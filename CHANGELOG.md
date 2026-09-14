@@ -1,21 +1,6 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [未发布]
-
-### ✨ 新功能 (New Features)
-- **模型列表编辑器升级为 harness 级配置面板** (`app/widgets/model_list_edit_dialog.py`, `app/utils/model_list_ops.py` 新增, `app/widgets/cards/settings/provider_edit_card.py`, `app/widgets/cards/settings/model_selector_card.py`, `app/main_widget.py`): 编辑器从「Enter 新增 / Delete 删除 / 双击编辑 / 拖拽排序」四项键盘操作，升级为「工具栏 + 列表 + 提示」三段式（列表高 200→320px）。新增能力：**启用开关**（取消勾选即隐藏，模型保留在列表里，可在模型选择/子智能体模糊匹配中屏蔽，随时可恢复）；**模型别名**（双击改名，模型选择卡显示别名、tooltip 保留真实 id，请求始终用真实 id）；**批量粘贴导入**（支持换行/逗号/空格分隔）；**搜索过滤**（同时匹配模型名与别名，只影响显示）；**元数据预览**（每行尾部显示上下文窗口 · 思考 · 多模态 · 价格）。数据格式保持 `模型列表` 为 `list[str]`，新增旁路键 `模型隐藏` / `模型别名`，旧数据零迁移。
-- **自定义模型能力配置** (`app/utils/model_capability_override.py` 新增, `app/core/model_capabilities.py`, `app/core/provider_profile.py`, `app/widgets/cards/settings/model_config_card.py`, `app/constants.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`): 模型能力查找链由「models.dev > 硬编码」扩展为「**用户覆盖 > models.dev > 硬编码**」。模型配置卡新增「模型能力」分组，可声明：支持思考（含思考参数类型 reasoning_effort/thinking/thinking_budget、思考等级可选值、思考启用值）、支持多模态、上下文窗口。此前自定义模型（不在硬编码表也不在 models.dev）的思考配置被硬锁死、多模态只能靠模型名关键词（`vl`/`vision`）猜测，现在都能在 UI 上直接声明。覆盖值用中文键名存储（`_VALID_IDENTIFIER_PATTERN` 只匹配 ASCII 标识符，英文键名会被当作 api_param 直发到 API 导致整块能力字典泄漏进 `extra_body`）。
-
-### 🐛 问题修复 (Bug Fixes)
-- **获取模型列表覆盖用户手改内容** (`app/widgets/cards/settings/provider_edit_card.py`, `app/utils/model_list_ops.py`): `_on_fetch_success` 原本直接 `clear()` + `addItems()`，用户手工新增/删除/排序过的条目在每次拉取后全部丢失。改为 `merge_fetched` 增量合并（保留现有顺序与条目，只追加拉取到的新模型，大小写不敏感去重）。
-- **编辑器与下拉框双写互踩** (`app/widgets/cards/settings/provider_edit_card.py`): 编辑器展开时点「获取模型列表」，下拉被覆盖；保存时又把编辑器内容写回，反而盖掉刚拉取的结果。现统一为 `_set_combo_models` 单一填充入口 + `_collect_editor_result` 单一收集出口。
-- **保存服务商配置静默清空未知键** (`app/widgets/cards/settings/provider_edit_card.py`): `_on_save` 原为从零重建 `provider_info` dict，未在表单中体现的键（如模型配置卡写入的能力覆盖）会在保存服务商配置时被清空。改为以既有 `provider_info` 副本为基底 update。
-- **自定义模型思考注入永不生效** (`app/core/model_capabilities.py`): `apply_model_defaults` 的思考默认值注入原本嵌在 `if caps.get("context_limit"):` 分支内部，导致只声明了思考能力、没有上下文窗口数据的自定义模型整块跳过，思考字段永远不注入。已提出为独立分支。
-- **思考字段被无条件剔除** (`app/main_widget.py`): `_ensure_thinking_fields` 改为按「用户覆盖 > models.dev > 硬编码」三层判定，用户显式声明支持思考时保留字段（此前手改的覆盖值会被无条件 pop）。
-- **模型列表编辑器 Qt 内置编辑污染模型名** (`app/widgets/model_list_edit_dialog.py`): 列表项文本含元数据摘要（如「glm-5    204K · 思考」），启用 Qt 内置编辑器时双击会把整串当模型名编辑，改完还只写回 `item.text()` 而不回写底层数据。已禁用内置编辑，改名与新增统一走 `QInputDialog` 单一写路径。
-- **多模态判定接入用户声明** (`app/core/provider_profile.py`, `app/core/workers/chat_worker.py`): `supports_vision` 与 worker 的视觉判定此前只看模型名关键词，现优先读模型能力（含用户覆盖层），关键词匹配保留为回退。
-
 ## [v0.6.0] - 2026-09-14 (重新发布 #3)
 
 自上一版本以来的变更 | 提交数：19 · 文件变更：86 · +5360/-1280 | 贡献者：mading, drifox-bot

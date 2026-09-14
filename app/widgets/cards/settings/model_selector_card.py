@@ -159,13 +159,11 @@ class ModelItem(QWidget):
         is_active: bool = False,
         note: str = "",
         name_width: int = None,
-        display_alias: str = "",
         parent=None,
     ):
         super().__init__(parent)
         self.provider_name = provider_name
         self.model_name = model_name
-        self.display_alias = (display_alias or "").strip()
         self.is_active = is_active
         self._note = note
         self._name_width = name_width
@@ -212,11 +210,8 @@ class ModelItem(QWidget):
         return "\n".join(rows) if rows else ""
 
     def _model_tooltip(self) -> str:
-        """组装模型名 tooltip：真实 id + 显示名 + 费用 + 能力，单行简要显示。"""
+        """组装模型名 tooltip：模型名 + 费用 + 能力，单行简要显示。"""
         parts = [self.model_name]
-        # 有别名时补一行说明，避免用户对不上号（显示名与请求名不一致的唯一线索）
-        if self.display_alias:
-            parts.append(f"显示名: {self.display_alias}")
         # 费用信息：in/out/cache，无单位
         cost = self._caps.get("cost") or {}
         key_labels = (("input", "in"), ("output", "out"), ("cache_read", "cache"))
@@ -259,8 +254,8 @@ class ModelItem(QWidget):
         self.dot.setFixedWidth(14)
         layout.addWidget(self.dot)
 
-        # 模型名（第一位）：别名优先（仅展示层，点击/请求仍用真实 id）
-        self.name_label = QLabel(self.display_alias or self.model_name, self)
+        # 模型名（第一位的文本；组内有 trailing 信息时固定宽度 = 组内最长名，成本列对齐）
+        self.name_label = QLabel(self.model_name, self)
         has_trailing = bool(
             self._cost_text()
             or self._caps.get("supports_thinking")
@@ -415,7 +410,6 @@ class ModelSelectorCardContent(QWidget):
         self._provider_headers: List[Tuple[QWidget, str]] = []  # (header_widget, provider_name)
         self._search_text = ""  # 搜索过滤文本，由标题栏搜索框设置
         self._model_notes: dict = {}  # 模型名 → 描述文本，搜索刷新时保留
-        self._model_aliases: dict = {}  # 模型名 → 显示别名，搜索刷新时保留
         self._display_to_provider_name: dict = {}  # display_name → icon provider_name，搜索重建时保留
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -474,7 +468,6 @@ class ModelSelectorCardContent(QWidget):
         current_model: str,
         display_to_provider_name: Optional[dict] = None,
         model_notes: Optional[dict] = None,  # 模型名 → 描述文本
-        model_aliases: Optional[dict] = None,  # 模型名 → 显示别名
     ):
         """设置服务商和模型数据
 
@@ -482,7 +475,6 @@ class ModelSelectorCardContent(QWidget):
         用于显示和 ModelItem 内部 active 判定。
         display_to_provider_name: 可选映射，display_name → icon_provider_name，
         用于让 ProviderHeader 正确找到服务商图标（PROVIDER_ICONS 不识别后缀）。
-        model_aliases: 可选映射，模型名 → 显示别名（只作用于展示，点击/请求用真实 id）。
         """
         # 重置滚动位置，避免重建后旧滚动位置导致吸顶服务商计算错误
         self.scroll_area.verticalScrollBar().setValue(0)
@@ -490,7 +482,6 @@ class ModelSelectorCardContent(QWidget):
         self._current_model = current_model
         self._provider_models = [(p, m) for p, m, _ in provider_models]
         self._model_notes = model_notes or {}
-        self._model_aliases = model_aliases or {}
         self._display_to_provider_name = display_to_provider_name or {}
         self._model_widgets.clear()
         self._all_model_items.clear()
@@ -517,14 +508,9 @@ class ModelSelectorCardContent(QWidget):
                 if key not in seen:
                     seen.add(key)
                     deduped.append(m)
-            # 过滤（同时匹配真实 id 与别名，用户搜别名也能找到）
+            # 过滤
             if search_text:
-                aliases = self._model_aliases
-
-                def _hit(m: str) -> bool:
-                    return search_text in m.lower() or search_text in str(aliases.get(m, "")).lower()
-
-                filtered_models = [m for m in deduped if _hit(m)]
+                filtered_models = [m for m in deduped if search_text in m.lower()]
                 if not filtered_models:
                     continue
             else:
@@ -536,26 +522,14 @@ class ModelSelectorCardContent(QWidget):
             self.content_layout.addWidget(header)
             self._provider_headers.append((header, provider_name))
 
-            # 该服务商内最长名称宽度（名称固定宽 → 金额列从同一 x 开始对齐比价）
-            # 按显示名计宽：别名可能比真实 id 长，用 id 计宽会让成本列错位
-            name_width = _measure_name_width(
-                [self._model_aliases.get(m) or m for m in filtered_models]
-            )
+            # 该服务商内最长模型名宽度（模型名固定宽 → 金额列从同一 x 开始对齐比价）
+            name_width = _measure_name_width(filtered_models)
 
             # 模型列表
             for model_name in filtered_models:
                 is_active = provider_name == current_provider and model_name == current_model
                 note = (model_notes or {}).get(model_name, "") if model_notes else ""
-                alias = self._model_aliases.get(model_name, "")
-                item = ModelItem(
-                    provider_name,
-                    model_name,
-                    is_active,
-                    note,
-                    name_width,
-                    display_alias=alias,
-                    parent=self.content_widget,
-                )
+                item = ModelItem(provider_name, model_name, is_active, note, name_width, self.content_widget)
                 if is_active:
                     self._active_model_item = item
                 item.clicked.connect(self._on_model_clicked)
@@ -693,7 +667,6 @@ class ModelSelectorCardContent(QWidget):
             self._current_model,
             self._display_to_provider_name,
             model_notes=self._model_notes,
-            model_aliases=self._model_aliases,
         )
 
     def _on_model_clicked(self, provider_name: str, model_name: str):

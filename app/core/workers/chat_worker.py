@@ -289,8 +289,7 @@ class OpenAIChatWorker(QThread):
                 logger.debug(f"[CacheTracker] 注入服务商 usage 钩子失败（回退内置解析）: {e}")
 
         # 缓存模型是否支持视觉，用于过滤 image_url 块
-        # 传 provider_name 让用户声明的「支持多模态」生效（自定义模型的唯一入口）
-        self._supports_vision = bool(get_model_capabilities(model_name, provider_name).get("supports_vision"))
+        self._supports_vision = bool(get_model_capabilities(model_name).get("supports_vision"))
 
         # ========== 性能优化：API 消息缓存 ==========
         # 向后兼容：保留 PyQt Signal，但通过 EventBus 统一发射
@@ -1791,8 +1790,6 @@ class OpenAIChatWorker(QThread):
                 "备注",
                 "获取地址",
                 "模型列表",
-                "模型隐藏",
-                "模型别名",
             }:
                 continue
             if cn_key in QUOTA_EXCLUDE_KEYS():
@@ -1817,7 +1814,7 @@ class OpenAIChatWorker(QThread):
         thinking_mode = self.llm_config.get("思考模式")
         if thinking_mode is not None:
             # 优先从 MODEL_CAPABILITIES 获取 thinking_param，回退到 provider_profile
-            caps = get_model_capabilities(model, self.llm_config.get("provider_name", ""))
+            caps = get_model_capabilities(model)
             t_param = None
             enable_value = "enabled"  # 大多数模型用 "enabled"
             if caps:
@@ -2844,7 +2841,7 @@ class OpenAIChatWorker(QThread):
 
         # 检查模型是否支持视觉
         model_name = str(self.llm_config.get("模型名称", "") or "")
-        caps = get_model_capabilities(model_name, str(self.llm_config.get("provider_name", "") or ""))
+        caps = get_model_capabilities(model_name)
         if not caps.get("supports_vision"):
             # 不支持视觉的模型：在已构建的 tool 消息 content 追加提示，防止模型幻觉
             _non_vision_tools = set()
@@ -5053,7 +5050,7 @@ class OpenAIChatWorker(QThread):
                 from app.core.model_capabilities import get_model_capabilities
 
                 _model_name = str(self.llm_config.get("模型名称", "") or "")
-                _caps = get_model_capabilities(_model_name, str(self.llm_config.get("provider_name", "") or ""))
+                _caps = get_model_capabilities(_model_name)
                 if _caps.get("supports_vision"):
                     result_content = str(result_content) + (
                         "\n\n[Vision Notice] 截图已自动以图片形式注入你的视觉上下文，"

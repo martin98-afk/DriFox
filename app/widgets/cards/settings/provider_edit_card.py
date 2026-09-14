@@ -32,7 +32,6 @@ from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.model_list_edit_dialog import ModelListEditorWidget
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
-from app.utils.model_list_ops import filter_visible, merge_fetched
 
 
 def _is_text_chat_model(model_id: str) -> bool:
@@ -691,48 +690,16 @@ class ProviderEditCard(QWidget):
         else:
             self.fetchFailed.emit("")
 
-    def _set_combo_models(self, models: list, keep_current: bool = True):
-        """统一的下拉填充入口：过滤隐藏项、保留当前选中"""
-        hidden = self.provider_info.get("模型隐藏", [])
-        visible = filter_visible(models, hidden)
-        current = self.modelCombo.currentText() if keep_current else ""
-        self.modelCombo.blockSignals(True)
-        self.modelCombo.clear()
-        self.modelCombo.addItems(visible)
-        if current:
-            idx = self.modelCombo.findText(current)
-            if idx >= 0:
-                self.modelCombo.setCurrentIndex(idx)
-        if self.modelCombo.count() > 0 and not self.modelCombo.currentText():
-            self.modelCombo.setCurrentIndex(0)
-        self.modelCombo.blockSignals(False)
-
-    def _reload_editor(self):
-        """把当前 provider_info 的模型数据重新灌进编辑器。
-
-        ⚠️ 必须读 provider_info["模型列表"]（全量）而不是 modelCombo：
-        combo 已经过 filter_visible 剔除了隐藏项，从 combo 读会让隐藏的
-        模型在编辑器里消失，用户无法取消隐藏把它们恢复回来。
-        """
-        models = self.provider_info.get("模型列表") or self.modelCombo.get_all_models()
-        self.modelListEditor.set_models(
-            models,
-            hidden=self.provider_info.get("模型隐藏", []),
-            aliases=self.provider_info.get("模型别名", {}),
-        )
-
     def _on_fetch_success(self, models: list):
         """获取成功（主线程）"""
         self.fetchBtn.setEnabled(True)
-        # 增量合并：保留用户手改的条目，只追加拉取到的新模型。
-        # ⚠️ 基准取 provider_info["模型列表"]（全量）而非 modelCombo：
-        # combo 已剔除隐藏项，从 combo 读会让隐藏的模型在合并后永久丢失。
-        current = self.provider_info.get("模型列表") or self.modelCombo.get_all_models()
-        merged = merge_fetched(current, models)
-        self.provider_info["模型列表"] = merged
-        self._set_combo_models(merged, keep_current=True)
-        if not self.modelListEditor.isHidden():
-            self._reload_editor()
+        self.modelCombo.blockSignals(True)
+        current = self.modelCombo.currentText()
+        self.modelCombo.clear()
+        self.modelCombo.addItems(models)
+        if current and self.modelCombo.findText(current) >= 0:
+            self.modelCombo.setCurrentIndex(self.modelCombo.findText(current))
+        self.modelCombo.blockSignals(False)
         from qfluentwidgets import InfoBar
         from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -757,34 +724,27 @@ class ProviderEditCard(QWidget):
         )
 
     def _on_manage_models(self):
-        """展开/收起内嵌模型列表编辑器。
-
-        展开判定用 isHidden() 而非 isVisible()：isVisible() 还会受父链
-        （卡片未显示时）影响，收起动作可能因父级不可见而被误判成展开。
-        """
-        if not self.modelListEditor.isHidden():
-            self._collect_editor_result()
+        """展开/收起内嵌模型列表编辑器；收起时把编辑结果写回模型下拉"""
+        if self.modelListEditor.isVisible():
+            self._sync_editor_to_combo()
             self.modelListEditor.setVisible(False)
             self.manageModelsBtn.setText("编辑列表")
         else:
-            self._reload_editor()
+            self.modelListEditor.set_models(self.modelCombo.get_all_models())
             self.modelListEditor.setVisible(True)
             self.manageModelsBtn.setText("收起列表")
 
-    def _collect_editor_result(self):
-        """把编辑器结果收集进 provider_info（三个键一次写齐）"""
-        models, hidden, aliases = self.modelListEditor.get_result()
-        if models:
-            self.provider_info["模型列表"] = models
-        if hidden:
-            self.provider_info["模型隐藏"] = hidden
-        else:
-            self.provider_info.pop("模型隐藏", None)
-        if aliases:
-            self.provider_info["模型别名"] = aliases
-        else:
-            self.provider_info.pop("模型别名", None)
-        self._set_combo_models(models, keep_current=True)
+    def _sync_editor_to_combo(self):
+        """把内嵌编辑器中的列表写回模型下拉"""
+        new_models = self.modelListEditor.get_models()
+        self.modelCombo.blockSignals(True)
+        self.modelCombo.clear()
+        self.modelCombo.addItems(new_models)
+        current = self.modelCombo.currentText()
+        if not current or self.modelCombo.findText(current) < 0:
+            if new_models:
+                self.modelCombo.setCurrentIndex(0)
+        self.modelCombo.blockSignals(False)
 
     def _on_save(self):
         """保存。
@@ -792,17 +752,19 @@ class ProviderEditCard(QWidget):
         不再手工保留 config_id——config_id 现在由 main_widget 端基于 apikey
         的稳定 hash 计算（见 app.core.provider_profile.apply_provider_save），
         编辑同 apikey 始终命中同一条目，不会再产生重复。
-
-        ⚠️ 以 provider_info 副本为基底 update，不从零重建：否则表单未覆盖的键
-        （如由模型配置卡写入的能力覆盖）会被静默清空。
         """
-        if not self.modelListEditor.isHidden():
-            self._collect_editor_result()
+        if self.modelListEditor.isVisible():
+            self._sync_editor_to_combo()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
-        # 先提取套餐用量额外字段（在 update 之前读出旧值）
+        current_models = self.modelCombo.get_all_models()
+        existing_models = self.provider_info.get("模型列表", [])
+        # 编辑场景下保留旧 config_id，让 main_widget 能据此判断 apikey 是否被改过
+        existing_config_id = self.provider_info.get("config_id", "")
+        # 先提取套餐用量额外字段（在覆盖 self.provider_info 之前）
         extra_fields = {}
+        provider_key = provider_name
         for (pname, config_key), (_row, edit_attr) in self._extra_field_rows.items():
-            if pname != provider_name:
+            if pname != provider_key:
                 continue
             editor = getattr(self, edit_attr, None)
             if editor is not None:
@@ -813,23 +775,28 @@ class ProviderEditCard(QWidget):
                 old_val = self.provider_info.get(config_key, "")
                 if old_val:
                     extra_fields[config_key] = old_val
+        self.provider_info = {
+            "API_URL": self.apiUrlCombo.currentText().strip(),
+            "API_KEY": self.apiKeyEdit.text().strip(),
+            "模型名称": self.modelCombo.currentText().strip(),
+            "认证方式": "bearer",
+            "name": self.configNameEdit.text().strip(),
+        }
+        if existing_config_id:
+            self.provider_info["config_id"] = existing_config_id
+        if current_models:
+            self.provider_info["模型列表"] = current_models
+        elif existing_models:
+            self.provider_info["模型列表"] = existing_models
+        else:
+            self.provider_info["模型列表"] = []
 
-        # 基底 = 既有信息副本（保留未知键），再覆盖本次表单字段
-        updated = dict(self.provider_info)
-        updated.update(
-            {
-                "API_URL": self.apiUrlCombo.currentText().strip(),
-                "API_KEY": self.apiKeyEdit.text().strip(),
-                "模型名称": self.modelCombo.currentText().strip(),
-                "认证方式": "bearer",
-                "name": self.configNameEdit.text().strip(),
-            }
-        )
-        updated.update(extra_fields)
-        self.provider_info = updated
+        # 写入套餐用量额外字段
+        self.provider_info.update(extra_fields)
 
         self.saved.emit(provider_name, self.provider_info)
 
     def _on_cancel(self):
         """取消"""
         self.closed.emit()
+

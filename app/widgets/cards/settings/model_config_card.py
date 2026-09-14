@@ -34,10 +34,9 @@ from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 # key 在哪个元组里就归到哪个组；不在任何组里的会归到"其他"（一般不会出现）
 # =============================================================================
 _FIELD_GROUPS = [
-    ("模型能力", ("支持思考", "思考参数", "思考等级可选值", "思考启用值", "支持多模态")),
     ("上下文", ("最大Token", "上下文长度")),
-    ("思考", ("思考模式", "思考预算", "思考等级")),
-    ("采样", ("温度", "temp", "top_p", "max_new_tokens")),
+    ("思考",   ("思考模式", "思考预算", "思考等级")),
+    ("采样",   ("温度", "temp", "top_p", "max_new_tokens")),
 ]
 
 # =============================================================================
@@ -63,7 +62,6 @@ class ModelConfigCard(QWidget):
         self.config = {}
         self.current_provider = ""
         self.current_model_name = ""
-        self.current_provider_name = ""
         self._widgets = {}
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -106,11 +104,10 @@ class ModelConfigCard(QWidget):
     # ------------------------------------------------------------------
     # 渲染
     # ------------------------------------------------------------------
-    def set_config(self, title: str, config: dict, model_name: str = "", provider_name: str = ""):
+    def set_config(self, title: str, config: dict, model_name: str = ""):
         self.config = config.copy()
         self.current_provider = title
         self.current_model_name = model_name or ""
-        self.current_provider_name = provider_name or ""
 
         self._clear_layout(self.layout)
         self._widgets.clear()
@@ -138,7 +135,7 @@ class ModelConfigCard(QWidget):
             if key == "思考等级" and self.current_model_name:
                 from app.core.model_capabilities import get_model_capabilities
 
-                caps = get_model_capabilities(self.current_model_name, self.current_provider_name)
+                caps = get_model_capabilities(self.current_model_name)
                 if caps.get("thinking_param") != "reasoning_effort" or not caps.get("reasoning_effort_values"):
                     continue
             display_name = meta.get("display_name", key)
@@ -306,7 +303,7 @@ class ModelConfigCard(QWidget):
             if key == "思考等级" and self.current_model_name:
                 from app.core.model_capabilities import get_model_capabilities
 
-                caps = get_model_capabilities(self.current_model_name, self.current_provider_name)
+                caps = get_model_capabilities(self.current_model_name)
                 dyn_values = caps.get("reasoning_effort_values")
                 if dyn_values:
                     options = list(dyn_values)

@@ -104,35 +104,6 @@ PARAM_SCHEMA = {
         "ui_type": "checkbox",
         "hide_in_card": True,  # 配置卡里不显示，启用技能在别处控制
     },
-    # ===== 模型能力声明（用户覆盖层，仅自定义模型需要）=====
-    # 无 api_param：这些是 DriFox 内部元数据，不进 API 请求体。
-    # 存放于 llm_model_overrides["服务商||模型"]，由模型配置卡的「模型能力」分组渲染。
-    "支持思考": {
-        "display_name": "支持思考",
-        "ui_type": "checkbox",
-        "order": 50,
-    },
-    "思考参数": {
-        "display_name": "思考参数",
-        "ui_type": "combobox",
-        "options": ["reasoning_effort", "thinking", "thinking_budget"],
-        "order": 60,
-    },
-    "思考等级可选值": {
-        "display_name": "思考等级可选值",
-        "ui_type": "line",
-        "order": 70,
-    },
-    "思考启用值": {
-        "display_name": "思考启用值",
-        "ui_type": "line",
-        "order": 80,
-    },
-    "支持多模态": {
-        "display_name": "支持多模态",
-        "ui_type": "checkbox",
-        "order": 90,
-    },
     "API_KEY": {
         "ui_type": "password",
     },
@@ -150,7 +121,6 @@ PARAM_SCHEMA = {
 MODEL_LEVEL_KEYS = frozenset(
     "温度 temp 最大Token 上下文长度 max_new_tokens "
     "top_p frequency_penalty presence_penalty "
-    "支持思考 思考参数 思考等级可选值 思考启用值 支持多模态 "
     "思考模式 思考预算 思考等级 启用技能".split()
 )
 

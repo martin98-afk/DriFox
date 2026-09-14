@@ -209,21 +209,9 @@ def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Opti
 
 
 def supports_vision(llm_config: Dict[str, Any]) -> bool:
-    """判断模型是否支持视觉输入。
-
-    优先看模型能力（含用户覆盖层），再回退到模型名关键词匹配。
-    用户显式声明「支持多模态」时，即使模型名不含视觉关键词也返回 True。
-    """
-    model = str(llm_config.get("模型名称", "") or "")
-    provider = str(llm_config.get("provider_name", "") or "")
-    try:
-        from app.core.model_capabilities import get_model_capabilities
-
-        if get_model_capabilities(model, provider).get("supports_vision"):
-            return True
-    except Exception:
-        pass
-    model_lower = model.lower()
+    model = str(llm_config.get("模型名称", "") or "").lower()
     # 只有模型名称里包含视觉相关关键词时才返回 True，不要根据整个服务商判断
     vision_markers = ("vision", "vl", "llava", "glm-4v", "gpt-4o", "gpt-4o-mini", "claude-3")
-    return any(marker in model_lower for marker in vision_markers)
+    if any(marker in model for marker in vision_markers):
+        return True
+    return False

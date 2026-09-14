@@ -2398,18 +2398,15 @@ class OpenAIChatToolWindow(ToolWindow):
         QApplication.processEvents(QEventLoop.AllEvents, 5)
 
     def _ensure_thinking_fields(self, config: dict):
-        """以「用户覆盖 > models.dev > 硬编码」为准，确保思考字段与模型实际能力一致。
+        """以 models.dev / 模型能力为准，确保思考字段与模型实际能力一致。
 
         在 model_overrides 叠加后调用，防止旧覆盖数据回补思考字段。
-        用户显式声明「支持思考」时（能力覆盖层给出 supports_thinking=True），
-        字段会被保留——这是自定义模型能开思考的关键。
         """
         if not self._current_model_name:
             return
         from app.core.model_capabilities import get_model_capabilities
 
-        provider = self._current_provider_name or ""
-        caps = get_model_capabilities(self._current_model_name, provider)
+        caps = get_model_capabilities(self._current_model_name)
         if not caps.get("supports_thinking", False):
             config.pop("思考模式", None)
             config.pop("思考等级", None)
@@ -2439,9 +2436,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if self._current_model_name:
                 config["模型名称"] = self._current_model_name
             # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 providers 插件的部分默认值）
-            # 传 provider_name 让用户能力覆盖生效（自定义模型需要它）
-            provider_for_caps = self._valid_configs.get(selected_name, {}).get("provider_name", selected_name)
-            config = apply_model_defaults(config, self._current_model_name, provider_for_caps)
+            config = apply_model_defaults(config, self._current_model_name)
             # 叠加用户按模型名覆盖的参数（最高优先级）
             # key = "服务商名||模型名"，按服务商隔离同名模型
             model_overrides = getattr(self.cfg, "llm_model_overrides", None)
@@ -6633,12 +6628,6 @@ class OpenAIChatToolWindow(ToolWindow):
         current = config.get("模型名称", "")
         if current and current not in model_list:
             model_list = [current] + list(model_list)
-        # 隐藏的模型不参与模糊匹配（用户主动屏蔽，子智能体不应命中）
-        hidden = config.get("模型隐藏", [])
-        if hidden:
-            from app.utils.model_list_ops import filter_visible
-
-            model_list = filter_visible(model_list, hidden)
         return list(model_list)
 
     def _fuzzy_match_model_name(
@@ -7295,17 +7284,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._display_to_config_id: dict[str, str] = {}
         # 维护 display_name → provider_name 映射，用于 model_selector 找 icon
         self._display_to_provider_name: dict[str, str] = {}
-        # 模型 id → 显示别名（服务商配置里的「模型别名」汇聚）
-        self._model_aliases: dict[str, str] = {}
         for config_id, config in self._valid_configs.items():
             display_name = config.get("display_name", config.get("provider_name", config_id))
             pname = config.get("provider_name", config_id)
             self._display_to_config_id[display_name] = config_id
             self._display_to_provider_name[display_name] = pname
-            # 汇聚别名（别名只作用于展示层，请求仍用真实 id）
-            for mid, alias in (config.get("模型别名") or {}).items():
-                if alias:
-                    self._model_aliases[mid] = alias
             model_list = []
             if "模型列表" in config:
                 saved_models = config["模型列表"]
@@ -7329,15 +7312,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 model_list.insert(0, cur_model)
             if not model_list and cur_model:
                 model_list = [cur_model]
-            # 隐藏的模型不进模型选择卡（用户主动屏蔽）；当前选中模型始终保留，
-            # 否则会出现「当前模型不在列表里」的空档
-            hidden = config.get("模型隐藏", [])
-            if hidden:
-                from app.utils.model_list_ops import filter_visible
-
-                model_list = filter_visible(model_list, hidden)
-                if cur_model and cur_model not in model_list:
-                    model_list.insert(0, cur_model)
             is_current = config_id == self._current_provider_name
             # 传给 model_selector 用 display_name（用户看到的名），不要传 config_id
             provider_models_data.append((display_name, model_list, is_current))
@@ -7364,7 +7338,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_model_name or "",
             self._display_to_provider_name,
             model_notes=model_notes,
-            model_aliases=self._model_aliases,
         )
 
         # 更新卡片头部：有服务商时显示服务商图标 + 模型名称，否则显示默认"模型选择"
@@ -8733,8 +8706,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 叠加模型默认值（三层兜底：硬编码 > 模型能力 > 已有配置）
         # 当服务商不在 providers 插件（自定义服务商）时，温度/top_p 等参数仍能有合理默认值
-        provider_for_caps = self._valid_configs.get(current_name, {}).get("provider_name", current_name)
-        config = apply_model_defaults(config, self._current_model_name, provider_for_caps)
+        config = apply_model_defaults(config, self._current_model_name)
 
         # 叠加用户按模型名保存的覆盖值（最高优先级）
         # 按「服务商名||模型名」隔离同名模型
@@ -8763,8 +8735,6 @@ class OpenAIChatToolWindow(ToolWindow):
             "API_URL",
             "API_KEY",
             "模型列表",
-            "模型隐藏",
-            "模型别名",
             "provider_name",
             "name",
             "config_id",
@@ -8774,7 +8744,7 @@ class OpenAIChatToolWindow(ToolWindow):
         ]:
             config.pop(pop_key, None)
 
-        self._model_config_popup.set_config(current_name, config, self._current_model_name, provider_for_caps)
+        self._model_config_popup.set_config(current_name, config, self._current_model_name)
 
     def _toggle_history_card(self):
         """切换历史会话（已迁移到右侧工作台「历史会话」页签）

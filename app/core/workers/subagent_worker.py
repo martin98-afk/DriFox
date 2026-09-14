@@ -996,8 +996,6 @@ class SubAgentExecutor(QThread):
                 "备注",
                 "获取地址",
                 "模型列表",
-                "模型隐藏",
-                "模型别名",
             }:
                 continue
             if cn_key in QUOTA_EXCLUDE_KEYS():
@@ -1020,7 +1018,7 @@ class SubAgentExecutor(QThread):
         # 处理思考模式
         thinking_mode = config.get("思考模式")
         if thinking_mode is not None:
-            caps = get_model_capabilities(model, config.get("provider_name", ""))
+            caps = get_model_capabilities(model)
             t_param = None
             enable_value = "enabled"
             if caps:
