@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.0] - 2026-09-14
+## [v0.6.0] - 2026-09-14 (重新发布 #2)
 
-自上一版本以来的变更 | 提交数：16 · 文件变更：83 · +5041/-1262 | 贡献者：mading, drifox-bot
+自上一版本以来的变更 | 提交数：17 · 文件变更：84 · +5151/-1270 | 贡献者：mading, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -32,6 +32,10 @@ All notable changes to this project will be documented in this file.
 - **版本号同步至 v0.6.0** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.5.12` → `0.6.0` 四文件统一；徽章与架构图同步更新。`f393110f`
 
 - **marketplace 自动重生** (`plugins/marketplace.json`, `plugins/system/marketplace.json`): GitHub Actions 由 plugin.json 自动同步生成。`03a9df56`
+
+### 🐛 问题修复（重新发布补充）
+
+- **追问标签误匹配吞掉正文** (`app/widgets/message_card.py`, `tests/widgets/test_ask_suggest_block.py`): 正文里出现孤立的 `<ask>`（模型描述格式、think / tool 块内字面量、闭合标签写错）时，跨行非贪婪匹配的起点落在正文中间、终点落在文末真追问的 `</ask>` 上，中间整段正文被当成追问内容摘进胶囊 —— 表现为流式期间正文正常显示、闭合标签一到就整段消失。修复：新增 `_is_ask_content_valid` 熔断（超长 / 跨空行 / 夹带协议标签一律判为误匹配并保留原文），追问内容正则禁止嵌套 `<ask>` 且长度封顶 120 字符，受保护区间从三反引号围栏扩到 `~~~` 围栏、行内代码与 think / tool 协议块；新增 5 条回归测试。`2110883c`
 
 ## [v0.5.12] - 2026-09-14
 
