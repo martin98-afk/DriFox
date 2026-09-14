@@ -337,7 +337,7 @@ class CardContainer(QWidget):
         return bool(visible) and any(w.property(self.FOLLOW_CONTENT_PROP) for w in visible)
 
     def _follow_content_natural_h(self) -> int:
-        """followContent 卡片：用卡片 heightForWidth(容器宽) 计算真实内容高度
+        """followContent 卡片：用卡片 heightForWidth(卡片可用宽度) 计算真实内容高度
 
         不能直接用布局 sizeHint：QVBoxLayout::sizeHint()（C++）内部遍历
         QWidgetItem 时**不会**调用 Python 覆写的 sizeHint()，而 wordWrap QLabel
@@ -346,8 +346,23 @@ class CardContainer(QWidget):
         容器锁高 → 卡片底部大段空白。
         heightForWidth() 按真实宽度换行，是 Qt 原生正确实现，从 Python 侧
         显式调用可拿到真实内容高度。
+
+        ★ 测量宽度必须等于卡片真实排版宽度：容器左右各有 8px margin
+        （BottomCardContainer margins 8/6/8/6）。早期版本传「容器宽」测量，
+        等于按比真实排版宽 16px 的假宽度算换行；文本换行数一旦落在这 16px
+        窗口内就少算一行（实测 hfw(容器宽)=362 vs 真实 384）→ 容器锁高低于
+        卡片布局最小需求 → Qt 布局无解 → 重排 → Resize → heightChanged →
+        _do_expand（仍用错宽度）→ 无限循环，表现为卡内元素每帧上下位移
+        （实测 _do_expand 323 次、footer_y 在 327↔349 往复 22px）；窗口
+        resize 跳出该宽度窗口后才收敛。
+
+        故测量宽度取「容器内容区宽度」（= 卡片将获得的排版宽度，实测与
+        card.width() 一致）。不可用 card.width()：它随滚动条出现/消失跳
+        20px，而测量结果又反过来决定滚动条状态 → 反馈环 → 自激循环；
+        容器内容区宽度只依赖父布局分配，是稳定输入。
         """
-        w = self.width()
+        _m = self._layout.contentsMargins()
+        w = self.width() - _m.left() - _m.right()
         if w <= 0:
             # 容器宽度未分配（如首次展开时容器尚在折叠态）：
             # 用可见卡片的布局理想宽度兜底，避免 fallback 到受 wordWrap
@@ -375,15 +390,18 @@ class CardContainer(QWidget):
                 continue
             h = 0
             if card.hasHeightForWidth():
-                # 防御：容器宽度未分配（如首次展开/测试环境无真实布局）时，
-                # 用卡片布局理想宽度兜底，避免以极小宽度计算换行导致高度虚高。
-                cw = card.width()
+                # 测量宽度 = 容器内容区宽度（= 卡片将获得的排版宽度）。
+                # 不用 card.width()：滚动条出现/消失会让它跳 20px，
+                # 而高度测量结果又反过来决定滚动条状态 → 反馈环 → 自激循环。
+                # 容器内容区宽度只依赖容器自身宽度（父布局分配），是稳定输入。
+                # 不可取 max(容器宽, 卡片宽)：容器宽比卡片宽一个 margins，
+                # 按假宽度测量会在换行临界处少算一行 → 容器锁高低于卡片布局
+                # 最小需求 → 布局无解 → 自激循环。
+                cw = w
                 if cw <= 0:
                     cl = card.layout()
                     cw = cl.sizeHint().width() if cl is not None else 0
-                if cw > 0:
-                    w = max(w, cw)
-                h = card.heightForWidth(w)
+                h = card.heightForWidth(cw)
             if h <= 0:
                 # 未实现 heightForWidth（或尚未测量出目标高）：退回布局 sizeHint
                 h = card.sizeHint().height()
