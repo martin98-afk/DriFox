@@ -584,6 +584,19 @@ class Settings(QConfig):
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
+    # 更新下载代理模式：direct=直连 / system=跟随系统 / prefix=加速前缀 / http=手动代理
+    # 注意：加速前缀只作用于安装包下载；检查更新始终直连 api.github.com
+    update_proxy_mode = ConfigItem(
+        "Update",
+        "ProxyMode",
+        "direct",
+        OptionsValidator(["direct", "system", "prefix", "http"]),
+    )
+    # 加速前缀地址（prefix 模式使用），如 https://ghfast.top/
+    update_proxy_prefix = ConfigItem("Update", "ProxyPrefix", "https://ghfast.top/")
+    # 手动代理地址（http 模式使用），形如 http://127.0.0.1:7890；不支持 socks5
+    update_proxy_url = ConfigItem("Update", "ProxyUrl", "")
+
     # 单实例限制：开启后同时只允许运行一个 Drifox 实例（重启生效）
     enable_single_instance = ConfigItem("General", "EnableSingleInstance", False, BoolValidator())
 

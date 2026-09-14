@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import contextlib
 import copy
 import ctypes
 import gc
@@ -192,6 +193,10 @@ from app.widgets.ui_helpers import (
 # 离底、再动一点又判贴底」的状态抖动，是「强制滚动太多」体感的直接来源。
 # 全项目只允许存在这一个常量，判定一律走 MainWidget._is_view_at_bottom()。
 AT_BOTTOM_TOLERANCE = 24
+
+# ─── 临时诊断开关：流式结束滚底断链定位（定位完成后整体移除）─────────────
+# 默认开启（诊断期），设 DRIFOX_SCROLL_DIAG=0 可关闭。
+_SCROLL_DIAG_ENABLED = os.getenv("DRIFOX_SCROLL_DIAG", "1") == "1"
 
 # [PERF] 滚动条上界校正里 `container.sizeHint()` 计算结果的复用窗口（秒）。
 # sizeHint() 是一次 O(卡片数) 的完整布局计算，而「程序置底 → valueChanged →
@@ -1385,6 +1390,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_anchor_timer.setInterval(100)
         self._bottom_anchor_timer.timeout.connect(self._maintain_bottom_anchor)
         self._suppress_scroll_sync_count = 0  # 加载历史时抑制滚动同步的计数器
+        # 「程序性滚动」深度：>0 表示当前 setValue 由程序发起（滚底 / 高度锚定补偿 /
+        # 滚动上界校正），不是用户意图。`_on_scroll_changed` 据此豁免 away 置位 ——
+        # 否则终渲染那几百毫秒里「补偿落点 < 真实 maximum」会被记成用户上滚，
+        # 而 away 一旦置位又因 value 不再变化而永不复位 → 视口永久停在列表中段。
+        self._programmatic_scroll_depth = 0
         # 🛡️ 会话切换哨兵：_create_new_session 中置 True，丢弃 stop_streaming 后
         # 仍可能跨线程到达的 worker 旧回调（_on_messages_updated / _do_post_stream_cleanup
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
@@ -11645,21 +11655,26 @@ class OpenAIChatToolWindow(ToolWindow):
         - 回收前记录滚动位置，回收上方卡片后补偿偏移量，防止视口跳动
         - 使用 delete_widgets_from_layout 立即从布局移除，避免延迟导致高度突变
         - 跳过当前流式输出中的卡片
+
+        🐛 配额修复：保留范围改用**真实视口**（见 `_viewport_batch_range`）而非
+        加载窗口（``_visible_batch_start/_visible_batch_end``）。后者加载完恒等于
+        ``[len-12, len]``，会让保留区间覆盖整张表 —— 回收范围恒为空、配额淘汰
+        也永远找不到候选（20 批以内的会话尤其明显：全表都被判为「附近」）。
         """
         if self._is_virtual_recycling or len(self._batch_cards) == 0:
             return
 
         self._is_virtual_recycling = True
         try:
-            # 计算可视缓冲区范围
+            # 计算可视缓冲区范围（基准 = 屏幕可见批次，不是加载窗口）
             buffer_batches = self._incremental_visible_batch_count * self._virtual_scroll_buffer
-            active_start = (
-                0 if self._visible_batch_start <= buffer_batches else self._visible_batch_start - buffer_batches
-            )
-            active_end = self._visible_batch_end + buffer_batches
+            vp_start, vp_end = self._resolve_viewport_range()
+            active_start = max(0, vp_start - buffer_batches)
+            active_end = vp_end + 1 + buffer_batches
 
             # 第一步：确保当前激活范围内所有卡片都已经懒渲染完成
             lazy_render_count = 0
+            rendered_delta = 0
             for batch_idx in range(active_start, active_end):
                 if batch_idx >= len(self._batch_cards):
                     continue
@@ -11670,6 +11685,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     if isinstance(card, MessageCard) and not getattr(card, "_lazy_rendered", True):
                         card.ensure_rendered()
                         lazy_render_count += 1
+                        # 🐛 配额计数归属：这里补渲染出的 viewer 必须计入
+                        # _rendered_card_count，否则配额被永久低估 →
+                        # _recycle_lru_batches 恒判「未超限」→ 淘汰链一次都不跑
+                        # （真机日志：渲染 26 页而计数只有 2）。可见性门控
+                        # （_render_deferred）会让 ensure_rendered 空转，
+                        # 故以渲染后的 _lazy_rendered 为准。
+                        if getattr(card, "_lazy_rendered", False):
+                            rendered_delta += 1
+            if rendered_delta > 0:
+                self._sync_global_rendered_pages(self._rendered_card_count + rendered_delta)
+                # 超配额时接续温和淘汰。此处仍在 _is_virtual_recycling 作用域内
+                # （_recycle_lru_batches 会因该标志直接返回），故延到下一帧执行。
+                if self._rendered_card_count > self._effective_max_rendered_cards():
+                    QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
@@ -11907,9 +11936,69 @@ class OpenAIChatToolWindow(ToolWindow):
         self._decr_rendered_count(rendered_in_batch)
         return net_removed_h
 
-    def _batch_is_protected(self, batch_idx: int) -> bool:
-        """判断批次是否受保护（不可淘汰）：
-        - 可视区 ±1 批（刚滚出/即将滚入，重建成本高）
+    def _viewport_batch_range(self) -> Optional[tuple]:
+        """屏幕**可见**的批次索引闭区间 ``(start, end)``；几何不可用时返回 None。
+
+        🐛 不要用 ``_visible_batch_start/_visible_batch_end`` 代替：那两个字段
+        是「已加载的批次窗口」（加载完恒为最后 ``_initial_visible_batch_count``
+        批），不是「用户此刻看到的批次」。把加载窗口当可视区，会让长对话里
+        保留区间覆盖整张表 —— 回收范围恒为空、配额淘汰找不到候选，20 批以内的
+        会话更是全表被判「附近」，内存只增不减。
+
+        占位（已卸载批次留的等高空白）也参与扫描：它同样占据视口高度，只看
+        存活卡片会漏掉「批次已卸载但仍在屏幕上」的位置。
+        """
+        try:
+            scroll_area = self.chat_scroll_area
+            if scroll_area is None:
+                return None
+            viewport_top = scroll_area.verticalScrollBar().value()
+            viewport_bottom = viewport_top + scroll_area.viewport().height()
+        except Exception:
+            return None
+
+        ph_by_widget = {}
+        for idx, widget in (self._batch_placeholders or {}).items():
+            ph_by_widget[id(widget)] = idx
+
+        visible: List[int] = []
+        degenerate = True
+        try:
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                widget = item.widget() if item else None
+                if widget is None:
+                    continue
+                idx = ph_by_widget.get(id(widget))
+                if idx is None:
+                    idx = getattr(widget, "_message_index", None)
+                if idx is None:
+                    continue
+                rect = widget.geometry()
+                if rect.height() > 0:
+                    degenerate = False
+                if rect.bottom() < viewport_top or rect.top() > viewport_bottom:
+                    continue
+                visible.append(int(idx))
+        except Exception:
+            return None
+        # 布局未就位（全部零高）/ 无批次与视口相交：退回加载窗口，保守但安全
+        if not visible or degenerate:
+            return None
+        return (min(visible), max(visible))
+
+    def _resolve_viewport_range(self, vp_range: Optional[tuple] = None) -> tuple:
+        """解析可视批次区间，几何不可用时退回加载窗口（兜底不为空）。"""
+        if vp_range is not None:
+            return vp_range
+        rng = self._viewport_batch_range()
+        if rng is not None:
+            return rng
+        return (self._visible_batch_start, max(self._visible_batch_start, self._visible_batch_end - 1))
+
+    def _batch_is_protected(self, batch_idx: int, vp_range: Optional[tuple] = None) -> bool:
+        """判断批次是否受保护（温和淘汰不碰）：
+        - 真实可视区 ±1 批（刚滚出/即将滚入，重建成本高）
         - 包含当前流式输出助手卡片的批次
         - 欢迎卡片所在批次
         """
@@ -11918,8 +12007,8 @@ class OpenAIChatToolWindow(ToolWindow):
         cards = self._batch_cards[batch_idx]
         if not cards:
             return False
-        # 可视区 ±1
-        if batch_idx >= max(0, self._visible_batch_start - 1) and batch_idx <= self._visible_batch_end + 1:
+        # 可视区 ±1（距离口径：0 = 视口内，1 = 紧邻，≥2 = 可安全淘汰）
+        if self._batch_distance(batch_idx, vp_range) <= 1:
             return True
         # 当前流式卡
         if self._current_assistant_card is not None and self._current_assistant_card in cards:
@@ -11930,12 +12019,33 @@ class OpenAIChatToolWindow(ToolWindow):
                 return True
         return False
 
-    def _batch_distance(self, batch_idx: int) -> int:
-        """批次到可视区的距离（批次数，0 = 在可视区）。"""
-        if batch_idx < self._visible_batch_start:
-            return self._visible_batch_start - 1 - batch_idx
-        if batch_idx > self._visible_batch_end:
-            return batch_idx - (self._visible_batch_end + 1)
+    def _batch_is_streaming_or_welcome(self, batch_idx: int) -> bool:
+        """「绝对不淘汰」判据：含流式输出卡片或欢迎卡片。
+
+        与 `_batch_is_protected` 的区别：不含「可视区 ±1」这一软保护。
+        供温和淘汰的降级候选使用 —— 用户正在看的批次可以卸（重建代价远低于
+        内存持续增长），但流式卡（卸了会中断渲染）与欢迎卡（独立缓存管理）
+        任何情况下都不能碰。
+        """
+        if not (0 <= batch_idx < len(self._batch_cards)):
+            return True
+        cards = self._batch_cards[batch_idx]
+        if not cards:
+            return False
+        if self._current_assistant_card is not None and self._current_assistant_card in cards:
+            return True
+        for card in cards:
+            if getattr(card, "_is_welcome", False):
+                return True
+        return False
+
+    def _batch_distance(self, batch_idx: int, vp_range: Optional[tuple] = None) -> int:
+        """批次到**可视区**的距离（批次数，0 = 在视口内）。"""
+        vp_start, vp_end = self._resolve_viewport_range(vp_range)
+        if batch_idx < vp_start:
+            return vp_start - 1 - batch_idx
+        if batch_idx > vp_end:
+            return batch_idx - (vp_end + 1)
         return 0
 
     def _effective_max_rendered_cards(self) -> int:
@@ -11993,6 +12103,29 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._sync_global_rendered_pages(self._rendered_card_count - n)
 
+    def _recount_rendered_cards(self) -> None:
+        """按 `_batch_cards` 实况重算本窗口已渲染卡片数（计数校准）。
+
+        增量记账（渲染时 +1 / 卸载时 -1）容易被漏记的路径带偏：任何绕过记账的
+        渲染入口（如流式首卡的立即渲染、用户气泡 viewer 的补建）都会让计数偏低，
+        而偏低 = 配额判「未超限」= 淘汰链永不运行 = 内存单调增长。
+        这里以实况扫描为准做一次对齐，供加载收口 / 淘汰前校准调用。
+
+        口径与 `_unload_batch` 的递减保持一致（统计 `_batch_cards` 中
+        ``_lazy_rendered`` 为真的卡片，含 user 气泡）。
+        """
+        actual = 0
+        for cards in self._batch_cards:
+            if not cards:
+                continue
+            for card in cards:
+                try:
+                    if getattr(card, "_lazy_rendered", False) and self._is_widget_alive(card):
+                        actual += 1
+                except RuntimeError:
+                    continue
+        self._sync_global_rendered_pages(actual)
+
     def _recycle_lru_batches(self):
         """B4 温和层：并发页超限时按「距可视区最远优先」淘汰批次 UI。
 
@@ -12001,29 +12134,37 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._is_virtual_recycling or not self._batch_cards:
             return
-        # 计数校准（可选增强）：每 20 次调用重算一次实际计数，防漂移
+        # 计数校准：每 20 次调用按实况重算一次，抹平漏记路径造成的漂移
+        # （漏记方向恒为「偏低」→ 配额失效，这条校准是兜底闸门）
         self._recycle_lru_call_count += 1
         if self._recycle_lru_call_count % 20 == 1:
-            # 计数校准：只统计已懒渲染的卡（_batch_cards 可能含已创建未渲染卡）
-            actual = 0
-            for cards in self._batch_cards:
-                if cards:
-                    actual += sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
-            self._sync_global_rendered_pages(actual)
+            self._recount_rendered_cards()
 
         quota = self._effective_max_rendered_cards()
         if self._rendered_card_count <= quota:
             return
 
+        # 可视区几何只解析一次，保护判定与距离计算共用（避免逐批反复扫布局）
+        vp_range = self._resolve_viewport_range()
+
         # 候选：所有非空批次（跳过受保护），按距离降序（最远先淘汰）
         candidates = []
+        fallback_candidates = []
         for idx, cards in enumerate(self._batch_cards):
             if not cards:
                 continue
-            if self._batch_is_protected(idx):
+            if self._batch_is_protected(idx, vp_range):
+                # 🐛 配额修复：保护区间按「真实视口 ±1」算之后，小表（可见批次少 +
+                # 缓冲）仍可能把全部批次判为受保护 → 候选为空 → 计数永不回落。
+                # 这里留一份「仅排除流式卡/欢迎卡」的降级候选，主候选耗尽而计数
+                # 仍超配额时才启用。
+                if self._batch_is_streaming_or_welcome(idx):
+                    continue
+                fallback_candidates.append((self._batch_distance(idx, vp_range), idx))
                 continue
-            candidates.append((self._batch_distance(idx), idx))
+            candidates.append((self._batch_distance(idx, vp_range), idx))
         candidates.sort(key=lambda x: x[0], reverse=True)
+        fallback_candidates.sort(key=lambda x: x[0], reverse=True)
 
         self._is_virtual_recycling = True
         try:
@@ -12034,6 +12175,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     break
                 removed_h = self._unload_batch(idx)
                 removed_total += removed_h
+            # 降级：温和候选不足以回到配额内时，继续淘汰最远的受保护批次
+            # （视口内最初 1 批仍由 _batch_distance == 0 天然挡在最后）
+            if self._rendered_card_count > quota and fallback_candidates:
+                for dist, idx in fallback_candidates:
+                    if self._rendered_card_count <= quota:
+                        break
+                    if dist <= 0:
+                        break  # 已触到视口内：不再继续，避免把正在看的批次卸掉
+                    removed_h = self._unload_batch(idx)
+                    removed_total += removed_h
             if removed_total > 0:
                 try:
                     scroll_bar.setValue(max(0, scroll_bar.value() - removed_total))
@@ -14852,7 +15003,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_node_preview_to_scroll()
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         if self._bottom_anchor_deadline > 0:
-            if value < scroll_bar.maximum():
+            if value < scroll_bar.maximum() and self._programmatic_scroll_depth <= 0:
+                # 程序自身的补偿落后于 maximum 不算「用户滚离」：否则终渲染期间
+                # 锚定会被自己的欠补偿一脚踹掉。
                 self._bottom_anchor_deadline = 0.0
                 self._bottom_anchor_timer.stop()
         # away 状态机 —— 全项目**唯一**的置/复位点，阈值统一走 AT_BOTTOM_TOLERANCE。
@@ -14866,8 +15019,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 静默失效（加载停在消息列表中间的根因），故只允许复位不允许置位。
         if self._is_view_at_bottom() or self._loading_session:
             self._user_intentionally_away_from_bottom = False
-        elif not self._loading_session:
+        elif not self._loading_session and self._programmatic_scroll_depth <= 0:
+            # 只有「非程序滚动导致的离底」才算用户意图。程序置底/补偿落点落后
+            # 不在此列，否则 away 一旦误置便无人复位（value 不再变化 → 无信号）。
             self._user_intentionally_away_from_bottom = True
+            self._scroll_diag("away-set", f"loading={self._loading_session}")
         if value <= self._history_load_threshold:
             self._load_more_history_batches()
         # 滚动时复用单个防抖定时器，避免堆积大量 singleShot 回调
@@ -16498,6 +16654,39 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_scroll_maximum()
         return scroll_bar.maximum() - scroll_bar.value() <= tolerance
 
+    def _scroll_diag(self, tag: str, extra: str = "") -> None:
+        """[临时诊断] 打印滚动状态快照，仅 DRIFOX_SCROLL_DIAG=1 时生效。
+
+        只读不写：这里刻意不走 `_sync_scroll_maximum`（它有副作用，会抬高
+        maximum），保证打点本身不改变被测行为。
+        """
+        if not _SCROLL_DIAG_ENABLED:
+            return
+        try:
+            sb = self.chat_scroll_area.verticalScrollBar()
+            away = getattr(self, "_user_intentionally_away_from_bottom", None)
+            left = getattr(self, "_bottom_anchor_deadline", 0.0) - time.monotonic()
+            logger.info(
+                f"[scroll-diag] {tag} value={sb.value()} max={sb.maximum()} "
+                f"gap={sb.maximum() - sb.value()} away={away} anchor_left={left:+.2f}s {extra}"
+            )
+        except Exception as e:  # 打点绝不能影响主流程
+            logger.info(f"[scroll-diag] {tag} <snapshot failed: {e}> {extra}")
+
+    @contextlib.contextmanager
+    def _programmatic_scroll(self):
+        """标记其间的 setValue 为程序行为（非用户意图）。
+
+        终渲染那一次全量重渲染会在数百毫秒内连续推高内容高度，程序按「单卡
+        delta」补偿的落点必然一度落后于真实 maximum。若让这次 valueChanged 参与
+        away 判定，就会被记成「用户主动滚离底部」，随后所有跟底守卫静默失效。
+        """
+        self._programmatic_scroll_depth += 1
+        try:
+            yield
+        finally:
+            self._programmatic_scroll_depth -= 1
+
     def _sync_scroll_maximum(self) -> int:
         """把滚动条上界校正到**真实**内容高度，返回校正后的 maximum。
 
@@ -16528,7 +16717,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 return scroll_bar.maximum()
             real = container.sizeHint().height() - self.chat_scroll_area.viewport().height()
             if real > scroll_bar.maximum():
-                scroll_bar.setMaximum(max(0, real))
+                with self._programmatic_scroll():
+                    scroll_bar.setMaximum(max(0, real))
         except RuntimeError:
             pass
         self._scroll_max_cache = (now, scroll_bar.maximum())
@@ -16610,10 +16800,12 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         max_val = self._sync_scroll_maximum()
-        scroll_bar.setValue(max_val)
-        # 再次设置确保卡片高度变化后仍在底部
-        scroll_bar.setValue(max_val)
+        with self._programmatic_scroll():
+            scroll_bar.setValue(max_val)
+            # 再次设置确保卡片高度变化后仍在底部
+            scroll_bar.setValue(max_val)
         self._pending_scroll_to_bottom = False
+        self._scroll_diag("do-scroll-bottom", f"target={max_val}")
         # 🐛 原此处无条件 `self._user_intentionally_away_from_bottom = False`：
         # 任何一次程序置底都会清空用户的「我在读历史」意图，于是守卫形同虚设
         # （下一次 token 批/工具回调立刻把视口拽回）。away 只由两处驱动：
@@ -16649,14 +16841,20 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         self._sync_scroll_maximum()
+        self._scroll_diag(f"ensure-check(retries={retries})")
         if not self._is_view_at_bottom():
-            scroll_bar.setValue(scroll_bar.maximum())
+            with self._programmatic_scroll():
+                scroll_bar.setValue(scroll_bar.maximum())
+            self._scroll_diag(f"ensure-fixed(retries={retries})")
             # 懒渲染可能需要更长时间，延迟再次检查
             # 如果还有重试次数，即使 bottom anchor 过期也继续重试
             if retries > 0:
                 QTimer.singleShot(300, lambda: self._ensure_at_bottom(retries - 1))
             elif self._bottom_anchor_deadline > time.monotonic():
                 QTimer.singleShot(300, self._ensure_at_bottom)
+        else:
+            # 在底部 → 链条到此终止，后续高度再涨无人拉底（断链嫌疑点）
+            self._scroll_diag(f"ensure-stop(retries={retries})")
 
     def _maintain_bottom_anchor(self):
         # 窗口已销毁时跳过：避免 _bottom_anchor_timer 回调在 closeEvent 之后
@@ -16674,7 +16872,12 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        scroll_bar.setValue(scroll_bar.maximum())
+        # 🐛 原此处直接 setValue(scroll_bar.maximum())：卡片 setFixedHeight 后 Qt
+        # 的 maximum 要下一轮事件循环才更新，锚定期一直拿旧上界置底 → 追不上
+        # 终渲染的高度暴涨。与 _do_scroll_to_bottom 对齐，先用 sizeHint 校正上界。
+        max_val = self._sync_scroll_maximum()
+        with self._programmatic_scroll():
+            scroll_bar.setValue(max_val)
         self._bottom_anchor_timer.start()
 
     def _on_message_card_height_changed(self, _height: int):
@@ -16723,7 +16926,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
                 card_bottom = card_top + sender.height()
                 if card_bottom <= value or self._should_follow_bottom():
-                    sb.setValue(max(0, value + delta))
+                    if abs(delta) >= 20:
+                        self._scroll_diag("card-delta", f"delta={delta} card_bottom={card_bottom}")
+                    with self._programmatic_scroll():
+                        sb.setValue(max(0, value + delta))
         except RuntimeError:
             pass
         if not sender._content_just_loaded:
@@ -16773,6 +16979,11 @@ class OpenAIChatToolWindow(ToolWindow):
         elif self._is_view_at_bottom() and not _reading_inside:
             # 视口已经在底部附近 → 补一次滚底，吸收卡片高度增量（阈值统一）
             self._scroll_to_bottom()
+        else:
+            self._scroll_diag(
+                "card-loaded-skip",
+                f"last={is_last_card} streaming={self._is_streaming} reading={_reading_inside}",
+            )
 
         sender._content_just_loaded = False
 
@@ -18977,7 +19188,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card and not _is_sip_deleted(self._current_assistant_card):
             if elapsed is not None:
                 self._current_assistant_card.set_meta_info(elapsed=elapsed)
+            self._scroll_diag("finish-before")
             self._current_assistant_card.finish_streaming()
+            self._scroll_diag("finish-after")
 
         # 🛡️ 流式完成后显式滚底：finish_streaming 触发的最后一次全量渲染
         # 替换 DOM 后，contentHeightChanged 可能因高度不变而不触发，或
@@ -18987,13 +19200,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # away，用户流式中途上滚读历史后，结束瞬间必被拽回 —— 这是最被诟病的一处。
         # 现在改为「用户已离开底部就保持位置」，等用户自己滚回底部再恢复跟随。
         if self._should_follow_bottom():
-            self._scroll_to_bottom()
+            # 🆕 sticky 1500ms：finish_streaming 的全量重渲染实测约 450ms 才把高度
+            # 落地（md 2.6w 字符 → 2614px），期间 maximum 被连续推高，靠「单卡
+            # delta 补偿 + 8×300ms 兜底」系统性追不上（补偿落点偏小）。锚定期每
+            # 100ms 强制 setValue(maximum)，用户一滚立即失效（_on_scroll_changed）。
+            self._scroll_to_bottom(sticky_ms=1500)
             # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
             # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
             # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
             # ⚠️ 兜底同样要守卫：用户可能在等待期间上滚去看别的内容。
             QTimer.singleShot(500, self._scroll_to_bottom_if_following)
             QTimer.singleShot(1000, self._scroll_to_bottom_if_following)
+        else:
+            self._scroll_diag("finish-no-follow")
 
         # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
         # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。

@@ -143,7 +143,7 @@ class ProviderEditCard(QWidget):
     saved = pyqtSignal(str, dict)  # provider_name, provider_info
     closed = pyqtSignal()
     fetchSuccess = pyqtSignal(list)  # 获取成功信号
-    fetchFailed = pyqtSignal()  # 获取失败信号
+    fetchFailed = pyqtSignal(str)  # 获取失败信号（失败原因，空串=无内容）
     loginSuccess = pyqtSignal(str, str)  # 登录成功（api_key, info）
     loginFailed = pyqtSignal(str)  # 登录失败（原因）
 
@@ -637,13 +637,20 @@ class ProviderEditCard(QWidget):
         api_key = self.apiKeyEdit.text().strip()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
 
-        # capabilities["models_hook"]：服务商自定义获取（自包含，无需输入框参数）
+        # capabilities["models_hook"]：服务商自定义获取（不依赖输入框 URL，
+        # 但需要当前表单值——如 CodeBuddy 按 API_KEY 里的 refresh_token 换 token）
         p = ProviderRegistry.get_instance().get(provider_name)
         hook = p.capabilities.get("models_hook") if p else None
         if hook is not None:
             self.fetchBtn.setEnabled(False)
             InfoBar.info("获取中", "正在获取模型列表...", parent=parent, duration=3000, position=InfoBarPosition.BOTTOM)
-            threading.Thread(target=self._do_fetch_thread, args=(hook,), daemon=True).start()
+            hook_config = {
+                "API_URL": api_url,
+                "API_KEY": api_key,
+                "模型名称": self.modelCombo.currentText().strip(),
+                "认证方式": "bearer",
+            }
+            threading.Thread(target=self._do_fetch_thread, args=(hook, hook_config), daemon=True).start()
             return
 
         if not api_url or not api_key:
@@ -662,17 +669,26 @@ class ProviderEditCard(QWidget):
         thread.daemon = True
         thread.start()
 
-    def _do_fetch_thread(self, fetch_func):
-        """在后台线程中获取模型"""
+    def _do_fetch_thread(self, fetch_func, *args):
+        """在后台线程中获取模型。
+
+        异常必须转成 fetchFailed 信号：线程内异常若逃逸会静默杀死线程，
+        fetchBtn 停在禁用态且无任何提示（表现为「一直卡住」）。
+        """
         import time
 
         time.sleep(0.1)
-        models = fetch_func()
+        try:
+            models = fetch_func(*args)
+        except Exception as e:  # noqa: BLE001 —— 失败原因需透传到 UI
+            logger.warning(f"[ProviderEditCard] 获取模型列表失败: {e}")
+            self.fetchFailed.emit(str(e))
+            return
         if models:
             self._fetched_models = models
             self.fetchSuccess.emit(models)
         else:
-            self.fetchFailed.emit()
+            self.fetchFailed.emit("")
 
     def _on_fetch_success(self, models: list):
         """获取成功（主线程）"""
@@ -692,15 +708,19 @@ class ProviderEditCard(QWidget):
             "成功", f"获取到 {len(models)} 个模型", parent=parent, duration=2000, position=InfoBarPosition.BOTTOM
         )
 
-    def _on_fetch_failed(self):
-        """获取失败（主线程）"""
+    def _on_fetch_failed(self, reason: str = ""):
+        """获取失败（主线程）；reason 为插件抛出的原因，空串走通用提示"""
         self.fetchBtn.setEnabled(True)
         from qfluentwidgets import InfoBar
         from app.widgets.tab_manager_window import TabManagerWindow
 
         parent = TabManagerWindow.get_instance() or self.window()
         InfoBar.error(
-            "失败", "获取模型列表失败，请检查配置", parent=parent, duration=3000, position=InfoBarPosition.BOTTOM
+            "失败",
+            reason[:150] if reason else "获取模型列表失败，请检查配置",
+            parent=parent,
+            duration=5000,
+            position=InfoBarPosition.BOTTOM,
         )
 
     def _on_manage_models(self):

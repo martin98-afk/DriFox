@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.0] - 2026-09-14 (重新发布 #2)
+## [v0.6.0] - 2026-09-15 (重新发布 #4)
 
-自上一版本以来的变更 | 提交数：17 · 文件变更：84 · +5151/-1270 | 贡献者：mading, drifox-bot
+自上一版本以来的变更（累计） | 提交数：39 · 文件变更：125 · +10625/-3979 | 贡献者：mading, drifox-bot, dingma
 
 ### ✨ 新功能 (New Features)
 
@@ -36,6 +36,44 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复（重新发布补充）
 
 - **追问标签误匹配吞掉正文** (`app/widgets/message_card.py`, `tests/widgets/test_ask_suggest_block.py`): 正文里出现孤立的 `<ask>`（模型描述格式、think / tool 块内字面量、闭合标签写错）时，跨行非贪婪匹配的起点落在正文中间、终点落在文末真追问的 `</ask>` 上，中间整段正文被当成追问内容摘进胶囊 —— 表现为流式期间正文正常显示、闭合标签一到就整段消失。修复：新增 `_is_ask_content_valid` 熔断（超长 / 跨空行 / 夹带协议标签一律判为误匹配并保留原文），追问内容正则禁止嵌套 `<ask>` 且长度封顶 120 字符，受保护区间从三反引号围栏扩到 `~~~` 围栏、行内代码与 think / tool 协议块；新增 5 条回归测试。`2110883c`
+
+### 🐛 问题修复（重新发布补充 #4）
+
+- **加载长会话渲染配额被架空导致内存暴涨** (`app/main_widget.py`, `tests/widgets/test_render_quota_enforcement.py` 新增, `docs/perf/memory-governance.md`): 加载 20 条消息的会话后内存 +1GB，日志呈现 `rendered=2 quota=12` 与池统计 `acquire=26 hit=0 miss=26 release=0` 的自相矛盾（并发 26 个 WebEngine 页而计数只有 2），单个 renderer 进程 512MB。三处缺陷叠加：① `_recycle_out_of_view_batches` 第一步的补渲染只累加日志用的 `lazy_render_count`，从不写回 `_rendered_card_count`，配额被永久低估 → `_recycle_lru_batches` 首行 `<= quota` 恒成立、淘汰链一次不跑；② 保留范围误用「加载窗口」`_visible_batch_start/_end`（加载完恒为最后 12 批），小表下「可视区 ±1」实际覆盖整张表，回收范围与淘汰候选集双双恒为空；③ 候选耗尽无降级，全批被判保护时计数停在超配额状态。修复：新增 `_viewport_batch_range()` 按真实布局几何 + 占位高度取视口相交批次（几何未就位时 `_resolve_viewport_range()` 回退加载窗口）；补渲染按 `_lazy_rendered` 实况写回 `_sync_global_rendered_pages` 并在超配额时下一帧接续淘汰；新增 `_recount_rendered_cards()` 作为漏记兜底（每 20 次调用对齐一次）；`_recycle_lru_batches` 增加降级通道，主候选耗尽时继续淘汰最远的软保护批次，`_batch_distance == 0`（视口邻域）即刻停止。新增 10 条回归测试。
+
+### 🐛 问题修复（重新发布补充 #3）
+
+- **模型列表获取卡死** (`app/widgets/cards/settings/provider_edit_card.py`, `tests/widgets/test_provider_edit_card_models_hook.py` 新增): 服务商走 `capabilities["models_hook"]` 自定义获取时（CodeBuddy 即此类），UI 侧 `_do_fetch_thread` 零参调用 `fetch_func()`，而插件实现为 `_fetch_models(config)` 需要当前表单值（按 `API_KEY` 里的 refresh_token 换取访问令牌）—— `TypeError` 在线程内抛出后直接杀死线程，`fetchSuccess` / `fetchFailed` 两个信号一个都不发，按钮停在禁用态且无任何提示，用户表现为「一直卡住获取不到」。修复三处：① `_on_fetch_models` 组装当前表单值（`API_URL` / `API_KEY` / `模型名称` / `认证方式`）作为 config 传给 hook；② `_do_fetch_thread` 加异常兜底，任何异常转成 `fetchFailed` 信号，杜绝线程静默死亡；③ `fetchFailed` 信号签名改为 `pyqtSignal(str)` 携带失败原因，`_on_fetch_failed` 直接展示插件给出的具体原因（如「尚未登录：请先点击登录」），取代笼统的「请检查配置」。新增 6 条回归测试，覆盖传参契约、异常透传、空结果、成功刷新下拉框与失败文案。`ce57a5ad`, `cd007556`
+
+### 🆕 重新发布 #4 增量（自重新发布 #3 起）
+
+基于上次重新发布 v0.6.0 (重新发布 #3) 的增量变更 | 提交数：20 · 文件变更：39 · +5265/-2699 | 贡献者：dingma
+
+#### ✨ 新功能 (New Features)
+
+- **流式消息增量式终结，减少全量重绘** (`app/widgets/message_card.py`, `tests/widgets/test_incremental_finalize.py` 新增): 引入增量终结机制，仅对当前活跃块与受影响的尾部片段做增量 DOM 更新，避免每 chunk 触发全卡重渲染，大幅降低流式期主线程负载。`c8c67d11`
+
+- **模型列表编辑器三段式升级 + 能力覆盖层 + 隐藏/别名** (`app/widgets/model_list_edit_dialog.py`, `app/widgets/cards/settings/model_selector_card.py`, `app/widgets/cards/settings/model_config_card.py`, `app/widgets/cards/settings/provider_edit_card.py`, `app/main_widget.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`, `app/utils/model_list_ops.py` 新增, `app/utils/model_capability_override.py` 新增, `app/core/model_capabilities.py`, `app/core/provider_profile.py`, `app/constants.py`, `tests/`): 模型列表编辑器由平面单段升级为「工具栏 + 列表 + 元数据」三段式，新增勾选隐藏、别名编辑、批量导入、搜索、元数据展示五类操作；新增模型能力覆盖模块（中文键防泄漏），能力查找链接入用户覆盖层、思考注入独立分支、多模态覆盖，模型配置卡新增「模型能力」分组，能力查询透传 `provider_name`；main_widget / worker 接入隐藏过滤、别名显示与能力覆盖透传；新增纯函数操作模块（增量合并 / 隐藏过滤 / 别名解析）。`951d32ba`, `ef7f7685`, `d9549b4a`, `5facfceb`, `7d3e6cad`, `e060c89a`, `99e43f8b`
+
+- **ChatSession 惰性消息释放与重载** (`app/core/chat_session.py`, `app/core/backend.py`, `app/main_widget.py`, `.gitignore`, `tests/core/test_session_message_release.py` 新增, `tools/diag_session_mem_probe.py` 新增): 会话消息改为按需惰性释放（加载时仅初始化当前可视窗口附近的批次），切换会话时主动释放已加载批次，避免长会话内存暴涨；引入 `.probe/` 目录忽略模式。`51d80207`
+
+- **更新下载代理设置卡 + 链路接入** (`app/utils/update_proxy.py` 新增, `app/utils/config.py`, `app/update_checker.py`, `app/utils/utils.py`, `app/widgets/cards/settings/update_proxy_card.py` 新增, `app/widgets/cards/settings/llm_settings_card.py`, `app/main_widget.py`, `tests/utils/test_update_proxy.py` 新增): 新增 `Update.ProxyMode`（direct / system / prefix / http）配置项 + 代理解析模块；新增「更新下载代理」设置卡组件（位于设置页更新分区），检查更新与下载链路接入代理配置；加速前缀只作用于安装包下载，检查更新始终直连 `api.github.com`。`c74f714e`, `5f0bbd24`, `69a077af`, `a83e1aea`
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **加载长会话渲染配额被架空导致内存暴涨** (`app/main_widget.py`, `tests/widgets/test_render_quota_enforcement.py` 新增, `docs/perf/memory-governance.md`): `_recycle_out_of_view_batches` 第一步补渲染只累加日志用的 `lazy_render_count` 而不写回 `_rendered_card_count`，配额永久低估 → `_recycle_lru_batches` 淘汰链一次不跑；保留范围误用「加载窗口」、候选耗尽无降级。修复后按真实布局几何取视口相交批次 + 实况写回 + 超配额接续淘汰 + `_recount_rendered_cards` 兜底；新增 10 条回归测试 + 内存治理文档。`e1a59e2e`
+
+- **服务商编辑卡拉取增量合并 + 保存保留未知键 + 写入隐藏/别名** (`app/widgets/cards/settings/provider_edit_card.py`, `tests/widgets/test_model_list_editor.py`): 拉取模型走增量合并，保存时保留未知键并写入隐藏/别名到配置。`dfab4c85`
+
+- **代理设置卡输入框遮挡标题 + 展开后底部空白** (`app/widgets/cards/settings/update_proxy_card.py`): 输入框在未选中模式下浮出遮挡标题；展开后底部残留空白。两处独立修复。`ef4d34d5`, `f3a4324e`
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **代码结构清理** (`app/`): 22 个文件变更（+860/-2422），主要为重构后的孤立 helper 与实验分支清理，保留对所有现有功能的引用链。`9d05553a`
+
+#### 📚 文档 (Documentation)
+
+- **CHANGELOG 增量记录** (`CHANGELOG.md`): 补记模型列表编辑器升级、自定义模型能力配置、下载代理配置变更。`ccf8b0a2`, `94c1b1f1`
 
 ## [v0.5.12] - 2026-09-14
 
@@ -135,11 +173,15 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **更新下载代理配置（直连 / 跟随系统 / 加速前缀 / 手动代理）** (`app/utils/update_proxy.py` 新增, `app/widgets/cards/settings/update_proxy_card.py` 新增, `app/utils/config.py`, `app/utils/utils.py`, `app/update_checker.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_update_proxy.py` 新增): 设置 → 更新页新增「更新下载代理」卡，四选一模式即改即生效。**加速前缀只作用于安装包下载**——实测 8 个主流 GitHub 加速站无一真代理 `api.github.com`（返回 200 的是自家首页 HTML），检查更新始终直连；下载域实测可用（`ghfast.top` 144KB/s vs 直连 38KB/s）。四种模式各自显式指定库参数：`direct`/`prefix` 走 `trust_env=False`（httpx 的 `proxy=None` 不生效，仍会读环境变量代理）、`system` 交给库默认、`http` 转发到指定地址。前缀为自由输入框（默认 `https://ghfast.top/`），带连通性测试按钮——探 release 小资产（287B SHA256SUMS，毫秒级）并**校验响应内容形态**，拦下「加速站返回自家首页 HTML 却给 200」的假阳性；测试在后台线程发起，25s 超时（实测网络受限时 ConnectTimeout 要 21s 才落地）。校验层拒绝 `socks5://` 并说明原因（socksio / PySocks 均未安装）。不做自动故障回退：前缀失败明确报错，静默直连会让用户误以为代理生效。与 plugin-marketplace 的 `proxy.json` 各管各的，互不依赖。25 条单元测试覆盖四模式改写/参数/校验/探测文案/内容判据。
+
 - **系统级密钥存储（keyring）** (`app/utils/secret_store.py` 新增, `app/utils/config.py`, `app/core/config_sync.py`, `build.py`, `Drifox.spec`): 服务商 API Key / Gitee OAuth token / GitHub token 迁入操作系统凭证库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），app.config 落盘与云端同步不再含明文密钥（此前 API_KEY 与 GitHub token 会原样上传 Gitee 私库）。`Settings.save()` 深拷贝后剥钥（toDict 内层与内存共享引用，必须隔离）、`load()` 后回填内存（须早于 config_id hash 迁移）；config_sync 两处「磁盘读回」路径（全量重载 / Gitee token 恢复）同步回填，防跨设备同步后本机密钥丢失。降级 fail-open：keyring 未装 / 无后端 / 异常 / 开关关闭（`General/UseSystemKeyring`）→ 完全旁路，明文照旧。密钥不跨设备同步，新设备拉到配置后需重输；PyInstaller 下 keyring 后端发现走 entry points 收不齐，build.py / spec 按平台显式声明后端模块（jaraco/keyring #439/#468）。已知边界：OS 凭证库不防本机同用户进程读取；更换服务商 URL/Key 后旧凭据条目会残留在系统凭据管理器（条目名 `DriFox:provider/xxx`），可手动删除。10 条单元测试 + WinVaultKeyring 真机全链冒烟（迁移/剥钥/回填）。
 
 - **编辑工具运行框的增删行数流式显示** (`app/core/tool_arg_lines.py`, `app/core/workers/chat_worker.py`, `app/widgets/message_card.py`, `plugins/system-tools/tools/_tool_desc.py`): write/edit/multi_edit 在参数流式接收期间显示 `+N/-M` 胶囊（复用完成框 diff 统计的 `.tool-diff-stats` 结构，运行中与完成态形态一致），取代对编辑场景没有信息量的 `(N字符)`。行数从 worker 手里的**半截 JSON 缓冲**估算：按字段取 `"field": "…"` 片段（未闭合截到缓冲末尾），转义感知计数（连续反斜杠奇数才是 `\n`），行数 = 换行转义数 + 1 对齐 diff 语义；同一 tool_call 内只增不减防正则失配抖动，完成后由真实 diff 统计接管。顺带修两处预览缺陷：progress 阶段路径字段扩展 `path/file_path/file/target`，且 path 未到达时显示「编辑文件中」而非空窗「准备中...」；`description` 与文件路径拼接时超 30 字符截断，保证路径不被单行省略裁掉。
 
 ### 🐛 问题修复 (Bug Fixes)
+
+- **设置卡展开后底部大块空白 / 未选中模式的输入框浮出遮挡标题** (`app/widgets/cards/settings/update_proxy_card.py`): 两个叠加的 Qt 布局坑。① 说明文字原用 `BodyLabel(wordWrap=True)`，其 C++ `sizeHint` 按**理想宽度**算换行高度（该行理想宽需 52px，实际宽度只需 40px），四行累加使卡片底部空出 90px；改用 `_ElidedLabel`（`QSizePolicy.Ignored` + 单行省略，同 `render_advanced_card`）根治。此前试过覆写 `sizeHint()` 返回 `heightForWidth` —— **无效**，PyQt5 里布局对 `QWidgetItem.sizeHint()` 的调用不派发 Python override。② 隐藏子控件仍被算进行 `sizeHint`，改为从布局 `removeWidget` 真正摘掉；但仅摘布局不够，控件仍留在父控件可见性体系里，父控件 show 时以「无布局子控件」身份在 (0,0) 浮出来压住自己的标题，故摘除路径必须同时 `setVisible(False)`。修复后展开高度 441 → 351，底部余量 93px → 5px。
 
 - **插话可打断 API 自动重试** (`app/core/workers/chat_worker.py`, `tests/core/test_retry_interject_abort.py`): 此前 `_make_api_call` 内部 15 次退避重试（5/10/15…s，累计最长 600s）期间 worker 阻塞在该函数内，而 `_hook_message_queue` 只在每轮 API 调用前由 `_inject_pending_hook_messages` 消费 → 报错重试期间发出的插话要等重试全部跑完才生效，表现为「发了消息 AI 长时间无响应」，实际只有点停止才能打断（停止还会把插话回收回填输入框）。修复：新增 `_has_pending_interject`（只探测不消费，取出后按原顺序放回）与 `_abort_retry_for_interject`（恢复协议错误重试的 partial 备份 + emit `retry_resolved` 收掉重试动画），在每轮 attempt 开头（限 `attempt > 0`，首轮遗留交给循环顶部正常消费）与退避等待循环（沿用 0.5s 粒度）探测插话，命中即放弃剩余重试并返回 `(None, None)`；主循环随后走 `not tool_calls_found` 完成路径把已接收内容落库，再由 `_drain_pending_hooks_before_exit` 注入插话并续跑一轮——保留上下文，不丢已生成内容，也不需要用户点停止。仅认 `_interject` 标记条目，TeamMail / SubAgentFinished 等不触发打断；worker 未持有 tool_executor（单测最小实例）时探测安全返回 False。3 条单元测试锁死：插话打断（只打 1 次 API、队列不被消费、发射 retry_resolved）、空队列照常重试、非插话条目不打断。
 
@@ -156,6 +198,10 @@ All notable changes to this project will be documented in this file.
 - **提问卡片提交后关不掉、点击无反应** (`app/widgets/cards/card_manager.py`, `tests/widgets/test_question_card_stuck.py`): 修掉一处栈顶记账被抢走的竞态。`CardManager` 用 `visible_cards[容器]` 单值记「谁是栈顶」，而 L2 状态层的 `refresh_layer() → _apply_visible_set()` 会无条件覆写该单值；提问卡注册在 `BOTTOM` 且非 stackable，因此只要提问等待期间状态层刷过一次（子智能体进度刷新 / 紧凑卡 auto_hide 定时器 / 撤销卡 TTL / 新消息进队列，共 4 处可自发触发），记账就被换成状态卡或置空，此后 `hide_card("question")` 命中「记账不匹配」早退，widget 永不 `setVisible(False)`。表现为：提交后卡片仍压在输入框上方、再点提交/忽略全无反应（答案其实每次都送达、正文照常输出），而非提问卡独占的输入区隐藏与卡片隐藏是两条独立动作，前者成功后者失败。修复两处结构性问题且均不硬编码 `question` 字面量：① `_apply_visible_set` 写栈顶记账时，若现栈顶不在本次重算的管辖集内（非本层成员）则不抢，保住「question 覆盖一切」的优先级判定（`is_card_visible` 不再被侵蚀）；② `hide_card` 语义由「按记账判定该不该隐藏」改为「让指定卡消失」，新增 `_hand_over_stack_top` 只在记账确实属于本卡时交接、不动其他卡占位（同修 `multi_visible` 分支同类抢占）。5 条回归测试锁死关不掉路径、反复点击、优先级不被侵蚀，以及状态层在无提问卡时照常接管栈顶。
 
 - **超长 API Key 无法存入系统凭证库，静默退回明文落盘** (`app/utils/secret_store.py`, `tests/utils/test_secret_store.py`): Windows 单个凭证 Blob 上限 2560 字节（`CRED_MAX_CREDENTIAL_BLOB_SIZE = 5*512`，utf-16 下 1280 字符），超出时 `CredWriteW` 直接失败（错误码 1783）。此前 `strip_secrets` 的 fail-open 逻辑「写入失败则保留明文」虽避免双丢，但 Windows 分支的 `set()` 不落任何日志，叠加后表现为**该服务商密钥静默以明文留在 app.config 里**——典型如 CodeBuddy 的 1472 字符 access_token JWT（需 2944 字节，溢出 384 字节），而其余短密钥正常入库，用户只看到「钥匙串已生效」与「某一条仍是明文」并存。修复：超限值自动分片，拆成 `provider/<id>#0..#n-1`，主条目只存 `\x00drifox:chunks:<n>` 标记，读取按标记拼回；向后兼容老条目（无标记按单片直读）；任一分片缺失返回空而非半截密钥；写入中途失败回滚已写分片、主条目保持原值；值改短时清理陈旧分片；删除时主条目与分片一并清理（主条目标记缺失时探测清理脏残留）。同时给 `strip_secrets` 的失败分支补 warning 日志，杜绝同类静默降级。10 条新增用例覆盖分片边界（含代理对不切断）、回滚、残缺分片、收缩清理与 1472 字符 key 的端到端闭环。
+
+### ⚡ 性能优化 (Performance)
+
+- **会话消息体惰性释放：长会话常驻内存 −107MB** (`app/core/chat_session.py`, `app/core/backend.py`, `tools/diag_session_mem_probe.py` 新增, `tests/core/test_session_message_release.py` 新增): 加载多个历史会话后，`SessionManager` 会把每个会话的完整消息体一直攥在内存里（默认最多 15 个）。实测（dev 库 283MB / 1721 会话，取最大的 15 个）：15 个会话全量常驻 RSS **+126.8MB**，单会话最大 **+26.9MB**（19.4MB blob / 228 条），而单次从 SQLite 反序列化重载只要 **22-56ms**。改为「当前会话 + 最近 `DEFAULT_KEEP_MESSAGES=3` 个常驻，其余只留元数据」：消息体经 `ChatSession.release_messages()` 释放，访问 `session.messages` 或 `switch_to_session()` 时经 `SessionManager` 注入的 loader 自动重载（对调用方透明）。同一实测场景 RSS 增量 **+126.8MB → +19.9MB**，稳态常驻 4 个会话。安全契约：未注入 loader 时一律不释放；重载器返回 `None`（如 HistoryManager 尚未就绪）时保持「已释放」状态而不写成空消息——空消息一旦被 save 覆盖 SQLite 就是丢历史，这是本次改动唯一的高危点，由 7 条回归测试锁死（含 `to_dict()` 导出路径先重载）。会话对象、索引与淘汰逻辑（`_evict_if_needed`）完全不变，仅消息体可换出。
 
 ## [v0.5.11] - 2026-09-13 (重新发布 #3)
 

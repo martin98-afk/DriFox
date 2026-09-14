@@ -77,6 +77,9 @@ htmlcov/
 # CodeGraph 索引（自动生成，不提交）
 .codegraph/
 
+# 内存/会话探针调试残留（一次性脚本 + pytest 输出，不提交）
+.probe/
+
 # 长时压测运行时数据（pytest -m perf_long 自动生成）
 tests/perf/long_run/baselines/
 
