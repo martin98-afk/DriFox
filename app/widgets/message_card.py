@@ -200,9 +200,20 @@ _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")
 # 仅保留 jump/create/generate/view/session 的旧 markdown 链接兼容。
 _CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((jump|create|generate|view|session)(?:\|([^)]*))?\)")
 # 追问新格式：<ask>内容</ask>，直接生成胶囊（空内容丢弃整段标签，避免 [](ask) 残留）
-_ASK_TAG_PATTERN = re.compile(r"<ask>(.*?)</ask>", re.DOTALL)
+# 内容段两条硬约束（防误匹配吞正文，详见 _ask_content_ok）：
+#   1. 禁止再出现 <ask>（防嵌套标签把两段之间的正文一起吃掉）
+#   2. 长度封顶 _ASK_MAX_CONTENT_LEN（追问是一句话，跨段落的超长"内容"必是误匹配）
+_ASK_MAX_CONTENT_LEN = 120
+_ASK_CONTENT_BODY = rf"(?:(?!<ask>).){{0,{_ASK_MAX_CONTENT_LEN}}}?"
+_ASK_TAG_PATTERN = re.compile(rf"<ask>({_ASK_CONTENT_BODY})</ask>", re.DOTALL)
 # 追问收拢：摘除正文里的 ask 标签（连带行内多余空白），改由末尾区块统一渲染
-_ASK_STRIP_PATTERN = re.compile(r"[ \t]*<ask>.*?</ask>[ \t]*", re.DOTALL)
+_ASK_STRIP_PATTERN = re.compile(rf"[ \t]*<ask>({_ASK_CONTENT_BODY})</ask>[ \t]*", re.DOTALL)
+# 协议块（思考 / 工具）：摘除发生在 think/tool 注入之前，块内文本不当正文处理，
+# 其中的 <ask> 字面量不参与收拢（否则会一路吃到文末真追问，把块尾与正文一起摘走）
+_ASK_PROTO_BLOCK_PATTERN = re.compile(r"<(think|tool)\b[^>]*>.*?(?:</\1>|\Z)", re.DOTALL | re.IGNORECASE)
+# 补充保护区间：~~~ 围栏与行内代码（``` 围栏由 _CODE_BLOCK_PATTERN 覆盖）
+_ASK_TILDE_FENCE_PATTERN = re.compile(r"~~~[^\n]*\n.*?~~~", re.DOTALL)
+_ASK_INLINE_CODE_PATTERN = re.compile(r"`[^`\n]{1,80}`")
 # 摘除后可能残留的空列表项（"-" 后无内容）
 _ASK_EMPTY_BULLET_PATTERN = re.compile(r"^[ \t]*[-*+][ \t]*$", re.MULTILINE)
 # 追问区块最多展示条数（模型通常给 1~3 条，超量截断避免卡片尾部过长）
@@ -4147,28 +4158,65 @@ def get_random_greeting() -> str:
     return random.choice(WELCOME_GREETINGS)
 
 
+def _is_ask_content_valid(content: str) -> bool:
+    """判断一段 <ask> 内容是否像真追问（一句话）。
+
+    模型偶尔在正文里字面写出 `<ask>` 却把 `</ask>` 留到文末（或写错闭合标签），
+    非贪婪匹配会把两标签之间的整段正文当成"追问内容"摘走并塞进胶囊 —— 表现为
+    「正文已经渲染出来，最后却整段消失」。这里做结构熔断：超长、跨空行、夹带协议
+    标签的一律判为误匹配，保留原文不摘除。
+    空内容（<ask></ask>、<ask>   </ask>）仍算合法标签：要摘除，但不产出条目。
+    """
+    c = content.strip()
+    if not c:
+        return True
+    if len(c) > _ASK_MAX_CONTENT_LEN:
+        return False
+    if "\n\n" in c:
+        return False
+    low = c.lower()
+    return not any(t in low for t in ("<ask>", "<think>", "</think>", "<tool>", "</tool>"))
+
+
 def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
     """摘出正文里所有 <ask> 内容并移除标签，返回（去 ask 后的文本, 去重后的追问列表）。
 
     追问由模型分散输出（多数在末尾，也可能夹在段落中）。渲染时全部摘除、按内容
     去重（保序、忽略空白差异），交给 _build_ask_suggest_block 在文末集中渲染。
     strip 后空内容（如 <ask></ask>、<ask>   </ask>）直接丢弃。
-    """
-    # 代码块内的 <ask> 不算追问（fence 内容要原样展示），先圈出 fence 区间跳过
-    fences = [(m.start(), m.end()) for m in _CODE_BLOCK_PATTERN.finditer(md_text)]
 
-    def _in_fence(pos: int) -> bool:
-        return any(s <= pos < e for s, e in fences)
+    ⚠ 只摘"像追问"的标签：判据见 _is_ask_content_valid，宁可残留字面量也不能吞正文。
+    """
+    # 受保护区间：这些位置里的 <ask> 是示例 / 非正文文本，一律不摘（摘了等于删内容）
+    #   - ``` 围栏（_CODE_BLOCK_PATTERN）与 ~~~ 围栏：代码块内容原样展示
+    #   - 行内代码：同理
+    #   - think / tool 协议块：本函数跑在 think/tool 注入之前，块内此时还是裸文本
+    protected = [
+        (m.start(), m.end())
+        for p in (
+            _CODE_BLOCK_PATTERN,
+            _ASK_TILDE_FENCE_PATTERN,
+            _ASK_INLINE_CODE_PATTERN,
+            _ASK_PROTO_BLOCK_PATTERN,
+        )
+        for m in p.finditer(md_text)
+    ]
+
+    def _in_protected(pos: int) -> bool:
+        return any(s <= pos < e for s, e in protected)
 
     items: list[str] = []
     seen: set[str] = set()
     found = False
     for m in _ASK_TAG_PATTERN.finditer(md_text):
-        if _in_fence(m.start()):
+        if _in_protected(m.start()):
             continue
         found = True
         content = m.group(1).strip()
         if not content:
+            continue
+        # 形态不像追问（超长 / 跨段 / 夹协议标签）→ 疑似误匹配，不收拢也不摘除
+        if not _is_ask_content_valid(content):
             continue
         key = _MULTIPLE_SPACES_PATTERN.sub(" ", content)
         # 占位词（模型照抄提示词模板）不是真追问
@@ -4185,7 +4233,8 @@ def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
     source = md_text
 
     def _strip(m: re.Match) -> str:
-        if _in_fence(m.start()):
+        # 受保护区间 / 不像追问的匹配：原样保留（宁可残留字面量，也不能吞掉正文）
+        if _in_protected(m.start()) or not _is_ask_content_valid(m.group(1)):
             return m.group(0)
         before = source[m.start() - 1] if m.start() > 0 else ""
         after = source[m.end()] if m.end() < len(source) else ""
