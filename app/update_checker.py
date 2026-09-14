@@ -16,6 +16,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
 )
 
+from app.utils import update_proxy
 from app.utils.config import Settings
 from app.utils.utils import AsyncUpdateChecker, DownloadThread
 
@@ -209,6 +210,10 @@ class UpdateChecker(QWidget):
             self.create_errorbar("未找到安装程序", "请前往 Release 手动下载")
             return
 
+        # 加速前缀只作用于下载链路（检查更新已直连完成，此处拿到的是原始资产 URL）
+        # exe_name 保持原始名，不受前缀影响：改写过的是请求 URL，落盘名要干净
+        download_url = update_proxy.rewrite_url(update_url)
+
         # 下载到临时目录
         self.installer_path = os.path.join(tempfile.gettempdir(), exe_name)
 
@@ -221,7 +226,7 @@ class UpdateChecker(QWidget):
         self.progress_dialog.canceled.connect(self._cancel_download)
 
         self.download_thread = DownloadThread(
-            update_url, self.installer_path, self.token
+            download_url, self.installer_path, self.token
         )
         self.download_thread.progress_signal.connect(self.progress_dialog.setValue)
         self.download_thread.finished_signal.connect(self._handle_download_finished)

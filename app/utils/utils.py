@@ -28,6 +28,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon, QIconEngine
 
 from app.utils.config import Settings
+from app.utils import update_proxy
 
 # ICON_NAME_TO_FILE 延迟到 _ThemeIconEngine._find_icon_file() 中导入，
 # 避免模块启动时加载 icon 映射表
@@ -784,6 +785,8 @@ class DownloadThread(QThread):
         import requests  # [PERF] 延迟导入：仅下载检查路径需要
 
         self.session = requests.Session()  # 使用 Session 以便关闭连接
+        # 应用更新代理配置（direct/prefix 强制直连，http 转发，system 跟随系统）
+        update_proxy.apply_to_session(self.session)
 
     def run(self):
         try:
@@ -869,7 +872,9 @@ class AsyncUpdateChecker(QThread):
         url = f"https://api.github.com/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入：仅更新检查路径需要
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # 检查更新始终直连 API 域（加速前缀只作用于下载）；
+        # 但 direct/prefix 模式需显式 trust_env=False 以屏蔽环境变量代理
+        async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 logger.debug(f"GitHub API 响应: {resp.json()}")
@@ -888,7 +893,7 @@ class AsyncUpdateChecker(QThread):
         url = f"https://gitee.com/api/v5/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 return resp.json()
@@ -901,7 +906,7 @@ class AsyncUpdateChecker(QThread):
         url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 return resp.json()

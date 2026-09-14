@@ -4,40 +4,59 @@
 覆盖：四模式 URL 改写 / httpx 参数 / requests session 参数 /
 尾斜杠归一 / 空地址容错 / 地址校验 / 系统代理探测文案 / 内容判据。
 纯函数测试，不联网。
+
+隔离策略：`update_proxy` 的配置读取全部经模块级 `_cfg()` 入口，测试里
+替换它为轻量假对象，不碰全局 `Settings` 单例。原因：全量跑 tests/utils/
+时，前序测试（test_app_about_to_quit_receivers 末尾的 gc.collect()）会
+把单例持有的 ConfigItem 回收掉，之后读写必抛 RuntimeError；本模块只
+验证代理解析逻辑，不该被跨文件时序问题牵连。
 """
 
 import pytest
 
 from app.utils import update_proxy
-from app.utils.config import Settings
+
+
+class _FakeItem:
+    """模拟 qfluentwidgets.ConfigItem 的 .value 读写"""
+
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeSettings:
+    """只暴露 update_proxy 真正读取的三个配置项"""
+
+    def __init__(self, mode=update_proxy.MODE_DIRECT, prefix="https://ghfast.top/", url=""):
+        self.update_proxy_mode = _FakeItem(mode)
+        self.update_proxy_prefix = _FakeItem(prefix)
+        self.update_proxy_url = _FakeItem(url)
 
 
 @pytest.fixture
-def cfg():
-    """每个用例都从 direct 起步并还原，避免用例之间互相污染配置
+def cfg(monkeypatch):
+    """注入假配置；每条用例独享实例，天然无跨用例污染"""
+    fake = _FakeSettings()
+    monkeypatch.setattr(update_proxy, "_cfg", lambda: fake)
+    return fake
 
-    直接赋值而非 monkeypatch：`ConfigItem.value` 是 Qt 绑定属性，
-    monkeypatch.setattr 只设实例属性、绕过 validator 与 valueChanged，
-    与项目测试惯例（tests/config、tests/core 全用直接赋值）也不一致。
-    """
-    s = Settings.get_instance()
-    saved = (
-        s.update_proxy_mode.value,
-        s.update_proxy_prefix.value,
-        s.update_proxy_url.value,
-    )
-    s.update_proxy_mode.value = update_proxy.MODE_DIRECT
-    s.update_proxy_prefix.value = "https://ghfast.top/"
-    s.update_proxy_url.value = ""
-    try:
-        yield s
-    finally:
-        s.update_proxy_mode.value = saved[0]
-        s.update_proxy_prefix.value = saved[1]
-        s.update_proxy_url.value = saved[2]
+
+def _mode(cfg, value) -> None:
+    cfg.update_proxy_mode.value = value
+
+
+def _prefix(cfg, value) -> None:
+    cfg.update_proxy_prefix.value = value
+
+
+def _url(cfg, value) -> None:
+    cfg.update_proxy_url.value = value
 
 
 DOWNLOAD_URL = "https://github.com/martin98-afk/DriFox/releases/download/v0.6.0/x.exe"
+
+
+# ── URL 改写 ──
 
 
 def test_direct_mode_rewrites_nothing(cfg):
@@ -45,16 +64,16 @@ def test_direct_mode_rewrites_nothing(cfg):
 
 
 def test_prefix_mode_prepends(cfg):
-    cfg.update_proxy_mode.value = update_proxy.MODE_PREFIX
+    _mode(cfg, update_proxy.MODE_PREFIX)
     assert update_proxy.rewrite_url(DOWNLOAD_URL) == "https://ghfast.top/" + DOWNLOAD_URL
 
 
 def test_prefix_trailing_slash_normalized(cfg):
     """带不带尾斜杠结果必须一致，否则会拼出 // 双斜杠"""
-    cfg.update_proxy_mode.value = update_proxy.MODE_PREFIX
-    cfg.update_proxy_prefix.value = "https://ghfast.top"
+    _mode(cfg, update_proxy.MODE_PREFIX)
+    _prefix(cfg, "https://ghfast.top")
     without = update_proxy.rewrite_url(DOWNLOAD_URL)
-    cfg.update_proxy_prefix.value = "https://ghfast.top/"
+    _prefix(cfg, "https://ghfast.top/")
     with_slash = update_proxy.rewrite_url(DOWNLOAD_URL)
     assert without == with_slash
     assert "//github.com" in without
@@ -62,19 +81,22 @@ def test_prefix_trailing_slash_normalized(cfg):
 
 def test_prefix_empty_address_falls_back_direct(cfg):
     """选了 prefix 但没填地址 → 退化为直连，不抛异常"""
-    cfg.update_proxy_mode.value = update_proxy.MODE_PREFIX
-    cfg.update_proxy_prefix.value = ""
+    _mode(cfg, update_proxy.MODE_PREFIX)
+    _prefix(cfg, "")
     assert update_proxy.rewrite_url(DOWNLOAD_URL) == DOWNLOAD_URL
 
 
 def test_http_mode_rewrites_nothing(cfg):
-    cfg.update_proxy_mode.value = update_proxy.MODE_HTTP
+    _mode(cfg, update_proxy.MODE_HTTP)
     assert update_proxy.rewrite_url(DOWNLOAD_URL) == DOWNLOAD_URL
 
 
 def test_system_mode_rewrites_nothing(cfg):
-    cfg.update_proxy_mode.value = update_proxy.MODE_SYSTEM
+    _mode(cfg, update_proxy.MODE_SYSTEM)
     assert update_proxy.rewrite_url(DOWNLOAD_URL) == DOWNLOAD_URL
+
+
+# ── httpx 参数 ──
 
 
 def test_httpx_kwargs_direct_forces_no_env(cfg):
@@ -83,27 +105,30 @@ def test_httpx_kwargs_direct_forces_no_env(cfg):
 
 
 def test_httpx_kwargs_system_uses_lib_default(cfg):
-    cfg.update_proxy_mode.value = update_proxy.MODE_SYSTEM
+    _mode(cfg, update_proxy.MODE_SYSTEM)
     assert update_proxy.httpx_kwargs() == {}
 
 
 def test_httpx_kwargs_prefix_forces_no_env(cfg):
     """prefix 是显式指定，不该被环境变量二次干扰"""
-    cfg.update_proxy_mode.value = update_proxy.MODE_PREFIX
+    _mode(cfg, update_proxy.MODE_PREFIX)
     assert update_proxy.httpx_kwargs() == {"trust_env": False}
 
 
 def test_httpx_kwargs_http_returns_proxy(cfg):
-    cfg.update_proxy_mode.value = update_proxy.MODE_HTTP
-    cfg.update_proxy_url.value = "http://127.0.0.1:7890"
+    _mode(cfg, update_proxy.MODE_HTTP)
+    _url(cfg, "http://127.0.0.1:7890")
     assert update_proxy.httpx_kwargs() == {"proxy": "http://127.0.0.1:7890"}
 
 
 def test_httpx_kwargs_http_empty_addr_degrades(cfg):
     """http 模式没填地址 → 退化直连，不把空串当代理"""
-    cfg.update_proxy_mode.value = update_proxy.MODE_HTTP
-    cfg.update_proxy_url.value = ""
+    _mode(cfg, update_proxy.MODE_HTTP)
+    _url(cfg, "")
     assert update_proxy.httpx_kwargs() == {"trust_env": False}
+
+
+# ── requests session 参数 ──
 
 
 class _FakeSession:
@@ -120,19 +145,22 @@ def test_apply_to_session_direct(cfg):
 
 
 def test_apply_to_session_system(cfg):
-    cfg.update_proxy_mode.value = update_proxy.MODE_SYSTEM
+    _mode(cfg, update_proxy.MODE_SYSTEM)
     s = _FakeSession()
     update_proxy.apply_to_session(s)
     assert s.trust_env is True
 
 
 def test_apply_to_session_http(cfg):
-    cfg.update_proxy_mode.value = update_proxy.MODE_HTTP
-    cfg.update_proxy_url.value = "http://127.0.0.1:7890"
+    _mode(cfg, update_proxy.MODE_HTTP)
+    _url(cfg, "http://127.0.0.1:7890")
     s = _FakeSession()
     update_proxy.apply_to_session(s)
     assert s.trust_env is False
     assert s.proxies == {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
+
+
+# ── 地址校验 ──
 
 
 def test_validate_prefix_rejects_socks5():
@@ -148,7 +176,7 @@ def test_validate_http_requires_port():
 
 
 def test_validate_http_rejects_socks5():
-    ok, msg = update_proxy.validate(update_proxy.MODE_HTTP, "socks5://127.0.0.1:1080")
+    ok, _msg = update_proxy.validate(update_proxy.MODE_HTTP, "socks5://127.0.0.1:1080")
     assert not ok
 
 
@@ -160,6 +188,9 @@ def test_validate_accepts_valid():
 def test_validate_empty_rejected():
     assert not update_proxy.validate(update_proxy.MODE_PREFIX, "")[0]
     assert not update_proxy.validate(update_proxy.MODE_HTTP, "")[0]
+
+
+# ── 系统代理探测文案 ──
 
 
 def test_probe_system_proxy_reports_disabled(monkeypatch):
@@ -188,6 +219,9 @@ def test_probe_system_proxy_reports_none(monkeypatch):
     monkeypatch.setattr(update_proxy, "_read_system_proxy", lambda: {"enable": False, "server": ""})
     text = update_proxy.probe_system_proxy()
     assert "未设置" in text or "未启用" in text
+
+
+# ── 内容判据（防加速站首页假阳性）──
 
 
 def test_content_judge_rejects_mirror_homepage():
