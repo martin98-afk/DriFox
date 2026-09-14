@@ -366,6 +366,14 @@ FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪�
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
+# ─── 差量收尾（流式结束不再整页重渲染）────────────────────────────────
+# 现状：finish_streaming 强制全量 → `container.innerHTML = newHtml` 整页替换，
+# 稳定区（流式期间已差量渲染好的段落）被一起销毁重建 → 结束瞬间整体重排闪一下，
+# 工具区坞态归位也跟着跳。差量收尾改为：稳定区 DOM 不动，只把剩余段差量上去 +
+# 流式思考块就地定稿（按 data-flip-key 位置键配对替换）。
+# ⚠️ 默认关闭：先合代码不行为，实机验证通过后再打开（DRIFOX_INCREMENTAL_FINALIZE=1）。
+INCREMENTAL_FINALIZE_ENABLED = os.getenv("DRIFOX_INCREMENTAL_FINALIZE", "0") == "1"
+
 
 # 结束态耗时打点（默认关）：环境变量 DRIFOX_FINISH_TIMING=1 打开，
 # 用于在真机定位"结束这一拍"到底卡在 render / json.dumps / 哪一段。
@@ -1946,6 +1954,40 @@ def _count_think_tool_prefix(content: Any, up_to: int) -> int:
     return count
 
 
+def _iter_think_segments(md_text: str) -> list[tuple[int, str, bool]]:
+    """按 `_inject_think_cards` 同样的切分规则，列出消息内的思考块。
+
+    Returns:
+        ``[(ordinal, content, closed)]`` —— ordinal 与 DOM 上的
+        ``data-flip-key="think-{n}"`` 一致（流式态与完成态共用同一序号，见
+        `_render_think_block`），closed 表示 ``</think>`` 已闭合。
+    """
+    out: list[tuple[int, str, bool]] = []
+    i = 0
+    ordinal = 0
+    while i < len(md_text):
+        start_idx = md_text.find("<think>", i)
+        if start_idx == -1:
+            break
+        think_start = start_idx + len("<think>")
+        next_think = md_text.find("<think>", think_start)
+        search_end = next_think if next_think != -1 else len(md_text)
+        end_idx = md_text.rfind("</think>", think_start, search_end)
+        if end_idx != -1:
+            content = md_text[think_start:end_idx]
+            if content.strip():
+                out.append((ordinal, content, True))
+                ordinal += 1
+            i = end_idx + len("</think>")
+        else:
+            content = md_text[think_start:search_end]
+            if content.strip():
+                out.append((ordinal, content, False))
+                ordinal += 1
+            i = search_end
+    return out
+
+
 def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
     """注入思考框HTML。
 
@@ -3040,7 +3082,9 @@ _SKELETON_CACHE_MAX = 48
 # （_currentToolBlockKeys 按 data-block-key 判定）。旧骨架只认 tool-call-id，
 # 空串 id 的块（未闭合 <tool> 协议文本渲染产物）永不清理 → 每轮渲染追加一份、
 # 全部同 data-order 且不再重排（工具完成框残留/两份/沉底）。
-_SKELETON_CACHE_VERSION = 32
+# v33（2026-09-15）：新增 finalizeStreamingBlocks（差量收尾：流式思考块就地
+# 定稿）。旧骨架不含该函数 → 收尾时 runJavaScript 调用未定义函数，静默失败。
+_SKELETON_CACHE_VERSION = 33
 
 
 def _js_literal(value) -> str:
@@ -8479,6 +8523,39 @@ class CodeWebViewer(QWebEngineView):
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeight(), 30);
                 }}
+                // ===== 差量收尾：流式思考块就地定稿 =====
+                // 结束这一拍不再整页替换 innerHTML：只把仍处流式态的 .think-streaming
+                // 按 data-flip-key 位置键（流式态与完成态共用同一 ordinal）替换成
+                // 完成态折叠框。稳定区与正文段落完全不动 → 没有整体重排闪动。
+                function finalizeStreamingBlocks(replacements) {{
+                    try {{
+                        var keys = Object.keys(replacements || {{}});
+                        if (!keys.length) return;
+                        var cp = document.getElementById('content-placeholder');
+                        var tc = document.getElementById('tool-content');
+                        for (var i = 0; i < keys.length; i++) {{
+                            var idx = keys[i];
+                            var el = document.querySelector('.think-streaming[data-streaming="true"][data-flip-key="think-' + idx + '"]');
+                            if (!el) continue;
+                            var tmp = document.createElement('div');
+                            tmp.innerHTML = replacements[idx];
+                            var nb = tmp.firstElementChild;
+                            if (!nb) continue;
+                            // 标记为恢复块：跳过 CSS 入场动画，避免“消失→重现”闪烁
+                            nb.setAttribute('data-restored', 'true');
+                            el.parentNode.replaceChild(nb, el);
+                            // 简洁模式：完成态思考块归属“工具与思考”区（与
+                            // _maybe_finish_thinking_for_tool 的处理保持一致）
+                            if (window._toolCompactMode && tc && nb.parentNode === cp) {{
+                                tc.appendChild(nb);
+                            }}
+                        }}
+                        if (window._toolCompactMode && typeof reorganizeContent === 'function') reorganizeContent();
+                        if (typeof reportHeight === 'function') setTimeout(function () {{ reportHeight(); }}, 30);
+                    }} catch (e) {{
+                        if (window.console) console.log('finalize-failed:' + e);
+                    }}
+                }}
                 // ===== B1 差量渲染：未闭合尾部行内渲染（整体替换增量节点） =====
                 // 无空行分隔的长段落（`\\n\\n` 缺失）没有闭合段可差量渲染，
                 // 尾部长时间以纯文本显示 markdown 源码（**加粗**、`code`、[链接]）。
@@ -10122,9 +10199,16 @@ class CodeWebViewer(QWebEngineView):
         if not hasattr(self, "_viewer_font_family"):
             return
         # [B1] 字体变化：差量 HTML 缓存失效，强制全量重渲染
-        self._needs_full_render = True
-        self._stable_html = ""
-        self._stable_md_len = 0
+        # 🆕 差量收尾：满足条件时保留差量基线（_stable_md_len），走「稳定区不动
+        # + 仅收尾」路径，避免整页 innerHTML 替换造成的重排闪动与坞态归位跳动。
+        # 不满足则原样回退全量终渲染（行为完全不变）。
+        self._incremental_finalize = self._should_incremental_finalize()
+        if self._incremental_finalize:
+            self._needs_full_render = False
+        else:
+            self._needs_full_render = True
+            self._stable_html = ""
+            self._stable_md_len = 0
         self._refresh_viewer_font_css()
         self._schedule_render(immediate=True)
 
@@ -10259,6 +10343,15 @@ class CodeWebViewer(QWebEngineView):
 
             # ── 非流式模式（历史加载 / 流式结束）：直接渲染，跳过所有增量比较逻辑 ──
             if not self._streaming:
+                # 🆕 差量收尾：稳定区 DOM 不动，只补渲染剩余段 + 流式块就地定稿。
+                # 成功即返回，完全不走下面的整页 innerHTML 替换。
+                if getattr(self, "_incremental_finalize", False) and self._try_incremental_finalize():
+                    self._incremental_finalize = False
+                    self._final_render_pending = False
+                    self._last_rendered_markdown = self._markdown_text
+                    return
+                # 收尾失败 / 不适用 → 清标记，回退原全量路径
+                self._incremental_finalize = False
                 self._refresh_viewer_font_css()
                 # 如果有懒回调，执行一次获取最终 markdown
                 if self._lazy_markdown_cb:
@@ -10961,6 +11054,73 @@ class CodeWebViewer(QWebEngineView):
             "}"
             "})();"
         )
+
+    def _should_incremental_finalize(self) -> bool:
+        """结束这一拍能否走差量收尾（稳定区 DOM 不动）。
+
+        差量收尾要求「流式期间确实走过差量路径」（_stable_md_len > 0），且没有
+        必须整页重排的 DOM 状态（活跃工具运行框 / 待注入工具）。任一不满足都
+        回退全量，保证与旧行为一致。
+        """
+        if not INCREMENTAL_FINALIZE_ENABLED:
+            return False
+        if self._stable_md_len <= 0:
+            # 流式期间一次差量都没走过（长段落无闭合段 / 一直在全量）→ 没有
+            # 可保留的稳定区，收尾等价于整页重渲，直接走原路径。
+            return False
+        if getattr(self, "_injected_pending_tools", None):
+            return False
+        if self._has_active_tool_dom():
+            return False
+        return True
+
+    def _try_incremental_finalize(self) -> bool:
+        """差量收尾：只把「未差量消费的剩余 markdown」渲染上去，稳定区 DOM 不动。
+
+        Returns:
+            True = 已收尾（调用方直接返回，不再走全量）；False = 收尾失败，调用方
+            回退全量终渲染，保证行为与旧路径一致。
+        """
+        try:
+            md = self._markdown_text or ""
+            new_html = ""
+            tail_html = ""
+            if md[self._stable_md_len :].strip():
+                stable_len, segs = _extract_closed_segments(md[self._stable_md_len :])
+                if segs:
+                    new_html = "".join(_render_stable_segment(s, compact=self._tool_compact_mode) for s in segs)
+                    self._stable_md_len += stable_len
+                    self._stable_html += new_html
+                rest = md[self._stable_md_len :]
+                # 结束这一拍 md 已是终态：剩余部分整体行内渲染。若仍残留未闭合的
+                # think/tool，说明内容不完整，放弃差量交给全量（宁可闪，不能缺内容）。
+                if rest.strip():
+                    if _has_unclosed_think_or_tool(rest):
+                        return False
+                    tail_html = _render_inline_tail(rest, compact=self._tool_compact_mode)
+            # 流式思考块就地定稿：按 data-flip-key 的 ordinal 配对生成完成态 HTML
+            replacements: dict[str, str] = {}
+            for ordinal, content, closed in _iter_think_segments(md):
+                if not closed:
+                    continue
+                replacements[str(ordinal)] = _render_think_block(
+                    content, completed=True, compact=self._tool_compact_mode, flip_idx=ordinal
+                )
+            if not new_html and not tail_html and not replacements:
+                return True  # 无待渲染内容：直接认定收尾完成，避免空转一次全量
+            if new_html or tail_html:
+                self.page().runJavaScript(
+                    "updateContentAppend("
+                    f"{json.dumps(new_html).decode('utf-8')},"
+                    f"{json.dumps(tail_html).decode('utf-8')});"
+                )
+            if replacements:
+                self.page().runJavaScript(f"finalizeStreamingBlocks({json.dumps(replacements).decode('utf-8')});")
+            self._height_report_pending = True
+            return True
+        except Exception as e:  # 差量收尾绝不能把消息卡在流式形态
+            logger.debug(f"[incremental-finalize] 回退全量: {e}")
+            return False
 
     def finish_streaming(self, keep_dock: bool = False):
         """流式结束收尾。
