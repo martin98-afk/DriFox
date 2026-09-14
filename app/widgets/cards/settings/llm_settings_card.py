@@ -59,6 +59,7 @@ from app.widgets.cards.settings.provider_setting_card import ProviderListSetting
 from app.widgets.cards.settings.secret_mode_card import SecretModeSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
 from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
+from app.widgets.cards.settings.update_proxy_card import UpdateProxyCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
@@ -846,6 +847,11 @@ class LLMSettingsCard(SystemCardFrame):
             self.parent(),
         )
         update_layout.addWidget(self.manualUpdateCard)
+
+        # 下载代理配置（四选一：直连 / 跟随系统 / 加速前缀 / 手动代理）
+        self.updateProxyCard = UpdateProxyCard(self)
+        update_layout.addWidget(self.updateProxyCard)
+
         update_layout.addStretch(1)
 
         # ════ 插件设置页（初始隐藏，有注册卡片时显示）════
@@ -1581,6 +1587,7 @@ class LLMSettingsCard(SystemCardFrame):
             "pluginToolCard",
             "pluginAgentCard",
             "renderAdvancedCard",
+            "updateProxyCard",
         ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
