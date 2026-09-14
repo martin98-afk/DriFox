@@ -28,7 +28,7 @@
 
 ![软件介绍](images/软件介绍.png)
 
-![v0.5.0 Release Poster](images/release-poster-v0.5.0.png)
+![v0.5.0 Release Poster](images/release-poster-v0.6.0.png)
 
 ---
 
