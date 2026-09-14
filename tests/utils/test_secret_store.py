@@ -223,3 +223,44 @@ def test_password_mode_seal_without_password_falls_back_to_backup():
     data2 = _make_data(api_key="sk-plain")
     ss.seal_secrets(data2, "")
     assert data2["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == "sk-plain"
+
+
+def test_hkdf_expand_rfc5869_vector():
+    """HKDF-Expand 实现用 RFC 5869 Test Case 1 官方向量锁定（SHA-256）"""
+    prk = bytes.fromhex("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5")
+    info = bytes.fromhex("f0f1f2f3f4f5f6f7f8f9")
+    okm = bytes.fromhex(
+        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf"
+        "34007208d5b887185865"
+    )
+    assert ss._hkdf_expand(prk, info, 42) == okm
+
+
+def test_v1_legacy_prefix_is_ciphertext_but_undecryptable():
+    """旧 v1（AES-GCM）密文：识别为密文（防当明文用/被覆盖），解密报错提示重填"""
+    legacy = "enc:v1:AAAA"
+    assert ss.is_ciphertext(legacy)
+    with pytest.raises(ss.SecretDecryptError):
+        ss.decrypt_secret(legacy, "pwd-123")
+
+
+def test_seal_batch_shares_salt_and_roundtrips():
+    """同批加密共享 salt（只做一次 KDF），各自都能解开"""
+    data = {
+        "LLM": {
+            "SavedProviders": {
+                "id1": {"API_KEY": "sk-one"},
+                "id2": {"API_KEY": "sk-two"},
+            }
+        }
+    }
+    ss.seal_secrets(data, "pwd-123")
+    toks = [data["LLM"]["SavedProviders"][i]["API_KEY"] for i in ("id1", "id2")]
+    assert all(ss.is_ciphertext(t) for t in toks)
+    # 同 salt：从密文头解出 salt 应一致
+    import base64 as _b64
+
+    salts = {_b64.urlsafe_b64decode(t[len(ss.CIPHER_PREFIX) :])[: ss._SALT_LEN] for t in toks}
+    assert len(salts) == 1
+    assert ss.decrypt_secret(toks[0], "pwd-123") == "sk-one"
+    assert ss.decrypt_secret(toks[1], "pwd-123") == "sk-two"

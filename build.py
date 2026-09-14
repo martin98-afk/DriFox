@@ -203,10 +203,6 @@ _hidden_imports = [
             "Darwin": ["keyring.backends.macOS"],
         }.get(platform.system(), ["keyring.backends.chainer"])
     ),
-    # 密码加密模式：AES-GCM。cryptography 走 cffi + 内部子模块，需显式收集
-    "cryptography",
-    "cryptography.hazmat.primitives.ciphers.aead",
-    "cryptography.hazmat.bindings._rust",
 ]
 
 # 打包排除：由插件自包含 deps/ 提供（codegraph-tools / desktop-automation），

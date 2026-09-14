@@ -320,7 +320,7 @@ class Settings(QConfig):
 
                 if mode == MODE_PASSWORD:
                     # 密码模式：明文加密落盘；locked 期间用备份密文原样回写
-                    seal_secrets(data, self._secret_password, self._cipher_backup)
+                    seal_secrets(data, self._secret_password, self._cipher_backup, kdf_salt=self._password_kdf_salt())
                 else:
                     strip_secrets(data, SecretStore(), mode=mode)
             except Exception:
@@ -439,6 +439,16 @@ class Settings(QConfig):
                 return True
         return False
 
+    def _password_kdf_salt(self) -> str:
+        """密码模式批量 KDF salt（持久化复用，避免每次保存重复付 scrypt；nonce 仍每次随机）"""
+        value = str(self.secret_kdf_salt.value or "")
+        if not value:
+            import secrets
+
+            value = secrets.token_hex(16)
+            self.secret_kdf_salt.value = value
+        return value
+
     @property
     def secrets_locked(self) -> bool:
         """密码模式下密钥是否未解锁（True 时应提示用户输入密码）"""
@@ -492,6 +502,7 @@ class Settings(QConfig):
         self._secret_password = new_password
         self._cipher_backup = {}
         self._secrets_locked = False
+        self.secret_kdf_salt.value = ""  # 换密码后换 salt（卫生习惯）
         self.save()
         return True
 
@@ -584,6 +595,9 @@ class Settings(QConfig):
         MODE_KEYRING,
         OptionsValidator([MODE_KEYRING, MODE_PASSWORD, MODE_NONE]),
     )
+
+    # 密码模式批量 KDF salt（hex，持久化复用；nonce 每次随机，安全性不受影响）
+    secret_kdf_salt = ConfigItem("General", "SecretKdfSalt", "")
 
     # 灰度开关：消息正文用纯 Qt 块级渲染器（MarkdownBlockViewer）替代 QWebEngineView。
     # 仅作用于 assistant 卡片（welcome 卡 JS 交互复杂暂不灰度）；默认关闭。

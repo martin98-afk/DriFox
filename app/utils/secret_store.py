@@ -5,8 +5,10 @@
 
 - keyring：把服务商 API_KEY 迁入操作系统凭证库（Windows Credential Locker /
   macOS Keychain / Linux Secret Service），配置文件落盘不含密钥。
-- password：API_KEY 用用户密码（scrypt KDF + AES-GCM）加密后以密文形式留在
+- password：API_KEY 用用户密码加密后以密文形式留在
   app.config，随 config_sync 同步到其它机器，换机输入同一密码即可解出。
+  算法为纯 stdlib 标准构造：scrypt KDF → RFC 5869 HKDF-Expand 密钥流 XOR →
+  HMAC-SHA256 Encrypt-then-MAC（零第三方依赖，实现由 RFC 向量测试锁定）。
 - none：明文落盘。
 
 降级策略（fail-open，行为与旧版一致）：
@@ -22,6 +24,7 @@
 
 import base64
 import hashlib
+import hmac
 import os
 from typing import Any, Dict, Optional
 
@@ -46,14 +49,24 @@ SECRET_MODES = (MODE_KEYRING, MODE_PASSWORD, MODE_NONE)
 # 「记住本机密码」在 keyring 中的 account 名（仅 password 模式使用）
 MASTER_PASSWORD_ACCOUNT = "secret/master_password"
 
-# 密文格式：enc:v1:<urlsafe_b64(salt|nonce|ciphertext+tag)>
-CIPHER_PREFIX = "enc:v1:"
+# 密文格式：enc:v2:<urlsafe_b64(salt|nonce|ciphertext|tag)>
+# v2 为纯 stdlib 实现（scrypt KDF + RFC 5869 HKDF-Expand 密钥流 XOR + HMAC-SHA256
+# Encrypt-then-MAC），零第三方依赖；实现正确性由 RFC 5869 测试向量锁定（见测试）。
+# enc:v1: 为短暂存在过的 AES-GCM 版本：仅识别为密文（防止当明文使用/被覆盖），
+# 不再支持解密，用户需重新填写 API Key。
+CIPHER_PREFIX = "enc:v2:"
+_LEGACY_CIPHER_PREFIX = "enc:v1:"
 _SALT_LEN = 16
 _NONCE_LEN = 12
+_TAG_LEN = 32
 _KEY_LEN = 32
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
+
+# KDF 结果缓存：(password, salt) → (enc_key, mac_key)，同批密文只算一次 scrypt
+_KDF_CACHE: Dict[Any, tuple] = {}
+_KDF_CACHE_MAX = 8
 
 # v0.5.11 keyring 化误剥的扁平项：(keyring account, 说明)，供一次性回迁使用
 LEGACY_FLAT_ACCOUNTS = (
@@ -139,65 +152,86 @@ class SecretDecryptError(Exception):
     """密码解密失败（密码错误 / 密文损坏 / 密码为空）"""
 
 
-def _aesgcm_cls():
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+def _derive_keys(password: str, salt: bytes) -> tuple:
+    """scrypt 派生 (enc_key, mac_key) 各 32 字节；同 (password, salt) 进程内只算一次"""
+    cache_key = (password, bytes(salt))
+    cached = _KDF_CACHE.get(cache_key)
+    if cached is None:
+        okm = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=_SCRYPT_N,
+            r=_SCRYPT_R,
+            p=_SCRYPT_P,
+            dklen=_KEY_LEN * 2,
+        )
+        cached = (okm[:_KEY_LEN], okm[_KEY_LEN:])
+        if len(_KDF_CACHE) >= _KDF_CACHE_MAX:
+            _KDF_CACHE.clear()
+        _KDF_CACHE[cache_key] = cached
+    return cached
 
-    return AESGCM
+
+def _hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
+    """RFC 5869 HKDF-Expand（HMAC-SHA256），实现正确性由 RFC 官方向量测试锁定"""
+    out = bytearray()
+    t = b""
+    i = 1
+    while len(out) < length:
+        t = hmac.new(prk, t + info + bytes((i,)), hashlib.sha256).digest()
+        out += t
+        i += 1
+    return bytes(out[:length])
 
 
-def password_crypto_available() -> bool:
-    """AES-GCM 后端是否可用（cryptography 未安装时 password 模式不可用）"""
-    try:
-        _aesgcm_cls()
-        return True
-    except Exception:
-        return False
-
-
-def _derive_key(password: str, salt: bytes) -> bytes:
-    return hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=_SCRYPT_N,
-        r=_SCRYPT_R,
-        p=_SCRYPT_P,
-        dklen=_KEY_LEN,
-    )
+def _xor_bytes(a: bytes, b: bytes) -> bytes:
+    n = len(a)
+    return (int.from_bytes(a, "big") ^ int.from_bytes(b[:n], "big")).to_bytes(n, "big") if n else b""
 
 
 def is_ciphertext(value: Any) -> bool:
-    """是否为本模块产出的密文串"""
-    return isinstance(value, str) and value.startswith(CIPHER_PREFIX)
+    """是否为本模块产出的密文串（含不再支持解密的 v1 旧密文）"""
+    return isinstance(value, str) and (
+        value.startswith(CIPHER_PREFIX) or value.startswith(_LEGACY_CIPHER_PREFIX)
+    )
 
 
-def encrypt_secret(plain: str, password: str) -> str:
-    """用密码加密明文，返回 enc:v1: 前缀密文串"""
+def encrypt_secret(plain: str, password: str, salt: bytes = b"") -> str:
+    """密码加密：scrypt 派生密钥 → HKDF-Expand(nonce) 密钥流 XOR → HMAC-SHA256 EtM 认证。
+
+    salt 传空则随机生成；seal_secrets 同批传同一 salt，整批只做一次 KDF。
+    """
     if not password:
         raise SecretDecryptError("加密密码为空")
-    salt = os.urandom(_SALT_LEN)
+    salt = bytes(salt) if salt else os.urandom(_SALT_LEN)
     nonce = os.urandom(_NONCE_LEN)
-    ct = _aesgcm_cls()(_derive_key(password, salt)).encrypt(nonce, plain.encode("utf-8"), None)
-    return CIPHER_PREFIX + base64.urlsafe_b64encode(salt + nonce + ct).decode("ascii")
+    enc_key, mac_key = _derive_keys(password, salt)
+    plain_b = plain.encode("utf-8")
+    ct = _xor_bytes(plain_b, _hkdf_expand(enc_key, nonce, len(plain_b)))
+    tag = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()
+    return CIPHER_PREFIX + base64.urlsafe_b64encode(salt + nonce + ct + tag).decode("ascii")
 
 
 def decrypt_secret(token: str, password: str) -> str:
     """用密码解密密文串；密码错误或密文损坏抛 SecretDecryptError"""
     if not is_ciphertext(token) or not password:
         raise SecretDecryptError("密文格式不合法或密码为空")
+    if token.startswith(_LEGACY_CIPHER_PREFIX):
+        raise SecretDecryptError("enc:v1: 为旧版密文格式，请重新填写该 API Key")
     try:
         raw = base64.urlsafe_b64decode(token[len(CIPHER_PREFIX) :].encode("ascii"))
     except Exception as e:
         raise SecretDecryptError(f"密文 base64 损坏: {e}") from e
-    if len(raw) <= _SALT_LEN + _NONCE_LEN:
+    if len(raw) <= _SALT_LEN + _NONCE_LEN + _TAG_LEN:
         raise SecretDecryptError("密文长度不足")
     salt = raw[:_SALT_LEN]
     nonce = raw[_SALT_LEN : _SALT_LEN + _NONCE_LEN]
-    ct = raw[_SALT_LEN + _NONCE_LEN :]
-    try:
-        plain = _aesgcm_cls()(_derive_key(password, salt)).decrypt(nonce, ct, None)
-    except Exception as e:
-        raise SecretDecryptError(f"解密失败（密码错误或密文损坏）: {e}") from e
-    return plain.decode("utf-8")
+    ct = raw[_SALT_LEN + _NONCE_LEN : -_TAG_LEN]
+    tag = raw[-_TAG_LEN:]
+    enc_key, mac_key = _derive_keys(password, salt)
+    if not hmac.compare_digest(hmac.new(mac_key, nonce + ct, hashlib.sha256).digest(), tag):
+        raise SecretDecryptError("解密失败（密码错误或密文损坏）")
+    return _xor_bytes(ct, _hkdf_expand(enc_key, nonce, len(ct))).decode("utf-8")
 
 
 def collect_ciphertexts(data: Dict[str, Any]) -> Dict[str, str]:
@@ -216,7 +250,7 @@ def collect_ciphertexts(data: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
-def seal_secrets(data: Dict[str, Any], password: str, backup: Optional[Dict[str, str]] = None) -> None:
+def seal_secrets(data: Dict[str, Any], password: str, backup: Optional[Dict[str, str]] = None, kdf_salt: str = "") -> None:
     """password 模式落盘前处理：就地加密 data 中的服务商 API_KEY。
 
     - 内存明文 + 有密码 → 加密写回；
@@ -224,8 +258,13 @@ def seal_secrets(data: Dict[str, Any], password: str, backup: Optional[Dict[str,
     - 已是密文 → 原样保留；
     - 明文但无密码（极端：解锁后又丢了密码）→ 有备份用备份，无备份保留明文并告警，
       绝不写空覆盖。
+
+    kdf_salt：调用方传入的持久化 hex salt（复用后同 (password, salt) 只算一次
+    scrypt，避免每次保存都付 ~300ms KDF）；传空则本批随机生成。nonce 始终随机，
+    复用 salt 不影响安全性。
     """
     backup = backup or {}
+    batch_salt = bytes.fromhex(kdf_salt) if kdf_salt else os.urandom(_SALT_LEN)
     for cfg_id, info in _saved_providers(data).items():
         if not isinstance(info, dict):
             continue
@@ -234,7 +273,7 @@ def seal_secrets(data: Dict[str, Any], password: str, backup: Optional[Dict[str,
             continue
         if key:
             if password:
-                info["API_KEY"] = encrypt_secret(key, password)
+                info["API_KEY"] = encrypt_secret(key, password, salt=batch_salt)
             elif str(cfg_id) in backup:
                 info["API_KEY"] = backup[str(cfg_id)]
             else:

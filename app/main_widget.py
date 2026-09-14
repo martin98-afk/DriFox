@@ -3608,6 +3608,19 @@ class OpenAIChatToolWindow(ToolWindow):
                     PluginHostService.get_instance().finish_watcher_baseline()
                 except Exception as e:
                     logger.debug(f"[MainWidget] watcher 基线期收口失败（不影响启动）: {e}")
+
+                # [修复 2026-09-14] UI 插件装载完成后按最终注册表强制刷新欢迎卡。
+                # 背景：启动去抖合并渲染（_schedule_initial_welcome 600ms 尾触）
+                # 可能发生在部分 welcome_tab 插件注册之前，而后续注册路径的
+                # _refresh_welcome_cards 在缓存缺失（被历史变更广播/项目同步
+                # invalidate pop）时走 skipped_no_cache 分支不再触发重渲染，
+                # 导致欢迎卡上插件 tab 缺失。此处失效 + 重建一次保证最终一致。
+                try:
+                    self._invalidate_welcome_card()
+                    if getattr(self, "_displayed_session_id", None) is None:
+                        self._show_initial_welcome()
+                except Exception as e:
+                    logger.warning(f"[MainWidget] 装载完成刷新欢迎卡失败: {e}")
             except Exception as e:
                 logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
 
