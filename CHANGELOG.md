@@ -37,6 +37,10 @@ All notable changes to this project will be documented in this file.
 
 - **追问标签误匹配吞掉正文** (`app/widgets/message_card.py`, `tests/widgets/test_ask_suggest_block.py`): 正文里出现孤立的 `<ask>`（模型描述格式、think / tool 块内字面量、闭合标签写错）时，跨行非贪婪匹配的起点落在正文中间、终点落在文末真追问的 `</ask>` 上，中间整段正文被当成追问内容摘进胶囊 —— 表现为流式期间正文正常显示、闭合标签一到就整段消失。修复：新增 `_is_ask_content_valid` 熔断（超长 / 跨空行 / 夹带协议标签一律判为误匹配并保留原文），追问内容正则禁止嵌套 `<ask>` 且长度封顶 120 字符，受保护区间从三反引号围栏扩到 `~~~` 围栏、行内代码与 think / tool 协议块；新增 5 条回归测试。`2110883c`
 
+### 🐛 问题修复（重新发布补充 #4）
+
+- **加载长会话渲染配额被架空导致内存暴涨** (`app/main_widget.py`, `tests/widgets/test_render_quota_enforcement.py` 新增, `docs/perf/memory-governance.md`): 加载 20 条消息的会话后内存 +1GB，日志呈现 `rendered=2 quota=12` 与池统计 `acquire=26 hit=0 miss=26 release=0` 的自相矛盾（并发 26 个 WebEngine 页而计数只有 2），单个 renderer 进程 512MB。三处缺陷叠加：① `_recycle_out_of_view_batches` 第一步的补渲染只累加日志用的 `lazy_render_count`，从不写回 `_rendered_card_count`，配额被永久低估 → `_recycle_lru_batches` 首行 `<= quota` 恒成立、淘汰链一次不跑；② 保留范围误用「加载窗口」`_visible_batch_start/_end`（加载完恒为最后 12 批），小表下「可视区 ±1」实际覆盖整张表，回收范围与淘汰候选集双双恒为空；③ 候选耗尽无降级，全批被判保护时计数停在超配额状态。修复：新增 `_viewport_batch_range()` 按真实布局几何 + 占位高度取视口相交批次（几何未就位时 `_resolve_viewport_range()` 回退加载窗口）；补渲染按 `_lazy_rendered` 实况写回 `_sync_global_rendered_pages` 并在超配额时下一帧接续淘汰；新增 `_recount_rendered_cards()` 作为漏记兜底（每 20 次调用对齐一次）；`_recycle_lru_batches` 增加降级通道，主候选耗尽时继续淘汰最远的软保护批次，`_batch_distance == 0`（视口邻域）即刻停止。新增 10 条回归测试。
+
 ### 🐛 问题修复（重新发布补充 #3）
 
 - **模型列表获取卡死** (`app/widgets/cards/settings/provider_edit_card.py`, `tests/widgets/test_provider_edit_card_models_hook.py` 新增): 服务商走 `capabilities["models_hook"]` 自定义获取时（CodeBuddy 即此类），UI 侧 `_do_fetch_thread` 零参调用 `fetch_func()`，而插件实现为 `_fetch_models(config)` 需要当前表单值（按 `API_KEY` 里的 refresh_token 换取访问令牌）—— `TypeError` 在线程内抛出后直接杀死线程，`fetchSuccess` / `fetchFailed` 两个信号一个都不发，按钮停在禁用态且无任何提示，用户表现为「一直卡住获取不到」。修复三处：① `_on_fetch_models` 组装当前表单值（`API_URL` / `API_KEY` / `模型名称` / `认证方式`）作为 config 传给 hook；② `_do_fetch_thread` 加异常兜底，任何异常转成 `fetchFailed` 信号，杜绝线程静默死亡；③ `fetchFailed` 信号签名改为 `pyqtSignal(str)` 携带失败原因，`_on_fetch_failed` 直接展示插件给出的具体原因（如「尚未登录：请先点击登录」），取代笼统的「请检查配置」。新增 6 条回归测试，覆盖传参契约、异常透传、空结果、成功刷新下拉框与失败文案。`ce57a5ad`, `cd007556`

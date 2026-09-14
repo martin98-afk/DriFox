@@ -11645,21 +11645,26 @@ class OpenAIChatToolWindow(ToolWindow):
         - 回收前记录滚动位置，回收上方卡片后补偿偏移量，防止视口跳动
         - 使用 delete_widgets_from_layout 立即从布局移除，避免延迟导致高度突变
         - 跳过当前流式输出中的卡片
+
+        🐛 配额修复：保留范围改用**真实视口**（见 `_viewport_batch_range`）而非
+        加载窗口（``_visible_batch_start/_visible_batch_end``）。后者加载完恒等于
+        ``[len-12, len]``，会让保留区间覆盖整张表 —— 回收范围恒为空、配额淘汰
+        也永远找不到候选（20 批以内的会话尤其明显：全表都被判为「附近」）。
         """
         if self._is_virtual_recycling or len(self._batch_cards) == 0:
             return
 
         self._is_virtual_recycling = True
         try:
-            # 计算可视缓冲区范围
+            # 计算可视缓冲区范围（基准 = 屏幕可见批次，不是加载窗口）
             buffer_batches = self._incremental_visible_batch_count * self._virtual_scroll_buffer
-            active_start = (
-                0 if self._visible_batch_start <= buffer_batches else self._visible_batch_start - buffer_batches
-            )
-            active_end = self._visible_batch_end + buffer_batches
+            vp_start, vp_end = self._resolve_viewport_range()
+            active_start = max(0, vp_start - buffer_batches)
+            active_end = vp_end + 1 + buffer_batches
 
             # 第一步：确保当前激活范围内所有卡片都已经懒渲染完成
             lazy_render_count = 0
+            rendered_delta = 0
             for batch_idx in range(active_start, active_end):
                 if batch_idx >= len(self._batch_cards):
                     continue
@@ -11670,6 +11675,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     if isinstance(card, MessageCard) and not getattr(card, "_lazy_rendered", True):
                         card.ensure_rendered()
                         lazy_render_count += 1
+                        # 🐛 配额计数归属：这里补渲染出的 viewer 必须计入
+                        # _rendered_card_count，否则配额被永久低估 →
+                        # _recycle_lru_batches 恒判「未超限」→ 淘汰链一次都不跑
+                        # （真机日志：渲染 26 页而计数只有 2）。可见性门控
+                        # （_render_deferred）会让 ensure_rendered 空转，
+                        # 故以渲染后的 _lazy_rendered 为准。
+                        if getattr(card, "_lazy_rendered", False):
+                            rendered_delta += 1
+            if rendered_delta > 0:
+                self._sync_global_rendered_pages(self._rendered_card_count + rendered_delta)
+                # 超配额时接续温和淘汰。此处仍在 _is_virtual_recycling 作用域内
+                # （_recycle_lru_batches 会因该标志直接返回），故延到下一帧执行。
+                if self._rendered_card_count > self._effective_max_rendered_cards():
+                    QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
@@ -11907,9 +11926,69 @@ class OpenAIChatToolWindow(ToolWindow):
         self._decr_rendered_count(rendered_in_batch)
         return net_removed_h
 
-    def _batch_is_protected(self, batch_idx: int) -> bool:
-        """判断批次是否受保护（不可淘汰）：
-        - 可视区 ±1 批（刚滚出/即将滚入，重建成本高）
+    def _viewport_batch_range(self) -> Optional[tuple]:
+        """屏幕**可见**的批次索引闭区间 ``(start, end)``；几何不可用时返回 None。
+
+        🐛 不要用 ``_visible_batch_start/_visible_batch_end`` 代替：那两个字段
+        是「已加载的批次窗口」（加载完恒为最后 ``_initial_visible_batch_count``
+        批），不是「用户此刻看到的批次」。把加载窗口当可视区，会让长对话里
+        保留区间覆盖整张表 —— 回收范围恒为空、配额淘汰找不到候选，20 批以内的
+        会话更是全表被判「附近」，内存只增不减。
+
+        占位（已卸载批次留的等高空白）也参与扫描：它同样占据视口高度，只看
+        存活卡片会漏掉「批次已卸载但仍在屏幕上」的位置。
+        """
+        try:
+            scroll_area = self.chat_scroll_area
+            if scroll_area is None:
+                return None
+            viewport_top = scroll_area.verticalScrollBar().value()
+            viewport_bottom = viewport_top + scroll_area.viewport().height()
+        except Exception:
+            return None
+
+        ph_by_widget = {}
+        for idx, widget in (self._batch_placeholders or {}).items():
+            ph_by_widget[id(widget)] = idx
+
+        visible: List[int] = []
+        degenerate = True
+        try:
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                widget = item.widget() if item else None
+                if widget is None:
+                    continue
+                idx = ph_by_widget.get(id(widget))
+                if idx is None:
+                    idx = getattr(widget, "_message_index", None)
+                if idx is None:
+                    continue
+                rect = widget.geometry()
+                if rect.height() > 0:
+                    degenerate = False
+                if rect.bottom() < viewport_top or rect.top() > viewport_bottom:
+                    continue
+                visible.append(int(idx))
+        except Exception:
+            return None
+        # 布局未就位（全部零高）/ 无批次与视口相交：退回加载窗口，保守但安全
+        if not visible or degenerate:
+            return None
+        return (min(visible), max(visible))
+
+    def _resolve_viewport_range(self, vp_range: Optional[tuple] = None) -> tuple:
+        """解析可视批次区间，几何不可用时退回加载窗口（兜底不为空）。"""
+        if vp_range is not None:
+            return vp_range
+        rng = self._viewport_batch_range()
+        if rng is not None:
+            return rng
+        return (self._visible_batch_start, max(self._visible_batch_start, self._visible_batch_end - 1))
+
+    def _batch_is_protected(self, batch_idx: int, vp_range: Optional[tuple] = None) -> bool:
+        """判断批次是否受保护（温和淘汰不碰）：
+        - 真实可视区 ±1 批（刚滚出/即将滚入，重建成本高）
         - 包含当前流式输出助手卡片的批次
         - 欢迎卡片所在批次
         """
@@ -11918,8 +11997,8 @@ class OpenAIChatToolWindow(ToolWindow):
         cards = self._batch_cards[batch_idx]
         if not cards:
             return False
-        # 可视区 ±1
-        if batch_idx >= max(0, self._visible_batch_start - 1) and batch_idx <= self._visible_batch_end + 1:
+        # 可视区 ±1（距离口径：0 = 视口内，1 = 紧邻，≥2 = 可安全淘汰）
+        if self._batch_distance(batch_idx, vp_range) <= 1:
             return True
         # 当前流式卡
         if self._current_assistant_card is not None and self._current_assistant_card in cards:
@@ -11930,12 +12009,33 @@ class OpenAIChatToolWindow(ToolWindow):
                 return True
         return False
 
-    def _batch_distance(self, batch_idx: int) -> int:
-        """批次到可视区的距离（批次数，0 = 在可视区）。"""
-        if batch_idx < self._visible_batch_start:
-            return self._visible_batch_start - 1 - batch_idx
-        if batch_idx > self._visible_batch_end:
-            return batch_idx - (self._visible_batch_end + 1)
+    def _batch_is_streaming_or_welcome(self, batch_idx: int) -> bool:
+        """「绝对不淘汰」判据：含流式输出卡片或欢迎卡片。
+
+        与 `_batch_is_protected` 的区别：不含「可视区 ±1」这一软保护。
+        供温和淘汰的降级候选使用 —— 用户正在看的批次可以卸（重建代价远低于
+        内存持续增长），但流式卡（卸了会中断渲染）与欢迎卡（独立缓存管理）
+        任何情况下都不能碰。
+        """
+        if not (0 <= batch_idx < len(self._batch_cards)):
+            return True
+        cards = self._batch_cards[batch_idx]
+        if not cards:
+            return False
+        if self._current_assistant_card is not None and self._current_assistant_card in cards:
+            return True
+        for card in cards:
+            if getattr(card, "_is_welcome", False):
+                return True
+        return False
+
+    def _batch_distance(self, batch_idx: int, vp_range: Optional[tuple] = None) -> int:
+        """批次到**可视区**的距离（批次数，0 = 在视口内）。"""
+        vp_start, vp_end = self._resolve_viewport_range(vp_range)
+        if batch_idx < vp_start:
+            return vp_start - 1 - batch_idx
+        if batch_idx > vp_end:
+            return batch_idx - (vp_end + 1)
         return 0
 
     def _effective_max_rendered_cards(self) -> int:
@@ -11993,6 +12093,29 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._sync_global_rendered_pages(self._rendered_card_count - n)
 
+    def _recount_rendered_cards(self) -> None:
+        """按 `_batch_cards` 实况重算本窗口已渲染卡片数（计数校准）。
+
+        增量记账（渲染时 +1 / 卸载时 -1）容易被漏记的路径带偏：任何绕过记账的
+        渲染入口（如流式首卡的立即渲染、用户气泡 viewer 的补建）都会让计数偏低，
+        而偏低 = 配额判「未超限」= 淘汰链永不运行 = 内存单调增长。
+        这里以实况扫描为准做一次对齐，供加载收口 / 淘汰前校准调用。
+
+        口径与 `_unload_batch` 的递减保持一致（统计 `_batch_cards` 中
+        ``_lazy_rendered`` 为真的卡片，含 user 气泡）。
+        """
+        actual = 0
+        for cards in self._batch_cards:
+            if not cards:
+                continue
+            for card in cards:
+                try:
+                    if getattr(card, "_lazy_rendered", False) and self._is_widget_alive(card):
+                        actual += 1
+                except RuntimeError:
+                    continue
+        self._sync_global_rendered_pages(actual)
+
     def _recycle_lru_batches(self):
         """B4 温和层：并发页超限时按「距可视区最远优先」淘汰批次 UI。
 
@@ -12001,29 +12124,37 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._is_virtual_recycling or not self._batch_cards:
             return
-        # 计数校准（可选增强）：每 20 次调用重算一次实际计数，防漂移
+        # 计数校准：每 20 次调用按实况重算一次，抹平漏记路径造成的漂移
+        # （漏记方向恒为「偏低」→ 配额失效，这条校准是兜底闸门）
         self._recycle_lru_call_count += 1
         if self._recycle_lru_call_count % 20 == 1:
-            # 计数校准：只统计已懒渲染的卡（_batch_cards 可能含已创建未渲染卡）
-            actual = 0
-            for cards in self._batch_cards:
-                if cards:
-                    actual += sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
-            self._sync_global_rendered_pages(actual)
+            self._recount_rendered_cards()
 
         quota = self._effective_max_rendered_cards()
         if self._rendered_card_count <= quota:
             return
 
+        # 可视区几何只解析一次，保护判定与距离计算共用（避免逐批反复扫布局）
+        vp_range = self._resolve_viewport_range()
+
         # 候选：所有非空批次（跳过受保护），按距离降序（最远先淘汰）
         candidates = []
+        fallback_candidates = []
         for idx, cards in enumerate(self._batch_cards):
             if not cards:
                 continue
-            if self._batch_is_protected(idx):
+            if self._batch_is_protected(idx, vp_range):
+                # 🐛 配额修复：保护区间按「真实视口 ±1」算之后，小表（可见批次少 +
+                # 缓冲）仍可能把全部批次判为受保护 → 候选为空 → 计数永不回落。
+                # 这里留一份「仅排除流式卡/欢迎卡」的降级候选，主候选耗尽而计数
+                # 仍超配额时才启用。
+                if self._batch_is_streaming_or_welcome(idx):
+                    continue
+                fallback_candidates.append((self._batch_distance(idx, vp_range), idx))
                 continue
-            candidates.append((self._batch_distance(idx), idx))
+            candidates.append((self._batch_distance(idx, vp_range), idx))
         candidates.sort(key=lambda x: x[0], reverse=True)
+        fallback_candidates.sort(key=lambda x: x[0], reverse=True)
 
         self._is_virtual_recycling = True
         try:
@@ -12034,6 +12165,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     break
                 removed_h = self._unload_batch(idx)
                 removed_total += removed_h
+            # 降级：温和候选不足以回到配额内时，继续淘汰最远的受保护批次
+            # （视口内最初 1 批仍由 _batch_distance == 0 天然挡在最后）
+            if self._rendered_card_count > quota and fallback_candidates:
+                for dist, idx in fallback_candidates:
+                    if self._rendered_card_count <= quota:
+                        break
+                    if dist <= 0:
+                        break  # 已触到视口内：不再继续，避免把正在看的批次卸掉
+                    removed_h = self._unload_batch(idx)
+                    removed_total += removed_h
             if removed_total > 0:
                 try:
                     scroll_bar.setValue(max(0, scroll_bar.value() - removed_total))
