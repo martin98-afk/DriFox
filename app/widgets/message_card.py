@@ -16077,16 +16077,6 @@ class MessageCard(SimpleCardWidget):
                         // 不受影响。
                         if (!isNaN(kod) && kod >= od) {{ container.insertBefore(el, k); return; }}
                     }}
-                    // 🐛 修复（完成框泄露·就地归位）：循环走完 = el 的 order 大于容器
-                    // 全部块（完成块 order 递增，这是常态）。此前静默 return——若 el
-                    // 此刻不在容器内（旧运行框被 save/restore / 差量收尾挪到正文或
-                    // 折叠框内部后 replaceChild 原地继承错误位置），泄露被永久固化。
-                    // 现补归位：el 不在容器 → append 到末尾（order 最大 = 末位语义
-                    // 正确）；已在容器则保持现位。运行中块（1e9 恒沉底）由下次
-                    // reorganizeContent 排序统一纠偏，此处不与之竞争。
-                    if (el.parentNode !== container) {{
-                        container.appendChild(el);
-                    }}
                 }}
                 // [sink-diag] 工具区快照（物理顺序 vs data-order），DRIFOX_SINK_DIAG=1 时回传 Python 打日志
                 function _snap() {{
@@ -16101,13 +16091,7 @@ class MessageCard(SimpleCardWidget):
                     return out;
                 }}
                 // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
-                // 🐛 修复（完成框泄露·查找限定容器）：querySelector 原为全文档查找，
-                // 同 ID 块若被 save/restore / 差量收尾挪进正文或某个折叠框 body
-                // （旧克隆未及时清理），会命中错误副本 → replaceChild 在错误容器内
-                // 原地转换 → 完成框泄露到正文/折叠框内部。限定在工具目标容器内查找，
-                // 容器外的旧克隆走下方新建分支 + _insertByOrder 归位，泄露块随后由
-                // reorganizeContent 的正文扫描 / 过期清理接管。
-                var existing = tc.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 if (existing) {{
                     // 🐛 修复：检测 existing 是否为流式态块（tool-streaming-block）。
                     // 流式态块内部是 spinner + preview text，没有 .cm-collapsible__summary
@@ -16488,9 +16472,7 @@ class MessageCard(SimpleCardWidget):
                 if (!tc) {{
                     tc = document.getElementById('content-placeholder');
                 }}
-                // 🐛 修复（同 append_tool_result）：existing 查找限定在目标容器内，
-                // 防止全文档命中被挪走的旧克隆后原地更新，运行框泄露到错误容器。
-                var el = tc.querySelector('[data-tool-call-id="{tool_call_id}"]');
+                var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : reportHeight;
                 // 徽标（+N/-M 或字符数）是预览 span 的兄弟节点，避免长文本省略号把徽标裁掉
                 var _dfxSetBadge = function(_bel, _bhtml) {{
