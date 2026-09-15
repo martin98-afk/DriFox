@@ -1,6 +1,36 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.1] - 2026-09-15
+
+自上一版本以来的变更 | 提交数：8 · 文件变更：27 · +1213/-215 | 贡献者：mading
+
+### ✨ 新功能 (New Features)
+
+- **工具完成块就地插入修复沉底** (`app/widgets/message_card.py`, `plugins/system-skills/skills/drifox-dev/references/known-pitfalls.md`, `tests/debug/tool_completion_sink_repro.py`, `tests/debug/tool_insert_order_check.py` 新增, `tests/debug/tree_expansion_restore_repro.py` 新增): 此前 `bb89a76c` 的 data-order 单调性检查只在 `updateContent` 全量渲染跑，`append_tool_result` 完成后若走差量快路径或 S1 末轮无下一拍永不触发；data-order 还存在 JS 注入块=锚点前 think/tool 计数与 D+ 补齐块=容器 blocks 序号两种尺度，相等时 sort 稳定不纠、严格小于检查也不触发。修复：`append_tool_result` 注入 JS 内置 `_insertByOrder` 就地插位（相等值用 `>=` 插同值块前），三分支全覆盖；新增诊断开关 `DRIFOX_SINK_DIAG=1` 打 `[sink-diag]` 快照日志供复测取证。`6efdb873`
+
+- **临时状态管理迁移到 app_state.json** (`app/main_widget.py`, `app/utils/app_state.py` 新增, `app/utils/config.py`, `app/widgets/tab_panel.py`, `tests/core/test_welcome_plugin_tab.py`, `tests/debug/tool_completion_sink_repro.py`, `tests/perf/test_new_tab_baseline.py`): 历史会话切项目不落盘根因 = `_on_project_selected` 有写 `cfg.current_project`，跨项目历史会话加载只改内存态 `_current_project` 不写盘。改走新增 `app/utils/app_state.py` 写 `<app_data_dir>/cache/app_state.json`，延迟加载 + 原子写 + 值不变短路；启动从旧 `app.config` 一次性迁入三项（`current_project` / `welcome_plugin_tab` / `workspace_tree_expansion`），跳过 `llm_selected_model`（云端 config_sync 链未动）。`29390740`
+
+- **`get_provider_config` 服务商配置检索实现** (`app/main_widget.py`, `app/plugins/contracts/engine_host.py`, `app/plugins/registries/ui_plugin_registry.py`, `docs/plugins/runtime-engines.md`, `tests/plugins/test_engine_host_contract.py`, `tests/plugins/test_prompt_enhancer_plugin.py`): 宿主公开服务 `services["get_provider_config"](provider, model)` 实现 —— 主程序读内存态已解锁明文并叠加模型默认参数；旧版主程序无此服务时回退遍历 `main_widget._valid_configs`（同为内存态）。语义收紧：显式指名的服务商不存在时返回空配置（不再静默串到当前会话模型）；判定改为「配置非空」而非「key 非空」，免鉴权服务商（如 OpenCode 免费模型）不再被误拒；输入按钮 context 补 `services`（此前仅浮动卡有），`main_widget._on_plugin_input_button_clicked` / `UIPluginRegistry.invoke_input_button` 两条派发路径均已覆盖。`523d74f1`
+
+- **延迟组件创建幂等保护** (`app/core/backend.py`, `app/core/deferred_task_queue.py`, `app/main_widget.py`, `tests/core/test_backend_deferred_idempotent.py` 新增, `tests/core/test_deferred_task_queue.py`): 延迟管线三层（进程级 preheat / 应用级 ensure_started / per-window DeferredTaskQueue）在「同一组件被多次触发」场景下，重复 enqueue 全部跑一遍且各自建对象，主窗口在快速切 tab / 重复打开时出现同组件多份实例。修复：backend 与 DeferredTaskQueue 加幂等保护 —— 同一 key 已存在则跳过；新增两套测试覆盖 backend 幂等与 queue 幂等。`60d70b2a`
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **简洁模式末轮工具完成框沉底固化** (`app/widgets/message_card.py`, `plugins/system-skills/skills/drifox-dev/references/known-pitfalls.md`, `tests/widgets/test_message_card_order.py` 新增): `reorganizeContent` 快路径在 restore `appendChild` 沉底 + `append_tool_result` 原地 `replaceChild` 转换后，键序列 diff 与 `_assignedDataOrder` 均探测不到物理顺序异常，导致 S1 后键集合恒同时跳过 sort、工具完成块滞留底部。`_orderChanged` 判定追加 data-order 物理单调性检查（跳过 tool-streaming-block 与无 data-order 块），倒序即强制 sort；同步递增骨架版本号至 34 强制客户端刷新；补 known-pitfalls P035 条目与 AST 单测。`bb89a76c`
+
+### ♻️ 代码重构 (Refactoring)
+
+- **移除滚动诊断代码与对应测试** (`app/main_widget.py`, `tests/widgets/test_stream_finish_bottom_follow.py`): 应用户要求（09-15 12:01）删除 `[scroll-diag]` 诊断日志与对应测试，仅清理诊断输出，保留触发滚动逻辑主线（程序滚动上下文深度计数 + away-set 豁免 + sticky_ms=1500 锚定期每 100ms 强制 `_sync_scroll_maximum()`）。`984e4654`
+
+### 📚 文档 (Documentation)
+
+- **更新 pitfalls 与 plugin-config 文档** (`plugins/system-skills/skills/ui-plugin-creator/references/pitfalls.md`, `plugins/system-skills/skills/ui-plugin-creator/references/plugin-config.md`): 补充 `get_provider_config` 服务契约与使用范例（密钥密文 `enc:v2:` / 空 key 免鉴权 / 显式服务商失效不串号），给 UI 插件作者可参考的避坑指南。`bb6c2130`
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号同步至 v0.6.1** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.6.0` → `0.6.1` 四文件统一；徽章 `version-0.6.1-brightgreen` 与架构图「DriFox v0.6.1 架构」同步更新。`7c2ef5b9`
+
 ## [v0.6.0] - 2026-09-15 (重新发布 #4)
 
 自上一版本以来的变更（累计） | 提交数：39 · 文件变更：125 · +10625/-3979 | 贡献者：mading, drifox-bot, dingma
