@@ -1,6 +1,18 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **崩溃记录被 first-chance 噪声污染、真崩溃反被漏报** (`app/core/crash_handler.py`, `tests/core/test_crash_handler.py`, `tests/debug/crash_filter_probe.py` 新增): 排查 `crash_20260915_202601_19296.log` 时发现三个叠加缺陷。① CPython 3.14 的 faulthandler 在 Windows 注册 VEH，无差别记录所有 SEH 异常：COM 的 `0x8001010D`（`RPC_E_CANTCALLOUT_ININPUTSYNCCALL`，Qt 与 Chromium 双消息循环共处主线程时高发）、调试断点 `0x80000003` 等上层能消化、进程照常存活的 first-chance 异常都被当作崩溃现场写进 `crash_*.log`，实测单份日志最多堆 13 段。② 原 `_install_minidump_filter` 用 `ctypes.WINFUNCTYPE` 把 Python 函数挂成 `SetUnhandledExceptionFilter` 回调，回调里跑 `strftime` / `Path` / `CreateFileW` / `MiniDumpWriteDump`；`crash/dumps/mini_*.dmp` 清一色 0 字节即其产物，且 WER 崩溃签名自 09-15 起由 `Qt5Core.dll` 变为 `python314.dll` + `c000041d`（`STATUS_FATAL_APP_EXIT`，含义是异常处理回调自身崩溃），说明这条链会把噪声升级成真崩溃 —— 已整体删除。③ `check_pending_crashes` 判据为「文件非空且无 clean-exit 标记」，而 CPython 会把部分原生 access violation 转成 Python `OSError` 抛出、解释器随后走正常 shutdown，`atexit` 照样补得上标记，真崩溃被自己的标记洗成「正常退出」。修复：新增 `_install_seh_classifier`，在 `faulthandler.enable()` 之后以 `first=1` 注册分流 VEH（因而先于 faulthandler 自己的 handler 被调用），按噪声码黑名单二次调用 `faulthandler.enable(file=...)` 把非致命现场改道 `anomaly_*.log`（实测二次 enable 幂等，不会重复注册 handler）；崩溃判据改为「含 `Windows fatal exception` 段」为唯一证据；`anomaly_*.log` 只留最近 20 份、空文件在退出时回收。新增 8 模式子进程探针，端到端断言三种场景的落点与「下次启动报告数」。
+
+## [Unreleased]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **崩溃记录被 first-chance 噪声污染、真崩溃反被漏报** (`app/core/crash_handler.py`, `tests/core/test_crash_handler.py`, `tests/debug/crash_filter_probe.py` 新增): 排查 `crash_20260915_202601_19296.log` 时发现三个叠加缺陷。① CPython 3.14 的 faulthandler 在 Windows 注册 VEH，无差别记录所有 SEH 异常：COM 的 `0x8001010D`（`RPC_E_CANTCALLOUT_ININPUTSYNCCALL`，Qt 与 Chromium 双消息循环共处主线程时高发）、调试断点 `0x80000003` 等上层能消化、进程照常存活的 first-chance 异常都被当作崩溃现场写进 `crash_*.log`，实测单份日志最多堆 13 段。② 原 `_install_minidump_filter` 用 `ctypes.WINFUNCTYPE` 把 Python 函数挂成 `SetUnhandledExceptionFilter` 回调，回调里跑 `strftime` / `Path` / `CreateFileW` / `MiniDumpWriteDump`；`crash/dumps/mini_*.dmp` 清一色 0 字节即其产物，且 WER 崩溃签名自 09-15 起由 `Qt5Core.dll` 变为 `python314.dll` + `c000041d`（`STATUS_FATAL_APP_EXIT`，含义是异常处理回调自身崩溃），说明这条链会把噪声升级成真崩溃 —— 已整体删除。③ `check_pending_crashes` 判据为「文件非空且无 clean-exit 标记」，而 CPython 会把部分原生 access violation 转成 Python `OSError` 抛出、解释器随后走正常 shutdown，`atexit` 照样补得上标记，真崩溃被自己的标记洗成「正常退出」。修复：新增 `_install_seh_classifier`，在 `faulthandler.enable()` 之后以 `first=1` 注册分流 VEH（因而先于 faulthandler 自己的 handler 被调用），按噪声码黑名单二次调用 `faulthandler.enable(file=...)` 把非致命现场改道 `anomaly_*.log`（实测二次 enable 幂等，不会重复注册 handler）；崩溃判据改为「含 `Windows fatal exception` 段」为唯一证据；`anomaly_*.log` 只留最近 20 份、空文件在退出时回收。新增 8 模式子进程探针，端到端断言三种场景的落点与「下次启动报告数」。
+
 ## [v0.6.1] - 2026-09-15
 
 自上一版本以来的变更 | 提交数：8 · 文件变更：27 · +1213/-215 | 贡献者：mading

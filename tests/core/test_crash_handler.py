@@ -1,23 +1,32 @@
 # -*- coding: utf-8 -*-
-"""crash_handler 单元测试：崩溃 dump 检测与清理规则
+"""crash_handler 单元测试：崩溃现场检测与噪声分流
 
 背景：打包版原生崩溃（Qt/C++ 段错误）不经过 Python excepthook，
 表现为「闪退且 all.log 无记录」。crash_handler 用 faulthandler 落盘
-dump，本文件覆盖下次启动的检测/清理/报告判定逻辑。
+现场，本文件覆盖：哪些现场算真崩溃、非致命 SEH 噪声如何改道 anomaly、
+以及下次启动的检测/清理/报告判定。
 """
+
 import os
 import time
 from pathlib import Path
 
 from app.core.crash_handler import (
+    _ANOMALY_KEEP,
     _CLEAN_EXIT_MARK,
+    EXCEPTION_MARK,
+    _is_noise_exception,
     _mark_clean_exit,
     _nearby_wer_dump,
     _nearby_wer_report,
+    _prune_anomaly_logs,
     _setup_wer_localdumps,
     check_pending_crashes,
     install_crash_handler,
 )
+
+# faulthandler 真实落盘时的段落开头，检测逻辑以此为唯一崩溃证据
+_REAL_DUMP = f'{EXCEPTION_MARK}: access violation\n  File "app/foo.py", line 1 in bar\n'
 
 
 def _make_dump(crash_dir: Path, name: str, content: str) -> Path:
@@ -38,7 +47,7 @@ def test_check_empty_dir(tmp_path):
 
 def test_crash_dump_reported(tmp_path):
     logs = tmp_path / "logs"
-    dump = _make_dump(logs / "crash", "crash_1.log", "Fatal Python error: Segmentation fault\nstack...")
+    dump = _make_dump(logs / "crash", "crash_1.log", _REAL_DUMP)
     assert check_pending_crashes(logs) == [dump]
     # 崩溃 dump 不被清理（弹窗确认后才删）
     assert dump.exists()
@@ -53,7 +62,7 @@ def test_reported_suffix_not_matched(tmp_path):
 
 def test_clean_exit_dump_cleared(tmp_path):
     logs = tmp_path / "logs"
-    f = _make_dump(logs / "crash", "crash_1.log", f"stack...\n{_CLEAN_EXIT_MARK}\n")
+    f = _make_dump(logs / "crash", "crash_1.log", f"{_CLEAN_EXIT_MARK}\n")
     assert check_pending_crashes(logs) == []
     assert not f.exists()
 
@@ -69,10 +78,85 @@ def test_empty_dump_cleared_not_reported(tmp_path):
 def test_all_pending_returned_oldest_first(tmp_path):
     """积压多份未报告 dump 全部返回，按崩溃时间从旧到新逐条弹。"""
     logs = tmp_path / "logs"
-    old = _make_dump(logs / "crash", "crash_100.log", "crash old")
-    new = _make_dump(logs / "crash", "crash_200.log", "crash new")
+    old = _make_dump(logs / "crash", "crash_100.log", _REAL_DUMP)
+    new = _make_dump(logs / "crash", "crash_200.log", _REAL_DUMP)
     os.utime(old, (time.time() - 10, time.time() - 10))
     assert check_pending_crashes(logs) == [old, new]
+
+
+def test_clean_exit_mark_does_not_mask_real_crash(tmp_path):
+    """clean-exit 标记不得洗掉真崩溃。
+
+    CPython 会把部分 SEH 异常（含原生 access violation）转成 Python 异常抛出，
+    解释器随后走正常 shutdown，atexit 照样补得上标记——旧判据「无标记才算崩」
+    会把这类真崩溃漏报。
+    """
+    logs = tmp_path / "logs"
+    dump = _make_dump(logs / "crash", "crash_1.log", f"{_REAL_DUMP}{_CLEAN_EXIT_MARK}\n")
+    assert check_pending_crashes(logs) == [dump]
+
+
+def test_dump_without_exception_section_cleared(tmp_path):
+    """只有 Qt 杂项文本、无异常段的文件不算崩溃，就地清理。"""
+    logs = tmp_path / "logs"
+    f = _make_dump(logs / "crash", "crash_1.log", "some startup noise\nno fault here\n")
+    assert check_pending_crashes(logs) == []
+    assert not f.exists()
+
+
+# ========== 非致命 SEH 噪声分流 ==========
+
+
+def test_noise_code_classification():
+    """COM/RPC 与调试器类码归噪声；硬件异常与致命退出码不得归噪声。"""
+    assert _is_noise_exception(0x8001010D)  # RPC_E_CANTCALLOUT_ININPUTSYNCCALL
+    assert _is_noise_exception(0x80000003)  # EXCEPTION_BREAKPOINT
+    assert not _is_noise_exception(0xC0000005)  # access violation
+    assert not _is_noise_exception(0xC000041D)  # STATUS_FATAL_APP_EXIT
+    assert not _is_noise_exception(0xC0000409)  # STATUS_STACK_BUFFER_OVERRUN
+
+
+def test_anomaly_log_never_reported(tmp_path):
+    """anomaly_*.log 不参与崩溃判定，也不被崩溃检测误删。"""
+    logs = tmp_path / "logs"
+    anomaly = _make_dump(logs / "crash", "anomaly_1.log", f"{EXCEPTION_MARK}: code 0x8001010d\nstack...\n")
+    assert check_pending_crashes(logs) == []
+    assert anomaly.exists()
+
+
+def test_install_creates_paired_logs(tmp_path):
+    """一次启动一对 crash_/anomaly_ 日志，同时间戳同 PID。"""
+    logs = tmp_path / "logs"
+    dump = install_crash_handler(logs)
+    assert dump is not None
+    anomalies = list((logs / "crash").glob("anomaly_*.log"))
+    assert len(anomalies) == 1
+    assert anomalies[0].name.replace("anomaly_", "crash_") == dump.name
+
+
+def test_empty_anomaly_discarded_on_clean_exit(tmp_path):
+    """没记到东西的噪声日志在退出时回收，不堆积空文件。"""
+    logs = tmp_path / "logs"
+    install_crash_handler(logs)
+    crash_dir = logs / "crash"
+    assert list(crash_dir.glob("anomaly_*.log"))
+    _mark_clean_exit()
+    assert not list(crash_dir.glob("anomaly_*.log"))
+
+
+def test_prune_anomaly_logs_keeps_recent(tmp_path):
+    """噪声日志超量时只保留最近 _ANOMALY_KEEP 份。"""
+    crash_dir = tmp_path / "crash"
+    crash_dir.mkdir(parents=True)
+    now = time.time()
+    for i in range(_ANOMALY_KEEP + 5):
+        p = crash_dir / f"anomaly_{i:03d}.log"
+        p.write_text("noise", encoding="utf-8")
+        os.utime(p, (now + i, now + i))
+    _prune_anomaly_logs(crash_dir)
+    left = sorted(p.name for p in crash_dir.glob("anomaly_*.log"))
+    assert len(left) == _ANOMALY_KEEP
+    assert left[0] == "anomaly_005.log"
 
 
 def test_install_and_clean_exit(tmp_path):
