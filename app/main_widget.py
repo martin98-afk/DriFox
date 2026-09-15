@@ -4494,7 +4494,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 回退到内置处理器（用于兼容旧命令或未注册的 function 命令）
             if command_name == "new":
-                self._create_new_session()
+                self._create_new_session(close_history=True)
                 return True
             elif command_name == "new-window":
                 tm = TabManagerWindow.get_instance()
@@ -9069,8 +9069,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._create_new_session()
         else:
             self._load_history_session_from_popup(index)
-        # ★ 页签保持：加载会话不再强制离开历史页/跳工作树，
-        # 工作台页签完全按用户选择保持（用户可继续点选其他会话）
+            # 🆕 加载会话 = 真切换：历史页签让位
+            # （用户语义 2026-09-15：点开会话即开始在该项目下干活，页签使命完成；
+            # 想再点其他会话重新打开页签即可。覆盖原「页签保持可连续点选」行为）
+            self._close_history_panel()
+        # ★ 页签保持（仅流式分支）：流式时点会话开新标签页不改变工作台当前页签，
+        # 保持批量翻阅体验；非流式路径已在上方加载后收起
 
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
@@ -11125,7 +11129,14 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(self, "_agent_buttons") and agent_name in self._agent_buttons:
                 self._agent_buttons[agent_name]["btn"].setToolTip(tooltip)
 
-    def _create_new_session(self):
+    def _create_new_session(self, close_history: bool = False):
+        """新建会话
+
+        Args:
+            close_history: 用户动作触发的新建会话（按钮/命令/历史页签/项目切换）
+                          传 True：新建后收起工作台「历史会话」页签（新建 = 真切换，
+                          页签让位；启动恢复路径不传，保持页签原状）。
+        """
         import time as _time
 
         _t0 = _time.perf_counter()
@@ -11141,6 +11152,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
         except Exception:
             pass
+
+        # 🆕 用户动作触发的新建会话：历史页签让位。
+        # 放在流式分支之前：流式下 spawn_tab 开新标签同样算「新建会话」动作，
+        # 页签同样让位（启动恢复路径 close_history=False 不受影响）。
+        # _close_history_panel 幂等：页签不是「历史会话」时为 no-op。
+        if close_history:
+            self._close_history_panel()
 
         # 🆕 流式保护：当前标签页正在流式输出时，新建会话改开新标签页，
         # 不强行停止当前对话（由 TabManagerWindow.spawn_tab 承载新会话）。
@@ -20821,7 +20839,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_popup_card.set_current_project(project)
         self._notify_history_data_changed()
         # 自动触发新建会话，避免原会话与切换后的项目不匹配
-        self._create_new_session()
+        # （close_history=True：切项目 + 新建会话 = 真切换，历史页签让位）
+        self._create_new_session(close_history=True)
         # 收起插件内的项目选择面板
         self._collapse_project_selector_panel()
 
@@ -20945,7 +20964,8 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[NewProject] 展开工作台关键文档失败: {e}")
         # 自动触发新建会话
-        self._create_new_session()
+        # （close_history=True：新建项目 + 新建会话 = 真切换，历史页签让位）
+        self._create_new_session(close_history=True)
         # 收起插件内的项目选择面板
         self._collapse_project_selector_panel()
         # 历史页项目过滤器跟随新项目（否则仍过滤旧项目，列表停留在旧项目会话）
@@ -20998,7 +21018,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_current_project(default_project)
-            self._create_new_session()
+            self._create_new_session(close_history=True)
             # 团队模式：归档当前项目切回默认项目，同样触发团队级同步
             # P2-B：prev_project = project_name（归档前项目），此时
             # _current_project 已切到默认项目，不能靠函数内兜底取值。

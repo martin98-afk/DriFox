@@ -13117,6 +13117,17 @@ class MessageCard(SimpleCardWidget):
         # preview 模式只写此字段，不真正 setFixedHeight（避免 Chromium 级联
         # relayout）。set_resize_preview_mode(False) 退出时一次性应用。
         self._pending_viewer_height: Optional[int] = None
+        # ── 空白守卫（blank-guard）──
+        # 背景：简洁模式流式中「偶尔」工具/折叠框下方出现大段空白 = viewer 高度
+        # （Qt 落地值）大于 JS 侧实际内容高。根因：_apply_debounced_height 收拢
+        # 方向 <40px 直接丢弃（防抖动设计），多工具依次完成时每次"运行框→折叠行"
+        # 缩 ~24px 全被吞 → 累积虚高，正文静默期（纯工具执行阶段）暴露为空白。
+        # 修复：小收缩改延迟落地（_shrink_timer 500ms 稳定窗）。
+        # _blank_guard_* 为二道防线（gap 探针取证），默认不启用单独开关。
+        self._shrink_timer: Optional[QTimer] = None
+        self._pending_shrink_height: Optional[int] = None
+        self._blank_guard_timer: Optional[QTimer] = None
+        self._blank_guard_rounds = 0
         # WebEngine 上下文恢复标志
         self._webengine_needs_restore = False
         # 懒渲染标志：未进入可视区域前不创建QWebEngine
@@ -15026,16 +15037,52 @@ class MessageCard(SimpleCardWidget):
             return
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         if h >= current_height:
-            # 增长方向：小阈值立即应用，保证流式输出滚底跟随
+            # 增长方向：小阈值立即应用，保证流式输出滚底跟随。
+            # 🐛 新内容填平了此前的收拢需求 → 取消挂起的延迟收缩。
+            self._cancel_pending_shrink()
             if h - current_height > 2:
                 self._apply_viewer_height(h)
         else:
-            # 收拢方向：小步回弹（<40px）流式期间不应用。
-            # 来源：流式块→完成块的 DOM 替换、滚动条出现/消失的重排噪声。
-            # 延迟到 finish_streaming 后的全量渲染统一收敛，消除"长一下又缩回去"的抖动。
-            # 大幅收拢（≥40px，折叠/展开/dock 切换）仍正常应用。
+            # 收拢方向：小步回弹（<40px）不立即应用（流式块→完成块的 DOM
+            # 替换、滚动条出现/消失的重排噪声，立即应用会"长一下又缩回去"抖动）。
+            # 🐛 但旧实现直接丢弃会累积虚高：12 个工具依次完成，每次
+            # "运行框→折叠行"缩 ~24px 全被吞 → 累积 250px+ 底部空白；
+            # 正文增长会暂时填平看不出，纯工具执行阶段（正文静默）即暴露。
+            # 修复：改为**延迟落地**——500ms 稳定窗合并连续抖动，窗口期被
+            # 增长取消（内容填平），静止的收缩最终落地。大幅收拢（≥40px）
+            # 仍立即应用。
             if current_height - h >= 40:
+                self._cancel_pending_shrink()
                 self._apply_viewer_height(h)
+            else:
+                self._schedule_pending_shrink(h)
+
+    def _schedule_pending_shrink(self, target: int):
+        """挂起一次小步收拢：500ms 稳定窗后落地，窗口内被增长/finish 取消。"""
+        self._pending_shrink_height = int(target)
+        if self._shrink_timer is None:
+            self._shrink_timer = QTimer(self)
+            self._shrink_timer.setSingleShot(True)
+            self._shrink_timer.setInterval(500)
+            self._shrink_timer.timeout.connect(self._apply_pending_shrink)
+        self._shrink_timer.start()
+
+    def _cancel_pending_shrink(self):
+        """取消挂起的延迟收缩（增长方向到来 / finish 收敛接管）。"""
+        self._pending_shrink_height = None
+        if self._shrink_timer is not None:
+            self._shrink_timer.stop()
+
+    def _apply_pending_shrink(self):
+        """延迟收缩落地：仅当流式中且当前落地值仍大于挂起目标。"""
+        target = self._pending_shrink_height
+        self._pending_shrink_height = None
+        if target is None or not self._streaming:
+            return
+        current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
+        # 目标仍小于当前值才收拢；期间已被增长覆盖（>= 目标）则放弃
+        if current_height > target:
+            self._apply_viewer_height(target)
 
     def _on_qt_viewer_height(self, h: int) -> None:
         """灰度：纯 Qt viewer 高度自治（layout 自适应，不 setFixedHeight），
@@ -17060,6 +17107,8 @@ class MessageCard(SimpleCardWidget):
                 self._anim_timer.stop()
             except RuntimeError:
                 pass
+            # 挂起的延迟小收缩作废：finish 后由非流式 _update_height 全量收敛接管
+            self._cancel_pending_shrink()
             # 🆕 打开结束态高度缓动窗口：坞态归位 + 最终重排后卡片高度会一次收敛
             # 数百 px，交由 _update_height 缓动（只服务一次，消费或超时即失效）。
             # 历史会话加载（history=True）不打开——那是首帧建卡，无需过渡。

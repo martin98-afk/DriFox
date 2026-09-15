@@ -280,7 +280,9 @@ class BottomToolbarModule(UIModule):
         host.new_session_btn.setStyleSheet(btn_capsule_style)
         host.new_session_btn.setToolTip("新建对话")
         host.new_session_btn.setObjectName("new_session")  # Phase E：插件按钮 position 锚点
-        host.new_session_btn.clicked.connect(host._create_new_session)
+        # close_history=True：新建会话 = 真切换，历史页签让位
+        # （lambda 避开 clicked 信号的 checked 位置参数误传）
+        host.new_session_btn.clicked.connect(lambda: host._create_new_session(close_history=True))
         capsule_layout.addWidget(host.new_session_btn)
 
         # 为工具栏按钮安装自绘 hover tooltip（绕开 QToolTip 样式问题）
