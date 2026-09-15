@@ -92,6 +92,8 @@ from app.core import window_registry
 
 
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
+from app.utils.app_state import get as _state_get
+from app.utils.app_state import set as _state_set
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Animations,
@@ -1163,7 +1165,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.homepage = homepage  # 必须在 super() 之前设置，供 backend.initialize 使用
         self.cfg = Settings.get_instance()
         # 初始化当前项目（在 backend.initialize 之前）
-        self._current_project = self.cfg.current_project.value or "默认项目"  # 当前项目
+        self._current_project = _state_get("current_project") or "默认项目"  # 当前项目
         # 上次广播的项目上下文 (project, workdir)：EV_PROJECT_CHANGED 去重用
         self._last_project_ctx: Optional[tuple] = None
         # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
@@ -2958,6 +2960,7 @@ class OpenAIChatToolWindow(ToolWindow):
         resolved_project = project or self._current_project
         session.metadata["project"] = resolved_project
         self._current_project = resolved_project
+        _state_set("current_project", resolved_project)
         self.backend._current_project = resolved_project
         if self.backend.tool_executor:
             try:
@@ -12885,7 +12888,7 @@ class OpenAIChatToolWindow(ToolWindow):
         cfg = Settings.get_instance()
         welcome_mode = resolve_initial_welcome_mode(
             cfg.welcome_mode.value,
-            cfg.welcome_plugin_tab.value,
+            _state_get("welcome_plugin_tab", ""),
             UIPluginRegistry.get_instance().get_welcome_tabs(),
         )
 
@@ -12927,21 +12930,21 @@ class OpenAIChatToolWindow(ToolWindow):
 
         cfg = Settings.get_instance()
         if new_mode in ("sessions", "projects"):
-            # 内置 mode：写 welcome_mode 并清空插件 tab 记忆
-            if cfg.welcome_plugin_tab.value:
-                cfg.welcome_plugin_tab.value = ""
+            # 内置 mode：写 welcome_mode 并清空插件 tab 记忆（记忆存 app_state，不入配置）
+            if _state_get("welcome_plugin_tab"):
+                _state_set("welcome_plugin_tab", "")
             if cfg.welcome_mode.value == new_mode:
                 return
             cfg.welcome_mode.value = new_mode
+            cfg.save()
         else:
             # 插件注册的 welcome tab：welcome_mode 的 OptionsValidator.correct
-            # 会把非法值纠正回 sessions，插件 tab 存独立字段。重启后仅当该 tab
+            # 会把非法值纠正回 sessions，插件 tab 记忆存 app_state。重启后仅当该 tab
             # 仍注册时恢复（见 resolve_initial_welcome_mode），插件卸载/停用则
             # 回退内置 mode，不影响正常启动。
-            if cfg.welcome_plugin_tab.value == new_mode:
+            if _state_get("welcome_plugin_tab") == new_mode:
                 return
-            cfg.welcome_plugin_tab.value = new_mode
-        cfg.save()
+            _state_set("welcome_plugin_tab", new_mode)
 
     def _sanitize_user_message_for_display(self, content: str) -> str:
         """清理用户消息用于显示（保留向后兼容）"""
@@ -14256,9 +14259,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 使用辅助函数初始化
         init_after_loading_session(self, restored, session_id, title, self.backend)
 
-        # 如果会话有自己的项目，显示在标题上
+        # 如果会话有自己的项目，显示在标题上；默认项目跟随更新（下次启动落在该会话项目）
         session_project = session_record.get("project", "默认项目") or "默认项目"
         self._current_project = session_project
+        _state_set("current_project", session_project)
         self.backend._current_project = session_project
         self._project_label.setText(session_project)
         self._refresh_project_branch_style()
@@ -17093,9 +17097,10 @@ class OpenAIChatToolWindow(ToolWindow):
             restored = create_session_from_record(session_record, messages, title)
             init_after_loading_session(self, restored, session_id, title, self.backend)
             self._release_inactive_session_messages()
-            # 同步项目
+            # 同步项目；默认项目跟随更新（下次启动落在该会话项目）
             session_project = session_record.get("project", "默认项目") or "默认项目"
             self._current_project = session_project
+            _state_set("current_project", session_project)
             self.backend._current_project = session_project
             self._project_label.setText(session_project)
             self._refresh_project_branch_style()
@@ -20567,7 +20572,7 @@ class OpenAIChatToolWindow(ToolWindow):
         tool_executor / _project_label / 分支样式 / 记忆卡片 / 历史面板 /
         Tab 图标），但跳过：
         - _create_new_session()（避免连环新建会话）
-        - cfg.current_project 全局写入（全局默认项目仅由发送方写）
+        - cfg.current_project 全局写入（全局默认项目仅由发送方写，现写 app_state）
         - 收起项目选择面板（仅针对发送方；接收方保持自己的面板状态）
         """
         if getattr(self, "_is_destroyed", False):
@@ -20747,8 +20752,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_label.setText(project)
         self._refresh_project_branch_style()
         self._update_branch()
-        self.cfg.current_project.value = project
-        self.cfg.save()
+        # 保存上次状态（默认项目存 app_state.json，不入系统配置）
+        _state_set("current_project", project)
         # 🛡️ 失效欢迎卡片缓存：recent_sessions/top_by_count 按 _current_project 过滤，
         # 项目切换后必须重建。虽然下方 _create_new_session 内部也会失效一次，
         # 这里提前失效可在 _create_new_session 早期失败/跳过时仍有兜底。
@@ -20859,9 +20864,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(project)
-        # 保存到配置
-        self.cfg.current_project.value = project
-        self.cfg.save()
+        # 保存上次状态
+        _state_set("current_project", project)
         # 🐛 修复：切换项目时无条件同步工作目录，
         # 否则 tool_executor.get_workdir() 残留旧项目 → PreUserMessage hook 的
         # 项目上下文显示旧项目根目录。
@@ -20936,8 +20940,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._project_label.setText(default_project)
             self._refresh_project_branch_style()
             self._update_branch()
-            self.cfg.current_project.value = default_project
-            self.cfg.save()
+            _state_set("current_project", default_project)
             # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_current_project(default_project)

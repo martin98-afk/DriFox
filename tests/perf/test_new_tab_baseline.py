@@ -587,11 +587,12 @@ def test_two_tabs_context_independence(tab_env):
     # ── 会话独立：两窗口 _current_session_id 不同且保持 ──
     assert win_a._current_session_id != win_b._current_session_id
 
-    # 清理：_on_project_selected 会把项目写进全局配置（cfg.save()），
-    # 残留会污染后续进程的默认项目（w0 继承脏值）。恢复后落盘。
+    # 清理：_on_project_selected 会把项目写进全局状态（app_state.json），
+    # 残留会污染后续进程的默认项目（w0 继承脏值）。恢复为基线项目。
     try:
-        win_a.cfg.current_project.value = baseline_project
-        win_a.cfg.save()
+        from app.utils import app_state
+
+        app_state.set("current_project", baseline_project)
     except Exception:
         pass
 
