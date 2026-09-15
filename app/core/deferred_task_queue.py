@@ -138,8 +138,13 @@ class DeferredTaskQueue(QObject):
             if not bt.ran:
                 return False
         if task.name in self._barriers:
-            # 屏障：critical 全部完成
-            if any(t.priority == "critical" and not t.ran for t in self._tasks.values()):
+            # 屏障：等「非屏障」的 critical 全部完成。
+            # 注意：屏障任务自身可能被注册为 critical（如 initialization_complete），
+            # 此时不能把它自己算作阻塞源——否则 _ready 恒为 False，该任务永不可
+            # 执行（自锁），并连带让 _all_critical_done 恒为 False、泵永不收口。
+            if any(
+                t.priority == "critical" and not t.ran and t.name not in self._barriers for t in self._tasks.values()
+            ):
                 return False
         return True
 
@@ -150,7 +155,12 @@ class DeferredTaskQueue(QObject):
         return None
 
     def _all_critical_done(self) -> bool:
-        return all(t.ran for t in self._tasks.values() if t.priority == "critical")
+        """非屏障的 critical 是否全部完成。
+
+        屏障任务自身不计入（否则屏障注册为 critical 时永远无法放行——自锁）。
+        语义：屏障等待的是「工作项」，而不是其他屏障门。
+        """
+        return all(t.ran for t in self._tasks.values() if t.priority == "critical" and t.name not in self._barriers)
 
     def _pump(self):
         self._pump_scheduled = False

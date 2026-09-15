@@ -680,7 +680,16 @@ class ChatBackend(QObject):
             logger.error(f"[ChatBackend] ToolExecutor 延迟创建失败: {e}")
 
     def _deferred_create_engines(self):
-        """400ms 批：ChatEngine（依赖 tool_executor）"""
+        """400ms 批：ChatEngine（依赖 tool_executor）
+
+        幂等守卫：发送关键路径的 ensure_deferred_components() 可能已同步创建
+        （团队 leader 自动开场早于错峰的 create_engines 队列任务）。缺失守卫时
+        重复创建会覆盖 _chat_engine，而正在运行的 worker 仍持有旧实例——
+        flush 把 UI 回调注册进新实例，旧实例回调字典为空，表现为团队对话
+        后台正常但前端卡片空白（2026-09-15 团队成员无法对话的根因）。
+        """
+        if self._chat_engine is not None:
+            return
         if self._tool_executor is None:
             logger.warning("[ChatBackend] ToolExecutor 未创建，跳过引擎延迟创建")
             return
@@ -724,6 +733,10 @@ class ChatBackend(QObject):
         """600ms 批：SubAgentManager + MCP 连接 + git 缓存预热"""
         if self._tool_executor is None:
             logger.warning("[ChatBackend] ToolExecutor 未创建，跳过 SubAgentManager 延迟创建")
+            return
+        if self._sub_agent_manager is not None:
+            # 幂等守卫：ensure_deferred_components 同步路径可能已创建，重复建会
+            # 覆盖实例导致信号连接（sub_agent_ready 补连）落空
             return
         try:
             # SubAgentManager（依赖 tool_executor / agent_manager）

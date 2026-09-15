@@ -4,7 +4,7 @@
 
 #define MyAppName "Drifox"
 #ifndef MyAppVersion
-  #define MyAppVersion "v0.6.0"
+  #define MyAppVersion "v0.6.1"
 #endif
 #ifndef MyAppSuffix
   #define MyAppSuffix "dev"
