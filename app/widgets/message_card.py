@@ -3084,7 +3084,12 @@ _SKELETON_CACHE_MAX = 48
 # 全部同 data-order 且不再重排（工具完成框残留/两份/沉底）。
 # v33（2026-09-15）：新增 finalizeStreamingBlocks（差量收尾：流式思考块就地
 # 定稿）。旧骨架不含该函数 → 收尾时 runJavaScript 调用未定义函数，静默失败。
-_SKELETON_CACHE_VERSION = 33
+# v34（2026-09-15）：reorganizeContent 快路径新增 data-order 物理单调性检查。
+# restore 恒 appendChild 沉底（F1）+ append_tool_result 原地 replaceChild 转换后，
+# 完成块 data-order 正确但物理滞留底部；S1（正文先于工具结束）后键集合恒同 →
+# 键序列 diff 全绿且无块缺 data-order → 跳过 sort → 末轮工具完成框沉底固化。
+# 物理顺序 data-order 倒序 → 强制 sort。旧骨架无此检查，必须靠版本号失效。
+_SKELETON_CACHE_VERSION = 34
 
 
 def _js_literal(value) -> str:
@@ -8910,6 +8915,27 @@ class CodeWebViewer(QWebEngineView):
                                 _orderChanged = true;
                                 break;
                             }}
+                        }}
+                    }}
+                    // 🐛 修复（完成框沉底）：restore 恒 appendChild 沉底 + append_tool_result
+                    // 原地 replaceChild 转换（继承 data-order、物理位置不动）后，完成块
+                    // data-order 正确但物理滞留底部；S1（正文先于工具结束）终渲染后无新
+                    // markdown 块 → 键集合恒同且无块缺 data-order → 上述 diff 全绿跳过
+                    // sort → 沉底固化。按物理顺序检查 data-order 单调性：跳过运行中块
+                    // （1e9 沉底语义，data-order 是调用时刻旧快照）与无 data-order 块
+                    // （think-streaming 待补齐），发现倒序即强制 sort（getPos 为权威
+                    // 排序，物理已正确时 sort 结果不变，零视觉影响）。
+                    if (!_orderChanged) {{
+                        var _prevOd = -Infinity;
+                        for (var _mi = 0; _mi < _curKids.length; _mi++) {{
+                            var _mk = _curKids[_mi];
+                            if (_mk.classList && _mk.classList.contains('tool-streaming-block')) continue;
+                            var _mod = _mk.getAttribute('data-order');
+                            if (_mod === null) continue;
+                            var _mv = parseFloat(_mod);
+                            if (isNaN(_mv)) continue;
+                            if (_mv < _prevOd) {{ _orderChanged = true; break; }}
+                            _prevOd = _mv;
                         }}
                     }}
                     if (_orderChanged) {{
