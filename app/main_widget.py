@@ -2629,6 +2629,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 启动子智能体日志自动清理（每6小时清理一次，保留14天）
         self._start_subagent_log_cleanup()
 
+        # 团队成员窗口：角色工具权限覆盖补应用（幂等）。
+        # 背景：apply_agent 只在 /team --load 的延迟 join 与 /agent 命令路径执行；
+        # 重启恢复/重建的成员窗口不会经过这两条路径，controller 停留在用户模式
+        # （全量工具放开、无覆盖高亮），与成员角色应有的权限裁剪不符。
+        # 屏障时机保证 load_model_configs 已完成，AgentManager 就绪，可安全解析。
+        _team_agent = getattr(self, "_team_agent_name", "") or ""
+        if _team_agent and not self._tool_permission_controller.is_agent_active():
+            try:
+                self._apply_agent_command_permissions(_team_agent)
+                self._refresh_tool_toggle_btn()
+            except Exception:  # noqa: BLE001
+                logger.exception(f"[InitComplete] 补应用成员工具权限覆盖失败: {_team_agent}")
+
         # 复制/分支窗口的 _valid_configs（含模型列表）已在 _duplicate_window 中
         # 从源窗口直接复制，不需要再重新拉取 OpenCode 免费模型列表，避免冗余网络请求和日志
         if not getattr(self, "_is_duplicate_window", False):
