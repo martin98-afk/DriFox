@@ -2014,12 +2014,14 @@ class UIPluginRegistry:
         if info is None or getattr(info, "on_click", None) is None or win is None:
             return
         try:
+            builder = getattr(win, "_build_ui_services", None)
             info.on_click(
                 {
                     "button_id": info.button_id,
                     "plugin_name": info.plugin_name,
                     "window_id": getattr(win, "_window_id", None),
                     "main_widget": win,
+                    "services": builder() if callable(builder) else {},
                 }
             )
         except Exception as e:

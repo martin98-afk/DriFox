@@ -142,6 +142,36 @@ import，改为栈工厂调用。
 
 ---
 
+## 4.6 通过 `services` 获取服务商配置（含明文 API_KEY）
+
+插件需要「切到某个服务商跑一次性 LLM 调用」（模型下拉 / 提交描述生成等）时，
+**必须**经宿主服务取配置：
+
+```python
+services = ctx["services"]                      # 浮动卡 / 输入按钮 context 均含
+cfg = services["get_provider_config"]("MiniMax", "MiniMax-M2.7")
+# → {"API_KEY": "sk-…明文", "API_URL": "…", "模型名称": "MiniMax-M2.7", …}
+client = build_openai_client(api_key=cfg["API_KEY"], base_url=cfg["API_URL"])
+```
+
+参数：`provider` 支持 config_id / display_name / provider_name（五级匹配），
+空串表示当前窗口服务商；`model` 空表示该服务商当前模型，非空时模糊匹配回填。
+未知 provider / 无可用配置返回 `{}`（**不静默串到别的服务商**）。
+
+**为什么不能用磁盘读取**：`SecretMode` 非 `none` 时，`~/.drifox/app.config` 里
+的 `API_KEY` 是密文（`password` 模式 `enc:v2:…`）或空串（`keyring` 模式密钥已
+移入系统凭证库）。插件 `json.load` 该文件拿到的 key 直接当 Bearer token 发出，
+表现为 **401 `log in fail: Please carry the API secret key`**。只有主程序内存态
+持有解密后的明文，`get_provider_config` 是唯一的正确通道。
+
+磁盘文件仍可用于读取**非密钥字段**（`provider_name` / `模型列表` 等），用于渲染
+「服务商:模型名」下拉选项；密钥字段一律走服务。
+
+> 免鉴权服务商（如 OpenCode 免费模型）API_KEY 本就为空，`build_openai_client`
+> 会剥掉 Authorization 头，此时空 key 是正常的，插件不应以「key 为空」判失败。
+
+---
+
 ## 5. 高级用法
 
 ### 5.1 完全自定义工厂
@@ -262,7 +292,7 @@ def register(registry):
 | `app/core/engines/gateway/engine.py` | 内置 `GatewayEngine`（gateway 槽位替换类的基类 + 单例工厂化入口） |
 | `app/utils/config.py` | 引擎槽位相关 `ConfigItem` 预留（当前无选择 UI，见 §7） |
 | `app/plugins/kernel.py` | `KNOWN_COMPONENTS` / `COMPONENT_ORDER` 含 `engines` 登记 |
-| `app/plugins/contracts/engine_host.py` | `EngineHost` Protocol（`ctx["services"]` 14 键的语义锚点，含 `conversation_stack`） |
+| `app/plugins/contracts/engine_host.py` | `EngineHost` Protocol（`ctx["services"]` 19 键的语义锚点，含 `conversation_stack` / `get_provider_config`） |
 | `app/plugins/contracts/conversation_stack.py` | `ConversationStackFactory` Protocol（`create_core` / `create_executor`） |
 | `app/main_widget.py` | `_build_ui_services()` 注入 services dict（含 `conversation_stack` 入口） |
 | `tests/plugins/test_e2e_engine_plugin.py` | 端到端测试（扫描/替换/安全网/卸载） |

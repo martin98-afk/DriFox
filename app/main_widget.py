@@ -2461,6 +2461,49 @@ class OpenAIChatToolWindow(ToolWindow):
             return []
         return list(session.messages or [])
 
+    def _resolve_provider_config(self, provider: str = "", model: str = "") -> Dict[str, Any]:
+        """解析服务商配置为可直接发起 LLM 请求的 llm_config（含明文 API_KEY）。
+
+        **插件取模型配置的统一入口**（经 services["get_provider_config"] 暴露）。
+        插件不要自行 json.load(app.config)：密钥模式下磁盘 API_KEY 是密文
+        （password 模式 enc:v2:…）或空串（keyring 模式），只有本窗口内存态
+        _valid_configs 才有已解锁的明文；直读文件会导致 401 / 无 Authorization。
+
+        参数语义：
+        - provider 空 → 用本窗口当前 provider；model 空 → 用其「模型名称」。
+        - provider 可传 config_id / display_name / provider_name（同
+          _resolve_service_provider 的五级匹配）；未知 provider → 返回 {}。
+        - model 非空时覆盖「模型名称」，并做一次模糊匹配回填真实模型名
+          （与 _resolve_subagent_model_config 同规则；匹配不到则保留原值）。
+        - 附带模型默认参数（apply_model_defaults），与主程序发起请求的配置同构。
+
+        返回 {} 表示无可用配置（调用方应提示用户先配置模型）。
+        """
+        valid = getattr(self, "_valid_configs", None)
+        if not isinstance(valid, dict) or not valid:
+            return {}
+
+        config_id = self._resolve_service_provider(provider) if provider else None
+        if config_id is None:
+            if provider:
+                return {}  # 显式指定的 provider 不存在 → 不静默串到别的服务商
+            name = getattr(self, "_current_provider_name", "") or ""
+            config_id = name if name in valid else (next(iter(valid), "") if not name else "")
+        if not config_id or config_id not in valid:
+            return {}
+
+        config = dict(valid[config_id])
+        model_name = model or getattr(self, "_current_model_name", "") or config.get("模型名称", "")
+        if model:
+            matched = self._fuzzy_match_model_name(
+                config_id,
+                model.lower(),
+                lambda: self._get_model_list_for_provider(config_id),
+            )
+            model_name = matched or model
+        config["模型名称"] = model_name
+        return apply_model_defaults(config, model_name)
+
     def _maybe_build_deferred_content(self):
         """【P2 懒加载】窗口首次激活（变为可见）时补建延迟的重型内容
 
@@ -3656,6 +3699,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "plugin_name": info.plugin_name,
                 "window_id": getattr(self, "_window_id", None),
                 "main_widget": self,
+                "services": self._build_ui_services(),
             }
             info.on_click(context)
         except Exception as e:
@@ -3671,6 +3715,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "plugin_name": info.plugin_name,
                 "window_id": getattr(self, "_window_id", None),
                 "main_widget": self,
+                "services": self._build_ui_services(),
             }
             info.on_right_click(context)
         except Exception as e:
@@ -22546,6 +22591,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         服务键集契约见 app/plugins/contracts/engine_host.py（EngineHost Protocol），
         新增/删改服务必须同步该契约与 tests/plugins/test_engine_host_contract.py。
+
+        get_provider_config 是插件取「任意服务商配置」的**唯一正确入口**：密钥模式下
+        磁盘 API_KEY 为密文/空串，插件直读 app.config 会拿到不可用的 key。
         """
         backend = self.backend
 
@@ -22649,6 +22697,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         return {
             "get_model_config": self._get_current_model_config,
+            "get_provider_config": self._resolve_provider_config,
             "get_tool_executor": lambda: backend.tool_executor if backend else None,
             "get_agent_manager": lambda: backend.agent_manager if backend else None,
             "get_agent_prompt": _agent_prompt,
