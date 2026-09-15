@@ -24,8 +24,6 @@ card-loaded-skip  value=735 max=1014 gap=279 away=True   # 最终离底 279px，
 import time
 from unittest.mock import MagicMock
 
-import pytest
-
 # 注意：不得在此插入 "app" 到 sys.path——app/plugins（regular package）会
 # 劫持顶层 `plugins.*` 命名空间解析。仓库根已由 pytest rootdir 提供。
 
@@ -66,14 +64,6 @@ def _make_win(**overrides):
     for key, value in overrides.items():
         setattr(win, key, value)
     return win
-
-
-@pytest.fixture(autouse=True)
-def _silence_diag(monkeypatch):
-    """诊断打点默认开启，测试里关掉，避免刷日志"""
-    import app.main_widget as mw
-
-    monkeypatch.setattr(mw, "_SCROLL_DIAG_ENABLED", False)
 
 
 # ─── 1. away 置位必须排除程序滚动 ────────────────────────────────
