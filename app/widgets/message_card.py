@@ -16004,6 +16004,45 @@ class MessageCard(SimpleCardWidget):
                 if (!tc) {{
                     tc = document.getElementById('content-placeholder');
                 }}
+                // 🐛 修复（完成框沉底·就地插位）：完成块注入/转换后立即按 data-order
+                // 插到正确位置，不依赖后续 reorganizeContent。工具完成后的渲染可能
+                // 走差量快路径（不跑排序）或不再有下一拍（S1：正文先于工具结束，
+                // 终渲染已落地）→ replaceChild/appendChild 的物理位置（restore 恢复
+                // 的底部）永久固化 → 完成框沉底。跳过运行中块（1e9 沉底语义）与
+                // 无 data-order 块；仅在工具区容器生效（编辑类工具保留正文语义，
+                // 不参与 order 重排）。
+                var _tgt = null;
+                function _insertByOrder(el, container) {{
+                    if (container.id !== 'tool-content') return;
+                    var od = parseFloat(el.getAttribute('data-order'));
+                    if (isNaN(od)) return;
+                    var kids = container.children;
+                    for (var i = 0; i < kids.length; i++) {{
+                        var k = kids[i];
+                        if (k === el) continue;
+                        if (k.classList && k.classList.contains('tool-streaming-block')) continue;
+                        var kod = parseFloat(k.getAttribute('data-order'));
+                        // 🐛 用 >= 而非 >：data-order 存在双尺度（JS 注入块 = 锚点前
+                        // think/tool 计数；D+ 补齐块 = 容器 blocks 序号），跨尺度相等
+                        // 时（如工具 od=1.0 与紧随的思考 od=1.0）严格大于永远找不到
+                        // 插入点 → 沉底滞留。相等时插到该块之前，语义正确（工具在
+                        // 其调用位置之后、后续思考之前）；同锚点多工具由 0.001 细分，
+                        // 不受影响。
+                        if (!isNaN(kod) && kod >= od) {{ container.insertBefore(el, k); return; }}
+                    }}
+                }}
+                // [sink-diag] 工具区快照（物理顺序 vs data-order），DRIFOX_SINK_DIAG=1 时回传 Python 打日志
+                function _snap() {{
+                    var out = [];
+                    for (var i = 0; i < tc.children.length; i++) {{
+                        var k = tc.children[i];
+                        out.push([k.getAttribute('data-tool-call-id'),
+                                  (k.getAttribute('data-block-key') || '').slice(0, 10),
+                                  k.getAttribute('data-order'),
+                                  (k.className || '').slice(0, 40)]);
+                    }}
+                    return out;
+                }}
                 // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
                 var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 if (existing) {{
@@ -16028,10 +16067,12 @@ class MessageCard(SimpleCardWidget):
                                 _newBlock.setAttribute('data-order', {_order_value_js});
                             }}
                             existing.parentNode.replaceChild(_newBlock, existing);
+                            _tgt = _newBlock;
                         }}
                     }} else {{
                         // 原地更新：保持同一 DOM 节点，只替换 className / 属性
                         // 避免 outerHTML 销毁+重建导致的"消失再出现"闪烁
+                        _tgt = existing;
                         existing.className = 'cm-collapsible tool-block';
                         existing.setAttribute('data-block-key', '{block_key}');
                         existing.setAttribute('data-expanded', 'false');
@@ -16057,6 +16098,8 @@ class MessageCard(SimpleCardWidget):
                             existing.innerHTML = {safe_inner};
                         }}
                     }}
+                    // 就地插位 + 快照回传（修复完成框沉底：不依赖后续渲染的排序修正）
+                    if (_tgt) _insertByOrder(_tgt, tc);
                     // 确保 tool-section 可见
                     if (window._toolCompactMode) {{
                         var ts = document.getElementById('tool-section');
@@ -16078,7 +16121,7 @@ class MessageCard(SimpleCardWidget):
                     window._suppressScrollEvent = false;
                     if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
                     reportHeight();
-                    return;
+                    return _snap();
                 }}
                 // 无已有流式块时，追加新块（兜底逻辑）
                 // 🐛 修复：不使用包装器 div（createElement+innerHTML+appendChild），
@@ -16093,6 +16136,10 @@ class MessageCard(SimpleCardWidget):
                     // 保证下次 reorganizeContent 排序能回到正确位置而非恒沉底。
                     _newBlock.setAttribute('data-order', {_order_value_js});
                     tc.appendChild(_newBlock);
+                    // 🐛 修复（完成框沉底·就地插位）：appendChild 兑底同样立即归位，
+                    // 不依赖后续渲染（S1 末轮无下一拍）。
+                    _insertByOrder(_newBlock, tc);
+                    _tgt = _newBlock;
                 }}
                 // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
                 // 区域独立 II：追加完成块是纯工具区更新 → bodyOnly 不碰正文容器
@@ -16117,6 +16164,7 @@ class MessageCard(SimpleCardWidget):
                     if (ts2) ts2.style.display = '';
                 }}
                 reportHeight();
+                return _snap();
             }})();
             """
             # [B2] 工具 DOM 已被 JS 增量注入 → 标记脏，下一次 _perform_update 必须走
@@ -16132,7 +16180,18 @@ class MessageCard(SimpleCardWidget):
                     pending.discard(tool_call_id)
             except Exception:
                 pass
-            self.viewer.page().runJavaScript(js_code)
+
+            def _sink_diag(r) -> None:
+                # [sink-diag] 完成框注入后的工具区快照（物理顺序 vs data-order）。
+                # DRIFOX_SINK_DIAG=1 时打日志，用于"沉底"类问题的现场取证。
+                if not os.environ.get("DRIFOX_SINK_DIAG") or not r:
+                    return
+                try:
+                    logger.info(f"[sink-diag] {tool_call_id} tool-content: {r}")
+                except Exception:
+                    pass
+
+            self.viewer.page().runJavaScript(js_code, _sink_diag)
         except Exception as e:
             logger.warning(f"增量工具块注入失败: {e}")
         # 🆕 F2（S1 归位兜底）：最后一个工具完成时关闭坞态。

@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
-"""复现：简洁模式（坞态）下 S1 场景（正文先于工具完成）末轮工具完成框沉底。
+"""复现（v2 多轮）：简洁模式多轮 agent 循环下工具完成框沉底。
 
-时序（生产真实链路）：
-1. 简洁模式开 → 流式开始
-2. 正文流式输出 → 工具调用（运行中块注入 #tool-content）
-3. 继续流式（触发 updateContent → reorganizeContent → save/restore 真实链路）
-4. 文本先结束：finish_streaming（有活跃工具 → keep_dock=True，坞态保留）
-5. 工具完成：append_tool_result（增量注入完成块）
-6. 采样 #tool-content 子元素物理顺序 vs data-order
-
-判定：完成块（tool_1）的物理位置若在列表末尾而其 data-order 非最大 → 沉底复现。
+时序（贴近生产）：
+- 第 1 轮：思考1 → 工具1 调用 → 1.5s 执行窗（正文继续流式）→ 工具1 完成
+  → LLM 继续流式（agent loop 新一轮）
+- 第 2 轮：思考2 → 工具2 调用 → 0.8s 执行窗 → 工具2 完成 → 收尾
+- 每个关键步后采样 #tool-content：物理顺序 vs data-order + 关键属性
 
 运行：python tests/debug/tool_completion_sink_repro.py
 """
@@ -34,11 +30,18 @@ PROBE = """
     out.push([k.getAttribute('data-tool-call-id'),
               (k.getAttribute('data-block-key')||'').slice(0,10),
               k.getAttribute('data-order'),
-              (k.className||'').slice(0,60)]);
+              k.getAttribute('data-streaming')||'-',
+              (k.className||'').slice(0,44)]);
   }
+  out.push(['TC-SCROLL', Math.round(tc.scrollTop), Math.round(tc.scrollHeight-tc.clientHeight), '', '']);
   return {order: out};
 })()
 """
+
+_LONG = (
+    "工具执行期间正文仍在流式输出，这段说明文字足够长，会触发自然边界渲染与"
+    "工具区迁移逻辑，穿插多段以模拟真实的 agent 循环节奏。\n\n"
+)
 
 
 def main() -> None:
@@ -48,6 +51,44 @@ def main() -> None:
     card = MessageCard(role="assistant")
     card.resize(700, 520)
     card.show()
+
+    def probe(label: str) -> None:
+        v = card.viewer
+        if v is None:
+            return
+        v.page().runJavaScript(PROBE, lambda r=None, l=label: (report(l, r)))
+
+    def report(label: str, r) -> None:
+        rows = (r or {}).get("order") if isinstance(r, dict) else None
+        if rows is None:
+            print(f"[{label}] probe fail: {r}")
+            return
+        print(f"----- [{label}] -----")
+        for row in rows:
+            if row[0] == "TC-SCROLL":
+                print(f"  tool-content scroll={row[1]}/{row[2]}")
+            else:
+                print(f"  tid={row[0]} bk={row[1]} od={row[2]} streaming={row[3]} cls={row[4]}")
+
+    def judge() -> None:
+        v = card.viewer
+        v.page().runJavaScript(PROBE, lambda r=None: (final(r), app.quit()))
+
+    def final(r) -> None:
+        rows = (r or {}).get("order") if isinstance(r, dict) else None
+        print("===== 最终态 =====")
+        sink = False
+        if rows:
+            ods = [float(x[2]) for x in rows if x[0] != "TC-SCROLL" and x[2] is not None]
+            for a, b in zip(ods, ods[1:]):
+                if a > b:
+                    sink = True
+            for row in rows:
+                if row[0] == "TC-SCROLL":
+                    print(f"  tool-content scroll={row[1]}/{row[2]}")
+                else:
+                    print(f"  tid={row[0]} bk={row[1]} od={row[2]} streaming={row[3]} cls={row[4]}")
+        print(">>> 复现：沉底" if sink else ">>> 最终态顺序正确")
 
     def start() -> None:
         card.start_streaming_anim()
@@ -59,86 +100,47 @@ def main() -> None:
         if v is None or not getattr(v, "_is_js_ready", False):
             QTimer.singleShot(200, wait_js)
             return
-        # 简洁模式开关（生产由 Settings.ui_compact_tool_area 注入）
         v.page().runJavaScript("window._toolCompactMode=true; window._setStreamingDock(true);")
-        # 数据层：思考1 → 工具1 → 正文 → 思考2 → 工具2（交错 + 锚点偏移）
         card.append_text("开始处理任务。\n\n")
         card.start_new_thinking_block()
-        card.append_reasoning("先思考第一步：检索资料。")
-        card.update_tool_streaming("tool_1", "search", {"q": "DriFox 滚动锚定"})
-        card.append_text("检索进行中，先说明思路。\n\n")
+        card.append_reasoning("第一步：检索资料。")
+        card.update_tool_streaming("tool_1", "search", {"q": "DriFox"})
+        exec_window(0, after_tool1_done)
+
+    def exec_window(n: int, done) -> None:
+        # 工具执行窗：正文继续流式（渲染链持续运转）
+        card.append_text(_LONG)
+        if n < 5:
+            QTimer.singleShot(120, lambda: exec_window(n + 1, done))
+        else:
+            QTimer.singleShot(300, done)
+
+    def after_tool1_done() -> None:
+        card.append_tool_result(
+            tool_name="search", result="检索结果：DriFox 是 PyQt5 桌面应用。", tool_call_id="tool_1"
+        )
+        QTimer.singleShot(600, lambda: (probe("tool1-完成+0.6s"), QTimer.singleShot(200, round2)))
+
+    def round2() -> None:
+        # agent loop 新一轮：LLM 继续输出 + 第二个工具
+        card.append_text("根据检索结果继续分析。\n\n")
         card.start_new_thinking_block()
-        card.append_reasoning("第二步：读取文件确认细节。")
+        card.append_reasoning("第二步：读取配置确认。")
         card.update_tool_streaming("tool_2", "read", {"path": "app/main.py"})
-        stream(0)
+        exec_window(0, after_tool2_done)
 
-    def stream(n: int) -> None:
-        # 灌 chunk 触发 updateContent → reorganizeContent → save/restore 真实链路
-        card.append_text(
-            f"流式补充说明第 {n} 段。这段文字足够长，以触发正文重排与工具区迁移逻辑，"
-            "并让 save/restore 与排序快路径真实运转。\n\n"
+    def after_tool2_done() -> None:
+        card.append_tool_result(
+            tool_name="read", result="文件内容：import sys ...", tool_call_id="tool_2"
         )
-        if n < 3:
-            # 60ms 高频间隔：模拟真实流式节奏（渲染走增量分支，reorganizeContent 少跑）
-            QTimer.singleShot(60, lambda: stream(n + 1))
-        else:
-            QTimer.singleShot(400, finish_s1)
+        QTimer.singleShot(600, lambda: (probe("tool2-完成+0.6s"), QTimer.singleShot(300, finish)))
 
-    def finish_s1() -> None:
-        # S1：文本先于工具完成而结束（有活跃工具 → keep_dock=True）
+    def finish() -> None:
         card.finish_streaming()
-        QTimer.singleShot(700, tool2_done)
-
-    def tool2_done() -> None:
-        # 反序完成：后调用的 tool_2 先完成（生产常见：耗时不同的并行工具）
-        card.append_tool_result(
-            tool_name="read",
-            result="文件内容：main.py ...",
-            tool_call_id="tool_2",
-        )
-        QTimer.singleShot(900, tool1_done)
-
-    def tool1_done() -> None:
-        card.append_tool_result(
-            tool_name="search",
-            result="检索完成：DriFox 是一个 PyQt5 桌面 LLM 聊天应用。",
-            tool_call_id="tool_1",
-        )
-        QTimer.singleShot(1200, probe)
-
-    def probe() -> None:
-        v = card.viewer
-        if v is None:
-            print("viewer 缺失")
-            app.quit()
-            return
-        v.page().runJavaScript(PROBE, lambda r=None: (report(r), app.quit()))
-
-    def report(r) -> None:
-        print("===== #tool-content 物理顺序 =====")
-        rows = (r or {}).get("order") if isinstance(r, dict) else None
-        if rows is None:
-            print("probe fail:", r)
-            app.quit()
-            return
-        sink = False
-        for i, row in enumerate(rows):
-            tid, bk, od, cls = row
-            print(f"  [{i}] tid={tid} bk={bk} order={od} cls={cls}")
-        # 沉底判定：物理顺序与 order 升序不一致（存在相邻逆序对）
-        ods = [float(x[2]) for x in rows if x[2] is not None]
-        for a, b in zip(ods, ods[1:]):
-            if a > b:
-                sink = True
-        print()
-        if sink:
-            print(">>> 复现：完成块沉底（物理顺序与 data-order 升序不一致）")
-        else:
-            print(">>> 未复现：完成块位置正确")
-        app.quit()
+        QTimer.singleShot(1200, judge)
 
     QTimer.singleShot(200, start)
-    QTimer.singleShot(30000, app.quit)
+    QTimer.singleShot(45000, app.quit)
     app.exec_()
 
 
