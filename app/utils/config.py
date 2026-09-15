@@ -712,19 +712,14 @@ class Settings(QConfig):
     tab_panel_mode = OptionsConfigItem(
         "UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"])
     )
-    # 工作区树折叠态：{节点 key: 是否展开}
-    workspace_tree_expansion = ConfigItem("UI", "WorkspaceTreeExpansion", {})
     pet_size = OptionsConfigItem("UI", "PetSize", "small", OptionsValidator(["small", "medium", "large"]))
 
-    # ========== 会话项目管理 ==========
-    current_project = ConfigItem("Session", "CurrentProject", "默认项目")
+    # 注：上次项目/上次欢迎 tab/树折叠态等「上次状态」已迁至 app_state（.drifox/cache/app_state.json），
+    # 不再作为系统配置项；旧 app.config 中的值由 app_state 首次加载时一次性迁入。
 
     # ========== 欢迎卡片模式（sessions / 插件注册 tab）==========
     # 内置 mode 仅保留 sessions；其余（📜 更新 等）由插件注册，禁用插件后自动消失。
     welcome_mode = OptionsConfigItem("UI", "WelcomeMode", "sessions", OptionsValidator(["sessions"]))
-    # 插件注册的欢迎 tab 记忆：welcome_mode 的 OptionsValidator.correct 会把
-    # 插件 mode_key 纠正回 sessions，无法复用；用独立无验证器字段存任意字符串。
-    welcome_plugin_tab = ConfigItem("UI", "WelcomePluginTab", "")
 
     # 侧边栏折叠态记忆：仅记用户手动操作（标题栏按钮/拖拽把手松手）的终态，
     # 挤压等自动折叠不落盘，重启恢复用户意图而非临时状态

@@ -644,3 +644,44 @@ def test_skeleton_cache_version_bumped_for_plan_fg():
     src = _extract_src()
     m = re.search(r"_SKELETON_CACHE_VERSION = (\d+)", src)
     assert m and int(m.group(1)) >= 6, f"方案 F/G 改动骨架 JS 后必须 >= 6，实际 {m.group(1) if m else 'None'}"
+
+
+# ──────────────────────────────────────────────
+# v34（末轮工具完成框沉底）修复回归
+# 根因：restore 恒 appendChild 沉底（F1：运行中块 dock 语义正确）+ append_tool_result
+# 原地 replaceChild 转换完成块（继承 data-order、物理位置不动）→ 完成块 data-order
+# 正确但物理滞留底部；S1（正文先于工具结束）终渲染后无新 markdown 块 →
+# reorganizeContent 键集合恒同、无块缺 data-order → 键序列 diff 全绿 +
+# _assignedDataOrder=False → 跳过 sort → 完成框沉底固化。偶现条件：工具完成后
+# 再无新正文块（典型为会话末轮的最后一个工具）。
+# 修复：_orderChanged 判定追加 data-order 物理单调性检查（跳过运行中块与
+# 无 data-order 块），物理倒序 → 强制 sort。
+# ──────────────────────────────────────────────
+
+
+def test_reorganize_content_force_sort_on_data_order_descent():
+    """AST：_orderChanged 必须检查 data-order 物理单调性。
+
+    restore appendChild + replaceChild 原地转换后，键序列 diff 与
+    _assignedDataOrder 都探测不到"物理顺序 ≠ data-order 顺序"（键集合未变、
+    无块缺 data-order）→ 末轮工具完成框沉底固化。物理 data-order 倒序必须
+    强制 sort。
+    """
+    src = _extract_src()
+    assert "var _prevOd = -Infinity" in src, "必须存在 data-order 单调性检查（_prevOd 起点 -Infinity）"
+    assert "_mv < _prevOd" in src, "发现 data-order 倒序必须置 _orderChanged = true"
+    # 检查必须位于键序列 diff 之后、sort 执行之前
+    diff_pos = src.find("_curKeys[_di] !== _lastOrder[_di]")
+    check_pos = src.find("var _prevOd = -Infinity")
+    sort_pos = src.find("if (_orderChanged) {{", diff_pos)
+    assert -1 < diff_pos < check_pos < sort_pos, "单调性检查必须插在键序列 diff 与强制 sort 之间"
+    # 检查块内部必须跳过运行中块（1e9 沉底语义，data-order 是调用时刻旧快照）
+    seg = src[check_pos:sort_pos]
+    assert "tool-streaming-block" in seg, "单调性检查必须跳过 tool-streaming-block"
+
+
+def test_skeleton_cache_version_bumped_for_v34():
+    """AST：v34 改动了骨架 JS（reorganizeContent 单调性检查），必须递增版本。"""
+    src = _extract_src()
+    m = re.search(r"_SKELETON_CACHE_VERSION = (\d+)", src)
+    assert m and int(m.group(1)) >= 34, f"v34 改动骨架 JS 后必须 >= 34，实际 {m.group(1) if m else 'None'}"

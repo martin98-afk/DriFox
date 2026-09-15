@@ -46,6 +46,8 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from app.utils.app_state import get as _state_get
+from app.utils.app_state import set as _state_set
 from app.utils.config import Settings
 from app.utils.design_tokens import Animations, Colors, font_size_css, get_unified_scrollbar_style, scale_font_size, scale_icon_size
 from app.utils.motion import retarget
@@ -1419,7 +1421,7 @@ class TabPanel(QWidget):
         try:
             cfg = Settings.get_instance()
             saved_mode = cfg.tab_panel_mode.value
-            saved_expansion = cfg.workspace_tree_expansion.value
+            saved_expansion = _state_get("workspace_tree_expansion", {})
         except Exception:
             saved_mode, saved_expansion = PANEL_MODE_LIST, {}
         self._mode = PANEL_MODE_TREE if saved_mode == PANEL_MODE_TREE else PANEL_MODE_LIST
@@ -2728,15 +2730,12 @@ class TabPanel(QWidget):
         self._rebuild_layout()
 
     def _on_tree_expansion_changed(self, state):
-        """树的折叠态变化 → 落 Settings（重启后保持展开现场）
+        """树的折叠态变化 → 落 app_state（重启后保持展开现场）
 
-        ⚠️ 走 Settings.set(..., save=True)，理由同 set_mode —— 直接改 item.value
-        不落盘。折叠态每次点箭头都会变，这里做一次 400ms 去抖合并写盘，避免
-        连点箭头时反复整份序列化 app.config。
+        折叠态属「上次状态」而非用户偏好，存 app_state.json，不进系统配置。
+        每次点箭头都会变，这里做一次 400ms 去抖合并写盘，避免连点箭头时反复写文件。
         """
         try:
-            # ⚠️ 不能先写 item.value：Settings.set() 有「值未变化就 return」的短路，
-            # 先改内存会让 save=True 也变成空操作。
             self._pending_expansion = dict(state or {})
             timer = getattr(self, "_expansion_save_timer", None)
             if timer is None:
@@ -2750,10 +2749,9 @@ class TabPanel(QWidget):
             pass
 
     def _flush_expansion_state(self):
-        """去抖到期：把折叠态真正写盘"""
+        """去抖到期：把折叠态真正写盘（app_state.json）"""
         try:
-            cfg = Settings.get_instance()
-            cfg.set(cfg.workspace_tree_expansion, dict(self._pending_expansion or {}), save=True)
+            _state_set("workspace_tree_expansion", dict(self._pending_expansion or {}))
         except Exception:
             pass
 

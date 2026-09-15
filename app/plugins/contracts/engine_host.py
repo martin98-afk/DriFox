@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """EngineHost 契约 — UI 插件 context["services"] 的类型化语义声明。
 
-现状：main_widget._build_ui_services() 返回 dict（18 个服务函数），插件按下标
+现状：main_widget._build_ui_services() 返回 dict（19 个服务函数），插件按下标
 取用、无静态检查。本 Protocol 是**语义锚点**——
 - 插件作者：以本文件为服务面清单写代码（IDE 补全/类型检查）
 - 主程序：dict 键集与本 Protocol 方法集保持一致（tests 守卫防漂移）
@@ -18,11 +18,32 @@ from typing import Any, Dict, List, Protocol, runtime_checkable
 
 @runtime_checkable
 class EngineHost(Protocol):
-    """对话引擎插件可用的宿主服务面（对应 ctx["services"] 全部 18 键）"""
+    """对话引擎插件可用的宿主服务面（对应 ctx["services"] 全部 19 键）"""
 
     # ===== 对话栈驱动 =====
     def get_model_config(self) -> Dict[str, Any]:
         """当前模型配置（provider/api_key/base_url/model 等）"""
+        ...
+
+    def get_provider_config(self, provider: str = "", model: str = "") -> Dict[str, Any]:
+        """按服务商名（config_id / display_name / provider_name）取完整模型配置。
+
+        **插件取模型配置的唯一正确入口**，返回 dict 含已解锁的明文 API_KEY /
+        API_URL / 模型名称及模型默认参数；provider 为空表示当前服务商，
+        model 为空表示该服务商当前模型。未知 provider / 无可用配置返回 {}。
+
+        为什么必须走这里：密钥模式下磁盘 app.config 的 API_KEY 是密文
+        （password 模式 enc:v2:…）或空串（keyring 模式），插件自行 json.load
+        该文件会拿到不可用的 key（表现为 401 Missing API key）。只有主程序
+        内存态持有解密后的明文。
+
+        Args:
+            provider: 服务商标识，支持 config_id / display_name / provider_name
+            model: 模型名，空则用该服务商的当前模型；非空时做模糊匹配回填
+
+        Returns:
+            可直接喂给 build_openai_client 的 llm_config；无可用配置时 {}
+        """
         ...
 
     def get_tool_executor(self) -> Any:
