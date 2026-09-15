@@ -1030,6 +1030,9 @@ class OpenAIChatToolWindow(ToolWindow):
     # 工具热重载风险通知：进程级注册标记（多窗口只注册一次 listener）
     _tool_reload_notice_registered: bool = False
 
+    # 病态 renderer 看门狗：进程级接线标记（多窗口只连一次信号，走类槽）
+    _renderer_watchdog_connected: bool = False
+
     # 团队模板：新建窗口延后 join team 的延迟（ms），等 backend 初始化完成
     # TODO: 根据用户机器性能动态调整此值
     _TEMPLATE_JOIN_DELAY_MS: int = 300
@@ -2674,6 +2677,21 @@ class OpenAIChatToolWindow(ToolWindow):
         # 启动子智能体日志自动清理（每6小时清理一次，保留14天）
         self._start_subagent_log_cleanup()
 
+        # 病态 renderer 看门狗：长对话+大 base64 图场景下，承载可见卡片的
+        # renderer 内存可涨到 3GB+ → V8 窒息 → 全部视图白屏（含新建对话），
+        # 且 renderer 未崩溃时 renderProcessTerminated 不触发、自愈链沉睡。
+        # 看门狗检测到病态进程后 terminate 它，唤醒既有自愈链完成恢复。
+        try:
+            from app.widgets.renderer_watchdog import RendererWatchdog
+
+            watchdog = RendererWatchdog.get_instance()
+            if not OpenAIChatToolWindow._renderer_watchdog_connected:
+                watchdog.rendererSick.connect(OpenAIChatToolWindow._on_renderer_sick)
+                OpenAIChatToolWindow._renderer_watchdog_connected = True
+            watchdog.ensure_started()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[R-watchdog] 启动失败（不影响主流程）: {e}")
+
         # 团队成员窗口：角色工具权限覆盖补应用（幂等）。
         # 背景：apply_agent 只在 /team --load 的延迟 join 与 /agent 命令路径执行；
         # 重启恢复/重建的成员窗口不会经过这两条路径，controller 停留在用户模式
@@ -2754,6 +2772,42 @@ class OpenAIChatToolWindow(ToolWindow):
             except RuntimeError:
                 pass
             window_registry.subagent_log_cleanup_timer = None
+
+    @classmethod
+    def _on_renderer_sick(cls, pid: int, rss_mb: float):
+        """看门狗判定病态 renderer：剔池内残留 viewer + terminate 该进程。
+
+        kill 后 Chromium 向该进程上所有视图广播 renderProcessTerminated，
+        message_card 自愈链（重载骨架 → 补渲）自动恢复；反复病态的 viewer
+        走 needRecreate 整卡重建。新视图落在新 renderer 进程，内存清零。
+
+        走类槽 + window_registry 遍历：不依赖某个窗口实例存活，信号永有接收者。
+        """
+        logger.warning(f"[R-watchdog] 处置病态 renderer pid={pid} rss={rss_mb:.0f}MB")
+        try:
+            from app.widgets.webview_pool import WebViewPool
+
+            purged = WebViewPool.get_instance().purge_pid(pid)
+            if purged:
+                logger.info(f"[R-watchdog] 已剔除池中该进程 viewer {purged} 个（防复用白屏）")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[R-watchdog] 剔池异常（忽略）: {e}")
+        # _unloaded_pids 里该 pid 的登记作废（进程将死，留着只会被 B4 重复 kill）
+        for win in window_registry.alive_window_instances():
+            if getattr(win, "_is_destroyed", False):
+                continue
+            try:
+                queue = getattr(win, "_unloaded_pids", None)
+                if queue:
+                    win._unloaded_pids = [e for e in queue if e[0] != pid]
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            killed = bool(OpenAIChatToolWindow._kill_renderer(pid))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[R-watchdog] kill pid={pid} 异常: {e}")
+            killed = False
+        logger.warning(f"[R-watchdog] terminate pid={pid} killed={killed}，等待自愈链恢复各卡片")
 
     def _do_clean_subagent_logs(self):
         """执行子智能体日志清理（保留14天）"""

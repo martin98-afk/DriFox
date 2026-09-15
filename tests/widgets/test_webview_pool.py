@@ -166,6 +166,26 @@ class TestPidGuard:
     def test_pids_empty_when_idle(self, fresh_pool, qapp):
         assert fresh_pool.pids() == set()
 
+    def test_purge_pid_removes_only_matching_viewers(self, fresh_pool, qapp):
+        """看门狗剔池：只销毁病态 PID 的 viewer，其他保留可复用"""
+        sick1 = _StubViewer(pid=111)
+        sick2 = _StubViewer(light=True, pid=111)
+        healthy = _StubViewer(pid=222)
+        fresh_pool.release(sick1)
+        fresh_pool.release(sick2, light=True)
+        fresh_pool.release(healthy)
+        assert fresh_pool.purge_pid(111) == 2
+        assert fresh_pool.stats["evicted"] == 2
+        # 病态 PID 的 viewer 已不在池中且被销毁调度，健康的不受影响
+        assert fresh_pool.pids() == {222}
+        assert fresh_pool.acquire() is healthy
+
+    def test_purge_pid_ignores_invalid(self, fresh_pool, qapp):
+        fresh_pool.release(_StubViewer(pid=111))
+        assert fresh_pool.purge_pid(0) == 0
+        assert fresh_pool.purge_pid(-5) == 0
+        assert fresh_pool.size() == 1
+
 
 class TestDegradation:
     def test_disabled_pool_neither_acquires_nor_releases(self, fresh_pool, qapp):

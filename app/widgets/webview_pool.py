@@ -147,6 +147,31 @@ class WebViewPool:
         self._failures = 0
         return True
 
+    def purge_pid(self, pid: int) -> int:
+        """把池中占用指定 renderer PID 的 viewer 全部销毁并移出池。
+
+        看门狗 terminate 病态 renderer 前调用：这些 viewer 所属进程即将被
+        终止，留在池里会被复用 → 必然白屏。返回剔除数量（记账入 evicted）。
+        """
+        if pid <= 0:
+            return 0
+        removed = 0
+        for bucket in self._idle.values():
+            keep = []
+            for viewer in bucket:
+                try:
+                    vpid = getattr(viewer, "_renderer_pid", 0) or 0
+                except Exception:
+                    vpid = 0
+                if vpid == pid:
+                    self._stats["evicted"] += 1
+                    self._safe_delete(viewer)
+                    removed += 1
+                else:
+                    keep.append(viewer)
+            bucket[:] = keep
+        return removed
+
     def clear(self) -> None:
         """清空并销毁所有池中 viewer（退出 / 主题全局刷新等场景）。"""
         for bucket in self._idle.values():
