@@ -125,3 +125,20 @@ def _build_chain(cfg) -> list:
 - 链头部失败 → 自动转下一个（本次任务不丢）；单引擎模式失败即报错。
 - key 全缺时在入口直接拦截并 InfoBar 提示去设置页填写。
 - 实战参照：`drifox-plugins2/plugins/voice-input/ui/__init__.py`（_build_chain / _start_cloud）。
+
+## 6. 复用主程序模型配置（services["get_provider_config"]）
+插件要「切到某个服务商跑一次 LLM 调用」（模型下拉 / 一次性增强 / 提交描述生成）
+时，**必须**经宿主服务取配置，禁止直读 `app.config` 取密钥（详见 pitfalls §18）：
+```python
+services = context.get("services") or {}          # 输入按钮 / 浮动卡 context 均含
+get_cfg = services.get("get_provider_config")     # 旧版主程序无此键 → 走内存兜底
+cfg = get_cfg("MiniMax", "MiniMax-M2.7")          # provider/model 空串 = 当前
+# → {"API_KEY": "sk-…明文", "API_URL": "…", "模型名称": …, +模型默认参数}
+```
+- `provider` 支持 config_id / display_name / provider_name（五级匹配）；
+- 未知 provider 返回 `{}`：显式指名时直接报「未找到模型配置」，不静默换服务商；
+- 配套下拉选项可读磁盘**非密钥字段**（`provider_name` / `模型列表`）渲染；
+- 旧版主程序（无该服务键）兜底：遍历 `main_widget._valid_configs`
+  （同为内存态明文），按 `config_id / display_name / provider_name` 匹配；
+- 实战参照：`drifox-plugins2/plugins/prompt-enhancer/ui/__init__.py` 的
+  `_get_llm_config`（services 优先 + 内存兜底双通道）。
