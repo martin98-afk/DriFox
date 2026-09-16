@@ -57,6 +57,7 @@ from .sections import (
     ProjectSection,
     ToolAccessSection,
     _btn_style,
+    _host_window,
 )
 
 
@@ -67,33 +68,6 @@ def _open_dialog(dlg) -> int:
     _hBox 布局是卡片位置的权威，手动干预会与布局互相覆盖导致卡片漂移。
     """
     return dlg.exec_()
-
-
-def _host_window():
-    """弹窗 parent：完整主窗口（TabManagerWindow 单例，对齐 plugin-marketplace 做法）。
-
-    self.window() 在 full 卡容器内可能返回卡片容器而非主窗口，导致
-    MaskDialog 遮罩只盖住容器、定位异常。回退链：TabManagerWindow 单例
-    → UIPluginRegistry 主 widget 的 window() → None（调用方自行兜底）。
-    """
-    try:
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        win = TabManagerWindow.get_instance()
-        if win is not None:
-            return win
-    except Exception:
-        pass
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        reg = UIPluginRegistry.get_instance()
-        for mw in (getattr(reg, "_main_widget", None), *getattr(reg, "_window_main_widgets", {}).values()):
-            if mw is not None:
-                return mw.window()
-    except Exception:
-        pass
-    return None
 
 
 def _confirm_dialog(parent, title: str, text: str) -> bool:
@@ -280,6 +254,8 @@ class AssistantCardWidget(QWidget):
         # 3-6. 分区
         self._profile = ProfileSection()
         self._profile.saveRequested.connect(self._on_profile_save)
+        self._profile.userAvatarPicked.connect(self._on_user_avatar_picked)
+        self._profile.userAvatarCleared.connect(self._on_user_avatar_cleared)
         self._inner_v.addWidget(self._profile)
 
         self._about = AboutSection(self._persona_items(), "")
@@ -461,6 +437,7 @@ class AssistantCardWidget(QWidget):
         def _do_bind() -> None:
             mgr = self._mgr
             self._profile.bind(a.name or a.id, a.user_addressing or mgr.user_name(), a.utility_model or "")
+            self._profile.set_user_avatar(mgr.user_avatar_path(aid_capture), a.user_addressing or mgr.user_name())
             self._about.set_persona(a.yuan)
             self._project.set_notes(a.project_notes_enabled)
             self._project.set_context_enabled(a.project_context_enabled)
@@ -558,12 +535,47 @@ class AssistantCardWidget(QWidget):
             return
         self._mgr.update(a)
         self._mgr.invalidate_context(a.id)
+        self._clear_identity_cache()  # 称呼/名字变更后新消息立即用新身份（会话级缓存失效）
         # 轻量更新显示（不整页 reload，避免打断节流保存中的编辑）
         if name:
             self._name_label.setText(name)
             self._avatar.set_text(name)
         if a.primary:
             self._reload_all(select_aid=a.id)
+
+    # ══════════════════════════════════════════════════
+    #  用户头像（消息身份行显示）
+    # ══════════════════════════════════════════════════
+
+    def _on_user_avatar_picked(self, data: bytes, ext: str) -> None:
+        """用户头像选中（预置库复制 / 本地上传统一走 bytes 落盘）。"""
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        path = self._mgr.save_user_avatar_from_bytes(a.id, data, ext)
+        self._profile.set_user_avatar(str(path) if path else None, a.user_addressing or self._mgr.user_name())
+        self._clear_identity_cache()
+        self._notify("用户头像已更新，下一条消息生效")
+
+    def _on_user_avatar_cleared(self) -> None:
+        """恢复默认用户头像（色块 + 首字母）。"""
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        self._mgr.clear_user_avatar(a.id)
+        self._profile.set_user_avatar(None, a.user_addressing or self._mgr.user_name())
+        self._clear_identity_cache()
+        self._notify("已恢复默认用户头像，下一条消息生效")
+
+    @staticmethod
+    def _clear_identity_cache() -> None:
+        """清主程序消息身份缓存：称呼/头像变更后新消息立即用新身份。"""
+        try:
+            from app.core.message_identity import clear_cache
+
+            clear_cache()
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 清理身份缓存失败: {e}")
 
     def _on_persona_change(self, pid: str) -> None:
         """切换人格：只改 yuan 字段落盘，人格本身只读（新增走 persona-creator 技能）。"""

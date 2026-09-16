@@ -248,16 +248,17 @@ def _identity_name(ctx: dict) -> str:
 
 
 def _identity_avatar(ctx: dict) -> str:
-    """身份头像引用：会话级临时助手（@提及）用该助手自己的头像。"""
+    """身份头像引用：助手消息取助手头像；用户消息取该助手配置的用户头像。"""
     try:
         from assistant_hub_manager import AssistantManager
 
-        if str((ctx or {}).get("role") or "") == "user":
-            return ""
         mgr = AssistantManager.get_instance()
         aid = _resolve_active_aid(ctx)
         if not aid:
             return ""
+        if str((ctx or {}).get("role") or "") == "user":
+            user_avatar = mgr.user_avatar_path(aid)
+            return str(user_avatar) if user_avatar else ""
         path = mgr.assistant_avatar_path(aid)
         return str(path) if path else ""
     except Exception as e:

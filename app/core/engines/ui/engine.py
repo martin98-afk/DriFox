@@ -377,6 +377,10 @@ class UIEngine(BaseEngine):
         # ---- 提取图片附件路径（仅用户主动上传的图片，供 session 标记 + UI 预览）----
         _image_attachments = kwargs.pop("_image_attachments", None)
 
+        # ---- 提取原始输入元数据（全量附件 + 占位符正文，供撤回保真回填）----
+        _input_attachments = kwargs.pop("_input_attachments", None)
+        _raw_input_text = kwargs.pop("_raw_input_text", None)
+
         # ---- 提取 hook_event 标记（团队任务邮件等），写入 session 消息时打标 ----
         hook_event = kwargs.pop("_hook_event", None)
 
@@ -438,6 +442,8 @@ class UIEngine(BaseEngine):
             tool_executor=self._tool_executor,
             hook_event=hook_event,
             image_attachments=_image_attachments,
+            input_attachments=_input_attachments,
+            raw_input_text=_raw_input_text,
         )
         worker.start()
 
@@ -902,6 +908,8 @@ class _PreSendWorker(QThread):
         tool_executor,
         hook_event: str | None = None,
         image_attachments: list | None = None,
+        input_attachments: list | None = None,
+        raw_input_text: str | None = None,
     ):
         super().__init__()
         self._hook_mgr = hook_mgr
@@ -919,6 +927,8 @@ class _PreSendWorker(QThread):
         self._tool_executor = tool_executor
         self._hook_event = hook_event
         self._image_attachments = image_attachments
+        self._input_attachments = input_attachments
+        self._raw_input_text = raw_input_text
 
         # 结果
         self._messages: list = []
@@ -985,6 +995,10 @@ class _PreSendWorker(QThread):
                 _add_kwargs["_hook_event"] = self._hook_event
             if self._image_attachments:
                 _add_kwargs["_image_attachments"] = self._image_attachments
+            if self._input_attachments:
+                _add_kwargs["_input_attachments"] = self._input_attachments
+            if self._raw_input_text:
+                _add_kwargs["_raw_input_text"] = self._raw_input_text
             session.add_user_message(content=self._content_to_store, **_add_kwargs)
 
         # ---- 4. PostUserMessage hooks ----

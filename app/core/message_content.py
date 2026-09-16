@@ -839,6 +839,14 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         atts = message.get("_image_attachments")
         if isinstance(atts, list) and atts:
             normalized["_image_attachments"] = [str(p) for p in atts if p]
+        # 原始输入元数据（全量附件 + 占位符正文）：「撤销到这里」保真回填依赖，
+        # 同样必须显式保留
+        input_atts = message.get("_input_attachments")
+        if isinstance(input_atts, list) and input_atts:
+            normalized["_input_attachments"] = [str(p) for p in input_atts if p]
+        raw_input = message.get("_raw_input_text")
+        if isinstance(raw_input, str) and raw_input:
+            normalized["_raw_input_text"] = raw_input
     else:
         normalized["content"] = content_to_text(raw_content)
 

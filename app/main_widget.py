@@ -16164,11 +16164,56 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._show_undo_delete_card()
 
-        # 恢复输入框内容
-        restore_input_from_card(self.input_area, card)
+        # 恢复输入框内容（优先按发送时保存的原始输入元数据保真回填）
+        self._restore_input_after_undo(card)
 
         # 撤销后消息数变化，显式刷新历史问题徽章
         self._update_history_questions_badge()
+
+    def _restore_input_after_undo(self, card: MessageCard) -> None:
+        """撤回（撤销到这里）后回填输入框
+
+        带附件的消息其 content 已被发送构建替换成「完整路径内联」的终态文本，
+        直接回填（旧行为）会丢失附件 chips 与占位符结构，再次编辑发送必然与
+        原消息偏离（2026-09-16 撤回渲染异常根因）。发送链路会在消息上挂
+        ``_raw_input_text``（占位符形式正文）+ ``_input_attachments``（全量附件
+        路径），优先依此保真还原；旧消息无标记时降级为纯文本回填。
+        """
+        msg: Optional[dict] = None
+        idx = getattr(card, "_message_index", None)
+        if isinstance(idx, int) and 0 <= idx < len(self._message_batch):
+            entry = self._message_batch[idx]
+            if entry and entry[0].get("role") == "user":
+                msg = entry[0]
+
+        raw_text = (msg or {}).get("_raw_input_text")
+        atts = (msg or {}).get("_input_attachments")
+        if not raw_text and not atts:
+            restore_input_from_card(self.input_area, card)
+            return
+
+        # 恢复附件 chips（失效路径跳过，与历史模式附件恢复同口径）
+        self._clear_attachments()
+        valid_paths: list = []
+        for p in atts or []:
+            if os.path.exists(p):
+                self._add_attachment(p)
+                valid_paths.append(p)
+        self._rebuild_attachment_chips()
+
+        # 回填占位符形式正文 + 占位符转胶囊（依有效路径还原）
+        from PyQt5.QtGui import QTextCursor
+
+        text = str(raw_text or "")
+        if text.strip().startswith("/"):
+            self.input_area._suppress_slash_trigger = True
+        self.input_area.setPlainText(text)
+        self.input_area.convert_placeholders_to_mentions(valid_paths)
+        self.input_area._on_text_changed()
+        cursor = self.input_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.input_area.setTextCursor(cursor)
+        self.input_area.setFocus()
 
     def _get_all_tool_call_ids_from_round(self, round_index: int) -> List[str]:
         """获取从指定 round 到最后的所有 tool_call_id"""
@@ -17541,12 +17586,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 第一轮：替换文本中出现的 [[basename]] 占位符
         # 同名文件使用 count=1 左到右逐次替换，每个附件占一个 [[basename]]
+        # 路径前后各补一个空格：占位符可能与 @提及胶囊（展开为 "@名字"）或中文
+        # 正文紧邻，直接替换会产生 "@空D:\..." 这类 mention 与路径粘连的不可读
+        # 文本（提及语义与路径边界双双失效，2026-09-16 回溯发送乱码根因）。
         referenced = set()
         for p in self._attachments:
             basename = os.path.basename(p)
             placeholder = f"[[{basename}]]"
             if placeholder in user_text:
-                user_text = user_text.replace(placeholder, p, 1)
+                user_text = user_text.replace(placeholder, f" {p} ", 1)
                 referenced.add(p)
 
         # 第二轮：未在文本中引用的附件拼到末尾
@@ -17559,7 +17607,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 第三轮：清除残留的 [[xxx]] 占位符（不匹配任何附件）
         user_text = re.sub(r"\[\[[^\]]*\]\]", "", user_text)
-        user_text = user_text.replace("  ", " ").strip()
+        # 压缩占位符替换/清除产生的连续水平空白（保留换行，路径多行结构不动）
+        user_text = re.sub(r"[^\S\n]{2,}", " ", user_text).strip()
 
         return user_text
 
@@ -17814,7 +17863,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 属于正在编辑的内容，不属于本次自动发送的邮件文本。
         _preserve_attachments = preserve_input and bool(self._attachments)
         _image_paths: list[str] = []  # 仅收集图片路径，编码推迟
+        # 原始输入元数据（构建前捕获）：占位符形式正文 + 全量附件路径，随消息落库，
+        # 供「撤销到这里」保真回填（重建 chips + 胶囊）；preserve_input（系统自动
+        # 发送）的附件属于正在编辑的内容，不属于本条消息，不挂标（与下方拼接分支同口径）
+        _raw_input_text: Optional[str] = None
+        _input_attachments: Optional[list] = None
         if self._attachments and not _preserve_attachments:
+            _raw_input_text = user_text
+            _input_attachments = list(self._attachments)
             # 先统一处理附件文本替换（含图片 [[basename]] → 路径）— UI 显示和
             # LLM 看到的文本必须一致，所以这一步仍在主线程做（轻量字符串操作）。
             user_text = self._build_user_text_with_attachments(user_text)
@@ -17923,6 +17979,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 恢复会话时渲染缩略图预览条（此前漏传导致历史加载不显示图片预览）
             if _image_paths:
                 engine_kwargs["_image_attachments"] = list(_image_paths)
+            # 原始输入元数据透传：session 消息打 _input_attachments/_raw_input_text 标记，
+            # 撤回（撤销到这里）时依此保真回填附件 chips 与占位符正文
+            if _input_attachments:
+                engine_kwargs["_input_attachments"] = list(_input_attachments)
+            if _raw_input_text:
+                engine_kwargs["_raw_input_text"] = _raw_input_text
             # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
             # add_user_message 修改 session.messages。即使后续被 / 命令拦截
             # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
