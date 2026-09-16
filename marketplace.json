@@ -387,7 +387,7 @@
         {
             "name": "system-providers",
             "description": "DriFox 内置服务商定义：DeepSeek / 智谱 / 通达 / 阿里 / 火山 / MiniMax / SiliconFlow / Gemini / 百度 / OpenCode / CodeBuddy",
-            "version": "1.1.0",
+            "version": "1.1.1",
             "author": "DriFoxx Team",
             "license": "MIT",
             "categories": [],

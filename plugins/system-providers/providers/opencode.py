@@ -3,7 +3,9 @@
 服务商插件 — OpenCode Zen / OpenCode Go
 
 数据 + 套餐用量查询 fetcher + 用量查询额外配置字段，全部由本插件声明。
-用量：opencode.ai/_server 接口（需 server_id / cookie / workspace_id）。
+用量：opencode.ai/_server 接口（server_id / cookie / workspace_id 三者必填）。
+其中 server_id 是 SolidStart server function 的构建哈希，opencode 前端每次发版都会变，
+失效时接口返回 500；cookie 必需，未认证时服务端在 RSC payload 里回 302 跳 /auth/authorize。
 """
 
 import json
@@ -12,6 +14,11 @@ import urllib.parse
 from typing import Any, Dict, Optional
 
 from app.plugins.registries.provider_registry import ProviderDef, QuotaField
+
+# 用量块锚点：响应里形如 rollingUsage:$R[2]={...}，字段顺序与数量均不锁定
+_USAGE_ANCHORS = [("rolling", "rollingUsage"), ("weekly", "weeklyUsage"), ("monthly", "monthlyUsage")]
+_RE_RESET_SEC = re.compile(r"resetInSec:(\d+)")
+_RE_USAGE_PCT = re.compile(r"usagePercent:([\d.]+)")
 
 _SERVER_URL = "https://opencode.ai/_server"
 _SERVER_HEADERS = {
@@ -24,13 +31,19 @@ _SERVER_HEADERS = {
 }
 
 
+class OpenCodeUsageError(RuntimeError):
+    """用量查询失败，异常文本即归因说明（由 UsageService 捕获后写 warning 日志）"""
+
+
 def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """从 opencode.ai/_server 获取 OpenCode Zen/Go 套餐用量。
 
     需要在服务商配置中额外填写 server_id / cookie / workspace_id。
     这些字段不会影响正常的 API 调用，仅用于用量查询。
     """
-    import urllib.request  # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
+    # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
+    import urllib.error
+    import urllib.request
 
     server_id = (config.get("server_id", "") or "").strip()
     cookie = (config.get("cookie", "") or "").strip()
@@ -59,8 +72,19 @@ def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, An
         with urllib.request.urlopen(req, timeout=10) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
             raw = resp.read().decode(charset, errors="replace")
-    except Exception:
-        return None
+    except urllib.error.HTTPError as e:
+        # 500 = 服务端找不到该 server function，即 Server ID 已随前端构建失效
+        if e.code == 500:
+            raise OpenCodeUsageError(
+                "Server ID 已失效（opencode 前端重新构建），请重新抓取 _server 请求的 X-Server-Id"
+            ) from e
+        raise OpenCodeUsageError(f"用量请求失败：HTTP {e.code}") from e
+    except OSError as e:
+        raise OpenCodeUsageError(f"用量请求异常：{e}") from e
+
+    # 未认证：HTTP 仍是 200，登录跳转藏在 RSC payload 内
+    if "auth/authorize" in raw:
+        raise OpenCodeUsageError("未认证：Cookie 缺失或已过期，请重新复制浏览器 Cookie")
 
     # 标准 JSON
     try:
@@ -69,36 +93,59 @@ def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, An
     except json.JSONDecodeError:
         pass
 
-    # JavaScript 风格响应
+    # RSC（JavaScript 风格）响应
     parsed = _parse_js(raw)
     if parsed.get("rolling") or parsed.get("weekly") or parsed.get("monthly"):
         return parsed
 
-    return None
+    raise OpenCodeUsageError("响应结构变更：未解析到 usagePercent，请核对 _server 接口返回体")
 
 
 def _parse_json(data: dict) -> Dict[str, Any]:
     result = {}
-    for key, api_key in [("rolling", "rollingUsage"),
-                          ("weekly", "weeklyUsage"),
-                          ("monthly", "monthlyUsage")]:
+    for key, api_key in _USAGE_ANCHORS:
         usage = data.get(api_key, {})
         pct = usage.get("usagePercent")
         sec = usage.get("resetInSec")
-        result[key] = {"percent": int(pct), "reset_sec": int(sec)} if pct is not None and sec is not None else None
+        result[key] = {"percent": float(pct), "reset_sec": int(sec)} if pct is not None and sec is not None else None
     return result
 
 
+def _extract_block(raw: str, anchor: str) -> Optional[str]:
+    """取 anchor 后首个花括号配平的块内容。
+
+    服务端会往用量对象里追加字段（当前已有 usage / limit），也可能出现嵌套对象，
+    因此按花括号深度扫描取整块，不用 [^{}]* 之类的单层匹配。
+    """
+    i = raw.find(anchor + ":")
+    if i < 0:
+        return None
+    j = raw.find("{", i)
+    if j < 0:
+        return None
+    depth = 0
+    for k in range(j, len(raw)):
+        ch = raw[k]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[j + 1 : k]
+    return None
+
+
 def _parse_js(raw: str) -> Dict[str, Any]:
-    result = {}
-    for key, api_key in [("rolling", "rollingUsage"),
-                          ("weekly", "weeklyUsage"),
-                          ("monthly", "monthlyUsage")]:
-        pat = re.compile(
-            rf'{api_key}:\$R\[\d+\]=\{{status:"[^"]+",resetInSec:(\d+),usagePercent:(\d+)\}}'
-        )
-        m = pat.search(raw)
-        result[key] = {"percent": int(m.group(2)), "reset_sec": int(m.group(1))} if m else None
+    """解析 RSC 响应中的用量块，percent 保留小数（44.9 这类值 UI 侧自行取整）"""
+    result: Dict[str, Any] = {}
+    for key, api_key in _USAGE_ANCHORS:
+        block = _extract_block(raw, api_key)
+        if block is None:
+            result[key] = None
+            continue
+        m_sec = _RE_RESET_SEC.search(block)
+        m_pct = _RE_USAGE_PCT.search(block)
+        result[key] = {"percent": float(m_pct.group(1)), "reset_sec": int(m_sec.group(1))} if m_sec and m_pct else None
     return result
 
 
@@ -107,17 +154,17 @@ _QUOTA_FIELDS = [
     QuotaField(
         key="server_id",
         label="Server ID:",
-        placeholder="opencode.ai/_server 请求中的 X-Server-Id",
+        placeholder="_server 请求的 X-Server-Id（随 opencode 前端构建变化，失效时接口返回 500）",
     ),
     QuotaField(
         key="cookie",
         label="Cookie:",
-        placeholder="oc_locale=zh; auth=Fe26.2**... （从浏览器复制完整的 Cookie 值）",
+        placeholder="oc_locale=zh; auth=Fe26.2**... （必填，从浏览器复制完整 Cookie 值，过期时提示未认证）",
     ),
     QuotaField(
         key="workspace_id",
         label="Workspace ID:",
-        placeholder="wrk_xxxxxxxxxxxx （无需可留空）",
+        placeholder="wrk_xxxxxxxxxxxx（必填，用量页面 URL 中可见）",
     ),
 ]
 
