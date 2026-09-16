@@ -62,6 +62,19 @@ def test_profile_section_bind_emit(qtbot=None):
     assert got and got[0][0] == "小狐"
 
 
+def test_profile_user_avatar_accepts_path(tmp_path=None, qtbot=None):
+    """回归：set_user_avatar 传 Path 对象不得触发 QPixmap TypeError（实跑崩过）。"""
+    from pathlib import Path
+
+    host = QWidget()
+    s = sections.ProfileSection(host)
+    p = (Path(tmp_path) / "user.png") if tmp_path else Path("Z:/nonexistent/user.png")
+    s.set_user_avatar(p, "mading")  # Path 入参：内部统一 str()
+    s.set_user_avatar(str(p), "mading")  # str 入参同样可用
+    s.set_user_avatar(None)  # 清除 → 回落色块
+    # 断言即「三种入参均不抛异常」；无额外状态可查（RoundAvatar 内部 pixmap 惰性建）
+
+
 def test_about_section_persona_switch(qtbot=None):
     personas = [
         {"id": "build", "name": "build", "description": "更懂工程的搭档", "tag": "推演"},

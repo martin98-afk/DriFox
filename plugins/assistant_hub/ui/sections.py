@@ -449,10 +449,14 @@ class ProfileSection(_Section):
         """
 
     def set_user_avatar(self, image_path: Optional[str], name: str = "") -> None:
-        """刷新用户头像预览（bind 与保存后由宿主调用；name 用于无图时的首字母色块）。"""
+        """刷新用户头像预览（bind 与保存后由宿主调用；name 用于无图时的首字母色块）。
+
+        ⚠ image_path 可能是 Path 或 str：QPixmap 不认 Path 对象（TypeError），
+        统一在此转 str，调用方无须关心。
+        """
         if name:
             self._user_avatar.set_text(name)
-        self._user_avatar.set_image(image_path or None)
+        self._user_avatar.set_image(str(image_path) if image_path else None)
 
     def _pick_avatar(self) -> None:
         """弹头像选择器（延迟导入避免 sections ↔ avatar_picker 循环依赖）。"""

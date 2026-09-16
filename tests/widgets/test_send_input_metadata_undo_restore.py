@@ -138,14 +138,14 @@ def test_build_text_inline_placeholder_keeps_surroundings():
     """正文内联占位符：替换后前后留一个空格，多余空白压缩"""
     inst = _make_builder([r"C:\t\a.png"])
     out = inst._build_user_text_with_attachments("当前 [[a.png]] 上面的列表")
-    assert out == f"当前 C:\\t\\a.png 上面的列表"
+    assert out == "当前 C:\\t\\a.png 上面的列表"
 
 
 def test_build_text_unused_appended_with_newline():
     """未在正文引用的附件：保持既有行为，换行拼到末尾"""
     inst = _make_builder([r"C:\t\a.png", r"C:\t\b.png"])
     out = inst._build_user_text_with_attachments("看这两个")
-    assert out == f"看这两个\nC:\\t\\a.png\nC:\\t\\b.png"
+    assert out == "看这两个\nC:\\t\\a.png\nC:\\t\\b.png"
 
 
 def test_build_text_no_attachments_clears_placeholders():
@@ -158,34 +158,65 @@ def test_build_text_no_attachments_clears_placeholders():
 # ==================== 撤回：保真回填 ====================
 
 
-def _make_undo_instance(msg, raw_text=None, atts=None):
+def _make_undo_instance():
     from app.main_widget import OpenAIChatToolWindow
 
     inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
-    stored = dict(msg or {})
-    if raw_text is not None:
-        stored["_raw_input_text"] = raw_text
-    if atts is not None:
-        stored["_input_attachments"] = atts
-    inst._message_batch = [(stored, MagicMock(), MagicMock())] if stored else []
+    inst._message_batch = []
     inst._clear_attachments = MagicMock()
     inst._add_attachment = MagicMock()
     inst._rebuild_attachment_chips = MagicMock()
     inst.input_area = MagicMock()
+    return inst
+
+
+def test_extract_undo_input_meta_from_batch(qapp):
+    """截断前元数据提取：从 _message_batch 按 card._message_index 取标记"""
+    from app.main_widget import OpenAIChatToolWindow
+
+    inst = _make_undo_instance()
+    inst._message_batch = [
+        (
+            {
+                "role": "user",
+                "_raw_input_text": "当前 [[hub]]",
+                "_input_attachments": [r"D:\x\hub"],
+            },
+            MagicMock(),
+        )
+    ]
     card = MagicMock()
     card._message_index = 0
-    return inst, card
+    raw, atts = OpenAIChatToolWindow._extract_undo_input_meta(inst, card)
+    assert raw == "当前 [[hub]]"
+    assert atts == [r"D:\x\hub"]
+
+
+def test_extract_undo_input_meta_out_of_range(qapp):
+    """截断后批次已重建（索引越界/指向非 user）→ 返回 (None, None) 走降级"""
+    from app.main_widget import OpenAIChatToolWindow
+
+    inst = _make_undo_instance()
+    inst._message_batch = [({"role": "assistant"}, MagicMock())]
+    card = MagicMock()
+    card._message_index = 0
+    assert OpenAIChatToolWindow._extract_undo_input_meta(inst, card) == (None, None)
+
+    card2 = MagicMock()
+    card2._message_index = 99  # 越界
+    assert OpenAIChatToolWindow._extract_undo_input_meta(inst, card2) == (None, None)
 
 
 def test_restore_input_uses_raw_metadata(qapp, monkeypatch):
-    """消息带原始输入元数据 → 回填占位符正文 + 重建 chips（保真路径）"""
+    """带原始输入元数据 → 回填占位符正文 + 重建 chips（保真路径）"""
     from app.main_widget import OpenAIChatToolWindow
 
     monkeypatch.setattr(os.path, "exists", lambda p: True)
-    inst, card = _make_undo_instance(
-        {"role": "user"}, raw_text="当前 [[hub]] [[a.png]]", atts=[r"D:\x\hub", r"C:\t\a.png"]
+    inst = _make_undo_instance()
+    card = MagicMock()
+    OpenAIChatToolWindow._restore_input_after_undo(
+        inst, card, raw_text="当前 [[hub]] [[a.png]]", atts=[r"D:\x\hub", r"C:\t\a.png"]
     )
-    OpenAIChatToolWindow._restore_input_after_undo(inst, card)
 
     inst._rebuild_attachment_chips.assert_called_once()
     assert inst._add_attachment.call_count == 2
@@ -201,8 +232,9 @@ def test_restore_input_skips_missing_files(qapp, monkeypatch):
     from app.main_widget import OpenAIChatToolWindow
 
     monkeypatch.setattr(os.path, "exists", lambda p: p == r"D:\alive")
-    inst, card = _make_undo_instance({"role": "user"}, raw_text="看下", atts=[r"D:\alive", r"D:\dead"])
-    OpenAIChatToolWindow._restore_input_after_undo(inst, card)
+    inst = _make_undo_instance()
+    card = MagicMock()
+    OpenAIChatToolWindow._restore_input_after_undo(inst, card, raw_text="看下", atts=[r"D:\alive", r"D:\dead"])
 
     inst._add_attachment.assert_called_once_with(r"D:\alive")
     inst.input_area.convert_placeholders_to_mentions.assert_called_once_with([r"D:\alive"])
@@ -213,8 +245,8 @@ def test_restore_input_fallback_without_metadata(qapp):
     from app.main_widget import OpenAIChatToolWindow
     import app.main_widget as mw
 
-    inst, card = _make_undo_instance({"role": "user", "content": "旧消息"})
-    inst._message_batch = [({"role": "user", "content": "旧消息"}, MagicMock(), MagicMock())]
+    inst = _make_undo_instance()
+    card = MagicMock()
     with pytest.MonkeyPatch.context() as m:
         m.setattr(mw, "restore_input_from_card", MagicMock())
         OpenAIChatToolWindow._restore_input_after_undo(inst, card)

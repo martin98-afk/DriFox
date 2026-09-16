@@ -15525,7 +15525,9 @@ class OpenAIChatToolWindow(ToolWindow):
         for msg in messages:
             if msg.get("role") != "user" or _is_hook_message(msg):
                 continue
-            text = " ".join(strip_system_reminder(msg.get("content") or "").split())
+            # content 可能是 multimodal list（视觉模型附件消息），先转纯文本再喂正则，
+            # 否则 re 收到 list 直接抛 "expected string or bytes-like object"（2026-09-17）
+            text = " ".join(strip_system_reminder(content_to_text(msg.get("content") or "")).split())
             if text:
                 return text[:80] + ("…" if len(text) > 80 else "")
         return ""
@@ -16152,6 +16154,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     logger.error("[UNDO] Cannot recover round_index after dialog, aborting undo")
                     return
 
+        # 🛡️ 截断前捕获原始输入元数据：_truncate_session_from_user_round 内部会
+        # 重建 _message_batch（被撤回的 round 已移除），之后再按 card._message_index
+        # 查批次必然落空 → 静默降级成纯文本回填（2026-09-17 撤回丢 chips 根因）
+        undo_raw_text, undo_atts = self._extract_undo_input_meta(card)
+
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
 
@@ -16165,12 +16172,32 @@ class OpenAIChatToolWindow(ToolWindow):
         self._show_undo_delete_card()
 
         # 恢复输入框内容（优先按发送时保存的原始输入元数据保真回填）
-        self._restore_input_after_undo(card)
+        self._restore_input_after_undo(card, undo_raw_text, undo_atts)
 
         # 撤销后消息数变化，显式刷新历史问题徽章
         self._update_history_questions_badge()
 
-    def _restore_input_after_undo(self, card: MessageCard) -> None:
+    def _extract_undo_input_meta(self, card: MessageCard) -> tuple:
+        """截断前提取被撤回 user 消息的原始输入元数据
+
+        Returns:
+            (raw_text, attachments)：来自消息上的 ``_raw_input_text`` /
+            ``_input_attachments`` 标记；旧消息无标记时返回 (None, None)。
+        """
+        idx = getattr(card, "_message_index", None)
+        if isinstance(idx, int) and 0 <= idx < len(self._message_batch):
+            entry = self._message_batch[idx]
+            if entry and entry[0].get("role") == "user":
+                msg = entry[0]
+                return msg.get("_raw_input_text"), msg.get("_input_attachments")
+        return None, None
+
+    def _restore_input_after_undo(
+        self,
+        card: MessageCard,
+        raw_text: Optional[str] = None,
+        atts: Optional[list] = None,
+    ) -> None:
         """撤回（撤销到这里）后回填输入框
 
         带附件的消息其 content 已被发送构建替换成「完整路径内联」的终态文本，
@@ -16178,16 +16205,13 @@ class OpenAIChatToolWindow(ToolWindow):
         原消息偏离（2026-09-16 撤回渲染异常根因）。发送链路会在消息上挂
         ``_raw_input_text``（占位符形式正文）+ ``_input_attachments``（全量附件
         路径），优先依此保真还原；旧消息无标记时降级为纯文本回填。
-        """
-        msg: Optional[dict] = None
-        idx = getattr(card, "_message_index", None)
-        if isinstance(idx, int) and 0 <= idx < len(self._message_batch):
-            entry = self._message_batch[idx]
-            if entry and entry[0].get("role") == "user":
-                msg = entry[0]
 
-        raw_text = (msg or {}).get("_raw_input_text")
-        atts = (msg or {}).get("_input_attachments")
+        Args:
+            card: 被撤回的 user 消息卡片
+            raw_text: 调用方在截断**前**预取的 ``_raw_input_text``（截断会重建
+                _message_batch，事后查必落空）；None 时降级判断按无标记处理。
+            atts: 同上，``_input_attachments``。
+        """
         if not raw_text and not atts:
             restore_input_from_card(self.input_area, card)
             return
@@ -17873,6 +17897,8 @@ class OpenAIChatToolWindow(ToolWindow):
             _input_attachments = list(self._attachments)
             # 先统一处理附件文本替换（含图片 [[basename]] → 路径）— UI 显示和
             # LLM 看到的文本必须一致，所以这一步仍在主线程做（轻量字符串操作）。
+            # 用户决策 2026-09-17：图片路径必须保留在正文文本里（视觉模型下
+            # multimodal 图片块与路径文本并存，不得剔除路径）。
             user_text = self._build_user_text_with_attachments(user_text)
 
             if _supports_vision:
