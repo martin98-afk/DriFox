@@ -213,6 +213,38 @@ All notable changes to this project will be documented in this file.
 
 - **版本号升级到 v0.5.12** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.5.11` → `0.5.12`。
 
+### 🆕 重新发布 #5 增量（自重新发布 #4 起）
+
+基于上次重新发布 v0.6.1 (重新发布 #4) 的增量变更 | 提交数：10 · 文件变更：96 · +7290/-1914 | 贡献者：mading, dingma
+
+#### ✨ 新功能 (New Features)
+
+- **崩溃记录去噪与异常分类** (`app/core/crash_handler.py`, `tests/core/test_crash_handler.py`, `tests/debug/crash_filter_probe.py` 新增): 新增 `_install_seh_classifier` 噪声分流 VEH，按黑名单把 first-chance 异常改道 `anomaly_*.log`；崩溃判据改为「含 `Windows fatal exception` 段」为唯一证据；移除原 minidump 回调链（实测 0 字节 dmp + 升级异常至 fatal）。`9c017d77`
+
+- **Markdown 块渲染升级：QuoteCard + TableBlockWidget** (`app/widgets/message_card.py`, `tests/widgets/...`): 引用块与表格块新组件化渲染。`d3ece7da`
+
+- **opencode 用量获取解析修复 + 错误归因** (`plugins/system-providers/providers/opencode.py`): `usagePercent` 改为 float；HTTP 500 / RSC 缺 cookie / 结构变更三类错误显式归因抛出 `OpenCodeUsageError`。`17f67c11`
+
+- **会话管理 `close_history` 选项** (`app/...`): 新会话支持关闭历史加载。`2042f65f`
+
+- **renderer 进程内存看门狗（已 Revert）** (`app/widgets/...`, `tools/...`): 实施后被 `4e2ea42d` 撤回，stash@{0} 保留改动备查。`d886439c`
+
+- **widget 测试增强：RenderCrashQueue / scroll hot path / WebViewPool / scroll anchor 等回归** (`tests/widgets/...`): 新增 11 个 RenderCrashQueue 用例、scroll hot path 缓存 TTL 调整与增量可见性测试、WebViewPool 信号连接与 viewer 复用、main widget scroll anchor 程序滚动上下文、viewer signal pairing 等。`a9b45c6f`
+
+- **`_sync_scroll_maximum` 微基准 bench_scroll_hot** (`tools/bench_scroll_hot.py`): 高频滚动同步路径性能分析基准。`4cab9d4e`
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **OpenAIChatToolWindow 移除多余性能计时器与滚动同步调试日志** (`app/widgets/openai_chat_tool_window.py`): 性能计时器与调试日志清理。`9533fb5b`
+
+#### 🔧 其他 (Chores & Build)
+
+- **Revert renderer-watchdog 看门狗方案** (`app/widgets/...`, `tools/...`): 撤回 renderer 进程内存看门狗实施，stash@{0} 保留改动备查。`4e2ea42d`
+
+#### 🔄 其他变更
+
+- **整体代码结构可读性与可维护性提升** (`app/widgets/`, `app/widgets/cards/settings/`): 大型重构清理，38 文件 / +3393/-1027，整理命名与目录边界，减少跨模块耦合。`8e883970`
+
 ## [Unreleased]
 
 ### ✨ 新功能 (New Features)
