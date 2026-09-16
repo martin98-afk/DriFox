@@ -14267,13 +14267,14 @@ class MessageCard(SimpleCardWidget):
         bubble_lay.addWidget(self._viewer_container)
         self._lazy_rendered = True
 
-        # 图片附件预览条：正文之上，set_image_attachments 时才显示（懒占位）
-        self._image_strip = QWidget(self._user_bubble)
+        # 图片附件预览条：挂 main 布局，位于气泡与底部按钮行**之间**（气泡外），
+        # set_image_attachments 时才显示（懒占位）
+        self._image_strip = QWidget(self)
         self._image_strip_lay = QHBoxLayout(self._image_strip)
-        self._image_strip_lay.setContentsMargins(2, 0, 2, 4)
+        self._image_strip_lay.setContentsMargins(2, 4, 2, 2)
         self._image_strip_lay.setSpacing(6)
         self._image_strip.setVisible(False)
-        bubble_lay.insertWidget(0, self._image_strip)
+        main.addWidget(self._image_strip, 0, Qt.AlignRight)
 
         # 底部操作行（纯按钮）：时间戳已移到身份行第二行（见 IdentityHeader）
         # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
@@ -14313,7 +14314,7 @@ class MessageCard(SimpleCardWidget):
         main.addWidget(footer_wrap)
 
     def set_image_attachments(self, paths, fallback_content=None):
-        """设置图片附件预览（用户气泡正文上方缩略图条）
+        """设置图片附件预览（用户气泡下方、底部按钮行上方缩略图条）
 
         Args:
             paths: 附件图片本地路径列表。发送时来自输入区附件；恢复会话时
