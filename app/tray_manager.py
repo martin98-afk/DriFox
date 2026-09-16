@@ -13,9 +13,9 @@ from pathlib import Path
 
 import keyboard
 from loguru import logger
-from PyQt5.QtCore import QAbstractNativeEventFilter, QObject, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
+from PyQt5.QtCore import QAbstractNativeEventFilter, QObject, QTimer, QUrl, pyqtSignal
+from PyQt5.QtGui import QDesktopServices, QIcon
+from PyQt5.QtWidgets import QApplication, QSystemTrayIcon
 
 
 class _HotkeyBridge(QObject):
@@ -140,10 +140,8 @@ class TrayManager(QObject):
         self._tray_icon.setIcon(QIcon(":/icons/drifox.ico"))
         self._tray_icon.setToolTip("Drifox")
 
-        # 创建右键菜单（动态重建，连接 aboutToShow 信号）
-        self._tray_menu = QMenu()
-        self._tray_menu.aboutToShow.connect(self._rebuild_context_menu)
-        self._tray_menu.addAction("加载中…")  # 占位，显示前会重建
+        # 创建右键菜单（Fluent 圆角风格；内容固定，构建一次即可）
+        self._tray_menu = self._build_context_menu()
         self._tray_icon.setContextMenu(self._tray_menu)
 
         # 监听托盘图标点击（Windows: 单击恢复窗口）
@@ -224,40 +222,105 @@ class TrayManager(QObject):
             pass
         self._tray_icon = None
 
-    # ========== 托盘右键菜单动态重建 ==========
+    # ========== 托盘右键菜单 ==========
 
-    def _rebuild_context_menu(self):
-        """动态重建托盘右键菜单，为每个窗口创建独立的菜单项"""
-        self._tray_menu.clear()
+    def _build_context_menu(self):
+        """构建托盘右键菜单（内容固定，只建一次）
 
-        # ── Tab 模式：简化菜单 ──
-        if self._tab_manager_window is not None:
-            tm_action = QAction("📑 Tab 管理器", self._tray_menu)
-            tm_action.triggered.connect(
-                lambda: (
-                    (
-                        self._tab_manager_window.show(),
-                        self._tab_manager_window.activateWindow(),
-                        self._tab_manager_window.raise_(),
-                    )
-                    if self._tab_manager_window
-                    else None
-                )
-            )
-            self._tray_menu.addAction(tm_action)
-            self._tray_menu.addSeparator()
-            restart_action = QAction("🔄 重启", self._tray_menu)
-            restart_action.triggered.connect(self._restart_application)
-            self._tray_menu.addAction(restart_action)
-            quit_action = QAction("退出", self._tray_menu)
-            quit_action.triggered.connect(self._quit_application)
-            self._tray_menu.addAction(quit_action)
+        不挂 aboutToShow 重建：RoundMenu.clear() 清不掉 addSeparator 插入的
+        裸 QListWidgetItem，反复重建会累积分隔线。详见
+        app/widgets/modules/tray_menu.py 模块注释。
+        """
+        # 延迟导入：qfluentwidgets 较重，不占用启动关键路径
+        from qfluentwidgets import Action, FluentIcon
+
+        from app.widgets.modules.tray_menu import TrayContextMenu
+
+        menu = TrayContextMenu()
+
+        main_action = Action(FluentIcon.HOME, "打开主界面", menu)
+        main_action.triggered.connect(self._show_main_window)
+        menu.addAction(main_action)
+
+        menu.addSeparator()
+
+        # 右侧显示当前版本号，点击走手动检查更新
+        menu.add_hint_action(FluentIcon.UPDATE, "检查更新", self._current_version(), self._check_update)
+        log_action = Action(FluentIcon.DOCUMENT, "打开日志", menu)
+        log_action.triggered.connect(self._open_current_log)
+        menu.addAction(log_action)
+        log_dir_action = Action(FluentIcon.FOLDER, "打开日志文件夹", menu)
+        log_dir_action.triggered.connect(self._open_log_folder)
+        menu.addAction(log_dir_action)
+
+        menu.addSeparator()
+
+        restart_action = Action(FluentIcon.SYNC, "重启", menu)
+        restart_action.triggered.connect(self._restart_application)
+        menu.addAction(restart_action)
+        quit_action = Action(FluentIcon.POWER_BUTTON, "退出", menu)
+        quit_action.triggered.connect(self._quit_application)
+        menu.addAction(quit_action)
+
+        return menu
+
+    def _show_main_window(self) -> None:
+        """显示并激活主界面（Tab 管理器窗口）"""
+        window = self._tab_manager_window
+        if not self._is_window_valid(window):
             return
 
-        # ── 独立窗口模式分支已下线（M2a-A4）：Tab 模式固定启用后
-        # `_tab_manager_window is not None` 恒为真，else 分支永不执行 ──
-        # （原逻辑：过滤有效窗口、显示/隐藏全部、新建窗口菜单项）
+        window.show()
+        window.activateWindow()
+        window.raise_()
 
+    @staticmethod
+    def _current_version() -> str:
+        """当前版本号（显示在「检查更新」右侧）"""
+        try:
+            from app.utils.config import Settings
+
+            return Settings.get_instance().current_version
+        except Exception:
+            return ""
+
+    def _check_update(self) -> None:
+        """托盘手动检查更新：先拉起主界面，结果 InfoBar 才有地方落地"""
+        self._show_main_window()
+        try:
+            from app.update_checker import UpdateChecker
+
+            UpdateChecker.get_instance(self._tab_manager_window).check_update()
+        except Exception as exc:
+            logger.warning(f"[tray] 检查更新失败: {exc}")
+
+    @staticmethod
+    def _log_dir() -> Path:
+        """日志目录（与 main.py 传给 setup_logging 的路径一致）"""
+        from app.utils.utils import get_app_data_dir
+
+        return get_app_data_dir() / "logs"
+
+    def _open_current_log(self) -> None:
+        """用系统默认程序打开当前日志文件（全量 all.log）"""
+        log_file = self._log_dir() / "all.log"
+        if not log_file.exists():
+            # 日志尚未落盘（启动极早期）时退化为打开目录
+            self._open_log_folder()
+            return
+
+        self._open_path(log_file)
+
+    def _open_log_folder(self) -> None:
+        """打开日志所在文件夹"""
+        log_dir = self._log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._open_path(log_dir)
+
+    @staticmethod
+    def _open_path(path: Path) -> None:
+        """交给系统默认程序 / 文件管理器打开"""
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     # ========== 多窗口选中管理 ==========
 
