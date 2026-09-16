@@ -13442,6 +13442,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 if user_card:
                     # 设置 message_index 用于卡片差异功能
                     user_card._message_index = global_batch_index
+                    # 消息源注入：TeamMail 等用户侧消息的身份按内容解析发送者
+                    user_card._source_message = batch[0]
                     cards.append(user_card)
                 if insert_index is not None and user_card:
                     insert_index += 1
@@ -13478,6 +13480,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 if assistant_card:
                     # 设置 message_index 用于卡片差异功能
                     assistant_card._message_index = global_batch_index
+                    # 消息源注入：历史消息的身份优先取自带快照，TeamMail 老数据
+                    # 从内容前缀解析发送者（详见 message_identity.resolve_for_message）
+                    assistant_card._source_message = batch[0]
                     cards.append(assistant_card)
                     # 使用辅助函数渲染消息
                     # [T11] 错峰：历史加载时不立即派发全量渲染，避免 N 卡
@@ -14476,6 +14481,48 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._load_session_from_record(session_record)
 
+    def _stamp_message_identities(self, messages) -> None:
+        """为缺 `_identity` 的消息补写身份快照（主线程调用）。
+
+        worker 线程构造消息时拿不到 UI 状态（团队成员角色名、插件 manager 调用
+        可能跨线程），故身份在此统一补写。已带 `_identity` 的消息跳过——
+        历史快照优先，切换助手不改写旧消息。
+
+        Args:
+            messages: 消息 dict 列表（就地修改；非法输入静默跳过）
+        """
+        if not isinstance(messages, list):
+            return
+        try:
+            from app.core.message_identity import resolve_identity, team_mail_sender
+
+            session = self.session_manager.get_current_session() if self.session_manager else None
+            session_id = getattr(session, "session_id", "") if session else ""
+            team_agent = getattr(self, "_team_agent_name", "") or ""
+            window_id = getattr(self, "_window_id", "") or ""
+            # 每个 role 只解析一次（解析链内部有会话级缓存，这里再省一次 dict 构造）
+            cache: Dict[str, Any] = {}
+            for msg in messages:
+                if not isinstance(msg, dict) or msg.get("_identity"):
+                    continue
+                role = msg.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                # 团队任务邮件：发送者是成员而非用户，按其名落快照
+                sender = team_mail_sender(msg)
+                if sender:
+                    msg["_identity"] = {"name": sender}
+                    continue
+                if role not in cache:
+                    cache[role] = resolve_identity(
+                        role, session_id=session_id, team_agent=team_agent, window_id=window_id
+                    )
+                data = cache[role].to_dict()
+                if data:
+                    msg["_identity"] = data
+        except Exception as e:
+            logger.debug(f"[Identity] 身份快照补写跳过: {e}")
+
     def _append_user_message(
         self,
         content: str,
@@ -14485,6 +14532,7 @@ class OpenAIChatToolWindow(ToolWindow):
         user_round_index: Optional[int] = None,
         update_preview: bool = True,
         image_attachments: Optional[list] = None,
+        identity=None,
     ):
         session = self.session_manager.get_current_session()
         if session:
@@ -14499,7 +14547,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if user_round_index is None:
             user_round_index = self._get_current_user_round_index()
 
-        card = MessageCard(parent=self, role="user", timestamp=timestamp)
+        card = MessageCard(parent=self, role="user", timestamp=timestamp, identity=identity)
         card._round_index = user_round_index
         card.update_content(content)
         # 图片附件预览：正文上方缩略图条（恢复会话时 content 为 multimodal list，
@@ -19960,6 +20008,11 @@ class OpenAIChatToolWindow(ToolWindow):
                         msg["elapsed"] = round(time.time() - self._response_start_time, 1)
                     if not msg.get("config_id") and self._current_provider_name:
                         msg["config_id"] = self._current_provider_name
+
+        # 身份快照补写：worker 线程构造的消息拿不到 UI 状态（团队角色名、插件
+        # manager 调用），在主线程统一补 `_identity` 后再落 session。已带快照的
+        # 消息不动（历史快照优先，切换助手不改写旧消息）。
+        self._stamp_message_identities(messages)
 
         session.set_messages(messages or [], preserve_compaction=False)
         # 🛡️ Worker 回传了完整消息列表，标记会话脏以确保后续持久化。

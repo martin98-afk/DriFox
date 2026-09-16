@@ -734,6 +734,17 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if isinstance(x_idx, int) and not isinstance(x_idx, bool):
         normalized["_x_idx"] = x_idx
 
+    # 消息身份快照（发送者头像 + 名称）。与 `_x_idx` 同理：白名单外字段会被
+    # 本函数剥掉，而身份必须随消息落库并在历史加载后原样回显（切助手不改写旧消息）。
+    # 不进 API 请求：serializer 显式构造 role/content/tool_calls 等字段，不整体拷贝。
+    identity = message.get("_identity")
+    if isinstance(identity, dict):
+        clean_identity = {
+            str(k): str(v) for k, v in identity.items() if isinstance(k, str) and isinstance(v, str) and v
+        }
+        if clean_identity.get("name"):
+            normalized["_identity"] = clean_identity
+
     if role == "assistant":
         content = content_to_text(message.get("content", ""))
         if content:

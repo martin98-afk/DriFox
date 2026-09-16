@@ -706,6 +706,9 @@ class Settings(QConfig):
     # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
 
+    # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
+    ui_message_identity = ConfigItem("UI", "MessageIdentity", True, BoolValidator())
+
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", False, BoolValidator())
     # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树

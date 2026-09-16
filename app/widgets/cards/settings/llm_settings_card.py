@@ -596,6 +596,16 @@ class LLMSettingsCard(SystemCardFrame):
         )
         common_layout.addWidget(self.compactToolCard)
 
+        # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
+        self.messageIdentityCard = SwitchSettingCard(
+            FluentIcon.PEOPLE,
+            "消息身份行",
+            "每条消息显示发送者头像与名称",
+            configItem=self.cfg.ui_message_identity,
+            parent=self,
+        )
+        common_layout.addWidget(self.messageIdentityCard)
+
         # 灰度开关：纯 Qt 消息渲染器（MarkdownBlockViewer 替代 QWebEngineView）
         self.qtRendererCard = SwitchSettingCard(
             FluentIcon.CODE,

@@ -321,6 +321,29 @@ class WelcomeActionInfo:
 
 
 @dataclass(frozen=True)
+class IdentityProviderInfo:
+    """消息身份提供者注册信息（name / avatar 两条独立通道）
+
+    主程序渲染每条消息时按优先级询问插件：「这条消息是谁发的、用什么头像」。
+    两条通道各自独立解析，插件可只提供其中之一（另一个回落下一优先级/内置默认）。
+
+    Attributes:
+        plugin_name: 所属插件名
+        provider_id: 提供者唯一标识
+        resolve_func: 解析回调 ``(ctx: dict) -> str``，返回空串表示未提供；
+                      ctx 含 role / session_id / team_agent / window_id
+        priority: 优先级（高者先问）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    provider_id: str
+    resolve_func: Callable[[Dict[str, Any]], str]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class MentionProviderInfo:
     """输入框 @ 提及条目提供者注册信息
 
@@ -617,6 +640,9 @@ class UIPluginRegistry:
         self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
         # @ 提及条目提供者：{provider_id: MentionProviderInfo}
         self._mention_providers: Dict[str, MentionProviderInfo] = {}
+        # 消息身份提供者（name / avatar 两条独立通道）
+        self._identity_name_providers: List[IdentityProviderInfo] = []
+        self._identity_avatar_providers: List[IdentityProviderInfo] = []
         # Phase D：四类新扩展点（键为 item_id/button_id/action_id/card_id）
         self._sidebar_items: Dict[str, SidebarItemInfo] = {}
         self._input_buttons: Dict[str, InputButtonInfo] = {}
@@ -1156,6 +1182,85 @@ class UIPluginRegistry:
             ctx = {}
         info.handler(content, ctx)
         return True
+
+    def register_identity_name_provider(
+        self,
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息身份的「显示名」提供者。
+
+        Args:
+            plugin_name: 所属插件名
+            provider_id: 提供者唯一标识（同 id 重复注册视为同一插件刷新，去重）
+            resolve_func: 回调 ``(ctx) -> str``，返回空串/None 表示未提供。
+                          ctx 含 role（user/assistant）/ session_id / team_agent / window_id。
+                          ⚠️ 渲染期高频调用，须为纯函数、禁止 I/O 与阻塞
+            priority: 优先级（高者先问）
+            metadata: 附加元数据
+        """
+        self._register_identity_provider(
+            self._identity_name_providers, plugin_name, provider_id, resolve_func, priority, metadata
+        )
+
+    def register_identity_avatar_provider(
+        self,
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息身份的「头像」提供者。
+
+        Args:
+            resolve_func: 回调 ``(ctx) -> str``，返回头像**引用**：
+                - 本地图片绝对路径
+                - 内置图标引用（``builtin:drifox``）
+                - 空串 → 渲染层用显示名派生色块 + 首字母
+                其余约束同 ``register_identity_name_provider``
+        """
+        self._register_identity_provider(
+            self._identity_avatar_providers, plugin_name, provider_id, resolve_func, priority, metadata
+        )
+
+    def _register_identity_provider(
+        self,
+        bucket: List[IdentityProviderInfo],
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int,
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """身份 provider 通用注册（去重 + 按优先级排序）。"""
+        try:
+            from app.core.ui_callback_watchdog import wrap_ui_callback
+
+            resolve_func = wrap_ui_callback(plugin_name, f"identity:{provider_id}", resolve_func)
+        except Exception:
+            pass
+        info = IdentityProviderInfo(
+            plugin_name=plugin_name,
+            provider_id=provider_id,
+            resolve_func=resolve_func,
+            priority=priority,
+            metadata=metadata or {},
+        )
+        bucket[:] = [p for p in bucket if not (p.plugin_name == plugin_name and p.provider_id == provider_id)]
+        bucket.append(info)
+        bucket.sort(key=lambda p: -p.priority)
+
+    def get_identity_name_providers(self) -> List[IdentityProviderInfo]:
+        """全部身份显示名提供者（按优先级降序）"""
+        return list(self._identity_name_providers)
+
+    def get_identity_avatar_providers(self) -> List[IdentityProviderInfo]:
+        """全部身份头像提供者（按优先级降序）"""
+        return list(self._identity_avatar_providers)
 
     def register_mention_provider(
         self,
@@ -2935,6 +3040,13 @@ class UIPluginRegistry:
         # 清理 welcome actions
         self._welcome_actions = {k: v for k, v in self._welcome_actions.items() if v.plugin_name != plugin_name}
         self._mention_providers = {k: v for k, v in self._mention_providers.items() if v.plugin_name != plugin_name}
+        # 清理消息身份 provider（name / avatar 两条通道）
+        self._identity_name_providers = [
+            p for p in self._identity_name_providers if p.plugin_name != plugin_name
+        ]
+        self._identity_avatar_providers = [
+            p for p in self._identity_avatar_providers if p.plugin_name != plugin_name
+        ]
         # 清理 floating cards + 对应命令
         cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:
@@ -3589,6 +3701,17 @@ def _declare_builtin_slots() -> None:
     declare_slot("context_menu", lambda r: r._context_actions.items())
     declare_slot("settings_card", lambda r: r._settings_cards.items())
     declare_slot("mention_provider", lambda r: r._mention_providers.items())
+    # 消息身份 provider：命中时需重渲染消息区（身份行随插件变化）
+    declare_slot(
+        "identity_name_provider",
+        lambda r: enumerate(r._identity_name_providers),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "identity_avatar_provider",
+        lambda r: enumerate(r._identity_avatar_providers),
+        scopes=(SCOPE_MESSAGES,),
+    )
     declare_slot("service", lambda r: r._services.items(), owner=lambda e: e[0])
     declare_slot(
         "ui_module",

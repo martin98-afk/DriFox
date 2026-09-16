@@ -13106,6 +13106,7 @@ class MessageCard(SimpleCardWidget):
         model_name: str = None,
         provider_name: str = None,
         config_id: str = None,
+        identity: Optional[Any] = None,
     ):
         super().__init__(parent)
         self._parent = parent
@@ -13113,6 +13114,12 @@ class MessageCard(SimpleCardWidget):
         self.model_name = model_name
         self.provider_name = provider_name
         self._provider_config_id = config_id  # UUID key in _valid_configs, for precise provider lookup
+        # 消息发送者身份（MessageIdentity 实例；None = 由 _ensure_identity 按 role 解析）
+        self._identity = identity
+        self._identity_header = None  # IdentityHeader（懒建；开关关闭时保持 None）
+        # 消息源数据（可选）：历史加载时由调用方注入，用于解析消息级身份
+        # （如 TeamMail 发送者名）。实时新建的消息为 None，走上下文解析链。
+        self._source_message = None
         self.timestamp = timestamp or datetime.now().strftime("%m-%d %H:%M")
         # 历史数据 timestamp 格式为 %Y-%m-%d %H:%M:%S，转为 %m-%d %H:%M
         if self.timestamp and len(self.timestamp) >= 19:
@@ -13405,6 +13412,12 @@ class MessageCard(SimpleCardWidget):
                     }}
                     """
                 )
+        # 刷新身份行名称颜色（跟随新主题）
+        if getattr(self, "_identity_header", None) is not None:
+            try:
+                self._identity_header.apply_text_color(self._theme["muted"])
+            except RuntimeError:
+                self._identity_header = None
         # 刷新 viewer 主题（注入 CSS 变量 + 失效实例渲染缓存）
         # ⚠️ 顺序必须在 _refresh_viewer_font() 之前：主题变化时先让
         # refresh_theme 清掉 _cached_streaming_html 等实例缓存并注入新 CSS
@@ -13970,6 +13983,65 @@ class MessageCard(SimpleCardWidget):
         )
         self._render_welcome_with_body(body_html)
 
+    def _ensure_identity(self):
+        """解析并缓存本条消息的身份（消息自带快照优先，否则走解析链）。
+
+        会话上下文从当前窗口取（session_id / 团队成员角色名 / window_id），
+        取不到时回落默认身份——渲染路径绝不因身份解析失败而中断。
+        """
+        if getattr(self, "_identity", None) is not None:
+            return self._identity
+        try:
+            from app.core.message_identity import resolve_for_message
+
+            session_id = ""
+            team_agent = ""
+            window_id = ""
+            host = self._parent
+            if host is not None:
+                window_id = getattr(host, "_window_id", "") or ""
+                team_agent = getattr(host, "_team_agent_name", "") or ""
+                session_mgr = getattr(host, "session_manager", None)
+                if session_mgr is not None:
+                    session = session_mgr.get_current_session()
+                    session_id = getattr(session, "session_id", "") or ""
+            role = "user" if self.role == "user" else "assistant"
+            self._identity = resolve_for_message(
+                self._source_message,
+                role,
+                session_id=session_id,
+                team_agent=team_agent,
+                window_id=window_id,
+            )
+        except Exception:
+            from app.core.message_identity import MessageIdentity
+
+            self._identity = MessageIdentity(name="Drifox" if self.role != "user" else "")
+        return self._identity
+
+    def _identity_enabled(self) -> bool:
+        """身份行显示开关（设置项，默认开；取配置失败时视为开启）"""
+        try:
+            from app.utils.config import Settings
+
+            return bool(Settings.get_instance().ui_message_identity.value)
+        except Exception:
+            return True
+
+    def _build_identity_header(self, parent, align_right: bool):
+        """构建身份行控件；开关关闭或不适用时返回 None。"""
+        if not self._identity_enabled():
+            return None
+        try:
+            from app.widgets.modules.identity_header import IdentityHeader
+
+            header = IdentityHeader(self._ensure_identity(), align_right=align_right, parent=parent)
+            header.apply_text_color(self._theme["muted"])
+            self._identity_header = header
+            return header
+        except Exception:
+            return None
+
     def _build_card_header(self, main: QVBoxLayout):
         """头部：头像 + 名称/副标题 + 时间戳/模型名 + 顶部操作按钮 + 分隔线
 
@@ -13977,7 +14049,10 @@ class MessageCard(SimpleCardWidget):
         user 卡片为简洁气泡（见 _setup_user_bubble）。
         """
         if self.role == "assistant":
-            # 全减模式：assistant 无头像/标题/顶部按钮/分隔线，直接进入正文
+            # 身份行：头像 + 显示名（助手在左）。开关关闭时保持原有「全减模式」。
+            header = self._build_identity_header(parent=self, align_right=False)
+            if header is not None:
+                main.addWidget(header)
             return
         top = QHBoxLayout()
         top.setContentsMargins(4, 0, 4, 0)
@@ -14092,6 +14167,11 @@ class MessageCard(SimpleCardWidget):
         self._viewer_pending_text = None
         main.addWidget(self._viewer_container)
         self._lazy_rendered = True
+
+        # 身份行：头像 + 显示名（用户在右，对齐主流客户端）
+        _header = self._build_identity_header(parent=self, align_right=True)
+        if _header is not None:
+            main.insertWidget(0, _header)
 
         # 底部操作行：stretch | 时间戳 | 复制/撤销/删除（hover 浮现）。
         # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动

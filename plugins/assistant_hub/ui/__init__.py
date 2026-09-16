@@ -207,6 +207,86 @@ def _register_mention_provider() -> None:
         logger.warning(f"[assistant_hub] 注册 mention provider 失败: {e}")
 
 
+# ── 消息身份覆盖（助手 / 用户两条通道）────────────────────────────
+
+_IDENTITY_PROVIDER_ID = "assistant_hub"
+
+
+def _resolve_active_aid(ctx: dict) -> str:
+    """当前上下文生效的助手 id：会话级临时助手（@提及）优先 → 全局主助手。"""
+    from assistant_hub_manager import AssistantManager
+
+    mgr = AssistantManager.get_instance()
+    sid = str((ctx or {}).get("session_id") or "")
+    aid = mgr.get_session_override(sid) if sid else ""
+    if not aid:
+        aid = mgr.active_id()
+    return aid if aid and mgr.has(aid) else ""
+
+
+def _identity_name(ctx: dict) -> str:
+    """身份显示名：助手消息取助手名；用户消息取「助手对用户的称呼」→ 系统用户名。"""
+    try:
+        from assistant_hub_manager import AssistantManager
+
+        mgr = AssistantManager.get_instance()
+        if str((ctx or {}).get("role") or "") == "user":
+            aid = _resolve_active_aid(ctx)
+            a = mgr.get(aid) if aid else None
+            addressing = (getattr(a, "user_addressing", "") or "").strip() if a else ""
+            if addressing:
+                return addressing
+            from persona import resolve_user_name
+
+            return resolve_user_name()
+        aid = _resolve_active_aid(ctx)
+        a = mgr.get(aid) if aid else None
+        return (getattr(a, "name", "") or "").strip()
+    except Exception as e:
+        logger.debug(f"[assistant_hub] identity name 解析失败: {e}")
+        return ""
+
+
+def _identity_avatar(ctx: dict) -> str:
+    """身份头像引用：会话级临时助手（@提及）用该助手自己的头像。"""
+    try:
+        from assistant_hub_manager import AssistantManager
+
+        if str((ctx or {}).get("role") or "") == "user":
+            return ""
+        mgr = AssistantManager.get_instance()
+        aid = _resolve_active_aid(ctx)
+        if not aid:
+            return ""
+        path = mgr.assistant_avatar_path(aid)
+        return str(path) if path else ""
+    except Exception as e:
+        logger.debug(f"[assistant_hub] identity avatar 解析失败: {e}")
+        return ""
+
+
+def _register_identity_providers() -> None:
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        registry = UIPluginRegistry.get_instance()
+        registry.register_identity_name_provider(
+            plugin_name="assistant_hub",
+            provider_id=_IDENTITY_PROVIDER_ID,
+            resolve_func=_identity_name,
+            priority=100,
+        )
+        registry.register_identity_avatar_provider(
+            plugin_name="assistant_hub",
+            provider_id=_IDENTITY_PROVIDER_ID,
+            resolve_func=_identity_avatar,
+            priority=100,
+        )
+        logger.debug("[assistant_hub] 已注册消息身份 provider")
+    except Exception as e:
+        logger.warning(f"[assistant_hub] 注册消息身份 provider 失败: {e}")
+
+
 # ── 欢迎卡片「助手」tab ──────────────────────────────────────────
 
 _WELCOME_TAB_MODE = "assistants"
@@ -718,6 +798,9 @@ def register_ui(registry) -> None:
     # ── @ 卡片智能体区（mention provider，选中后会话级临时切换）──
     _register_mention_provider()
 
+    # ── 消息身份覆盖（助手名/头像 + 用户侧称呼）──
+    _register_identity_providers()
+
     # ── 欢迎卡片「助手」tab + 点击填 @助手名 ──
     _register_welcome_tab()
 
@@ -727,5 +810,5 @@ def register_ui(registry) -> None:
     logger.info(
         f"[assistant_hub] UI 组件已注册：titlebar_tab(助手) + floating_card(assistant_hub/full)"
         f" + tag_renderer({_persona_block_tags()}) + gitee sync"
-        f" + mention_provider + welcome_tab(助手)"
+        f" + mention_provider + identity_provider + welcome_tab(助手)"
     )

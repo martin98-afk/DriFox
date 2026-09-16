@@ -1890,6 +1890,7 @@ def create_assistant_card_widget(
     on_subagent_log=None,
     on_review=None,
     immediate_render: bool = False,
+    identity=None,
 ) -> Any:
     """
     创建助手消息卡片（带标准配置）
@@ -1921,6 +1922,7 @@ def create_assistant_card_widget(
         model_name=model_name,
         provider_name=provider_name,
         config_id=config_id,
+        identity=identity,
     )
     card._round_index = round_index
     if immediate_render:
