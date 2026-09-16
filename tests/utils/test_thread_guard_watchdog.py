@@ -191,3 +191,48 @@ def test_atexit_cleanup_budget_warning(caplog, monkeypatch):
         assert any("atexit 清理耗时" in r.message for r in caplog.records)
     finally:
         tg._running_threads.discard(t)
+
+
+# ========== 回归：非 Qt 管理线程里创建 QThread 不得自递归 ==========
+
+
+def test_cross_thread_qthread_creation_no_self_recursion(qapp, caplog):
+    """线程池类线程里 new QThread 不得触发 QThread.__init__ 自递归。
+
+    回归现场（2026-09-16）：
+        _safe_init 内调 QThread.currentThread() 判断是否主线程，而 sip 为
+        「非 Qt 管理的线程」（adopted thread，即 ThreadPoolExecutor 的
+        tool_parallel_*）生成 QThread 包装对象时会再走一次 __init__ →
+        无限递归 → C 栈打满：RecursionError: Stack overflow (used 1954 kB)，
+        subagent_para 派发必失败，整个子智能体通路不可用。
+    """
+    import threading as _th
+
+    from app.utils import thread_guard as tg
+
+    tg.install_guard()
+    result = {}
+
+    def _work():
+        try:
+            t = QThread()
+            result["ok"] = t is not None
+            tg._running_threads.discard(t)  # 不污染其他用例的扫描集合
+        except BaseException as e:  # noqa: BLE001
+            result["err"] = f"{type(e).__name__}: {e}"
+
+    # 32MB 栈：万一回归，让 Python recursionlimit 先触发并抛 RecursionError，
+    # 而不是把 C 栈打满带崩整个 pytest 进程（后者连 traceback 都拿不到）。
+    old = _th.stack_size(32 * 1024 * 1024)
+    th = _th.Thread(target=_work, name="tool_parallel_probe")
+    try:
+        with caplog.at_level("WARNING", logger="thread_guard.watchdog"):
+            th.start()
+            th.join(30)
+    finally:
+        _th.stack_size(old)
+
+    assert not th.is_alive(), "探测线程超时未返回（疑似栈溢出把线程卡死）"
+    assert "err" not in result, f"跨线程创建 QThread 失败（疑似 __init__ 自递归）: {result.get('err')}"
+    assert result.get("ok") is True, "跨线程创建 QThread 应成功（守卫只告警，不阻断）"
+    assert any("非主线程创建 QThread" in r.message for r in caplog.records), "应留下 affinity 告警"

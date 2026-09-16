@@ -24,7 +24,7 @@ import atexit
 import logging as _logging
 import threading as _threading
 import time as _time
-from typing import Set, cast
+from typing import Set
 
 from PyQt5.QtCore import QObject, QThread
 
@@ -36,13 +36,6 @@ _thread_anchor: QObject = QObject()
 # ── 全局强引用集合 ────────────────────────────────────
 # 保持对 ALL 运行中 QThread 的强引用，防止 Python GC 提前回收。
 _running_threads: Set[QThread] = set()
-
-# ── 主线程参照（M7）───────────────────────────
-# install_guard() 在进程主线程执行（app/__init__.py 导入链），此刻的
-# currentThread() 即 Qt 主线程。QThread 跨线程创建会导致对象所属线程与
-# start()/销毁线程不一致，是退出期 "QThread: Destroyed while thread is
-# still running" qFatal 的高危源头（WER 口径 53.9%）。
-_main_thread: QThread = cast(QThread, QThread.currentThread())
 
 
 def _on_thread_finished(thread: QThread) -> None:
@@ -71,16 +64,28 @@ def install_guard() -> None:
     original_init = QThread.__init__
 
     def _safe_init(self, parent=None):
-        # ── 0. M7 主线程守卫：拒绝跨线程创建 QThread ──
-        # QThread 对象必须归属于主线程（与 QApplication 同线程）；在 worker
-        # 线程里 new QThread 是退出期销毁顺序错乱的根源，提前炸出来比留到
-        # 退出期 qFatal 好排查。
-        if QThread.currentThread() is not _main_thread:
-            raise RuntimeError(
-                "QThread 必须在主线程创建："
-                f"当前线程 {_threading.current_thread().name} "
-                f"(native_id={_threading.get_ident()})，"
-                "跨线程创建会在退出期触发 qFatal（QThread: Destroyed while running）"
+        # ── 0. M7 主线程守卫：非主线程创建 QThread 仅告警 ──
+        # QThread 对象理想上应归属主线程（与 QApplication 同线程）；在 worker
+        # 线程里 new QThread 会让对象 affinity 落在创建线程上，是退出期销毁
+        # 顺序错乱的隐患（"QThread: Destroyed while running" qFatal）。
+        #
+        # ★ 判定必须用 Python 层 threading，绝不能调 QThread.currentThread()：
+        #   本函数就是 QThread.__init__，而 sip 为「非 Qt 管理的线程」（adopted
+        #   thread，典型 ThreadPoolExecutor 的 tool_parallel_*）生成 QThread 包装
+        #   对象时会走 __init__ —— 每调一次 currentThread() 就再进一次 _safe_init，
+        #   无限递归把 C 栈打满，报 "Stack overflow (used 1954 kB)"。
+        #   （2026-09-16 子智能体 subagent_para 派发必崩即此路径）
+        #
+        # ★ 只告警不抛错：工具线程池里创建 QThread 是当前架构的既定路径
+        #   （SubAgentExecutor 正是在 tool_parallel_* 中构造），硬抛会直接废掉
+        #   整个子智能体通路。退出期 qFatal 的实际防护由下面的 parent 重定向 +
+        #   全局强引用承担，不依赖本判定。
+        if _threading.current_thread() is not _threading.main_thread():
+            _watchdog_logger.warning(
+                "[ThreadGuard] 非主线程创建 QThread: %s (native_id=%s)，"
+                "对象 affinity 归属该线程，退出期存在销毁顺序风险",
+                _threading.current_thread().name,
+                _threading.get_ident(),
             )
         # ★ 看门狗起点：记录创建时间戳，用于卡死检测
         self._guard_start_ts = _time.monotonic()

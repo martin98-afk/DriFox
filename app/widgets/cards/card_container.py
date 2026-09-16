@@ -840,6 +840,7 @@ class CardContainer(QWidget):
                 self._apply_visible_card_dock_size()
                 return
 
+
             # ── 展开：snap 或动画到 layout 算出的自然尺寸（轴向） ──
             # 先放开轴向 max，让 layout 算出"展开后该有多大"
             self._set_axis_max(self._EXPAND_MAX)
@@ -926,13 +927,10 @@ class CardContainer(QWidget):
                     # sizeHint 常因异步加载变化，单次 setSizes 会被后续重排冲掉；用
                     # minimum 锁死下限后，无论 sizeHint 怎么变，splitter 都必须给到
                     # 至少该高度，首次/二次及以后都不会缩回细条。
-                    #
-                    # [T33] 实验记录：曾试「落位锁 max=target 不放开」以阻断
-                    # sizeHint 撑大，实测引发连锁回归（窗口 resize / 拖宽场景被
-                    # max 钳死，6 用例失败）已回退。循环本体已由 _schedule_expand
-                    # 的动画守卫 + _on_dock_splitter_moved 的记忆污染守卫消除
-                    # （_do_expand 调用次数从 1867 次降回正常），剩余的恢复偏差
-                    # （w≈163 vs 220）属另一独立问题，另行排查。
+                    # [T33] 曾试「落位锁 max=target 不放开」（方向 A）：与
+                    # TestDockMinLockUpgrade :150 的产品契约「展开完成 max 必须释放
+                    # （>= _EXPAND_MAX）」冲突，且引发 TestDockMinLockUpgrade 两用例
+                    # 失败/挂起，已回退。自激循环本体由两处动画守卫消除。
                     self._set_axis_min(min_floor)
                     self._set_axis_max(self._EXPAND_MAX)
                     self._restore_dock_size(target)

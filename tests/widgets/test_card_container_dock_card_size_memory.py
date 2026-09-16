@@ -152,6 +152,13 @@ class _MiniBottomHost(QWidget):
 
 def _drag_splitter(sp: QSplitter, sizes: list):
     """模拟用户拖拽：setSizes + 手动发射 splitterMoved（setSizes 不发该信号）"""
+    # [T33-方向A] 真实用户拖拽前 QSplitterHandle 的 MouseButtonPress 会解除
+    # 落位锁（max=target）；本模拟不经 handle 鼠标事件，需显式解除等价物，
+    # 否则 setSizes 会被落位锁钳制（真实交互不受影响：Press 已解锁）。
+    for i in range(sp.count()):
+        w = sp.widget(i)
+        if isinstance(w, CardContainer) and 0 < w._axis_max() < w._EXPAND_MAX:
+            w._set_axis_max(w._EXPAND_MAX)
     sp.setSizes(sizes)
     sp.splitterMoved.emit(0, 0)
     _pump(50)
