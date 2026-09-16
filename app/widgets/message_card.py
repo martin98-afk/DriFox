@@ -6329,24 +6329,11 @@ class CodeWebViewer(QWebEngineView):
                     gap: 6px;
                     margin-bottom: 8px;
                 }}
-                .session-header-icon {{
-                    font-size: {tag_font_size}px;
-                    line-height: 1;
-                }}
                 .session-header-title {{
                     font-size: {tag_font_size}px;
                     font-weight: 600;
                     color: var(--text);
                     letter-spacing: 0.02em;
-                }}
-                .session-header-count {{
-                    font-size: {tiny_font_size}px;
-                    color: var(--accent-text);
-                    background: var(--accent-soft);
-                    border: 1px solid var(--accent-border-weak);
-                    padding: 0 7px;
-                    border-radius: 999px;
-                    line-height: 1.7;
                 }}
                 /* 分区右侧「全部」快捷按钮：打开工作台历史会话页（复用 context-tag 点击链） */
                 .session-header-more {{
@@ -6397,17 +6384,6 @@ class CodeWebViewer(QWebEngineView):
                     transform: translateX(2px);
                     box-shadow: 0 2px 10px var(--accent-glow);
                 }}
-                .session-item-badge {{
-                    flex: 0 0 auto;
-                    width: 30px;
-                    height: 30px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    border-radius: 9px;
-                    font-size: 14px;
-                    line-height: 1;
-                }}
                 .session-item-body {{
                     flex: 1;
                     min-width: 0;
@@ -6437,7 +6413,7 @@ class CodeWebViewer(QWebEngineView):
                     transition: opacity 0.18s ease, transform 0.18s ease;
                     line-height: 1;
                 }}
-                /* 最近会话右侧相对时间 tag（仅 count_mode=False 输出） */
+                /* 会话卡右侧状态 tag：最近=相对时间 / 最活跃=消息数，同一套中性色 */
                 .session-item-tag {{
                     flex: 0 0 auto;
                     font-size: {tiny_font_size}px;
@@ -6448,11 +6424,6 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: 6px;
                     line-height: 1.4;
                     white-space: nowrap;
-                }}
-                /* 最活跃会话右侧热度 tag（count_mode=True 输出） */
-                .session-item-tag-warn {{
-                    color: #ea580c;
-                    background: rgba(234, 88, 12, 0.12);
                 }}
                 .session-item.context-tag:hover .session-item-arrow {{
                     opacity: 1;
@@ -13337,7 +13308,6 @@ class MessageCard(SimpleCardWidget):
                 "accent": Colors.ASSISTANT_CARD_ACCENT,
                 "text": Colors.ASSISTANT_CARD_TEXT,
                 "muted": Colors.ASSISTANT_CARD_MUTED,
-                "side": "left",
             },
             "welcome": {
                 "avatar": "DX",
@@ -13348,7 +13318,6 @@ class MessageCard(SimpleCardWidget):
                 "accent": Colors.ASSISTANT_CARD_ACCENT,
                 "text": Colors.ASSISTANT_CARD_TEXT,
                 "muted": Colors.ASSISTANT_CARD_MUTED,
-                "side": "left",
             },
             "user": {
                 "avatar": "User",
@@ -13359,7 +13328,6 @@ class MessageCard(SimpleCardWidget):
                 "accent": Colors.USER_CARD_ACCENT,
                 "text": Colors.USER_CARD_TEXT,
                 "muted": Colors.USER_CARD_MUTED,
-                "side": "right",
             },
         }
         theme = dict(themes.get(role, themes["assistant"]))
@@ -13457,6 +13425,19 @@ class MessageCard(SimpleCardWidget):
         # 刷新富文本视图字体并触发重渲染（缓存已在 refresh_theme 中失效）
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
             self.viewer._refresh_viewer_font()
+        # 欢迎 tab 条：文字/hover/选中底色都由 CustomTabButton 实时取 Colors token，
+        # refresh_style 重算 QSS 即可；胶囊（_TabIndicator）配色每次 paint 实时读，
+        # 补一次 update 触发重绘。
+        for _btn in self._welcome_tab_buttons:
+            try:
+                _btn.refresh_style()
+            except RuntimeError:
+                continue
+        if self._welcome_indicator_ctl is not None:
+            try:
+                self._welcome_indicator_ctl.indicator.update()
+            except RuntimeError:
+                self._welcome_indicator_ctl = None
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
@@ -13863,7 +13844,7 @@ class MessageCard(SimpleCardWidget):
         return specs
 
     def _build_welcome_mode_tabs(self, parent_layout):
-        """构建欢迎 tab 条（welcome 角色专属）：独立一行，挂在头像行之后
+        """构建欢迎 tab 条（welcome 角色专属）：卡片底部独立一行
 
         与顶栏 / 工作台页签共用同一套组件（``CustomTabButton`` +
         ``TabIndicatorController`` 滑动胶囊）：未选中透明底、hover 前景色 6%、
@@ -13873,18 +13854,18 @@ class MessageCard(SimpleCardWidget):
         host = QWidget(self)
         self._welcome_tab_host = host
         host.setStyleSheet("background: transparent;")
-        host.setFixedHeight(CustomTabButton.HEIGHT)
-        bar = FlowLayout(host, spacing=2, alignment=Qt.AlignLeft, margins=0)
+        # 高度策略：FlowLayout 的 heightForWidth 已是真实折行高度，但 Qt5 在
+        # 「子布局带 heightForWidth」的子 widget 上会用 **minimumWidth** 估高
+        # （本项目 P010 记录过 PyQt5 不派发 Python 侧 sizeHint override）——
+        # 6 个 tab 会被当成 3 行 = 90px，实际 1 行只需 30px，多出的就是卡片
+        # 底部空白。这里不依赖 Qt 估高：布局跑完后按实测宽度主动设高
+        # （见 _sync_welcome_tab_host_height）。
+        _sp = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        host.setSizePolicy(_sp)
+        # margins：上留白 4，左右 4（居中时对称即可）
+        bar = FlowLayout(host, spacing=2, alignment=Qt.AlignHCenter, margins=(4, 4, 4, 0))
         self._welcome_tabs_bar_layout = bar
-        # 整行左缩进对齐头像（头像 30px + 间距 6px），视觉上与上方头像同一起始线
-        wrap = QWidget(self)
-        wrap.setStyleSheet("background: transparent;")
-        wrap_layout = QHBoxLayout(wrap)
-        wrap_layout.setContentsMargins(4, 2, 4, 0)
-        wrap_layout.setSpacing(0)
-        wrap_layout.addWidget(host)
-        wrap_layout.addStretch()
-        parent_layout.addWidget(wrap)
+        parent_layout.addWidget(host)
 
         # 滑动指示器：构造必须早于任何按钮加入，天然垫在按钮之下
         self._welcome_indicator_ctl = TabIndicatorController(
@@ -13893,6 +13874,27 @@ class MessageCard(SimpleCardWidget):
             self._welcome_tab_active_geometry,
         )
         self._rebuild_welcome_tab_buttons(current_mode=self._welcome_mode or None)
+
+    def _sync_welcome_tab_host_height(self) -> None:
+        """按 FlowLayout 在**当前实测宽度**下的折行结果给宿主设高
+
+        窗口 resize 导致 tab 重新折行时必须重调，否则高度停在旧行数
+        （多一行会被裁、少一行留空白）。
+        """
+        host = self._welcome_tab_host
+        bar = self._welcome_tabs_bar_layout
+        if host is None or bar is None:
+            return
+        width = host.width()
+        if width <= 0:
+            return
+        try:
+            h = bar.heightForWidth(width)
+            if h > 0 and host.height() != h:
+                host.setFixedHeight(h)
+        except RuntimeError:
+            self._welcome_tab_host = None
+            self._welcome_tabs_bar_layout = None
 
     def _welcome_tab_active_geometry(self):
         """当前激活 tab 按钮的几何（无激活项 / 控件已销毁返回 None）"""
@@ -13908,7 +13910,7 @@ class MessageCard(SimpleCardWidget):
             return None
 
     def _rebuild_welcome_tab_buttons(self, current_mode: Optional[str] = None) -> None:
-        """按当前注册表重建 tab 按钮（集合变化时调用，见 _sync_welcome_tabs）"""
+        """按当前注册表重建 tab 按钮（重建后同步高亮 + 胶囊钉位）"""
         bar = self._welcome_tabs_bar_layout
         if self._welcome_tab_host is None or bar is None:
             return
@@ -13939,18 +13941,38 @@ class MessageCard(SimpleCardWidget):
 
         target = current_mode if current_mode in self._welcome_tab_ids else None
         if target is None and self._welcome_tab_ids:
-            target = self._welcome_tab_ids[0]
-            self._welcome_mode = target
+            # 仅在尚未确定 mode（首次构建）时回落首项；已有 mode 但对应 tab 消失
+            # （插件卸载）时不改写，交给上层失效重建决定去向
+            if not self._welcome_mode:
+                self._welcome_mode = self._welcome_tab_ids[0]
+            target = self._welcome_mode if self._welcome_mode in self._welcome_tab_ids else None
         for i, btn in enumerate(self._welcome_tab_buttons):
             btn.set_active(self._welcome_tab_ids[i] == target)
         self._apply_welcome_tabs_font()
+        self._sync_welcome_tab_host_height()
         self._schedule_welcome_indicator_snap()
 
     def _schedule_welcome_indicator_snap(self) -> None:
-        """延迟一拍把指示器钉到激活 tab（本帧布局尚未收敛，读到的几何是旧值）"""
-        if self._welcome_indicator_ctl is None:
+        """延迟一拍把指示器钉到激活 tab（本帧布局尚未收敛，读到的几何是旧值）
+
+        ⚠️ 用绑定 card 生命周期的 QTimer 而非裸 ``QTimer.singleShot(0, ...)``：
+        延迟窗口内卡片被销毁（会话切换 / 标签页关闭）时 singleShot 仍会回调，
+        对已释放控件取几何 → ACCESS_VIOLATION（同 _defer_emit 的 P050 根因）。
+        """
+        ctl = self._welcome_indicator_ctl
+        if ctl is None:
             return
-        QTimer.singleShot(0, self._snap_welcome_indicator)
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def _run() -> None:
+            try:
+                self._snap_welcome_indicator()
+            finally:
+                timer.deleteLater()
+
+        timer.timeout.connect(_run)
+        timer.start(0)
 
     def _snap_welcome_indicator(self) -> None:
         ctl = self._welcome_indicator_ctl
@@ -13960,20 +13982,6 @@ class MessageCard(SimpleCardWidget):
             ctl.snap_to_active()
         except RuntimeError:
             self._welcome_indicator_ctl = None
-
-    def sync_welcome_tabs(self) -> None:
-        """插件注册表变化后同步 tab 条（幂等）
-
-        卡片实例已存在时不会再走 ``_build_welcome_mode_tabs``；热重载 / 启用
-        插件新增 welcome tab 后由 UIPluginRegistry 的刷新链调用本方法。
-        """
-        if self._welcome_tab_host is None:
-            return
-        specs = self._welcome_tab_specs()
-        if [k for k, _ in specs] == list(self._welcome_tab_ids):
-            self._schedule_welcome_indicator_snap()
-            return
-        self._rebuild_welcome_tab_buttons(current_mode=self._welcome_mode or None)
 
     def _apply_welcome_tabs_font(self):
         """欢迎 tabs 适配系统字号
@@ -13989,22 +13997,39 @@ class MessageCard(SimpleCardWidget):
             except RuntimeError:
                 continue
 
+    def _sync_welcome_tab_active(self, mode: str, animate: bool = False) -> None:
+        """把 tab 高亮 + 滑动胶囊对齐到 mode（控件已销毁时静默跳过）
+
+        ``animate=True`` 仅用于用户点击（胶囊滑过去）；其余路径用 False
+        （布局平移 / 静态刷新场景下瞬移，避免动画被自己的副作用打断）。
+        """
+        if mode not in self._welcome_tab_ids:
+            return
+        for i, btn in enumerate(self._welcome_tab_buttons):
+            try:
+                btn.set_active(self._welcome_tab_ids[i] == mode)
+            except RuntimeError:
+                continue
+        ctl = self._welcome_indicator_ctl
+        if ctl is None:
+            return
+        try:
+            geom = self._welcome_tab_active_geometry()
+            if geom is not None:
+                ctl.move_to(geom, animate=animate)
+        except RuntimeError:
+            self._welcome_indicator_ctl = None
+
     def _on_welcome_mode_tab_clicked(self, mode: str):
-        """tab 点击：切高亮 + 滑动指示器 + 重渲染 body（不重建 QWebEngineView）"""
+        """tab 点击：滑动胶囊 + 切 mode + 重渲染 body（不重建 QWebEngineView）"""
         if mode == self._welcome_mode:
             return
+        # 先落 mode：``_sync_welcome_tab_active`` 经 ``_welcome_tab_active_geometry``
+        # 按 self._welcome_mode 定位目标按钮，顺序反了会读到旧项几何 → 胶囊不动。
         self._welcome_mode = mode
-        for i, btn in enumerate(self._welcome_tab_buttons):
-            btn.set_active(self._welcome_tab_ids[i] == mode)
-        ctl = self._welcome_indicator_ctl
-        if ctl is not None:
-            try:
-                geom = self._welcome_tab_active_geometry()
-                if geom is not None:
-                    ctl.move_to(geom, animate=True)
-            except RuntimeError:
-                self._welcome_indicator_ctl = None
-        self.set_welcome_mode(mode)
+        self._sync_welcome_tab_active(mode, animate=True)
+        # sync_tab=False：重渲染不能把刚起的滑动动画瞬移掉
+        self.set_welcome_mode(mode, sync_tab=False)
         self.welcomeModeChanged.emit(mode)
 
     def _get_welcome_window_context(self) -> dict:
@@ -14024,30 +14049,22 @@ class MessageCard(SimpleCardWidget):
                 pass
         return {}
 
-    def set_welcome_mode(self, mode: str):
+    def set_welcome_mode(self, mode: str, *, sync_tab: bool = True):
         """切换欢迎卡片模式（同步 active tab + 重渲染 body）
 
         所有 mode 统一走 ``_render_welcome_body`` 分发（内置 sessions /
         插件注册 tab），插件 fetcher 完成后通过 UIEventBus 通知本卡片
         再次调 ``set_welcome_mode`` 强制重渲染当前 mode（见 _subscribe_welcome_refresh）。
+
+        Args:
+            sync_tab: False 时不动 tab 高亮（点击路径已自行同步，且需要保留
+                滑动动画，不能在这里用 animate=False 把它盖掉）。
         """
         self._welcome_mode = mode
-        # 同步 tab 高亮：本方法也被插件静态刷新路径直接调用（不经点击处理），
-        # 高亮与指示器必须在这里收敛，否则外部改 mode 后 tab 停在旧项上。
-        if mode in self._welcome_tab_ids:
-            for i, btn in enumerate(self._welcome_tab_buttons):
-                try:
-                    btn.set_active(self._welcome_tab_ids[i] == mode)
-                except RuntimeError:
-                    continue
-            ctl = self._welcome_indicator_ctl
-            if ctl is not None:
-                try:
-                    geom = self._welcome_tab_active_geometry()
-                    if geom is not None:
-                        ctl.move_to(geom, animate=False)
-                except RuntimeError:
-                    self._welcome_indicator_ctl = None
+        # 静态刷新路径（插件数据到达 / 外部改 mode）不经点击处理，高亮与胶囊
+        # 必须在这里收敛，否则 tab 会停在旧项上。
+        if sync_tab:
+            self._sync_welcome_tab_active(mode, animate=False)
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -14113,13 +14130,8 @@ class MessageCard(SimpleCardWidget):
         self._welcome_mode = mode
         # 初始 mode 由 resolve_initial_welcome_mode 解析（可能是插件 tab），
         # 与已建好的按钮集合对齐高亮；mode 不在集合内时安装点已回落首项
-        if mode in self._welcome_tab_ids:
-            for i, btn in enumerate(self._welcome_tab_buttons):
-                try:
-                    btn.set_active(self._welcome_tab_ids[i] == mode)
-                except RuntimeError:
-                    continue
-            self._schedule_welcome_indicator_snap()
+        self._sync_welcome_tab_active(mode, animate=False)
+        self._schedule_welcome_indicator_snap()
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -14241,6 +14253,16 @@ class MessageCard(SimpleCardWidget):
             if header is not None:
                 main.addWidget(header)
             return
+        if self.role == "welcome":
+            # 欢迎卡片：无头部（不画头像行 / 标题 / 分隔线），首屏直接从问候语开始。
+            # 仍建 label 引用占位以兼容 hasattr 守卫（refresh_theme 等），但不显示。
+            nm_l = QLabel(self._theme["title"], self)
+            self._name_label = nm_l
+            nm_l.setVisible(False)
+            sub_l = QLabel(self._theme["subtitle"], self)
+            self._subtitle_label = sub_l
+            sub_l.setVisible(False)
+            return
         top = QHBoxLayout()
         top.setContentsMargins(4, 0, 4, 0)
         top.setSpacing(6)
@@ -14263,43 +14285,32 @@ class MessageCard(SimpleCardWidget):
 
         font_css = get_font_family_css()
         top.addWidget(av)
-        # 欢迎卡片：极简头部，只剩头像 + 右侧 mode 切换 tabs（无标题/副标题文字）
-        # 其他角色（assistant/user）：保留原 title_wrap + 模型名/时间戳 + 顶部操作按钮
-        if self.role == "welcome":
-            # 仍创建 label 引用占位以兼容 hasattr 守卫（refresh_theme 等），但不显示
-            nm_l = QLabel(self._theme["title"], self)
-            self._name_label = nm_l
-            nm_l.setVisible(False)
-            sub_l = QLabel(self._theme["subtitle"], self)
-            self._subtitle_label = sub_l
-            sub_l.setVisible(False)
-            self._build_welcome_mode_tabs(top)
-        else:
-            title_wrap = QWidget(self)
-            title_layout = QVBoxLayout(title_wrap)
-            title_layout.setContentsMargins(0, 0, 0, 0)
-            title_layout.setSpacing(1)
+        # assistant / user 路径：title_wrap + 模型名/时间戳 + 顶部操作按钮
+        title_wrap = QWidget(self)
+        title_layout = QVBoxLayout(title_wrap)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(1)
 
-            nm_l = QLabel(self._theme["title"], self)
-            self._name_label = nm_l
-            nm_l.setStyleSheet(
-                f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
-            )
-            sub_l = QLabel(self._theme["subtitle"], self)
-            self._subtitle_label = sub_l
-            sub_l.setStyleSheet(
-                f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
-            )
-            title_layout.addWidget(nm_l)
-            title_layout.addWidget(sub_l)
-            top.addWidget(title_wrap)
-            # 助手卡片显示模型名称
-            label_text = self.model_name if (self.role == "assistant" and self.model_name) else self.timestamp
-            ts = QLabel(label_text, self)
-            self._ts_label = ts
-            ts.setVisible(bool(label_text))
-            ts.setStyleSheet(
-                f"""
+        nm_l = QLabel(self._theme["title"], self)
+        self._name_label = nm_l
+        nm_l.setStyleSheet(
+            f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
+        )
+        sub_l = QLabel(self._theme["subtitle"], self)
+        self._subtitle_label = sub_l
+        sub_l.setStyleSheet(
+            f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
+        )
+        title_layout.addWidget(nm_l)
+        title_layout.addWidget(sub_l)
+        top.addWidget(title_wrap)
+        # 助手卡片显示模型名称
+        label_text = self.model_name if (self.role == "assistant" and self.model_name) else self.timestamp
+        ts = QLabel(label_text, self)
+        self._ts_label = ts
+        ts.setVisible(bool(label_text))
+        ts.setStyleSheet(
+            f"""
                 QLabel {{
                     {get_font_family_css()} font-size: {scale_font_size(11)}px;
                     color: {self._theme["muted"]};
@@ -14309,9 +14320,9 @@ class MessageCard(SimpleCardWidget):
                     padding: 2px 8px;
                 }}
                 """
-            )
-            top.addWidget(ts)
-            top.addStretch()
+        )
+        top.addWidget(ts)
+        top.addStretch()
 
         # 顶部操作按钮
         btns = QWidget(self)
@@ -14610,7 +14621,9 @@ class MessageCard(SimpleCardWidget):
         main.addWidget(self._retry_status_widget)
 
         if self.role == "welcome":  # 全减：assistant 无底部装饰线；user 简洁气泡本就不带
-            main.addWidget(CardSeparator(self))
+            # 欢迎卡片：tab 条落在卡片**底部**（内容下方），切换区不占用
+            # 头部首位；顶部头部与底部区分隔线均已去掉（2026-09-17 用户要求）。
+            self._build_welcome_mode_tabs(main)
 
         # ===== 助手卡片底部元信息栏（分割线下方） =====
         if self.role == "assistant":
@@ -15008,15 +15021,8 @@ class MessageCard(SimpleCardWidget):
         w, h = self.width(), self.height()
         radius = 16
 
-        accent = QColor(self._theme["accent"])
-        if self.role == "welcome":
-            # 静态 accent 侧边竖条（user 简洁气泡 / assistant 全减模式不画，保持纯净）
-            accent.setAlpha(75)
-            stripe_width = 4
-            stripe_x = w - stripe_width - 2 if self._theme.get("side") == "right" else 2
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(accent)
-            painter.drawRoundedRect(stripe_x, 10, stripe_width, max(18, h - 20), 3, 3)
+        # 侧边竖条已整体移除：welcome 卡片的 accent 竖条（左缘那条线）由用户
+        # 2026-09-17 明确要求去掉，保持卡片四边纯净。
 
         if not self._streaming:
             painter.end()
@@ -17516,6 +17522,11 @@ class MessageCard(SimpleCardWidget):
         # 浮动按钮组不在布局里，需手工跟随卡片宽度变化重新贴靠时间戳左侧。
         if self.role == "user":
             self._sync_identity_header_width()
+        elif self.role == "welcome":
+            # tab 条按宽度折行：宽度变化后行数可能变，需重算宿主高度
+            # （Qt5 对带 heightForWidth 子布局的 widget 估高偏大，见
+            # _sync_welcome_tab_host_height，不能依赖布局自动收敛）
+            self._sync_welcome_tab_host_height()
 
     def _disconnect_all_signals(self):
         """断开 MessageCard 发射的所有信号，打破信号-槽引用环路"""
@@ -17719,7 +17730,8 @@ def _session_duration_days(created_at: str) -> int:
 def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_anim: bool = False) -> str:
     """渲染会话导览 body：最近 / 最活跃两个卡片双列网格（每分类 3 行）
 
-    每张卡片：左侧图标徽章 + 标题/副标题 + hover 滑入箭头。
+    每张卡片：标题/副标题 + 右侧标签 + hover 滑入箭头（无图钉徽章：彩色 emoji
+    贴片与卡片内线性图标体系混排显脏，信息量也不增，故移除）。
     复用 .context-tag 点击事件链（data-type="session" + data-session-id），
     仅替换视觉外观，JS 拦截逻辑不变。
     """
@@ -17733,23 +17745,19 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
         t = escape(s.get("title", "未命名会话"))
         sid = escape(s.get("session_id", ""))
         if count_mode:
-            mc = s.get("message_count", 0)
             # 第二行 = 日期（天）+ 持续天数（消息数移到右侧 tag，不重复显示）
             last_time = s.get("last_time") or ""
             date_str = last_time[:10] if len(last_time) >= 10 else last_time
             days = _session_duration_days(s.get("created_at") or "")
             days_part = f" · 持续 {days} 天" if days > 0 else ""
             meta = f"{date_str}{days_part}"
-            icon = "⚡"
         else:
             meta = escape(s.get("last_time") or "")
-            icon = "💬"
         anim_style = "animation: none;" if suppress_anim else f"animation-delay:{idx * 55}ms"
-        # 右侧 tag：最近=相对时间（蓝），最活跃=消息数（橙）
-        tag_html = ""
+        # 右侧 tag：最近 = 相对时间，最活跃 = 消息数（同一套中性色，仅文案不同）
         if count_mode:
             mc = s.get("message_count", 0)
-            tag_html = f'<span class="session-item-tag session-item-tag-warn">{mc} 条</span>'
+            tag_html = f'<span class="session-item-tag">{mc} 条</span>'
         else:
             rel_label = format_relative_time(s.get("last_time") or "")
             tag_html = f'<span class="session-item-tag">{escape(rel_label)}</span>'
@@ -17757,7 +17765,6 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
             f'<div class="context-tag session-item" data-type="session" '
             f'data-session-id="{sid}" data-action="session" '
             f'style="{anim_style}">'
-            f'<span class="session-item-badge">{icon}</span>'
             f'<span class="session-item-body">'
             f'<span class="session-item-title">{t}</span>'
             f'<span class="session-item-meta">{meta}</span>'
@@ -17769,7 +17776,6 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
 
     def _render_section(
         title: str,
-        icon: str,
         items: list,
         count_mode: bool = False,
         start_idx: int = 0,
@@ -17795,9 +17801,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
         return (
             f'<div class="session-section">'
             f'<div class="session-header">'
-            f'<span class="session-header-icon">{icon}</span>'
             f'<span class="session-header-title">{title}</span>'
-            f'<span class="session-header-count">{len(shown)}</span>'
             f"{more}"
             f"</div>"
             f'<div class="session-list">{rows}</div>'
@@ -17806,7 +17810,6 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
 
     recent_block = _render_section(
         "最近会话",
-        "📅",
         recent_sessions,
         count_mode=False,
         start_idx=0,
@@ -17815,7 +17818,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     )
     top_start = len(recent_sessions[: _SESSION_ROWS * _SESSION_COLS])
     top_block = _render_section(
-        "最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=top_start, suppress_anim=suppress_anim
+        "最活跃会话", top_by_count, count_mode=True, start_idx=top_start, suppress_anim=suppress_anim
     )
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'

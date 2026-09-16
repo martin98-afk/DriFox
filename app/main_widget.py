@@ -10623,9 +10623,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 递归刷新所有 qfluentwidgets 组件字体大小
             apply_font_size_to_widget(self, 14)
 
-            # 欢迎卡片 segmented tabs 显式适配（SegmentedItem 内部写死 14px，
-            # apply_font_size_to_widget 已覆盖但其 _postInit 在增量重建时会重置，
-            # 这里双保险确保当前 delta 生效）
+            # 欢迎卡片 tab 条显式适配：CustomTabButton 的文字样式由
+            # _apply_label_color 写死 font-size，apply_font_size_to_widget 的
+            # setFont 覆盖不到，这里按当前 delta 重设（首次构建同路径）。
             for _card in self.findChildren(MessageCard):
                 if getattr(_card, "role", None) == "welcome" and hasattr(_card, "_apply_welcome_tabs_font"):
                     try:

@@ -24,10 +24,10 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from PyQt5.QtCore import QRectF, QSize, Qt
-from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
+from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPixmap
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from app.core.message_identity import BUILTIN_AVATAR_DRIFOX, BUILTIN_AVATAR_PREFIX, MessageIdentity
@@ -116,19 +116,104 @@ def _color_for_name(name: str) -> str:
     return _PALETTE[sum(ord(c) for c in text) % len(_PALETTE)]
 
 
+def _device_pixel_ratio() -> float:
+    """取主屏 devicePixelRatio（HiDPI 屏 >1.0），取不到回落 1.0。"""
+    try:
+        from PyQt5.QtGui import QGuiApplication
+
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return 1.0
+        return float(screen.devicePixelRatio()) or 1.0
+    except Exception:
+        return 1.0
+
+
+def _pil_resample() -> Optional[int]:
+    """取 Pillow 的高质量重采样滤镜（LANCZOS）。
+
+    Pillow ≥9.1 起 ``Image.LANCZOS`` 仍在（``Image.Resampling.LANCZOS`` 的别名），
+    兼容 ``Image.Resampling`` 缺失的旧版本。取不到返回 None → 调用方回落 Qt 缩放。
+    """
+    try:
+        from PIL import Image as _Image
+
+        resampling = getattr(_Image, "Resampling", None)
+        if resampling is not None:
+            return int(getattr(resampling, "LANCZOS"))
+        return int(getattr(_Image, "LANCZOS"))
+    except Exception:
+        return None
+
+
+def _hq_square(source: "QPixmap", size: int, dpr: float) -> Tuple[Optional["QPixmap"], bool]:
+    """把任意尺寸源图高质量降采样为正方形头像。
+
+    **为什么不用 Qt 一步 scaled**：250×250 → 32×32 是 7.8:1 的降采样，
+    Qt 的 ``SmoothTransformation`` 在大比例缩放下高频细节丢失明显（实测边缘能量
+    stddev 92.9，而 PIL LANCZOS 可达 99.8，肉眼即「发虚」）。逐级折半更糟——
+    Qt 每步双线性会累积插值损失（实测反降到 90.8）。故走 Pillow LANCZOS 一次性重采样。
+
+    Args:
+        source: 源 pixmap（任意尺寸）
+        size: 逻辑边长
+        dpr: devicePixelRatio（物理像素 = 逻辑 × dpr；<1 钳制为 1）
+
+    Returns:
+        ``(pixmap, ok)``；ok=False 表示 Pillow 不可用，调用方回落 Qt 缩放。
+    """
+    resample = _pil_resample()
+    if resample is None:
+        return None, False
+    phys = max(1, int(round(size * max(dpr, 1.0))))
+    try:
+        from PIL import Image as _Image
+
+        image = source.toImage().convertToFormat(QImage.Format_RGBA8888)
+        width, height = image.width(), image.height()
+        if width <= 0 or height <= 0:
+            return None, False
+        bits = image.constBits()
+        if bits is None:
+            return None, False
+        bits.setsize(height * width * 4)
+        # PyQt5 的 constBits() 返回 sip.voidptr，stub 未声明其 buffer 协议 → 类型债
+        pil_image = _Image.frombytes("RGBA", (width, height), bytes(bits))  # type: ignore[arg-type]
+
+        # 居中正方形裁剪（与 KeepAspectRatioByExpanding 语义一致，保留主体）
+        side = min(width, height)
+        left = (width - side) // 2
+        top = (height - side) // 2
+        pil_image = pil_image.crop((left, top, left + side, top + side))
+        pil_image = pil_image.resize((phys, phys), resample)
+
+        # 直传 RGBA 内存构造 QImage，省掉 PNG 编解码往返（更快、无压缩损失）
+        raw = pil_image.tobytes()
+        result_image = QImage(bytes(raw), phys, phys, phys * 4, QImage.Format_RGBA8888)
+        if result_image.isNull():
+            return None, False
+        result = QPixmap.fromImage(result_image.copy())
+        result.setDevicePixelRatio(dpr)
+        return result, True
+    except Exception:
+        # 静默回落：Pillow 缺依赖 / 打包裁剪 / 图像损坏时，走原 Qt 缩放而非让头像消失
+        return None, False
+
+
 def resolve_avatar_pixmap(identity: MessageIdentity, size: int = AVATAR_SIZE) -> Optional[QPixmap]:
     """解析身份头像为 QPixmap（带缓存）。
 
-    - 图片路径：加载并按 size 缩放（失败视作无色块头像）
+    - 图片路径：加载并**高质量**降采样为正方形（Pillow LANCZOS，见 ``_hq_square``）
     - ``builtin:`` 引用：取内置图标
     - 空：返回 None，由调用方画色块 + 首字母
 
-    缓存 key 用头像引用本身，同一头像的多条消息只加载一次。
+    缓存 key 同时含尺寸与 dpr（HiDPI 与常规屏产出不同，不可混用）。
     """
     avatar = (identity.avatar or "").strip()
     if not avatar:
         return None
-    cache_key = f"{avatar}@{size}"
+    dpr = _device_pixel_ratio()
+    cache_key = f"{avatar}@{size}@{dpr:.2f}"
     cached = _PIXMAP_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -146,7 +231,12 @@ def resolve_avatar_pixmap(identity: MessageIdentity, size: int = AVATAR_SIZE) ->
         try:
             candidate = QPixmap(avatar)
             if not candidate.isNull():
-                pixmap = candidate.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                hq, ok = _hq_square(candidate, size, dpr)
+                if ok:
+                    pixmap = hq
+                else:
+                    # Pillow 不可用（打包裁剪 / 导入失败）→ 回落原 Qt 缩放，功能不降级
+                    pixmap = candidate.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         except Exception:
             pixmap = None
 
@@ -194,11 +284,13 @@ class IdentityAvatar(QWidget):
             painter.setBrush(_qcolor(Colors.CARD_BG_SOLID, QColor(33, 33, 38, 250)))
             painter.drawRect(rect)
             source = self._pixmap
-            offset_x = max(0, (source.width() - self._size) // 2)
-            offset_y = max(0, (source.height() - self._size) // 2)
-            painter.drawPixmap(
-                0, 0, source, offset_x, offset_y, min(self._size, source.width()), min(self._size, source.height())
-            )
+            # ⚠️ QPixmap 的 width()/height() 是**设备像素**，self._size 是**逻辑像素**。
+            # HiDPI（dpr>1）下二者不等：此前用 `source.width() - self._size` 算偏移、
+            # 又用 `min(self._size, source.width())` 当源矩形边长 —— 只取到源图左上
+            # 1/(dpr²) 区域，表现为「头像只剩左上 1/4」（2026-09-17 用户反馈）。
+            # drawPixmap(目标矩形, pixmap, 源矩形) 重载里两个矩形各归各的单位：
+            # 目标=逻辑，源=设备，Qt 自动按 dpr 换算，故这里直接用全图作源矩形。
+            painter.drawPixmap(rect, source, QRectF(source.rect()))
             painter.setClipping(False)
         else:
             painter.setPen(Qt.NoPen)

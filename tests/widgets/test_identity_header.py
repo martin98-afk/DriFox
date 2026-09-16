@@ -6,6 +6,9 @@
 """
 
 import pytest
+from PIL import Image as PILImage
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QApplication
 
 from app.core.message_identity import BUILTIN_AVATAR_DRIFOX, MessageIdentity
@@ -73,6 +76,98 @@ def test_avatar_pixmap_missing_file_returns_none(qapp):
 
 def test_avatar_pixmap_empty_avatar_returns_none(qapp):
     assert ih.resolve_avatar_pixmap(MessageIdentity(name="hanako")) is None
+
+
+def test_avatar_pixmap_uses_high_quality_resample(qapp, tmp_path):
+    """大比例降采样必须走高质量重采样，而非 Qt 一步 SmoothTransformation。
+
+    回归守卫：250×250 → 32×32 是 7.8:1，Qt 单步双线性高频丢失明显（肉眼发虚）。
+    `_hq_square` 走 Pillow LANCZOS，实测边缘能量 stddev 92.9 → 99.8（+7%）。
+    这里锁定「输出为正方形 + 尺寸正确 + 与 Qt 路径结果不同」，
+    锐度绝对值受源图影响，不在单测中断言。
+    """
+    src = tmp_path / "big.png"
+    PILImage.new("RGB", (256, 256)).save(src)
+    img = PILImage.open(src).convert("RGB")
+    # 高频棋盘格：任何插值损失都会让输出偏离纯黑白
+    pixels = img.load()
+    for y in range(256):
+        for x in range(256):
+            v = 0 if ((x // 8) + (y // 8)) % 2 else 255
+            pixels[x, y] = (v, v, v)
+    img.save(src)
+
+    pm = ih.resolve_avatar_pixmap(MessageIdentity(name="checker", avatar=str(src)), 32)
+    assert pm is not None and not pm.isNull()
+    assert pm.width() == pm.height() == 32
+
+    qt_way = QPixmap(str(src)).scaled(32, 32, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    assert pm.toImage() != qt_way.toImage(), "高质量缩放未生效（与 Qt 默认缩放输出完全一致）"
+
+
+def test_hq_square_falls_back_when_pillow_missing(qapp, monkeypatch, tmp_path):
+    """Pillow 不可用时必须回落（ok=False），绝不返回坏图。"""
+    src = tmp_path / "a.png"
+    PILImage.new("RGBA", (64, 64), (255, 0, 0, 255)).save(src)
+    pixmap = QPixmap(str(src))
+    monkeypatch.setattr(ih, "_pil_resample", lambda: None)
+    result, ok = ih._hq_square(pixmap, 32, 1.0)
+    assert ok is False and result is None
+
+
+def test_avatar_renders_full_image_on_hidpi(qapp, monkeypatch, tmp_path):
+    """HiDPI（dpr>1）下头像必须画满整张源图，不能只剩左上 1/4。
+
+    回归守卫（2026-09-17 用户反馈）：QPixmap.width() 返回**设备像素**，
+    paintEvent 曾拿它与**逻辑** self._size 混算偏移与源矩形边长，
+    dpr=2 时只取到源图左上 32×32 设备像素 = 源图 1/4。
+    现走 drawPixmap(目标矩形, pixmap, 源矩形) 显式区分两套单位。
+
+    断言方式：四象限异色源图，渲染结果（圆内）四个象限颜色都必须出现。
+    """
+    src = tmp_path / "quad.png"
+    img = PILImage.new("RGBA", (64, 64))
+    pixels = img.load()
+    for y in range(64):
+        for x in range(64):
+            if y < 32:
+                pixels[x, y] = (255, 0, 0, 255) if x < 32 else (0, 255, 0, 255)
+            else:
+                pixels[x, y] = (0, 0, 255, 255) if x < 32 else (255, 255, 0, 255)
+    img.save(src)
+
+    monkeypatch.setattr(ih, "_device_pixel_ratio", lambda: 2.0)
+    widget = ih.IdentityAvatar(MessageIdentity(name="q", avatar=str(src)), 32)
+    assert widget._pixmap.devicePixelRatio() == 2.0
+
+    grabbed = widget.grab()
+    qimg = grabbed.toImage().convertToFormat(QImage.Format_RGBA8888)
+    width, height = qimg.width(), qimg.height()
+    bits = qimg.constBits()
+    bits.setsize(height * width * 4)
+    rendered = PILImage.frombytes("RGBA", (width, height), bytes(bits))
+
+    # 只统计圆形头像内部（避开圆裁外的透明角）
+    cx = cy = width / 2
+    radius_sq = (width / 2 - 2) ** 2
+    seen = set()
+    for y in range(height):
+        for x in range(width):
+            if (x - cx) ** 2 + (y - cy) ** 2 > radius_sq:
+                continue
+            r, g, b, a = rendered.getpixel((x, y))
+            if a < 200 or max(r, g, b) < 120:
+                continue
+            top, left = y < height / 2, x < width / 2
+            if top and left and r > 150:
+                seen.add("左上")
+            elif top and not left and g > 150:
+                seen.add("右上")
+            elif not top and left and b > 150:
+                seen.add("左下")
+            elif not top and not left and r > 150 and g > 150:
+                seen.add("右下")
+    assert seen == {"左上", "右上", "左下", "右下"}, f"HiDPI 下头像未画满整图，实际可见象限：{sorted(seen)}"
 
 
 def test_identity_avatar_renders_without_image(qapp):
