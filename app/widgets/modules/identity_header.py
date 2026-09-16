@@ -31,8 +31,8 @@ from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from app.core.message_identity import BUILTIN_AVATAR_DRIFOX, BUILTIN_AVATAR_PREFIX, MessageIdentity
-from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.design_tokens import Colors, scale_font_size
+from app.utils.utils import get_icon, get_unified_font
 
 # qrc 编译产物：**导入即注册资源**。主程序链路只 import 了深色 icons_rc，
 # 浅色 icons_light_rc 从未被引入（同 scroll_to_bottom_button.py 的补齐），
@@ -43,11 +43,14 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-# 头像尺寸（对齐主流 LLM 客户端比例）
-AVATAR_SIZE = 30
+# 头像尺寸（两行身份块：名称 + 时间，头像垂直居中于两行）
+AVATAR_SIZE = 40
 
 # 名称字号（基础值，实际经 scale_font_size 叠加用户字号档位）
 NAME_FONT_SIZE = 15
+
+# 时间字号（小于名称、字色更浅，弱化处理）
+TIME_FONT_SIZE = 10
 
 # 无头像时的候选主色（按显示名 hash 稳定选取）
 _PALETTE = (
@@ -229,26 +232,42 @@ class IdentityHeader(QWidget):
         identity: MessageIdentity,
         align_right: bool = False,
         parent: Optional[QWidget] = None,
+        timestamp: str = "",
     ):
         super().__init__(parent)
         self._align_right = align_right
         self.setStyleSheet("background: transparent;")
 
+        # 名称在上、时间在下（同列两行）；头像在侧，垂直居中于两行整体。
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
         self._avatar = IdentityAvatar(identity, AVATAR_SIZE, self)
-        self._name_label = QLabel(identity.name or "", self)
+
+        text_col = QWidget(self)
+        text_col.setStyleSheet("background: transparent;")
+        col = QVBoxLayout(text_col)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(1)
+
+        self._name_label = QLabel(identity.name or "", text_col)
         self._apply_name_style()
+
+        self._time_label = QLabel(timestamp or "", text_col)
+        self._time_label.setVisible(bool(timestamp))
+        self._apply_time_style()
+
+        col.addWidget(self._name_label)
+        col.addWidget(self._time_label)
 
         if align_right:
             layout.addStretch(1)
-            layout.addWidget(self._name_label)
+            layout.addWidget(text_col)
             layout.addWidget(self._avatar)
         else:
             layout.addWidget(self._avatar)
-            layout.addWidget(self._name_label)
+            layout.addWidget(text_col)
             layout.addStretch(1)
         self.setFixedHeight(AVATAR_SIZE + 2)
 
@@ -257,22 +276,60 @@ class IdentityHeader(QWidget):
         self._avatar.set_identity(identity)
         self._name_label.setText(identity.name or "")
 
+    def set_timestamp(self, timestamp: str) -> None:
+        """更新时间显示（空串隐藏）"""
+        self._time_label.setText(timestamp or "")
+        self._time_label.setVisible(bool(timestamp))
+
     def apply_text_color(self, color: str) -> None:
-        """按卡片主题色刷新名称颜色（refresh_theme 调用）"""
+        """按卡片主题色刷新名称与时间颜色（refresh_theme 调用）"""
         self._apply_name_style(color)
+        self._apply_time_style(color)
 
     def _apply_name_style(self, color: str = "") -> None:
-        """名称样式统一出口。
+        """名称样式统一出口：字族/字号走 setFont，QSS 只管颜色。
 
-        ⚠ `font_size_css()` 返回的就是完整声明（`font-size: 20px;`），不能再生
-        拼一层 `font-size:`——拼出来是非法 CSS，Qt 会静默丢弃整条声明，字号
-        永远停在默认值（2026-09-16 走查发现：身份行字号改不动就是这个原因）。
+        ⚠ 两个踩过的坑：
+        1. 字号曾经走 QSS 拼接：`font_size_css()` 返回的已是完整声明
+           （`font-size: 20px;`），再生拼一层 `font-size:` → `font-size: font-size: 20px;;`，
+           非法 CSS 被 Qt 静默丢弃、字号停在默认值。
+        2. QSS 的 `font-family` 在 Qt 里解析不到中文字体名（实测 `'楷体'`、
+           `楷体`、`KaiTi` 全部落到宋体，而 `QFont("楷体")` 能正确匹配）。
+           故字族必须走 `setFont()`，QSS 只负责颜色。
         """
+        font = get_unified_font()
+        font.setPixelSize(scale_font_size(NAME_FONT_SIZE))
+        font.setBold(True)
+        self._name_label.setFont(font)
         color_part = f"color: {color};" if color else ""
-        self._name_label.setStyleSheet(
-            f"{get_font_family_css()} {font_size_css(NAME_FONT_SIZE)}"
-            f" font-weight: 600; {color_part} background: transparent;"
-        )
+        self._name_label.setStyleSheet(f"{color_part} background: transparent;")
+
+    def _apply_time_style(self, color: str = "") -> None:
+        """时间样式：小字号 + 更浅的字色（弱化，突出名称）。
+
+        同样走 setFont（QSS 解析不到中文字体名），颜色用主题 muted 再降一档透明度。
+        """
+        font = get_unified_font()
+        font.setPixelSize(max(10, scale_font_size(TIME_FONT_SIZE)))
+        font.setBold(False)
+        self._time_label.setFont(font)
+        if color:
+            # 名称色是 muted，时间再浅一档：附加 alpha 让它在同色系里更轻
+            self._time_label.setStyleSheet(
+                f"color: {color}; background: transparent;"
+            )
+            try:
+                from PyQt5.QtWidgets import QGraphicsOpacityEffect
+
+                eff = self._time_label.graphicsEffect()
+                if eff is None:
+                    eff = QGraphicsOpacityEffect(self._time_label)
+                    self._time_label.setGraphicsEffect(eff)
+                eff.setOpacity(0.72)
+            except Exception:
+                pass
+        else:
+            self._time_label.setStyleSheet("background: transparent;")
 
 
 __all__ = [

@@ -46,6 +46,7 @@ from PyQt5.QtCore import (
     QByteArray,
     QEasingCurve,
     QObject,
+    QSize,
     QThread,
     Qt,
     QTimer,
@@ -12607,6 +12608,24 @@ class PlainTextViewer(QWidget):
         self._resize_debounce_timer.stop()
         self._resize_debounce_timer.start()
 
+    def sizeHint(self):
+        """返回**内容实测**尺寸。
+
+        ⚠️ QWidget 默认 sizeHint 来自内部 QTextEdit 的默认值（272x200），与本控件
+        经 ``_update_height`` 算出的真实尺寸无关。控件被 ``setFixedSize`` 钉住后，
+        min/max 是对的，但 sizeHint 仍是 200 高——**父级布局按 sizeHint 分配空间**，
+        于是中间容器（_user_bubble）被撑高、气泡与下方按钮栏脱节（2026-09-16
+        hover/图片错位问题的根因之一）。这里改为返回当前实测量。
+        """
+        size = super().sizeHint()
+        if self.width() > 0 and self.height() > 0:
+            return QSize(self.width(), self.height())
+        return QSize(size.width(), max(40, min(size.height(), self.MAX_HEIGHT)))
+
+    def minimumSizeHint(self):
+        """与 sizeHint 一致：控件尺寸由内容决定，不参与父级拉伸。"""
+        return self.sizeHint()
+
     def _do_resize_update(self):
         """防抖后执行高度更新"""
         self._update_height()
@@ -13604,7 +13623,8 @@ class MessageCard(SimpleCardWidget):
             install_hover_tooltip(b, delay_ms=200)
             hb.addWidget(b)
         hover_btns.setFixedHeight(20)
-        hover_btns.setVisible(False)  # hover 浮现，保持卡片简洁
+        hover_btns.setVisible(True)  # 常驻布局占位，靠 opacity 控制浮现
+        MessageCard._set_actions_visible(hover_btns, False)
         layout.addWidget(hover_btns)
 
         # 弹性分隔：左侧元信息区 | 右侧差异区
@@ -14182,11 +14202,21 @@ class MessageCard(SimpleCardWidget):
 
         # 气泡容器：背景色/圆角只在这一层（身份行与底部操作行在容器外，
         # 不随气泡底色渲染）。视图与图片条在内。
+        #
+        # ⚠️ 垂直策略必须是 Maximum：默认 Preferred 会被父级布局拉伸，
+        # 而中间层（viewer_container → PlainTextViewer）的 sizeHint 与实测尺寸
+        # 不一致时，多出的空间全落在气泡上 → 气泡与下方按钮栏脱节、
+        # 图片条看起来"漏出"气泡（2026-09-16 用户反馈的三连问题）。
+        # Maximum = 取 sizeHint 上限，不额外膨胀。
         self._user_bubble = QWidget(self)
+        self._user_bubble.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         bubble_lay = QVBoxLayout(self._user_bubble)
         bubble_lay.setContentsMargins(0, 0, 0, 0)
         bubble_lay.setSpacing(0)
-        main.addWidget(self._user_bubble)
+        # 右对齐：卡片宽度由「气泡」与「footer」中的较大者决定。窄气泡时卡片会
+        # 比气泡宽（多出的部分透明），footer 的时间戳与按钮才有地方放，而不必
+        # 反过来把气泡撑宽。
+        main.addWidget(self._user_bubble, 0, Qt.AlignRight)
         _bubble_alive = True
 
         # 正文视图容器挂到气泡内（原 _viewer_container 直接挂卡片）
@@ -14212,11 +14242,16 @@ class MessageCard(SimpleCardWidget):
         footer.setSpacing(6)
         footer.addStretch()
 
+        # footer：stretch | [按钮组] | 时间戳
+        # 时间戳贴右缘（右对齐），按钮 hover 浮现在它左侧。
+        # ⚠️ 按钮进布局会让卡片最小宽 = 时间戳 + 按钮（约 170px），这是必需的：
+        # 窄气泡（如「嗯」仅 100px）本身装不下两者。卡片会比气泡宽，多出的部分
+        # 透明，气泡仍按内容自适应收缩（_user_bubble 右对齐 + Maximum 策略），
+        # 所以**气泡不会被撑宽**，撑开的只是卡片外框的透明区。
         ts = QLabel(self.timestamp, self)
         self._ts_label = ts
         ts.setVisible(bool(self.timestamp))
         ts.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(11)}px; color: {self._theme['muted']};")
-        footer.addWidget(ts)
 
         btns = QWidget(self)
         self._user_action_btns = btns
@@ -14234,8 +14269,14 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(26, 26)  # 弱化处理：比助手卡 32px 更小
             install_hover_tooltip(b, delay_ms=200)
             bl.addWidget(b)
-        btns.setVisible(False)  # hover 浮现，保持气泡简洁（高度占位由 wrap 固定）
+
         footer.addWidget(btns)
+        footer.addWidget(ts)
+        self._footer_wrap = footer_wrap
+        # 常驻布局占位（尺寸恒定），靠 opacity 浮现/隐藏 —— 不改变布局尺寸
+        MessageCard._set_actions_visible(btns, False)
+        main.addWidget(footer_wrap)
+        MessageCard._set_actions_visible(btns, False)
         main.addWidget(footer_wrap)
 
     def set_image_attachments(self, paths, fallback_content=None):
@@ -14799,7 +14840,16 @@ class MessageCard(SimpleCardWidget):
         self.sync_width(force=True)
 
     def paintEvent(self, event):
-        super().paintEvent(event)
+        # ⚠️ SimpleCardWidget.paintEvent 会无条件画一圈描边：
+        #   painter.setPen(QColor(0,0,0,12 或 48)) + drawRoundedRect(...)
+        # CSS 的 `border: none` 管不到它（这是 QPainter 直接画的，不走样式表），
+        # 于是 user 气泡（背景已移交给 _user_bubble）与 assistant 全减模式卡片
+        # 上下会残留一条淡边框。这两个角色由自身样式/子容器负责外观，
+        # 跳过父类绘制；welcome 与错误态仍需原来的卡片底与描边。
+        if self.role in ("user", "assistant") and not self.error:
+            pass
+        else:
+            super().paintEvent(event)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -15396,6 +15446,16 @@ class MessageCard(SimpleCardWidget):
             # 实际宽度由 PlainTextViewer 按内容最长行自适应收缩
             self.setMinimumWidth(60)
             self.setMaximumWidth(target_width)
+            # 🛡️ 卡片宽度下限抬到 footer 需求宽（时间戳 + hover 按钮）：
+            # 否则窄气泡（如「你好」）的卡片会比 footer 窄，Qt 压缩布局时
+            # 按钮会盖到时间戳上（2026-09-16 用户截图反馈）。
+            # 气泡自身仍按内容收缩（_user_bubble 右对齐 + Maximum 策略），
+            # 卡片多出的部分是透明留白，不影响气泡视觉宽度。
+            footer = getattr(self, "_footer_wrap", None)
+            if footer is not None:
+                need = footer.minimumSizeHint().width()
+                if need > 60:
+                    self.setMinimumWidth(need)
             # 上限同步给 viewer（卡内边距 4*2 + viewer 布局边距 8*2），
             # cap 未变化时 set_width_cap 内部为 no-op。
             # 🐛 不受 _resize_preview_mode 拦截：preview 守卫是为 CodeWebViewer
@@ -15405,6 +15465,7 @@ class MessageCard(SimpleCardWidget):
             # 窗口缩小后固定尺寸的气泡超出可视区（文字跑到显示范围之外）。
             if self.viewer is not None:
                 self.viewer.set_width_cap(target_width - 24)
+            self._position_user_actions()
             return
 
         # 非 user（assistant/welcome）：固定宽度（min=max）
@@ -15506,20 +15567,69 @@ class MessageCard(SimpleCardWidget):
                 except RuntimeError:
                     pass
 
+    def _position_user_actions(self) -> None:
+        """把 footer 操作按钮组贴到时间戳左侧（浮动层，不参与布局）。
+
+        按钮组不进布局是刻意的：其最小宽会通过布局反推卡片下限，把短消息气泡
+        硬撑宽（实测「嗯」被撑到 188px）。窄气泡的 footer 只有约 100px，也装不下
+        「时间戳 + 按钮」，故按钮挂在卡片层、允许浮出气泡范围（左侧留白区）。
+        """
+        btns = getattr(self, "_user_action_btns", None)
+        ts = getattr(self, "_ts_label", None)
+        if btns is None or ts is None:
+            return
+        try:
+            if not ts.isVisible():
+                return
+            # 时间戳左缘（卡片坐标系）
+            ts_left = ts.mapTo(self, ts.rect().topLeft()).x()
+            ts_center_y = ts.mapTo(self, ts.rect().center()).y()
+            x = ts_left - btns.width() - 4
+            y = max(0, ts_center_y - btns.height() // 2)
+            btns.move(max(0, x), y)
+        except RuntimeError:
+            pass
+
     def enterEvent(self, event):
         # 用户气泡 / assistant 全减：hover 浮现操作按钮，保持静态简洁
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
-            self._user_action_btns.setVisible(True)
+            self._set_actions_visible(self._user_action_btns, True)
         elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._assistant_action_btns.setVisible(True)
+            self._set_actions_visible(self._assistant_action_btns, True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
-            self._user_action_btns.setVisible(False)
+            self._set_actions_visible(self._user_action_btns, False)
         elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._assistant_action_btns.setVisible(False)
+            self._set_actions_visible(self._assistant_action_btns, False)
         super().leaveEvent(event)
+
+    @staticmethod
+    def _set_actions_visible(container, visible: bool) -> None:
+        """opacity 控显隐（不用 setVisible）。
+
+        setVisible(False) 会让容器退出布局计算 → 父级 sizeHint 变小 → 卡片宽度
+        协商结果改变（实测 hover 前后 sizeHint 从 280 掉到 196），气泡在 hover
+        瞬间被重排“撑长/变形”。改用透明度：控件始终参与布局，尺寸恒定，
+        仅视觉上浮现（置 0 时同时关闭鼠标交互避免误点隐形按钮）。
+        """
+        try:
+            effect = container.graphicsEffect()
+            if effect is None:
+                from PyQt5.QtWidgets import QGraphicsOpacityEffect
+
+                effect = QGraphicsOpacityEffect(container)
+                effect.setOpacity(0.0 if not visible else 1.0)
+                container.setGraphicsEffect(effect)
+            effect.setOpacity(1.0 if visible else 0.0)
+            # 透明时隐藏子按钮的鼠标响应，避免点到不可见的按钮
+            for child in container.findChildren(QWidget):
+                child.setAttribute(Qt.WA_TransparentForMouseEvents, not visible)
+            if visible:
+                container.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        except RuntimeError:
+            pass
 
     def wheelEvent(self, event: QWheelEvent):
         # MessageCard 的 wheelEvent 仅在子 widget（viewer）未消费事件时被调用。
@@ -17331,6 +17441,9 @@ class MessageCard(SimpleCardWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # 宽度同步由外层聊天窗口统一调度，避免卡片自身 resize 再次触发全量重算
+        # 浮动按钮组不在布局里，需手工跟随卡片宽度变化重新贴靠时间戳左侧。
+        if self.role == "user":
+            self._position_user_actions()
 
     def _disconnect_all_signals(self):
         """断开 MessageCard 发射的所有信号，打破信号-槽引用环路"""

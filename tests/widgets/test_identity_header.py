@@ -102,20 +102,41 @@ def test_header_has_fixed_height(qapp):
     assert header.height() == ih.AVATAR_SIZE + 2
 
 
-def test_name_label_font_size_is_valid_css(qapp):
-    """名称字号必须是合法 CSS。
+def test_name_label_font_and_size(qapp):
+    """名称的字族与字号必须真实生效。
 
-    回归守卫：`font_size_css()` 返回的就已是完整声明（`font-size: 20px;`），
-    再生拼一层 `font-size:` 会得到 `font-size: font-size: 20px;;` —— 非法 CSS，
-    Qt 静默丢弃整条声明，字号永远停在默认值（2026-09-16 走查发现的真实 bug）。
+    两个踩过的坑（2026-09-16 走查）：
+    1. `font_size_css()` 返回的已是完整声明（`font-size: 20px;`），再生拼一层
+       `font-size:` → `font-size: font-size: 20px;;`，非法 CSS 被 Qt 静默丢弃、
+       字号停在默认值。现改走 `setFont()`，QSS 不再出现 font-size。
+    2. QSS 的 `font-family` 解析不到中文字体名（`'楷体'`/`楷体`/`KaiTi` 全落到宋体），
+       而 `QFont("楷体")` 能正确匹配。故字族必须走 `setFont()`。
     """
-    header = ih.IdentityHeader(MessageIdentity(name="mading"), align_right=True)
-    css = header._name_label.styleSheet()
-    assert css.count("font-size:") == 1, f"font-size 声明必须只出现一次，实际: {css!r}"
-    assert ih.font_size_css(ih.NAME_FONT_SIZE) in css
+    from PyQt5.QtGui import QFontInfo
 
-    # 主题刷新路径同样校验（apply_text_color 会重写样式）
+    header = ih.IdentityHeader(MessageIdentity(name="mading"), align_right=True)
+    label = header._name_label
+
+    # 字号：跟随全局字号档位缩放
+    assert label.font().pixelSize() == ih.scale_font_size(ih.NAME_FONT_SIZE)
+    assert label.font().bold()
+
+    # 字族：必须落到用户配置的字体，而非 QSS 回落的宋体
+    from app.utils.utils import Settings
+
+    expected = Settings.get_instance().llm_font_family.value
+    assert QFontInfo(label.font()).family() == expected, (
+        f"名称字族应为 {expected!r}，实际 {QFontInfo(label.font()).family()!r}"
+    )
+
+    # QSS 里不应再出现字号/字族声明（它们由 setFont 负责）
+    css = label.styleSheet()
+    assert "font-size" not in css, f"字号不应走 QSS（会被非法拼接或忽略）: {css!r}"
+    assert "font-family" not in css, f"字族不应走 QSS（中文名解析不到）: {css!r}"
+
+    # 主题刷新路径同样保持（apply_text_color 只改颜色）
     header.apply_text_color("#8FA4C2")
-    css2 = header._name_label.styleSheet()
-    assert css2.count("font-size:") == 1, f"着色后 font-size 声明异常: {css2!r}"
+    css2 = label.styleSheet()
     assert "color: #8FA4C2" in css2
+    assert "font-size" not in css2
+    assert label.font().pixelSize() == ih.scale_font_size(ih.NAME_FONT_SIZE)
