@@ -44,7 +44,9 @@ except Exception:  # noqa: BLE001
     pass
 
 # 头像尺寸（与两行文本块等高，兼顾紧凑与辨识度）
-AVATAR_SIZE = 32
+# 2026-09-17：32 → 40。源图为 250px 上下，40px 仍在高质量降采样的安全区
+# （6:1 以内），既提升辨识度又不引入新的插值损失。
+AVATAR_SIZE = 40
 
 # 名称字号（基础值，实际经 scale_font_size 叠加用户字号档位）
 NAME_FONT_SIZE = 15
