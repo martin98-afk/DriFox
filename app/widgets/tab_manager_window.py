@@ -4085,6 +4085,8 @@ class TabManagerWindow(FramelessWindow):
         session_record: "dict | None" = None,
         project: "str | None" = None,
         branch: bool = False,
+        branch_messages: "list | None" = None,
+        branch_name: "str | None" = None,
     ) -> "OpenAIChatToolWindow | None":
         """统一创建新标签页并加载内容。
 
@@ -4098,6 +4100,9 @@ class TabManagerWindow(FramelessWindow):
             session_record: 直接加载的历史会话记录（注入 showEvent，跳过空会话）
             project: 目标项目上下文（覆盖源窗口当前项目）
             branch: 复制源窗口当前会话消息到新 tab
+            branch_messages: 分支内容（消息卡片级分支用）。传入时以此为分支消息，
+                不传则复制整个当前会话（tab 级分支的原行为）。
+            branch_name: 分支会话标题；不传时由当前会话名 + " [分支]" 生成。
         Returns:
             新窗口实例；失败返回 None（调用方应降级为原行为）
         """
@@ -4113,10 +4118,13 @@ class TabManagerWindow(FramelessWindow):
             if branch:
                 cur = getattr(source_window, "session_manager", None)
                 cur_session = cur.get_current_session() if cur else None
-                if cur_session is not None:
+                # 消息卡片级分支：优先用调用方传入的截断消息；不传则整会话复制（tab 级分支原行为）
+                if cur_session is not None or branch_messages:
+                    messages = list(branch_messages) if branch_messages is not None else list(cur_session.messages)
+                    name = branch_name or ((cur_session.name or "对话") if cur_session is not None else "对话") + " [分支]"
                     new._branch_session_data = {
-                        "messages": list(cur_session.messages),
-                        "name": (cur_session.name or "对话") + " [分支]",
+                        "messages": messages,
+                        "name": name,
                         "project": project or getattr(source_window, "_current_project", None) or "",
                     }
                 new._skip_restore_history = True

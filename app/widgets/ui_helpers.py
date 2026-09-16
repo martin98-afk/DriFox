@@ -1889,6 +1889,7 @@ def create_assistant_card_widget(
     on_save_file=None,
     on_subagent_log=None,
     on_review=None,
+    on_branch=None,
     immediate_render: bool = False,
     identity=None,
     source_message: Optional[dict] = None,
@@ -1910,6 +1911,7 @@ def create_assistant_card_widget(
         on_save_file: 保存文件回调
         on_subagent_log: 子智能体日志回调
         on_review: 页脚 Review 按钮回调（收到信号时触发 code-reviewer 子智能体）
+        on_branch: 页脚「分支」按钮回调（以该条助手消息为界开新会话）
         immediate_render: 是否立即创建 QWebEngineView。流式输出需要 True；
                          会话加载设为 False，由懒渲染队列统一控制。
 
@@ -1947,6 +1949,8 @@ def create_assistant_card_widget(
         card.subAgentLogRequested.connect(on_subagent_log)
     if on_review:
         card.reviewRequested.connect(on_review)
+    if on_branch:
+        card.branchRequested.connect(on_branch)
 
     return card
 

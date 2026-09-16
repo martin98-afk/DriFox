@@ -13090,6 +13090,7 @@ class MessageCard(SimpleCardWidget):
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     cardDiffRequested = pyqtSignal(int, int)  # round_index, message_index（消息在 _message_batch 中的索引）
     reviewRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚 Review 按钮时触发
+    branchRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚「分支」按钮时触发
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
@@ -13500,7 +13501,11 @@ class MessageCard(SimpleCardWidget):
             self._refresh_footer_separators()
 
     def _build_footer_bar(self, main: QVBoxLayout):
-        """构建助手卡片底部极简元信息栏：token | 耗时 | 模型（左） | 差异统计（右）"""
+        """构建助手卡片底部极简元信息栏
+
+        布局：左侧全信息（token | 耗时 | 模型 | 差异统计），右侧全按钮
+        （复制 / 分支 hover 浮现，Review 有 diff 时常显）。
+        """
         bar = QWidget(self)
         self._footer_bar = bar
         bar.setStyleSheet("background: transparent;")
@@ -13564,17 +13569,27 @@ class MessageCard(SimpleCardWidget):
         self._footer_model_label = model_l
         layout.addWidget(model_l)
 
-        # 差异统计（右端，极简风格，点击弹出差异弹窗）
+        # 分隔点 3（模型 ↔ 差异统计）
+        sep3 = QLabel("·", self)
+        sep3.setStyleSheet(label_style)
+        sep3.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        sep3.setVisible(False)
+        self._footer_sep3 = sep3
+        layout.addWidget(sep3)
+
+        # 差异统计（左侧信息区末位，点击弹出差异弹窗）
         diff_l = QLabel("", self)
-        diff_l.setStyleSheet(label_style)
-        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+        diff_l.setStyleSheet(f"{label_style} margin-left: 8px;")
+        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         diff_l.setVisible(False)
         diff_l.setCursor(Qt.PointingHandCursor)
         diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
         install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
         self._footer_diff_stats_label = diff_l
+        layout.addWidget(diff_l)  # 差异统计属「信息」，紧跟左侧元信息区
 
         # Review 按钮（使用 Search 图标），点击触发 code-reviewer 子智能体
+        # ★ 有 diff 时**常显**（用户选定），不与 hover 组一起隐现。
         icon_size = scale_font_size(10)
         review_btn = QLabel(self)
         review_btn.setObjectName("footer_review_btn")
@@ -13595,9 +13610,11 @@ class MessageCard(SimpleCardWidget):
         install_hover_tooltip(review_btn, "用 code-reviewer 子智能体快速审查本次修改")
         self._footer_review_btn = review_btn
 
-        # 全减模式：hover 操作组（复制），卡片 hover 时浮现（与 user 气泡一致）。
-        # 紧跟左侧元信息区，右侧留给差异统计独占。
-        # 固定高度占位：按钮显隐切换时 footer 高度不变，卡片不跳动。
+        # 弹性分隔：左侧信息区（元信息 + 差异统计） | 右侧操作区
+        layout.addStretch()
+
+        # 右侧操作区：hover 浮现组（复制 / 分支）+ Review（有 diff 时常显）。
+        # 固定尺寸占位：按钮显隐切换时 footer 尺寸不变，卡片不跳动、不重排。
         hover_btns = QWidget(self)
         self._assistant_action_btns = hover_btns
         hb = QHBoxLayout(hover_btns)
@@ -13605,6 +13622,7 @@ class MessageCard(SimpleCardWidget):
         hb.setSpacing(2)
         for ic, tp, cb in [
             (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
+            (get_icon("分支"), "从此条分支新对话", lambda: self._emit_branch_requested()),
         ]:
             b = TransparentToolButton(ic, self)
             b.setToolTip(tp)
@@ -13612,17 +13630,13 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(20, 20)  # 弱化处理：比原顶部按钮 32px 更小
             install_hover_tooltip(b, delay_ms=200)
             hb.addWidget(b)
-        hover_btns.setFixedHeight(20)
-        hover_btns.setVisible(True)  # 常驻布局占位，靠 opacity 控制浮现
+        hover_btns.setFixedSize(hb.sizeHint())
+        hover_btns.setVisible(True)  # 常驻布局占位，仅切换子按钮显隐
         MessageCard._set_actions_visible(hover_btns, False)
         layout.addWidget(hover_btns)
 
-        # 弹性分隔：左侧元信息区 | 右侧差异区
-        layout.addStretch()
-
-        # 差异统计 + Review：右端独占
-        layout.addWidget(diff_l)
-        layout.addWidget(review_btn)
+        # Review：右端末位常显（有 diff 时），不随 hover 隐现
+        layout.addWidget(review_btn, 0, Qt.AlignVCenter)
 
         main.addWidget(bar)
 
@@ -15206,6 +15220,16 @@ class MessageCard(SimpleCardWidget):
         round_idx = self._round_index if self._round_index is not None else -1
         msg_idx = self._message_index if self._message_index is not None else -1
         self.reviewRequested.emit(round_idx, msg_idx)
+
+    def _emit_branch_requested(self):
+        """发射页脚「分支」按钮点击信号（以本条消息为界开新会话）
+
+        Signal:
+            branchRequested(int round_index, int message_index)
+        """
+        round_idx = self._round_index if self._round_index is not None else -1
+        msg_idx = self._message_index if self._message_index is not None else -1
+        self.branchRequested.emit(round_idx, msg_idx)
 
     def _remember_height_for_width(self, height: int) -> None:
         """[L3] 记录「最近一次同步宽度 → 内容高度」，供后续 resize 预测命中。

@@ -14647,6 +14647,7 @@ class OpenAIChatToolWindow(ToolWindow):
             on_save_file=self._on_save_file_requested,
             on_subagent_log=self._on_subagent_log_requested,
             on_review=self._on_review_requested,
+            on_branch=self._on_branch_from_card_requested,
             immediate_render=scroll,  # 流式(scroll=True)立即渲染，加载(scroll=False)走懒渲染队列
             source_message=source_message,
         )
@@ -16664,6 +16665,74 @@ class OpenAIChatToolWindow(ToolWindow):
                 parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
+
+    def _on_branch_from_card_requested(self, round_index: int, message_index: int = -1):
+        """页脚「分支」按钮：以该条助手消息为界，把之前的消息复制成新会话
+
+        与 tab 级分支的区别：tab 级复制整个会话，本方法只复制到**该条消息所在
+        round 结束处**（含该条助手回复），用户可在任意一轮历史处开叉。
+
+        Args:
+            round_index: 该消息所属 user round 索引
+            message_index: 消息在 _message_batch 中的索引（round_index 失效时的 fallback）
+        """
+        if round_index < 0 and message_index < 0:
+            return
+
+        session = self.session_manager.get_current_session()
+        if not session:
+            return
+
+        canonical_messages = consolidate_messages(session.messages)
+        round_ranges = get_user_round_ranges(canonical_messages)
+
+        resolved_round = round_index
+        if resolved_round < 0 or resolved_round >= len(round_ranges):
+            # fallback：从 _message_batch 位置反推（与 _on_card_diff_requested 同口径）
+            resolved_round = -1
+        if resolved_round < 0 and message_index >= 0:
+            computed = 0
+            for idx in range(message_index):
+                if (
+                    idx < len(self._message_batch)
+                    and self._message_batch[idx]
+                    and self._message_batch[idx][0].get("role") == "user"
+                ):
+                    computed += 1
+            if computed < len(round_ranges):
+                resolved_round = computed
+
+        if resolved_round < 0 or resolved_round >= len(round_ranges):
+            logger.warning(f"[card-branch] cannot determine valid round_index: {round_index}/{message_index}")
+            return
+
+        # 含该 round 的全部消息（含本条助手回复）→ 新会话的初始上下文
+        cutoff = round_ranges[resolved_round][1]
+        branch_messages = [copy.deepcopy(m) for m in canonical_messages[:cutoff]]
+        if not branch_messages:
+            return
+
+        base_name = (session.name or "对话").replace(" [分支]", "")
+        branch_name = f"{base_name} [分支]"
+        project = self._current_project
+
+        tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
+        try:
+            new_window = tm.spawn_tab(
+                self,
+                branch=True,
+                branch_messages=branch_messages,
+                branch_name=branch_name,
+                project=project,
+            )
+        except TypeError:
+            # 兼容：spawn_tab 未接受 branch_messages 时回退为整会话分支
+            new_window = tm.spawn_tab(self, branch=True, project=project)
+
+        if new_window is None:
+            logger.warning("[card-branch] spawn_tab 返回 None，分支未创建")
+            return
+        logger.info(f"[card-branch] 已在 round {resolved_round} 处分支，消息数 {len(branch_messages)}")
 
     def _on_review_requested(self, round_index: int, message_index: int = -1):
         """
