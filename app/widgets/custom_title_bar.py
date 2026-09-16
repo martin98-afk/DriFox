@@ -329,6 +329,10 @@ class CustomTabButton(QWidget):
 
     ANIM_MS = Animations.HOVER_MS
 
+    #: 文字基准字号（pt）。顶栏用字体设置项的基础字号；嵌入卡片等更紧凑的
+    #: 场景可传更小值，仍随系统字号 delta 缩放（见 font_size）。
+    BASE_FONT_SIZE = 13
+
     def __init__(
         self,
         tab_id: str,
@@ -338,10 +342,14 @@ class CustomTabButton(QWidget):
         closable: bool = False,
         icon_path: str = "",
         indicator_managed: bool = False,
+        font_size: Optional[int] = None,
     ):
         super().__init__(parent)
         self.tab_id = tab_id
         self._closable = closable
+        #: 文字字号（未缩放基准）。refresh_style 每次据此重算，改系统字号后
+        #: 由调用方重建设置即可生效（与顶栏一致的重建路径）。
+        self._font_size = self.BASE_FONT_SIZE if font_size is None else int(font_size)
         self._active = False
         self._hovered = False
         #: True = 选中底色由外部滑动指示器（_TabIndicator）接管，按钮只画
@@ -450,6 +458,19 @@ class CustomTabButton(QWidget):
         """进度是否已就位（收尾误差 0.001 内视作到位）"""
         return abs(current - target) < 0.001
 
+    def set_font_size(self, size: int) -> None:
+        """更新文字字号（宿主在系统字号变化时调用，幂等）
+
+        ``_label_css_key`` 不含字号，同色同字重下 QSS 短路会吞掉新字号，
+        所以这里显式失效缓存键。
+        """
+        size = int(size)
+        if size == self._font_size:
+            return
+        self._font_size = size
+        self._label_css_key = None
+        self._apply_label_color()
+
     def set_hover(self, hovered: bool) -> None:
         """设置悬浮态（幂等；进度卡在中途会自动补一次收尾）"""
         target = 1.0 if hovered else 0.0
@@ -534,7 +555,7 @@ class CustomTabButton(QWidget):
         t = min(1.0, max(self._active_t, self._hover_t * 0.5))
         weight = 600 if self._active else 400
         q = int(t * self.COLOR_STEPS + 0.5)
-        key = (q, weight, from_c.rgb(), to_c.rgb())
+        key = (q, weight, from_c.rgb(), to_c.rgb(), self._font_size)
         if key == self._label_css_key:
             return
         self._label_css_key = key
@@ -544,7 +565,7 @@ class CustomTabButton(QWidget):
         b = int(round(from_c.blue() + (to_c.blue() - from_c.blue()) * t))
         self._label.setStyleSheet(
             f"color: rgb({r}, {g}, {b}); background: transparent;"
-            f" {get_font_family_css()} {font_size_css(13)}; font-weight: {weight};"
+            f" {get_font_family_css()} {font_size_css(self._font_size)}; font-weight: {weight};"
         )
 
 

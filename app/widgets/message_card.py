@@ -82,7 +82,6 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     MaskDialogBase,
-    SegmentedWidget,
     TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.card_widget import (
@@ -116,6 +115,8 @@ from app.utils.design_tokens import (
 # 保证 Web 侧（消息正文）与 Qt 侧（控件）使用同一套圆角节奏。
 _BORDER_RADIUS_CSS_VARS = BorderRadius.CSS_VARS
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
+from app.widgets.flow_layout import FlowLayout
 
 # 懒渲染占位 QSS（welcome / assistant 两条路径共用，T35 去重）：
 # 依赖 scale_font_size / get_font_family_css，故在 import 之后求值。
@@ -261,37 +262,10 @@ _TEXT_LEXER = TextLexer()
 # formatter 含动态字号，缓存当前字号对应的实例
 _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
 
-# ======== 流式边框调色板（模块级共享，修 #1）========
-# 原实现每张 MessageCard 构造时各 new 10+8 个 QColor（约 +18 个/卡），改为
-# 模块级共享 tuple。QColor 不可变，多卡共享同一批实例无副作用。
-_RAINBOW_NORMAL: tuple = tuple(
-    QColor(c)
-    for c in (
-        "#60D4FF",
-        "#40C8FF",
-        "#4DA6FF",
-        "#8B7BFF",
-        "#C084FC",
-        "#F472B6",
-        "#FB7185",
-        "#F59E0B",
-        "#34D399",
-        "#22D3EE",
-    )
-)
-_RAINBOW_RETRY: tuple = tuple(
-    QColor(c)
-    for c in (
-        "#ff2222",
-        "#aa0000",
-        "#ff3333",
-        "#880000",
-        "#ff1111",
-        "#bb0000",
-        "#ff4444",
-        "#990000",
-    )
-)
+# ======== 流式态单色 tint（替代原彩虹循环色板）========
+# 旧 _RAINBOW_NORMAL 为 10 色高饱和绕卡循环，色相跳变（青→紫→粉→橙→绿）
+# 过于抢眼；现流式指示统一走单色（accent / 警示红），运动只保留底部光块。
+_STREAM_TINT_RETRY = "#ff2222"
 
 # ===== 性能缓存：图标前缀和字号（避免每块代码都查主题和计算字号） =====
 _ICON_PREFIX_CACHE: str = "qrc:/icons"
@@ -13226,15 +13200,9 @@ class MessageCard(SimpleCardWidget):
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._update_anim)
         self._pulse_phase = 0.0
-        # M1 性能缓存：流式脉动渐变/调色板/裁剪路径模板（相位无关对象，
-        # paintEvent 内仅改色/坐标，避免每帧 new 数十个临时对象）。
-        self._rainbow_normal = _RAINBOW_NORMAL  # 模块级共享，0 个新 QColor
-        self._rainbow_retry = _RAINBOW_RETRY
-        self._grad_main, self._grad_inner, self._grad_glow = (QLinearGradient(0, 0, 1, 1) for _ in range(3))
-        self._clip_inner = self._clip_outer = self._clip_inner_edge = self._clip_border = QPainterPath()
-        self._clip_inner_border = self._clip_shimmer = self._clip_top = self._clip_glow_region = (
-            self._clip_border_region
-        ) = QPainterPath()
+        self._grad_main, self._grad_inner = (QLinearGradient(0, 0, 1, 1) for _ in range(2))
+        self._clip_inner = self._clip_border = QPainterPath()
+        self._clip_inner_border = self._clip_border_region = QPainterPath()
         self._clip_w = self._clip_h = -1
         self._height_anim = QVariantAnimation(self)
         # 插值时长占位（见下：随即被 setDuration(0) 覆盖，实际长度由每轮动画
@@ -13304,7 +13272,12 @@ class MessageCard(SimpleCardWidget):
         self._welcome_greeting: str = ""
         self._welcome_recent: list = []
         self._welcome_top: list = []
-        self._welcome_mode_tabs: Optional["SegmentedWidget"] = None
+        # 欢迎 tab 条：宿主容器 + 按钮列表 + 滑动指示器控制器（见 _build_welcome_mode_tabs）
+        self._welcome_tab_host: Optional[QWidget] = None
+        self._welcome_tab_buttons: list = []
+        self._welcome_tab_ids: list = []
+        self._welcome_indicator_ctl: Optional[TabIndicatorController] = None
+        self._welcome_tabs_bar_layout: Optional["FlowLayout"] = None
         self._pending_welcome_md: Optional[str] = None  # viewer 懒渲染前的等待内容
         # 异步刷新事件回调引用（destroyed 退订时按 is 匹配）
         self._welcome_refresh_cb: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -13849,59 +13822,188 @@ class MessageCard(SimpleCardWidget):
             }}
         """
 
-    # ========== 欢迎卡片 mode 切换（PyQt segmented tabs）==========
+    # ========== 欢迎卡片 mode 切换（自绘胶囊 tabs）==========
     # 内置项仅保留消息卡片核心（会话列表）。其余 tab 由插件通过
-    # ``UIPluginRegistry.register_welcome_tab`` 动态注入（如 📜 更新），
+    # ``UIPluginRegistry.register_welcome_tab`` 动态注入（如 更新），
     # 卸载/禁用对应插件后该 tab 自动消失，无需主程序介入。
+    # 标签文字统一剥离前导 emoji（见 _strip_label_emoji），与顶栏 / 工作台页签
+    # 共用「纯文字胶囊」视觉语言；插件 label 字面量无需改动。
     _WELCOME_MODE_ITEMS = [
-        ("sessions", "💬 会话"),
+        ("sessions", "会话"),
     ]
 
-    def _build_welcome_mode_tabs(self, top_layout):
-        """在卡片标题栏右上角构建 segmented tabs（welcome 角色专属）"""
-        seg = SegmentedWidget(self)
-        for i, (key, label) in enumerate(self._WELCOME_MODE_ITEMS):
-            seg.insertItem(i, key, label, onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k))
-        # 插件注册的欢迎 tab 动态追加（系统项之后）
+    #: 卡片内 tab 文字基准字号：比顶栏（13）略小，与卡片内分区标题（12）同档
+    _WELCOME_TAB_FONT = 12
+
+    @staticmethod
+    def _strip_label_emoji(label: str) -> str:
+        """剥离标签前导 emoji / 符号及分隔空白
+
+        插件 label 常见形如 ``"🤖 助手"`` / ``"📜 更新"``。彩色 emoji 与卡片内
+        线性图标体系混排显脏，这里统一在渲染层清洗：插件契约与字面量不动，
+        主程序单方面决定呈现方式，后续新增 tab 自动受益。
+        """
+        s = (label or "").strip()
+        stripped = re.sub(r"^[^\w\u4e00-\u9fff]+", "", s, flags=re.UNICODE).strip()
+        return stripped or s
+
+    def _welcome_tab_specs(self) -> list:
+        """当前欢迎 tab 规格：[(mode_key, 显示文本), ...]
+
+        内置项在前，插件注册项按注册序追加（与旧 SegmentedWidget 顺序一致）。
+        """
+        specs = [(key, self._strip_label_emoji(label)) for key, label in self._WELCOME_MODE_ITEMS]
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             for key, info in UIPluginRegistry.get_instance().get_welcome_tabs().items():
-                seg.addItem(
-                    key,
-                    info.label,
-                    onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k),
-                )
+                specs.append((key, self._strip_label_emoji(info.label)))
         except Exception:
             pass
-        self._welcome_mode_tabs = seg
-        top_layout.addWidget(seg)
-        top_layout.addStretch()
-        # 字号适配：SegmentedItem 内部写死 setFont(self, 14)，不读当前 delta，
-        # 必须在此按当前字号缩放一次，否则新建/重建欢迎卡片时 tab 字体恒为 14px。
+        return specs
+
+    def _build_welcome_mode_tabs(self, parent_layout):
+        """构建欢迎 tab 条（welcome 角色专属）：独立一行，挂在头像行之后
+
+        与顶栏 / 工作台页签共用同一套组件（``CustomTabButton`` +
+        ``TabIndicatorController`` 滑动胶囊）：未选中透明底、hover 前景色 6%、
+        选中前景色 14% 底 + 文字提亮加粗。FlowLayout 负责自动折行，其
+        minimumWidth 只取最宽单个子项，不会把卡片撑宽。
+        """
+        host = QWidget(self)
+        self._welcome_tab_host = host
+        host.setStyleSheet("background: transparent;")
+        host.setFixedHeight(CustomTabButton.HEIGHT)
+        bar = FlowLayout(host, spacing=2, alignment=Qt.AlignLeft, margins=0)
+        self._welcome_tabs_bar_layout = bar
+        # 整行左缩进对齐头像（头像 30px + 间距 6px），视觉上与上方头像同一起始线
+        wrap = QWidget(self)
+        wrap.setStyleSheet("background: transparent;")
+        wrap_layout = QHBoxLayout(wrap)
+        wrap_layout.setContentsMargins(4, 2, 4, 0)
+        wrap_layout.setSpacing(0)
+        wrap_layout.addWidget(host)
+        wrap_layout.addStretch()
+        parent_layout.addWidget(wrap)
+
+        # 滑动指示器：构造必须早于任何按钮加入，天然垫在按钮之下
+        self._welcome_indicator_ctl = TabIndicatorController(
+            host,
+            self,
+            self._welcome_tab_active_geometry,
+        )
+        self._rebuild_welcome_tab_buttons(current_mode=self._welcome_mode or None)
+
+    def _welcome_tab_active_geometry(self):
+        """当前激活 tab 按钮的几何（无激活项 / 控件已销毁返回 None）"""
+        try:
+            idx = self._welcome_tab_ids.index(self._welcome_mode)
+        except ValueError:
+            return None
+        if not (0 <= idx < len(self._welcome_tab_buttons)):
+            return None
+        try:
+            return self._welcome_tab_buttons[idx].geometry()
+        except RuntimeError:
+            return None
+
+    def _rebuild_welcome_tab_buttons(self, current_mode: Optional[str] = None) -> None:
+        """按当前注册表重建 tab 按钮（集合变化时调用，见 _sync_welcome_tabs）"""
+        bar = self._welcome_tabs_bar_layout
+        if self._welcome_tab_host is None or bar is None:
+            return
+        while bar.count():
+            item = bar.takeAt(0)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                # 先断父子再预约删除：仅 deleteLater 在事件循环繁忙期会留残影
+                # （对齐工作台页签重建的同款教训）
+                w.setParent(None)
+                w.hide()
+                w.deleteLater()
+        self._welcome_tab_buttons = []
+        self._welcome_tab_ids = []
+
+        for mode_key, label in self._welcome_tab_specs():
+            btn = CustomTabButton(
+                mode_key,
+                label,
+                self._welcome_tab_host,
+                indicator_managed=True,
+                font_size=self._WELCOME_TAB_FONT,
+            )
+            btn.clicked.connect(self._on_welcome_mode_tab_clicked)
+            bar.addWidget(btn)
+            self._welcome_tab_buttons.append(btn)
+            self._welcome_tab_ids.append(mode_key)
+
+        target = current_mode if current_mode in self._welcome_tab_ids else None
+        if target is None and self._welcome_tab_ids:
+            target = self._welcome_tab_ids[0]
+            self._welcome_mode = target
+        for i, btn in enumerate(self._welcome_tab_buttons):
+            btn.set_active(self._welcome_tab_ids[i] == target)
         self._apply_welcome_tabs_font()
+        self._schedule_welcome_indicator_snap()
+
+    def _schedule_welcome_indicator_snap(self) -> None:
+        """延迟一拍把指示器钉到激活 tab（本帧布局尚未收敛，读到的几何是旧值）"""
+        if self._welcome_indicator_ctl is None:
+            return
+        QTimer.singleShot(0, self._snap_welcome_indicator)
+
+    def _snap_welcome_indicator(self) -> None:
+        ctl = self._welcome_indicator_ctl
+        if ctl is None:
+            return
+        try:
+            ctl.snap_to_active()
+        except RuntimeError:
+            self._welcome_indicator_ctl = None
+
+    def sync_welcome_tabs(self) -> None:
+        """插件注册表变化后同步 tab 条（幂等）
+
+        卡片实例已存在时不会再走 ``_build_welcome_mode_tabs``；热重载 / 启用
+        插件新增 welcome tab 后由 UIPluginRegistry 的刷新链调用本方法。
+        """
+        if self._welcome_tab_host is None:
+            return
+        specs = self._welcome_tab_specs()
+        if [k for k, _ in specs] == list(self._welcome_tab_ids):
+            self._schedule_welcome_indicator_snap()
+            return
+        self._rebuild_welcome_tab_buttons(current_mode=self._welcome_mode or None)
 
     def _apply_welcome_tabs_font(self):
-        """欢迎卡片 segmented tabs 适配系统字号
+        """欢迎 tabs 适配系统字号
 
-        SegmentedItem._postInit() 硬 setFont(self, 14)，qfluentwidgets 原组件不感知
-        DriFox 的 font_size delta；此处按当前 delta 缩放覆盖，保证 tab 字体随
-        系统字号变化（首次构建 + _apply_runtime_ui_settings 字体块都会调用）。
+        CustomTabButton 的文字样式由 ``_apply_label_color`` 写死 font-size，
+        走 ``apply_font_size_to_widget`` 的 setFont 覆盖不到；这里显式按当前
+        delta 重设（首次构建 + _apply_runtime_ui_settings 字体块都会调用）。
         """
-        if self._welcome_mode_tabs is None:
-            return
-        fs = scale_font_size(14)
-        ff = _get_global_font()
-        for item in self._welcome_mode_tabs.items.values():
-            font = item.font()
-            font.setFamily(ff)
-            font.setPixelSize(fs)
-            item.setFont(font)
+        fs = scale_font_size(self._WELCOME_TAB_FONT)
+        for btn in self._welcome_tab_buttons:
+            try:
+                btn.set_font_size(fs)
+            except RuntimeError:
+                continue
 
     def _on_welcome_mode_tab_clicked(self, mode: str):
-        """PyQt tabs 点击：切换 mode + 重新渲染 body（不重建 QWebEngineView）"""
+        """tab 点击：切高亮 + 滑动指示器 + 重渲染 body（不重建 QWebEngineView）"""
         if mode == self._welcome_mode:
             return
+        self._welcome_mode = mode
+        for i, btn in enumerate(self._welcome_tab_buttons):
+            btn.set_active(self._welcome_tab_ids[i] == mode)
+        ctl = self._welcome_indicator_ctl
+        if ctl is not None:
+            try:
+                geom = self._welcome_tab_active_geometry()
+                if geom is not None:
+                    ctl.move_to(geom, animate=True)
+            except RuntimeError:
+                self._welcome_indicator_ctl = None
         self.set_welcome_mode(mode)
         self.welcomeModeChanged.emit(mode)
 
@@ -13930,11 +14032,22 @@ class MessageCard(SimpleCardWidget):
         再次调 ``set_welcome_mode`` 强制重渲染当前 mode（见 _subscribe_welcome_refresh）。
         """
         self._welcome_mode = mode
-        if self._welcome_mode_tabs is not None:
-            try:
-                self._welcome_mode_tabs.setCurrentItem(mode)
-            except Exception:
-                pass
+        # 同步 tab 高亮：本方法也被插件静态刷新路径直接调用（不经点击处理），
+        # 高亮与指示器必须在这里收敛，否则外部改 mode 后 tab 停在旧项上。
+        if mode in self._welcome_tab_ids:
+            for i, btn in enumerate(self._welcome_tab_buttons):
+                try:
+                    btn.set_active(self._welcome_tab_ids[i] == mode)
+                except RuntimeError:
+                    continue
+            ctl = self._welcome_indicator_ctl
+            if ctl is not None:
+                try:
+                    geom = self._welcome_tab_active_geometry()
+                    if geom is not None:
+                        ctl.move_to(geom, animate=False)
+                except RuntimeError:
+                    self._welcome_indicator_ctl = None
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -13998,11 +14111,15 @@ class MessageCard(SimpleCardWidget):
         self._welcome_recent = list(recent_sessions or [])
         self._welcome_top = list(top_by_count or [])
         self._welcome_mode = mode
-        if self._welcome_mode_tabs is not None:
-            try:
-                self._welcome_mode_tabs.setCurrentItem(mode)
-            except Exception:
-                pass
+        # 初始 mode 由 resolve_initial_welcome_mode 解析（可能是插件 tab），
+        # 与已建好的按钮集合对齐高亮；mode 不在集合内时安装点已回落首项
+        if mode in self._welcome_tab_ids:
+            for i, btn in enumerate(self._welcome_tab_buttons):
+                try:
+                    btn.set_active(self._welcome_tab_ids[i] == mode)
+                except RuntimeError:
+                    continue
+            self._schedule_welcome_indicator_snap()
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -14906,160 +15023,80 @@ class MessageCard(SimpleCardWidget):
             return
 
         # ══════════════════════════════════════════════════════
-        #  辅助：准备色板 + 流光相位
+        #  流式态视觉：静态单色细描边 + 底部往返光块
         # ══════════════════════════════════════════════════════
-        if self.role == "assistant":
-            # 呼吸：极缓慢脉动
-            breathe = 0.55 + 0.45 * (math.sin(self._pulse_phase * 0.3) + 1) / 2
-            # 流光闪烁：柔和放缓
-            shimmer = 0.6 + 0.4 * (math.sin(self._pulse_phase * 1.8) + 1) / 2
-
-            def lerp_color(a: QColor, b: QColor, t: float) -> QColor:
-                """线性插值两颜色"""
-                r = int(a.red() + (b.red() - a.red()) * t)
-                g = int(a.green() + (b.green() - a.green()) * t)
-                bl = int(a.blue() + (b.blue() - a.blue()) * t)
-                return QColor(r, g, bl)
-
-            rainbow = self._rainbow_retry if self._retrying else self._rainbow_normal
-            N = len(rainbow)
-            # 主边框连续相位
-            shift_main = (self._pulse_phase / (math.pi * 2)) * N
-            # 发光层更慢
-            shift_glow = shift_main * 0.5
-            # 流光带相位
-            shift_shimmer = shift_main * 1.15
-
-            def build_gradient(grad: QLinearGradient, shift: float, stops: list, alpha_base: float) -> QLinearGradient:
-                """相位无关模板 grad 复用：仅改坐标与 stop 颜色，不每帧 new"""
-                grad.setStart(0, 0)
-                grad.setFinalStop(w, h)
-                for pos in stops:
-                    raw = (shift + pos * N) % N
-                    idx = int(raw) % N
-                    frac = raw - int(raw)
-                    c = lerp_color(rainbow[idx], rainbow[(idx + 1) % N], frac)
-                    c.setAlpha(int(alpha_base * breathe))
-                    grad.setColorAt(pos, c)
-                return grad
-
-            main_stops = [0.0, 0.12, 0.24, 0.36, 0.50, 0.64, 0.76, 0.88, 1.0]
-            inner_stops = [0.0, 0.12, 0.24, 0.36, 0.48, 0.60, 0.72, 0.84, 0.92, 1.0]
-            glow_stops = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        # 旧实现：10 色高饱和彩虹绕整卡循环 + 7px 霓虹外发光 + 3px 白色流光带，
+        # 动区覆盖整卡周长、色相跳变（青→紫→粉→橙→绿），阅读时过于抢眼。
+        # 现把「动」收敛到底部一条光带：
+        #   · 描边：1.5px 单色（accent / 重试红），静态，仅随极缓呼吸微调透明度
+        #   · 光块：底部内侧 3px 高、约 40% 卡宽，两端淡出，左右往返（约 3s 一趟）
+        breathe = 0.55 + 0.45 * (math.sin(self._pulse_phase * 0.3) + 1) / 2
+        # 单色 tint：重试/错误态用警示红，其余用主题 accent（不再循环变色）
+        if self._retrying or self.error:
+            tint = QColor(_STREAM_TINT_RETRY)
         else:
-            rainbow = None
-            pulse = QColor(self._theme["accent"])
-            breathe = 0.55 + 0.45 * (math.sin(self._pulse_phase * 0.3) + 1) / 2
-            shimmer = 0.6 + 0.4 * (math.sin(self._pulse_phase * 1.8) + 1) / 2
+            tint = QColor(self._theme["accent"])
 
-        # ══════════════════════════════════════════════════════
-        #  层1：内壁漫射（极柔和的边缘渗光）
-        # ══════════════════════════════════════════════════════
+        # ── 层1：内壁漫射（极柔和的边缘渗光）──
         # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath
         if self._clip_w != w or self._clip_h != h:
             self._clip_w, self._clip_h = w, h
             self._clip_inner = QPainterPath()
             self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
-            self._clip_outer = QPainterPath()
-            self._clip_outer.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
-            self._clip_inner_edge = QPainterPath()
-            self._clip_inner_edge.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
             self._clip_border = QPainterPath()
             self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
             self._clip_inner_border = QPainterPath()
             self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
-            self._clip_shimmer = QPainterPath()
-            self._clip_shimmer.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
-            self._clip_top = QPainterPath()
-            self._clip_top.addRoundedRect(0, 0, w, h, radius, radius)
-            self._clip_glow_region = self._clip_outer - self._clip_inner_edge
             self._clip_border_region = self._clip_border - self._clip_inner_border
-        inner_clip = self._clip_inner
-        painter.setClipPath(inner_clip)
-        if self.role == "assistant":
-            inner_gradient = build_gradient(self._grad_inner, shift_glow, inner_stops, 12)
-        else:
-            inner_gradient = QLinearGradient(0, 0, w, h)
-            c = QColor(pulse.lighter(150))
-            c.setAlpha(int(18 * breathe))
-            inner_gradient.setColorAt(0.0, c)
-            inner_gradient.setColorAt(1.0, QColor(pulse.darker(110).name()))
+        painter.setClipPath(self._clip_inner)
+        inner_gradient = self._grad_inner
+        inner_gradient.setStart(0, 0)
+        inner_gradient.setFinalStop(w, h)
+        _c0 = QColor(tint)
+        _c0.setAlpha(int(14 * breathe))
+        _c1 = QColor(tint)
+        _c1.setAlpha(int(5 * breathe))
+        inner_gradient.setColorAt(0.0, _c0)
+        inner_gradient.setColorAt(1.0, _c1)
         painter.fillRect(0, 0, w, h, inner_gradient)
 
-        # ══════════════════════════════════════════════════════
-        #  层2：外发光（霓虹光晕，7px宽，比主边框更宽更柔和）
-        # ══════════════════════════════════════════════════════
-        glow_region = self._clip_glow_region
-        painter.setClipPath(glow_region)
-        if self.role == "assistant":
-            glow_gradient = build_gradient(self._grad_glow, shift_glow, glow_stops, 48)
-        else:
-            glow_gradient = QLinearGradient(0, 0, w, h)
-            glow_gradient.setColorAt(0.0, QColor(pulse.lighter(130).name()))
-            glow_gradient.setColorAt(0.5, QColor(pulse.name()))
-            glow_gradient.setColorAt(1.0, QColor(pulse.darker(140).name()))
-        glow_pen = QPen(glow_gradient, 7)
-        painter.setPen(glow_pen)
-        painter.setBrush(QBrush(Qt.NoBrush))
-        painter.drawRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
-
-        # ══════════════════════════════════════════════════════
-        #  层3：主彩色边框（4px，饱和鲜艳）
-        # ══════════════════════════════════════════════════════
-        border_region = self._clip_border_region
-        painter.setClipPath(border_region)
-        if self.role == "assistant":
-            main_gradient = build_gradient(self._grad_main, shift_main, main_stops, 215)
-        else:
-            main_gradient = QLinearGradient(0, 0, w, h)
-            glow_a = int((90 + 45 * (math.sin(self._pulse_phase * 1.5) + 1) / 2) * breathe)
-            pulse2 = QColor(pulse.name())
-            pulse2.setAlpha(glow_a)
-            main_gradient.setColorAt(0.0, QColor(pulse.lighter(120).name()))
-            main_gradient.setColorAt(0.5, pulse2)
-            main_gradient.setColorAt(1.0, QColor(pulse.darker(130).name()))
-        main_pen = QPen(main_gradient, 4)
-        painter.setPen(main_pen)
+        # ── 层2：静态细描边（1.5px 单色，替代原 4px 彩虹循环 + 7px 外发光）──
+        painter.setClipPath(self._clip_border_region)
+        _bc = QColor(tint)
+        _bc.setAlpha(int(115 * breathe))
+        border_pen = QPen(_bc)
+        border_pen.setWidthF(1.5)
+        painter.setPen(border_pen)
         painter.setBrush(QBrush(Qt.NoBrush))
         painter.drawRoundedRect(0, 0, w, h, radius + 1, radius + 1)
 
-        # ══════════════════════════════════════════════════════
-        #  层4：流光高光带（白色细光条快速划过）
-        # ══════════════════════════════════════════════════════
-        if self.role == "assistant":
-            shimmer_clip = self._clip_shimmer
-            painter.setClipPath(shimmer_clip)
-            # 流光位置：连续小数，避免跳变
-            shimmer_pos = (shift_shimmer % N) / N
-            # 注意：stop 位置随相位连续变化，不能复用模板渐变（setColorAt 会不断追加 stop 导致残留脏色），必须每帧新建
-            shimmer_band_gradient = QLinearGradient(0, 0, w, h)
-            shimmer_band_gradient.setStart(0, 0)
-            shimmer_band_gradient.setFinalStop(w, h)
-            shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.07), QColor(0, 0, 0, 0))
-            shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.03), QColor(255, 255, 255, int(80 * shimmer)))
-            shimmer_band_gradient.setColorAt(shimmer_pos, QColor(255, 255, 255, int(150 * shimmer)))
-            shimmer_band_gradient.setColorAt(min(1.0, shimmer_pos + 0.03), QColor(255, 255, 255, int(80 * shimmer)))
-            shimmer_band_gradient.setColorAt(min(1.0, shimmer_pos + 0.07), QColor(0, 0, 0, 0))
-            shimmer_pen = QPen(shimmer_band_gradient, 3)
-            painter.setPen(shimmer_pen)
-            painter.setBrush(QBrush(Qt.NoBrush))
-            painter.drawRoundedRect(1, 1, w - 2, h - 2, radius, radius)
-
-        # ══════════════════════════════════════════════════════
-        #  层5：顶部高光条（柔和的光泽）
-        # ══════════════════════════════════════════════════════
-        top_clip = self._clip_top
-        painter.setClipPath(top_clip)
-        if self.role == "assistant":
-            if self._retrying or self.error:
-                top_color = QColor("#ff2222")
-            else:
-                top_color = QColor("#60D4FF")
-            top_color.setAlpha(int(22 * breathe))
-        else:
-            top_color = QColor(self._theme["accent"])
-            top_color.setAlpha(int(30 * breathe))
-        painter.fillRect(0, 0, w, 5, top_color)
+        # ── 层3：底部往返光块（唯一的运动元素）──
+        painter.setClipPath(self._clip_inner_border)
+        band_h = 3
+        band_ratio = 0.4  # 光块宽度占卡宽比例
+        travel_ratio = 1.0 - band_ratio
+        # 三角波 0→1→0：相位步进 0.035/拍 × 20fps，×3.0 使往返约 3s 一趟
+        _t = (self._pulse_phase / (math.pi * 2)) * 3.0 % 2.0
+        _tri = _t if _t < 1.0 else 2.0 - _t
+        band_cx = (0.5 * band_ratio + travel_ratio * _tri) * w
+        band_w = band_ratio * w
+        band_x = int(band_cx - 0.5 * band_w)
+        band_w = int(band_w)
+        band_y = h - 3 - band_h
+        # 复用模板渐变：stop 位置固定（0/0.5/1），仅改坐标与颜色，不每帧 new
+        band_gradient = self._grad_main
+        band_gradient.setStart(band_x, 0)
+        band_gradient.setFinalStop(band_x + band_w, 0)
+        _b0 = QColor(tint)
+        _b0.setAlpha(0)
+        _b1 = QColor(tint)
+        _b1.setAlpha(int(190 * breathe))
+        band_gradient.setColorAt(0.0, _b0)
+        band_gradient.setColorAt(0.5, _b1)
+        band_gradient.setColorAt(1.0, _b0)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(band_gradient))
+        painter.drawRoundedRect(band_x, band_y, band_w, band_h, 1.5, 1.5)
         painter.end()
 
     def set_error_state(self, is_error: bool, error_message: str = ""):
