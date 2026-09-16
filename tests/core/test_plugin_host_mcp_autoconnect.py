@@ -9,6 +9,10 @@ PluginHostService 时，_discover_mcp_servers / _init_mcp_connections 的
 
 修复：_do_deferred（延迟 2s 非关键初始化链）尾部补 MCP 自动发现 + 连接，
 与 gateway sync_platforms() 补启、LSP start_all_background 同构。
+
+[T31] 架构变更：延迟链由「单回调 _do_deferred」改为
+``DeferredTaskQueue``（10 项 idle 任务 + 3 条保序约束）。本测试同步适配：
+驱动队列泵直至完成，而非手动触发单个回调。
 """
 
 from types import SimpleNamespace
@@ -24,7 +28,28 @@ def _make_host() -> PluginHostService:
     svc = PluginHostService.__new__(PluginHostService)
     QObject.__init__(svc)
     svc._agent_manager = None
+    # [T31] __new__ 绕过 __init__，补延迟队列/LSP 幂等标志
+    import threading
+
+    svc._deferred_queue = None
+    svc._pm_for_deferred = None
+    svc._deferred_once_lock = threading.Lock()
+    svc._lsp_initialized_once = False
     return svc
+
+
+def _drain_queue(queue, limit: int = 200) -> None:
+    """手动推进 DeferredTaskQueue 泵直至完成（配合 QTimer.singleShot patch）。
+
+    队列 delay_ms=2000：直接把队列起始时刻前移 10000s，使所有 delay 立即到期
+    （不真等 2s，也避免 patch time.monotonic 导致的 start 时刻同步偏移问题）。
+    """
+    queue._start_monotonic -= 10000.0
+    for _ in range(limit):
+        if queue._stopped or queue._finished or not queue._pump_scheduled:
+            return
+        queue._pump_scheduled = False
+        queue._pump()
 
 
 @pytest.fixture()
@@ -76,9 +101,15 @@ class TestDeferredChainInitializesMcp:
 
         svc._defer_non_critical_plugin_init(MagicMock())
 
-        assert fired, "非关键初始化延迟回调未注册"
-        _, callback = fired[0]
-        callback()  # 手动触发 _do_deferred
+        queue = svc._deferred_queue
+        assert queue is not None, "非关键初始化应注册延迟队列（T31）"
+        assert "mcp_discover" in queue._tasks and "mcp_connect" in queue._tasks
+        # _constraints 为 {after: {before...}}，故断言元组顺序必须是 (after, before)
+        assert ("mcp_connect", "mcp_discover") in [
+            (after, before) for after, befores in queue._constraints.items() for before in befores
+        ], "mcp_discover → mcp_connect 保序约束必须存在"
+
+        _drain_queue(queue)
 
         assert calls == ["discover", "connect"], (
             "启动延迟链缺失 MCP 自动发现/连接调用 —— aa8f7a6b 迁移丢调用点回归"
@@ -102,9 +133,11 @@ class TestLspOnDemandStart:
         svc, fired = deferred_spied
         svc._defer_non_critical_plugin_init(MagicMock())
 
-        assert fired, "非关键初始化延迟回调未注册"
-        _, callback = fired[0]
-        callback()
+        queue = svc._deferred_queue
+        assert queue is not None, "非关键初始化应注册延迟队列（T31）"
+        assert "lsp_init" in queue._tasks, "LSP 初始化任务应入队"
+
+        _drain_queue(queue)
 
         # fixture patch 的 get_lsp_manager 返回同一 MagicMock，直接取回校验：
         # 注册仍发生，预热不发生

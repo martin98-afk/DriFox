@@ -147,6 +147,18 @@ class ToolRegistry:
         # schema 过滤器（owner → fn）：对话前按 owner 裁剪发给 LLM 的工具 schema。
         # fn(schemas, ctx) -> list；ctx 含 session_id。插件禁用/卸载时按 owner 清理。
         self._schema_filters: Dict[str, Callable] = {}
+        # 聚合缓存（PERF T32）：六个聚合查询此前每次调用都 O(N) 全表扫描，
+        # 权限链/渲染链/视觉注入链在同一次流式循环里反复调用 → O(N²)。
+        # 用 _version 比对做惰性重建：register/unregister/clear 已自增 version，
+        # 无需改动写路径。五个 frozenset 一次重建（同一 version 下保持恒等）。
+        self._agg_version: int = -1
+        self._agg_team_only: frozenset = frozenset()
+        self._agg_dangerous: frozenset = frozenset()
+        self._agg_safe: frozenset = frozenset()
+        self._agg_keep_content: frozenset = frozenset()
+        self._agg_provides_image: frozenset = frozenset()
+        # 原始 group 字段聚合（对应 tools_in_group；与 group_map() 的 display_group 不同）
+        self._agg_by_group: Dict[str, frozenset] = {}
 
     # ========== 单例 ==========
 
@@ -425,19 +437,56 @@ class ToolRegistry:
             return "plain", arguments.get(arg_name, "")
         return "plain", ""
 
-    def team_only_tools(self) -> List[str]:
-        """全部团队专用工具名（供 schema 过滤）"""
+    def _ensure_aggregates_locked(self) -> None:
+        """按 _version 惰性重建聚合缓存（调用方必须已持 self._lock）。
+
+        version 未变直接返回；变了则五个 frozenset + 按 group 聚合一次重建。
+        """
+        version = self._version
+        if self._agg_version == version:
+            return
+        team_only = []
+        dangerous = []
+        safe = []
+        keep_content = []
+        provides_image = []
+        by_group: Dict[str, List[str]] = {}
+        for name, reg in self._tools.items():
+            if reg.team_only:
+                team_only.append(name)
+            if reg.danger == DANGER_DANGEROUS:
+                dangerous.append(name)
+            elif reg.danger == DANGER_SAFE:
+                safe.append(name)
+            if reg.keep_in_content:
+                keep_content.append(name)
+            if (reg.metadata or {}).get("provides_image"):
+                provides_image.append(name)
+            by_group.setdefault(reg.group, []).append(name)
+        self._agg_team_only = frozenset(team_only)
+        self._agg_dangerous = frozenset(dangerous)
+        self._agg_safe = frozenset(safe)
+        self._agg_keep_content = frozenset(keep_content)
+        self._agg_provides_image = frozenset(provides_image)
+        self._agg_by_group = {g: frozenset(names) for g, names in by_group.items()}
+        self._agg_version = version
+
+    def team_only_tools(self) -> frozenset:
+        """全部团队专用工具名（供 schema 过滤）。返回不可变 frozenset（T32 缓存化）"""
         with self._lock:
-            return [n for n, r in self._tools.items() if r.team_only]
+            self._ensure_aggregates_locked()
+            return self._agg_team_only
 
     def provides_image_tools(self) -> frozenset:
         """提供视觉内容（截图/图片读取）的工具名集合（metadata["provides_image"]=True）。
 
         供 chat_worker 视觉注入路径使用（替代硬编码 screenshot/read 判断）：
         工具结果可携带 image_data（协议 B）或可解析出本地图片路径（协议 A）时声明。
+        返回不可变 frozenset（T32 缓存化）。
         """
         with self._lock:
-            return frozenset(r.name for r in self._tools.values() if (r.metadata or {}).get("provides_image"))
+            self._ensure_aggregates_locked()
+            return self._agg_provides_image
 
     def group_map(self) -> Dict[str, List[ToolRegistration]]:
         """按展示分组聚合（权限卡片用）。保持注册顺序，组内危险工具在前。"""
@@ -449,14 +498,16 @@ class ToolRegistry:
             tools.sort(key=lambda r: 0 if r.danger == DANGER_DANGEROUS else 1)
         return groups
 
-    def tools_in_group(self, group: str) -> List[str]:
+    def tools_in_group(self, group: str) -> frozenset:
         """返回指定展示分组内的全部工具名（插件注册时声明的 group）。
 
         供主程序各消费点（文件写入组判定/审查白名单/统计）复用，
         避免 group 名散落为硬编码工具名集合。
+        返回不可变 frozenset（T32 缓存化）；空分组返回空集。
         """
         with self._lock:
-            return [n for n, r in self._tools.items() if r.group == group]
+            self._ensure_aggregates_locked()
+            return self._agg_by_group.get(group, frozenset())
 
     def keep_in_content_tools(self) -> frozenset:
         """始终展示在正文的工具名集合（消息卡片正文/工具区分区用）。
@@ -464,17 +515,23 @@ class ToolRegistry:
         纯参数派生：注册时显式声明 keep_in_content=True（如 write/edit/multi_edit、
         subagent_para、question）。不做 group/语义标记隐式推断——
         语义键（interactive/subagent_task）另有消费点，借用会误触发其他流程。
+        返回不可变 frozenset（T32 缓存化）。
         """
         with self._lock:
-            return frozenset(r.name for r in self._tools.values() if r.keep_in_content)
+            self._ensure_aggregates_locked()
+            return self._agg_keep_content
 
-    def dangerous_tools(self) -> List[str]:
+    def dangerous_tools(self) -> frozenset:
+        """全部危险工具名。返回不可变 frozenset（T32 缓存化）"""
         with self._lock:
-            return [n for n, r in self._tools.items() if r.danger == DANGER_DANGEROUS]
+            self._ensure_aggregates_locked()
+            return self._agg_dangerous
 
-    def safe_tools(self) -> List[str]:
+    def safe_tools(self) -> frozenset:
+        """全部安全工具名。返回不可变 frozenset（T32 缓存化）"""
         with self._lock:
-            return [n for n, r in self._tools.items() if r.danger == DANGER_SAFE]
+            self._ensure_aggregates_locked()
+            return self._agg_safe
 
     # ========== 作用域过滤（按 agent 可用工具） ==========
 

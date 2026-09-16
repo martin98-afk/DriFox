@@ -116,6 +116,18 @@ from app.utils.design_tokens import (
 _BORDER_RADIUS_CSS_VARS = BorderRadius.CSS_VARS
 from app.utils.utils import get_font_family_css, get_icon
 
+# 懒渲染占位 QSS（welcome / assistant 两条路径共用，T35 去重）：
+# 依赖 scale_font_size / get_font_family_css，故在 import 之后求值。
+_PLACEHOLDER_QSS = f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}"
+# resize 占位幽灵框 QSS（两处共用）
+_RESIZE_GHOST_QSS = """
+                QFrame {
+                    background: rgba(255,255,255,0.035);
+                    border: 1px dashed rgba(255,255,255,0.08);
+                    border-radius: 12px;
+                }
+                """
+
 # 纯 Qt 块级渲染器（灰度功能，默认关闭）——**延迟导入**。
 # [PERF] markdown_block_viewer 顶层会导入 pygments/qrc 资源并定义 30+ 个渲染
 # 控件类，累计导入耗时约 340ms（其中模块自身顶层代码约 100ms）。而灰度开关
@@ -170,6 +182,7 @@ from app.widgets.render_helpers import (
     get_tool_qrc_prefix,
     render_tool_block,
 )
+from app.widgets.render_crash_queue import RenderCrashQueue
 from app.utils.session_preview import format_relative_time
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
@@ -4712,6 +4725,22 @@ class ConsoleMonitorPage(QWebEnginePage):
         return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
+        """Chromium 控制台消息分发。
+
+        ⚠️ 族⑤修复（T43）：本函数运行在 Chromium 回调栈内，函数内的动作类
+        emit（用户点击 context-tag/推荐问题/图表等触发）会**同步**进入 Qt
+        信号链——在「取消长请求 + 429 错误态 + 大批次虚拟滚动回收」窗口内，
+        链上某跳 receiver 可能已析构但连接未断 → 悬空调用 → AV（崩点漂移
+        但同一 Python 行，生命周期 bug）。动作类 emit 统一改为
+        ``QTimer.singleShot(0, ...)`` 延迟到事件循环下一拍派发：Chromium
+        回调栈立即返回，掐断「回调栈内同步进 Qt 信号链」的必要条件。
+        lambda 闭包参数用默认参固化，防迟到绑定。
+
+        例外：pywebview_height / cardReadingChanged / contentReady 是流式
+        布局高频信号，延迟会破坏帧时序，保持同步。
+        """
+        from PyQt5.QtCore import QTimer  # [T43] 延迟派发用（本函数作用域内此前未导入）
+
         msg = message.strip()
         # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
         # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
@@ -4745,7 +4774,11 @@ class ConsoleMonitorPage(QWebEnginePage):
             if "context|||" in msg:
                 try:
                     parts = msg.split("|||")
-                    self.contextActionRequested.emit(urllib.parse.unquote(parts[1]), urllib.parse.unquote(parts[2]))
+                    # [T43] 延迟派发（族⑤）：默认参固化 unquote 结果
+                    QTimer.singleShot(
+                        0,
+                        lambda a1=urllib.parse.unquote(parts[1]), a2=urllib.parse.unquote(parts[2]): self.contextActionRequested.emit(a1, a2),
+                    )
                 except Exception:
                     pass
             elif "context_lost" in msg:
@@ -4758,7 +4791,11 @@ class ConsoleMonitorPage(QWebEnginePage):
 
                     _text = _b64mod.b64decode(msg.split("fence_prompt:", 1)[1]).decode("utf-8")
                     if _text.strip():
-                        self.contextActionRequested.emit(_text, "ask")
+                        # [T43] 延迟派发（族⑤），与 context||| 同链路
+                        QTimer.singleShot(
+                            0,
+                            lambda a1=_text: self.contextActionRequested.emit(a1, "ask"),
+                        )
                 except Exception:
                     pass
             elif "preview_image:" in msg:
@@ -4767,7 +4804,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                 # openUrl 后实际无响应。预处理失败时由宿主回退 openUrl。
                 try:
                     url_str = msg.split("preview_image:", 1)[1]
-                    self.previewImageRequested.emit(url_str)
+                    # [T43] 延迟派发（族⑤）
+                    QTimer.singleShot(0, lambda u=url_str: self.previewImageRequested.emit(u))
                 except Exception:
                     pass
             elif "open_url:" in msg:
@@ -4804,14 +4842,16 @@ class ConsoleMonitorPage(QWebEnginePage):
                 # 处理工具差异对比请求
                 try:
                     tool_call_id = msg.split("tool_diff:", 1)[1]
-                    self.toolDiffRequested.emit(tool_call_id)
+                    # [T43] 延迟派发（族⑤）
+                    QTimer.singleShot(0, lambda tid=tool_call_id: self.toolDiffRequested.emit(tid))
                 except Exception:
                     pass
             elif "subagent_log:" in msg:
                 # 处理子智能体日志查看请求
                 try:
                     task_ids = msg.split("subagent_log:", 1)[1]
-                    self.subAgentLogRequested.emit(task_ids)
+                    # [T43] 延迟派发（族⑤）
+                    QTimer.singleShot(0, lambda t=task_ids: self.subAgentLogRequested.emit(t))
                 except Exception:
                     pass
             elif "save_file:" in msg:
@@ -4832,7 +4872,11 @@ class ConsoleMonitorPage(QWebEnginePage):
                     rest = msg.split("pywebview_action:chart_expand:", 1)[1]
                     chart_type, payload = rest.split(":", 1)
                     if chart_type in ("echarts", "mermaid", "svg", "html") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
-                        self.chartExpandRequested.emit(chart_type, payload)
+                        # [T43] 延迟派发（族⑤）
+                        QTimer.singleShot(
+                            0,
+                            lambda ct=chart_type, pl=payload: self.chartExpandRequested.emit(ct, pl),
+                        )
                 except Exception:
                     pass
             elif msg.startswith("pywebview_action:save_widget_file:"):
@@ -4841,7 +4885,11 @@ class ConsoleMonitorPage(QWebEnginePage):
                     rest = msg.split("pywebview_action:save_widget_file:", 1)[1]
                     wtype, payload = rest.split(":", 1)
                     if wtype in ("svg", "html") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
-                        self.saveWidgetFileRequested.emit(wtype, payload)
+                        # [T43] 延迟派发（族⑤）
+                        QTimer.singleShot(
+                            0,
+                            lambda wt=wtype, pl=payload: self.saveWidgetFileRequested.emit(wt, pl),
+                        )
                 except Exception:
                     pass
             elif msg.startswith("pywebview_action:save_chart_png:"):
@@ -4850,13 +4898,21 @@ class ConsoleMonitorPage(QWebEnginePage):
                     rest = msg.split("pywebview_action:save_chart_png:", 1)[1]
                     name_b64, png_b64 = rest.split(":", 1)
                     if len(png_b64) <= _MAX_CHART_PAYLOAD_B64:
-                        self.saveChartPngRequested.emit(name_b64, png_b64)
+                        # [T43] 延迟派发（族⑤）
+                        QTimer.singleShot(
+                            0,
+                            lambda nb=name_b64, pb=png_b64: self.saveChartPngRequested.emit(nb, pb),
+                        )
                 except Exception:
                     pass
             else:
                 try:
                     p = msg.split(":")
-                    self.codeActionRequested.emit(base64.b64decode(p[2]).decode("utf-8"), p[1])
+                    # [T43] 延迟派发（族⑤）
+                    QTimer.singleShot(
+                        0,
+                        lambda code=base64.b64decode(p[2]).decode("utf-8"), act=p[1]: self.codeActionRequested.emit(code, act),
+                    )
                 except Exception:
                     pass
 
@@ -5160,7 +5216,11 @@ class CodeWebViewer(QWebEngineView):
         self._min_render_interval = 80
         self._height_report_pending = False
         self._context_lost = False  # 上下文丢失标志
-        self._context_lost_count = 0  # 上下文丢失次数统计
+        # [T11] 恢复计数按信号源拆分：renderCrashed 与 JS webglcontextlost 各自累加，
+        # 互不叠加（单 renderer 崩溃会引发全量 viewer 的 webgl 集中上报，共享计数
+        # 会把第一次 renderCrashed 直接推过阈值 → 误入整卡重建风暴）。
+        self._render_crash_count = 0  # renderer 崩溃次数（阈值 >2 → needRecreate）
+        self._webgl_ctx_lost_count = 0  # JS webgl 上下文丢失次数（阈值 >1 → needRecreate）
         # 注：原 CodeWebViewer 的 _resize_debounce_timer(100ms) 与 _resize_timer(100ms)
         # 只被定义/连接、从未 start()，属死代码且误导排查，已移除。
         # resize 期间真正生效的防抖只剩下面的 _resize_unlock_timer(150ms)。
@@ -5360,11 +5420,11 @@ class CodeWebViewer(QWebEngineView):
         """JavaScript 报告上下文丢失"""
         if not self._context_lost:
             self._context_lost = True
-            self._context_lost_count += 1
+            self._webgl_ctx_lost_count += 1
             self.contextLost.emit()
 
             # 如果已经丢失超过1次，直接请求重建
-            if self._context_lost_count > 1:
+            if self._webgl_ctx_lost_count > 1:
                 self.needRecreate.emit()
                 return
 
@@ -5392,19 +5452,26 @@ class CodeWebViewer(QWebEngineView):
             self.needRecreate.emit()
 
     def _on_render_crashed(self):
-        """renderer 进程崩溃自愈：重载骨架补渲；连续崩溃（≥3 次）交重建。
+        """renderer 进程崩溃自愈：错峰排队恢复；连续崩溃（≥3 次）交重建。
 
-        复用 _context_lost_count 计数（与 webglcontextlost 共享阈值）：
-        单次崩溃重载骨架成本远低于整卡重建；反复崩溃说明环境级问题（如
-        显存枯竭），重建兜底。重载骨架后 vault/队列等 JS 状态随页面重置，
-        _schedule_render 补渲时图表按当前内容重新 init 一次。
+        计数专用 ``_render_crash_count``（不与 JS webgl 路径共享）：单次崩溃
+        重载骨架成本远低于整卡重建；反复崩溃说明环境级问题（如显存枯竭），
+        重建兜底。重载骨架后 vault/队列等 JS 状态随页面重置，补渲时图表按当前
+        内容重新 init 一次。
+
+        [T11 错峰] 单 renderer 承载全部卡片时，一次崩溃让所有卡片同帧收到本回调；
+        若各自即刻 ``_try_restore_context``，N 张卡的重载齐发会把刚重启的 Chromium
+        线程再次压垮（→ 0xC0000409 进程级死亡）。改交 ``RenderCrashQueue`` 排队，
+        每 500ms 只恢复一张（可见优先）。JS webgl 路径若先恢复（置
+        ``_context_lost=False``），队列下一拍自动剔除该条目，不会重复恢复。
         """
         logger.warning("WebEngine renderer 崩溃，触发卡片自愈")
-        self._context_lost_count += 1
-        if self._context_lost_count > 2:
+        self._render_crash_count += 1
+        if self._render_crash_count > 2:
             self.needRecreate.emit()
             return
-        self._try_restore_context()
+        self._context_lost = True
+        RenderCrashQueue.get_instance().enqueue(self)
 
     def event(self, event):
         """拦截 WebEngine 事件"""
@@ -5497,6 +5564,13 @@ class CodeWebViewer(QWebEngineView):
         self._restore_finished_ids = None
         self._resize_locked = False
         self._height_report_pending = False
+        # [T11] 复用前复位崩溃/上下文状态：计数器是「本 viewer 生命周期内」语义，
+        # 不清零会让崩溃过的 viewer 复用后被陈旧计数误判 → 无谓重建；
+        # 从崩溃队列移除（本页已重置，无需再自愈）。这是排队器正确性前置条件。
+        self._context_lost = False
+        self._render_crash_count = 0
+        self._webgl_ctx_lost_count = 0
+        RenderCrashQueue.get_instance().discard(self)
         self._document_height = 0
         self._body_client_height = 0
         self._body_scroll_top = 0
@@ -9828,7 +9902,10 @@ class CodeWebViewer(QWebEngineView):
     # 上方 150~500ms 的自适应节流形同虚设，退化为「每 chunk 一次 O(tail) 转换」
     # ——随消息长度呈 O(n²)，是「流式越到后面越卡」的主因。
     # 用最小间隔而非固定延迟，可在快速流式合并的同时保住慢速流式的即时观感。
-    _SOFT_BOUNDARY_MERGE_MS = 40
+    # [T28 L1] 40 → 100ms：40ms 窗口太窄，快速流式（chunk 间隔 ~20-50ms）下
+    # 大部分软边界仍落在窗口外 → 仍逐句重渲染。100ms 覆盖典型 chunk 间隔的
+    # 2-5 倍，合并生效且不拖慢慢速流式（慢速流式距上次渲染远超 100ms → 仍即时）。
+    _SOFT_BOUNDARY_MERGE_MS = 100
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
@@ -10195,9 +10272,11 @@ class CodeWebViewer(QWebEngineView):
             #
             # 背景：中文句号极密集，无脑 immediate 会让整个自适应节流失效并退化
             # 为 O(n²)；但一律延迟又会拖慢打字机观感（句子结束后格式迟迟不变）。
-            # 折中：只有「距上次渲染不足一个合并窗口」时才推迟到窗口末尾——
-            #   慢速流式（人能逐句阅读）→ 仍 immediate，观感与优化前一致；
-            #   快速流式（连续句号刷屏）→ 合并为窗口内一次，砍掉重复转换。
+            # 折中：只有「距上次渲染不足一个合并窗口（_SOFT_BOUNDARY_MERGE_MS，
+            # 现为 100ms）」时才推迟到窗口末尾——
+            #   慢速流式（人能逐句阅读，句间隔 >100ms）→ 仍 immediate，观感不变；
+            #   快速流式（连续句号刷屏，句间隔 <100ms）→ 合并为窗口内一次，
+            #   砍掉重复转换（实测该场景占流式时长的大头）。
             if self._has_reached_soft_boundary(self._markdown_text):
                 since_last_ms = (time.monotonic() - getattr(self, "_last_render_ts", 0.0)) * 1000
                 if since_last_ms < self._SOFT_BOUNDARY_MERGE_MS:
@@ -11148,13 +11227,16 @@ class CodeWebViewer(QWebEngineView):
             logger.debug(f"[incremental-finalize] 回退全量: {e}")
             return False
 
-    def finish_streaming(self, keep_dock: bool = False):
+    def finish_streaming(self, keep_dock: bool = False, immediate: bool = True):
         """流式结束收尾。
 
         Args:
             keep_dock: True 时保留坞态（简洁模式下工具区仍沉底）——流式文本可能
                 先于工具结果结束（S1：dock 归位早于工具完成），此时不应立即归位，
                 等最后一个工具完成时再由 append_tool_result 兜底归位。
+            immediate: False 时最终全量渲染不立即派发（仅启内部定时器），
+                供批量加载路径错峰用（T11）。状态清理/JS 调用不受影响，
+                仍全部同步执行。
         """
         self._streaming = False
         # [B1] 流式结束：差量缓存失效（尾部未闭合内容需全量渲染收尾），
@@ -11225,7 +11307,12 @@ class CodeWebViewer(QWebEngineView):
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
         # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
-        self._schedule_render(immediate=True)
+        # immediate=False（T11 批量加载错峰）：交内部短定时器合并派发，
+        # 避免 N 卡同帧全量重渲；状态清理与 JS 调用已在上方同步执行。
+        if immediate:
+            self._schedule_render(immediate=True)
+        else:
+            self._schedule_render(immediate=False)
         # 简洁模式：流式结束后自动折叠工具与思考区（收起为"工具与思考 · N 项"
         # 标题栏）。坞态归位 + 折叠由 MessageCard.finish_streaming 统一触发
         # （需 Python 端 _streaming/_has_active_tools 判据，viewer 侧无此状态，
@@ -11486,10 +11573,16 @@ class CodeWebViewer(QWebEngineView):
                 break
             parent = parent.parent()
 
-    def _copy_to_clipboard(self):
+    def _copy_to_clipboard(self, copy_selection: bool = True):
         """复制内容到剪贴板（使用系统原生 API）
 
         优先复制页面选中文本（右键菜单标准行为），无选中时降级复制全文。
+
+        Args:
+            copy_selection: True 时优先页面选中文本（右键菜单），False 跳过
+                选区直接复制全文（工具栏复制按钮路径）。与 PlainTextViewer
+                同名方法签名对齐（T41：MessageCard._copy_user_message 两态
+                传参，签名不一致会在 CodeWebViewer 上 TypeError）。
 
         🐛 修复：使用 get_plain_text() 替代直接读 _markdown_text，
         因为 _cleanup_render_cache 会将 _markdown_text 清空。
@@ -11498,7 +11591,7 @@ class CodeWebViewer(QWebEngineView):
         # 优先复制选中文本：QWebEnginePage.selectedText() 返回 DOM 选区，
         # 无选中时返回空字符串；\u2029 为 WebEngine 块级换行分隔符，规范化为 \n。
         try:
-            selected = self.page().selectedText()
+            selected = self.page().selectedText() if copy_selection else ""
             if selected:
                 text = selected.replace("\u2029", "\n")
             else:
@@ -11507,19 +11600,19 @@ class CodeWebViewer(QWebEngineView):
             text = self.get_plain_text()
         if not text:
             return
+        # 收口走 Qt 剪贴板：旧实现的原生剪贴板 Open/Empty/Set/Close 序列无
+        # try/finally 保护，异常时剪贴板句柄悬挂会触发 COM failfast
+        # （2026-09-16 WER 口径 CoreMessaging 族诱因之一）。Qt 侧内部自带
+        # 重试与句柄管理，行为对外等价。
         try:
-            import win32clipboard
-
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
-            win32clipboard.CloseClipboard()
-        except Exception:
-            # 兜底：使用 PyQt5 剪贴板
             from PyQt5.QtWidgets import QApplication
 
-            clipboard = QApplication.clipboard()
-            clipboard.setText(text)
+            _clipboard = QApplication.clipboard()
+            if _clipboard is None:
+                raise RuntimeError("系统剪贴板不可用")
+            _clipboard.setText(text)
+        except Exception as e:
+            logger.warning(f"复制到剪贴板失败: {e}")
 
     def _get_default_filename(self) -> str:
         """生成默认导出文件名：会话名_时间戳"""
@@ -12335,12 +12428,17 @@ class PlainTextViewer(QWidget):
             self.text_edit.document().setTextWidth(vp_width)
         self._schedule_update_height()
 
-    def finish_streaming(self, keep_dock: bool = False):
+    def finish_streaming(self, keep_dock: bool = False, immediate: bool = True):
         """流式结束收尾。
 
         🆕 F4：与 CodeWebViewer.finish_streaming 保持相同签名——MessageCard.
         finish_streaming 统一以 keep_dock=self._has_active_tools() 调用两个 Viewer。
         PlainTextViewer 无 dock 概念（用户卡片无工具与思考折叠框），忽略该参数。
+
+        [P0 修复] immediate 为接口对齐参数（兄弟团队 T11 错峰链给 CodeWebViewer
+        加了该参数并在 MessageCard 无条件传参，此处漏改导致鸭子类型断裂）。
+        PlainTextViewer 是同步纯 Qt 渲染，无 WebEngine JS 投递可择机，错峰无意义，
+        故接收后忽略：立即 _schedule_update_height() 即等价于 immediate=True 语义。
         """
         self._schedule_update_height()
 
@@ -13117,6 +13215,17 @@ class MessageCard(SimpleCardWidget):
         # preview 模式只写此字段，不真正 setFixedHeight（避免 Chromium 级联
         # relayout）。set_resize_preview_mode(False) 退出时一次性应用。
         self._pending_viewer_height: Optional[int] = None
+        # ── 空白守卫（blank-guard）──
+        # 背景：简洁模式流式中「偶尔」工具/折叠框下方出现大段空白 = viewer 高度
+        # （Qt 落地值）大于 JS 侧实际内容高。根因：_apply_debounced_height 收拢
+        # 方向 <40px 直接丢弃（防抖动设计），多工具依次完成时每次"运行框→折叠行"
+        # 缩 ~24px 全被吞 → 累积虚高，正文静默期（纯工具执行阶段）暴露为空白。
+        # 修复：小收缩改延迟落地（_shrink_timer 500ms 稳定窗）。
+        # _blank_guard_* 为二道防线（gap 探针取证），默认不启用单独开关。
+        self._shrink_timer: Optional[QTimer] = None
+        self._pending_shrink_height: Optional[int] = None
+        self._blank_guard_timer: Optional[QTimer] = None
+        self._blank_guard_rounds = 0
         # WebEngine 上下文恢复标志
         self._webengine_needs_restore = False
         # 懒渲染标志：未进入可视区域前不创建QWebEngine
@@ -14111,9 +14220,7 @@ class MessageCard(SimpleCardWidget):
             # 欢迎卡片使用懒渲染：占位符，不立即创建 QWebEngine
             # 避免首帧 Chromium 进程创建阻塞主线程（优化前首帧卡顿 200-500ms 的根因）
             placeholder = QLabel("加载中...", self)
-            placeholder.setStyleSheet(
-                f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}"
-            )
+            placeholder.setStyleSheet(_PLACEHOLDER_QSS)
             placeholder.setAlignment(Qt.AlignCenter)
             self._viewer_layout.addWidget(placeholder)
             main.addWidget(self._viewer_container)
@@ -14122,22 +14229,12 @@ class MessageCard(SimpleCardWidget):
             self.resize_placeholder = QFrame(self)
             self.resize_placeholder.setVisible(False)
             self.resize_placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.resize_placeholder.setStyleSheet(
-                """
-                QFrame {
-                    background: rgba(255,255,255,0.035);
-                    border: 1px dashed rgba(255,255,255,0.08);
-                    border-radius: 12px;
-                }
-                """
-            )
+            self.resize_placeholder.setStyleSheet(_RESIZE_GHOST_QSS)
             main.addWidget(self.resize_placeholder)
         elif self.role != "user":  # user 已在 _setup_user_bubble 创建，不再进入懒渲染
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
-            placeholder.setStyleSheet(
-                f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}"
-            )
+            placeholder.setStyleSheet(_PLACEHOLDER_QSS)
             placeholder.setAlignment(Qt.AlignCenter)
             self._viewer_layout.addWidget(placeholder)
             main.addWidget(self._viewer_container)
@@ -14146,15 +14243,7 @@ class MessageCard(SimpleCardWidget):
             self.resize_placeholder = QFrame(self)
             self.resize_placeholder.setVisible(False)
             self.resize_placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.resize_placeholder.setStyleSheet(
-                """
-                QFrame {
-                    background: rgba(255,255,255,0.035);
-                    border: 1px dashed rgba(255,255,255,0.08);
-                    border-radius: 12px;
-                }
-                """
-            )
+            self.resize_placeholder.setStyleSheet(_RESIZE_GHOST_QSS)
             main.addWidget(self.resize_placeholder)
 
         self.options_widget = QWidget(self)
@@ -15026,16 +15115,52 @@ class MessageCard(SimpleCardWidget):
             return
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         if h >= current_height:
-            # 增长方向：小阈值立即应用，保证流式输出滚底跟随
+            # 增长方向：小阈值立即应用，保证流式输出滚底跟随。
+            # 🐛 新内容填平了此前的收拢需求 → 取消挂起的延迟收缩。
+            self._cancel_pending_shrink()
             if h - current_height > 2:
                 self._apply_viewer_height(h)
         else:
-            # 收拢方向：小步回弹（<40px）流式期间不应用。
-            # 来源：流式块→完成块的 DOM 替换、滚动条出现/消失的重排噪声。
-            # 延迟到 finish_streaming 后的全量渲染统一收敛，消除"长一下又缩回去"的抖动。
-            # 大幅收拢（≥40px，折叠/展开/dock 切换）仍正常应用。
+            # 收拢方向：小步回弹（<40px）不立即应用（流式块→完成块的 DOM
+            # 替换、滚动条出现/消失的重排噪声，立即应用会"长一下又缩回去"抖动）。
+            # 🐛 但旧实现直接丢弃会累积虚高：12 个工具依次完成，每次
+            # "运行框→折叠行"缩 ~24px 全被吞 → 累积 250px+ 底部空白；
+            # 正文增长会暂时填平看不出，纯工具执行阶段（正文静默）即暴露。
+            # 修复：改为**延迟落地**——500ms 稳定窗合并连续抖动，窗口期被
+            # 增长取消（内容填平），静止的收缩最终落地。大幅收拢（≥40px）
+            # 仍立即应用。
             if current_height - h >= 40:
+                self._cancel_pending_shrink()
                 self._apply_viewer_height(h)
+            else:
+                self._schedule_pending_shrink(h)
+
+    def _schedule_pending_shrink(self, target: int):
+        """挂起一次小步收拢：500ms 稳定窗后落地，窗口内被增长/finish 取消。"""
+        self._pending_shrink_height = int(target)
+        if self._shrink_timer is None:
+            self._shrink_timer = QTimer(self)
+            self._shrink_timer.setSingleShot(True)
+            self._shrink_timer.setInterval(500)
+            self._shrink_timer.timeout.connect(self._apply_pending_shrink)
+        self._shrink_timer.start()
+
+    def _cancel_pending_shrink(self):
+        """取消挂起的延迟收缩（增长方向到来 / finish 收敛接管）。"""
+        self._pending_shrink_height = None
+        if self._shrink_timer is not None:
+            self._shrink_timer.stop()
+
+    def _apply_pending_shrink(self):
+        """延迟收缩落地：仅当流式中且当前落地值仍大于挂起目标。"""
+        target = self._pending_shrink_height
+        self._pending_shrink_height = None
+        if target is None or not self._streaming:
+            return
+        current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
+        # 目标仍小于当前值才收拢；期间已被增长覆盖（>= 目标）则放弃
+        if current_height > target:
+            self._apply_viewer_height(target)
 
     def _on_qt_viewer_height(self, h: int) -> None:
         """灰度：纯 Qt viewer 高度自治（layout 自适应，不 setFixedHeight），
@@ -15372,6 +15497,8 @@ class MessageCard(SimpleCardWidget):
         v.chartExpandRequested.connect(self._on_chart_expand)
         v.saveChartPngRequested.connect(self._on_save_chart_png)
         v.saveWidgetFileRequested.connect(self._on_save_widget_file)
+        # 图片预览（T9-2）：池化路径漏连，非 user 卡片预览失灵存量 bug
+        v.previewImageRequested.connect(self._on_preview_image)
         # WebEngine 上下文丢失处理
         v.contextLost.connect(self._on_webengine_context_lost)
         v.contextRestored.connect(self._on_webengine_context_restored)
@@ -15394,6 +15521,7 @@ class MessageCard(SimpleCardWidget):
             (v.chartExpandRequested, self._on_chart_expand),
             (v.saveChartPngRequested, self._on_save_chart_png),
             (v.saveWidgetFileRequested, self._on_save_widget_file),
+            (v.previewImageRequested, self._on_preview_image),
             (v.contextLost, self._on_webengine_context_lost),
             (v.contextRestored, self._on_webengine_context_restored),
             (v.needRecreate, self._on_webengine_need_recreate),
@@ -15731,7 +15859,14 @@ class MessageCard(SimpleCardWidget):
 
         return "\n\n".join(part for part in parts if part).strip()
 
-    def append_text(self, text: str):
+    def append_text(self, text: str, immediate_render: bool = True):
+        """追加文本内容。
+
+        Args:
+            immediate_render: 批量加载路径传 False（T11），把本函数内的
+                immediate 渲染请求降级为合并派发，避免 N 卡同帧全量重渲。
+                非 immediate 的一处调用不受影响（本就合并）。
+        """
         # [L3] 内容增长：此前的「宽度→高度」预测失效（流式期间本就不写缓存，
         # 这里兜底处理流式中途插入内容等路径）
         self._height_cache.clear()
@@ -15786,7 +15921,7 @@ class MessageCard(SimpleCardWidget):
                     # 首 chunk：立即渲染一次显示"深度思考中..." spinner
                     self.viewer._think_text_streaming_started = True
                     self.viewer._thinking_finalized = False
-                    self.viewer._schedule_render(immediate=True)
+                    self.viewer._schedule_render(immediate=immediate_render)
                 # 后续 chunk：静默累积，不触发渲染/高度更新
                 self._content_just_loaded = True
                 return
@@ -15797,7 +15932,7 @@ class MessageCard(SimpleCardWidget):
             # 卡片即刻展开而无需等下一个边界。
             if _tag_unclosed != getattr(self.viewer, "_tag_text_streaming", False):
                 self.viewer._needs_full_render = True
-                self.viewer._schedule_render(immediate=True)
+                self.viewer._schedule_render(immediate=immediate_render)
             self.viewer._tag_text_streaming = _tag_unclosed
             # <think> 已闭合或无 think 标签：恢复正常渲染
             self.viewer._think_text_streaming_started = False
@@ -15811,7 +15946,7 @@ class MessageCard(SimpleCardWidget):
             # [PERF] 软边界（句号）不再 immediate —— 与 append_chunk /
             # _schedule_render 保持一致，交由内部 90ms 短定时器合并。
             if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
-                self.viewer._schedule_render(immediate=True)
+                self.viewer._schedule_render(immediate=immediate_render)
             else:
                 self.viewer._schedule_render(immediate=False)
             self._content_just_loaded = True
@@ -17017,7 +17152,7 @@ class MessageCard(SimpleCardWidget):
         if enabled:
             self.interventionRequested.emit({"card_id": id(self), "message": "请求人工干预"})
 
-    def finish_streaming(self, history: bool = False, force_dock_off: bool = False):
+    def finish_streaming(self, history: bool = False, force_dock_off: bool = False, immediate: bool = True):
         """流式结束收尾。
 
         Args:
@@ -17033,6 +17168,8 @@ class MessageCard(SimpleCardWidget):
                 错误路径 worker 已终止，工具结果永不到达，兑底永不触发
                 → 坞态永久沉底、正文限矮（流式结构残留 bug 根因），
                 故打断/错误调用方必须传 True。
+            immediate: 透传给 viewer.finish_streaming（T11）。批量加载路径传
+                False，避免 N 卡同帧全量重渲；交互路径保持默认 True。
         """
         try:
             # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
@@ -17042,6 +17179,8 @@ class MessageCard(SimpleCardWidget):
                 self._anim_timer.stop()
             except RuntimeError:
                 pass
+            # 挂起的延迟小收缩作废：finish 后由非流式 _update_height 全量收敛接管
+            self._cancel_pending_shrink()
             # 🆕 打开结束态高度缓动窗口：坞态归位 + 最终重排后卡片高度会一次收敛
             # 数百 px，交由 _update_height 缓动（只服务一次，消费或超时即失效）。
             # 历史会话加载（history=True）不打开——那是首帧建卡，无需过渡。
@@ -17050,7 +17189,7 @@ class MessageCard(SimpleCardWidget):
                 self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 _keep_dock = self._has_active_tools() and not (history or force_dock_off)
-                self.viewer.finish_streaming(keep_dock=_keep_dock)
+                self.viewer.finish_streaming(keep_dock=_keep_dock, immediate=immediate)
                 if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()
                 # 简洁模式：坞态归位后自动折叠工具与思考区。keep_dock=True

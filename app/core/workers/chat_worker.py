@@ -259,6 +259,10 @@ class OpenAIChatWorker(QThread):
             initial_compaction_cache=initial_compaction_cache,
         )
         self._sync_state_from_state()  # 同步到旧属性名（向后兼容）
+        # [T28 L4] _response_chunks 字符总数增量计数器：原 sum(len(c) for c in ...)
+        # 在 MEM_DIAG 快照（每 100 chunk）与流式调试日志里各跑一次，长响应下
+        # O(chunks) × 高频 = 可观开销。所有写路径（append/clear/恢复/重置）同步维护。
+        self._chunks_total_len = 0
         # 每轮 API 调用的有效输入上下文计数；API 不返回 usage 时供消息卡片回退显示。
         self._last_context_token_count = 0
         # ============================================================
@@ -432,8 +436,8 @@ class OpenAIChatWorker(QThread):
         else:
             delta_str = "init"
 
-        # 估算 _response_chunks 的字符串总长度
-        chunks_total_len = sum(len(c) for c in self._response_chunks)
+        # _response_chunks 的字符串总长度（[T28 L4] 增量计数器替代每拍 sum）
+        chunks_total_len = self._chunks_total_len
 
         # 基础度量
         parts = [
@@ -1403,6 +1407,8 @@ class OpenAIChatWorker(QThread):
         # 使用 ChatWorkerState 清理
         self._state.reset_pending_response_state()
         self._sync_state_from_state()
+        # [T28 L4] deque 已被换成新空 deque（见 ChatWorkerState.reset_pending_response_state）
+        self._chunks_total_len = 0
 
     def _restore_partial_content_backup(self):
         """
@@ -1419,6 +1425,8 @@ class OpenAIChatWorker(QThread):
             self._response_content_blocks = backup.get("content_blocks", []) or []
         if not self._response_chunks:
             self._response_chunks = list(backup.get("response_chunks", []) or [])
+            # [T28 L4] 恢复路径重建了 chunks，重算计数（低频一次性）
+            self._chunks_total_len = sum(len(c) for c in self._response_chunks)
         self._partial_content_backup = None
 
     def _has_pending_interject(self) -> bool:
@@ -1658,6 +1666,8 @@ class OpenAIChatWorker(QThread):
         # 使用 ChatWorkerState 清理所有状态
         self._state.full_cleanup()
         self._sync_state_from_state()
+        # [T28 L4] 与 full_cleanup 换新 deque 对齐
+        self._chunks_total_len = 0
 
         # 清理问题/回答状态
         self._pending_answer = None
@@ -2031,6 +2041,11 @@ class OpenAIChatWorker(QThread):
             while not self._is_cancelled:
                 if self._is_cancelled:
                     return
+                # [T15/M6] 退出期 atexit 钩子会 requestInterruption() 收敛存活的
+                # QThread；主循环必须响应中断标志尽快返回，否则 wait(500) 超时后
+                # 线程仍活着 → "QThread: Destroyed while running" qFatal 闪退
+                if self.isInterruptionRequested():
+                    return
 
                 # LoopPolicy：轮数上限（默认策略不限 → 零行为变化）
                 if self._check_loop_round_limit():
@@ -2397,6 +2412,8 @@ class OpenAIChatWorker(QThread):
                 # _response_chunks deque 不再需要，提前释放避免在整个工具执行期间
                 # （_execute_all_tools 可能耗时较长）持有几十 MB 的文本 chunk。
                 self._response_chunks.clear()
+                # [T28 L4] 与上方 clear 对齐（chunks 已合入 response_sequence）
+                self._chunks_total_len = 0
                 current_messages.extend(response_sequence)
                 current_session_messages.extend(response_sequence)
                 self._current_session_messages = list(current_session_messages)
@@ -4034,6 +4051,7 @@ class OpenAIChatWorker(QThread):
             if content:
                 # 性能优化：使用 list append + join 代替字符串拼接
                 self._response_chunks.append(content)
+                self._chunks_total_len += len(content)
                 self._response_content_blocks = append_text_block(self._response_content_blocks, content)
                 # [PERF] 批量发送：积累到 30 字符或 80ms 才 emit，降低信号频率
                 # 原 15 字符/50ms 过于激进，每 50ms 触发一次完整的
@@ -4061,7 +4079,8 @@ class OpenAIChatWorker(QThread):
             chunk_count += 1
             # [MEM] 每 100 个 chunk 记录一次流式内存快照
             if chunk_count % 100 == 0 and self._mem_diag_enabled:
-                chunks_total = sum(len(c) for c in self._response_chunks)
+                # [T28 L4] 计数器替代 sum（每 100 chunk 一次，长响应下省 O(chunks)）
+                chunks_total = self._chunks_total_len
                 self._mem_total_chunks_logged += 1
                 rss_str = ""
                 if _HAS_PSUTIL:
@@ -4398,6 +4417,7 @@ class OpenAIChatWorker(QThread):
                 piece = getattr(event, "delta", "") or ""
                 if piece:
                     self._response_chunks.append(piece)
+                    self._chunks_total_len += len(piece)
                     self._response_content_blocks = append_text_block(self._response_content_blocks, piece)
                     _content_batch += piece
                     now = time.time()

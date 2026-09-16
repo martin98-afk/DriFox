@@ -319,17 +319,50 @@ class ContextBudgetAllocator:
 
         # 上下文压缩 —— 使用分配器计算的预算
         budget = self._allocate_history_budget(full_system_content, llm_config)
-        # compact 为纯同步函数，调用方（PreSendWorker / chat_worker /
-        # gateway 主线程入口）已各自决定执行线程；此前的 anyio.run(to_thread) 包装
-        # 只增加 event loop 创建与线程切换开销，不改阻塞语义（同步等待）。
-        history_for_api, compaction_state, compaction_cache = self._compactor.compact(
-            history_messages,
+        # [PERF T33] 发送前处理缓存：consolidate + compact（含 token 估算）在
+        # 同一消息版本 + 同一预算/模型/截断参数下结果完全确定，而一次发送会经
+        # 多次调用（主发送 + 工具迭代回环）。长会话下这两步是 100-300ms 级开销。
+        # 命中条件为 8 元组全等；任一变化即 miss 走原路径并回写。
+        # S1 工具截断与 filtered_history 过滤留在缓存外（对 history_for_api 原地
+        # 改 content，缓存持有的是 compact 输出，不能被下游改动污染）。
+        tool_result_max_len = resolve_tool_result_max_len(llm_config)
+        prep_key = (
+            getattr(session, "_messages_version", -1),
+            len(history_messages),
+            history_messages[0].get("timestamp", "") if history_messages else "",
+            history_messages[-1].get("timestamp", "") if history_messages else "",
             budget,
-            existing_cache=getattr(session, "compaction_cache", None),
-            allow_llm_summary=allow_llm_summary,
+            llm_config.get("model", "") if isinstance(llm_config, dict) else "",
+            tool_result_max_len,
+            bool(allow_llm_summary),
         )
-        session.set_compaction_state(compaction_state)
-        session.set_compaction_cache(compaction_cache)
+        cached_prep = getattr(session, "_send_prep_cache", None)
+        if cached_prep is not None and cached_prep.get("key") == prep_key:
+            history_for_api = cached_prep["history"]
+            session.set_compaction_state(cached_prep["state"])
+            session.set_compaction_cache(cached_prep["cache"])
+        else:
+            # compact 为纯同步函数，调用方（PreSendWorker / chat_worker /
+            # gateway 主线程入口）已各自决定执行线程；此前的 anyio.run(to_thread) 包装
+            # 只增加 event loop 创建与线程切换开销，不改阻塞语义（同步等待）。
+            history_for_api, compaction_state, compaction_cache = self._compactor.compact(
+                history_messages,
+                budget,
+                existing_cache=getattr(session, "compaction_cache", None),
+                allow_llm_summary=allow_llm_summary,
+                prenormalized=history_messages,
+            )
+            session.set_compaction_state(compaction_state)
+            session.set_compaction_cache(compaction_cache)
+            try:
+                session._send_prep_cache = {
+                    "key": prep_key,
+                    "history": history_for_api,
+                    "state": compaction_state,
+                    "cache": compaction_cache,
+                }
+            except Exception:
+                pass  # 缓存写回失败不影响发送（session 可能为只读桩）
 
         # 过滤旧 system 消息（保留 _hook_event 标记的系统消息，它们是由 hook 注入的动态上下文；
         # 同时保留 _compaction_summary 标记的压缩摘要，它是合法上下文，不应被当作"旧 system 消息"丢弃，

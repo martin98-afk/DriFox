@@ -8,12 +8,19 @@ Python 层异常有 sys.excepthook / sys.unraisablehook 兜底（main.py），
 dump 并以 InfoBar 横幅告知报告位置，解决「闪退后无从排查」的问题。
 
 判定规则：
-- dump 文件非空且无 clean-exit 标记 → 发生过原生崩溃，InfoBar 报告
-- 含 clean-exit 标记 → 正常退出，静默清理
-- 空文件（taskkill 强杀/断电，faulthandler 未触发）→ 静默清理，不误报
+- dump 文件含「Windows fatal exception」（faulthandler）或「[DRIFOX VEH」（VEH
+  捕获器）现场标记 → 发生过原生崩溃，InfoBar 报告
+- 未命中标记的文件一律保留（证据保全，不误删）——空文件也可能来自取证链
+  尚未覆盖的崩溃形态
 
 已提示确认的报告重命名为 *.log.reported（保留取证，不再提示）。
+
+噪声分流：faulthandler 在 Windows 上注册的 VEH 无差别记录所有 SEH 异常，
+其中 COM/RPC 与调试器类异常会被上层处理器消化、进程照常存活，混进崩溃
+文件会造成「上次异常退出」假警报。本模块用一层自建 VEH 按异常码把这些
+现场改道到 anomaly_*.log（不参与崩溃判定），详见 _install_seh_classifier。
 """
+
 import atexit
 import os
 import sys
@@ -23,6 +30,14 @@ from typing import Optional
 
 _CLEAN_EXIT_MARK = "=== clean exit ==="
 
+# faulthandler 落盘现场的固定开头，用作「发生过 SEH 异常」的唯一可箱证据
+EXCEPTION_MARK = "Windows fatal exception"
+
+# VEH 捕获器（app/utils/veh_minidump.py）落盘现场的开头标记。与 faulthandler
+# 产物同为 crash_*.log 命名模式，但不含 EXCEPTION_MARK；缺此判定时 VEH 记录的
+# 真崩溃（0xC0000409 等 faulthandler 拿不到的异常）会被误当空文件删除。
+VEH_MARK = "[DRIFOX VEH"
+
 # WER 报告根目录（ReportQueue/ReportArchive 存 AppCrash_<exe> 崩溃报告），
 # 模块常量便于测试 monkeypatch 重定向
 _WER_REPORT_BASE = Path(r"C:\ProgramData\Microsoft\Windows\WER")
@@ -31,11 +46,39 @@ _WER_REPORT_BASE = Path(r"C:\ProgramData\Microsoft\Windows\WER")
 # 句柄被 GC 关闭后崩溃时将无法写入
 _crash_file = None
 
-# 取证产物目录（qt 消息日志 / minidump），模块级供回调链使用
+# 非致命异常（噪声）现场落盘的文件句柄，与 _crash_file 同生命周期
+_noise_file = None
+
+# 取证产物目录（qt 消息日志），模块级供回调链使用
 _forensic_dir: Optional[Path] = None
 
-# SetUnhandledExceptionFilter 回调必须模块级持有，防 GC 后野指针
-_minidump_filter = None
+# VEH 回调必须模块级持有，防 GC 后野指针
+_veh_handler_ref = None
+
+# 安装幂等守卫（T32）：install_crash_handler 可能被多次调用（测试里 reset 单例
+# 后重装、deferred_startup 重入等）。重复安装会重新注册 VEH 回调并让上一份
+# cb（WINFUNCTYPE thunk）失去引用 → GC 释放 thunk 内存，而 VEH 链里仍留着
+# 它的地址 → 异常发生时跳到已释放内存 → 0xC0000409 fastfail（core 整跑必崩
+# 的根因）。置 True 后二次调用直接返回，不再重复注册。
+_crash_handler_installed = False
+
+# 噪声异常码：均为「上层处理器能消化、进程不会因此终止」的 SEH 码。
+# 采黑名单 + 默认可疑策略：未列入的一律当崩溃写 crash 文件，宁可噪声
+# 漏进崩溃文件，也不能丢掉真实崩溃现场。
+_NOISE_EXCEPTION_CODES = frozenset(
+    {
+        0x8001010D,  # RPC_E_CANTCALLOUT_ININPUTSYNCCALL 输入同步期发起 COM 外呼
+        0x80010001,  # RPC_E_SERVERCALL_RETRYLATER       被调用方忙，重试即可
+        0x8001010A,  # RPC_E_CALL_REJECTED               调用被拒，重试即可
+        0x80000003,  # EXCEPTION_BREAKPOINT              调试断点 / Chromium DCHECK
+        0x40010006,  # OUTPUT_DEBUG_STRING               调试器调试输出
+        0x406D1388,  # MSVC 线程命名约定，仅用于通知调试器
+        0xE0434352,  # CLR 托管异常（.NET 互操作层）
+    }
+)
+
+# anomaly_*.log 保留份数
+_ANOMALY_KEEP = 20
 
 
 def install_crash_handler(logs_dir: Path) -> Optional[Path]:
@@ -43,41 +86,64 @@ def install_crash_handler(logs_dir: Path) -> Optional[Path]:
 
     返回 dump 文件路径；启用失败返回 None（绝不阻塞启动）。
     在 _deferred_startup 中调用（日志目录就绪后）。
+
+    幂等：重复调用直接返回 None（T32）。重复安装会重复注册 VEH 回调并让
+    上一份回调 thunk 被 GC 释放，而 VEH 链仍持有其地址 → 悬空指针 →
+    异常发生时 0xC0000409 fastfail（core 整跑必崩的根因）。
     """
-    global _crash_file
+    global _crash_file, _noise_file, _crash_handler_installed
+    if _crash_handler_installed:
+        return None
     try:
         import faulthandler
 
-        crash_dir = Path(logs_dir) / "crash"
+        crash_dir = Path(logs_dir).resolve() / "crash"
         crash_dir.mkdir(parents=True, exist_ok=True)
-        dump_path = crash_dir / f"crash_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
+        # 路径对齐（T24）：veh_minidump 的 dmp 走 _crash_dir()，打包版 cwd 是
+        # 安装目录（D:\...\Drifox）而 logs_dir 在 ~/.drifox/logs，两者不同源
+        # → VEH 的 .dmp 与 faulthandler 的 .log 分居两处，现场取证断裂
+        # （2026-09-16 实测复现）。此处写入环境变量强制统一，veh_minidump
+        # 读取优先级 DRIFOX_CRASH_DIR > cwd 推导，故安装后永远与 crash_dir 一致。
+        os.environ["DRIFOX_CRASH_DIR"] = str(crash_dir)
+        stamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+        dump_path = crash_dir / f"crash_{stamp}.log"
         _crash_file = open(dump_path, "w", encoding="utf-8")
         faulthandler.enable(file=_crash_file)
+        _noise_file = open(crash_dir / f"anomaly_{stamp}.log", "w", encoding="utf-8")
+        # 顺序敏感：分流 VEH 必须在 enable() 之后注册才能排到 faulthandler 之前
+        _install_seh_classifier()
+        _prune_anomaly_logs(crash_dir)
         atexit.register(_mark_clean_exit)
         _setup_wer_localdumps(crash_dir)
         # 取证增强：0xC0000409（qFatal/fastfail）不触发 faulthandler，
         # 0xC0000005 在 Windows 上走 SEH/WER 也不触发。两类崩溃此前只留下
-        # 空文件无法定位。补两条独立取证链：
-        #   1) qInstallMessageHandler → qt_messages.log（qFatal 文本，abort 前必经）
-        #   2) SetUnhandledExceptionFilter + MiniDumpWriteDump → dumps/*.dmp（C 栈）
+        # 空文件无法定位 → qInstallMessageHandler 落 qFatal 文本（abort 前必经）。
+        # 原 SetUnhandledExceptionFilter + MiniDumpWriteDump 链已删除：回调是
+        # Python 函数，在异常上下文里跑字节码只产出 0 字节的 dmp，还会把
+        # first-chance 异常升级成真崩溃（WER 签名 python314.dll / c000041d）。
         _install_qt_message_logger(crash_dir)
-        _install_minidump_filter(crash_dir / "dumps")
+        # 全部子步骤成功后置位（失败分支在下面回滚，允许重试）
+        _crash_handler_installed = True
         return dump_path
     except Exception:
+        _crash_handler_installed = False
         return None
 
 
 def _install_qt_message_logger(crash_dir: Path) -> None:
-    """安装 Qt 消息钩子：warning 及以上写入 crash_dir/qt_messages.log。
+    """安装 Qt 消息钩子：warning 及以上按日期写入 qt_messages_YYYYMMDD.log。
 
     qFatal（触发 0xC0000409 fastfail，如跨线程 QPixmap / 跨线程事件）的
     致命文本在 abort 前必经本钩子，落盘后即可按文本定位崩溃源头。
+    按日期分文件：单文件无轮转会无限膨胀，跨天自动切新文件，旧文件留档。
     """
     global _forensic_dir
     try:
         from PyQt5.QtCore import qInstallMessageHandler, QtMsgType
 
-        log_path = crash_dir / "qt_messages.log"
+        def _qt_log_path() -> Path:
+            return crash_dir / f"qt_messages_{time.strftime('%Y%m%d')}.log"
+
         _forensic_dir = crash_dir
 
         def _qt_handler(mode, context, message):
@@ -90,7 +156,7 @@ def _install_qt_message_logger(crash_dir: Path) -> None:
                     QtMsgType.QtFatalMsg: "FATAL",
                 }.get(mode, "?")
                 line = f"{time.strftime('%H:%M:%S')} [{label}] {message}\n"
-                with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                with open(_qt_log_path(), "a", encoding="utf-8", errors="replace") as f:
                     f.write(line)
                     if mode in (QtMsgType.QtFatalMsg, QtMsgType.QtCriticalMsg):
                         f.flush()
@@ -103,73 +169,90 @@ def _install_qt_message_logger(crash_dir: Path) -> None:
         pass
 
 
-def _install_minidump_filter(dumps_dir: Path) -> None:
-    """注册 SEH 未处理异常过滤器：原生崩溃时用 MiniDumpWriteDump 写 .dmp。
+def _is_noise_exception(code: int) -> bool:
+    """异常码是否属于非致命噪声（上层处理器会消化，进程不会终止）。"""
+    return code in _NOISE_EXCEPTION_CODES
 
-    与 WER LocalDumps（需 HKLM 管理员）不同，本函数在进程内注册，
-    无需任何权限。回调内只做 C 层调用（不跑复杂 Python），失败静默。
+
+def _install_seh_classifier() -> bool:
+    """注册分流 VEH：非致命 SEH 异常的现场从 crash 文件改道到 anomaly 文件。
+
+    手法（均已在 Python 3.14 实测，见 tests/debug/crash_filter_probe.py）：
+    1. 在 faulthandler.enable() 之后以 first=1 注册，插到 VEH 链头，先于
+       faulthandler 自己的 handler 被调用；
+    2. 回调内按异常码再次调用 faulthandler.enable(file=...) 切换落点——
+       二次 enable 幂等，只改输出目标，不会重复注册 handler；
+    3. 返回 EXCEPTION_CONTINUE_SEARCH，不改写异常传播语义。
+
+    回调刻意做到最轻：一次指针解引用 + 一次集合查找 + 一次 C 函数调用，
+    不做 strftime / Path 拼接 / 文件 IO，降低在异常上下文里二次崩溃的风险。
+    返回是否注册成功。
+
+    幂等（T32）：已注册过则直接返回 True。重复注册会用新 thunk 覆盖
+    ``_veh_handler_ref``，旧 thunk 随即被 GC 释放，而系统 VEH 链仍持有其
+    地址 → 悬空指针（core 整跑必崩根因）。回调内部改读模块级
+    ``_crash_file`` / ``_noise_file``，落点随下次 install 自动更新，
+    无需重注册。
     """
-    global _minidump_filter
-    if sys.platform != "win32":
-        return
+    global _veh_handler_ref
+    if _veh_handler_ref is not None:
+        return True
+    if sys.platform != "win32" or _crash_file is None or _noise_file is None:
+        return False
     try:
         import ctypes
+        import faulthandler
         from ctypes import wintypes
 
-        dumps_dir.mkdir(parents=True, exist_ok=True)
-        dbghelp = ctypes.WinDLL("dbghelp")
-        kernel32 = ctypes.WinDLL("kernel32")
-        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
-        kernel32.CreateFileW.restype = wintypes.HANDLE
-        kernel32.SetUnhandledExceptionFilter.restype = ctypes.c_void_p
-        kernel32.SetUnhandledExceptionFilter.argtypes = [ctypes.c_void_p]
-        dbghelp.MiniDumpWriteDump.restype = wintypes.BOOL
-        dbghelp.MiniDumpWriteDump.argtypes = [
-            wintypes.HANDLE,   # hProcess
-            wintypes.DWORD,    # ProcessId
-            wintypes.HANDLE,   # hFile
-            ctypes.c_int,      # DumpType
-            ctypes.c_void_p,   # ExceptionParam (LPEXCEPTION_POINTERS)
-            ctypes.c_void_p,   # UserStreamParam
-            ctypes.c_void_p,   # CallbackParam
-        ]
+        EXCEPTION_CONTINUE_SEARCH = 0
 
-        GENERIC_WRITE = 0x40000000
-        CREATE_ALWAYS = 2
-        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-        EXCEPTION_EXECUTE_HANDLER = 1
+        class _EXCEPTION_RECORD(ctypes.Structure):  # noqa: SLF001
+            _fields_ = [
+                ("ExceptionCode", wintypes.DWORD),
+                ("ExceptionFlags", wintypes.DWORD),
+                ("ExceptionRecord", ctypes.c_void_p),
+                ("ExceptionAddress", ctypes.c_void_p),
+                ("NumberParameters", wintypes.DWORD),
+                ("ExceptionInformation", ctypes.c_size_t * 15),
+            ]
 
-        @ctypes.WINFUNCTYPE(wintypes.LONG, ctypes.c_void_p)
-        def _filter(exception_pointers):
+        class _EXCEPTION_POINTERS(ctypes.Structure):  # noqa: SLF001
+            _fields_ = [
+                ("ExceptionRecord", ctypes.POINTER(_EXCEPTION_RECORD)),
+                ("ContextRecord", ctypes.c_void_p),
+            ]
+
+        eps_ptr_type = ctypes.POINTER(_EXCEPTION_POINTERS)
+
+        def _classify(exception_pointers: int) -> int:
+            # 落点动态读模块全局（T32）：reset_for_test 后重新 install 会换新
+            # 文件句柄，而无重注册的旧回调必须跟随新落点。句柄为空时跳过
+            # （交 faulthandler 原落点），不传 None 给 enable 以免误关 faulthandler。
             try:
-                path = dumps_dir / f"mini_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.dmp"
-                h_file = kernel32.CreateFileW(
-                    str(path), GENERIC_WRITE, 0, None, CREATE_ALWAYS, 0, None
-                )
-                if (
-                    h_file is not None
-                    and h_file != INVALID_HANDLE_VALUE
-                    and h_file != 0xFFFFFFFFFFFFFFFF
-                ):
-                    try:
-                        dbghelp.MiniDumpWriteDump(
-                            kernel32.GetCurrentProcess(),
-                            kernel32.GetCurrentProcessId(),
-                            h_file,
-                            0,  # MiniDumpNormal
-                            exception_pointers,
-                            None,
-                            None,
-                        )
-                    finally:
-                        kernel32.CloseHandle(h_file)
-            except Exception:  # noqa: BLE001
+                record = ctypes.cast(exception_pointers, eps_ptr_type).contents.ExceptionRecord
+                target = _noise_file if _is_noise_exception(record.contents.ExceptionCode) else _crash_file
+                if target is not None:
+                    faulthandler.enable(file=target)
+            except BaseException:  # noqa: BLE001
                 pass
-            return EXCEPTION_EXECUTE_HANDLER
+            return EXCEPTION_CONTINUE_SEARCH
 
-        _minidump_filter = _filter  # 防 GC
-        kernel32.SetUnhandledExceptionFilter(_minidump_filter)
+        cb = ctypes.WINFUNCTYPE(wintypes.LONG, ctypes.c_void_p)(_classify)
+        _veh_handler_ref = cb  # 防 GC
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.AddVectoredExceptionHandler.restype = ctypes.c_void_p
+        kernel32.AddVectoredExceptionHandler.argtypes = [wintypes.DWORD, ctypes.c_void_p]
+        return bool(kernel32.AddVectoredExceptionHandler(1, ctypes.cast(cb, ctypes.c_void_p)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _prune_anomaly_logs(crash_dir: Path) -> None:
+    """噪声日志按数量截断，只留最近 _ANOMALY_KEEP 份。"""
+    try:
+        files = sorted(crash_dir.glob("anomaly_*.log"), key=lambda p: p.stat().st_mtime)
+        for stale in files[:-_ANOMALY_KEEP]:
+            _silent_remove(stale)
     except Exception:  # noqa: BLE001
         pass
 
@@ -197,29 +280,59 @@ def _setup_wer_localdumps(crash_dir: Path) -> Optional[Path]:
         key_path = rf"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\{app_exe}"
         with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
             winreg.SetValueEx(key, "DumpFolder", 0, winreg.REG_EXPAND_SZ, str(dumps_dir))
-            winreg.SetValueEx(key, "DumpType", 0, winreg.REG_DWORD, 1)  # 1=minidump
-            winreg.SetValueEx(key, "DumpCount", 0, winreg.REG_DWORD, 5)
+            winreg.SetValueEx(
+                key, "DumpType", 0, winreg.REG_DWORD, 2
+            )  # 2=完整 dump（含线程栈/寄存器上下文/全模块；1=minidump 实测仅模块表无法定位）
+            winreg.SetValueEx(key, "DumpCount", 0, winreg.REG_DWORD, 50)
         return dumps_dir
     except Exception:
         return None
 
 
 def _mark_clean_exit() -> None:
-    """正常退出时打标记，检测逻辑据此区分「崩过」与「正常关闭」。"""
+    """正常退出时打标记（记录性参考，已不再是崩溃判据）。
+
+    真正区分「崩过」与「正常关闭」的是 crash 文件里有没异常段，
+    见 check_pending_crashes 的理由说明。
+    """
     try:
         if _crash_file is not None and not _crash_file.closed:
             _crash_file.write(_CLEAN_EXIT_MARK + "\n")
             _crash_file.close()
     except Exception:
         pass
+    _discard_empty_anomaly_log()
+
+
+def _discard_empty_anomaly_log() -> None:
+    """噪声日志一无所获就删掉，避免每次启动堆一个空文件。"""
+    global _noise_file
+    try:
+        if _noise_file is None:
+            return
+        path = Path(_noise_file.name)
+        if not _noise_file.closed:
+            _noise_file.close()
+        if path.stat().st_size == 0:
+            _silent_remove(path)
+    except Exception:  # noqa: BLE001
+        pass
+    _noise_file = None
 
 
 def check_pending_crashes(logs_dir: Path) -> list:
     """扫描 crash 目录，返回全部待报告的崩溃 dump（按崩溃时间从旧到新）。
 
     每份 dump 由 prompt_crash_report InfoBar 提示一次后重命名 .reported（改状态），
-    因此这里只收集尚未报告的；已确认非崩溃的文件（空文件/含 clean-exit
-    标记）就地清理。
+    因此这里只收集尚未报告的；未命中崩溃标记的文件一律保留不删（证据保全，
+    空文件也可能是取证链未覆盖的崩溃形态，宁可留白不误删）。
+
+    为何以「含异常段」而非「无 clean-exit 标记」为据：CPython 会把部分 SEH 异常
+    （含原生 access violation）转成 Python 异常抛出，解释器随后走正常 shutdown，
+    atexit 照样补得上 clean-exit 标记——只看标记会把真崩溃洗成「正常退出」。
+
+    只扫 crash_*.log：非致命 SEH 异常已由 _install_seh_classifier 改道到
+    anomaly_*.log，天然不参与崩溃判定。
     """
     try:
         crash_dir = Path(logs_dir) / "crash"
@@ -231,10 +344,9 @@ def check_pending_crashes(logs_dir: Path) -> list:
                 content = f.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            if content.strip() and _CLEAN_EXIT_MARK not in content:
+            if EXCEPTION_MARK in content or VEH_MARK in content:
                 pending.append(f)
-            else:
-                _silent_remove(f)
+            # 证据保全（T16 P0）：不再删除未命中标记的文件，杜绝误删真崩溃现场
         pending.sort(key=lambda p: p.stat().st_mtime)
         return pending
     except Exception:
@@ -321,19 +433,19 @@ def prompt_crash_report(dump_path: Path, parent=None) -> None:
             icon=InfoBarIcon.WARNING,
             title="检测到上次异常退出",
             content=content,
-            orient=Qt.Vertical,
+            orient=Qt.Orientation.Vertical,
             isClosable=True,
             position=InfoBarPosition.BOTTOM,
             duration=-1,
             parent=parent,
         )
         open_btn = PushButton("打开报告目录")
-        open_btn.clicked.connect(
-            lambda: (
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent))),
-                bar.close(),
-            )
-        )
+
+        def _open_report_dir() -> None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent)))
+            bar.close()
+
+        open_btn.clicked.connect(_open_report_dir)
         bar.addWidget(open_btn)
         bar.show()
         # 报告已告知 → 重命名标记已读：文件保留供排查（崩溃证据不可再生），
@@ -351,3 +463,25 @@ def _silent_remove(path: Path) -> None:
         path.unlink()
     except Exception:
         pass
+
+
+def reset_crash_handler_for_test() -> None:
+    """测试隔离：关闭本模块持有的文件句柄并允许重新安装（T32）。
+
+    供单测在用例间复位状态。**刻意不调用 RemoveVectoredExceptionHandler**：
+    移除 VEH 会释放回调 thunk 的引用，而操作系统 VEH 链里若仍残留其地址
+    （移除失败的窗口期）就会造出新的悬空指针 —— 比留着旧回调更危险。
+    旧回调继续存在也无害：它只调用 faulthandler.enable(file=...)，而 faulthandler
+    的落点会随新 _crash_file 一起更新（安装时重设），异常分流语义保持正确。
+    """
+    global _crash_file, _noise_file, _crash_handler_installed, _forensic_dir
+    for handle in (_crash_file, _noise_file):
+        try:
+            if handle is not None and not handle.closed:
+                handle.close()
+        except Exception:
+            pass
+    _crash_file = None
+    _noise_file = None
+    _forensic_dir = None
+    _crash_handler_installed = False

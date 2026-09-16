@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import threading
+import time as time_module
 from typing import Any, Dict, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from app.core.backend import _extract_markdown_images, _gw_str_platform
 
@@ -58,6 +60,9 @@ class GatewayService(QObject):
         self._agent_manager = None
         self._initialized = False
         self._last_selfheal_ts = 0.0
+        # [PERF T34] 后台预热线程与主线程消息路径的 _ensure_components 竞争保护。
+        # 不用 RLock：构造段在锁内是纯 CPU/import，无需重入。
+        self._components_lock = threading.Lock()
 
         self.gateway_input_received.connect(self._on_gateway_input)
         # 创建/停止均由 TabManagerWindow（应用生命周期容器）驱动：
@@ -91,9 +96,22 @@ class GatewayService(QObject):
         return {}
 
     def _ensure_components(self) -> bool:
-        """确保 gateway 专属 tool_executor / agent_manager 就绪（幂等）"""
+        """确保 gateway 专属 tool_executor / agent_manager 就绪（幂等，双检锁）
+
+        [PERF T34] 后台预热线程（_prebuild_components_background）与主线程消息
+        路径（_on_gateway_input → _ensure_engine）会并发进入本方法。锁内双检
+        保证仅构造一次；已就绪时仍走无锁快路径（首行判断）不付锁代价。
+        """
         if self._tool_executor is not None and self._agent_manager is not None:
             return True
+        with self._components_lock:
+            # 二次检查：可能在等锁期间已被另一线程构造完成
+            if self._tool_executor is not None and self._agent_manager is not None:
+                return True
+            return self._build_components_locked()
+
+    def _build_components_locked(self) -> bool:
+        """实际构造段（调用方必须已持 self._components_lock）"""
         try:
             from app.core.tool_executor import ToolExecutor
 
@@ -109,8 +127,10 @@ class GatewayService(QObject):
             if self._agent_manager is None:
                 from app.core.agent import AgentManager
 
+                # [PERF T34] 不再覆盖 _agent_manager._builtin_tools（T19 实证：
+                # GatewayEngine 全链显式传表 engine.py:768/773，覆盖全局指针只造成
+                # 窗口 fallback 污染与关闭泄漏，无功能依赖）。
                 self._agent_manager = AgentManager.get_instance(None, None)
-                self._agent_manager._builtin_tools = self._tool_executor._builtin_tools
             return True
         except Exception as e:
             logger.error(f"[GatewayService] 组件创建失败: {e}", exc_info=True)
@@ -174,13 +194,84 @@ class GatewayService(QObject):
             # 高峰窗口（UI 插件装载/后端延迟创建并发期），实测 _ensure_engine 占
             # 主线程 ~370ms（含 ToolExecutor 重复初始化日志）。延后 4s 错峰执行，
             # 首条平台消息早到仍由自愈守卫兜底。
+            # [PERF T34] 4s 检查点不再直接建引擎，改走 _maybe_prebuild_engine：
+            # 无启用平台时彻底跳过（不用网关的用户省下 20-50MB 常驻 + 4s 尖峰），
+            # 有启用平台时把重活（import 链 + ToolExecutor）挪到 daemon 线程，
+            # 主线程只留 QObject 构造段。
             from PyQt5.QtCore import QTimer
 
-            QTimer.singleShot(4000, self._ensure_engine)
+            QTimer.singleShot(4000, self._maybe_prebuild_engine)
 
             self._manager.start_all_async()
         except Exception as e:
             logger.exception(f"[GatewayService] 启动失败: {e}", exc_info=True)
+
+    # ==================== 按需预热（T34） ====================
+
+    def _has_enabled_platform(self) -> bool:
+        """是否存在「已注册 + 配置启用」的 gateway 平台（实时遍历，零缓存）。
+
+        registry 异常（插件组件未就绪/加载失败）时返回 False —— 保守跳过预热，
+        待首条平台消息经 _on_gateway_input 自愈路径建引擎（该路径不依赖本判断）。
+
+        不缓存的原因：平台启用状态可由用户随时在设置卡切换，缓存会让
+        「刚启用平台但引擎未建」的窗口期延长到下次判断；本方法只在 4s
+        检查点调用一次，遍历成本可忽略。
+        """
+        try:
+            from app.gateway.config import GatewayConfigHelper
+            from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
+
+            for d in GatewayPlatformRegistry.get_instance().list_platforms():
+                if GatewayConfigHelper.is_platform_enabled(d.platform_id):
+                    return True
+            return False
+        except Exception as e:
+            logger.debug(f"[GatewayService] 平台启用状态检查失败（视为无启用平台）: {e}")
+            return False
+
+    def _maybe_prebuild_engine(self) -> None:
+        """4s 检查点入口（主线程）：按需决定是否预热引擎。
+
+        - 引擎已活 → 直接返回（幂等，可能是消息自愈路径先建好了）
+        - 无启用平台 → 跳过（T34 目标：不用网关的用户零成本）
+        - 有启用平台 → 转后台线程做重活
+        """
+        if self._engine is not None and getattr(self._engine, "is_active", True):
+            return
+        if not self._has_enabled_platform():
+            logger.info("[GatewayService] 无启用平台，跳过引擎预热")
+            return
+        self._prebuild_components_background()
+
+    def _prebuild_components_background(self) -> None:
+        """后台线程预热组件（import 链 + ToolExecutor），完成后回主线程建引擎。
+
+        T19 定案：把 ~370ms 主线程串行段（GatewayEngine import 链含 mcp SDK、
+        ToolExecutor 构造 ~1.4s 级）移出主线程；QObject 构造段（GatewayEngine
+        get_instance）必须回主线程执行，故用 QTimer.singleShot(0) 投递。
+        """
+        t0 = time_module.perf_counter()
+
+        def _work():
+            ok = False
+            try:
+                # GatewayEngine import 链预热（模块级 import 含 mcp SDK，冷启动最重）
+                import app.core.engines.gateway  # noqa: F401
+
+                # 组件构造（含 ToolExecutor）在后台线程完成；_ensure_components
+                # 内部双检锁保证与主线程消息路径竞争安全
+                ok = self._ensure_components()
+                elapsed = (time_module.perf_counter() - t0) * 1000
+                logger.info(f"[GatewayService] 后台组件预热 ok={ok} {elapsed:.0f}ms")
+                if ok:
+                    # 回主线程做 QObject 构造（GatewayEngine 是 QObject 单例）；
+                    # QTimer.singleShot 可从任意线程投递到对象所属线程的事件循环
+                    QTimer.singleShot(0, self._ensure_engine)
+            except Exception as e:
+                logger.error(f"[GatewayService] 后台组件预热失败: {e}", exc_info=True)
+
+        threading.Thread(target=_work, name="gw-prebuild", daemon=True).start()
 
     def sync_platforms(self) -> None:
         """按 registry 当前注册 + 配置启用状态，补启未连接的启用平台（幂等，主线程调用）。

@@ -20,6 +20,7 @@
     - 任何 QThread 先于底层 OS 线程被销毁的路径
 """
 
+import atexit
 import logging as _logging
 import threading as _threading
 import time as _time
@@ -57,19 +58,45 @@ def install_guard() -> None:
     此函数可多次调用，幂等。
     """
     # 检查是否已安装
-    if getattr(QThread, "__init__", None) is getattr(
-        install_guard, "_patched", None
-    ):
+    if getattr(QThread, "__init__", None) is getattr(install_guard, "_patched", None):
         return
 
     original_init = QThread.__init__
 
     def _safe_init(self, parent=None):
+        # ── 0. M7 主线程守卫：非主线程创建 QThread 仅告警 ──
+        # QThread 对象理想上应归属主线程（与 QApplication 同线程）；在 worker
+        # 线程里 new QThread 会让对象 affinity 落在创建线程上，是退出期销毁
+        # 顺序错乱的隐患（"QThread: Destroyed while running" qFatal）。
+        #
+        # ★ 判定必须用 Python 层 threading，绝不能调 QThread.currentThread()：
+        #   本函数就是 QThread.__init__，而 sip 为「非 Qt 管理的线程」（adopted
+        #   thread，典型 ThreadPoolExecutor 的 tool_parallel_*）生成 QThread 包装
+        #   对象时会走 __init__ —— 每调一次 currentThread() 就再进一次 _safe_init，
+        #   无限递归把 C 栈打满，报 "Stack overflow (used 1954 kB)"。
+        #   （2026-09-16 子智能体 subagent_para 派发必崩即此路径）
+        #
+        # ★ 只告警不抛错：工具线程池里创建 QThread 是当前架构的既定路径
+        #   （SubAgentExecutor 正是在 tool_parallel_* 中构造），硬抛会直接废掉
+        #   整个子智能体通路。退出期 qFatal 的实际防护由下面的 parent 重定向 +
+        #   全局强引用承担，不依赖本判定。
+        if _threading.current_thread() is not _threading.main_thread():
+            _watchdog_logger.warning(
+                "[ThreadGuard] 非主线程创建 QThread: %s (native_id=%s)，"
+                "对象 affinity 归属该线程，退出期存在销毁顺序风险",
+                _threading.current_thread().name,
+                _threading.get_ident(),
+            )
         # ★ 看门狗起点：记录创建时间戳，用于卡死检测
         self._guard_start_ts = _time.monotonic()
         # ── 1. 重设 parent → 全局隐藏锚点 ──
         # 不管调用方传了什么 parent（哪怕是 widget），
         # 都改为 _thread_anchor，防止 widget 销毁时连带销毁运行中的 QThread
+        global _thread_anchor
+        if not _cpp_alive(_thread_anchor):
+            # 自愈：锚点 C++ 对象被外部环境（如测试组合污染）删除时就地重建。
+            # QThread 构造不可失败——炸掉调用方只会把故障扩散到业务路径。
+            _thread_anchor = QObject()
         original_init(self, _thread_anchor)
 
         # ── 2. 全局强引用跟踪 ──
@@ -83,13 +110,22 @@ def install_guard() -> None:
     # 标记已安装
     install_guard._patched = _safe_init  # type: ignore[attr-defined]
 
+    # ── 退出期清理注册（幂等，模块级标志防重复注册）──
+    global _atexit_registered
+    if not _atexit_registered:
+        atexit.register(_cleanup_threads_at_exit)
+        _atexit_registered = True
+
 
 # ── 看门狗：定期扫描 _running_threads，检测卡死线程 ──
-_STUCK_TIMEOUT_S = 60        # 卡死阈值（秒）：线程创建后超过此时间未结束视为可疑
-_WATCHDOG_INTERVAL_S = 30    # 扫描间隔（秒）
+_STUCK_TIMEOUT_S = 60  # 卡死阈值（秒）：线程创建后超过此时间未结束视为可疑
+_WATCHDOG_INTERVAL_S = 30  # 扫描间隔（秒）
+_atexit_wait_ms = 500  # 退出期单个线程 wait 上限（毫秒）
+_atexit_budget_s = 1.0  # 退出期清理总时长预算（秒），超时仅告警不硬中断
 _watchdog_lock = _threading.Lock()
 _watchdog_thread = None
 _watchdog_logger = _logging.getLogger("thread_guard.watchdog")
+_atexit_registered = False
 
 
 def _cpp_alive(obj: QObject) -> bool:
@@ -173,3 +209,43 @@ def start_watchdog() -> None:
             name="ThreadGuardWatchdog",
         )
         _watchdog_thread.start()
+
+
+def _cleanup_threads_at_exit() -> None:
+    """解释器退出期收敛所有存活 QThread（T15 主根因修复）。
+
+    背景：退出时若 QThread 仍在运行，Qt 打印 "QThread: Destroyed while
+    thread is still running" 并 qFatal（0xC0000409 闪退）。固定收尾顺序：
+    requestInterruption()（配合业务层 M6 中断检查点）→ quit()（退出
+    run() 内的事件循环）→ wait(500)（限时等线程自然结束）。
+
+    纪律：
+    - 绝不调 deleteLater / setParent(None)：退出期主线程事件循环已停，
+      跨线程的延迟删除/重父化本身是另一条 qFatal 链；线程对象交由
+      进程终局回收。
+    - 绝不调 terminate()：强制终止不释放线程持有的锁与资源。
+    - 每线程 try/except 兜底：C++ 侧已析构等 RuntimeError 不允许打断
+      其余线程的收尾（atexit 链上抛错会吞掉后续清理步骤）。
+    """
+    start = _time.monotonic()
+    with _watchdog_lock:
+        snapshot = list(_running_threads)
+    for thread in snapshot:
+        try:
+            if not isinstance(thread, QThread) or not _cpp_alive(thread):
+                continue  # Python 包装器活着但 C++ 已析构 / 已非 QThread
+            if not thread.isRunning():
+                continue
+            thread.requestInterruption()
+            thread.quit()
+            thread.wait(_atexit_wait_ms)
+        except Exception:  # noqa: BLE001
+            continue
+    elapsed = _time.monotonic() - start
+    if elapsed > _atexit_budget_s:
+        _watchdog_logger.warning(
+            "[ThreadGuard] atexit 清理耗时 %.0fms，超过 %.0fs 预算（%d 个存活线程）",
+            elapsed * 1000,
+            _atexit_budget_s,
+            len(snapshot),
+        )

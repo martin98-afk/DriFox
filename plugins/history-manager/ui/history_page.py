@@ -906,9 +906,12 @@ class HistoryPage(QWidget):
         win = _active_window()
         current = getattr(win, "_current_project", None) if win is not None else None
         if target and target not in (_PROJECT_ALL, _PROJECT_CURRENT) and target != current:
+            # 宿主 _on_project_selected 内含 close_history=True，切完自动收页签
             self._call_window("_on_project_selected", target)
             return
         self._call_window("_create_new_session")
+        # 🆕 新建会话 = 真切换：本页签让位（与宿主 close_history 语义一致）
+        self._call_window("_close_history_panel")
 
     def _on_new_project_submitted(self) -> None:
         """工具条输入框回车 / + 按钮：交窗口统一处理（命中已有项目则切换）"""

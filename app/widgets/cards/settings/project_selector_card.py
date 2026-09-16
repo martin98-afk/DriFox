@@ -587,6 +587,20 @@ class ProjectSelectorCardContent(QWidget):
                         return
         event.ignore()
 
+    def closeEvent(self, event):
+        """关闭时逐层摘除拖放 OLE 注册（本卡三处均开了 acceptDrops）。
+
+        拖放热区跨 self / 内容容器 / 滚动区三层，析构后 OLE 若仍持有任一
+        drop target 会在 COM 回调里触达已释放对象 → failfast。逐层关闭并
+        容错，任一层失败不阻塞关闭。
+        """
+        for widget in (self, self._content_widget, self._scroll_area):
+            try:
+                widget.setAcceptDrops(False)
+            except (RuntimeError, AttributeError):
+                pass
+        super().closeEvent(event)
+
     # ── 拖拽视觉反馈 ──
     def refresh_style(self):
         """刷新主题样式（含滚动条颜色）"""

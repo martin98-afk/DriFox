@@ -35,8 +35,22 @@ from app.widgets.cards.card_container import BottomCardContainer, CardContainer
 from app.widgets.cards.card_manager import CardManager, ContainerType
 
 
+_APP_HOLDER: list = []
+
+
 def _app():
-    return QApplication.instance() or QApplication(sys.argv)
+    """确保 QApplication 存活并**持有强引用**。
+
+    ⚠️ 引用必须被模块级容器持有：pytest 环境下若只写
+    ``QApplication.instance() or QApplication(sys.argv)`` 而丢弃返回值，
+    Qt 的 C++ 对象会随 Python 包装对象被 GC 回收，下一次 QWidget 构造即
+    qFatal（0xC0000409 fastfail，无 Python 现场）—— 本文件历史上的
+    "试金石崩" 根因（独立脚本因引用链幸存不崩，pytest 下必崩）。
+    """
+    app = QApplication.instance() or QApplication(sys.argv)
+    if not _APP_HOLDER:
+        _APP_HOLDER.append(app)
+    return app
 
 
 def _pump(ms: int):
@@ -60,6 +74,10 @@ class _MiniDockHost(QWidget):
     """横向停靠宿主：LEFT 容器 + 内容区放 QSplitter（对齐 TabManagerWindow 结构）"""
 
     def __init__(self):
+        # QApplication 是 QWidget 构造的前提：本文件不请求 qapp fixture，
+        # 无 QApplication 时下面的 super().__init__() 直接 qFatal（0xC0000409
+        # fastfail，无 Python 现场）。必须在 super().__init__() 之前确保实例存在。
+        _app()
         super().__init__()
         CardManager.reset_instance()
         self._card_manager = CardManager.get_instance()
@@ -97,6 +115,8 @@ class _MiniBottomHost(QWidget):
     """纵向停靠宿主：vdock splitter = 内容区 + BOTTOM 容器"""
 
     def __init__(self):
+        # 同上：QApplication 必须在 super().__init__() 之前就绪。
+        _app()
         super().__init__()
         CardManager.reset_instance()
         self._card_manager = CardManager.get_instance()
@@ -132,6 +152,13 @@ class _MiniBottomHost(QWidget):
 
 def _drag_splitter(sp: QSplitter, sizes: list):
     """模拟用户拖拽：setSizes + 手动发射 splitterMoved（setSizes 不发该信号）"""
+    # [T33-方向A] 真实用户拖拽前 QSplitterHandle 的 MouseButtonPress 会解除
+    # 落位锁（max=target）；本模拟不经 handle 鼠标事件，需显式解除等价物，
+    # 否则 setSizes 会被落位锁钳制（真实交互不受影响：Press 已解锁）。
+    for i in range(sp.count()):
+        w = sp.widget(i)
+        if isinstance(w, CardContainer) and 0 < w._axis_max() < w._EXPAND_MAX:
+            w._set_axis_max(w._EXPAND_MAX)
     sp.setSizes(sizes)
     sp.splitterMoved.emit(0, 0)
     _pump(50)

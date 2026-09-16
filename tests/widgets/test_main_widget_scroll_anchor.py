@@ -17,6 +17,7 @@ _process_next_lazy_batch 所需的最小属性，验证置底/滚底是否被触
 """
 
 import sys
+from typing import Callable
 from unittest.mock import MagicMock
 
 import pytest
@@ -55,6 +56,9 @@ def _make_window(**overrides):
     win._bottom_anchor_timer = MagicMock()
     win._virtual_scroll_timer = MagicMock()
     win._scroll_sync_timer = MagicMock()
+    # T9：_is_view_at_bottom / _on_scroll_changed 依赖的程序滚动状态
+    win._programmatic_scroll_depth = 0
+    win._sync_scroll_maximum = MagicMock(return_value=1000)
     win._load_more_history_batches = MagicMock()
     win._history_load_threshold = 48
     scroll_bar = MagicMock()
@@ -412,6 +416,10 @@ class _AnchorHarness(QObject):
     _on_message_card_height_changed = OpenAIChatToolWindow._on_message_card_height_changed
     _should_follow_bottom = OpenAIChatToolWindow._should_follow_bottom
     _is_view_at_bottom = OpenAIChatToolWindow._is_view_at_bottom
+    _programmatic_scroll = OpenAIChatToolWindow._programmatic_scroll
+    # _make_anchor_window 运行时注入的实例属性（类型声明供 pyright 收窄）
+    _programmatic_scroll_depth: int
+    _sync_scroll_maximum: Callable[[], int]
 
 
 def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=False, away=False):
@@ -469,6 +477,9 @@ def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=Fa
     win.chat_scroll_area = area
     win._is_streaming = streaming
     win._user_intentionally_away_from_bottom = away
+    # T9：_is_view_at_bottom / 补偿分支依赖的程序滚动状态
+    win._programmatic_scroll_depth = 0
+    win._sync_scroll_maximum = MagicMock(return_value=maximum)
 
     card.heightChanged.connect(win._on_message_card_height_changed)
     return win, card, bar
@@ -582,6 +593,11 @@ def _make_sticky_window(away=False):
     win._scroll_bottom_timer = MagicMock()
     win._suppress_scroll_sync_count = 0
     win._user_intentionally_away_from_bottom = away
+    # T9：置底链路会调真实 _sync_scroll_maximum / _programmatic_scroll（访问
+    # _scroll_max_cache / _programmatic_scroll_depth），裸 __new__ 实例属性访问
+    # 抛 RuntimeError → 预置/替身隔离
+    win._programmatic_scroll_depth = 0
+    win._sync_scroll_maximum = MagicMock(return_value=1000)
     bar = _FakeScrollBar(maximum=1000, value=1000)  # 贴底起点
     area = MagicMock()
     area.verticalScrollBar.return_value = bar
@@ -861,3 +877,109 @@ def test_mapping_equivalence_with_reference_fuzz():
         assert win._build_node_to_batch_mapping() == _reference_mapping(batches), (
             f"fuzz case {case} 不等价: batches={batches!r}"
         )
+
+
+# ─── HeightCommitBatch flush 的程序滚动豁免（T9 away-set 死锁修复） ─────────
+# 背景：flush 末尾的置底（follow 分支）与锚定修正（anchor 分支）都是程序滚动，
+# 必须发生在 _programmatic_scroll 豁免上下文内。此前裸 setValue 参与 away 判定
+# → resize 恢复期把用户误判为「主动滚离」→ 滚底守卫卡死。
+
+
+class _RecordingCtx:
+    """记录 enter/exit 与其间 setValue 时序的豁免上下文替身"""
+
+    def __init__(self):
+        self.events: list = []
+
+    def __call__(self):
+        return self
+
+    def __enter__(self):
+        self.events.append("enter")
+        return self
+
+    def __exit__(self, *exc):
+        self.events.append("exit")
+        return False
+
+
+def _make_batch_harness(qapp, follow_bottom: bool, ctx=None):
+    """构造 flush 可运行的最小 HeightCommitBatch（真 QScrollArea + Mock 滚动条）
+
+    ctx：_RecordingCtx 实例（同时充当豁免上下文工厂与 setValue 事件记录器）；
+    None 表示不注入豁免上下文（向后兼容路径）。
+    """
+    from PyQt5.QtWidgets import QScrollArea, QVBoxLayout, QWidget
+
+    from app.widgets.height_commit_batch import HeightCommitBatch
+
+    scroll_area = QScrollArea()
+    scroll_area.setWidgetResizable(True)
+    container = QWidget()
+    QVBoxLayout(container)
+    scroll_area.setWidget(container)
+    scroll_area.resize(400, 200)
+    scroll_area.show()
+    qapp.processEvents()
+
+    bar = MagicMock()
+    bar.maximum.return_value = 1000
+    bar.value.return_value = 0
+    if ctx is not None:
+        bar.setValue.side_effect = lambda *_: ctx.events.append("setValue")
+    scroll_area.verticalScrollBar = lambda: bar  # 实例属性遮蔽，供 flush 断言
+
+    batch = HeightCommitBatch(
+        scroll_area,
+        container,
+        lambda: follow_bottom,
+        programmatic_scroll_fn=ctx,
+    )
+    return batch, bar, container
+
+
+def test_flush_follow_setvalue_inside_programmatic_ctx(qapp):
+    """follow 分支：置底 setValue 必须发生在程序滚动豁免上下文内"""
+    ctx = _RecordingCtx()
+    batch, bar, _container = _make_batch_harness(qapp, follow_bottom=True, ctx=ctx)
+    card = MagicMock()
+    card.viewer = MagicMock()
+    batch.begin()
+    batch.submit(card, 120)
+    batch.flush()
+
+    bar.setValue.assert_called_once_with(1000)
+    assert ctx.events == ["enter", "setValue", "exit"]
+
+
+def test_flush_anchor_setvalue_inside_programmatic_ctx(qapp):
+    """anchor 分支：锚定修正 setValue 同样必须发生在豁免上下文内"""
+    from PyQt5.QtWidgets import QWidget
+
+    ctx = _RecordingCtx()
+    batch, bar, container = _make_batch_harness(qapp, follow_bottom=False, ctx=ctx)
+    card = QWidget(container)
+    card.setFixedHeight(50)
+    layout = container.layout()
+    assert layout is not None  # _make_batch_harness 已装 QVBoxLayout
+    layout.addWidget(card)
+    qapp.processEvents()
+
+    batch.begin()
+    batch.submit(card, 120)
+    batch.flush()
+
+    bar.setValue.assert_called_once()  # 锚定修正恰好一次
+    assert ctx.events == ["enter", "setValue", "exit"]
+
+
+def test_flush_without_programmatic_ctx_still_works(qapp):
+    """向后兼容：未注入豁免上下文（旧调用方/测试桩）时 flush 走 nullcontext 不炸"""
+    batch, bar, _container = _make_batch_harness(qapp, follow_bottom=True)
+    card = MagicMock()
+    card.viewer = MagicMock()
+    batch.begin()
+    batch.submit(card, 120)
+    batch.flush()
+
+    bar.setValue.assert_called_once_with(1000)

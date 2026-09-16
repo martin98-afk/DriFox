@@ -357,6 +357,10 @@ class SubAgentExecutor(QThread):
 
         self._start_time = time.time()
 
+        # [T15/M6] 退出期中断检查：atexit 收敛时尽快返回，不拖 wait(500)
+        if self.isInterruptionRequested():
+            return
+
         try:
             # 防御：确保 llm_config 是 dict
             if not isinstance(self.llm_config, dict):

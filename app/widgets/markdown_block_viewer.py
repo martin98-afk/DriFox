@@ -26,6 +26,7 @@ from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap, QTextOption
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -87,6 +88,52 @@ def _is_light_theme() -> bool:
         return False
 
 
+# ── 主题令牌层（与 WebEngine 版 :root CSS 变量同源）────────────────
+# 背景：本模块原先直接读 Colors.ASSISTANT_CARD_*，那是「卡片外壳」色（暗橙底/
+# 亮橙字），而 WebEngine 版正文用的是 current_theme() 的面板色。两套色源导致
+# 纯 Qt 渲染与 WebEngine 观感割裂。本层统一取 current_theme()，逐一对齐
+# message_card._load_skeleton 里的 :root 变量，缺键回落 Colors。
+def _qt_theme() -> Dict[str, str]:
+    """返回本模块使用的扁平色表，键名对齐 WebEngine 版 CSS 变量名。"""
+    try:
+        from app.utils.design_tokens import current_theme
+
+        t = current_theme()
+    except Exception:
+        t = {}
+    light = _is_light_theme()
+    # 语义派生量（WebEngine 版在 CSS 里现算，这里预先算好）
+    row_alt = "rgba(15, 23, 42, 0.03)" if light else "rgba(255, 255, 255, 0.02)"
+    row_hover = "rgba(15, 23, 42, 0.05)" if light else "rgba(255, 255, 255, 0.05)"
+    row_header = "rgba(15, 23, 42, 0.06)" if light else "rgba(255, 255, 255, 0.04)"
+    return {
+        "border": t.get("border") or Colors.BORDER,
+        "border_accent": t.get("border_accent") or Colors.BORDER_ACCENT,
+        "text": t.get("text_primary") or Colors.TEXT_PRIMARY,
+        "text_secondary": t.get("text_secondary") or Colors.TEXT_SECONDARY,
+        "text_muted": t.get("text_muted") or Colors.TEXT_MUTED,
+        "accent": t.get("accent") or Colors.TEXT_ACCENT,
+        "accent_warm": t.get("accent_warm") or Colors.ACCENT_WARM,
+        "content_bg": t.get("content_bg") or Colors.CONTENT_BG,
+        "row_alt": row_alt,
+        "row_hover": row_hover,
+        "row_header": row_header,
+        "light": light,
+    }
+
+
+def _accent_rgba(hex_color: str, alpha: float) -> str:
+    """#rrggbb → rgba(r,g,b,alpha)（对齐 message_card._accent_rgba 语义）。"""
+    h = (hex_color or "").lstrip("#")
+    if len(h) != 6:
+        return hex_color or "transparent"
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except Exception:
+        return hex_color or "transparent"
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
 # ── 解析常量 ──────────────────────────────────────────────────────
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
@@ -98,6 +145,15 @@ _LANG_COLOR = "#FFA500"
 _BODY_MAX_HEIGHT = 400  # 代码区内部滚动上限(px)
 
 _FENCE_RE = re.compile(r"^([ \t]*)```([\w+#.-]*)[ \t]*\n", re.M)
+
+# 顶层块元素切分（在 **已转 HTML** 的片段上跑）：blockquote / table / hr。
+# 命名组即块类型名。table 非贪婪跨行匹配到 </table>。
+_BLOCK_ELEMENT_RE = re.compile(
+    r"(?P<quote><blockquote\b[^>]*>.*?</blockquote>)"
+    r"|(?P<table><table\b[^>]*>.*?</table>)"
+    r"|(?P<hr><hr\s*/?>)",
+    re.S | re.I,
+)
 
 # ── 流式活动坞（Streaming Dock）常量（对齐 WebEngine 版 _STREAMING_DOCK_CSS）──
 # 与 WebEngine 版 body.streaming-dock #tool-content 的 max-height 保持一致。
@@ -474,8 +530,33 @@ def _parse_tool_block(content: str) -> Dict[str, Any]:
     }
 
 
+def _split_block_elements(text: str) -> List[Tuple[str, str]]:
+    """已转 HTML 的片段 → [("text"|"quote"|"table"|"hr", 内容)]。
+
+    顶层块元素（blockquote / table / hr）必须拆成独立块：Qt 富文本对它们的
+    渲染能力残缺（实测 blockquote 丢边框与底色、table 无圆角、hr 只是默认
+    灰线），靠内联 style 救不回来。拆开后由 QuoteCard / TableBlockWidget /
+    HRSeparator 用真实 QWidget 渲染。
+
+    注意：输入必须是 **已转 HTML** 的片段（正则匹配的是 HTML 标签，不是
+    markdown 源码），调用方负责先 md_to_html。
+    """
+    out: List[Tuple[str, str]] = []
+    pos = 0
+    for m in _BLOCK_ELEMENT_RE.finditer(text):
+        head = text[pos : m.start()]
+        if head.strip():
+            out.append(("text", head))
+        out.append((m.lastgroup or "hr", m.group(0)))
+        pos = m.end()
+    tail = text[pos:]
+    if tail.strip():
+        out.append(("text", tail))
+    return out
+
+
 def parse_blocks(md_text: str) -> List[Dict[str, Any]]:
-    """markdown 全文 → 块列表。type ∈ think/tool/code/html/tag。"""
+    """markdown 全文 → 块列表。type ∈ think/tool/code/html/tag/quote/table/hr。"""
     blocks: List[Dict[str, Any]] = []
     for kind, content, closed in _split_tag_segments(md_text, _THINK_OPEN, _THINK_CLOSE):
         if kind == "tag":
@@ -508,7 +589,7 @@ def _split_plugin_tags(text: str) -> List[Dict[str, Any]]:
     except Exception:
         tag_names = []
     if not tag_names:
-        return [{"type": "html", "html": _md_to_html(text)}]
+        return _plain_text_blocks(text)
 
     # 逐标签切分：tag 段标记为 f"tag:{name}"，普通段继续下一层
     queue: List[Tuple[str, str, bool]] = [("plain", text, True)]
@@ -536,8 +617,84 @@ def _split_plugin_tags(text: str) -> List[Dict[str, Any]]:
             if html:
                 out.append({"type": "tag", "tag": tag, "content": body, "completed": closed, "html": html})
         elif body.strip():
-            out.append({"type": "html", "html": _md_to_html(body)})
+            out.extend(_plain_text_blocks(body))
     return out
+
+
+def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
+    """普通 markdown 文本 → 块列表（quote/table/hr 独立成块，其余转 html 块）。
+
+    先整段转 HTML 再切：块元素正则匹配的是 HTML 标签。切出的 quote/table
+    片段本身已是 HTML（无需二次转换），text 片段原样回传。
+    """
+    if not text.strip():
+        return []
+    html = _md_to_html(text)
+    segs = _split_block_elements(html)
+    # 无块元素（最常见）：零额外开销，单个 html 块
+    if len(segs) == 1 and segs[0][0] == "text":
+        return [{"type": "html", "html": html}]
+    out: List[Dict[str, Any]] = []
+    for kind, body in segs:
+        if kind == "quote":
+            out.append({"type": "quote", "html": _unwrap_quote(body)})
+        elif kind == "table":
+            parsed = _parse_table_html(body)
+            if parsed:
+                out.append({"type": "table", **parsed})
+            else:  # 解析失败：退回普通 html 块，不丢内容
+                out.append({"type": "html", "html": body})
+        elif kind == "hr":
+            out.append({"type": "hr"})
+        elif body.strip():
+            out.append({"type": "html", "html": body})
+    return out
+
+
+_QUOTE_INNER_RE = re.compile(r"<blockquote\b[^>]*>(.*?)</blockquote>", re.S | re.I)
+
+
+def _unwrap_quote(html: str) -> str:
+    """<blockquote>...</blockquote> → 内部 HTML（外层由 QuoteCard 承载样式）。"""
+    m = _QUOTE_INNER_RE.search(html)
+    return m.group(1).strip() if m else html
+
+
+_TD_RE = re.compile(r"<t[dh]\b([^>]*)>(.*?)</t[dh]>", re.S | re.I)
+_TR_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.S | re.I)
+_THEAD_RE = re.compile(r"<thead\b[^>]*>(.*?)</thead>", re.S | re.I)
+_TBODY_RE = re.compile(r"<tbody\b[^>]*>(.*?)</tbody>", re.S | re.I)
+
+
+def _parse_table_html(html: str) -> Optional[Dict[str, Any]]:
+    """markdown 生成的 <table> HTML → 结构化 {header, rows}。
+
+    失败返回 None（调用方退回 html 块）。单元格内容保留富文本（加粗/行内 code），
+    只剥掉最外层标签——Qt 富文本无法渲染带圆角/斑马纹的表格，改由
+    TableBlockWidget 用 QGridLayout 真实控件渲染。
+    """
+    try:
+        header: List[str] = []
+        rows: List[List[str]] = []
+        th = _THEAD_RE.search(html)
+        body_html = html
+        if th is not None:
+            for tr in _TR_RE.findall(th.group(1)):
+                header = [c.strip() for _, c in _TD_RE.findall(tr)]
+            body_html = html[: th.start()] + html[th.end() :]
+        tb = _TBODY_RE.search(body_html)
+        scan = tb.group(1) if tb is not None else body_html
+        for tr in _TR_RE.findall(scan):
+            cells = [c.strip() for _, c in _TD_RE.findall(tr)]
+            if cells:
+                rows.append(cells)
+        if not header and rows:  # 无 thead：首行当表头（markdown 扩展不总生成 thead）
+            header = rows.pop(0)
+        if not header and not rows:
+            return None
+        return {"header": header, "rows": rows}
+    except Exception:
+        return None
 
 
 def _render_plugin_tag_html(tag: str, content: str, completed: bool) -> str:
@@ -577,26 +734,73 @@ def _md_to_html(md_fragment: str) -> str:
     return _inject_qt_rich_styles(html)
 
 
-_INLINE_CODE_STYLE_RE = re.compile(r"<code>(?!style)")
+def _rich_styles() -> Dict[str, str]:
+    """正文富文本的块级样式表（键=HTML 标签，值=style 内容）。
+
+    对齐 message_card._load_skeleton 的 :root + 块级 CSS，逐条搬到 Qt 富文本：
+    - 标题：字号阶梯 + 上边距 > 下边距（格式塔接近原则）+ 行高 1.3
+    - 段落：margin 8px 0、行高 1.65、text-secondary
+    - 列表：上下 margin 8px，行高 1.65
+    - 链接：accent 色无下划线
+    - 行内 code：accent-glow 底 + accent-text 字 + 圆角 + padding
+    """
+    t = _qt_theme()
+    body = scale_font_size(14)
+    code = scale_font_size(13)
+    return {
+        "h1": f"font-size:{int(body * 1.45)}px; font-weight:700; color:{t['text']};"
+        f" margin:14px 0 6px; line-height:1.3;",
+        "h2": f"font-size:{int(body * 1.25)}px; font-weight:700; color:{t['text']};"
+        f" margin:12px 0 5px; line-height:1.3;",
+        "h3": f"font-size:{int(body * 1.1)}px; font-weight:700; color:{t['text']}; margin:10px 0 4px; line-height:1.3;",
+        "h4": f"font-size:{body}px; font-weight:700; color:{t['text']}; margin:9px 0 4px; line-height:1.3;",
+        "h5": f"font-size:{max(8, body - 1)}px; font-weight:700; color:{t['text']}; margin:8px 0 3px; line-height:1.3;",
+        "h6": f"font-size:{max(8, body - 2)}px; font-weight:700; color:{t['text_muted']};"
+        f" margin:8px 0 3px; line-height:1.3;",
+        "p": f"margin:8px 0; line-height:1.65; color:{t['text_secondary']};",
+        "ul": "margin:8px 0; line-height:1.65; -qt-list-indent:1;",
+        "ol": "margin:8px 0; line-height:1.65; -qt-list-indent:1;",
+        "li": f"margin:3px 0; color:{t['text_secondary']};",
+        "a": f"color:{t['accent']}; text-decoration:none;",
+        "strong": f"color:{t['text']}; font-weight:600;",
+        "em": f"color:{t['text_secondary']}; font-style:italic;",
+        "code": (
+            f"background:{_accent_rgba(t['accent'], 0.10)}; color:{t['accent']};"
+            f" font-family:'Consolas',monospace; font-size:{code}px;"
+            " padding:1px 5px; border-radius:4px;"
+        ),
+        "pre": f"font-family:'Consolas',monospace; font-size:{code}px; margin:8px 0;",
+        "th": f"background:{t['row_header']}; padding:6px 10px; font-weight:600; color:{t['text']};"
+        f" border-bottom:1px solid {t['border_accent']};",
+        "td": f"padding:6px 10px; color:{t['text_secondary']}; border-bottom:1px solid {t['border']};",
+    }
 
 
-def _inline_code_style() -> str:
-    bg = "#ececf1" if _is_light_theme() else "rgba(255,255,255,0.09)"
-    fg = "#7c3aed" if _is_light_theme() else "#e8b4f8"
-    return f"background-color:{bg}; font-family:'Consolas',monospace; color:{fg};"
+_STYLE_TAG_RE = re.compile(r"<(h1|h2|h3|h4|h5|h6|p|ul|ol|li|a|strong|em|code|pre|th|td)\b([^>]*)>", re.I)
 
 
 def _inject_qt_rich_styles(html: str) -> str:
-    """为 Qt 富文本补齐浏览器默认样式：行内 code 底色、表格边框。"""
-    html = _INLINE_CODE_STYLE_RE.sub(lambda _: f'<code style="{_inline_code_style()}">', html)
-    if "<table" in html:
-        html = html.replace("<table>", '<table border="1" cellspacing="0" cellpadding="5">', 1)
-    return html
+    """为 Qt 富文本补齐浏览器默认样式（对齐 WebEngine 版块级 CSS）。
+
+    Qt 富文本不支持 <style> 与外部样式表，只能内联。逐标签注入 style：
+    标题/段落/列表/链接/行内 code/表格单元格。已有 style 的标签不覆盖
+    （插件渲染器输出的 HTML 自带样式，避免被冲掉）。
+    """
+    styles = _rich_styles()
+
+    def _sub(m: "re.Match[str]") -> str:
+        tag = m.group(1).lower()
+        attrs = m.group(2)
+        if "style=" in attrs.lower():
+            return m.group(0)
+        return f'<{tag}{attrs} style="{styles[tag]}">'
+
+    return _STYLE_TAG_RE.sub(_sub, html)
 
 
 # ── 控件层：正文块 ────────────────────────────────────────────────
 class RichTextLabel(QLabel):
-    """段落/标题/列表/表格：QLabel 富文本。"""
+    """段落/标题/列表：QLabel 富文本。"""
 
     def __init__(self, html: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -607,15 +811,167 @@ class RichTextLabel(QLabel):
         self.set_html(html)
 
     def set_html(self, html: str) -> None:
+        t = _qt_theme()
         self.setStyleSheet(
             f"QLabel {{ {get_font_family_css()} font-size:{scale_font_size(14)}px;"
-            f" color:{Colors.ASSISTANT_CARD_TEXT}; background:transparent; }}"
+            f" color:{t['text_secondary']}; background:transparent; }}"
         )
         self.setText(html)
 
     def update_content(self, b: Dict[str, Any]) -> None:
         """流式原地更新（reconcile slot 复用约定）。"""
         self.set_html(b.get("html") or "")
+
+
+class QuoteCard(QFrame):
+    """引用块：左侧 accent-warm 竖条 + 暖色底 + 圆角（对齐 WebEngine 版 blockquote）。
+
+    为什么不用富文本 <blockquote>：Qt 富文本对它的 border-left / background
+    全部忽略（像素采样验证：加了 border-left:3px 与底色后渲染结果与不加完全
+    一致，左侧竖条区域恒为白）。必须上真实 QFrame + 左竖条子控件。
+    """
+
+    def __init__(self, html: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("quoteCard")
+        t = _qt_theme()
+        self.setStyleSheet(
+            f"QFrame#quoteCard {{ background:{_accent_rgba(t['accent_warm'], 0.08)};"
+            f" border:none; border-radius:0 10px 10px 0; }}"
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        bar = QFrame(self)
+        bar.setFixedWidth(3)
+        bar.setStyleSheet(f"QFrame {{ background:{t['accent_warm']}; border:none; }}")
+        lay.addWidget(bar)
+        self._label = QLabel(self)
+        self._label.setWordWrap(True)
+        self._label.setTextFormat(Qt.RichText)
+        self._label.setOpenExternalLinks(True)
+        self._label.setTextInteractionFlags(Qt.TextBrowserInteraction | Qt.TextSelectableByMouse)
+        self._label.setStyleSheet(
+            f"QLabel {{ {get_font_family_css()} font-size:{scale_font_size(14)}px;"
+            f" color:{t['text_secondary']}; background:transparent; padding:8px 12px; }}"
+        )
+        self._label.setText(html)
+        lay.addWidget(self._label, 1)
+
+    def update_content(self, b: Dict[str, Any]) -> None:
+        self._label.setText(b.get("html") or "")
+
+
+class TableBlockWidget(QFrame):
+    """表格：真实网格控件（表头底色 / 斑马纹 / 圆角容器 / 行 hover）。
+
+    为什么不用富文本 <table>：Qt 富文本表格只能画 border，做不到
+    border-radius、tr:hover、表头与表体分界色（tr 上的 background 会被
+    单元格覆盖，且圆角在 QTextTable 上无效）。改成 QGridLayout 后
+    斑马纹/表头底/hover 全部可用，且单元格宽度按内容自适应。
+    """
+
+    def __init__(self, header: List[str], rows: List[List[str]], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("tableBlock")
+        self._header = list(header or [])
+        self._rows = [list(r) for r in (rows or [])]
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(1, 1, 1, 1)
+        self._grid.setSpacing(0)
+        self._grid.setHorizontalSpacing(0)
+        self._grid.setVerticalSpacing(0)
+        self._build()
+
+    def _cell_label(self, html: str, is_header: bool) -> QLabel:
+        t = _qt_theme()
+        lb = QLabel(html)
+        lb.setWordWrap(True)
+        lb.setTextFormat(Qt.RichText)
+        lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lb.setContentsMargins(10, 6, 10, 6)
+        color = t["text"] if is_header else t["text_secondary"]
+        weight = 600 if is_header else 400
+        lb.setStyleSheet(
+            f"QLabel {{ {get_font_family_css()} font-size:{scale_font_size(14)}px;"
+            f" color:{color}; font-weight:{weight}; background:transparent; padding:2px 4px; }}"
+        )
+        return lb
+
+    def _row_bg(self, idx: int, is_header: bool) -> str:
+        """行底色：表头 / 偶数行斑马纹 / 奇数行透明（对齐 WebEngine 版 table CSS）。"""
+        t = _qt_theme()
+        if is_header:
+            return t["row_header"]
+        return t["row_alt"] if idx % 2 == 1 else "transparent"
+
+    def _build(self) -> None:
+        while self._grid.count():
+            it = self._grid.takeAt(0)
+            w = it.widget() if it is not None else None
+            if w is not None:
+                w.deleteLater()
+        self.setStyleSheet(self._frame_style())
+        cols = max([len(self._header)] + [len(r) for r in self._rows]) if (self._header or self._rows) else 0
+        if cols == 0:
+            return
+        # 表头
+        if self._header:
+            for c in range(cols):
+                cell = self._wrap_cell(
+                    self._cell_label(self._header[c] if c < len(self._header) else "", True),
+                    self._row_bg(-1, True),
+                    is_last=False,
+                )
+                self._grid.addWidget(cell, 0, c)
+        # 表体
+        for r, row in enumerate(self._rows):
+            is_last = r == len(self._rows) - 1
+            for c in range(cols):
+                text = row[c] if c < len(row) else ""
+                cell = self._wrap_cell(self._cell_label(text, False), self._row_bg(r, False), is_last)
+                self._grid.addWidget(cell, r + (1 if self._header else 0), c)
+
+    def _frame_style(self) -> str:
+        t = _qt_theme()
+        return f"QFrame#tableBlock {{ background:transparent; border:1px solid {t['border']}; border-radius:10px; }}"
+
+    def _wrap_cell(self, label: QLabel, bg: str, is_last: bool) -> QWidget:
+        """单元格容器：承载底色 + 单元格分隔线（末行不画底线，避免与外框重叠）。"""
+        t = _qt_theme()
+        cell = QWidget(self)
+        bottom = "" if is_last else f" border-bottom:1px solid {t['border']};"
+        cell.setStyleSheet(f"QWidget {{ background:{bg}; border-right:1px solid {t['border']};{bottom} }}")
+        lay = QVBoxLayout(cell)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(label)
+        return cell
+
+    def update_content(self, b: Dict[str, Any]) -> None:
+        header = b.get("header")
+        rows = b.get("rows")
+        if header == self._header and rows == self._rows:
+            return
+        self._header = list(header or [])
+        self._rows = [list(r) for r in (rows or [])]
+        self._build()
+
+
+class HRSeparator(QFrame):
+    """分隔线：1px 主题色横线（对齐 WebEngine 版 hr 的 border-top:1px solid var(--border)）。
+
+    Qt 富文本 <hr> 渲染为默认灰线且忽略 height/background（像素采样验证：
+    加与不加渲染结果完全相同），必须用真实控件。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        t = _qt_theme()
+        self.setFixedHeight(1)
+        self.setStyleSheet(f"QFrame {{ background:{t['border']}; border:none; }}")
+
+    def update_content(self, b: Dict[str, Any]) -> None:  # noqa: ARG002
+        """分隔线无内容，reconcile 复用时无需动作。"""
 
 
 class CodeBlockWidget(QFrame):
@@ -691,12 +1047,16 @@ class CodeBlockWidget(QFrame):
         body.setSpacing(0)
         self._line_numbers = QLabel("", self)
         self._line_numbers.setAlignment(Qt.AlignTop | Qt.AlignRight)
+        # 行号列必须限高：QLabel 默认随父容器垂直拉伸，而代码正文（QTextEdit）
+        # 按文档高度定高。不限高时行号列会被拉到卡片全高（实测 2 行代码 →
+        # 行号列 820px vs 正文 62px），整个代码块被撑成巨型。
+        self._line_numbers.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._line_numbers.setStyleSheet(
             f"QLabel {{ color:{self._line_color()}; background:transparent; border:none;"
             f" font-family:'Consolas',monospace; font-size:{_CODE_FONT_SIZE}px;"
             " padding:0 8px 0 12px; }"
         )
-        body.addWidget(self._line_numbers)
+        body.addWidget(self._line_numbers, 0, Qt.AlignTop)
 
         self.text_edit = QTextEdit(self)
         self.text_edit.setReadOnly(True)
@@ -765,7 +1125,10 @@ class CodeBlockWidget(QFrame):
         if self.text_edit.viewport().width() <= 0:
             return
         doc_h = int(self.text_edit.document().size().height()) + 12
-        self.text_edit.setFixedHeight(min(doc_h, _BODY_MAX_HEIGHT))
+        eff = min(doc_h, _BODY_MAX_HEIGHT)
+        self.text_edit.setFixedHeight(eff)
+        # 行号列与正文同高（Fixed 策略下不会自动跟随，必须显式同步）
+        self._line_numbers.setFixedHeight(eff)
 
     def sizeHint(self) -> QSize:  # noqa: N802
         hint = super().sizeHint()
@@ -1792,6 +2155,9 @@ class MarkdownBlockViewer(QWidget):
         self._body_lay = QVBoxLayout(self._body_box)
         self._body_lay.setContentsMargins(0, 0, 0, 0)
         self._body_lay.setSpacing(2)
+        # 尾部 stretch：无它时最后一个块会被拉满剩余空间（实测代码块被撑到
+        # 582px，实际内容仅 113px）。内容顶齐、多余空间留在底部。
+        self._body_lay.addStretch(1)
         self._vbox.addWidget(self._tool_section)
         self._vbox.addWidget(self._body_box)
 
@@ -1806,9 +2172,15 @@ class MarkdownBlockViewer(QWidget):
         self._md += text
         self._reconcile()
 
-    def finish_streaming(self, keep_dock: bool = False) -> None:
+    def finish_streaming(self, keep_dock: bool = False, immediate: bool = True) -> None:
         """流式结束。keep_dock=True 时保留坞态（S1：文本先于工具结果结束），
-        等最后工具完成由 MessageCard 回调 _sync_streaming_dock(False) 归位。"""
+        等最后工具完成由 MessageCard 回调 _sync_streaming_dock(False) 归位。
+
+        [P0 修复] immediate 为接口对齐参数：本类经 MessageCard 赋给 self.viewer
+        （markdown-block-viewer 灰度通道），MessageCard.finish_streaming 无条件
+        透传 immediate（T11 错峰链），签名缺失会抱 TypeError。本类是同步纯 Qt
+        渲染（_reconcile 直接重建块），无 JS 投递可择机，错峰无意义，故忽略。
+        """
         self._streaming = False
         if not keep_dock and self._dock_active:
             self._sync_streaming_dock(False)
@@ -1941,7 +2313,12 @@ class MarkdownBlockViewer(QWidget):
             [b for b in blocks if b["type"] == "think" or (b["type"] == "tool" and not b.get("is_edit"))]
         )
         body_items = _slot_items(
-            [b for b in blocks if b["type"] in ("html", "code", "tag") or (b["type"] == "tool" and b.get("is_edit"))]
+            [
+                b
+                for b in blocks
+                if b["type"] in ("html", "code", "tag", "quote", "table", "hr")
+                or (b["type"] == "tool" and b.get("is_edit"))
+            ]
         )
         self._widgets, self._keys = reconcile_widgets(
             self._body_lay, self._widgets, self._keys, body_items, self._build_block_widget, self._streaming
@@ -1967,4 +2344,10 @@ class MarkdownBlockViewer(QWidget):
             return ToolCardWidget(b)  # 编辑类工具：结果展示在正文之中
         if b["type"] == "tag":
             return RichTextLabel(b["html"])  # 插件内联标签卡（已由渲染器生成 HTML）
+        if b["type"] == "quote":
+            return QuoteCard(b["html"])
+        if b["type"] == "table":
+            return TableBlockWidget(b["header"], b["rows"])
+        if b["type"] == "hr":
+            return HRSeparator()
         return RichTextLabel(b["html"])

@@ -930,6 +930,10 @@ class _PreSendWorker(QThread):
 
     def run(self):
         """在后台线程执行所有预处理工作。"""
+        # [T15/M6] 退出期中断检查：atexit 收敛时本线程若未启动/刚启动，
+        # 直接返回避免进入 hook 链拖住 wait(500)
+        if self.isInterruptionRequested():
+            return
         try:
             self._do_hooks_and_build()
         except Exception as e:

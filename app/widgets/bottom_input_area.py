@@ -2274,6 +2274,14 @@ class SendableTextEdit(TextEdit):
                 pass
         menu.exec_(event.globalPos())
 
+    def closeEvent(self, event):
+        """关闭时摘除拖放 OLE 注册，避免析构后 drop target 回调 COM failfast。"""
+        try:
+            self.setAcceptDrops(False)
+        except (RuntimeError, AttributeError):
+            pass
+        super().closeEvent(event)
+
 
 class InputGlowUnderlay(QWidget):
     """统一胶囊向内发光层。

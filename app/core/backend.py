@@ -134,6 +134,8 @@ def _inject_hook_to_session(session, event_name: str, output: str, status_messag
         return
     msg = _make_hook_message(event_name, output, status_message)
     session.messages.append(msg)
+    # [PERF T33] 唯一绕过 ChatSession 写方法的消息追加点，需手动失效发送前缓存
+    session.bump_messages_version()
     session._update_timestamp()
 
 

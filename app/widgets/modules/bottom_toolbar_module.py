@@ -75,9 +75,60 @@ class BottomToolbarModule(UIModule):
 
         # ===== 工具栏（现在挂在独立 strip 上）=====
         toolbar_widget = QWidget(host._bottom_toolbar_strip)
+        toolbar_widget.setObjectName("toolbarInner")
         # 30px 高度匹配 strip 内部 30px 内容区，配合 VCenter 完美居中
         toolbar_widget.setFixedHeight(30)
-        toolbar_widget.setStyleSheet("background: transparent; border: none;")
+        # [PERF T35] 聚合 QSS：本模块创建的 11 个静态样式控件合并为一条容器级表。
+        # 宿主选 toolbar_widget 而非 :67 的 bottomToolbarStrip —— 后者样式表由
+        # main_widget._apply_bottom_input_stack_style 在 build 尾与每次焦点变化时
+        # 整体重设（setStyleSheet 是整体替换），挂 strip 会在首次刷新即被清空。
+        # toolbar_widget 无任何重设点，作用域覆盖全部 11 个目标控件。
+        # 硬纪律：容器级 QSS 一律 objectName 选择器，禁裸类选择器（避免误伤
+        # 后代中同类型控件）。主题敏感项（settings_btn 走主题刷新链、
+        # _tool_count_label 走 _refresh_tool_toggle_btn）保留运行期重设能力，
+        # 重设只为该控件自身生效，不影响聚合表中其他控件。
+        toolbar_widget.setStyleSheet(f"""
+            QWidget#toolbarInner {{
+                background: transparent;
+                border: none;
+            }}
+            QWidget#toolTransparentBg {{
+                background: transparent;
+                border: none;
+            }}
+            QWidget#modelSepLine {{
+                background: {Colors.BORDER};
+            }}
+            QWidget#settingsEffortBtn {{
+                background: transparent;
+                border: none;
+                border-radius: 8px;
+            }}
+            QWidget#settingsEffortBtn:hover {{
+                background: {Colors.HOVER_BG_STRONG};
+            }}
+            QWidget#effortCycleBtn {{
+                background: transparent;
+                border: none;
+            }}
+            QWidget#toolToggleBtn {{
+                background: transparent;
+                border: none;
+            }}
+            QLabel#toolCountLabel {{
+                color: {Colors.TEXT_MUTED};
+                background: transparent; border: none;
+                {font_size_css(12)} {get_font_family_css()}
+            }}
+            QPushButton#toolRestoreBtn {{
+                background: transparent; border: none;
+                color: #ff9500; {font_size_css(13)} {get_font_family_css()}
+                font-weight: bold; padding: 0;
+            }}
+            QPushButton#toolRestoreBtn:hover {{
+                color: #ffb84d;
+            }}
+        """)
         toolbar_layout = QHBoxLayout(toolbar_widget)
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(8)
@@ -86,26 +137,24 @@ class BottomToolbarModule(UIModule):
 
         # 模型选择（无边框，只保留背景）
         host._model_btn_container = QWidget(toolbar_widget)
+        host._model_btn_container.setObjectName("toolTransparentBg")
         host._model_btn_container.setFixedHeight(28)
         Colors.refresh()
         # 一体化视觉：去背景胶囊（卡中卡），模型区直接落在输入卡底色上
-        host._model_btn_container.setStyleSheet("""
-            background: transparent;
-            border: none;
-        """)
+        # （样式由 toolbar_widget 聚合 QSS 的 #toolTransparentBg 提供）
         model_layout = QHBoxLayout(host._model_btn_container)
         model_layout.setContentsMargins(8, 0, 4, 0)
         model_layout.setSpacing(0)
         # 模型胶囊内竖向分隔线：把 [模型名] | [思考强度+配置] | [用量上下文] 三组分开
         host._model_sep_name = QWidget(host._model_btn_container)
+        host._model_sep_name.setObjectName("modelSepLine")
         host._model_sep_name.setFixedSize(1, 16)
-        host._model_sep_name.setStyleSheet(f"background: {Colors.BORDER};")
         host._model_sep_name.setAttribute(Qt.WA_TransparentForMouseEvents)
         # 一体化视觉：去竖向分隔线，改用间距分组（保留控件供主题刷新链引用）
         host._model_sep_name.setVisible(False)
         host._model_sep_usage = QWidget(host._model_btn_container)
+        host._model_sep_usage.setObjectName("modelSepLine")
         host._model_sep_usage.setFixedSize(1, 16)
-        host._model_sep_usage.setStyleSheet(f"background: {Colors.BORDER};")
         host._model_sep_usage.setAttribute(Qt.WA_TransparentForMouseEvents)
         host._model_sep_usage.setVisible(False)  # 同上：去分隔线
         host.current_model_btn = QWidget(host._model_btn_container)
@@ -116,7 +165,7 @@ class BottomToolbarModule(UIModule):
         btn_layout.setContentsMargins(2, 2, 0, 2)
         btn_layout.setSpacing(4)
         host._model_btn_icon = QLabel(host.current_model_btn)
-        host._model_btn_icon.setStyleSheet("background: transparent; border: none;")
+        host._model_btn_icon.setObjectName("toolTransparentBg")
         host._model_btn_icon.setFixedSize(18, 18)
         host._model_btn_icon.setScaledContents(True)
         btn_layout.addWidget(host._model_btn_icon)
@@ -130,16 +179,6 @@ class BottomToolbarModule(UIModule):
         host.settings_btn = QWidget(host._model_btn_container)
         host.settings_btn.setObjectName("settingsEffortBtn")
         host.settings_btn.setCursor(Qt.PointingHandCursor)
-        host.settings_btn.setStyleSheet(f"""
-            QWidget#settingsEffortBtn {{
-                background: transparent;
-                border: none;
-                border-radius: 8px;
-            }}
-            QWidget#settingsEffortBtn:hover {{
-                background: {Colors.HOVER_BG_STRONG};
-            }}
-        """)
         host.settings_btn.setToolTip("模型参数配置")
         host.settings_btn.mousePressEvent = lambda e: host._toggle_model_config_card()
         settings_btn_layout = QHBoxLayout(host.settings_btn)
@@ -156,12 +195,6 @@ class BottomToolbarModule(UIModule):
         host.effort_btn = QWidget(host._model_btn_container)
         host.effort_btn.setObjectName("effortCycleBtn")
         host.effort_btn.setCursor(Qt.PointingHandCursor)
-        host.effort_btn.setStyleSheet("""
-            QWidget#effortCycleBtn {
-                background: transparent;
-                border: none;
-            }
-        """)
         host.effort_btn.setToolTip("点击切换思考强度等级")
         host.effort_btn.mousePressEvent = lambda e: host._cycle_effort_level(e)
         effort_btn_layout = QHBoxLayout(host.effort_btn)
@@ -192,14 +225,13 @@ class BottomToolbarModule(UIModule):
 
         # ===== 工具开关双色分段按钮 =====
         host._tool_toggle_btn = QWidget(toolbar_widget)
+        host._tool_toggle_btn.setObjectName("toolToggleBtn")
         host._tool_toggle_btn.setFixedHeight(28)
         host._tool_toggle_btn.setCursor(Qt.PointingHandCursor)
         Colors.refresh()
         # 一体化视觉：无背景，图标 + 计数徽标直接落在输入卡底色上
-        host._tool_toggle_btn.setStyleSheet("""
-            background: transparent;
-            border: none;
-        """)
+        # （样式由聚合 QSS 的 #toolToggleBtn 提供；agent 覆盖态由
+        #  _refresh_tool_toggle_btn 单控件重设，取更具体作用域）
         host._tool_toggle_btn.mousePressEvent = lambda e: host._toggle_tool_control_card()
         tt_layout = QHBoxLayout(host._tool_toggle_btn)
         tt_layout.setContentsMargins(6, 0, 6, 0)
@@ -215,29 +247,16 @@ class BottomToolbarModule(UIModule):
         # 有危险工具时由 _refresh_tool_toggle_btn 转警示橙。替代 InfoBadge
         # 角标（数字块叠在图标上遮挡图标）与更早的红绿硬底分段条。
         host._tool_count_label = QLabel("0/0", host._tool_toggle_btn)
+        host._tool_count_label.setObjectName("toolCountLabel")
         host._tool_count_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-        host._tool_count_label.setStyleSheet(f"""
-            color: {Colors.TEXT_MUTED};
-            background: transparent; border: none;
-            {font_size_css(12)} {get_font_family_css()}
-        """)
         tt_layout.addWidget(host._tool_count_label)
 
         # 恢复按钮（仅 agent 覆盖时显示，不打开卡片即可恢复）
         host._tool_restore_btn = QPushButton("↺", host._tool_toggle_btn)
+        host._tool_restore_btn.setObjectName("toolRestoreBtn")
         host._tool_restore_btn.setFixedSize(20, 20)
         host._tool_restore_btn.setCursor(Qt.PointingHandCursor)
         host._tool_restore_btn.setToolTip("取消 agent 覆盖，恢复用户工具权限")
-        host._tool_restore_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; border: none;
-                color: #ff9500; {font_size_css(13)} {get_font_family_css()}
-                font-weight: bold; padding: 0;
-            }}
-            QPushButton:hover {{
-                color: #ffb84d;
-            }}
-        """)
         host._tool_restore_btn.setVisible(False)
         host._tool_restore_btn.clicked.connect(lambda: host._on_tool_restore())
         tt_layout.addWidget(host._tool_restore_btn)
@@ -249,13 +268,10 @@ class BottomToolbarModule(UIModule):
 
         # 右侧功能按钮组（无边框，间距加宽）
         host._toolbar_capsule = QWidget(toolbar_widget)
+        host._toolbar_capsule.setObjectName("toolTransparentBg")
         host._toolbar_capsule.setFixedHeight(30)
         Colors.refresh()
-        # 一体化视觉：去右侧图标组背景胶囊
-        host._toolbar_capsule.setStyleSheet("""
-            background: transparent;
-            border: none;
-        """)
+        # 一体化视觉：去右侧图标组背景胶囊（样式由聚合 QSS 提供）
         capsule_layout = QHBoxLayout(host._toolbar_capsule)
         capsule_layout.setContentsMargins(6, 2, 6, 2)
         capsule_layout.setSpacing(4)
@@ -280,7 +296,9 @@ class BottomToolbarModule(UIModule):
         host.new_session_btn.setStyleSheet(btn_capsule_style)
         host.new_session_btn.setToolTip("新建对话")
         host.new_session_btn.setObjectName("new_session")  # Phase E：插件按钮 position 锚点
-        host.new_session_btn.clicked.connect(host._create_new_session)
+        # close_history=True：新建会话 = 真切换，历史页签让位
+        # （lambda 避开 clicked 信号的 checked 位置参数误传）
+        host.new_session_btn.clicked.connect(lambda: host._create_new_session(close_history=True))
         capsule_layout.addWidget(host.new_session_btn)
 
         # 为工具栏按钮安装自绘 hover tooltip（绕开 QToolTip 样式问题）

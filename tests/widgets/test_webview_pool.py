@@ -23,6 +23,7 @@ import os
 import sys
 import textwrap
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -31,7 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import Qt  # noqa: E402
+from PyQt5.QtCore import Qt, pyqtSignal  # noqa: E402
 from PyQt5.QtWidgets import QWidget  # noqa: E402
 
 from app.widgets.message_card import MessageCard  # noqa: E402
@@ -96,8 +97,8 @@ class TestBorrowReturn:
         fresh_pool.release(v)
         host = v.parentWidget()
         assert host is not None
-        assert bool(host.windowType() & Qt.Tool)
-        assert host.testAttribute(Qt.WA_DontShowOnScreen)
+        assert bool(host.windowType() & Qt.WindowType.Tool)
+        assert host.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
 
 
 class TestQuota:
@@ -186,9 +187,26 @@ class TestSignalPairing:
     """连接与断开必须覆盖同一组信号。
 
     池化复用 viewer 的成败全靠这两处对称：漏掉一个断开，旧卡片销毁后
-    残留连接触发即 RuntimeError。用 AST 从源码提取，新增信号时若只改一边
-    会立刻在这里失败。
+    残留连接触发即 RuntimeError。T9-2 起改为白名单对比：旧版只断言
+    connect==disconnect，两边同时漏同一信号的「对称漏报」无法发现——
+    previewImageRequested 池化路径漏连存量 bug 正是这样漏网的。
     """
+
+    EXPECTED_VIEWER_SIGNALS = {
+        "codeActionRequested",
+        "contextActionRequested",
+        "contentHeightChanged",
+        "toolDiffRequested",
+        "subAgentLogRequested",
+        "saveFileRequested",
+        "chartExpandRequested",
+        "saveChartPngRequested",
+        "saveWidgetFileRequested",
+        "previewImageRequested",
+        "contextLost",
+        "contextRestored",
+        "needRecreate",
+    }
 
     @staticmethod
     def _viewer_attrs(method_name: str) -> set:
@@ -208,5 +226,85 @@ class TestSignalPairing:
     def test_connect_and_disconnect_cover_same_signals(self):
         connect = self._viewer_attrs("_connect_viewer_signals")
         disconnect = self._viewer_attrs("_disconnect_viewer_signals")
+        expected = self.EXPECTED_VIEWER_SIGNALS
         assert connect, "解析不到任何信号，测试或源码结构已变"
         assert connect == disconnect, f"只在一边出现的信号：{connect ^ disconnect}"
+        assert connect == expected, (
+            f"连接面与白名单不一致：多 {sorted(connect - expected)}，少 {sorted(expected - connect)}"
+        )
+        assert disconnect == expected, (
+            f"断开面与白名单不一致：多 {sorted(disconnect - expected)}，少 {sorted(expected - disconnect)}"
+        )
+
+
+class _FakePooledViewerWithPreview(QWidget):
+    """带真实 previewImageRequested 信号的池化 viewer 桩。
+
+    池接口属性显式定义（照 _StubViewer 模式）：`_is_usable` 会真值检查
+    `_context_lost` / `page()`，走 MagicMock 回退会被误判为不可复用。
+    其余未知属性仍回退 MagicMock 吸收交互。
+    """
+
+    previewImageRequested = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._is_js_ready = True
+        self._light_skeleton = False
+        self._context_lost = False
+        self._page_dead = False
+        self._renderer_pid = 0
+        self.skeleton_reload_count = 0
+
+    def page(self):
+        return None if self._page_dead else object()
+
+    def reset_for_reuse(self):
+        self.skeleton_reload_count += 1
+
+    def _load_skeleton(self):
+        self.skeleton_reload_count += 1
+        self._is_js_ready = False
+
+    def _install_dialog_filter(self):
+        pass
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return MagicMock()
+
+
+def test_preview_image_signal_connected_after_ensure_rendered(qapp):
+    """T9-2 动态验证：ensure_rendered（池化取用路径）后 previewImageRequested
+    必须已连到卡片的 _on_preview_image——emit 一次即可触达卡片槽。
+
+    回归现场：v21 引入池化时 _connect/_disconnect_viewer_signals 漏了
+    previewImageRequested，所有非 user 卡片图片预览失灵。
+    """
+    from app.widgets.webview_pool import WebViewPool
+
+    WebViewPool.set_enabled(True)
+    pool = WebViewPool.get_instance()
+    pool.clear()
+
+    fake = _FakePooledViewerWithPreview()
+    assert pool.release(fake, light=False) is True
+
+    card = MessageCard(role="assistant")
+    card._pending_content = "你好"
+
+    calls = []
+    try:
+        with (
+            patch("app.widgets.message_card._qt_renderer_enabled", return_value=False),
+            patch.object(MessageCard, "_is_effectively_visible", lambda self: True),
+            patch.object(MessageCard, "_on_preview_image", side_effect=calls.append),
+        ):
+            card.ensure_rendered()
+            assert card.viewer is fake, "应命中池中 viewer（复用路径）"
+            assert calls == [], "ensure_rendered 本身不应触发预览"
+            fake.previewImageRequested.emit("file:///tmp/x.png")
+            assert calls == ["file:///tmp/x.png"], "previewImageRequested 未连到卡片 _on_preview_image（池化路径漏连）"
+    finally:
+        pool.clear()

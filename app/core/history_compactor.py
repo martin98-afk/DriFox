@@ -699,6 +699,7 @@ class HistoryCompactor:
         budget: int,
         existing_cache: Optional[Dict[str, Any]] = None,
         allow_llm_summary: bool = True,
+        prenormalized: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
         """
         执行压缩
@@ -708,6 +709,10 @@ class HistoryCompactor:
             budget: 可用 token 预算
             existing_cache: 已有的压缩缓存（用于复用）
             allow_llm_summary: 是否允许 LLM 摘要（False 则只用启发式截断）
+            prenormalized: 调用方已完成 consolidate 时的结果（T33）。
+                传入时跳过本方法内的重复 consolidate_messages——发送前路径
+                已在 build_messages 里规范化过一遍，长会话下重复遍历是可观开销。
+                调用方需保证其等价于 consolidate_messages(messages)。
 
         Returns:
             tuple:
@@ -720,8 +725,8 @@ class HistoryCompactor:
 
         soft_limit = self._get_soft_limit(budget)
 
-        # 消息规范化
-        normalized = consolidate_messages(messages)
+        # 消息规范化（调用方已规范化时直接复用，跳过重复遍历）
+        normalized = prenormalized if prenormalized is not None else consolidate_messages(messages)
         if not normalized:
             return [], self._make_state(), self._make_cache()
 
