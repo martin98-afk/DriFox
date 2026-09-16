@@ -583,6 +583,10 @@ class Settings(QConfig):
     current_version = "v0.6.1"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
+    # 进入时崩溃通知：检测到上次崩溃 dump 后是否弹 InfoBar 提示用户。
+    # 关闭后仍会扫描日志目录并把 .reported 标记已读（不重复扫描），
+    # 仅不展示横幅；用户可手动到日志目录查看 dump 文件。
+    crash_notify_on_startup = ConfigItem("General", "CrashNotifyOnStartup", True, BoolValidator())
 
     # 更新下载代理模式：direct=直连 / system=跟随系统 / prefix=加速前缀 / http=手动代理
     # 注意：加速前缀只作用于安装包下载；检查更新始终直连 api.github.com

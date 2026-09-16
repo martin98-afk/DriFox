@@ -613,15 +613,31 @@ def main():
         logger.info("DriFox 以 Tab 管理器模式启动（壳先行 + 进程级预热）")
 
         # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。
-        # 每条 InfoBar 创建成功即重命名 .reported（显示过就改状态），下次启动不再提示
+        # 每条 InfoBar 创建成功即重命名 .reported（显示过就改状态），下次启动不再提示。
+        # 用户在系统设置 → 通知 → 「进入时崩溃通知」可关闭弹窗，但 dump 文件仍保留在日志目录。
         def _check_last_crash():
             try:
                 from app.core.crash_handler import check_pending_crashes, prompt_crash_report
+                from app.utils.config import Settings
                 from app.utils.utils import get_app_data_dir
 
                 dumps = check_pending_crashes(get_app_data_dir() / "logs")
+                if not dumps:
+                    return
+                # 用户关闭了「进入时崩溃通知」：扫描仍会跑、把 dump 标记已读
+                # （避免下次开启时历史崩溃全部冒头），但不弹横幅。
+                cfg = Settings.get_instance()
+                notify_enabled = bool(getattr(cfg.crash_notify_on_startup, "value", True))
                 for dump in dumps:
                     logger.warning(f"[CrashHandler] 检测到上次崩溃报告: {dump}")
+                    if not notify_enabled:
+                        logger.info("[CrashHandler] 用户已关闭进入时崩溃通知，跳过 InfoBar")
+                        # 同样改名标记已读，否则下次开启开关会被旧 dump 淹没
+                        try:
+                            dump.rename(dump.with_name(dump.name + ".reported"))
+                        except Exception:
+                            pass
+                        continue
                     prompt_crash_report(dump, parent=tm)
             except Exception:
                 pass

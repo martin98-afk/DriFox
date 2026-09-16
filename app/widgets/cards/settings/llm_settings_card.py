@@ -796,6 +796,16 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         notify_layout.addWidget(self.llmSoundCard)
+
+        # 进入时崩溃通知
+        self.crashNotifyCard = SwitchSettingCard(
+            get_icon("提示"),
+            "崩溃通知",
+            "检测到上次异常退出时弹出提示横幅",
+            configItem=self.cfg.crash_notify_on_startup,
+            parent=self,
+        )
+        notify_layout.addWidget(self.crashNotifyCard)
         notify_layout.addStretch(1)
 
         # ════ 外观样式页 ════

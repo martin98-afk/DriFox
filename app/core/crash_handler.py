@@ -414,6 +414,7 @@ def prompt_crash_report(dump_path: Path, parent=None) -> None:
     try:
         from PyQt5.QtCore import Qt, QUrl
         from PyQt5.QtGui import QDesktopServices
+        from PyQt5.QtWidgets import QHBoxLayout, QWidget
         from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PushButton
 
         dump_path = Path(dump_path)
@@ -440,13 +441,37 @@ def prompt_crash_report(dump_path: Path, parent=None) -> None:
             parent=parent,
         )
         open_btn = PushButton("打开报告目录")
+        mute_btn = PushButton("后续不再显示")
 
         def _open_report_dir() -> None:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent)))
             bar.close()
 
+        def _mute_crash_notifications() -> None:
+            # 关闭「进入时崩溃通知」开关并立即落盘，后续启动不再弹横幅。
+            # 与系统设置里的开关共用同一配置项，关闭后用户仍可在设置中重新开启。
+            try:
+                from app.utils.config import Settings
+
+                cfg = Settings.get_instance()
+                cfg.crash_notify_on_startup.value = False
+                cfg.save()
+                logger.info("[CrashHandler] 用户已在崩溃横幅上关闭进入时崩溃通知")
+            except Exception:
+                logger.warning("[CrashHandler] 关闭崩溃通知开关失败", exc_info=True)
+            bar.close()
+
         open_btn.clicked.connect(_open_report_dir)
-        bar.addWidget(open_btn)
+        mute_btn.clicked.connect(_mute_crash_notifications)
+        # 按钮容器：弹性空间在左、按钮在右，匹配现代弹窗的「行动按钮右对齐」习惯。
+        btn_row = QWidget(bar)
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(mute_btn)
+        btn_layout.addWidget(open_btn)
+        bar.addWidget(btn_row)
         bar.show()
         # 报告已告知 → 重命名标记已读：文件保留供排查（崩溃证据不可再生），
         # 后缀变化使 check_pending_crashes 不再命中，避免重复提示
