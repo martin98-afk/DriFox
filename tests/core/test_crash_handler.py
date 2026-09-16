@@ -15,6 +15,7 @@ from app.core.crash_handler import (
     _ANOMALY_KEEP,
     _CLEAN_EXIT_MARK,
     EXCEPTION_MARK,
+    VEH_MARK,
     _is_noise_exception,
     _mark_clean_exit,
     _nearby_wer_dump,
@@ -60,19 +61,20 @@ def test_reported_suffix_not_matched(tmp_path):
     assert check_pending_crashes(logs) == []
 
 
-def test_clean_exit_dump_cleared(tmp_path):
+def test_clean_exit_dump_kept(tmp_path):
+    """clean-exit 标记文件保留不删（T16 证据保全：不误删，宁可留白）。"""
     logs = tmp_path / "logs"
     f = _make_dump(logs / "crash", "crash_1.log", f"{_CLEAN_EXIT_MARK}\n")
     assert check_pending_crashes(logs) == []
-    assert not f.exists()
+    assert f.exists()
 
 
-def test_empty_dump_cleared_not_reported(tmp_path):
-    """空文件 = taskkill 强杀/断电（faulthandler 未触发），静默清理不误报。"""
+def test_empty_dump_kept_not_reported(tmp_path):
+    """空文件 = taskkill 强杀/断电（faulthandler 未触发）：不报告也不删（证据保全）。"""
     logs = tmp_path / "logs"
     f = _make_dump(logs / "crash", "crash_1.log", "")
     assert check_pending_crashes(logs) == []
-    assert not f.exists()
+    assert f.exists()
 
 
 def test_all_pending_returned_oldest_first(tmp_path):
@@ -96,12 +98,29 @@ def test_clean_exit_mark_does_not_mask_real_crash(tmp_path):
     assert check_pending_crashes(logs) == [dump]
 
 
-def test_dump_without_exception_section_cleared(tmp_path):
-    """只有 Qt 杂项文本、无异常段的文件不算崩溃，就地清理。"""
+def test_dump_without_exception_section_kept(tmp_path):
+    """只有 Qt 杂项文本、无异常段的文件不算崩溃：保留不删（证据保全）。"""
     logs = tmp_path / "logs"
     f = _make_dump(logs / "crash", "crash_1.log", "some startup noise\nno fault here\n")
     assert check_pending_crashes(logs) == []
-    assert not f.exists()
+    assert f.exists()
+
+
+def test_veh_mark_dump_reported_not_deleted(tmp_path):
+    """P0 防护：含 VEH 捕获器标记的 crash_*.log 必须命中崩溃报告且不被删除。
+
+    VEH 产物（[DRIFOX VEH v2] 开头）与 faulthandler 产物同名同目录，但不含
+    EXCEPTION_MARK；旧判定会把它当空文件静默删除，丢掉 0xC0000409 等只有
+    VEH 能拿到的真崩溃现场。
+    """
+    logs = tmp_path / "logs"
+    dump = _make_dump(
+        logs / "crash",
+        "crash_20260916_120000_pid_123.log",
+        f"{VEH_MARK} v2] native crash captured\ntime=... pid=... tid=...\n",
+    )
+    assert check_pending_crashes(logs) == [dump]
+    assert dump.exists()
 
 
 # ========== 非致命 SEH 噪声分流 ==========
@@ -215,13 +234,14 @@ def test_wer_configures_registry(tmp_path, monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "winreg", fake)
     crash_dir = tmp_path / "crash"
     result = _setup_wer_localdumps(crash_dir)
+    assert result is not None
     assert result == crash_dir / "dumps"
     assert result.is_dir()
     paths = [c[0] for c in fake.calls]
     assert all("LocalDumps" in p for p in paths)
     values = {c[1]: (c[2], c[3]) for c in fake.calls}
-    assert values["DumpType"] == (_FakeWinReg.REG_DWORD, 1)
-    assert values["DumpCount"] == (_FakeWinReg.REG_DWORD, 5)
+    assert values["DumpType"] == (_FakeWinReg.REG_DWORD, 2)
+    assert values["DumpCount"] == (_FakeWinReg.REG_DWORD, 50)
     assert values["DumpFolder"][1] == str(crash_dir / "dumps")
 
 

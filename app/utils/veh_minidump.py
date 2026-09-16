@@ -31,6 +31,7 @@ import os
 import sys
 import time
 import ctypes
+from pathlib import Path
 from ctypes import (
     WINFUNCTYPE,
     Structure,
@@ -78,7 +79,11 @@ MAX_PY_STACK_DEPTH = 80
 MAX_PY_THREADS = 24
 
 # MiniDump type: Normal | WithIndirectlyReferencedMemory | WithUnloadedModules
-MiniDumpType = 0x40 | 0x20
+# T17：+ WithProcessThreadData(0x100，含全部线程栈内存)
+#      + WithThreadInfo(0x1000，线程时间/起始地址)
+# 之前实测 72KB 的 dmp 仅模块表，无法看线程现场。WithFullMemory(0x2) 不加：
+# 单份 dmp 会随进程提交内存膨胀到数百 MB，与 DumpCount=50 组合不可承受。
+MiniDumpType = 0x40 | 0x20 | 0x0100 | 0x1000
 
 
 class EXCEPTION_RECORD(Structure):
@@ -166,11 +171,15 @@ def _now_str():
 
 
 def _crash_dir():
-    d = os.environ.get("DRIFOX_CRASH_DIR") or os.path.join("logs", "crash")
+    # 绝对化（T16 P4）：服务/打包场景下进程 cwd 不一定是项目根，相对路径
+    # 会把取证产物写进意外目录，崩溃后找不到。以 Path(os.getcwd()) 为基准
+    # 固定为绝对路径，行为与旧相对路径在正常启动下等价。
+    base = Path(os.getcwd())
+    d = os.environ.get("DRIFOX_CRASH_DIR") or str(base / "logs" / "crash")
     try:
         os.makedirs(d, exist_ok=True)
     except Exception:
-        d = "."
+        d = str(base)
     return d
 
 

@@ -105,10 +105,20 @@ def main():
 
     _sm_seg = _sm_time.perf_counter()
 
-    def _smark(label: str) -> None:
+    def _smark(label: str, level: str = "debug") -> None:
+        """启动分段打点。
+
+        [T29 C1] level 参数：关键分界点（壳可见 / import 完成 / 首窗就绪）用
+        "info" 提升可见性——普通用户的默认日志级别即可看到启动耗时分布，
+        无需开 DEBUG。
+        """
         nonlocal _sm_seg
         _now = _sm_time.perf_counter()
-        logger.debug(f"[StartupMark] {label} 耗时 {(_now - _sm_seg) * 1000:.0f}ms")
+        msg = f"[StartupMark] {label} 耗时 {(_now - _sm_seg) * 1000:.0f}ms"
+        if level == "info":
+            logger.info(msg)
+        else:
+            logger.debug(msg)
         _sm_seg = _now
 
     if _qt_pp: 
@@ -158,6 +168,43 @@ def main():
     # ========== 延迟启动的非关键 I/O 操作 ==========
     # 以下操作不阻塞首帧渲染，放到一次性定时器中执行
 
+    # [T24 R4] 日志 + 原生崩溃捕获前置（壳显示后立即执行；幂等）。
+    # 背景：setup_logging / faulthandler 原在 _deferred_startup 中（事件循环后），
+    # 而 T7 把 main_widget 级联 import 移进了 _show_popup —— 壳已显示但 import
+    # 期间（~3s）若崩溃，既无日志也无 dump，构成取证盲窗。现在提前到 tm.show()
+    # 之后立即执行；_deferred_startup 中保留同函数调用（幂等，覆盖其它路径）。
+    _early_forensics_state = {"done": False}
+
+    def _setup_early_forensics():
+        """启用日志与 faulthandler（幂等）。
+
+        顺序：数据迁移 → 日志 → 崩溃捕获。迁移必须先于日志——打包版迁移会
+        rmtree 目标目录后重建，若日志先开，句柄会指向被删除的文件。
+        """
+        if _early_forensics_state["done"]:
+            return
+        _early_forensics_state["done"] = True
+        try:
+            from app.utils.utils import migrate_app_data_if_needed
+
+            migrate_app_data_if_needed()
+        except Exception:
+            logger.exception("[EarlyForensics] migrate_app_data_if_needed 失败")
+        try:
+            from app.core.logging_setup import setup_logging
+            from app.utils.utils import get_app_data_dir
+
+            setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
+        except Exception:
+            pass
+        try:
+            from app.core.crash_handler import install_crash_handler
+            from app.utils.utils import get_app_data_dir
+
+            install_crash_handler(get_app_data_dir() / "logs")
+        except Exception:
+            pass
+
     def _deferred_startup():
         """在事件循环启动后执行的非关键初始化"""
         # 分段计时：本函数整体在主线程串行执行，任一步骤拖慢都会顺延后续步骤
@@ -174,35 +221,12 @@ def main():
 
         _mark("enter")
 
-        # 迁移旧版本数据
-        try:
-            from app.utils.utils import migrate_app_data_if_needed
-
-            migrate_app_data_if_needed()
-        except Exception:
-            logger.exception("[DeferredStartup] migrate_app_data_if_needed 失败")
-        _mark("migrate_app_data")
-
-        # 设置日志（全量 all.log + 按子系统拆分的分文件，见 app/core/logging_setup.py）
-        try:
-            from app.core.logging_setup import setup_logging
-            from app.utils.utils import get_app_data_dir
-
-            setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
-        except Exception:
-            pass
-        _mark("setup_logging")
-
-        # 原生崩溃捕获（faulthandler）：Qt/C++ 层段错误不经过 Python excepthook，
-        # 打包版表现为「闪退且 all.log 无任何记录」。启用后崩溃栈 dump 到
-        # logs/crash/，下次启动由 crash_handler.check_pending_crashes 检测并弹窗。
-        try:
-            from app.core.crash_handler import install_crash_handler
-            from app.utils.utils import get_app_data_dir
-
-            install_crash_handler(get_app_data_dir() / "logs")
-        except Exception:
-            pass
+        # [T24 R4] 迁移/日志/崩溃捕获已提前到壳显示后（_setup_early_forensics，
+        # 见 _show_popup 内调用）。此处保留兜底调用：非 _show_popup 启动路径
+        # （如测试直接调 _deferred_startup）仍需保证日志与 faulthandler 就绪；
+        # 幂等 → 已执行过则为空操作。
+        _setup_early_forensics()
+        _mark("early_forensics(fallback)")
 
         # 同步开机自启注册表状态
         try:
@@ -360,12 +384,38 @@ def main():
     from app.core.single_instance import SingleInstanceGuard
     from app.utils.config import Settings
 
+    # [T24 R2] 二次启动 show 请求的接入口必须在拿到单实例锁后**立即**注册。
+    # 此前注册在 _show_popup 末尾（首窗 add_window 之后）：T7 把 main_widget
+    # 级联 import（~3s）后移到该点之前，窗口期内的二次启动请求会因
+    # show_requested 无接收者而静默丢弃（用户感知：双击图标无反应）。
+    # 现在改为：锁即注册；窗口未就绪时先记 pending，首窗就绪后补激活。
+    _show_window_state: dict = {"window": None, "wanted": False}
+
+    def _activate_window(window):
+        """激活窗口：显示 + 置前 + 还原"""
+        window.show()
+        window.activateWindow()
+        window.raise_()
+        if window.isMinimized():
+            window.showNormal()
+
+    def _on_show_requested():
+        """二次启动 show 请求：窗口就绪则激活，未就绪先记 pending（T24 R2）。"""
+        win = _show_window_state["window"]
+        if win is None:
+            _show_window_state["wanted"] = True
+            return
+        _activate_window(win)
+
     _guard = SingleInstanceGuard("Drifox")
     # 开关关闭时不取锁，允许多实例并行（改动重启生效）
     if Settings.get_instance().enable_single_instance.value and not _guard.try_lock():
         _guard.request_show_window()
         _guard.cleanup()
         return
+
+    # [T24 R2] 锁就绪 → 立即接上 show 请求入口，覆盖后续 import 窗口期
+    _guard.show_requested.connect(_on_show_requested)
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
@@ -401,9 +451,6 @@ def main():
     from PyQt5.QtWidgets import QWidget
 
     _smark("pre_import（单实例/主题/字体）")
-    from app.main_widget import OpenAIChatToolWindow
-
-    _smark("import_main_widget")
 
     class FakePage(QWidget):
         def __init__(self):
@@ -441,14 +488,6 @@ def main():
     fake_page = FakePage()
     _smark("fake_page")
 
-    def _activate_window(window):
-        """激活窗口：显示 + 置前 + 还原"""
-        window.show()
-        window.activateWindow()
-        window.raise_()
-        if window.isMinimized():
-            window.showNormal()
-
     def _show_popup():
         from app.utils.config import Settings
 
@@ -480,10 +519,30 @@ def main():
         # 输入按钮）全部缺失。
         tm.show()
         tm.show_boot_placeholder()
+        # [T24 R6] 同步重绘一次，让壳在 import 阻塞前真正画出来。
+        # show() 是异步的（实际绘制等事件循环的 expose），而紧随其后的
+        # main_widget 级联 import 会阻塞主线程 ~3s，期间事件循环不跑 →
+        # 窗口始终未绘制（用户看到白屏/空窗而非「正在准备会话…」）。
+        # repaint() 强制同步绘制当前帧且**不处理事件队列**：
+        # - 方案 a（processEvents）实测会吸入 _deferred_startup 的 singleShot(0)，
+        #   使其在 _show_popup 中途重入执行（打断启动时序约束），故不采用；
+        # - 方案 b（占位文本前置）实测无效：占位在 show 前后设置都一样，
+        #   回调内 paintEvent 根本不被调用（paint 必须等事件循环）。
+        # 兜底：repaint 异常不影响启动主流程。
+        try:
+            tm.repaint()
+        except Exception:
+            pass
+        # [T24 R4] 壳已可见 → 立即启用日志与崩溃捕获，缩小 import 期的取证盲窗
+        _setup_early_forensics()
+        _smark("early_forensics")
+        # [T29 C1] 关键分界点：壳可见 + 日志/崩溃捕获已就绪（import 盲窗已消除）。
+        # info 级别：普通用户日志即可看到「壳可见 → 首窗就绪」的耗时分布。
+        _smark("shell_visible_after_logging", level="info")
         from app.core.gateway_service import GatewayService
         from app.core.plugin_host_service import PluginHostService
 
-        _smark("shell_show")
+        _smark("shell_show", level="info")
         GatewayService.get_instance().ensure_started()
         PluginHostService.get_instance().ensure_started()
         _smark("app_services_start")
@@ -491,12 +550,26 @@ def main():
 
         preheat_process_level()
         _smark("preheat_process")
+        # [PERF T7] 巨型 import 后移：main_widget 级联 import（message_card/cards/
+        # tab_manager_window/qfluentwidgets，历史实测 ~3s）原在顶层，挡住启动壳；
+        # 现移到壳显示 + 应用级服务启动 + 进程级预热之后、首窗构造前。
+        # 时序安全：WebEngine 已在启动早期预导入；首窗构造本就要求在
+        # ensure_started/preheat 之后（见上方时序约束注释），import 与首窗
+        # 构造同属此节点，无新增顺序依赖。
+        from app.main_widget import OpenAIChatToolWindow
+
+        _smark("import_main_widget", level="info")
         chat_window = OpenAIChatToolWindow(fake_page)
-        _smark("first_chat_window")
+        _smark("first_chat_window", level="info")
         tm.add_window(chat_window)
         tm.remove_boot_placeholder()
         tm._mark_first_window_ready()
-        _guard.show_requested.connect(lambda: _activate_window(tm))
+        # [T24 R2] 窗口就绪 → 登记到共享状态；若 import 窗口期已有二次启动请求
+        # （_on_show_requested 记了 pending），此处立即补激活，不再静默丢失。
+        _show_window_state["window"] = tm
+        if _show_window_state["wanted"]:
+            _show_window_state["wanted"] = False
+            _activate_window(tm)
         logger.info("DriFox 以 Tab 管理器模式启动（壳先行 + 进程级预热）")
 
         # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。

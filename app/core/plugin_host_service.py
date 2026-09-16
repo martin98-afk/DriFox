@@ -112,6 +112,12 @@ class PluginHostService(QObject):
         self._hot_reload_requested.connect(self._on_hot_reload_requested)
 
         # 生命周期标志（原 backend 引用计数体系随寄生一起废除——服务与 app 同寿）
+        # [T31] 延迟队列 + LSP 幂等兜底（LspManager.initialize 的守卫在传入
+        # 非空 lsp_configs 时不生效，见 _deferred_init_lsp docstring）
+        self._deferred_queue = None
+        self._pm_for_deferred = None
+        self._deferred_once_lock = threading.Lock()
+        self._lsp_initialized_once = False
         logger.info("[PluginHost] 已创建（应用级单例）")
 
     def ensure_started(self) -> None:
@@ -126,7 +132,15 @@ class PluginHostService(QObject):
         self._init_plugin_system()
 
     def stop(self) -> None:
-        """停止 watcher 线程（应用退出时由 TabManagerWindow.cleanup 调用）"""
+        """停止 watcher 线程 + 延迟队列（应用退出时由 TabManagerWindow.cleanup 调用）"""
+        # [T31 改动4] 先停延迟队列：未执行的 idle 任务静默丢弃，避免退出期
+        # 泵循环继续调任务体（可能 spawn 线程 / 连网络）。
+        queue = getattr(self, "_deferred_queue", None)
+        if queue is not None:
+            try:
+                queue.stop("plugin_host_stop")
+            except Exception as e:
+                logger.warning(f"[PluginHost] 延迟队列 stop failed: {e}")
         try:
             self._stop_plugin_watcher()
         except Exception as e:
@@ -186,117 +200,203 @@ class PluginHostService(QObject):
             logger.error(f"[PluginHost] PluginManager 初始化失败: {e}")
 
     def _defer_non_critical_plugin_init(self, pm):
-        """非关键插件初始化：主题/LSP/热更新，延迟执行不阻塞 UI"""
-        # 使用 QTimer 延迟执行（backend 提供 _deferred_timer 供调用方关联到 Qt 事件循环）
-        from PyQt5.QtCore import QTimer
+        """非关键插件初始化：主题/LSP/热更新，延迟执行不阻塞 UI。
 
-        def _do_deferred():
-            # 内置组件 reloader 注册（幂等，进程一次 — chat_backend.py 顶层注册表
-            # 可能在 ChatBackend 之前已被其他模块 import kernel 注册过，幂等保护）
-            try:
-                from app.plugins.builtin_reloaders import bind_runtime, register_builtin_reloaders
-                from app.plugins.kernel import get_reloader_registry
+        [PERF T31] 原实现是 `QTimer.singleShot(2000, _do_deferred)` 里 ~1.03s
+        的**主线程无 yield 串行段**（10 个 try 块背靠背执行）：这 1s 内事件循环
+        完全停摆，用户拖窗口/滚动/输入全部无响应（一级瓶颈）。
+        现拆入 `DeferredTaskQueue`（idle 优先级 + delay_ms=2000 对齐原语义）：
+        每项执行后 yield 一次事件循环，交互性恢复；同时保留三条关键保序
+        （见下方 add_order_constraint 注释）与逐项计时日志。
+        """
+        from app.core.deferred_task_queue import DeferredTaskQueue
 
-                bind_runtime(self._agent_manager)
-                register_builtin_reloaders(get_reloader_registry())
-            except Exception as e:
-                logger.error(f"[PluginHost] 内置 reloader 注册失败: {e}")
+        self._pm_for_deferred = pm
+        queue = DeferredTaskQueue()
+        self._deferred_queue = queue
+        queue.register("reloader", self._deferred_register_reloaders, delay_ms=2000)
+        queue.register("themes", self._deferred_reload_themes, delay_ms=2000)
+        queue.register("watcher", self._deferred_start_watcher, delay_ms=2000)
+        queue.register("plugin_tools_rescan", self._deferred_rescan_plugin_tools, delay_ms=2000)
+        queue.register("provider_warmup", self._deferred_warmup_providers, delay_ms=2000)
+        queue.register("runtime_components", self._deferred_warmup_runtime_components, delay_ms=2000)
+        queue.register("gateway_sync", self._deferred_sync_gateway_platforms, delay_ms=2000)
+        queue.register("lsp_init", self._deferred_init_lsp, delay_ms=2000)
+        queue.register("mcp_discover", self._deferred_discover_mcp, delay_ms=2000)
+        queue.register("mcp_connect", self._deferred_connect_mcp, delay_ms=2000)
 
-            # 刷新主题
-            try:
-                self._reload_themes_from_plugins()
-            except Exception as e:
-                logger.error(f"[PluginHost] 延迟主题刷新失败: {e}")
+        # 保序约束（T14 代码证据）：
+        # 1) reloader → watcher：watcher 首轮扫描会触发热重载分类，需要 reloader
+        #    注册表已就绪（否则新插件识别路径缺 builtin 重载器）。
+        # 2) runtime_components → gateway_sync：gateway 平台由 runtime component
+        #    loader 注册进 registry（warmup 未完成时 sync_platforms 看不到平台，
+        #    漏启连接）。
+        # 3) mcp_discover → mcp_connect：连接前必须先完成发现（发现结果决定连接目标）。
+        queue.add_order_constraint("reloader", "watcher")
+        queue.add_order_constraint("runtime_components", "gateway_sync")
+        queue.add_order_constraint("mcp_discover", "mcp_connect")
 
-            # 启动插件文件变更监听（热更新，仅启动一次）
-            try:
-                self._start_plugin_watcher()
-            except Exception as e:
-                logger.error(f"[PluginHost] 延迟启动插件监听失败: {e}")
+        # 逐项计时：定位队列内慢项（每项 yield 后单测耗时才有意义）
+        self._wrap_deferred_timings(queue)
 
-            # 插件工具按启用状态对齐重扫：工具加载发生在 import 期（早于 pm.initialize），
-            # 彼时新插件尚未被 _restore_enabled_from_settings 补齐到 enabled 列表 →
-            # 新装插件工具被过滤；pm.initialize 已在此前完成，重扫后
-            # 新安装插件工具注册、被禁用插件工具注销，两边同时正确。
-            try:
-                from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
+        logger.debug(f"[PluginHost-Deferred] 队列已注册 {len(queue._tasks)} 项（idle, delay=2000ms）")
+        queue.start()
 
-                watcher = ensure_plugin_tool_watcher()
-                if watcher is not None:
-                    watcher.scan_now()
-            except Exception as e:
-                logger.error(f"[PluginHost] 插件工具启用状态对齐重扫失败: {e}")
+    def _wrap_deferred_timings(self, queue) -> None:
+        """给队列内每个任务包一层耗时计时（T31 改动3）。
 
-            # 服务商插件（providers）：延迟初始化加载 + 热重载 watcher
-            # （与工具插件并列；服务商核心数据在 UI 初始化前就绪）
-            try:
-                from app.plugins.loaders.provider_loader import ensure_provider_watcher
-                from app.plugins.registries.provider_registry import ProviderRegistry
+        包在 ``fn`` 外层而非改写各私有方法：计时是横切关注点，且队列任务名
+        与实际方法一一对应，日志可直接对号入座。
+        """
+        for task in queue._tasks.values():
+            inner = task.fn
 
-                ProviderRegistry.get_instance().ensure_loaded()
-                pwatcher = ensure_provider_watcher()
-                if pwatcher is not None:
-                    pwatcher.scan_now()
-            except Exception as e:
-                logger.error(f"[PluginHost] 服务商插件初始化失败: {e}")
+            def timed(_inner=inner, _name=task.name):
+                t0 = time.perf_counter()
+                try:
+                    _inner()
+                finally:
+                    logger.debug(f"[PluginHost-Deferred] {_name} 耗时 {(time.perf_counter() - t0) * 1000:.0f}ms")
 
-            # 运行时组件（model_adapters / loop_policies / storages）：
-            # 内置实现先注册，插件目录可覆盖内置
-            try:
-                from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+            task.fn = timed
 
-                warmup_runtime_components()
-            except Exception as e:
-                logger.error(f"[PluginHost] 运行时组件 warmup 失败: {e}")
+    # ── 延迟任务项（原 _do_deferred 内 10 个 try 块，逐块提取） ──
 
-            # gateway 平台此时才注册进 registry（warmup 晚于 GatewayService
-            # ensure_started 的 start_all_async → 启动期平台漏启）。注册完成后
-            # 补一次同步：对"已注册 + 已启用 + 未连接"的平台补启连接（幂等）。
-            # 修复：初始化时已启用的 gateway 插件必须手动关闭/打开才连接。
-            try:
-                from app.core.gateway_service import GatewayService
+    def _deferred_register_reloaders(self):
+        """内置组件 reloader 注册（幂等，进程一次 — 顶层注册表可能在
+        PluginHostService 之前已被其他模块 import kernel 注册过，幂等保护）"""
+        try:
+            from app.plugins.builtin_reloaders import bind_runtime, register_builtin_reloaders
+            from app.plugins.kernel import get_reloader_registry
 
-                GatewayService.get_instance().sync_platforms()
-            except Exception as e:
-                logger.error(f"[PluginHost] gateway 平台补启失败: {e}")
+            bind_runtime(self._agent_manager)
+            register_builtin_reloaders(get_reloader_registry())
+        except Exception as e:
+            logger.error(f"[PluginHost] 内置 reloader 注册失败: {e}")
 
-            # 初始化 LSP 管理器（仅首次，多窗口共享单例）
-            try:
-                from app.core.lsp.lsp_manager import get_lsp_manager
+    def _deferred_reload_themes(self):
+        """刷新主题"""
+        try:
+            self._reload_themes_from_plugins()
+        except Exception as e:
+            logger.error(f"[PluginHost] 延迟主题刷新失败: {e}")
 
-                lsp_mgr = get_lsp_manager()
-                lsp_configs = pm.get_lsp_configs()
-                # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
-                lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
-                workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                lsp_mgr.initialize(workdir, lsp_configs)
-                logger.info(f"[PluginHost] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
-                # 按需启动：不再批量预热。所有 LSP 消费接口（lsp_tools 的
-                # diagnostics/symbols/definition/references/hover 等操作，
-                # 经 LspManager 的 sync_get_diagnostics/sync_hover/
-                # sync_go_to_definition 等方法提交）调用前均会经
-                # _ensure_started 自动拉起对应 server，
-                # 避免启动窗口 6+ 个 LSP 子进程集中 spawn（性能优化 T5-1）。
-                # 插件热重载场景（_reload_all_plugin_subsystems）仍主动 start_all_background。
-            except Exception as e:
-                logger.error(f"[PluginHost] LSP 延迟初始化失败: {e}")
+    def _deferred_start_watcher(self):
+        """启动插件文件变更监听（热更新，仅启动一次）"""
+        try:
+            self._start_plugin_watcher()
+        except Exception as e:
+            logger.error(f"[PluginHost] 延迟启动插件监听失败: {e}")
 
-            # MCP 自动发现（仅首次）+ 建立连接（后台异步，不阻塞 UI）。
-            # 修复：aa8f7a6b 重构把 _discover_mcp_servers/_init_mcp_connections 迁入
-            # PluginHostService 时调用点丢失（原 ChatBackend 延迟创建尾部两段 try），
-            # 启动后已启用的 MCP 服务器不会自动连接（须手动关闭+开启才启动）。
-            # 与上方 gateway sync_platforms() 补启同构。
-            try:
-                self._discover_mcp_servers()
-            except Exception as e:
-                logger.error(f"[PluginHost] MCP 自动发现失败: {e}")
-            try:
-                self._init_mcp_connections()
-            except Exception as e:
-                logger.error(f"[PluginHost] MCP 连接初始化失败: {e}")
+    def _deferred_rescan_plugin_tools(self):
+        """插件工具按启用状态对齐重扫：工具加载发生在 import 期（早于
+        pm.initialize），彼时新插件尚未被 _restore_enabled_from_settings 补齐到
+        enabled 列表 → 新装插件工具被过滤；pm.initialize 已在此前完成，重扫后
+        新安装插件工具注册、被禁用插件工具注销，两边同时正确。"""
+        try:
+            from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
-        # 延迟 2 秒执行，让窗口首帧 + 用户交互先就绪
-        QTimer.singleShot(2000, _do_deferred)
+            watcher = ensure_plugin_tool_watcher()
+            if watcher is not None:
+                watcher.scan_now()
+        except Exception as e:
+            logger.error(f"[PluginHost] 插件工具启用状态对齐重扫失败: {e}")
+
+    def _deferred_warmup_providers(self):
+        """服务商插件（providers）：延迟初始化加载 + 热重载 watcher
+        （与工具插件并列；服务商核心数据在 UI 初始化前就绪）"""
+        try:
+            from app.plugins.loaders.provider_loader import ensure_provider_watcher
+            from app.plugins.registries.provider_registry import ProviderRegistry
+
+            ProviderRegistry.get_instance().ensure_loaded()
+            pwatcher = ensure_provider_watcher()
+            if pwatcher is not None:
+                pwatcher.scan_now()
+        except Exception as e:
+            logger.error(f"[PluginHost] 服务商插件初始化失败: {e}")
+
+    def _deferred_warmup_runtime_components(self):
+        """运行时组件（model_adapters / loop_policies / storages）：
+        内置实现先注册，插件目录可覆盖内置"""
+        try:
+            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+            warmup_runtime_components()
+        except Exception as e:
+            logger.error(f"[PluginHost] 运行时组件 warmup 失败: {e}")
+
+    def _deferred_sync_gateway_platforms(self):
+        """gateway 平台此时才注册进 registry（warmup 晚于 GatewayService
+        ensure_started 的 start_all_async → 启动期平台漏启）。注册完成后补一次
+        同步：对"已注册 + 已启用 + 未连接"的平台补启连接（幂等）。
+        修复：初始化时已启用的 gateway 插件必须手动关闭/打开才连接。"""
+        try:
+            from app.core.gateway_service import GatewayService
+
+            GatewayService.get_instance().sync_platforms()
+        except Exception as e:
+            logger.error(f"[PluginHost] gateway 平台补启失败: {e}")
+
+    def _deferred_init_lsp(self):
+        """初始化 LSP 管理器（多窗口共享单例）。
+
+        [T31 现场核实结论] ``LspManager.initialize`` 的幂等守卫为
+        ``if self._initialized and self._clients and not lsp_configs: return``
+        ——本调用点传入非空 ``lsp_configs``（``pm.get_lsp_configs()`` 结果），
+        **该守卫不生效**：每次调用都会走完整重建（先 stop_all 旧客户端再重注册）。
+        run 期本方法只被 ``_defer_non_critical_plugin_init`` 调用，而后者在
+        ``_init_plugin_system`` 的「首次初始化」分支内、由 ``ensure_started``
+        幂等保护，进程内只执行一次 → **当前无重复初始化风险**。
+        为防未来新增调用点（窗口重开路径等）踩坑，此处加类级一次性标志兜底。
+        """
+        pm = self._pm_for_deferred
+        if pm is None:  # 防御：绕过 _defer_non_critical_plugin_init 的直接调用（正常路径必已赋值）
+            logger.warning("[PluginHost] LSP 延迟初始化缺少 PluginManager 引用，跳过")
+            return
+        with self._deferred_once_lock:
+            if self._lsp_initialized_once:
+                logger.debug("[PluginHost] LSP 已初始化过（类级标志），跳过")
+                return
+            self._lsp_initialized_once = True
+        try:
+            from app.core.lsp.lsp_manager import get_lsp_manager
+
+            lsp_mgr = get_lsp_manager()
+            lsp_configs = pm.get_lsp_configs()
+            # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
+            lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
+            workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            lsp_mgr.initialize(workdir, lsp_configs)
+            logger.info(f"[PluginHost] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
+            # 按需启动：不再批量预热。所有 LSP 消费接口（lsp_tools 的
+            # diagnostics/symbols/definition/references/hover 等操作，
+            # 经 LspManager 的 sync_get_diagnostics/sync_hover/
+            # sync_go_to_definition 等方法提交）调用前均会经
+            # _ensure_started 自动拉起对应 server，
+            # 避免启动窗口 6+ 个 LSP 子进程集中 spawn（性能优化 T5-1）。
+            # 插件热重载场景（_reload_all_plugin_subsystems）仍主动 start_all_background。
+        except Exception as e:
+            logger.error(f"[PluginHost] LSP 延迟初始化失败: {e}")
+
+    def _deferred_discover_mcp(self):
+        """MCP 自动发现（仅首次）。
+
+        修复：aa8f7a6b 重构把 _discover_mcp_servers/_init_mcp_connections 迁入
+        PluginHostService 时调用点丢失（原 ChatBackend 延迟创建尾部两段 try），
+        启动后已启用的 MCP 服务器不会自动连接（须手动关闭+开启才启动）。
+        与上方 gateway sync_platforms() 补启同构。"""
+        try:
+            self._discover_mcp_servers()
+        except Exception as e:
+            logger.error(f"[PluginHost] MCP 自动发现失败: {e}")
+
+    def _deferred_connect_mcp(self):
+        """MCP 建立连接（后台异步，不阻塞 UI）"""
+        try:
+            self._init_mcp_connections()
+        except Exception as e:
+            logger.error(f"[PluginHost] MCP 连接初始化失败: {e}")
 
     def _reload_themes_from_plugins(self):
         """插件系统初始化后，重新加载插件主题"""
@@ -468,9 +568,10 @@ class PluginHostService(QObject):
         claude_skills_dir = _Path.home() / ".claude" / "skills"
         claude_skills_dir.mkdir(parents=True, exist_ok=True)
         watch_paths.append(str(claude_skills_dir.resolve()))
-        claude_cache_dir = _Path.home() / ".claude" / "plugins" / "cache"
-        if claude_cache_dir.exists():
-            watch_paths.append(str(claude_cache_dir.resolve()))
+        # [T28 L2] 不再监听 ~/.claude/plugins/cache：该目录是插件安装缓存，
+        # 子目录数量大（句柄随子目录数增长），且其中的变更只反映「缓存写入」
+        # 而非「插件启用状态变化」，触发重载分类属无意义开销。
+        # 需要让缓存插件生效时走手动刷新（设置页刷新按钮）。
 
         if not watch_paths:
             logger.warning("[PluginHost] 无插件目录可监听，跳过热更新")

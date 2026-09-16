@@ -170,6 +170,7 @@ from app.widgets.render_helpers import (
     get_tool_qrc_prefix,
     render_tool_block,
 )
+from app.widgets.render_crash_queue import RenderCrashQueue
 from app.utils.session_preview import format_relative_time
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
@@ -5160,7 +5161,11 @@ class CodeWebViewer(QWebEngineView):
         self._min_render_interval = 80
         self._height_report_pending = False
         self._context_lost = False  # 上下文丢失标志
-        self._context_lost_count = 0  # 上下文丢失次数统计
+        # [T11] 恢复计数按信号源拆分：renderCrashed 与 JS webglcontextlost 各自累加，
+        # 互不叠加（单 renderer 崩溃会引发全量 viewer 的 webgl 集中上报，共享计数
+        # 会把第一次 renderCrashed 直接推过阈值 → 误入整卡重建风暴）。
+        self._render_crash_count = 0  # renderer 崩溃次数（阈值 >2 → needRecreate）
+        self._webgl_ctx_lost_count = 0  # JS webgl 上下文丢失次数（阈值 >1 → needRecreate）
         # 注：原 CodeWebViewer 的 _resize_debounce_timer(100ms) 与 _resize_timer(100ms)
         # 只被定义/连接、从未 start()，属死代码且误导排查，已移除。
         # resize 期间真正生效的防抖只剩下面的 _resize_unlock_timer(150ms)。
@@ -5360,11 +5365,11 @@ class CodeWebViewer(QWebEngineView):
         """JavaScript 报告上下文丢失"""
         if not self._context_lost:
             self._context_lost = True
-            self._context_lost_count += 1
+            self._webgl_ctx_lost_count += 1
             self.contextLost.emit()
 
             # 如果已经丢失超过1次，直接请求重建
-            if self._context_lost_count > 1:
+            if self._webgl_ctx_lost_count > 1:
                 self.needRecreate.emit()
                 return
 
@@ -5392,19 +5397,26 @@ class CodeWebViewer(QWebEngineView):
             self.needRecreate.emit()
 
     def _on_render_crashed(self):
-        """renderer 进程崩溃自愈：重载骨架补渲；连续崩溃（≥3 次）交重建。
+        """renderer 进程崩溃自愈：错峰排队恢复；连续崩溃（≥3 次）交重建。
 
-        复用 _context_lost_count 计数（与 webglcontextlost 共享阈值）：
-        单次崩溃重载骨架成本远低于整卡重建；反复崩溃说明环境级问题（如
-        显存枯竭），重建兜底。重载骨架后 vault/队列等 JS 状态随页面重置，
-        _schedule_render 补渲时图表按当前内容重新 init 一次。
+        计数专用 ``_render_crash_count``（不与 JS webgl 路径共享）：单次崩溃
+        重载骨架成本远低于整卡重建；反复崩溃说明环境级问题（如显存枯竭），
+        重建兜底。重载骨架后 vault/队列等 JS 状态随页面重置，补渲时图表按当前
+        内容重新 init 一次。
+
+        [T11 错峰] 单 renderer 承载全部卡片时，一次崩溃让所有卡片同帧收到本回调；
+        若各自即刻 ``_try_restore_context``，N 张卡的重载齐发会把刚重启的 Chromium
+        线程再次压垮（→ 0xC0000409 进程级死亡）。改交 ``RenderCrashQueue`` 排队，
+        每 500ms 只恢复一张（可见优先）。JS webgl 路径若先恢复（置
+        ``_context_lost=False``），队列下一拍自动剔除该条目，不会重复恢复。
         """
         logger.warning("WebEngine renderer 崩溃，触发卡片自愈")
-        self._context_lost_count += 1
-        if self._context_lost_count > 2:
+        self._render_crash_count += 1
+        if self._render_crash_count > 2:
             self.needRecreate.emit()
             return
-        self._try_restore_context()
+        self._context_lost = True
+        RenderCrashQueue.get_instance().enqueue(self)
 
     def event(self, event):
         """拦截 WebEngine 事件"""
@@ -5497,6 +5509,13 @@ class CodeWebViewer(QWebEngineView):
         self._restore_finished_ids = None
         self._resize_locked = False
         self._height_report_pending = False
+        # [T11] 复用前复位崩溃/上下文状态：计数器是「本 viewer 生命周期内」语义，
+        # 不清零会让崩溃过的 viewer 复用后被陈旧计数误判 → 无谓重建；
+        # 从崩溃队列移除（本页已重置，无需再自愈）。这是排队器正确性前置条件。
+        self._context_lost = False
+        self._render_crash_count = 0
+        self._webgl_ctx_lost_count = 0
+        RenderCrashQueue.get_instance().discard(self)
         self._document_height = 0
         self._body_client_height = 0
         self._body_scroll_top = 0
@@ -9828,7 +9847,10 @@ class CodeWebViewer(QWebEngineView):
     # 上方 150~500ms 的自适应节流形同虚设，退化为「每 chunk 一次 O(tail) 转换」
     # ——随消息长度呈 O(n²)，是「流式越到后面越卡」的主因。
     # 用最小间隔而非固定延迟，可在快速流式合并的同时保住慢速流式的即时观感。
-    _SOFT_BOUNDARY_MERGE_MS = 40
+    # [T28 L1] 40 → 100ms：40ms 窗口太窄，快速流式（chunk 间隔 ~20-50ms）下
+    # 大部分软边界仍落在窗口外 → 仍逐句重渲染。100ms 覆盖典型 chunk 间隔的
+    # 2-5 倍，合并生效且不拖慢慢速流式（慢速流式距上次渲染远超 100ms → 仍即时）。
+    _SOFT_BOUNDARY_MERGE_MS = 100
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
@@ -10195,9 +10217,11 @@ class CodeWebViewer(QWebEngineView):
             #
             # 背景：中文句号极密集，无脑 immediate 会让整个自适应节流失效并退化
             # 为 O(n²)；但一律延迟又会拖慢打字机观感（句子结束后格式迟迟不变）。
-            # 折中：只有「距上次渲染不足一个合并窗口」时才推迟到窗口末尾——
-            #   慢速流式（人能逐句阅读）→ 仍 immediate，观感与优化前一致；
-            #   快速流式（连续句号刷屏）→ 合并为窗口内一次，砍掉重复转换。
+            # 折中：只有「距上次渲染不足一个合并窗口（_SOFT_BOUNDARY_MERGE_MS，
+            # 现为 100ms）」时才推迟到窗口末尾——
+            #   慢速流式（人能逐句阅读，句间隔 >100ms）→ 仍 immediate，观感不变；
+            #   快速流式（连续句号刷屏，句间隔 <100ms）→ 合并为窗口内一次，
+            #   砍掉重复转换（实测该场景占流式时长的大头）。
             if self._has_reached_soft_boundary(self._markdown_text):
                 since_last_ms = (time.monotonic() - getattr(self, "_last_render_ts", 0.0)) * 1000
                 if since_last_ms < self._SOFT_BOUNDARY_MERGE_MS:
@@ -15419,6 +15443,8 @@ class MessageCard(SimpleCardWidget):
         v.chartExpandRequested.connect(self._on_chart_expand)
         v.saveChartPngRequested.connect(self._on_save_chart_png)
         v.saveWidgetFileRequested.connect(self._on_save_widget_file)
+        # 图片预览（T9-2）：池化路径漏连，非 user 卡片预览失灵存量 bug
+        v.previewImageRequested.connect(self._on_preview_image)
         # WebEngine 上下文丢失处理
         v.contextLost.connect(self._on_webengine_context_lost)
         v.contextRestored.connect(self._on_webengine_context_restored)
@@ -15441,6 +15467,7 @@ class MessageCard(SimpleCardWidget):
             (v.chartExpandRequested, self._on_chart_expand),
             (v.saveChartPngRequested, self._on_save_chart_png),
             (v.saveWidgetFileRequested, self._on_save_widget_file),
+            (v.previewImageRequested, self._on_preview_image),
             (v.contextLost, self._on_webengine_context_lost),
             (v.contextRestored, self._on_webengine_context_restored),
             (v.needRecreate, self._on_webengine_need_recreate),

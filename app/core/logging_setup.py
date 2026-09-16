@@ -112,7 +112,7 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     """配置全量日志 + 分系统日志 + 内存诊断日志。
 
     - ``all.log``：全量兜底，10 MB 轮转并保留历史，供跨系统时间线排查。
-    - 分文件：每日 0 点轮转，仅保留近一天，磁盘上基本只留当天。
+    - 分文件：每日 0 点轮转，仅保留近七天，方便跨周回溯崩溃前的日志链。
     - ``mem_diag.log``：内存诊断（消息含 ``[MEM]``），受 ``mem_diag_enabled`` 控制。
     """
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -130,7 +130,7 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
         logger.add(
             log_dir / file_name,
             rotation="00:00",
-            retention="1 day",
+            retention="7 days",
             level="DEBUG",
             format=LOG_FORMAT,
             filter=make_module_filter(include, exclude),

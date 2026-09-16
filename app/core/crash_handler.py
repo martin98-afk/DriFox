@@ -8,8 +8,10 @@ Python 层异常有 sys.excepthook / sys.unraisablehook 兜底（main.py），
 dump 并以 InfoBar 横幅告知报告位置，解决「闪退后无从排查」的问题。
 
 判定规则：
-- dump 文件含「Windows fatal exception」现场段 → 发生过原生崩溃，InfoBar 报告
-- 不含异常段（空文件 / 只有 clean-exit 标记）→ 正常退出或被强杀，静默清理
+- dump 文件含「Windows fatal exception」（faulthandler）或「[DRIFOX VEH」（VEH
+  捕获器）现场标记 → 发生过原生崩溃，InfoBar 报告
+- 未命中标记的文件一律保留（证据保全，不误删）——空文件也可能来自取证链
+  尚未覆盖的崩溃形态
 
 已提示确认的报告重命名为 *.log.reported（保留取证，不再提示）。
 
@@ -30,6 +32,11 @@ _CLEAN_EXIT_MARK = "=== clean exit ==="
 
 # faulthandler 落盘现场的固定开头，用作「发生过 SEH 异常」的唯一可箱证据
 EXCEPTION_MARK = "Windows fatal exception"
+
+# VEH 捕获器（app/utils/veh_minidump.py）落盘现场的开头标记。与 faulthandler
+# 产物同为 crash_*.log 命名模式，但不含 EXCEPTION_MARK；缺此判定时 VEH 记录的
+# 真崩溃（0xC0000409 等 faulthandler 拿不到的异常）会被误当空文件删除。
+VEH_MARK = "[DRIFOX VEH"
 
 # WER 报告根目录（ReportQueue/ReportArchive 存 AppCrash_<exe> 崩溃报告），
 # 模块常量便于测试 monkeypatch 重定向
@@ -77,8 +84,14 @@ def install_crash_handler(logs_dir: Path) -> Optional[Path]:
     try:
         import faulthandler
 
-        crash_dir = Path(logs_dir) / "crash"
+        crash_dir = Path(logs_dir).resolve() / "crash"
         crash_dir.mkdir(parents=True, exist_ok=True)
+        # 路径对齐（T24）：veh_minidump 的 dmp 走 _crash_dir()，打包版 cwd 是
+        # 安装目录（D:\...\Drifox）而 logs_dir 在 ~/.drifox/logs，两者不同源
+        # → VEH 的 .dmp 与 faulthandler 的 .log 分居两处，现场取证断裂
+        # （2026-09-16 实测复现）。此处写入环境变量强制统一，veh_minidump
+        # 读取优先级 DRIFOX_CRASH_DIR > cwd 推导，故安装后永远与 crash_dir 一致。
+        os.environ["DRIFOX_CRASH_DIR"] = str(crash_dir)
         stamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
         dump_path = crash_dir / f"crash_{stamp}.log"
         _crash_file = open(dump_path, "w", encoding="utf-8")
@@ -102,16 +115,19 @@ def install_crash_handler(logs_dir: Path) -> Optional[Path]:
 
 
 def _install_qt_message_logger(crash_dir: Path) -> None:
-    """安装 Qt 消息钩子：warning 及以上写入 crash_dir/qt_messages.log。
+    """安装 Qt 消息钩子：warning 及以上按日期写入 qt_messages_YYYYMMDD.log。
 
     qFatal（触发 0xC0000409 fastfail，如跨线程 QPixmap / 跨线程事件）的
     致命文本在 abort 前必经本钩子，落盘后即可按文本定位崩溃源头。
+    按日期分文件：单文件无轮转会无限膨胀，跨天自动切新文件，旧文件留档。
     """
     global _forensic_dir
     try:
         from PyQt5.QtCore import qInstallMessageHandler, QtMsgType
 
-        log_path = crash_dir / "qt_messages.log"
+        def _qt_log_path() -> Path:
+            return crash_dir / f"qt_messages_{time.strftime('%Y%m%d')}.log"
+
         _forensic_dir = crash_dir
 
         def _qt_handler(mode, context, message):
@@ -124,7 +140,7 @@ def _install_qt_message_logger(crash_dir: Path) -> None:
                     QtMsgType.QtFatalMsg: "FATAL",
                 }.get(mode, "?")
                 line = f"{time.strftime('%H:%M:%S')} [{label}] {message}\n"
-                with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                with open(_qt_log_path(), "a", encoding="utf-8", errors="replace") as f:
                     f.write(line)
                     if mode in (QtMsgType.QtFatalMsg, QtMsgType.QtCriticalMsg):
                         f.flush()
@@ -236,8 +252,10 @@ def _setup_wer_localdumps(crash_dir: Path) -> Optional[Path]:
         key_path = rf"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\{app_exe}"
         with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
             winreg.SetValueEx(key, "DumpFolder", 0, winreg.REG_EXPAND_SZ, str(dumps_dir))
-            winreg.SetValueEx(key, "DumpType", 0, winreg.REG_DWORD, 1)  # 1=minidump
-            winreg.SetValueEx(key, "DumpCount", 0, winreg.REG_DWORD, 5)
+            winreg.SetValueEx(
+                key, "DumpType", 0, winreg.REG_DWORD, 2
+            )  # 2=完整 dump（含线程栈/寄存器上下文/全模块；1=minidump 实测仅模块表无法定位）
+            winreg.SetValueEx(key, "DumpCount", 0, winreg.REG_DWORD, 50)
         return dumps_dir
     except Exception:
         return None
@@ -278,8 +296,8 @@ def check_pending_crashes(logs_dir: Path) -> list:
     """扫描 crash 目录，返回全部待报告的崩溃 dump（按崩溃时间从旧到新）。
 
     每份 dump 由 prompt_crash_report InfoBar 提示一次后重命名 .reported（改状态），
-    因此这里只收集尚未报告的；不含异常段的文件（空文件/仅 clean-exit 标记）
-    就地清理。
+    因此这里只收集尚未报告的；未命中崩溃标记的文件一律保留不删（证据保全，
+    空文件也可能是取证链未覆盖的崩溃形态，宁可留白不误删）。
 
     为何以「含异常段」而非「无 clean-exit 标记」为据：CPython 会把部分 SEH 异常
     （含原生 access violation）转成 Python 异常抛出，解释器随后走正常 shutdown，
@@ -298,10 +316,9 @@ def check_pending_crashes(logs_dir: Path) -> list:
                 content = f.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            if EXCEPTION_MARK in content:
+            if EXCEPTION_MARK in content or VEH_MARK in content:
                 pending.append(f)
-            else:
-                _silent_remove(f)
+            # 证据保全（T16 P0）：不再删除未命中标记的文件，杜绝误删真崩溃现场
         pending.sort(key=lambda p: p.stat().st_mtime)
         return pending
     except Exception:
@@ -388,19 +405,19 @@ def prompt_crash_report(dump_path: Path, parent=None) -> None:
             icon=InfoBarIcon.WARNING,
             title="检测到上次异常退出",
             content=content,
-            orient=Qt.Vertical,
+            orient=Qt.Orientation.Vertical,
             isClosable=True,
             position=InfoBarPosition.BOTTOM,
             duration=-1,
             parent=parent,
         )
         open_btn = PushButton("打开报告目录")
-        open_btn.clicked.connect(
-            lambda: (
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent))),
-                bar.close(),
-            )
-        )
+
+        def _open_report_dir() -> None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent)))
+            bar.close()
+
+        open_btn.clicked.connect(_open_report_dir)
         bar.addWidget(open_btn)
         bar.show()
         # 报告已告知 → 重命名标记已读：文件保留供排查（崩溃证据不可再生），
