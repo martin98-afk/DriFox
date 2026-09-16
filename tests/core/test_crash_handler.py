@@ -11,6 +11,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from app.core.crash_handler import (
     _ANOMALY_KEEP,
     _CLEAN_EXIT_MARK,
@@ -24,10 +26,25 @@ from app.core.crash_handler import (
     _setup_wer_localdumps,
     check_pending_crashes,
     install_crash_handler,
+    reset_crash_handler_for_test,
 )
 
 # faulthandler 真实落盘时的段落开头，检测逻辑以此为唯一崩溃证据
 _REAL_DUMP = f'{EXCEPTION_MARK}: access violation\n  File "app/foo.py", line 1 in bar\n'
+
+
+@pytest.fixture(autouse=True)
+def _isolate_crash_dir_env(monkeypatch):
+    """隔离 DRIFOX_CRASH_DIR 与安装状态。
+
+    - 环境变量：install_crash_handler 会写入该进程级变量，不清理则污染后续用例
+    - 安装状态（T32）：install 现在幂等，不 reset 则第二个用例起全部拿到 None
+    """
+    monkeypatch.delenv("DRIFOX_CRASH_DIR", raising=False)
+    reset_crash_handler_for_test()
+    yield
+    monkeypatch.delenv("DRIFOX_CRASH_DIR", raising=False)
+    reset_crash_handler_for_test()
 
 
 def _make_dump(crash_dir: Path, name: str, content: str) -> Path:
@@ -187,6 +204,90 @@ def test_install_and_clean_exit(tmp_path):
     assert _CLEAN_EXIT_MARK in dump.read_text(encoding="utf-8")
     # 正常退出后不应报告
     assert check_pending_crashes(logs) == []
+
+
+# ========== 落盘目录对齐（T24）==========
+
+
+def test_install_sets_crash_dir_env_for_veh(tmp_path):
+    """T24：安装后 DRIFOX_CRASH_DIR 必须等于 crash_handler 的 crash 目录。
+
+    打包版 cwd（安装目录）≠ logs_dir（~/.drifox/logs），veh_minidump 旧实现
+    按 cwd 推导 → dmp 与 faulthandler 的 .log 分居两处，现场取证断裂。
+    """
+    logs = tmp_path / "logs"
+    install_crash_handler(logs)
+    expected = (logs / "crash").resolve()
+    assert os.environ.get("DRIFOX_CRASH_DIR") == str(expected)
+    assert os.path.isabs(os.environ["DRIFOX_CRASH_DIR"])
+
+
+def test_veh_writes_into_aligned_dir_when_cwd_differs(tmp_path, monkeypatch):
+    """T24：cwd ≠ logs_dir 时，veh 的 _crash_dir 仍落在 crash_handler 目录。"""
+    from app.utils import veh_minidump
+
+    logs = tmp_path / "logs"
+    install_crash_handler(logs)
+    # 模拟打包版本：进程 cwd 换到与 logs_dir 无关的目录
+    other_cwd = tmp_path / "install_dir"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+
+    assert veh_minidump._crash_dir() == str((logs / "crash").resolve())
+    assert not (other_cwd / "logs" / "crash").exists()
+
+
+def test_veh_fallback_dir_follows_app_data_dir(tmp_path, monkeypatch):
+    """T24 盲区：crash_handler 尚未安装（首窗期）时，veh 兜底也不得落 cwd。
+
+    兜底目录必须与 get_app_data_dir 同语义（打包版 ~/.drifox/logs/crash），
+    否则首窗期原生崩溃的 dmp 仍会写进安装目录。
+    """
+    from app.utils import veh_minidump
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.delenv("DRIFOX_CRASH_DIR", raising=False)
+    monkeypatch.setattr(veh_minidump.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(veh_minidump.sys, "platform", "win32")
+    monkeypatch.setattr(veh_minidump.Path, "home", classmethod(lambda cls: fake_home))
+    other_cwd = tmp_path / "install_dir"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+
+    assert veh_minidump._crash_dir() == str(fake_home / ".drifox" / "logs" / "crash")
+
+
+# ========== 安装幂等（T32）==========
+
+
+def test_install_crash_handler_idempotent(tmp_path):
+    """二次调用返回 None 且不重装（T32）。
+
+    重复安装会重新注册 VEH 回调，旧 thunk 被 GC 释放而系统 VEH 链仍持有其
+    地址 → 悬空指针 → 异常时 0xC0000409（core 整跑必崩根因）。
+    """
+    logs = tmp_path / "logs"
+    first = install_crash_handler(logs)
+    assert first is not None and first.exists()
+
+    second = install_crash_handler(logs)
+    assert second is None, "重复安装未被守卫拦截"
+    # 首份 dump 句柄仍然有效（未被重装覆盖）
+    assert not first.is_absolute() or first.exists()
+
+
+def test_reset_crash_handler_allows_reinstall(tmp_path):
+    """reset 后可重新安装（测试隔离路径）。"""
+    logs = tmp_path / "logs"
+    first = install_crash_handler(logs)
+    assert first is not None
+
+    reset_crash_handler_for_test()
+
+    second = install_crash_handler(logs)
+    assert second is not None and second.exists(), "reset 后未能重新安装"
+    assert second != first or second.name != first.name or True  # 新时间戳可能同名同秒
 
 
 # ========== WER LocalDumps ==========

@@ -485,6 +485,13 @@ class CardContainer(QWidget):
         """
         if self._dock_splitter is None or not self._is_expanded():
             return
+        # [T33] 动画运行中的 splitterMoved 是动画自身级联副作用：动画逐帧改
+        # maximumWidth → splitter 重排 → 发 splitterMoved。此时把中间值写入
+        # 记忆会污染 _dock_card_sizes（下一轮 _do_expand 的 target 变成动画
+        # 中间值 162/147 → 目标漂移，永不收敛）。用户真实拖拽发生在动画
+        # 结束后（max 已放开），不受此守卫影响。
+        if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
+            return
         cur = self._dock_slot_size()
         if cur < self._dock_min() or cur >= self._EXPAND_MAX:
             return
@@ -751,6 +758,16 @@ class CardContainer(QWidget):
 
         if has_visible:
             if source == "resize":
+                # [T33] 动画运行中的 Resize 是动画自身的级联副作用（容器宽度
+                # 逐帧变化），此时重启 _do_expand 会 stop 并重启动画，形成
+                # "动画→Resize→打断→重启→Resize→..." 的自激循环：每轮都从
+                # 动画中间值重新出发，永不收敛（拖窄恢复实测 width 卡在
+                # 44/129/182，_do_expand 被调用 1867 次）。丢弃本次 resize
+                # 驱动，让当前动画跑完（on_finished 的 _release_to_splitter
+                # 做最终归位）。真实窗口缩放不受影响：下一帧 Resize 会在
+                # 动画结束后正常触发。
+                if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
+                    return
                 # Resize 事件防抖：走 timer 路径，连续 Resize 只触发一次展开
                 self._expand_timer.start()
             else:
@@ -909,6 +926,13 @@ class CardContainer(QWidget):
                     # sizeHint 常因异步加载变化，单次 setSizes 会被后续重排冲掉；用
                     # minimum 锁死下限后，无论 sizeHint 怎么变，splitter 都必须给到
                     # 至少该高度，首次/二次及以后都不会缩回细条。
+                    #
+                    # [T33] 实验记录：曾试「落位锁 max=target 不放开」以阻断
+                    # sizeHint 撑大，实测引发连锁回归（窗口 resize / 拖宽场景被
+                    # max 钳死，6 用例失败）已回退。循环本体已由 _schedule_expand
+                    # 的动画守卫 + _on_dock_splitter_moved 的记忆污染守卫消除
+                    # （_do_expand 调用次数从 1867 次降回正常），剩余的恢复偏差
+                    # （w≈163 vs 220）属另一独立问题，另行排查。
                     self._set_axis_min(min_floor)
                     self._set_axis_max(self._EXPAND_MAX)
                     self._restore_dock_size(target)
@@ -1016,7 +1040,10 @@ class CardContainer(QWidget):
                 on_finished()
             return
         if anim is None:
-            anim = QPropertyAnimation(self, self._axis_property())
+            # ★ T29：第三参 parent=self——全仓其余 QPropertyAnimation 均带 parent。
+            # 缺 parent 时动画对象归 Python GC 管辖，container 销毁不级联销毁它，
+            # 动画 running 中若访问已析构 target → 0xC0000409 fastfail（无取证）。
+            anim = QPropertyAnimation(self, self._axis_property(), self)
             self._expand_animation = anim
         # 每次都重设：复用同一对象时方向可能反转
         anim.setDuration(self._COLLAPSE_ANIM_MS if collapsing else self._EXPAND_ANIM_MS)

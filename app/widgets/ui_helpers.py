@@ -1483,13 +1483,15 @@ def materialize_batch_with_extras(batch: list, session_id: str, load_extras) -> 
     return out
 
 
-def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
+def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render: bool = True) -> None:
     """
     将消息批次渲染到 assistant 卡片
 
     Args:
         assistant_card: Assistant 卡片
         batch: 消息批次列表
+        immediate_render: 批量加载路径传 False（T11 错峰），避免 N 卡同帧
+            全量重渲；交互路径保持默认 True。
     """
     for msg in batch:
         if msg.get("role") == "assistant":
@@ -1508,7 +1510,7 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
                     combined_content += "\n\n"
                 combined_content += content
             if combined_content:
-                assistant_card.append_text(combined_content)
+                assistant_card.append_text(combined_content, immediate_render=immediate_render)
         elif msg.get("role") == "tool" and msg.get("content", ""):
             assistant_card.append_tool_result(
                 tool_name=msg.get("name", ""),
@@ -1519,7 +1521,7 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
                 diff=msg.get("diff"),
                 echarts=msg.get("echarts"),
             )
-    assistant_card.finish_streaming(history=True)
+    assistant_card.finish_streaming(history=True, immediate=immediate_render)
 
 
 _scroll_last_time = [0.0]  # 使用 list 实现可变闭包

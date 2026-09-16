@@ -2172,9 +2172,15 @@ class MarkdownBlockViewer(QWidget):
         self._md += text
         self._reconcile()
 
-    def finish_streaming(self, keep_dock: bool = False) -> None:
+    def finish_streaming(self, keep_dock: bool = False, immediate: bool = True) -> None:
         """流式结束。keep_dock=True 时保留坞态（S1：文本先于工具结果结束），
-        等最后工具完成由 MessageCard 回调 _sync_streaming_dock(False) 归位。"""
+        等最后工具完成由 MessageCard 回调 _sync_streaming_dock(False) 归位。
+
+        [P0 修复] immediate 为接口对齐参数：本类经 MessageCard 赋给 self.viewer
+        （markdown-block-viewer 灰度通道），MessageCard.finish_streaming 无条件
+        透传 immediate（T11 错峰链），签名缺失会抱 TypeError。本类是同步纯 Qt
+        渲染（_reconcile 直接重建块），无 JS 投递可择机，错峰无意义，故忽略。
+        """
         self._streaming = False
         if not keep_dock and self._dock_active:
             self._sync_streaming_dock(False)

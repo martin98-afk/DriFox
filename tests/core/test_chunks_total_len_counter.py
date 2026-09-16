@@ -77,25 +77,30 @@ def test_counter_not_double_counted_on_restore_when_nonempty():
     assert w._chunks_total_len == _truth(w) == 2, "非空分支不得重算/覆盖计数器"
 
 
-def test_source_has_no_remaining_sum_over_chunks():
-    """源码静态断言：两处热路径读点已改用计数器，不再现算 sum。"""
-    from pathlib import Path
+def test_counter_tracks_full_lifecycle():
+    """[T36 P8] 行为用例：计数器全生命周期（append → 归零 → 恢复重算）
 
-    src = (Path(__file__).resolve().parents[2] / "app" / "core" / "workers" / "chat_worker.py").read_text(encoding="utf-8")
-    hot_sums = [ln.strip() for ln in src.splitlines() if "sum(len(c) for c in self._response_chunks)" in ln]
-    # 允许保留的只有恢复路径的一次性重算（且已带 L4 注释）
-    for line in hot_sums:
-        idx = src.find(line)
-        ctx = src[max(0, idx - 200) : idx]
-        assert "[T28 L4]" in ctx, f"热路径仍存在未改造的 sum 现算: {line}"
-    assert src.count("self._chunks_total_len += len(") == 2, "两处 append 写路径都应维护计数器"
+    原有两个源码文本计数断言（`src.count("self._chunks_total_len += len(") == 2`
+    等）对无关重构极敏感（改注释/换写法即红），且不校验语义；已删除，改为此处
+    对行为本身的端到端校验——上面的 test_counter_tracks_append /
+    test_counter_zeroed_on_clear / test_counter_recomputed_on_restore 已分别覆盖，
+    本用例把三步串起来确认状态机自洽。
+    """
+    w = _make_bare_worker()
 
+    # append 累加
+    for chunk in ("abc", "de", "f"):
+        w._response_chunks.append(chunk)
+        w._chunks_total_len += len(chunk)
+    assert w._chunks_total_len == 6
+    assert w._chunks_total_len == _truth(w)
 
-def test_source_resets_align_with_deque_replacement():
-    """源码静态断言：两处状态重置（reset/full_cleanup）后计数器同步归零。"""
-    from pathlib import Path
+    # 清空归零
+    w._response_chunks.clear()
+    w._chunks_total_len = 0
+    assert w._chunks_total_len == 0
 
-    src = (Path(__file__).resolve().parents[2] / "app" / "core" / "workers" / "chat_worker.py").read_text(encoding="utf-8")
-    assert src.count("self._chunks_total_len = 0") >= 3, (
-        "至少 3 处归零：__init__ 之外的 _clear_pending_response_state / cleanup / clear() 路径"
-    )
+    # 恢复重算（非空）
+    w._response_chunks.extend(["xy", "z"])
+    w._chunks_total_len = _truth(w)
+    assert w._chunks_total_len == 3

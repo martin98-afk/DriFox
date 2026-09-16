@@ -67,6 +67,11 @@ class ChatSession:
         # 用于"对话进行中切换项目导致落盘错存"bug 的兜底：
         # 一旦锁定不再改变，即使后续切换项目，会话仍归属首发项目。
         self.originating_project: str = ""
+        # [PERF T33] 发送前处理缓存版本号：消息列表内容/顺序任何变化都自增，
+        # 供 ContextBudgetAllocator 的 consolidate+token 估算缓存做失效判定。
+        # 缓存本身不持久化（to_dict 不输出），进程内复用。
+        self._messages_version: int = 0
+        self._send_prep_cache: Optional[Dict] = None
 
     @staticmethod
     def _default_compaction_state() -> Dict:
@@ -107,6 +112,11 @@ class ChatSession:
     def messages(self, value: Optional[List[Dict]]) -> None:
         self._messages = value or []
         self._messages_released = False
+        # [PERF T33] 赋值路径统一失效（覆盖 set_messages 之外的直写点，
+        # 如 main_widget 分支会话创建）。__init__ 首次赋值时版本字段尚未创建，
+        # 用 hasattr 防御（该路径必然冷启动，缓存本就是 None）。
+        if hasattr(self, "_messages_version"):
+            self.bump_messages_version()
 
     @property
     def messages_released(self) -> bool:
@@ -129,6 +139,7 @@ class ChatSession:
             return
         self._messages = consolidate_messages(loaded)
         self._messages_released = False
+        self.bump_messages_version()
 
     def ensure_messages(self) -> None:
         """确保消息体已加载（已释放则重载），幂等。"""
@@ -148,17 +159,26 @@ class ChatSession:
         self.message_count = released
         self._messages = []
         self._messages_released = True
+        # [PERF T33] 释放后内容不再可用（下次读会从 SQLite 重载），
+        # 只清缓存不 bump：bump 会让「释放→重载」同一内容产生无谓的版本抖动。
+        self._send_prep_cache = None
         return released
 
     def get_context_messages(self) -> List[Dict[str, str]]:
         return consolidate_messages(self.messages)
 
     def set_messages(self, messages: List[Dict], preserve_compaction: bool = False):
+        # 赋值经 property setter，已自带 bump_messages_version（T33）
         self.messages = consolidate_messages(messages or [])
         if not preserve_compaction:
             self.reset_compaction_cache()
             self.reset_compaction_state()
         self._update_timestamp()
+
+    def bump_messages_version(self) -> None:
+        """消息版本自增 + 发送前缓存失效（消息写入路径统一调用）。"""
+        self._messages_version += 1
+        self._send_prep_cache = None
 
     def add_assistant_message(self, content: str, model_name: str = None, provider_name: str = None):
         msg = {
@@ -175,6 +195,7 @@ class ChatSession:
             msg["provider_name"] = provider_name
         self.messages.append(msg)
         # 追加操作不走全量 consolidate，由持久化层在 save 时统一做
+        self.bump_messages_version()
         self._update_timestamp()
 
     def add_user_message(self, content, **kwargs):
@@ -197,6 +218,7 @@ class ChatSession:
             msg["_image_attachments"] = [str(p) for p in atts if p]
         self.messages.append(msg)
         # 追加操作不走全量 consolidate，由持久化层在 save 时统一做
+        self.bump_messages_version()
         self._update_timestamp()
 
     def _update_timestamp(self):
@@ -241,6 +263,7 @@ class ChatSession:
     def clear(self):
         self.messages.clear()
         self._messages_released = False
+        self.bump_messages_version()
         self.topic_summary = ""
         self.invalidate_compaction()
         self._update_timestamp()

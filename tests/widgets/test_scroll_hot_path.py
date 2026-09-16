@@ -205,3 +205,75 @@ def test_node_cache_rebuilt_on_epoch_change():
     win._bump_layout_epoch()
     cache = win._node_user_cards_cache
     assert cache is None, "纪元递增必须同时清空缓存（否则复用陈旧卡引用）"
+
+
+# ─── T36 P1：会话切换后新卡宽度必同步（id 复用防串） ─────────────────
+
+
+def test_take_chat_widgets_resets_visible_set_and_bumps_epoch():
+    """会话切换出口必须同时作废纪元 + 清空可视集（T36 P1 的两条动作）"""
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._current_assistant_card = None
+    win._displayed_session_id = None
+    win._layout_epoch = 5
+    win._node_user_cards_cache = (5, [("stale",)])
+    win._last_visible_card_ids = {111, 222}  # 旧会话残留 id
+
+    from PyQt5.QtWidgets import QVBoxLayout
+
+    container = QWidget()
+    win.chat_layout = QVBoxLayout(container)
+
+    win._take_chat_widgets()
+
+    assert win._layout_epoch == 6, "_take_chat_widgets 必须递增布局纪元"
+    assert win._node_user_cards_cache is None, "必须作废节点定位缓存"
+    assert win._last_visible_card_ids == set(), (
+        "必须清空可视集：否则新卡复用旧卡堆地址（id 相同）会被误判'已同步'而永久跳过宽度同步"
+    )
+
+
+def test_new_card_with_recycled_id_is_resynced(qapp):
+    """T36 P1 行为复现：新卡命中旧 id 时仍必须跑宽度同步
+
+    复现路径：旧会话卡片 id 残留在 _last_visible_card_ids，新会话卡片复用同一
+    堆地址 → 旧实现 `cid in prev_visible` 判真 → continue 跳过 sync_width →
+    新卡宽度永久错。T36 在 _take_chat_widgets 清空集合后，该判定必然为假。
+    """
+    from PyQt5.QtWidgets import QScrollArea, QVBoxLayout
+
+    from app.widgets.message_card import MessageCard
+
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._is_destroyed = False
+    win._restore_queue = []
+    win._log_render_quota = MagicMock()
+
+    scroll_area = QScrollArea()
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    card = MessageCard(role="assistant", parent=container)
+    card.setFixedHeight(300)
+    layout.addWidget(card)
+    scroll_area.setWidget(container)
+    scroll_area.resize(400, 200)
+    scroll_area.show()
+    qapp.processEvents()
+    win.chat_scroll_area = scroll_area
+    win.chat_layout = layout
+
+    synced = []
+    win._sync_single_card_width = lambda c, force=True: synced.append(id(c))  # type: ignore[method-assign]
+
+    # 模拟「会话切换前」的残留：可视集里已有本卡 id（等价于堆地址复用场景）
+    win._last_visible_card_ids = {id(card)}
+
+    # 未清空时（修复前语义）：被误判为已同步 → 跳过
+    win._sync_visible_cards_on_scroll()
+    assert synced == [], "前置校验：残留 id 确实会触发跳过（复现修复前的 bug 路径）"
+
+    # T36 P1 修复动作：清空可视集
+    win._last_visible_card_ids = set()
+    win._sync_visible_cards_on_scroll()
+    assert len(synced) == 1, "清空可视集后，同一张卡必须重新同步宽度（T36 P1 锁死点）"

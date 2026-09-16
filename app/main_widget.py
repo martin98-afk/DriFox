@@ -12780,6 +12780,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 w.hide()
                 widgets.append(w)
+        # [T36 P1] 会话切换后新卡可能复用刚释放卡片的堆地址（id() 相同）→
+        # _sync_visible_cards_on_scroll 会误判「已在视口、宽度已同步」而永久
+        # 跳过宽度同步；同时旧卡的 id 残留在集合里也会让后续高亮/同步错位。
+        # 此处作废布局纪元 + 清空可视集，让新会话的卡片重新跑一轮判定。
+        self._bump_layout_epoch()
+        self._last_visible_card_ids = set()
         return widgets
 
     def _cache_current_session_cards(self):
@@ -13248,6 +13254,9 @@ class OpenAIChatToolWindow(ToolWindow):
             card._message_index = batch_idx
 
         self._batch_cards = new_batch_cards
+        # [T36 P2] 公共重建出口：卡片集合与顺序已变 → 作废节点定位缓存。
+        # 一处覆盖 _delete_user_round / _remove_interject_ghost_card / 截断三条路径。
+        self._bump_layout_epoch()
         logger.debug(
             f"[Delete] _rebuild_batch_cards_from_layout: {len(alive_cards)} alive cards → {new_len} batch slots"
         )
@@ -13476,7 +13485,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     assistant_card._message_index = global_batch_index
                     cards.append(assistant_card)
                     # 使用辅助函数渲染消息
-                    render_batch_to_assistant_card(assistant_card, batch)
+                    # [T11] 错峰：历史加载时不立即派发全量渲染，避免 N 卡
+                    # 同帧重渲压垮 renderer；末尾由 _flush_batch_immediate_renders
+                    # 逐卡串行补渲。
+                    render_batch_to_assistant_card(assistant_card, batch, immediate_render=False)
                     # 从 batch 中恢复元信息（耗时和 token）
                     self._restore_meta_from_batch(assistant_card, batch)
                     # 延迟恢复差异统计（避免文件 I/O 阻塞首屏渲染）
@@ -13509,6 +13521,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if pending_lazy_cards and not self._lazy_batch_timer_active:
             self._lazy_batch_timer_active = True
             QTimer.singleShot(0, self._process_next_lazy_batch)
+            # [T11] 错峰补渲：上一轮 immediate 降级的卡片在本批懒渲染启动后
+            # 逐个（间隔 80ms）补派全量渲染——19 卡同帧重渲是崩溃链第一环。
+            QTimer.singleShot(50, lambda: self._flush_batch_immediate_renders(pending_lazy_cards))
 
     # 渲染配额打点的最小间隔（秒）：事件密集（滚动/懒渲染/回收）时避免刷屏
     RENDER_QUOTA_LOG_MIN_INTERVAL = 2.0
@@ -13546,6 +13561,40 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         except Exception:
             pass
+
+    def _flush_batch_immediate_renders(self, cards) -> None:
+        """逐卡错峰补派全量渲染（T11）。
+
+        历史会话加载路径把 render_batch_to_assistant_card 的 immediate 渲染
+        降级（immediate_render=False），各卡只启内部合并定时器；本方法在懒渲染
+        队列启动后按 80ms 间隔串行触发每张卡的全量渲染——N 卡同帧重渲会把
+        renderer 的 layout 压力集中到一帧（09-16 崩溃链第一环：19 卡同帧
+        终渲染 + renderer 自杀）。
+
+        容错：已销毁卡（sip 删除 / RuntimeError）跳过，不影响后续卡片。
+        """
+        for index, card in enumerate(list(cards or [])):
+            try:
+                if not self._is_widget_alive(card):
+                    continue
+
+                def _render_one(c=card) -> None:
+                    try:
+                        if not self._is_widget_alive(c):
+                            return
+                        viewer = getattr(c, "viewer", None)
+                        if viewer is None or _is_sip_deleted(viewer):
+                            return
+                        viewer._schedule_render(immediate=True)
+                    except RuntimeError:
+                        pass
+                    except AttributeError:
+                        pass
+
+                # 首张立即（已在 50ms 延迟后），其余按 80ms 递增串行
+                QTimer.singleShot(index * 80, _render_one)
+            except Exception:
+                continue
 
     def _process_next_lazy_batch(self):
         """批量懒渲染：16ms 时间片内处理尽量多卡片，减少 WebEngine 创建开销
@@ -21922,6 +21971,16 @@ class OpenAIChatToolWindow(ToolWindow):
     @classmethod
     def _on_app_about_to_quit(cls):
         """应用退出时保存所有窗口的脏会话（单次注册，批量执行）"""
+        # 托盘图标清理必须最先做：Shell_NotifyIcon 注册未摘除时，退出期
+        # Windows Shell 会向正在销毁的宿主窗口投递 tray 消息（COM failfast
+        # 诱因）。清理失败不阻塞退出，后续保存流程照常执行。
+        try:
+            from app.tray_manager import TrayManager
+
+            TrayManager.get_instance().cleanup()
+        except Exception:
+            pass
+
         # 停止全局子智能体日志清理定时器，避免退出后悬空回调（修 #3 timer：含 deleteLater 兜底）
         cls.stop_subagent_log_cleanup()
         for win in window_registry.alive_window_instances():
@@ -22104,7 +22163,30 @@ class OpenAIChatToolWindow(ToolWindow):
                 return self.history_manager.get_current_title(idx)
         return None
 
+    def _release_drop_targets(self) -> None:
+        """摘除本窗口全部拖放 OLE 注册（关闭路径首步）。
+
+        QWidget 析构后若 OLE 端仍持有其拖放注册，系统会在 COM 回调里触达
+        已释放的 drop target（CoreMessaging failfast 族，WER 口径 28.4%）。
+        覆盖对话区与输入区模块建的热区——那些模块是 UIModule（非 QWidget，
+        Qt 不会调用其 closeEvent），宿主窗口是唯一可靠的关闭时机。
+        逐项容错，任一失败不影响关闭流程。
+        """
+        for _attr in (
+            "chat_container",
+            "_input_card",
+            "_attach_container",
+        ):
+            try:
+                _widget = getattr(self, _attr, None)
+                if _widget is not None:
+                    _widget.setAcceptDrops(False)
+            except (RuntimeError, AttributeError):
+                pass
+
     def closeEvent(self, event):
+        self._release_drop_targets()
+
         # 🔧 F2: 主动断开 destroyed 清理连接 + 立即清理快捷键，避免窗口 C++ 对象
         # 销毁触发 destroyed 时 lambda 访问已删除的 self 抛 RuntimeError
         # （wrapped C/C++ object has been deleted）。

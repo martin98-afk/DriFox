@@ -129,3 +129,11 @@ class ModelListEditorWidget(QWidget):
 
     def get_models(self) -> list:
         return [self.listWidget.item(i).text() for i in range(self.listWidget.count())]
+
+    def closeEvent(self, event):
+        """关闭时摘除列表内部拖拽模式，避免析构后 drop 回调触达已释放项。"""
+        try:
+            self.listWidget.setDragDropMode(QListWidget.NoDragDrop)
+        except (RuntimeError, AttributeError):
+            pass
+        super().closeEvent(event)

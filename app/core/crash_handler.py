@@ -55,6 +55,13 @@ _forensic_dir: Optional[Path] = None
 # VEH 回调必须模块级持有，防 GC 后野指针
 _veh_handler_ref = None
 
+# 安装幂等守卫（T32）：install_crash_handler 可能被多次调用（测试里 reset 单例
+# 后重装、deferred_startup 重入等）。重复安装会重新注册 VEH 回调并让上一份
+# cb（WINFUNCTYPE thunk）失去引用 → GC 释放 thunk 内存，而 VEH 链里仍留着
+# 它的地址 → 异常发生时跳到已释放内存 → 0xC0000409 fastfail（core 整跑必崩
+# 的根因）。置 True 后二次调用直接返回，不再重复注册。
+_crash_handler_installed = False
+
 # 噪声异常码：均为「上层处理器能消化、进程不会因此终止」的 SEH 码。
 # 采黑名单 + 默认可疑策略：未列入的一律当崩溃写 crash 文件，宁可噪声
 # 漏进崩溃文件，也不能丢掉真实崩溃现场。
@@ -79,8 +86,14 @@ def install_crash_handler(logs_dir: Path) -> Optional[Path]:
 
     返回 dump 文件路径；启用失败返回 None（绝不阻塞启动）。
     在 _deferred_startup 中调用（日志目录就绪后）。
+
+    幂等：重复调用直接返回 None（T32）。重复安装会重复注册 VEH 回调并让
+    上一份回调 thunk 被 GC 释放，而 VEH 链仍持有其地址 → 悬空指针 →
+    异常发生时 0xC0000409 fastfail（core 整跑必崩的根因）。
     """
-    global _crash_file, _noise_file
+    global _crash_file, _noise_file, _crash_handler_installed
+    if _crash_handler_installed:
+        return None
     try:
         import faulthandler
 
@@ -109,8 +122,11 @@ def install_crash_handler(logs_dir: Path) -> Optional[Path]:
         # Python 函数，在异常上下文里跑字节码只产出 0 字节的 dmp，还会把
         # first-chance 异常升级成真崩溃（WER 签名 python314.dll / c000041d）。
         _install_qt_message_logger(crash_dir)
+        # 全部子步骤成功后置位（失败分支在下面回滚，允许重试）
+        _crash_handler_installed = True
         return dump_path
     except Exception:
+        _crash_handler_installed = False
         return None
 
 
@@ -171,8 +187,16 @@ def _install_seh_classifier() -> bool:
     回调刻意做到最轻：一次指针解引用 + 一次集合查找 + 一次 C 函数调用，
     不做 strftime / Path 拼接 / 文件 IO，降低在异常上下文里二次崩溃的风险。
     返回是否注册成功。
+
+    幂等（T32）：已注册过则直接返回 True。重复注册会用新 thunk 覆盖
+    ``_veh_handler_ref``，旧 thunk 随即被 GC 释放，而系统 VEH 链仍持有其
+    地址 → 悬空指针（core 整跑必崩根因）。回调内部改读模块级
+    ``_crash_file`` / ``_noise_file``，落点随下次 install 自动更新，
+    无需重注册。
     """
     global _veh_handler_ref
+    if _veh_handler_ref is not None:
+        return True
     if sys.platform != "win32" or _crash_file is None or _noise_file is None:
         return False
     try:
@@ -199,12 +223,16 @@ def _install_seh_classifier() -> bool:
             ]
 
         eps_ptr_type = ctypes.POINTER(_EXCEPTION_POINTERS)
-        crash_fp, noise_fp = _crash_file, _noise_file
 
         def _classify(exception_pointers: int) -> int:
+            # 落点动态读模块全局（T32）：reset_for_test 后重新 install 会换新
+            # 文件句柄，而无重注册的旧回调必须跟随新落点。句柄为空时跳过
+            # （交 faulthandler 原落点），不传 None 给 enable 以免误关 faulthandler。
             try:
                 record = ctypes.cast(exception_pointers, eps_ptr_type).contents.ExceptionRecord
-                faulthandler.enable(file=noise_fp if _is_noise_exception(record.contents.ExceptionCode) else crash_fp)
+                target = _noise_file if _is_noise_exception(record.contents.ExceptionCode) else _crash_file
+                if target is not None:
+                    faulthandler.enable(file=target)
             except BaseException:  # noqa: BLE001
                 pass
             return EXCEPTION_CONTINUE_SEARCH
@@ -435,3 +463,25 @@ def _silent_remove(path: Path) -> None:
         path.unlink()
     except Exception:
         pass
+
+
+def reset_crash_handler_for_test() -> None:
+    """测试隔离：关闭本模块持有的文件句柄并允许重新安装（T32）。
+
+    供单测在用例间复位状态。**刻意不调用 RemoveVectoredExceptionHandler**：
+    移除 VEH 会释放回调 thunk 的引用，而操作系统 VEH 链里若仍残留其地址
+    （移除失败的窗口期）就会造出新的悬空指针 —— 比留着旧回调更危险。
+    旧回调继续存在也无害：它只调用 faulthandler.enable(file=...)，而 faulthandler
+    的落点会随新 _crash_file 一起更新（安装时重设），异常分流语义保持正确。
+    """
+    global _crash_file, _noise_file, _crash_handler_installed, _forensic_dir
+    for handle in (_crash_file, _noise_file):
+        try:
+            if handle is not None and not handle.closed:
+                handle.close()
+        except Exception:
+            pass
+    _crash_file = None
+    _noise_file = None
+    _forensic_dir = None
+    _crash_handler_installed = False

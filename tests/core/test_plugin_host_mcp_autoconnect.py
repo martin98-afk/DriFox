@@ -104,7 +104,8 @@ class TestDeferredChainInitializesMcp:
         queue = svc._deferred_queue
         assert queue is not None, "非关键初始化应注册延迟队列（T31）"
         assert "mcp_discover" in queue._tasks and "mcp_connect" in queue._tasks
-        assert ("mcp_discover", "mcp_connect") in [
+        # _constraints 为 {after: {before...}}，故断言元组顺序必须是 (after, before)
+        assert ("mcp_connect", "mcp_discover") in [
             (after, before) for after, befores in queue._constraints.items() for before in befores
         ], "mcp_discover → mcp_connect 保序约束必须存在"
 

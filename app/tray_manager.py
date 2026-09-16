@@ -193,6 +193,37 @@ class TrayManager(QObject):
 
         logger.info("TrayManager 初始化完成")
 
+    def cleanup(self) -> None:
+        """退出前摘除托盘图标（Shell_NotifyIcon 注册）。
+
+        QSystemTrayIcon 析构时若系统仍持有通知图标注册，Windows Shell 会向
+        已销毁的宿主窗口投递 tray 消息 → 回调触达已释放对象（COM failfast）。
+        显式 hide() 让 Shell 注销图标，再 deleteLater 交给事件循环回收；
+        各步独立容错，已删除对象（sip.isdeleted）直接跳过。
+        """
+        icon = self._tray_icon
+        if icon is None:
+            return
+        try:
+            from PyQt5 import sip
+
+            # sip.isdeleted 只接受 sip 包装对象；拿到的不是（替身/异常态）
+            # 时抛 TypeError，此处一并归入「不可用」处理。
+            if sip.isdeleted(icon):
+                self._tray_icon = None
+                return
+        except (ImportError, TypeError):
+            pass
+        try:
+            icon.hide()
+        except RuntimeError:
+            pass
+        try:
+            icon.deleteLater()
+        except RuntimeError:
+            pass
+        self._tray_icon = None
+
     # ========== 托盘右键菜单动态重建 ==========
 
     def _rebuild_context_menu(self):

@@ -55,6 +55,17 @@ class RenderCrashQueue:
     def get_instance(cls) -> "RenderCrashQueue":
         if cls._instance is None:
             cls._instance = cls()
+        else:
+            # [T36 P7] 幂等补连：首例可能在 QApplication 存在之前构造（__init__
+            # 内 app is None 未连 aboutToQuit）→ 退出期清表失效。此处补连，重复
+            # connect 由 _aboutToQuit_connected 标志位挡住（Qt 允许重复 connect，
+            # 但会重复触发 clear，标志位更干净）。
+            inst = cls._instance
+            if not getattr(inst, "_aboutToQuit_connected", False):
+                app = QApplication.instance()
+                if app is not None:
+                    app.aboutToQuit.connect(inst.clear)
+                    inst._aboutToQuit_connected = True
         return cls._instance
 
     def __init__(self) -> None:
@@ -63,9 +74,11 @@ class RenderCrashQueue:
         # [T29 A2] 进程退出时清空队列并停表：退出期事件循环可能再跑一拍，
         # 若队列残留已析构 viewer 会触发 AV（_drain_one 的 try 挡不住
         # 访问已释放 C++ 对象的崩溃）。aboutToQuit 在 QApplication 存在时才可连。
+        self._aboutToQuit_connected = False
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.clear)
+            self._aboutToQuit_connected = True
 
     # ── 入队 / 出队 ────────────────────────────────────────────────
 
@@ -127,11 +140,29 @@ class RenderCrashQueue:
                 # webgl 集中上报）都会把它重新入队 → 同一张卡每拍循环恢复失败，
                 # 形成 CPU/日志风暴。置 False = 放弃本次自愈，交由 needRecreate
                 # 链（达阈值后重建）或用户手动操作兜底。
+                #
+                # [T36 P4] 注：本分支实际不可达 —— ``_try_restore_context`` 内部
+                # 自带 try/except 且不外抛（见 message_card 实现）。保留作防御。
                 try:
                     viewer._context_lost = False
                 except Exception:
                     pass
                 logger.warning("RenderCrashQueue: 自愈恢复失败（对象可能已销毁），已出队")
+            else:
+                # [T36 P4] 恢复后校验：``_try_restore_context`` 内部吞异常返回时
+                # 不会外抛，若恢复未真正成功，viewer 仍是 ``_context_lost=True``。
+                # 此时若无后续触发点，卡片会永久白屏无人重试 → 主动升级到
+                # needRecreate（重建 WebEngine 页），失败则置 False 收敛避免循环。
+                if getattr(viewer, "_context_lost", True):
+                    logger.warning("RenderCrashQueue: 恢复未生效，触发 needRecreate 重建")
+                    try:
+                        viewer.needRecreate.emit()
+                    except Exception:
+                        try:
+                            viewer._context_lost = False
+                        except Exception:
+                            pass
+                        logger.warning("RenderCrashQueue: needRecreate 触发失败，已放弃该 viewer 自愈")
         # [T29 A4] 仅当未排期时才 start：_drain_one 执行期间若有新 viewer
         # 入队（enqueue → _ensure_timer 已 start），此处再 start 会重置计时器，
         # 使已等待的那一拍被推迟（持续入队时恢复节奏被无限推后）。

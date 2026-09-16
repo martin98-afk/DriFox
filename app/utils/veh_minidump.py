@@ -170,16 +170,34 @@ def _now_str():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _default_crash_dir() -> str:
+    """未设 DRIFOX_CRASH_DIR 时的兜底目录：与 ``get_app_data_dir()`` 同语义。
+
+    打包版必须落 ``~/.drifox/logs/crash``（= crash_handler 的 logs_dir），
+    不能落 cwd/logs/crash：安装目录与用户数据目录不同源，dmp 会与 faulthandler
+    的 .log 分居两处（2026-09-16 实测）。本模块禁止 import PyQt5，故不直接
+    复用 utils.get_app_data_dir，按其判定逻辑重写（与 render_env.default_config_path
+    同款做法）。首窗期崩溃（crash_handler 尚未安装、环境变量未写入）走这里兜底。
+    """
+    if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
+        if sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support" / "Drifox" / ".drifox"
+        else:
+            base = Path.home() / ".drifox"
+    else:
+        base = Path.cwd() / ".drifox"
+    return str(base / "logs" / "crash")
+
+
 def _crash_dir():
-    # 绝对化（T16 P4）：服务/打包场景下进程 cwd 不一定是项目根，相对路径
-    # 会把取证产物写进意外目录，崩溃后找不到。以 Path(os.getcwd()) 为基准
-    # 固定为绝对路径，行为与旧相对路径在正常启动下等价。
-    base = Path(os.getcwd())
-    d = os.environ.get("DRIFOX_CRASH_DIR") or str(base / "logs" / "crash")
+    # 三级取址（T24）：① crash_handler 安装时写入的 DRIFOX_CRASH_DIR（权威，
+    # 保证与 faulthandler 产物同目录）；② 按 get_app_data_dir 语义推导的兜底；
+    # ③ 目录不可建时退到 cwd。绝对化避免 cwd 漂移把取证产物写到意外位置。
+    d = os.environ.get("DRIFOX_CRASH_DIR") or _default_crash_dir()
     try:
         os.makedirs(d, exist_ok=True)
     except Exception:
-        d = str(base)
+        d = os.getcwd()
     return d
 
 

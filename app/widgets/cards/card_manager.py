@@ -91,8 +91,24 @@ class CardManager:
 
     @classmethod
     def reset_instance(cls):
-        """重置单例（主要用于测试）"""
+        """重置单例（主要用于测试）。
+
+        ★ T29：不能只置空引用——旧实例的 _window_data 里存着各窗口注册的卡片
+        widget（含 CardContainer）。单例引用丢失后这些 Qt C++ 对象仍挂在原
+        父级上，若测试随即构造新实例并触发卡片动画，残留的 QPropertyAnimation
+        可能访问半销毁的旧卡片 → 0xC0000409 fastfail（无 Python 取证）。
+        与 unregister_window 同款清理：逐卡 deleteLater，另显式 stop 卡容器
+        的展开动画（即使动画已带 parent，显式停更稳妥）。
+        """
+        old = cls._instance
         cls._instance = None
+        if old is None:
+            return
+        try:
+            for window_id in list(getattr(old, "_window_data", {}) or {}):
+                old.unregister_window(window_id)
+        except (RuntimeError, TypeError, AttributeError):
+            pass
 
     def __init__(self):
         pass
@@ -168,16 +184,37 @@ class CardManager:
         # ★ 泄漏修复（P1-E）：先 pop 出窗口数据，再显式 deleteLater 仍存活的
         # 卡片 widget，释放 C++ 对象树——否则卡片 widget 易被全局单例 / 回调
         # 残留引用长期持有，反复开关窗口时对象树堆积。
+        # ★ T29：清理前显式 stop 卡片容器上的展开/折叠动画——动画 running 中
+        # 随容器销毁会访问已析构 target（0xC0000409 fastfail，无 Python 现场）。
+        # 容器分两类形态：CardContainer 自带 _expand_animation 属性；
+        # 其他卡片若有 _expand_animation / _anim 一并按属性探测处理，缺则跳过。
         win_data = self._window_data.pop(window_id, None)
         if win_data is not None:
             for _ct_cards in win_data.get("cards", {}).values():
                 for _card_widget in _ct_cards.values():
+                    if _card_widget is None:
+                        continue
+                    self._stop_card_animations(_card_widget)
                     try:
-                        if _card_widget is not None:
-                            _card_widget.deleteLater()
+                        _card_widget.deleteLater()
                     except (RuntimeError, TypeError):
                         pass
         self._coexist_containers.pop(window_id, None)
+
+    @staticmethod
+    def _stop_card_animations(card_widget) -> None:
+        """显式停止卡片上的高度/几何动画（T29）。
+
+        仅处理属性名已知的动画对象；对象已销毁（RuntimeError / TypeError）
+        或属性缺失一律跳过——本方法只做加法，失败不得影响清理主流程。
+        """
+        for _anim_attr in ("_expand_animation", "_anim"):
+            try:
+                _anim = getattr(card_widget, _anim_attr, None)
+                if _anim is not None:
+                    _anim.stop()
+            except (RuntimeError, TypeError, AttributeError):
+                continue
 
     def register_card(
         self,
