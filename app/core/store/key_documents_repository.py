@@ -312,6 +312,64 @@ class KeyDocumentsRepository:
             logger.error(f"[KeyDocumentsRepository] remove_by_path 异常: {e}")
             return False
 
+    def prune_stale_worktrees(self, project: str = "") -> List[Tuple[str, str]]:
+        """清理路径已消失的 git_worktree 记录（僵尸工作树自净化）
+
+        只处理 added_by='git_worktree' 的记录：这类条目由 worktree 切换自动写入，
+        语义是「真实存在的 git 工作树」。目录被外部删除后 git 侧记录被 prune，
+        worktree-manager 的缺失检测（数据源 `git worktree list`）再也列不出该
+        路径 → 缺失集合恒为空 → DB 残留永久化，关键文档注入会持续把已不存在的
+        目录当有效文档，工作目录计数（get_worktree_counts）同样被污染。
+
+        manual / stage_files 记录不在此列：用户可能登记网络盘或临时拔除的移动盘，
+        路径暂时不可达不等于条目失效，误删不可逆。
+
+        Args:
+            project: 限定项目名；空串表示扫描全部项目
+
+        Returns:
+            List[Tuple[str, str]]: 被清理的 (project, file_path) 列表，
+                调用方据此做工作目录善后（被删路径恰是当前 workdir 时需回退）
+        """
+        if not self.is_initialized:
+            return []
+        try:
+            sql = f"SELECT project, file_path FROM {self.TABLE_NAME} WHERE added_by = 'git_worktree'"
+            params: tuple = ()
+            if project:
+                sql += " AND project = ?"
+                params = (project,)
+            success, rows = self._execute(sql, params)
+            if not success or not rows:
+                return []
+
+            stale: List[Tuple[str, str]] = []
+            for row in rows:
+                proj = row[0] if isinstance(row, tuple) else row.get("project", "")
+                path = row[1] if isinstance(row, tuple) else row.get("file_path", "")
+                if not path or path.startswith(("http://", "https://")):
+                    continue
+                if not os.path.isdir(path):
+                    stale.append((proj, path))
+
+            removed: List[Tuple[str, str]] = []
+            for proj, path in stale:
+                ok, _ = self._execute(
+                    f"DELETE FROM {self.TABLE_NAME} WHERE project = ? AND file_path = ?",
+                    (proj, path),
+                )
+                if ok:
+                    removed.append((proj, path))
+            if removed:
+                logger.info(
+                    f"[KeyDocumentsRepository] 清理 {len(removed)} 条失效 worktree 记录: "
+                    f"{[p for _, p in removed]}"
+                )
+            return removed
+        except Exception as e:
+            logger.error(f"[KeyDocumentsRepository] prune_stale_worktrees 异常: {e}")
+            return []
+
     def clear_by_project(self, project: str) -> int:
         """
         清空项目的所有关键文档

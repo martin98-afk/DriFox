@@ -1291,6 +1291,9 @@ class ChatBackend(QObject):
             return ctx
         try:
             wd_path = self._tool_executor.get_workdir() if self._tool_executor else ""
+            # 自净化：先清掉路径已消失的 git_worktree 记录（节流，默认 60s 一次），
+            # 避免把已删除的工作树当有效关键文档持续注入
+            self._memory_manager.prune_stale_worktrees(self._current_project or "")
             docs = self._memory_manager.get_key_documents(self._current_project)[:50]
             if docs:
                 doc_items = []
