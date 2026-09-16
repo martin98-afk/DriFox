@@ -43,11 +43,11 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-# 头像尺寸（对齐主流 LLM 客户端比例：略小于正文行高）
-AVATAR_SIZE = 26
+# 头像尺寸（对齐主流 LLM 客户端比例）
+AVATAR_SIZE = 30
 
-# 名称字号
-NAME_FONT_SIZE = 12
+# 名称字号（基础值，实际经 scale_font_size 叠加用户字号档位）
+NAME_FONT_SIZE = 15
 
 # 无头像时的候选主色（按显示名 hash 稳定选取）
 _PALETTE = (
@@ -236,14 +236,11 @@ class IdentityHeader(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
-        layout.setSpacing(7)
+        layout.setSpacing(8)
 
         self._avatar = IdentityAvatar(identity, AVATAR_SIZE, self)
         self._name_label = QLabel(identity.name or "", self)
-        self._name_label.setStyleSheet(
-            f"{get_font_family_css()} font-size: {font_size_css(NAME_FONT_SIZE)};"
-            " font-weight: 600; background: transparent;"
-        )
+        self._apply_name_style()
 
         if align_right:
             layout.addStretch(1)
@@ -262,9 +259,19 @@ class IdentityHeader(QWidget):
 
     def apply_text_color(self, color: str) -> None:
         """按卡片主题色刷新名称颜色（refresh_theme 调用）"""
+        self._apply_name_style(color)
+
+    def _apply_name_style(self, color: str = "") -> None:
+        """名称样式统一出口。
+
+        ⚠ `font_size_css()` 返回的就是完整声明（`font-size: 20px;`），不能再生
+        拼一层 `font-size:`——拼出来是非法 CSS，Qt 会静默丢弃整条声明，字号
+        永远停在默认值（2026-09-16 走查发现：身份行字号改不动就是这个原因）。
+        """
+        color_part = f"color: {color};" if color else ""
         self._name_label.setStyleSheet(
-            f"{get_font_family_css()} font-size: {font_size_css(NAME_FONT_SIZE)};"
-            f" font-weight: 600; color: {color}; background: transparent;"
+            f"{get_font_family_css()} {font_size_css(NAME_FONT_SIZE)}"
+            f" font-weight: 600; {color_part} background: transparent;"
         )
 
 

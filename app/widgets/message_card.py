@@ -13107,6 +13107,7 @@ class MessageCard(SimpleCardWidget):
         provider_name: str = None,
         config_id: str = None,
         identity: Optional[Any] = None,
+        source_message: Optional[dict] = None,
     ):
         super().__init__(parent)
         self._parent = parent
@@ -13117,9 +13118,10 @@ class MessageCard(SimpleCardWidget):
         # 消息发送者身份（MessageIdentity 实例；None = 由 _ensure_identity 按 role 解析）
         self._identity = identity
         self._identity_header = None  # IdentityHeader（懒建；开关关闭时保持 None）
-        # 消息源数据（可选）：历史加载时由调用方注入，用于解析消息级身份
-        # （如 TeamMail 发送者名）。实时新建的消息为 None，走上下文解析链。
-        self._source_message = None
+        # 消息源数据（可选）：历史加载 / TeamMail 等场景由调用方注入，用于解析
+        # 消息级身份（如从邮件内容取发送者名）。必须早于 _setup_ui 赋值——
+        # 身份行在 __init__ 内构建，晚赋值会拿到未注入的源。
+        self._source_message = source_message
         self.timestamp = timestamp or datetime.now().strftime("%m-%d %H:%M")
         # 历史数据 timestamp 格式为 %Y-%m-%d %H:%M:%S，转为 %m-%d %H:%M
         if self.timestamp and len(self.timestamp) >= 19:
@@ -13489,7 +13491,7 @@ class MessageCard(SimpleCardWidget):
             self._refresh_footer_separators()
 
     def _build_footer_bar(self, main: QVBoxLayout):
-        """构建助手卡片底部极简元信息栏：差异统计（左） | token | 耗时 | 模型（右）"""
+        """构建助手卡片底部极简元信息栏：token | 耗时 | 模型（左） | 差异统计（右）"""
         bar = QWidget(self)
         self._footer_bar = bar
         bar.setStyleSheet("background: transparent;")
@@ -13506,40 +13508,8 @@ class MessageCard(SimpleCardWidget):
             f"color: {accent}; font-weight: 400; padding: 0px; margin: 0px;"
         )
 
-        # 差异统计（左对齐，极简风格，点击弹出差异弹窗）
-        diff_l = QLabel("", self)
-        diff_l.setStyleSheet(label_style)
-        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        diff_l.setVisible(False)
-        diff_l.setCursor(Qt.PointingHandCursor)
-        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
-        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
-        self._footer_diff_stats_label = diff_l
-        layout.addWidget(diff_l)
-
-        # Review 按钮（使用 Search 图标），点击触发 code-reviewer 子智能体
-        icon_size = scale_font_size(10)
-        review_btn = QLabel(self)
-        review_btn.setObjectName("footer_review_btn")
-        review_btn.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
-        review_btn.setFixedSize(icon_size + 4, icon_size + 4)
-        review_btn.setScaledContents(True)
-        review_btn.setStyleSheet(
-            "QLabel {"
-            " background: transparent; padding: 2px; margin: 0px;"
-            " border-radius: 3px;"
-            " }"
-            "QLabel:hover { background: rgba(128,128,128,0.18); }"
-        )
-        review_btn.setAlignment(Qt.AlignCenter)
-        review_btn.setCursor(Qt.PointingHandCursor)
-        review_btn.setVisible(False)
-        review_btn.mousePressEvent = lambda e: self._emit_review_requested()
-        install_hover_tooltip(review_btn, "用 code-reviewer 子智能体快速审查本次修改")
-        self._footer_review_btn = review_btn
-        layout.addWidget(review_btn)
-
-        layout.addStretch()
+        # 布局顺序：token | 耗时 | 模型 | hover 复制按钮 ——stretch—— 差异统计 | Review
+        # （元信息靠左，差异独占右端；两端对称留 8px 边距）
 
         # Token 消耗
         tokens_l = QLabel("", self)
@@ -13585,7 +13555,39 @@ class MessageCard(SimpleCardWidget):
         self._footer_model_label = model_l
         layout.addWidget(model_l)
 
-        # 全减模式：hover 操作组（复制/差异对比），卡片 hover 时浮现（与 user 气泡一致）。
+        # 差异统计（右端，极简风格，点击弹出差异弹窗）
+        diff_l = QLabel("", self)
+        diff_l.setStyleSheet(label_style)
+        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+        diff_l.setVisible(False)
+        diff_l.setCursor(Qt.PointingHandCursor)
+        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
+        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
+        self._footer_diff_stats_label = diff_l
+
+        # Review 按钮（使用 Search 图标），点击触发 code-reviewer 子智能体
+        icon_size = scale_font_size(10)
+        review_btn = QLabel(self)
+        review_btn.setObjectName("footer_review_btn")
+        review_btn.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
+        review_btn.setFixedSize(icon_size + 4, icon_size + 4)
+        review_btn.setScaledContents(True)
+        review_btn.setStyleSheet(
+            "QLabel {"
+            " background: transparent; padding: 2px; margin: 0px;"
+            " border-radius: 3px;"
+            " }"
+            "QLabel:hover { background: rgba(128,128,128,0.18); }"
+        )
+        review_btn.setAlignment(Qt.AlignCenter)
+        review_btn.setCursor(Qt.PointingHandCursor)
+        review_btn.setVisible(False)
+        review_btn.mousePressEvent = lambda e: self._emit_review_requested()
+        install_hover_tooltip(review_btn, "用 code-reviewer 子智能体快速审查本次修改")
+        self._footer_review_btn = review_btn
+
+        # 全减模式：hover 操作组（复制），卡片 hover 时浮现（与 user 气泡一致）。
+        # 紧跟左侧元信息区，右侧留给差异统计独占。
         # 固定高度占位：按钮显隐切换时 footer 高度不变，卡片不跳动。
         hover_btns = QWidget(self)
         self._assistant_action_btns = hover_btns
@@ -13604,6 +13606,13 @@ class MessageCard(SimpleCardWidget):
         hover_btns.setFixedHeight(20)
         hover_btns.setVisible(False)  # hover 浮现，保持卡片简洁
         layout.addWidget(hover_btns)
+
+        # 弹性分隔：左侧元信息区 | 右侧差异区
+        layout.addStretch()
+
+        # 差异统计 + Review：右端独占
+        layout.addWidget(diff_l)
+        layout.addWidget(review_btn)
 
         main.addWidget(bar)
 
@@ -14165,25 +14174,36 @@ class MessageCard(SimpleCardWidget):
         # （参考 assistant/welcome 卡片的懒渲染模式，复用 _lazy_rendered 守卫）。
         self.viewer = None
         self._viewer_pending_text = None
-        main.addWidget(self._viewer_container)
-        self._lazy_rendered = True
 
-        # 身份行：头像 + 显示名（用户在右，对齐主流客户端）
+        # 身份行（气泡**外**上方，右对齐）：头像 + 显示名
         _header = self._build_identity_header(parent=self, align_right=True)
         if _header is not None:
-            main.insertWidget(0, _header)
+            main.addWidget(_header)
 
-        # 底部操作行：stretch | 时间戳 | 复制/撤销/删除（hover 浮现）。
-        # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
+        # 气泡容器：背景色/圆角只在这一层（身份行与底部操作行在容器外，
+        # 不随气泡底色渲染）。视图与图片条在内。
+        self._user_bubble = QWidget(self)
+        bubble_lay = QVBoxLayout(self._user_bubble)
+        bubble_lay.setContentsMargins(0, 0, 0, 0)
+        bubble_lay.setSpacing(0)
+        main.addWidget(self._user_bubble)
+        _bubble_alive = True
+
+        # 正文视图容器挂到气泡内（原 _viewer_container 直接挂卡片）
+        self._viewer_container.setParent(self._user_bubble)
+        bubble_lay.addWidget(self._viewer_container)
+        self._lazy_rendered = True
 
         # 图片附件预览条：正文之上，set_image_attachments 时才显示（懒占位）
-        self._image_strip = QWidget(self)
+        self._image_strip = QWidget(self._user_bubble)
         self._image_strip_lay = QHBoxLayout(self._image_strip)
         self._image_strip_lay.setContentsMargins(2, 0, 2, 4)
         self._image_strip_lay.setSpacing(6)
         self._image_strip.setVisible(False)
-        main.addWidget(self._image_strip)
+        bubble_lay.insertWidget(0, self._image_strip)
 
+        # 底部操作行（气泡**外**下方）：时间戳 + 复制/撤销/删除（hover 浮现）。
+        # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
         footer_wrap = QWidget(self)
         footer_wrap.setStyleSheet("background: transparent;")
         footer_wrap.setFixedHeight(28)  # 26px 按钮 + 垂直余量，紧凑
@@ -14473,16 +14493,27 @@ class MessageCard(SimpleCardWidget):
             return
         self._applied_card_style_key = _style_key
         # user 简洁气泡：12px 圆角 + 无边框（仅轻量背景色）；错误态仍显示红色边框
+        # 背景只画在气泡容器上：身份行与底部操作行在容器外，不受气泡底色影响
         if self.role == "user" and not self.error:
             self.setStyleSheet(
-                f"""
-                CardWidget {{
-                    background-color: {bg or self._base_bg};
+                """
+                CardWidget {
+                    background-color: transparent;
                     border: none;
-                    border-radius: 12px;
-                }}
+                }
                 """
             )
+            bubble = getattr(self, "_user_bubble", None)
+            if bubble is not None:
+                bubble.setStyleSheet(
+                    f"""
+                    QWidget {{
+                        background-color: {bg or self._base_bg};
+                        border: none;
+                        border-radius: 12px;
+                    }}
+                    """
+                )
             return
         if self.role == "assistant" and not self.error:
             # 全减模式：assistant 纯文字流（无边框无背景）；

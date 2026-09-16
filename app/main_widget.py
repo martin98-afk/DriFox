@@ -13438,12 +13438,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     user_round_index=round_index,
                     update_preview=not insert_at_top,
                     image_attachments=batch[0].get("_image_attachments"),
+                    source_message=batch[0],
                 )
                 if user_card:
                     # 设置 message_index 用于卡片差异功能
                     user_card._message_index = global_batch_index
-                    # 消息源注入：TeamMail 等用户侧消息的身份按内容解析发送者
-                    user_card._source_message = batch[0]
                     cards.append(user_card)
                 if insert_index is not None and user_card:
                     insert_index += 1
@@ -14533,6 +14532,7 @@ class OpenAIChatToolWindow(ToolWindow):
         update_preview: bool = True,
         image_attachments: Optional[list] = None,
         identity=None,
+        source_message: Optional[dict] = None,
     ):
         session = self.session_manager.get_current_session()
         if session:
@@ -14547,7 +14547,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if user_round_index is None:
             user_round_index = self._get_current_user_round_index()
 
-        card = MessageCard(parent=self, role="user", timestamp=timestamp, identity=identity)
+        card = MessageCard(
+            parent=self,
+            role="user",
+            timestamp=timestamp,
+            identity=identity,
+            source_message=source_message,
+        )
         card._round_index = user_round_index
         card.update_content(content)
         # 图片附件预览：正文上方缩略图条（恢复会话时 content 为 multimodal list，
@@ -14582,6 +14588,7 @@ class OpenAIChatToolWindow(ToolWindow):
         model_name: str = None,
         provider_name: str = None,
         config_id: str = None,
+        source_message: Optional[dict] = None,
     ) -> MessageCard:
         session = self.session_manager.get_current_session()
         if session:
@@ -14641,6 +14648,7 @@ class OpenAIChatToolWindow(ToolWindow):
             on_subagent_log=self._on_subagent_log_requested,
             on_review=self._on_review_requested,
             immediate_render=scroll,  # 流式(scroll=True)立即渲染，加载(scroll=False)走懒渲染队列
+            source_message=source_message,
         )
 
         # 连接模型标签点击信号到切换逻辑
@@ -17852,7 +17860,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._clear_input_area()
             self._clear_attachments()
         # 视觉模型时图片以 multimodal 注入：卡片同步预览 + session 消息打标记（恢复会话可回显）
-        self._append_user_message(user_text, image_attachments=_image_paths or None)
+        # hook_event 透传：TeamMail 等系统注入消息的身份按消息源解析（显示成员名而非用户名）
+        self._append_user_message(
+            user_text,
+            image_attachments=_image_paths or None,
+            source_message={"role": "user", "content": user_text, "_hook_event": hook_event} if hook_event else None,
+        )
 
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
@@ -20012,7 +20025,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 身份快照补写：worker 线程构造的消息拿不到 UI 状态（团队角色名、插件
         # manager 调用），在主线程统一补 `_identity` 后再落 session。已带快照的
         # 消息不动（历史快照优先，切换助手不改写旧消息）。
-        self._stamp_message_identities(messages)
+        # getattr 守卫：测试替身（SimpleNamespace 假宿主）可不实现该方法。
+        _stamp = getattr(self, "_stamp_message_identities", None)
+        if callable(_stamp):
+            _stamp(messages)
 
         session.set_messages(messages or [], preserve_compaction=False)
         # 🛡️ Worker 回传了完整消息列表，标记会话脏以确保后续持久化。

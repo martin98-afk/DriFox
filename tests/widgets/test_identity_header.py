@@ -100,3 +100,22 @@ def test_header_has_fixed_height(qapp):
     """身份行高度固定：卡片高度上报走 HeightCommitBatch，不能让身份行抖动。"""
     header = ih.IdentityHeader(MessageIdentity(name="测试"))
     assert header.height() == ih.AVATAR_SIZE + 2
+
+
+def test_name_label_font_size_is_valid_css(qapp):
+    """名称字号必须是合法 CSS。
+
+    回归守卫：`font_size_css()` 返回的就已是完整声明（`font-size: 20px;`），
+    再生拼一层 `font-size:` 会得到 `font-size: font-size: 20px;;` —— 非法 CSS，
+    Qt 静默丢弃整条声明，字号永远停在默认值（2026-09-16 走查发现的真实 bug）。
+    """
+    header = ih.IdentityHeader(MessageIdentity(name="mading"), align_right=True)
+    css = header._name_label.styleSheet()
+    assert css.count("font-size:") == 1, f"font-size 声明必须只出现一次，实际: {css!r}"
+    assert ih.font_size_css(ih.NAME_FONT_SIZE) in css
+
+    # 主题刷新路径同样校验（apply_text_color 会重写样式）
+    header.apply_text_color("#8FA4C2")
+    css2 = header._name_label.styleSheet()
+    assert css2.count("font-size:") == 1, f"着色后 font-size 声明异常: {css2!r}"
+    assert "color: #8FA4C2" in css2

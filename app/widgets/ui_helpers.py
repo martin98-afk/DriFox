@@ -1891,6 +1891,7 @@ def create_assistant_card_widget(
     on_review=None,
     immediate_render: bool = False,
     identity=None,
+    source_message: Optional[dict] = None,
 ) -> Any:
     """
     创建助手消息卡片（带标准配置）
@@ -1923,6 +1924,7 @@ def create_assistant_card_widget(
         provider_name=provider_name,
         config_id=config_id,
         identity=identity,
+        source_message=source_message,
     )
     card._round_index = round_index
     if immediate_render:
