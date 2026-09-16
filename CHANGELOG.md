@@ -3,10 +3,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### ✨ 新功能 (New Features)
-
-- **托盘右键菜单改 Fluent 风格并补齐入口** (`app/tray_manager.py`, `app/widgets/modules/tray_menu.py` 新增): 原生 `QMenu` + emoji 菜单换成 qfluentwidgets `SystemTrayMenu`（圆角、跟随亮暗主题、Fluent 矢量图标），emoji 全部去除；菜单项改为「打开主界面 / 检查更新（右侧显示当前版本号）/ 打开日志 / 打开日志文件夹 / 重启 / 退出」。新增 `TrayContextMenu` 与 `HintMenuItemDelegate`：Qt 原生菜单项没有「右侧说明文本」概念，版本号走 action 动态属性 + 自定义委托绘制，并把提示宽度计入菜单项右侧留白（覆写 `_longestShortcutWidth`），否则会与菜单项文字重叠。菜单改为一次性构建，不再挂 `aboutToShow` 重建 —— `RoundMenu.clear()` 只清 action 与 subMenu，清不掉 `addSeparator()` 插入的裸 `QListWidgetItem`，反复重建会累积分隔线。日志路径与 `main.py` 传给 `setup_logging` 的 `get_app_data_dir()/logs` 一致：「打开日志」用系统默认程序打开全量 `all.log`，文件尚未落盘时退化为打开目录；检查更新前先拉起主界面，保证结果 InfoBar 有地方落地。
-
 ### 🐛 问题修复 (Bug Fixes)
 
 - **崩溃记录被 first-chance 噪声污染、真崩溃反被漏报** (`app/core/crash_handler.py`, `tests/core/test_crash_handler.py`, `tests/debug/crash_filter_probe.py` 新增): 排查 `crash_20260915_202601_19296.log` 时发现三个叠加缺陷。① CPython 3.14 的 faulthandler 在 Windows 注册 VEH，无差别记录所有 SEH 异常：COM 的 `0x8001010D`（`RPC_E_CANTCALLOUT_ININPUTSYNCCALL`，Qt 与 Chromium 双消息循环共处主线程时高发）、调试断点 `0x80000003` 等上层能消化、进程照常存活的 first-chance 异常都被当作崩溃现场写进 `crash_*.log`，实测单份日志最多堆 13 段。② 原 `_install_minidump_filter` 用 `ctypes.WINFUNCTYPE` 把 Python 函数挂成 `SetUnhandledExceptionFilter` 回调，回调里跑 `strftime` / `Path` / `CreateFileW` / `MiniDumpWriteDump`；`crash/dumps/mini_*.dmp` 清一色 0 字节即其产物，且 WER 崩溃签名自 09-15 起由 `Qt5Core.dll` 变为 `python314.dll` + `c000041d`（`STATUS_FATAL_APP_EXIT`，含义是异常处理回调自身崩溃），说明这条链会把噪声升级成真崩溃 —— 已整体删除。③ `check_pending_crashes` 判据为「文件非空且无 clean-exit 标记」，而 CPython 会把部分原生 access violation 转成 Python `OSError` 抛出、解释器随后走正常 shutdown，`atexit` 照样补得上标记，真崩溃被自己的标记洗成「正常退出」。修复：新增 `_install_seh_classifier`，在 `faulthandler.enable()` 之后以 `first=1` 注册分流 VEH（因而先于 faulthandler 自己的 handler 被调用），按噪声码黑名单二次调用 `faulthandler.enable(file=...)` 把非致命现场改道 `anomaly_*.log`（实测二次 enable 幂等，不会重复注册 handler）；崩溃判据改为「含 `Windows fatal exception` 段」为唯一证据；`anomaly_*.log` 只留最近 20 份、空文件在退出时回收。新增 8 模式子进程探针，端到端断言三种场景的落点与「下次启动报告数」。
@@ -222,6 +218,8 @@ All notable changes to this project will be documented in this file.
 基于上次重新发布 v0.6.1 (重新发布 #4) 的增量变更 | 提交数：10 · 文件变更：96 · +7290/-1914 | 贡献者：mading, dingma
 
 #### ✨ 新功能 (New Features)
+
+- **托盘右键菜单改 Fluent 风格并补齐入口** (`app/tray_manager.py`, `app/widgets/modules/tray_menu.py` 新增): 原生 `QMenu` + emoji 菜单换成 qfluentwidgets `SystemTrayMenu`（圆角、跟随亮暗主题、Fluent 矢量图标），emoji 全部去除；菜单项改为「打开主界面 / 检查更新（右侧显示当前版本号）/ 打开日志 / 打开日志文件夹 / 重启 / 退出」。新增 `TrayContextMenu` 与 `HintMenuItemDelegate`：Qt 原生菜单项没有「右侧说明文本」概念，版本号走 action 动态属性 + 自定义委托绘制，并把提示宽度计入菜单项右侧留白（覆写 `_longestShortcutWidth`），否则会与菜单项文字重叠。菜单改为一次性构建，不再挂 `aboutToShow` 重建 —— `RoundMenu.clear()` 只清 action 与 subMenu，清不掉 `addSeparator()` 插入的裸 `QListWidgetItem`，反复重建会累积分隔线。日志路径与 `main.py` 传给 `setup_logging` 的 `get_app_data_dir()/logs` 一致：「打开日志」用系统默认程序打开全量 `all.log`，文件尚未落盘时退化为打开目录；检查更新前先拉起主界面，保证结果 InfoBar 有地方落地。`8cb6bcb2`
 
 - **崩溃记录去噪与异常分类** (`app/core/crash_handler.py`, `tests/core/test_crash_handler.py`, `tests/debug/crash_filter_probe.py` 新增): 新增 `_install_seh_classifier` 噪声分流 VEH，按黑名单把 first-chance 异常改道 `anomaly_*.log`；崩溃判据改为「含 `Windows fatal exception` 段」为唯一证据；移除原 minidump 回调链（实测 0 字节 dmp + 升级异常至 fatal）。`9c017d77`
 
