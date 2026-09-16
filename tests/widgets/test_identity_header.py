@@ -99,7 +99,35 @@ def test_identity_header_aligns_and_updates(qapp):
 def test_header_has_fixed_height(qapp):
     """身份行高度固定：卡片高度上报走 HeightCommitBatch，不能让身份行抖动。"""
     header = ih.IdentityHeader(MessageIdentity(name="测试"))
-    assert header.height() == ih.AVATAR_SIZE + 2
+    assert header.height() >= ih.AVATAR_SIZE + 2
+    # 固定高：多次 resize 不变
+    header.resize(300, header.height())
+    header.show()
+    qapp.processEvents()
+    assert header.height() == header.maximumHeight() == header.minimumHeight()
+
+
+def test_timestamp_row_fully_visible(qapp):
+    """第二行（时间）必须完整落在身份行可视区内。
+
+    回归守卫：QLabel 默认 sizeHint 高含内边距（实测 30px），两行需求 60px 会
+    超出身份行固定高 → 时间被推到可视区外，表现为「时间只显示一瞬间就消失」
+    （2026-09-16 用户反馈的真因）。现显式压缩标签高度并在布局高度上留余量。
+    """
+    header = ih.IdentityHeader(MessageIdentity(name="mading"), align_right=True, timestamp="09-16 23:05")
+    header.resize(220, header.height())
+    header.show()
+    qapp.processEvents()
+
+    name, time = header._name_label, header._time_label
+    assert time.isVisible()
+    assert time.text() == "09-16 23:05"
+    # 两行不重叠
+    assert time.y() >= name.y() + name.height(), f"时间与名称重叠：name={name.geometry()}, time={time.geometry()}"
+    # 时间底边不超出身份行
+    assert time.y() + time.height() <= header.height(), (
+        f"时间被裁：time bottom={time.y() + time.height()} > header h={header.height()}"
+    )
 
 
 def test_name_label_font_and_size(qapp):

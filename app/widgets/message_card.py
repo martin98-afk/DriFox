@@ -4666,6 +4666,37 @@ def _format_elapsed(elapsed: float) -> str:
 
 
 # ======== WebViewer ========
+def _defer_emit(sender, fn):
+    """延迟到事件循环下一拍执行 ``fn``，并绑定到 ``sender`` 的生命周期。
+
+    用于 Chromium 回调栈（javaScriptConsoleMessage）内的动作类 emit：既要把
+    emit 挪出回调栈（族⑤），又要保证延迟期间 sender 不会被「销毁后照旧回调」
+    （族⑤-2）。
+
+    ⚠️ 不能退化为 ``QTimer.singleShot(0, fn)``：延迟期间若 sender 被销毁
+    （卡片卸载 / viewer 池回收 / 会话切换），回调照样执行 → 对已释放的 sender
+    调 emit → ACCESS_VIOLATION（实机 2026-09-16 22:46:30 例，崩在
+    ``Qt5Core!QObject::signalsBlocked`` +0x4 —— emit 第一步读
+    ``sender->d_ptr->blockSig``，此时对象内存已被释放清零）。
+
+    以 sender 为 parent 的一次性 QTimer 随 sender 析构而销毁，pending 的
+    timeout 不再派发，从根上掐断「延迟窗口内 sender 死亡」这条路径。
+    """
+    from PyQt5.QtCore import QTimer
+
+    timer = QTimer(sender)
+    timer.setSingleShot(True)
+
+    def _run():
+        try:
+            fn()
+        finally:
+            timer.deleteLater()
+
+    timer.timeout.connect(_run)
+    timer.start(0)
+
+
 class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
@@ -4733,15 +4764,16 @@ class ConsoleMonitorPage(QWebEnginePage):
         信号链——在「取消长请求 + 429 错误态 + 大批次虚拟滚动回收」窗口内，
         链上某跳 receiver 可能已析构但连接未断 → 悬空调用 → AV（崩点漂移
         但同一 Python 行，生命周期 bug）。动作类 emit 统一改为
-        ``QTimer.singleShot(0, ...)`` 延迟到事件循环下一拍派发：Chromium
+        ``_defer_emit(self, ...)`` 延迟到事件循环下一拍派发：Chromium
         回调栈立即返回，掐断「回调栈内同步进 Qt 信号链」的必要条件。
         lambda 闭包参数用默认参固化，防迟到绑定。
+
+        ⚠️ 族⑤-2：延迟回调必须绑定本 page 生命周期（见 :func:`_defer_emit`），
+        否则延迟期间 page 被销毁后回调仍执行 → 对已释放 sender emit → AV。
 
         例外：pywebview_height / cardReadingChanged / contentReady 是流式
         布局高频信号，延迟会破坏帧时序，保持同步。
         """
-        from PyQt5.QtCore import QTimer  # [T43] 延迟派发用（本函数作用域内此前未导入）
-
         msg = message.strip()
         # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
         # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
@@ -4776,9 +4808,11 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     parts = msg.split("|||")
                     # [T43] 延迟派发（族⑤）：默认参固化 unquote 结果
-                    QTimer.singleShot(
-                        0,
-                        lambda a1=urllib.parse.unquote(parts[1]), a2=urllib.parse.unquote(parts[2]): self.contextActionRequested.emit(a1, a2),
+                    _defer_emit(
+                        self,
+                        lambda a1=urllib.parse.unquote(parts[1]), a2=urllib.parse.unquote(parts[2]): (
+                            self.contextActionRequested.emit(a1, a2)
+                        ),
                     )
                 except Exception:
                     pass
@@ -4793,8 +4827,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                     _text = _b64mod.b64decode(msg.split("fence_prompt:", 1)[1]).decode("utf-8")
                     if _text.strip():
                         # [T43] 延迟派发（族⑤），与 context||| 同链路
-                        QTimer.singleShot(
-                            0,
+                        _defer_emit(
+                            self,
                             lambda a1=_text: self.contextActionRequested.emit(a1, "ask"),
                         )
                 except Exception:
@@ -4806,7 +4840,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     url_str = msg.split("preview_image:", 1)[1]
                     # [T43] 延迟派发（族⑤）
-                    QTimer.singleShot(0, lambda u=url_str: self.previewImageRequested.emit(u))
+                    _defer_emit(self, lambda u=url_str: self.previewImageRequested.emit(u))
                 except Exception:
                     pass
             elif "open_url:" in msg:
@@ -4844,7 +4878,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     tool_call_id = msg.split("tool_diff:", 1)[1]
                     # [T43] 延迟派发（族⑤）
-                    QTimer.singleShot(0, lambda tid=tool_call_id: self.toolDiffRequested.emit(tid))
+                    _defer_emit(self, lambda tid=tool_call_id: self.toolDiffRequested.emit(tid))
                 except Exception:
                     pass
             elif "subagent_log:" in msg:
@@ -4852,7 +4886,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     task_ids = msg.split("subagent_log:", 1)[1]
                     # [T43] 延迟派发（族⑤）
-                    QTimer.singleShot(0, lambda t=task_ids: self.subAgentLogRequested.emit(t))
+                    _defer_emit(self, lambda t=task_ids: self.subAgentLogRequested.emit(t))
                 except Exception:
                     pass
             elif "save_file:" in msg:
@@ -4874,8 +4908,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                     chart_type, payload = rest.split(":", 1)
                     if chart_type in ("echarts", "mermaid", "svg", "html") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
                         # [T43] 延迟派发（族⑤）
-                        QTimer.singleShot(
-                            0,
+                        _defer_emit(
+                            self,
                             lambda ct=chart_type, pl=payload: self.chartExpandRequested.emit(ct, pl),
                         )
                 except Exception:
@@ -4887,8 +4921,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                     wtype, payload = rest.split(":", 1)
                     if wtype in ("svg", "html") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
                         # [T43] 延迟派发（族⑤）
-                        QTimer.singleShot(
-                            0,
+                        _defer_emit(
+                            self,
                             lambda wt=wtype, pl=payload: self.saveWidgetFileRequested.emit(wt, pl),
                         )
                 except Exception:
@@ -4900,8 +4934,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                     name_b64, png_b64 = rest.split(":", 1)
                     if len(png_b64) <= _MAX_CHART_PAYLOAD_B64:
                         # [T43] 延迟派发（族⑤）
-                        QTimer.singleShot(
-                            0,
+                        _defer_emit(
+                            self,
                             lambda nb=name_b64, pb=png_b64: self.saveChartPngRequested.emit(nb, pb),
                         )
                 except Exception:
@@ -4910,9 +4944,11 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     p = msg.split(":")
                     # [T43] 延迟派发（族⑤）
-                    QTimer.singleShot(
-                        0,
-                        lambda code=base64.b64decode(p[2]).decode("utf-8"), act=p[1]: self.codeActionRequested.emit(code, act),
+                    _defer_emit(
+                        self,
+                        lambda code=base64.b64decode(p[2]).decode("utf-8"), act=p[1]: self.codeActionRequested.emit(
+                            code, act
+                        ),
                     )
                 except Exception:
                     pass
@@ -14058,13 +14094,18 @@ class MessageCard(SimpleCardWidget):
             return True
 
     def _build_identity_header(self, parent, align_right: bool):
-        """构建身份行控件；开关关闭或不适用时返回 None。"""
+        """构建身份行控件（两行：名称 + 时间）；开关关闭或不适用时返回 None。"""
         if not self._identity_enabled():
             return None
         try:
             from app.widgets.modules.identity_header import IdentityHeader
 
-            header = IdentityHeader(self._ensure_identity(), align_right=align_right, parent=parent)
+            header = IdentityHeader(
+                self._ensure_identity(),
+                align_right=align_right,
+                parent=parent,
+                timestamp=self.timestamp or "",
+            )
             header.apply_text_color(self._theme["muted"])
             self._identity_header = header
             return header
@@ -14195,10 +14236,12 @@ class MessageCard(SimpleCardWidget):
         self.viewer = None
         self._viewer_pending_text = None
 
-        # 身份行（气泡**外**上方，右对齐）：头像 + 显示名
+        # 身份行（气泡**外**上方，右对齐）：头像 + 名称 + 时间
+        # 与气泡同宽同侧：加进 bubble_lay 会随气泡收缩，视觉上贴合气泡右缘。
         _header = self._build_identity_header(parent=self, align_right=True)
+        self._identity_owner = self
         if _header is not None:
-            main.addWidget(_header)
+            main.addWidget(_header, 0, Qt.AlignRight)
 
         # 气泡容器：背景色/圆角只在这一层（身份行与底部操作行在容器外，
         # 不随气泡底色渲染）。视图与图片条在内。
@@ -14232,7 +14275,7 @@ class MessageCard(SimpleCardWidget):
         self._image_strip.setVisible(False)
         bubble_lay.insertWidget(0, self._image_strip)
 
-        # 底部操作行（气泡**外**下方）：时间戳 + 复制/撤销/删除（hover 浮现）。
+        # 底部操作行（纯按钮）：时间戳已移到身份行第二行（见 IdentityHeader）
         # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
         footer_wrap = QWidget(self)
         footer_wrap.setStyleSheet("background: transparent;")
@@ -14242,17 +14285,7 @@ class MessageCard(SimpleCardWidget):
         footer.setSpacing(6)
         footer.addStretch()
 
-        # footer：stretch | [按钮组] | 时间戳
-        # 时间戳贴右缘（右对齐），按钮 hover 浮现在它左侧。
-        # ⚠️ 按钮进布局会让卡片最小宽 = 时间戳 + 按钮（约 170px），这是必需的：
-        # 窄气泡（如「嗯」仅 100px）本身装不下两者。卡片会比气泡宽，多出的部分
-        # 透明，气泡仍按内容自适应收缩（_user_bubble 右对齐 + Maximum 策略），
-        # 所以**气泡不会被撑宽**，撑开的只是卡片外框的透明区。
-        ts = QLabel(self.timestamp, self)
-        self._ts_label = ts
-        ts.setVisible(bool(self.timestamp))
-        ts.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(11)}px; color: {self._theme['muted']};")
-
+        # 按钮 hover 浮现在右端（卡片右缘对齐，与身份行头像侧一致）
         btns = QWidget(self)
         self._user_action_btns = btns
         bl = QHBoxLayout(btns)
@@ -14270,12 +14303,12 @@ class MessageCard(SimpleCardWidget):
             install_hover_tooltip(b, delay_ms=200)
             bl.addWidget(b)
 
+        # 固定尺寸 = 全部按钮都显示时的尺寸。这样 hover 显隐子按钮时容器尺寸
+        # 恒定、布局不重排（否则宽度 0↔82 来回变，表现为「hover 撑大气泡」）。
+        btns.setFixedSize(bl.sizeHint())
         footer.addWidget(btns)
-        footer.addWidget(ts)
         self._footer_wrap = footer_wrap
-        # 常驻布局占位（尺寸恒定），靠 opacity 浮现/隐藏 —— 不改变布局尺寸
-        MessageCard._set_actions_visible(btns, False)
-        main.addWidget(footer_wrap)
+        # 初始隐藏：容器常驻布局占位，仅切换子按钮显隐（不用 effect，见 _set_actions_visible）
         MessageCard._set_actions_visible(btns, False)
         main.addWidget(footer_wrap)
 
@@ -15465,7 +15498,7 @@ class MessageCard(SimpleCardWidget):
             # 窗口缩小后固定尺寸的气泡超出可视区（文字跑到显示范围之外）。
             if self.viewer is not None:
                 self.viewer.set_width_cap(target_width - 24)
-            self._position_user_actions()
+            self._sync_identity_header_width()
             return
 
         # 非 user（assistant/welcome）：固定宽度（min=max）
@@ -15567,26 +15600,30 @@ class MessageCard(SimpleCardWidget):
                 except RuntimeError:
                     pass
 
-    def _position_user_actions(self) -> None:
-        """把 footer 操作按钮组贴到时间戳左侧（浮动层，不参与布局）。
+    def _sync_identity_header_width(self) -> None:
+        """身份行右缘与气泡对齐（宽度取内容需求与气泡宽的较大值）。
 
-        按钮组不进布局是刻意的：其最小宽会通过布局反推卡片下限，把短消息气泡
-        硬撑宽（实测「嗯」被撑到 188px）。窄气泡的 footer 只有约 100px，也装不下
-        「时间戳 + 按钮」，故按钮挂在卡片层、允许浮出气泡范围（左侧留白区）。
+        身份行内容宽（头像 + 名称/时间列）常大于窄气泡宽（实测短消息气泡
+        100px vs 身份行需 ~135px）。强行压到气泡宽会把时间文本截断成
+        「09-16 23…」（2026-09-16 用户反馈的排布问题）。故取
+        ``max(内容需求, 气泡宽)``：右缘与气泡严格对齐，宽出部分向左延伸
+        （右对齐天然如此），视觉上仍贴着气泡。
         """
-        btns = getattr(self, "_user_action_btns", None)
-        ts = getattr(self, "_ts_label", None)
-        if btns is None or ts is None:
+        header = getattr(self, "_identity_header", None)
+        if header is None:
             return
         try:
-            if not ts.isVisible():
-                return
-            # 时间戳左缘（卡片坐标系）
-            ts_left = ts.mapTo(self, ts.rect().topLeft()).x()
-            ts_center_y = ts.mapTo(self, ts.rect().center()).y()
-            x = ts_left - btns.width() - 4
-            y = max(0, ts_center_y - btns.height() // 2)
-            btns.move(max(0, x), y)
+            # 先解绑固定宽，才能拿到「不被压缩时」的真实内容宽
+            header.setMinimumWidth(0)
+            header.setMaximumWidth(16777215)
+            need = header.sizeHint().width()
+            bubble = getattr(self, "_user_bubble", None)
+            target = need
+            if bubble is not None and bubble.width() > 0:
+                target = max(need, bubble.width())
+            elif self.width() > 0:
+                target = max(need, self.width() - 8)
+            header.setFixedWidth(target)
         except RuntimeError:
             pass
 
@@ -15607,27 +15644,24 @@ class MessageCard(SimpleCardWidget):
 
     @staticmethod
     def _set_actions_visible(container, visible: bool) -> None:
-        """opacity 控显隐（不用 setVisible）。
+        """用**子按钮显隐**控显隐（容器常驻布局，不用 graphicsEffect）。
 
-        setVisible(False) 会让容器退出布局计算 → 父级 sizeHint 变小 → 卡片宽度
-        协商结果改变（实测 hover 前后 sizeHint 从 280 掉到 196），气泡在 hover
-        瞬间被重排“撑长/变形”。改用透明度：控件始终参与布局，尺寸恒定，
-        仅视觉上浮现（置 0 时同时关闭鼠标交互避免误点隐形按钮）。
+        两条踩过的经验：
+        1. `container.setVisible(False)` 会让容器退出布局计算 → 父级 sizeHint
+           变小 → 卡片宽度重排，hover 瞬间气泡被“撑长/变形”。
+        2. 容器上用 `QGraphicsOpacityEffect` 控透明度同样不可取：卡片自身有
+           fade_in 的 effect（见 fade_in_widget），**Qt 在父级已有 effect 时对
+           子级 effect 的合成不可靠** —— 表现为控件「先显示一瞬间随后消失」。
+
+        故改为：容器保持可见且尺寸固定（占位不变），只切换其内部按钮的
+        setVisible，既不改布局尺寸，也不引入任何 effect。
         """
         try:
-            effect = container.graphicsEffect()
-            if effect is None:
-                from PyQt5.QtWidgets import QGraphicsOpacityEffect
-
-                effect = QGraphicsOpacityEffect(container)
-                effect.setOpacity(0.0 if not visible else 1.0)
-                container.setGraphicsEffect(effect)
-            effect.setOpacity(1.0 if visible else 0.0)
-            # 透明时隐藏子按钮的鼠标响应，避免点到不可见的按钮
             for child in container.findChildren(QWidget):
-                child.setAttribute(Qt.WA_TransparentForMouseEvents, not visible)
-            if visible:
-                container.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                # 只切换直接承载内容的按钮（有 sizeHint 的子控件）
+                if child.parent() is container:
+                    child.setVisible(visible)
+            container.setAttribute(Qt.WA_TransparentForMouseEvents, not visible)
         except RuntimeError:
             pass
 
@@ -17443,7 +17477,7 @@ class MessageCard(SimpleCardWidget):
         # 宽度同步由外层聊天窗口统一调度，避免卡片自身 resize 再次触发全量重算
         # 浮动按钮组不在布局里，需手工跟随卡片宽度变化重新贴靠时间戳左侧。
         if self.role == "user":
-            self._position_user_actions()
+            self._sync_identity_header_width()
 
     def _disconnect_all_signals(self):
         """断开 MessageCard 发射的所有信号，打破信号-槽引用环路"""

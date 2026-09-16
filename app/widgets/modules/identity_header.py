@@ -28,7 +28,7 @@ from typing import Dict, Optional
 
 from PyQt5.QtCore import QRectF, QSize, Qt
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from app.core.message_identity import BUILTIN_AVATAR_DRIFOX, BUILTIN_AVATAR_PREFIX, MessageIdentity
 from app.utils.design_tokens import Colors, scale_font_size
@@ -43,14 +43,14 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-# 头像尺寸（两行身份块：名称 + 时间，头像垂直居中于两行）
-AVATAR_SIZE = 40
+# 头像尺寸（与两行文本块等高，兼顾紧凑与辨识度）
+AVATAR_SIZE = 32
 
 # 名称字号（基础值，实际经 scale_font_size 叠加用户字号档位）
 NAME_FONT_SIZE = 15
 
 # 时间字号（小于名称、字色更浅，弱化处理）
-TIME_FONT_SIZE = 10
+TIME_FONT_SIZE = 9
 
 # 无头像时的候选主色（按显示名 hash 稳定选取）
 _PALETTE = (
@@ -240,8 +240,8 @@ class IdentityHeader(QWidget):
 
         # 名称在上、时间在下（同列两行）；头像在侧，垂直居中于两行整体。
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 0, 4, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(7)
 
         self._avatar = IdentityAvatar(identity, AVATAR_SIZE, self)
 
@@ -257,6 +257,11 @@ class IdentityHeader(QWidget):
         self._time_label = QLabel(timestamp or "", text_col)
         self._time_label.setVisible(bool(timestamp))
         self._apply_time_style()
+        # ⚠️ QLabel 默认 sizeHint 高度含内边距（实测 30px），两行就是 60px，
+        # 远超身份行的固定高 → 第二行（时间）被推到可视区外，表现为「时间不显示」。
+        # 显式压缩为字高，让两行真能装进固定高度（2026-09-16 用户反馈根因）。
+        self._name_label.setFixedHeight(self._name_label.fontMetrics().height())
+        self._time_label.setFixedHeight(self._time_label.fontMetrics().height())
 
         col.addWidget(self._name_label)
         col.addWidget(self._time_label)
@@ -269,7 +274,15 @@ class IdentityHeader(QWidget):
             layout.addWidget(self._avatar)
             layout.addWidget(text_col)
             layout.addStretch(1)
-        self.setFixedHeight(AVATAR_SIZE + 2)
+        # 高度 = max(头像, 两行文本) + 余量。此前写死 AVATAR_SIZE+2，两行文本装不下
+        # （名称 30 + 时间 30 > 42）→ 时间标签被裁掉看不见（2026-09-16 用户反馈
+        # 「时间只显示一瞬间就消失」的真因：布局压缩后文本落到可视区外）。
+        # ⚠️ 余量不可省：字号档位放大后两行需求可能恰好等于算出的高度，任何
+        # 亚像素误差都会让第二行（时间）被裁，留 2px 兜底。
+        text_h = self._name_label.sizeHint().height() + (
+            self._time_label.sizeHint().height() + col.spacing() if timestamp else 0
+        )
+        self.setFixedHeight(max(AVATAR_SIZE + 2, text_h) + 2)
 
     def set_identity(self, identity: MessageIdentity) -> None:
         """更新身份（助手切换 / 主题刷新时调用）"""
@@ -307,29 +320,45 @@ class IdentityHeader(QWidget):
     def _apply_time_style(self, color: str = "") -> None:
         """时间样式：小字号 + 更浅的字色（弱化，突出名称）。
 
-        同样走 setFont（QSS 解析不到中文字体名），颜色用主题 muted 再降一档透明度。
+        ⚠️ 弱化只用水色（QSS 的 rgba/浅色），**不用 QGraphicsOpacityEffect**：
+        卡片自身有 fade_in 的 QGraphicsOpacityEffect（见 fade_in_widget），
+        Qt 在父级已有 effect 时对子级 effect 的合成不可靠 —— 表现为时间标签
+        「先显示一瞬间、随后消失」（2026-09-16 用户反馈的真因）。
+        同样走 setFont 设字族（QSS 解析不到中文字体名）。
         """
         font = get_unified_font()
         font.setPixelSize(max(10, scale_font_size(TIME_FONT_SIZE)))
         font.setBold(False)
         self._time_label.setFont(font)
         if color:
-            # 名称色是 muted，时间再浅一档：附加 alpha 让它在同色系里更轻
-            self._time_label.setStyleSheet(
-                f"color: {color}; background: transparent;"
-            )
-            try:
-                from PyQt5.QtWidgets import QGraphicsOpacityEffect
-
-                eff = self._time_label.graphicsEffect()
-                if eff is None:
-                    eff = QGraphicsOpacityEffect(self._time_label)
-                    self._time_label.setGraphicsEffect(eff)
-                eff.setOpacity(0.72)
-            except Exception:
-                pass
+            # 在同色系里调低不透明度：解析 #rrggbb / rgb() 后附加 alpha
+            light = self._with_alpha(color, 0.62)
+            self._time_label.setStyleSheet(f"color: {light}; background: transparent;")
         else:
             self._time_label.setStyleSheet("background: transparent;")
+
+    @staticmethod
+    def _with_alpha(color: str, alpha: float) -> str:
+        """把 #rrggbb / rgb() / rgba() 转成带目标 alpha 的 rgba() 串。
+
+        QColor 不认 CSS 的 rgba 写法（会退化成黑），故手工拼接供 QSS 使用。
+        """
+        s = str(color or "").strip()
+        try:
+            if s.startswith("#"):
+                hex_part = s[1:]
+                if len(hex_part) == 3:
+                    hex_part = "".join(c * 2 for c in hex_part)
+                r, g, b = (int(hex_part[i : i + 2], 16) for i in (0, 2, 4))
+            elif s.lower().startswith(("rgba(", "rgb(")):
+                inner = s[s.index("(") + 1 : s.rindex(")")]
+                parts = [p.strip() for p in inner.split(",")]
+                r, g, b = (int(float(parts[i])) for i in range(3))
+            else:
+                return s  # 具名颜色（如 red）原样返回
+            return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+        except Exception:
+            return s
 
 
 __all__ = [
