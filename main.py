@@ -45,6 +45,53 @@ for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
     os.environ.pop(_env_key, None)
 
 
+# ========== 全局异常钩子（T44 提前安装）==========
+# 原版安装在 _deferred_startup（主窗就绪后），启动早期（巨型 import / QApplication
+# 创建 / 首窗构造期）存在未兜窗口：PyQt5.15 槽内裸异常默认 fastfail（T42 实测），
+# 唯一救生索是 excepthook 被显式覆盖。现提前到 import 段后立即安装，三个钩子：
+#   sys.excepthook        主线程未捕获异常
+#   sys.unraisablehook    __del__ 中的被忽略异常
+#   threading.excepthook  子线程未捕获异常（chat_worker/subagent_worker 等，
+#                         此前完全未兜，与本轮稳定性直接相关）
+# _deferred_startup 内不再重复定义（合并为同一函数，行为一致：打日志、不退进程）。
+import threading
+import traceback as _exc_tb
+
+from loguru import logger as _hook_logger
+
+
+def _pyqt_exception_hook(exc_type, exc_val, exc_tb):
+    _hook_logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
+    _hook_logger.error("".join(_exc_tb.format_exception(exc_type, exc_val, exc_tb)))
+
+
+def _unraisable_hook(unraisable):
+    msg = getattr(unraisable.exc_value, "args", (str(unraisable.exc_value),))
+    err_msg = msg[0] if msg else str(unraisable.exc_value)
+    _hook_logger.error(f"[UnraisableException] {unraisable.exc_type.__name__}: {err_msg}")
+    if unraisable.object:
+        _hook_logger.error(f"  Object: {unraisable.object!r}")
+    _hook_logger.error(f"  Err: {unraisable.err_msg}")
+
+
+def _threading_excepthook_hook(args):
+    thread_name = args.thread.name if args.thread is not None else "?"
+    _hook_logger.error(
+        f"[ThreadUnhandledException] {args.exc_type.__name__}: {args.exc_value} in thread {thread_name}"
+    )
+    _hook_logger.error("".join(_exc_tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+
+def _install_global_exception_hooks() -> None:
+    """安装三钩子（幂等：重复调用只是重复赋值，行为一致）。"""
+    sys.excepthook = _pyqt_exception_hook
+    sys.unraisablehook = _unraisable_hook
+    threading.excepthook = _threading_excepthook_hook
+
+
+_install_global_exception_hooks()
+
+
 # ========== 内存诊断开关 ==========
 # 设为 False 可禁用所有 [MEM] 诊断日志和 mem_diag.log 文件
 # 关闭后 Worker 内也不再执行内存快照和自适应 GC 日志
@@ -357,25 +404,9 @@ def main():
 
     qInstallMessageHandler(_qt_message_handler)
 
-    # 全局 Python 异常钩子（兜底）
-    import traceback as _traceback
-
-    def _pyqt_exception_hook(exc_type, exc_val, exc_tb):
-        _logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
-        _logger.error("".join(_traceback.format_exception(exc_type, exc_val, exc_tb)))
-
-    sys.excepthook = _pyqt_exception_hook
-
-    # sys.unraisablehook
-    def _unraisable_hook(unraisable):
-        msg = getattr(unraisable.exc_value, "args", (str(unraisable.exc_value),))
-        err_msg = msg[0] if msg else str(unraisable.exc_value)
-        _logger.error(f"[UnraisableException] {unraisable.exc_type.__name__}: {err_msg}")
-        if unraisable.object:
-            _logger.error(f"  Object: {unraisable.object!r}")
-        _logger.error(f"  Err: {unraisable.err_msg}")
-
-    sys.unraisablehook = _unraisable_hook
+    # 全局 Python 异常钩子（兜底）—— [T44] 已提前到模块级安装
+    # （_pyqt_exception_hook / _unraisable_hook / _threading_excepthook_hook，
+    # 见文件头部「全局异常钩子」段），此处不再重复定义。
 
     # 禁用默认退出行为
     app.setQuitOnLastWindowClosed(False)
@@ -404,6 +435,15 @@ def main():
         win = _show_window_state["window"]
         if win is None:
             _show_window_state["wanted"] = True
+            # [T36 P5] pending 超时兜底：首窗构造异常（如渲染环境崩溃）时，
+            # 二次启动请求会一直挂在 wanted 上被静默丢弃 → 用户双击图标无反应。
+            # 30s 后仍未就绪则清 wanted + 告警（对应 T24 R2 的"窗口期"上限）。
+            def _expire_pending() -> None:
+                if _show_window_state["window"] is None and _show_window_state["wanted"]:
+                    _show_window_state["wanted"] = False
+                    logger.warning("[Main] 二次启动 show 请求超时（30s 内首窗未就绪），已放弃")
+
+            QTimer.singleShot(30000, _expire_pending)
             return
         _activate_window(win)
 
@@ -542,7 +582,7 @@ def main():
         from app.core.gateway_service import GatewayService
         from app.core.plugin_host_service import PluginHostService
 
-        _smark("shell_show", level="info")
+        _smark("import_services", level="info")
         GatewayService.get_instance().ensure_started()
         PluginHostService.get_instance().ensure_started()
         _smark("app_services_start")

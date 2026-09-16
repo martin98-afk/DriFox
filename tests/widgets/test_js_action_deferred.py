@@ -51,7 +51,7 @@ def _run_console(viewer, message):
 
     ConsoleMonitorPage.javaScriptConsoleMessage(
         viewer,
-        QWebEnginePage.JavaScriptConsoleMessageLevel.InfoLevel.value,
+        QWebEnginePage.JavaScriptConsoleMessageLevel(0),  # InfoLevel
         message,
         1,
         "js",

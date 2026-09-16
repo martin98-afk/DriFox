@@ -9725,7 +9725,6 @@ class OpenAIChatToolWindow(ToolWindow):
         viewport_top = scroll_area.verticalScrollBar().value()
         viewport_bottom = viewport_top + viewport_rect.height()
 
-        _t_hot = time.perf_counter()
         _synced = 0
         prev_visible = self._last_visible_card_ids
         visible_ids: set = set()
@@ -9764,10 +9763,6 @@ class OpenAIChatToolWindow(ToolWindow):
             _synced += 1
 
         self._last_visible_card_ids = visible_ids
-        logger.debug(
-            f"[scroll-hot] sync-visible {((time.perf_counter() - _t_hot) * 1000):.2f}ms "
-            f"synced={_synced} visible={len(visible_ids)}"
-        )
 
     def _restore_card_now(self, card):
         """把卡片从恢复队列摘除并就地退出 preview（滚动即时命中路径）。
@@ -14695,7 +14690,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # [T23 改动3] 布局纪元缓存：节点 → 用户卡**引用**的定位结果只依赖布局结构
         # （批次数组与批内卡片构成），不依赖高度。纪元不变时复用卡引用，避免每拍
         # 全量扫 _batch_cards（O(节点 × 批内卡)）；y()/height() 是布局结果，仍每拍重读。
-        _t_hot = time.perf_counter()
         cache = self._node_user_cards_cache
         if cache is not None and cache[0] == self._layout_epoch:
             located = cache[1]
@@ -14715,7 +14709,6 @@ class OpenAIChatToolWindow(ToolWindow):
                             located.append((node_idx, card))
                             break
             self._node_user_cards_cache = (self._layout_epoch, located)
-        logger.debug(f"[scroll-hot] node-locate {((time.perf_counter() - _t_hot) * 1000):.2f}ms n={len(located)}")
 
         # 每拍实时重读几何（卡片高度随懒渲染/折叠持续变化，不能随引用一起缓存）
         user_card_info = []
