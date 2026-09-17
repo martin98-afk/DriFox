@@ -13161,6 +13161,7 @@ class MessageCard(SimpleCardWidget):
         self._footer_model_label: Optional[QLabel] = None
         self._footer_elapsed_label: Optional[QLabel] = None
         self._footer_tokens_label: Optional[QLabel] = None
+        self._footer_speed_label: Optional[QLabel] = None
         self._footer_diff_stats_label: Optional[QLabel] = None
         self._footer_review_btn: Optional[QLabel] = None
         self._footer_sep1: Optional[QLabel] = None
@@ -13503,8 +13504,8 @@ class MessageCard(SimpleCardWidget):
     def _build_footer_bar(self, main: QVBoxLayout):
         """构建助手卡片底部极简元信息栏
 
-        布局：左侧全信息（token | 耗时 | 模型 | 差异统计），右侧全按钮
-        （复制 / 分支 hover 浮现，Review 有 diff 时常显）。
+        布局：左侧纯文本（token | 速度 | 耗时），右侧全可点击
+        （模型胶囊 / 差异徽章，复制+分支 hover 浮现，Review 有 diff 时常显）。
         """
         bar = QWidget(self)
         self._footer_bar = bar
@@ -13514,16 +13515,15 @@ class MessageCard(SimpleCardWidget):
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(0)
 
-        accent = self._theme["accent"]
         font_css = get_font_family_css()
-        # 统一所有 footer 元素字号为 10px（原 9px 文字 + 11px emoji 混用 → 基线错位）
+        # 统一所有 footer 元素字号为 10px；信息区 muted 降噪（accent 留给正文强调）
         label_style = (
             f"{font_css} font-size: {scale_font_size(10)}px; "
-            f"color: {accent}; font-weight: 400; padding: 0px; margin: 0px;"
+            f"color: {self._theme['muted']}; font-weight: 400; padding: 0px; margin: 0px;"
         )
 
-        # 布局顺序：token | 耗时 | 模型 | hover 复制按钮 ——stretch—— 差异统计 | Review
-        # （元信息靠左，差异独占右端；两端对称留 8px 边距）
+        # 布局顺序：token | 速度 | 耗时 ——stretch—— 模型胶囊 | 差异徽章 | hover(分支/复制) | Review
+        # （左侧纯文本不可点，右侧全可点击；两端对称留 8px 边距）
 
         # Token 消耗
         tokens_l = QLabel("", self)
@@ -13533,13 +13533,32 @@ class MessageCard(SimpleCardWidget):
         self._footer_tokens_label = tokens_l
         layout.addWidget(tokens_l)
 
-        # 分隔点 1（token ↔ 耗时）
+        # 分隔点 1（token ↔ 速度）
         sep1 = QLabel("·", self)
         sep1.setStyleSheet(label_style)
         sep1.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         sep1.setVisible(False)
         self._footer_sep1 = sep1
         layout.addWidget(sep1)
+
+        # 生成速度（回合结束时 set_meta_info 由 total/elapsed 计算，流式期间不显示）
+        speed_l = QLabel("", self)
+        speed_l.setStyleSheet(
+            f"{font_css} font-size: {scale_font_size(10)}px; "
+            f"color: #2ea043; font-weight: 400; padding: 0px; margin: 0px;"
+        )
+        speed_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        speed_l.setVisible(False)
+        self._footer_speed_label = speed_l
+        layout.addWidget(speed_l)
+
+        # 分隔点 2（速度 ↔ 耗时）
+        sep2 = QLabel("·", self)
+        sep2.setStyleSheet(label_style)
+        sep2.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        sep2.setVisible(False)
+        self._footer_sep2 = sep2
+        layout.addWidget(sep2)
 
         # 耗时
         elapsed_l = QLabel("", self)
@@ -13548,45 +13567,6 @@ class MessageCard(SimpleCardWidget):
         elapsed_l.setVisible(False)
         self._footer_elapsed_label = elapsed_l
         layout.addWidget(elapsed_l)
-
-        # 分隔点 2（耗时 ↔ 模型）
-        sep2 = QLabel("·", self)
-        sep2.setStyleSheet(label_style)
-        sep2.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        sep2.setVisible(False)
-        self._footer_sep2 = sep2
-        layout.addWidget(sep2)
-
-        # 模型名称（可点击，仅显示模型名，服务商名已隐藏但保留用于跳转）
-        footer_text = self._get_footer_model_text()
-        model_l = QLabel(footer_text, self)
-        model_l.setStyleSheet(f"{label_style}")
-        model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        model_l.setVisible(bool(footer_text))
-        model_l.setCursor(Qt.PointingHandCursor)
-        model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
-        install_hover_tooltip(model_l, "点击切换到目标模型配置")
-        self._footer_model_label = model_l
-        layout.addWidget(model_l)
-
-        # 分隔点 3（模型 ↔ 差异统计）
-        sep3 = QLabel("·", self)
-        sep3.setStyleSheet(label_style)
-        sep3.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        sep3.setVisible(False)
-        self._footer_sep3 = sep3
-        layout.addWidget(sep3)
-
-        # 差异统计（左侧信息区末位，点击弹出差异弹窗）
-        diff_l = QLabel("", self)
-        diff_l.setStyleSheet(f"{label_style} margin-left: 8px;")
-        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        diff_l.setVisible(False)
-        diff_l.setCursor(Qt.PointingHandCursor)
-        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
-        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
-        self._footer_diff_stats_label = diff_l
-        layout.addWidget(diff_l)  # 差异统计属「信息」，紧跟左侧元信息区
 
         # Review 按钮（使用 Search 图标），点击触发 code-reviewer 子智能体
         # ★ 有 diff 时**常显**（用户选定），不与 hover 组一起隐现。
@@ -13610,8 +13590,37 @@ class MessageCard(SimpleCardWidget):
         install_hover_tooltip(review_btn, "用 code-reviewer 子智能体快速审查本次修改")
         self._footer_review_btn = review_btn
 
-        # 弹性分隔：左侧信息区（元信息 + 差异统计） | 右侧操作区
+        # 弹性分隔：左侧纯文本信息区 | 右侧可点击区（胶囊/徽章/按钮）
         layout.addStretch()
+
+        # 模型胶囊（可点击跳目标配置；仅显示模型名，服务商名隐藏但保留用于跳转）
+        footer_text = self._get_footer_model_text()
+        model_l = QLabel(footer_text, self)
+        model_l.setStyleSheet(
+            f"{font_css} font-size: {scale_font_size(10)}px; color: {self._theme['muted']};"
+            f" border: 1px solid {Colors.BORDER}; border-radius: 8px; padding: 1px 8px;"
+        )
+        model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        model_l.setVisible(bool(footer_text))
+        model_l.setCursor(Qt.PointingHandCursor)
+        model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
+        install_hover_tooltip(model_l, "点击切换到目标模型配置")
+        self._footer_model_label = model_l
+        layout.addWidget(model_l)
+
+        # 差异徽章（点击弹出差异弹窗；有 diff 才显示，与 Review 按钮联动）
+        diff_l = QLabel("", self)
+        diff_l.setStyleSheet(
+            f"{font_css} font-size: {scale_font_size(10)}px; color: {self._theme['muted']};"
+            f" border: 1px solid {Colors.BORDER}; border-radius: 4px; padding: 1px 6px; margin-left: 4px;"
+        )
+        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        diff_l.setVisible(False)
+        diff_l.setCursor(Qt.PointingHandCursor)
+        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
+        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
+        self._footer_diff_stats_label = diff_l
+        layout.addWidget(diff_l)
 
         # 右侧操作区：hover 浮现组（复制 / 分支）+ Review（有 diff 时常显）。
         # 固定尺寸占位：按钮显隐切换时 footer 尺寸不变，卡片不跳动、不重排。
@@ -13621,8 +13630,8 @@ class MessageCard(SimpleCardWidget):
         hb.setContentsMargins(0, 0, 0, 0)
         hb.setSpacing(2)
         for ic, tp, cb in [
-            (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
             (get_icon("分支"), "从此条分支新对话", lambda: self._emit_branch_requested()),
+            (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
         ]:
             b = TransparentToolButton(ic, self)
             b.setToolTip(tp)
@@ -13630,9 +13639,9 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(20, 20)  # 弱化处理：比原顶部按钮 32px 更小
             install_hover_tooltip(b, delay_ms=200)
             hb.addWidget(b)
-        hover_btns.setFixedSize(hb.sizeHint())
-        hover_btns.setVisible(True)  # 常驻布局占位，仅切换子按钮显隐
-        MessageCard._set_actions_visible(hover_btns, False)
+        # 容器整体显隐（assistant 卡片为定宽布局，显隐只引起 footer 内部横移，
+        # 不会撑宽卡片；user 气泡仍走 _set_actions_visible 子按钮显隐防变形）
+        hover_btns.setVisible(False)
         layout.addWidget(hover_btns)
 
         # Review：右端末位常显（有 diff 时），不随 hover 隐现
@@ -13654,7 +13663,7 @@ class MessageCard(SimpleCardWidget):
             self._elapsed_timer.stop()
             self._elapsed_start_time = None
             try:
-                self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(elapsed)}")
+                self._footer_elapsed_label.setText(f"{_format_elapsed(elapsed)}")
                 self._footer_elapsed_label.setVisible(True)
             except RuntimeError:
                 # 🛡️ 防御：footer label 可能已被 C++ 侧销毁（deleteLater 排队中），
@@ -13674,11 +13683,28 @@ class MessageCard(SimpleCardWidget):
             except RuntimeError:
                 # 🛡️ 同上：token label 可能已被 C++ 侧销毁，静默忽略。
                 pass
+        # 生成速度（口径对齐 agent_trace：output ÷ (总时长 − 首字延迟)；
+        # total 是上下文快照含历史，不能当分子）
+        if elapsed is not None and token_usage is not None and self._footer_speed_label:
+            output = token_usage.get("output", 0) or 0
+            ttft_s = (token_usage.get("ttft_ms", 0) or 0) / 1000.0
+            gen_elapsed = elapsed - ttft_s
+            if output > 0 and gen_elapsed > 0.2:
+                tps = output / gen_elapsed
+                speed_text = f"{tps / 1000:.1f}K tok/s" if tps >= 1000 else f"{round(tps)} tok/s"
+                try:
+                    self._footer_speed_label.setText(speed_text)
+                    self._footer_speed_label.setVisible(True)
+                except RuntimeError:
+                    # 🛡️ 同上：speed label 可能已被 C++ 侧销毁，静默忽略。
+                    pass
+        # 轮次结束，停掉流式估算刷新（label 里已显示的估算值由精确值覆盖或兜底保留）
+        self._stream_char_count = 0
         # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）
         self._refresh_footer_separators()
 
     def set_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0):
-        """设置左对齐差异统计：📄N | +N | -N（点击弹出差异弹窗）
+        """设置差异徽章：N 文件 +N/-N（点击弹出差异弹窗）
 
         Args:
             files_count: 修改的文件数
@@ -13696,8 +13722,8 @@ class MessageCard(SimpleCardWidget):
                 self._footer_review_btn.setVisible(False)
             return
 
-        accent = self._theme.get("accent", "#888888")
-        html = f'<span style="color:{accent};">📄{files_count}</span>'
+        muted = self._theme.get("muted", "#888888")
+        html = f'<span style="color:{muted};">{files_count} 文件</span>'
 
         add_del = []
         if additions > 0:
@@ -13767,12 +13793,13 @@ class MessageCard(SimpleCardWidget):
         """根据标签文本非空判断分隔点可见性（比 isVisible 更可靠）"""
         try:
             has_tokens = bool(self._footer_tokens_label and self._footer_tokens_label.text())
+            has_speed = bool(self._footer_speed_label and self._footer_speed_label.text())
             has_elapsed = bool(self._footer_elapsed_label and self._footer_elapsed_label.text())
-            has_model = bool(self._footer_model_label and self._footer_model_label.text())
             if self._footer_sep1:
-                self._footer_sep1.setVisible(has_tokens and has_elapsed)
+                # speed 缺席时 tokens 与耗时仍需分隔（流式期间常见）
+                self._footer_sep1.setVisible(has_tokens and (has_speed or has_elapsed))
             if self._footer_sep2:
-                self._footer_sep2.setVisible(has_elapsed and has_model)
+                self._footer_sep2.setVisible(has_speed and has_elapsed)
         except RuntimeError:
             # 🛡️ 防御：footer label / separator 可能已被 C++ 侧销毁（deleteLater 排队中），
             # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。静默忽略。
@@ -13785,7 +13812,10 @@ class MessageCard(SimpleCardWidget):
         if not self._footer_elapsed_label:
             return
         self._elapsed_start_time = time.time()
-        self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(0)}")
+        # 流式吞吐估算状态：update_content 累计字符，首个内容 chunk 记时刻
+        self._stream_char_count = 0
+        self._stream_first_text_t = None
+        self._footer_elapsed_label.setText(f"{_format_elapsed(0)}")
         self._footer_elapsed_label.setVisible(True)
         self._refresh_footer_separators()
         self._elapsed_timer.start(1000)  # 每秒更新
@@ -13800,7 +13830,19 @@ class MessageCard(SimpleCardWidget):
         if not self.isVisible():
             return
         elapsed = time.time() - self._elapsed_start_time
-        self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(elapsed)}")
+        self._footer_elapsed_label.setText(f"{_format_elapsed(elapsed)}")
+        # 流式实时吞吐（估算，≈ 前缀同 agent_trace）：输出字符÷4 ÷ 首字后生成时长
+        if self._footer_speed_label is not None:
+            chars = getattr(self, "_stream_char_count", 0)
+            t0 = getattr(self, "_stream_first_text_t", None)
+            if chars > 0 and t0 is not None:
+                gen = time.time() - t0
+                if gen > 0.5:
+                    tps = (chars // 4) / gen
+                    text = f"≈{tps / 1000:.1f}K tok/s" if tps >= 1000 else f"≈{round(tps)} tok/s"
+                    self._footer_speed_label.setText(text)
+                    self._footer_speed_label.setVisible(True)
+                    self._refresh_footer_separators()
 
     def _build_avatar_style(self):
         font_css = get_font_family_css()
@@ -15700,14 +15742,14 @@ class MessageCard(SimpleCardWidget):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, True)
         elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._set_actions_visible(self._assistant_action_btns, True)
+            self._assistant_action_btns.setVisible(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, False)
         elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._set_actions_visible(self._assistant_action_btns, False)
+            self._assistant_action_btns.setVisible(False)
         super().leaveEvent(event)
 
     @staticmethod
@@ -15755,6 +15797,11 @@ class MessageCard(SimpleCardWidget):
         if isinstance(txt, list):
             self.set_content(txt)
             return
+        # 流式吞吐估算：累计输出字符，首个非空 chunk 记时刻（口径对齐 agent_trace TTFT）
+        if self.role == "assistant" and isinstance(txt, str) and txt:
+            self._stream_char_count = getattr(self, "_stream_char_count", 0) + len(txt)
+            if getattr(self, "_stream_first_text_t", None) is None:
+                self._stream_first_text_t = time.time()
         self.append_text(txt)
 
     def showEvent(self, event):

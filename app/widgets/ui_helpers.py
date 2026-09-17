@@ -1868,9 +1868,10 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
         if layout_removed:
             widget.deleteLater()
             deleted += 1
-            logger.info(f"[DELETE] Widget deleted: role={widget.role}")
+            # 无 role 属性的 widget（分隔条/占位等）显示类名，避免 AttributeError
+            logger.info(f"[DELETE] Widget deleted: role={getattr(widget, 'role', type(widget).__name__)}")
         else:
-            logger.warning(f"[DELETE] Widget not found in layout: role={widget.role}")
+            logger.warning(f"[DELETE] Widget not found in layout: role={getattr(widget, 'role', type(widget).__name__)}")
 
     return deleted
 

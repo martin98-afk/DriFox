@@ -619,7 +619,16 @@ class AssistantManager:
         self._ensure_dir(path.parent)
         tmp = path.with_suffix(".yaml.tmp")
         tmp.write_text(a.to_yaml(), encoding="utf-8")
-        tmp.replace(path)
+        # Windows 下 Defender/索引服务可能瞬时持有目标句柄，replace 报 WinError 5，
+        # 短退避重试吸收（20/40/80/160ms，总窗口约 300ms），穷尽才抛
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02 * (2**attempt))
 
     # ── ID 校验 ──
 

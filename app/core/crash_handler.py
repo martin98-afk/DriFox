@@ -28,6 +28,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from loguru import logger
+
 _CLEAN_EXIT_MARK = "=== clean exit ==="
 
 # faulthandler 落盘现场的固定开头，用作「发生过 SEH 异常」的唯一可箱证据

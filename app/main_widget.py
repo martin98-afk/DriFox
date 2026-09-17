@@ -13330,10 +13330,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if card.role != "assistant":
             return
         elapsed = None
+        output_tokens = 0
+        ttft_ms = 0
         for msg in batch:
             if msg.get("role") == "assistant":
                 if msg.get("elapsed") is not None:
                     elapsed = msg["elapsed"]
+                tu = msg.get("token_usage") or {}
+                if tu.get("output"):
+                    output_tokens = tu["output"]
+                ttft_ms = msg.get("ttft_ms") or 0
         # 卡片 token 显示与上下文圆环同步：直接用圆环快照的 used_tokens（同一来源），
         # 不再读取落库的 msg["token_usage"]——后者是 worker 侧估算（可能基于压缩后的
         # current_messages），会远小于圆环真实占用，导致重载后卡片显示异常小的数值。
@@ -13351,6 +13357,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._reload_ctx_used_tokens = used
             self._reload_ctx_sid = sid
         token_usage = {"total": used} if used > 0 else None
+        if token_usage and output_tokens:
+            token_usage["output"] = output_tokens
+            if ttft_ms:
+                token_usage["ttft_ms"] = ttft_ms
         if elapsed is not None or token_usage is not None:
             card.set_meta_info(elapsed=elapsed, token_usage=token_usage)
         # 延迟刷新分隔点：等父级布局完成后再检查 isVisible()，避免加载时父级隐藏导致误判
