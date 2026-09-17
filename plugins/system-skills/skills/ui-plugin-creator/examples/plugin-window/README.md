@@ -8,11 +8,25 @@
 
 ```
 plugin-window/
-├── plugin.json                  # components: { "ui": true }
+├── plugin.json                  # 需自建（内容见下），components: { "ui": true }
 └── ui/
     ├── __init__.py              # register_ui(registry)：热重载清理 + register_window
     └── example_window_page.py   # 内容页：三约定接口 set_context_provider/show_card/refresh_theme
 ```
+
+> ⚠️ 技能包内不带 `plugin.json`（仓库 `.gitignore` 的 `*.json` 规则不放行非
+> `.drifox-plugin/` 目录的 json）。复制后请自建 `plugin.json`：
+>
+> ```json
+> {
+>   "name": "plugin-window-example",
+>   "description": "独立弹窗示例",
+>   "version": "0.1.0",
+>   "author": { "name": "you" },
+>   "license": "MIT",
+>   "components": { "ui": true }
+> }
+> ```
 
 ## 何时参照
 
