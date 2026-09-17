@@ -1,0 +1,18 @@
+{
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
+    "name": "ui-slots-demo",
+    "description": "UI 扩展点示例 — 演示独立弹窗（register_window）与消息卡片按钮/信息注入（footer_action / footer_stat），可作为新插件开发的参考模板",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "user",
+    "components": {
+        "ui": true
+    }
+}
