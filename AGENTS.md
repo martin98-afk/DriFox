@@ -33,12 +33,13 @@ pytest tests/ -m perf                  # 仅性能基准
 | 目录 | 职责 |
 |---|---|
 | `app/core/` | 引擎：backend/chat_session/hook_manager/workers + lsp/store/team |
+| `app/core/context/` | 上下文管理 tier cascade：view/pipeline/budget/config/tool_prune + tiers/ |
 | `app/gateway/` | 多平台网关适配层 |
 | `app/tools/` | 工具框架(registry/loader/classifier/mapper)+共享服务(task/team/mcp) |
 | `app/widgets/` | UI 组件、设置卡片、像素宠物 |
-| `app/plugins/contracts/` | Protocol：ModelAdapter/LoopPolicy/SessionStorageEngine/MessageSerializer |
+| `app/plugins/contracts/` | Protocol：ModelAdapter/LoopPolicy/SessionStorageEngine/MessageSerializer/ContextPolicy |
 | `app/plugins/registries/` | 四注册表单例(adapter/loop policy/storage/serializer) |
-| `plugins/system/` | 系统插件：tools/model_adapters/loop_policies/storages/serializers/hooks/skills/themes/commands/ui |
+| `plugins/system-*` | 系统插件：tools/model_adapters/loop_policies/storages/serializers/context_tiers/budget_resolvers/hooks/skills/themes/commands/ui |
 | `~/.drifox/plugins/` | 用户级社区插件(watchfiles 热扫描) |
 | `tests/` | 与源码按模块对齐：core/widgets/plugins/utils/perf/gateway/debug |
 | `docs/` | plugins/perf/security/superpowers 四大知识库 |
@@ -49,6 +50,8 @@ pytest tests/ -m perf                  # 仅性能基准
 **配置契约 E1**：`.drifox-plugin/plugin.json` 声明 `config_schema`（title+fields[{key,label,type,default,env,placeholder,description}]）。type：`text/password/bool/select/number/textarea`。主程序自动渲染设置卡 + 存储 `<app_data_dir>/plugins/<plugin>/config.json`。三级链：环境变量→存储→默认。
 
 **运行时组件**：`model_adapters/*.py`、`loop_policies/*.py`、`storages/*.py`、`serializers/*.py` 各自 `register(registry)`。user 根覆盖 system 根。激活 `LoopPolicyRegistry.get_instance().set_active(<id>)`。序列化单入口 `MessageSerializer.serialize(messages, ctx)`，按 `ctx.flags.use_responses_api` 路由。
+
+**上下文策略**（插件 `context_tiers/*.py` 与 `budget_resolvers/*.py` 各自 `register(registry)`）：契约见 `app/plugins/contracts/context_policy.py`。tier cascade 分由轻到重 8 层（order 10-80：图片剥离/去重/工具截断/落盘/参数截断/摘要化/尾保留/LLM 摘要），三个 stage `ingest`（允许落盘副作用）/`send`／`ui`（禁止副作用）共用同一链。tier 只产出新 messages 列表、不得修改 view 输入、阈值一律走 config_schema（`system-context` 插件）；同 order 后注册覆盖先注册，默认 tier 不可删。入口统一为 `ContextPipeline`（`ingest_tool_results` / `project_for_send` / `project_for_ui`），禁止在调用点手工重复截断。
 
 **Gateway**：插件在 `gateways/<platform>.py` 注册 `GatewayPlatformDef`；主程序查 `GatewayPlatformRegistry.get_instance()`，零平台 if。SDK vendor 到 `<插件>/deps/`，顶层 `sys.path.insert(0,_deps)` 优先，本体函数内延迟导入（教训：dingtalk_stream 顶层导入致 gateway 包加载失败）。
 

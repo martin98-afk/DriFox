@@ -1,6 +1,17 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### ✨ 新功能 (New Features)
+
+- **上下文管理插件化 — tier cascade** (`app/core/context/` 新增, `app/plugins/contracts/context_policy.py`, `app/plugins/registries/context_policy_registry.py`, `plugins/system-context/` 新增, `tests/core/test_context_pipeline.py` 新增): 把硬编码在内核的上下文管理逻辑抽成插件槽位，遵循 Claude Code / Anthropic context editing 的分层降级范式。新增 `ContextView` 投影对象与 `ContextPipeline` 编排器，三个 stage（`ingest` 允许落盘副作用 / `send` / `ui` 禁止副作用）共用同一条降级链；8 个内置 tier 按 order 10-80 由轻到重执行（图片剥离 / 重复结果去重 / 工具结果截断 / 长结果落盘 / 参数截断 / 旧输出摘要化 / 尾保留 / LLM 摘要），每层自带 trigger 声明。编排三条规则：达标即停（used <= target 立刻 break）、分层熔断（连续 2 次无收益跳过该层）、异常隔离（tier 抛错记录并跳过，不阻断发送）。插件可注册/覆盖/插入任意层，同 order 后注册者生效；阈值统一由 `system-context` 插件 config_schema 承载（环境变量→存储→默认三级链）。既有 `prune_tool_result` / `ToolResultPersister` / `HistoryCompactor` 对外 API 零变化。
+
+### 🔧 重构 (Refactor)
+
+- `prune_tool_result` 及私有辅助迁至 `app/core/context/tool_prune.py`（`context_builder` / `message_content` 保留 re-export，序列化器插件继续调用）
+- 免裁剪名单改由工具注册时声明：`metadata["no_prune"]`（不截断）/ `metadata["no_offload"]`（不落盘），替代主程序硬编码的 `PRUNE_SKIP_TOOLS` / `SKIP_TOOLS` 两份不一致白名单
+
 ## [v0.6.2] - 2026-09-17 (重新发布 #2)
 
 自上一版本以来的变更 | 提交数：23 · 文件变更：58 · +7059/-1327 | 贡献者：dingma, mading
