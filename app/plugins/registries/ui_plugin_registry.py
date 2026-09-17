@@ -548,6 +548,54 @@ class InputButtonInfo:
 
 
 @dataclass(frozen=True)
+class FooterStatInfo:
+    """消息卡片页脚左区信息项注册信息（吞吐量等统计数据由插件注入）
+
+    Attributes:
+        plugin_name: 所属插件名
+        stat_id: 信息项唯一 ID
+        provider: 取值回调，签名 (context: dict) -> Optional[dict]。
+            context 含 window_id / main_widget / role / model_name / elapsed /
+            token_usage / streaming / live_tokens / live_gen_s 等（见
+            MessageCard._footer_stat_context）；返回 None 表示本条消息不显示，
+            返回 {"text": str, "color": str(可选), "tooltip": str(可选)} 表示显示。
+        priority: 优先级（同 stat_id 时高者覆盖低者；显示顺序同值按注册序）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    stat_id: str
+    provider: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FooterActionInfo:
+    """消息卡片页脚右区 hover 按钮组注册信息（与内置分支/复制同排）
+
+    Attributes:
+        plugin_name: 所属插件名
+        action_id: 按钮唯一 ID
+        icon_path: 深色主题图标路径
+        icon_light_path: 浅色主题图标路径（可选，缺省回退 icon_path）
+        tooltip: 悬停提示
+        on_click: 点击回调，签名 (context: dict) -> None（context 同 FooterStatInfo）
+        priority: 优先级（同 action_id 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    action_id: str
+    icon_path: str = ""
+    icon_light_path: str = ""
+    tooltip: str = ""
+    on_click: Optional[Callable[[Dict[str, Any]], None]] = None
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ContextMenuActionInfo:
     """右键菜单插件项注册信息（Phase D）
 
@@ -651,6 +699,9 @@ class UIPluginRegistry:
         # 标题栏常驻 tab 槽位：{tab_id: TitlebarTabInfo}
         self._titlebar_tabs: Dict[str, TitlebarTabInfo] = {}
         self._titlebar_widgets: Dict[str, TitlebarWidgetInfo] = {}
+        # 消息卡片页脚扩展点：左区信息项 + 右区 hover 按钮
+        self._footer_stats: Dict[str, FooterStatInfo] = {}
+        self._footer_actions: Dict[str, FooterActionInfo] = {}
         self._services: Dict[str, tuple] = {}  # name -> (plugin_name, instance)
         # 右侧工作台页签槽位：{page_id: WorkbenchTabInfo}
         self._workbench_tabs: Dict[str, WorkbenchTabInfo] = {}
@@ -1656,6 +1707,72 @@ class UIPluginRegistry:
 
         数据源：region 存储（Phase E 单源化）"""
         return [e.payload for e in self.get_region_entries("toolbar:input") if isinstance(e.payload, InputButtonInfo)]
+
+    def register_footer_stat(
+        self,
+        plugin_name: str,
+        stat_id: str,
+        provider: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息卡片页脚左区信息项（吞吐量等统计数据由插件注入）
+
+        provider 在卡片构建 / 回合落定 / 流式计时节拍时被回调（主线程），
+        要求纯内存快速计算，不得阻塞或弹 UI。
+        """
+        if metadata is None:
+            metadata = {}
+        info = FooterStatInfo(
+            plugin_name=plugin_name,
+            stat_id=stat_id,
+            provider=provider,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._footer_stats.get(stat_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._footer_stats[stat_id] = info
+
+    def get_footer_stats(self) -> List[FooterStatInfo]:
+        """获取全部页脚信息项（priority 降序 → 注册序）"""
+        items = sorted(self._footer_stats.values(), key=lambda i: -i.priority)
+        return items
+
+    def register_footer_action(
+        self,
+        plugin_name: str,
+        action_id: str,
+        icon_path: str = "",
+        icon_light_path: str = "",
+        tooltip: str = "",
+        on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息卡片页脚右区 hover 按钮组按钮（与内置分支/复制同排）"""
+        if metadata is None:
+            metadata = {}
+        info = FooterActionInfo(
+            plugin_name=plugin_name,
+            action_id=action_id,
+            icon_path=icon_path,
+            icon_light_path=icon_light_path,
+            tooltip=tooltip,
+            on_click=on_click,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._footer_actions.get(action_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._footer_actions[action_id] = info
+
+    def get_footer_actions(self) -> List[FooterActionInfo]:
+        """获取全部页脚插件按钮（priority 降序 → 注册序）"""
+        items = sorted(self._footer_actions.values(), key=lambda i: -i.priority)
+        return items
 
     def register_context_menu_action(
         self,
@@ -3086,6 +3203,9 @@ class UIPluginRegistry:
         self._sidebar_items = {k: v for k, v in self._sidebar_items.items() if v.plugin_name != plugin_name}
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
         self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
+        # 清理消息卡片页脚扩展点
+        self._footer_stats = {k: v for k, v in self._footer_stats.items() if v.plugin_name != plugin_name}
+        self._footer_actions = {k: v for k, v in self._footer_actions.items() if v.plugin_name != plugin_name}
         # config_schema 自动设置卡（metadata.auto_config_card）保留：其生命周期归
         # manifest 层（PluginManager._unregister_config_schema），ui 组件的 unload/load
         # 不得误伤——否则 targeted 热重载「rescan 注册卡 → ui 卸载清卡」会让插件配置卡
@@ -3701,6 +3821,9 @@ def _declare_builtin_slots() -> None:
     declare_slot("context_menu", lambda r: r._context_actions.items())
     declare_slot("settings_card", lambda r: r._settings_cards.items())
     declare_slot("mention_provider", lambda r: r._mention_providers.items())
+    # 消息卡片页脚：左区信息项 / 右区 hover 按钮（改动后不牵动既有视图，仅登记）
+    declare_slot("footer_stat", lambda r: r._footer_stats.items())
+    declare_slot("footer_action", lambda r: r._footer_actions.items())
     # 消息身份 provider：命中时需重渲染消息区（身份行随插件变化）
     declare_slot(
         "identity_name_provider",

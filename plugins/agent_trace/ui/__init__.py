@@ -121,6 +121,108 @@ def _on_trace_tab_clicked() -> None:
         logger.error(f"[agent_trace] toggle_floating_card 失败: {e}")
 
 
+def _footer_avg_throughput(ctx) -> dict | None:
+    """页脚信息项回调：流式期间显示当前流实时吞吐量，回合落定后显示会话平均。
+
+    平均口径对齐 detail_panel 统计页：总时长 = elapsed_ms（缺实时回填时反推），
+    首 token 延迟 = ttft_ms（chat_worker 落盘），生成 = 总时长 − 首 token，
+    吞吐量 = 输出 token ÷ 生成秒；轮次级 Σ/Σ 聚合即加权平均。
+    流式期间（ctx["streaming"]）直接用 live 实时值（live_tokens ÷ live_gen_s），
+    不并入平均。
+    """
+    try:
+        from .trace_collector import TraceCollectorHub
+        from .trace_models import EntryKind
+
+        # 流式跟随：live 数据全在卡片侧 context，不依赖 collector ——
+        # 放在 collector_for 之前，collector 建不出来也不影响实时显示
+        live_tokens = int(ctx.get("live_tokens") or 0)
+        live_gen_s = float(ctx.get("live_gen_s") or 0.0)
+        if bool(ctx.get("streaming")):
+            if live_tokens <= 0 or live_gen_s <= 0.5:
+                return None
+            tps = live_tokens / live_gen_s
+            return {
+                "text": f"{_fmt_tps(tps)} tok/s",
+                "color": "#2ea043",
+                "tooltip": "当前流实时吞吐量（输出字符÷4 估算）",
+            }
+
+        mw = ctx.get("main_widget")
+        if mw is None:
+            return None
+        hub = _footer_hub(TraceCollectorHub)
+        collector = hub.collector_for(mw)
+        if collector is None:
+            return None
+
+        # 回合落定 / 历史加载：会话平均吞吐量（Σ输出 token ÷ Σ生成秒）
+        total_tokens = 0
+        total_gen_ms = 0
+        rounds = 0
+        for rec in collector.records:
+            if rec.kind != EntryKind.ASSISTANT or rec.is_pending:
+                continue
+            tokens = rec.tokens
+            if tokens <= 0:
+                continue
+            total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
+            ttft = rec.meta.get("ttft_ms")
+            ttft_ms = int(ttft) if isinstance(ttft, (int, float)) and ttft > 0 else 0
+            gen_ms = total_ms - ttft_ms
+            # 生成段 <200ms 的轮次不参与（首字延迟吃掉几乎全部时长时 tps 虚高）
+            if gen_ms <= 200:
+                continue
+            total_tokens += tokens
+            total_gen_ms += gen_ms
+            rounds += 1
+        if total_gen_ms <= 0 or total_tokens <= 0:
+            # collector 尚未投影到本轮（backend 信号顺序不定，落定刷新可能先于
+            # 投影完成）→ 用落定 context 兜底算本轮单值，投影就绪后下次刷新
+            # 自然切换为会话平均。
+            tu = ctx.get("token_usage") or {}
+            out = tu.get("output") or 0
+            el = ctx.get("elapsed")
+            ttft_ms = tu.get("ttft_ms") or 0
+            if isinstance(out, (int, float)) and out > 0 and isinstance(el, (int, float)) and el > 0:
+                gen_s = float(el) - float(ttft_ms) / 1000.0
+                if gen_s > 0.2:
+                    return {
+                        "text": f"{_fmt_tps(out / gen_s)} tok/s",
+                        "color": "#2ea043",
+                        "tooltip": "本轮吞吐量（会话统计就绪前的单轮值）",
+                    }
+            return None
+        tps = total_tokens / (total_gen_ms / 1000.0)
+        return {
+            "text": f"{_fmt_tps(tps)} tok/s",
+            "color": "#2ea043",
+            "tooltip": f"本会话 {rounds} 轮平均吞吐量（Σ输出 token ÷ Σ生成秒）",
+        }
+    except Exception as e:  # noqa: BLE001 — 页脚回调异常不能影响消息渲染
+        logger.debug(f"[agent_trace] footer 吞吐量计算失败: {e}")
+        return None
+
+
+def _fmt_tps(tps: float) -> str:
+    """吞吐量文本格式化：≥1000 显示 K 位，其余取整。"""
+    return f"{tps / 1000:.1f}K" if tps >= 1000 else str(round(tps))
+
+
+# 页脚平均吞吐量专用 hub（与轨迹卡实例解耦的模块级单例；
+# 轨迹卡未打开也能对任意窗口惰性建 collector 并重投影落盘消息）
+_FOOTER_HUB = None
+
+
+def _footer_hub(hub_cls):
+    global _FOOTER_HUB
+    if _FOOTER_HUB is None:
+        from PyQt5.QtCore import QCoreApplication
+
+        _FOOTER_HUB = hub_cls(QCoreApplication.instance())
+    return _FOOTER_HUB
+
+
 def register_ui(registry) -> None:
     """注册 agent_trace 的 UI 组件。"""
     # 热重载兼容：清理旧子模块缓存（避免 Python 用旧 sys.modules 引用）
@@ -168,4 +270,16 @@ def register_ui(registry) -> None:
         priority=0,
     )
 
-    logger.info("[agent_trace] UI 组件已注册：titlebar_tab(agent_trace) + floating_card(agent_trace/full)")
+    # ── 消息卡片页脚信息项：会话平均吞吐量（流式期间跟随刷新）──
+    registry.register_footer_stat(
+        plugin_name="agent_trace",
+        stat_id="agent_trace:avg_tps",
+        provider=_footer_avg_throughput,
+        priority=0,
+        metadata={"label": "会话平均吞吐量"},
+    )
+
+    logger.info(
+        "[agent_trace] UI 组件已注册：titlebar_tab(agent_trace) + floating_card(agent_trace/full)"
+        " + footer_stat(avg_tps)"
+    )
