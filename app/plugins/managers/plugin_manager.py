@@ -123,6 +123,10 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "serializers": lambda d: (d / "serializers").exists() and any((d / "serializers").glob("*.py")),
     "gateways": lambda d: (d / "gateways").exists() and any((d / "gateways").glob("*.py")),
     "engines": lambda d: (d / "engines").exists() and any((d / "engines").glob("*.py")),
+    "context_tiers": lambda d: (d / "context_tiers").exists() and any((d / "context_tiers").glob("*.py")),
+    "budget_resolvers": lambda d: (
+        (d / "budget_resolvers").exists() and any((d / "budget_resolvers").glob("*.py"))
+    ),
 }
 
 
@@ -429,6 +433,8 @@ class PluginManager:
         "storages": "system-storages",
         "serializers": "system-serializers",
         "tools": "system-tools",
+        "context_tiers": "system-context",
+        "budget_resolvers": "system-context",
         # 「ui」组件的系统插件锚点：产物页（工作树/历史已拆分为独立插件）
         "ui": "artifacts-manager",
         "team_templates": "system-team-templates",

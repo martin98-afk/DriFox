@@ -1,0 +1,78 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-context",
+  "description": "DriFox 内置上下文管理：8 层 tier cascade（图片剥离 / 去重 / 截断 / 落盘 / 参数截断 / 摘要化 / 尾保留 / LLM 摘要）",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "context_tiers": true,
+    "budget_resolvers": true
+  },
+  "config_schema": {
+    "title": "上下文管理阈值",
+    "fields": [
+      {
+        "key": "tool_result_max_len",
+        "label": "工具结果截断阈值（字符）",
+        "type": "number",
+        "default": "0",
+        "min": 0,
+        "max": 1000000,
+        "description": "单条工具结果超过此长度即头尾截断。填 0 表示按模型上下文容量动态放大（8K 起，最大 24K）"
+      },
+      {
+        "key": "single_result_threshold",
+        "label": "单结果落盘阈值（字符）",
+        "type": "number",
+        "default": "50000",
+        "min": 1000,
+        "max": 10000000,
+        "description": "单个工具结果超过此长度写入磁盘，上下文内替换为 persisted-output 块"
+      },
+      {
+        "key": "message_total_threshold",
+        "label": "消息级落盘阈值（字符）",
+        "type": "number",
+        "default": "200000",
+        "min": 1000,
+        "max": 100000000,
+        "description": "单条消息内工具结果合计超过此长度时，按大小排序落盘最大的几个"
+      },
+      {
+        "key": "args_head_chars",
+        "label": "工具参数保留长度（字符）",
+        "type": "number",
+        "default": "200",
+        "min": 20,
+        "max": 10000,
+        "description": "tool_call 参数 JSON 中长字符串叶子的保留长度（保持 JSON 有效性）"
+      },
+      {
+        "key": "soft_limit_ratio",
+        "label": "压缩触发阈值（百分比）",
+        "type": "number",
+        "default": "84",
+        "min": 5,
+        "max": 99,
+        "description": "历史占用超过预算此百分比时触发尾保留。填 84 表示 84%"
+      },
+      {
+        "key": "target_ratio",
+        "label": "压缩达标线（百分比）",
+        "type": "number",
+        "default": "60",
+        "min": 5,
+        "max": 99,
+        "description": "cascade 降到预算此百分比即停止后续层。填 60 表示 60%"
+      }
+    ]
+  }
+}

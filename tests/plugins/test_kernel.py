@@ -26,6 +26,8 @@ def test_known_components_complete():
         "serializers",
         "gateways",
         "engines",
+        "context_tiers",
+        "budget_resolvers",
     }
     assert kernel.KNOWN_COMPONENTS == expected
 
@@ -121,4 +123,6 @@ def test_component_order_explicit_tuple():
         "serializers",
         "gateways",
         "engines",
+        "context_tiers",
+        "budget_resolvers",
     )
