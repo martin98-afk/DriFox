@@ -407,6 +407,27 @@ class ToolRegistry:
         reg = self.get(name)
         return bool(reg and reg.metadata and reg.metadata.get("protect"))
 
+    def is_no_prune(self, name: str) -> bool:
+        """是否永不截断工具结果（metadata["no_prune"]=True）。
+
+        与 protect 不同：protect = 压缩时完整保留，不阻止超阈值截断。
+        异常时回退 False（不豁免）—— 与 is_protected 的「保护优先」相反：
+        豁免失败最坏只是多截一次，而保护失败会永久丢内容。
+        """
+        try:
+            reg = self.get(name)
+            return bool(reg and reg.metadata and reg.metadata.get("no_prune"))
+        except Exception:
+            return False
+
+    def is_no_offload(self, name: str) -> bool:
+        """是否永不落盘（metadata["no_offload"]=True）。异常时回退 False。"""
+        try:
+            reg = self.get(name)
+            return bool(reg and reg.metadata and reg.metadata.get("no_offload"))
+        except Exception:
+            return False
+
     def is_interactive(self, name: str) -> bool:
         """是否为交互式工具（UI 弹窗/人工介入，metadata["interactive"]=True）"""
         reg = self.get(name)
