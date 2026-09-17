@@ -9762,6 +9762,18 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_single_card_width(card)
             _synced += 1
 
+        # [占位死区] 滚动停在/经过已回收批次的占位区时，提前触发回收函数
+        # （其第 1.5 步负责原位重建占位批次），不等 500ms 定时器自然到期。
+        if self._batch_placeholders:
+            rng = self._viewport_batch_range()
+            if rng is not None:
+                _vp_start, _vp_end = rng
+                _buf = self._incremental_visible_batch_count * self._virtual_scroll_buffer
+                for _idx in self._batch_placeholders:
+                    if _vp_start - _buf <= _idx <= _vp_end + _buf:
+                        self._virtual_scroll_timer.start()
+                        break
+
         self._last_visible_card_ids = visible_ids
 
     def _restore_card_now(self, card):
@@ -11825,6 +11837,66 @@ class OpenAIChatToolWindow(ToolWindow):
                 # （_recycle_lru_batches 会因该标志直接返回），故延到下一帧执行。
                 if self._rendered_card_count > self._effective_max_rendered_cards():
                     QTimer.singleShot(0, lambda: self._recycle_lru_batches())
+
+            # ── 第 1.5 步：重建视口附近的已回收批次（占位死区修复）──
+            # 上翻穿过「已回收批次」的等高空白占位区时没有任何重建触发点：
+            # _load_more_history_batches 只 prepend _visible_batch_start 之上的
+            # 未加载批次（占位批次 index ≥ _visible_batch_start 永远不在其范围）；
+            # 上面的 ensure_rendered 只处理 _batch_cards 非空的批次。结果视口
+            # 落进占位区即一片永久空白。这里对激活范围内有占位的批次原位重建
+            # （数据仍在 _message_batch），恢复「视口 ± 缓冲内必有内容」。
+            pending_restore = []
+            for batch_idx in range(active_start, active_end):
+                if batch_idx >= len(self._batch_cards) or self._batch_cards[batch_idx] is not None:
+                    continue
+                if batch_idx >= len(self._message_batch) or not self._message_batch[batch_idx]:
+                    continue
+                ph = self._batch_placeholders.get(batch_idx)
+                if ph is None:
+                    # 占位安装失败的批次高度为 0，视口不会落在其上
+                    continue
+                anchor = self.chat_layout.indexOf(ph)
+                if anchor < 0:
+                    continue
+                pending_restore.append((batch_idx, anchor))
+            if pending_restore:
+                # 锚点 = 视口顶第一个可见 widget（含占位）：任何布局改动前捕获，
+                # 重建后把同一 layout index 的 widget 拉回同一 y（P052 教训）。
+                _anchor_index = -1
+                _anchor_y = 0
+                for _i in range(self.chat_layout.count()):
+                    _item = self.chat_layout.itemAt(_i)
+                    _w = _item.widget() if _item else None
+                    if _w is not None and self._is_widget_alive(_w):
+                        _geo = _w.geometry()
+                        if _geo.bottom() >= self.chat_scroll_area.verticalScrollBar().value():
+                            _anchor_index = _i
+                            _anchor_y = _geo.y()
+                            break
+                for batch_idx, anchor in pending_restore:
+                    self._render_message_to_card(
+                        self._message_batch[batch_idx : batch_idx + 1],
+                        batch_offset=batch_idx,
+                        anchor_layout_index=anchor,
+                    )
+                logger.debug(f"[virtual-scroll] 原位重建 {len(pending_restore)} 个视口附近占位批次")
+
+                def _restore_anchor_after_placeholder():
+                    try:
+                        if not (0 <= _anchor_index < self.chat_layout.count()):
+                            return
+                        _item = self.chat_layout.itemAt(_anchor_index)
+                        _w = _item.widget() if _item else None
+                        if _w is None or not self._is_widget_alive(_w):
+                            return
+                        _delta = _w.geometry().y() - _anchor_y
+                        if _delta:
+                            sb = self.chat_scroll_area.verticalScrollBar()
+                            sb.setValue(max(0, sb.value() + _delta))
+                    except RuntimeError:
+                        pass
+
+                QTimer.singleShot(0, _restore_anchor_after_placeholder)
 
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
@@ -16673,6 +16745,78 @@ class OpenAIChatToolWindow(ToolWindow):
                 parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
+
+    def branch_session_from_message(self, message_index: int, source_window=None):
+        """消息级「从这里分支」：以**选中的那一条消息**为界复制成新会话。
+
+        与 :meth:`_on_branch_from_card_requested` 的区别：后者以「整轮」为界
+        （复制到该轮结束），本方法精确到单条消息，供轨迹面板「从这里分支」用 ——
+        用户在轨迹里指哪条就切到哪条。
+
+        工具对不会被切坏：``truncate_messages_at`` 会丢掉找不到声明者的孤立
+        ``tool`` 消息，并从 assistant 上剥掉结果落在截断点之后的 ``tool_calls``
+        （全被剥光且无正文的 assistant 整条丢弃）。否则新会话带悬空调用，
+        下次请求会被 API 拒绝。
+
+        Args:
+            message_index: 消息在 **session.messages 原始空间**的索引（含该条）。
+                轨迹面板投影的正是原始空间（collector 直接把 ``session.messages``
+                逐条投影，不做合并），而分支要在 canonical 空间切 —— 两空间在
+                ``normalize_message`` 丢弃非法条目（非法 role / 空 assistant /
+                缺 tool_call_id 的 tool）时会错位，故此处先做索引换算。
+            source_window: 源窗口（默认 self）；轨迹面板从插件侧调用时传宿主窗口。
+
+        Returns:
+            新窗口实例；失败返回 None。
+        """
+        session = self.session_manager.get_current_session()
+        if not session:
+            return None
+        from app.core.message_content import consolidate_messages, normalize_message, truncate_messages_at
+
+        raw = list(getattr(session, "messages", None) or [])
+        canonical = consolidate_messages(session.messages)
+        if not canonical:
+            return None
+        # 原始下标 → canonical 下标。
+        # ⚠️ 必须单趟 O(n)：曾写成「对每个 probe 重扫 raw[:probe+1] 并逐条
+        # normalize_message」，那是 O(n²) 次 normalize —— 3000 条会话点一下
+        # 分支就是数百万次调用，UI 直接卡死。
+        # 非法条目（非法 role / 空 assistant / 缺 tool_call_id 的 tool）在
+        # canonical 里不存在，映射落到**前一条有效消息**（也就是「切到最后一条
+        # 真实存在的消息」），这是安全回退而非错位。
+        idx = max(0, min(int(message_index), len(raw) - 1)) if raw else 0
+        canon_index = 0
+        seen = -1
+        for i, m in enumerate(raw):
+            if normalize_message(m) is not None:
+                seen += 1
+            if i == idx:
+                canon_index = max(0, seen)
+                break
+        branch_messages = [copy.deepcopy(m) for m in truncate_messages_at(canonical, canon_index)]
+        if not branch_messages:
+            logger.warning(f"[msg-branch] 截断后消息为空，取消分支: index={message_index}")
+            return None
+
+        src = source_window or self
+        base_name = (session.name or "对话").replace(" [分支]", "")
+        tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
+        try:
+            new_window = tm.spawn_tab(
+                src,
+                branch=True,
+                branch_messages=branch_messages,
+                branch_name=f"{base_name} [分支]",
+                project=getattr(src, "_current_project", None),
+            )
+        except TypeError:
+            new_window = tm.spawn_tab(src, branch=True)
+        if new_window is None:
+            logger.warning("[msg-branch] spawn_tab 返回 None，分支未创建")
+            return None
+        logger.info(f"[msg-branch] 已在 messages[{message_index}] 处分支，消息数 {len(branch_messages)}")
+        return new_window
 
     def _on_branch_from_card_requested(self, round_index: int, message_index: int = -1):
         """页脚「分支」按钮：以该条助手消息为界，把之前的消息复制成新会话

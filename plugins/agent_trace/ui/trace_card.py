@@ -847,25 +847,40 @@ class TraceCardWidget(QWidget):
         self._timeline.focus_window(bounds[0], bounds[1])
 
     def _on_branch_requested(self, row: int) -> None:
-        """「从这里分支」→ 主程序 ``_on_branch_from_card_requested(round_index)``。
+        """「从这里分支」→ 主程序 ``branch_session_from_message(msg_index)``。
 
-        ⚠️ 主程序的 round_index 是**用户回合序号**（从 0 起，按 canonical
-        messages 里真实 user 消息计数），与轨迹里 ``rec.turn_no``（从 1 起）差 1。
-        两者口径分别由 ``get_user_round_ranges`` 与 collector 的 turn 计数决定，
-        这里只做 -1 偏移，不做任何猜测性推导。
+        ⚠️ 粒度是**选中的那一条消息**（含它），不是整轮：用户在轨迹里指哪条就
+        切到哪条。工具对由主程序 ``truncate_messages_at`` 负责修补（丢弃孤立
+        tool 结果、剥掉结果落在截断点之后的 tool_calls），这里不自行裁剪。
+
+        ``rec.meta["msg_index"]`` 是 collector 投影时写入的绝对消息序号，
+        与 ``source`` 文案（``messages[i]``）同源。SYSTEM 行是合成记录、
+        没有 msg_index，回退到按轮分支（``_on_branch_from_card_requested``）。
         """
         rec = self._turn_list.record_at_row(row)
-        if rec is None or rec.turn_no <= 0:
+        if rec is None:
             return
         mw = self._ctx.get("main_widget")
-        handler = getattr(mw, "_on_branch_from_card_requested", None) if mw is not None else None
-        if not callable(handler):
-            logger.warning("[agent_trace] 主程序未提供 _on_branch_from_card_requested，分支不可用")
+        if mw is None:
             return
-        try:
-            handler(rec.turn_no - 1)
-        except Exception as e:  # noqa: BLE001 — 分支失败不该影响轨迹面板
-            logger.warning(f"[agent_trace] 从这里分支失败: {e}")
+        msg_index = rec.meta.get("msg_index")
+        handler = getattr(mw, "branch_session_from_message", None)
+        if isinstance(msg_index, int) and callable(handler):
+            try:
+                handler(msg_index)
+                return
+            except Exception as e:  # noqa: BLE001 — 分支失败不该影响轨迹面板
+                logger.warning(f"[agent_trace] 从这里分支失败: {e}")
+                return
+        # 兜底：老版本主程序 / 合成行（SYSTEM）→ 回到按轮分支
+        round_handler = getattr(mw, "_on_branch_from_card_requested", None)
+        if rec.turn_no > 0 and callable(round_handler):
+            try:
+                round_handler(rec.turn_no - 1)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[agent_trace] 从这里分支（按轮回退）失败: {e}")
+        else:
+            logger.warning("[agent_trace] 主程序未提供分支入口，分支不可用")
 
     def _focus_search(self) -> None:
         """Ctrl+F：聚焦搜索框并全选（再打即替换旧关键词）。"""

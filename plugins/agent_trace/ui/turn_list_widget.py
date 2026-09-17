@@ -1115,9 +1115,18 @@ class TurnListWidget(QWidget):
 
         menu = QMenu(self)
         self._apply_menu_style(menu)
-        act_branch = menu.addAction(f"从这里分支（截至 Turn {rec.turn_no}）" if rec.turn_no > 0 else "从这里分支")
-        act_branch.setToolTip("以这条记录所属轮次为界，把之前的消息复制成新会话")
-        menu.addSeparator()
+        # 粒度是选中的**这一条**：文案带上消息序号，让用户确认切在哪。
+        # SYSTEM 是合成记录（不对应任何 messages 条目）→ 不显示分支项。
+        mi = rec.meta.get("msg_index")
+        act_branch = None
+        if isinstance(mi, int):
+            act_branch = menu.addAction(f"从这里分支（截至 messages[{mi}]）")
+            act_branch.setToolTip("以此条消息为界，把之前的消息复制成新会话（自动修补工具调用配对）")
+            menu.addSeparator()
+        elif rec.turn_no > 0:
+            act_branch = menu.addAction(f"从这里分支（截至 Turn {rec.turn_no}）")
+            act_branch.setToolTip("以此条所属轮次为界，把之前的消息复制成新会话")
+            menu.addSeparator()
         act_name = menu.addAction("复制名称")
         act_summary = menu.addAction("复制摘要（名称 + 预览）")
         act_args = menu.addAction("复制入参")
@@ -1130,7 +1139,7 @@ class TurnListWidget(QWidget):
         chosen = menu.exec_(self._list.viewport().mapToGlobal(pos))
         if chosen is None:
             return
-        if chosen is act_branch:
+        if act_branch is not None and chosen is act_branch:
             self.branchRequested.emit(row)
         elif chosen is act_name:
             _copy((rec.meta.get("name") or rec.label) if rec.kind == EntryKind.TOOL else rec.label)

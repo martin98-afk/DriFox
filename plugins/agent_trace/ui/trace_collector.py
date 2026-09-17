@@ -592,6 +592,9 @@ class TraceCollector(QObject):
 
             # 轮次号取预计算结果（前置 hook 已归入其后的 user 那一轮）
             rec_turn = turn_of[i] if i < len(turn_of) else turn
+            # 原始消息索引（绝对序号）：消息级「从这里分支」按它截断，
+            # 与 source 文案同源，避免 UI 侧再反解 messages[i]。
+            meta["msg_index"] = start_index + i
             if is_real_user_message(msg):
                 meta["turn_start"] = True
             elif i < len(turn_of) and rec_turn > 0 and rec_turn != (turn_of[i - 1] if i > 0 else turn_start):
