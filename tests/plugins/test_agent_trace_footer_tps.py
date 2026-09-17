@@ -57,10 +57,12 @@ def ui_mod(qapp):
     表现为 ``wrapped C/C++ object of type QConfig has been deleted``。
     """
     mod = _load_ui_module()
-    # collector hub 缓存必须清空：上一个用例注入的 fake hub 会串到下一个
+    # collector hub / 重投影节流表必须清空：上一个用例的残留会串到下一个
     mod._FOOTER_HUB = None
+    mod._REPROJECT_GUARD.clear()
     yield mod
     mod._FOOTER_HUB = None
+    mod._REPROJECT_GUARD.clear()
 
 
 def _ctx(**kw):
@@ -208,6 +210,19 @@ def test_history_load_reprojects_and_shows(ui_mod, monkeypatch):
     monkeypatch.setattr(ui_mod, "_FOOTER_HUB", hub)
     val = ui_mod._footer_avg_throughput(_ctx(main_widget=_Host("sessB")))
     assert val is not None and val["text"] == "500 tok/s"
+
+
+def test_reproject_is_throttled(ui_mod, monkeypatch):
+    """重投影必须节流：加载历史会话时每张卡片构建都会刷 stat，
+
+    不节流就每张卡各跑一次全量投影（实测 200+ 消息会话单次 40~115ms，主线程）。
+    """
+    hub = _FakeHub("sessA", [_asst_rec(ui_mod, 500, 2000.0)])  # refresh 不改变 sid
+    monkeypatch.setattr(ui_mod, "_FOOTER_HUB", hub)
+    host = _Host("sessB")
+    for _ in range(5):
+        assert ui_mod._footer_avg_throughput(_ctx(main_widget=host)) is None
+    assert hub._collector.refresh_calls == 1, "窗口期内只允许尝试一次"
 
 
 def test_pending_and_short_gen_excluded(ui_mod, monkeypatch):

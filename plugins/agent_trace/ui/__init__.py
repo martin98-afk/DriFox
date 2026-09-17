@@ -21,8 +21,9 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from loguru import logger
 
@@ -181,6 +182,11 @@ def _footer_avg_throughput(ctx) -> dict | None:
 # 且真实落定路径的 ``set_meta_info`` 不带 output，累加表只会装脏数据、永不被修正。
 # 现统一走 ``_aggregate_records``（collector 逐条 per-call 口径）。
 
+# 会话重投影节流表：(window_id, 目标 session_id) -> 上次尝试时刻。
+# 只用于「投影落后于会话切换」这一种情况，防止每张卡片构建都触发全量投影。
+_REPROJECT_GUARD: "Dict[tuple, float]" = {}
+_REPROJECT_GUARD_WINDOW_S = 5.0
+
 
 def _aggregate_records(ctx):
     """从 collector 投影聚合 (Σ输出 token, Σ生成秒, 调用次数)。
@@ -203,9 +209,23 @@ def _aggregate_records(ctx):
     # 是上一个会话的投影，聚合出来就是别的会话的均值。此处**驱动一次重投影**
     # 而不是直接放弃 —— 切会话路径（_load_session_from_record → set_current_session）
     # 不触发任何 backend 信号，collector 不会自己感知，不 refresh 的话页脚在
-    # 用户下一次发消息前一直空白。refresh 后 sid 就对齐，不会重复触发。
+    # 用户下一次发消息前一直空白。重投影成功即对齐 sid，后续刷新自然跳过。
+    #
+    # ⚠️ 节流：refresh 内部会拿 backend 当前会话重新投影，会话拿不到时 sid 不变，
+    # 不设守卫就会在「每张历史卡片构建 + 落定补刷」时各跑一次全量投影
+    # （实测 200+ 消息会话单次 40~115ms，主线程）。同一 (窗口, 目标会话) 在
+    # 窗口期内只试一次，失败就退化成不显示（下次节拍再试）。
     cur_sid = str(getattr(mw, "_current_session_id", "") or "")
     if cur_sid and str(getattr(collector, "_active_session_id", "") or "") != cur_sid:
+        wid = str(ctx.get("window_id") or "")
+        guard_key = (wid, cur_sid)
+        now = time.time()
+        if now - _REPROJECT_GUARD.get(guard_key, 0.0) < _REPROJECT_GUARD_WINDOW_S:
+            return None
+        _REPROJECT_GUARD[guard_key] = now
+        if len(_REPROJECT_GUARD) > 32:  # 防御：切会话频繁时不让守卫表无限增长
+            _REPROJECT_GUARD.clear()
+            _REPROJECT_GUARD[guard_key] = now
         try:
             collector.refresh()
         except Exception as e:  # noqa: BLE001 — 重投影失败只能退化，不影响渲染
