@@ -47,10 +47,13 @@ _PY_SUBDIRS = frozenset(
         "providers",
         "model_adapters",
         "loop_policies",
+        "hook_policies",
         "storages",
         "serializers",
         "gateways",
         "engines",
+        "context_tiers",
+        "budget_resolvers",
     }
 )
 # 整体开关、不支持细分的组件（ui 是插件的一个 __init__ 入口，内部槽位

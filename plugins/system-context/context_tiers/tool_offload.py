@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from app.core.context.config import cfg_int, offload_skip_tools
+from app.core.context.config import cfg_bool, cfg_int, offload_skip_tools
 from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_INGEST, TierOutcome
 
 _CHARS_PER_TOKEN = 4  # 节省字符 → token 的粗算口径（仅用于 stats 统计）
@@ -44,6 +44,8 @@ class ToolOffloadTier:
         return self._persister
 
     def should_apply(self, view) -> bool:
+        if not cfg_bool("enable_tool_offload", True):
+            return False
         single = cfg_int("single_result_threshold", 50_000)
         total = cfg_int("message_total_threshold", 200_000)
         skip = offload_skip_tools()

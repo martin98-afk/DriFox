@@ -4,8 +4,8 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-context",
-  "description": "DriFox 内置上下文管理：8 层 tier cascade（图片剥离 / 去重 / 截断 / 落盘 / 参数截断 / 摘要化 / 尾保留 / LLM 摘要）",
-  "version": "1.0.0",
+  "description": "DriFox 内置上下文管理（前缀安全层）：工具结果截断 + 长结果落盘。会改写历史消息、破坏 prompt cache 前缀的压缩层不在本插件（见用户插件 context-compaction）",
+  "version": "2.0.0",
   "author": {
     "name": "DriFoxx Team"
   },
@@ -17,8 +17,22 @@
     "budget_resolvers": true
   },
   "config_schema": {
-    "title": "上下文管理阈值",
+    "title": "上下文管理",
     "fields": [
+      {
+        "key": "enable_tool_prune",
+        "label": "工具结果截断",
+        "type": "bool",
+        "default": true,
+        "description": "超长工具结果保留头尾 + 省略标记，给出取回指引。产物字节恒定，不影响缓存命中"
+      },
+      {
+        "key": "enable_tool_offload",
+        "label": "长工具结果落盘",
+        "type": "bool",
+        "default": true,
+        "description": "超大工具结果写入磁盘，上下文内只留预览 + 文件路径供回读。预览冻结，不影响缓存命中"
+      },
       {
         "key": "tool_result_max_len",
         "label": "工具结果截断阈值（字符）",
@@ -35,7 +49,7 @@
         "default": "50000",
         "min": 1000,
         "max": 10000000,
-        "description": "单个工具结果超过此长度写入磁盘，上下文内替换为 persisted-output 块"
+        "description": "单个工具结果超过此长度写入磁盘"
       },
       {
         "key": "message_total_threshold",
@@ -45,33 +59,6 @@
         "min": 1000,
         "max": 100000000,
         "description": "单条消息内工具结果合计超过此长度时，按大小排序落盘最大的几个"
-      },
-      {
-        "key": "args_head_chars",
-        "label": "工具参数保留长度（字符）",
-        "type": "number",
-        "default": "200",
-        "min": 20,
-        "max": 10000,
-        "description": "tool_call 参数 JSON 中长字符串叶子的保留长度（保持 JSON 有效性）"
-      },
-      {
-        "key": "soft_limit_ratio",
-        "label": "压缩触发阈值（百分比）",
-        "type": "number",
-        "default": "84",
-        "min": 5,
-        "max": 99,
-        "description": "历史占用超过预算此百分比时触发尾保留。填 84 表示 84%"
-      },
-      {
-        "key": "target_ratio",
-        "label": "压缩达标线（百分比）",
-        "type": "number",
-        "default": "60",
-        "min": 5,
-        "max": 99,
-        "description": "cascade 降到预算此百分比即停止后续层。填 60 表示 60%"
       },
       {
         "key": "prune_skip_tools",
@@ -88,6 +75,15 @@
         "default": "question,todowrite,todoread,manage_skill,mcp_list_servers,skill",
         "placeholder": "question,skill",
         "description": "逗号分隔的工具名，其工具结果永不写入磁盘。工具侧也可用 metadata[\"no_offload\"] 自行声明"
+      },
+      {
+        "key": "target_ratio",
+        "label": "上下文达标线（百分比）",
+        "type": "number",
+        "default": "60",
+        "min": 5,
+        "max": 99,
+        "description": "cascade 降到预算此百分比即停车。填 60 表示 60%"
       }
     ]
   }
