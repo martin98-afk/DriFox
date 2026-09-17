@@ -271,6 +271,29 @@
             }
         },
         {
+            "name": "system-context",
+            "description": "DriFox 内置上下文管理（前缀安全层）：工具结果截断 + 长结果落盘。逐层启停在「设置 → 大模型 → 上下文」页；会改写历史消息、破坏 prompt cache 前缀的压缩层不在本插件（见用户插件 context-compaction）",
+            "version": "2.2.0",
+            "author": "DriFoxx Team",
+            "license": "MIT",
+            "categories": [],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-context",
+                "ref": "master"
+            },
+            "components": {
+                "context_tiers": true,
+                "budget_resolvers": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
             "name": "system-hook-policies",
             "description": "DriFox 内置 Hook 触发策略：all / none / tool_only / subagent_default / team_member",
             "version": "1.0.0",
