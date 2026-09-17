@@ -52,7 +52,7 @@ pytest tests/ -m perf                  # 仅性能基准
 
 **Gateway**：插件在 `gateways/<platform>.py` 注册 `GatewayPlatformDef`；主程序查 `GatewayPlatformRegistry.get_instance()`，零平台 if。SDK vendor 到 `<插件>/deps/`，顶层 `sys.path.insert(0,_deps)` 优先，本体函数内延迟导入（教训：dingtalk_stream 顶层导入致 gateway 包加载失败）。
 
-**UI 扩展点**（插件 `ui/__init__.py` 导出 `register_ui`）：`register_content_renderer`/`register_welcome_tab`/`register_message_factory`/`register_floating_card`/`register_sidebar_item`/`register_input_button`（icon_path 深色 + icon_light_path 浅色，主题切换自动刷新）/`register_context_menu_action`/`register_settings_card`/`register_footer_stat`（消息卡片页脚左区信息项，provider 回调 `(ctx) -> Optional[{"text","color","tooltip"}]`，卡片构建/回合落定/流式节拍时刷新）/`register_footer_action`（页脚右区 hover 按钮组，与内置分支/复制同排）。回调 context 含 window_id/main_widget/card/role/model_name/elapsed/token_usage/streaming/live_tokens/live_gen_s；`unload_plugin` 幂等清理。
+**UI 扩展点**（插件 `ui/__init__.py` 导出 `register_ui`）：`register_content_renderer`/`register_welcome_tab`/`register_message_factory`/`register_floating_card`/`register_sidebar_item`/`register_input_button`（icon_path 深色 + icon_light_path 浅色，主题切换自动刷新）/`register_context_menu_action`/`register_settings_card`/`register_footer_stat`（消息卡片页脚左区信息项，provider 回调 `(ctx) -> Optional[{"text","color","tooltip"}]`，卡片构建/回合落定/流式节拍时刷新）/`register_footer_action`（页脚右区 hover 按钮组，与内置分支/复制同排）。回调 context 含 window_id/main_widget/card/role/model_name/round_index/message_index/elapsed/token_usage/streaming/live_text/live_gen_s（流式期间 `live_text` 为本流累计原文、`live_gen_s` 为首字至今秒数，token 估算与统计口径由 provider 定）；`unload_plugin` 幂等清理。
 
 ## 5. 代码风格
 - **格式化**：ruff（双引号）；**类型**：pyright 严格；**导入**：标准→三方→本地

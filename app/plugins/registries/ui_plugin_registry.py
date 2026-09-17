@@ -556,7 +556,7 @@ class FooterStatInfo:
         stat_id: 信息项唯一 ID
         provider: 取值回调，签名 (context: dict) -> Optional[dict]。
             context 含 window_id / main_widget / role / model_name / elapsed /
-            token_usage / streaming / live_tokens / live_gen_s 等（见
+            token_usage / streaming / live_text / live_gen_s 等（见
             MessageCard._footer_stat_context）；返回 None 表示本条消息不显示，
             返回 {"text": str, "color": str(可选), "tooltip": str(可选)} 表示显示。
         priority: 优先级（同 stat_id 时高者覆盖低者；显示顺序同值按注册序）

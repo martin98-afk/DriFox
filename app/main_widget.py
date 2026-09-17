@@ -10759,6 +10759,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
                     "pluginToolCard",
                     "pluginAgentCard",
+                    "secretModeCard",
                 ):
                     self._safe_refresh(getattr(self._settings_popup, card_name, None))
                 # 刷新设置弹窗分隔标签

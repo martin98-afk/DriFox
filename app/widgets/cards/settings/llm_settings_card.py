@@ -1608,6 +1608,7 @@ class LLMSettingsCard(SystemCardFrame):
             "pluginAgentCard",
             "renderAdvancedCard",
             "updateProxyCard",
+            "secretModeCard",
         ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):

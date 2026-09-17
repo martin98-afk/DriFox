@@ -21,8 +21,9 @@
 from __future__ import annotations
 
 import sys
+from collections import OrderedDict
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 from loguru import logger
 
@@ -122,86 +123,145 @@ def _on_trace_tab_clicked() -> None:
 
 
 def _footer_avg_throughput(ctx) -> dict | None:
-    """页脚信息项回调：流式期间显示当前流实时吞吐量，回合落定后显示会话平均。
+    """页脚信息项回调：流式期间显示本条回复的实时吞吐量，回合落定后显示会话平均。
 
-    平均口径对齐 detail_panel 统计页：总时长 = elapsed_ms（缺实时回填时反推），
-    首 token 延迟 = ttft_ms（chat_worker 落盘），生成 = 总时长 − 首 token，
-    吞吐量 = 输出 token ÷ 生成秒；轮次级 Σ/Σ 聚合即加权平均。
-    流式期间（ctx["streaming"]）直接用 live 实时值（live_tokens ÷ live_gen_s），
-    不并入平均。
+    口径对齐 detail_panel 统计页：生成秒 = 总时长 − 首 token 延迟；
+    吞吐量 = 输出 token ÷ 生成秒。
+
+    - 流式期间：token 用 ``estimate_tokens_text``（与轨迹卡 Tokens 列同源的
+      tiktoken/cl100k 估算，中文约 1.2 token/字，不是 chars÷4），时间取
+      「首字至今」→ 当前这条流的最近一次采样值；起步 0.3s 内不显示，
+      避免首字抖动。
+    - 回合落定：本轮真实 usage 写入会话累加表，输出 Σ输出 token ÷ Σ生成秒。
+      累加表按 (window_id, session_id) 分组、按 (round_index, message_index)
+      幂等写入 → 重复刷新不重复计数，且**不等** collector 投影，落定即出
+      均值（旧版要等投影，靠 1s/2.5s 补刷拉回，观感即"延迟高"）。
+    - 历史会话加载（本进程没经历过落定事件）：回退 collector 投影全量聚合。
     """
     try:
-        from .trace_collector import TraceCollectorHub
-        from .trace_models import EntryKind
+        from .trace_models import estimate_tokens_text
 
-        # 流式跟随：live 数据全在卡片侧 context，不依赖 collector ——
-        # 放在 collector_for 之前，collector 建不出来也不影响实时显示
-        live_tokens = int(ctx.get("live_tokens") or 0)
-        live_gen_s = float(ctx.get("live_gen_s") or 0.0)
         if bool(ctx.get("streaming")):
-            if live_tokens <= 0 or live_gen_s <= 0.5:
+            text = ctx.get("live_text") or ""
+            gen_s = float(ctx.get("live_gen_s") or 0.0)
+            if not text or gen_s < 0.3:
                 return None
-            tps = live_tokens / live_gen_s
+            tokens = estimate_tokens_text(text)
+            if tokens <= 0:
+                return None
             return {
-                "text": f"{_fmt_tps(tps)} tok/s",
+                "text": f"{_fmt_tps(tokens / gen_s)} tok/s",
                 "color": "#2ea043",
-                "tooltip": "当前流实时吞吐量（输出字符÷4 估算）",
+                "tooltip": "当前这条回复的实时吞吐量（估算 token ÷ 首字至今秒数）",
             }
 
-        mw = ctx.get("main_widget")
-        if mw is None:
-            return None
-        hub = _footer_hub(TraceCollectorHub)
-        collector = hub.collector_for(mw)
-        if collector is None:
-            return None
-
-        # 回合落定 / 历史加载：会话平均吞吐量（Σ输出 token ÷ Σ生成秒）
-        total_tokens = 0
-        total_gen_ms = 0
-        rounds = 0
-        for rec in collector.records:
-            if rec.kind != EntryKind.ASSISTANT or rec.is_pending:
-                continue
-            tokens = rec.tokens
-            if tokens <= 0:
-                continue
-            total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
-            ttft = rec.meta.get("ttft_ms")
-            ttft_ms = int(ttft) if isinstance(ttft, (int, float)) and ttft > 0 else 0
-            gen_ms = total_ms - ttft_ms
-            # 生成段 <200ms 的轮次不参与（首字延迟吃掉几乎全部时长时 tps 虚高）
-            if gen_ms <= 200:
-                continue
-            total_tokens += tokens
-            total_gen_ms += gen_ms
-            rounds += 1
-        if total_gen_ms <= 0 or total_tokens <= 0:
-            # collector 尚未投影到本轮（backend 信号顺序不定，落定刷新可能先于
-            # 投影完成）→ 用落定 context 兜底算本轮单值，投影就绪后下次刷新
-            # 自然切换为会话平均。
-            tu = ctx.get("token_usage") or {}
-            out = tu.get("output") or 0
-            el = ctx.get("elapsed")
-            ttft_ms = tu.get("ttft_ms") or 0
-            if isinstance(out, (int, float)) and out > 0 and isinstance(el, (int, float)) and el > 0:
-                gen_s = float(el) - float(ttft_ms) / 1000.0
-                if gen_s > 0.2:
-                    return {
-                        "text": f"{_fmt_tps(out / gen_s)} tok/s",
-                        "color": "#2ea043",
-                        "tooltip": "本轮吞吐量（会话统计就绪前的单轮值）",
-                    }
-            return None
-        tps = total_tokens / (total_gen_ms / 1000.0)
+        key = _session_key(ctx)
+        _record_round(key, ctx)
+        stats = _round_bucket(key, create=False) or {}
+        total_tokens = sum(t for t, _ in stats.values())
+        total_gen_s = sum(g for _, g in stats.values())
+        rounds = len(stats)
+        if total_gen_s <= 0 or total_tokens <= 0:
+            # 历史会话加载：本进程没走过落定分支 → 从 collector 投影全量聚合
+            agg = _aggregate_records(ctx)
+            if agg is None:
+                return None
+            total_tokens, total_gen_s, rounds = agg
         return {
-            "text": f"{_fmt_tps(tps)} tok/s",
+            "text": f"{_fmt_tps(total_tokens / total_gen_s)} tok/s",
             "color": "#2ea043",
             "tooltip": f"本会话 {rounds} 轮平均吞吐量（Σ输出 token ÷ Σ生成秒）",
         }
     except Exception as e:  # noqa: BLE001 — 页脚回调异常不能影响消息渲染
         logger.debug(f"[agent_trace] footer 吞吐量计算失败: {e}")
         return None
+
+
+# 会话级轮次累加表：sess_key -> {(round_index, message_index): (tokens, gen_s)}
+# 只存聚合值不存原文；上限 8 个会话，LRU 淘汰最久未用的。
+_ROUND_STATS: "OrderedDict[str, Dict[tuple, Tuple[int, float]]]" = OrderedDict()
+_ROUND_STATS_MAX = 8
+
+
+def _session_key(ctx) -> str:
+    """会话维度键 = window_id + collector 的 active session_id（切会话自动隔离）。"""
+    wid = str(ctx.get("window_id") or "")
+    sid = ""
+    try:
+        from .trace_collector import TraceCollectorHub
+
+        collector = _footer_hub(TraceCollectorHub).collector_for(ctx.get("main_widget"))
+        sid = str(getattr(collector, "_active_session_id", "") or "")
+    except Exception:  # noqa: BLE001 — 无 backend / 未初始化时退化成 window_id 级
+        sid = ""
+    return f"{wid}::{sid}"
+
+
+def _round_bucket(key: str, create: bool = True) -> "Dict[tuple, Tuple[int, float]] | None":
+    """取会话累加桶；create=False 时不存在则返回 None（不污染 LRU）。"""
+    bucket = _ROUND_STATS.get(key)
+    if bucket is None:
+        if not create:
+            return None
+        bucket = {}
+        _ROUND_STATS[key] = bucket
+    else:
+        _ROUND_STATS.move_to_end(key)
+    while len(_ROUND_STATS) > _ROUND_STATS_MAX:
+        _ROUND_STATS.popitem(last=False)
+    return bucket
+
+
+def _record_round(key: str, ctx) -> None:
+    """把本轮真实 usage 写入累加表（同轮重复调用幂等，靠 round/message 索引去重）。"""
+    tu = ctx.get("token_usage") or {}
+    out = tu.get("output")
+    el = ctx.get("elapsed")
+    if not isinstance(out, (int, float)) or out <= 0:
+        return
+    if not isinstance(el, (int, float)) or el <= 0:
+        return
+    ttft_ms = tu.get("ttft_ms") or 0
+    gen_s = float(el) - float(ttft_ms) / 1000.0
+    # 生成段 <200ms 的轮次不参与（首字延迟吃掉几乎全部时长时 tps 虚高）
+    if gen_s <= 0.2:
+        return
+    rk = (ctx.get("round_index"), ctx.get("message_index"))
+    _round_bucket(key)[rk] = (int(out), float(gen_s))
+
+
+def _aggregate_records(ctx):
+    """历史会话兜底：从 collector 投影聚合 (Σ输出 token, Σ生成秒, 轮数)。"""
+    from .trace_collector import TraceCollectorHub
+    from .trace_models import EntryKind
+
+    mw = ctx.get("main_widget")
+    if mw is None:
+        return None
+    collector = _footer_hub(TraceCollectorHub).collector_for(mw)
+    if collector is None:
+        return None
+    total_tokens = 0
+    total_gen_s = 0.0
+    rounds = 0
+    for rec in collector.records:
+        if rec.kind != EntryKind.ASSISTANT or rec.is_pending:
+            continue
+        tokens = rec.tokens
+        if tokens <= 0:
+            continue
+        total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
+        ttft = rec.meta.get("ttft_ms")
+        ttft_ms = int(ttft) if isinstance(ttft, (int, float)) and ttft > 0 else 0
+        gen_ms = total_ms - ttft_ms
+        if gen_ms <= 200:
+            continue
+        total_tokens += tokens
+        total_gen_s += gen_ms / 1000.0
+        rounds += 1
+    if total_gen_s <= 0 or total_tokens <= 0:
+        return None
+    return total_tokens, total_gen_s, rounds
 
 
 def _fmt_tps(tps: float) -> str:

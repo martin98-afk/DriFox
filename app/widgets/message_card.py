@@ -45,6 +45,7 @@ from pygments.lexers import TextLexer, get_lexer_by_name
 from PyQt5.QtCore import (
     QByteArray,
     QEasingCurve,
+    QElapsedTimer,
     QObject,
     QSize,
     QThread,
@@ -266,6 +267,20 @@ _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
 # 旧 _RAINBOW_NORMAL 为 10 色高饱和绕卡循环，色相跳变（青→紫→粉→橙→绿）
 # 过于抢眼；现流式指示统一走单色（accent / 警示红），运动只保留底部光块。
 _STREAM_TINT_RETRY = "#ff2222"
+
+# ======== 流式底部光块运动参数 ========
+# 单程时长(ms)：往返一趟 = 2 × _STREAM_BAND_SWEEP_MS
+_STREAM_BAND_SWEEP_MS = 1600.0
+# 单拍最大推进(ms)：主线程被内容渲染占满时 Qt 定时器会延迟触发，若按真实 dt
+# 全额推进，恢复后光块会一次瞬移到新位置（观感「跳变」）。钳到一帧多的量，
+# 掉帧只表现为动画变慢，不瞬移、也不在恢复时集中补帧（观感「卡住后猛冲」）。
+_STREAM_BAND_MAX_DT_MS = 100.0
+_STREAM_BAND_H = 3  # 光块高度(px)
+_STREAM_BAND_BOTTOM = 3  # 光块距卡片底边(px)
+# 动画帧脏区在光块上下的纵向余量(px)。必须让脏区保持在内壁描边**之上**：
+# 脏区一旦覆盖底部描边，重绘会先擦掉该带内的描边、而窄带重绘只画光块，
+# 描边就在「整卡重绘画出」与「动画帧擦掉」之间反复 —— 表现为下边框闪烁。
+_STREAM_BAND_REPAINT_PAD = 1
 
 # ===== 性能缓存：图标前缀和字号（避免每块代码都查主题和计算字号） =====
 _ICON_PREFIX_CACHE: str = "qrc:/icons"
@@ -13131,9 +13146,6 @@ class MessageCard(SimpleCardWidget):
                 self.timestamp = dt.strftime("%m-%d %H:%M")
             except ValueError:
                 self.timestamp = self.timestamp[:14]
-        # 助手卡片初始不显示时间，流完成后再设模型名称或时间
-        if role == "assistant" and not timestamp:
-            self.timestamp = ""
         self.error = error
         self._interactive_options: List[dict] = []
         self._content_data: Any = [] if role == "assistant" else ""
@@ -13172,7 +13184,10 @@ class MessageCard(SimpleCardWidget):
         self._elapsed_start_time: Optional[float] = None
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._update_anim)
-        self._pulse_phase = 0.0
+        # 动画累积时间(ms)：光块位置与重试 spinner 都由它推导，帧率抖动不改变速度
+        self._anim_t_ms = 0.0
+        self._anim_clock = QElapsedTimer()
+        self._anim_clock.start()
         self._grad_main, self._grad_inner = (QLinearGradient(0, 0, 1, 1) for _ in range(2))
         self._clip_inner = self._clip_border = QPainterPath()
         self._clip_inner_border = self._clip_border_region = QPainterPath()
@@ -13698,15 +13713,13 @@ class MessageCard(SimpleCardWidget):
         # 每 500ms 只带 token_usage 刷圆环）：不得清 live 累计、不得刷 stat ——
         # 否则平均分支拿不到落定值会把 stat 藏掉，与 1s tick 的实时值交替 → 闪烁。
         if elapsed is not None:
-            # 轮次结束，停掉流式估算刷新
-            self._stream_char_count = 0
+            # 轮次结束，清掉流式采样缓冲
+            self._stream_text_acc = ""
             # 插件信息项按落定态刷新（token_usage 透传给 provider 自行取舍）
             self._refresh_footer_stats(streaming=False, elapsed=elapsed, token_usage=token_usage)
-            # 两连发补刷：插件的会话级统计（如 collector 投影）可能晚于本次调用，
-            # 首刷拿到空值把 stat 藏掉后没有节拍再拉回。1s 拉回投影就绪的常见
-            # 竞态，2.5s 兕住慢投影。
+            # 单次补刷：历史会话加载 / 投影晚到的兜底（旧版 1s+2.5s 二连发是为等
+            # collector 投影；现在会话均值由插件累加表即时算出，1s 兜底足够）
             self._schedule_stat_refresh(1000, elapsed, token_usage)
-            self._schedule_stat_refresh(2500, elapsed, token_usage)
 
     def _schedule_stat_refresh(self, delay_ms: int, elapsed, token_usage) -> None:
         """延迟补刷页脚插件 stat（绑定卡片生命周期）。
@@ -13857,10 +13870,11 @@ class MessageCard(SimpleCardWidget):
             "streaming": streaming,
         }
         if streaming:
-            # 流式实时估算（字符÷4），provider 决定是否并入平均
-            chars = getattr(self, "_stream_char_count", 0)
+            # 流式实时采样：只给「本流累计原文」+「首字至今秒数」，token 估算与
+            # 吞吐量口径交给 provider（插件侧走 tiktoken/cl100k，中文约 1.2
+            # token/字）。主程序不再用 chars÷4 粗估（中文低估约 4~5 倍）。
+            ctx["live_text"] = getattr(self, "_stream_text_acc", "") or ""
             t0 = getattr(self, "_stream_first_text_t", None)
-            ctx["live_tokens"] = chars // 4 if chars > 0 else 0
             ctx["live_gen_s"] = max(0.0, time.time() - t0) if t0 else 0.0
         return ctx
 
@@ -13924,8 +13938,8 @@ class MessageCard(SimpleCardWidget):
         if not self._footer_elapsed_label:
             return
         self._elapsed_start_time = time.time()
-        # 流式估算状态：update_content 累计字符，首个内容 chunk 记时刻
-        self._stream_char_count = 0
+        # 流式采样状态：update_content 累计原文，首个内容 chunk 记时刻
+        self._stream_text_acc = ""
         self._stream_first_text_t = None
         self._footer_elapsed_label.setText(f"{_format_elapsed(0)}")
         self._footer_elapsed_label.setVisible(True)
@@ -14811,7 +14825,8 @@ class MessageCard(SimpleCardWidget):
         # 新轮流式开始：恢复简洁模式坞态（工具区沉底跟随最新活动）
         if self.viewer and hasattr(self.viewer, "_sync_streaming_dock"):
             self.viewer._sync_streaming_dock(True)
-        self._pulse_phase = 0.0
+        self._anim_t_ms = 0.0
+        self._anim_clock.restart()
         try:
             self._anim_timer.start(50)  # 80→50ms，帧率从12.5fps提升到20fps
         except RuntimeError:
@@ -14820,13 +14835,15 @@ class MessageCard(SimpleCardWidget):
 
     def _update_anim(self):
         # [V1] 可见性门控：隐藏 tab 不执行动画帧（避免隐藏页每 50ms 空转 update()）。
-        # 相位 _pulse_phase 是模 2π 的循环累积，暂停后从原相位继续，无视觉跳变；
-        # 恢复可见后下一拍定时器自动续跑，无需显式重启。
+        # 暂停期间重启时钟：动画位置由累积时间 _anim_t_ms 决定，不推进即停在原位置，
+        # 恢复后从原位置继续，无视觉跳变；下一拍定时器自动续跑，无需显式重启。
         if not self.isVisible():
+            self._anim_clock.restart()
             return
-        # 系统「减少动态效果」：脉冲边框是纯装饰动画，直接不重绘。
-        # 这是流式热路径上 20fps 的全卡 update()，关掉即省下这段绘制开销。
+        # 系统「减少动态效果」：底部光块是纯装饰动画，直接不重绘。
+        # 这是流式热路径上的逐帧绘制，关掉即省下这段开销。
         if not Animations.motion_enabled():
+            self._anim_clock.restart()
             return
         # 拖拽期间暂停重绘：原生拖拽时主线程在 DefWindowProc 模态循环里，
         # 每 50ms 触发一次 update() 会强制 DWM 对整窗重新合成 → 拖拽卡顿。
@@ -14835,8 +14852,18 @@ class MessageCard(SimpleCardWidget):
         from app.utils.window_drag_state import any_window_dragging
 
         if any_window_dragging:
+            self._anim_clock.restart()
             return
-        self._pulse_phase = (self._pulse_phase + 0.035) % (math.pi * 2)
+        # 时间驱动：按真实经过时间推进，掉帧只丢中间帧、不改变运动速度（旧实现
+        # 每拍固定 +0.035 相位，主线程一忙整条动画就变慢，恢复后又连续补帧猛冲）。
+        # 单拍钳制 _STREAM_BAND_MAX_DT_MS：被内容渲染占满 500ms 后也只前进一帧的量，
+        # 观感是「慢了一下」，而不是瞬移或猛冲。
+        dt = self._anim_clock.restart()
+        if dt <= 0.0:  # 同一拍内重复进入（理论上不会）：不推进
+            dt = 0.0
+        elif dt > _STREAM_BAND_MAX_DT_MS:
+            dt = _STREAM_BAND_MAX_DT_MS
+        self._anim_t_ms += dt
         # 重试状态栏降频更新（每200ms一次，避免和paintEvent双重刷新导致卡顿）
         if self._retrying:
             if not hasattr(self, "_retry_status_tick"):
@@ -14845,7 +14872,14 @@ class MessageCard(SimpleCardWidget):
             if self._retry_status_tick >= 4:  # 50ms * 4 = 200ms
                 self._retry_status_tick = 0
                 self._update_retry_status_bar()
-        self.update()
+        # 局部重绘：动画帧只标脏底部光带这一条窄带（不碰描边所在的卡片边缘），
+        # 免得每帧都把整卡交给 Qt 重绘、和流式内容渲染抢主线程。重试中状态栏
+        # 位置不确定，退回整卡重绘。
+        if self._retrying:
+            self.update()
+        else:
+            band_top = self.height() - _STREAM_BAND_BOTTOM - _STREAM_BAND_H - _STREAM_BAND_REPAINT_PAD
+            self.update(0, band_top, self.width(), _STREAM_BAND_H + 2 * _STREAM_BAND_REPAINT_PAD)
 
     def _apply_card_style(self, border: str = None, bg: str = None):
         # [PERF] 幂等短路：setStyleSheet 会触发 Qt 样式重新 polish + 子控件 relayout，
@@ -14928,7 +14962,8 @@ class MessageCard(SimpleCardWidget):
         # 确保动画定时器运行
         if not self._streaming:
             self._streaming = True
-            self._pulse_phase = 0.0
+            self._anim_t_ms = 0.0
+            self._anim_clock.restart()
             try:
                 self._anim_timer.start(50)
             except RuntimeError:
@@ -14973,7 +15008,7 @@ class MessageCard(SimpleCardWidget):
         )
         # 旋转图标动画
         spin_chars = ["◜", "◝", "◞", "◟"]
-        idx = int(self._pulse_phase * 2) % 4
+        idx = int(self._anim_t_ms / 180.0) % 4  # 每 180ms 转一格
         self._retry_spinner.setText(spin_chars[idx])
         # 错误类型
         self._retry_type_label.setStyleSheet(
@@ -15192,9 +15227,10 @@ class MessageCard(SimpleCardWidget):
         # 旧实现：10 色高饱和彩虹绕整卡循环 + 7px 霓虹外发光 + 3px 白色流光带，
         # 动区覆盖整卡周长、色相跳变（青→紫→粉→橙→绿），阅读时过于抢眼。
         # 现把「动」收敛到底部一条光带：
-        #   · 描边：1.5px 单色（accent / 重试红），静态，仅随极缓呼吸微调透明度
-        #   · 光块：底部内侧 3px 高、约 40% 卡宽，两端淡出，左右往返（约 3s 一趟）
-        breathe = 0.55 + 0.45 * (math.sin(self._pulse_phase * 0.3) + 1) / 2
+        #   · 描边：1.5px 单色（accent / 重试红），完全静态（alpha 不再随呼吸调制，
+        #     否则每帧都要整卡重绘内壁渐变 + 描边，与流式内容渲染抢主线程）
+        #   · 光块：底部内侧 3px 高、约 40% 卡宽，两端淡出，左右往返（单程 1.6s）
+
         # 单色 tint：重试/错误态用警示红，其余用主题 accent（不再循环变色）
         if self._retrying or self.error:
             tint = QColor(_STREAM_TINT_RETRY)
@@ -15217,17 +15253,21 @@ class MessageCard(SimpleCardWidget):
         inner_gradient.setStart(0, 0)
         inner_gradient.setFinalStop(w, h)
         _c0 = QColor(tint)
-        _c0.setAlpha(int(14 * breathe))
+        _c0.setAlpha(11)
         _c1 = QColor(tint)
-        _c1.setAlpha(int(5 * breathe))
+        _c1.setAlpha(4)
         inner_gradient.setColorAt(0.0, _c0)
         inner_gradient.setColorAt(1.0, _c1)
         painter.fillRect(0, 0, w, h, inner_gradient)
 
         # ── 层2：静态细描边（1.5px 单色，替代原 4px 彩虹循环 + 7px 外发光）──
+        # 静态层每帧照画，不做「局部重绘就跳过」的优化：动画帧的脏区是底部一条
+        # 窄带（见 _update_anim），Qt 按脏区裁剪光栅化，整卡 fillRect 的实际填充
+        # 仍被限制在窄带内；若按脏区跳过静态层，脏区覆盖到的描边会被擦掉却不
+        # 重画（下边框随动画帧一闪一闪）。
         painter.setClipPath(self._clip_border_region)
         _bc = QColor(tint)
-        _bc.setAlpha(int(115 * breathe))
+        _bc.setAlpha(92)
         border_pen = QPen(_bc)
         border_pen.setWidthF(1.5)
         painter.setPen(border_pen)
@@ -15236,17 +15276,19 @@ class MessageCard(SimpleCardWidget):
 
         # ── 层3：底部往返光块（唯一的运动元素）──
         painter.setClipPath(self._clip_inner_border)
-        band_h = 3
+        band_h = _STREAM_BAND_H
         band_ratio = 0.4  # 光块宽度占卡宽比例
         travel_ratio = 1.0 - band_ratio
-        # 三角波 0→1→0：相位步进 0.035/拍 × 20fps，×3.0 使往返约 3s 一趟
-        _t = (self._pulse_phase / (math.pi * 2)) * 3.0 % 2.0
+        # 三角波 0→1→0：直接对累积时间取模 2，周期严格闭合。
+        # 旧写法 _t = (相位/2π) * 3.0 % 2.0 每个相位圈走 3 个半程，回绕处
+        # 从「最右」瞬跳「最左」（约每 9s 一次跳变），是跳变感的直接来源。
+        _t = (self._anim_t_ms / _STREAM_BAND_SWEEP_MS) % 2.0
         _tri = _t if _t < 1.0 else 2.0 - _t
         band_cx = (0.5 * band_ratio + travel_ratio * _tri) * w
         band_w = band_ratio * w
         band_x = int(band_cx - 0.5 * band_w)
         band_w = int(band_w)
-        band_y = h - 3 - band_h
+        band_y = h - _STREAM_BAND_BOTTOM - band_h
         # 复用模板渐变：stop 位置固定（0/0.5/1），仅改坐标与颜色，不每帧 new
         band_gradient = self._grad_main
         band_gradient.setStart(band_x, 0)
@@ -15254,7 +15296,7 @@ class MessageCard(SimpleCardWidget):
         _b0 = QColor(tint)
         _b0.setAlpha(0)
         _b1 = QColor(tint)
-        _b1.setAlpha(int(190 * breathe))
+        _b1.setAlpha(170)
         band_gradient.setColorAt(0.0, _b0)
         band_gradient.setColorAt(0.5, _b1)
         band_gradient.setColorAt(1.0, _b0)
@@ -15899,15 +15941,15 @@ class MessageCard(SimpleCardWidget):
         if isinstance(txt, list):
             self.set_content(txt)
             return
-        # 流式吞吐估算：累计输出字符，首个非空 chunk 记时刻（口径对齐 agent_trace TTFT）
+        # 流式吞吐采样：累计输出原文，首个非空 chunk 记时刻（口径对齐 agent_trace TTFT）
         if self.role == "assistant" and isinstance(txt, str) and txt:
             now = time.time()
-            self._stream_char_count = getattr(self, "_stream_char_count", 0) + len(txt)
+            self._stream_text_acc = (getattr(self, "_stream_text_acc", "") or "") + txt
             if getattr(self, "_stream_first_text_t", None) is None:
                 self._stream_first_text_t = now
-            # 按 chunk 节流刷新插件 stat（300ms）：1s tick 的采样窗口会整段漏掉
+            # 按 chunk 节流刷新插件 stat（200ms）：1s tick 的采样窗口会整段漏掉
             # 快模型的短流式，导致流式期间始终无实时值、落定才闪现
-            if now - getattr(self, "_last_live_stat_refresh", 0.0) >= 0.3:
+            if now - getattr(self, "_last_live_stat_refresh", 0.0) >= 0.2:
                 self._last_live_stat_refresh = now
                 self._refresh_footer_stats(streaming=True)
         self.append_text(txt)
