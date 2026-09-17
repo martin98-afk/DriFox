@@ -129,9 +129,9 @@ def _footer_avg_throughput(ctx) -> dict | None:
     吞吐量 = 输出 token ÷ 生成秒。
 
     - 流式期间：token 用 ``estimate_tokens_text``（与轨迹卡 Tokens 列同源的
-      tiktoken/cl100k 估算，中文约 1.2 token/字，不是 chars÷4），时间取
-      「首字至今」→ 当前这条流的最近一次采样值；起步 0.3s 内不显示，
-      避免首字抖动。
+      tiktoken/cl100k 估算，中文约 1.2 token/字，不是 chars÷4），时间取宿主给的
+      ``live_gen_s``（**累计出字时间**，已排除工具执行 / 长等待空档）→ 当前这条
+      流的最近一次采样值；起步 0.3s 内不显示，避免首字抖动。
     - 回合落定：本轮真实 usage 写入会话累加表，输出 Σ输出 token ÷ Σ生成秒。
       累加表按 (window_id, session_id) 分组、按 (round_index, message_index)
       幂等写入 → 重复刷新不重复计数，且**不等** collector 投影，落定即出
@@ -149,10 +149,11 @@ def _footer_avg_throughput(ctx) -> dict | None:
             tokens = estimate_tokens_text(text)
             if tokens <= 0:
                 return None
+            tps = tokens / gen_s
             return {
-                "text": f"{_fmt_tps(tokens / gen_s)} tok/s",
-                "color": "#2ea043",
-                "tooltip": "当前这条回复的实时吞吐量（估算 token ÷ 首字至今秒数）",
+                "text": f"{_fmt_tps(tps)} tok/s",
+                "color": _tps_color(tps),
+                "tooltip": "当前这条回复的实时吞吐量（估算 token ÷ 累计出字秒数，已排除工具执行空档）",
             }
 
         key = _session_key(ctx)
@@ -167,9 +168,10 @@ def _footer_avg_throughput(ctx) -> dict | None:
             if agg is None:
                 return None
             total_tokens, total_gen_s, rounds = agg
+        tps = total_tokens / total_gen_s
         return {
-            "text": f"{_fmt_tps(total_tokens / total_gen_s)} tok/s",
-            "color": "#2ea043",
+            "text": f"{_fmt_tps(tps)} tok/s",
+            "color": _tps_color(tps),
             "tooltip": f"本会话 {rounds} 轮平均吞吐量（Σ输出 token ÷ Σ生成秒）",
         }
     except Exception as e:  # noqa: BLE001 — 页脚回调异常不能影响消息渲染
@@ -267,6 +269,23 @@ def _aggregate_records(ctx):
 def _fmt_tps(tps: float) -> str:
     """吞吐量文本格式化：≥1000 显示 K 位，其余取整。"""
     return f"{tps / 1000:.1f}K" if tps >= 1000 else str(round(tps))
+
+
+# 页脚吞吐量配色阈值（tok/s）：慢 = 红，一般 = 黄，其余 = 绿
+_TPS_SLOW = 30
+_TPS_OK = 60
+_COLOR_SLOW = "#f85149"
+_COLOR_OK = "#d29922"
+_COLOR_FAST = "#2ea043"
+
+
+def _tps_color(tps: float) -> str:
+    """吞吐量配色：<30 红 / <60 黄 / 其余绿（红绿语义对齐差异徽章的 +/-）。"""
+    if tps < _TPS_SLOW:
+        return _COLOR_SLOW
+    if tps < _TPS_OK:
+        return _COLOR_OK
+    return _COLOR_FAST
 
 
 # 页脚平均吞吐量专用 hub（与轨迹卡实例解耦的模块级单例；

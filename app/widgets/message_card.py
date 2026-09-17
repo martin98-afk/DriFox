@@ -13112,6 +13112,11 @@ class MessageCard(SimpleCardWidget):
     welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / 插件注册 tab）
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出（内部处理保存，不透传）
 
+    # 流式实时吞吐采样：单段「出字间隔」计入上限（秒）。间隔超过它视为工具执行
+    # / 请求等待，不计入生成秒 —— 工具循环里卡片不重建（start_elapsed_tracking
+    # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
+    _LIVE_GAP_CAP_S = 2.0
+
     def __init__(
         self,
         role: str,
@@ -13537,6 +13542,9 @@ class MessageCard(SimpleCardWidget):
             f"{font_css} font-size: {scale_font_size(10)}px; "
             f"color: {self._theme['muted']}; font-weight: 400; padding: 0px; margin: 0px;"
         )
+        # 插件 stat 的基准样式：配色时只在它后面追加 color，保证与耗时 label
+        # 同字号、同内边距（两者并排，样式来源必须一致才不会错行）
+        self._footer_stat_base_style = label_style
 
         # 耗时
         elapsed_l = QLabel("", self)
@@ -13715,6 +13723,8 @@ class MessageCard(SimpleCardWidget):
         if elapsed is not None:
             # 轮次结束，清掉流式采样缓冲
             self._stream_text_acc = ""
+            self._stream_gen_s = 0.0
+            self._stream_last_text_t = None
             # 插件信息项按落定态刷新（token_usage 透传给 provider 自行取舍）
             self._refresh_footer_stats(streaming=False, elapsed=elapsed, token_usage=token_usage)
             # 单次补刷：历史会话加载 / 投影晚到的兜底（旧版 1s+2.5s 二连发是为等
@@ -13874,8 +13884,8 @@ class MessageCard(SimpleCardWidget):
             # 吞吐量口径交给 provider（插件侧走 tiktoken/cl100k，中文约 1.2
             # token/字）。主程序不再用 chars÷4 粗估（中文低估约 4~5 倍）。
             ctx["live_text"] = getattr(self, "_stream_text_acc", "") or ""
-            t0 = getattr(self, "_stream_first_text_t", None)
-            ctx["live_gen_s"] = max(0.0, time.time() - t0) if t0 else 0.0
+            # 生成秒 = 累计出字时间（已排除工具执行 / 长等待段）
+            ctx["live_gen_s"] = max(0.0, float(getattr(self, "_stream_gen_s", 0.0) or 0.0))
         return ctx
 
     def _refresh_footer_stats(
@@ -13905,8 +13915,16 @@ class MessageCard(SimpleCardWidget):
                         text = str(val.get("text") or "")
                         color = val.get("color")
                         tip = val.get("tooltip")
-                        label.setTextFormat(Qt.RichText)
-                        label.setText(f'<span style="color:{color};">{text}</span>' if color else text)
+                        # ⚠️ 纯文本 + QSS 上色，不用 RichText：富文本 QLabel 的基线
+                        # 与 sizeHint 和耗时 label（纯文本）不同，两者并排会垂直错位；
+                        # 顺带避免插件文本里的 < & 被当标记解析。
+                        label.setTextFormat(Qt.PlainText)
+                        if label.text() != text:
+                            label.setText(text)
+                        if getattr(label, "_stat_color", None) != color:
+                            label._stat_color = color
+                            base = getattr(self, "_footer_stat_base_style", "")
+                            label.setStyleSheet(f"{base} color: {color};" if color else base)
                         if tip:
                             install_hover_tooltip(label, str(tip))
                 if not text:
@@ -13938,8 +13956,10 @@ class MessageCard(SimpleCardWidget):
         if not self._footer_elapsed_label:
             return
         self._elapsed_start_time = time.time()
-        # 流式采样状态：update_content 累计原文，首个内容 chunk 记时刻
+        # 流式采样状态：update_content 累计原文与出字时间，首个内容 chunk 记时刻
         self._stream_text_acc = ""
+        self._stream_gen_s = 0.0
+        self._stream_last_text_t = None
         self._stream_first_text_t = None
         self._footer_elapsed_label.setText(f"{_format_elapsed(0)}")
         self._footer_elapsed_label.setVisible(True)
@@ -15941,12 +15961,17 @@ class MessageCard(SimpleCardWidget):
         if isinstance(txt, list):
             self.set_content(txt)
             return
-        # 流式吞吐采样：累计输出原文，首个非空 chunk 记时刻（口径对齐 agent_trace TTFT）
+        # 流式吞吐采样：累计输出原文，并**逐段累加出字时间**（不是首字至今）
         if self.role == "assistant" and isinstance(txt, str) and txt:
             now = time.time()
             self._stream_text_acc = (getattr(self, "_stream_text_acc", "") or "") + txt
-            if getattr(self, "_stream_first_text_t", None) is None:
+            prev = getattr(self, "_stream_last_text_t", None)
+            if prev is None:
+                # 首个非空 chunk：仅记时刻（供 TTFT 语义），生成秒从 0 起算
                 self._stream_first_text_t = now
+            elif 0 < now - prev <= self._LIVE_GAP_CAP_S:
+                self._stream_gen_s = getattr(self, "_stream_gen_s", 0.0) + (now - prev)
+            self._stream_last_text_t = now
             # 按 chunk 节流刷新插件 stat（200ms）：1s tick 的采样窗口会整段漏掉
             # 快模型的短流式，导致流式期间始终无实时值、落定才闪现
             if now - getattr(self, "_last_live_stat_refresh", 0.0) >= 0.2:

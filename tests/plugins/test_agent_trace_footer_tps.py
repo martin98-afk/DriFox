@@ -116,3 +116,19 @@ def test_sessions_are_isolated(ui_mod):
 def test_no_usage_returns_none(ui_mod):
     assert ui_mod._footer_avg_throughput(_ctx(elapsed=2.0, token_usage={})) is None
     assert ui_mod._footer_avg_throughput(_ctx()) is None
+
+
+def test_color_thresholds(ui_mod):
+    """<30 红 / <60 黄 / 其余绿；每组用独立会话，避免累加表串扰。"""
+
+    def _one(wid: str, out: int):
+        return ui_mod._footer_avg_throughput(
+            _ctx(window_id=wid, elapsed=2.0, token_usage={"output": out, "ttft_ms": 0})
+        )
+
+    assert _one("c1", 10)["text"] == "5 tok/s"
+    assert _one("c1", 10)["color"] == "#f85149"
+    assert _one("c2", 90)["text"] == "45 tok/s"
+    assert _one("c2", 90)["color"] == "#d29922"
+    assert _one("c3", 200)["text"] == "100 tok/s"
+    assert _one("c3", 200)["color"] == "#2ea043"
