@@ -35,8 +35,13 @@ class ContextPipeline:
     """上下文 cascade 编排器（无状态，可随时实例化）"""
 
     def __init__(self, registry=None) -> None:
+        # registry 可注入（测试 / 隔离场景）；不传则用全局单例
         self._registry = registry
         self._budget_fallback = BuiltInBudgetResolver()
+
+    @property
+    def _reg(self):
+        return self._registry if self._registry is not None else _resolve_registry()
 
     # ---------- 三个 stage 入口 ----------
 
@@ -138,7 +143,7 @@ class ContextPipeline:
 
     def _chain(self, stage: str) -> List[ContextTier]:
         try:
-            chain = _resolve_registry().resolve_chain(stage)
+            chain = self._reg.resolve_chain(stage)
         except Exception as e:
             logger.warning(f"[Context] 注册解析失败，按空链处理: {e}")
             return []
@@ -155,7 +160,7 @@ class ContextPipeline:
     ) -> ContextView:
         resolver = None
         try:
-            resolver = _resolve_registry().get_budget_resolver()
+            resolver = self._reg.get_budget_resolver()
         except Exception:
             resolver = None
         if resolver is None:
