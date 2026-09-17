@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.2] - 2026-09-17
+## [v0.6.2] - 2026-09-17 (重新发布 #2)
 
-自上一版本以来的变更 | 提交数：20 · 文件变更：47 · +5759/-1152 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：23 · 文件变更：58 · +7059/-1327 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -26,6 +26,14 @@ All notable changes to this project will be documented in this file.
 - **软件界面截图更新** (`images/软件界面.png`): 替换为最新界面截图。`550b5c41`
 
 - **版本号升级到 v0.6.2** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.6.1` → `0.6.2`。
+
+### ✨ 新功能 (New Features) — 重新发布增量
+
+- **agent_trace 三态宽度模式 + 交互增强** (`app/widgets/message_card.py`, `plugins/agent_trace/README.md`, `plugins/agent_trace/ui/detail_panel.py`, `plugins/agent_trace/ui/timeline_panel.py`, `plugins/agent_trace/ui/trace_card.py`, `plugins/agent_trace/ui/trace_collector.py`, `plugins/agent_trace/ui/trace_models.py`, `plugins/agent_trace/ui/turn_list_widget.py`, `uv.lock`): 时间线新增 Token 宽度模式（条带宽度 ∝ token 占比），与 Duration 互斥。`01441e84`
+
+- **消息级分支落地 + agent_trace 占位增强** (`app/core/message_content.py`, `app/main_widget.py`, `plugins/agent_trace/ui/trace_card.py`, `plugins/agent_trace/ui/trace_collector.py`, `plugins/agent_trace/ui/turn_list_widget.py`): 消息级分支实现，agent_trace 增强占位处理。`fd2449c5`
+
+- **右键菜单分支能力增强** (`plugins/agent_trace/README.md`): 右键菜单分支能力完善。`69765f10`
 
 ## [v0.6.1] - 2026-09-15
 
