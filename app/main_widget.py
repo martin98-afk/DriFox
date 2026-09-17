@@ -12278,7 +12278,9 @@ class OpenAIChatToolWindow(ToolWindow):
         其余保留圈的批次允许保持占位（用户滚过去时视口移动，它们进入重建窗口
         才被唤醒），从而给 LRU 淘汰器留出可卸载的候选。
         """
-        return self._virtual_buffer_batches() // 4
+        # 至少 ±1：保留圈本身已很小时（退化配置），±1 与它等价，不会产生对拆
+        # （distance=1 的批次本就在保护圈内、从不会被卸载，也就无重建可触发）。
+        return max(1, self._virtual_buffer_batches() // 4)
 
     def _batch_is_protected(self, batch_idx: int, vp_range: Optional[tuple] = None) -> bool:
         """判断批次是否受保护（温和淘汰不碰）：
