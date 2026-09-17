@@ -13588,9 +13588,11 @@ class MessageCard(SimpleCardWidget):
         review_icon.setStyleSheet(
             "QLabel {"
             " background: transparent; padding: 1px; margin: 0px;"
-            " border-radius: 3px;"
+            # 父级差异胶囊用 QWidget 选择器设了 1px 实线边框，类型选择器会级联到
+            # 子 QLabel；不显式清掉就会在放大镜外露出一圈方框
+            " border: none; border-radius: 3px;"
             " }"
-            "QLabel:hover { background: rgba(128,128,128,0.18); }"
+            "QLabel:hover { background: rgba(128,128,128,0.18); border: none; }"
         )
         review_icon.setAlignment(Qt.AlignCenter)
         review_icon.setCursor(Qt.PointingHandCursor)
