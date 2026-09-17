@@ -49,7 +49,16 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import SegmentedWidget
 
-from .trace_models import EntryKind, ThemePalette, TraceRecord, format_duration, kind_color, pretty_json, with_alpha
+from .trace_models import (
+    EntryKind,
+    ThemePalette,
+    TraceRecord,
+    format_duration,
+    format_tokens,
+    kind_color,
+    pretty_json,
+    with_alpha,
+)
 from .turn_list_widget import unified_scrollbar
 
 # tab key → 页面实例槽位
@@ -386,6 +395,8 @@ class DetailPanel(QWidget):
     """右侧详情面板。"""
 
     dismissRequested = pyqtSignal()  # 点击 × → 清除选中
+    # 点标题里的 Turn 徽章 → 只看该轮（0 = 清除）
+    turnFilterRequested = pyqtSignal(int)
 
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -425,6 +436,12 @@ class DetailPanel(QWidget):
         self._badge.setFixedHeight(18)
         self._badge.setMinimumWidth(72)
         row1.addWidget(self._badge, 0, Qt.AlignVCenter)
+        # 可点 Turn 徽章（点它 = 列表切到只看该轮）
+        self._turn_chip = _ClickLabel(self._title_bar)
+        self._turn_chip.setFixedHeight(18)
+        self._turn_chip.hide()
+        self._turn_chip.clicked.connect(self._on_turn_chip)
+        row1.addWidget(self._turn_chip, 0, Qt.AlignVCenter)
         self._title_label = QLabel("未选中条目", self._title_bar)
         row1.addWidget(self._title_label, 1)
         self._close_btn = _CloseButton(self._title_bar)
@@ -588,6 +605,7 @@ class DetailPanel(QWidget):
             f"QFrame#agentTraceDetailTitle {{ background: transparent; border-bottom: 1px solid {pal.q('border')}; }}"
         )
         self._close_btn.set_palette(pal)
+        self._turn_chip.set_palette(pal)
         self._title_label.setStyleSheet(f"color: {pal.q('text')}; font-family: '{ui}'; font-size: {self._base_px}px;")
         self._meta_label.setStyleSheet(f"color: {pal.q('text_muted')}; font-family: '{ui}'; font-size: {fs}px;")
         for edit in self._existing_text_pages():
@@ -742,15 +760,30 @@ class DetailPanel(QWidget):
 
         self._refresh_badge()
         turn_part = f"Turn {rec.turn_no} · " if rec.turn_no > 0 else ""
+        self._turn_chip.set_turn(rec.turn_no)
         self._title_label.setText(f"{turn_part}{rec.label}")
         bits = [
             rec.status,
             format_duration(rec.duration_ms) if rec.duration_ms > 0 else "—",
             rec.absolute_time,
-            f"{len(rec.raw or ''):,} 字符",
         ]
+        # 工具调用 / hook 注入类消息本来就没有正文 —— 显示「0 字符」是噪音，
+        # 换成 token 数（真正占用上下文的量）。
+        if (rec.raw or "").strip():
+            bits.append(f"{len(rec.raw):,} 字符")
+        elif rec.tokens > 0:
+            bits.append(f"{format_tokens(rec.tokens)} tok")
         self._meta_label.setText("  ·  ".join(bits))
         self._fill_active_tab()
+
+    def _on_turn_chip(self) -> None:
+        """点标题里的 Turn 徽章 → 请求列表只看该轮。"""
+        idx = self._current_idx
+        if idx is None or idx >= len(self._records):
+            return
+        rec = self._records[idx]
+        if rec.turn_no > 0:
+            self.turnFilterRequested.emit(rec.turn_no)
 
     def _refresh_badge(self) -> None:
         if self._current_idx is None or self._current_idx >= len(self._records):
@@ -773,6 +806,7 @@ class DetailPanel(QWidget):
         self._stack.setCurrentWidget(self._page_text)
         self._badge.setText("----")
         self._badge.setStyleSheet(self._badge_qss(QColor("#888888")))
+        self._turn_chip.hide()
         self._title_label.setText("未选中条目")
         self._meta_label.setText("点击左侧任意条目查看完整内容")
         for edit in self._existing_text_pages():
@@ -821,7 +855,8 @@ class DetailPanel(QWidget):
         return [
             ("开始时间", self._full_ts(rec.start_ts)),
             ("Turn", str(rec.turn_no) if rec.turn_no > 0 else "-"),
-            ("大小", f"{len(rec.raw or ''):,} 字符"),
+            ("大小", f"{len(rec.raw):,} 字符" if (rec.raw or "").strip() else "—"),
+            ("Tokens", format_tokens(rec.tokens)),
         ]
 
     def _llm_stat_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
@@ -946,3 +981,39 @@ def _hms(epoch: float) -> str:
     import datetime as _dt
 
     return _dt.datetime.fromtimestamp(epoch).strftime("%H:%M:%S")
+
+
+class _ClickLabel(QLabel):
+    """可点击的小标签（Turn 徽章）—— hover 加亮、单击发信号。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        self._pal = ThemePalette()
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_palette(self, pal: ThemePalette) -> None:
+        self._pal = pal
+        self._apply_style()
+
+    def set_turn(self, turn_no: int) -> None:
+        if turn_no > 0:
+            self.setText(f"Turn {turn_no}")
+            self.show()
+        else:
+            self.hide()
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        pal = self._pal
+        self.setStyleSheet(
+            f"color: {pal.q('accent')}; background: {pal.q('accent', 36)};"
+            f" border-radius: 3px; padding: 0 6px;"
+            f" font-family: '{pal.font_family}'; font-size: {max(9, pal.font_px - 3)}px;"
+        )
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)

@@ -43,12 +43,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QPainter
+from PyQt5.QtGui import QColor, QFont, QKeySequence, QPainter
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QShortcut,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -56,7 +57,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import SearchLineEdit
 
 from .detail_panel import DetailPanel
-from .timeline_panel import TimelinePanel
+from .timeline_panel import MODE_DURATION, MODE_EQUAL, MODE_TOKEN, TimelinePanel
 from .trace_collector import TraceCollector, TraceCollectorHub
 from .trace_models import (
     EntryKind,
@@ -172,7 +173,9 @@ class TraceCardWidget(QWidget):
         splitter.addWidget(self._detail)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([880, 520])
+        # 默认给列表更多宽度（详情一展开就吃掉 37% 宽会让 Name 列被压得很窄），
+        # 要看详情再往左拖
+        splitter.setSizes([1080, 320])
         outer.addWidget(splitter, 1)
         self._splitter = splitter
         self._detail_sizes: Optional[List[int]] = None  # 详情收起前的宽度（展开时恢复）
@@ -187,8 +190,19 @@ class TraceCardWidget(QWidget):
         self._timeline.rangeSelected.connect(self._turn_list.set_time_range)
         self._timeline.rangeCleared.connect(self._turn_list.clear_time_range)
         self._turn_list.timeRangeCleared.connect(self._timeline.clear_range)
+        self._turn_list.errorCountChanged.connect(self._on_error_count_changed)
+        self._turn_list.cleared.connect(self._on_detail_dismissed)
+        self._turn_list.turnFilterChanged.connect(self._on_turn_filter_changed)
+        self._turn_list.branchRequested.connect(self._on_branch_requested)
         self._detail.dismissRequested.connect(self._on_detail_dismissed)
+        self._detail.turnFilterRequested.connect(self._turn_list.set_turn_filter)
         self._search_box.textChanged.connect(self._turn_list.set_search)
+        self._search_box.returnPressed.connect(self._on_search_enter)
+        # Ctrl+F 聚焦搜索（装在整个卡片上：焦点在列表/详情时都能一键跳过来）
+        for w in (self, self._turn_list, self._detail, self._timeline):
+            act = QShortcut(QKeySequence.Find, w)
+            act.setContext(Qt.WidgetWithChildrenShortcut)
+            act.activated.connect(self._focus_search)
 
     def _build_top_bar(self) -> QWidget:
         bar = QFrame(self)
@@ -207,17 +221,25 @@ class TraceCardWidget(QWidget):
 
         layout.addStretch(1)
 
-        # Duration 开关：开=按真实时间比例画条带，关=每条等宽；
-        # 开启后时间线支持滚轮缩放（以鼠标所在时刻为锚点）
+        # 宽度模式三态（互斥）：等宽（默认）/ Duration（时间比例）/ Token（token 占比）
+        # ⚠️ 三者互斥：两个都开会让宽度语义无定义，互斥靠 _on_mode_toggled 取消另一个。
         self._duration_btn = QPushButton("Duration", bar)
         self._duration_btn.setCheckable(True)
-        # 默认关：Duration 关 = 每条等宽（固定长度），开启才按真实时间比例
         self._duration_btn.setChecked(False)
         self._duration_btn.setFixedHeight(26)
         self._duration_btn.setCursor(Qt.PointingHandCursor)
-        self._duration_btn.setToolTip("开：条带宽度按真实时间比例（开启后滚轮可缩放时间窗）；关：每条等宽")
-        self._duration_btn.toggled.connect(self._on_flag_toggled)
+        self._duration_btn.setToolTip("开：条带宽度按真实时间比例（与 Token 互斥）；关：等宽铺满")
+        self._duration_btn.toggled.connect(self._on_mode_toggled)
         layout.addWidget(self._duration_btn)
+
+        self._token_btn = QPushButton("Token", bar)
+        self._token_btn.setCheckable(True)
+        self._token_btn.setChecked(False)
+        self._token_btn.setFixedHeight(26)
+        self._token_btn.setCursor(Qt.PointingHandCursor)
+        self._token_btn.setToolTip("开：条带宽度按 token 占比（与 Duration 互斥）；关：等宽铺满")
+        self._token_btn.toggled.connect(self._on_mode_toggled)
+        layout.addWidget(self._token_btn)
 
         self._search_box = SearchLineEdit(bar)
         self._search_box.setPlaceholderText("搜索内容 / 工具名…")
@@ -248,6 +270,11 @@ class TraceCardWidget(QWidget):
                 sep.setMinimumWidth(0)
                 layout.addWidget(sep)
         layout.addStretch(1)
+        # 失败计数（列表侧有失败时才显示；点它只看失败）
+        self._stats_errors = QLabel("", bar)
+        self._stats_errors.hide()
+        self._stats_errors.mousePressEvent = self._on_stats_errors_clicked  # type: ignore[method-assign]
+        layout.addWidget(self._stats_errors)
         layout.addWidget(self._stats_total)
         self._bottom_bar = bar
         return bar
@@ -787,7 +814,7 @@ class TraceCardWidget(QWidget):
         if self._detail.isVisible():
             return
         self._detail.show()
-        sizes = self._detail_sizes or [880, 520]
+        sizes = self._detail_sizes or [1080, 320]
         total = sum(self._splitter.sizes()) or sum(sizes)
         scale = total / sum(sizes)
         self._splitter.setSizes([round(sizes[0] * scale), round(sizes[1] * scale)])
@@ -804,9 +831,87 @@ class TraceCardWidget(QWidget):
         # × = 整块隐藏详情面板；点选新条目时再恢复（_on_record_selected）
         self._hide_detail()
 
-    def _on_flag_toggled(self, checked: bool) -> None:
-        """顶栏 Duration 开关 → 时间线显示模式。"""
-        self._timeline.set_duration(checked)
+    def _on_turn_filter_changed(self, turn_no: int) -> None:
+        """只看 Turn N → 泳道图放大到该轮的实际时间跨度（0 = 复位全量）。
+
+        ⚠️ 用**整轮条带的时间跨度**而不是该轮的某一条：一轮里含 user + 多次
+        工具 + 多次回复，只看单条会把同轮其它条带挤出视口，看起来像丢了数据。
+        """
+        if turn_no <= 0:
+            self._timeline.focus_window(None, None)
+            return
+        bounds = self._turn_list.turn_bounds(turn_no)
+        if bounds is None:
+            self._timeline.focus_window(None, None)
+            return
+        self._timeline.focus_window(bounds[0], bounds[1])
+
+    def _on_branch_requested(self, row: int) -> None:
+        """「从这里分支」→ 主程序 ``_on_branch_from_card_requested(round_index)``。
+
+        ⚠️ 主程序的 round_index 是**用户回合序号**（从 0 起，按 canonical
+        messages 里真实 user 消息计数），与轨迹里 ``rec.turn_no``（从 1 起）差 1。
+        两者口径分别由 ``get_user_round_ranges`` 与 collector 的 turn 计数决定，
+        这里只做 -1 偏移，不做任何猜测性推导。
+        """
+        rec = self._turn_list.record_at_row(row)
+        if rec is None or rec.turn_no <= 0:
+            return
+        mw = self._ctx.get("main_widget")
+        handler = getattr(mw, "_on_branch_from_card_requested", None) if mw is not None else None
+        if not callable(handler):
+            logger.warning("[agent_trace] 主程序未提供 _on_branch_from_card_requested，分支不可用")
+            return
+        try:
+            handler(rec.turn_no - 1)
+        except Exception as e:  # noqa: BLE001 — 分支失败不该影响轨迹面板
+            logger.warning(f"[agent_trace] 从这里分支失败: {e}")
+
+    def _focus_search(self) -> None:
+        """Ctrl+F：聚焦搜索框并全选（再打即替换旧关键词）。"""
+        self._search_box.setFocus(Qt.ShortcutFocusReason)
+        self._search_box.selectAll()
+
+    def _on_search_enter(self) -> None:
+        """回车：跳到第一条命中（搜完直接落到结果，不用再摸鼠标点列表）。"""
+        row = self._turn_list.first_visible_row()
+        if row is None:
+            return
+        self._turn_list.select_row(row)
+
+    def _on_stats_errors_clicked(self, _event) -> None:
+        """点底部「N 失败」→ 列表切到只看失败（再点一次由 chip 取消）。"""
+        self._turn_list.toggle_error_only()
+
+    def _on_error_count_changed(self, n: int) -> None:
+        """列表侧失败数 → 底部统计栏（可点即筛）。"""
+        if n > 0:
+            self._stats_errors.setText(f"{n} 失败")
+            self._stats_errors.setToolTip("点击只看失败条目")
+            self._stats_errors.setCursor(Qt.PointingHandCursor)
+            self._stats_errors.show()
+        else:
+            self._stats_errors.hide()
+            self._stats_errors.setText("")
+
+    def _on_mode_toggled(self, _checked: bool = False) -> None:
+        """顶栏三态按钮 → 时间线宽度模式。
+
+        互斥：两个按钮可分别点开，点开一个自动把另一个置回。用 blockSignals
+        断开被置回按钮的信号，避免它反过来触发一次模式重算（回环）。
+        """
+        dur = self._duration_btn.isChecked()
+        tok = self._token_btn.isChecked()
+        if dur and tok:
+            # 刚被点开的那个保持（sender 即最新点击的按钮），另一个置回
+            src = self.sender()
+            other = self._token_btn if src is self._duration_btn else self._duration_btn
+            other.blockSignals(True)
+            other.setChecked(False)
+            other.blockSignals(False)
+            dur, tok = src is self._duration_btn, src is self._token_btn
+        mode = MODE_DURATION if dur else (MODE_TOKEN if tok else MODE_EQUAL)
+        self._timeline.set_mode(mode)
 
     # ──────────────────── 底部汇总 ────────────────────
 

@@ -42,6 +42,7 @@ from .trace_models import (
     is_real_user_message,
     message_label,
     message_source,
+    tool_arg_summary,
     truncate,
 )
 
@@ -361,8 +362,14 @@ class TraceCollector(QObject):
         try:
             cut_rec = cut_msg + offset
             prefix = self._records[:cut_rec]
-            # 轮次号必须接着前缀继续数，否则新消息全变成 Turn 0
-            turn = prefix[-1].turn_no if prefix else 0
+            # 轮次号必须接着前缀继续数，否则新消息全变成 Turn 0。
+            # ⚠️ 不能用 ``prefix[-1].turn_no``：前置 hook 现在归属**其后**那一轮
+            # （见 _project_messages 的轮次归属说明），前缀末尾若是「属于下一轮
+            # 的 hook」，它的 turn_no 已经 +1，拿它当 turn_start 会让紧接着的
+            # user 又 +1 → 整片轮次号偏移一位。
+            # 真实 user 计数才是稳定基准（O(切片长度) 的字典取值比较，远低于
+            # 全量投影的时间戳解析 / 内容拼接成本）。
+            turn = sum(1 for m in messages[:cut_msg] if is_real_user_message(m))
             tail = self._project_messages(
                 messages[cut_msg:],
                 system_prompt=system_prompt,
@@ -405,6 +412,43 @@ class TraceCollector(QObject):
         records: List[TraceRecord] = []
         turn = turn_start
         assistant_seq = 0
+        # ── 轮次归属（口径对齐主程序 ``get_user_round_ranges``）──
+        # ⚠️ hook 消息（PreUserMessage 等）注入在真实 user **之前**。若按
+        # 「遇到 user 才 +1」的顺序计数，这些 hook 会落到**上一轮** →
+        # 筛 Turn N 时本轮 PreUserMessage 缺席，却混入属于 Turn N+1 的那条
+        # （用户报「preuser 筛错了」的根因）。
+        # 主程序的口径是「round 范围向前扩展、包含 user 之前的 hook」，
+        # 这里对齐：先按真实 user 定出各轮次号，再把紧邻真实 user 之前的
+        # 连续 hook 拉进同一个轮次。
+        # SessionStart 属会话级（不归任何轮），只越过、不修正。
+        turn_of: List[int] = [turn_start] * len(messages)
+        real_user_pos: List[int] = []
+        for i, msg in enumerate(messages):
+            if is_real_user_message(msg):
+                turn += 1
+                real_user_pos.append(i)
+                turn_of[i] = turn
+            elif msg.get("_hook_event") == "SessionStart":
+                # 会话级上下文，不纳入任何轮（对齐主程序 get_user_round_ranges：
+                # 「SessionStart 视为会话级上下文，不纳入任何 round 范围」）。
+                # 归 0 = 不画轮次徽章、不参与 Turn 筛选，与 SYSTEM 行同级。
+                turn_of[i] = 0
+            else:
+                turn_of[i] = turn
+        for i in real_user_pos:
+            t = turn_of[i]
+            j = i - 1
+            while j >= 0:
+                prev = messages[j]
+                if is_real_user_message(prev):
+                    break  # 不越过上一个真实 user
+                ev = prev.get("_hook_event")
+                if not ev:
+                    break  # 非 hook 非 user（assistant / tool）→ 不属本轮前置
+                if ev != "SessionStart":
+                    turn_of[j] = t
+                # SessionStart 保持 0（会话级），只越过、不改写
+                j -= 1
         # ⚠️ 时间戳解析是投影头号热点（profile：strptime 占 _project_messages
         # 的 61%）。两条优化：
         #   ① ``ts_ms`` 存在时**不要**去解析秒级 ``timestamp`` 串 —— 解析结果
@@ -546,8 +590,13 @@ class TraceCollector(QObject):
             else:
                 preview = truncate(raw_text, 140)
 
+            # 轮次号取预计算结果（前置 hook 已归入其后的 user 那一轮）
+            rec_turn = turn_of[i] if i < len(turn_of) else turn
             if is_real_user_message(msg):
-                turn += 1
+                meta["turn_start"] = True
+            elif i < len(turn_of) and rec_turn > 0 and rec_turn != (turn_of[i - 1] if i > 0 else turn_start):
+                # 本轮的首条前置 hook 也标 turn_start：徽章/分组线落在轮次真正
+                # 开始的位置（视觉上「这一轮从这里起」），与主程序 round 起点一致。
                 meta["turn_start"] = True
 
             # token 占用（列表 Tokens 列）：优先用 worker 落盘的真实 usage，
@@ -568,7 +617,7 @@ class TraceCollector(QObject):
                     end_ts=end,
                     is_pending=False,
                     is_error=is_error,
-                    turn_no=turn,
+                    turn_no=rec_turn,
                     meta=meta,
                     reasoning_loader=rec_loader,
                 )
@@ -677,9 +726,15 @@ class TraceCollector(QObject):
 
     @staticmethod
     def _tool_preview(args_text: str, raw_text: str) -> str:
-        """TOOL 行预览：优先参数 JSON 摘要，其次结果首行。"""
+        """TOOL 行预览：优先**主参数摘要**，其次整段参数，最后结果首行。
+
+        ⚠️ 不能直接甩 ``{"command": "cd /d ...``：参数名是固定字面量，占掉
+        一行里前十几个字符，真正要看的命令 / 路径反而被截断线吃掉。
+        ``tool_arg_summary`` 抽到主参数后这里退化为「挑可读的那部分」。
+        """
         if args_text:
-            return truncate(args_text.replace("\n", " "), 140)
+            summary = tool_arg_summary("", args_text, 140)
+            return summary or truncate(args_text.replace("\n", " "), 140)
         return truncate(raw_text, 140)
 
     @staticmethod
@@ -900,9 +955,9 @@ def _dump_arguments(arguments: Any) -> str:
 
 
 def _pending_preview(args_text: str, placeholder: bool) -> str:
-    """in-flight 行的预览文案。"""
+    """in-flight 行的预览文案（与正式行同口径：优先主参数摘要）。"""
     if args_text:
-        return args_text
+        return tool_arg_summary("", args_text, 140) or truncate(args_text.replace("\n", " "), 140)
     return "（正在接收参数…）" if placeholder else "（调用中…）"
 
 

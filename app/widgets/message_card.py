@@ -13986,14 +13986,17 @@ class MessageCard(SimpleCardWidget):
         font_css = get_font_family_css()
         if self.role in ("welcome", "assistant"):
             return ""
+        # 头像直径 30px：首字母字号取 16px（直径的 ~53%），
+        # 与项目卡片 _SquareAvatar(14/24≈58%) 比例接近，避免字符过小看不清。
         return f"""
             QLabel {{
-                {font_css} font-size: {scale_font_size(12)}px;
+                {font_css} font-size: {scale_font_size(16)}px;
                 color: #FFFFFF;
                 font-weight: 700;
                 background: {self._theme["accent"]};
                 border: 1px solid rgba(255,255,255,0.12);
                 border-radius: 15px;
+                padding: 0px;
             }}
         """
 

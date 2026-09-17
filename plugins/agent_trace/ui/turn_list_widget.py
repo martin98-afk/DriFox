@@ -48,7 +48,8 @@ from .trace_models import (
     with_alpha,
 )
 
-# 类型过滤 chips（label 与 kind）
+# 类型过滤 chips（label 与 kind）。key="error" 按失败状态筛（不是按类型），
+# 单独处理：工具报错散落在长列表里，没有这个入口只能靠肉眼扫红色状态点。
 FILTER_CHIPS = (
     ("all", "全部", None),
     ("system", "系统", EntryKind.SYSTEM),
@@ -212,8 +213,17 @@ class _RowDelegate(QStyledItemDelegate):
         self._pal = ThemePalette()
         self._base_px = 13
         self._bounds = (0.0, 1.0)
+        self._search_text = ""
 
     # ── 配置 ──
+
+    def set_search(self, text: str) -> None:
+        """注入当前搜索词 → 命中片段高亮（不参与过滤，只影响绘制）。"""
+        self._search_text = (text or "").strip().lower()
+
+    def small_font(self) -> QFont:
+        """徽章字体（与 paint 内的 ``small_font`` 同源，供命中区几何复用）。"""
+        return self._font(-2, bold=True)
 
     def set_palette(self, pal: ThemePalette, base_px: int) -> None:
         self._pal = pal
@@ -314,17 +324,19 @@ class _RowDelegate(QStyledItemDelegate):
             painter.drawEllipse(x, dot_y, dot_d, dot_d)
             x += dot_d + 8
 
-            # Turn 前缀徽章
-            if rec.meta.get("turn_start") and rec.turn_no > 0:
-                tfm = QFontMetrics(small_font)
-                tag = f"T{rec.turn_no}"
-                tw = tfm.horizontalAdvance(tag) + 10
+            # Turn 前缀徽章（矩形由 _turn_badge_geometry 统一算出，点击命中共用）
+            badge_rect = _turn_badge_geometry(rec, rect.y(), rect.height(), _PAD_L, small_font)
+            if badge_rect is not None:
                 painter.setBrush(with_alpha(QColor(pal.accent), 36))
-                painter.drawRoundedRect(QRectF(x, dot_y - 2, tw, dot_d + 4), 3, 3)
+                painter.drawRoundedRect(QRectF(badge_rect), 3, 3)
                 painter.setPen(QColor(pal.accent))
                 painter.setFont(small_font)
-                painter.drawText(QRect(x, rect.y(), tw, rect.height()), Qt.AlignCenter, tag)
-                x += tw + 6
+                painter.drawText(
+                    QRect(badge_rect.x(), rect.y(), badge_rect.width(), rect.height()),
+                    Qt.AlignCenter,
+                    f"T{rec.turn_no}",
+                )
+                x += badge_rect.width() + 6
 
             # 思维链标记：有 reasoning → 详情面板有 Thinking tab，列表给个入口暗示
             if rec.meta.get("reasoning"):
@@ -356,10 +368,13 @@ class _RowDelegate(QStyledItemDelegate):
                 rest = avail - head_w
                 if rest > 20:
                     painter.setPen(QColor(pal.text_muted))
+                    preview = rec.preview.replace("\n", " ")
+                    elided = fm.elidedText(preview, Qt.ElideRight, rest)
+                    self._paint_search_highlight(painter, fm, QRect(x + head_w, rect.y(), rest, rect.height()), elided)
                     painter.drawText(
                         QRect(x + head_w, rect.y(), rest, rect.height()),
                         Qt.AlignVCenter | Qt.AlignLeft,
-                        fm.elidedText(rec.preview.replace("\n", " "), Qt.ElideRight, rest),
+                        elided,
                     )
 
             # ── Type 列：类型徽章 ──
@@ -389,6 +404,30 @@ class _RowDelegate(QStyledItemDelegate):
             painter.drawLine(rect.x() + 3, rect.bottom(), rect.right(), rect.bottom())
         finally:
             painter.restore()
+
+    def _paint_search_highlight(self, painter: QPainter, fm: QFontMetrics, rect: QRect, text: str) -> None:
+        """在文字下方画命中片段的高亮底（搜索框非空时才画）。
+
+        只高亮可见区内的第一处命中：一行里多处命中时全画会让预览看起来像
+        荧光板；用户需要的是「这条为什么被搜出来」，一处足够定位。
+        """
+        needle = self._search_text
+        if not needle or not text:
+            return
+        pos = text.lower().find(needle)
+        if pos < 0:
+            return
+        x0 = rect.x() + fm.horizontalAdvance(text[:pos])
+        x1 = x0 + fm.horizontalAdvance(text[pos : pos + len(needle)])
+        if x1 <= rect.x() or x0 >= rect.right():
+            return
+        x0, x1 = max(x0, rect.x()), min(x1, rect.right())
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(with_alpha(QColor(self._pal.accent), 60))
+        y = rect.y() + (rect.height() - fm.height()) // 2
+        painter.drawRoundedRect(QRectF(x0 - 1, y + 1, max(2, x1 - x0 + 2), max(6, fm.height() - 3)), 2, 2)
+        painter.restore()
 
     def _paint_waterfall(self, painter: QPainter, rec: TraceRecord, rect: QRect, color: QColor) -> None:
         """行内迷你甘特条 + 右侧占用时长（Time 列已并入本列）。
@@ -431,12 +470,47 @@ class _RowDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(QRectF(x0 + w, track_y, min(8, rect.x() + track_w - x0 - w), 10), 2, 2)
 
 
+def _copy(text: str) -> None:
+    """复制到系统剪贴板（空文本不动作，避免清掉用户剪贴板里的东西）。"""
+    if not text:
+        return
+    from PyQt5.QtWidgets import QApplication
+
+    cb = QApplication.clipboard()
+    if cb is not None:
+        cb.setText(str(text))
+
+
+def _turn_badge_geometry(rec: TraceRecord, row_y: int, row_h: int, pad_l: int, font: QFont) -> Optional[QRect]:
+    """行首 ``T{n}`` 徽章的命中矩形（绘制与点击共用，保证像素级一致）。
+
+    只有带 ``turn_start`` 且 ``turn_no > 0`` 的行才有徽章（与 delegate 绘制条件
+    同源）；其余返回 None。x 依次是：左边距 → 6px 状态点 → 8px 间距。
+    """
+    if not rec.meta.get("turn_start") or rec.turn_no <= 0:
+        return None
+    fm = QFontMetrics(font)
+    tw = fm.horizontalAdvance(f"T{rec.turn_no}") + 10
+    dot_d = 6
+    dot_y = row_y + (row_h - dot_d) // 2
+    x = pad_l + dot_d + 8
+    return QRect(x, dot_y - 2, tw, dot_d + 4)
+
+
 class TurnListWidget(QWidget):
     """中央表格：可排序列头 + QListWidget 条目（+ in-flight 尾巴）。"""
 
     recordSelected = pyqtSignal(int)  # record 索引（visible_records 空间）
     # 用户点掉「时间区间」chip → 卡片同步清掉时间线上的选区
     timeRangeCleared = pyqtSignal()
+    # 当前筛选结果里的失败条数（底部统计栏加「N 失败」用）
+    errorCountChanged = pyqtSignal(int)
+    # Esc 且本无筛选 → 向上冒泡给卡片（收起详情面板）
+    cleared = pyqtSignal()
+    # 「从这里分支」→ 卡片转发给主程序（参数为列表行号）
+    branchRequested = pyqtSignal(int)
+    # 轮次过滤变化（0 = 清除）→ 卡片把泳道图聚焦到该轮
+    turnFilterChanged = pyqtSignal(int)
 
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -447,6 +521,9 @@ class TurnListWidget(QWidget):
         self._filter_kind: Optional[EntryKind] = None
         self._search_text: str = ""
         self._time_range: Optional[Tuple[float, float]] = None  # 时间线拖选出的区间
+        self._turn_filter: int = 0  # >0 = 只看该轮（点 list 中的 Turn 分隔线）
+        self._error_only: bool = False  # 只看失败条目
+        self._error_count: int = 0  # 当前筛选结果里的失败数
         self._bounds = (0.0, 1.0)  # 会话时间边界（算区间相对秒数用）
         self._sort_key = "index"
         self._sort_desc = False
@@ -482,6 +559,9 @@ class TurnListWidget(QWidget):
         # 无横向滚动概念）——显式关掉横向滚动条，防 sizeHint 回归再引入横滚。
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list.currentRowChanged.connect(self._on_current_row_changed)
+        # 右键复制菜单（Name / 入参 / 结果 / tool_call_id）
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_context_menu)
         SmoothScrollDelegate(self._list)  # 平滑滚动（与主程序同款引擎）
         outer.addWidget(self._list, 1)
 
@@ -519,6 +599,27 @@ class TurnListWidget(QWidget):
         self._range_chip.clicked.connect(self._on_range_chip_clicked)
         self._range_chip.hide()
         lay.addWidget(self._range_chip)
+
+        # Turn chip（点列表分隔线/时间线选中某一轮时出现，点它清除）
+        self._turn_chip = QPushButton(bar)
+        self._turn_chip.setObjectName("agentTraceRangeChip")
+        self._turn_chip.setFixedHeight(24)
+        self._turn_chip.setCursor(Qt.PointingHandCursor)
+        self._turn_chip.setToolTip("点击清除轮次过滤")
+        self._turn_chip.clicked.connect(self._on_turn_chip_clicked)
+        self._turn_chip.hide()
+        lay.addWidget(self._turn_chip)
+
+        # 错误 chip（默认隐藏，只在当前筛选结果里有失败时出现；点它只看失败）
+        self._error_chip = QPushButton("失败", bar)
+        self._error_chip.setObjectName("agentTraceErrorChip")
+        self._error_chip.setCheckable(True)
+        self._error_chip.setFixedHeight(24)
+        self._error_chip.setCursor(Qt.PointingHandCursor)
+        self._error_chip.setToolTip("只看失败的条目")
+        self._error_chip.toggled.connect(self._on_error_chip_toggled)
+        self._error_chip.hide()
+        lay.addWidget(self._error_chip)
 
         lay.addStretch(1)
         self._count_label = QLabel(bar)
@@ -572,6 +673,7 @@ class TurnListWidget(QWidget):
 
     def set_search(self, text: str) -> None:
         self._search_text = (text or "").strip().lower()
+        self._delegate.set_search(self._search_text)  # 命中片段高亮（只影响绘制）
         self._refilter()
 
     def set_filter_kind(self, kind: Optional[EntryKind]) -> None:
@@ -607,6 +709,53 @@ class TurnListWidget(QWidget):
         self._update_range_chip()
         self._refilter()
         self.timeRangeCleared.emit()
+
+    def _on_turn_chip_clicked(self) -> None:
+        self.set_turn_filter(0)
+
+    def _on_error_chip_toggled(self, checked: bool) -> None:
+        self._error_only = bool(checked)
+        self._refilter()
+
+    # ──────────────────── 轮次 / 失败过滤 ────────────────────
+
+    def set_turn_filter(self, turn_no: int) -> None:
+        """只看某一轮（0 = 清除）。点列表 Turn 分隔线 / 详情标题的 Turn 徽章触发。"""
+        turn_no = int(turn_no or 0)
+        if turn_no == self._turn_filter:
+            return
+        self._turn_filter = turn_no
+        self._update_turn_chip()
+        self._refilter()
+        self.turnFilterChanged.emit(turn_no)
+
+    def _update_turn_chip(self) -> None:
+        if self._turn_filter <= 0:
+            self._turn_chip.hide()
+            return
+        self._turn_chip.setText(f"Turn {self._turn_filter}  ✕")
+        self._turn_chip.show()
+
+    @property
+    def error_count(self) -> int:
+        """当前筛选结果里的失败条数。"""
+        return self._error_count
+
+    def _update_error_chip(self) -> None:
+        """失败 chip 只在有失败时出现（无误报少一个常驻控件）；文案带计数。"""
+        n = sum(1 for r in self._records if r.is_error)
+        self._error_count = n
+        if n <= 0:
+            if self._error_only:
+                self._error_only = False
+                self._error_chip.blockSignals(True)
+                self._error_chip.setChecked(False)
+                self._error_chip.blockSignals(False)
+            self._error_chip.hide()
+        else:
+            self._error_chip.setText(f"失败 {n}")
+            self._error_chip.show()
+        self.errorCountChanged.emit(n)
 
     def _update_range_chip(self) -> None:
         rng = self._time_range
@@ -647,6 +796,9 @@ class TurnListWidget(QWidget):
         self._tail = []
         self._visible_map = []
         self._selected_rec_idx = None
+        self._turn_filter = 0
+        self._error_only = False
+        self._update_turn_chip()
         self._list.clear()
         self._update_empty()
 
@@ -662,6 +814,39 @@ class TurnListWidget(QWidget):
     @property
     def total_count(self) -> int:
         return len(self._records) + len(self._tail)
+
+    def first_visible_row(self) -> Optional[int]:
+        """第一条可见行的行号（搜索回车跳转用）；无结果返回 None。"""
+        return 0 if self._visible_map else None
+
+    def select_row(self, row: int) -> None:
+        """选中并滚动到指定行（越界静默忽略）。"""
+        if 0 <= row < self._list.count():
+            self._list.setCurrentRow(row)
+            self._list.scrollToItem(self._list.item(row), QListWidget.PositionAtCenter)
+
+    def toggle_error_only(self) -> None:
+        """切「只看失败」（底部统计栏点一下 → 切到只看失败；再点回全部）。"""
+        self._error_chip.setChecked(not self._error_only)
+
+    def turn_bounds(self, turn_no: int) -> Optional[Tuple[float, float]]:
+        """某一轮在**全量时间轴**上的 (t0, t1)；该轮无可用时间戳时返回 None。
+
+        时间线聚焦用：只看 Turn N 时把视口收窄到这一轮的实际时间跨度
+        （取整轮条带的最小起点 / 最大终点）。
+        """
+        if turn_no <= 0:
+            return None
+        starts: List[float] = []
+        ends: List[float] = []
+        for rec in self._records:
+            if rec.turn_no != turn_no or rec.start_ts <= 0:
+                continue
+            starts.append(rec.start_ts)
+            ends.append(max(rec.span_end_ts, rec.start_ts))
+        if not starts:
+            return None
+        return min(starts), max(ends)
 
     # ──────────────────── 主题 / 字体 ────────────────────
 
@@ -705,6 +890,16 @@ class TurnListWidget(QWidget):
             f"  font-family: '{pal.font_family}'; font-size: {max(10, fs - 2)}px; }}"
             f"QFrame#agentTraceFilterBar QPushButton#agentTraceRangeChip:hover {{"
             f"  background: {pal.q('accent', 44)}; }}"
+            # 失败 chip：危险色描边；未选中也可见（有失败时才显示）
+            f"QFrame#agentTraceFilterBar QPushButton#agentTraceErrorChip {{"
+            f"  color: {pal.q('danger')}; border: 1px solid {pal.q('danger', 150)};"
+            f"  background: {pal.q('danger', 20)}; padding: 0 8px;"
+            f"  font-family: '{pal.font_family}'; font-size: {max(10, fs - 2)}px; }}"
+            f"QFrame#agentTraceFilterBar QPushButton#agentTraceErrorChip:hover {{"
+            f"  background: {pal.q('danger', 44)}; }}"
+            f"QFrame#agentTraceFilterBar QPushButton#agentTraceErrorChip:checked {{"
+            f"  color: #FFFFFF; background: {pal.q('danger')};"
+            f"  border: 1px solid {pal.q('danger')}; }}"
         )
         self._count_label.setStyleSheet(
             f"color: {pal.q('text_muted')}; font-family: '{pal.font_family}'; font-size: {max(10, fs - 2)}px;"
@@ -732,6 +927,10 @@ class TurnListWidget(QWidget):
 
     def _match(self, rec: TraceRecord) -> bool:
         if self._filter_kind is not None and rec.kind != self._filter_kind:
+            return False
+        if self._turn_filter > 0 and rec.turn_no != self._turn_filter:
+            return False
+        if self._error_only and not rec.is_error:
             return False
         if self._time_range is not None:
             # 用「占用区间与选区是否重叠」判定：跨越选区边界的长条目也该留下
@@ -768,6 +967,7 @@ class TurnListWidget(QWidget):
             return idxs
 
     def _refilter(self) -> None:
+        self._update_error_chip()
         self._visible_map = self._sorted_indices()
         self._rebuild_items()
         self._restore_selection()
@@ -829,6 +1029,146 @@ class TurnListWidget(QWidget):
         rec_idx = self._visible_map[row]
         self._selected_rec_idx = rec_idx
         self.recordSelected.emit(rec_idx)
+
+    # ──────────────────── 右键菜单 / 键盘 ────────────────────
+
+    def _record_at_row(self, row: int) -> Optional[TraceRecord]:
+        """行号 → 记录（含 tail 尾部 in-flight 行）。"""
+        if 0 <= row < len(self._visible_map):
+            return self._records[self._visible_map[row]]
+        k = row - len(self._visible_map)
+        if 0 <= k < len(self._tail):
+            return self._tail[k]
+        return None
+
+    def _selected_record(self) -> Optional[TraceRecord]:
+        row = self._list.currentRow()
+        if row < 0:
+            return None
+        return self._record_at_row(row)
+
+    def record_at_row(self, row: int) -> Optional[TraceRecord]:
+        """公开版 ``_record_at_row``（卡片转发「从这里分支」时用）。"""
+        return self._record_at_row(row)
+
+    # 行首 ``T{n}`` 徽章的命中区（点击 = 只看该轮）。
+    # 几何由字体 + 轮次号确定性算出，与 _RowDelegate 绘制共用同一个函数 ——
+    # 不缓存绘制结果（paint 按可见行顺序走，缓存最后一次会张冠李戴）。
+    def _turn_badge_rect(self, row: int) -> Optional[QRect]:
+        if row < 0:
+            return None
+        rec = self._record_at_row(row)
+        item = self._list.item(row) if row < self._list.count() else None
+        if rec is None or item is None:
+            return None
+        row_rect = self._list.visualItemRect(item)
+        return _turn_badge_geometry(rec, row_rect.y(), row_rect.height(), _PAD_L, self._delegate.small_font())
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        """点行首的 ``T{n}`` 徽章 = 只看该轮（再点同一徽章取消）。"""
+        if event.button() == Qt.LeftButton and self._list.geometry().contains(event.pos()):
+            inner = self._list.viewport().mapFrom(self, event.pos())
+            item = self._list.itemAt(inner)
+            if item is not None:
+                badge = self._turn_badge_rect(self._list.row(item))
+                if badge is not None and badge.contains(inner):
+                    rec = self._record_at_row(self._list.row(item))
+                    if rec is not None and rec.turn_no > 0:
+                        self.set_turn_filter(0 if self._turn_filter == rec.turn_no else rec.turn_no)
+                        return
+        super().mousePressEvent(event)
+
+    def _apply_menu_style(self, menu) -> None:
+        """右键菜单走项目统一样式（系统 UI 字体 + 主题配色）。
+
+        ⚠️ QMenu 默认用 Qt 内置样式 + 默认字体：在这个全系统字体的面板里
+        一眼就是不搭的异类（旧版菜单字体小、间距挤、无圆角）。风格对齐
+        file-tree / history-manager 的菜单写法。
+        """
+        pal = self._pal
+        fs = max(10, self._base_px - 2)
+        menu.setStyleSheet(
+            f"QMenu {{ background: {pal.q('card_bg')}; border: 1px solid {pal.q('border')};"
+            f" border-radius: 8px; padding: 4px; }}"
+            f"QMenu::item {{ padding: 6px 22px 6px 12px; color: {pal.q('text')};"
+            f"  font-family: '{pal.font_family}'; font-size: {fs}px; }}"
+            f"QMenu::item:selected {{ background: {pal.q('accent', 46)}; border-radius: 4px; }}"
+            f"QMenu::item:disabled {{ color: {pal.q('text_muted')}; }}"
+            f"QMenu::separator {{ height: 1px; background: {pal.q('border')}; margin: 4px 8px; }}"
+            f"QMenu::icon {{ padding-left: 10px; }}"
+        )
+
+    def _on_context_menu(self, pos) -> None:
+        """右键：复制可读信息 / 从此处分支 / 跳该轮 / 只看失败。
+
+        以前要拿一条工具的入参或结果，只能进 Raw tab 手工划选 —— 追踪一条
+        失败调用时最常做的就是「把报错原文贴出来」。
+        """
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        row = self._list.row(item)
+        rec = self._record_at_row(row)
+        if rec is None:
+            return
+        from PyQt5.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        self._apply_menu_style(menu)
+        act_branch = menu.addAction(f"从这里分支（截至 Turn {rec.turn_no}）" if rec.turn_no > 0 else "从这里分支")
+        act_branch.setToolTip("以这条记录所属轮次为界，把之前的消息复制成新会话")
+        menu.addSeparator()
+        act_name = menu.addAction("复制名称")
+        act_summary = menu.addAction("复制摘要（名称 + 预览）")
+        act_args = menu.addAction("复制入参")
+        act_result = menu.addAction("复制结果")
+        act_raw = menu.addAction("复制完整内容")
+        menu.addSeparator()
+        act_turn = menu.addAction(f"只看 Turn {rec.turn_no}") if rec.turn_no > 0 else None
+        act_err = menu.addAction("只看失败") if rec.is_error else None
+
+        chosen = menu.exec_(self._list.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_branch:
+            self.branchRequested.emit(row)
+        elif chosen is act_name:
+            _copy((rec.meta.get("name") or rec.label) if rec.kind == EntryKind.TOOL else rec.label)
+        elif chosen is act_summary:
+            _copy(f"{rec.label}\t{rec.preview}" if rec.preview else rec.label)
+        elif chosen is act_args:
+            _copy(str(rec.meta.get("arguments") or ""))
+        elif chosen is act_result:
+            _copy(str(rec.meta.get("result") or ""))
+        elif chosen is act_raw:
+            _copy(rec.raw or "")
+        elif act_turn is not None and chosen is act_turn:
+            self.set_turn_filter(rec.turn_no)
+        elif act_err is not None and chosen is act_err:
+            self._error_only = True
+            self._error_chip.blockSignals(True)
+            self._error_chip.setChecked(True)
+            self._error_chip.blockSignals(False)
+            self._refilter()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """键盘导航：Up/Down 移动选中（默认就能）、Home/End 跳首尾、Esc 清筛选。"""
+        if event.key() == Qt.Key_Escape:
+            had_filter = bool(self._search_text or self._turn_filter > 0 or self._error_only)
+            self._search_text = ""
+            self._turn_filter = 0
+            self._error_only = False
+            self._error_chip.blockSignals(True)
+            self._error_chip.setChecked(False)
+            self._error_chip.blockSignals(False)
+            self._update_turn_chip()
+            if had_filter:
+                self._refilter()
+                self.turnFilterChanged.emit(0)
+            else:
+                self.cleared.emit()
+            return
+        super().keyPressEvent(event)
 
     def _update_empty(self) -> None:
         empty = self._list.count() == 0
