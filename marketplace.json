@@ -545,6 +545,30 @@
             }
         },
         {
+            "name": "ui-slots-demo",
+            "description": "UI 扩展点示例 — 演示独立弹窗（register_window）与消息卡片按钮/信息注入（footer_action / footer_stat），可作为新插件开发的参考模板",
+            "version": "0.1.0",
+            "author": "DriFox Contributors",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/ui-slots-demo",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
             "name": "welcome_changelog",
             "description": "欢迎卡片「更新」tab — 拉取 DriFox GitHub Releases 作为更新日志展示。禁用插件后该 tab 消失。",
             "version": "1.0.1",
