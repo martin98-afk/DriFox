@@ -48,16 +48,23 @@ class PluginWindow(FramelessWindow):
         self.titleBar.set_window_title(window_info.title or _DEFAULT_TITLE)
         self._apply_window_icon(window_info.icon_path)
         self.setWindowTitle(window_info.title or _DEFAULT_TITLE)
+        self.setObjectName("pluginWindowRoot")
+        self._apply_window_style()
 
         # 内容页：插件 widget_class 实例填满客户区（构造契约对齐浮动卡：
         # 优先 parent= 关键字，TypeError 回退位置参数；context provider 注入
         # 对齐 _show_floating_card 的 set_context_provider/set_context/_card_context）
         content = self._build_content(window_info.widget_class, window_info.context_provider)
         self._content = content
+        # ⚠️ FramelessWindow 的 titleBar 是浮动子控件（不参与布局，靠 resizeEvent
+        # 定位在顶部）——布局顶部必须留出标题栏高度，否则内容覆盖标题栏区域；
+        # 且 content 晚于 titleBar 创建、z-order 更高，必须再 raise_ 一次，
+        # 否则标题栏被盖住（无法拖动、点不到最小化/关闭）。
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(0, self.titleBar.height(), 0, 0)
         lay.setSpacing(0)
         lay.addWidget(content)
+        self.titleBar.raise_()
 
         # 几何
         self.resize(max(int(window_info.width), 1), max(int(window_info.height), 1))
@@ -74,6 +81,21 @@ class PluginWindow(FramelessWindow):
             pass
 
     # ── 内部 ──
+
+    def _apply_window_style(self) -> None:
+        """窗口整体背景（主题色；refresh_theme 复用）
+
+        FramelessWindow 默认不绘制背景，不设会透出桌面/黑底。
+        用 objectName 选择器限定本窗口，避免 QSS 级联影响插件内容页子控件。
+        """
+        try:
+            from app.utils.design_tokens import Colors
+
+            self.setStyleSheet(
+                f"#pluginWindowRoot {{ background: {Colors.CONTENT_BG}; }}"
+            )
+        except Exception:
+            pass
 
     def _apply_window_icon(self, icon_path: str) -> None:
         """标题栏图标：插件提供路径则用之，否则回退 DriFox 图标"""
@@ -134,6 +156,7 @@ class PluginWindow(FramelessWindow):
             self.titleBar.refresh_style()
         except Exception:
             pass
+        self._apply_window_style()
 
     def closeEvent(self, event) -> None:
         """手动关闭：从 registry 摘除实例（与 close_window 幂等）"""

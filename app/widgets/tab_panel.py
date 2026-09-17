@@ -882,6 +882,40 @@ def _make_position_icon(black_cells) -> QIcon:
     return icon
 
 
+_POPOUT_ICON_CACHE: list = []
+
+
+def _make_popout_icon() -> QIcon:
+    """生成「弹出」菜单图标：主窗口轮廓（浅块）+ 右上角弹出箭头（带缓存）
+
+    风格对齐 _make_position_icon：16x16 viewBox + 浅灰描边，深浅主题均可辨。
+    """
+    if _POPOUT_ICON_CACHE:
+        return _POPOUT_ICON_CACHE[0]
+    # 矩形=原窗口位置；折线箭头（↗）=脱离主窗口弹出
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+        f'<rect x="1" y="6.2" width="8.8" height="8.8" rx="1.6" '
+        f'fill="{_POSITION_WHITE}" stroke="{_POSITION_STROKE}" stroke-width="0.9"/>'
+        f'<path d="M8.2 8.2 L14.2 2.2" stroke="{_POSITION_BLACK}" stroke-width="1.5" '
+        'stroke-linecap="round"/>'
+        f'<path d="M9.8 2.2 H14.2 V6.6" fill="none" stroke="{_POSITION_BLACK}" '
+        'stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>'
+        "</svg>"
+    )
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.transparent)
+    renderer = QSvgRenderer(svg.encode("utf-8"))
+    painter = QPainter(pm)
+    try:
+        renderer.render(painter)
+    finally:
+        painter.end()
+    icon = QIcon(pm)
+    _POPOUT_ICON_CACHE.append(icon)
+    return icon
+
+
 class _RotatableArrow(QWidget):
     """可旋转 chevron 折叠指示箭头：0° 指向右(折叠)，90° 指向下(展开)。
 
@@ -1101,7 +1135,7 @@ class UIPluginRow(QFrame):
                     lambda checked=False, c=container: self.positionRequested.emit(self._card_id, c)
                 )
             menu.addSeparator()
-        menu.addAction("弹出为独立窗口").triggered.connect(
+        menu.addAction(_make_popout_icon(), "弹出").triggered.connect(
             lambda checked=False: self.popoutRequested.emit(self._card_id)
         )
         return menu
