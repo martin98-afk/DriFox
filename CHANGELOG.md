@@ -1,19 +1,39 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.6.2] - 2026-09-17 (重新发布 #2)
 
-### 🐛 问题修复 (Bug Fixes)
+自上一版本以来的变更 | 提交数：23 · 文件变更：58 · +7059/-1327 | 贡献者：dingma, mading
 
-- **崩溃记录被 first-chance 噪声污染、真崩溃反被漏报** (`app/core/crash_handler.py`, `tests/core/test_crash_handler.py`, `tests/debug/crash_filter_probe.py` 新增): 排查 `crash_20260915_202601_19296.log` 时发现三个叠加缺陷。① CPython 3.14 的 faulthandler 在 Windows 注册 VEH，无差别记录所有 SEH 异常：COM 的 `0x8001010D`（`RPC_E_CANTCALLOUT_ININPUTSYNCCALL`，Qt 与 Chromium 双消息循环共处主线程时高发）、调试断点 `0x80000003` 等上层能消化、进程照常存活的 first-chance 异常都被当作崩溃现场写进 `crash_*.log`，实测单份日志最多堆 13 段。② 原 `_install_minidump_filter` 用 `ctypes.WINFUNCTYPE` 把 Python 函数挂成 `SetUnhandledExceptionFilter` 回调，回调里跑 `strftime` / `Path` / `CreateFileW` / `MiniDumpWriteDump`；`crash/dumps/mini_*.dmp` 清一色 0 字节即其产物，且 WER 崩溃签名自 09-15 起由 `Qt5Core.dll` 变为 `python314.dll` + `c000041d`（`STATUS_FATAL_APP_EXIT`，含义是异常处理回调自身崩溃），说明这条链会把噪声升级成真崩溃 —— 已整体删除。③ `check_pending_crashes` 判据为「文件非空且无 clean-exit 标记」，而 CPython 会把部分原生 access violation 转成 Python `OSError` 抛出、解释器随后走正常 shutdown，`atexit` 照样补得上标记，真崩溃被自己的标记洗成「正常退出」。修复：新增 `_install_seh_classifier`，在 `faulthandler.enable()` 之后以 `first=1` 注册分流 VEH（因而先于 faulthandler 自己的 handler 被调用），按噪声码黑名单二次调用 `faulthandler.enable(file=...)` 把非致命现场改道 `anomaly_*.log`（实测二次 enable 幂等，不会重复注册 handler）；崩溃判据改为「含 `Windows fatal exception` 段」为唯一证据；`anomaly_*.log` 只留最近 20 份、空文件在退出时回收。新增 8 模式子进程探针，端到端断言三种场景的落点与「下次启动报告数」。
+### ✨ 新功能 (New Features)
 
-- **opencode 套餐用量圆环恒不显示** (`plugins/system-providers/providers/opencode.py`): 排查「用量查不到」时发现根因与登录凭据无关，接口正常返回数据（实测 weekly 44.9% / monthly 72.5%），坏在 `_parse_js` 的正则。opencode 服务端已往用量对象里追加 `usage` / `limit` 两个字段，且 `usagePercent` 从整数变成小数（`44.9`），而旧正则写死 `usagePercent:(\d+)\}` —— `(\d+)` 吃不下小数、`\}` 要求该字段后紧跟右括号，三档全部匹配失败，fetcher 静默 `return None`，圆环永久隐藏。修复：改为按花括号深度扫描取出整块（`_extract_block`），块内独立搜 `resetInSec` / `usagePercent`，字段顺序与新增字段均不再敏感；percent 改收 `float`（UI 侧 `int()` 取整，行为不变）。同时补三条失败归因，替换原先一律吞成 None 的做法：HTTP 500 判为 Server ID 随前端构建失效、RSC payload 含 `auth/authorize` 判为 Cookie 未认证或过期、解析不到 `usagePercent` 判为响应结构变更，均以 `OpenCodeUsageError` 抛出由 `UsageService` 写 warning 日志；配置项缺失仍保持静默返回 None 不打扰。另澄清一处误判：Chrome DevTools 显示 `Provisional headers are shown` 时不会列出 Cookie 头，据此判断「接口已免 cookie」不成立，实测去 cookie 重放返回 302 跳 `/auth/authorize`，且未登录访问 workspace 页面直接落到 GitHub 授权页。`system-providers` 插件版本 1.1.0 → 1.1.1，`marketplace.json` 由 `tools/generate_marketplace.py` 重生成同步。
+- **消息身份系统** (`app/widgets/modules/identity_header.py`, `app/core/message_identity.py`, `app/core/message_content.py`, `tests/core/test_message_identity.py`, `tests/widgets/test_identity_header.py` 新增): 消息卡头部新增 `IdentityHeader` 显示身份头像 + 名称，支持源消息（`source_message`）引用关系；时间戳走 `FontConfig.RESOLVE` 渲染，加密模式同明文模式字体；用户头像 `Path` 对象直接传入，撤销恢复预取 `_extract_undo_input_meta` 同步落 `_raw_input_text` / `_input_attachments`，免 `card._message_index` 过期查空。`ea6973b0`, `e8e14400`, `f8ceaf41`, `b2ee6076`
 
-## [Unreleased]
+- **消息卡渲染优化与头像高质量降采样** (`app/widgets/message_card.py`, `app/utils/ui_helpers.py`, `app/widgets/modules/identity_header.py`): 移除彩虹渐变插值与冗余颜色分配降 paint cost；头像先放大再用 Pillow `LANCZOS` 高质量降采样至目标尺寸，体积上调增强细节保留；图片附件预览上移到底部按钮行之上；MessageCard 会话分支功能落地。`03a6428e`, `914b778e`, `cc1cab26`, `0845651d`, `a3e87538`, `29688baa`
 
-### 🐛 问题修复 (Bug Fixes)
+- **消息卡页脚统计与吞吐/速度指标** (`app/widgets/message_card.py`, `app/plugins/registries/ui_plugin_registry.py`, `plugins/agent_trace/ui/__init__.py`, `app/widgets/cards/settings/secret_mode_card.py`, `tests/widgets/test_message_card_live_gen_s.py`, `tests/widgets/test_message_card_meta_deleted.py`, `tests/widgets/test_secret_mode_card_theme_refresh.py`, `tests/plugins/test_agent_trace_footer_tps.py` 新增): 新增 `FooterStatInfo` / `FooterActionInfo` 数据契约，UIPluginRegistry 注册表透出页脚统计与动作；`MessageCard` 页脚动态显示吞吐/速度/总用时三档胶囊，`live_gen_s` 仅累加 0~2s 内的相邻 chunk 间隔（旧墙钟会把 10s 工具等待吞掉算入分母）；流式期吞吐走墙钟而非累加值；`SecretModeSettingCard` 主题切换广播 `refresh_style`；`agent_trace` 插件落地会话内/全会话两档平均吞吐；首问回答右侧推荐按钮按下不再走同步阻塞。`08d7c368`, `6ba7ff0e`, `22b098cd`, `42e30ec9`
 
-- **崩溃记录被 first-chance 噪声污染、真崩溃反被漏报** (`app/core/crash_handler.py`, `tests/core/test_crash_handler.py`, `tests/debug/crash_filter_probe.py` 新增): 排查 `crash_20260915_202601_19296.log` 时发现三个叠加缺陷。① CPython 3.14 的 faulthandler 在 Windows 注册 VEH，无差别记录所有 SEH 异常：COM 的 `0x8001010D`（`RPC_E_CANTCALLOUT_ININPUTSYNCCALL`，Qt 与 Chromium 双消息循环共处主线程时高发）、调试断点 `0x80000003` 等上层能消化、进程照常存活的 first-chance 异常都被当作崩溃现场写进 `crash_*.log`，实测单份日志最多堆 13 段。② 原 `_install_minidump_filter` 用 `ctypes.WINFUNCTYPE` 把 Python 函数挂成 `SetUnhandledExceptionFilter` 回调，回调里跑 `strftime` / `Path` / `CreateFileW` / `MiniDumpWriteDump`；`crash/dumps/mini_*.dmp` 清一色 0 字节即其产物，且 WER 崩溃签名自 09-15 起由 `Qt5Core.dll` 变为 `python314.dll` + `c000041d`（`STATUS_FATAL_APP_EXIT`，含义是异常处理回调自身崩溃），说明这条链会把噪声升级成真崩溃 —— 已整体删除。③ `check_pending_crashes` 判据为「文件非空且无 clean-exit 标记」，而 CPython 会把部分原生 access violation 转成 Python `OSError` 抛出、解释器随后走正常 shutdown，`atexit` 照样补得上标记，真崩溃被自己的标记洗成「正常退出」。修复：新增 `_install_seh_classifier`，在 `faulthandler.enable()` 之后以 `first=1` 注册分流 VEH（因而先于 faulthandler 自己的 handler 被调用），按噪声码黑名单二次调用 `faulthandler.enable(file=...)` 把非致命现场改道 `anomaly_*.log`（实测二次 enable 幂等，不会重复注册 handler）；崩溃判据改为「含 `Windows fatal exception` 段」为唯一证据；`anomaly_*.log` 只留最近 20 份、空文件在退出时回收。新增 8 模式子进程探针，端到端断言三种场景的落点与「下次启动报告数」。
+- **sender 销毁竞态下的延迟 emit 反 AV 防护** (`app/widgets/message_card.py`, `tests/widgets/test_js_action_deferred.py` 新增): JS 动作触发时若 sender 已销毁仍直接 `emit` 会撞 `QtCore.pyd+0x14765A` `call qword ptr [rdx]`（崩族⑤根因）。新增延迟 emit 队列收集待投递信号，sender 存活校验后批量派发；新增 6 用例覆盖 sender 在 push 前/中/后析构三种时序。`2499baff`
+
+- **崩溃通知启动期开关** (`app/core/crash_handler.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/core/test_crash_handler.py`): 新增「崩溃通知」设置项（默认开启），下次启动时 InfoBar 弹窗可勾选「后续不再显示」落配置，下次启动不再打扰。`6c4fabf1`
+
+- **底部工具栏布局收紧** (`app/widgets/modules/bottom_toolbar_module.py`): 工具权限按钮 `contentsMargins (6,0,6,0)→(3,0,3,0)`、工具栏胶囊 `(6,2,6,2)→(3,1,3,1)`、间距 `4→2`，为推荐问题按钮与右侧胶囊让出横向空间。`366bdcd7`
+
+- **欢迎卡热更新改进 + 旧 git worktree 记录自清** (`app/main_widget.py`, `app/core/chat_session.py`, `tests/widgets/test_welcome_card_tab_bar.py`, `tests/core/test_stale_worktree_prune.py` 新增, `tests/plugins/test_input_button_hot_reload.py` 新增): 欢迎卡热刷新时正确重建 tab；worker / engine 工具间透传 `_raw_input_text` / `_input_attachments`，mention/路径组装以空格分隔，normalize 白名单补 `[`；输入按钮热重载回归；历史 git worktree 记录按 mtime 过期自清，避免堆积。`1ba51275`, `934204e9`
+
+### 🔧 其他 (Chores & Build)
+
+- **软件界面截图更新** (`images/软件界面.png`): 替换为最新界面截图。`550b5c41`
+
+- **版本号升级到 v0.6.2** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.6.1` → `0.6.2`。
+
+### ✨ 新功能 (New Features) — 重新发布增量
+
+- **agent_trace 三态宽度模式 + 交互增强** (`app/widgets/message_card.py`, `plugins/agent_trace/README.md`, `plugins/agent_trace/ui/detail_panel.py`, `plugins/agent_trace/ui/timeline_panel.py`, `plugins/agent_trace/ui/trace_card.py`, `plugins/agent_trace/ui/trace_collector.py`, `plugins/agent_trace/ui/trace_models.py`, `plugins/agent_trace/ui/turn_list_widget.py`, `uv.lock`): 时间线新增 Token 宽度模式（条带宽度 ∝ token 占比），与 Duration 互斥。`01441e84`
+
+- **消息级分支落地 + agent_trace 占位增强** (`app/core/message_content.py`, `app/main_widget.py`, `plugins/agent_trace/ui/trace_card.py`, `plugins/agent_trace/ui/trace_collector.py`, `plugins/agent_trace/ui/turn_list_widget.py`): 消息级分支实现，agent_trace 增强占位处理。`fd2449c5`
+
+- **右键菜单分支能力增强** (`plugins/agent_trace/README.md`): 右键菜单分支能力完善。`69765f10`
 
 ## [v0.6.1] - 2026-09-15
 

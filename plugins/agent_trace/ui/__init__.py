@@ -21,8 +21,9 @@
 from __future__ import annotations
 
 import sys
+from collections import OrderedDict
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 from loguru import logger
 
@@ -121,6 +122,186 @@ def _on_trace_tab_clicked() -> None:
         logger.error(f"[agent_trace] toggle_floating_card 失败: {e}")
 
 
+def _footer_avg_throughput(ctx) -> dict | None:
+    """页脚信息项回调：流式期间显示本条回复的实时吞吐量，回合落定后显示会话平均。
+
+    口径对齐 detail_panel 统计页：生成秒 = 总时长 − 首 token 延迟；
+    吞吐量 = 输出 token ÷ 生成秒。
+
+    - 流式期间：token 用 ``estimate_tokens_text``（与轨迹卡 Tokens 列同源的
+      tiktoken/cl100k 估算，中文约 1.2 token/字，不是 chars÷4），时间取宿主给的
+      ``live_gen_s``（**累计出字时间**，已排除工具执行 / 长等待空档）→ 当前这条
+      流的最近一次采样值；起步 0.3s 内不显示，避免首字抖动。
+    - 回合落定：本轮真实 usage 写入会话累加表，输出 Σ输出 token ÷ Σ生成秒。
+      累加表按 (window_id, session_id) 分组、按 (round_index, message_index)
+      幂等写入 → 重复刷新不重复计数，且**不等** collector 投影，落定即出
+      均值（旧版要等投影，靠 1s/2.5s 补刷拉回，观感即"延迟高"）。
+    - 历史会话加载（本进程没经历过落定事件）：回退 collector 投影全量聚合。
+    """
+    try:
+        from .trace_models import estimate_tokens_text
+
+        if bool(ctx.get("streaming")):
+            text = ctx.get("live_text") or ""
+            gen_s = float(ctx.get("live_gen_s") or 0.0)
+            if not text or gen_s < 0.3:
+                return None
+            tokens = estimate_tokens_text(text)
+            if tokens <= 0:
+                return None
+            tps = tokens / gen_s
+            return {
+                "text": f"{_fmt_tps(tps)} tok/s",
+                "color": _tps_color(tps),
+                "tooltip": "当前这条回复的实时吞吐量（估算 token ÷ 累计出字秒数，已排除工具执行空档）",
+            }
+
+        key = _session_key(ctx)
+        _record_round(key, ctx)
+        stats = _round_bucket(key, create=False) or {}
+        total_tokens = sum(t for t, _ in stats.values())
+        total_gen_s = sum(g for _, g in stats.values())
+        rounds = len(stats)
+        if total_gen_s <= 0 or total_tokens <= 0:
+            # 历史会话加载：本进程没走过落定分支 → 从 collector 投影全量聚合
+            agg = _aggregate_records(ctx)
+            if agg is None:
+                return None
+            total_tokens, total_gen_s, rounds = agg
+        tps = total_tokens / total_gen_s
+        return {
+            "text": f"{_fmt_tps(tps)} tok/s",
+            "color": _tps_color(tps),
+            "tooltip": f"本会话 {rounds} 轮平均吞吐量（Σ输出 token ÷ Σ生成秒）",
+        }
+    except Exception as e:  # noqa: BLE001 — 页脚回调异常不能影响消息渲染
+        logger.debug(f"[agent_trace] footer 吞吐量计算失败: {e}")
+        return None
+
+
+# 会话级轮次累加表：sess_key -> {(round_index, message_index): (tokens, gen_s)}
+# 只存聚合值不存原文；上限 8 个会话，LRU 淘汰最久未用的。
+_ROUND_STATS: "OrderedDict[str, Dict[tuple, Tuple[int, float]]]" = OrderedDict()
+_ROUND_STATS_MAX = 8
+
+
+def _session_key(ctx) -> str:
+    """会话维度键 = window_id + collector 的 active session_id（切会话自动隔离）。"""
+    wid = str(ctx.get("window_id") or "")
+    sid = ""
+    try:
+        from .trace_collector import TraceCollectorHub
+
+        collector = _footer_hub(TraceCollectorHub).collector_for(ctx.get("main_widget"))
+        sid = str(getattr(collector, "_active_session_id", "") or "")
+    except Exception:  # noqa: BLE001 — 无 backend / 未初始化时退化成 window_id 级
+        sid = ""
+    return f"{wid}::{sid}"
+
+
+def _round_bucket(key: str, create: bool = True) -> "Dict[tuple, Tuple[int, float]] | None":
+    """取会话累加桶；create=False 时不存在则返回 None（不污染 LRU）。"""
+    bucket = _ROUND_STATS.get(key)
+    if bucket is None:
+        if not create:
+            return None
+        bucket = {}
+        _ROUND_STATS[key] = bucket
+    else:
+        _ROUND_STATS.move_to_end(key)
+    while len(_ROUND_STATS) > _ROUND_STATS_MAX:
+        _ROUND_STATS.popitem(last=False)
+    return bucket
+
+
+def _record_round(key: str, ctx) -> None:
+    """把本轮真实 usage 写入累加表（同轮重复调用幂等，靠 round/message 索引去重）。"""
+    tu = ctx.get("token_usage") or {}
+    out = tu.get("output")
+    el = ctx.get("elapsed")
+    if not isinstance(out, (int, float)) or out <= 0:
+        return
+    if not isinstance(el, (int, float)) or el <= 0:
+        return
+    ttft_ms = tu.get("ttft_ms") or 0
+    gen_s = float(el) - float(ttft_ms) / 1000.0
+    # 生成段 <200ms 的轮次不参与（首字延迟吃掉几乎全部时长时 tps 虚高）
+    if gen_s <= 0.2:
+        return
+    rk = (ctx.get("round_index"), ctx.get("message_index"))
+    _round_bucket(key)[rk] = (int(out), float(gen_s))
+
+
+def _aggregate_records(ctx):
+    """历史会话兜底：从 collector 投影聚合 (Σ输出 token, Σ生成秒, 轮数)。"""
+    from .trace_collector import TraceCollectorHub
+    from .trace_models import EntryKind
+
+    mw = ctx.get("main_widget")
+    if mw is None:
+        return None
+    collector = _footer_hub(TraceCollectorHub).collector_for(mw)
+    if collector is None:
+        return None
+    total_tokens = 0
+    total_gen_s = 0.0
+    rounds = 0
+    for rec in collector.records:
+        if rec.kind != EntryKind.ASSISTANT or rec.is_pending:
+            continue
+        tokens = rec.tokens
+        if tokens <= 0:
+            continue
+        total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
+        ttft = rec.meta.get("ttft_ms")
+        ttft_ms = int(ttft) if isinstance(ttft, (int, float)) and ttft > 0 else 0
+        gen_ms = total_ms - ttft_ms
+        if gen_ms <= 200:
+            continue
+        total_tokens += tokens
+        total_gen_s += gen_ms / 1000.0
+        rounds += 1
+    if total_gen_s <= 0 or total_tokens <= 0:
+        return None
+    return total_tokens, total_gen_s, rounds
+
+
+def _fmt_tps(tps: float) -> str:
+    """吞吐量文本格式化：≥1000 显示 K 位，其余取整。"""
+    return f"{tps / 1000:.1f}K" if tps >= 1000 else str(round(tps))
+
+
+# 页脚吞吐量配色阈值（tok/s）：慢 = 红，一般 = 黄，其余 = 绿
+_TPS_SLOW = 30
+_TPS_OK = 60
+_COLOR_SLOW = "#f85149"
+_COLOR_OK = "#d29922"
+_COLOR_FAST = "#2ea043"
+
+
+def _tps_color(tps: float) -> str:
+    """吞吐量配色：<30 红 / <60 黄 / 其余绿（红绿语义对齐差异徽章的 +/-）。"""
+    if tps < _TPS_SLOW:
+        return _COLOR_SLOW
+    if tps < _TPS_OK:
+        return _COLOR_OK
+    return _COLOR_FAST
+
+
+# 页脚平均吞吐量专用 hub（与轨迹卡实例解耦的模块级单例；
+# 轨迹卡未打开也能对任意窗口惰性建 collector 并重投影落盘消息）
+_FOOTER_HUB = None
+
+
+def _footer_hub(hub_cls):
+    global _FOOTER_HUB
+    if _FOOTER_HUB is None:
+        from PyQt5.QtCore import QCoreApplication
+
+        _FOOTER_HUB = hub_cls(QCoreApplication.instance())
+    return _FOOTER_HUB
+
+
 def register_ui(registry) -> None:
     """注册 agent_trace 的 UI 组件。"""
     # 热重载兼容：清理旧子模块缓存（避免 Python 用旧 sys.modules 引用）
@@ -168,4 +349,16 @@ def register_ui(registry) -> None:
         priority=0,
     )
 
-    logger.info("[agent_trace] UI 组件已注册：titlebar_tab(agent_trace) + floating_card(agent_trace/full)")
+    # ── 消息卡片页脚信息项：会话平均吞吐量（流式期间跟随刷新）──
+    registry.register_footer_stat(
+        plugin_name="agent_trace",
+        stat_id="agent_trace:avg_tps",
+        provider=_footer_avg_throughput,
+        priority=0,
+        metadata={"label": "会话平均吞吐量"},
+    )
+
+    logger.info(
+        "[agent_trace] UI 组件已注册：titlebar_tab(agent_trace) + floating_card(agent_trace/full)"
+        " + footer_stat(avg_tps)"
+    )

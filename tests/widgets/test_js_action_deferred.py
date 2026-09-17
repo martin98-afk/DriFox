@@ -99,3 +99,27 @@ def test_deferred_emit_survives_sync_stage(qapp):
 
     _pump_once()
     assert viewer.calls == [("t", "rec")], f"延迟派发丢失或重复: {viewer.calls}"
+
+
+def test_deferred_emit_dropped_when_sender_destroyed(qapp, capsys):
+    """族⑤-2 回归：延迟窗口内 sender 被销毁 → 回调不得执行。
+
+    实机场景：点击追问后主线程卡顿期间卡片被回收 / 会话被切换，page 已析构；
+    旧实现 ``QTimer.singleShot(0, fn)`` 的回调照旧执行 → 对已释放的 sender 调
+    emit → ACCESS_VIOLATION（2026-09-16 22:46:30 例，崩在
+    ``Qt5Core!QObject::signalsBlocked`` +0x4）。
+
+    这里用 ``sip.delete`` 显式销毁 sender 模拟该窗口：回调一旦执行就会抛
+    RuntimeError，PyQt 会把它打到 stderr —— 据此断言「没有执行」。
+    """
+    from PyQt5 import sip
+
+    viewer = _StubViewer()
+    tag = urllib.parse.quote("追问A")
+
+    _run_console(viewer, f"pywebview_action:context|||{tag}|||ask")
+    sip.delete(viewer)  # 延迟窗口内销毁 sender
+    _pump_once()
+
+    err = capsys.readouterr().err
+    assert "has been deleted" not in err, f"sender 已销毁但回调仍执行（崩溃窗口复现）: {err[:300]}"

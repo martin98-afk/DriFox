@@ -469,6 +469,102 @@ def truncate(text: str, max_chars: int = 120) -> str:
     return head[: max_chars - 1] + "…"
 
 
+# 主参数优先级：工具名 → 依次尝试的键。取第一个命中的键作为行内摘要。
+# 目的：列表 Name 列现在直接甩整段 JSON（``bash {"command": "cd /d ...``），
+# 关键信息（命令 / 文件路径 / 检索式）被参数名和引号挤到右边看不见。
+_TOOL_ARG_KEYS: Dict[str, tuple] = {
+    "bash": ("command", "cmd"),
+    "powershell": ("command", "script", "cmd"),
+    "read": ("path", "file_path"),
+    "write": ("path", "file_path"),
+    "edit": ("path", "file_path"),
+    "multi_edit": ("path", "file_path"),
+    "glob": ("pattern",),
+    "grep": ("pattern",),
+    "ls": ("path",),
+    "list": ("path",),
+    "task": ("description", "prompt"),
+    "sh": ("command", "cmd"),
+    "webfetch": ("url",),
+    "websearch": ("query",),
+    "skill": ("name",),
+}
+# 任何一个工具都优先试这几个「一看就懂」的键
+_TOOL_ARG_FALLBACK: tuple = ("command", "path", "file_path", "pattern", "url", "query", "name", "description")
+
+
+def tool_arg_summary(name: str, arguments: Any, max_chars: int = 96) -> str:
+    """从工具入参里挑出**可读主参数**，供列表 Name 列显示。
+
+    显示 ``bash cd /d D:/work/DriFox && wc -l`` 比 ``bash {"command": "cd /d ...``
+    可读得多：后者把工具名和参数名（固定字面量）当成了信息，真正要看的命令 /
+    路径 / 检索式被挤到截断线之外。
+
+    入参不是 JSON / 解析失败 / 没有命中已知键 → 返回空串（调用方回退原文本）。
+    """
+    import json as _json
+
+    obj: Any = arguments
+    if isinstance(obj, str):
+        text = obj.strip()
+        if not text:
+            return ""
+        try:
+            obj = _json.loads(text)
+        except Exception:
+            return ""
+    if not isinstance(obj, dict):
+        return ""
+
+    keys = _TOOL_ARG_KEYS.get(str(name or "").strip().lower(), ()) + _TOOL_ARG_FALLBACK
+    for key in keys:
+        if key not in obj:
+            continue
+        val = obj.get(key)
+        if val is None or val == "" or isinstance(val, (dict, list)):
+            continue
+        text = str(val).replace("\n", " ").replace("\r", " ").strip()
+        if text:
+            return truncate(text + _range_suffix(obj) + _scope_suffix(name, key, obj), max_chars)
+    return ""
+
+
+def _scope_suffix(name: str, key: str, obj: Dict[str, Any]) -> str:
+    """搜索类工具（grep / glob）：在检索式后补搜索范围。
+
+    ``grep _eq_order`` 只说了一半，``grep _eq_order in plugins/agent_trace``
+    才完整 —— 同一关键词在不同目录下的结果完全不同。
+    """
+    if key != "pattern":
+        return ""
+    scope = obj.get("path") or obj.get("include") or ""
+    scope = str(scope).replace("\n", " ").strip()
+    return f" in {scope}" if scope else ""
+
+
+def _range_suffix(obj: Dict[str, Any]) -> str:
+    """读文件类工具 → 在路径后补 ``:420-470``（行区间是这部分调用的关键信息）。
+
+    只有拿到明确区间才补：``startline=1`` 且无 ``endline``（默认整读）不补，
+    否则每行都拖一串 ``:1-500`` 噪音。
+    """
+    start = obj.get("startline")
+    end = obj.get("endline")
+    try:
+        s = int(start) if start is not None else None
+    except Exception:
+        s = None
+    try:
+        e = int(end) if end is not None else None
+    except Exception:
+        e = None
+    if s in (None, 1) and e is None:
+        return ""
+    if s is None:
+        s = 1
+    return f":{s}-{e}" if e is not None else f":{s}+"
+
+
 def content_to_text(content: Any) -> str:
     """把 message.content（str | list[dict] | 其它）统一转成可读文本。
 

@@ -10,7 +10,7 @@
 
 | 文件 | 对应瓶颈 | 测试要点 |
 |---|---|---|
-| `test_message_card_paint_throttle.py` | Top① 消息卡片动画高频绘制 | 动画定时器 50ms；paintEvent 已缓存渐变 `self._grad_*` / 裁剪路径 `self._clip_*`；每帧仍有颜色分配（build_gradient >=3、lerp_color 存在） |
+| `test_message_card_paint_throttle.py` | Top① 消息卡片动画高频绘制 | 动画定时器 50ms；paintEvent 已缓存渐变 `self._grad_*` / 裁剪路径 `self._clip_*`；每帧颜色分配已收敛（断言 `build_gradient` / `lerp_color` 彩虹逐 stop 插值不再回归） |
 | `test_lazy_batch_webengineview.py` | Top② WebEngineView 一次性实例化 | 懒加载分批 `_process_next_lazy_batch` + `ensure_rendered()` + `singleShot(80,...)`；Chromium 实例上限 `_max_rendered_cards` + LRU 回收 `_recycle_lru_batches` |
 | `test_share_card_upload_nonblocking.py` | Top③ 分享上传阻塞主线程 | 上传入口 `_on_upload` + `uploader.upload_file(`；后台线程 `_ShareUploadThread(QThread)` + 按钮禁用 / "上传中"；底层 `requests.post(..., timeout=30)` |
 | `test_startup_init_lazy.py` | Top④ 启动同步初始化链 | `self.backend.initialize(` -> `self._init_plugin_system()` 同步直调（前 6 行无 `singleShot`）-> `self._agent_manager.reload_agents()` 同步触发 |

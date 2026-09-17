@@ -734,6 +734,17 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if isinstance(x_idx, int) and not isinstance(x_idx, bool):
         normalized["_x_idx"] = x_idx
 
+    # 消息身份快照（发送者头像 + 名称）。与 `_x_idx` 同理：白名单外字段会被
+    # 本函数剥掉，而身份必须随消息落库并在历史加载后原样回显（切助手不改写旧消息）。
+    # 不进 API 请求：serializer 显式构造 role/content/tool_calls 等字段，不整体拷贝。
+    identity = message.get("_identity")
+    if isinstance(identity, dict):
+        clean_identity = {
+            str(k): str(v) for k, v in identity.items() if isinstance(k, str) and isinstance(v, str) and v
+        }
+        if clean_identity.get("name"):
+            normalized["_identity"] = clean_identity
+
     if role == "assistant":
         content = content_to_text(message.get("content", ""))
         if content:
@@ -828,6 +839,14 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         atts = message.get("_image_attachments")
         if isinstance(atts, list) and atts:
             normalized["_image_attachments"] = [str(p) for p in atts if p]
+        # 原始输入元数据（全量附件 + 占位符正文）：「撤销到这里」保真回填依赖，
+        # 同样必须显式保留
+        input_atts = message.get("_input_attachments")
+        if isinstance(input_atts, list) and input_atts:
+            normalized["_input_attachments"] = [str(p) for p in input_atts if p]
+        raw_input = message.get("_raw_input_text")
+        if isinstance(raw_input, str) and raw_input:
+            normalized["_raw_input_text"] = raw_input
     else:
         normalized["content"] = content_to_text(raw_content)
 
@@ -899,6 +918,80 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n))
 
     return normalized
+
+
+def truncate_messages_at(messages: List[Dict[str, Any]], index: int) -> List[Dict[str, Any]]:
+    """把消息列表截断到 ``index``（**含**该条），并修好工具调用配对。
+
+    用于「从这里分支」的消息级截断。OpenAI 协议要求每个 ``tool`` 消息前面必须有
+    声明它的 ``assistant(tool_calls[i].id)``，且每个已声明的 tool_call 都应有
+    对应结果；否则后续请求被 API 拒绝（"tool_call_id not found" /
+    "missing tool response"）。因此单纯切片不够，必须补齐：
+
+    1. **补齐缺失的调用方**：``index`` 落在某条 ``tool`` 上，而声明它的
+       assistant 位于更前面（正常情形，天然包含）—— 无需处理；但若该 tool 的
+       ``tool_call_id`` 在截断结果里找不到声明者（历史数据异常 / hook 注入的
+       孤立结果），则该 tool 一并丢弃。
+    2. **剥掉悬空的声明**：``index`` 落在某条 ``assistant`` 上，而它的
+       ``tool_calls`` 结果落在截断点之后 → 从该条 assistant 里移除这些还没有
+       结果的 tool_call；全部被移除且正文为空时，整条丢弃（避免空 assistant）。
+       保留 ``multiple_edit`` / 并行工具的**已有结果的那部分**调用，其余剥掉。
+
+    Args:
+        messages: 已 ``consolidate_messages`` 的规范消息（角色 / tool_calls 结构完整）。
+        index: 截断点（含）。越界自动夹到 ``[0, len-1]``。
+
+    Returns:
+        截断并修复配对后的新列表（元素为浅引用，调用方需 deepcopy）。
+    """
+    if not messages:
+        return []
+    index = max(0, min(int(index), len(messages) - 1))
+    cut = messages[: index + 1]
+
+    # 截断结果里已有的 tool_call 声明 / 结果
+    declared: Dict[str, int] = {}  # tool_call_id → 声明它的 assistant 在 cut 中的下标
+    answered = set()  # tool_call_id → 已有结果
+    for i, msg in enumerate(cut):
+        role = msg.get("role")
+        if role == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                if isinstance(tc, dict) and tc.get("id"):
+                    declared[str(tc["id"])] = i
+        elif role == "tool":
+            tid = str(msg.get("tool_call_id") or "")
+            if tid:
+                answered.add(tid)
+
+    # ① 丢弃找不到声明者的孤立 tool 消息
+    kept: List[Dict[str, Any]] = []
+    for msg in cut:
+        if msg.get("role") == "tool":
+            tid = str(msg.get("tool_call_id") or "")
+            if tid and tid not in declared:
+                continue
+        kept.append(msg)
+
+    # ② 剥掉悬空声明（结果在截断点之后）→ 按 id 重建 tool_calls
+    out: List[Dict[str, Any]] = []
+    for msg in kept:
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            out.append(msg)
+            continue
+        kept_calls = [tc for tc in msg["tool_calls"] if isinstance(tc, dict) and str(tc.get("id") or "") in answered]
+        if len(kept_calls) == len(msg["tool_calls"]):
+            out.append(msg)  # 无悬空，原样保留（不做无谓拷贝）
+            continue
+        trimmed = dict(msg)
+        if kept_calls:
+            trimmed["tool_calls"] = kept_calls
+        else:
+            trimmed.pop("tool_calls", None)
+        # 全剥光且没有正文 / 思维链 → 整条丢弃（空 assistant 会污染上下文）
+        if not trimmed.get("tool_calls") and not trimmed.get("content") and not trimmed.get("reasoning_content"):
+            continue
+        out.append(trimmed)
+    return out
 
 
 def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int]]:

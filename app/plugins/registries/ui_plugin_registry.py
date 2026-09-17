@@ -321,6 +321,29 @@ class WelcomeActionInfo:
 
 
 @dataclass(frozen=True)
+class IdentityProviderInfo:
+    """消息身份提供者注册信息（name / avatar 两条独立通道）
+
+    主程序渲染每条消息时按优先级询问插件：「这条消息是谁发的、用什么头像」。
+    两条通道各自独立解析，插件可只提供其中之一（另一个回落下一优先级/内置默认）。
+
+    Attributes:
+        plugin_name: 所属插件名
+        provider_id: 提供者唯一标识
+        resolve_func: 解析回调 ``(ctx: dict) -> str``，返回空串表示未提供；
+                      ctx 含 role / session_id / team_agent / window_id
+        priority: 优先级（高者先问）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    provider_id: str
+    resolve_func: Callable[[Dict[str, Any]], str]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class MentionProviderInfo:
     """输入框 @ 提及条目提供者注册信息
 
@@ -525,6 +548,54 @@ class InputButtonInfo:
 
 
 @dataclass(frozen=True)
+class FooterStatInfo:
+    """消息卡片页脚左区信息项注册信息（吞吐量等统计数据由插件注入）
+
+    Attributes:
+        plugin_name: 所属插件名
+        stat_id: 信息项唯一 ID
+        provider: 取值回调，签名 (context: dict) -> Optional[dict]。
+            context 含 window_id / main_widget / role / model_name / elapsed /
+            token_usage / streaming / live_text / live_gen_s 等（见
+            MessageCard._footer_stat_context）；返回 None 表示本条消息不显示，
+            返回 {"text": str, "color": str(可选), "tooltip": str(可选)} 表示显示。
+        priority: 优先级（同 stat_id 时高者覆盖低者；显示顺序同值按注册序）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    stat_id: str
+    provider: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FooterActionInfo:
+    """消息卡片页脚右区 hover 按钮组注册信息（与内置分支/复制同排）
+
+    Attributes:
+        plugin_name: 所属插件名
+        action_id: 按钮唯一 ID
+        icon_path: 深色主题图标路径
+        icon_light_path: 浅色主题图标路径（可选，缺省回退 icon_path）
+        tooltip: 悬停提示
+        on_click: 点击回调，签名 (context: dict) -> None（context 同 FooterStatInfo）
+        priority: 优先级（同 action_id 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    action_id: str
+    icon_path: str = ""
+    icon_light_path: str = ""
+    tooltip: str = ""
+    on_click: Optional[Callable[[Dict[str, Any]], None]] = None
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ContextMenuActionInfo:
     """右键菜单插件项注册信息（Phase D）
 
@@ -617,6 +688,9 @@ class UIPluginRegistry:
         self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
         # @ 提及条目提供者：{provider_id: MentionProviderInfo}
         self._mention_providers: Dict[str, MentionProviderInfo] = {}
+        # 消息身份提供者（name / avatar 两条独立通道）
+        self._identity_name_providers: List[IdentityProviderInfo] = []
+        self._identity_avatar_providers: List[IdentityProviderInfo] = []
         # Phase D：四类新扩展点（键为 item_id/button_id/action_id/card_id）
         self._sidebar_items: Dict[str, SidebarItemInfo] = {}
         self._input_buttons: Dict[str, InputButtonInfo] = {}
@@ -625,6 +699,9 @@ class UIPluginRegistry:
         # 标题栏常驻 tab 槽位：{tab_id: TitlebarTabInfo}
         self._titlebar_tabs: Dict[str, TitlebarTabInfo] = {}
         self._titlebar_widgets: Dict[str, TitlebarWidgetInfo] = {}
+        # 消息卡片页脚扩展点：左区信息项 + 右区 hover 按钮
+        self._footer_stats: Dict[str, FooterStatInfo] = {}
+        self._footer_actions: Dict[str, FooterActionInfo] = {}
         self._services: Dict[str, tuple] = {}  # name -> (plugin_name, instance)
         # 右侧工作台页签槽位：{page_id: WorkbenchTabInfo}
         self._workbench_tabs: Dict[str, WorkbenchTabInfo] = {}
@@ -1157,6 +1234,85 @@ class UIPluginRegistry:
         info.handler(content, ctx)
         return True
 
+    def register_identity_name_provider(
+        self,
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息身份的「显示名」提供者。
+
+        Args:
+            plugin_name: 所属插件名
+            provider_id: 提供者唯一标识（同 id 重复注册视为同一插件刷新，去重）
+            resolve_func: 回调 ``(ctx) -> str``，返回空串/None 表示未提供。
+                          ctx 含 role（user/assistant）/ session_id / team_agent / window_id。
+                          ⚠️ 渲染期高频调用，须为纯函数、禁止 I/O 与阻塞
+            priority: 优先级（高者先问）
+            metadata: 附加元数据
+        """
+        self._register_identity_provider(
+            self._identity_name_providers, plugin_name, provider_id, resolve_func, priority, metadata
+        )
+
+    def register_identity_avatar_provider(
+        self,
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息身份的「头像」提供者。
+
+        Args:
+            resolve_func: 回调 ``(ctx) -> str``，返回头像**引用**：
+                - 本地图片绝对路径
+                - 内置图标引用（``builtin:drifox``）
+                - 空串 → 渲染层用显示名派生色块 + 首字母
+                其余约束同 ``register_identity_name_provider``
+        """
+        self._register_identity_provider(
+            self._identity_avatar_providers, plugin_name, provider_id, resolve_func, priority, metadata
+        )
+
+    def _register_identity_provider(
+        self,
+        bucket: List[IdentityProviderInfo],
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int,
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """身份 provider 通用注册（去重 + 按优先级排序）。"""
+        try:
+            from app.core.ui_callback_watchdog import wrap_ui_callback
+
+            resolve_func = wrap_ui_callback(plugin_name, f"identity:{provider_id}", resolve_func)
+        except Exception:
+            pass
+        info = IdentityProviderInfo(
+            plugin_name=plugin_name,
+            provider_id=provider_id,
+            resolve_func=resolve_func,
+            priority=priority,
+            metadata=metadata or {},
+        )
+        bucket[:] = [p for p in bucket if not (p.plugin_name == plugin_name and p.provider_id == provider_id)]
+        bucket.append(info)
+        bucket.sort(key=lambda p: -p.priority)
+
+    def get_identity_name_providers(self) -> List[IdentityProviderInfo]:
+        """全部身份显示名提供者（按优先级降序）"""
+        return list(self._identity_name_providers)
+
+    def get_identity_avatar_providers(self) -> List[IdentityProviderInfo]:
+        """全部身份头像提供者（按优先级降序）"""
+        return list(self._identity_avatar_providers)
+
     def register_mention_provider(
         self,
         plugin_name: str,
@@ -1551,6 +1707,72 @@ class UIPluginRegistry:
 
         数据源：region 存储（Phase E 单源化）"""
         return [e.payload for e in self.get_region_entries("toolbar:input") if isinstance(e.payload, InputButtonInfo)]
+
+    def register_footer_stat(
+        self,
+        plugin_name: str,
+        stat_id: str,
+        provider: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息卡片页脚左区信息项（吞吐量等统计数据由插件注入）
+
+        provider 在卡片构建 / 回合落定 / 流式计时节拍时被回调（主线程），
+        要求纯内存快速计算，不得阻塞或弹 UI。
+        """
+        if metadata is None:
+            metadata = {}
+        info = FooterStatInfo(
+            plugin_name=plugin_name,
+            stat_id=stat_id,
+            provider=provider,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._footer_stats.get(stat_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._footer_stats[stat_id] = info
+
+    def get_footer_stats(self) -> List[FooterStatInfo]:
+        """获取全部页脚信息项（priority 降序 → 注册序）"""
+        items = sorted(self._footer_stats.values(), key=lambda i: -i.priority)
+        return items
+
+    def register_footer_action(
+        self,
+        plugin_name: str,
+        action_id: str,
+        icon_path: str = "",
+        icon_light_path: str = "",
+        tooltip: str = "",
+        on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息卡片页脚右区 hover 按钮组按钮（与内置分支/复制同排）"""
+        if metadata is None:
+            metadata = {}
+        info = FooterActionInfo(
+            plugin_name=plugin_name,
+            action_id=action_id,
+            icon_path=icon_path,
+            icon_light_path=icon_light_path,
+            tooltip=tooltip,
+            on_click=on_click,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._footer_actions.get(action_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._footer_actions[action_id] = info
+
+    def get_footer_actions(self) -> List[FooterActionInfo]:
+        """获取全部页脚插件按钮（priority 降序 → 注册序）"""
+        items = sorted(self._footer_actions.values(), key=lambda i: -i.priority)
+        return items
 
     def register_context_menu_action(
         self,
@@ -2935,6 +3157,13 @@ class UIPluginRegistry:
         # 清理 welcome actions
         self._welcome_actions = {k: v for k, v in self._welcome_actions.items() if v.plugin_name != plugin_name}
         self._mention_providers = {k: v for k, v in self._mention_providers.items() if v.plugin_name != plugin_name}
+        # 清理消息身份 provider（name / avatar 两条通道）
+        self._identity_name_providers = [
+            p for p in self._identity_name_providers if p.plugin_name != plugin_name
+        ]
+        self._identity_avatar_providers = [
+            p for p in self._identity_avatar_providers if p.plugin_name != plugin_name
+        ]
         # 清理 floating cards + 对应命令
         cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:
@@ -2974,6 +3203,9 @@ class UIPluginRegistry:
         self._sidebar_items = {k: v for k, v in self._sidebar_items.items() if v.plugin_name != plugin_name}
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
         self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
+        # 清理消息卡片页脚扩展点
+        self._footer_stats = {k: v for k, v in self._footer_stats.items() if v.plugin_name != plugin_name}
+        self._footer_actions = {k: v for k, v in self._footer_actions.items() if v.plugin_name != plugin_name}
         # config_schema 自动设置卡（metadata.auto_config_card）保留：其生命周期归
         # manifest 层（PluginManager._unregister_config_schema），ui 组件的 unload/load
         # 不得误伤——否则 targeted 热重载「rescan 注册卡 → ui 卸载清卡」会让插件配置卡
@@ -3589,6 +3821,20 @@ def _declare_builtin_slots() -> None:
     declare_slot("context_menu", lambda r: r._context_actions.items())
     declare_slot("settings_card", lambda r: r._settings_cards.items())
     declare_slot("mention_provider", lambda r: r._mention_providers.items())
+    # 消息卡片页脚：左区信息项 / 右区 hover 按钮（改动后不牵动既有视图，仅登记）
+    declare_slot("footer_stat", lambda r: r._footer_stats.items())
+    declare_slot("footer_action", lambda r: r._footer_actions.items())
+    # 消息身份 provider：命中时需重渲染消息区（身份行随插件变化）
+    declare_slot(
+        "identity_name_provider",
+        lambda r: enumerate(r._identity_name_providers),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "identity_avatar_provider",
+        lambda r: enumerate(r._identity_avatar_providers),
+        scopes=(SCOPE_MESSAGES,),
+    )
     declare_slot("service", lambda r: r._services.items(), owner=lambda e: e[0])
     declare_slot(
         "ui_module",

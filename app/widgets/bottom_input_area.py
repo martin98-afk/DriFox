@@ -1218,10 +1218,12 @@ class SendableTextEdit(TextEdit):
                 # [[basename]] 字面占位符转回 inline 胶囊（依条目附件路径还原）
                 self.convert_placeholders_to_mentions(entry.get("attachments", []))
                 self.historyAttachmentsRestored.emit(entry.get("attachments", []))
-                # 选中全部文本，方便继续编辑
+                # 光标置尾（追加编辑模式）：旧实现全选是为了「直接打字替换整条」，
+                # 但代价是用户在恢复内容上键入第一个字符（如 @）即静默清空全部
+                # 正文（2026-09-16 回溯发送乱码根因之一），置尾更符合「找回历史
+                # 消息继续改」的真实意图
                 cursor = self.textCursor()
                 cursor.movePosition(QTextCursor.End)
-                cursor.movePosition(QTextCursor.Start, QTextCursor.KeepAnchor)
                 self.setTextCursor(cursor)
         finally:
             self._setting_history_text = False
@@ -1515,14 +1517,14 @@ class SendableTextEdit(TextEdit):
 
         - 长名优先 + 重叠丢弃："阿明2" 与 "阿明" 同时在列时前者整段成胶囊，
           不给后者留前缀残段
-        - 后边界要求名字后是串尾/空白/常见标点；前边界只挡 ASCII 字母数字与
-          @ _（邮箱、路径里的 @），中文紧邻（"问下@阿明"）放行
+        - 后边界要求名字后是串尾/空白/常见标点/占位符起始符 `[`；前边界只挡
+          ASCII 字母数字与 @ _（邮箱、路径里的 @），中文紧邻（"问下@阿明"）放行
         """
         spans: list[tuple[int, int, QTextCharFormat]] = []
         taken: list[tuple[int, int]] = []
         _AFTER = "，。！？；：、)）】」》\"'"
         for name in sorted(name_colors, key=len, reverse=True):
-            for m in re.finditer("@" + re.escape(name) + r"(?=$|\s|[" + re.escape(_AFTER) + r"])", raw):
+            for m in re.finditer("@" + re.escape(name) + r"(?=$|\s|\[|[" + re.escape(_AFTER) + r"])", raw):
                 start, end = m.start(), m.end()
                 if start > 0:
                     prev = raw[start - 1]

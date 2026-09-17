@@ -619,7 +619,16 @@ class AssistantManager:
         self._ensure_dir(path.parent)
         tmp = path.with_suffix(".yaml.tmp")
         tmp.write_text(a.to_yaml(), encoding="utf-8")
-        tmp.replace(path)
+        # Windows 下 Defender/索引服务可能瞬时持有目标句柄，replace 报 WinError 5，
+        # 短退避重试吸收（20/40/80/160ms，总窗口约 300ms），穷尽才抛
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02 * (2**attempt))
 
     # ── ID 校验 ──
 
@@ -926,6 +935,50 @@ class AssistantManager:
             return True
         for old_ext in _avatar_supported_exts():
             old = d / f"agent.{old_ext}"
+            if old.exists():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        return True
+
+    # ── 用户头像（该助手视角下「你」的头像，注入消息身份行显示）──
+
+    def user_avatar_path(self, aid: str) -> Optional[Path]:
+        """用户头像：avatars/user.{ext}，未设置返回 None（渲染层回落色块+首字母）。"""
+        d = self._avatar_dir(aid)
+        if not d.exists():
+            return None
+        for ext in _avatar_supported_exts():
+            p = d / f"user.{ext}"
+            if p.exists():
+                return p
+        return None
+
+    def save_user_avatar_from_bytes(self, aid: str, data: bytes, ext: str) -> Optional[Path]:
+        """保存用户头像（预置库复制与本地上传统一走 bytes 落盘，不引用源路径）。"""
+        ext = ext.lower().lstrip(".")
+        if ext not in _avatar_supported_exts():
+            return None
+        d = self._avatar_dir(aid)
+        self._ensure_dir(d)
+        for old_ext in _avatar_supported_exts():
+            old = d / f"user.{old_ext}"
+            if old.exists():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        target = d / f"user.{ext}"
+        target.write_bytes(data)
+        return target
+
+    def clear_user_avatar(self, aid: str) -> bool:
+        d = self._avatar_dir(aid)
+        if not d.exists():
+            return True
+        for old_ext in _avatar_supported_exts():
+            old = d / f"user.{old_ext}"
             if old.exists():
                 try:
                     old.unlink()

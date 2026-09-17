@@ -580,9 +580,13 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.6.1"
+    current_version = "v0.6.2"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
+    # 进入时崩溃通知：检测到上次崩溃 dump 后是否弹 InfoBar 提示用户。
+    # 关闭后仍会扫描日志目录并把 .reported 标记已读（不重复扫描），
+    # 仅不展示横幅；用户可手动到日志目录查看 dump 文件。
+    crash_notify_on_startup = ConfigItem("General", "CrashNotifyOnStartup", True, BoolValidator())
 
     # 更新下载代理模式：direct=直连 / system=跟随系统 / prefix=加速前缀 / http=手动代理
     # 注意：加速前缀只作用于安装包下载；检查更新始终直连 api.github.com
@@ -705,6 +709,9 @@ class Settings(QConfig):
 
     # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
+
+    # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
+    ui_message_identity = ConfigItem("UI", "MessageIdentity", True, BoolValidator())
 
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", False, BoolValidator())

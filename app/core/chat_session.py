@@ -216,6 +216,14 @@ class ChatSession:
         atts = kwargs.get("_image_attachments")
         if isinstance(atts, list) and atts:
             msg["_image_attachments"] = [str(p) for p in atts if p]
+        # 原始输入元数据：全量附件路径 + 占位符形式正文（发送构建前的 toPlainText），
+        # 供「撤销到这里」回填时保真还原 chips 与胶囊（消息级字段，不泄漏给 API）
+        input_atts = kwargs.get("_input_attachments")
+        if isinstance(input_atts, list) and input_atts:
+            msg["_input_attachments"] = [str(p) for p in input_atts if p]
+        raw_text = kwargs.get("_raw_input_text")
+        if isinstance(raw_text, str) and raw_text:
+            msg["_raw_input_text"] = raw_text
         self.messages.append(msg)
         # 追加操作不走全量 consolidate，由持久化层在 save 时统一做
         self.bump_messages_version()

@@ -10,7 +10,7 @@ MemorySection（记忆传送带）→ ExperienceSection（经验）。
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
@@ -226,6 +226,33 @@ class _Section(QFrame):
 # ── 名称 / 模型分区 ──────────────────────────────────────
 
 
+def _host_window():
+    """弹窗 parent：完整主窗口（与 assistant_card 同实现，供分区内的弹窗复用）。
+
+    self.window() 在 full 卡容器内可能返回卡片容器导致 MaskDialog 遮罩
+    只盖住容器、定位异常；回退链：TabManagerWindow 单例 → UIPluginRegistry
+    主 widget 的 window() → None（调用方自行兜底）。
+    """
+    try:
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        win = TabManagerWindow.get_instance()
+        if win is not None:
+            return win
+    except Exception:
+        pass
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        for mw in (getattr(reg, "_main_widget", None), *getattr(reg, "_window_main_widgets", {}).values()):
+            if mw is not None:
+                return mw.window()
+    except Exception:
+        pass
+    return None
+
+
 class _CenterFlowLayout(QLayout):
     """流式布局：空间不足自动换行，每行水平居中（chips 卡行用）。"""
 
@@ -310,9 +337,11 @@ class _CenterFlowLayout(QLayout):
 
 
 class ProfileSection(_Section):
-    """对他/她的称呼 / 称呼 / 记忆整理模型（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
+    """对他/她的称呼 / 称呼 / 记忆整理模型 / 用户头像（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
 
     saveRequested = pyqtSignal(str, str, str)  # (name, user_addressing, utility_model_key)
+    userAvatarPicked = pyqtSignal(bytes, str)  # 用户头像选中（数据, 扩展名）
+    userAvatarCleared = pyqtSignal()  # 恢复默认用户头像
     _DEBOUNCE_MS = 600
     _MAX_VISIBLE_ITEMS = 12  # 下拉弹层最大可见条目数，超出滚动
 
@@ -361,6 +390,22 @@ class ProfileSection(_Section):
         row2.addWidget(self._utility_model, 1)
         form.addLayout(row2)
 
+        # 用户头像：预览 + 选择按钮（选中的头像注入消息身份行，显示在用户消息旁）
+        row3 = QHBoxLayout()
+        lbl3 = _title_label("你的头像", 11)
+        lbl3.setFixedWidth(118)
+        row3.addWidget(lbl3)
+        self._user_avatar = RoundAvatar(size=40, text="?", color="#7C3AED")
+        row3.addWidget(self._user_avatar)
+        self._pick_avatar_btn = QPushButton("选择头像")
+        self._pick_avatar_btn.setFixedHeight(30)
+        self._pick_avatar_btn.setCursor(Qt.PointingHandCursor)
+        self._pick_avatar_btn.setStyleSheet(_btn_style())
+        self._pick_avatar_btn.clicked.connect(self._pick_avatar)
+        row3.addWidget(self._pick_avatar_btn)
+        row3.addStretch()
+        form.addLayout(row3)
+
         wrap = QHBoxLayout()
         wrap.addStretch()
         wrap.addWidget(form_holder)
@@ -368,7 +413,8 @@ class ProfileSection(_Section):
         self.body().addLayout(wrap)
         self.body().addWidget(
             _hint(
-                "对话模型跟随系统配置；记忆整理模型用于记忆编译 / Dream / 经验反思，跟随全局即用当前对话模型。改动自动保存。"
+                "对话模型跟随系统配置；记忆整理模型用于记忆编译 / Dream / 经验反思，跟随全局即用当前对话模型。"
+                "用户头像显示在消息列表中你的消息旁，每个助手独立设置。改动自动保存。"
             )
         )
 
@@ -401,6 +447,25 @@ class ProfileSection(_Section):
                 margin-right: 2px;
             }}
         """
+
+    def set_user_avatar(self, image_path: Optional[str], name: str = "") -> None:
+        """刷新用户头像预览（bind 与保存后由宿主调用；name 用于无图时的首字母色块）。
+
+        ⚠ image_path 可能是 Path 或 str：QPixmap 不认 Path 对象（TypeError），
+        统一在此转 str，调用方无须关心。
+        """
+        if name:
+            self._user_avatar.set_text(name)
+        self._user_avatar.set_image(str(image_path) if image_path else None)
+
+    def _pick_avatar(self) -> None:
+        """弹头像选择器（延迟导入避免 sections ↔ avatar_picker 循环依赖）。"""
+        from .avatar_picker import UserAvatarDialog
+
+        dlg = UserAvatarDialog(parent=_host_window() or self.window())
+        dlg.picked.connect(self.userAvatarPicked)
+        dlg.cleared.connect(self.userAvatarCleared)
+        dlg.exec_()
 
     def _schedule_autosave(self, *_a) -> None:
         if self._suspend_autosave:

@@ -9762,6 +9762,18 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_single_card_width(card)
             _synced += 1
 
+        # [占位死区] 滚动停在/经过已回收批次的占位区时，提前触发回收函数
+        # （其第 1.5 步负责原位重建占位批次），不等 500ms 定时器自然到期。
+        if self._batch_placeholders:
+            rng = self._viewport_batch_range()
+            if rng is not None:
+                _vp_start, _vp_end = rng
+                _buf = self._incremental_visible_batch_count * self._virtual_scroll_buffer
+                for _idx in self._batch_placeholders:
+                    if _vp_start - _buf <= _idx <= _vp_end + _buf:
+                        self._virtual_scroll_timer.start()
+                        break
+
         self._last_visible_card_ids = visible_ids
 
     def _restore_card_now(self, card):
@@ -10257,16 +10269,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     QTimer.singleShot(0, lambda _kw=_kw: _tmw.refresh_workbench(**_kw))
             except Exception:
                 pass
-            # 欢迎卡片插件 tab 刷新：ui 组件重载（安装/更新/卸载）后，已打开的
-            # 欢迎卡片需重建以显示新增/移除的插件 tab。原刷新完全依赖
-            # register_welcome_tab → registry 链，实测安装新插件后已打开标签页
-            # 不刷新（须新建会话才出现），此处显式兜底刷新（见 2026-08-23 故障）。
-            try:
-                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-                UIPluginRegistry.get_instance()._refresh_welcome_cards()
-            except Exception:
-                logger.debug("[HotReload] 欢迎卡片刷新失败", exc_info=True)
+            # 欢迎卡片插件 tab 刷新不在此处兜底：任何 ui 组件变更（哪怕只动
+            # input_button）都会进本分支，无条件刷会让每个窗口的欢迎卡片
+            # QWebEngineView 重建一次（100-500ms/个，正显示欢迎卡片的窗口
+            # 肉眼可见闪一下），且与 registry 自身的调度双刷。
+            # 判定交给 registry：load_plugin 按 before_tabs/after_tabs、
+            # unload_plugin 按 had_welcome_tabs 精准触发 _schedule_welcome_refresh
+            # （带 debounce），插件不占 welcome 槽位时零刷新。
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
                 from app.tray_manager import TrayManager
@@ -10623,9 +10632,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 递归刷新所有 qfluentwidgets 组件字体大小
             apply_font_size_to_widget(self, 14)
 
-            # 欢迎卡片 segmented tabs 显式适配（SegmentedItem 内部写死 14px，
-            # apply_font_size_to_widget 已覆盖但其 _postInit 在增量重建时会重置，
-            # 这里双保险确保当前 delta 生效）
+            # 欢迎卡片 tab 条显式适配：CustomTabButton 的文字样式由
+            # _apply_label_color 写死 font-size，apply_font_size_to_widget 的
+            # setFont 覆盖不到，这里按当前 delta 重设（首次构建同路径）。
             for _card in self.findChildren(MessageCard):
                 if getattr(_card, "role", None) == "welcome" and hasattr(_card, "_apply_welcome_tabs_font"):
                     try:
@@ -10762,6 +10771,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
                     "pluginToolCard",
                     "pluginAgentCard",
+                    "secretModeCard",
                 ):
                     self._safe_refresh(getattr(self._settings_popup, card_name, None))
                 # 刷新设置弹窗分隔标签
@@ -11827,6 +11837,66 @@ class OpenAIChatToolWindow(ToolWindow):
                 # （_recycle_lru_batches 会因该标志直接返回），故延到下一帧执行。
                 if self._rendered_card_count > self._effective_max_rendered_cards():
                     QTimer.singleShot(0, lambda: self._recycle_lru_batches())
+
+            # ── 第 1.5 步：重建视口附近的已回收批次（占位死区修复）──
+            # 上翻穿过「已回收批次」的等高空白占位区时没有任何重建触发点：
+            # _load_more_history_batches 只 prepend _visible_batch_start 之上的
+            # 未加载批次（占位批次 index ≥ _visible_batch_start 永远不在其范围）；
+            # 上面的 ensure_rendered 只处理 _batch_cards 非空的批次。结果视口
+            # 落进占位区即一片永久空白。这里对激活范围内有占位的批次原位重建
+            # （数据仍在 _message_batch），恢复「视口 ± 缓冲内必有内容」。
+            pending_restore = []
+            for batch_idx in range(active_start, active_end):
+                if batch_idx >= len(self._batch_cards) or self._batch_cards[batch_idx] is not None:
+                    continue
+                if batch_idx >= len(self._message_batch) or not self._message_batch[batch_idx]:
+                    continue
+                ph = self._batch_placeholders.get(batch_idx)
+                if ph is None:
+                    # 占位安装失败的批次高度为 0，视口不会落在其上
+                    continue
+                anchor = self.chat_layout.indexOf(ph)
+                if anchor < 0:
+                    continue
+                pending_restore.append((batch_idx, anchor))
+            if pending_restore:
+                # 锚点 = 视口顶第一个可见 widget（含占位）：任何布局改动前捕获，
+                # 重建后把同一 layout index 的 widget 拉回同一 y（P052 教训）。
+                _anchor_index = -1
+                _anchor_y = 0
+                for _i in range(self.chat_layout.count()):
+                    _item = self.chat_layout.itemAt(_i)
+                    _w = _item.widget() if _item else None
+                    if _w is not None and self._is_widget_alive(_w):
+                        _geo = _w.geometry()
+                        if _geo.bottom() >= self.chat_scroll_area.verticalScrollBar().value():
+                            _anchor_index = _i
+                            _anchor_y = _geo.y()
+                            break
+                for batch_idx, anchor in pending_restore:
+                    self._render_message_to_card(
+                        self._message_batch[batch_idx : batch_idx + 1],
+                        batch_offset=batch_idx,
+                        anchor_layout_index=anchor,
+                    )
+                logger.debug(f"[virtual-scroll] 原位重建 {len(pending_restore)} 个视口附近占位批次")
+
+                def _restore_anchor_after_placeholder():
+                    try:
+                        if not (0 <= _anchor_index < self.chat_layout.count()):
+                            return
+                        _item = self.chat_layout.itemAt(_anchor_index)
+                        _w = _item.widget() if _item else None
+                        if _w is None or not self._is_widget_alive(_w):
+                            return
+                        _delta = _w.geometry().y() - _anchor_y
+                        if _delta:
+                            sb = self.chat_scroll_area.verticalScrollBar()
+                            sb.setValue(max(0, sb.value() + _delta))
+                    except RuntimeError:
+                        pass
+
+                QTimer.singleShot(0, _restore_anchor_after_placeholder)
 
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
@@ -13330,10 +13400,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if card.role != "assistant":
             return
         elapsed = None
+        output_tokens = 0
+        ttft_ms = 0
         for msg in batch:
             if msg.get("role") == "assistant":
                 if msg.get("elapsed") is not None:
                     elapsed = msg["elapsed"]
+                tu = msg.get("token_usage") or {}
+                if tu.get("output"):
+                    output_tokens = tu["output"]
+                ttft_ms = msg.get("ttft_ms") or 0
         # 卡片 token 显示与上下文圆环同步：直接用圆环快照的 used_tokens（同一来源），
         # 不再读取落库的 msg["token_usage"]——后者是 worker 侧估算（可能基于压缩后的
         # current_messages），会远小于圆环真实占用，导致重载后卡片显示异常小的数值。
@@ -13351,6 +13427,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._reload_ctx_used_tokens = used
             self._reload_ctx_sid = sid
         token_usage = {"total": used} if used > 0 else None
+        if token_usage and output_tokens:
+            token_usage["output"] = output_tokens
+            if ttft_ms:
+                token_usage["ttft_ms"] = ttft_ms
         if elapsed is not None or token_usage is not None:
             card.set_meta_info(elapsed=elapsed, token_usage=token_usage)
         # 延迟刷新分隔点：等父级布局完成后再检查 isVisible()，避免加载时父级隐藏导致误判
@@ -13438,6 +13518,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     user_round_index=round_index,
                     update_preview=not insert_at_top,
                     image_attachments=batch[0].get("_image_attachments"),
+                    source_message=batch[0],
                 )
                 if user_card:
                     # 设置 message_index 用于卡片差异功能
@@ -13478,6 +13559,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 if assistant_card:
                     # 设置 message_index 用于卡片差异功能
                     assistant_card._message_index = global_batch_index
+                    # 消息源注入：历史消息的身份优先取自带快照，TeamMail 老数据
+                    # 从内容前缀解析发送者（详见 message_identity.resolve_for_message）
+                    assistant_card._source_message = batch[0]
                     cards.append(assistant_card)
                     # 使用辅助函数渲染消息
                     # [T11] 错峰：历史加载时不立即派发全量渲染，避免 N 卡
@@ -14476,6 +14560,48 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._load_session_from_record(session_record)
 
+    def _stamp_message_identities(self, messages) -> None:
+        """为缺 `_identity` 的消息补写身份快照（主线程调用）。
+
+        worker 线程构造消息时拿不到 UI 状态（团队成员角色名、插件 manager 调用
+        可能跨线程），故身份在此统一补写。已带 `_identity` 的消息跳过——
+        历史快照优先，切换助手不改写旧消息。
+
+        Args:
+            messages: 消息 dict 列表（就地修改；非法输入静默跳过）
+        """
+        if not isinstance(messages, list):
+            return
+        try:
+            from app.core.message_identity import resolve_identity, team_mail_sender
+
+            session = self.session_manager.get_current_session() if self.session_manager else None
+            session_id = getattr(session, "session_id", "") if session else ""
+            team_agent = getattr(self, "_team_agent_name", "") or ""
+            window_id = getattr(self, "_window_id", "") or ""
+            # 每个 role 只解析一次（解析链内部有会话级缓存，这里再省一次 dict 构造）
+            cache: Dict[str, Any] = {}
+            for msg in messages:
+                if not isinstance(msg, dict) or msg.get("_identity"):
+                    continue
+                role = msg.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                # 团队任务邮件：发送者是成员而非用户，按其名落快照
+                sender = team_mail_sender(msg)
+                if sender:
+                    msg["_identity"] = {"name": sender}
+                    continue
+                if role not in cache:
+                    cache[role] = resolve_identity(
+                        role, session_id=session_id, team_agent=team_agent, window_id=window_id
+                    )
+                data = cache[role].to_dict()
+                if data:
+                    msg["_identity"] = data
+        except Exception as e:
+            logger.debug(f"[Identity] 身份快照补写跳过: {e}")
+
     def _append_user_message(
         self,
         content: str,
@@ -14485,6 +14611,8 @@ class OpenAIChatToolWindow(ToolWindow):
         user_round_index: Optional[int] = None,
         update_preview: bool = True,
         image_attachments: Optional[list] = None,
+        identity=None,
+        source_message: Optional[dict] = None,
     ):
         session = self.session_manager.get_current_session()
         if session:
@@ -14499,7 +14627,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if user_round_index is None:
             user_round_index = self._get_current_user_round_index()
 
-        card = MessageCard(parent=self, role="user", timestamp=timestamp)
+        card = MessageCard(
+            parent=self,
+            role="user",
+            timestamp=timestamp,
+            identity=identity,
+            source_message=source_message,
+        )
         card._round_index = user_round_index
         card.update_content(content)
         # 图片附件预览：正文上方缩略图条（恢复会话时 content 为 multimodal list，
@@ -14534,6 +14668,7 @@ class OpenAIChatToolWindow(ToolWindow):
         model_name: str = None,
         provider_name: str = None,
         config_id: str = None,
+        source_message: Optional[dict] = None,
     ) -> MessageCard:
         session = self.session_manager.get_current_session()
         if session:
@@ -14592,7 +14727,9 @@ class OpenAIChatToolWindow(ToolWindow):
             on_save_file=self._on_save_file_requested,
             on_subagent_log=self._on_subagent_log_requested,
             on_review=self._on_review_requested,
+            on_branch=self._on_branch_from_card_requested,
             immediate_render=scroll,  # 流式(scroll=True)立即渲染，加载(scroll=False)走懒渲染队列
+            source_message=source_message,
         )
 
         # 连接模型标签点击信号到切换逻辑
@@ -15469,7 +15606,9 @@ class OpenAIChatToolWindow(ToolWindow):
         for msg in messages:
             if msg.get("role") != "user" or _is_hook_message(msg):
                 continue
-            text = " ".join(strip_system_reminder(msg.get("content") or "").split())
+            # content 可能是 multimodal list（视觉模型附件消息），先转纯文本再喂正则，
+            # 否则 re 收到 list 直接抛 "expected string or bytes-like object"（2026-09-17）
+            text = " ".join(strip_system_reminder(content_to_text(msg.get("content") or "")).split())
             if text:
                 return text[:80] + ("…" if len(text) > 80 else "")
         return ""
@@ -16096,6 +16235,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     logger.error("[UNDO] Cannot recover round_index after dialog, aborting undo")
                     return
 
+        # 🛡️ 截断前捕获原始输入元数据：_truncate_session_from_user_round 内部会
+        # 重建 _message_batch（被撤回的 round 已移除），之后再按 card._message_index
+        # 查批次必然落空 → 静默降级成纯文本回填（2026-09-17 撤回丢 chips 根因）
+        undo_raw_text, undo_atts = self._extract_undo_input_meta(card)
+
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
 
@@ -16108,11 +16252,73 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._show_undo_delete_card()
 
-        # 恢复输入框内容
-        restore_input_from_card(self.input_area, card)
+        # 恢复输入框内容（优先按发送时保存的原始输入元数据保真回填）
+        self._restore_input_after_undo(card, undo_raw_text, undo_atts)
 
         # 撤销后消息数变化，显式刷新历史问题徽章
         self._update_history_questions_badge()
+
+    def _extract_undo_input_meta(self, card: MessageCard) -> tuple:
+        """截断前提取被撤回 user 消息的原始输入元数据
+
+        Returns:
+            (raw_text, attachments)：来自消息上的 ``_raw_input_text`` /
+            ``_input_attachments`` 标记；旧消息无标记时返回 (None, None)。
+        """
+        idx = getattr(card, "_message_index", None)
+        if isinstance(idx, int) and 0 <= idx < len(self._message_batch):
+            entry = self._message_batch[idx]
+            if entry and entry[0].get("role") == "user":
+                msg = entry[0]
+                return msg.get("_raw_input_text"), msg.get("_input_attachments")
+        return None, None
+
+    def _restore_input_after_undo(
+        self,
+        card: MessageCard,
+        raw_text: Optional[str] = None,
+        atts: Optional[list] = None,
+    ) -> None:
+        """撤回（撤销到这里）后回填输入框
+
+        带附件的消息其 content 已被发送构建替换成「完整路径内联」的终态文本，
+        直接回填（旧行为）会丢失附件 chips 与占位符结构，再次编辑发送必然与
+        原消息偏离（2026-09-16 撤回渲染异常根因）。发送链路会在消息上挂
+        ``_raw_input_text``（占位符形式正文）+ ``_input_attachments``（全量附件
+        路径），优先依此保真还原；旧消息无标记时降级为纯文本回填。
+
+        Args:
+            card: 被撤回的 user 消息卡片
+            raw_text: 调用方在截断**前**预取的 ``_raw_input_text``（截断会重建
+                _message_batch，事后查必落空）；None 时降级判断按无标记处理。
+            atts: 同上，``_input_attachments``。
+        """
+        if not raw_text and not atts:
+            restore_input_from_card(self.input_area, card)
+            return
+
+        # 恢复附件 chips（失效路径跳过，与历史模式附件恢复同口径）
+        self._clear_attachments()
+        valid_paths: list = []
+        for p in atts or []:
+            if os.path.exists(p):
+                self._add_attachment(p)
+                valid_paths.append(p)
+        self._rebuild_attachment_chips()
+
+        # 回填占位符形式正文 + 占位符转胶囊（依有效路径还原）
+        from PyQt5.QtGui import QTextCursor
+
+        text = str(raw_text or "")
+        if text.strip().startswith("/"):
+            self.input_area._suppress_slash_trigger = True
+        self.input_area.setPlainText(text)
+        self.input_area.convert_placeholders_to_mentions(valid_paths)
+        self.input_area._on_text_changed()
+        cursor = self.input_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.input_area.setTextCursor(cursor)
+        self.input_area.setFocus()
 
     def _get_all_tool_call_ids_from_round(self, round_index: int) -> List[str]:
         """获取从指定 round 到最后的所有 tool_call_id"""
@@ -16539,6 +16745,146 @@ class OpenAIChatToolWindow(ToolWindow):
                 parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
+
+    def branch_session_from_message(self, message_index: int, source_window=None):
+        """消息级「从这里分支」：以**选中的那一条消息**为界复制成新会话。
+
+        与 :meth:`_on_branch_from_card_requested` 的区别：后者以「整轮」为界
+        （复制到该轮结束），本方法精确到单条消息，供轨迹面板「从这里分支」用 ——
+        用户在轨迹里指哪条就切到哪条。
+
+        工具对不会被切坏：``truncate_messages_at`` 会丢掉找不到声明者的孤立
+        ``tool`` 消息，并从 assistant 上剥掉结果落在截断点之后的 ``tool_calls``
+        （全被剥光且无正文的 assistant 整条丢弃）。否则新会话带悬空调用，
+        下次请求会被 API 拒绝。
+
+        Args:
+            message_index: 消息在 **session.messages 原始空间**的索引（含该条）。
+                轨迹面板投影的正是原始空间（collector 直接把 ``session.messages``
+                逐条投影，不做合并），而分支要在 canonical 空间切 —— 两空间在
+                ``normalize_message`` 丢弃非法条目（非法 role / 空 assistant /
+                缺 tool_call_id 的 tool）时会错位，故此处先做索引换算。
+            source_window: 源窗口（默认 self）；轨迹面板从插件侧调用时传宿主窗口。
+
+        Returns:
+            新窗口实例；失败返回 None。
+        """
+        session = self.session_manager.get_current_session()
+        if not session:
+            return None
+        from app.core.message_content import consolidate_messages, normalize_message, truncate_messages_at
+
+        raw = list(getattr(session, "messages", None) or [])
+        canonical = consolidate_messages(session.messages)
+        if not canonical:
+            return None
+        # 原始下标 → canonical 下标。
+        # ⚠️ 必须单趟 O(n)：曾写成「对每个 probe 重扫 raw[:probe+1] 并逐条
+        # normalize_message」，那是 O(n²) 次 normalize —— 3000 条会话点一下
+        # 分支就是数百万次调用，UI 直接卡死。
+        # 非法条目（非法 role / 空 assistant / 缺 tool_call_id 的 tool）在
+        # canonical 里不存在，映射落到**前一条有效消息**（也就是「切到最后一条
+        # 真实存在的消息」），这是安全回退而非错位。
+        idx = max(0, min(int(message_index), len(raw) - 1)) if raw else 0
+        canon_index = 0
+        seen = -1
+        for i, m in enumerate(raw):
+            if normalize_message(m) is not None:
+                seen += 1
+            if i == idx:
+                canon_index = max(0, seen)
+                break
+        branch_messages = [copy.deepcopy(m) for m in truncate_messages_at(canonical, canon_index)]
+        if not branch_messages:
+            logger.warning(f"[msg-branch] 截断后消息为空，取消分支: index={message_index}")
+            return None
+
+        src = source_window or self
+        base_name = (session.name or "对话").replace(" [分支]", "")
+        tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
+        try:
+            new_window = tm.spawn_tab(
+                src,
+                branch=True,
+                branch_messages=branch_messages,
+                branch_name=f"{base_name} [分支]",
+                project=getattr(src, "_current_project", None),
+            )
+        except TypeError:
+            new_window = tm.spawn_tab(src, branch=True)
+        if new_window is None:
+            logger.warning("[msg-branch] spawn_tab 返回 None，分支未创建")
+            return None
+        logger.info(f"[msg-branch] 已在 messages[{message_index}] 处分支，消息数 {len(branch_messages)}")
+        return new_window
+
+    def _on_branch_from_card_requested(self, round_index: int, message_index: int = -1):
+        """页脚「分支」按钮：以该条助手消息为界，把之前的消息复制成新会话
+
+        与 tab 级分支的区别：tab 级复制整个会话，本方法只复制到**该条消息所在
+        round 结束处**（含该条助手回复），用户可在任意一轮历史处开叉。
+
+        Args:
+            round_index: 该消息所属 user round 索引
+            message_index: 消息在 _message_batch 中的索引（round_index 失效时的 fallback）
+        """
+        if round_index < 0 and message_index < 0:
+            return
+
+        session = self.session_manager.get_current_session()
+        if not session:
+            return
+
+        canonical_messages = consolidate_messages(session.messages)
+        round_ranges = get_user_round_ranges(canonical_messages)
+
+        resolved_round = round_index
+        if resolved_round < 0 or resolved_round >= len(round_ranges):
+            # fallback：从 _message_batch 位置反推（与 _on_card_diff_requested 同口径）
+            resolved_round = -1
+        if resolved_round < 0 and message_index >= 0:
+            computed = 0
+            for idx in range(message_index):
+                if (
+                    idx < len(self._message_batch)
+                    and self._message_batch[idx]
+                    and self._message_batch[idx][0].get("role") == "user"
+                ):
+                    computed += 1
+            if computed < len(round_ranges):
+                resolved_round = computed
+
+        if resolved_round < 0 or resolved_round >= len(round_ranges):
+            logger.warning(f"[card-branch] cannot determine valid round_index: {round_index}/{message_index}")
+            return
+
+        # 含该 round 的全部消息（含本条助手回复）→ 新会话的初始上下文
+        cutoff = round_ranges[resolved_round][1]
+        branch_messages = [copy.deepcopy(m) for m in canonical_messages[:cutoff]]
+        if not branch_messages:
+            return
+
+        base_name = (session.name or "对话").replace(" [分支]", "")
+        branch_name = f"{base_name} [分支]"
+        project = self._current_project
+
+        tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
+        try:
+            new_window = tm.spawn_tab(
+                self,
+                branch=True,
+                branch_messages=branch_messages,
+                branch_name=branch_name,
+                project=project,
+            )
+        except TypeError:
+            # 兼容：spawn_tab 未接受 branch_messages 时回退为整会话分支
+            new_window = tm.spawn_tab(self, branch=True, project=project)
+
+        if new_window is None:
+            logger.warning("[card-branch] spawn_tab 返回 None，分支未创建")
+            return
+        logger.info(f"[card-branch] 已在 round {resolved_round} 处分支，消息数 {len(branch_messages)}")
 
     def _on_review_requested(self, round_index: int, message_index: int = -1):
         """
@@ -17485,12 +17831,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 第一轮：替换文本中出现的 [[basename]] 占位符
         # 同名文件使用 count=1 左到右逐次替换，每个附件占一个 [[basename]]
+        # 路径前后各补一个空格：占位符可能与 @提及胶囊（展开为 "@名字"）或中文
+        # 正文紧邻，直接替换会产生 "@空D:\..." 这类 mention 与路径粘连的不可读
+        # 文本（提及语义与路径边界双双失效，2026-09-16 回溯发送乱码根因）。
         referenced = set()
         for p in self._attachments:
             basename = os.path.basename(p)
             placeholder = f"[[{basename}]]"
             if placeholder in user_text:
-                user_text = user_text.replace(placeholder, p, 1)
+                user_text = user_text.replace(placeholder, f" {p} ", 1)
                 referenced.add(p)
 
         # 第二轮：未在文本中引用的附件拼到末尾
@@ -17503,7 +17852,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 第三轮：清除残留的 [[xxx]] 占位符（不匹配任何附件）
         user_text = re.sub(r"\[\[[^\]]*\]\]", "", user_text)
-        user_text = user_text.replace("  ", " ").strip()
+        # 压缩占位符替换/清除产生的连续水平空白（保留换行，路径多行结构不动）
+        user_text = re.sub(r"[^\S\n]{2,}", " ", user_text).strip()
 
         return user_text
 
@@ -17758,9 +18108,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 属于正在编辑的内容，不属于本次自动发送的邮件文本。
         _preserve_attachments = preserve_input and bool(self._attachments)
         _image_paths: list[str] = []  # 仅收集图片路径，编码推迟
+        # 原始输入元数据（构建前捕获）：占位符形式正文 + 全量附件路径，随消息落库，
+        # 供「撤销到这里」保真回填（重建 chips + 胶囊）；preserve_input（系统自动
+        # 发送）的附件属于正在编辑的内容，不属于本条消息，不挂标（与下方拼接分支同口径）
+        _raw_input_text: Optional[str] = None
+        _input_attachments: Optional[list] = None
         if self._attachments and not _preserve_attachments:
+            _raw_input_text = user_text
+            _input_attachments = list(self._attachments)
             # 先统一处理附件文本替换（含图片 [[basename]] → 路径）— UI 显示和
             # LLM 看到的文本必须一致，所以这一步仍在主线程做（轻量字符串操作）。
+            # 用户决策 2026-09-17：图片路径必须保留在正文文本里（视觉模型下
+            # multimodal 图片块与路径文本并存，不得剔除路径）。
             user_text = self._build_user_text_with_attachments(user_text)
 
             if _supports_vision:
@@ -17804,7 +18163,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._clear_input_area()
             self._clear_attachments()
         # 视觉模型时图片以 multimodal 注入：卡片同步预览 + session 消息打标记（恢复会话可回显）
-        self._append_user_message(user_text, image_attachments=_image_paths or None)
+        # hook_event 透传：TeamMail 等系统注入消息的身份按消息源解析（显示成员名而非用户名）
+        self._append_user_message(
+            user_text,
+            image_attachments=_image_paths or None,
+            source_message={"role": "user", "content": user_text, "_hook_event": hook_event} if hook_event else None,
+        )
 
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
@@ -17862,6 +18226,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 恢复会话时渲染缩略图预览条（此前漏传导致历史加载不显示图片预览）
             if _image_paths:
                 engine_kwargs["_image_attachments"] = list(_image_paths)
+            # 原始输入元数据透传：session 消息打 _input_attachments/_raw_input_text 标记，
+            # 撤回（撤销到这里）时依此保真回填附件 chips 与占位符正文
+            if _input_attachments:
+                engine_kwargs["_input_attachments"] = list(_input_attachments)
+            if _raw_input_text:
+                engine_kwargs["_raw_input_text"] = _raw_input_text
             # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
             # add_user_message 修改 session.messages。即使后续被 / 命令拦截
             # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
@@ -19960,6 +20330,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         msg["elapsed"] = round(time.time() - self._response_start_time, 1)
                     if not msg.get("config_id") and self._current_provider_name:
                         msg["config_id"] = self._current_provider_name
+
+        # 身份快照补写：worker 线程构造的消息拿不到 UI 状态（团队角色名、插件
+        # manager 调用），在主线程统一补 `_identity` 后再落 session。已带快照的
+        # 消息不动（历史快照优先，切换助手不改写旧消息）。
+        # getattr 守卫：测试替身（SimpleNamespace 假宿主）可不实现该方法。
+        _stamp = getattr(self, "_stamp_message_identities", None)
+        if callable(_stamp):
+            _stamp(messages)
 
         session.set_messages(messages or [], preserve_compaction=False)
         # 🛡️ Worker 回传了完整消息列表，标记会话脏以确保后续持久化。

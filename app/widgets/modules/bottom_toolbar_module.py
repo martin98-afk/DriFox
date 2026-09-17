@@ -234,7 +234,7 @@ class BottomToolbarModule(UIModule):
         #  _refresh_tool_toggle_btn 单控件重设，取更具体作用域）
         host._tool_toggle_btn.mousePressEvent = lambda e: host._toggle_tool_control_card()
         tt_layout = QHBoxLayout(host._tool_toggle_btn)
-        tt_layout.setContentsMargins(6, 0, 6, 0)
+        tt_layout.setContentsMargins(3, 0, 3, 0)
         tt_layout.setSpacing(0)
 
         # 图标（主题感知 SVG — 自动适配浅色/深色模式）
@@ -273,8 +273,8 @@ class BottomToolbarModule(UIModule):
         Colors.refresh()
         # 一体化视觉：去右侧图标组背景胶囊（样式由聚合 QSS 提供）
         capsule_layout = QHBoxLayout(host._toolbar_capsule)
-        capsule_layout.setContentsMargins(6, 2, 6, 2)
-        capsule_layout.setSpacing(4)
+        capsule_layout.setContentsMargins(3, 1, 3, 1)
+        capsule_layout.setSpacing(2)
 
         Colors.refresh()
         btn_capsule_style = f"""

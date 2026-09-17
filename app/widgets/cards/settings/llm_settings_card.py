@@ -596,6 +596,16 @@ class LLMSettingsCard(SystemCardFrame):
         )
         common_layout.addWidget(self.compactToolCard)
 
+        # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
+        self.messageIdentityCard = SwitchSettingCard(
+            FluentIcon.PEOPLE,
+            "消息身份行",
+            "每条消息显示发送者头像与名称",
+            configItem=self.cfg.ui_message_identity,
+            parent=self,
+        )
+        common_layout.addWidget(self.messageIdentityCard)
+
         # 灰度开关：纯 Qt 消息渲染器（MarkdownBlockViewer 替代 QWebEngineView）
         self.qtRendererCard = SwitchSettingCard(
             FluentIcon.CODE,
@@ -786,6 +796,16 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         notify_layout.addWidget(self.llmSoundCard)
+
+        # 进入时崩溃通知
+        self.crashNotifyCard = SwitchSettingCard(
+            get_icon("提示"),
+            "崩溃通知",
+            "检测到上次异常退出时弹出提示横幅",
+            configItem=self.cfg.crash_notify_on_startup,
+            parent=self,
+        )
+        notify_layout.addWidget(self.crashNotifyCard)
         notify_layout.addStretch(1)
 
         # ════ 外观样式页 ════
@@ -1588,6 +1608,7 @@ class LLMSettingsCard(SystemCardFrame):
             "pluginAgentCard",
             "renderAdvancedCard",
             "updateProxyCard",
+            "secretModeCard",
         ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):

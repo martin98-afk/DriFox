@@ -1301,9 +1301,10 @@ class TabPanel(QWidget):
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
-        # ── 顶部：左「对话页」标题 + 右 分支/新建 纯图标按钮 ──
-        # 布局：标题左对齐占满剩余空间（stretch=1），两个 24px 图标按钮靠右。
-        # 收起态隐藏标题与分支按钮，只保留新建（46px 窄条容不下两个按钮）。
+        # ── 顶部：左「对话页」标题 + 右 新建/模式 纯图标按钮 ──
+        # 布局：标题左对齐占满剩余空间（stretch=1），图标按钮靠右。
+        # 收起态隐藏标题与模式按钮，只保留新建（46px 窄条容不下）。
+        # ★ 分支入口已迁移到助手消息卡片页脚（用户可在任意一条消息处分支）。
         self._top_bar = QWidget(self)
         top_layout = QHBoxLayout(self._top_bar)
         top_layout.setContentsMargins(8, 4, 4, 2)
@@ -1312,15 +1313,6 @@ class TabPanel(QWidget):
         self._sessions_label = QLabel("对话页", self._top_bar)
         self._sessions_label.setObjectName("sessionsLabel")
         top_layout.addWidget(self._sessions_label, 1)
-
-        self._branch_btn = TransparentToolButton(self._top_bar)
-        self._branch_btn.setIcon(get_icon("分支"))
-        self._branch_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
-        self._branch_btn.setFixedSize(24, 24)
-        self._branch_btn.setCursor(Qt.PointingHandCursor)
-        self._branch_btn.setToolTip("从当前标签页分支")
-        self._branch_btn.clicked.connect(self._on_branch_clicked)
-        top_layout.addWidget(self._branch_btn)
 
         self._new_btn = TransparentToolButton(self._top_bar)
         self._new_btn.setIcon(FIF.ADD)
@@ -1701,13 +1693,7 @@ class TabPanel(QWidget):
         except Exception as e:
             logger.error(f"[TabPanel] 侧边栏插件项 {info.item_id} 回调失败：{e}")
 
-    def _on_branch_clicked(self):
-        """分支按钮点击：从当前活动 Tab 分支"""
-        if 0 <= self._active_index < len(self._items):
-            self.tabBranchRequested.emit(self._active_index)
-
     # ── 侧边栏收起/展开 ──
-
     def set_animating(self, animating: bool):
         """标记侧边栏宽度动画进行中：动画期间抑制 resizeEvent 自动展开
 
@@ -1811,18 +1797,16 @@ class TabPanel(QWidget):
             return
 
         if self._collapsed:
-            # 收起时隐藏标题与分支/模式按钮，仅保留新建图标按钮（46px 窄条）
+            # 收起时隐藏标题与模式按钮，仅保留新建图标按钮（46px 窄条）
             self._sessions_label.setVisible(False)
-            self._branch_btn.setVisible(False)
             self._new_btn.setVisible(True)
             if hasattr(self, "_mode_btn"):
                 self._mode_btn.setVisible(False)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
         else:
-            # 展开时恢复标题 + 分支/新建/模式图标按钮
+            # 展开时恢复标题 + 新建/模式图标按钮
             self._sessions_label.setVisible(True)
-            self._branch_btn.setVisible(True)
             self._new_btn.setVisible(True)
             if hasattr(self, "_mode_btn"):
                 self._mode_btn.setVisible(True)
@@ -1968,27 +1952,21 @@ class TabPanel(QWidget):
         self._apply_custom_card_style(compact=self._collapsed)
         if hasattr(self, "_custom_plugin_arrow"):
             self._custom_plugin_arrow.update()
-        # ── 顶部：「对话页」标题 + 分支/新建图标按钮随主题/字号刷新 ──
+        # ── 顶部：「对话页」标题 + 新建/模式图标按钮随主题/字号刷新 ──
         self._refresh_top_bar_style()
 
     def _refresh_top_bar_style(self):
-        """刷新顶部行样式：「对话页」标题（颜色/字体）+ 图标按钮（主题图标/图标尺寸）
-
-        分支图标存在浅/深色两套资源，主题切换后需重新 setIcon，否则会沿用旧主题资源。
-        """
+        """刷新顶部行样式：「对话页」标题（颜色/字体）+ 图标按钮（主题图标/图标尺寸）"""
         if hasattr(self, "_sessions_label") and self._sessions_label is not None:
             self._sessions_label.setFont(get_unified_font(12))
             self._sessions_label.setStyleSheet(
                 f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}; font-weight: bold;"
             )
-        if hasattr(self, "_branch_btn") and self._branch_btn is not None:
-            self._branch_btn.setIcon(get_icon("分支"))
         # 竖向「⋯」是旋转位图（不随主题自动变色），主题/字号变更时必须重新生成
         if hasattr(self, "_mode_btn") and self._mode_btn is not None:
             self._mode_btn.setIcon(_vertical_more_icon())
         _icon_px = scale_icon_size(14)
         for _btn in (
-            getattr(self, "_branch_btn", None),
             getattr(self, "_new_btn", None),
             getattr(self, "_mode_btn", None),
         ):

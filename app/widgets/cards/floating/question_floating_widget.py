@@ -203,7 +203,7 @@ class _OptionRadioCard(QWidget):
         Colors.refresh()
         if self._selected:
             bg, border = Colors.REALTIME_TAG_BG, Colors.REALTIME_ACCENT
-            rf, tf = Colors.REALTIME_ACCENT, "#ffffff"
+            rf, tf = Colors.REALTIME_ACCENT, Colors.TEXT_PRIMARY
         elif self._hovered:
             bg, border = Colors.HOVER_BG, Colors.REALTIME_TAG_BORDER
             rf, tf = Colors.REALTIME_ACCENT, Colors.REALTIME_TEXT
@@ -330,7 +330,7 @@ class _OptionCheckCard(QWidget):
         Colors.refresh()
         if self._checked:
             bg, border = Colors.REALTIME_TAG_BG, Colors.REALTIME_ACCENT
-            cf, tf = Colors.REALTIME_ACCENT, "#ffffff"
+            cf, tf = Colors.REALTIME_ACCENT, Colors.TEXT_PRIMARY
         elif self._hovered:
             bg, border = Colors.HOVER_BG, Colors.REALTIME_TAG_BORDER
             cf, tf = Colors.REALTIME_ACCENT, Colors.REALTIME_TEXT
@@ -475,9 +475,9 @@ class _CustomInputCard(QWidget):
         self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._text_edit.textChanged.connect(self._on_text_changed)
         self._text_edit.installEventFilter(self)  # 监听 Resize/Show，等布局完成后再算高度
-        # 强制白色文字：Qt 样式表 color 对 QTextEdit 经常不生效，需用 QPalette
+        # QSS color 对 QTextEdit 常不生效，用 QPalette 兜底；色值走主题 token（浅色主题下不能硬编码白字）
         pal = self._text_edit.palette()
-        pal.setColor(QPalette.Text, QColor("#ffffff"))
+        pal.setColor(QPalette.Text, QColor(Colors.TEXT_PRIMARY))
         self._text_edit.setPalette(pal)
         self._right_layout.addWidget(self._text_edit)
 
@@ -588,7 +588,7 @@ class _CustomInputCard(QWidget):
         Colors.refresh()
         if self._active:
             bg, border = Colors.REALTIME_TAG_BG, Colors.REALTIME_ACCENT
-            rf, tf = Colors.REALTIME_ACCENT, "#ffffff"
+            rf, tf = Colors.REALTIME_ACCENT, Colors.TEXT_PRIMARY
         else:
             bg, border = Colors.HOVER_BG, Colors.REALTIME_TAG_BORDER
             rf, tf = Colors.REALTIME_TEXT_SECONDARY, Colors.REALTIME_TEXT

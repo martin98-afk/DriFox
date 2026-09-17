@@ -7,6 +7,9 @@
 注意：项目笔记已交由 BuildSystemPrompt hook (read_project_notes) 从 AGENTS.md 读取注入。
 """
 
+import os
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +45,10 @@ class MemoryManagerCore:
         # 两个仓储
         self._entry_memories_repo: Optional[MemoryRepository] = None
         self._key_documents_repo: Optional[KeyDocumentsRepository] = None
+
+        # 失效 worktree 清理节流状态（key: 项目名或 "__all__"，value: monotonic 时间戳）
+        self._pruned_at: Dict[str, float] = {}
+        self._prune_lock = threading.Lock()
 
         # 初始化存储
         self._init_storage()
@@ -121,6 +128,78 @@ class MemoryManagerCore:
         if not self._key_documents_repo:
             return 0
         return self._key_documents_repo.clear_by_project(project)
+
+    def prune_stale_worktrees(self, project: str = "", throttle_seconds: float = 60.0) -> List[Dict[str, str]]:
+        """清理路径已失效的 git_worktree 关键文档（节流 + 工作目录善后）
+
+        自净化兜底：worktree-manager 的缺失检测数据源是 `git worktree list`，
+        目录被外部删除且 git 记录被 prune 之后，该路径再也不会出现在检测面，
+        DB 残留永久化——关键文档注入持续输出不存在的目录，工作目录计数被污染。
+
+        节流：PreUserMessage 每轮都拉关键文档上下文，这里按项目缓存上次执行时间
+        （默认 60s 一次），把 N 次 os.path.isdir 探测 + 可能的 DELETE 压到低频。
+
+        Args:
+            project: 限定项目名；空串表示扫描全部项目
+            throttle_seconds: 同一项目的节流窗口（秒）
+
+        Returns:
+            List[Dict[str, str]]: 被清理的 [{project, file_path}]，未执行时为空列表
+        """
+        if not self._key_documents_repo:
+            return []
+
+        key = project or "__all__"
+        now = time.monotonic()
+        with self._prune_lock:
+            last = self._pruned_at.get(key)
+            if last is not None and (now - last) < throttle_seconds:
+                return []
+
+        # 删除前先捕获各项目的工作目录：is_working_dir 标记就在待删记录上，
+        # 记录删掉后 get_working_directory 查不到，善后逻辑会永不触发
+        projects = [project] if project else self._key_documents_repo.get_all_projects()
+        wd_before = {p: self.get_working_directory(p) for p in projects}
+
+        removed = self._key_documents_repo.prune_stale_worktrees(project)
+
+        with self._prune_lock:
+            self._pruned_at[key] = now
+
+        for proj, path in removed:
+            wd = wd_before.get(proj)
+            if wd and os.path.normpath(wd) == os.path.normpath(path):
+                self._heal_dangling_workdir(proj)
+        return [{"project": p, "file_path": f} for p, f in removed]
+
+    def _heal_dangling_workdir(self, project: str) -> None:
+        """工作目录悬空（指向的记录已被清理）时，回退到仍存在的根目录
+
+        被清理的 worktree 恰是该项目工作目录时，标记随记录一起消失，工具链会在
+        不存在的目录里执行。优先回退到同项目内仍存在的非 worktree 根目录；
+        没有可用候选则清空该标记。
+        """
+        try:
+            docs = self.get_key_documents(project)
+            candidates = [
+                d.get("file_path", "")
+                for d in docs
+                if d.get("added_by") != "git_worktree" and os.path.isdir(d.get("file_path", ""))
+            ]
+            # 优先仍带根目录标记的候选，其次任意可用目录
+            root = next(
+                (d.get("file_path", "") for d in docs if d.get("is_working_dir") and d.get("file_path") in candidates),
+                "",
+            )
+            fallback = root or (candidates[0] if candidates else "")
+            if fallback:
+                self.set_working_directory(project, fallback)
+                logger.info(f"[MemoryManager] 工作目录悬空，回退到 {fallback}（项目: {project}）")
+            else:
+                self.set_working_directory(project, "clear")
+                logger.info(f"[MemoryManager] 工作目录悬空且无可用根目录，已清空（项目: {project}）")
+        except Exception as e:
+            logger.warning(f"[MemoryManager] 工作目录善后失败（项目: {project}）: {e}")
 
     def get_worktree_counts(self) -> Dict[str, int]:
         """获取所有项目的工作目录数量

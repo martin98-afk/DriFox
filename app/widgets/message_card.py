@@ -45,7 +45,9 @@ from pygments.lexers import TextLexer, get_lexer_by_name
 from PyQt5.QtCore import (
     QByteArray,
     QEasingCurve,
+    QElapsedTimer,
     QObject,
+    QSize,
     QThread,
     Qt,
     QTimer,
@@ -81,7 +83,6 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     MaskDialogBase,
-    SegmentedWidget,
     TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.card_widget import (
@@ -115,6 +116,8 @@ from app.utils.design_tokens import (
 # 保证 Web 侧（消息正文）与 Qt 侧（控件）使用同一套圆角节奏。
 _BORDER_RADIUS_CSS_VARS = BorderRadius.CSS_VARS
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
+from app.widgets.flow_layout import FlowLayout
 
 # 懒渲染占位 QSS（welcome / assistant 两条路径共用，T35 去重）：
 # 依赖 scale_font_size / get_font_family_css，故在 import 之后求值。
@@ -260,37 +263,24 @@ _TEXT_LEXER = TextLexer()
 # formatter 含动态字号，缓存当前字号对应的实例
 _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
 
-# ======== 流式边框调色板（模块级共享，修 #1）========
-# 原实现每张 MessageCard 构造时各 new 10+8 个 QColor（约 +18 个/卡），改为
-# 模块级共享 tuple。QColor 不可变，多卡共享同一批实例无副作用。
-_RAINBOW_NORMAL: tuple = tuple(
-    QColor(c)
-    for c in (
-        "#60D4FF",
-        "#40C8FF",
-        "#4DA6FF",
-        "#8B7BFF",
-        "#C084FC",
-        "#F472B6",
-        "#FB7185",
-        "#F59E0B",
-        "#34D399",
-        "#22D3EE",
-    )
-)
-_RAINBOW_RETRY: tuple = tuple(
-    QColor(c)
-    for c in (
-        "#ff2222",
-        "#aa0000",
-        "#ff3333",
-        "#880000",
-        "#ff1111",
-        "#bb0000",
-        "#ff4444",
-        "#990000",
-    )
-)
+# ======== 流式态单色 tint（替代原彩虹循环色板）========
+# 旧 _RAINBOW_NORMAL 为 10 色高饱和绕卡循环，色相跳变（青→紫→粉→橙→绿）
+# 过于抢眼；现流式指示统一走单色（accent / 警示红），运动只保留底部光块。
+_STREAM_TINT_RETRY = "#ff2222"
+
+# ======== 流式底部光块运动参数 ========
+# 单程时长(ms)：往返一趟 = 2 × _STREAM_BAND_SWEEP_MS
+_STREAM_BAND_SWEEP_MS = 1600.0
+# 单拍最大推进(ms)：主线程被内容渲染占满时 Qt 定时器会延迟触发，若按真实 dt
+# 全额推进，恢复后光块会一次瞬移到新位置（观感「跳变」）。钳到一帧多的量，
+# 掉帧只表现为动画变慢，不瞬移、也不在恢复时集中补帧（观感「卡住后猛冲」）。
+_STREAM_BAND_MAX_DT_MS = 100.0
+_STREAM_BAND_H = 3  # 光块高度(px)
+_STREAM_BAND_BOTTOM = 3  # 光块距卡片底边(px)
+# 动画帧脏区在光块上下的纵向余量(px)。必须让脏区保持在内壁描边**之上**：
+# 脏区一旦覆盖底部描边，重绘会先擦掉该带内的描边、而窄带重绘只画光块，
+# 描边就在「整卡重绘画出」与「动画帧擦掉」之间反复 —— 表现为下边框闪烁。
+_STREAM_BAND_REPAINT_PAD = 1
 
 # ===== 性能缓存：图标前缀和字号（避免每块代码都查主题和计算字号） =====
 _ICON_PREFIX_CACHE: str = "qrc:/icons"
@@ -4665,6 +4655,37 @@ def _format_elapsed(elapsed: float) -> str:
 
 
 # ======== WebViewer ========
+def _defer_emit(sender, fn):
+    """延迟到事件循环下一拍执行 ``fn``，并绑定到 ``sender`` 的生命周期。
+
+    用于 Chromium 回调栈（javaScriptConsoleMessage）内的动作类 emit：既要把
+    emit 挪出回调栈（族⑤），又要保证延迟期间 sender 不会被「销毁后照旧回调」
+    （族⑤-2）。
+
+    ⚠️ 不能退化为 ``QTimer.singleShot(0, fn)``：延迟期间若 sender 被销毁
+    （卡片卸载 / viewer 池回收 / 会话切换），回调照样执行 → 对已释放的 sender
+    调 emit → ACCESS_VIOLATION（实机 2026-09-16 22:46:30 例，崩在
+    ``Qt5Core!QObject::signalsBlocked`` +0x4 —— emit 第一步读
+    ``sender->d_ptr->blockSig``，此时对象内存已被释放清零）。
+
+    以 sender 为 parent 的一次性 QTimer 随 sender 析构而销毁，pending 的
+    timeout 不再派发，从根上掐断「延迟窗口内 sender 死亡」这条路径。
+    """
+    from PyQt5.QtCore import QTimer
+
+    timer = QTimer(sender)
+    timer.setSingleShot(True)
+
+    def _run():
+        try:
+            fn()
+        finally:
+            timer.deleteLater()
+
+    timer.timeout.connect(_run)
+    timer.start(0)
+
+
 class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
@@ -4732,15 +4753,16 @@ class ConsoleMonitorPage(QWebEnginePage):
         信号链——在「取消长请求 + 429 错误态 + 大批次虚拟滚动回收」窗口内，
         链上某跳 receiver 可能已析构但连接未断 → 悬空调用 → AV（崩点漂移
         但同一 Python 行，生命周期 bug）。动作类 emit 统一改为
-        ``QTimer.singleShot(0, ...)`` 延迟到事件循环下一拍派发：Chromium
+        ``_defer_emit(self, ...)`` 延迟到事件循环下一拍派发：Chromium
         回调栈立即返回，掐断「回调栈内同步进 Qt 信号链」的必要条件。
         lambda 闭包参数用默认参固化，防迟到绑定。
+
+        ⚠️ 族⑤-2：延迟回调必须绑定本 page 生命周期（见 :func:`_defer_emit`），
+        否则延迟期间 page 被销毁后回调仍执行 → 对已释放 sender emit → AV。
 
         例外：pywebview_height / cardReadingChanged / contentReady 是流式
         布局高频信号，延迟会破坏帧时序，保持同步。
         """
-        from PyQt5.QtCore import QTimer  # [T43] 延迟派发用（本函数作用域内此前未导入）
-
         msg = message.strip()
         # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
         # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
@@ -4775,9 +4797,11 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     parts = msg.split("|||")
                     # [T43] 延迟派发（族⑤）：默认参固化 unquote 结果
-                    QTimer.singleShot(
-                        0,
-                        lambda a1=urllib.parse.unquote(parts[1]), a2=urllib.parse.unquote(parts[2]): self.contextActionRequested.emit(a1, a2),
+                    _defer_emit(
+                        self,
+                        lambda a1=urllib.parse.unquote(parts[1]), a2=urllib.parse.unquote(parts[2]): (
+                            self.contextActionRequested.emit(a1, a2)
+                        ),
                     )
                 except Exception:
                     pass
@@ -4792,8 +4816,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                     _text = _b64mod.b64decode(msg.split("fence_prompt:", 1)[1]).decode("utf-8")
                     if _text.strip():
                         # [T43] 延迟派发（族⑤），与 context||| 同链路
-                        QTimer.singleShot(
-                            0,
+                        _defer_emit(
+                            self,
                             lambda a1=_text: self.contextActionRequested.emit(a1, "ask"),
                         )
                 except Exception:
@@ -4805,7 +4829,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     url_str = msg.split("preview_image:", 1)[1]
                     # [T43] 延迟派发（族⑤）
-                    QTimer.singleShot(0, lambda u=url_str: self.previewImageRequested.emit(u))
+                    _defer_emit(self, lambda u=url_str: self.previewImageRequested.emit(u))
                 except Exception:
                     pass
             elif "open_url:" in msg:
@@ -4843,7 +4867,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     tool_call_id = msg.split("tool_diff:", 1)[1]
                     # [T43] 延迟派发（族⑤）
-                    QTimer.singleShot(0, lambda tid=tool_call_id: self.toolDiffRequested.emit(tid))
+                    _defer_emit(self, lambda tid=tool_call_id: self.toolDiffRequested.emit(tid))
                 except Exception:
                     pass
             elif "subagent_log:" in msg:
@@ -4851,7 +4875,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     task_ids = msg.split("subagent_log:", 1)[1]
                     # [T43] 延迟派发（族⑤）
-                    QTimer.singleShot(0, lambda t=task_ids: self.subAgentLogRequested.emit(t))
+                    _defer_emit(self, lambda t=task_ids: self.subAgentLogRequested.emit(t))
                 except Exception:
                     pass
             elif "save_file:" in msg:
@@ -4873,8 +4897,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                     chart_type, payload = rest.split(":", 1)
                     if chart_type in ("echarts", "mermaid", "svg", "html") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
                         # [T43] 延迟派发（族⑤）
-                        QTimer.singleShot(
-                            0,
+                        _defer_emit(
+                            self,
                             lambda ct=chart_type, pl=payload: self.chartExpandRequested.emit(ct, pl),
                         )
                 except Exception:
@@ -4886,8 +4910,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                     wtype, payload = rest.split(":", 1)
                     if wtype in ("svg", "html") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
                         # [T43] 延迟派发（族⑤）
-                        QTimer.singleShot(
-                            0,
+                        _defer_emit(
+                            self,
                             lambda wt=wtype, pl=payload: self.saveWidgetFileRequested.emit(wt, pl),
                         )
                 except Exception:
@@ -4899,8 +4923,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                     name_b64, png_b64 = rest.split(":", 1)
                     if len(png_b64) <= _MAX_CHART_PAYLOAD_B64:
                         # [T43] 延迟派发（族⑤）
-                        QTimer.singleShot(
-                            0,
+                        _defer_emit(
+                            self,
                             lambda nb=name_b64, pb=png_b64: self.saveChartPngRequested.emit(nb, pb),
                         )
                 except Exception:
@@ -4909,9 +4933,11 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     p = msg.split(":")
                     # [T43] 延迟派发（族⑤）
-                    QTimer.singleShot(
-                        0,
-                        lambda code=base64.b64decode(p[2]).decode("utf-8"), act=p[1]: self.codeActionRequested.emit(code, act),
+                    _defer_emit(
+                        self,
+                        lambda code=base64.b64decode(p[2]).decode("utf-8"), act=p[1]: self.codeActionRequested.emit(
+                            code, act
+                        ),
                     )
                 except Exception:
                     pass
@@ -6318,24 +6344,11 @@ class CodeWebViewer(QWebEngineView):
                     gap: 6px;
                     margin-bottom: 8px;
                 }}
-                .session-header-icon {{
-                    font-size: {tag_font_size}px;
-                    line-height: 1;
-                }}
                 .session-header-title {{
                     font-size: {tag_font_size}px;
                     font-weight: 600;
                     color: var(--text);
                     letter-spacing: 0.02em;
-                }}
-                .session-header-count {{
-                    font-size: {tiny_font_size}px;
-                    color: var(--accent-text);
-                    background: var(--accent-soft);
-                    border: 1px solid var(--accent-border-weak);
-                    padding: 0 7px;
-                    border-radius: 999px;
-                    line-height: 1.7;
                 }}
                 /* 分区右侧「全部」快捷按钮：打开工作台历史会话页（复用 context-tag 点击链） */
                 .session-header-more {{
@@ -6386,17 +6399,6 @@ class CodeWebViewer(QWebEngineView):
                     transform: translateX(2px);
                     box-shadow: 0 2px 10px var(--accent-glow);
                 }}
-                .session-item-badge {{
-                    flex: 0 0 auto;
-                    width: 30px;
-                    height: 30px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    border-radius: 9px;
-                    font-size: 14px;
-                    line-height: 1;
-                }}
                 .session-item-body {{
                     flex: 1;
                     min-width: 0;
@@ -6426,7 +6428,7 @@ class CodeWebViewer(QWebEngineView):
                     transition: opacity 0.18s ease, transform 0.18s ease;
                     line-height: 1;
                 }}
-                /* 最近会话右侧相对时间 tag（仅 count_mode=False 输出） */
+                /* 会话卡右侧状态 tag：最近=相对时间 / 最活跃=消息数，同一套中性色 */
                 .session-item-tag {{
                     flex: 0 0 auto;
                     font-size: {tiny_font_size}px;
@@ -6437,11 +6439,6 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: 6px;
                     line-height: 1.4;
                     white-space: nowrap;
-                }}
-                /* 最活跃会话右侧热度 tag（count_mode=True 输出） */
-                .session-item-tag-warn {{
-                    color: #ea580c;
-                    background: rgba(234, 88, 12, 0.12);
                 }}
                 .session-item.context-tag:hover .session-item-arrow {{
                     opacity: 1;
@@ -12607,6 +12604,24 @@ class PlainTextViewer(QWidget):
         self._resize_debounce_timer.stop()
         self._resize_debounce_timer.start()
 
+    def sizeHint(self):
+        """返回**内容实测**尺寸。
+
+        ⚠️ QWidget 默认 sizeHint 来自内部 QTextEdit 的默认值（272x200），与本控件
+        经 ``_update_height`` 算出的真实尺寸无关。控件被 ``setFixedSize`` 钉住后，
+        min/max 是对的，但 sizeHint 仍是 200 高——**父级布局按 sizeHint 分配空间**，
+        于是中间容器（_user_bubble）被撑高、气泡与下方按钮栏脱节（2026-09-16
+        hover/图片错位问题的根因之一）。这里改为返回当前实测量。
+        """
+        size = super().sizeHint()
+        if self.width() > 0 and self.height() > 0:
+            return QSize(self.width(), self.height())
+        return QSize(size.width(), max(40, min(size.height(), self.MAX_HEIGHT)))
+
+    def minimumSizeHint(self):
+        """与 sizeHint 一致：控件尺寸由内容决定，不参与父级拉伸。"""
+        return self.sizeHint()
+
     def _do_resize_update(self):
         """防抖后执行高度更新"""
         self._update_height()
@@ -13090,11 +13105,17 @@ class MessageCard(SimpleCardWidget):
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     cardDiffRequested = pyqtSignal(int, int)  # round_index, message_index（消息在 _message_batch 中的索引）
     reviewRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚 Review 按钮时触发
+    branchRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚「分支」按钮时触发
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
     welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / 插件注册 tab）
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出（内部处理保存，不透传）
+
+    # 流式实时吞吐采样：单段「出字间隔」计入上限（秒）。间隔超过它视为工具执行
+    # / 请求等待，不计入生成秒 —— 工具循环里卡片不重建（start_elapsed_tracking
+    # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
+    _LIVE_GAP_CAP_S = 2.0
 
     def __init__(
         self,
@@ -13106,6 +13127,8 @@ class MessageCard(SimpleCardWidget):
         model_name: str = None,
         provider_name: str = None,
         config_id: str = None,
+        identity: Optional[Any] = None,
+        source_message: Optional[dict] = None,
     ):
         super().__init__(parent)
         self._parent = parent
@@ -13113,6 +13136,13 @@ class MessageCard(SimpleCardWidget):
         self.model_name = model_name
         self.provider_name = provider_name
         self._provider_config_id = config_id  # UUID key in _valid_configs, for precise provider lookup
+        # 消息发送者身份（MessageIdentity 实例；None = 由 _ensure_identity 按 role 解析）
+        self._identity = identity
+        self._identity_header = None  # IdentityHeader（懒建；开关关闭时保持 None）
+        # 消息源数据（可选）：历史加载 / TeamMail 等场景由调用方注入，用于解析
+        # 消息级身份（如从邮件内容取发送者名）。必须早于 _setup_ui 赋值——
+        # 身份行在 __init__ 内构建，晚赋值会拿到未注入的源。
+        self._source_message = source_message
         self.timestamp = timestamp or datetime.now().strftime("%m-%d %H:%M")
         # 历史数据 timestamp 格式为 %Y-%m-%d %H:%M:%S，转为 %m-%d %H:%M
         if self.timestamp and len(self.timestamp) >= 19:
@@ -13121,9 +13151,6 @@ class MessageCard(SimpleCardWidget):
                 self.timestamp = dt.strftime("%m-%d %H:%M")
             except ValueError:
                 self.timestamp = self.timestamp[:14]
-        # 助手卡片初始不显示时间，流完成后再设模型名称或时间
-        if role == "assistant" and not timestamp:
-            self.timestamp = ""
         self.error = error
         self._interactive_options: List[dict] = []
         self._content_data: Any = [] if role == "assistant" else ""
@@ -13150,27 +13177,25 @@ class MessageCard(SimpleCardWidget):
         self._footer_bar: Optional[QWidget] = None
         self._footer_model_label: Optional[QLabel] = None
         self._footer_elapsed_label: Optional[QLabel] = None
-        self._footer_tokens_label: Optional[QLabel] = None
-        self._footer_diff_stats_label: Optional[QLabel] = None
-        self._footer_review_btn: Optional[QLabel] = None
-        self._footer_sep1: Optional[QLabel] = None
-        self._footer_sep2: Optional[QLabel] = None
+        self._footer_diff_stats_label: Optional[QLabel] = None  # 差异胶囊内文本
+        self._footer_diff_pill: Optional[QWidget] = None  # 差异胶囊容器（文本 + 🔍 同舱）
+        # 左区成员表 [(分隔点或None, label)]：耗时 + 插件 stat，· 分隔动态管理
+        self._footer_left_items: List[Tuple[Optional[QLabel], QLabel]] = []
+        # 插件注册的页脚信息项（footer_stat 槽位）：{stat_id: QLabel}
+        self._footer_stat_labels: Dict[str, QLabel] = {}
         # 耗时实时计时器
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.timeout.connect(self._update_elapsed_display)
         self._elapsed_start_time: Optional[float] = None
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._update_anim)
-        self._pulse_phase = 0.0
-        # M1 性能缓存：流式脉动渐变/调色板/裁剪路径模板（相位无关对象，
-        # paintEvent 内仅改色/坐标，避免每帧 new 数十个临时对象）。
-        self._rainbow_normal = _RAINBOW_NORMAL  # 模块级共享，0 个新 QColor
-        self._rainbow_retry = _RAINBOW_RETRY
-        self._grad_main, self._grad_inner, self._grad_glow = (QLinearGradient(0, 0, 1, 1) for _ in range(3))
-        self._clip_inner = self._clip_outer = self._clip_inner_edge = self._clip_border = QPainterPath()
-        self._clip_inner_border = self._clip_shimmer = self._clip_top = self._clip_glow_region = (
-            self._clip_border_region
-        ) = QPainterPath()
+        # 动画累积时间(ms)：光块位置与重试 spinner 都由它推导，帧率抖动不改变速度
+        self._anim_t_ms = 0.0
+        self._anim_clock = QElapsedTimer()
+        self._anim_clock.start()
+        self._grad_main, self._grad_inner = (QLinearGradient(0, 0, 1, 1) for _ in range(2))
+        self._clip_inner = self._clip_border = QPainterPath()
+        self._clip_inner_border = self._clip_border_region = QPainterPath()
         self._clip_w = self._clip_h = -1
         self._height_anim = QVariantAnimation(self)
         # 插值时长占位（见下：随即被 setDuration(0) 覆盖，实际长度由每轮动画
@@ -13240,7 +13265,12 @@ class MessageCard(SimpleCardWidget):
         self._welcome_greeting: str = ""
         self._welcome_recent: list = []
         self._welcome_top: list = []
-        self._welcome_mode_tabs: Optional["SegmentedWidget"] = None
+        # 欢迎 tab 条：宿主容器 + 按钮列表 + 滑动指示器控制器（见 _build_welcome_mode_tabs）
+        self._welcome_tab_host: Optional[QWidget] = None
+        self._welcome_tab_buttons: list = []
+        self._welcome_tab_ids: list = []
+        self._welcome_indicator_ctl: Optional[TabIndicatorController] = None
+        self._welcome_tabs_bar_layout: Optional["FlowLayout"] = None
         self._pending_welcome_md: Optional[str] = None  # viewer 懒渲染前的等待内容
         # 异步刷新事件回调引用（destroyed 退订时按 is 匹配）
         self._welcome_refresh_cb: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -13300,7 +13330,6 @@ class MessageCard(SimpleCardWidget):
                 "accent": Colors.ASSISTANT_CARD_ACCENT,
                 "text": Colors.ASSISTANT_CARD_TEXT,
                 "muted": Colors.ASSISTANT_CARD_MUTED,
-                "side": "left",
             },
             "welcome": {
                 "avatar": "DX",
@@ -13311,7 +13340,6 @@ class MessageCard(SimpleCardWidget):
                 "accent": Colors.ASSISTANT_CARD_ACCENT,
                 "text": Colors.ASSISTANT_CARD_TEXT,
                 "muted": Colors.ASSISTANT_CARD_MUTED,
-                "side": "left",
             },
             "user": {
                 "avatar": "User",
@@ -13322,7 +13350,6 @@ class MessageCard(SimpleCardWidget):
                 "accent": Colors.USER_CARD_ACCENT,
                 "text": Colors.USER_CARD_TEXT,
                 "muted": Colors.USER_CARD_MUTED,
-                "side": "right",
             },
         }
         theme = dict(themes.get(role, themes["assistant"]))
@@ -13405,6 +13432,12 @@ class MessageCard(SimpleCardWidget):
                     }}
                     """
                 )
+        # 刷新身份行名称颜色（跟随新主题）
+        if getattr(self, "_identity_header", None) is not None:
+            try:
+                self._identity_header.apply_text_color(self._theme["muted"])
+            except RuntimeError:
+                self._identity_header = None
         # 刷新 viewer 主题（注入 CSS 变量 + 失效实例渲染缓存）
         # ⚠️ 顺序必须在 _refresh_viewer_font() 之前：主题变化时先让
         # refresh_theme 清掉 _cached_streaming_html 等实例缓存并注入新 CSS
@@ -13414,6 +13447,19 @@ class MessageCard(SimpleCardWidget):
         # 刷新富文本视图字体并触发重渲染（缓存已在 refresh_theme 中失效）
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
             self.viewer._refresh_viewer_font()
+        # 欢迎 tab 条：文字/hover/选中底色都由 CustomTabButton 实时取 Colors token，
+        # refresh_style 重算 QSS 即可；胶囊（_TabIndicator）配色每次 paint 实时读，
+        # 补一次 update 触发重绘。
+        for _btn in self._welcome_tab_buttons:
+            try:
+                _btn.refresh_style()
+            except RuntimeError:
+                continue
+        if self._welcome_indicator_ctl is not None:
+            try:
+                self._welcome_indicator_ctl.indicator.update()
+            except RuntimeError:
+                self._welcome_indicator_ctl = None
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
@@ -13476,7 +13522,12 @@ class MessageCard(SimpleCardWidget):
             self._refresh_footer_separators()
 
     def _build_footer_bar(self, main: QVBoxLayout):
-        """构建助手卡片底部极简元信息栏：差异统计（左） | token | 耗时 | 模型（右）"""
+        """构建助手卡片底部极简元信息栏
+
+        布局：左侧纯文本（耗时 + 插件注册信息项），右侧全可点击
+        （模型胶囊 / 差异胶囊含内嵌 Review，分支+复制 hover 浮现 + 插件按钮）。
+        token 总量与吞吐量的展示已移除，由插件经 footer_stat 槽位注入。
+        """
         bar = QWidget(self)
         self._footer_bar = bar
         bar.setStyleSheet("background: transparent;")
@@ -13485,64 +13536,15 @@ class MessageCard(SimpleCardWidget):
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(0)
 
-        accent = self._theme["accent"]
         font_css = get_font_family_css()
-        # 统一所有 footer 元素字号为 10px（原 9px 文字 + 11px emoji 混用 → 基线错位）
+        # 统一所有 footer 元素字号为 10px；信息区 muted 降噪（accent 留给正文强调）
         label_style = (
             f"{font_css} font-size: {scale_font_size(10)}px; "
-            f"color: {accent}; font-weight: 400; padding: 0px; margin: 0px;"
+            f"color: {self._theme['muted']}; font-weight: 400; padding: 0px; margin: 0px;"
         )
-
-        # 差异统计（左对齐，极简风格，点击弹出差异弹窗）
-        diff_l = QLabel("", self)
-        diff_l.setStyleSheet(label_style)
-        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        diff_l.setVisible(False)
-        diff_l.setCursor(Qt.PointingHandCursor)
-        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
-        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
-        self._footer_diff_stats_label = diff_l
-        layout.addWidget(diff_l)
-
-        # Review 按钮（使用 Search 图标），点击触发 code-reviewer 子智能体
-        icon_size = scale_font_size(10)
-        review_btn = QLabel(self)
-        review_btn.setObjectName("footer_review_btn")
-        review_btn.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
-        review_btn.setFixedSize(icon_size + 4, icon_size + 4)
-        review_btn.setScaledContents(True)
-        review_btn.setStyleSheet(
-            "QLabel {"
-            " background: transparent; padding: 2px; margin: 0px;"
-            " border-radius: 3px;"
-            " }"
-            "QLabel:hover { background: rgba(128,128,128,0.18); }"
-        )
-        review_btn.setAlignment(Qt.AlignCenter)
-        review_btn.setCursor(Qt.PointingHandCursor)
-        review_btn.setVisible(False)
-        review_btn.mousePressEvent = lambda e: self._emit_review_requested()
-        install_hover_tooltip(review_btn, "用 code-reviewer 子智能体快速审查本次修改")
-        self._footer_review_btn = review_btn
-        layout.addWidget(review_btn)
-
-        layout.addStretch()
-
-        # Token 消耗
-        tokens_l = QLabel("", self)
-        tokens_l.setStyleSheet(label_style)
-        tokens_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        tokens_l.setVisible(False)
-        self._footer_tokens_label = tokens_l
-        layout.addWidget(tokens_l)
-
-        # 分隔点 1（token ↔ 耗时）
-        sep1 = QLabel("·", self)
-        sep1.setStyleSheet(label_style)
-        sep1.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        sep1.setVisible(False)
-        self._footer_sep1 = sep1
-        layout.addWidget(sep1)
+        # 插件 stat 的基准样式：配色时只在它后面追加 color，保证与耗时 label
+        # 同字号、同内边距（两者并排，样式来源必须一致才不会错行）
+        self._footer_stat_base_style = label_style
 
         # 耗时
         elapsed_l = QLabel("", self)
@@ -13551,19 +13553,63 @@ class MessageCard(SimpleCardWidget):
         elapsed_l.setVisible(False)
         self._footer_elapsed_label = elapsed_l
         layout.addWidget(elapsed_l)
+        self._footer_left_items.append((None, elapsed_l))
 
-        # 分隔点 2（耗时 ↔ 模型）
-        sep2 = QLabel("·", self)
-        sep2.setStyleSheet(label_style)
-        sep2.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        sep2.setVisible(False)
-        self._footer_sep2 = sep2
-        layout.addWidget(sep2)
+        # 插件注册信息项（footer_stat 槽位）：耗时右侧依次排布，· 分隔动态管理
+        footer_stats = []
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        # 模型名称（可点击，仅显示模型名，服务商名已隐藏但保留用于跳转）
+            footer_stats = UIPluginRegistry.get_instance().get_footer_stats()
+        except Exception:
+            footer_stats = []
+        for info in footer_stats:
+            sep = QLabel("·", self)
+            sep.setStyleSheet(label_style)
+            sep.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            sep.setVisible(False)
+            stat_l = QLabel("", self)
+            stat_l.setStyleSheet(label_style)
+            stat_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            stat_l.setVisible(False)
+            self._footer_stat_labels[info.stat_id] = stat_l
+            layout.addWidget(sep)
+            layout.addWidget(stat_l)
+            self._footer_left_items.append((sep, stat_l))
+
+        # Review 图标（内嵌差异胶囊右端；点击触发 code-reviewer 子智能体）
+        # ★ 胶囊存在时常显，不与 hover 组一起隐现。
+        icon_size = scale_font_size(10)
+        review_icon = QLabel(self)
+        review_icon.setObjectName("footer_review_icon")
+        review_icon.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
+        review_icon.setFixedSize(icon_size + 4, icon_size + 4)
+        review_icon.setScaledContents(True)
+        review_icon.setStyleSheet(
+            "QLabel {"
+            " background: transparent; padding: 1px; margin: 0px;"
+            # 父级差异胶囊用 QWidget 选择器设了 1px 实线边框，类型选择器会级联到
+            # 子 QLabel；不显式清掉就会在放大镜外露出一圈方框
+            " border: none; border-radius: 3px;"
+            " }"
+            "QLabel:hover { background: rgba(128,128,128,0.18); border: none; }"
+        )
+        review_icon.setAlignment(Qt.AlignCenter)
+        review_icon.setCursor(Qt.PointingHandCursor)
+        review_icon.mousePressEvent = lambda e: self._emit_review_requested()
+        install_hover_tooltip(review_icon, "用 code-reviewer 子智能体快速审查本次修改")
+        self._footer_review_icon = review_icon
+
+        # 弹性分隔：左侧纯文本信息区 | 右侧可点击区（胶囊/按钮）
+        layout.addStretch()
+
+        # 模型胶囊（可点击跳目标配置；仅显示模型名，服务商名隐藏但保留用于跳转）
         footer_text = self._get_footer_model_text()
         model_l = QLabel(footer_text, self)
-        model_l.setStyleSheet(f"{label_style}")
+        model_l.setStyleSheet(
+            f"{font_css} font-size: {scale_font_size(10)}px; color: {self._theme['muted']};"
+            f" border: 1px solid {Colors.BORDER}; border-radius: 8px; padding: 1px 8px;"
+        )
         model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
@@ -13572,14 +13618,42 @@ class MessageCard(SimpleCardWidget):
         self._footer_model_label = model_l
         layout.addWidget(model_l)
 
-        # 全减模式：hover 操作组（复制/差异对比），卡片 hover 时浮现（与 user 气泡一致）。
-        # 固定高度占位：按钮显隐切换时 footer 高度不变，卡片不跳动。
+        # 差异胶囊：文本（点击弹差异弹窗）+ 🔍（点击触发 Review）同舱，有 diff 才显示
+        diff_pill = QWidget(self)
+        diff_pill.setAttribute(Qt.WA_StyledBackground, True)  # 纯 QWidget 让 QSS border 生效
+        diff_pill.setStyleSheet(
+            f"QWidget {{ background: transparent; border: 1px solid {Colors.BORDER};"
+            f" border-radius: 8px; margin-left: 4px; }}"
+        )
+        dp = QHBoxLayout(diff_pill)
+        dp.setContentsMargins(8, 0, 2, 0)
+        dp.setSpacing(2)
+        diff_l = QLabel("", diff_pill)
+        diff_l.setStyleSheet(
+            f"{font_css} font-size: {scale_font_size(10)}px; color: {self._theme['muted']};"
+            f" background: transparent; border: none; padding: 1px 0px; margin: 0px;"
+        )
+        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        diff_l.setVisible(False)
+        diff_l.setCursor(Qt.PointingHandCursor)
+        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
+        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
+        self._footer_diff_stats_label = diff_l
+        dp.addWidget(diff_l)
+        dp.addWidget(review_icon, 0, Qt.AlignVCenter)
+        diff_pill.setVisible(False)
+        self._footer_diff_pill = diff_pill
+        layout.addWidget(diff_pill)
+
+        # 右侧操作区：hover 浮现组（复制 / 分支 / 插件按钮）。
+        # 固定尺寸占位：按钮显隐切换时 footer 尺寸不变，卡片不跳动、不重排。
         hover_btns = QWidget(self)
         self._assistant_action_btns = hover_btns
         hb = QHBoxLayout(hover_btns)
         hb.setContentsMargins(0, 0, 0, 0)
         hb.setSpacing(2)
         for ic, tp, cb in [
+            (get_icon("分支"), "从此条分支新对话", lambda: self._emit_branch_requested()),
             (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
         ]:
             b = TransparentToolButton(ic, self)
@@ -13588,18 +13662,47 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(20, 20)  # 弱化处理：比原顶部按钮 32px 更小
             install_hover_tooltip(b, delay_ms=200)
             hb.addWidget(b)
-        hover_btns.setFixedHeight(20)
-        hover_btns.setVisible(False)  # hover 浮现，保持卡片简洁
+        # 插件注册按钮（footer_action 槽位）：与内置按钮同排同风格
+        footer_actions = []
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            footer_actions = UIPluginRegistry.get_instance().get_footer_actions()
+        except Exception:
+            footer_actions = []
+        for info in footer_actions:
+            try:
+                from PyQt5.QtGui import QIcon
+
+                from app.utils.theme_manager import theme_manager
+
+                try:
+                    is_light = theme_manager.is_light_theme()
+                except Exception:
+                    is_light = False
+                path = info.icon_light_path if (is_light and info.icon_light_path) else info.icon_path
+                b = TransparentToolButton(QIcon(str(path)) if path else QIcon(), self)
+                if info.tooltip:
+                    b.setToolTip(info.tooltip)
+                    install_hover_tooltip(b, delay_ms=200)
+                b.setFixedSize(20, 20)
+                b.clicked.connect(lambda _c=False, _info=info: self._on_footer_plugin_action(_info))
+                hb.addWidget(b)
+            except Exception as e:
+                logger.warning(f"[MessageCard] 页脚插件按钮 {getattr(info, 'action_id', '?')} 构建失败: {e}")
+        # 容器整体显隐（assistant 卡片为定宽布局，显隐只引起 footer 内部横移，
+        # 不会撑宽卡片；user 气泡仍走 _set_actions_visible 子按钮显隐防变形）
+        hover_btns.setVisible(False)
         layout.addWidget(hover_btns)
 
         main.addWidget(bar)
 
     def set_meta_info(self, elapsed: float = None, token_usage: dict = None):
-        """设置助手卡片的元信息（耗时和 token 消耗）
+        """设置助手卡片的元信息（耗时；token 总量与速度展示已移除，由插件经 footer_stat 注入）
 
         Args:
             elapsed: 响应耗时（秒），如 3.2。传入后停止实时计时。
-            token_usage: 如 {"input": 1234, "output": 567, "total": 1801}
+            token_usage: 如 {"input": 1234, "output": 567, "total": 1801}，透传给 provider 自行取舍
         """
         if self.role != "assistant":
             return
@@ -13608,31 +13711,50 @@ class MessageCard(SimpleCardWidget):
             self._elapsed_timer.stop()
             self._elapsed_start_time = None
             try:
-                self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(elapsed)}")
+                self._footer_elapsed_label.setText(f"{_format_elapsed(elapsed)}")
                 self._footer_elapsed_label.setVisible(True)
             except RuntimeError:
                 # 🛡️ 防御：footer label 可能已被 C++ 侧销毁（deleteLater 排队中），
                 # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。
                 # 静默忽略（项目既有风格参考 _safe_report_height / L2465 先例）。
                 pass
-        # Token
-        if token_usage is not None and self._footer_tokens_label:
-            total = token_usage.get("total", 0)
-            if total >= 1000:
-                text = f"{total / 1000:.1f}K tokens"
-            else:
-                text = f"{total} tokens"
+        # Token 总量与速度展示已移除（footer_stat 槽位由插件注入）
+        # ⚠️ elapsed=None 是中间态调用（流式期间 _refresh_context_usage_indicator
+        # 每 500ms 只带 token_usage 刷圆环）：不得清 live 累计、不得刷 stat ——
+        # 否则平均分支拿不到落定值会把 stat 藏掉，与 1s tick 的实时值交替 → 闪烁。
+        if elapsed is not None:
+            # 轮次结束，清掉流式采样缓冲
+            self._stream_text_acc = ""
+            self._stream_gen_s = 0.0
+            self._stream_last_text_t = None
+            # 插件信息项按落定态刷新（token_usage 透传给 provider 自行取舍）
+            self._refresh_footer_stats(streaming=False, elapsed=elapsed, token_usage=token_usage)
+            # 单次补刷：历史会话加载 / 投影晚到的兜底（旧版 1s+2.5s 二连发是为等
+            # collector 投影；现在会话均值由插件累加表即时算出，1s 兜底足够）
+            self._schedule_stat_refresh(1000, elapsed, token_usage)
+
+    def _schedule_stat_refresh(self, delay_ms: int, elapsed, token_usage) -> None:
+        """延迟补刷页脚插件 stat（绑定卡片生命周期）。
+
+        ⚠️ 用绑定卡片生命周期的 QTimer 而非裸 singleShot（L14086 P050 同因：
+        延迟窗口内卡片销毁后回调访问已释放控件）。
+        """
+        if not self._footer_stat_labels:
+            return
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def _run() -> None:
             try:
-                self._footer_tokens_label.setText(text)
-                self._footer_tokens_label.setVisible(True)
-            except RuntimeError:
-                # 🛡️ 同上：token label 可能已被 C++ 侧销毁，静默忽略。
-                pass
-        # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）
-        self._refresh_footer_separators()
+                self._refresh_footer_stats(streaming=False, elapsed=elapsed, token_usage=token_usage)
+            finally:
+                timer.deleteLater()
+
+        timer.timeout.connect(_run)
+        timer.start(delay_ms)
 
     def set_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0):
-        """设置左对齐差异统计：📄N | +N | -N（点击弹出差异弹窗）
+        """设置差异徽章：N 文件 +N/-N（点击弹出差异弹窗）
 
         Args:
             files_count: 修改的文件数
@@ -13644,14 +13766,13 @@ class MessageCard(SimpleCardWidget):
         if not self._footer_diff_stats_label:
             return
         if files_count == 0 and additions == 0 and deletions == 0:
-            self._footer_diff_stats_label.setVisible(False)
-            # 同步隐藏 Review 按钮（没有 diff 时审查无意义）
-            if self._footer_review_btn:
-                self._footer_review_btn.setVisible(False)
+            # 无 diff：整舱隐藏（文本 + 内嵌 Review 同舱联动）
+            if self._footer_diff_pill:
+                self._footer_diff_pill.setVisible(False)
             return
 
-        accent = self._theme.get("accent", "#888888")
-        html = f'<span style="color:{accent};">📄{files_count}</span>'
+        muted = self._theme.get("muted", "#888888")
+        html = f'<span style="color:{muted};">{files_count} 文件</span>'
 
         add_del = []
         if additions > 0:
@@ -13665,9 +13786,9 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setTextFormat(Qt.RichText)
         self._footer_diff_stats_label.setVisible(True)
 
-        # 同步显示 Review 按钮（紧贴差异统计右侧）
-        if self._footer_review_btn:
-            self._footer_review_btn.setVisible(True)
+        # 整舱显示（含内嵌 Review 图标）
+        if self._footer_diff_pill:
+            self._footer_diff_pill.setVisible(True)
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0, seen_files: set = None):
         """增量累加差异统计（工具执行时实时调用，文件级去重避免多次编辑同一文件重复计数）
@@ -13718,19 +13839,117 @@ class MessageCard(SimpleCardWidget):
             )
 
     def _refresh_footer_separators(self):
-        """根据标签文本非空判断分隔点可见性（比 isVisible 更可靠）"""
+        """左区 · 分隔点可见性：前段有可见成员且当前成员非空才显示（比 isVisible 更可靠）"""
         try:
-            has_tokens = bool(self._footer_tokens_label and self._footer_tokens_label.text())
-            has_elapsed = bool(self._footer_elapsed_label and self._footer_elapsed_label.text())
-            has_model = bool(self._footer_model_label and self._footer_model_label.text())
-            if self._footer_sep1:
-                self._footer_sep1.setVisible(has_tokens and has_elapsed)
-            if self._footer_sep2:
-                self._footer_sep2.setVisible(has_elapsed and has_model)
+            seen_visible = False
+            for sep, label in getattr(self, "_footer_left_items", []):
+                label_ok = bool(label and label.text())
+                if sep is not None:
+                    sep.setVisible(seen_visible and label_ok)
+                seen_visible = seen_visible or label_ok
         except RuntimeError:
             # 🛡️ 防御：footer label / separator 可能已被 C++ 侧销毁（deleteLater 排队中），
             # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。静默忽略。
             pass
+
+    def _resolve_footer_host(self):
+        """沿父链查找宿主窗口（带 _window_id 的祖先），插件回调 context 用"""
+        p = self.parent()
+        while p is not None:
+            if getattr(p, "_window_id", None):
+                return p
+            p = p.parent()
+        return None
+
+    def _footer_stat_context(
+        self,
+        streaming: bool = False,
+        elapsed: float = None,
+        token_usage: dict = None,
+    ) -> Dict[str, Any]:
+        """组装 footer_stat / footer_action 回调 context（口径见 FooterStatInfo）"""
+        host = self._resolve_footer_host()
+        ctx: Dict[str, Any] = {
+            "window_id": getattr(host, "_window_id", "") if host is not None else "",
+            "main_widget": host,
+            "card": self,
+            "role": self.role,
+            "model_name": self.model_name,
+            "round_index": self._round_index,
+            "message_index": self._message_index,
+            "elapsed": elapsed,
+            "token_usage": token_usage,
+            "streaming": streaming,
+        }
+        if streaming:
+            # 流式实时采样：只给「本流累计原文」+「首字至今秒数」，token 估算与
+            # 吞吐量口径交给 provider（插件侧走 tiktoken/cl100k，中文约 1.2
+            # token/字）。主程序不再用 chars÷4 粗估（中文低估约 4~5 倍）。
+            ctx["live_text"] = getattr(self, "_stream_text_acc", "") or ""
+            # 生成秒 = 累计出字时间（已排除工具执行 / 长等待段）
+            ctx["live_gen_s"] = max(0.0, float(getattr(self, "_stream_gen_s", 0.0) or 0.0))
+        return ctx
+
+    def _refresh_footer_stats(
+        self, streaming: bool = False, elapsed: float = None, token_usage: dict = None
+    ):
+        """回调全部 footer_stat provider 并刷新对应 label（主线程节拍调用）"""
+        if self.role != "assistant" or not self._footer_stat_labels:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            infos = {i.stat_id: i for i in UIPluginRegistry.get_instance().get_footer_stats()}
+        except Exception:
+            return
+        ctx = self._footer_stat_context(streaming=streaming, elapsed=elapsed, token_usage=token_usage)
+        for stat_id, label in self._footer_stat_labels.items():
+            try:
+                info = infos.get(stat_id)
+                text = ""
+                if info is not None:
+                    val = None
+                    try:
+                        val = info.provider(ctx)
+                    except Exception as e:
+                        logger.warning(f"[MessageCard] footer_stat {stat_id} provider 失败: {e}")
+                    if val:
+                        text = str(val.get("text") or "")
+                        color = val.get("color")
+                        tip = val.get("tooltip")
+                        # ⚠️ 纯文本 + QSS 上色，不用 RichText：富文本 QLabel 的基线
+                        # 与 sizeHint 和耗时 label（纯文本）不同，两者并排会垂直错位；
+                        # 顺带避免插件文本里的 < & 被当标记解析。
+                        label.setTextFormat(Qt.PlainText)
+                        if label.text() != text:
+                            label.setText(text)
+                        if getattr(label, "_stat_color", None) != color:
+                            label._stat_color = color
+                            base = getattr(self, "_footer_stat_base_style", "")
+                            label.setStyleSheet(f"{base} color: {color};" if color else base)
+                        if tip:
+                            install_hover_tooltip(label, str(tip))
+                if not text:
+                    # provider 返回 None / 插件已注销 → 隐藏（分隔点联动收敛）
+                    if label.text():
+                        label.setText("")
+                        label.setVisible(False)
+                    continue
+                label.setVisible(True)
+            except RuntimeError:
+                # 🛡️ label 可能已被 C++ 侧销毁（deleteLater 排队中），跳过该成员
+                continue
+        self._refresh_footer_separators()
+
+    def _on_footer_plugin_action(self, info):
+        """页脚插件按钮点击 → 派发 on_click(context)"""
+        cb = getattr(info, "on_click", None)
+        if cb is None:
+            return
+        try:
+            cb(self._footer_stat_context())
+        except Exception as e:
+            logger.warning(f"[MessageCard] footer_action {getattr(info, 'action_id', '?')} 回调失败: {e}")
 
     def start_elapsed_tracking(self):
         """开始实时计时（流式输出时调用）"""
@@ -13739,13 +13958,18 @@ class MessageCard(SimpleCardWidget):
         if not self._footer_elapsed_label:
             return
         self._elapsed_start_time = time.time()
-        self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(0)}")
+        # 流式采样状态：update_content 累计原文与出字时间，首个内容 chunk 记时刻
+        self._stream_text_acc = ""
+        self._stream_gen_s = 0.0
+        self._stream_last_text_t = None
+        self._stream_first_text_t = None
+        self._footer_elapsed_label.setText(f"{_format_elapsed(0)}")
         self._footer_elapsed_label.setVisible(True)
-        self._refresh_footer_separators()
+        self._refresh_footer_stats(streaming=True)
         self._elapsed_timer.start(1000)  # 每秒更新
 
     def _update_elapsed_display(self):
-        """实时更新耗时显示"""
+        """实时更新耗时显示 + 插件页脚信息项（流式跟随刷新）"""
         if self._elapsed_start_time is None:
             self._elapsed_timer.stop()
             return
@@ -13754,77 +13978,255 @@ class MessageCard(SimpleCardWidget):
         if not self.isVisible():
             return
         elapsed = time.time() - self._elapsed_start_time
-        self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(elapsed)}")
+        self._footer_elapsed_label.setText(f"{_format_elapsed(elapsed)}")
+        # 插件信息项流式跟随（live 估算数据在 context 里，口径由 provider 定）
+        self._refresh_footer_stats(streaming=True, elapsed=elapsed)
 
     def _build_avatar_style(self):
         font_css = get_font_family_css()
         if self.role in ("welcome", "assistant"):
             return ""
+        # 头像直径 30px：首字母字号取 16px（直径的 ~53%），
+        # 与项目卡片 _SquareAvatar(14/24≈58%) 比例接近，避免字符过小看不清。
         return f"""
             QLabel {{
-                {font_css} font-size: {scale_font_size(12)}px;
+                {font_css} font-size: {scale_font_size(16)}px;
                 color: #FFFFFF;
                 font-weight: 700;
                 background: {self._theme["accent"]};
                 border: 1px solid rgba(255,255,255,0.12);
                 border-radius: 15px;
+                padding: 0px;
             }}
         """
 
-    # ========== 欢迎卡片 mode 切换（PyQt segmented tabs）==========
+    # ========== 欢迎卡片 mode 切换（自绘胶囊 tabs）==========
     # 内置项仅保留消息卡片核心（会话列表）。其余 tab 由插件通过
-    # ``UIPluginRegistry.register_welcome_tab`` 动态注入（如 📜 更新），
+    # ``UIPluginRegistry.register_welcome_tab`` 动态注入（如 更新），
     # 卸载/禁用对应插件后该 tab 自动消失，无需主程序介入。
+    # 标签文字统一剥离前导 emoji（见 _strip_label_emoji），与顶栏 / 工作台页签
+    # 共用「纯文字胶囊」视觉语言；插件 label 字面量无需改动。
     _WELCOME_MODE_ITEMS = [
-        ("sessions", "💬 会话"),
+        ("sessions", "会话"),
     ]
 
-    def _build_welcome_mode_tabs(self, top_layout):
-        """在卡片标题栏右上角构建 segmented tabs（welcome 角色专属）"""
-        seg = SegmentedWidget(self)
-        for i, (key, label) in enumerate(self._WELCOME_MODE_ITEMS):
-            seg.insertItem(i, key, label, onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k))
-        # 插件注册的欢迎 tab 动态追加（系统项之后）
+    #: 卡片内 tab 文字基准字号：比顶栏（13）略小，与卡片内分区标题（12）同档
+    _WELCOME_TAB_FONT = 12
+
+    @staticmethod
+    def _strip_label_emoji(label: str) -> str:
+        """剥离标签前导 emoji / 符号及分隔空白
+
+        插件 label 常见形如 ``"🤖 助手"`` / ``"📜 更新"``。彩色 emoji 与卡片内
+        线性图标体系混排显脏，这里统一在渲染层清洗：插件契约与字面量不动，
+        主程序单方面决定呈现方式，后续新增 tab 自动受益。
+        """
+        s = (label or "").strip()
+        stripped = re.sub(r"^[^\w\u4e00-\u9fff]+", "", s, flags=re.UNICODE).strip()
+        return stripped or s
+
+    def _welcome_tab_specs(self) -> list:
+        """当前欢迎 tab 规格：[(mode_key, 显示文本), ...]
+
+        内置项在前，插件注册项按注册序追加（与旧 SegmentedWidget 顺序一致）。
+        """
+        specs = [(key, self._strip_label_emoji(label)) for key, label in self._WELCOME_MODE_ITEMS]
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             for key, info in UIPluginRegistry.get_instance().get_welcome_tabs().items():
-                seg.addItem(
-                    key,
-                    info.label,
-                    onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k),
-                )
+                specs.append((key, self._strip_label_emoji(info.label)))
         except Exception:
             pass
-        self._welcome_mode_tabs = seg
-        top_layout.addWidget(seg)
-        top_layout.addStretch()
-        # 字号适配：SegmentedItem 内部写死 setFont(self, 14)，不读当前 delta，
-        # 必须在此按当前字号缩放一次，否则新建/重建欢迎卡片时 tab 字体恒为 14px。
+        return specs
+
+    def _build_welcome_mode_tabs(self, parent_layout):
+        """构建欢迎 tab 条（welcome 角色专属）：卡片底部独立一行
+
+        与顶栏 / 工作台页签共用同一套组件（``CustomTabButton`` +
+        ``TabIndicatorController`` 滑动胶囊）：未选中透明底、hover 前景色 6%、
+        选中前景色 14% 底 + 文字提亮加粗。FlowLayout 负责自动折行，其
+        minimumWidth 只取最宽单个子项，不会把卡片撑宽。
+        """
+        host = QWidget(self)
+        self._welcome_tab_host = host
+        host.setStyleSheet("background: transparent;")
+        # 高度策略：FlowLayout 的 heightForWidth 已是真实折行高度，但 Qt5 在
+        # 「子布局带 heightForWidth」的子 widget 上会用 **minimumWidth** 估高
+        # （本项目 P010 记录过 PyQt5 不派发 Python 侧 sizeHint override）——
+        # 6 个 tab 会被当成 3 行 = 90px，实际 1 行只需 30px，多出的就是卡片
+        # 底部空白。这里不依赖 Qt 估高：布局跑完后按实测宽度主动设高
+        # （见 _sync_welcome_tab_host_height）。
+        _sp = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        host.setSizePolicy(_sp)
+        # margins：上留白 4，左右 4（居中时对称即可）
+        bar = FlowLayout(host, spacing=2, alignment=Qt.AlignHCenter, margins=(4, 4, 4, 0))
+        self._welcome_tabs_bar_layout = bar
+        parent_layout.addWidget(host)
+
+        # 滑动指示器：构造必须早于任何按钮加入，天然垫在按钮之下
+        self._welcome_indicator_ctl = TabIndicatorController(
+            host,
+            self,
+            self._welcome_tab_active_geometry,
+        )
+        self._rebuild_welcome_tab_buttons(current_mode=self._welcome_mode or None)
+
+    def _sync_welcome_tab_host_height(self) -> None:
+        """按 FlowLayout 在**当前实测宽度**下的折行结果给宿主设高
+
+        窗口 resize 导致 tab 重新折行时必须重调，否则高度停在旧行数
+        （多一行会被裁、少一行留空白）。
+        """
+        host = self._welcome_tab_host
+        bar = self._welcome_tabs_bar_layout
+        if host is None or bar is None:
+            return
+        width = host.width()
+        if width <= 0:
+            return
+        try:
+            h = bar.heightForWidth(width)
+            if h > 0 and host.height() != h:
+                host.setFixedHeight(h)
+        except RuntimeError:
+            self._welcome_tab_host = None
+            self._welcome_tabs_bar_layout = None
+
+    def _welcome_tab_active_geometry(self):
+        """当前激活 tab 按钮的几何（无激活项 / 控件已销毁返回 None）"""
+        try:
+            idx = self._welcome_tab_ids.index(self._welcome_mode)
+        except ValueError:
+            return None
+        if not (0 <= idx < len(self._welcome_tab_buttons)):
+            return None
+        try:
+            return self._welcome_tab_buttons[idx].geometry()
+        except RuntimeError:
+            return None
+
+    def _rebuild_welcome_tab_buttons(self, current_mode: Optional[str] = None) -> None:
+        """按当前注册表重建 tab 按钮（重建后同步高亮 + 胶囊钉位）"""
+        bar = self._welcome_tabs_bar_layout
+        if self._welcome_tab_host is None or bar is None:
+            return
+        while bar.count():
+            item = bar.takeAt(0)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                # 先断父子再预约删除：仅 deleteLater 在事件循环繁忙期会留残影
+                # （对齐工作台页签重建的同款教训）
+                w.setParent(None)
+                w.hide()
+                w.deleteLater()
+        self._welcome_tab_buttons = []
+        self._welcome_tab_ids = []
+
+        for mode_key, label in self._welcome_tab_specs():
+            btn = CustomTabButton(
+                mode_key,
+                label,
+                self._welcome_tab_host,
+                indicator_managed=True,
+                font_size=self._WELCOME_TAB_FONT,
+            )
+            btn.clicked.connect(self._on_welcome_mode_tab_clicked)
+            bar.addWidget(btn)
+            self._welcome_tab_buttons.append(btn)
+            self._welcome_tab_ids.append(mode_key)
+
+        target = current_mode if current_mode in self._welcome_tab_ids else None
+        if target is None and self._welcome_tab_ids:
+            # 仅在尚未确定 mode（首次构建）时回落首项；已有 mode 但对应 tab 消失
+            # （插件卸载）时不改写，交给上层失效重建决定去向
+            if not self._welcome_mode:
+                self._welcome_mode = self._welcome_tab_ids[0]
+            target = self._welcome_mode if self._welcome_mode in self._welcome_tab_ids else None
+        for i, btn in enumerate(self._welcome_tab_buttons):
+            btn.set_active(self._welcome_tab_ids[i] == target)
         self._apply_welcome_tabs_font()
+        self._sync_welcome_tab_host_height()
+        self._schedule_welcome_indicator_snap()
+
+    def _schedule_welcome_indicator_snap(self) -> None:
+        """延迟一拍把指示器钉到激活 tab（本帧布局尚未收敛，读到的几何是旧值）
+
+        ⚠️ 用绑定 card 生命周期的 QTimer 而非裸 ``QTimer.singleShot(0, ...)``：
+        延迟窗口内卡片被销毁（会话切换 / 标签页关闭）时 singleShot 仍会回调，
+        对已释放控件取几何 → ACCESS_VIOLATION（同 _defer_emit 的 P050 根因）。
+        """
+        ctl = self._welcome_indicator_ctl
+        if ctl is None:
+            return
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def _run() -> None:
+            try:
+                self._snap_welcome_indicator()
+            finally:
+                timer.deleteLater()
+
+        timer.timeout.connect(_run)
+        timer.start(0)
+
+    def _snap_welcome_indicator(self) -> None:
+        ctl = self._welcome_indicator_ctl
+        if ctl is None:
+            return
+        try:
+            ctl.snap_to_active()
+        except RuntimeError:
+            self._welcome_indicator_ctl = None
 
     def _apply_welcome_tabs_font(self):
-        """欢迎卡片 segmented tabs 适配系统字号
+        """欢迎 tabs 适配系统字号
 
-        SegmentedItem._postInit() 硬 setFont(self, 14)，qfluentwidgets 原组件不感知
-        DriFox 的 font_size delta；此处按当前 delta 缩放覆盖，保证 tab 字体随
-        系统字号变化（首次构建 + _apply_runtime_ui_settings 字体块都会调用）。
+        CustomTabButton 的文字样式由 ``_apply_label_color`` 写死 font-size，
+        走 ``apply_font_size_to_widget`` 的 setFont 覆盖不到；这里显式按当前
+        delta 重设（首次构建 + _apply_runtime_ui_settings 字体块都会调用）。
         """
-        if self._welcome_mode_tabs is None:
+        fs = scale_font_size(self._WELCOME_TAB_FONT)
+        for btn in self._welcome_tab_buttons:
+            try:
+                btn.set_font_size(fs)
+            except RuntimeError:
+                continue
+
+    def _sync_welcome_tab_active(self, mode: str, animate: bool = False) -> None:
+        """把 tab 高亮 + 滑动胶囊对齐到 mode（控件已销毁时静默跳过）
+
+        ``animate=True`` 仅用于用户点击（胶囊滑过去）；其余路径用 False
+        （布局平移 / 静态刷新场景下瞬移，避免动画被自己的副作用打断）。
+        """
+        if mode not in self._welcome_tab_ids:
             return
-        fs = scale_font_size(14)
-        ff = _get_global_font()
-        for item in self._welcome_mode_tabs.items.values():
-            font = item.font()
-            font.setFamily(ff)
-            font.setPixelSize(fs)
-            item.setFont(font)
+        for i, btn in enumerate(self._welcome_tab_buttons):
+            try:
+                btn.set_active(self._welcome_tab_ids[i] == mode)
+            except RuntimeError:
+                continue
+        ctl = self._welcome_indicator_ctl
+        if ctl is None:
+            return
+        try:
+            geom = self._welcome_tab_active_geometry()
+            if geom is not None:
+                ctl.move_to(geom, animate=animate)
+        except RuntimeError:
+            self._welcome_indicator_ctl = None
 
     def _on_welcome_mode_tab_clicked(self, mode: str):
-        """PyQt tabs 点击：切换 mode + 重新渲染 body（不重建 QWebEngineView）"""
+        """tab 点击：滑动胶囊 + 切 mode + 重渲染 body（不重建 QWebEngineView）"""
         if mode == self._welcome_mode:
             return
-        self.set_welcome_mode(mode)
+        # 先落 mode：``_sync_welcome_tab_active`` 经 ``_welcome_tab_active_geometry``
+        # 按 self._welcome_mode 定位目标按钮，顺序反了会读到旧项几何 → 胶囊不动。
+        self._welcome_mode = mode
+        self._sync_welcome_tab_active(mode, animate=True)
+        # sync_tab=False：重渲染不能把刚起的滑动动画瞬移掉
+        self.set_welcome_mode(mode, sync_tab=False)
         self.welcomeModeChanged.emit(mode)
 
     def _get_welcome_window_context(self) -> dict:
@@ -13844,19 +14246,22 @@ class MessageCard(SimpleCardWidget):
                 pass
         return {}
 
-    def set_welcome_mode(self, mode: str):
+    def set_welcome_mode(self, mode: str, *, sync_tab: bool = True):
         """切换欢迎卡片模式（同步 active tab + 重渲染 body）
 
         所有 mode 统一走 ``_render_welcome_body`` 分发（内置 sessions /
         插件注册 tab），插件 fetcher 完成后通过 UIEventBus 通知本卡片
         再次调 ``set_welcome_mode`` 强制重渲染当前 mode（见 _subscribe_welcome_refresh）。
+
+        Args:
+            sync_tab: False 时不动 tab 高亮（点击路径已自行同步，且需要保留
+                滑动动画，不能在这里用 animate=False 把它盖掉）。
         """
         self._welcome_mode = mode
-        if self._welcome_mode_tabs is not None:
-            try:
-                self._welcome_mode_tabs.setCurrentItem(mode)
-            except Exception:
-                pass
+        # 静态刷新路径（插件数据到达 / 外部改 mode）不经点击处理，高亮与胶囊
+        # 必须在这里收敛，否则 tab 会停在旧项上。
+        if sync_tab:
+            self._sync_welcome_tab_active(mode, animate=False)
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -13920,11 +14325,10 @@ class MessageCard(SimpleCardWidget):
         self._welcome_recent = list(recent_sessions or [])
         self._welcome_top = list(top_by_count or [])
         self._welcome_mode = mode
-        if self._welcome_mode_tabs is not None:
-            try:
-                self._welcome_mode_tabs.setCurrentItem(mode)
-            except Exception:
-                pass
+        # 初始 mode 由 resolve_initial_welcome_mode 解析（可能是插件 tab），
+        # 与已建好的按钮集合对齐高亮；mode 不在集合内时安装点已回落首项
+        self._sync_welcome_tab_active(mode, animate=False)
+        self._schedule_welcome_indicator_snap()
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -13970,6 +14374,70 @@ class MessageCard(SimpleCardWidget):
         )
         self._render_welcome_with_body(body_html)
 
+    def _ensure_identity(self):
+        """解析并缓存本条消息的身份（消息自带快照优先，否则走解析链）。
+
+        会话上下文从当前窗口取（session_id / 团队成员角色名 / window_id），
+        取不到时回落默认身份——渲染路径绝不因身份解析失败而中断。
+        """
+        if getattr(self, "_identity", None) is not None:
+            return self._identity
+        try:
+            from app.core.message_identity import resolve_for_message
+
+            session_id = ""
+            team_agent = ""
+            window_id = ""
+            host = self._parent
+            if host is not None:
+                window_id = getattr(host, "_window_id", "") or ""
+                team_agent = getattr(host, "_team_agent_name", "") or ""
+                session_mgr = getattr(host, "session_manager", None)
+                if session_mgr is not None:
+                    session = session_mgr.get_current_session()
+                    session_id = getattr(session, "session_id", "") or ""
+            role = "user" if self.role == "user" else "assistant"
+            self._identity = resolve_for_message(
+                self._source_message,
+                role,
+                session_id=session_id,
+                team_agent=team_agent,
+                window_id=window_id,
+            )
+        except Exception:
+            from app.core.message_identity import MessageIdentity
+
+            self._identity = MessageIdentity(name="Drifox" if self.role != "user" else "")
+        return self._identity
+
+    def _identity_enabled(self) -> bool:
+        """身份行显示开关（设置项，默认开；取配置失败时视为开启）"""
+        try:
+            from app.utils.config import Settings
+
+            return bool(Settings.get_instance().ui_message_identity.value)
+        except Exception:
+            return True
+
+    def _build_identity_header(self, parent, align_right: bool):
+        """构建身份行控件（两行：名称 + 时间）；开关关闭或不适用时返回 None。"""
+        if not self._identity_enabled():
+            return None
+        try:
+            from app.widgets.modules.identity_header import IdentityHeader
+
+            header = IdentityHeader(
+                self._ensure_identity(),
+                align_right=align_right,
+                parent=parent,
+                timestamp=self.timestamp or "",
+            )
+            header.apply_text_color(self._theme["muted"])
+            self._identity_header = header
+            return header
+        except Exception:
+            return None
+
     def _build_card_header(self, main: QVBoxLayout):
         """头部：头像 + 名称/副标题 + 时间戳/模型名 + 顶部操作按钮 + 分隔线
 
@@ -13977,7 +14445,20 @@ class MessageCard(SimpleCardWidget):
         user 卡片为简洁气泡（见 _setup_user_bubble）。
         """
         if self.role == "assistant":
-            # 全减模式：assistant 无头像/标题/顶部按钮/分隔线，直接进入正文
+            # 身份行：头像 + 显示名（助手在左）。开关关闭时保持原有「全减模式」。
+            header = self._build_identity_header(parent=self, align_right=False)
+            if header is not None:
+                main.addWidget(header)
+            return
+        if self.role == "welcome":
+            # 欢迎卡片：无头部（不画头像行 / 标题 / 分隔线），首屏直接从问候语开始。
+            # 仍建 label 引用占位以兼容 hasattr 守卫（refresh_theme 等），但不显示。
+            nm_l = QLabel(self._theme["title"], self)
+            self._name_label = nm_l
+            nm_l.setVisible(False)
+            sub_l = QLabel(self._theme["subtitle"], self)
+            self._subtitle_label = sub_l
+            sub_l.setVisible(False)
             return
         top = QHBoxLayout()
         top.setContentsMargins(4, 0, 4, 0)
@@ -14001,43 +14482,32 @@ class MessageCard(SimpleCardWidget):
 
         font_css = get_font_family_css()
         top.addWidget(av)
-        # 欢迎卡片：极简头部，只剩头像 + 右侧 mode 切换 tabs（无标题/副标题文字）
-        # 其他角色（assistant/user）：保留原 title_wrap + 模型名/时间戳 + 顶部操作按钮
-        if self.role == "welcome":
-            # 仍创建 label 引用占位以兼容 hasattr 守卫（refresh_theme 等），但不显示
-            nm_l = QLabel(self._theme["title"], self)
-            self._name_label = nm_l
-            nm_l.setVisible(False)
-            sub_l = QLabel(self._theme["subtitle"], self)
-            self._subtitle_label = sub_l
-            sub_l.setVisible(False)
-            self._build_welcome_mode_tabs(top)
-        else:
-            title_wrap = QWidget(self)
-            title_layout = QVBoxLayout(title_wrap)
-            title_layout.setContentsMargins(0, 0, 0, 0)
-            title_layout.setSpacing(1)
+        # assistant / user 路径：title_wrap + 模型名/时间戳 + 顶部操作按钮
+        title_wrap = QWidget(self)
+        title_layout = QVBoxLayout(title_wrap)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(1)
 
-            nm_l = QLabel(self._theme["title"], self)
-            self._name_label = nm_l
-            nm_l.setStyleSheet(
-                f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
-            )
-            sub_l = QLabel(self._theme["subtitle"], self)
-            self._subtitle_label = sub_l
-            sub_l.setStyleSheet(
-                f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
-            )
-            title_layout.addWidget(nm_l)
-            title_layout.addWidget(sub_l)
-            top.addWidget(title_wrap)
-            # 助手卡片显示模型名称
-            label_text = self.model_name if (self.role == "assistant" and self.model_name) else self.timestamp
-            ts = QLabel(label_text, self)
-            self._ts_label = ts
-            ts.setVisible(bool(label_text))
-            ts.setStyleSheet(
-                f"""
+        nm_l = QLabel(self._theme["title"], self)
+        self._name_label = nm_l
+        nm_l.setStyleSheet(
+            f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
+        )
+        sub_l = QLabel(self._theme["subtitle"], self)
+        self._subtitle_label = sub_l
+        sub_l.setStyleSheet(
+            f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
+        )
+        title_layout.addWidget(nm_l)
+        title_layout.addWidget(sub_l)
+        top.addWidget(title_wrap)
+        # 助手卡片显示模型名称
+        label_text = self.model_name if (self.role == "assistant" and self.model_name) else self.timestamp
+        ts = QLabel(label_text, self)
+        self._ts_label = ts
+        ts.setVisible(bool(label_text))
+        ts.setStyleSheet(
+            f"""
                 QLabel {{
                     {get_font_family_css()} font-size: {scale_font_size(11)}px;
                     color: {self._theme["muted"]};
@@ -14047,9 +14517,9 @@ class MessageCard(SimpleCardWidget):
                     padding: 2px 8px;
                 }}
                 """
-            )
-            top.addWidget(ts)
-            top.addStretch()
+        )
+        top.addWidget(ts)
+        top.addStretch()
 
         # 顶部操作按钮
         btns = QWidget(self)
@@ -14090,20 +14560,49 @@ class MessageCard(SimpleCardWidget):
         # （参考 assistant/welcome 卡片的懒渲染模式，复用 _lazy_rendered 守卫）。
         self.viewer = None
         self._viewer_pending_text = None
-        main.addWidget(self._viewer_container)
+
+        # 身份行（气泡**外**上方，右对齐）：头像 + 名称 + 时间
+        # 与气泡同宽同侧：加进 bubble_lay 会随气泡收缩，视觉上贴合气泡右缘。
+        _header = self._build_identity_header(parent=self, align_right=True)
+        self._identity_owner = self
+        if _header is not None:
+            main.addWidget(_header, 0, Qt.AlignRight)
+
+        # 气泡容器：背景色/圆角只在这一层（身份行与底部操作行在容器外，
+        # 不随气泡底色渲染）。视图与图片条在内。
+        #
+        # ⚠️ 垂直策略必须是 Maximum：默认 Preferred 会被父级布局拉伸，
+        # 而中间层（viewer_container → PlainTextViewer）的 sizeHint 与实测尺寸
+        # 不一致时，多出的空间全落在气泡上 → 气泡与下方按钮栏脱节、
+        # 图片条看起来"漏出"气泡（2026-09-16 用户反馈的三连问题）。
+        # Maximum = 取 sizeHint 上限，不额外膨胀。
+        self._user_bubble = QWidget(self)
+        self._user_bubble.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+        bubble_lay = QVBoxLayout(self._user_bubble)
+        bubble_lay.setContentsMargins(0, 0, 0, 0)
+        bubble_lay.setSpacing(0)
+        # 右对齐：卡片宽度由「气泡」与「footer」中的较大者决定。窄气泡时卡片会
+        # 比气泡宽（多出的部分透明），footer 的时间戳与按钮才有地方放，而不必
+        # 反过来把气泡撑宽。
+        main.addWidget(self._user_bubble, 0, Qt.AlignRight)
+        _bubble_alive = True
+
+        # 正文视图容器挂到气泡内（原 _viewer_container 直接挂卡片）
+        self._viewer_container.setParent(self._user_bubble)
+        bubble_lay.addWidget(self._viewer_container)
         self._lazy_rendered = True
 
-        # 底部操作行：stretch | 时间戳 | 复制/撤销/删除（hover 浮现）。
-        # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
-
-        # 图片附件预览条：正文之上，set_image_attachments 时才显示（懒占位）
+        # 图片附件预览条：挂 main 布局，位于气泡与底部按钮行**之间**（气泡外），
+        # set_image_attachments 时才显示（懒占位）
         self._image_strip = QWidget(self)
         self._image_strip_lay = QHBoxLayout(self._image_strip)
-        self._image_strip_lay.setContentsMargins(2, 0, 2, 4)
+        self._image_strip_lay.setContentsMargins(2, 4, 2, 2)
         self._image_strip_lay.setSpacing(6)
         self._image_strip.setVisible(False)
-        main.addWidget(self._image_strip)
+        main.addWidget(self._image_strip, 0, Qt.AlignRight)
 
+        # 底部操作行（纯按钮）：时间戳已移到身份行第二行（见 IdentityHeader）
+        # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
         footer_wrap = QWidget(self)
         footer_wrap.setStyleSheet("background: transparent;")
         footer_wrap.setFixedHeight(28)  # 26px 按钮 + 垂直余量，紧凑
@@ -14112,12 +14611,7 @@ class MessageCard(SimpleCardWidget):
         footer.setSpacing(6)
         footer.addStretch()
 
-        ts = QLabel(self.timestamp, self)
-        self._ts_label = ts
-        ts.setVisible(bool(self.timestamp))
-        ts.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(11)}px; color: {self._theme['muted']};")
-        footer.addWidget(ts)
-
+        # 按钮 hover 浮现在右端（卡片右缘对齐，与身份行头像侧一致）
         btns = QWidget(self)
         self._user_action_btns = btns
         bl = QHBoxLayout(btns)
@@ -14134,12 +14628,18 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(26, 26)  # 弱化处理：比助手卡 32px 更小
             install_hover_tooltip(b, delay_ms=200)
             bl.addWidget(b)
-        btns.setVisible(False)  # hover 浮现，保持气泡简洁（高度占位由 wrap 固定）
+
+        # 固定尺寸 = 全部按钮都显示时的尺寸。这样 hover 显隐子按钮时容器尺寸
+        # 恒定、布局不重排（否则宽度 0↔82 来回变，表现为「hover 撑大气泡」）。
+        btns.setFixedSize(bl.sizeHint())
         footer.addWidget(btns)
+        self._footer_wrap = footer_wrap
+        # 初始隐藏：容器常驻布局占位，仅切换子按钮显隐（不用 effect，见 _set_actions_visible）
+        MessageCard._set_actions_visible(btns, False)
         main.addWidget(footer_wrap)
 
     def set_image_attachments(self, paths, fallback_content=None):
-        """设置图片附件预览（用户气泡正文上方缩略图条）
+        """设置图片附件预览（用户气泡下方、底部按钮行上方缩略图条）
 
         Args:
             paths: 附件图片本地路径列表。发送时来自输入区附件；恢复会话时
@@ -14318,7 +14818,9 @@ class MessageCard(SimpleCardWidget):
         main.addWidget(self._retry_status_widget)
 
         if self.role == "welcome":  # 全减：assistant 无底部装饰线；user 简洁气泡本就不带
-            main.addWidget(CardSeparator(self))
+            # 欢迎卡片：tab 条落在卡片**底部**（内容下方），切换区不占用
+            # 头部首位；顶部头部与底部区分隔线均已去掉（2026-09-17 用户要求）。
+            self._build_welcome_mode_tabs(main)
 
         # ===== 助手卡片底部元信息栏（分割线下方） =====
         if self.role == "assistant":
@@ -14348,7 +14850,8 @@ class MessageCard(SimpleCardWidget):
         # 新轮流式开始：恢复简洁模式坞态（工具区沉底跟随最新活动）
         if self.viewer and hasattr(self.viewer, "_sync_streaming_dock"):
             self.viewer._sync_streaming_dock(True)
-        self._pulse_phase = 0.0
+        self._anim_t_ms = 0.0
+        self._anim_clock.restart()
         try:
             self._anim_timer.start(50)  # 80→50ms，帧率从12.5fps提升到20fps
         except RuntimeError:
@@ -14357,13 +14860,15 @@ class MessageCard(SimpleCardWidget):
 
     def _update_anim(self):
         # [V1] 可见性门控：隐藏 tab 不执行动画帧（避免隐藏页每 50ms 空转 update()）。
-        # 相位 _pulse_phase 是模 2π 的循环累积，暂停后从原相位继续，无视觉跳变；
-        # 恢复可见后下一拍定时器自动续跑，无需显式重启。
+        # 暂停期间重启时钟：动画位置由累积时间 _anim_t_ms 决定，不推进即停在原位置，
+        # 恢复后从原位置继续，无视觉跳变；下一拍定时器自动续跑，无需显式重启。
         if not self.isVisible():
+            self._anim_clock.restart()
             return
-        # 系统「减少动态效果」：脉冲边框是纯装饰动画，直接不重绘。
-        # 这是流式热路径上 20fps 的全卡 update()，关掉即省下这段绘制开销。
+        # 系统「减少动态效果」：底部光块是纯装饰动画，直接不重绘。
+        # 这是流式热路径上的逐帧绘制，关掉即省下这段开销。
         if not Animations.motion_enabled():
+            self._anim_clock.restart()
             return
         # 拖拽期间暂停重绘：原生拖拽时主线程在 DefWindowProc 模态循环里，
         # 每 50ms 触发一次 update() 会强制 DWM 对整窗重新合成 → 拖拽卡顿。
@@ -14372,8 +14877,18 @@ class MessageCard(SimpleCardWidget):
         from app.utils.window_drag_state import any_window_dragging
 
         if any_window_dragging:
+            self._anim_clock.restart()
             return
-        self._pulse_phase = (self._pulse_phase + 0.035) % (math.pi * 2)
+        # 时间驱动：按真实经过时间推进，掉帧只丢中间帧、不改变运动速度（旧实现
+        # 每拍固定 +0.035 相位，主线程一忙整条动画就变慢，恢复后又连续补帧猛冲）。
+        # 单拍钳制 _STREAM_BAND_MAX_DT_MS：被内容渲染占满 500ms 后也只前进一帧的量，
+        # 观感是「慢了一下」，而不是瞬移或猛冲。
+        dt = self._anim_clock.restart()
+        if dt <= 0.0:  # 同一拍内重复进入（理论上不会）：不推进
+            dt = 0.0
+        elif dt > _STREAM_BAND_MAX_DT_MS:
+            dt = _STREAM_BAND_MAX_DT_MS
+        self._anim_t_ms += dt
         # 重试状态栏降频更新（每200ms一次，避免和paintEvent双重刷新导致卡顿）
         if self._retrying:
             if not hasattr(self, "_retry_status_tick"):
@@ -14382,7 +14897,14 @@ class MessageCard(SimpleCardWidget):
             if self._retry_status_tick >= 4:  # 50ms * 4 = 200ms
                 self._retry_status_tick = 0
                 self._update_retry_status_bar()
-        self.update()
+        # 局部重绘：动画帧只标脏底部光带这一条窄带（不碰描边所在的卡片边缘），
+        # 免得每帧都把整卡交给 Qt 重绘、和流式内容渲染抢主线程。重试中状态栏
+        # 位置不确定，退回整卡重绘。
+        if self._retrying:
+            self.update()
+        else:
+            band_top = self.height() - _STREAM_BAND_BOTTOM - _STREAM_BAND_H - _STREAM_BAND_REPAINT_PAD
+            self.update(0, band_top, self.width(), _STREAM_BAND_H + 2 * _STREAM_BAND_REPAINT_PAD)
 
     def _apply_card_style(self, border: str = None, bg: str = None):
         # [PERF] 幂等短路：setStyleSheet 会触发 Qt 样式重新 polish + 子控件 relayout，
@@ -14393,16 +14915,27 @@ class MessageCard(SimpleCardWidget):
             return
         self._applied_card_style_key = _style_key
         # user 简洁气泡：12px 圆角 + 无边框（仅轻量背景色）；错误态仍显示红色边框
+        # 背景只画在气泡容器上：身份行与底部操作行在容器外，不受气泡底色影响
         if self.role == "user" and not self.error:
             self.setStyleSheet(
-                f"""
-                CardWidget {{
-                    background-color: {bg or self._base_bg};
+                """
+                CardWidget {
+                    background-color: transparent;
                     border: none;
-                    border-radius: 12px;
-                }}
+                }
                 """
             )
+            bubble = getattr(self, "_user_bubble", None)
+            if bubble is not None:
+                bubble.setStyleSheet(
+                    f"""
+                    QWidget {{
+                        background-color: {bg or self._base_bg};
+                        border: none;
+                        border-radius: 12px;
+                    }}
+                    """
+                )
             return
         if self.role == "assistant" and not self.error:
             # 全减模式：assistant 纯文字流（无边框无背景）；
@@ -14454,7 +14987,8 @@ class MessageCard(SimpleCardWidget):
         # 确保动画定时器运行
         if not self._streaming:
             self._streaming = True
-            self._pulse_phase = 0.0
+            self._anim_t_ms = 0.0
+            self._anim_clock.restart()
             try:
                 self._anim_timer.start(50)
             except RuntimeError:
@@ -14499,7 +15033,7 @@ class MessageCard(SimpleCardWidget):
         )
         # 旋转图标动画
         spin_chars = ["◜", "◝", "◞", "◟"]
-        idx = int(self._pulse_phase * 2) % 4
+        idx = int(self._anim_t_ms / 180.0) % 4  # 每 180ms 转一格
         self._retry_spinner.setText(spin_chars[idx])
         # 错误类型
         self._retry_type_label.setStyleSheet(
@@ -14688,7 +15222,16 @@ class MessageCard(SimpleCardWidget):
         self.sync_width(force=True)
 
     def paintEvent(self, event):
-        super().paintEvent(event)
+        # ⚠️ SimpleCardWidget.paintEvent 会无条件画一圈描边：
+        #   painter.setPen(QColor(0,0,0,12 或 48)) + drawRoundedRect(...)
+        # CSS 的 `border: none` 管不到它（这是 QPainter 直接画的，不走样式表），
+        # 于是 user 气泡（背景已移交给 _user_bubble）与 assistant 全减模式卡片
+        # 上下会残留一条淡边框。这两个角色由自身样式/子容器负责外观，
+        # 跳过父类绘制；welcome 与错误态仍需原来的卡片底与描边。
+        if self.role in ("user", "assistant") and not self.error:
+            pass
+        else:
+            super().paintEvent(event)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -14696,175 +15239,95 @@ class MessageCard(SimpleCardWidget):
         w, h = self.width(), self.height()
         radius = 16
 
-        accent = QColor(self._theme["accent"])
-        if self.role == "welcome":
-            # 静态 accent 侧边竖条（user 简洁气泡 / assistant 全减模式不画，保持纯净）
-            accent.setAlpha(75)
-            stripe_width = 4
-            stripe_x = w - stripe_width - 2 if self._theme.get("side") == "right" else 2
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(accent)
-            painter.drawRoundedRect(stripe_x, 10, stripe_width, max(18, h - 20), 3, 3)
+        # 侧边竖条已整体移除：welcome 卡片的 accent 竖条（左缘那条线）由用户
+        # 2026-09-17 明确要求去掉，保持卡片四边纯净。
 
         if not self._streaming:
             painter.end()
             return
 
         # ══════════════════════════════════════════════════════
-        #  辅助：准备色板 + 流光相位
+        #  流式态视觉：静态单色细描边 + 底部往返光块
         # ══════════════════════════════════════════════════════
-        if self.role == "assistant":
-            # 呼吸：极缓慢脉动
-            breathe = 0.55 + 0.45 * (math.sin(self._pulse_phase * 0.3) + 1) / 2
-            # 流光闪烁：柔和放缓
-            shimmer = 0.6 + 0.4 * (math.sin(self._pulse_phase * 1.8) + 1) / 2
+        # 旧实现：10 色高饱和彩虹绕整卡循环 + 7px 霓虹外发光 + 3px 白色流光带，
+        # 动区覆盖整卡周长、色相跳变（青→紫→粉→橙→绿），阅读时过于抢眼。
+        # 现把「动」收敛到底部一条光带：
+        #   · 描边：1.5px 单色（accent / 重试红），完全静态（alpha 不再随呼吸调制，
+        #     否则每帧都要整卡重绘内壁渐变 + 描边，与流式内容渲染抢主线程）
+        #   · 光块：底部内侧 3px 高、约 40% 卡宽，两端淡出，左右往返（单程 1.6s）
 
-            def lerp_color(a: QColor, b: QColor, t: float) -> QColor:
-                """线性插值两颜色"""
-                r = int(a.red() + (b.red() - a.red()) * t)
-                g = int(a.green() + (b.green() - a.green()) * t)
-                bl = int(a.blue() + (b.blue() - a.blue()) * t)
-                return QColor(r, g, bl)
-
-            rainbow = self._rainbow_retry if self._retrying else self._rainbow_normal
-            N = len(rainbow)
-            # 主边框连续相位
-            shift_main = (self._pulse_phase / (math.pi * 2)) * N
-            # 发光层更慢
-            shift_glow = shift_main * 0.5
-            # 流光带相位
-            shift_shimmer = shift_main * 1.15
-
-            def build_gradient(grad: QLinearGradient, shift: float, stops: list, alpha_base: float) -> QLinearGradient:
-                """相位无关模板 grad 复用：仅改坐标与 stop 颜色，不每帧 new"""
-                grad.setStart(0, 0)
-                grad.setFinalStop(w, h)
-                for pos in stops:
-                    raw = (shift + pos * N) % N
-                    idx = int(raw) % N
-                    frac = raw - int(raw)
-                    c = lerp_color(rainbow[idx], rainbow[(idx + 1) % N], frac)
-                    c.setAlpha(int(alpha_base * breathe))
-                    grad.setColorAt(pos, c)
-                return grad
-
-            main_stops = [0.0, 0.12, 0.24, 0.36, 0.50, 0.64, 0.76, 0.88, 1.0]
-            inner_stops = [0.0, 0.12, 0.24, 0.36, 0.48, 0.60, 0.72, 0.84, 0.92, 1.0]
-            glow_stops = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        # 单色 tint：重试/错误态用警示红，其余用主题 accent（不再循环变色）
+        if self._retrying or self.error:
+            tint = QColor(_STREAM_TINT_RETRY)
         else:
-            rainbow = None
-            pulse = QColor(self._theme["accent"])
-            breathe = 0.55 + 0.45 * (math.sin(self._pulse_phase * 0.3) + 1) / 2
-            shimmer = 0.6 + 0.4 * (math.sin(self._pulse_phase * 1.8) + 1) / 2
+            tint = QColor(self._theme["accent"])
 
-        # ══════════════════════════════════════════════════════
-        #  层1：内壁漫射（极柔和的边缘渗光）
-        # ══════════════════════════════════════════════════════
+        # ── 层1：内壁漫射（极柔和的边缘渗光）──
         # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath
         if self._clip_w != w or self._clip_h != h:
             self._clip_w, self._clip_h = w, h
             self._clip_inner = QPainterPath()
             self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
-            self._clip_outer = QPainterPath()
-            self._clip_outer.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
-            self._clip_inner_edge = QPainterPath()
-            self._clip_inner_edge.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
             self._clip_border = QPainterPath()
             self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
             self._clip_inner_border = QPainterPath()
             self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
-            self._clip_shimmer = QPainterPath()
-            self._clip_shimmer.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
-            self._clip_top = QPainterPath()
-            self._clip_top.addRoundedRect(0, 0, w, h, radius, radius)
-            self._clip_glow_region = self._clip_outer - self._clip_inner_edge
             self._clip_border_region = self._clip_border - self._clip_inner_border
-        inner_clip = self._clip_inner
-        painter.setClipPath(inner_clip)
-        if self.role == "assistant":
-            inner_gradient = build_gradient(self._grad_inner, shift_glow, inner_stops, 12)
-        else:
-            inner_gradient = QLinearGradient(0, 0, w, h)
-            c = QColor(pulse.lighter(150))
-            c.setAlpha(int(18 * breathe))
-            inner_gradient.setColorAt(0.0, c)
-            inner_gradient.setColorAt(1.0, QColor(pulse.darker(110).name()))
+        painter.setClipPath(self._clip_inner)
+        inner_gradient = self._grad_inner
+        inner_gradient.setStart(0, 0)
+        inner_gradient.setFinalStop(w, h)
+        _c0 = QColor(tint)
+        _c0.setAlpha(11)
+        _c1 = QColor(tint)
+        _c1.setAlpha(4)
+        inner_gradient.setColorAt(0.0, _c0)
+        inner_gradient.setColorAt(1.0, _c1)
         painter.fillRect(0, 0, w, h, inner_gradient)
 
-        # ══════════════════════════════════════════════════════
-        #  层2：外发光（霓虹光晕，7px宽，比主边框更宽更柔和）
-        # ══════════════════════════════════════════════════════
-        glow_region = self._clip_glow_region
-        painter.setClipPath(glow_region)
-        if self.role == "assistant":
-            glow_gradient = build_gradient(self._grad_glow, shift_glow, glow_stops, 48)
-        else:
-            glow_gradient = QLinearGradient(0, 0, w, h)
-            glow_gradient.setColorAt(0.0, QColor(pulse.lighter(130).name()))
-            glow_gradient.setColorAt(0.5, QColor(pulse.name()))
-            glow_gradient.setColorAt(1.0, QColor(pulse.darker(140).name()))
-        glow_pen = QPen(glow_gradient, 7)
-        painter.setPen(glow_pen)
-        painter.setBrush(QBrush(Qt.NoBrush))
-        painter.drawRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
-
-        # ══════════════════════════════════════════════════════
-        #  层3：主彩色边框（4px，饱和鲜艳）
-        # ══════════════════════════════════════════════════════
-        border_region = self._clip_border_region
-        painter.setClipPath(border_region)
-        if self.role == "assistant":
-            main_gradient = build_gradient(self._grad_main, shift_main, main_stops, 215)
-        else:
-            main_gradient = QLinearGradient(0, 0, w, h)
-            glow_a = int((90 + 45 * (math.sin(self._pulse_phase * 1.5) + 1) / 2) * breathe)
-            pulse2 = QColor(pulse.name())
-            pulse2.setAlpha(glow_a)
-            main_gradient.setColorAt(0.0, QColor(pulse.lighter(120).name()))
-            main_gradient.setColorAt(0.5, pulse2)
-            main_gradient.setColorAt(1.0, QColor(pulse.darker(130).name()))
-        main_pen = QPen(main_gradient, 4)
-        painter.setPen(main_pen)
+        # ── 层2：静态细描边（1.5px 单色，替代原 4px 彩虹循环 + 7px 外发光）──
+        # 静态层每帧照画，不做「局部重绘就跳过」的优化：动画帧的脏区是底部一条
+        # 窄带（见 _update_anim），Qt 按脏区裁剪光栅化，整卡 fillRect 的实际填充
+        # 仍被限制在窄带内；若按脏区跳过静态层，脏区覆盖到的描边会被擦掉却不
+        # 重画（下边框随动画帧一闪一闪）。
+        painter.setClipPath(self._clip_border_region)
+        _bc = QColor(tint)
+        _bc.setAlpha(92)
+        border_pen = QPen(_bc)
+        border_pen.setWidthF(1.5)
+        painter.setPen(border_pen)
         painter.setBrush(QBrush(Qt.NoBrush))
         painter.drawRoundedRect(0, 0, w, h, radius + 1, radius + 1)
 
-        # ══════════════════════════════════════════════════════
-        #  层4：流光高光带（白色细光条快速划过）
-        # ══════════════════════════════════════════════════════
-        if self.role == "assistant":
-            shimmer_clip = self._clip_shimmer
-            painter.setClipPath(shimmer_clip)
-            # 流光位置：连续小数，避免跳变
-            shimmer_pos = (shift_shimmer % N) / N
-            # 注意：stop 位置随相位连续变化，不能复用模板渐变（setColorAt 会不断追加 stop 导致残留脏色），必须每帧新建
-            shimmer_band_gradient = QLinearGradient(0, 0, w, h)
-            shimmer_band_gradient.setStart(0, 0)
-            shimmer_band_gradient.setFinalStop(w, h)
-            shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.07), QColor(0, 0, 0, 0))
-            shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.03), QColor(255, 255, 255, int(80 * shimmer)))
-            shimmer_band_gradient.setColorAt(shimmer_pos, QColor(255, 255, 255, int(150 * shimmer)))
-            shimmer_band_gradient.setColorAt(min(1.0, shimmer_pos + 0.03), QColor(255, 255, 255, int(80 * shimmer)))
-            shimmer_band_gradient.setColorAt(min(1.0, shimmer_pos + 0.07), QColor(0, 0, 0, 0))
-            shimmer_pen = QPen(shimmer_band_gradient, 3)
-            painter.setPen(shimmer_pen)
-            painter.setBrush(QBrush(Qt.NoBrush))
-            painter.drawRoundedRect(1, 1, w - 2, h - 2, radius, radius)
-
-        # ══════════════════════════════════════════════════════
-        #  层5：顶部高光条（柔和的光泽）
-        # ══════════════════════════════════════════════════════
-        top_clip = self._clip_top
-        painter.setClipPath(top_clip)
-        if self.role == "assistant":
-            if self._retrying or self.error:
-                top_color = QColor("#ff2222")
-            else:
-                top_color = QColor("#60D4FF")
-            top_color.setAlpha(int(22 * breathe))
-        else:
-            top_color = QColor(self._theme["accent"])
-            top_color.setAlpha(int(30 * breathe))
-        painter.fillRect(0, 0, w, 5, top_color)
+        # ── 层3：底部往返光块（唯一的运动元素）──
+        painter.setClipPath(self._clip_inner_border)
+        band_h = _STREAM_BAND_H
+        band_ratio = 0.4  # 光块宽度占卡宽比例
+        travel_ratio = 1.0 - band_ratio
+        # 三角波 0→1→0：直接对累积时间取模 2，周期严格闭合。
+        # 旧写法 _t = (相位/2π) * 3.0 % 2.0 每个相位圈走 3 个半程，回绕处
+        # 从「最右」瞬跳「最左」（约每 9s 一次跳变），是跳变感的直接来源。
+        _t = (self._anim_t_ms / _STREAM_BAND_SWEEP_MS) % 2.0
+        _tri = _t if _t < 1.0 else 2.0 - _t
+        band_cx = (0.5 * band_ratio + travel_ratio * _tri) * w
+        band_w = band_ratio * w
+        band_x = int(band_cx - 0.5 * band_w)
+        band_w = int(band_w)
+        band_y = h - _STREAM_BAND_BOTTOM - band_h
+        # 复用模板渐变：stop 位置固定（0/0.5/1），仅改坐标与颜色，不每帧 new
+        band_gradient = self._grad_main
+        band_gradient.setStart(band_x, 0)
+        band_gradient.setFinalStop(band_x + band_w, 0)
+        _b0 = QColor(tint)
+        _b0.setAlpha(0)
+        _b1 = QColor(tint)
+        _b1.setAlpha(170)
+        band_gradient.setColorAt(0.0, _b0)
+        band_gradient.setColorAt(0.5, _b1)
+        band_gradient.setColorAt(1.0, _b0)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(band_gradient))
+        painter.drawRoundedRect(band_x, band_y, band_w, band_h, 1.5, 1.5)
         painter.end()
 
     def set_error_state(self, is_error: bool, error_message: str = ""):
@@ -14968,6 +15431,16 @@ class MessageCard(SimpleCardWidget):
         round_idx = self._round_index if self._round_index is not None else -1
         msg_idx = self._message_index if self._message_index is not None else -1
         self.reviewRequested.emit(round_idx, msg_idx)
+
+    def _emit_branch_requested(self):
+        """发射页脚「分支」按钮点击信号（以本条消息为界开新会话）
+
+        Signal:
+            branchRequested(int round_index, int message_index)
+        """
+        round_idx = self._round_index if self._round_index is not None else -1
+        msg_idx = self._message_index if self._message_index is not None else -1
+        self.branchRequested.emit(round_idx, msg_idx)
 
     def _remember_height_for_width(self, height: int) -> None:
         """[L3] 记录「最近一次同步宽度 → 内容高度」，供后续 resize 预测命中。
@@ -15285,6 +15758,16 @@ class MessageCard(SimpleCardWidget):
             # 实际宽度由 PlainTextViewer 按内容最长行自适应收缩
             self.setMinimumWidth(60)
             self.setMaximumWidth(target_width)
+            # 🛡️ 卡片宽度下限抬到 footer 需求宽（时间戳 + hover 按钮）：
+            # 否则窄气泡（如「你好」）的卡片会比 footer 窄，Qt 压缩布局时
+            # 按钮会盖到时间戳上（2026-09-16 用户截图反馈）。
+            # 气泡自身仍按内容收缩（_user_bubble 右对齐 + Maximum 策略），
+            # 卡片多出的部分是透明留白，不影响气泡视觉宽度。
+            footer = getattr(self, "_footer_wrap", None)
+            if footer is not None:
+                need = footer.minimumSizeHint().width()
+                if need > 60:
+                    self.setMinimumWidth(need)
             # 上限同步给 viewer（卡内边距 4*2 + viewer 布局边距 8*2），
             # cap 未变化时 set_width_cap 内部为 no-op。
             # 🐛 不受 _resize_preview_mode 拦截：preview 守卫是为 CodeWebViewer
@@ -15294,6 +15777,7 @@ class MessageCard(SimpleCardWidget):
             # 窗口缩小后固定尺寸的气泡超出可视区（文字跑到显示范围之外）。
             if self.viewer is not None:
                 self.viewer.set_width_cap(target_width - 24)
+            self._sync_identity_header_width()
             return
 
         # 非 user（assistant/welcome）：固定宽度（min=max）
@@ -15395,20 +15879,70 @@ class MessageCard(SimpleCardWidget):
                 except RuntimeError:
                     pass
 
+    def _sync_identity_header_width(self) -> None:
+        """身份行右缘与气泡对齐（宽度取内容需求与气泡宽的较大值）。
+
+        身份行内容宽（头像 + 名称/时间列）常大于窄气泡宽（实测短消息气泡
+        100px vs 身份行需 ~135px）。强行压到气泡宽会把时间文本截断成
+        「09-16 23…」（2026-09-16 用户反馈的排布问题）。故取
+        ``max(内容需求, 气泡宽)``：右缘与气泡严格对齐，宽出部分向左延伸
+        （右对齐天然如此），视觉上仍贴着气泡。
+        """
+        header = getattr(self, "_identity_header", None)
+        if header is None:
+            return
+        try:
+            # 先解绑固定宽，才能拿到「不被压缩时」的真实内容宽
+            header.setMinimumWidth(0)
+            header.setMaximumWidth(16777215)
+            need = header.sizeHint().width()
+            bubble = getattr(self, "_user_bubble", None)
+            target = need
+            if bubble is not None and bubble.width() > 0:
+                target = max(need, bubble.width())
+            elif self.width() > 0:
+                target = max(need, self.width() - 8)
+            header.setFixedWidth(target)
+        except RuntimeError:
+            pass
+
     def enterEvent(self, event):
         # 用户气泡 / assistant 全减：hover 浮现操作按钮，保持静态简洁
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
-            self._user_action_btns.setVisible(True)
+            self._set_actions_visible(self._user_action_btns, True)
         elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
             self._assistant_action_btns.setVisible(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
-            self._user_action_btns.setVisible(False)
+            self._set_actions_visible(self._user_action_btns, False)
         elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
             self._assistant_action_btns.setVisible(False)
         super().leaveEvent(event)
+
+    @staticmethod
+    def _set_actions_visible(container, visible: bool) -> None:
+        """用**子按钮显隐**控显隐（容器常驻布局，不用 graphicsEffect）。
+
+        两条踩过的经验：
+        1. `container.setVisible(False)` 会让容器退出布局计算 → 父级 sizeHint
+           变小 → 卡片宽度重排，hover 瞬间气泡被“撑长/变形”。
+        2. 容器上用 `QGraphicsOpacityEffect` 控透明度同样不可取：卡片自身有
+           fade_in 的 effect（见 fade_in_widget），**Qt 在父级已有 effect 时对
+           子级 effect 的合成不可靠** —— 表现为控件「先显示一瞬间随后消失」。
+
+        故改为：容器保持可见且尺寸固定（占位不变），只切换其内部按钮的
+        setVisible，既不改布局尺寸，也不引入任何 effect。
+        """
+        try:
+            for child in container.findChildren(QWidget):
+                # 只切换直接承载内容的按钮（有 sizeHint 的子控件）
+                if child.parent() is container:
+                    child.setVisible(visible)
+            container.setAttribute(Qt.WA_TransparentForMouseEvents, not visible)
+        except RuntimeError:
+            pass
 
     def wheelEvent(self, event: QWheelEvent):
         # MessageCard 的 wheelEvent 仅在子 widget（viewer）未消费事件时被调用。
@@ -15432,6 +15966,22 @@ class MessageCard(SimpleCardWidget):
         if isinstance(txt, list):
             self.set_content(txt)
             return
+        # 流式吞吐采样：累计输出原文，并**逐段累加出字时间**（不是首字至今）
+        if self.role == "assistant" and isinstance(txt, str) and txt:
+            now = time.time()
+            self._stream_text_acc = (getattr(self, "_stream_text_acc", "") or "") + txt
+            prev = getattr(self, "_stream_last_text_t", None)
+            if prev is None:
+                # 首个非空 chunk：仅记时刻（供 TTFT 语义），生成秒从 0 起算
+                self._stream_first_text_t = now
+            elif 0 < now - prev <= self._LIVE_GAP_CAP_S:
+                self._stream_gen_s = getattr(self, "_stream_gen_s", 0.0) + (now - prev)
+            self._stream_last_text_t = now
+            # 按 chunk 节流刷新插件 stat（200ms）：1s tick 的采样窗口会整段漏掉
+            # 快模型的短流式，导致流式期间始终无实时值、落定才闪现
+            if now - getattr(self, "_last_live_stat_refresh", 0.0) >= 0.2:
+                self._last_live_stat_refresh = now
+                self._refresh_footer_stats(streaming=True)
         self.append_text(txt)
 
     def showEvent(self, event):
@@ -17220,6 +17770,14 @@ class MessageCard(SimpleCardWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # 宽度同步由外层聊天窗口统一调度，避免卡片自身 resize 再次触发全量重算
+        # 浮动按钮组不在布局里，需手工跟随卡片宽度变化重新贴靠时间戳左侧。
+        if self.role == "user":
+            self._sync_identity_header_width()
+        elif self.role == "welcome":
+            # tab 条按宽度折行：宽度变化后行数可能变，需重算宿主高度
+            # （Qt5 对带 heightForWidth 子布局的 widget 估高偏大，见
+            # _sync_welcome_tab_host_height，不能依赖布局自动收敛）
+            self._sync_welcome_tab_host_height()
 
     def _disconnect_all_signals(self):
         """断开 MessageCard 发射的所有信号，打破信号-槽引用环路"""
@@ -17423,7 +17981,8 @@ def _session_duration_days(created_at: str) -> int:
 def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_anim: bool = False) -> str:
     """渲染会话导览 body：最近 / 最活跃两个卡片双列网格（每分类 3 行）
 
-    每张卡片：左侧图标徽章 + 标题/副标题 + hover 滑入箭头。
+    每张卡片：标题/副标题 + 右侧标签 + hover 滑入箭头（无图钉徽章：彩色 emoji
+    贴片与卡片内线性图标体系混排显脏，信息量也不增，故移除）。
     复用 .context-tag 点击事件链（data-type="session" + data-session-id），
     仅替换视觉外观，JS 拦截逻辑不变。
     """
@@ -17437,23 +17996,19 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
         t = escape(s.get("title", "未命名会话"))
         sid = escape(s.get("session_id", ""))
         if count_mode:
-            mc = s.get("message_count", 0)
             # 第二行 = 日期（天）+ 持续天数（消息数移到右侧 tag，不重复显示）
             last_time = s.get("last_time") or ""
             date_str = last_time[:10] if len(last_time) >= 10 else last_time
             days = _session_duration_days(s.get("created_at") or "")
             days_part = f" · 持续 {days} 天" if days > 0 else ""
             meta = f"{date_str}{days_part}"
-            icon = "⚡"
         else:
             meta = escape(s.get("last_time") or "")
-            icon = "💬"
         anim_style = "animation: none;" if suppress_anim else f"animation-delay:{idx * 55}ms"
-        # 右侧 tag：最近=相对时间（蓝），最活跃=消息数（橙）
-        tag_html = ""
+        # 右侧 tag：最近 = 相对时间，最活跃 = 消息数（同一套中性色，仅文案不同）
         if count_mode:
             mc = s.get("message_count", 0)
-            tag_html = f'<span class="session-item-tag session-item-tag-warn">{mc} 条</span>'
+            tag_html = f'<span class="session-item-tag">{mc} 条</span>'
         else:
             rel_label = format_relative_time(s.get("last_time") or "")
             tag_html = f'<span class="session-item-tag">{escape(rel_label)}</span>'
@@ -17461,7 +18016,6 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
             f'<div class="context-tag session-item" data-type="session" '
             f'data-session-id="{sid}" data-action="session" '
             f'style="{anim_style}">'
-            f'<span class="session-item-badge">{icon}</span>'
             f'<span class="session-item-body">'
             f'<span class="session-item-title">{t}</span>'
             f'<span class="session-item-meta">{meta}</span>'
@@ -17473,7 +18027,6 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
 
     def _render_section(
         title: str,
-        icon: str,
         items: list,
         count_mode: bool = False,
         start_idx: int = 0,
@@ -17499,9 +18052,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
         return (
             f'<div class="session-section">'
             f'<div class="session-header">'
-            f'<span class="session-header-icon">{icon}</span>'
             f'<span class="session-header-title">{title}</span>'
-            f'<span class="session-header-count">{len(shown)}</span>'
             f"{more}"
             f"</div>"
             f'<div class="session-list">{rows}</div>'
@@ -17510,7 +18061,6 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
 
     recent_block = _render_section(
         "最近会话",
-        "📅",
         recent_sessions,
         count_mode=False,
         start_idx=0,
@@ -17519,7 +18069,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     )
     top_start = len(recent_sessions[: _SESSION_ROWS * _SESSION_COLS])
     top_block = _render_section(
-        "最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=top_start, suppress_anim=suppress_anim
+        "最活跃会话", top_by_count, count_mode=True, start_idx=top_start, suppress_anim=suppress_anim
     )
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'

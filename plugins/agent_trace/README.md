@@ -4,17 +4,31 @@
 
 ## 功能（v2 重写）
 
-- **三泳道甘特图**：`Input` / `Model` / `Tools` 三条泳道，条带按时间比例排布，
-  hover 显示 tooltip、点击选中记录。顶栏 `Duration` / `Turns` / `Calls` 切换：
-  - Duration：真实时间轴
-  - Turns：每个 turn 等宽分段（段内仍按真实时间）
-  - Calls：只看工具调用
-- **类型过滤 + 搜索**：列表顶部 chips（全部/系统/用户/上下文/助手/工具）一键
-  隐藏 hook 刷屏；顶栏搜索框全文匹配（label/preview/raw）。
-- **turn 分组**：真实 USER 消息行标注 `Turn N` 分隔线；详情标题显示所属轮次。
-- **完整内容**：右侧详情 `Summary` / `Preview` / `Raw` / `Source` 四 tab，
-  Preview/Raw 自动换行、可复制；多模态 content 提取 text 段。
-- **底部统计栏**：`N 轮 · M 步 | LLM 总时长 · 工具总时长 | 上下文 tok`。
+- **三泳道甘特图**：`Input` / `Model` / `Tools` 三条泳道，hover 显示 tooltip、
+  点击选中记录。顶栏两个互斥开关切换宽度语义：
+  - `Duration`：条带宽度 ∝ 真实耗时；
+  - `Token`：条带宽度 ∝ token 占比（顺序仍是时间序），顶部刻度换画**累积 token**。
+  
+  两个都不开 = 等宽铺满（默认）。三者共用同一条时间视口：滚轮以鼠标所在
+  时刻为锚点缩放，等宽 / Token 下只铺视口内记录并在窗内重新归一化。
+  Token 模式带像素级下限 + water-filling 分配，小条目（30 tok 对 8k tok）
+  也保证可见可点。
+- **类型过滤 + 搜索**：列表顶部 chips（全部/系统/用户/钩子/助手/工具）一键
+  隐藏 hook 刷屏；有失败时额外出现「失败 N」chip，点切只看失败。
+  顶栏搜索框全文匹配（label/preview/raw），命中片段在行内高亮，回车跳到首条。
+- **turn 分组**：真实 USER 消息行标注 `T{n}` 可点徽章；点它 = 只看该轮，
+  同时泳道图自动放大到该轮的实际时间跨度（点同一徽章取消）。
+  ⚠️ 轮次归属对齐主程序 `get_user_round_ranges`：user 之前的 hook
+  （PreUserMessage 等）归入**紧随其后**那一轮，`SessionStart` 属会话级不归任何轮。
+- **完整内容**：右侧详情按条目类型给 tab（System Prompt / Tools Schema /
+  Request / Response / Thinking / Preview / Raw / Info / 统计），自动换行、可复制。
+- **右键菜单**：列表右键可复制名称 / 摘要 / 入参 / 结果 / 完整内容，
+  **从这里分支**（以**选中的那一条消息**为界复制成新会话）、跳该轮、只看失败。
+  分支会自动修补工具调用配对（丢弃孤立 tool 结果、剥掉结果落在截断点之后的
+  `tool_calls`），不会产生 API 拒绝的悬空调用。SYSTEM 是合成行，无此入口。
+- **键盘**：`Ctrl+F` 聚焦搜索（卡片内任意位置）、`Esc` 清筛选（无筛选时收起详情）。
+- **底部统计栏**：`N 条 · M 轮 | LLM 总时长 · 工具总时长 | 上下文 tok · 占比`，
+  有失败时右侧额外显示可点的「N 失败」。
 
 ## 架构（数据正确性三原则）
 
@@ -35,8 +49,9 @@
 
 | 项 | 说明 |
 |---|---|
-| 字体 | `Cascadia Mono, Consolas, Menlo, monospace`（DevTools 观感） |
+| 字体 | UI 文字走系统字体（`ctx.font_family`）；代码/JSON/数字列用 `Cascadia Mono, Consolas, Menlo, monospace`（DevTools 观感） |
 | 配色 | 全部经 `ctx["colors"]` 注入；透明度一律 `with_alpha(QColor(hex), a)` 派生。**禁止** `QColor("rgba(...)")` 字符串 —— Qt 解析失败静默返回黑色（v1 黑块根因） |
+| 工具行摘要 | `tool_arg_summary` 从入参 JSON 里挑可读主参数（`bash cd /d ...`、`read x.py:420-470`、`grep _eq_order in plugins/`），不再直接甩原始 JSON |
 | 列表实现 | `QListWidget` + `QStyledItemDelegate` 自绘；过滤/搜索走「可见索引映射」（`Qt.UserRole+1` 存 record 索引） |
 | 选中态 | record 索引制：过滤、追加、回填都不丢选中 |
 | 心跳 | 1s QTimer，仅存在 in-flight 记录时重绘（时长走动） |

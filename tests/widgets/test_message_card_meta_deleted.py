@@ -19,12 +19,15 @@
      label 访问包 try/except RuntimeError（兜底）
 
 本测试覆盖 C 层：label 被 `deleteLater()` + `processEvents()` 强制销毁后，
-`set_meta_info` 与 `_refresh_footer_separators` 必须静默不抛异常。
+`set_meta_info` / `_refresh_footer_stats` / `_refresh_footer_separators` 必须静默不抛异常。
+
+注：页脚结构已改为「耗时 + 插件 stat（footer_stat 槽位）」，原 tokens/speed label
+已移除；销毁场景用 stat label（`_footer_stat_labels` 成员）等价替代。
 """
 
 import sys
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QLabel
 
 from app.widgets.message_card import MessageCard
 
@@ -39,6 +42,14 @@ def _make_card() -> MessageCard:
     return MessageCard(role="assistant")
 
 
+def _install_stat_label(card: MessageCard, stat_id: str = "test:stat") -> QLabel:
+    """向卡片塞一个插件 stat label（模拟 footer_stat 槽位已注册并完成构建）。"""
+    label = QLabel("", card)
+    card._footer_stat_labels[stat_id] = label
+    card._footer_left_items.append((None, label))
+    return label
+
+
 def _destroy_label(card: MessageCard, attr: str):
     """deleteLater + processEvents 强制 C++ 侧销毁指定 footer label。"""
     label = getattr(card, attr)
@@ -47,14 +58,24 @@ def _destroy_label(card: MessageCard, attr: str):
     QApplication.processEvents()
 
 
-def test_set_meta_info_token_survives_deleted_label():
-    """tokens label 被销毁后 set_meta_info(token_usage=...) 不抛异常。"""
+def _destroy_stat_label(card: MessageCard):
+    """deleteLater + processEvents 强制 C++ 侧销毁塞入的 stat label（存于 dict）。"""
+    assert card._footer_stat_labels, "应已先 _install_stat_label"
+    label = next(iter(card._footer_stat_labels.values()))
+    label.deleteLater()
+    QApplication.processEvents()
+
+
+def test_set_meta_info_stat_survives_deleted_label():
+    """stat label 被销毁后 set_meta_info(token_usage=...) 不抛异常。
+
+    token 总量展示已移除，token_usage 现在只透传给 footer_stat provider 刷新链路；
+    修复前：_refresh_footer_stats 访问已删 label → RuntimeError；修复后静默通过。
+    """
     card = _make_card()
-    _destroy_label(card, "_footer_tokens_label")
-    # 修复前：_footer_tokens_label.setText → RuntimeError；修复后静默通过
+    _install_stat_label(card)
+    _destroy_stat_label(card)
     card.set_meta_info(token_usage={"total": 1000})
-    # token 块之后仍会调 _refresh_footer_separators（其内部访问已删 label），
-    # 同样不得抛异常 —— 到这里说明整条链路安全
     assert True
 
 
@@ -67,18 +88,20 @@ def test_set_meta_info_elapsed_survives_deleted_label():
 
 
 def test_refresh_footer_separators_survives_deleted_labels():
-    """tokens + elapsed label 均被销毁后 _refresh_footer_separators 不抛异常。"""
+    """elapsed + stat label 均被销毁后 _refresh_footer_separators 不抛异常。"""
     card = _make_card()
-    _destroy_label(card, "_footer_tokens_label")
+    _install_stat_label(card)
+    _destroy_stat_label(card)
     _destroy_label(card, "_footer_elapsed_label")
     card._refresh_footer_separators()
     assert True
 
 
 def test_set_meta_info_both_survives_deleted_labels():
-    """elapsed + token_usage 同时传入且两 label 均已销毁 → 不抛异常。"""
+    """elapsed + token_usage 同时传入且 elapsed/stat label 均已销毁 → 不抛异常。"""
     card = _make_card()
-    _destroy_label(card, "_footer_tokens_label")
+    _install_stat_label(card)
+    _destroy_stat_label(card)
     _destroy_label(card, "_footer_elapsed_label")
     card.set_meta_info(elapsed=3.0, token_usage={"total": 1000})
     assert True

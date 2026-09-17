@@ -27,20 +27,21 @@ from app.widgets.common_dialogs import ConfirmDialog
 from app.widgets.secret_unlock_dialog import SecretPasswordSetupDialog, SecretUnlockDialog
 
 
+def _hint_qss() -> str:
+    """说明文字样式（内嵌主题 token，refresh_style 时需重建）"""
+    return f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
+
+
 def _hint(text: str, parent) -> BodyLabel:
     label = BodyLabel(text, parent)
     label.setWordWrap(True)
-    label.setStyleSheet(
-        f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
-    )
+    label.setStyleSheet(_hint_qss())
     return label
 
 
-def _small_button(text: str, parent) -> PushButton:
-    btn = PushButton(text, parent)
-    btn.setFixedHeight(28)
-    btn.setCursor(Qt.PointingHandCursor)
-    btn.setStyleSheet(f"""
+def _small_button_qss() -> str:
+    """小按钮样式（内嵌主题 token，refresh_style 时需重建）"""
+    return f"""
         PushButton {{
             background-color: {Colors.CARD_BG.format(alpha=180)};
             color: {Colors.TEXT_PRIMARY};
@@ -53,7 +54,14 @@ def _small_button(text: str, parent) -> PushButton:
             background-color: {Colors.HOVER_BG};
             border-color: {Colors.BORDER_ACCENT};
         }}
-    """)
+    """
+
+
+def _small_button(text: str, parent) -> PushButton:
+    btn = PushButton(text, parent)
+    btn.setFixedHeight(28)
+    btn.setCursor(Qt.PointingHandCursor)
+    btn.setStyleSheet(_small_button_qss())
     return btn
 
 
@@ -71,12 +79,27 @@ class _ModeRow(QFrame):
         h.setContentsMargins(12, 8, 12, 8)
         h.setSpacing(8)
         self._title = QLabel(title, self)
-        self._title.setStyleSheet(
+        self._title.setStyleSheet(self._title_qss())
+        h.addWidget(self._title)
+        self._desc = _hint(desc, self)
+        h.addWidget(self._desc, 1)
+        self._apply_style()
+
+    @staticmethod
+    def _title_qss() -> str:
+        """标题样式（内嵌主题 token，refresh_style 时需重建）"""
+        return (
             f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
             f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
         )
-        h.addWidget(self._title)
-        h.addWidget(_hint(desc, self), 1)
+
+    def refresh_style(self):
+        """主题/字号刷新：标题、说明、选中态边框全按当前 token 重建
+
+        选中态由 `_apply_style` 现取 BORDER_ACCENT/HOVER_BG，不做会停留旧主题色。
+        """
+        self._title.setStyleSheet(self._title_qss())
+        self._desc.setStyleSheet(_hint_qss())
         self._apply_style()
 
     def set_selected(self, selected: bool):
@@ -201,6 +224,25 @@ class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         if self.isExpand:
             # 展开态下内容变化会改变高度，mixin 负责重算
             self._adjust_view_size()
+
+    def refresh_style(self):
+        """主题/字号变更：重建行与密码子区样式
+
+        ⚠️ 本卡继承 ExpandSettingCard（非 SettingCard 子类），挂在设置分页内——
+        `findChildren(SettingCard)` 与 `SystemCardFrame._refresh_content_children`
+        两条通用刷新链都扫不到，必须显式挂进命名清单：主题切换走
+        `main_widget._apply_runtime_ui_settings` 的清单（同 pluginToolCard /
+        pluginAgentCard），构造期走 `LLMSettingsCard._refresh_appearance_from_config`
+        的手风琴卡清单。漏挂 = 行/按钮 QSS 停留旧主题（2026-09-17 用户报
+        「加密方式下拉样式不随主题刷新」的根因）。
+        """
+        Colors.refresh()
+        for row in self._rows.values():
+            row.refresh_style()
+        self._pwd_status.setStyleSheet(_hint_qss())
+        for btn in (self._pwd_btn, self._forget_btn):
+            btn.setStyleSheet(_small_button_qss())
+        self._refresh()
 
     def _has_password(self) -> bool:
         """是否已有加密密码（内存持有 / 存在未解密密文）"""
