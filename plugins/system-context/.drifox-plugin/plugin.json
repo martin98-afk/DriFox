@@ -4,8 +4,8 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-context",
-  "description": "DriFox 内置上下文管理（前缀安全层）：工具结果截断 + 长结果落盘。会改写历史消息、破坏 prompt cache 前缀的压缩层不在本插件（见用户插件 context-compaction）",
-  "version": "2.0.0",
+  "description": "DriFox 内置上下文管理（前缀安全层）：工具结果截断 + 长结果落盘。逐层启停在「设置 → 大模型 → 上下文」页；会改写历史消息、破坏 prompt cache 前缀的压缩层不在本插件（见用户插件 context-compaction）",
+  "version": "2.2.0",
   "author": {
     "name": "DriFoxx Team"
   },
@@ -17,39 +17,25 @@
     "budget_resolvers": true
   },
   "config_schema": {
-    "title": "上下文管理",
+    "title": "上下文管理阈值",
     "fields": [
       {
-        "key": "enable_tool_prune",
-        "label": "工具结果截断",
-        "type": "bool",
-        "default": true,
-        "description": "超长工具结果保留头尾 + 省略标记，给出取回指引。产物字节恒定，不影响缓存命中"
-      },
-      {
-        "key": "enable_tool_offload",
-        "label": "长工具结果落盘",
-        "type": "bool",
-        "default": true,
-        "description": "超大工具结果写入磁盘，上下文内只留预览 + 文件路径供回读。预览冻结，不影响缓存命中"
-      },
-      {
         "key": "tool_result_max_len",
-        "label": "工具结果截断阈值（字符）",
+        "label": "截断阈值（字符）",
         "type": "number",
         "default": "0",
         "min": 0,
         "max": 1000000,
-        "description": "单条工具结果超过此长度即头尾截断。填 0 表示按模型上下文容量动态放大（8K 起，最大 24K）"
+        "description": "单条工具结果超过此长度即头尾截断。填 0 表示按模型上下文容量自动放大（8K~24K，推荐）"
       },
       {
         "key": "single_result_threshold",
-        "label": "单结果落盘阈值（字符）",
+        "label": "落盘阈值（字符）",
         "type": "number",
         "default": "50000",
         "min": 1000,
         "max": 10000000,
-        "description": "单个工具结果超过此长度写入磁盘"
+        "description": "单个工具结果超过此长度写入磁盘，上下文内替换为预览块"
       },
       {
         "key": "message_total_threshold",
@@ -59,31 +45,6 @@
         "min": 1000,
         "max": 100000000,
         "description": "单条消息内工具结果合计超过此长度时，按大小排序落盘最大的几个"
-      },
-      {
-        "key": "prune_skip_tools",
-        "label": "免截断工具名单",
-        "type": "text",
-        "default": "question,skill,todoread",
-        "placeholder": "question,skill,todoread",
-        "description": "逗号分隔的工具名，其工具结果永不截断（结果小且语义完整）。工具侧也可用 metadata[\"no_prune\"] 自行声明"
-      },
-      {
-        "key": "offload_skip_tools",
-        "label": "免落盘工具名单",
-        "type": "text",
-        "default": "question,todowrite,todoread,manage_skill,mcp_list_servers,skill",
-        "placeholder": "question,skill",
-        "description": "逗号分隔的工具名，其工具结果永不写入磁盘。工具侧也可用 metadata[\"no_offload\"] 自行声明"
-      },
-      {
-        "key": "target_ratio",
-        "label": "上下文达标线（百分比）",
-        "type": "number",
-        "default": "60",
-        "min": 5,
-        "max": 99,
-        "description": "cascade 降到预算此百分比即停车。填 60 表示 60%"
       }
     ]
   }

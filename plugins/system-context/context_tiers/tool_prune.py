@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from app.core.context.config import cfg_bool, cfg_int, prune_skip_tools
+from app.core.context.config import cfg_int, prune_skip_tools
 from app.core.context.tool_prune import prune_tool_result, resolve_tool_result_max_len
 from app.core.token_estimator import count_messages_tokens
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
@@ -41,8 +41,6 @@ class ToolPruneTier:
     cache_impact = CACHE_NONE
 
     def should_apply(self, view) -> bool:
-        if not cfg_bool("enable_tool_prune", True):
-            return False
         limit = self._limit(view)
         for m in view.messages:
             if m.get("role") != "tool" or self._skip(m.get("name", "")):

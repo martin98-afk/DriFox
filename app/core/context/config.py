@@ -48,32 +48,25 @@ def cfg_bool(key: str, default: bool) -> bool:
     return str(val).lower() in ("1", "true", "yes", "on")
 
 
-# 免裁剪名单的内置默认值（config_schema 未注册 / 未配置时的兜底）
-# 正式来源有二：① 系统插件 config_schema（用户可在设置页改）
-#             ② 工具注册时声明的 metadata["no_prune"] / ["no_offload"]
-# 三者取并集，任一命中即豁免。
-DEFAULT_PRUNE_SKIP_TOOLS = "question,skill,todoread"
-DEFAULT_OFFLOAD_SKIP_TOOLS = "question,todowrite,todoread,manage_skill,mcp_list_servers,skill"
-
-
-def _parse_tool_list(raw: Any) -> frozenset:
-    if not raw:
-        return frozenset()
-    return frozenset(n.strip() for n in str(raw).split(",") if n.strip())
+# 免裁剪名单：唯一权威来源是工具注册时的 metadata 声明
+#   metadata["no_prune"]=True   → 永不截断
+#   metadata["no_offload"]=True → 永不落盘
+# 下方常量是「工具未声明」场景的兜底（供序列化器等直接调用本函数的路径使用），
+# 不进 config_schema —— 工具名单属实现细节，不该让用户手填。
+_FALLBACK_PRUNE_SKIP = frozenset({"question", "skill", "todoread"})
+_FALLBACK_OFFLOAD_SKIP = frozenset(
+    {"question", "todowrite", "todoread", "manage_skill", "mcp_list_servers", "skill"}
+)
 
 
 def prune_skip_tools() -> frozenset:
-    """免截断工具名单：配置值 ∪ 内置默认。"""
-    return _parse_tool_list(cfg("prune_skip_tools", DEFAULT_PRUNE_SKIP_TOOLS)) | _parse_tool_list(
-        DEFAULT_PRUNE_SKIP_TOOLS
-    )
+    """免截断工具兜底名单（工具 metadata 未声明时生效）。"""
+    return _FALLBACK_PRUNE_SKIP
 
 
 def offload_skip_tools() -> frozenset:
-    """免落盘工具名单：配置值 ∪ 内置默认。"""
-    return _parse_tool_list(cfg("offload_skip_tools", DEFAULT_OFFLOAD_SKIP_TOOLS)) | _parse_tool_list(
-        DEFAULT_OFFLOAD_SKIP_TOOLS
-    )
+    """免落盘工具兜底名单（工具 metadata 未声明时生效）。"""
+    return _FALLBACK_OFFLOAD_SKIP
 
 
 def cfg_ratio(key: str, default: float) -> float:
