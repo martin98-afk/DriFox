@@ -1198,7 +1198,7 @@ def _prune_tool_content_for_api(content: str) -> str:
     """
     if not isinstance(content, str) or not content:
         return content
-    from app.core.context_builder import prune_tool_result
+    from app.core.context.tool_prune import prune_tool_result
 
     return prune_tool_result(content)
 
