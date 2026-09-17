@@ -72,7 +72,47 @@ def _history(n=4):
 
 
 def _allocator(compactor):
-    return ContextBudgetAllocator(_FakeAgentManager(), compactor=compactor)
+    """注入 compactor 与包它的 pipeline 桩。
+
+    上下文压缩已迁到 ContextPipeline（cascade）。为让本测试继续锁定
+    「_send_prep_cache 缓存失效契约」，用一个把假 compactor 包装成
+    单 tier 的 registry 注入 pipeline —— 这样 compact_calls 计数语义不变。
+    """
+    from app.core.context.pipeline import ContextPipeline
+    from app.plugins.contracts.context_policy import (
+        CACHE_INVALIDATE,
+        STAGE_SEND,
+        TierOutcome,
+    )
+    from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
+
+    class _CompactorTier:
+        """把 _CountingCompactor 包装成 cascade 的一层（order 70 尾保留位）"""
+
+        id = "compactor_tier"
+        label = "压缩（测试桩）"
+        order = 70
+        stages = frozenset({STAGE_SEND})
+        cache_impact = CACHE_INVALIDATE
+
+        def should_apply(self, view):
+            return True
+
+        def apply(self, view):
+            messages, state, cache = compactor.compact(
+                view.messages,
+                view.budget,
+                existing_cache=view.compaction_cache or None,
+                allow_llm_summary=True,
+                prenormalized=view.messages,
+            )
+            view.compaction_state = state
+            view.compaction_cache = cache
+            return TierOutcome(messages=messages, saved_tokens=0, note="compact")
+
+    reg = ContextPolicyRegistry()
+    reg.register_tier(_CompactorTier(), "test")
+    return ContextBudgetAllocator(_FakeAgentManager(), compactor=compactor, pipeline=ContextPipeline(reg))
 
 
 class TestCacheHit:

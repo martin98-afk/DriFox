@@ -55,6 +55,27 @@ def _setup_qt_attributes():
     QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_context_tiers_loaded():
+    """测试期加载 system-context 内置 tier 链（session 级，幂等）。
+
+    上下文压缩已迁到 ContextPipeline：build_messages / UI 估算不再直接调
+    compactor，而是跑 registry 里的 tier 链。单个测试进程不会走真实启动链的
+    warmup_runtime_components()，故此 fixture 补一次扫描，让依赖真实 cascade
+    行为的用例（如 tool 结果截断集成测试）拿到非空链。
+    """
+    try:
+        from app.plugins.loaders.runtime_component_loader import (
+            _make_budget_resolver_loader,
+            _make_context_tier_loader,
+        )
+
+        _make_context_tier_loader().scan_roots()
+        _make_budget_resolver_loader().scan_roots()
+    except Exception:
+        pass
+
+
 @pytest.fixture(scope="session")
 def qapp(_setup_qt_attributes):
     """PyQt5 QApplication 单例（Phase F：UIModule 测试需要 Qt 事件循环）"""

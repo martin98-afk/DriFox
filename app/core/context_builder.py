@@ -44,16 +44,18 @@ class ContextBudgetAllocator:
     - 系统提示 token 缓存：避免重复计算相同内容
     """
 
-    def __init__(self, agent_manager, compactor=None, backend=None):
+    def __init__(self, agent_manager, compactor=None, backend=None, pipeline=None):
         """
         Args:
             agent_manager: AgentManager 实例
-            compactor: HistoryCompactor 实例（用于实际压缩）
+            compactor: HistoryCompactor 实例（用于预算查询与压缩）
             backend: 后端实例（用于获取记忆上下文）
+            pipeline: ContextPipeline 实例（可注入，测试用桩替换；不传则每次新建）
         """
         self._agent_manager = agent_manager
         self.backend = backend
         self._compactor = compactor
+        self._pipeline = pipeline
 
         # ========== 性能优化：系统提示 token 缓存（LRU，md5 键跨进程稳定） ==========
         # 避免重复计算相同系统内容的 token 数；容量 64，最久未用者先逐
@@ -158,14 +160,16 @@ class ContextBudgetAllocator:
             params = history_messages[-1].get("params", {})
             history_messages = history_messages[:-1]
 
-        # 上下文压缩 —— 使用分配器计算的预算
+        # 上下文压缩 + S1 工具截断 —— 统一交给 ContextPipeline 的 send stage。
+        # 原实现：预算 → compact（含 _send_prep_cache 缓存）→ 过滤旧 system →
+        #         逐条 prune_tool_result。现在 cascade 按 order 依次执行
+        #         图片剥离 / 去重 / 工具截断 / 参数截断 / 摘要化 / 尾保留 / LLM 摘要，
+        #         每层达标即停，逐层记录 stats。
         budget = self._allocate_history_budget(full_system_content, llm_config)
-        # [PERF T33] 发送前处理缓存：consolidate + compact（含 token 估算）在
-        # 同一消息版本 + 同一预算/模型/截断参数下结果完全确定，而一次发送会经
-        # 多次调用（主发送 + 工具迭代回环）。长会话下这两步是 100-300ms 级开销。
-        # 命中条件为 8 元组全等；任一变化即 miss 走原路径并回写。
-        # S1 工具截断与 filtered_history 过滤留在缓存外（对 history_for_api 原地
-        # 改 content，缓存持有的是 compact 输出，不能被下游改动污染）。
+        # [PERF T33] 发送前处理缓存：cascade 输出在同一消息版本 + 同一预算/模型/
+        # 截断参数下结果确定，而一次发送会经多次调用（主发送 + 工具迭代回环）。
+        # 长会话下是 100-300ms 级开销。命中条件 8 元组全等，任一变化即 miss。
+        # filtered_history 过滤留在缓存外（对 cascade 输出原地筛选，不回写缓存）。
         tool_result_max_len = resolve_tool_result_max_len(llm_config)
         prep_key = (
             getattr(session, "_messages_version", -1),
@@ -183,24 +187,43 @@ class ContextBudgetAllocator:
             session.set_compaction_state(cached_prep["state"])
             session.set_compaction_cache(cached_prep["cache"])
         else:
-            # compact 为纯同步函数，调用方（PreSendWorker / chat_worker /
-            # gateway 主线程入口）已各自决定执行线程；此前的 anyio.run(to_thread) 包装
-            # 只增加 event loop 创建与线程切换开销，不改阻塞语义（同步等待）。
-            history_for_api, compaction_state, compaction_cache = self._compactor.compact(
+            pipeline = self._pipeline
+            if pipeline is None:
+                from app.core.context.pipeline import ContextPipeline
+
+                pipeline = ContextPipeline()
+            # 预算由 pipeline 内部的 ContextBudgetResolver 计算；此处传的 budget
+            # 仅用于参与 prep_key（保持缓存键语义不变）。
+            view = pipeline.project_for_send(
                 history_messages,
-                budget,
-                existing_cache=getattr(session, "compaction_cache", None),
-                allow_llm_summary=allow_llm_summary,
-                prenormalized=history_messages,
+                llm_config,
+                system_content=full_system_content,
+                state=getattr(session, "compaction_state", None),
+                cache=getattr(session, "compaction_cache", None),
             )
-            session.set_compaction_state(compaction_state)
-            session.set_compaction_cache(compaction_cache)
+            history_for_api = view.messages
+            session.set_compaction_state(view.compaction_state)
+            session.set_compaction_cache(view.compaction_cache)
+            try:
+                session._last_context_stats = [
+                    {
+                        "tier_id": s.tier_id,
+                        "label": s.label,
+                        "saved_tokens": s.saved_tokens,
+                        "cache_impact": s.cache_impact,
+                        "note": s.note,
+                        "skipped": s.skipped,
+                    }
+                    for s in view.stats
+                ]
+            except Exception:
+                pass  # 统计写回失败不影响发送（session 可能为只读桩）
             try:
                 session._send_prep_cache = {
                     "key": prep_key,
                     "history": history_for_api,
-                    "state": compaction_state,
-                    "cache": compaction_cache,
+                    "state": view.compaction_state,
+                    "cache": view.compaction_cache,
                 }
             except Exception:
                 pass  # 缓存写回失败不影响发送（session 可能为只读桩）
@@ -213,16 +236,6 @@ class ContextBudgetAllocator:
             for m in history_for_api
             if m.get("role") != "system" or m.get("_hook_event") or m.get("_compaction_summary")
         ]
-        # S1: 工具结果截断 — 超阈值 tool 输出分层截断（阈值随模型上下文容量动态放大）。
-        # 只在「发给 LLM 的上下文」层裁剪，session 原始存储不受影响（可追溯/可重放）。
-        tool_result_max_len = resolve_tool_result_max_len(llm_config)
-        for m in filtered_history:
-            if m.get("role") == "tool" and isinstance(m.get("content"), str):
-                m["content"] = prune_tool_result(
-                    m["content"],
-                    max_len=tool_result_max_len,
-                    tool_name=m.get("name", ""),
-                )
         messages.extend(filtered_history)
 
         # 添加用户消息

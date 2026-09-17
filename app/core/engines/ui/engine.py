@@ -18,7 +18,6 @@ from app.core.chat_session import (
     ChatSession,
     SessionManager,
 )
-from app.core.context_builder import TOOL_RESULT_MAX_LEN, prune_tool_result
 from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
@@ -566,24 +565,20 @@ class UIEngine(BaseEngine):
         # 本地估算校正系数（除数）：服务商能力 > app.config 覆盖 > 模型名兜底
         ratio = resolve_token_ratio(llm_config, model)
 
+        # S2: 上下文投影（ui stage）— 与 send stage 共用同一 cascade，
+        # 保证「UI 估算 = 实际发送量」是结构性一致，不再手工重复截断。
+        # ui stage 禁止副作用（不落盘、不调 LLM），且 tier 只产出新列表、
+        # 不改 session.messages 原始存储（可追溯）。
+        from app.core.context.pipeline import ContextPipeline
+
+        _ui_view = ContextPipeline().project_for_ui(session.messages, llm_config, system_content=system_prompt)
+        _projected = _ui_view.messages
+        pruned_tokens = sum(s.saved_tokens for s in _ui_view.stats if not s.skipped)
+
         approx_messages: List[Dict] = []
         if system_prompt:
             approx_messages.append({"role": "system", "content": system_prompt})
-        # S2: 工具结果截断投影 — 与 context_builder.build_messages 使用同一
-        # prune_tool_result（同参数），使 UI 估算 = 实际发送 token（截断后），
-        # 保证「投影与实际用量一致」；并累计节省量 pruned_tokens 供 UI 展示。
-        # 仅对超阈值消息建副本，不修改 session.messages 原始存储（可追溯）。
-        pruned_tokens = 0
-        for _m in session.messages:
-            _content = _m.get("content")
-            if _m.get("role") == "tool" and isinstance(_content, str) and len(_content) > TOOL_RESULT_MAX_LEN:
-                raw_tok = per_message_tokens(_m, model, ratio)
-                _m_copy = dict(_m)
-                _m_copy["content"] = prune_tool_result(_content)
-                approx_messages.append(_m_copy)
-                pruned_tokens += max(0, raw_tok - per_message_tokens(_m_copy, model, ratio))
-            else:
-                approx_messages.append(_m)
+        approx_messages.extend(_projected)
 
         # 获取工具 schema（与实际 API 请求一致），必须计入上下文占用
         # ⚠️ 旧实现此处漏传 tools，导致工具定义（35+ 工具）的 token 完全未计入，
@@ -640,7 +635,8 @@ class UIEngine(BaseEngine):
         # 消除 [msg] 临时列表分配 + 4-entry is 缓存必然 MISS 的开销，
         # 100 条消息场景从 ~102 次 count_messages_tokens 降至 ~N+1 次 per_message_tokens。
         user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
-        for msg in session.messages:
+        # 用 ui stage 的投影结果统计（已含 cascade 截断效果），不再逐条手工截断
+        for msg in _projected:
             role = msg.get("role", "")
             t = per_message_tokens(msg, model, ratio)
             # 分离 hook 注入消息（带 _hook_event 标记），独立统计
@@ -651,12 +647,7 @@ class UIEngine(BaseEngine):
             elif role == "assistant":
                 assistant_tokens += t
             elif role == "tool":
-                # S2: 工具结果按实际发送口径统计（超阈值先截断再计 token）
-                _m = msg
-                if isinstance(msg.get("content"), str) and len(msg["content"]) > TOOL_RESULT_MAX_LEN:
-                    _m = dict(msg)
-                    _m["content"] = prune_tool_result(_m["content"])
-                tool_tokens += per_message_tokens(_m, model, ratio)
+                tool_tokens += t
             else:
                 # 其它角色（如内联 system 消息）兜底归入用户侧
                 user_tokens += t
