@@ -28,6 +28,18 @@ def _ensure_split_system_plugins_enabled():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _disable_codebuddy_refresh_loop():
+    """codebuddy 守护线程 urlopen/DNS 与解释器退出竞态（0x8001010D）→ 测试环境禁用
+
+    codebuddy._bootstrap 读 DRIFOX_NO_CODEBUDDY_REFRESH=1 时跳过线程启动；
+    避免测试进程退出期被后台网络请求击中（Windows fatal exception）。
+    """
+    import os
+
+    os.environ["DRIFOX_NO_CODEBUDDY_REFRESH"] = "1"
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _setup_qt_attributes():
     """qfluentwidgets SingleDirectionScrollArea 需在 QApplication 创建前设置 Qt::AA_ShareOpenGLContexts"""
     from PyQt5.QtCore import QCoreApplication, Qt

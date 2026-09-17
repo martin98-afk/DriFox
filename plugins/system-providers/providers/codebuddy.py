@@ -19,6 +19,7 @@ User-Agent）经 capabilities["extra_headers"] 注入每个 LLM 请求，主程�
 """
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -193,9 +194,22 @@ def _fetch_balance(config):
     return {"balance": round(left, 1), "currency": ""}
 
 
+# daemon 守护线程与解释器拆解竞态的防护：
+# - 退出信标：aboutToQuit 置位，线程在分段睡眠间隙退出，不再 exec auth 模块
+# - 预热：启动时先加载一次 buddy_auth（sys.modules 缓存），退出期 exec
+#   命中缓存 import，避免「拆解中首次 import email/urllib」的 Windows
+#   fatal exception 0x8001010D（pytest/开发进程退出必现）
+_STOP_EVENT = threading.Event()
+_THREAD_STARTED = False
+
+
 def _refresh_loop():
     """守护循环：遍历缓存内全部号 —— 临期刷新 access_token + 每日自动签到（幂等）。"""
-    while True:
+    try:
+        _load_auth_module()  # 预热：退出期不再首次加载 auth 模块
+    except Exception:
+        pass
+    while not _STOP_EVENT.is_set():
         try:
             ba = _load_auth_module()
             for path in sorted(_CACHE_DIR.glob("*.json")):
@@ -229,12 +243,36 @@ def _refresh_loop():
                     continue  # 单号失败不影响其余号
         except Exception:
             pass  # 守护线程不允许退出
-        time.sleep(_REFRESH_INTERVAL_SEC)
+        # 分段睡眠：退出信标置位后最快 1s 内退出（整段 6h 会挡住退出）
+        for _ in range(_REFRESH_INTERVAL_SEC):
+            if _STOP_EVENT.is_set():
+                return
+            time.sleep(1)
 
 
 def _bootstrap():
-    """注册时启动守护线程（热重载重复启动无害：daemon 且幂等写）。"""
+    """注册时启动守护线程（热重载重复启动无害：daemon 且幂等写）。
+
+    测试/CI 环境（DRIFOX_NO_CODEBUDDY_REFRESH=1）不启动：守护线程的
+    urlopen/DNS 解析与解释器退出存在竞态（Windows fatal 0x8001010D），
+    测试进程退出期会被它击中。
+    """
+    global _THREAD_STARTED
+    if _THREAD_STARTED:
+        return
+    if os.environ.get("DRIFOX_NO_CODEBUDDY_REFRESH") == "1":
+        return
+    _THREAD_STARTED = True
+    _STOP_EVENT.clear()
     threading.Thread(target=_refresh_loop, daemon=True).start()
+    try:
+        from PyQt5.QtCore import QCoreApplication
+
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(_STOP_EVENT.set)
+    except Exception:
+        pass
 
 
 def register(registry):
