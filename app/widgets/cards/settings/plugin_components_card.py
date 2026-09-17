@@ -60,12 +60,16 @@ from app.utils.design_tokens import Colors, SwitchStyles, font_size_css, scale_f
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.elided_label import _ElidedLabel
 
-# 只对这两类组件提供开关。
+# 只对这些组件提供开关。
 #
 # 其余组件（hooks / mcp / lsp / ui / providers …）整类关掉后要么感知不到差别，
 # 要么本来就有各自的专用设置页，列在这里只是让设置页变长、构建变慢。
 # 需要重新开放某一类时，往这个元组里加即可——下面的过滤、统计、搜索全部按它走。
-_MANAGED_COMPONENTS = ("tools", "agents")
+#
+# context_tiers / budget_resolvers：上下文管理（截断 / 落盘 / 压缩层）。
+# 这些层直接决定「发给模型的上下文长什么样」，用户需要能逐项开关 ——
+# 尤其破坏 prompt cache 前缀的压缩层（见用户插件 context-compaction）。
+_MANAGED_COMPONENTS = ("tools", "agents", "context_tiers", "budget_resolvers")
 
 # 组件中文名（KNOWN_COMPONENTS 全集；未知组件回退显示原名）
 _COMPONENT_CN = {
@@ -86,6 +90,8 @@ _COMPONENT_CN = {
     "serializers": "消息序列化",
     "gateways": "通讯网关",
     "engines": "存储引擎",
+    "context_tiers": "上下文层",
+    "budget_resolvers": "预算解析",
 }
 
 # 组件来源标签样式（对齐 tool_control_card：system 红 / user 绿）

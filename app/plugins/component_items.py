@@ -218,11 +218,53 @@ def _items_md(directory: Optional[Path], pattern: str = "*.md") -> List[Componen
 
 
 def _items_stem(directory: Optional[Path], pattern: str) -> List[ComponentItem]:
-    """按文件名 stem 枚举（yaml / py 目录通用；md 目录走 _items_md）"""
+    """按文件名 stem 枚举（yaml / py 目录通用；md 目录走 _items_md）
+
+    py 目录额外尝试读取模块内实现的 `label` / `order` 类属性作为描述
+    （上下文层这类组件：类上有中文 label 与 order，比裸文件名好辨认得多）。
+    读取走 AST 静态解析，不 exec 模块 —— 避免枚举设置页时触发插件副作用。
+    """
     if directory is None or not directory.exists():
         return []
-    items = [ComponentItem(id=p.stem) for p in sorted(directory.glob(pattern)) if not p.name.startswith("_")]
+    py_mode = pattern.endswith(".py")
+    items: List[ComponentItem] = []
+    for p in sorted(directory.glob(pattern)):
+        if p.name.startswith("_"):
+            continue
+        desc = _py_module_label(p) if py_mode else ""
+        items.append(ComponentItem(id=p.stem, label="", description=desc))
     return sorted(items, key=lambda it: it.id)
+
+
+def _py_module_label(path: Path) -> str:
+    """从 py 文件静态提取实现类的中文 label + order（失败返回空串）。
+
+    只做 AST 遍历取类属性字面量，不导入模块 —— 枚举动作必须零副作用。
+    """
+    try:
+        import ast
+
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return ""
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        label = ""
+        order = None
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for tgt in stmt.targets:
+                if not isinstance(tgt, ast.Name):
+                    continue
+                if tgt.id == "label" and isinstance(stmt.value, ast.Constant):
+                    label = str(stmt.value.value or "")
+                elif tgt.id == "order" and isinstance(stmt.value, ast.Constant):
+                    order = stmt.value.value
+        if label:
+            return f"order {order} · {label}" if order is not None else _shorten(label)
+    return ""
 
 
 # ── 对外 API ──────────────────────────────────────

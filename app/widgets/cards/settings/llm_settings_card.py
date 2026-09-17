@@ -366,6 +366,7 @@ class LLMSettingsCard(SystemCardFrame):
                 ("lsp", "LSP", "lsp"),
                 ("tools", "工具", "工具"),
                 ("agents", "智能体", "智能体"),
+                ("context", "上下文", "折叠"),
                 ("skills", "技能", "技能"),
             ),
         ),
@@ -537,6 +538,18 @@ class LLMSettingsCard(SystemCardFrame):
         )
         agents_layout.addWidget(self.pluginAgentCard)
         agents_layout.addStretch(1)
+
+        # ════ 上下文管理页（按插件控制上下文层启停 + 阈值）════
+        context_layout = self._page_layouts["context"]
+        self.pluginContextCard = PluginComponentsCard(
+            components=("context_tiers", "budget_resolvers"),
+            title="上下文管理",
+            content="按插件控制上下文层（截断 / 落盘 / 压缩）的启停",
+            icon=get_icon("折叠"),
+            parent=self,
+        )
+        context_layout.addWidget(self.pluginContextCard)
+        context_layout.addStretch(1)
 
         # 技能启用（按插件/内置/用户分组，行在展开后分批构建）
         skills_layout = self._page_layouts["skills"]
@@ -1225,8 +1238,12 @@ class LLMSettingsCard(SystemCardFrame):
 
                     self.hookListCard._hook_manager = HookManager()
                 self.hookListCard._refresh(reload=True)
-            elif tab_id in ("tools", "agents"):
-                card = getattr(self, "pluginToolCard" if tab_id == "tools" else "pluginAgentCard", None)
+            elif tab_id in ("tools", "agents", "context"):
+                card = getattr(
+                    self,
+                    {"tools": "pluginToolCard", "agents": "pluginAgentCard", "context": "pluginContextCard"}[tab_id],
+                    None,
+                )
                 if card is not None:
                     card.refresh_components()
             elif tab_id == "plugins":

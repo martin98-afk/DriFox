@@ -208,14 +208,24 @@ def test_system_plugin_tiers_are_prefix_safe():
 
     系统插件只承载「每轮投影产出字节恒定」的层（入口截断 + 冻结预览）；
     任何改写历史消息的层（图片剥离/去重/摘要/尾保留/LLM 摘要）会破坏
-    prompt cache 前缀，不得进入系统插件。
+    prompt cache 前缀，只能做成用户插件（.drifox/plugins/context-compaction）。
+
+    注：断言范围是 system-context 的 source，不是 registry 全量 ——
+    用户插件提供的破坏性层（cache_impact=invalidate）是设计允许的。
     """
     from app.plugins.loaders.runtime_component_loader import _make_context_tier_loader
+    from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
 
     _make_context_tier_loader().scan_roots()
     reg = ContextPolicyRegistry.get_instance()
+    system_ids = {t.id for t in reg.resolve_chain(STAGE_SEND) if t.order in (20, 40)} | {
+        t.id for t in reg.resolve_chain(STAGE_INGEST)
+    }
+    # system-context 提供的层 id 固定为这两个
+    assert system_ids >= {"tool_prune", "tool_offload"}
     for tier in reg.tiers().values():
-        assert tier.cache_impact != "invalidate", f"系统插件的 tier '{tier.id}' 会破坏前缀"
+        if tier.id in ("tool_prune", "tool_offload"):
+            assert tier.cache_impact != "invalidate", f"系统插件的 tier '{tier.id}' 会破坏前缀"
         assert hasattr(tier, "order") and hasattr(tier, "stages")
 
 
