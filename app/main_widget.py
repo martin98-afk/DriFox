@@ -10257,16 +10257,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     QTimer.singleShot(0, lambda _kw=_kw: _tmw.refresh_workbench(**_kw))
             except Exception:
                 pass
-            # 欢迎卡片插件 tab 刷新：ui 组件重载（安装/更新/卸载）后，已打开的
-            # 欢迎卡片需重建以显示新增/移除的插件 tab。原刷新完全依赖
-            # register_welcome_tab → registry 链，实测安装新插件后已打开标签页
-            # 不刷新（须新建会话才出现），此处显式兜底刷新（见 2026-08-23 故障）。
-            try:
-                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-                UIPluginRegistry.get_instance()._refresh_welcome_cards()
-            except Exception:
-                logger.debug("[HotReload] 欢迎卡片刷新失败", exc_info=True)
+            # 欢迎卡片插件 tab 刷新不在此处兜底：任何 ui 组件变更（哪怕只动
+            # input_button）都会进本分支，无条件刷会让每个窗口的欢迎卡片
+            # QWebEngineView 重建一次（100-500ms/个，正显示欢迎卡片的窗口
+            # 肉眼可见闪一下），且与 registry 自身的调度双刷。
+            # 判定交给 registry：load_plugin 按 before_tabs/after_tabs、
+            # unload_plugin 按 had_welcome_tabs 精准触发 _schedule_welcome_refresh
+            # （带 debounce），插件不占 welcome 槽位时零刷新。
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
                 from app.tray_manager import TrayManager

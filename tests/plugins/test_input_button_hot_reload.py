@@ -5,6 +5,8 @@
 不出现新按钮（新建标签页才显示）。
 """
 
+import weakref
+
 import pytest
 from PyQt5.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
@@ -30,12 +32,13 @@ def widget(qtbot, monkeypatch):
     w._command_card = MagicMock()
     qtbot.addWidget(w._toolbar_capsule)
     # 模拟已打开窗口：注册进类级实例表 + 复位热重载指纹
-    window_registry.window_instances.append(w)
+    # window_instances 存弱引用（window_registry.register_window 同口径），
+    # alive_window_instances() 会对元素调用 r()，塞强引用会抛 TypeError。
+    window_registry.window_instances.append(weakref.ref(w))
     window_registry.last_hot_reload_fingerprint = None
     OpenAIChatToolWindow._last_hot_reload_at = 0.0
     yield w
-    if w in window_registry.window_instances:
-        window_registry.window_instances.remove(w)
+    window_registry.unregister_window(w)
     window_registry.last_hot_reload_fingerprint = None
     OpenAIChatToolWindow._last_hot_reload_at = 0.0
 
@@ -91,7 +94,7 @@ def test_hot_reload_rogue_window_does_not_block_broadcast(qtbot, widget, fresh_r
     # 修复前 hasattr(win, "_command_card") 抛 RuntimeError 中断整个广播槽
     rogue = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     monkeypatch.setattr(
-        window_registry, "window_instances", [rogue, widget]  # 残骸排在最前
+        window_registry, "window_instances", [weakref.ref(rogue), weakref.ref(widget)]  # 残骸排在最前
     )
     monkeypatch.setattr(window_registry, "last_hot_reload_fingerprint", None)
     monkeypatch.setattr(OpenAIChatToolWindow, "_last_hot_reload_at", 0.0)
@@ -101,6 +104,42 @@ def test_hot_reload_rogue_window_does_not_block_broadcast(qtbot, widget, fresh_r
     widget._on_plugin_hot_reload(_hot_reload_result())
     buttons = [b for b in widget._toolbar_capsule.findChildren(QToolButton) if b.toolTip() == "新按钮"]
     assert len(buttons) == 1, "残骸窗口之后的健康窗口必须完成按钮重建"
+
+
+def test_hot_reload_ui_does_not_refresh_welcome_cards(qtbot, widget, fresh_registry, monkeypatch):
+    """仅 input_button 变更（插件不占 welcome 槽位）时不得刷新欢迎卡片
+
+    回归：main_widget._on_plugin_hot_reload 的 ui 分支曾无条件调用
+    UIPluginRegistry._refresh_welcome_cards()——任何 ui 组件热重载（哪怕只动
+    输入区按钮）都会让每个窗口的欢迎卡片缓存失效，正显示欢迎卡片的窗口
+    立即重建 QWebEngineView（100-500ms/个，肉眼可见闪一下），且与 registry
+    自身调度双刷。精准判定在 registry：unload 按 had_welcome_tabs、
+    load 按 before_tabs/after_tabs 才 _schedule_welcome_refresh。
+    """
+    widget.backend = object()
+    calls = []
+    monkeypatch.setattr(UIPluginRegistry, "_refresh_welcome_cards", lambda self: calls.append(1))
+
+    fresh_registry.register_input_button("demo", "btn-1", tooltip="新按钮", on_click=lambda ctx: None)
+
+    widget._on_plugin_hot_reload(_hot_reload_result())
+    assert calls == [], f"插件不占 welcome 槽位时不应刷新欢迎卡片，实际刷新 {len(calls)} 次"
+
+
+def test_welcome_tab_plugin_unload_still_schedules_welcome_refresh(qtbot, fresh_registry, monkeypatch):
+    """占 welcome 槽位的插件卸载后仍必须刷新欢迎卡片（防 2026-08-23 故障回归）
+
+    删除 main_widget 的无条件兜底后，刷新完全依赖 registry 自身判定：
+    unload 按 had_welcome_tabs、load 按 before_tabs/after_tabs 调度
+    _schedule_welcome_refresh（QTimer.singleShot + debounce）。
+    """
+    fresh_registry.register_welcome_tab("demo", "tab-1", "T", lambda ctx: "<p>x</p>")
+    calls = []
+    monkeypatch.setattr(UIPluginRegistry, "_refresh_welcome_cards", lambda self: calls.append(1))
+
+    fresh_registry.unload_plugin("demo")
+    qtbot.wait(50)
+    assert calls, "占 welcome 槽位的插件卸载后必须调度欢迎卡片刷新"
 
 
 if __name__ == "__main__":
