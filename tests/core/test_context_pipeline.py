@@ -189,6 +189,30 @@ def test_register_dispatch_by_shape(registry):
     assert registry.get_budget_resolver().id == "r1"
 
 
+def test_prune_precedes_dedupe():
+    """截断（order 20）必须排在去重（order 30）之前。
+
+    回归：曾把 tool_dedupe 排在 tool_prune 前，去重后常已达标而 break，
+    导致超长单条结果全文进上下文（实测 30K 未被截断，输出比旧实现还大）。
+    截断保留头尾 + 取回指引，损失可控；去重整条替换成占位符，损失不可逆。
+    """
+    from app.core.context.tiers.tool_dedupe import ToolDedupeTier
+    from app.core.context.tiers.tool_prune import ToolPruneTier
+
+    assert ToolPruneTier.order < ToolDedupeTier.order
+
+
+def test_real_chain_prune_before_dedupe():
+    """真实 system-context 链里 tool_prune 必须先于 tool_dedupe"""
+    from app.plugins.loaders.runtime_component_loader import _make_context_tier_loader
+
+    _make_context_tier_loader().scan_roots()
+    reg = ContextPolicyRegistry.get_instance()
+    ids = [t.id for t in reg.resolve_chain(STAGE_SEND)]
+    if "tool_prune" in ids and "tool_dedupe" in ids:
+        assert ids.index("tool_prune") < ids.index("tool_dedupe")
+
+
 def test_view_token_cache_invalidated_on_replace():
     v = _view(n=10)
     first = v.used_tokens

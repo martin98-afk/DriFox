@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""order 20 — 重复工具结果去重：相同内容只保留最新一份完整拷贝。
+"""order 30 — 重复工具结果去重：相同内容只保留最新一份完整拷贝。
 
 来源：_prune_old_tool_results Pass 1（history_compactor.py）。
 cache_impact=invalidate：改写旧 tool 消息 content，破坏前缀。
@@ -24,7 +24,7 @@ def _hash(content: str) -> str:
 class ToolDedupeTier:
     id = "tool_dedupe"
     label = "重复工具结果去重"
-    order = 20
+    order = 30
     stages = frozenset({STAGE_SEND, STAGE_UI})
     cache_impact = CACHE_INVALIDATE
 

@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""order 30 — 工具结果截断（S1）：超阈值 tool 输出分层截断，头 + 尾 + 省略标记。
+"""order 20 — 工具结果截断（S1）：超阈值 tool 输出分层截断，头 + 尾 + 省略标记。
 
 来源：context_builder.build_messages 的 S1 循环。
 stage=all：三个入口都要（ingest 先截断，落盘判定才准确）。
 cache_impact=none：入口即截断，前后缀自始一致。
+
+order 20 的理由（排在 tool_dedupe=30 之前）：截断保留头尾 + 取回指引，
+信息损失可控；去重把整条替换成一行占位符，损失不可逆。若先去重，
+去重后常已达标而 break，超长单条结果将全文进上下文（实测 30K 未被截断）。
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ def _count(messages: List[Dict[str, Any]]) -> int:
 class ToolPruneTier:
     id = "tool_prune"
     label = "工具结果截断"
-    order = 30
+    order = 20
     stages = frozenset(ALL_STAGES)
     cache_impact = CACHE_NONE
 
