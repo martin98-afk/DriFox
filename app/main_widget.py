@@ -11886,9 +11886,18 @@ class OpenAIChatToolWindow(ToolWindow):
             # 未加载批次（占位批次 index ≥ _visible_batch_start 永远不在其范围）；
             # 上面的 ensure_rendered 只处理 _batch_cards 非空的批次。结果视口
             # 落进占位区即一片永久空白。这里对激活范围内有占位的批次原位重建
-            # （数据仍在 _message_batch），恢复「视口 ± 缓冲内必有内容」。
+            # （数据仍在 _message_batch），恢复「视口邻域必有内容」。
+            #
+            # ⚠️ 窗口刻意**窄于**保留圈（`_restore_window_batches` vs
+            # `_virtual_buffer_batches`）：若与保留圈同宽，落在圈内但视口外的批次
+            # 会被「第二步卸载 → 本步重建」无限对拆（T42）。窄窗口保证只有视口
+            # 真正邻域立即有内容，圈内其余批次保持占位（视口移动时才被唤醒），
+            # 从而让 LRU 淘汰器留有候选、内存上限不被架空。
+            _restore_win = self._restore_window_batches()
+            _restore_start = max(0, vp_start - _restore_win)
+            _restore_end = vp_end + 1 + _restore_win
             pending_restore = []
-            for batch_idx in range(active_start, active_end):
+            for batch_idx in range(_restore_start, _restore_end):
                 if batch_idx >= len(self._batch_cards) or self._batch_cards[batch_idx] is not None:
                     continue
                 if batch_idx >= len(self._message_batch) or not self._message_batch[batch_idx]:
@@ -12236,19 +12245,67 @@ class OpenAIChatToolWindow(ToolWindow):
             return rng
         return (self._visible_batch_start, max(self._visible_batch_start, self._visible_batch_end - 1))
 
+    def _virtual_buffer_batches(self) -> int:
+        """视口回收器的保留缓冲批数（`_recycle_out_of_view_batches` 第二步口径）。
+
+        语义：距视口多远之外的批次可以**卸载**（卸载后只留等高占位）。
+
+        未装配缓冲配置时（测试桩）退回 ±1：与历史保护口径一致，避免保护范围
+        误缩到 0 而把视口邻域判成可淘汰。
+        """
+        # ⚠️ 桩实例（`__new__` 未调 super().__init__）上访问 Qt 属性抛的是
+        # RuntimeError 而非 AttributeError，两种都要吞。
+        try:
+            inc = int(self._incremental_visible_batch_count)
+            buf = int(self._virtual_scroll_buffer)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return 1
+        value = inc * buf
+        return value if value > 0 else 1
+
+    def _restore_window_batches(self) -> int:
+        """重建窗口：距视口多近之内的**占位**批次必须立即重建（第 1.5 步口径）。
+
+        🐛 T42 自激修复的关键：这个窗口必须**明显窄于** `_virtual_buffer_batches`。
+
+        历史实现让两者同宽（都是 ±8），于是第 1.5 步无条件重建整个保留圈内的
+        占位批次，而第二步又卸载保留圈外的批次 —— 落在「保留圈内但视口外」
+        （±3~±8）的批次被反复卸载→重建：实机日志 `原位重建 6` 与 `回收 11`
+        出现在同一次调用里，`batches=50/9 ↔ 50/14` 波动、`rendered` 单调超配额，
+        全程无用户操作。
+
+        收窄后语义才自洽：只有视口真正邻域的批次保证有内容（防白屏），
+        其余保留圈的批次允许保持占位（用户滚过去时视口移动，它们进入重建窗口
+        才被唤醒），从而给 LRU 淘汰器留出可卸载的候选。
+        """
+        return self._virtual_buffer_batches() // 4
+
     def _batch_is_protected(self, batch_idx: int, vp_range: Optional[tuple] = None) -> bool:
         """判断批次是否受保护（温和淘汰不碰）：
-        - 真实可视区 ±1 批（刚滚出/即将滚入，重建成本高）
+        - 视口邻域（`_restore_window_batches` 口径）
         - 包含当前流式输出助手卡片的批次
         - 欢迎卡片所在批次
+
+        🐛 保护范围必须**等于第 1.5 步的重建窗口**，不能等于整个保留圈（T42）。
+
+        历史：保护范围曾是「可视区 ±1」，而第 1.5 步重建窗口是「±8」，差区间
+        （±2~±8）于是出现「LRU 说太远该卸 → 第 1.5 步说该建」的对拆，每 0.5s
+        一轮永不收敛。
+
+        反过来把保护范围扩到整个保留圈（±8）同样错：保留圈（17 批）比渲染配额
+        （12 页）还大，淘汰器永远找不到候选 → 内存上限被架空（实机 rendered
+        单调涨到 16/12）。
+
+        正解是让保护范围**精确等于重建窗口**：重建窗口内的批次 LRU 不碰（卸了
+        会被立刻建回），窗口外则允许淘汰（它们只持占位，滚过去时才重建）。
         """
         if not (0 <= batch_idx < len(self._batch_cards)):
             return True
         cards = self._batch_cards[batch_idx]
         if not cards:
             return False
-        # 可视区 ±1（距离口径：0 = 视口内，1 = 紧邻，≥2 = 可安全淘汰）
-        if self._batch_distance(batch_idx, vp_range) <= 1:
+        # 与第 1.5 步的重建窗口同口径（距离 0 = 视口内）
+        if self._batch_distance(batch_idx, vp_range) <= self._restore_window_batches():
             return True
         # 当前流式卡
         if self._current_assistant_card is not None and self._current_assistant_card in cards:
@@ -12394,10 +12451,10 @@ class OpenAIChatToolWindow(ToolWindow):
             if not cards:
                 continue
             if self._batch_is_protected(idx, vp_range):
-                # 🐛 配额修复：保护区间按「真实视口 ±1」算之后，小表（可见批次少 +
-                # 缓冲）仍可能把全部批次判为受保护 → 候选为空 → 计数永不回落。
-                # 这里留一份「仅排除流式卡/欢迎卡」的降级候选，主候选耗尽而计数
-                # 仍超配额时才启用。
+                # 🐛 配额修复：保护区间按「真实视口 ±缓冲」算之后，小表（可见批次
+                # 少 + 缓冲）仍可能把全部批次判为受保护 → 候选为空 → 计数永不
+                # 回落。这里留一份「仅排除流式卡/欢迎卡」的降级候选，主候选耗尽
+                # 而计数仍超配额时才启用（其下限见下方 T42 注释）。
                 if self._batch_is_streaming_or_welcome(idx):
                     continue
                 fallback_candidates.append((self._batch_distance(idx, vp_range), idx))
@@ -12415,14 +12472,18 @@ class OpenAIChatToolWindow(ToolWindow):
                     break
                 removed_h = self._unload_batch(idx)
                 removed_total += removed_h
-            # 降级：温和候选不足以回到配额内时，继续淘汰最远的受保护批次
-            # （视口内最初 1 批仍由 _batch_distance == 0 天然挡在最后）
+            # 降级：温和候选不足以回到配额内时，继续淘汰更远的批次。
+            # 🐛 T42：下限必须**严格大于**视口回收器的保留缓冲 —— 它会对
+            # active 区间（视口 ±缓冲）内的占位批次原位重建，卸了立刻被建回，
+            # 形成 0.5s 一轮的对拆自激。历史实现的 `dist <= 0` 只挡住「视口内
+            # 1 批」，把整个缓冲圈（±2~±8）都交给了两器互殴。
             if self._rendered_card_count > quota and fallback_candidates:
+                _buffer = self._virtual_buffer_batches()
                 for dist, idx in fallback_candidates:
                     if self._rendered_card_count <= quota:
                         break
-                    if dist <= 0:
-                        break  # 已触到视口内：不再继续，避免把正在看的批次卸掉
+                    if dist <= _buffer:
+                        break  # 已触到视口回收器的保留范围：再卸会被它立刻重建
                     removed_h = self._unload_batch(idx)
                     removed_total += removed_h
             if removed_total > 0:
