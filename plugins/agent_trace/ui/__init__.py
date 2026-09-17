@@ -186,16 +186,25 @@ _ROUND_STATS_MAX = 8
 
 
 def _session_key(ctx) -> str:
-    """会话维度键 = window_id + collector 的 active session_id（切会话自动隔离）。"""
-    wid = str(ctx.get("window_id") or "")
-    sid = ""
-    try:
-        from .trace_collector import TraceCollectorHub
+    """会话维度键 = window_id + 当前会话 id（切会话自动隔离）。
 
-        collector = _footer_hub(TraceCollectorHub).collector_for(ctx.get("main_widget"))
-        sid = str(getattr(collector, "_active_session_id", "") or "")
-    except Exception:  # noqa: BLE001 — 无 backend / 未初始化时退化成 window_id 级
-        sid = ""
+    优先取宿主窗口 ``_current_session_id``：卡片构建早于 collector 投影同步
+    （后者靠 messages_updated 信号异步追赶），加载历史会话瞬间 collector 的
+    active session 可能还是上一个会话 —— 用它当 key 会把本会话轮次写进旧
+    会话的累加桶（(round_index, message_index) 直接覆盖旧数据）、并在旧桶
+    非空时直接显示旧会话均值（页脚吞吐量与当前对话对不上）。collector 仅
+    作回退（无宿主 / 未初始化场景）。
+    """
+    wid = str(ctx.get("window_id") or "")
+    sid = str(getattr(ctx.get("main_widget"), "_current_session_id", "") or "")
+    if not sid:
+        try:
+            from .trace_collector import TraceCollectorHub
+
+            collector = _footer_hub(TraceCollectorHub).collector_for(ctx.get("main_widget"))
+            sid = str(getattr(collector, "_active_session_id", "") or "")
+        except Exception:  # noqa: BLE001 — 无 backend / 未初始化时退化成 window_id 级
+            sid = ""
     return f"{wid}::{sid}"
 
 
@@ -242,6 +251,11 @@ def _aggregate_records(ctx):
         return None
     collector = _footer_hub(TraceCollectorHub).collector_for(mw)
     if collector is None:
+        return None
+    # 投影未跟上会话切换时不聚合：加载历史会话瞬间 collector.records 可能还
+    # 是上一个会话的投影，聚合出来就是别的会话的均值（宁可不显示，等 1s 补刷）
+    cur_sid = str(getattr(mw, "_current_session_id", "") or "")
+    if cur_sid and str(getattr(collector, "_active_session_id", "") or "") != cur_sid:
         return None
     total_tokens = 0
     total_gen_s = 0.0

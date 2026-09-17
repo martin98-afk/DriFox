@@ -21360,12 +21360,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 无匹配 → 创建新项目
         self._on_new_project_created(name)
 
-    def _on_new_project_created(self, project: str, suppress_memory_card: bool = False, root_dir: str = ""):
+    def _on_new_project_created(self, project: str, root_dir: str = ""):
         """新建项目后
 
         Args:
-            suppress_memory_card: 为 True 时不自动弹出关键文档卡片
-                                  （拖拽/选择文件夹设了根目录时使用）
             root_dir: 指定的项目根目录（拖拽/选择文件夹建项目时传入）。
                       传入时直接绑定该目录为工作目录，不再创建默认项目文件夹
                       （~/.drifox/workspaces/<project>/），AGENTS.md 等文件
@@ -21394,8 +21392,6 @@ class OpenAIChatToolWindow(ToolWindow):
                                 new.backend.memory_manager.set_working_directory(project, root_dir)
                         new._sync_working_directory()
                         self._broadcast_team_project(project, self._current_project)
-                        if not suppress_memory_card:
-                            tm.open_workbench_memory("docs")
                     except Exception as e:
                         logger.warning(f"[NewProject] 流式下新标签页项目上下文注册失败: {e}")
                     self._collapse_project_selector_panel()
@@ -21428,16 +21424,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_working_directory()
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
-        # 自动展开工作台记忆页的「关键文档」（记忆功能已完全迁移到工作台，
-        # 不再弹出旧的独立记忆卡片）。
-        # suppress_memory_card=True 时跳过（拖拽/选择文件夹已设根目录，避免干扰）。
-        if not suppress_memory_card:
-            try:
-                tm = TabManagerWindow.get_instance()
-                if tm is not None and hasattr(tm, "open_workbench_memory"):
-                    tm.open_workbench_memory("docs")
-            except Exception as e:
-                logger.warning(f"[NewProject] 展开工作台关键文档失败: {e}")
         # 自动触发新建会话
         # （close_history=True：新建项目 + 新建会话 = 真切换，历史页签让位）
         self._create_new_session(close_history=True)
@@ -22050,11 +22036,11 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # ── 创建项目（已设根目录，跳过关键文档卡片弹出） ──
+        # ── 创建项目 ──
         # 传入 root_dir=folder_path：直接绑定指定文件夹为工作目录，
         # 不再创建默认项目文件夹（~/.drifox/workspaces/<project>/），
         # AGENTS.md 等文件写入指定路径而非默认路径。
-        self._on_new_project_created(project_name, suppress_memory_card=True, root_dir=folder_path)
+        self._on_new_project_created(project_name, root_dir=folder_path)
 
         # ── 将拖入文件夹加入关键文档并设为工作目录（根目录） ──
         try:

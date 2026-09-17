@@ -118,6 +118,49 @@ def test_no_usage_returns_none(ui_mod):
     assert ui_mod._footer_avg_throughput(_ctx()) is None
 
 
+class _FakeHub:
+    """collector_for 返回固定 active session 的 stub hub（替代真 TraceCollectorHub）。"""
+
+    def __init__(self, sid: str):
+        self._sid = sid
+
+    def collector_for(self, mw):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(_active_session_id=self._sid)
+
+
+class _Host:
+    """最小宿主 stub：仅带 _current_session_id（窗口真实路径切会话时先于卡片构建更新）。"""
+
+    def __init__(self, sid: str):
+        self._current_session_id = sid
+
+
+def test_history_load_keys_by_host_session(ui_mod, monkeypatch):
+    """加载历史会话：宿主已切 sessB、collector 投影还停 sessA → 轮次必须归 sessB。
+
+    修复前 key 取 collector._active_session_id（异步投影滞后于卡片构建），历史轮
+    会写进旧会话的累加桶（按 (round_index, message_index) 覆盖旧数据），旧桶非空
+    时还会把旧会话均值直接顶出来 —— 页脚吞吐量与当前对话对不上。
+    """
+    monkeypatch.setattr(ui_mod, "_FOOTER_HUB", _FakeHub("sessA"))
+    host = _Host("sessB")
+    val = ui_mod._footer_avg_throughput(
+        _ctx(main_widget=host, elapsed=2.0, token_usage={"output": 500, "ttft_ms": 200})
+    )
+    assert val["text"] == "278 tok/s"  # sessB 单轮真实值，非 sessA 旧桶均值
+    assert any(k.endswith("sessB") for k in ui_mod._ROUND_STATS), "轮次应归入宿主当前会话的桶"
+
+
+def test_history_load_stale_projection_shows_nothing(ui_mod, monkeypatch):
+    """累加桶空 + collector 投影未跟上会话切换 → 宁可不显示（等 1s 补刷），不串旧会话数字。"""
+    monkeypatch.setattr(ui_mod, "_FOOTER_HUB", _FakeHub("sessA"))
+    host = _Host("sessB")
+    # 无 token_usage → 不写桶 → 走 _aggregate_records → 投影 stale → None
+    assert ui_mod._footer_avg_throughput(_ctx(main_widget=host)) is None
+
+
 def test_color_thresholds(ui_mod):
     """<30 红 / <60 黄 / 其余绿；每组用独立会话，避免累加表串扰。"""
 
