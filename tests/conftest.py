@@ -1,9 +1,17 @@
 # -*- coding: utf-8 -*-
 """pytest 全局 fixtures"""
 
+import os
+
 import pytest
 
 from loguru import logger
+
+# ⚠️ 必须模块级（收集期生效）：pytest 收集测试文件即触发 app 模块链式
+# import → provider 加载 → codebuddy._bootstrap 启动守护线程；session
+# fixture 首测试前才运行，届时线程已在 urlopen 阻塞（退出期竞态 0x8001010D）。
+# codebuddy._bootstrap 读该变量跳过线程启动。
+os.environ["DRIFOX_NO_CODEBUDDY_REFRESH"] = "1"
 
 
 @pytest.fixture(scope="session", autouse=True)

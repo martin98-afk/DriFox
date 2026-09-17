@@ -668,6 +668,17 @@ def main():
 
     app.aboutToQuit.connect(_teardown_tab_windows)
 
+    # ── 插件独立弹窗：应用退出统一销毁（随主窗口关闭销毁的生命周期）──
+    def _teardown_plugin_windows():
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().destroy_all_windows()
+        except Exception:
+            logger.warning("[M2] 退出时销毁插件独立弹窗失败", exc_info=True)
+
+    app.aboutToQuit.connect(_teardown_plugin_windows)
+
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)

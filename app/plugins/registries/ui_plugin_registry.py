@@ -582,6 +582,8 @@ class FooterActionInfo:
         tooltip: 悬停提示
         on_click: 点击回调，签名 (context: dict) -> None（context 同 FooterStatInfo）
         priority: 优先级（同 action_id 时高者覆盖低者）
+        role: 渲染侧角色 "assistant" | "user" | "both"（assistant=助手页脚按钮组；
+              user=用户气泡底部操作行；both=两端都渲染）
         metadata: 附加元数据
     """
 
@@ -592,6 +594,37 @@ class FooterActionInfo:
     tooltip: str = ""
     on_click: Optional[Callable[[Dict[str, Any]], None]] = None
     priority: int = 0
+    role: str = "assistant"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WindowInfo:
+    """插件独立弹窗注册信息
+
+    Attributes:
+        plugin_name: 所属插件名
+        window_id: 窗口唯一 ID（open_window/命令联动键）
+        widget_class: QWidget 子类（窗口内容页，填满客户区）
+        title: 窗口标题（标题栏显示）
+        icon_path: 标题栏图标路径（缺省用 DriFox 图标）
+        width / height: 默认窗口几何
+        min_width / min_height: 最小尺寸（0 = 不限制）
+        context_provider: 可选上下文提供者（对齐 floating_card），
+                          无参回调返回 dict；open_window 时写入窗口 context
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    window_id: str
+    widget_class: type
+    title: str = ""
+    icon_path: str = ""
+    width: int = 640
+    height: int = 480
+    min_width: int = 0
+    min_height: int = 0
+    context_provider: Optional[Callable[[], Dict[str, Any]]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -702,6 +735,10 @@ class UIPluginRegistry:
         # 消息卡片页脚扩展点：左区信息项 + 右区 hover 按钮
         self._footer_stats: Dict[str, FooterStatInfo] = {}
         self._footer_actions: Dict[str, FooterActionInfo] = {}
+        # 插件独立弹窗：注册簿 + 已开实例 + 联动命令名
+        self._windows: Dict[str, WindowInfo] = {}
+        self._open_windows: Dict[str, Any] = {}  # {window_id: PluginWindow}
+        self._window_command_names: Dict[str, str] = {}
         self._services: Dict[str, tuple] = {}  # name -> (plugin_name, instance)
         # 右侧工作台页签槽位：{page_id: WorkbenchTabInfo}
         self._workbench_tabs: Dict[str, WorkbenchTabInfo] = {}
@@ -1749,11 +1786,18 @@ class UIPluginRegistry:
         tooltip: str = "",
         on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
         priority: int = 0,
+        role: str = "assistant",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册消息卡片页脚右区 hover 按钮组按钮（与内置分支/复制同排）"""
+        """注册消息卡片页脚右区 hover 按钮组按钮（与内置分支/复制同排）
+
+        role: "assistant" 渲染在助手卡片页脚按钮组；"user" 渲染在用户气泡
+        底部操作行；"both" 两端都渲染。非法值回退 "assistant"。
+        """
         if metadata is None:
             metadata = {}
+        if role not in ("assistant", "user", "both"):
+            role = "assistant"
         info = FooterActionInfo(
             plugin_name=plugin_name,
             action_id=action_id,
@@ -1762,6 +1806,7 @@ class UIPluginRegistry:
             tooltip=tooltip,
             on_click=on_click,
             priority=priority,
+            role=role,
             metadata=metadata,
         )
         existing = self._footer_actions.get(action_id)
@@ -1773,6 +1818,184 @@ class UIPluginRegistry:
         """获取全部页脚插件按钮（priority 降序 → 注册序）"""
         items = sorted(self._footer_actions.values(), key=lambda i: -i.priority)
         return items
+
+    # ── 插件独立弹窗扩展点（register_window） ──
+
+    def register_window(
+        self,
+        plugin_name: str,
+        window_id: str,
+        widget_class: type,
+        title: str = "",
+        icon_path: str = "",
+        width: int = 640,
+        height: int = 480,
+        min_width: int = 0,
+        min_height: int = 0,
+        context_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        register_command: bool = True,
+    ) -> None:
+        """注册插件独立弹窗（顶级窗口，壳复用主程序 FramelessWindow + CustomTitleBar）
+
+        窗口生命周期：随应用退出（aboutToQuit）或插件卸载（unload_plugin）销毁；
+        用户手动关闭同一并销毁实例。同 window_id 重复注册按后注册覆盖。
+        注册后自动出现在左侧自定义插件栏（TabPanel），点击开/关切换。
+
+        Args:
+            register_command: 是否联动注册 /<window_id> 命令
+                              （popout_card 合成窗口传 False 避免命令噪音）
+
+        Side Effects:
+            register_command=True 时自动注册对应命令 /<window_id>（用户插件带命名空间前缀）
+        """
+        if metadata is None:
+            metadata = {}
+        info = WindowInfo(
+            plugin_name=plugin_name,
+            window_id=window_id,
+            widget_class=widget_class,
+            title=title,
+            icon_path=icon_path,
+            width=width,
+            height=height,
+            min_width=min_width,
+            min_height=min_height,
+            context_provider=context_provider,
+            metadata=metadata,
+        )
+        self._windows[window_id] = info
+        if register_command:
+            self._register_command_for_window(info)
+
+    def get_window_info(self, window_id: str) -> Optional[WindowInfo]:
+        """查询弹窗注册信息（不存在返回 None）"""
+        return self._windows.get(window_id)
+
+    def _register_command_for_window(self, info: WindowInfo) -> None:
+        """为插件弹窗注册「打开该窗」命令（命名空间对齐浮动卡）"""
+        cmd_name = self._ui_command_name(info.window_id, info.plugin_name)
+
+        def _handler(args: str, wid=info.window_id):
+            self.open_window(wid)
+
+        self._window_command_names[info.window_id] = cmd_name
+        self.register_ui_command(
+            cmd_name,
+            f"打开 {info.title or info.window_id}",
+            _handler,
+            owner=info.plugin_name,
+        )
+
+    def open_window(self, window_id: str, main_widget=None) -> Optional[Any]:
+        """打开插件独立弹窗（单例：同 id 已存在 → 前置 + 显示）
+
+        Args:
+            window_id: 已注册的窗口 ID
+            main_widget: 可选宿主窗口（仅用于 context 组装，不绑定窗口生命周期）
+
+        Returns:
+            窗口实例；未注册或无法创建（无 QApplication 等）返回 None
+        """
+        info = self._windows.get(window_id)
+        if info is None:
+            return None
+        win = self._open_windows.get(window_id)
+        if win is not None:
+            try:
+                win.show()
+                win.raise_()
+                win.activateWindow()
+                return win
+            except RuntimeError:
+                # 窗口已被 C++ 侧销毁但摘除失败（极端路径）：重建
+                self._open_windows.pop(window_id, None)
+                win = None
+        if win is None:
+            try:
+                from app.widgets.plugin_window import PluginWindow
+
+                win = PluginWindow(info, context=main_widget, registry=self)
+            except Exception as e:
+                logger.warning(f"[UIPluginRegistry] 创建插件窗口 {window_id} 失败: {e}")
+                return None
+            self._open_windows[window_id] = win
+            win.show()
+        return win
+
+    def get_window_infos(self) -> List[WindowInfo]:
+        """已注册的全部弹窗（注册序，供左侧自定义插件栏展示）"""
+        return list(self._windows.values())
+
+    def toggle_window(self, window_id: str) -> bool:
+        """左侧栏点击语义：未开 → 打开；已开 → 关闭。返回窗口中是否已开"""
+        if window_id in self._open_windows:
+            self.close_window(window_id)
+            return False
+        win = self.open_window(window_id)
+        return win is not None
+
+    def popout_card(self, card_id: str) -> Optional[Any]:
+        """把浮动卡片内容弹出为独立窗口（右键「弹出为独立窗口」）
+
+        首次弹出时以 card 的 widget_class/context_provider 合成一个临时
+        WindowInfo 注册进 _windows（window_id=popout:<card_id>，不注册命令）；
+        再次弹出走单例前置。关闭窗口保留注册（可再弹）。卸载插件时
+        按 plugin_name 一并清理。
+        """
+        info = self._floating_cards.get(card_id)
+        if info is None:
+            return None
+        popout_wid = f"popout:{card_id}"
+        if popout_wid in self._windows:
+            return self.open_window(popout_wid)
+        self.register_window(
+            plugin_name=info.plugin_name,
+            window_id=popout_wid,
+            widget_class=info.widget_class,
+            title=info.title or card_id,
+            context_provider=info.context_provider,
+            metadata=dict(info.metadata or {}),
+            register_command=False,
+        )
+        return self.open_window(popout_wid)
+
+    def hide_window(self, window_id: str) -> bool:
+        """隐藏插件弹窗（不销毁实例）；未打开返回 False"""
+        win = self._open_windows.get(window_id)
+        if win is None:
+            return False
+        try:
+            win.hide()
+        except RuntimeError:
+            self._open_windows.pop(window_id, None)
+        return True
+
+    def close_window(self, window_id: str) -> bool:
+        """关闭并销毁插件弹窗实例；未打开返回 False（幂等）"""
+        win = self._open_windows.pop(window_id, None)
+        if win is None:
+            return False
+        try:
+            win.close()
+            win.deleteLater()
+        except RuntimeError:
+            pass
+        return True
+
+    def get_open_windows(self) -> Dict[str, Any]:
+        """当前已打开的插件弹窗映射：{window_id: PluginWindow}"""
+        return dict(self._open_windows)
+
+    def destroy_all_windows(self) -> None:
+        """销毁全部插件弹窗（应用退出统一调用，幂等）"""
+        for wid in list(self._open_windows.keys()):
+            self.close_window(wid)
+
+    def _unregister_command_for_window(self, window_id: str) -> None:
+        """卸载插件弹窗对应的命令（按注册时记录的实际命令名反查，避免前缀错配）"""
+        cmd_name = self._window_command_names.pop(window_id, window_id)
+        self.unregister_ui_command(cmd_name)
 
     def register_context_menu_action(
         self,
@@ -3206,6 +3429,11 @@ class UIPluginRegistry:
         # 清理消息卡片页脚扩展点
         self._footer_stats = {k: v for k, v in self._footer_stats.items() if v.plugin_name != plugin_name}
         self._footer_actions = {k: v for k, v in self._footer_actions.items() if v.plugin_name != plugin_name}
+        # 清理插件独立弹窗：销毁已开实例 + 移除注册 + 注销联动命令（幂等）
+        for wid in [k for k, v in self._windows.items() if v.plugin_name == plugin_name]:
+            self.close_window(wid)
+            self._unregister_command_for_window(wid)
+            self._windows.pop(wid, None)
         # config_schema 自动设置卡（metadata.auto_config_card）保留：其生命周期归
         # manifest 层（PluginManager._unregister_config_schema），ui 组件的 unload/load
         # 不得误伤——否则 targeted 热重载「rescan 注册卡 → ui 卸载清卡」会让插件配置卡
@@ -3707,6 +3935,13 @@ class UIPluginRegistry:
         self._tab_card_visibility.clear()
         self._active_tab_scope = None
         self._tab_sync_in_progress = False
+        # 插件独立弹窗：销毁已开实例 + 清注册簿（QApplication 存在时）
+        if self._open_windows:
+            for wid in list(self._open_windows.keys()):
+                self.close_window(wid)
+        self._open_windows.clear()
+        self._windows.clear()
+        self._window_command_names.clear()
         # 重置单例本身（建议）——让下一次 get_instance() 重新创建，
         # 避免测试间残留 _instance 上的实例属性
         UIPluginRegistry._instance = None
@@ -3824,6 +4059,8 @@ def _declare_builtin_slots() -> None:
     # 消息卡片页脚：左区信息项 / 右区 hover 按钮（改动后不牵动既有视图，仅登记）
     declare_slot("footer_stat", lambda r: r._footer_stats.items())
     declare_slot("footer_action", lambda r: r._footer_actions.items())
+    # 插件独立弹窗：改动后旧实例已由 unload 销毁，仅登记占位（未归类 → 回退全量）
+    declare_slot("plugin_window", lambda r: r._windows.items())
     # 消息身份 provider：命中时需重渲染消息区（身份行随插件变化）
     declare_slot(
         "identity_name_provider",

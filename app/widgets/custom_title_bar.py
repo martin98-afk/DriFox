@@ -728,8 +728,17 @@ class CustomTitleBar(TitleBarBase):
     sidebar_hover_changed = pyqtSignal(bool)  # 左按钮：True=进入 False=离开
     workbench_hover_changed = pyqtSignal(bool)  # 右按钮：True=进入 False=离开
 
-    def __init__(self, parent):
+    def __init__(self, parent, minimal: bool = False):
+        """自定义标题栏
+
+        Args:
+            parent: 宿主窗口
+            minimal: 精简模式（插件独立弹窗用）：隐藏侧栏开关 / 工作台开关 /
+                     tab 区，仅保留 icon 区与系统按钮（最小化/最大化/关闭）。
+                     默认 False 保持主窗口（TabManagerWindow）现有完整布局。
+        """
         self._is_mac: bool = sys.platform == "darwin"
+        self._minimal = bool(minimal)
         super().__init__(parent)
         self._tabs: Dict[str, CustomTabButton] = {}
         self._active_id: Optional[str] = None
@@ -837,6 +846,24 @@ class CustomTitleBar(TitleBarBase):
         # 标题栏按钮堆的 minimumSizeHint（~340px）会顶住整窗 resize 下限；
         # setMinimumWidth(0) 压不住 hint，必须覆写：宽度全放开，窄窗口下按钮被裁剪
         self.setMinimumWidth(0)
+
+        # ── 精简模式（插件独立弹窗）：隐藏功能控件，仅保留系统按钮 ──
+        if self._minimal:
+            self._sidebar_btn.hide()
+            self._workbench_btn.hide()
+            self._tab_container.hide()  # 无 tab 时本就隐藏，显式声明语义
+            self._left_balance.hide()
+            self._right_balance.hide()
+            # 左区：窗口图标 + 标题（主窗口靠 tab 表达标题，无此需求）
+            self._plugin_icon = QLabel(self)
+            self._plugin_icon.setFixedSize(20, 20)
+            self._plugin_icon.setScaledContents(True)
+            self._plugin_title = QLabel(self)
+            self._plugin_title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            layout.insertWidget(0, self._plugin_icon)
+            layout.insertWidget(1, self._plugin_title)
+            self._apply_plugin_title_style()
+
         self.refresh_style()
         self._sync_tab_centering()
 
@@ -893,6 +920,9 @@ class CustomTitleBar(TitleBarBase):
 
         这里给窄的一侧补一个等宽占位 widget，使两侧固定宽度相等。
         """
+        if self._minimal:
+            # 精简模式无 tab 容器，左右平衡无意义（系统按钮右对齐即可）
+            return
         layout = self.layout()
         if layout is None:
             return
@@ -1168,6 +1198,32 @@ class CustomTitleBar(TitleBarBase):
         # show 之前 widget 无有效几何，命中测试无意义；首帧后再补一次
         self._schedule_tab_hover_sync()
 
+    def set_window_icon(self, icon) -> None:
+        """精简模式左区设置窗口图标（主窗口模式 no-op）"""
+        label = getattr(self, "_plugin_icon", None)
+        if label is not None:
+            try:
+                label.setPixmap(icon.pixmap(20, 20))
+            except Exception:
+                pass
+
+    def set_window_title(self, text: str) -> None:
+        """精简模式左区设置窗口标题文本（主窗口模式 no-op）"""
+        label = getattr(self, "_plugin_title", None)
+        if label is not None:
+            label.setText(text or "")
+
+    def _apply_plugin_title_style(self) -> None:
+        """精简模式标题文字样式（主题 token，随 refresh_style 重刷）"""
+        label = getattr(self, "_plugin_title", None)
+        if label is None:
+            return
+        label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY};"
+            f" {get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
+            " background: transparent; border: none; padding: 0 6px;"
+        )
+
     def refresh_style(self) -> None:
         """主题切换后刷新样式（Colors.refresh() 由调用方先执行）"""
         for b in self._tabs.values():
@@ -1194,6 +1250,9 @@ class CustomTitleBar(TitleBarBase):
             "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
             f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
         )
+        # 精简模式标题样式随主题刷新
+        if self._minimal:
+            self._apply_plugin_title_style()
         # 品牌（DriFox + 版本号）已按极简要求移除，顶栏只留功能控件。
 
     # ── 内部 ──

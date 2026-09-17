@@ -13662,12 +13662,17 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(20, 20)  # 弱化处理：比原顶部按钮 32px 更小
             install_hover_tooltip(b, delay_ms=200)
             hb.addWidget(b)
-        # 插件注册按钮（footer_action 槽位）：与内置按钮同排同风格
+        # 插件注册按钮（footer_action 槽位）：与内置按钮同排同风格。
+        # 只渲染 assistant/both 角色（user 角色走用户气泡底部操作行）。
         footer_actions = []
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            footer_actions = UIPluginRegistry.get_instance().get_footer_actions()
+            footer_actions = [
+                a
+                for a in UIPluginRegistry.get_instance().get_footer_actions()
+                if getattr(a, "role", "assistant") in ("assistant", "both")
+            ]
         except Exception:
             footer_actions = []
         for info in footer_actions:
@@ -14617,6 +14622,43 @@ class MessageCard(SimpleCardWidget):
         bl = QHBoxLayout(btns)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(2)
+        # 插件注册按钮（footer_action role=user/both）：位于内置按钮之前（左侧），
+        # 同排同风格，hover 随容器整体浮现；点击复用 _on_footer_plugin_action。
+        plugin_actions = []
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            plugin_actions = [
+                a
+                for a in UIPluginRegistry.get_instance().get_footer_actions()
+                if getattr(a, "role", "assistant") in ("user", "both")
+            ]
+        except Exception:
+            plugin_actions = []
+        for info in plugin_actions:
+            try:
+                from PyQt5.QtGui import QIcon
+
+                from app.utils.theme_manager import theme_manager
+
+                try:
+                    is_light = theme_manager.is_light_theme()
+                except Exception:
+                    is_light = False
+                path = (
+                    info.icon_light_path if (is_light and info.icon_light_path) else info.icon_path
+                )
+                b = TransparentToolButton(QIcon(str(path)) if path else QIcon(), self)
+                if info.tooltip:
+                    b.setToolTip(info.tooltip)
+                    install_hover_tooltip(b, delay_ms=200)
+                b.setFixedSize(26, 26)  # 与内置按钮同尺寸（弱化处理）
+                b.clicked.connect(lambda _c=False, _info=info: self._on_footer_plugin_action(_info))
+                bl.addWidget(b)
+            except Exception as e:
+                logger.warning(
+                    f"[MessageCard] 用户按钮栏插件按钮 {getattr(info, 'action_id', '?')} 构建失败: {e}"
+                )
         for ic, tp, cb in [
             (get_icon("复制"), "复制", lambda: self._copy_user_message()),
             (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),

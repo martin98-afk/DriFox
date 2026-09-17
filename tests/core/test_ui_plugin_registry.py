@@ -1378,3 +1378,170 @@ def test_workbench_card_reclick_closes_tab_and_workbench(monkeypatch):
     assert panel.has_card_tab("plug-right:card")
 
     reg.reset()
+
+
+# ── footer_action role 分流 ─────────────────────────────────────────────
+
+def test_footer_action_role_roundtrip():
+    """footer_action role 参数透传；默认 assistant；非法值回退 assistant"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_footer_action("plug-a", "user_btn", tooltip="u", role="user")
+    reg.register_footer_action("plug-a", "both_btn", tooltip="b", role="both")
+    reg.register_footer_action("plug-a", "default_btn", tooltip="d")
+    reg.register_footer_action("plug-a", "bad_btn", tooltip="x", role="bogus")
+    roles = {i.action_id: i.role for i in reg.get_footer_actions()}
+    assert roles["user_btn"] == "user"
+    assert roles["both_btn"] == "both"
+    assert roles["default_btn"] == "assistant"
+    assert roles["bad_btn"] == "assistant"
+    reg.reset()
+
+
+# ── 插件独立弹窗（register_window） ─────────────────────────────────────
+
+def test_register_window_info_and_command():
+    """注册弹窗写入 _windows 并联动命令名登记"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", type, title="测试窗")
+    info = reg.get_window_info("w1")
+    assert info is not None
+    assert info.plugin_name == "plug-a"
+    assert info.title == "测试窗"
+    assert info.widget_class is type
+    assert reg._window_command_names.get("w1") == "w1"  # 短名（无冲突时 _ui_command_name 返回 base_id）
+    reg.reset()
+
+
+def test_open_window_unregistered_returns_none():
+    """未注册的 window_id → open_window 返回 None"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    assert reg.open_window("missing") is None
+    reg.reset()
+
+
+def test_open_window_creates_and_singleton(qapp):
+    """open_window 创建实例；重复调用返回同一实例（单例）"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget, title="w1", width=300, height=200)
+    w1 = reg.open_window("w1")
+    assert w1 is not None
+    assert reg.get_open_windows().get("w1") is w1
+    w2 = reg.open_window("w1")
+    assert w2 is w1  # 单例复用
+    reg.reset()
+
+
+def test_hide_and_close_window(qapp):
+    """hide 保留实例；close 销毁并从 _open_windows 摘除（幂等）"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget)
+    reg.open_window("w1")
+    assert reg.hide_window("w1") is True
+    assert reg.get_open_windows().get("w1") is not None  # 隐藏不销毁
+    assert reg.close_window("w1") is True
+    assert reg.get_open_windows() == {}
+    assert reg.close_window("w1") is False  # 幂等
+    reg.reset()
+
+
+def test_unload_plugin_closes_and_unregisters(qapp):
+    """unload_plugin 销毁该插件全部窗口 + 移除注册 + 注销命令，其它插件不受影响"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget)
+    reg.register_window("plug-a", "w2", QWidget)
+    reg.register_window("plug-b", "w3", QWidget)
+    reg.open_window("w1")
+    reg.open_window("w2")
+    reg.open_window("w3")
+    assert reg.unload_plugin("plug-a") is True
+    assert reg.get_window_info("w1") is None
+    assert reg.get_window_info("w2") is None
+    assert reg.get_window_info("w3") is not None  # 其它插件不受影响
+    assert "w1" not in reg._window_command_names
+    assert "w2" not in reg._window_command_names
+    open_w = reg.get_open_windows()
+    assert list(open_w.keys()) == ["w3"]
+    reg.reset()
+
+
+def test_destroy_all_windows(qapp):
+    """destroy_all_windows 清空全部已开弹窗（应用退出路径）"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget)
+    reg.register_window("plug-b", "w2", QWidget)
+    reg.open_window("w1")
+    reg.open_window("w2")
+    reg.destroy_all_windows()
+    assert reg.get_open_windows() == {}
+    reg.reset()
+
+
+def test_register_window_no_command():
+    """register_command=False 联动命令不登记（popout 合成窗口用）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", type, register_command=False)
+    assert "w1" not in reg._window_command_names
+    assert reg.get_window_info("w1") is not None
+    reg.reset()
+
+
+def test_get_window_infos():
+    """get_window_infos 返回全部注册（含 popout 合成）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", type, title="A")
+    reg.register_window("plug-b", "w2", type, title="B")
+    infos = {i.window_id: i for i in reg.get_window_infos()}
+    assert set(infos) == {"w1", "w2"}
+    assert infos["w1"].title == "A"
+    reg.reset()
+
+
+def test_toggle_window_semantics(qapp):
+    """左侧栏 toggle：未开→开返回 True；已开→关返回 False"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget)
+    assert reg.toggle_window("w1") is True
+    assert "w1" in reg.get_open_windows()
+    assert reg.toggle_window("w1") is False
+    assert reg.get_open_windows() == {}
+    reg.reset()
+
+
+def test_popout_card_create_and_singleton(qapp):
+    """popout_card：合成 popout:<card_id> 窗口并单例复用；未注册 card 返回 None"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card("plug-a", "my-card", QWidget, container="right", title="我的卡")
+    w1 = reg.popout_card("my-card")
+    assert w1 is not None
+    popout_wid = "popout:my-card"
+    assert reg.get_open_windows().get(popout_wid) is w1
+    assert reg.get_window_info(popout_wid) is not None
+    assert popout_wid not in reg._window_command_names  # 合成窗口不注册命令
+    w2 = reg.popout_card("my-card")
+    assert w2 is w1  # 单例
+    assert reg.popout_card("missing-card") is None
+    assert "popout:missing-card" not in reg._windows
+    reg.reset()
