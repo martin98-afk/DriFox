@@ -37,17 +37,22 @@ SINGLE_RESULT_THRESHOLD = 50_000  # 单结果 > 50K 字符 -> 持久化
 MESSAGE_TOTAL_THRESHOLD = 200_000  # 单条消息合计 > 200K -> 按大小截断
 PREVIEW_BYTES = 2_000  # 预览字节数
 
+def _load_skip_tools() -> frozenset:
+    """免落盘工具名单：系统插件 config_schema 声明（主程序不写死工具名）。
+
+    配置项 `offload_skip_tools` 为逗号分隔的工具名；缺省回退空集合
+    （正式来源是工具注册时的 metadata["no_offload"]，见 ToolOffloadTier._skip）。
+    """
+    try:
+        from app.core.context.config import offload_skip_tools
+
+        return offload_skip_tools()
+    except Exception:
+        return frozenset()
+
+
 # 应被跳过的工具结果 (返回小、结构化、不能被截断)
-SKIP_TOOLS = frozenset(
-    {
-        "question",  # 用户问答结果
-        "todowrite",  # todo 写入
-        "todoread",  # todo 读取
-        "manage_skill",  # 技能管理
-        "mcp_list_servers",  # MCP 服务器列表
-        "skill",  # 技能加载结果
-    }
-)
+SKIP_TOOLS = _load_skip_tools()
 
 
 def _shorten_value(val: Any, max_len: int = 120) -> str:

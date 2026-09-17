@@ -187,13 +187,19 @@ class ContextBudgetAllocator:
             session.set_compaction_state(cached_prep["state"])
             session.set_compaction_cache(cached_prep["cache"])
         else:
+            # ══ 统一走 tier 链 ══
+            # 链上的层由插件提供，按 order 升序执行、达标即停：
+            #   system-context（系统插件，前缀安全）：
+            #     order 20 tool_prune   工具结果截断（入口恒定字节）
+            #     order 40 tool_offload 长结果落盘（冻结预览）
+            #   context-compaction（用户插件，破坏前缀，可逐项开关）：
+            #     order 10 media_strip / 30 tool_dedupe / 50 args_truncate /
+            #     60 tool_summarize / 70 tail_retain / 80 llm_summary
             pipeline = self._pipeline
             if pipeline is None:
                 from app.core.context.pipeline import ContextPipeline
 
                 pipeline = ContextPipeline()
-            # 预算由 pipeline 内部的 ContextBudgetResolver 计算；此处传的 budget
-            # 仅用于参与 prep_key（保持缓存键语义不变）。
             view = pipeline.project_for_send(
                 history_messages,
                 llm_config,
@@ -202,8 +208,8 @@ class ContextBudgetAllocator:
                 cache=getattr(session, "compaction_cache", None),
             )
             history_for_api = view.messages
-            session.set_compaction_state(view.compaction_state)
-            session.set_compaction_cache(view.compaction_cache)
+            session.set_compaction_state(view.compaction_state or {})
+            session.set_compaction_cache(view.compaction_cache or {})
             try:
                 session._last_context_stats = [
                     {

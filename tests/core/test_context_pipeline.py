@@ -189,28 +189,34 @@ def test_register_dispatch_by_shape(registry):
     assert registry.get_budget_resolver().id == "r1"
 
 
-def test_prune_precedes_dedupe():
-    """截断（order 20）必须排在去重（order 30）之前。
+def test_prune_precedes_offload_in_ingest():
+    """ingest stage 里 tool_prune 必须先于 tool_offload。
 
-    回归：曾把 tool_dedupe 排在 tool_prune 前，去重后常已达标而 break，
-    导致超长单条结果全文进上下文（实测 30K 未被截断，输出比旧实现还大）。
-    截断保留头尾 + 取回指引，损失可控；去重整条替换成占位符，损失不可逆。
+    落盘判定基于内容长度，若先落盘再截断，阈值会基于未截断内容失真。
     """
-    from app.core.context.tiers.tool_dedupe import ToolDedupeTier
-    from app.core.context.tiers.tool_prune import ToolPruneTier
-
-    assert ToolPruneTier.order < ToolDedupeTier.order
-
-
-def test_real_chain_prune_before_dedupe():
-    """真实 system-context 链里 tool_prune 必须先于 tool_dedupe"""
     from app.plugins.loaders.runtime_component_loader import _make_context_tier_loader
 
     _make_context_tier_loader().scan_roots()
     reg = ContextPolicyRegistry.get_instance()
-    ids = [t.id for t in reg.resolve_chain(STAGE_SEND)]
-    if "tool_prune" in ids and "tool_dedupe" in ids:
-        assert ids.index("tool_prune") < ids.index("tool_dedupe")
+    ids = [t.id for t in reg.resolve_chain(STAGE_INGEST)]
+    if "tool_prune" in ids and "tool_offload" in ids:
+        assert ids.index("tool_prune") < ids.index("tool_offload")
+
+
+def test_system_plugin_tiers_are_prefix_safe():
+    """system-context 提供的层必须全部 cache_impact ≠ invalidate。
+
+    系统插件只承载「每轮投影产出字节恒定」的层（入口截断 + 冻结预览）；
+    任何改写历史消息的层（图片剥离/去重/摘要/尾保留/LLM 摘要）会破坏
+    prompt cache 前缀，不得进入系统插件。
+    """
+    from app.plugins.loaders.runtime_component_loader import _make_context_tier_loader
+
+    _make_context_tier_loader().scan_roots()
+    reg = ContextPolicyRegistry.get_instance()
+    for tier in reg.tiers().values():
+        assert tier.cache_impact != "invalidate", f"系统插件的 tier '{tier.id}' 会破坏前缀"
+        assert hasattr(tier, "order") and hasattr(tier, "stages")
 
 
 def test_view_token_cache_invalidated_on_replace():

@@ -74,21 +74,15 @@ def _history(n=4):
 def _allocator(compactor):
     """注入 compactor 与包它的 pipeline 桩。
 
-    上下文压缩已迁到 ContextPipeline（cascade）。为让本测试继续锁定
-    「_send_prep_cache 缓存失效契约」，用一个把假 compactor 包装成
-    单 tier 的 registry 注入 pipeline —— 这样 compact_calls 计数语义不变。
+    压缩现在由 tier 链上的 tail_retain/llm_summary 执行（用户插件 context-compaction）。
+    为让本测试继续锁定「_send_prep_cache 缓存失效契约」，把假 compactor 包成
+    单 tier 注入 pipeline —— compact_calls 计数语义保持不变。
     """
     from app.core.context.pipeline import ContextPipeline
-    from app.plugins.contracts.context_policy import (
-        CACHE_INVALIDATE,
-        STAGE_SEND,
-        TierOutcome,
-    )
+    from app.plugins.contracts.context_policy import CACHE_INVALIDATE, STAGE_SEND, TierOutcome
     from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
 
     class _CompactorTier:
-        """把 _CountingCompactor 包装成 cascade 的一层（order 70 尾保留位）"""
-
         id = "compactor_tier"
         label = "压缩（测试桩）"
         order = 70

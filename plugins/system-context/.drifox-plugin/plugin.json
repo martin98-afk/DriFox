@@ -72,6 +72,22 @@
         "min": 5,
         "max": 99,
         "description": "cascade 降到预算此百分比即停止后续层。填 60 表示 60%"
+      },
+      {
+        "key": "prune_skip_tools",
+        "label": "免截断工具名单",
+        "type": "text",
+        "default": "question,skill,todoread",
+        "placeholder": "question,skill,todoread",
+        "description": "逗号分隔的工具名，其工具结果永不截断（结果小且语义完整）。工具侧也可用 metadata[\"no_prune\"] 自行声明"
+      },
+      {
+        "key": "offload_skip_tools",
+        "label": "免落盘工具名单",
+        "type": "text",
+        "default": "question,todowrite,todoread,manage_skill,mcp_list_servers,skill",
+        "placeholder": "question,skill",
+        "description": "逗号分隔的工具名，其工具结果永不写入磁盘。工具侧也可用 metadata[\"no_offload\"] 自行声明"
       }
     ]
   }

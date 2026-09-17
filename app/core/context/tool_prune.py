@@ -31,10 +31,22 @@ TOOL_RESULT_HEAD_KEEP = 4096  # 保留头部字符数
 TOOL_RESULT_TAIL_KEEP = 1024  # 保留尾部字符数
 TOOL_RESULT_ELLIPSIS = "\n...[工具结果过长，已截断中间 {dropped} 字符，头 {head} + 尾 {tail}]...\n"
 
-# 不应截断的工具（结果小且语义完整，截断会破坏关键信息）
-# 兜底名单：正式来源为工具注册时的 metadata["no_prune"]（见 ToolRegistry.is_no_prune），
-# 本集合保留给未经 registry 注册即直接调用本函数的场景（如序列化器插件）。
-PRUNE_SKIP_TOOLS = frozenset({"question", "skill", "todoread"})
+def _load_prune_skip() -> frozenset:
+    """免截断工具名单：插件配置 ∪ 内置默认（主程序不写死工具名）。
+
+    正式来源有二者取并集：
+      ① 工具注册时声明的 metadata["no_prune"]（见 ToolPruneTier._skip）
+      ② 系统插件 config_schema 的 prune_skip_tools + 内置默认值
+    """
+    try:
+        from app.core.context.config import prune_skip_tools
+
+        return prune_skip_tools()
+    except Exception:
+        return frozenset()
+
+
+PRUNE_SKIP_TOOLS = _load_prune_skip()
 
 # read 工具输出头: #File: {path} (Lines {a}-{b} of {N})
 _FILE_HEADER_RE = re.compile(r"^#File: (.+?) \(Lines (\d+)-(\d+) of (\d+)\)\s*$", re.MULTILINE)
