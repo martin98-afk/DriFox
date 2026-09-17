@@ -1601,7 +1601,13 @@ class TabPanel(QWidget):
                 info.plugin_name,
                 0,
             )
-            if is_system:
+            # group 注册参数覆盖插件归属（"system" 常驻 / "custom" 自定义 / 空跟随）
+            group = getattr(info, "group", "") or ""
+            if group == "system":
+                system_infos.append(entry)
+            elif group == "custom":
+                custom_infos.append(entry)
+            elif is_system:
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)

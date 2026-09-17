@@ -612,6 +612,8 @@ class WindowInfo:
         min_width / min_height: 最小尺寸（0 = 不限制）
         context_provider: 可选上下文提供者（对齐 floating_card），
                           无参回调返回 dict；open_window 时写入窗口 context
+        group: 左侧插件栏分组覆盖 "" | "system" | "custom"
+               （空 = 跟随插件归属：系统插件常驻区、用户插件自定义区）
         metadata: 附加元数据
     """
 
@@ -625,6 +627,7 @@ class WindowInfo:
     min_width: int = 0
     min_height: int = 0
     context_provider: Optional[Callable[[], Dict[str, Any]]] = None
+    group: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -1835,6 +1838,7 @@ class UIPluginRegistry:
         context_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         register_command: bool = True,
+        group: str = "",
     ) -> None:
         """注册插件独立弹窗（顶级窗口，壳复用主程序 FramelessWindow + CustomTitleBar）
 
@@ -1845,12 +1849,16 @@ class UIPluginRegistry:
         Args:
             register_command: 是否联动注册 /<window_id> 命令
                               （popout_card 合成窗口传 False 避免命令噪音）
+            group: 左侧插件栏分组覆盖 "system"（常驻区）| "custom"（自定义折叠区）|
+                   空字符串（跟随插件归属：系统插件→常驻，用户插件→自定义）
 
         Side Effects:
             register_command=True 时自动注册对应命令 /<window_id>（用户插件带命名空间前缀）
         """
         if metadata is None:
             metadata = {}
+        if group not in ("", "system", "custom"):
+            group = ""
         info = WindowInfo(
             plugin_name=plugin_name,
             window_id=window_id,
@@ -1862,6 +1870,7 @@ class UIPluginRegistry:
             min_width=min_width,
             min_height=min_height,
             context_provider=context_provider,
+            group=group,
             metadata=metadata,
         )
         self._windows[window_id] = info

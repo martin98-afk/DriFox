@@ -1501,6 +1501,22 @@ def test_register_window_no_command():
     reg.reset()
 
 
+def test_register_window_group_roundtrip():
+    """register_window group 参数透传；非法值回退空（跟随插件归属）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", type, title="A", group="system")
+    reg.register_window("plug-a", "w2", type, title="B", group="custom")
+    reg.register_window("plug-a", "w3", type, title="C")
+    reg.register_window("plug-a", "w4", type, title="D", group="bogus")
+    groups = {i.window_id: i.group for i in reg.get_window_infos()}
+    assert groups["w1"] == "system"
+    assert groups["w2"] == "custom"
+    assert groups["w3"] == ""
+    assert groups["w4"] == ""
+    reg.reset()
+
+
 def test_get_window_infos():
     """get_window_infos 返回全部注册（含 popout 合成）"""
     reg = UIPluginRegistry.get_instance()
