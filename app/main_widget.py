@@ -11753,11 +11753,19 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
     def _take_batch_placeholder(self, batch_idx: int):
-        """取出并移除 batch_idx 的占位，返回它当时在 chat_layout 中的位置。
+        """取出并移除 batch_idx 的占位，返回 ``(布局位置, 占位高度)``。
 
         供 `_render_message_to_card` 在重建该批次时把新卡片插回原位 —— 这是
         「用占位换来的高度稳定」必须付的代价：顺序要显式还回去，否则新卡片
         会被追加到末尾，消息顺序错乱。
+
+        高度同样必须还回去：新建卡片从最小高度（40px）起步，而占位是回收瞬间
+        的实高 H。若把 H 丢掉，重建会让容器总高骤降 Σ(H-40)，随后的锚点补偿
+        据此算出巨大的 `_delta` 把视口拽走 —— 用户看到「一滚到底就自动弹回
+        上方」，并由此再触发一轮回收，形成永远到不了底的自激回路（T42）。
+
+        Returns:
+            ``(index, height)``；占位不存在 / 已销毁 / 不在布局中时返回 None。
         """
         widget = self._batch_placeholders.pop(batch_idx, None)
         if widget is None:
@@ -11766,10 +11774,44 @@ class OpenAIChatToolWindow(ToolWindow):
             if sip.isdeleted(widget):
                 return None
             index = self.chat_layout.indexOf(widget)
+            height = widget.height()
             self._remove_placeholder_widget(widget)
-            return index if index >= 0 else None
+            if index < 0:
+                return None
+            return (index, height)
         except Exception:
             return None
+
+    def _apply_placeholder_height(self, cards: list, height: int) -> None:
+        """把占位高度还原到重建出来的卡片上（T42 高度守恒）。
+
+        新建卡片从 MessageCard 最小高度（40px）起步，直接进布局会让容器总高在
+        重建瞬间骤降；上方批次的锚点补偿据此算出巨大负 `_delta` 把视口拽走，
+        表现为「一滚到底就自动弹回上方」，并再触发一轮回收形成自激。
+
+        单卡批次（绝大多数，历史消息按 user 轮分组）：占位就是这张卡的实高，
+        直接钉回。
+        多卡批次：占位存的是各卡实高之和，无法逐张还原分配，均摊保证**总高**
+        守恒，余数补给末卡；单卡误差由随后的异步高度上报收敛。
+
+        只钉「起步高度」，不阻止后续上报改写（与 `_commit_viewer_height`
+        的 setFixedHeight 同语义，不会锁死）。
+        """
+        if height <= 0 or not cards:
+            return
+        alive = [c for c in cards if self._is_widget_alive(c)]
+        if not alive:
+            return
+        if len(alive) == 1:
+            targets = [height]
+        else:
+            share, remainder = divmod(height, len(alive))
+            targets = [share] * (len(alive) - 1) + [share + remainder]
+        for card, target in zip(alive, targets):
+            try:
+                card.setFixedHeight(max(1, target))
+            except (RuntimeError, AttributeError):
+                continue
 
     def _clear_batch_placeholders(self, remove_from_layout: bool = True):
         """清空全部批次占位。会话切换 / 布局重建时必须调用，防止索引错位。
@@ -11860,19 +11902,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 pending_restore.append((batch_idx, anchor))
             if pending_restore:
-                # 锚点 = 视口顶第一个可见 widget（含占位）：任何布局改动前捕获，
-                # 重建后把同一 layout index 的 widget 拉回同一 y（P052 教训）。
-                _anchor_index = -1
-                _anchor_y = 0
-                for _i in range(self.chat_layout.count()):
-                    _item = self.chat_layout.itemAt(_i)
-                    _w = _item.widget() if _item else None
-                    if _w is not None and self._is_widget_alive(_w):
-                        _geo = _w.geometry()
-                        if _geo.bottom() >= self.chat_scroll_area.verticalScrollBar().value():
-                            _anchor_index = _i
-                            _anchor_y = _geo.y()
-                            break
+                # ⚠️ 这里刻意**不做**锚点几何补偿（T42 撤除）。
+                # 历史实现：捕获视口顶 widget 的 y，重建后 `setValue(value + Δ)`
+                # 把同一 widget 拉回同一 y。实测这条路是「一滚到底就自动弹到顶」
+                # 的直接成因 —— 回调在 `singleShot(0)` 执行时读到的是**中间态几何**：
+                # 重建后布局尚未跑完，新插入 widget 的 y 仍是 0（实测 4500 → 0，
+                # Δ=-4500 → setValue(0) 一脚踹到顶部）；随后几拍里 y 又从 6452
+                # 单调降到 5412，回调落在哪一拍纯看事件循环时序（实测落在 5412，
+                # Δ=+912）。稳定值 4500 只在布局收敛后才出现，此时补偿早已执行。
+                #
+                # 正确性来源已由「高度守恒」接管：
+                #   - 回收侧 `_install_batch_placeholder` 用实高 H 建等高占位
+                #   - 重建侧 `_apply_placeholder_height` 把 H 还给新卡片
+                #   - `_take_batch_placeholder` 保证 layout index 原位归还
+                # 三者叠加使整趟回收→重建的几何**恒等**，无需任何滚动补偿。
+                # 卡片真实高度与占位的差值由 `_on_message_card_height_changed`
+                # 的单卡增量补偿处理（那条路径读的是稳定几何，语义也不同）。
                 for batch_idx, anchor in pending_restore:
                     self._render_message_to_card(
                         self._message_batch[batch_idx : batch_idx + 1],
@@ -11880,23 +11925,6 @@ class OpenAIChatToolWindow(ToolWindow):
                         anchor_layout_index=anchor,
                     )
                 logger.debug(f"[virtual-scroll] 原位重建 {len(pending_restore)} 个视口附近占位批次")
-
-                def _restore_anchor_after_placeholder():
-                    try:
-                        if not (0 <= _anchor_index < self.chat_layout.count()):
-                            return
-                        _item = self.chat_layout.itemAt(_anchor_index)
-                        _w = _item.widget() if _item else None
-                        if _w is None or not self._is_widget_alive(_w):
-                            return
-                        _delta = _w.geometry().y() - _anchor_y
-                        if _delta:
-                            sb = self.chat_scroll_area.verticalScrollBar()
-                            sb.setValue(max(0, sb.value() + _delta))
-                    except RuntimeError:
-                        pass
-
-                QTimer.singleShot(0, _restore_anchor_after_placeholder)
 
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
@@ -11968,12 +11996,16 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # ── 执行回收（从布局移除 + deleteLater）──
             if above_widgets:
-                # 滚动位置补偿：回收上方卡片后，容器高度减少，需同步降低滚动值
+                # 滚动位置补偿：回收上方卡片后，容器高度减少，需同步降低滚动值。
+                # 占位安装成功时 above_removed_height 恒为 0（总高没变），
+                # 此处是空操作；只在占位失败的降级路径才真的补偿。
+                # 包 _programmatic_scroll()：程序补偿不得被记成用户滚离底部（T42）。
                 scroll_bar = self.chat_scroll_area.verticalScrollBar()
                 old_scroll = scroll_bar.value()
                 delete_widgets_from_layout(above_widgets, self.chat_layout)
-                # 补偿滚动值：减去已移除的上方卡片总高度
-                scroll_bar.setValue(max(0, old_scroll - above_removed_height))
+                if above_removed_height > 0:
+                    with self._programmatic_scroll():
+                        scroll_bar.setValue(max(0, old_scroll - above_removed_height))
 
             if below_widgets:
                 delete_widgets_from_layout(below_widgets, self.chat_layout)
@@ -12395,7 +12427,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     removed_total += removed_h
             if removed_total > 0:
                 try:
-                    scroll_bar.setValue(max(0, scroll_bar.value() - removed_total))
+                    # 程序补偿，不得被记成用户滚离底部（T42）。
+                    # 占位安装成功时 removed_h 恒为 0（见 _unload_batch），
+                    # 这里只在占位失败的降级路径才真的动滚动值。
+                    with self._programmatic_scroll():
+                        scroll_bar.setValue(max(0, scroll_bar.value() - removed_total))
                 except RuntimeError:
                     pass
                 logger.debug(
@@ -13504,9 +13540,15 @@ class OpenAIChatToolWindow(ToolWindow):
             # 需要重新创建
             # 🐛 等高占位归还：卸载时留过占位的批次必须在其原位重建，
             # 否则新卡片会被追加到末尾 → 消息顺序错乱。
-            ph_index = self._take_batch_placeholder(global_batch_index)
-            if ph_index is not None:
-                insert_index = ph_index
+            # 同时取回占位高度：新建卡片从最小高度（40px）起步，若不先把
+            # 高度撑到占位值，容器总高会在重建瞬间骤降 Σ(H-40) → 上方锚点
+            # 补偿算出巨大负 `_delta` 把视口拽走 → 「一滚到底就弹回上方」
+            # 并再触发一轮回收的自激回路（T42）。高度在下方把所有卡片建完后
+            # 统一还原（`_apply_placeholder_height`）。
+            ph_height = 0
+            ph = self._take_batch_placeholder(global_batch_index)
+            if ph is not None:
+                insert_index, ph_height = ph
             cards = []
             if role == "user":
                 content = self._sanitize_user_message_for_display(batch[0].get("content", ""))
@@ -13577,6 +13619,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 保存卡片引用到 batch_cards
             self._batch_cards[global_batch_index] = cards if cards else None
+
+            # 🐛 高度守恒：把占位高度还给重建出来的卡片（T42）。
+            # 新建卡片起步高度是 MessageCard 的最小高度（40px），直接留在布局里
+            # 会让容器总高在重建瞬间骤降 —— 上方批次的锚点补偿据此算出巨大的
+            # 负 `_delta` 把视口往上拽（「一滚到底就自动弹回上方」），并因视口
+            # 落进新的占位区而再触发一轮回收，形成自激循环。
+            # 放在卡片全部建完之后：多卡批次要按总高均摊，得先知道张数。
+            if ph_height > 0 and cards:
+                self._apply_placeholder_height(cards, ph_height)
 
         # 批量处理懒渲染：渲染完所有卡片后再统一触发，避免每次都触发滚动
         # 收集需要懒渲染的卡片

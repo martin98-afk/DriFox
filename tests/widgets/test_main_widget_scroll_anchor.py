@@ -304,7 +304,8 @@ def test_install_batch_placeholder_keeps_height(qapp):
 
 
 def test_take_batch_placeholder_returns_index_and_removes(qapp):
-    """取回占位要还回原索引 —— 否则重建的卡片会被追加到末尾，顺序错乱"""
+    """取回占位要还回原索引与高度 —— 否则重建的卡片会被追加到末尾（顺序错乱）
+    且从最小高度起步（容器塌陷，T42）"""
     from PyQt5.QtWidgets import QWidget
 
     win, container, layout = _make_placeholder_window()
@@ -313,7 +314,7 @@ def test_take_batch_placeholder_returns_index_and_removes(qapp):
     idx = layout.indexOf(card)
 
     win._install_batch_placeholder(7, 80, idx)
-    assert win._take_batch_placeholder(7) == idx
+    assert win._take_batch_placeholder(7) == (idx, 80)
     assert win._take_batch_placeholder(7) is None  # 幂等：取过就没了
 
 
