@@ -366,7 +366,7 @@ class LLMSettingsCard(SystemCardFrame):
                 ("lsp", "LSP", "lsp"),
                 ("tools", "工具", "工具"),
                 ("agents", "智能体", "智能体"),
-                ("context", "上下文", "折叠"),
+                ("context", "上下文", "上下文"),
                 ("skills", "技能", "技能"),
             ),
         ),
@@ -545,7 +545,7 @@ class LLMSettingsCard(SystemCardFrame):
             components=("context_tiers", "budget_resolvers"),
             title="上下文管理",
             content="按插件控制上下文层（截断 / 落盘 / 压缩）的启停",
-            icon=get_icon("折叠"),
+            icon=get_icon("上下文"),
             parent=self,
         )
         context_layout.addWidget(self.pluginContextCard)
