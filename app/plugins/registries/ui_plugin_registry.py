@@ -1936,12 +1936,17 @@ class UIPluginRegistry:
         return win is not None
 
     def popout_card(self, card_id: str) -> Optional[Any]:
-        """把浮动卡片内容弹出为独立窗口（右键「弹出为独立窗口」）
+        """把浮动卡片内容弹出为独立窗口（右键「弹出」）
 
         首次弹出时以 card 的 widget_class/context_provider 合成一个临时
         WindowInfo 注册进 _windows（window_id=popout:<card_id>，不注册命令）；
         再次弹出走单例前置。关闭窗口保留注册（可再弹）。卸载插件时
         按 plugin_name 一并清理。
+
+        context 对齐浮动卡激活路径：用 ``_make_context_provider``（含
+        project_root / session_id / plugin_icon 的动态解析）——直接拿
+        ``card_info.context_provider``（多数卡片为 None）会让弹窗内容
+        拿不到 project_root，数据与主题双失败（2026-09-17 git-panel 实测）。
         """
         info = self._floating_cards.get(card_id)
         if info is None:
@@ -1949,12 +1954,15 @@ class UIPluginRegistry:
         popout_wid = f"popout:{card_id}"
         if popout_wid in self._windows:
             return self.open_window(popout_wid)
+        host = self._resolve_global_host()
+        window_id = getattr(host, "_window_id", None) if host is not None else None
+        ctx_provider = self._make_context_provider(info, window_id)
         self.register_window(
             plugin_name=info.plugin_name,
             window_id=popout_wid,
             widget_class=info.widget_class,
             title=info.title or card_id,
-            context_provider=info.context_provider,
+            context_provider=ctx_provider,
             metadata=dict(info.metadata or {}),
             register_command=False,
         )

@@ -142,6 +142,15 @@ class PluginWindow(FramelessWindow):
                     page._card_context_provider = context_provider
             except Exception as e:
                 logger.debug(f"[PluginWindow] context 注入失败: {e}")
+        # 数据/主题加载入口对齐浮动卡激活路径：插件模板的 show_card() 负责
+        # 拉数据 + 应用主题（如 git-panel 的 _apply_latest_theme + _async_refresh），
+        # 不调用则弹窗只建骨架（样式丢失 + 数据空白）。
+        show_card = getattr(page, "show_card", None)
+        if callable(show_card):
+            try:
+                show_card()
+            except Exception as e:
+                logger.warning(f"[PluginWindow] 内容页 show_card 失败: {e}")
         return page
 
     def refresh_theme(self) -> None:
@@ -157,6 +166,14 @@ class PluginWindow(FramelessWindow):
         except Exception:
             pass
         self._apply_window_style()
+        # 主题级联到内容页（插件页若实现 refresh_theme 则同步刷新）
+        content = getattr(self, "_content", None)
+        refresh_theme = getattr(content, "refresh_theme", None)
+        if callable(refresh_theme):
+            try:
+                refresh_theme()
+            except Exception:
+                pass
 
     def closeEvent(self, event) -> None:
         """手动关闭：从 registry 摘除实例（与 close_window 幂等）"""
