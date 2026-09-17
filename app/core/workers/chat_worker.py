@@ -2397,13 +2397,28 @@ class OpenAIChatWorker(QThread):
                 # 借鉴 Claude Code: 单结果 > 50K 字符 / 消息级 > 200K 字符 -> 落盘
                 # 在 ToolExecutor 之后、消息拼接之前执行, 保护 Prompt Cache 前缀稳定
                 # 完全无 LLM API 调用, 失败时回退保留原结果
+                #
+                # 现经 ContextPipeline 的 ingest stage 执行：落盘逻辑已迁移为
+                # tool_offload tier（order 40）。ingest stage 允许副作用（写盘），
+                # send/ui 两个投影入口不会触发本层。
                 try:
-                    persister = self._get_persister()
-                    if persister and tool_results:
-                        tool_results, persist_stats = persister.process(tool_results)
-                        self._last_persist_stats = persist_stats.to_dict()
+                    if tool_results:
+                        from app.core.context.pipeline import ContextPipeline
+
+                        _before_chars = sum(len(str(r.get("content", "") or "")) for r in tool_results)
+                        tool_results = ContextPipeline().ingest_tool_results(tool_results, self.llm_config or {})
+                        _after_chars = sum(len(str(r.get("content", "") or "")) for r in tool_results)
+                        if _after_chars < _before_chars:
+                            self._last_persist_stats = {
+                                "persisted_count": sum(
+                                    1 for r in tool_results if "<persisted-output>" in str(r.get("content", ""))
+                                ),
+                                "saved_chars": _before_chars - _after_chars,
+                            }
+                        else:
+                            self._last_persist_stats = None
                 except Exception as e:
-                    logger.exception(f"[Persist] 持久化失败, 保留原结果: {e}")
+                    logger.exception(f"[Persist] ingest 失败, 保留原结果: {e}")
                     self._last_persist_stats = None
 
                 response_sequence = self._build_response_message_sequence(tool_results)
