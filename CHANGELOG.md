@@ -22,7 +22,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.6.2] - 2026-09-17 (重新发布 #2)
 
-自上一版本以来的变更 | 累计提交数：81 · 累计文件变更：416 · 累计 +17471/-5834 | 累计贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更 | 累计提交数：82 · 累计文件变更：419 · 累计 +17737/-5841 | 累计贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -175,6 +175,24 @@ All notable changes to this project will be documented in this file.
 ---
 
 > 累计统计 v0.6.2 (重新发布 #3)：自上一版本以来累计 **81 个 commit** · 触及 **416 个文件** · **+17471/-5834 行** · 贡献者 **dingma, drifox-bot, mading**。
+
+---
+
+### 🐛 问题修复 (Bug Fixes) — 重新发布增量 #4
+
+- **widget 隐藏 detach 护栏 + 历史跳积分批增量加载 + 目标批次原位重建** (`app/main_widget.py`, `app/widgets/message_card.py`, `tests/widgets/test_history_jump_chunked_load.py` 新增): 三处护栏联动修复「跳到顶部 / 切会话 / 点历史问题」三类场景的可见性副反应：
+  - **必须先 hide() 再 setParent(None)** (`app/main_widget.py`, `app/widgets/message_card.py`): `CodeWebViewer` 持有原生 HWND，可见状态下脱离父窗口树会让 Chromium 弹出独立顶层窗口（白窗一闪）；message_card 复用 viewer 时与 detach 成对显式 `show()`，否则卡片区域一片空白。与 main_widget 其它 detach 点（`_clear_chat_area` / `ui_helpers`）同一护栏。
+  - **分批增量加载** (`app/main_widget.py`): 跳转加载历史时一次 `prepend` 整段历史（长会话数百批）会把每张卡的 markdown 转换与 `insertWidget(0)` 布局搬移挤进一帧，主线程长阻塞肉眼可见卡死。改按 `_incremental_visible_batch_count`（默认 8）分批，100ms 后由 `singleShot` 续拍，直到覆盖目标位置。
+  - **`_restore_batch_ui` 原位重建** (`app/main_widget.py`): 跳转定位时若目标批次已被虚拟滚动卸载（`_batch_cards[idx]=None`、只剩等高占位），查卡片表与遍历布局都落空 → 跳转静默失败。新增方法按占位 `anchor_layout_index` 原位 `render_message_to_card` 单批重建，高度由 `_apply_placeholder_height` 守恒，定位后视口不漂。
+  - **新增测试** (`tests/widgets/test_history_jump_chunked_load.py` 新增 206 行): 覆盖 detach 隐藏护栏 / 分批增量续拍 / `_restore_batch_ui` 原位重建三条路径。
+
+### 🔧 其他 (Chores & Build) — 重新发布增量 #4
+
+- 无新文件；本次仅追加问题修复。
+
+---
+
+> 累计统计 v0.6.2 (重新发布 #4)：自上一版本以来累计 **82 个 commit** · 触及 **419 个文件** · **+17737/-5841 行** · 贡献者 **dingma, drifox-bot, mading**。
 
 ## [v0.6.1] - 2026-09-15
 
