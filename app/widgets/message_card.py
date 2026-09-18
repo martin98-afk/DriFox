@@ -5318,20 +5318,26 @@ class CodeWebViewer(QWebEngineView):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(40)
 
-        self._page.codeActionRequested.connect(self.codeActionRequested.emit)
-        self._page.contextActionRequested.connect(self.contextActionRequested.emit)
+        # ⚠️ 转发一律 signal-to-signal 直连（.connect(self.xxxRequested)），
+        # 禁止 .connect(self.xxxRequested.emit)：bound .emit 对 PyQt 是普通
+        # Python callable，不绑定 receiver 生命周期（receiver 销毁后连接残留），
+        # 且 disconnect(bound.emit) 永远抛 TypeError（每次访问 .emit 都是新
+        # 对象，匹配不上）——2026-09-18 代码框按钮闪退
+        # （Qt5Core!QObject::signalsBlocked AV READ 0x0）根因。
+        self._page.codeActionRequested.connect(self.codeActionRequested)
+        self._page.contextActionRequested.connect(self.contextActionRequested)
         self._user_reading_inside = False
         self._page.heightReported.connect(self._on_height_reported)
         self._page.bodyGeometryReported.connect(self._on_body_geometry_reported)
         self._page.cardReadingChanged.connect(self._on_card_reading_changed)
         self._page.contentReady.connect(self._on_js_ready)
-        self._page.toolDiffRequested.connect(self.toolDiffRequested.emit)
-        self._page.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
-        self._page.saveFileRequested.connect(self.saveFileRequested.emit)
-        self._page.chartExpandRequested.connect(self.chartExpandRequested.emit)
-        self._page.saveChartPngRequested.connect(self.saveChartPngRequested.emit)
-        self._page.saveWidgetFileRequested.connect(self.saveWidgetFileRequested.emit)
-        self._page.previewImageRequested.connect(self.previewImageRequested.emit)
+        self._page.toolDiffRequested.connect(self.toolDiffRequested)
+        self._page.subAgentLogRequested.connect(self.subAgentLogRequested)
+        self._page.saveFileRequested.connect(self.saveFileRequested)
+        self._page.chartExpandRequested.connect(self.chartExpandRequested)
+        self._page.saveChartPngRequested.connect(self.saveChartPngRequested)
+        self._page.saveWidgetFileRequested.connect(self.saveWidgetFileRequested)
+        self._page.previewImageRequested.connect(self.previewImageRequested)
         self._page.renderCrashed.connect(self._on_render_crashed)
 
         self._load_skeleton()
@@ -15230,12 +15236,12 @@ class MessageCard(SimpleCardWidget):
         # 灰度：Qt 渲染器无 context lost，不应进入此方法；防御性回退到 WebEngine
         self.viewer = CodeWebViewer(self)
         self.viewer._lazy_markdown_cb = self._build_incremental_md
-        self.viewer.codeActionRequested.connect(self.actionRequested.emit)
-        self.viewer.contextActionRequested.connect(self.contextActionRequested.emit)
+        self.viewer.codeActionRequested.connect(self.actionRequested)
+        self.viewer.contextActionRequested.connect(self.contextActionRequested)
         self.viewer.contentHeightChanged.connect(self._update_height)
-        self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
-        self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
-        self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+        self.viewer.toolDiffRequested.connect(self.toolDiffRequested)
+        self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested)
+        self.viewer.saveFileRequested.connect(self.saveFileRequested)
         self.viewer.chartExpandRequested.connect(self._on_chart_expand)
         self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
         self.viewer.saveWidgetFileRequested.connect(self._on_save_widget_file)
@@ -16074,18 +16080,27 @@ class MessageCard(SimpleCardWidget):
         """连接 viewer → 卡片的全部信号。
 
         与 :meth:`_disconnect_viewer_signals` **成对维护**，两处写在一起是为了
-        支持 WebView 池化：viewer 换卡片时必须先断开旧连接再连到新卡片，
-        否则旧卡片被销毁后残留连接会在信号触发时抛 RuntimeError。
+        支持 WebView 池化：viewer 换卡片时必须先断开旧连接再连到新卡片。
+
+        ⚠️ 转发一律 signal-to-signal 直连（``.connect(self.actionRequested)``），
+        禁止 ``.connect(self.actionRequested.emit)``：bound ``.emit`` 对 PyQt
+        是普通 Python callable，不绑定 receiver（卡片）生命周期——卡片被虚拟
+        滚动回收销毁后连接残留，viewer 复用时信号触发即调用已析构对象
+        → ``Qt5Core!QObject::signalsBlocked`` AV READ 0x0（2026-09-18 代码框
+        按钮闪退根因）；且 ``disconnect(bound.emit)`` 永远抛 TypeError
+        （每次访问 ``.emit`` 都是新对象，匹配不上），导致
+        :meth:`_disconnect_viewer_signals` 静默失效。直连由 Qt 记录 receiver
+        QObject，销毁自动断连，``disconnect(信号对象)`` 也可正常断开。
         """
         v = self.viewer
         if v is None:
             return
-        v.codeActionRequested.connect(self.actionRequested.emit)
-        v.contextActionRequested.connect(self.contextActionRequested.emit)
+        v.codeActionRequested.connect(self.actionRequested)
+        v.contextActionRequested.connect(self.contextActionRequested)
         v.contentHeightChanged.connect(self._update_height)
-        v.toolDiffRequested.connect(self.toolDiffRequested.emit)
-        v.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
-        v.saveFileRequested.connect(self.saveFileRequested.emit)
+        v.toolDiffRequested.connect(self.toolDiffRequested)
+        v.subAgentLogRequested.connect(self.subAgentLogRequested)
+        v.saveFileRequested.connect(self.saveFileRequested)
         v.chartExpandRequested.connect(self._on_chart_expand)
         v.saveChartPngRequested.connect(self._on_save_chart_png)
         v.saveWidgetFileRequested.connect(self._on_save_widget_file)
@@ -16104,12 +16119,12 @@ class MessageCard(SimpleCardWidget):
         if v is None:
             return
         pairs = (
-            (v.codeActionRequested, self.actionRequested.emit),
-            (v.contextActionRequested, self.contextActionRequested.emit),
+            (v.codeActionRequested, self.actionRequested),
+            (v.contextActionRequested, self.contextActionRequested),
             (v.contentHeightChanged, self._update_height),
-            (v.toolDiffRequested, self.toolDiffRequested.emit),
-            (v.subAgentLogRequested, self.subAgentLogRequested.emit),
-            (v.saveFileRequested, self.saveFileRequested.emit),
+            (v.toolDiffRequested, self.toolDiffRequested),
+            (v.subAgentLogRequested, self.subAgentLogRequested),
+            (v.saveFileRequested, self.saveFileRequested),
             (v.chartExpandRequested, self._on_chart_expand),
             (v.saveChartPngRequested, self._on_save_chart_png),
             (v.saveWidgetFileRequested, self._on_save_widget_file),
@@ -16197,7 +16212,8 @@ class MessageCard(SimpleCardWidget):
                 # 灰度：纯 Qt 块级渲染器（无 Chromium/JS 层）
                 self.viewer = _get_markdown_block_viewer_cls()(self)
                 self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
-                self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+                # 直连（非 .emit 转发）：Qt 绑定 receiver 生命周期，viewer 销毁自动断连
+                self.viewer.saveFileRequested.connect(self.saveFileRequested)
                 # 仅"从磁盘加载的历史会话"折叠；本轮对话（流式进行中或已完成）
                 # 保持展开 —— 后者若按 _streaming=False 判为历史，会在虚拟滚动
                 # 回收重建后突然折叠，与首次渲染的展开态不一致。
