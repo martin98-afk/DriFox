@@ -551,6 +551,12 @@ class TraceCollector(QObject):
             elif kind == EntryKind.ASSISTANT:
                 if msg.get("tool_calls"):
                     meta["has_tool_calls"] = True
+                # 模型名（worker 落盘在 msg["model_name"]，历史消息同样带）→
+                # 统计页「模型」行。历史会话里 provider 配置可能已换，只有
+                # 消息级快照才反映当时真正用的模型。
+                msg_model = msg.get("model_name")
+                if msg_model:
+                    meta["model"] = str(msg_model)
                 # ① 优先用 worker 落盘的真实耗时（elapsed_ms，毫秒）。
                 #    这样**重新加载会话后耗时依然在**——实时信号测出来的
                 #    值只存在于内存，重启即丢。
