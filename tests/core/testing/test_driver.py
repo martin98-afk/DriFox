@@ -88,30 +88,55 @@ class TestBus:
         from tools.ui_driver.bus import invoke
 
         win, _label, _btn, edit = _make_tree(qtbot)
+        errors: list[Exception] = []
+        results: list[str] = []
 
         def _worker():
-            # 工作线程里摸控件：经 invoke 投递主线程改文本再回读
-            def _do():
-                edit.setText("via-bus")
-                return edit.text()
+            try:
+                # 工作线程里摸控件：经 invoke 投递主线程改文本并回读（必修 1/2 覆盖）
+                def _do():
+                    edit.setText("via-bus")
+                    return edit.text()
 
-            return invoke(_do)
+                results.append(invoke(_do))
 
-        t = threading.Thread(target=lambda: None)
-        t.start()  # 触发一次线程环境，验证主调用路径
-        t.join()
-        assert invoke(lambda: edit.setText("sync-path")) is None
-        assert edit.text() == "sync-path"
+                def _boom():
+                    raise ValueError("boom")
+
+                invoke(_boom)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t = threading.Thread(target=_worker)
+        t.start()
+        # 主线程必须泵事件（queued 请求靠主线程派发）；join() 不泵会饿死投递
+        qtbot.waitUntil(lambda: not t.is_alive(), timeout=30000)
+        assert results == ["via-bus"], f"跨线程投递结果异常: {results}"
+        assert len(errors) == 1 and isinstance(errors[0], ValueError), f"异常未跨线程重抛: {errors}"
+        assert edit.text() == "via-bus"
         assert find({"objectName": "input_box"}, root=win) is edit
 
-    def test_invoke_propagates_exception(self, qtbot, armed):
-        from tools.ui_driver.bus import invoke
+    def test_invoke_timeout(self, qtbot, armed):
+        """timeout_ms 生效：主线程不泵事件（本用例主线程纯轮询 sleep）时抛 DriverTimeoutError。"""
+        import time as _time
 
-        def _boom():
-            raise ValueError("boom")
+        from tools.ui_driver.bus import DriverTimeoutError, invoke
 
-        with pytest.raises(ValueError, match="boom"):
-            invoke(_boom)
+        errors: list[Exception] = []
+
+        def _worker():
+            try:
+                invoke(lambda: None, timeout_ms=200)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t = threading.Thread(target=_worker)
+        t.start()
+        deadline = _time.monotonic() + 30
+        while t.is_alive() and _time.monotonic() < deadline:
+            _time.sleep(0.05)  # 主线程不泵：queued 请求不派发 → 必走 200ms 超时分支
+        assert not t.is_alive(), "超时路径死锁"
+        assert errors and isinstance(errors[0], DriverTimeoutError), f"应超时: {errors}"
 
 
 class TestActionsObserve:

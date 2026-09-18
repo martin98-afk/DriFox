@@ -17,14 +17,16 @@
 
 from __future__ import annotations
 
+import itertools
 import threading
 from typing import Any, Callable, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QCoreApplication, QObject, QEventLoop, Qt, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QCoreApplication, QObject, Qt, pyqtSignal, pyqtSlot
 
 _AUDIT_SINK_ADDED = False
 _RLOCK = threading.RLock()
+_REQ_IDS = itertools.count(1)
 
 
 class DriverNotArmedError(RuntimeError):
@@ -70,23 +72,27 @@ def is_armed() -> bool:
 
 class _MainCaller(QObject):
     """住主线程的调用器：跨线程 emit 请求信号（自动 QueuedConnection），
-    在主线程执行 callable 并把结果经 done 信号回传调用线程。"""
+    在主线程执行 callable 并把结果经 done 信号回传调用线程。
 
-    requested = pyqtSignal(object)
-    done = pyqtSignal(object)
+    请求 id 贯穿 requested/done：多工作线程并发投递时 done 是广播信号，
+    每个等待方只消费与自己 req_id 匹配的回包，防止串台（S3a-r 必修 1）。
+    """
+
+    requested = pyqtSignal(int, object)
+    done = pyqtSignal(int, object)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         # receiver 自身住主线程（parent=app），跨线程 emit 自动走 QueuedConnection
         self.requested.connect(self._run)
 
-    @pyqtSlot(object)
-    def _run(self, fn: Callable[[], Any]) -> None:
+    @pyqtSlot(int, object)
+    def _run(self, req_id: int, fn: Callable[[], Any]) -> None:
         try:
-            self.done.emit((True, fn()))
+            self.done.emit(req_id, (True, fn()))
         except Exception as exc:  # noqa: BLE001 — 异常打包回传调用线程重抛
             logger.exception("[ui-driver] 主线程执行异常")
-            self.done.emit((False, exc))
+            self.done.emit(req_id, (False, exc))
 
 
 _caller: Optional[_MainCaller] = None
@@ -125,25 +131,32 @@ def invoke(fn: Callable[[], Any], timeout_ms: int = 15000) -> Any:
     _ensure_audit_sink()
     with _RLOCK:
         caller = _get_caller()
-        loop = QEventLoop()
-        box: dict[str, Any] = {}
+        req_id = next(_REQ_IDS)
+        done_evt = threading.Event()
+        box: dict[str, Any] = {"payload": None}
 
-        def _on_done(payload: tuple) -> None:
+        def _on_done(done_id: int, payload: tuple) -> None:
+            if done_id != req_id:  # 其他请求的回包：忽略（广播信号）
+                return
             box["payload"] = payload
-            loop.quit()
+            done_evt.set()
 
-        caller.done.connect(_on_done)
+        # 显式 DirectConnection：done 回包在主线程（emit 线程）直接执行
+        # _on_done（仅 dict 写 + Event.set，线程安全），立即唤醒工作线程等待；
+        # 若走 Auto/Queued 会投递到无事件循环的工作线程队列，回包永不派发
+        _direct = getattr(Qt, "DirectConnection")
+        caller.done.connect(_on_done, _direct)  # type: ignore[call-overload]
         try:
-            caller.requested.emit(fn)  # 跨线程 → QueuedConnection → 主线程
-            if not loop.exec_():  # pragma: no cover — exec_ 正常返回 True
-                raise DriverTimeoutError("QEventLoop 异常退出")
+            caller.requested.emit(req_id, fn)  # 跨线程 → QueuedConnection → 主线程
+            # 等待用 threading.Event：工作线程不需要跑 Qt 事件循环
+            # （QEventLoop 版在非 QThread 工作线程存在回包派发时序问题，S3a-r 必修 2）
+            if not done_evt.wait(timeout_ms / 1000.0):
+                raise DriverTimeoutError(f"主线程执行超时（>{timeout_ms}ms）")
         finally:
             try:
                 caller.done.disconnect(_on_done)
             except TypeError:
                 pass
-        if "payload" not in box:
-            raise DriverTimeoutError(f"主线程执行超时（>{timeout_ms}ms）")
         ok, payload = box["payload"]
         if not ok:
             raise payload
@@ -181,5 +194,4 @@ __all__ = [
     "invoke",
     "is_armed",
     "setArmed",
-    "Qt",
 ]

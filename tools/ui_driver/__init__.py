@@ -44,6 +44,11 @@ def place_offscreen(w: QWidget) -> None:
     禁止用 showMinimized 替代：最小化态 WebEngine renderer 随机 0xC0000409
     （S2 POC 实测，崩族②同签名）。
     """
+    if not w.isWindow():
+        raise ValueError(
+            "place_offscreen 仅接受顶层窗口（isWindow()==True）；"
+            "子 widget 请先 setParent 到窗口或直接传窗口实例"
+        )
     w.show()
     w.move(*WINDOW_OFFSCREEN_FORM)
 

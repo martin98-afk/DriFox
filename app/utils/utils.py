@@ -84,7 +84,9 @@ def get_app_data_dir() -> Path:
     """
     env_dir = os.environ.get("DRIFOX_DATA_DIR")
     if env_dir:
-        return Path(env_dir)
+        path = Path(env_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     # 开发环境
     if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):

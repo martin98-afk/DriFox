@@ -123,14 +123,24 @@ def memory() -> dict[str, Any]:
     guard("observe.memory")
 
     def _run() -> dict[str, Any]:
-        out: dict[str, Any] = {"main_private_mb": None, "main_ws_mb": None, "webengine_rss_mb": None}
+        out: dict[str, Any] = {
+            "main_private_mb": None,
+            "main_ws_mb": None,
+            "webengine_count": None,
+            "webengine_rss_mb": None,
+        }
         try:
             import psutil
 
             proc = psutil.Process()
             mem = proc.memory_info()
             out["main_ws_mb"] = round(mem.rss / 1048576, 1)
-            out["main_private_mb"] = round(getattr(proc.memory_full_info(), "uss", mem.rss) / 1048576, 1)
+            # Windows 口径对齐 T1b/T2：memory_info().private = PrivateUsage
+            # （= PrivateMemorySize64，进程私有提交字节）；uss 仅物理去共享，不等价
+            private = getattr(mem, "private", None)
+            out["main_private_mb"] = (
+                round(private / 1048576, 1) if isinstance(private, int) else None
+            )
             children = [c for c in proc.children(recursive=True) if "webengine" in c.name().lower()]
             out["webengine_count"] = len(children)
             out["webengine_rss_mb"] = round(sum(c.memory_info().rss for c in children) / 1048576, 1) if children else 0
