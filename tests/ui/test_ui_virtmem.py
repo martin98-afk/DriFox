@@ -52,9 +52,8 @@ def _make_assistant_card(host, qtbot, text: str):
 # ── 用例 1 ──
 
 # 独立探针源码：在子进程中构建 6 张卡并 cleanup，检验「cleanup 入池」。
-# 用子进程的原因：现状下 cleanup 走 viewer 销毁路径，会触发 WebEngine 销毁
-# 竞态崩溃（S2 POC 崩族①/②同源，进程级死亡）——pytest 的 xfail 只能表达
-# 断言失败，无法表达进程崩溃；子进程隔离后崩溃=非零退出码，语义等价。
+# 用子进程的原因：cleanup 的 viewer 销毁路径存在 WebEngine 销毁竞态
+# （S2 POC 崩族①/②同源，进程级死亡）——子进程隔离让该竞态不波及测试主进程。
 _POOL_PROBE_SRC = r'''
 import os, sys
 import tempfile
@@ -114,13 +113,11 @@ sys.exit(0 if ok else 1)
 '''
 
 
-@pytest.mark.xfail(strict=True, reason="等方案 4：cleanup 入池（当前 cleanup 销毁 viewer 不回池，且销毁竞态会崩子进程）")
 def test_pool_lifecycle_after_cleanup(tmp_path):
     """cleanup() 后 viewer 应入池（池桶 size∈[1,4] 且 pids 非空）。
 
-    子进程隔离执行：现状下 cleanup 销毁 viewer 触发 WebEngine 销毁竞态
-    （崩族①/②同源）直接杀进程——用退出码表达「未达标」，xfer 语义不变；
-    方案 4 落地后子进程打印 POOL_OK 且 returncode 0 → 本用例转绿。
+    方案 4 已落地（MessageCard.cleanup 先 detach_viewer 回池）；子进程隔离
+    执行规避 cleanup 销毁路径的 WebEngine 销毁竞态，POOL_OK + rc 0 即转绿。
     """
     import subprocess
     import sys as _sys
@@ -300,8 +297,8 @@ def test_thumb_closure_holds_scaled_only(ui_app, qtbot, tmp_path):
     for t in thumbs:
         handler = getattr(t, "mousePressEvent", None)
         defaults = getattr(handler, "__defaults__", None) or ()
-        for pm in defaults:
-            if hasattr(pm, "width"):
-                assert pm.width() <= 800, f"点击闭包持有全尺寸 pixmap（{pm.width()}px）"
+        held = [pm for pm in defaults if hasattr(pm, "width")]
+        # 闭包捕获的是 (source, data_uri) 字符串——不得再持有任何 pixmap
+        assert not held, f"点击闭包仍持有 pixmap（宽 {', '.join(str(p.width()) for p in held)}px）"
 
 

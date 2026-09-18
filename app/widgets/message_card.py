@@ -17894,12 +17894,25 @@ class MessageCard(SimpleCardWidget):
         # 断开所有信号连接（打破引用环路）
         self._disconnect_all_signals()
 
+        # [方案 4] viewer 回池：cleanup 时优先把 CodeWebViewer 归还复用池。
+        # detach 成功自带 self.viewer=None → 下方 viewer 清理分支自然跳过；
+        # detach 失败路径（None/流式/user 卡/非 CodeWebViewer/入池拒绝）自然回归
+        # 原销毁行为。红线：禁止在 detach 失败路径补 deleteLater——detach 内部
+        # 已处理失败分支的销毁，此处补会造成 double free。
+        if self.viewer is not None:
+            self.detach_viewer()
+
         # 调用 viewer 的清理方法（先清理后释放引用）
-        if hasattr(self.viewer, "cleanup"):
-            try:
-                self.viewer.cleanup()
-            except RuntimeError:
-                pass
+        # 🛡️ viewer 为 sip-deleted wrapper 时 hasattr 会抛 RuntimeError（既有隐患），
+        # 这里整体兜底；alive viewer 的清理见内层 try。
+        try:
+            if hasattr(self.viewer, "cleanup"):
+                try:
+                    self.viewer.cleanup()
+                except RuntimeError:
+                    pass
+        except RuntimeError:
+            pass
         # [B4-强回收] 防悬挂：MessageCard 清理时同步清零 renderer PID
         self._renderer_pid = 0
         self.viewer = None  # 释放 viewer 引用，允许 GC
