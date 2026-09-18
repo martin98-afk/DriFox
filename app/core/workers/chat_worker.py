@@ -616,6 +616,15 @@ class OpenAIChatWorker(QThread):
         from app.plugins.contracts.message_serializer import SerializeContext
         from app.plugins.registries.serializer_registry import SerializerRegistry
 
+        # [方案 1] image_ref → data:image 读侧恢复（persist 的逆操作）；
+        # 缺失文件降级 text 占位块，不抛错
+        try:
+            from app.core.store.session_repository import revive_vision_image_refs
+
+            messages = revive_vision_image_refs(messages)
+        except Exception as e:  # noqa: BLE001 — revive 失败不阻断发送
+            logger.warning(f"[chat_worker] revive image_refs 失败（按原消息发送）: {e}")
+
         flags = self._adapter_flags()
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
         return serializer.serialize(messages, SerializeContext(supports_vision=supports_vision, flags=flags))

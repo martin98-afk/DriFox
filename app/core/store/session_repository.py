@@ -6,6 +6,7 @@
 """
 
 from datetime import datetime
+from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,6 +42,114 @@ def merge_extras_into(messages: List[Any], extras: Dict[int, Dict[str, Any]]) ->
         if 0 <= i < len(messages) and isinstance(messages[i], dict):
             messages[i].update(patch)
     return messages
+
+
+# ── vision base64 落盘（方案 1，T1d 底稿）──
+
+
+def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root_dir) -> List[Any]:
+    """把消息 content 中 data:image 块替换为 image_ref 引用块（就地修改）。
+
+    - 仅处理 ``type=image_url`` 且 ``image_url.url`` 以 ``data:image`` 开头的块
+    - 落盘 ``<root_dir>/screenshots/persisted/<session_id>/sha1[:16]<ext>``
+    - 已是 ``type=image_ref`` 的块跳过（幂等：二次 save 不重复落盘）
+    - 单块失败隔离：该块保留原样（对齐 save 链既有逐段 try 风格）
+    """
+    import base64 as _base64
+    import hashlib as _hashlib
+
+    out_dir = Path(root_dir) / "screenshots" / "persisted" / session_id
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for bi, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") != "image_url":
+                continue
+            img = block.get("image_url")
+            url = img.get("url") if isinstance(img, dict) else None
+            if not isinstance(url, str) or not url.startswith("data:image"):
+                continue
+            try:
+                header_end = url.find(",")
+                if header_end == -1:
+                    continue
+                meta = url[len("data:") : header_end]  # image/png;base64
+                ext = ".png" if "png" in meta else (".jpg" if "jpeg" in meta or "jpg" in meta else ".bin")
+                b64 = url[header_end + 1 :]
+                raw = _base64.b64decode(b64)
+                digest = _hashlib.sha1(raw).hexdigest()[:16]
+                out_dir.mkdir(parents=True, exist_ok=True)
+                fpath = out_dir / f"{digest}{ext}"
+                if not fpath.exists():  # 幂等：同图（同 sha1）不重复写
+                    fpath.write_bytes(raw)
+                content[bi] = {
+                    "type": "image_ref",
+                    "image_ref": {"file": fpath.name, "meta": meta, "session_id": session_id},
+                }
+            except Exception:  # noqa: BLE001 — 单块失败保留原样
+                continue
+    return messages
+
+
+def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
+    """把 image_ref 引用块还原为 data:image 块（发送 / API 读侧）。
+
+    session_id 从各块的 image_ref.session_id 取（persist 时写入），
+    因此调用方无需知道会话上下文（chat_worker / gateway 读侧均可直用）。
+
+    - 读 ``<root_dir>/screenshots/persisted/<session_id>/<file>`` → base64 data URI
+    - >5MB 的 data URI 走 chat_worker.compress_data_uri 压缩
+    - 文件缺失/IO 失败 → 替换为 text 占位块（不抛错）
+    """
+    import base64 as _base64
+
+    if root_dir is None:
+        from app.utils.utils import get_app_data_dir
+
+        root_dir = get_app_data_dir()
+    base_dir = Path(root_dir) / "screenshots" / "persisted"
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for bi, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") != "image_ref":
+                continue
+            ref = block.get("image_ref") or {}
+            fname = str(ref.get("file") or "")
+            sid = str(ref.get("session_id") or "")
+            data_uri = ""
+            try:
+                fpath = base_dir / sid / fname
+                if fname and fpath.exists():
+                    raw = fpath.read_bytes()
+                    mime = str(ref.get("meta") or "image/png").split(";")[0]
+                    b64 = _base64.b64encode(raw).decode("ascii")
+                    data_uri = f"data:{mime};base64,{b64}"
+                    from app.core.workers.chat_worker import compress_data_uri
+
+                    data_uri = compress_data_uri(data_uri)
+            except OSError:
+                data_uri = ""
+            except Exception:  # noqa: BLE001 — 解码失败降级占位
+                data_uri = ""
+            if data_uri:
+                content[bi] = {"type": "image_url", "image_url": {"url": data_uri}}
+            else:
+                content[bi] = {
+                    "type": "text",
+                    "text": f"[图片已失效：{_ref_basename(fname or 'unknown')}]",
+                }
+    return messages
+
+
+def _ref_basename(p: str) -> str:
+    return Path(p).name
 
 
 def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, bytes]], List[Any]]:
@@ -339,6 +448,13 @@ class SessionRepository:
             messages = _backfill_offload_light_messages_impl(messages, session_id, self)
         except Exception as e:
             logger.warning(f"[SessionRepository] backfill 自愈失败，按原消息继续保存: {e}")
+        # [方案 1] vision base64 落盘：data:image 块 → image_ref 文件引用
+        try:
+            from app.utils.utils import get_app_data_dir
+
+            messages = _persist_vision_image_blocks_impl(messages, session_id, get_app_data_dir())
+        except Exception as e:
+            logger.warning(f"[SessionRepository] vision 落盘失败，按原消息继续保存: {e}")
         try:
             extras, light_messages = extract_offload_fields(messages)
         except Exception as e:
@@ -495,7 +611,9 @@ class SessionRepository:
         except Exception as e:
             logger.error(f"[SessionRepository] write_extras 异常: {e}")
 
-    def load_extras_for_session(self, session_id: str, idxs: Optional[List[int]] = None) -> Optional[Dict[int, Dict[str, Any]]]:
+    def load_extras_for_session(
+        self, session_id: str, idxs: Optional[List[int]] = None
+    ) -> Optional[Dict[int, Dict[str, Any]]]:
         """读取剥离的 UI 态字段（message_extras）。
 
         Args:
@@ -549,9 +667,7 @@ class SessionRepository:
         msgs = sess.get("messages", [])
         extras = self.load_extras_for_session(session_id)
         if extras is None:
-            logger.warning(
-                f"[SessionRepository] get_full_messages: {session_id} extras 读取失败，降级返回轻量消息"
-            )
+            logger.warning(f"[SessionRepository] get_full_messages: {session_id} extras 读取失败，降级返回轻量消息")
             return msgs
         return merge_extras_into(msgs, extras)
 

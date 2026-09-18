@@ -117,20 +117,45 @@ class APIHistoryManager:
         if self._session_store and self._session_store.is_initialized:
             self._session_store.save_session(session_record)
 
+    @staticmethod
+    def _revive_session_images(session_record: Dict) -> None:
+        """[方案 1 读侧] image_ref → data:image（就地恢复 messages 里的图片块）。"""
+        if not session_record:
+            return
+        from app.core.store.session_repository import revive_vision_image_refs
+
+        try:
+            msgs = session_record.get("messages")
+            if isinstance(msgs, list) and msgs:
+                session_record["messages"] = revive_vision_image_refs(msgs)
+        except Exception as e:  # noqa: BLE001 — 恢复失败按原消息
+            logger.warning(f"[APIHistoryManager] revive 失败: {e}")
+
     def get_history_list(self) -> List[Dict]:
         return sorted(self._api_sessions, key=lambda x: x.get("last_time", ""), reverse=True)
 
     def get_session_by_session_id(self, session_id: str) -> Optional[Dict]:
         for s in self._api_sessions:
             if s.get("session_id") == session_id:
+                self._revive_session_images(s)
                 return s
         if self._session_store and self._session_store.is_initialized:
-            return self._session_store.get_session(session_id)
+            s = self._session_store.get_session(session_id)
+            if s is not None:
+                self._revive_session_images(s)
+            return s
         return None
 
     def get_session_by_index(self, idx: int) -> Optional[List[Dict]]:
         if 0 <= idx < len(self._api_sessions):
-            return self._api_sessions[idx].get("messages", [])
+            msgs = self._api_sessions[idx].get("messages", [])
+            from app.core.store.session_repository import revive_vision_image_refs
+
+            try:
+                msgs = revive_vision_image_refs(msgs)
+            except Exception as e:  # noqa: BLE001 — revive 失败按原消息
+                logger.warning(f"[APIHistoryManager] revive 失败: {e}")
+            return msgs
         return None
 
     def find_index_by_session_id(self, session_id: str) -> int:
