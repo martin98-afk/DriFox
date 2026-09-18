@@ -9,6 +9,7 @@ tools/list → ui_inspect tree → find 领 token → click 无 token 拒 →
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -71,7 +72,10 @@ def dev_instance(tmp_path_factory):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    assert _wait_port(), "dev 实例 90s 内未监听测试服务端口"
+    try:
+        assert _wait_port(), "dev 实例 90s 内未监听测试服务端口"
+    except AssertionError:
+        raise
     yield proc
     try:
         urllib.request.urlopen(_BASE + "/shutdown", data=b"", timeout=10)
