@@ -3,8 +3,8 @@
 工具结果持久化器 - 借鉴 Claude Code 的入口管控策略
 
 核心职责:
-  1. 单结果 > 50,000 字符 -> 持久化到磁盘
-  2. 消息级预算 > 200,000 字符 -> 按大小排序持久化最大的几个
+  1. 单结果 > single_threshold (默认 50,000) 字符 -> 持久化到磁盘
+  2. 消息级预算 > total_threshold (默认 200,000) 字符 -> 按大小排序持久化最大的几个
   3. 替换 content 为 <persisted-output> 块 + 2000 字节预览 + 文件路径
   4. 替换决策冻结 (预览字符串必须稳定 -> 保护 Prompt Cache)
 
@@ -109,7 +109,12 @@ class ToolResultPersister:
         self._frozen: Dict[str, str] = {}
         logger.info(f"[Persist] 工具结果持久化目录: {self._root_dir}")
 
-    def process(self, tool_results: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], PersistStats]:
+    def process(
+        self,
+        tool_results: List[Dict[str, Any]],
+        single_threshold: int = SINGLE_RESULT_THRESHOLD,
+        total_threshold: int = MESSAGE_TOTAL_THRESHOLD,
+    ) -> Tuple[List[Dict[str, Any]], PersistStats]:
         """
         入口: 处理一批 tool_result, 返回 (处理后结果, 统计)
 
@@ -124,6 +129,8 @@ class ToolResultPersister:
                     "success": True,
                     ...
                 }
+            single_threshold: 单结果落盘阈值（字符），由 system-context 插件配置传入
+            total_threshold: 消息级合计落盘阈值（字符），同上
 
         Returns:
             (处理后 tool_results, 统计信息)
@@ -180,8 +187,8 @@ class ToolResultPersister:
                 stats.file_paths.append(persisted_path)
                 continue
 
-            # 单结果 > 50K -> 持久化
-            if content_len > SINGLE_RESULT_THRESHOLD:
+            # 单结果超阈值 -> 持久化
+            if content_len > single_threshold:
                 try:
                     persisted_path = self._persist(r, content)
                 except Exception as e:
@@ -204,9 +211,9 @@ class ToolResultPersister:
             stats.kept_count += 1
 
         # 2) 第二轮: 消息级预算
-        #    总和 > 200K 时, 把"最大且未持久化"的几条再持久化
+        #    总和超阈值时, 把"最大且未持久化"的几条再持久化
         total_after = sum(len(str(r.get("content", "") or "")) for r in tool_results)
-        if total_after > MESSAGE_TOTAL_THRESHOLD:
+        if total_after > total_threshold:
             # 按"原始长度"降序, 取仍然超限的 (跳过已持久化的)
             candidates = sorted(
                 [
@@ -221,7 +228,7 @@ class ToolResultPersister:
                 reverse=True,
             )
             for r in candidates:
-                if total_after <= MESSAGE_TOTAL_THRESHOLD:
+                if total_after <= total_threshold:
                     break
                 content = r.get("content", "") or ""
                 content_len = len(content)

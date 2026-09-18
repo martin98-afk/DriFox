@@ -2399,14 +2399,16 @@ class OpenAIChatWorker(QThread):
                 # 完全无 LLM API 调用, 失败时回退保留原结果
                 #
                 # 现经 ContextPipeline 的 ingest stage 执行：落盘逻辑已迁移为
-                # tool_offload tier（order 40）。ingest stage 允许副作用（写盘），
-                # send/ui 两个投影入口不会触发本层。
+                # tool_offload tier（order 15，先于截断层：可回读优于有损截断）。
+                # ingest stage 允许副作用（写盘），send/ui 两个投影入口不会触发本层。
                 try:
                     if tool_results:
                         from app.core.context.pipeline import ContextPipeline
 
                         _before_chars = sum(len(str(r.get("content", "") or "")) for r in tool_results)
-                        tool_results = ContextPipeline().ingest_tool_results(tool_results, self.llm_config or {})
+                        tool_results = ContextPipeline().ingest_tool_results(
+                            tool_results, self.llm_config or {}, session_id=self.session_id or ""
+                        )
                         _after_chars = sum(len(str(r.get("content", "") or "")) for r in tool_results)
                         if _after_chars < _before_chars:
                             self._last_persist_stats = {

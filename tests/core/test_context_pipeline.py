@@ -189,10 +189,11 @@ def test_register_dispatch_by_shape(registry):
     assert registry.get_budget_resolver().id == "r1"
 
 
-def test_prune_precedes_offload_in_ingest():
-    """ingest stage 里 tool_prune 必须先于 tool_offload。
+def test_offload_precedes_prune_in_ingest():
+    """ingest stage 里 tool_offload 必须先于 tool_prune。
 
-    落盘判定基于内容长度，若先落盘再截断，阈值会基于未截断内容失真。
+    落盘可回读全文（信息保留），截断中间段永久丢失（有损）。若截断在前，
+    内容已被截到 ≤24K，offload 的 single 阈值(50K)永不触发，本层退化成死层。
     """
     from app.plugins.loaders.runtime_component_loader import _make_context_tier_loader
 
@@ -200,7 +201,7 @@ def test_prune_precedes_offload_in_ingest():
     reg = ContextPolicyRegistry.get_instance()
     ids = [t.id for t in reg.resolve_chain(STAGE_INGEST)]
     if "tool_prune" in ids and "tool_offload" in ids:
-        assert ids.index("tool_prune") < ids.index("tool_offload")
+        assert ids.index("tool_offload") < ids.index("tool_prune")
 
 
 def test_system_plugin_tiers_are_prefix_safe():
@@ -218,7 +219,7 @@ def test_system_plugin_tiers_are_prefix_safe():
 
     _make_context_tier_loader().scan_roots()
     reg = ContextPolicyRegistry.get_instance()
-    system_ids = {t.id for t in reg.resolve_chain(STAGE_SEND) if t.order in (20, 40)} | {
+    system_ids = {t.id for t in reg.resolve_chain(STAGE_SEND) if t.order in (15, 20)} | {
         t.id for t in reg.resolve_chain(STAGE_INGEST)
     }
     # system-context 提供的层 id 固定为这两个

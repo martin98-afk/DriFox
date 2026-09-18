@@ -42,8 +42,9 @@ class ToolPruneTier:
 
     def should_apply(self, view) -> bool:
         limit = self._limit(view)
+        skip = prune_skip_tools()
         for m in view.messages:
-            if m.get("role") != "tool" or self._skip(m.get("name", "")):
+            if m.get("role") != "tool" or self._skip(m.get("name", ""), skip):
                 continue
             c = m.get("content")
             if isinstance(c, str) and len(c) > limit:
