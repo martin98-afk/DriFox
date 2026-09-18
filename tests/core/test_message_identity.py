@@ -4,7 +4,7 @@
 import pytest
 
 from app.core.infra import message_identity as mi
-from app.core.message_content import messages_to_api, normalize_message
+from app.core.conversation.message_content import messages_to_api, normalize_message
 
 
 @pytest.fixture(autouse=True)

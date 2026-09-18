@@ -21,7 +21,7 @@ from app.core.modelmeta.model_capabilities import (
     resolve_context_limit,
     resolve_max_output_tokens,
 )
-from app.core.message_content import extract_reasoning_delta
+from app.core.conversation.message_content import extract_reasoning_delta
 from app.core.modelmeta.provider_profile import get_provider_profile
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
@@ -918,7 +918,7 @@ class SubAgentExecutor(QThread):
 
             # 收集成功执行的 hook 输出，注入 messages
             # ★ 只注入标记为 add_to_context=true 的 hook 结果
-            from app.core.backend import _make_hook_message
+            from app.core.conversation.backend import _make_hook_message
 
             injected = 0
             for r in results:
@@ -1499,7 +1499,7 @@ class SubAgentExecutor(QThread):
         try:
             agent = self.agent_manager.get_agent(self.agent_name) if self.agent_manager else None
             if agent is not None:
-                from app.core.agent import PermissionResolver
+                from app.core.conversation.agent import PermissionResolver
 
                 resolver = PermissionResolver(agent.permission, {}, agent.tools)
                 # 权限参数适配（与 UI 引擎/AGENT_CONFIG 同口径）：

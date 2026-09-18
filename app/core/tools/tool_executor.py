@@ -17,7 +17,7 @@ import orjson
 from loguru import logger
 
 from app.core.hooks.hook_manager import HookDecision
-from app.core.message_content import content_to_text
+from app.core.conversation.message_content import content_to_text
 from app.tools.tool_name_mapper import ToolNameMapper
 
 # 预编译正则表达式

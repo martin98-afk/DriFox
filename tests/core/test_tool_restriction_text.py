@@ -106,7 +106,7 @@ def test_semantics_match_permission_resolver():
     - compaction.md 型：全部工具 deny
     - explore.md 型：deny 列表禁用，其余 allow
     """
-    from app.core.agent import PermissionResolver
+    from app.core.conversation.agent import PermissionResolver
 
     leader = PermissionResolver(
         {"question": "allow", "team_list_members": "allow", "team_send_message": "allow", "*": "deny"}

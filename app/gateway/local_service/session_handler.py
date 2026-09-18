@@ -84,7 +84,7 @@ class APIHistoryManager:
         """初始化 SQLite 存储（经 backend 门面获取活跃引擎，行为等价 SessionStore）"""
         try:
             # 函数体内延迟 import：避免与 backend 循环导入
-            from app.core.backend import get_session_storage
+            from app.core.conversation.backend import get_session_storage
 
             engine = get_session_storage()
             # hasattr 降级：引擎无 is_initialized（第三方实现）→ 视为未初始化

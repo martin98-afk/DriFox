@@ -68,7 +68,7 @@ class IsolatedChatContext:
         return list(session.messages or [])
 
     def _create_agent_manager(self):
-        from app.core.agent import AgentManager
+        from app.core.conversation.agent import AgentManager
         return AgentManager.get_instance()
 
     def _get_model_config(self) -> Dict[str, Any]:

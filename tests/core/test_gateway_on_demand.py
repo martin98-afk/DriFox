@@ -177,7 +177,7 @@ class TestBuiltinToolsNotOverwritten:
 
     def test_build_components_does_not_overwrite_builtin_tools(self, fresh_service, monkeypatch):
         """T34 核心：删掉覆盖行后，全局 AgentManager 的 _builtin_tools 不被改写"""
-        import app.core.agent as agent_mod
+        import app.core.conversation.agent as agent_mod
 
         sentinel = object()  # 模拟「窗口已设置的」_builtin_tools
         fake_am = MagicMock()
@@ -203,7 +203,7 @@ class TestBuiltinToolsNotOverwritten:
 
     def test_late_window_schema_still_works(self, fresh_service, monkeypatch):
         """后建窗口的 schema 生成不受影响（显式传表路径仍可用）"""
-        from app.core.agent import AgentManager
+        from app.core.conversation.agent import AgentManager
 
         am = AgentManager.get_instance(None, None)
         # 显式传入 builtin_tools（GatewayEngine engine.py:768/773 的做法）

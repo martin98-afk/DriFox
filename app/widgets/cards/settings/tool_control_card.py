@@ -947,7 +947,7 @@ class ToolControlCardFrame(SystemCardFrame):
         # 占位项:默认显示"用户自定义"(无 agent 覆盖),作为动作入口
         self._template_combo.addItem("用户自定义", userData="")
         try:
-            from app.core.agent import AgentManager
+            from app.core.conversation.agent import AgentManager
 
             agents = AgentManager.get_instance().list_agents()
         except Exception:
@@ -969,7 +969,7 @@ class ToolControlCardFrame(SystemCardFrame):
         try:
             from loguru import logger
 
-            from app.core.agent import AgentManager
+            from app.core.conversation.agent import AgentManager
 
             agent = AgentManager.get_instance().get_agent(name)
             if agent is None:

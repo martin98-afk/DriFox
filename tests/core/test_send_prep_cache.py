@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.chat_session import ChatSession  # noqa: E402
+from app.core.conversation.chat_session import ChatSession  # noqa: E402
 from app.core.context.builder import ContextBudgetAllocator  # noqa: E402
 
 
@@ -195,7 +195,7 @@ class TestInvalidationOnHookInjection:
     """hook 注入（backend._inject_hook_to_session）必须 miss"""
 
     def test_inject_hook_to_session_misses(self):
-        from app.core.backend import _inject_hook_to_session
+        from app.core.conversation.backend import _inject_hook_to_session
 
         compactor = _CountingCompactor()
         alloc = _allocator(compactor)

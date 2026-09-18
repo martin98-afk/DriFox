@@ -101,7 +101,7 @@ class PluginHostService(QObject):
         super().__init__(parent)
 
         # 全局组件（不绑任何窗口）
-        from app.core.agent import AgentManager
+        from app.core.conversation.agent import AgentManager
         from app.core.hooks.hook_manager import HookManager
 
         # 插件 hooks 的注册目标。HookManager._hooks 类级共享（任一实例等效），
@@ -1330,7 +1330,7 @@ class PluginHostService(QObject):
         - components: 各组件重载结果（agents 数量/其余布尔）
         - diff: 工具与 MCP 服务器增减明细（tools_added/tools_removed/mcp_added/mcp_removed）
         """
-        from app.core.backend import ChatBackend
+        from app.core.conversation.backend import ChatBackend
 
         instances = [
             b

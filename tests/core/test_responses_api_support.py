@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from app.core.message_content import messages_to_responses_input
+from app.core.conversation.message_content import messages_to_responses_input
 from app.core.workers.chat_worker import OpenAIChatWorker
 from app.core.workers.subagent_worker import SubAgentExecutor
 

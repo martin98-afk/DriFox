@@ -290,7 +290,7 @@ class TraceCollector(QObject):
 
         def _load() -> str:
             try:
-                from app.core.backend import get_session_storage
+                from app.core.conversation.backend import get_session_storage
 
                 storage = get_session_storage()
                 fn = getattr(storage, "load_msg_extras", None)

@@ -151,7 +151,7 @@ def trigger_plugin_changed_hook(context: dict) -> None:
             mcp_disconnected/mcp_failed），可选 "plugin_name"/"server_name" 等
     """
     try:
-        from app.core.backend import ChatBackend
+        from app.core.conversation.backend import ChatBackend
 
         # 过滤窗口关闭竞态实例（closeEvent 后 cleanup 前仍可能在集合中）
         instances = [

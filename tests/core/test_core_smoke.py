@@ -20,7 +20,7 @@ class TestMessageContent:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.message_content")
+        return pytest.importorskip("app.core.conversation.message_content")
 
     def test_import(self, mod):
         assert mod is not None
@@ -345,7 +345,7 @@ class TestChatSession:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.chat_session")
+        return pytest.importorskip("app.core.conversation.chat_session")
 
     def test_import(self, mod):
         assert mod is not None
@@ -432,7 +432,7 @@ class TestMemoryManagerCore:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.memory_manager")
+        return pytest.importorskip("app.core.conversation.memory_manager")
 
     def test_import(self, mod):
         assert mod is not None

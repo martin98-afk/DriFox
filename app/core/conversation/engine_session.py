@@ -151,7 +151,7 @@ class EngineSessionImpl:
         # 会话初始化（executor.execute 依赖 current session）
         sm = self._core.session_manager
         if not sm.get_current_session():
-            from app.core.chat_session import ChatSession
+            from app.core.conversation.chat_session import ChatSession
 
             session = ChatSession(name=f"plugin:{engine_name}")
             sm.sessions.append(session)

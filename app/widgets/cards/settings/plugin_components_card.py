@@ -160,7 +160,7 @@ def _estimate_agents_tokens(plugin_name: str) -> tuple:
     格式必须与 app/core/agent.py 保持一致（含标题行、描述截断 300 字），
     否则估算值会和实际注入的 token 数对不上。
     """
-    from app.core.agent import AgentManager
+    from app.core.conversation.agent import AgentManager
 
     mgr = AgentManager.get_instance()
     names = mgr._plugin_agents.get(plugin_name) or set()

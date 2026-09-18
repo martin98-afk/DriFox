@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
-from app.core.backend import _extract_markdown_images, _gw_str_platform
+from app.core.conversation.backend import _extract_markdown_images, _gw_str_platform
 
 _AUTO_RESTART_COOLDOWN = 5.0  # 引擎不可用时的自愈重建最小间隔（秒）
 
@@ -125,7 +125,7 @@ class GatewayService(QObject):
                     self._tool_executor._builtin_tools.set_team_context("gateway", "plan")
 
             if self._agent_manager is None:
-                from app.core.agent import AgentManager
+                from app.core.conversation.agent import AgentManager
 
                 # [PERF T34] 不再覆盖 _agent_manager._builtin_tools（T19 实证：
                 # GatewayEngine 全链显式传表 engine.py:768/773，覆盖全局指针只造成
@@ -504,7 +504,7 @@ class GatewayService(QObject):
                 chat_session = self._engine.find_session(stored_chat_id)
 
             if not chat_session:
-                from app.core.chat_session import ChatSession
+                from app.core.conversation.chat_session import ChatSession
 
                 user_name = gw_session.user_name or user_id[:8]
                 chat_session = ChatSession(name=f"{gw_platform}对话")

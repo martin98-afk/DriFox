@@ -41,7 +41,7 @@ from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
 from app.core.conversation.config import HookPolicy, PermissionCache
-from app.core.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
+from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
 from app.core.modelmeta.model_capabilities import get_model_capabilities, normalize_reasoning_effort
 from app.core.modelmeta.provider_profile import get_provider_profile
@@ -730,7 +730,7 @@ class OpenAIChatWorker(QThread):
                     mail = pending[0]
                     tm.mark_mail_running(mail["id"], window_id)
 
-                    from app.core.backend import _format_hook_output
+                    from app.core.conversation.backend import _format_hook_output
 
                     task_desc = mail.get("body", mail.get("subject", ""))
                     from_agent = mail.get("from_agent", "?")
@@ -874,7 +874,7 @@ class OpenAIChatWorker(QThread):
                 （来自 hookify 风格 JSON 的 reason/stopReason 字段，或 raw output）；
                 否则返回 None。Stop hook 用此实现"强制续命"机制。
         """
-        from app.core.backend import _make_hook_message
+        from app.core.conversation.backend import _make_hook_message
 
         # Hook 参与级别拦截：消息级事件（PreAssistantMessage/PostAssistantMessage/Stop）
         # 由 hook policy 插件决定（plugins/system-hook-policies/hook_policies/）。
@@ -895,7 +895,7 @@ class OpenAIChatWorker(QThread):
         if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
             for msg in reversed(current_session_messages):
                 if msg.get("role") == "user":
-                    from app.core.message_content import content_to_text
+                    from app.core.conversation.message_content import content_to_text
 
                     current_message_text = content_to_text(msg.get("content", ""))
                     break

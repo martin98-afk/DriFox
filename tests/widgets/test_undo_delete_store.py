@@ -20,8 +20,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import app.main_widget as mw
-from app.core.chat_session import ChatSession, SessionManager
-from app.core.message_content import group_messages_for_display
+from app.core.conversation.chat_session import ChatSession, SessionManager
+from app.core.conversation.message_content import group_messages_for_display
 from app.widgets.cards.floating.undo_delete_store import (
     KIND_DELETE_ROUND,
     KIND_UNDO_TO_ROUND,

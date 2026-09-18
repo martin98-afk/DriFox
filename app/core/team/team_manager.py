@@ -392,7 +392,7 @@ class TeamManager:
             # 🛡️ F9：capability 自动登记（动态解析，失败静默降级为无快照——
             # get_member_capability 会在无快照时重新动态解析，不破坏老数据）
             try:
-                from app.core.agent import AgentManager  # 延迟 import 防循环依赖
+                from app.core.conversation.agent import AgentManager  # 延迟 import 防循环依赖
 
                 am = AgentManager.get_instance()
                 agent = am.get_agent(agent_name) if am else None
@@ -599,7 +599,7 @@ class TeamManager:
         """从 Agent 对象推导能力摘要（join 快照 + 动态解析共用）。
 
         Args:
-            agent: app.core.agent.Agent 实例（name/description/mode/permission/tools）
+            agent: app.core.conversation.agent.Agent 实例（name/description/mode/permission/tools）
 
         Returns:
             {
@@ -682,7 +682,7 @@ class TeamManager:
             return None
         # 1. 动态解析优先（agent 文件存在时能力最新）
         try:
-            from app.core.agent import AgentManager  # 延迟 import 防循环依赖
+            from app.core.conversation.agent import AgentManager  # 延迟 import 防循环依赖
 
             am = AgentManager.get_instance()
             agent = am.get_agent(agent_name) if am else None

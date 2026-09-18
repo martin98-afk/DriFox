@@ -29,8 +29,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.chat_session import ChatSession
-from app.core.message_content import normalize_message
+from app.core.conversation.chat_session import ChatSession
+from app.core.conversation.message_content import normalize_message
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 

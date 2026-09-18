@@ -67,7 +67,7 @@ def _build_mock_backend():
     """
     import gc
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from PyQt5.QtWidgets import QApplication
 
     # 多路径找 QApplication
@@ -104,7 +104,7 @@ def _build_mock_backend():
     # 真实链路要扫盘 / 加载 agents / hooks 等，开销大且与"内存增长基线"目标无关。
     # 我们只保留"信号 → emit"的关键路径：每次 reload 调用自增计数器并 emit
     # plugin_changed，量化信号链路的内存增长。
-    from app.core import backend as backend_module
+    from app.core.conversation import backend as backend_module
 
     _orig_reload_subsystems = backend_module.ChatBackend.reload_plugin_subsystems
     _orig_do_single_reload = backend_module.ChatBackend._do_single_reload

@@ -28,7 +28,7 @@ import orjson as json
 from loguru import logger
 from openai import OpenAI
 
-from app.core.message_content import (
+from app.core.conversation.message_content import (
     consolidate_messages,
     content_to_text,
 )

@@ -98,8 +98,8 @@ def test_backend_on_hook_finished_parses_and_checks_session_id():
 # 行为级：on_hook_finished 校验逻辑（独立模拟）
 # ──────────────────────────────────────────────
 
-from app.core.backend import _inject_hook_to_session  # noqa: E402
-from app.core.chat_session import ChatSession  # noqa: E402
+from app.core.conversation.backend import _inject_hook_to_session  # noqa: E402
+from app.core.conversation.chat_session import ChatSession  # noqa: E402
 
 
 def _make_session(sid: str) -> ChatSession:

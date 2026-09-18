@@ -37,7 +37,7 @@ class _FakePlugin:
 
 def _build_backend():
     """最小 ChatBackend 实例（不跑 __init__ 全链）"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     backend._agent_manager = None

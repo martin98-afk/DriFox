@@ -27,7 +27,7 @@ def test_reasoning_loader_returns_content(monkeypatch):
         storage_calls.append((sid, list(idxs)))
         return {idx: {"reasoning_content": f"think-{idx}"} for idx in idxs}
 
-    import app.core.backend as backend_mod
+    import app.core.conversation.backend as backend_mod
 
     monkeypatch.setattr(backend_mod, "get_session_storage", lambda: SimpleNamespace(load_msg_extras=load_msg_extras))
     c = _bare_collector()
@@ -37,7 +37,7 @@ def test_reasoning_loader_returns_content(monkeypatch):
 
 
 def test_reasoning_loader_safe_on_missing_engine(monkeypatch):
-    import app.core.backend as backend_mod
+    import app.core.conversation.backend as backend_mod
 
     monkeypatch.setattr(backend_mod, "get_session_storage", lambda: SimpleNamespace())
     c = _bare_collector()
@@ -46,7 +46,7 @@ def test_reasoning_loader_safe_on_missing_engine(monkeypatch):
 
 
 def test_reasoning_loader_safe_on_exception(monkeypatch):
-    import app.core.backend as backend_mod
+    import app.core.conversation.backend as backend_mod
 
     def boom():
         raise RuntimeError("db down")

@@ -14,15 +14,15 @@ import typing as _typing
 # 如果 attr_name 为 None 则表示直接返回整个模块
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     # Backend
-    "ChatBackend":             ("app.core.backend", "ChatBackend"),
+    "ChatBackend":             ("app.core.conversation.backend", "ChatBackend"),
     # 引擎与执行器
     "ChatEngine":              ("app.core.engines.ui", "ChatEngine"),
     "ToolExecutor":            ("app.core.tools.tool_executor", "ToolExecutor"),
-    "MemoryManagerCore":       ("app.core.memory_manager", "MemoryManagerCore"),
+    "MemoryManagerCore":       ("app.core.conversation.memory_manager", "MemoryManagerCore"),
     # Agent 系统
-    "Agent":                   ("app.core.agent", "Agent"),
-    "AgentManager":            ("app.core.agent", "AgentManager"),
-    "create_agent_manager":    ("app.core.agent", "create_agent_manager"),
+    "Agent":                   ("app.core.conversation.agent", "Agent"),
+    "AgentManager":            ("app.core.conversation.agent", "AgentManager"),
+    "create_agent_manager":    ("app.core.conversation.agent", "create_agent_manager"),
     # Worker
     "OpenAIChatWorker":        ("app.core.workers", "OpenAIChatWorker"),
     "SubAgentExecutor":        ("app.core.workers", "SubAgentExecutor"),
@@ -32,16 +32,16 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SessionStore":            ("app.core.store", "SessionStore"),
     "SubAgentLogRepository":   ("app.core.store", "SubAgentLogRepository"),
     # 消息处理
-    "consolidate_messages":    ("app.core.message_content", "consolidate_messages"),
-    "content_to_text":         ("app.core.message_content", "content_to_text"),
-    "content_to_markdown":     ("app.core.message_content", "content_to_markdown"),
-    "group_messages_for_display": ("app.core.message_content", "group_messages_for_display"),
-    "to_api_message":          ("app.core.message_content", "to_api_message"),
-    "messages_to_api":         ("app.core.message_content", "messages_to_api"),
-    "append_text_block":       ("app.core.message_content", "append_text_block"),
-    "ensure_content_blocks":   ("app.core.message_content", "ensure_content_blocks"),
-    "make_tool_result_block":  ("app.core.message_content", "make_tool_result_block"),
-    "get_user_round_ranges":   ("app.core.message_content", "get_user_round_ranges"),
+    "consolidate_messages":    ("app.core.conversation.message_content", "consolidate_messages"),
+    "content_to_text":         ("app.core.conversation.message_content", "content_to_text"),
+    "content_to_markdown":     ("app.core.conversation.message_content", "content_to_markdown"),
+    "group_messages_for_display": ("app.core.conversation.message_content", "group_messages_for_display"),
+    "to_api_message":          ("app.core.conversation.message_content", "to_api_message"),
+    "messages_to_api":         ("app.core.conversation.message_content", "messages_to_api"),
+    "append_text_block":       ("app.core.conversation.message_content", "append_text_block"),
+    "ensure_content_blocks":   ("app.core.conversation.message_content", "ensure_content_blocks"),
+    "make_tool_result_block":  ("app.core.conversation.message_content", "make_tool_result_block"),
+    "get_user_round_ranges":   ("app.core.conversation.message_content", "get_user_round_ranges"),
     # 重试
     "create_api_call_with_retry": ("app.core.workers.error_handler", "create_api_call_with_retry"),
     "retry_on_api_error":      ("app.core.workers.error_handler", "retry_on_api_error"),
@@ -58,8 +58,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "count_messages_tokens":   ("app.core.infra.token_estimator", "count_messages_tokens"),
     "TokenCounter":            ("app.core.infra.token_estimator", "TokenCounter"),
     # 会话
-    "ChatSession":             ("app.core.chat_session", "ChatSession"),
-    "SessionManager":          ("app.core.chat_session", "SessionManager"),
+    "ChatSession":             ("app.core.conversation.chat_session", "ChatSession"),
+    "SessionManager":          ("app.core.conversation.chat_session", "SessionManager"),
 }
 
 

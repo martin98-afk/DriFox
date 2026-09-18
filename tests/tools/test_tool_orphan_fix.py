@@ -70,7 +70,7 @@ def test_phase5_orphan_tool_result_uses_call_map():
 
 def test_phase5_serialized_declaration_matches_result_id():
     """Phase 5 产物经消息序列化后，assistant 声明 id 与 tool 结果 id 一致。"""
-    from app.core.message_content import normalize_message
+    from app.core.conversation.message_content import normalize_message
 
     worker = _make_worker()
     worker._response_content_blocks = []
@@ -215,7 +215,7 @@ def test_tool_result_dict_as_declaration_survives_normalize():
     normalize_message 不丢弃该消息，但 id 为空 → 服务端 2013。
     该测试固化 normalize 行为，说明脏数据即使入库也会被修复函数拦下。
     """
-    from app.core.message_content import normalize_message
+    from app.core.conversation.message_content import normalize_message
 
     dirty_asst = {
         "role": "assistant",

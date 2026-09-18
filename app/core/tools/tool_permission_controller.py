@@ -376,7 +376,7 @@ class ToolPermissionController(QObject):
             agent_tools: agent.tools 字典(白名单,可为 None)
             agent_permission: agent.permission 字典(allow/deny/ask 规则,可为 None)
         """
-        from app.core.agent import PermissionResolver
+        from app.core.conversation.agent import PermissionResolver
 
         agent_tools = agent_tools or {}
         agent_permission = agent_permission or {}

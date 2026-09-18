@@ -627,7 +627,7 @@ class WorktreeSectionWidget(QWidget):
         if not self._project:
             return
         try:
-            from app.core.memory_manager import MemoryManagerCore
+            from app.core.conversation.memory_manager import MemoryManagerCore
 
             mm = MemoryManagerCore.get_instance()
             if mm and mm._key_documents_repo:
@@ -638,7 +638,7 @@ class WorktreeSectionWidget(QWidget):
     def _restore_workdir(self, original_path: str):
         """将工作目录恢复为原始 git 仓库根目录（当被删 path 恰是当前 workdir 时）"""
         try:
-            from app.core.memory_manager import MemoryManagerCore
+            from app.core.conversation.memory_manager import MemoryManagerCore
 
             mm = MemoryManagerCore.get_instance()
             if mm and self._project:

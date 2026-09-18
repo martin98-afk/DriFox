@@ -772,7 +772,7 @@ class ConfigSyncService(QObject):
             # 晚于本方法置位（解压完成 → emit → 主线程重载期间 watcher 尚未处理事件），
             # 3s 后补查一次，确保 agents/commands 最终加载、事件不丢。
             try:
-                from app.core.backend import ChatBackend
+                from app.core.conversation.backend import ChatBackend
 
                 if getattr(ChatBackend, "_watcher_pending_reload", False):
                     ChatBackend._watcher_pending_reload = False

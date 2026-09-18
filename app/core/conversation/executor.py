@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from app.core.agent import PermissionResolver
+from app.core.conversation.agent import PermissionResolver
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.workers.chat_worker import OpenAIChatWorker

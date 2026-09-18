@@ -475,7 +475,7 @@ class HookEditCard(QWidget):
         combo.clear()
 
         try:
-            from app.core.agent import AgentManager
+            from app.core.conversation.agent import AgentManager
 
             am = AgentManager.get_instance()
             # 确保所有插件 agent 都已加载（避免初始化时序问题）

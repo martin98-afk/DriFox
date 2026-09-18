@@ -15,7 +15,7 @@ import pytest
 from PyQt5.QtCore import QObject
 
 from app.core.services.plugin_host_service import PluginHostService
-from app.core.backend import ChatBackend
+from app.core.conversation.backend import ChatBackend
 from app.plugins.managers.plugin_manager import PluginManager
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 

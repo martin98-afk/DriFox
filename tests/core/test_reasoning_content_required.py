@@ -18,7 +18,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from app.core.message_content import messages_to_api, to_api_message
+from app.core.conversation.message_content import messages_to_api, to_api_message
 
 
 def _opencode_deepseek_config() -> dict:

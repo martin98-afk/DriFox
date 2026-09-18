@@ -65,7 +65,7 @@ def test_routes_structure_valid():
 def test_key_modules_routed():
     """关键子系统模块均应命中对应分文件。"""
     expectations = {
-        "app.core.backend": "llm.log",
+        "app.core.conversation.backend": "llm.log",
         "app.gateway.manager": "gateway.log",
         "app.tools.mcp_tools": "mcp.log",
         "app.core.lsp.lsp_client": "lsp.log",

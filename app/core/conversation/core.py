@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from app.core.chat_session import SessionManager
+from app.core.conversation.chat_session import SessionManager
 from app.core.context.builder import ContextBudgetAllocator
 from app.core.conversation.config import PermissionCache
 from app.core.context.history_compactor import HistoryCompactor

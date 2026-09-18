@@ -30,7 +30,7 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # 语言服务（LSP）
     ("lsp.log", ("app.core.lsp",), ()),
     # 团队协作与子智能体
-    ("team.log", ("app.core.team", "app.core.team.team_manager", "app.core.agent"), ()),
+    ("team.log", ("app.core.team", "app.core.team.team_manager", "app.core.conversation.agent"), ()),
     # 会话/记忆/用量存储
     ("store.log", ("app.core.store", "app.core.infra.usage_service"), ()),
     # 工具框架与执行（mcp_tools 除外）
@@ -65,8 +65,8 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     (
         "llm.log",
         (
-            "app.core.backend",
-            "app.core.chat_session",
+            "app.core.conversation.backend",
+            "app.core.conversation.chat_session",
             "app.core.workers",
             "app.core.conversation",
             "app.core.engines",
@@ -74,10 +74,10 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
             "app.core.context.usage",
             "app.core.hooks.hook_manager",
             "app.core.context.history_compactor",
-            "app.core.memory_manager",
+            "app.core.conversation.memory_manager",
             "app.core.infra.token_estimator",
             "app.core.modelmeta.models_dev_sync",
-            "app.core.message_content",
+            "app.core.conversation.message_content",
             "app.core.modelmeta.model_capabilities",
             "app.core.modelmeta.provider_profile",
             "app.core.commands.builtin_commands",

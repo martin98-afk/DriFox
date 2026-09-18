@@ -782,7 +782,7 @@ class AssistantManager:
         BuildSystemPrompt hooks → 新助手身份注入）。
         """
         try:
-            from app.core.backend import ChatBackend
+            from app.core.conversation.backend import ChatBackend
 
             for backend in list(ChatBackend._active_instances):
                 sm = getattr(backend, "session_manager", None)
@@ -830,7 +830,7 @@ class AssistantManager:
         if not session_id:
             return
         try:
-            from app.core.backend import ChatBackend
+            from app.core.conversation.backend import ChatBackend
 
             for backend in list(ChatBackend._active_instances):
                 sm = getattr(backend, "session_manager", None)

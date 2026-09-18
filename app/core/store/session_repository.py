@@ -98,7 +98,7 @@ def extract_first_user_question(messages: Optional[List]) -> Tuple[str, str]:
             continue
         content = msg.get("content", "")
         if isinstance(content, list):
-            from app.core.message_content import content_to_text
+            from app.core.conversation.message_content import content_to_text
 
             content = content_to_text(content)
         if not content:

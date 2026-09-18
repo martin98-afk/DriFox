@@ -424,7 +424,7 @@ class ChatBackend(QObject):
 
         # 1. 创建 SessionManager（延迟导入，减少 import 级联）
         from app.core.store import SessionStore
-        from app.core.chat_session import SessionManager
+        from app.core.conversation.chat_session import SessionManager
 
         self._session_store = SessionStore.get_instance()
         self._session_manager = SessionManager()
@@ -563,7 +563,7 @@ class ChatBackend(QObject):
 
         # 5. 使用全局共享的 AgentManager（只读数据，跨窗口复用）
         # agents_dir 传 None，智能体从已启用插件动态加载
-        from app.core.agent import AgentManager
+        from app.core.conversation.agent import AgentManager
 
         self._agent_manager = AgentManager.get_instance(None, self._hook_manager)
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
@@ -644,7 +644,7 @@ class ChatBackend(QObject):
     def _deferred_create_memory_manager(self):
         """0ms 批：MemoryManagerCore（全局单例，跨窗口共享）"""
         try:
-            from app.core.memory_manager import MemoryManagerCore
+            from app.core.conversation.memory_manager import MemoryManagerCore
 
             self._memory_manager = MemoryManagerCore.get_instance()
             logger.debug("[ChatBackend] MemoryManager 延迟创建完成")

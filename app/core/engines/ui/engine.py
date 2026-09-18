@@ -13,8 +13,8 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 from PyQt5.QtCore import QEventLoop, QThread
 
-from app.core.agent import PermissionResolver
-from app.core.chat_session import (
+from app.core.conversation.agent import PermissionResolver
+from app.core.conversation.chat_session import (
     ChatSession,
     SessionManager,
 )
@@ -22,7 +22,7 @@ from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
-from app.core.message_content import content_to_text
+from app.core.conversation.message_content import content_to_text
 from app.core.infra.token_estimator import count_tools_tokens, per_message_tokens
 from app.core.modelmeta.provider_profile import resolve_token_ratio
 from app.tools import get_builtin_tools_schema
@@ -943,7 +943,7 @@ class _PreSendWorker(QThread):
 
     def _do_hooks_and_build(self):
         """执行 hooks → 注入 session → build_messages → tools"""
-        from app.core.backend import _inject_hook_to_session
+        from app.core.conversation.backend import _inject_hook_to_session
         from app.tools import get_builtin_tools_schema
 
         hook_mgr = self._hook_mgr

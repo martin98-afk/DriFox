@@ -224,7 +224,7 @@ def test_backend_injects_team_member_policy(monkeypatch):
     """backend 创建 UI 引擎时，按 is_team_member 透传 hook_policy_id。"""
     from unittest.mock import MagicMock
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = ChatBackend(window_id="win_team_1")
 
@@ -258,7 +258,7 @@ def test_backend_no_policy_for_non_team(monkeypatch):
     """非团队成员窗口不注入 hook_policy_id（走主域默认激活）。"""
     from unittest.mock import MagicMock
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = ChatBackend(window_id="win_main_1")
 

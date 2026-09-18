@@ -82,7 +82,7 @@ from app.core import (
     get_user_round_ranges,
     group_messages_for_display,
 )
-from app.core.message_content import _is_hook_message, strip_system_reminder
+from app.core.conversation.message_content import _is_hook_message, strip_system_reminder
 from app.core.commands.builtin_commands import FunctionCommandHandlers
 from app.core.commands.command_manager import CommandManager, CommandType
 from app.core.modelmeta.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
@@ -6083,7 +6083,7 @@ class OpenAIChatToolWindow(ToolWindow):
         邮件包装为 <system-reminder> 格式，chat_worker 在下一轮 API 调用前
         自动消费并注入上下文，LLM 在下一轮响应中即可感知任务邮件。
         """
-        from app.core.backend import _format_hook_output
+        from app.core.conversation.backend import _format_hook_output
 
         tm = self._get_team_manager()
         tm.mark_mail_running(mail["id"], self._window_id)
@@ -13540,7 +13540,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _get_load_msg_extras_fn(self):
         """message_extras 懒读函数（探测式：引擎不支持时返回 None）。"""
         try:
-            from app.core.backend import get_session_storage
+            from app.core.conversation.backend import get_session_storage
 
             storage = get_session_storage()
         except Exception:
@@ -15302,7 +15302,7 @@ class OpenAIChatToolWindow(ToolWindow):
             sid = getattr(session, "session_id", "")
             if not sid:
                 return []
-            from app.core.backend import get_session_storage
+            from app.core.conversation.backend import get_session_storage
 
             storage = get_session_storage()
             fn = getattr(storage, "get_full_messages", None)
@@ -16886,7 +16886,7 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if not session:
             return None
-        from app.core.message_content import consolidate_messages, normalize_message, truncate_messages_at
+        from app.core.conversation.message_content import consolidate_messages, normalize_message, truncate_messages_at
 
         raw = list(getattr(session, "messages", None) or [])
         canonical = consolidate_messages(session.messages)
@@ -17020,7 +17020,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # difflib 是标准库，移出 try 块以便失败时给出明确的诊断（不会被业务异常吞掉）
         import difflib
 
-        from app.core.message_content import consolidate_messages, get_user_round_ranges
+        from app.core.conversation.message_content import consolidate_messages, get_user_round_ranges
 
         canonical_messages = consolidate_messages(session.messages)
         round_ranges = get_user_round_ranges(canonical_messages)
@@ -17984,7 +17984,7 @@ class OpenAIChatToolWindow(ToolWindow):
         Args:
             agent_name: 智能体名(对应 Agent 数据类的 name)
         """
-        from app.core.agent import AgentManager
+        from app.core.conversation.agent import AgentManager
 
         agent_manager = AgentManager.get_instance()
         if agent_manager is None:
@@ -19472,7 +19472,7 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         # 使用 hook 消息格式包裹
-        from app.core.backend import _format_hook_output
+        from app.core.conversation.backend import _format_hook_output
 
         hook_content = _format_hook_output("SubAgentFinished", content, wrap_system_reminder=False)
 
