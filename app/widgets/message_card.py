@@ -12456,7 +12456,9 @@ class PlainTextViewer(QWidget):
     def _safe_update_height(self):
         """带存活性检查的 _update_height"""
         try:
-            # 检查 C++ 对象是否已被销毁
+            # 检查 C++ 对象是否已被销毁（text_edit 可能在懒创建前为 None）
+            if self.text_edit is None:
+                return
             if sip.isdeleted(self.text_edit):
                 return
             self._update_height()
