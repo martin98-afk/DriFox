@@ -11757,6 +11757,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if widget is None or sip.isdeleted(widget):
                 return
             self.chat_layout.removeWidget(widget)
+            # 🛡️ 必须先 hide() 再 setParent(None)：占位是已 show 过的可见 widget，
+            # 直接脱离父窗口树会变成独立顶层窗口（白窗一闪），要等 deleteLater
+            # 真正执行才消失。批量回收/重建（跳到顶部、切会话）会一次摘掉一堆
+            # 占位 → 软件窗口之外浮出一排白窗。
+            widget.hide()
             widget.setParent(None)
             widget.deleteLater()
         except Exception:
@@ -15178,18 +15183,22 @@ class OpenAIChatToolWindow(ToolWindow):
             self._scroll_to_pending_target()
             return
 
-        # 计算需要加载多少批次
-        batch_count = self._visible_batch_start - target_batch_start
-        if batch_count > 0:
-            # 触发分批加载
+        # 🐛 分批加载：一次 prepend 到目标位置会把整段历史（长会话数百批）
+        # 同步建卡塞进一帧 —— 每张卡含 markdown 转换与 insertWidget(0) 布局
+        # 搬移，主线程直接长阻塞（点历史问题跳到第一条时肉眼可见的卡死）。
+        # 每拍只补 `_incremental_visible_batch_count` 批，100ms 后再续，直到
+        # 覆盖目标位置；续拍由下面的 singleShot 驱动（到位后走滚动分支返回）。
+        step = max(1, int(getattr(self, "_incremental_visible_batch_count", 8) or 8))
+        chunk_start = max(target_batch_start, self._visible_batch_start - step)
+        if chunk_start < self._visible_batch_start:
             self._render_message_to_card(
-                self._message_batch[target_batch_start : self._visible_batch_start],
+                self._message_batch[chunk_start : self._visible_batch_start],
                 insert_at_top=True,
-                batch_offset=target_batch_start,
+                batch_offset=chunk_start,
             )
 
             # 更新可见范围
-            self._visible_batch_start = target_batch_start
+            self._visible_batch_start = chunk_start
 
             # 延迟检查是否需要继续加载（使用 QTimer.singleShot 避免重复）
             QTimer.singleShot(100, lambda: self._load_history_to_index(target_batch_start))
@@ -15239,6 +15248,38 @@ class OpenAIChatToolWindow(ToolWindow):
 
         logger.warning(f"[NodePreview] Card not found after history load, index={target_index}")
 
+    def _restore_batch_ui(self, batch_idx: int) -> bool:
+        """把已卸载（只留等高占位）的批次原位重建为卡片。
+
+        虚拟滚动卸载离屏批次后把 `_batch_cards[idx]` 置 None、布局里换成等高
+        占位 —— 此时跳转定位既在卡片表里找不到、遍历布局也只剩占位，于是直接
+        放弃跳转（真机表现：刚跳到过顶部、底部批次被全部卸载后，再点「最后一
+        个历史问题」毫无反应）。这里按占位原位重建**单批**，高度由
+        `_apply_placeholder_height` 守恒，定位后视口不漂。
+
+        Returns:
+            是否重建出卡片。
+        """
+        if getattr(self, "_is_virtual_recycling", False):
+            return False
+        if not (0 <= batch_idx < len(self._batch_cards)) or self._batch_cards[batch_idx] is not None:
+            return False
+        message_batch = getattr(self, "_message_batch", None) or []
+        if batch_idx >= len(message_batch) or not message_batch[batch_idx]:
+            return False
+        ph = self._batch_placeholders.get(batch_idx)
+        if ph is None:
+            return False
+        anchor = self.chat_layout.indexOf(ph)
+        if anchor < 0:
+            return False
+        self._render_message_to_card(
+            message_batch[batch_idx : batch_idx + 1],
+            batch_offset=batch_idx,
+            anchor_layout_index=anchor,
+        )
+        return bool(self._batch_cards[batch_idx])
+
     def _scroll_to_batch_index(self, batch_index: int, node_index: int = -1):
         """
         滚动到指定 batch 索引的位置。
@@ -15246,6 +15287,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if node_index >= 0:
             self._pending_scroll_to_update = node_index
+
+        # 🐛 目标批次已被卸载（只剩占位）时先原位重建，否则查卡片 / 查布局
+        # 两条路都落空 → 跳转静默失败（见 `_restore_batch_ui`）。
+        self._restore_batch_ui(batch_index)
 
         # 优先从 _batch_cards 查找（更可靠，避免虚拟回收后布局遍历失效）
         if 0 <= batch_index < len(self._batch_cards):

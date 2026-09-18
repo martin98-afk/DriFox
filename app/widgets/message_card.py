@@ -16164,6 +16164,10 @@ class MessageCard(SimpleCardWidget):
         try:
             self._disconnect_viewer_signals()
             self._viewer_layout.removeWidget(viewer)
+            # 🛡️ 必须先 hide() 再 setParent(None)：CodeWebViewer 持有原生 HWND，
+            # 可见状态下脱离父窗口树会让 Chromium 弹出独立原生窗口（白窗一闪），
+            # 与 main_widget 里其它 detach 点（_clear_chat_area / ui_helpers）同一护栏。
+            viewer.hide()
             viewer.setParent(None)
         except RuntimeError:
             return False
@@ -16245,6 +16249,10 @@ class MessageCard(SimpleCardWidget):
                 try:
                     pooled.setParent(self)
                     pooled.setUpdatesEnabled(True)
+                    # 🛡️ 与 detach_viewer 的 hide() 成对：显式隐藏过的 widget 不会
+                    # 随父控件 show() 自动恢复可见，复用时必须显式 show()，
+                    # 否则卡片区域是一片空白（viewer 存在但不可见）。
+                    pooled.show()
                     # 高度兜底复位：丢弃上一张卡片钉死的高度（长消息可达数千 px），
                     # 避免骨架就绪前的窗口期显示成"巨高空白卡片"。
                     pooled.setMinimumHeight(40)
