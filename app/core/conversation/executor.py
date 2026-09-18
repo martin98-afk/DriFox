@@ -254,14 +254,19 @@ class ConversationExecutor:
                 self._pending_cleanup_workers.remove((w, ts))
             except ValueError:
                 pass
-            # 卡死兜底：finished 信号未触发（线程卡死），绕过 _finalize_worker_cleanup
-            # 的"运行则重排"逻辑，直接中断+deleteLater 回收，避免无限泄漏。
+            # 卡死兜底：finished 信号未触发（线程卡死），仅再次中断+quit 提醒。
+            # ⚠️ 绝不 deleteLater 运行中的 QThread：QThread 析构时若 OS 线程
+            # 仍在运行会 qFatal（"QThread: Destroyed while thread is still
+            # running"）→ 0xC0000409 闪退（族①，2026-09-17/18 实机多例 +
+            # pytest 退出期批量复现）。worker 由 thread_guard 的全局 anchor
+            # 持有强引用与父子关系，不删除仅产生微量泄漏；进程退出期由
+            # thread_guard 的 atexit 收敛（requestInterruption + quit + wait
+            # + setParent 脱钩 + setdestroyonexit(False)）统一兜底。
+            # worker 留在队列中：线程自然退出后 finished 仍会触发正常收尾。
             if not getattr(w, "_executor_cleaned", False):
                 try:
                     w.requestInterruption()
                     w.quit()
-                    w.deleteLater()
-                    w._executor_cleaned = True
                 except Exception as e:
                     logger.debug(f"[ConversationExecutor] watchdog cleanup error: {e}")
         self._start_cleanup_watchdog()
