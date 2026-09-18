@@ -10,12 +10,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from app.core.context.budget import BuiltInBudgetResolver
 from app.core.context.view import ContextView, TierStat
+from app.core.model_capabilities import resolve_context_limit
 from app.plugins.contracts.context_policy import (
     STAGE_INGEST,
     STAGE_SEND,
@@ -37,7 +37,6 @@ class ContextPipeline:
     def __init__(self, registry=None) -> None:
         # registry 可注入（测试 / 隔离场景）；不传则用全局单例
         self._registry = registry
-        self._budget_fallback = BuiltInBudgetResolver()
 
     @property
     def _reg(self):
@@ -49,8 +48,18 @@ class ContextPipeline:
         self,
         tool_results: List[Dict[str, Any]],
         llm_config: Dict[str, Any],
+        session_id: str = "",
     ) -> List[Dict[str, Any]]:
         """ingest stage：工具结果入库前（允许落盘副作用）。"""
+        # 会话归属下传：落盘类 tier（如 tool_offload）按 session 隔离
+        # 落盘目录与冻结表。duck-typing 传参，不约束无会话语义的 tier。
+        for tier in self._chain(STAGE_INGEST):
+            set_sid = getattr(tier, "set_session_id", None)
+            if callable(set_sid):
+                try:
+                    set_sid(session_id)
+                except Exception as e:
+                    logger.warning(f"[Context] tier '{tier.id}' set_session_id 失败: {e}")
         view = self._build_view(tool_results, llm_config, STAGE_INGEST)
         view = self.run(view)
         return view.messages
@@ -141,6 +150,19 @@ class ContextPipeline:
 
     # ---------- 内部 ----------
 
+    def _fallback_budget(self, llm_config: Dict[str, Any]) -> Tuple[int, int]:
+        """常数级兜底预算（registry 无 resolver / 解析抛错时）。
+
+        只保留「上下文 − 输出预留」与固定达标比，不复刻插件内的
+        系统提示挤压等策略 —— 插件在时策略归插件，插件不在时够用即可。
+        """
+        try:
+            ctx = resolve_context_limit(llm_config or {})
+        except Exception:
+            ctx = 128000
+        budget = max(500, ctx - 4096)
+        return budget, max(1, int(budget * 0.6))
+
     def _chain(self, stage: str) -> List[ContextTier]:
         try:
             chain = self._reg.resolve_chain(stage)
@@ -163,15 +185,15 @@ class ContextPipeline:
             resolver = self._reg.get_budget_resolver()
         except Exception:
             resolver = None
-        if resolver is None:
-            resolver = self._budget_fallback
-        try:
-            result = resolver.resolve(llm_config or {}, system_content)
-            budget, target = result.budget, result.target_tokens
-        except Exception as e:
-            logger.warning(f"[Context] 预算解析失败，回退内置: {e}")
-            fallback = self._budget_fallback.resolve(llm_config or {}, system_content)
-            budget, target = fallback.budget, fallback.target_tokens
+        if resolver is not None:
+            try:
+                result = resolver.resolve(llm_config or {}, system_content)
+                budget, target = result.budget, result.target_tokens
+            except Exception as e:
+                logger.warning(f"[Context] 预算解析失败，回退常数兜底: {e}")
+                budget, target = self._fallback_budget(llm_config)
+        else:
+            budget, target = self._fallback_budget(llm_config)
         return ContextView(
             messages=list(messages),
             budget=budget,
