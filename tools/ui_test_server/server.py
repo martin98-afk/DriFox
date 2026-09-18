@@ -180,6 +180,7 @@ def _tool_ui_screenshot(**kwargs) -> Dict[str, Any]:
 
 # ── 工具注册表 ──
 
+
 def _schemas() -> Dict[str, Dict[str, Any]]:
     def sch(name, desc, props, required=None):
         return {
@@ -213,13 +214,39 @@ def _schemas() -> Dict[str, Dict[str, Any]]:
         "ui_click": sch(
             "ui_click",
             "点击控件（两步确认：先 ui_inspect mode=find 命中领取 confirm_token；危险关键词目标直接拒）",
-            {"objectName": {"type": "string"}, "text": {"type": "string"}, "role": {"type": "string"}, "confirm_token": {"type": "string"}},
+            {
+                "objectName": {"type": "string"},
+                "text": {"type": "string"},
+                "role": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
             required=["confirm_token"],
         ),
-        "ui_type": sch("ui_type", "向控件注入键盘文本", {"selector": {"type": "object", "properties": sel}, "text": {"type": "string"}}, required=["text"]),
-        "ui_scroll": sch("ui_scroll", "滚动到指定值（定位目标或主窗口滚动条）", {"selector": {"type": "object", "properties": sel}, "target_object_name": {"type": "string"}, "value": {"type": "integer"}}),
-        "ui_wait": sch("ui_wait", "等待：纯等待 seconds 秒，或 until_object_name 出现（超时即秒数）", {"seconds": {"type": "number"}, "until_object_name": {"type": "string"}}),
-        "ui_screenshot": sch("ui_screenshot", "截图存 PNG 临时文件，返回路径与尺寸", {"target_object_name": {"type": "string"}, "max_width": {"type": "integer"}}),
+        "ui_type": sch(
+            "ui_type",
+            "向控件注入键盘文本",
+            {"selector": {"type": "object", "properties": sel}, "text": {"type": "string"}},
+            required=["text"],
+        ),
+        "ui_scroll": sch(
+            "ui_scroll",
+            "滚动到指定值（定位目标或主窗口滚动条）",
+            {
+                "selector": {"type": "object", "properties": sel},
+                "target_object_name": {"type": "string"},
+                "value": {"type": "integer"},
+            },
+        ),
+        "ui_wait": sch(
+            "ui_wait",
+            "等待：纯等待 seconds 秒，或 until_object_name 出现（超时即秒数）",
+            {"seconds": {"type": "number"}, "until_object_name": {"type": "string"}},
+        ),
+        "ui_screenshot": sch(
+            "ui_screenshot",
+            "截图存 PNG 临时文件，返回路径与尺寸",
+            {"target_object_name": {"type": "string"}, "max_width": {"type": "integer"}},
+        ),
     }
 
 
@@ -236,6 +263,7 @@ def _handlers() -> Dict[str, Callable[..., Dict[str, Any]]]:
 
 
 # ── HTTP 层 ──
+
 
 class _RpcHandler(BaseHTTPRequestHandler):
     httpd: Optional[UiTestHttpServer] = None
@@ -254,7 +282,8 @@ class _RpcHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802 — http.server 接口名
         if self.path.rstrip("/") == "/shutdown":
             self._send_json(200, {"ok": True})
-            threading.Thread(target=self.server.request_shutdown, daemon=True).start()
+            httpd = self.httpd
+            threading.Thread(target=_shutdown_server, args=(httpd,), daemon=True).start()
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -271,15 +300,18 @@ class _RpcHandler(BaseHTTPRequestHandler):
             return
 
         if method == "initialize":
-            self._send_json(200, {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "result": {
-                    "protocolVersion": "2.0",
-                    "serverInfo": {"name": "drifox-ui-test-server", "version": "0.1.0"},
-                    "capabilities": {"tools": {}},
+            self._send_json(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "protocolVersion": "2.0",
+                        "serverInfo": {"name": "drifox-ui-test-server", "version": "0.1.0"},
+                        "capabilities": {"tools": {}},
+                    },
                 },
-            })
+            )
             return
         if method == "tools/list":
             tools = [{"name": n, **s} for n, s in _schemas().items()]
@@ -291,28 +323,65 @@ class _RpcHandler(BaseHTTPRequestHandler):
             args = params.get("arguments") or {}
             handler = _handlers().get(name)
             if handler is None:
-                self._send_json(200, {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32602, "message": f"unknown tool: {name}"}})
+                self._send_json(
+                    200, {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32602, "message": f"unknown tool: {name}"}}
+                )
                 return
             try:
                 # HTTP handler 线程 → bus.invoke 投递主线程执行 UI 操作
                 data = invoke(lambda: handler(**args))
-                self._send_json(200, {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, default=str)}], "isError": False},
-                })
+                self._send_json(
+                    200,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {
+                            "content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, default=str)}],
+                            "isError": False,
+                        },
+                    },
+                )
             except Exception as exc:  # noqa: BLE001 — 工具异常按 MCP isError 结果返回
                 logger.warning(f"[ui-test-server] {name} 执行异常: {exc}")
-                self._send_json(200, {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {"content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}], "isError": True},
-                })
+                self._send_json(
+                    200,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {
+                            "content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}],
+                            "isError": True,
+                        },
+                    },
+                )
             return
-        self._send_json(200, {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"unknown method: {method}"}})
+        self._send_json(
+            200, {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"unknown method: {method}"}}
+        )
 
     def do_GET(self):  # noqa: N802 — 健康检查
         self._send_json(200, {"service": "drifox-ui-test-server", "ok": True})
+
+
+def _shutdown_server(httpd: "UiTestHttpServer") -> None:
+    """停 HTTP 服务 + 请求主程序退出（主线程 QCoreApplication.quit）。"""
+    httpd.shutdown()
+    try:
+        from tools.ui_driver.bus import invoke
+
+        def _quit():
+            from PyQt5.QtCore import QCoreApplication
+
+            qapp = QCoreApplication.instance()
+            if qapp is not None:
+                qapp.quit()
+
+        invoke(_quit)
+    except Exception as exc:  # noqa: BLE001 — 主循环已不可用时兜底硬退
+        logger.warning(f"[ui-test-server] 优雅退出失败，改用 os._exit: {exc}")
+        import os
+
+        os._exit(0)
 
 
 class UiTestHttpServer(ThreadingHTTPServer):
