@@ -54,7 +54,7 @@ class _Host(QWidget):
 @pytest.fixture()
 def host(qapp):
     """依赖 conftest.qapp：QApplication 先于 app 包 import 存在。"""
-    from app.core.tool_permission_controller import ToolPermissionController
+    from app.core.tools.tool_permission_controller import ToolPermissionController
     from app.main_widget import OpenAIChatToolWindow
     from app.tools.registry import ToolRegistry
 
@@ -119,7 +119,7 @@ def test_registry_change_refreshes_count_without_tool_card(host):
 
 def test_agent_apply_refreshes_count_without_tool_card(host):
     """未开工具卡：agent 权限注入后计数刷新（历史 bug ② 回归门）"""
-    from app.core.tool_permission_controller import ToolPermissionController
+    from app.core.tools.tool_permission_controller import ToolPermissionController
     from app.tools.registry import ToolRegistry
 
     from PyQt5.QtWidgets import QApplication

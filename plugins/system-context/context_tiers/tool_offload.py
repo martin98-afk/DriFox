@@ -55,7 +55,7 @@ class ToolOffloadTier:
 
     def _get_persister(self):
         if self._persister is None:
-            from app.core.tool_result_persister import ToolResultPersister
+            from app.core.tools.tool_result_persister import ToolResultPersister
 
             self._persister = ToolResultPersister(session_id=str(self._session_id))
         return self._persister

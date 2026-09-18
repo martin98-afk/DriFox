@@ -221,7 +221,7 @@ class UIEngine(BaseEngine):
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
             # per-tool 关闭策略优先，缺失回退全局 behavior（ask/deny 由 INTERACTIVE 策略驱动对话框）
-            from app.core.tool_permission_controller import resolve_tool_off_policy
+            from app.core.tools.tool_permission_controller import resolve_tool_off_policy
 
             policy = resolve_tool_off_policy(check_name, controller, policies, behavior)
             logger.info(f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False policy={policy}")

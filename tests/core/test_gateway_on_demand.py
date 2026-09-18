@@ -191,7 +191,7 @@ class TestBuiltinToolsNotOverwritten:
         fake_executor = MagicMock()
         fake_executor._builtin_tools = MagicMock(name="gateway_bt")
 
-        import app.core.tool_executor as te_mod
+        import app.core.tools.tool_executor as te_mod
 
         monkeypatch.setattr(te_mod, "ToolExecutor", lambda backend=None: fake_executor)
 

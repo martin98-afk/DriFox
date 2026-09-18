@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.core.tool_executor import ToolExecutor
+from app.core.tools.tool_executor import ToolExecutor
 
 
 def _make_executor(backend) -> ToolExecutor:

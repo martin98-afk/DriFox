@@ -23,7 +23,7 @@ from app.core.model_capabilities import (
 )
 from app.core.message_content import extract_reasoning_delta
 from app.core.provider_profile import get_provider_profile
-from app.core.tool_call_parser import smart_parse_arguments
+from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.tools.result import ToolResult
 
@@ -1487,7 +1487,7 @@ class SubAgentExecutor(QThread):
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
             # per-tool 关闭策略优先，缺失回退全局 behavior（与 UI 引擎 _check_tool_permission 同口径）
-            from app.core.tool_permission_controller import resolve_tool_off_policy
+            from app.core.tools.tool_permission_controller import resolve_tool_off_policy
 
             return resolve_tool_off_policy(check_name, controller, policies, behavior)
 

@@ -45,7 +45,7 @@ from app.core.message_content import append_text_block, consolidate_messages, ex
 
 from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
 from app.core.provider_profile import get_provider_profile
-from app.core.tool_call_parser import smart_parse_arguments
+from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.core.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
@@ -343,7 +343,7 @@ class OpenAIChatWorker(QThread):
         """
         if self._result_persister is None:
             try:
-                from app.core.tool_result_persister import ToolResultPersister
+                from app.core.tools.tool_result_persister import ToolResultPersister
 
                 # 优先用 worker 当前 session_id, 兜底用 "default"
                 session_id = (
@@ -3951,7 +3951,7 @@ class OpenAIChatWorker(QThread):
                             except json.JSONDecodeError:
                                 # 短参数的 JSON 解析失败，记录到等待队列
                                 # 同时也发射长度进度，避免 UI 一直卡在"正在准备参数..."
-                                from app.core.tool_arg_lines import (
+                                from app.core.tools.tool_arg_lines import (
                                     LINE_ESTIMATE_STEP,
                                     build_progress_payload,
                                     extract_partial_path,
@@ -3996,7 +3996,7 @@ class OpenAIChatWorker(QThread):
                         else:
                             # 参数已超过 1000 字符，跳过逐块 JSON 解析以节省开销
                             # 但仍推送长度进度 + 累积尾部预览，让 UI 显示接收进度
-                            from app.core.tool_arg_lines import (
+                            from app.core.tools.tool_arg_lines import (
                                 LINE_ESTIMATE_STEP,
                                 build_progress_payload,
                                 extract_partial_path,

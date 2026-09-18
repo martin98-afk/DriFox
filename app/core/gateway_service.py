@@ -113,7 +113,7 @@ class GatewayService(QObject):
     def _build_components_locked(self) -> bool:
         """实际构造段（调用方必须已持 self._components_lock）"""
         try:
-            from app.core.tool_executor import ToolExecutor
+            from app.core.tools.tool_executor import ToolExecutor
 
             if self._tool_executor is None:
                 # backend=None：gateway 无 UI，不跑主对话 Hook；

@@ -17,7 +17,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "ChatBackend":             ("app.core.backend", "ChatBackend"),
     # 引擎与执行器
     "ChatEngine":              ("app.core.engines.ui", "ChatEngine"),
-    "ToolExecutor":            ("app.core.tool_executor", "ToolExecutor"),
+    "ToolExecutor":            ("app.core.tools.tool_executor", "ToolExecutor"),
     "MemoryManagerCore":       ("app.core.memory_manager", "MemoryManagerCore"),
     # Agent 系统
     "Agent":                   ("app.core.agent", "Agent"),

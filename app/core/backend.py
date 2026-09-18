@@ -656,7 +656,7 @@ class ChatBackend(QObject):
         if self._tool_executor is not None:
             return
         try:
-            from app.core.tool_executor import ToolExecutor
+            from app.core.tools.tool_executor import ToolExecutor
 
             self._tool_executor = ToolExecutor(workdir=self._initial_workdir, backend=self)
             if self._memory_manager:

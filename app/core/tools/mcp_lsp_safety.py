@@ -31,10 +31,11 @@ _SESSION_DENIED: set = set()
 # 用户手动开关（force=True）不受限。确认/拒绝后清除）
 _PENDING_CONFIRM: set = set()
 
-# 源码运行：仓库根/app/core/mcp_lsp_safety.py → parents[2] = 仓库根；
-# 打包（onefile）：<_MEIPASS>/app/core/... → parents[2] = <_MEIPASS>，plugins 随包同级。
-# 注意必须是 parents[2]：曾误写 parents[3] 指到仓库外层目录，系统插件源全部误判非内置。
-_SYSTEM_PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "plugins"
+# 源码运行：仓库根/app/core/tools/mcp_lsp_safety.py → parents[3] = 仓库根；
+# 打包（onefile）：<_MEIPASS>/app/core/tools/... → parents[3] = <_MEIPASS>，plugins 随包同级。
+# 注意层级随文件位置走：本文件从 app/core/ 移入 app/core/tools/ 时 parents[2]→[3]，
+# 曾因层级漂移导致系统插件源全部误判非内置，test_system_plugin_root_points_at_repo 锁死此断言。
+_SYSTEM_PLUGIN_ROOT = Path(__file__).resolve().parents[3] / "plugins"
 
 
 def check_args_safety(args) -> Tuple[bool, str]:
