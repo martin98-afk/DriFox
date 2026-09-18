@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **会话分享 HTML 在线渲染** (`app/gateway/utils/edgeone_deployer.py` 新增, `app/widgets/cards/floating/share_card.py`, `tests/gateway/test_edgeone_deployer.py` 新增, `tests/widgets/test_share_card_html_deploy.py` 新增): 分享卡片选择 HTML 格式时，「生成链接」按钮改为「🌐 发布网页」，走 EdgeOne Makers 匿名部署得到可在线渲染的站点链接（HTML 被浏览器正常解析，不再像 Gitee raw 那样显示源码或被内容机审拦截）。零配置：申请临时凭证 → COS 签名上传 → 创建部署 → 轮询结果，全流程在后台 QThread 执行，UI 不冻结。链接 30 分钟内有效（EdgeOne 匿名部署的产品设计），InfoBar 明确提示；部署失败时本地 HTML 仍保留在 `~/.drifox/share/sessions/`。JSON / Markdown 格式继续走原 Gitee 链路，行为不变。
+
 - **上下文管理插件化 — tier cascade** (`app/core/context/` 新增, `app/plugins/contracts/context_policy.py`, `app/plugins/registries/context_policy_registry.py`, `plugins/system-context/` 新增, `tests/core/test_context_pipeline.py` 新增): 把硬编码在内核的上下文管理逻辑抽成插件槽位，遵循 Claude Code / Anthropic context editing 的分层降级范式。新增 `ContextView` 投影对象与 `ContextPipeline` 编排器，三个 stage（`ingest` 允许落盘副作用 / `send` / `ui` 禁止副作用）共用同一条降级链；8 个内置 tier 按 order 10-80 由轻到重执行（图片剥离 / 重复结果去重 / 工具结果截断 / 长结果落盘 / 参数截断 / 旧输出摘要化 / 尾保留 / LLM 摘要），每层自带 trigger 声明。编排三条规则：达标即停（used <= target 立刻 break）、分层熔断（连续 2 次无收益跳过该层）、异常隔离（tier 抛错记录并跳过，不阻断发送）。插件可注册/覆盖/插入任意层，同 order 后注册者生效；阈值统一由 `system-context` 插件 config_schema 承载（环境变量→存储→默认三级链）。既有 `prune_tool_result` / `ToolResultPersister` / `HistoryCompactor` 对外 API 零变化。
 
 ### 🔧 重构 (Refactor)

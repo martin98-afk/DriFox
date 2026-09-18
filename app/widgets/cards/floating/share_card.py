@@ -719,6 +719,9 @@ class ShareCardContent(QWidget):
         for fid, btn in self._format_btns.items():
             btn.setStyleSheet(self._btn_style(fid == fmt_id))
 
+        # HTML 走 EdgeOne 在线渲染，按钮语义与其它格式不同
+        self._upload_btn.setText("🌐 发布网页" if fmt_id == "html" else "🔗 生成链接")
+
         if not self._messages:
             self._preview_content.setText("")
             self._empty_label.show()
@@ -847,6 +850,11 @@ class ShareCardContent(QWidget):
             self._show_info(f"保存分享文件失败: {e}", "error")
             return
 
+        # HTML 走 EdgeOne 匿名部署（Gitee raw 对 HTML 返回 text/plain，浏览器只显示源码）
+        if fmt == "html":
+            self._on_deploy_html(text, save_path, title)
+            return
+
         try:
             from app.gateway.utils.gitee_uploader import GiteeUploader
 
@@ -886,6 +894,58 @@ class ShareCardContent(QWidget):
             self._upload_btn.setEnabled(True)
             self._upload_btn.setText("🔗 生成链接")
             self._show_info(f"上传异常: {e}（文件已保存到本地）", "warning")
+
+    def _on_deploy_html(self, html_text: str, save_path, title: str):
+        """把 HTML 部署到 EdgeOne 匿名站点（后台线程，链 30 分钟内有效）"""
+        self._upload_btn.setEnabled(False)
+        self._upload_btn.setText("⏳ 发布中…")
+        self._pending_upload_path = save_path
+        self._pending_title = title
+        self._pending_fmt = "html"
+        try:
+            self._deploy_thread = _EdgeOneDeployThread(html_text, title)
+            self._deploy_thread.finished_signal.connect(self._on_deploy_finished)
+            self._deploy_thread.finished.connect(self._deploy_thread.deleteLater)
+            self._deploy_thread.start()
+        except Exception as e:
+            self._upload_btn.setEnabled(True)
+            self._upload_btn.setText("🌐 发布网页")
+            self._show_info(f"发布启动失败: {e}（文件已保存到本地）", "warning")
+
+    def _on_deploy_finished(self, result):
+        url, err = result
+        save_path = self._pending_upload_path
+        title = self._pending_title
+        self._upload_btn.setEnabled(True)
+        self._upload_btn.setText("🌐 发布网页")
+        if err:
+            self._show_info(f"发布失败: {err}（文件已保存到本地）", "warning")
+            insert_record(
+                type_="session",
+                title=title,
+                format_="html",
+                file_path=str(save_path),
+                ref_id=self._record.get("session_id", ""),
+                extra_info={
+                    "msg_count": len(self._messages),
+                    "project": self._record.get("project", ""),
+                },
+            )
+            return
+        QApplication.clipboard().setText(url)
+        self._show_info(f"链接已复制到剪贴板（30 分钟内有效）\n本地备份: {save_path.name}", "success")
+        insert_record(
+            type_="session",
+            title=title,
+            format_="html",
+            file_path=str(save_path),
+            upload_url=url,
+            ref_id=self._record.get("session_id", ""),
+            extra_info={
+                "msg_count": len(self._messages),
+                "project": self._record.get("project", ""),
+            },
+        )
 
     def _on_upload_finished(self, result):
         url, err = result
@@ -963,4 +1023,27 @@ class _ShareUploadThread(QThread):
             self._result = self._uploader.upload_file(self._file_path)
         except Exception as e:
             self._result = ("", str(e))
+        self.finished_signal.emit(self._result)
+
+
+class _EdgeOneDeployThread(QThread):
+    """后台线程：把 HTML 部署到 EdgeOne 匿名站点，避免点击"发布网页"后 UI 冻结。
+
+    finished_signal 携带 deploy_html 返回值 (url, err)，二者有且仅有一个非空。
+    """
+
+    finished_signal = pyqtSignal(object)
+
+    def __init__(self, html_text, title, parent=None):
+        super().__init__(parent)
+        self._html_text = html_text
+        self._title = title
+
+    def run(self):
+        try:
+            from app.gateway.utils.edgeone_deployer import EdgeOneDeployer
+
+            self._result = EdgeOneDeployer.get_instance().deploy_html(self._html_text, self._title)
+        except Exception as e:
+            self._result = (None, str(e))
         self.finished_signal.emit(self._result)
