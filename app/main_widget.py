@@ -9762,17 +9762,27 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_single_card_width(card)
             _synced += 1
 
-        # [占位死区] 滚动停在/经过已回收批次的占位区时，提前触发回收函数
-        # （其第 1.5 步负责原位重建占位批次），不等 500ms 定时器自然到期。
+        # [占位死区] 滚动停在/经过已回收批次的占位区时：
+        # - 视口直接落在占位上 → 同步原位重建（本回调已在 100ms 防抖后，
+        #   视口立刻有卡片骨架，不再叠加 500ms 定时器等待）
+        # - 占位只在邻域（±缓冲）→ 提前启动防抖 timer，缩短停手等待
         if self._batch_placeholders:
             rng = self._viewport_batch_range()
             if rng is not None:
                 _vp_start, _vp_end = rng
                 _buf = self._incremental_visible_batch_count * self._virtual_scroll_buffer
+                _in_view = False
+                _near = False
                 for _idx in self._batch_placeholders:
-                    if _vp_start - _buf <= _idx <= _vp_end + _buf:
-                        self._virtual_scroll_timer.start()
+                    if _vp_start <= _idx <= _vp_end:
+                        _in_view = True
                         break
+                    if _vp_start - _buf <= _idx <= _vp_end + _buf:
+                        _near = True
+                if _in_view:
+                    self._restore_placeholders_in_viewport()
+                elif _near:
+                    self._virtual_scroll_timer.start()
 
         self._last_visible_card_ids = visible_ids
 
@@ -11826,6 +11836,47 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         for w in widgets:
             self._remove_placeholder_widget(w)
+
+    def _restore_placeholders_in_viewport(self) -> int:
+        """同步重建与视口直接相交的占位批次（不等 500ms 防抖到期）。
+
+        滚动停顿后视口若落在占位区，等 `_virtual_scroll_timer` 自然到期再走
+        `_recycle_out_of_view_batches` 第 1.5 步，用户要多等 500ms 纯空白。
+        本方法由 `_sync_visible_cards_on_scroll`（100ms 防抖后）调用，同步把
+        **视口内**的占位批次原位重建：建卡 <1ms/张，WebEngine 渲染仍走懒渲染
+        队列异步完成，主线程无重活。
+
+        幂等：重建摘掉占位（`_take_batch_placeholder`），下次调用不再命中。
+        只处理与视口**直接相交**的批次；邻域（±缓冲）批次仍交给防抖路径，
+        避免滚动中反复重建边界批次（T42 对拆自激的教训）。
+
+        Returns:
+            本次重建的批次数。
+        """
+        if self._is_virtual_recycling or not self._batch_placeholders:
+            return 0
+        rng = self._viewport_batch_range()
+        if rng is None:
+            return 0
+        vp_start, vp_end = rng
+        restored = 0
+        for batch_idx, ph in list(self._batch_placeholders.items()):
+            if not (vp_start <= batch_idx <= vp_end):
+                continue
+            if batch_idx >= len(self._batch_cards) or self._batch_cards[batch_idx] is not None:
+                continue
+            if batch_idx >= len(self._message_batch) or not self._message_batch[batch_idx]:
+                continue
+            anchor = self.chat_layout.indexOf(ph)
+            if anchor < 0:
+                continue
+            self._render_message_to_card(
+                self._message_batch[batch_idx : batch_idx + 1],
+                batch_offset=batch_idx,
+                anchor_layout_index=anchor,
+            )
+            restored += 1
+        return restored
 
     def _recycle_out_of_view_batches(self):
         """回收超出可视缓冲区范围的批次UI，只保留数据，节省内存
