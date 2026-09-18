@@ -181,6 +181,56 @@ def _tool_ui_screenshot(**kwargs) -> Dict[str, Any]:
 # ── 工具注册表 ──
 
 
+def _tool_ui_session(**kwargs) -> Dict[str, Any]:
+    """会话操作（二批工具，P1 变更）：action=load|switch|new。
+
+    token 语义（最小安全实现）：ui_state 返回的可用会话列表逐条附带
+    session_token（TokenStore.issue(session_id)，object_name 位即 session_id，
+    复用 ui_click 同款校验）；load/switch 必须携带匹配 token。new 免 token。
+    """
+    action = str(kwargs.get("action") or "")
+    from app.core.infra.window_registry import alive_window_instances
+
+    wins = alive_window_instances()
+    if not wins:
+        return {"ok": False, "error": "无存活主窗口"}
+    mw = wins[0]
+    sm = getattr(mw, "session_manager", None)
+
+    if action == "new":
+        assert sm is not None
+        session = sm.create_new_session()
+        mw._display_current_session()
+        return {"ok": True, "action": "new", "session_id": str(session.session_id)[:8]}
+
+    session_id = str(kwargs.get("session_id") or "")
+    token = str(kwargs.get("confirm_token") or "")
+    if action in ("load", "switch"):
+        if not session_id:
+            return {"ok": False, "error": "load/switch 需要 session_id"}
+        ok, reason = _tokens.validate(token, session_id, consume=True)
+        if not ok:
+            return {
+                "ok": False,
+                "blocked_by": reason,
+                "error": f"confirm_token 校验失败（{reason}）：先 ui_state 领取该会话的 session_token",
+            }
+        record = mw.history_manager.get_session_by_session_id(session_id) if mw.history_manager else None
+        if not record or not record.get("session_id"):
+            return {"ok": False, "error": f"会话不存在：{session_id[:8]}"}
+        mw._load_session_from_record(record)
+        manager = getattr(mw, "session_manager", None)
+        cur = manager.get_current_session() if manager is not None else None
+        msgs = getattr(cur, "messages", None) if cur else None
+        return {
+            "ok": True,
+            "action": action,
+            "session_id": str(getattr(cur, "session_id", ""))[:8],
+            "msgs": len(msgs) if isinstance(msgs, list) else 0,
+        }
+    return {"ok": False, "error": f"未知 action: {action}"}
+
+
 def _schemas() -> Dict[str, Dict[str, Any]]:
     def sch(name, desc, props, required=None):
         return {
@@ -242,6 +292,16 @@ def _schemas() -> Dict[str, Dict[str, Any]]:
             "等待：纯等待 seconds 秒，或 until_object_name 出现（超时即秒数）",
             {"seconds": {"type": "number"}, "until_object_name": {"type": "string"}},
         ),
+        "ui_session": sch(
+            "ui_session",
+            "会话操作：new 免 token；load/switch 需 confirm_token（ui_state 领取）",
+            {
+                "action": {"type": "string", "enum": ["load", "switch", "new"]},
+                "session_id": {"type": "string"},
+                "confirm_token": {"type": "string"},
+            },
+            required=["action"],
+        ),
         "ui_screenshot": sch(
             "ui_screenshot",
             "截图存 PNG 临时文件，返回路径与尺寸",
@@ -259,6 +319,7 @@ def _handlers() -> Dict[str, Callable[..., Dict[str, Any]]]:
         "ui_scroll": _tool_ui_scroll,
         "ui_wait": _tool_ui_wait,
         "ui_screenshot": _tool_ui_screenshot,
+        "ui_session": _tool_ui_session,
     }
 
 
