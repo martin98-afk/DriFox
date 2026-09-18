@@ -31,6 +31,18 @@ KEEP_RECENT_ROUNDS = 3
 OFFLOAD_IDX_FIELD = "_x_idx"
 
 
+def merge_extras_into(messages: List[Any], extras: Dict[int, Dict[str, Any]]) -> List[Any]:
+    """按 msg_idx 把 extras 字段就地合并回消息列表（repo 层共享 helper）。
+
+    get_full_messages 与 history-manager 懒回填共用（T1e 问题项收敛）。
+    越界索引与非 dict 消息静默跳过（与既有合并分支语义一致）。
+    """
+    for i, patch in extras.items():
+        if 0 <= i < len(messages) and isinstance(messages[i], dict):
+            messages[i].update(patch)
+    return messages
+
+
 def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, bytes]], List[Any]]:
     """提取保活窗外的 UI 态字段，返回 (extras, 轻量消息副本)。
 
@@ -418,7 +430,7 @@ class SessionRepository:
         except Exception as e:
             logger.error(f"[SessionRepository] write_extras 异常: {e}")
 
-    def load_extras_for_session(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict[str, Any]]:
+    def load_extras_for_session(self, session_id: str, idxs: Optional[List[int]] = None) -> Optional[Dict[int, Dict[str, Any]]]:
         """读取剥离的 UI 态字段（message_extras）。
 
         Args:
@@ -426,15 +438,15 @@ class SessionRepository:
             idxs: 消息绝对索引列表；None 读全部
 
         Returns:
-            {msg_idx: {field: 反序列化后的值}}；异常/未初始化返回 {}
+            {msg_idx: {field: 反序列化后的值}}；「无 extras」返回 {}；
+            **读失败返回 None**（与空结果可区分，消费方按 falsy 零改动即可）
 
         契约：
         - idxs 规模由调用方保证（批次级，≤数百）；不做截断，静默截断反而丢数据
-        - 异常时返回 {}，与「无 extras」不可区分；消费方（渲染/轨迹/导出）
-          均有降级回退，不得依赖本方法区分「读失败」与「真没有」
+        - None=读失败（DB 异常/未初始化）；{}=读成功但该会话无 extras
         """
         if not self.is_initialized or not session_id:
-            return {}
+            return None
         try:
             if idxs:
                 placeholders = ",".join("?" * len(idxs))
@@ -458,24 +470,25 @@ class SessionRepository:
             return result
         except Exception as e:
             logger.error(f"[SessionRepository] load_extras 异常: {e}")
-            return {}
+            return None
 
     def get_full_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """主 blob + extras 合并的全量消息（导出 / agent_trace 深读用）。
 
         get() 每次返回新反序列化的消息列表，就地合并无副作用。
+        extras 读失败（None）→ WARNING + 返回轻量消息（降级不炸）。
         """
         sess = self.get(session_id)
         if not sess:
             return []
         msgs = sess.get("messages", [])
         extras = self.load_extras_for_session(session_id)
-        if not extras:
+        if extras is None:
+            logger.warning(
+                f"[SessionRepository] get_full_messages: {session_id} extras 读取失败，降级返回轻量消息"
+            )
             return msgs
-        for i, patch in extras.items():
-            if i < len(msgs) and isinstance(msgs[i], dict):
-                msgs[i].update(patch)
-        return msgs
+        return merge_extras_into(msgs, extras)
 
     def get(self, session_id: str) -> Optional[Dict]:
         """根据 ID 获取单个会话（同时失效内容 hash 缓存）"""
