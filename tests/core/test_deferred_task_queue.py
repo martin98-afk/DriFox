@@ -17,7 +17,7 @@ from PyQt5.QtCore import QEventLoop, QTimer
 
 pytest.importorskip("PyQt5.QtWidgets")
 
-from app.core.deferred_task_queue import DeferredTaskQueue
+from app.core.infra.deferred_task_queue import DeferredTaskQueue
 
 
 def _drain(ms):

@@ -5,7 +5,7 @@
 count_messages_tokens([msg], model) 在各种消息结构下输出一致。
 """
 
-from app.core.token_estimator import (
+from app.core.infra.token_estimator import (
     count_messages_tokens,
     per_message_tokens,
 )
@@ -165,7 +165,7 @@ def test_snapshot_internal_consistency():
     """新实现保证 est_total = sum(per_message_tokens) + tools_tokens，
     即 breakdown 之和与 est_total 内部一致（视觉等比缩放基线准确）。
     """
-    from app.core.token_estimator import count_tools_tokens, get_model_token_ratio
+    from app.core.infra.token_estimator import count_tools_tokens, get_model_token_ratio
 
     messages = [
         {"role": "user", "content": "hello"},

@@ -16,7 +16,7 @@ per-window 的派生状态（如当前窗口选中的服务商、模型列表）
 """
 
 import copy
-from app.core import window_registry
+from app.core.infra import window_registry
 from typing import List, Optional
 
 from loguru import logger

@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 from app.core.context.config import cfg_ratio
 from app.core.modelmeta.model_capabilities import resolve_context_limit, resolve_max_output_tokens
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 from app.plugins.contracts.context_policy import BudgetResult
 
 SYSTEM_PROMPT_RESERVE_RATIO = 0.15

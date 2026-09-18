@@ -26,7 +26,7 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from app.core.message_content import consolidate_messages, content_to_text
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
 
 

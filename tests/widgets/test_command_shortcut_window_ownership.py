@@ -26,7 +26,7 @@ from PyQt5 import sip
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QApplication, QWidget
 
-from app.core import window_registry as window_registry_mod
+from app.core.infra import window_registry as window_registry_mod
 from app.core.commands.command_manager import CommandManager, CommandType
 
 

@@ -4,7 +4,7 @@
 只测纯函数与路由表结构，不做真实文件 IO（避免污染全局 loguru 状态）。
 """
 
-from app.core.logging_setup import LOG_ROUTES, _match_prefix, make_module_filter
+from app.core.infra.logging_setup import LOG_ROUTES, _match_prefix, make_module_filter
 
 
 def test_match_prefix_exact():

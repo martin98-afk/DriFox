@@ -86,9 +86,9 @@ from app.core.message_content import _is_hook_message, strip_system_reminder
 from app.core.commands.builtin_commands import FunctionCommandHandlers
 from app.core.commands.command_manager import CommandManager, CommandType
 from app.core.modelmeta.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
-from app.core.rss_sampler import rss_sampler
+from app.core.infra.rss_sampler import rss_sampler
 from app.core.tools.tool_permission_controller import ToolPermissionController
-from app.core import window_registry
+from app.core.infra import window_registry
 
 
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
@@ -997,7 +997,7 @@ def _image_path_to_data_uri(img_path: str) -> "str | None":
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐"
     icon = get_icon("drifox")
-    # 所有窗口实例列表（用于广播事件）已外提到 app.core.window_registry.window_instances
+    # 所有窗口实例列表（用于广播事件）已外提到 app.core.infra.window_registry.window_instances
     session_manager = None
     _valid_configs: Dict[str, Dict[str, Any]] = {}
     history_manager = None
@@ -1026,7 +1026,7 @@ class OpenAIChatToolWindow(ToolWindow):
     # 每个窗口各执行一遍 _on_plugin_hot_reload。类级指纹 + 短窗抑制，
     # 只让首个窗口执行完整刷新链路，其余窗口直接 return。
     # 指纹 = result 序列化（同一次广播 result 相同）；10s 短窗内同指纹只执行一次。
-    # _last_hot_reload_fingerprint 已外提到 app.core.window_registry.last_hot_reload_fingerprint
+    # _last_hot_reload_fingerprint 已外提到 app.core.infra.window_registry.last_hot_reload_fingerprint
     _last_hot_reload_at: float = 0.0
 
     # 工具热重载风险通知：进程级注册标记（多窗口只注册一次 listener）
@@ -1060,7 +1060,7 @@ class OpenAIChatToolWindow(ToolWindow):
     # aboutToQuit 全局注册守卫（仅首个窗口连接一次）
     _about_to_quit_connected: bool = False
     # 子智能体日志全局清理 timer 已外提到
-    # app.core.window_registry.subagent_log_cleanup_timer（类级单例，不随窗口销毁）
+    # app.core.infra.window_registry.subagent_log_cleanup_timer（类级单例，不随窗口销毁）
 
     _BASE_SYSTEM_CARD_IDS = (
         "model_selector",
@@ -1147,7 +1147,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._source_window = source_window
         # 批4：per-window 延迟任务队列（必须在 super().__init__ 触发 setup_ui
         # 之前创建：setup_ui 内 N9/N10/N11 的注册依赖此实例）
-        from app.core.deferred_task_queue import DeferredTaskQueue
+        from app.core.infra.deferred_task_queue import DeferredTaskQueue
 
         self._deferred_queue = DeferredTaskQueue()
         self._pending_agent_switch = None
@@ -1351,7 +1351,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ 用量聚合（T6）：套餐用量结果由进程级单例 UsageService 广播
         # （全局缓存 + 单例轮询，N tab × 同 provider 只发 1 路请求），
         # 替代旧的 per-window _coding_plan_result_ready 信号桥接。
-        from app.core.usage_service import UsageService
+        from app.core.infra.usage_service import UsageService
 
         self._reg_sig(UsageService.get_instance().coding_plan_ready, self._on_coding_plan_result)
         # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
@@ -7716,7 +7716,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._valid_configs[config_id]["模型名称"] = model_name
             # ★ 用量聚合（T6）：配置快照变更后失效用量/余额缓存（幂等）
             try:
-                from app.core.usage_service import UsageService
+                from app.core.infra.usage_service import UsageService
 
                 UsageService.get_instance().invalidate(config_id)
             except Exception:
@@ -8008,7 +8008,7 @@ class OpenAIChatToolWindow(ToolWindow):
         balance_display.set_provider(provider_name, config_id)
 
         # 委托 UsageService：缓存命中直接广播，未命中单例后台抓取（全局 1 路）
-        from app.core.usage_service import UsageService
+        from app.core.infra.usage_service import UsageService
 
         UsageService.get_instance().request_balance(provider_name, config_id, config)
 
@@ -8041,7 +8041,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._coding_plan_hidden = True
             return
 
-        from app.core.usage_service import UsageService
+        from app.core.infra.usage_service import UsageService
 
         UsageService.get_instance().request_coding_plan(provider_name, config_id, config)
 
@@ -9849,7 +9849,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ 用量聚合（T6）：配置字段（API_KEY/cookie 等）变更后失效用量/余额缓存，
         # 下次请求强制重拉（幂等，可重复调用）。
         try:
-            from app.core.usage_service import UsageService
+            from app.core.infra.usage_service import UsageService
 
             UsageService.get_instance().invalidate(current_name)
         except Exception:
@@ -12606,7 +12606,7 @@ class OpenAIChatToolWindow(ToolWindow):
         直接执行 ``psutil.Process().children(recursive=True)`` + 逐子进程
         ``memory_info()``，单次 20-80ms，与 chat_worker 的 80ms 批处理周期
         同量级 → 主线程 25%-50% 时间用于遍历进程表，是流式卡顿主因之一。
-        现改为读取后台采样器缓存（`app.core.rss_sampler`），主线程零 psutil 调用。
+        现改为读取后台采样器缓存（`app.core.infra.rss_sampler`），主线程零 psutil 调用。
         """
         return rss_sampler.web_rss_mb()
 
@@ -12628,7 +12628,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 触发阈值（_WEB_MEM_THRESHOLD_MB_ACTIVE）避免频繁 kill 造成
                 滚动回看时的重建抖动；但绝不再完全跳过（旧实现跳过 = 内存泄漏）。
 
-        ⚡ [PERF] 采样值来自后台线程（`app.core.rss_sampler`）。本方法每
+        ⚡ [PERF] 采样值来自后台线程（`app.core.infra.rss_sampler`）。本方法每
         content chunk 调用一次，绝不能在这里执行 psutil 系统调用。
 
         子进程采样不可用时退化：并发页 > _MAX_RENDERED_CARDS 且存在
@@ -14687,7 +14687,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if not isinstance(messages, list):
             return
         try:
-            from app.core.message_identity import resolve_identity, team_mail_sender
+            from app.core.infra.message_identity import resolve_identity, team_mail_sender
 
             session = self.session_manager.get_current_session() if self.session_manager else None
             session_id = getattr(session, "session_id", "") if session else ""
@@ -20078,7 +20078,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if api_key:
                     balance_display.set_provider(provider_name, config_id)
                     # 委托全局单例：缓存命中直接广播，未命中单例后台抓取
-                    from app.core.usage_service import UsageService
+                    from app.core.infra.usage_service import UsageService
 
                     UsageService.get_instance().request_balance(provider_name, config_id, config)
                     return
@@ -22353,7 +22353,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._last_project_ctx = signature
         try:
-            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
 
             UIEventBus.get_instance().publish(
                 EV_PROJECT_CHANGED,
@@ -22716,7 +22716,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     for w in window_registry.alive_window_instances()
                 )
                 if not _same_config_alive:
-                    from app.core.usage_service import UsageService
+                    from app.core.infra.usage_service import UsageService
 
                     UsageService.get_instance().unregister(_cid)
         except Exception:
@@ -22818,7 +22818,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 🔧 泄漏修复（M6）：断开全局单例 coding_plan_ready，关窗后不再幽灵回调
             try:
-                from app.core.usage_service import UsageService
+                from app.core.infra.usage_service import UsageService
 
                 UsageService.get_instance().coding_plan_ready.disconnect(self._on_coding_plan_result)
             except (TypeError, RuntimeError):
@@ -23664,7 +23664,7 @@ def _cleanup_global_lru_caches():
     except Exception:
         pass
     try:
-        from app.core.token_estimator import estimate_tokens
+        from app.core.infra.token_estimator import estimate_tokens
 
         estimate_tokens.cache_clear()
     except Exception:

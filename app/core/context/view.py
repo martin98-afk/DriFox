@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 
 
 @dataclass

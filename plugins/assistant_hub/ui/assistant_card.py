@@ -571,7 +571,7 @@ class AssistantCardWidget(QWidget):
     def _clear_identity_cache() -> None:
         """清主程序消息身份缓存：称呼/头像变更后新消息立即用新身份。"""
         try:
-            from app.core.message_identity import clear_cache
+            from app.core.infra.message_identity import clear_cache
 
             clear_cache()
         except Exception as e:

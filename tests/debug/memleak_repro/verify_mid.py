@@ -164,7 +164,7 @@ def verify_M3_uieventbus(app, rounds: int) -> Dict[str, Any]:
     断言 _subs[EV] 列表线性增长（主窗口模式，永不退订）。
     """
     try:
-        from app.core.ui_event_bus import UIEventBus  # type: ignore
+        from app.core.infra.ui_event_bus import UIEventBus  # type: ignore
     except Exception as exc:  # noqa: BLE001
         return {"error": f"import UIEventBus 失败: {exc}"}
 

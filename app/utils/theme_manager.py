@@ -430,7 +430,7 @@ class ThemeManager:
             pass
         # Phase E：发布主题切换事件（供插件订阅刷新自定义 UI）
         try:
-            from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
 
             theme_id = self.get_current_theme_id()
             theme_obj = self.get_current_theme() or {}

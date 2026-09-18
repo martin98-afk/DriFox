@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import QApplication  # noqa: E402
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 app = QApplication.instance() or QApplication(sys.argv)
 
-from app.core.webengine_profile import init_shared_web_profile  # noqa: E402
+from app.core.infra.webengine_profile import init_shared_web_profile  # noqa: E402
 from app.widgets.message_card import MessageCard  # noqa: E402
 
 init_shared_web_profile()

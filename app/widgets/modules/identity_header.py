@@ -30,7 +30,7 @@ from PyQt5.QtCore import QRectF, QSize, Qt
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPixmap
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from app.core.message_identity import BUILTIN_AVATAR_DRIFOX, BUILTIN_AVATAR_PREFIX, MessageIdentity
+from app.core.infra.message_identity import BUILTIN_AVATAR_DRIFOX, BUILTIN_AVATAR_PREFIX, MessageIdentity
 from app.utils.design_tokens import Colors, scale_font_size
 from app.utils.utils import get_icon, get_unified_font
 

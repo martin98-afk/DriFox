@@ -11,7 +11,7 @@ import pytest
 from PyQt5.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-from app.core import window_registry
+from app.core.infra import window_registry
 
 
 

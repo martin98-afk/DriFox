@@ -209,7 +209,7 @@ class PluginHostService(QObject):
         每项执行后 yield 一次事件循环，交互性恢复；同时保留三条关键保序
         （见下方 add_order_constraint 注释）与逐项计时日志。
         """
-        from app.core.deferred_task_queue import DeferredTaskQueue
+        from app.core.infra.deferred_task_queue import DeferredTaskQueue
 
         self._pm_for_deferred = pm
         queue = DeferredTaskQueue()

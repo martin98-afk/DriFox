@@ -353,7 +353,7 @@ def test_theme_changed_event_refreshes_button(qapp):
     → 注册进 `_refresh_targets` 的 widget 一个都收不到 refresh_theme()。
     （main_widget.py 的批量刷新注释里也点明了这一点。）
     """
-    from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+    from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
     from app.utils.design_tokens import Colors
     from app.utils.theme_manager import theme_manager
     from app.widgets.scroll_to_bottom_button import ScrollToBottomButton

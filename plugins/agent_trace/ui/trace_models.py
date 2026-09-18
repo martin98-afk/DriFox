@@ -429,7 +429,7 @@ _TOKEN_ESTIMATOR: Any = None
 
 
 def estimate_tokens_text(text: str, model: str = "gpt-4") -> int:
-    """文本 token 估算：优先主程序 ``app.core.token_estimator``（tiktoken），
+    """文本 token 估算：优先主程序 ``app.core.infra.token_estimator``（tiktoken），
     失败/导入不到时按「中文 0.7 / 西文 1/3.5」比例兜底。
 
     ⚠️ 结果是**逐条缓存**的（写回 ``TraceRecord.meta``），不要在绘制热路径上
@@ -440,7 +440,7 @@ def estimate_tokens_text(text: str, model: str = "gpt-4") -> int:
     global _TOKEN_ESTIMATOR
     if _TOKEN_ESTIMATOR is None:
         try:
-            from app.core.token_estimator import estimate_tokens as _est
+            from app.core.infra.token_estimator import estimate_tokens as _est
 
             _TOKEN_ESTIMATOR = _est
         except Exception:

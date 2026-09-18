@@ -271,7 +271,7 @@ class TestTokenEstimator:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.token_estimator")
+        return pytest.importorskip("app.core.infra.token_estimator")
 
     def test_import(self, mod):
         assert mod is not None

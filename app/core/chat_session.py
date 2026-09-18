@@ -22,7 +22,7 @@ from loguru import logger
 from PyQt5.QtCore import QObject
 
 from app.core.message_content import consolidate_messages
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 
 # 内存泄漏修复：会话消息数软限制
 MAX_SESSION_MESSAGES = 500

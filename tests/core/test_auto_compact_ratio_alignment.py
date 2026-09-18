@@ -120,7 +120,7 @@ class TestHookRatioMatchesRing:
 
     def test_overlong_tool_result_not_inflated(self):
         """超长工具结果：hook 注入值必须等于快照 used（截断口径），而非原文估算"""
-        from app.core.token_estimator import count_messages_tokens, per_message_tokens
+        from app.core.infra.token_estimator import count_messages_tokens, per_message_tokens
 
         big = "line %d: data\n" * 3000  # ~21k 字符 ≈ 5k token
         messages = [

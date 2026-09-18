@@ -160,7 +160,7 @@ def _ensure_theme_subscription():
     if _theme_subscribed:
         return
     try:
-        from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+        from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
 
         UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, _on_theme_changed_event)
         _theme_subscribed = True

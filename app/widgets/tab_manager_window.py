@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from PyQt5 import sip as _sip
 
 from loguru import logger
-from app.core import window_registry
+from app.core.infra import window_registry
 from PyQt5.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
@@ -2287,7 +2287,7 @@ class TabManagerWindow(FramelessWindow):
         # ── full 容器卡片标题栏 tab（替代原 ReplaceTabBar）──
         # full 卡片（UI 插件 full 卡 + 内置全局卡）打开时在标题栏 tab 区显示
         # （带 × 关闭钮，见 _on_card_visibility_changed）。这里仅订阅显隐事件。
-        from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+        from app.core.infra.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
 
         # 订阅 full 卡片显隐事件，同步标题栏 tab open 集合与显隐
         UIEventBus.get_instance().subscribe(EV_CARD_VISIBILITY_CHANGED, self._on_card_visibility_changed)
@@ -3731,7 +3731,7 @@ class TabManagerWindow(FramelessWindow):
                 pass
             # Phase E：发布 Tab 切换事件
             try:
-                from app.core.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
+                from app.core.infra.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
 
                 UIEventBus.get_instance().publish(
                     EV_TAB_SWITCHED,

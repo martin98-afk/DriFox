@@ -17,7 +17,7 @@ import time
 import pytest
 from PyQt5.QtCore import QTimer
 
-from app.core.usage_service import UsageService
+from app.core.infra.usage_service import UsageService
 
 PROVIDER = "test-provider"
 CONFIG_ID = "cfg-1"

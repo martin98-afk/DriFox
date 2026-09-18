@@ -32,7 +32,7 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # 团队协作与子智能体
     ("team.log", ("app.core.team", "app.core.team.team_manager", "app.core.agent"), ()),
     # 会话/记忆/用量存储
-    ("store.log", ("app.core.store", "app.core.usage_service"), ()),
+    ("store.log", ("app.core.store", "app.core.infra.usage_service"), ()),
     # 工具框架与执行（mcp_tools 除外）
     (
         "tools.log",
@@ -55,9 +55,9 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
             "app.main_widget",
             "app.tray_manager",
             "app.update_checker",
-            "app.core.ui_event_bus",
-            "app.core.webengine_profile",
-            "app.core.window_registry",
+            "app.core.infra.ui_event_bus",
+            "app.core.infra.webengine_profile",
+            "app.core.infra.window_registry",
         ),
         (),
     ),
@@ -75,7 +75,7 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
             "app.core.hooks.hook_manager",
             "app.core.context.history_compactor",
             "app.core.memory_manager",
-            "app.core.token_estimator",
+            "app.core.infra.token_estimator",
             "app.core.modelmeta.models_dev_sync",
             "app.core.message_content",
             "app.core.modelmeta.model_capabilities",

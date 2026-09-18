@@ -26,7 +26,7 @@ from app.core.context.tool_prune import (  # noqa: F401  向后兼容 re-export�
     resolve_tool_result_max_len,
 )
 from app.core.message_content import consolidate_messages
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 
 # 预算分配常量
 SYSTEM_PROMPT_RESERVE_RATIO = 0.15  # 预留 15% 给系统提示（含技能、记忆等）

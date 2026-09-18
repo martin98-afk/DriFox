@@ -115,14 +115,14 @@ def child_filtered(d: str, which: str) -> None:
 
 def child_handler_noise(d: str) -> None:
     """端到端：真实 install_crash_handler + 非致命码 → 应落 anomaly，不落 crash。"""
-    from app.core.crash_handler import install_crash_handler
+    from app.core.infra.crash_handler import install_crash_handler
 
     install_crash_handler(d)
     _raise(CODE_NOISE)
 
 
 def child_handler_fatal(d: str) -> None:
-    from app.core.crash_handler import install_crash_handler
+    from app.core.infra.crash_handler import install_crash_handler
 
     install_crash_handler(d)
     _raise(CODE_FATAL)
@@ -132,7 +132,7 @@ def child_handler_clean(d: str) -> None:
     """端到端：噪声异常后正常退出 → crash 带 clean-exit 标记，空 anomaly 被回收。"""
     import atexit
 
-    from app.core.crash_handler import _mark_clean_exit, install_crash_handler
+    from app.core.infra.crash_handler import _mark_clean_exit, install_crash_handler
 
     install_crash_handler(d)
     atexit.register(_mark_clean_exit)
@@ -234,7 +234,7 @@ def drive() -> int:
             if verdict.startswith("  ✗"):
                 failures.append(mode)
             if mode in PENDING_EXPECT:
-                from app.core.crash_handler import check_pending_crashes
+                from app.core.infra.crash_handler import check_pending_crashes
 
                 got_pending = len(check_pending_crashes(Path(d)))
                 want_pending = PENDING_EXPECT[mode]

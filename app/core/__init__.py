@@ -54,9 +54,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     # 子模块（直接返回 module 对象）
     "error_handler":           ("app.core.workers.error_handler", None),
     # Token
-    "estimate_tokens":         ("app.core.token_estimator", "estimate_tokens"),
-    "count_messages_tokens":   ("app.core.token_estimator", "count_messages_tokens"),
-    "TokenCounter":            ("app.core.token_estimator", "TokenCounter"),
+    "estimate_tokens":         ("app.core.infra.token_estimator", "estimate_tokens"),
+    "count_messages_tokens":   ("app.core.infra.token_estimator", "count_messages_tokens"),
+    "TokenCounter":            ("app.core.infra.token_estimator", "TokenCounter"),
     # 会话
     "ChatSession":             ("app.core.chat_session", "ChatSession"),
     "SessionManager":          ("app.core.chat_session", "SessionManager"),

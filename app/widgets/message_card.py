@@ -98,7 +98,7 @@ from app.core import (
     ensure_content_blocks,
 )
 from app.core.message_content import make_tool_result_block
-from app.core.webengine_profile import get_shared_web_profile
+from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Animations,
     BorderRadius,
@@ -571,7 +571,7 @@ def _render_plugin_fence(info, code_content_raw: str) -> str:
         code = code_content_raw
     # P2-1：fence render 入口同口径 watchdog（超时 degrade → 连续熔断停用）
     try:
-        from app.core.ui_callback_watchdog import timed_ui_callback
+        from app.core.infra.ui_callback_watchdog import timed_ui_callback
 
         html = timed_ui_callback(
             info.plugin_name,
@@ -14282,7 +14282,7 @@ class MessageCard(SimpleCardWidget):
         仅匹配当前 ``self._welcome_mode`` 的 mode_key（payload 由插件声明），
         不匹配则忽略。widget 销毁时自动退订，防止悬挂 callback。
         """
-        from app.core.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
+        from app.core.infra.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
 
         def _on_refresh(payload):
             mode_key = payload.get("mode_key")
@@ -14388,7 +14388,7 @@ class MessageCard(SimpleCardWidget):
         if getattr(self, "_identity", None) is not None:
             return self._identity
         try:
-            from app.core.message_identity import resolve_for_message
+            from app.core.infra.message_identity import resolve_for_message
 
             session_id = ""
             team_agent = ""
@@ -14410,7 +14410,7 @@ class MessageCard(SimpleCardWidget):
                 window_id=window_id,
             )
         except Exception:
-            from app.core.message_identity import MessageIdentity
+            from app.core.infra.message_identity import MessageIdentity
 
             self._identity = MessageIdentity(name="Drifox" if self.role != "user" else "")
         return self._identity

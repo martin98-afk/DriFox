@@ -59,7 +59,7 @@ class RssSampler:
 
     典型用法::
 
-        from app.core.rss_sampler import rss_sampler
+        from app.core.infra.rss_sampler import rss_sampler
         rss_sampler.ensure_started()          # 一般在应用启动时调用一次
         if rss_sampler.web_rss_mb() > 300:   # 主线程读取，零 psutil 开销
             ...

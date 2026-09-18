@@ -11,7 +11,7 @@ import types
 import pytest
 from loguru import logger
 
-from app.core import ui_callback_watchdog as wd
+from app.core.infra import ui_callback_watchdog as wd
 
 
 @pytest.fixture(autouse=True)

@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 from loguru import logger
 
-from app.core import window_registry
+from app.core.infra import window_registry
 from app.core.commands.command_manager import CommandManager, CommandParameter, CommandType
 from app.tools.tool_name_mapper import ToolNameMapper
 

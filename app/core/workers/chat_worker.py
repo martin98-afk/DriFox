@@ -46,7 +46,7 @@ from app.core.message_content import append_text_block, consolidate_messages, ex
 from app.core.modelmeta.model_capabilities import get_model_capabilities, normalize_reasoning_effort
 from app.core.modelmeta.provider_profile import get_provider_profile
 from app.core.tools.tool_call_parser import smart_parse_arguments
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
 from app.core.workers.worker_event_bus import WorkerEvent, WorkerEventBus

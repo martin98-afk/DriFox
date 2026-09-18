@@ -19,7 +19,7 @@ from app.core.context.builder import (
     prune_tool_result,
     resolve_tool_result_max_len,
 )
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 
 
 class TestPruneToolResultUnit:

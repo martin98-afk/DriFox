@@ -104,7 +104,7 @@ def snapshot_usage_for_hooks(
 def _legacy_estimate(session, llm_config: Optional[Dict] = None) -> Tuple[int, int]:
     """旧口径兜底：count_messages_tokens(全量) + resolve_context_limit"""
     try:
-        from app.core.token_estimator import count_messages_tokens
+        from app.core.infra.token_estimator import count_messages_tokens
         from app.core.modelmeta.provider_profile import resolve_token_ratio
 
         model = str((llm_config or {}).get("模型名称", "gpt-4") or "gpt-4")

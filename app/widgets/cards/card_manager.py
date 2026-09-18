@@ -448,7 +448,7 @@ class CardManager:
 
         # Phase E：发布卡片显隐事件
         try:
-            from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
 
             UIEventBus.get_instance().publish(
                 EV_CARD_VISIBILITY_CHANGED,
@@ -525,7 +525,7 @@ class CardManager:
 
         # Phase E：发布卡片显隐事件
         try:
-            from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
 
             UIEventBus.get_instance().publish(
                 EV_CARD_VISIBILITY_CHANGED,
@@ -820,7 +820,7 @@ class CardManager:
     def _publish_card_visibility(card_id: str, window_id: str, visible: bool) -> None:
         """发布卡片显隐事件（Phase E）"""
         try:
-            from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
 
             UIEventBus.get_instance().publish(
                 EV_CARD_VISIBILITY_CHANGED, card_id=card_id, window_id=window_id, visible=visible

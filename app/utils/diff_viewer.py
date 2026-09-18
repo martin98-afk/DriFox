@@ -28,7 +28,7 @@ from PyQt5.QtCore import Qt, QTimer, QUrl
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
 from PyQt5.QtWidgets import QDialog, QHBoxLayout
 
-from app.core.webengine_profile import create_transient_web_profile
+from app.core.infra.webengine_profile import create_transient_web_profile
 
 # Pygments 语法高亮（行内 diff 高亮子系统，确保 diff 弹窗预渲染文件不依赖 JS 即有着色）
 from app.utils.diff_highlight import (

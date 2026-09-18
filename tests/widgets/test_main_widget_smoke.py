@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import MagicMock, patch
 
 import pytest
-from app.core import window_registry
+from app.core.infra import window_registry
 
 # ─── helpers ───────────────────────────────────────────────────
 

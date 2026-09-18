@@ -1321,7 +1321,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
         def _work():
             try:
-                from app.core.token_estimator import estimate_tokens
+                from app.core.infra.token_estimator import estimate_tokens
 
                 servers = self._get_servers()
                 count = len(servers)

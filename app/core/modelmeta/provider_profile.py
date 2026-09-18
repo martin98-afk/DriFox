@@ -203,7 +203,7 @@ def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Opti
             return float(cap)
     except Exception:
         pass
-    from app.core.token_estimator import _get_model_token_ratio
+    from app.core.infra.token_estimator import _get_model_token_ratio
 
     return _get_model_token_ratio(model or str(llm_config.get("模型名称", "gpt-4") or "gpt-4"))
 

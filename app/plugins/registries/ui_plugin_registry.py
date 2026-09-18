@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List,
 
 from loguru import logger
 
-from app.core.project_changed import dispatch_project_changed, is_active_window
+from app.core.infra.project_changed import dispatch_project_changed, is_active_window
 
 if TYPE_CHECKING:
     from app.core.commands.command_manager import CommandType  # noqa: F401
@@ -848,7 +848,7 @@ class UIPluginRegistry:
         if getattr(self, "_project_changed_subscribed", False):
             return
         try:
-            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
 
             self._project_changed_subscribed = True
             UIEventBus.get_instance().subscribe(EV_PROJECT_CHANGED, self._on_project_changed_event)
@@ -891,7 +891,7 @@ class UIPluginRegistry:
         if getattr(self, "_theme_changed_subscribed", False):
             return
         try:
-            from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
 
             self._theme_changed_subscribed = True
             UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, self._on_theme_changed_event)
@@ -961,7 +961,7 @@ class UIPluginRegistry:
         # P2-1：UI 回调 watchdog 包装（单次/滑窗超时 degrade → 连续熔断停用；
         # 重新注册即重置计数=修复恢复语义）
         try:
-            from app.core.ui_callback_watchdog import wrap_ui_callback
+            from app.core.infra.ui_callback_watchdog import wrap_ui_callback
 
             render_func = wrap_ui_callback(plugin_name, f"content:{type_name}", render_func)
         except Exception:
@@ -1014,7 +1014,7 @@ class UIPluginRegistry:
             raise ValueError(f"invalid tag_name {tag_name!r}: must match [a-z0-9_-]+")
         # P2-1：UI 回调 watchdog 包装（同 content renderer 口径）
         try:
-            from app.core.ui_callback_watchdog import wrap_ui_callback
+            from app.core.infra.ui_callback_watchdog import wrap_ui_callback
 
             render_func = wrap_ui_callback(plugin_name, f"tag:{key}", render_func)
         except Exception:
@@ -1329,7 +1329,7 @@ class UIPluginRegistry:
     ) -> None:
         """身份 provider 通用注册（去重 + 按优先级排序）。"""
         try:
-            from app.core.ui_callback_watchdog import wrap_ui_callback
+            from app.core.infra.ui_callback_watchdog import wrap_ui_callback
 
             resolve_func = wrap_ui_callback(plugin_name, f"identity:{provider_id}", resolve_func)
         except Exception:
@@ -2323,7 +2323,7 @@ class UIPluginRegistry:
             try:
                 from PyQt5.QtWidgets import QApplication
 
-                from app.core import window_registry
+                from app.core.infra import window_registry
 
                 if QApplication.instance() is not None and window_registry.alive_window_instances():
                     from app.core.commands.builtin_commands import _rebind_command_shortcuts
@@ -2357,7 +2357,7 @@ class UIPluginRegistry:
             try:
                 from PyQt5.QtWidgets import QApplication
 
-                from app.core import window_registry
+                from app.core.infra import window_registry
 
                 if QApplication.instance() is not None and window_registry.alive_window_instances():
                     from app.core.commands.builtin_commands import _rebind_command_shortcuts
@@ -3488,7 +3488,7 @@ class UIPluginRegistry:
             else:
                 self._ui_modules.pop(module_id, None)
         # 事件总线退订：防止悬挂回调引用已卸载的旧模块闭包
-        from app.core.ui_event_bus import UIEventBus
+        from app.core.infra.ui_event_bus import UIEventBus
 
         UIEventBus.get_instance().unsubscribe_plugin(plugin_name)
         self._loaded_plugins.discard(plugin_name)

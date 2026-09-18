@@ -877,7 +877,7 @@ class SubAgentExecutor(QThread):
             # 让 hook（如 context_auto_compact）能检测当前 token 占比
             if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
                 try:
-                    from app.core.token_estimator import count_messages_tokens as _count
+                    from app.core.infra.token_estimator import count_messages_tokens as _count
                     from app.core.modelmeta.model_capabilities import resolve_context_limit as _resolve_limit
 
                     token_count = _count(current_messages)

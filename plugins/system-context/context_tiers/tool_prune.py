@@ -22,7 +22,7 @@ from typing import Any, Dict, List
 
 from app.core.context.config import cfg_int, prune_skip_tools
 from app.core.context.tool_prune import prune_tool_result, resolve_tool_result_max_len
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
 
 

@@ -21,7 +21,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QShortcut
 from PyQt5.QtTest import QTest
 
-from app.core import window_registry as window_registry_mod
+from app.core.infra import window_registry as window_registry_mod
 from app.core.commands.command_manager import CommandManager, CommandType
 
 TEST_CMD = "hot_reload_probe_cmd"

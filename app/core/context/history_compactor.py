@@ -33,7 +33,7 @@ from app.core.message_content import (
     content_to_text,
 )
 from app.core.modelmeta.model_capabilities import resolve_context_limit, resolve_max_output_tokens
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 from app.core.workers.error_handler import create_api_call_with_retry
 
 # ========== 常量 ==========
