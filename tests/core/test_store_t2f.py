@@ -145,6 +145,94 @@ def test_c_backfill_heals_light_messages(repo, caplog):
     assert full[1].get("arguments") == {"cmd": "dir"}, f"自愈失败: {full[1]}"
 
 
+# ── 修复 c-r：backfill 读失败不得清空已落库 extras ──
+
+
+def test_cr_load_failure_keeps_existing_extras(repo, monkeypatch):
+    """DB 瞬断一次：backfill 读失败 → 跳过 _write_extras，旧 extras 不许被清空。
+
+    回归背景：修复 c 把 ``(extras or {})`` 折成 ``{}``，读失败与「无字段」不可
+    区分 → save 链全删全插把该会话已落库的剥离字段一并抹掉（数据不可逆丢失）。
+    """
+    from app.core.store.session_repository import _backfill_offload_light_messages_impl
+
+    sid = "cr-keep"
+    # 1) 正常落库一条带剥离字段的消息（进入 extras 表）
+    msgs = [
+        {"role": "assistant", "content": "done", "arguments": {"cmd": "ls"}, "diff": "d", "reasoning_content": "r"},
+        {"role": "user", "content": "u"},
+        {"role": "assistant", "content": "tail1"},
+        {"role": "user", "content": "tail2"},
+    ]
+    _save_session(repo, sid, msgs)
+    before = repo.load_extras_for_session(sid)
+    assert before and before.get(0, {}).get("arguments"), f"前置：extras 应已落库: {before}"
+
+    # 2) 契约：查询抛异常 → load_failed=True 且消息原样返回
+    real_load = repo.load_extras_for_session
+
+    def _boom(sid_arg, idxs=None):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(repo, "load_extras_for_session", _boom)
+    probe = [{"role": "assistant", "content": "a", "_x_idx": 0}]
+    out, failed = _backfill_offload_light_messages_impl(probe, sid, repo)
+    assert failed is True, "查询异常必须让 load_failed=True 才能让 save 链跳过写"
+    assert out[0].get("_x_idx") == 0 and "arguments" not in out[0], "读失败应保留消息原样"
+
+    # 3) save 链行为：读失败 → 不写 extras → 旧字段仍在（未清空即证明跳过生效）
+    changed = [dict(m) for m in repo.get(sid)["messages"]]
+    changed[-1] = {"role": "user", "content": "tail2-changed"}
+    ok = repo.save({"session_id": sid, "messages": changed, "message_count": len(changed)})
+    monkeypatch.setattr(repo, "load_extras_for_session", real_load)
+    assert ok, "主保存应成功（extras 读失败不阻塞主 blob）"
+
+    after = repo.load_extras_for_session(sid)
+    assert after and after.get(0, {}).get("arguments") is not None, f"读失败后 extras 被清空（回归）：{after}"
+
+
+def test_cr_none_result_skips_write(repo, monkeypatch):
+    """load_extras_for_session 返回 None（读失败语义）同样跳过 _write_extras。"""
+    sid = "cr-none"
+    msgs = [
+        {"role": "assistant", "content": "done", "arguments": {"cmd": "ls"}, "reasoning_content": "r"},
+        {"role": "user", "content": "u"},
+        {"role": "assistant", "content": "t1"},
+        {"role": "user", "content": "t2"},
+    ]
+    _save_session(repo, sid, msgs)
+    before = repo.load_extras_for_session(sid)
+    assert before and before.get(0, {}).get("arguments")
+
+    monkeypatch.setattr(repo, "load_extras_for_session", lambda sid_arg, idxs=None: None)
+    changed = [dict(m) for m in repo.get(sid)["messages"]]
+    changed[-1] = {"role": "user", "content": "t2-changed"}
+    assert repo.save({"session_id": sid, "messages": changed, "message_count": len(changed)})
+    monkeypatch.undo()
+
+    after = repo.load_extras_for_session(sid)
+    assert after and after.get(0, {}).get("arguments") is not None, f"None 读失败后 extras 被清空：{after}"
+
+
+def test_cr_backfill_preserves_real_field(repo):
+    """回填只补缺失/falsy 字段，不覆盖消息上已有的真实值。"""
+    from app.core.store.session_repository import _backfill_offload_light_messages_impl
+
+    sid = "cr-preserve"
+    repo.save({"session_id": sid, "messages": [{"role": "user", "content": "q"}], "message_count": 1})
+    repo._execute(
+        "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) VALUES (?, ?, ?, ?)",
+        (sid, 1, "reasoning_content", b'"from-db"'),
+    )
+    light = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a", "_x_idx": 1, "reasoning_content": "in-memory"},
+    ]
+    out, failed = _backfill_offload_light_messages_impl(light, sid, repo)
+    assert failed is False
+    assert out[1]["reasoning_content"] == "in-memory", "已有真值不得被库内值覆盖"
+
+
 # ── 方案 1：vision base64 落盘 ──
 
 
@@ -209,7 +297,9 @@ def test_vision_missing_file_degrades_to_text(tmp_path):
     msgs = [
         {
             "role": "user",
-            "content": [{"type": "image_ref", "image_ref": {"file": "gone.png", "meta": "image/png", "session_id": "nope"}}],
+            "content": [
+                {"type": "image_ref", "image_ref": {"file": "gone.png", "meta": "image/png", "session_id": "nope"}}
+            ],
         }
     ]
     revived = revive_vision_image_refs(msgs, tmp_path)
@@ -235,12 +325,16 @@ def test_vision_coexists_with_offload_fields(repo, tmp_path):
     ]
     _save_session(repo, sid, msgs)
     blob_msgs = repo.get(sid)["messages"]
-    assert any(
-        isinstance(b, dict) and b.get("type") == "image_ref"
-        for m in blob_msgs if isinstance(m, dict)
-        for b in (m.get("content") or [])
-        if isinstance(m.get("content"), list)
-    ) or True  # blob 形态取决于 persist 是否生效，最终以 revive 等价为准
+    assert (
+        any(
+            isinstance(b, dict) and b.get("type") == "image_ref"
+            for m in blob_msgs
+            if isinstance(m, dict)
+            for b in (m.get("content") or [])
+            if isinstance(m.get("content"), list)
+        )
+        or True
+    )  # blob 形态取决于 persist 是否生效，最终以 revive 等价为准
     full = repo.get_full_messages(sid)
     blk = full[0]["content"][0]
     assert blk["type"] in ("image_url", "image_ref")
@@ -252,3 +346,27 @@ def test_vision_coexists_with_offload_fields(repo, tmp_path):
 def os_path_exists_indir(tmp_path, sid):
     p = tmp_path / "screenshots" / "persisted" / sid
     return p.exists()
+
+
+def test_vision_persist_no_tmp_leftover(repo, tmp_path):
+    """原子写：落盘后不得残留 .tmp 文件（半截文件会让 revive 丢图）。"""
+    import os
+
+    sid = "vision-atomic"
+    png = _png_bytes(48)
+    _persist_vision_image_blocks_impl([_vision_message(png)], sid, tmp_path)
+    d = tmp_path / "screenshots" / "persisted" / sid
+    assert d.exists(), "落盘目录应存在"
+    leftovers = [f for f in os.listdir(d) if f.endswith(".tmp")]
+    assert not leftovers, f"残留临时文件: {leftovers}"
+    assert [f for f in os.listdir(d) if f.endswith(".png")], "应生成 png 文件"
+
+
+def test_image_utils_compress_data_uri_shared_by_worker(repo):
+    """compress_data_uri 收敛到 app.utils.image_utils，chat_worker 同源转发。"""
+    from app.core.workers.chat_worker import compress_data_uri as worker_impl
+    from app.utils.image_utils import compress_data_uri as util_impl
+
+    tiny = "data:image/png;base64," + base64.b64encode(_png_bytes(8)).decode("ascii")
+    assert util_impl(tiny) == tiny, "未超限应原样返回"
+    assert worker_impl(tiny) == tiny, "chat_worker 转发行为应一致"

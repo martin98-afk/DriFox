@@ -57,6 +57,7 @@ def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root
     """
     import base64 as _base64
     import hashlib as _hashlib
+    import os as _os
 
     out_dir = Path(root_dir) / "screenshots" / "persisted" / session_id
     for msg in messages:
@@ -84,7 +85,14 @@ def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root
                 out_dir.mkdir(parents=True, exist_ok=True)
                 fpath = out_dir / f"{digest}{ext}"
                 if not fpath.exists():  # 幂等：同图（同 sha1）不重复写
-                    fpath.write_bytes(raw)
+                    # 原子写：先写同目录 .tmp 再 os.replace，避免进程中断留下
+                    # 半截文件（revive 侧读到损坏文件 → QImage 解码失败丢图）。
+                    tmp = out_dir / f".{digest}{ext}.tmp"
+                    with open(tmp, "wb") as _fh:
+                        _fh.write(raw)
+                        _fh.flush()
+                        _os.fsync(_fh.fileno())
+                    _os.replace(tmp, fpath)
                 content[bi] = {
                     "type": "image_ref",
                     "image_ref": {"file": fpath.name, "meta": meta, "session_id": session_id},
@@ -101,7 +109,7 @@ def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
     因此调用方无需知道会话上下文（chat_worker / gateway 读侧均可直用）。
 
     - 读 ``<root_dir>/screenshots/persisted/<session_id>/<file>`` → base64 data URI
-    - >5MB 的 data URI 走 chat_worker.compress_data_uri 压缩
+    - >5MB 的 data URI 走 ``app.utils.image_utils.compress_data_uri`` 压缩
     - 文件缺失/IO 失败 → 替换为 text 占位块（不抛错）
     """
     import base64 as _base64
@@ -131,7 +139,7 @@ def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
                     mime = str(ref.get("meta") or "image/png").split(";")[0]
                     b64 = _base64.b64encode(raw).decode("ascii")
                     data_uri = f"data:{mime};base64,{b64}"
-                    from app.core.workers.chat_worker import compress_data_uri
+                    from app.utils.image_utils import compress_data_uri
 
                     data_uri = compress_data_uri(data_uri)
             except OSError:
@@ -198,20 +206,25 @@ def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, byt
     return extras, light
 
 
-def _backfill_offload_light_messages_impl(messages: List[Any], session_id: str, repo) -> List[Any]:
+def _backfill_offload_light_messages_impl(messages: List[Any], session_id: str, repo) -> Tuple[List[Any], bool]:
     """[T2f 修复 c] 轻量剥离消息自愈回填（save 链入口前置调用）。
 
     带 ``_x_idx`` 哨兵且无剥离字段的消息 → 按哨兵 idx 从 session_msg_extras
-    IN 查询回填副本字段（setdefault，不覆盖消息上已有真实字段）。
+    IN 查询回填副本字段（仅补齐消息上缺失/falsy 的字段，不覆盖已有真值）。
 
     - 全部补齐 → INFO（自愈成功）
     - 查无 extras 行 → DEBUG 保留原样（可能真是无剥离字段的轻量消息）
-    - 查询异常 → WARNING 保留原样（不阻塞保存）
+    - 查询异常/读失败（None）→ WARNING 保留原样（不阻塞保存）
 
     Args:
         messages: 待保存消息列表（就地修改）
         session_id: 会话 ID（extras 查询键）
         repo: SessionRepository 实例（复用其 load_extras_for_session）
+
+    Returns:
+        ``(messages, load_failed)``。load_failed=True 表示 extras 读取失败
+        （异常或 load_extras_for_session 返回 None）——调用方**必须**跳过
+        ``_write_extras``，否则空 extras 会全删该会话已落库的剥离字段。
     """
     light_pairs: list[tuple[int, Dict[str, Any]]] = []
     for i, msg in enumerate(messages):
@@ -222,22 +235,31 @@ def _backfill_offload_light_messages_impl(messages: List[Any], session_id: str, 
         ):
             light_pairs.append((i, msg))
     if not light_pairs:
-        return messages
+        return messages, False
     idxs = [i for i, _ in light_pairs]
     try:
         extras = repo.load_extras_for_session(session_id, idxs)
     except Exception as e:  # noqa: BLE001 — 查询失败不阻塞保存
-        logger.warning(f"[SessionRepository] backfill extras 查询失败（保留原样）: {e}")
-        return messages
+        logger.warning(f"[SessionRepository] backfill extras 查询失败（保留原样，本轮不写 extras）: {e}")
+        return messages, True
+    if extras is None:
+        # load_extras_for_session 用 None 表示读失败（{} 表示读成功但无行）。
+        # 此处折叠成 {} 会让 save 链把「读失败」当成「无字段」→ 全删旧 extras。
+        logger.warning(
+            f"[SessionRepository] backfill extras 读失败（None，保留原样且本轮不写 extras）"
+            f"（session={session_id[:8]}, idxs={idxs[:8]}）"
+        )
+        return messages, True
     repaired = 0
     missing_rows: list[int] = []
     for i, msg in light_pairs:
-        patch = (extras or {}).get(i)
+        patch = extras.get(i)
         if not patch:
             missing_rows.append(i)
             continue
         for f, v in patch.items():
-            msg.setdefault(f, v)
+            if not msg.get(f):
+                msg[f] = v
         repaired += 1
     if missing_rows:
         logger.debug(
@@ -248,7 +270,7 @@ def _backfill_offload_light_messages_impl(messages: List[Any], session_id: str, 
             f"[SessionRepository] backfill 自愈: {repaired} 条轻量剥离消息已回填"
             f"（session={session_id[:8]}, idxs={idxs[:8]}）"
         )
-    return messages
+    return messages, False
 
 
 def extract_first_user_question(messages: Optional[List]) -> Tuple[str, str]:
@@ -444,10 +466,13 @@ class SessionRepository:
 
         # message_extras：提取剥离字段（不就地修改 session.messages）
         # [T2f 修复 c] 前置自愈：轻量剥离消息（带 _x_idx 无字段）先回填 extras
+        backfill_extras_failed = False
         try:
-            messages = _backfill_offload_light_messages_impl(messages, session_id, self)
+            messages, backfill_extras_failed = _backfill_offload_light_messages_impl(messages, session_id, self)
         except Exception as e:
             logger.warning(f"[SessionRepository] backfill 自愈失败，按原消息继续保存: {e}")
+            # 自愈异常时 extras 未知，跳过本轮 _write_extras（全删全插会丢字段）
+            backfill_extras_failed = True
         # [方案 1] vision base64 落盘：data:image 块 → image_ref 文件引用
         try:
             from app.utils.utils import get_app_data_dir
@@ -555,10 +580,18 @@ class SessionRepository:
                 # 由此天然覆盖（每次 save 后 extras 与主 blob 严格一致）。
                 # 🛡️ 独立隔离：extras 写入失败只记日志，不得让异常冒泡到外层
                 # try（主 blob 已落库，误报 False 会误导调用方重试/报错）。
-                try:
-                    self._write_extras(session_id, extras)
-                except Exception as e:  # noqa: BLE001
-                    logger.error(f"[SessionRepository] write_extras 调用异常（不影响主保存）: {e}")
+                # 🛡️ backfill 读失败（load_failed）时跳过：此时 extras 为空不代表
+                # 该会话真无字段，全删全插会把已落库的剥离字段一并抹掉。
+                if backfill_extras_failed:
+                    logger.warning(
+                        f"[SessionRepository] backfill 读失败，跳过本轮 extras 写入"
+                        f"（保留库内旧值，session={session_id[:8]}）"
+                    )
+                else:
+                    try:
+                        self._write_extras(session_id, extras)
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(f"[SessionRepository] write_extras 调用异常（不影响主保存）: {e}")
 
             return success
 
