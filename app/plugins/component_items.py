@@ -220,8 +220,9 @@ def _items_md(directory: Optional[Path], pattern: str = "*.md") -> List[Componen
 def _items_stem(directory: Optional[Path], pattern: str) -> List[ComponentItem]:
     """按文件名 stem 枚举（yaml / py 目录通用；md 目录走 _items_md）
 
-    py 目录额外尝试读取模块内实现的 `label` / `order` 类属性作为描述
-    （上下文层这类组件：类上有中文 label 与 order，比裸文件名好辨认得多）。
+    py 目录额外尝试读取模块内实现的 ``label`` / ``order`` / ``description``
+    类属性（上下文层这类组件：类上有中文 label 与 order，比裸文件名好辨认
+    得多；description 给细项行副标题，说明这一层具体干什么）。
     读取走 AST 静态解析，不 exec 模块 —— 避免枚举设置页时触发插件副作用。
     """
     if directory is None or not directory.exists():
@@ -231,27 +232,30 @@ def _items_stem(directory: Optional[Path], pattern: str) -> List[ComponentItem]:
     for p in sorted(directory.glob(pattern)):
         if p.name.startswith("_"):
             continue
-        desc = _py_module_label(p) if py_mode else ""
-        items.append(ComponentItem(id=p.stem, label="", description=desc))
+        label, desc = _py_module_meta(p) if py_mode else ("", "")
+        items.append(ComponentItem(id=p.stem, label=label, description=desc))
     return sorted(items, key=lambda it: it.id)
 
 
-def _py_module_label(path: Path) -> str:
-    """从 py 文件静态提取实现类的中文 label + order（失败返回空串）。
+def _py_module_meta(path: Path) -> Tuple[str, str]:
+    """从 py 文件静态提取实现类的 label / order / description（失败返回空对）。
 
     只做 AST 遍历取类属性字面量，不导入模块 —— 枚举动作必须零副作用。
+    返回 ``(显示名, 副标题)``：有 order 时显示名拼「order N ·」前缀；
+    副标题为 description（超长按单行压缩，悬停可看全文由 UI tooltip 兜底）。
     """
     try:
         import ast
 
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError):
-        return ""
+        return "", ""
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
         label = ""
         order = None
+        description = ""
         for stmt in node.body:
             if not isinstance(stmt, ast.Assign):
                 continue
@@ -262,9 +266,13 @@ def _py_module_label(path: Path) -> str:
                     label = str(stmt.value.value or "")
                 elif tgt.id == "order" and isinstance(stmt.value, ast.Constant):
                     order = stmt.value.value
-        if label:
-            return f"order {order} · {label}" if order is not None else _shorten(label)
-    return ""
+                elif tgt.id == "description" and isinstance(stmt.value, ast.Constant):
+                    description = str(stmt.value.value or "")
+        if not (label or description):
+            continue
+        name = f"order {order} · {label}" if order is not None else label
+        return name, _shorten(description)
+    return "", ""
 
 
 # ── 对外 API ──────────────────────────────────────

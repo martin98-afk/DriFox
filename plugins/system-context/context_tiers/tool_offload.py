@@ -35,6 +35,8 @@ class ToolOffloadTier:
     id = "tool_offload"
     label = "长工具结果落盘"
     order = 15
+    # 设置页细项行副标题（component_items 走 AST 静态读取，仅支持字面量）
+    description = "超长工具结果全文写入磁盘，上下文内留预览块+路径，模型可按需读回；对 prompt cache 友好"
     stages = frozenset({STAGE_INGEST})
     cache_impact = CACHE_NONE
 

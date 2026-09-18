@@ -28,6 +28,9 @@ class BuiltInBudgetResolver:
     """内置预算解析器（id="builtin"）"""
 
     id = "builtin"
+    # 设置页细项行展示名与副标题（component_items 走 AST 静态读取，仅支持字面量）
+    label = "内置预算计算"
+    description = "按模型上下文上限、输出预留与系统提示占比计算历史消息 token 预算，逐层压缩到达标线即停"
 
     def __init__(self) -> None:
         self._system_tokens_cache: "OrderedDict[str, int]" = OrderedDict()

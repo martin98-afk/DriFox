@@ -37,6 +37,8 @@ class ToolPruneTier:
     id = "tool_prune"
     label = "工具结果截断"
     order = 20
+    # 设置页细项行副标题（component_items 走 AST 静态读取，仅支持字面量）
+    description = "超阈值工具结果保留头尾、省略中段并附重查指引；阈值为 0 时按模型上下文容量自动定"
     stages = frozenset(ALL_STAGES)
     cache_impact = CACHE_NONE
 
