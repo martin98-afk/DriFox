@@ -11949,6 +11949,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 如果批次包含当前流式输出的助手卡片，跳过整个批次
                     if cards and self._current_assistant_card in cards:
                         continue
+                    # 含未渲染卡的批次整批保留：按 40px 起步高装占位会把失真高度
+                    # 钉进布局，重建后长高把视口拽走（滚轮跳动）；且无 viewer
+                    # 不占内存，回收零收益
+                    if cards and not self._batch_fully_rendered(cards):
+                        continue
                     if cards:
                         batch_cards = []
                         batch_height = 0
@@ -11980,6 +11985,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 if self._batch_cards[batch_idx] is not None:
                     cards = self._batch_cards[batch_idx]
                     if cards and self._current_assistant_card in cards:
+                        continue
+                    # 同上方批次：未渲染批次整批保留（占位高度失真风险）
+                    if cards and not self._batch_fully_rendered(cards):
                         continue
                     if cards:
                         batch_cards = []
@@ -12118,6 +12126,20 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug(f"[pool-detach] 异常：{_e!r}")
             return False
 
+    def _batch_fully_rendered(self, cards: list) -> bool:
+        """批次内所有存活卡片是否都已完成懒渲染。
+
+        未渲染卡片高度只有起步值（40px 级），按它装等高占位等于把失真高度钉进
+        布局：随后滚回视口重建/补渲，卡片长高数千 px，连环滚动补偿把视口拽走
+        （「滚轮异常跳动」主因）。且未渲染卡没有 QWebEngineView、不占渲染配额，
+        回收它们零收益纯风险 —— 守卫判 False 时调用方应整批保留 UI。
+        """
+        for card in cards or []:
+            if isinstance(card, MessageCard) and self._is_widget_alive(card):
+                if not getattr(card, "_lazy_rendered", False):
+                    return False
+        return True
+
     def _unload_batch(self, batch_idx: int) -> int:
         """卸载一个批次的 UI（释放 WebEngine renderer），保留 _message_batch 数据。
 
@@ -12135,6 +12157,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return 0
         cards = self._batch_cards[batch_idx]
         if not cards:
+            return 0
+        # 含未渲染卡的批次整批跳过：高度失真 + 不占配额（见 _batch_fully_rendered）
+        if not self._batch_fully_rendered(cards):
             return 0
         # ── 第一步：先按「viewer 仍在」的状态量出真实高度 ──
         # ⚠️ 顺序关键：摘掉 viewer 会让卡片高度立刻塌陷，必须在摘之前量完，
@@ -12451,6 +12476,10 @@ class OpenAIChatToolWindow(ToolWindow):
         fallback_candidates = []
         for idx, cards in enumerate(self._batch_cards):
             if not cards:
+                continue
+            # 未渲染批次不占渲染配额，淘汰它们计数不回落、纯白装失真占位 ——
+            # 候选阶段直接过滤，避免 LRU 空转
+            if not self._batch_fully_rendered(cards):
                 continue
             if self._batch_is_protected(idx, vp_range):
                 # 🐛 配额修复：保护区间按「真实视口 ±缓冲」算之后，小表（可见批次
