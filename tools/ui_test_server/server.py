@@ -111,7 +111,7 @@ def _tool_ui_state(**kwargs) -> Dict[str, Any]:
 
 
 def _tool_ui_click(**kwargs) -> Dict[str, Any]:
-    selector = {k: kwargs[k] for k in ("objectName", "text", "role") if kwargs.get(k)}
+    selector = {k: kwargs[k] for k in ("objectName", "text", "role", "cls") if kwargs.get(k)}
     if not selector:
         return {"clicked": False, "error": "至少提供 objectName/text/role 之一"}
     probe_text = str(selector.get("objectName") or selector.get("text") or "")
@@ -125,13 +125,29 @@ def _tool_ui_click(**kwargs) -> Dict[str, Any]:
         }
     target_name = str(selector.get("objectName") or "")
     token = str(kwargs.get("confirm_token") or "")
-    ok, reason = _tokens.validate(token, target_name, consume=True)
-    if not ok:
+    entry = _tokens.peek(token)
+    if entry is None:
         return {
             "clicked": False,
-            "blocked_by": reason,
-            "error": f"confirm_token 校验失败（{reason}）：先 ui_inspect mode=find 命中目标领取",
+            "blocked_by": "missing_token",
+            "error": "confirm_token 缺失或已消费：先 ui_inspect mode=find 命中目标领取",
         }
+    if entry["expires"] < __import__("time").time():
+        _tokens._store.pop(token, None)
+        return {
+            "clicked": False,
+            "blocked_by": "expired_token",
+            "error": "confirm_token 已过期（5 分钟）：重新 ui_inspect 领取",
+        }
+    # cls 定位模式无 objectName 可比对（target_name 为空），绑定名存在即放行
+    bound = str(entry.get("object_name") or "")
+    if bound and target_name and bound != target_name:
+        return {
+            "clicked": False,
+            "blocked_by": "token_mismatch",
+            "error": "confirm_token 与目标 objectName 不匹配：重新 ui_inspect 领取",
+        }
+    _tokens._store.pop(token, None)  # 一次性：消费即作废
     widget = find(selector)
     if widget is None:
         return {"clicked": False, "hint": "未找到控件；先 ui_inspect mode=tree 定位"}

@@ -124,11 +124,13 @@ def test_mcp_e2e_full_chain(dev_instance, tmp_path):
     assert token, f"未下发 confirm_token: {find_res}"
 
     # 5) ui_click 无 token → 拒
-    denied = _call_tool("ui_click", {"objectName": target_name}, msg_id=5)
+    denied = _call_tool("ui_click", {"cls": "QPushButton"}, msg_id=5)
     assert denied.get("clicked") is False and denied.get("blocked_by") == "missing_token"
 
-    # 6) ui_click 带 token → 成功
-    clicked = _call_tool("ui_click", {"objectName": target_name, "confirm_token": token}, msg_id=6)
+    # 6) ui_click 带 token → 成功（cls 定位首个 QPushButton）
+    clicked = _call_tool(
+        "ui_click", {"cls": "QPushButton", "confirm_token": token}, msg_id=6
+    )
     assert clicked.get("clicked") is True, f"带 token 点击失败: {clicked}"
 
     # 7) ui_screenshot：PNG 非空
