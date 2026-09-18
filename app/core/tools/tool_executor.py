@@ -295,7 +295,7 @@ class ToolExecutor:
 
     def _check_team_member(self) -> bool:
         """检查当前窗口是否是团队成员（委托给共用函数）"""
-        from app.core.team_manager import check_team_member
+        from app.core.team.team_manager import check_team_member
 
         return check_team_member(self._backend)
 

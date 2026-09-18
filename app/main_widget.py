@@ -1178,7 +1178,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._valid_configs: Dict[str, Dict[str, Any]] = {}
         self._is_destroyed = False
         # 多窗口隔离：窗口唯一标识（持久化 ID，跨重启稳定）
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
 
         self._window_id = TeamManager.get_instance().generate_window_id()
         # 注册由 _rxmb_zbshud_vhmcnvr_sn_sdzl_lzmzfdq() 触发
@@ -5943,7 +5943,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         if not getattr(self, "_team_agent_name", ""):
             return  # 非团队模式，无需监听
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
 
         try:
             tm = TeamManager.get_instance()
@@ -6360,7 +6360,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _sync_active_windows_to_team_manager(self):
         """同步当前所有活跃窗口 ID 到 TeamManager，触发失效成员清理"""
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
 
         tm = TeamManager.get_instance()
         active_ids = set()
@@ -6380,7 +6380,7 @@ class OpenAIChatToolWindow(ToolWindow):
     # ── 内部辅助 ─────────────────────────────────────
 
     def _get_team_manager(self):
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
 
         return TeamManager.get_instance()
 
@@ -8634,7 +8634,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _sync_team_member_runtime_status(self, state: str) -> None:
         """将 AI 状态同步到团队成员 runtime 状态（仅团队成员生效，非成员静默跳过）"""
-        from app.core.team_manager import TeamManager, check_team_member
+        from app.core.team.team_manager import TeamManager, check_team_member
 
         if not check_team_member(self._window_id):
             return
@@ -14466,7 +14466,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 团队元数据（被存为普通会话）。仅非团队窗口才采用记录 run_id
             # （此时加载团队会话 = 进入该团队上下文，登记为新成员）。
             try:
-                from app.core.team_manager import TeamManager
+                from app.core.team.team_manager import TeamManager
 
                 _member_guard = bool(self._window_id) and TeamManager.get_instance().is_team_member(self._window_id)
             except Exception:
@@ -14487,7 +14487,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 窗口（防 _cleanup_stale_members 误清）。仅 window_id 与 agent_name
             # 均非空时执行，不破坏普通会话加载语义。
             if self._window_id and self._team_agent_name:
-                from app.core.team_manager import TeamManager
+                from app.core.team.team_manager import TeamManager
 
                 tm = TeamManager.get_instance()
                 # 🆕 review#13-#1：守卫从「未注册」升级为「未注册 OR 已注册但 agent_name 不一致」。
@@ -14513,7 +14513,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 语义：成员身份由 join_team 决定——成员窗口后续编辑/产出会话归团队
             # （保存时带团队字段入团队合并条目），此为有意设计，非污染。
             try:
-                from app.core.team_manager import TeamManager
+                from app.core.team.team_manager import TeamManager
 
                 is_member = bool(self._window_id) and TeamManager.get_instance().is_team_member(self._window_id)
             except Exception:
@@ -21290,7 +21290,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not getattr(self, "_team_agent_name", ""):
             return
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
 
         tm_mgr = TeamManager.get_instance()
         # 发送方切换前项目兜底：未显式传入时用当前 _current_project
@@ -21364,7 +21364,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not getattr(self, "_team_agent_name", ""):
             return
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
 
         tm_mgr = TeamManager.get_instance()
         # 写团队级统一工作目录/工作树：按 run_id 粒度（workdirs_by_run_id），

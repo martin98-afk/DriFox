@@ -51,7 +51,7 @@ def hook(event: str, context: dict) -> str:
 
     try:
         from app.core.agent import create_agent_manager
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
 
         tm = TeamManager.get_instance()
         agent_name = _find_member_agent_name(tm, window_id)

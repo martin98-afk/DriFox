@@ -3547,7 +3547,7 @@ class TabManagerWindow(FramelessWindow):
         fallback 也为空则返回 ("", "")（header 不显示 icon）。
         """
         try:
-            from app.core.team_manager import TeamManager
+            from app.core.team.team_manager import TeamManager
 
             tm = TeamManager.get_instance()
             run_id = TabManagerWindow._resolve_tab_team_id(window)
@@ -3863,7 +3863,7 @@ class TabManagerWindow(FramelessWindow):
                     if hasattr(window, "_handle_team_leave") and callable(window._handle_team_leave):
                         window._handle_team_leave(silent=True, batch_disband=True)
                     else:
-                        from app.core.team_manager import TeamManager
+                        from app.core.team.team_manager import TeamManager
 
                         # 🛡️ W3a（W2 联调审查问题 4）：降级路径（无 _handle_team_leave
                         # 的老窗口/非主窗口）在 leave_team 前必须先停 team watcher——
@@ -3904,7 +3904,7 @@ class TabManagerWindow(FramelessWindow):
         # save_now=False 挂起（team_manager._save_team_data 仅标记 pending），
         # 此处 flush 一次原子写盘。flush 是优化项，失败静默不破坏解散流程。
         try:
-            from app.core.team_manager import TeamManager
+            from app.core.team.team_manager import TeamManager
 
             TeamManager.get_instance().flush_pending_saves()
         except Exception:

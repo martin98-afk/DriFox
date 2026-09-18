@@ -268,7 +268,7 @@ def test_on_team_close_empty_team_id_no_op(qapp):
 
 def test_on_team_close_falls_back_to_handle_team_leave_or_minimal(qapp):
     """窗口无 _handle_team_leave 时降级：仅调 tm.leave_team(window_id)"""
-    from app.core import team_manager as tm_mod
+    from app.core.team import team_manager as tm_mod
     from app.widgets.tab_manager_window import TabManagerWindow
 
     # window 没有 _handle_team_leave（部分老窗口可能没有）

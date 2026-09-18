@@ -231,7 +231,7 @@ def test_backend_injects_team_member_policy(monkeypatch):
     # 桩 TeamManager：本窗口是团队成员
     tm = MagicMock()
     tm.is_team_member.return_value = True
-    monkeypatch.setattr("app.core.team_manager.TeamManager", MagicMock(get_instance=lambda: tm))
+    monkeypatch.setattr("app.core.team.team_manager.TeamManager", MagicMock(get_instance=lambda: tm))
 
     captured = {}
 
@@ -264,7 +264,7 @@ def test_backend_no_policy_for_non_team(monkeypatch):
 
     tm = MagicMock()
     tm.is_team_member.return_value = False
-    monkeypatch.setattr("app.core.team_manager.TeamManager", MagicMock(get_instance=lambda: tm))
+    monkeypatch.setattr("app.core.team.team_manager.TeamManager", MagicMock(get_instance=lambda: tm))
 
     captured = {}
 

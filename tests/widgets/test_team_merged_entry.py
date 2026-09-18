@@ -461,7 +461,7 @@ class TestLoadSessionTeamMarks:
         """patch TeamManager.get_instance().is_team_member 返回值（F4 修复判定）。"""
         from unittest.mock import MagicMock, patch
 
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         fake_tm = MagicMock()
         fake_tm.is_team_member.return_value = result

@@ -774,7 +774,7 @@ class AgentManager:
             bt_window_id = getattr(_bt, "_team_window_id", "")
             if bt_window_id:
                 try:
-                    from app.core.team_manager import TeamManager
+                    from app.core.team.team_manager import TeamManager
 
                     is_in_team = TeamManager.get_instance().is_team_member(bt_window_id)
                 except Exception:

@@ -706,7 +706,7 @@ class ChatBackend(QObject):
             # 等主对话语义 hook，避免污染成员的邮件驱动对话流边界）。
             hook_policy_id = None
             try:
-                from app.core.team_manager import TeamManager
+                from app.core.team.team_manager import TeamManager
 
                 if TeamManager.get_instance().is_team_member(self._window_id):
                     hook_policy_id = "team_member"

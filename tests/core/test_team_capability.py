@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import team_manager as tm_mod
+from app.core.team import team_manager as tm_mod
 
 # 工具插件化：TeamTools 类已删除，团队工具迁移为 plugins/system-tools/tools/subagent_tools.py
 # 的模块级函数（_format_capability / _team_list_members / _team_send_message，tool_ctx 签名）。

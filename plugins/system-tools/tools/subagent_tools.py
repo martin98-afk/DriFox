@@ -34,7 +34,7 @@ _STATUS_LABELS = {
 
 
 def _get_team_manager():
-    from app.core.team_manager import TeamManager
+    from app.core.team.team_manager import TeamManager
 
     return TeamManager.get_instance()
 

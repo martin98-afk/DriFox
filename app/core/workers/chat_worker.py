@@ -77,7 +77,7 @@ class StreamInterruptedError(RuntimeError):
 
 def _check_team_member(backend) -> bool:
     """检查当前窗口是否是团队成员（委托给共用函数）"""
-    from app.core.team_manager import check_team_member
+    from app.core.team.team_manager import check_team_member
 
     return check_team_member(backend)
 
@@ -722,7 +722,7 @@ class OpenAIChatWorker(QThread):
                 return
             window_id = getattr(backend, "_window_id", None)
             if window_id:
-                from app.core.team_manager import TeamManager
+                from app.core.team.team_manager import TeamManager
 
                 tm = TeamManager.get_instance()
                 pending = tm.get_pending_tasks(window_id)

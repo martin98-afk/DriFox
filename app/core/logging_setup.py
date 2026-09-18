@@ -30,7 +30,7 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # 语言服务（LSP）
     ("lsp.log", ("app.core.lsp",), ()),
     # 团队协作与子智能体
-    ("team.log", ("app.core.team", "app.core.team_manager", "app.core.agent"), ()),
+    ("team.log", ("app.core.team", "app.core.team.team_manager", "app.core.agent"), ()),
     # 会话/记忆/用量存储
     ("store.log", ("app.core.store", "app.core.usage_service"), ()),
     # 工具框架与执行（mcp_tools 除外）

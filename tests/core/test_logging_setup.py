@@ -72,7 +72,7 @@ def test_key_modules_routed():
         "app.core.tools.tool_executor": "tools.log",
         "plugins.system-tools.tools.terminal_tools": "plugins.log",
         "app.main_widget": "ui.log",
-        "app.core.team_manager": "team.log",
+        "app.core.team.team_manager": "team.log",
         "app.core.store.session_store": "store.log",
     }
     for module_name, expected_file in expectations.items():
