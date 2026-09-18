@@ -1530,8 +1530,18 @@ class HistoryManager:
                 if not session.get("messages") and self._session_store and self._session_store.is_initialized:
                     full = self._session_store.get_session(session_id)
                     if full:
-                        session["messages"] = full.get("messages", [])
-                        session["message_count"] = full.get("message_count", len(session["messages"]))
+                        messages = full.get("messages", [])
+                        # [T2f 修复 a] 懒回填改全量物化：主 blob 是轻量消息
+                        # （剥离字段在 session_msg_extras 表），必须按 _x_idx
+                        # 合并回填；轻量消息进保存链会丢历史 extras（2026-09-12
+                        # 根因的读取侧一半）。
+                        extras = self._session_store.load_msg_extras(session_id)
+                        if extras:
+                            from app.core.store.session_repository import merge_extras_into
+
+                            merge_extras_into(messages, extras)
+                        session["messages"] = messages
+                        session["message_count"] = full.get("message_count", len(messages))
                         # system_prompt 轻量列表不再加载，借这次全量查询回填
                         # （full 已含该字段，零额外 I/O）
                         if session.get("system_prompt") is None:
