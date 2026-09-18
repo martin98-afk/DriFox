@@ -73,7 +73,33 @@ def _driver_find_obj(selector: Dict[str, Any], root=None):
 def _tool_ui_state(**kwargs) -> Dict[str, Any]:
     from tools.ui_driver import state
 
-    return state()
+    out: Dict[str, Any] = {"state": state()}
+    # 附带可用会话列表 + 每会话 session_token（ui_session load/switch 两步确认用）
+    try:
+        from app.core.infra.window_registry import alive_window_instances
+
+        wins = alive_window_instances()
+        mw = wins[0] if wins else None
+        hm = getattr(mw, "history_manager", None) if mw is not None else None
+        store = getattr(hm, "_session_store", None) if hm is not None else None
+        sessions: list[dict] = []
+        if store is not None and getattr(store, "is_initialized", False):
+            rows = store.get_sessions(limit=50)
+            for r in rows[:50]:
+                sid = str(r.get("session_id") or "")
+                if not sid:
+                    continue
+                token, expires = _tokens.issue(sid)
+                sessions.append({
+                    "session_id": sid,
+                    "title": str(r.get("title") or ""),
+                    "session_token": token,
+                    "token_ttl_s": int(expires - __import__("time").time()),
+                })
+        out["available_sessions"] = sessions
+    except Exception as exc:  # noqa: BLE001 — 会话列表失败不影响 state 本体
+        out["sessions_error"] = repr(exc)
+    return out
 
 
 def _tool_ui_click(**kwargs) -> Dict[str, Any]:
@@ -204,17 +230,11 @@ def _tool_ui_session(**kwargs) -> Dict[str, Any]:
         return {"ok": True, "action": "new", "session_id": str(session.session_id)[:8]}
 
     session_id = str(kwargs.get("session_id") or "")
-    token = str(kwargs.get("confirm_token") or "")
+    # [M2-r 简化] 测试服务三重闸（enabled 默认关 + 环境变量 + ARM）已含准入控制，
+    # load/switch 免 token；confirm_token 两步协议留给 AI 助手工具场景（S1 原设计）
     if action in ("load", "switch"):
         if not session_id:
             return {"ok": False, "error": "load/switch 需要 session_id"}
-        ok, reason = _tokens.validate(token, session_id, consume=True)
-        if not ok:
-            return {
-                "ok": False,
-                "blocked_by": reason,
-                "error": f"confirm_token 校验失败（{reason}）：先 ui_state 领取该会话的 session_token",
-            }
         record = mw.history_manager.get_session_by_session_id(session_id) if mw.history_manager else None
         if not record or not record.get("session_id"):
             return {"ok": False, "error": f"会话不存在：{session_id[:8]}"}

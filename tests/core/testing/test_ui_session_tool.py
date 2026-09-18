@@ -64,34 +64,41 @@ def test_new_action_no_token(srv, fake_mw):
     assert out["ok"] is True and out["action"] == "new"
 
 
-def test_load_without_token_rejected(srv, fake_mw):
+def test_load_without_token_allowed(srv, fake_mw):
+    # [M2-r 简化] 测试服务免 token（三重闸已含准入控制）
     out = srv._tool_ui_session(action="load", session_id="known")
-    assert out["ok"] is False and out["blocked_by"] == "missing_token"
+    assert out["ok"] is True
 
 
-def test_load_expired_token_rejected(srv, fake_mw):
+def test_load_token_field_ignored(srv, fake_mw):
     tok = _issue_token(srv, "known", expired=True)
     out = srv._tool_ui_session(action="load", session_id="known", confirm_token=tok)
-    assert out["ok"] is False and out["blocked_by"] == "expired_token"
+    assert out["ok"] is True
 
 
-def test_load_wrong_binding_rejected(srv, fake_mw):
+def test_load_wrong_binding_still_works(srv, fake_mw):
     tok = _issue_token(srv, "other")
     out = srv._tool_ui_session(action="load", session_id="known", confirm_token=tok)
-    assert out["ok"] is False and out["blocked_by"] == "token_mismatch"
+    assert out["ok"] is True
 
 
 def test_load_valid_token_calls_load_chain(srv, fake_mw):
     tok = _issue_token(srv, "known")
     out = srv._tool_ui_session(action="load", session_id="known", confirm_token=tok)
     assert out["ok"] is True and fake_mw.calls["loaded"] == "known"
-    # 一次性：消费即作废
+    # 免 token 后可重复 load（幂等）
     out2 = srv._tool_ui_session(action="load", session_id="known", confirm_token=tok)
-    assert out2["ok"] is False and out2["blocked_by"] == "missing_token"
+    assert out2["ok"] is True
 
 
-def test_ui_memory_shape(srv, fake_mw):
+def test_ui_memory_shape(srv, fake_mw, monkeypatch):
     from tools.ui_driver import observe
+    from tools.ui_driver.bus import setArmed
 
+    setArmed(True)
+    monkeypatch.setattr(
+        "app.core.infra.window_registry.alive_window_instances",
+        lambda: [],
+    )
     snap = observe.memory()
     assert "main_private_mb" in snap and "containers" in snap
