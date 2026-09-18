@@ -272,7 +272,7 @@
         },
         {
             "name": "system-context",
-            "description": "DriFox 内置上下文管理（前缀安全层）：工具结果截断 + 长结果落盘。逐层启停在「设置 → 大模型 → 上下文」页；会改写历史消息、破坏 prompt cache 前缀的压缩层不在本插件（见用户插件 context-compaction）",
+            "description": "发送请求前自动给上下文瘦身：超长的工具结果先落盘成文件（上下文留预览块，模型可读回全文），较长的截断头尾、省略中段；同一结果每轮投影一致，不破坏 prompt cache。预算解析按模型上下文容量计算历史消息可用 token，达标即停。各层可单独开关，阈值在下方细项的插件设置里调",
             "version": "2.3.0",
             "author": "DriFoxx Team",
             "license": "MIT",
