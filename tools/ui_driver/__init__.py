@@ -29,7 +29,7 @@ from __future__ import annotations
 from PyQt5.QtWidgets import QWidget
 
 from .actions import click, scroll, type_text, wait_idle, wait_signal, wait_until
-from .bus import DriverNotArmedError, DriverTimeoutError, invoke, is_armed, setArmed
+from .bus import DriverNotArmedError, DriverTimeoutError, init_main_caller, invoke, is_armed, setArmed
 from .observe import memory, screenshot, state
 from .query import find, tree
 

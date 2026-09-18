@@ -689,9 +689,11 @@ def main():
     _ui_test_addr = os.environ.get("DRIFOX_UI_TEST_SERVER", "")
     if _ui_test_addr:
         try:
-            from tools.ui_driver import setArmed as _ui_test_setArmed
+            from tools.ui_driver import init_main_caller, setArmed as _ui_test_setArmed
             from tools.ui_test_server.server import start_ui_test_server as _start_ui_test_server
 
+            # _MainCaller 亲和性必须在主线程定型（工作线程构造会导致 queued 请求永不派发）
+            init_main_caller()
             _host, _, _port = _ui_test_addr.rpartition(":")
             _ui_test_thread = threading.Thread(
                 target=_start_ui_test_server,

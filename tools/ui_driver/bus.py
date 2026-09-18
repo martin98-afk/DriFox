@@ -98,6 +98,17 @@ class _MainCaller(QObject):
 _caller: Optional[_MainCaller] = None
 
 
+def init_main_caller() -> None:
+    """主线程内显式构造 _MainCaller（线程亲和性=主线程）。
+
+    必须在主线程调用（如 main.py 启动链）；若留给首个工作线程 invoke 惰性
+    构造，_MainCaller 的 thread affinity 会错误落在工作线程上，queued 请求
+    永不派发（S3b/M2 e2e 实测：invoke 全部 15s 超时）。
+    """
+    global _caller
+    _get_caller()
+
+
 def _get_caller() -> _MainCaller:
     global _caller
     if _caller is None:
