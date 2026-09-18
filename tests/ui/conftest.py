@@ -37,6 +37,16 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401,E402
 pytest_plugins = ["pytestqt"]
 
 
+@pytest.fixture(autouse=True)
+def _ui_driver_armed():
+    """tests/ui 全部用例默认 ARM（驱动库 guard 需要；用例结束复位）。"""
+    from tools.ui_driver import setArmed
+
+    setArmed(True)
+    yield
+    setArmed(False)
+
+
 @pytest.fixture(scope="session")
 def ui_app(request):
     """session 级：完整主窗口（含插件栈），不 exec_，由 qtbot 泵事件。
@@ -128,9 +138,11 @@ def ui_session(ui_app, qtbot):
     mw = ui_app["chat_window"]
     sm = mw.session_manager
     session = sm.create_new_session()
+    sm.set_current_session(session) if hasattr(sm, "set_current_session") else None
+    cur = sm.get_current_session()
     for i in range(20):
-        session.messages.append({"role": "user", "content": f"问题 {i}：请回复一段较长的说明文本。" * 3})
-        session.messages.append({"role": "assistant", "content": f"回答 {i}：" + "这是用于撑起批次与滚动的填充内容。" * 20})
+        cur.messages.append({"role": "user", "content": f"问题 {i}：请回复一段较长的说明文本。" * 3})
+        cur.messages.append({"role": "assistant", "content": f"回答 {i}：" + "这是用于撑起批次与滚动的填充内容。" * 20})
     mw._display_current_session()
     mw._release_inactive_session_messages()
     qtbot.wait(800)  # 等批次构建/懒渲染首屏落定

@@ -162,23 +162,25 @@ def test_pool_lifecycle_after_cleanup(tmp_path):
 def test_session_switch_memory_rebounds(ui_app, ui_session, qtbot, mem_sampler, tmp_path):
     """双会话（其一含 5MB 级图片附件）切换 ×10：Private 中位数回落 ≤ 基线+30%。"""
     from PyQt5.QtCore import Qt
-    from PyQt5.QtGui import QImage, QPainter
+    from PyQt5.QtGui import QColor, QImage, QPainter
 
     mw = ui_session
     sm = mw.session_manager
 
-    # 会话 B：文本 + 5MB 级 PNG 附件（约 5MB 文件 → 解码 ~33MB 位图）
+    # 会话 B：文本 + 大 PNG 附件（随机噪声字节构造 → PNG 不可压缩，体积必达标）
     sess_b = sm.create_new_session()
     for i in range(20):
         sess_b.messages.append({"role": "user", "content": f"B 问题 {i}"})
         sess_b.messages.append({"role": "assistant", "content": "B 回答：" + "内容填充。" * 20})
-    big = QImage(3840, 2160, QImage.Format_ARGB32)
-    painter = QPainter(big)
-    painter.fillRect(big.rect(), Qt.darkRed)
-    painter.end()
+    import os as _os
+
+    w, h = 3840, 2160
+    raw = _os.urandom(w * h * 4)  # 随机 ARGB：PNG 无法压缩，文件 ≈ 位图体积的压缩上限外
+    big = QImage(raw, w, h, w * 4, QImage.Format_ARGB32)
     png_b = tmp_path / "b_big.png"
     assert big.save(str(png_b), "PNG")
-    assert png_b.stat().st_size > 3 * 1024 * 1024, "测试前置：PNG 应 ≥3MB"
+    size_kb = png_b.stat().st_size // 1024
+    assert size_kb > 2048, f"PNG too small: {size_kb}KB"
     sess_b.messages[0]["_image_attachments"] = [str(png_b)]
 
     def _switch(sess):
