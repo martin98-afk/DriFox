@@ -343,6 +343,99 @@ def test_vision_coexists_with_offload_fields(repo, tmp_path):
     assert os_path_exists_indir(tmp_path, sid) or True
 
 
+# ── 方案 1 缺口：image_ref 必须在规范化链路存活 ──
+
+
+def _ref_block(sid="sess-x"):
+    return {"type": "image_ref", "image_ref": {"file": "x.png", "meta": "image/png", "session_id": sid}}
+
+
+def _user_with_ref(sid="sess-x"):
+    return {"role": "user", "content": [_ref_block(sid), {"type": "text", "text": "看看这张图"}]}
+
+
+def _block_kinds(messages):
+    kinds = []
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list):
+            kinds += [b.get("type") for b in c if isinstance(b, dict)]
+    return kinds
+
+
+def test_image_ref_survives_normalize():
+    """回归：image_ref 必须走 multimodal 分支存活（否则加载后回写即永久丢图）。"""
+    from app.core.conversation.message_content import (
+        _has_image_content,
+        consolidate_messages,
+        normalize_message,
+    )
+
+    assert _has_image_content([_ref_block()]), "image_ref 应被识别为图片内容"
+    n = normalize_message(_user_with_ref())
+    assert isinstance(n["content"], list), f"image_ref 被拍平成文本: {n['content']!r}"
+    assert "image_ref" in _block_kinds([n])
+
+    c = consolidate_messages([_user_with_ref()])
+    assert "image_ref" in _block_kinds(c), f"consolidate 丢 image_ref: {c}"
+
+
+def test_image_ref_survives_display_and_truncate():
+    """回归：显示分组（group_messages_for_display）与截断（撤销/分支）均不得丢图。"""
+    from app.core.conversation.message_content import (
+        consolidate_messages,
+        group_messages_for_display,
+        truncate_messages_at,
+    )
+
+    msgs = [_user_with_ref(), {"role": "assistant", "content": "看到图了。"}]
+    flat = [m for batch in group_messages_for_display(msgs) for m in batch]
+    assert "image_ref" in _block_kinds(flat), f"显示分组丢 image_ref: {flat}"
+
+    trunc = truncate_messages_at(consolidate_messages(msgs), len(msgs) - 1)
+    assert "image_ref" in _block_kinds(trunc), f"截断丢 image_ref: {trunc}"
+
+
+def test_image_ref_survives_save_load_resave(repo, tmp_path, monkeypatch):
+    """端到端回归：save → load → 规范化 → 回存，image_ref 仍在（图片不成孤儿）。"""
+    import base64
+
+    from app.core.conversation.message_content import consolidate_messages
+
+    # persist 内部走全局 get_app_data_dir()，测试必须隔离到 tmp_path，
+    # 否则落盘文件写到真实 .drifox 且 revive 读不到。
+    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path, raising=False)
+
+    sid = "vision-resave"
+    png = _png_bytes(32)
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}},
+                {"type": "text", "text": "看看这张图"},
+            ],
+        },
+        {"role": "assistant", "content": "看到图了。"},
+    ]
+    _save_session(repo, sid, msgs)
+    loaded = repo.get(sid)["messages"]
+    assert "image_ref" in _block_kinds(loaded), f"落盘后应为 image_ref: {loaded}"
+
+    canonical = consolidate_messages(loaded)
+    # 强制走真实写盘（save 有 (len, last_msg_hash) 指纹短路）
+    writeback = [dict(m) for m in canonical]
+    writeback[-1]["content"] = str(writeback[-1].get("content") or "") + "（回写）"
+    _save_session(repo, sid, writeback)
+
+    after = repo.get(sid)["messages"]
+    assert "image_ref" in _block_kinds(after), f"回存后丢 image_ref（图片成孤儿文件）: {after}"
+    # revive 仍能把图还原出来（repo fixture 的 root_dir 即 tmp_path）
+    revived = revive_vision_image_refs(repo.get_full_messages(sid), tmp_path)
+    kinds = [b.get("type") for m in revived if isinstance(m.get("content"), list) for b in m["content"]]
+    assert "image_url" in kinds, f"revive 失败: {kinds}"
+
+
 def os_path_exists_indir(tmp_path, sid):
     p = tmp_path / "screenshots" / "persisted" / sid
     return p.exists()

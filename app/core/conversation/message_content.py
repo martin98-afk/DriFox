@@ -160,7 +160,12 @@ def _sanitize_rendering_string(text: str) -> str:
 
 
 def _has_image_content(content: Any) -> bool:
-    """检查内容中是否包含图片块"""
+    """检查内容中是否包含图片块
+
+    含 ``image_ref``（方案 1 落盘引用块）：落盘会话加载后必须先被识别为
+    multimodal，否则 normalize_message 会走纯文本分支把它拍平成正文，
+    撤销/分支/压缩路径回写即永久丢图（screenshots 文件成孤儿）。
+    """
     if isinstance(content, list):
         for block in content:
             if isinstance(block, dict):
@@ -170,6 +175,9 @@ def _has_image_content(content: Any) -> bool:
                 if block.get("type") == "input_image":
                     return True
                 if block.get("type") == "image":
+                    return True
+                # 方案 1：落盘图片引用（读侧 revive 前的中转形态）
+                if block.get("type") == "image_ref":
                     return True
     return False
 
@@ -240,7 +248,7 @@ def _clean_multimodal_blocks(blocks: List[Dict]) -> List[Dict]:
             text = str(block.get("text", ""))
             if text:
                 cleaned.append({"type": "text", "text": text})
-        elif btype in ("image_url", "input_image", "image"):
+        elif btype in ("image_url", "input_image", "image", "image_ref"):
             cleaned.append(dict(block))
         else:
             # 其他类型保留
@@ -513,7 +521,7 @@ def content_to_text(content: Any, include_tool_results: bool = False) -> str:
             text = str(block.get("text", ""))
             if text:
                 texts.append(text)
-        elif block_type in ("image_url", "input_image", "image"):
+        elif block_type in ("image_url", "input_image", "image", "image_ref"):
             # 图片块转为文本占位符
             continue
         elif include_tool_results and block_type == "tool_result":
