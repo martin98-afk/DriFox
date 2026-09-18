@@ -86,7 +86,9 @@ def test_auto_arm_requires_both_flags(ui_tools_module, monkeypatch, tmp_path):
     setArmed(False)
     _enable_plugin(monkeypatch, tmp_path)
     cfg_dir = tmp_path / "plugin_data" / "ui-driver"
-    (cfg_dir / "config.json").write_text(json.dumps({"enabled": True, "auto_arm": True}), encoding="utf-8")
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"enabled": True, "auto_arm": True}), encoding="utf-8"
+    )
     reg = _FakeRegistry()
     ui_tools_module.register(reg)
     assert len(reg.registered) == 5
