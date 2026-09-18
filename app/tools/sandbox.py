@@ -110,3 +110,67 @@ class SandboxConfig:
         for part in parts[:-1]:
             node = node.setdefault(part, {})
         node[parts[-1]] = value
+
+
+# ============================================================
+# 路径边界（写窄读宽）
+# ============================================================
+# 读/写工具的归属由 ToolRegistry 分组驱动（sandbox_check_tool），
+# 分组名与插件侧 GROUP_WRITE/GROUP_READ（plugins/system-tools/tools/file_tools.py:109）
+# 对齐；不在此写死工具名清单——插件增删热生效，写死必漏。
+
+def _norm(p: Union[str, Path]) -> str:
+    """展开环境变量/~ 后 resolve，统一大小写与分隔符（Windows 比较用）"""
+    raw = str(p)
+    expanded = os.path.expandvars(raw)
+    return os.path.normcase(str(Path(expanded).expanduser().resolve()))
+
+
+def _under(child: str, parent: str) -> bool:
+    """child 是否位于 parent 目录内（含相等）"""
+    if parent == child:
+        return True
+    return child.startswith(parent.rstrip("\\/") + os.sep)
+
+
+def _match_blacklist(norm_path: str, blacklist: list) -> bool:
+    """黑名单条目：绝对目录前缀匹配，或裸文件名匹配（如 ".env" 命中任意层级 .env）"""
+    for item in blacklist:
+        item_str = str(item)
+        if os.path.isabs(os.path.expandvars(item_str)):
+            norm_item = _norm(item_str)
+            if norm_path.startswith(norm_item):
+                return True
+        else:
+            if Path(norm_path).name.lower() == item_str.lower():
+                return True
+    return False
+
+
+def check_path(
+    workdir: Union[str, Path],
+    path: str,
+    mode: str,
+    cfg: Optional[SandboxConfig] = None,
+) -> Verdict:
+    """路径边界判定。mode: "read"|"write"。优先级：黑名单 > 白名单 > workdir 边界"""
+    cfg = cfg or SandboxConfig.get_instance()
+    if not cfg.get("sandbox_enabled"):
+        return ALLOW
+    if not path or not str(path).strip():
+        return ALLOW
+
+    norm_path = _norm(path)
+    blacklist = cfg.get("path.blacklist") or []
+    whitelist = cfg.get("path.whitelist") or []
+
+    # 黑名单最高优先（读写都拦）
+    if blacklist and _match_blacklist(norm_path, blacklist):
+        return CONFIRM
+    # 白名单放行出界写
+    if any(_under(norm_path, _norm(item)) for item in whitelist):
+        return ALLOW
+    if mode == "write":
+        workdir_norm = _norm(workdir)
+        return ALLOW if _under(norm_path, workdir_norm) else CONFIRM
+    return ALLOW
