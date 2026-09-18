@@ -333,7 +333,7 @@ class GlobalCardController:
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict, is_new: bool = False):
         """服务商编辑保存后的回调（全局配置落盘 + 广播所有窗口刷新）"""
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
-        from app.core.provider_profile import ProviderConfigCollision, apply_provider_save
+        from app.core.modelmeta.provider_profile import ProviderConfigCollision, apply_provider_save
 
         try:
             new_config_id = apply_provider_save(saved_providers, provider_info, provider_name, is_new=is_new)

@@ -85,7 +85,7 @@ from app.core import (
 from app.core.message_content import _is_hook_message, strip_system_reminder
 from app.core.commands.builtin_commands import FunctionCommandHandlers
 from app.core.commands.command_manager import CommandManager, CommandType
-from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
+from app.core.modelmeta.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
 from app.core.rss_sampler import rss_sampler
 from app.core.tools.tool_permission_controller import ToolPermissionController
 from app.core import window_registry
@@ -2421,7 +2421,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not self._current_model_name:
             return
-        from app.core.model_capabilities import get_model_capabilities
+        from app.core.modelmeta.model_capabilities import get_model_capabilities
 
         caps = get_model_capabilities(self._current_model_name)
         if not caps.get("supports_thinking", False):
@@ -3153,7 +3153,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ 关键：PyQt 不会自动断开 singleton → window 的跨对象连接（widget 销毁
         # 只断开 parent-owned 信号），必须用 _reg_sig 跟踪并在 destroyed 时清理。
         try:
-            from app.core.config_sync import ConfigSyncService
+            from app.core.sync.config_sync import ConfigSyncService
 
             self._reg_sig(
                 ConfigSyncService.get_instance().settingsRestored,
@@ -7273,7 +7273,7 @@ class OpenAIChatToolWindow(ToolWindow):
         描述来自 models.dev / 硬编码能力字典的 note 字段（无则空串）。
         供命令卡片枚举值模式显示当前模型描述。
         """
-        from app.core.model_capabilities import get_model_capabilities
+        from app.core.modelmeta.model_capabilities import get_model_capabilities
 
         options = []
         for config_id, config in self._valid_configs.items():
@@ -7434,7 +7434,7 @@ class OpenAIChatToolWindow(ToolWindow):
         （首个请求的 on_done 回调会广播所有窗口）；首个发起者负责置 inflight
         并把结果写类级缓存、清 inflight、广播所有活跃窗口。
         """
-        from app.core.models_dev_sync import get_dynamic_models, refresh_dynamic_models_async
+        from app.core.modelmeta.models_dev_sync import get_dynamic_models, refresh_dynamic_models_async
 
         # 类级内存缓存命中（多窗口已加载过）→ 直接 emit 给本窗口，无需发请求
         cached = OpenAIChatToolWindow._models_dev_cache
@@ -7500,7 +7500,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         只刷新内置默认，不碰用户自己添加的 OpenCode 实例，避免覆盖用户自定义模型列表。
         启动后立即返回，不阻塞 UI。
-        网络与解析逻辑在 app.core.models_dev_sync 的
+        网络与解析逻辑在 app.core.modelmeta.models_dev_sync 的
         fetch_opencode_free_models_for_providers，本方法只负责收集实例、
         调度线程、把结果经信号回主线程刷新 UI。
 
@@ -7510,7 +7510,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         import threading
 
-        from app.core.models_dev_sync import fetch_opencode_free_models_for_providers
+        from app.core.modelmeta.models_dev_sync import fetch_opencode_free_models_for_providers
 
         # 类级 inflight 守卫：已有窗口在拉取 → 跳过，结果会在 on_done 回调中广播
         if OpenAIChatToolWindow._opencode_fetch_inflight:

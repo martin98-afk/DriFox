@@ -43,8 +43,8 @@ from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
-from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
-from app.core.provider_profile import get_provider_profile
+from app.core.modelmeta.model_capabilities import get_model_capabilities, normalize_reasoning_effort
+from app.core.modelmeta.provider_profile import get_provider_profile
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.core.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
@@ -2156,7 +2156,7 @@ class OpenAIChatWorker(QThread):
                         #  这里漏传 tools 会让卡片底部的 fallback 估值缺掉工具定义，与圆环对不上）
                         # ratio：本地估算校正系数（服务商能力 > app.config 覆盖 > 模型名兜底），
                         # 修正 MiniMax 等不返 usage 厂商的本地估算比真实值高约 2 倍的问题。
-                        from app.core.provider_profile import resolve_token_ratio
+                        from app.core.modelmeta.provider_profile import resolve_token_ratio
 
                         ctx_count = count_messages_tokens(
                             current_messages,
@@ -5084,7 +5084,7 @@ class OpenAIChatWorker(QThread):
             image_data=getattr(result_obj, "image_data", None) if result_obj else None,
         ):
             try:
-                from app.core.model_capabilities import get_model_capabilities
+                from app.core.modelmeta.model_capabilities import get_model_capabilities
 
                 _model_name = str(self.llm_config.get("模型名称", "") or "")
                 _caps = get_model_capabilities(_model_name)

@@ -364,7 +364,7 @@ def main():
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
             try:
-                from app.core.models_dev_sync import load_dynamic_models
+                from app.core.modelmeta.models_dev_sync import load_dynamic_models
 
                 result = load_dynamic_models()
                 dynamic_count = sum(len(v) for v in result.provider_models.values())

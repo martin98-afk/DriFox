@@ -33,7 +33,7 @@ get_model_capabilities 返回值的优先级：
 from typing import Any, Dict, Optional
 
 from app.constants import provider_default_config
-from app.core.provider_profile import get_provider_profile
+from app.core.modelmeta.provider_profile import get_provider_profile
 
 # =============================================================================
 # 字段名候选（按这个顺序查 llm_config 里的显式值）
@@ -346,7 +346,7 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
 def _get_dynamic_model_capabilities(model_name: str) -> Optional[Dict[str, Any]]:
     """从 models.dev 动态缓存中查询模型能力，失败返回 None。"""
     try:
-        from app.core.models_dev_sync import get_dynamic_models
+        from app.core.modelmeta.models_dev_sync import get_dynamic_models
 
         dynamic = get_dynamic_models()
         return dynamic.model_capabilities.get(model_name) or dynamic.model_capabilities.get(model_name.lower())

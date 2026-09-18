@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from app.core.context.view import ContextView, TierStat
-from app.core.model_capabilities import resolve_context_limit
+from app.core.modelmeta.model_capabilities import resolve_context_limit
 from app.plugins.contracts.context_policy import (
     STAGE_INGEST,
     STAGE_SEND,

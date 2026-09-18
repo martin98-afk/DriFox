@@ -116,7 +116,7 @@ class ToolPermissionController(QObject):
         # 发射，无参），各 tab 内存状态相互独立；用户编辑仍写入全局 Settings
         # （保留「最后一份」），新建 tab 启动时读取即继承，分支/复制走 copy_state_from。
         try:
-            from app.core.config_sync import ConfigSyncService
+            from app.core.sync.config_sync import ConfigSyncService
 
             self._reg_sig(
                 ConfigSyncService.get_instance().settingsRestored,

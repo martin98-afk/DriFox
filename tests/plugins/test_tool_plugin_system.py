@@ -1213,7 +1213,7 @@ class TestPerToolPolicy:
             # 模拟外部变更(ConfigSync 下载新配置):写 Settings 后由
             # ConfigSyncService.settingsRestored 驱动刷新。控制器不再监听
             # Settings.valueChanged,避免兄弟 tab 本地编辑互相广播刷新。
-            from app.core.config_sync import ConfigSyncService
+            from app.core.sync.config_sync import ConfigSyncService
 
             s.tool_permission_policy.value = {"read": "ask", "stale_tool": "ask"}
             ConfigSyncService.get_instance().settingsRestored.emit()

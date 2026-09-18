@@ -105,7 +105,7 @@ def _legacy_estimate(session, llm_config: Optional[Dict] = None) -> Tuple[int, i
     """旧口径兜底：count_messages_tokens(全量) + resolve_context_limit"""
     try:
         from app.core.token_estimator import count_messages_tokens
-        from app.core.provider_profile import resolve_token_ratio
+        from app.core.modelmeta.provider_profile import resolve_token_ratio
 
         model = str((llm_config or {}).get("模型名称", "gpt-4") or "gpt-4")
         token_count = count_messages_tokens(
@@ -118,7 +118,7 @@ def _legacy_estimate(session, llm_config: Optional[Dict] = None) -> Tuple[int, i
 
     token_limit = 0
     try:
-        from app.core.model_capabilities import resolve_context_limit
+        from app.core.modelmeta.model_capabilities import resolve_context_limit
 
         token_limit = resolve_context_limit(llm_config or {})
     except Exception:

@@ -511,7 +511,7 @@ def _register_sync_provider() -> None:
     - 绑定 Gitee 后自动上传/下载；目录变更 watch 到自动上传。
     """
     try:
-        from app.core.config_sync import register_sync_content_provider
+        from app.core.sync.config_sync import register_sync_content_provider
 
         from assistant_hub_manager import AssistantManager
 

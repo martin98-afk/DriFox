@@ -351,7 +351,7 @@ class TestUploadBytes:
             patch.object(uploader, "_ensure_config", side_effect=[True, False, True]),
             patch.object(uploader, "_backend") as mock_backend,
             patch.object(uploader, "tokenInvalid") as mock_signal,
-            patch("app.core.config_sync.ConfigSyncService.get_instance", return_value=fake_svc),
+            patch("app.core.sync.config_sync.ConfigSyncService.get_instance", return_value=fake_svc),
         ):
             # 首次 401；云端恢复后重试上传成功
             mock_backend.upload.side_effect = [False, True]

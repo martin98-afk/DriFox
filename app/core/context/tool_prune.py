@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from typing import Dict, Optional
 
-from app.core.model_capabilities import resolve_context_limit
+from app.core.modelmeta.model_capabilities import resolve_context_limit
 
 TOOL_RESULT_MAX_LEN = 8192  # 基础阈值（短上下文模型默认）
 TOOL_RESULT_HEAD_KEEP = 4096  # 保留头部字符数

@@ -259,7 +259,7 @@ class GiteeAccountRow(QFrame):
         self._compact = False  # 是否紧凑模式（收起时垂直堆叠）
         self._invalid = False  # 绑定是否已失效（token 失效，需重新绑定）
 
-        from app.core.config_sync import ConfigSyncService
+        from app.core.sync.config_sync import ConfigSyncService
 
         self._sync_svc = ConfigSyncService.get_instance()
         self._setup_ui()
@@ -1132,7 +1132,7 @@ class GiteeCard(SettingCard):
         self.hBoxLayout.addWidget(self._sync_dot)
         self.hBoxLayout.addSpacing(2)
 
-        from app.core.config_sync import ConfigSyncService
+        from app.core.sync.config_sync import ConfigSyncService
 
         self._sync_svc = ConfigSyncService.get_instance()
         # 先断开旧连接，防止 GiteeCard 重建（如设置面板关闭再打开）导致重复连接
@@ -1347,7 +1347,7 @@ class GiteeCard(SettingCard):
 
     def _start_oauth_with_backup(self, repo_private: bool):
         """绑定前先备份本地配置"""
-        from app.core.config_sync import ConfigSyncService
+        from app.core.sync.config_sync import ConfigSyncService
 
         ConfigSyncService.get_instance().backup_local()
         self._start_oauth(repo_private)

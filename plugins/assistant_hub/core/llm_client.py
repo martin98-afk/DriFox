@@ -169,7 +169,7 @@ def _supports_thinking(model: str) -> bool:
     if not model:
         return False
     try:
-        from app.core.model_capabilities import get_model_capabilities
+        from app.core.modelmeta.model_capabilities import get_model_capabilities
 
         return bool((get_model_capabilities(model) or {}).get("supports_thinking", False))
     except Exception:

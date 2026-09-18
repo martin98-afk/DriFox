@@ -73,7 +73,7 @@ class TestModelCapabilities:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.model_capabilities")
+        return pytest.importorskip("app.core.modelmeta.model_capabilities")
 
     def test_import(self, mod):
         assert mod is not None

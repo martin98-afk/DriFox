@@ -81,7 +81,7 @@ def _get_records_path() -> Path:
 # 用于跨设备同步插件业务数据（如 assistant_hub 的助手信息与记忆）。
 #
 # 用法：
-#   from app.core.config_sync import register_sync_content_provider
+#   from app.core.sync.config_sync import register_sync_content_provider
 #   register_sync_content_provider(
 #       provider_id="assistant_hub",
 #       label="助手信息与记忆",

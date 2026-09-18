@@ -24,7 +24,7 @@ from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.message_content import content_to_text
 from app.core.token_estimator import count_tools_tokens, per_message_tokens
-from app.core.provider_profile import resolve_token_ratio
+from app.core.modelmeta.provider_profile import resolve_token_ratio
 from app.tools import get_builtin_tools_schema
 
 

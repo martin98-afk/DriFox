@@ -750,7 +750,7 @@ class ProviderEditCard(QWidget):
         """保存。
 
         不再手工保留 config_id——config_id 现在由 main_widget 端基于 apikey
-        的稳定 hash 计算（见 app.core.provider_profile.apply_provider_save），
+        的稳定 hash 计算（见 app.core.modelmeta.provider_profile.apply_provider_save），
         编辑同 apikey 始终命中同一条目，不会再产生重复。
         """
         if self.modelListEditor.isVisible():

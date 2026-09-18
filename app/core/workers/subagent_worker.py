@@ -15,14 +15,14 @@ from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
-from app.core.model_capabilities import (
+from app.core.modelmeta.model_capabilities import (
     get_model_capabilities,
     normalize_reasoning_effort,
     resolve_context_limit,
     resolve_max_output_tokens,
 )
 from app.core.message_content import extract_reasoning_delta
-from app.core.provider_profile import get_provider_profile
+from app.core.modelmeta.provider_profile import get_provider_profile
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.tools.result import ToolResult
@@ -878,7 +878,7 @@ class SubAgentExecutor(QThread):
             if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
                 try:
                     from app.core.token_estimator import count_messages_tokens as _count
-                    from app.core.model_capabilities import resolve_context_limit as _resolve_limit
+                    from app.core.modelmeta.model_capabilities import resolve_context_limit as _resolve_limit
 
                     token_count = _count(current_messages)
                     token_limit = 0

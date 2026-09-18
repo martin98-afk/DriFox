@@ -831,7 +831,7 @@ class SubAgentCompactFloatingWidget(QWidget):
         if not model_name:
             return ""
         try:
-            from app.core.model_capabilities import get_model_capabilities
+            from app.core.modelmeta.model_capabilities import get_model_capabilities
 
             caps = get_model_capabilities(model_name)
             ctx_limit = caps.get("context_limit", 0) or caps.get("max_context_tokens", 0) or 0

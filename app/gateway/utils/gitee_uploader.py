@@ -244,7 +244,7 @@ class GiteeUploader(QObject):
                     # token 为设备本地独立凭证（云端不再存储）：重载本地 token
                     # 重试一次，仍失败则走下方 tokenInvalid 判定（真失效才提示）
                     try:
-                        from app.core.config_sync import ConfigSyncService
+                        from app.core.sync.config_sync import ConfigSyncService
 
                         svc = ConfigSyncService.get_instance()
                         if svc.recover_token_from_cloud():
