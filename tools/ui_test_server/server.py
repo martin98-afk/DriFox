@@ -70,6 +70,12 @@ def _driver_find_obj(selector: Dict[str, Any], root=None):
     return find(selector, root=root)
 
 
+def _tool_ui_memory(**kwargs) -> Dict[str, Any]:
+    from tools.ui_driver import memory
+
+    return memory()
+
+
 def _tool_ui_state(**kwargs) -> Dict[str, Any]:
     from tools.ui_driver import state
 
@@ -90,12 +96,14 @@ def _tool_ui_state(**kwargs) -> Dict[str, Any]:
                 if not sid:
                     continue
                 token, expires = _tokens.issue(sid)
-                sessions.append({
-                    "session_id": sid,
-                    "title": str(r.get("title") or ""),
-                    "session_token": token,
-                    "token_ttl_s": int(expires - __import__("time").time()),
-                })
+                sessions.append(
+                    {
+                        "session_id": sid,
+                        "title": str(r.get("title") or ""),
+                        "session_token": token,
+                        "token_ttl_s": int(expires - __import__("time").time()),
+                    }
+                )
         out["available_sessions"] = sessions
     except Exception as exc:  # noqa: BLE001 — 会话列表失败不影响 state 本体
         out["sessions_error"] = repr(exc)
@@ -281,6 +289,11 @@ def _schemas() -> Dict[str, Dict[str, Any]]:
             },
         ),
         "ui_state": sch("ui_state", "界面状态快照（会话/批次/卡/池/配额/懒队列）", {}),
+        "ui_memory": sch(
+            "ui_memory",
+            "内存采样：主进程 Private/WS + WebEngine 子进程 RSS + 容器计数（间隔采样对比增量）",
+            {},
+        ),
         "ui_click": sch(
             "ui_click",
             "点击控件（两步确认：先 ui_inspect mode=find 命中领取 confirm_token；危险关键词目标直接拒）",
@@ -340,6 +353,7 @@ def _handlers() -> Dict[str, Callable[..., Dict[str, Any]]]:
         "ui_wait": _tool_ui_wait,
         "ui_screenshot": _tool_ui_screenshot,
         "ui_session": _tool_ui_session,
+        "ui_memory": _tool_ui_memory,
     }
 
 
@@ -410,7 +424,7 @@ class _RpcHandler(BaseHTTPRequestHandler):
                 return
             try:
                 # HTTP handler 线程 → bus.invoke 投递主线程执行 UI 操作
-                data = invoke(lambda: handler(**args))
+                data = invoke(lambda: handler(**args), timeout_ms=90000)
                 self._send_json(
                     200,
                     {

@@ -292,3 +292,100 @@ def test_hidden_card_keeps_aux_dirty(qapp):
         assert not card._aux_dirty, "showEvent 应补刷并清 dirty"
     finally:
         card.close()
+
+
+def test_switch_survives_collector_pulled_ahead(qapp):
+    """collector 已被先行 refresh 到目标会话时，卡片仍必须刷新 UI。
+
+    真实路径（用户报「agent_trace 里显示的不正常」）：
+    footer 的 ``_aggregate_records``（每张消息卡片构建 / 落定补刷时都跑）会先
+    refresh 同一个 collector，把它带到目标会话。**若此时卡片没绑定信号**
+    （卡片隐藏 / 切走时 ``_switch_collector`` 会先 unbind），那次
+    ``recordsReset`` 就没人接；等卡片回来再 ``_switch_collector`` 时 collector
+    内容已一致 → ``_sync`` 判为「无变化」→ **一个信号都不发**。而卡片把
+    ``_active_sid`` 更新成新值 → ``_on_tick`` 判据变假 → 永不重试，UI 永久
+    停在旧会话（实测停在刚新建的空会话：2 条 0 轮、SYSTEM 无提示词）。
+
+    ⚠️ 断言必须读 **UI 列表自身**（``_turn_list``）的记录，不能用
+    ``card._visible()`` —— 后者读的是 collector，永远是最新数据，用它断言
+    会「恒过」（改前实测：去掉修复后本用例仍绿，就是踩了这个坑）。
+    """
+    session_a = _FakeSession("sid-A", _msgs("A", 2))
+    backend = _FakeBackend(session_a)
+    mw = _FakeMainWidget("win-ahead", backend)
+
+    card = _make_card(qapp, mw)
+    try:
+        assert card._turn_list.total_count == 5, "会话 A（2 轮）应显示 5 条（含合成 SYSTEM）"
+
+        # ① 卡片切走（隐藏 + 解绑信号）—— 真实场景：用户在看对话页
+        card.hide()
+        card._unbind_collector_signals()
+        qapp.processEvents()
+
+        # ② 期间换会话，footer 抢先 refresh（信号发出但无人接）
+        session_b = _FakeSession("sid-B", _msgs("B", 4))
+        backend._session = session_b
+        card._collector.refresh()
+        qapp.processEvents()
+        assert card._collector._active_session_id == "sid-B", "前置：collector 应已被带到会话 B"
+
+        # ③ 用户切回轨迹卡 → _switch_collector 重新绑定并推送
+        card.show()
+        card._switch_collector(mw)
+        qapp.processEvents()
+
+        # 读 UI 列表自身的记录（不是 collector）
+        ui_records = [r for r in card._turn_list._records]
+        ui_raw = "".join((r.raw or "") for r in ui_records)
+        assert "B-user-3" in ui_raw, (
+            f"UI 列表未刷新到会话 B（当前 {card._turn_list.total_count} 条）—— "
+            "_switch_collector 只依赖 collector 信号，被抢先 refresh 后收不到通知"
+        )
+        assert "A-user-0" not in ui_raw, "UI 列表仍残留会话 A 内容"
+        assert card._turn_list.total_count == 9, f"会话 B（4 轮）应显示 9 条，实际 {card._turn_list.total_count}"
+    finally:
+        card.close()
+
+
+def test_switch_into_fresh_session_then_back_tracks_history(qapp):
+    """新建空会话后再载入历史会话 → 轨迹必须跟随（截图 2 的复现场景）。
+
+    用户截图特征：列表「2 条 · 0 轮」、SYSTEM 行显示无系统提示词 —— 即卡片
+    停在刚 ``create_session`` 的空会话上，而用户已在看带图片的历史会话。
+    """
+    history = _FakeSession("sid-HIST", _msgs("HIST", 3), system_prompt="SYS-HIST")
+    backend = _FakeBackend(history)
+    mw = _FakeMainWidget("win-hist", backend)
+
+    card = _make_card(qapp, mw)
+    try:
+        # ① 新建空会话（只有一条 SessionStart hook）
+        empty = _FakeSession(
+            "sid-EMPTY",
+            [
+                {
+                    "role": "user",
+                    "content": "<system-reminder>SessionStart</system-reminder>",
+                    "_hook_event": "SessionStart",
+                    "timestamp": "2026-09-19 00:58:29",
+                    "ts_ms": int(time.time() * 1000),
+                }
+            ],
+        )
+        backend._session = empty
+        card._switch_collector(mw)
+        qapp.processEvents()
+        assert card._turn_list.total_count == 2, f"新建空会话应显示 2 条，实际 {card._turn_list.total_count}"
+
+        # ② 载入历史会话（模拟 footer 抢先 refresh 的竞争）
+        backend._session = history
+        card._collector.refresh()
+        qapp.processEvents()
+        card._switch_collector(mw)
+        qapp.processEvents()
+
+        assert any("HIST-user-2" in (r.raw or "") for r in card._visible()), "载入历史会话后轨迹未跟随"
+        assert card._turn_list.total_count > 2, "仍停在空会话的 2 条上"
+    finally:
+        card.close()

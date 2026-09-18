@@ -92,18 +92,21 @@ def test_mcp_e2e_full_chain(dev_instance, tmp_path):
     out = _rpc("initialize", {}, msg_id=1)
     assert out["result"]["serverInfo"]["name"] == "drifox-ui-test-server"
 
-    # 2) tools/list：7 工具
+    # 2) tools/list：9 工具（M2 7 个 + 二批 ui_session + 补注册 ui_memory）
     out = _rpc("tools/list", {}, msg_id=2)
     names = [t["name"] for t in out["result"]["tools"]]
-    assert names == [
+    expected = {
         "ui_inspect",
         "ui_state",
+        "ui_memory",
         "ui_click",
         "ui_type",
         "ui_scroll",
         "ui_wait",
         "ui_screenshot",
-    ]
+        "ui_session",
+    }
+    assert set(names) == expected, f"工具清单不符: {sorted(names)}"
 
     # 3) ui_inspect mode=tree：返回树 JSON
     tree_data = _call_tool("ui_inspect", {"mode": "tree", "depth": 2}, msg_id=3)

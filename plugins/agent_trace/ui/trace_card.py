@@ -524,6 +524,14 @@ class TraceCardWidget(QWidget):
                 logger.warning(f"[agent_trace] 会话切换后重投影失败（等心跳重试）: {e}")
                 return
             self._active_sid = sid
+            # ⚠️ 必须**主动全量推送**，不能只依赖 collector 的信号：footer 的
+            # ``_aggregate_records``（每张消息卡片构建 / 落定补刷时都跑）会在
+            # 卡片之前先 refresh 同一个 collector，把它带到目标会话；等这里
+            # 再 refresh 时内容已一致 → ``_sync`` 判为「无变化」→ **一个信号
+            # 都不发**。而 _active_sid 此刻已更新为新值 → 心跳判据变假 →
+            # UI 永久停在上一个会话（用户报「轨迹面板整个不对」，实测卡片
+            # 停在刚新建的空会话上：2 条 0 轮、SYSTEM 显示无提示词）。
+            self._pull_records()
             return
 
         self._unbind_collector_signals()
