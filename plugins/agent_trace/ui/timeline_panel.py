@@ -105,9 +105,15 @@ def _token_slot_spans(
     widths = [0.0] * n
     fixed: set = set()
 
-    def _free_width(idx: int, rem_px: float, free_idx: List[int]) -> float:
-        """剩余宽度按权重分给 ``idx``（全零权重时均分）。"""
-        free_total = sum(weights[i] for i in free_idx)
+    def _free_width(idx: int, rem_px: float, free_idx: List[int], free_total: float) -> float:
+        """剩余宽度按权重分给 ``idx``（全零权重时均分）。
+
+        ⚠️ ``free_total`` 必须由调用方**每轮算一次**传进来，不能在函数里现算：
+        它与 ``idx`` 无关（整轮所有条目共用同一分母），而旧实现在此对每个 i
+        重新 ``sum`` 一遍 → 每轮 O(n²)。实测 Token 模式 ``paintEvent``：
+        n=1000 时 43ms、n=4000 时 652ms（`_hover_idx` 一变就重绘，鼠标划过
+        整个条带都在掉帧）。
+        """
         if free_total > 0:
             return rem_px * weights[idx] / free_total
         return rem_px / len(free_idx) if free_idx else 0.0
@@ -115,10 +121,11 @@ def _token_slot_spans(
     for _ in range(24):
         free = [i for i in range(n) if i not in fixed]
         rem_px = avail - floor_px * len(fixed)
-        newly = [i for i in free if _free_width(i, rem_px, free) < floor_px]
+        free_total = sum(weights[i] for i in free)
+        newly = [i for i in free if _free_width(i, rem_px, free, free_total) < floor_px]
         if not newly:
             for i in free:
-                widths[i] = _free_width(i, rem_px, free)
+                widths[i] = _free_width(i, rem_px, free, free_total)
             break
         for i in newly:
             fixed.add(i)
