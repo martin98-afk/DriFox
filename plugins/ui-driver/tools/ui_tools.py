@@ -10,7 +10,8 @@
 
 三重安全闸（全部通过才注册工具）：
 1. 插件开关 enabled（config_schema 默认 false，false 时 register 直接 return）
-2. 环境变量 DRIFOX_UI_DRIVER=1
+2. 环境变量 DRIFOX_UI_DRIVER=1（⚠️ 这是**注册闸**：只影响工具是否注册进工具列表；
+   运行期撤销/开关靠 ARM 总闸与 config，不靠中途改环境变量）
 3. ARM 总闸（tools.ui_driver.setArmed；仅 auto_confirm+auto_arm 双开时启动自动置位，
    否则需外部测试启动器/显式命令置位——后续批次将含作用域校验）
 
@@ -33,13 +34,13 @@ def _driver_unavailable(*_args, **_kwargs):  # pragma: no cover — 闸 0 保证
     raise RuntimeError(f"tools.ui_driver 不可用：{_DRIVER_IMPORT_ERROR}")
 
 
-try:  # noqa: SIM105 — 需要区分「import 成功与否」而非吞掉一切
+try:  # 只捕 ImportError：其他异常（拼写/环境）应尽早暴露而非静默降级（S3c-r 建议）
     from tools.ui_driver import find as _driver_find
     from tools.ui_driver import setArmed as _driver_setArmed
     from tools.ui_driver import tree as _driver_tree
 
     _DRIVER_IMPORT_ERROR: Optional[str] = None
-except Exception as _exc:  # noqa: BLE001 — ImportError 及其环境变体
+except ImportError as _exc:
     _driver_find = _driver_unavailable
     _driver_tree = _driver_unavailable
     _driver_setArmed = _driver_unavailable
@@ -48,6 +49,15 @@ except Exception as _exc:  # noqa: BLE001 — ImportError 及其环境变体
 _PLUGIN_NAME = "ui-driver"
 _GROUP = "UI测试"
 _TMP_SCREENSHOT_DIR = os.path.join(tempfile.gettempdir(), "ui_driver_shots")
+
+# ── ui_click 两步确认协议（S3c-r 必修）──
+# ui_inspect mode=find 命中可点按钮时下发一次性 confirm_token
+# （objectName + 时间窗生成）；ui_click 必须携带匹配且未过期 token 才执行。
+_TOKEN_TTL_S = 300.0
+_tokens: dict[str, dict[str, Any]] = {}
+
+# 危险动作黑名单（辅助防线，不可替代 token）：命中即拒并提示需更高授权
+_DANGEROUS_KEYWORDS = ("删除", "移除", "清空", "撤回", "解散", "delete", "remove", "clear")
 
 
 def _config_get(key: str) -> Any:
@@ -83,7 +93,18 @@ def _ui_inspect_impl(tool_ctx, **kwargs):
             if hit is None:
                 return _dump(True, {"found": False}, "未命中；可用 ui_inspect mode=tree 查看结构")
             data = {"found": True, "cls": type(hit).__name__, "objectName": hit.objectName()}
-            return _dump(True, data, "命中；可用 ui_click 提供该控件 objectName/text 点击")
+            hint = "命中；可用 ui_click 提供该控件 objectName/text 点击"
+            # 可点按钮 → 下发一次性 confirm_token（两步确认协议，S3c-r）
+            if callable(getattr(hit, "click", None)):
+                token = f"tok_{abs(hash((hit.objectName(), id(hit), __import__('time').time()))) % 10**10:010d}"
+                _tokens[token] = {
+                    "objectName": hit.objectName(),
+                    "expires": __import__("time").time() + _TOKEN_TTL_S,
+                }
+                data["confirm_token"] = token
+                data["token_ttl_s"] = int(_TOKEN_TTL_S)
+                hint = "命中可点按钮；ui_click 需携带 confirm_token（5 分钟内有效）"
+            return _dump(True, data, hint)
         snap = _driver_tree(root=root, depth=max(1, min(depth, 4)))
         return _dump(True, snap, "树已按深度截断；children_count 大的节点可用 ui_inspect mode=find 精查")
     except Exception as exc:  # noqa: BLE001
@@ -120,7 +141,7 @@ def _ui_screenshot_impl(tool_ctx, **kwargs):
     from tools.ui_driver import screenshot
 
     target_object_name = kwargs.get("target_object_name")
-    max_width = int(kwargs.get("max_width", 1280) or 1280)
+    max_width = max(1, int(kwargs.get("max_width", 1280) or 1280))
     try:
         target = _driver_find({"objectName": target_object_name}) if target_object_name else None
         data = screenshot(target, max_width=max_width)
@@ -144,6 +165,42 @@ def _ui_click_impl(tool_ctx, **kwargs):
     selector = {k: kwargs[k] for k in ("objectName", "text", "role") if kwargs.get(k)}
     if not selector:
         return _dump(False, None, "至少提供 objectName/text/role 之一")
+
+    # 黑名单辅助防线：目标文本命中危险关键词即拒（不可替代 token）
+    probe_text = str(selector.get("objectName") or selector.get("text") or "").lower()
+    hit_kw = next((kw for kw in _DANGEROUS_KEYWORDS if kw in probe_text), None)
+    if hit_kw:
+        return _dump(
+            False,
+            {"clicked": False, "blocked_by": "dangerous_keyword"},
+            f"目标含危险关键词「{hit_kw}」，需更高授权才能点击",
+        )
+
+    # 两步确认协议：必须携带 ui_inspect 下发的有效 confirm_token
+    token = str(kwargs.get("confirm_token") or "")
+    entry = _tokens.get(token)
+    now = __import__("time").time()
+    if not token or entry is None:
+        return _dump(
+            False,
+            {"clicked": False, "blocked_by": "missing_token"},
+            "缺少 confirm_token：先 ui_inspect mode=find 命中目标按钮领取（5 分钟有效）",
+        )
+    if entry["expires"] < now:
+        _tokens.pop(token, None)
+        return _dump(
+            False,
+            {"clicked": False, "blocked_by": "expired_token"},
+            "confirm_token 已过期（5 分钟）：重新 ui_inspect 领取",
+        )
+    if entry["objectName"] != selector.get("objectName"):
+        return _dump(
+            False,
+            {"clicked": False, "blocked_by": "token_mismatch"},
+            "confirm_token 与目标 objectName 不匹配：重新 ui_inspect 领取",
+        )
+    _tokens.pop(token, None)  # 一次性：消费即作废
+
     try:
         hit = _driver_find(selector)
         if hit is None:
@@ -176,12 +233,16 @@ def _schema(name: str, description: str, properties: dict, required: Optional[li
 _SCHEMAS = {
     "ui_inspect": _schema(
         "ui_inspect",
-        "查询/浏览 DriFox 界面控件。mode=find 按 selector 精查单个控件；mode=tree 输出浅层控件树（token 友好，children_count 可判断子树规模）",
+        "查询/浏览 DriFox 界面控件。mode=find 按 selector 精查单个控件，命中可点按钮时下发一次性 confirm_token（ui_click 必需）；mode=tree 输出浅层控件树（token 友好，children_count 可判断子树规模；tree 模式忽略 selector，只看 root 整树）",
         {
-            "mode": {"type": "string", "enum": ["find", "tree"], "description": "find=精查 / tree=浅树"},
+            "mode": {
+                "type": "string",
+                "enum": ["find", "tree"],
+                "description": "find=精查 / tree=浅树（tree 忽略 selector）",
+            },
             "selector": {
                 "type": "object",
-                "description": "find 的匹配条件（可组合）：objectName/cls/text/role",
+                "description": "find 的匹配条件（可组合，tree 模式忽略）：objectName/cls/text/role",
                 "properties": {
                     "objectName": {"type": "string"},
                     "cls": {"type": "string", "description": "类名"},
@@ -208,17 +269,22 @@ _SCHEMAS = {
         "截取 DriFox 界面为 PNG 临时文件，返回路径与尺寸（不塞 base64）",
         {
             "target_object_name": {"type": "string", "description": "目标控件 objectName（缺省截首个可见窗口）"},
-            "max_width": {"type": "integer", "description": "最大宽度（超宽下采样），默认 1280"},
+            "max_width": {"type": "integer", "description": "最大宽度（超宽下采样），默认 1280，最小 1", "minimum": 1},
         },
     ),
     "ui_click": _schema(
         "ui_click",
-        "点击 DriFox 界面控件（QAbstractButton 语义）。先用 ui_inspect 定位再点击",
+        "点击 DriFox 界面控件（两步确认：先 ui_inspect mode=find 命中目标领取 confirm_token）。含危险关键词（删除/移除/清空/撤回/解散等）的目标直接拒绝",
         {
             "objectName": {"type": "string"},
             "text": {"type": "string", "description": "控件文本包含匹配"},
             "role": {"type": "string"},
+            "confirm_token": {
+                "type": "string",
+                "description": "ui_inspect mode=find 命中可点按钮时下发的一次性令牌（5 分钟有效，消费即作废）",
+            },
         },
+        required=["confirm_token"],
     ),
 }
 
