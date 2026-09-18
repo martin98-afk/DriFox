@@ -144,12 +144,31 @@ def _escape_html(text: str) -> str:
 
 
 def _md_to_html(text: str) -> str:
-    """用与 in-app 一致的 markdown 扩展渲染正文"""
+    """用与 in-app 一致的 markdown 扩展渲染正文（含语法高亮）"""
     try:
-        md = markdown.Markdown(extensions=["fenced_code", "nl2br", "tables"])
+        md = markdown.Markdown(
+            extensions=["fenced_code", "codehilite", "nl2br", "tables"],
+            extension_configs={
+                "codehilite": {
+                    "noclasses": True,
+                    "pygments_style": _pygments_style_for_theme(),
+                    "guess_lang": False,
+                }
+            },
+        )
         return md.convert(text or "")
     except Exception:
         return f"<p>{_escape_html(text or '')}</p>"
+
+
+def _pygments_style_for_theme() -> str:
+    """按当前主题明暗选 pygments 高亮配色（与 in-app 保持同一对）"""
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        return "friendly" if theme_manager.is_light_theme() else "dracula"
+    except Exception:
+        return "dracula"
 
 
 def _role_meta(role: str, msg: Dict) -> tuple:
@@ -232,16 +251,42 @@ def _export_html(messages: List[Dict], record: Dict = None) -> str:
 
     # ── 主题色（与 in-app 消息卡片一致）──
     theme = current_theme()
+    try:
+        from app.utils.theme_manager import theme_manager as _tm
+
+        is_light = bool(_tm.is_light_theme())
+    except Exception:
+        is_light = False
+
+    def _pick(key: str, fallback: str) -> str:
+        v = theme.get(key)
+        return str(v) if v else fallback
+
     c = {
-        "panel": theme.get("card_bg_solid", "rgba(33, 33, 38, 0.96)"),
-        "panel_soft": theme.get("content_bg", "#2a2a2e"),
-        "border": theme.get("border", "#3d3d3d"),
-        "border_strong": theme.get("border_accent", "#f59e0b"),
-        "text": theme.get("text_primary", "#ffffff"),
-        "text_secondary": theme.get("text_secondary", "rgba(255, 255, 255, 0.5)"),
-        "text_muted": theme.get("text_muted", "#888888"),
-        "accent": theme.get("accent", "#66c6ff"),
-        "accent_warm": theme.get("accent_warm", "#f59e0b"),
+        "panel": _pick("card_bg_solid", "rgba(33, 33, 38, 0.96)"),
+        "panel_soft": _pick("content_bg", "#2a2a2e"),
+        "border": _pick("border", "#3d3d3d"),
+        "border_strong": _pick("border_accent", "#f59e0b"),
+        "text": _pick("text_primary", "#ffffff"),
+        "text_secondary": _pick("text_secondary", "rgba(255, 255, 255, 0.5)"),
+        "text_muted": _pick("text_muted", "#888888"),
+        "accent": _pick("accent", "#66c6ff"),
+        "accent_warm": _pick("accent_warm", "#f59e0b"),
+        # 角色配色（对齐 in-app 用户卡 / 助手卡）
+        "user_bg": _pick("user_card_bg", "rgba(102, 198, 255, 0.10)"),
+        "user_accent": _pick("user_card_accent", "#66c6ff"),
+        "assistant_bg": _pick("assistant_card_bg", "rgba(245, 158, 11, 0.08)"),
+        "assistant_accent": _pick("assistant_card_accent", "#f59e0b"),
+        # 工具 / 状态色
+        "tool_accent": _pick("syntax_step", "#5fd18c"),
+        "tool_color": _pick("syntax_tool", "#b45309"),
+        # 代码块
+        "code_bg": _pick("card_bg_dim", "rgba(255, 255, 255, 0.04)"),
+        "inline_code_bg": _pick("hover_bg", "rgba(102, 198, 255, 0.12)"),
+        "inline_code_fg": _pick("tag_accent_text", "#9bddff"),
+        # 分隔与引用
+        "divider": _pick("divider_color", "rgba(255, 255, 255, 0.08)"),
+        "quote_fg": _pick("text_muted", "#888888"),
     }
     win = {}
     try:
@@ -311,6 +356,17 @@ def _export_html(messages: List[Dict], record: Dict = None) -> str:
     --text-muted: {c["text_muted"]};
     --accent: {c["accent"]};
     --accent-warm: {c["accent_warm"]};
+    --user-bg: {c["user_bg"]};
+    --user-accent: {c["user_accent"]};
+    --assistant-bg: {c["assistant_bg"]};
+    --assistant-accent: {c["assistant_accent"]};
+    --tool-accent: {c["tool_accent"]};
+    --tool-color: {c["tool_color"]};
+    --code-bg: {c["code_bg"]};
+    --inline-code-bg: {c["inline_code_bg"]};
+    --inline-code-fg: {c["inline_code_fg"]};
+    --divider: {c["divider"]};
+    --quote-fg: {c["quote_fg"]};
 }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 html {{ scroll-behavior: smooth; }}
@@ -322,17 +378,18 @@ body {{
     line-height: 1.7;
     -webkit-font-smoothing: antialiased;
 }}
-.container {{ max-width: 1100px; margin: 0 auto; padding: 28px 16px 60px; }}
+.container {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 72px; }}
 
 /* ── 整体布局：左导航 + 右正文 ── */
 .layout {{ display: flex; gap: 24px; align-items: flex-start; }}
 .sidebar {{
-    width: 248px;
+    width: 262px;
     flex-shrink: 0;
     position: sticky;
-    top: 16px;
-    max-height: calc(100vh - 32px);
+    top: 20px;
+    max-height: calc(100vh - 40px);
     overflow-y: auto;
+    overscroll-behavior: contain;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -364,9 +421,9 @@ body {{
     transition: background .12s ease, color .12s ease;
     border-left: 2px solid transparent;
 }}
-.nav-item:hover {{ background: rgba(255, 255, 255, 0.04); color: var(--text); }}
+.nav-item:hover {{ background: var(--code-bg); color: var(--text); }}
 .nav-item.active {{
-    background: rgba(102, 198, 255, 0.10);
+    background: var(--inline-code-bg);
     color: var(--text);
     border-left-color: var(--accent);
 }}
@@ -374,12 +431,12 @@ body {{
     width: 22px; height: 22px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     font-size: 11px; flex-shrink: 0;
-    background: rgba(255, 255, 255, 0.10);
+    background: var(--code-bg);
 }}
-.nav-item.nav-user .nav-icon {{ background: rgba(102, 198, 255, 0.16); }}
-.nav-item.nav-assistant .nav-icon {{ background: rgba(245, 158, 11, 0.16); }}
-.nav-item.nav-tool .nav-icon {{ background: rgba(95, 209, 140, 0.16); }}
-.nav-item.nav-system .nav-icon {{ background: rgba(255, 255, 255, 0.16); }}
+.nav-item.nav-user .nav-icon {{ background: var(--user-bg); }}
+.nav-item.nav-assistant .nav-icon {{ background: var(--assistant-bg); }}
+.nav-item.nav-tool .nav-icon {{ background: var(--code-bg); }}
+.nav-item.nav-system .nav-icon {{ background: var(--code-bg); }}
 .nav-text {{ display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }}
 .nav-role {{ font-size: 13px; font-weight: 600; white-space: nowrap; }}
 .nav-snip {{
@@ -390,11 +447,11 @@ body {{
 
 /* ── 会话头部 ── */
 .session-header {{ margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }}
-.session-title {{ font-size: 22px; font-weight: 700; color: #fff; letter-spacing: .01em; }}
+.session-title {{ font-size: 22px; font-weight: 700; color: var(--text); letter-spacing: .01em; }}
 .session-meta {{ margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }}
 .chip {{
     display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--code-bg);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 3px 12px;
@@ -417,25 +474,27 @@ body {{
 .msg-card {{
     background: var(--panel);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px 16px;
+    border-radius: 12px;
+    padding: 14px 18px;
     margin-bottom: 14px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }}
-.msg-card.msg-user {{ border-left: 3px solid var(--accent); }}
-.msg-card.msg-assistant {{ border-left: 3px solid var(--accent-warm); }}
-.msg-card.msg-tool {{ border-left: 3px solid #5fd18c; }}
+.msg-card.msg-user {{ background: var(--user-bg); border-left: 3px solid var(--user-accent); }}
+.msg-card.msg-assistant {{ background: var(--assistant-bg); border-left: 3px solid var(--assistant-accent); }}
+.msg-card.msg-tool {{ border-left: 3px solid var(--tool-accent); }}
 .msg-card.msg-system {{ border-left: 3px solid var(--text-muted); }}
 .msg-head {{ display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }}
 .avatar {{
     width: 28px; height: 28px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     font-size: 14px; flex-shrink: 0;
+    background: var(--code-bg);
 }}
-.avatar-user {{ background: rgba(102, 198, 255, 0.16); }}
-.avatar-assistant {{ background: rgba(245, 158, 11, 0.16); }}
-.avatar-tool {{ background: rgba(95, 209, 140, 0.16); }}
-.avatar-system {{ background: rgba(255, 255, 255, 0.10); }}
-.avatar-other {{ background: rgba(255, 255, 255, 0.10); }}
+.avatar-user {{ background: var(--user-bg); }}
+.avatar-assistant {{ background: var(--assistant-bg); }}
+.avatar-tool {{ background: var(--code-bg); }}
+.avatar-system {{ background: var(--code-bg); }}
+.avatar-other {{ background: var(--code-bg); }}
 .role-name {{ font-weight: 600; color: var(--text); font-size: 14px; }}
 .ts {{ color: var(--text-muted); font-size: 12px; margin-left: auto; }}
 
@@ -443,7 +502,7 @@ body {{
 .msg-body .md > :first-child {{ margin-top: 0; }}
 .msg-body .md > :last-child {{ margin-bottom: 0; }}
 .msg-body p {{ margin: 8px 0; color: var(--text-secondary); }}
-.msg-body h1, .msg-body h2, .msg-body h3, .msg-body h4 {{ color: #fff; font-weight: 700; margin: 12px 0 6px; }}
+.msg-body h1, .msg-body h2, .msg-body h3, .msg-body h4 {{ color: var(--text); font-weight: 700; margin: 14px 0 8px; }}
 .msg-body h1 {{ font-size: 1.35em; }}
 .msg-body h2 {{ font-size: 1.2em; }}
 .msg-body h3 {{ font-size: 1.08em; }}
@@ -451,18 +510,18 @@ body {{
 .msg-body a:hover {{ text-decoration: underline; }}
 .msg-body ul, .msg-body ol {{ margin: 8px 0; padding-left: 24px; }}
 .msg-body li {{ margin: 4px 0; color: var(--text-secondary); }}
-.msg-body strong {{ color: #fff; font-weight: 600; }}
-.msg-body em {{ color: #c4cedd; }}
+.msg-body strong {{ color: var(--text); font-weight: 600; }}
+.msg-body em {{ color: var(--text-secondary); font-style: italic; }}
 .msg-body code {{
-    background: rgba(102, 198, 255, 0.12);
-    color: #9bddff;
+    background: var(--inline-code-bg);
+    color: var(--inline-code-fg);
     padding: 2px 6px;
     border-radius: 5px;
     font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
     font-size: 0.88em;
 }}
 .msg-body pre {{
-    background: rgba(0, 0, 0, 0.28);
+    background: var(--code-bg);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px 14px;
@@ -476,13 +535,17 @@ body {{
     font-size: 0.85em;
     line-height: 1.5;
 }}
+/* pygments 高亮产物（codehilite）：保留行内颜色，去掉自带的背景与内边距 */
+.msg-body .codehilite {{ background: transparent; margin: 0; }}
+.msg-body .codehilite pre {{ margin: 0; }}
+.msg-body .codehilite pre span {{ background: transparent !important; }}
 .msg-body blockquote {{
     border-left: 3px solid var(--border-strong);
     margin: 10px 0;
     padding: 4px 14px;
-    color: var(--text-muted);
+    color: var(--quote-fg);
 }}
-.msg-body hr {{ border: none; border-top: 1px solid var(--border); margin: 14px 0; }}
+.msg-body hr {{ border: none; border-top: 1px solid var(--divider); margin: 14px 0; }}
 .msg-body table {{
     width: 100%;
     border-collapse: collapse;
@@ -493,11 +556,11 @@ body {{
     overflow: hidden;
 }}
 .msg-body th {{
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--code-bg);
     padding: 8px 12px;
     text-align: left;
     font-weight: 600;
-    color: #fff;
+    color: var(--text);
     border-bottom: 1px solid var(--border-strong);
 }}
 .msg-body td {{
@@ -505,11 +568,11 @@ body {{
     border-bottom: 1px solid var(--border);
     color: var(--text-secondary);
 }}
-.msg-body tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.02); }}
+.msg-body tr:nth-child(even) {{ background: var(--code-bg); }}
 
 /* ── 思考过程 ── */
 details.reasoning {{
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--code-bg);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 6px 12px;
@@ -520,19 +583,20 @@ details.reasoning summary {{ font-weight: 600; color: var(--text-muted); cursor:
 
 /* ── 工具调用 ── */
 .tool-block {{
-    background: rgba(95, 209, 140, 0.06);
-    border: 1px solid rgba(95, 209, 140, 0.25);
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--tool-accent);
     border-radius: 8px;
     padding: 8px 12px;
     margin: 8px 0;
 }}
-.tool-head {{ font-weight: 600; color: #5fd18c; margin-bottom: 4px; font-size: 13px; }}
+.tool-head {{ font-weight: 600; color: var(--tool-color); margin-bottom: 4px; font-size: 13px; }}
 .tool-body {{ font-size: 0.92em; }}
 
 /* ── 图片占位 ── */
 .image-block {{
     display: inline-block;
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--code-bg);
     border: 1px dashed var(--border);
     border-radius: 8px;
     padding: 18px 26px;
@@ -558,28 +622,64 @@ details.reasoning summary {{ font-weight: 600; color: var(--text-muted); cursor:
 <script>
 (function() {{
     var items = Array.prototype.slice.call(document.querySelectorAll('.nav-item'));
-    var map = {{}};
+    // 按 DOM 顺序建立条目列表，不依赖对象键顺序
+    var entries = [];
     items.forEach(function(a) {{
         var id = a.getAttribute('data-target');
-        var el = document.getElementById(id);
-        if (el) map[id] = a;
+        var el = id ? document.getElementById(id) : null;
+        if (el) entries.push({{ id: id, el: el, link: a }});
     }});
-    var targets = Object.keys(map).map(function(id) {{ return document.getElementById(id); }});
-    if (!('IntersectionObserver' in window) || !targets.length) return;
+    if (!entries.length) return;
+
+    var sidebar = document.querySelector('.sidebar');
     var current = null;
+
     function setActive(id) {{
         if (current === id) return;
         current = id;
-        items.forEach(function(a) {{ a.classList.remove('active'); }});
-        if (map[id]) map[id].classList.add('active');
+        var link = null;
+        entries.forEach(function(e) {{
+            e.link.classList.remove('active');
+            if (e.id === id) link = e.link;
+        }});
+        if (!link) return;
+        link.classList.add('active');
+        // 高亮项滚出侧栏可视区时，把侧栏滚到能看见它的位置
+        if (!sidebar) return;
+        var linkTop = link.offsetTop;
+        var linkBottom = linkTop + link.offsetHeight;
+        var viewTop = sidebar.scrollTop;
+        var viewBottom = viewTop + sidebar.clientHeight;
+        if (linkTop < viewTop) {{
+            sidebar.scrollTop = Math.max(0, linkTop - 8);
+        }} else if (linkBottom > viewBottom) {{
+            sidebar.scrollTop = linkBottom - sidebar.clientHeight + 8;
+        }}
     }}
-    var observer = new IntersectionObserver(function(entries) {{
-        // 取当前视口内最靠上的可见消息
-        var visible = entries.filter(function(e) {{ return e.isIntersecting; }})
-            .sort(function(a, b) {{ return a.boundingClientRect.top - b.boundingClientRect.top; }});
-        if (visible.length) setActive(visible[0].target.id);
-    }}, {{ rootMargin: '-15% 0px -70% 0px', threshold: 0 }});
-    targets.forEach(function(t) {{ observer.observe(t); }});
+
+    // 以视口上方 15% 处为基准线，取基准线上方最靠下的一条消息作为「当前读到」
+    // 不用 IntersectionObserver：它只在元素跨越观察边界时回调，滚动中大量位置
+    // 没有任何元素落在判定带内，高亮会停在旧值或跳变。
+    function pickActive() {{
+        var baseY = window.innerHeight * 0.15;
+        var best = entries[0];
+        for (var i = 0; i < entries.length; i++) {{
+            if (entries[i].el.getBoundingClientRect().top <= baseY) best = entries[i];
+        }}
+        setActive(best.id);
+    }}
+
+    var ticking = false;
+    window.addEventListener('scroll', function() {{
+        if (ticking) return;
+        ticking = true;
+        window.requestAnimationFrame(function() {{
+            ticking = false;
+            pickActive();
+        }});
+    }}, {{ passive: true }});
+    window.addEventListener('resize', pickActive, {{ passive: true }});
+    pickActive();
 }})();
 </script>
 </body>

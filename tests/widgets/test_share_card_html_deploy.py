@@ -80,3 +80,61 @@ def test_gitee_branch_untouched(share_src: str):
     """Gitee 上传链路对非 HTML 格式保持原样"""
     assert "_ShareUploadThread(uploader, str(save_path))" in share_src
     assert "uploader.is_configured()" in share_src
+
+
+# ── 主题适配（深浅主题都要能看清）────────────────────────────────
+
+
+def test_theme_tokens_cover_role_and_code_colors(share_src: str):
+    """角色 / 代码 / 工具配色必须从主题取，不得硬编码（否则亮色主题下白字不可见）"""
+    for key in (
+        "user_card_bg",
+        "user_card_accent",
+        "assistant_card_bg",
+        "assistant_card_accent",
+        "syntax_step",
+        "syntax_tool",
+        "tag_accent_text",
+        "divider_color",
+    ):
+        assert f'_pick("{key}"' in share_src, f"缺少主题 token 映射: {key}"
+
+
+def test_no_white_hardcode_in_css_body(share_src: str):
+    """导出模板的 CSS 里不得再用 #fff / 白色半透明叠加（亮色主题下会白底白字）"""
+    css_start = share_src.find('return f"""<!DOCTYPE html>')
+    assert css_start > 0
+    css = share_src[css_start : share_src.find("class ShareCardContent")]
+    for bad in ("color: #fff;", "color: #c4cedd", "color: #9bddff", "color: #5fd18c", "rgba(255, 255, 255, 0.04)"):
+        assert bad not in css, f"仍存在硬编码颜色: {bad}"
+
+
+def test_markdown_uses_theme_aware_pygments(share_src: str):
+    """代码块走 codehilite + 按主题明暗选择高亮配色"""
+    assert '"codehilite"' in share_src
+    assert "def _pygments_style_for_theme" in share_src
+    assert '"friendly" if theme_manager.is_light_theme() else "dracula"' in share_src
+
+
+# ── 侧栏导航（乱飞回归）──────────────────────────────────────────
+
+
+def test_nav_highlight_not_using_intersection_observer_entries(share_src: str):
+    """导航高亮不得依赖 IntersectionObserver 的 entries 做「取最靠上可见项」
+
+    entries 只含状态发生变化的元素，滚动中未跨界的目标不在集合里，
+    取「最靠上的可见项」会取到残缺集合的结果导致高亮来回跳。
+    """
+    assert "new IntersectionObserver" not in share_src
+
+
+def test_nav_highlight_computes_from_document_order(share_src: str):
+    """高亮按 DOM 顺序全量比较 getBoundingClientRect，而非对象键顺序"""
+    assert "entries.push(" in share_src
+    assert "getBoundingClientRect().top <= baseY" in share_src
+
+
+def test_sidebar_auto_scrolls_to_active_item(share_src: str):
+    """高亮项滚出侧栏可视区时，侧栏需自动滚动跟随"""
+    assert "sidebar.scrollTop = Math.max(0, linkTop - 8)" in share_src
+    assert "linkBottom - sidebar.clientHeight + 8" in share_src
