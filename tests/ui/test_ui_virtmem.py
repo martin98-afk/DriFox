@@ -65,6 +65,11 @@ from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget
 from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401 — 先于 QApplication
 
 app = QApplication([])
+# 🛡️ 共享 profile 必须先建：否则第一张卡 ensure_rendered 即抛
+# RuntimeError（get_shared_web_profile 未初始化），6 卡全灭、池恒空
+from app.core.infra.webengine_profile import init_shared_web_profile
+
+init_shared_web_profile(app)
 from app.widgets.message_card import MessageCard
 from tools.ui_driver import place_offscreen
 
@@ -94,6 +99,11 @@ while __import__("time").monotonic() < deadline:
         break
     __import__("time").sleep(0.05)
 
+# 流式守卫前置：update_content 会置 _streaming=True，不 finish 则 detach 被
+# 守卫拒绝（T2e-v 定位结论：6 卡全走「流式中不可摘」分支）
+for c in cards:
+    c.finish_streaming()
+
 for c in cards:
     c.cleanup()
 for _ in range(30):
@@ -104,10 +114,11 @@ from app.widgets.webview_pool import WebViewPool
 
 pool = WebViewPool.get_instance()
 size = pool.size(light=False)
-pids = pool.pids()
 print(f"POOL_SIZE={size}")
-print(f"POOL_PIDS={len(pids)}")
-ok = 1 <= size <= 4 and len(pids) >= 1
+print(f"POOL_PIDS={len(pool.pids())}")
+# 注意：_renderer_pid 仅 B4 强回收链路填写，普通 cleanup→detach 回池路径
+# pids 恒空（T2e-v 实测），故断言只看池桶 size
+ok = 1 <= size <= 4
 print("POOL_OK" if ok else "POOL_NOT_OK")
 sys.exit(0 if ok else 1)
 '''
@@ -128,11 +139,13 @@ def test_pool_lifecycle_after_cleanup(tmp_path):
         [_sys.executable, str(script)],
         capture_output=True,
         text=True,
+        encoding="utf-8",  # 探针输出含中文，Windows 默认 GBK 解码会崩 reader 线程
+        errors="replace",
         timeout=180,
         cwd=r"D:/work/DriFox",
     )
     tail = (r.stdout or "").strip().splitlines()[-4:]
-    assert r.returncode == 0, f"子进程未达标 rc={r.returncode} tail={tail}"
+    assert r.returncode == 0, f"子进程未达标 rc={r.returncode} tail={tail} stderr={(r.stderr or '')[-400:]}"
     assert "POOL_OK" in (r.stdout or ""), f"未入池：{tail}"
 
 
