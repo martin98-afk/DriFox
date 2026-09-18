@@ -10,7 +10,7 @@
 
 import pytest
 
-from app.core.context_builder import (
+from app.core.context.builder import (
     TOOL_RESULT_HEAD_KEEP,
     TOOL_RESULT_MAX_LEN,
     TOOL_RESULT_TAIL_KEEP,

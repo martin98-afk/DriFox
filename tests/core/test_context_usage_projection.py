@@ -9,7 +9,7 @@
 """
 import pytest
 
-from app.core.context_builder import TOOL_RESULT_MAX_LEN, prune_tool_result
+from app.core.context.builder import TOOL_RESULT_MAX_LEN, prune_tool_result
 from app.core.engines.ui.engine import UIEngine
 from app.core.token_estimator import per_message_tokens
 

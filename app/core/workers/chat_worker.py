@@ -1024,7 +1024,7 @@ class OpenAIChatWorker(QThread):
 
     def _hook_context_usage(self, backend) -> tuple:
         """hook 注入用上下文用量（与圆环同源，见 app/core/context_usage.py）"""
-        from app.core.context_usage import snapshot_usage_for_hooks
+        from app.core.context.usage import snapshot_usage_for_hooks
 
         return snapshot_usage_for_hooks(
             backend,

@@ -443,7 +443,7 @@ class ToolExecutor:
         if not session or not getattr(session, "messages", None):
             return 0, 0
 
-        from app.core.context_usage import snapshot_usage_for_hooks
+        from app.core.context.usage import snapshot_usage_for_hooks
 
         return snapshot_usage_for_hooks(self._backend, session=session)
 

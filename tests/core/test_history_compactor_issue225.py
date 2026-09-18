@@ -13,7 +13,7 @@ user 消息，破坏 user/assistant 交替结构。模型会把这份摘要当�
 """
 import pytest
 
-from app.core.history_compactor import HistoryCompactor
+from app.core.context.history_compactor import HistoryCompactor
 
 
 def _make_long_conversation(n: int = 20, per_msg_chars: int = 200) -> list:

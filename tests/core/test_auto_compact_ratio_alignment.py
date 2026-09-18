@@ -138,7 +138,7 @@ class TestHookRatioMatchesRing:
 
         # 圆环（engine 快照）在无 API 值时的 used = est_total（含截断投影）
         # 这里不构建完整 engine，用同一截断函数构造快照返回值模拟圆环口径
-        from app.core.context_builder import prune_tool_result
+        from app.core.context.builder import prune_tool_result
 
         approx = []
         for m in messages:

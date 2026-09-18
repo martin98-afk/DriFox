@@ -29,7 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from app.core.chat_session import ChatSession  # noqa: E402
-from app.core.context_builder import ContextBudgetAllocator  # noqa: E402
+from app.core.context.builder import ContextBudgetAllocator  # noqa: E402
 
 
 class _CountingCompactor:
