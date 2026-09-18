@@ -81,7 +81,7 @@ def test_backend_on_hook_finished_parses_and_checks_session_id():
 
     会话切换（当前 session != 触发时 session）→ 丢弃输出不注入。
     """
-    src = _read_src("core/backend.py")
+    src = _read_src("core/conversation/backend.py")
     # on_hook_finished 是 __init__ 内的闭包：直接检查 _PRE_DIALOG_EVENTS 定义段
     idx = src.index("_PRE_DIALOG_EVENTS =")
     # 从该定义向前回溯到 on_hook_finished 闭包起点，向后取足够文本覆盖校验逻辑

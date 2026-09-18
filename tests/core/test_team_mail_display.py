@@ -228,7 +228,7 @@ class TestGetUserRoundRangesTeamMail:
         import re
         from pathlib import Path
 
-        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "message_content.py"
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "conversation" / "message_content.py"
         tree = ast.parse(src_path.read_text(encoding="utf-8"))
 
         target = None
