@@ -16,7 +16,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.core.builtin_commands import reload_agent_commands, reload_all_commands
+from app.core.commands.builtin_commands import reload_agent_commands, reload_all_commands
 from app.plugins.kernel import KNOWN_COMPONENTS, ComponentReloaderRegistry, ReloadContext
 from app.utils.utils import invalidate_skills_cache
 

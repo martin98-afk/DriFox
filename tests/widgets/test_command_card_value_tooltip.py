@@ -313,7 +313,7 @@ class TestValueDescTooltip:
         import html as html_mod
 
         from PyQt5.QtWidgets import QWidget, QVBoxLayout
-        from app.core.command_manager import CommandManager, CommandType
+        from app.core.commands.command_manager import CommandManager, CommandType
         from app.widgets.cards.floating.command_card import CommandCard
 
         parent = QWidget()

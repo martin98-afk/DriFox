@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.hook_manager import HookManager
+from app.core.hooks.hook_manager import HookManager
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +158,7 @@ def test_edit_hook_not_found_returns_false(tmp_path):
     hm = HookManager()
     hm.register_hooks_from_json("p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file))
     # 伪造一个内存中不存在于文件的 hook（动态注册）
-    from app.core.hook_manager import Hook, HookMatchRule
+    from app.core.hooks.hook_manager import Hook, HookMatchRule
 
     ghost = Hook(id="ghost_1", type="command", command="echo x", config_file=str(hooks_file))
     rule = HookMatchRule(matcher="", hooks=[ghost])
@@ -324,7 +324,7 @@ def test_migrate_legacy_states_writes_source_and_cleans_ghost(tmp_path):
     hm._hook_states["ghost_1"] = True
     hm._hook_states["sys_1"] = True
     # 造一个系统 hook（is_system_plugin=True）
-    from app.core.hook_manager import Hook, HookMatchRule
+    from app.core.hooks.hook_manager import Hook, HookMatchRule
 
     sys_hook = Hook(id="sys_1", type="command", command="echo sys", is_system_plugin=True)
     hm._hooks.setdefault("Stop", []).append(HookMatchRule(matcher="", hooks=[sys_hook]))

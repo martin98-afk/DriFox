@@ -1922,7 +1922,7 @@ class PluginManager:
             extra: 附加字段（如 server_config）
         """
         try:
-            from app.core.hook_manager import trigger_plugin_changed_hook
+            from app.core.hooks.hook_manager import trigger_plugin_changed_hook
 
             is_mcp = action.startswith("mcp_")
             context: dict = {

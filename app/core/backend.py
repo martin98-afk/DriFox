@@ -431,7 +431,7 @@ class ChatBackend(QObject):
         logger.info(f"[ChatBackend-Perf] SessionManager 创建完成 ({(_time.perf_counter() - _t0) * 1000:.0f}ms)")
 
         # 2. 创建 HookManager（必须在 create_session 之前）
-        from app.core.hook_manager import HookManager
+        from app.core.hooks.hook_manager import HookManager
 
         self._hook_manager = HookManager(self._thread_pool)
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
@@ -1358,7 +1358,7 @@ class ChatBackend(QObject):
             # command/http 类型 hook 后台执行 + finished 回调回补注入，主线程不被
             # 外部进程/网络阻塞（PROMPT 类型仍同步顺序注入，语义不变）。
             # 非 UI 线程（CLI 等无 Qt 事件循环，异步回调无处回补）→ 保持同步。
-            from app.core.hook_manager import _is_ui_thread
+            from app.core.hooks.hook_manager import _is_ui_thread
 
             trigger_async = _is_ui_thread()
             results = self._hook_manager.trigger_event(
@@ -1391,7 +1391,7 @@ class ChatBackend(QObject):
             ctx.update(extra_context)
         # 🛡️ W1：UI 线程（clear/compact 等 GUI 场景）→ trigger_async=True 走后台
         # 异步 + 回调回补；非 UI 线程保持同步（与 create_session 同策略）。
-        from app.core.hook_manager import _is_ui_thread
+        from app.core.hooks.hook_manager import _is_ui_thread
 
         results = self._hook_manager.trigger_event(
             "SessionStart",

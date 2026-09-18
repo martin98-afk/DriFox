@@ -1234,7 +1234,7 @@ class LLMSettingsCard(SystemCardFrame):
                 # 构造期 hook_manager 为 None（parent 无 backend），原实现在
                 # controller 里构造完立刻注入并全量重渲染一次（实测 ~0.7s）
                 if getattr(self.hookListCard, "_hook_manager", None) is None:
-                    from app.core.hook_manager import HookManager
+                    from app.core.hooks.hook_manager import HookManager
 
                     self.hookListCard._hook_manager = HookManager()
                 self.hookListCard._refresh(reload=True)

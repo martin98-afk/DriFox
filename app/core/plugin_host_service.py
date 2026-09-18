@@ -102,7 +102,7 @@ class PluginHostService(QObject):
 
         # 全局组件（不绑任何窗口）
         from app.core.agent import AgentManager
-        from app.core.hook_manager import HookManager
+        from app.core.hooks.hook_manager import HookManager
 
         # 插件 hooks 的注册目标。HookManager._hooks 类级共享（任一实例等效），
         # 注册到本专属实例后各 tab 均可触发；AgentManager 单例由此首次创建。
@@ -1340,7 +1340,7 @@ class PluginHostService(QObject):
         if not instances or "PluginChanged" not in instances[0]._hook_manager._hooks:
             # 无注册 hook 仍刷新基线（懒导入失败静默，不影响主流程）
             try:
-                from app.core.hook_manager import _compute_plugin_snapshot_diff
+                from app.core.hooks.hook_manager import _compute_plugin_snapshot_diff
 
                 _compute_plugin_snapshot_diff()
             except Exception:
@@ -1355,7 +1355,7 @@ class PluginHostService(QObject):
             "components": {k: v for k, v in result.items() if not k.startswith("_")},
         }
         try:
-            from app.core.hook_manager import _compute_plugin_snapshot_diff, _sub_actions_from_diff
+            from app.core.hooks.hook_manager import _compute_plugin_snapshot_diff, _sub_actions_from_diff
 
             diff = _compute_plugin_snapshot_diff()
         except Exception:
@@ -1471,7 +1471,7 @@ class PluginHostService(QObject):
                 result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
                 result["hooks"] = True  # agents 组件包含 hooks 重载
                 try:
-                    from app.core.builtin_commands import reload_agent_commands
+                    from app.core.commands.builtin_commands import reload_agent_commands
 
                     reload_agent_commands()
                     result["commands"] = True
@@ -1485,7 +1485,7 @@ class PluginHostService(QObject):
             # 3. 命令
             if comps.get("commands") and not result["commands"]:
                 try:
-                    from app.core.builtin_commands import reload_all_commands
+                    from app.core.commands.builtin_commands import reload_all_commands
 
                     reload_all_commands()
                     result["commands"] = True
@@ -2217,7 +2217,7 @@ class PluginHostService(QObject):
 
         # 3. 重载命令
         try:
-            from app.core.builtin_commands import reload_all_commands
+            from app.core.commands.builtin_commands import reload_all_commands
 
             reload_all_commands()
             result["commands"] = True

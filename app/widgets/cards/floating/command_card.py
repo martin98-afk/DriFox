@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
 )
 
 from qfluentwidgets import ScrollArea
-from app.core.command_manager import CommandManager, CommandParameter, CommandType
+from app.core.commands.command_manager import CommandManager, CommandParameter, CommandType
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.utils.design_tokens import CardStyles, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name

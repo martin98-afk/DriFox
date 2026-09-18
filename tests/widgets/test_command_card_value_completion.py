@@ -3,7 +3,7 @@
 
 from unittest.mock import patch
 
-from app.core.command_manager import CommandParameter
+from app.core.commands.command_manager import CommandParameter
 
 
 def test_manual_value_parameter_detection_is_not_blocked_by_hidden_params(qapp):

@@ -544,7 +544,7 @@ def _promote_build_system_prompt_hook(_attempt: int = 0) -> None:
     from PyQt5.QtCore import QTimer
 
     try:
-        from app.core.hook_manager import HookManager
+        from app.core.hooks.hook_manager import HookManager
 
         rules = HookManager._shared_hooks.get("BuildSystemPrompt") or []
         target = next((r for r in rules if getattr(r, "skill_name", "") == "assistant_hub"), None)

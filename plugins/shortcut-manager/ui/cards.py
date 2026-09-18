@@ -239,7 +239,7 @@ def _find_conflicts(shortcut: str, all_commands: list, exclude_cmd: str = "") ->
 
 def _load_all_items() -> list:
     """获取系统内建命令 + UI 插件命令列表"""
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
     from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
     items = []
@@ -924,7 +924,7 @@ class ShortcutManagerCard(QWidget):
         )
 
         # 所有文件写入完成，只重载一次（不依赖 watchfiles 异步热更新防抖）
-        from app.core.builtin_commands import reload_all_commands
+        from app.core.commands.builtin_commands import reload_all_commands
 
         reload_all_commands()
 
@@ -988,7 +988,7 @@ class ShortcutManagerCard(QWidget):
                 _cleanup_legacy_shortcut_md(cmd_name)
                 logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
                 self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
-                from app.core.builtin_commands import reload_all_commands
+                from app.core.commands.builtin_commands import reload_all_commands
 
                 reload_all_commands()
                 QTimer.singleShot(300, self._refresh)
@@ -1004,7 +1004,7 @@ class ShortcutManagerCard(QWidget):
                     logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
                     self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
                     # 强制立即重载命令缓存，不依赖 watchfiles 异步热更新
-                    from app.core.builtin_commands import reload_all_commands
+                    from app.core.commands.builtin_commands import reload_all_commands
 
                     reload_all_commands()
                     break

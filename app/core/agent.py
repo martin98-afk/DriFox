@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Set, Union
 import yaml
 from loguru import logger
 
-from app.core.builtin_commands import _generate_tool_restriction_text
-from app.core.hook_manager import HookManager
+from app.core.commands.builtin_commands import _generate_tool_restriction_text
+from app.core.hooks.hook_manager import HookManager
 from app.tools import get_builtin_tools_schema
 from app.tools.tool_name_mapper import ToolNameMapper
 

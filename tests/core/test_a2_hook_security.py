@@ -8,7 +8,7 @@
 import pytest
 from loguru import logger
 
-from app.core.hook_manager import (
+from app.core.hooks.hook_manager import (
     Hook,
     HookManager,
     HookWorker,
@@ -103,7 +103,7 @@ def test_command_single_line_passes(tmp_path, log_capture):
     out, ok, rc = HookWorker._run_command_sync(hook.command)
     assert ok is True and out.strip() == "hello"
     # 执行审计（插件名+事件+命令摘要）在调用侧产生
-    from app.core.hook_manager import _audit_command
+    from app.core.hooks.hook_manager import _audit_command
 
     _audit_command(hook, "test-event", hook.command)
     audits = [r for r in log_capture if "[HookCommandAudit]" in r]

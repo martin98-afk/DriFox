@@ -1199,10 +1199,10 @@ class TestLoadMissingDegradation:
         assert "加载中止" not in func_src, "_handle_team_load 不应再出现「加载中止」报错文案（已降级到 prompt 补全）"
 
     def test_command_need_degrade_exception_exists(self):
-        """`app/core/command_manager.py` 必须定义 `CommandNeedDegrade` 异常类。"""
+        """`app/core/commands/command_manager.py` 必须定义 `CommandNeedDegrade` 异常类。"""
         import ast as _ast
 
-        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "command_manager.py"
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "commands" / "command_manager.py"
         _tree = _ast.parse(src_path.read_text(encoding="utf-8"))
 
         found = False
@@ -1440,8 +1440,8 @@ class TestLoadMissingDegradation:
         )
 
         # 🆕 select_prompt 过滤后公共规范始终保留（与命令报错回退兜底联动）
-        from app.core.builtin_commands import _load_command_file
-        from app.core.command_manager import CommandManager, CommandType
+        from app.core.commands.builtin_commands import _load_command_file
+        from app.core.commands.command_manager import CommandManager, CommandType
 
         _loaded = _load_command_file(team_md_path)
         _cm = CommandManager.get_instance()
@@ -1613,7 +1613,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
         monkeypatch.setattr(mw, "create_session_from_record", lambda *a, **k: MagicMock())
         monkeypatch.setattr(mw, "init_after_loading_session", lambda *a, **k: None)
 
-        import app.core.command_manager as cm_mod
+        import app.core.commands.command_manager as cm_mod
         import app.plugins.registries.ui_plugin_registry as uipr_mod
 
         monkeypatch.setattr(cm_mod.CommandManager, "get_instance", staticmethod(lambda: MagicMock()))

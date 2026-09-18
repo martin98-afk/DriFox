@@ -20,7 +20,7 @@ from loguru import logger
 from app.core.project_changed import dispatch_project_changed, is_active_window
 
 if TYPE_CHECKING:
-    from app.core.command_manager import CommandType  # noqa: F401
+    from app.core.commands.command_manager import CommandType  # noqa: F401
 
 # re-export：让 `from app.plugins.registries.ui_plugin_registry import WorkspacePageInfo` 直接可用
 from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo  # noqa: E402,F401
@@ -2291,8 +2291,8 @@ class UIPluginRegistry:
         description, handler = spec[0], spec[1]
         override_external = spec[3] if len(spec) > 3 else True
         try:
-            from app.core.builtin_commands import FunctionCommandHandlers
-            from app.core.command_manager import CommandManager, CommandType
+            from app.core.commands.builtin_commands import FunctionCommandHandlers
+            from app.core.commands.command_manager import CommandManager, CommandType
         except Exception:
             return
         cmd_mgr = CommandManager.get_instance()
@@ -2326,7 +2326,7 @@ class UIPluginRegistry:
                 from app.core import window_registry
 
                 if QApplication.instance() is not None and window_registry.alive_window_instances():
-                    from app.core.builtin_commands import _rebind_command_shortcuts
+                    from app.core.commands.builtin_commands import _rebind_command_shortcuts
 
                     logger.info(f"[UIPluginRegistry] UI 命令 /{name} 带快捷键落表，重建 QShortcut 绑定")
                     _rebind_command_shortcuts()
@@ -2345,8 +2345,8 @@ class UIPluginRegistry:
         self._ui_applied_names.discard(name)
         self._ui_command_names.discard(name)
         try:
-            from app.core.builtin_commands import FunctionCommandHandlers
-            from app.core.command_manager import CommandManager
+            from app.core.commands.builtin_commands import FunctionCommandHandlers
+            from app.core.commands.command_manager import CommandManager
 
             CommandManager.get_instance().unregister(name)
             FunctionCommandHandlers._handlers.pop(name, None)
@@ -2360,7 +2360,7 @@ class UIPluginRegistry:
                 from app.core import window_registry
 
                 if QApplication.instance() is not None and window_registry.alive_window_instances():
-                    from app.core.builtin_commands import _rebind_command_shortcuts
+                    from app.core.commands.builtin_commands import _rebind_command_shortcuts
 
                     _rebind_command_shortcuts()
             except Exception:
@@ -2417,7 +2417,7 @@ class UIPluginRegistry:
             return f"{plugin_name}:{base_id}"
         if base_id not in self._ui_applied_names:
             try:
-                from app.core.command_manager import CommandManager
+                from app.core.commands.command_manager import CommandManager
 
                 if CommandManager.get_instance().has_command(base_id):
                     return f"{plugin_name}:{base_id}"

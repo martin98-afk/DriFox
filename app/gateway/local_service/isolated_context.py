@@ -48,7 +48,7 @@ class IsolatedChatContext:
         return manager
 
     def _create_tool_executor(self):
-        from app.core.tool_executor import ToolExecutor
+        from app.core.tools.tool_executor import ToolExecutor
         ui_tool_executor = getattr(self._main_widget, '_tool_executor', None)
         homepage = getattr(self._main_widget, 'homepage', None)
         executor = ToolExecutor(homepage=homepage)

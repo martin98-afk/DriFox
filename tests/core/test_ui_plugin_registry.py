@@ -162,7 +162,7 @@ def test_floating_card_auto_registers_command():
     """register_floating_card 应自动注册 /card_id 命令（系统插件用短名）"""
     reg = UIPluginRegistry.get_instance()
     reg.reset()
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     # 系统插件（plugin_name == "system"）→ 短名
@@ -181,7 +181,7 @@ def test_floating_card_user_plugin_namespaced_command():
     """非系统插件的浮动卡片应注册为 namespaced 命令"""
     reg = UIPluginRegistry.get_instance()
     reg.reset()
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     # 用户插件 → plugin_name:card_id 形式
@@ -248,7 +248,7 @@ def test_unload_plugin_clears_registrations():
     assert "card1" not in reg.get_floating_cards()
     assert "plug-y" not in reg._loaded_plugins
 
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     assert cmd_mgr.has_command("card1") is False
@@ -375,7 +375,7 @@ def test_show_floating_card_registers_as_system_card():
     assert main_widget.system_card_registered.count("plug-bot") == 1
 
     # 清理
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-bot:plug-bot")
@@ -700,7 +700,7 @@ def test_move_floating_card_switches_container_and_rebuilds():
     assert main_widget._bottom_card_container.added[0][0] == "plug-move"
 
     # 清理
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-move:plug-move")
@@ -735,7 +735,7 @@ def test_move_floating_card_hidden_card_updates_only_and_bounds():
     assert reg.move_floating_card("not-exist", "top") is False
 
     # 清理
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-move:plug-move")
@@ -779,7 +779,7 @@ def test_show_floating_card_works_without_register_system_card_api():
     assert len(legacy._bottom_card_container.added) == 1
 
     # 清理
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-old:plug-old")

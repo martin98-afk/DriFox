@@ -8,7 +8,7 @@
 3. 智能体命令（AGENT/SUBAGENT）- 选中/发送时替换为智能体提示词，或通过 --subagent 启动子智能体
 
 使用方式：
-    from app.core.command_manager import CommandManager, CommandType
+    from app.core.commands.command_manager import CommandManager, CommandType
     
     manager = CommandManager.get_instance()
     manager.register("new", CommandType.FUNCTION, description="新建会话")

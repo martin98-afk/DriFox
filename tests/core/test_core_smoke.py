@@ -130,7 +130,7 @@ class TestCommandManager:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.command_manager")
+        return pytest.importorskip("app.core.commands.command_manager")
 
     def test_import(self, mod):
         assert mod is not None
@@ -487,7 +487,7 @@ class TestHookManager:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.hook_manager")
+        return pytest.importorskip("app.core.hooks.hook_manager")
 
     def test_import(self, mod):
         assert mod is not None

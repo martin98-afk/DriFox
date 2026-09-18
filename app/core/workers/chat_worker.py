@@ -1001,7 +1001,7 @@ class OpenAIChatWorker(QThread):
                 #   - JSON 输出 {"decision": "block", ...}
                 # 仅 Stop 事件实际消费该决策；其他事件也透传，由调用方决定
                 try:
-                    from app.core.hook_manager import HookDecision
+                    from app.core.hooks.hook_manager import HookDecision
 
                     if r.decision == HookDecision.BLOCK:
                         reason = self._extract_block_reason(r.output)

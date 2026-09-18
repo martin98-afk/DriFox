@@ -77,7 +77,7 @@ def _make_controller(monkeypatch, instances):
             pass
 
     monkeypatch.setattr("app.widgets.cards.settings.llm_settings_card.LLMSettingsCard", FakeLLMSettingsCard)
-    monkeypatch.setattr("app.core.hook_manager.HookManager", object)
+    monkeypatch.setattr("app.core.hooks.hook_manager.HookManager", object)
 
     container = type("C", (), {"added": [], "add_card": lambda self, cid, w: self.added.append((cid, w))})()
     ctrl = gcc.GlobalCardController(object(), container)

@@ -83,11 +83,11 @@ from app.core import (
     group_messages_for_display,
 )
 from app.core.message_content import _is_hook_message, strip_system_reminder
-from app.core.builtin_commands import FunctionCommandHandlers
-from app.core.command_manager import CommandManager, CommandType
+from app.core.commands.builtin_commands import FunctionCommandHandlers
+from app.core.commands.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
 from app.core.rss_sampler import rss_sampler
-from app.core.tool_permission_controller import ToolPermissionController
+from app.core.tools.tool_permission_controller import ToolPermissionController
 from app.core import window_registry
 
 
@@ -3518,7 +3518,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _init_builtin_commands(self):
         """注册并初始化所有内置命令"""
-        from app.core.builtin_commands import register_all_commands
+        from app.core.commands.builtin_commands import register_all_commands
 
         register_all_commands()
         self._register_system_card_commands()
@@ -3548,7 +3548,7 @@ class OpenAIChatToolWindow(ToolWindow):
         - 用户可以在快捷键管理器中为它们分配全局快捷键
         - 也可以通过 /settings、/history 等斜杠命令打开
         """
-        from app.core.command_manager import CommandManager, CommandType
+        from app.core.commands.command_manager import CommandManager, CommandType
 
         cmd_mgr = CommandManager.get_instance()
 
@@ -4271,7 +4271,7 @@ class OpenAIChatToolWindow(ToolWindow):
         from PyQt5.QtGui import QKeySequence
         from PyQt5.QtWidgets import QShortcut
 
-        from app.core.command_manager import CommandManager
+        from app.core.commands.command_manager import CommandManager
 
         def _resolve_target(parent):
             # 运行时解析当前激活的 MainWidget：Tab 模式取 _content_area 当前页；
@@ -4368,7 +4368,7 @@ class OpenAIChatToolWindow(ToolWindow):
         命令定义了 parameters（如 --flag、--key=value）时返回 True，
         快捷键触发时走插入文本路径，让参数卡片自动弹出。
         """
-        from app.core.command_manager import CommandManager
+        from app.core.commands.command_manager import CommandManager
 
         cmd_def = CommandManager.get_instance().get_command(name)
         return bool(cmd_def and cmd_def.parameters)
@@ -4433,7 +4433,7 @@ class OpenAIChatToolWindow(ToolWindow):
             False: 降级到 prompt 注入（命令未真正执行，调用方应保留附件等输入，
                 由后续普通发送流程把附件文本拼入 user_text，避免附件静默丢失）
         """
-        from app.core.command_manager import CommandNeedDegrade
+        from app.core.commands.command_manager import CommandNeedDegrade
 
         try:
             # 多窗口隔离：优先使用当前窗口自己的处理器（动态注册）
@@ -4486,7 +4486,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # _team_load_degraded=True 让 _on_send_clicked 继续 send_message。
             _cmd_name = exc.command_name or command_name
             _remainder = exc.remainder or args
-            from app.core.command_manager import CommandManager as _CommandManager
+            from app.core.commands.command_manager import CommandManager as _CommandManager
 
             _cmd_mgr = _CommandManager.get_instance()
             # 🛡️ 兜底：select_prompt 匹配不到对应 section 时（如 --create 无等号、
@@ -4495,7 +4495,7 @@ class OpenAIChatToolWindow(ToolWindow):
             _selected = _cmd_mgr.select_prompt(_cmd_name, _remainder) or ""
             if not _selected:
                 # CommandNeedDegrade 均来自 FUNCTION 命令，取 FUNCTION 类型定义回退
-                from app.core.command_manager import CommandType as _CommandType
+                from app.core.commands.command_manager import CommandType as _CommandType
 
                 _cmd_def = _cmd_mgr._commands.get(_cmd_name, {}).get(_CommandType.FUNCTION)
                 if _cmd_def:
@@ -4607,7 +4607,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # prompt 注入（_execute_command 捕获后 select_prompt 按 --create= 参数
         # 匹配 `<!-- section:create -->` 段，AI 自动生成团队模板）。
         if args.startswith("--create"):
-            from app.core.command_manager import CommandNeedDegrade
+            from app.core.commands.command_manager import CommandNeedDegrade
 
             raise CommandNeedDegrade("team", args)
 
@@ -4964,7 +4964,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # prompt 注入补全流程：由 _execute_command 捕获后 select_prompt 按
             # --load= 参数匹配 `<!-- section:load_missing -->` 段（详见
             # `plugins/system-commands/commands/team.md`），AI 走补全流程。
-            from app.core.command_manager import CommandNeedDegrade
+            from app.core.commands.command_manager import CommandNeedDegrade
 
             raise CommandNeedDegrade("team", f"--load={name} 缺失角色: {', '.join(missing)}")
 
@@ -14641,7 +14641,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 刷新 UI 插件命令卡片缓存（插件可能注册了新命令）
         try:
-            from app.core.command_manager import CommandManager
+            from app.core.commands.command_manager import CommandManager
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             CommandManager.get_instance().reload_all_commands()
@@ -19065,7 +19065,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # prompt 注入（_execute_command 捕获后 select_prompt 按 --create= 参数
         # 匹配 `<!-- section:create -->` 段，AI 自动生成子智能体 md 文件）。
         if args.startswith("--create"):
-            from app.core.command_manager import CommandNeedDegrade
+            from app.core.commands.command_manager import CommandNeedDegrade
 
             raise CommandNeedDegrade("subagents", args)
 
@@ -19212,7 +19212,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_subagents_param_description(self):
         """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""
-        from app.core.command_manager import CommandManager
+        from app.core.commands.command_manager import CommandManager
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()
@@ -19231,7 +19231,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_title_gen_param_description(self):
         """更新 /title_gen 命令的 --model= 参数描述，反映当前默认值"""
-        from app.core.command_manager import CommandManager
+        from app.core.commands.command_manager import CommandManager
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()

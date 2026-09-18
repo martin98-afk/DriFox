@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 import orjson
 from loguru import logger
 
-from app.core.hook_manager import HookDecision
+from app.core.hooks.hook_manager import HookDecision
 from app.core.message_content import content_to_text
 from app.tools.tool_name_mapper import ToolNameMapper
 

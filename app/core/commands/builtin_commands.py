@@ -16,7 +16,7 @@ function 类型仅使用 frontmatter，内容可为空
 ```
 
 用法：
-    from app.core.builtin_commands import register_all_commands
+    from app.core.commands.builtin_commands import register_all_commands
     register_all_commands()
 
 对于 function 类型命令的执行，由 main_widget.py 调用 FunctionCommandHandlers.get(name) 获取处理器。
@@ -32,7 +32,7 @@ import yaml
 from loguru import logger
 
 from app.core import window_registry
-from app.core.command_manager import CommandManager, CommandParameter, CommandType
+from app.core.commands.command_manager import CommandManager, CommandParameter, CommandType
 from app.tools.tool_name_mapper import ToolNameMapper
 
 # ============================================================

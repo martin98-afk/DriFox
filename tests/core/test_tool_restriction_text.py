@@ -18,7 +18,7 @@ import pytest
 @pytest.fixture
 def gen():
     """返回 _generate_tool_restriction_text 函数（私有函数直接导入测试）。"""
-    mod = pytest.importorskip("app.core.builtin_commands")
+    mod = pytest.importorskip("app.core.commands.builtin_commands")
     return mod._generate_tool_restriction_text
 
 

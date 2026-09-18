@@ -27,7 +27,7 @@ from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QApplication, QWidget
 
 from app.core import window_registry as window_registry_mod
-from app.core.command_manager import CommandManager, CommandType
+from app.core.commands.command_manager import CommandManager, CommandType
 
 
 TEST_CMD = "shortcut_probe_cmd"

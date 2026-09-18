@@ -60,7 +60,7 @@ def test_hook_manager_async_event_encodes_session_id():
 
     格式 `__async__:<event>:<sid>`，供 backend 回补注入前校验。
     """
-    src = _read_src("core/hook_manager.py")
+    src = _read_src("core/hooks/hook_manager.py")
     lines = src.splitlines()
     tree = ast.parse(src)
     # 用 AST 拿 _execute_hook 的精确行号范围，再对原始源码切片
