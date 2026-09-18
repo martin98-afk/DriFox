@@ -352,5 +352,36 @@ key = data["LLM"]["SavedProviders"]["xxx"]["API_KEY"]   # enc:v2:… 或 ""
 - 实战参照：`drifox-plugins2/plugins/prompt-enhancer/ui/__init__.py`（v0.3.0）
   与 `plugins/git-panel/ui/llm_config.py`（v2.0.1），回归测试
   `drifox-plugins2/tests/test_provider_key_channel.py`。
+## 19. 卡片弹出独立窗口后「样式全丢（按钮黑块）+ 数据空白」
+**症状**：浮动卡右键「弹出」为独立窗口后，窗口能开能拖，但内容页样式全丢
+（按钮渲染成黑色方块）、数据空白（如 Git 面板显示不出变更/搁置/分支）。
+**原因**：卡片类插件的模板惯例是 **`__init__` 只建骨架，数据加载与主题应用都收敛在
+`show_card()`**（浮动卡激活时由宿主调用）；主题样式同理（`_apply_latest_theme` →
+`_retheme` 由 show_card 触发）。弹窗宿主早期既不调用 `show_card()`，注入的上下文
+又不是完整 provider（`card_info.context_provider` 多数卡片为 None，
+拿不到 `project_root`）→ 双失败。
+**修法**（主程序侧 2026-09-17 已修，插件侧要点）：
+- 内容页按约定实现 `set_context_provider` / `show_card` / `refresh_theme` 三接口
+  （模板见 `templates-window.md` §15.3）；
+- **别在 `__init__` 里做重加载**：数据/样式统一放 `show_card()`，
+  两种宿主（浮动卡 / 独立窗）才能行为一致；
+- 老主程序上若弹窗内容不刷新，检查宿主版本是否走激活路径
+  （`PluginWindow._build_content` 调 `show_card()`）。
+
+## 20. FramelessWindow 自建窗口：内容把标题栏盖住 → 拖不动、点不到按钮
+**症状**：基于 `qframelesswindow.FramelessWindow` 自建窗口时，内容页铺满整个窗口，
+标题栏被压在下面——窗口拖不动、最小化/关闭点不到。
+**原因**：`FramelessWindow` 的 `titleBar` 是**浮动子控件**（不进布局，靠
+`resizeEvent` 定位在顶部 `(0, 0, w, titleBar.height())`）；内容页后创建 z-order 更高，
+且根布局 margins=0 时内容从 y=0 起铺。
+**修法**：
+```python
+lay = QVBoxLayout(self)
+lay.setContentsMargins(0, self.titleBar.height(), 0, 0)  # 顶部留出标题栏高度
+lay.addWidget(content)
+self.titleBar.raise_()   # content 晚于 titleBar 创建，必须再置顶一次
+```
+（参考实现：`app/widgets/plugin_window.py`；TabManagerWindow 同款在
+`main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)`。）
 ---
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。

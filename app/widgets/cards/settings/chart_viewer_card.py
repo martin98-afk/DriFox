@@ -31,7 +31,7 @@ from PyQt5.QtWebEngineWidgets import QWebEnginePage
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import QDialog, QVBoxLayout
 
-from app.core.webengine_profile import create_transient_web_profile
+from app.core.infra.webengine_profile import create_transient_web_profile
 from app.utils.diff_viewer import _cleanup_temp_files, _load_html_to_webview
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 

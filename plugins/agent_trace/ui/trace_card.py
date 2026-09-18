@@ -317,7 +317,7 @@ class TraceCardWidget(QWidget):
         if getattr(self, "_events_subscribed", False):
             return
         try:
-            from app.core.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
 
             weak_self = weakref.ref(self)
 

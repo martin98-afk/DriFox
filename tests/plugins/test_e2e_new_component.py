@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt5.QtCore import QObject
 
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 
 
 def test_new_component_type_end_to_end(monkeypatch, tmp_path):

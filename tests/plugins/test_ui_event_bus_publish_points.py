@@ -4,7 +4,7 @@
 用 monkeypatch 拦截 publish，不构造真实 Qt 窗口——埋点函数级验证。
 """
 
-from app.core.ui_event_bus import (
+from app.core.infra.ui_event_bus import (
     EV_CARD_VISIBILITY_CHANGED,
     EV_TAB_SWITCHED,
     EV_THEME_CHANGED,

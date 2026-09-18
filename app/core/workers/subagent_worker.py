@@ -15,15 +15,15 @@ from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
-from app.core.model_capabilities import (
+from app.core.modelmeta.model_capabilities import (
     get_model_capabilities,
     normalize_reasoning_effort,
     resolve_context_limit,
     resolve_max_output_tokens,
 )
-from app.core.message_content import extract_reasoning_delta
-from app.core.provider_profile import get_provider_profile
-from app.core.tool_call_parser import smart_parse_arguments
+from app.core.conversation.message_content import extract_reasoning_delta
+from app.core.modelmeta.provider_profile import get_provider_profile
+from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.tools.result import ToolResult
 
@@ -877,8 +877,8 @@ class SubAgentExecutor(QThread):
             # 让 hook（如 context_auto_compact）能检测当前 token 占比
             if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
                 try:
-                    from app.core.token_estimator import count_messages_tokens as _count
-                    from app.core.model_capabilities import resolve_context_limit as _resolve_limit
+                    from app.core.infra.token_estimator import count_messages_tokens as _count
+                    from app.core.modelmeta.model_capabilities import resolve_context_limit as _resolve_limit
 
                     token_count = _count(current_messages)
                     token_limit = 0
@@ -918,7 +918,7 @@ class SubAgentExecutor(QThread):
 
             # 收集成功执行的 hook 输出，注入 messages
             # ★ 只注入标记为 add_to_context=true 的 hook 结果
-            from app.core.backend import _make_hook_message
+            from app.core.conversation.backend import _make_hook_message
 
             injected = 0
             for r in results:
@@ -1487,7 +1487,7 @@ class SubAgentExecutor(QThread):
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
             # per-tool 关闭策略优先，缺失回退全局 behavior（与 UI 引擎 _check_tool_permission 同口径）
-            from app.core.tool_permission_controller import resolve_tool_off_policy
+            from app.core.tools.tool_permission_controller import resolve_tool_off_policy
 
             return resolve_tool_off_policy(check_name, controller, policies, behavior)
 
@@ -1499,7 +1499,7 @@ class SubAgentExecutor(QThread):
         try:
             agent = self.agent_manager.get_agent(self.agent_name) if self.agent_manager else None
             if agent is not None:
-                from app.core.agent import PermissionResolver
+                from app.core.conversation.agent import PermissionResolver
 
                 resolver = PermissionResolver(agent.permission, {}, agent.tools)
                 # 权限参数适配（与 UI 引擎/AGENT_CONFIG 同口径）：

@@ -38,7 +38,7 @@ from qfluentwidgets import (
     ToolButton,
 )
 
-from app.core.mcp_lsp_safety import (
+from app.core.tools.mcp_lsp_safety import (
     confirm_by_key,
     is_pending_confirm_by_key,
     is_session_denied,
@@ -872,7 +872,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _mcp_gate_key(self, name: str) -> str:
         """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）"""
-        from app.core.mcp_lsp_safety import plugin_from_source, server_key
+        from app.core.tools.mcp_lsp_safety import plugin_from_source, server_key
 
         src = next((s.get("_source", "") for s in self._get_servers() if s.get("name", "") == name), "")
         return server_key("mcp", plugin_from_source(src), name)
@@ -1321,7 +1321,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
         def _work():
             try:
-                from app.core.token_estimator import estimate_tokens
+                from app.core.infra.token_estimator import estimate_tokens
 
                 servers = self._get_servers()
                 count = len(servers)

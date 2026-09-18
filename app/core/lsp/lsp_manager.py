@@ -459,7 +459,7 @@ class LspManager:
         """通用 CLI 调用 + JSON 解析（pyright 风格）。由 cli_fallback 调度。"""
         import asyncio.subprocess
 
-        from app.core.mcp_lsp_safety import gate_server_launch
+        from app.core.tools.mcp_lsp_safety import gate_server_launch
 
         if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
             return None, "", False, "CLI 启动被安全门禁拦截"
@@ -495,7 +495,7 @@ class LspManager:
         """通用 CLI 调用 + 原始 stdout 返回（不解析）。"""
         import asyncio.subprocess
 
-        from app.core.mcp_lsp_safety import gate_server_launch
+        from app.core.tools.mcp_lsp_safety import gate_server_launch
 
         if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
             return "[CLI] 启动被安全门禁拦截"
@@ -530,7 +530,7 @@ class LspManager:
         import asyncio.subprocess
         import re
 
-        from app.core.mcp_lsp_safety import gate_server_launch
+        from app.core.tools.mcp_lsp_safety import gate_server_launch
 
         if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
             return "[CLI] 启动被安全门禁拦截"

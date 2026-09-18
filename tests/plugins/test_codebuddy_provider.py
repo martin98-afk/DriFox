@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.provider_profile import detect_provider_family, get_provider_profile
+from app.core.modelmeta.provider_profile import detect_provider_family, get_provider_profile
 from app.plugins.registries.provider_registry import ProviderRegistry
 
 _PROVIDER_FILE = Path("plugins/system-providers/providers/codebuddy.py")

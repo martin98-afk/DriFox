@@ -41,12 +41,12 @@ from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
 from app.core.conversation.config import HookPolicy, PermissionCache
-from app.core.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
+from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
-from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
-from app.core.provider_profile import get_provider_profile
-from app.core.tool_call_parser import smart_parse_arguments
-from app.core.token_estimator import count_messages_tokens
+from app.core.modelmeta.model_capabilities import get_model_capabilities, normalize_reasoning_effort
+from app.core.modelmeta.provider_profile import get_provider_profile
+from app.core.tools.tool_call_parser import smart_parse_arguments
+from app.core.infra.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
 from app.core.workers.chat_worker_state import ChatWorkerState
 from app.core.workers.worker_event_bus import WorkerEvent, WorkerEventBus
@@ -77,7 +77,7 @@ class StreamInterruptedError(RuntimeError):
 
 def _check_team_member(backend) -> bool:
     """检查当前窗口是否是团队成员（委托给共用函数）"""
-    from app.core.team_manager import check_team_member
+    from app.core.team.team_manager import check_team_member
 
     return check_team_member(backend)
 
@@ -343,7 +343,7 @@ class OpenAIChatWorker(QThread):
         """
         if self._result_persister is None:
             try:
-                from app.core.tool_result_persister import ToolResultPersister
+                from app.core.tools.tool_result_persister import ToolResultPersister
 
                 # 优先用 worker 当前 session_id, 兜底用 "default"
                 session_id = (
@@ -722,7 +722,7 @@ class OpenAIChatWorker(QThread):
                 return
             window_id = getattr(backend, "_window_id", None)
             if window_id:
-                from app.core.team_manager import TeamManager
+                from app.core.team.team_manager import TeamManager
 
                 tm = TeamManager.get_instance()
                 pending = tm.get_pending_tasks(window_id)
@@ -730,7 +730,7 @@ class OpenAIChatWorker(QThread):
                     mail = pending[0]
                     tm.mark_mail_running(mail["id"], window_id)
 
-                    from app.core.backend import _format_hook_output
+                    from app.core.conversation.backend import _format_hook_output
 
                     task_desc = mail.get("body", mail.get("subject", ""))
                     from_agent = mail.get("from_agent", "?")
@@ -874,7 +874,7 @@ class OpenAIChatWorker(QThread):
                 （来自 hookify 风格 JSON 的 reason/stopReason 字段，或 raw output）；
                 否则返回 None。Stop hook 用此实现"强制续命"机制。
         """
-        from app.core.backend import _make_hook_message
+        from app.core.conversation.backend import _make_hook_message
 
         # Hook 参与级别拦截：消息级事件（PreAssistantMessage/PostAssistantMessage/Stop）
         # 由 hook policy 插件决定（plugins/system-hook-policies/hook_policies/）。
@@ -895,7 +895,7 @@ class OpenAIChatWorker(QThread):
         if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
             for msg in reversed(current_session_messages):
                 if msg.get("role") == "user":
-                    from app.core.message_content import content_to_text
+                    from app.core.conversation.message_content import content_to_text
 
                     current_message_text = content_to_text(msg.get("content", ""))
                     break
@@ -1001,7 +1001,7 @@ class OpenAIChatWorker(QThread):
                 #   - JSON 输出 {"decision": "block", ...}
                 # 仅 Stop 事件实际消费该决策；其他事件也透传，由调用方决定
                 try:
-                    from app.core.hook_manager import HookDecision
+                    from app.core.hooks.hook_manager import HookDecision
 
                     if r.decision == HookDecision.BLOCK:
                         reason = self._extract_block_reason(r.output)
@@ -1024,7 +1024,7 @@ class OpenAIChatWorker(QThread):
 
     def _hook_context_usage(self, backend) -> tuple:
         """hook 注入用上下文用量（与圆环同源，见 app/core/context_usage.py）"""
-        from app.core.context_usage import snapshot_usage_for_hooks
+        from app.core.context.usage import snapshot_usage_for_hooks
 
         return snapshot_usage_for_hooks(
             backend,
@@ -2156,7 +2156,7 @@ class OpenAIChatWorker(QThread):
                         #  这里漏传 tools 会让卡片底部的 fallback 估值缺掉工具定义，与圆环对不上）
                         # ratio：本地估算校正系数（服务商能力 > app.config 覆盖 > 模型名兜底），
                         # 修正 MiniMax 等不返 usage 厂商的本地估算比真实值高约 2 倍的问题。
-                        from app.core.provider_profile import resolve_token_ratio
+                        from app.core.modelmeta.provider_profile import resolve_token_ratio
 
                         ctx_count = count_messages_tokens(
                             current_messages,
@@ -2397,13 +2397,30 @@ class OpenAIChatWorker(QThread):
                 # 借鉴 Claude Code: 单结果 > 50K 字符 / 消息级 > 200K 字符 -> 落盘
                 # 在 ToolExecutor 之后、消息拼接之前执行, 保护 Prompt Cache 前缀稳定
                 # 完全无 LLM API 调用, 失败时回退保留原结果
+                #
+                # 现经 ContextPipeline 的 ingest stage 执行：落盘逻辑已迁移为
+                # tool_offload tier（order 15，先于截断层：可回读优于有损截断）。
+                # ingest stage 允许副作用（写盘），send/ui 两个投影入口不会触发本层。
                 try:
-                    persister = self._get_persister()
-                    if persister and tool_results:
-                        tool_results, persist_stats = persister.process(tool_results)
-                        self._last_persist_stats = persist_stats.to_dict()
+                    if tool_results:
+                        from app.core.context.pipeline import ContextPipeline
+
+                        _before_chars = sum(len(str(r.get("content", "") or "")) for r in tool_results)
+                        tool_results = ContextPipeline().ingest_tool_results(
+                            tool_results, self.llm_config or {}, session_id=self.session_id or ""
+                        )
+                        _after_chars = sum(len(str(r.get("content", "") or "")) for r in tool_results)
+                        if _after_chars < _before_chars:
+                            self._last_persist_stats = {
+                                "persisted_count": sum(
+                                    1 for r in tool_results if "<persisted-output>" in str(r.get("content", ""))
+                                ),
+                                "saved_chars": _before_chars - _after_chars,
+                            }
+                        else:
+                            self._last_persist_stats = None
                 except Exception as e:
-                    logger.exception(f"[Persist] 持久化失败, 保留原结果: {e}")
+                    logger.exception(f"[Persist] ingest 失败, 保留原结果: {e}")
                     self._last_persist_stats = None
 
                 response_sequence = self._build_response_message_sequence(tool_results)
@@ -3934,7 +3951,7 @@ class OpenAIChatWorker(QThread):
                             except json.JSONDecodeError:
                                 # 短参数的 JSON 解析失败，记录到等待队列
                                 # 同时也发射长度进度，避免 UI 一直卡在"正在准备参数..."
-                                from app.core.tool_arg_lines import (
+                                from app.core.tools.tool_arg_lines import (
                                     LINE_ESTIMATE_STEP,
                                     build_progress_payload,
                                     extract_partial_path,
@@ -3979,7 +3996,7 @@ class OpenAIChatWorker(QThread):
                         else:
                             # 参数已超过 1000 字符，跳过逐块 JSON 解析以节省开销
                             # 但仍推送长度进度 + 累积尾部预览，让 UI 显示接收进度
-                            from app.core.tool_arg_lines import (
+                            from app.core.tools.tool_arg_lines import (
                                 LINE_ESTIMATE_STEP,
                                 build_progress_payload,
                                 extract_partial_path,
@@ -5067,7 +5084,7 @@ class OpenAIChatWorker(QThread):
             image_data=getattr(result_obj, "image_data", None) if result_obj else None,
         ):
             try:
-                from app.core.model_capabilities import get_model_capabilities
+                from app.core.modelmeta.model_capabilities import get_model_capabilities
 
                 _model_name = str(self.llm_config.get("模型名称", "") or "")
                 _caps = get_model_capabilities(_model_name)

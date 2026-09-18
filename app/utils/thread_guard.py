@@ -110,6 +110,19 @@ def install_guard() -> None:
     # 标记已安装
     install_guard._patched = _safe_init  # type: ignore[attr-defined]
 
+    # ── 族① 根治：退出期 PyQt 不得销毁仍被引用的 C++ 对象 ──
+    # 默认开启时，解释器 shutdown 阶段 PyQt 会 delete 所有仍被 Python 拥有的
+    # QObject：anchor 级联 delete children（含 finalize 超时被放生、仍在运行
+    # 的 worker）→ "QThread: Destroyed while thread is still running" qFatal
+    # → 0xC0000409 闪退。关闭后这些对象直接泄漏到进程死亡，由内核回收；
+    # 需要落盘/收尾的资源都走 atexit/closeEvent 显式路径，不依赖析构。
+    try:
+        from PyQt5 import sip as _sip_mod
+
+        _sip_mod.setdestroyonexit(False)
+    except Exception:  # noqa: BLE001
+        pass
+
     # ── 退出期清理注册（幂等，模块级标志防重复注册）──
     global _atexit_registered
     if not _atexit_registered:
@@ -230,6 +243,7 @@ def _cleanup_threads_at_exit() -> None:
     start = _time.monotonic()
     with _watchdog_lock:
         snapshot = list(_running_threads)
+    survivors = []
     for thread in snapshot:
         try:
             if not isinstance(thread, QThread) or not _cpp_alive(thread):
@@ -239,6 +253,25 @@ def _cleanup_threads_at_exit() -> None:
             thread.requestInterruption()
             thread.quit()
             thread.wait(_atexit_wait_ms)
+        except Exception:  # noqa: BLE001
+            continue
+        # wait 超时仍存活的线程记入幸存者（finalize 超时被放生的流式 worker）
+        try:
+            if _cpp_alive(thread) and thread.isRunning():
+                survivors.append(thread)
+        except RuntimeError:
+            pass
+    # ── 族① 双保险：幸存线程脱离 anchor 父链 ──
+    # anchor（模块级 QObject）析构时 Qt 会级联 delete 全部 children；
+    # 幸存线程被级联 delete → 同一条 qFatal。脱钩后 anchor 无 children
+    # 可删；配合 install_guard 里的 setdestroyonexit(False)，PyQt 退出期
+    # 也不再 delete —— OS 线程随进程死亡由内核回收。
+    # 注意：绝不从 _running_threads 丢弃幸存者（强引用防止 GC 回收
+    # wrapper 时 sip delete 运行中线程，同一条 qFatal）。
+    for thread in survivors:
+        try:
+            if thread.parent() is _thread_anchor:
+                thread.setParent(None)
         except Exception:  # noqa: BLE001
             continue
     elapsed = _time.monotonic() - start

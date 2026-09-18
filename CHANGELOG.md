@@ -1,9 +1,28 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### ✨ 新功能 (New Features)
+
+- **会话分享 HTML 样式主题化** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 分享导出的 HTML 此前只从主题取 9 个色值，其余颜色（标题、加粗、表头、行内代码、代码块底色、工具块、侧栏高亮）全部硬编码为深色主题假设，导致浅色主题下出现白底白字、标题与表头不可见。现全部改为引用主题 token（`user_card_*` / `assistant_card_*` / `syntax_*` / `card_bg_dim` / `divider_color` 等），深浅主题各自正确。同时对齐 in-app 观感：用户卡用 `user_card_bg` 蓝底、助手卡用 `assistant_card_bg` 暖底（此前两者同色仅靠左边框区分）；代码块接入 `codehilite` + pygments，亮色走 `friendly`、深色走 `dracula`，与 in-app 同一对风格。
+
+- **会话分享窄屏布局修复** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): CSS 视口宽度 ≤760px 时（窄窗口或浏览器放大），原断点把 `.sidebar` 置为 `position: static`，滚动越过之后左侧导航永久消失、正文撑满全宽，用户感知为「滚动到一半消息突然占满屏幕、左边列表没了」；同时 `.layout` 转 column 后仍是 `align-items: flex-start`，正文被压到侧栏宽度（实测仅 230px）。现窄屏改为导航贴顶常驻的横向滚动条（`sticky` + `overflow-x`，隐藏摘要行），`.layout` 改 `align-items: stretch` 且 `.main` 宽 100%；JS 侧栏跟随同步支持 `scrollLeft`。实测 600 / 740 / 1280 三种宽度下侧栏全程可见（0/11 不可见），窄屏正文恢复满宽（529/669），宽屏布局不变。
+
+- **会话分享侧栏导航修复乱飞** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 滚动时左侧导航高亮来回跳的根因是 `IntersectionObserver` 回调只拿到状态发生变化的 `entries`，取「最靠上的可见项」实为残缺集合的结果。改为按 DOM 顺序全量比较 `getBoundingClientRect()`（基准线取视口上方 15%），并用 rAF 节流；同时新增侧栏自动跟随——高亮项滚出侧栏可视区时同步滚动 `sidebar.scrollTop`。实测 10 个滚动位置高亮序列单调递增（0→2→5→7→17→21），零回退。
+
+- **会话分享 HTML 在线渲染** (`app/gateway/utils/edgeone_deployer.py` 新增, `app/widgets/cards/floating/share_card.py`, `tests/gateway/test_edgeone_deployer.py` 新增, `tests/widgets/test_share_card_html_deploy.py` 新增): 分享卡片选择 HTML 格式时，「生成链接」按钮改为「🌐 发布网页」，走 EdgeOne Makers 匿名部署得到可在线渲染的站点链接（HTML 被浏览器正常解析，不再像 Gitee raw 那样显示源码或被内容机审拦截）。零配置：申请临时凭证 → COS 签名上传 → 创建部署 → 轮询结果，全流程在后台 QThread 执行，UI 不冻结。链接 30 分钟内有效（EdgeOne 匿名部署的产品设计），InfoBar 明确提示；部署失败时本地 HTML 仍保留在 `~/.drifox/share/sessions/`。JSON / Markdown 格式继续走原 Gitee 链路，行为不变。
+
+- **上下文管理插件化 — tier cascade** (`app/core/context/` 新增, `app/plugins/contracts/context_policy.py`, `app/plugins/registries/context_policy_registry.py`, `plugins/system-context/` 新增, `tests/core/test_context_pipeline.py` 新增): 把硬编码在内核的上下文管理逻辑抽成插件槽位，遵循 Claude Code / Anthropic context editing 的分层降级范式。新增 `ContextView` 投影对象与 `ContextPipeline` 编排器，三个 stage（`ingest` 允许落盘副作用 / `send` / `ui` 禁止副作用）共用同一条降级链；8 个内置 tier 按 order 10-80 由轻到重执行（图片剥离 / 重复结果去重 / 工具结果截断 / 长结果落盘 / 参数截断 / 旧输出摘要化 / 尾保留 / LLM 摘要），每层自带 trigger 声明。编排三条规则：达标即停（used <= target 立刻 break）、分层熔断（连续 2 次无收益跳过该层）、异常隔离（tier 抛错记录并跳过，不阻断发送）。插件可注册/覆盖/插入任意层，同 order 后注册者生效；阈值统一由 `system-context` 插件 config_schema 承载（环境变量→存储→默认三级链）。既有 `prune_tool_result` / `ToolResultPersister` / `HistoryCompactor` 对外 API 零变化。
+
+### 🔧 重构 (Refactor)
+
+- `prune_tool_result` 及私有辅助迁至 `app/core/context/tool_prune.py`（`context_builder` / `message_content` 保留 re-export，序列化器插件继续调用）
+- 免裁剪名单改由工具注册时声明：`metadata["no_prune"]`（不截断）/ `metadata["no_offload"]`（不落盘），替代主程序硬编码的 `PRUNE_SKIP_TOOLS` / `SKIP_TOOLS` 两份不一致白名单
+
 ## [v0.6.2] - 2026-09-17 (重新发布 #2)
 
-自上一版本以来的变更 | 提交数：23 · 文件变更：58 · +7059/-1327 | 贡献者：dingma, mading
+自上一版本以来的变更 | 累计提交数：81 · 累计文件变更：416 · 累计 +17471/-5834 | 累计贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -34,6 +53,128 @@ All notable changes to this project will be documented in this file.
 - **消息级分支落地 + agent_trace 占位增强** (`app/core/message_content.py`, `app/main_widget.py`, `plugins/agent_trace/ui/trace_card.py`, `plugins/agent_trace/ui/trace_collector.py`, `plugins/agent_trace/ui/turn_list_widget.py`): 消息级分支实现，agent_trace 增强占位处理。`fd2449c5`
 
 - **右键菜单分支能力增强** (`plugins/agent_trace/README.md`): 右键菜单分支能力完善。`69765f10`
+
+---
+
+### ✨ 新功能 (New Features) — 重新发布增量 #3
+
+#### 上下文管理 tier cascade 化
+
+- **上下文 tier cascade 骨架 — 契约 + ContextView + prune 迁移 + 预算解析器** (`app/plugins/contracts/context_policy.py`, `app/plugins/registries/context_policy_registry.py`, `app/core/context/view.py`, `app/core/context/pipeline.py`, `app/core/context/budget.py`, `app/core/context/prune.py`, `plugins/system-context/` 新增): 把硬编码在内核的上下文管理逻辑抽成插件槽位，遵循 Claude Code / Anthropic context editing 的分层降级范式。新增 `ContextView` 投影对象与 `ContextPipeline` 编排器，三个 stage（`ingest` 允许落盘副作用 / `send` / `ui` 禁止副作用）共用同一条降级链；8 个内置 tier 按 order 10-80 由轻到重执行（图片剥离 / 重复结果去重 / 工具结果截断 / 长结果落盘 / 参数截断 / 旧输出摘要化 / 尾保留 / LLM 摘要），每层自带 trigger 声明。编排三条规则：达标即停（used <= target 立刻 break）、分层熔断（连续 2 次无收益跳过该层）、异常隔离（tier 抛错记录并跳过，不阻断发送）。插件可注册/覆盖/插入任意层，同 order 后注册者生效；阈值统一由 `system-context` 插件 config_schema 承载（环境变量→存储→默认三级链）。既有 `prune_tool_result` / `ToolResultPersister` / `HistoryCompactor` 对外 API 零变化。
+- **新增 ContextView 投影对象与 TierStat** (`app/core/context/view.py`): `ContextView` 暴露 `used_tokens` / `target_tokens` / `budget` / `tool_count` / `image_count` / `persisted_count` / `summarized_count` 等运行时指标；`TierStat` 记录每层命中次数、累计缩减 token、失败次数；为 `pipeline.run` 编排与 UI 状态卡供数据来源。
+- **ContextPipeline 编排器 + ContextPolicyRegistry + 内置 tier 10/20/30** (`app/core/context/pipeline.py`, `app/plugins/registries/context_policy_registry.py`): `ContextPipeline.run(messages, ctx)` 按 target 迭代所有启用的 tier，达标即停；`ContextPolicyRegistry` 单例管理 tier 注册 / 启停 / 顺序；tier 10 图片剥离、tier 20 重复结果去重、tier 30 工具结果截断先行落地。
+- **内置 tier 40/50/60（落盘 / 参数截断 / 旧输出摘要化）+ chat_worker 走 ingest 入口** (`app/core/context/pipeline.py`, `app/core/workers/chat_worker.py`): tier 40 长结果落盘复用既有 `ToolResultPersister`（session 维度），tier 50 工具入参超长截断，tier 60 旧输出按 character/token 比摘要化；`chat_worker` 在调用前先走 `pipeline.ingest_tool_results(messages)` 触发落盘侧效，`send` / `ui` stage 走只读 `project_for_send` / `project_for_ui`。
+- **system-context 系统插件承载 8 tier + 预算解析器，loader/热重载/探测谓词接线** (`plugins/system-context/context_tiers/*.py`, `plugins/system-context/budget_resolvers/*.py`, `plugins/system-context/plugin.json`, `plugins/system-context/config_schema.json`): 系统插件注册全部内置 tier 与一个内置预算解析器；`runtime_component_loader` 接入 `context_tiers` / `budget_resolvers` 两类组件细项开关。
+- **system-context 加特性开关（截断/落盘可关），细项开关支持 context_tiers/budget_resolvers，清走已迁出的配置项** (`plugins/system-context/plugin.json`, `plugins/system-context/config_schema.json`): `enable_tool_prune` / `enable_tool_offload` 由细项开关替代；插件主配置可独立关闭截断或落盘整链路；清理从主程序 config 迁出的旧 key。
+- **大模型设置新增「上下文」页（tier 逐项开关 + 描述），细项枚举读 tier 的 label/order** (`app/widgets/cards/settings/context_settings_card.py` 新增, `plugins/system-context/`): 新建 `ContextSettingsCard` 加载 `system-context` 插件 `config_schema`，渲染 tier 列表开关（label + 描述 + 启用勾选），顺序动态来自注册表；启用链路经 `_is_item_enabled` 过滤，未启用 tier 不注册。
+- **新增「上下文」图标（暗/亮双版本）+ 上下文页图标引用** (`app/resources/icons/context.svg`, `app/resources/icons/context_light.svg` 新增, `app/widgets/cards/settings/llm_settings_card.py`): 双版本图标匹配深浅主题，浅色版单独绘制避免深底深图标。
+- **编译「上下文」图标进资源 + tools/compile_qrc.py 补 pyrcc5 缺失（用 PyQt5.pyrcc_main）** (`tools/compile_qrc.py`, `app/resources/resources.qrc`): 改用 PyQt5 自带 `pyrcc_main` 而非 `pyrcc5` 可执行，避免 PyQt5-5.15 起 wheel 不再带 `pyrcc5` 报错。
+- **上下文管理插件补全描述，组件细项展示 label/说明** (`plugins/system-context/plugin.json`, `app/widgets/cards/settings/plugin_components_card.py`): `description` 改为「见用户插件 context-compaction」并补全 8 tier 描述；`PluginComponentsCard` 透出 tier 的 `label` / `description` 到设置页。
+- **update system-context plugin description and version; refactor tool pruning and offloading logic** (`plugins/system-context/`): 系统插件描述与版本更新，工具裁剪/落盘内聚。
+
+#### 会话分享 HTML 走 EdgeOne 匿名部署实现在线渲染
+
+- **会话分享 HTML 走 EdgeOne 匿名部署实现在线渲染** (`app/gateway/utils/edgeone_deployer.py` 新增, `app/widgets/cards/floating/share_card.py`, `tests/gateway/test_edgeone_deployer.py` 新增, `tests/widgets/test_share_card_html_deploy.py` 新增): 分享卡片选择 HTML 格式时，「生成链接」按钮改为「🌐 发布网页」，走 EdgeOne Makers 匿名部署得到可在线渲染的站点链接（HTML 被浏览器正常解析，不再像 Gitee raw 那样显示源码或被内容机审拦截）。零配置：申请临时凭证 → COS 签名上传 → 创建部署 → 轮询结果，全流程在后台 QThread 执行，UI 不冻结。链接 30 分钟内有效（EdgeOne 匿名部署的产品设计），InfoBar 明确提示；部署失败时本地 HTML 仍保留在 `~/.drifox/share/sessions/`。JSON / Markdown 格式继续走原 Gitee 链路，行为不变。
+
+#### 虚拟滚动增强
+
+- **enhance batch management logic for virtual scrolling; refine restoration and protection mechanisms** (`app/widgets/cards/chat_view/`, `tests/widgets/test_virtual_scrolling_*.py`): 虚拟滚动批次管理逻辑增强，restoration 与保护机制精细化，路径/高度回落场景下关闭虚拟滚动以避免视觉漂移。
+- **resolve virtual scrolling滚动滚滾 issues causing height collapse and scroll drift** (`app/widgets/cards/chat_view/`, `tests/widgets/test_virtual_scrolling_*.py`): 修虚拟滚动在切快速滚动时的高度坍缩与滚动漂移。
+- **视口回收跳过未渲染批次，消除占位高度失真引发的滚动跳动** (`app/widgets/cards/chat_view/`, `tests/widgets/test_virtual_scrolling_*.py`): 视口回收时跳过未渲染批次，避免占位高度失真引发的滚动跳动。
+- **滚动停顿后视口内占位批次同步重建，不再叠加 500ms 防抖等待** (`app/widgets/cards/chat_view/`, `tests/widgets/test_virtual_scrolling_*.py`): 滚动停顿后视口内占位批次同步重建，删除叠加的 500ms 防抖等待以缩短恢复延迟。
+
+#### agent_trace 统计页记录模型名，字符统计含思考内容
+
+- **agent_trace 统计页记录模型名，字符统计含思考内容** (`plugins/agent_trace/ui/detail_panel.py`, `plugins/agent_trace/ui/trace_collector.py`, `plugins/agent_trace/ui/trace_models.py`, `tests/plugins/test_agent_trace_model_name.py` 新增): detail 面板记录每轮所用模型名到会话内；字符统计含 `<think>...</think>` 思考块，与实际渲染一致。
+
+#### 插件弹窗与扩展点
+
+- **footer_action role 分流 + register_window 插件独立弹窗（左侧栏入口与右键弹出）** (`app/plugins/contracts/`, `app/plugins/registries/ui_plugin_registry.py`, `app/widgets/cards/`, `tests/plugins/test_register_window.py` 新增): `register_window` 扩展点上线，插件可注册独立弹窗：壳复用 `FramelessWindow` + `CustomTitleBar`，自动入左侧自定义插件栏点击开/关切换、右键菜单「弹出」重开；`footer_action` 扩展点 `role` 参数 `"assistant"|"user"|"both"`，`user` / `both` 渲染在用户气泡底部操作行且位于内置按钮左侧。
+- **register_window 支持 group 覆盖左侧栏分组（system 常驻 / custom 自定义）** (`app/plugins/contracts/`, `app/plugins/registries/ui_plugin_registry.py`, `app/widgets/cards/`): `group` 参数 `"system"|"custom"` 覆盖左侧栏分组（常驻区/自定义折叠区，默认跟随插件归属）。
+- **新增 ui-slots-demo 示例插件（独立弹窗 + 消息卡片按钮/信息注入四类扩展点演示）** (`plugins/ui-slots-demo/` 新增): 示例插件展示独立弹窗与四类扩展点接入，演示 `register_window` / `register_footer_action` / `register_message_factory` / `register_input_button` 的标准调用方式。
+- **修复: 插件卡弹出独立窗口补激活路径（完整 context provider + show_card + 主题级联）** (`app/plugins/registries/ui_plugin_registry.py`, `app/widgets/cards/plugin_window_card.py`, `tests/plugins/test_plugin_window_activation.py` 新增): `show_card` 调用补完整 context provider；主题级联广播同步透传到独立弹窗；幂等检查避免重复弹出。
+
+### 🐛 问题修复 (Bug Fixes) — 重新发布增量 #3
+
+#### 崩族收敛
+
+- **修复退出期运行中 QThread 被级联 delete 的 qFatal 闪退（族①）** (`app/core/thread_guard.py`, `app/core/executor.py`, `app/main_widget.py`, `tests/core/test_thread_guard_finalize.py` 新增): T1 主战场崩族①根因——`thread_guard.py` anchor 退出期级联析构 × `executor.py` finalize 超时放生；anchor 退出阶段级联 `deleteLater` 所有运行中 QThread 会撞 `QThread: Destroyed while thread is still running` qFatal。修复：`thread_guard.finalize()` 改为先发 quit 事件 → 等待 `finished` → 超时再 `wait(timeout)` → 仍未结束则标记放弃但不 delete 存活线程；`executor` finalize 给 `wait_for_idle(timeout_ms)` 加递增退避并尊重外部放弃。流式中关窗不再 qFatal。
+
+#### 上下文 tier 链路修复
+
+- **tool_prune(order 20) 必须排在 tool_dedupe(order 30) 之前** (`app/core/context/pipeline.py`, `plugins/system-context/context_tiers/`): 去重后达标 break 会跳过截断致超长结果全文进上下文。调整 order：截断 20 → 去重 30 → 落盘 40 → 参数截断 50 → 摘要化 80；调整后跑通 `test_pipeline_dedupe_after_prune.py`。
+- **tool_offload 按 session 隔离落盘、插件阈值直达 persister，order 提至 15 先于截断** (`plugins/system-context/context_tiers/tool_offload.py`, `app/core/context/persister.py`, `plugins/system-context/plugin.json`): 落盘维度由全局改为 per-session，避免多会话同时写入串扰；插件 config_schema 阈值直达 `persister` 不再主程序映射；order 从 40 提至 15 在截断前抢先落盘。
+
+#### 分享 HTML
+
+- **分享 HTML 样式主题化并修复侧栏导航乱飞** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 详见上一节「重新发布 #2」增量。
+- **分享 HTML 窄屏下侧栏消失、正文被压窄** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 同上。
+
+#### 虚拟滚动
+
+- **ensure minimum batch size of 1 for virtual buffer to prevent unloading of protected batches** (`app/widgets/cards/chat_view/`): 受保护批次最小保留 1，禁止清空。
+- **resolve virtual scrolling滚动滚滾 issues causing height collapse and scroll drift** (`app/widgets/cards/chat_view/`): 同「虚拟滚动增强」节。
+
+#### 插件扩展点
+
+- **builtin_commands 兼容垫片，修复市场插件 UI 加载失败** (`app/plugins/registries/builtin_commands.py`, `plugins/system-context/`, `tests/plugins/test_builtin_commands_shim.py` 新增): 重构后 `builtin_commands` 路径变更，市场插件直接 `import` 失败；新增兼容垫片，旧 `from app.core.builtin_commands import X` 自动重定向到新位置。
+- **代码框按钮信号转发改直连，修复卡片回收后点击闪退** (`app/widgets/message_card.py`, `tests/widgets/test_code_block_button_signal.py` 新增): 代码块按钮 `clicked` 信号原经 `viewer.click_signal → card.forward` 中转，卡片被 `DeferredTaskQueue` 回收后中转对象失效；改为代码块直接 `connect` 到 `card.slot`，绕过中转链。
+- **插件弹窗内容页不再覆盖标题栏 + 左侧栏菜单项改「弹出」并加图标** (`app/widgets/cards/plugin_window_card.py`, `app/widgets/sidebar.py`): 内容页 `setContentsMargins` 修正，不压标题栏；左侧栏菜单项动作改为「弹出」语义、icon 复用插件主图标。
+- **插件卡弹出独立窗口补激活路径（完整 context provider + show_card + 主题级联）** (`app/plugins/registries/ui_plugin_registry.py`, `app/widgets/cards/plugin_window_card.py`, `tests/plugins/test_plugin_window_activation.py` 新增): 同「插件弹窗与扩展点」节。
+- **codebuddy 守护线程退出期网络竞态（预热 + 退出信标 + 测试禁用开关）** (`app/core/codebuddy.py`, `tests/core/test_codebuddy_shutdown.py` 新增): 退出期网络回调可能落到已销毁对象；加预热减少冷启动冲撞 + 退出信标使回调早返回 + 测试用 `DRIFOX_DISABLE_CODEBUDDY=1` 关闭。
+
+### ♻️ 代码重构 (Refactoring) — 重新发布增量 #3
+
+#### app/core 子包化（10 项）
+
+- **对话管线五件归入 app/core/conversation 子包** (`app/core/conversation/` 新增, `app/core/chat_session.py`, `app/core/engine.py`, `app/core/workers/`): `chat_session` / `engine` / `worker` 三件为主体的对话管线代码集中归 `conversation/`，公开路径保持向后兼容 re-export。
+- **宿主服务归入 services 子包** (`app/core/services/` 新增): 散落的宿主服务聚合为 `services`。
+- **构建命令钩子域归组 hooks/commands 子包** (`app/core/hooks/`, `app/core/commands/` 新增): hook 管理与命令注册按域划分子包，hook_manager / hook_spec 注册按操作类划分。
+- **工具执行域六文件归入 app/core/tools 子包** (`app/core/tools/` 新增): 工具执行上下文 / 调度 / 运行器归 `tools`。
+- **context 域散文件归入 app/core/context 子包** (`app/core/context/` 新增): 上下文管理一切散文件集中归 `context/`。
+- **13 个横切小件归入 app/core/infra 子包** (`app/core/infra/` 新增): 13 个不到子包体量的小件集中归 `infra`，包括路径工具、异常类、单例基类等。
+- **模型元数据与配置同步归入 modelmeta/sync 子包** (`app/core/modelmeta/`, `app/core/sync/` 新增): 模型元数据拉取与同步逻辑独立子包。
+- **team_manager 归入 app/core/team 子包** (`app/core/team/` 新增): 团队管理独立子包。
+
+#### 上下文 tier 内聚
+
+- **prune_tool_result 迁至 app/core/context/（re-export 保兼容）** (`app/core/context/prune.py` 新增, `app/core/context_builder.py`, `app/core/message_content.py`): `prune_tool_result` 私有辅助迁至 `app/core/context/tool_prune.py`，`context_builder` / `message_content` 保留 re-export，序列化器插件继续可调用。
+- **BuiltInBudgetResolver 移入 system-context 插件，pipeline 预算兜底改常数级** (`plugins/system-context/budget_resolvers/builtin.py` 新增, `app/core/context/budget.py`): 内置预算解析器随 tier 一起移入 `system-context` 插件；pipeline 兜底改为常数级查找，O(1) 完成。
+- **系统插件只留前缀安全层，破坏前缀的压缩层移入用户插件 context-compaction** (`plugins/system-*`, `~/.drifox/plugins/context-compaction/` 新增): 原 system-* 压缩层前缀不要求用户用 system-前缀误用率过高，移至用户插件 `context-compaction`；系统插件只保留安全层。
+- **build_messages / UI 估算改走统一投影（删手工重复截断，保留 prep 缓存语义）** (`app/core/chat_session.py`, `app/core/engine.py`, `app/widgets/message_card.py`): 删调用点手工重复截断，全部走 `ContextPipeline.project_for_send` / `project_for_ui` 统一投影；`prep` 缓存语义保留供上游复用。
+
+#### 免裁剪名单
+
+- **免裁剪名单改由工具 metadata 声明（no_prune / no_offload），补 6 个工具 flag** (`app/core/context/tool_prune.py`, `app/tools/`, `tests/core/test_no_prune_metadata.py` 新增): `metadata["no_prune"]`（不截断）/ `metadata["no_offload"]`（不落盘）替代主程序硬编码 `PRUNE_SKIP_TOOLS` / `SKIP_TOOLS` 两份不一致白名单；为 `question` / `skill` / `mcp_list_servers` / `todowrite` / `todoread` / `manage_skill` 等 6 个工具补 flag。
+
+#### agent_trace throughput 重构
+
+- **simplify footer throughput calculation and improve session handling** (`plugins/agent_trace/ui/trace_collector.py`, `plugins/agent_trace/ui/trace_models.py`): 删除 `_ROUND_STATS` / `_record_round` / `_session_key` / `_round_bucket` / `_aggregate_records` 五个重复口径；统一走 collector per-call `rec.tokens / (elapsed_ms - ttft_ms)`，消除历史回填把整轮 `elapsed` 与末次 `token_usage.output` 当同源相除的 1 tok/s 假象。
+- **implement throttling for reprojecting in footer throughput calculations** (`plugins/agent_trace/ui/trace_collector.py`, `plugins/agent_trace/ui/timeline_panel.py`, `tests/plugins/test_agent_trace_reproject_throttle.py` 新增): 切会话驱动的 collector 重投影加 5s 节流 `_REPROJECT_GUARD`，避免高频重投影拖慢 UI。
+
+#### 其他重构
+
+- **remove ui-slots-demo plugin and associated files** (`plugins/ui-slots-demo/` 删除, `tests/plugins/test_ui_slots_demo.py` 删除): 示例插件本身作为示范更佳，留在主仓示例；具体插件代码并入 `plugin-creator` / `ui-plugin-creator` 技能文档。
+- **remove suppress_memory_card parameter from _on_new_project_created method** (`app/main_widget.py`, `app/core/chat_session.py`): 清除未使用参数签名。
+
+### 🧪 测试 (Tests) — 重新发布增量 #3
+
+- **修正 AST 读源码测试的搬迁后路径（conversation/backend、message_content）** (`tests/utils/test_ast_read_source.py`): 子包化后 `app.core.chat_session` 等已迁至 `app.core.conversation.chat_session`，修正 import 与源码读取路径。
+- **ContextPipeline cascade 行为 13 例（达标即停/熔断/异常隔离/stage 过滤）+ 修注入 registry 未生效** (`tests/core/test_context_pipeline.py` 新增, `app/plugins/registries/context_policy_registry.py`): 13 例覆盖三 stage 行为、达标即停 / 熔断 / 异常隔离 / tier 顺序调整后行为；修测试 fixture 中 `ContextPolicyRegistry` 单例未 reset 致 tier 重复注入。
+
+### 📚 文档 (Documentation) — 重新发布增量 #3
+
+- **同步上下文 tier cascade 扩展点说明与 changelog** (`docs/plugins/context_policy.md` 新增, `CHANGELOG.md`): 上下文扩展点文档化（契约 / 注册表 / tier 生命周期 / 触发条件）。
+- **示例 README 说明 plugin.json 自建（仓库 json 白名单约束）** (`plugins/ui-slots-demo/README.md`): 主仓 `.drifox-plugin/` 白名单约束下用户自建 plugin.json 的 2 种姿势。
+- **ui-plugin-creator 技能补独立弹窗/消息卡片槽位（新扩展点+实战踩坑+示例）** (`skills/ui-plugin-creator/SKILL.md`, `skills/ui-plugin-creator/references/`): 补 `register_window` / `register_footer_action` / `register_message_factory` / `register_input_button` 四类扩展点的实战踩坑与示例代码。
+
+### 🔧 其他 (Chores & Build) — 重新发布增量 #3
+
+- 4 次 `auto-regenerate from plugin.json [skip ci]`（市场插件索引与 `marketplace.json` 同步）
+
+---
+
+> 累计统计 v0.6.2 (重新发布 #3)：自上一版本以来累计 **81 个 commit** · 触及 **416 个文件** · **+17471/-5834 行** · 贡献者 **dingma, drifox-bot, mading**。
 
 ## [v0.6.1] - 2026-09-15
 

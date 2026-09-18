@@ -97,8 +97,8 @@ from app.core import (
     content_to_text,
     ensure_content_blocks,
 )
-from app.core.message_content import make_tool_result_block
-from app.core.webengine_profile import get_shared_web_profile
+from app.core.conversation.message_content import make_tool_result_block
+from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Animations,
     BorderRadius,
@@ -571,7 +571,7 @@ def _render_plugin_fence(info, code_content_raw: str) -> str:
         code = code_content_raw
     # P2-1：fence render 入口同口径 watchdog（超时 degrade → 连续熔断停用）
     try:
-        from app.core.ui_callback_watchdog import timed_ui_callback
+        from app.core.infra.ui_callback_watchdog import timed_ui_callback
 
         html = timed_ui_callback(
             info.plugin_name,
@@ -5318,20 +5318,26 @@ class CodeWebViewer(QWebEngineView):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(40)
 
-        self._page.codeActionRequested.connect(self.codeActionRequested.emit)
-        self._page.contextActionRequested.connect(self.contextActionRequested.emit)
+        # ⚠️ 转发一律 signal-to-signal 直连（.connect(self.xxxRequested)），
+        # 禁止 .connect(self.xxxRequested.emit)：bound .emit 对 PyQt 是普通
+        # Python callable，不绑定 receiver 生命周期（receiver 销毁后连接残留），
+        # 且 disconnect(bound.emit) 永远抛 TypeError（每次访问 .emit 都是新
+        # 对象，匹配不上）——2026-09-18 代码框按钮闪退
+        # （Qt5Core!QObject::signalsBlocked AV READ 0x0）根因。
+        self._page.codeActionRequested.connect(self.codeActionRequested)
+        self._page.contextActionRequested.connect(self.contextActionRequested)
         self._user_reading_inside = False
         self._page.heightReported.connect(self._on_height_reported)
         self._page.bodyGeometryReported.connect(self._on_body_geometry_reported)
         self._page.cardReadingChanged.connect(self._on_card_reading_changed)
         self._page.contentReady.connect(self._on_js_ready)
-        self._page.toolDiffRequested.connect(self.toolDiffRequested.emit)
-        self._page.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
-        self._page.saveFileRequested.connect(self.saveFileRequested.emit)
-        self._page.chartExpandRequested.connect(self.chartExpandRequested.emit)
-        self._page.saveChartPngRequested.connect(self.saveChartPngRequested.emit)
-        self._page.saveWidgetFileRequested.connect(self.saveWidgetFileRequested.emit)
-        self._page.previewImageRequested.connect(self.previewImageRequested.emit)
+        self._page.toolDiffRequested.connect(self.toolDiffRequested)
+        self._page.subAgentLogRequested.connect(self.subAgentLogRequested)
+        self._page.saveFileRequested.connect(self.saveFileRequested)
+        self._page.chartExpandRequested.connect(self.chartExpandRequested)
+        self._page.saveChartPngRequested.connect(self.saveChartPngRequested)
+        self._page.saveWidgetFileRequested.connect(self.saveWidgetFileRequested)
+        self._page.previewImageRequested.connect(self.previewImageRequested)
         self._page.renderCrashed.connect(self._on_render_crashed)
 
         self._load_skeleton()
@@ -13662,12 +13668,17 @@ class MessageCard(SimpleCardWidget):
             b.setFixedSize(20, 20)  # 弱化处理：比原顶部按钮 32px 更小
             install_hover_tooltip(b, delay_ms=200)
             hb.addWidget(b)
-        # 插件注册按钮（footer_action 槽位）：与内置按钮同排同风格
+        # 插件注册按钮（footer_action 槽位）：与内置按钮同排同风格。
+        # 只渲染 assistant/both 角色（user 角色走用户气泡底部操作行）。
         footer_actions = []
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            footer_actions = UIPluginRegistry.get_instance().get_footer_actions()
+            footer_actions = [
+                a
+                for a in UIPluginRegistry.get_instance().get_footer_actions()
+                if getattr(a, "role", "assistant") in ("assistant", "both")
+            ]
         except Exception:
             footer_actions = []
         for info in footer_actions:
@@ -14277,7 +14288,7 @@ class MessageCard(SimpleCardWidget):
         仅匹配当前 ``self._welcome_mode`` 的 mode_key（payload 由插件声明），
         不匹配则忽略。widget 销毁时自动退订，防止悬挂 callback。
         """
-        from app.core.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
+        from app.core.infra.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
 
         def _on_refresh(payload):
             mode_key = payload.get("mode_key")
@@ -14383,7 +14394,7 @@ class MessageCard(SimpleCardWidget):
         if getattr(self, "_identity", None) is not None:
             return self._identity
         try:
-            from app.core.message_identity import resolve_for_message
+            from app.core.infra.message_identity import resolve_for_message
 
             session_id = ""
             team_agent = ""
@@ -14405,7 +14416,7 @@ class MessageCard(SimpleCardWidget):
                 window_id=window_id,
             )
         except Exception:
-            from app.core.message_identity import MessageIdentity
+            from app.core.infra.message_identity import MessageIdentity
 
             self._identity = MessageIdentity(name="Drifox" if self.role != "user" else "")
         return self._identity
@@ -14617,6 +14628,43 @@ class MessageCard(SimpleCardWidget):
         bl = QHBoxLayout(btns)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(2)
+        # 插件注册按钮（footer_action role=user/both）：位于内置按钮之前（左侧），
+        # 同排同风格，hover 随容器整体浮现；点击复用 _on_footer_plugin_action。
+        plugin_actions = []
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            plugin_actions = [
+                a
+                for a in UIPluginRegistry.get_instance().get_footer_actions()
+                if getattr(a, "role", "assistant") in ("user", "both")
+            ]
+        except Exception:
+            plugin_actions = []
+        for info in plugin_actions:
+            try:
+                from PyQt5.QtGui import QIcon
+
+                from app.utils.theme_manager import theme_manager
+
+                try:
+                    is_light = theme_manager.is_light_theme()
+                except Exception:
+                    is_light = False
+                path = (
+                    info.icon_light_path if (is_light and info.icon_light_path) else info.icon_path
+                )
+                b = TransparentToolButton(QIcon(str(path)) if path else QIcon(), self)
+                if info.tooltip:
+                    b.setToolTip(info.tooltip)
+                    install_hover_tooltip(b, delay_ms=200)
+                b.setFixedSize(26, 26)  # 与内置按钮同尺寸（弱化处理）
+                b.clicked.connect(lambda _c=False, _info=info: self._on_footer_plugin_action(_info))
+                bl.addWidget(b)
+            except Exception as e:
+                logger.warning(
+                    f"[MessageCard] 用户按钮栏插件按钮 {getattr(info, 'action_id', '?')} 构建失败: {e}"
+                )
         for ic, tp, cb in [
             (get_icon("复制"), "复制", lambda: self._copy_user_message()),
             (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
@@ -15188,12 +15236,12 @@ class MessageCard(SimpleCardWidget):
         # 灰度：Qt 渲染器无 context lost，不应进入此方法；防御性回退到 WebEngine
         self.viewer = CodeWebViewer(self)
         self.viewer._lazy_markdown_cb = self._build_incremental_md
-        self.viewer.codeActionRequested.connect(self.actionRequested.emit)
-        self.viewer.contextActionRequested.connect(self.contextActionRequested.emit)
+        self.viewer.codeActionRequested.connect(self.actionRequested)
+        self.viewer.contextActionRequested.connect(self.contextActionRequested)
         self.viewer.contentHeightChanged.connect(self._update_height)
-        self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
-        self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
-        self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+        self.viewer.toolDiffRequested.connect(self.toolDiffRequested)
+        self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested)
+        self.viewer.saveFileRequested.connect(self.saveFileRequested)
         self.viewer.chartExpandRequested.connect(self._on_chart_expand)
         self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
         self.viewer.saveWidgetFileRequested.connect(self._on_save_widget_file)
@@ -16032,18 +16080,27 @@ class MessageCard(SimpleCardWidget):
         """连接 viewer → 卡片的全部信号。
 
         与 :meth:`_disconnect_viewer_signals` **成对维护**，两处写在一起是为了
-        支持 WebView 池化：viewer 换卡片时必须先断开旧连接再连到新卡片，
-        否则旧卡片被销毁后残留连接会在信号触发时抛 RuntimeError。
+        支持 WebView 池化：viewer 换卡片时必须先断开旧连接再连到新卡片。
+
+        ⚠️ 转发一律 signal-to-signal 直连（``.connect(self.actionRequested)``），
+        禁止 ``.connect(self.actionRequested.emit)``：bound ``.emit`` 对 PyQt
+        是普通 Python callable，不绑定 receiver（卡片）生命周期——卡片被虚拟
+        滚动回收销毁后连接残留，viewer 复用时信号触发即调用已析构对象
+        → ``Qt5Core!QObject::signalsBlocked`` AV READ 0x0（2026-09-18 代码框
+        按钮闪退根因）；且 ``disconnect(bound.emit)`` 永远抛 TypeError
+        （每次访问 ``.emit`` 都是新对象，匹配不上），导致
+        :meth:`_disconnect_viewer_signals` 静默失效。直连由 Qt 记录 receiver
+        QObject，销毁自动断连，``disconnect(信号对象)`` 也可正常断开。
         """
         v = self.viewer
         if v is None:
             return
-        v.codeActionRequested.connect(self.actionRequested.emit)
-        v.contextActionRequested.connect(self.contextActionRequested.emit)
+        v.codeActionRequested.connect(self.actionRequested)
+        v.contextActionRequested.connect(self.contextActionRequested)
         v.contentHeightChanged.connect(self._update_height)
-        v.toolDiffRequested.connect(self.toolDiffRequested.emit)
-        v.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
-        v.saveFileRequested.connect(self.saveFileRequested.emit)
+        v.toolDiffRequested.connect(self.toolDiffRequested)
+        v.subAgentLogRequested.connect(self.subAgentLogRequested)
+        v.saveFileRequested.connect(self.saveFileRequested)
         v.chartExpandRequested.connect(self._on_chart_expand)
         v.saveChartPngRequested.connect(self._on_save_chart_png)
         v.saveWidgetFileRequested.connect(self._on_save_widget_file)
@@ -16062,12 +16119,12 @@ class MessageCard(SimpleCardWidget):
         if v is None:
             return
         pairs = (
-            (v.codeActionRequested, self.actionRequested.emit),
-            (v.contextActionRequested, self.contextActionRequested.emit),
+            (v.codeActionRequested, self.actionRequested),
+            (v.contextActionRequested, self.contextActionRequested),
             (v.contentHeightChanged, self._update_height),
-            (v.toolDiffRequested, self.toolDiffRequested.emit),
-            (v.subAgentLogRequested, self.subAgentLogRequested.emit),
-            (v.saveFileRequested, self.saveFileRequested.emit),
+            (v.toolDiffRequested, self.toolDiffRequested),
+            (v.subAgentLogRequested, self.subAgentLogRequested),
+            (v.saveFileRequested, self.saveFileRequested),
             (v.chartExpandRequested, self._on_chart_expand),
             (v.saveChartPngRequested, self._on_save_chart_png),
             (v.saveWidgetFileRequested, self._on_save_widget_file),
@@ -16155,7 +16212,8 @@ class MessageCard(SimpleCardWidget):
                 # 灰度：纯 Qt 块级渲染器（无 Chromium/JS 层）
                 self.viewer = _get_markdown_block_viewer_cls()(self)
                 self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
-                self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+                # 直连（非 .emit 转发）：Qt 绑定 receiver 生命周期，viewer 销毁自动断连
+                self.viewer.saveFileRequested.connect(self.saveFileRequested)
                 # 仅"从磁盘加载的历史会话"折叠；本轮对话（流式进行中或已完成）
                 # 保持展开 —— 后者若按 _streaming=False 判为历史，会在虚拟滚动
                 # 回收重建后突然折叠，与首次渲染的展开态不一致。

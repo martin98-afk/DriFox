@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from PyQt5 import sip as _sip
 
 from loguru import logger
-from app.core import window_registry
+from app.core.infra import window_registry
 from PyQt5.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
@@ -2287,7 +2287,7 @@ class TabManagerWindow(FramelessWindow):
         # ── full 容器卡片标题栏 tab（替代原 ReplaceTabBar）──
         # full 卡片（UI 插件 full 卡 + 内置全局卡）打开时在标题栏 tab 区显示
         # （带 × 关闭钮，见 _on_card_visibility_changed）。这里仅订阅显隐事件。
-        from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+        from app.core.infra.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
 
         # 订阅 full 卡片显隐事件，同步标题栏 tab open 集合与显隐
         UIEventBus.get_instance().subscribe(EV_CARD_VISIBILITY_CHANGED, self._on_card_visibility_changed)
@@ -3547,7 +3547,7 @@ class TabManagerWindow(FramelessWindow):
         fallback 也为空则返回 ("", "")（header 不显示 icon）。
         """
         try:
-            from app.core.team_manager import TeamManager
+            from app.core.team.team_manager import TeamManager
 
             tm = TeamManager.get_instance()
             run_id = TabManagerWindow._resolve_tab_team_id(window)
@@ -3731,7 +3731,7 @@ class TabManagerWindow(FramelessWindow):
                 pass
             # Phase E：发布 Tab 切换事件
             try:
-                from app.core.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
+                from app.core.infra.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
 
                 UIEventBus.get_instance().publish(
                     EV_TAB_SWITCHED,
@@ -3863,7 +3863,7 @@ class TabManagerWindow(FramelessWindow):
                     if hasattr(window, "_handle_team_leave") and callable(window._handle_team_leave):
                         window._handle_team_leave(silent=True, batch_disband=True)
                     else:
-                        from app.core.team_manager import TeamManager
+                        from app.core.team.team_manager import TeamManager
 
                         # 🛡️ W3a（W2 联调审查问题 4）：降级路径（无 _handle_team_leave
                         # 的老窗口/非主窗口）在 leave_team 前必须先停 team watcher——
@@ -3904,7 +3904,7 @@ class TabManagerWindow(FramelessWindow):
         # save_now=False 挂起（team_manager._save_team_data 仅标记 pending），
         # 此处 flush 一次原子写盘。flush 是优化项，失败静默不破坏解散流程。
         try:
-            from app.core.team_manager import TeamManager
+            from app.core.team.team_manager import TeamManager
 
             TeamManager.get_instance().flush_pending_saves()
         except Exception:
@@ -5246,8 +5246,8 @@ class TabManagerWindow(FramelessWindow):
         TabManagerWindow._instance = None
         # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
         try:
-            from app.core.gateway_service import GatewayService
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.services.gateway_service import GatewayService
+            from app.core.services.plugin_host_service import PluginHostService
 
             GatewayService.get_instance().stop()
             PluginHostService.get_instance().stop()

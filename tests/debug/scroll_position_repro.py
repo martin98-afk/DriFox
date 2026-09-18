@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
-from app.core.webengine_profile import init_shared_web_profile  # noqa: E402
+from app.core.infra.webengine_profile import init_shared_web_profile  # noqa: E402
 from app.widgets.message_card import CodeWebViewer  # noqa: E402
 
 PROBE = """

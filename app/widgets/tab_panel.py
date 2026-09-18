@@ -882,6 +882,40 @@ def _make_position_icon(black_cells) -> QIcon:
     return icon
 
 
+_POPOUT_ICON_CACHE: list = []
+
+
+def _make_popout_icon() -> QIcon:
+    """生成「弹出」菜单图标：主窗口轮廓（浅块）+ 右上角弹出箭头（带缓存）
+
+    风格对齐 _make_position_icon：16x16 viewBox + 浅灰描边，深浅主题均可辨。
+    """
+    if _POPOUT_ICON_CACHE:
+        return _POPOUT_ICON_CACHE[0]
+    # 矩形=原窗口位置；折线箭头（↗）=脱离主窗口弹出
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+        f'<rect x="1" y="6.2" width="8.8" height="8.8" rx="1.6" '
+        f'fill="{_POSITION_WHITE}" stroke="{_POSITION_STROKE}" stroke-width="0.9"/>'
+        f'<path d="M8.2 8.2 L14.2 2.2" stroke="{_POSITION_BLACK}" stroke-width="1.5" '
+        'stroke-linecap="round"/>'
+        f'<path d="M9.8 2.2 H14.2 V6.6" fill="none" stroke="{_POSITION_BLACK}" '
+        'stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>'
+        "</svg>"
+    )
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.transparent)
+    renderer = QSvgRenderer(svg.encode("utf-8"))
+    painter = QPainter(pm)
+    try:
+        renderer.render(painter)
+    finally:
+        painter.end()
+    icon = QIcon(pm)
+    _POPOUT_ICON_CACHE.append(icon)
+    return icon
+
+
 class _RotatableArrow(QWidget):
     """可旋转 chevron 折叠指示箭头：0° 指向右(折叠)，90° 指向下(展开)。
 
@@ -948,6 +982,7 @@ class UIPluginRow(QFrame):
 
     clicked = pyqtSignal()
     positionRequested = pyqtSignal(str, str)  # (card_id, container) 右键选择插入方位
+    popoutRequested = pyqtSignal(str)  # (key) 右键「弹出为独立窗口」
 
     def __init__(
         self,
@@ -957,12 +992,14 @@ class UIPluginRow(QFrame):
         plugin_name: str = "",
         card_id: str = "",
         enable_position_menu: bool = True,
+        kind: str = "card",
     ):
         super().__init__(parent)
         self._title = title  # 存储标题，图标 tooltip 使用（侧边栏收起时只剩图标）
         self._plugin_name = plugin_name  # 存储插件名，主题刷新时重新获取图标
-        self._card_id = card_id  # 存储卡片 ID，右键菜单定位用
+        self._card_id = card_id  # 存储卡片/窗口 ID，右键菜单定位用
         self._enable_position_menu = enable_position_menu  # 独立 sidebar 项无卡片方位概念，禁用右键菜单
+        self._kind = kind  # "sidebar" | "card" | "window"（决定右键菜单构成）
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
         # 图标 tooltip：收起态只有图标时悬浮可见插件名（与 TabItem 一致）
@@ -980,10 +1017,11 @@ class UIPluginRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("uiPluginRow")
         self.set_icon(icon)
-        # 右键菜单：选择卡片插入方位（仅内存生效，不持久化）
-        if enable_position_menu:
+        # 右键菜单：card → 插入方位 + 弹出独立窗口；window → 弹出独立窗口；
+        # sidebar 无右键（无内容 widget 可弹）
+        if enable_position_menu or kind == "window":
             self.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.customContextMenuRequested.connect(self._show_position_menu)
+            self.customContextMenuRequested.connect(self._show_context_menu)
         # 初始应用字体和颜色，避免在 refresh_style() 被调用前显示默认 Qt 字体
         from app.utils.utils import get_unified_font
 
@@ -1062,10 +1100,10 @@ class UIPluginRow(QFrame):
             self.clicked.emit()
         super().mousePressEvent(event)
 
-    def _build_position_menu(self) -> QMenu:
-        """构建插入方位菜单：下/左/右/替换（「上」与 full 行为重复，不提供）"""
+    def _build_context_menu(self) -> QMenu:
+        """右键菜单：card → 插入方位（下/左/右/替换，仅内存生效）+ 弹出独立窗口；
+        window → 弹出独立窗口。样式与 TabPanel.contextMenuEvent 保持一致（运行时插值，跟随主题色）"""
         menu = QMenu(self)
-        # 样式与 TabPanel.contextMenuEvent 保持一致（运行时插值，跟随主题色）
         menu.setStyleSheet(f"""
             QMenu {{
                 background: {Colors.CARD_BG};
@@ -1083,21 +1121,28 @@ class UIPluginRow(QFrame):
                 background: {Colors.HOVER_BG};
             }}
         """)
-        # 图标：2x2 方块，黑=卡片显示位置（下/左/右为半黑，替换=全黑）
-        positions = (
-            ("下", "bottom", {(0, 1), (1, 1)}),
-            ("左", "left", {(0, 0), (0, 1)}),
-            ("右", "right", {(1, 0), (1, 1)}),
-            ("替换", "full", {(0, 0), (1, 0), (0, 1), (1, 1)}),
+        if self._kind == "card":
+            # 图标：2x2 方块，黑=卡片显示位置（下/左/右为半黑，替换=全黑）
+            positions = (
+                ("下", "bottom", {(0, 1), (1, 1)}),
+                ("左", "left", {(0, 0), (0, 1)}),
+                ("右", "right", {(1, 0), (1, 1)}),
+                ("替换", "full", {(0, 0), (1, 0), (0, 1), (1, 1)}),
+            )
+            for label, container, black_cells in positions:
+                action = menu.addAction(_make_position_icon(black_cells), label)
+                action.triggered.connect(
+                    lambda checked=False, c=container: self.positionRequested.emit(self._card_id, c)
+                )
+            menu.addSeparator()
+        menu.addAction(_make_popout_icon(), "弹出").triggered.connect(
+            lambda checked=False: self.popoutRequested.emit(self._card_id)
         )
-        for label, container, black_cells in positions:
-            action = menu.addAction(_make_position_icon(black_cells), label)
-            action.triggered.connect(lambda checked=False, c=container: self.positionRequested.emit(self._card_id, c))
         return menu
 
-    def _show_position_menu(self, pos):
-        """显示插入方位菜单（仅内存生效，不持久化）"""
-        self._build_position_menu().exec_(self.mapToGlobal(pos))
+    def _show_context_menu(self, pos):
+        """显示右键菜单（仅内存生效，不持久化）"""
+        self._build_context_menu().exec_(self.mapToGlobal(pos))
 
 
 def _sort_plugin_entries(entries: list) -> list:
@@ -1513,8 +1558,9 @@ class TabPanel(QWidget):
             registry = UIPluginRegistry.get_instance()
             sidebar_items = registry.get_sidebar_items()
             cards = registry.get_floating_cards()
+            window_infos = registry.get_window_infos()
         except Exception:
-            sidebar_items, cards = [], {}
+            sidebar_items, cards, window_infos = [], {}, []
 
         from app.plugins.managers.plugin_manager import PluginManager
 
@@ -1523,7 +1569,7 @@ class TabPanel(QWidget):
         # 兼容映射：已注册独立 sidebar 项的插件 → 跳过其 container="left" 卡片派生
         sidebar_plugin_names = {info.plugin_name for info in sidebar_items}
 
-        # 统一条目：(kind, key, title, plugin_name, priority)；kind ∈ {"sidebar", "card"}
+        # 统一条目：(kind, key, title, plugin_name, priority)；kind ∈ {"sidebar", "card", "window"}
         system_infos: list[tuple[str, str, str, str, int]] = []
         custom_infos: list[tuple[str, str, str, str, int]] = []
         for info in sidebar_items:
@@ -1535,6 +1581,33 @@ class TabPanel(QWidget):
                 info.priority,
             )
             if info.group == "system":
+                system_infos.append(entry)
+            else:
+                custom_infos.append(entry)
+        # 独立弹窗条目（register_window）：左侧栏点击开/关切换，右键可弹出
+        for info in window_infos:
+            # 合成弹窗（popout_card 生成）不出现在左侧栏，避免与源卡片重复条目
+            if info.window_id.startswith("popout:"):
+                continue
+            try:
+                plugin_info = pm.get_plugin(info.plugin_name)
+                is_system = plugin_info.is_system if plugin_info else False
+            except Exception:
+                is_system = False
+            entry = (
+                "window",
+                info.window_id,
+                (info.title or "").strip() or info.window_id,
+                info.plugin_name,
+                0,
+            )
+            # group 注册参数覆盖插件归属（"system" 常驻 / "custom" 自定义 / 空跟随）
+            group = getattr(info, "group", "") or ""
+            if group == "system":
+                system_infos.append(entry)
+            elif group == "custom":
+                custom_infos.append(entry)
+            elif is_system:
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1582,6 +1655,7 @@ class TabPanel(QWidget):
                     plugin_name=plugin_name,
                     card_id=key,
                     enable_position_menu=(kind == "card"),
+                    kind=kind,
                 )
             except Exception as e:
                 logger.warning("[refresh_ui_plugins] 跳过异常插件 %s: %s", plugin_name, e)
@@ -1589,9 +1663,13 @@ class TabPanel(QWidget):
             if kind == "sidebar":
                 info = next((s for s in sidebar_items if s.item_id == key), None)
                 row.clicked.connect(lambda cid=key, sid=info: self._on_sidebar_item_clicked(sid))
+            elif kind == "window":
+                row.clicked.connect(lambda cid=key: self._on_ui_plugin_window_clicked(cid))
+                row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
             else:
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
+                row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
             self._system_plugin_layout.addWidget(row)
             self._system_plugin_buttons.append(row)
         has_system = bool(system_infos)
@@ -1614,6 +1692,7 @@ class TabPanel(QWidget):
                     plugin_name=plugin_name,
                     card_id=key,
                     enable_position_menu=(kind == "card"),
+                    kind=kind,
                 )
             except Exception as e:
                 logger.warning("[refresh_ui_plugins] 跳过异常插件 %s: %s", plugin_name, e)
@@ -1621,9 +1700,13 @@ class TabPanel(QWidget):
             if kind == "sidebar":
                 info = next((s for s in sidebar_items if s.item_id == key), None)
                 row.clicked.connect(lambda cid=key, sid=info: self._on_sidebar_item_clicked(sid))
+            elif kind == "window":
+                row.clicked.connect(lambda cid=key: self._on_ui_plugin_window_clicked(cid))
+                row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
             else:
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
+                row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
             self._custom_plugin_layout.addWidget(row)
             # 显式 show：清除 Qt 的 hidden 标志。折叠/展开态刷新时 scroll 被强制
             # 隐藏重建，未 show 的新行会被 QWidgetItem 视为空（sizeHint 贡献 0），
@@ -1909,6 +1992,28 @@ class TabPanel(QWidget):
             UIPluginRegistry.get_instance().toggle_floating_card(card_id, main_widget=current_window)
         except Exception as e:
             logger.error(f"[TabPanel] UI 插件 {card_id} 打开失败：{e}")
+
+    def _on_ui_plugin_window_clicked(self, window_id: str):
+        """左侧栏点击独立弹窗条目：开/关切换（toggle 语义）"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().toggle_window(window_id)
+        except Exception as e:
+            logger.error(f"[TabPanel] 插件弹窗 {window_id} 切换失败：{e}")
+
+    def _on_ui_plugin_popout_requested(self, key: str):
+        """右键「弹出为独立窗口」：card → popout_card；window → open_window"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            registry = UIPluginRegistry.get_instance()
+            if key in registry.get_floating_cards():
+                registry.popout_card(key)
+            else:
+                registry.open_window(key)
+        except Exception as e:
+            logger.error(f"[TabPanel] 插件弹窗 {key} 弹出失败：{e}")
 
     def _on_ui_plugin_position_requested(self, card_id: str, container: str):
         """按指定方位移动 UI 插件卡片（仅内存生效，不持久化）"""

@@ -18,7 +18,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from app.core.backend import _format_hook_output
+from app.core.conversation.backend import _format_hook_output
 
 
 class TestSubAgentStreamInjection:

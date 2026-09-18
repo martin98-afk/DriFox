@@ -158,6 +158,33 @@ def test_enumerate_without_plugin_path_is_safe():
     assert list_component_items("__no_such_plugin__", "hooks") == []
 
 
+# ── 2.5 上下文层/预算解析细项可读性（AST 提取 label/order/description）──
+
+
+def _ctx_items(component: str):
+    return list_component_items("system-context", component, PROJECT_ROOT / "plugins" / "system-context")
+
+
+def test_context_tiers_have_readable_label_and_description():
+    """回归（2026-09-18 用户反馈）：细项行只有「order N · label」，
+    用户不知道每层是干什么的。label 拆进名称列，description 进副标题。"""
+    by_id = {it.id: it for it in _ctx_items("context_tiers")}
+    assert set(by_id) >= {"tool_offload", "tool_prune"}
+    offload = by_id["tool_offload"]
+    assert offload.display_label == "order 15 · 长工具结果落盘"
+    assert "磁盘" in offload.description and "读回" in offload.description
+    prune = by_id["tool_prune"]
+    assert prune.display_label == "order 20 · 工具结果截断"
+    assert "截断" in prune.description or "头尾" in prune.description
+
+
+def test_budget_resolver_builtin_has_label_and_description():
+    by_id = {it.id: it for it in _ctx_items("budget_resolvers")}
+    assert "builtin" in by_id
+    assert by_id["builtin"].display_label == "内置预算计算"
+    assert "预算" in by_id["builtin"].description
+
+
 # ── 3. 团队模板来源过滤（回归） ─────────────────────
 
 

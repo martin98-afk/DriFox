@@ -307,7 +307,7 @@ def _spawn_and_measure(tm, source):
 
 @pytest.fixture(scope="module")
 def tab_env():
-    from app.core.webengine_profile import init_shared_web_profile
+    from app.core.infra.webengine_profile import init_shared_web_profile
     from app.utils.render_env import apply_render_env, default_config_path
 
     # 渲染环境 → 环境变量（QT_OPENGL=angle 等，绕开 Intel OpenGL ICD 崩溃路径）

@@ -238,14 +238,14 @@ def main():
         except Exception:
             logger.exception("[EarlyForensics] migrate_app_data_if_needed 失败")
         try:
-            from app.core.logging_setup import setup_logging
+            from app.core.infra.logging_setup import setup_logging
             from app.utils.utils import get_app_data_dir
 
             setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
         except Exception:
             pass
         try:
-            from app.core.crash_handler import install_crash_handler
+            from app.core.infra.crash_handler import install_crash_handler
             from app.utils.utils import get_app_data_dir
 
             install_crash_handler(get_app_data_dir() / "logs")
@@ -286,7 +286,7 @@ def main():
         # 初始化共享 WebEngine Profile（轻量，不启动 Chromium 进程）
         # [PERF] 从主线程关键路径移到这里，首帧不再阻塞
         try:
-            from app.core.webengine_profile import init_shared_web_profile
+            from app.core.infra.webengine_profile import init_shared_web_profile
 
             init_shared_web_profile(parent=app)
         except Exception:
@@ -297,7 +297,7 @@ def main():
         # 采样结果供 B4 强回收阈值判定使用（原为每 content chunk 同步采样，
         # 单次 20-80ms，是流式卡顿主因之一）。
         try:
-            from app.core.rss_sampler import rss_sampler
+            from app.core.infra.rss_sampler import rss_sampler
 
             rss_sampler.ensure_started()
         except Exception:
@@ -364,7 +364,7 @@ def main():
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
             try:
-                from app.core.models_dev_sync import load_dynamic_models
+                from app.core.modelmeta.models_dev_sync import load_dynamic_models
 
                 result = load_dynamic_models()
                 dynamic_count = sum(len(v) for v in result.provider_models.values())
@@ -412,7 +412,7 @@ def main():
     app.setQuitOnLastWindowClosed(False)
 
     # ========== 单实例检查 ==========
-    from app.core.single_instance import SingleInstanceGuard
+    from app.core.infra.single_instance import SingleInstanceGuard
     from app.utils.config import Settings
 
     # [T24 R2] 二次启动 show 请求的接入口必须在拿到单实例锁后**立即**注册。
@@ -579,8 +579,8 @@ def main():
         # [T29 C1] 关键分界点：壳可见 + 日志/崩溃捕获已就绪（import 盲窗已消除）。
         # info 级别：普通用户日志即可看到「壳可见 → 首窗就绪」的耗时分布。
         _smark("shell_visible_after_logging", level="info")
-        from app.core.gateway_service import GatewayService
-        from app.core.plugin_host_service import PluginHostService
+        from app.core.services.gateway_service import GatewayService
+        from app.core.services.plugin_host_service import PluginHostService
 
         _smark("import_services", level="info")
         GatewayService.get_instance().ensure_started()
@@ -617,7 +617,7 @@ def main():
         # 用户在系统设置 → 通知 → 「进入时崩溃通知」可关闭弹窗，但 dump 文件仍保留在日志目录。
         def _check_last_crash():
             try:
-                from app.core.crash_handler import check_pending_crashes, prompt_crash_report
+                from app.core.infra.crash_handler import check_pending_crashes, prompt_crash_report
                 from app.utils.config import Settings
                 from app.utils.utils import get_app_data_dir
 
@@ -667,6 +667,17 @@ def main():
             logger.warning("[M2] 退出时驱动 TabManagerWindow.cleanup 失败", exc_info=True)
 
     app.aboutToQuit.connect(_teardown_tab_windows)
+
+    # ── 插件独立弹窗：应用退出统一销毁（随主窗口关闭销毁的生命周期）──
+    def _teardown_plugin_windows():
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().destroy_all_windows()
+        except Exception:
+            logger.warning("[M2] 退出时销毁插件独立弹窗失败", exc_info=True)
+
+    app.aboutToQuit.connect(_teardown_plugin_windows)
 
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)

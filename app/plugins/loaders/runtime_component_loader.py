@@ -538,6 +538,8 @@ _storage_loader: Optional[RuntimeComponentLoader] = None
 _serializer_loader: Optional[RuntimeComponentLoader] = None
 _gateway_loader: Optional[RuntimeComponentLoader] = None
 _engine_loader: Optional[RuntimeComponentLoader] = None
+_context_tier_loader: Optional[RuntimeComponentLoader] = None
+_budget_resolver_loader: Optional[RuntimeComponentLoader] = None
 _adapters_watcher: Optional[_RuntimeWatcher] = None
 _loop_watcher: Optional[_RuntimeWatcher] = None
 _hook_watcher: Optional[_RuntimeWatcher] = None
@@ -545,6 +547,7 @@ _storage_watcher: Optional[_RuntimeWatcher] = None
 _serializer_watcher: Optional[_RuntimeWatcher] = None
 _gateway_watcher: Optional[_RuntimeWatcher] = None
 _engine_watcher: Optional[_RuntimeWatcher] = None
+_context_watcher: Optional[_RuntimeWatcher] = None
 _watchers_lock = threading.Lock()
 
 
@@ -588,6 +591,18 @@ def _make_engine_loader() -> RuntimeComponentLoader:
     from app.plugins.registries.engine_registry import EngineRegistry
 
     return RuntimeComponentLoader("engines", EngineRegistry.get_instance())
+
+
+def _make_context_tier_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
+
+    return RuntimeComponentLoader("context_tiers", ContextPolicyRegistry.get_instance())
+
+
+def _make_budget_resolver_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
+
+    return RuntimeComponentLoader("budget_resolvers", ContextPolicyRegistry.get_instance())
 
 
 def ensure_model_adapter_watcher() -> Optional[_RuntimeWatcher]:
@@ -674,6 +689,23 @@ def ensure_engine_watcher() -> Optional[_RuntimeWatcher]:
         return _engine_watcher
 
 
+def ensure_context_watcher() -> Optional[_RuntimeWatcher]:
+    """上下文 tier / 预算解析器 watcher。
+
+    两类组件共用 ContextPolicyRegistry，故只起一个 watcher 扫 context_tiers 目录；
+    budget_resolvers 由 warmup 与 reload 路径各自 scan_roots 覆盖。
+    """
+    global _context_tier_loader, _context_watcher
+    with _watchers_lock:
+        if _context_watcher is not None:
+            return _context_watcher
+        _context_tier_loader = _context_tier_loader or _make_context_tier_loader()
+        _context_watcher = _RuntimeWatcher(_context_tier_loader, "context_tiers")
+        _context_watcher.scan_now()
+        _context_watcher.start()
+        return _context_watcher
+
+
 def warmup_runtime_components() -> Dict[str, Set[str]]:
     """启动期一次性加载五类运行时组件（系统插件 plugins/system 提供默认实现）。
 
@@ -689,4 +721,6 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     result["serializers"] = _make_serializer_loader().scan_roots()
     result["gateways"] = _make_gateway_loader().scan_roots()
     result["engines"] = _make_engine_loader().scan_roots()
+    result["context_tiers"] = _make_context_tier_loader().scan_roots()
+    result["budget_resolvers"] = _make_budget_resolver_loader().scan_roots()
     return result

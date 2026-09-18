@@ -28,8 +28,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.chat_session import ChatSession  # noqa: E402
-from app.core.context_builder import ContextBudgetAllocator  # noqa: E402
+from app.core.conversation.chat_session import ChatSession  # noqa: E402
+from app.core.context.builder import ContextBudgetAllocator  # noqa: E402
 
 
 class _CountingCompactor:
@@ -72,7 +72,41 @@ def _history(n=4):
 
 
 def _allocator(compactor):
-    return ContextBudgetAllocator(_FakeAgentManager(), compactor=compactor)
+    """注入 compactor 与包它的 pipeline 桩。
+
+    压缩现在由 tier 链上的 tail_retain/llm_summary 执行（用户插件 context-compaction）。
+    为让本测试继续锁定「_send_prep_cache 缓存失效契约」，把假 compactor 包成
+    单 tier 注入 pipeline —— compact_calls 计数语义保持不变。
+    """
+    from app.core.context.pipeline import ContextPipeline
+    from app.plugins.contracts.context_policy import CACHE_INVALIDATE, STAGE_SEND, TierOutcome
+    from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
+
+    class _CompactorTier:
+        id = "compactor_tier"
+        label = "压缩（测试桩）"
+        order = 70
+        stages = frozenset({STAGE_SEND})
+        cache_impact = CACHE_INVALIDATE
+
+        def should_apply(self, view):
+            return True
+
+        def apply(self, view):
+            messages, state, cache = compactor.compact(
+                view.messages,
+                view.budget,
+                existing_cache=view.compaction_cache or None,
+                allow_llm_summary=True,
+                prenormalized=view.messages,
+            )
+            view.compaction_state = state
+            view.compaction_cache = cache
+            return TierOutcome(messages=messages, saved_tokens=0, note="compact")
+
+    reg = ContextPolicyRegistry()
+    reg.register_tier(_CompactorTier(), "test")
+    return ContextBudgetAllocator(_FakeAgentManager(), compactor=compactor, pipeline=ContextPipeline(reg))
 
 
 class TestCacheHit:
@@ -161,7 +195,7 @@ class TestInvalidationOnHookInjection:
     """hook 注入（backend._inject_hook_to_session）必须 miss"""
 
     def test_inject_hook_to_session_misses(self):
-        from app.core.backend import _inject_hook_to_session
+        from app.core.conversation.backend import _inject_hook_to_session
 
         compactor = _CountingCompactor()
         alloc = _allocator(compactor)

@@ -18,7 +18,7 @@ def isolated_app_data(monkeypatch):
 
 @pytest.fixture()
 def clean_cmd_manager():
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     mgr = CommandManager.get_instance()
     saved = dict(mgr._commands)
@@ -41,7 +41,7 @@ def test_shortcuts_json_write_and_clear(isolated_app_data):
 
 def test_apply_ui_command_overrides_stale_shortcut(isolated_app_data, clean_cmd_manager):
     """旧兜底 md 先注册带过期 shortcut → UI 命令注册时以 JSON 为准覆盖"""
-    from app.core.command_manager import CommandType
+    from app.core.commands.command_manager import CommandType
     from app.plugins.registries import ui_plugin_registry as R
 
     R._shortcuts_cache = None
@@ -60,7 +60,7 @@ def test_apply_ui_command_overrides_stale_shortcut(isolated_app_data, clean_cmd_
 
 def test_apply_ui_command_preserves_external_when_no_mapping(isolated_app_data, clean_cmd_manager):
     """JSON 无映射 + 同名外部命令 → 不抢占（让位语义不受影响）"""
-    from app.core.command_manager import CommandType
+    from app.core.commands.command_manager import CommandType
     from app.plugins.registries import ui_plugin_registry as R
 
     R._shortcuts_cache = None

@@ -514,7 +514,7 @@ class SendableTextEdit(TextEdit):
                     self._schedule_detail_sync()
                     return
 
-                from app.core.command_manager import CommandManager
+                from app.core.commands.command_manager import CommandManager
                 from app.utils.utils import get_skill_by_name
 
                 # 解析后缀：如 "tdd-skill" → base="tdd", type="skill"
@@ -1152,7 +1152,7 @@ class SendableTextEdit(TextEdit):
         - 自动检测 --model 前缀并弹出模型列表
         - 模型列表的实时搜索过滤
         """
-        from app.core.command_manager import CommandManager
+        from app.core.commands.command_manager import CommandManager
 
         card = self._get_card()
         if not card or not card.is_detail_mode:

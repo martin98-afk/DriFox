@@ -7,13 +7,13 @@ from typing import List, Dict, Any
 # 确保能找到 app 包
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from app.core.message_content import (
+from app.core.conversation.message_content import (
     consolidate_messages,
     get_user_round_ranges,
     group_messages_for_display,
     _is_hook_message,
 )
-from app.core.chat_session import ChatSession
+from app.core.conversation.chat_session import ChatSession
 
 
 def make_hook_msg(event_name: str, content: str = "hook output") -> Dict[str, Any]:

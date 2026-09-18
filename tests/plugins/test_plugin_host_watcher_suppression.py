@@ -7,7 +7,7 @@
 仍在大规模写/删 plugins 目录 → watchfiles 事件风暴 + 半成品插件被 import +
 主线程重载风暴 → UI 卡死。
 
-修复：suppress/resume 改为引用计数（app.core.plugin_host_service 模块级函数），
+修复：suppress/resume 改为引用计数（app.core.services.plugin_host_service 模块级函数），
 最后一个 resume 才真正放开 watcher；截止时间戳仅作旧调用方（config_sync 直接写）
 的兼容叠加。
 
@@ -31,7 +31,7 @@ PLUGIN_MARKETPLACE = ROOT / "plugins" / "plugin-marketplace"
 if str(PLUGIN_MARKETPLACE) not in sys.path:
     sys.path.insert(0, str(PLUGIN_MARKETPLACE))
 
-from app.core.plugin_host_service import (  # noqa: E402
+from app.core.services.plugin_host_service import (  # noqa: E402
     PluginHostService,
     resume_plugin_watcher,
     suppress_plugin_watcher,

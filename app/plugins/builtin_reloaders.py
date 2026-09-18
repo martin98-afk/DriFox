@@ -16,7 +16,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.core.builtin_commands import reload_agent_commands, reload_all_commands
+from app.core.commands.builtin_commands import reload_agent_commands, reload_all_commands
 from app.plugins.kernel import KNOWN_COMPONENTS, ComponentReloaderRegistry, ReloadContext
 from app.utils.utils import invalidate_skills_cache
 
@@ -360,6 +360,30 @@ def _reload_gateways(ctx: ReloadContext) -> Any:
     return False
 
 
+def _reload_context_policies(ctx: ReloadContext) -> Any:
+    """context_tiers / budget_resolvers 分支：精准卸载/重载单插件
+
+    两类组件共用 ContextPolicyRegistry 与同一个 watcher（扫 context_tiers 目录）；
+    budget_resolvers 的变更由同插件的 context_tiers 重载一并覆盖（registry 按
+    plugin:<name> source 清理，两类条目同 source）。
+    """
+    from app.plugins.loaders.runtime_component_loader import (
+        _make_budget_resolver_loader,
+        ensure_context_watcher,
+    )
+
+    watcher = ensure_context_watcher()
+    if watcher is None:
+        return False
+    if ctx.plugin is None:
+        watcher.unload_plugin(ctx.plugin_name)
+        _make_budget_resolver_loader().unload_plugin(ctx.plugin_name)
+    else:
+        watcher.reload_plugin(ctx.plugin_name)
+        _make_budget_resolver_loader().reload_plugin(ctx.plugin_name)
+    return True
+
+
 # 运行时句柄：backend 初始化后注入（避免循环 import — reloader 不能 import backend）
 _RUNTIME: dict = {"agent_manager": None}
 
@@ -399,6 +423,8 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "serializers": _reload_serializers,
         "gateways": _reload_gateways,
         "engines": _reload_engines,
+        "context_tiers": _reload_context_policies,
+        "budget_resolvers": _reload_context_policies,
     }
     for comp, fn in mapping.items():
         registry.register(comp, fn)

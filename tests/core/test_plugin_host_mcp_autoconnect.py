@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt5.QtCore import QObject
 
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 
 
 def _make_host() -> PluginHostService:
@@ -73,7 +73,7 @@ def deferred_spied(monkeypatch):
     import app.plugins.loaders.provider_loader as pl
     import app.plugins.loaders.runtime_component_loader as rcl
     import app.plugins.registries.provider_registry as pr
-    import app.core.gateway_service as gs
+    import app.core.services.gateway_service as gs
     import app.core.lsp.lsp_manager as lm
 
     monkeypatch.setattr(br, "bind_runtime", lambda *a, **k: None)

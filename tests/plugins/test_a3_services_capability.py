@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from loguru import logger
 
-from app.core.tool_executor import ToolExecutor
+from app.core.tools.tool_executor import ToolExecutor
 from app.tools.registry import ToolRegistry
 
 

@@ -71,7 +71,7 @@ class BalanceDisplay(QWidget):
         # ★ 用量聚合（T6）：余额结果由进程级单例 UsageService 广播
         # （缓存命中 / 后台抓取结果均经此信号），本组件只负责消费显示。
         # UsageService 只存 config 快照不持窗口引用；本连接随组件销毁自动断开。
-        from app.core.usage_service import UsageService
+        from app.core.infra.usage_service import UsageService
 
         self._reg_sig(UsageService.get_instance().balance_ready, self.show_balance_result)
 

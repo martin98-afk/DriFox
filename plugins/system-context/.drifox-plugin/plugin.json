@@ -1,0 +1,51 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-context",
+  "description": "发送请求前自动给上下文瘦身：超长的工具结果先落盘成文件（上下文留预览块，模型可读回全文），较长的截断头尾、省略中段；同一结果每轮投影一致，不破坏 prompt cache。预算解析按模型上下文容量计算历史消息可用 token，达标即停。各层可单独开关，阈值在下方细项的插件设置里调",
+  "version": "2.3.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "context_tiers": true,
+    "budget_resolvers": true
+  },
+  "config_schema": {
+    "title": "上下文管理阈值",
+    "fields": [
+      {
+        "key": "tool_result_max_len",
+        "label": "截断阈值（字符）",
+        "type": "number",
+        "default": "0",
+        "min": 0,
+        "max": 1000000,
+        "description": "单条工具结果超过此长度即头尾截断。填 0 表示按模型上下文容量自动放大（8K~24K，推荐）"
+      },
+      {
+        "key": "single_result_threshold",
+        "label": "落盘阈值（字符）",
+        "type": "number",
+        "default": "50000",
+        "min": 1000,
+        "max": 10000000,
+        "description": "单个工具结果超过此长度写入磁盘，上下文内替换为预览块"
+      },
+      {
+        "key": "message_total_threshold",
+        "label": "消息级落盘阈值（字符）",
+        "type": "number",
+        "default": "200000",
+        "min": 1000,
+        "max": 100000000,
+        "description": "单条消息内工具结果合计超过此长度时，按大小排序落盘最大的几个"
+      }
+    ]
+  }
+}

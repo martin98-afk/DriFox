@@ -39,7 +39,7 @@
 
 ---
 
-## 二、三种组件类型
+## 二、组件类型
 
 ### 2.1 浮动卡片（FloatingCard）
 
@@ -98,6 +98,24 @@ AI 工具返回 {"type": "custom", "custom_type": "xxx", "data": {...}}
 `ctx["is_dark"]`（跟随 Qt 主题），prefers-color-scheme 仅作 ctx 缺失兜底。
 完整模板见 `templates-welcome-tab.md`。
 
+### 2.5 独立弹窗（PluginWindow，register_window）
+
+**用途**：可脱离主窗的独立顶级窗口（工具窗/面板），壳复用主程序
+`FramelessWindow` + `CustomTitleBar`（无边框/标题栏/拖动缩放/主题/生命周期全由主程序提供）。
+**注册**：`registry.register_window(...)` → 自动注册命令 `/<window_id>`，
+窗口条目自动入左侧插件栏（点击开/关切换、右键「弹出」重开）。
+**打开**：`registry.open_window(window_id)`（单例：已开→前置）。
+**上下文**：由插件在注册时的 `context_provider` 提供（推荐读主题 token，见 §四）。
+**内容页约定**：`set_context_provider` / `show_card` / `refresh_theme` 三接口
+（数据与主题统一收敛到 `show_card()`）。完整模板见 `templates-window.md`。
+
+### 2.6 消息卡片槽位（footer_action / footer_stat）
+
+**用途**：消息卡片上的插件入口——按钮（助手页脚/用户气泡操作行，`role` 分流）
+与页脚信息项（字数/速率等，provider 拉模型）。
+**注册**：`registry.register_footer_action(...)` / `registry.register_footer_stat(...)`。
+完整模板见 `templates-card-slots.md`。
+
 ---
 
 ## 三、关键文件速查
@@ -135,6 +153,22 @@ UIPluginRegistry 为每个插件卡片创建 context_provider 闭包
 - `plugin_name`: str
 - `card_id`: str
 
+**独立弹窗场景**：窗口的 provider 由插件在 `register_window(context_provider=...)` 提供
+（浮动卡是主程序自动注入；弹窗没有自动注入主程序业务上下文）。
+常用写法是每次调用现取主题 token：
+
+```python
+def _ctx_provider():
+    ctx = {}
+    try:
+        from app.utils.design_tokens import Colors
+        Colors.refresh()
+        ctx["colors"] = {"text_primary": Colors.TEXT_PRIMARY, ...}
+    except Exception:
+        pass
+    return ctx
+```
+
 ---
 
 ## 五、插件生命周期
@@ -154,7 +188,12 @@ PluginManager.initialize()
 插件禁用/卸载 → unload_plugin(name)
   → 清理注册表
   → 移除浮动卡片 widget 实例
+  → 销毁插件独立弹窗实例（close_window 逐个）
   → 注销命令
+
+应用退出 → aboutToQuit 链
+  → destroy_all_windows()（独立弹窗统一销毁）
+  → 其余清理按既有链路
 ```
 
 ---

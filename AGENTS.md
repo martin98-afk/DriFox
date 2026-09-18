@@ -33,12 +33,13 @@ pytest tests/ -m perf                  # 仅性能基准
 | 目录 | 职责 |
 |---|---|
 | `app/core/` | 引擎：backend/chat_session/hook_manager/workers + lsp/store/team |
+| `app/core/context/` | 上下文管理 tier cascade：view/pipeline/budget/config/tool_prune + tiers/ |
 | `app/gateway/` | 多平台网关适配层 |
 | `app/tools/` | 工具框架(registry/loader/classifier/mapper)+共享服务(task/team/mcp) |
 | `app/widgets/` | UI 组件、设置卡片、像素宠物 |
-| `app/plugins/contracts/` | Protocol：ModelAdapter/LoopPolicy/SessionStorageEngine/MessageSerializer |
+| `app/plugins/contracts/` | Protocol：ModelAdapter/LoopPolicy/SessionStorageEngine/MessageSerializer/ContextPolicy |
 | `app/plugins/registries/` | 四注册表单例(adapter/loop policy/storage/serializer) |
-| `plugins/system/` | 系统插件：tools/model_adapters/loop_policies/storages/serializers/hooks/skills/themes/commands/ui |
+| `plugins/system-*` | 系统插件：tools/model_adapters/loop_policies/storages/serializers/context_tiers/budget_resolvers/hooks/skills/themes/commands/ui |
 | `~/.drifox/plugins/` | 用户级社区插件(watchfiles 热扫描) |
 | `tests/` | 与源码按模块对齐：core/widgets/plugins/utils/perf/gateway/debug |
 | `docs/` | plugins/perf/security/superpowers 四大知识库 |
@@ -50,9 +51,11 @@ pytest tests/ -m perf                  # 仅性能基准
 
 **运行时组件**：`model_adapters/*.py`、`loop_policies/*.py`、`storages/*.py`、`serializers/*.py` 各自 `register(registry)`。user 根覆盖 system 根。激活 `LoopPolicyRegistry.get_instance().set_active(<id>)`。序列化单入口 `MessageSerializer.serialize(messages, ctx)`，按 `ctx.flags.use_responses_api` 路由。
 
+**上下文策略**（插件 `context_tiers/*.py` 与 `budget_resolvers/*.py` 各自 `register(registry)`）：契约见 `app/plugins/contracts/context_policy.py`。tier cascade 分由轻到重 8 层（order 10-80：图片剥离/去重/工具截断/落盘/参数截断/摘要化/尾保留/LLM 摘要），三个 stage `ingest`（允许落盘副作用）/`send`／`ui`（禁止副作用）共用同一链。tier 只产出新 messages 列表、不得修改 view 输入、阈值一律走 config_schema（`system-context` 插件）；同 order 后注册覆盖先注册，默认 tier 不可删。入口统一为 `ContextPipeline`（`ingest_tool_results` / `project_for_send` / `project_for_ui`），禁止在调用点手工重复截断。
+
 **Gateway**：插件在 `gateways/<platform>.py` 注册 `GatewayPlatformDef`；主程序查 `GatewayPlatformRegistry.get_instance()`，零平台 if。SDK vendor 到 `<插件>/deps/`，顶层 `sys.path.insert(0,_deps)` 优先，本体函数内延迟导入（教训：dingtalk_stream 顶层导入致 gateway 包加载失败）。
 
-**UI 扩展点**（插件 `ui/__init__.py` 导出 `register_ui`）：`register_content_renderer`/`register_welcome_tab`/`register_message_factory`/`register_floating_card`/`register_sidebar_item`/`register_input_button`（icon_path 深色 + icon_light_path 浅色，主题切换自动刷新）/`register_context_menu_action`/`register_settings_card`/`register_footer_stat`（消息卡片页脚左区信息项，provider 回调 `(ctx) -> Optional[{"text","color","tooltip"}]`，卡片构建/回合落定/流式节拍时刷新）/`register_footer_action`（页脚右区 hover 按钮组，与内置分支/复制同排）。回调 context 含 window_id/main_widget/card/role/model_name/round_index/message_index/elapsed/token_usage/streaming/live_text/live_gen_s（流式期间 `live_text` 为本流累计原文、`live_gen_s` 为首字至今秒数，token 估算与统计口径由 provider 定）；`unload_plugin` 幂等清理。
+**UI 扩展点**（插件 `ui/__init__.py` 导出 `register_ui`）：`register_content_renderer`/`register_welcome_tab`/`register_message_factory`/`register_floating_card`/`register_sidebar_item`/`register_input_button`（icon_path 深色 + icon_light_path 浅色，主题切换自动刷新）/`register_context_menu_action`/`register_settings_card`/`register_footer_stat`（消息卡片页脚左区信息项，provider 回调 `(ctx) -> Optional[{"text","color","tooltip"}]`，卡片构建/回合落定/流式节拍时刷新）/`register_footer_action`（页脚右区 hover 按钮组，与内置分支/复制同排；`role` 参数 `"assistant"|"user"|"both"`，user/both 渲染在用户气泡底部操作行且位于内置按钮左侧）/`register_window`（插件独立弹窗：壳复用 `FramelessWindow`+`CustomTitleBar`，自动入左侧自定义插件栏点击开/关切换、右键菜单「弹出」重开；`group` 参数 `"system"|"custom"` 覆盖左侧栏分组（常驻区/自定义折叠区，默认跟随插件归属）；生命周期随应用退出 aboutToQuit / 插件卸载销毁）。回调 context 含 window_id/main_widget/card/role/model_name/round_index/message_index/elapsed/token_usage/streaming/live_text/live_gen_s（流式期间 `live_text` 为本流累计原文、`live_gen_s` 为首字至今秒数，token 估算与统计口径由 provider 定）；`unload_plugin` 幂等清理。
 
 ## 5. 代码风格
 - **格式化**：ruff（双引号）；**类型**：pyright 严格；**导入**：标准→三方→本地

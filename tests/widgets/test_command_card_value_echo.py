@@ -27,7 +27,7 @@ def _ensure_qapp():
 def _make_card():
     """构造 detail 模式卡片：--load= / --join= 两个 value 参数（动态枚举）"""
     from app.widgets.cards.floating.command_card import CommandCard
-    from app.core.command_manager import CommandParameter
+    from app.core.commands.command_manager import CommandParameter
 
     parent = QWidget()
     parent.setLayout(QVBoxLayout())

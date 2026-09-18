@@ -1,0 +1,1460 @@
+# -*- coding: utf-8 -*-
+import collections
+import re
+import threading
+from typing import Any, Dict, List, Optional
+
+import orjson as json
+
+# ========== Gemini thought_signature 适配 ==========
+# Gemini 2.5+/3 在多轮工具调用时，要求把模型返回 functionCall 时携带的
+# thought_signature（思考签名）原样回传，否则报 400：
+#   "Function call is missing a thought_signature in functionCall parts..."
+# OpenAI 兼容端点把该签名放在 tool_call 的 extra_content.google.thought_signature。
+# 内部消息用 tool_calls[i]["thought_signature"] 承载真实签名；只有从 Gemini 响应
+# 解析出来的 tool call 才会带此字段，因此回传时注入是天然按厂商隔离的。
+# 兜底：旧历史/迁移会话缺失真实签名时，用 Google 官方占位串绕过 400 校验
+# （仅略微降低推理质量，不会中断对话）。
+GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+
+# ========== consolidate_messages 多入口增量 LRU 缓存 ==========
+# 旧实现为单入口缓存（key=None/result=None），交替处理不同消息列表时
+# 互相踢出。升级为 4-entry LRU，覆盖多数场景（主消息列表 + 临时列表）。
+# 主键：(id(list), 前 2 条特征)，逐出策略为最久未命中。
+#
+# [PERF] 旧主键是 (id, len, **全列表**指纹)，有两个严重后果：
+#   1. **每追加一条消息必然 miss**（len 变化），于是每次都要 O(n) 重算指纹
+#      + O(n) 全表 normalize → 长会话累计 O(n²)。n=3000 时是流式后期
+#      越来越卡、内存持续上涨的隐性主因之一。
+#   2. 4 个 LRU 条目各自持有一份**完整**归一化列表 → 同一会话最多 4 份副本
+#      （3000 条 ≈ 12000 个 dict，5-7MB）。
+#
+# 新实现：主键只保留 id(list) + O(1) 的首部特征，值改为
+# (长度, 尾部窗口特征, 归一化结果)，配合三级命中策略：
+#   - 长度不变 → 仅重算最后 _TAIL_CHECK_W 条特征比对（O(W)），命中即复用同一对象；
+#   - 纯追加   → 校验旧前缀尾部未变后，只 normalize 新增的 Δ 条，
+#                旧结果用 list() 浅拷贝（只复制指针，不复制 dict）→
+#                多个 LRU 条目共享同一批消息 dict，内存从 4 份降到 1 份；
+#   - 变短 / 校验失败 → 全量重算。
+#
+# 正确性契约（与原实现一致）：消息列表「只追加或整体替换，不原地修改历史条目」。
+# 原地补写元数据（Bug9：流式收尾写 model_name/elapsed/provider_name/config_id）
+# 只发生在列表末尾几条，故尾部窗口 W=16 足以覆盖；窗口外的历史条目原地修改
+# 不在支持范围内（原实现的全列表指纹能覆盖，但代价是 O(n²)，见上）。
+_MAX_CONSOLIDATE_ENTRIES = 4
+_TAIL_CHECK_W = 16  # 尾部校验窗口：检测流式收尾对末尾消息的原地补写
+_consolidate_cache_local = threading.local()
+
+
+def _msg_feature(msg: Any):
+    """单条消息的缓存特征（Bug9 防脏命中：覆盖原地可变的元数据字段 + 内容长度）。
+
+    [PERF] 全部取值均为 O(1)，不复制长文本。
+
+    ⚠️ 为什么要带内容长度：只按元数据取特征时，「整表替换成等长但内容不同的
+    列表」在 id 地址被复用后会脏命中 —— 实测 `test_tool_result_pruner.py::
+    test_short_tool_result_untouched_in_context` 就是这条路径：前一个用例留下
+    content=50000 字符的历史，本用例新建 content="ok" 的列表恰好拿到同一地址，
+    元数据特征全同 → 被误判为「纯追加」而复用了旧结果。
+    加入内容长度后等长替换之外的场景都能被检出。
+    """
+    if isinstance(msg, dict):
+        content = msg.get("content")
+        if isinstance(content, (str, bytes, list)):
+            content_len = len(content)
+        else:
+            content_len = None
+        return (
+            msg.get("role", ""),
+            msg.get("_hook_event", ""),
+            msg.get("model_name", ""),
+            msg.get("provider_name", ""),
+            msg.get("config_id", ""),
+            msg.get("elapsed"),
+            content_len,
+        )
+    return None
+
+
+
+
+def _msg_head_key(messages: list) -> tuple:
+    """缓存主键第二段：前 2 条消息特征（O(1)）。
+
+    key 里若只剩 id(list)，地址被 GC 复用后可能脏命中（这正是原实现引入
+    指纹的原因）。但把「全列表指纹」放进 key 又会让每次追加都 miss（O(n²)）。
+    折中：首部 2 条消息在整个会话生命周期内不变（system / 首条 user），
+    用它们的特征做防复用的第二段 key，代价 O(1)。
+    """
+    if not messages:
+        return ()
+    head = [_msg_feature(messages[0])]
+    if len(messages) > 1:
+        head.append(_msg_feature(messages[1]))
+    return tuple(head)
+
+
+def _msg_tail_features(messages: list, end: int, count: int = _TAIL_CHECK_W) -> tuple:
+    """messages[max(0, end-count):end] 的特征元组（O(W)，用于增量命中校验）。"""
+    start = end - count
+    if start < 0:
+        start = 0
+    return tuple(_msg_feature(m) for m in messages[start:end])
+
+
+def _get_consolidate_cache() -> dict:
+    """获取 thread-local 的 LRU 缓存（OrderedDict 模拟 LRU）"""
+    cache = getattr(_consolidate_cache_local, "cache", None)
+    if cache is None:
+        cache = {"_entries": collections.OrderedDict()}
+        _consolidate_cache_local.cache = cache
+    return cache
+
+
+def _set_consolidate_cache(cache_key: tuple, list_len: int, result: list, tail_features: tuple):
+    """写入 LRU 缓存；超上限时逐出最久未命中条目
+
+    Args:
+        cache_key: 完整主键 (id(list), 首部特征)
+        list_len: 写入时列表长度
+        result: 归一化结果
+        tail_features: 写入时列表尾部窗口特征（下次命中校验用）
+    """
+    entries = _get_consolidate_cache()["_entries"]
+    entries[cache_key] = (list_len, tail_features, result)
+    entries.move_to_end(cache_key)
+    if len(entries) > _MAX_CONSOLIDATE_ENTRIES:
+        entries.popitem(last=False)  # FIFO 逐出最旧条目
+
+
+# ==========
+
+VALID_MESSAGE_ROLES = {"system", "user", "assistant", "tool"}
+
+# 渲染敏感标记（按长度降序排列，避免部分匹配）
+_SENSITIVE_MARKERS = [
+    "",
+    "</think>",
+    "</tool>",
+    "<tool>",
+    "```",
+]
+
+# 性能优化：预编译正则表达式用于一次性替换所有敏感标记
+_SANITIZE_PATTERN = re.compile('|'.join(re.escape(marker) for marker in _SENSITIVE_MARKERS))
+
+
+def _sanitize_rendering_string(text: str) -> str:
+    """
+    清理字符串中的渲染敏感标记。
+    在字符串进入渲染流程前调用，防止标记被错误解析。
+
+    注意：只清理完整的工具块标记，不要清理参数中的子串！
+
+    性能优化：使用预编译的正则表达式一次性替换所有标记。
+    """
+    if not text or not isinstance(text, str):
+        return str(text) if text is not None else ""
+
+    return _SANITIZE_PATTERN.sub("", text)
+
+
+def _has_image_content(content: Any) -> bool:
+    """检查内容中是否包含图片块"""
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "image_url":
+                    return True
+                # Anthropic 格式
+                if block.get("type") == "input_image":
+                    return True
+                if block.get("type") == "image":
+                    return True
+    return False
+
+
+def _extract_content_for_api(content: Any, supports_vision: bool = True) -> Any:
+    """
+    提取适合 API 调用的内容格式。
+    纯文本返回 str，含图片块返回 list。
+
+    Args:
+        content: 消息内容
+        supports_vision: 当前模型是否支持视觉输入。若为 False，
+            图片块将被替换为 [图片] 文本占位符。
+
+    Returns:
+        str 或 list，保持图片块的原样传递
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # 是否有图片块？
+        has_image = any(
+            isinstance(b, dict) and b.get("type") in ("image_url", "input_image", "image")
+            for b in content
+        )
+        if not has_image:
+            # 纯文本块，合并为字符串
+            return _extract_text_content(content)
+        # 含图片块但不支持视觉 → 将图片块替换为 [图片] 文本
+        if not supports_vision:
+            return _strip_image_blocks(content)
+        # 支持视觉，返回完整的 multimodal list
+        return _clean_multimodal_blocks(content)
+    return str(content)
+
+
+def _strip_image_blocks(content: list) -> str:
+    """将含图片块的内容列表转为纯文本，图片块替换为 [图片] 占位符。
+
+    用于不支持视觉输入的模型：发送请求前过滤掉 image_url/input_image/image 块。
+    """
+    parts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = str(block.get("text", ""))
+            if text:
+                parts.append(text)
+        elif btype in ("image_url", "input_image", "image"):
+            parts.append("[图片]")
+    return "\n".join(parts) if parts else ""
+
+
+def _clean_multimodal_blocks(blocks: List[Dict]) -> List[Dict]:
+    """
+    清理 multimodal 内容块列表，去掉空文本块。
+    """
+    cleaned = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = str(block.get("text", ""))
+            if text:
+                cleaned.append({"type": "text", "text": text})
+        elif btype in ("image_url", "input_image", "image"):
+            cleaned.append(dict(block))
+        else:
+            # 其他类型保留
+            cleaned.append(dict(block))
+    return cleaned
+
+
+def _safe_truncate_json_array_or_object(serialized: str, max_len: int = 50000) -> str:
+    """安全截断 JSON 数组/对象，保持 JSON 合法性。
+
+    当序列化后的 JSON 超过 max_len 时，截断到最后一个完整元素后补闭合括号。
+    例如：[1,2,3,4,5] 截断到 3 个元素 → [1,2,3]。
+    """
+    if len(serialized) <= max_len:
+        return serialized
+
+    # 判断是数组还是对象
+    is_array = serialized.startswith("[")
+    closer = "]" if is_array else "}"
+
+    # 从 max_len 往前找，找到完整的元素边界
+    # 遍历到 max_len 位置，用状态机找到深度为 1 的第一个逗号
+    depth = 0
+    in_string = False
+    escape_next = False
+    last_comma_at_depth1 = -1
+
+    for pos in range(len(serialized)):
+        if pos > max_len - len(closer) - 1:
+            break
+        c = serialized[pos]
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\":
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c in ("{", "["):
+            depth += 1
+        elif c in ("}", "]"):
+            depth -= 1
+            if depth == 0:
+                # 到达顶层闭合，说明整个 JSON 恰好在这个范围内完整
+                return serialized[: pos + 1]
+        elif c == "," and depth == 1:
+            last_comma_at_depth1 = pos
+
+    if last_comma_at_depth1 > 0:
+        truncated = serialized[:last_comma_at_depth1] + closer
+        return truncated
+
+    # 兜底：在目标位置截断并补闭合括号，必须验证合法性
+    fallback = serialized[: max_len - len(closer)] + closer
+    if not _is_json_balanced(fallback):
+        # 再兜底：从末尾反向找最近的开括号，补闭合括号后重建
+        for pos in range(len(serialized) - 1, 0, -1):
+            if serialized[pos] in ("{", "["):
+                fallback = serialized[:pos] + closer
+                if _is_json_balanced(fallback):
+                    return fallback
+    return fallback
+
+
+def _is_json_balanced(text: str) -> bool:
+    """检查 JSON 文本的括号是否平衡"""
+    depth = 0
+    in_string = False
+    escape_next = False
+    for c in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\":
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c in ("{", "["):
+            depth += 1
+        elif c in ("}", "]"):
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _sanitize_tool_args(args: Any) -> Any:
+    """
+    递归清理工具参数中的渲染敏感标记。
+    """
+    if args is None:
+        return {}
+
+    if isinstance(args, dict):
+        return {k: _sanitize_tool_args(v) for k, v in args.items()}
+
+    if isinstance(args, list):
+        return [_sanitize_tool_args(item) for item in args]
+
+    if isinstance(args, str):
+        return _sanitize_rendering_string(args)
+
+    return args
+
+
+def _sanitize_result(result: Any) -> str:
+    """
+    清理工具结果中的渲染敏感标记。
+    """
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return _sanitize_rendering_string(result)
+    return str(result)
+
+
+def make_text_block(text: Any) -> Dict[str, Any]:
+    return {
+        "type": "text",
+        "text": str(text or ""),
+    }
+
+
+def make_tool_result_block(
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        result: Any = None,
+        success: bool = True,
+        tool_call_id: Optional[str] = None,
+        diff: Optional[str] = None,
+        echarts: Optional[str] = None,
+) -> Dict[str, Any]:
+    block = {
+        "type": "tool_result",
+        "name": str(tool_name or "tool"),
+        "arguments": _sanitize_tool_args(arguments),
+        "result": _sanitize_rendering_string("") if result is None else _sanitize_rendering_string(str(result)),
+        "success": bool(success),
+    }
+    if tool_call_id:
+        block["tool_call_id"] = str(tool_call_id)
+    if diff:
+        block["diff"] = diff
+    if echarts:
+        block["echarts"] = echarts
+    return block
+
+
+def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
+    """
+    将任意格式的内容转换为标准 blocks 列表。
+
+    支持类型：text, reasoning, tool_result, image_url, input_image, image
+
+    性能优化：简化类型检查逻辑，减少重复代码。
+    """
+    if content is None:
+        return []
+
+    if isinstance(content, list):
+        blocks: List[Dict[str, Any]] = []
+        for item in content:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "text":
+                    text = str(item.get("text", ""))
+                    if text:
+                        blocks.append({"type": "text", "text": text})
+                elif item_type in ("image_url", "input_image", "image"):
+                    # 图片块直接透传
+                    blocks.append(dict(item))
+                elif item_type == "reasoning":
+                    reasoning_content = str(item.get("content", "") or "")
+                    blocks.append({"type": "reasoning", "content": reasoning_content})
+                elif item_type == "tool_result":
+                    blocks.append(
+                        make_tool_result_block(
+                            tool_name=item.get("name", "tool"),
+                            arguments=item.get("arguments", {}),
+                            result=item.get("result", ""),
+                            success=item.get("success", True),
+                            tool_call_id=item.get("tool_call_id"),
+                            diff=item.get("diff"),
+                            echarts=item.get("echarts"),
+                        )
+                    )
+                elif item_type == "custom":
+                    # 自定义内容块：{ "type": "custom", "custom_type": "<type>", "data": {...} }
+                    custom_type = item.get("custom_type", "")
+                    data = item.get("data", {}) or {}
+                    if custom_type:
+                        blocks.append({
+                            "type": "custom",
+                            "custom_type": custom_type,
+                            "data": data,
+                        })
+                else:
+                    # 其他类型也当作文本处理
+                    text = str(item.get("text", ""))
+                    if text:
+                        blocks.append({"type": "text", "text": text})
+            elif item is not None:
+                text = str(item)
+                if text:
+                    blocks.append({"type": "text", "text": text})
+        return blocks
+
+    text = str(content or "")
+    return [make_text_block(text)] if text else []
+
+
+def build_assistant_content(
+        text: Any = "",
+        tool_results: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    text_value = str(text or "")
+    if text_value:
+        blocks.append(make_text_block(text_value))
+
+    for item in tool_results or []:
+        if not isinstance(item, dict):
+            continue
+        blocks.append(
+            make_tool_result_block(
+                tool_name=item.get("name", "tool"),
+                arguments=item.get("arguments", {}),
+                result=item.get("result", item.get("content", "")),
+                success=item.get("success", True),
+                tool_call_id=item.get("tool_call_id"),
+                diff=item.get("diff"),
+            )
+        )
+
+    return blocks
+
+
+def append_text_block(content: Any, text: Any) -> List[Dict[str, Any]]:
+    text_value = str(text or "")
+    if not text_value:
+        return ensure_content_blocks(content)
+
+    # 性能优化：如果 content 已是 list 且末尾为 text block，就地追加避免重建列表
+    # 流式输出时高频调用，避免每次复制全部 block
+    if isinstance(content, list) and content and isinstance(content[-1], dict) and content[-1].get("type") == "text":
+        content[-1]["text"] = str(content[-1].get("text", "")) + text_value
+        return content
+
+    blocks = ensure_content_blocks(content)
+    blocks.append(make_text_block(text_value))
+    return blocks
+
+
+def content_to_text(content: Any, include_tool_results: bool = False) -> str:
+    if isinstance(content, str):
+        return content
+
+    texts: List[str] = []
+    for block in ensure_content_blocks(content):
+        block_type = block.get("type")
+        if block_type == "text":
+            text = str(block.get("text", ""))
+            if text:
+                texts.append(text)
+        elif block_type in ("image_url", "input_image", "image"):
+            # 图片块转为文本占位符
+            continue
+        elif include_tool_results and block_type == "tool_result":
+            name = str(block.get("name", "tool"))
+            result = str(block.get("result", ""))
+            snippet = result[:500]
+            texts.append(f"[tool:{name}] {snippet}")
+    return "\n\n".join(part for part in texts if part).strip()
+
+
+def content_to_markdown(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+
+    parts: List[str] = []
+    # 性能优化：content 已为 list 时跳过 ensure_content_blocks 二次拷贝
+    blocks = content if isinstance(content, list) else ensure_content_blocks(content)
+    for block in blocks:
+        block_type = block.get("type")
+        if block_type == "custom":
+            # 调用注册渲染器获取 HTML
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+            custom_type = block.get("custom_type", "")
+            data = block.get("data", {}) or {}
+            try:
+                registry = UIPluginRegistry.get_instance()
+                renderer = registry.get_content_renderer(custom_type)
+            except Exception:
+                renderer = None
+            if renderer:
+                try:
+                    html = renderer.render_func(data, None)
+                    # 用 <div class="custom-block"> 包裹，方便后续处理
+                    parts.append(
+                        f'<div class="custom-block" data-type="{custom_type}">\n{html}\n</div>'
+                    )
+                except Exception as e:
+                    from loguru import logger
+                    logger.error(
+                        f"[content_to_markdown] 渲染自定义块失败 {custom_type}: {e}"
+                    )
+                    parts.append(f"[自定义内容块 {custom_type} 渲染失败]")
+            else:
+                parts.append(f"[自定义内容块: {custom_type}]")
+        elif block_type == "reasoning":
+            # 思考内容：输出为 <think> 标签，由渲染器 _inject_think_cards 处理
+            reasoning_content = str(block.get("content", "") or "")
+            if reasoning_content:
+                parts.append(f"<think>{reasoning_content}</think>")
+        elif block_type in ("image_url", "input_image", "image"):
+            # 图片块转为 markdown 图片引用
+            image_url = ""
+            if block_type == "image_url":
+                image_data = block.get("image_url", {}) or {}
+                image_url = str(image_data.get("url", ""))
+            if image_url:
+                if image_url.startswith("data:image"):
+                    parts.append("![image](uploaded_image)")
+                else:
+                    parts.append(f"![image]({image_url})")
+            else:
+                parts.append("[图片]")
+        elif block_type == "text":
+            text = str(block.get("text", ""))
+            if text:
+                parts.append(text)
+        elif block_type == "tool_result":
+            # 直接从 block 中提取关键参数，避免 JSON 序列化问题
+            args = block.get("arguments", {}) or {}
+
+            # 生成安全的参数字符串表示
+            if isinstance(args, dict) and args:
+                # 按 value 类型排序：字符串优先显示（如 path），复杂类型（list/dict）放后面
+                # 这样即使 JSON 被截断，关键短字段如 path 也不会丢失
+                sorted_items = sorted(args.items(), key=lambda x: (0 if isinstance(x[1], str) else 1, len(str(x[1]))))
+                args_parts = []
+                for k, v in sorted_items:
+                    if isinstance(v, str):
+                        if len(v) > 200:
+                            # 截断长字符串但保留 JSON 合法性
+                            truncated = v[:200].replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            truncated = _sanitize_result(truncated)
+                            args_parts.append(f'"{k}": "{truncated}..."')
+                        else:
+                            # 短字符串完整保留（如 path）
+                            safe_v = v.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                            safe_v = _sanitize_result(safe_v)
+                            args_parts.append(f'"{k}": "{safe_v}"')
+                    else:
+                        # 非字符串类型（list/dict）：完整序列化，不截断
+                        # 原因：截断会产生非法 JSON，导致 _render_tool_block_content
+                        # 解析失败，参数预览信息（如"更新待办（3项）"的计数）丢失。
+                        # 仅在极端异常大时（>50KB）做安全截断。
+                        try:
+                            serialized = json.dumps(v).decode('utf-8')
+                        except (AttributeError, TypeError):
+                            serialized = str(v)
+                        if len(serialized) > 50000:
+                            # 极端情况：截断但保持 JSON 合法（截断到最后一个完整元素）
+                            serialized = _safe_truncate_json_array_or_object(serialized)
+                        args_parts.append(f'"{k}": {_sanitize_result(serialized)}')
+                args_json = "{" + ", ".join(args_parts) + "}"
+            else:
+                args_json = "{}"
+
+            # 处理 result：清理可能影响渲染的标签
+            result_raw = str(block.get("result", ""))
+            # question 工具的回答可能包含多个问题，不截断
+            if block.get("name") == "question":
+                result_escaped = _sanitize_result(result_raw)
+            else:
+                result_escaped = _sanitize_result(result_raw)[:300]
+
+            success = bool(block.get("success", True))
+            tool_call_id = block.get("tool_call_id", "")
+
+            # 读取 diff 字段（用于 inline diff 展示）
+            diff_raw = block.get("diff", "") or ""
+            diff_escaped = ""  # 显式初始化，避免 LSP 误报未绑定
+            if diff_raw:
+                # diff 多行内容，直接嵌入
+                diff_escaped = _sanitize_result(str(diff_raw))
+
+            # 读取 echarts 字段（用于 DAG 图展示）
+            echarts_raw = block.get("echarts", "") or ""
+
+            tool_lines = [
+                "<tool>",
+                f"name: {block.get('name', 'tool')}",
+                f"args: {args_json}",
+                f"result: {result_escaped}",
+            ]
+            if diff_raw:
+                tool_lines.append("diff:")
+                tool_lines.append(diff_escaped)
+            tool_lines.append(f"success: {success}")
+            # 保留 tool_call_id 用于差异对比功能
+            if tool_call_id:
+                tool_lines.append(f"tool_call_id: {tool_call_id}")
+            # echarts 图表：嵌入 tool 块内部，由 _render_tool_block_content 渲染
+            if echarts_raw:
+                tool_lines.append("echarts:")
+                tool_lines.append(echarts_raw)
+            tool_lines.append("</tool>")
+            parts.append("\n".join(tool_lines))
+    return "\n\n".join(part for part in parts if part).strip()
+
+
+
+
+
+
+def normalize_tool_call(tool_call: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(tool_call, dict):
+        return None
+
+    function = tool_call.get("function", {}) or {}
+    function_name = str(function.get("name", "") or "").strip()
+    function_arguments = function.get("arguments", "{}")
+    if isinstance(function_arguments, dict):
+        function_arguments = json.dumps(function_arguments).decode("utf-8")
+    else:
+        function_arguments = str(function_arguments or "{}")
+
+    try:
+        parsed_arguments = json.loads(function_arguments)
+    except Exception:
+        parsed_arguments = {}
+
+    if not isinstance(parsed_arguments, dict):
+        parsed_arguments = {}
+
+    normalized = {
+        "id": str(tool_call.get("id", "") or ""),
+        "type": str(tool_call.get("type", "function") or "function"),
+        "function": {
+            "name": function_name,
+            "arguments": json.dumps(parsed_arguments).decode("utf-8"),
+        },
+    }
+    # 🔧 透传 Gemini thought_signature（历史存档/加载也走 normalize_message，必须保留）
+    sig = tool_call.get("thought_signature")
+    if sig:
+        normalized["thought_signature"] = sig
+    return normalized
+
+
+def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(message, dict):
+        return None
+
+    role = str(message.get("role", "") or "").strip()
+    if role not in VALID_MESSAGE_ROLES:
+        return None
+
+    normalized: Dict[str, Any] = {"role": role}
+
+    if message.get("timestamp"):
+        normalized["timestamp"] = str(message.get("timestamp"))
+
+    # 毫秒级时间戳（所有 role 通用）。``timestamp`` 只有秒级精度，同秒连发的
+    # 多条消息（hook 注入、并行工具结果）排不出先后 → 轨迹分析必需的字段。
+    # ⚠️ 新字段必须加进这个白名单，否则会被 consolidate_messages 剥掉。
+    ts_ms = message.get("ts_ms")
+    if isinstance(ts_ms, (int, float)) and not isinstance(ts_ms, bool) and ts_ms > 0:
+        normalized["ts_ms"] = int(ts_ms)
+
+    # 工具执行分阶段耗时 {perm, exec, other, total}（毫秒，chat_worker 写入）
+    phases = message.get("trace_phases")
+    if isinstance(phases, dict) and phases:
+        normalized["trace_phases"] = {str(k): float(v) for k, v in phases.items() if isinstance(v, (int, float))}
+
+    # message_extras 剥离哨兵（session_repository 写库时打上的绝对索引）。
+    # 历史会话加载后渲染前会经本函数重建消息，若在此剥掉哨兵，
+    # materialize_batch_with_extras 找不到索引 → 剥离的 arguments/diff/
+    # reasoning_content 永远补不回 → 工具折叠框预览参数全空（2026-09-08 回归）。
+    x_idx = message.get("_x_idx")
+    if isinstance(x_idx, int) and not isinstance(x_idx, bool):
+        normalized["_x_idx"] = x_idx
+
+    # 消息身份快照（发送者头像 + 名称）。与 `_x_idx` 同理：白名单外字段会被
+    # 本函数剥掉，而身份必须随消息落库并在历史加载后原样回显（切助手不改写旧消息）。
+    # 不进 API 请求：serializer 显式构造 role/content/tool_calls 等字段，不整体拷贝。
+    identity = message.get("_identity")
+    if isinstance(identity, dict):
+        clean_identity = {
+            str(k): str(v) for k, v in identity.items() if isinstance(k, str) and isinstance(v, str) and v
+        }
+        if clean_identity.get("name"):
+            normalized["_identity"] = clean_identity
+
+    if role == "assistant":
+        content = content_to_text(message.get("content", ""))
+        if content:
+            normalized["content"] = content
+        tool_calls = [
+            item
+            for item in (
+                normalize_tool_call(tool_call)
+                for tool_call in (message.get("tool_calls") or [])
+            )
+            if item
+        ]
+        if tool_calls:
+            normalized["tool_calls"] = tool_calls
+        # DeepSeek V4 thinking mode: 保留 reasoning_content
+        reasoning = message.get("reasoning_content")
+        # 保留显式空值：DeepSeek/Console thinking + tool_calls 协议要求字段存在。
+        if reasoning is not None:
+            normalized["reasoning_content"] = str(reasoning)
+        if message.get("round_id"):
+            normalized["round_id"] = str(message.get("round_id"))
+        if message.get("model_name"):
+            normalized["model_name"] = str(message.get("model_name"))
+        if message.get("provider_name"):
+            normalized["provider_name"] = str(message.get("provider_name"))
+        if message.get("config_id"):
+            normalized["config_id"] = str(message.get("config_id"))
+        if message.get("elapsed") is not None:
+            normalized["elapsed"] = float(message["elapsed"])
+        # 单次 LLM 调用耗时（毫秒，chat_worker 写入）—— 持久化后重新加载
+        # 会话也能看到真实耗时，不再依赖只存在于内存里的实时信号。
+        llm_ms = message.get("elapsed_ms")
+        if isinstance(llm_ms, (int, float)) and not isinstance(llm_ms, bool) and llm_ms > 0:
+            normalized["elapsed_ms"] = float(llm_ms)
+        # 首 token 延迟（毫秒，chat_worker 写入）—— 轨迹统计（吞吐量/生成时长）用
+        ttft_ms = message.get("ttft_ms")
+        if isinstance(ttft_ms, (int, float)) and not isinstance(ttft_ms, bool) and ttft_ms > 0:
+            normalized["ttft_ms"] = float(ttft_ms)
+        if isinstance(message.get("token_usage"), dict):
+            normalized["token_usage"] = dict(message["token_usage"])
+        # 保留 _hook_event 标记，确保能通过 save/load 持久化
+        if "_hook_event" in message:
+            normalized["_hook_event"] = message["_hook_event"]
+        else:
+            # 迁移旧数据：无 _hook_event 但内容格式匹配的 → 自动补上标记
+            _fill_hook_event = _check_hook_content(normalized.get("content", ""))
+            if _fill_hook_event is not None:
+                normalized["_hook_event"] = _fill_hook_event
+                # 用原消息更新持久化（直接回写 message 引用）
+                message["_hook_event"] = _fill_hook_event
+
+        if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
+                "reasoning_content"):
+            return None
+        return normalized
+
+    if role == "tool":
+        tool_call_id = str(message.get("tool_call_id", "") or "").strip()
+        if not tool_call_id:
+            return None
+        normalized["tool_call_id"] = tool_call_id
+        normalized["content"] = content_to_text(message.get("content", ""))
+        normalized["name"] = str(message.get("name", "tool") or "tool")
+        # 🛡️ 不伪造空 arguments：轻量剥离消息（无 arguments 键）normalize 后
+        # 若带上空 dict，extract_offload_fields 会误判「无剥离字段」，配合
+        # _write_extras 全删全插造成历史参数数据静默丢失（2026-09-12 回归）。
+        # 保留「键缺失」语义，让剥离状态穿透保存链可见。
+        if "arguments" in message:
+            normalized["arguments"] = message.get("arguments")
+        normalized["success"] = bool(message.get("success", True))
+        if message.get("round_id"):
+            normalized["round_id"] = str(message.get("round_id"))
+        if message.get("diff"):
+            normalized["diff"] = str(message.get("diff"))
+        if message.get("anchors"):
+            normalized["anchors"] = str(message.get("anchors"))
+        if message.get("echarts"):
+            normalized["echarts"] = str(message.get("echarts"))
+        return normalized
+
+    raw_content = message.get("content", "")
+    # 用户消息：如果含图片块，保留原始 list 格式；否则转为文本
+    if role == "user":
+        if isinstance(raw_content, list) and _has_image_content(raw_content):
+            normalized["content"] = _clean_multimodal_blocks(raw_content)
+        else:
+            normalized["content"] = content_to_text(raw_content)
+        params = message.get("params")
+        normalized["params"] = dict(params) if isinstance(params, dict) else {}
+        # 图片附件路径标记（UI 恢复会话时渲染缩略图预览用），同 _hook_event 一样
+        # 必须显式保留，否则会被 consolidate_messages 剥掉
+        atts = message.get("_image_attachments")
+        if isinstance(atts, list) and atts:
+            normalized["_image_attachments"] = [str(p) for p in atts if p]
+        # 原始输入元数据（全量附件 + 占位符正文）：「撤销到这里」保真回填依赖，
+        # 同样必须显式保留
+        input_atts = message.get("_input_attachments")
+        if isinstance(input_atts, list) and input_atts:
+            normalized["_input_attachments"] = [str(p) for p in input_atts if p]
+        raw_input = message.get("_raw_input_text")
+        if isinstance(raw_input, str) and raw_input:
+            normalized["_raw_input_text"] = raw_input
+    else:
+        normalized["content"] = content_to_text(raw_content)
+
+    if message.get("model_name"):
+        normalized["model_name"] = str(message.get("model_name"))
+    # 保留 _hook_event 标记，确保能通过 save/load 持久化
+    if "_hook_event" in message:
+        normalized["_hook_event"] = message["_hook_event"]
+    else:
+        # 迁移旧数据：为 user 角色的 hook 格式消息补上 _hook_event。
+        # include_team_mail=True（Bug11）：TeamMail 是 user 角色，历史数据
+        # （内容为 📨 + 任务邮件 但无标记）在此补 _hook_event="TeamMail"，
+        # 使 F2/F4 统一的 round 口径对旧数据生效。assistant 分支（L725 前）
+        # 不启用 TeamMail 识别，避免 AI 回复引用邮件文本被误标。
+        _fill_hook_event = _check_hook_content(normalized.get("content", ""), include_team_mail=True)
+        if _fill_hook_event is not None:
+            normalized["_hook_event"] = _fill_hook_event
+            message["_hook_event"] = _fill_hook_event
+    return normalized
+
+
+def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    保持消息列表平坦，不再合并。
+    每个 assistant 消息只包含自己的内容和 tool_calls。
+    每个 tool 结果独立为一条 tool 消息。
+
+    使用增量缓存：调用方传入同一个列表对象时，只 normalize 新增的消息；
+    对末尾消息元数据的原地补写（流式收尾）会触发全量重算，不会返回脏数据。
+    消息列表只追加（长度增加）或整体替换（id 变化），不原地修改历史条目。
+
+    详见模块顶部 ``_MAX_CONSOLIDATE_ENTRIES`` 处的缓存策略说明。
+    """
+    if messages is None:
+        return []
+
+    entries = _get_consolidate_cache()["_entries"]
+    cache_key = (id(messages), _msg_head_key(messages))
+    n = len(messages)
+
+    cached = entries.get(cache_key)
+    if cached is not None:
+        cached_n, cached_tail, cached_norm = cached
+        if n == cached_n:
+            # 长度未变：仅校验尾部窗口（O(W)），命中则复用同一列表对象
+            if _msg_tail_features(messages, n) == cached_tail:
+                entries.move_to_end(cache_key)  # 更新 LRU 位置
+                return cached_norm
+        elif n > cached_n:
+            # 纯追加：旧前缀尾部未变 → 只 normalize 新增的 Δ 条。
+            # list() 是浅拷贝：只复制指针数组，消息 dict 与旧缓存条目共享，
+            # 因此同一会话的多个长度快照不会放大内存。
+            if _msg_tail_features(messages, cached_n) == cached_tail:
+                normalized: List[Dict[str, Any]] = list(cached_norm)
+                for message in messages[cached_n:]:
+                    item = normalize_message(message)
+                    if item:
+                        normalized.append(item)
+                _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n))
+                return normalized
+        # 变短（删除/回退/截断）或尾部校验失败 → 落到下面的全量重算
+
+    normalized: List[Dict[str, Any]] = []
+    for message in messages:
+        item = normalize_message(message)
+        if item:
+            normalized.append(item)
+
+    _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n))
+
+    return normalized
+
+
+def truncate_messages_at(messages: List[Dict[str, Any]], index: int) -> List[Dict[str, Any]]:
+    """把消息列表截断到 ``index``（**含**该条），并修好工具调用配对。
+
+    用于「从这里分支」的消息级截断。OpenAI 协议要求每个 ``tool`` 消息前面必须有
+    声明它的 ``assistant(tool_calls[i].id)``，且每个已声明的 tool_call 都应有
+    对应结果；否则后续请求被 API 拒绝（"tool_call_id not found" /
+    "missing tool response"）。因此单纯切片不够，必须补齐：
+
+    1. **补齐缺失的调用方**：``index`` 落在某条 ``tool`` 上，而声明它的
+       assistant 位于更前面（正常情形，天然包含）—— 无需处理；但若该 tool 的
+       ``tool_call_id`` 在截断结果里找不到声明者（历史数据异常 / hook 注入的
+       孤立结果），则该 tool 一并丢弃。
+    2. **剥掉悬空的声明**：``index`` 落在某条 ``assistant`` 上，而它的
+       ``tool_calls`` 结果落在截断点之后 → 从该条 assistant 里移除这些还没有
+       结果的 tool_call；全部被移除且正文为空时，整条丢弃（避免空 assistant）。
+       保留 ``multiple_edit`` / 并行工具的**已有结果的那部分**调用，其余剥掉。
+
+    Args:
+        messages: 已 ``consolidate_messages`` 的规范消息（角色 / tool_calls 结构完整）。
+        index: 截断点（含）。越界自动夹到 ``[0, len-1]``。
+
+    Returns:
+        截断并修复配对后的新列表（元素为浅引用，调用方需 deepcopy）。
+    """
+    if not messages:
+        return []
+    index = max(0, min(int(index), len(messages) - 1))
+    cut = messages[: index + 1]
+
+    # 截断结果里已有的 tool_call 声明 / 结果
+    declared: Dict[str, int] = {}  # tool_call_id → 声明它的 assistant 在 cut 中的下标
+    answered = set()  # tool_call_id → 已有结果
+    for i, msg in enumerate(cut):
+        role = msg.get("role")
+        if role == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                if isinstance(tc, dict) and tc.get("id"):
+                    declared[str(tc["id"])] = i
+        elif role == "tool":
+            tid = str(msg.get("tool_call_id") or "")
+            if tid:
+                answered.add(tid)
+
+    # ① 丢弃找不到声明者的孤立 tool 消息
+    kept: List[Dict[str, Any]] = []
+    for msg in cut:
+        if msg.get("role") == "tool":
+            tid = str(msg.get("tool_call_id") or "")
+            if tid and tid not in declared:
+                continue
+        kept.append(msg)
+
+    # ② 剥掉悬空声明（结果在截断点之后）→ 按 id 重建 tool_calls
+    out: List[Dict[str, Any]] = []
+    for msg in kept:
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            out.append(msg)
+            continue
+        kept_calls = [tc for tc in msg["tool_calls"] if isinstance(tc, dict) and str(tc.get("id") or "") in answered]
+        if len(kept_calls) == len(msg["tool_calls"]):
+            out.append(msg)  # 无悬空，原样保留（不做无谓拷贝）
+            continue
+        trimmed = dict(msg)
+        if kept_calls:
+            trimmed["tool_calls"] = kept_calls
+        else:
+            trimmed.pop("tool_calls", None)
+        # 全剥光且没有正文 / 思维链 → 整条丢弃（空 assistant 会污染上下文）
+        if not trimmed.get("tool_calls") and not trimmed.get("content") and not trimmed.get("reasoning_content"):
+            continue
+        out.append(trimmed)
+    return out
+
+
+def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int]]:
+    """
+    计算每个 user round 的起止索引。
+
+    Round 范围向前扩展：包含 user 消息之前的所有 hook 消息
+    （PreUserMessage、PreToolUse 等除 SessionStart 外的 hook），
+    删除 round 时这些 hook 会被一起删除，避免重复堆叠。
+
+    SessionStart 视为会话级上下文，不纳入任何 round 范围，
+    删除首个 round 时不会连带删除。
+
+    关键设计：先计算每个 round 的 start（向前回溯 hook），
+    再用下一个 round 的 start 作为本 round 的 end，
+    避免 hook 消息同时属于两个 round。
+    """
+    canonical_messages = consolidate_messages(messages or [])
+    # 跳过 hook 合成消息（如 Stop block 续命注入的 user 消息），
+    # 不作为 round 起点。续命回复纳入前一个真实 user round 范围，
+    # 与 build_node_preview_data 的节点过滤保持一致。
+    # 🆕 例外：TeamMail（_hook_event="TeamMail"）视为独立 user round 起点——
+    # 与 UI 渲染 batch（_is_hook_message 放行 TeamMail 独立成卡）和卡片
+    # round_index（_get_user_round_index_for_batch_index 计入 TeamMail）口径一致。
+    # 此前此处排除 TeamMail 导致三者口径漂移：会话 [A, X(TeamMail), B] 时
+    # B 卡片 round_index=2 但 round_ranges 只有 2 个 → 撤回静默失败 +
+    # 差异统计 cannot determine valid round_index（TeamMail 撤回/统计双杀）。
+    user_indices = [
+        idx for idx, msg in enumerate(canonical_messages)
+        if msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
+    ]
+
+    # 第一遍：计算每个 round 的 start
+    round_starts: List[int] = []
+    for pos, start_idx in enumerate(user_indices):
+        # 向前回溯起点：上一个 user 之后，或会话开头
+        prev_boundary = user_indices[pos - 1] + 1 if pos > 0 else 0
+        round_start = start_idx
+        for j in range(start_idx - 1, prev_boundary - 1, -1):
+            msg = canonical_messages[j]
+            hook_event = msg.get("_hook_event")
+            if hook_event:
+                if hook_event != "SessionStart":
+                    round_start = j  # 扩展起点到本 hook
+                # SessionStart: 会话级，跳过不扩展，继续向前
+                continue
+            if msg.get("role") == "user":
+                break  # 遇到上一个真实 user（无 _hook_event），停止
+            # 非 hook 非 user 消息，停止向前回溯
+            break
+        round_starts.append(round_start)
+
+    # 第二遍：end = 下一个 round 的 start（最后一个 round 则是消息总数）
+    ranges: List[tuple[int, int]] = []
+    for i, start in enumerate(round_starts):
+        end = round_starts[i + 1] if i + 1 < len(round_starts) else len(canonical_messages)
+        ranges.append((start, end))
+    return ranges
+
+
+# 预编译 hook 内容格式正则（模块级复用，避免重复编译）
+_HOOK_CONTENT_PATTERN = re.compile(
+    r'<system-reminder>\s*<([a-z0-9-]+-hook)>.*?</\1>\s*</system-reminder>',
+    re.DOTALL
+)
+
+# 宽匹配：剥除混入消息内容里的整段 system-reminder 注入
+# （覆盖无内层 hook 标签的裸注入形态，_HOOK_CONTENT_PATTERN 只认双标签）
+_SYSTEM_REMINDER_BLOCK_PATTERN = re.compile(
+    r"<system-reminder>.*?</system-reminder>",
+    re.DOTALL,
+)
+
+
+def strip_system_reminder(text: str) -> str:
+    """剥除文本中混入的 <system-reminder>...</system-reminder> 注入段
+
+    用于摘要 / 预览等只应展示用户实际内容的场景（如撤销卡片 tooltip）。
+    """
+    if not text:
+        return ""
+    return _SYSTEM_REMINDER_BLOCK_PATTERN.sub("", text)
+
+
+def _is_team_mail_text(text: str) -> bool:
+    """判断文本是否为 TeamMail 消息内容（Bug11 迁移识别特征）。
+
+    新消息注入路径已带 `_hook_event="TeamMail"` 标记（F1 相关），此处仅用于
+    迁移**无标记的历史 TeamMail 消息**（恢复/加载旧数据时），使其 round 口径
+    与 F2/F4 统一（TeamMail 计入 user round）。
+
+    实际消息格式（两种已知变体均以 📨 开头 + 含"任务邮件"）：
+    - main_widget._process_team_task（非流式）：`📨 **来自 [build@win_01] 的任务邮件：**`
+    - main_widget._inject_team_mail_as_hook（流式）：`📨 **来自 [build@win_01] 的任务邮件：**\n...`
+    - 测试/历史变体：`📨 来自 team 的任务邮件`
+
+    取 📨 + "任务邮件" 双特征（避免与普通用户消息误判；assistant 分支不启用
+    该识别，AI 回复引用邮件文本不会误标）。
+    """
+    return "📨" in text and "任务邮件" in text
+
+
+def _check_hook_content(content: Any, include_team_mail: bool = False) -> Optional[str]:
+    """检查内容是否为 hook 格式，若是则返回提取的 event_name
+
+    用于迁移旧数据：当消息没有 _hook_event 字段但内容匹配 hook 格式时，
+    自动推断出 event_name 并补上 _hook_event。
+
+    Args:
+        content: 消息内容（str 或 list）
+        include_team_mail: True 时额外识别 TeamMail 消息格式（📨 + 任务邮件）。
+            仅 user 角色消息应启用——TeamMail 是 user 角色（Bug11）；assistant
+            回复可能引用邮件文本，若启用会把 assistant 误标 TeamMail。
+
+    Returns:
+        event_name 字符串（如 "pre-user-message-hook" / "TeamMail"），
+        或 None（不匹配 hook 格式）
+    """
+    if isinstance(content, str):
+        m = _HOOK_CONTENT_PATTERN.search(content)
+        if m:
+            tag = m.group(1)  # e.g., "pre-user-message-hook"
+            return tag
+        if include_team_mail and _is_team_mail_text(content):
+            return "TeamMail"
+        return None
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = str(block.get("text", ""))
+                m = _HOOK_CONTENT_PATTERN.search(text)
+                if m:
+                    tag = m.group(1)  # e.g., "pre-user-message-hook"
+                    return tag
+                if include_team_mail and _is_team_mail_text(text):
+                    return "TeamMail"
+        return None
+    return None
+
+
+def _is_hook_message(msg: Dict[str, Any]) -> bool:
+    """判断消息是否为 hook 内部通知消息
+
+    两层判断：
+    1. 首选 _hook_event 字段（精确标记，新消息都有）
+    2. 兜底内容格式匹配（<system-reminder><xxx-hook>...</xxx-hook></system-reminder>）
+       用于旧数据或字段丢失的极端情况
+
+    Returns:
+        True 表示是 hook 消息，应跳过渲染
+    """
+    if msg.get("_hook_event") and msg.get("_hook_event") != "TeamMail":
+        return True
+    # 兜底：检查内容格式
+    content = msg.get("content", "")
+    if isinstance(content, str) and _HOOK_CONTENT_PATTERN.search(content):
+        return True
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = str(block.get("text", ""))
+                if _HOOK_CONTENT_PATTERN.search(text):
+                    return True
+    return False
+
+
+def group_messages_for_display(
+        messages: List[Dict[str, Any]],
+) -> List[List[Dict[str, Any]]]:
+    canonical_messages = consolidate_messages(messages or [])
+    batches: List[List[Dict[str, Any]]] = []
+    current_batch: List[Dict[str, Any]] = []
+
+    for msg in canonical_messages:
+        role = msg.get("role")
+        if role == "system":
+            continue
+        # 跳过 hook 内部通知消息（如 SessionStart、PostToolUse 等），
+        # 不显示为消息卡片。
+        if _is_hook_message(msg):
+            continue
+        if role == "user":
+            if current_batch:
+                batches.append(current_batch)
+                current_batch = []
+            batches.append([msg])
+            continue
+        current_batch.append(msg)
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
+def _prune_tool_content_for_api(content: str) -> str:
+    """发送给 API 前对工具结果应用 S1 截断（与 context_builder.build_messages 同参数）。
+
+    动机：chat_worker 工具迭代路径（发送全量）与 build_messages 路径（S1 截断）对同一
+    工具结果产生不同 content，导致 prompt 前缀分叉、缓存命中失效。统一在此转换层截断后，
+    两条路径字节一致（build_messages 已截断内容 < 阈值，再截断为 no-op）。
+
+    延迟 import 避免循环依赖：context_builder 顶部 import 本模块。
+    仅作用于发送内容；session / UI 存储保持全量。
+    """
+    if not isinstance(content, str) or not content:
+        return content
+    from app.core.context.tool_prune import prune_tool_result
+
+    return prune_tool_result(content)
+
+
+def _resolve_serializer():
+    """经 SerializerRegistry 解析默认序列化器（id="openai"）。
+
+    冷启动防御（P3 修正）：resolve 已改为永不抛错（空时降级内置 passthrough），
+    无法再靠 except RuntimeError 驱动冷启动重载。故这里前置探测：registry 空
+    则幂等触发系统插件扫描再取，确保真实环境拿到 openai serializer 而非
+    passthrough（passthrough 不做协议特判，特性会丢）。函数体内 import
+    注册表，避免与 app/core/__init__.py LazyLoader 循环导入。
+    """
+    from app.plugins.registries.serializer_registry import SerializerRegistry
+
+    registry = SerializerRegistry.get_instance()
+    if not registry.serializers():
+        try:
+            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+            warmup_runtime_components()
+        except Exception:
+            pass
+    return registry.resolve()
+
+
+def _default_ctx(supports_vision: bool = True, is_gemini: bool = False, requires_reasoning_content: bool = False):
+    """由旧 kwargs 组 SerializeContext（serializer_id 保持默认 openai — Phase B 走覆盖式替换）"""
+    from app.plugins.contracts.message_serializer import SerializeContext
+    from app.plugins.contracts.model_adapter import ProtocolFlags
+
+    return SerializeContext(
+        supports_vision=supports_vision,
+        flags=ProtocolFlags(
+            is_gemini=is_gemini,
+            requires_reasoning_content=requires_reasoning_content,
+            use_responses_api=False,
+        ),
+    )
+
+
+def to_api_message(
+    message: Dict[str, Any],
+    supports_vision: bool = True,
+    is_gemini: bool = False,
+    requires_reasoning_content: bool = False,
+) -> Dict[str, Any]:
+    """
+    将内部消息格式转换为标准API请求格式（薄壳：委托 SerializerRegistry 默认序列化器）。
+
+    签名与导出不变（app/core/__init__.py LazyLoader 兼容），逻辑等价旧实现：
+    序列化器 serialize_messages 按列表语义过滤空 user 消息后，此处补回单条语义
+    （normalize 失败 → {}；空 user → {"role":"user","content":""}），保证逐点等价。
+    """
+    serializer = _resolve_serializer()
+    result = serializer.serialize(
+        [message], _default_ctx(supports_vision, is_gemini, requires_reasoning_content)
+    )
+    if result.messages:
+        return result.messages[0]
+    # 空 user 消息被列表语义过滤 → 复刻旧 to_api_message 单条语义
+    normalized = normalize_message(message)
+    if normalized and normalized.get("role") == "user":
+        return {"role": "user", "content": ""}
+    return {}
+
+
+def messages_to_api(
+    messages: List[Dict[str, Any]],
+    supports_vision: bool = True,
+    is_gemini: bool = False,
+    requires_reasoning_content: bool = False,
+) -> List[Dict[str, Any]]:
+    """将内部消息列表转换为标准API请求格式列表（薄壳：委托默认序列化器单入口）。
+
+    签名与导出不变；返回形态 List[Dict] 不变；内部转发序列化器单入口
+    serialize() → result.messages（与旧实现逐点等价）。
+    """
+    serializer = _resolve_serializer()
+    result = serializer.serialize(
+        messages, _default_ctx(supports_vision, is_gemini, requires_reasoning_content)
+    )
+    return result.messages
+
+
+def _build_api_tool_call(tc: Dict[str, Any], is_gemini: bool = False) -> Dict[str, Any]:
+    """将内部 tool_call 转换为标准 API tool_call 格式。
+
+    会剥离内部专用字段（如 _args_parsed），并按需注入 Gemini thought_signature：
+    - 内部携带真实 thought_signature → 用真实签名
+    - 未携带且目标为 Gemini → 用官方占位串兜底
+    """
+    func = tc.get("function") or {}
+    out: Dict[str, Any] = {
+        "id": tc.get("id"),
+        "type": tc.get("type", "function"),
+        "function": {
+            "name": func.get("name"),
+            "arguments": func.get("arguments", "{}"),
+        },
+    }
+    sig = tc.get("thought_signature")
+    if sig:
+        out["extra_content"] = {"google": {"thought_signature": sig}}
+    elif is_gemini:
+        out["extra_content"] = {"google": {"thought_signature": GEMINI_DUMMY_THOUGHT_SIGNATURE}}
+    return out
+
+
+def _extract_text_content(content: Any) -> str:
+    """从复杂内容中提取纯文本"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    txt = str(block.get("text", ""))
+                    if txt:
+                        parts.append(txt)
+        return " ".join(parts)
+    return str(content)
+
+
+# ========== Responses API（OpenAI GPT-5.x 系列）消息转换 ==========
+# GPT-5.x 系列（如 gpt-5.6-luna）的思考内容只在 Responses API
+# （/v1/responses）的 reasoning_summary_text 事件中返回，chat/completions
+# 端点的流式 delta 不含任何 reasoning 字段（OpenCode Go 网关实测剥离）。
+# 因此对该系列模型切换 Responses API：消息需转换为 input items 格式。
+
+
+def _block_to_responses_content(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """将内部 multimodal 块转换为 Responses API content part。
+
+    返回 None 表示无法转换（跳过该块）。
+    """
+    if not isinstance(block, dict):
+        return None
+    btype = block.get("type")
+    if btype == "text":
+        text = str(block.get("text", ""))
+        return {"type": "input_text", "text": text} if text else None
+    if btype == "input_image":
+        # Responses API 的 input_image.image_url 是字符串（chat/completions 是对象）
+        url = block.get("image_url")
+        if isinstance(url, dict):
+            url = url.get("url", "")
+        return {"type": "input_image", "image_url": str(url or "")} if url else None
+    if btype == "image_url":
+        img = block.get("image_url", {}) or {}
+        url = img.get("url", "") if isinstance(img, dict) else img
+        return {"type": "input_image", "image_url": str(url or "")} if url else None
+    if btype == "image":
+        # Anthropic 格式 image 块 → data URI
+        src = block.get("source", {}) or {}
+        if isinstance(src, dict) and src.get("type") == "base64":
+            media = src.get("media_type", "image/png")
+            data = src.get("data", "")
+            if data:
+                return {"type": "input_image", "image_url": f"data:{media};base64,{data}"}
+        return None
+    return None
+
+
+def _extract_responses_content(content: Any, supports_vision: bool = True) -> List[Dict[str, Any]]:
+    """将内部消息 content 转换为 Responses API content parts 列表。
+
+    纯文本返回单段 input_text；含图片块返回多段。不支持视觉时图片替换为文本占位。
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}] if content else []
+    if isinstance(content, list):
+        parts: List[Dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = str(block.get("text", ""))
+                if text:
+                    parts.append({"type": "input_text", "text": text})
+            elif block.get("type") in ("image_url", "input_image", "image"):
+                if supports_vision:
+                    part = _block_to_responses_content(block)
+                    if part:
+                        parts.append(part)
+                else:
+                    parts.append({"type": "input_text", "text": "[图片]"})
+        return parts
+    text = str(content)
+    return [{"type": "input_text", "text": text}] if text else []
+
+
+def messages_to_responses_input(
+    messages: List[Dict[str, Any]],
+    supports_vision: bool = True,
+) -> tuple:
+    """将内部消息列表转换为 Responses API 请求参数（薄壳：委托默认序列化器）。
+
+    返回形态 (input_items, instructions) 不变；use_responses_api=True 语义
+    注入 ctx.flags；逻辑与旧实现逐点等价（instructions 提取 / function_call /
+    function_call_output / images→文本 / S1 截断）。
+    """
+    serializer = _resolve_serializer()
+    ctx = _default_ctx(supports_vision)
+    ctx.flags.use_responses_api = True
+    result = serializer.serialize(messages, ctx)
+    return result.input_items, result.instructions
+
+
+def extract_reasoning_delta(obj: Any) -> str:
+    """从流式 delta / message 对象里提取思考增量，兼容各厂商字段名。
+
+    厂商差异（实测）：
+        - ``reasoning_content`` : DeepSeek / GLM / 混元官方 / vLLM reasoning-parser
+        - ``reasoning``         : OpenRouter 及兼容网关（OpenCode Go）的归一化字段
+        - ``reasoning_details`` : OpenRouter 结构化数组
+          ``[{"type": "reasoning.text", "text": "...", "index": 0}]``
+
+    只取第一个命中的字段，避免同一段思考被重复计入（网关通常同时下发
+    ``reasoning`` 与 ``reasoning_details``，两者内容一致）。
+
+    Args:
+        obj: openai SDK 的 ``ChoiceDelta`` / ``ChatCompletionMessage``，或等价 dict。
+
+    Returns:
+        思考文本增量；无思考内容时返回空字符串。
+    """
+
+    def _pick(container, key):
+        if isinstance(container, dict):
+            return container.get(key)
+        return getattr(container, key, None)
+
+    for key in ("reasoning_content", "reasoning"):
+        value = _pick(obj, key)
+        # 只接受标量文本：dict/list（某些网关的 reasoning 是对象）不塞进思考框
+        if isinstance(value, str) and value:
+            return value
+        if value and not isinstance(value, (dict, list, tuple)):
+            return str(value)
+
+    details = _pick(obj, "reasoning_details")
+    if isinstance(details, list) and details:
+        parts = []
+        for item in details:
+            if isinstance(item, dict):
+                piece = item.get("text") or item.get("summary") or ""
+            else:
+                piece = getattr(item, "text", None) or getattr(item, "summary", None) or ""
+            if piece:
+                parts.append(str(piece))
+        if parts:
+            return "".join(parts)
+    return ""

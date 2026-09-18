@@ -8,7 +8,7 @@ Deleted（杀毒扫描/索引服务批量触碰目录句柄，表现为多个插
 修复：删除事件先经 os.path.isdir 磁盘核实，目录仍在则忽略。
 """
 
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 
 # watchfiles.Change.deleted 的数值（枚举 added=1, modified=2, deleted=3）
 _DELETED = 3
@@ -22,7 +22,7 @@ def _prefixes(*paths: str) -> dict:
 class TestConfirmPluginRootDeleted:
     def test_misreported_delete_ignored_when_dir_still_exists(self, monkeypatch):
         """误报场景：事件称根目录被删，但磁盘上目录仍在 → False（不卸载）"""
-        monkeypatch.setattr("app.core.plugin_host_service.os.path.isdir", lambda p: True)
+        monkeypatch.setattr("app.core.services.plugin_host_service.os.path.isdir", lambda p: True)
         prefixes = _prefixes("C:/u/.drifox6/plugins/prompt-enhancer")
         changes = [
             (_DELETED, "C:/u/.drifox6/plugins/prompt-enhancer"),
@@ -32,7 +32,7 @@ class TestConfirmPluginRootDeleted:
 
     def test_real_delete_confirmed_when_dir_gone(self, monkeypatch):
         """真实删除：磁盘上目录确实不存在 → True（安全触发卸载）"""
-        monkeypatch.setattr("app.core.plugin_host_service.os.path.isdir", lambda p: False)
+        monkeypatch.setattr("app.core.services.plugin_host_service.os.path.isdir", lambda p: False)
         prefixes = _prefixes("C:/u/.drifox6/plugins/prompt-enhancer")
         changes = [(_DELETED, "C:/u/.drifox6/plugins/PROMPT-ENHANCER")]
         assert PluginHostService._confirm_plugin_root_deleted("plugin-0", prefixes, changes) is True
@@ -45,7 +45,7 @@ class TestConfirmPluginRootDeleted:
             called.append(p)
             return False
 
-        monkeypatch.setattr("app.core.plugin_host_service.os.path.isdir", _fail)
+        monkeypatch.setattr("app.core.services.plugin_host_service.os.path.isdir", _fail)
         prefixes = _prefixes("C:/u/.drifox6/plugins/browser")
         changes = [(_MODIFIED, "C:/u/.drifox6/plugins/browser/ui/main.py")]
         assert PluginHostService._confirm_plugin_root_deleted("plugin-0", prefixes, changes) is False
@@ -53,7 +53,7 @@ class TestConfirmPluginRootDeleted:
 
     def test_other_plugin_delete_not_matched(self, monkeypatch):
         """删除事件属于其他插件根 → 本插件返回 False"""
-        monkeypatch.setattr("app.core.plugin_host_service.os.path.isdir", lambda p: False)
+        monkeypatch.setattr("app.core.services.plugin_host_service.os.path.isdir", lambda p: False)
         prefixes = _prefixes("C:/u/.drifox6/plugins/a", "C:/u/.drifox6/plugins/b")
         changes = [(_DELETED, "C:/u/.drifox6/plugins/b")]
         assert PluginHostService._confirm_plugin_root_deleted("plugin-0", prefixes, changes) is False

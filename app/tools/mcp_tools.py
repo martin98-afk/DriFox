@@ -365,7 +365,7 @@ class MCPServerConnection:
         if prev == state:
             return  # 同态重复，不重复上报
         try:
-            from app.core.hook_manager import trigger_plugin_changed_hook
+            from app.core.hooks.hook_manager import trigger_plugin_changed_hook
 
             if state == MCPState.CONNECTED:
                 context = {
@@ -545,7 +545,7 @@ class MCPClientManager:
         env = conn.config.get("env")
 
         # P1-3：启动门禁（审计 + shell 元字符拒启 + 非内置源确认流）
-        from app.core.mcp_lsp_safety import gate_server_launch
+        from app.core.tools.mcp_lsp_safety import gate_server_launch
 
         source = conn.config.get("_source")
         plugin_name = Path(source).parent.name if source and Path(source).suffix == ".json" else ""
@@ -633,7 +633,7 @@ class MCPClientManager:
         merged_env = _build_stdio_env(env)
 
         # P1-3：启动门禁（两阶段 stdio→http 同样过门禁）
-        from app.core.mcp_lsp_safety import gate_server_launch
+        from app.core.tools.mcp_lsp_safety import gate_server_launch
 
         source = conn.config.get("_source")
         plugin_name = Path(source).parent.name if source and Path(source).suffix == ".json" else ""

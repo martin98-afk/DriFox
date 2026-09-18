@@ -31,7 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.gateway_service import GatewayService  # noqa: E402
+from app.core.services.gateway_service import GatewayService  # noqa: E402
 
 
 @pytest.fixture()
@@ -132,7 +132,7 @@ class TestEnabledPlatform:
             def start(self):
                 captured["started"] = True
 
-        import app.core.gateway_service as gs_mod
+        import app.core.services.gateway_service as gs_mod
 
         monkeypatch.setattr(gs_mod.threading, "Thread", _FakeThread)
         fresh_service._prebuild_components_background()
@@ -177,7 +177,7 @@ class TestBuiltinToolsNotOverwritten:
 
     def test_build_components_does_not_overwrite_builtin_tools(self, fresh_service, monkeypatch):
         """T34 核心：删掉覆盖行后，全局 AgentManager 的 _builtin_tools 不被改写"""
-        import app.core.agent as agent_mod
+        import app.core.conversation.agent as agent_mod
 
         sentinel = object()  # 模拟「窗口已设置的」_builtin_tools
         fake_am = MagicMock()
@@ -191,7 +191,7 @@ class TestBuiltinToolsNotOverwritten:
         fake_executor = MagicMock()
         fake_executor._builtin_tools = MagicMock(name="gateway_bt")
 
-        import app.core.tool_executor as te_mod
+        import app.core.tools.tool_executor as te_mod
 
         monkeypatch.setattr(te_mod, "ToolExecutor", lambda backend=None: fake_executor)
 
@@ -203,7 +203,7 @@ class TestBuiltinToolsNotOverwritten:
 
     def test_late_window_schema_still_works(self, fresh_service, monkeypatch):
         """后建窗口的 schema 生成不受影响（显式传表路径仍可用）"""
-        from app.core.agent import AgentManager
+        from app.core.conversation.agent import AgentManager
 
         am = AgentManager.get_instance(None, None)
         # 显式传入 builtin_tools（GatewayEngine engine.py:768/773 的做法）

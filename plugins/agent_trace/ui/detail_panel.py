@@ -707,12 +707,7 @@ class DetailPanel(QWidget):
         elif key == "thinking":
             # DeepSeek V4 / GLM-5 等思维链：worker 落盘在 msg["reasoning_content"]，
             # collector 投影时搬进 meta["reasoning"]；轻量消息（已剥离）走 loader 懒读。
-            reasoning = str(rec.meta.get("reasoning") or "").strip()
-            if not reasoning and rec.reasoning_loader is not None:
-                try:
-                    reasoning = str(rec.reasoning_loader() or "").strip()
-                except Exception:
-                    reasoning = ""
+            reasoning = self._reasoning_text(rec).strip()
             self._set_content(self._page_text, reasoning or "（空）")
         elif key == "request":
             self._set_content(self._ensure_slot_page("request"), self._tool_request(rec))
@@ -735,12 +730,9 @@ class DetailPanel(QWidget):
 
         # ASSISTANT 带思维链 → 在 Preview 后插入 Thinking tab（没 reasoning 不占位）
         tabs = list(_TABS_BY_KIND.get(rec.kind, _TABS_BY_KIND[EntryKind.USER]))
-        has_reasoning = bool(str(rec.meta.get("reasoning") or "").strip())
-        if not has_reasoning and rec.reasoning_loader is not None:
-            try:
-                has_reasoning = bool(str(rec.reasoning_loader() or "").strip())
-            except Exception:
-                has_reasoning = False
+        # 全文只读一次：tab 插入判断与标题栏字符统计共用（loader 走存储 IO）
+        reasoning_text = self._reasoning_text(rec)
+        has_reasoning = bool(reasoning_text.strip())
         if rec.kind == EntryKind.ASSISTANT and has_reasoning:
             tabs.insert(1, ("thinking", "Thinking"))
         self._rebuild_tabs(tuple(tabs))
@@ -769,8 +761,9 @@ class DetailPanel(QWidget):
         ]
         # 工具调用 / hook 注入类消息本来就没有正文 —— 显示「0 字符」是噪音，
         # 换成 token 数（真正占用上下文的量）。
-        if (rec.raw or "").strip():
-            bits.append(f"{len(rec.raw):,} 字符")
+        # 字符数 = 正文 + 思考内容（思维链也是模型输出的一部分）。
+        if (rec.raw or "").strip() or reasoning_text.strip():
+            bits.append(f"{len(rec.raw or '') + len(reasoning_text):,} 字符")
         elif rec.tokens > 0:
             bits.append(f"{format_tokens(rec.tokens)} tok")
         self._meta_label.setText("  ·  ".join(bits))
@@ -850,12 +843,30 @@ class DetailPanel(QWidget):
             return pretty_json(raw.split("\n\n── result ──\n", 1)[1])
         return raw or "（无结果）"
 
+    @staticmethod
+    def _reasoning_text(rec: TraceRecord) -> str:
+        """思考内容全文：优先 ``meta["reasoning"]``（collector 投影），
+        轻量消息（已剥离）走 ``reasoning_loader`` 懒读（存储 load_msg_extras）。
+        取不到返回空串。"""
+        text = str(rec.meta.get("reasoning") or "")
+        if not text.strip() and rec.reasoning_loader is not None:
+            try:
+                text = str(rec.reasoning_loader() or "")
+            except Exception:
+                text = ""
+        return text
+
+    def _content_size_text(self, rec: TraceRecord) -> str:
+        """内容体量文案：正文 + 思考内容合计字符数（与标题栏口径一致）。"""
+        total = len(rec.raw or "") + len(self._reasoning_text(rec))
+        return f"{total:,} 字符" if total > 0 else "—"
+
     def _headers_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
         """Info 页（原 Headers）：只留有用的三行，元杂项（Kind/Status/Source 等）全部砍掉。"""
         return [
             ("开始时间", self._full_ts(rec.start_ts)),
             ("Turn", str(rec.turn_no) if rec.turn_no > 0 else "-"),
-            ("大小", f"{len(rec.raw):,} 字符" if (rec.raw or "").strip() else "—"),
+            ("大小", self._content_size_text(rec)),
             ("Tokens", format_tokens(rec.tokens)),
         ]
 
@@ -867,7 +878,11 @@ class DetailPanel(QWidget):
         生成 = 总时长 − 首 token；吞吐量 = 输出 token ÷ 生成秒。
         估算 token（无 tokens_exact）时吞吐量加 ≈ 前缀。
         """
-        rows: List[Tuple[str, str]] = [("开始时间", self._full_ts(rec.start_ts))]
+        model = str(rec.meta.get("model") or "")
+        rows: List[Tuple[str, str]] = []
+        if model:
+            rows.append(("模型", model))
+        rows.append(("开始时间", self._full_ts(rec.start_ts)))
         total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
         rows.append(("总时长", format_duration(total_ms) if total_ms > 0 else "—"))
         ttft = rec.meta.get("ttft_ms")

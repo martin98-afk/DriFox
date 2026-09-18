@@ -166,7 +166,7 @@ def test_about_to_quit_calls_tray_cleanup_first(monkeypatch):
     """
     from app import tray_manager as tray_mod
     from app.main_widget import OpenAIChatToolWindow
-    from app.core import window_registry as wr_mod
+    from app.core.infra import window_registry as wr_mod
 
     calls: list = []
 
@@ -189,7 +189,7 @@ def test_about_to_quit_calls_tray_cleanup_first(monkeypatch):
 def test_about_to_quit_continues_after_tray_cleanup_failure(monkeypatch):
     """托盘清理抛异常不得中断退出保存链（退出期批量保存是用户数据保障）。"""
     from app import tray_manager as tray_mod
-    from app.core import window_registry as wr_mod
+    from app.core.infra import window_registry as wr_mod
     from app.main_widget import OpenAIChatToolWindow
 
     calls: list = []

@@ -284,7 +284,7 @@ class TestVisionNoticeSuppression:
 
     @staticmethod
     def _set_caps(monkeypatch, supports_vision: bool):
-        import app.core.model_capabilities as mc
+        import app.core.modelmeta.model_capabilities as mc
 
         monkeypatch.setattr(
             mc, "get_model_capabilities", lambda name: {"supports_vision": supports_vision}

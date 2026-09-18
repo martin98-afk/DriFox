@@ -14,7 +14,7 @@
 插件自包含：
 - 渲染逻辑 + CSS/JS 在 ``_render.py``
 - GitHub Releases 后台拉取 + 进程内缓存 + 异步刷新派发在 ``_fetcher.py``
-- 跨线程通信走 ``app.core.ui_event_bus.EV_WELCOME_TAB_REFRESHED`` 事件
+- 跨线程通信走 ``app.core.infra.ui_event_bus.EV_WELCOME_TAB_REFRESHED`` 事件
 """
 
 from __future__ import annotations

@@ -23,7 +23,7 @@ from typing import List, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 
-from app.core.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
+from app.core.infra.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
 
 _REPO = "martin98-afk/DriFox"
 _CACHE_TTL = 3600  # 1h

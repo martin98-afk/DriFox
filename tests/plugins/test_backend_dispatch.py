@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt5.QtCore import QObject
 
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 
 
 def _make_host():
@@ -49,7 +49,7 @@ def kernel_env(monkeypatch, tmp_path):
 def test_dispatch_via_registry(kernel_env, monkeypatch):
     """经注册表分派：themes 组件 → 自定义 reloader 被调用"""
     reg, fake_pm = kernel_env
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     calls = []
     reg.register("themes", lambda ctx: calls.append(ctx.component) or True)
@@ -86,7 +86,7 @@ def test_dispatch_deleted_plugin_triggers_cleanup_path(kernel_env, monkeypatch):
     # 被外层 except 吞掉，删除清理段永远走不到（54e8a4cf 引入的测试回归）。
     fake_pm.get_plugin.side_effect = [fake_plugin, None, None]
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     seen = []
     reg.register("themes", lambda ctx: seen.append(("themes", ctx.plugin is None)) or True)
@@ -113,7 +113,7 @@ def test_dispatch_deleted_plugin_triggers_cleanup_path(kernel_env, monkeypatch):
 def test_unknown_component_skipped(kernel_env, monkeypatch):
     """未知组件：注册的 bogus reloader 完全不被调用（plugin=None 删除路径也不命中）"""
     reg, fake_pm = kernel_env
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     # 故意注册一个 bogus 名字的 reloader — 验证注册表 dispatch 不会误派给它
     calls = []
@@ -143,7 +143,7 @@ def test_agents_dispatch_marks_hooks_and_commands(kernel_env, monkeypatch):
     fake_plugin.components = {"agents": True, "hooks": True, "commands": True}
     fake_plugin.has_component = lambda c: fake_plugin.components.get(c, False)
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     calls = []
     reg.register("agents", lambda ctx: calls.append(ctx.component) or 3)
@@ -191,7 +191,7 @@ def test_delete_path_iterates_by_component_order(kernel_env, monkeypatch):
     for comp in kernel_mod.COMPONENT_ORDER:
         reg.register(comp, lambda ctx, _c=comp: seen.append(_c) or True)
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     backend._watcher_dedup_cache = {}
@@ -215,7 +215,7 @@ def test_reload_plugin_targeted_dispatches_manifest(kernel_env, monkeypatch):
     会重载全部插件的 hooks/agents/commands；targeted 门面必须走精准路径。
     """
     reg, fake_pm = kernel_env
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     calls: list = []
@@ -227,7 +227,7 @@ def test_reload_plugin_targeted_dispatches_manifest(kernel_env, monkeypatch):
 def test_reload_plugin_targeted_empty_falls_back_to_full(kernel_env, monkeypatch):
     """reload_plugin_targeted(空名) → 回退全量 reload_plugin_subsystems（防御）"""
     reg, fake_pm = kernel_env
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     calls: list = []
@@ -244,7 +244,7 @@ def test_reload_plugin_targeted_emits_plugin_changed(kernel_env, monkeypatch):
     watcher 抑制解除后的 fallback 事件组件归类常为 root（ui=False）顶替不了。
     """
     reg, fake_pm = kernel_env
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     fake_plugin = fake_pm.get_plugin.return_value
     fake_plugin.components = {"ui": True}
@@ -283,7 +283,7 @@ def test_reload_plugin_subsystems_diff_precise(kernel_env, monkeypatch):
     卸载一个插件会波及全部插件；现改为逐插件精准处理。
     """
     reg, fake_pm = kernel_env
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     class _FakeDiffPlugin:
         def __init__(self, name, components):
@@ -331,7 +331,7 @@ def test_reload_plugin_subsystems_diff_precise(kernel_env, monkeypatch):
 def test_reload_plugin_subsystems_no_diff_skips(kernel_env, monkeypatch):
     """reload_plugin_subsystems 无变更时不重载任何子系统（零浪费）"""
     reg, fake_pm = kernel_env
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     fake_pm.rescan.return_value = {"added": [], "removed": [], "changed": []}
     monkeypatch.setattr(
@@ -358,7 +358,7 @@ def test_reload_plugin_subsystems_no_diff_skips(kernel_env, monkeypatch):
 def test_reload_plugin_subsystems_force_full(kernel_env, monkeypatch):
     """reload_plugin_subsystems(force_full=True) 保留全量语义（设置按钮显式操作）"""
     reg, fake_pm = kernel_env
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     fake_pm.rescan.return_value = {"added": [], "removed": [], "changed": []}
     monkeypatch.setattr(

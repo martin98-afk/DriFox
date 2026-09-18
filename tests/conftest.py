@@ -1,9 +1,17 @@
 # -*- coding: utf-8 -*-
 """pytest 全局 fixtures"""
 
+import os
+
 import pytest
 
 from loguru import logger
+
+# ⚠️ 必须模块级（收集期生效）：pytest 收集测试文件即触发 app 模块链式
+# import → provider 加载 → codebuddy._bootstrap 启动守护线程；session
+# fixture 首测试前才运行，届时线程已在 urlopen 阻塞（退出期竞态 0x8001010D）。
+# codebuddy._bootstrap 读该变量跳过线程启动。
+os.environ["DRIFOX_NO_CODEBUDDY_REFRESH"] = "1"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -28,11 +36,44 @@ def _ensure_split_system_plugins_enabled():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _disable_codebuddy_refresh_loop():
+    """codebuddy 守护线程 urlopen/DNS 与解释器退出竞态（0x8001010D）→ 测试环境禁用
+
+    codebuddy._bootstrap 读 DRIFOX_NO_CODEBUDDY_REFRESH=1 时跳过线程启动；
+    避免测试进程退出期被后台网络请求击中（Windows fatal exception）。
+    """
+    import os
+
+    os.environ["DRIFOX_NO_CODEBUDDY_REFRESH"] = "1"
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _setup_qt_attributes():
     """qfluentwidgets SingleDirectionScrollArea 需在 QApplication 创建前设置 Qt::AA_ShareOpenGLContexts"""
     from PyQt5.QtCore import QCoreApplication, Qt
 
     QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_context_tiers_loaded():
+    """测试期加载 system-context 内置 tier 链（session 级，幂等）。
+
+    上下文压缩已迁到 ContextPipeline：build_messages / UI 估算不再直接调
+    compactor，而是跑 registry 里的 tier 链。单个测试进程不会走真实启动链的
+    warmup_runtime_components()，故此 fixture 补一次扫描，让依赖真实 cascade
+    行为的用例（如 tool 结果截断集成测试）拿到非空链。
+    """
+    try:
+        from app.plugins.loaders.runtime_component_loader import (
+            _make_budget_resolver_loader,
+            _make_context_tier_loader,
+        )
+
+        _make_context_tier_loader().scan_roots()
+        _make_budget_resolver_loader().scan_roots()
+    except Exception:
+        pass
 
 
 @pytest.fixture(scope="session")

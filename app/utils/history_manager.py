@@ -25,8 +25,8 @@ import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
-from app.core.message_content import consolidate_messages, content_to_text
-from app.core.token_estimator import count_messages_tokens
+from app.core.conversation.message_content import consolidate_messages, content_to_text
+from app.core.infra.token_estimator import count_messages_tokens
 from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
 
 
@@ -163,7 +163,7 @@ def extract_message_preview(messages: List[Dict], max_len: int = 50) -> str:
         content = msg.get("content", "")
         if role == "user" and content:
             if isinstance(content, list):
-                from app.core.message_content import content_to_text
+                from app.core.conversation.message_content import content_to_text
 
                 content = content_to_text(content)
             return content[:max_len].strip() + ("..." if len(content) > max_len else "")
@@ -463,7 +463,7 @@ class HistoryManager:
         if use_sqlite:
             try:
                 # 函数体内延迟 import：避免与 backend 循环导入
-                from app.core.backend import get_session_storage
+                from app.core.conversation.backend import get_session_storage
 
                 engine = get_session_storage()
                 # hasattr 降级：引擎无 is_initialized（第三方实现）→ 视为未启用 SQLite

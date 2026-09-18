@@ -4,7 +4,7 @@
 只测纯函数与路由表结构，不做真实文件 IO（避免污染全局 loguru 状态）。
 """
 
-from app.core.logging_setup import LOG_ROUTES, _match_prefix, make_module_filter
+from app.core.infra.logging_setup import LOG_ROUTES, _match_prefix, make_module_filter
 
 
 def test_match_prefix_exact():
@@ -19,7 +19,7 @@ def test_match_prefix_submodule():
 
 def test_match_prefix_no_substring_false_positive():
     """子串不误命中：gateway_service 不是 gateway 子模块。"""
-    assert not _match_prefix("app.core.gateway_service", ("app.core.gateway",))
+    assert not _match_prefix("app.core.services.gateway_service", ("app.core.gateway",))
 
 
 def test_match_prefix_multiple_prefixes():
@@ -65,14 +65,14 @@ def test_routes_structure_valid():
 def test_key_modules_routed():
     """关键子系统模块均应命中对应分文件。"""
     expectations = {
-        "app.core.backend": "llm.log",
+        "app.core.conversation.backend": "llm.log",
         "app.gateway.manager": "gateway.log",
         "app.tools.mcp_tools": "mcp.log",
         "app.core.lsp.lsp_client": "lsp.log",
-        "app.core.tool_executor": "tools.log",
+        "app.core.tools.tool_executor": "tools.log",
         "plugins.system-tools.tools.terminal_tools": "plugins.log",
         "app.main_widget": "ui.log",
-        "app.core.team_manager": "team.log",
+        "app.core.team.team_manager": "team.log",
         "app.core.store.session_store": "store.log",
     }
     for module_name, expected_file in expectations.items():

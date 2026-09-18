@@ -103,7 +103,7 @@ class TestRefreshConnections:
 
     def test_skips_pending_gate_confirm(self):
         """门禁待确认的服务器 → 自动补连跳过（防插件批量安装时重复发起被拦连接）"""
-        from app.core import mcp_lsp_safety
+        from app.core.tools import mcp_lsp_safety
 
         srv = _server("browser")
         srv["_source"] = str(Path.home() / ".drifox" / "plugins" / "browser" / ".mcp.json")

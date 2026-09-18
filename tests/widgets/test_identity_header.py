@@ -11,7 +11,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QApplication
 
-from app.core.message_identity import BUILTIN_AVATAR_DRIFOX, MessageIdentity
+from app.core.infra.message_identity import BUILTIN_AVATAR_DRIFOX, MessageIdentity
 from app.widgets.modules import identity_header as ih
 
 

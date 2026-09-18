@@ -10,7 +10,7 @@ capabilities["extra_headers"] 为静态自定义头（伪装 UA 等），声明�
 
 import pytest
 
-from app.core.provider_profile import get_provider_profile
+from app.core.modelmeta.provider_profile import get_provider_profile
 from app.plugins.registries.provider_registry import ProviderRegistry
 
 

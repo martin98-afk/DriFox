@@ -173,7 +173,7 @@ def test_disable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
 
     注：reload 目标已迁移到 PluginHostService（应用级单例），不再走 ChatBackend._active_instances。
     """
-    from app.core.plugin_host_service import PluginHostService
+    from app.core.services.plugin_host_service import PluginHostService
     from ui.installer import PluginInstaller
 
     installer = _make_installer(tmp_path)
@@ -209,7 +209,7 @@ def test_enable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
 
     注：reload 目标已迁移到 PluginHostService（应用级单例），不再走 ChatBackend._active_instances。
     """
-    from app.core.plugin_host_service import PluginHostService
+    from app.core.services.plugin_host_service import PluginHostService
     from ui.installer import PluginInstaller
 
     installer = _make_installer(tmp_path)

@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
-from app.core.tool_executor import ToolExecutor
+from app.core.tools.tool_executor import ToolExecutor
 
 # 加载 task_tools 插件模块（plugins/ 非 Python 包，_load_module 模式）
 _PLUGIN_TOOLS = PROJECT_ROOT / "plugins" / "system-tools" / "tools"

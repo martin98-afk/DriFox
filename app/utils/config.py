@@ -127,7 +127,7 @@ class Settings(QConfig):
             logger.info("[_migrate_saved_providers] 密钥未解锁，跳过 config_id 重算")
             return
 
-        from app.core.provider_profile import apply_provider_save
+        from app.core.modelmeta.provider_profile import apply_provider_save
 
         new_saved_providers: dict = {}
         old_to_new: dict = {}
@@ -169,7 +169,7 @@ class Settings(QConfig):
           内置 key 已失效且免 key 端点不接受假 key）。
         """
         from app.constants import provider_default_config
-        from app.core.provider_profile import compute_provider_config_id
+        from app.core.modelmeta.provider_profile import compute_provider_config_id
 
         provider_name = "OpenCode Zen"
         # 数据源从硬编码 FREE_PROVIDERS 迁移到 providers 插件（OpenCode Zen 插件注册表）

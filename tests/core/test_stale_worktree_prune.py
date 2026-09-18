@@ -120,7 +120,7 @@ def test_prune_scoped_to_project(repo, tmp_path):
 @pytest.fixture
 def mm(store):
     """绕过全局存储门面，直接把临时库的仓储注入 MemoryManagerCore"""
-    from app.core.memory_manager import MemoryManagerCore
+    from app.core.conversation.memory_manager import MemoryManagerCore
     from app.core.store.key_documents_repository import KeyDocumentsRepository
 
     MemoryManagerCore._instance = None
@@ -187,7 +187,7 @@ def test_mm_clears_dangling_workdir_without_candidate(mm, tmp_path):
 
 def test_backend_context_excludes_stale_worktree(mm, tmp_path, monkeypatch):
     """注入上下文不再包含失效 worktree 路径（端到端）"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     root = _mkdir(tmp_path, "proj")
     gone = str(tmp_path / "gone-wt").replace("\\", "/")
@@ -209,7 +209,7 @@ def test_backend_context_excludes_stale_worktree(mm, tmp_path, monkeypatch):
 
 def test_backend_context_survives_prune_failure(mm, monkeypatch):
     """清理抛异常时注入路径不崩（防御性降级）"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     def _boom(*a, **kw):
         raise RuntimeError("db locked")
@@ -250,7 +250,7 @@ def test_prune_on_uninitialized_repo():
 
 def test_mm_prune_without_repo():
     """memory_manager 无仓储时安全返回"""
-    from app.core.memory_manager import MemoryManagerCore
+    from app.core.conversation.memory_manager import MemoryManagerCore
 
     MemoryManagerCore._instance = None
     inst = MemoryManagerCore.get_instance()

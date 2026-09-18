@@ -21,8 +21,8 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QShortcut
 from PyQt5.QtTest import QTest
 
-from app.core import window_registry as window_registry_mod
-from app.core.command_manager import CommandManager, CommandType
+from app.core.infra import window_registry as window_registry_mod
+from app.core.commands.command_manager import CommandManager, CommandType
 
 TEST_CMD = "hot_reload_probe_cmd"
 TEST_SEQ = "Ctrl+Alt+7"
@@ -103,7 +103,7 @@ def _live_marked_shortcuts(win) -> list:
 
 def _rebind_like_hot_reload():
     """走真实热重载入口：builtin_commands._rebind_command_shortcuts()"""
-    from app.core.builtin_commands import _rebind_command_shortcuts
+    from app.core.commands.builtin_commands import _rebind_command_shortcuts
 
     _rebind_command_shortcuts()
 

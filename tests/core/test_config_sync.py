@@ -58,7 +58,7 @@ def make_gitee_file_response(content_str: str, sha: str = "abc123"):
 @pytest.fixture(autouse=True)
 def reset_sync_service():
     """每个测试前重置 ConfigSyncService 状态"""
-    from app.core.config_sync import ConfigSyncService
+    from app.core.sync.config_sync import ConfigSyncService
 
     svc = ConfigSyncService.get_instance()
     # 重置所有实例状态
@@ -117,7 +117,7 @@ class TestCheckRemoteFile:
         "网络异常，无法同步"（不含"已失效"）→ T2a/T2b 关键词过滤拦截 →
         UI 静默无提示。修复后 401 标记为 token 失效，走刷新重试/失效分支。
         """
-        from app.core.config_sync import TokenAuthError
+        from app.core.sync.config_sync import TokenAuthError
 
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
@@ -128,7 +128,7 @@ class TestCheckRemoteFile:
 
     def test_401_with_invalid_token_message_raises(self, svc):
         """非 401 状态码但响应体含 invalid_token 语义 → 同样抛 TokenAuthError"""
-        from app.core.config_sync import TokenAuthError
+        from app.core.sync.config_sync import TokenAuthError
 
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
@@ -139,7 +139,7 @@ class TestCheckRemoteFile:
 
     def test_401_with_expired_message_raises(self, svc):
         """响应体含 'Access token is expired' → 抛 TokenAuthError"""
-        from app.core.config_sync import TokenAuthError
+        from app.core.sync.config_sync import TokenAuthError
 
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
@@ -591,7 +591,7 @@ class TestInitialSync:
         修复后：走 _refresh_local_and_upload 既有失效分支，
         TOKEN_REVOKED → 清绑 + "Gitee token 已失效，请重新绑定"。
         """
-        from app.core.config_sync import Settings
+        from app.core.sync.config_sync import Settings
 
         msgs = []
         svc.syncDone.connect(lambda ok, msg: msgs.append((ok, msg)))
@@ -619,7 +619,7 @@ class TestInitialSync:
                     return_value=(None, "TOKEN_REVOKED::invalid_grant"),
                 ),
                 patch.object(svc, "recover_token_from_cloud", return_value=False),
-                patch("app.core.config_sync.Settings.get_instance", return_value=fake_cfg),
+                patch("app.core.sync.config_sync.Settings.get_instance", return_value=fake_cfg),
             ):
                 svc._initial_sync()
 
@@ -666,7 +666,7 @@ class TestInitialSync:
 
     def test_network_error_still_network_branch_no_unbind(self, svc):
         """网络异常（ConnectError）→ 仍走"网络异常，无法同步"，不清绑、不误报失效。"""
-        from app.core.config_sync import Settings
+        from app.core.sync.config_sync import Settings
 
         msgs = []
         svc.syncDone.connect(lambda ok, msg: msgs.append((ok, msg)))
@@ -682,7 +682,7 @@ class TestInitialSync:
             mock_client_cls.return_value.__enter__.return_value = mock_client
             mock_client.get.side_effect = httpx.ConnectError("connection refused")
 
-            with patch("app.core.config_sync.Settings.get_instance", return_value=fake_cfg):
+            with patch("app.core.sync.config_sync.Settings.get_instance", return_value=fake_cfg):
                 svc._initial_sync()
 
         assert svc._initial_sync_completed is False
@@ -1101,7 +1101,7 @@ class TestThemeSyncTiming:
 
     def test_reload_settings_registers_themes_before_write(self, svc, tmp_path, monkeypatch):
         """_reload_settings_on_main_thread 先注册主题再写 ui_theme_style → 不回退"""
-        from app.core import config_sync as cs
+        from app.core.sync import config_sync as cs
 
         cfg_path = self._write_config(tmp_path, "mytheme")
 
@@ -1129,7 +1129,7 @@ class TestThemeSyncTiming:
 
     def test_reload_settings_emits_settings_restored(self, svc, tmp_path, monkeypatch):
         """_reload_settings_on_main_thread 全量写回后发射 settingsRestored（驱动模型选择刷新）"""
-        from app.core import config_sync as cs
+        from app.core.sync import config_sync as cs
 
         cfg_path = self._write_config(tmp_path, "lumia")
 
@@ -1190,7 +1190,7 @@ class TestThemeSyncTiming:
 
     def _call_reload_with_instance(self, svc, tmp_path, monkeypatch, current_theme: str, cloud_theme: str):
         """用返回实例的替身调用 _reload_settings_on_main_thread，返回 dispatch_refresh mock"""
-        from app.core import config_sync as cs
+        from app.core.sync import config_sync as cs
 
         cfg_path = self._write_theme_config(tmp_path, cloud_theme)
 
@@ -1264,7 +1264,7 @@ class TestThemeModeSync:
 
     def _run_reload(self, svc, tmp_path, monkeypatch, cloud_mode: str):
         """构造云端配置并执行 _reload_settings_on_main_thread，返回 (dispatch_mock, fake)"""
-        from app.core import config_sync as cs
+        from app.core.sync import config_sync as cs
 
         cfg_path = tmp_path / "app.config"
         cfg_path.write_text(
@@ -1367,7 +1367,7 @@ class TestAutoStartExcludedFromSync:
 
     def test_auto_start_not_overwritten_by_cloud(self, reset_sync_service, tmp_path, monkeypatch):
         """云端 AutoStart=False 覆盖本机 True → 写回循环跳过，内存保持 True"""
-        from app.core import config_sync as cs
+        from app.core.sync import config_sync as cs
 
         cfg_path = tmp_path / "app.config"
         cfg_path.write_text(

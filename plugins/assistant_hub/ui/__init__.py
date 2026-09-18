@@ -511,7 +511,7 @@ def _register_sync_provider() -> None:
     - 绑定 Gitee 后自动上传/下载；目录变更 watch 到自动上传。
     """
     try:
-        from app.core.config_sync import register_sync_content_provider
+        from app.core.sync.config_sync import register_sync_content_provider
 
         from assistant_hub_manager import AssistantManager
 
@@ -544,7 +544,7 @@ def _promote_build_system_prompt_hook(_attempt: int = 0) -> None:
     from PyQt5.QtCore import QTimer
 
     try:
-        from app.core.hook_manager import HookManager
+        from app.core.hooks.hook_manager import HookManager
 
         rules = HookManager._shared_hooks.get("BuildSystemPrompt") or []
         target = next((r for r in rules if getattr(r, "skill_name", "") == "assistant_hub"), None)

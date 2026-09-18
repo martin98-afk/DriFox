@@ -37,7 +37,7 @@ def _fresh_consolidate_cache():
     测试间列表对象被 GC 后 id 可能复用 → 不同 diff 内容却命中旧缓存。
     清空保证每个测试拿到独立规范化结果。
     """
-    from app.core.message_content import _get_consolidate_cache
+    from app.core.conversation.message_content import _get_consolidate_cache
 
     _get_consolidate_cache()["_entries"].clear()
     yield

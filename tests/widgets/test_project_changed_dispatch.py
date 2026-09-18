@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """项目切换联动（EV_PROJECT_CHANGED 派发助手）测试"""
 
-from app.core.project_changed import dispatch_project_changed, is_active_window
+from app.core.infra.project_changed import dispatch_project_changed, is_active_window
 
 
 class _Sensitive:
@@ -64,7 +64,7 @@ def test_is_active_window_filters_background_window(monkeypatch):
 
 def test_publish_project_changed_dedupes(monkeypatch):
     """同 (project, workdir) 重复同步只发一次；变化即发"""
-    from app.core import ui_event_bus as bus_mod
+    from app.core.infra import ui_event_bus as bus_mod
     from app.main_widget import OpenAIChatToolWindow
 
     published = []

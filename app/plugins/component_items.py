@@ -47,10 +47,13 @@ _PY_SUBDIRS = frozenset(
         "providers",
         "model_adapters",
         "loop_policies",
+        "hook_policies",
         "storages",
         "serializers",
         "gateways",
         "engines",
+        "context_tiers",
+        "budget_resolvers",
     }
 )
 # 整体开关、不支持细分的组件（ui 是插件的一个 __init__ 入口，内部槽位
@@ -215,11 +218,61 @@ def _items_md(directory: Optional[Path], pattern: str = "*.md") -> List[Componen
 
 
 def _items_stem(directory: Optional[Path], pattern: str) -> List[ComponentItem]:
-    """按文件名 stem 枚举（yaml / py 目录通用；md 目录走 _items_md）"""
+    """按文件名 stem 枚举（yaml / py 目录通用；md 目录走 _items_md）
+
+    py 目录额外尝试读取模块内实现的 ``label`` / ``order`` / ``description``
+    类属性（上下文层这类组件：类上有中文 label 与 order，比裸文件名好辨认
+    得多；description 给细项行副标题，说明这一层具体干什么）。
+    读取走 AST 静态解析，不 exec 模块 —— 避免枚举设置页时触发插件副作用。
+    """
     if directory is None or not directory.exists():
         return []
-    items = [ComponentItem(id=p.stem) for p in sorted(directory.glob(pattern)) if not p.name.startswith("_")]
+    py_mode = pattern.endswith(".py")
+    items: List[ComponentItem] = []
+    for p in sorted(directory.glob(pattern)):
+        if p.name.startswith("_"):
+            continue
+        label, desc = _py_module_meta(p) if py_mode else ("", "")
+        items.append(ComponentItem(id=p.stem, label=label, description=desc))
     return sorted(items, key=lambda it: it.id)
+
+
+def _py_module_meta(path: Path) -> Tuple[str, str]:
+    """从 py 文件静态提取实现类的 label / order / description（失败返回空对）。
+
+    只做 AST 遍历取类属性字面量，不导入模块 —— 枚举动作必须零副作用。
+    返回 ``(显示名, 副标题)``：有 order 时显示名拼「order N ·」前缀；
+    副标题为 description（超长按单行压缩，悬停可看全文由 UI tooltip 兜底）。
+    """
+    try:
+        import ast
+
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return "", ""
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        label = ""
+        order = None
+        description = ""
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for tgt in stmt.targets:
+                if not isinstance(tgt, ast.Name):
+                    continue
+                if tgt.id == "label" and isinstance(stmt.value, ast.Constant):
+                    label = str(stmt.value.value or "")
+                elif tgt.id == "order" and isinstance(stmt.value, ast.Constant):
+                    order = stmt.value.value
+                elif tgt.id == "description" and isinstance(stmt.value, ast.Constant):
+                    description = str(stmt.value.value or "")
+        if not (label or description):
+            continue
+        name = f"order {order} · {label}" if order is not None else label
+        return name, _shorten(description)
+    return "", ""
 
 
 # ── 对外 API ──────────────────────────────────────

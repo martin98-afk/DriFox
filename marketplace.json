@@ -271,6 +271,29 @@
             }
         },
         {
+            "name": "system-context",
+            "description": "发送请求前自动给上下文瘦身：超长的工具结果先落盘成文件（上下文留预览块，模型可读回全文），较长的截断头尾、省略中段；同一结果每轮投影一致，不破坏 prompt cache。预算解析按模型上下文容量计算历史消息可用 token，达标即停。各层可单独开关，阈值在下方细项的插件设置里调",
+            "version": "2.3.0",
+            "author": "DriFoxx Team",
+            "license": "MIT",
+            "categories": [],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-context",
+                "ref": "master"
+            },
+            "components": {
+                "context_tiers": true,
+                "budget_resolvers": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
             "name": "system-hook-policies",
             "description": "DriFox 内置 Hook 触发策略：all / none / tool_only / subagent_default / team_member",
             "version": "1.0.0",

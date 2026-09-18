@@ -44,7 +44,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ScrollArea, TransparentToolButton
 
-from app.core.project_changed import dispatch_project_changed, is_active_window
+from app.core.infra.project_changed import dispatch_project_changed, is_active_window
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
@@ -1087,7 +1087,7 @@ class WorkbenchPanel(QWidget):
         同时用于 subscribe 与 unsubscribe，否则退订静默失效、留下悬挂回调。
         """
         try:
-            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
 
             bus = UIEventBus.get_instance()
             handler = self._on_project_changed_event

@@ -15,7 +15,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 from PyQt5.QtCore import QObject
 
 
@@ -35,7 +35,7 @@ def _make_host():
 
 def _build_backend():
     """绕过 Qt 初始化构造 ChatBackend 实例"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     backend._agent_manager = None
@@ -203,7 +203,7 @@ def test_root_file_components_contains_drifox_plugin_manifest():
 
 def test_identify_components_recognizes_manifest_change(tmp_path):
     """_identify_all_components_from_changes 识别 .drifox-plugin/plugin.json → __manifest__"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     plugin_dir = tmp_path / "my-plugin"
@@ -222,7 +222,7 @@ def test_identify_components_fallback_recognizes_manifest_change(tmp_path):
     """fallback 路径（plugin_prefixes 索引过期）也能识别 .drifox-plugin 变更"""
     from pathlib import Path
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from app.plugins.managers.plugin_manager import PluginInfo
 
     plugin_dir = tmp_path / "my-plugin"
@@ -257,7 +257,7 @@ def test_reload_single_plugin_manifest_triggers_all_components(monkeypatch, tmp_
 
     manifest 变更 = 组件清单可能增删，必须全组件重载以重新探测差异。
     """
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from app.plugins.kernel import ComponentReloaderRegistry, ReloadContext, get_reloader_registry
 
     # 插件声明了 3 个组件
@@ -305,7 +305,7 @@ def test_reload_single_plugin_manifest_triggers_all_components(monkeypatch, tmp_
 
 def test_reload_single_plugin_manifest_skips_unknown_component(monkeypatch, tmp_path):
     """manifest 触发的全组件重载：仅遍历该插件实际声明的 components，不调未声明的"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from app.plugins.kernel import ComponentReloaderRegistry
 
     fake_plugin = MagicMock()

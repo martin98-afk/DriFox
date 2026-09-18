@@ -21,9 +21,9 @@
 from __future__ import annotations
 
 import sys
-from collections import OrderedDict
+import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from loguru import logger
 
@@ -132,11 +132,16 @@ def _footer_avg_throughput(ctx) -> dict | None:
       tiktoken/cl100k 估算，中文约 1.2 token/字，不是 chars÷4），时间取宿主给的
       ``live_gen_s``（**累计出字时间**，已排除工具执行 / 长等待空档）→ 当前这条
       流的最近一次采样值；起步 0.3s 内不显示，避免首字抖动。
-    - 回合落定：本轮真实 usage 写入会话累加表，输出 Σ输出 token ÷ Σ生成秒。
-      累加表按 (window_id, session_id) 分组、按 (round_index, message_index)
-      幂等写入 → 重复刷新不重复计数，且**不等** collector 投影，落定即出
-      均值（旧版要等投影，靠 1s/2.5s 补刷拉回，观感即"延迟高"）。
-    - 历史会话加载（本进程没经历过落定事件）：回退 collector 投影全量聚合。
+    - 回合落定 / 历史会话加载：统一从 collector 投影**逐条**聚合，
+      Σ每条输出 token ÷ Σ每条生成秒（生成秒 = 该次 LLM 调用耗时 − 其 TTFT）。
+
+      ⚠️ 不能用宿主卡片给的 ``elapsed`` + ``token_usage.output`` 直接相除：
+      加载历史会话时 ``_restore_meta_from_batch`` 取的 ``elapsed`` 是**整轮墙钟**
+      （含全部工具迭代），``token_usage.output`` 只是**最后一次** API 调用的输出，
+      分子取末次、分母取整轮 → 实测偏差达百倍量级（真实样本 603 tok ÷ 1584 s
+      = 0.38 tok/s，同期 per-call 口径是 42 tok/s），页脚长期显示 0~2 tok/s。
+      per-call 的 ``elapsed_ms`` / ``ttft_ms`` 由 worker 逐条落盘在 assistant 消息上
+      （历史会话同样有），collector 投影时已回填进 ``rec.meta``，才是同源数据。
     """
     try:
         from .trace_models import estimate_tokens_text
@@ -156,84 +161,41 @@ def _footer_avg_throughput(ctx) -> dict | None:
                 "tooltip": "当前这条回复的实时吞吐量（估算 token ÷ 累计出字秒数，已排除工具执行空档）",
             }
 
-        key = _session_key(ctx)
-        _record_round(key, ctx)
-        stats = _round_bucket(key, create=False) or {}
-        total_tokens = sum(t for t, _ in stats.values())
-        total_gen_s = sum(g for _, g in stats.values())
-        rounds = len(stats)
-        if total_gen_s <= 0 or total_tokens <= 0:
-            # 历史会话加载：本进程没走过落定分支 → 从 collector 投影全量聚合
-            agg = _aggregate_records(ctx)
-            if agg is None:
-                return None
-            total_tokens, total_gen_s, rounds = agg
+        agg = _aggregate_records(ctx)
+        if agg is None:
+            return None
+        total_tokens, total_gen_s, rounds = agg
         tps = total_tokens / total_gen_s
         return {
             "text": f"{_fmt_tps(tps)} tok/s",
             "color": _tps_color(tps),
-            "tooltip": f"本会话 {rounds} 轮平均吞吐量（Σ输出 token ÷ Σ生成秒）",
+            "tooltip": f"本会话 {rounds} 次调用平均吞吐量（Σ输出 token ÷ Σ生成秒）",
         }
     except Exception as e:  # noqa: BLE001 — 页脚回调异常不能影响消息渲染
         logger.debug(f"[agent_trace] footer 吞吐量计算失败: {e}")
         return None
 
 
-# 会话级轮次累加表：sess_key -> {(round_index, message_index): (tokens, gen_s)}
-# 只存聚合值不存原文；上限 8 个会话，LRU 淘汰最久未用的。
-_ROUND_STATS: "OrderedDict[str, Dict[tuple, Tuple[int, float]]]" = OrderedDict()
-_ROUND_STATS_MAX = 8
+# 会话级轮次累加表已移除（2026-09-17）：
+# 旧实现把宿主卡片的 ``elapsed``（整轮墙钟）与 ``token_usage.output``（末次调用输出）
+# 当同一次调用相加，历史会话加载回填时分子分母跨调用串口径，实测偏差百倍；
+# 且真实落定路径的 ``set_meta_info`` 不带 output，累加表只会装脏数据、永不被修正。
+# 现统一走 ``_aggregate_records``（collector 逐条 per-call 口径）。
 
-
-def _session_key(ctx) -> str:
-    """会话维度键 = window_id + collector 的 active session_id（切会话自动隔离）。"""
-    wid = str(ctx.get("window_id") or "")
-    sid = ""
-    try:
-        from .trace_collector import TraceCollectorHub
-
-        collector = _footer_hub(TraceCollectorHub).collector_for(ctx.get("main_widget"))
-        sid = str(getattr(collector, "_active_session_id", "") or "")
-    except Exception:  # noqa: BLE001 — 无 backend / 未初始化时退化成 window_id 级
-        sid = ""
-    return f"{wid}::{sid}"
-
-
-def _round_bucket(key: str, create: bool = True) -> "Dict[tuple, Tuple[int, float]] | None":
-    """取会话累加桶；create=False 时不存在则返回 None（不污染 LRU）。"""
-    bucket = _ROUND_STATS.get(key)
-    if bucket is None:
-        if not create:
-            return None
-        bucket = {}
-        _ROUND_STATS[key] = bucket
-    else:
-        _ROUND_STATS.move_to_end(key)
-    while len(_ROUND_STATS) > _ROUND_STATS_MAX:
-        _ROUND_STATS.popitem(last=False)
-    return bucket
-
-
-def _record_round(key: str, ctx) -> None:
-    """把本轮真实 usage 写入累加表（同轮重复调用幂等，靠 round/message 索引去重）。"""
-    tu = ctx.get("token_usage") or {}
-    out = tu.get("output")
-    el = ctx.get("elapsed")
-    if not isinstance(out, (int, float)) or out <= 0:
-        return
-    if not isinstance(el, (int, float)) or el <= 0:
-        return
-    ttft_ms = tu.get("ttft_ms") or 0
-    gen_s = float(el) - float(ttft_ms) / 1000.0
-    # 生成段 <200ms 的轮次不参与（首字延迟吃掉几乎全部时长时 tps 虚高）
-    if gen_s <= 0.2:
-        return
-    rk = (ctx.get("round_index"), ctx.get("message_index"))
-    _round_bucket(key)[rk] = (int(out), float(gen_s))
+# 会话重投影节流表：(window_id, 目标 session_id) -> 上次尝试时刻。
+# 只用于「投影落后于会话切换」这一种情况，防止每张卡片构建都触发全量投影。
+_REPROJECT_GUARD: "Dict[tuple, float]" = {}
+_REPROJECT_GUARD_WINDOW_S = 5.0
 
 
 def _aggregate_records(ctx):
-    """历史会话兜底：从 collector 投影聚合 (Σ输出 token, Σ生成秒, 轮数)。"""
+    """从 collector 投影聚合 (Σ输出 token, Σ生成秒, 调用次数)。
+
+    逐条 assistant 取**同一次调用**的同源字段：token 用 ``rec.tokens``
+    （有真实 usage 取 output，否则文本估算），耗时用 ``rec.meta["elapsed_ms"]``
+    （单次 LLM 调用）减 ``rec.meta["ttft_ms"]``。两者都由 worker 逐条落盘在
+    assistant 消息上（历史会话同样具备），不存在跨调用串口径。
+    """
     from .trace_collector import TraceCollectorHub
     from .trace_models import EntryKind
 
@@ -243,6 +205,33 @@ def _aggregate_records(ctx):
     collector = _footer_hub(TraceCollectorHub).collector_for(mw)
     if collector is None:
         return None
+    # 投影未跟上会话切换时不聚合：加载历史会话瞬间 collector.records 可能还
+    # 是上一个会话的投影，聚合出来就是别的会话的均值。此处**驱动一次重投影**
+    # 而不是直接放弃 —— 切会话路径（_load_session_from_record → set_current_session）
+    # 不触发任何 backend 信号，collector 不会自己感知，不 refresh 的话页脚在
+    # 用户下一次发消息前一直空白。重投影成功即对齐 sid，后续刷新自然跳过。
+    #
+    # ⚠️ 节流：refresh 内部会拿 backend 当前会话重新投影，会话拿不到时 sid 不变，
+    # 不设守卫就会在「每张历史卡片构建 + 落定补刷」时各跑一次全量投影
+    # （实测 200+ 消息会话单次 40~115ms，主线程）。同一 (窗口, 目标会话) 在
+    # 窗口期内只试一次，失败就退化成不显示（下次节拍再试）。
+    cur_sid = str(getattr(mw, "_current_session_id", "") or "")
+    if cur_sid and str(getattr(collector, "_active_session_id", "") or "") != cur_sid:
+        wid = str(ctx.get("window_id") or "")
+        guard_key = (wid, cur_sid)
+        now = time.time()
+        if now - _REPROJECT_GUARD.get(guard_key, 0.0) < _REPROJECT_GUARD_WINDOW_S:
+            return None
+        _REPROJECT_GUARD[guard_key] = now
+        if len(_REPROJECT_GUARD) > 32:  # 防御：切会话频繁时不让守卫表无限增长
+            _REPROJECT_GUARD.clear()
+            _REPROJECT_GUARD[guard_key] = now
+        try:
+            collector.refresh()
+        except Exception as e:  # noqa: BLE001 — 重投影失败只能退化，不影响渲染
+            logger.debug(f"[agent_trace] footer 重投影失败: {e}")
+        if cur_sid and str(getattr(collector, "_active_session_id", "") or "") != cur_sid:
+            return None
     total_tokens = 0
     total_gen_s = 0.0
     rounds = 0

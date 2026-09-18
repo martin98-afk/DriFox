@@ -727,7 +727,7 @@ class TrayManager(QObject):
         """
         try:
             # 优先从 CommandManager 读取（支持用户插件覆盖系统命令）
-            from app.core.command_manager import CommandManager
+            from app.core.commands.command_manager import CommandManager
 
             cmd_mgr = CommandManager.get_instance()
             toggle_cmd = cmd_mgr.get_command("toggle-window")

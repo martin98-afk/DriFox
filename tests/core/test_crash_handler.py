@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.crash_handler import (
+from app.core.infra.crash_handler import (
     _ANOMALY_KEEP,
     _CLEAN_EXIT_MARK,
     EXCEPTION_MARK,
@@ -377,7 +377,7 @@ def test_nearby_wer_report(tmp_path, monkeypatch):
 
     exe_name = Path(_sys.executable).stem
     wer_base = tmp_path / "WER"
-    monkeypatch.setattr("app.core.crash_handler._WER_REPORT_BASE", wer_base)
+    monkeypatch.setattr("app.core.infra.crash_handler._WER_REPORT_BASE", wer_base)
 
     crash_dir = tmp_path / "crash"
     crash_dir.mkdir(parents=True)

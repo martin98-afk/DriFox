@@ -44,7 +44,7 @@ def test_reloaders_dispatch_runtime_components(monkeypatch):
         reg.register(comp, _fake_reloader)
     monkeypatch.setattr(kernel, "get_reloader_registry", lambda: reg)
 
-    backend_cls = pytest.importorskip("app.core.backend").ChatBackend
+    backend_cls = pytest.importorskip("app.core.conversation.backend").ChatBackend
     backend = backend_cls.__new__(backend_cls)
     fake_pm = MagicMock()
     fake_pm.is_initialized.return_value = True

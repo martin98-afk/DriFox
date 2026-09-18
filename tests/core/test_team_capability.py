@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import team_manager as tm_mod
+from app.core.team import team_manager as tm_mod
 
 # 工具插件化：TeamTools 类已删除，团队工具迁移为 plugins/system-tools/tools/subagent_tools.py
 # 的模块级函数（_format_capability / _team_list_members / _team_send_message，tool_ctx 签名）。
@@ -57,7 +57,7 @@ def _fake_agent(
     permission: dict = None,
     tools: dict = None,
 ) -> SimpleNamespace:
-    """构造伪造 Agent 对象（与 app.core.agent.Agent 字段兼容的子集）。"""
+    """构造伪造 Agent 对象（与 app.core.conversation.agent.Agent 字段兼容的子集）。"""
     return SimpleNamespace(
         name=name,
         description=description,
@@ -68,12 +68,12 @@ def _fake_agent(
 
 
 def _patch_agent_manager(monkeypatch, agents: dict):
-    """把 app.core.agent.AgentManager.get_instance 指向伪造管理器。
+    """把 app.core.conversation.agent.AgentManager.get_instance 指向伪造管理器。
 
     team_manager 内部延迟 import AgentManager 后调 get_instance()，
     因此 patch 目标是 agent 模块的 AgentManager.get_instance。
     """
-    from app.core import agent as agent_mod
+    from app.core.conversation import agent as agent_mod
 
     fake_mgr = SimpleNamespace(get_agent=lambda name: agents.get(name))
     monkeypatch.setattr(agent_mod.AgentManager, "get_instance", classmethod(lambda cls: fake_mgr))

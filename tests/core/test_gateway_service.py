@@ -7,7 +7,7 @@
 import io
 import sys
 
-from app.core.gateway_service import GatewayService, _gw_str_platform
+from app.core.services.gateway_service import GatewayService, _gw_str_platform
 
 
 def test_gw_str_platform():

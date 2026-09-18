@@ -26,7 +26,7 @@ def shell_env(qapp):
     from app.utils.render_env import apply_render_env, default_config_path
 
     apply_render = apply_render_env(default_config_path())
-    from app.core.webengine_profile import init_shared_web_profile
+    from app.core.infra.webengine_profile import init_shared_web_profile
 
     init_shared_web_profile(parent=qapp)
 

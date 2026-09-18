@@ -172,11 +172,11 @@ class TestNewProjectStreamingBehavior:
         """流式 + 导入文件夹建项目 → 根目录只绑定到新窗口（instance 缓存 + 关键文档）"""
         stub = _make_stub(streaming=True)
         folder = "D:/workspace/proj"
-        fake_tm, fake_new = _call_with_tm(stub, "新项目", tm_cls_mock, root_dir=folder, suppress_memory_card=True)
+        fake_tm, fake_new = _call_with_tm(stub, "新项目", tm_cls_mock, root_dir=folder)
         assert fake_new._current_workdir["新项目"] == folder
         fake_new.backend.memory_manager.add_key_document.assert_called_once_with("新项目", folder, added_by="manual")
         fake_new.backend.memory_manager.set_working_directory.assert_called_once_with("新项目", folder)
-        fake_tm.open_workbench_memory.assert_not_called()  # suppress_memory_card=True
+        fake_tm.open_workbench_memory.assert_not_called()  # 新建项目不再自动展开工作台
 
     @patch("app.main_widget.TabManagerWindow")
     def test_streaming_broadcasts_team_with_prev_project(self, tm_cls_mock):

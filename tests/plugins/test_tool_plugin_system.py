@@ -697,7 +697,7 @@ class TestSourceLabelRender:
         """工具行构建后存在来源 QLabel（与 hook 卡片 sourceLabel 同位置/风格）"""
         from PyQt5.QtWidgets import QLabel
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         # 显式只加载 system_root，隔离用户插件（hashline-edit 覆盖 read）干扰
@@ -778,7 +778,7 @@ class TestPermissionLinkage:
 
     def test_permission_controller(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -803,7 +803,7 @@ class TestPermissionLinkage:
 
     def test_control_card_groups(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         ToolRegistry.reset_instance()
@@ -825,7 +825,7 @@ class TestPermissionLinkage:
         """回归：watcher 重扫会逐个注销+重注册全部工具（几十次 change 事件），
         卡片必须合并为一次全量重建，不能逐个排队（曾导致 ~180ms/次 × 35 次刷屏 6s）"""
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         ToolRegistry.reset_instance()
@@ -875,7 +875,7 @@ class TestPermissionLinkage:
         import threading
 
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         ToolRegistry.reset_instance()
@@ -956,7 +956,7 @@ class TestPerToolPolicy:
 
     def test_tool_policy_set_persist_fallback(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -986,7 +986,7 @@ class TestPerToolPolicy:
 
     def test_apply_agent_generates_policies_and_copy(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -1024,7 +1024,7 @@ class TestPerToolPolicy:
 
     def test_tool_policy_combo_visibility(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         ToolRegistry.reset_instance()
@@ -1060,7 +1060,7 @@ class TestPerToolPolicy:
 
     def test_behavior_combo_mixed_and_force(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import (
             MIXED_OPTION,
             ToolControlCardFrame,
@@ -1101,7 +1101,7 @@ class TestPerToolPolicy:
     def test_engine_off_policy_resolution(self, qt_app):
         """engine/subagent_worker 共用 resolve_tool_off_policy:关闭分支查 per-tool 策略"""
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import (
+        from app.core.tools.tool_permission_controller import (
             ToolPermissionController,
             resolve_tool_off_policy,
         )
@@ -1130,7 +1130,7 @@ class TestPerToolPolicy:
     def test_policy_change_does_not_bypass_template_deny(self, qt_app):
         """MAJOR-1 锚点:改策略不污染 _user_modified → 不绕过 agent 模板 deny"""
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import (
+        from app.core.tools.tool_permission_controller import (
             ToolPermissionController,
             resolve_tool_off_policy,
         )
@@ -1166,7 +1166,7 @@ class TestPerToolPolicy:
     def test_set_policy_agent_mode_active_only(self, qt_app):
         """MINOR-2①:agent 激活时 set_user_tool_policy 只改 active,user 偏好不变"""
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -1200,7 +1200,7 @@ class TestPerToolPolicy:
         """MINOR-2②:Settings 外部变更(ConfigSync 场景)自动刷新 + 回环防护"""
         from app.tools.registry import ToolRegistry
         from app.utils.config import Settings
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -1213,7 +1213,7 @@ class TestPerToolPolicy:
             # 模拟外部变更(ConfigSync 下载新配置):写 Settings 后由
             # ConfigSyncService.settingsRestored 驱动刷新。控制器不再监听
             # Settings.valueChanged,避免兄弟 tab 本地编辑互相广播刷新。
-            from app.core.config_sync import ConfigSyncService
+            from app.core.sync.config_sync import ConfigSyncService
 
             s.tool_permission_policy.value = {"read": "ask", "stale_tool": "ask"}
             ConfigSyncService.get_instance().settingsRestored.emit()
@@ -1238,7 +1238,7 @@ class TestPerToolPolicy:
         """MINOR-2③:subagent_worker._check_ui_tool_permission 关闭分支查 per-tool 策略"""
         from unittest.mock import MagicMock
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.core.workers.subagent_worker import SubAgentExecutor
 
         ToolRegistry.reset_instance()
@@ -1284,7 +1284,7 @@ class TestPerToolPolicy:
         from unittest.mock import MagicMock
 
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.core.engines.ui.engine import UIEngine
 
         ToolRegistry.reset_instance()
@@ -1336,7 +1336,7 @@ class TestPerToolPolicy:
         from unittest.mock import MagicMock
 
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.core.engines.ui.engine import UIEngine
 
         ToolRegistry.reset_instance()

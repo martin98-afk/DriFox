@@ -17,7 +17,7 @@
 - 不同列表对象（id 不同）不串缓存
 """
 
-from app.core.message_content import consolidate_messages
+from app.core.conversation.message_content import consolidate_messages
 
 
 def _fresh_messages():

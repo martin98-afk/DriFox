@@ -13,7 +13,7 @@ gateways/model_adapters/loop_policies/storages/serializers 全覆盖。
 from unittest.mock import MagicMock
 
 import pytest
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 from PyQt5.QtCore import QObject
 
 
@@ -37,7 +37,7 @@ class _FakePlugin:
 
 def _build_backend():
     """最小 ChatBackend 实例（不跑 __init__ 全链）"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     backend._agent_manager = None

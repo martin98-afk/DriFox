@@ -2,7 +2,7 @@
 """_singleton_connections 清理骨架测试（#4.9 Commit 4 配套）"""
 import gc
 
-from app.core.tool_permission_controller import ToolPermissionController
+from app.core.tools.tool_permission_controller import ToolPermissionController
 
 
 def test_copy_state_from_does_not_copy_singleton_connections():

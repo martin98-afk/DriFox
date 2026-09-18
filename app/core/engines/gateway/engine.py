@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, pyqtSignal
 
-from app.core.chat_session import ChatSession
+from app.core.conversation.chat_session import ChatSession
 from app.core.conversation.adapters import GatewayConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore

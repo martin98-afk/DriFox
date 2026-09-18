@@ -7,7 +7,7 @@
 - 基础字段校验（schema_version、agents 非空、agent_name 唯一）
 - agent_name 在系统中存在性的语义校验（交给调用方传入 agent_manager）
 
-为保持纯净，本模块不导入 app.core.agent / agent_manager，
+为保持纯净，本模块不导入 app.core.conversation.agent / agent_manager，
 仅依赖 dataclass + typing，方便单测中独立构造和断言。
 """
 

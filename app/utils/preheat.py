@@ -29,7 +29,7 @@ def _preheat_session_store():
 
 
 def _preheat_session_storage():
-    from app.core.backend import get_session_storage
+    from app.core.conversation.backend import get_session_storage
 
     get_session_storage()
 

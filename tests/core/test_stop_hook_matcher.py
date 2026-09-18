@@ -11,7 +11,7 @@
 
 import pytest
 
-from app.core.hook_manager import HookMatchRule
+from app.core.hooks.hook_manager import HookMatchRule
 
 
 def _ctx(event: str, reason: str = "", is_team_member: bool = False) -> dict:

@@ -603,7 +603,7 @@ class TestJoinTeamPreservesMailbox:
         set_active_window_ids() 同步活跃集合，已 join 窗口不会被误判为 stale。
         """
         # 重定向 TeamManager 的数据目录到 tmp_path（不污染真实 ~/.drifox/）
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
         tm_mod.TeamManager._instance = None
@@ -643,7 +643,7 @@ class TestStaleCleanupSafety:
 
     @staticmethod
     def _fresh_tm(tmp_path, monkeypatch):
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
         tm_mod.TeamManager._instance = None
@@ -891,7 +891,7 @@ class TestInjectTeamContext:
         assert hook("SessionStart", {"is_team_member": False}) == ""
 
     def test_no_template_returns_empty(self, tmp_path, monkeypatch):
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         class _FakeTM:
             def get_template(self):
@@ -906,7 +906,7 @@ class TestInjectTeamContext:
 
     def test_meaningless_description_not_injected(self, tmp_path, monkeypatch):
         """用户自建模板的自动生成描述（由 N 个活跃窗口保存...）不注入。"""
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         class _FakeTM:
             def get_template(self):
@@ -915,7 +915,7 @@ class TestInjectTeamContext:
             def get_members(self):
                 return []
 
-        import app.core.team_manager as tm_module
+        import app.core.team.team_manager as tm_module
 
         # 必须用 monkeypatch：直接赋值会永久污染 TeamManager，导致同一 pytest
         # 会话中后续用例（如 main_widget smoke）拿到 _FakeTM 而报 AttributeError。
@@ -925,7 +925,7 @@ class TestInjectTeamContext:
 
     def test_injects_template_desc_only_for_member_without_role_desc(self, tmp_path, monkeypatch):
         """成员无角色描述（旧模板）时只注入模板描述，不追加角色段落。"""
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         class _FakeTM:
             def get_template(self):
@@ -938,7 +938,7 @@ class TestInjectTeamContext:
             def get_members(self):
                 return [{"window_id": "win_01", "agent_name": "build"}]
 
-        import app.core.team_manager as tm_module
+        import app.core.team.team_manager as tm_module
 
         monkeypatch.setattr(tm_module.TeamManager, "get_instance", staticmethod(lambda: _FakeTM()))
         hook = self._load_hook()
@@ -949,7 +949,7 @@ class TestInjectTeamContext:
 
     def test_injects_template_desc_plus_own_role_desc(self, tmp_path, monkeypatch):
         """成员应收到模板描述 + 自己角色的描述（按成员各自注入）。"""
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         class _FakeTM:
             def get_template(self):
@@ -968,7 +968,7 @@ class TestInjectTeamContext:
                     {"window_id": "win_02", "agent_name": "build"},
                 ]
 
-        import app.core.team_manager as tm_module
+        import app.core.team.team_manager as tm_module
 
         monkeypatch.setattr(tm_module.TeamManager, "get_instance", staticmethod(lambda: _FakeTM()))
         hook = self._load_hook()
@@ -987,7 +987,7 @@ class TestInjectTeamContext:
 
     def test_member_not_found_returns_empty(self, tmp_path, monkeypatch):
         """window_id 在成员列表中找不到时（不应发生）返回空，不崩溃。"""
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         class _FakeTM:
             def get_template(self):
@@ -996,7 +996,7 @@ class TestInjectTeamContext:
             def get_members(self):
                 return [{"window_id": "win_01", "agent_name": "build"}]
 
-        import app.core.team_manager as tm_module
+        import app.core.team.team_manager as tm_module
 
         monkeypatch.setattr(tm_module.TeamManager, "get_instance", staticmethod(lambda: _FakeTM()))
         hook = self._load_hook()
@@ -1007,7 +1007,7 @@ class TestInjectTeamContext:
 
     def test_legacy_string_agents_supported(self, tmp_path):
         """旧模板 agents 为纯字符串列表时兼容：不崩溃、角色描述为空。"""
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         class _FakeTM:
             def get_template(self):
@@ -1020,7 +1020,7 @@ class TestInjectTeamContext:
             def get_members(self):
                 return [{"window_id": "win_01", "agent_name": "build"}]
 
-        import app.core.team_manager as tm_module
+        import app.core.team.team_manager as tm_module
 
         tm_module.TeamManager.get_instance = staticmethod(lambda: _FakeTM())
         hook = self._load_hook()
@@ -1042,7 +1042,7 @@ class TestTeamListMembersRoleDesc:
         return {"team_window_id": window_id, "team_agent_name": agent_name}
 
     def _make_tm(self, template=None, members=None):
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         class _FakeTM:
             def __init__(self, template, members):
@@ -1199,10 +1199,10 @@ class TestLoadMissingDegradation:
         assert "加载中止" not in func_src, "_handle_team_load 不应再出现「加载中止」报错文案（已降级到 prompt 补全）"
 
     def test_command_need_degrade_exception_exists(self):
-        """`app/core/command_manager.py` 必须定义 `CommandNeedDegrade` 异常类。"""
+        """`app/core/commands/command_manager.py` 必须定义 `CommandNeedDegrade` 异常类。"""
         import ast as _ast
 
-        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "command_manager.py"
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "commands" / "command_manager.py"
         _tree = _ast.parse(src_path.read_text(encoding="utf-8"))
 
         found = False
@@ -1440,8 +1440,8 @@ class TestLoadMissingDegradation:
         )
 
         # 🆕 select_prompt 过滤后公共规范始终保留（与命令报错回退兜底联动）
-        from app.core.builtin_commands import _load_command_file
-        from app.core.command_manager import CommandManager, CommandType
+        from app.core.commands.builtin_commands import _load_command_file
+        from app.core.commands.command_manager import CommandManager, CommandType
 
         _loaded = _load_command_file(team_md_path)
         _cm = CommandManager.get_instance()
@@ -1590,7 +1590,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
         """隔离 TeamManager 数据目录 + _load_session_from_record 的模块级依赖。"""
         from unittest.mock import MagicMock
 
-        from app.core import team_manager as tm_mod
+        from app.core.team import team_manager as tm_mod
 
         # 🛡️ test_legacy_string_agents_supported 直接赋值污染 TeamManager.get_instance
         # （非 monkeypatch，同一 pytest 会话内永不恢复）。此处显式恢复真实单例逻辑，
@@ -1613,7 +1613,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
         monkeypatch.setattr(mw, "create_session_from_record", lambda *a, **k: MagicMock())
         monkeypatch.setattr(mw, "init_after_loading_session", lambda *a, **k: None)
 
-        import app.core.command_manager as cm_mod
+        import app.core.commands.command_manager as cm_mod
         import app.plugins.registries.ui_plugin_registry as uipr_mod
 
         monkeypatch.setattr(cm_mod.CommandManager, "get_instance", staticmethod(lambda: MagicMock()))

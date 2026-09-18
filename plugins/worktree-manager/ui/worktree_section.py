@@ -523,7 +523,7 @@ class WorktreeSectionWidget(QWidget):
         self._setup_ui()
         # 主题自刷：已迁移出 app/widgets，main_widget 不再 isinstance 遍历刷新，改订 UIEventBus
         try:
-            from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
 
             UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, self.refresh_style, plugin_name="worktree-manager")
         except Exception:
@@ -627,7 +627,7 @@ class WorktreeSectionWidget(QWidget):
         if not self._project:
             return
         try:
-            from app.core.memory_manager import MemoryManagerCore
+            from app.core.conversation.memory_manager import MemoryManagerCore
 
             mm = MemoryManagerCore.get_instance()
             if mm and mm._key_documents_repo:
@@ -638,7 +638,7 @@ class WorktreeSectionWidget(QWidget):
     def _restore_workdir(self, original_path: str):
         """将工作目录恢复为原始 git 仓库根目录（当被删 path 恰是当前 workdir 时）"""
         try:
-            from app.core.memory_manager import MemoryManagerCore
+            from app.core.conversation.memory_manager import MemoryManagerCore
 
             mm = MemoryManagerCore.get_instance()
             if mm and self._project:

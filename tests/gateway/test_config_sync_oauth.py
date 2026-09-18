@@ -15,9 +15,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("app.core.config_sync")
+pytest.importorskip("app.core.sync.config_sync")
 
-from app.core.config_sync import ConfigSyncService
+from app.core.sync.config_sync import ConfigSyncService
 
 
 @pytest.fixture

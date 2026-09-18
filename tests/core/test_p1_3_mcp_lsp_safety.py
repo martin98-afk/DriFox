@@ -9,8 +9,8 @@ monkeypatch 拦 subprocess 语义：本组用例只测门禁判定函数（gate_
 import pytest
 from loguru import logger
 
-from app.core import mcp_lsp_safety
-from app.core.mcp_lsp_safety import (
+from app.core.tools import mcp_lsp_safety
+from app.core.tools.mcp_lsp_safety import (
     _SYSTEM_PLUGIN_ROOT,
     confirm_by_key,
     confirm_plugin_server,

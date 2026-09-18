@@ -11,7 +11,7 @@
 
 from unittest.mock import MagicMock
 
-from app.core.backend import ChatBackend
+from app.core.conversation.backend import ChatBackend
 
 
 def _make_backend(window_id: str) -> ChatBackend:

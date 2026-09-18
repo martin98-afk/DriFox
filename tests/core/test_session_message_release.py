@@ -12,7 +12,7 @@
 
 import pytest
 
-from app.core.chat_session import ChatSession, SessionManager
+from app.core.conversation.chat_session import ChatSession, SessionManager
 
 
 def _msgs(tag: str, n: int = 5):
