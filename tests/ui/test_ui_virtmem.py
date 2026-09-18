@@ -261,15 +261,14 @@ def _find_bar(mw):
 
 
 from PyQt5.QtCore import Qt as Qt_ORIENTATION  # noqa: E402 — 供 _find_bar 使用
-# ── 用例 2 ──
+# ── 用例 2（放最后：栅格操作之后不再触发新的 Chromium 初始化，规避 AV）──
 
 
-@pytest.mark.xfail(strict=True, reason="等方案 2：闭包改持小图（当前持全尺寸原始 pixmap）")
 def test_thumb_closure_holds_scaled_only(ui_app, qtbot, tmp_path):
     """缩略图点击闭包只允许持有缩放后小图（≤800px 宽）。
 
-    现状：_build_image_thumb 的 ``mousePressEvent = lambda e, pm=pixmap: ...``
-    闭包 defaults 持有**全尺寸原始 pixmap**（3840×2160 ≈ 33MB RGBA/张）。
+    方案 2 已落地：_build_image_thumb 闭包改捕获 (source, data_uri)，
+    点击时现解码全尺寸图，原始 pixmap 随函数返回出作用域释放。
     强制 A 档：QPixmap 像素操作在 offscreen 下崩溃（S2）。
     """
     from PyQt5.QtCore import Qt

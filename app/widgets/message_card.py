@@ -14729,12 +14729,25 @@ class MessageCard(SimpleCardWidget):
         thumb.setFixedHeight(80)
         thumb.setToolTip(os.path.basename(path))
         thumb.setCursor(Qt.PointingHandCursor)
-        thumb.mousePressEvent = lambda e, pm=pixmap: self._show_image_dialog(pm)
+        # [方案 2] 闭包只捕获 (source, data_uri) 源引用，点击时现解码全尺寸图——
+        # 原始 pixmap 随本函数返回出作用域释放，不再被闭包长期持有
+        # （3840×2160 解码后 ≈33MB RGBA/张，多张图片会话即数百 MB 常驻）。
+        thumb.mousePressEvent = lambda e, src=source, uri=data_uri: self._show_image_dialog(src, uri)
         return thumb
 
-    def _show_image_dialog(self, pixmap):
-        """点击缩略图放大查看（Mask 遮罩弹窗，完整等比显示、无滚动、点遮罩关闭）"""
-        if pixmap is None or pixmap.isNull():
+    def _show_image_dialog(self, source, data_uri):
+        """点击缩略图放大查看（Mask 遮罩弹窗，完整等比显示、无滚动、点遮罩关闭）
+
+        Args:
+            source: 图片本地路径（可能已失效，None/空串跳过）。
+            data_uri: base64 data URI（source 无效时的兜底来源）。
+        """
+        pixmap = QPixmap()
+        if source:
+            pixmap.load(source)
+        elif data_uri:
+            pixmap.loadFromData(QByteArray.fromBase64(data_uri.split("base64,", 1)[-1].encode("ascii")))
+        if pixmap.isNull():
             return
         _ImagePreviewDialog(pixmap, parent=self.window()).exec_()
 
