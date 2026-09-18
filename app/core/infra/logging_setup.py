@@ -24,7 +24,7 @@ LOG_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
 # 排查场景见各条目注释；后续增删子系统只需调整本表。
 LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # 平台消息收发（QQ/微信/钉钉等网关）
-    ("gateway.log", ("app.gateway", "app.core.gateway_service"), ()),
+    ("gateway.log", ("app.gateway", "app.core.services.gateway_service"), ()),
     # MCP 连接与工具调用
     ("mcp.log", ("app.tools.mcp_tools",), ()),
     # 语言服务（LSP）
@@ -46,7 +46,7 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
         ("app.tools.mcp_tools",),
     ),
     # 插件加载/热更/插件宿主/系统插件代码
-    ("plugins.log", ("app.plugins", "app.core.plugin_host_service", "plugins"), ()),
+    ("plugins.log", ("app.plugins", "app.core.services.plugin_host_service", "plugins"), ()),
     # UI 组件与窗口
     (
         "ui.log",
@@ -91,7 +91,7 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
 def _match_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
     """按路径段匹配模块名前缀：精确相等，或以 ``prefix + "."`` 开头。
 
-    避免子串误匹配（如 ``app.core.gateway_service`` 不应命中 ``app.core.gateway``）。
+    避免子串误匹配（如 ``app.core.services.gateway_service`` 不应命中 ``app.core.gateway``）。
     """
     return any(name == p or name.startswith(p + ".") for p in prefixes)
 

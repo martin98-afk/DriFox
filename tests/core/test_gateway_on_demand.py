@@ -31,7 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.gateway_service import GatewayService  # noqa: E402
+from app.core.services.gateway_service import GatewayService  # noqa: E402
 
 
 @pytest.fixture()
@@ -132,7 +132,7 @@ class TestEnabledPlatform:
             def start(self):
                 captured["started"] = True
 
-        import app.core.gateway_service as gs_mod
+        import app.core.services.gateway_service as gs_mod
 
         monkeypatch.setattr(gs_mod.threading, "Thread", _FakeThread)
         fresh_service._prebuild_components_background()

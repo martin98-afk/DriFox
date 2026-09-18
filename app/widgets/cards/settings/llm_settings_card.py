@@ -1039,7 +1039,7 @@ class LLMSettingsCard(SystemCardFrame):
         if getattr(self, "_hot_reload_connected", False):
             return
         try:
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.services.plugin_host_service import PluginHostService
 
             self._hot_reload_connected = True
             self._hot_reload_timer = QTimer(self)

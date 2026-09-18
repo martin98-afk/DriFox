@@ -5246,8 +5246,8 @@ class TabManagerWindow(FramelessWindow):
         TabManagerWindow._instance = None
         # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
         try:
-            from app.core.gateway_service import GatewayService
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.services.gateway_service import GatewayService
+            from app.core.services.plugin_host_service import PluginHostService
 
             GatewayService.get_instance().stop()
             PluginHostService.get_instance().stop()

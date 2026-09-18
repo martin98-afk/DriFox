@@ -1116,7 +1116,7 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
     def _on_component_toggled(self, plugin_name: str, component: str, enabled: bool):
         try:
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.services.plugin_host_service import PluginHostService
 
             pm = self._pm()
             if pm.is_component_enabled(plugin_name, component) == enabled:
@@ -1160,7 +1160,7 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
     def _on_item_toggled(self, plugin_name: str, component: str, item_id: str, enabled: bool):
         """单个工具 / 智能体的开关"""
         try:
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.services.plugin_host_service import PluginHostService
 
             pm = self._pm()
             if pm.is_item_enabled(plugin_name, component, item_id) == enabled:

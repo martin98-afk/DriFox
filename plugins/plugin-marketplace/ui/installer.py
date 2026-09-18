@@ -1006,7 +1006,7 @@ class PluginInstaller:
     def _suppress_backend_watcher(self, duration: float = 180.0) -> None:
         """安装期间抑制 backend 插件热重载 watcher，避免半安装插件被提前 import 报错。
 
-        委托模块级引用计数 API（app.core.plugin_host_service.suppress_plugin_watcher）：
+        委托模块级引用计数 API（app.core.services.plugin_host_service.suppress_plugin_watcher）：
         - 多个 worker（安装/卸载/启停并发，市场并发上限 >1）各自 suppress 时，
           引用计数叠加，**先结束的 worker 不会解除后结束 worker 的抑制**；
           最后一个 resume 才真正放开 watcher（并发批量装卸时杜绝事件风暴 + 半成品
@@ -1019,7 +1019,7 @@ class PluginInstaller:
         复活 → 事件风暴。此为迁移遗留缺陷。
         """
         try:
-            from app.core.plugin_host_service import suppress_plugin_watcher
+            from app.core.services.plugin_host_service import suppress_plugin_watcher
 
             suppress_plugin_watcher(duration)
         except Exception as e:
@@ -1046,7 +1046,7 @@ class PluginInstaller:
                 None 时由 backend 按插件注册表状态自动推断
         """
         try:
-            from app.core.plugin_host_service import resume_plugin_watcher
+            from app.core.services.plugin_host_service import resume_plugin_watcher
 
             resume_plugin_watcher()
         except Exception:
@@ -1054,7 +1054,7 @@ class PluginInstaller:
         if not reload:
             return
         try:
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.services.plugin_host_service import PluginHostService
 
             svc = PluginHostService.get_instance()
             # 尽量在主线程执行重载（与 backend watcher 的 _hot_reload_requested 信号同效）；

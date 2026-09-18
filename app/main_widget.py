@@ -1282,7 +1282,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 子智能体默认解析是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
         self.backend.set_subagent_model_resolver(lambda v: self._resolve_subagent_model_config(v, show_error=False))
         # 连接插件热更新信号
-        from app.core.plugin_host_service import PluginHostService
+        from app.core.services.plugin_host_service import PluginHostService
 
         PluginHostService.get_instance().plugin_changed.connect(self._on_plugin_hot_reload)
         # 注册工具热重载风险通知监听（进程级一次）
@@ -3687,7 +3687,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 启动装载完成：收口 watcher 启动基线期（插件装载期自身写文件
                 # 不再触发即时热重载；窗口内累积变更由合并兑底重载消费）
                 try:
-                    from app.core.plugin_host_service import PluginHostService
+                    from app.core.services.plugin_host_service import PluginHostService
 
                     PluginHostService.get_instance().finish_watcher_baseline()
                 except Exception as e:
@@ -22810,7 +22810,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🔧 断开应用级 PluginHostService 的 plugin_changed（窗口销毁后
             # 服务常驻，不断开会向死窗口槽投递 → RuntimeError 刷屏）
             try:
-                from app.core.plugin_host_service import PluginHostService
+                from app.core.services.plugin_host_service import PluginHostService
 
                 PluginHostService.get_instance().plugin_changed.disconnect(self._on_plugin_hot_reload)
             except (TypeError, RuntimeError):
@@ -23347,7 +23347,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 SendResult（success/error 可判定）。服务未就绪时返回
                 success=False 的 SendResult，不抛异常。
             """
-            from app.core.gateway_service import GatewayService
+            from app.core.services.gateway_service import GatewayService
             from app.gateway.base import SendResult
 
             try:
@@ -23362,7 +23362,7 @@ class OpenAIChatToolWindow(ToolWindow):
             返回 GatewaySession 列表（含 platform/chat_id/display_name）；
             服务未就绪时返回空列表。
             """
-            from app.core.gateway_service import GatewayService
+            from app.core.services.gateway_service import GatewayService
 
             try:
                 return GatewayService.get_instance().list_platform_sessions()
@@ -23375,7 +23375,7 @@ class OpenAIChatToolWindow(ToolWindow):
             返回 list[dict]：{id, enabled, connected, available, error}；
             服务未就绪时返回空列表。
             """
-            from app.core.gateway_service import GatewayService
+            from app.core.services.gateway_service import GatewayService
 
             try:
                 return GatewayService.get_instance().list_platforms()

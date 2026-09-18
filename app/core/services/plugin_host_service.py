@@ -332,7 +332,7 @@ class PluginHostService(QObject):
         同步：对"已注册 + 已启用 + 未连接"的平台补启连接（幂等）。
         修复：初始化时已启用的 gateway 插件必须手动关闭/打开才连接。"""
         try:
-            from app.core.gateway_service import GatewayService
+            from app.core.services.gateway_service import GatewayService
 
             GatewayService.get_instance().sync_platforms()
         except Exception as e:

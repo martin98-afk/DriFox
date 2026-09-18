@@ -92,19 +92,19 @@ class TestInferAction:
     """PluginHostService._infer_plugin_changed_action 推断"""
 
     def test_sentinel_is_installed(self):
-        from app.core.plugin_host_service import PluginHostService
+        from app.core.services.plugin_host_service import PluginHostService
 
         svc = PluginHostService.__new__(PluginHostService)
         assert svc._infer_plugin_changed_action(PluginHostService._NEW_PLUGIN_SENTINEL) == "installed"
 
     def test_empty_name_is_updated(self):
-        from app.core.plugin_host_service import PluginHostService
+        from app.core.services.plugin_host_service import PluginHostService
 
         svc = PluginHostService.__new__(PluginHostService)
         assert svc._infer_plugin_changed_action("") == "updated"
 
     def test_missing_plugin_is_uninstalled(self, monkeypatch):
-        from app.core.plugin_host_service import PluginHostService
+        from app.core.services.plugin_host_service import PluginHostService
 
         svc = PluginHostService.__new__(PluginHostService)
         monkeypatch.setattr(

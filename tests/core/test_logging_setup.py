@@ -19,7 +19,7 @@ def test_match_prefix_submodule():
 
 def test_match_prefix_no_substring_false_positive():
     """子串不误命中：gateway_service 不是 gateway 子模块。"""
-    assert not _match_prefix("app.core.gateway_service", ("app.core.gateway",))
+    assert not _match_prefix("app.core.services.gateway_service", ("app.core.gateway",))
 
 
 def test_match_prefix_multiple_prefixes():

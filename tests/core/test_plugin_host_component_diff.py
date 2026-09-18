@@ -13,7 +13,7 @@ reload_plugin_subsystems，而首拍组件的 rescan_plugin 已消费插件级 c
 
 import pytest
 
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 from app.plugins.managers.plugin_manager import PluginInfo
 
 
