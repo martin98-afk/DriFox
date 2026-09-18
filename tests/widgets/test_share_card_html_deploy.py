@@ -138,3 +138,43 @@ def test_sidebar_auto_scrolls_to_active_item(share_src: str):
     """高亮项滚出侧栏可视区时，侧栏需自动滚动跟随"""
     assert "sidebar.scrollTop = Math.max(0, linkTop - 8)" in share_src
     assert "linkBottom - sidebar.clientHeight + 8" in share_src
+
+
+# ── 窄屏布局（导航消失回归）──────────────────────────────────────
+
+
+def test_narrow_breakpoint_keeps_sidebar_sticky(share_src: str):
+    """窄屏断点不得把侧栏改为 static
+
+    原实现 .sidebar 在 <=760px 时 position: static，滚动越过它之后导航
+    永久消失、正文撑满全宽（用户感知为「消息突然占满屏幕、左边列表没了」）。
+    """
+    m = re.search(r"@media \(max-width: 760px\) \{\{(.*?)\n\}}\n", share_src, re.S)
+    assert m is not None, "缺少窄屏断点"
+    block = m.group(1)
+    assert "position: static" not in block, "窄屏侧栏不能是 static（滚走即消失）"
+    assert "position: sticky" in block, "窄屏侧栏应保持 sticky 常驻"
+
+
+def test_narrow_breakpoint_uses_horizontal_nav(share_src: str):
+    """窄屏导航转为横向滚动条，并有横向溢出滚动"""
+    m = re.search(r"@media \(max-width: 760px\) \{\{(.*?)\n\}}\n", share_src, re.S)
+    block = m.group(1)
+    assert "flex-direction: row" in block
+    assert "overflow-x: auto" in block
+    # .nav-snip（摘要）在横向条里隐藏，避免撑爆
+    assert ".nav-snip {{ display: none; }}" in block
+
+
+def test_narrow_breakpoint_stretches_children(share_src: str):
+    """窄屏 column 布局下子元素须拉伸，否则正文只剩侧栏宽度"""
+    m = re.search(r"@media \(max-width: 760px\) \{\{(.*?)\n\}}\n", share_src, re.S)
+    block = m.group(1)
+    assert "align-items: stretch" in block
+    assert ".main {{ width: 100%; }}" in block
+
+
+def test_sidebar_follow_supports_horizontal(share_src: str):
+    """侧栏跟随需同时处理纵向（宽屏列表）与横向（窄屏条）"""
+    assert "sidebar.scrollLeft = Math.max(0, linkLeft - 8)" in share_src
+    assert "linkRight - sidebar.clientWidth + 8" in share_src

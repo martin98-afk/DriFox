@@ -460,14 +460,44 @@ body {{
 }}
 .chip-k {{ color: var(--text-muted); }}
 
-/* ── 移动端：导航转为顶部横向滚动条 ── */
+/* ── 窄屏：导航贴顶常驻，转为横向滚动条 ──
+   原实现把 .sidebar 置为 position: static，滚动越过它之后导航永久消失、
+   正文撑满全宽（用户感知为"消息突然占满屏幕、左边列表没了"）。
+   改为 sticky 贴顶 + 横向滚动，任何滚动位置都能看到并跳转。 */
 @media (max-width: 760px) {{
-    .layout {{ flex-direction: column; gap: 14px; }}
+    .layout {{ flex-direction: column; gap: 14px; align-items: stretch; }}
+    .main {{ width: 100%; }}
     .sidebar {{
-        width: 100%; position: static; max-height: 160px;
-        display: flex; flex-direction: column;
+        width: 100%;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        max-height: none;
+        padding: 8px;
+        display: block;
+        border-radius: 0 0 10px 10px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.10);
     }}
-    .sidebar-nav {{ display: flex; flex-direction: column; gap: 2px; }}
+    .sidebar-title {{ display: none; }}
+    .sidebar-nav {{
+        display: flex;
+        flex-direction: row;
+        gap: 6px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: thin;
+    }}
+    .nav-item {{
+        flex: 0 0 auto;
+        border-left: none;
+        border-bottom: 2px solid transparent;
+        padding: 6px 10px;
+        max-width: 150px;
+    }}
+    .nav-item.active {{ border-left-color: transparent; border-bottom-color: var(--accent); }}
+    .nav-text {{ flex-direction: row; align-items: center; gap: 6px; }}
+    .nav-snip {{ display: none; }}
+    .nav-role {{ font-size: 12px; max-width: 92px; overflow: hidden; text-overflow: ellipsis; }}
 }}
 
 /* ── 消息卡片（对齐 in-app CardWidget）── */
@@ -645,6 +675,7 @@ details.reasoning summary {{ font-weight: 600; color: var(--text-muted); cursor:
         if (!link) return;
         link.classList.add('active');
         // 高亮项滚出侧栏可视区时，把侧栏滚到能看见它的位置
+        // 宽屏侧栏是纵向列表（用 scrollTop），窄屏是横向条（用 scrollLeft）
         if (!sidebar) return;
         var linkTop = link.offsetTop;
         var linkBottom = linkTop + link.offsetHeight;
@@ -654,6 +685,15 @@ details.reasoning summary {{ font-weight: 600; color: var(--text-muted); cursor:
             sidebar.scrollTop = Math.max(0, linkTop - 8);
         }} else if (linkBottom > viewBottom) {{
             sidebar.scrollTop = linkBottom - sidebar.clientHeight + 8;
+        }}
+        var linkLeft = link.offsetLeft;
+        var linkRight = linkLeft + link.offsetWidth;
+        var viewLeft = sidebar.scrollLeft;
+        var viewRight = viewLeft + sidebar.clientWidth;
+        if (linkLeft < viewLeft) {{
+            sidebar.scrollLeft = Math.max(0, linkLeft - 8);
+        }} else if (linkRight > viewRight) {{
+            sidebar.scrollLeft = linkRight - sidebar.clientWidth + 8;
         }}
     }}
 
