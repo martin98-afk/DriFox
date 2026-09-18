@@ -1603,16 +1603,24 @@ class HistoryCard(QWidget):
 
         return card
 
-    def _prepare_history_render_queue(self):
+    def _prepare_history_render_queue(self, skip_count: int = 0):
         """准备历史会话渲染队列（只做数据分组，不创建 widget）
+
+        Args:
+            skip_count: 已渲染的会话数（「加载更多」增量追加时传入）。大于 0 时
+                只产出超出该数量的新增条目，且不再产出「当前会话」区与「置顶」
+                分组（二者在首次渲染时已入列）。
 
         M4 混排：取消顶部团队分组区，团队合并条目（team_merged）与普通会话
         条目按 last_time 天然混排（数据层 merge_team=True 已合并，此处按
         session 条目统一渲染即可）。
         """
         queue = self._render_queue
+        incremental = skip_count > 0
 
         if not self._all_history:
+            if incremental:
+                return
             if self._search_filter:
                 queue.append(("empty", f"没有找到匹配「{self._search_filter}」的会话"))
             else:
@@ -1626,7 +1634,7 @@ class HistoryCard(QWidget):
         current_session_widget = False
         current_matches_search = True
 
-        if self._current_index is not None and 0 <= self._current_index < len(self._all_history):
+        if not incremental and self._current_index is not None and 0 <= self._current_index < len(self._all_history):
             current_session = self._all_history[self._current_index]
             current_matches_search = not self._search_filter or _matches_search(
                 current_session, self._search_filter, self._pinyin_cache
@@ -1681,10 +1689,11 @@ class HistoryCard(QWidget):
         session_count = 0
         self._remaining_count = max(0, total_other - limit)
 
-        has_items = current_session_widget
+        # 增量追加时列表已非空（has_items 只用于决定是否显示空态占位）
+        has_items = current_session_widget or incremental
 
         # ── 置顶分组（当前会话区之后、日期分组之前；不受分页限制） ──
-        if pinned_entries:
+        if pinned_entries and not incremental:
             has_items = True
             queue.append(("header", "置顶", len(pinned_entries)))
             for original_index, session in pinned_entries:
@@ -1702,12 +1711,21 @@ class HistoryCard(QWidget):
             if session_count >= limit:
                 continue
             total_in_section = len(sessions)
-            to_add = sessions[: limit - session_count] if session_count + total_in_section > limit else sessions
-            if not to_add:
+            # 增量追加：本组前 offset 条已在列表中，跳过（offset>0 表示本组此前
+            # 已渲染过一部分，其 header/spacer 已在布局里，不再重复插入）
+            offset = max(0, skip_count - session_count)
+            if offset >= total_in_section:
+                session_count += total_in_section
                 continue
+            budget = max(0, limit - session_count - offset)
+            if budget <= 0:
+                session_count += total_in_section
+                continue
+            to_add = sessions[offset : offset + budget]
             has_items = True
             # header 显示该分组总会话数（而非仅可见数），让用户了解完整规模
-            queue.append(("header", section, total_in_section))
+            if offset == 0:
+                queue.append(("header", section, total_in_section))
             for original_index, session in to_add:
                 if session.get("team_merged"):
                     # 团队合并条目：按 run_id 渲染团队卡（与普通条目同位置混排）
@@ -1719,15 +1737,20 @@ class HistoryCard(QWidget):
                     sid = session.get("session_id", "")
                     visible_ids.add(sid)
                     queue.append(("session", session, original_index, False))
-            session_count += len(to_add)
-            queue.append(("spacer",))
+            session_count += offset + len(to_add)
+            if offset == 0:
+                queue.append(("spacer",))
 
-        if not has_items:
+        if not has_items and not incremental:
             if self._search_filter:
                 queue.append(("empty", f"没有找到匹配「{self._search_filter}」的会话"))
             else:
                 queue.append(("empty", "暂无历史对话记录"))
 
+        if incremental:
+            # 增量路径下 visible_ids/active_run_ids 只覆盖新增条目，据此清理
+            # 会把已渲染的缓存卡片误判为孤儿删掉 —— 整表清理留给全量渲染。
+            return
         self._cleanup_orphan_history_cards(visible_ids)
         self._cleanup_orphan_team_cards(active_run_ids)
 
@@ -1756,11 +1779,19 @@ class HistoryCard(QWidget):
             if card:
                 card.deleteLater()
 
-    def _prepare_archived_render_queue(self):
-        """准备归档会话渲染队列（只做数据分组，不创建 widget）"""
+    def _prepare_archived_render_queue(self, skip_count: int = 0):
+        """准备归档会话渲染队列（只做数据分组，不创建 widget）
+
+        Args:
+            skip_count: 已渲染的会话数（「加载更多」增量追加时传入），语义同
+                _prepare_history_render_queue。
+        """
         queue = self._render_queue
+        incremental = skip_count > 0
 
         if not self._archived_sessions:
+            if incremental:
+                return
             queue.append(("empty", "暂无归档会话"))
             self._cleanup_orphan_archived_cards(set())
             return
@@ -1772,6 +1803,8 @@ class HistoryCard(QWidget):
             ]
 
         if not sessions_to_show:
+            if incremental:
+                return
             queue.append(("empty", f"没有找到匹配「{self._search_filter}」的会话"))
             self._cleanup_orphan_archived_cards(set())
             return
@@ -1800,7 +1833,7 @@ class HistoryCard(QWidget):
         session_count = 0
         self._remaining_count = max(0, total_archived - limit)
 
-        has_items = False
+        has_items = incremental
         active_paths = set()
         for section, sessions in final_order:
             if not sessions:
@@ -1809,22 +1842,32 @@ class HistoryCard(QWidget):
             if session_count >= limit:
                 continue
             total_in_section = len(sessions)
-            to_add = sessions[: limit - session_count] if session_count + total_in_section > limit else sessions
-            if not to_add:
+            offset = max(0, skip_count - session_count)
+            if offset >= total_in_section:
+                session_count += total_in_section
                 continue
+            budget = max(0, limit - session_count - offset)
+            if budget <= 0:
+                session_count += total_in_section
+                continue
+            to_add = sessions[offset : offset + budget]
             has_items = True
             # header 显示该分组总会话数（而非仅可见数），让用户了解完整规模
-            queue.append(("header", section, total_in_section))
+            if offset == 0:
+                queue.append(("header", section, total_in_section))
             for session in to_add:
                 file_path = session.get("path", "")
                 active_paths.add(file_path)
                 queue.append(("archived", session))
-            session_count += len(to_add)
-            queue.append(("spacer",))
+            session_count += offset + len(to_add)
+            if offset == 0:
+                queue.append(("spacer",))
 
-        if not has_items:
+        if not has_items and not incremental:
             queue.append(("empty", "暂无归档会话"))
 
+        if incremental:
+            return
         self._cleanup_orphan_archived_cards(active_paths)
 
     def _prune_cached_spacers(self):
@@ -1893,15 +1936,38 @@ class HistoryCard(QWidget):
                 break
         btn.deleteLater()
 
-    def _on_load_more(self):
-        """加载下一批会话"""
-        # 🛡️ 保留滚动位置：_update_display 全清重建时内容瞬间清空，
-        # widgetResizable 模式下 scrollbar range 收缩会把 value clamp 到 0，
-        # 渲染完成后视口跳回顶部（此前每次点加载更多都弹回列表头）。
-        # 加载更多只在尾部追加、头部内容不变，恢复原 value 即可保持视口。
+    def _render_incremental(self, skip: int):
+        """只把新增的一页会话追加到列表尾部（不清空已渲染内容）。
+
+        与 ``_update_display`` 全清重建的区别：已渲染卡片不出布局，滚动区
+        range 只增不减 → 滚动条 value 不被 clamp，视口不会发生「弹回列表头
+        再跳回」的两段式跳变；代价也小（只渲染新增 30 条，而非整列表重排）。
+
+        Args:
+            skip: 已渲染的会话数（追加前 ``_show_limit`` 的旧值）。
+        """
+        self._render_timer.stop()
+        self._render_queue.clear()
+        if self.get_content_layout() is None:
+            return
+        # 「加载更多」按钮位于 stretch 之前，先摘掉再追加，否则新条目会插到
+        # 按钮之后（渲染完成后由 _add_load_more_if_needed 重建）。
+        self._remove_load_more_button()
+        # 摘按钮会让内容矮一截，贴底时 value 可能被 clamp —— 记录现值，
+        # 渲染完成后仅在「视口被拽向上方」时补回。
         self._pending_scroll_restore = self._parent_scroll_vbar_value()
+        if self._current_tab == "history":
+            self._prepare_history_render_queue(skip_count=skip)
+        else:
+            self._prepare_archived_render_queue(skip_count=skip)
+        self._render_batch_index = 0
+        QTimer.singleShot(0, self._process_render_batch)
+
+    def _on_load_more(self):
+        """加载下一批会话（增量追加）"""
+        skip = self._show_limit
         self._show_limit += self._page_size
-        self._update_display()
+        self._render_incremental(skip)
 
     def _parent_scroll_vbar_value(self) -> Optional[int]:
         """沿父链找宿主滚动区，返回当前垂直滚动值（找不到返回 None）"""
@@ -1914,7 +1980,11 @@ class HistoryCard(QWidget):
         return None
 
     def _restore_scroll_if_pending(self):
-        """渲染完成后恢复「加载更多」前记录的滚动位置（延迟一拍等布局生效）"""
+        """渲染完成后补回被压缩的滚动位置（延迟一拍等布局生效）。
+
+        只补偿「视口被系统拽向上方」（value < 记录值）的情形：追加期间用户
+        若主动向下滚动，不应被反向拉回。
+        """
         if self._pending_scroll_restore is None:
             return
         target = self._pending_scroll_restore
@@ -1925,7 +1995,9 @@ class HistoryCard(QWidget):
             while parent:
                 scroll_area = getattr(parent, "_scroll_area", None)
                 if scroll_area is not None:
-                    scroll_area.verticalScrollBar().setValue(target)
+                    sb = scroll_area.verticalScrollBar()
+                    if sb.value() < target:
+                        sb.setValue(min(target, sb.maximum()))
                     return
                 parent = parent.parent()
 
