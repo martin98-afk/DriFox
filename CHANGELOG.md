@@ -20,9 +20,9 @@ All notable changes to this project will be documented in this file.
 - `prune_tool_result` 及私有辅助迁至 `app/core/context/tool_prune.py`（`context_builder` / `message_content` 保留 re-export，序列化器插件继续调用）
 - 免裁剪名单改由工具注册时声明：`metadata["no_prune"]`（不截断）/ `metadata["no_offload"]`（不落盘），替代主程序硬编码的 `PRUNE_SKIP_TOOLS` / `SKIP_TOOLS` 两份不一致白名单
 
-## [v0.6.2] - 2026-09-17 (重新发布 #2)
+## [v0.6.2] - 2026-09-17 (重新发布 #3)
 
-自上一版本以来的变更 | 累计提交数：82 · 累计文件变更：419 · 累计 +17737/-5841 | 累计贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更 | 累计提交数：83 · 累计文件变更：421 · 累计 +18186/-5846 | 累计贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -248,9 +248,17 @@ All notable changes to this project will be documented in this file.
 
 - 无新文件；本次仅追加问题修复与 UI 测试基础设施。
 
+### ✨ 新功能 (New Features) — 重新发布增量 #6
+
+- **历史卡点击记录滚动位置稳定（避免跳回顶部）** (`plugins/history-manager/ui/history_card.py`, `tests/widgets/test_history_scroll_position_stable.py` 新增): 列表下方点击记录时视口跳回上方的根因链是 `set_history` → `_clear_content` → 内容塌缩 → QScrollArea 上限收缩 → value 被 clamp。修复分两层：快路径比对 `_history_signature`（列表形态不变时只换高亮不重建）、锚点兜底（`_capture_scroll_anchor` / `_release_scroll_anchor` 在重建期钉住内容最小高度防 range 塌缩）。回归测试 311 行覆盖点击下方记录后 value 不变。`08d0f49c`
+
+### 🔧 其他 (Chores & Build) — 重新发布增量 #6
+
+- 无新文件；本次仅追加新功能与回归测试。
+
 ---
 
-> 累计统计 v0.6.2 (重新发布 #5)：自上一版本以来累计 **114 个 commit** · 触及 **466 个文件** · **+23888/-6915 行** · 贡献者 **dingma, drifox-bot, mading**。
+> 累计统计 v0.6.2 (重新发布 #6)：自上一版本以来累计 **115 个 commit** · 触及 **468 个文件** · **+24337/-6920 行** · 贡献者 **dingma, drifox-bot, mading**。
 
 ## [v0.6.1] - 2026-09-15
 
