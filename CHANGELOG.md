@@ -192,7 +192,65 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-> 累计统计 v0.6.2 (重新发布 #4)：自上一版本以来累计 **82 个 commit** · 触及 **419 个文件** · **+17737/-5841 行** · 贡献者 **dingma, drifox-bot, mading**。
+### ✨ 新功能 (New Features) — 重新发布增量 #5
+
+- **DRIFOX_DATA_DIR 环境变量隔离应用数据目录（UI 测试脚手架前置）** (`app/main.py`, `app/utils/paths.py` 或类似, `tests/`): 新增环境变量用于 e2e 测试隔离应用数据目录，避免污染真实用户配置。`0a28894b`
+- **UI 测试驱动库 tools/ui_driver（主线程投递 + ARM 总闸 + 查询/动作/观测，S3a）** (`tools/ui_driver/` 新增): 内部 UI 测试驱动上线，三层守护（主线程 caller 亲和、ARM 总闸、危险动作拒绝）保障自动化操作安全不毁环境。`1027f43f`
+- **tokens.py 迁移 confirm_token 协议与危险关键词黑名单（M2，源自 f20c56b7）** (`app/tools/tokens.py`, `tools/ui_driver/`): 把 ui_click 两步协议的 token 确认与黑名单收敛到 tokens 层，主驱动与具体动作工具复用同一份机制；f20c56b7 后被 ui-driver 插件 Revert 时，这层底层能力仍在。`399b8e88`
+- **tools/ui_test_server JSON-RPC 测试服务 + main.py DRIFOX_UI_TEST_SERVER 接线（M2）** (`tools/ui_test_server.py` 新增, `app/main.py`): 提供本地 JSON-RPC 服务暴露 UI 操作接口给 e2e 测试；main.py 按环境变量启停服务，避免打包版误启。`71b61c7c`
+- **agent_trace 增强 messages_updated 信号与尾部处理** (`plugins/agent_trace/`): `messages_updated` 信号贯穿会话/回合维度；尾部空 message 不再污染 trace 序列。`7ca0c6ca`
+- **vision base64 图片落盘替换 + 发送时按需重读（方案 1，T1d 底稿）** (`app/core/`, `app/widgets/`): 截图不再走 base64 通道而是落盘图片，发送时按需重读，节省内联体积；image_ref 类型纳入规范化白名单后链路保持完整。`011bd651`
+- **ui_test_server 二批工具 ui_session（load/switch/new，token 两步协议）** (`tools/ui_test_server.py`): 二批会话操作工具上线，对话列表/切换/新建覆盖主流程；token 协议与 ui_click 同源。`821a143e`
+- **TokenStore.peek 非消耗式 token 预览** (`app/core/token_store.py`, `tests/`): 新增 `peek()` 接口预览当前 token 数但不消耗配额，便于 UI/调试观测。`5dbc3bfa`
+
+### 🐛 问题修复 (Bug Fixes) — 重新发布增量 #5
+
+#### session-repository / history-manager 数据完整性
+
+- **session-repository extras 读取失败与空结果区分（load 返回 None 契约 + merge_extras_into 共享 helper）** (`app/core/storage/session_repository.py`, `tests/`): 读失败返回 `None` 与空 extras 区分，避免空结果被当作读失败触发误清空；合并逻辑抽公共 helper。`c7e18bb6`
+- **session-repository backfill 读失败不得清空已落库 extras（T2f-r）** (`app/core/storage/session_repository.py`): 修复 read 失败的 backfill 链路会把已落库 extras 当未变更拉走数据本身清空的缺陷。`723d9f96`
+- **session-repository save 链轻量剥离消息自愈回填（修复 c，backfill 前置 + 探测器降 DEBUG）** (`app/core/storage/session_repository.py`): save 链剥离消息触发自愈回填时前置 backfill，避免空字段覆盖已落库；探测器日志降 DEBUG 频次。`707d1adb`
+- **history-manager 会话懒回填改全量物化（blob+extras 合并，修复 a）** (`app/core/storage/history_manager.py`): 懒回填遇 blob 缺失时改为全量物化（含 extras 合并），杜绝半完整快照。`b8943f14`
+
+#### UI 测试驱动 / tokens
+
+- **ui_driver 修复 done 广播串台/超时未生效/内存口径与打包隔离细节（S3a-r）** (`tools/ui_driver/`): done 事件不再串台（每连接独立订阅）；超时时长实际生效；内存口径与打包后 cwd 隔离；与下游 ui_test_server 协议一致。`7968bf4c`
+- **ui_click 支持 cls 定位与 token 放宽校验，e2e 参数对齐（M2-r）** (`tools/ui_driver/`, `tests/ui/`): cls 参数上线做选择器定位；token 校验在 e2e 场景支持简化模式，参数命名与下游服务对齐。`867dfa62`
+- **补注册 ui_memory 工具（schema/handler 漏项，M2 遗留缺陷）** (`app/tools/ui_memory.py`, `tools/ui_driver/`): 之前 schema 注册漏 `ui_memory`，驱动调用直接报错；补全注册入口。`826ad7c3`
+- **ui_session 免 token 简化 + ui_state 附会话列表（M2-r）** (`tools/ui_driver/`, `tools/ui_test_server.py`): 会话相关工具在测试环境下免 token（防死锁）；`ui_state` 调用附会话列表便于测试观测。`12ff114e`
+
+#### 多媒体 / 消息卡稳定性
+
+- **image_ref 纳入 multimodal 白名单，修复方案 1 落盘图片被规范化链路抹除** (`app/core/storage/`、`app/core/message_content.py`): 修复落盘图片在 normalize / `_has_image_content` / `_clean_multimodal_blocks` / `content_to_text` 四处被抹平的链路，save-load-resave 端到端保图。`669f1838`
+- **缩略图点击闭包改持 (source, data_uri) 源引用，点击时现解码（方案 2）** (`app/widgets/message_card.py`): 闭包不再持已解码 bytes，改持 (source, data_uri) 元组，点击时按需解码，规避长生命周期闭包持大图。`1474ff6e`
+- **MessageCard.cleanup 优先 detach_viewer 回池（方案 4，churn 一行修）+ sip-deleted hasattr 防御** (`app/widgets/message_card.py`): cleanup 时优先把 viewer detach 回池，减少 churn；sip-deleted 防御走 hasattr 避免崩。`7edef3ed`
+- **PlainTextViewer._safe_update_height 对 text_edit 为 None 时跳过 isdeleted 检查（隔离环境测试暴露）** (`app/widgets/cards/chat_view/` 或 `app/widgets/message_card.py`): 隔离环境运行测试时 `text_edit` 为 None，跳过 isdeleted 检查避免异常路径上抛。`0b8a7e72`
+
+#### 信号总线 / e2e 基础设施
+
+- **bus 主线程 caller 亲和性显式初始化（修 HTTP 线程 invoke 全超时）** (`app/core/bus.py`): HTTP 工作线程 invoke 时主线程 caller 未显式初始化，全部超时；显式绑亲和。`03c3ce36`
+- **e2e 补 os 导入与断言细节** (`tests/ui/`): 补 `os` 模块 import 缺漏；断言条件精确化。`8cf36f7b`
+
+### 🔄 其他变更 — 重新发布增量 #5
+
+- **Revert "fix: ui_click 两步 confirm_token 协议 + 危险关键词黑名单 + 打包守卫收窄（S3c-r）"** (`f20c56b7`): UI 驱动首批接入时的协议补丁，被 ui-driver 插件化时一并撤回，统一走 tokens.py 集中实现。`853e2a09`
+- **Revert "feat: ui-driver 插件（AI 闭环 UI 工具层，三重安全闸，S3c）"** (`4ed08cbf`): UI 驱动从插件回退为内部库，三重安全闸仍保留在 tools/ui_driver/。`8665fb1d`
+
+### 🧪 测试 (Tests) — 重新发布增量 #5
+
+- **tests/ui 脚手架 + 首批 4 用例（A 档全链，S3b）** (`tests/ui/` 新增): 脚手架覆盖驱动加载、会话列表、问题发送、用户输入模拟 4 条主路径。`cca4defd`
+- **MCP 测试服务 e2e 验收 + README（M2）** (`tests/ui/`, `tools/ui_test_server/README.md`): MCP 协议层 e2e 验收用例齐备，README 描述服务启动 / 关闭 / 协议示例。`49b85e50`
+- **用例 1 探针三修（profile 初始化 / finish_streaming 前置 / 退出析构竞态隔离，T2e-v 定位）** (`tests/ui/`): profile 初始化、finish_streaming 前置、退出期 QThread 析构竞态三处探针补全，定位流式守卫拒收 detach 的根因。`03eb0ba2`
+- **用例 1 探针补 finish_streaming 前置与 pids 断言修正（T2e-v 定位：流式守卫拒收 detach）** (`tests/ui/`): 与上一条配合修正 pids 断言，确保 detach 时机后服务侧仍能干净退出。`20ac39e9`
+- **agent_trace 时间线缩放锚点测试 + 缩放功能实现** (`plugins/agent_trace/tests/`, `plugins/agent_trace/ui/timeline_panel.py`): 缩放锚点 zoom-anchor 行为测试，UI 侧时间线缩放落地。`cbf020b1`
+
+### 🔧 其他 (Chores & Build) — 重新发布增量 #5
+
+- 无新文件；本次仅追加问题修复与 UI 测试基础设施。
+
+---
+
+> 累计统计 v0.6.2 (重新发布 #5)：自上一版本以来累计 **114 个 commit** · 触及 **466 个文件** · **+23888/-6915 行** · 贡献者 **dingma, drifox-bot, mading**。
 
 ## [v0.6.1] - 2026-09-15
 
