@@ -274,6 +274,135 @@ def test_scrollbar_maps_to_item_window_in_slot_modes(panel, qapp):
     assert sb.pageStep() == hi - lo + 1, f"滚动条页长 {sb.pageStep()} 与窗口条数 {hi - lo + 1} 不一致"
 
 
+@pytest.mark.parametrize("mode", [_panel.MODE_EQUAL, _panel.MODE_TOKEN])
+@pytest.mark.parametrize("width", [1, 2, 3])
+def test_zoom_out_escapes_minimum_window(panel, qapp, mode, width):
+    """窗口收到最小宽度（1~3 条）后，下滚必须仍能变宽。
+
+    用户报（2026-09-19）：泳道图放大到最大后**无法缩小**。
+
+    根因：槽位模式（等宽 / Token）的窗口宽度是**整数条数**，每次滚轮乘 k
+    后取整。宽度 2 时两个方向都是固定点 ——
+    ``round(2 * 0.8) = round(1.6) = 2``（放大不动）、
+    ``round(2 * 1.25) = round(2.5) = 2``（缩小也不动，Python 的 banker's
+    rounding 把 .5 归到偶数侧）。宽度 1 同样双向锁死。窗口不变 →
+    ``_sync_scrollbar`` / ``update`` 无状态变化 → 滚轮彻底失效。
+
+    Duration 模式不受影响：那条路径用浮点 ``new_span = max(0.02, span * k)``，
+    缩小侧 0.02 → 0.025 → 0.03125 一路可退，所以只有槽位模式会锁死。
+    """
+    panel._view = None
+    panel.set_mode(mode)
+    panel.set_records(_mk_records())
+    _render(panel, qapp)
+
+    n_all = len(panel._records)
+    i0 = n_all // 2
+    panel._iwin = (i0, i0 + width - 1)
+    panel._sync_scrollbar()
+    _render(panel, qapp)
+
+    x = int(panel._track_x + panel._track_w * 0.5)
+    _wheel_at(panel, x, qapp, zoom_in=False)
+    assert panel._iwin is not None, f"{mode} 下滚不应清空窗口（远未覆盖全量）"
+    after = panel._iwin[1] - panel._iwin[0] + 1
+    assert after > width, f"{mode} 宽度 {width} 下滚后仍是 {after} —— 缩放死锁"
+
+
+@pytest.mark.parametrize("mode", [_panel.MODE_EQUAL, _panel.MODE_TOKEN])
+def test_zoom_in_escapes_two_item_window(panel, qapp, mode):
+    """宽度 2 时上滚必须收窄到 1（放大方向同样是固定点，只是危害小）。"""
+    panel._view = None
+    panel.set_mode(mode)
+    panel.set_records(_mk_records())
+    _render(panel, qapp)
+
+    n_all = len(panel._records)
+    i0 = n_all // 2
+    panel._iwin = (i0, i0 + 1)
+    panel._sync_scrollbar()
+    _render(panel, qapp)
+
+    x = int(panel._track_x + panel._track_w * 0.5)
+    _wheel_at(panel, x, qapp, zoom_in=True)
+    assert panel._iwin is not None, f"{mode} 放大不应清空窗口"
+    after = panel._iwin[1] - panel._iwin[0] + 1
+    assert after == 1, f"{mode} 宽度 2 上滚后是 {after}，应收到最小 1 条"
+
+
+def _wheel_event_accepted(panel, x):
+    """派发一次滚轮后返回事件的 accepted 状态（不经过 _wheel_at 的渲染）。"""
+    from PyQt5.QtCore import QPoint, QPointF, Qt
+    from PyQt5.QtGui import QWheelEvent
+
+    gpos = panel.mapToGlobal(QPoint(int(x), 10))
+
+    class _Stub:
+        @staticmethod
+        def pos():
+            return gpos
+
+    real = _panel.QCursor
+    _panel.QCursor = _Stub
+    try:
+        ev = QWheelEvent(
+            QPointF(float(x), 10.0),
+            QPointF(gpos),
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            getattr(Qt, "NoScrollPhase", 0),
+            False,
+        )
+        ev.setAccepted(False)  # Qt 派发时的初始态
+        panel.wheelEvent(ev)
+        return ev.isAccepted()
+    finally:
+        _panel.QCursor = real
+
+
+@pytest.mark.parametrize("mode", [_panel.MODE_EQUAL, _panel.MODE_DURATION, _panel.MODE_TOKEN])
+def test_wheel_event_is_consumed(panel, qapp, mode):
+    """滚轮必须被消费（accept），否则会沿父链上浮，触发别的滚动区跟着滚。
+
+    用户报（2026-09-19）：滚泳道图时**聊天消息列表跟着滚动**。
+
+    根因：Qt5 里 ``QWidget::wheelEvent`` 默认实现是 ``event->ignore()``
+    （qwidget.cpp，Qt 5.15），未接受的 Wheel 会沿 parent 链向上传播。本面板
+    覆写 ``wheelEvent`` 后只做缩放、从不调 ``accept()``/``ignore()``，事件因此
+    保持未接受状态并上浮到 ``TabManagerWindow._chat_wrapper``，命中
+    ``tab_manager_window.py`` 的 ``QEvent.Wheel`` 分支 →
+    ``_forward_wheel_to_scroll_area()`` → ``chat_scroll_area.wheelEvent(event)``。
+    那就是「列表跟着滚」。
+
+    该转发分支本身有其用途（限宽居中的留白区没有子控件接收滚轮，需要转发给
+    对话区），所以修复点在**面板侧**：处理完就 accept，别让事件继续往上跑。
+    """
+    panel._view = None
+    panel._iwin = None
+    panel.set_mode(mode)
+    panel.set_records(_mk_records())
+    _render(panel, qapp)
+
+    x = int(panel._track_x + panel._track_w * 0.5)
+    assert _wheel_event_accepted(panel, x), (
+        f"{mode} 模式：滚轮未被 accept → 事件会沿父链上浮到 _chat_wrapper，"
+        "被转发给 chat_scroll_area，表现为聊天列表跟着滚"
+    )
+
+
+def test_wheel_on_empty_records_still_bubbles(panel, qapp):
+    """无数据时**不**消费滚轮 —— 泳道图没内容可缩放，事件应正常上浮滚对话区。"""
+    panel._view = None
+    panel._iwin = None
+    panel.set_records([])
+    _render(panel, qapp)
+
+    x = int(panel._track_x + panel._track_w * 0.5)
+    assert not _wheel_event_accepted(panel, x), "空数据时不应吞掉滚轮事件"
+
+
 def _print_diag(panel, qapp):
     """诊断表（``-s`` 可见）：各模式 × 各标的下的一次放大漂移。"""
     print(f"\n{'模式':>9} {'目标记录':>12} {'漂移px':>10}")

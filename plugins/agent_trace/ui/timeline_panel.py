@@ -884,7 +884,17 @@ class TimelinePanel(QWidget):
             else:
                 # 空白处：按像素位置折算窗内条目，锚定其中心
                 hit = max(i0, min(i1, i0 + int(frac * width)))
-            new_width = max(1, int(round(width * k)))
+            # ⚠️ 窗口宽度是**整数条数**，缩放进/出必须保证每次至少变化 1 条。
+            # 只写 ``max(1, round(width * k))`` 会有双向不动点：宽度 2 时
+            # round(2*0.8)=2（放大不动）、round(2*1.25)=2（缩小也不动 ——
+            # Python 的 round 把 .5 归到偶数侧）；宽度 1 同样双向锁死
+            # round(0.8)=1、round(1.25)=1。窗口不变 → 滚动条与画面均无变化，
+            # 表现为「放大到最大后就无法缩小」。Duration 分支用浮点新窗
+            # （见上方 ``new_span``）天然无此问题。
+            if k < 1.0:
+                new_width = max(1, min(width - 1, int(round(width * k))))
+            else:
+                new_width = max(width + 1, int(round(width * k)))
             if new_width >= n_all:
                 self._iwin = None  # 窗口已覆盖全部条目 → 复位
                 self._view = None
@@ -900,6 +910,17 @@ class TimelinePanel(QWidget):
                 self._iwin_to_view()
         self._sync_scrollbar()
         self.update()
+        # ⚠️ 必须显式 accept：Qt5 的 ``QWidget::wheelEvent`` 默认实现是
+        # ``event->ignore()``，未接受的 Wheel 会沿 parent 链向上传播。本面板
+        # 若只做缩放不消费，事件会一路浮到 TabManagerWindow._chat_wrapper，
+        # 命中其 ``QEvent.Wheel`` 分支 → ``_forward_wheel_to_scroll_area()``
+        # → ``chat_scroll_area.wheelEvent(event)``，表现为「滚泳道图，聊天
+        # 消息列表跟着滚」。那条转发分支是给限宽居中留白区用的（留白处没有
+        # 子控件接收滚轮），不能靠它区分，只能在源头消费掉。
+        #
+        # 上面的 ``if not self._records: return`` 早退路径**特意不 accept**：
+        # 无数据时泳道图没有可缩放内容，让事件正常上浮去滚对话区。
+        event.accept()
 
     def _ordinal_window_start(self, hit: int, cell: float, i0: int, width: int, new_width: int) -> int:
         """等宽模式：窗内每条等宽 → 序号即位置。

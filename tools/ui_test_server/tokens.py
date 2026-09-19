@@ -69,6 +69,11 @@ class TokenStore:
                 self._store.pop(token, None)
             return True, ""
 
+    def peek(self, token: str) -> Optional[Dict[str, Any]]:
+        """查看令牌条目（不消费）；不存在返回 None。"""
+        with self._lock:
+            return self._store.get(token)
+
     def clear(self) -> None:
         with self._lock:
             self._store.clear()
