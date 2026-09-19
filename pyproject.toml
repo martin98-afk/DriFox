@@ -125,10 +125,15 @@ quote-style = "double"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
+# tests/ui 为 A 档全链 UI 测试（构建完整主窗口，重）：默认收集排除，
+# 显式 `pytest tests/ui -m ui` 才运行（S3b）
+addopts = "--ignore=tests/ui"
+xfail_strict = true
 markers = [
     "perf: 性能基准测试（测量响应时间）",
     "perf_long: 长时间运行时压测（≥30s/场景，需 QApplication）",
     "stress: 压力测试（连续调用验证稳定性）",
+    "ui: A 档全链 UI 测试（完整主窗口 + WebEngine，需显式 pytest tests/ui -m ui）",
 ]
 
 # 构建系统配置

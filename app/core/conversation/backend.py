@@ -201,6 +201,14 @@ class ChatBackend(QObject):
     message_received = pyqtSignal(dict)  # 新消息
     # 内部信号：hook 回调添加消息后触发 UI 刷新（跨线程安全）
     _hook_messages_updated = pyqtSignal()
+    # ⚠️ 与引擎回调 ``messages_updated`` 同名：worker 的 ``finished_with_messages``
+    # （工具迭代落盘 / 整轮结束）经 executor 回调链到达后转发到此信号。
+    # 无此信号时，**落盘事件对插件不可见** —— 工具迭代写入 session.messages 后
+    # 没有任何东西通知外部的轨迹/统计消费者，只能等下一次 tool_result_received
+    # 或整轮 stream_finished，表现为「记录刷新延迟非常高」。
+    # 参数不透传（arity=0）：消费者需要消息时自己从 session 读，避免跨线程
+    # 传递大列表；与 _hook_messages_updated 同风格的空信号。
+    messages_updated = pyqtSignal()
     stream_started = pyqtSignal()
     stream_chunk = pyqtSignal(str)  # 流式内容片段
     # ⚠️ 签名与引擎侧一致（response: str），不再是旧的 dict —— 见 _TRACE_SIGNAL_ARITY
@@ -822,6 +830,9 @@ class ChatBackend(QObject):
         "tool_result_received": 4,  # (tool_call_id, name, arguments, result)
         "context_updated": 2,  # (token_count, limit)；引擎第 3 参 from_api 不透传
         "error": 1,  # (error,) → 信号名见 _TRACE_SIGNAL_ALIAS
+        # messages_updated 是「消息已落盘」的唯一可订阅事件（见信号定义处注释）。
+        # arity=0：消息列表本身不透传，消费者从 session 读最新状态即可。
+        "messages_updated": 0,
     }
 
     # 「回调键名 ≠ 信号名」的映射（main_widget._setup_engine_callbacks 用的是

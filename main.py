@@ -683,6 +683,31 @@ def main():
     QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)
 
+    # ── UI 测试服务（默认关）：DRIFOX_UI_TEST_SERVER=host:port 开启（M2）──
+    # 开启时 daemon 线程起 JSON-RPC 服务并置 ARM 总闸；打包产物无 tools/，
+    # lazy import 失败仅 warning 跳过，不影响主程序。
+    _ui_test_addr = os.environ.get("DRIFOX_UI_TEST_SERVER", "")
+    if _ui_test_addr:
+        try:
+            from tools.ui_driver import init_main_caller, setArmed as _ui_test_setArmed
+            from tools.ui_test_server.server import start_ui_test_server as _start_ui_test_server
+
+            # _MainCaller 亲和性必须在主线程定型（工作线程构造会导致 queued 请求永不派发）
+            init_main_caller()
+            _host, _, _port = _ui_test_addr.rpartition(":")
+            _ui_test_thread = threading.Thread(
+                target=_start_ui_test_server,
+                args=(_host or "127.0.0.1", int(_port)),
+                daemon=True,
+                name="ui-test-server",
+            )
+            _ui_test_thread.start()
+            _ui_test_setArmed(True)
+            logger.info(f"[ui-test-server] 已启动 {_ui_test_addr}，ARM 已置位")
+        except Exception as exc:  # noqa: BLE001 — 打包态 ImportError / 端口耗尽均跳过
+            logger.warning(f"[ui-test-server] 启动失败（跳过）: {exc}")
+    # ── UI 测试服务接线结束 ──
+
     sys.exit(app.exec_())
 
 

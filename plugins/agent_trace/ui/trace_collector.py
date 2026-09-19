@@ -7,9 +7,14 @@
 2. **实时信号只写 timing 表**：tool/stream 起止时间记到 ``_timing`` /
    ``_streams``，投影时按 tool_call_id / assistant 序号回填精确毫秒时长。
 3. **in-flight 尾巴**放 ``_tail`` 单独展示，落盘后自动被正式记录取代。
-4. **tail 稳定化**：``_set_tail`` 内部比对签名，内容没变就**不发信号** —
-   修复 v2 每次 ``_sync`` 无条件 emit tailChanged 导致列表全量重建
-   （「历史记录一直在刷新」）的问题。
+   工具尾巴的生命周期（关键，勿简化）：``tool_result_received`` 到达时消息
+   **还没落盘**，此刻只把尾巴「就地收尾」（停表 / 清 pending / 标状态）
+   并保留；真正的撤除发生在 ``messages_updated``（落盘事件）之后的 ``_sync``
+   里，按 tool_call_id 比对已落盘记录。提前删 = 该工具条在列表里凭空消失。
+4. **tail 稳定化**：``_set_tail`` 与 ``_tail_sig`` 快照比对，内容没变就不发
+   信号 — 修复 v2 每次 ``_sync`` 无条件 emit tailChanged 导致列表全量重建
+   （「历史记录一直在刷新」）的问题。快照而非现场签名：tail 记录支持就地
+   修改（``_finish_tool_tail`` / ``_update_tail_args``）。
 5. **TraceCollectorHub**：per-window 常驻采集器管理。每个对话标签页的
    backend 各挂一个 collector **持续收集**（后台标签页的工具耗时/流耗时不
    丢失），轨迹卡切换标签页时只是切换「展示哪个 collector」。
@@ -72,6 +77,11 @@ class TraceCollector(QObject):
         super().__init__(parent)
         self._records: List[TraceRecord] = []
         self._tail: List[TraceRecord] = []
+        # 上次 emit 时的 tail 签名快照。⚠️ 不能拿「当前 self._tail 的签名」当基准：
+        # tail 里的 TraceRecord 会被**就地修改**（_finish_tool_tail 停表、
+        # _update_tail_args 补参数），两次都算当下状态会恒等 → 判重短路 →
+        # 信号永不发射，UI 停在「进行中」。快照才是真正的「上次发出的是什么」。
+        self._tail_sig: tuple = ()
         # tool_call_id → {"start", "end", "success", "name", "args", "result"}
         self._timing: Dict[str, Dict[str, Any]] = {}
         # assistant 流列表（按完成序）：{"start": float, "end": float}
@@ -107,9 +117,16 @@ class TraceCollector(QObject):
             # 引擎报错：唯一能观测到「这一轮异常终止」的信号（见 _on_error_occurred）
             if hasattr(backend, "error_occurred"):
                 backend.error_occurred.connect(self._on_error_occurred)
-            # 主程序在 hook 注入 / 工具结果写入 messages 后触发的节拍信号
+            # 主程序在 hook 注入后触发的节拍信号
             if hasattr(backend, "_hook_messages_updated"):
                 backend._hook_messages_updated.connect(self._on_messages_updated)
+            # ⚠️ 「消息已落盘」的唯一可订阅事件：worker 的 finished_with_messages
+            # （每次工具迭代落盘 / 整轮结束）经 executor 回调链转发到此信号。
+            # 不订阅它的话，工具迭代写入 session.messages 后 collector 完全感知
+            # 不到 —— 只能等下一次 tool_result_received（那时消息还没落盘）或
+            # 整轮 stream_finished，表现为「记录刷新延迟非常高」。
+            if hasattr(backend, "messages_updated"):
+                backend.messages_updated.connect(self._on_messages_updated)
         except Exception as e:
             logger.warning(f"[agent_trace] attach signals failed: {e}")
         self._sync(emit_reset=True)
@@ -125,6 +142,7 @@ class TraceCollector(QObject):
             ("stream_finished", self._on_stream_finished),
             ("error_occurred", self._on_error_occurred),
             ("_hook_messages_updated", self._on_messages_updated),
+            ("messages_updated", self._on_messages_updated),
         ):
             try:
                 getattr(self._bound_backend, sig).disconnect(slot)
@@ -249,6 +267,23 @@ class TraceCollector(QObject):
         if self._tail:
             self._set_tail([r for r in self._tail if r.kind != EntryKind.CONTEXT])
 
+        # 工具尾巴：正式记录落盘后撤掉临时行（工具结果与落盘之间有时间差，
+        # 详见 _on_tool_result_received 的收尾策略）。
+        if self._tail:
+            persisted_ids = {
+                r.meta.get("tool_call_id")
+                for r in new_records
+                if r.kind == EntryKind.TOOL and r.meta.get("tool_call_id")
+            }
+            if persisted_ids:
+                self._set_tail(
+                    [
+                        r
+                        for r in self._tail
+                        if not (r.kind == EntryKind.TOOL and r.meta.get("tool_call_id") in persisted_ids)
+                    ]
+                )
+
         # assistant 已有正式落盘记录时，同步清掉「正在生成」尾巴 —— README 承诺的
         # 「落盘后自动被正式记录取代」。只靠 stream_finished 清会在 finished
         # 丢失的路径（手动停止 / 异常中断）留下永久走动时长的僵尸尾巴。
@@ -265,6 +300,9 @@ class TraceCollector(QObject):
 
     def _clear_all(self) -> None:
         self._records = []
+        # ⚠️ 必须经 _set_tail 走一遍：清空时 UI 那边可能还挂着尾巴行，只有它
+        # 会 emit tailChanged 让列表收敛。直接赋值 + 重置快照会吞掉这次信号，
+        # 留下永不消失的幽灵行。
         self._set_tail([])
         self._timing.clear()
         self._streams.clear()
@@ -283,7 +321,10 @@ class TraceCollector(QObject):
 
     @staticmethod
     def _tail_signature(tail: List[TraceRecord]) -> tuple:
-        return tuple((r.kind, r.label[:32], round(r.start_ts, 3), r.is_pending, r.raw[:48]) for r in tail)
+        return tuple(
+            (r.kind, r.label[:32], round(r.start_ts, 3), round(r.end_ts, 3), r.is_pending, r.is_error, r.raw[:48])
+            for r in tail
+        )
 
     def _make_reasoning_loader(self, session_id: str, msg_idx: int):
         """轻量消息 reasoning 懒读闭包（message_extras 探测式，失败返回空串）。"""
@@ -306,9 +347,10 @@ class TraceCollector(QObject):
     def _set_tail(self, new_tail: List[TraceRecord]) -> None:
         """tail 稳定化赋值：内容没变不发信号（修「历史记录一直在刷新」）。"""
         new_sig = self._tail_signature(new_tail)
-        if new_sig == self._tail_signature(self._tail):
+        if new_sig == self._tail_sig:
             return
         self._tail = list(new_tail)
+        self._tail_sig = new_sig
         self.tailChanged.emit()
 
     # ──────────────────── 增量投影 ────────────────────
@@ -844,9 +886,10 @@ class TraceCollector(QObject):
         从 result 里探测（:meth:`_result_success`）。
         """
         success = self._result_success(result)
+        now = time.time()
         t = self._timing.get(tool_call_id)
         if t is not None:
-            t["end"] = time.time()
+            t["end"] = now
             t["success"] = success
             t["result"] = content_to_text(result)
             # 结果回调带的 arguments 是解析后的真实值，可用来补齐；占位字典跳过
@@ -854,9 +897,13 @@ class TraceCollector(QObject):
                 text = _dump_arguments(arguments)
                 if text and not t.get("args"):
                     t["args"] = text
-        # 落盘消息通常在 result 回调之后写入，这里先清尾巴，_sync 由
-        # _hook_messages_updated 驱动；若已落盘则立即同步回填。
-        self._set_tail([r for r in self._tail if r.meta.get("tool_call_id") != tool_call_id])
+        # ⚠️ 落盘消息通常在 result 回调**之后**才写入。旧实现此刻直接删尾巴，
+        # 而投影里也还没有正式记录 → 该工具条从列表凭空消失，直到下一个信号
+        # （下一次 tool_result_received / 整轮 stream_finished）才补回来，
+        # 用户感知就是「记录刷新延迟」。
+        # 正确做法：把这条尾巴**就地收尾**（停表、清 pending、标状态）并保留，
+        # 由 _sync 在正式记录落盘后按 tool_call_id 撤掉临时行。
+        self._finish_tool_tail(tool_call_id, success=success, result_text=content_to_text(result), now=now)
         if t is None:
             # 结果先于 started 到达的兜底：直接记 timing 并同步
             self._timing[tool_call_id or f"anon-{time.time()}"] = {
@@ -868,6 +915,26 @@ class TraceCollector(QObject):
                 "result": content_to_text(result),
             }
         self._sync()
+
+    def _finish_tool_tail(self, tool_call_id: str, success: bool, result_text: str, now: float) -> None:
+        """把指定工具的 in-flight 尾巴就地收尾（不删除，等正式记录落盘后由 _sync 撤）。"""
+        if not self._tail:
+            return
+        changed = False
+        for rec in self._tail:
+            if rec.kind != EntryKind.TOOL or rec.meta.get("tool_call_id") != tool_call_id:
+                continue
+            if not rec.is_pending:
+                continue
+            rec.is_pending = False
+            rec.is_error = not success
+            rec.end_ts = now
+            rec.meta.pop("args_placeholder", None)
+            if result_text:
+                rec.meta["result"] = result_text
+            changed = True
+        if changed:
+            self._set_tail(self._tail)
 
     def _on_error_occurred(self, message: str = "") -> None:
         """引擎/模型报错 → **in-flight 尾巴必须立刻收尾**。

@@ -6,6 +6,7 @@
 """
 
 from datetime import datetime
+from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,6 +32,134 @@ KEEP_RECENT_ROUNDS = 3
 OFFLOAD_IDX_FIELD = "_x_idx"
 
 
+def merge_extras_into(messages: List[Any], extras: Dict[int, Dict[str, Any]]) -> List[Any]:
+    """按 msg_idx 把 extras 字段就地合并回消息列表（repo 层共享 helper）。
+
+    get_full_messages 与 history-manager 懒回填共用（T1e 问题项收敛）。
+    越界索引与非 dict 消息静默跳过（与既有合并分支语义一致）。
+    """
+    for i, patch in extras.items():
+        if 0 <= i < len(messages) and isinstance(messages[i], dict):
+            messages[i].update(patch)
+    return messages
+
+
+# ── vision base64 落盘（方案 1，T1d 底稿）──
+
+
+def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root_dir) -> List[Any]:
+    """把消息 content 中 data:image 块替换为 image_ref 引用块（就地修改）。
+
+    - 仅处理 ``type=image_url`` 且 ``image_url.url`` 以 ``data:image`` 开头的块
+    - 落盘 ``<root_dir>/screenshots/persisted/<session_id>/sha1[:16]<ext>``
+    - 已是 ``type=image_ref`` 的块跳过（幂等：二次 save 不重复落盘）
+    - 单块失败隔离：该块保留原样（对齐 save 链既有逐段 try 风格）
+    """
+    import base64 as _base64
+    import hashlib as _hashlib
+    import os as _os
+
+    out_dir = Path(root_dir) / "screenshots" / "persisted" / session_id
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for bi, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") != "image_url":
+                continue
+            img = block.get("image_url")
+            url = img.get("url") if isinstance(img, dict) else None
+            if not isinstance(url, str) or not url.startswith("data:image"):
+                continue
+            try:
+                header_end = url.find(",")
+                if header_end == -1:
+                    continue
+                meta = url[len("data:") : header_end]  # image/png;base64
+                ext = ".png" if "png" in meta else (".jpg" if "jpeg" in meta or "jpg" in meta else ".bin")
+                b64 = url[header_end + 1 :]
+                raw = _base64.b64decode(b64)
+                digest = _hashlib.sha1(raw).hexdigest()[:16]
+                out_dir.mkdir(parents=True, exist_ok=True)
+                fpath = out_dir / f"{digest}{ext}"
+                if not fpath.exists():  # 幂等：同图（同 sha1）不重复写
+                    # 原子写：先写同目录 .tmp 再 os.replace，避免进程中断留下
+                    # 半截文件（revive 侧读到损坏文件 → QImage 解码失败丢图）。
+                    tmp = out_dir / f".{digest}{ext}.tmp"
+                    with open(tmp, "wb") as _fh:
+                        _fh.write(raw)
+                        _fh.flush()
+                        _os.fsync(_fh.fileno())
+                    _os.replace(tmp, fpath)
+                content[bi] = {
+                    "type": "image_ref",
+                    "image_ref": {"file": fpath.name, "meta": meta, "session_id": session_id},
+                }
+            except Exception:  # noqa: BLE001 — 单块失败保留原样
+                continue
+    return messages
+
+
+def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
+    """把 image_ref 引用块还原为 data:image 块（发送 / API 读侧）。
+
+    session_id 从各块的 image_ref.session_id 取（persist 时写入），
+    因此调用方无需知道会话上下文（chat_worker / gateway 读侧均可直用）。
+
+    - 读 ``<root_dir>/screenshots/persisted/<session_id>/<file>`` → base64 data URI
+    - >5MB 的 data URI 走 ``app.utils.image_utils.compress_data_uri`` 压缩
+    - 文件缺失/IO 失败 → 替换为 text 占位块（不抛错）
+    """
+    import base64 as _base64
+
+    if root_dir is None:
+        from app.utils.utils import get_app_data_dir
+
+        root_dir = get_app_data_dir()
+    base_dir = Path(root_dir) / "screenshots" / "persisted"
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for bi, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") != "image_ref":
+                continue
+            ref = block.get("image_ref") or {}
+            fname = str(ref.get("file") or "")
+            sid = str(ref.get("session_id") or "")
+            data_uri = ""
+            try:
+                fpath = base_dir / sid / fname
+                if fname and fpath.exists():
+                    raw = fpath.read_bytes()
+                    mime = str(ref.get("meta") or "image/png").split(";")[0]
+                    b64 = _base64.b64encode(raw).decode("ascii")
+                    data_uri = f"data:{mime};base64,{b64}"
+                    from app.utils.image_utils import compress_data_uri
+
+                    data_uri = compress_data_uri(data_uri)
+            except OSError:
+                data_uri = ""
+            except Exception:  # noqa: BLE001 — 解码失败降级占位
+                data_uri = ""
+            if data_uri:
+                content[bi] = {"type": "image_url", "image_url": {"url": data_uri}}
+            else:
+                content[bi] = {
+                    "type": "text",
+                    "text": f"[图片已失效：{_ref_basename(fname or 'unknown')}]",
+                }
+    return messages
+
+
+def _ref_basename(p: str) -> str:
+    return Path(p).name
+
+
 def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, bytes]], List[Any]]:
     """提取保活窗外的 UI 态字段，返回 (extras, 轻量消息副本)。
 
@@ -51,13 +180,20 @@ def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, byt
         patch = {f: msg[f] for f in OFFLOAD_FIELDS if msg.get(f)}
         if not patch:
             # 🛡️ 回归探测器：带 _x_idx 的消息说明曾从轻量 blob 读出，若其无任何
-            # 剥离字段却再次进入保存链，意味着调用方拿到了轻量消息列表（正常
-            # 情况下加载入口已全量物化）。该消息的历史 extras 行将在本次
-            # 全删全插中永久丢失——必须告警暴露，不得静默。
+            # 剥离字段却再次进入保存链，意味着调用方拿到了轻量消息列表。
+            # [T2f] save 链已有 _backfill_offload_light_messages 自愈前置：走到
+            # 这里说明 backfill 查无 extras 行（真无历史字段），降 DEBUG 常驻；
+            # 附调用栈（栈底 8 帧）便于定位放行轻量消息的入口。
             if isinstance(msg.get(OFFLOAD_IDX_FIELD), int):
-                logger.warning(
+                import traceback
+
+                frames = traceback.extract_stack()[-8:-1]
+                stack_str = " <- ".join(
+                    f"{fr.filename.replace(chr(92), '/').rsplit('/', 1)[-1]}:{fr.lineno}:{fr.name}" for fr in frames
+                )
+                logger.debug(
                     f"[SessionRepository] 轻量剥离消息(role={msg.get('role')}, idx={i}) "
-                    f"无剥离字段进入保存链，历史 extras 数据将随本次保存丢失"
+                    f"无剥离字段进入保存链（backfill 未命中，保留原样） | stack: {stack_str}"
                 )
             light.append(msg)
             continue
@@ -68,6 +204,73 @@ def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, byt
         extras[i] = {f: serialize(v) for f, v in patch.items()}
         light.append(m2)
     return extras, light
+
+
+def _backfill_offload_light_messages_impl(messages: List[Any], session_id: str, repo) -> Tuple[List[Any], bool]:
+    """[T2f 修复 c] 轻量剥离消息自愈回填（save 链入口前置调用）。
+
+    带 ``_x_idx`` 哨兵且无剥离字段的消息 → 按哨兵 idx 从 session_msg_extras
+    IN 查询回填副本字段（仅补齐消息上缺失/falsy 的字段，不覆盖已有真值）。
+
+    - 全部补齐 → INFO（自愈成功）
+    - 查无 extras 行 → DEBUG 保留原样（可能真是无剥离字段的轻量消息）
+    - 查询异常/读失败（None）→ WARNING 保留原样（不阻塞保存）
+
+    Args:
+        messages: 待保存消息列表（就地修改）
+        session_id: 会话 ID（extras 查询键）
+        repo: SessionRepository 实例（复用其 load_extras_for_session）
+
+    Returns:
+        ``(messages, load_failed)``。load_failed=True 表示 extras 读取失败
+        （异常或 load_extras_for_session 返回 None）——调用方**必须**跳过
+        ``_write_extras``，否则空 extras 会全删该会话已落库的剥离字段。
+    """
+    light_pairs: list[tuple[int, Dict[str, Any]]] = []
+    for i, msg in enumerate(messages):
+        if (
+            isinstance(msg, dict)
+            and isinstance(msg.get(OFFLOAD_IDX_FIELD), int)
+            and not any(msg.get(f) for f in OFFLOAD_FIELDS)
+        ):
+            light_pairs.append((i, msg))
+    if not light_pairs:
+        return messages, False
+    idxs = [i for i, _ in light_pairs]
+    try:
+        extras = repo.load_extras_for_session(session_id, idxs)
+    except Exception as e:  # noqa: BLE001 — 查询失败不阻塞保存
+        logger.warning(f"[SessionRepository] backfill extras 查询失败（保留原样，本轮不写 extras）: {e}")
+        return messages, True
+    if extras is None:
+        # load_extras_for_session 用 None 表示读失败（{} 表示读成功但无行）。
+        # 此处折叠成 {} 会让 save 链把「读失败」当成「无字段」→ 全删旧 extras。
+        logger.warning(
+            f"[SessionRepository] backfill extras 读失败（None，保留原样且本轮不写 extras）"
+            f"（session={session_id[:8]}, idxs={idxs[:8]}）"
+        )
+        return messages, True
+    repaired = 0
+    missing_rows: list[int] = []
+    for i, msg in light_pairs:
+        patch = extras.get(i)
+        if not patch:
+            missing_rows.append(i)
+            continue
+        for f, v in patch.items():
+            if not msg.get(f):
+                msg[f] = v
+        repaired += 1
+    if missing_rows:
+        logger.debug(
+            f"[SessionRepository] backfill: {len(missing_rows)} 条查无 extras 行（idx={missing_rows[:8]}），保留原样"
+        )
+    if repaired:
+        logger.info(
+            f"[SessionRepository] backfill 自愈: {repaired} 条轻量剥离消息已回填"
+            f"（session={session_id[:8]}, idxs={idxs[:8]}）"
+        )
+    return messages, False
 
 
 def extract_first_user_question(messages: Optional[List]) -> Tuple[str, str]:
@@ -262,6 +465,21 @@ class SessionRepository:
                 return True  # 消息未变，跳过昂贵的序列化+压缩+写盘
 
         # message_extras：提取剥离字段（不就地修改 session.messages）
+        # [T2f 修复 c] 前置自愈：轻量剥离消息（带 _x_idx 无字段）先回填 extras
+        backfill_extras_failed = False
+        try:
+            messages, backfill_extras_failed = _backfill_offload_light_messages_impl(messages, session_id, self)
+        except Exception as e:
+            logger.warning(f"[SessionRepository] backfill 自愈失败，按原消息继续保存: {e}")
+            # 自愈异常时 extras 未知，跳过本轮 _write_extras（全删全插会丢字段）
+            backfill_extras_failed = True
+        # [方案 1] vision base64 落盘：data:image 块 → image_ref 文件引用
+        try:
+            from app.utils.utils import get_app_data_dir
+
+            messages = _persist_vision_image_blocks_impl(messages, session_id, get_app_data_dir())
+        except Exception as e:
+            logger.warning(f"[SessionRepository] vision 落盘失败，按原消息继续保存: {e}")
         try:
             extras, light_messages = extract_offload_fields(messages)
         except Exception as e:
@@ -362,10 +580,18 @@ class SessionRepository:
                 # 由此天然覆盖（每次 save 后 extras 与主 blob 严格一致）。
                 # 🛡️ 独立隔离：extras 写入失败只记日志，不得让异常冒泡到外层
                 # try（主 blob 已落库，误报 False 会误导调用方重试/报错）。
-                try:
-                    self._write_extras(session_id, extras)
-                except Exception as e:  # noqa: BLE001
-                    logger.error(f"[SessionRepository] write_extras 调用异常（不影响主保存）: {e}")
+                # 🛡️ backfill 读失败（load_failed）时跳过：此时 extras 为空不代表
+                # 该会话真无字段，全删全插会把已落库的剥离字段一并抹掉。
+                if backfill_extras_failed:
+                    logger.warning(
+                        f"[SessionRepository] backfill 读失败，跳过本轮 extras 写入"
+                        f"（保留库内旧值，session={session_id[:8]}）"
+                    )
+                else:
+                    try:
+                        self._write_extras(session_id, extras)
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(f"[SessionRepository] write_extras 调用异常（不影响主保存）: {e}")
 
             return success
 
@@ -418,7 +644,9 @@ class SessionRepository:
         except Exception as e:
             logger.error(f"[SessionRepository] write_extras 异常: {e}")
 
-    def load_extras_for_session(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict[str, Any]]:
+    def load_extras_for_session(
+        self, session_id: str, idxs: Optional[List[int]] = None
+    ) -> Optional[Dict[int, Dict[str, Any]]]:
         """读取剥离的 UI 态字段（message_extras）。
 
         Args:
@@ -426,15 +654,15 @@ class SessionRepository:
             idxs: 消息绝对索引列表；None 读全部
 
         Returns:
-            {msg_idx: {field: 反序列化后的值}}；异常/未初始化返回 {}
+            {msg_idx: {field: 反序列化后的值}}；「无 extras」返回 {}；
+            **读失败返回 None**（与空结果可区分，消费方按 falsy 零改动即可）
 
         契约：
         - idxs 规模由调用方保证（批次级，≤数百）；不做截断，静默截断反而丢数据
-        - 异常时返回 {}，与「无 extras」不可区分；消费方（渲染/轨迹/导出）
-          均有降级回退，不得依赖本方法区分「读失败」与「真没有」
+        - None=读失败（DB 异常/未初始化）；{}=读成功但该会话无 extras
         """
         if not self.is_initialized or not session_id:
-            return {}
+            return None
         try:
             if idxs:
                 placeholders = ",".join("?" * len(idxs))
@@ -458,24 +686,23 @@ class SessionRepository:
             return result
         except Exception as e:
             logger.error(f"[SessionRepository] load_extras 异常: {e}")
-            return {}
+            return None
 
     def get_full_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """主 blob + extras 合并的全量消息（导出 / agent_trace 深读用）。
 
         get() 每次返回新反序列化的消息列表，就地合并无副作用。
+        extras 读失败（None）→ WARNING + 返回轻量消息（降级不炸）。
         """
         sess = self.get(session_id)
         if not sess:
             return []
         msgs = sess.get("messages", [])
         extras = self.load_extras_for_session(session_id)
-        if not extras:
+        if extras is None:
+            logger.warning(f"[SessionRepository] get_full_messages: {session_id} extras 读取失败，降级返回轻量消息")
             return msgs
-        for i, patch in extras.items():
-            if i < len(msgs) and isinstance(msgs[i], dict):
-                msgs[i].update(patch)
-        return msgs
+        return merge_extras_into(msgs, extras)
 
     def get(self, session_id: str) -> Optional[Dict]:
         """根据 ID 获取单个会话（同时失效内容 hash 缓存）"""
