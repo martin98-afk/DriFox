@@ -78,7 +78,16 @@ def get_app_data_dir() -> Path:
     开发环境: 当前目录/.drifox
     PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox
+
+    测试/多实例隔离: 设置环境变量 DRIFOX_DATA_DIR 后一律使用该目录
+    （优先级最高，置于 frozen 判断之前，UI 驱动库与测试脚手架依赖此隔离）。
     """
+    env_dir = os.environ.get("DRIFOX_DATA_DIR")
+    if env_dir:
+        path = Path(env_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     # 开发环境
     if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
         return Path('.drifox')

@@ -512,24 +512,51 @@ class TraceCardWidget(QWidget):
             # 切换）才补一次投影 —— 比对是 O(1)，不是性能热点。
             if sid and sid == self._active_sid:
                 return
+            # ⚠️ ``_active_sid`` 只在投影**成功**后才更新。旧实现先赋值再
+            # refresh，投影抛异常时 sid 已被污染 → ``_on_tick`` 的判据
+            # ``sid != self._active_sid`` 永远为假 → 该会话永不重试
+            # （用户报「加载历史会话有时还不刷新」，取决于该会话消息是否
+            # 触发投影异常）。异常同时必须就地吞掉：showEvent / 切标签都
+            # 会走到这里，抛穿会让宿主的事件处理中断。
+            try:
+                self._collector.refresh()
+            except Exception as e:  # noqa: BLE001 — 投影失败退化为等心跳重试
+                logger.warning(f"[agent_trace] 会话切换后重投影失败（等心跳重试）: {e}")
+                return
             self._active_sid = sid
-            self._collector.refresh()
+            # ⚠️ 必须**主动全量推送**，不能只依赖 collector 的信号：footer 的
+            # ``_aggregate_records``（每张消息卡片构建 / 落定补刷时都跑）会在
+            # 卡片之前先 refresh 同一个 collector，把它带到目标会话；等这里
+            # 再 refresh 时内容已一致 → ``_sync`` 判为「无变化」→ **一个信号
+            # 都不发**。而 _active_sid 此刻已更新为新值 → 心跳判据变假 →
+            # UI 永久停在上一个会话（用户报「轨迹面板整个不对」，实测卡片
+            # 停在刚新建的空会话上：2 条 0 轮、SYSTEM 显示无提示词）。
+            self._pull_records()
             return
 
         self._unbind_collector_signals()
         self._unbind_backend_stats_signals()
         self._collector = self._hub.collector_for(main_widget)
         self._active_wid = wid if self._collector is not None else ""
-        self._active_sid = sid if self._collector is not None else ""
 
         if self._collector is not None:
-            self._collector.refresh()
+            # 同上：绑定与全量推送之前先确认投影成功，失败则保持 _active_sid
+            # 为旧值（或空串）→ 下次心跳/切标签继续重试。
+            try:
+                self._collector.refresh()
+            except Exception as e:  # noqa: BLE001 — 同上，退化重试
+                logger.warning(f"[agent_trace] 切换 collector 后重投影失败（等心跳重试）: {e}")
+                self._active_sid = ""
+                self._pull_records()
+                return
+            self._active_sid = sid
             self._bind_collector_signals(self._collector)
             self._bind_backend_stats_signals(main_widget)
             self._pull_records()
             self._hub.cleanup_closed(self._active_window_ids())
         else:
             # backend 未就绪：清空展示，等下次 show/tab 切换重试
+            self._active_sid = ""
             self._pull_records()
 
     @staticmethod
@@ -697,9 +724,13 @@ class TraceCardWidget(QWidget):
 
     def _flush_aux_refresh(self) -> None:
         """防抖窗口到期：把 timeline/stats/详情数据源一次性刷到最新。"""
-        self._aux_dirty = False
         if not self.isVisible():
-            return  # 不可见：留 dirty 标志，showEvent 时补刷
+            # ⚠️ 不可见时**不消费** dirty 标志：提前置 False 会让 showEvent 里
+            # 的 ``if self._aux_dirty: self._flush_aux_refresh()`` 永不成立，
+            # 隐藏期间积压的刷新（切走时收到 tailChanged / context_updated）
+            # 就再也不会补上 —— 表现为切回标签后泳道图/统计停在上次的状态。
+            return
+        self._aux_dirty = False
         vis = self._visible()
         self._timeline.set_records(vis)
         self._sync_bounds(vis)

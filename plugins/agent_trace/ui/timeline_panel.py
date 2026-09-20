@@ -105,9 +105,15 @@ def _token_slot_spans(
     widths = [0.0] * n
     fixed: set = set()
 
-    def _free_width(idx: int, rem_px: float, free_idx: List[int]) -> float:
-        """剩余宽度按权重分给 ``idx``（全零权重时均分）。"""
-        free_total = sum(weights[i] for i in free_idx)
+    def _free_width(idx: int, rem_px: float, free_idx: List[int], free_total: float) -> float:
+        """剩余宽度按权重分给 ``idx``（全零权重时均分）。
+
+        ⚠️ ``free_total`` 必须由调用方**每轮算一次**传进来，不能在函数里现算：
+        它与 ``idx`` 无关（整轮所有条目共用同一分母），而旧实现在此对每个 i
+        重新 ``sum`` 一遍 → 每轮 O(n²)。实测 Token 模式 ``paintEvent``：
+        n=1000 时 43ms、n=4000 时 652ms（`_hover_idx` 一变就重绘，鼠标划过
+        整个条带都在掉帧）。
+        """
         if free_total > 0:
             return rem_px * weights[idx] / free_total
         return rem_px / len(free_idx) if free_idx else 0.0
@@ -115,10 +121,11 @@ def _token_slot_spans(
     for _ in range(24):
         free = [i for i in range(n) if i not in fixed]
         rem_px = avail - floor_px * len(fixed)
-        newly = [i for i in free if _free_width(i, rem_px, free) < floor_px]
+        free_total = sum(weights[i] for i in free)
+        newly = [i for i in free if _free_width(i, rem_px, free, free_total) < floor_px]
         if not newly:
             for i in free:
-                widths[i] = _free_width(i, rem_px, free)
+                widths[i] = _free_width(i, rem_px, free, free_total)
             break
         for i in newly:
             fixed.add(i)
@@ -165,8 +172,8 @@ class TimelinePanel(QWidget):
         self._selected_idx: Optional[int] = None
         self._hover_idx: Optional[int] = None
         self._hit_areas: List[Tuple[QRect, int]] = []
-        # 条带像素几何（idx → (bx0, bx1)）仅命中测试用（_hit_areas），
-        # 时间换算统一走线性几何（_t0/_t1 + _track_x/_track_w）
+        # 条带像素几何（idx → (bx0, bx1)）仅命中测试用（_hit_areas）；
+        # 时间换算走 _x_to_time（**按模式分派**：Duration 线性、槽位域反查）
         self._pal = ThemePalette()
         self._base_px = 13
         # ── 选区状态 ──
@@ -178,9 +185,16 @@ class TimelinePanel(QWidget):
         self._drag_from: Optional[int] = None  # 拖拽起点 x
         self._drag_to: Optional[int] = None  # 当前 x
         self._press_hit: Optional[int] = None  # 按下时锁定的命中目标（点击容错）
-        # ── 时间视口（滚轮缩放，两种模式共用同一时间轴）──
-        # None = 显示全量时间轴；(v0, v1) = 当前可见时间窗
+        # ── 缩放窗口：两种语义，按模式选用（互斥）──
+        # Duration：``_view`` 时间窗（条带 x 与时间线性同源）
+        # 等宽 / Token：``_iwin`` 条目窗 [i0, i1)（条带 x 是槽位域：窗内
+        #   条目按序号铺满，与自身时刻无关）
+        #
+        # ⚠️ 槽位模式**不能**沿用时间窗：窗一变、窗内条目数就变，同一 idx 的
+        # 槽序随之漂移 → 缩放的条带乱跳（实测漂移 255~313px、条目被甩出视野）。
+        # 条目窗直接固定「显示哪几条」，槽序才稳定，锚定才有可能。
         self._view: Optional[Tuple[float, float]] = None
+        self._iwin: Optional[Tuple[int, int]] = None
         # 铺满布局（等宽 / Token 共用）：视口内记录按序分槽，paintEvent 每帧重建
         self._slot_order: List[int] = []  # 槽序 → idx
         self._slot_span: Dict[int, Tuple[float, float]] = {}  # idx → (a, b) 归一化
@@ -220,7 +234,7 @@ class TimelinePanel(QWidget):
 
     def set_records(self, records: List[TraceRecord]) -> None:
         self._records = list(records)
-        self._clamp_view()
+        self._clamp_windows()
         self._sync_scrollbar()
         self.update()
 
@@ -231,11 +245,16 @@ class TimelinePanel(QWidget):
     def set_mode(self, mode: str) -> None:
         """宽度模式（顶栏三态按钮驱动）：``equal`` / ``duration`` / ``token``。
 
-        只改宽度语义，时间轴/视口/拖选在三种模式下共用，切换不复位。
+        时间轴 / 拖选在三态共用；缩放窗口按模式换算，切换后视野保持连续。
         """
         if mode not in (MODE_EQUAL, MODE_DURATION, MODE_TOKEN) or mode == self._mode:
             return
+        was_duration = self._mode == MODE_DURATION
         self._mode = mode
+        if was_duration and mode != MODE_DURATION:
+            self._view_to_iwin()
+        elif not was_duration and mode == MODE_DURATION:
+            self._iwin_to_view()
         self._sync_scrollbar()
         self.update()
 
@@ -328,22 +347,25 @@ class TimelinePanel(QWidget):
 
             track_x = LANE_LABEL_W
             track_w = max(40, self.width() - track_x - PAD_R)
-            # 滚轮缩放：有视口用视口，否则全量时间轴
+            # 时间窗：Duration 用 _view（缩放结果），槽位模式仍按 _view 反推
+            # 出时间范围供刻度/拖选使用（槽位模式放大时 _view 由 _iwin 同步）。
             t0, t1 = self._view if self._view else time_bounds(recs)
-            # 记录几何/时间映射，供拖选/缩放换算（x ↔ 时间戳，线性）
+            # 记录几何/时间映射，供拖选/缩放换算（x ↔ 时间戳）
             self._full_t0, self._full_t1 = time_bounds(recs)
             self._track_x, self._track_w, self._t0, self._t1 = track_x, track_w, t0, t1
-            # 铺满布局（等宽 / Token）：与视口相交的记录按序分槽，缩放时只铺窗内记录
+            # 铺满布局（等宽 / Token）：窗内记录按序分槽
+            # ⚠️ 槽位模式的窗口是**条目窗** _iwin（不是时间窗）：时间窗会让
+            # 窗内条目数随缩放变化、槽序漂移，条带乱跳（见 __init__ 注释）。
             self._slot_order = []
             self._slot_span = {}
             self._token_total = 0
             if self._mode != MODE_DURATION:
-                order = []
-                for i, r in enumerate(recs):
-                    s_v = r.start_ts if r.start_ts > 0 else t0
-                    e_v = max(r.span_end_ts, s_v)
-                    if e_v >= t0 and s_v <= t1:
-                        order.append(i)
+                n_all = len(recs)
+                if self._iwin is not None:
+                    i0, i1 = self._iwin
+                    order = list(range(max(0, i0), min(n_all, i1 + 1)))
+                else:
+                    order = list(range(n_all))
                 self._slot_order = order
                 if self._mode == MODE_TOKEN:
                     vals = [max(0, recs[i].tokens) for i in order]
@@ -459,15 +481,20 @@ class TimelinePanel(QWidget):
         self.update()
 
     def focus_window(self, t0: Optional[float], t1: Optional[float], pad_ratio: float = 0.04) -> None:
-        """把时间视口收窄到 ``[t0, t1]``（只看某一轮时用）；None = 复位全量。
+        """把缩放窗口收窄到 ``[t0, t1]``（只看某一轮时用）；None = 复位全量。
 
         ⚠️ 视口两端各留一点余量（``pad_ratio``）：正好卡在边界上时首尾条带会
         贴死轴的两端，看起来像被裁掉。留余量后条带落在中间，仍是「放大到这
-        一轮」。不与全量相同时才设视口，避免出现「放大了但看不出区别」的空
-        缩放状态（此时 ``_clamp_view`` 会把它复位）。
+        一轮」。不与全量相同时才设窗口，避免出现「放大了但看不出区别」的空
+        缩放状态。
+
+        ⚠️ 槽位模式必须换算成**条目窗**（写 ``_iwin``）：只设 ``_view`` 的话
+        刻度轴会跟着变、条带却仍按全量铺满，两者错位（该模式下条带位置由
+        ``_iwin`` 决定）。
         """
         if t0 is None or t1 is None:
             self._view = None
+            self._iwin = None
             self._sync_scrollbar()
             self.update()
             return
@@ -480,9 +507,11 @@ class TimelinePanel(QWidget):
         span = max(1e-3, b - a)
         if span >= full_t1 - full_t0:
             self._view = None  # 与全量等宽 → 无需缩放
+            self._iwin = None
         else:
             a = max(full_t0, min(full_t1 - span, a))
             self._view = (a, a + span)
+            self._view_to_iwin()
         self._sync_scrollbar()
         self.update()
 
@@ -673,20 +702,39 @@ class TimelinePanel(QWidget):
         )
 
     def _sync_scrollbar(self) -> None:
-        """滚动条 ↔ 视口同步：未放大时隐藏，放大后出现且可拖。"""
+        """滚动条 ↔ 缩放窗口同步：未放大时隐藏，放大后出现且可拖。
+
+        两种模式的窗口语义不同，映射也不同：
+        - Duration：时间窗 → 滚动条 = 毫秒位移
+        - 等宽 / Token：**条目窗** → 滚动条 = 条目位移
+        """
         sb = self._scrollbar
-        if self._view is None or not self._records:
-            sb.hide()
-            return
-        full_t0, full_t1 = time_bounds(self._records)
-        full_ms = max(1, int((full_t1 - full_t0) * 1000))
-        span_ms = max(1, int((self._view[1] - self._view[0]) * 1000))
-        sb.blockSignals(True)
-        sb.setRange(0, max(0, full_ms - span_ms))
-        sb.setPageStep(span_ms)
-        sb.setSingleStep(max(1, span_ms // 20))
-        sb.setValue(int((self._view[0] - full_t0) * 1000))
-        sb.blockSignals(False)
+        n_all = len(self._records)
+        if self._mode == MODE_DURATION:
+            if self._view is None or not n_all:
+                sb.hide()
+                return
+            full_t0, full_t1 = time_bounds(self._records)
+            full_ms = max(1, int((full_t1 - full_t0) * 1000))
+            span_ms = max(1, int((self._view[1] - self._view[0]) * 1000))
+            sb.blockSignals(True)
+            sb.setRange(0, max(0, full_ms - span_ms))
+            sb.setPageStep(span_ms)
+            sb.setSingleStep(max(1, span_ms // 20))
+            sb.setValue(int((self._view[0] - full_t0) * 1000))
+            sb.blockSignals(False)
+        else:
+            if self._iwin is None or not n_all:
+                sb.hide()
+                return
+            i0, i1 = self._iwin
+            width = max(1, i1 - i0 + 1)
+            sb.blockSignals(True)
+            sb.setRange(0, max(0, n_all - width))
+            sb.setPageStep(width)
+            sb.setSingleStep(max(1, width // 20))
+            sb.setValue(i0)
+            sb.blockSignals(False)
         self._scrollbar.setGeometry(
             LANE_LABEL_W,
             self.height() - SCROLL_H,
@@ -696,53 +744,233 @@ class TimelinePanel(QWidget):
         sb.show()
 
     def _on_scroll_moved(self, value: int) -> None:
-        """拖滚动条 → 视口平移（缩放状态不变）。"""
-        if self._view is None or not self._records:
-            return
-        full_t0, full_t1 = time_bounds(self._records)
-        span = self._view[1] - self._view[0]
-        v0 = full_t0 + value / 1000.0
-        v0 = max(full_t0, min(full_t1 - span, v0))
-        self._view = (v0, v0 + span)
+        """拖滚动条 → 窗口平移（缩放状态不变）。"""
+        n_all = len(self._records)
+        if self._mode == MODE_DURATION:
+            if self._view is None or not n_all:
+                return
+            full_t0, full_t1 = time_bounds(self._records)
+            span = self._view[1] - self._view[0]
+            v0 = full_t0 + value / 1000.0
+            v0 = max(full_t0, min(full_t1 - span, v0))
+            self._view = (v0, v0 + span)
+        else:
+            if self._iwin is None or not n_all:
+                return
+            i0, i1 = self._iwin
+            width = max(1, i1 - i0 + 1)
+            i0 = max(0, min(n_all - width, int(value)))
+            self._iwin = (i0, i0 + width - 1)
+            self._iwin_to_view()
         self.update()
 
-    def _clamp_view(self) -> None:
-        """数据变化后把视口夹回全量时间轴内（流式追加不打断缩放状态）。"""
-        if self._view is None:
+    def _clamp_windows(self) -> None:
+        """数据变化后夹紧当前模式使用的窗口（两种语义共存，各自独立夹）。"""
+        n_all = len(self._records)
+        if self._view is not None:
+            full_t0, full_t1 = time_bounds(self._records)
+            span = max(1e-6, self._view[1] - self._view[0])
+            if full_t1 - full_t0 <= span:
+                self._view = None
+            else:
+                v0 = max(full_t0, min(full_t1 - span, self._view[0]))
+                self._view = (v0, v0 + span)
+        if self._iwin is not None:
+            i0, i1 = self._iwin
+            width = max(1, i1 - i0 + 1)
+            if width >= n_all:
+                self._iwin = None
+            else:
+                i0 = max(0, min(n_all - width, i0))
+                self._iwin = (i0, i0 + width - 1)
+
+    # ──────────────────── 模式间窗口换算 ────────────────────
+
+    def _iwin_to_view(self) -> None:
+        """条目窗 → 时间窗（供刻度/拖选/模式切换保持视野连续）。
+
+        取窗内条目首尾的占用区间；窗为空则清掉 _view。仅槽位模式的派生值，
+        不反向读取（避免两个源互相同步变成环）。
+        """
+        recs = self._records
+        if self._iwin is None or not recs:
+            self._view = None
             return
-        full_t0, full_t1 = time_bounds(self._records)
-        span = max(1e-6, self._view[1] - self._view[0])
-        if full_t1 - full_t0 <= span:
-            self._view = None  # 数据变少/变空 → 复位
+        i0, i1 = self._iwin
+        i0, i1 = max(0, i0), min(len(recs) - 1, i1)
+        if i0 > i1:
+            self._view = None
             return
-        v0 = max(full_t0, min(full_t1 - span, self._view[0]))
-        self._view = (v0, v0 + span)
+        starts = [recs[i].start_ts for i in range(i0, i1 + 1) if recs[i].start_ts > 0]
+        ends = [max(recs[i].span_end_ts, recs[i].start_ts) for i in range(i0, i1 + 1) if recs[i].start_ts > 0]
+        if not starts:
+            self._view = None
+            return
+        a, b = min(starts), max(ends)
+        if b <= a:
+            b = a + 0.001
+        self._view = (a, b)
+
+    def _view_to_iwin(self) -> None:
+        """时间窗 → 条目窗（Duration 切到槽位模式时换算，保证视野连续）。"""
+        recs = self._records
+        if self._view is None or not recs:
+            self._iwin = None
+            return
+        t0, t1 = self._view
+        hits = [
+            i
+            for i, r in enumerate(recs)
+            if r.start_ts > 0 and max(r.span_end_ts, r.start_ts) >= t0 and r.start_ts <= t1
+        ]
+        if not hits or len(hits) >= len(recs):
+            self._iwin = None
+            return
+        self._iwin = (hits[0], hits[-1])
 
     def wheelEvent(self, event) -> None:  # noqa: N802
-        """滚轮缩放时间窗（以鼠标所在时刻为锚点），两种模式共用。
+        """滚轮缩放（以鼠标所指为锚点），三种模式共用入口、按模式分派窗口。
 
         ⚠️ 锚点必须用全局光标映射：QWheelEvent.pos() 在部分 Windows 环境
         返回错误坐标，导致锚点恒在左端 → 放大永远从时间轴起点开始。
+
+        两种窗口语义（见 ``__init__`` 的 _view / _iwin 说明）：
+        - **Duration**：缩的是**时间窗**。x 与时间线性同源，锚点取光标时刻，
+          新窗按 ``anchor - frac * new_span`` 反推。
+        - **等宽 / Token**：缩的是**条目窗**。条带 x 是槽位域（与自身时刻
+          无关），时间插值算出的锚点毫无意义 —— 旧实现正是这么写的，实测
+          漂移 255~313px、多数条目被甩出视野。改为：锚点 = 光标所压条目的
+          槽序，按同比例收窄窗内条目数，使该条在窗内的相对位置保持不变。
         """
         if not self._records:
             return
-        full_t0, full_t1 = time_bounds(self._records)
-        t0, t1 = self._view if self._view else (full_t0, full_t1)
-        span = max(1e-6, t1 - t0)
+        n_all = len(self._records)
         pos = self.mapFromGlobal(QCursor.pos())
         frac = max(0.0, min(1.0, (pos.x() - self._track_x) / max(1, self._track_w)))
-        anchor = t0 + frac * span
         # 上滚(angleDelta>0)=放大（窗口收窄）；下滚=缩小（窗口放宽）
         k = 0.8 if event.angleDelta().y() > 0 else 1.25
-        new_span = max(0.02, span * k)  # 最小窗口 20ms，防无限放大
-        if new_span >= full_t1 - full_t0:
-            self._view = None  # 窗口已覆盖全量 → 复位
+
+        if self._mode == MODE_DURATION:
+            full_t0, full_t1 = time_bounds(self._records)
+            t0, t1 = self._view if self._view else (full_t0, full_t1)
+            span = max(1e-6, t1 - t0)
+            in_track = self._track_x <= pos.x() <= self._track_x + self._track_w
+            anchor = self._x_to_time(pos.x()) if in_track else t0 + frac * span
+            new_span = max(0.02, span * k)  # 最小窗口 20ms，防无限放大
+            if new_span >= full_t1 - full_t0:
+                self._view = None  # 窗口已覆盖全量 → 复位
+            else:
+                v0 = anchor - frac * new_span
+                v0 = max(full_t0, min(full_t1 - new_span, v0))
+                self._view = (v0, v0 + new_span)
         else:
-            v0 = anchor - frac * new_span
-            v0 = max(full_t0, min(full_t1 - new_span, v0))
-            self._view = (v0, v0 + new_span)
+            i0, i1 = self._iwin if self._iwin else (0, n_all - 1)
+            width = max(1, i1 - i0 + 1)
+            # ── 锚点：光标所指条目 + 光标在该条带内的相对位置 ──
+            # ⚠️ 必须用条带的**真实归一化区间**（_slot_span）反推 cell，不能拿
+            # 「槽序中心 (k+0.5)/n」当锚点：槽序中心与条带中心差 0.04/n，且
+            # 缩放后 n 变小，这个偏差按 -0.5/n′·track_w 累积（实测 n′≈19 时
+            # 单次跳 41px，连滚 5 次上百 px）。
+            hit: Optional[int] = None
+            cell = 0.5
+            for rect, idx in self._hit_areas:
+                if rect.left() <= pos.x() <= rect.right():
+                    hit = idx
+                    break
+            if hit is not None:
+                ab = self._slot_span.get(hit)
+                if ab is not None and ab[1] > ab[0]:
+                    cell = max(0.0, min(1.0, (frac - ab[0]) / (ab[1] - ab[0])))
+            else:
+                # 空白处：按像素位置折算窗内条目，锚定其中心
+                hit = max(i0, min(i1, i0 + int(frac * width)))
+            # ⚠️ 窗口宽度是**整数条数**，缩放进/出必须保证每次至少变化 1 条。
+            # 只写 ``max(1, round(width * k))`` 会有双向不动点：宽度 2 时
+            # round(2*0.8)=2（放大不动）、round(2*1.25)=2（缩小也不动 ——
+            # Python 的 round 把 .5 归到偶数侧）；宽度 1 同样双向锁死
+            # round(0.8)=1、round(1.25)=1。窗口不变 → 滚动条与画面均无变化，
+            # 表现为「放大到最大后就无法缩小」。Duration 分支用浮点新窗
+            # （见上方 ``new_span``）天然无此问题。
+            if k < 1.0:
+                new_width = max(1, min(width - 1, int(round(width * k))))
+            else:
+                new_width = max(width + 1, int(round(width * k)))
+            if new_width >= n_all:
+                self._iwin = None  # 窗口已覆盖全部条目 → 复位
+                self._view = None
+            elif self._mode == MODE_TOKEN:
+                i0n = self._token_window_start(hit, cell, frac, new_width)
+                if i0n is None:
+                    i0n = self._ordinal_window_start(hit, cell, i0, width, new_width)
+                self._iwin = (i0n, i0n + new_width - 1)
+                self._iwin_to_view()
+            else:
+                i0n = self._ordinal_window_start(hit, cell, i0, width, new_width)
+                self._iwin = (i0n, i0n + new_width - 1)
+                self._iwin_to_view()
         self._sync_scrollbar()
         self.update()
+        # ⚠️ 必须显式 accept：Qt5 的 ``QWidget::wheelEvent`` 默认实现是
+        # ``event->ignore()``，未接受的 Wheel 会沿 parent 链向上传播。本面板
+        # 若只做缩放不消费，事件会一路浮到 TabManagerWindow._chat_wrapper，
+        # 命中其 ``QEvent.Wheel`` 分支 → ``_forward_wheel_to_scroll_area()``
+        # → ``chat_scroll_area.wheelEvent(event)``，表现为「滚泳道图，聊天
+        # 消息列表跟着滚」。那条转发分支是给限宽居中留白区用的（留白处没有
+        # 子控件接收滚轮），不能靠它区分，只能在源头消费掉。
+        #
+        # 上面的 ``if not self._records: return`` 早退路径**特意不 accept**：
+        # 无数据时泳道图没有可缩放内容，让事件正常上浮去滚对话区。
+        event.accept()
+
+    def _ordinal_window_start(self, hit: int, cell: float, i0: int, width: int, new_width: int) -> int:
+        """等宽模式：窗内每条等宽 → 序号即位置。
+
+        保持「光标处」在窗内的归一化位置不变：
+        ``(hit - i0 + cell) / width == (hit - i0′ + cell) / new_width``
+        """
+        p_win = (hit - i0 + cell) / max(1, width)
+        start = int(round(hit + cell - p_win * new_width))
+        return max(0, min(len(self._records) - new_width, start))
+
+    def _token_window_start(self, hit: int, cell: float, frac: float, new_width: int) -> Optional[int]:
+        """Token 模式：槽宽 ∝ token 占比 → 必须用**权重前缀和**求解。
+
+        ⚠️ 不能沿用序号公式（``_ordinal_window_start``）：序号空间里相邻两条
+        等距，而 Token 模式一条 20k 的回复与一条 200 的 hook 宽度差百倍，
+        序号位置与像素位置完全不成比例 —— 实测连滚 5 次漂移 323px、锚点条目
+        直接跑出视野。
+
+        目标：让「光标所指的那一点」在新窗内的像素占比仍等于 ``frac``。
+        前缀和 ``P`` 下，该点累计权重 ``A = P[hit] + cell·tokens[hit]``，
+        在窗 ``[i0′, i0′+new_width)`` 内的占比是
+        ``(A − P[i0′]) / (P[i0′+new_width] − P[i0′])``。
+        候选 i0′ 必须满足锚点条目在窗内，即 ``i0′ ∈ [hit−new_width+1, hit]``
+        —— 至多 ``new_width`` 个，逐个求占比取最近者（O(new_width)，滚轮事件
+        量级下可忽略）。
+
+        返回 None = 无法求解（窗内权重全 0，如全是无 token 的条目），
+        由调用方退回序号公式。
+        """
+        recs = self._records
+        n_all = len(recs)
+        pref = [0] * (n_all + 1)
+        for i, r in enumerate(recs):
+            pref[i + 1] = pref[i] + max(0, r.tokens)
+        anchor = pref[hit] + cell * max(0, recs[hit].tokens)
+        lo = max(0, hit - new_width + 1)
+        hi = min(hit, n_all - new_width)
+        if lo > hi:
+            return None
+        best: Optional[Tuple[float, int]] = None
+        for cand in range(lo, hi + 1):
+            total = pref[cand + new_width] - pref[cand]
+            if total <= 0:
+                continue
+            pos = (anchor - pref[cand]) / total
+            d = abs(pos - frac)
+            if best is None or d < best[0]:
+                best = (d, cand)
+        return best[1] if best is not None else None
 
     def _hit_test(self, pos) -> Optional[int]:
         for rect, idx in self._hit_areas:

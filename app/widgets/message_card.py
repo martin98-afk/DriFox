@@ -12456,7 +12456,9 @@ class PlainTextViewer(QWidget):
     def _safe_update_height(self):
         """带存活性检查的 _update_height"""
         try:
-            # 检查 C++ 对象是否已被销毁
+            # 检查 C++ 对象是否已被销毁（text_edit 可能在懒创建前为 None）
+            if self.text_edit is None:
+                return
             if sip.isdeleted(self.text_edit):
                 return
             self._update_height()
@@ -14727,12 +14729,25 @@ class MessageCard(SimpleCardWidget):
         thumb.setFixedHeight(80)
         thumb.setToolTip(os.path.basename(path))
         thumb.setCursor(Qt.PointingHandCursor)
-        thumb.mousePressEvent = lambda e, pm=pixmap: self._show_image_dialog(pm)
+        # [方案 2] 闭包只捕获 (source, data_uri) 源引用，点击时现解码全尺寸图——
+        # 原始 pixmap 随本函数返回出作用域释放，不再被闭包长期持有
+        # （3840×2160 解码后 ≈33MB RGBA/张，多张图片会话即数百 MB 常驻）。
+        thumb.mousePressEvent = lambda e, src=source, uri=data_uri: self._show_image_dialog(src, uri)
         return thumb
 
-    def _show_image_dialog(self, pixmap):
-        """点击缩略图放大查看（Mask 遮罩弹窗，完整等比显示、无滚动、点遮罩关闭）"""
-        if pixmap is None or pixmap.isNull():
+    def _show_image_dialog(self, source, data_uri):
+        """点击缩略图放大查看（Mask 遮罩弹窗，完整等比显示、无滚动、点遮罩关闭）
+
+        Args:
+            source: 图片本地路径（可能已失效，None/空串跳过）。
+            data_uri: base64 data URI（source 无效时的兜底来源）。
+        """
+        pixmap = QPixmap()
+        if source:
+            pixmap.load(source)
+        elif data_uri:
+            pixmap.loadFromData(QByteArray.fromBase64(data_uri.split("base64,", 1)[-1].encode("ascii")))
+        if pixmap.isNull():
             return
         _ImagePreviewDialog(pixmap, parent=self.window()).exec_()
 
@@ -17892,12 +17907,25 @@ class MessageCard(SimpleCardWidget):
         # 断开所有信号连接（打破引用环路）
         self._disconnect_all_signals()
 
+        # [方案 4] viewer 回池：cleanup 时优先把 CodeWebViewer 归还复用池。
+        # detach 成功自带 self.viewer=None → 下方 viewer 清理分支自然跳过；
+        # detach 失败路径（None/流式/user 卡/非 CodeWebViewer/入池拒绝）自然回归
+        # 原销毁行为。红线：禁止在 detach 失败路径补 deleteLater——detach 内部
+        # 已处理失败分支的销毁，此处补会造成 double free。
+        if self.viewer is not None:
+            self.detach_viewer()
+
         # 调用 viewer 的清理方法（先清理后释放引用）
-        if hasattr(self.viewer, "cleanup"):
-            try:
-                self.viewer.cleanup()
-            except RuntimeError:
-                pass
+        # 🛡️ viewer 为 sip-deleted wrapper 时 hasattr 会抛 RuntimeError（既有隐患），
+        # 这里整体兜底；alive viewer 的清理见内层 try。
+        try:
+            if hasattr(self.viewer, "cleanup"):
+                try:
+                    self.viewer.cleanup()
+                except RuntimeError:
+                    pass
+        except RuntimeError:
+            pass
         # [B4-强回收] 防悬挂：MessageCard 清理时同步清零 renderer PID
         self._renderer_pid = 0
         self.viewer = None  # 释放 viewer 引用，允许 GC
