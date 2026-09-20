@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
-- **斜杠命令卡片置顶 (pin)** (`app/widgets/cards/floating/command_card.py`, `tests/widgets/test_command_card_pin.py` 新增): 命令/技能/智能体条目可置顶，置顶项恒排列表最前并独立成「置顶区」（与下方区域间自动出分隔线），其余排序不变。交互与历史会话卡置顶同范式：悬停条目右侧浮现置顶按钮（`get_icon("置顶")`），已置顶常显、tooltip「置顶/取消置顶」；点击按钮只切换置顶不触发命令执行（QPushButton 子控件自行消费鼠标事件），切换后保持当前搜索条件立即重排。状态持久化到 `app_state.json` 新键 `command_pins`（元素为 `type:name` 复合键，同名跨类型互不影响），不进设置界面、不参与配置同步；置顶集合随每次 `load_items` 从 AppState 进程内缓存读取，多窗口即时一致。
+- **工作台任务列表视觉优化** (`app/widgets/workbench_panel.py`, `tests/widgets/test_workbench_panel.py`): 任务条目全部改单行省略（复用共享 `_ElidedLabel`，悬浮显示全文），长任务不再换行撑高、把进行中条目挤出首屏；进行中条目加左侧琥珀竖条 + 淡琥珀底强调，扫视焦点明确；头部统计升级为「百分比 · done/total」、进度条 3→4px，完成度一眼可读；pending 圆点弃用按优先级红/黄/绿着色（易误读为出错状态），恒为中性灰；行 tooltip 合一为单气泡（优先级 + 任务全文，避免优先级/内容两个气泡先后弹出）。交互增强：header 整行左键可折叠/展开（不再必须点按钮）；进行中条目置顶为常驻条（支持多条），置顶是额外快照、下方列表保持完整原序且一律普通行样式；置顶容器以淡琥珀底卡 + 左琥珀竖条 + 600 字重与列表视觉区分，避免同任务重复出现的观感；折叠态仍可见执行中任务，折叠高度计算计入常驻条；折叠态推送新任务不再强制展开。任务区测试新增 7 用例（单行省略 / 进行中强调 / 中性圆点 / 折叠可见 / 高度计算 / 整行点击 / 防累积）。
+
+- **斜杠命令卡片置顶 (pin)**(`app/widgets/cards/floating/command_card.py`, `tests/widgets/test_command_card_pin.py` 新增): 命令/技能/智能体条目可置顶，置顶项恒排列表最前并独立成「置顶区」（与下方区域间自动出分隔线），其余排序不变。交互与历史会话卡置顶同范式：悬停条目右侧浮现置顶按钮（`get_icon("置顶")`），已置顶常显、tooltip「置顶/取消置顶」；点击按钮只切换置顶不触发命令执行（QPushButton 子控件自行消费鼠标事件），切换后保持当前搜索条件立即重排。状态持久化到 `app_state.json` 新键 `command_pins`（元素为 `type:name` 复合键，同名跨类型互不影响），不进设置界面、不参与配置同步；置顶集合随每次 `load_items` 从 AppState 进程内缓存读取，多窗口即时一致。
 
 - **会话分享 HTML 样式主题化** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 分享导出的 HTML 此前只从主题取 9 个色值，其余颜色（标题、加粗、表头、行内代码、代码块底色、工具块、侧栏高亮）全部硬编码为深色主题假设，导致浅色主题下出现白底白字、标题与表头不可见。现全部改为引用主题 token（`user_card_*` / `assistant_card_*` / `syntax_*` / `card_bg_dim` / `divider_color` 等），深浅主题各自正确。同时对齐 in-app 观感：用户卡用 `user_card_bg` 蓝底、助手卡用 `assistant_card_bg` 暖底（此前两者同色仅靠左边框区分）；代码块接入 `codehilite` + pygments，亮色走 `friendly`、深色走 `dracula`，与 in-app 同一对风格。
 

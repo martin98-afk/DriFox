@@ -20879,6 +20879,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.backend.approve_tool_permission(tool_call_id, True, False)
             elif "【本次会话允许】" in answer:
                 self.backend.approve_tool_permission(tool_call_id, False, True)
+            elif "【确认删除】" in answer:
+                self.backend.approve_tool_permission(tool_call_id, False, False)
             else:
                 self.backend.deny_tool_permission(tool_call_id)
             self._focus_input_if_active()
@@ -20973,13 +20975,45 @@ class OpenAIChatToolWindow(ToolWindow):
             arg_str = str(arguments)[:160] if arguments else ""
             if arguments and len(str(arguments)) > 160:
                 arg_str += "..."
-            question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数摘要: {arg_str}\n\n点击“预览”可查看完整参数。"
-            options = [
-                {"label": "允许", "description": ""},
-                {"label": "允许且该轮对话自动允许", "description": ""},
-                {"label": "本次会话允许", "description": ""},
-                {"label": "不允许", "description": ""},
-            ]
+
+            # 删除类命令走专用审批：只留「确认删除/取消」，并列出待删明细
+            # （复用 sandbox 快照同款路径解析；明细解析失败则回退通用审批卡）
+            delete_mode = False
+            delete_detail = ""
+            try:
+                from app.tools.sandbox import delete_targets, is_delete_command
+
+                command = str((arguments or {}).get("command") or "")
+                if command and is_delete_command(command):
+                    targets = delete_targets(command)
+                    existing = targets.get("existing") or []
+                    missing_count = len(targets.get("missing") or [])
+                    lines = [f"  • {p}" for p in existing[:10]]
+                    if len(existing) > 10:
+                        lines.append(f"  • …等共 {len(existing)} 项")
+                    if missing_count:
+                        lines.append(f"  （另有 {missing_count} 项路径当前不存在）")
+                    if not lines:
+                        lines.append("  （未解析到具体路径，请通过「预览」确认命令内容）")
+                    delete_detail = "\n".join(lines)
+                    delete_mode = True
+            except Exception as e:  # noqa: BLE001 - 明细解析失败回退通用审批卡
+                logger.warning(f"[Permission] 删除明细解析失败: {e}")
+
+            if delete_mode:
+                question_text = f"⚠️ 确认删除以下内容？\n{delete_detail}\n\n命令: {arg_str}"
+                options = [
+                    {"label": "确认删除", "description": ""},
+                    {"label": "取消", "description": ""},
+                ]
+            else:
+                question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数摘要: {arg_str}\n\n点击“预览”可查看完整参数。"
+                options = [
+                    {"label": "允许", "description": ""},
+                    {"label": "允许且该轮对话自动允许", "description": ""},
+                    {"label": "本次会话允许", "description": ""},
+                    {"label": "不允许", "description": ""},
+                ]
             self._question_floating_widget.show_question(
                 [{"question": question_text, "options": options, "multiple": False}],
                 show_custom_input=False,

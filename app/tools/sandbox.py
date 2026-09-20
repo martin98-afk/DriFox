@@ -12,6 +12,7 @@
 本模块不弹 UI、不做 OS 级隔离；审批呈现由 chat_worker 既有弹窗链负责。
 设计文档：docs/superpowers/specs/2026-09-18-sandbox-l1-security-center-design.md
 """
+
 from __future__ import annotations
 
 import copy
@@ -40,6 +41,7 @@ DEFAULT_CONFIG = {
     "network": {"enabled": True, "blacklist_domains": []},
     "sys_tools_bypass": False,
     "delete_protection": True,
+    "delete": {"exempt_paths": []},
     "job_limits": {"memory_mb": 2048, "active_process": 64, "cpu_time_ms": 0},
     "backup_limit_mb": 3000,
 }
@@ -124,6 +126,7 @@ class SandboxConfig:
 # 分组名与插件侧 GROUP_WRITE/GROUP_READ（plugins/system-tools/tools/file_tools.py:109）
 # 对齐；不在此写死工具名清单——插件增删热生效，写死必漏。
 
+
 def _norm(p: Union[str, Path]) -> str:
     """展开环境变量/~ 后 resolve，统一大小写与分隔符（Windows 比较用）"""
     raw = str(p)
@@ -185,9 +188,7 @@ def check_path(
 # 命令边界（递归解壳 + 用户名单叠加）
 # ============================================================
 # 系统级工具：沙箱管不住其内部行为（如 wsl 内的 Linux 侧操作）
-SYS_LEVEL_TOOLS = frozenset(
-    {"wsl", "wmic", "sc", "reg", "schtasks", "diskpart", "bcdedit"}
-)
+SYS_LEVEL_TOOLS = frozenset({"wsl", "wmic", "sc", "reg", "schtasks", "diskpart", "bcdedit"})
 
 
 def _first_token(command: str) -> str:
@@ -234,12 +235,31 @@ def check_command(command: str, cfg: Optional[SandboxConfig] = None) -> Verdict:
 # L1 是特征检测不是 egress 隔离，目标是拦误用（如 curl -d @secret.txt），
 # 不追求绕过完备性；宁多问一次。
 _NET_TOOL_TOKENS = (
-    "curl", "wget", "invoke-webrequest", "invoke-restmethod", "iwr", "irm",
-    "nc", "ncat", "netcat", "ftp", "scp", "bitsadmin", "certutil",
+    "curl",
+    "wget",
+    "invoke-webrequest",
+    "invoke-restmethod",
+    "iwr",
+    "irm",
+    "nc",
+    "ncat",
+    "netcat",
+    "ftp",
+    "scp",
+    "bitsadmin",
+    "certutil",
 )
 _NET_UPLOAD_FLAGS = (
-    "-d", "--data", "--data-binary", "--data-raw", "-f", "--form",
-    "--upload-file", "-t", "--post-file", "--body",
+    "-d",
+    "--data",
+    "--data-binary",
+    "--data-raw",
+    "-f",
+    "--form",
+    "--upload-file",
+    "-t",
+    "--post-file",
+    "--body",
 )
 _URL_PATTERN = re.compile(r"https?://[^\s\"']+")
 
@@ -328,6 +348,8 @@ def sandbox_check_tool(tool_name: str, arguments: dict, cfg: Optional[SandboxCon
     command = args.get("command")
     if isinstance(command, str) and command.strip():
         verdict = check_command(command, cfg)
+        if verdict == CONFIRM and is_delete_command(command) and delete_exempt(command, cfg):
+            return ALLOW
         if verdict == ALLOW:
             net = check_network(command, cfg)
             return net if net else ALLOW
@@ -349,9 +371,7 @@ def sandbox_check_tool(tool_name: str, arguments: dict, cfg: Optional[SandboxCon
 # ============================================================
 # 删除保护（审批放行后、执行前快照）
 # ============================================================
-DELETE_COMMANDS = frozenset(
-    {"rm", "del", "erase", "rd", "rmdir", "deltree", "unlink", "remove-item", "ri"}
-)
+DELETE_COMMANDS = frozenset({"rm", "del", "erase", "rd", "rmdir", "deltree", "unlink", "remove-item", "ri"})
 
 # rm/del 等常见 flag（快照时剔除）
 _DELETE_FLAGS = {"-r", "-rf", "-f", "-fr", "-d", "-rd", "-recursive", "/s", "/q", "/f"}
@@ -375,6 +395,76 @@ def _strip_quotes(token: str) -> str:
     if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "\"'":
         return stripped[1:-1]
     return stripped
+
+
+def delete_targets(command: str) -> dict:
+    """解析删除命令的目标路径（供审批展示与豁免判定共用）
+
+    Returns:
+        {"existing": [Path, ...], "missing": [str, ...]}——
+        existing 为真实存在的目标（去重），missing 为命令里写了但当前不存在的候选
+    """
+    result: dict = {"existing": [], "missing": []}
+    if not is_delete_command(command):
+        return result
+    seen: set = set()
+    for token in _split_tokens(command):
+        raw = _strip_quotes(token)
+        lowered = raw.lower()
+        if lowered in _DELETE_FLAGS or lowered in DELETE_COMMANDS:
+            continue
+        if lowered.startswith(("-", "/")) and not _looks_like_path(raw):
+            continue
+        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试
+        candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
+        for item in candidates:
+            item = _strip_quotes(item)
+            if not item or item.lower() in DELETE_COMMANDS or item.lower() in _DELETE_FLAGS:
+                continue
+            if item.startswith(("-", "/")) and not _looks_like_path(item):
+                continue
+            candidate = Path(os.path.expandvars(item)).expanduser()
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.exists():
+                result["existing"].append(candidate)
+            else:
+                result["missing"].append(item)
+    return result
+
+
+def _looks_like_path(token: str) -> bool:
+    """-/开头但形似路径的特例（/s /q 是 flag，/tmp/x 是 Unix 绝对路径）
+
+    含路径分隔符或扩展名点号才视为路径，否则按 flag 处理。
+    """
+    return ("/" in token[1:] or "\\" in token or "." in token[1:]) and len(token) > 2
+
+
+def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None) -> bool:
+    """删除豁免判定：命令的删除目标全部落在豁免路径内时，confirm 降级为 allow
+
+    豁免条目支持绝对路径（workdir 外）或相对 workdir 的路径（如 tests/）。
+    任一目标不在豁免内即不豁免（宁多问一次）；无目标可解析则不豁免。
+    """
+    cfg = cfg or SandboxConfig.get_instance()
+    exempt = [str(p) for p in (cfg.get("delete.exempt_paths") or [])]
+    if not exempt:
+        return False
+    targets = delete_targets(command)
+    candidates = targets["existing"] + [Path(m) for m in targets["missing"]]
+    if not candidates:
+        return False
+    workdir = _current_workdir()
+    for target in candidates:
+        norm_target = _norm(target)
+        if not any(
+            _under(norm_target, _norm(item)) or _under(norm_target, _norm(workdir / str(item))) for item in exempt
+        ):
+            return False
+    return True
 
 
 def is_delete_command(command: str) -> bool:

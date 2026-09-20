@@ -382,6 +382,7 @@ class LLMSettingsCard(SystemCardFrame):
             "系统",
             (
                 ("common", "通用", FluentIcon.SETTING),
+                ("security", "安全中心", "锁定"),
                 ("notify", "通知", "提示"),
                 ("update", "更新", FluentIcon.UPDATE),
             ),
@@ -785,6 +786,14 @@ class LLMSettingsCard(SystemCardFrame):
         )
         render_layout.addWidget(self.renderAdvancedCard)
         render_layout.addStretch(1)
+
+        # ════ 安全中心页（沙箱开关 / 文件与命令名单 / 网络黑名单 / 删除保护 / 备份）════
+        security_layout = self._page_layouts["security"]
+        from app.widgets.cards.settings.security_center_card import SecurityCenterCard
+
+        self.securityCenterCard = SecurityCenterCard()
+        security_layout.addWidget(self.securityCenterCard)
+        security_layout.addStretch(1)
 
         # ════ 通知页 ════
         notify_layout = self._page_layouts["notify"]
