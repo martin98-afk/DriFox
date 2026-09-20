@@ -354,3 +354,46 @@ class FileOperationRecorder:
     def _sanitize_filename(self, filename: str) -> str:
         """移除文件名中不合法的字符"""
         return _SANITIZE_FILENAME_PATTERN.sub("_", filename)
+
+
+def enforce_backup_limit(backup_base_dir, limit_mb: float) -> list:
+    """按 mtime 先进先出清理备份，直到总量 <= limit_mb
+
+    limit_mb<=0 表示清空全部。返回被删文件路径列表。
+    模块级独立函数：设置页手动触发 / 启动期触发均可调用。
+    """
+    base = Path(backup_base_dir)
+    if not base.exists():
+        return []
+    try:
+        files = [f for f in base.rglob("*") if f.is_file()]
+    except OSError as e:
+        logger.warning(f"[FileRecorder] 备份目录扫描失败: {e}")
+        return []
+    if not files:
+        return []
+
+    limit_bytes = int(float(limit_mb) * 1024 * 1024)
+    total = 0
+    for f in files:
+        try:
+            total += f.stat().st_size
+        except OSError:
+            continue
+    if limit_bytes > 0 and total <= limit_bytes:
+        return []
+
+    removed: list = []
+    for f in sorted(files, key=lambda x: x.stat().st_mtime):
+        if limit_bytes > 0 and total <= limit_bytes:
+            break
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            total -= size
+            removed.append(f)
+        except OSError as e:
+            logger.warning(f"[FileRecorder] 备份清理失败: {f} ({e})")
+    if removed:
+        logger.info(f"[FileRecorder] 备份 FIFO 清理 {len(removed)} 个文件，剩余 {total / 1024 / 1024:.1f} MB")
+    return removed
