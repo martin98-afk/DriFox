@@ -4907,15 +4907,37 @@ class OpenAIChatWorker(QThread):
         if tool_name in ToolRegistry.get_instance().team_only_tools():
             return True
 
-        if not self.permission_check_callback:
+        # 沙箱检查（L1）：deny 直接拒；confirm 强制走审批弹窗（绕过工具名缓存）
+        sandbox_verdict = self._sandbox_verdict(tool_name, arguments)
+        if sandbox_verdict == "deny":
+            logger.info(f"[Sandbox] tool={tool_name} 被沙箱拦截")
+            self._emit_with_callback(
+                "tool_result_received",
+                self.tool_result_received,
+                tool_call_id,
+                tool_name,
+                arguments,
+                type("ToolResult", (), {"success": False, "error": f"命令被安全中心拦截: {arguments}"})(),
+            )
+            results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": f"Error: blocked by security center (sandbox): {arguments}",
+                    "round_id": round_id,
+                }
+            )
             return True
 
-        # 检查权限缓存
-        if self._permission_cache.is_allowed(tool_name):
+        if sandbox_verdict == "confirm":
+            permission_result = "ask"
+        elif not self.permission_check_callback:
+            return True
+        elif self._permission_cache.is_allowed(tool_name):
             logger.info(f"[Permission] 使用缓存: tool={tool_name}")
             return True
-
-        permission_result = self.permission_check_callback(tool_name, arguments)
+        else:
+            permission_result = self.permission_check_callback(tool_name, arguments)
 
         if permission_result == "deny":
             # 🛡️ 工具被关闭/禁用：直接拒绝执行，追加错误结果，通知 UI
@@ -4993,7 +5015,23 @@ class OpenAIChatWorker(QThread):
                 )
                 return True  # 已处理，继续（但不会执行工具）
 
+            self._sandbox_after_approve(tool_name, arguments)
+
         return True  # 允许执行
+
+    def _sandbox_verdict(self, tool_name, arguments):
+        """沙箱判定；失败放行（fail-open：安全增强不可阻断正常使用）"""
+        try:
+            from app.tools.sandbox import sandbox_check_tool
+
+            return sandbox_check_tool(tool_name, dict(arguments or {}))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Sandbox] 检查失败放行: {e}")
+            return None
+
+    def _sandbox_after_approve(self, tool_name, arguments):
+        """审批通过后的钩子（删除保护快照接这里）"""
+        return None
 
     def _execute_tool(self, tool_name, arguments, tool_call_id):
         """执行单个工具调用。"""

@@ -269,3 +269,74 @@ def check_network(command: str, cfg: Optional[SandboxConfig] = None) -> Optional
     if urls:
         return CONFIRM
     return None
+
+
+# ============================================================
+# 工具路由（worker 层唯一入口）
+# ============================================================
+# 分组名与插件侧 GROUP_WRITE/GROUP_READ（plugins/system-tools/tools/file_tools.py:109）
+# 对齐；"文件写入" 同时是 FileRecorder 追踪组的同源字符串。
+# 不写死工具名清单——插件增删热生效，写死必漏。
+GROUP_WRITE_NAME = "文件写入"
+GROUP_READ_NAME = "文件读取"
+
+
+def _tools_in(group_name: str) -> frozenset:
+    """registry 分组成员查询；registry 不可用时返回空集（fail-open）"""
+    try:
+        from app.tools.registry import ToolRegistry
+
+        return ToolRegistry.get_instance().tools_in_group(group_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[Sandbox] registry 分组查询失败({group_name}): {e}")
+        return frozenset()
+
+
+def _current_workdir() -> Path:
+    """当前有效工作目录：BackgroundTaskManager 单例通道，回退 cwd"""
+    try:
+        from app.tools.bg_manager import BackgroundTaskManager
+
+        inst = BackgroundTaskManager._instance
+        if inst is not None:
+            wd = inst._effective_workdir()
+            if wd is not None:
+                return Path(wd)
+    except Exception:  # noqa: BLE001
+        pass
+    return Path.cwd()
+
+
+def sandbox_check_tool(tool_name: str, arguments: dict, cfg: Optional[SandboxConfig] = None) -> Verdict:
+    """worker 层唯一入口：工具名 + 参数 → 三分判定（deny/confirm/allow）
+
+    路由规则（元数据驱动，不写死工具名）：
+    - 参数带 command 键 → 命令工具 → check_command + check_network
+    - tool_name ∈ registry "文件写入" 分组 → check_path(write)
+    - tool_name ∈ registry "文件读取" 分组 → check_path(read)
+    - 其余 → allow
+    """
+    cfg = cfg or SandboxConfig.get_instance()
+    if not cfg.get("sandbox_enabled"):
+        return ALLOW
+    args = dict(arguments or {})
+
+    command = args.get("command")
+    if isinstance(command, str) and command.strip():
+        verdict = check_command(command, cfg)
+        if verdict == ALLOW:
+            net = check_network(command, cfg)
+            return net if net else ALLOW
+        return verdict
+
+    if tool_name in _tools_in(GROUP_WRITE_NAME):
+        mode = "write"
+    elif tool_name in _tools_in(GROUP_READ_NAME):
+        mode = "read"
+    else:
+        return ALLOW
+
+    path = args.get("path") or args.get("file_path") or ""
+    if not path:
+        return ALLOW
+    return check_path(_current_workdir(), str(path), mode, cfg)
