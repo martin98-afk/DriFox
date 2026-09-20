@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional, Union
 
@@ -221,3 +222,50 @@ def check_command(command: str, cfg: Optional[SandboxConfig] = None) -> Verdict:
     if verdict == "confirm":
         return CONFIRM
     return ALLOW
+
+
+# ============================================================
+# 网络外传（弱防护）
+# ============================================================
+# L1 是特征检测不是 egress 隔离，目标是拦误用（如 curl -d @secret.txt），
+# 不追求绕过完备性；宁多问一次。
+_NET_TOOL_TOKENS = (
+    "curl", "wget", "invoke-webrequest", "invoke-restmethod", "iwr", "irm",
+    "nc", "ncat", "netcat", "ftp", "scp", "bitsadmin", "certutil",
+)
+_NET_UPLOAD_FLAGS = (
+    "-d", "--data", "--data-binary", "--data-raw", "-f", "--form",
+    "--upload-file", "-t", "--post-file", "--body",
+)
+_URL_PATTERN = re.compile(r"https?://[^\s\"']+")
+
+
+def check_network(command: str, cfg: Optional[SandboxConfig] = None) -> Optional[Verdict]:
+    """网络外传判定：命中返回 CONFIRM，无风险返回 None"""
+    cfg = cfg or SandboxConfig.get_instance()
+    if not cfg.get("sandbox_enabled") or not cfg.get("network.enabled"):
+        return None
+    if not command:
+        return None
+
+    lowered = command.lower()
+    has_net_tool = any(token in lowered for token in _NET_TOOL_TOKENS)
+    urls = _URL_PATTERN.findall(command)
+    if not has_net_tool and not urls:
+        return None
+
+    # 域名黑名单（后缀匹配）
+    for url in urls:
+        host = re.sub(r"^https?://", "", url).split("/")[0].split(":")[0].lower()
+        for domain in cfg.get("network.blacklist_domains") or []:
+            d = str(domain).lower().lstrip(".")
+            if d and (host == d or host.endswith("." + d)):
+                return CONFIRM
+
+    # 上传/POST 体形态
+    if has_net_tool and any(f" {flag}" in lowered for flag in _NET_UPLOAD_FLAGS):
+        return CONFIRM
+    # 带 URL 的网络命令一律过一道审批（弱防护定位）
+    if urls:
+        return CONFIRM
+    return None
