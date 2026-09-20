@@ -22,6 +22,9 @@ from loguru import logger
 # Windows 常量与结构
 # ============================================================
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+JOB_OBJECT_LIMIT_JOB_TIME = 0x00000004
 JobObjectExtendedLimitInformation = 9
 
 PROCESS_SET_QUOTA = 0x0100
@@ -98,32 +101,69 @@ class ProcessJob:
             ...
         # 退出 with 时关闭 Job 句柄 → kill-on-close 杀灭全部进程树
 
+    可选资源限额（memory_mb / active_process / cpu_time_ms），0 表示不限。
     非 Windows 平台：所有操作均为安全 no-op（is_supported() == False）。
     """
 
-    __slots__ = ("_handle", "_closed")
+    __slots__ = ("_handle", "_closed", "_info", "_last_limit_flags")
 
-    def __init__(self, name: Optional[str] = None):
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        memory_mb: int = 0,
+        active_process: int = 0,
+        cpu_time_ms: int = 0,
+    ):
+        """memory_mb/active_process/cpu_time_ms：0 表示不限该项。
+
+        限额设置失败 → 降级为仅 KILL_ON_JOB_CLOSE（fail-open，日志告警）；
+        降级仍失败才抛 OSError。
+        """
         self._handle = None
         self._closed = False
+        self._info = None
+        self._last_limit_flags = 0
         if _kernel32 is None:
             return
         handle = _kernel32.CreateJobObjectW(None, name or None)
         if not handle:
             err = ctypes.get_last_error()
             raise OSError(err, f"CreateJobObjectW failed: {err}")
-        # 配置 kill-on-close：Job 句柄关闭时自动终止所有关联进程
         info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if memory_mb > 0:
+            info.ProcessMemoryLimit = int(memory_mb) * 1024 * 1024
+            flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        if active_process > 0:
+            info.BasicLimitInformation.ActiveProcessLimit = int(active_process)
+            flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        if cpu_time_ms > 0:
+            # PerJobUserTimeLimit 单位 100ns
+            info.BasicLimitInformation.PerJobUserTimeLimit = int(cpu_time_ms) * 10_000
+            flags |= JOB_OBJECT_LIMIT_JOB_TIME
+        info.BasicLimitInformation.LimitFlags = flags
         ok = _kernel32.SetInformationJobObject(
             handle, JobObjectExtendedLimitInformation,
             ctypes.byref(info), ctypes.sizeof(info),
         )
         if not ok:
-            _kernel32.CloseHandle(handle)
+            # 降级：只保留 kill-on-close 再设一次
             err = ctypes.get_last_error()
-            raise OSError(err, f"SetInformationJobObject failed: {err}")
+            logger.warning(f"[ProcessJob] 限额设置失败({err})，降级为仅 KILL_ON_JOB_CLOSE")
+            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            ok = _kernel32.SetInformationJobObject(
+                handle, JobObjectExtendedLimitInformation,
+                ctypes.byref(info), ctypes.sizeof(info),
+            )
+            if not ok:
+                _kernel32.CloseHandle(handle)
+                err = ctypes.get_last_error()
+                raise OSError(err, f"SetInformationJobObject failed: {err}")
+            flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         self._handle = handle
+        self._info = info
+        self._last_limit_flags = flags
 
     @staticmethod
     def is_supported() -> bool:
