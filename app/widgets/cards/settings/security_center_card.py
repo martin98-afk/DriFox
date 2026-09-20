@@ -53,6 +53,9 @@ class _ListEditorCard(QWidget):
     def __init__(self, title: str, config_key: str, placeholder: str, parent=None, show_title: bool = True):
         super().__init__(parent)
         self._key = config_key
+        # 内容变化回调：折叠卡模式下由 SecurityCenterCard 绑定到
+        # ExpandGroupSettingCard._adjustViewSize，条目增删后重算展开高度
+        self.on_change = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         if show_title:
@@ -214,6 +217,8 @@ class _ListEditorCard(QWidget):
             wrapper.setFixedHeight(32)
             wrapper.setLayout(row)
             self._rows_layout.addWidget(wrapper)
+        if callable(self.on_change):
+            self.on_change()
 
 
 class SecurityCenterCard(QWidget):
@@ -239,6 +244,15 @@ class SecurityCenterCard(QWidget):
             """把名单编辑区包成折叠卡：收起一行，点击展开编辑（对齐设置页范式）"""
             card = ExpandGroupSettingCard(icon, title, content)
             card.addGroupWidget(editor)
+
+            from PyQt5.QtCore import QTimer
+
+            # 条目增删后内容高度变化，展开态需要重算卡片高度，否则新行被滚动区吞掉。
+            # 延迟一拍：deleteLater 的旧行 / 布局失效需先在事件循环落定，sizeHint 才准
+            def _sync_height():
+                QTimer.singleShot(0, card._adjustViewSize)
+
+            editor.on_change = _sync_height
             return card
 
         self._path_white = _ListEditorCard(
