@@ -24,16 +24,37 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from qfluentwidgets import ScrollArea
+from qfluentwidgets import ScrollArea, TransparentToolButton
 from app.core.commands.command_manager import CommandManager, CommandParameter, CommandType
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+from app.utils import app_state as _app_state
 from app.utils.design_tokens import CardStyles, Colors, font_size_css, get_unified_scrollbar_style
-from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
+from app.utils.utils import get_font_family_css, get_icon, get_local_skills, get_skill_by_name
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.elided_label import _ElidedLabel
 
 ITEM_HEIGHT = 36  # 每个 item 高度
 MAX_VISIBLE_ITEMS = 8  # 最多同时显示 item 数
+
+# ── 命令置顶（pin）────────────────────────────────────────────
+# 置顶状态存 app_state.json 的 command_pins 键（元素为 "type:name" 复合键），
+# 与历史会话卡置顶同范式：置顶项排在列表最前，独立分区，图标常显。
+PIN_STATE_KEY = "command_pins"  # AppState 存储键
+
+
+def _pin_key(item: Dict[str, str]) -> str:
+    """置顶唯一键：type:name（同名跨类型项互不影响）"""
+    return f"{item['type']}:{item['name']}"
+
+
+def get_pinned_keys() -> set:
+    """读取置顶键集合（AppState 进程内缓存读取，异常/脏数据回退空集）"""
+    try:
+        pins = _app_state.get(PIN_STATE_KEY, [])
+        return set(pins) if isinstance(pins, list) else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
 
 # ── 虚拟化渲染参数 ──
 # 列表只渲染可见窗口内的 widget（可见项 + 上下缓冲），滚动时复用池绑定数据，
@@ -172,6 +193,7 @@ class CommandItemWidget(QWidget):
 
     clicked = pyqtSignal()
     hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
+    pinToggled = pyqtSignal(object)  # 置顶按钮点击时发射自身引用（点击按钮不触发执行）
 
     def __init__(self, item_data: Dict[str, str], query: str, parent=None):
         super().__init__(parent)
@@ -217,6 +239,15 @@ class CommandItemWidget(QWidget):
         self._shortcut_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         layout.addWidget(self._shortcut_label)
 
+        # 置顶按钮（hover 浮现；已置顶常显）——点击只切置顶，不触发命令执行
+        # （QPushButton 子控件自行消费鼠标事件，事件不会传播到 item 的 mousePressEvent）
+        self._pinned = False
+        self._pin_btn = TransparentToolButton(get_icon("置顶"), self)
+        self._pin_btn.setFixedSize(20, 20)
+        self._pin_btn.setIconSize(self._pin_btn.size() * 0.62)
+        self._pin_btn.clicked.connect(self._on_pin_clicked)
+        layout.addWidget(self._pin_btn)
+
         # 类型标签（始终创建，根据 item 类型动态显示/隐藏）
         self._tag_label = QLabel()
         self._tag_label.setObjectName("tagLabel")
@@ -238,6 +269,22 @@ class CommandItemWidget(QWidget):
 
         self._apply_style()
         self._update_display()
+        self._refresh_pin_state()
+
+    def _refresh_pin_state(self):
+        """按当前数据 + AppState 同步置顶状态与按钮显隐
+
+        显隐策略（与历史会话卡同范式）：已置顶常显；未置顶仅 hover 浮现。
+        未置顶且非 hover 时 hide()（不占布局空间，desc 恢复全宽）。
+        """
+        self._pinned = _pin_key(self._data) in get_pinned_keys()
+        # 已置顶显示带右下划线的「取消置顶」图标，直观表达「点击=取消」
+        self._pin_btn.setIcon(get_icon("取消置顶" if self._pinned else "置顶"))
+        self._pin_btn.setToolTip("取消置顶" if self._pinned else "置顶")
+        self._pin_btn.setVisible(self._pinned or self._hovered)
+
+    def _on_pin_clicked(self):
+        self.pinToggled.emit(self)
 
     def _apply_style(self):
         """应用当前状态的样式 — 单次 setStyleSheet 合并所有子标签样式
@@ -442,9 +489,11 @@ class CommandItemWidget(QWidget):
         else:
             self._shortcut_label.setVisible(False)
         self._apply_style()
+        self._refresh_pin_state()
 
     def enterEvent(self, event):
         self._hovered = True
+        self._pin_btn.setVisible(True)  # hover 浮现置顶按钮
         # hover 即选中：通知父卡片同步选中索引到此 widget
         self.hovered.emit(self)
         super().enterEvent(event)
@@ -464,6 +513,8 @@ class CommandItemWidget(QWidget):
 
     def leaveEvent(self, event):
         self._hovered = False
+        if not self._pinned:
+            self._pin_btn.hide()  # 未置顶时离开隐藏按钮（置顶常显）
         if not self._selected:
             self._apply_style()
         super().leaveEvent(event)
@@ -766,6 +817,7 @@ class CommandCard(QWidget):
         # UI 插件命令账本版本号（变化即置脏，见 _refresh_data）
         self._ui_cmds_version: int = -1
         self._filtered_items: List[Dict[str, str]] = []
+        self._pinned_keys: set = set()  # 置顶键集合（load_items 时从 AppState 刷新）
         self._selected_index = 0
         self._last_selected_index = -1  # 上次选中索引，用于增量更新
 
@@ -2564,13 +2616,18 @@ class CommandCard(QWidget):
                     item for item in self._filtered_items if self._matches_type_filter(item, type_filter)
                 ]
 
-        # 排序：内置命令→UI 插件命令→技能→智能体，同类型按名称
+        # 排序：置顶 → 内置命令→UI 插件命令→技能→智能体，同类型按名称
+        # 置顶集合随每次 load_items 读取（AppState 进程内缓存，开销可忽略），
+        # 多窗口/插件热重载后无需手动失效
         sort_order = {"command": 0, "skill": 2, "agent": 3}
+        self._pinned_keys = get_pinned_keys()
 
         def _sort_key(item):
             base = sort_order.get(item["type"], 99)
             if item.get("subtype") == "ui_plugin":
                 base = 1  # UI 插件命令排在内置命令之后、技能之前
+            if _pin_key(item) in self._pinned_keys:
+                base = -1  # 置顶恒排最前，置顶区内部保持原有类型/名称序
             return (base, item["name"])
 
         self._filtered_items.sort(key=_sort_key)
@@ -2656,8 +2713,11 @@ class CommandCard(QWidget):
         items = self._filtered_items
 
         # 计算每个 item 所属的分区编号
-        # 0=内置命令, 1=UI 插件, 2=技能, 3=智能体/提示词
+        # -1=置顶区, 0=内置命令, 1=UI 插件, 2=技能, 3=智能体/提示词
+        # （置顶项跨类型集中成独立分区，与下方区域之间自动出分隔线）
         def _section(item):
+            if _pin_key(item) in self._pinned_keys:
+                return -1
             t = item["type"]
             if t == "command" and item.get("subtype") == "ui_plugin":
                 return 1
@@ -2766,6 +2826,7 @@ class CommandCard(QWidget):
                     w = CommandItemWidget(self._dummy_item, self._current_text_query, self._scroll_content)
                     w.clicked.connect(self._on_item_clicked)
                     w.hovered.connect(self._on_item_hovered)
+                    w.pinToggled.connect(self._on_item_pin_toggled)
                     self._item_pool.append(w)
                 w._virtual_slot = slot
                 w.move(0, y)
@@ -2807,6 +2868,24 @@ class CommandCard(QWidget):
             self._selected_index = item_idx
             self._update_selection()
             self.select_current()
+
+    def _on_item_pin_toggled(self, widget):
+        """置顶按钮点击：翻转该项置顶状态并重排（保持当前过滤条件）
+
+        持久化走 AppState（原子落盘）；列表用当前 query 重新过滤+排序+渲染，
+        置顶项立即跳到顶部。widget 池复用时 _refresh_pin_state 会按新状态刷新图标。
+        """
+        item_idx = self._slot_to_item_index(widget)
+        if item_idx is None or item_idx >= len(self._filtered_items):
+            return
+        key = _pin_key(self._filtered_items[item_idx])
+        pins = get_pinned_keys()
+        if key in pins:
+            pins.discard(key)
+        else:
+            pins.add(key)
+        _app_state.set(PIN_STATE_KEY, sorted(pins))
+        self.load_items(self._last_query)
 
     def _slot_to_item_index(self, widget) -> Optional[int]:
         """从池 widget 反查其绑定的 filtered_items 索引（虚拟化映射）"""

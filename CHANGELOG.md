@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **斜杠命令卡片置顶 (pin)** (`app/widgets/cards/floating/command_card.py`, `tests/widgets/test_command_card_pin.py` 新增): 命令/技能/智能体条目可置顶，置顶项恒排列表最前并独立成「置顶区」（与下方区域间自动出分隔线），其余排序不变。交互与历史会话卡置顶同范式：悬停条目右侧浮现置顶按钮（`get_icon("置顶")`），已置顶常显、tooltip「置顶/取消置顶」；点击按钮只切换置顶不触发命令执行（QPushButton 子控件自行消费鼠标事件），切换后保持当前搜索条件立即重排。状态持久化到 `app_state.json` 新键 `command_pins`（元素为 `type:name` 复合键，同名跨类型互不影响），不进设置界面、不参与配置同步；置顶集合随每次 `load_items` 从 AppState 进程内缓存读取，多窗口即时一致。
+
 - **会话分享 HTML 样式主题化** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 分享导出的 HTML 此前只从主题取 9 个色值，其余颜色（标题、加粗、表头、行内代码、代码块底色、工具块、侧栏高亮）全部硬编码为深色主题假设，导致浅色主题下出现白底白字、标题与表头不可见。现全部改为引用主题 token（`user_card_*` / `assistant_card_*` / `syntax_*` / `card_bg_dim` / `divider_color` 等），深浅主题各自正确。同时对齐 in-app 观感：用户卡用 `user_card_bg` 蓝底、助手卡用 `assistant_card_bg` 暖底（此前两者同色仅靠左边框区分）；代码块接入 `codehilite` + pygments，亮色走 `friendly`、深色走 `dracula`，与 in-app 同一对风格。
 
 - **会话分享窄屏布局修复** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): CSS 视口宽度 ≤760px 时（窄窗口或浏览器放大），原断点把 `.sidebar` 置为 `position: static`，滚动越过之后左侧导航永久消失、正文撑满全宽，用户感知为「滚动到一半消息突然占满屏幕、左边列表没了」；同时 `.layout` 转 column 后仍是 `align-items: flex-start`，正文被压到侧栏宽度（实测仅 230px）。现窄屏改为导航贴顶常驻的横向滚动条（`sticky` + `overflow-x`，隐藏摘要行），`.layout` 改 `align-items: stretch` 且 `.main` 宽 100%；JS 侧栏跟随同步支持 `scrollLeft`。实测 600 / 740 / 1280 三种宽度下侧栏全程可见（0/11 不可见），窄屏正文恢复满宽（529/669），宽屏布局不变。

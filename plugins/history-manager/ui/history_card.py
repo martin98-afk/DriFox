@@ -262,7 +262,7 @@ class _HistoryItemCard(QFrame):
         btns_layout = QHBoxLayout(self._btns)
         btns_layout.setContentsMargins(0, 0, 0, 0)
         btns_layout.setSpacing(0)
-        self.pin_btn = TransparentToolButton(get_icon("置顶"), self._btns)
+        self.pin_btn = TransparentToolButton(get_icon("取消置顶" if pinned else "置顶"), self._btns)
         self.pin_btn.setToolTip("取消置顶" if pinned else "置顶")
         self.pin_btn.setFixedSize(22, 22)
         self.pin_btn.clicked.connect(lambda: self.pinToggleRequested.emit(self._index, not self._pinned))
@@ -410,7 +410,8 @@ class _HistoryItemCard(QFrame):
         self._project = project
         self._update_project_label(show_project)
 
-        # 置顶按钮提示跟随状态
+        # 置顶按钮提示与图标跟随状态（带右下划线的取消置顶图标直观表达「点击=取消」）
+        self.pin_btn.setIcon(get_icon("取消置顶" if pinned else "置顶"))
         self.pin_btn.setToolTip("取消置顶" if pinned else "置顶")
 
         # 预览变化
