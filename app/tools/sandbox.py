@@ -174,3 +174,50 @@ def check_path(
         workdir_norm = _norm(workdir)
         return ALLOW if _under(norm_path, workdir_norm) else CONFIRM
     return ALLOW
+
+
+# ============================================================
+# 命令边界（递归解壳 + 用户名单叠加）
+# ============================================================
+# 系统级工具：沙箱管不住其内部行为（如 wsl 内的 Linux 侧操作）
+SYS_LEVEL_TOOLS = frozenset(
+    {"wsl", "wmic", "sc", "reg", "schtasks", "diskpart", "bcdedit"}
+)
+
+
+def _first_token(command: str) -> str:
+    """首 token 归一化：去路径前缀、去 .exe、小写"""
+    token = command.strip().split()[0].lower().replace("\\", "/").split("/")[-1]
+    return token[:-4] if token.endswith(".exe") else token
+
+
+def check_command(command: str, cfg: Optional[SandboxConfig] = None) -> Verdict:
+    """命令判定：递归解壳 + 用户名单叠加 + 系统级工具豁免"""
+    cfg = cfg or SandboxConfig.get_instance()
+    if not cfg.get("sandbox_enabled"):
+        return ALLOW
+    if not command or not command.strip():
+        return ALLOW
+
+    from app.tools.command_safety import classify_command_deep
+
+    stripped = command.strip()
+
+    # 用户 confirm 名单优先于 allow 名单（显式加严）
+    for prefix in cfg.get("command.confirm_prefixes") or []:
+        if stripped.lower().startswith(str(prefix).lower()):
+            return CONFIRM
+    # 系统级工具豁免
+    if cfg.get("sys_tools_bypass") and _first_token(stripped) in SYS_LEVEL_TOOLS:
+        return ALLOW
+    # 用户 allow 名单：放行，但 block 命令仍拦
+    for prefix in cfg.get("command.allow_prefixes") or []:
+        if stripped.lower().startswith(str(prefix).lower()):
+            return DENY if classify_command_deep(stripped) == "block" else ALLOW
+
+    verdict = classify_command_deep(stripped)
+    if verdict == "block":
+        return DENY
+    if verdict == "confirm":
+        return CONFIRM
+    return ALLOW
