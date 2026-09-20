@@ -7,6 +7,7 @@
 - check_path / check_command / check_network：三分法判定，返回 "allow"|"confirm"|"deny"
 - sandbox_check_tool：工具名 + 参数 → 判定（worker 层唯一入口）
 - snapshot_paths_before_delete：删除类命令执行前快照
+- snapshot_paths_before_delete：删除类命令执行前快照
 
 本模块不弹 UI、不做 OS 级隔离；审批呈现由 chat_worker 既有弹窗链负责。
 设计文档：docs/superpowers/specs/2026-09-18-sandbox-l1-security-center-design.md
@@ -17,6 +18,9 @@ import copy
 import json
 import os
 import re
+import shlex
+import shutil
+import time
 from pathlib import Path
 from typing import Optional, Union
 
@@ -340,3 +344,98 @@ def sandbox_check_tool(tool_name: str, arguments: dict, cfg: Optional[SandboxCon
     if not path:
         return ALLOW
     return check_path(_current_workdir(), str(path), mode, cfg)
+
+
+# ============================================================
+# 删除保护（审批放行后、执行前快照）
+# ============================================================
+DELETE_COMMANDS = frozenset(
+    {"rm", "del", "erase", "rd", "rmdir", "deltree", "unlink", "remove-item", "ri"}
+)
+
+# rm/del 等常见 flag（快照时剔除）
+_DELETE_FLAGS = {"-r", "-rf", "-f", "-fr", "-d", "-rd", "-recursive", "/s", "/q", "/f"}
+
+
+# 命令分词：shlex.split(posix=True) 会吞掉 Windows 反斜杠
+# （C:\\tmp\\a.txt → C:tmpa.txt）导致快照路径失真，故用正则分词：
+# 成对引号整段保留，其余按空白切；去壳引号在取值时处理。
+_TOKEN_PATTERN = re.compile(r'"[^"]*"|\'[^\']*\'|\S+')
+
+
+def _split_tokens(command: str) -> list:
+    """命令分词（保留 Windows 路径反斜杠，成对引号作单 token）"""
+    if not command:
+        return []
+    return _TOKEN_PATTERN.findall(command)
+
+
+def _strip_quotes(token: str) -> str:
+    stripped = token.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "\"'":
+        return stripped[1:-1]
+    return stripped
+
+
+def is_delete_command(command: str) -> bool:
+    """是否删除类命令（含壳命令包裹形态）
+
+    保守判定：任一 token（含引号内内容后再拆一次）命中删除命令名即算
+    （git rm / powershell -c Remove-Item 均覆盖）；误报方向是「多问一次」。
+    """
+    if not command:
+        return False
+    for token in _split_tokens(command):
+        inner = _strip_quotes(token)
+        if inner.lower() in DELETE_COMMANDS:
+            return True
+        # 引号内可能是完整子命令（powershell -c "Remove-Item x"）
+        for sub in inner.split():
+            head = sub.lower().replace("\\", "/").split("/")[-1]
+            if head in DELETE_COMMANDS:
+                return True
+    return False
+
+
+def snapshot_paths_before_delete(command: str, backup_root: Union[str, Path]) -> list:
+    """删除命令执行前，把命令中「存在」的路径快照到 backup_root，返回快照路径列表
+
+    只在审批放行后调用；非删除命令返回 []。快照失败不阻断（用户已批准删除）。
+    """
+    if not is_delete_command(command):
+        return []
+    backup_root = Path(backup_root)
+    snapshots: list = []
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    seen: set = set()
+    for token in _split_tokens(command):
+        raw = _strip_quotes(token)
+        lowered = raw.lower()
+        if lowered in _DELETE_FLAGS or lowered in DELETE_COMMANDS:
+            continue
+        if lowered.startswith(("-", "/")):
+            continue
+        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试
+        candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
+        for item in candidates:
+            item = _strip_quotes(item)
+            if not item or item.lower() in DELETE_COMMANDS or item.lower() in _DELETE_FLAGS:
+                continue
+            if item.startswith(("-", "/")):
+                continue
+            candidate = Path(os.path.expandvars(item)).expanduser()
+            if not candidate.exists() or str(candidate) in seen:
+                continue
+            seen.add(str(candidate))
+            try:
+                target = backup_root / f"{stamp}_{candidate.name}"
+                if candidate.is_dir():
+                    shutil.copytree(candidate, target, dirs_exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(candidate, target)
+                snapshots.append(target)
+                logger.info(f"[Sandbox] 删除前已快照: {candidate} -> {target}")
+            except Exception as e:  # noqa: BLE001 - 快照失败不阻断用户已批准的删除
+                logger.warning(f"[Sandbox] 删除前快照失败({e}): {candidate}")
+    return snapshots

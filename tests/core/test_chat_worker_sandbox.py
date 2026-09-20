@@ -65,3 +65,60 @@ def test_tools_in_returns_empty_on_registry_failure(monkeypatch):
 
     monkeypatch.setattr(registry_mod.ToolRegistry, "get_instance", staticmethod(_boom))
     assert sandbox._tools_in("文件写入") == frozenset()
+
+
+# ── 审批通过后的删除保护钩子（_sandbox_after_approve 不依赖 self）──
+
+
+def _call_after_approve(tool_name, arguments):
+    from app.core.workers.chat_worker import OpenAIChatWorker
+
+    return OpenAIChatWorker._sandbox_after_approve(object(), tool_name, arguments)
+
+
+def test_after_approve_snapshots_delete_target(tmp_path, monkeypatch):
+    from app.utils import utils as utils_mod
+
+    victim = tmp_path / "gone.txt"
+    victim.write_text("precious", encoding="utf-8")
+    data_dir = tmp_path / "appdata"
+    monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: data_dir)
+
+    SandboxConfig.reset_instance()
+    cfg = SandboxConfig(config_path=str(tmp_path / "sandbox_config.json"))
+    SandboxConfig._instance = cfg
+    try:
+        cfg.set("delete_protection", True)
+        _call_after_approve("bash", {"command": f"rm {victim}"})
+        snapped = list((data_dir / "backups" / "deleted").rglob("*gone.txt"))
+        assert snapped and snapped[0].read_text(encoding="utf-8") == "precious"
+    finally:
+        SandboxConfig.reset_instance()
+
+
+def test_after_approve_no_snapshot_when_disabled(tmp_path, monkeypatch):
+    from app.utils import utils as utils_mod
+
+    victim = tmp_path / "gone.txt"
+    victim.write_text("precious", encoding="utf-8")
+    data_dir = tmp_path / "appdata"
+    monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: data_dir)
+
+    SandboxConfig.reset_instance()
+    cfg = SandboxConfig(config_path=str(tmp_path / "sandbox_config.json"))
+    SandboxConfig._instance = cfg
+    try:
+        cfg.set("delete_protection", False)
+        _call_after_approve("bash", {"command": f"rm {victim}"})
+        assert not (data_dir / "backups" / "deleted").exists()
+    finally:
+        SandboxConfig.reset_instance()
+
+
+def test_after_approve_ignores_non_command_tools(tmp_path, monkeypatch):
+    from app.utils import utils as utils_mod
+
+    data_dir = tmp_path / "appdata"
+    monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: data_dir)
+    _call_after_approve("write", {"path": str(tmp_path / "x.txt"), "content": "rm -rf /"})
+    assert not (data_dir / "backups" / "deleted").exists()

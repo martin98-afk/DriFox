@@ -5030,8 +5030,23 @@ class OpenAIChatWorker(QThread):
             return None
 
     def _sandbox_after_approve(self, tool_name, arguments):
-        """审批通过后的钩子（删除保护快照接这里）"""
-        return None
+        """审批通过后钩子：删除保护开启时，对删除命令做执行前快照"""
+        try:
+            args = dict(arguments or {})
+            command = str(args.get("command") or "")
+            if not command:
+                return
+            from app.tools.sandbox import SandboxConfig, snapshot_paths_before_delete
+
+            cfg = SandboxConfig.get_instance()
+            if not cfg.get("sandbox_enabled") or not cfg.get("delete_protection"):
+                return
+            from app.utils.utils import get_app_data_dir
+
+            backup_root = get_app_data_dir() / "backups" / "deleted"
+            snapshot_paths_before_delete(command, backup_root)
+        except Exception as e:  # noqa: BLE001 - 快照失败不阻断已批准执行
+            logger.warning(f"[Sandbox] 删除保护快照异常: {e}")
 
     def _execute_tool(self, tool_name, arguments, tool_call_id):
         """执行单个工具调用。"""
