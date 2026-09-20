@@ -35,12 +35,14 @@ DENY = "deny"
 Verdict = str
 
 DEFAULT_CONFIG = {
-    "sandbox_enabled": True,
+    # ★ 默认关闭：L1 沙箱与删除保护仍处完善期，机制成熟后再改默认开启；
+    # 已有配置文件中显式写入的值不受此处影响（_deep_merge 磁盘值优先）
+    "sandbox_enabled": False,
     "path": {"whitelist": [], "blacklist": []},
     "command": {"allow_prefixes": [], "confirm_prefixes": []},
     "network": {"enabled": True, "blacklist_domains": []},
     "sys_tools_bypass": False,
-    "delete_protection": True,
+    "delete_protection": False,
     "delete": {"exempt_paths": []},
     "job_limits": {"memory_mb": 2048, "active_process": 64, "cpu_time_ms": 0},
     "backup_limit_mb": 3000,

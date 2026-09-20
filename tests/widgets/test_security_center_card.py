@@ -25,11 +25,12 @@ def _qapp(_app_keepalive):
 
 @pytest.fixture
 def isolated_cfg(tmp_path, monkeypatch):
-    """隔离 SandboxConfig：单例指向 tmp_path 配置文件"""
+    """隔离 SandboxConfig：单例指向 tmp_path 配置文件（沙箱默认显式开启）"""
     from app.tools.sandbox import SandboxConfig
 
     SandboxConfig.reset_instance()
     cfg = SandboxConfig(config_path=str(tmp_path / "sandbox_config.json"))
+    cfg.set("sandbox_enabled", True)  # 测试关注开启态行为，不依赖全局默认值
     monkeypatch.setattr(SandboxConfig, "_instance", cfg)
     yield cfg
     SandboxConfig.reset_instance()
@@ -40,7 +41,7 @@ def test_card_instantiates_and_binds_config(isolated_cfg):
     from app.widgets.cards.settings.security_center_card import SecurityCenterCard
 
     card = SecurityCenterCard()
-    # 总开关反映配置（默认 True）
+    # 总开关反映配置（fixture 显式开启）
     assert card.sandbox_switch.isChecked() is True
     # 切开关写回配置
     card.sandbox_switch.setChecked(False)

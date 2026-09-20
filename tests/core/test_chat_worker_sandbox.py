@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """worker 层接入：sandbox_check_tool 元数据路由 + deny/confirm 语义"""
+
 from app.tools import sandbox
 from app.tools.sandbox import SandboxConfig, sandbox_check_tool
 
@@ -12,9 +13,7 @@ def _cfg(enabled=True):
 
 def _fake_groups(monkeypatch, write=("write", "edit"), read=("read", "grep")):
     """registry 分组注入（测试环境不加载插件工具注册）"""
-    monkeypatch.setattr(
-        sandbox, "_tools_in", lambda g: frozenset(write if g == sandbox.GROUP_WRITE_NAME else read)
-    )
+    monkeypatch.setattr(sandbox, "_tools_in", lambda g: frozenset(write if g == sandbox.GROUP_WRITE_NAME else read))
 
 
 def test_command_shaped_args_routed_to_check_command():
@@ -88,6 +87,7 @@ def test_after_approve_snapshots_delete_target(tmp_path, monkeypatch):
     cfg = SandboxConfig(config_path=str(tmp_path / "sandbox_config.json"))
     SandboxConfig._instance = cfg
     try:
+        cfg.set("sandbox_enabled", True)
         cfg.set("delete_protection", True)
         _call_after_approve("bash", {"command": f"rm {victim}"})
         snapped = list((data_dir / "backups" / "deleted").rglob("*gone.txt"))
