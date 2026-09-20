@@ -232,21 +232,22 @@ class CommandItemWidget(QWidget):
         self._desc_label.setMinimumWidth(0)
         layout.addWidget(self._desc_label, 1)
 
-        # 快捷键标签（仅内建命令的 function 类型显示）
-        self._shortcut_label = QLabel()
-        self._shortcut_label.setObjectName("shortcutLabel")
-        self._shortcut_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._shortcut_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        layout.addWidget(self._shortcut_label)
-
         # 置顶按钮（hover 浮现；已置顶常显）——点击只切置顶，不触发命令执行
         # （QPushButton 子控件自行消费鼠标事件，事件不会传播到 item 的 mousePressEvent）
+        # 布局位置：描述右侧、快捷键标签左侧
         self._pinned = False
         self._pin_btn = TransparentToolButton(get_icon("置顶"), self)
         self._pin_btn.setFixedSize(20, 20)
         self._pin_btn.setIconSize(self._pin_btn.size() * 0.62)
         self._pin_btn.clicked.connect(self._on_pin_clicked)
         layout.addWidget(self._pin_btn)
+
+        # 快捷键标签（仅内建命令的 function 类型显示）
+        self._shortcut_label = QLabel()
+        self._shortcut_label.setObjectName("shortcutLabel")
+        self._shortcut_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._shortcut_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        layout.addWidget(self._shortcut_label)
 
         # 类型标签（始终创建，根据 item 类型动态显示/隐藏）
         self._tag_label = QLabel()
