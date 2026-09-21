@@ -53,7 +53,15 @@ class _ListEditorCard(QWidget):
     条目行在 reload() 重建时同样继承，无需逐行设样式。
     """
 
-    def __init__(self, title: str, config_key: str, placeholder: str, parent=None, show_title: bool = True):
+    def __init__(
+        self,
+        title: str,
+        config_key: str,
+        placeholder: str,
+        parent=None,
+        show_title: bool = True,
+        tip: str = "",
+    ):
         super().__init__(parent)
         self._key = config_key
         # 内容变化回调：折叠卡模式下由 SecurityCenterCard 绑定到
@@ -73,6 +81,9 @@ class _ListEditorCard(QWidget):
         add_row = QHBoxLayout()
         self._input = QLineEdit()
         self._input.setPlaceholderText(placeholder)
+        if tip:
+            # 长说明走悬停提示，输入框只留示例，避免说明文字堆在界面上
+            self._input.setToolTip(tip)
         self._input.returnPressed.connect(self._add_current)
         add_btn = QPushButton("添加")
         add_btn.setCursor(Qt.PointingHandCursor)
@@ -237,15 +248,23 @@ class SecurityCenterCard(QWidget):
         self.sandbox_switch = SwitchSettingCard(
             FIF.CERTIFICATE if FIF else None,
             "沙箱安全（默认关闭）",
-            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。网络外传检测、删除保护快照与进程配额均依赖本开关。",
+            "命令与文件操作经检查",
+        )
+        self.sandbox_switch.setToolTip(
+            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。"
+            "网络外传检测、删除保护快照与进程配额均依赖本开关。"
         )
         self.sandbox_switch.setChecked(bool(self._cfg.get("sandbox_enabled")))
         self.sandbox_switch.checkedChanged.connect(self._on_sandbox_toggled)
         layout.addWidget(self.sandbox_switch)
 
-        def _expand(icon, title, content, editor: "_ListEditorCard") -> "ExpandGroupSettingCard":
+        def _expand(
+            icon, title, content, editor: "_ListEditorCard", tip: str = ""
+        ) -> "ExpandGroupSettingCard":
             """把名单编辑区包成折叠卡：收起一行，点击展开编辑（对齐设置页范式）"""
             card = ExpandGroupSettingCard(icon, title, content)
+            if tip:
+                card.setToolTip(tip)
             card.addGroupWidget(editor)
 
             from PyQt5.QtCore import QTimer
@@ -261,21 +280,24 @@ class SecurityCenterCard(QWidget):
         self._path_white = _ListEditorCard(
             "写入白名单（放行 workdir 外的写入目录；读操作不受此限制）",
             "whitelist",
-            "如 D:\\other_proj 或 %USERPROFILE%\\docs（相对路径按工作目录解析）",
+            "如 D:\\other_proj 或 %USERPROFILE%\\docs",
             show_title=False,
+            tip="读操作不受此限制；相对路径按工作目录解析。",
         )
         self._path_black = _ListEditorCard(
             "文件黑名单（读写均拦截，如 .env/.ssh）",
             "blacklist",
-            "如 D:\\secrets 或 .env（⚠ 文件名需完全相等：.env 不拦 .env.local，建议一并添加）",
+            "如 D:\\secrets 或 .env",
             show_title=False,
+            tip="⚠ 文件名需完全相等：.env 不拦 .env.local，建议一并添加。",
         )
         self._cmd_allow = _ListEditorCard(
             "命令安全 · 放行前缀（跳过审批；危险命令仍拦截）",
             "allow_prefixes",
-            "如 git status、npm run build（⚠ 按词边界匹配；填 git 可省常规子命令审批，"
-            "但 git rm -rf . 等破坏性操作仍会确认）",
+            "如 git status、npm run build",
             show_title=False,
+            tip="⚠ 按词边界匹配；填 git 可省常规子命令审批，"
+            "但 git rm -rf . 等破坏性操作仍会确认。",
         )
         self._cmd_confirm = _ListEditorCard(
             "命令安全 · 强制审批前缀",
@@ -293,32 +315,37 @@ class SecurityCenterCard(QWidget):
         self._path_white_card = _expand(
             FIF.FOLDER_ADD if FIF else None,
             "写入白名单",
-            "放行 workdir 外的写入目录（读操作不受此限制）",
+            "放行工作目录外的写入",
             self._path_white,
+            tip="放行 workdir 外的写入目录；读操作不受此限制。",
         )
         self._path_black_card = _expand(
             FIF.HIDE if FIF else None,
             "文件黑名单",
-            "读写均拦截（如 .env/.ssh）",
+            "读写均拦截",
             self._path_black,
+            tip="读写均拦截（如 .env/.ssh）。",
         )
         self._cmd_allow_card = _expand(
             FIF.ACCEPT if FIF else None,
             "命令安全 · 放行前缀",
-            "跳过审批；危险命令仍拦截（示例见输入框提示）",
+            "跳过审批，危险命令仍拦截",
             self._cmd_allow,
+            tip="跳过审批；危险命令仍拦截（示例见输入框提示）。",
         )
         self._cmd_confirm_card = _expand(
             FIF.CARE_RIGHT_SOLID if FIF else None,
             "命令安全 · 强制审批前缀",
-            "命中即弹审批（如 git push）",
+            "命中即弹审批",
             self._cmd_confirm,
+            tip="命中即弹审批（如 git push）。",
         )
         self._net_domains_card = _expand(
             FIF.GLOBE if FIF else None,
             "网络安全 · 域名黑名单",
-            "命中域名的网络命令弹审批（如 evil.com）",
+            "命中即弹审批",
             self._net_domains,
+            tip="命中域名的网络命令弹审批（如 evil.com）。",
         )
         for w in (
             self._path_white_card,
@@ -333,9 +360,12 @@ class SecurityCenterCard(QWidget):
         self.delete_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "删除保护",
+            "删除类命令强制审批，执行前自动快照",
+        )
+        self.delete_switch.setToolTip(
             "开启后：删除类命令强制审批，放行后执行前自动快照（可找回）。"
             "关闭后删除类命令不再审批；但命令黑名单（如 cacls）、网络外传、"
-            "路径黑名单与手动加严的策略仍会拦截。",
+            "路径黑名单与手动加严的策略仍会拦截。"
         )
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
@@ -345,14 +375,16 @@ class SecurityCenterCard(QWidget):
         self._delete_exempt = _ListEditorCard(
             "删除豁免路径（这些目录内的删除不再弹审批，也不做快照，如 tests/）",
             "delete_exempt",
-            "如 tests/ 或 D:/other_proj/logs（相对路径按工作目录解析）",
+            "如 tests/ 或 D:/other_proj/logs",
             show_title=False,
+            tip="相对路径按工作目录解析。",
         )
         self._delete_exempt_card = _expand(
             FIF.INFO if FIF else None,
             "删除豁免路径",
-            "这些目录内的删除不再弹审批（如 tests/）",
+            "这些目录内的删除不再弹审批",
             self._delete_exempt,
+            tip="这些目录内的删除不再弹审批，也不做快照。相对路径按工作目录解析（如 tests/）。",
         )
         layout.addWidget(self._delete_exempt_card)
 
@@ -377,8 +409,9 @@ class SecurityCenterCard(QWidget):
         self.net_switch = SwitchSettingCard(
             FIF.GLOBE if FIF else None,
             "网络外传检测",
-            "拦截 curl/wget 等带 URL 或上传参数的命令；仅在沙箱安全开启时生效",
+            "拦截带 URL 或上传参数的命令",
         )
+        self.net_switch.setToolTip("curl/wget 等；仅在沙箱安全开启时生效。")
         self.net_switch.setChecked(bool(self._cfg.get("network.enabled")))
         self.net_switch.checkedChanged.connect(self._on_network_toggled)
         layout.addWidget(self.net_switch)
@@ -387,7 +420,10 @@ class SecurityCenterCard(QWidget):
         self.sys_switch = SwitchSettingCard(
             FIF.COMMAND_PROMPT if FIF else None,
             "系统级工具豁免",
-            "wsl/wmic/sc/reg/schtasks/diskpart/bcdedit 等绕过沙箱审批，请谨慎启用",
+            "这些命令绕过沙箱审批",
+        )
+        self.sys_switch.setToolTip(
+            "wsl/wmic/sc/reg/schtasks/diskpart/bcdedit 等绕过沙箱审批，请谨慎启用。"
         )
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
@@ -400,13 +436,11 @@ class SecurityCenterCard(QWidget):
         # N1：默认值提示（沙箱与删除保护默认关闭，用户需手动开启）
         # MCP / upload_file 说明：三类不受本页约束的操作，避免虚假安全感
         _note_text = (
-            "说明：以上拦截为应用层检查，非 OS 级沙箱隔离。\n"
-            "沙箱安全与删除保护默认关闭，需手动开启后才会拦截。\n"
-            "读操作除黑名单外不受路径约束；白名单与 workdir 边界仅约束写入。\n"
-            "MCP 工具（mcp__*）由外部服务提供，其读写/外传行为不在本页检查范围内；"
-            "请通过 MCP 卡片的服务器开关控制其启停。\n"
-            "提示：upload_file（上传文件到 Gitee）与 webfetch（抓取网页）不受域名黑名单约束。"
-            "如需拦截，请在「工具」页关闭对应工具（关闭后会走审批确认）。"
+            "说明：应用层拦截，非 OS 级沙箱隔离。\n"
+            "沙箱安全与删除保护默认关闭，需手动开启后才会拦截；"
+            "读操作除黑名单外不受路径约束，白名单与 workdir 边界仅约束写入。\n"
+            "MCP 工具（mcp__*）与 upload_file / webfetch 由外部服务提供，"
+            "不受本页约束（可在「工具」页关闭）。"
         )
         note = BodyLabel(_note_text) if BodyLabel else QLabel(_note_text)
         note.setWordWrap(True)
@@ -438,15 +472,17 @@ class SecurityCenterCard(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(8)
-        label = QLabel("备份容量上限（0 = 不限，不自动清理）")
+        label = QLabel("备份容量上限")
         label.setObjectName("sciTitle")
         label.setWordWrap(True)
+        label.setToolTip("0 = 不限，不自动清理。")
         head.addWidget(label, 1)
 
         self.backup_limit_spin = SpinBox()
         self.backup_limit_spin.setRange(0, 102400)
         self.backup_limit_spin.setSingleStep(500)
         self.backup_limit_spin.setSuffix(" MB")
+        self.backup_limit_spin.setToolTip("0 = 不限，不自动清理。")
         self.backup_limit_spin.setValue(self._int_cfg("backup_limit_mb"))
         self.backup_limit_spin.valueChanged.connect(self._on_backup_limit_changed)
         head.addWidget(self.backup_limit_spin)
@@ -477,6 +513,10 @@ class SecurityCenterCard(QWidget):
         head.setSpacing(8)
         label = QLabel("删除保护快照")
         label.setObjectName("sciTitle")
+        label.setToolTip(
+            "快照是误删文件后的恢复手段，清空后不可找回。"
+            "独立配额 = 备份上限的 1/4（下限 100 MB），不受「清理备份文件」影响。"
+        )
         head.addWidget(label, 1)
 
         self.snapshot_btn = QPushButton("打开目录")
@@ -507,9 +547,10 @@ class SecurityCenterCard(QWidget):
         lay.setContentsMargins(16, 4, 16, 4)
         lay.setSpacing(4)
 
-        title = QLabel("受管进程资源配额（0 = 不限；仅约束 Bash 与后台命令）")
+        title = QLabel("受管进程资源配额")
         title.setObjectName("sciTitle")
         title.setWordWrap(True)
+        title.setToolTip("0 = 不限；仅约束 Bash 与后台命令。")
         lay.addWidget(title)
 
         self.job_spins = {}
@@ -604,11 +645,11 @@ class SecurityCenterCard(QWidget):
         limit = self._int_cfg("backup_limit_mb")
         if limit > 0:
             self.backup_hint.setText(
-                f"当前上限 {limit} MB；超出后按修改时间从旧到新清理。"
-                "自动清理在启动时执行，改动上限后需重启才生效 —— 可点「清理备份文件」立即清理。"
+                f"当前上限 {limit} MB；超出后从旧到新清理。"
+                "改动上限后需重启才生效，可点「清理备份文件」立即清理。"
             )
         else:
-            self.backup_hint.setText("未设上限：不会自动清理备份，也不执行手动清理。")
+            self.backup_hint.setText("未设上限：不自动清理，也不执行手动清理。")
 
     def _on_clean_backups(self):
         """立即清理（只清 FileRecorder 侧，不含删除快照）"""
@@ -655,11 +696,7 @@ class SecurityCenterCard(QWidget):
     def _refresh_snapshot_stats(self) -> None:
         count, size = self._deleted_dir_stats()
         mb = size / 1024 / 1024
-        self.snapshot_label.setText(
-            f"删除快照：{count} 项，占用 {mb:.1f} MB。"
-            "快照是误删文件后的恢复手段，清空后不可找回。"
-            "独立配额 = 备份上限的 1/4（下限 100 MB），不受「清理备份文件」影响。",
-        )
+        self.snapshot_label.setText(f"已有 {count} 项快照，占用 {mb:.1f} MB，可用于恢复误删。")
         self.snapshot_clear_btn.setEnabled(count > 0)
         self.snapshot_clear_btn.setToolTip("" if count > 0 else "当前没有快照")
 
