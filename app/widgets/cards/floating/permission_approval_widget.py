@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from qfluentwidgets import Action, RoundMenu
+from qfluentwidgets import Action, CheckableMenu, MenuAnimationType
 
 from app.utils.design_tokens import BorderRadius, CardStyles, Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_unified_font
@@ -50,6 +50,9 @@ _DANGER_ALLOW_DELAY_MS = 500
 
 # 作用域选择器文案（按钮与菜单项共用短名；选中什么显示什么，执行统一走「允许」）
 _SCOPE_LABELS = {REMEMBER_TOOL: "当前工具", REMEMBER_ROUND: "当前轮次", REMEMBER_SESSION: "当前会话"}
+
+# danger 档位菜单内的说明行（仅在它解释了「当前会话」为何禁用时显示）
+_DANGER_SESSION_HINT = "⚠ 删除类命令不支持会话级豁免"
 
 # 提示行默认文案（防误触拦截时临时改写，用后还原）
 # 不含数字键直选：4 按钮卡片上价值有限，且需与视觉顺序强绑定（改布局即错位），
@@ -136,6 +139,11 @@ class PermissionApprovalWidget(QWidget):
         self._impact = dict(impact or {})
         self._preview_payload = preview_payload
         self._decided = False
+        # 作用域逐次请求复位：卡片是复用单例，上次选的「当前会话」不能
+        # 因为默认值未重置而顺延成下一个（可能是另一个工具）的授权范围。
+        # 这是安全默认的一部分：每次审批都从最小范围（当前工具）开始。
+        self._remember_scope = REMEMBER_TOOL
+        self._scope_btn.setText(f"{_SCOPE_LABELS[REMEMBER_TOOL]} ▾")
         from datetime import datetime
 
         self._request_time = datetime.now().strftime("%H:%M:%S")
@@ -151,6 +159,9 @@ class PermissionApprovalWidget(QWidget):
         self._tool_name = ""
         self._arguments = {}
         self._preview_payload = None
+        # 作用域一并复位：避免清理后残留的会话级选中被下一次请求继承
+        self._remember_scope = REMEMBER_TOOL
+        self._scope_btn.setText(f"{_SCOPE_LABELS[REMEMBER_TOOL]} ▾")
         self._decided = True  # 清理后不再允许 emit
         self.setVisible(False)
 
@@ -584,19 +595,28 @@ class PermissionApprovalWidget(QWidget):
         档位禁用（删除类不给会话级豁免）；最后一项仅作说明性占位——删除类
         不给会话级豁免，故永远禁用。
 
-        用 `qfluentwidgets.RoundMenu` 而非原生 `QMenu`：原生菜单不跟随主题，
-        深色主题下是白底系统样式，与卡片割裂（用户反馈"记住的弹窗样式很丑"）。
-        RoundMenu 自动跟随 qfluentwidgets 主题，与设置页菜单观感一致。
+        用 `qfluentwidgets.CheckableMenu` 而非原生 `QMenu` 或 `RoundMenu`：
+        - 原生 `QMenu` 不跟随主题，深色主题下是白底系统样式，与卡片割裂
+          （用户反馈"记住的弹窗样式很丑"）。
+        - `RoundMenu` 跟随主题，但其 item delegate 无勾选指示器，
+          `setCheckable`/`setChecked` 渲染零像素差异（实测选中态不可见）。
+        - `CheckableMenu` = RoundMenu + CheckIndicatorMenuItemDelegate（默认
+          indicatorType 即 CHECK），既跟随主题又能显示当前选中项。
+
+        ⚠ 选中回传必须走 `Action.triggered` 信号：`CheckableMenu`/`RoundMenu`
+        覆写了 `exec`/`exec_`，它们是**非阻塞 show + 信号驱动**且恒返回 None，
+        没有原生 `QMenu.exec_()` 的"返回被触发 action"语义。靠返回值判断选中项
+        会静默失效（三个作用域全部点了没反应，作用域恒为 tool）。
         """
-        menu = RoundMenu(parent=self)
+        menu = CheckableMenu(parent=self)
         act_tool = Action("当前工具", menu)
         act_round = Action("当前轮次", menu)
         act_session = Action("当前会话", menu)
-        act_danger = Action("⚠ 删除类命令不支持会话级豁免", menu)
         # danger 档位不给会话级豁免（删除类风险最高，仅允许逐次确认）
         act_session.setEnabled(self._risk != RISK_DANGER)
-        act_danger.setEnabled(False)
-        # 勾选态与按钮文案同源：打开菜单即可看出当前选中项
+        # 勾选态与按钮文案同源：打开菜单即可看出当前选中项。
+        # 菜单每次新建、不跨次复用，故此处的勾选完全由当前 `_remember_scope`
+        # 决定，不会出现多项同时带勾的残留（无需 QActionGroup 做互斥）。
         for act in (act_tool, act_round, act_session):
             act.setCheckable(True)
         _SCOPE_ACTIONS = {REMEMBER_TOOL: act_tool, REMEMBER_ROUND: act_round, REMEMBER_SESSION: act_session}
@@ -604,31 +624,47 @@ class PermissionApprovalWidget(QWidget):
         menu.addAction(act_tool)
         menu.addAction(act_round)
         menu.addAction(act_session)
-        menu.addSeparator()
-        menu.addAction(act_danger)
+        # 说明性占位行**仅在它解释了某个禁用项时才显示**：
+        # 会话项被禁（danger 档）→ 加这行告诉用户为什么；否则它是永久灰色的
+        # 死项，菜单 3 项变 4 项、每项都要多扫一眼（用户反馈“这个提示要去掉”）。
+        if self._risk == RISK_DANGER:
+            menu.addSeparator()
+            act_danger = Action(_DANGER_SESSION_HINT, menu)
+            act_danger.setEnabled(False)
+            menu.addAction(act_danger)
         # 显式留存引用：不依赖 actions() 索引（separator 可能改变索引语义）
         menu._act_tool = act_tool  # type: ignore[attr-defined]
         menu._act_round = act_round  # type: ignore[attr-defined]
         menu._act_session = act_session  # type: ignore[attr-defined]
+        # 选中即更新作用域，不立即执行（执行统一走「允许」）
+        act_tool.triggered.connect(lambda _=False: self._set_scope(REMEMBER_TOOL))
+        act_round.triggered.connect(lambda _=False: self._set_scope(REMEMBER_ROUND))
+        act_session.triggered.connect(lambda _=False: self._set_scope(REMEMBER_SESSION))
         return menu
 
     def _show_remember_menu(self) -> None:
-        """弹出作用域选择菜单：选中仅更新按钮显示，不立即执行（执行统一走「允许」）"""
+        """弹出作用域选择菜单：选中仅更新按钮显示，不立即执行（执行统一走「允许」）
+
+        `exec_` 只负责弹出并做进出场动画（非阻塞，见 `_build_remember_menu` 注释）；
+        选中结果由菜单项自身的 `triggered` 信号回传，此处不读返回值。
+
+        弹出方向固定为 **向上**（PULL_UP）+ 锚在按钮**上边缘**：审批卡位于聊天区
+        底部，向下弹（默认 DROP_DOWN）会盖住卡片正文与「拒绝/允许」按钮，用户在
+        选作用域时看不到自己要批的是什么，而向上弹只占用消息区空白高度。
+        """
         menu = self._build_remember_menu()
-        act_tool = menu._act_tool  # type: ignore[attr-defined]
-        act_round = menu._act_round  # type: ignore[attr-defined]
-        act_session = menu._act_session  # type: ignore[attr-defined]
-        chosen = menu.exec_(self._scope_btn.mapToGlobal(self._scope_btn.rect().bottomLeft()))
-        if chosen is act_tool:
-            self._set_scope(REMEMBER_TOOL)
-        elif chosen is act_round:
-            self._set_scope(REMEMBER_ROUND)
-        elif chosen is act_session and act_session.isEnabled():
-            self._set_scope(REMEMBER_SESSION)
+        menu.exec_(
+            self._scope_btn.mapToGlobal(self._scope_btn.rect().topLeft()),
+            aniType=MenuAnimationType.PULL_UP,
+        )
 
     def _set_scope(self, scope: str) -> None:
         """更新所选作用域并同步按钮文案（当前选中什么就显示什么）"""
         if scope not in _SCOPE_LABELS:
+            return
+        # danger 档位不给会话级豁免：菜单项已 disable，此处再兜一层，
+        # 防止绕过菜单的调用点（快捷键/测试直调）写入非法作用域
+        if scope == REMEMBER_SESSION and self._risk == RISK_DANGER:
             return
         self._remember_scope = scope
         self._scope_btn.setText(f"{_SCOPE_LABELS[scope]} ▾")

@@ -21001,19 +21001,26 @@ class OpenAIChatToolWindow(ToolWindow):
         return "policy", "🔒 工具权限策略"
 
     def _grade_permission_risk(self, tool_name: str, arguments: dict, source: str) -> str:
-        """风险档位：danger（危险工具/删除类/沙箱黑名单）> warn（沙箱拦截）> info"""
+        """风险档位：danger（不可逆高危）> warn（沙箱拦截）> info
+
+        ⚠ danger 的语义是**不可逆高危**（删除类等），不是「工具有副作用」。
+        工具注册表的 `danger="dangerous"` 含义是「会改东西」（写文件/执行命令/
+        改待办/上传都能命中），bash、write、edit、read 等 10 个常规工具全是它，
+        若直接映射为 danger 档：
+        - 常规审批全部走 500ms 防误触闸门（每次都白等）
+        - 全部禁用「当前会话」作用域 → 会话级豁免在这些工具上永久不可用
+        故此处只认「删除类命令」这一真正不可逆的条件；工具有副作用的事实由
+        来源文案（source_text）与影响范围（impact）表达，不靠风险档位重复。
+        """
         try:
-            from app.tools.registry import ToolRegistry
             from app.tools.sandbox import is_delete_command
 
-            if ToolRegistry.get_instance().get_danger(tool_name) == "dangerous":
-                return "danger"
             command = str((arguments or {}).get("command") or "")
             if command and is_delete_command(command):
                 return "danger"
         except Exception as e:  # noqa: BLE001 - 判定失败按 info（仅影响配色强度）
             logger.debug(f"[Permission] 风险判定失败({tool_name}): {e}")
-        if source == "sandbox":
+        if source in ("sandbox", "delete"):
             return "warn"
         return "info"
 

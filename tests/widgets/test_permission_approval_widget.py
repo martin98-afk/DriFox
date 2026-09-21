@@ -405,27 +405,171 @@ def test_digit_shortcuts_removed(qapp):
 
 
 def test_remember_menu_is_round_menu(qapp):
-    """记住菜单必须用 RoundMenu（跟随 qfluentwidgets 主题），不得回归原生 QMenu"""
+    """记住菜单必须跟随 qfluentwidgets 主题，不得回归原生 QMenu（已由
+    test_remember_menu_is_checkable_menu 覆盖类型与时序，此处保留主题继承断言）"""
     from qfluentwidgets import RoundMenu
 
     card = _make_card()
     menu = card._build_remember_menu()
-    assert isinstance(menu, RoundMenu), f"菜单类型应为 RoundMenu，实际 {type(menu).__name__}"
+    assert isinstance(menu, RoundMenu), f"菜单类型应为 RoundMenu 子类，实际 {type(menu).__name__}"
+    assert type(menu) is not RoundMenu, "不得退回无勾选指示器的 RoundMenu"
+
+
+def test_remember_menu_is_checkable_menu(qapp):
+    """记住菜单必须是 CheckableMenu（跟随主题 + 有勾选指示器），不得回归原生 QMenu
+
+    原生 QMenu 不跟随主题（深色下白底割裂）；RoundMenu 跟随主题但其
+    delegate 无勾选指示器，setChecked 渲染零像素差异（选中态不可见）。
+    """
+    from qfluentwidgets import CheckableMenu
+
+    card = _make_card()
+    menu = card._build_remember_menu()
+    assert isinstance(menu, CheckableMenu), f"菜单类型应为 CheckableMenu，实际 {type(menu).__name__}"
+    # 勾选指示器由 CheckableMenu 的 delegate 提供（RoundMenu 不具备）
+    assert type(menu.view.itemDelegate()).__name__ == "CheckIndicatorMenuItemDelegate"
+
+
+def test_click_menu_item_updates_scope(qapp):
+    """回归：真实点击菜单项必须更新作用域并回传所选值
+
+    事故链路：CheckableMenu/RoundMenu 覆写了 exec_，非阻塞且恒返回 None，
+    没有原生 QMenu.exec_() 的"返回被触发 action"语义。原实现用
+    `chosen = menu.exec_(...)` 的返回值判断选中项，三个分支永远不命中，
+    导致「当前工具/当前轮次/当前会话」全部点了没反应、作用域恒为 tool。
+    本用例走真实鼠标点击（不经 _set_scope 直调），锁死该回归。
+
+    注：菜单按 QMenu 基类查找（不绑 CheckableMenu），使本用例只检验
+    "点击是否生效"这一行为契约，不因菜单类型实现变化而误判。
+    """
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QMenu
+
+    card = _make_card(risk="warn")
+    card.resize(600, 240)
+    card.show()
+    qapp.processEvents()
+
+    card._scope_btn.click()
+    qapp.processEvents()
+    menus = [m for m in card.findChildren(QMenu) if m.isVisible()]
+    assert menus, "点击作用域按钮应弹出菜单"
+    menu = menus[0]
+
+    # 点第二项「当前轮次」（索引 1，索引 3 是 separator）
+    rect = menu.view.visualItemRect(menu.view.item(1))
+    QTest.mouseClick(menu.view.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    qapp.processEvents()
+
+    assert card._remember_scope == "round", "点击菜单项后作用域必须更新（原实现点了没反应）"
+    assert "当前轮次" in card._scope_btn.text(), "按钮文案必须同步为所选作用域"
+
+    # 关键闭环：所选作用域必须随「允许」回传
+    got = _collect(card)
+    card._allow_btn.click()
+    assert got == [("allow", "round", "")], "所选作用域必须进入决策回传"
+    card.close()
+
+
+def test_click_disabled_session_item_is_noop(qapp):
+    """danger 档位下点「当前会话」（禁用项）→ 作用域不变
+
+    菜单项 disable 只是 UI 层拦截，本用例确认点击事件确实不会穿过
+    (RoundMenu._onItemClicked 对 disabled action 提前 return)。
+    """
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QMenu
+
+    card = _make_card(risk="danger")
+    card.resize(600, 240)
+    card.show()
+    qapp.processEvents()
+
+    card._scope_btn.click()
+    qapp.processEvents()
+    menu = [m for m in card.findChildren(QMenu) if m.isVisible()][0]
+    assert menu._act_session.isEnabled() is False
+
+    rect = menu.view.visualItemRect(menu.view.item(2))
+    QTest.mouseClick(menu.view.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    qapp.processEvents()
+
+    assert card._remember_scope == "tool", "danger 档位点会话级不得改变作用域"
+    card.close()
+
+
+def test_set_scope_rejects_session_when_danger(qapp):
+    """danger 档位：绕过菜单直调也不得写入会话级作用域（兜底层）"""
+    card = _make_card(risk="danger")
+    card._set_scope("session")
+    assert card._remember_scope == "tool", "danger 档位不得写入 session 作用域"
+    # 轮次级仍可用
+    card._set_scope("round")
+    assert card._remember_scope == "round"
+
+
+def test_scope_resets_on_new_request(qapp):
+    """跨请求复位：上一张卡选过会话级，下一次请求必须回到最小范围
+
+    卡片是复用单例（宿主 _ensure_permission_approval_widget 只创建一次），
+    作用域若不复位，上一次选的「当前会话」会顺延成下一个（可能是完全
+    不同的工具）的授权范围——静默扩大授权面。
+    """
+    card = _make_card(risk="warn")
+    card._set_scope("session")
+    assert card._remember_scope == "session"
+
+    card.show_request(
+        tool_name="write_file",
+        arguments={"path": "D:/x/b.txt"},
+        source="sandbox",
+        source_text="⚠ 安全中心拦截",
+        risk="warn",
+        workdir="D:/work/DriFox",
+        impact={"paths": ["D:/x/b.txt"], "writes": True},
+        preview_payload=None,
+    )
+    assert card._remember_scope == "tool", "新请求必须复位为最小作用域"
+    assert "当前工具" in card._scope_btn.text()
+
+
+def test_scope_resets_on_clear(qapp):
+    """clear 后作用域复位（防清理后残留的会话级选中被下一次请求继承）"""
+    card = _make_card(risk="warn")
+    card._set_scope("session")
+    card.clear()
+    assert card._remember_scope == "tool"
 
 
 def test_remember_menu_items_present(qapp):
-    """菜单含三级作用域短名（当前工具/当前轮次/当前会话）+ 禁用占位项"""
+    """非 danger 档位：菜单只 3 项（无分隔线与说明行）
+
+    说明性占位行（⚠ 删除类命令不支持会话级豁免）仅在它解释了「当前会话」
+    为何禁用时才显示：非 danger 档会话项可用，该行就是永久灰色的死项
+    （用户反馈"这个提示要去掉"）。
+    """
     card = _make_card(risk="info")
     menu = card._build_remember_menu()
     labels = [a.text() for a in menu.actions() if not a.isSeparator()]
-    assert len(labels) == 4
-    assert labels[0] == "当前工具"
-    assert labels[1] == "当前轮次"
-    assert labels[2] == "当前会话"
+    assert labels == ["当前工具", "当前轮次", "当前会话"], "非 danger 档不得出现说明行"
+    assert menu.view.count() == 3, "非 danger 档不得出现分隔线"
     assert menu._act_session.isEnabled() is True
     # 勾选态跟随当前作用域（默认 tool）
     assert menu._act_tool.isChecked() is True
     assert menu._act_round.isChecked() is False
+
+
+def test_remember_menu_danger_shows_hint(qapp):
+    """danger 档位：说明行随禁用的会话项一起出现（解释它为何不能选）"""
+    from app.widgets.cards.floating.permission_approval_widget import _DANGER_SESSION_HINT
+
+    card = _make_card(risk="danger")
+    menu = card._build_remember_menu()
+    non_sep = [a for a in menu.actions() if not a.isSeparator()]
+    assert [a.text() for a in non_sep[:3]] == ["当前工具", "当前轮次", "当前会话"]
+    assert menu._act_session.isEnabled() is False
+    assert non_sep[-1].text() == _DANGER_SESSION_HINT
+    assert non_sep[-1].isEnabled() is False, "说明行不可点击"
 
 
 def test_remember_tool_emits_scope(qapp):

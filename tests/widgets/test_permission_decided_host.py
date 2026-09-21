@@ -273,15 +273,23 @@ def test_risk_grading_delete_is_danger(monkeypatch):
     assert host._grade_permission_risk("bash", {"command": "rm x"}, "delete") == "danger"
 
 
-def test_risk_grading_dangerous_tool_is_danger(monkeypatch):
-    """registry 标 dangerous 的工具 → danger"""
+def test_risk_grading_dangerous_tool_is_warn_not_danger(monkeypatch):
+    """registry 标 dangerous 的工具**不再是** danger 档（回归锁定）
+
+    `danger="dangerous"` 的语义是「工具有副作用」（写文件/执行命令/改待办/
+    上传都能命中），bash、write、edit、read 等 10 个常规工具全是它。
+    若直接映射为 danger 档，常规审批会全部走 500ms 防误触闸门并禁用
+    「当前会话」作用域 —— 会话级豁免在这些工具上永久不可用。
+    danger 档只认真正不可逆的条件（删除类命令）。
+    """
     import app.tools.sandbox as sandbox_mod
     from app.tools import registry as registry_mod
 
     monkeypatch.setattr(sandbox_mod, "is_delete_command", lambda c: False)
     monkeypatch.setattr(registry_mod.ToolRegistry, "get_instance", staticmethod(lambda: _FakeRegistry("dangerous")))
     host = _make_host()
-    assert host._grade_permission_risk("bash", {"command": "ls"}, "policy") == "danger"
+    assert host._grade_permission_risk("bash", {"command": "ls"}, "policy") == "info"
+    assert host._grade_permission_risk("write", {"path": "D:/x"}, "policy") == "info"
 
 
 def test_risk_grading_sandbox_is_warn(monkeypatch):
@@ -293,6 +301,22 @@ def test_risk_grading_sandbox_is_warn(monkeypatch):
     monkeypatch.setattr(registry_mod.ToolRegistry, "get_instance", staticmethod(lambda: _FakeRegistry("safe")))
     host = _make_host()
     assert host._grade_permission_risk("bash", {"command": "curl http://x"}, "sandbox") == "warn"
+
+
+def test_risk_grading_delete_source_is_warn(monkeypatch):
+    """delete 来源（删除保护拦截）→ warn
+
+    delete 来源的 command 必然命中 is_delete_command（_classify_permission_source
+    里二者同源），故实际上会被上面的删除分支先判为 danger；本用例用桩把
+    is_delete_command 关掉，单独验证 source 分支本身不遗漏 delete。
+    """
+    import app.tools.sandbox as sandbox_mod
+    from app.tools import registry as registry_mod
+
+    monkeypatch.setattr(sandbox_mod, "is_delete_command", lambda c: False)
+    monkeypatch.setattr(registry_mod.ToolRegistry, "get_instance", staticmethod(lambda: _FakeRegistry("safe")))
+    host = _make_host()
+    assert host._grade_permission_risk("bash", {"command": "x"}, "delete") == "warn"
 
 
 def test_risk_grading_default_info(monkeypatch):
