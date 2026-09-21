@@ -298,7 +298,7 @@ class UIEngine(BaseEngine):
     ) -> None:
         """结构化审批决策回传（替代文本标签反解析）。
 
-        - decision="allow" + remember=""        → 单次允许
+        - decision="allow" + remember="tool"    → 仅当前工具调用放行（不写缓存）
         - decision="allow" + remember="round"   → 本轮对话内不再询问
         - decision="allow" + remember="session" → 本次会话内不再询问
         - decision="deny"                        → 拒绝（可带 reason 回填给模型）

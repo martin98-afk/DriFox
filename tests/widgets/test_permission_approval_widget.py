@@ -67,28 +67,46 @@ def _collect(card):
 
 
 def test_decision_allow_emits_structured(qapp):
-    """点允许 → answered("allow", "", "")"""
+    """点允许（默认作用域=当前工具）→ answered("allow", "tool", "")"""
     card = _make_card()
     got = _collect(card)
     card._allow_btn.click()
-    assert got == [("allow", "", "")]
+    assert got == [("allow", "tool", "")]
 
 
 def test_remember_round_emits_scope(qapp):
-    """记住菜单选「本轮」→ ("allow", "round", "")"""
+    """作用域选「当前轮次」后点允许 → ("allow", "round", "")"""
     card = _make_card()
     got = _collect(card)
-    # 直接走决策出口，等价于菜单第一项被选中
-    card._decide("allow", "round")
+    card._set_scope("round")
+    card._allow_btn.click()
     assert got == [("allow", "round", "")]
 
 
 def test_remember_session_emits_scope(qapp):
-    """记住菜单选「本次会话」→ ("allow", "session", "")"""
+    """作用域选「当前会话」后点允许 → ("allow", "session", "")"""
     card = _make_card()
     got = _collect(card)
-    card._decide("allow", "session")
+    card._set_scope("session")
+    card._allow_btn.click()
     assert got == [("allow", "session", "")]
+
+
+def test_scope_selector_defaults_and_labels(qapp):
+    """作用域选择器：默认当前工具，选中什么按钮显示什么；选择不执行"""
+    card = _make_card()
+    got = _collect(card)
+    assert card._remember_scope == "tool"
+    assert "当前工具" in card._scope_btn.text()
+    card._set_scope("session")
+    assert "当前会话" in card._scope_btn.text()
+    card._set_scope("round")
+    assert "当前轮次" in card._scope_btn.text()
+    # 仅选择不产生决策
+    assert got == []
+    # 非法作用域被拒
+    card._set_scope("bogus")
+    assert card._remember_scope == "round"
 
 
 def test_deny_button_emits_deny(qapp):
@@ -130,7 +148,7 @@ def test_no_duplicate_emit_after_first_decision(qapp):
     card._allow_btn.click()
     card._deny_btn.click()
     card._decide("deny", "")
-    assert got == [("allow", "", "")]
+    assert got == [("allow", "tool", "")]
 
 
 # ── 二、安全默认 ──
@@ -171,7 +189,7 @@ def test_close_after_decision_is_noop(qapp):
     card.cancelled.connect(lambda: cancelled.append(True))
     card._allow_btn.click()
     card.closeEvent(QCloseEvent())
-    assert got == [("allow", "", "")]
+    assert got == [("allow", "tool", "")]
     assert cancelled == [], "已决策后关闭不应再发 cancelled"
 
 
@@ -201,7 +219,7 @@ def test_keyboard_enter_allows(qapp):
     card = _make_card(risk="info")
     got = _collect(card)
     card.keyPressEvent(QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Return, Qt.NoModifier))
-    assert got == [("allow", "", "")]
+    assert got == [("allow", "tool", "")]
 
 
 def test_space_on_focused_deny_denies(qapp):
@@ -243,7 +261,7 @@ def test_enter_still_allows_even_with_deny_focused(qapp):
 
     QTest.keyClick(card._deny_btn, Qt.Key_Return)
     qapp.processEvents()
-    assert got == [("allow", "", "")], "Enter 必须是允许（含焦点在拒绝按钮时）"
+    assert got == [("allow", "tool", "")], "Enter 必须是允许（含焦点在拒绝按钮时）"
     card.close()
 
 
@@ -289,7 +307,7 @@ def test_danger_keyboard_enter_blocked_within_500ms(qapp):
         qapp.processEvents()
         time.sleep(0.05)
     card.keyPressEvent(QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Return, Qt.NoModifier))
-    assert got == [("allow", "", "")], "解锁后 Enter 应正常放行"
+    assert got == [("allow", "tool", "")], "解锁后 Enter 应正常放行"
 
 
 def test_danger_direct_decide_blocked_within_500ms(qapp):
@@ -319,7 +337,7 @@ def test_info_enter_not_blocked(qapp):
     got = []
     card.answered.connect(lambda d, r, s: got.append((d, r, s)))
     card.keyPressEvent(QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Return, Qt.NoModifier))
-    assert got == [("allow", "", "")]
+    assert got == [("allow", "tool", "")]
 
 
 def test_danger_hint_shown_on_blocked_attempt(qapp):
@@ -334,10 +352,10 @@ def test_danger_hint_shown_on_blocked_attempt(qapp):
 # ── 六、UI 布局与字体收敛（用户反馈批次）──
 
 
-def test_footer_layout_preview_remember_left(qapp):
-    """尾部布局：左区 = 预览 + 记住，右区 = 拒绝 + 允许（主操作最右）
+def test_footer_layout_buttons_right_aligned(qapp):
+    """尾部布局：全部按钮靠右 = [预览][作用域] ｜[拒绝][允许]（主操作最右）
 
-    用户明确要求"预览和记住放到左边，右侧是拒绝+允许"。
+    用户要求按钮统一右对齐，辅助组与决策组之间留一点距离。
     用布局内实际索引断言（不依赖创建顺序）。注意：全是 layout 索引，
     不可与 widgets 列表索引混用（此前混用导致断言误判）。
     """
@@ -356,14 +374,16 @@ def test_footer_layout_preview_remember_left(qapp):
         if w is not None:
             idx[w] = i
         elif it.spacerItem() is not None and stretch_idx is None:
-            stretch_idx = i  # 左右分界
+            stretch_idx = i  # 起始 stretch：整体靠右
 
-    assert stretch_idx is not None, "左右区之间必须有 addStretch() 分隔"
-    assert idx[card._preview_btn] < stretch_idx, "预览应在左区"
-    assert idx[card._remember_btn] < stretch_idx, "记住应在左区"
-    assert idx[card._deny_btn] > stretch_idx, "拒绝应在右区"
-    assert idx[card._allow_btn] > stretch_idx, "允许应在右区"
+    assert stretch_idx == 0, "首位必须是 addStretch()，全部按钮靠右"
+    assert idx[card._preview_btn] > stretch_idx, "预览应靠右"
+    assert idx[card._scope_btn] > stretch_idx, "作用域按钮应靠右"
+    assert idx[card._deny_btn] > idx[card._scope_btn], "拒绝在辅助按钮之后"
     assert idx[card._deny_btn] < idx[card._allow_btn], "允许必须最右（主操作）"
+    # 辅助组与决策组之间有固定间隔（视觉分组）
+    aux_end = max(idx[card._preview_btn], idx[card._scope_btn])
+    assert idx[card._deny_btn] - aux_end >= 2, "辅助组与决策组之间应有间隔项（addSpacing）"
 
 
 def test_no_page_indicator(qapp):
@@ -394,14 +414,26 @@ def test_remember_menu_is_round_menu(qapp):
 
 
 def test_remember_menu_items_present(qapp):
-    """菜单含两个可用作用域 + 禁用占位项"""
+    """菜单含三级作用域短名（当前工具/当前轮次/当前会话）+ 禁用占位项"""
     card = _make_card(risk="info")
     menu = card._build_remember_menu()
     labels = [a.text() for a in menu.actions() if not a.isSeparator()]
-    assert len(labels) == 3
-    assert "本轮" in labels[0]
-    assert "会话" in labels[1]
+    assert len(labels) == 4
+    assert labels[0] == "当前工具"
+    assert labels[1] == "当前轮次"
+    assert labels[2] == "当前会话"
     assert menu._act_session.isEnabled() is True
+    # 勾选态跟随当前作用域（默认 tool）
+    assert menu._act_tool.isChecked() is True
+    assert menu._act_round.isChecked() is False
+
+
+def test_remember_tool_emits_scope(qapp):
+    """默认作用域（当前工具）下点允许 → ("allow", "tool", "")"""
+    card = _make_card()
+    got = _collect(card)
+    card._allow_btn.click()
+    assert got == [("allow", "tool", "")]
 
 
 def test_font_scale_converged(qapp):
@@ -494,13 +526,44 @@ def test_impact_rendered_with_paths(qapp):
     card = _make_card(impact={"paths": ["D:/a", "D:/b"], "missing": ["D:/c"], "writes": True})
     text = card._impact_label.text()
     assert "D:/a" in text and "D:/b" in text
-    assert "1 项路径当前不存在" in text
+    assert "1 项路径不存在" in text
     assert "写入文件" in text
 
 
-def test_workdir_shown(qapp):
+def test_workdir_shown_in_meta(qapp):
+    """工作目录从正文挪进详情折叠区（正文只留决策必需信息）"""
     card = _make_card(workdir="D:/work/DriFox")
-    assert "D:/work/DriFox" in card._workdir_label.text()
+    assert "D:/work/DriFox" in card._meta_label.text()
+
+
+def test_body_labels_use_system_font(qapp):
+    """正文/提示/按钮样式必须应用系统字体族（原先大部分 label 缺 font-family）"""
+    from app.utils.utils import get_font_family_css
+
+    card = _make_card()
+    for widget_name in (
+        "_source_desc",
+        "_impact_label",
+        "_meta_label",
+        "_hint_label",
+        "_meta_toggle",
+        "_deny_btn",
+        "_preview_btn",
+        "_scope_btn",
+        "_allow_btn",
+    ):
+        widget = getattr(card, widget_name)
+        assert get_font_family_css() in widget.styleSheet(), f"{widget_name} 样式缺系统字体族"
+
+
+def test_footer_buttons_right_aligned(qapp):
+    """辅助按钮与决策按钮同行右对齐：辅助组与决策组之间有固定间隔"""
+    card = _make_card()
+    footer = card._preview_btn.parentWidget()
+    lay = footer.layout()
+    assert lay.indexOf(card._preview_btn) < lay.indexOf(card._deny_btn)
+    # 预览按钮之前只能是 stretch，不得有左对齐的其他控件
+    assert lay.count() > 0 and lay.itemAt(0).spacerItem() is not None
 
 
 def test_styled_background_attribute_set(qapp):

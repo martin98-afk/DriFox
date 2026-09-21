@@ -6,7 +6,7 @@
   （`问题「X」的回答：\\n【允许】`），审批卡走结构化信号，两者互不影响。
 - 结构化回传：`answered(decision, remember, reason)` —— 消除文本标签反解析，
   避免标签文案改字导致静默 deny。
-- 风险三档（danger/warn/info）驱动配色、图标、默认焦点、按钮延迟与记住菜单项。
+- 风险三档（danger/warn/info）驱动配色、图标、默认焦点、按钮延迟与作用域选择菜单。
 - 安全默认：默认焦点在「拒绝」；任何异常/中断路径（Esc、关闭、无选择）一律 deny。
 
 职责分离：本卡**不做命令解析**（不 import sandbox）。影响范围/风险档位/来源文案
@@ -39,18 +39,22 @@ RISK_DANGER = "danger"
 RISK_WARN = "warn"
 RISK_INFO = "info"
 
-# 记住语义取值（与 PermissionCache 的 round/session 两级对齐）
+# 记住语义取值（tool=仅本次调用放行不写缓存；round/session 与 PermissionCache 两级对齐）
 REMEMBER_NONE = ""
+REMEMBER_TOOL = "tool"
 REMEMBER_ROUND = "round"
 REMEMBER_SESSION = "session"
 
 # danger 档位「允许」按钮防误触延迟（ms）：连按 Enter 一路放行的现存风险点
 _DANGER_ALLOW_DELAY_MS = 500
 
+# 作用域选择器文案（按钮与菜单项共用短名；选中什么显示什么，执行统一走「允许」）
+_SCOPE_LABELS = {REMEMBER_TOOL: "当前工具", REMEMBER_ROUND: "当前轮次", REMEMBER_SESSION: "当前会话"}
+
 # 提示行默认文案（防误触拦截时临时改写，用后还原）
 # 不含数字键直选：4 按钮卡片上价值有限，且需与视觉顺序强绑定（改布局即错位），
-# 用户明确反馈"字体太多太杂乱"，收敛为 4 项核心快捷键。
-_HINT_TEXT = "Enter 允许 · Esc 拒绝 · Ctrl+P 预览 · A 记住"
+# 用户明确反馈"字体太多太杂乱"，收敛为 3 项核心快捷键。
+_HINT_TEXT = "Enter 允许 · Esc 拒绝 · Ctrl+P 预览"
 
 
 class PermissionApprovalWidget(QWidget):
@@ -78,6 +82,8 @@ class PermissionApprovalWidget(QWidget):
         self._allow_unlock_timer: QTimer | None = None
         # 已就当前请求做出决策（防重复 emit：按钮点击 + Esc 竞争）
         self._decided = False
+        # 允许的作用域（作用域按钮显示当前选中项；选择不立即执行，允许时生效）
+        self._remember_scope = REMEMBER_TOOL
         # danger 防误触拦截提示是否已显示（避免连按时反复改写提示行）
         self._lock_hint_shown = False
         # 高度通知合并标志（对齐提问卡，防布局自激循环）
@@ -224,11 +230,6 @@ class PermissionApprovalWidget(QWidget):
         self._impact_label.setWordWrap(True)
         lay.addWidget(self._impact_label)
 
-        self._workdir_label = QLabel("")
-        self._workdir_label.setObjectName("papHint")
-        self._workdir_label.setWordWrap(True)
-        lay.addWidget(self._workdir_label)
-
         return w
 
     def _build_meta(self) -> QWidget:
@@ -265,16 +266,20 @@ class PermissionApprovalWidget(QWidget):
         return w
 
     def _build_footer(self) -> QWidget:
-        """⑤ 尾部：左 [预览] [记住 ▼]　右 [拒绝] [允许]（主操作在最右）
+        """⑤ 尾部：按钮统一靠右 —— [预览] [作用域 ▾] ｜ [拒绝] [允许]（主操作在最右）
 
-        用 addStretch() 分隔两区。用户明确要求"预览和记住放到左边，右侧是拒绝+允许"。
+        作用域按钮显示当前选中项（当前工具/当前轮次/当前会话），点击弹出菜单
+        仅切换选中，不执行；「允许」/Enter 按所选作用域放行。辅助组与决策组
+        之间 12px 间隔做视觉分组。
         """
         w = QWidget()
         lay = QHBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
-        # ── 左区：辅助操作 ──
+        lay.addStretch()
+
+        # ── 辅助操作 ──
         self._preview_btn = QPushButton("预览")
         self._preview_btn.setObjectName("papSecondary")
         self._preview_btn.setCursor(Qt.PointingHandCursor)
@@ -283,16 +288,18 @@ class PermissionApprovalWidget(QWidget):
         self._preview_btn.clicked.connect(self._on_preview)
         lay.addWidget(self._preview_btn)
 
-        self._remember_btn = QPushButton("记住 ▾")
-        self._remember_btn.setObjectName("papSecondary")
-        self._remember_btn.setCursor(Qt.PointingHandCursor)
-        self._remember_btn.setFixedHeight(26)
-        self._remember_btn.clicked.connect(self._show_remember_menu)
-        lay.addWidget(self._remember_btn)
+        self._scope_btn = QPushButton(f"{_SCOPE_LABELS[REMEMBER_TOOL]} ▾")
+        self._scope_btn.setObjectName("papSecondary")
+        self._scope_btn.setCursor(Qt.PointingHandCursor)
+        self._scope_btn.setFixedHeight(26)
+        self._scope_btn.setToolTip("选择本次允许的作用范围")
+        self._scope_btn.clicked.connect(self._show_remember_menu)
+        lay.addWidget(self._scope_btn)
 
-        lay.addStretch()
+        # 辅助组与决策组之间的间隔（视觉分组）
+        lay.addSpacing(12)
 
-        # ── 右区：决策操作（主操作「允许」在最右）──
+        # ── 决策操作（主操作「允许」按所选作用域放行，在最右）──
         self._deny_btn = QPushButton("拒绝")
         self._deny_btn.setObjectName("papDeny")
         self._deny_btn.setCursor(Qt.PointingHandCursor)
@@ -307,7 +314,7 @@ class PermissionApprovalWidget(QWidget):
         self._allow_btn.setObjectName("papAllow")
         self._allow_btn.setCursor(Qt.PointingHandCursor)
         self._allow_btn.setFixedHeight(26)
-        self._allow_btn.clicked.connect(lambda: self._decide("allow", REMEMBER_NONE))
+        self._allow_btn.clicked.connect(lambda: self._decide("allow", self._remember_scope))
         lay.addWidget(self._allow_btn)
 
         return w
@@ -329,9 +336,11 @@ class PermissionApprovalWidget(QWidget):
         self._cmd_label.setText(self._format_arguments())
         self._source_desc.setText(self._source_description())
         self._impact_label.setText(self._format_impact())
-        self._workdir_label.setText(f"工作目录：{self._workdir}" if self._workdir else "")
 
-        self._meta_label.setText(f"tool_call_id：{self._tool_call_id or '—'}\n请求时间：{self._request_time or '—'}")
+        meta_lines = [f"tool_call_id：{self._tool_call_id or '—'}", f"请求时间：{self._request_time or '—'}"]
+        if self._workdir:
+            meta_lines.append(f"工作目录：{self._workdir}")
+        self._meta_label.setText("\n".join(meta_lines))
 
         # 预览按钮仅在宿主给了载荷时显示
         self._preview_btn.setVisible(self._preview_payload is not None)
@@ -398,12 +407,12 @@ class PermissionApprovalWidget(QWidget):
         return "\n".join(lines)
 
     def _source_description(self) -> str:
-        """来源一句话说明"""
+        """来源一句话说明（精简措辞，降低阅读负担）"""
         if self._source == "sandbox":
-            return "触发了安全中心的沙箱拦截规则（命令/路径/网络边界）。"
+            return "触发沙箱拦截规则（命令/路径/网络边界）。"
         if self._source == "delete":
-            return "这是删除类命令，确认后将先快照再执行（可找回）。"
-        return "该工具当前策略为「关闭后询问」，需要你确认后才能执行。"
+            return "删除类命令，执行前自动快照（可找回）。"
+        return "该工具策略为「关闭后询问」。"
 
     def _format_impact(self) -> str:
         """影响范围：路径 / 缺失路径 / 域名 / 写操作"""
@@ -416,12 +425,12 @@ class PermissionApprovalWidget(QWidget):
             parts.append(f"影响路径：\n{shown}{extra}")
         missing = impact.get("missing") or []
         if missing:
-            parts.append(f"（另有 {len(missing)} 项路径当前不存在）")
+            parts.append(f"{len(missing)} 项路径不存在")
         domains = impact.get("domains") or []
         if domains:
-            parts.append("涉及域名：" + "、".join(str(d) for d in domains[:10]))
+            parts.append("域名：" + "、".join(str(d) for d in domains[:10]))
         if impact.get("writes"):
-            parts.append("该操作会写入文件。")
+            parts.append("写入文件")
         return "\n".join(parts)
 
     # ══════════════════ 样式 ══════════════════
@@ -452,43 +461,42 @@ class PermissionApprovalWidget(QWidget):
             f" font-size:{scale_font_size(11)}px; }}"
         )
         self._source_desc.setStyleSheet(
-            f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;{font_size_css(11)}"
+            f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;{font_size_css(11)} {get_font_family_css()}"
         )
-        self._impact_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT};background:transparent;{font_size_css(11)}")
-        self._workdir_label.setStyleSheet(
-            f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;{font_size_css(11)}"
+        self._impact_label.setStyleSheet(
+            f"color:{Colors.REALTIME_TEXT};background:transparent;{font_size_css(11)} {get_font_family_css()}"
         )
         self._meta_label.setStyleSheet(
-            f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;{font_size_css(11)}"
+            f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;{font_size_css(11)} {get_font_family_css()}"
         )
         # 提示行 9 → 10（原字号偏小）
         self._hint_label.setStyleSheet(
-            f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;{font_size_css(10)}"
+            f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;{font_size_css(10)} {get_font_family_css()}"
         )
         self._meta_toggle.setStyleSheet(
             f"QPushButton#papMetaToggle {{ color:{Colors.TEXT_SECONDARY}; background:transparent;"
-            f" border:none; padding:0; text-align:left; {font_size_css(10)} }}"
+            f" border:none; padding:0; text-align:left; {font_size_css(10)} {get_font_family_css()} }}"
             f" QPushButton#papMetaToggle:hover {{ color:{Colors.TEXT_PRIMARY}; }}"
         )
         # 拒绝：透明底 + 次要文字；danger 档位改错误色文字
         deny_color = Colors.REALTIME_ERROR if self._risk == RISK_DANGER else Colors.TEXT_SECONDARY
         self._deny_btn.setStyleSheet(
             f"QPushButton#papDeny {{ background:transparent; color:{deny_color}; border:none;"
-            f" padding:0 12px; {font_size_css(12)} }}"
+            f" padding:0 12px; {font_size_css(12)} {get_font_family_css()} }}"
             f" QPushButton#papDeny:hover {{ color:{Colors.TEXT_PRIMARY}; }}"
         )
         # 次要按钮：REALTIME_TAG_BG 底 + REALTIME_TEXT 字（禁止硬编码白字）
-        for btn in (self._preview_btn, self._remember_btn):
+        for btn in (self._preview_btn, self._scope_btn):
             btn.setStyleSheet(
                 f"QPushButton#papSecondary {{ background:{Colors.REALTIME_TAG_BG};"
                 f" color:{Colors.REALTIME_TEXT}; border:none; border-radius:{BorderRadius.SM};"
-                f" padding:0 12px; {font_size_css(12)} }}"
+                f" padding:0 12px; {font_size_css(12)} {get_font_family_css()} }}"
                 f" QPushButton#papSecondary:hover {{ background:{Colors.HOVER_BG}; }}"
             )
         self._allow_btn.setStyleSheet(
             f"QPushButton#papAllow {{ background:{Colors.REALTIME_ACCENT}; color:#ffffff;"
             f" border:none; border-radius:{BorderRadius.SM}; padding:0 16px; font-weight:bold;"
-            f" {font_size_css(12)} }}"
+            f" {font_size_css(12)} {get_font_family_css()} }}"
             f" QPushButton#papAllow:hover {{ background:{Colors.REALTIME_ACCENT_WARM}; }}"
             f" QPushButton#papAllow:disabled {{ background:{Colors.HOVER_BG}; color:{Colors.TEXT_SECONDARY}; }}"
         )
@@ -500,8 +508,8 @@ class PermissionApprovalWidget(QWidget):
         for seq, slot in (
             (Qt.Key_Escape, self._on_deny),
             ("Ctrl+P", self._on_preview),
-            ("Ctrl+Return", lambda: self._decide("allow", REMEMBER_NONE)),
-            ("Ctrl+Enter", lambda: self._decide("allow", REMEMBER_NONE)),
+            ("Ctrl+Return", lambda: self._decide("allow", self._remember_scope)),
+            ("Ctrl+Enter", lambda: self._decide("allow", self._remember_scope)),
         ):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
@@ -511,14 +519,10 @@ class PermissionApprovalWidget(QWidget):
         key = event.key()
         mods = event.modifiers()
         if not mods and key in (Qt.Key_Return, Qt.Key_Enter):
-            self._decide("allow", REMEMBER_NONE)
+            self._decide("allow", self._remember_scope)
             return
-        if not mods and key == Qt.Key_A:
-            self._show_remember_menu()
-            return
-        # 数字键直选已移除：新布局改为左[预览·记住] 右[拒绝·允许]，
-        # 数字映射若不同步重排会与视觉顺序错位（按 1 得到的 ≠ 视觉第一个），
-        # 且 4 按钮卡片上价值有限。保留 Enter/Esc/Ctrl+P/A 四项核心快捷键。
+        # 数字键与 A 直选已移除：数字映射需与视觉顺序强绑定（改布局即错位），
+        # 作用域改为下拉选择器后 A 无对应动作。保留 Enter/Esc/Ctrl+P 三项核心快捷键。
         super().keyPressEvent(event)
 
     def showEvent(self, event):
@@ -575,39 +579,59 @@ class PermissionApprovalWidget(QWidget):
     def _build_remember_menu(self):
         """构建记住菜单（供测试直调断言启用态与项数）
 
-        三项作用域：本轮（可用）/ 本次会话（danger 档位禁用）/ 删除类会话豁免（恒禁用）。
-        最后一项仅作说明性占位——删除类不给会话级豁免，故永远禁用。
+        三级作用域从小到大：当前工具（单次放行）/ 当前轮次 / 当前会话。
+        选中仅更新作用域与按钮文案，执行统一收敛到「允许」。会话级在 danger
+        档位禁用（删除类不给会话级豁免）；最后一项仅作说明性占位——删除类
+        不给会话级豁免，故永远禁用。
 
         用 `qfluentwidgets.RoundMenu` 而非原生 `QMenu`：原生菜单不跟随主题，
         深色主题下是白底系统样式，与卡片割裂（用户反馈"记住的弹窗样式很丑"）。
         RoundMenu 自动跟随 qfluentwidgets 主题，与设置页菜单观感一致。
         """
         menu = RoundMenu(parent=self)
-        act_round = Action("本轮对话内不再询问", menu)
-        act_session = Action("本次会话内不再询问", menu)
-        act_danger = Action("⚠ 本次会话内允许删除类命令", menu)
+        act_tool = Action("当前工具", menu)
+        act_round = Action("当前轮次", menu)
+        act_session = Action("当前会话", menu)
+        act_danger = Action("⚠ 删除类命令不支持会话级豁免", menu)
         # danger 档位不给会话级豁免（删除类风险最高，仅允许逐次确认）
         act_session.setEnabled(self._risk != RISK_DANGER)
         act_danger.setEnabled(False)
+        # 勾选态与按钮文案同源：打开菜单即可看出当前选中项
+        for act in (act_tool, act_round, act_session):
+            act.setCheckable(True)
+        _SCOPE_ACTIONS = {REMEMBER_TOOL: act_tool, REMEMBER_ROUND: act_round, REMEMBER_SESSION: act_session}
+        _SCOPE_ACTIONS[self._remember_scope].setChecked(True)
+        menu.addAction(act_tool)
         menu.addAction(act_round)
         menu.addAction(act_session)
         menu.addSeparator()
         menu.addAction(act_danger)
         # 显式留存引用：不依赖 actions() 索引（separator 可能改变索引语义）
+        menu._act_tool = act_tool  # type: ignore[attr-defined]
         menu._act_round = act_round  # type: ignore[attr-defined]
         menu._act_session = act_session  # type: ignore[attr-defined]
         return menu
 
     def _show_remember_menu(self) -> None:
-        """弹出记住菜单（不平铺：平铺会让「扩大授权」与「允许」视觉同权，用户易误点）"""
+        """弹出作用域选择菜单：选中仅更新按钮显示，不立即执行（执行统一走「允许」）"""
         menu = self._build_remember_menu()
+        act_tool = menu._act_tool  # type: ignore[attr-defined]
         act_round = menu._act_round  # type: ignore[attr-defined]
         act_session = menu._act_session  # type: ignore[attr-defined]
-        chosen = menu.exec_(self._remember_btn.mapToGlobal(self._remember_btn.rect().bottomLeft()))
-        if chosen is act_round:
-            self._decide("allow", REMEMBER_ROUND)
+        chosen = menu.exec_(self._scope_btn.mapToGlobal(self._scope_btn.rect().bottomLeft()))
+        if chosen is act_tool:
+            self._set_scope(REMEMBER_TOOL)
+        elif chosen is act_round:
+            self._set_scope(REMEMBER_ROUND)
         elif chosen is act_session and act_session.isEnabled():
-            self._decide("allow", REMEMBER_SESSION)
+            self._set_scope(REMEMBER_SESSION)
+
+    def _set_scope(self, scope: str) -> None:
+        """更新所选作用域并同步按钮文案（当前选中什么就显示什么）"""
+        if scope not in _SCOPE_LABELS:
+            return
+        self._remember_scope = scope
+        self._scope_btn.setText(f"{_SCOPE_LABELS[scope]} ▾")
 
     def _decide(self, decision: str, remember: str, reason: str = "") -> None:
         """统一出口：危险操作防误触闸门 + 防重复 emit + 清理定时器

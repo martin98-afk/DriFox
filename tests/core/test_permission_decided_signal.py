@@ -68,6 +68,13 @@ def test_decide_allow_maps_to_approve():
     assert worker.calls == [("approve", "call_1", False, False)]
 
 
+def test_decide_allow_tool_maps_to_single_approve():
+    """allow + remember="tool" → 仅本次调用放行，不写任何缓存"""
+    worker = _FakeWorker()
+    _make_engine(worker).decide_tool_permission("call_2t", "allow", "tool")
+    assert worker.calls == [("approve", "call_2t", False, False)]
+
+
 def test_decide_allow_round_maps_to_auto_allow():
     """allow + remember="round" → auto_allow=True"""
     worker = _FakeWorker()
