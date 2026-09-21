@@ -45,7 +45,11 @@ DEFAULT_CONFIG = {
     "delete_protection": False,
     "delete": {"exempt_paths": []},
     "job_limits": {"memory_mb": 2048, "active_process": 64, "cpu_time_ms": 0},
+    # 0 = 不限（不自动清理），>0 = 启动期与手动清理的上限
     "backup_limit_mb": 3000,
+    # gateway 平台侧权限请求是否自动放行（True=保持现状；False=遵循沙箱判定，
+    # 无人值守场景可能因等不到审批而失败）
+    "gateway_auto_approve": True,
 }
 
 
@@ -144,12 +148,16 @@ def _under(child: str, parent: str) -> bool:
 
 
 def _match_blacklist(norm_path: str, blacklist: list) -> bool:
-    """黑名单条目：绝对目录前缀匹配，或裸文件名匹配（如 ".env" 命中任意层级 .env）"""
+    """黑名单条目：绝对目录前缀匹配，或裸文件名匹配（如 ".env" 命中任意层级 .env）
+
+    ⚠ 绝对条目的前缀匹配必须走 `_under`（含 `rstrip("\\/") + os.sep` 边界），
+    否则 `D:/work/proj/secret` 会误命中 `secret2/b.txt` 与 `secret_backup/c.txt`
+    —— 属误报（过度拦截），用户会困惑"为什么没配这个目录也被拦"。
+    """
     for item in blacklist:
         item_str = str(item)
         if os.path.isabs(os.path.expandvars(item_str)):
-            norm_item = _norm(item_str)
-            if norm_path.startswith(norm_item):
+            if _under(norm_path, _norm(item_str)):
                 return True
         else:
             if Path(norm_path).name.lower() == item_str.lower():
@@ -171,15 +179,25 @@ def check_path(
         return ALLOW
 
     norm_path = _norm(path)
-    blacklist = cfg.get("path.blacklist") or []
-    whitelist = cfg.get("path.whitelist") or []
+    blacklist: list = list(cfg.get("path.blacklist") or [])
+    whitelist: list = list(cfg.get("path.whitelist") or [])
 
     # 黑名单最高优先（读写都拦）
     if blacklist and _match_blacklist(norm_path, blacklist):
         return CONFIRM
     # 白名单放行出界写
-    if any(_under(norm_path, _norm(item)) for item in whitelist):
-        return ALLOW
+    # 绝对条目直接用；相对条目按 **workdir** 解析（不是进程 cwd），
+    # 否则用户在 UI 填 `other_proj` 会静默失效。
+    # ⚠ 必须先 expandvars 再判绝对：`%USERPROFILE%\docs` 这类含环境变量的
+    # 条目 os.path.isabs() 返回 False，不展开会被误当相对路径拼到 workdir 下。
+    for item in whitelist:
+        item_str = str(item)
+        if os.path.isabs(os.path.expandvars(item_str)):
+            if _under(norm_path, _norm(item_str)):
+                return ALLOW
+        else:
+            if _under(norm_path, _norm(Path(workdir) / item_str)):
+                return ALLOW
     if mode == "write":
         workdir_norm = _norm(workdir)
         return ALLOW if _under(norm_path, workdir_norm) else CONFIRM
@@ -199,6 +217,40 @@ def _first_token(command: str) -> str:
     return token[:-4] if token.endswith(".exe") else token
 
 
+def _prefix_match(command: str, prefix: str) -> bool:
+    """命令是否命中白名单前缀（**带词边界**，EU-G24）
+
+    判据：前缀与命令在**词边界**处对齐 —— 即命令等于前缀，或前缀后紧跟
+    空白/行尾。避免 `git` 误命中 `gitsomething`，也避免 `npm run` 误命中
+    `npm runner`。
+
+    条目本身可含参数（如 `git status`），此时按整串前缀 + 边界匹配。
+    """
+    if not command or not prefix:
+        return False
+    cmd = command.strip().lower()
+    pre = str(prefix).strip().lower()
+    if not pre:
+        return False
+    if not cmd.startswith(pre):
+        return False
+    if len(cmd) == len(pre):
+        return True
+    return cmd[len(pre)] in (" ", "\t")
+
+
+def _matches_any_prefix(command: str, prefixes) -> bool:
+    """命令是否命中任一用户前缀名单（带词边界，大小写不敏感）
+
+    用于 EU-G23：用户显式写进 `command.confirm_prefixes` 的命令，不应因
+    `delete_protection` 关闭而被放行 —— 显式加严优先于开关默认值。
+    EU-G24：与白名单共用 `_prefix_match` 的边界语义，两条路径口径一致。
+    """
+    if not command:
+        return False
+    return any(_prefix_match(command, str(p)) for p in (prefixes or []))
+
+
 def check_command(command: str, cfg: Optional[SandboxConfig] = None) -> Verdict:
     """命令判定：递归解壳 + 用户名单叠加 + 系统级工具豁免"""
     cfg = cfg or SandboxConfig.get_instance()
@@ -211,17 +263,31 @@ def check_command(command: str, cfg: Optional[SandboxConfig] = None) -> Verdict:
 
     stripped = command.strip()
 
-    # 用户 confirm 名单优先于 allow 名单（显式加严）
+    # 用户 confirm 名单优先于 allow 名单（显式加严；边界匹配见 _prefix_match）
     for prefix in cfg.get("command.confirm_prefixes") or []:
-        if stripped.lower().startswith(str(prefix).lower()):
+        if _prefix_match(stripped, str(prefix)):
             return CONFIRM
     # 系统级工具豁免
     if cfg.get("sys_tools_bypass") and _first_token(stripped) in SYS_LEVEL_TOOLS:
         return ALLOW
-    # 用户 allow 名单：放行，但 block 命令仍拦
+    # 用户 allow 名单：**有条件放行**
+    # ⚠ EU-G24：此前是纯 `startswith` 前缀匹配 → 白名单填 `git` 会放行
+    # `git rm -rf .` / `git push --force` 等全部子命令（设置页 placeholder
+    # 「如 git、npm run」正引导用户如此配置），等于引导用户制造漏洞。
+    # 现改为：命中白名单后仍检查 deep 判定的 **block 与 confirm 两层** ——
+    #   · block → DENY（不变）
+    #   · confirm → CONFIRM（新：不再被白名单无条件放行）
+    #   · safe → ALLOW（白名单意图生效）
+    # 效果：填 `git` 可省掉 `git status`/`git commit` 的审批，但 `git rm -rf .`
+    # 仍要确认；若用户确实想全放行 git，需显式在 confirm 名单之外承担风险。
     for prefix in cfg.get("command.allow_prefixes") or []:
-        if stripped.lower().startswith(str(prefix).lower()):
-            return DENY if classify_command_deep(stripped) == "block" else ALLOW
+        if _prefix_match(stripped, str(prefix)):
+            deep = classify_command_deep(stripped)
+            if deep == "block":
+                return DENY
+            if deep == "confirm":
+                return CONFIRM
+            return ALLOW
 
     verdict = classify_command_deep(stripped)
     if verdict == "block":
@@ -264,6 +330,76 @@ _NET_UPLOAD_FLAGS = (
     "--body",
 )
 _URL_PATTERN = re.compile(r"https?://[^\s\"']+")
+# 裸域名（无 scheme）：仅在网络工具的**位置参数**上匹配，避免全局正则误报
+# （`curl evil.com/x` 会被 curl 自动补 http://，旧实现完全绕过域名黑名单）
+_BARE_DOMAIN_RE = re.compile(r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(?::\d+)?(?:[/?#].*)?$")
+# 位置参数取值的候选前缀（这些 flag 后面跟的值不是"目标"）
+_VALUE_FLAGS = frozenset(
+    {
+        "-o",
+        "--output",
+        "-d",
+        "--data",
+        "--data-raw",
+        "--data-binary",
+        "-H",
+        "--header",
+        "-u",
+        "--user",
+        "-A",
+        "--user-agent",
+        "-e",
+        "--referer",
+        "-x",
+        "--proxy",
+        "-F",
+        "--form",
+        "--upload-file",
+        "-T",
+        "--body",
+        "--max-time",
+        "-m",
+        "--connect-timeout",
+    }
+)
+
+
+def _extract_bare_domains(command: str) -> list:
+    """从网络命令的位置参数中抽取裸域名（保守：只认"像域名"的 token）
+
+    判据（全部满足才算）：
+    - 不是 flag（不以 - 开头）
+    - 不紧跟在"取值型 flag"之后（如 `-o out.txt`、`-H X: Y`）
+    - 形如 `host.tld[...]`（至少一个点 + TLD 字母后缀）
+    - 不含 Windows 盘符/路径分隔特征（`C:\\`、`\\server\\share`）
+
+    只用于域名黑名单比对，不单独触发"带 URL 就审批"（避免把普通参数误判为外传）。
+    """
+    if not command:
+        return []
+    tokens = _split_tokens(command)
+    domains = []
+    expect_value = False
+    for raw in tokens:
+        token = _strip_quotes(raw)
+        if not token:
+            continue
+        if expect_value:
+            expect_value = False
+            continue
+        if token.startswith("-"):
+            if token in _VALUE_FLAGS:
+                expect_value = True
+            continue
+        # 排除 Windows 盘符与 UNC 路径（C:\x、\\srv\share）
+        if re.match(r"^[a-zA-Z]:[\\/]", token) or token.startswith("\\\\"):
+            continue
+        # 已有 scheme 的交给 _URL_PATTERN，这里只看裸形态
+        if "://" in token:
+            continue
+        if _BARE_DOMAIN_RE.match(token):
+            domains.append(token)
+    return domains
 
 
 def check_network(command: str, cfg: Optional[SandboxConfig] = None) -> Optional[Verdict]:
@@ -277,12 +413,14 @@ def check_network(command: str, cfg: Optional[SandboxConfig] = None) -> Optional
     lowered = command.lower()
     has_net_tool = any(token in lowered for token in _NET_TOOL_TOKENS)
     urls = _URL_PATTERN.findall(command)
-    if not has_net_tool and not urls:
+    bare_domains = _extract_bare_domains(command) if has_net_tool else []
+    if not has_net_tool and not urls and not bare_domains:
         return None
 
-    # 域名黑名单（后缀匹配）
-    for url in urls:
-        host = re.sub(r"^https?://", "", url).split("/")[0].split(":")[0].lower()
+    # 域名黑名单（后缀匹配）：带 scheme 的 URL + 裸域名统一比对
+    hosts = [re.sub(r"^https?://", "", url).split("/")[0].split(":")[0].lower() for url in urls]
+    hosts += [d.split("/")[0].split(":")[0].lower() for d in bare_domains]
+    for host in hosts:
         for domain in cfg.get("network.blacklist_domains") or []:
             d = str(domain).lower().lstrip(".")
             if d and (host == d or host.endswith("." + d)):
@@ -333,7 +471,12 @@ def _current_workdir() -> Path:
     return Path.cwd()
 
 
-def sandbox_check_tool(tool_name: str, arguments: dict, cfg: Optional[SandboxConfig] = None) -> Verdict:
+def sandbox_check_tool(
+    tool_name: str,
+    arguments: dict,
+    cfg: Optional[SandboxConfig] = None,
+    workdir: Optional[Path] = None,
+) -> Verdict:
     """worker 层唯一入口：工具名 + 参数 → 三分判定（deny/confirm/allow）
 
     路由规则（元数据驱动，不写死工具名）：
@@ -341,6 +484,11 @@ def sandbox_check_tool(tool_name: str, arguments: dict, cfg: Optional[SandboxCon
     - tool_name ∈ registry "文件写入" 分组 → check_path(write)
     - tool_name ∈ registry "文件读取" 分组 → check_path(read)
     - 其余 → allow
+
+    workdir 显式传入时以此为准；未传时回退 `_current_workdir()`。
+    ⚠ 回退来源是 BackgroundTaskManager 单例里的全局 workdir（由每次工具调用刷新），
+    多窗口 / 主对话与子智能体并发时会串味（拿到"最后一次调用者"的 workdir）。
+    需要确定性基准的调用方应显式传 workdir。
     """
     cfg = cfg or SandboxConfig.get_instance()
     if not cfg.get("sandbox_enabled"):
@@ -350,8 +498,48 @@ def sandbox_check_tool(tool_name: str, arguments: dict, cfg: Optional[SandboxCon
     command = args.get("command")
     if isinstance(command, str) and command.strip():
         verdict = check_command(command, cfg)
+        # ── 删除保护门控（EU-G23，正解 A）──
+        # `delete_protection` 关闭时，**仅取消「因删除命令而 confirm」这一层**。
+        # 依据：删除类命令的 confirm 来自 CONFIRM_COMMANDS 命令名单（command_safety），
+        # 与路径边界无关 —— 所以门控必须落在 command 分支，而非 check_path。
+        # ⚠ 以下三层**不受影响**，必须继续拦截：
+        #   ① deny（cacls 等 block 命令）② check_network（外传）③ G31 黑名单
+        #   ④ 用户 confirm_prefixes 显式加严（如手动加了 `rm`）—— 用户显式意图优先
+        # 降级为 ALLOW 后仍会走下方 check_network，故外传层不会因此漏判。
+        if (
+            verdict == CONFIRM
+            and not cfg.get("delete_protection")
+            and is_delete_command(command)
+            and not _matches_any_prefix(command, cfg.get("command.confirm_prefixes"))
+        ):
+            verdict = ALLOW
         if verdict == CONFIRM and is_delete_command(command) and delete_exempt(command, cfg):
             return ALLOW
+        # ── 黑名单定向检查（命令类工具的路径边界）──
+        # 背景：command 分支原不查路径，导致 path.blacklist 对命令类工具完全失效
+        # （AI 用 `type D:/secrets/key.pem` 可静默读取敏感目录）。而 CONFIRM_COMMANDS
+        # 的条目全是写类/系统类命令，一个读取类都没有 → 黑名单形同虚设。
+        # 设计：只过黑名单，**不判 workdir 边界** —— check_path 的 read 模式天然
+        # 只检查黑名单（其余无条件 allow），故统一传 "read" 可避开 mode 推断
+        # （rm=write / type=read / git、npm、python -m 无法静态判定）。
+        # read 模式不判 workdir 边界 → 零误报（plan 用 16 个真实 AI 命令实测 16/16）。
+        # 顺序：放在 delete_exempt 之后（用户显式豁免优先于黑名单）。
+        # 幂等：黑名单为空（默认 []）时整块短路，零性能开销、零行为变化。
+        if cfg.get("path.blacklist"):
+            wd = workdir if workdir is not None else _current_workdir()
+            for token in _split_tokens(command):
+                raw = _strip_quotes(token)
+                if not raw:
+                    continue
+                # 引号内可能是完整子命令（powershell -c "Get-Content X"），
+                # 需二次拆分才拿得到其中的路径 token（与 delete_targets 同款处理）
+                candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
+                for item in candidates:
+                    item = _strip_quotes(item)
+                    if not item or item.startswith(("-", "/")):
+                        continue
+                    if check_path(wd, item, "read", cfg) == CONFIRM:
+                        return CONFIRM
         if verdict == ALLOW:
             net = check_network(command, cfg)
             return net if net else ALLOW
@@ -364,10 +552,26 @@ def sandbox_check_tool(tool_name: str, arguments: dict, cfg: Optional[SandboxCon
     else:
         return ALLOW
 
-    path = args.get("path") or args.get("file_path") or ""
-    if not path:
+    # 路径字段提取：单值（path/file_path）优先，其次数组形态（files/paths）。
+    # 数组逐个元素判定，任一命中 CONFIRM 则整体 CONFIRM。
+    # 说明：`multi_edit` 的 schema 已有 `path` 字段故不属漏判；`stage_files`
+    # 是 danger="safe" + GROUP_READ（走 read 分支恒定 ALLOW），**本项对
+    # stage_files 不产生实际拦截效果** —— 它是防御未来可能出现的数组写工具。
+    raw_paths = args.get("path") or args.get("file_path")
+    if raw_paths is None:
+        for key in ("files", "paths"):
+            vals = args.get(key)
+            if isinstance(vals, list) and vals:
+                raw_paths = vals
+                break
+    if not raw_paths:
         return ALLOW
-    return check_path(_current_workdir(), str(path), mode, cfg)
+    items = raw_paths if isinstance(raw_paths, list) else [raw_paths]
+    wd = workdir if workdir is not None else _current_workdir()
+    verdicts = [check_path(wd, str(p), mode, cfg) for p in items if p]
+    if any(v == CONFIRM for v in verdicts):
+        return CONFIRM
+    return ALLOW
 
 
 # ============================================================
@@ -445,11 +649,16 @@ def _looks_like_path(token: str) -> bool:
     return ("/" in token[1:] or "\\" in token or "." in token[1:]) and len(token) > 2
 
 
-def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None) -> bool:
+def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None, workdir: Optional[Path] = None) -> bool:
     """删除豁免判定：命令的删除目标全部落在豁免路径内时，confirm 降级为 allow
 
     豁免条目支持绝对路径（workdir 外）或相对 workdir 的路径（如 tests/）。
     任一目标不在豁免内即不豁免（宁多问一次）；无目标可解析则不豁免。
+
+    ⚠ 双分支写法与 `check_path` 白名单（G5）**逐字同构**，不要退回 `any(A or B)`：
+    那会让相对条目在"目标是绝对路径且 workdir 不同"时全部失效
+    （如豁免 `tests/` + `rm /abs/work/tests/x` 曾被判不豁免）。
+    另：相对条目必须按 **workdir** 解析（不是进程 cwd），`%VAR%` 需先 expandvars 再判绝对。
     """
     cfg = cfg or SandboxConfig.get_instance()
     exempt = [str(p) for p in (cfg.get("delete.exempt_paths") or [])]
@@ -459,12 +668,20 @@ def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None) -> bool:
     candidates = targets["existing"] + [Path(m) for m in targets["missing"]]
     if not candidates:
         return False
-    workdir = _current_workdir()
+    workdir = workdir if workdir is not None else _current_workdir()
     for target in candidates:
         norm_target = _norm(target)
-        if not any(
-            _under(norm_target, _norm(item)) or _under(norm_target, _norm(workdir / str(item))) for item in exempt
-        ):
+        matched = False
+        for item in exempt:
+            if os.path.isabs(os.path.expandvars(item)):
+                if _under(norm_target, _norm(item)):
+                    matched = True
+                    break
+            else:
+                if _under(norm_target, _norm(Path(workdir) / item)):
+                    matched = True
+                    break
+        if not matched:
             return False
     return True
 

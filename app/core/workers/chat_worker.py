@@ -92,6 +92,19 @@ def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
     return _impl(data_uri, max_bytes)
 
 
+def _build_deny_message(reason: str) -> str:
+    """构造工具被拒绝时的结果文案（模型侧可见）
+
+    reason 为空 → 与改造前逐字一致；非空 → 追加用户反馈，让模型知道该怎么改。
+    抽成模块级函数以便测试直测真实实现（`_check_permission` 内含串行锁 + 0.1s
+    轮询等待，无法在单测中同步调用）。
+    """
+    msg = "Error: Permission denied by user"
+    if reason:
+        msg += f". User feedback: {reason}"
+    return msg
+
+
 class OpenAIChatWorker(QThread):
     content_received = pyqtSignal(str)
     reasoning_content_received = pyqtSignal(str)  # DeepSeek thinking mode
@@ -191,6 +204,9 @@ class OpenAIChatWorker(QThread):
             initial_compaction_cache=initial_compaction_cache,
         )
         self._sync_state_from_state()  # 同步到旧属性名（向后兼容）
+        # 拒绝理由（结构化审批回传）：deny_permission 写入、_check_permission 读取后随结果下发。
+        # 属于单次审批的瞬时值，不进 ChatWorkerState（无需跨 sync 边界持久化）。
+        self._permission_deny_reason = ""
         # [T28 L4] _response_chunks 字符总数增量计数器：原 sum(len(c) for c in ...)
         # 在 MEM_DIAG 快照（每 100 chunk）与流式调试日志里各跑一次，长响应下
         # O(chunks) × 高频 = 可观开销。所有写路径（append/clear/恢复/重置）同步维护。
@@ -1613,6 +1629,7 @@ class OpenAIChatWorker(QThread):
         # 清理问题/回答状态
         self._pending_answer = None
         self._question_pending = None
+        self._permission_deny_reason = ""
 
         # 清理会话缓存
         self._current_session_messages = []
@@ -1939,11 +1956,24 @@ class OpenAIChatWorker(QThread):
                 self._permission_cache.allow_session(tool_name)
             self._permission_approved = True
             self._permission_pending = None
+        else:
+            # id 不匹配时原实现静默不改状态 → 与等待循环组合成"永久阻塞"，
+            # 且日志无任何证据。显式告警让该失败模式可观测（S2）
+            logger.warning(
+                f"[Permission] approve 决策被丢弃：id 不匹配 got={tool_call_id} "
+                f"expected={(self._permission_pending or {}).get('tool_call_id')}"
+            )
 
-    def deny_permission(self, tool_call_id: str):
+    def deny_permission(self, tool_call_id: str, reason: str = ""):
         if self._permission_pending and self._permission_pending.get("tool_call_id") == tool_call_id:
             self._permission_approved = False
+            self._permission_deny_reason = reason or ""
             self._permission_pending = None
+        else:
+            logger.warning(
+                f"[Permission] deny 决策被丢弃：id 不匹配 got={tool_call_id} "
+                f"expected={(self._permission_pending or {}).get('tool_call_id')}"
+            )
 
     def run(self):
         try:
@@ -4920,6 +4950,7 @@ class OpenAIChatWorker(QThread):
                     "arguments": arguments,
                 }
                 self._permission_approved = False
+                self._permission_deny_reason = ""
             # 锁在 while 循环前释放，避免阻塞主线程调用 approve_permission/deny_permission
             # 性能优化：移除后台线程中的 processEvents()
             # processEvents() 在非主线程调用会导致信号丢失、死锁等问题
@@ -4938,19 +4969,22 @@ class OpenAIChatWorker(QThread):
                 return False
 
             if not self._permission_approved:
+                deny_reason = self._permission_deny_reason
+                self._permission_deny_reason = ""
+                deny_msg = _build_deny_message(deny_reason)
                 self._emit_with_callback(
                     "tool_result_received",
                     self.tool_result_received,
                     tool_call_id,
                     tool_name,
                     arguments,
-                    type("ToolResult", (), {"success": False, "error": "Permission denied by user"})(),
+                    type("ToolResult", (), {"success": False, "error": deny_msg})(),
                 )
                 results.append(
                     {
                         "role": "tool",
                         "tool_call_id": tool_call_id,
-                        "content": "Error: Permission denied by user",
+                        "content": deny_msg,
                         "round_id": round_id,
                     }
                 )

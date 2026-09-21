@@ -888,6 +888,21 @@ class HookWorker(QRunnable):
         cls._relative_func_cache.clear()
 
     @staticmethod
+    def _is_linked_file(path: Path) -> bool:
+        """硬链接检测：st_nlink > 1 表示该 inode 有多个目录项（EU-G18）
+
+        `Path.resolve()` 无法识别硬链接（它返回链接自身路径，仍在子树内），
+        故必须单独用 nlink 判定。
+
+        ⚠ 局限：NTFS 上 st_nlink > 1 也可能由备份/去重工具造成，属**保守误报**
+        方向（宁可拒执行）；正常插件不会用硬链接组织 hooks 模块。
+        """
+        try:
+            return path.stat().st_nlink > 1
+        except OSError:
+            return False
+
+    @staticmethod
     def _import_relative_function(function_path: str, config_file: str) -> Optional[Callable]:
         """从相对模块路径导入函数（.module:func → <config_dir>/module.py 中的 func）
 
@@ -922,6 +937,33 @@ class HookWorker(QRunnable):
         # 基于 hooks.json 所在目录解析
         config_dir = Path(config_file).resolve().parent
         abs_path = config_dir / py_file
+
+        # ── 相对路径导入范围限制（EU-G18）──
+        # 背景：相对路径是插件自带 hook 的唯一可用方式（插件模块不可能位于
+        # app.hooks/app.utils），故**不能**套用 SAFE_PYTHON_MODULES 白名单
+        # （那会废掉所有插件的 python 型 hook）。但不加限制则可越界导入任意模块。
+        #
+        # 实测结论（plan 验证）：
+        #   · `..` 各种变体 → 已被上方的 `replace(".", "/")` 意外封死（点的上跳
+        #     语义被转成路径分隔符）—— 保留该保护并加测试锁定，防未来改写回归
+        #   · 绝对路径 → 被 `startswith(".")` 要求封死
+        #   · **junction / 硬链接 → 可越界**（无需管理员），需在此拦
+        try:
+            root = config_dir.resolve()
+            # ① resolve 后必须在 root 子树内 → 拦 junction / 符号链接
+            if not abs_path.resolve().is_relative_to(root):
+                logger.warning(
+                    f"[HookPythonAudit] 相对模块越界已拒执行（链接/上跳）: "
+                    f"{module_path} -> {abs_path.resolve()}"
+                )
+                return None
+            # ② 拒任何链接文件本身 → 拦硬链接（resolve 无法识别硬链接）
+            if abs_path.is_symlink() or HookWorker._is_linked_file(abs_path):
+                logger.warning(f"[HookPythonAudit] 相对模块为链接文件，已拒执行: {abs_path}")
+                return None
+        except (OSError, ValueError) as e:
+            logger.warning(f"[HookPythonAudit] 相对模块路径校验失败，拒执行: {module_path} ({e})")
+            return None
 
         if not abs_path.exists():
             logger.error(f"[HookWorker] Relative module not found: {abs_path}")

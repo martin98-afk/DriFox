@@ -1522,7 +1522,11 @@ class PluginHostService(QObject):
                     lsp_mgr.remove_plugin_servers(plugin_name)
                     lsp_config = pm.get_plugin_lsp_config(plugin_name)
                     if lsp_config:
-                        count = lsp_mgr.add_plugin_servers(plugin_name, lsp_config["config"])
+                        count = lsp_mgr.add_plugin_servers(
+                            plugin_name,
+                            lsp_config["config"],
+                            source_path=lsp_config.get("source", "") or "",
+                        )
                         result["lsp"] = count > 0
                     logger.info(f"[PluginHost] Plugin '{plugin_name}' LSP 增量加载完成")
                 except Exception as e:

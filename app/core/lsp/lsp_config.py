@@ -36,6 +36,10 @@ class LspServerConfig:
     max_restarts: int = 3
     transport: str = "stdio"            # stdio | socket
     plugin_name: str = ""               # 来源插件名
+    source_path: str = ""               # 来源 .lsp.json 绝对路径（启动门禁内置判定用）
+    # ★ 启动安全门禁（mcp_lsp_safety.is_builtin_source）靠它判定"系统插件源 vs 非内置"。
+    # 缺失（空串）会被判非内置 → 官方 system 插件提供的 server 也会被要求确认，
+    # 而 LSP 侧无确认入口 → 任何 LSP server 永远无法启动（EU-G22 修的正是此缺陷）。
     install_hint: str = ""              # 安装提示命令，如 "npm install -g pyright"
     # ── 高级字段：诊断触发（可选） ──
     trigger_diagnostics: Optional[Dict[str, Any]] = None
@@ -46,13 +50,16 @@ class LspServerConfig:
     # 字段：command、argsTemplate（支持 ${file}）、parser（tsc/pyright/raw）
 
     @classmethod
-    def from_dict(cls, name: str, data: Dict[str, Any], plugin_name: str = "") -> "LspServerConfig":
+    def from_dict(
+        cls, name: str, data: Dict[str, Any], plugin_name: str = "", source_path: str = ""
+    ) -> "LspServerConfig":
         """从 .lsp.json 的一个 key 解析配置
 
         Args:
             name: 服务器名（json key）
             data: 服务器配置 dict
             plugin_name: 来源插件名
+            source_path: 来源 .lsp.json 绝对路径（启动门禁判定内置源用；空串→非内置）
         """
         # 扩展名映射处理：.lsp.json 的 key 是字符串，需要确保带点
         ext_map_raw = data.get("extensionToLanguage", {})
@@ -73,6 +80,7 @@ class LspServerConfig:
             max_restarts=data.get("maxRestarts", 3),
             transport=data.get("transport", "stdio"),
             plugin_name=plugin_name,
+            source_path=source_path,
             install_hint=data.get("installHint", ""),
             trigger_diagnostics=data.get("triggerDiagnostics"),
             cli_fallback=data.get("cliFallback"),

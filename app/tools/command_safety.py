@@ -237,6 +237,109 @@ def _remove_quoted(text: str) -> str:
     return result
 
 
+# ============================================================
+# git 子命令判定（EU-G25）
+# ============================================================
+# 背景：`classify_command` 只看首 token（`git`），而 `git` 不在 CONFIRM_COMMANDS
+# 里 → **所有 git 命令一律 safe**。实测确认：`git rm -rf .` / `git clean -fdx` /
+# `git reset --hard` / `git push --force` 全部不触发任何审批，AI 可在无提示下
+# 丢弃未提交改动或强推覆盖远端。
+#
+# 判定策略：
+# - 破坏性**子命令**：命中即 confirm（可审批放行，不做硬拒 —— 用户可能确实要这样做）
+# - 读取/常规子命令：不受影响（`status`/`log`/`diff`/`add`/`commit` 等）
+# - 危险由**选项**决定的形态（`git clean` 需 `-f`、`git push` 需 `-f`/`--force`、
+#   `git branch` 需 `-D`）：按选项组合判定，避免误伤 `git clean -n`（dry-run）、
+#   `git branch --list`（只读）
+_GIT_DESTRUCTIVE_SUBCOMMANDS = frozenset(
+    {
+        "rm",  # 删工作区+索引文件
+        "reset",  # 配合 --hard 才破坏，见下
+        "restore",  # 覆盖工作区改动，见下
+        "checkout",  # 配合 -- . 才破坏，见下
+        "revert",  # 生成反向提交，可控，但可能冲突丢改动
+        "filter-branch",  # 重写历史
+        "filter-repo",
+        "update-ref",  # 直接改 ref
+    }
+)
+
+
+def _git_subcommand_verdict(parts: list) -> Optional[str]:
+    """分析 `git <子命令> [args]` 的破坏性，返回判定值或 None（表示"无特殊判定"）
+
+    只在首 token 为 git 时调用。返回 "confirm" / "safe"，None 表示交给上层默认。
+    """
+    if len(parts) < 2:
+        return None
+    # 跳过 git 全局选项（-C <path> / -c k=v / --git-dir=... 等）
+    idx = 1
+    while idx < len(parts):
+        token = parts[idx]
+        if token in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            idx += 2  # 这些选项各带一个值
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        break
+    if idx >= len(parts):
+        return None
+    sub = parts[idx].lower()
+    rest_lower = [str(t).lower() for t in parts[idx + 1 :]]
+    rest_raw = [str(t) for t in parts[idx + 1 :]]
+    rest = rest_lower
+
+    # ① 破坏性由子命令本身决定
+    if sub in ("rm", "filter-branch", "filter-repo", "update-ref"):
+        return "confirm"
+    if sub == "reset":
+        # --hard 丢弃工作区与索引改动；--mixed/--soft 保留文件，不算破坏
+        return "confirm" if "--hard" in rest else "safe"
+    if sub == "restore":
+        # `git restore .` / `--worktree` 会丢弃未提交改动；`--staged` 只改索引
+        if "--staged" in rest and "--worktree" not in rest and "." not in rest:
+            return "safe"
+        return "confirm"
+    if sub == "checkout":
+        # 只在"检出路径"（覆盖工作区）形态下判破坏；切分支不受影响
+        if "--" in rest:
+            return "confirm"
+        return "safe"
+    if sub == "clean":
+        # 需 -f/--force 才真删（-n/--dry-run 只预览）
+        has_force = any(t in ("-f", "--force") or (t.startswith("-") and "f" in t.lstrip("-")) for t in rest)
+        return "confirm" if has_force else "safe"
+    if sub == "push":
+        force = any(
+            t in ("-f", "--force", "--force-with-lease", "--force-if-includes")
+            or (t.startswith("-") and not t.startswith("--") and "f" in t)
+            for t in rest
+        )
+        return "confirm" if force else "safe"
+    if sub == "branch":
+        # -D 强制删除未合并分支；-d 只删已合并的。⚠ 必须用原大小写判定 ——
+        # 小写化后 -D 与 -d 无法区分（实测踩到：`git branch -D feat` 被判 safe）
+        if any(t == "-D" or (t.startswith("-") and not t.startswith("--") and "D" in t) for t in rest_raw):
+            return "confirm"
+        return "safe"
+    if sub == "tag":
+        if any(t in ("-d", "--delete") for t in rest_lower):
+            return "confirm"
+        return "safe"
+    if sub == "stash":
+        # `git stash drop/clear` 会真删 stash 记录
+        if rest and rest[0] in ("drop", "clear"):
+            return "confirm"
+        return "safe"
+    return None
+
+
+def _is_git_command(cmd_name: str) -> bool:
+    """首 token 是否 git（含 git.exe / 带路径形态）"""
+    return cmd_name in ("git", "git.exe")
+
+
 def needs_shell(command: str) -> bool:
     """检测命令是否需要 shell 解释器
 
@@ -302,6 +405,12 @@ def classify_command(command: str) -> str:
 
     if cmd_name in CONFIRM_COMMANDS:
         return "confirm"
+
+    # git 子命令判定（EU-G25）：`git` 不在 CONFIRM_COMMANDS，需按子命令细分
+    if _is_git_command(cmd_name):
+        git_verdict = _git_subcommand_verdict(parts)
+        if git_verdict is not None:
+            return git_verdict
 
     return "safe"
 

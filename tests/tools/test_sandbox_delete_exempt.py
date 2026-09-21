@@ -80,7 +80,12 @@ def test_sandbox_check_tool_downgrades_confirmed_delete(tmp_path):
 
 
 def test_sandbox_check_tool_still_confirms_outside_delete(tmp_path):
-    """豁免路径外的删除仍走审批"""
+    """豁免路径外的删除仍走审批
+
+    ⚠ EU-G23 起必须显式开启 delete_protection：删除类命令的 confirm 由该开关
+    门控（关闭时仅取消"因删除命令而 confirm"这一层，降级为 allow）。
+    本用例验证的是"豁免路径外"，与开关无关，故显式置 True 以隔离关注点。
+    """
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir()
     outside_dir = tmp_path / "app"
@@ -88,6 +93,7 @@ def test_sandbox_check_tool_still_confirms_outside_delete(tmp_path):
     SandboxConfig.reset_instance()
     cfg = SandboxConfig(config_path=":memory:")
     cfg.set("sandbox_enabled", True)
+    cfg.set("delete_protection", True)  # EU-G23：删除保护开关门控删除类 confirm
     cfg.set("delete.exempt_paths", [str(tests_dir)])
 
     verdict = sandbox_check_tool(

@@ -111,6 +111,7 @@ class _Host(QWidget):
         # 懒创建占位（与改造后 system_cards_module 的 None 占位一致）
         self._tool_control_card = None
         self._question_floating_widget = None
+        self._permission_floating_widget = None
 
     def _register_cards_to_manager(self):
         pass
@@ -156,6 +157,7 @@ def test_lazy_not_built_after_compose(fresh_registry, qapp):
     host = _compose_host()
     assert host._tool_control_card is None, "tool_control 卡在 build 期被同步创建（懒化未生效）"
     assert host._question_floating_widget is None, "question 卡在 build 期被同步创建（懒化未生效）"
+    assert host._permission_floating_widget is None, "permission 卡在 build 期被同步创建（懒化未生效）"
 
 
 def test_ensure_tool_control_card_binds_controller(fresh_registry, qapp):

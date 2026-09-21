@@ -110,6 +110,7 @@ class LspClient:
             self.config.plugin_name,
             self.config.name,
             [self.config.command] + list(self.config.args or []),
+            source=self.config.source_path,
         )
         if verdict != "proceed":
             logger.warning(

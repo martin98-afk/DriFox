@@ -283,6 +283,37 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] sync_auto_start_from_config 失败")
 
+        # 备份容量清理（EU-G6）：分治配额，两类备份互不挤占
+        # - FileRecorder 备份（高频产物）：独立配额 = backup_limit_mb，排除 deleted/
+        # - 删除保护快照（误删后唯一恢复手段）：独立配额 = 总配额 1/4，下限 100MB
+        #   ⚠ 派生规则（1/4 + 下限 100MB）刻意如此：共享一个 FIFO 配额会让日常
+        #   编辑把快照挤干净 —— 安全功能静默失效，不可接受。
+        # - backup_limit_mb <= 0 = 不限（函数内部自处理，无需在此判 0）
+        # ⚠️ 必须走后台线程：实测扫盘 + 删除耗时随文件数线性增长
+        #   （144 文件 ≈ 87ms；2000 文件 ≈ 800ms；10000 文件 ≈ 11.7s），
+        #   主线程同步执行会冻结 UI 十秒级。清理本身无 UI 交互，后台安全。
+        def _cleanup_backups() -> None:
+            try:
+                from app.tools.sandbox import SandboxConfig
+                from app.utils.file_operation_recorder import cleanup_backups_partitioned
+                from app.utils.utils import get_app_data_dir
+
+                limit = int(SandboxConfig.get_instance().get("backup_limit_mb") or 0)
+                cleanup_backups_partitioned(get_app_data_dir() / "backups", limit)
+            except Exception:
+                logger.exception("[DeferredStartup] 备份容量清理失败")
+
+        try:
+            import threading
+
+            _bk_t0 = _time.perf_counter()
+            _bk_thread = threading.Thread(target=_cleanup_backups, daemon=True)
+            _bk_thread.start()
+            logger.debug(f"[DeferredStartup] 备份清理已派发后台线程（派发耗时 {(_time.perf_counter() - _bk_t0) * 1000:.1f}ms）")
+        except Exception:
+            logger.exception("[DeferredStartup] 启动备份清理线程失败")
+        _mark("backup_limit_cleanup(dispatch)")
+
         # 初始化共享 WebEngine Profile（轻量，不启动 Chromium 进程）
         # [PERF] 从主线程关键路径移到这里，首帧不再阻塞
         try:

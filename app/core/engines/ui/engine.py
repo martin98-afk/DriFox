@@ -281,12 +281,37 @@ class UIEngine(BaseEngine):
         worker = getattr(self._conversation_executor, "_current_worker", None)
         if worker:
             worker.approve_permission(tool_call_id, auto_allow, session_allow)
+        else:
+            # 流已结束（executor 置 worker=None）或 _current_worker 被摘除时，
+            # 原实现静默 return；显式告警让"点了没反应"可排障（S4）
+            logger.warning(f"[Permission] 无法投递 approve：worker 不存在 id={tool_call_id}")
 
-    def deny_tool_permission(self, tool_call_id: str):
+    def deny_tool_permission(self, tool_call_id: str, reason: str = ""):
         worker = getattr(self._conversation_executor, "_current_worker", None)
         if worker:
-            worker.deny_permission(tool_call_id)
+            worker.deny_permission(tool_call_id, reason)
+        else:
+            logger.warning(f"[Permission] 无法投递 deny：worker 不存在 id={tool_call_id}")
 
+    def decide_tool_permission(
+        self, tool_call_id: str, decision: str, remember: str = "", reason: str = ""
+    ) -> None:
+        """结构化审批决策回传（替代文本标签反解析）。
+
+        - decision="allow" + remember=""        → 单次允许
+        - decision="allow" + remember="round"   → 本轮对话内不再询问
+        - decision="allow" + remember="session" → 本次会话内不再询问
+        - decision="deny"                        → 拒绝（可带 reason 回填给模型）
+        非法 decision 一律按 deny 处理（安全默认：不因参数异常而放行）。
+        """
+        if decision == "allow":
+            self.approve_tool_permission(
+                tool_call_id,
+                auto_allow=(remember == "round"),
+                session_allow=(remember == "session"),
+            )
+        else:
+            self.deny_tool_permission(tool_call_id, reason)
 
     # ========== 回调管理 ==========
 

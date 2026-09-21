@@ -23,13 +23,16 @@ try:
         BodyLabel,
         ExpandGroupSettingCard,
         PushSettingCard,
+        SpinBox,
         SwitchSettingCard,
         FluentIcon as FIF,
     )
 except ImportError:  # 兜底：qfluentwidgets 缺失时用 Qt 原生，保功能不保观感
     from PyQt5.QtWidgets import QCheckBox as SwitchSettingCard  # type: ignore
+    from PyQt5.QtWidgets import QSpinBox  # type: ignore
 
     BodyLabel = PushSettingCard = ExpandGroupSettingCard = None  # type: ignore
+    SpinBox = QSpinBox  # type: ignore
     FIF = None
 
 from PyQt5.QtCore import Qt
@@ -233,8 +236,8 @@ class SecurityCenterCard(QWidget):
         # ── 沙箱安全卡 ──
         self.sandbox_switch = SwitchSettingCard(
             FIF.CERTIFICATE if FIF else None,
-            "沙箱安全",
-            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为",
+            "沙箱安全（默认关闭）",
+            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。网络外传检测、删除保护快照与进程配额均依赖本开关。",
         )
         self.sandbox_switch.setChecked(bool(self._cfg.get("sandbox_enabled")))
         self.sandbox_switch.checkedChanged.connect(self._on_sandbox_toggled)
@@ -256,21 +259,22 @@ class SecurityCenterCard(QWidget):
             return card
 
         self._path_white = _ListEditorCard(
-            "文件安全 · 白名单（放行 workdir 外的写入目录）",
+            "写入白名单（放行 workdir 外的写入目录；读操作不受此限制）",
             "whitelist",
-            "如 D:\\other_proj 或 %USERPROFILE%\\docs",
+            "如 D:\\other_proj 或 %USERPROFILE%\\docs（相对路径按工作目录解析）",
             show_title=False,
         )
         self._path_black = _ListEditorCard(
-            "文件安全 · 黑名单（读写都强制审批，如 .env/.ssh）",
+            "文件黑名单（读写均拦截，如 .env/.ssh）",
             "blacklist",
-            "如 D:\\secrets 或 .env",
+            "如 D:\\secrets 或 .env（⚠ 文件名需完全相等：.env 不拦 .env.local，建议一并添加）",
             show_title=False,
         )
         self._cmd_allow = _ListEditorCard(
-            "命令安全 · 放行前缀（跳过审批；block 命令仍拦截）",
+            "命令安全 · 放行前缀（跳过审批；危险命令仍拦截）",
             "allow_prefixes",
-            "如 git、npm run",
+            "如 git status、npm run build（⚠ 按词边界匹配；填 git 可省常规子命令审批，"
+            "但 git rm -rf . 等破坏性操作仍会确认）",
             show_title=False,
         )
         self._cmd_confirm = _ListEditorCard(
@@ -288,20 +292,20 @@ class SecurityCenterCard(QWidget):
 
         self._path_white_card = _expand(
             FIF.FOLDER_ADD if FIF else None,
-            "文件安全 · 白名单",
-            "放行 workdir 外的写入目录",
+            "写入白名单",
+            "放行 workdir 外的写入目录（读操作不受此限制）",
             self._path_white,
         )
         self._path_black_card = _expand(
             FIF.HIDE if FIF else None,
-            "文件安全 · 黑名单",
-            "读写都强制审批（如 .env/.ssh）",
+            "文件黑名单",
+            "读写均拦截（如 .env/.ssh）",
             self._path_black,
         )
         self._cmd_allow_card = _expand(
             FIF.ACCEPT if FIF else None,
             "命令安全 · 放行前缀",
-            "跳过审批；block 命令仍拦截（如 git、npm run）",
+            "跳过审批；危险命令仍拦截（示例见输入框提示）",
             self._cmd_allow,
         )
         self._cmd_confirm_card = _expand(
@@ -329,7 +333,9 @@ class SecurityCenterCard(QWidget):
         self.delete_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "删除保护",
-            "删除类命令强制审批，放行后执行前自动快照（可找回）",
+            "开启后：删除类命令强制审批，放行后执行前自动快照（可找回）。"
+            "关闭后删除类命令不再审批；但命令黑名单（如 cacls）、网络外传、"
+            "路径黑名单与手动加严的策略仍会拦截。",
         )
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
@@ -337,9 +343,9 @@ class SecurityCenterCard(QWidget):
 
         # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不做快照
         self._delete_exempt = _ListEditorCard(
-            "删除豁免路径（这些目录内的删除不再弹审批，如 tests/）",
+            "删除豁免路径（这些目录内的删除不再弹审批，也不做快照，如 tests/）",
             "delete_exempt",
-            "如 tests/ 或 D:/other_proj/logs",
+            "如 tests/ 或 D:/other_proj/logs（相对路径按工作目录解析）",
             show_title=False,
         )
         self._delete_exempt_card = _expand(
@@ -354,30 +360,375 @@ class SecurityCenterCard(QWidget):
             "打开备份目录",
             FIF.FOLDER if FIF else None,
             "自动备份",
-            f"修改前自动备份原文件（FileRecorder），上限 {self._cfg.get('backup_limit_mb')} MB",
+            # C2：不含具体数值 —— 数值由下方 SpinBox 与 hint 承载，
+            # 避免同屏两处显示同一配置但一处是构造期快照（改值后不一致）
+            "修改前自动备份原文件（FileRecorder）",
         )
         self.backup_dir_card.clicked.connect(lambda: self._open_backup_dir())
         layout.addWidget(self.backup_dir_card)
+
+        # ── EU-G10：备份容量上限编辑 + 立即清理（FileRecorder 侧，不含删除快照）──
+        layout.addWidget(self._build_backup_limit_row())
+
+        # ── EU-G11：删除快照容量展示 + 打开目录 / 清空快照 ──
+        layout.addWidget(self._build_snapshot_row())
+
+        # ── EU-G12：网络外传检测开关 ──
+        self.net_switch = SwitchSettingCard(
+            FIF.GLOBE if FIF else None,
+            "网络外传检测",
+            "拦截 curl/wget 等带 URL 或上传参数的命令；仅在沙箱安全开启时生效",
+        )
+        self.net_switch.setChecked(bool(self._cfg.get("network.enabled")))
+        self.net_switch.checkedChanged.connect(self._on_network_toggled)
+        layout.addWidget(self.net_switch)
 
         # ── 系统级工具卡 ──
         self.sys_switch = SwitchSettingCard(
             FIF.COMMAND_PROMPT if FIF else None,
             "系统级工具豁免",
-            "wsl/wmic/sc/reg/schtasks 等绕过沙箱审批，请谨慎启用",
+            "wsl/wmic/sc/reg/schtasks/diskpart/bcdedit 等绕过沙箱审批，请谨慎启用",
         )
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
         layout.addWidget(self.sys_switch)
 
+        # ── EU-G9：受管进程资源配额（Job Object 三限额）──
+        layout.addWidget(self._build_job_limits_row())
+
         # ── 底部说明 ──
-        note = (
-            BodyLabel("说明：以上拦截为应用层检查，非 OS 级沙箱隔离。")
-            if BodyLabel
-            else QLabel("说明：以上拦截为应用层检查，非 OS 级沙箱隔离。")
+        # N1：默认值提示（沙箱与删除保护默认关闭，用户需手动开启）
+        # MCP / upload_file 说明：三类不受本页约束的操作，避免虚假安全感
+        _note_text = (
+            "说明：以上拦截为应用层检查，非 OS 级沙箱隔离。\n"
+            "沙箱安全与删除保护默认关闭，需手动开启后才会拦截。\n"
+            "读操作除黑名单外不受路径约束；白名单与 workdir 边界仅约束写入。\n"
+            "MCP 工具（mcp__*）由外部服务提供，其读写/外传行为不在本页检查范围内；"
+            "请通过 MCP 卡片的服务器开关控制其启停。\n"
+            "提示：upload_file（上传文件到 Gitee）与 webfetch（抓取网页）不受域名黑名单约束。"
+            "如需拦截，请在「工具」页关闭对应工具（关闭后会走审批确认）。"
         )
+        note = BodyLabel(_note_text) if BodyLabel else QLabel(_note_text)
+        note.setWordWrap(True)
         layout.addWidget(note)
 
         layout.addStretch(1)
+
+    # ══════════════════ EU-G10 / G11 / G9：构建各控件的独立入口 ══════════════════
+
+    def _int_cfg(self, key: str, default: int = 0) -> int:
+        """读取配置中的整数（类型安全：cfg.get 返回 Unknown 联合类型）
+
+        统一收窄避免每处 `int(cfg.get(...) or 0)` 触发 pyright reportArgumentType。
+        """
+        raw = self._cfg.get(key)
+        if raw is None or isinstance(raw, (dict, list)):
+            return default
+        try:
+            return int(raw)
+        except TypeError, ValueError:
+            return default
+
+    def _build_backup_limit_row(self) -> QWidget:
+        """备份容量上限（0 = 不限）+ 立即清理按钮（只清 FileRecorder 侧）"""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(16, 4, 16, 4)
+        lay.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        label = QLabel("备份容量上限（0 = 不限，不自动清理）")
+        label.setObjectName("sciTitle")
+        label.setWordWrap(True)
+        head.addWidget(label, 1)
+
+        self.backup_limit_spin = SpinBox()
+        self.backup_limit_spin.setRange(0, 102400)
+        self.backup_limit_spin.setSingleStep(500)
+        self.backup_limit_spin.setSuffix(" MB")
+        self.backup_limit_spin.setValue(self._int_cfg("backup_limit_mb"))
+        self.backup_limit_spin.valueChanged.connect(self._on_backup_limit_changed)
+        head.addWidget(self.backup_limit_spin)
+
+        self.clean_btn = QPushButton("清理备份文件")
+        self.clean_btn.setCursor(Qt.PointingHandCursor)
+        self.clean_btn.clicked.connect(self._on_clean_backups)
+        head.addWidget(self.clean_btn)
+        lay.addLayout(head)
+
+        self.backup_hint = QLabel("")
+        self.backup_hint.setObjectName("sciHint")
+        self.backup_hint.setWordWrap(True)
+        lay.addWidget(self.backup_hint)
+
+        self._sync_clean_btn_enabled()
+        w.setStyleSheet(self._row_qss())
+        return w
+
+    def _build_snapshot_row(self) -> QWidget:
+        """删除快照：容量展示 + 打开目录 / 清空（清空需二次确认）"""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(16, 4, 16, 4)
+        lay.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        label = QLabel("删除保护快照")
+        label.setObjectName("sciTitle")
+        head.addWidget(label, 1)
+
+        self.snapshot_btn = QPushButton("打开目录")
+        self.snapshot_btn.setCursor(Qt.PointingHandCursor)
+        self.snapshot_btn.clicked.connect(self._open_snapshot_dir)
+        head.addWidget(self.snapshot_btn)
+
+        self.snapshot_clear_btn = QPushButton("清空快照")
+        self.snapshot_clear_btn.setObjectName("sciDanger")
+        self.snapshot_clear_btn.setCursor(Qt.PointingHandCursor)
+        self.snapshot_clear_btn.clicked.connect(self._on_clear_snapshots)
+        head.addWidget(self.snapshot_clear_btn)
+        lay.addLayout(head)
+
+        self.snapshot_label = QLabel("")
+        self.snapshot_label.setObjectName("sciHint")
+        self.snapshot_label.setWordWrap(True)
+        lay.addWidget(self.snapshot_label)
+
+        self._refresh_snapshot_stats()
+        w.setStyleSheet(self._row_qss())
+        return w
+
+    def _build_job_limits_row(self) -> QWidget:
+        """受管进程资源配额（Job Object）：三限额，0 = 不限"""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(16, 4, 16, 4)
+        lay.setSpacing(4)
+
+        title = QLabel("受管进程资源配额（0 = 不限；仅约束 Bash 与后台命令）")
+        title.setObjectName("sciTitle")
+        title.setWordWrap(True)
+        lay.addWidget(title)
+
+        self.job_spins = {}
+        spec = (
+            ("memory_mb", "内存上限", " MB", 0, 65536, 256),
+            ("active_process", "进程数上限", " 个", 0, 1024, 8),
+            ("cpu_time_ms", "CPU 时间上限", " 毫秒", 0, 3600000, 1000),
+        )
+        for key, text, suffix, lo, hi, step in spec:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            lbl = QLabel(text)
+            lbl.setObjectName("sciEntry")
+            lbl.setWordWrap(True)
+            row.addWidget(lbl, 1)
+            spin = SpinBox()
+            spin.setRange(lo, hi)
+            spin.setSingleStep(step)
+            spin.setSuffix(suffix)
+            cur = (self._cfg.get("job_limits") or {}).get(key)
+            spin.setValue(self._int_cfg(f"job_limits.{key}"))
+            spin.valueChanged.connect(lambda val, k=key: self._on_job_limit_changed(k, val))
+            row.addWidget(spin)
+            self.job_spins[key] = spin
+            lay.addLayout(row)
+
+        w.setStyleSheet(self._row_qss())
+        return w
+
+    @staticmethod
+    def _row_qss() -> str:
+        """本卡新增行的统一主题样式（每次调用重新取 token）"""
+        Colors.refresh()
+        return f"""
+            QLabel#sciTitle {{
+                color: {Colors.TEXT_SECONDARY};
+                background: transparent;
+                {font_size_css(13)}
+                font-weight: bold;
+                {get_font_family_css()}
+            }}
+            QLabel#sciEntry {{
+                color: {Colors.TEXT_PRIMARY};
+                background: transparent;
+                {font_size_css(12)}
+                {get_font_family_css()}
+            }}
+            QLabel#sciHint {{
+                color: {Colors.TEXT_SECONDARY};
+                background: transparent;
+                {font_size_css(11)}
+                {get_font_family_css()}
+            }}
+            QPushButton {{
+                background-color: {Colors.SELECTED_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px 12px;
+                {font_size_css(12)}
+                {get_font_family_css()}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.TEXT_ACCENT};
+            }}
+            QPushButton:disabled {{
+                color: {Colors.TEXT_SECONDARY};
+                background-color: {Colors.CONTENT_BG};
+            }}
+            QPushButton#sciDanger {{
+                color: {Colors.TEXT_ACCENT};
+            }}
+        """
+
+    # ══════════════════ EU-G10/G11/G9 回调 ══════════════════
+
+    def _on_backup_limit_changed(self, value: int):
+        self._cfg.set("backup_limit_mb", int(value))
+        self._cfg.save()
+        self._sync_clean_btn_enabled()
+        self._refresh_backup_hint()
+
+    def _sync_clean_btn_enabled(self) -> None:
+        """0 = 不限 → 按钮禁用 + tooltip 说明（避免点了没反应以为坏了）"""
+        limit = self._int_cfg("backup_limit_mb")
+        self.clean_btn.setEnabled(limit > 0)
+        self.clean_btn.setToolTip("" if limit > 0 else "未设上限（0 = 不限），清理已停用")
+        self._refresh_backup_hint()
+
+    def _refresh_backup_hint(self) -> None:
+        limit = self._int_cfg("backup_limit_mb")
+        if limit > 0:
+            self.backup_hint.setText(
+                f"当前上限 {limit} MB；超出后按修改时间从旧到新清理。"
+                "自动清理在启动时执行，改动上限后需重启才生效 —— 可点「清理备份文件」立即清理。"
+            )
+        else:
+            self.backup_hint.setText("未设上限：不会自动清理备份，也不执行手动清理。")
+
+    def _on_clean_backups(self):
+        """立即清理（只清 FileRecorder 侧，不含删除快照）"""
+        limit = self._int_cfg("backup_limit_mb")
+        if limit <= 0:
+            return
+        try:
+            from app.utils.file_operation_recorder import cleanup_backups_partitioned
+            from app.utils.utils import get_app_data_dir
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            result = cleanup_backups_partitioned(get_app_data_dir() / "backups", limit)
+            removed = len(result.get("file_backups_removed") or [])
+            InfoBar.success(
+                "清理完成",
+                f"已清理 {removed} 个备份文件（删除快照不受影响）。",
+                duration=3000,
+                parent=self.window(),
+                position=InfoBarPosition.BOTTOM,
+            )
+            self._refresh_snapshot_stats()
+        except Exception as e:  # noqa: BLE001 - 清理失败不应崩设置页
+            logger.warning(f"[SecurityCenter] 备份清理失败: {e}")
+
+    # ── EU-G11 快照 ──
+
+    @staticmethod
+    def _deleted_dir_stats() -> tuple:
+        """返回 (文件数, 总字节)；目录不存在返回 (0, 0)"""
+        from app.utils.utils import get_app_data_dir
+
+        d = get_app_data_dir() / "backups" / "deleted"
+        if not d.exists():
+            return (0, 0)
+        files = [f for f in d.rglob("*") if f.is_file()]
+        total = 0
+        for f in files:
+            try:
+                total += f.stat().st_size
+            except OSError:
+                continue
+        return (len(files), total)
+
+    def _refresh_snapshot_stats(self) -> None:
+        count, size = self._deleted_dir_stats()
+        mb = size / 1024 / 1024
+        self.snapshot_label.setText(
+            f"删除快照：{count} 项，占用 {mb:.1f} MB。"
+            "快照是误删文件后的恢复手段，清空后不可找回。"
+            "独立配额 = 备份上限的 1/4（下限 100 MB），不受「清理备份文件」影响。",
+        )
+        self.snapshot_clear_btn.setEnabled(count > 0)
+        self.snapshot_clear_btn.setToolTip("" if count > 0 else "当前没有快照")
+
+    def _open_snapshot_dir(self):
+        self._open_path_in_explorer(self._snapshot_dir())
+
+    def _on_clear_snapshots(self):
+        """清空删除快照（破坏性操作，需二次确认）"""
+        count, _ = self._deleted_dir_stats()
+        if count <= 0:
+            return
+        try:
+            from app.widgets.common_dialogs import ConfirmDialog
+
+            dialog = ConfirmDialog(
+                title="清空删除快照",
+                content=f"将永久删除 {count} 项删除快照，清空后无法找回。确认继续？",
+                parent=self.window(),
+            )
+            if not dialog.exec_():
+                return
+        except Exception as e:  # noqa: BLE001 - 对话框不可用时保守放弃
+            logger.warning(f"[SecurityCenter] 快照清空确认框不可用，已放弃: {e}")
+            return
+        try:
+            import shutil
+
+            d = self._snapshot_dir()
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+            logger.info(f"[SecurityCenter] 已清空删除快照（{count} 项）")
+            self._refresh_snapshot_stats()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[SecurityCenter] 清空快照失败: {e}")
+
+    @staticmethod
+    def _snapshot_dir():
+        from app.utils.utils import get_app_data_dir
+
+        return get_app_data_dir() / "backups" / "deleted"
+
+    @staticmethod
+    def _open_path_in_explorer(path) -> None:
+        """在系统文件管理器中打开目录（跨平台）
+
+        ⚠ 必须覆盖三平台：旧实现只有 win32 分支，mac/linux 上点击完全静默
+        无反应（用户以为按钮坏了）。DriFox 有 mac 打包（dmgbuild），属功能缺失。
+        """
+        import subprocess
+        import sys
+
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", str(path)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as e:  # noqa: BLE001 - 打开失败不应崩设置页
+            logger.warning(f"[SecurityCenter] 打开目录失败: {path} ({e})")
+
+    # ── EU-G9 job_limits 回写 ──
+
+    def _on_job_limit_changed(self, key: str, value: int):
+        limits = dict(self._cfg.get("job_limits") or {})
+        limits[key] = int(value)
+        self._cfg.set("job_limits", limits)
+        self._cfg.save()
 
     # ── 名单编辑的 card 级稳定接口（按 key 路由到对应编辑区）──
     def _editor_for(self, key: str) -> _ListEditorCard:
@@ -411,13 +762,12 @@ class SecurityCenterCard(QWidget):
         self._cfg.save()
         logger.warning(f"[SecurityCenter] 系统级工具豁免 → {checked}")
 
+    def _on_network_toggled(self, checked: bool):
+        self._cfg.set("network.enabled", bool(checked))
+        self._cfg.save()
+
     def _open_backup_dir(self):
+        """打开备份根目录（复用跨平台实现，避免两套 explorer 调用漂移）"""
         from app.utils.utils import get_app_data_dir
 
-        backup_dir = get_app_data_dir() / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        import subprocess
-        import sys
-
-        if sys.platform == "win32":
-            subprocess.Popen(["explorer", str(backup_dir)])
+        self._open_path_in_explorer(get_app_data_dir() / "backups")

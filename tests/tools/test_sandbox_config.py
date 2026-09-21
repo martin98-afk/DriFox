@@ -7,7 +7,9 @@ from app.tools.sandbox import DEFAULT_CONFIG, SandboxConfig
 
 def test_defaults_complete():
     cfg = SandboxConfig(config_path=":memory:")
-    assert cfg.get("sandbox_enabled") is True
+    # 默认关闭：L1 沙箱与删除保护仍处完善期（见 sandbox.py DEFAULT_CONFIG 注释）
+    assert cfg.get("sandbox_enabled") is False
+    assert cfg.get("delete_protection") is False
     assert cfg.get("path.whitelist") == []
     assert cfg.get("job_limits.memory_mb") == 2048
     assert cfg.get("backup_limit_mb") == 3000
@@ -37,5 +39,6 @@ def test_set_and_save_roundtrip(tmp_path):
 def test_default_config_has_no_extra_top_keys():
     assert set(DEFAULT_CONFIG) == {
         "sandbox_enabled", "path", "command", "network",
-        "sys_tools_bypass", "delete_protection", "job_limits", "backup_limit_mb",
+        "sys_tools_bypass", "delete_protection", "delete", "job_limits", "backup_limit_mb",
+        "gateway_auto_approve",
     }

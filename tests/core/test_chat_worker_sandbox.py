@@ -18,7 +18,11 @@ def _fake_groups(monkeypatch, write=("write", "edit"), read=("read", "grep")):
 
 def test_command_shaped_args_routed_to_check_command():
     # 不依赖 registry：带 command 参数即命令工具
-    assert sandbox_check_tool("bash", {"command": "cmd /c del x"}, _cfg()) == "confirm"
+    # ⚠ EU-G23 起：删除类命令的 confirm 由 delete_protection 门控（默认关闭），
+    # 故此处显式开启以隔离"路由"这个关注点；deny 与 allow 两层不受开关影响
+    cfg = _cfg()
+    cfg.set("delete_protection", True)
+    assert sandbox_check_tool("bash", {"command": "cmd /c del x"}, cfg) == "confirm"
     assert sandbox_check_tool("bg_start", {"command": "cacls C:\\ /g u:F"}, _cfg()) == "deny"
     assert sandbox_check_tool("any_future_cmd_tool", {"command": "git status"}, _cfg()) == "allow"
 
