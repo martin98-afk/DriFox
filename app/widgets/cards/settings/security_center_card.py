@@ -251,20 +251,19 @@ class SecurityCenterCard(QWidget):
             "命令与文件操作经检查",
         )
         self.sandbox_switch.setToolTip(
-            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。"
-            "网络外传检测、删除保护快照与进程配额均依赖本开关。"
+            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。网络外传检测、删除保护快照与进程配额均依赖本开关。"
         )
         self.sandbox_switch.setChecked(bool(self._cfg.get("sandbox_enabled")))
         self.sandbox_switch.checkedChanged.connect(self._on_sandbox_toggled)
         layout.addWidget(self.sandbox_switch)
 
-        def _expand(
-            icon, title, content, editor: "_ListEditorCard", tip: str = ""
-        ) -> "ExpandGroupSettingCard":
+        def _expand(icon, title, content, editor: "_ListEditorCard", tip: str = "") -> "ExpandGroupSettingCard":
             """把名单编辑区包成折叠卡：收起一行，点击展开编辑（对齐设置页范式）"""
             card = ExpandGroupSettingCard(icon, title, content)
             if tip:
-                card.setToolTip(tip)
+                # 挂到标题行而非折叠卡本体：卡片是 QScrollArea 子类，被
+                # simple_hover_tooltip 排除在自绘气泡之外，且悬停命中的本就是标题行
+                card.card.setToolTip(tip)
             card.addGroupWidget(editor)
 
             from PyQt5.QtCore import QTimer
@@ -296,8 +295,7 @@ class SecurityCenterCard(QWidget):
             "allow_prefixes",
             "如 git status、npm run build",
             show_title=False,
-            tip="⚠ 按词边界匹配；填 git 可省常规子命令审批，"
-            "但 git rm -rf . 等破坏性操作仍会确认。",
+            tip="⚠ 按词边界匹配；填 git 可省常规子命令审批，但 git rm -rf . 等破坏性操作仍会确认。",
         )
         self._cmd_confirm = _ListEditorCard(
             "命令安全 · 强制审批前缀",
@@ -422,9 +420,7 @@ class SecurityCenterCard(QWidget):
             "系统级工具豁免",
             "这些命令绕过沙箱审批",
         )
-        self.sys_switch.setToolTip(
-            "wsl/wmic/sc/reg/schtasks/diskpart/bcdedit 等绕过沙箱审批，请谨慎启用。"
-        )
+        self.sys_switch.setToolTip("wsl/wmic/sc/reg/schtasks/diskpart/bcdedit 等绕过沙箱审批，请谨慎启用。")
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
         layout.addWidget(self.sys_switch)
@@ -439,11 +435,15 @@ class SecurityCenterCard(QWidget):
             "说明：应用层拦截，非 OS 级沙箱隔离。\n"
             "沙箱安全与删除保护默认关闭，需手动开启后才会拦截；"
             "读操作除黑名单外不受路径约束，白名单与 workdir 边界仅约束写入。\n"
-            "MCP 工具（mcp__*）与 upload_file / webfetch 由外部服务提供，"
-            "不受本页约束（可在「工具」页关闭）。"
+            "MCP 工具与 upload_file / webfetch 不受本页约束。"
         )
         note = BodyLabel(_note_text) if BodyLabel else QLabel(_note_text)
         note.setWordWrap(True)
+        note.setToolTip(
+            "MCP 工具（mcp__*）由外部服务提供，其读写/外传行为不在本页检查范围内；"
+            "upload_file（上传到 Gitee）与 webfetch（抓取网页）不受域名黑名单约束。"
+            "如需拦截，请在「工具」页关闭对应工具（关闭后会走审批确认）。"
+        )
         layout.addWidget(note)
 
         layout.addStretch(1)
@@ -645,8 +645,7 @@ class SecurityCenterCard(QWidget):
         limit = self._int_cfg("backup_limit_mb")
         if limit > 0:
             self.backup_hint.setText(
-                f"当前上限 {limit} MB；超出后从旧到新清理。"
-                "改动上限后需重启才生效，可点「清理备份文件」立即清理。"
+                f"当前上限 {limit} MB；超出后从旧到新清理。改动上限后需重启才生效，可点「清理备份文件」立即清理。"
             )
         else:
             self.backup_hint.setText("未设上限：不自动清理，也不执行手动清理。")

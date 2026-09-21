@@ -1744,13 +1744,13 @@ body{{font-family:var(--sans);background:var(--bg);color:var(--text);height:100v
 .call-id{{margin-top:8px;color:var(--text2);font-family:var(--mono);font-size:11px;overflow-wrap:anywhere}}
 .sm{{padding:10px 16px;background:var(--bg3);color:var(--text2);border-bottom:1px solid var(--border)}}
 .fl{{flex:1;overflow-y:auto;padding:10px}}
-.fr{{padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);margin-bottom:8px}}
-.ft{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
-.fk{{flex:1;color:var(--text);font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}}
-.fb{{padding:1px 6px;border-radius:10px;font-size:11px;flex-shrink:0}}
-.fb.risk{{background:var(--yel-bg);color:var(--yellow)}}
-.fp{{color:var(--text2);font-family:var(--mono);font-size:11px;line-height:1.5;overflow-wrap:anywhere;white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
-.fe{{color:var(--text2);padding:16px}}
+.field-row{{padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);margin-bottom:8px}}
+.field-top{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
+.field-key{{flex:1;color:var(--text);font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}}
+.field-badge{{padding:1px 6px;border-radius:10px;font-size:11px;flex-shrink:0}}
+.field-badge.risk{{background:var(--yel-bg);color:var(--yellow)}}
+.field-preview{{color:var(--text2);font-family:var(--mono);font-size:11px;line-height:1.5;overflow-wrap:anywhere;white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
+.field-empty{{color:var(--text2);padding:16px}}
 .ct{{flex:1;display:flex;flex-direction:column;overflow:hidden}}
 .ch{{padding:10px 16px;background:var(--bg3);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}}
 .ctt{{flex:1;color:var(--text);font-weight:600}}
