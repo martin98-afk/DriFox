@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.6.3] - 2026-09-22
+
+自上一版本以来的变更 | 提交数：18 · 文件变更：73 · +9969/-1111 | 贡献者：dingma, mading
+
 ### ⚠️ 行为变更 (Breaking Changes)
 
 - **`delete_protection` 现在真正控制删除审批（默认关闭，语义与名称首次一致）** (`app/tools/sandbox.py`, `tests/tools/test_delete_protection_gate.py` 新增): 该开关此前**只控制执行前快照，完全不控制审批** —— 删除类命令（`rm`/`del`/`Remove-Item` 等）的审批来自命令安全名单（`CONFIRM_COMMANDS`），与开关无关，因此关掉开关后删除**照样弹审批**，用户以为开关坏了。现改为名副其实：**开关关闭（默认）时删除类命令不再弹审批，开启时才弹**。⚠️ 请知悉：**默认配置下删除操作不再被拦截**；如需保留删除审批，请在 设置 → 安全中心 打开「删除保护」。开关只影响删除维度：权限篡改类命令（`cacls`/`icacls`/`takeown`）仍拒绝执行，网络外传检测、路径黑名单均不受影响。注意 `git rm` 属删除类（其 token 序列含 `rm`），同样受本开关管辖。
@@ -10,6 +14,8 @@ All notable changes to this project will be documented in this file.
 - **`git` 破坏性子命令由「静默放行」改为「需审批」** (`app/tools/command_safety.py`, `tests/tools/test_git_subcommand_guard.py` 新增): `git rm -rf .`、`git clean -fdx`、`git reset --hard`、`git branch -D`、`git push --force` 等命令此前不触发任何审批（`classify_command` 只看首 token，而 `git` 不在确认名单），AI 可在无提示下丢弃未提交改动或强推覆盖远端。现按子命令 + 选项组合判定破坏性并纳入审批。常规读取类命令（`status`/`log`/`diff`/`show`/`add`/`commit`）不受影响。
 
 - **备份「上限 0」语义修正为「不限」（不再清空全部）** (`app/utils/file_operation_recorder.py`): 旧实现 `limit_mb <= 0` 会**清空全部备份**，但用户按字面理解「设为 0 = 不限制」时备份被全删。现统一为 `0 = 不限，不做任何清理`（与 Docker `--memory=0` 等主流语义一致）。
+
+- **沙箱与删除保护默认值改为关闭** (`app/tools/sandbox.py`, `tests/core/test_chat_worker_sandbox.py`, `tests/widgets/test_security_center_card.py`): L1 沙箱机制仍处完善期，`sandbox_enabled` / `delete_protection` 默认值改为 `False`。已有配置文件中的显式值不受影响（`_deep_merge` 磁盘值优先），相关测试改为显式开启、不再依赖默认值。`c1bc476e`
 
 ### 🔐 安全 (Security)
 
@@ -29,6 +35,18 @@ All notable changes to this project will be documented in this file.
 
 - **进程资源配额可配置** (`app/tools/bg_manager.py`, `app/tools/pty_session.py`, `app/widgets/cards/settings/security_center_card.py`, `tests/core/test_pty_session_quota.py` 新增): `job_limits`（内存 / 进程数 / CPU 时间上限）此前只能手改 `sandbox_config.json`，且 `pty_session` 是唯一漏网处（裸构造 Job，三项限额全为 0）。现安全中心新增三项 SpinBox（含 0=不限语义与范围钳制），`pty_session` 改用 `create_quota_job()` 读配置（延迟 import 避免拖入重依赖）。配额每次创建 Job 时读取，**改动无需重启**。
 
+- **沙箱配置层 SandboxConfig** (`app/tools/sandbox.py`, `tests/tools/test_sandbox_config.py` 新增): 配置读写改为点路径接口 + 与磁盘深合并 + 原子保存（临时文件替换），免去调用方自行拼装嵌套字典。`496fca3b`
+
+- **沙箱路径边界 check_path** (`app/tools/sandbox.py`, `tests/tools/test_sandbox_path.py` 新增): 写入路径默认收紧、读取放宽（写窄读宽），白名单与黑名单同时生效且黑名单优先。`a7cb615c`
+
+- **命令递归解壳 classify_command_deep** (`app/tools/sandbox.py`, `app/tools/command_safety.py`, `tests/tools/test_sandbox_command.py` 新增): 此前只判表层命令名，`cmd /c "..."`、`powershell -Command`、`python -c` 等载荷可绕过；现递归解壳到最内层真实命令再判定。`c15a798f`
+
+- **沙箱网络外传检测 check_network** (`app/tools/sandbox.py`, `tests/tools/test_sandbox_network.py` 新增): 按 URL、域名黑名单、上传形态三类特征识别外传行为。`f278445e`
+
+- **chat_worker 接入沙箱检查** (`app/core/workers/chat_worker.py`, `app/tools/sandbox.py`, `tests/core/test_chat_worker_sandbox.py` 新增): 工具调用前置判定；用户点「确认」时绕过审批缓存强制走审批（此前缓存命中可静默放行）。`3b7ff9f2`
+
+- **删除保护：放行后执行前快照** (`app/core/workers/chat_worker.py`, `app/tools/sandbox.py`, `tests/tools/test_sandbox_delete_guard.py` 新增): 删除类命令经审批放行后，执行前快照命令中提及的路径，误删可从备份恢复。`ccc115eb`
+
 ### ✨ 新功能 (New Features)
 
 - **安全中心补齐此前只能手改 JSON 的多项配置与文案澄清** (`app/widgets/cards/settings/security_center_card.py`, `tests/widgets/test_security_center_card.py`): 新增进程资源配额（三项 SpinBox，含单位与 0=不限说明）、备份容量上限编辑 +「立即清理」按钮（值为 0 时禁用并提示）、删除快照占用统计（条数 + 空间）与清空入口（二次确认）、网络外传检测开关。同步澄清多处文案（消除"UI 承诺与行为不符"）：白名单改为「写入白名单（读操作不受此限制）」、黑名单注明「读写均拦截」与「文件名需完全相等（`.env` 不拦 `.env.local`）」、放行前缀说明改为「按词边界匹配；填 `git` 可省常规子命令审批，但 `git rm -rf .` 等破坏性操作仍会确认」、删除豁免补「也不做快照」、进程配额补「仅约束 Bash 与后台命令」、快照补「独立配额 = 备份上限 1/4」、备份上限补「自动清理在启动时执行，改动后需重启；可点按钮立即清理」、系统级工具列表补全（`diskpart`/`bcdedit`）；新增 MCP 工具与 `upload_file`/`webfetch` 的保护边界说明。修复 `_open_path_in_explorer` 缺 mac/linux 分支（此前在非 Windows 平台点「打开目录」完全静默无反应），并消除 `_open_backup_dir` 的重复实现。测试新增 39 例。
@@ -37,20 +55,13 @@ All notable changes to this project will be documented in this file.
 
 - **斜杠命令卡片置顶 (pin)**(`app/widgets/cards/floating/command_card.py`, `tests/widgets/test_command_card_pin.py` 新增): 命令/技能/智能体条目可置顶，置顶项恒排列表最前并独立成「置顶区」（与下方区域间自动出分隔线），其余排序不变。交互与历史会话卡置顶同范式：悬停条目右侧浮现置顶按钮（`get_icon("置顶")`），已置顶常显、tooltip「置顶/取消置顶」；点击按钮只切换置顶不触发命令执行（QPushButton 子控件自行消费鼠标事件），切换后保持当前搜索条件立即重排。状态持久化到 `app_state.json` 新键 `command_pins`（元素为 `type:name` 复合键，同名跨类型互不影响），不进设置界面、不参与配置同步；置顶集合随每次 `load_items` 从 AppState 进程内缓存读取，多窗口即时一致。
 
-- **会话分享 HTML 样式主题化** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 分享导出的 HTML 此前只从主题取 9 个色值，其余颜色（标题、加粗、表头、行内代码、代码块底色、工具块、侧栏高亮）全部硬编码为深色主题假设，导致浅色主题下出现白底白字、标题与表头不可见。现全部改为引用主题 token（`user_card_*` / `assistant_card_*` / `syntax_*` / `card_bg_dim` / `divider_color` 等），深浅主题各自正确。同时对齐 in-app 观感：用户卡用 `user_card_bg` 蓝底、助手卡用 `assistant_card_bg` 暖底（此前两者同色仅靠左边框区分）；代码块接入 `codehilite` + pygments，亮色走 `friendly`、深色走 `dracula`，与 in-app 同一对风格。
+- **权限审批卡作用域三档：当前工具 / 当前轮次 / 当前会话** (`app/widgets/cards/floating/permission_approval_widget.py`, `app/core/engines/ui/engine.py`, `tests/widgets/test_permission_approval_widget.py`): 「记住」由固定两档改为作用域选择器（`CheckableMenu`），选中即显示当前作用域、执行统一走「允许」；**每次审批复位为最小范围（当前工具）**，上次选的会话级豁免不会被下一次请求（可能是另一个工具）继承。danger 档位禁用会话级豁免并在菜单内说明原因。同时移除冗余的 workdir 行，快捷键提示收敛为三项。`f595ebc8`
 
-- **会话分享窄屏布局修复** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): CSS 视口宽度 ≤760px 时（窄窗口或浏览器放大），原断点把 `.sidebar` 置为 `position: static`，滚动越过之后左侧导航永久消失、正文撑满全宽，用户感知为「滚动到一半消息突然占满屏幕、左边列表没了」；同时 `.layout` 转 column 后仍是 `align-items: flex-start`，正文被压到侧栏宽度（实测仅 230px）。现窄屏改为导航贴顶常驻的横向滚动条（`sticky` + `overflow-x`，隐藏摘要行），`.layout` 改 `align-items: stretch` 且 `.main` 宽 100%；JS 侧栏跟随同步支持 `scrollLeft`。实测 600 / 740 / 1280 三种宽度下侧栏全程可见（0/11 不可见），窄屏正文恢复满宽（529/669），宽屏布局不变。
+- **权限风险分级只认不可逆高危** (`app/main_widget.py`, `app/widgets/cards/floating/permission_approval_widget.py`, `tests/widgets/test_permission_approval_widget.py`): 此前把工具注册表 `danger="dangerous"` 直接映射为 danger 档，但该字段语义是「有副作用」（bash / write / edit / read 等 10 个常规工具全是它），导致常规审批一律走 500ms 防误触闸门、且会话级豁免在这些工具上永久不可用。现只认删除类命令这一真正不可逆条件；「有副作用」由来源文案与影响范围表达，不再靠风险档位重复；删除来源单列 `delete` 并计入 warn 档。`992c62ad`
 
-- **会话分享侧栏导航修复乱飞** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 滚动时左侧导航高亮来回跳的根因是 `IntersectionObserver` 回调只拿到状态发生变化的 `entries`，取「最靠上的可见项」实为残缺集合的结果。改为按 DOM 顺序全量比较 `getBoundingClientRect()`（基准线取视口上方 15%），并用 rAF 节流；同时新增侧栏自动跟随——高亮项滚出侧栏可视区时同步滚动 `sidebar.scrollTop`。实测 10 个滚动位置高亮序列单调递增（0→2→5→7→17→21），零回退。
+- **命令卡置顶按钮区分已置顶态** (`app/widgets/cards/floating/command_card.py`, `plugins/history-manager/ui/history_card.py`, `app/utils/icon_name_map.py`, `icons/取消置顶.svg` 新增（深浅双色 + qrc + 图标映射）, `tests/widgets/test_command_card_pin.py`): 已置顶改用「pin + 右下划线」图标，与取消置顶面板一致；按钮位置移到快捷键标签左侧（不再遮挡）。命令卡与历史会话卡的构造路径和原地更新路径同步切换。`0650a728`, `44c9ee95`
 
-- **会话分享 HTML 在线渲染** (`app/gateway/utils/edgeone_deployer.py` 新增, `app/widgets/cards/floating/share_card.py`, `tests/gateway/test_edgeone_deployer.py` 新增, `tests/widgets/test_share_card_html_deploy.py` 新增): 分享卡片选择 HTML 格式时，「生成链接」按钮改为「🌐 发布网页」，走 EdgeOne Makers 匿名部署得到可在线渲染的站点链接（HTML 被浏览器正常解析，不再像 Gitee raw 那样显示源码或被内容机审拦截）。零配置：申请临时凭证 → COS 签名上传 → 创建部署 → 轮询结果，全流程在后台 QThread 执行，UI 不冻结。链接 30 分钟内有效（EdgeOne 匿名部署的产品设计），InfoBar 明确提示；部署失败时本地 HTML 仍保留在 `~/.drifox/share/sessions/`。JSON / Markdown 格式继续走原 Gitee 链路，行为不变。
-
-- **上下文管理插件化 — tier cascade** (`app/core/context/` 新增, `app/plugins/contracts/context_policy.py`, `app/plugins/registries/context_policy_registry.py`, `plugins/system-context/` 新增, `tests/core/test_context_pipeline.py` 新增): 把硬编码在内核的上下文管理逻辑抽成插件槽位，遵循 Claude Code / Anthropic context editing 的分层降级范式。新增 `ContextView` 投影对象与 `ContextPipeline` 编排器，三个 stage（`ingest` 允许落盘副作用 / `send` / `ui` 禁止副作用）共用同一条降级链；8 个内置 tier 按 order 10-80 由轻到重执行（图片剥离 / 重复结果去重 / 工具结果截断 / 长结果落盘 / 参数截断 / 旧输出摘要化 / 尾保留 / LLM 摘要），每层自带 trigger 声明。编排三条规则：达标即停（used <= target 立刻 break）、分层熔断（连续 2 次无收益跳过该层）、异常隔离（tier 抛错记录并跳过，不阻断发送）。插件可注册/覆盖/插入任意层，同 order 后注册者生效；阈值统一由 `system-context` 插件 config_schema 承载（环境变量→存储→默认三级链）。既有 `prune_tool_result` / `ToolResultPersister` / `HistoryCompactor` 对外 API 零变化。
-
-### 🔧 重构 (Refactor)
-
-- `prune_tool_result` 及私有辅助迁至 `app/core/context/tool_prune.py`（`context_builder` / `message_content` 保留 re-export，序列化器插件继续调用）
-- 免裁剪名单改由工具注册时声明：`metadata["no_prune"]`（不截断）/ `metadata["no_offload"]`（不落盘），替代主程序硬编码的 `PRUNE_SKIP_TOOLS` / `SKIP_TOOLS` 两份不一致白名单
+- **安全中心列表编辑器动态高度与中文 tooltip** (`app/widgets/cards/settings/security_center_card.py`, `app/utils/diff_viewer.py`, `tests/utils/test_tool_payload_preview_styles.py` 新增): `_ListEditorCard` 新增 `on_change` 回调驱动高度自适应；各配置项补齐中文 tooltip；`diff_viewer` 工具参数预览 CSS 类名统一为语义化命名（`.field-row` / `.field-key` / `.field-badge` / `.field-preview` / `.field-empty`）并加样式回归测试。`872790dc`, `30ceef55`, `c482973b`
 
 ## [v0.6.2] - 2026-09-17 (重新发布 #3)
 
@@ -139,8 +150,8 @@ All notable changes to this project will be documented in this file.
 
 #### 分享 HTML
 
-- **分享 HTML 样式主题化并修复侧栏导航乱飞** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 详见上一节「重新发布 #2」增量。
-- **分享 HTML 窄屏下侧栏消失、正文被压窄** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 同上。
+- **分享 HTML 样式主题化并修复侧栏导航乱飞** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): 分享导出的 HTML 此前只从主题取 9 个色值，其余颜色（标题、加粗、表头、行内代码、代码块底色、工具块、侧栏高亮）全部硬编码为深色主题假设，导致浅色主题下出现白底白字、标题与表头不可见。现全部改为引用主题 token（`user_card_*` / `assistant_card_*` / `syntax_*` / `card_bg_dim` / `divider_color` 等），深浅主题各自正确。同时对齐 in-app 观感：用户卡用 `user_card_bg` 蓝底、助手卡用 `assistant_card_bg` 暖底（此前两者同色仅靠左边框区分）；代码块接入 `codehilite` + pygments，亮色走 `friendly`、深色走 `dracula`，与 in-app 同一对风格。 滚动时左侧导航高亮来回跳的根因是 `IntersectionObserver` 回调只拿到状态发生变化的 `entries`，取「最靠上的可见项」实为残缺集合的结果。改为按 DOM 顺序全量比较 `getBoundingClientRect()`（基准线取视口上方 15%），并用 rAF 节流；同时新增侧栏自动跟随——高亮项滚出侧栏可视区时同步滚动 `sidebar.scrollTop`。实测 10 个滚动位置高亮序列单调递增（0→2→5→7→17→21），零回退。
+- **分享 HTML 窄屏下侧栏消失、正文被压窄** (`app/widgets/cards/floating/share_card.py`, `tests/widgets/test_share_card_html_deploy.py`): CSS 视口宽度 ≤760px 时（窄窗口或浏览器放大），原断点把 `.sidebar` 置为 `position: static`，滚动越过之后左侧导航永久消失、正文撑满全宽，用户感知为「滚动到一半消息突然占满屏幕、左边列表没了」；同时 `.layout` 转 column 后仍是 `align-items: flex-start`，正文被压到侧栏宽度（实测仅 230px）。现窄屏改为导航贴顶常驻的横向滚动条（`sticky` + `overflow-x`，隐藏摘要行），`.layout` 改 `align-items: stretch` 且 `.main` 宽 100%；JS 侧栏跟随同步支持 `scrollLeft`。实测 600 / 740 / 1280 三种宽度下侧栏全程可见（0/11 不可见），窄屏正文恢复满宽（529/669），宽屏布局不变。
 
 #### 虚拟滚动
 
