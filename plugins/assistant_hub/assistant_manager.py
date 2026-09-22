@@ -601,6 +601,7 @@ class AssistantManager:
                 self._write_yaml(v)
         if changed:
             self._invalidate_session_prompt_caches()
+            self._invalidate_identity_cache()
         return True
 
     def save_order(self, ordered_ids: List[str]) -> bool:
@@ -677,6 +678,9 @@ class AssistantManager:
         # 同步归属映射（提前落盘，不等轮次结束）
         if aid:
             cls.record_session_aid(session_id, aid)
+        # 身份行跟随：消息身份解析有会话级缓存，override 变化必须失效，
+        # 否则新消息仍显示旧助手（2026-09-22 身份行不更新根因）
+        cls._invalidate_identity_cache()
         return True
 
     @classmethod
@@ -858,6 +862,23 @@ class AssistantManager:
             from loguru import logger
 
             logger.debug(f"[assistant_hub] 清空会话 {session_id} prompt 缓存失败: {e}")
+
+    @staticmethod
+    def _invalidate_identity_cache() -> None:
+        """清空主程序消息身份解析缓存（主助手切换 / 会话 override 变化时）。
+
+        ``message_identity.resolve_identity`` 按 (session_id, role) 缓存解析结果，
+        助手身份变化后不清缓存，新消息的身份行（名字+头像）仍解析出旧助手，
+        直到新建会话（新 session_id 换缓存 key）才恢复——2026-09-22 三个症状
+        （切主助手头像不更新 / @临时助手身份行不跟随）的共同根因。
+        解析成本极低，整表清空即可。
+        """
+        try:
+            from app.core.infra.message_identity import clear_cache
+
+            clear_cache()
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 清空身份缓存失败: {e}")
 
     # ── 对外描述 (AGENTS.public.md：其他 agent 调用本助手时看到的简介) ──
 

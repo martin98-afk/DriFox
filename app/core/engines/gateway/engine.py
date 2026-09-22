@@ -766,6 +766,7 @@ class GatewayEngine(QObject, BaseEngine):
             tools = self._agent_manager.get_agent_tools_schema(
                 agent_name,
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                session_id=str(getattr(s, "session_id", "") or "") if s else "",
             )
         else:
             tools = get_builtin_tools_schema(

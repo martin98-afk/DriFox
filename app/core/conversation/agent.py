@@ -736,6 +736,7 @@ class AgentManager:
         global_permission: Optional[Dict[str, Any]] = None,
         is_subagent_call: bool = False,
         builtin_tools=None,
+        session_id: str = "",
     ) -> List[Dict]:
         """获取智能体的工具 schema。
 
@@ -746,6 +747,9 @@ class AgentManager:
             builtin_tools: BuiltinTools 实例，用于获取团队上下文。
                           多窗口场景下必须传入当前窗口的实例，否则 is_in_team
                           检查会使用 AgentManager 单例的最后覆盖值（可能指向错误窗口）。
+            session_id: 当前会话 id，透传给 registry schema 过滤器
+                          （assistant_hub 按会话级临时助手裁剪工具档位）；
+                          缺省为空 = 按全局主助手档位过滤。
         """
         agent = self.get_agent(agent_name)
         if not agent:
@@ -754,7 +758,7 @@ class AgentManager:
         # 优先使用调用方传入的 builtin_tools（多窗口隔离），回退到 AgentManager 单例的引用
         _bt = builtin_tools if builtin_tools is not None else self._builtin_tools
 
-        all_tools = get_builtin_tools_schema(self, builtin_tools=_bt)
+        all_tools = get_builtin_tools_schema(self, builtin_tools=_bt, session_id=session_id)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
         # registry 派生：interactive（question）+ 子智能体组（subagent_para/subagent_status）

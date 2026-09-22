@@ -626,6 +626,7 @@ class UIEngine(BaseEngine):
                 available_tools = self._get_agent_manager().get_agent_tools_schema(
                     self._current_agent,
                     builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                    session_id=str(getattr(session, "session_id", "") or ""),
                 )
             else:
                 available_tools = get_builtin_tools_schema(
@@ -1033,6 +1034,7 @@ class _PreSendWorker(QThread):
             self._available_tools = self._agent_manager.get_agent_tools_schema(
                 self._current_agent,
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                session_id=session_id,
             )
         else:
             self._available_tools = get_builtin_tools_schema(
