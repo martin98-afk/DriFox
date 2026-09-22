@@ -14423,6 +14423,44 @@ class MessageCard(SimpleCardWidget):
             self._identity = MessageIdentity(name="Drifox" if self.role != "user" else "")
         return self._identity
 
+    def refresh_identity(self) -> None:
+        """强制重解析身份并刷新已构建的身份行（无变化时零成本跳过）。
+
+        背景：assistant 占位卡在发送同步段创建（早于后台 PreSendWorker 的
+        PreUserMessage hook），身份行此时解析会把「@助手切换前」的旧身份
+        固化在卡片上——表现为回答内容/工具档位已是新助手、身份行仍是主
+        助手（2026-09-22 输入框历史回填发送场景）。流式开始时 hook 必已
+        完成（build_messages 后才有首 chunk），此时重解析即拿到最新身份。
+        """
+        try:
+            from app.core.infra.message_identity import resolve_for_message
+
+            session_id = ""
+            team_agent = ""
+            window_id = ""
+            host = self._parent
+            if host is not None:
+                window_id = getattr(host, "_window_id", "") or ""
+                team_agent = getattr(host, "_team_agent_name", "") or ""
+                session_mgr = getattr(host, "session_manager", None)
+                if session_mgr is not None:
+                    session = session_mgr.get_current_session()
+                    session_id = getattr(session, "session_id", "") or ""
+            role = "user" if self.role == "user" else "assistant"
+            identity = resolve_for_message(
+                self._source_message,
+                role,
+                session_id=session_id,
+                team_agent=team_agent,
+                window_id=window_id,
+            )
+            changed = identity != self._identity
+            self._identity = identity
+            if changed and self._identity_header is not None:
+                self._identity_header.set_identity(identity)
+        except Exception:
+            pass
+
     def _identity_enabled(self) -> bool:
         """身份行显示开关（设置项，默认开；取配置失败时视为开启）"""
         try:

@@ -271,9 +271,129 @@ def test_tasks_progress_bar_reflects_done(panel):
 
 
 def test_tasks_stat_label_shows_done_over_total(panel):
-    """任务区统计标签显示 done/total（单条任务时为 0/1）"""
+    """任务区统计标签显示百分比 + done/total（单条任务时为 0% · 0/1）"""
     panel.update_todos([{"content": "a", "status": "pending", "priority": "medium"}])
-    assert panel.tasks_page._header._extra_label.text() == "0/1"
+    assert panel.tasks_page._header._extra_label.text() == "0% · 0/1"
+
+
+def _task_items(panel):
+    """取当前任务条目（objectName=taskItem 的 QFrame 列表）"""
+    lay = panel.tasks_page._list_layout
+    return [
+        w
+        for i in range(lay.count())
+        if isinstance(w := lay.itemAt(i).widget(), QFrame) and w.objectName() == "taskItem"
+    ]
+
+
+def _running_items(panel):
+    """取进行中常驻条条目（脱离列表的置顶区）"""
+    lay = panel.tasks_page._running_layout
+    return [
+        w
+        for i in range(lay.count())
+        if isinstance(w := lay.itemAt(i).widget(), QFrame) and w.objectName() == "taskItem"
+    ]
+
+
+def test_tasks_item_single_line_elided_with_full_tooltip(panel):
+    """任务条目单行省略（不换行撑高），全文进 tooltip"""
+    long_text = "很长的任务描述" * 20
+    panel.update_todos([{"content": long_text, "status": "pending", "priority": "medium"}])
+    items = _task_items(panel)
+    assert len(items) == 1
+    label = items[0].findChild(QLabel, "taskContent")
+    assert type(label).__name__ == "_ElidedLabel"
+    # 单一 tooltip：优先级 + 全文合一
+    assert label.toolTip().endswith(long_text)
+    assert "优先级" in label.toolTip()
+
+
+def test_tasks_in_progress_emphasized_with_accent_bar(panel):
+    """仅置顶条带琥珀重点样式；列表条目一律普通行（样式不受置顶影响）"""
+    panel.update_todos(
+        [
+            {"content": "done", "status": "completed", "priority": "medium"},
+            {"content": "doing", "status": "in_progress", "priority": "high"},
+            {"content": "todo", "status": "pending", "priority": "low"},
+        ]
+    )
+    # 置顶为额外快照，列表保持完整原序
+    items = _task_items(panel)
+    assert [w.property("status") for w in items] == ["completed", "in_progress", "pending"]
+    run_items = _running_items(panel)
+    assert len(run_items) == 1
+    assert run_items[0].property("status") == "in_progress"
+    assert run_items[0].property("pinned")
+    # 置顶容器淡琥珀底卡，与普通列表视觉区分
+    assert "rgba(245, 158, 11, 0.10)" in panel.tasks_page._running_wrap.styleSheet()
+    # 竖条强调靠 [pinned="true"] 属性选择器限域，仅置顶条生效
+    for w in items + run_items:
+        assert '[pinned="true"]' in w.styleSheet()
+    # 字重区分：置顶 600，列表内同任务行保持普通 500
+    assert "font-weight: 600" in run_items[0].findChild(QLabel, "taskContent").styleSheet()
+    list_run = next(w for w in items if w.property("status") == "in_progress")
+    assert "font-weight: 500" in list_run.findChild(QLabel, "taskContent").styleSheet()
+
+
+def test_tasks_running_row_visible_when_collapsed(panel):
+    """折叠只收列表，进行中常驻条保持可见"""
+    page = panel.tasks_page
+    page.update_todos(
+        [
+            {"content": "done", "status": "completed", "priority": "medium"},
+            {"content": "doing", "status": "in_progress", "priority": "high"},
+        ]
+    )
+    page._set_collapsed(True)
+    assert page._collapsed
+    assert not page._scroll.isVisible()
+    assert page._running_wrap.isVisible()
+
+
+def test_tasks_header_height_includes_running_row_when_collapsed(panel):
+    """折叠态高度计算包含可见的进行中常驻条（否则被 splitter 截掉）"""
+    page = panel.tasks_page
+    page.update_todos([{"content": "doing", "status": "in_progress", "priority": "high"}])
+    page._set_collapsed(True)
+    with_running = page.header_height()
+    page._running_wrap.hide()  # 模拟无进行中：折叠高度应变小
+    assert with_running > page.header_height()
+
+
+def test_tasks_header_click_toggles_collapse(panel):
+    """点 header 整行任意位置切换折叠/展开"""
+    from PyQt5.QtTest import QTest
+
+    page = panel.tasks_page
+    page.update_todos([{"content": "todo", "status": "pending", "priority": "medium"}])
+    assert not page._collapsed
+    QTest.mouseClick(page._header, Qt.LeftButton)
+    assert page._collapsed
+    QTest.mouseClick(page._header, Qt.LeftButton)
+    assert not page._collapsed
+
+
+def test_tasks_running_row_no_duplicate_after_refresh(panel):
+    """连续刷新不残留旧 running 条目"""
+    page = panel.tasks_page
+    page.update_todos([{"content": "a", "status": "in_progress", "priority": "medium"}])
+    page.update_todos([{"content": "b", "status": "in_progress", "priority": "medium"}])
+    run_items = _running_items(panel)
+    assert len(run_items) == 1
+    assert run_items[0].findChild(QLabel, "taskContent").toolTip().endswith("b")
+
+
+def test_tasks_pending_dot_neutral_priority_in_tooltip(panel):
+    """pending 圆点恒中性灰（高优先级也不着红），优先级移到行 tooltip"""
+    panel.update_todos([{"content": "待办", "status": "pending", "priority": "high"}])
+    item = _task_items(panel)[0]
+    mark = item.findChild(QLabel, "taskMark")
+    assert "#6b7280" in mark.styleSheet()
+    assert "#ef4444" not in mark.styleSheet()
+    label = item.findChild(QLabel, "taskContent")
+    assert "优先级：高" in label.toolTip()
+    assert "待办" in label.toolTip()
 
 
 def test_tasks_no_stale_widget_after_refresh(panel):

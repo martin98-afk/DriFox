@@ -4,6 +4,10 @@
 八用例：os:system 拒 / 相对路径放行 / registered_functions 放行 / 多行 command 拒 /
 单行过 / http 拒（非 https）/ https 私网拒 / https 公网过。
 恶意 fixture 全部 tmp_path；subprocess 用 monkeypatch 拦截（多行 command 不允许真实执行）。
+
+★ 相对路径的限制语义（EU-G18 起）：不受标准路径白名单限制（插件模块不可能位于
+  app.hooks/app.utils，套用白名单会废掉所有插件的 python hook），**但被限制在
+  hooks.json 同目录子树内**（拦 junction / 符号链接 / 硬链接越界）。
 """
 import pytest
 from loguru import logger
@@ -51,7 +55,17 @@ def test_python_standard_path_rejects_os_system(tmp_path, log_capture):
 
 
 def test_python_relative_path_bypasses_whitelist(tmp_path):
-    """相对路径（hooks.json 同目录）保留旁路，不受标准路径白名单限制。"""
+    """相对路径（hooks.json 同目录）不受标准路径白名单限制。
+
+    ⚠ 注意前提：**没有**越过同目录子树的越界行为 —— EU-G18 起相对路径被限制在
+    hooks.json 同目录子树内（拦 junction / 符号链接 / 硬链接）。
+    本用例的 relmod.py 就在同目录，属正常范围，故仍放行。
+    边界与越界场景见 tests/core/test_hook_relative_scope.py。
+
+    历史说明：原注释写「保留旁路，不受标准路径白名单限制」，易被读成"存在已知
+    未修的绕过漏洞"。实测 `..` 各种变体早已被 `replace(".", "/")` 意外封死，
+    故该表述已修正为准确的范围限制语义。
+    """
     (tmp_path / "relmod.py").write_text(
         "def hook_func(**kw):\n    return 'relative-ok'\n", encoding="utf-8"
     )

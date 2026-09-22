@@ -580,7 +580,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.6.2"
+    current_version = "v0.6.3"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
     # 进入时崩溃通知：检测到上次崩溃 dump 后是否弹 InfoBar 提示用户。

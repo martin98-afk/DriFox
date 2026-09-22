@@ -1098,14 +1098,34 @@ class ChatBackend(QObject):
             self._tool_executor._builtin_tools.set_team_context(self._window_id, agent_name)
 
     def approve_tool_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
-        """批准工具调用权限"""
-        if self._chat_engine:
-            self._chat_engine.approve_tool_permission(tool_call_id, auto_allow, session_allow)
+        """批准工具调用权限（返回是否已投递：engine 未就绪时 False）"""
+        if not self._chat_engine:
+            logger.warning(f"[Permission] 决策丢弃：engine 未就绪 id={tool_call_id}")
+            return False
+        self._chat_engine.approve_tool_permission(tool_call_id, auto_allow, session_allow)
+        return True
 
-    def deny_tool_permission(self, tool_call_id: str):
-        """拒绝工具调用权限"""
-        if self._chat_engine:
-            self._chat_engine.deny_tool_permission(tool_call_id)
+    def deny_tool_permission(self, tool_call_id: str, reason: str = ""):
+        """拒绝工具调用权限（reason 非空时回填给模型）"""
+        if not self._chat_engine:
+            logger.warning(f"[Permission] 拒绝被丢弃：engine 未就绪 id={tool_call_id}")
+            return False
+        self._chat_engine.deny_tool_permission(tool_call_id, reason)
+        return True
+
+    def decide_tool_permission(self, tool_call_id: str, decision: str, remember: str = "", reason: str = "") -> bool:
+        """结构化审批决策回传（见 ChatEngine.decide_tool_permission）
+
+        Returns:
+            True = 已投递到引擎；False = engine 未就绪，决策未送出（宿主据此提示用户）
+        """
+        if not self._chat_engine:
+            logger.warning(
+                f"[Permission] 决策丢弃：engine 未就绪 id={tool_call_id} decision={decision}"
+            )
+            return False
+        self._chat_engine.decide_tool_permission(tool_call_id, decision, remember, reason)
+        return True
 
     def provide_question_answer(self, answer: str):
         """提供问题答案"""

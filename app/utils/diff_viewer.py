@@ -1705,12 +1705,12 @@ class ToolPayloadHtmlGenerator:
         rows = []
         for k, v in arguments.items():
             vt = cls._safe_json(v) if isinstance(v, (dict, list)) else str(v)
-            pv = vt.replace("\n", " ")[:140] + ("..." if len(vt) > 140 else "")
-            b = "重点" if k in high_risk else "参数"
-            bc = "risk" if k in high_risk else "normal"
+            # 保留换行（CSS 限 3 行截断），不再压成一行长串；截断加长给多行展示留余量
+            pv = vt if len(vt) <= 200 else vt[:200] + "…"
+            # 徽标降噪：只标「重点」，普通参数不挂徽标（用户反馈样式杂乱）
+            badge = '<span class="field-badge risk">重点</span>' if k in high_risk else ""
             rows.append(f"""<div class="field-row"><div class="field-top">
-                <span class="field-key">{DiffHtmlGenerator.escape_html(str(k))}</span>
-                <span class="field-badge {bc}">{b}</span></div>
+                <span class="field-key">{DiffHtmlGenerator.escape_html(str(k))}</span>{badge}</div>
                 <div class="field-preview">{DiffHtmlGenerator.escape_html(pv)}</div></div>""")
         return "\n".join(rows)
 
@@ -1744,14 +1744,13 @@ body{{font-family:var(--sans);background:var(--bg);color:var(--text);height:100v
 .call-id{{margin-top:8px;color:var(--text2);font-family:var(--mono);font-size:11px;overflow-wrap:anywhere}}
 .sm{{padding:10px 16px;background:var(--bg3);color:var(--text2);border-bottom:1px solid var(--border)}}
 .fl{{flex:1;overflow-y:auto;padding:10px}}
-.fr{{padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);margin-bottom:8px}}
-.ft{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
-.fk{{flex:1;color:var(--text);font-family:var(--mono);overflow-wrap:anywhere}}
-.fb{{padding:1px 6px;border-radius:10px;font-size:11px;flex-shrink:0}}
-.fb.risk{{background:var(--yel-bg);color:var(--yellow)}}
-.fb.normal{{background:var(--blue-bg);color:var(--link)}}
-.fp{{color:var(--text2);font-family:var(--mono);font-size:11px;overflow-wrap:anywhere}}
-.fe{{color:var(--text2);padding:16px}}
+.field-row{{padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);margin-bottom:8px}}
+.field-top{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
+.field-key{{flex:1;color:var(--text);font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}}
+.field-badge{{padding:1px 6px;border-radius:10px;font-size:11px;flex-shrink:0}}
+.field-badge.risk{{background:var(--yel-bg);color:var(--yellow)}}
+.field-preview{{color:var(--text2);font-family:var(--mono);font-size:11px;line-height:1.5;overflow-wrap:anywhere;white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
+.field-empty{{color:var(--text2);padding:16px}}
 .ct{{flex:1;display:flex;flex-direction:column;overflow:hidden}}
 .ch{{padding:10px 16px;background:var(--bg3);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}}
 .ctt{{flex:1;color:var(--text);font-weight:600}}

@@ -149,11 +149,12 @@ class LspManager:
 
         for entry in lsp_configs:
             plugin_name = entry.get("plugin", "unknown")
+            source_path = entry.get("source", "") or ""
             config_data = entry.get("config", {})
 
             for server_name, server_data in config_data.items():
                 try:
-                    config = LspServerConfig.from_dict(server_name, server_data, plugin_name)
+                    config = LspServerConfig.from_dict(server_name, server_data, plugin_name, source_path)
                     client = LspClient(config, workspace_root)
                     self._clients[server_name] = client
                     for ext, lang in config.extension_to_language.items():
@@ -222,7 +223,7 @@ class LspManager:
 
     # ── 增量热重载 ───────────────────────────────────────────
 
-    def add_plugin_servers(self, plugin_name: str, config_data: dict) -> int:
+    def add_plugin_servers(self, plugin_name: str, config_data: dict, source_path: str = "") -> int:
         """增量注册并启动一个插件的 LSP 服务器，不影响已有服务器
 
         用于新增插件的增量热重载场景：
@@ -233,6 +234,7 @@ class LspManager:
         Args:
             plugin_name: 插件名称
             config_data: .lsp.json 的配置内容（{server_name: {...}}）
+            source_path: 来源 .lsp.json 路径（启动门禁内置判定用）
 
         Returns:
             成功注册的服务器数量（后台启动中，不一定全部启动成功）
@@ -248,7 +250,7 @@ class LspManager:
                 logger.debug(f"[LspManager] 服务器 {server_name} 已存在，跳过增量注册")
                 continue
             try:
-                config = LspServerConfig.from_dict(server_name, server_data, plugin_name)
+                config = LspServerConfig.from_dict(server_name, server_data, plugin_name, source_path)
                 client = LspClient(config, self._workspace_root)
                 self._clients[server_name] = client
                 for ext, lang in config.extension_to_language.items():
@@ -455,13 +457,24 @@ class LspManager:
     async def _run_cli_with_args(
         args: list,
         timeout: float,
+        source_path: str = "",
     ) -> tuple[Optional[list], str, bool, str]:
-        """通用 CLI 调用 + JSON 解析（pyright 风格）。由 cli_fallback 调度。"""
+        """通用 CLI 调用 + JSON 解析（pyright 风格）。由 cli_fallback 调度。
+
+        source_path：该 LSP 配置自身的 .lsp.json 路径，透传给启动门禁。
+        系统插件的 CLI fallback → 内置源 → proceed；用户插件的 → need_confirm
+        （用户可在 LSP 设置卡确认一次）。不传/空串 → 非内置，会被拦。
+        """
         import asyncio.subprocess
 
         from app.core.tools.mcp_lsp_safety import gate_server_launch
 
-        if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
+        if (
+            gate_server_launch(
+                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path
+            )
+            != "proceed"
+        ):
             return None, "", False, "CLI 启动被安全门禁拦截"
 
         subprocess_kwargs = {}
@@ -491,13 +504,18 @@ class LspManager:
         return data.get("generalDiagnostics", []), stderr_text, False, ""
 
     @staticmethod
-    async def _raw_cli_diagnostics(file_path: str, args: list) -> Optional[str]:
+    async def _raw_cli_diagnostics(file_path: str, args: list, source_path: str = "") -> Optional[str]:
         """通用 CLI 调用 + 原始 stdout 返回（不解析）。"""
         import asyncio.subprocess
 
         from app.core.tools.mcp_lsp_safety import gate_server_launch
 
-        if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
+        if (
+            gate_server_launch(
+                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path
+            )
+            != "proceed"
+        ):
             return "[CLI] 启动被安全门禁拦截"
 
         subprocess_kwargs = {}
@@ -522,7 +540,7 @@ class LspManager:
         return f"[CLI] {os.path.basename(file_path)}:\n{text[:2000]}"
 
     @staticmethod
-    async def _tsc_text_diagnostics(file_path: str, args: list) -> Optional[str]:
+    async def _tsc_text_diagnostics(file_path: str, args: list, source_path: str = "") -> Optional[str]:
         """解析 tsc --noEmit 文本输出::
 
         file.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.
@@ -532,7 +550,12 @@ class LspManager:
 
         from app.core.tools.mcp_lsp_safety import gate_server_launch
 
-        if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
+        if (
+            gate_server_launch(
+                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path
+            )
+            != "proceed"
+        ):
             return "[CLI] 启动被安全门禁拦截"
 
         subprocess_kwargs = {}
@@ -596,11 +619,15 @@ class LspManager:
             args.append(tmpl.replace("${file}", file_path))
 
         if parser == "tsc":
-            return await LspManager._tsc_text_diagnostics(file_path, args)
+            return await LspManager._tsc_text_diagnostics(
+                file_path, args, source_path=getattr(config, "source_path", "") or ""
+            )
 
         # raw / pyright 走原 pyright JSON 路径（pyright 路径也会被 raw 覆盖，
         # 因为 _run_cli_with_args 对非 JSON 输出返回空 diags，效果等同 raw）
-        diags, stderr_text, timed_out, error_msg = await LspManager._run_cli_with_args(args, timeout=5.0)
+        diags, stderr_text, timed_out, error_msg = await LspManager._run_cli_with_args(
+            args, timeout=5.0, source_path=getattr(config, "source_path", "") or ""
+        )
         if timed_out:
             logger.debug(f"[LspManager] CLI 诊断超时 (5s): {file_path}")
             return None
@@ -702,9 +729,13 @@ class LspManager:
             args.append(tmpl.replace("${file}", file_path))
 
         if parser == "tsc":
-            return await LspManager._tsc_text_diagnostics(file_path, args)
+            return await LspManager._tsc_text_diagnostics(
+                file_path, args, source_path=getattr(config, "source_path", "") or ""
+            )
         if parser == "pyright":
-            diags, _, timed_out, error_msg = await LspManager._run_cli_with_args(args, timeout=30.0)
+            diags, _, timed_out, error_msg = await LspManager._run_cli_with_args(
+                args, timeout=30.0, source_path=getattr(config, "source_path", "") or ""
+            )
             if timed_out:
                 return "(LSP CLI 超时)"
             if error_msg:
@@ -724,7 +755,9 @@ class LspManager:
                 lines.append(f"  {ln}:{col} [{sev}] {msg}{code_str}")
             return "\n".join(lines)
         # raw / 兜底
-        return await LspManager._raw_cli_diagnostics(file_path, args)
+        return await LspManager._raw_cli_diagnostics(
+            file_path, args, source_path=getattr(config, "source_path", "") or ""
+        )
 
     # ── 透明代理 LSP 操作 ─────────────────────────────────────
 

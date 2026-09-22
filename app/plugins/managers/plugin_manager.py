@@ -1516,7 +1516,12 @@ class PluginManager:
             if lsp_file.exists():
                 try:
                     with open(lsp_file, "r", encoding="utf-8") as f:
-                        configs.append({"plugin": plugin.name, "config": json.load(f)})
+                        # source：启动安全门禁（mcp_lsp_safety）靠它判定内置源。
+                        # 不传会导致系统插件自带的 LSP 也被要求确认，而 LSP 侧无确认入口
+                        # → server 永远无法启动（EU-G22）
+                        configs.append(
+                            {"plugin": plugin.name, "source": str(lsp_file), "config": json.load(f)}
+                        )
                 except Exception as e:
                     logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
 
@@ -1539,7 +1544,9 @@ class PluginManager:
                         continue
                     try:
                         with open(lsp_file, "r", encoding="utf-8") as f:
-                            configs.append({"plugin": item.name, "config": json.load(f)})
+                            configs.append(
+                                {"plugin": item.name, "source": str(lsp_file), "config": json.load(f)}
+                            )
                         logger.debug(f"[PluginManager] 发现独立 LSP 配置: {item.name}")
                     except Exception as e:
                         logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
@@ -1567,7 +1574,8 @@ class PluginManager:
             return None
         try:
             with open(lsp_file, "r", encoding="utf-8") as f:
-                return {"plugin": plugin_name, "config": json.load(f)}
+                # 热重载路径同样需要 source（否则重载后 server 又启不来）
+                return {"plugin": plugin_name, "source": str(lsp_file), "config": json.load(f)}
         except Exception as e:
             logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
             return None

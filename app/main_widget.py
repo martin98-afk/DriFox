@@ -1017,6 +1017,10 @@ class OpenAIChatToolWindow(ToolWindow):
     _latest_todos: Optional[list] = None  # 最近一次 todowrite 回传的任务列表（推送消息卡片内嵌任务区）
     _question_floating_widget = None
     _question_tool_call_id = None
+    # 权限审批浮动卡（懒创建；与提问卡解耦，走结构化决策回传）
+    _permission_floating_widget = None
+    # 待决审批的 tool_call_id（宿主自持：决策到达时 worker 可能已结束或 pending 已清空）
+    _pending_permission_id = None
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
     _system_cards_open: bool = False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
     _window_active: bool = True
@@ -1499,7 +1503,7 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             self._window_active = False
         # 初始化属性
-        self._pending_permission_tool_call_id: Optional[str] = None
+        self._pending_permission_id: Optional[str] = None
         self._question_tool_call_id: Optional[str] = None
         self._current_assistant_round_index: Optional[int] = None  # 跟踪当前应分配给 assistant 的 round_index
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
@@ -1911,6 +1915,32 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._question_floating_widget,
             )
             self._bottom_card_container.add_card("question", self._question_floating_widget)
+
+    def _ensure_permission_approval_widget(self):
+        """权限审批卡懒创建：构造/接线/注册按需执行
+
+        弹出链入口（_on_permission_approval_requested）兜底 ensure。
+        与提问卡用不同 card_id：审批卡不需要"覆盖一切"语义（显示时输入区
+        本就隐藏），BOTTOM 容器内天然与提问卡互斥。
+        """
+        if getattr(self, "_permission_floating_widget", None) is not None:
+            return
+        from app.widgets.cards.floating.permission_approval_widget import PermissionApprovalWidget
+
+        self._permission_floating_widget = PermissionApprovalWidget(self)
+        self._permission_floating_widget.setVisible(False)
+        self._permission_floating_widget.answered.connect(self._on_permission_decided)
+        self._permission_floating_widget.cancelled.connect(self._on_permission_cancelled)
+        self._permission_floating_widget.previewRequested.connect(self._on_question_preview_requested)
+        if not getattr(self, "_permission_floating_registered", False):
+            self._permission_floating_registered = True
+            self._card_manager.register_card(
+                self._window_id,
+                ContainerType.BOTTOM,
+                "permission",
+                self._permission_floating_widget,
+            )
+            self._bottom_card_container.add_card("permission", self._permission_floating_widget)
 
     def _ensure_model_config_card(self):
         """确保模型配置卡片框架已创建（内容由 _build_deferred_card_model_config 填充）"""
@@ -2877,6 +2907,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新问题悬浮框
         if self._question_floating_widget:
             self._question_floating_widget.set_opacity(opacity)
+        # 更新权限审批悬浮框
+        if self._permission_floating_widget:
+            self._permission_floating_widget.set_opacity(opacity)
         # 更新服务商编辑卡片
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
@@ -10794,6 +10827,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 浮动卡片
             for card in (
                 self._question_floating_widget,
+                self._permission_floating_widget,
                 self._sub_agent_compact_widget,
                 self._share_card_content,
                 self._history_questions_card_content,
@@ -10869,6 +10903,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 主窗口内嵌浮动卡片（周期内去重：5b 跳过 5a 已刷卡片） ──
         for card in (
             self._question_floating_widget,
+            self._permission_floating_widget,
             self._sub_agent_compact_widget,
             self._share_card_content,
             self._history_questions_card_content,
@@ -11290,6 +11325,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._question_floating_widget:
             self._question_floating_widget.clear()
         self._question_tool_call_id = None
+        if self._permission_floating_widget:
+            self._permission_floating_widget.clear()
+        self._pending_permission_id = None
         self._load_agent_list()
         self._release_inactive_session_messages()
         _t4 = _time.perf_counter()
@@ -18837,6 +18875,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._response_start_time = time.time()
         self._set_ai_state("streaming")  # 桌宠：开始回复
         if self._current_assistant_card:
+            # 身份行刷新：占位卡身份在发送同步段解析，早于 PreUserMessage hook
+            # （@助手切换在后台线程）；流式开始时 hook 必已完成，以最新身份重画。
+            # 无变化时 set_identity 不会被调（零成本幂等）。
+            self._current_assistant_card.refresh_identity()
             # 🛡️ 只在尚未开始计时时启动，避免重复调用重置计数器。
             if self._current_assistant_card._elapsed_start_time is None:
                 self._current_assistant_card.start_elapsed_tracking()
@@ -19459,6 +19501,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         if window_id and window_id != self._window_id:
             return  # 其它窗口的请求，跳过
+        # 缺陷 2：补 Tab 提示（切走窗口也能看到哪个 Tab 在等审批）与系统通知
+        self._set_ai_state("question")
+        self._notify_if_inactive("子智能体待授权", f"子智能体请求使用工具 {tool_name}")
         try:
             args_preview = ""
             if arguments:
@@ -19956,6 +20001,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = False
         self._toggle_send_stop(False)
         self._set_ai_state("idle")  # 桌宠：任务完成
+        # 缺陷 3：流结束仍有待输入浮动卡残留时一并收起（幂等）
+        self._dismiss_pending_overlay_cards()
 
         # 写入模型名称/服务商到卡片和 session 消息
         if self._current_assistant_card:
@@ -20650,6 +20697,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._set_ai_state("error")  # 桌宠：发生错误
 
         self._toggle_send_stop(False)
+        # 缺陷 3：引擎错误时收起残留的待输入浮动卡（幂等）
+        self._dismiss_pending_overlay_cards()
 
         # 停止计时器并写入最终耗时到 session 消息（引擎错误路径不走 _on_messages_updated）
         if (
@@ -20792,6 +20841,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "undo_delete",
             "message_queue",
             "sub_agent_compact",
+            "permission",
         ]:
             self._card_manager.hide_card(card_id, self._window_id)
 
@@ -20869,21 +20919,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._set_bottom_input_visible(True)
         self._restore_after_question_close()
         self._pet_set_state("streaming")  # 回答后继续回复
-        if self._pending_permission_tool_call_id:
-            tool_call_id = self._pending_permission_tool_call_id
-            self._pending_permission_tool_call_id = None
-            # answer 格式为 "问题「...」的回答：\n【允许】"，用 in 匹配标签
-            if "【允许】" in answer:
-                self.backend.approve_tool_permission(tool_call_id, False, False)
-            elif "【允许且该轮对话自动允许】" in answer:
-                self.backend.approve_tool_permission(tool_call_id, True, False)
-            elif "【本次会话允许】" in answer:
-                self.backend.approve_tool_permission(tool_call_id, False, True)
-            else:
-                self.backend.deny_tool_permission(tool_call_id)
-            self._focus_input_if_active()
-            return
-
         if not self._question_tool_call_id:
             return
 
@@ -20905,13 +20940,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._set_bottom_input_visible(True)
         self._restore_after_question_close()
         self._pet_set_state("idle")  # 取消则回 idle
-
-        if self._pending_permission_tool_call_id:
-            tool_call_id = self._pending_permission_tool_call_id
-            self._pending_permission_tool_call_id = None
-            self.backend.deny_tool_permission(tool_call_id)
-            self._focus_input_if_active()
-            return
 
         if not self._question_tool_call_id:
             return
@@ -20955,34 +20983,236 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         pass
 
+    def _classify_permission_source(self, tool_name: str, arguments: dict) -> tuple:
+        """判定审批来源 → (source_key, 人类可读文案)
+
+        判定顺序与 chat_worker._check_permission 一致：先沙箱（deny/confirm），
+        再删除类，最后回落到工具权限策略。沙箱关闭时 sandbox_check_tool 立即
+        返回 ALLOW，重算成本可忽略。
+        """
+        args = dict(arguments or {})
+        command = str(args.get("command") or "")
+        try:
+            from app.tools.sandbox import is_delete_command, sandbox_check_tool
+
+            verdict = sandbox_check_tool(tool_name, args)
+            if verdict in ("confirm", "deny"):
+                return "sandbox", "⚠ 安全中心拦截"
+            if command and is_delete_command(command):
+                return "delete", "🗑 删除保护"
+        except Exception as e:  # noqa: BLE001 - 判定失败回落策略来源
+            logger.debug(f"[Permission] 来源判定失败({tool_name}): {e}")
+        return "policy", "🔒 工具权限策略"
+
+    def _grade_permission_risk(self, tool_name: str, arguments: dict, source: str) -> str:
+        """风险档位：danger（不可逆高危）> warn（沙箱拦截）> info
+
+        ⚠ danger 的语义是**不可逆高危**（删除类等），不是「工具有副作用」。
+        工具注册表的 `danger="dangerous"` 含义是「会改东西」（写文件/执行命令/
+        改待办/上传都能命中），bash、write、edit、read 等 10 个常规工具全是它，
+        若直接映射为 danger 档：
+        - 常规审批全部走 500ms 防误触闸门（每次都白等）
+        - 全部禁用「当前会话」作用域 → 会话级豁免在这些工具上永久不可用
+        故此处只认「删除类命令」这一真正不可逆的条件；工具有副作用的事实由
+        来源文案（source_text）与影响范围（impact）表达，不靠风险档位重复。
+        """
+        try:
+            from app.tools.sandbox import is_delete_command
+
+            command = str((arguments or {}).get("command") or "")
+            if command and is_delete_command(command):
+                return "danger"
+        except Exception as e:  # noqa: BLE001 - 判定失败按 info（仅影响配色强度）
+            logger.debug(f"[Permission] 风险判定失败({tool_name}): {e}")
+        if source in ("sandbox", "delete"):
+            return "warn"
+        return "info"
+
+    def _build_permission_impact(self, tool_name: str, arguments: dict) -> dict:
+        """计算影响范围（新卡只渲染，解析全部在此完成）"""
+        args = dict(arguments or {})
+        impact: dict = {"paths": [], "missing": [], "domains": [], "writes": False}
+        command = str(args.get("command") or "")
+        if command:
+            try:
+                from app.tools.sandbox import delete_targets, is_delete_command
+
+                if is_delete_command(command):
+                    targets = delete_targets(command)
+                    impact["paths"] = [str(p) for p in (targets.get("existing") or [])]
+                    impact["missing"] = [str(p) for p in (targets.get("missing") or [])]
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[Permission] 删除目标解析失败: {e}")
+            # 域名提取：从命令里找 URL 形态
+            try:
+                import re
+
+                urls = re.findall(r"https?://([^\s/\"']+)", command)
+                if urls:
+                    impact["domains"] = sorted(set(urls))
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[Permission] 域名提取失败: {e}")
+        # 写操作判定：registry 分组（与 FileRecorder 追踪组同源字符串）
+        try:
+            from app.tools.registry import ToolRegistry
+
+            if tool_name in ToolRegistry.get_instance().tools_in_group("文件写入"):
+                impact["writes"] = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] 写操作判定失败({tool_name}): {e}")
+        return impact
+
+    def _on_permission_decided(self, decision: str, remember: str, reason: str):
+        """审批卡的决策落点：结构化回传，无文本标签反解析
+
+        要求 1（阻断）：tool_call_id 由宿主自持，不从 worker 反查——worker 可能
+        已结束（_current_worker 置 None）或 pending 已被 cancel() 清空，反查会
+        命中错配 id 导致静默丢弃 + worker 永久阻塞。id 读完立即清空防重放。
+        要求 2（阻断）：engine 未就绪时必须给出可见反馈，不得让用户点击凭空消失。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        tool_call_id = self._pending_permission_id
+        self._pending_permission_id = None
+        self._dismiss_permission_card()
+        if not tool_call_id:
+            # 无待决 id：可能是重复信号/已过期，按 deny 语义处理（不静默 allow）
+            logger.warning(f"[Permission] 决策无对应 tool_call_id，忽略: decision={decision}")
+            self._restore_after_permission_close()
+            return
+        delivered = False
+        try:
+            delivered = bool(
+                self.backend.decide_tool_permission(tool_call_id, decision, remember, reason)
+            )
+        except Exception as e:  # noqa: BLE001 - 回传异常不应让 UI 卡住
+            logger.error(f"[Permission] 决策回传异常 id={tool_call_id}: {e}")
+            self._notify_permission_decision_lost(tool_call_id, decision)
+            self._restore_after_permission_close()
+            return
+        if not delivered:
+            # 门面返回 False = engine 未就绪，决策未送出（要求 2 / S6）
+            logger.warning(
+                f"[Permission] 决策未送达（engine 未就绪）id={tool_call_id} decision={decision}"
+            )
+            self._notify_permission_decision_lost(tool_call_id, decision)
+        self._restore_after_permission_close()
+
+    def _notify_permission_decision_lost(self, tool_call_id: str, decision: str) -> None:
+        """决策可能未送达时的可见反馈（避免用户以为点成功、实际对话卡死）"""
+        # parent 求值单独 try：`self.window()` 在某些构造期/桩环境可能不可用，
+        # 但提示本身不能因此丢失（提示是要求 2 的唯一可见反馈手段）
+        try:
+            parent = TabManagerWindow.get_instance() or self.window()
+        except Exception:  # noqa: BLE001
+            parent = None
+        try:
+            InfoBar.warning(
+                "审批未送达",
+                f"对话引擎当前不可用，本次「{decision}」决策可能未生效。若对话无响应，请点停止后重试。",
+                duration=5000,
+                parent=parent,
+                position=InfoBarPosition.BOTTOM,
+            )
+        except Exception as e:  # noqa: BLE001 - 提示失败不能影响收尾
+            logger.debug(f"[Permission] 决策未送达提示失败: {e}")
+
+    def _on_permission_cancelled(self):
+        """审批卡被关闭（Esc/关闭按钮）→ 按 deny 处理（安全默认）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        tool_call_id = self._pending_permission_id
+        self._pending_permission_id = None
+        self._dismiss_permission_card()
+        if tool_call_id:
+            try:
+                self.backend.decide_tool_permission(tool_call_id, "deny", "", "")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[Permission] 取消回传异常 id={tool_call_id}: {e}")
+        self._restore_after_permission_close()
+
+    def _dismiss_permission_card(self) -> None:
+        """收起审批卡（幂等：未创建/未显示时 no-op）"""
+        if getattr(self, "_permission_floating_widget", None) is not None:
+            self._card_manager.hide_card("permission", self._window_id)
+            self._permission_floating_widget.clear()
+
+    def _restore_after_permission_close(self) -> None:
+        """审批结束统一收尾：切回 streaming 态 + 恢复输入区（对齐提问卡收尾顺序）"""
+        self._set_ai_state("streaming")
+        self._pet_set_state("streaming")
+        self._set_bottom_input_visible(True)
+        self._restore_after_question_close()
+        self._focus_input_if_active()
+
+    def _dismiss_pending_overlay_cards(self) -> None:
+        """收起所有"等待用户输入"的浮动卡（幂等）
+
+        缺陷 3 共性修复：流结束/流取消/引擎错误三条路径原先都不处理卡片，
+        导致用户在审批或提问等待中点停止后，卡片残留、输入区继续隐藏，
+        界面卡在一个已失效的请求上，只能靠切换/新建会话脱困。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        changed = False
+        if getattr(self, "_question_floating_widget", None) is not None and (
+            self._question_floating_widget.isVisible() or self._question_tool_call_id
+        ):
+            self._question_floating_widget.clear()
+            self._question_tool_call_id = None
+            changed = True
+        if getattr(self, "_pending_permission_id", None) or (
+            getattr(self, "_permission_floating_widget", None) is not None
+            and self._permission_floating_widget.isVisible()
+        ):
+            self._pending_permission_id = None
+            if getattr(self, "_permission_floating_widget", None) is not None:
+                self._permission_floating_widget.clear()
+            changed = True
+        if changed:
+            self._card_manager.hide_card("question", self._window_id)
+            self._card_manager.hide_card("permission", self._window_id)
+            self._set_bottom_input_visible(True)
+            logger.info("[Permission] 已收起待输入浮动卡（流结束/取消/错误路径）")
+
     def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         if getattr(self, "_is_destroyed", False):
             return
-        self._ensure_question_floating_widget()
-        # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态，
-        # 否则 TabPanel 听不到 ai_state_changed 变化、不会在 Tab 边框
-        # 渲染问题动画，用户在多 Tab 场景下分不清"哪个窗口在等权限"。
+        self._ensure_permission_approval_widget()
+        # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态。
+        # ⚠ 三合一契约（勿删勿改语义）：① TabPanel 边框 question 动画
+        # ② 桌宠 question 态 ③ 并行会话新增的 _question_count 计数体系。
         self._set_ai_state("question")
-        self._pending_permission_tool_call_id = tool_call_id
-        self._pending_permission_auto_allow = False
-        # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
+        # 宿主自持待决 id（要求 1）：决策到达时不再从 worker 反查
+        self._pending_permission_id = tool_call_id
+        # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看审批
         self._set_bottom_input_visible(False)
-        # 先填充内容再展开容器：见 _on_question_asked 同源 bug 注释
-        self._question_floating_widget.setUpdatesEnabled(False)
+        # 多 Tab 场景下切走窗口也能知道本窗口在等审批
+        self._notify_if_inactive("需要授权", f"工具 {tool_name} 等待你的确认")
+
+        source, source_text = self._classify_permission_source(tool_name, arguments)
+        risk = self._grade_permission_risk(tool_name, arguments, source)
+        impact = self._build_permission_impact(tool_name, arguments)
         try:
-            arg_str = str(arguments)[:160] if arguments else ""
-            if arguments and len(str(arguments)) > 160:
-                arg_str += "..."
-            question_text = f"工具 `{tool_name}` 需要权限执行。\n\n参数摘要: {arg_str}\n\n点击“预览”可查看完整参数。"
-            options = [
-                {"label": "允许", "description": ""},
-                {"label": "允许且该轮对话自动允许", "description": ""},
-                {"label": "本次会话允许", "description": ""},
-                {"label": "不允许", "description": ""},
-            ]
-            self._question_floating_widget.show_question(
-                [{"question": question_text, "options": options, "multiple": False}],
-                show_custom_input=False,
+            from app.tools.sandbox import _current_workdir
+
+            workdir = str(_current_workdir())
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] workdir 读取失败: {e}")
+            workdir = ""
+
+        widget = self._permission_floating_widget
+        # 先填充内容再展开容器：见 _on_question_asked 同源 bug 注释
+        widget.setUpdatesEnabled(False)
+        try:
+            widget.show_request(
+                tool_name=tool_name,
+                arguments=arguments or {},
+                source=source,
+                source_text=source_text,
+                risk=risk,
+                workdir=workdir,
+                impact=impact,
                 preview_payload={
                     "tool_name": tool_name,
                     "tool_call_id": tool_call_id,
@@ -20990,20 +21220,23 @@ class OpenAIChatToolWindow(ToolWindow):
                 },
             )
         except Exception as e:
-            self._question_floating_widget.setUpdatesEnabled(True)
+            widget.setUpdatesEnabled(True)
             logger.error(f"[Permission] Approval error: {e}")
             self.backend.deny_tool_permission(tool_call_id)
-            self._pending_permission_tool_call_id = None
+            self._pending_permission_id = None
+            # 缺陷 1：异常分支必须同时恢复输入区与卡片层，
+            # 否则构建审批卡抛异常会导致输入区永久隐藏
+            self._set_bottom_input_visible(True)
             self._restore_after_question_close()
             return
-        self._question_floating_widget.setUpdatesEnabled(True)
-        # 🛠️ 同 _on_question_asked 的 layout cache invalidate，防止第二次权限请求
+        widget.setUpdatesEnabled(True)
+        # 🛠️ 同 _on_question_asked 的 layout cache invalidate，防止第二次审批请求
         # 时 _do_expand 读到过期 sizeHint 导致卡片不显示
-        _ql = self._question_floating_widget.layout()
-        if _ql is not None:
-            _ql.invalidate()
-        self._question_floating_widget.updateGeometry()
-        self._card_manager.show_card("question", self._window_id)
+        _pl = widget.layout()
+        if _pl is not None:
+            _pl.invalidate()
+        widget.updateGeometry()
+        self._card_manager.show_card("permission", self._window_id)
 
         # 🛡️ 同 _on_question_asked 的安全网：延迟重试展开容器（绕过拖拽检查）
         QTimer.singleShot(200, self._bottom_card_container._do_expand)
@@ -23085,6 +23318,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         # 🛡️ 取消正在进行的标题生成任务，防止停止后仍继续重试
         self._topic_summary_cancelled = True
+
+        # 缺陷 3：停止时收起残留的待输入浮动卡（审批/提问等待中被取消，
+        # 否则卡继续显示、输入区继续隐藏，界面卡在失效请求上）
+        self._dismiss_pending_overlay_cards()
 
         # 🛡️ 防止重复点击停止按钮
         if getattr(self, "_stop_deferred_pending", False):

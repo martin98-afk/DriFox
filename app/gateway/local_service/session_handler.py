@@ -549,7 +549,42 @@ class APISessionHandler:
         elif event_name == "permission":
             tool_call_id = args[0] if len(args) > 0 else ""
             if ctx.engine:
-                ctx.engine.approve_tool_permission(tool_call_id, True)
+                # ── gateway 平台侧权限请求：是否自动放行（EU-G2）──
+                # `gateway_auto_approve` 此前是**死键**（定义了无人消费），
+                # 用户改了没效果。现接入：True（默认）= 保持原自动放行；
+                # False = 遵循沙箱判定，deny/confirm 一律拒绝。
+                # 理由：gateway 是无人值守场景（平台侧消息），等不到人工审批，
+                # 故不能像 UI 那样弹窗，只能"按沙箱结论决定放不放"。
+                _auto_approve = True
+                try:
+                    from app.tools.sandbox import SandboxConfig
+
+                    _auto_approve = bool(SandboxConfig.get_instance().get("gateway_auto_approve"))
+                except Exception as e:  # noqa: BLE001 - 读配置失败保持原行为（fail-open）
+                    logger.debug(f"[GatewayLocal] 读取 gateway_auto_approve 失败，按自动放行: {e}")
+
+                if _auto_approve:
+                    ctx.engine.approve_tool_permission(tool_call_id, True)
+                else:
+                    # 遵循沙箱判定：args 结构与 tool_result 同源
+                    # （(tool_call_id, tool_name, arguments)，已由 signature 核对确认）
+                    tool_name = args[1] if len(args) > 1 else ""
+                    arguments = args[2] if len(args) > 2 else {}
+                    verdict = "confirm"  # 取不到信息时保守化（deny 方向）
+                    try:
+                        from app.tools.sandbox import sandbox_check_tool
+
+                        verdict = sandbox_check_tool(tool_name, dict(arguments or {}))
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"[GatewayLocal] 沙箱判定失败，保守拒绝: {e}")
+                    if verdict == "allow":
+                        ctx.engine.approve_tool_permission(tool_call_id, True)
+                    else:
+                        logger.info(
+                            f"[GatewayLocal] gateway_auto_approve=False 且沙箱判定为 {verdict}，"
+                            f"拒绝工具 {tool_name}（id={tool_call_id}）"
+                        )
+                        ctx.engine.deny_tool_permission(tool_call_id)
             return
         elif event_name == "messages_updated":
             messages = args[0] if args else []
