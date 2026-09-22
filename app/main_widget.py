@@ -18875,6 +18875,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._response_start_time = time.time()
         self._set_ai_state("streaming")  # 桌宠：开始回复
         if self._current_assistant_card:
+            # 身份行刷新：占位卡身份在发送同步段解析，早于 PreUserMessage hook
+            # （@助手切换在后台线程）；流式开始时 hook 必已完成，以最新身份重画。
+            # 无变化时 set_identity 不会被调（零成本幂等）。
+            self._current_assistant_card.refresh_identity()
             # 🛡️ 只在尚未开始计时时启动，避免重复调用重置计数器。
             if self._current_assistant_card._elapsed_start_time is None:
                 self._current_assistant_card.start_elapsed_tracking()
