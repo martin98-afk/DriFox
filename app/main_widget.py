@@ -11756,6 +11756,39 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ── 批次卸载占位：消除回收导致的高度塌陷 ────────────────────
 
+    def _batch_slot_gap(self, card_count: int) -> int:
+        """批次内卡片占据的布局槽间距总和（``(n-1) × spacing``）。
+
+        一个含 n 张卡的批次在 ``chat_layout`` 里占 n 个槽、n-1 条间距；
+        卸载后只留 **1 个**占位槽。因此「等高占位」必须把这 n-1 条间距
+        一并补上，否则容器总高在回收瞬间变矮 ``(n-1) × spacing`` ——
+        视口内容整体上移，滚动连续跳变（多卡批次 = 真实会话常态）。
+        """
+        if card_count <= 1:
+            return 0
+        try:
+            spacing = int(self.chat_layout.spacing())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return 0
+        return max(0, spacing) * (card_count - 1)
+
+    def _batch_layout_height(self, cards: list) -> int:
+        """批次在布局中实际占据的高度（卡高之和 + 槽内间距）。
+
+        卸载（建等高占位）与还原（把高度还给新卡）两侧必须用同一口径，
+        否则差额会累积进布局。
+        """
+        alive = [c for c in cards or [] if self._is_widget_alive(c)]
+        if not alive:
+            return 0
+        total = 0
+        for card in alive:
+            try:
+                total += int(card.height())
+            except (RuntimeError, TypeError, ValueError):
+                continue
+        return total + self._batch_slot_gap(len(alive))
+
     def _install_batch_placeholder(self, batch_idx: int, height: int, layout_index: int) -> bool:
         """卸载批次后在原位留一个等高空白占位。
 
@@ -11766,7 +11799,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         Args:
             batch_idx: 被卸载的批次索引
-            height: 被移除卡片的总高度（<=0 时不安装）
+            height: 被移除卡片在布局中占据的高度（卡高 + 槽内间距，见
+                ``_batch_layout_height``；<=0 时不安装）
             layout_index: 被移除的第一张卡片在 chat_layout 中的位置
 
         Returns:
@@ -11842,10 +11876,14 @@ class OpenAIChatToolWindow(ToolWindow):
         重建瞬间骤降；上方批次的锚点补偿据此算出巨大负 `_delta` 把视口拽走，
         表现为「一滚到底就自动弹回上方」，并再触发一轮回收形成自激。
 
+        传入的 ``height`` 是**布局高度**（含槽内间距），而卡片插回布局后间距
+        由 Qt 自动补回，故先扣掉 gap 再分配，否则总高凭空多出
+        ``(n-1) × spacing``。
+
         单卡批次（绝大多数，历史消息按 user 轮分组）：占位就是这张卡的实高，
         直接钉回。
-        多卡批次：占位存的是各卡实高之和，无法逐张还原分配，均摊保证**总高**
-        守恒，余数补给末卡；单卡误差由随后的异步高度上报收敛。
+        多卡批次：无法逐张还原分配，均摊保证**总高**守恒，余数补给末卡；
+        单卡误差由随后的异步高度上报收敛。
 
         只钉「起步高度」，不阻止后续上报改写（与 `_commit_viewer_height`
         的 setFixedHeight 同语义，不会锁死）。
@@ -11855,10 +11893,13 @@ class OpenAIChatToolWindow(ToolWindow):
         alive = [c for c in cards if self._is_widget_alive(c)]
         if not alive:
             return
+        budget = height - self._batch_slot_gap(len(alive))
+        if budget <= 0:
+            return
         if len(alive) == 1:
-            targets = [height]
+            targets = [budget]
         else:
-            share, remainder = divmod(height, len(alive))
+            share, remainder = divmod(budget, len(alive))
             targets = [share] * (len(alive) - 1) + [share + remainder]
         for card, target in zip(alive, targets):
             try:
@@ -12060,6 +12101,11 @@ class OpenAIChatToolWindow(ToolWindow):
                                 recycled_card_ids.add(id(card))
                                 batch_cards.append(card)
                         if batch_cards:
+                            # 🐛 多卡批次必须补槽内间距：n 张卡在布局里占 n 槽
+                            # n-1 条间距，卸载后只留 1 个占位槽 —— 只记卡高之
+                            # 和会让总高少 (n-1)×spacing（等高占位因此不成立，
+                            # 视口内容整体上移 = 滚动跳变）。
+                            batch_height += self._batch_slot_gap(len(batch_cards))
                             # 🐛 等高占位优先：总高度在回收瞬间保持不变，下面的
                             # setValue 补偿就成了空操作 —— 不再与滚底重试链打架。
                             if not self._install_batch_placeholder(batch_idx, batch_height, first_index):
@@ -12095,7 +12141,8 @@ class OpenAIChatToolWindow(ToolWindow):
                                 recycled_card_ids.add(id(card))
                                 batch_cards.append(card)
                         if batch_cards:
-                            # 同上方批次：优先留等高占位，保持容器总高度不变
+                            # 同上方批次：优先留等高占位（含槽内间距），保持容器总高度不变
+                            batch_height += self._batch_slot_gap(len(batch_cards))
                             self._install_batch_placeholder(batch_idx, batch_height, first_index)
                             below_widgets.extend(batch_cards)
                             # [池化] 同上：几何已固定后再摘 WebView
@@ -12270,6 +12317,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 except RuntimeError:
                     pass
                 alive_cards.append(card)
+        # 多卡批次补槽内间距：卸载后只留 1 个占位槽，n-1 条间距必须计入
+        removed_h += self._batch_slot_gap(len(alive_cards))
 
         # ── 第二步：高度已记录，安全摘下 WebView 归还复用池 ──
         detached_ids = {id(c) for c in alive_cards if self._try_detach_card_viewer(c)}

@@ -365,19 +365,28 @@ def test_sse_multiline_data_block_buffered(serializer):
     assert chunks[0].choices[0].delta.content == "你好"
 
 
-
-
 def test_ensure_project_standard_tier_requires_user_project(tmp_path, monkeypatch):
-    """标准档（userDefinedCloudaicompanionProject）无 user_project 时报可操作错误"""
+    """标准档（userDefinedCloudaicompanionProject）账号下无任何项目时报可操作错误"""
 
     class _Stub:
         def refresh(self, refresh_token):
             return {"access_token": "at-test"}
 
+        def list_projects(self, token):
+            return {"projects": []}  # 账号下无可用项目
+
         def codeassist_post(self, path, token, body):
             if path == ":loadCodeAssist":
                 # 用户实测响应形态：无 currentTier/project，allowedTiers 仅标准档
-                return {"allowedTiers": [{"id": "standard-tier", "name": "Gemini Code Assist", "userDefinedCloudaicompanionProject": True}]}
+                return {
+                    "allowedTiers": [
+                        {
+                            "id": "standard-tier",
+                            "name": "Gemini Code Assist",
+                            "userDefinedCloudaicompanionProject": True,
+                        }
+                    ]
+                }
             raise AssertionError(f"不应走到 {path}")
 
     module = _make_provider_module(tmp_path, monkeypatch, _Stub())
@@ -411,6 +420,45 @@ def test_ensure_project_standard_tier_onboards_with_user_project(tmp_path, monke
     load_body = [b for p, b in calls if p == ":loadCodeAssist"][0]
     assert load_body["cloudaicompanionProject"] == "my-project-123"
     assert load_body["metadata"]["duetProject"] == "my-project-123"
+
+
+def test_ensure_project_auto_discovers_project_when_unset(tmp_path, monkeypatch):
+    """标准档未手填 GCP 项目：自动列账号项目逐个尝试，第一个无效换下一个"""
+    calls = []
+
+    class _Stub:
+        def refresh(self, refresh_token):
+            return {"access_token": "at-test"}
+
+        def list_projects(self, token):
+            return {
+                "projects": [
+                    {"projectId": "bad-one", "lifecycleState": "ACTIVE"},
+                    {"projectId": "good-one", "lifecycleState": "ACTIVE"},
+                    {"projectId": "deleted-one", "lifecycleState": "DELETE_REQUESTED"},  # 过滤掉
+                ]
+            }
+
+        def codeassist_post(self, path, token, body):
+            calls.append((path, dict(body)))
+            if path == ":loadCodeAssist":
+                return {"allowedTiers": [{"id": "standard-tier"}]}
+            if path == ":onboardUser":
+                pid = body["cloudaicompanionProject"]
+                if pid == "bad-one":
+                    raise RuntimeError("Code Assist :onboardUser HTTP 400: INVALID_ARGUMENT")
+                return {"done": True, "response": {"cloudaicompanionProject": {"id": pid}}}
+            raise AssertionError(path)
+
+        def codeassist_get_operation(self, name, token):
+            raise AssertionError("onboard 直接 done 不应轮询")
+
+    module = _make_provider_module(tmp_path, monkeypatch, _Stub())
+    monkeypatch.setattr(module.time, "sleep", lambda s: None)
+    assert module.ensure_project("rt-5", "") == "good-one"
+    onboarded = [b["cloudaicompanionProject"] for p, b in calls if p == ":onboardUser"]
+    assert onboarded == ["bad-one", "good-one"]  # 列表顺序逐个尝试
+
 
 # ---------- google_auth login 骨架（server 构造→轮询→超时全链路） ----------
 
