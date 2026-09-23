@@ -430,28 +430,6 @@
             }
         },
         {
-            "name": "system-transports",
-            "description": "DriFox 内置协议传输器：OpenAI chat/completions 请求组装与响应事件归一",
-            "version": "1.0.0",
-            "author": "DriFoxx Team",
-            "license": "MIT",
-            "categories": [],
-            "source": {
-                "type": "git-subdir",
-                "url": "https://github.com/martin98-afk/DriFox",
-                "path": "plugins/system-transports",
-                "ref": "master"
-            },
-            "components": {
-                "transports": true
-            },
-            "homepage": "https://github.com/martin98-afk/DriFox",
-            "icon": {
-                "light": "icon.svg",
-                "dark": "icon_dark.svg"
-            }
-        },
-        {
             "name": "system-serializers",
             "description": "DriFox 内置消息序列化器：OpenAI 消息格式",
             "version": "1.0.0",
@@ -582,6 +560,28 @@
             },
             "components": {
                 "tools": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-transports",
+            "description": "DriFox 内置协议传输器：OpenAI chat/completions 请求组装与响应事件归一（协议形状 → StreamEvent）",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "MIT",
+            "categories": [],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-transports",
+                "ref": "master"
+            },
+            "components": {
+                "transports": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
