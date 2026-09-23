@@ -11493,8 +11493,11 @@ class CodeWebViewer(QWebEngineView):
         menu.addSeparator()
 
         # 复制
+        # ⚠️ 必须 lambda 转接：QAction.triggered 带一个 bool(checked) 实参，
+        # 直连 self._copy_to_clipboard 会把该 bool 灌进首个形参 copy_selection，
+        # 默认值 True 被静默覆盖为 False → 右键永远复制全文（选区形同虚设）。
         copy_action = menu.addAction(get_icon("复制"), "复制")
-        copy_action.triggered.connect(self._copy_to_clipboard)
+        copy_action.triggered.connect(lambda checked=False: self._copy_to_clipboard(copy_selection=True))
 
         # 导出
         export_action = menu.addAction(get_icon("导入"), "导出")
