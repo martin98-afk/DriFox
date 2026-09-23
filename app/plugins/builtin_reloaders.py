@@ -242,6 +242,40 @@ def _reload_hook_policies(ctx: ReloadContext) -> Any:
     return False
 
 
+def _reload_transports(ctx: ReloadContext) -> Any:
+    """transports 分支：同 serializers（精准卸载/重载单插件）"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_transport_watcher
+
+        watcher = ensure_transport_watcher()
+        if watcher is not None:
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] transports 重载失败: {e}")
+    return False
+
+
+def _reload_stream_sinks(ctx: ReloadContext) -> Any:
+    """stream_sinks 分支：同 serializers（精准卸载/重载单插件）"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_stream_sink_watcher
+
+        watcher = ensure_stream_sink_watcher()
+        if watcher is not None:
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] stream_sinks 重载失败: {e}")
+    return False
+
+
 def _reload_storages(ctx: ReloadContext) -> Any:
     """storages 分支：同 model_adapters（精准卸载/重载单插件）"""
     try:
@@ -422,6 +456,8 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "storages": _reload_storages,
         "serializers": _reload_serializers,
         "gateways": _reload_gateways,
+        "transports": _reload_transports,
+        "stream_sinks": _reload_stream_sinks,
         "engines": _reload_engines,
         "context_tiers": _reload_context_policies,
         "budget_resolvers": _reload_context_policies,

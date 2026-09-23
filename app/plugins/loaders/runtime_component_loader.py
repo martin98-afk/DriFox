@@ -537,6 +537,8 @@ _hook_loader: Optional[RuntimeComponentLoader] = None
 _storage_loader: Optional[RuntimeComponentLoader] = None
 _serializer_loader: Optional[RuntimeComponentLoader] = None
 _gateway_loader: Optional[RuntimeComponentLoader] = None
+_transport_loader: Optional[RuntimeComponentLoader] = None
+_stream_sink_loader: Optional[RuntimeComponentLoader] = None
 _engine_loader: Optional[RuntimeComponentLoader] = None
 _context_tier_loader: Optional[RuntimeComponentLoader] = None
 _budget_resolver_loader: Optional[RuntimeComponentLoader] = None
@@ -546,6 +548,8 @@ _hook_watcher: Optional[_RuntimeWatcher] = None
 _storage_watcher: Optional[_RuntimeWatcher] = None
 _serializer_watcher: Optional[_RuntimeWatcher] = None
 _gateway_watcher: Optional[_RuntimeWatcher] = None
+_transport_watcher: Optional[_RuntimeWatcher] = None
+_stream_sink_watcher: Optional[_RuntimeWatcher] = None
 _engine_watcher: Optional[_RuntimeWatcher] = None
 _context_watcher: Optional[_RuntimeWatcher] = None
 _watchers_lock = threading.Lock()
@@ -579,6 +583,18 @@ def _make_serializer_loader() -> RuntimeComponentLoader:
     from app.plugins.registries.serializer_registry import SerializerRegistry
 
     return RuntimeComponentLoader("serializers", SerializerRegistry.get_instance())
+
+
+def _make_transport_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.transport_registry import TransportRegistry
+
+    return RuntimeComponentLoader("transports", TransportRegistry.get_instance())
+
+
+def _make_stream_sink_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.stream_sink_registry import StreamSinkRegistry
+
+    return RuntimeComponentLoader("stream_sinks", StreamSinkRegistry.get_instance())
 
 
 def _make_gateway_loader() -> RuntimeComponentLoader:
@@ -665,6 +681,30 @@ def ensure_serializer_watcher() -> Optional[_RuntimeWatcher]:
         return _serializer_watcher
 
 
+def ensure_transport_watcher() -> Optional[_RuntimeWatcher]:
+    global _transport_loader, _transport_watcher
+    with _watchers_lock:
+        if _transport_watcher is not None:
+            return _transport_watcher
+        _transport_loader = _transport_loader or _make_transport_loader()
+        _transport_watcher = _RuntimeWatcher(_transport_loader, "transports")
+        _transport_watcher.scan_now()
+        _transport_watcher.start()
+        return _transport_watcher
+
+
+def ensure_stream_sink_watcher() -> Optional[_RuntimeWatcher]:
+    global _stream_sink_loader, _stream_sink_watcher
+    with _watchers_lock:
+        if _stream_sink_watcher is not None:
+            return _stream_sink_watcher
+        _stream_sink_loader = _stream_sink_loader or _make_stream_sink_loader()
+        _stream_sink_watcher = _RuntimeWatcher(_stream_sink_loader, "stream_sinks")
+        _stream_sink_watcher.scan_now()
+        _stream_sink_watcher.start()
+        return _stream_sink_watcher
+
+
 def ensure_gateway_watcher() -> Optional[_RuntimeWatcher]:
     global _gateway_loader, _gateway_watcher
     with _watchers_lock:
@@ -719,6 +759,8 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     result["hook_policies"] = _make_hook_loader().scan_roots()
     result["storages"] = _make_storage_loader().scan_roots()
     result["serializers"] = _make_serializer_loader().scan_roots()
+    result["transports"] = _make_transport_loader().scan_roots()
+    result["stream_sinks"] = _make_stream_sink_loader().scan_roots()
     result["gateways"] = _make_gateway_loader().scan_roots()
     result["engines"] = _make_engine_loader().scan_roots()
     result["context_tiers"] = _make_context_tier_loader().scan_roots()

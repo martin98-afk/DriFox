@@ -89,6 +89,8 @@ _COMPONENT_CN = {
     "storages": "会话存储",
     "serializers": "消息序列化",
     "gateways": "通讯网关",
+    "transports": "传输协议",
+    "stream_sinks": "流式接收",
     "engines": "存储引擎",
     "context_tiers": "上下文层",
     "budget_resolvers": "预算解析",
