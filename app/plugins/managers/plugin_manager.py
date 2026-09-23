@@ -434,6 +434,8 @@ class PluginManager:
         "providers": "system-providers",
         "storages": "system-storages",
         "serializers": "system-serializers",
+        "transports": "system-transports",
+        "stream_sinks": "system-stream-sinks",
         "tools": "system-tools",
         "context_tiers": "system-context",
         "budget_resolvers": "system-context",
