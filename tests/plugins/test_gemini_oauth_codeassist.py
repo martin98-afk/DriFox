@@ -276,7 +276,7 @@ def test_adapter_flags_declare_codeassist_protocol(adapter):
 def test_adapter_flags_extra_carries_project_and_transport(adapter, adapter_module, monkeypatch):
     class _FakeProvider:
         @staticmethod
-        def ensure_project(refresh_token):
+        def ensure_project(refresh_token, user_project=""):
             assert refresh_token == "rt-abc"
             return "proj-1"
 
@@ -321,6 +321,7 @@ def test_ensure_project_already_onboarded_uses_load_response(tmp_path, monkeypat
     assert metadata["ideName"] == "IDE_UNSPECIFIED"  # 新版字段集（旧 ideType 会被拒 400）
     assert metadata["platform"] == "WINDOWS_AMD64"
     assert "updateChannel" in metadata
+    assert "duetProject" not in metadata  # 未填 GCP_PROJECT 时不带 duetProject
     assert module._cache_get("rt-1")["project"] == "proj-direct"
 
 
@@ -334,7 +335,7 @@ def test_ensure_project_onboard_flow_lro_and_nested_project(tmp_path, monkeypatc
         def codeassist_post(self, path, token, body):
             calls.append((path, dict(body)))
             if path == ":loadCodeAssist":
-                return {"allowedTiers": [{"id": "standard-gemini"}, {"id": "free-gemini", "isDefault": True}]}
+                return {"allowedTiers": [{"id": "standard-tier"}, {"id": "free-tier", "isDefault": True}]}
             if path == ":onboardUser":
                 return {"done": False, "name": "operations/abc"}
             raise AssertionError(path)
@@ -348,7 +349,7 @@ def test_ensure_project_onboard_flow_lro_and_nested_project(tmp_path, monkeypatc
     assert module.ensure_project("rt-2") == "proj-managed"
 
     onboard = [b for p, b in calls if p == ":onboardUser"][0]
-    assert onboard["tierId"] == "free-gemini"  # allowedTiers isDefault 项
+    assert onboard["tierId"] == "free-tier"  # allowedTiers isDefault 项
     assert "cloudaicompanionProject" not in onboard  # free 档托管项目，带了报 Precondition Failed
     assert ("GET", "operations/abc") in calls  # LRO 轮询
 
@@ -363,6 +364,53 @@ def test_sse_multiline_data_block_buffered(serializer):
     assert len(chunks) == 1
     assert chunks[0].choices[0].delta.content == "你好"
 
+
+
+
+def test_ensure_project_standard_tier_requires_user_project(tmp_path, monkeypatch):
+    """标准档（userDefinedCloudaicompanionProject）无 user_project 时报可操作错误"""
+
+    class _Stub:
+        def refresh(self, refresh_token):
+            return {"access_token": "at-test"}
+
+        def codeassist_post(self, path, token, body):
+            if path == ":loadCodeAssist":
+                # 用户实测响应形态：无 currentTier/project，allowedTiers 仅标准档
+                return {"allowedTiers": [{"id": "standard-tier", "name": "Gemini Code Assist", "userDefinedCloudaicompanionProject": True}]}
+            raise AssertionError(f"不应走到 {path}")
+
+    module = _make_provider_module(tmp_path, monkeypatch, _Stub())
+    with pytest.raises(RuntimeError, match="GCP 项目 ID"):
+        module.ensure_project("rt-3", "")
+
+
+def test_ensure_project_standard_tier_onboards_with_user_project(tmp_path, monkeypatch):
+    calls = []
+
+    class _Stub:
+        def refresh(self, refresh_token):
+            return {"access_token": "at-test"}
+
+        def codeassist_post(self, path, token, body):
+            calls.append((path, dict(body)))
+            if path == ":loadCodeAssist":
+                return {"allowedTiers": [{"id": "standard-tier"}]}
+            if path == ":onboardUser":
+                return {"done": True, "response": {"cloudaicompanionProject": {"id": "proj-user"}}}
+            raise AssertionError(path)
+
+    module = _make_provider_module(tmp_path, monkeypatch, _Stub())
+    assert module.ensure_project("rt-4", "my-project-123") == "proj-user"
+    onboard = [b for p, b in calls if p == ":onboardUser"][0]
+    assert onboard["tierId"] == "legacy-tier"  # 无 isDefault 项 → legacy 回退
+    assert onboard["cloudaicompanionProject"] == "my-project-123"
+    assert onboard["metadata"]["duetProject"] == "my-project-123"
+
+    # user_project 也透传进 loadCodeAssist（提高标准档直接命中概率）
+    load_body = [b for p, b in calls if p == ":loadCodeAssist"][0]
+    assert load_body["cloudaicompanionProject"] == "my-project-123"
+    assert load_body["metadata"]["duetProject"] == "my-project-123"
 
 # ---------- google_auth login 骨架（server 构造→轮询→超时全链路） ----------
 
@@ -431,7 +479,7 @@ def test_generation_config_maps_params(adapter_module):
 def test_build_request_assembles_codeassist_body(adapter_module, registered_serializer, monkeypatch):
     class _FakeProvider:
         @staticmethod
-        def ensure_project(refresh_token):
+        def ensure_project(refresh_token, user_project=""):
             assert refresh_token == "rt-x"
             return "proj-9"
 
