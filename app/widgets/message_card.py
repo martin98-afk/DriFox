@@ -47,6 +47,7 @@ from PyQt5.QtCore import (
     QEasingCurve,
     QElapsedTimer,
     QObject,
+    QRect,
     QSize,
     QThread,
     Qt,
@@ -116,8 +117,9 @@ from app.utils.design_tokens import (
 # 保证 Web 侧（消息正文）与 Qt 侧（控件）使用同一套圆角节奏。
 _BORDER_RADIUS_CSS_VARS = BorderRadius.CSS_VARS
 from app.utils.utils import get_font_family_css, get_icon
-from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
+from app.widgets.custom_title_bar import CustomTabButton, TabHoverSyncHost, TabIndicatorController
 from app.widgets.flow_layout import FlowLayout
+from app.widgets.modules.message_bubble import MessageBubble, ensure_bubble_contrast
 
 # 懒渲染占位 QSS（welcome / assistant 两条路径共用，T35 去重）：
 # 依赖 scale_font_size / get_font_family_css，故在 import 之后求值。
@@ -12225,8 +12227,18 @@ class CodeWebViewer(QWebEngineView):
     def wheelEvent(self, event: QWheelEvent):
         # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部。
         # 转发外层滚动区走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
+        # ⚠️ 宿主层级可变（曾直挂卡片，2026-09-23 起移入 assistant 气泡），
+        # 不能写死 parent().parent() 层数 —— 层数变了 _parent 取不到，
+        # AttributeError 被吞后滚轮静默失效。沿父链找持 _parent 的 MessageCard。
         try:
-            scroll_area = self.parent().parent()._parent.chat_scroll_area
+            node = self.parent()
+            card = None
+            while node is not None:
+                if hasattr(node, "_parent"):
+                    card = node
+                    break
+                node = node.parent()
+            scroll_area = card._parent.chat_scroll_area if card is not None else None
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
                 if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
@@ -13204,7 +13216,8 @@ class MessageCard(SimpleCardWidget):
         self._grad_main, self._grad_inner = (QLinearGradient(0, 0, 1, 1) for _ in range(2))
         self._clip_inner = self._clip_border = QPainterPath()
         self._clip_inner_border = self._clip_border_region = QPainterPath()
-        self._clip_w = self._clip_h = -1
+        # 流式视觉绘制区域缓存（x/y/w/h）：assistant 跟随气泡矩形，其余整卡
+        self._clip_x = self._clip_y = self._clip_w = self._clip_h = -1
         self._height_anim = QVariantAnimation(self)
         # 插值时长占位（见下：随即被 setDuration(0) 覆盖，实际长度由每轮动画
         # 自行设置 —— 结束态收敛用 FINISH_HEIGHT_ANIM_MS，其余为 0 禁用插值）
@@ -13371,6 +13384,11 @@ class MessageCard(SimpleCardWidget):
                 r, g, b, a = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
                 new_a = max(0, min(255, int(a * _win_opacity)))
                 theme["bg"] = f"rgba({r}, {g}, {b}, {new_a})"
+
+        # 气泡可读性保障（双策略）：assistant 贴背景极简（低饱和微偏移），
+        # user 保留主题色相、明度过近时拉开。welcome 不参与。
+        if role in ("user", "assistant"):
+            theme["bg"] = ensure_bubble_contrast(theme["bg"], Colors.CONTENT_BG, role)
 
         if error:
             # 检测深浅色模式，选择合适的错误配色
@@ -14061,7 +14079,7 @@ class MessageCard(SimpleCardWidget):
         选中前景色 14% 底 + 文字提亮加粗。FlowLayout 负责自动折行，其
         minimumWidth 只取最宽单个子项，不会把卡片撑宽。
         """
-        host = QWidget(self)
+        host = TabHoverSyncHost(self)
         self._welcome_tab_host = host
         host.setStyleSheet("background: transparent;")
         # 高度策略：FlowLayout 的 heightForWidth 已是真实折行高度，但 Qt5 在
@@ -14627,7 +14645,9 @@ class MessageCard(SimpleCardWidget):
         # 不一致时，多出的空间全落在气泡上 → 气泡与下方按钮栏脱节、
         # 图片条看起来"漏出"气泡（2026-09-16 用户反馈的三连问题）。
         # Maximum = 取 sizeHint 上限，不额外膨胀。
-        self._user_bubble = QWidget(self)
+        # 自绘气泡（圆角 + 右上引脚指向头像）：背景由 paintEvent 画，不走样式表，
+        # 避免样式表 QWidget 选择器污染后代控件（viewer/正文视图）
+        self._user_bubble = MessageBubble("right", self)
         self._user_bubble.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         bubble_lay = QVBoxLayout(self._user_bubble)
         bubble_lay.setContentsMargins(0, 0, 0, 0)
@@ -14806,7 +14826,8 @@ class MessageCard(SimpleCardWidget):
 
     def _setup_ui(self):
         main = QVBoxLayout(self)
-        main.setContentsMargins(4, 4, 4, 4)
+        # 上下 2（2026-09-23 收敛消息间距：原 4 配合卡片间 spacing 8 视觉空隙过大）
+        main.setContentsMargins(4, 2, 4, 2)
         main.setSpacing(4 if self.role != "user" else 0)  # user：正文与时间行零间隙
 
         if self.role == "user":
@@ -14838,7 +14859,19 @@ class MessageCard(SimpleCardWidget):
             placeholder.setStyleSheet(_PLACEHOLDER_QSS)
             placeholder.setAlignment(Qt.AlignCenter)
             self._viewer_layout.addWidget(placeholder)
-            main.addWidget(self._viewer_container)
+            if self.role == "assistant":
+                # 助手气泡：全宽底色块 + 左上引脚指向头像（与用户气泡镜像，2026-09-23）。
+                # 只包 _viewer_container（正文/工具区都在 WebEngine 内），
+                # 身份行与 footer 留在气泡外。
+                self._assistant_bubble = MessageBubble("left", self)
+                _b_lay = QVBoxLayout(self._assistant_bubble)
+                _b_lay.setContentsMargins(0, 0, 0, 0)
+                _b_lay.setSpacing(0)
+                self._viewer_container.setParent(self._assistant_bubble)
+                _b_lay.addWidget(self._viewer_container)
+                main.addWidget(self._assistant_bubble)
+            else:
+                main.addWidget(self._viewer_container)
             self._lazy_rendered = False
             self.viewer = None  # 懒加载，延后创建
             self.resize_placeholder = QFrame(self)
@@ -15001,6 +15034,14 @@ class MessageCard(SimpleCardWidget):
         # 局部重绘：动画帧只标脏底部光带这一条窄带（不碰描边所在的卡片边缘），
         # 免得每帧都把整卡交给 Qt 重绘、和流式内容渲染抢主线程。重试中状态栏
         # 位置不确定，退回整卡重绘。
+        bubble = self._assistant_bubble if (self.role == "assistant" and getattr(self, "_assistant_bubble", None) is not None) else None
+        if bubble is not None:
+            # 气泡自绘流式帧：推送三角波相位与 tint，气泡内部幂等判定 + 标脏重绘
+            phase = (self._anim_t_ms / _STREAM_BAND_SWEEP_MS) % 2.0
+            tri = phase if phase < 1.0 else 2.0 - phase
+            tint_s = _STREAM_TINT_RETRY if (self._retrying or self.error) else self._theme["accent"]
+            bubble.set_stream_frame(tri, QColor(tint_s))
+            return
         if self._retrying:
             self.update()
         else:
@@ -15011,11 +15052,11 @@ class MessageCard(SimpleCardWidget):
         # [PERF] 幂等短路：setStyleSheet 会触发 Qt 样式重新 polish + 子控件 relayout，
         # 而流式结束时 stop_streaming_anim() 会再调一次 —— 与最终全量渲染撞在
         # 同一拍，是结束态卡顿的一分子。参数未变时直接跳过。
-        _style_key = (self.role, self.error, border, bg, self._base_bg, self._base_border)
+        _style_key = (self.role, self.error, border, bg, self._base_bg, self._base_border, Colors.BORDER)
         if getattr(self, "_applied_card_style_key", None) == _style_key:
             return
         self._applied_card_style_key = _style_key
-        # user 简洁气泡：12px 圆角 + 无边框（仅轻量背景色）；错误态仍显示红色边框
+        # user 简洁气泡：底色/圆角/引脚由 MessageBubble 自绘（错误态仍显示红色边框）
         # 背景只画在气泡容器上：身份行与底部操作行在容器外，不受气泡底色影响
         if self.role == "user" and not self.error:
             self.setStyleSheet(
@@ -15028,18 +15069,12 @@ class MessageCard(SimpleCardWidget):
             )
             bubble = getattr(self, "_user_bubble", None)
             if bubble is not None:
-                bubble.setStyleSheet(
-                    f"""
-                    QWidget {{
-                        background-color: {bg or self._base_bg};
-                        border: none;
-                        border-radius: 12px;
-                    }}
-                    """
-                )
+                bubble.set_bubble_color(bg or self._base_bg)
+                bubble.set_border_color(Colors.BORDER)
             return
         if self.role == "assistant" and not self.error:
-            # 全减模式：assistant 纯文字流（无边框无背景）；
+            # 助手气泡：全宽底色块 + 左上引脚（2026-09-23，替代原「全减」透明样式）；
+            # 卡片自身保持透明（身份行/footer 不吃底色），
             # 错误/重试/上下文丢失态仍走下方原逻辑（红框提示）
             self.setStyleSheet(
                 """
@@ -15049,6 +15084,10 @@ class MessageCard(SimpleCardWidget):
                 }
                 """
             )
+            bubble = getattr(self, "_assistant_bubble", None)
+            if bubble is not None:
+                bubble.set_bubble_color(bg or self._base_bg)
+                bubble.set_border_color(Colors.BORDER)
             return
         self.setStyleSheet(
             f"""
@@ -15059,9 +15098,18 @@ class MessageCard(SimpleCardWidget):
             }}
             """
         )
+        # 错误/重试态：气泡底色同步为主题色（红系），避免旧底色与红框冲突
+        for attr in ("_user_bubble", "_assistant_bubble"):
+            b = getattr(self, attr, None)
+            if b is not None:
+                b.set_bubble_color(bg or self._base_bg)
+                b.set_border_color(Colors.BORDER)
 
     def stop_streaming_anim(self):
         self._streaming = False
+        bubble = getattr(self, "_assistant_bubble", None)
+        if bubble is not None:
+            bubble.set_stream_frame(None, None)  # 气泡退出流式态（清描边/光带）
         # 标记本轮已走过流式（含用户中断/出错中断）：viewer 创建或虚拟滚动
         # 回收重建时据此保持工具区展开，不再被判为"历史"而折叠。
         self._streaming_finished = True
@@ -15322,6 +15370,19 @@ class MessageCard(SimpleCardWidget):
         # 同步宽度
         self.sync_width(force=True)
 
+    def _stream_region(self) -> QRect:
+        """流式视觉（漫射/描边/光带）的绘制区域。
+
+        assistant 气泡化（2026-09-23）后视觉主体是气泡，流式效果必须跟随气泡
+        矩形；继续画整卡会在气泡外浮出一圈与气泡无关的「外边框」。
+        其余角色仍为整卡。
+        """
+        if self.role == "assistant":
+            bubble = getattr(self, "_assistant_bubble", None)
+            if bubble is not None:
+                return bubble.geometry()
+        return QRect(0, 0, self.width(), self.height())
+
     def paintEvent(self, event):
         # ⚠️ SimpleCardWidget.paintEvent 会无条件画一圈描边：
         #   painter.setPen(QColor(0,0,0,12 或 48)) + drawRoundedRect(...)
@@ -15347,6 +15408,12 @@ class MessageCard(SimpleCardWidget):
             painter.end()
             return
 
+        if self.role == "assistant" and getattr(self, "_assistant_bubble", None) is not None:
+            # 流式视觉（描边/光带）改由气泡自绘（画在其底色之上）：卡片层画会被
+            # 气泡不透明底色盖住，且视觉主体应是气泡而非卡片外缘（2026-09-23）。
+            painter.end()
+            return
+
         # ══════════════════════════════════════════════════════
         #  流式态视觉：静态单色细描边 + 底部往返光块
         # ══════════════════════════════════════════════════════
@@ -15364,27 +15431,31 @@ class MessageCard(SimpleCardWidget):
             tint = QColor(self._theme["accent"])
 
         # ── 层1：内壁漫射（极柔和的边缘渗光）──
-        # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath
-        if self._clip_w != w or self._clip_h != h:
-            self._clip_w, self._clip_h = w, h
+        # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath。
+        # 区域 = _stream_region()（assistant 为气泡矩形），气泡高度随流式上报变化，
+        # 四元组任一变化即重建。
+        region = self._stream_region()
+        rx, ry, rw, rh = region.x(), region.y(), region.width(), region.height()
+        if (self._clip_x, self._clip_y, self._clip_w, self._clip_h) != (rx, ry, rw, rh):
+            self._clip_x, self._clip_y, self._clip_w, self._clip_h = rx, ry, rw, rh
             self._clip_inner = QPainterPath()
-            self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
+            self._clip_inner.addRoundedRect(rx + 3, ry + 3, rw - 6, rh - 6, radius - 2, radius - 2)
             self._clip_border = QPainterPath()
-            self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_border.addRoundedRect(rx, ry, rw, rh, radius + 1, radius + 1)
             self._clip_inner_border = QPainterPath()
-            self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
+            self._clip_inner_border.addRoundedRect(rx + 2, ry + 2, rw - 4, rh - 4, radius - 1, radius - 1)
             self._clip_border_region = self._clip_border - self._clip_inner_border
         painter.setClipPath(self._clip_inner)
         inner_gradient = self._grad_inner
-        inner_gradient.setStart(0, 0)
-        inner_gradient.setFinalStop(w, h)
+        inner_gradient.setStart(rx, ry)
+        inner_gradient.setFinalStop(rx + rw, ry + rh)
         _c0 = QColor(tint)
         _c0.setAlpha(11)
         _c1 = QColor(tint)
         _c1.setAlpha(4)
         inner_gradient.setColorAt(0.0, _c0)
         inner_gradient.setColorAt(1.0, _c1)
-        painter.fillRect(0, 0, w, h, inner_gradient)
+        painter.fillRect(rx, ry, rw, rh, inner_gradient)
 
         # ── 层2：静态细描边（1.5px 单色，替代原 4px 彩虹循环 + 7px 外发光）──
         # 静态层每帧照画，不做「局部重绘就跳过」的优化：动画帧的脏区是底部一条
@@ -15398,7 +15469,7 @@ class MessageCard(SimpleCardWidget):
         border_pen.setWidthF(1.5)
         painter.setPen(border_pen)
         painter.setBrush(QBrush(Qt.NoBrush))
-        painter.drawRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+        painter.drawRoundedRect(rx, ry, rw, rh, radius + 1, radius + 1)
 
         # ── 层3：底部往返光块（唯一的运动元素）──
         painter.setClipPath(self._clip_inner_border)
@@ -15410,11 +15481,11 @@ class MessageCard(SimpleCardWidget):
         # 从「最右」瞬跳「最左」（约每 9s 一次跳变），是跳变感的直接来源。
         _t = (self._anim_t_ms / _STREAM_BAND_SWEEP_MS) % 2.0
         _tri = _t if _t < 1.0 else 2.0 - _t
-        band_cx = (0.5 * band_ratio + travel_ratio * _tri) * w
-        band_w = band_ratio * w
-        band_x = int(band_cx - 0.5 * band_w)
+        band_cx = (0.5 * band_ratio + travel_ratio * _tri) * rw
+        band_w = band_ratio * rw
+        band_x = rx + int(band_cx - 0.5 * band_w)
         band_w = int(band_w)
-        band_y = h - _STREAM_BAND_BOTTOM - band_h
+        band_y = ry + rh - _STREAM_BAND_BOTTOM - band_h
         # 复用模板渐变：stop 位置固定（0/0.5/1），仅改坐标与颜色，不每帧 new
         band_gradient = self._grad_main
         band_gradient.setStart(band_x, 0)
