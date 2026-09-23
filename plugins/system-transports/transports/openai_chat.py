@@ -49,7 +49,18 @@ class OpenAIChatTransport:
     """chat/completions 传输器（请求组装 + SDK 流 + 事件归一）"""
 
     id = "openai_chat"
+    # 默认支持流式；模型级例外由 supports_streaming_for 按 llm_config 判定
     supports_streaming = True
+
+    def supports_streaming_for(self, llm_config: Dict[str, Any]) -> bool:
+        """模型级流式能力：o1/o3 系列（非 gpt-5+）的 chat/completions 不接受 stream 参数。
+
+        worker 经 hasattr 探测本方法（可选能力），未实现时用类属性 supports_streaming。
+        """
+        model = str((llm_config or {}).get("模型名称", "") or "")
+        if model.startswith("o1") or model.startswith("o3"):
+            return False
+        return True
 
     def __init__(self, client_factory=None) -> None:
         """client_factory：无参回调，返回复用的 OpenAI SDK 客户端（每次请求调用）。
@@ -182,7 +193,8 @@ class OpenAIChatTransport:
         req_kwargs: Dict[str, Any] = {
             "model": kwargs["model"],
             "messages": api_messages,
-            "stream": bool(self.supports_streaming),
+            # 模型级流式判定（o1/o3 不接受 stream）；worker 也会同步 stream=False
+            "stream": self.supports_streaming_for(llm_config),
         }
         if kwargs["extra_body"]:
             req_kwargs["extra_body"] = kwargs["extra_body"]

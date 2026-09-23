@@ -1760,6 +1760,47 @@ class OpenAIChatWorker(QThread):
         self._chat_transport = transport
         return transport
 
+    def _transport_supports_streaming(self, transport) -> bool:
+        """读 transport 的流式能力声明（不再按模型名硬编码）。
+
+        优先调用 supports_streaming_for(llm_config)（模型级判定，可选能力），
+        回退类属性 supports_streaming；都缺失时默认 True（保守：SDK 默认流式）。
+        """
+        if transport is None:
+            return True
+        probe = getattr(transport, "supports_streaming_for", None)
+        if callable(probe):
+            try:
+                return bool(probe(self.llm_config))
+            except Exception as exc:
+                logger.warning(f"[Transport] supports_streaming_for 异常，按流式处理: {exc!r}")
+                return True
+        return bool(getattr(transport, "supports_streaming", True))
+
+    def _verify_sink_pairing(self, transport) -> None:
+        """校验 transport 声明的 sink_id 已注册（④：防静默用错 sink 解析响应）。
+
+        transport 声明了 sink_id 却未注册对应 sink 时，resolve 会静默回退默认 sink
+        （openai_chat）——若该协议响应形态不同，解析会错得很隐蔽。此处提前告警。
+        未声明 sink_id 时正常（走默认配对），不告警。
+        """
+        if transport is None:
+            return
+        sink_id = getattr(transport, "sink_id", None)
+        if not sink_id:
+            return
+        try:
+            from app.plugins.registries.stream_sink_registry import StreamSinkRegistry
+
+            registered = StreamSinkRegistry.get_instance().sinks()
+            if sink_id not in registered:
+                logger.warning(
+                    f"[Transport] transport {getattr(transport, 'id', '?')!r} 声明的 sink_id={sink_id!r} 未注册，"
+                    f"将回退默认 sink 解析响应——若协议形态不同会解析错误，请确认配套 sink 插件已启用"
+                )
+        except Exception as exc:
+            logger.debug(f"[Transport] sink 配对校验跳过: {exc!r}")
+
     def _get_stream_sink(self, transport=None):
         """解析流式接收器：transport 可声明 sink_id，缺省走注册表默认实现。"""
         override = self.__dict__.get("_stream_sink_override")
@@ -3291,11 +3332,9 @@ class OpenAIChatWorker(QThread):
 
         # 消息序列化（协议无关，序列化器插件负责形态）
         # 请求参数组装已下沉至 transport 插件（system-transports/openai_chat.py）；
-        # worker 只保留自愈逻辑需要的消息列表引用与 o1 非流式判定
+        # worker 只保留自愈逻辑需要的消息列表引用与流式能力判定
         api_messages = sanitized
         model = str(self.llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
-        if model.startswith("o1") or model.startswith("o3"):
-            self.stream = False
         # 认证头（bce / 服务商伪装头）：由 worker 统一算出后交给 transport/原生通道
         auth_headers = self._build_auth_headers()
 
@@ -3303,11 +3342,22 @@ class OpenAIChatWorker(QThread):
         # GPT-5.x 系列走 Responses API（思考内容只在 /v1/responses 返回）
         use_responses = self._use_responses_api()
         # 协议分派（三层优先级）：
-        # 1) adapter 声明的 transport（第三协议，flags.extra["transport"]）
+        # 1) adapter 声明的 transport（插件协议，flags.extra["transport"]）
         # 2) responses 原生通道（未插件化，二期）
         # 3) chat/completions → TransportRegistry 默认 transport + 对应 sink
         adapter_flags = self._adapter_flags()
         adapter_transport = (adapter_flags.extra or {}).get("transport")
+        # 流式能力由 transport 声明（不再按模型名硬编码）；responses 通道固定流式
+        if use_responses:
+            active_transport = None  # 原生通道不经 transport，无需解析
+        elif adapter_transport is not None:
+            active_transport = adapter_transport
+        else:
+            active_transport = self._get_chat_transport()
+        if active_transport is not None and not self._transport_supports_streaming(active_transport):
+            self.stream = False
+        # sink 配对校验：transport 声明的 sink_id 缺失时提前报错（否则静默用错 sink 解析响应）
+        self._verify_sink_pairing(active_transport)
         if use_responses:
             logger.info(f"[ResponsesAPI] model={model} 使用 Responses API（chat/completions 不透传 reasoning）")
 
@@ -3324,34 +3374,24 @@ class OpenAIChatWorker(QThread):
                 logger.info(f"[API] 检测到用户插话，放弃剩余重试（attempt={attempt}）")
                 return self._abort_retry_for_interject()
             try:
-                if adapter_transport is not None:
-                    # 第三协议：请求发出与响应归一全在 transport 插件内，
-                    # 产出 StreamEvent 流由 sink 消费（下方统一处理）
-                    self.stream = True
+                if not use_responses:
+                    # 插件协议 / chat-completions：请求发出与响应归一全在 transport 内，
+                    # 产出 StreamEvent 流由 sink 消费（下方统一处理）。
+                    # stream 已由 _transport_supports_streaming 决定，此处不再硬设
                     self._llm_req_t0 = time.monotonic()
-                    response = adapter_transport.create_stream(
+                    response = active_transport.create_stream(
                         self.llm_config,
                         messages,
                         tools=self.tools,
                         auth_headers=auth_headers,
                         api_messages=api_messages,
                     )
-                elif use_responses:
+                else:
                     # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
                     self.stream = True
                     self._llm_req_t0 = time.monotonic()
-                    # 原生 responses 通道：按需取 HTTP 客户端（chat/transport 通道不经此）
+                    # 原生 responses 通道：按需取 HTTP 客户端（transport 通道不经此）
                     response = self._get_http_client().responses.create(**self._build_responses_kwargs(messages))
-                else:
-                    # chat/completions：请求组装与响应归一均下沉至 transport 插件
-                    self._llm_req_t0 = time.monotonic()
-                    response = self._get_chat_transport().create_stream(
-                        self.llm_config,
-                        messages,
-                        tools=self.tools,
-                        auth_headers=auth_headers,
-                        api_messages=api_messages,
-                    )
                 if attempt > 0:
                     self.retry_resolved.emit()
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
@@ -3359,10 +3399,10 @@ class OpenAIChatWorker(QThread):
                 try:
                     if use_responses:
                         return self._process_responses_stream(response)
-                    # chat/completions 与第三协议统一走 sink 消费 StreamEvent
+                    # 插件协议与 chat/completions 统一走 sink 消费 StreamEvent
                     return self._consume_stream_via_sink(
                         response,
-                        transport=adapter_transport,
+                        transport=active_transport,
                         # __dict__.get 而非 getattr：未初始化 PyQt 对象（测试 __new__ 构造）上
                         # getattr 会抛 RuntimeError: super-class __init__() was never called
                         token_update_callback=self.__dict__.get("_token_update_callback"),

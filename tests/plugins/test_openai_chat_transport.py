@@ -203,7 +203,9 @@ def test_transport_satisfies_contract(transport):
     assert transport.id == "openai_chat"
     assert transport.supports_streaming is True
 
+
 # ---------- 13. token 上限钳制注入（回归：漏注导致 400 错误码 1210） ----------
+
 
 def test_cap_max_tokens_injected_applies_to_request(transport):
     """回归：worker 须注入 set_cap_max_tokens，否则用户配的极大值直接透传被上游拒。
@@ -212,8 +214,9 @@ def test_cap_max_tokens_injected_applies_to_request(transport):
     """
     transport.set_cap_max_tokens(lambda model, req: min(int(req), 65536))
     try:
-        out = transport.build_request_kwargs({"模型名称": "MiniMax-M2", "最大Token": 200000},
-                                             cap_max_tokens=transport._cap_max_tokens)
+        out = transport.build_request_kwargs(
+            {"模型名称": "MiniMax-M2", "最大Token": 200000}, cap_max_tokens=transport._cap_max_tokens
+        )
         assert out["extra_body"]["max_tokens"] == 65536
     finally:
         transport.set_cap_max_tokens(None)
@@ -221,6 +224,48 @@ def test_cap_max_tokens_injected_applies_to_request(transport):
 
 def test_cap_max_tokens_none_passes_through(transport):
     """未注入时不钳制（独立使用场景；worker 路径必须注入）"""
-    out = transport.build_request_kwargs({"模型名称": "m", "最大Token": 200000},
-                                         cap_max_tokens=transport._cap_max_tokens)
+    out = transport.build_request_kwargs(
+        {"模型名称": "m", "最大Token": 200000}, cap_max_tokens=transport._cap_max_tokens
+    )
     assert out["extra_body"]["max_tokens"] == 200000
+
+
+# ---------- 14. 模型级流式能力声明（worker 消费，替代模型名硬编码） ----------
+
+
+def test_supports_streaming_for_o1_family_returns_false(transport):
+    """o1/o3 的 chat/completions 不接受 stream 参数 → 声明 False"""
+    assert transport.supports_streaming_for({"模型名称": "o1-preview"}) is False
+    assert transport.supports_streaming_for({"模型名称": "o3-mini"}) is False
+
+
+def test_supports_streaming_for_normal_models_returns_true(transport):
+    assert transport.supports_streaming_for({"模型名称": "gpt-4o"}) is True
+    assert transport.supports_streaming_for({"模型名称": "gpt-5.2"}) is True
+    assert transport.supports_streaming_for({}) is True
+
+
+def test_create_stream_uses_model_level_streaming_flag(transport, monkeypatch):
+    """create_stream 的 stream 参数随模型变（o1 场景 False）"""
+    captured = {}
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            captured.update(kwargs)
+            return iter(())
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    transport.set_client_factory(lambda: _Client())
+    try:
+        transport.create_stream({"模型名称": "o1-preview"}, [{"role": "user", "content": "x"}])
+        assert captured["stream"] is False
+        transport.create_stream({"模型名称": "gpt-4o"}, [{"role": "user", "content": "x"}])
+        assert captured["stream"] is True
+    finally:
+        transport.set_client_factory(None)
