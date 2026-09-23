@@ -22,7 +22,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget  # noqa: E402
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry  # noqa: E402
 from app.widgets import message_card as mc  # noqa: E402
@@ -346,3 +346,104 @@ class TestWelcomeTabBar:
         finally:
             card.close()
             card.deleteLater()
+
+
+# ─── 4. hover 残留回归（TabHoverSyncHost 兜底 + _start 停在途动画）─────────
+
+
+class TestWelcomeTabHoverResidue:
+    """2026-09-23 用户反馈「底部 tab 残留 hover」双根因：
+
+    1. ``CustomTabButton._start`` 快速路径（current≈target）只 return 不
+       stop，enter 后不足一帧就 leave 时在途动画独自跑完把 ``_hover_t``
+       推到 1（快速扫过一排 tab 必现）；
+    2. 子按钮 leaveEvent 在布局重排 / 抢焦点等场景不保证到达（顶栏
+       CustomTitleBar._clear_tab_hover 同源教训），此前无宿主层兜底。
+    """
+
+    def test_host_is_hover_sync_host(self, _qt_app):
+        """tab 宿主必须是 TabHoverSyncHost（带 Leave 清理 + 布局重算兜底）"""
+        from app.widgets.custom_title_bar import TabHoverSyncHost
+
+        card = _make_card(_qt_app)
+        try:
+            assert isinstance(card._welcome_tab_host, TabHoverSyncHost)
+        finally:
+            card.deleteLater()
+
+    def test_inflight_hover_animation_stopped_on_revert(self, _qt_app):
+        """根因 1 回归：置 hover 后一帧内撤销，在途动画必须被停掉
+
+        旧行为：_start 快速路径只 return，0→1 动画继续跑完，_hover_t 残留 1.0。
+        """
+        import time
+
+        from app.widgets.custom_title_bar import CustomTabButton, TabHoverSyncHost
+
+        holder = QWidget()  # 模块级持引用防 GC（项目坑：QWidget 无主析构崩溃）
+        host = TabHoverSyncHost(holder)
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        btn = CustomTabButton("t0", "会话", host, font_size=12)
+        lay.addWidget(btn)
+        holder._ref_btn = btn
+        holder._ref_host = host
+        host.show()
+        _qt_app.processEvents()
+
+        btn.set_hover(True)  # 动画启动，尚未推进首帧
+        btn.set_hover(False)  # 一帧内撤销
+        for _ in range(40):
+            _qt_app.processEvents()
+            time.sleep(0.01)
+        _qt_app.processEvents()
+        try:
+            assert btn._hover_t < 0.001, f"在途动画未被停掉，_hover_t={btn._hover_t}"
+        finally:
+            holder.deleteLater()
+
+    def test_leave_event_clears_all_hover(self, _qt_app):
+        """根因 2 回归：Leave 事件兜底清空全部按钮 hover"""
+        from PyQt5.QtCore import QEvent
+
+        from app.widgets.custom_title_bar import CustomTabButton, TabHoverSyncHost
+
+        holder = QWidget()
+        host = TabHoverSyncHost(holder)
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        btns = [CustomTabButton(f"t{i}", f"标签{i}", host, font_size=12) for i in range(3)]
+        for b in btns:
+            lay.addWidget(b)
+        holder._ref_btns = btns
+        holder._ref_host = host
+        host.show()
+        _qt_app.processEvents()
+        for b in btns:
+            b.set_hover(True)
+        _qt_app.sendEvent(host, QEvent(QEvent.Leave))
+        try:
+            assert all(not b._hovered for b in btns)
+        finally:
+            holder.deleteLater()
+
+    def test_layout_change_reschedules_hover_sync(self, _qt_app):
+        """布局重排（Resize/LayoutRequest）后延迟一拍重算 hover"""
+        from PyQt5.QtCore import QEvent
+
+        from app.widgets.custom_title_bar import TabHoverSyncHost
+
+        holder = QWidget()
+        host = TabHoverSyncHost(holder)
+        holder._ref_host = host
+        host.show()
+        _qt_app.processEvents()
+        calls = []
+        host.sync_tab_hover = lambda: calls.append(1)  # 记录重算调用
+        _qt_app.sendEvent(host, QEvent(QEvent.Resize))
+        assert host._hover_resync_pending, "Resize 后未登记重算"
+        _qt_app.processEvents()
+        try:
+            assert calls and not host._hover_resync_pending, "重算未被事件循环消费"
+        finally:
+            holder.deleteLater()

@@ -117,7 +117,7 @@ from app.utils.design_tokens import (
 # 保证 Web 侧（消息正文）与 Qt 侧（控件）使用同一套圆角节奏。
 _BORDER_RADIUS_CSS_VARS = BorderRadius.CSS_VARS
 from app.utils.utils import get_font_family_css, get_icon
-from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
+from app.widgets.custom_title_bar import CustomTabButton, TabHoverSyncHost, TabIndicatorController
 from app.widgets.flow_layout import FlowLayout
 from app.widgets.modules.message_bubble import MessageBubble, ensure_bubble_contrast
 
@@ -14079,7 +14079,7 @@ class MessageCard(SimpleCardWidget):
         选中前景色 14% 底 + 文字提亮加粗。FlowLayout 负责自动折行，其
         minimumWidth 只取最宽单个子项，不会把卡片撑宽。
         """
-        host = QWidget(self)
+        host = TabHoverSyncHost(self)
         self._welcome_tab_host = host
         host.setStyleSheet("background: transparent;")
         # 高度策略：FlowLayout 的 heightForWidth 已是真实折行高度，但 Qt5 在

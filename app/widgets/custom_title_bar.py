@@ -408,10 +408,15 @@ class CustomTabButton(QWidget):
         系统「减少动态效果」时直接落终值：hover 仍要给出状态反馈（颜色变化
         必须可见），只是去掉过渡过程；靠 ``setValue`` 走同一条 valueChanged
         通路，调用方无需感知两条路径的差异。
+
+        ★ 快速路径（current≈target）也必须先 ``anim.stop()``：enter 后不足
+        一帧就 leave 时，``_hover_t`` 缓存还停在 0，但上一发 0→1 动画仍在
+        跑——只 return 不 stop，旧动画会独自跑完把进度推到 1，hover 底色
+        永久残留（快速扫过一排 tab 必现，是残留类问题的直接根因）。
         """
+        anim.stop()
         if abs(current - target) < 0.001:
             return
-        anim.stop()
         if not Animations.motion_enabled():
             anim.setValue(target)
             return
@@ -567,6 +572,72 @@ class CustomTabButton(QWidget):
             f"color: rgb({r}, {g}, {b}); background: transparent;"
             f" {get_font_family_css()} {font_size_css(self._font_size)}; font-weight: {weight};"
         )
+
+
+class TabHoverSyncHost(QWidget):
+    """tab 条宿主：兜底清理子按钮 hover 残留（CustomTabButton 列表容器）
+
+    子按钮的 leaveEvent 在以下场景不保证到达（CustomTitleBar._clear_tab_hover
+    同源教训）：
+    - 拖到屏幕边缘触发分屏 / 系统菜单 / 被其它窗口抢走焦点
+    - 布局重排（resize 折行 / 字重变化 invalidate）平移按钮后，鼠标不动则
+      Qt 不重派发 enter/leave，旧按钮 hover 卡住、新命中按钮不亮
+
+    宿主层兜底：Leave 清空全部 hover；Resize/LayoutRequest 延迟一拍按全局
+    鼠标位置命中测试重算（延迟是必要的：此刻几何还没收敛）。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._hover_resync_pending = False
+
+    def _tab_buttons(self) -> list:
+        """宿主下的全部 tab 按钮（滑动胶囊是纯 QWidget 不在 CustomTabButton
+        之列，天然被 findChildren 类型过滤）"""
+        try:
+            return self.findChildren(CustomTabButton)
+        except RuntimeError:
+            return []
+
+    def clear_tab_hover(self) -> None:
+        """清空全部子按钮 hover"""
+        for btn in self._tab_buttons():
+            try:
+                btn.set_hover(False)
+            except RuntimeError:
+                continue
+
+    def sync_tab_hover(self) -> None:
+        """按全局光标位置命中测试，重算所有子按钮 hover"""
+        pos = QCursor.pos()
+        for btn in self._tab_buttons():
+            try:
+                btn.set_hover(btn.isVisible() and btn.rect().contains(btn.mapFromGlobal(pos)))
+            except RuntimeError:
+                continue
+
+    def _schedule_hover_sync(self) -> None:
+        """合并同一事件循环内的多次重算请求（resize/折行常成串到达）"""
+        if self._hover_resync_pending:
+            return
+        self._hover_resync_pending = True
+        QTimer.singleShot(0, self._run_hover_sync)
+
+    def _run_hover_sync(self) -> None:
+        self._hover_resync_pending = False
+        self.sync_tab_hover()
+
+    def leaveEvent(self, event) -> None:
+        # 光标离开宿主：子按钮的 leaveEvent 不保证到达，宿主层统一清空
+        self.clear_tab_hover()
+        super().leaveEvent(event)
+
+    def event(self, e):
+        # 布局重排（Resize/LayoutRequest）后按钮可能平移：延迟一拍按光标
+        # 位置重算 hover（singleShot 落在布局收敛后，命中测试拿到新几何）
+        if e.type() in (QEvent.Resize, QEvent.LayoutRequest):
+            self._schedule_hover_sync()
+        return super().event(e)
 
 
 class _TabIndicator(QWidget):
