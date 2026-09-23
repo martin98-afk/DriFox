@@ -155,7 +155,7 @@ def test_convert_tools_empty_when_no_function(serializer):
 
 
 def _make_stream(serializer_module, sse_lines):
-    lines = [f"data: {line}" if not line.startswith("data:") else line for line in sse_lines]
+    lines = [(f"data: {line}" if line and not line.startswith("data:") else line) for line in sse_lines]
     response = SimpleNamespace(iter_lines=lambda: iter(lines), close=lambda: None)
     return serializer_module.CodeAssistStream(response)
 
@@ -240,7 +240,7 @@ def test_stream_max_tokens_maps_to_length_and_usage_only_chunk(serializer):
             }
         }
     )
-    chunks = list(_make_stream(module, [usage_only, truncated, "data: [DONE]"]))
+    chunks = list(_make_stream(module, [usage_only, "", truncated, "", "data: [DONE]", ""]))
     assert chunks[0].choices == []  # 空 choices chunk：usage 单独消费（worker 已兼容）
     assert chunks[0].usage.prompt_tokens == 3
     assert chunks[1].choices[0].finish_reason == "length"
@@ -289,6 +289,115 @@ def test_adapter_flags_extra_carries_project_and_transport(adapter, adapter_modu
     transport = flags.extra["transport"]
     assert isinstance(transport, ProtocolTransport)
     assert callable(transport.create_stream)
+
+
+# ---------- ensure_project（loadCodeAssist / onboardUser / LRO） ----------
+
+
+def _make_provider_module(tmp_path, monkeypatch, ga_stub):
+    module = _load(Path("providers") / "gemini_oauth.py", "gemini_oauth_ensure_test")
+    monkeypatch.setattr(module, "_CACHE_DIR", tmp_path / "cache")
+    module._CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    module._CACHE.clear()
+    monkeypatch.setattr(module, "_load_auth_module", lambda: ga_stub)
+    return module
+
+
+def test_ensure_project_already_onboarded_uses_load_response(tmp_path, monkeypatch):
+    captured = {}
+
+    class _Stub:
+        def refresh(self, refresh_token):
+            return {"access_token": "at-test"}
+
+        def codeassist_post(self, path, token, body):
+            captured["load_body"] = body
+            assert path == ":loadCodeAssist"
+            return {"currentTier": {"id": "free-gemini"}, "cloudaicompanionProject": "proj-direct"}
+
+    module = _make_provider_module(tmp_path, monkeypatch, _Stub())
+    assert module.ensure_project("rt-1") == "proj-direct"
+    metadata = captured["load_body"]["metadata"]
+    assert metadata["ideName"] == "IDE_UNSPECIFIED"  # 新版字段集（旧 ideType 会被拒 400）
+    assert metadata["platform"] == "WINDOWS_AMD64"
+    assert "updateChannel" in metadata
+    assert module._cache_get("rt-1")["project"] == "proj-direct"
+
+
+def test_ensure_project_onboard_flow_lro_and_nested_project(tmp_path, monkeypatch):
+    calls = []
+
+    class _Stub:
+        def refresh(self, refresh_token):
+            return {"access_token": "at-test"}
+
+        def codeassist_post(self, path, token, body):
+            calls.append((path, dict(body)))
+            if path == ":loadCodeAssist":
+                return {"allowedTiers": [{"id": "standard-gemini"}, {"id": "free-gemini", "isDefault": True}]}
+            if path == ":onboardUser":
+                return {"done": False, "name": "operations/abc"}
+            raise AssertionError(path)
+
+        def codeassist_get_operation(self, name, token):
+            calls.append(("GET", name))
+            return {"done": True, "response": {"cloudaicompanionProject": {"id": "proj-managed"}}}
+
+    module = _make_provider_module(tmp_path, monkeypatch, _Stub())
+    monkeypatch.setattr(module.time, "sleep", lambda s: None)
+    assert module.ensure_project("rt-2") == "proj-managed"
+
+    onboard = [b for p, b in calls if p == ":onboardUser"][0]
+    assert onboard["tierId"] == "free-gemini"  # allowedTiers isDefault 项
+    assert "cloudaicompanionProject" not in onboard  # free 档托管项目，带了报 Precondition Failed
+    assert ("GET", "operations/abc") in calls  # LRO 轮询
+
+
+def test_sse_multiline_data_block_buffered(serializer):
+    """单条 SSE 事件拆多行 data: 时必须缓冲合并（gemini-cli 同款），逐行解析会丢块"""
+    module = _load(Path("serializers") / "codeassist.py", "codeassist_sse_multi_test")
+    part1 = json.dumps({"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "你好"}]}}]}})
+    lines = ["data: " + part1[:40], "data: " + part1[40:], "", "data: [DONE]", ""]
+    response = SimpleNamespace(iter_lines=lambda: iter(lines), close=lambda: None)
+    chunks = list(module.CodeAssistStream(response))
+    assert len(chunks) == 1
+    assert chunks[0].choices[0].delta.content == "你好"
+
+
+# ---------- google_auth login 骨架（server 构造→轮询→超时全链路） ----------
+
+
+def test_login_timeout_path_no_name_error(monkeypatch):
+    """回调骨架回归：曾因重构误删 server 构造行导致 NameError: server is not defined。
+
+    不弹浏览器、不真发网络：起本地 loopback 服务器 → 轮询 → 超时抛 TimeoutError，
+    全链路跑通即证明骨架无未定义名。
+    """
+    module = _load(Path("providers") / "google_auth.py", "google_auth_login_test")
+    monkeypatch.setattr(module.webbrowser, "open", lambda url: None)
+    with pytest.raises(TimeoutError, match="等待 OAuth 授权回调超时"):
+        module.login(timeout_sec=0.8, open_browser=False)
+
+
+def test_callback_handler_state_mismatch_rejected():
+    """回调处理器：state 不匹配时返回 400（防 CSRF）"""
+    module = _load(Path("providers") / "google_auth.py", "google_auth_handler_test")
+
+    class _FakeServer:
+        _expected_state = "good-state"
+        shutdown = lambda self: None
+
+    handler = module._CallbackHandler.__new__(module._CallbackHandler)
+    handler.server = _FakeServer()
+    handler.path = "/oauth-callback?code=abc&state=evil-state"
+    sent = {}
+
+    handler.send_response = lambda code: sent.setdefault("code", code)
+    handler.send_header = lambda *a, **k: None
+    handler.end_headers = lambda: None
+    handler.wfile = SimpleNamespace(write=lambda data: sent.setdefault("body", data))
+    handler.do_GET()
+    assert sent["code"] == 400
 
 
 # ---------- transport 请求构造 ----------
