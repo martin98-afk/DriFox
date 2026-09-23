@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.6.3] - 2026-09-22
+## [v0.6.3] - 2026-09-22 (重新发布 #2)
 
-自上一版本以来的变更 | 提交数：18 · 文件变更：73 · +9969/-1111 | 贡献者：dingma, mading
+自上一版本以来的变更（累计） | 提交数：23 · 文件变更：90 · +11117/-1163 | 贡献者：dingma, mading
 
 ### ⚠️ 行为变更 (Breaking Changes)
 
@@ -62,6 +62,28 @@ All notable changes to this project will be documented in this file.
 - **命令卡置顶按钮区分已置顶态** (`app/widgets/cards/floating/command_card.py`, `plugins/history-manager/ui/history_card.py`, `app/utils/icon_name_map.py`, `icons/取消置顶.svg` 新增（深浅双色 + qrc + 图标映射）, `tests/widgets/test_command_card_pin.py`): 已置顶改用「pin + 右下划线」图标，与取消置顶面板一致；按钮位置移到快捷键标签左侧（不再遮挡）。命令卡与历史会话卡的构造路径和原地更新路径同步切换。`0650a728`, `44c9ee95`
 
 - **安全中心列表编辑器动态高度与中文 tooltip** (`app/widgets/cards/settings/security_center_card.py`, `app/utils/diff_viewer.py`, `tests/utils/test_tool_payload_preview_styles.py` 新增): `_ListEditorCard` 新增 `on_change` 回调驱动高度自适应；各配置项补齐中文 tooltip；`diff_viewer` 工具参数预览 CSS 类名统一为语义化命名（`.field-row` / `.field-key` / `.field-badge` / `.field-preview` / `.field-empty`）并加样式回归测试。`872790dc`, `30ceef55`, `c482973b`
+
+---
+
+### 🆕 重新发布 #2 增量（自 v0.6.3 首发起）
+
+基于上次发布 `v0.6.3` 的增量变更 | 提交数：5 · 文件变更：17 · +1296/-52 | 贡献者：mading
+
+#### ✨ 新功能 (New Features)
+
+- **assistant_hub 三缺陷修复（工具档位 session_id + 身份链路贯穿 + 头像快照）** (`app/core/conversation/agent.py`, `app/core/engines/gateway/engine.py`, `app/core/engines/ui/engine.py`, `plugins/assistant_hub/assistant_manager.py`, `tests/plugins/assistant_hub/test_identity_cache_invalidation.py` 新增): 三处同源根因——临时助手身份未贯穿消息发送链路。①工具档位补 `session_id`：临时助手 `drifox_paste/截图_0922_141225.png` 等自定义工具未生效是因为 `assistant_tools` 注册链路断链，注入工具时缺 `session_id` 致工具档位判定失败；②历史切换/撤回重发丢临时助手身份：身份透传仅覆盖首发场景，切历史会话/撤销重发路径未带上临时助手 id，导致回滚后身份回退到全局默认；③头像不刷新：身份快照写入点不全，`refresh_identity` 缺失按需触发。`45c230eb`
+
+- **MessageCard 新增 refresh_identity 按需更新身份** (`app/main_widget.py`, `app/widgets/message_card.py`, `tests/widgets/test_message_card_refresh_identity.py` 新增): 头像与身份名称偶发「刷新前旧身份/刷新后新身份」漂移，原因是临时助手 id 写入后未触发卡片重投影。现新增 `refresh_identity()` 公开方法，宿主在身份变更时主动调用一次，按需重读助手档案并刷新 IdentityHeader；测试覆盖「未持有临时助手 id」「切换 id 前/后」「已销毁卡片」三类边界。`88ddd403`
+
+- **MessageBubble 提取用户/助手消息气泡（对比度保证）** (`app/widgets/message_card.py`, `app/widgets/modules/chat_area_module.py`, `app/widgets/modules/message_bubble.py` 新增): 把 MessageCard 中用户/助手两条渲染支路抽到独立 `MessageBubble` 模块，气泡与卡片结构解耦；新增 `contrast_assured` 主题自适应色板（深浅主题下文字/背景对比度 ≥4.5），解决部分主题下气泡文字几乎不可见的问题。`f8486d1f`
+
+- **TabHoverSyncHost 收敛标签按钮 hover 状态防残留** (`app/widgets/custom_title_bar.py`, `app/widgets/message_card.py`, `tests/widgets/test_welcome_card_tab_bar.py` 新增, `tests/debug/verify_welcome_tab_hover_fix.py` 新增): 自定义标题栏与欢迎卡 tab 按钮 hover 状态偶发残留（鼠标移开后按钮仍保持高亮），根因是多 hover 源各自持信号连接、`enter/leave` 事件错位时无人复位。新增 `TabHoverSyncHost` 作为单一真源统一 enter/leave 节拍，强制同一时刻只有一个按钮持 hover 态。`abd5df42`
+
+#### 🧪 测试 (Tests)
+
+- **命令卡 hover 跳格与高度公式回归** (`app/widgets/cards/floating/command_card.py`, `tests/widgets/test_command_card_divider.py` 新增, `tests/widgets/test_command_card_hover_edge_slot.py` 新增, `tests/debug/verify_edge_slot_fix.py` 新增): 命令卡片 `_apply_list_height` 高度公式 `visible*36 + divider_count*1` 把视口外分隔线计入预算，导致底部 1~3px 半行 item 漏出，鼠标扫过触发 enterEvent→hover 选中→`_scroll_to_item` 滚 35px 跳格。现新增 `_natural_height_for(visible)` 按「第 N 个 item 槽结束 y」精确计算；虚拟布局未就绪时退回旧公式兜底。回归测试 9 例覆盖：9 项 2 区/16 项 4 区/带分隔线/视口底裁切场景。`015e82d2`
+
+---
 
 ## [v0.6.2] - 2026-09-17 (重新发布 #3)
 
