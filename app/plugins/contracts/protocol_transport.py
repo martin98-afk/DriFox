@@ -21,7 +21,17 @@ from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 @runtime_checkable
 class ProtocolTransport(Protocol):
-    """协议传输器接口（无状态实现，随 adapter flags 携带）"""
+    """协议传输器接口（无状态实现，随 adapter flags 携带）
+
+    输出语义：create_stream 返回的流被迭代时产出
+    `app.plugins.contracts.stream_sink.StreamEvent`（归一化事件），
+    由 StreamEventSink.consume 消费驱动 worker 状态机。
+    """
+
+    id: str
+
+    # 能力声明：False 时 worker 不启用流式（如 o1/o3 系列），由插件按 llm_config 决定
+    supports_streaming: bool
 
     def create_stream(
         self,
@@ -30,7 +40,7 @@ class ProtocolTransport(Protocol):
         tools: Optional[List[Dict[str, Any]]] = None,
         auth_headers: Optional[Dict[str, str]] = None,
     ) -> Any:
-        """发请求并返回可迭代响应流（OpenAI chunk 兼容形状，需支持 close()）。
+        """发请求并返回可迭代 StreamEvent 的流（需支持 close()）。
 
         Args:
             llm_config: 模型配置（API_URL / 模型名称 / 温度 / 思考模式等全量参数）
@@ -40,5 +50,17 @@ class ProtocolTransport(Protocol):
 
         Returns:
             可迭代 + 可 close() 的流对象；失败抛 RuntimeError（走 worker 通用重试/报错链）
+        """
+        ...
+
+    def classify_error(self, error_str: str) -> Optional[str]:
+        """把服务端错误串映射为 worker 自愈动作 kind（无匹配返回 None）。
+
+        现状对应的两种自愈（chat/completions 专属，responses 恒 None）：
+        - "tool_order"：tool result 顺序错（2013）→ worker 调 _fix_tool_result_order
+        - "missing_args"：工具参数丢失 → worker 调 _try_recover_tool_arguments
+
+        修复动作**不在 transport 内执行**（它不持有 worker 的消息缓存与源头列表），
+        只做错误串 → kind 的映射，落地写回由 worker 负责。
         """
         ...
