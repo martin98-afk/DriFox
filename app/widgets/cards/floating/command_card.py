@@ -1384,13 +1384,18 @@ class CommandCard(QWidget):
         """
         # 虚拟化后 _item_widgets 是固定大小的池，改用数据源计数
         # 高度口径必须与 _build_virtual_layout 一致：
-        # 真实总高 = item_count * ITEM_HEIGHT + divider_count * 1
+        # 视口高度 = 第 visible 个 item 槽的结束 y（其间分隔线自然包含）。
+        # ⚠ 不能按 visible * ITEM_HEIGHT + divider_count 计：divider_count 是
+        # 全列表分隔线数，位于末个可见项之后的分隔线会撑高视口 1~N px，
+        # 使下一个 item 在视口底露出半行边条；鼠标扫过边条即 hover 选中 →
+        # _scroll_to_item 强制完整可见 → 列表凭空下移一格（用户感知为
+        # 「高度超过 8 项一点点，鼠标扫到底部会跳格」）。
         # 若用 total_items（含 dividers）作 visible 基数，
         # 当 item_count < MAX_VISIBLE_ITEMS 时 visible = item_count + divider_count，
         # 卡片高度 = (item_count + divider_count) * ITEM_HEIGHT + divider_count
         # = 真实高度 + divider_count * (ITEM_HEIGHT - 1) + (visible - item_count) * ITEM_HEIGHT
         # 即多出空槽占位，导致列表底部出现大量空白。
-        # 因此 visible 只能按 item_count 计算，dividers 单独加 1px 即可。
+        # 因此 visible 只能按 item_count 计算，分隔线由槽布局自然带出。
         item_count = len(self._filtered_items)
         divider_count = self._divider_count
         total_items = item_count + divider_count
@@ -1401,7 +1406,7 @@ class CommandCard(QWidget):
             return
 
         visible = min(item_count, MAX_VISIBLE_ITEMS)
-        natural = visible * ITEM_HEIGHT + divider_count * 1
+        natural = self._natural_height_for(visible)
 
         budget = self._available_card_budget()
         if natural <= budget:
@@ -1417,10 +1422,30 @@ class CommandCard(QWidget):
             CARD_MIN_VISIBLE_ITEMS,
             min(item_count, MAX_VISIBLE_ITEMS, budget // ITEM_HEIGHT),
         )
-        self._card_target_height = visible_fit * ITEM_HEIGHT + divider_count * 1
+        self._card_target_height = self._natural_height_for(visible_fit)
         self.setFixedHeight(self._card_target_height)
         self._sync_desc_tooltip_position()
         self._sync_visible_slots()
+
+    def _natural_height_for(self, visible_items: int) -> int:
+        """前 visible_items 个 item 槽的结束 y（自然视口高度，含其间分隔线）
+
+        分隔线只在其落在可见范围内时才计入：位于末个可见项之后的分隔线
+        不得撑高视口，否则下一个 item 会在视口底露出半行，hover 即滚动
+        （见 _apply_list_height 注释）。虚拟布局未就绪时退回旧公式兜底。
+        """
+        fallback = visible_items * ITEM_HEIGHT + self._divider_count
+        count = 0
+        end = fallback
+        for kind, _idx, y in self._virtual_slots:
+            if kind != "item":
+                continue
+            count += 1
+            end = y + ITEM_HEIGHT
+            if count >= visible_items:
+                return end
+        # 槽内 item 数不足（虚拟布局 stale，如手动 mock 数据）→ 退回旧公式
+        return fallback if count < visible_items else end
 
     def hasHeightForWidth(self):
         # follow_content 分支用 heightForWidth 精确锁定容器高度（避开 C++ 布局
