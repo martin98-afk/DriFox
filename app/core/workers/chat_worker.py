@@ -3426,6 +3426,11 @@ class OpenAIChatWorker(QThread):
         max_retries = 15
         # GPT-5.x 系列走 Responses API（思考内容只在 /v1/responses 返回）
         use_responses = self._use_responses_api()
+        # 第三协议传输器：adapter 经 flags.extra["transport"] 声明（契约见
+        # protocol_transport.py）。openai/responses 为原生通道不经此；
+        # 新增协议 = 插件声明 transport，worker 零协议知识、零协议名硬编码
+        adapter_flags = self._adapter_flags()
+        transport = (adapter_flags.extra or {}).get("transport")
         if use_responses:
             logger.info(
                 f"[ResponsesAPI] model={cached_config['model']} 使用 Responses API（chat/completions 不透传 reasoning）"
@@ -3444,7 +3449,15 @@ class OpenAIChatWorker(QThread):
                 logger.info(f"[API] 检测到用户插话，放弃剩余重试（attempt={attempt}）")
                 return self._abort_retry_for_interject()
             try:
-                if use_responses:
+                if transport is not None:
+                    # 第三协议：请求发出与响应归一全在 transport 插件内，
+                    # 产出 OpenAI chunk 兼容流后复用 _process_response 全管线
+                    self.stream = True
+                    self._llm_req_t0 = time.monotonic()
+                    response = transport.create_stream(
+                        self.llm_config, messages, tools=self.tools, auth_headers=cached_config.get("_auth_headers")
+                    )
+                elif use_responses:
                     # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
                     self.stream = True
                     self._llm_req_t0 = time.monotonic()
@@ -3456,6 +3469,8 @@ class OpenAIChatWorker(QThread):
                     self.retry_resolved.emit()
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
+                    if transport is not None:
+                        return self._process_response(response)
                     if use_responses:
                         return self._process_responses_stream(response)
                     return self._process_response(response)
