@@ -160,7 +160,8 @@ def test_build_request_kwargs_basic(transport, monkeypatch):
     )
     assert out["model"] == "gpt-4o"
     assert out["extra_body"]["max_tokens"] == 100
-    assert out["_auth_headers"] is None  # bearer 默认不加额外头
+    # 认证头不在组装结果内（由 worker 统一算后经 create_stream 注入）
+    assert "_auth_headers" not in out
     assert out["_is_o1_model"] is False
 
 
@@ -179,10 +180,11 @@ def test_build_request_kwargs_o1_skips_sampling(transport, monkeypatch):
     assert "temperature" not in out["extra_body"] and "top_p" not in out["extra_body"]
 
 
-def test_build_request_kwargs_bce_auth(transport, monkeypatch):
+def test_build_request_kwargs_bce_auth_not_in_transport(transport, monkeypatch):
+    """认证头组装归 worker（_build_auth_headers 唯一组装点），transport 不再自算"""
     monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
     out = transport.build_request_kwargs({"模型名称": "ernie", "API_KEY": "ak", "认证方式": "bce"})
-    assert out["_auth_headers"]["Authorization"].startswith("Basic ")
+    assert "_auth_headers" not in out
 
 
 def test_build_request_kwargs_caps_max_tokens(transport, monkeypatch):
@@ -200,3 +202,25 @@ def test_transport_satisfies_contract(transport):
     assert isinstance(transport, ProtocolTransport)
     assert transport.id == "openai_chat"
     assert transport.supports_streaming is True
+
+# ---------- 13. token 上限钳制注入（回归：漏注导致 400 错误码 1210） ----------
+
+def test_cap_max_tokens_injected_applies_to_request(transport):
+    """回归：worker 须注入 set_cap_max_tokens，否则用户配的极大值直接透传被上游拒。
+
+    实况：MiniMax 限制 max_tokens ∈ [1, 131072]，用户配 200000 → 400 code 1210。
+    """
+    transport.set_cap_max_tokens(lambda model, req: min(int(req), 65536))
+    try:
+        out = transport.build_request_kwargs({"模型名称": "MiniMax-M2", "最大Token": 200000},
+                                             cap_max_tokens=transport._cap_max_tokens)
+        assert out["extra_body"]["max_tokens"] == 65536
+    finally:
+        transport.set_cap_max_tokens(None)
+
+
+def test_cap_max_tokens_none_passes_through(transport):
+    """未注入时不钳制（独立使用场景；worker 路径必须注入）"""
+    out = transport.build_request_kwargs({"模型名称": "m", "最大Token": 200000},
+                                         cap_max_tokens=transport._cap_max_tokens)
+    assert out["extra_body"]["max_tokens"] == 200000

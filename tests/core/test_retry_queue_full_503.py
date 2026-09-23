@@ -90,9 +90,13 @@ def _make_worker(fake_client, monkeypatch):
     worker.retry_resolved = _SignalStub()
     worker.retry_status = _SignalStub()
     worker._http_client = None
-    worker._build_api_request_kwargs = lambda: {"model": "gpt-4o", "stream": True}
-    worker._get_http_client = lambda: fake_client
-    worker._process_response = lambda resp: (True, True)
+    # 协议通道已插件化：直接把假 transport/sink 挂到 worker（原 _build_api_request_kwargs /
+    # _get_http_client / _process_response 的 mock 点已不存在）。
+    # 不走注册表：session 级 warmup 会在跨文件运行时注册真插件，注册顺序不可控。
+    from tests.core.protocol_test_helpers import FakeChatTransport, FakeStreamSink
+
+    worker._chat_transport = FakeChatTransport(fake_client)
+    worker._stream_sink_override = FakeStreamSink(result=(True, True))
     # 加速：重试等待不真睡（真实逻辑中每 0.5s 检查一次取消标志）
     monkeypatch.setattr("app.core.workers.chat_worker.time.sleep", lambda s: None)
     return worker

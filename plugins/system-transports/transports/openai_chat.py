@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import base64
 import re
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -60,10 +59,18 @@ class OpenAIChatTransport:
         （插件独立使用场景）。
         """
         self._client_factory = client_factory
+        self._cap_max_tokens = None
 
     def set_client_factory(self, factory) -> None:
         """worker 注入客户端工厂（幂等覆盖）"""
         self._client_factory = factory
+
+    def set_cap_max_tokens(self, cap) -> None:
+        """worker 注入 token 上限钳制函数（签名 (model, requested) -> int）。
+
+        必需：上游对 max_tokens 有硬限定（如 MiniMax [1, 131072]），不钳制时用户配置的
+        极大值（如 200000）直接透传会被拒 400（错误码 1210）。"""
+        self._cap_max_tokens = cap
 
     def _get_client(self, llm_config: Dict[str, Any]):
         if self._client_factory is not None:
@@ -110,15 +117,12 @@ class OpenAIChatTransport:
 
         self._apply_thinking(extra_body, llm_config, model)
 
-        auth_headers = None
-        if str(llm_config.get("认证方式", "bearer") or "bearer") == "bce":
-            api_key = str(llm_config.get("API_KEY", "") or "")
-            b64_auth = base64.b64encode(f"{api_key}:{api_key}".encode()).decode()
-            auth_headers = {"Authorization": f"Basic {b64_auth}"}
+        # 认证头由 worker 统一组装（_build_auth_headers：bce + 服务商伪装头）后经
+        # create_stream(auth_headers=...) 注入——transport 不重复实现认证逻辑，
+        # 保持「协议形状转换」单一职责。
         return {
             "model": model,
             "extra_body": extra_body,
-            "_auth_headers": auth_headers,
             "_is_o1_model": is_o1,
         }
 
@@ -163,20 +167,28 @@ class OpenAIChatTransport:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         auth_headers: Optional[Dict[str, str]] = None,
+        api_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> Any:
-        """返回产出 StreamEvent 的迭代器（惰性：调用时立即发请求，迭代时拉取 chunk）。"""
+        """返回产出 StreamEvent 的迭代器（惰性：调用时立即发请求，迭代时拉取 chunk）。
+
+        api_messages：worker 已完成序列化（且可能经自愈修正）的 API 格式消息。
+        传入时直接使用（跳过内部序列化），避免与 worker 的 _api_messages_cache /
+        自愈修正结果不一致；为 None 时按 messages 自行序列化（独立使用场景）。
+        """
         client = self._get_client(llm_config)
-        kwargs = self.build_request_kwargs(llm_config)
+        kwargs = self.build_request_kwargs(llm_config, cap_max_tokens=self._cap_max_tokens)
+        if api_messages is None:
+            api_messages = messages
         req_kwargs: Dict[str, Any] = {
             "model": kwargs["model"],
-            "messages": messages,
+            "messages": api_messages,
             "stream": bool(self.supports_streaming),
         }
         if kwargs["extra_body"]:
             req_kwargs["extra_body"] = kwargs["extra_body"]
-        merged_headers = {**(kwargs["_auth_headers"] or {}), **(auth_headers or {})}
-        if merged_headers:
-            req_kwargs["extra_headers"] = merged_headers
+        # 认证头全部来自 worker 注入（唯一组装点）；独立使用时无认证头
+        if auth_headers:
+            req_kwargs["extra_headers"] = dict(auth_headers)
         if tools:
             req_kwargs["tools"] = tools
         response = client.chat.completions.create(**req_kwargs)
@@ -218,6 +230,8 @@ class OpenAIChatTransport:
 
                 for tc in getattr(delta, "tool_calls", None) or []:
                     tc_id = getattr(tc, "id", "") or ""
+                    tc_index = getattr(tc, "index", None)
+                    index = int(tc_index) if isinstance(tc_index, int) else -1
                     func = getattr(tc, "function", None)
                     name = (getattr(func, "name", "") if func is not None else "") or ""
                     args = (getattr(func, "arguments", "") if func is not None else "") or ""
@@ -229,6 +243,7 @@ class OpenAIChatTransport:
                             tool_call_id=tc_id,
                             name=name,
                             thought_signature=signature,
+                            index=index,
                         )
                     if args:
                         yield StreamEvent(
@@ -236,6 +251,7 @@ class OpenAIChatTransport:
                             tool_call_id=tc_id,
                             name=name,
                             text=args,
+                            index=index,
                         )
 
             if usage:

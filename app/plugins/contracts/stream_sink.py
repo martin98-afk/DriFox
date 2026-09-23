@@ -61,6 +61,9 @@ class StreamEvent:
     finish_reason: str = ""
     usage: Dict[str, int] = field(default_factory=dict)
     thought_signature: str = ""
+    # 工具调用在本次响应中的序号（部分服务商 chunk 2+ 会清空 id，靠 index 回查真实 id；
+    # Qwen/DashScope 等兼容协议必需）。非工具事件保持 -1。
+    index: int = -1
 
     def __post_init__(self) -> None:
         if self.type not in EVENT_TYPES:

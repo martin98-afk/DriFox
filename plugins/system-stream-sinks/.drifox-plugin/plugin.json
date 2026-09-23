@@ -1,0 +1,18 @@
+{
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
+    "name": "system-stream-sinks",
+    "description": "DriFox 内置流式事件接收器：把 transport 归一的 StreamEvent 驱动 worker 状态机（默认实现 id=\"openai_chat\"；搬迁自 chat_worker._process_response）",
+    "version": "1.0.0",
+    "author": {
+        "name": "DriFoxx Team"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "system",
+    "components": {
+        "stream_sinks": true
+    }
+}

@@ -62,23 +62,24 @@ def test_transport_protocol_includes_new_capabilities():
 
 
 def test_transport_registry_resolve_falls_back_then_none():
+    """独立实例（不依赖全局单例状态）：无任何注册时 resolve 返回 None"""
     from app.plugins.registries.transport_registry import TransportRegistry
 
-    reg = TransportRegistry.get_instance()
-    assert reg.resolve("not-exist") is None  # 未注册默认实现 → None
+    reg = TransportRegistry()
+    assert reg.resolve("not-exist") is None
 
 
 def test_stream_sink_registry_resolve_falls_back_then_none():
     from app.plugins.registries.stream_sink_registry import StreamSinkRegistry
 
-    reg = StreamSinkRegistry.get_instance()
+    reg = StreamSinkRegistry()
     assert reg.resolve("not-exist") is None
 
 
 def test_transport_registry_register_and_unregister():
     from app.plugins.registries.transport_registry import TransportRegistry
 
-    reg = TransportRegistry.get_instance()
+    reg = TransportRegistry()
 
     class Fake:
         id = "_probe_transport"
@@ -92,7 +93,7 @@ def test_transport_registry_register_and_unregister():
 def test_stream_sink_registry_register_and_unregister():
     from app.plugins.registries.stream_sink_registry import StreamSinkRegistry
 
-    reg = StreamSinkRegistry.get_instance()
+    reg = StreamSinkRegistry()
 
     class Fake:
         id = "_probe_sink"
