@@ -50,7 +50,12 @@ _CONFIG_ONLY_KEYS = {
 
 
 class OpenAIChatTransport:
-    """chat/completions 传输器（请求组装 + SDK 流 + 事件归一）"""
+    """chat/completions 传输器（请求组装 + SDK 流 + 事件归一）
+
+    无状态实现：注册表返回的实例被全进程共享，per-request 资源（HTTP 客户端 /
+    token 钳制函数）一律经 create_stream 入参传递，不写实例属性——写入即被其他
+    worker 覆盖，导致请求打到别家服务商端点（模型名与端点错配 400）。
+    """
 
     id = "openai_chat"
     # 默认支持流式；模型级例外由 supports_streaming_for 按 llm_config 判定
@@ -66,25 +71,31 @@ class OpenAIChatTransport:
             return False
         return True
 
-    def __init__(self, client_factory=None) -> None:
-        """client_factory：无参回调，返回复用的 OpenAI SDK 客户端（每次请求调用）。
+    def __init__(self, client_factory=None, cap_max_tokens=None) -> None:
+        """构造期注入（可选）：供插件独立使用场景（不依赖 worker）预先绑定资源。
 
-        worker 在构造 transport 实例后注入（`set_client_factory`），
-        使 worker 保持单一 httpx 连接池与既有超时配置；未注入时按 llm_config 自建
-        （插件独立使用场景）。
+        ⚠️ 注册表返回的实例全进程共享，worker 路径**不得**走这里——它已改为经
+        create_stream(client=..., cap_max_tokens=...) 逐请求传入，与实例无关。
+        本入参只在插件自己 new 一个 transport 自用时使用（如单测/脚本）。
         """
         self._client_factory = client_factory
-        self._cap_max_tokens = None
+        self._cap_max_tokens = cap_max_tokens
 
     def set_client_factory(self, factory) -> None:
-        """worker 注入客户端工厂（幂等覆盖）"""
+        """兼容接口：旧版 worker 经 hasattr 探测后调用（写入实例属性）。
+
+        ⚠️ **不可删除**：插件热重载即刻生效，主程序需重启。旧主程序 + 新插件是
+        常态组合，删掉本方法会让旧 worker 的 hasattr 探测落空 → 不注入 →
+        连接池/钳制双双失效（实测直接 400 code 1210）。新版 worker 不再调用本方法。
+
+        副作用提醒：直接写共享实例属性，多 worker 并发会互相覆盖（模型名与端点
+        错配 400 的根因）——旧 worker 路径由 worker 侧浅拷贝隔离兜底。
+        """
         self._client_factory = factory
 
     def set_cap_max_tokens(self, cap) -> None:
-        """worker 注入 token 上限钳制函数（签名 (model, requested) -> int）。
-
-        必需：上游对 max_tokens 有硬限定（如 MiniMax [1, 131072]），不钳制时用户配置的
-        极大值（如 200000）直接透传会被拒 400（错误码 1210）。"""
+        """兼容接口：旧版 worker 注入 token 上限钳制函数。同 set_client_factory，
+        **不可删除**（旧主程序依赖 hasattr 探测到它才会注入，缺失即 400 code 1210）。"""
         self._cap_max_tokens = cap
 
     def _get_client(self, llm_config: Dict[str, Any]):
@@ -103,9 +114,11 @@ class OpenAIChatTransport:
         """llm_config → (model, stream, extra_body, auth_headers, is_o1)。
 
         与 chat_worker._build_api_request_kwargs 逐点等价（含思考模式三分支、
-        bce Basic 认证、服务商伪装头合并）；`cap_max_tokens` 为 worker 注入的
+        bce Basic 认证、服务商伪装头合并）；`cap_max_tokens` 为 per-request 传入的
         token 上限钳制函数（签名 (model, requested) -> int），缺省不做钳制。
         """
+        if cap_max_tokens is None:
+            cap_max_tokens = self._cap_max_tokens
         model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
         extra_body: Dict[str, Any] = {}
 
@@ -181,15 +194,21 @@ class OpenAIChatTransport:
         tools: Optional[List[Dict[str, Any]]] = None,
         auth_headers: Optional[Dict[str, str]] = None,
         api_messages: Optional[List[Dict[str, Any]]] = None,
+        client: Any = None,
+        cap_max_tokens: Any = None,
     ) -> Any:
         """返回产出 StreamEvent 的迭代器（惰性：调用时立即发请求，迭代时拉取 chunk）。
 
         api_messages：worker 已完成序列化（且可能经自愈修正）的 API 格式消息。
         传入时直接使用（跳过内部序列化），避免与 worker 的 _api_messages_cache /
         自愈修正结果不一致；为 None 时按 messages 自行序列化（独立使用场景）。
+
+        client / cap_max_tokens：per-request 资源（worker 逐请求传入）。为 None 时
+        回退构造期注入值（插件独立使用场景），再回退默认行为（自建客户端 / 不钳制）。
         """
-        client = self._get_client(llm_config)
-        kwargs = self.build_request_kwargs(llm_config, cap_max_tokens=self._cap_max_tokens)
+        if client is None:
+            client = self._get_client(llm_config)
+        kwargs = self.build_request_kwargs(llm_config, cap_max_tokens=cap_max_tokens)
         if api_messages is None:
             api_messages = messages
         req_kwargs: Dict[str, Any] = {

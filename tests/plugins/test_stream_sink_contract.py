@@ -102,3 +102,52 @@ def test_stream_sink_registry_register_and_unregister():
     assert reg.resolve("_probe_sink").id == "_probe_sink"
     reg.unregister_source("_probe_source")
     assert reg.resolve("_probe_sink") is None
+
+# ---------- transport 无状态纪律（per-request 注入分流） ----------
+
+
+def test_create_stream_accepts_per_request_resources():
+    """契约：create_stream 接受 client / cap_max_tokens 逐请求入参。
+
+    不接受即回退成写共享单例属性，并发 worker 会互相覆盖，
+    表现为模型名与端点错配的 400。
+    """
+    import inspect
+
+    from app.plugins.contracts.protocol_transport import ProtocolTransport
+
+    params = inspect.signature(ProtocolTransport.create_stream).parameters
+    assert "client" in params
+    assert "cap_max_tokens" in params
+
+
+def test_worker_signature_probe_detects_new_and_old_impls():
+    """worker 签名探测：新实现走首选路径，仅有 set_* 的旧实现走浅拷贝兼容路径。
+
+    探测用签名而非 hasattr：兼容期实现可能同时保留 set_* 方法，
+    hasattr 无法区分「支持新入参」与「只支持旧注入」。
+    """
+    from app.core.workers.chat_worker import _accepts_per_request_client
+
+    class NewImpl:
+        def create_stream(self, llm_config, messages, tools=None, auth_headers=None, api_messages=None, client=None, cap_max_tokens=None):
+            return iter(())
+
+    class OldImpl:
+        def create_stream(self, llm_config, messages, tools=None, auth_headers=None, api_messages=None):
+            return iter(())
+
+        def set_client_factory(self, factory) -> None:
+            return None
+
+        def set_cap_max_tokens(self, cap) -> None:
+            return None
+
+    class KwargsImpl:
+        def create_stream(self, llm_config, messages, **kwargs):
+            return iter(())
+
+    assert _accepts_per_request_client(NewImpl().create_stream) is True
+    assert _accepts_per_request_client(OldImpl().create_stream) is False
+    # **kwargs 形式视为支持（无法否定时不误判）
+    assert _accepts_per_request_client(KwargsImpl().create_stream) is True

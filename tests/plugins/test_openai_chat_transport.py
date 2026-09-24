@@ -206,18 +206,15 @@ def test_transport_satisfies_contract(transport):
 
 
 def test_cap_max_tokens_injected_applies_to_request(transport):
-    """回归：worker 须注入 set_cap_max_tokens，否则用户配的极大值直接透传被上游拒。
+    """回归：worker 逐请求传入 cap_max_tokens，否则用户配的极大值直接透传被上游拒。
 
     实况：MiniMax 限制 max_tokens ∈ [1, 131072]，用户配 200000 → 400 code 1210。
     """
-    transport.set_cap_max_tokens(lambda model, req: min(int(req), 65536))
-    try:
-        out = transport.build_request_kwargs(
-            {"模型名称": "MiniMax-M2", "最大Token": 200000}, cap_max_tokens=transport._cap_max_tokens
-        )
-        assert out["extra_body"]["max_tokens"] == 65536
-    finally:
-        transport.set_cap_max_tokens(None)
+    out = transport.build_request_kwargs(
+        {"模型名称": "MiniMax-M2", "最大Token": 200000},
+        cap_max_tokens=lambda model, req: min(int(req), 65536),
+    )
+    assert out["extra_body"]["max_tokens"] == 65536
 
 
 def test_cap_max_tokens_none_passes_through(transport):
@@ -259,14 +256,10 @@ def test_create_stream_uses_model_level_streaming_flag(transport, monkeypatch):
     class _Client:
         chat = _Chat()
 
-    transport.set_client_factory(lambda: _Client())
-    try:
-        transport.create_stream({"模型名称": "o1-preview"}, [{"role": "user", "content": "x"}])
-        assert captured["stream"] is False
-        transport.create_stream({"模型名称": "gpt-4o"}, [{"role": "user", "content": "x"}])
-        assert captured["stream"] is True
-    finally:
-        transport.set_client_factory(None)
+    transport.create_stream({"模型名称": "o1-preview"}, [{"role": "user", "content": "x"}], client=_Client())
+    assert captured["stream"] is False
+    transport.create_stream({"模型名称": "gpt-4o"}, [{"role": "user", "content": "x"}], client=_Client())
+    assert captured["stream"] is True
 
 
 # ---------- 9. 非流式 ChatCompletion 归一（o1/o3 stream=False） ----------
@@ -335,10 +328,89 @@ def test_non_stream_end_to_end_via_create_stream(transport):
     class _Client:
         chat = _Chat()
 
-    transport.set_client_factory(lambda: _Client())
-    try:
-        stream = transport.create_stream({"模型名称": "o1-preview"}, [{"role": "user", "content": "x"}])
-        events = list(stream)
-        assert [e.type for e in events] == ["content_delta"]
-    finally:
-        transport.set_client_factory(None)
+    stream = transport.create_stream(
+        {"模型名称": "o1-preview"}, [{"role": "user", "content": "x"}], client=_Client()
+    )
+    events = list(stream)
+    assert [e.type for e in events] == ["content_delta"]
+
+# ---------- 15. 并发隔离（回归：transport 共享单例被多 worker 互相覆盖） ----------
+
+
+def test_per_request_client_never_touches_shared_instance(transport):
+    """per-request 入参不落实例：连续两次不同 client 调用后，实例仍时不持有任何 client。
+
+    历史缺陷：worker 调 set_client_factory 把本 worker 的 client 写进共享单例，
+    并发 worker 互相覆盖 → 请求编程到别家服务商端点（MiniMax 端点收到 glm-5.3-flash）。
+    """
+    used = []
+
+    def _make_client(tag):
+        class _Completions:
+            @staticmethod
+            def create(**kwargs):
+                used.append(tag)
+                return iter(())
+
+        class _Chat:
+            completions = _Completions()
+
+        class _Client:
+            chat = _Chat()
+
+        return _Client()
+
+    transport.create_stream({"模型名称": "m-a"}, [], client=_make_client("A"))
+    transport.create_stream({"模型名称": "m-b"}, [], client=_make_client("B"))
+    assert used == ["A", "B"]
+    # 关键断言：实例上不得沉淀 client 或钳制函数
+    assert transport._client_factory is None
+    assert transport._cap_max_tokens is None
+
+
+def test_concurrent_requests_keep_own_client(transport):
+    """并发：多线程各传自己的 client，出发的请求必须命中自己的（不被其他线程抢走）。
+
+    模拟原缺陷：set_client_factory 方式下 A 写完 B 写，A 的请求会用 B 的 client。
+    """
+    import threading
+
+    N = 8
+    barrier = threading.Barrier(N)
+    seen = {}
+    errors = []
+
+    def _client_for(name):
+        class _Completions:
+            @staticmethod
+            def create(**kwargs):
+                # 请求发出时回读当前线程持有的名字
+                seen.setdefault(name, set()).add(kwargs.get("model"))
+                return iter(())
+
+        class _Chat:
+            completions = _Completions()
+
+        class _Client:
+            chat = _Chat()
+
+        return _Client()
+
+    def _worker(idx):
+        name = f"w{idx}"
+        try:
+            barrier.wait(timeout=5)
+            transport.create_stream({"模型名称": name}, [], client=_client_for(name))
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(N)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=10)
+
+    assert not errors, errors
+    # 每个 worker 的 client 只应发出自己的模型名
+    for i in range(N):
+        assert seen.get(f"w{i}") == {f"w{i}"}, seen

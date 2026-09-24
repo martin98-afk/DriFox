@@ -65,6 +65,24 @@ _SHARED_TOOL_POOL = concurrent.futures.ThreadPoolExecutor(
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
+def _accepts_per_request_client(fn) -> bool:
+    """transport.create_stream 是否接受 client / cap_max_tokens 逐请求入参。
+
+    用签名探测而非 hasattr：兼容期实现可能同时保留 set_client_factory 方法，
+    hasattr 无法区分「支持新入参」与「只支持旧注入」。探测失败（C 扩展/签名不可读）
+    时按不支持处理，走浅拷贝兼容路径（保守：宁可多拷贝一次，不可漏隔离）。
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "client" in params
+
+
 def _check_team_member(backend) -> bool:
     """检查当前窗口是否是团队成员（委托给共用函数）"""
     from app.core.team.team_manager import check_team_member
@@ -1745,7 +1763,16 @@ class OpenAIChatWorker(QThread):
             raise RuntimeError("未注册 chat/completions 传输器（system-transports 插件未启用），无法发起对话请求")
 
         class _WorkerBoundTransport:
-            """每 worker 独享视图：委托插件实现，client_factory/cap 绑定本 worker。"""
+            """每 worker 独享视图：client/cap 逐请求传入，不写共享插件实例。
+
+            注册表返回的 transport 是**进程级共享实例**。历史上 worker 把本 worker 的
+            client_factory 写进该实例（set_client_factory）后再调用 create_stream，
+            并发 worker 会互相覆盖：A 写完 B 写，A 的请求随即用上 B 的连接池
+            （base_url 指向 B 的服务商），表现为「模型名与端点错配」的 400
+            （实测 MiniMax 端点收到 glm-5.3-flash、智谱端点收到 MiniMax-M3）。
+            现改为经 create_stream(client=..., cap_max_tokens=...) 传递——与实例无关，
+            无竞态窗口。
+            """
 
             def __init__(self, impl, worker):
                 self._impl = impl
@@ -1764,6 +1791,22 @@ class OpenAIChatWorker(QThread):
 
             def create_stream(self, llm_config, messages, tools=None, auth_headers=None, api_messages=None):
                 impl = self._impl
+                if _accepts_per_request_client(impl.create_stream):
+                    # 首选路径：资源逐请求传入，与共享实例无关，零竞态窗口
+                    return impl.create_stream(
+                        llm_config,
+                        messages,
+                        tools=tools,
+                        auth_headers=auth_headers,
+                        api_messages=api_messages,
+                        client=self._worker._get_http_client(),
+                        cap_max_tokens=self._worker._cap_max_output_tokens,
+                    )
+                # 兼容路径：仅支持 set_* 注入的旧实现。浅拷贝出本请求私有实例再注入，
+                # 写入不外溢到共享单例（浅拷贝安全：transport 只持有标量回调属性）。
+                import copy as _copy
+
+                impl = _copy.copy(impl)
                 if hasattr(impl, "set_client_factory"):
                     impl.set_client_factory(self._worker._get_http_client)
                 if hasattr(impl, "set_cap_max_tokens"):
