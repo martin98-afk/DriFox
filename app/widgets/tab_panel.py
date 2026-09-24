@@ -2333,7 +2333,7 @@ class TabPanel(QWidget):
         header.setProperty("teamId", team_id)
         header.setAttribute(Qt.WA_Hover, True)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(0, 2, 32, 4)
+        header_layout.setContentsMargins(0, 2, 0, 4)
         header_layout.setSpacing(4)
         # 点击 header 切换团队框折叠/展开（T4 右键菜单复用 _toggle_team_collapsed）
         header.setCursor(Qt.PointingHandCursor)
@@ -2361,25 +2361,25 @@ class TabPanel(QWidget):
         name_label = _ELLabel("", header)
         name_label.setObjectName("teamGroupName")
         name_label.setText("团队")
-        header_layout.addWidget(name_label, 1)
 
         # 聚合信息 badge：待答 WARNING > 运行 INFO > 空闲（成员数），语义态走动态属性。
-        # 定宽脱流锚右缘（overlay）：按钮 hover 展开从弹性标题借空间，badge 恒贴
-        # 右缘不被挤压横移；空闲态按钮区零占位、无 68px 常驻空白（#11 回归修复）。
-        # 固定 30×18（数字居中）使位置计算不依赖文本宽度，resizeEvent 同步位置
+        # 位于团队名**左侧**（用户定案）：左侧元素（arrow/icon/badge）不参与 hover
+        # 挤压→恒定不动；右侧全留给按钮区。宽度自适应（不加 setFixedSize）：
+        # 「待答 N」「运行 N」文案完整不裁断，与 QSS padding 共同决定尺寸。
         badge = QLabel("0", header)
         badge.setObjectName("teamGroupBadge")
         badge.setProperty("state", "idle")
         badge.setAlignment(Qt.AlignCenter)
-        badge.setFixedSize(30, 18)
+        header_layout.addWidget(badge)
+
+        header_layout.addWidget(name_label, 1)
 
         # ── hover 三按钮展开区（宽度不固定）──
         # 空闲态零占位：容器内按钮全隐藏时 sizeHint 宽为 0，布局不分配宽度（#11：
         # 此前固定 68px 恒占位致 badge 右侧常驻空白 + 窄栏被撑宽）；hover 时按钮
-        # 显示撑开容器，从 stretch 弹性标题借空间，badge（脱流锚右缘）不随之移动；
-        # 高度仍固定 20：容器 sizeHint 随按钮全隐藏塌缩为 0，否则 hover 会微调
-        # header 高度（23↔26）；固定后展开态 header 恒 26、折叠态恒 22。
-        # 右 contentsMargins 32 = badge(30) + 呼吸位，供流内容避开 badge overlay。
+        # 显示撑开容器，从 stretch 弹性团队名借空间；badge 在团队名左侧、定宽自适应，
+        # 不参与挤压→恒不动。高度固定 20：容器 sizeHint 随按钮全隐藏塌缩为 0，
+        # 否则 hover 会微调 header 高度（23↔26）；固定后展开态 header 恒 26、折叠态恒 22。
         # 折叠态由 _apply_team_compact 整体隐藏（C3：折叠态不弹按钮，也避免窄条空白）
         btn_area = QWidget(header)
         btn_area_layout = QHBoxLayout(btn_area)
@@ -2423,20 +2423,6 @@ class TabPanel(QWidget):
         close_btn.setAttribute(Qt.WA_NoMousePropagation, True)
         # 保存 qfluentwidgets 控件级样式，解散确认态回退时还原（同 TabItem._close_btn_orig_ss）
         grp._team_close_btn_orig_ss = close_btn.styleSheet()
-
-        # badge overlay 定位：x = 行宽-31（右留 1px 呼吸位），垂直居中；
-        # 流内容右 margin 32 已让出 badge 区，互不重叠。resize 时同步。
-        def _position_badge():
-            badge.move(header.width() - 31, max(2, (header.height() - 18) // 2))
-
-        _orig_header_resize = header.resizeEvent
-
-        def _on_header_resize(ev):
-            _position_badge()
-            _orig_header_resize(ev)
-
-        header.resizeEvent = _on_header_resize
-        _position_badge()
         # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略；
         # 解散是重操作：走内联二次确认（TabItem._on_close_btn_clicked 同范式）
         close_btn.clicked.connect(lambda *_args, _tid=team_id: self._on_team_close_clicked(_tid))
@@ -2611,6 +2597,14 @@ class TabPanel(QWidget):
             badge.setProperty("state", state)
             badge.style().unpolish(badge)
             badge.style().polish(badge)
+        # #13：按当前文案同步最小宽（含 QSS padding 1px 6px）——窄栏 + hover 时
+        # 布局会压缩 badge（实测「12 运行」73→48 裁字），最小宽钉住后不被压缩；
+        # 挤压转嫁给团队名（_ElidedLabel 有 elide 保护，显示省略号属预期）。
+        # ⚠️ 必须放在 unpolish/polish 之后：repolish 会重新应用 QSS 的
+        # min-width 覆盖掉此处设置（实测放在前面 minW 被重置回 26）
+        needed = badge.fontMetrics().horizontalAdvance(text) + 12
+        if badge.minimumWidth() != needed:
+            badge.setMinimumWidth(needed)
         if badge.toolTip() != tooltip:
             badge.setToolTip(tooltip)
 
@@ -2842,8 +2836,6 @@ class TabPanel(QWidget):
                 arrow.setVisible(True)
             if badge is not None:
                 badge.setVisible(True)
-                # overlay badge 重定位（定宽脱流，位置不随布局自动更新）
-                badge.move(header.width() - 31, max(2, (header.height() - 18) // 2))
             btn_area = getattr(grp, "_team_btn_area", None)
             if btn_area is not None:
                 btn_area.setVisible(True)

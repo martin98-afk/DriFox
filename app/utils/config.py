@@ -48,6 +48,19 @@ class ListDictValidator(ConfigValidator):
 
 
 
+# OpenCode Zen 插件历史声明过的 default_model 值（插件演进过程中用过的默认模型）。
+# 用途：老配置若「模型名称」仍是这些值之一，说明用户从未手动切换过模型，
+# 可在插件升级默认模型后安全地随之升级；用户改成白名单外的值（自己选的模型）
+# 一律不碰，避免覆盖用户选择。
+#
+# 维护：providers 插件每次修改 ProviderDef(default_model=...) 时，把旧值追加到此集合。
+_LEGACY_OPENCODE_DEFAULT_MODELS = frozenset(
+    {
+        "deepseek-v4-flash-free",  # 初版默认（2026-09 实测已下线，服务端报 Model is unavailable）
+    }
+)
+
+
 class Settings(QConfig):
     _instance = None
     # 类级别关闭标志 — 一旦设置，任何实例的 save() 都会跳过
@@ -178,20 +191,37 @@ class Settings(QConfig):
             return
 
         api_url = default_config.get("API_URL", "")
-        model_name = "deepseek-v4-flash-free"
         config_name = "opencode免费模型"
 
         saved_providers = instance.llm_saved_providers.value
         if not isinstance(saved_providers, dict):
             saved_providers = {}
 
-        # 已存在同名配置：标记已注入并直接返回（用户可改名/替换 key 来隐藏或自定义）
+        # 已存在同名配置：标记已注入（用户可改名/替换 key 来隐藏或自定义）
+        #
+        # 附带幂等迁移：若该配置的「模型名称」仍是插件历史默认值（用户从未
+        # 手动切换过模型），则升级为插件当前声明的 default_model。修复的是
+        # 「插件换了默认模型，老用户配置仍指向已下线模型」的问题——旧默认值
+        # 下线后这类配置每次启动都拿不到可用默认，且异步刷新只回填「模型列表」
+        # 不碰「模型名称」。用户自行选过的模型（白名单外）一律保持不动。
+        declared_model = str(default_config.get("模型名称", "") or "")
         for config_id, info in saved_providers.items():
             if not isinstance(info, dict):
                 continue
             if info.get("name") != config_name:
                 continue
             instance.llm_default_opencode_injected.value = True
+            current_model = str(info.get("模型名称", "") or "")
+            if declared_model and current_model and current_model != declared_model:
+                if current_model in _LEGACY_OPENCODE_DEFAULT_MODELS:
+                    # deepcopy 后再写回：直接原地修改不会触发 valueChanged 信号
+                    upgraded = deepcopy(saved_providers)
+                    upgraded[config_id]["模型名称"] = declared_model
+                    instance.llm_saved_providers.value = upgraded
+                    instance.save()
+                    logger.info(
+                        f"OpenCode 默认配置模型已升级: {current_model} -> {declared_model} ({config_id})"
+                    )
             return
 
         provider_info = {
@@ -199,12 +229,13 @@ class Settings(QConfig):
             "name": config_name,
             "API_URL": api_url,
             "API_KEY": "",  # 免 key 匿名调用：空 key 走剥离 Authorization 头逻辑
-            "模型名称": model_name,
         }
+        # 「模型名称」不在此写死 —— 由下方 default_config 注入插件声明的
+        # ProviderDef.default_model（单一数据源在 providers 插件，本处只做消费）。
         # 不写 模型列表 —— 空列表会让模型选择器显示为空，
         # 不写此键则回退到 merged_provider_models（插件模型 + models.dev + 异步刷新），
         # 等异步刷新完成后才写入实际列表。
-        # 继承 providers 插件默认配置中的其他默认参数（温度、最大Token、认证方式等）
+        # 继承 providers 插件默认配置中的其他默认参数（模型名/温度/最大Token/认证方式等）
         for key, value in default_config.items():
             if key not in provider_info:
                 provider_info[key] = value
