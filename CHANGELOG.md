@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.6.3] - 2026-09-22 (重新发布 #2)
+## [v0.6.3] - 2026-09-24 (重新发布 #3)
 
-自上一版本以来的变更（累计） | 提交数：23 · 文件变更：90 · +11117/-1163 | 贡献者：dingma, mading
+自上一版本以来的变更（累计） | 提交数：45 · 文件变更：184 · +17198/-2356 | 贡献者：dingma, drifox-bot, mading
 
 ### ⚠️ 行为变更 (Breaking Changes)
 
@@ -82,6 +82,60 @@ All notable changes to this project will be documented in this file.
 #### 🧪 测试 (Tests)
 
 - **命令卡 hover 跳格与高度公式回归** (`app/widgets/cards/floating/command_card.py`, `tests/widgets/test_command_card_divider.py` 新增, `tests/widgets/test_command_card_hover_edge_slot.py` 新增, `tests/debug/verify_edge_slot_fix.py` 新增): 命令卡片 `_apply_list_height` 高度公式 `visible*36 + divider_count*1` 把视口外分隔线计入预算，导致底部 1~3px 半行 item 漏出，鼠标扫过触发 enterEvent→hover 选中→`_scroll_to_item` 滚 35px 跳格。现新增 `_natural_height_for(visible)` 按「第 N 个 item 槽结束 y」精确计算；虚拟布局未就绪时退回旧公式兜底。回归测试 9 例覆盖：9 项 2 区/16 项 4 区/带分隔线/视口底裁切场景。`015e82d2`
+
+### 🆕 重新发布 #3 增量（自 v0.6.3 重新发布 #2 起）
+
+基于上次发布 `v0.6.3 (重新发布 #2)` 的增量变更 | 提交数：22 · 文件变更：94 · +6081/-1193 | 贡献者：dingma, drifox-bot, mading
+
+#### ✨ 新功能 (New Features)
+
+- **system-transports 插件：openai_chat transport 上线 + transports/stream_sinks 组件注册** (`plugins/system-transports/`, `plugins/system-transports/transports/openai_chat.py` 新增, `app/plugins/kernel.py`, `app/plugins/registries/*`): chat/completions 流量从 chat_worker 内置路径重构为 transport+sink 插件架构。① 新增 `StreamEvent` 与 `StreamEventSink` 契约（`plugins/system-transports/sinks/_contract.py` 等）；② 注册表新增 `transports` / `stream_sinks` 两种 component 类型；③ 内置 `openai_chat` transport 把 SDK chunk → `StreamEvent` 转换封装在插件内，chat_worker 改为消费事件的薄编排层。同时为 gemini-oauth 新增 `system-transports/gemini_codeassist` 配套 transport，承接 CodeAssist 协议的 `codeassist_get_operation` LRO 轮询与多行 SSE 解析。`a4cc314c` `09b29bea` `798aa294`
+
+- **chat/completions 路由迁移到 transport+sink 插件** (`app/core/workers/chat_worker.py`, `app/core/conversation/backend.py`, `plugins/system-transports/`, `tests/core/test_chat_worker_*.py` 新增): 旧版 `chat_worker._process_response` 577 行编排 + `_build_api_request_kwargs` 160 行构造逻辑下放到 transport + sink；worker 收敛为三层分派（adapter transport → responses 原生 → registry 默认 transport）+ 重试/自愈/取消/连接池/`max_tokens` 钳制注入。o1/o3 流式硬编码改为 transport 声明式 `supports_streaming_for`，流式契约异常下沉到 sink 契约层。`a6946c9f` `5d688919`
+
+- **transport 缓存跨热重载修复（连接池混用致流式中断）** (`plugins/system-transports/transports/openai_chat.py`, `app/plugins/kernel.py`): transport 在跨热重载时缓存的 OpenAI client 与新注册 transport 实例错配，导致连接池中旧 client 流被复用、新 SDK 路径下解析失败。现改为按 transport id 重载时强制重建 client + `cap_max_tokens` 在 `create_stream` 入参钳制，防止共享实例下 max_tokens 漂移到下一个请求。`5d688919` `038eb5ac`
+
+- **per-request 注入 + create_stream max_tokens 钳制** (`plugins/system-transports/transports/openai_chat.py`, `app/core/workers/chat_worker.py`): OpenAI SDK 共享 client 时多个请求共用 headers/timeout 等参数会互相覆盖。现改为每次请求构造独立 `client._prepare_options` 副本并随请求释放；`cap_max_tokens` 在 `create_stream` 入参处统一钳制，与请求级 `extra_body` 合并而非覆盖。`038eb5ac`
+
+- **OpenAIChatTransport usage 事件携带 `prompt_tokens_details`（缓存命中可观测）** (`plugins/system-transports/transports/openai_chat.py`, `app/core/workers/chat_worker.py`, `tests/plugins/system_transports/test_openai_chat_transport_usage.py` 新增): usage 事件补齐 `prompt_tokens_details.cached_tokens`，sink 与 SubAgentCompact 统计面板可直接读出缓存命中量；新增 cache 字段后按钮行为（SubAgentCompact 折叠状态）回归测试覆盖。`c9323255`
+
+- **transport 契约收敛：流式声明 + 签名漂移 + sink 配对** (`plugins/system-transports/`, `tests/plugins/system_transports/`): transport `supports_streaming=False`（o1/o3）经实测未兑现 — SDK 显式传 `stream=False` 时返回 `ChatCompletion` 单对象（pydantic BaseModel 可 `iter()` 产 `("id", value)` 键值元组），旧 `to_events` 仅解析 chunk 流 → sink 访问 `ev.type` 触发 `AttributeError`。修复：transport `to_events` 入口判断非流式 response 归一为 `[content_delta 全文, usage, finish]` 三事件，sink 零改动；并补 `sink_id` 配对校验（transport 声明的 sink_id 未注册时提前告警，commit `805aa737`）。`805aa737`
+
+- **Google OAuth2 PKCE 客户端（Gemini Code Assist 接入 Phase A）** (`plugins/gemini-oauth/google_auth.py` 新增, `plugins/gemini-oauth/codeassist.py` 新增, `tests/plugins/test_gemini_oauth_codeassist.py` 新增, `tests/plugins/test_gemini_oauth_login_flow.py` 新增): OAuth2 PKCE 全链路 — `google_auth.py` 处理登录与 token 刷新，`codeassist.py` serializer 做内部消息 ↔ Code Assist 格式双向映射；含 Code Assist 协议 SSE 适配、`codeassist_get_operation` LRO 轮询、transport 请求构造（generation config 映射 + 请求体组装）、多行 SSE data 块解析修复。`6560bc0c` `41fec6cb`
+
+- **Code Assist 项目处理 + 用户自定义 GCP 项目** (`plugins/gemini-oauth/`, `app/widgets/cards/settings/provider_edit_card.py`): `bd4fee98` 新增 Google OAuth2 client 项目列表功能 + onboarding 流程强化；`8b9edfa9` 允许用户自定义 GCP 项目 + 新增 SVG 图标；`41fec6cb` 同步重构 `ProviderEditCard` 简化 API key 处理 + 按钮可见性逻辑。`8b9edfa9` `bd4fee98` `41fec6cb`
+
+- **OpenCode Zen provider 默认模型升级 + 旧配置迁移** (`app/core/providers/*`, `tests/core/test_opencode_zen_default_model_migration.py` 新增, `tests/core/test_provider_config_consistency.py` 新增): 升级 OpenCode Zen 默认模型；新增迁移逻辑保证用户已选模型不受全局默认值变更影响；含 provider 配置一致性测试。`c7cbd9a5`
+
+- **团队胶囊色稳定化（md5 哈希）** (`app/widgets/cards/team/team_capsule.py`, `app/widgets/cards/team/team_header.py`, `tests/widgets/test_team_capsule_color.py` 新增, `tests/widgets/test_team_header_context_menu.py` 新增): 团队胶囊颜色此前依赖随机种子或会话序，重启后会变化。现改为对 `team_id + member_id` 取 md5 前 6 位映射到色板，颜色跨会话稳定；团队 header 右键菜单功能补回归测试。`a374d76b`
+
+- **记忆汇编预算管理 + topic 处理** (`app/core/memory/compiler.py`, `tests/core/test_memory_compiler_budget.py` 新增): 记忆编译器新增预算管理（单次编译输出 token 上限）与 topic 维度处理；超预算按重要度截断而非简单抛错。`f4b40f3a`
+
+- **批次槽位 gap 高度守恒 + 多卡批次回收回归** (`app/widgets/cards/floating/batch_card.py`, `tests/widgets/test_batch_slot_gap_height.py` 新增, `tests/widgets/test_multi_card_batch_recycling.py` 新增): 批次卡多卡布局时 gap 区域会被虚拟化误判，导致上滚加载后高度跳变。现为每个槽位守恒 `gap_top + item + gap_bottom`，虚拟化回收时按槽位而非整体高度；新增 9 例回归测试。`efcf2bb8`
+
+- **CodeWebViewer 复制行为修复 + 选中状态** (`app/widgets/cards/code_web_viewer.py`, `tests/widgets/test_code_web_viewer_copy.py` 新增): 复制按钮偶发复制空文本，根因是 `QTextEdit.copy()` 在无选区时静默返回；现显式检测选区长度并提示用户。`f37fcab7`
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **CardManager.get_all_windows 恢复（修复 browser 插件拦截打开 AttributeError）** (`app/widgets/card_manager.py`, `tests/widgets/test_card_manager_get_all_windows.py` 新增): 此前某次重构把 `get_all_windows` 删除，导致 browser 插件拦截打开路径调用此方法抛 `AttributeError`；现恢复方法并加边界测试（空窗口列表、单一窗口、多窗口三类）。`65fb101f`
+
+- **懒加载畸变修复：T42 占位守恒钉死卡片高度后解除缺失** (`app/widgets/cards/floating/batch_card.py`, `app/widgets/cards/loading_card.py`, `app/widgets/cards/viewer_height_reporter.py`, `tests/widgets/test_*.py` 新增): T42 懒加载占位卡钉死高度后解除时机错误，viewer 高度上报只改 viewer 导致差值被压给页脚拉伸成竖条；pin/unpin 双出口解除（pin 解除路径与 unpin 解除路径分别校验）+ 回归测试覆盖三处出口。`3d14b60a`
+
+- **transport 契约缺陷闭环（sink 配对 + 流式声明兑现）** (`plugins/system-transports/`): 见上文"transport 契约收敛"段。`805aa737`
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **流式契约异常下沉到 stream_sink 契约层** (`plugins/system-transports/sinks/_contract.py`, `plugins/system-transports/transports/openai_chat.py`): 此前 transport 内抛 SDK 异常（`openai.APIError` 等）需在 worker 侧逐个 try/except；现下沉为 sink 契约层的 `StreamSinkError`，transport 转为产出 `error` 事件，worker 只关心事件流。`5d688919`
+
+- **chat/completions 路由迁移到 transport+sink 插件** (`app/core/workers/chat_worker.py`, `app/core/conversation/backend.py`): 见上文"路由迁移"段。`a6946c9f`
+
+#### 🎨 样式改进 (Style)
+
+- **ruff format 落地（transport per-request injection 改动）** (`plugins/system-transports/transports/openai_chat.py`, `app/core/workers/chat_worker.py`): 应用项目级 ruff format，per-request 注入代码段行宽/import 顺序/类型注解对齐到仓库统一风格。`dec22b81`
+
+#### 🔧 其他 (Chores & Build)
+
+- **marketplace 插件清单自动再生（×2）** (`marketplace/plugins/index.json`, `marketplace/plugins/manifest.json`): `[skip ci]` 标记，bot 按 `plugins/*/.drifox-plugin/plugin.json` 自动聚合产物；本次因新增 system-transports + gemini-oauth 改动触发生成。`4087252d` `6589c71f`
 
 ---
 
