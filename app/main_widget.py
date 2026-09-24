@@ -11903,7 +11903,10 @@ class OpenAIChatToolWindow(ToolWindow):
             targets = [share] * (len(alive) - 1) + [share + remainder]
         for card, target in zip(alive, targets):
             try:
-                card.setFixedHeight(max(1, target))
+                # pin_layout_height = setFixedHeight + 钉死标记：viewer 首个真实
+                # 高度上报时由卡片侧解除（_unpin_layout_height）。若只裸钉不解除，
+                # H 与内容实际高度的差会被布局压给气泡 + 页脚（页脚拉伸畸变）。
+                card.pin_layout_height(max(1, target))
             except (RuntimeError, AttributeError):
                 continue
 

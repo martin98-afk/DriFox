@@ -160,6 +160,10 @@ def prewarm_markdown_block_viewer() -> None:
         pass
 
 
+# Qt 的「无限制」尺寸常量（QWIDGETSIZE_MAX），message_card 内多处高度钳制共用
+_QWIDGETSIZE_MAX = 16777215
+
+
 def _qt_renderer_enabled() -> bool:
     """灰度开关：assistant 卡片正文用纯 Qt 块级渲染器替代 QWebEngineView。
 
@@ -13259,6 +13263,10 @@ class MessageCard(SimpleCardWidget):
         self._height_cache: Dict[int, int] = {}
         self._resize_preview_mode = False
         self._resize_preview_height = 0
+        # T42 占位守恒标记：批次重建时 _apply_placeholder_height 会临时把卡片
+        # 钉死在占位高度（min=max=H）；viewer 真实高度到达时解除（见
+        # _unpin_layout_height）。False = 高度由内容自适应。
+        self._layout_height_pinned = False
         self._options_were_visible_before_resize = False
         # [PERF] preview 期间 viewer height 目标值累积。_apply_viewer_height 在
         # preview 模式只写此字段，不真正 setFixedHeight（避免 Chromium 级联
@@ -15833,6 +15841,38 @@ class MessageCard(SimpleCardWidget):
             widget = widget.parentWidget()
         return None
 
+    def pin_layout_height(self, height: int) -> None:
+        """T42 占位守恒：把卡片钉死在起步高度（min=max），重建瞬间容器总高不变。
+
+        只作起步高度，不锁死：viewer 首个真实高度上报到达时由
+        ``_unpin_layout_height`` 解除。方法形式（而非调用方直接 setFixedHeight）
+        是为了让「钉死」带上标记，解除路径才有据可依。
+        """
+        try:
+            self.setFixedHeight(max(1, int(height)))
+            self._layout_height_pinned = True
+        except RuntimeError, AttributeError:
+            pass
+
+    def _unpin_layout_height(self) -> None:
+        """解除 T42 起步高度钉死，恢复高度由内容自适应。
+
+        为什么必须解除：钉死后 viewer 高度上报只改 viewer 自身的固定高度，
+        卡片的 min=max=H 不再跟随内容；H 与内容实际高度的差会被卡片布局压给
+        仅有的两个可伸缩项（气泡容器 + 页脚栏）——页脚模型胶囊带边框，拉伸后
+        成竖长条（真机畸变截图）；H 偏小时则裁掉内容底部。viewer 真实高度到达
+        的此刻解除，内容自然高度 ≈ H，解除与 viewer 落高在同一次布局内收敛，
+        无可见跳动（T42 防重建骤降的目的在此前窗口期已经达成）。
+        """
+        if not getattr(self, "_layout_height_pinned", False):
+            return
+        self._layout_height_pinned = False
+        try:
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(_QWIDGETSIZE_MAX)
+        except RuntimeError:
+            pass
+
     def _commit_viewer_height(self, height: int) -> None:
         """高度应用的统一出口。
 
@@ -15840,6 +15880,8 @@ class MessageCard(SimpleCardWidget):
         「一次布局 + 一次锚点修正」，与高度到达顺序无关；否则按原行为直接
         应用。流式卡片始终走直接路径，保证跟底不受批处理延迟影响。
         """
+        # viewer 真实高度到达 → T42 起步钉死完成使命，解除（幂等，未钉死零开销）
+        self._unpin_layout_height()
         batch = getattr(self, "_height_batch", None)
         if batch is None:
             batch = self._resolve_height_batch()
