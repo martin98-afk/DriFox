@@ -65,6 +65,21 @@ def test_empty_choices_still_emits_usage(transport):
     assert events[0].usage == {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
 
 
+# ---------- 2b. usage 携带缓存明细时透传 prompt_tokens_details（命中率统计依赖） ----------
+
+
+def test_usage_passes_through_prompt_tokens_details(transport):
+    details = SimpleNamespace(cached_tokens=1024)
+    usage = SimpleNamespace(prompt_tokens=5000, completion_tokens=2, total_tokens=5002, prompt_tokens_details=details)
+    events = list(transport.to_events([_chunk(choices_empty=True, usage=usage)]))
+    assert events[0].type == "usage"
+    assert events[0].usage["prompt_tokens_details"] == {"cached_tokens": 1024}
+    # 无明细时不产出该键（保持向后兼容的精确形状）
+    plain = SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+    events2 = list(transport.to_events([_chunk(choices_empty=True, usage=plain)]))
+    assert "prompt_tokens_details" not in events2[0].usage
+
+
 # ---------- 3. 工具调用：首 chunk 带 id+name，后续仅 index+arguments ----------
 
 
@@ -328,11 +343,10 @@ def test_non_stream_end_to_end_via_create_stream(transport):
     class _Client:
         chat = _Chat()
 
-    stream = transport.create_stream(
-        {"模型名称": "o1-preview"}, [{"role": "user", "content": "x"}], client=_Client()
-    )
+    stream = transport.create_stream({"模型名称": "o1-preview"}, [{"role": "user", "content": "x"}], client=_Client())
     events = list(stream)
     assert [e.type for e in events] == ["content_delta"]
+
 
 # ---------- 15. 并发隔离（回归：transport 共享单例被多 worker 互相覆盖） ----------
 

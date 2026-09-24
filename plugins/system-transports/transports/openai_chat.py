@@ -351,14 +351,19 @@ class OpenAIChatTransport:
 
     @staticmethod
     def _usage_event(usage: Any) -> StreamEvent:
-        return StreamEvent(
-            type="usage",
-            usage={
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
-                "total_tokens": getattr(usage, "total_tokens", 0) or 0,
-            },
-        )
+        usage_dict: Dict[str, Any] = {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+            "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+        }
+        # 缓存命中明细必须透传：CacheTracker 的 OpenAI 语义只认
+        # prompt_tokens_details.cached_tokens，缺失即命中率恒 0（2026-09-24 回归修复）
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is not None:
+            usage_dict["prompt_tokens_details"] = {
+                "cached_tokens": getattr(details, "cached_tokens", 0) or 0,
+            }
+        return StreamEvent(type="usage", usage=usage_dict)
 
     # ---------- 错误映射（自愈 kind，修复动作由 worker 执行） ----------
 

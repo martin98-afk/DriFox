@@ -16946,6 +16946,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if not found_any:
             return
 
+        # 用户主动点按钮 = 显式要求查看。auto_hide/手动关闭后 _batch_started=False
+        # 且任务行仍在（show_completed_task 因 task_id in _task_rows 早退，不会
+        # setVisible），必须重新置位，否则分层谓词(_batch_started and _task_rows)
+        # 恒假，refresh_layer 不会让卡片重现 → 点击无反应。与 /subagents 命令路径
+        # （_handle_subagents_command）语义一致。
+        compact._batch_started = True
+
         # 触发状态层重算（谓词：批次活跃且有任务行）
         self._card_manager.refresh_layer(self._window_id, "status")
 
