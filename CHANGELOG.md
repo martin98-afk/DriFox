@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.6.3] - 2026-09-24 (重新发布 #3)
+## [v0.6.3] - 2026-09-24 (重新发布 #4)
 
-自上一版本以来的变更（累计） | 提交数：45 · 文件变更：184 · +17198/-2356 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更（累计） | 提交数：46 · 文件变更：185 · +17201/-2356 | 贡献者：dingma, drifox-bot, mading
 
 ### ⚠️ 行为变更 (Breaking Changes)
 
@@ -136,6 +136,14 @@ All notable changes to this project will be documented in this file.
 #### 🔧 其他 (Chores & Build)
 
 - **marketplace 插件清单自动再生（×2）** (`marketplace/plugins/index.json`, `marketplace/plugins/manifest.json`): `[skip ci]` 标记，bot 按 `plugins/*/.drifox-plugin/plugin.json` 自动聚合产物；本次因新增 system-transports + gemini-oauth 改动触发生成。`4087252d` `6589c71f`
+
+### 🆕 重新发布 #4 增量（自 v0.6.3 重新发布 #3 起）
+
+基于上次发布 `v0.6.3 (重新发布 #3)` 的增量变更 | 提交数：1 · 文件变更：1 · +3/-0 | 贡献者：mading
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **打包补收 app.plugins.sdk 隐藏导入（修复传输器未注册报错）** (`build.py`): 插件源文件由 PyInstaller 运行时动态加载，其依赖不被静态分析收集；`app/plugins/sdk.py` 仅被插件 import、主代码零静态引用，漏打导致打包版 `system-transports` / `system-stream-sinks` 加载失败，发起对话报「未注册 chat/completions 传输器」。现加入 `_hidden_imports`。`346a438d`
 
 ---
 
