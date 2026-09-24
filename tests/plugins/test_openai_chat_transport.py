@@ -162,7 +162,6 @@ def test_build_request_kwargs_basic(transport, monkeypatch):
     assert out["extra_body"]["max_tokens"] == 100
     # 认证头不在组装结果内（由 worker 统一算后经 create_stream 注入）
     assert "_auth_headers" not in out
-    assert out["_is_o1_model"] is False
 
 
 def test_build_request_kwargs_skips_sampling_params(transport, monkeypatch):
@@ -176,7 +175,6 @@ def test_build_request_kwargs_skips_sampling_params(transport, monkeypatch):
 def test_build_request_kwargs_o1_skips_sampling(transport, monkeypatch):
     monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
     out = transport.build_request_kwargs({"模型名称": "o1-preview", "温度": 0.5, "top_p": 0.9})
-    assert out["_is_o1_model"] is True
     assert "temperature" not in out["extra_body"] and "top_p" not in out["extra_body"]
 
 
@@ -267,5 +265,80 @@ def test_create_stream_uses_model_level_streaming_flag(transport, monkeypatch):
         assert captured["stream"] is False
         transport.create_stream({"模型名称": "gpt-4o"}, [{"role": "user", "content": "x"}])
         assert captured["stream"] is True
+    finally:
+        transport.set_client_factory(None)
+
+
+# ---------- 9. 非流式 ChatCompletion 归一（o1/o3 stream=False） ----------
+
+
+def _completion(content=None, tool_calls=None, reasoning=None):
+    """stream=False 时 SDK 返回的单对象形状（choices[0].message 携带最终态）"""
+    message = SimpleNamespace(content=content, tool_calls=tool_calls, reasoning_content=reasoning)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+
+
+def test_non_stream_completion_yields_content_only(transport):
+    """非流式单对象 → content_delta；不发 usage/finish（sink 非流式分支负责记账）"""
+    events = list(transport.to_events(_completion(content="你好")))
+    assert [(e.type, e.text) for e in events] == [("content_delta", "你好")]
+
+
+def test_non_stream_completion_reasoning_before_content(transport):
+    """思考先于正文 emit，保持 UI 思考块在前"""
+    events = list(transport.to_events(_completion(content="答", reasoning="想")))
+    assert [e.type for e in events] == ["reasoning_delta", "content_delta"]
+
+
+def test_non_stream_completion_tool_calls_normalized_as_begin_args_pair(transport):
+    """tool_call 归一为 begin+args_delta 对（sink 按 begin 建 buffer，args 走既有解析路径）"""
+    tc = SimpleNamespace(
+        index=0, id="call_1", function=SimpleNamespace(name="read", arguments='{"p":1}'), thought_signature="sig"
+    )
+    events = list(transport.to_events(_completion(tool_calls=[tc])))
+    assert [(e.type, e.tool_call_id, e.name, e.text) for e in events] == [
+        ("tool_call_begin", "call_1", "read", ""),
+        ("tool_args_delta", "call_1", "read", '{"p":1}'),
+    ]
+    assert events[0].thought_signature == "sig"
+
+
+def test_non_stream_completion_missing_id_falls_back_to_index(transport):
+    tc = SimpleNamespace(index=2, id="", function=SimpleNamespace(name="ls", arguments="{}"), thought_signature="")
+    events = list(transport.to_events(_completion(tool_calls=[tc])))
+    assert events and all(e.tool_call_id == "index_2" for e in events)
+
+
+def test_non_stream_completion_unnamed_tool_call_skipped(transport):
+    """无名的完整调用无法建 buffer（与流式孤立 delta 同规则），跳过"""
+    tc = SimpleNamespace(index=0, id="call_x", function=SimpleNamespace(name="", arguments="{}"), thought_signature="")
+    assert list(transport.to_events(_completion(tool_calls=[tc]))) == []
+
+
+def test_non_stream_completion_empty_choices_yields_no_events(transport):
+    """空响应 → 空事件流，交给 sink 的非流式 usage 分支与空响应检测兜底"""
+    assert list(transport.to_events(SimpleNamespace(choices=[]))) == []
+
+
+def test_non_stream_end_to_end_via_create_stream(transport):
+    """端到端：o1 配置 → create(stream=False) 返回单对象 → 归一为 content 事件"""
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            assert kwargs["stream"] is False
+            return _completion(content="非流式回复")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    transport.set_client_factory(lambda: _Client())
+    try:
+        stream = transport.create_stream({"模型名称": "o1-preview"}, [{"role": "user", "content": "x"}])
+        events = list(stream)
+        assert [e.type for e in events] == ["content_delta"]
     finally:
         transport.set_client_factory(None)
