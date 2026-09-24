@@ -348,10 +348,19 @@ class RuntimeComponentLoader:
 
         语义：注销该插件旧组件 → 恢复被其覆盖的低等级根同名组件 → 重新注册
         该插件当前模块（高等级根再次覆盖）→ 最终状态与全量重扫一致。
+
+        🛡️ 失败回滚：重注册全部失败（如新代码 import 错误）且注销前确有组件时，
+        回滚到旧模块——注册表空态会让所有对话请求撞死在 resolve 报错上，
+        旧组件可用性优于空态（半新半旧优于全无）。回滚仍失败则保留空态并 error。
         """
         with self._scan_lock:
             # 先捕获来源等级（_unload_source 会清除 _source_kind 记录）
             removed_rank = _ROOT_KIND_PRIORITY.get(self._source_kind.get(f"plugin:{plugin_name}", "system"), 0)
+            removed_items = self._occupied_by_source.get(f"plugin:{plugin_name}", set())
+            had_items = bool(removed_items)
+            old_mod_names = [
+                m for m in sys.modules if m.startswith(f"drifox_rt_{self._comp_dir}_{plugin_name}_")
+            ]
             removed_items = self._unload_source(plugin_name)
             if removed_items:
                 logger.info(f"[RuntimeLoader] 重载前注销插件组件: {plugin_name}（{removed_items} 项）")
@@ -372,6 +381,7 @@ class RuntimeComponentLoader:
                 )
                 return
             roots = self._scan_roots_cache or _plugin_roots()
+            loaded_any = False
             for root in roots:
                 if not (root / plugin_name).is_dir():
                     continue
@@ -381,7 +391,31 @@ class RuntimeComponentLoader:
                 for py in sorted(comp.glob("*.py")):
                     if py.name.startswith("_"):
                         continue
-                    self._load_module(py, plugin_name, _root_kind(root))
+                    if self._load_module(py, plugin_name, _root_kind(root)):
+                        loaded_any = True
+            # 🛡️ 失败回滚：新模块全炸且之前有组件 → 旧模块重新 exec 注册
+            if not loaded_any and had_items and old_mod_names:
+                logger.warning(f"[RuntimeLoader] {plugin_name}:{self._comp_dir} 重载失败，回滚到旧模块")
+                for mod_name in old_mod_names:
+                    mod = sys.modules.get(mod_name)
+                    register = getattr(mod, "register", None) if mod is not None else None
+                    if not callable(register):
+                        continue
+                    try:
+                        proxy = _RegistryProxy(
+                            self._registry, plugin_name, _ROOT_KIND_PRIORITY and "system", self._occupied,
+                            self._lock, component=self._comp_dir,
+                        )
+                        register(proxy)
+                        with self._lock:
+                            self._sources.add(f"plugin:{plugin_name}")
+                            self._occupied_by_source.setdefault(f"plugin:{plugin_name}", set()).update(
+                                proxy._occupied_items
+                            )
+                            self._source_kind[f"plugin:{plugin_name}"] = "system"
+                        logger.info(f"[RuntimeLoader] 回滚成功: {plugin_name}:{self._comp_dir}")
+                    except Exception as rollback_exc:
+                        logger.error(f"[RuntimeLoader] 回滚失败 {mod_name}: {rollback_exc}")
 
     def _load_module(self, py: Path, plugin_name: str, kind: str) -> bool:
         mod_name = f"drifox_rt_{self._comp_dir}_{plugin_name}_{py.stem}"

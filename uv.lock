@@ -261,7 +261,7 @@ wheels = [
 
 [[package]]
 name = "drifox"
-version = "0.6.2"
+version = "0.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },

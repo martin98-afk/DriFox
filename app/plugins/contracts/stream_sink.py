@@ -18,7 +18,7 @@ EVENT_TYPES 为闭集：新增事件类型属契约变更，需同步改本模�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Protocol, Tuple, runtime_checkable
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Set, Tuple, runtime_checkable
 
 # 事件类型闭集（协议插件可产出、接收器须全部处理的类型）
 EVENT_TYPES = frozenset(
@@ -32,6 +32,21 @@ EVENT_TYPES = frozenset(
         "finish",  # 流结束 → finish_reason（stop/length/content_filter）
     }
 )
+
+
+class StreamInterruptedError(RuntimeError):
+    """流式响应被服务端提前截断/过滤/异常空响应。
+
+    用于区分「正常完成」与「服务端截断」：
+    - finish_reason='length'：max_tokens 截断，回复不完整
+    - finish_reason='content_filter'：内容被安全过滤
+    - 收到 chunk 但无任何输出内容（无 content/reasoning/tool_calls）
+    抛出后由 _handle_error 给出明确提示，避免静默当正常完成。
+
+    契约归属：截断/过滤/空响应是 sink.consume 的异常语义（见 StreamEventSink），
+    异常类型必须在契约层定义——原置于 chat_worker 迫使 sink 插件 import 5000 行
+    worker 模块链（lazy import 只掩盖循环，不消除耦合）。
+    """
 
 
 @dataclass
@@ -68,6 +83,58 @@ class StreamEvent:
     def __post_init__(self) -> None:
         if self.type not in EVENT_TYPES:
             raise ValueError(f"未知流式事件类型: {self.type!r}（允许: {sorted(EVENT_TYPES)}）")
+
+
+@runtime_checkable
+class SinkContext(Protocol):
+    """worker 侧流式上下文契约（实现：app.core.workers.stream_sink_context.StreamSinkContext）。
+
+    sink 插件只依赖本协议，不 import worker。属性名即 ctx 公开名，
+    实现侧经 _ATTR_MAP 代理到 worker 私有属性。
+    """
+
+    # 运行时字段（worker 每次 consume 前 bind）
+    response: Any
+    stream: bool
+    token_update_callback: Any
+    # 回调与常量
+    tool_start_callback: Any
+    DEFERRED_PREVIEW_TOOLS: Set[str]
+    max_param_retry_count: int
+    # 流式过程状态（读写）
+    response_content_blocks: List[Dict[str, Any]]
+    current_tool_calls: Dict[str, Dict[str, Any]]
+    tool_calls_buffer: Dict[str, Dict[str, Any]]
+    tool_calls_index_to_id: Dict[Any, str]
+    response_chunks: List[str]
+    chunks_total_len: int
+    reasoning_content: str
+    reasoning_chunks: List[str]
+    last_usage: Optional[Dict[str, int]]
+    cache_tracker: Any
+    waiting_tool_params: Dict[str, Dict[str, Any]]
+    previewed_tool_call_ids: Set[str]
+    last_progress_len: Dict[str, int]
+    last_progress_ts: Dict[str, float]
+    last_est_len: Dict[str, int]
+    last_line_est: Dict[Any, Tuple[int, int]]
+    is_cancelled: bool
+    streaming_rss_base: float
+    mem_total_chunks_logged: int
+    current_response: Any
+    stream_lock: Any
+    last_ttft_ms: float
+    llm_req_t0: float
+    mem_diag_enabled: bool
+    accumulated_tokens: int
+
+    def emit(self, signal_name: str, *args: Any) -> None:
+        """发射 worker 信号（信号对象由适配层查表补齐）"""
+        ...
+
+    def get_reasoning_content(self) -> str: ...
+
+    def extract_thought_signature(self, tc: Any) -> str: ...
 
 
 @runtime_checkable

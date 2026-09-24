@@ -27,7 +27,7 @@ import os
 import time
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
-# 顶层常量与 lazy import 兼容（worker 内通过 from app.core.workers.chat_worker 导入）
+# 可选依赖：psutil 用于内存诊断（不强制）
 try:
     import psutil as _psutil
 
@@ -38,15 +38,14 @@ except ImportError:
 
 from loguru import logger
 
-from app.core.conversation.message_content import append_text_block
-
-
-# StreamInterruptedError 定义在 app.core.workers.chat_worker。
-# 为避免循环 import（sink 也可能在 worker 模块初始化阶段被加载），在这里做 lazy import：
-def _get_stream_interrupted_error():
-    from app.core.workers.chat_worker import StreamInterruptedError
-
-    return StreamInterruptedError
+from app.plugins.contracts.stream_sink import SinkContext, StreamEvent, StreamInterruptedError
+from app.plugins.sdk import (
+    LINE_ESTIMATE_STEP,
+    append_text_block,
+    build_progress_payload,
+    extract_partial_path,
+    should_emit_progress,
+)
 
 
 class OpenAIChatStreamSink:
@@ -71,10 +70,11 @@ class OpenAIChatStreamSink:
 
     id = "openai_chat"
 
-    def consume(self, events: Iterable[Any], ctx: Any) -> Tuple[bool, bool]:
+    def consume(self, events: Iterable[Any], ctx: "SinkContext") -> Tuple[bool, bool]:
         """消费 StreamEvent 序列，行为等价于原 chat_worker._process_response。
 
         返回 (tool_calls_found, tool_args_pending)：给 worker 决定后续工具执行流。
+        ctx 满足 app.plugins.contracts.stream_sink.SinkContext 协议。
         """
         # 🛡️ 保存响应引用，供 cancel() 安全中断流式等待。
         # 锁内写入：与 _abort_current_stream 的锁内读取配对，避免 cancel 抢在
@@ -461,12 +461,6 @@ class OpenAIChatStreamSink:
                         except json.JSONDecodeError:
                             # 短参数的 JSON 解析失败，记录到等待队列
                             # 同时也发射长度进度，避免 UI 一直卡在"正在准备参数..."
-                            from app.core.tools.tool_arg_lines import (
-                                LINE_ESTIMATE_STEP,
-                                build_progress_payload,
-                                extract_partial_path,
-                                should_emit_progress,
-                            )
 
                             prev = ctx.last_progress_len.get(tc_id, 0)
                             _now_ms = time.monotonic() * 1000.0
@@ -505,12 +499,6 @@ class OpenAIChatStreamSink:
                     else:
                         # 参数已超过 1000 字符，跳过逐块 JSON 解析以节省开销
                         # 但仍推送长度进度 + 累积尾部预览，让 UI 显示接收进度
-                        from app.core.tools.tool_arg_lines import (
-                            LINE_ESTIMATE_STEP,
-                            build_progress_payload,
-                            extract_partial_path,
-                            should_emit_progress,
-                        )
 
                         prev = ctx.last_progress_len.get(tc_id, 0)
                         _now_ms = time.monotonic() * 1000.0
@@ -702,12 +690,12 @@ class OpenAIChatStreamSink:
         if not ctx.is_cancelled:
             if last_finish_reason == "length":
                 # max_tokens 截断：回复不完整，明确提示（保留已接收 partial）
-                raise _get_stream_interrupted_error()(
+                raise StreamInterruptedError(
                     "[输出截断] 模型回复被 max_tokens 上限截断（finish_reason=length），"
                     "回复内容不完整。请调大「最大Token」设置，或让模型分步输出。"
                 )
             if last_finish_reason == "content_filter":
-                raise _get_stream_interrupted_error()(
+                raise StreamInterruptedError(
                     "[内容过滤] 模型回复被内容安全过滤器拦截（finish_reason=content_filter），"
                     "已接收内容保留。请调整提问或回复内容后重试。"
                 )
@@ -722,7 +710,7 @@ class OpenAIChatStreamSink:
                     else getattr(ctx, "reasoning_content", "") or ""
                 )
                 if not has_text and not has_reasoning:
-                    raise _get_stream_interrupted_error()(
+                    raise StreamInterruptedError(
                         "[空响应] 模型返回了空响应（未生成任何内容），可能是服务端过载或网络异常。请稍后重试。"
                     )
 

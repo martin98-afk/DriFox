@@ -17,11 +17,15 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterator, List, Optional
 
-from app.constants import PARAM_SCHEMA
-from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
-from app.core.modelmeta.model_capabilities import get_model_capabilities, normalize_reasoning_effort
-from app.core.modelmeta.provider_profile import get_provider_profile
 from app.plugins.contracts.stream_sink import StreamEvent
+from app.plugins.sdk import (
+    PARAM_SCHEMA,
+    get_model_capabilities,
+    get_provider_profile,
+    normalize_reasoning_effort,
+    provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS,
+    build_openai_client,
+)
 
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
@@ -86,7 +90,6 @@ class OpenAIChatTransport:
     def _get_client(self, llm_config: Dict[str, Any]):
         if self._client_factory is not None:
             return self._client_factory()
-        from app.utils.http_client import build_openai_client
 
         return build_openai_client(
             api_key=str(llm_config.get("API_KEY", "") or ""),
@@ -134,7 +137,6 @@ class OpenAIChatTransport:
         return {
             "model": model,
             "extra_body": extra_body,
-            "_is_o1_model": is_o1,
         }
 
     @staticmethod
@@ -209,16 +211,23 @@ class OpenAIChatTransport:
     # ---------- 响应归一（纯形状转换，零 worker 状态） ----------
 
     def to_events(self, chunks) -> Iterator[StreamEvent]:
-        """OpenAI SDK chunk 流 → StreamEvent 流。
+        """OpenAI SDK 响应 → StreamEvent 流（chunk 流 / 非流式 completion 二选一）。
 
-        覆盖形状（每种都有对应单测）：
+        流式（Stream 迭代器）覆盖形状（每种都有对应单测）：
         - 空 choices + usage（部分模型 usage 在独立 chunk）
         - delta.content → content_delta
         - delta.reasoning_content → reasoning_delta
         - delta.tool_calls：首 chunk 带 id+name，后续 chunk 仅 index+arguments
         - thought_signature 透传（Gemini 多轮必需）
         - finish_reason → finish（None 不发）
+
+        非流式（stream=False，o1/o3 系列）：ChatCompletion 单对象，归一见
+        _completion_to_events。判据：响应对象自身携带 list 型 choices
+        （chunk 流迭代器无该属性，不会被误判）。
         """
+        if isinstance(getattr(chunks, "choices", None), list):
+            yield from self._completion_to_events(chunks)
+            return
         for chunk in chunks:
             choices = getattr(chunk, "choices", None) or []
             usage = getattr(chunk, "usage", None)
@@ -270,6 +279,56 @@ class OpenAIChatTransport:
                 yield self._usage_event(usage)
             if finish_reason:
                 yield StreamEvent(type="finish", finish_reason=str(finish_reason))
+
+    @classmethod
+    def _completion_to_events(cls, response: Any) -> Iterator[StreamEvent]:
+        """stream=False 的 ChatCompletion 单对象 → StreamEvent（o1/o3 等非流式通道）。
+
+        与流式路径同构：tool_call 归一为 begin+args_delta 对（sink 按 begin 建
+        buffer、args 走既有 JSON 解析路径）。usage / finish 不在此发：
+        - usage：sink 对非流式（ctx.stream=False）统一从 response 对象记账，
+          重复发会双份 record_usage；
+        - finish：非流式无 SSE 截断概念，缺席时 sink 截断检测语义不变。
+        """
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            return
+        message = getattr(choices[0], "message", None)
+        if message is None:
+            return
+        reasoning = getattr(message, "reasoning_content", None)
+        if reasoning:
+            # 思考先于正文 emit，保持 UI 思考块在前
+            yield StreamEvent(type="reasoning_delta", text=reasoning)
+        content = getattr(message, "content", None)
+        if content:
+            yield StreamEvent(type="content_delta", text=content)
+        for tc in getattr(message, "tool_calls", None) or []:
+            func = getattr(tc, "function", None)
+            name = (getattr(func, "name", "") if func is not None else "") or ""
+            if not name:
+                # 无名的完整调用无法建 buffer（与流式孤立 delta 同规则），跳过
+                continue
+            args = (getattr(func, "arguments", "") if func is not None else "") or ""
+            tc_index = getattr(tc, "index", None)
+            index = int(tc_index) if isinstance(tc_index, int) else -1
+            tc_id = (getattr(tc, "id", "") or "") or (f"index_{index}" if index != -1 else "completion_0")
+            signature = getattr(tc, "thought_signature", "") or ""
+            yield StreamEvent(
+                type="tool_call_begin",
+                tool_call_id=tc_id,
+                name=name,
+                thought_signature=signature,
+                index=index,
+            )
+            if args:
+                yield StreamEvent(
+                    type="tool_args_delta",
+                    tool_call_id=tc_id,
+                    name=name,
+                    text=args,
+                    index=index,
+                )
 
     @staticmethod
     def _usage_event(usage: Any) -> StreamEvent:

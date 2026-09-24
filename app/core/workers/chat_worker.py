@@ -39,6 +39,8 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
+from app.plugins.contracts.stream_sink import StreamInterruptedError  # noqa: F401  契约层定义，此处兼容 re-export
+
 from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
@@ -61,17 +63,6 @@ _SHARED_TOOL_POOL = concurrent.futures.ThreadPoolExecutor(
 
 # 预编译正则表达式
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-
-
-class StreamInterruptedError(RuntimeError):
-    """流式响应被服务端提前截断/过滤/异常空响应。
-
-    用于区分「正常完成」与「服务端截断」：
-    - finish_reason='length'：max_tokens 截断，回复不完整
-    - finish_reason='content_filter'：内容被安全过滤
-    - 收到 chunk 但无任何输出内容（无 content/reasoning/tool_calls）
-    抛出后由 _handle_error 给出明确提示，避免静默当正常完成。
-    """
 
 
 def _check_team_member(backend) -> bool:
@@ -1738,27 +1729,56 @@ class OpenAIChatWorker(QThread):
     def _get_chat_transport(self):
         """解析 chat/completions 使用的 transport（TransportRegistry 默认实现）。
 
-        首次解析时注入 client_factory（复用 worker 的 httpx 连接池）与
-        cap_max_tokens（token 上限钳制），使插件行为与原 _build_api_request_kwargs 一致。
+        每次调用现取注册表并做每 worker 包装，不缓存插件实例：
+        1) 注册表单例会被热重载整体替换（注销旧→注册新），缓存会跨周期持有
+           已注销实例——旧实例上的 client_factory 指向本 worker 连接池，热重载后
+           继续使用等于把两个周期的连接池混用，新标签页建池会让其他窗口飞行中的
+           流式连接被抽池（ReadError → 对话概率性中断）。
+        2) 注册表 resolve 是锁内字典查询，每轮现取零成本。
+        注入用轻量 wrapper 承载（闭包捕获 self），不写回插件单例——单例被多
+        worker 共享时逐实例注入会互相覆盖 client_factory。
         """
-        # 用 __dict__.get 而非 getattr：测试用 object.__new__ 构造的 mock worker
-        # 未走 __init__，getattr 会触发 Qt super().__init__() 检查抛 RuntimeError
-        existing = self.__dict__.get("_chat_transport")
-        if existing is not None:
-            return existing
         from app.plugins.registries.transport_registry import TransportRegistry
 
         transport = TransportRegistry.get_instance().resolve()
         if transport is None:
             raise RuntimeError("未注册 chat/completions 传输器（system-transports 插件未启用），无法发起对话请求")
-        if hasattr(transport, "set_client_factory"):
-            transport.set_client_factory(self._get_http_client)
-        if hasattr(transport, "set_cap_max_tokens"):
-            # 必需：上游 max_tokens 硬限定各不相同（如 MiniMax [1,131072]），
-            # 不钳制时用户配置的极值直接透传会被 400 拒（错误码 1210）
-            transport.set_cap_max_tokens(self._cap_max_output_tokens)
-        self._chat_transport = transport
-        return transport
+
+        class _WorkerBoundTransport:
+            """每 worker 独享视图：委托插件实现，client_factory/cap 绑定本 worker。"""
+
+            def __init__(self, impl, worker):
+                self._impl = impl
+                self._worker = worker
+                self.id = getattr(impl, "id", "openai_chat")
+                self.supports_streaming = getattr(impl, "supports_streaming", True)
+                sink_id = getattr(impl, "sink_id", None)
+                if sink_id is not None:
+                    self.sink_id = sink_id
+
+            def supports_streaming_for(self, llm_config):
+                probe = getattr(self._impl, "supports_streaming_for", None)
+                if callable(probe):
+                    return bool(probe(llm_config))
+                return self.supports_streaming
+
+            def create_stream(self, llm_config, messages, tools=None, auth_headers=None, api_messages=None):
+                impl = self._impl
+                if hasattr(impl, "set_client_factory"):
+                    impl.set_client_factory(self._worker._get_http_client)
+                if hasattr(impl, "set_cap_max_tokens"):
+                    # 必需：上游 max_tokens 硬限定各不相同（如 MiniMax [1,131072]），
+                    # 不钳制时用户配置的极值直接透传会被 400 拒（错误码 1210）
+                    impl.set_cap_max_tokens(self._worker._cap_max_output_tokens)
+                return impl.create_stream(
+                    llm_config, messages, tools=tools, auth_headers=auth_headers, api_messages=api_messages
+                )
+
+            def classify_error(self, error_str):
+                probe = getattr(self._impl, "classify_error", None)
+                return probe(error_str) if callable(probe) else None
+
+        return _WorkerBoundTransport(transport, self)
 
     def _transport_supports_streaming(self, transport) -> bool:
         """读 transport 的流式能力声明（不再按模型名硬编码）。
