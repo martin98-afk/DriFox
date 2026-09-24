@@ -103,6 +103,7 @@ def test_stream_sink_registry_register_and_unregister():
     reg.unregister_source("_probe_source")
     assert reg.resolve("_probe_sink") is None
 
+
 # ---------- transport 无状态纪律（per-request 注入分流） ----------
 
 
@@ -130,7 +131,16 @@ def test_worker_signature_probe_detects_new_and_old_impls():
     from app.core.workers.chat_worker import _accepts_per_request_client
 
     class NewImpl:
-        def create_stream(self, llm_config, messages, tools=None, auth_headers=None, api_messages=None, client=None, cap_max_tokens=None):
+        def create_stream(
+            self,
+            llm_config,
+            messages,
+            tools=None,
+            auth_headers=None,
+            api_messages=None,
+            client=None,
+            cap_max_tokens=None,
+        ):
             return iter(())
 
     class OldImpl:

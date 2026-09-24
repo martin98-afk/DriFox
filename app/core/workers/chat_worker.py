@@ -76,7 +76,7 @@ def _accepts_per_request_client(fn) -> bool:
 
     try:
         params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return True
