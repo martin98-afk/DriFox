@@ -23,6 +23,47 @@ import os
 
 from app.plugins.contracts.ui_module import UIModule
 
+# ── 对话区滚轮平滑参数（2026-09-26 手感修复） ──────────────────────────────
+# 背景：qfluentwidgets 的 FixedStepSmoothScrollEngine 默认
+# duration=400 / stepRatio=1.5 / acceleration=1 / SmoothMode.LINEAR，
+# 实测在用户自然滚速（200-400ms 一格）下产生「划一下停一下」：
+#   · LINEAR 插值把单格摊成三角形速度曲线——起步/收尾各 2-3 帧近乎静止，
+#     中间冲到峰值，每格一次「等→冲→停」，慢滚时被感知为两次独立停顿；
+#   · stepRatio=1.5 叠 acceleration=1，单格实滚 96-109px，而原生
+#     QScrollBar 基准是 60px，位移过冲且与系统内其它列表不一致；
+#   · duration=400ms 长于用户的滚轮间隔，队列来不及消化，新旧动画叠加。
+#
+# 定参依据（真实 60fps 定时器驱动，逐格扫过 100/200/350/500ms 四档滚轮间隔）：
+#   CONSTANT 匀速插值消除头尾死区（静止占比 400ms 间隔下 0%，LINEAR 为 48%）；
+#   stepRatio=1.0 + acceleration=0 让单格对齐原生 60px（实测 104px → 52-60px）；
+#   duration=500ms 在稳态抖动（50%）与队列积压（峰 1-3，不断流）间平衡最优。
+#
+# ⚠️ stepsTotal = fps * duration / 1000 必须为整数，否则 stepsLeftQueue
+#    永不排空 → 滚动彻底卡死（实测 233/267ms 会留下 3s+ 静止段）。
+#    duration 请只取 200 / 300 / 400 / 500 / 600 这类 60 的整倍数值。
+_SCROLL_SMOOTH_DURATION = 500
+_SCROLL_SMOOTH_STEP_RATIO = 1.0
+_SCROLL_SMOOTH_ACCELERATION = 0
+
+
+def _configure_smooth_scroll(scroll_area) -> None:
+    """收敛对话区滚轮手感：匀速插值 + 原生位移量 + 无加速度放大。
+
+    在 build() 中于滚动区创建后立即调用。任何一步失败都不影响滚动区
+    可用性（qfluentwidgets 内部结构变化时退化为默认手感，不抛异常）。
+    """
+    from qfluentwidgets.common.smooth_scroll import SmoothMode
+
+    try:
+        smooth = scroll_area.smoothScroll
+        smooth.setSmoothMode(SmoothMode.CONSTANT)
+        for engine in (smooth.fixedStepScrollEngine, smooth.adaptiveScrollEngine):
+            engine.duration = _SCROLL_SMOOTH_DURATION
+            engine.stepRatio = _SCROLL_SMOOTH_STEP_RATIO
+            engine.acceleration = _SCROLL_SMOOTH_ACCELERATION
+    except Exception:
+        pass
+
 
 def _resolve_chat_image(image: str) -> str:
     """解析图片路径（chat_area_module 局部 helper，复用 theme_manager.get_theme_resource）
@@ -67,6 +108,7 @@ class ChatAreaModule(UIModule):
         host.chat_scroll_area.setWidgetResizable(True)
         host.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
         host.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        _configure_smooth_scroll(host.chat_scroll_area)
 
         host.chat_container = QWidget()
         host.chat_container.setStyleSheet("background: transparent;")

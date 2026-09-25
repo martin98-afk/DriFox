@@ -2595,6 +2595,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_session_initialized", False):
             super().showEvent(event)
             self._connect_opacity_signal()
+            # 切回标签页补置底（延迟一拍：Qt 在切回瞬间尚未重算滚动条上界）
+            QTimer.singleShot(0, lambda: self._safe_timer_call(self._calibrate_scroll_on_reshow))
             return
         self._session_initialized = True
         # 标记正在初始化，防止窗口在初始化完成前被关闭导致竞态条件
@@ -17675,6 +17677,34 @@ class OpenAIChatToolWindow(ToolWindow):
                 time.monotonic() + sticky_ms / 1000.0,
             )
         self._scroll_bottom_timer.start()
+
+    def _calibrate_scroll_on_reshow(self):
+        """切回标签页时的滚动校准（由 ``showEvent`` 延迟一拍调用）。
+
+        背景（离屏 Qt 探针实测）：QStackedWidget 隐藏页里 Qt 完全停更滚动条
+        —— ``maximum()`` 冻结在切走时的值、``setValue()`` 被静默钳制
+        （``setValue(9999)`` 后 ``value`` 仍为 0），而容器 ``sizeHint()``
+        依旧准确。于是切走期间卡片高度增长不会反映到滚动条上，切回的瞬间
+        ``value`` 停在旧位置，距底 gap 可达数千 px。
+
+        负责追平的调用点此前不存在：``TabManagerWindow._on_tab_selected``
+        只做浮动卡投影/主题补刷/桌宠/工作台；补渲路径
+        （``_render_deferred → showEvent → _schedule_render``）不置
+        ``_content_just_loaded``，heightChanged 只走单卡 delta 增量补偿，
+        追不上一整段积压。
+
+        away 守卫：切走前用户正在读历史时保持其阅读位置，不打扰。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not self._should_follow_bottom():
+            return
+        # 先校正上界（Qt 切回时可能还没算到真实高度），再起 sticky 置底：
+        # 复用既有 _maintain_bottom_anchor + _ensure_at_bottom(retries=8) 收敛链，
+        # 覆盖补渲期间异步到达的卡片高度。
+        self._scroll_max_cache = None
+        self._sync_scroll_maximum()
+        self._scroll_to_bottom(sticky_ms=900)
 
     def _do_scroll_to_bottom(self):
         # 窗口已销毁时跳过：避免 QTimer 回调在 closeEvent 之后访问已释放的 chat_scroll_area
