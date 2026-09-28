@@ -84,8 +84,12 @@ def _is_text_chat_model(model_id: str) -> bool:
     return True
 
 
-def fetch_provider_models(api_url: str, api_key: str, provider_name: str, auth_type: str = "bearer") -> list:
-    """Fetch model list from provider API. Returns text chat models only."""
+def fetch_provider_models(api_url: str, api_key: str, provider_name: str, auth_type: str = "bearer") -> tuple:
+    """Fetch model list from provider API.
+
+    Returns (text_chat_models, filtered_out_models)：后者为被关键词规则
+    过滤掉的非对话模型，UI 侧会展示给用户、允许点击加回（防误杀）。
+    """
     headers = {"Authorization": f"Bearer {api_key}"} if auth_type == "bearer" else {}
 
     urls_to_try = []
@@ -126,14 +130,15 @@ def fetch_provider_models(api_url: str, api_key: str, provider_name: str, auth_t
                     all_models = []
 
                 filtered = [m for m in all_models if m and _is_text_chat_model(m)]
-                return filtered
+                removed = [m for m in all_models if m and not _is_text_chat_model(m)]
+                return filtered, removed
 
             last_error = f"HTTP {response.status_code}"
         except Exception as e:
             last_error = str(e)
 
     logger.warning(f"[ProviderEditCard] All attempts failed. Last error: {last_error}")
-    return []
+    return [], []
 
 
 class ProviderEditCard(QWidget):
@@ -154,6 +159,7 @@ class ProviderEditCard(QWidget):
         self.is_new = is_new
         self._original_info = (provider_info or {}).copy()
         self._fetched_models = []
+        self._filtered_out_models = []
         self._auto_config_name = ""
         # 收集 SearchableEditableComboBox 引用用于刷新
         self._searchable_combos = []
@@ -487,6 +493,8 @@ class ProviderEditCard(QWidget):
 
     def _on_provider_changed(self, name: str):
         """服务商变化时更新预设值"""
+        # 过滤缓存属于上一个服务商，切换后作废
+        self._filtered_out_models = []
         if self.is_new and hasattr(self, "configNameEdit"):
             current_config_name = self.configNameEdit.text()
             if not current_config_name.strip() or current_config_name == self._auto_config_name:
@@ -516,6 +524,10 @@ class ProviderEditCard(QWidget):
             if self.modelCombo.count() > 0:
                 self.modelCombo.setCurrentIndex(0)
             self.modelCombo.blockSignals(False)
+        # 编辑器可见时同步刷新，保持与下拉一致（防双源漂移）
+        if self.modelListEditor.isVisible():
+            self.modelListEditor.set_models(self.modelCombo.get_all_models())
+            self.modelListEditor.set_filtered_models([])
         self._update_extra_config_visibility()
 
     def _update_extra_config_visibility(self):
@@ -693,34 +705,104 @@ class ProviderEditCard(QWidget):
 
         time.sleep(0.1)
         try:
-            models = fetch_func(*args)
+            result = fetch_func(*args)
         except Exception as e:  # noqa: BLE001 —— 失败原因需透传到 UI
             logger.warning(f"[ProviderEditCard] 获取模型列表失败: {e}")
             self.fetchFailed.emit(str(e))
             return
+        # 内置 fetch 返回 (models, filtered_out) 元组；插件 models_hook 返回纯列表
+        if isinstance(result, tuple):
+            models, removed = (list(result[0]), list(result[1]) if len(result) > 1 else [])
+        else:
+            models, removed = list(result), []
+        self._fetched_models = models
+        self._filtered_out_models = removed
         if models:
-            self._fetched_models = models
             self.fetchSuccess.emit(models)
         else:
             self.fetchFailed.emit("")
 
     def _on_fetch_success(self, models: list):
-        """获取成功（主线程）"""
+        """获取成功（主线程）。
+
+        现有列表非空时不再静默覆盖（会吞掉手工编辑结果），弹三选：
+        合并 / 替换 / 取消；列表为空（首次获取）时直接填入。
+        """
         self.fetchBtn.setEnabled(True)
-        self.modelCombo.blockSignals(True)
-        current = self.modelCombo.currentText()
-        self.modelCombo.clear()
-        self.modelCombo.addItems(models)
-        if current and self.modelCombo.findText(current) >= 0:
-            self.modelCombo.setCurrentIndex(self.modelCombo.findText(current))
-        self.modelCombo.blockSignals(False)
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        parent = TabManagerWindow.get_instance() or self.window()
+        existing = self.modelCombo.get_all_models()
+        if not existing:
+            self._apply_fetched(models, mode="replace")
+            return
+        from app.widgets.common_dialogs import ChoiceDialog
+
+        dialog = ChoiceDialog(
+            title="获取成功",
+            content=f"获取到 {len(models)} 个模型，现有列表 {len(existing)} 个，如何处理？",
+            options=[("merge", "合并"), ("replace", "替换")],
+            parent=parent,
+        )
+        dialog.chosen.connect(lambda key: self._apply_fetched(models, mode=key))
+        dialog.exec_()
+
+    def _apply_fetched(self, models: list, mode: str):
+        """把获取结果写入模型下拉与内嵌编辑器。
+
+        合并 = 现有列表在前、新模型去重追加；替换 = 直接覆盖。
+        默认模型若不在结果中：提示并切到第一项，不再静默改值。
+        """
         from qfluentwidgets import InfoBar
         from app.widgets.tab_manager_window import TabManagerWindow
 
         parent = TabManagerWindow.get_instance() or self.window()
-        InfoBar.success(
-            "成功", f"获取到 {len(models)} 个模型", parent=parent, duration=2000, position=InfoBarPosition.BOTTOM
-        )
+        if mode == "merge":
+            existing = self.modelCombo.get_all_models()
+            new_list = existing + [m for m in models if m not in existing]
+            added = len(new_list) - len(existing)
+        else:
+            new_list = list(models)
+            added = len(new_list)
+
+        self.modelCombo.blockSignals(True)
+        current = self.modelCombo.currentText()
+        self.modelCombo.clear()
+        self.modelCombo.addItems(new_list)
+        if current and self.modelCombo.findText(current) >= 0:
+            self.modelCombo.setCurrentIndex(self.modelCombo.findText(current))
+        elif current and self.modelCombo.count() > 0:
+            self.modelCombo.setCurrentIndex(0)
+            InfoBar.warning(
+                "默认模型已失效",
+                f"「{current}」不在获取结果中，已切换为「{self.modelCombo.currentText()}」",
+                parent=parent,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        self.modelCombo.blockSignals(False)
+
+        # 内嵌编辑器可见时同步刷新，避免收起时旧数据把获取结果写回吞掉
+        if self.modelListEditor.isVisible():
+            self.modelListEditor.set_models(new_list)
+            self.modelListEditor.set_filtered_models(self._filtered_out_models)
+
+        if mode == "merge":
+            InfoBar.success(
+                "已合并",
+                f"新增 {added} 个，保留原有 {len(new_list) - added} 个",
+                parent=parent,
+                duration=2500,
+                position=InfoBarPosition.BOTTOM,
+            )
+        else:
+            InfoBar.success(
+                "已替换",
+                f"获取到 {len(new_list)} 个模型",
+                parent=parent,
+                duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
 
     def _on_fetch_failed(self, reason: str = ""):
         """获取失败（主线程）；reason 为插件抛出的原因，空串走通用提示"""
@@ -740,24 +822,40 @@ class ProviderEditCard(QWidget):
     def _on_manage_models(self):
         """展开/收起内嵌模型列表编辑器；收起时把编辑结果写回模型下拉"""
         if self.modelListEditor.isVisible():
+            # 编辑器里加回的被过滤项同步回卡片缓存，下次展开不再展示
+            self._filtered_out_models = self.modelListEditor.get_filtered_models()
             self._sync_editor_to_combo()
             self.modelListEditor.setVisible(False)
             self.manageModelsBtn.setText("编辑列表")
         else:
             self.modelListEditor.set_models(self.modelCombo.get_all_models())
+            self.modelListEditor.set_filtered_models(self._filtered_out_models)
             self.modelListEditor.setVisible(True)
             self.manageModelsBtn.setText("收起列表")
 
     def _sync_editor_to_combo(self):
         """把内嵌编辑器中的列表写回模型下拉"""
+        from qfluentwidgets import InfoBar
+        from app.widgets.tab_manager_window import TabManagerWindow
+
         new_models = self.modelListEditor.get_models()
         self.modelCombo.blockSignals(True)
+        current = self.modelCombo.currentText()
         self.modelCombo.clear()
         self.modelCombo.addItems(new_models)
-        current = self.modelCombo.currentText()
-        if not current or self.modelCombo.findText(current) < 0:
-            if new_models:
-                self.modelCombo.setCurrentIndex(0)
+        if current and self.modelCombo.findText(current) >= 0:
+            self.modelCombo.setCurrentIndex(self.modelCombo.findText(current))
+        elif current and self.modelCombo.count() > 0:
+            # 默认模型被用户从列表删除：提示后再切换，不再静默改值
+            self.modelCombo.setCurrentIndex(0)
+            parent = TabManagerWindow.get_instance() or self.window()
+            InfoBar.warning(
+                "默认模型已失效",
+                f"「{current}」已从列表移除，已切换为「{self.modelCombo.currentText()}」",
+                parent=parent,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
         self.modelCombo.blockSignals(False)
 
     def _on_save(self):
@@ -768,10 +866,29 @@ class ProviderEditCard(QWidget):
         编辑同 apikey 始终命中同一条目，不会再产生重复。
         """
         if self.modelListEditor.isVisible():
+            self._filtered_out_models = self.modelListEditor.get_filtered_models()
             self._sync_editor_to_combo()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
         current_models = self.modelCombo.get_all_models()
         existing_models = self.provider_info.get("模型列表", [])
+        if not current_models and existing_models:
+            # 用户清空了列表但旧列表非空：确认后才允许存空（旧逻辑会静默恢复旧数据）
+            from app.widgets.common_dialogs import ConfirmDialog
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            parent = TabManagerWindow.get_instance() or self.window()
+            dialog = ConfirmDialog(
+                title="清空模型列表",
+                content="模型列表已清空。保存后该服务商将没有可选模型，确定继续？",
+                confirm_text="清空并保存",
+                cancel_text="返回修改",
+                parent=parent,
+            )
+            confirmed = {}
+            dialog.confirmed.connect(lambda: confirmed.update(yes=True))
+            dialog.exec_()
+            if not confirmed.get("yes"):
+                return
         # 编辑场景下保留旧 config_id，让 main_widget 能据此判断 apikey 是否被改过
         existing_config_id = self.provider_info.get("config_id", "")
         # 先提取套餐用量额外字段（在覆盖 self.provider_info 之前）
@@ -800,9 +917,8 @@ class ProviderEditCard(QWidget):
             self.provider_info["config_id"] = existing_config_id
         if current_models:
             self.provider_info["模型列表"] = current_models
-        elif existing_models:
-            self.provider_info["模型列表"] = existing_models
         else:
+            # 走到这里：要么旧列表本来就空，要么用户已在确认框里确认清空
             self.provider_info["模型列表"] = []
 
         # 写入套餐用量额外字段

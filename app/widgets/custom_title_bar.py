@@ -1175,8 +1175,12 @@ class CustomTitleBar(TitleBarBase):
         # Qt 不会补发 enter/leave
         self._schedule_tab_hover_sync()
 
-    def remove_tab(self, tab_id: str) -> None:
-        """移除 tab；若移除的是激活 tab 则自动激活剩余第一个"""
+    def remove_tab(self, tab_id: str, *, reactivate: bool = True) -> None:
+        """移除 tab；reactivate=True 且移除的是激活 tab 时自动激活剩余第一个
+
+        reactivate=False 供「关闭 replace 卡后由补位逻辑接管高亮」的调用点：
+        避免先把高亮甩回「对话」，再从那里长滑到补位 tab（中间态 + 二次动画）。
+        """
         btn = self._tabs.pop(tab_id, None)
         if btn is None:
             return
@@ -1186,7 +1190,7 @@ class CustomTitleBar(TitleBarBase):
             self._tab_container.setVisible(False)
         if self._active_id == tab_id:
             self._active_id = None
-            if self._tabs:
+            if reactivate and self._tabs:
                 # 增删后整组按钮在平移补位，胶囊跟随瞬移，不做滑动
                 self.set_active_tab(next(iter(self._tabs)), animate=False)
         # 剩余 tab 会平移到光标下；被删的 tab 若正处于 hover 态，它的

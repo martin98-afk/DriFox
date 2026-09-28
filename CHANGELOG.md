@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ✨ 改进 (Improved)
+
+- **服务商模型列表编辑功能完善** (`app/widgets/cards/settings/provider_edit_card.py`, `app/widgets/model_list_edit_dialog.py`, `app/widgets/searchable_editable_combobox.py`, `app/widgets/common_dialogs.py`, `tests/widgets/test_model_list_editor.py` 新增): 修复四项数据一致性缺陷——① `SearchableEditableComboBox.addItems` 用 `set()` 合并导致模型顺序随机化（编辑器里拖拽排好的顺序写回后被打乱），且基类 `addItem` 不查重，重复文本会产生重复菜单项，现改为逐条保序去重；② 「获取模型列表」此前**直接清空覆盖**手工编辑的列表且无任何提示，现改为现有列表非空时弹「合并 / 替换」选择框（合并 = 现有在前、新模型去重追加），首次获取（列表为空）行为不变；③ 内嵌编辑器展开时点获取，编辑器内容不同步，收起后旧数据会把获取结果写回吞掉（双真相源漂移），现获取/切换服务商后同步刷新可见编辑器；④ 删除当前默认模型后**静默切换**为列表第一项，现改为 InfoBar 提示「默认模型已失效」后再切换；⑤ 清空列表保存时旧逻辑**静默恢复旧数据**（用户无法清空重配），现弹「清空并保存 / 返回修改」确认框。编辑器新增：顶部输入框（搜索过滤 + 回车快速添加，支持多行与逗号分隔批量粘贴）、Ctrl+V 批量导入（重复项跳过并提示数量）、重复项自动标红（修复初始列表项缺 `ItemIsEditable` 导致双击编辑失效）。获取结果中被关键词规则过滤的非对话模型不再丢弃：编辑器内新增「已过滤 N 个非对话模型（点击加回）」区域，防短关键词（`wan`/`search`/`vl`）误杀合法模型。通用弹框组件新增 `ChoiceDialog`（MaskDialogBase 范式，2~3 选项 + 取消）。测试新增 26 例。
+
 ## [v0.6.3] - 2026-09-24 (重新发布 #4)
 
 自上一版本以来的变更（累计） | 提交数：46 · 文件变更：185 · +17201/-2356 | 贡献者：dingma, drifox-bot, mading

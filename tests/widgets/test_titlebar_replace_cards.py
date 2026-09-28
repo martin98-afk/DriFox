@@ -242,9 +242,13 @@ def test_close_active_card_still_activates_remaining(qtbot, monkeypatch):
     tm._on_card_visibility_changed({"card_id": "card_b", "visible": True})
     assert tm._replace_active[GLOBAL_WINDOW_ID] == "card_b"
 
-    # 关闭激活卡 B：剩余最近一张（card_a）应被 toggle 弹出
+    # 关闭激活卡 B：剩余最近一张（card_a）应被 toggle 弹出，且高亮直接乐观
+    # 落位 card_a（remove_tab reactivate=False 跳过「自动激活第一个」）——
+    # 不得先甩回「对话」再从那里长滑到补位 tab（中间态 + 二次动画）
     tm.close_replace_card("card_b")
     reg.toggle_floating_card.assert_called_once_with("card_a")
+    assert tm._replace_active[GLOBAL_WINDOW_ID] == "card_a"
+    assert tm.titleBar._active_id == "card_a"
 
 
 def test_global_replace_cards_sync(qtbot, monkeypatch):
