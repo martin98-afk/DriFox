@@ -2865,6 +2865,9 @@ class TabManagerWindow(FramelessWindow):
     def _on_replace_close_timeout(self, card_id: str) -> None:
         self._replace_timers.pop(card_id, None)
         if not self._has_other_visible_full(card_id):
+            # 仅当关的是当前窗口的激活卡才补位激活剩余卡；后台 tab ×（对话视图
+            # 或看其他卡时）不得触发自动切换（回归：胶囊从「对话」滑到最右）
+            was_active_current = self._replace_active.get(self._current_window_id()) == card_id
             # 卡片是全局单例：从所有对话的 open 集合中移除（关闭后任何对话都不应再显示）
             owners = [wid for wid, od in self._replace_open.items() if card_id in od]
             for wid in owners:
@@ -2877,9 +2880,11 @@ class TabManagerWindow(FramelessWindow):
                 # open/active，不删 tab：它是插件固定入口，删了无人恢复（回归：
                 # assistant_hub 点「新建人格」后标题栏「助手」tab 消失）
                 if card_id not in self._plugin_titlebar_tab_ids:
-                    self.titleBar.remove_tab(card_id)
-                # 关掉当前卡片且 open 仍有其他 full 卡片 → 自动激活（互斥显示）最近一个
-                self._activate_remaining_replace_card()
+                    # 关的是激活卡时不自动激活第一个：高亮由补位激活接管
+                    self.titleBar.remove_tab(card_id, reactivate=not was_active_current)
+                # 关掉的是当前激活卡 → 自动激活（互斥显示）最近一个；无剩余临时卡时内部回「对话」
+                if was_active_current:
+                    self._activate_remaining_replace_card()
 
     def _activate_remaining_replace_card(self) -> None:
         """当前对话 open 集合非空时，自动激活（互斥显示）最近一个 full 卡片，避免关掉
@@ -2909,7 +2914,15 @@ class TabManagerWindow(FramelessWindow):
             return
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        UIPluginRegistry.get_instance().toggle_floating_card(nid)
+        # 乐观置活：不等 shown 事件，胶囊从被关 tab 直接滑向补位 tab（shown/显隐
+        # 事件到达后同 target 幂等）；显示失败由 _schedule_replace_highlight 收敛
+        # 兜底。不置活的话高亮悬空，等卡片创建完才从原处长滑过去。
+        self._set_replace_active(nid)
+        if nid in KNOWN_GLOBAL_REPLACE_CARDS:
+            # 内置全局卡：toggle_floating_card 对其无效，走 CardManager 对称显示
+            cm.show_card(nid, wid)
+        else:
+            UIPluginRegistry.get_instance().toggle_floating_card(nid)
 
     def _has_other_visible_full(self, exclude_id: str) -> bool:
         """窗口内是否有其他 replace 卡片当前可见（用于区分切换/关闭）"""
@@ -3154,6 +3167,9 @@ class TabManagerWindow(FramelessWindow):
 
         # 卡片是全局单例：从所有对话的 open 集合中移除并清 active（避免切回其他对话仍显示已关卡片）
         cur_wid = self._current_window_id()
+        # 仅当关的是当前窗口的激活卡才补位激活剩余卡；后台 tab ×（对话视图
+        # 或看其他卡时）不得触发自动切换（回归：胶囊从「对话」滑到最右）
+        was_active_current = self._replace_active.get(cur_wid) == card_id
         owners = [wid for wid, od in self._replace_open.items() if card_id in od]
         for wid in owners:
             del self._replace_open[wid][card_id]
@@ -3162,7 +3178,8 @@ class TabManagerWindow(FramelessWindow):
         if owners:
             # 常驻插件 tab 只清 open/active 不删 tab（同 _on_replace_close_timeout）
             if card_id not in self._plugin_titlebar_tab_ids:
-                self.titleBar.remove_tab(card_id)
+                # 关的是激活卡时不自动激活第一个：高亮由补位激活接管
+                self.titleBar.remove_tab(card_id, reactivate=not was_active_current)
 
         # 真正隐藏卡片本身（避免「tab 消失但卡片仍显示」）
         if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
@@ -3179,7 +3196,7 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 pass
 
-        if self._replace_open.get(cur_wid):
+        if was_active_current:
             self._activate_remaining_replace_card()
         # 关掉的是当前高亮项时，_activate_remaining_replace_card 未必命中
         # （例如剩余项都是常驻插件 tab），补一次收敛兜底
