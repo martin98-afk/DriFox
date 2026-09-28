@@ -397,6 +397,7 @@ class LspListSettingCard(ExpandSettingCard):
         """
         try:
             from app.core.tools.mcp_lsp_safety import (
+                config_hash,
                 is_pending_confirm_by_key,
                 is_session_denied,
                 server_key,
@@ -405,7 +406,13 @@ class LspListSettingCard(ExpandSettingCard):
             cfg = getattr(client, "config", None)
             if cfg is None:
                 return ""
-            key = server_key("lsp", getattr(cfg, "plugin_name", "") or "", getattr(cfg, "name", "") or "")
+            # 指纹口径与 gate 调用点一致：args 含 command 本体（[command]+args）。
+            # 属性名是 args（R-G1 P2-A：曾误写 argsTemplate，恒 None → args 全丢，
+            # 指纹与 gate 不一致 → 卡待确认/放行按钮永不出现）
+            cmd = getattr(cfg, "command", None)
+            args = getattr(cfg, "args", None)
+            chash = config_hash(cmd, ([cmd] if cmd else []) + list(args or []))
+            key = server_key("lsp", getattr(cfg, "plugin_name", "") or "", getattr(cfg, "name", "") or "", chash)
             if is_session_denied(key):
                 return ""
             return key if is_pending_confirm_by_key(key) else ""

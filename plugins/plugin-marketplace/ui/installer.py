@@ -599,12 +599,9 @@ class PluginInstaller:
         if not target.exists() and disabled_dir is not None and (disabled_dir / name).exists():
             target = disabled_dir / name
         elif not target.exists():
-            # 内置插件（项目根 plugins/<name> 目录存在，含真系统 type=system 与
-            # builtin 非 system type=user/缺失）→ 原地覆盖项目目录，避免双副本。
-            # 更新完成后由 cards 主线程回调 rescan_plugin 热重载（含 UI 组件）。
-            system_dir = getattr(self, "_system_dir", None)
-            if system_dir is not None and (system_dir / name).is_dir():
-                target = system_dir / name
+            # 内置插件更新：一律装用户根（.drifox/plugins/<name>），经 user>system
+            # 加载优先级覆盖内置版本；不原地改写主仓 plugins/。卸载影子副本即回退内置版。
+            pass
         remote_ver = plugin_meta.get("version", "0.0.0")
 
         # 目标目录已存在 → 走 _download_and_move 的备份替换分支；
@@ -890,19 +887,37 @@ class PluginInstaller:
                 self._robust_move(str(target), str(backup))
                 try:
                     self._robust_move(str(sub_src), str(target))
-                except Exception:
-                    # 替换失败 → 回滚旧版
+                    # manifest 校验（新版落位后、旧版备份删除前）：缺 manifest
+                    # 视为无效内容 → 移走无效版并 raise，走下方既有回滚还原旧版
+                    if self._read_manifest_at(target) is None:
+                        _rmtree_readonly(target)
+                        raise RuntimeError(
+                            f"{name}: 下载内容缺少 .drifox-plugin/plugin.json（市场索引 path 配置错误或上游结构变化）"
+                        )
+                except Exception as move_err:
+                    # 替换失败 / 内容无效 → 回滚旧版
                     try:
                         if backup.exists() and not target.exists():
                             shutil.move(str(backup), str(target))
                     except Exception as rb_e:
                         logger.error(f"[Installer] 回滚旧版失败: {name}: {rb_e}")
                     shutil.rmtree(cache_tmp, ignore_errors=True)
+                    if "plugin.json" in str(move_err):
+                        self.last_error = str(move_err)
+                        logger.error(f"[Installer] {self.last_error}")
+                        return False
                     raise
                 if not _rmtree_readonly(backup):
                     logger.warning(f"[Installer] 旧版备份清理失败（残留 cache）: {backup}")
             else:
                 self._robust_move(str(sub_src), str(target))
+                # manifest 校验（新装）：缺 manifest → 拒装，不残留无效目录
+                if self._read_manifest_at(target) is None:
+                    _rmtree_readonly(target)
+                    shutil.rmtree(cache_tmp, ignore_errors=True)
+                    self.last_error = f"{name}: 下载内容缺少 .drifox-plugin/plugin.json（市场索引 path 配置错误或上游结构变化）"
+                    logger.error(f"[Installer] {self.last_error}")
+                    return False
 
             # === 3. 清理 cache ===
             shutil.rmtree(cache_tmp, ignore_errors=True)

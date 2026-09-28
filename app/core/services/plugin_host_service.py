@@ -298,7 +298,9 @@ class PluginHostService(QObject):
 
             watcher = ensure_plugin_tool_watcher()
             if watcher is not None:
-                watcher.scan_now()
+                # 启动对齐场景：注册集无差异时走快路径跳过（force=False），
+                # 避免与热更新 scan_now(force=True) 语义混用
+                watcher.scan_now(force=False)
         except Exception as e:
             logger.error(f"[PluginHost] 插件工具启用状态对齐重扫失败: {e}")
 
@@ -584,8 +586,12 @@ class PluginHostService(QObject):
 
         logger.info(f"[PluginHost] 启动插件文件变更监听: {watch_paths}")
 
-        # 连接内部信号到主线程重载方法
-        self._hot_reload_requested.connect(self._on_hot_reload_requested)
+        # 连接收敛（守卫式）：信号连接只建一次——__init__（:112）已连则跳过，
+        # watcher 重启反复进入本方法不会叠加连接（PyQt 重复 connect 同一 bound
+        # method 不去重，emit 一次执行 N 次）。receivers==0 的场景（如测试夹具
+        # 用 __new__ 绕过 __init__）由此建立唯一连接。
+        if self.receivers(self._hot_reload_requested) == 0:
+            self._hot_reload_requested.connect(self._on_hot_reload_requested)
 
         # 预计算插件路径 → 插件名映射（用于快速定位变更文件所属插件）
         plugin_prefixes = self._build_plugin_path_index()

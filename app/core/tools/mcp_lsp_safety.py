@@ -38,6 +38,14 @@ _PENDING_CONFIRM: set = set()
 _SYSTEM_PLUGIN_ROOT = Path(__file__).resolve().parents[3] / "plugins"
 
 
+def config_hash(command, args) -> str:
+    """启动配置内容指纹（command+args 绑定白名单，配置变更后需重新确认）"""
+    import hashlib
+
+    payload = f"{command or ''}\x00" + "\x1f".join(str(a) for a in (args or []))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+
 def check_args_safety(args) -> Tuple[bool, str]:
     """args 任一元素含 shell 元字符（``; & | ` $(``）→ 拒。
 
@@ -67,6 +75,7 @@ def gate_server_launch(
     server: str,
     args: Optional[List[str]],
     source=None,
+    command: Optional[str] = None,
 ) -> str:
     """启动门禁三态判定 + 审计日志。
 
@@ -95,10 +104,13 @@ def gate_server_launch(
     # 2) 审计日志（启动放行路径统一记录：插件名+server+args 摘要）
     summary = " ".join(args)[:120]
     builtin = is_builtin_source(source)
-    key = server_key(kind, plugin, server)
 
-    # 3) 非内置源确认流
+    # 3) 非内置源确认流：key 绑定 command+args 内容指纹（配置变更后需重新确认）；
+    #    旧格式 key（无指纹）命中时原地升级为新格式，避免既有用户被重复弹确认
     if not builtin:
+        chash = config_hash(command, args)
+        key_full = server_key(kind, plugin, server, chash)
+        key = key_full
         confirmed: list = []
         try:
             from app.utils.config import Settings
@@ -106,21 +118,29 @@ def gate_server_launch(
             confirmed = Settings.get_instance().confirmed_plugin_servers.value or []
         except Exception:
             pass
-        if key in confirmed:
+        if key_full in confirmed:
             logger.warning(
                 f"[{tag}] plugin={plugin or '?'} server={server} 已确认放行 args=[{summary}]"
             )
             return "proceed"
-        if key in _SESSION_DENIED:
+        legacy_key = server_key(kind, plugin, server)
+        if legacy_key in confirmed:
+            _migrate_legacy_confirm(legacy_key, key_full)
+            logger.warning(
+                f"[{tag}] plugin={plugin or '?'} server={server} 旧格式确认已迁移绑定 command+args 指纹"
+            )
+            return "proceed"
+        if legacy_key in _SESSION_DENIED or key in _SESSION_DENIED:
             logger.warning(
                 f"[{tag}] plugin={plugin or '?'} server={server} 本次会话已被用户拒绝，跳过启动"
             )
             return "denied"
         logger.warning(
             f"[{tag}] plugin={plugin or '?'} server={server} 非内置源首次启动，需用户确认 "
-            f"(source={source}; args=[{summary}]；确认后调 confirm_plugin_server 白名单化)"
+            f"(source={source}; command={command!r}; args=[{summary}]；确认后绑定配置指纹)"
         )
         _PENDING_CONFIRM.add(key)
+        _PENDING_CONFIRM.add(legacy_key)  # 双格式兼容：未同步的旧 UI/测试按身份 key 查询
         return "need_confirm"
 
     logger.warning(f"[{tag}] plugin={plugin or '?'} server={server} args=[{summary}]")
@@ -135,9 +155,28 @@ def plugin_from_source(source) -> str:
     return p.parent.name if p.suffix == ".json" else ""
 
 
-def server_key(kind: str, plugin: str, server: str) -> str:
-    """门禁三集合（白名单/会话拒绝/待确认）统一的 key 拼接。"""
-    return f"{kind}:{plugin or '-'}:{server}"
+def server_key(kind: str, plugin: str, server: str, chash: str = "") -> str:
+    """门禁三集合（白名单/会话拒绝/待确认）统一的 key 拼接。
+
+    chash 非空时 key 绑定启动配置指纹（配置变更后旧 key 不再命中，需重新确认）；
+    空 chash 生成旧格式 key（仅供旧条目迁移路径使用）。
+    """
+    key = f"{kind}:{plugin or '-'}:{server}"
+    return f"{key}:{chash}" if chash else key
+
+
+def _migrate_legacy_confirm(old: str, new: str) -> None:
+    """旧格式确认条目（无配置指纹）原地升级为绑定指纹的新格式。"""
+    try:
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        confirmed = list(cfg.confirmed_plugin_servers.value or [])
+        if old in confirmed:
+            confirmed[confirmed.index(old)] = new
+            cfg.set(cfg.confirmed_plugin_servers, confirmed, save=True)
+    except Exception as e:
+        logger.warning(f"[mcp_lsp_safety] 旧确认条目迁移失败（保留旧条目）: {e}")
 
 
 def is_pending_confirm_by_key(key: str) -> bool:

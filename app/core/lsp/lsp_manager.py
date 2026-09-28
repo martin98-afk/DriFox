@@ -471,7 +471,8 @@ class LspManager:
 
         if (
             gate_server_launch(
-                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path
+                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path,
+                command=args[0] if args else None,
             )
             != "proceed"
         ):
@@ -512,7 +513,8 @@ class LspManager:
 
         if (
             gate_server_launch(
-                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path
+                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path,
+                command=args[0] if args else None,
             )
             != "proceed"
         ):
@@ -552,7 +554,8 @@ class LspManager:
 
         if (
             gate_server_launch(
-                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path
+                "lsp", "", Path(args[0]).stem if args else "cli", args, source=source_path,
+                command=args[0] if args else None,
             )
             != "proceed"
         ):
