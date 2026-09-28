@@ -621,6 +621,9 @@ _TAG_ICONS = [
 # 副标题兜底灰（不透明度写法 QTextDocument 不支持，用固定灰）
 _MUTED = "#9aa0a8"
 
+# 空值判定集合：值命中此集合的键不单独占行，合并为末尾一行小灰字
+_EMPTY_VALUES = {"", "无", "（无）", "(无)"}
+
 
 def _tag_skin(tag: str) -> dict:
     skin = dict(_TAG_SKINS.get(tag) or {})
@@ -644,6 +647,9 @@ def _render_kv_tag_card(content: str, ctx: dict, skin: dict) -> str:
     <table class="layout-table">（主程序全局表格样式与滚动包裹均排除
     layout-table，避免命中斑马纹/边框/圆角外框），td 内 <br> 分行，
     双端兼容 QLabel 富文本（QTextDocument）与 QWebEngineView。
+
+    空值键（值为空/无）不单独占行，收集后合并为末尾一行小灰字
+    「风险 / 取舍：无」，压掉零信息行的高度噪音。
 
     ctx: {tag, completed, compact}；流式未闭合（completed=False）渲染
     单行占位，避免逐 chunk 闪大卡。
@@ -679,7 +685,11 @@ def _render_kv_tag_card(content: str, ctx: dict, skin: dict) -> str:
     if subtitle_esc:
         header += f'<span style="color:{_MUTED}; font-size:{sub_sz}px;"> &#183; {subtitle_esc}</span>'
     body: List[str] = []
+    empty_keys: List[str] = []
     for key, val in _kv_sections(content):
+        if key and val in _EMPTY_VALUES:
+            empty_keys.append(key)
+            continue
         key_esc = _html.escape(key)
         val_esc = _html.escape(val)
         if key:
@@ -689,6 +699,9 @@ def _render_kv_tag_card(content: str, ctx: dict, skin: dict) -> str:
             )
         else:
             body.append(f'<span style="font-size:{body_sz}px;">{val_esc}</span>')
+    if empty_keys:
+        merged_esc = _html.escape(" / ".join(empty_keys))
+        body.append(f'<span style="color:{_MUTED}; font-size:{sub_sz}px;">{merged_esc}：无</span>')
     inner = "<br>".join([header] + body)
     return (
         '<table class="layout-table" border="0" cellspacing="0" cellpadding="0" width="100%" '

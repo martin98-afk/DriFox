@@ -167,6 +167,46 @@ class TestPersonaTagCards:
             assert kw in html
         assert "#6c8ebf" in html  # plan 靛蓝皮肤
 
+    def test_plan_card_empty_values_merged(self):
+        """空值键不单独占行，收集后合并为末尾一行小灰字。"""
+        from plugins.assistant_hub.ui import _make_tag_renderer
+
+        render = _make_tag_renderer("plan")
+        content = "目标：检索最新动态\n路径：websearch 查询\n风险：（无）\n取舍：（无）"
+        html = render(content, {"tag": "plan", "completed": True, "compact": False})
+        assert "PLAN" in html
+        # 有值键正常成行
+        for kw in ("目标", "路径"):
+            assert kw in html
+        # 空值键合并为一行，原「（无）」值不重复出现
+        assert "风险 / 取舍：无" in html
+        assert "（无）" not in html
+        # 合并行位于末尾（最后一个 <br> 段）
+        assert "风险 / 取舍：无" in html.split("<br>")[-1]
+
+    def test_plan_card_empty_values_variants(self):
+        """空值变体（空串/半角(无)/「无」）同样命中合并逻辑。"""
+        from plugins.assistant_hub.ui import _make_tag_renderer
+
+        render = _make_tag_renderer("plan")
+        html = render(
+            "目标：x\n路径：y\n风险：\n取舍：(无)",
+            {"tag": "plan", "completed": True},
+        )
+        assert "风险 / 取舍：无" in html
+        assert "(无)" not in html
+
+    def test_plan_card_all_values_present_untouched(self):
+        """全部键有值时行为与旧版一致，不出现合并行。"""
+        from plugins.assistant_hub.ui import _make_tag_renderer
+
+        render = _make_tag_renderer("plan")
+        html = render(
+            "目标：a\n路径：b\n风险：c\n取舍：d",
+            {"tag": "plan", "completed": True},
+        )
+        assert "：无</span>" not in html
+
     def test_unknown_tag_neutral_skin(self):
         from plugins.assistant_hub.ui import _make_tag_renderer
 
