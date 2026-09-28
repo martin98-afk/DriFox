@@ -41,6 +41,10 @@ from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
 from app.plugins.contracts.stream_sink import StreamInterruptedError  # noqa: F401  契约层定义，此处兼容 re-export
 
+# 插件编程错误类型集（G3）：transport/sink 抛出这些异常 = 插件代码 bug，
+# 快速失败不重试（使用点：_make_api_call 异常分类、_handle_error 文案分支）
+_PLUGIN_CODE_ERRORS = (AttributeError, NameError, TypeError, KeyError, ImportError, NotImplementedError)
+
 from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
@@ -3553,6 +3557,16 @@ class OpenAIChatWorker(QThread):
                 error_str = str(e)
                 error_type = type(e).__name__
 
+                # 插件编程错误快速失败：transport/sink 的 NameError/AttributeError 等
+                # 是代码 bug，重试永远不会自愈（每次都同炸）；立即终止并归因，
+                # 避免与网络类错误混在一起让用户看不到真正原因
+                if isinstance(e, _PLUGIN_CODE_ERRORS):
+                    logger.error(
+                        f"[API] 协议插件代码异常，终止重试: {error_type}: {error_str[:200]}"
+                    )
+                    self._restore_partial_content_backup()
+                    raise
+
                 # 判断是否应该重试 - 使用异常继承关系系统性覆盖
                 # httpx/httpcore 的异常体系：
                 # - NetworkError: 连接失败、协议错误等
@@ -4666,6 +4680,16 @@ class OpenAIChatWorker(QThread):
         )
 
         error_msg = str(error)
+
+        # 插件编程错误：与网络类错误明确区分，归因到协议插件代码而非网络
+        if isinstance(error, _PLUGIN_CODE_ERRORS):
+            self._emit_with_callback(
+                "error_occurred",
+                self.error_occurred,
+                f"[协议插件代码异常] {type(error).__name__}: {error_msg[:200]}——已终止重试，"
+                "请检查或临时禁用对应协议插件（故障不在网络或服务商）。",
+            )
+            return
 
         # 🛡️ 流式截断/过滤/空响应：已带完整中文提示，直接透传
         if isinstance(error, StreamInterruptedError):
