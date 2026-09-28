@@ -371,16 +371,17 @@ def test_plugin_manager_importable_from_new_path():
 
 
 def test_marketplace_update_reload_ui_module_collectable():
-    """修正后 tests/test_plugin_marketplace_update_reload_ui.py 不再有 collection ImportError
+    """修正后 tests/plugins/test_plugin_marketplace_update_reload_ui.py 不再有 collection ImportError
 
     修复前该模块 `from app.core import plugin_manager as pm_mod` 触发 pytest collection 失败
     （Pre-existing ERROR）。本测试不直接 import（避免触发 cards.py 真实 Qt 依赖链），
     只做语法级断言：源文件不含已废弃的旧 import 路径。
+    （文件已随 tests 结构化搬迁 tests/ → tests/plugins/，路径跟随更新）
     """
     from pathlib import Path
 
-    src = Path(__file__).resolve().parent.parent / "test_plugin_marketplace_update_reload_ui.py"
+    src = Path(__file__).resolve().parent / "test_plugin_marketplace_update_reload_ui.py"
     content = src.read_text(encoding="utf-8")
     assert "from app.core import plugin_manager" not in content, (
-        "tests/test_plugin_marketplace_update_reload_ui.py 必须改用 app.plugins.managers.plugin_manager"
+        "test_plugin_marketplace_update_reload_ui.py 必须改用 app.plugins.managers.plugin_manager"
     )

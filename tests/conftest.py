@@ -2,6 +2,7 @@
 """pytest 全局 fixtures"""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,14 @@ from loguru import logger
 # fixture 首测试前才运行，届时线程已在 urlopen 阻塞（退出期竞态 0x8001010D）。
 # codebuddy._bootstrap 读该变量跳过线程启动。
 os.environ["DRIFOX_NO_CODEBUDDY_REFRESH"] = "1"
+
+# ⚠️ 同理必须模块级（早于任何 Settings 单例构造）：把测试进程的 app_data_dir
+# 隔离到仓库内 .drifox-test/（已被 /.drifox*/ gitignore 覆盖），杜绝测试写入
+# 真实用户配置 .drifox/app.config（D3 实证污染过 Tools/OffBehavior 等键）。
+# setdefault：外部显式指定 DRIFOX_DATA_DIR 时尊重外部值。
+os.environ.setdefault(
+    "DRIFOX_DATA_DIR", str(Path(__file__).resolve().parent.parent / ".drifox-test")
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -92,3 +101,28 @@ def log_capture():
     sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
     yield records
     logger.remove(sink_id)
+
+
+@pytest.fixture()
+def plugin_enabled():
+    """把插件名临时加入 Settings.enabled_plugins（P0-1 加载过滤适配），返回恢复函数。
+
+    build P0-1 后 load_plugin_tools 以 Settings.enabled_plugins 为准过滤插件；
+    临时插件名不在白名单会被跳过。本 fixture 自动加入并在测试结束后恢复原值。
+    （30f26d89 重构时误删导致 15+ 测试文件 ERROR，7c0a6b1a 后由 F1 恢复）
+    """
+
+    def _enable(plugin_name: str):
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = list(cfg.enabled_plugins.value or [])
+        if plugin_name not in saved:
+            cfg.enabled_plugins.value = saved + [plugin_name]
+
+        def restore():
+            cfg.enabled_plugins.value = saved
+
+        return restore
+
+    return _enable
