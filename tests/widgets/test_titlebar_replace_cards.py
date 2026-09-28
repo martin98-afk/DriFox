@@ -439,6 +439,37 @@ class TestTitlebarTabSlot:
         assert "plugin_tab" not in tm.titleBar._tabs
         assert "plugin_tab" not in tm._plugin_titlebar_tab_ids
 
+    def test_overflow_tabs_go_into_more_menu(self, qtbot):
+        """容压：插件 tab 超上限时前 LIMIT-1 个驻留，其余收进「更多」聚合 tab"""
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        reg = UIPluginRegistry.get_instance()
+        limit = TabManagerWindow._PLUGIN_TITLEBAR_TAB_LIMIT
+        total = limit + 1  # 触发溢出：LIMIT-1 驻留 + 2 收进「更多」
+        try:
+            for i in range(total):
+                reg.register_titlebar_tab("pt", f"tab_{i}", f"插件{i}", on_click=lambda: None)
+            tm._sync_plugin_titlebar_tabs()
+            resident = [f"tab_{i}" for i in range(limit - 1)]
+            overflow = [f"tab_{i}" for i in range(limit - 1, total)]
+            assert all(tid in tm.titleBar._tabs for tid in resident)
+            assert all(tid not in tm.titleBar._tabs for tid in overflow)
+            assert TabManagerWindow._MORE_TAB_ID in tm.titleBar._tabs
+            assert [i.tab_id for i in tm._more_tab_infos] == overflow
+            # 回落到上限内：「更多」聚合 tab 移除，条目恢复驻留
+            reg.unregister_titlebar_tabs("pt")
+            for i in range(limit - 1):
+                reg.register_titlebar_tab("pt", f"tab_{i}", f"插件{i}", on_click=lambda: None)
+            tm._sync_plugin_titlebar_tabs()
+            assert TabManagerWindow._MORE_TAB_ID not in tm.titleBar._tabs
+            assert tm._more_tab_infos == []
+        finally:
+            reg.unregister_titlebar_tabs("pt")
+        tm._sync_plugin_titlebar_tabs()
+        assert TabManagerWindow._MORE_TAB_ID not in tm.titleBar._tabs
+
 
 def test_overlay_limit_width_config_only(qtbot):
     """覆盖层限宽只针对配置类卡片：settings → True，diff_viewer/sub_agent_session → False"""

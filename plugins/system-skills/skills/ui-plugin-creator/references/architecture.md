@@ -44,7 +44,9 @@
 ### 2.1 浮动卡片（FloatingCard）
 
 **用途**：像系统设置卡片一样，在聊天界面下方/上方弹出的独立面板。
-**注册**：`registry.register_floating_card(...)` → 自动注册命令 `/card-id`
+**注册**：`registry.register_floating_card(...)` → 自动注册命令 `/card-id`；
+metadata 里声明 `"primary_entry": {"kind": "titlebar" | "sidebar", ...}` 可自动派生
+标题栏 tab / 侧栏项常驻入口（一处注册、多处分发；详见 templates-entries.md §10）
 **容器**：
 - `container="bottom"`：显示在聊天下方，隐藏输入区（与系统配置卡片一致）
 - `container="top"`：显示在聊天上方（较少使用）

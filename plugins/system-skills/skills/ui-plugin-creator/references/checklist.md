@@ -424,15 +424,19 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 
 ### 14.1 标题栏常驻 tab（参考：agent_trace / assistant_hub）
 
-- [ ] tab 出现在标题栏，label 正确，点击触发 on_click
-- [ ] **tab 点击必须走 `UIPluginRegistry.toggle_floating_card(CARD_ID)`**，
+- [ ] tab 出现在标题栏，label 正确，点击唤出对应卡片
+- [ ] **推荐 `primary_entry` 声明式**：`register_floating_card(metadata={"primary_entry":
+      {"kind": "titlebar", ...}})`，框架生成回调（懒创建 + 宿主解析 + 可见性检查单点承载）；
+      手写 `on_click` 仅作兼容路径，写时必须走 `toggle_floating_card`，
       不能用 `card_manager.show_card`（懒创建实例，show_card 首次点击静默失败）
 - [ ] tab 图标注意：`CustomTabButton` 无 icon_light 主题感知 → 深色主题下深色描边图标
       不可见，**纯文字更安全**
 - [ ] full 卡 metadata：`full_card=True` + `hide_sidebar=True`（入口只有标题栏 tab，
       侧边栏不重复列出）
-- [ ] 已可见时点 tab 不闪（先查 `is_card_visible` 再 toggle，语义"切到该 tab"）
-- [ ] Tab 模式宿主是 TabManagerWindow：直接用 `UIPluginRegistry.toggle_floating_card`
+- [ ] 已可见时点 tab 不闪（框架回调已内置「已可见忽略」；手写时先查 `is_card_visible`，
+      语义"切到该 tab"）
+- [ ] Tab 模式宿主是 TabManagerWindow：框架回调已做宿主解析；手写时直接用
+      `UIPluginRegistry.toggle_floating_card`
       （内部已处理宿主解析），别自己遍历 main_widget
 
 ### 14.2 右侧工作台页（参考：system/ui/_worktree_page.py、_artifacts_page.py）

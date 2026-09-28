@@ -1,19 +1,16 @@
 # -*- coding: utf-8 -*-
 """assistant_hub UI 入口。
 
-注册组件（参考 agent_trace 同款模式）：
+注册组件：
 
-1. **常驻标题栏 tab**（``register_titlebar_tab``）
-   - tab_id = ``assistant_hub``
-   - label = ``助手``（放在「轨迹」右侧）
-   - on_click → ``UIPluginRegistry.toggle_floating_card("assistant_hub")``
-
-2. **full 容器浮动卡**（``register_floating_card``）
+1. **full 容器浮动卡**（``register_floating_card``）
    - card_id = ``assistant_hub``
    - container = ``full``
    - widget_class = ``AssistantCardWidget``（左列表 + 右 Tab 编辑器）
+   - metadata.primary_entry = {"kind": "titlebar", "label": "助手", "priority": 10}
+     → 框架自动派生标题栏 tab（已可见忽略、否则唤出，一处注册多处分发）
 
-3. **Gitee 同步内容注册**（``register_sync_content_provider``）
+2. **Gitee 同步内容注册**（``register_sync_content_provider``）
    - provider_id = ``assistant_hub``
    - 同步整个 <app_data>/assistant_hub/ 目录（助手信息 + 记忆），跨设备同步。
 
@@ -81,69 +78,7 @@ def _plugin_icons_dir() -> str:
     return str(here.parent / "icons")
 
 
-def _resolve_active_main_widgets() -> List[object]:
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        widgets = list(UIPluginRegistry.get_instance()._window_main_widgets.values())
-    except Exception:
-        widgets = []
-    return [w for w in widgets if w is not None]
-
-
-def _resolve_global_host():
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        reg = UIPluginRegistry.get_instance()
-    except Exception:
-        return None, None, None
-    try:
-        host = reg._resolve_global_host()
-    except Exception:
-        host = None
-    if host is None:
-        for mw in _resolve_active_main_widgets():
-            if getattr(mw, "_card_manager", None) is not None:
-                host = mw
-                break
-    if host is None:
-        return None, None, None
-    return host, getattr(host, "_card_manager", None), getattr(host, "_window_id", None)
-
-
-def _is_card_visible() -> bool:
-    _host, cm, wid = _resolve_global_host()
-    if cm is None or not wid:
-        return False
-    try:
-        return bool(cm.is_card_visible(CARD_ID, wid))
-    except Exception:
-        return False
-
-
-def _on_tab_clicked() -> None:
-    """标题栏「助手」tab 点击 → 显示助手中心 full 卡片。"""
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        reg = UIPluginRegistry.get_instance()
-    except Exception as e:
-        logger.error(f"[assistant_hub] 无法获取 UIPluginRegistry: {e}")
-        return
-
-    if _is_card_visible():
-        logger.debug("[assistant_hub] 卡片已可见，忽略重复点击")
-        return
-
-    try:
-        reg.toggle_floating_card(CARD_ID)
-        logger.info("[assistant_hub] 已切换显示助手中心卡片")
-    except Exception as e:
-        logger.error(f"[assistant_hub] toggle_floating_card 失败: {e}")
-
-
-# ── @ 卡片智能体区（mention provider）────────────────────────────
+# ── @ 卡片智能体区（mention provider）────────────────────────
 
 _MENTION_PROVIDER_ID = "assistant_hub"
 
@@ -791,16 +726,10 @@ def register_ui(registry) -> None:
             "icon_light": icon_light,
             "full_card": True,
             "hide_sidebar": True,
+            # 主入口声明：框架自动派生「助手」标题栏 tab（已可见忽略、否则唤出），
+            # 无需手写 on_click 绑定样板（旧版手写实现已由框架单点承载）
+            "primary_entry": {"kind": "titlebar", "label": "助手", "priority": 10},
         },
-    )
-
-    # ── 常驻标题栏 tab（「助手」，位于「轨迹」之后）──
-    registry.register_titlebar_tab(
-        plugin_name="assistant_hub",
-        tab_id=CARD_ID,
-        label="助手",
-        on_click=_on_tab_clicked,
-        priority=10,
     )
 
     # ── 人格块标签卡（mood/plan/snap 等，按 persona frontmatter tag 动态注册）──
@@ -822,7 +751,7 @@ def register_ui(registry) -> None:
     _promote_build_system_prompt_hook()
 
     logger.info(
-        f"[assistant_hub] UI 组件已注册：titlebar_tab(助手) + floating_card(assistant_hub/full)"
-        f" + tag_renderer({_persona_block_tags()}) + gitee sync"
+        f"[assistant_hub] UI 组件已注册：floating_card(assistant_hub/full"
+        f"+primary_entry=titlebar) + tag_renderer({_persona_block_tags()}) + gitee sync"
         f" + mention_provider + identity_provider + welcome_tab(助手)"
     )

@@ -4363,11 +4363,19 @@ class TabManagerWindow(FramelessWindow):
 
     # ── Tab 面板 UI 插件列表 ──
 
+    #: 插件常驻 tab 容压上限：超过时前 LIMIT-1 个驻留，其余收进「更多」下拉
+    _PLUGIN_TITLEBAR_TAB_LIMIT = 5
+    #: 「更多」聚合 tab 的固定 ID（不与插件 tab_id 冲突的保留名）
+    _MORE_TAB_ID = "__plugin_more__"
+
     def _sync_plugin_titlebar_tabs(self) -> None:
         """同步插件注册的常驻标题栏 tab（无 × 关闭钮；点击走插件 on_click 回调自展示）
 
         幂等：info 对象未变（未重载）的已挂载 tab 跳过；插件热重载后 registry
         中是全新 info → 摘旧挂新；已卸载插件的 tab 移除。注册表为空时仅做清理。
+
+        容压：插件 tab 超过 ``_PLUGIN_TITLEBAR_TAB_LIMIT`` 时，前 LIMIT-1 个驻留，
+        其余收进「更多」聚合下拉（防插件生态增长挤爆标题栏 tab 区）。
         """
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -4375,8 +4383,15 @@ class TabManagerWindow(FramelessWindow):
             infos = UIPluginRegistry.get_instance().get_titlebar_tabs()
         except Exception:
             infos = []
+        # 容压分流：溢出集每次全量重建，「更多」tab 闭包经 self._more_tab_infos 取最新
+        limit = self._PLUGIN_TITLEBAR_TAB_LIMIT
+        overflow_infos = []
+        if len(infos) > limit:
+            overflow_infos = infos[limit - 1 :]
+            infos = infos[: limit - 1]
+        self._more_tab_infos = overflow_infos
         valid_ids = {info.tab_id for info in infos}
-        # 移除已卸载/不再注册的常驻 tab
+        # 移除已卸载/不再注册/被容压收起的常驻 tab
         for tab_id in list(self._plugin_titlebar_tab_ids):
             if tab_id not in valid_ids:
                 self.titleBar.remove_tab(tab_id)
@@ -4399,6 +4414,44 @@ class TabManagerWindow(FramelessWindow):
             )
             self._plugin_titlebar_tab_ids.add(info.tab_id)
             self._plugin_titlebar_tab_infos[info.tab_id] = info
+        # 「更多」聚合 tab：溢出集非空挂载、为空移除；生命周期由本函数显式管理，
+        # 不入 _plugin_titlebar_tab_ids（避免被上面的清理循环误删）
+        more_id = self._MORE_TAB_ID
+        if overflow_infos:
+            if more_id not in self.titleBar._tabs:
+                self.titleBar.add_tab(more_id, "更多", on_click=self._show_more_tabs_menu, closable=False)
+        elif more_id in self.titleBar._tabs:
+            self.titleBar.remove_tab(more_id)
+
+    def _show_more_tabs_menu(self) -> None:
+        """「更多」聚合下拉：列出被容压收起的插件 tab，点击等价点击原 tab"""
+        infos = list(getattr(self, "_more_tab_infos", []))
+        if not infos:
+            return
+        from PyQt5.QtGui import QCursor
+
+        try:
+            from qfluentwidgets import Action, RoundMenu
+
+            menu = RoundMenu(parent=self)
+            for info in infos:
+                cb = info.on_click
+                if cb is None:
+                    continue
+                menu.addAction(Action(info.label, lambda _checked=False, f=cb: f()))
+            menu.exec(QCursor.pos())
+        except Exception:
+            # qfluentwidgets 不可用时退化为原生 QMenu（测试环境/旧依赖兜底）
+            from PyQt5.QtWidgets import QMenu
+
+            menu = QMenu(self)
+            for info in infos:
+                cb = info.on_click
+                if cb is None:
+                    continue
+                act = menu.addAction(info.label)
+                act.triggered.connect(lambda _checked=False, f=cb: f())
+            menu.exec(QCursor.pos())
 
     def _update_shared_launcher(self) -> None:
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
