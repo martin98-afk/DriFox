@@ -1676,6 +1676,19 @@ class UIPluginRegistry:
         for tab_id in [tid for tid, v in self._titlebar_tabs.items() if v.plugin_name == plugin_name]:
             del self._titlebar_tabs[tab_id]
 
+    def unregister_titlebar_tab(self, plugin_name: str, tab_id: str) -> None:
+        """精确注销单个常驻 tab（校验归属防误删同 id 他插件 tab；联动命令同步注销）
+
+        供 WorkspacePageHost 等宿主层做「按声明重建」的幂等清理：整插件注销
+        （unregister_titlebar_tabs）会误删同插件 floating card 派生的 tab。
+        """
+        info = self._titlebar_tabs.get(tab_id)
+        if info is None or info.plugin_name != plugin_name:
+            return
+        del self._titlebar_tabs[tab_id]
+        if getattr(info, "on_click", None) is not None:
+            self.unregister_ui_command(self._ui_command_name(info.tab_id, info.plugin_name))
+
     def get_titlebar_tabs(self) -> List[TitlebarTabInfo]:
         """获取全部常驻 tab（按注册序返回，tab 栏位置即注册顺序）"""
         return list(self._titlebar_tabs.values())
