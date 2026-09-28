@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -21,6 +22,36 @@ from app.utils.design_tokens import Colors, get_unified_scrollbar_style, scale_f
 from app.utils.utils import get_font_family_css
 
 _DUP_COLOR = "#e05656"  # 重复项前景色
+
+
+class _ItemEditorDelegate(QStyledItemDelegate):
+    """给 QListWidget 内置编辑器注入主题样式。
+
+    双击编辑的编辑器由 delegate 创建，parent 是 viewport；QSS 后代选择器
+    （QListWidget QLineEdit）对其不可靠，浅色主题下默认选中文本样式叠上
+    item 选中背景后文字几乎看不见。改在 createEditor 里直接 setStyleSheet。
+    """
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            Colors.refresh()
+            editor.setStyleSheet(
+                f"""
+                QLineEdit {{
+                    background-color: {Colors.CONTENT_BG};
+                    color: {Colors.TEXT_PRIMARY};
+                    border: 1px solid {Colors.INPUT_FOCUS_BORDER};
+                    border-radius: 3px;
+                    padding: 2px 4px;
+                    {get_font_family_css()}
+                    font-size: {scale_font_size(13)}px;
+                    selection-background-color: {Colors.TEXT_ACCENT};
+                    selection-color: #ffffff;
+                }}
+                """
+            )
+        return editor
 
 
 def _split_model_input(text: str) -> list:
@@ -139,6 +170,7 @@ class ModelListEditorWidget(QWidget):
         self.listWidget.setDefaultDropAction(Qt.MoveAction)
         self.listWidget.setSelectionBehavior(QListWidget.SelectRows)
         self.listWidget.setEditTriggers(QListWidget.DoubleClicked | QListWidget.EditKeyPressed)
+        self.listWidget.setItemDelegate(_ItemEditorDelegate(self.listWidget))
         self.listWidget.itemDoubleClicked.connect(self._start_edit)
         self.listWidget.itemChanged.connect(lambda _item: self._check_duplicates())
         for m in models:
