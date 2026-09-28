@@ -6,6 +6,11 @@
   - 行式条目（grep/list/glob）：按行保索引 + 缩小范围重查指引
   - 通用文本：字符头尾 + 缩小输出范围指引
 
+错误保护（Manus keep-wrong-turns）：工具报错的结果（success=False）
+截断阈值按倍数放宽（config: error_keep_multiplier，默认 ×4），
+错误栈与纠错轨迹优先保留；超大错误仍会截断（防失控），
+超长全文走 tool_offload 落盘可回读。
+
 stage=all：ingest 也要截断，否则落盘判定会基于未截断内容（阈值失真）。
 
 cache_impact=none：截断发生在入口，同一条 tool 结果每次投影的字节完全一致，
@@ -25,6 +30,8 @@ from app.core.context.tool_prune import prune_tool_result, resolve_tool_result_m
 from app.core.infra.token_estimator import count_messages_tokens
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
 
+_ERROR_KEEP_MULTIPLIER_DEFAULT = 4  # 错误结果保留倍数默认值（与 plugin.json default 同步）
+
 
 def _count_tokens(messages: List[Dict[str, Any]]) -> int:
     try:
@@ -38,46 +45,72 @@ class ToolPruneTier:
     label = "工具结果截断"
     order = 20
     # 设置页细项行副标题（component_items 走 AST 静态读取，仅支持字面量）
-    description = "超阈值工具结果保留头尾、省略中段并附重查指引；阈值为 0 时按模型上下文容量自动定"
+    description = "超阈值工具结果保留头尾、省略中段并附重查指引；报错结果阈值×4 优先保留错误栈；阈值为 0 时按模型上下文容量自动定"
     stages = frozenset(ALL_STAGES)
     cache_impact = CACHE_NONE
 
     def should_apply(self, view) -> bool:
-        limit = self._limit(view)
+        base = self._limit(view)
+        mult = self._error_mult()
         skip = prune_skip_tools()
         for m in view.messages:
             if m.get("role") != "tool" or self._skip(m.get("name", ""), skip):
                 continue
             c = m.get("content")
-            if isinstance(c, str) and len(c) > limit:
+            if isinstance(c, str) and len(c) > self._limit_for(m, base, mult):
                 return True
         return False
 
     def apply(self, view) -> TierOutcome:
-        limit = self._limit(view)
+        base = self._limit(view)
+        mult = self._error_mult()
         skip = prune_skip_tools()
         result: List[Dict[str, Any]] = []
         changed = 0
+        pruned_errors = 0
         for m in view.messages:
             if m.get("role") == "tool" and isinstance(m.get("content"), str):
                 name = m.get("name", "")
                 if self._skip(name, skip):
                     result.append(m)
                     continue
-                new_content = prune_tool_result(m["content"], max_len=limit, tool_name=name)
+                new_content = prune_tool_result(m["content"], max_len=self._limit_for(m, base, mult), tool_name=name)
                 if new_content != m["content"]:
+                    if self._is_error(m):
+                        pruned_errors += 1
                     m = {**m, "content": new_content}
                     changed += 1
             result.append(m)
         if changed == 0:
             return TierOutcome(messages=list(view.messages), saved_tokens=0, note="无超阈值结果")
         saved = view.used_tokens - _count_tokens(result)
-        return TierOutcome(messages=result, saved_tokens=max(0, saved), note=f"截断 {changed} 条工具结果")
+        note = f"截断 {changed} 条工具结果"
+        if pruned_errors:
+            note += f"（含 {pruned_errors} 条错误）"
+        return TierOutcome(messages=result, saved_tokens=max(0, saved), note=note)
 
     def _limit(self, view) -> int:
         """截断阈值：插件配置优先（0/未配则按模型上下文容量动态放大）。"""
         override = cfg_int("tool_result_max_len", 0)
         return override if override > 0 else resolve_tool_result_max_len(view.llm_config)
+
+    @staticmethod
+    def _error_mult() -> int:
+        """错误保留倍数（config: error_keep_multiplier，默认 4，下限 1=关闭保护）。"""
+        return max(1, cfg_int("error_keep_multiplier", _ERROR_KEEP_MULTIPLIER_DEFAULT))
+
+    @staticmethod
+    def _is_error(m: Dict[str, Any]) -> bool:
+        """错误结果判定：worker 构造的 tool 消息带 success 字段，False 即报错。
+
+        无 success 字段（外部导入的会话等）保守视为非错误，按原阈值截断。
+        """
+        return m.get("success") is False
+
+    @classmethod
+    def _limit_for(cls, m: Dict[str, Any], base: int, mult: int) -> int:
+        """单条结果的实际截断阈值：错误结果按倍数放宽。"""
+        return base * mult if cls._is_error(m) else base
 
     @staticmethod
     def _skip(name: str, skip: frozenset = frozenset()) -> bool:
