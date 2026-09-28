@@ -3,9 +3,43 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### ✨ 改进 (Improved)
+## [v0.6.4] - 2026-09-28
 
-- **服务商模型列表编辑功能完善** (`app/widgets/cards/settings/provider_edit_card.py`, `app/widgets/model_list_edit_dialog.py`, `app/widgets/searchable_editable_combobox.py`, `app/widgets/common_dialogs.py`, `tests/widgets/test_model_list_editor.py` 新增): 修复四项数据一致性缺陷——① `SearchableEditableComboBox.addItems` 用 `set()` 合并导致模型顺序随机化（编辑器里拖拽排好的顺序写回后被打乱），且基类 `addItem` 不查重，重复文本会产生重复菜单项，现改为逐条保序去重；② 「获取模型列表」此前**直接清空覆盖**手工编辑的列表且无任何提示，现改为现有列表非空时弹「合并 / 替换」选择框（合并 = 现有在前、新模型去重追加），首次获取（列表为空）行为不变；③ 内嵌编辑器展开时点获取，编辑器内容不同步，收起后旧数据会把获取结果写回吞掉（双真相源漂移），现获取/切换服务商后同步刷新可见编辑器；④ 删除当前默认模型后**静默切换**为列表第一项，现改为 InfoBar 提示「默认模型已失效」后再切换；⑤ 清空列表保存时旧逻辑**静默恢复旧数据**（用户无法清空重配），现弹「清空并保存 / 返回修改」确认框。编辑器新增：顶部输入框（搜索过滤 + 回车快速添加，支持多行与逗号分隔批量粘贴）、Ctrl+V 批量导入（重复项跳过并提示数量）、重复项自动标红（修复初始列表项缺 `ItemIsEditable` 导致双击编辑失效）。获取结果中被关键词规则过滤的非对话模型不再丢弃：编辑器内新增「已过滤 N 个非对话模型（点击加回）」区域，防短关键词（`wan`/`search`/`vl`）误杀合法模型。通用弹框组件新增 `ChoiceDialog`（MaskDialogBase 范式，2~3 选项 + 取消）。测试新增 26 例。
+自上一版本以来的变更 | 提交数：20 · 文件变更：77 · +17236/-13744 | 贡献者：dingma, drifox-bot, mading
+
+### ✨ 新功能 (New Features)
+
+- **服务商模型列表编辑功能完善** (`app/widgets/cards/settings/provider_edit_card.py`, `app/widgets/model_list_edit_dialog.py`, `app/widgets/searchable_editable_combobox.py`, `app/widgets/common_dialogs.py`, `tests/widgets/test_model_list_editor.py` 新增): 修复四项数据一致性缺陷——① `SearchableEditableComboBox.addItems` 用 `set()` 合并导致模型顺序随机化（编辑器里拖拽排好的顺序写回后被打乱），且基类 `addItem` 不查重，重复文本会产生重复菜单项，现改为逐条保序去重；② 「获取模型列表」此前**直接清空覆盖**手工编辑的列表且无任何提示，现改为现有列表非空时弹「合并 / 替换」选择框（合并 = 现有在前、新模型去重追加），首次获取（列表为空）行为不变；③ 内嵌编辑器展开时点获取，编辑器内容不同步，收起后旧数据会把获取结果写回吞掉（双真相源漂移），现获取/切换服务商后同步刷新可见编辑器；④ 删除当前默认模型后**静默切换**为列表第一项，现改为 InfoBar 提示「默认模型已失效」后再切换；⑤ 清空列表保存时旧逻辑**静默恢复旧数据**（用户无法清空重配），现弹「清空并保存 / 返回修改」确认框。编辑器新增：顶部输入框（搜索过滤 + 回车快速添加，支持多行与逗号分隔批量粘贴）、Ctrl+V 批量导入（重复项跳过并提示数量）、重复项自动标红（修复初始列表项缺 `ItemIsEditable` 导致双击编辑失效）。获取结果中被关键词规则过滤的非对话模型不再丢弃：编辑器内新增「已过滤 N 个非对话模型（点击加回）」区域，防短关键词（`wan`/`search`/`vl`）误杀合法模型。通用弹框组件新增 `ChoiceDialog`（MaskDialogBase 范式，2~3 选项 + 取消），QListWidget 新增主题化自定义 item editor delegate。测试新增 26 例。
+
+- **标题栏/侧栏声明式入口绑定** (`f5de446f`, `415239b2`): 插件浮动卡可声明 `card_id` 绑定标题栏/侧栏常驻入口，由 `primary_entry` 声明式派生并支持精确注销，替代手工登记。
+
+- **消息卡片渲染增强** (`04cbd37d`, `c72f956c`): plan 卡多个空值键合并为单行展示；欢迎会话消息卡改为增量 DOM 更新，降低全量重建开销。
+
+- **tool_prune 错误保护** (`3e05c4d4`): system-context 工具结果截断对报错结果按倍数放宽阈值，避免错误信息被截断后丢失归因线索。
+
+- **tooltip 自守卫** (`4c7fd98f`): tooltip 增加防残留自守卫机制，修复提示框悬挂不消失的问题。
+
+- **插件安装下载策略优化** (`e7473d1b`, `ec590f02`): plugin-marketplace 插件安装优先 git sparse clone（更快、历史更省），无 git 环境自动回退 GitHub 归档下载模块作为备选方案。
+
+- **聊天区滚动体验优化** (`b1bbc3e7`, `66afe32e`): 增强聊天区平滑滚动体验，后收敛配置面：移除平滑滚动配置项与相关探针测试，保留增强后的默认手感。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **聊天视图后台 tab 不再自动激活** (`2178a089`): 修复 tab_manager 中后台 tab 被意外自动激活的问题。
+
+- **插件内核一组修复** (`48a3cec5`): 热更新双连防护、采样参数注入、MCP 确认流绑定指纹、配置原子写、插件市场守卫、不可禁用名单完善。
+
+- **协议插件编程错误快速失败** (`dd96ac7a`): 协议插件代码异常（AttributeError/NameError/TypeError 等）不再进入无意义重试，立即终止并输出专属归因文案，明确故障不在网络或服务商。
+
+### 🔄 其他变更 (Others)
+
+- **测试基建修复** (`cc450cc0`): fixture 恢复、测试数据目录隔离（`DRIFOX_DATA_DIR` 指向仓库内 `.drifox-test`，测试不再写穿用户 `app.config`）、存量失败用例修复。
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号升级至 v0.6.4（pyproject.toml / config.py / installer.iss / README）(`6fcf069c`)
+- marketplace 自 plugin.json 自动再生成 (`4c70a477`)
+- 移除上下文六层链遗留注释，改为指向 registry 实际注册 (`c3bfe0be`)
 
 ## [v0.6.3] - 2026-09-24 (重新发布 #4)
 
