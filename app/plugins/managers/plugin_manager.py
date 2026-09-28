@@ -122,6 +122,8 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "storages": lambda d: (d / "storages").exists() and any((d / "storages").glob("*.py")),
     "serializers": lambda d: (d / "serializers").exists() and any((d / "serializers").glob("*.py")),
     "gateways": lambda d: (d / "gateways").exists() and any((d / "gateways").glob("*.py")),
+    "transports": lambda d: (d / "transports").exists() and any((d / "transports").glob("*.py")),
+    "stream_sinks": lambda d: (d / "stream_sinks").exists() and any((d / "stream_sinks").glob("*.py")),
     "engines": lambda d: (d / "engines").exists() and any((d / "engines").glob("*.py")),
     "context_tiers": lambda d: (d / "context_tiers").exists() and any((d / "context_tiers").glob("*.py")),
     "budget_resolvers": lambda d: (
@@ -432,6 +434,8 @@ class PluginManager:
         "providers": "system-providers",
         "storages": "system-storages",
         "serializers": "system-serializers",
+        "transports": "system-transports",
+        "stream_sinks": "system-stream-sinks",
         "tools": "system-tools",
         "context_tiers": "system-context",
         "budget_resolvers": "system-context",

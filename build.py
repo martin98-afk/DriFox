@@ -187,6 +187,9 @@ _hidden_imports = [
     "app.tools.task_state",
     "app.tools.process_job",
     "app.tools.bg_manager",
+    # 插件 SDK（app/plugins/sdk.py）：仅被插件源文件 import，主代码零静态引用，
+    # PyInstaller 分析不到，漏打会导致 system-transports/stream-sinks 加载失败
+    "app.plugins.sdk",
     # system 插件引用的第三方包
     "html2text",
     "bs4",

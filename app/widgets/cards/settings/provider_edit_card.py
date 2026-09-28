@@ -193,10 +193,6 @@ class ProviderEditCard(QWidget):
             self.nameCombo.currentTextChanged.connect(self._on_provider_changed)
             name_row.addWidget(self.nameCombo, 1)
 
-            self.getKeyBtn = PrimaryPushButton("获取 API KEY")
-            self.getKeyBtn.clicked.connect(lambda: self._open_help_url(self.nameCombo.currentText()))
-            name_row.addWidget(self.getKeyBtn)
-
             main_layout.addLayout(name_row)
             first_provider = self.nameCombo.currentText()
             template = provider_default_config(first_provider) or {}
@@ -214,9 +210,6 @@ class ProviderEditCard(QWidget):
             name_row.addWidget(ProviderIconWidget(self.provider_name, 24))
             name_row.addWidget(BodyLabel(self.provider_name))
             name_row.addStretch(1)
-            getKeyBtn = PrimaryPushButton("获取 API KEY")
-            getKeyBtn.clicked.connect(lambda: self._open_help_url(self.provider_name))
-            name_row.addWidget(getKeyBtn)
             main_layout.addLayout(name_row)
 
         # 配置名称行（紧跟服务商名称行）
@@ -271,6 +264,10 @@ class ProviderEditCard(QWidget):
         if current_key:
             self.apiKeyEdit.setText(current_key)
         key_row.addWidget(self.apiKeyEdit, 1)
+        # 「获取 API KEY」（打开注册页）与「登录」（OAuth 类）互斥显示，同在 Key 行
+        self.getKeyBtn = PrimaryPushButton("获取 API KEY")
+        self.getKeyBtn.clicked.connect(self._open_register_url)
+        key_row.addWidget(self.getKeyBtn)
         self.loginBtn = PrimaryPushButton("登录")
         self.loginBtn.clicked.connect(self._on_auto_login)
         self.loginBtn.setVisible(False)
@@ -382,6 +379,9 @@ class ProviderEditCard(QWidget):
         # 新建时调用一次初始化
         if self.is_new:
             self._on_provider_changed(self.nameCombo.currentText())
+        else:
+            # 编辑模式无 provider 切换，直接按当前服务商联动三按钮显隐
+            self._sync_login_btn()
 
     def _apply_style(self):
         """应用主题感知的基础样式"""
@@ -546,12 +546,26 @@ class ProviderEditCard(QWidget):
         self._sync_login_btn()
 
     def _sync_login_btn(self):
-        """按当前服务商 capabilities 是否含 login_hook 显示/隐藏「登录」按钮"""
+        """按服务商 capabilities 联动三按钮：OAuth 类（有 login_hook）只显「登录」并
+        隐藏「获取模型列表」（无 /models REST，用内置模型表）；普通类只显「获取 API KEY」"""
         if not hasattr(self, "loginBtn"):
             return
         provider = self.nameCombo.currentText() if self.is_new else self.provider_name
         p = ProviderRegistry.get_instance().get(provider)
-        self.loginBtn.setVisible(bool(p and p.capabilities.get("login_hook")))
+        has_login = bool(p and p.capabilities.get("login_hook"))
+        self.loginBtn.setVisible(has_login)
+        self.getKeyBtn.setVisible(not has_login)
+        # 有专属 models_hook 的 OAuth 类（如 CodeBuddy）仍可获取；纯内置表则隐藏。
+        # fetchBtn 在 loginBtn 之后创建，构造期触发本函数时可能尚未存在
+        fetch_btn = getattr(self, "fetchBtn", None)
+        if fetch_btn is not None:
+            has_models_hook = bool(p and p.capabilities.get("models_hook"))
+            fetch_btn.setVisible(has_models_hook or not has_login)
+
+    def _open_register_url(self):
+        """打开当前服务商的注册/取 Key 页面"""
+        name = self.nameCombo.currentText() if self.is_new else self.provider_name
+        self._open_help_url(name)
 
     def _on_auto_login(self):
         """登录：后台执行 capabilities["login_hook"]，成功后回填 API Key 输入框"""
@@ -799,4 +813,3 @@ class ProviderEditCard(QWidget):
     def _on_cancel(self):
         """取消"""
         self.closed.emit()
-

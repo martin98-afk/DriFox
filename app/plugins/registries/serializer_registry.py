@@ -40,7 +40,17 @@ class SerializerRegistry:
         """
         requested = serializer_id or _DEFAULT_ID
         with self._lock:
-            item = self._serializers.get(requested) or self._serializers.get(_DEFAULT_ID)
+            direct = self._serializers.get(requested)
+            item = direct or self._serializers.get(_DEFAULT_ID)
+        if direct is None and item is not None:
+            # 协议降级必须可见：adapter 指定的 id 缺失时静默回退 openai，会把错误
+            # 格式的请求体发给非 OpenAI 端点（如 Code Assist），400 后无从排查
+            from loguru import logger
+
+            logger.warning(
+                f"[SerializerRegistry] serializer_id={requested!r} 未注册，回退默认 'openai'——"
+                f"若该配置指向非 OpenAI 协议端点，请求将失败，请确认对应序列化器插件已启用"
+            )
         if item is None:
             # P3 兜底：无任何 MessageSerializer 插件 → 返回内置 passthrough + warning
             # 行为：serialize 直接透传 messages（不做协议特判）；多模态等高级特性会丢失，

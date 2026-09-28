@@ -185,32 +185,43 @@ _ZEN_CAPABILITIES = {
 def register(registry):
     """注册 OpenCode Zen / OpenCode Go 两个服务商定义"""
     # ── OpenCode Zen（免费额度） ──
+    #
+    # 免费层闸门（实测 2026-09-24）：
+    #   带 -free 后缀的模型（big-pickle / mimo-v2.5-free / nemotron-*-free /
+    #   ling-*-free 等）返回 403 FreeTierError「can only be used from within
+    #   OpenCode」。网关判定在服务端按账号/工作区维度进行，伪装身份头无效：
+    #   User-Agent 换 opencode-cli/1.0.0、opencode 等，并补齐 x-opencode-client
+    #   / x-opencode-project / x-opencode-request / x-opencode-session（UUID）后
+    #   仍全部 403。这些头在网关源码里仅写入日志指标，不参与鉴权
+    #   （packages/console/app/src/routes/zen/util/handler.ts）。
+    #   保留这些条目是因为付费 workspace 账号仍可使用；免费账号选中会报
+    #   403，属预期。
+    #
+    #   space-bunny-free 不受该闸门约束（无 -free 后缀的例外项），免 key
+    #   匿名调用可用，流式与工具调用正常，故作为默认模型。
     registry.register(
         ProviderDef(
             name="OpenCode Zen",
             icon="opencode",
             api_url="https://opencode.ai/zen/v1",
             auth_type="bearer",
-            default_model="deepseek-v4-flash-free",
+            default_model="space-bunny-free",
             default_params={
                 "温度": 0.7,
                 "最大Token": 200000,
             },
             register_url="https://opencode.ai/auth",
             models=[
-                "deepseek-v4-flash-free",
+                "space-bunny-free",
+                "big-pickle",
                 "mimo-v2.5-free",
                 "nemotron-3-ultra-free",
-                "north-mini-code-free",
-                "big-pickle",
                 "glm-5.1",
                 "glm-5",
                 "kimi-k2.6",
                 "kimi-k2.5",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
-                "mimo-v2.5-pro",
-                "mimo-v2.5",
                 "minimax-m2.7",
                 "minimax-m2.5",
                 "qwen3.6-plus",

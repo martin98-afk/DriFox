@@ -121,6 +121,32 @@ class TestTeamHeaderIcon:
         panel.set_team_project("run_1", "", "")
         assert icon.isHidden(), "空项目应隐藏 header icon"
 
+    def test_team_name_x_stable_across_icon_show_hide(self, panel):
+        """header 横向稳定：icon 隐藏占位（retainSizeWhenHidden），显隐均不横移团队名。
+
+        回归：icon 不占位时，隐藏态收走 16px 宽 + spacing 4，set_team_project
+        显示后 _team_name_label 横移。纵向高度由 badge/name_label（sizeHint
+        17px）决定、icon 16px 从不是最高控件，纵向断言恒真，故断言横向位置。
+        """
+        from PyQt5.QtWidgets import QApplication
+
+        _, grp, _icon = self._setup_team(panel)
+        panel.show()
+        QApplication.processEvents()
+
+        name = grp._team_name_label
+        x_before = name.geometry().x()
+
+        # 异步加载完成：icon 显示 → 团队名横向位置不变
+        panel.set_team_project("run_1", "AB", "rgba(33,139,255,255)")
+        QApplication.processEvents()
+        assert name.geometry().x() == x_before, "icon 显示后团队名不得横移"
+
+        # 反向：清空项目 icon 隐藏 → 位置不变
+        panel.set_team_project("run_1", "", "")
+        QApplication.processEvents()
+        assert name.geometry().x() == x_before, "icon 隐藏后团队名不得横移"
+
 
 class TestCapsuleMethods:
     """B5: update_tab_capsule/clear_tab_capsule 正常"""

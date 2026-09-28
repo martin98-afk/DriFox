@@ -971,6 +971,13 @@ class SubAgentExecutor(QThread):
         base_url = config.get("API_URL") or None
         model = str(config.get("模型名称", "gpt-4o"))
 
+        # Code Assist 原生协议暂不支持子代理链路（非流式分支未实现 generateContent 形态），
+        # 显式拦截避免错误格式的 OpenAI 请求打到该端点产生难排查的 400
+        if "cloudcode-pa.googleapis.com" in str(base_url or ""):
+            raise RuntimeError(
+                "子代理暂不支持 Gemini OAuth（Code Assist）协议：请在团队/子代理配置中改用 OpenAI 兼容模型"
+            )
+
         req_kwargs = {
             "model": model,
             "messages": messages,

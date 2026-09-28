@@ -152,6 +152,12 @@ class HeightCommitBatch:
                             continue
                         # 本轮统一走锚定，关闭 per-card 增量补偿
                         card._last_height_delta = 0
+                        # viewer 真实高度到达 → 解除 T42 起步高度钉死（幂等）：
+                        # 不解除的话卡片 min=max=占位高度，与内容的差被布局压给
+                        # 气泡 + 页脚（页脚模型胶囊拉伸成竖条的画面畸变）
+                        unpin = getattr(card, "_unpin_layout_height", None)
+                        if callable(unpin):
+                            unpin()
                         viewer.setFixedHeight(height)
                         card._last_applied_viewer_height = height
                         card.heightChanged.emit(height)

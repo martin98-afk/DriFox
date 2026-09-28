@@ -269,5 +269,77 @@ def test_event_filter_mouse_press_does_not_block_click(qtbot):
     assert clicked, "MouseButtonPress 不应被 filter 拦截，按钮点击应正常触发"
 
 
+# ── R3：SimpleHoverTooltip 自看护（守卫下沉到窗口自身） ──────────────
+
+
+def _make_shown_tooltip(qtbot):
+    """直接实例化 tooltip 窗口（模拟插件绕过 filter 的典型用法）"""
+    from app.widgets.simple_hover_tooltip import SimpleHoverTooltip
+
+    tt = SimpleHoverTooltip()
+    qtbot.addWidget(tt)
+    tt.set_text("插件提示")
+    tt.resize(80, 24)
+    tt.move(50, 50)
+    tt.show()
+    assert tt.isVisible(), "tooltip 应已显示"
+    return tt
+
+
+def test_selfguard_hides_on_anchor_destroy(qtbot):
+    """R3：锚点销毁 → 自看护收起（此前直接实例化零兜底，永久残留）"""
+    from PyQt5.QtWidgets import QLabel
+
+    from app.widgets.simple_hover_tooltip import SimpleHoverTooltip
+
+    anchor = QLabel("anchor")
+    qtbot.addWidget(anchor)
+    anchor.resize(100, 40)
+    anchor.show()
+
+    tt = SimpleHoverTooltip()
+    qtbot.addWidget(tt)
+    tt.set_text("提示")
+    tt.show_above(anchor)
+    assert tt.isVisible()
+
+    anchor.deleteLater()
+    qtbot.wait(300)
+    assert not tt.isVisible(), "锚点销毁后 tooltip 应被自看护收起（不残留）"
+
+
+def test_selfguard_hides_when_cursor_leaves_anchor(qtbot):
+    """R3：光标离开锚点 → 自看护收起"""
+    from PyQt5.QtWidgets import QLabel
+
+    from app.widgets.simple_hover_tooltip import SimpleHoverTooltip
+
+    anchor = QLabel("anchor")
+    qtbot.addWidget(anchor)
+    anchor.resize(100, 40)
+    anchor.show()
+
+    tt = SimpleHoverTooltip()
+    qtbot.addWidget(tt)
+    tt.set_text("提示")
+    tt.show_above(anchor)
+    assert tt.isVisible()
+
+    outside = anchor.mapToGlobal(QPoint(anchor.width() + 500, anchor.height() + 500))
+    with patch("app.widgets.simple_hover_tooltip.QCursor.pos", return_value=outside):
+        qtbot.wait(300)
+    assert not tt.isVisible(), "光标离开锚点后 tooltip 应被自看护收起"
+
+
+def test_selfguard_hides_on_app_deactivate_without_anchor(qtbot):
+    """R3：无锚点 move+show 用法（conversation_node_preview 模式）应用失焦 → 自看护收起"""
+    from PyQt5.QtWidgets import QApplication
+
+    tt = _make_shown_tooltip(qtbot)
+    with patch.object(QApplication, "activeWindow", return_value=None):
+        qtbot.wait(300)
+    assert not tt.isVisible(), "应用失焦时 tooltip 应被自看护收起（不残留）"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -135,3 +135,70 @@ def test_assemble_empty(tmp_path):
     text = m.assemble(aid)
     assert text == ""
     assert not (aid / "memory" / "memory.md").exists()
+
+
+def test_compile_daily_topic_filename(tmp_path):
+    """TOPIC 行转文件名（day-主题），正文不含 TOPIC 行。"""
+    aid = tmp_path / "a6"
+    aid.mkdir()
+    llm = FakeLLM(["TOPIC: transport 重构\n\n- 09-22 transport 拆 chunk/sink\n- sink 修复收编"])
+    r = m.compile_daily(aid, "- 草稿", "2026-09-22", llm=llm)
+    assert r["changed"] is True
+    files = list((aid / "memory" / "daily").glob("2026-09-22*.md"))
+    assert len(files) == 1 and "transport" in files[0].stem
+    body = files[0].read_text(encoding="utf-8")
+    assert "TOPIC" not in body and "chunk" in body
+
+
+def test_compile_daily_prefix_dedupe(tmp_path):
+    """同日已存在（含旧无主题命名）按日期前缀判重跳过。"""
+    aid = tmp_path / "a7"
+    (aid / "memory" / "daily").mkdir(parents=True)
+    (aid / "memory" / "daily" / "2026-09-22.md").write_text("旧日记", encoding="utf-8")
+    llm = FakeLLM(["TOPIC: x\n\n- 条目"])
+    r = m.compile_daily(aid, "- 草稿", "2026-09-22", llm=llm)
+    assert r["changed"] is False and llm.calls == []
+
+
+def test_compile_daily_overrun_shrink(tmp_path):
+    """正文超 DAILY_MAX_CHARS：重试压缩一次，落盘用压缩结果。"""
+    aid = tmp_path / "a8"
+    aid.mkdir()
+    big_body = "- 超长条目内容" * 150  # 约 1200 字符
+    llm = FakeLLM(["TOPIC: 压缩测试\n\n" + big_body, "- 压缩后条目"])
+    r = m.compile_daily(aid, "- 草稿", "2026-09-23", llm=llm)
+    assert r["changed"] is True
+    assert len(llm.calls) == 2  # 蒸馏 + 压缩重试
+    files = list((aid / "memory" / "daily").glob("2026-09-23*.md"))
+    body = files[0].read_text(encoding="utf-8")
+    assert "压缩后条目" in body
+    assert "超长条目内容" not in body
+
+
+def test_assemble_recent_is_index(tmp_path):
+    """recent 段索引化：文件名清单 + 路径提示，daily 全文不入注入。"""
+    aid = tmp_path / "a9"
+    mem = aid / "memory"
+    (mem / "daily").mkdir(parents=True)
+    (mem / "daily" / "2026-09-22-transport重构.md").write_text(
+        "# 2026-09-22\n\n- " + "很长的日记内容" * 200, encoding="utf-8"
+    )
+    text = m.assemble(aid)
+    assert "2026-09-22-transport重构" in text
+    assert "很长的日记内容" not in text  # 全文不入注入
+    assert "daily" in text  # RECENT_INDEX_HINT 带路径
+    assert len(text) <= m.ASSEMBLE_MAX_CHARS
+
+
+def test_assemble_section_budget(tmp_path):
+    """超长 today 段按行截断保头部，总长受控且带截断标注。"""
+    aid = tmp_path / "a10"
+    mem = aid / "memory"
+    mem.mkdir(parents=True)
+    (mem / "today.md").write_text(
+        "\n".join(f"- 今日碎片{i}" + "细节" * 30 for i in range(50)), encoding="utf-8"
+    )
+    text = m.assemble(aid)
+    assert len(text) < m.ASSEMBLE_MAX_CHARS
+    assert "…（超预算已截）" in text
+    assert "- 今日碎片0" in text  # 保头部

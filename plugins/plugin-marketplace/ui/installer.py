@@ -23,6 +23,7 @@ from typing import Optional, Tuple
 
 from loguru import logger
 
+from .archive_downloader import ArchiveFetchError, fetch_github_repo, parse_github_repo
 from .data import compare_versions
 from .deps_installer import DepsInstaller
 from .proxy import get_proxy_config
@@ -256,6 +257,10 @@ class PluginInstaller:
         self._plugins_dir = drifox / "plugins"
         self._disabled_dir = drifox / "plugins-disabled"
         self._cache_dir = drifox / "cache" / "install_tmp"
+        # 仓库归档缓存（按 commit sha 内容寻址，跨插件/跨安装复用）。
+        # 刻意与 install_tmp 平级而非其子目录：install_tmp 是「每次安装用完即清」
+        # 的临时区（既有测试断言其为空），归档缓存是跨安装长期复用的持久区。
+        self._archive_cache_dir = drifox / "cache" / "repo_archives"
         # 被占用（已加载原生 .pyd/.dll）文件的隔离目录：rmtree 删不掉时
         # 把文件同卷 rename 到这里，让插件目录让空；重启后由 _cleanup_pending_delete 清掉。
         self._quarantine_dir = drifox / ".plugin_quarantine"
@@ -283,6 +288,11 @@ class PluginInstaller:
     # 非原子更新，锁保证读方看不到"半写"中间态。类级默认：兼容测试用
     # PluginInstaller.__new__ 手赋属性的构造方式（不执行 __init__）。
     _cache_lock = threading.Lock()
+
+    # GitHub 仓库归档缓存根目录（__init__ 赋值为 .drifox/cache/repo_archives）。
+    # 类级默认 None = 未启用归档通道（走 git）。测试用 __new__ 手构实例时
+    # 不赋值即自动离线，绝不发起外网请求；生产实例由 __init__ 显式开启。
+    _archive_cache_dir: Optional[Path] = None
 
     # ── 批量状态查询 ──────────────────────────────────────
 
@@ -751,6 +761,92 @@ class PluginInstaller:
 
     # ── 核心下载逻辑 ─────────────────────────────────────
 
+    def _fetch_into_cache(self, name: str, url: str, subpath: str, ref: str, cache_tmp: Path) -> Path:
+        """把仓库内容取到 cache_tmp，返回插件源目录路径
+
+        双通道，**顺序不可颠倒**（2026-09 实测定序）：
+
+        1. git 稀疏克隆 —— 首选。只取目标子目录，实测同仓插件 7.4s 完成
+           （drifox-plugins 仓库 116 个插件同源，稀疏克隆只拉 0.07MB）。
+        2. GitHub 归档 tarball —— 仅在 git 可执行文件缺失时兜底。纯标准库
+           无需 git，但必须下整仓（实测 59.9MB / 45s），代价明显更高。
+
+        即：有 git 就用 git；只有 git 不在场才启用归档。若反过来让归档抢首位，
+        装了 git 的用户反而从 7.4s 退化到 45s。
+
+        Returns:
+            插件源目录（subpath="." 时为仓库根，否则为子目录）
+        """
+        proxy = get_proxy_config()
+        git_url, git_extra = proxy.git_clone_args(url)
+        candidates = self._build_clone_candidates(url, git_url, git_extra, proxy)
+        last_err: Optional[Exception] = None
+        for i, (cu, ce) in enumerate(candidates):
+            if i > 0:
+                logger.info(f"[Installer] retry #{i}: {cu}")
+            if cache_tmp.exists() and not _rmtree_readonly(cache_tmp):
+                # Windows 下 git 残留句柄会让删除静默失败，沿用同名目录
+                # 重试必报「already exists」→ 换新目录名（真实案例：
+                # 2026-09 使用者 attempt #0 checkout 失败后 retry 全灭）
+                logger.warning(f"[Installer] 残留下载目录删除失败，改用新目录: {cache_tmp}")
+                cache_tmp = self._cache_dir / f"{name}_{int(time.time())}_r{i}"
+            shutil.rmtree(cache_tmp, ignore_errors=True)
+            cache_tmp.mkdir(parents=True, exist_ok=True)
+            try:
+                self._sparse_clone(cu, subpath, ref, cache_tmp, extra_args=ce)
+                return cache_tmp if subpath in (".", "") else cache_tmp / subpath
+            except GitNotFoundError:
+                # git 可执行文件缺失：换任何 URL 都不会成功，直接转归档通道
+                logger.info(f"[Installer] 未检测到 git，改用归档通道: {name}")
+                return self._fetch_via_archive(name, url, subpath, ref, cache_tmp)
+            except Exception as e:
+                last_err = e
+                logger.warning(f"[Installer] attempt #{i} failed ({cu}): {self._format_git_err(e)}")
+        if last_err is not None:
+            # 所有候选都失败：抛最后一个错误（带 stderr），让外层 logger.error 记录
+            raise last_err
+        return cache_tmp if subpath in (".", "") else cache_tmp / subpath
+
+    def _fetch_via_archive(self, name: str, url: str, subpath: str, ref: str, cache_tmp: Path) -> Path:
+        """git 缺失时的兜底：从 GitHub 归档 tarball 取插件（纯标准库，无需 git）
+
+        非 github host 或未启用归档缓存时抛出 GitNotFoundError 原样上抛 ——
+        让 last_error 精确指向「环境缺 git」，由 UI 引导安装。
+
+        Raises:
+            GitNotFoundError: 无法通过归档通道获取（调用方据此提示装 git）
+        """
+        coords = parse_github_repo(url)
+        archive_root = getattr(self, "_archive_cache_dir", None)
+        if coords is None or archive_root is None:
+            raise GitNotFoundError(
+                "未检测到 git 可执行文件（git 未安装或不在 PATH），"
+                "且该插件源无法通过归档通道获取，请先安装 git 后再安装插件"
+            )
+        archive_dir = cache_tmp / "_archive"
+        shutil.rmtree(archive_dir, ignore_errors=True)
+        try:
+            src = fetch_github_repo(
+                coords[0],
+                coords[1],
+                ref,
+                subpath=subpath,
+                cache_root=archive_root,
+                dest_dir=archive_dir,
+                proxy=get_proxy_config(),
+            )
+        except Exception as e:
+            # 归档也失败（加速站不支持归档端点 / 仓库过大超时等）：
+            # 回退到 git 缺失提示，让用户走安装 git 的引导
+            shutil.rmtree(archive_dir, ignore_errors=True)
+            logger.warning(f"[Installer] 归档通道亦不可用: {name}: {e}")
+            raise GitNotFoundError(
+                "未检测到 git 可执行文件（git 未安装或不在 PATH），"
+                f"归档备用通道也未能获取插件（{e}），请先安装 git 后再安装插件"
+            ) from e
+        logger.info(f"[Installer] 归档通道下载成功（无需 git）: {name} ← {coords[0]}/{coords[1]}@{ref}")
+        return src
+
     def _download_and_move(self, name: str, url: str, subpath: str, ref: str, target: Path) -> bool:
         """从 git 源下载插件并移动到目标目录
 
@@ -772,40 +868,12 @@ class PluginInstaller:
             cache_tmp = self._cache_dir / f"{name}_{int(time.time())}"
             cache_tmp.mkdir(parents=True, exist_ok=True)
             try:
-                proxy = get_proxy_config()
-                git_url, git_extra = proxy.git_clone_args(url)
-                candidates = self._build_clone_candidates(url, git_url, git_extra, proxy)
-                last_err: Optional[Exception] = None
-                for i, (cu, ce) in enumerate(candidates):
-                    if i > 0:
-                        logger.info(f"[Installer] retry #{i}: {cu}")
-                    if cache_tmp.exists() and not _rmtree_readonly(cache_tmp):
-                        # Windows 下 git 残留句柄会让删除静默失败，沿用同名目录
-                        # 重试必报「already exists」→ 换新目录名（真实案例：
-                        # 2026-09 使用者 attempt #0 checkout 失败后 retry 全灭）
-                        logger.warning(f"[Installer] 残留下载目录删除失败，改用新目录: {cache_tmp}")
-                        cache_tmp = self._cache_dir / f"{name}_{int(time.time())}_r{i}"
-                    shutil.rmtree(cache_tmp, ignore_errors=True)
-                    cache_tmp.mkdir(parents=True, exist_ok=True)
-                    try:
-                        self._sparse_clone(cu, subpath, ref, cache_tmp, extra_args=ce)
-                        last_err = None
-                        break
-                    except Exception as e:
-                        last_err = e
-                        logger.warning(f"[Installer] attempt #{i} failed ({cu}): {self._format_git_err(e)}")
-                if last_err is not None:
-                    # 所有候选都失败：抛最后一个错误（带 stderr），让外层 logger.error 记录
-                    raise last_err
+                sub_src = self._fetch_into_cache(name, url, subpath, ref, cache_tmp)
             except Exception:
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise
 
             # === 2. 确定源目录 ===
-            if subpath in (".", ""):
-                sub_src = cache_tmp
-            else:
-                sub_src = cache_tmp / subpath
             if not sub_src.exists():
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise RuntimeError(f"Subpath {subpath} not found in clone")

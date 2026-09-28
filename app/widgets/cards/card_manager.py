@@ -908,6 +908,10 @@ class CardManager:
         win_data["dock_active_cards"][ct] = card_id
         win_data["visible_cards"][ct] = card_id
 
+    def get_all_windows(self) -> List[str]:
+        """获取所有已注册的窗口ID（插件跨仓调用，勿删：480b039d 曾误删）"""
+        return list(self._window_data.keys())
+
     # ============================================================
     # 外部卡片注册（由 UI 插件调用）
     # ============================================================

@@ -6,6 +6,7 @@ TabPanel — Tab 管理器左侧面板
 支持拖拽排序、右键菜单、滚轮滚动。
 """
 
+import hashlib
 import math as _math
 import os
 
@@ -49,7 +50,15 @@ from qfluentwidgets import (
 from app.utils.app_state import get as _state_get
 from app.utils.app_state import set as _state_set
 from app.utils.config import Settings
-from app.utils.design_tokens import Animations, Colors, font_size_css, get_unified_scrollbar_style, scale_font_size, scale_icon_size
+from app.utils.design_tokens import (
+    Animations,
+    BorderRadius,
+    Colors,
+    font_size_css,
+    get_unified_scrollbar_style,
+    scale_font_size,
+    scale_icon_size,
+)
 from app.utils.motion import retarget
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -64,6 +73,11 @@ from app.widgets.workspace_tree import (
     TreeNodeSpec,
     WorkspaceTree,
 )
+
+
+def _stable_text_hue(text: str) -> int:
+    """文本 → 稳定色相（0-359）：md5 替代内置 hash（进程级随机化致重启变色）"""
+    return int(hashlib.md5(text.encode("utf-8")).hexdigest(), 16) % 360
 
 
 def _parse_rgba(rgba_str: str) -> _QColor:
@@ -409,7 +423,7 @@ class TabItem(QFrame):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setFixedHeight(40)
+        self.setFixedHeight(40)  # 行高分档由 _refresh_row_height 决定（团队列表态 32 / 其余 40）
         self.setCursor(Qt.PointingHandCursor)
 
         # 图标尺寸：跟随系统字体缩放
@@ -567,8 +581,8 @@ class TabItem(QFrame):
     def set_capsule(self, text: str, color: str = ""):
         """显示团队角色胶囊"""
         if not color:
-            # 从 agent 名 hash 生成稳定色
-            h = abs(hash(text)) % 360
+            # 从 agent 名 hash 生成稳定色（md5 稳定 hash，跨进程恒定）
+            h = _stable_text_hue(text)
             color = f"hsl({h}, 65%, 50%)"
         self._capsule_color = color  # 紧凑态首字符图标用同色（矩阵 B4）
         self._capsule_label.setText(text)
@@ -577,7 +591,7 @@ class TabItem(QFrame):
                 background: {color};
                 color: white;
                 border-radius: 4px;
-                padding: 1px 6px;
+                padding: 1px 4px;
                 font-size: 11px;
                 font-weight: bold;
             }}
@@ -611,7 +625,18 @@ class TabItem(QFrame):
                 self._icon_widget.setVisible(True)
         else:
             self._icon_widget.setVisible(not team_mode)
+        # 行高分档跟随模式：团队模式（列表态）成员行 32px
+        self._refresh_row_height()
         self.update()
+
+    def _refresh_row_height(self):
+        """行高分档：团队模式（列表态）成员行 32px 紧凑；树模式复用 / 非团队保持 40px
+
+        树模式下团队成员同样 _team_mode=True（角色胶囊仍在），但以 panel._mode
+        判定当前渲染容器；paintEvent 缓存按 (w, h) 自适应，行高变化无需额外失效。
+        """
+        in_list = self._panel is None or getattr(self._panel, "_mode", PANEL_MODE_LIST) != PANEL_MODE_TREE
+        self.setFixedHeight(32 if (self._team_mode and in_list) else 40)
 
     def _apply_compact_icon(self):
         """紧凑态团队模式：用角色胶囊首字符 + 胶囊色绘制图标（折叠态成员可区分）
@@ -624,7 +649,7 @@ class TabItem(QFrame):
         ch = text[0] if text else "?"
         color = self._capsule_color or ""
         if not color and text:
-            h = abs(hash(text)) % 360
+            h = _stable_text_hue(text)
             color = f"hsl({h}, 65%, 50%)"
         self._icon_widget.set_project(ch, color)
         self._icon_widget.setVisible(True)
@@ -1178,6 +1203,16 @@ class TabPanel(QWidget):
         #    _team_groups 缓存 team_id → QFrame 容器（避免反复创建）
         self._item_team: Dict[int, str] = {}
         self._team_groups: Dict[str, "QFrame"] = {}
+        # 团队框折叠态：启动恢复用快照（运行期单一真源 = inner.isVisible()），
+        # 切换经 400ms 去抖落 app_state，与 workspace_tree_expansion 同范式
+        self._team_collapsed_states: Dict[str, bool] = {}
+        self._team_collapse_save_timer: Optional[QTimer] = None
+        try:
+            _saved_collapsed = _state_get("team_groups_collapsed", {})
+        except Exception:
+            _saved_collapsed = {}
+        if isinstance(_saved_collapsed, dict):
+            self._team_collapsed_states = {str(k): bool(v) for k, v in _saved_collapsed.items()}
         self._plugin_infos: list[tuple[str, str, str, str, int]] = []  # (kind, key, title, plugin_name, priority)
         self._system_plugin_layout: Optional[QVBoxLayout] = None
         self._system_plugin_buttons: list[UIPluginRow] = []
@@ -2177,6 +2212,20 @@ class TabPanel(QWidget):
         old_team = self._item_team.get(index, "")
         if old_team == team_id:
             return  # 无变化
+        # 活跃增量计数随成员迁移：从旧团队框减、向新团队框加（仅活跃中的成员有量可迁）
+        item = self._items[index]
+        for _src, _cnt in (
+            ("_streaming", "_team_streaming_count"),
+            ("_stream_error", "_team_error_count"),
+            ("_question", "_team_question_count"),
+        ):
+            if not getattr(item, _src, False):
+                continue
+            for _tid, _sign in ((old_team, -1), (team_id, 1)):
+                _grp = self._team_groups.get(_tid) if _tid else None
+                if _grp is not None:
+                    setattr(_grp, _cnt, max(0, getattr(_grp, _cnt, 0) + _sign))
+                    self._update_team_badge(_grp)
         self._item_team[index] = team_id
         # 若旧 team 已空，清理容器
         if old_team and not any(t == old_team for t in self._item_team.values()):
@@ -2286,12 +2335,25 @@ class TabPanel(QWidget):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(0, 2, 0, 4)
         header_layout.setSpacing(4)
+        # 点击 header 切换团队框折叠/展开（T4 右键菜单复用 _toggle_team_collapsed）
+        header.setCursor(Qt.PointingHandCursor)
+        header.mousePressEvent = lambda _ev, _tid=team_id: self._toggle_team_collapsed(_tid)
 
         # 团队标题项目 icon（团队级统一项目，复用 _TabProjectIcon；默认隐藏，
         # 由 set_team_project 在团队级项目存在时显示）。多个成员窗口共享
         # 同一 header，数据源必须为团队级 project（TeamManager.get_team_project）。
+        # 折叠指示箭头（0° 右=折叠 / 90° 下=展开），点击 160ms 缓动旋转
+        arrow = _RotatableArrow(header, size=14)
+        arrow.setToolTip("折叠/展开团队")
+        header_layout.addWidget(arrow)
+
         team_icon = _TabProjectIcon(header, size=16)
         team_icon.setVisible(False)
+        # 高度恒定：隐藏时仍保留布局占位，项目 icon 异步加载完成显示后
+        # header 不 reflow（否则 icon 计入/移出布局导致标题栏高度跳变）
+        _icon_sp = team_icon.sizePolicy()
+        _icon_sp.setRetainSizeWhenHidden(True)
+        team_icon.setSizePolicy(_icon_sp)
         header_layout.addWidget(team_icon)
 
         from app.widgets.elided_label import _ElidedLabel as _ELLabel
@@ -2299,11 +2361,36 @@ class TabPanel(QWidget):
         name_label = _ELLabel("", header)
         name_label.setObjectName("teamGroupName")
         name_label.setText("团队")
+
+        # 聚合信息 badge：待答 WARNING > 运行 INFO > 空闲（成员数），语义态走动态属性。
+        # 位于团队名**左侧**（用户定案）：左侧元素（arrow/icon/badge）不参与 hover
+        # 挤压→恒定不动；右侧全留给按钮区。宽度自适应（不加 setFixedSize）：
+        # 「待答 N」「运行 N」文案完整不裁断，与 QSS padding 共同决定尺寸。
+        badge = QLabel("0", header)
+        badge.setObjectName("teamGroupBadge")
+        badge.setProperty("state", "idle")
+        badge.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(badge)
+
         header_layout.addWidget(name_label, 1)
+
+        # ── hover 三按钮展开区（宽度不固定）──
+        # 空闲态零占位：容器内按钮全隐藏时 sizeHint 宽为 0，布局不分配宽度（#11：
+        # 此前固定 68px 恒占位致 badge 右侧常驻空白 + 窄栏被撑宽）；hover 时按钮
+        # 显示撑开容器，从 stretch 弹性团队名借空间；badge 在团队名左侧、定宽自适应，
+        # 不参与挤压→恒不动。高度固定 20：容器 sizeHint 随按钮全隐藏塌缩为 0，
+        # 否则 hover 会微调 header 高度（23↔26）；固定后展开态 header 恒 26、折叠态恒 22。
+        # 折叠态由 _apply_team_compact 整体隐藏（C3：折叠态不弹按钮，也避免窄条空白）
+        btn_area = QWidget(header)
+        btn_area_layout = QHBoxLayout(btn_area)
+        btn_area_layout.setContentsMargins(0, 0, 0, 0)
+        btn_area_layout.setSpacing(4)
+        btn_area.setFixedHeight(20)
+        header_layout.addWidget(btn_area)
 
         # 新建任务按钮：hover 显示（与 add/close 联动），点击 → teamNewTaskRequested(team_id)
         # 🎨 图标：与主界面"新建对话"按钮一致的 新会话.svg（铅笔+加号，语义：全员新建会话）
-        new_task_btn = TransparentToolButton(header)
+        new_task_btn = TransparentToolButton(btn_area)
         new_task_btn.setObjectName("teamGroupNewTaskBtn")
         new_task_btn.setIcon(get_icon("新会话"))
         new_task_btn.setFixedSize(20, 20)
@@ -2312,11 +2399,11 @@ class TabPanel(QWidget):
         new_task_btn.setAttribute(Qt.WA_NoMousePropagation, True)
         # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
         new_task_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamNewTaskRequested.emit(_tid))
-        header_layout.addWidget(new_task_btn)
+        btn_area_layout.addWidget(new_task_btn)
 
         # 快速新建成员按钮：hover 显示（与 new_task/close 联动），点击 → teamAddMemberRequested(team_id)
         # 🎨 图标：与子智能体卡片 title 一致的 设置-subagent.svg
-        add_btn = TransparentToolButton(header)
+        add_btn = TransparentToolButton(btn_area)
         add_btn.setObjectName("teamGroupAddBtn")
         add_btn.setIcon(get_icon("设置-subagent"))
         add_btn.setFixedSize(20, 20)
@@ -2325,18 +2412,21 @@ class TabPanel(QWidget):
         add_btn.setAttribute(Qt.WA_NoMousePropagation, True)
         # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
         add_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamAddMemberRequested.emit(_tid))
-        header_layout.addWidget(add_btn)
+        btn_area_layout.addWidget(add_btn)
 
-        close_btn = TransparentToolButton(header)
+        close_btn = TransparentToolButton(btn_area)
         close_btn.setObjectName("teamGroupCloseBtn")
         close_btn.setIcon(FIF.CLOSE)
         close_btn.setFixedSize(20, 20)
         close_btn.setToolTip("关闭团队")
         close_btn.setVisible(False)
         close_btn.setAttribute(Qt.WA_NoMousePropagation, True)
-        # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
-        close_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamCloseRequested.emit(_tid))
-        header_layout.addWidget(close_btn)
+        # 保存 qfluentwidgets 控件级样式，解散确认态回退时还原（同 TabItem._close_btn_orig_ss）
+        grp._team_close_btn_orig_ss = close_btn.styleSheet()
+        # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略；
+        # 解散是重操作：走内联二次确认（TabItem._on_close_btn_clicked 同范式）
+        close_btn.clicked.connect(lambda *_args, _tid=team_id: self._on_team_close_clicked(_tid))
+        btn_area_layout.addWidget(close_btn)
         outer.addWidget(header)
 
         # ── inner：成员列表（独立 widget + 独立布局，便于访问） ──
@@ -2359,9 +2449,19 @@ class TabPanel(QWidget):
         grp._team_new_task_btn = new_task_btn
         grp._team_add_btn = add_btn
         grp._team_icon = team_icon
+        grp._team_btn_area = btn_area  # 占位容器访问器（_apply_team_compact 折叠态隐藏用）
         grp._team_icon_key = None  # 值相等跳过缓存（initials, color）
         grp._team_inner_widget = inner_widget
         grp._team_inner_layout = inner_layout
+        grp._team_arrow = arrow
+        grp._team_badge = badge
+        # badge 增量计数（状态迁移级维护，禁遍历 _items 全量统计）
+        grp._team_streaming_count = 0
+        grp._team_error_count = 0
+        grp._team_question_count = 0
+        grp._team_total = 0
+        grp._team_close_confirming = False  # 解散二次确认态（TabItem 同范式）
+        grp._team_close_timer = None
 
         # hover 控制 new_task/add/close 按钮可见性（紧凑态守卫：折叠态不弹按钮，矩阵 C3）
         def _enter(_e, _h=header, _btn=close_btn, _add=add_btn, _task=new_task_btn):
@@ -2384,10 +2484,12 @@ class TabPanel(QWidget):
                     _gp = _QCursor.pos()
                     _QApp.sendEvent(_w, _QEnterEvent(_QPointF(_lp), _QPointF(_lp), _QPointF(_gp)))
 
-        def _leave(_e, _h=header, _btn=close_btn, _add=add_btn, _task=new_task_btn):
+        def _leave(_e, _h=header, _btn=close_btn, _add=add_btn, _task=new_task_btn, _panel=self, _tid=team_id):
             _btn.setVisible(False)
             _add.setVisible(False)
             _task.setVisible(False)
+            # 移出 header：取消解散确认态（防悬停残留误解散，同 TabItem.leaveEvent）
+            _panel._cancel_team_close_confirm(_tid)
 
         header.enterEvent = _enter
         header.leaveEvent = _leave
@@ -2402,7 +2504,173 @@ class TabPanel(QWidget):
         # 折叠态新建团队框：header 立即紧凑（规格书 2.2）
         if self._collapsed:
             self._apply_team_compact(grp, True)
+        # 恢复上次会话的团队框折叠现场（箭头不播动画）
+        if self._team_collapsed_states.get(team_id):
+            self._set_team_collapsed(grp, True, animate=False)
+        # 初始补偿：团队框创建可能晚于成员进入 streaming/question（恢复/迁移场景），
+        # 此处一次性统计作为增量计数起点（创建时一次，非热路径）
+        for _i, _t in self._item_team.items():
+            if _t != team_id or not (0 <= _i < len(self._items)):
+                continue
+            _it = self._items[_i]
+            if _it._streaming:
+                grp._team_streaming_count += 1
+            if _it._stream_error:
+                grp._team_error_count += 1
+            if _it._question:
+                grp._team_question_count += 1
+        grp._team_total = sum(1 for _t in self._item_team.values() if _t == team_id)
+        self._update_team_badge(grp)
         return grp
+
+    def _toggle_team_collapsed(self, team_id: str):
+        """切换团队框折叠/展开（header 点击入口，T4 右键菜单「折叠/展开团队」复用）
+
+        折叠态单一真源 = grp._team_inner_widget.isVisible()（外部菜单现场读它判定），
+        此处不另存折叠 bool；切换结果经 400ms 去抖落 app_state（重启保持现场）。
+        仅隐藏成员层，header 恒显；_rebuild_team_layout 重建只搬运 inner 不改显隐，
+        折叠态天然跨重建保留。
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return
+        inner = getattr(grp, "_team_inner_widget", None)
+        if inner is None:
+            return
+        collapsed = inner.isVisible()
+        self._set_team_collapsed(grp, collapsed)
+        self._schedule_team_collapse_save(team_id, collapsed)
+
+    def _set_team_collapsed(self, grp: "QFrame", collapsed: bool, animate: bool = True):
+        """应用团队框折叠态：显隐成员层 + 箭头指向 + 重绘（不写持久化）"""
+        inner = getattr(grp, "_team_inner_widget", None)
+        if inner is not None:
+            inner.setVisible(not collapsed)
+        arrow = getattr(grp, "_team_arrow", None)
+        if arrow is not None:
+            arrow.set_expanded(not collapsed, animate=animate)
+        grp.update()
+
+    def _schedule_team_collapse_save(self, team_id: str, collapsed: bool):
+        """折叠态落盘调度：400ms 去抖合并连点（与 workspace_tree_expansion 同范式）"""
+        self._team_collapsed_states[team_id] = collapsed
+        timer = self._team_collapse_save_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(400)
+            timer.timeout.connect(self._flush_team_collapse_state)
+            self._team_collapse_save_timer = timer
+        timer.start()
+
+    def _flush_team_collapse_state(self):
+        """去抖到期：把团队框折叠态真正写盘（app_state.json）"""
+        try:
+            _state_set("team_groups_collapsed", dict(self._team_collapsed_states))
+        except Exception:
+            pass
+
+    def _update_team_badge(self, grp: "QFrame"):
+        """按 grp 增量计数刷新 header 聚合 badge（仅状态迁移分支调用）
+
+        文案优先级：待回答（question，WARNING）> 运行中（streaming/error，INFO）
+        > 空闲（成员总数，muted）。error 并入运行口径、不单列文案（对齐
+        main_widget._sync_team_member_runtime_status：error 不覆盖 busy）。
+        三重守卫：文本/属性态/tooltip 变了才写，避免 repolish 进高频路径；
+        badge 数字静态不逐帧动画，减动效环境下天然可见。
+        """
+        badge = getattr(grp, "_team_badge", None)
+        if badge is None:
+            return
+        q = getattr(grp, "_team_question_count", 0)
+        running = getattr(grp, "_team_streaming_count", 0) + getattr(grp, "_team_error_count", 0)
+        total = getattr(grp, "_team_total", 0)
+        if q > 0:
+            text, state, tooltip = f"{q} 待答", "warn", f"{total} 名成员，{q} 个待回答"
+        elif running > 0:
+            text, state, tooltip = f"{running} 运行", "run", f"{total} 名成员，{running} 个运行中"
+        else:
+            text, state, tooltip = str(total), "idle", f"{total} 名成员"
+        if badge.text() != text:
+            badge.setText(text)
+        if badge.property("state") != state:
+            badge.setProperty("state", state)
+            badge.style().unpolish(badge)
+            badge.style().polish(badge)
+        # #13：按当前文案同步最小宽（含 QSS padding 1px 6px）——窄栏 + hover 时
+        # 布局会压缩 badge（实测「12 运行」73→48 裁字），最小宽钉住后不被压缩；
+        # 挤压转嫁给团队名（_ElidedLabel 有 elide 保护，显示省略号属预期）。
+        # ⚠️ 必须放在 unpolish/polish 之后：repolish 会重新应用 QSS 的
+        # min-width 覆盖掉此处设置（实测放在前面 minW 被重置回 26）
+        needed = badge.fontMetrics().horizontalAdvance(text) + 12
+        if badge.minimumWidth() != needed:
+            badge.setMinimumWidth(needed)
+        if badge.toolTip() != tooltip:
+            badge.setToolTip(tooltip)
+
+    def _on_team_close_clicked(self, team_id: str):
+        """解散团队按钮：内联二次确认（TabItem._on_close_btn_clicked 同范式）
+
+        解散是重操作，无条件确认：首击 → ⚠ 红色确认态 + 3s 超时回退；
+        二击才 emit teamCloseRequested。
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return
+        btn = getattr(grp, "_team_close_btn", None)
+        if btn is None:
+            return
+        if getattr(grp, "_team_close_confirming", False):
+            # 二次点击：确认解散
+            timer = getattr(grp, "_team_close_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+            grp._team_close_confirming = False
+            self._restore_team_close_btn(grp)
+            self.teamCloseRequested.emit(team_id)
+            return
+        # 首击：进入确认态（⚠ 占位 + 危险色，3s 内不点自动回退）
+        grp._team_close_confirming = True
+        btn.setIcon(QIcon())  # 清图标，文字占位（与 TabItem 确认态一致）
+        btn.setText("⚠")
+        # ⚠️ 必须显式透明背景 + TextOnly：局部 stylesheet 会覆盖 qfluentwidgets
+        # 全局样式（若只设 color 则 Qt 回退默认深色底）；IconOnly 不绘制 setText 文字。
+        btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        btn.setStyleSheet(
+            "QToolButton { background: transparent; border: none; "
+            f"color: {Colors.RING_DANGER}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+            " }"
+        )
+        btn.setToolTip("解散团队：再次点击确认，3秒后自动取消")
+        timer = QTimer(grp)
+        timer.setSingleShot(True)
+        timer.setInterval(3000)
+        timer.timeout.connect(lambda _tid=team_id: self._cancel_team_close_confirm(_tid))
+        grp._team_close_timer = timer
+        timer.start()
+
+    def _cancel_team_close_confirm(self, team_id: str):
+        """取消解散确认态，恢复普通关闭按钮（3s 超时 / 移出 header 触发）"""
+        grp = self._team_groups.get(team_id)
+        if grp is None or not getattr(grp, "_team_close_confirming", False):
+            return
+        grp._team_close_confirming = False
+        timer = getattr(grp, "_team_close_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        self._restore_team_close_btn(grp)
+
+    def _restore_team_close_btn(self, grp: "QFrame"):
+        """恢复解散按钮常规外观（CLOSE 图标 + 原控件级样式）"""
+        btn = getattr(grp, "_team_close_btn", None)
+        if btn is None:
+            return
+        btn.setIcon(FIF.CLOSE)
+        btn.setText("")
+        btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        # 还原创建时保存的 qfluentwidgets 样式（不能 setStyleSheet("")，否则连全局样式一起清）
+        btn.setStyleSheet(getattr(grp, "_team_close_btn_orig_ss", ""))
+        btn.setToolTip("解散团队")
 
     def _apply_team_group_style(self, grp: "QFrame", bg_alpha: int = 40):
         """应用团队分组框样式：细边框 + 卡片背景 + 圆角，视觉清晰但不喧宾夺主
@@ -2464,6 +2732,27 @@ class TabPanel(QWidget):
             #teamGroupCloseBtn:hover {{
                 background: {Colors.HOVER_BG};
             }}
+            #teamGroupBadge {{
+                color: {Colors.TEXT_MUTED};
+                background: {Colors.HOVER_BG};
+                border-radius: {BorderRadius.XS};
+                padding: 1px 6px;
+                {get_font_family_css()} {font_size_css(10)}
+                min-width: 14px;
+            }}
+            /* 语义态走 QSS 动态属性三档（数字静态，不逐帧动画）：
+               run=运行中（流式/报错均计，error 不覆盖 busy 口径）；
+               warn=待回答（question，需用户介入） */
+            #teamGroupBadge[state="run"] {{
+                color: {Colors.INFO};
+                background: {Colors.HOVER_BG_STRONG};
+                font-weight: 600;
+            }}
+            #teamGroupBadge[state="warn"] {{
+                color: {Colors.WARNING};
+                background: {Colors.HOVER_BG_STRONG};
+                font-weight: 600;
+            }}
         """)
         # header 是独立子控件（在 grp 主布局外），需要单独刷新样式避免主题切换遗漏
         header = getattr(grp, "_team_header", None)
@@ -2497,6 +2786,8 @@ class TabPanel(QWidget):
         add_btn = getattr(grp, "_team_add_btn", None)
         new_task_btn = getattr(grp, "_team_new_task_btn", None)
         team_icon = getattr(grp, "_team_icon", None)
+        arrow = getattr(grp, "_team_arrow", None)
+        badge = getattr(grp, "_team_badge", None)
         team_name = (name_label.text() if name_label else "").strip() or "团队"
 
         if compact:
@@ -2520,18 +2811,34 @@ class TabPanel(QWidget):
                     team_icon.setVisible(True)
             if name_label is not None:
                 name_label.setVisible(False)
+            # 窄条放不下箭头与 badge：一并隐藏（展开态恢复显示）
+            if arrow is not None:
+                arrow.setVisible(False)
+            if badge is not None:
+                badge.setVisible(False)
             if close_btn is not None:
                 close_btn.setVisible(False)
             if add_btn is not None:
                 add_btn.setVisible(False)
             if new_task_btn is not None:
                 new_task_btn.setVisible(False)
+            btn_area = getattr(grp, "_team_btn_area", None)
+            if btn_area is not None:
+                # 占位容器折叠态整体隐藏：窄条不放按钮区（C3），也避免 68px 空白
+                btn_area.setVisible(False)
             header.setToolTip(team_name)
             # 折叠态增强窄条视觉边界：背景加深（P2-1 方案 B，仅折叠态）
             self._apply_team_group_style(grp, bg_alpha=70)
         else:
             if name_label is not None:
                 name_label.setVisible(True)
+            if arrow is not None:
+                arrow.setVisible(True)
+            if badge is not None:
+                badge.setVisible(True)
+            btn_area = getattr(grp, "_team_btn_area", None)
+            if btn_area is not None:
+                btn_area.setVisible(True)
             if close_btn is not None:
                 close_btn.setVisible(False)
             if add_btn is not None:
@@ -2677,6 +2984,9 @@ class TabPanel(QWidget):
             ):
                 inner.addWidget(self._items[i])
             self._list_layout.addWidget(grp)
+            # 成员总数以重建结果为准（快照变化的重建才会走到这里），活跃计数靠增量
+            grp._team_total = len(team_members[t])
+            self._update_team_badge(grp)
 
         # 2) 再放独立 TabItem（无 team 归属，置于团队框下方）
         for i in independent_indices:
@@ -2698,6 +3008,8 @@ class TabPanel(QWidget):
             item.set_indent(0)
             item.set_open_marker(False)
             item.set_close_persistent(False)
+            # 行高分档跟随当前渲染容器（列表团队 32 / 其余 40）
+            item._refresh_row_height()
             item.setVisible(True)
         for grp in self._team_groups.values():
             grp.setVisible(True)
@@ -3204,6 +3516,8 @@ class TabPanel(QWidget):
             item.set_open_marker(not compact)
             item.set_close_persistent(not compact)
             item.set_compact(compact)
+            # 树模式成员行回 40px 分档（32 档仅列表团队态生效）
+            item._refresh_row_height()
         # ⚠️ 团队只在列表模式渲染：树模式不生成团队框节点，但框体 widget 仍在
         # _team_groups 里且上次可能入过布局 —— 不显式隐藏就会以旧几何继续绘制成残影。
         for grp in self._team_groups.values():
@@ -3233,6 +3547,17 @@ class TabPanel(QWidget):
                 for i, t in self._item_team.items():
                     new_mapping[i - 1 if i > index else i] = t
                 self._item_team = new_mapping
+            # 同步递减所属团队框 badge 增量计数（成员总数由后续重建刷新）
+            if old_team:
+                grp = self._team_groups.get(old_team)
+                if grp is not None:
+                    if item._streaming:
+                        grp._team_streaming_count = max(0, grp._team_streaming_count - 1)
+                    if item._stream_error:
+                        grp._team_error_count = max(0, grp._team_error_count - 1)
+                    if item._question:
+                        grp._team_question_count = max(0, grp._team_question_count - 1)
+                    self._update_team_badge(grp)
 
             # 批量删除模式（begin_batch_remove/end_batch_remove 包围）：空组清理
             # 与视觉布局重建延迟到 end_batch_remove 统一执行，避免连续删除 N 个
@@ -3314,24 +3639,36 @@ class TabPanel(QWidget):
 
     def update_tab_streaming(self, index: int, streaming: bool, error: bool = False):
         """更新 Tab 的流式/错误状态"""
-        if 0 <= index < len(self._items):
-            item = self._items[index]
-            old_streaming = item._streaming
-            old_error = item._stream_error
-            item.set_streaming(streaming, error)
-            if streaming and not old_streaming:
-                self._streaming_count += 1
-                self._ensure_anim_timer()
-            elif not streaming and old_streaming:
-                self._streaming_count = max(0, self._streaming_count - 1)
-            if error and not old_error:
-                # 报错同样驱动动画（红色流光脉冲）
-                self._error_count += 1
-                self._ensure_anim_timer()
-            elif not error and old_error:
-                self._error_count = max(0, self._error_count - 1)
-            if self._streaming_count + self._question_count + self._error_count == 0:
-                self._stop_anim_timer()
+        if not (0 <= index < len(self._items)):
+            return
+        item = self._items[index]
+        old_streaming = item._streaming
+        old_error = item._stream_error
+        # old/new 早退守卫（对齐 update_tab_question）：同参重复调用零开销
+        if old_streaming == streaming and old_error == error:
+            return
+        item.set_streaming(streaming, error)
+        if streaming and not old_streaming:
+            self._streaming_count += 1
+            self._ensure_anim_timer()
+        elif not streaming and old_streaming:
+            self._streaming_count = max(0, self._streaming_count - 1)
+        if error and not old_error:
+            # 报错同样驱动动画（红色流光脉冲）
+            self._error_count += 1
+            self._ensure_anim_timer()
+        elif not error and old_error:
+            self._error_count = max(0, self._error_count - 1)
+        if self._streaming_count + self._question_count + self._error_count == 0:
+            self._stop_anim_timer()
+        # 团队框 badge 增量计数同步（仅状态迁移分支走到这里）
+        grp = self._team_groups.get(self._item_team.get(index, ""))
+        if grp is not None:
+            if streaming != old_streaming:
+                grp._team_streaming_count = max(0, grp._team_streaming_count + (1 if streaming else -1))
+            if error != old_error:
+                grp._team_error_count = max(0, grp._team_error_count + (1 if error else -1))
+            self._update_team_badge(grp)
 
     def update_tab_question(self, index: int, question: bool):
         """更新 Tab 的 question 状态（AI 提问等待用户回答）"""
@@ -3348,6 +3685,11 @@ class TabPanel(QWidget):
             self._question_count = max(0, self._question_count - 1)
             if self._streaming_count + self._question_count + self._error_count == 0:
                 self._stop_anim_timer()
+        # 团队框 badge 增量计数同步（仅状态迁移分支走到这里）
+        grp = self._team_groups.get(self._item_team.get(index, ""))
+        if grp is not None:
+            grp._team_question_count = max(0, grp._team_question_count + (1 if question else -1))
+            self._update_team_badge(grp)
 
     def _ensure_anim_timer(self):
         """确保彩虹动画定时器已启动
@@ -3598,26 +3940,9 @@ class TabPanel(QWidget):
             except Exception:
                 pass
 
-    def contextMenuEvent(self, event):
-        """显示右键菜单
-
-        右键点击了哪个标签页就操作哪个标签页；
-        如果没有点击到任何标签页（如点击空白区域），则操作当前选中的标签页。
-        """
-        # ── 确定右键点击对应的标签页索引 ──
-        clicked_index = self._active_index  # 默认回退到当前选中
-        container = self._active_list_container()
-        list_pos = container.mapFromGlobal(event.globalPos())
-        child = container.childAt(list_pos)
-        while child is not None and child is not container:
-            if isinstance(child, TabItem):
-                if child in self._items:
-                    clicked_index = self._items.index(child)
-                break
-            child = child.parentWidget()
-
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
+    def _tab_menu_stylesheet(self) -> str:
+        """右键菜单统一样式（TabItem 菜单与团队框菜单共用）"""
+        return f"""
             QMenu {{
                 background: {Colors.CARD_BG};
                 border: 1px solid {Colors.BORDER};
@@ -3633,7 +3958,78 @@ class TabPanel(QWidget):
             QMenu::item:selected {{
                 background: {Colors.HOVER_BG};
             }}
-        """)
+        """
+
+    def _show_team_context_menu(self, team_id: str, global_pos):
+        """团队框 header 右键菜单：折叠/展开、新建任务、快速新建成员、解散
+
+        折叠态下 hover 按钮禁弹，此菜单是折叠态唯一操作入口（兑现 header
+        注释宣称的 T4 右键复用）。解散走二级确认菜单：复用按钮确认范式
+        （_on_team_close_clicked 把确认态写在 close_btn 外观上）在折叠态
+        按钮不可见，二次点击物理不可达，故确认语义迁到菜单内。
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(self._tab_menu_stylesheet())
+        collapsed = grp._team_inner_widget.isHidden()
+        toggle_action = menu.addAction("展开团队" if collapsed else "折叠团队")
+        menu.addSeparator()
+        new_task_action = menu.addAction("新建任务")
+        add_member_action = menu.addAction("快速新建成员")
+        menu.addSeparator()
+        close_action = menu.addAction("解散团队")
+
+        action = menu.exec_(global_pos)
+        if action is None:
+            return
+        if action == toggle_action:
+            self._toggle_team_collapsed(team_id)
+        elif action == new_task_action:
+            self.teamNewTaskRequested.emit(team_id)
+        elif action == add_member_action:
+            self.teamAddMemberRequested.emit(team_id)
+        elif action == close_action:
+            # 二级确认：首击不解散，弹确认菜单再点一次才 emit（防误触）
+            confirm = QMenu(self)
+            confirm.setStyleSheet(self._tab_menu_stylesheet())
+            confirm_action = confirm.addAction("⚠ 确认解散团队")
+            confirm.addSeparator()
+            cancel_action = confirm.addAction("取消")
+            confirmed = confirm.exec_(global_pos)
+            if confirmed == confirm_action:
+                self.teamCloseRequested.emit(team_id)
+            elif confirmed == cancel_action:
+                self._cancel_team_close_confirm(team_id)
+
+    def contextMenuEvent(self, event):
+        """显示右键菜单
+
+        右键点击了哪个标签页就操作哪个标签页；
+        如果没有点击到任何标签页（如点击空白区域），则操作当前选中的标签页。
+        团队框 header 命中时弹出团队专属菜单（不回退到当前选中 tab 的菜单）。
+        """
+        # ── 确定右键点击对应的标签页索引 ──
+        clicked_index = self._active_index  # 默认回退到当前选中
+        container = self._active_list_container()
+        list_pos = container.mapFromGlobal(event.globalPos())
+        child = container.childAt(list_pos)
+        while child is not None and child is not container:
+            if isinstance(child, TabItem):
+                if child in self._items:
+                    clicked_index = self._items.index(child)
+                break
+            if child.objectName() == "teamGroupHeader":
+                # 团队框 header：弹团队菜单（此前会错位回退到 _active_index 的 tab 菜单）
+                team_id = child.property("teamId")
+                if team_id:
+                    self._show_team_context_menu(team_id, event.globalPos())
+                    return
+            child = child.parentWidget()
+
+        menu = QMenu(self)
+        menu.setStyleSheet(self._tab_menu_stylesheet())
         switch_session_action = None
         branch_action = None
         close_action = None

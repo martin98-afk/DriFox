@@ -4352,7 +4352,7 @@ class MarketplaceCard(QWidget):
             if self._is_git_missing(get_installer().last_error):
                 # 环境缺 git：提示准确原因 + 自动回对话引导安装 git
                 InfoBar.error(f"{name} 安装失败", "未检测到 git，已为你引导安装", duration=4000, parent=bar_parent)
-                self._guide_install_git()
+                self._guide_install_git(name)
             else:
                 InfoBar.error(f"{name} 安装失败", "请检查网络或插件源", duration=3000, parent=bar_parent)
 
@@ -4360,8 +4360,44 @@ class MarketplaceCard(QWidget):
         """判断安装错误是否源于 git 可执行文件缺失（installer 已转成 GitNotFoundError 文案）"""
         return "未检测到 git" in (err or "")
 
-    def _guide_install_git(self):
-        """git 缺失引导：隐藏市场卡、切回对话、把「本地安装git」填入输入框
+    # 各平台安装 git 的具体手段（按优先级；提示词据此给模型可执行步骤）
+    _GIT_INSTALL_HINTS = {
+        "win32": (
+            "winget install --id Git.Git -e --source winget（Windows 11/10 现代版自带 winget；"
+            "若无 winget，去 https://git-scm.com/download/win 下载安装包）"
+        ),
+        "darwin": (
+            "brew install git（已装 Homebrew 时首选）；未装 Homebrew 则执行 "
+            "xcode-select --install 装 Xcode 命令行工具（自带 git）"
+        ),
+    }
+    _GIT_INSTALL_HINTS["linux"] = (
+        "按发行版选一条：Debian/Ubuntu → sudo apt install -y git；"
+        "Fedora/RHEL → sudo dnf install -y git；Arch → sudo pacman -S git"
+    )
+
+    def _build_git_install_prompt(self, plugin_name: str) -> str:
+        """构造「引导安装 git」的提示词：带上真实 OS 与对应安装命令
+
+        原实现只填「本地安装git」五个字，模型不知道当前系统、不知道可用什么
+        包管理器、也不知道装完要验证什么，只能给出泛泛而谈的步骤，装不顺。
+        这里把平台判定与具体命令写好，模型直接照做即可。
+        """
+        system = sys.platform
+        if system.startswith("linux"):
+            system = "linux"
+        hint = self._GIT_INSTALL_HINTS.get(system, "请到 https://git-scm.com/downloads 下载对应系统的安装包")
+        os_label = {"win32": "Windows", "darwin": "macOS", "linux": "Linux"}.get(system, system)
+        return (
+            f"我装插件「{plugin_name}」失败，原因是本机没有 git（不在 PATH）。\n"
+            f"当前系统：{os_label}。\n"
+            f"请帮我用这条命令安装 git：{hint}\n"
+            f"装完后执行 `git --version` 确认可用，再告诉我，我会重新尝试安装插件。\n"
+            f"注意：装完 git 可能需要重启 DriFox 才能被 PATH 识别。"
+        )
+
+    def _guide_install_git(self, plugin_name: str = ""):
+        """git 缺失引导：隐藏市场卡、切回对话、把带环境信息的引导语填入输入框
 
         installer.last_error 为 GitNotFoundError 文案时由 _on_install_done 触发。
         全程 try/except 兜底：引导失败（如窗口未就绪）不影响安装失败的正常提示。
@@ -4376,7 +4412,7 @@ class MarketplaceCard(QWidget):
             if mw is None or not hasattr(mw, "input_area"):
                 return
             area = mw.input_area
-            area.setPlainText("本地安装git")
+            area.setPlainText(self._build_git_install_prompt(plugin_name))
             cursor = area.textCursor()
             cursor.movePosition(cursor.End)
             area.setTextCursor(cursor)
