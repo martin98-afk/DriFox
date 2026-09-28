@@ -14414,7 +14414,48 @@ class MessageCard(SimpleCardWidget):
             self._get_welcome_window_context(),
             suppress_anim=True,
         )
-        self._render_welcome_with_body(body_html)
+        # 增量替换优先：可见窗口只换 #welcome-sessions-root 的 innerHTML，
+        # 问候语/欢迎 tab 栏原地保留，零整页重排闪动；viewer 未就绪或窗口
+        # 不可见回退整页渲染（后台窗口由 viewer 门控 deferred，切回补渲）。
+        if not self._refresh_welcome_body_incremental(body_html):
+            self._render_welcome_with_body(body_html)
+
+    def _refresh_welcome_body_incremental(self, body_html: str) -> bool:
+        """增量替换欢迎卡片 sessions body DOM（不整页重渲染）。
+
+        背景：软刷新（refresh_welcome_data）旧实现走 set_content 整页替换
+        #content-placeholder 的 innerHTML，问候语/欢迎 tab 栏连带重建，重排
+        闪动可见（其他标签页会话结束广播到本窗口场景）。本方法只替换
+        #welcome-sessions-root（_render_sessions_body 包根输出）的 innerHTML，
+        greeting 与 tab 栏原地保留。
+
+        Returns:
+            True = 已增量替换，或窗口不可见无需立即替换（数据已更新到
+            _welcome_recent/_welcome_top，下次整页渲染自然生效）；
+            False = viewer 未就绪，调用方应回退整页渲染。
+        """
+        try:
+            viewer = getattr(self, "viewer", None)
+        except RuntimeError:
+            # stub（__new__ 绕过 __init__）实例：sip 未初始化，getattr 即抛错
+            return False
+        if viewer is None or not getattr(self, "_lazy_rendered", False):
+            return False
+        if not viewer.isVisible():
+            # 后台 tab：与 viewer 可见性门控同语义，切回时整页补渲拿新数据
+            return False
+        try:
+            page = viewer.page()
+            if page is None or not getattr(viewer, "_is_js_ready", False):
+                return False
+            payload = json.dumps(body_html).decode("utf-8")
+            page.runJavaScript(
+                f"var _r=document.getElementById('welcome-sessions-root');if(_r){{_r.innerHTML={payload};}}"
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_refresh_welcome_body_incremental] failed: {e}")
+            return False
 
     def _ensure_identity(self):
         """解析并缓存本条消息的身份（消息自带快照优先，否则走解析链）。
@@ -18319,6 +18360,10 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     top_block = _render_section(
         "最活跃会话", top_by_count, count_mode=True, start_idx=top_start, suppress_anim=suppress_anim
     )
+    # 包根元素：软刷新增量替换的稳定锚点（refresh_welcome_data →
+    # _refresh_welcome_body_incremental 只换本容器 innerHTML，不整页重建）
     if not (recent_block or top_block):
-        return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
-    return recent_block + top_block
+        return (
+            '<div id="welcome-sessions-root"><div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div></div>'
+        )
+    return f'<div id="welcome-sessions-root">{recent_block}{top_block}</div>'
