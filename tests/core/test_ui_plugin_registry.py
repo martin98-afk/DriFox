@@ -1561,3 +1561,149 @@ def test_popout_card_create_and_singleton(qapp):
     assert reg.popout_card("missing-card") is None
     assert "popout:missing-card" not in reg._windows
     reg.reset()
+
+
+# ── 主入口声明（primary_entry）与 card_id 声明式绑定 ──────────────
+
+
+def test_primary_entry_titlebar_derived(qapp):
+    """primary_entry kind=titlebar：注册卡即派生标题栏 tab（tab_id=card_id，回调已生成）"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        "plug-a",
+        "my-card",
+        QWidget,
+        container="full",
+        title="我的卡",
+        metadata={"primary_entry": {"kind": "titlebar", "label": "轨迹", "priority": 3}},
+    )
+    tabs = {t.tab_id: t for t in reg.get_titlebar_tabs()}
+    assert "my-card" in tabs
+    info = tabs["my-card"]
+    assert info.plugin_name == "plug-a"
+    assert info.label == "轨迹"
+    assert info.priority == 3
+    assert info.card_id == "my-card"
+    assert info.on_click is not None  # 框架生成的唤出回调
+    reg.reset()
+
+
+def test_primary_entry_sidebar_str_shorthand(qapp):
+    """primary_entry 字符串简写：kind=sidebar 派生侧栏项，label 缺省用卡 title"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        "plug-a",
+        "my-card",
+        QWidget,
+        container="right",
+        title="我的卡",
+        metadata={"primary_entry": "sidebar"},
+    )
+    items = {i.item_id: i for i in reg.get_sidebar_items()}
+    assert "my-card" in items
+    info = items["my-card"]
+    assert info.plugin_name == "plug-a"
+    assert info.label == "我的卡"
+    assert info.on_click is not None  # 框架生成的 toggle 回调
+    reg.reset()
+
+
+def test_primary_entry_invalid_kind_skipped(qapp):
+    """primary_entry.kind 非法：跳过派生且不抛异常，卡本身注册成功"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        "plug-a",
+        "my-card",
+        QWidget,
+        container="full",
+        title="我的卡",
+        metadata={"primary_entry": {"kind": "bogus"}},
+    )
+    assert reg.get_titlebar_tabs() == []
+    assert reg.get_sidebar_items() == []
+    assert "my-card" in reg.get_floating_cards()
+    reg.reset()
+
+
+def test_no_primary_entry_no_derivation(qapp):
+    """未声明 primary_entry：不派生任何入口（旧行为完全一致）"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card("plug-a", "my-card", QWidget, container="left", title="我的卡")
+    assert reg.get_titlebar_tabs() == []
+    assert reg.get_sidebar_items() == []
+    reg.reset()
+
+
+def test_titlebar_tab_on_click_priority_over_card_id(qapp):
+    """on_click 与 card_id 同传：on_click 优先（兼容路径不受影响）"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card("plug-a", "my-card", QWidget, container="full", title="我的卡")
+
+    def _manual():
+        return None
+
+    reg.register_titlebar_tab("plug-a", "my-card", "轨迹", on_click=_manual, card_id="my-card")
+    (info,) = reg.get_titlebar_tabs()
+    assert info.on_click is _manual
+    assert info.card_id == "my-card"
+    reg.reset()
+
+
+def test_titlebar_tab_card_id_before_card_registration(qapp):
+    """先注册 tab 后注册卡（card_id 暂未注册）：告警不阻断，注册成功"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_titlebar_tab("plug-a", "my-card", "轨迹", card_id="my-card")
+    reg.register_floating_card("plug-a", "my-card", QWidget, container="full", title="我的卡")
+    (info,) = reg.get_titlebar_tabs()
+    assert info.on_click is not None
+    assert info.card_id == "my-card"
+    reg.reset()
+
+
+def test_unload_plugin_clears_derived_entries(qapp):
+    """插件卸载：primary_entry 派生的 tab 与侧栏项一并注销"""
+    from PyQt5.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        "plug-a",
+        "my-card",
+        QWidget,
+        container="full",
+        title="我的卡",
+        metadata={"primary_entry": "titlebar"},
+    )
+    reg.register_floating_card(
+        "plug-a",
+        "side-card",
+        QWidget,
+        container="right",
+        title="侧卡",
+        metadata={"primary_entry": "sidebar"},
+    )
+    assert reg.get_titlebar_tabs() != []
+    assert reg.get_sidebar_items() != []
+    reg.unload_plugin("plug-a")
+    assert reg.get_titlebar_tabs() == []
+    assert reg.get_sidebar_items() == []
+    assert reg.get_floating_cards() == {}
+    reg.reset()

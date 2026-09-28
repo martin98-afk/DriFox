@@ -45,11 +45,11 @@ def register_ui(registry):
 
 | 扩展点 | 注册方法（关键参数） | 场景 |
 |--------|---------------------|------|
-| 浮动卡片 | `register_floating_card(plugin_name, card_id, widget_class, container, title, default_visible, context_provider)` | 独立面板/仪表板；自动注册 `/<card_id>` 命令；widget_class 需接受 parent |
+| 浮动卡片 | `register_floating_card(plugin_name, card_id, widget_class, container, title, default_visible, context_provider, metadata)` | 独立面板/仪表板；自动注册 `/<card_id>` 命令；widget_class 需接受 parent；`metadata["primary_entry"]` 可声明式派生标题栏 tab / 侧栏项（一处注册多处分发，见下） |
 | 内容块渲染器 | `register_content_renderer(plugin_name, type_name, render_func, priority)` | 消息流中自定义类型内容的 HTML 渲染；render_func(data, context) -> HTML |
 | 消息元素工厂 | `register_message_factory(plugin_name, name, condition_func, factory_func, priority)` | 高级：condition 命中时接管整条消息的构造 |
 | 欢迎 tab | `register_welcome_tab(plugin_name, mode_key, label, render_func, priority)` | 欢迎卡片新增 tab；render_func(ctx) -> 完整 HTML |
-| 侧边栏项 | `register_sidebar_item(plugin_name, item_id, label, icon_path, group, default_visible, priority, on_click)` | 左侧导航自定义入口；on_click(ctx) |
+| 侧边栏项 | `register_sidebar_item(plugin_name, item_id, label, icon_path, group, default_visible, priority, on_click, card_id)` | 左侧导航自定义入口；on_click(ctx)；`card_id` 声明式绑定浮动卡（框架生成 toggle 回调，开关语义） |
 | 输入框按钮 | `register_input_button(plugin_name, button_id, icon_path, icon_light_path, tooltip, group, priority, on_click, on_right_click)` | 输入区旁自定义按钮 |
 | 右键菜单 | `register_context_menu_action(plugin_name, action_id, target, label, action_func, enabled_func, separator_before, priority)` | 定制上下文菜单；action_func(ctx)->bool |
 | 设置卡片 | `register_settings_card(plugin_name, card_id, title, widget_class, group, priority, section)` | 设置页自定义卡片 |
@@ -62,7 +62,11 @@ def register_ui(registry):
 | 围栏渲染 | `register_fence_renderer(plugin_name, lang, render_func, streaming_placeholder, priority, assets, bridge_permissions)`；**保留 lang 不可劫持：echarts, mermaid, svg, html, widget** |
 | 欢迎动作 | `register_welcome_action(plugin_name, action, handler(content, ctx))`；欢迎 tab HTML 内 `.context-tag` 点击派发，后注册覆盖先注册 |
 | @提及提供者 | `register_mention_provider(plugin_name, provider_id, list_func()->[{...}], on_selected)`；条目渲染在 @ 卡片顶部 |
-| 标题栏 tab | `register_titlebar_tab(plugin_name, tab_id, label, icon_path, on_click, priority)`；icon 无主题感知，建议纯文字 label |
+| 标题栏 tab | `register_titlebar_tab(plugin_name, tab_id, label, icon_path, on_click, card_id, priority)`；icon 无主题感知，建议纯文字 label；`card_id` 声明式绑定浮动卡（框架生成唤出回调，已可见忽略不关闭） |
+
+**主入口声明（推荐，一处注册多处分发）**：在 `register_floating_card` 的 metadata 里声明
+`"primary_entry": {"kind": "titlebar" | "sidebar", "label": str, "priority": int, "icon_path": str}`
+（或简写 `"primary_entry": "titlebar"`），框架自动派生常驻入口，插件无需手写 tab/侧栏注册与回调绑定。派生入口随插件卸载自动注销。旧写法（手写 `on_click` + `toggle_floating_card`）仍然兼容，但新代码一律用声明式。
 | 工作台页签 | `register_workbench_tab(plugin_name, page_id, label, widget_class, priority)`；同 page_id 高优先级覆盖 |
 | 工作区页面 | `register_workspace_page(plugin_name, page_id, title, widget_class, icon_path, icon_light_path, order_hint)`；icon_light_path 双主题 |
 | 槽位条目 | `register_slot_entry(region_id, entry_id, plugin_name, priority, payload)`；宿主须先 `declare_region` 声明区域 |

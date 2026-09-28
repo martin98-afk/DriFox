@@ -100,3 +100,95 @@ def test_remove_plugin_with_readonly_git_pack(tmp_path, monkeypatch):
     result = installer.remove("base44")
     assert result is True, "remove() 必须返回 True"
     assert not plugin.exists(), "插件目录必须被完全删除"
+
+
+# ---------- manifest 校验守卫（G1-4b）：无 manifest 内容拒装 + 更新回滚 ----------
+
+
+def _make_bare_installer(tmp_path):
+    """隔离 installer（不跑真 git/网络，不走 __init__ 的真实目录）"""
+    import types
+
+    if "pm_ui" not in sys.modules:
+        _pkg = types.ModuleType("pm_ui")
+        _pkg.__path__ = [str(PLUGIN_MARKETPLACE / "ui")]
+        _pkg.__package__ = "pm_ui"
+        sys.modules["pm_ui"] = _pkg
+    from pm_ui import installer as inst
+
+    inst.report_plugin_install = lambda name: None
+    p = inst.PluginInstaller.__new__(inst.PluginInstaller)
+    p._plugins_dir = tmp_path / "plugins"
+    p._cache_dir = tmp_path / "cache"
+    p._inst_map_cache = None
+    p._inst_map_ts = 0.0
+    p._status_map_cache = None
+    p._status_map_ts = 0.0
+    p._manifest_cache = {}
+    return p, inst
+
+
+def test_install_rejects_non_plugin_content(monkeypatch, tmp_path):
+    """下载内容缺 .drifox-plugin/plugin.json → 拒装（False + last_error 含 manifest + 目录不残留）"""
+    p, inst = _make_bare_installer(tmp_path)
+
+    def fake_clone(self, url, subpath, ref, cache_dir, extra_args=None):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "junk.txt").write_text("not a plugin", encoding="utf-8")
+
+    monkeypatch.setattr(inst.PluginInstaller, "_sparse_clone", fake_clone)
+
+    target = p._plugins_dir / "bad-plug"
+    ok = p._download_and_move("bad-plug", "https://github.com/x/bad.git", ".", "main", target)
+    assert ok is False
+    assert "plugin.json" in (p.last_error or "")
+    assert not target.exists(), "拒装后不得残留无效插件目录"
+
+
+def test_update_rejects_non_plugin_content_restores_old(monkeypatch, tmp_path):
+    """更新场景下载到无 manifest 内容 → 回滚旧版（旧版文件完好）"""
+    p, inst = _make_bare_installer(tmp_path)
+    target = p._plugins_dir / "demo"
+    target.mkdir(parents=True)
+    (target / "old.txt").write_text("old", encoding="utf-8")
+
+    def fake_clone(self, url, subpath, ref, cache_dir, extra_args=None):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "junk.txt").write_text("not a plugin", encoding="utf-8")
+
+    monkeypatch.setattr(inst.PluginInstaller, "_sparse_clone", fake_clone)
+
+    ok = p.update({"name": "demo", "version": "2.0.0", "source": {"source": "github", "repo": "o/d"}})
+    assert ok is False
+    assert (target / "old.txt").read_text(encoding="utf-8") == "old", "旧版必须被还原"
+    assert not (target / "junk.txt").exists(), "无效内容不得残留"
+
+
+def test_update_builtin_installs_to_user_root(monkeypatch, tmp_path):
+    """内置插件更新：一律装用户根（plugins/<name>），不原地改写主仓 plugins/
+
+    回归锁定：旧实现 system_dir 重定向会把新版原地覆盖项目根 plugins/<name>。
+    user>system 加载优先级下用户根副本生效；卸载影子副本即回退内置版。
+    """
+    p, inst = _make_bare_installer(tmp_path)
+    # 模拟内置插件已在主仓（system_dir 只读探测，不参与落位）
+    system_dir = tmp_path / "repo-plugins"
+    builtin = system_dir / "builtin-demo"
+    builtin.mkdir(parents=True)
+    (builtin / "builtin.txt").write_text("builtin", encoding="utf-8")
+    p._system_dir = system_dir
+
+    def fake_clone(self, url, subpath, ref, cache_dir, extra_args=None):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "new.txt").write_text("new", encoding="utf-8")
+        md = cache_dir / ".drifox-plugin"
+        md.mkdir(parents=True, exist_ok=True)
+        (md / "plugin.json").write_text('{"name": "builtin-demo", "version": "2.0.0"}', encoding="utf-8")
+
+    monkeypatch.setattr(inst.PluginInstaller, "_sparse_clone", fake_clone)
+
+    ok = p.update({"name": "builtin-demo", "version": "2.0.0", "source": {"source": "github", "repo": "o/d"}})
+    assert ok is True
+    # 新版落用户根；主仓目录未被改写
+    assert (p._plugins_dir / "builtin-demo" / "new.txt").read_text(encoding="utf-8") == "new"
+    assert (system_dir / "builtin-demo" / "builtin.txt").read_text(encoding="utf-8") == "builtin"

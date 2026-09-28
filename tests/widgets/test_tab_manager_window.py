@@ -93,10 +93,12 @@ class TestReplaceTabCloseFromCardInside:
         tm.close_replace_card("hook_edit")
 
         assert "hook_edit" not in tm._replace_open[GLOBAL_WINDOW_ID]
-        assert tm._replace_active.get(GLOBAL_WINDOW_ID) is None
         assert "hook_edit" not in tm.titleBar._tabs
-        # settings 保留（卡片内关闭编辑卡 → 回到设置面板）
+        # settings 保留（卡片内关闭编辑卡 → 补位回到设置面板，高亮乐观落 settings，
+        # 不再经过「对话」中间态）
         assert "settings" in tm.titleBar._tabs
+        assert tm._replace_active.get(GLOBAL_WINDOW_ID) == "settings"
+        assert tm.titleBar._active_id == "settings"
 
     def test_tab_close_click_uses_same_public_entry(self, qtbot):
         """tab × 关闭走同一公共方法（行为一致）"""

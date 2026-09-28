@@ -673,6 +673,14 @@ def _rebind_command_shortcuts():
     - reload_all_commands（命令定义含 shortcut 变更时）
     - reload_agent_commands（agent 命令删除/更新后，保证移除残留快捷键绑定）
     """
+    # 无 GUI 进程（测试/headless）守卫：TrayManager.get_instance() 会构造
+    # QSystemTrayIcon，无 QApplication 时是 **native crash**（C 层直接崩进程），
+    # try/except 拦不住——必须在任何 Qt 对象构造前返回。
+    from PyQt5.QtWidgets import QApplication
+
+    if QApplication.instance() is None:
+        logger.debug("[Commands] 无 QApplication（headless 环境），跳过快捷键重绑定")
+        return
     try:
         from app.main_widget import OpenAIChatToolWindow
 

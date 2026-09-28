@@ -320,8 +320,9 @@ class PluginManager:
     _SYSTEM_PLUGIN_DIR = _resolve_system_plugin_dir()
     # 不可禁用核心插件名单（黑名单制）：禁用会断核心链路（组件宿主/插件市场自身）。
     # system 插件已按组件类型拆分为 system-* 系列内置插件，其中承载核心链路的
-    # 子集（工具/序列化/存储/模型适配/服务商/Hooks/两类策略/命令/智能体）不可禁用；
-    # 外围插件（主题/技能/MCP/团队模板/UI 页）可整插件禁用。
+    # 子集（工具/序列化/存储/模型适配/服务商/Hooks/两类策略/命令/智能体
+    # /协议传输/流式接收器）不可禁用；
+    # 外围插件（主题/技能/MCP/团队模板/UI 页/上下文策略）可整插件禁用。
     # plugin-marketplace/ui/installer.py 状态分类与本名单保持单一数据源。
     _NON_DISABLEABLE = frozenset(
         {
@@ -335,6 +336,8 @@ class PluginManager:
             "system-hook-policies",
             "system-commands",
             "system-agents",
+            "system-transports",
+            "system-stream-sinks",
             "plugin-marketplace",
         }
     )

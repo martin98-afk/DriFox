@@ -235,3 +235,69 @@ def test_view_token_cache_invalidated_on_replace():
     first = v.used_tokens
     v.replace_messages([{"role": "user", "content": "z" * 5000}])
     assert v.used_tokens != first
+
+
+class TestToolPruneErrorKeep:
+    """tool_prune 错误保护（keep-wrong-turns）：报错结果阈值 ×4 放宽。
+
+    Manus 原则：错误尝试是 agent 最不该丢的上下文。报错结果（success=False）
+    截断阈值按 error_keep_multiplier 放大；无 success 字段保守按普通结果处理。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stable_cfg(self, monkeypatch):
+        # 屏蔽本机用户配置，保证阈值走默认：base=8192（llm_config={}）、倍数=4
+        monkeypatch.setattr(
+            "app.plugins.managers.plugin_config_store.PluginConfigStore.get",
+            lambda self, plugin, key: None,
+        )
+
+    @staticmethod
+    def _tier():
+        from app.plugins.loaders.runtime_component_loader import _make_context_tier_loader
+        from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
+
+        _make_context_tier_loader().scan_roots()
+        return ContextPolicyRegistry.get_instance().tiers()["tool_prune"]
+
+    @staticmethod
+    def _view(msgs):
+        return ContextView(messages=msgs, budget=200000, target_tokens=100000, llm_config={}, stage=STAGE_SEND)
+
+    def test_error_result_spared_within_multiplier(self):
+        """报错结果 9K 字符（>8192 基础阈值、<×4=32768）→ 不截断"""
+        tier = self._tier()
+        view = self._view([{"role": "tool", "name": "bash", "content": "e" * 9000, "success": False}])
+        assert not tier.should_apply(view)
+        outcome = tier.apply(view)
+        assert outcome.messages[0]["content"] == "e" * 9000
+
+    def test_normal_result_still_pruned(self):
+        """成功结果同长度 → 照常截断（保护只作用于报错结果）"""
+        tier = self._tier()
+        view = self._view([{"role": "tool", "name": "bash", "content": "o" * 9000, "success": True}])
+        assert tier.should_apply(view)
+        outcome = tier.apply(view)
+        assert len(outcome.messages[0]["content"]) < 9000
+
+    def test_huge_error_still_capped(self):
+        """超大报错结果（40K > ×4=32768）→ 仍截断，防失控"""
+        tier = self._tier()
+        view = self._view([{"role": "tool", "name": "bash", "content": "e" * 40000, "success": False}])
+        assert tier.should_apply(view)
+        outcome = tier.apply(view)
+        assert len(outcome.messages[0]["content"]) < 40000
+
+    def test_error_prune_idempotent(self):
+        """截断后的报错结果重复投影字节恒定（cache_impact=none 的前提）"""
+        tier = self._tier()
+        msgs = [{"role": "tool", "name": "bash", "content": "e" * 40000, "success": False}]
+        first = tier.apply(self._view(msgs)).messages
+        second = tier.apply(self._view(first)).messages
+        assert first[0]["content"] == second[0]["content"]
+
+    def test_missing_success_field_treated_as_normal(self):
+        """无 success 字段（外部导入的会话）保守按普通结果截断"""
+        tier = self._tier()
+        view = self._view([{"role": "tool", "name": "bash", "content": "o" * 9000}])
+        assert tier.should_apply(view)

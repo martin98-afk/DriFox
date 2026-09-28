@@ -2865,6 +2865,9 @@ class TabManagerWindow(FramelessWindow):
     def _on_replace_close_timeout(self, card_id: str) -> None:
         self._replace_timers.pop(card_id, None)
         if not self._has_other_visible_full(card_id):
+            # 仅当关的是当前窗口的激活卡才补位激活剩余卡；后台 tab ×（对话视图
+            # 或看其他卡时）不得触发自动切换（回归：胶囊从「对话」滑到最右）
+            was_active_current = self._replace_active.get(self._current_window_id()) == card_id
             # 卡片是全局单例：从所有对话的 open 集合中移除（关闭后任何对话都不应再显示）
             owners = [wid for wid, od in self._replace_open.items() if card_id in od]
             for wid in owners:
@@ -2877,9 +2880,11 @@ class TabManagerWindow(FramelessWindow):
                 # open/active，不删 tab：它是插件固定入口，删了无人恢复（回归：
                 # assistant_hub 点「新建人格」后标题栏「助手」tab 消失）
                 if card_id not in self._plugin_titlebar_tab_ids:
-                    self.titleBar.remove_tab(card_id)
-                # 关掉当前卡片且 open 仍有其他 full 卡片 → 自动激活（互斥显示）最近一个
-                self._activate_remaining_replace_card()
+                    # 关的是激活卡时不自动激活第一个：高亮由补位激活接管
+                    self.titleBar.remove_tab(card_id, reactivate=not was_active_current)
+                # 关掉的是当前激活卡 → 自动激活（互斥显示）最近一个；无剩余临时卡时内部回「对话」
+                if was_active_current:
+                    self._activate_remaining_replace_card()
 
     def _activate_remaining_replace_card(self) -> None:
         """当前对话 open 集合非空时，自动激活（互斥显示）最近一个 full 卡片，避免关掉
@@ -2909,7 +2914,15 @@ class TabManagerWindow(FramelessWindow):
             return
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        UIPluginRegistry.get_instance().toggle_floating_card(nid)
+        # 乐观置活：不等 shown 事件，胶囊从被关 tab 直接滑向补位 tab（shown/显隐
+        # 事件到达后同 target 幂等）；显示失败由 _schedule_replace_highlight 收敛
+        # 兜底。不置活的话高亮悬空，等卡片创建完才从原处长滑过去。
+        self._set_replace_active(nid)
+        if nid in KNOWN_GLOBAL_REPLACE_CARDS:
+            # 内置全局卡：toggle_floating_card 对其无效，走 CardManager 对称显示
+            cm.show_card(nid, wid)
+        else:
+            UIPluginRegistry.get_instance().toggle_floating_card(nid)
 
     def _has_other_visible_full(self, exclude_id: str) -> bool:
         """窗口内是否有其他 replace 卡片当前可见（用于区分切换/关闭）"""
@@ -3154,6 +3167,9 @@ class TabManagerWindow(FramelessWindow):
 
         # 卡片是全局单例：从所有对话的 open 集合中移除并清 active（避免切回其他对话仍显示已关卡片）
         cur_wid = self._current_window_id()
+        # 仅当关的是当前窗口的激活卡才补位激活剩余卡；后台 tab ×（对话视图
+        # 或看其他卡时）不得触发自动切换（回归：胶囊从「对话」滑到最右）
+        was_active_current = self._replace_active.get(cur_wid) == card_id
         owners = [wid for wid, od in self._replace_open.items() if card_id in od]
         for wid in owners:
             del self._replace_open[wid][card_id]
@@ -3162,7 +3178,8 @@ class TabManagerWindow(FramelessWindow):
         if owners:
             # 常驻插件 tab 只清 open/active 不删 tab（同 _on_replace_close_timeout）
             if card_id not in self._plugin_titlebar_tab_ids:
-                self.titleBar.remove_tab(card_id)
+                # 关的是激活卡时不自动激活第一个：高亮由补位激活接管
+                self.titleBar.remove_tab(card_id, reactivate=not was_active_current)
 
         # 真正隐藏卡片本身（避免「tab 消失但卡片仍显示」）
         if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
@@ -3179,7 +3196,7 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 pass
 
-        if self._replace_open.get(cur_wid):
+        if was_active_current:
             self._activate_remaining_replace_card()
         # 关掉的是当前高亮项时，_activate_remaining_replace_card 未必命中
         # （例如剩余项都是常驻插件 tab），补一次收敛兜底
@@ -4363,11 +4380,19 @@ class TabManagerWindow(FramelessWindow):
 
     # ── Tab 面板 UI 插件列表 ──
 
+    #: 插件常驻 tab 容压上限：超过时前 LIMIT-1 个驻留，其余收进「更多」下拉
+    _PLUGIN_TITLEBAR_TAB_LIMIT = 5
+    #: 「更多」聚合 tab 的固定 ID（不与插件 tab_id 冲突的保留名）
+    _MORE_TAB_ID = "__plugin_more__"
+
     def _sync_plugin_titlebar_tabs(self) -> None:
         """同步插件注册的常驻标题栏 tab（无 × 关闭钮；点击走插件 on_click 回调自展示）
 
         幂等：info 对象未变（未重载）的已挂载 tab 跳过；插件热重载后 registry
         中是全新 info → 摘旧挂新；已卸载插件的 tab 移除。注册表为空时仅做清理。
+
+        容压：插件 tab 超过 ``_PLUGIN_TITLEBAR_TAB_LIMIT`` 时，前 LIMIT-1 个驻留，
+        其余收进「更多」聚合下拉（防插件生态增长挤爆标题栏 tab 区）。
         """
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -4375,8 +4400,15 @@ class TabManagerWindow(FramelessWindow):
             infos = UIPluginRegistry.get_instance().get_titlebar_tabs()
         except Exception:
             infos = []
+        # 容压分流：溢出集每次全量重建，「更多」tab 闭包经 self._more_tab_infos 取最新
+        limit = self._PLUGIN_TITLEBAR_TAB_LIMIT
+        overflow_infos = []
+        if len(infos) > limit:
+            overflow_infos = infos[limit - 1 :]
+            infos = infos[: limit - 1]
+        self._more_tab_infos = overflow_infos
         valid_ids = {info.tab_id for info in infos}
-        # 移除已卸载/不再注册的常驻 tab
+        # 移除已卸载/不再注册/被容压收起的常驻 tab
         for tab_id in list(self._plugin_titlebar_tab_ids):
             if tab_id not in valid_ids:
                 self.titleBar.remove_tab(tab_id)
@@ -4399,6 +4431,44 @@ class TabManagerWindow(FramelessWindow):
             )
             self._plugin_titlebar_tab_ids.add(info.tab_id)
             self._plugin_titlebar_tab_infos[info.tab_id] = info
+        # 「更多」聚合 tab：溢出集非空挂载、为空移除；生命周期由本函数显式管理，
+        # 不入 _plugin_titlebar_tab_ids（避免被上面的清理循环误删）
+        more_id = self._MORE_TAB_ID
+        if overflow_infos:
+            if more_id not in self.titleBar._tabs:
+                self.titleBar.add_tab(more_id, "更多", on_click=self._show_more_tabs_menu, closable=False)
+        elif more_id in self.titleBar._tabs:
+            self.titleBar.remove_tab(more_id)
+
+    def _show_more_tabs_menu(self) -> None:
+        """「更多」聚合下拉：列出被容压收起的插件 tab，点击等价点击原 tab"""
+        infos = list(getattr(self, "_more_tab_infos", []))
+        if not infos:
+            return
+        from PyQt5.QtGui import QCursor
+
+        try:
+            from qfluentwidgets import Action, RoundMenu
+
+            menu = RoundMenu(parent=self)
+            for info in infos:
+                cb = info.on_click
+                if cb is None:
+                    continue
+                menu.addAction(Action(info.label, lambda _checked=False, f=cb: f()))
+            menu.exec(QCursor.pos())
+        except Exception:
+            # qfluentwidgets 不可用时退化为原生 QMenu（测试环境/旧依赖兜底）
+            from PyQt5.QtWidgets import QMenu
+
+            menu = QMenu(self)
+            for info in infos:
+                cb = info.on_click
+                if cb is None:
+                    continue
+                act = menu.addAction(info.label)
+                act.triggered.connect(lambda _checked=False, f=cb: f())
+            menu.exec(QCursor.pos())
 
     def _update_shared_launcher(self) -> None:
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""

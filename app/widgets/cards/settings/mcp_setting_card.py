@@ -871,11 +871,18 @@ class MCPListSettingCard(ExpandSettingCard):
         mgr.connect_server_background(name, config, on_done=on_done)
 
     def _mcp_gate_key(self, name: str) -> str:
-        """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）"""
-        from app.core.tools.mcp_lsp_safety import plugin_from_source, server_key
+        """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）。
 
-        src = next((s.get("_source", "") for s in self._get_servers() if s.get("name", "") == name), "")
-        return server_key("mcp", plugin_from_source(src), name)
+        key 绑定启动配置指纹（command+args，args 含 command 本体与
+        mcp_tools 调用点口径一致）：配置变更后旧 key 失配，需重新确认。"""
+        from app.core.tools.mcp_lsp_safety import config_hash, plugin_from_source, server_key
+
+        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
+        src = server_cfg.get("_source", "")
+        cmd = server_cfg.get("command", "") or ""
+        cmd_args = [cmd] + list(server_cfg.get("args") or []) if cmd else list(server_cfg.get("args") or [])
+        chash = config_hash(cmd, cmd_args)
+        return server_key("mcp", plugin_from_source(src), name, chash)
 
     def _show_mcp_confirm_bar(self, name: str, key: str):
         """need_confirm 确认弹窗：带「允许启动/本次拒绝」按钮，同 key 去重只弹一个"""
@@ -889,10 +896,18 @@ class MCPListSettingCard(ExpandSettingCard):
         from app.widgets.tab_manager_window import TabManagerWindow
 
         _parent = TabManagerWindow.get_instance() or self.window()
+        # 展示完整启动命令行（盲确认修复：此前仅提示来源，用户看不到将执行什么）
+        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
+        cmd = str(server_cfg.get("command", "") or "")
+        cmd_args = " ".join(str(a) for a in (server_cfg.get("args") or []))
         infobar = InfoBar(
             icon=InfoBarIcon.WARNING,
             title=f"MCP 安全确认: {name}",
-            content="该服务器来自非内置源（用户级插件），首次启动需确认是否放行",
+            content=(
+                f"command: {cmd}\n"
+                f"args: {cmd_args}\n"
+                "该服务器来自非内置源（用户级插件），确认后将绑定以上启动配置；配置变更需重新确认。"
+            ),
             orient=Qt.Vertical,
             isClosable=False,
             duration=-1,
@@ -905,7 +920,6 @@ class MCPListSettingCard(ExpandSettingCard):
         btn_layout = QHBoxLayout(btn_container)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(8)
-        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
 
         def _allow():
             confirm_by_key(key, allow=True)

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -22,6 +23,10 @@ from loguru import logger
 
 from app.plugins.contracts.plugin_config import PluginConfigField, PluginConfigSchema
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+# 模块级锁：全部调用方每次 new 实例（无状态设计），实例锁无效；
+# RLock 因 set_values 的 read-modify-write 需在锁内嵌套调用 _read_raw/_write_raw
+_IO_LOCK = threading.RLock()
 
 
 class PluginConfigStore:
@@ -67,21 +72,38 @@ class PluginConfigStore:
         return new_path
 
     def _read_raw(self, plugin_name: str) -> Dict[str, Any]:
+        # path 计算放在 try 外：_path 若抛异常，下方 except 的 .corrupt 分支引用
+        # path 会 NameError 穿透（防御性修，R-G1 P3）
+        path = self._path(plugin_name)
         try:
-            path = self._path(plugin_name)
-            if path.exists():
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
+            with _IO_LOCK:
+                if path.exists():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        return data
         except Exception as e:
-            logger.warning(f"[PluginConfigStore] {plugin_name} 配置读取失败（按空处理）: {e}")
+            # 半截 JSON（进程被杀/断电）不再无限吞：改名 .corrupt 保留现场供排查，
+            # 之后读取按空处理（回退 schema 默认值），下次写入重建干净文件
+            try:
+                with _IO_LOCK:
+                    corrupt = path.with_suffix(".json.corrupt")
+                    if corrupt.exists():
+                        corrupt.unlink()
+                    path.rename(corrupt)
+                logger.warning(f"[PluginConfigStore] {plugin_name} 配置损坏已改名 .corrupt 保留现场: {e}")
+            except OSError:
+                logger.warning(f"[PluginConfigStore] {plugin_name} 配置读取失败（按空处理）: {e}")
         return {}
 
     def _write_raw(self, plugin_name: str, data: Dict[str, Any]) -> bool:
+        """原子写：先写 .json.tmp 再 os.replace，避免进程被杀/并发写留下半截 JSON"""
         try:
-            path = self._path(plugin_name)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            with _IO_LOCK:
+                path = self._path(plugin_name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(tmp, path)
             return True
         except Exception as e:
             logger.warning(f"[PluginConfigStore] {plugin_name} 配置写入失败: {e}")
@@ -123,13 +145,14 @@ class PluginConfigStore:
 
     def set_values(self, plugin_name: str, values: Dict[str, Any]) -> bool:
         """合并写；空串/None = 清除该键（回退默认）。只落 values 出现的键。"""
-        raw = self._read_raw(plugin_name)
-        for key, val in values.items():
-            if val is None or val == "":
-                raw.pop(key, None)
-            else:
-                raw[key] = val
-        return self._write_raw(plugin_name, raw)
+        with _IO_LOCK:  # read-modify-write 整体互斥，防并发互相覆盖
+            raw = self._read_raw(plugin_name)
+            for key, val in values.items():
+                if val is None or val == "":
+                    raw.pop(key, None)
+                else:
+                    raw[key] = val
+            return self._write_raw(plugin_name, raw)
 
     def reset(self, plugin_name: str) -> bool:
         """删除存储文件（全部回默认）"""

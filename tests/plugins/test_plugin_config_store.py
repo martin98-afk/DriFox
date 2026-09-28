@@ -92,6 +92,48 @@ class TestPersistence:
         (cfg_dir / "config.json").write_text("{ not json", encoding="utf-8")
         s = PluginConfigStore()
         assert s.get("plug-x", "api_key") == "built-in-default"  # 损坏容错回默认
+        # 坏文件先被 legacy 迁移搬到 plugin_data，读坏后改名 .corrupt 保留现场
+        new_cfg = tmp_path / "plugin_data" / "plug-x" / "config.json"
+        assert (tmp_path / "plugin_data" / "plug-x" / "config.json.corrupt").exists()
+        assert not new_cfg.exists()
+        assert s.set_values("plug-x", {"api_key": "rebuilt"})
+        assert s.get("plug-x", "api_key") == "rebuilt"
+
+    def test_write_atomic_no_partial_read(self, store_env):
+        """并发 get/set 大配置：终态 JSON 可解析、全部字段在（无半截文件）"""
+        import concurrent.futures
+
+        tmp_path, _ = store_env
+        s = PluginConfigStore()
+        big = {f"key_{i:03d}": f"value-{i}-" + "x" * 200 for i in range(60)}
+        s.set_values("plug-x", big)
+
+        def worker(n):
+            for i in range(100):
+                if n % 2 == 0:
+                    s.set_values("plug-x", {f"key_{i % 60:03d}": f"w{n}-{i}"})
+                else:
+                    s.get_all("plug-x")
+            return True
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+            assert all(ex.map(worker, range(4)))
+
+        final = json.loads((tmp_path / "plugin_data" / "plug-x" / "config.json").read_text(encoding="utf-8"))
+        assert len(final) == 60  # 键集合收敛（不丢不半截）
+        assert not (tmp_path / "plugin_data" / "plug-x" / "config.json.tmp").exists()
+
+    def test_set_values_preserves_unknown_keys(self, store_env):
+        """set_values 合并写：不在本次 values 与 schema 里的孤儿键原样保留"""
+        s = PluginConfigStore()
+        s.set_values("plug-x", {"api_key": "k1", "orphan_key": "keep-me"})
+        s.set_values("plug-x", {"verbose": "true"})
+        raw = json.loads(
+            (store_env[0] / "plugin_data" / "plug-x" / "config.json").read_text(encoding="utf-8")
+        )
+        assert raw["orphan_key"] == "keep-me"
+        assert raw["api_key"] == "k1"
+        assert raw["verbose"] == "true"
 
 
 class TestMigration:

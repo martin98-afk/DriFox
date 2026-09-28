@@ -515,11 +515,14 @@ class PluginToolWatcher:
             logger.debug(f"[PluginToolWatcher] 对齐差异判定失败，保守回退全量重扫: {e}")
             return True
 
-    def scan_now(self) -> None:
+    def scan_now(self, force: bool = True) -> None:
         """全量重扫：先注销已加载插件的全部工具，再全量重新注册（幂等）。
 
         ⚡️ 对齐快路径：注册表实际注册集与磁盘期望注册集一致时直接返回
         （零注销零重扫），见 _align_needed。
+        force=False 仅限启动对齐场景（deferred rescan）：快路径判定生效，
+        无对齐差异时跳过；热更新场景（文件内容变更但注册集不变）必须
+        force=True 才会真正重扫（默认值保持热更新语义不变）。
 
         ⚠️ 修复：旧实现用「注册前后 diff（after-before）」记录 _loaded，
         热更新场景（工具已注册、文件内容变更）diff 为空集，导致 _loaded
@@ -531,7 +534,7 @@ class PluginToolWatcher:
         跨根保护失效，用户覆盖会被还原）。
         """
         with self._scan_lock:
-            if not self._align_needed():
+            if not force and not self._align_needed():
                 logger.debug("[PluginToolWatcher] 启用状态无差异，跳过全量重扫")
                 return
             # 批量通知合并：注销+全量重扫期内几十次 register/unregister 的

@@ -160,11 +160,8 @@ class ContextBudgetAllocator:
             params = history_messages[-1].get("params", {})
             history_messages = history_messages[:-1]
 
-        # 上下文压缩 + S1 工具截断 —— 统一交给 ContextPipeline 的 send stage。
-        # 原实现：预算 → compact（含 _send_prep_cache 缓存）→ 过滤旧 system →
-        #         逐条 prune_tool_result。现在 cascade 按 order 依次执行
-        #         图片剥离 / 去重 / 工具截断 / 参数截断 / 摘要化 / 尾保留 / LLM 摘要，
-        #         每层达标即停，逐层记录 stats。
+        # 上下文压缩 + S1 工具截断 —— 统一交给 ContextPipeline 的 send stage，
+        # cascade 按 order 升序执行、达标即停，逐层记录 stats。
         budget = self._allocate_history_budget(full_system_content, llm_config)
         # [PERF T33] 发送前处理缓存：cascade 输出在同一消息版本 + 同一预算/模型/
         # 截断参数下结果确定，而一次发送会经多次调用（主发送 + 工具迭代回环）。
@@ -188,13 +185,8 @@ class ContextBudgetAllocator:
             session.set_compaction_cache(cached_prep["cache"])
         else:
             # ══ 统一走 tier 链 ══
-            # 链上的层由插件提供，按 order 升序执行、达标即停：
-            #   system-context（系统插件，前缀安全）：
-            #     order 20 tool_prune   工具结果截断（入口恒定字节）
-            #     order 40 tool_offload 长结果落盘（冻结预览）
-            #   context-compaction（用户插件，破坏前缀，可逐项开关）：
-            #     order 10 media_strip / 30 tool_dedupe / 50 args_truncate /
-            #     60 tool_summarize / 70 tail_retain / 80 llm_summary
+            # 链上的层由 system-context 插件提供，按 order 升序执行、达标即停；
+            # 各层清单以 ContextPolicyRegistry 实际注册为准
             pipeline = self._pipeline
             if pipeline is None:
                 from app.core.context.pipeline import ContextPipeline

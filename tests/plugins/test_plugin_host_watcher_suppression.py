@@ -281,6 +281,9 @@ class TestCrossPluginBatchEmit:
         monkeypatch.setattr(svc, "_on_hot_reload_requested", lambda p, c: received.append((p, c)))
 
         svc._start_plugin_watcher()
+        # 启动基线期（15s 抑制窗口）会把首批变更标记 pending 而非 emit；测试批次
+        # 需要落入正常 emit 分支，置零基线（时间戳已过 → 抑制不生效）
+        svc._watcher_baseline_until = 0.0
         try:
             assert entered.wait(5.0), "watcher 线程未在超时内消费测试批次"
             qtbot.wait_until(lambda: len(received) >= 1, timeout=5000)

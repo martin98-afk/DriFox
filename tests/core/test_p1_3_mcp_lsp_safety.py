@@ -12,12 +12,24 @@ from loguru import logger
 from app.core.tools import mcp_lsp_safety
 from app.core.tools.mcp_lsp_safety import (
     _SYSTEM_PLUGIN_ROOT,
+    config_hash,
     confirm_by_key,
     confirm_plugin_server,
     gate_server_launch,
     is_pending_confirm_by_key,
     server_key,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_settings_disk_write(monkeypatch):
+    """本文件用例禁止 Settings 落盘：确认迁移/白名单写真实 app.config 会污染用户配置
+    （实测残留过测试条目 mcp:my-plug:fetch:<chash>）。全部改内存态。"""
+    from app.utils.config import Settings
+
+    monkeypatch.setattr(
+        Settings, "set", lambda self, attr, value, save=False: setattr(attr, "value", value)
+    )
 
 
 
@@ -126,6 +138,49 @@ def test_system_plugin_root_points_at_repo():
     )
 
 
+def test_confirm_binds_config_content(tmp_path):
+    """确认绑定启动配置指纹：同 server 名不同 args / 不同 command → 需重新确认。
+
+    回归锁定：旧实现白名单 key=kind:plugin:server 不绑内容，配置被改后静默放行。"""
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    saved = list(cfg.confirmed_plugin_servers.value or [])
+    src = str(tmp_path / "my-plug" / ".mcp.json")
+    try:
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "fetch"], source=src, command="npx") == "need_confirm"
+        # 模拟 UI 确认（按 gate 同款指纹写白名单；口径：args 含 command 本体，与
+        # 调用点 [command]+args 一致，否则 UI 确认后 gate 永不失配）
+        chash = config_hash("npx", ["npx", "fetch"])
+        cfg.confirmed_plugin_servers.value = saved + [server_key("mcp", "my-plug", "fetch", chash)]
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "fetch"], source=src, command="npx") == "proceed"
+        # args 变化 → 指纹失配 → 重新确认
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "-y", "fetch"], source=src, command="npx") == "need_confirm"
+        # command 变化 → 同样失配
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["bunx", "fetch"], source=src, command="bunx") == "need_confirm"
+    finally:
+        cfg.confirmed_plugin_servers.value = saved
+        mcp_lsp_safety._PENDING_CONFIRM.clear()
+
+
+def test_legacy_key_migrated_on_hit(tmp_path, monkeypatch):
+    """旧格式确认条目（无指纹）命中时放行，并原地替换为绑定指纹的新格式。"""
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    saved = list(cfg.confirmed_plugin_servers.value or [])
+    legacy = server_key("mcp", "my-plug", "fetch")
+    new_key = server_key("mcp", "my-plug", "fetch", config_hash("npx", ["npx", "fetch"]))
+    src = str(tmp_path / "my-plug" / ".mcp.json")
+    try:
+        cfg.confirmed_plugin_servers.value = saved + [legacy]
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "fetch"], source=src, command="npx") == "proceed"
+        assert legacy not in (cfg.confirmed_plugin_servers.value or [])
+        assert new_key in (cfg.confirmed_plugin_servers.value or [])
+    finally:
+        cfg.confirmed_plugin_servers.value = saved
+
+
 def test_need_confirm_sets_pending_and_deny_clears(tmp_path):
     """need_confirm 置位待确认集合；拒绝后清除并会话禁用（自动补连据此跳过）。"""
     src = str(tmp_path / "my-plug" / ".mcp.json")
@@ -163,4 +218,28 @@ def test_confirm_allow_whitelists_and_clears_pending(tmp_path, monkeypatch):
         assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "fetch"], source=src) == "proceed"
     finally:
         cfg.confirmed_plugin_servers.value = saved
+        mcp_lsp_safety._PENDING_CONFIRM.discard(key)
+
+
+def test_lsp_gate_key_uses_args_attribute(monkeypatch):
+    """R-G1 P2-A 回归：LSP 设置卡 _gate_key_for 读 cfg.args（曾误写 argsTemplate
+    恒 None → 指纹与 gate 不一致 → 卡待确认/放行按钮永不出现）。"""
+    from types import SimpleNamespace
+
+    from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
+
+    cfg = SimpleNamespace(
+        command="pyright-langserver", args=["--stdio"], plugin_name="my-lsp-plug", name="pyright"
+    )
+    client = SimpleNamespace(config=cfg)
+    card = LspListSettingCard.__new__(LspListSettingCard)  # 绕过 Qt 控件树构造
+
+    # 预置 pending（与 gate 调用点同款指纹：args 含 command 本体），应命中返回非空 key
+    chash = config_hash("pyright-langserver", ["pyright-langserver", "--stdio"])
+    key = server_key("lsp", "my-lsp-plug", "pyright", chash)
+    mcp_lsp_safety._PENDING_CONFIRM.add(key)
+    try:
+        got = card._gate_key_for(client)
+        assert got == key, f"应返回与 gate 一致的指纹 key，实际 {got!r}"
+    finally:
         mcp_lsp_safety._PENDING_CONFIRM.discard(key)

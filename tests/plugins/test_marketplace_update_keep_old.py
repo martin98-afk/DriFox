@@ -79,6 +79,10 @@ def test_update_success_replaces_old_version(monkeypatch, tmp_path):
     def fake_clone(self, url, subpath, ref, cache_dir, extra_args=None):
         cache_dir.mkdir(parents=True, exist_ok=True)
         (cache_dir / "new.txt").write_text("new", encoding="utf-8")
+        # 新校验要求下载内容带 manifest（对齐真实市场产物）
+        md = cache_dir / ".drifox-plugin"
+        md.mkdir(parents=True, exist_ok=True)
+        (md / "plugin.json").write_text('{"name": "demo", "version": "2.0.0"}', encoding="utf-8")
 
     monkeypatch.setattr(inst.PluginInstaller, "_sparse_clone", fake_clone)
 
@@ -102,6 +106,10 @@ def test_update_rollback_when_replace_fails(monkeypatch, tmp_path):
     def fake_clone(self, url, subpath, ref, cache_dir, extra_args=None):
         cache_dir.mkdir(parents=True, exist_ok=True)
         (cache_dir / "new.txt").write_text("new", encoding="utf-8")
+        # 新校验要求下载内容带 manifest（对齐真实市场产物）
+        md = cache_dir / ".drifox-plugin"
+        md.mkdir(parents=True, exist_ok=True)
+        (md / "plugin.json").write_text('{"name": "demo", "version": "2.0.0"}', encoding="utf-8")
 
     monkeypatch.setattr(inst.PluginInstaller, "_sparse_clone", fake_clone)
 

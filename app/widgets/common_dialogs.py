@@ -553,3 +553,155 @@ class InfoDialog(MaskDialogBase):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._center_widget()
+
+
+class ChoiceDialog(MaskDialogBase):
+    """通用多选项弹框 — 在 2~3 个动作中选择其一，或取消/点遮罩关闭。
+
+    Usage:
+        dialog = ChoiceDialog(
+            title="获取成功",
+            content="获取到 128 个模型，如何处理现有列表（12 个）？",
+            options=[("merge", "合并"), ("replace", "替换")],
+            parent=self.window(),
+        )
+        dialog.chosen.connect(lambda key: ...)   # key 为选项标识
+        dialog.exec_()
+    """
+
+    chosen = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    DEFAULT_WIDTH = 420
+    DEFAULT_HEIGHT = 140
+    DEFAULT_MAX_WIDTH = 600
+    DEFAULT_MAX_HEIGHT = 720
+
+    def __init__(self, title: str, content: str, options: list, parent=None, cancel_text: str = "取消"):
+        super().__init__(parent)
+        self._init_ui(title, content, options, cancel_text)
+
+    def _init_ui(self, title: str, content: str, options: list, cancel_text: str):
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 180))
+
+        self.widget.setObjectName("choiceDialogWidget")
+        self.widget.setStyleSheet(f"""
+            #choiceDialogWidget {{
+                background-color: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(28, 28, 28, 20)
+        layout.setSpacing(0)
+
+        title_label = BodyLabel(self.widget)
+        title_label.setText(title)
+        title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(16)}; font-weight: bold;"
+        )
+        title_label.setWordWrap(True)
+        layout.addWidget(title_label)
+
+        layout.addSpacing(12)
+
+        content_label = BodyLabel(self.widget)
+        content_label.setText(content)
+        content_label.setWordWrap(True)
+        content_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(13)}; line-height: 1.6;"
+        )
+        layout.addWidget(content_label)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        normal_qss = f"""
+            QPushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 4px 28px;
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.BORDER_ACCENT};
+            }}
+            QPushButton:pressed {{
+                background-color: {Colors.SELECTED_BG};
+            }}
+        """
+        primary_qss = f"""
+            QPushButton {{
+                background-color: {Colors.INFO};
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 28px;
+                {get_font_family_css()} {font_size_css(13)};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.SEND_BTN_END};
+            }}
+            QPushButton:pressed {{
+                background-color: {Colors.SEND_BTN_HOVER_END};
+            }}
+        """
+
+        def _add_option(key: str, label: str, primary: bool):
+            btn = QPushButton(label, self.widget)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(36)
+            btn.setStyleSheet(primary_qss if primary else normal_qss)
+            btn.clicked.connect(lambda _=False, k=key: self._on_choose(k))
+            return btn
+
+        cancel_btn = QPushButton(cancel_text, self.widget)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setFixedHeight(36)
+        cancel_btn.setStyleSheet(normal_qss)
+        cancel_btn.clicked.connect(self._on_cancel)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        # 选项按传入顺序排列，最后一个为主要动作（高亮）
+        for i, (key, label) in enumerate(options):
+            btn_layout.addWidget(_add_option(key, label, primary=(i == len(options) - 1)))
+        layout.addLayout(btn_layout)
+
+        # 内容自适应：minSize 保底 + maxSize 防撑爆
+        self.layout().removeWidget(self.widget)
+        self.widget.setParent(self)
+        self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+        self.widget.setMaximumSize(self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
+        self.widget.adjustSize()
+        self._center_widget()
+
+    def _on_choose(self, key: str):
+        self.close()
+        self.chosen.emit(key)
+
+    def _on_cancel(self):
+        self.close()
+        self.cancelled.emit()
+
+    def _center_widget(self):
+        """让 widget 在 dialog 中保持居中"""
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._center_widget()

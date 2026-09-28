@@ -63,8 +63,10 @@
 
 ## 已知约束
 
-- 显示卡片必须用 `UIPluginRegistry.toggle_floating_card(card_id)`，
-  **不能**用 `card_manager.show_card` —— 后者不创建实例，首次点击会静默失败。
+- 入口用 `metadata.primary_entry = {"kind": "titlebar", "label": "轨迹"}` 声明式派生；
+  若手写回调，必须用 `UIPluginRegistry.toggle_floating_card(card_id)`，
+  **不能**用 `card_manager.show_card` —— 后者不创建实例，首次点击会静默失败
+  （框架生成的回调已内置懒创建 + 宿主解析 + 可见性检查）。
 - `TraceCardWidget.closed` 必须是 `pyqtSignal`（registry 会对它 `connect`）；
   v1 写成 `None` 导致首次创建中断、点击 tab 无反应。
 - `register_titlebar_tab` 的 `icon_path` 无主题感知，故 tab 只显示纯文字。

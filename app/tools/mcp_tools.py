@@ -555,6 +555,7 @@ class MCPClientManager:
             conn.name,
             [command] + list(args or []),
             source=source,
+            command=command,
         )
         if verdict != "proceed":
             conn._connect_error = RuntimeError(
@@ -643,6 +644,7 @@ class MCPClientManager:
             conn.name,
             [command] + list(args or []),
             source=source,
+            command=command,
         )
         if verdict != "proceed":
             conn._connect_error = RuntimeError(

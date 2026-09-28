@@ -179,18 +179,35 @@ def test_build_request_kwargs_basic(transport, monkeypatch):
     assert "_auth_headers" not in out
 
 
-def test_build_request_kwargs_skips_sampling_params(transport, monkeypatch):
-    """温度/top_p 不进 extra_body —— 等价搬迁自原 worker（skip_params 语义，行为不变）"""
+def test_sampling_params_go_top_level(transport, monkeypatch):
+    """温度/top_p 不进 extra_body，改走 SDK 顶层参数（修复：曾因 skip_params 静默丢弃，
+    用户配置在主对话从不生效，与 subagent_worker 行为分嵐）"""
     monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
     out = transport.build_request_kwargs({"模型名称": "gpt-4o", "温度": 0.5, "top_p": 0.9})
     assert "temperature" not in out["extra_body"]
     assert "top_p" not in out["extra_body"]
+    # 顶层注入：与 subagent_worker 对齐，用户采样配置真正生效（create_stream 内 req_kwargs.update 展开）
+    assert out["top_level"]["temperature"] == 0.5
+    assert out["top_level"]["top_p"] == 0.9
+
+
+def test_penalty_params_go_top_level(transport, monkeypatch):
+    """presence_penalty / frequency_penalty 同走顶层（同属 _SAMPLING_PARAMS 闭集）"""
+    monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
+    out = transport.build_request_kwargs({"模型名称": "gpt-4o", "presence_penalty": 0.3, "frequency_penalty": 0.7})
+    assert "presence_penalty" not in out["extra_body"]
+    assert "frequency_penalty" not in out["extra_body"]
+    assert out["top_level"]["presence_penalty"] == 0.3
+    assert out["top_level"]["frequency_penalty"] == 0.7
 
 
 def test_build_request_kwargs_o1_skips_sampling(transport, monkeypatch):
     monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
     out = transport.build_request_kwargs({"模型名称": "o1-preview", "温度": 0.5, "top_p": 0.9})
     assert "temperature" not in out["extra_body"] and "top_p" not in out["extra_body"]
+    # o1/o3 顶层也丢弃（chat/completions 不接受采样参数）
+    assert "temperature" not in out
+    assert "top_p" not in out
 
 
 def test_build_request_kwargs_bce_auth_not_in_transport(transport, monkeypatch):

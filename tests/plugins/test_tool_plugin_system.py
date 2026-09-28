@@ -944,7 +944,15 @@ class TestPerToolPolicy:
         from app.utils.config import Settings
 
         s = Settings.get_instance()
-        return (s.tool_toggles.value, s.tool_off_behavior.value, s.tool_permission_policy.value)
+        snap = (s.tool_toggles.value, s.tool_off_behavior.value, s.tool_permission_policy.value)
+        # D1：前置用例经 _restore_settings 回写自身快照（restore 即 save 落盘），
+        # 依赖「初始无 per-tool 策略」的用例会被前一用例的脏态污染。快照后统一
+        # 隔离到出厂默认，保证每用例同一基线出发（_restore_settings 不变）。
+        s.tool_toggles.value = {}
+        s.tool_off_behavior.value = "deny"
+        s.tool_permission_policy.value = {}
+        s.save()
+        return snap
 
     @staticmethod
     def _restore_settings(snap):
@@ -1390,7 +1398,10 @@ class TestWebToolsEnvKey:
 
     @staticmethod
     def _schema_defaults():
-        """E1：默认 key 由 plugin.json config_schema 声明（迁移后单一来源）"""
+        """E1：默认 key 由 plugin.json config_schema 声明（迁移后单一来源）。
+
+        字段 default 可选（link/action 等无存储值类型不声明 default），用 .get 容错。
+        """
         import json
 
         manifest = json.loads(
@@ -1398,7 +1409,7 @@ class TestWebToolsEnvKey:
                 encoding="utf-8"
             )
         )
-        return {f["key"]: f["default"] for f in manifest["config_schema"]["fields"]}
+        return {f["key"]: f.get("default") for f in manifest["config_schema"]["fields"]}
 
     def test_api_key_reads_env_only(self, monkeypatch):
         mod = self._load_web_tools()
@@ -1406,14 +1417,19 @@ class TestWebToolsEnvKey:
         # 插件内置默认 key 非空(用户配置值由 schema 声明)
         assert defaults["tavily_api_key"]
         assert defaults["tinyfish_api_key"]
-        # E1 契约：_api_key 调用前需注册 schema（模块级常量已迁出）
+        # E1 契约：_api_key 调用前需注册 schema（模块级常量已迁出）。
+        # 注册名必须是 _api_key 内查询的 "system-tools"（曾误写 "system" 导致
+        # schema 不生效、env 优先级分支死路）；同时隔离本机 plugin_data 残留
+        # config.json（存储值优先级高于 default，不清会污染回退断言）。
         from app.plugins.contracts.plugin_config import parse_config_schema
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
         from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 
+        monkeypatch.setattr(PluginConfigStore, "_read_raw", lambda self, name: {})
         reg = PluginConfigRegistry.get_instance()
         reg.register(
             parse_config_schema(
-                "system",
+                "system-tools",
                 {
                     "title": "T",
                     "fields": [
@@ -1450,7 +1466,7 @@ class TestWebToolsEnvKey:
             monkeypatch.delenv("TINYFISH_API_KEY")
             assert mod._api_key({}, "TINYFISH_API_KEY") == defaults["tinyfish_api_key"]
         finally:
-            reg.unregister_plugin("system")
+            reg.unregister_plugin("system-tools")
 
 
 class TestSelfContained:

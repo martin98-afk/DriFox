@@ -48,6 +48,10 @@ _CONFIG_ONLY_KEYS = {
     "模型列表",
 }
 
+# 采样参数：走 SDK 顶层参数（与 subagent_worker 行为对齐），不进 extra_body；
+# o1/o3 的 chat/completions 不接受采样参数，直接丢弃（详见 supports_streaming_for）
+_SAMPLING_PARAMS = frozenset({"temperature", "top_p", "presence_penalty", "frequency_penalty"})
+
 
 class OpenAIChatTransport:
     """chat/completions 传输器（请求组装 + SDK 流 + 事件归一）
@@ -111,7 +115,7 @@ class OpenAIChatTransport:
     # ---------- 请求组装（纯函数，便于单测） ----------
 
     def build_request_kwargs(self, llm_config: Dict[str, Any], cap_max_tokens=None) -> Dict[str, Any]:
-        """llm_config → (model, stream, extra_body, auth_headers, is_o1)。
+        """llm_config → (model, extra_body, top_level)。采样参数走 SDK 顶层参数。
 
         与 chat_worker._build_api_request_kwargs 逐点等价（含思考模式三分支、
         bce Basic 认证、服务商伪装头合并）；`cap_max_tokens` 为 per-request 传入的
@@ -121,11 +125,9 @@ class OpenAIChatTransport:
             cap_max_tokens = self._cap_max_tokens
         model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
         extra_body: Dict[str, Any] = {}
+        top_level: Dict[str, Any] = {}
 
-        skip_params = {"temperature", "top_p", "presence_penalty", "frequency_penalty"}
         is_o1 = model.startswith("o1") or model.startswith("o3")
-        if is_o1:
-            skip_params.update({"temperature", "top_p"})
 
         for cn_key, value in llm_config.items():
             if cn_key in _CONFIG_ONLY_KEYS or cn_key in QUOTA_EXCLUDE_KEYS():
@@ -134,7 +136,12 @@ class OpenAIChatTransport:
             en_key = meta.get("api_param")
             if not en_key and _VALID_IDENTIFIER_PATTERN.match(cn_key):
                 en_key = cn_key
-            if not en_key or en_key in skip_params or en_key == "max_tokens":
+            if not en_key or en_key == "max_tokens":
+                continue
+            if en_key in _SAMPLING_PARAMS:
+                if is_o1:
+                    continue  # o1/o3 chat/completions 不接受采样参数
+                top_level[en_key] = value
                 continue
             extra_body[en_key] = value
 
@@ -150,6 +157,7 @@ class OpenAIChatTransport:
         return {
             "model": model,
             "extra_body": extra_body,
+            "top_level": top_level,
         }
 
     @staticmethod
@@ -217,6 +225,8 @@ class OpenAIChatTransport:
             # 模型级流式判定（o1/o3 不接受 stream）；worker 也会同步 stream=False
             "stream": self.supports_streaming_for(llm_config),
         }
+        # 采样参数（temperature/top_p 等）走 SDK 顶层参数（见 build_request_kwargs）
+        req_kwargs.update(kwargs.get("top_level") or {})
         if kwargs["extra_body"]:
             req_kwargs["extra_body"] = kwargs["extra_body"]
         # 认证头全部来自 worker 注入（唯一组装点）；独立使用时无认证头

@@ -17,6 +17,7 @@ class WorkspacePageHost:
         self._loaded: Dict[str, Tuple[Any, Any]] = {}  # page_id -> (info, widget)
         self._page_indexes: Dict[str, int] = {}  # page_id -> content_area index
         self._sidebar_item_ids: List[str] = []
+        self._derived_tab_ids: List[Tuple[str, str]] = []  # (plugin_name, tab_id) primary_entry 派生
         self._command_names: List[str] = []  # 已注册的 FUNCTION 命令名（用于卸载清理）
 
     # ── 接入 ──
@@ -41,6 +42,14 @@ class WorkspacePageHost:
         for item_id in self._sidebar_item_ids:
             self._remove_sidebar_item(reg, item_id)
         self._sidebar_item_ids = []
+        # 1b. 清旧派生标题栏 tab（primary_entry 声明，按 tab_id 精确注销，
+        #     避免整插件注销误删同插件浮动卡派生的 tab）
+        for plugin_name, tab_id in self._derived_tab_ids:
+            try:
+                reg.unregister_titlebar_tab(plugin_name, tab_id)
+            except Exception as e:
+                logger.warning(f"[WorkspacePageHost] derived tab unregister failed ({tab_id}): {e}")
+        self._derived_tab_ids = []
         # 2. 对比销毁：已加载但 registry 中已不存在 / 已被热重载替换（info 对象
         #    身份不同）的页。插件热重载 = 卸载旧注册 + 重新注册同一 page_id，
         #    仅按 page_id 集合对比发现不了 → 旧 widget 实例永不重建（热重载失效）。
@@ -70,6 +79,33 @@ class WorkspacePageHost:
                 logger.warning(f"[WorkspacePageHost] sidebar register failed ({item_id}): {e}")
         # 5. 注册命令
         self._register_page_commands(reg)
+        # 6. 注册 primary_entry 派生标题栏 tab（kind=titlebar；sidebar 语义已由步骤 4 自动覆盖，
+        #    声明 sidebar 反而会与自动侧栏项重复，故不支持）
+        for info in reg.get_workspace_pages():
+            entry = (info.metadata or {}).get("primary_entry")
+            if not entry:
+                continue
+            if isinstance(entry, str):
+                entry = {"kind": entry}
+            kind = entry.get("kind")
+            if kind != "titlebar":
+                logger.warning(
+                    f"[WorkspacePageHost] primary_entry.kind 仅支持 titlebar（page={info.page_id}，忽略 {kind!r}）"
+                )
+                continue
+            tab_id = f"wp-tab:{info.page_id}"
+            try:
+                reg.register_titlebar_tab(
+                    plugin_name=info.plugin_name,
+                    tab_id=tab_id,
+                    label=entry.get("label") or info.title,
+                    icon_path=entry.get("icon_path", ""),
+                    priority=int(entry.get("priority", 0)),
+                    on_click=lambda pid=info.page_id: self.show_page(pid),
+                )
+                self._derived_tab_ids.append((info.plugin_name, tab_id))
+            except Exception as e:
+                logger.warning(f"[WorkspacePageHost] titlebar tab register failed ({tab_id}): {e}")
 
     def show_page(self, page_id: str) -> None:
         """激活页面（首访懒创建）"""

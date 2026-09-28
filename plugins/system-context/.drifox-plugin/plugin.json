@@ -5,7 +5,7 @@
   },
   "name": "system-context",
   "description": "发送请求前自动给上下文瘦身：超长的工具结果先落盘成文件（上下文留预览块，模型可读回全文），较长的截断头尾、省略中段；同一结果每轮投影一致，不破坏 prompt cache。预算解析按模型上下文容量计算历史消息可用 token，达标即停。各层可单独开关，阈值在下方细项的插件设置里调",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "author": {
     "name": "DriFoxx Team"
   },
@@ -45,6 +45,15 @@
         "min": 1000,
         "max": 100000000,
         "description": "单条消息内工具结果合计超过此长度时，按大小排序落盘最大的几个"
+      },
+      {
+        "key": "error_keep_multiplier",
+        "label": "错误结果保留倍数",
+        "type": "number",
+        "default": "4",
+        "min": 1,
+        "max": 100,
+        "description": "工具报错的结果（success=false）截断阈值按此倍数放宽，错误栈优先保留；填 1 关闭保护"
       }
     ]
   }

@@ -149,6 +149,33 @@ class TestScanHotUpdate:
         watcher.scan_now()
         assert reg.get("w_read").impl(**{}) == "v2", "文件内容变更后重扫应更新 impl"
 
+    def test_reload_plugin_updates_impl(self, tmp_path):
+        """D2 回归：对齐快路径命中后再变更，热更新 scan_now 仍更新 impl。
+
+        曾因 scan_now 对齐快路径（_align_needed=False 即跳过）吞掉热更新：
+        注册集未变（同名工具同签名）但 impl 语义已变，重复 scan 永不更新。
+        force=True 默认语义下任意次 scan 后内容变更必须生效；force=False
+        仅限启动对齐场景（无差异跳过）。
+        """
+        reg = ToolRegistry.get_instance()
+        watcher = _make_watcher(tmp_path, reg)
+        py = _make_plugin(tmp_path, "w_read", _register_snippet("w_read", ret="v1"))
+        watcher.scan_now()
+        assert reg.get("w_read").impl(**{}) == "v1"
+
+        # 模拟 deferred 对齐重扫：注册集无差异 → 快路径跳过（幂等）
+        watcher.scan_now(force=False)
+        assert reg.get("w_read").impl(**{}) == "v1"
+
+        # 内容变更 → 热更新 scan_now（默认 force=True）→ impl 更新
+        py.write_text(_register_snippet("w_read", ret="v2"), encoding="utf-8")
+        self._bump_mtime(py)
+        watcher.scan_now()
+        assert reg.get("w_read").impl(**{}) == "v2", "对齐快路径不得吞掉热更新内容变更"
+        # 再次对齐重扫：新 impl 稳定保持
+        watcher.scan_now(force=False)
+        assert reg.get("w_read").impl(**{}) == "v2"
+
     def test_delete_file_unregisters_tool(self, tmp_path):
         """旧 diff 实现 bug 回归：删除文件后必须注销残留工具"""
         py = _make_plugin(tmp_path, "w_read", _register_snippet("w_read"))

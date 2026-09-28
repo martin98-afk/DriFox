@@ -429,7 +429,11 @@ class TitlebarTabInfo:
         tab_id: tab 唯一 ID（与 full 卡片 card_id 共用标题栏 tab 命名空间，勿冲突）
         label: tab 显示文本
         icon_path: 图标资源路径（可选，按钮内左侧 14px）
-        on_click: 点击回调（签名 () -> None），由插件自行决定展示方式
+        on_click: 点击回调（签名 () -> None），由插件自行决定展示方式；
+                  card_id 声明式绑定时由框架生成，无需手写
+        card_id: 声明式绑定浮动卡（一处注册、多处分发）。非空且未传 on_click 时
+                 框架生成「已可见则忽略、否则唤出该卡」回调（tab 语义=切到该页，
+                 再点不关闭）；与 on_click 同传时 on_click 优先
         priority: 优先级（同 tab_id 时高者覆盖低者）
         metadata: 附加元数据
     """
@@ -439,6 +443,7 @@ class TitlebarTabInfo:
     label: str
     icon_path: str = ""
     on_click: Optional[Callable[[], None]] = None
+    card_id: str = ""
     priority: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -1473,6 +1478,53 @@ class UIPluginRegistry:
         self._floating_cards[card_id] = info
         # 联动注册命令
         self._register_command_for_card(info)
+        # 主入口声明（一处注册、多处分发）：primary_entry 非空时自动派生常驻
+        # 入口（标题栏 tab / 侧栏项），插件无需再手写入口注册 + 绑定回调。
+        self._derive_primary_entry(info)
+
+    def _derive_primary_entry(self, info: FloatingCardInfo) -> None:
+        """按 metadata.primary_entry 自动派生常驻入口。
+
+        取值：
+        - dict: {"kind": "titlebar" | "sidebar", "label": str, "priority": int,
+                 "icon_path": str}（label 缺省用卡 title）
+        - str: "titlebar" / "sidebar"（label 用卡 title，priority 0）
+        - 其余（含缺省）: 不派生，行为与旧版一致
+
+        派生入口的 plugin_name = 卡插件名，插件卸载时随 unload_plugin 的
+        标题栏 tab / 侧栏项清理路径自动注销，无需额外清理代码。
+        """
+        entry = info.metadata.get("primary_entry")
+        if not entry:
+            return
+        if isinstance(entry, str):
+            entry = {"kind": entry}
+        kind = entry.get("kind")
+        label = entry.get("label") or info.title
+        priority = int(entry.get("priority", 0))
+        icon_path = entry.get("icon_path", "")
+        if kind == "titlebar":
+            self.register_titlebar_tab(
+                plugin_name=info.plugin_name,
+                tab_id=info.card_id,
+                label=label,
+                icon_path=icon_path,
+                card_id=info.card_id,
+                priority=priority,
+            )
+        elif kind == "sidebar":
+            self.register_sidebar_item(
+                plugin_name=info.plugin_name,
+                item_id=info.card_id,
+                label=label,
+                icon_path=icon_path,
+                priority=priority,
+                card_id=info.card_id,
+            )
+        else:
+            logger.warning(
+                f"[UIPluginRegistry] primary_entry.kind 非法: {kind!r}（card={info.card_id}，跳过派生）"
+            )
 
     def register_sidebar_item(
         self,
@@ -1484,11 +1536,23 @@ class UIPluginRegistry:
         default_visible: bool = True,
         priority: int = 0,
         on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
+        card_id: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册侧边栏插件项（Phase D 独立扩展点，与 floating card 解耦）"""
+        """注册侧边栏插件项（Phase D 独立扩展点，与 floating card 解耦）
+
+        card_id 声明式绑定：非空且未传 on_click 时，框架生成 toggle 语义回调
+        （已显示则关闭、未显示则打开，对齐侧栏按钮的开关直觉；right 容器卡
+        即「再点关闭页签并收起工作台」的既有行为）。on_click 同传时优先。
+        """
         if metadata is None:
             metadata = {}
+        if card_id and on_click is not None:
+            logger.warning(
+                f"[UIPluginRegistry] sidebar {item_id}: on_click 与 card_id 同传，on_click 优先"
+            )
+        elif card_id:
+            on_click = self._make_card_sidebar_callback(card_id)
         info = SidebarItemInfo(
             plugin_name=plugin_name,
             item_id=item_id,
@@ -1509,6 +1573,18 @@ class UIPluginRegistry:
         # 联动命令：注册即获得「等价于点击该项」的命令（有回调时）
         self._register_command_for_sidebar_item(info)
 
+    def _make_card_sidebar_callback(self, card_id: str) -> Callable[[Dict[str, Any]], None]:
+        """生成「侧栏语义」的卡片 toggle 回调：已显示则关闭、未显示则打开。
+
+        与 tab 回调（show-only）刻意不同：侧栏按钮的直觉是开关，right 容器卡
+        沿用「再点关闭页签并收起工作台」的既有行为。
+        """
+
+        def _on_item_click(_ctx: Dict[str, Any]) -> None:
+            self.toggle_floating_card(card_id)
+
+        return _on_item_click
+
     def get_sidebar_items(self) -> List[SidebarItemInfo]:
         """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按 priority 降序 → 注册序）
 
@@ -1527,18 +1603,37 @@ class UIPluginRegistry:
         label: str,
         icon_path: str = "",
         on_click: Optional[Callable[[], None]] = None,
+        card_id: str = "",
         priority: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册标题栏常驻 tab（无 × 关闭钮；点击走 on_click 回调自展示）"""
+        """注册标题栏常驻 tab（无 × 关闭钮；点击自展示）
+
+        card_id 声明式绑定（推荐）：传卡 ID 且未传 on_click 时，框架生成
+        「已可见则忽略、否则唤出该卡」回调，插件无需手写绑定样板（懒创建、
+        可见性检查、宿主解析均在框架层处理）。允许先注册 tab 后注册卡的顺序，
+        card_id 暂未注册仅告警不阻断。
+        """
         if metadata is None:
             metadata = {}
+        if card_id and on_click is not None:
+            logger.warning(
+                f"[UIPluginRegistry] tab {tab_id}: on_click 与 card_id 同传，on_click 优先（card_id 仅记录）"
+            )
+        elif card_id:
+            on_click = self._make_card_tab_callback(card_id)
+            if card_id not in self._floating_cards:
+                logger.warning(
+                    f"[UIPluginRegistry] tab {tab_id}: card_id={card_id!r} 尚未注册"
+                    "（若随后 register_floating_card 可忽略；永不注册则点击无效果）"
+                )
         info = TitlebarTabInfo(
             plugin_name=plugin_name,
             tab_id=tab_id,
             label=label,
             icon_path=icon_path,
             on_click=on_click,
+            card_id=card_id,
             priority=priority,
             metadata=metadata,
         )
@@ -1549,10 +1644,50 @@ class UIPluginRegistry:
         # 联动命令：注册即获得「等价于点击该 tab」的命令（有回调时）
         self._register_command_for_titlebar_tab(info)
 
+    def _make_card_tab_callback(self, card_id: str) -> Callable[[], None]:
+        """生成「tab 语义」的卡片唤出回调：已可见则忽略（不关闭），否则显示。
+
+        框架单点承载三件样板事：宿主解析（Tab 模式全局容器 / 单窗口回退）、
+        可见性检查（再点不关闭，对齐「切到该页」直觉）、懒创建显示（必须走
+        ``_show_floating_card``；直接 CardManager.show_card 会在 widget 未创建时
+        静默 return——历史上各插件手写回调各自踩过一遍的坑）。
+        """
+
+        def _on_tab_click() -> None:
+            host = self._resolve_global_host()
+            mw = host or self._main_widget
+            if mw is None:
+                return
+            card_manager = getattr(mw, "_card_manager", None)
+            window_id = getattr(mw, "_window_id", None)
+            if card_manager is None or not window_id:
+                return
+            try:
+                if card_manager.is_card_visible(card_id, window_id):
+                    return
+            except Exception:
+                pass
+            self._show_floating_card(card_id, main_widget=mw)
+
+        return _on_tab_click
+
     def unregister_titlebar_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部常驻 tab（插件卸载时调用）"""
         for tab_id in [tid for tid, v in self._titlebar_tabs.items() if v.plugin_name == plugin_name]:
             del self._titlebar_tabs[tab_id]
+
+    def unregister_titlebar_tab(self, plugin_name: str, tab_id: str) -> None:
+        """精确注销单个常驻 tab（校验归属防误删同 id 他插件 tab；联动命令同步注销）
+
+        供 WorkspacePageHost 等宿主层做「按声明重建」的幂等清理：整插件注销
+        （unregister_titlebar_tabs）会误删同插件 floating card 派生的 tab。
+        """
+        info = self._titlebar_tabs.get(tab_id)
+        if info is None or info.plugin_name != plugin_name:
+            return
+        del self._titlebar_tabs[tab_id]
+        if getattr(info, "on_click", None) is not None:
+            self.unregister_ui_command(self._ui_command_name(info.tab_id, info.plugin_name))
 
     def get_titlebar_tabs(self) -> List[TitlebarTabInfo]:
         """获取全部常驻 tab（按注册序返回，tab 栏位置即注册顺序）"""
