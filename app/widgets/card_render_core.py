@@ -327,24 +327,30 @@ FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪�
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
-# ======== 流式期高度补间（默认开，出问题可一键关）========
-# 背景：流式期间卡片高度是「台阶式落地」——上报延迟（打字机节流 ≥80ms +
-# Python 侧 80ms 防抖）之后一次性 setFixedHeight 到目标值。文字是连续出来的，
-# 卡片高度却每 ~160ms 蹦一格：观感是"文字先顶到卡片边缘、憋一下、再整块蹦高"。
-# 这里在每次防抖到期时用 _height_anim 把 viewer 从现值缓动到目标值，视觉连续性
-# 由动画帧提供（不必提高上报频率，两次申报之间的空隙被填平）。
-# 时长取 Animations.ENTER_MS 的一半量级（110ms）：略大于典型上报间隔，保证前一
-# 段未走完时新目标已到达、衔接不上；又足够短，不会让 "高度落后于文字" 变明显。
+# ======== 流式期高度追踪（默认开，出问题可一键关）========
+# 背景：流式期间卡片高度是「台阶式落地」——上报延迟（打字机节流 + Python 侧
+# 防抖）之后一次性 setFixedHeight 到目标值。文字是连续出来的，卡片高度却每
+# ~160ms 蹦一格：观感是"文字先顶到卡片边缘、憋一下、再整块蹦高"。
+# 实现：流式激活时开一个固定节拍的追踪 tick（STREAM_HEIGHT_TICK_MS），每拍朝
+# 最新目标值按比例逼近（STREAM_HEIGHT_TRACK_FACTOR）。相比一次性 QVariantAnimation
+# 补间：目标值可随时更新（天然 retarget）、无 stop/start 抖动、追踪永不打断。
 # 关闭方式：环境变量 DRIFOX_STREAM_HEIGHT_ANIM=0，或运行时
 # set_stream_height_anim_enabled(False)。
 STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") != "0"
-STREAM_HEIGHT_ANIM_MS = 110
-# 小于该变化量直接 snap：流式尾巴上的小噪声不值得起动画（省者与 Fight 抖动同源）
+# 追踪节拍（ms）：30ms ≈ 2 帧。每拍一次 setFixedHeight，回环已被
+# _stream_height_anim_active 上报隔离封死，频率即成本上限。
+STREAM_HEIGHT_TICK_MS = 30
+# 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
+# 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
+STREAM_HEIGHT_TRACK_FACTOR = 0.45
+# 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
+STREAM_HEIGHT_TRACK_EPSILON = 2
+# 小于该变化量直接 snap：流式尾巴上的小噪声不值得起追踪（避免常开 tick 空转）
 STREAM_HEIGHT_ANIM_MIN_DELTA = 8
 
 
 def set_stream_height_anim_enabled(enabled: bool) -> None:
-    """运行时开关流式期高度补间（灰度/回滚用）。"""
+    """运行时开关流式期高度追踪（灰度/回滚用）。"""
     global STREAM_HEIGHT_ANIM_ENABLED
     STREAM_HEIGHT_ANIM_ENABLED = bool(enabled)
 
@@ -3072,7 +3078,11 @@ _SKELETON_CACHE_MAX = 48
 # 完成块 data-order 正确但物理滞留底部；S1（正文先于工具结束）后键集合恒同 →
 # 键序列 diff 全绿且无块缺 data-order → 跳过 sort → 末轮工具完成框沉底固化。
 # 物理顺序 data-order 倒序 → 强制 sort。旧骨架无此检查，必须靠版本号失效。
-_SKELETON_CACHE_VERSION = 34
+# v35（2026-09-29）：打字机高度上报节流 80 → 40ms（_twStep._skipReport）。
+# Python 侧追踪 tick（30ms 节拍）已把高度应用连续化并封死 ResizeObserver 回环，
+# 上报端收紧只减"文字已出、目标未到"的滞后。旧骨架节流常量编译在缓存 HTML 里
+# → 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 35
 
 
 def _js_literal(value) -> str:
@@ -3718,8 +3728,11 @@ _TYPEWRITER_JS = """
                     // [PERF] 高度上报节流：揭示是每帧进行，但高度上报会触发
                     // reportHeight → Python setFixedHeight → Chromium 视口变化 →
                     // 重排的回环。按帧上报会让回环频率翻数倍（流式卡顿来源），
-                    // 这里限制到 ≥80ms 一次——与旧"按 chunk 上报"的节奏一致。
-                    var _skipReport = (now - (st.reportedAt || 0)) < 80;
+                    // 这里限制上报频率——与旧"按 chunk 上报"的节奏一致。
+                    // [T29] 80 → 40ms：目标值进入 Python 追踪的频率。应用侧
+                    // （追踪 tick 30ms 节拍）已连续化且回环被封死，上报端唯一
+                    // 代价是 console.log IPC（微秒级），收紧只减滞后不增成本。
+                    var _skipReport = (now - (st.reportedAt || 0)) < 40;
                     if (!_skipReport) st.reportedAt = now;
                     try {
                         window._dfxAppendStreamText(slice, _skipReport);
