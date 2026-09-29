@@ -107,6 +107,8 @@ class GitWorktreeDetector:
     _git_available: Optional[bool] = None  # 是否安装了 git
     _detect_cache: dict = {}  # {path: (result, timestamp)}
     _is_worktree_cache: dict = {}  # {path: (bool, timestamp)}
+    _branch_cache: dict = {}  # {path: (str, timestamp)}
+    _worktrees_cache: dict = {}  # {git_root: (List[WorktreeInfo], timestamp)}
     _info_cache: dict = {}  # {path: (GitRepoInfo, timestamp)}
     _CACHE_TTL = 30.0  # 缓存有效期（秒），避免频繁 git 子进程调用拖慢 UI
     # git root 对固定 workdir 极稳定（git init/重建仓库才变），长 TTL 减少
@@ -238,14 +240,25 @@ class GitWorktreeDetector:
 
     @staticmethod
     def get_current_branch(path: str) -> str:
-        """获取当前分支名"""
+        """获取当前分支名
+
+        [PERF-close] 结果缓存（TTL 30s）：本方法被 get_repo_info 调用，
+        而 get_repo_info 在 PreUserMessage 每条消息前触发；TTL 过期后
+        每个 git 子进程在 Windows+Defender 下 100-300ms。分支仅在
+        显式 git 操作时变化，30s 陈旧窗口可接受。
+        """
+        cached = GitWorktreeDetector._cache_get(GitWorktreeDetector._branch_cache, path)
+        if cached is not None:
+            return cached
+        result = ""
         try:
-            result = _run_git(["branch", "--show-current"], cwd=path)
-            if result.returncode == 0:
-                return result.stdout.strip()
+            r = _run_git(["branch", "--show-current"], cwd=path)
+            if r.returncode == 0:
+                result = r.stdout.strip()
         except Exception:
             pass
-        return ""
+        GitWorktreeDetector._cache_set(GitWorktreeDetector._branch_cache, path, result)
+        return result
 
     @staticmethod
     def list_worktrees(git_root: str) -> List[WorktreeInfo]:
@@ -259,9 +272,18 @@ class GitWorktreeDetector:
 
         Returns:
             List[WorktreeInfo]: worktree 列表
+
+        [PERF-close] 结果缓存（TTL 30s）：内部 worktree list + N 个并行
+        rev-list（每 worktree 一个子进程），Windows 冷启动 300ms+；调用方
+        get_repo_info 在 PreUserMessage 每条消息前触发（hook 上下文）。
+        worktree 增删由 worktree-manager 的 _invalidate_info_cache 主动
+        失效本缓存，30s 陈旧窗口仅覆盖外部 git 命令行操作。
         """
         if not git_root or not os.path.exists(git_root):
             return []
+        cached = GitWorktreeDetector._cache_get(GitWorktreeDetector._worktrees_cache, git_root)
+        if cached is not None:
+            return cached
 
         try:
             result = _run_git(["worktree", "list", "--porcelain"], cwd=git_root)
@@ -337,6 +359,7 @@ class GitWorktreeDetector:
                             wt.behind_main = behind
                             wt.ahead_main = ahead
 
+            GitWorktreeDetector._cache_set(GitWorktreeDetector._worktrees_cache, git_root, worktrees)
             return worktrees
 
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
