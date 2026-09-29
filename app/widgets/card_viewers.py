@@ -6726,8 +6726,11 @@ class CodeWebViewer(QWebEngineView):
         # 🆕 F2（S1）：keep_dock=True 时保留坞态——流式文本先于工具结果结束是
         # 常见时序（工具执行耗时 > 文本流式），此时立即归位会让用户看到
         # "工具还在运行但工具区已回顶部"的跳动。归位推迟到最后一个工具完成时。
+        # [T30] 归位即折叠（collapse_after=True）：归位展开 → 折叠收起的两段式
+        # 往返峰是结束态剧烈抖动主因，终态本就是折叠，同帧合并成一条曲线。
+        # 非简洁模式由 JS 侧 _toolCompactMode 守卫自动 no-op。
         if not keep_dock:
-            self._sync_streaming_dock(False)
+            self._sync_streaming_dock(False, collapse_after=True)
         # 🐛 FIX: 流式结束时清除 tool_md_cache，防止缓存过期导致
         # 后续非流式渲染拿到缺内容的旧 <tool> markdown，造成 tool-block
         # 在 reorganizeContent 中因不匹配而被清除或生成重复。
@@ -6814,8 +6817,16 @@ class CodeWebViewer(QWebEngineView):
         except RuntimeError:
             pass
 
-    def _sync_streaming_dock(self, active: bool):
+    def _sync_streaming_dock(self, active: bool, collapse_after: bool = False):
         """同步流式活动坞状态到 JS 端。
+
+        Args:
+            active: True 进坞 / False 归位。
+            collapse_after: [T30] 归位时同帧折叠工具区（仅简洁模式生效）。坞态
+                归位本会把 #tool-content 从 220px 限高展开到自然高度，随后折叠
+                又收回去 —— 两段式是结束态剧烈抖动的主因。True 时 JS 在归位
+                事务内连置折叠属性，高度只走一条 220px→0 的曲线。
+                非归位方向（active=True）忽略。
 
         仅简洁模式下 JS 侧 _setStreamingDock 会真正切换 body.streaming-dock，
         非简洁模式注入为空操作。JS 未就绪时跳过——_on_js_ready 会按当前
@@ -6828,7 +6839,10 @@ class CodeWebViewer(QWebEngineView):
         try:
             if self._is_js_ready and self.page():
                 flag = "true" if active else "false"
-                self.page().runJavaScript(f"if(typeof _setStreamingDock==='function')_setStreamingDock({flag});")
+                collapse = "true" if (collapse_after and not active) else "false"
+                self.page().runJavaScript(
+                    f"if(typeof _setStreamingDock==='function')_setStreamingDock({flag},{collapse});"
+                )
         except RuntimeError:
             pass
 

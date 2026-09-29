@@ -347,6 +347,10 @@ STREAM_HEIGHT_TRACK_FACTOR = 0.45
 STREAM_HEIGHT_TRACK_EPSILON = 2
 # 小于该变化量直接 snap：流式尾巴上的小噪声不值得起追踪（避免常开 tick 空转）
 STREAM_HEIGHT_ANIM_MIN_DELTA = 8
+# 结束态（FINISH 窗口）追踪的逼近比例：比流式（0.45）更缓——结束态的高度变化
+# 与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级，追踪太快会"Qt 侧先到、
+# 页面还在动"的两段感；0.28 → 约 10 拍（300ms）收敛 96%，即丝绸尾音。
+FINISH_HEIGHT_TRACK_FACTOR = 0.28
 
 
 def set_stream_height_anim_enabled(enabled: bool) -> None:
@@ -3082,7 +3086,11 @@ _SKELETON_CACHE_MAX = 48
 # Python 侧追踪 tick（30ms 节拍）已把高度应用连续化并封死 ResizeObserver 回环，
 # 上报端收紧只减"文字已出、目标未到"的滞后。旧骨架节流常量编译在缓存 HTML 里
 # → 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 35
+# v36（2026-09-29）：_setStreamingDock 增加 collapseAfter 参数——坞态归位与工具区
+# 折叠同帧合并（两个 max-height 变化合成一条 220px→0 过渡曲线），消除结束态
+# 「归位展开到自然高度峰值→再折叠」的往返峰（剧烈抖动主因）。旧骨架无此参数，
+# 归位仍两段式 → 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 36
 
 
 def _js_literal(value) -> str:
@@ -3572,7 +3580,7 @@ _STREAMING_DOCK_CSS = """
 _STREAMING_DOCK_JS = """
                 // ===== 流式活动坞（Streaming Dock）=====
                 window._streamingActive = false;
-                function _setStreamingDock(active) {
+                function _setStreamingDock(active, collapseAfter) {
                     // 仅简洁模式启用坞态
                     var on = !!active && !!window._toolCompactMode;
                     var wasOn = document.body.classList.contains('streaming-dock');
@@ -3587,6 +3595,19 @@ _STREAMING_DOCK_JS = """
                     if (typeof window._flipArm === 'function') window._flipArm(1200);
                     var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
+                    // [T30] 归位同帧折叠：坞态归位本会让 #tool-content 从 220px 限高
+                    // 展开到自然高度（工具多时暴涨数百 px），随后 finish 流程又立刻
+                    // 把它折叠回 0 —— 「先胀后缩」的往返峰是结束态剧烈抖动的主因，
+                    // 而终态本来就是折叠，中间那次全展开纯属浪费。collapseAfter=true
+                    // 时在同一同步块内连置折叠属性：两个 max-height 变化合并为一帧，
+                    // 浏览器只算一条 220px→0 的过渡曲线，自然高度峰值从不进布局。
+                    // 折叠的 transitionend 终值单报由函数尾部统一的
+                    // _beginToolSectionTransition 承接（本帧内开启抑制，无漏报窗口）。
+                    if (on === false && wasOn && collapseAfter && (window._toolCompactMode !== false) && ts) {
+                        ts.setAttribute('data-collapsed', 'true');
+                        var _sepC = document.getElementById('tool-separator');
+                        if (_sepC) _sepC.setAttribute('aria-expanded', 'false');
+                    }
                     if (!on && wasOn) {
                         // 🐛 修复（坞态归位正文置顶）：坞态下正文容器限高内滚，用户
                         // 阅读位置在 #content-placeholder.scrollTop。归位移除
