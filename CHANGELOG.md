@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.6.4] - 2026-09-28
+## [v0.6.4] - 2026-09-28 (重新发布 #2)
 
-自上一版本以来的变更 | 提交数：20 · 文件变更：77 · +17236/-13744 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更（累计） | 提交数：26 · 文件变更：94 · +17797/-13924 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -40,6 +40,24 @@ All notable changes to this project will be documented in this file.
 - 版本号升级至 v0.6.4（pyproject.toml / config.py / installer.iss / README）(`6fcf069c`)
 - marketplace 自 plugin.json 自动再生成 (`4c70a477`)
 - 移除上下文六层链遗留注释，改为指向 registry 实际注册 (`c3bfe0be`)
+
+### ➕ 重新发布 #2 新增（v0.6.4 之后 6 commits · 17 files · +561/-180）
+
+#### ✨ 新功能 (New Features)
+
+- **流式高度追踪** (`991b9da9`, `app/widgets/card_render_core.py`, `app/widgets/message_card.py`): 在卡片渲染核心引入流式内容高度追踪机制，消息卡随流式输出平滑过渡高度，内容变化期间视觉更连贯，避免出现"跳变"式高度切换。
+
+- **流式坞高度动画优化** (`9eb8cba9`, `app/main_widget.py`, `app/widgets/card_render_core.py`, `app/widgets/card_viewers.py`, `app/widgets/message_card.py`, `tests/widgets/test_scroll_hot_path.py`): 流式坞行为增强 —— 同步折叠状态 + 改进高度追踪，配合新的动画过渡让流式输出期间高度变化更平滑，性能与手感双提升。
+
+- **流式坞同步折叠与高度追踪** (`ffe92de5`, `app/widgets/card_render_core.py`, `app/widgets/card_viewers.py`, `app/widgets/message_card.py`, `tests/widgets/test_message_card_streaming_dock.py`, `tests/widgets/test_message_card_user_actions.py`): 流式坞行为进一步收敛，折叠展开与高度追踪完全同步；新增 `test_message_card_user_actions.py` 40 例覆盖用户/助手卡片 hover 前后页脚高度恒等回归。测试新增 55 例。
+
+- **worktree 检测与会话自动保存性能优化** (`cf16d177`, `app/main_widget.py`, `app/utils/git_worktree.py`, `app/utils/history_manager.py`): 优化 worktree 检测与会话自动保存路径，扫描/序列化关键路径耗时下降，减少高频调用时的开销。
+
+- **当前分支与 worktree 列表缓存** (`e2b252fd`, `app/utils/git_worktree.py`, `plugins/worktree-manager/tools/worktree_tools.py`): 在 worktree-manager 工具层引入当前分支与 worktree 列表缓存，避免重复 git 调用开销，工作树检测从 O(扫描) 收敛到 O(缓存命中)。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **软件界面截图更新** (`23331c0e`, `images/软件界面.png`): 更新 README 引用的软件界面截图至最新版本（603 KB → 84 KB，体积下降 86%）。
 
 ## [v0.6.3] - 2026-09-24 (重新发布 #4)
 
