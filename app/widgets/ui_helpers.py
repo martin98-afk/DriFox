@@ -21,10 +21,11 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
 
 from app.utils.design_tokens import Colors, font_size_css
+from app.utils.utils import get_icon
 from app.widgets import MessageCard
 from app.widgets.elided_label import _ElidedLabel
 
@@ -2114,3 +2115,27 @@ class TitleEditWidget(QWidget):
         self._label.setText(self._full_text)
         self.setReadOnly(True)
         return False
+
+
+# ==================== 主题感知图标标签 ====================
+# 自 main_widget.py 迁出（2026-09-29 拆分步骤 3），bottom_toolbar_module 等使用
+
+
+class _ThemedIconLabel(QWidget):
+    """主题感知图标标签 — 使用 QIcon 引擎自动适配浅色/深色
+
+    替代静态 emoji/文字图标，支持主题切换时自动更新图标颜色。
+    通过 QIconEngine（_ThemeIconEngine）实现每次 paint 时按当前主题加载正确颜色。
+    """
+
+    def __init__(self, icon_name: str, size: int = 18, parent=None):
+        super().__init__(parent)
+        self._icon = get_icon(icon_name)
+        self._icon_size = size
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._icon.paint(painter, self.rect())

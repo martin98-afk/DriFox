@@ -86,6 +86,28 @@ from app.core.conversation.message_content import _is_hook_message, strip_system
 from app.core.commands.builtin_commands import FunctionCommandHandlers
 from app.core.commands.command_manager import CommandManager, CommandType
 from app.core.modelmeta.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
+from app.core.infra import memory_governor
+from app.core.infra.memory_governor import (
+    _MAX_GLOBAL_RENDERED_PAGES,
+    _MAX_RENDERED_CARDS,
+    _MEM_THRESHOLD_TOTAL_MB,
+    _MEM_THRESHOLD_TOTAL_MB_ACTIVE,
+    _MIN_RENDERED_CARDS_PER_WINDOW,
+    _MIN_RENDERED_CARDS_PER_WINDOW_FLOOR,
+    _OFFSCREEN_BATCHES_FOR_KILL,
+    _OFFSCREEN_BATCHES_FOR_KILL_ACTIVE,
+    _UNLOADED_PIDS_MAX,
+    _WEB_MEM_THRESHOLD_MB,
+    _WEB_MEM_THRESHOLD_MB_ACTIVE,
+    _KILL_BATCH_MAX,
+    _KILL_COOLDOWN_S,
+    _LRU_RENDERER_KEEP,
+    _LRU_RENDERER_KEEP_ACTIVE,
+    _cleanup_global_lru_caches,
+    _compact_process_heap_after_cleanup,
+    _is_sip_deleted,
+    _run_gc_hook,
+)
 from app.core.infra.rss_sampler import rss_sampler
 from app.core.tools.tool_permission_controller import ToolPermissionController
 from app.core.infra import window_registry
@@ -123,6 +145,8 @@ try:
 except Exception:  # noqa: BLE001
     logger.warning("[MainWidget] TabManagerWindow 导入失败，InfoBar parent 回退 self.window()")
 
+from app.widgets import tool_window
+from app.widgets.tool_window import ToolWindow, _ToolReloadNoticeBridge
 from app.widgets.cards import (
     BottomCardContainer,
     CardManager,
@@ -596,26 +620,6 @@ class _ProjectImportOptionDialog(MaskDialogBase):
             self.urlImportRequested.emit()
 
 
-class _ThemedIconLabel(QWidget):
-    """主题感知图标标签 — 使用 QIcon 引擎自动适配浅色/深色
-
-    替代静态 emoji/文字图标，支持主题切换时自动更新图标颜色。
-    通过 QIconEngine（_ThemeIconEngine）实现每次 paint 时按当前主题加载正确颜色。
-    """
-
-    def __init__(self, icon_name: str, size: int = 18, parent=None):
-        super().__init__(parent)
-        self._icon = get_icon(icon_name)
-        self._icon_size = size
-        self.setFixedSize(size, size)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        self._icon.paint(painter, self.rect())
-
-
 def resolve_busy_behavior(behavior: str, inverse: bool) -> str:
     """繁忙时行为判定：设置项 + Ctrl+Enter 互反（模块级纯函数便于测试）
 
@@ -663,249 +667,6 @@ def _abort_team_window(win) -> None:
     except Exception:
         pass
 
-
-class ToolWindowTitleBar(QWidget):
-    """窗口标题栏（原 app/tool_popup.py 定义，随 ToolPopupDialog 下线迁移至此）"""
-
-    popupRequested = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._custom_buttons = []
-        self._popup_mode_buttons = []
-        self._is_compact = False
-        self._setup_ui()
-
-    def _setup_ui(self):
-        self.setFixedHeight(28)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 0, 2, 0)
-        layout.setSpacing(4)
-
-        self._icon_widget = IconWidget(self)
-        self._icon_widget.setFixedSize(20, 20)
-
-        self._title_label = QLabel(self)
-        self._title_label.setObjectName("titleLabel")
-
-        layout.addWidget(self._icon_widget)
-        layout.addWidget(self._title_label)
-        layout.addStretch()
-
-        self._action_container = QWidget(self)
-        self._action_container.setObjectName("actionContainer")
-        self._action_layout = QHBoxLayout(self._action_container)
-        self._action_layout.setContentsMargins(0, 0, 0, 0)
-        self._action_layout.setSpacing(3)
-        layout.addWidget(self._action_container)
-
-        # 设置按钮已移除（移到主窗口内）
-
-        self._min_btn = TransparentToolButton(get_icon("最小化"), self)
-        self._min_btn.setFixedSize(28, 28)
-        self._min_btn.setToolTip("最小化")
-
-        self._popup_btn = TransparentToolButton(FluentIcon.CLOSE, self)
-        self._popup_btn.setFixedSize(28, 28)
-        self._popup_btn.setToolTip("关闭")
-        self._popup_btn.clicked.connect(self._on_popup_clicked)
-
-        layout.addWidget(self._min_btn)
-        layout.addWidget(self._popup_btn)
-
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
-
-        # 使用主题颜色
-        from app.utils.design_tokens import Colors
-
-        Colors.refresh()
-        Colors.refresh()
-        title_color = Colors.TEXT_PRIMARY
-        btn_hover = Colors.HOVER_BG
-        border_color = Colors.BORDER
-
-        self.setStyleSheet(f"""
-            ToolWindowTitleBar {{
-                background-color: {Colors.CONTENT_BG};
-                border-bottom: 1px solid {border_color};
-            }}
-            #titleLabel {{
-                color: {title_color};
-                font-size: {scale_font_size(13)}px;
-                font-weight: bold;
-                font-family: "{font_name}";
-                padding: 0 3px;
-            }}
-            #actionContainer {{
-                background-color: transparent;
-            }}
-            ToolButton {{
-                background-color: transparent;
-                border: none;
-                border-radius: 3px;
-                padding: 1px;
-            }}
-            ToolButton:hover {{
-                background-color: {btn_hover};
-            }}
-            ToolButton:pressed {{
-                background-color: {btn_hover};
-            }}
-        """)
-
-    def set_icon(self, icon):
-        self._icon_widget.setIcon(icon)
-
-    def set_title(self, title):
-        self._title_label.setText(title)
-
-    def set_title_color(self, color: str):
-        """设置标题文字颜色（覆盖默认的 TEXT_PRIMARY）
-
-        传入空字符串 '' 可清除行内颜色样式，恢复默认主题色。
-        """
-        if color:
-            self._title_label.setStyleSheet(f"color: {color};")
-        else:
-            self._title_label.setStyleSheet("")
-
-    def add_button(self, widget, stretch=0):
-        self._action_layout.insertWidget(self._action_layout.count() - 2, widget, stretch=stretch)
-        self._custom_buttons.append(widget)
-
-    def insert_button(self, index, widget, stretch=0):
-        self._action_layout.insertWidget(index, widget, stretch=stretch)
-        self._custom_buttons.append(widget)
-
-    def _on_popup_clicked(self):
-        self.popupRequested.emit()
-
-    def refresh_style(self):
-        """主题/字体变更时刷新标题栏样式"""
-        Colors.refresh()
-        # 重新读取字体
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
-
-        title_color = Colors.TEXT_PRIMARY
-        btn_hover = Colors.HOVER_BG
-        border_color = Colors.BORDER
-
-        # 整体标题栏样式
-        self.setStyleSheet(f"""
-            ToolWindowTitleBar {{
-                background-color: {Colors.CONTENT_BG};
-                border-bottom: 1px solid {border_color};
-            }}
-            #titleLabel {{
-                color: {title_color};
-                font-size: {scale_font_size(13)}px;
-                font-weight: bold;
-                font-family: "{font_name}";
-                padding: 0 3px;
-            }}
-            #actionContainer {{
-                background-color: transparent;
-            }}
-            ToolButton {{
-                background-color: transparent;
-                border: none;
-                border-radius: 3px;
-                padding: 1px;
-            }}
-            ToolButton:hover {{
-                background-color: {btn_hover};
-            }}
-            ToolButton:pressed {{
-                background-color: {btn_hover};
-            }}
-        """)
-
-
-class ToolWindow(QWidget):
-    """工具窗口基类（原 app/tool_popup.py 定义，随 ToolPopupDialog 下线迁移至此）"""
-
-    name: str = "Unnamed"
-    icon = None
-
-    def __init__(self, page):
-        super().__init__()
-        self.homepage = page
-        self._title_bar = None
-        self._content_widget = None
-
-        self._init_unified_font()
-        self._init_title_bar()
-        self.setObjectName("OpenAIChatToolWindow")
-
-    def _init_title_bar(self):
-        if self._title_bar:
-            return
-
-        self._title_bar = ToolWindowTitleBar(self)
-        self._title_bar.set_icon(self.icon)
-        self._title_bar.set_title(self.name)
-        self._title_bar.hide()
-        self._setup_title_bar()
-
-    def _setup_title_bar(self):
-        pass
-
-    def get_title_bar(self):
-        return self._title_bar
-
-    def _init_unified_font(self):
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
-
-        font = self.font()
-        font.setFamily(font_name)
-        self.setFont(font)
-
-        # 只设置字体，不设置背景（背景由子类的 setup_ui 处理）
-        self.setStyleSheet(f"""
-            ToolWindow {{
-                font-family: "{font_name}";
-            }}
-            QLabel, QPushButton, QLineEdit, QComboBox, QTreeWidget, QTableWidget {{
-                font-family: "{font_name}";
-            }}
-        """)
-
-
-class _ToolReloadNoticeBridge(QObject):
-    """工具热重载风险通知桥：watcher 后台线程 emit → 主线程槽执行
-
-    reloaded 由 watcher 后台线程 emit；桥在主线程创建，reloaded→notified
-    跨线程自动 QueuedConnection，确保外部槽在主线程执行。
-    """
-
-    reloaded = pyqtSignal()
-    notified = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.reloaded.connect(self.notified)
-
-
-_tool_reload_notice_bridge: Optional[_ToolReloadNoticeBridge] = None
 
 
 def _image_path_to_data_uri(img_path: str) -> "str | None":
@@ -10126,7 +9887,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if OpenAIChatToolWindow._tool_reload_notice_registered:
             return
         OpenAIChatToolWindow._tool_reload_notice_registered = True
-        global _tool_reload_notice_bridge
         try:
             from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
@@ -10135,10 +9895,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 # watcher 未就绪（watchfiles 未安装等）→ 解除注册，下次窗口再试
                 OpenAIChatToolWindow._tool_reload_notice_registered = False
                 return
-            if _tool_reload_notice_bridge is None:
-                _tool_reload_notice_bridge = _ToolReloadNoticeBridge()
-                _tool_reload_notice_bridge.notified.connect(OpenAIChatToolWindow._on_tool_reload_notice)
-            watcher.on_tools_reloaded(_tool_reload_notice_bridge.reloaded.emit)
+            if tool_window._tool_reload_notice_bridge is None:
+                tool_window._tool_reload_notice_bridge = _ToolReloadNoticeBridge()
+                tool_window._tool_reload_notice_bridge.notified.connect(OpenAIChatToolWindow._on_tool_reload_notice)
+            watcher.on_tools_reloaded(tool_window._tool_reload_notice_bridge.reloaded.emit)
             logger.debug("[ToolReloadNotice] 工具热重载风险通知监听已注册")
         except Exception as e:
             logger.warning(f"[ToolReloadNotice] 注册热重载监听失败: {e}")
@@ -12564,9 +12324,10 @@ class OpenAIChatToolWindow(ToolWindow):
         所有「重算/清零」计数的地方都必须走这里，否则全局计数会漂移，
         进而让闸门误判（配额被永久占用 → 其他窗口被饿死）。
         """
-        global _global_rendered_pages
         new_count = max(0, new_count)
-        _global_rendered_pages = max(0, _global_rendered_pages - self._rendered_card_count + new_count)
+        memory_governor._global_rendered_pages = max(
+            0, memory_governor._global_rendered_pages - self._rendered_card_count + new_count
+        )
         self._rendered_card_count = new_count
 
     def _decr_rendered_count(self, n: int) -> None:
@@ -13047,11 +12808,10 @@ class OpenAIChatToolWindow(ToolWindow):
         150ms singleShot 合并高频路径（清空聊天区/关闭窗口/清空快捷键），
         只在窗口相关大块内存释放后触发一次，避免每帧同步执行。
         """
-        global _gc_hook_pending
-        if _gc_hook_pending:
+        if memory_governor._gc_hook_pending:
             return
-        _gc_hook_pending = True
-        QTimer.singleShot(150, _run_gc_hook)
+        memory_governor._gc_hook_pending = True
+        QTimer.singleShot(150, memory_governor._run_gc_hook)
 
     def _clear_chat_area(self, delete_widgets: bool = True):
         self._current_assistant_card = None
@@ -14015,8 +13775,7 @@ class OpenAIChatToolWindow(ToolWindow):
         new_count = sum(1 for c in batch[:consumed] if getattr(c, "_lazy_rendered", False))
         if new_count > 0:
             self._rendered_card_count += new_count
-            global _global_rendered_pages
-            _global_rendered_pages += new_count
+            memory_governor._global_rendered_pages += new_count
             if self._rendered_card_count > self._effective_max_rendered_cards():
                 QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
@@ -23404,8 +23163,9 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         # ★ B4 温和层：窗口关闭时全局观测计数递减（本窗口已渲染卡片数）
-        global _global_rendered_pages
-        _global_rendered_pages = max(0, _global_rendered_pages - self._rendered_card_count)
+        memory_governor._global_rendered_pages = max(
+            0, memory_governor._global_rendered_pages - self._rendered_card_count
+        )
         # ★ B4 强回收层：进程退出整体回收，不 kill（窗口销毁时 renderer
         # 子进程随 WebEngine profile 自动退出，显式 kill 反而可能误伤共享进程）
         self._unloaded_pids.clear()
@@ -24044,149 +23804,3 @@ def _is_plugin_override(module_id: str) -> bool:
         return any(name != "system" for name, _p, _f in slot)
     except Exception:
         return False
-
-
-def _is_sip_deleted(obj) -> bool:
-    """判断 PyQt 对象是否已被 C++ 侧销毁（防御 wrapped C/C++ object has been deleted）。
-
-    destroyed 信号在 C++ 对象真正销毁时触发，此时 Python 侧的 self 仍存在但
-    C++ 包装已失效，访问 self 的任何 Qt 属性都会抛 RuntimeError。
-    用于 destroyed 回调 / 清理路径的入口守卫，静默返回 False 兜底。
-    """
-    try:
-        return sip.isdeleted(obj)
-    except Exception:
-        return False
-
-
-# GC 钩子（T9）：模块级防抖标志，150ms 内多次触发只执行一次。
-_gc_hook_pending = False
-
-
-# ── B4 温和层：WebEngine 并发页上限（T12 蓝图） ──
-# 每渲染卡 ~64MB renderer 进程，长对话必须锁峰值：
-# 温和层：并发页 ≤ _MAX_RENDERED_CARDS（18 = 可视 12 批 + 上下 6 批缓冲）。
-# 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
-# 2026-09-09 内存治理：18 → 12（可视 ~8 批 + 上下 4 批缓冲）。真机日志显示
-# 大会话（60+ 批次）内存主体是**并发 WebEngine 页数**而非单卡 HTML 体积
-# （单卡 DOM 数百 KB vs 每页数十 MB 常驻），砍 6 页 ≈ 直接省下数百 MB，
-# 且历史渲染已异步化，回滚重建不再阻塞主线程。
-_MAX_RENDERED_CARDS = 12
-_global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
-
-# ── B4 温和层：跨窗口全局渲染页闸门 ──
-# [PERF] _MAX_RENDERED_CARDS 原本是 **per-window** 常量，多窗口场景下
-# N 窗口 = N×18 张已渲染卡片常驻。每张卡片的 DOM/JS heap 都要挤在
-# --renderer-process-limit 封顶的那几个 renderer 进程里，内存随窗口数线性增长
-# （4 窗口 ≈ 72 页）。改为全局配额：新窗口只能分到「全局剩余配额」，
-# 但每窗口至少保留 _MIN_RENDERED_CARDS_PER_WINDOW 张 —— 宁可全局超限，
-# 也不能让某个窗口白屏（可用性优先于内存）。
-_MAX_GLOBAL_RENDERED_PAGES = 32  # 跨窗口并发渲染页硬闸门
-_MIN_RENDERED_CARDS_PER_WINDOW = 6  # 每窗口保底页数（闸门的下限保护）
-# [MEM] 保底页数的收缩下限。原实现保底是常量 6 —— N 个窗口必然 N×6 页
-# （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），_MAX_GLOBAL_RENDERED_PAGES=32
-# 被完全架空。现在保底随存活窗口数收缩，但降到本值即停，避免窗口被饿死到白屏。
-_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR = 3
-
-# ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
-# 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
-# 避免仅主进程内存高（如 Python 堆）时误杀 renderer。
-# [MEM] 强回收的主判据已改为 WebEngine 子进程 RSS（见 _over_memory_threshold）。
-# 实测（tools/diag_webengine_mem_probe.py，dpr=2.25）：并发 8 个 QWebEngineView
-# 让子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存主体全在 renderer 子进程，
-# 拿主进程 RSS 当门槛等于永远够不着，强回收永不触发 → 子进程一路涨到 4GB。
-_WEB_MEM_THRESHOLD_MB = 600  # 非活跃窗口：WebEngine 子进程 RSS 触发阈值
-_WEB_MEM_THRESHOLD_MB_ACTIVE = 1000  # 活跃窗口：阈值更高，避免滚动回看时重建抖动
-# 兜底：子进程采样不可用时（无 psutil / 尚未创建 view）退回主进程 RSS 判据
-_MEM_THRESHOLD_TOTAL_MB = 900
-_LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
-_KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
-_KILL_BATCH_MAX = 12  # 每轮最多 kill
-_OFFSCREEN_BATCHES_FOR_KILL = 8  # 距可视区 ≥8 批才可 kill（严格离屏护栏）
-
-# ── 活跃窗口强回收（修复「活跃窗口永不回收」导致的内存单调增长）──
-# 活跃窗口用户正在交互，回收需要更保守，但绝不能像旧实现那样直接跳过
-# （跳过 = 单窗口场景永不回收 = 内存溢出）。
-# - 阈值更高：避免刚过阈值就频繁 kill 造成重建抖动
-# - 保留更多：距可视区近的 renderer 留着，回滚时无需重建
-# - 离屏更远才 kill：只回收用户短期内不会滚回的批次
-# - 队列上限做最终兜底：护栏再严也保证队列与 renderer 进程数有界
-_MEM_THRESHOLD_TOTAL_MB_ACTIVE = 1400  # 活跃窗口阈值（高于非活跃的 900MB）
-_LRU_RENDERER_KEEP_ACTIVE = 14  # 活跃窗口保留更多最近 renderer（对比非活跃 8）
-_OFFSCREEN_BATCHES_FOR_KILL_ACTIVE = 12  # 活跃窗口要求离屏更远（对比非活跃 8）
-_UNLOADED_PIDS_MAX = 32  # _unloaded_pids 队列硬上限：超限强制 kill 最老的（背压兜底）
-
-
-def _run_gc_hook():
-    """GC 钩子执行体：清理全局渲染缓存 + 回收进程堆。
-
-    由 _schedule_gc_hook 防抖合并后调用（150ms singleShot），
-    全 try/except 吞异常，不影响主流程。
-    """
-    global _gc_hook_pending
-    _gc_hook_pending = False
-    try:
-        from app.widgets.message_card import clear_global_render_cache
-
-        clear_global_render_cache()
-    except Exception:
-        pass
-    try:
-        _compact_process_heap_after_cleanup()
-    except Exception:
-        pass
-
-
-def _cleanup_global_lru_caches():
-    """清理全局 LRU 缓存，释放旧会话渲染/估算占用的内存。
-
-    在新建会话、切换会话时调用，避免缓存的 HTML 渲染结果和 token 估算值累积。
-    """
-    try:
-        from app.widgets.message_card import clear_global_render_cache
-
-        clear_global_render_cache()
-    except Exception:
-        pass
-    try:
-        from app.core.infra.token_estimator import estimate_tokens
-
-        estimate_tokens.cache_clear()
-    except Exception:
-        pass
-    try:
-        from app.widgets.message_card import _render_tool_block_content
-
-        _render_tool_block_content.cache_clear()
-    except Exception:
-        pass
-    try:
-        from app.widgets.render_helpers import invalidate_render_caches
-
-        invalidate_render_caches()
-    except Exception:
-        pass
-    try:
-        from app.utils.utils import invalidate_icon_cache
-
-        invalidate_icon_cache()
-    except Exception:
-        pass
-    try:
-        from app.utils.provider_icons import invalidate_provider_icon_cache
-
-        invalidate_provider_icon_cache()
-    except Exception:
-        pass
-
-
-def _compact_process_heap_after_cleanup():
-    """卡片清理后触发 gc，回收 Python 对象图（T11：移除失效的 HeapCompact/malloc_trim）。
-
-    T10 实测：Python 3.14 下 ctypes.WinDLL("kernel32").HeapCompact 100% 抛
-    access violation（被 except 吞掉），主线程高频路径（新建/切换/恢复会话、
-    切换项目、undo）上制造无效异常开销；Linux malloc_trim 收益同样有限。
-    故移除两者，保留 gc.collect() —— pymalloc arena 的归还由 CPython
-    内存管理自行处理，gc 收集足够。
-    """
-    gc.collect()
