@@ -90,6 +90,11 @@ def _invalidate_info_cache(repo_root: str) -> None:
     for key in list(GitWorktreeDetector._detect_cache):
         if os.path.abspath(key) == os.path.abspath(repo_root):
             GitWorktreeDetector._detect_cache.pop(key, None)
+    # [PERF-close] list_worktrees/get_current_branch 的 30s 结果缓存：
+    # worktree 增删后列表与分支都可能变化，随本函数一并失效（缓存条目少，
+    # 全清后 30s 内自然重建）
+    GitWorktreeDetector._worktrees_cache.clear()
+    GitWorktreeDetector._branch_cache.clear()
 
 
 def _load_get_bridge():

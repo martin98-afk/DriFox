@@ -128,6 +128,7 @@ from app.widgets.render_helpers import (
 )
 from app.utils.session_preview import format_relative_time
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
+
 # 渲染管线与查看器已拆分至独立模块；此处 re-export 保持既有 import 路径兼容。
 from app.widgets.card_render_core import (
     AUTO_SCROLL_THRESHOLD,
@@ -137,6 +138,7 @@ from app.widgets.card_render_core import (
     FINISH_HEIGHT_ANIM_MIN_DELTA,
     FINISH_HEIGHT_ANIM_MS,
     FINISH_HEIGHT_ANIM_WINDOW_S,
+    FINISH_HEIGHT_TRACK_FACTOR,
     FlowLayout,
     MessageBubble,
     TabHoverSyncHost,
@@ -154,6 +156,11 @@ from app.widgets.card_render_core import (
     _STREAM_BAND_REPAINT_PAD,
     _STREAM_BAND_SWEEP_MS,
     _STREAM_TINT_RETRY,
+    STREAM_HEIGHT_ANIM_ENABLED,
+    STREAM_HEIGHT_ANIM_MIN_DELTA,
+    STREAM_HEIGHT_TICK_MS,
+    STREAM_HEIGHT_TRACK_EPSILON,
+    STREAM_HEIGHT_TRACK_FACTOR,
     _THINK_SNAKE_SVG,
     _classify_think_tag,
     _count_think_tool_prefix,
@@ -348,14 +355,30 @@ class MessageCard(SimpleCardWidget):
         self._finish_height_anim_until = 0.0
         self._finish_height_anim_left = 0
         self._finish_height_anim_active = False
+        # [T29] 流式高度追踪进行中标记。追踪期间 Chromium 侧 ResizeObserver 会
+        # 不断送来"当前中间高度"，若照单全收会把追踪打断成锯齿（stop → 防抖 →
+        # 重启）。故追踪期间一律吞掉上报，落定时由 tick 主动校正。
+        self._stream_height_anim_active = False
+        # 追踪节拍器：流式高度增长的连续化。目标值（_target_viewer_height）可
+        # 随时被新上报更新，tick 每拍朝它按比例逼近 —— 天然 retarget，无动画
+        # stop/start 抖动。parent=self：随卡片销毁。
+        self._stream_height_tick = QTimer(self)
+        self._stream_height_tick.setInterval(STREAM_HEIGHT_TICK_MS)
+        self._stream_height_tick.timeout.connect(self._stream_height_tick_step)
+        # [T30] 每拍逼近比例：流式 0.45；结束态 FINISH 窗口换成更缓的 0.28
+        # （丝绸尾音，与页面内 CSS 过渡/FLIP 的 200~220ms 同量级收尾）。
+        self._height_track_factor = STREAM_HEIGHT_TRACK_FACTOR
         # 结束态打点起点（0 = 无待结算的结束拍）
         self._finish_t0 = 0.0
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
+        # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick（30ms）已把"应用"
+        # 侧的节拍连续化，防抖只负责合并同一窗口内的上报，不再需要独自扛
+        # 削峰 —— 拉长只会平白增加"文字已出、目标未到"的滞后。
         self._stream_height_timer = QTimer(self)
         self._stream_height_timer.setSingleShot(True)
-        self._stream_height_timer.setInterval(80)
+        self._stream_height_timer.setInterval(32)
         self._stream_height_timer.timeout.connect(self._apply_debounced_height)
         self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)
@@ -839,9 +862,17 @@ class MessageCard(SimpleCardWidget):
             except Exception as e:
                 logger.warning(f"[MessageCard] 页脚插件按钮 {getattr(info, 'action_id', '?')} 构建失败: {e}")
         # 容器整体显隐（assistant 卡片为定宽布局，显隐只引起 footer 内部横移，
-        # 不会撑宽卡片；user 气泡仍走 _set_actions_visible 子按钮显隐防变形）
+        # 不会撑宽卡片）。非 hover 时容器退出布局 = 不占宽度；行高恒定改由
+        # bar.setFixedHeight 保证（见下），否则 Qt 布局跳过隐藏控件的 sizeHint，
+        # 行高在文本高度（≈14px）与按钮高度（20px）间跳变 → 卡片高度抖动。
         hover_btns.setVisible(False)
         layout.addWidget(hover_btns)
+
+        # 行高下界 = 按钮高度：非 hover 时按钮容器退出布局，行高会由文本元素
+        # （耗时 15px / 模型胶囊 19px）决定 → hover 时被 20px 按钮抬高，卡片轻微
+        # 抖动。约束 bar 最小高度为按钮高度，两种状态下行高恒定。
+        # 用 setMinimumHeight 而非 setFixedHeight：内容更高时仍可撑开，不裁剪。
+        bar.setMinimumHeight(hb.sizeHint().height())
 
         main.addWidget(bar)
 
@@ -2796,6 +2827,18 @@ class MessageCard(SimpleCardWidget):
         if not self._streaming and not self._resize_preview_mode:
             self._remember_height_for_width(target_height)
 
+        # [T29] 流式高度补间进行中：一律吞掉上报。
+        # 补间的每一帧 setFixedHeight 都会让 Chromium 视口变化 → ResizeObserver
+        # → reportHeight → 回到本函数，送来的正是"补间途中的中间高度"。若不隔离，
+        # 中间值与动画终值的差轻易超过 24px（一次跳 200px 的补间，途中的任意
+        # 采样都能差上百），会被下面的新目标判定误认成「内容又变了」→ stop +
+        # 重启补间 → 永远走不到终点、退化成锯齿。隔离后补间独占这条通道，
+        # 收尾由 _on_height_anim_state_changed 主动校正一次。
+        if self._stream_height_anim_active:
+            # 只更新已知的目标值，不打断进行中的动画
+            self._target_viewer_height = target_height
+            return
+
         # 🆕 结束态高度动画进行中：reportHeight 回环（setFixedHeight → 视口变化 →
         # ResizeObserver → reportHeight）会不断送来"当前中间高度"，若照单全收会
         # 把补间打断成锯齿。判定为同一收敛值（差异 <24px）时忽略。
@@ -2869,25 +2912,29 @@ class MessageCard(SimpleCardWidget):
         return int(getattr(self, "_finish_height_anim_left", 0)) > 0
 
     def _start_finish_height_anim(self, start_h: int, end_h: int) -> None:
-        """用既有的 ``_height_anim`` 把 viewer 高度从 start 缓动到 end。
+        """结束态高度收敛：走追踪 tick（[T30] 替代一次性 QVariantAnimation）。
 
-        容器侧仍走 ``noContainerAnimation`` snap（原逻辑保留），因为容器
-        maximumHeight 只是一个**上限**，放宽到终值不会造成可见跳变；真正的
-        可见高度由 viewer 的固定高度驱动，故缓动 viewer 即可平滑整体。
+        为什么换掉 ``_height_anim``：
+        1. 它没有上报隔离——归位/折叠的 200ms CSS 过渡期间 ResizeObserver 会
+           送来中间高度，与动画终值的差轻易超过 ``_update_height`` 守卫的
+           24px 阈值 → stop + 重启，补间被打断成锯齿（"剧烈抖动"的 Qt 侧成分）。
+        2. QVariantAnimation 不支持运行中改终值，新目标只能 stop+start，同样
+           丢进度。追踪 tick 天然 retarget + 隔离，与流式同一套机制。
+        追踪比例换更缓的 ``FINISH_HEIGHT_TRACK_FACTOR``（0.28，约 300ms 收敛），
+        与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级收尾，丝绸不抢拍。
         """
         # 消费一次预算；预算用尽则关闭窗口
         self._finish_height_anim_left = max(0, int(getattr(self, "_finish_height_anim_left", 0)) - 1)
         if self._finish_height_anim_left <= 0:
             self._finish_height_anim_until = 0.0
-        self._finish_height_anim_active = True
         try:
-            self._height_anim.stop()
-            self._height_anim.setDuration(FINISH_HEIGHT_ANIM_MS)
-            self._height_anim.setStartValue(int(start_h))
-            self._height_anim.setEndValue(int(end_h))
-            self._height_anim.start()
+            self._finish_height_anim_active = True
+            self._height_track_factor = FINISH_HEIGHT_TRACK_FACTOR
+            self._target_viewer_height = int(end_h)
+            self._begin_stream_height_track(int(end_h))
         except Exception:
-            # 动画不可用（对象已销毁等）：退回原有 snap 行为
+            # 追踪不可用（对象已销毁等）：退回原有 snap 行为
+            self._finish_height_anim_active = False
             self.setProperty("noContainerAnimation", True)
             self._apply_viewer_height(end_h)
             QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
@@ -2910,6 +2957,65 @@ class MessageCard(SimpleCardWidget):
             if layout:
                 layout.invalidate()
 
+    def _begin_stream_height_track(self, target_h: int) -> None:
+        """启动/续跑流式高度追踪：viewer 朝 ``target_h`` 按拍逼近。
+
+        流式期间高度上报是「延迟后一次性落地」的台阶：文字按帧连续出现，卡片
+        高度却每 ~160ms 蹦一格 —— 这就是用户感知的顿挫。追踪 tick 用固定节拍
+        把台阶摊成连续生长；目标值可随时被新上报刷新（_target_viewer_height），
+        无需重启任何动画，天然 retarget。
+        """
+        self._stream_height_anim_active = True
+        if not self._stream_height_tick.isActive():
+            self._stream_height_tick.start()
+
+    def _stream_height_tick_step(self):
+        """追踪 tick：朝目标值按比例逼近，收敛（±2px）即落定停拍。
+
+        ⚠️ 不得以 ``_streaming`` 作为停止条件：结束态（FINISH 窗口）也走本
+        追踪，而彼时 ``_streaming`` 已是 False——若在此自杀，tick 首拍即停、
+        一次 setFixedHeight 都不会执行，viewer 高度冻结在流式末值（坞态正文
+        限高的小值），归位后内容全高大于它 → 卡片底部被裁（文字显示不全）。
+        停止只由「收敛落定 / 对象失效」驱动，收敛保证不空转。
+        """
+        target = int(getattr(self, "_target_viewer_height", 0) or 0)
+        if target <= 0:
+            self._stop_stream_height_track()
+            return
+        try:
+            current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
+            diff = target - current_height
+            if abs(diff) <= STREAM_HEIGHT_TRACK_EPSILON:
+                # 落定：精确对齐 + 解除上报隔离 + 通知宿主布局
+                self._apply_viewer_height(target)
+                self._stop_stream_height_track()
+                return
+            self._apply_viewer_height(int(current_height + diff * self._height_track_factor))
+        except RuntimeError, AttributeError:
+            # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
+            # 停拍防泄漏。内容重挂后会自行上报高度，走常规路径校正。
+            self._stop_stream_height_track()
+
+    def _stop_stream_height_track(self):
+        """停追踪拍 + 解除上报隔离 + 通知宿主。"""
+        self._stream_height_anim_active = False
+        self._height_track_factor = STREAM_HEIGHT_TRACK_FACTOR
+        if self._stream_height_tick.isActive():
+            self._stream_height_tick.stop()
+        # 重发的是**已应用过**的高度，没有新的高度增量。必须清零，否则
+        # 外层列表会拿上一次的残值再补偿一次 → 视口被重复拖拽。
+        self._last_height_delta = 0
+        # 结束态（FINISH 窗口）追踪收尾：补一次 _content_just_loaded，让
+        # main_widget 把视口真正钉到底（追踪过程中只做增量补偿，不触发整段滚底；
+        # 结束态会停在「补偿后的位置」而不是底部）。
+        if self._finish_height_anim_active:
+            self._finish_height_anim_active = False
+            self._content_just_loaded = True
+        self.heightChanged.emit(self._last_applied_viewer_height)
+        layout = self.layout()
+        if layout:
+            layout.invalidate()
+
     def _apply_debounced_height(self):
         """应用防抖后的流式高度（_stream_height_timer 到期回调）"""
         h = self._debounced_target_height
@@ -2922,7 +3028,17 @@ class MessageCard(SimpleCardWidget):
             # 🐛 新内容填平了此前的收拢需求 → 取消挂起的延迟收缩。
             self._cancel_pending_shrink()
             if h - current_height > 2:
-                self._apply_viewer_height(h)
+                # [T29] 增量足够大 → 启动追踪，消除「憋一下再整块蹦高」的
+                # 台阶感；量级不足（流式尾巴的小抖动）直接 snap，避免 tick 常转。
+                if (
+                    STREAM_HEIGHT_ANIM_ENABLED
+                    and Animations.motion_enabled()
+                    and (h - current_height) >= STREAM_HEIGHT_ANIM_MIN_DELTA
+                ):
+                    self._target_viewer_height = h
+                    self._begin_stream_height_track(h)
+                else:
+                    self._apply_viewer_height(h)
         else:
             # 收拢方向：小步回弹（<40px）不立即应用（流式块→完成块的 DOM
             # 替换、滚动条出现/消失的重排噪声，立即应用会"长一下又缩回去"抖动）。
@@ -2934,7 +3050,13 @@ class MessageCard(SimpleCardWidget):
             # 仍立即应用。
             if current_height - h >= 40:
                 self._cancel_pending_shrink()
-                self._apply_viewer_height(h)
+                # [T29] 大幅收拢同样走追踪：多个工具框同时到期会一次性回落
+                # 数百 px，snap 是「掉下去」，追踪是「滑下去」。
+                if STREAM_HEIGHT_ANIM_ENABLED and Animations.motion_enabled():
+                    self._target_viewer_height = h
+                    self._begin_stream_height_track(h)
+                else:
+                    self._apply_viewer_height(h)
             else:
                 self._schedule_pending_shrink(h)
 
@@ -2963,7 +3085,14 @@ class MessageCard(SimpleCardWidget):
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         # 目标仍小于当前值才收拢；期间已被增长覆盖（>= 目标）则放弃
         if current_height > target:
-            self._apply_viewer_height(target)
+            # [T29] 延迟收缩落地同样走追踪：工具密集时多个收缩会在同一拍落地，
+            # snap 是「掉下去」。量级小时不值得动画（这里是 <40px 的小步收拢，
+            # 阈值用 FINISH 的 60 太大，直接判是否 >= 12px）。
+            if STREAM_HEIGHT_ANIM_ENABLED and Animations.motion_enabled() and (current_height - target) >= 12:
+                self._target_viewer_height = target
+                self._begin_stream_height_track(target)
+            else:
+                self._apply_viewer_height(target)
 
     def _on_qt_viewer_height(self, h: int) -> None:
         """灰度：纯 Qt viewer 高度自治（layout 自适应，不 setFixedHeight），
@@ -4280,15 +4409,15 @@ class MessageCard(SimpleCardWidget):
                 and not self._streaming
                 and not self._has_active_tools()
             ):
-                # F2（S1 兜底归位）+ 简洁模式折叠：最后一个工具完成时归位，
-                # 并与 finish_streaming 路径一致地收起工具与思考区。
-                # getattr 兜底：Qt 渲染器（markdown_block_viewer）无
-                # _auto_collapse_tool_section，折叠由其 exit_dock 完成。
+                # F2（S1 兜底归位）+ 简洁模式折叠：最后一个工具完成时归位。
+                # [T30] 与 finish_streaming 主路径一致：归位即折叠（两段式往返
+                # 峰已并入同一条 220px→0 曲线），不再单独派发折叠调用。
+                # lambda 捕获动态属性判空——0ms 内 viewer 被 cleanup 置 None 时
+                # 避免 AttributeError traceback。
                 def _dock_off_and_collapse() -> None:
                     if self.viewer is None:
                         return
-                    self.viewer._sync_streaming_dock(False)
-                    getattr(self.viewer, "_auto_collapse_tool_section", lambda: None)()
+                    self.viewer._sync_streaming_dock(False, collapse_after=True)
 
                 QTimer.singleShot(0, _dock_off_and_collapse)
         except Exception:
@@ -5113,6 +5242,11 @@ class MessageCard(SimpleCardWidget):
                 pass
             # 挂起的延迟小收缩作废：finish 后由非流式 _update_height 全量收敛接管
             self._cancel_pending_shrink()
+            # [T29] 流式追踪落定：防抖/追踪都停，避免结束后的非流式收敛与
+            # 追踪 tick 双写 viewer 高度（追踪的 _target_viewer_height 是流式
+            # 旧目标，结束后应交回 FINISH 窗口的缓动路径）。
+            if self._stream_height_anim_active or self._stream_height_tick.isActive():
+                self._stop_stream_height_track()
             # 🆕 打开结束态高度缓动窗口：坞态归位 + 最终重排后卡片高度会一次收敛
             # 数百 px，交由 _update_height 缓动（只服务一次，消费或超时即失效）。
             # 历史会话加载（history=True）不打开——那是首帧建卡，无需过渡。
@@ -5124,16 +5258,10 @@ class MessageCard(SimpleCardWidget):
                 self.viewer.finish_streaming(keep_dock=_keep_dock, immediate=immediate)
                 if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()
-                # 简洁模式：坞态归位后自动折叠工具与思考区。keep_dock=True
-                # （文本先于工具结束，S1）时保留坞态不折叠，等最后一个工具
-                # 完成时由 append_tool_result 兜底归位处折叠。singleShot(0)
-                # 等本函数尾部的 stop_streaming_anim 先把流式块标完成。
-                # hasattr 守卫：stub viewer（测试桩）无该方法。
-                if not history and not self._has_active_tools() and hasattr(self.viewer, "_auto_collapse_tool_section"):
-                    QTimer.singleShot(
-                        0,
-                        lambda: self.viewer._auto_collapse_tool_section() if self.viewer is not None else None,
-                    )
+                # [T30] 简洁模式的「归位后折叠」已并入 viewer.finish_streaming 的
+                # 坞态归位事务（_setStreamingDock(false, collapse_after=true)）：
+                # 归位展开到自然高度峰值再折叠收起的两段式往返，是结束态剧烈
+                # 抖动的主因，终态本就是折叠。此处不再单独派发折叠调用。
         except RuntimeError:
             pass
         if history:

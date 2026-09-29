@@ -327,6 +327,38 @@ FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪�
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
+# ======== 流式期高度追踪（默认开，出问题可一键关）========
+# 背景：流式期间卡片高度是「台阶式落地」——上报延迟（打字机节流 + Python 侧
+# 防抖）之后一次性 setFixedHeight 到目标值。文字是连续出来的，卡片高度却每
+# ~160ms 蹦一格：观感是"文字先顶到卡片边缘、憋一下、再整块蹦高"。
+# 实现：流式激活时开一个固定节拍的追踪 tick（STREAM_HEIGHT_TICK_MS），每拍朝
+# 最新目标值按比例逼近（STREAM_HEIGHT_TRACK_FACTOR）。相比一次性 QVariantAnimation
+# 补间：目标值可随时更新（天然 retarget）、无 stop/start 抖动、追踪永不打断。
+# 关闭方式：环境变量 DRIFOX_STREAM_HEIGHT_ANIM=0，或运行时
+# set_stream_height_anim_enabled(False)。
+STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") != "0"
+# 追踪节拍（ms）：30ms ≈ 2 帧。每拍一次 setFixedHeight，回环已被
+# _stream_height_anim_active 上报隔离封死，频率即成本上限。
+STREAM_HEIGHT_TICK_MS = 30
+# 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
+# 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
+STREAM_HEIGHT_TRACK_FACTOR = 0.45
+# 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
+STREAM_HEIGHT_TRACK_EPSILON = 2
+# 小于该变化量直接 snap：流式尾巴上的小噪声不值得起追踪（避免常开 tick 空转）
+STREAM_HEIGHT_ANIM_MIN_DELTA = 8
+# 结束态（FINISH 窗口）追踪的逼近比例：比流式（0.45）更缓——结束态的高度变化
+# 与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级，追踪太快会"Qt 侧先到、
+# 页面还在动"的两段感；0.28 → 约 10 拍（300ms）收敛 96%，即丝绸尾音。
+FINISH_HEIGHT_TRACK_FACTOR = 0.28
+
+
+def set_stream_height_anim_enabled(enabled: bool) -> None:
+    """运行时开关流式期高度追踪（灰度/回滚用）。"""
+    global STREAM_HEIGHT_ANIM_ENABLED
+    STREAM_HEIGHT_ANIM_ENABLED = bool(enabled)
+
+
 # ─── 差量收尾（流式结束不再整页重渲染）────────────────────────────────
 # 现状：finish_streaming 强制全量 → `container.innerHTML = newHtml` 整页替换，
 # 稳定区（流式期间已差量渲染好的段落）被一起销毁重建 → 结束瞬间整体重排闪一下，
@@ -3050,7 +3082,15 @@ _SKELETON_CACHE_MAX = 48
 # 完成块 data-order 正确但物理滞留底部；S1（正文先于工具结束）后键集合恒同 →
 # 键序列 diff 全绿且无块缺 data-order → 跳过 sort → 末轮工具完成框沉底固化。
 # 物理顺序 data-order 倒序 → 强制 sort。旧骨架无此检查，必须靠版本号失效。
-_SKELETON_CACHE_VERSION = 34
+# v35（2026-09-29）：打字机高度上报节流 80 → 40ms（_twStep._skipReport）。
+# Python 侧追踪 tick（30ms 节拍）已把高度应用连续化并封死 ResizeObserver 回环，
+# 上报端收紧只减"文字已出、目标未到"的滞后。旧骨架节流常量编译在缓存 HTML 里
+# → 必须靠版本号让旧缓存失效。
+# v36（2026-09-29）：_setStreamingDock 增加 collapseAfter 参数——坞态归位与工具区
+# 折叠同帧合并（两个 max-height 变化合成一条 220px→0 过渡曲线），消除结束态
+# 「归位展开到自然高度峰值→再折叠」的往返峰（剧烈抖动主因）。旧骨架无此参数，
+# 归位仍两段式 → 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 36
 
 
 def _js_literal(value) -> str:
@@ -3540,7 +3580,7 @@ _STREAMING_DOCK_CSS = """
 _STREAMING_DOCK_JS = """
                 // ===== 流式活动坞（Streaming Dock）=====
                 window._streamingActive = false;
-                function _setStreamingDock(active) {
+                function _setStreamingDock(active, collapseAfter) {
                     // 仅简洁模式启用坞态
                     var on = !!active && !!window._toolCompactMode;
                     var wasOn = document.body.classList.contains('streaming-dock');
@@ -3555,6 +3595,19 @@ _STREAMING_DOCK_JS = """
                     if (typeof window._flipArm === 'function') window._flipArm(1200);
                     var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
+                    // [T30] 归位同帧折叠：坞态归位本会让 #tool-content 从 220px 限高
+                    // 展开到自然高度（工具多时暴涨数百 px），随后 finish 流程又立刻
+                    // 把它折叠回 0 —— 「先胀后缩」的往返峰是结束态剧烈抖动的主因，
+                    // 而终态本来就是折叠，中间那次全展开纯属浪费。collapseAfter=true
+                    // 时在同一同步块内连置折叠属性：两个 max-height 变化合并为一帧，
+                    // 浏览器只算一条 220px→0 的过渡曲线，自然高度峰值从不进布局。
+                    // 折叠的 transitionend 终值单报由函数尾部统一的
+                    // _beginToolSectionTransition 承接（本帧内开启抑制，无漏报窗口）。
+                    if (on === false && wasOn && collapseAfter && (window._toolCompactMode !== false) && ts) {
+                        ts.setAttribute('data-collapsed', 'true');
+                        var _sepC = document.getElementById('tool-separator');
+                        if (_sepC) _sepC.setAttribute('aria-expanded', 'false');
+                    }
                     if (!on && wasOn) {
                         // 🐛 修复（坞态归位正文置顶）：坞态下正文容器限高内滚，用户
                         // 阅读位置在 #content-placeholder.scrollTop。归位移除
@@ -3696,8 +3749,11 @@ _TYPEWRITER_JS = """
                     // [PERF] 高度上报节流：揭示是每帧进行，但高度上报会触发
                     // reportHeight → Python setFixedHeight → Chromium 视口变化 →
                     // 重排的回环。按帧上报会让回环频率翻数倍（流式卡顿来源），
-                    // 这里限制到 ≥80ms 一次——与旧"按 chunk 上报"的节奏一致。
-                    var _skipReport = (now - (st.reportedAt || 0)) < 80;
+                    // 这里限制上报频率——与旧"按 chunk 上报"的节奏一致。
+                    // [T29] 80 → 40ms：目标值进入 Python 追踪的频率。应用侧
+                    // （追踪 tick 30ms 节拍）已连续化且回环被封死，上报端唯一
+                    // 代价是 console.log IPC（微秒级），收紧只减滞后不增成本。
+                    var _skipReport = (now - (st.reportedAt || 0)) < 40;
                     if (!_skipReport) st.reportedAt = now;
                     try {
                         window._dfxAppendStreamText(slice, _skipReport);

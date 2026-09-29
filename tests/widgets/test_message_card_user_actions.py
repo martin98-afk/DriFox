@@ -87,6 +87,46 @@ def test_both_role_renders_both_sides(qapp):
     UIPluginRegistry.get_instance().reset()
 
 
+def test_assistant_hover_buttons_no_height_change(qapp):
+    """assistant 卡 hover 显隐按钮组：高度恒定（回归）+ 非 hover 不占宽
+
+    历史 bug：_assistant_action_btns 整容器 setVisible 切换，Qt 布局跳过隐藏
+    控件的 sizeHint → 非 hover 时页脚行高塌缩到文本元素高度（空内容时塌 0，
+    实测 111px），hover 后被 20px 按钮抬高（实测 131px）→ 卡片高度跳变。
+    修复：bar 最小高度托底（按钮高度），显隐方式保持 setVisible。
+
+    反向约束：**不得**为防高度跳变把容器改成常驻固定尺寸占位——那会让非
+    hover 时右侧白留一片按钮宽度的空白（2026-09-29 用户反馈）。
+    """
+    card = _make_card("assistant")
+    card.show()
+    qapp.processEvents()
+    btns = card._assistant_action_btns
+    btns.setVisible(True)
+    qapp.processEvents()
+    h_shown = card.height()
+    btns.setVisible(False)
+    qapp.processEvents()
+    h_hidden = card.height()
+    assert h_shown == h_hidden, f"hover 显隐改变卡片高度: hidden={h_hidden} shown={h_shown}"
+    # 非 hover：容器必须退出布局（隐藏），不得占宽
+    assert not btns.isVisible(), "非 hover 时按钮容器仍可见 = 右侧出现空白占位"
+
+
+def test_user_hover_buttons_no_height_change(qapp):
+    """user 气泡 hover 显隐按钮不改变卡片高度（对照，_set_actions_visible 路径）"""
+    card = _make_card("user")
+    card.show()
+    qapp.processEvents()
+    h_before = card.height()
+    MessageCard._set_actions_visible(card._user_action_btns, True)
+    qapp.processEvents()
+    h_shown = card.height()
+    MessageCard._set_actions_visible(card._user_action_btns, False)
+    qapp.processEvents()
+    assert h_shown == h_before, f"hover 显隐改变卡片高度: {h_before} -> {h_shown}"
+
+
 def test_user_plugin_button_click_dispatches_context(qapp):
     """点击 user 侧插件按钮：on_click 收到卡片 context（含 role/card）"""
     reg = _fresh_reg()

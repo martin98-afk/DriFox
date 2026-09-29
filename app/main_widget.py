@@ -17829,12 +17829,28 @@ class OpenAIChatToolWindow(ToolWindow):
             # [T23 改动1b] 高度真变化 → 主动失效滚动上界缓存。delta 非零才走到这里
             # （卡片等值上报在 message_card._apply_viewer_height 已被挡），
             # 因此不会引入高频写。TTL 放宽到 0.12s 后，这是「不读到陈旧上界」的保证。
-            if delta:
-                self._scroll_max_cache = None
+            #
+            # [T29 改动] 上界校正改 O(1) 增量，不再每次回调都跑 container.sizeHint()。
+            # sizeHint() 是 O(卡片数) 的完整布局计算，而本回调在流式期间以
+            # 12.5Hz（打字机节流 ≥80ms）触发 × 长会话数百张卡 = 主线程被这条线
+            # 单独占满 → 卡片高度台阶式落地（顿挫感）与滚动不跟手。
+            # 语义上「某张卡增高 delta」⇔「内容总高增高 delta」，故上界直接 +delta
+            # 即可；Qt 随后自己算出的上界会覆盖它，不需要我们精确。
             container = self.chat_scroll_area.widget()
             if delta and container is not None and sender.parentWidget() is container:
                 sb = self.chat_scroll_area.verticalScrollBar()
-                self._sync_scroll_maximum()
+                if delta > 0:
+                    with self._programmatic_scroll():
+                        sb.setMaximum(max(0, sb.maximum() + delta))
+                    # 缓存同步抬到新上界（而非置 None）：否则下拍 _is_view_at_bottom
+                    # 又会触发一次全量 sizeHint，O(1) 优化等于没做。
+                    self._scroll_max_cache = (time.monotonic(), sb.maximum())
+                else:
+                    # 收缩方向无法用增量表达（Qt 会自行压低上界）。不在此处补偿：
+                    # setValue 会被 Qt 自动钳到新上界，语义等价。仅失效缓存，让
+                    # 下一次读取落到 Qt 的真实值（避免 `_is_view_at_bottom` 期间
+                    # 又跑一次全量 sizeHint，抵消本优化的收益）。
+                    self._scroll_max_cache = None
                 value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
                 card_bottom = card_top + sender.height()
@@ -21570,7 +21586,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _get_current_worktree_path(self) -> str:
         """门面：当前 worktree 路径（空串=不在；实现在 WorktreeService）"""
         svc = self._worktree_service()
-        return svc.get_current_worktree_path(self) if svc is not None else ""
+        result = svc.get_current_worktree_path(self) if svc is not None else ""
+        # [PERF-close] 回写窗口级已知值，供关窗保存免探测复用
+        self._last_known_worktree = result
+        return result
 
     def _switch_to_worktree(self, worktree_path: str):
         """门面：切换 worktree（实现在 WorktreeService.switch_to_worktree）"""
@@ -22930,7 +22949,7 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return ""
 
-    def _auto_save_current_session(self):
+    def _auto_save_current_session(self, flush_mode: str = "sync"):
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
             return
@@ -22980,7 +22999,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     msg["provider_name"] = matched
 
         system_prompt = getattr(session, "system_prompt", "") or ""
-        worktree_path = self._get_current_worktree_path()
+        # [PERF-close] 关窗探测 worktree 需起最多 3 个 git 子进程（Windows
+        # 冷启动实测 ~600ms，是关窗卡顿的最终主因）。会话期间发消息/保存
+        # 已实时探测并回写 _last_known_worktree，此处直接复用；仅窗口
+        # 从未探测过才实时探测一次。
+        _last_wt = getattr(self, "_last_known_worktree", None)
+        worktree_path = self._get_current_worktree_path() if _last_wt is None else _last_wt
         # 🛡️ 始终记录当前 worktree_path（空字符串表示主仓库，清除旧关联）
         worktree_kwargs = {"worktree_path": worktree_path or ""}
 
@@ -23066,9 +23090,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 成功保存后清除脏标记
         self._session_dirty = False
 
-        # 立即落盘，确保退出前数据写入 SQLite
+        # 落盘模式：sync=主线程立即写（退出路径，确保数据落盘）；
+        # async=后台 daemon 线程写（关窗路径，实测主线程同步 flush
+        # 全量序列化+zstd+SQL 700ms+，是关窗卡顿主因）
         if self.history_manager:
-            self.history_manager.flush()
+            if flush_mode == "async":
+                self.history_manager.flush_async()
+            else:
+                self.history_manager.flush()
 
         # 🆕 会话数据变更统一通知：历史面板刷新 + 欢迎卡片失效 + 跨窗口广播
         # （自动保存路径同样需要触发 UI 同步：关闭窗口/项目切换等触发此函数时，
@@ -23315,7 +23344,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._initialization_in_progress = False
 
         try:
-            self._auto_save_current_session()
+            # [PERF-close] 关窗保存一律后台 flush：实测主线程同步 flush
+            # 全量序列化+zstd+SQL 600-700ms，是关窗卡顿主因。flush_async
+            # 用非 daemon 线程，应用退出时解释器 shutdown join 保证写盘
+            # 完成（aboutToQuit 跳过已 unregister 的最后一窗，此处是
+            # 唯一保存点，数据安全由非 daemon join 兜底）。
+            self._auto_save_current_session(flush_mode="async")
         except Exception:
             pass
 

@@ -108,10 +108,17 @@ def test_height_change_invalidates_max_cache(qapp):
     # 直接走处理器主体（sender() 在无信号发射时为 None，故改用桩替代）
     win.sender = lambda: card  # type: ignore[method-assign]
     win._sync_scroll_maximum = MagicMock(return_value=1000)
+    old_max = scroll_area.verticalScrollBar().maximum()
 
     win._on_message_card_height_changed(100)
 
-    assert win._scroll_max_cache is None, "高度真变化必须失效滚动上界缓存（否则 TTL 放宽后会读到陈旧上界）"
+    # [T29] 契约更新：增长方向改走 O(1) 增量（不再置 None + 全量 sizeHint），
+    # 判断标准从「缓存被清空」变为「缓存上界已含本次 delta」——这是
+    # 「不读到陈旧上界」的本质保证，且不引入 O(卡片数) 的布局重算。
+    assert win._scroll_max_cache is not None, "增长方向应把缓存抬到新上界，而非清空"
+    assert win._scroll_max_cache[1] >= old_max + 42, "缓存上界必须含本次 delta，否则会读到陈旧上界"
+    # 增量路径不得再触发全量 sizeHint（这正是本次优化要消除的 O(N) 开销）
+    win._sync_scroll_maximum.assert_not_called()
 
 
 # ─── 改动 c：可视集增量 ──────────────────────────────────────────────
