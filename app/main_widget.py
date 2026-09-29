@@ -21570,7 +21570,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _get_current_worktree_path(self) -> str:
         """门面：当前 worktree 路径（空串=不在；实现在 WorktreeService）"""
         svc = self._worktree_service()
-        return svc.get_current_worktree_path(self) if svc is not None else ""
+        result = svc.get_current_worktree_path(self) if svc is not None else ""
+        # [PERF-close] 回写窗口级已知值，供关窗保存免探测复用
+        self._last_known_worktree = result
+        return result
 
     def _switch_to_worktree(self, worktree_path: str):
         """门面：切换 worktree（实现在 WorktreeService.switch_to_worktree）"""
@@ -22930,7 +22933,7 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return ""
 
-    def _auto_save_current_session(self):
+    def _auto_save_current_session(self, flush_mode: str = "sync"):
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
             return
@@ -22980,7 +22983,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     msg["provider_name"] = matched
 
         system_prompt = getattr(session, "system_prompt", "") or ""
-        worktree_path = self._get_current_worktree_path()
+        # [PERF-close] 关窗探测 worktree 需起最多 3 个 git 子进程（Windows
+        # 冷启动实测 ~600ms，是关窗卡顿的最终主因）。会话期间发消息/保存
+        # 已实时探测并回写 _last_known_worktree，此处直接复用；仅窗口
+        # 从未探测过才实时探测一次。
+        _last_wt = getattr(self, "_last_known_worktree", None)
+        worktree_path = self._get_current_worktree_path() if _last_wt is None else _last_wt
         # 🛡️ 始终记录当前 worktree_path（空字符串表示主仓库，清除旧关联）
         worktree_kwargs = {"worktree_path": worktree_path or ""}
 
@@ -23066,9 +23074,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 成功保存后清除脏标记
         self._session_dirty = False
 
-        # 立即落盘，确保退出前数据写入 SQLite
+        # 落盘模式：sync=主线程立即写（退出路径，确保数据落盘）；
+        # async=后台 daemon 线程写（关窗路径，实测主线程同步 flush
+        # 全量序列化+zstd+SQL 700ms+，是关窗卡顿主因）
         if self.history_manager:
-            self.history_manager.flush()
+            if flush_mode == "async":
+                self.history_manager.flush_async()
+            else:
+                self.history_manager.flush()
 
         # 🆕 会话数据变更统一通知：历史面板刷新 + 欢迎卡片失效 + 跨窗口广播
         # （自动保存路径同样需要触发 UI 同步：关闭窗口/项目切换等触发此函数时，
@@ -23315,7 +23328,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._initialization_in_progress = False
 
         try:
-            self._auto_save_current_session()
+            # [PERF-close] 关窗保存一律后台 flush：实测主线程同步 flush
+            # 全量序列化+zstd+SQL 600-700ms，是关窗卡顿主因。flush_async
+            # 用非 daemon 线程，应用退出时解释器 shutdown join 保证写盘
+            # 完成（aboutToQuit 跳过已 unregister 的最后一窗，此处是
+            # 唯一保存点，数据安全由非 daemon join 兜底）。
+            self._auto_save_current_session(flush_mode="async")
         except Exception:
             pass
 
