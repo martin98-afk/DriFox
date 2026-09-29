@@ -327,6 +327,28 @@ FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪�
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
+# ======== 流式期高度补间（默认开，出问题可一键关）========
+# 背景：流式期间卡片高度是「台阶式落地」——上报延迟（打字机节流 ≥80ms +
+# Python 侧 80ms 防抖）之后一次性 setFixedHeight 到目标值。文字是连续出来的，
+# 卡片高度却每 ~160ms 蹦一格：观感是"文字先顶到卡片边缘、憋一下、再整块蹦高"。
+# 这里在每次防抖到期时用 _height_anim 把 viewer 从现值缓动到目标值，视觉连续性
+# 由动画帧提供（不必提高上报频率，两次申报之间的空隙被填平）。
+# 时长取 Animations.ENTER_MS 的一半量级（110ms）：略大于典型上报间隔，保证前一
+# 段未走完时新目标已到达、衔接不上；又足够短，不会让 "高度落后于文字" 变明显。
+# 关闭方式：环境变量 DRIFOX_STREAM_HEIGHT_ANIM=0，或运行时
+# set_stream_height_anim_enabled(False)。
+STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") != "0"
+STREAM_HEIGHT_ANIM_MS = 110
+# 小于该变化量直接 snap：流式尾巴上的小噪声不值得起动画（省者与 Fight 抖动同源）
+STREAM_HEIGHT_ANIM_MIN_DELTA = 8
+
+
+def set_stream_height_anim_enabled(enabled: bool) -> None:
+    """运行时开关流式期高度补间（灰度/回滚用）。"""
+    global STREAM_HEIGHT_ANIM_ENABLED
+    STREAM_HEIGHT_ANIM_ENABLED = bool(enabled)
+
+
 # ─── 差量收尾（流式结束不再整页重渲染）────────────────────────────────
 # 现状：finish_streaming 强制全量 → `container.innerHTML = newHtml` 整页替换，
 # 稳定区（流式期间已差量渲染好的段落）被一起销毁重建 → 结束瞬间整体重排闪一下，

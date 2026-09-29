@@ -4191,21 +4191,20 @@ class CodeWebViewer(QWebEngineView):
                     }} catch (_e) {{}}
                     console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0'));
                 }}
-                // 批量报告高度：流式每 chunk 一次 IPC 开销高，改为 3 帧合并
-                // （rAF ×3 后 reportHeight 一次），动画期间仍暂停报告
+                // 批量报告高度：合并同一帧内的多次请求，动画期间仍暂停报告。
+                //
+                // [T29] rAF ×3 → ×1：原本的"3 帧合并"是为「流式每 chunk 一次 IPC」
+                // 设计的，但打字机揭示队列（_twStep）已把上报节流到 ≥80ms 一次
+                // （约 12.5Hz），两层节流串联纯属重复 —— 白送 ~33ms 的高度延迟，
+                // 与后续 Python 侧 80ms 防抖相加后总延迟达 130~210ms，表现为卡片
+                // 高度"憋一下再整块蹦高"的顿挫感。保留单帧合并（同一帧内多次
+                // 请求去重）即可，合并语义不变、延迟砍到 ~16ms。
                 let _heightReportPending = false;
-                let _heightReportFrames = 0;
                 function reportHeightDebounced() {{
                     if (_collapsibleHeightReporting) return;  // 动画期间暂停
                     if (_heightReportPending) return;
                     _heightReportPending = true;
-                    _heightReportFrames = 0;
                     requestAnimationFrame(function _batchTick() {{
-                        _heightReportFrames++;
-                        if (_heightReportFrames < 3) {{
-                            requestAnimationFrame(_batchTick);
-                            return;
-                        }}
                         reportHeight();
                         _heightReportPending = false;
                     }});

@@ -17829,12 +17829,28 @@ class OpenAIChatToolWindow(ToolWindow):
             # [T23 改动1b] 高度真变化 → 主动失效滚动上界缓存。delta 非零才走到这里
             # （卡片等值上报在 message_card._apply_viewer_height 已被挡），
             # 因此不会引入高频写。TTL 放宽到 0.12s 后，这是「不读到陈旧上界」的保证。
-            if delta:
-                self._scroll_max_cache = None
+            #
+            # [T29 改动] 上界校正改 O(1) 增量，不再每次回调都跑 container.sizeHint()。
+            # sizeHint() 是 O(卡片数) 的完整布局计算，而本回调在流式期间以
+            # 12.5Hz（打字机节流 ≥80ms）触发 × 长会话数百张卡 = 主线程被这条线
+            # 单独占满 → 卡片高度台阶式落地（顿挫感）与滚动不跟手。
+            # 语义上「某张卡增高 delta」⇔「内容总高增高 delta」，故上界直接 +delta
+            # 即可；Qt 随后自己算出的上界会覆盖它，不需要我们精确。
             container = self.chat_scroll_area.widget()
             if delta and container is not None and sender.parentWidget() is container:
                 sb = self.chat_scroll_area.verticalScrollBar()
-                self._sync_scroll_maximum()
+                if delta > 0:
+                    with self._programmatic_scroll():
+                        sb.setMaximum(max(0, sb.maximum() + delta))
+                    # 缓存同步抬到新上界（而非置 None）：否则下拍 _is_view_at_bottom
+                    # 又会触发一次全量 sizeHint，O(1) 优化等于没做。
+                    self._scroll_max_cache = (time.monotonic(), sb.maximum())
+                else:
+                    # 收缩方向无法用增量表达（Qt 会自行压低上界）。不在此处补偿：
+                    # setValue 会被 Qt 自动钳到新上界，语义等价。仅失效缓存，让
+                    # 下一次读取落到 Qt 的真实值（避免 `_is_view_at_bottom` 期间
+                    # 又跑一次全量 sizeHint，抵消本优化的收益）。
+                    self._scroll_max_cache = None
                 value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
                 card_bottom = card_top + sender.height()
