@@ -17,7 +17,7 @@ from datetime import datetime
 from html import escape, unescape
 from typing import Any, Dict, List, Optional
 import orjson as json
-import shiboken6 as sip
+import shiboken6
 from loguru import logger
 from markdown import Markdown
 from PySide6.QtCore import (
@@ -800,6 +800,45 @@ class CodeWebViewer(QWebEngineView):
     #       对话框关闭（finished）或销毁（destroyed）后恢复；
     #       额外用 eventFilter 监听 Hide/Close/Destroy 事件兜底，
     #       避免原生对话框（无 Qt 信号）导致永久隐藏。
+
+    # ──────────────────────────────────────────────
+    # renderer 生命周期冻结（off-screen 挂起族，c296d9a1b）
+    # ──────────────────────────────────────────────
+
+    def set_page_suspended(self, suspended: bool) -> None:
+        """冻结/恢复本卡片的 renderer（Qt 6.5+ LifecycleState API）。
+        守卫：流式中、在途渲染、JS 未就绪、上下文丢失、渲染被推迟时
+        拒绝冻结——冻结会暂停 JS，叠加这些状态会出现丢内容/丢渲染。
+        枚举成员名兼容：Qt 6.10 起上游把 Suspended 改名 Frozen
+        （PySide6 6.11 实测仅剩 Frozen），项目声明 PySide6>=6.9，两者都认。
+        ⚠️ 实测前置条件（Chromium 侧硬性校验，不满足则静默忽略冻结）：
+        1. page 已加载过内容（空 page 的 renderer frame 未就绪，冻结无效）；
+        2. Chromium 侧 visibility 为 HIDDEN——Qt widget isVisible()==True 的
+           离屏卡片（滚出视口但未隐藏）不满足，必须先 page.setVisible(False)
+           （Qt 6.5+ page 级可见性覆盖，不影响 Qt 布局占位，仅让 Chromium
+           停止合成新帧）。恢复时反向操作：Active + setVisible(True)。
+        """
+        if self._context_lost or self._streaming or self._render_inflight:
+            return
+        if not self._is_js_ready or self._render_deferred:
+            return
+        page = self.page()
+        if page is None:
+            return
+        try:
+            states = QWebEnginePage.LifecycleState
+            frozen = getattr(states, "Frozen", None) or getattr(states, "Suspended", None)
+            if frozen is None:  # pragma: no cover - Qt<6.5 无此 API
+                return
+            if suspended:
+                page.setVisible(False)
+                page.setLifecycleState(frozen)
+            else:
+                page.setLifecycleState(states.Active)
+                page.setVisible(True)
+        except (RuntimeError, AttributeError):
+            # Qt < 6.5 无此 API / page 已销毁：静默跳过（冻结是纯优化）
+            pass
 
     def _find_chat_scroll_area(self):
         """沿 Qt 父链找到外层聊天滚动区（宿主窗口的 chat_scroll_area 属性）"""
@@ -6277,7 +6316,7 @@ class CodeWebViewer(QWebEngineView):
                 return
             if html is None:
                 return
-            if not sip.isValid(self) or not self.page():
+            if not shiboken6.isValid(self) or not self.page():
                 return
             self._last_rendered_html = html
             self._height_report_pending = True
@@ -7927,7 +7966,7 @@ class PlainTextViewer(QWidget):
             # 检查 C++ 对象是否已被销毁（text_edit 可能在懒创建前为 None）
             if self.text_edit is None:
                 return
-            if not sip.isValid(self.text_edit):
+            if not shiboken6.isValid(self.text_edit):
                 return
             self._update_height()
         except RuntimeError:
