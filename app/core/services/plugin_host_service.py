@@ -110,6 +110,10 @@ class PluginHostService(QObject):
         self._agent_manager = AgentManager.get_instance(None, self._host_hook_manager)
 
         self._hot_reload_requested.connect(self._on_hot_reload_requested)
+        # 连接收敛标志：PySide6 无 PyQt5 的 receivers(SignalInstance) 写法，
+        # _start_plugin_watcher 以此判定是否已连（测试夹具 __new__ 绕过 __init__
+        # 时无此属性，用 getattr 默认 False 补连）
+        self._hot_reload_wired = True
 
         # 生命周期标志（原 backend 引用计数体系随寄生一起废除——服务与 app 同寿）
         # [T31] 延迟队列 + LSP 幂等兜底（LspManager.initialize 的守卫在传入
@@ -587,11 +591,14 @@ class PluginHostService(QObject):
         logger.info(f"[PluginHost] 启动插件文件变更监听: {watch_paths}")
 
         # 连接收敛（守卫式）：信号连接只建一次——__init__（:112）已连则跳过，
-        # watcher 重启反复进入本方法不会叠加连接（PyQt 重复 connect 同一 bound
-        # method 不去重，emit 一次执行 N 次）。receivers==0 的场景（如测试夹具
-        # 用 __new__ 绕过 __init__）由此建立唯一连接。
-        if self.receivers(self._hot_reload_requested) == 0:
+        # watcher 重启反复进入本方法不会叠加连接（重复 connect 同一 bound
+        # method 不去重，emit 一次执行 N 次）。PySide6 的 receivers() 仅收
+        # 字符串签名（PyQt5 收 SignalInstance 的写法直接 TypeError），改用
+        # 实例标志位；夹具用 __new__ 绕过 __init__ 的场景由 getattr 默认
+        # False 由此建立唯一连接。
+        if not getattr(self, "_hot_reload_wired", False):
             self._hot_reload_requested.connect(self._on_hot_reload_requested)
+            self._hot_reload_wired = True
 
         # 预计算插件路径 → 插件名映射（用于快速定位变更文件所属插件）
         plugin_prefixes = self._build_plugin_path_index()
