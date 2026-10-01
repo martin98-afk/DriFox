@@ -13,6 +13,11 @@ def cm():
     CardManager.reset_instance()
     yield CardManager.get_instance()
     CardManager.reset_instance()
+    # 回收 detach 后已 deleteLater 的孤儿 widget 与 manager 侧残留引用，
+    # 防止析构时机落入下一用例的 Qt 状态窗口（shiboken access violation）
+    import gc
+
+    gc.collect()
 
 
 def _mk_cm_window(cm):
@@ -83,3 +88,7 @@ class TestCardStackContainer:
         stack.sync_from_manager()
         stack.detach_card("c1")
         assert stack.count() == 0
+        # 释放测试侧强引用：deleteLater 已调度销毁，del 防止本用例结束后
+        # GC 析构时机与下个用例的 Qt 状态交叠（与 detach_card 的孤儿治理同因）
+        del w
+        del stack

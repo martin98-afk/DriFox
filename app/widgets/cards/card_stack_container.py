@@ -55,6 +55,11 @@ class CardStackContainer(QWidget):
         w = self._widgets.pop(card_id, None)
         if w is not None:
             self._stack.removeWidget(w)
+            # removeWidget 摘卡后无任何引用（Python 侧 _widgets 已 pop、Qt 侧无 parent），
+            # 沦为 C++ 孤儿：下一个事件循环窗口 GC 析构孤儿 → shiboken access violation
+            # （tests/plugins 原生崩溃根因）。detach 语义即「卡不再属于本容器」，
+            # 全仓无 detach 后重新 attach/复用同一实例的路径，直接调度销毁。
+            w.deleteLater()
         # qfluentwidgets Pivot 无 removeItem API：清理 items 列表后重建（最小化实现）
         try:
             self._pivot.clear()
