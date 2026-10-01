@@ -51,7 +51,7 @@ class _Host(QWidget):
 
 @pytest.fixture()
 def host(qt_app=None):
-    from app.core.tool_permission_controller import ToolPermissionController
+    from app.core.tools.tool_permission_controller import ToolPermissionController
     from app.main_widget import OpenAIChatToolWindow
 
     app = QApplication.instance() or QApplication(sys.argv)
@@ -109,7 +109,7 @@ def test_registry_change_refreshes_count_without_tool_card(host):
 
 def test_agent_apply_refreshes_count_without_tool_card(host):
     """未开工具卡：agent 权限注入后计数刷新（历史 bug ② 回归门）"""
-    from app.core.tool_permission_controller import ToolPermissionController
+    from app.core.tools.tool_permission_controller import ToolPermissionController
 
     app = QApplication.instance()
     reg = ToolRegistry.get_instance()

@@ -199,8 +199,8 @@ def main():
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
     # 否则后续模块（如 message_card.py）中延迟导入会导致：
     #   ImportError: QtWebEngineWidgets must be imported before a QCoreApplication instance is created
-    from PySide6.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings  # noqa: F401
-    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
 
     # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
