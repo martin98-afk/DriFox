@@ -92,5 +92,5 @@ class TrayContextMenu(SystemTrayMenu):
         for action in self.menuActions():
             hint = action.property(HINT_PROPERTY)
             if hint:
-                width = max(width, metrics.width(hint))
+                width = max(width, metrics.horizontalAdvance(hint))
         return width
