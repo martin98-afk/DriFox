@@ -107,9 +107,6 @@ def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) 
         pinyin_cache: 拼音缓存字典 {session_id: {"pinyin": str, "initials": str}}，
                       传入后可避免重复计算
     """
-    # 内存治理(#21-B)：pypinyin 惰性导入，避免模块加载即常驻拼音词典内存
-    from pypinyin import lazy_pinyin
-
     if not search_text:
         return True
     search_lower = search_text.lower().replace(" ", "")
@@ -126,6 +123,11 @@ def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) 
     # 2. 拼音匹配（尝试从缓存读取，避免重复计算）
     session_id = session.get("session_id", "")
     try:
+        # 内存治理(#21-B)：pypinyin 惰性导入，避免模块加载即常驻拼音词典内存。
+        # 必须放在 try 内——导入失败（依赖缺失）时降级为纯子串匹配，
+        # 不能把 ImportError 抛给调用方（列表推导里的调用点无异常保护）。
+        from pypinyin import lazy_pinyin
+
         if pinyin_cache is not None and session_id:
             cached = pinyin_cache.get(session_id)
             if cached:
