@@ -1,19 +1,16 @@
 # -*- coding: utf-8 -*-
 """assistant_hub UI 入口。
 
-注册组件（参考 agent_trace 同款模式）：
+注册组件：
 
-1. **常驻标题栏 tab**（``register_titlebar_tab``）
-   - tab_id = ``assistant_hub``
-   - label = ``助手``（放在「轨迹」右侧）
-   - on_click → ``UIPluginRegistry.toggle_floating_card("assistant_hub")``
-
-2. **full 容器浮动卡**（``register_floating_card``）
+1. **full 容器浮动卡**（``register_floating_card``）
    - card_id = ``assistant_hub``
    - container = ``full``
    - widget_class = ``AssistantCardWidget``（左列表 + 右 Tab 编辑器）
+   - metadata.primary_entry = {"kind": "titlebar", "label": "助手", "priority": 10}
+     → 框架自动派生标题栏 tab（已可见忽略、否则唤出，一处注册多处分发）
 
-3. **Gitee 同步内容注册**（``register_sync_content_provider``）
+2. **Gitee 同步内容注册**（``register_sync_content_provider``）
    - provider_id = ``assistant_hub``
    - 同步整个 <app_data>/assistant_hub/ 目录（助手信息 + 记忆），跨设备同步。
 
@@ -81,69 +78,7 @@ def _plugin_icons_dir() -> str:
     return str(here.parent / "icons")
 
 
-def _resolve_active_main_widgets() -> List[object]:
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        widgets = list(UIPluginRegistry.get_instance()._window_main_widgets.values())
-    except Exception:
-        widgets = []
-    return [w for w in widgets if w is not None]
-
-
-def _resolve_global_host():
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        reg = UIPluginRegistry.get_instance()
-    except Exception:
-        return None, None, None
-    try:
-        host = reg._resolve_global_host()
-    except Exception:
-        host = None
-    if host is None:
-        for mw in _resolve_active_main_widgets():
-            if getattr(mw, "_card_manager", None) is not None:
-                host = mw
-                break
-    if host is None:
-        return None, None, None
-    return host, getattr(host, "_card_manager", None), getattr(host, "_window_id", None)
-
-
-def _is_card_visible() -> bool:
-    _host, cm, wid = _resolve_global_host()
-    if cm is None or not wid:
-        return False
-    try:
-        return bool(cm.is_card_visible(CARD_ID, wid))
-    except Exception:
-        return False
-
-
-def _on_tab_clicked() -> None:
-    """标题栏「助手」tab 点击 → 显示助手中心 full 卡片。"""
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        reg = UIPluginRegistry.get_instance()
-    except Exception as e:
-        logger.error(f"[assistant_hub] 无法获取 UIPluginRegistry: {e}")
-        return
-
-    if _is_card_visible():
-        logger.debug("[assistant_hub] 卡片已可见，忽略重复点击")
-        return
-
-    try:
-        reg.toggle_floating_card(CARD_ID)
-        logger.info("[assistant_hub] 已切换显示助手中心卡片")
-    except Exception as e:
-        logger.error(f"[assistant_hub] toggle_floating_card 失败: {e}")
-
-
-# ── @ 卡片智能体区（mention provider）────────────────────────────
+# ── @ 卡片智能体区（mention provider）────────────────────────
 
 _MENTION_PROVIDER_ID = "assistant_hub"
 
@@ -205,6 +140,87 @@ def _register_mention_provider() -> None:
         logger.debug("[assistant_hub] 已注册 @ 卡片 mention provider")
     except Exception as e:
         logger.warning(f"[assistant_hub] 注册 mention provider 失败: {e}")
+
+
+# ── 消息身份覆盖（助手 / 用户两条通道）────────────────────────────
+
+_IDENTITY_PROVIDER_ID = "assistant_hub"
+
+
+def _resolve_active_aid(ctx: dict) -> str:
+    """当前上下文生效的助手 id：会话级临时助手（@提及）优先 → 全局主助手。"""
+    from assistant_hub_manager import AssistantManager
+
+    mgr = AssistantManager.get_instance()
+    sid = str((ctx or {}).get("session_id") or "")
+    aid = mgr.get_session_override(sid) if sid else ""
+    if not aid:
+        aid = mgr.active_id()
+    return aid if aid and mgr.has(aid) else ""
+
+
+def _identity_name(ctx: dict) -> str:
+    """身份显示名：助手消息取助手名；用户消息取「助手对用户的称呼」→ 系统用户名。"""
+    try:
+        from assistant_hub_manager import AssistantManager
+
+        mgr = AssistantManager.get_instance()
+        if str((ctx or {}).get("role") or "") == "user":
+            aid = _resolve_active_aid(ctx)
+            a = mgr.get(aid) if aid else None
+            addressing = (getattr(a, "user_addressing", "") or "").strip() if a else ""
+            if addressing:
+                return addressing
+            from persona import resolve_user_name
+
+            return resolve_user_name()
+        aid = _resolve_active_aid(ctx)
+        a = mgr.get(aid) if aid else None
+        return (getattr(a, "name", "") or "").strip()
+    except Exception as e:
+        logger.debug(f"[assistant_hub] identity name 解析失败: {e}")
+        return ""
+
+
+def _identity_avatar(ctx: dict) -> str:
+    """身份头像引用：助手消息取助手头像；用户消息取该助手配置的用户头像。"""
+    try:
+        from assistant_hub_manager import AssistantManager
+
+        mgr = AssistantManager.get_instance()
+        aid = _resolve_active_aid(ctx)
+        if not aid:
+            return ""
+        if str((ctx or {}).get("role") or "") == "user":
+            user_avatar = mgr.user_avatar_path(aid)
+            return str(user_avatar) if user_avatar else ""
+        path = mgr.assistant_avatar_path(aid)
+        return str(path) if path else ""
+    except Exception as e:
+        logger.debug(f"[assistant_hub] identity avatar 解析失败: {e}")
+        return ""
+
+
+def _register_identity_providers() -> None:
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        registry = UIPluginRegistry.get_instance()
+        registry.register_identity_name_provider(
+            plugin_name="assistant_hub",
+            provider_id=_IDENTITY_PROVIDER_ID,
+            resolve_func=_identity_name,
+            priority=100,
+        )
+        registry.register_identity_avatar_provider(
+            plugin_name="assistant_hub",
+            provider_id=_IDENTITY_PROVIDER_ID,
+            resolve_func=_identity_avatar,
+            priority=100,
+        )
+        logger.debug("[assistant_hub] 已注册消息身份 provider")
+    except Exception as e:
+        logger.warning(f"[assistant_hub] 注册消息身份 provider 失败: {e}")
 
 
 # ── 欢迎卡片「助手」tab ──────────────────────────────────────────
@@ -430,7 +446,7 @@ def _register_sync_provider() -> None:
     - 绑定 Gitee 后自动上传/下载；目录变更 watch 到自动上传。
     """
     try:
-        from app.core.config_sync import register_sync_content_provider
+        from app.core.sync.config_sync import register_sync_content_provider
 
         from assistant_hub_manager import AssistantManager
 
@@ -463,7 +479,7 @@ def _promote_build_system_prompt_hook(_attempt: int = 0) -> None:
     from PySide6.QtCore import QTimer
 
     try:
-        from app.core.hook_manager import HookManager
+        from app.core.hooks.hook_manager import HookManager
 
         rules = HookManager._shared_hooks.get("BuildSystemPrompt") or []
         target = next((r for r in rules if getattr(r, "skill_name", "") == "assistant_hub"), None)
@@ -540,6 +556,9 @@ _TAG_ICONS = [
 # 副标题兜底灰（不透明度写法 QTextDocument 不支持，用固定灰）
 _MUTED = "#9aa0a8"
 
+# 空值判定集合：值命中此集合的键不单独占行，合并为末尾一行小灰字
+_EMPTY_VALUES = {"", "无", "（无）", "(无)"}
+
 
 def _tag_skin(tag: str) -> dict:
     skin = dict(_TAG_SKINS.get(tag) or {})
@@ -563,6 +582,9 @@ def _render_kv_tag_card(content: str, ctx: dict, skin: dict) -> str:
     <table class="layout-table">（主程序全局表格样式与滚动包裹均排除
     layout-table，避免命中斑马纹/边框/圆角外框），td 内 <br> 分行，
     双端兼容 QLabel 富文本（QTextDocument）与 QWebEngineView。
+
+    空值键（值为空/无）不单独占行，收集后合并为末尾一行小灰字
+    「风险 / 取舍：无」，压掉零信息行的高度噪音。
 
     ctx: {tag, completed, compact}；流式未闭合（completed=False）渲染
     单行占位，避免逐 chunk 闪大卡。
@@ -598,7 +620,11 @@ def _render_kv_tag_card(content: str, ctx: dict, skin: dict) -> str:
     if subtitle_esc:
         header += f'<span style="color:{_MUTED}; font-size:{sub_sz}px;"> &#183; {subtitle_esc}</span>'
     body: List[str] = []
+    empty_keys: List[str] = []
     for key, val in _kv_sections(content):
+        if key and val in _EMPTY_VALUES:
+            empty_keys.append(key)
+            continue
         key_esc = _html.escape(key)
         val_esc = _html.escape(val)
         if key:
@@ -608,6 +634,9 @@ def _render_kv_tag_card(content: str, ctx: dict, skin: dict) -> str:
             )
         else:
             body.append(f'<span style="font-size:{body_sz}px;">{val_esc}</span>')
+    if empty_keys:
+        merged_esc = _html.escape(" / ".join(empty_keys))
+        body.append(f'<span style="color:{_MUTED}; font-size:{sub_sz}px;">{merged_esc}：无</span>')
     inner = "<br>".join([header] + body)
     return (
         '<table class="layout-table" border="0" cellspacing="0" cellpadding="0" width="100%" '
@@ -697,16 +726,10 @@ def register_ui(registry) -> None:
             "icon_light": icon_light,
             "full_card": True,
             "hide_sidebar": True,
+            # 主入口声明：框架自动派生「助手」标题栏 tab（已可见忽略、否则唤出），
+            # 无需手写 on_click 绑定样板（旧版手写实现已由框架单点承载）
+            "primary_entry": {"kind": "titlebar", "label": "助手", "priority": 10},
         },
-    )
-
-    # ── 常驻标题栏 tab（「助手」，位于「轨迹」之后）──
-    registry.register_titlebar_tab(
-        plugin_name="assistant_hub",
-        tab_id=CARD_ID,
-        label="助手",
-        on_click=_on_tab_clicked,
-        priority=10,
     )
 
     # ── 人格块标签卡（mood/plan/snap 等，按 persona frontmatter tag 动态注册）──
@@ -718,6 +741,9 @@ def register_ui(registry) -> None:
     # ── @ 卡片智能体区（mention provider，选中后会话级临时切换）──
     _register_mention_provider()
 
+    # ── 消息身份覆盖（助手名/头像 + 用户侧称呼）──
+    _register_identity_providers()
+
     # ── 欢迎卡片「助手」tab + 点击填 @助手名 ──
     _register_welcome_tab()
 
@@ -725,7 +751,7 @@ def register_ui(registry) -> None:
     _promote_build_system_prompt_hook()
 
     logger.info(
-        f"[assistant_hub] UI 组件已注册：titlebar_tab(助手) + floating_card(assistant_hub/full)"
-        f" + tag_renderer({_persona_block_tags()}) + gitee sync"
-        f" + mention_provider + welcome_tab(助手)"
+        f"[assistant_hub] UI 组件已注册：floating_card(assistant_hub/full"
+        f"+primary_entry=titlebar) + tag_renderer({_persona_block_tags()}) + gitee sync"
+        f" + mention_provider + identity_provider + welcome_tab(助手)"
     )

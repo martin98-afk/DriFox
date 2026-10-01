@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 PLUGIN_MARKETPLACE = ROOT / "plugins" / "plugin-marketplace"
 if str(PLUGIN_MARKETPLACE) not in sys.path:
     sys.path.insert(0, str(PLUGIN_MARKETPLACE))
@@ -173,7 +173,7 @@ def test_disable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
 
     注：reload 目标已迁移到 PluginHostService（应用级单例），不再走 ChatBackend._active_instances。
     """
-    from app.core.plugin_host_service import PluginHostService
+    from app.core.services.plugin_host_service import PluginHostService
     from ui.installer import PluginInstaller
 
     installer = _make_installer(tmp_path)
@@ -209,7 +209,7 @@ def test_enable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
 
     注：reload 目标已迁移到 PluginHostService（应用级单例），不再走 ChatBackend._active_instances。
     """
-    from app.core.plugin_host_service import PluginHostService
+    from app.core.services.plugin_host_service import PluginHostService
     from ui.installer import PluginInstaller
 
     installer = _make_installer(tmp_path)

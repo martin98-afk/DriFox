@@ -10,7 +10,7 @@
 
 import pytest
 
-from app.core.context_builder import (
+from app.core.context.builder import (
     TOOL_RESULT_HEAD_KEEP,
     TOOL_RESULT_MAX_LEN,
     TOOL_RESULT_TAIL_KEEP,
@@ -19,7 +19,7 @@ from app.core.context_builder import (
     prune_tool_result,
     resolve_tool_result_max_len,
 )
-from app.core.token_estimator import count_messages_tokens
+from app.core.infra.token_estimator import count_messages_tokens
 
 
 class TestPruneToolResultUnit:

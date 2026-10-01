@@ -176,7 +176,7 @@ class ModelItem(QWidget):
 
     def _get_caps(self):
         """查询模型能力（thinking + vision）"""
-        from app.core.model_capabilities import get_model_capabilities
+        from app.core.modelmeta.model_capabilities import get_model_capabilities
 
         return get_model_capabilities(self.model_name)
 

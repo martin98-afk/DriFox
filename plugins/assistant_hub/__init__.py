@@ -28,10 +28,9 @@
    新增人格走 persona-creator 技能，不做 UI 编辑。
 
 3. **UI 入口**
-   标题栏常驻 tab 「助手」（无 ×），点开即通过
-   ``UIPluginRegistry.toggle_floating_card("assistant_hub")`` 拉起 full 容器浮动卡。
-   与 agent_trace 共用同一套 "标题栏 full-card" 模式：上方助手弧形卡片堆叠，
-   下方单列分区（基本信息 / 人格切换 / 记忆 / Dream）。
+   full 容器浮动卡 ``assistant_hub``（上方助手弧形卡片堆叠，下方单列分区：
+   基本信息 / 人格切换 / 记忆 / Dream）通过 ``metadata.primary_entry``
+   声明式派生标题栏常驻 tab「助手」（无 ×，点开唤出卡片，已可见忽略）。
 
 4. **运行时**
    主助手即不 @ 时的默认身份（``AssistantManager.active_id()`` 恒等于

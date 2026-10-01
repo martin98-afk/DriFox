@@ -63,6 +63,8 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from app.widgets.elided_label import _ElidedLabel
+
 from .downloads import get_downloads_fetcher
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
@@ -4370,7 +4372,7 @@ class MarketplaceCard(QWidget):
             if self._is_git_missing(get_installer().last_error):
                 # 环境缺 git：提示准确原因 + 自动回对话引导安装 git
                 InfoBar.error(f"{name} 安装失败", "未检测到 git，已为你引导安装", duration=4000, parent=bar_parent)
-                self._guide_install_git()
+                self._guide_install_git(name)
             else:
                 InfoBar.error(f"{name} 安装失败", "请检查网络或插件源", duration=3000, parent=bar_parent)
 
@@ -4378,8 +4380,44 @@ class MarketplaceCard(QWidget):
         """判断安装错误是否源于 git 可执行文件缺失（installer 已转成 GitNotFoundError 文案）"""
         return "未检测到 git" in (err or "")
 
-    def _guide_install_git(self):
-        """git 缺失引导：隐藏市场卡、切回对话、把「本地安装git」填入输入框
+    # 各平台安装 git 的具体手段（按优先级；提示词据此给模型可执行步骤）
+    _GIT_INSTALL_HINTS = {
+        "win32": (
+            "winget install --id Git.Git -e --source winget（Windows 11/10 现代版自带 winget；"
+            "若无 winget，去 https://git-scm.com/download/win 下载安装包）"
+        ),
+        "darwin": (
+            "brew install git（已装 Homebrew 时首选）；未装 Homebrew 则执行 "
+            "xcode-select --install 装 Xcode 命令行工具（自带 git）"
+        ),
+    }
+    _GIT_INSTALL_HINTS["linux"] = (
+        "按发行版选一条：Debian/Ubuntu → sudo apt install -y git；"
+        "Fedora/RHEL → sudo dnf install -y git；Arch → sudo pacman -S git"
+    )
+
+    def _build_git_install_prompt(self, plugin_name: str) -> str:
+        """构造「引导安装 git」的提示词：带上真实 OS 与对应安装命令
+
+        原实现只填「本地安装git」五个字，模型不知道当前系统、不知道可用什么
+        包管理器、也不知道装完要验证什么，只能给出泛泛而谈的步骤，装不顺。
+        这里把平台判定与具体命令写好，模型直接照做即可。
+        """
+        system = sys.platform
+        if system.startswith("linux"):
+            system = "linux"
+        hint = self._GIT_INSTALL_HINTS.get(system, "请到 https://git-scm.com/downloads 下载对应系统的安装包")
+        os_label = {"win32": "Windows", "darwin": "macOS", "linux": "Linux"}.get(system, system)
+        return (
+            f"我装插件「{plugin_name}」失败，原因是本机没有 git（不在 PATH）。\n"
+            f"当前系统：{os_label}。\n"
+            f"请帮我用这条命令安装 git：{hint}\n"
+            f"装完后执行 `git --version` 确认可用，再告诉我，我会重新尝试安装插件。\n"
+            f"注意：装完 git 可能需要重启 DriFox 才能被 PATH 识别。"
+        )
+
+    def _guide_install_git(self, plugin_name: str = ""):
+        """git 缺失引导：隐藏市场卡、切回对话、把带环境信息的引导语填入输入框
 
         installer.last_error 为 GitNotFoundError 文案时由 _on_install_done 触发。
         全程 try/except 兜底：引导失败（如窗口未就绪）不影响安装失败的正常提示。
@@ -4394,7 +4432,7 @@ class MarketplaceCard(QWidget):
             if mw is None or not hasattr(mw, "input_area"):
                 return
             area = mw.input_area
-            area.setPlainText("本地安装git")
+            area.setPlainText(self._build_git_install_prompt(plugin_name))
             from PySide6.QtGui import QTextCursor
 
             cursor = area.textCursor()
@@ -5129,7 +5167,12 @@ class MarketplaceCard(QWidget):
                 "QPushButton:hover { background: rgba(64,158,255,0.32); }"
             )
             if rec.get("meta"):
-                retry_btn.clicked.connect(lambda checked=False, r=rec: self._retry_record(r))
+                # 该插件已有任务在跑/排队 → 按钮直接置忙（重建行也保持正确状态）
+                if self._is_plugin_task_active(name):
+                    retry_btn.setEnabled(False)
+                    retry_btn.setText("重试中…")
+                else:
+                    retry_btn.clicked.connect(lambda checked=False, r=rec, b=retry_btn: self._retry_record(r, b))
             else:
                 retry_btn.setEnabled(False)
                 retry_btn.setToolTip("缺少插件元数据，无法重试")
@@ -5137,12 +5180,28 @@ class MarketplaceCard(QWidget):
 
         return row
 
-    def _retry_record(self, rec: dict):
-        """失败记录一键重试：重试原动作（安装→重新安装，更新→重新更新）"""
+    def _is_plugin_task_active(self, name: str) -> bool:
+        """插件是否有任务在运行或排队（供记录行重试按钮置忙）"""
+        if name in self._active_tasks:
+            return True
+        return any(t.get("name") == name for t in self._task_queue)
+
+    def _retry_record(self, rec: dict, btn: Optional[QPushButton] = None):
+        """失败记录一键重试：重试原动作（安装→重新安装，更新→重新更新）
+
+        点击即反馈：按钮置忙「重试中…」+ toast 确认已提交；任务完成/失败后
+        _record_task_result 刷新记录列表（新行置顶）+ InfoBar 收尾。
+        """
         meta = rec.get("meta")
         if not meta:
             self._show_proxy_info("缺少插件元数据，无法重试", error=True)
             return
+        action_text = "安装" if rec.get("action") == "install" else "更新"
+        name = rec.get("name", "")
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("重试中…")
+        self._show_proxy_info(f"已重新提交{action_text}：{name}")
         if rec.get("action") == "install":
             self._async_install(meta)
         else:
@@ -5869,6 +5928,11 @@ class MarketplaceCard(QWidget):
         """
         tc = getattr(self, "_cached_tc", None) or _text_color()
         tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
+        # 裸 QLabel 的 QSS 带 font-size 时 Qt 会用应用默认字体族渲染（非全局字体）。
+        # qfluentwidgets 的 setFontFamilies 只管它自己的组件，管不到裸 QLabel
+        # → 必须在 QSS 里显式写 font-family（与代理页记录行 _refresh_records_ui 同款）。
+        ff = getattr(self, "_cached_font_family", "") or ""
+        ff_qss = f" font-family: '{ff}';" if ff else ""
         row = QWidget(self._markets_content)
         row.setStyleSheet("background: rgba(128,128,128,0.08); border-radius: 8px;")
         h = QHBoxLayout(row)
@@ -5890,10 +5954,11 @@ class MarketplaceCard(QWidget):
         name_row_layout.setContentsMargins(0, 0, 0, 0)
         name_row_layout.setSpacing(6)
 
-        name_label = QLabel(name_text, name_row)
+        # 名称用 _ElidedLabel：长名自动中间省略 + tooltip 全文，不再把徽标挤出行
+        name_label = _ElidedLabel(name_text, name_row)
         name_label.setObjectName("marketRowName")
-        name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;")
-        name_row_layout.addWidget(name_label)
+        name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;{ff_qss}")
+        name_row_layout.addWidget(name_label, 1)
 
         # 拉取状态徽标（读 manager 持久化状态；无记录 → 未拉取）
         status_lb = QLabel("", name_row)
@@ -5902,17 +5967,16 @@ class MarketplaceCard(QWidget):
         self._market_status_labels[src_def["name"]] = status_lb
         self._refresh_market_status_label(src_def["name"])
 
-        name_row_layout.addStretch(1)
         info.addWidget(name_row)
 
         src = src_def.get("source", {})
         src_type = src.get("source", "url")
         src_text = src.get("repo", src.get("url", "unknown"))
-        if len(src_text) > 60:
-            src_text = src_text[:57] + "..."
-        url_label = QLabel(src_text, row)
+        # URL 用 _ElidedLabel：窄行自动中间省略 + tooltip 全文
+        # （原为 len>60 硬截断加 "..."，全文无法查看）
+        url_label = _ElidedLabel(src_text, row)
         url_label.setObjectName("marketRowUrl")
-        url_label.setStyleSheet(f"color: {tcs}; font-size: 14px; background: transparent;")
+        url_label.setStyleSheet(f"color: {tcs}; font-size: 14px; background: transparent;{ff_qss}")
         info.addWidget(url_label)
 
         h.addLayout(info, 1)

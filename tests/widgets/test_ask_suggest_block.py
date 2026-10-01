@@ -76,3 +76,56 @@ def test_block_survives_markdown_convert():
     html = _render_markdown_to_html_cached_impl(src)
     assert 'class="ask-suggest"' in html
     assert 'class="context-tag" data-type="ask"' in html
+
+
+# ===== 误匹配熔断：宁可残留字面量，也不能把正文当成"追问内容"摘走 =====
+
+
+def test_stray_open_tag_does_not_swallow_body():
+    """正文里字面写出的孤立 <ask> 不得吞掉后续正文（内容凭空消失回归）。
+
+    流式期闭合标签还没到，正文照常显示；一旦文末 </ask> 到达，非贪婪匹配会把
+    两个标签之间的整段正文当成追问摘进胶囊 —— 表现为「渲染出来又全没了」。
+    """
+    src = "写法：把问题放进 <ask> 标签即可。\n\n第一段正文。\n\n第二段正文。\n\n<ask>要我继续吗</ask>\n"
+    out = _inject_context_links(src)
+    assert "第一段正文" in out
+    assert "第二段正文" in out
+    assert "标签即可" in out
+    assert out.count('data-type="ask"') == 1
+    assert "要我继续吗" in out
+
+
+def test_ask_inside_think_block_untouched():
+    """摘除跑在 think/tool 注入之前，块内的 <ask> 不参与收拢。"""
+    src = "<think>记住用 <ask> 标签</think>\n\n正文。\n\n<ask>继续吗</ask>\n"
+    out = _inject_context_links(src)
+    assert "<think>记住用 <ask> 标签</think>" in out
+    assert "正文。" in out
+    assert out.count('data-type="ask"') == 1
+
+
+def test_ask_inside_tool_block_untouched():
+    """工具块内同理：块内 ask 留在块里，不搬到文末。"""
+    src = "<tool>\nname: x\nresult: 用 <ask> 标签\n</tool>\n\n正文。\n\n<ask>继续吗</ask>\n"
+    out = _inject_context_links(src)
+    assert "result: 用 <ask> 标签" in out
+    assert "正文。" in out
+    assert out.count('data-type="ask"') == 1
+
+
+def test_ask_inside_inline_code_untouched():
+    """行内代码里的 <ask> 是示例，原样保留。"""
+    src = "用法：`<ask>问题</ask>` 这样写。\n\n<ask>继续吗</ask>\n"
+    out = _inject_context_links(src)
+    assert "`<ask>问题</ask>`" in out
+    assert out.count('data-type="ask"') == 1
+
+
+def test_malformed_close_tag_not_an_ask():
+    """闭合标签写错（</ ask>）时整段不是追问，原文不动。"""
+    src = "说明：<ask>你的问题</ ask>\n\n正文。\n\n<ask>继续吗</ask>\n"
+    out = _inject_context_links(src)
+    assert "<ask>你的问题</ ask>" in out
+    assert "正文。" in out
+    assert out.count('data-type="ask"') == 1

@@ -13,19 +13,18 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 from PySide6.QtCore import QEventLoop, QThread
 
-from app.core.agent import PermissionResolver
-from app.core.chat_session import (
+from app.core.conversation.agent import PermissionResolver
+from app.core.conversation.chat_session import (
     ChatSession,
     SessionManager,
 )
-from app.core.context_builder import TOOL_RESULT_MAX_LEN, prune_tool_result
 from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
-from app.core.message_content import content_to_text
-from app.core.token_estimator import count_tools_tokens, per_message_tokens
-from app.core.provider_profile import resolve_token_ratio
+from app.core.conversation.message_content import content_to_text
+from app.core.infra.token_estimator import count_tools_tokens, per_message_tokens
+from app.core.modelmeta.provider_profile import resolve_token_ratio
 from app.tools import get_builtin_tools_schema
 
 
@@ -222,7 +221,7 @@ class UIEngine(BaseEngine):
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
             # per-tool 关闭策略优先，缺失回退全局 behavior（ask/deny 由 INTERACTIVE 策略驱动对话框）
-            from app.core.tool_permission_controller import resolve_tool_off_policy
+            from app.core.tools.tool_permission_controller import resolve_tool_off_policy
 
             policy = resolve_tool_off_policy(check_name, controller, policies, behavior)
             logger.info(f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False policy={policy}")
@@ -282,12 +281,37 @@ class UIEngine(BaseEngine):
         worker = getattr(self._conversation_executor, "_current_worker", None)
         if worker:
             worker.approve_permission(tool_call_id, auto_allow, session_allow)
+        else:
+            # 流已结束（executor 置 worker=None）或 _current_worker 被摘除时，
+            # 原实现静默 return；显式告警让"点了没反应"可排障（S4）
+            logger.warning(f"[Permission] 无法投递 approve：worker 不存在 id={tool_call_id}")
 
-    def deny_tool_permission(self, tool_call_id: str):
+    def deny_tool_permission(self, tool_call_id: str, reason: str = ""):
         worker = getattr(self._conversation_executor, "_current_worker", None)
         if worker:
-            worker.deny_permission(tool_call_id)
+            worker.deny_permission(tool_call_id, reason)
+        else:
+            logger.warning(f"[Permission] 无法投递 deny：worker 不存在 id={tool_call_id}")
 
+    def decide_tool_permission(
+        self, tool_call_id: str, decision: str, remember: str = "", reason: str = ""
+    ) -> None:
+        """结构化审批决策回传（替代文本标签反解析）。
+
+        - decision="allow" + remember="tool"    → 仅当前工具调用放行（不写缓存）
+        - decision="allow" + remember="round"   → 本轮对话内不再询问
+        - decision="allow" + remember="session" → 本次会话内不再询问
+        - decision="deny"                        → 拒绝（可带 reason 回填给模型）
+        非法 decision 一律按 deny 处理（安全默认：不因参数异常而放行）。
+        """
+        if decision == "allow":
+            self.approve_tool_permission(
+                tool_call_id,
+                auto_allow=(remember == "round"),
+                session_allow=(remember == "session"),
+            )
+        else:
+            self.deny_tool_permission(tool_call_id, reason)
 
     # ========== 回调管理 ==========
 
@@ -377,6 +401,10 @@ class UIEngine(BaseEngine):
         # ---- 提取图片附件路径（仅用户主动上传的图片，供 session 标记 + UI 预览）----
         _image_attachments = kwargs.pop("_image_attachments", None)
 
+        # ---- 提取原始输入元数据（全量附件 + 占位符正文，供撤回保真回填）----
+        _input_attachments = kwargs.pop("_input_attachments", None)
+        _raw_input_text = kwargs.pop("_raw_input_text", None)
+
         # ---- 提取 hook_event 标记（团队任务邮件等），写入 session 消息时打标 ----
         hook_event = kwargs.pop("_hook_event", None)
 
@@ -438,6 +466,8 @@ class UIEngine(BaseEngine):
             tool_executor=self._tool_executor,
             hook_event=hook_event,
             image_attachments=_image_attachments,
+            input_attachments=_input_attachments,
+            raw_input_text=_raw_input_text,
         )
         worker.start()
 
@@ -560,24 +590,20 @@ class UIEngine(BaseEngine):
         # 本地估算校正系数（除数）：服务商能力 > app.config 覆盖 > 模型名兜底
         ratio = resolve_token_ratio(llm_config, model)
 
+        # S2: 上下文投影（ui stage）— 与 send stage 共用同一 cascade，
+        # 保证「UI 估算 = 实际发送量」是结构性一致，不再手工重复截断。
+        # ui stage 禁止副作用（不落盘、不调 LLM），且 tier 只产出新列表、
+        # 不改 session.messages 原始存储（可追溯）。
+        from app.core.context.pipeline import ContextPipeline
+
+        _ui_view = ContextPipeline().project_for_ui(session.messages, llm_config, system_content=system_prompt)
+        _projected = _ui_view.messages
+        pruned_tokens = sum(s.saved_tokens for s in _ui_view.stats if not s.skipped)
+
         approx_messages: List[Dict] = []
         if system_prompt:
             approx_messages.append({"role": "system", "content": system_prompt})
-        # S2: 工具结果截断投影 — 与 context_builder.build_messages 使用同一
-        # prune_tool_result（同参数），使 UI 估算 = 实际发送 token（截断后），
-        # 保证「投影与实际用量一致」；并累计节省量 pruned_tokens 供 UI 展示。
-        # 仅对超阈值消息建副本，不修改 session.messages 原始存储（可追溯）。
-        pruned_tokens = 0
-        for _m in session.messages:
-            _content = _m.get("content")
-            if _m.get("role") == "tool" and isinstance(_content, str) and len(_content) > TOOL_RESULT_MAX_LEN:
-                raw_tok = per_message_tokens(_m, model, ratio)
-                _m_copy = dict(_m)
-                _m_copy["content"] = prune_tool_result(_content)
-                approx_messages.append(_m_copy)
-                pruned_tokens += max(0, raw_tok - per_message_tokens(_m_copy, model, ratio))
-            else:
-                approx_messages.append(_m)
+        approx_messages.extend(_projected)
 
         # 获取工具 schema（与实际 API 请求一致），必须计入上下文占用
         # ⚠️ 旧实现此处漏传 tools，导致工具定义（35+ 工具）的 token 完全未计入，
@@ -600,6 +626,7 @@ class UIEngine(BaseEngine):
                 available_tools = self._get_agent_manager().get_agent_tools_schema(
                     self._current_agent,
                     builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                    session_id=str(getattr(session, "session_id", "") or ""),
                 )
             else:
                 available_tools = get_builtin_tools_schema(
@@ -634,7 +661,8 @@ class UIEngine(BaseEngine):
         # 消除 [msg] 临时列表分配 + 4-entry is 缓存必然 MISS 的开销，
         # 100 条消息场景从 ~102 次 count_messages_tokens 降至 ~N+1 次 per_message_tokens。
         user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
-        for msg in session.messages:
+        # 用 ui stage 的投影结果统计（已含 cascade 截断效果），不再逐条手工截断
+        for msg in _projected:
             role = msg.get("role", "")
             t = per_message_tokens(msg, model, ratio)
             # 分离 hook 注入消息（带 _hook_event 标记），独立统计
@@ -645,12 +673,7 @@ class UIEngine(BaseEngine):
             elif role == "assistant":
                 assistant_tokens += t
             elif role == "tool":
-                # S2: 工具结果按实际发送口径统计（超阈值先截断再计 token）
-                _m = msg
-                if isinstance(msg.get("content"), str) and len(msg["content"]) > TOOL_RESULT_MAX_LEN:
-                    _m = dict(msg)
-                    _m["content"] = prune_tool_result(_m["content"])
-                tool_tokens += per_message_tokens(_m, model, ratio)
+                tool_tokens += t
             else:
                 # 其它角色（如内联 system 消息）兜底归入用户侧
                 user_tokens += t
@@ -902,6 +925,8 @@ class _PreSendWorker(QThread):
         tool_executor,
         hook_event: str | None = None,
         image_attachments: list | None = None,
+        input_attachments: list | None = None,
+        raw_input_text: str | None = None,
     ):
         super().__init__()
         self._hook_mgr = hook_mgr
@@ -919,6 +944,8 @@ class _PreSendWorker(QThread):
         self._tool_executor = tool_executor
         self._hook_event = hook_event
         self._image_attachments = image_attachments
+        self._input_attachments = input_attachments
+        self._raw_input_text = raw_input_text
 
         # 结果
         self._messages: list = []
@@ -930,6 +957,10 @@ class _PreSendWorker(QThread):
 
     def run(self):
         """在后台线程执行所有预处理工作。"""
+        # [T15/M6] 退出期中断检查：atexit 收敛时本线程若未启动/刚启动，
+        # 直接返回避免进入 hook 链拖住 wait(500)
+        if self.isInterruptionRequested():
+            return
         try:
             self._do_hooks_and_build()
         except Exception as e:
@@ -938,7 +969,7 @@ class _PreSendWorker(QThread):
 
     def _do_hooks_and_build(self):
         """执行 hooks → 注入 session → build_messages → tools"""
-        from app.core.backend import _inject_hook_to_session
+        from app.core.conversation.backend import _inject_hook_to_session
         from app.tools import get_builtin_tools_schema
 
         hook_mgr = self._hook_mgr
@@ -981,6 +1012,10 @@ class _PreSendWorker(QThread):
                 _add_kwargs["_hook_event"] = self._hook_event
             if self._image_attachments:
                 _add_kwargs["_image_attachments"] = self._image_attachments
+            if self._input_attachments:
+                _add_kwargs["_input_attachments"] = self._input_attachments
+            if self._raw_input_text:
+                _add_kwargs["_raw_input_text"] = self._raw_input_text
             session.add_user_message(content=self._content_to_store, **_add_kwargs)
 
         # ---- 4. PostUserMessage hooks ----
@@ -999,6 +1034,7 @@ class _PreSendWorker(QThread):
             self._available_tools = self._agent_manager.get_agent_tools_schema(
                 self._current_agent,
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                session_id=session_id,
             )
         else:
             self._available_tools = get_builtin_tools_schema(

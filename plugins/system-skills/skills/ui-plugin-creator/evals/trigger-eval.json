@@ -44,6 +44,18 @@
       "expected_route": "ui-plugin-creator:modifying（改现有插件，免前置）"
     },
     {
+      "id": "T08",
+      "type": "positive",
+      "query": "做一个能独立出软件窗口的日志查看器，左侧栏点开，能拖到主窗外",
+      "expected_route": "ui-plugin-creator:独立弹窗（templates-window.md）"
+    },
+    {
+      "id": "T09",
+      "type": "positive",
+      "query": "用户消息下面加个按钮，点击把这条消息内容发到我的工具窗口；页脚再显示个字数",
+      "expected_route": "ui-plugin-creator:消息卡片槽位 footer_action/footer_stat（templates-card-slots.md）"
+    },
+    {
       "id": "N01",
       "type": "negative",
       "query": "做一个调用本地 API 查天气的工具，不带界面",

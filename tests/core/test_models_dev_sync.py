@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 import pytest
 
-from app.core import models_dev_sync as sync
+from app.core.modelmeta import models_dev_sync as sync
 
 
 # ============================================================
@@ -310,7 +310,7 @@ def test_get_model_capabilities_dynamic_false_overrides_hardcode(monkeypatch):
     如 MiniMax-M2.7：硬编码标 supports_thinking=True，但 models.dev 无
     reasoning_options → 动态 False → 最终 False（思考开关不显示）。
     """
-    from app.core import model_capabilities as mc
+    from app.core.modelmeta import model_capabilities as mc
 
     dynamic = sync.DynamicModelsResult(
         provider_models={},
@@ -326,7 +326,7 @@ def test_get_model_capabilities_dynamic_false_overrides_hardcode(monkeypatch):
 
 def test_get_model_capabilities_dynamic_false_when_no_hardcode(monkeypatch):
     """硬编码无记录 + 动态 False → False。"""
-    from app.core import model_capabilities as mc
+    from app.core.modelmeta import model_capabilities as mc
 
     dynamic = sync.DynamicModelsResult(
         provider_models={},
@@ -342,7 +342,7 @@ def test_get_model_capabilities_dynamic_false_when_no_hardcode(monkeypatch):
 
 def test_get_model_capabilities_dynamic_missing_uses_hardcode(monkeypatch):
     """models.dev 查不到该模型（动态 None）→ 硬编码兜底生效。"""
-    from app.core import model_capabilities as mc
+    from app.core.modelmeta import model_capabilities as mc
 
     dynamic = sync.DynamicModelsResult(provider_models={}, model_capabilities={}, from_cache=False, fetched_at=None)
     monkeypatch.setattr(sync, "get_dynamic_models", lambda: dynamic)
@@ -353,7 +353,7 @@ def test_get_model_capabilities_dynamic_missing_uses_hardcode(monkeypatch):
 
 def test_get_model_capabilities_dynamic_thinking_fields_replace_hardcode(monkeypatch):
     """动态有思考字段时，硬编码的 thinking_param 残留不混入（思考字段整体以动态为准）。"""
-    from app.core import model_capabilities as mc
+    from app.core.modelmeta import model_capabilities as mc
 
     dynamic = sync.DynamicModelsResult(
         provider_models={},
@@ -371,7 +371,7 @@ def test_get_model_capabilities_dynamic_thinking_fields_replace_hardcode(monkeyp
 
 def test_get_model_capabilities_effort_values_from_dynamic(monkeypatch):
     """动态能力里的 reasoning_effort_values 应透传到 get_model_capabilities 结果。"""
-    from app.core import model_capabilities as mc
+    from app.core.modelmeta import model_capabilities as mc
 
     dynamic = sync.DynamicModelsResult(
         provider_models={},
@@ -393,7 +393,7 @@ def test_get_model_capabilities_effort_values_from_dynamic(monkeypatch):
 
 def test_apply_model_defaults_effort_values_first_as_default(monkeypatch):
     """思考等级默认值：模型有 effort values → 取第一个；无 → 回退 medium。"""
-    from app.core import model_capabilities as mc
+    from app.core.modelmeta import model_capabilities as mc
 
     def _fake_dynamic(model_caps):
         return sync.DynamicModelsResult(
@@ -561,14 +561,14 @@ def test_load_dynamic_models_refetches_when_content_stale(monkeypatch, tmp_path:
 # normalize_reasoning_effort（等级校验：无效回退中间值）
 # ============================================================
 def test_normalize_reasoning_effort_valid_kept():
-    from app.core.model_capabilities import normalize_reasoning_effort
+    from app.core.modelmeta.model_capabilities import normalize_reasoning_effort
 
     assert normalize_reasoning_effort("high", ["low", "medium", "high"]) == "high"
     assert normalize_reasoning_effort("MAX", ["high", "max"]) == "max"  # 大小写不敏感，保留 values 原大小写
 
 
 def test_normalize_reasoning_effort_invalid_fallback_middle():
-    from app.core.model_capabilities import normalize_reasoning_effort
+    from app.core.modelmeta.model_capabilities import normalize_reasoning_effort
 
     # 保存值不在可选值中 → 回退 values 中间配置（models.dev 顺序即强度升序）
     assert normalize_reasoning_effort("high", ["low", "medium"]) == "low"
@@ -579,7 +579,7 @@ def test_normalize_reasoning_effort_invalid_fallback_middle():
 
 
 def test_normalize_reasoning_effort_no_values_passthrough():
-    from app.core.model_capabilities import normalize_reasoning_effort
+    from app.core.modelmeta.model_capabilities import normalize_reasoning_effort
 
     # 模型无 reasoning_effort_values 数据 → 不拦截，保持原值/默认
     assert normalize_reasoning_effort("high", None) == "high"

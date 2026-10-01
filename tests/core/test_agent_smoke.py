@@ -20,7 +20,7 @@ class TestAgent:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.agent")
+        return pytest.importorskip("app.core.conversation.agent")
 
     # ── Defaults ──────────────────────────────────────────────────────
 
@@ -247,7 +247,7 @@ class TestPermissionResolver:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.agent")
+        return pytest.importorskip("app.core.conversation.agent")
 
     # ── DEFAULT_PERMISSIONS ───────────────────────────────────────────
 
@@ -429,7 +429,7 @@ class TestAgentManager:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.agent")
+        return pytest.importorskip("app.core.conversation.agent")
 
     @pytest.fixture(autouse=True)
     def _reset_singleton(self, mod):
@@ -546,11 +546,11 @@ class TestAgentManager:
 
 
 class TestModuleFunctions:
-    """Tests for module-level functions in app.core.agent."""
+    """Tests for module-level functions in app.core.conversation.agent."""
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.agent")
+        return pytest.importorskip("app.core.conversation.agent")
 
     def test_create_agent_manager_returns_instance(self, mod):
         """create_agent_manager returns an AgentManager instance."""
@@ -578,7 +578,7 @@ class TestAgentPermissionIntegration:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.agent")
+        return pytest.importorskip("app.core.conversation.agent")
 
     @pytest.fixture(autouse=True)
     def _reset_singleton(self, mod):
@@ -644,7 +644,7 @@ class TestAgentManagerWithAgents:
 
     @pytest.fixture
     def mod(self):
-        return pytest.importorskip("app.core.agent")
+        return pytest.importorskip("app.core.conversation.agent")
 
     @pytest.fixture(autouse=True)
     def _reset_singleton(self, mod):

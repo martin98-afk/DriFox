@@ -308,7 +308,7 @@ def _spawn_and_measure(tm, source):
 
 @pytest.fixture(scope="module")
 def tab_env():
-    from app.core.webengine_profile import init_shared_web_profile
+    from app.core.infra.webengine_profile import init_shared_web_profile
     from app.utils.render_env import apply_render_env, default_config_path
 
     # 渲染环境 → 环境变量（QT_OPENGL=angle 等，绕开 Intel OpenGL ICD 崩溃路径）
@@ -588,11 +588,12 @@ def test_two_tabs_context_independence(tab_env):
     # ── 会话独立：两窗口 _current_session_id 不同且保持 ──
     assert win_a._current_session_id != win_b._current_session_id
 
-    # 清理：_on_project_selected 会把项目写进全局配置（cfg.save()），
-    # 残留会污染后续进程的默认项目（w0 继承脏值）。恢复后落盘。
+    # 清理：_on_project_selected 会把项目写进全局状态（app_state.json），
+    # 残留会污染后续进程的默认项目（w0 继承脏值）。恢复为基线项目。
     try:
-        win_a.cfg.current_project.value = baseline_project
-        win_a.cfg.save()
+        from app.utils import app_state
+
+        app_state.set("current_project", baseline_project)
     except Exception:
         pass
 

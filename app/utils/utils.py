@@ -28,6 +28,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont, QIcon, QIconEngine
 
 from app.utils.config import Settings
+from app.utils import update_proxy
 
 # ICON_NAME_TO_FILE 延迟到 _ThemeIconEngine._find_icon_file() 中导入，
 # 避免模块启动时加载 icon 映射表
@@ -86,7 +87,16 @@ def get_app_data_dir() -> Path:
     开发环境: 当前目录/.drifox6
     PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox6
+
+    测试/多实例隔离: 设置环境变量 DRIFOX_DATA_DIR 后一律使用该目录
+    （优先级最高，置于 frozen 判断之前，UI 驱动库与测试脚手架依赖此隔离）。
     """
+    env_dir = os.environ.get("DRIFOX_DATA_DIR")
+    if env_dir:
+        path = Path(env_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     # 开发环境
     if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
         return Path(APP_DATA_DIR_NAME)
@@ -794,6 +804,8 @@ class DownloadThread(QThread):
         import requests  # [PERF] 延迟导入：仅下载检查路径需要
 
         self.session = requests.Session()  # 使用 Session 以便关闭连接
+        # 应用更新代理配置（direct/prefix 强制直连，http 转发，system 跟随系统）
+        update_proxy.apply_to_session(self.session)
 
     def run(self):
         try:
@@ -879,22 +891,28 @@ class AsyncUpdateChecker(QThread):
         url = f"https://api.github.com/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入：仅更新检查路径需要
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # 检查更新始终直连 API 域（加速前缀只作用于下载）；
+        # 但 direct/prefix 模式需显式 trust_env=False 以屏蔽环境变量代理
+        async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 logger.debug(f"GitHub API 响应: {resp.json()}")
                 return resp.json()
-            else:
+            if resp.status_code in (403, 429) and "rate limit" in resp.text.lower():
+                # 限流与一般失败区分提示：匿名配额 60 次/小时/IP，易被共享出口耗尽
                 logger.debug(f"GitHub API 响应: {resp.text}")
-                self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
+                self.error.emit("GitHub API 限流（未配置 token 时 60 次/小时），请稍后重试或配置 GitHub token")
                 return None
+            logger.debug(f"GitHub API 响应: {resp.text}")
+            self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
+            return None
 
     async def fetch_gitee(self):
         headers = {"Authorization": self.token} if self.token else {}
         url = f"https://gitee.com/api/v5/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 return resp.json()
@@ -907,7 +925,7 @@ class AsyncUpdateChecker(QThread):
         url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 return resp.json()

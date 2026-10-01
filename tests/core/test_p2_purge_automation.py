@@ -8,7 +8,7 @@ import importlib
 import sys
 import types
 
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 
 resolve = PluginHostService._resolve_purge_prefixes
 purge = PluginHostService._purge_module_prefixes

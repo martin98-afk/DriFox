@@ -32,6 +32,7 @@ _CONTRACT_ATTRS = (
     "_model_selector_card_content",
     "_tool_control_card",
     "_question_floating_widget",
+    "_permission_floating_widget",
 )
 
 
@@ -147,3 +148,4 @@ def test_compose_builds_system_cards(fresh_registry, qapp):
     # 批1 懒创建：两卡 build 期为 None 占位（懒化生效，构造移入 ensure）
     assert host._tool_control_card is None
     assert host._question_floating_widget is None
+    assert host._permission_floating_widget is None

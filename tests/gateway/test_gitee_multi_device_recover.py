@@ -121,7 +121,7 @@ class _FakeHttpxClient:
 
 def test_fetch_cloud_token_pair_updates_local(tmp_settings):
     """云端 app.config 含新 RT 时，_fetch_cloud_token_pair 应写回 cfg + 磁盘"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
 
     fake, cfg_file = tmp_settings
     _seed(fake, local_rt="R_local")
@@ -134,7 +134,7 @@ def test_fetch_cloud_token_pair_updates_local(tmp_settings):
     fake_client = _FakeHttpxClient(cloud_resp)
 
     svc = cs_mod.ConfigSyncService.get_instance()
-    with mock.patch("app.core.config_sync.httpx.Client", return_value=fake_client):
+    with mock.patch("app.core.sync.config_sync.httpx.Client", return_value=fake_client):
         ok = svc._fetch_cloud_token_pair()
 
     assert ok, "应从云端恢复 token 段"
@@ -149,7 +149,7 @@ def test_fetch_cloud_token_pair_updates_local(tmp_settings):
 
 def test_fetch_cloud_token_pair_same_rt_returns_false(tmp_settings):
     """云端 RT 与本地一致 → 返回 False（防止无效循环）"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
 
     fake, _ = tmp_settings
     _seed(fake, local_rt="R_same")
@@ -158,7 +158,7 @@ def test_fetch_cloud_token_pair_same_rt_returns_false(tmp_settings):
     fake_client = _FakeHttpxClient(cloud_resp)
 
     svc = cs_mod.ConfigSyncService.get_instance()
-    with mock.patch("app.core.config_sync.httpx.Client", return_value=fake_client):
+    with mock.patch("app.core.sync.config_sync.httpx.Client", return_value=fake_client):
         ok = svc._fetch_cloud_token_pair()
 
     assert not ok, "云端 RT 与本地相同，不应进入无效恢复循环"
@@ -166,14 +166,14 @@ def test_fetch_cloud_token_pair_same_rt_returns_false(tmp_settings):
 
 def test_fetch_cloud_token_pair_http_error_returns_false(tmp_settings):
     """云端读取失败（401/网络）→ 返回 False"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
 
     fake, _ = tmp_settings
     _seed(fake)
 
     fake_client = _FakeHttpxClient(_FakeResp(401, {"message": "invalid_token"}))
     svc = cs_mod.ConfigSyncService.get_instance()
-    with mock.patch("app.core.config_sync.httpx.Client", return_value=fake_client):
+    with mock.patch("app.core.sync.config_sync.httpx.Client", return_value=fake_client):
         ok = svc._fetch_cloud_token_pair()
 
     assert not ok, "云端 401 时不应恢复成功"
@@ -184,7 +184,7 @@ def test_fetch_cloud_token_pair_http_error_returns_false(tmp_settings):
 
 def test_recover_token_from_cloud_success(tmp_settings):
     """本地 RT 失效 + 云端 RT 更新 → 恢复成功并回传云端"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
     from app.gateway.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
@@ -217,7 +217,7 @@ def test_recover_token_from_cloud_success(tmp_settings):
 
 def test_recover_token_from_cloud_all_revoked_returns_false(tmp_settings):
     """云端 RT 也失效（连刷 2 次 TOKEN_REVOKED）→ 返回 False（应清绑）"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
     from app.gateway.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
@@ -244,7 +244,7 @@ def test_recover_token_from_cloud_all_revoked_returns_false(tmp_settings):
 
 def test_recover_token_from_cloud_no_cloud_rt(tmp_settings):
     """云端无 RT（_fetch 返回 False）→ 直接失败"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
 
     fake, _ = tmp_settings
     _seed(fake, local_rt="R_local")
@@ -264,7 +264,7 @@ def test_recover_token_from_cloud_no_cloud_rt(tmp_settings):
 
 def test_refresh_local_and_upload_revoked_recovers(tmp_settings):
     """本地刷新 TOKEN_REVOKED 且云端恢复成功 → 不清绑，syncDone(True)"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
     from app.gateway.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
@@ -299,7 +299,7 @@ def test_refresh_local_and_upload_revoked_recovers(tmp_settings):
 
 def test_refresh_local_and_upload_revoked_clears_when_no_cloud(tmp_settings):
     """本地刷新 TOKEN_REVOKED 且云端恢复失败 → 清绑 + syncDone(False, 已失效)"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
     from app.gateway.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
@@ -333,7 +333,7 @@ def test_refresh_local_and_upload_revoked_clears_when_no_cloud(tmp_settings):
 
 def test_refresh_local_and_upload_network_error_keeps_binding(tmp_settings):
     """网络异常（非 TOKEN_REVOKED）→ 保留绑定，不触发云端恢复"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
     from app.gateway.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings

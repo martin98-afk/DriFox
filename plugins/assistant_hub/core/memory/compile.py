@@ -19,7 +19,7 @@ import logging
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,13 @@ _THIS = Path(__file__).resolve()
 DAILY_WINDOW_RETENTION_DAYS = 6
 # assemble 总量硬上限（字符）
 ASSEMBLE_MAX_CHARS = 12000
+# 段级字符预算：assemble 按段截断保头部，保证四段都在、总量不破总闸
+SECTION_BUDGETS = {"facts": 2200, "recent": 1200, "today": 2800, "longterm": 800}
+# compile_today / compile_daily 输出源头硬预算：超了先重试压缩，仍超则按行截断
+TODAY_MAX_CHARS = 2800
+DAILY_MAX_CHARS = 800
+# recent 段索引尾注：daily 全文不入注入，LLM 需要时用读文件工具按此路径自查
+RECENT_INDEX_HINT = "（以上仅索引；需要详情用读文件工具按路径查阅：{dir}）"
 # 注入预算提示（memory.md 目标 ≤2000 token ≈ 4000 中文字符，超出靠 ASSEMBLE_MAX_CHARS 硬截）
 MEMORY_TARGET_CHARS = 4000
 
@@ -86,6 +93,51 @@ def _read(path: Path) -> str:
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _clip_lines(body: str, budget: int) -> str:
+    """段内按行截断保头部（预算内原样返回）；行级累积超预算即停，截尾标注。"""
+    if len(body) <= budget:
+        return body
+    out: List[str] = []
+    used = 0
+    for ln in body.splitlines():
+        if used + len(ln) + 1 > budget:
+            break
+        out.append(ln)
+        used += len(ln) + 1
+    if not out:
+        out = [body[:budget].rstrip()]
+    return "\n".join(out).rstrip() + "\n…（超预算已截）"
+
+
+def _split_topic(text: str) -> Tuple[str, str]:
+    """提取蒸馏输出首行 ``TOPIC: 主题``；无则回退空主题。返回 (topic, body)。"""
+    lines = text.splitlines()
+    if lines and lines[0].strip().lower().startswith("topic:"):
+        topic = lines[0].split(":", 1)[1].strip()
+        return topic, "\n".join(lines[1:]).strip()
+    return "", text.strip()
+
+
+def _topic_slug(topic: str) -> str:
+    """主题转文件名安全片段：替换路径非法字符与空白，限长 24。"""
+    bad = '\\/:*?"<>|\r\n\t '
+    slug = "".join("-" if ch in bad else ch for ch in topic).strip("-")
+    return slug[:24]
+
+
+def _shrink_to_budget(llm: Callable, text: str, budget: int) -> str:
+    """编译输出超预算时重试压缩一次，仍超则按行截断（LLM 无视行数约束的硬兜底）。"""
+    if len(text) <= budget:
+        return text
+    try:
+        prompts = _load_prompts()
+        shrunk = (llm(prompts.build_shrink_overrun(text, budget)) or "").strip()
+    except Exception as e:
+        logger.warning(f"[assistant_hub.compile] 超预算压缩失败: {e}")
+        shrunk = ""
+    return _clip_lines(shrunk or text, budget)
 
 
 def logical_today() -> str:
@@ -184,6 +236,7 @@ def compile_today(
         return {"ok": False, "changed": False, "error": str(e)}
     if not compiled:
         return {"ok": False, "changed": False, "error": "LLM 返回空"}
+    compiled = _shrink_to_budget(llm, compiled, TODAY_MAX_CHARS)
 
     _write(memory_dir(aid_dir) / "today.md", compiled)
     state["last_msg_cursor"] = cursor
@@ -207,9 +260,12 @@ def _load_prompts():
 
 
 def compile_daily(aid_dir: Path, prev_today_text: str, day: str, *, llm: Callable) -> Dict:
-    """把昨日 today 草稿蒸馏成日记，写 daily/<day>.md。"""
-    out_path = daily_dir(aid_dir) / f"{day}.md"
-    if out_path.exists() or not prev_today_text.strip():
+    """把昨日 today 草稿蒸馏成日记，写 daily/<day>-<主题>.md（主题取 TOPIC 行）。
+
+    文件名带主题供 memory.md 近期段索引化（仅列文件名，LLM 按需读文件）；
+    同日判重按日期前缀 glob（兼容旧无主题命名）。
+    """
+    if list(daily_dir(aid_dir).glob(f"{day}*.md")) or not prev_today_text.strip():
         return {"ok": True, "changed": False, "reason": "已存在或空"}
     try:
         prompts = _load_prompts()
@@ -219,7 +275,12 @@ def compile_daily(aid_dir: Path, prev_today_text: str, day: str, *, llm: Callabl
         return {"ok": False, "error": str(e)}
     if not text:
         return {"ok": False, "error": "LLM 返回空"}
-    _write(out_path, f"# {day}\n\n{text}\n")
+    topic, body = _split_topic(text)
+    body = _shrink_to_budget(llm, body, DAILY_MAX_CHARS)
+    slug = _topic_slug(topic)
+    stem = f"{day}-{slug}" if slug else day
+    out_path = daily_dir(aid_dir) / f"{stem}.md"
+    _write(out_path, f"# {day}\n\n{body}\n")
     return {"ok": True, "changed": True, "file": str(out_path)}
 
 
@@ -298,7 +359,12 @@ def build_compiled_markdown(sections: Dict[str, str]) -> str:
 
 
 def assemble(aid_dir: Path) -> str:
-    """同步拼四段 → 写 memory.md 并返回；全空返回 ""（不写盘）。"""
+    """同步拼四段 → 写 memory.md 并返回；全空返回 ""（不写盘）。
+
+    段级预算（SECTION_BUDGETS）按段截断保头部，总闸 ASSEMBLE_MAX_CHARS 兜底；
+    recent 段索引化：仅列 daily 文件名清单（日期+主题+字符数），
+    全文不入注入，LLM 需要时用读文件工具按 RECENT_INDEX_HINT 路径自查。
+    """
     mem = memory_dir(aid_dir)
     recent_lines: List[str] = []
     ddir = daily_dir(aid_dir)
@@ -306,18 +372,20 @@ def assemble(aid_dir: Path) -> str:
         for f in sorted(ddir.glob("*.md"))[-DAILY_WINDOW_RETENTION_DAYS:]:
             body = _read(f).strip()
             if body:
-                recent_lines.append(body)
+                recent_lines.append(f"- {f.stem}（{len(body)}字）")
+    if recent_lines:
+        recent_lines.append(RECENT_INDEX_HINT.format(dir=str(ddir)))
     raw = {
-        "facts": _read(mem / "facts.md"),
-        "recent": "\n\n".join(recent_lines),
-        "today": _read(mem / "today.md"),
-        "longterm": _read(mem / "longterm.md"),
+        "facts": _clip_lines(_read(mem / "facts.md").strip(), SECTION_BUDGETS["facts"]),
+        "recent": _clip_lines("\n".join(recent_lines).strip(), SECTION_BUDGETS["recent"]),
+        "today": _clip_lines(_read(mem / "today.md").strip(), SECTION_BUDGETS["today"]),
+        "longterm": _clip_lines(_read(mem / "longterm.md").strip(), SECTION_BUDGETS["longterm"]),
     }
     text = build_compiled_markdown(raw)
     if not text:
         return ""
     if len(text) > ASSEMBLE_MAX_CHARS:
-        # 按段比例截断（保前部：facts > today > recent > longterm 优先级由顺序体现）
+        # 段级预算兜底后的总闸（理论到不了，防御性保留）
         text = text[:ASSEMBLE_MAX_CHARS].rstrip() + "\n…（已截断）"
     _write(mem / "memory.md", text)
     return text

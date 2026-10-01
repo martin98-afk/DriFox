@@ -8,7 +8,7 @@ T19 批次1 上收：
 """
 import pytest
 
-from app.core import team_manager as tm_mod
+from app.core.team import team_manager as tm_mod
 
 # 模块导入时缓存真实 get_instance（对齐原 test_team_project.py 的隔离防护）
 _ORIG_GET_INSTANCE = tm_mod.TeamManager.__dict__["get_instance"]

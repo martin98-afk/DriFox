@@ -424,15 +424,19 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 
 ### 14.1 标题栏常驻 tab（参考：agent_trace / assistant_hub）
 
-- [ ] tab 出现在标题栏，label 正确，点击触发 on_click
-- [ ] **tab 点击必须走 `UIPluginRegistry.toggle_floating_card(CARD_ID)`**，
+- [ ] tab 出现在标题栏，label 正确，点击唤出对应卡片
+- [ ] **推荐 `primary_entry` 声明式**：`register_floating_card(metadata={"primary_entry":
+      {"kind": "titlebar", ...}})`，框架生成回调（懒创建 + 宿主解析 + 可见性检查单点承载）；
+      手写 `on_click` 仅作兼容路径，写时必须走 `toggle_floating_card`，
       不能用 `card_manager.show_card`（懒创建实例，show_card 首次点击静默失败）
 - [ ] tab 图标注意：`CustomTabButton` 无 icon_light 主题感知 → 深色主题下深色描边图标
       不可见，**纯文字更安全**
 - [ ] full 卡 metadata：`full_card=True` + `hide_sidebar=True`（入口只有标题栏 tab，
       侧边栏不重复列出）
-- [ ] 已可见时点 tab 不闪（先查 `is_card_visible` 再 toggle，语义"切到该 tab"）
-- [ ] Tab 模式宿主是 TabManagerWindow：直接用 `UIPluginRegistry.toggle_floating_card`
+- [ ] 已可见时点 tab 不闪（框架回调已内置「已可见忽略」；手写时先查 `is_card_visible`，
+      语义"切到该 tab"）
+- [ ] Tab 模式宿主是 TabManagerWindow：框架回调已做宿主解析；手写时直接用
+      `UIPluginRegistry.toggle_floating_card`
       （内部已处理宿主解析），别自己遍历 main_widget
 
 ### 14.2 右侧工作台页（参考：system/ui/_worktree_page.py、_artifacts_page.py）
@@ -455,5 +459,35 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 | `register_settings_card` | 设置面板插件卡片（priority 覆盖 E1 自动卡） | prompt-enhancer |
 | `register_tag_renderer` | 消息内标签卡渲染（persona tag 等） | assistant_hub |
 | `register_welcome_action` / `register_mention_provider` | 欢迎页动作 / @提及提供者 | UIPluginRegistry:557/603 |
+| `register_window` | 插件独立弹窗（模板见 `templates-window.md`） | `plugins/ui-slots-demo/` |
+| `register_footer_action` / `register_footer_stat` | 消息卡片按钮 / 页脚信息项（模板见 `templates-card-slots.md`） | `plugins/ui-slots-demo/`、agent_trace |
 
 > 标题栏 tab 模板见 `templates-entries.md`；工作台页模板见 `templates-workbench.md`。
+
+---
+
+## 15. 独立弹窗 / 消息卡片槽位验证（用了 `register_window` / `footer_action` / `footer_stat` 时）
+
+### 15.1 独立弹窗（参考：plugins/ui-slots-demo）
+
+- [ ] 左侧插件栏出现条目；点击**开/关切换**（未开→打开前置；已开→关闭）
+- [ ] 右键菜单有「弹出」（card 条目还应有 下/左/右/替换 方位项）
+- [ ] 标题栏可拖动、最小化/最大化/关闭可点（内容页没盖住标题栏——自建
+      FramelessWindow 时布局顶部留 `titleBar.height()` 且 `titleBar.raise_()`，坑见 pitfalls §20）
+- [ ] **内容页数据加载走 `show_card()`**：打开即有数据+样式，不出现「黑块/空白」
+      （坑见 pitfalls §19）；`__init__` 里不做重加载
+- [ ] 上下文取色走 ctx + fallback（深浅主题切换后窗口内容不误色）
+- [ ] 关窗后重开：单例语义正确（旧实例已销毁、新实例正常），无幽灵窗口
+- [ ] 插件卸载 / 应用退出后窗口全部销毁，无残留
+- [ ] `group="system"/"custom"` 分组符合预期（不传=跟随插件归属：仓库内置→常驻区，用户插件→自定义折叠区）
+
+### 15.2 消息卡片槽位（参考：plugins/ui-slots-demo、agent_trace）
+
+- [ ] `role="user"` 按钮出现在**用户气泡底部操作行、内置复制/撤销/删除左侧**
+      （26px，hover 随容器浮现）
+- [ ] `role="assistant"`（默认）按钮出现在助手页脚按钮组（与分支/复制同排）
+- [ ] `role="both"` 两端都出现
+- [ ] `on_click(ctx)` 能拿到 `ctx["card"]`（`get_plain_text()` 有内容）
+- [ ] `footer_stat` provider 纯内存快速返回；本条不适用时返回 `None`（信息项与 `·` 分隔点一起隐藏）
+- [ ] 深浅主题图标两套都给了（`icon_path` + `icon_light_path`）
+- [ ] 卸载插件后按钮/信息项消失（`unload_plugin` 幂等清理）

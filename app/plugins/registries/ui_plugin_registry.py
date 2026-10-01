@@ -6,6 +6,7 @@
 """
 
 import functools
+import json
 import os
 import re
 import threading
@@ -16,13 +17,67 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List,
 
 from loguru import logger
 
-from app.core.project_changed import dispatch_project_changed, is_active_window
+from app.core.infra.project_changed import dispatch_project_changed, is_active_window
 
 if TYPE_CHECKING:
-    from app.core.command_manager import CommandType  # noqa: F401
+    from app.core.commands.command_manager import CommandType  # noqa: F401
 
 # re-export：让 `from app.plugins.registries.ui_plugin_registry import WorkspacePageInfo` 直接可用
 from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo  # noqa: E402,F401
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UI 命令快捷键持久化（user-custom/shortcuts.json）
+# ═══════════════════════════════════════════════════════════════════════════
+# Why 不走 user-custom/commands/*.md 兜底：UI 插件命令名常带冒号
+# （如 quick-screenshot:quick-screenshot），写 md 时文件名安全化（: → __），
+# 重启后 md 以 stem 注册成孤儿命令，快捷键落不到 UI 命令上。
+# 改存名字原样的 JSON 映射，_apply_ui_command 时查表带入 shortcut。
+# 注销 UI 命令时映射保留：插件重装后快捷键自动恢复。
+
+_UI_SHORTCUTS_REL = Path("plugins/user-custom/shortcuts.json")
+_shortcuts_cache: Optional[Dict[str, str]] = None
+
+
+def _get_ui_shortcuts_file() -> Path:
+    from app.utils.utils import get_app_data_dir
+
+    return get_app_data_dir() / _UI_SHORTCUTS_REL
+
+
+def load_ui_command_shortcuts() -> Dict[str, str]:
+    """读取 UI 命令快捷键映射（模块级缓存，保存时同步更新）"""
+    global _shortcuts_cache
+    if _shortcuts_cache is not None:
+        return dict(_shortcuts_cache)
+    path = _get_ui_shortcuts_file()
+    result: Dict[str, str] = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                result = {str(k): str(v) for k, v in data.items() if str(v)}
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] shortcuts.json 解析失败，忽略: {e}")
+    _shortcuts_cache = result
+    return dict(result)
+
+
+def save_ui_command_shortcut(name: str, shortcut: str) -> None:
+    """写入一条 UI 命令快捷键并落盘；shortcut 为空串时删除该条"""
+    global _shortcuts_cache
+    mapping = load_ui_command_shortcuts()
+    if shortcut:
+        mapping[name] = shortcut
+    else:
+        mapping.pop(name, None)
+    path = _get_ui_shortcuts_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(mapping, indent=2, ensure_ascii=False), encoding="utf-8")
+        _shortcuts_cache = dict(mapping)
+    except Exception as e:
+        logger.error(f"[UIPluginRegistry] shortcuts.json 写入失败: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -266,6 +321,29 @@ class WelcomeActionInfo:
 
 
 @dataclass(frozen=True)
+class IdentityProviderInfo:
+    """消息身份提供者注册信息（name / avatar 两条独立通道）
+
+    主程序渲染每条消息时按优先级询问插件：「这条消息是谁发的、用什么头像」。
+    两条通道各自独立解析，插件可只提供其中之一（另一个回落下一优先级/内置默认）。
+
+    Attributes:
+        plugin_name: 所属插件名
+        provider_id: 提供者唯一标识
+        resolve_func: 解析回调 ``(ctx: dict) -> str``，返回空串表示未提供；
+                      ctx 含 role / session_id / team_agent / window_id
+        priority: 优先级（高者先问）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    provider_id: str
+    resolve_func: Callable[[Dict[str, Any]], str]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class MentionProviderInfo:
     """输入框 @ 提及条目提供者注册信息
 
@@ -351,7 +429,11 @@ class TitlebarTabInfo:
         tab_id: tab 唯一 ID（与 full 卡片 card_id 共用标题栏 tab 命名空间，勿冲突）
         label: tab 显示文本
         icon_path: 图标资源路径（可选，按钮内左侧 14px）
-        on_click: 点击回调（签名 () -> None），由插件自行决定展示方式
+        on_click: 点击回调（签名 () -> None），由插件自行决定展示方式；
+                  card_id 声明式绑定时由框架生成，无需手写
+        card_id: 声明式绑定浮动卡（一处注册、多处分发）。非空且未传 on_click 时
+                 框架生成「已可见则忽略、否则唤出该卡」回调（tab 语义=切到该页，
+                 再点不关闭）；与 on_click 同传时 on_click 优先
         priority: 优先级（同 tab_id 时高者覆盖低者）
         metadata: 附加元数据
     """
@@ -361,6 +443,7 @@ class TitlebarTabInfo:
     label: str
     icon_path: str = ""
     on_click: Optional[Callable[[], None]] = None
+    card_id: str = ""
     priority: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -470,6 +553,90 @@ class InputButtonInfo:
 
 
 @dataclass(frozen=True)
+class FooterStatInfo:
+    """消息卡片页脚左区信息项注册信息（吞吐量等统计数据由插件注入）
+
+    Attributes:
+        plugin_name: 所属插件名
+        stat_id: 信息项唯一 ID
+        provider: 取值回调，签名 (context: dict) -> Optional[dict]。
+            context 含 window_id / main_widget / role / model_name / elapsed /
+            token_usage / streaming / live_text / live_gen_s 等（见
+            MessageCard._footer_stat_context）；返回 None 表示本条消息不显示，
+            返回 {"text": str, "color": str(可选), "tooltip": str(可选)} 表示显示。
+        priority: 优先级（同 stat_id 时高者覆盖低者；显示顺序同值按注册序）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    stat_id: str
+    provider: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FooterActionInfo:
+    """消息卡片页脚右区 hover 按钮组注册信息（与内置分支/复制同排）
+
+    Attributes:
+        plugin_name: 所属插件名
+        action_id: 按钮唯一 ID
+        icon_path: 深色主题图标路径
+        icon_light_path: 浅色主题图标路径（可选，缺省回退 icon_path）
+        tooltip: 悬停提示
+        on_click: 点击回调，签名 (context: dict) -> None（context 同 FooterStatInfo）
+        priority: 优先级（同 action_id 时高者覆盖低者）
+        role: 渲染侧角色 "assistant" | "user" | "both"（assistant=助手页脚按钮组；
+              user=用户气泡底部操作行；both=两端都渲染）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    action_id: str
+    icon_path: str = ""
+    icon_light_path: str = ""
+    tooltip: str = ""
+    on_click: Optional[Callable[[Dict[str, Any]], None]] = None
+    priority: int = 0
+    role: str = "assistant"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WindowInfo:
+    """插件独立弹窗注册信息
+
+    Attributes:
+        plugin_name: 所属插件名
+        window_id: 窗口唯一 ID（open_window/命令联动键）
+        widget_class: QWidget 子类（窗口内容页，填满客户区）
+        title: 窗口标题（标题栏显示）
+        icon_path: 标题栏图标路径（缺省用 DriFox 图标）
+        width / height: 默认窗口几何
+        min_width / min_height: 最小尺寸（0 = 不限制）
+        context_provider: 可选上下文提供者（对齐 floating_card），
+                          无参回调返回 dict；open_window 时写入窗口 context
+        group: 左侧插件栏分组覆盖 "" | "system" | "custom"
+               （空 = 跟随插件归属：系统插件常驻区、用户插件自定义区）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    window_id: str
+    widget_class: type
+    title: str = ""
+    icon_path: str = ""
+    width: int = 640
+    height: int = 480
+    min_width: int = 0
+    min_height: int = 0
+    context_provider: Optional[Callable[[], Dict[str, Any]]] = None
+    group: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ContextMenuActionInfo:
     """右键菜单插件项注册信息（Phase D）
 
@@ -562,6 +729,9 @@ class UIPluginRegistry:
         self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
         # @ 提及条目提供者：{provider_id: MentionProviderInfo}
         self._mention_providers: Dict[str, MentionProviderInfo] = {}
+        # 消息身份提供者（name / avatar 两条独立通道）
+        self._identity_name_providers: List[IdentityProviderInfo] = []
+        self._identity_avatar_providers: List[IdentityProviderInfo] = []
         # Phase D：四类新扩展点（键为 item_id/button_id/action_id/card_id）
         self._sidebar_items: Dict[str, SidebarItemInfo] = {}
         self._input_buttons: Dict[str, InputButtonInfo] = {}
@@ -570,6 +740,13 @@ class UIPluginRegistry:
         # 标题栏常驻 tab 槽位：{tab_id: TitlebarTabInfo}
         self._titlebar_tabs: Dict[str, TitlebarTabInfo] = {}
         self._titlebar_widgets: Dict[str, TitlebarWidgetInfo] = {}
+        # 消息卡片页脚扩展点：左区信息项 + 右区 hover 按钮
+        self._footer_stats: Dict[str, FooterStatInfo] = {}
+        self._footer_actions: Dict[str, FooterActionInfo] = {}
+        # 插件独立弹窗：注册簿 + 已开实例 + 联动命令名
+        self._windows: Dict[str, WindowInfo] = {}
+        self._open_windows: Dict[str, Any] = {}  # {window_id: PluginWindow}
+        self._window_command_names: Dict[str, str] = {}
         self._services: Dict[str, tuple] = {}  # name -> (plugin_name, instance)
         # 右侧工作台页签槽位：{page_id: WorkbenchTabInfo}
         self._workbench_tabs: Dict[str, WorkbenchTabInfo] = {}
@@ -676,7 +853,7 @@ class UIPluginRegistry:
         if getattr(self, "_project_changed_subscribed", False):
             return
         try:
-            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
 
             self._project_changed_subscribed = True
             UIEventBus.get_instance().subscribe(EV_PROJECT_CHANGED, self._on_project_changed_event)
@@ -719,7 +896,7 @@ class UIPluginRegistry:
         if getattr(self, "_theme_changed_subscribed", False):
             return
         try:
-            from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
 
             self._theme_changed_subscribed = True
             UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, self._on_theme_changed_event)
@@ -789,7 +966,7 @@ class UIPluginRegistry:
         # P2-1：UI 回调 watchdog 包装（单次/滑窗超时 degrade → 连续熔断停用；
         # 重新注册即重置计数=修复恢复语义）
         try:
-            from app.core.ui_callback_watchdog import wrap_ui_callback
+            from app.core.infra.ui_callback_watchdog import wrap_ui_callback
 
             render_func = wrap_ui_callback(plugin_name, f"content:{type_name}", render_func)
         except Exception:
@@ -842,7 +1019,7 @@ class UIPluginRegistry:
             raise ValueError(f"invalid tag_name {tag_name!r}: must match [a-z0-9_-]+")
         # P2-1：UI 回调 watchdog 包装（同 content renderer 口径）
         try:
-            from app.core.ui_callback_watchdog import wrap_ui_callback
+            from app.core.infra.ui_callback_watchdog import wrap_ui_callback
 
             render_func = wrap_ui_callback(plugin_name, f"tag:{key}", render_func)
         except Exception:
@@ -1102,6 +1279,85 @@ class UIPluginRegistry:
         info.handler(content, ctx)
         return True
 
+    def register_identity_name_provider(
+        self,
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息身份的「显示名」提供者。
+
+        Args:
+            plugin_name: 所属插件名
+            provider_id: 提供者唯一标识（同 id 重复注册视为同一插件刷新，去重）
+            resolve_func: 回调 ``(ctx) -> str``，返回空串/None 表示未提供。
+                          ctx 含 role（user/assistant）/ session_id / team_agent / window_id。
+                          ⚠️ 渲染期高频调用，须为纯函数、禁止 I/O 与阻塞
+            priority: 优先级（高者先问）
+            metadata: 附加元数据
+        """
+        self._register_identity_provider(
+            self._identity_name_providers, plugin_name, provider_id, resolve_func, priority, metadata
+        )
+
+    def register_identity_avatar_provider(
+        self,
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息身份的「头像」提供者。
+
+        Args:
+            resolve_func: 回调 ``(ctx) -> str``，返回头像**引用**：
+                - 本地图片绝对路径
+                - 内置图标引用（``builtin:drifox``）
+                - 空串 → 渲染层用显示名派生色块 + 首字母
+                其余约束同 ``register_identity_name_provider``
+        """
+        self._register_identity_provider(
+            self._identity_avatar_providers, plugin_name, provider_id, resolve_func, priority, metadata
+        )
+
+    def _register_identity_provider(
+        self,
+        bucket: List[IdentityProviderInfo],
+        plugin_name: str,
+        provider_id: str,
+        resolve_func: Callable[[Dict[str, Any]], str],
+        priority: int,
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """身份 provider 通用注册（去重 + 按优先级排序）。"""
+        try:
+            from app.core.infra.ui_callback_watchdog import wrap_ui_callback
+
+            resolve_func = wrap_ui_callback(plugin_name, f"identity:{provider_id}", resolve_func)
+        except Exception:
+            pass
+        info = IdentityProviderInfo(
+            plugin_name=plugin_name,
+            provider_id=provider_id,
+            resolve_func=resolve_func,
+            priority=priority,
+            metadata=metadata or {},
+        )
+        bucket[:] = [p for p in bucket if not (p.plugin_name == plugin_name and p.provider_id == provider_id)]
+        bucket.append(info)
+        bucket.sort(key=lambda p: -p.priority)
+
+    def get_identity_name_providers(self) -> List[IdentityProviderInfo]:
+        """全部身份显示名提供者（按优先级降序）"""
+        return list(self._identity_name_providers)
+
+    def get_identity_avatar_providers(self) -> List[IdentityProviderInfo]:
+        """全部身份头像提供者（按优先级降序）"""
+        return list(self._identity_avatar_providers)
+
     def register_mention_provider(
         self,
         plugin_name: str,
@@ -1222,6 +1478,53 @@ class UIPluginRegistry:
         self._floating_cards[card_id] = info
         # 联动注册命令
         self._register_command_for_card(info)
+        # 主入口声明（一处注册、多处分发）：primary_entry 非空时自动派生常驻
+        # 入口（标题栏 tab / 侧栏项），插件无需再手写入口注册 + 绑定回调。
+        self._derive_primary_entry(info)
+
+    def _derive_primary_entry(self, info: FloatingCardInfo) -> None:
+        """按 metadata.primary_entry 自动派生常驻入口。
+
+        取值：
+        - dict: {"kind": "titlebar" | "sidebar", "label": str, "priority": int,
+                 "icon_path": str}（label 缺省用卡 title）
+        - str: "titlebar" / "sidebar"（label 用卡 title，priority 0）
+        - 其余（含缺省）: 不派生，行为与旧版一致
+
+        派生入口的 plugin_name = 卡插件名，插件卸载时随 unload_plugin 的
+        标题栏 tab / 侧栏项清理路径自动注销，无需额外清理代码。
+        """
+        entry = info.metadata.get("primary_entry")
+        if not entry:
+            return
+        if isinstance(entry, str):
+            entry = {"kind": entry}
+        kind = entry.get("kind")
+        label = entry.get("label") or info.title
+        priority = int(entry.get("priority", 0))
+        icon_path = entry.get("icon_path", "")
+        if kind == "titlebar":
+            self.register_titlebar_tab(
+                plugin_name=info.plugin_name,
+                tab_id=info.card_id,
+                label=label,
+                icon_path=icon_path,
+                card_id=info.card_id,
+                priority=priority,
+            )
+        elif kind == "sidebar":
+            self.register_sidebar_item(
+                plugin_name=info.plugin_name,
+                item_id=info.card_id,
+                label=label,
+                icon_path=icon_path,
+                priority=priority,
+                card_id=info.card_id,
+            )
+        else:
+            logger.warning(
+                f"[UIPluginRegistry] primary_entry.kind 非法: {kind!r}（card={info.card_id}，跳过派生）"
+            )
 
     def register_sidebar_item(
         self,
@@ -1233,11 +1536,23 @@ class UIPluginRegistry:
         default_visible: bool = True,
         priority: int = 0,
         on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
+        card_id: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册侧边栏插件项（Phase D 独立扩展点，与 floating card 解耦）"""
+        """注册侧边栏插件项（Phase D 独立扩展点，与 floating card 解耦）
+
+        card_id 声明式绑定：非空且未传 on_click 时，框架生成 toggle 语义回调
+        （已显示则关闭、未显示则打开，对齐侧栏按钮的开关直觉；right 容器卡
+        即「再点关闭页签并收起工作台」的既有行为）。on_click 同传时优先。
+        """
         if metadata is None:
             metadata = {}
+        if card_id and on_click is not None:
+            logger.warning(
+                f"[UIPluginRegistry] sidebar {item_id}: on_click 与 card_id 同传，on_click 优先"
+            )
+        elif card_id:
+            on_click = self._make_card_sidebar_callback(card_id)
         info = SidebarItemInfo(
             plugin_name=plugin_name,
             item_id=item_id,
@@ -1258,6 +1573,18 @@ class UIPluginRegistry:
         # 联动命令：注册即获得「等价于点击该项」的命令（有回调时）
         self._register_command_for_sidebar_item(info)
 
+    def _make_card_sidebar_callback(self, card_id: str) -> Callable[[Dict[str, Any]], None]:
+        """生成「侧栏语义」的卡片 toggle 回调：已显示则关闭、未显示则打开。
+
+        与 tab 回调（show-only）刻意不同：侧栏按钮的直觉是开关，right 容器卡
+        沿用「再点关闭页签并收起工作台」的既有行为。
+        """
+
+        def _on_item_click(_ctx: Dict[str, Any]) -> None:
+            self.toggle_floating_card(card_id)
+
+        return _on_item_click
+
     def get_sidebar_items(self) -> List[SidebarItemInfo]:
         """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按 priority 降序 → 注册序）
 
@@ -1276,18 +1603,37 @@ class UIPluginRegistry:
         label: str,
         icon_path: str = "",
         on_click: Optional[Callable[[], None]] = None,
+        card_id: str = "",
         priority: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册标题栏常驻 tab（无 × 关闭钮；点击走 on_click 回调自展示）"""
+        """注册标题栏常驻 tab（无 × 关闭钮；点击自展示）
+
+        card_id 声明式绑定（推荐）：传卡 ID 且未传 on_click 时，框架生成
+        「已可见则忽略、否则唤出该卡」回调，插件无需手写绑定样板（懒创建、
+        可见性检查、宿主解析均在框架层处理）。允许先注册 tab 后注册卡的顺序，
+        card_id 暂未注册仅告警不阻断。
+        """
         if metadata is None:
             metadata = {}
+        if card_id and on_click is not None:
+            logger.warning(
+                f"[UIPluginRegistry] tab {tab_id}: on_click 与 card_id 同传，on_click 优先（card_id 仅记录）"
+            )
+        elif card_id:
+            on_click = self._make_card_tab_callback(card_id)
+            if card_id not in self._floating_cards:
+                logger.warning(
+                    f"[UIPluginRegistry] tab {tab_id}: card_id={card_id!r} 尚未注册"
+                    "（若随后 register_floating_card 可忽略；永不注册则点击无效果）"
+                )
         info = TitlebarTabInfo(
             plugin_name=plugin_name,
             tab_id=tab_id,
             label=label,
             icon_path=icon_path,
             on_click=on_click,
+            card_id=card_id,
             priority=priority,
             metadata=metadata,
         )
@@ -1298,10 +1644,50 @@ class UIPluginRegistry:
         # 联动命令：注册即获得「等价于点击该 tab」的命令（有回调时）
         self._register_command_for_titlebar_tab(info)
 
+    def _make_card_tab_callback(self, card_id: str) -> Callable[[], None]:
+        """生成「tab 语义」的卡片唤出回调：已可见则忽略（不关闭），否则显示。
+
+        框架单点承载三件样板事：宿主解析（Tab 模式全局容器 / 单窗口回退）、
+        可见性检查（再点不关闭，对齐「切到该页」直觉）、懒创建显示（必须走
+        ``_show_floating_card``；直接 CardManager.show_card 会在 widget 未创建时
+        静默 return——历史上各插件手写回调各自踩过一遍的坑）。
+        """
+
+        def _on_tab_click() -> None:
+            host = self._resolve_global_host()
+            mw = host or self._main_widget
+            if mw is None:
+                return
+            card_manager = getattr(mw, "_card_manager", None)
+            window_id = getattr(mw, "_window_id", None)
+            if card_manager is None or not window_id:
+                return
+            try:
+                if card_manager.is_card_visible(card_id, window_id):
+                    return
+            except Exception:
+                pass
+            self._show_floating_card(card_id, main_widget=mw)
+
+        return _on_tab_click
+
     def unregister_titlebar_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部常驻 tab（插件卸载时调用）"""
         for tab_id in [tid for tid, v in self._titlebar_tabs.items() if v.plugin_name == plugin_name]:
             del self._titlebar_tabs[tab_id]
+
+    def unregister_titlebar_tab(self, plugin_name: str, tab_id: str) -> None:
+        """精确注销单个常驻 tab（校验归属防误删同 id 他插件 tab；联动命令同步注销）
+
+        供 WorkspacePageHost 等宿主层做「按声明重建」的幂等清理：整插件注销
+        （unregister_titlebar_tabs）会误删同插件 floating card 派生的 tab。
+        """
+        info = self._titlebar_tabs.get(tab_id)
+        if info is None or info.plugin_name != plugin_name:
+            return
+        del self._titlebar_tabs[tab_id]
+        if getattr(info, "on_click", None) is not None:
+            self.unregister_ui_command(self._ui_command_name(info.tab_id, info.plugin_name))
 
     def get_titlebar_tabs(self) -> List[TitlebarTabInfo]:
         """获取全部常驻 tab（按注册序返回，tab 栏位置即注册顺序）"""
@@ -1497,6 +1883,272 @@ class UIPluginRegistry:
         数据源：region 存储（Phase E 单源化）"""
         return [e.payload for e in self.get_region_entries("toolbar:input") if isinstance(e.payload, InputButtonInfo)]
 
+    def register_footer_stat(
+        self,
+        plugin_name: str,
+        stat_id: str,
+        provider: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息卡片页脚左区信息项（吞吐量等统计数据由插件注入）
+
+        provider 在卡片构建 / 回合落定 / 流式计时节拍时被回调（主线程），
+        要求纯内存快速计算，不得阻塞或弹 UI。
+        """
+        if metadata is None:
+            metadata = {}
+        info = FooterStatInfo(
+            plugin_name=plugin_name,
+            stat_id=stat_id,
+            provider=provider,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._footer_stats.get(stat_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._footer_stats[stat_id] = info
+
+    def get_footer_stats(self) -> List[FooterStatInfo]:
+        """获取全部页脚信息项（priority 降序 → 注册序）"""
+        items = sorted(self._footer_stats.values(), key=lambda i: -i.priority)
+        return items
+
+    def register_footer_action(
+        self,
+        plugin_name: str,
+        action_id: str,
+        icon_path: str = "",
+        icon_light_path: str = "",
+        tooltip: str = "",
+        on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
+        priority: int = 0,
+        role: str = "assistant",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息卡片页脚右区 hover 按钮组按钮（与内置分支/复制同排）
+
+        role: "assistant" 渲染在助手卡片页脚按钮组；"user" 渲染在用户气泡
+        底部操作行；"both" 两端都渲染。非法值回退 "assistant"。
+        """
+        if metadata is None:
+            metadata = {}
+        if role not in ("assistant", "user", "both"):
+            role = "assistant"
+        info = FooterActionInfo(
+            plugin_name=plugin_name,
+            action_id=action_id,
+            icon_path=icon_path,
+            icon_light_path=icon_light_path,
+            tooltip=tooltip,
+            on_click=on_click,
+            priority=priority,
+            role=role,
+            metadata=metadata,
+        )
+        existing = self._footer_actions.get(action_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._footer_actions[action_id] = info
+
+    def get_footer_actions(self) -> List[FooterActionInfo]:
+        """获取全部页脚插件按钮（priority 降序 → 注册序）"""
+        items = sorted(self._footer_actions.values(), key=lambda i: -i.priority)
+        return items
+
+    # ── 插件独立弹窗扩展点（register_window） ──
+
+    def register_window(
+        self,
+        plugin_name: str,
+        window_id: str,
+        widget_class: type,
+        title: str = "",
+        icon_path: str = "",
+        width: int = 640,
+        height: int = 480,
+        min_width: int = 0,
+        min_height: int = 0,
+        context_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        register_command: bool = True,
+        group: str = "",
+    ) -> None:
+        """注册插件独立弹窗（顶级窗口，壳复用主程序 FramelessWindow + CustomTitleBar）
+
+        窗口生命周期：随应用退出（aboutToQuit）或插件卸载（unload_plugin）销毁；
+        用户手动关闭同一并销毁实例。同 window_id 重复注册按后注册覆盖。
+        注册后自动出现在左侧自定义插件栏（TabPanel），点击开/关切换。
+
+        Args:
+            register_command: 是否联动注册 /<window_id> 命令
+                              （popout_card 合成窗口传 False 避免命令噪音）
+            group: 左侧插件栏分组覆盖 "system"（常驻区）| "custom"（自定义折叠区）|
+                   空字符串（跟随插件归属：系统插件→常驻，用户插件→自定义）
+
+        Side Effects:
+            register_command=True 时自动注册对应命令 /<window_id>（用户插件带命名空间前缀）
+        """
+        if metadata is None:
+            metadata = {}
+        if group not in ("", "system", "custom"):
+            group = ""
+        info = WindowInfo(
+            plugin_name=plugin_name,
+            window_id=window_id,
+            widget_class=widget_class,
+            title=title,
+            icon_path=icon_path,
+            width=width,
+            height=height,
+            min_width=min_width,
+            min_height=min_height,
+            context_provider=context_provider,
+            group=group,
+            metadata=metadata,
+        )
+        self._windows[window_id] = info
+        if register_command:
+            self._register_command_for_window(info)
+
+    def get_window_info(self, window_id: str) -> Optional[WindowInfo]:
+        """查询弹窗注册信息（不存在返回 None）"""
+        return self._windows.get(window_id)
+
+    def _register_command_for_window(self, info: WindowInfo) -> None:
+        """为插件弹窗注册「打开该窗」命令（命名空间对齐浮动卡）"""
+        cmd_name = self._ui_command_name(info.window_id, info.plugin_name)
+
+        def _handler(args: str, wid=info.window_id):
+            self.open_window(wid)
+
+        self._window_command_names[info.window_id] = cmd_name
+        self.register_ui_command(
+            cmd_name,
+            f"打开 {info.title or info.window_id}",
+            _handler,
+            owner=info.plugin_name,
+        )
+
+    def open_window(self, window_id: str, main_widget=None) -> Optional[Any]:
+        """打开插件独立弹窗（单例：同 id 已存在 → 前置 + 显示）
+
+        Args:
+            window_id: 已注册的窗口 ID
+            main_widget: 可选宿主窗口（仅用于 context 组装，不绑定窗口生命周期）
+
+        Returns:
+            窗口实例；未注册或无法创建（无 QApplication 等）返回 None
+        """
+        info = self._windows.get(window_id)
+        if info is None:
+            return None
+        win = self._open_windows.get(window_id)
+        if win is not None:
+            try:
+                win.show()
+                win.raise_()
+                win.activateWindow()
+                return win
+            except RuntimeError:
+                # 窗口已被 C++ 侧销毁但摘除失败（极端路径）：重建
+                self._open_windows.pop(window_id, None)
+                win = None
+        if win is None:
+            try:
+                from app.widgets.plugin_window import PluginWindow
+
+                win = PluginWindow(info, context=main_widget, registry=self)
+            except Exception as e:
+                logger.warning(f"[UIPluginRegistry] 创建插件窗口 {window_id} 失败: {e}")
+                return None
+            self._open_windows[window_id] = win
+            win.show()
+        return win
+
+    def get_window_infos(self) -> List[WindowInfo]:
+        """已注册的全部弹窗（注册序，供左侧自定义插件栏展示）"""
+        return list(self._windows.values())
+
+    def toggle_window(self, window_id: str) -> bool:
+        """左侧栏点击语义：未开 → 打开；已开 → 关闭。返回窗口中是否已开"""
+        if window_id in self._open_windows:
+            self.close_window(window_id)
+            return False
+        win = self.open_window(window_id)
+        return win is not None
+
+    def popout_card(self, card_id: str) -> Optional[Any]:
+        """把浮动卡片内容弹出为独立窗口（右键「弹出」）
+
+        首次弹出时以 card 的 widget_class/context_provider 合成一个临时
+        WindowInfo 注册进 _windows（window_id=popout:<card_id>，不注册命令）；
+        再次弹出走单例前置。关闭窗口保留注册（可再弹）。卸载插件时
+        按 plugin_name 一并清理。
+
+        context 对齐浮动卡激活路径：用 ``_make_context_provider``（含
+        project_root / session_id / plugin_icon 的动态解析）——直接拿
+        ``card_info.context_provider``（多数卡片为 None）会让弹窗内容
+        拿不到 project_root，数据与主题双失败（2026-09-17 git-panel 实测）。
+        """
+        info = self._floating_cards.get(card_id)
+        if info is None:
+            return None
+        popout_wid = f"popout:{card_id}"
+        if popout_wid in self._windows:
+            return self.open_window(popout_wid)
+        host = self._resolve_global_host()
+        window_id = getattr(host, "_window_id", None) if host is not None else None
+        ctx_provider = self._make_context_provider(info, window_id)
+        self.register_window(
+            plugin_name=info.plugin_name,
+            window_id=popout_wid,
+            widget_class=info.widget_class,
+            title=info.title or card_id,
+            context_provider=ctx_provider,
+            metadata=dict(info.metadata or {}),
+            register_command=False,
+        )
+        return self.open_window(popout_wid)
+
+    def hide_window(self, window_id: str) -> bool:
+        """隐藏插件弹窗（不销毁实例）；未打开返回 False"""
+        win = self._open_windows.get(window_id)
+        if win is None:
+            return False
+        try:
+            win.hide()
+        except RuntimeError:
+            self._open_windows.pop(window_id, None)
+        return True
+
+    def close_window(self, window_id: str) -> bool:
+        """关闭并销毁插件弹窗实例；未打开返回 False（幂等）"""
+        win = self._open_windows.pop(window_id, None)
+        if win is None:
+            return False
+        try:
+            win.close()
+            win.deleteLater()
+        except RuntimeError:
+            pass
+        return True
+
+    def get_open_windows(self) -> Dict[str, Any]:
+        """当前已打开的插件弹窗映射：{window_id: PluginWindow}"""
+        return dict(self._open_windows)
+
+    def destroy_all_windows(self) -> None:
+        """销毁全部插件弹窗（应用退出统一调用，幂等）"""
+        for wid in list(self._open_windows.keys()):
+            self.close_window(wid)
+
+    def _unregister_command_for_window(self, window_id: str) -> None:
+        """卸载插件弹窗对应的命令（按注册时记录的实际命令名反查，避免前缀错配）"""
+        cmd_name = self._window_command_names.pop(window_id, window_id)
+        self.unregister_ui_command(cmd_name)
+
     def register_context_menu_action(
         self,
         plugin_name: str,
@@ -1597,6 +2249,28 @@ class UIPluginRegistry:
             infos.extend(e.payload for e in region["entries"].values() if isinstance(e.payload, SettingsCardInfo))
         infos.sort(key=lambda i: -i.priority)
         return infos
+
+    def unregister_auto_config_cards(self, plugin_name: str) -> None:
+        """移除插件的 config_schema 自动设置卡（E1，metadata.auto_config_card）。
+
+        与 unload_plugin 分离：自动卡的清理只由 manifest 层触发
+        （PluginManager._unregister_config_schema，插件真正卸载/schema 删除时）；
+        ui 组件的 unload/load 不触碰它，避免热重载误杀 rescan 刚注册的卡。
+        """
+        self._settings_cards = {
+            k: v
+            for k, v in self._settings_cards.items()
+            if not (v.plugin_name == plugin_name and v.metadata.get("auto_config_card"))
+        }
+        for region in self._regions.values():
+            region["entries"] = {
+                k: v
+                for k, v in region["entries"].items()
+                if not (
+                    v.plugin_name == plugin_name
+                    and (getattr(v.payload, "metadata", None) or {}).get("auto_config_card")
+                )
+            }
 
     # ── Phase E：Region 通用挂载模型 ──
 
@@ -1752,8 +2426,8 @@ class UIPluginRegistry:
         description, handler = spec[0], spec[1]
         override_external = spec[3] if len(spec) > 3 else True
         try:
-            from app.core.builtin_commands import FunctionCommandHandlers
-            from app.core.command_manager import CommandManager, CommandType
+            from app.core.commands.builtin_commands import FunctionCommandHandlers
+            from app.core.commands.command_manager import CommandManager, CommandType
         except Exception:
             return
         cmd_mgr = CommandManager.get_instance()
@@ -1762,15 +2436,37 @@ class UIPluginRegistry:
         # handler 始终刷新：命令可能被 register_all_commands 清空后由本账本重建，
         # 且热重载后闭包指向新实例
         FunctionCommandHandlers.register(name, handler)
-        if not cmd_mgr.has_command(name):
+        # 快捷键以 shortcuts.json 为准。同名外部命令已注册时（如旧版兜底 md 残留，
+        # 先于 UI 注册且带过期 shortcut），也重注册覆盖；register 同名同类型时
+        # 保留旧 parameters/prompt_text，此处覆盖只影响 shortcut/description。
+        saved_shortcut = load_ui_command_shortcuts().get(name, "")
+        if not cmd_mgr.has_command(name) or saved_shortcut:
             cmd_mgr.register(
                 name=name,
                 command_type=CommandType.FUNCTION,
                 description=description,
                 argument_hint="",
+                shortcut=saved_shortcut,
             )
         self._ui_applied_names.add(name)
         self._ui_command_names.add(name)
+        # 带快捷键的 UI 命令落表后需重建 QShortcut 绑定（幂等；无快捷键时跳过避免启动期浪费）。
+        # 守卫：仅 QApplication 与活窗口均已就绪时才 rebind——_rebind 会惰性创建
+        # TrayManager 单例，启动早期/无头环境（测试）拉起托盘会 native crash。
+        # 冷启动场景由主窗口初始化时的 _register_command_shortcuts 全量扫描兑底。
+        if saved_shortcut:
+            try:
+                from PySide6.QtWidgets import QApplication
+
+                from app.core.infra import window_registry
+
+                if QApplication.instance() is not None and window_registry.alive_window_instances():
+                    from app.core.commands.builtin_commands import _rebind_command_shortcuts
+
+                    logger.info(f"[UIPluginRegistry] UI 命令 /{name} 带快捷键落表，重建 QShortcut 绑定")
+                    _rebind_command_shortcuts()
+            except Exception:
+                logger.warning(f"[UIPluginRegistry] /{name} 快捷键重绑失败", exc_info=True)
 
     def unregister_ui_command(self, name: str) -> None:
         """注销单条 UI 命令（账本 + CommandManager + 处理器三处同步）
@@ -1784,13 +2480,26 @@ class UIPluginRegistry:
         self._ui_applied_names.discard(name)
         self._ui_command_names.discard(name)
         try:
-            from app.core.builtin_commands import FunctionCommandHandlers
-            from app.core.command_manager import CommandManager
+            from app.core.commands.builtin_commands import FunctionCommandHandlers
+            from app.core.commands.command_manager import CommandManager
 
             CommandManager.get_instance().unregister(name)
             FunctionCommandHandlers._handlers.pop(name, None)
         except Exception:
             pass
+        # 注销带快捷键的 UI 命令后重建 QShortcut，清掉幽灵绑定（环境守卫同 _apply_ui_command）
+        if load_ui_command_shortcuts().get(name, ""):
+            try:
+                from PySide6.QtWidgets import QApplication
+
+                from app.core.infra import window_registry
+
+                if QApplication.instance() is not None and window_registry.alive_window_instances():
+                    from app.core.commands.builtin_commands import _rebind_command_shortcuts
+
+                    _rebind_command_shortcuts()
+            except Exception:
+                pass
 
     def unregister_ui_commands(self, owner: str) -> None:
         """按归属插件批量注销其全部 UI 命令（含浮动卡 / 工作台页 / 工作区页）"""
@@ -1843,7 +2552,7 @@ class UIPluginRegistry:
             return f"{plugin_name}:{base_id}"
         if base_id not in self._ui_applied_names:
             try:
-                from app.core.command_manager import CommandManager
+                from app.core.commands.command_manager import CommandManager
 
                 if CommandManager.get_instance().has_command(base_id):
                     return f"{plugin_name}:{base_id}"
@@ -1902,12 +2611,14 @@ class UIPluginRegistry:
         if info is None or getattr(info, "on_click", None) is None or win is None:
             return
         try:
+            builder = getattr(win, "_build_ui_services", None)
             info.on_click(
                 {
                     "button_id": info.button_id,
                     "plugin_name": info.plugin_name,
                     "window_id": getattr(win, "_window_id", None),
                     "main_widget": win,
+                    "services": builder() if callable(builder) else {},
                 }
             )
         except Exception as e:
@@ -2309,13 +3020,12 @@ class UIPluginRegistry:
         self._window_main_widgets[window_id] = host
 
         # tab × 关闭钮 → registry 同步清理卡片状态并摘 tab。
-        # ★ 严禁使用 type=Qt.UniqueConnection：UIPluginRegistry 不是 QObject 子类，
-        #   PySide6 对「非 QObject 成员函数 + UniqueConnection」的连接会直接拒绝，
-        #   且只往 stderr 打一行 qt.core.qobject.connect 警告、不抛 Python 异常，
-        #   于是 connect 静默失败、标志位照样被置 True，表现为「点 × 毫无反应且无报错」。
-        #   去重已由下面 panel 级幂等标志保证，UniqueConnection 是多余且致命的。
         # ★ 幂等标志必须挂在 panel 上：registry 是全局单例、panel 每宿主一份，挂在 self 上
-        #   会让第二个 panel 永远接不上线。
+        #   会让第二个 panel 永远接不上线；接线也必须留在 if widget is None 之外——
+        #   卡片实例复用路径此前会整段跳过接线。
+        # ★ 不用 type=Qt.UniqueConnection：本方法多次进入时标志已防重，
+        #   UniqueConnection 与普通函数组合在各绑定下语义不一（PyQt5 重复连会抛 TypeError）。
+        #   （同步 pyside6 ad524790）
         if not getattr(panel, "_drifox_card_close_wired", False):
             panel.card_tab_close_requested.connect(self._close_workbench_card_tab)
             panel._drifox_card_close_wired = True
@@ -2379,7 +3089,7 @@ class UIPluginRegistry:
         host = self._resolve_global_host()
         panel = getattr(host, "workbench_panel", None) if host is not None else None
         if panel is None:
-            # 静默 return 会让「点了没反应」永远查不到证据，必须留痕
+            # 静默 return 会让「点了没反应」永远查不到证据，必须留痕（同步 pyside6 ad524790）
             logger.warning(
                 "[UIPluginRegistry] 关闭卡片页签时拿不到工作台面板，tab 不会被摘除 (card_id=%s, host=%s)",
                 card_id,
@@ -2822,6 +3532,13 @@ class UIPluginRegistry:
         # 清理 welcome actions
         self._welcome_actions = {k: v for k, v in self._welcome_actions.items() if v.plugin_name != plugin_name}
         self._mention_providers = {k: v for k, v in self._mention_providers.items() if v.plugin_name != plugin_name}
+        # 清理消息身份 provider（name / avatar 两条通道）
+        self._identity_name_providers = [
+            p for p in self._identity_name_providers if p.plugin_name != plugin_name
+        ]
+        self._identity_avatar_providers = [
+            p for p in self._identity_avatar_providers if p.plugin_name != plugin_name
+        ]
         # 清理 floating cards + 对应命令
         cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:
@@ -2861,7 +3578,23 @@ class UIPluginRegistry:
         self._sidebar_items = {k: v for k, v in self._sidebar_items.items() if v.plugin_name != plugin_name}
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
         self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
-        self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
+        # 清理消息卡片页脚扩展点
+        self._footer_stats = {k: v for k, v in self._footer_stats.items() if v.plugin_name != plugin_name}
+        self._footer_actions = {k: v for k, v in self._footer_actions.items() if v.plugin_name != plugin_name}
+        # 清理插件独立弹窗：销毁已开实例 + 移除注册 + 注销联动命令（幂等）
+        for wid in [k for k, v in self._windows.items() if v.plugin_name == plugin_name]:
+            self.close_window(wid)
+            self._unregister_command_for_window(wid)
+            self._windows.pop(wid, None)
+        # config_schema 自动设置卡（metadata.auto_config_card）保留：其生命周期归
+        # manifest 层（PluginManager._unregister_config_schema），ui 组件的 unload/load
+        # 不得误伤——否则 targeted 热重载「rescan 注册卡 → ui 卸载清卡」会让插件配置卡
+        # 从设置页消失，直到下一次全量扫描才回来（2026-09-14 安装/更新后配置卡不刷新回归）。
+        self._settings_cards = {
+            k: v
+            for k, v in self._settings_cards.items()
+            if v.plugin_name != plugin_name or v.metadata.get("auto_config_card")
+        }
         # 清理工作区页面槽（Phase G）
         self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
         # 清理右侧工作台页签槽位（含其联动命令）
@@ -2874,9 +3607,14 @@ class UIPluginRegistry:
         self.unregister_titlebar_widgets(plugin_name)
         # 清理服务槽
         self._services = {k: v for k, v in self._services.items() if v[0] != plugin_name}
-        # 清理通用区域条目（Phase E）
+        # 清理通用区域条目（Phase E）；settings: 分区中 auto_config_card 条目保留（同上）
         for region in self._regions.values():
-            region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}
+            region["entries"] = {
+                k: v
+                for k, v in region["entries"].items()
+                if v.plugin_name != plugin_name
+                or (getattr(v.payload, "metadata", None) or {}).get("auto_config_card")
+            }
         # 清理 UI 模块槽（Phase F）：仅移除该 plugin 的实现，其余保留
         for module_id, impls in list(self._ui_modules.items()):
             kept = [s for s in impls if s[0] != plugin_name]
@@ -2885,7 +3623,7 @@ class UIPluginRegistry:
             else:
                 self._ui_modules.pop(module_id, None)
         # 事件总线退订：防止悬挂回调引用已卸载的旧模块闭包
-        from app.core.ui_event_bus import UIEventBus
+        from app.core.infra.ui_event_bus import UIEventBus
 
         UIEventBus.get_instance().unsubscribe_plugin(plugin_name)
         self._loaded_plugins.discard(plugin_name)
@@ -3349,6 +4087,13 @@ class UIPluginRegistry:
         self._tab_card_visibility.clear()
         self._active_tab_scope = None
         self._tab_sync_in_progress = False
+        # 插件独立弹窗：销毁已开实例 + 清注册簿（QApplication 存在时）
+        if self._open_windows:
+            for wid in list(self._open_windows.keys()):
+                self.close_window(wid)
+        self._open_windows.clear()
+        self._windows.clear()
+        self._window_command_names.clear()
         # 重置单例本身（建议）——让下一次 get_instance() 重新创建，
         # 避免测试间残留 _instance 上的实例属性
         UIPluginRegistry._instance = None
@@ -3463,6 +4208,22 @@ def _declare_builtin_slots() -> None:
     declare_slot("context_menu", lambda r: r._context_actions.items())
     declare_slot("settings_card", lambda r: r._settings_cards.items())
     declare_slot("mention_provider", lambda r: r._mention_providers.items())
+    # 消息卡片页脚：左区信息项 / 右区 hover 按钮（改动后不牵动既有视图，仅登记）
+    declare_slot("footer_stat", lambda r: r._footer_stats.items())
+    declare_slot("footer_action", lambda r: r._footer_actions.items())
+    # 插件独立弹窗：改动后旧实例已由 unload 销毁，仅登记占位（未归类 → 回退全量）
+    declare_slot("plugin_window", lambda r: r._windows.items())
+    # 消息身份 provider：命中时需重渲染消息区（身份行随插件变化）
+    declare_slot(
+        "identity_name_provider",
+        lambda r: enumerate(r._identity_name_providers),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "identity_avatar_provider",
+        lambda r: enumerate(r._identity_avatar_providers),
+        scopes=(SCOPE_MESSAGES,),
+    )
     declare_slot("service", lambda r: r._services.items(), owner=lambda e: e[0])
     declare_slot(
         "ui_module",

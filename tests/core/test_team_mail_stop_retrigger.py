@@ -14,7 +14,7 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
-from app.core import team_manager as tm_mod
+from app.core.team import team_manager as tm_mod
 from app.core.workers.chat_worker import OpenAIChatWorker
 from app.main_widget import OpenAIChatToolWindow
 

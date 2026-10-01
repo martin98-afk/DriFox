@@ -45,6 +45,53 @@ for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
     os.environ.pop(_env_key, None)
 
 
+# ========== 全局异常钩子（T44 提前安装）==========
+# 原版安装在 _deferred_startup（主窗就绪后），启动早期（巨型 import / QApplication
+# 创建 / 首窗构造期）存在未兜窗口：PyQt5.15 槽内裸异常默认 fastfail（T42 实测），
+# 唯一救生索是 excepthook 被显式覆盖。现提前到 import 段后立即安装，三个钩子：
+#   sys.excepthook        主线程未捕获异常
+#   sys.unraisablehook    __del__ 中的被忽略异常
+#   threading.excepthook  子线程未捕获异常（chat_worker/subagent_worker 等，
+#                         此前完全未兜，与本轮稳定性直接相关）
+# _deferred_startup 内不再重复定义（合并为同一函数，行为一致：打日志、不退进程）。
+import threading
+import traceback as _exc_tb
+
+from loguru import logger as _hook_logger
+
+
+def _pyqt_exception_hook(exc_type, exc_val, exc_tb):
+    _hook_logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
+    _hook_logger.error("".join(_exc_tb.format_exception(exc_type, exc_val, exc_tb)))
+
+
+def _unraisable_hook(unraisable):
+    msg = getattr(unraisable.exc_value, "args", (str(unraisable.exc_value),))
+    err_msg = msg[0] if msg else str(unraisable.exc_value)
+    _hook_logger.error(f"[UnraisableException] {unraisable.exc_type.__name__}: {err_msg}")
+    if unraisable.object:
+        _hook_logger.error(f"  Object: {unraisable.object!r}")
+    _hook_logger.error(f"  Err: {unraisable.err_msg}")
+
+
+def _threading_excepthook_hook(args):
+    thread_name = args.thread.name if args.thread is not None else "?"
+    _hook_logger.error(
+        f"[ThreadUnhandledException] {args.exc_type.__name__}: {args.exc_value} in thread {thread_name}"
+    )
+    _hook_logger.error("".join(_exc_tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+
+def _install_global_exception_hooks() -> None:
+    """安装三钩子（幂等：重复调用只是重复赋值，行为一致）。"""
+    sys.excepthook = _pyqt_exception_hook
+    sys.unraisablehook = _unraisable_hook
+    threading.excepthook = _threading_excepthook_hook
+
+
+_install_global_exception_hooks()
+
+
 # ========== 内存诊断开关 ==========
 # 设为 False 可禁用所有 [MEM] 诊断日志和 mem_diag.log 文件
 # 关闭后 Worker 内也不再执行内存快照和自适应 GC 日志
@@ -99,6 +146,28 @@ def main():
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import QApplication
 
+    # 启动分段打点：壳前各段（巨型 import / 主窗口构造）历史上有累计 ~3s
+    # 的无日志空窗，逐段 DEBUG 打点便于定位后续优化目标（行为零变更）
+    import time as _sm_time
+
+    _sm_seg = _sm_time.perf_counter()
+
+    def _smark(label: str, level: str = "debug") -> None:
+        """启动分段打点。
+
+        [T29 C1] level 参数：关键分界点（壳可见 / import 完成 / 首窗就绪）用
+        "info" 提升可见性——普通用户的默认日志级别即可看到启动耗时分布，
+        无需开 DEBUG。
+        """
+        nonlocal _sm_seg
+        _now = _sm_time.perf_counter()
+        msg = f"[StartupMark] {label} 耗时 {(_now - _sm_seg) * 1000:.0f}ms"
+        if level == "info":
+            logger.info(msg)
+        else:
+            logger.debug(msg)
+        _sm_seg = _now
+
     if _qt_pp: 
         logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
 
@@ -107,8 +176,8 @@ def main():
 
     # DPI 缩放设置
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    # 迁移注记：Qt6 高 DPI 永远启用，AA_EnableHighDpiScaling/AA_UseHighDpiPixmaps
-    # 已无效果（设置会触发弃用警告），仅保留 rounding policy。
+    # 迁移注记（PySide6/Qt6）：高 DPI 永远启用，AA_EnableHighDpiScaling /
+    # AA_UseHighDpiPixmaps 已无效果（设置会触发弃用警告），仅保留 rounding policy。
     # OpenGL 走 ANGLE(D3D11)：绕开 Intel OpenGL ICD 缺陷路径（见文件顶部说明）。
     # 必须在 QApplication 与 WebEngine 导入之前设置。
     # 由 RenderBackend 推导（见 render_env.compute_settings）：hardware / software
@@ -130,10 +199,8 @@ def main():
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
     # 否则后续模块（如 message_card.py）中延迟导入会导致：
     #   ImportError: QtWebEngineWidgets must be imported before a QCoreApplication instance is created
-    # Qt6 迁移：QWebEnginePage/QWebEngineSettings 已移至 QtWebEngineCore，
-    # QWebEngineView 仍在 QtWebEngineWidgets（Qt6 拆分模块）。
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
-    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings  # noqa: F401
+    from PySide6.QtWebEngineCore import QWebEnginePage
 
     # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
@@ -149,35 +216,65 @@ def main():
     # ========== 延迟启动的非关键 I/O 操作 ==========
     # 以下操作不阻塞首帧渲染，放到一次性定时器中执行
 
-    def _deferred_startup():
-        """在事件循环启动后执行的非关键初始化"""
-        # 迁移旧版本数据
+    # [T24 R4] 日志 + 原生崩溃捕获前置（壳显示后立即执行；幂等）。
+    # 背景：setup_logging / faulthandler 原在 _deferred_startup 中（事件循环后），
+    # 而 T7 把 main_widget 级联 import 移进了 _show_popup —— 壳已显示但 import
+    # 期间（~3s）若崩溃，既无日志也无 dump，构成取证盲窗。现在提前到 tm.show()
+    # 之后立即执行；_deferred_startup 中保留同函数调用（幂等，覆盖其它路径）。
+    _early_forensics_state = {"done": False}
+
+    def _setup_early_forensics():
+        """启用日志与 faulthandler（幂等）。
+
+        顺序：数据迁移 → 日志 → 崩溃捕获。迁移必须先于日志——打包版迁移会
+        rmtree 目标目录后重建，若日志先开，句柄会指向被删除的文件。
+        """
+        if _early_forensics_state["done"]:
+            return
+        _early_forensics_state["done"] = True
         try:
             from app.utils.utils import migrate_app_data_if_needed
 
             migrate_app_data_if_needed()
         except Exception:
-            logger.exception("[DeferredStartup] migrate_app_data_if_needed 失败")
-
-        # 设置日志（全量 all.log + 按子系统拆分的分文件，见 app/core/logging_setup.py）
+            logger.exception("[EarlyForensics] migrate_app_data_if_needed 失败")
         try:
-            from app.core.logging_setup import setup_logging
+            from app.core.infra.logging_setup import setup_logging
             from app.utils.utils import get_app_data_dir
 
             setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
         except Exception:
             pass
-
-        # 原生崩溃捕获（faulthandler）：Qt/C++ 层段错误不经过 Python excepthook，
-        # 打包版表现为「闪退且 all.log 无任何记录」。启用后崩溃栈 dump 到
-        # logs/crash/，下次启动由 crash_handler.check_pending_crashes 检测并弹窗。
         try:
-            from app.core.crash_handler import install_crash_handler
+            from app.core.infra.crash_handler import install_crash_handler
             from app.utils.utils import get_app_data_dir
 
             install_crash_handler(get_app_data_dir() / "logs")
         except Exception:
             pass
+
+    def _deferred_startup():
+        """在事件循环启动后执行的非关键初始化"""
+        # 分段计时：本函数整体在主线程串行执行，任一步骤拖慢都会顺延后续步骤
+        # （历史上 openai resources 预导入独占 ~4s 无从察觉），逐段打点便于定位
+        import time as _time
+
+        _seg_t = _time.perf_counter()
+
+        def _mark(label: str) -> None:
+            nonlocal _seg_t
+            _now = _time.perf_counter()
+            logger.debug(f"[DeferredStartup] {label} 耗时 {(_now - _seg_t) * 1000:.0f}ms")
+            _seg_t = _now
+
+        _mark("enter")
+
+        # [T24 R4] 迁移/日志/崩溃捕获已提前到壳显示后（_setup_early_forensics，
+        # 见 _show_popup 内调用）。此处保留兜底调用：非 _show_popup 启动路径
+        # （如测试直接调 _deferred_startup）仍需保证日志与 faulthandler 就绪；
+        # 幂等 → 已执行过则为空操作。
+        _setup_early_forensics()
+        _mark("early_forensics(fallback)")
 
         # 同步开机自启注册表状态
         try:
@@ -187,20 +284,52 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] sync_auto_start_from_config 失败")
 
+        # 备份容量清理（EU-G6）：分治配额，两类备份互不挤占
+        # - FileRecorder 备份（高频产物）：独立配额 = backup_limit_mb，排除 deleted/
+        # - 删除保护快照（误删后唯一恢复手段）：独立配额 = 总配额 1/4，下限 100MB
+        #   ⚠ 派生规则（1/4 + 下限 100MB）刻意如此：共享一个 FIFO 配额会让日常
+        #   编辑把快照挤干净 —— 安全功能静默失效，不可接受。
+        # - backup_limit_mb <= 0 = 不限（函数内部自处理，无需在此判 0）
+        # ⚠️ 必须走后台线程：实测扫盘 + 删除耗时随文件数线性增长
+        #   （144 文件 ≈ 87ms；2000 文件 ≈ 800ms；10000 文件 ≈ 11.7s），
+        #   主线程同步执行会冻结 UI 十秒级。清理本身无 UI 交互，后台安全。
+        def _cleanup_backups() -> None:
+            try:
+                from app.tools.sandbox import SandboxConfig
+                from app.utils.file_operation_recorder import cleanup_backups_partitioned
+                from app.utils.utils import get_app_data_dir
+
+                limit = int(SandboxConfig.get_instance().get("backup_limit_mb") or 0)
+                cleanup_backups_partitioned(get_app_data_dir() / "backups", limit)
+            except Exception:
+                logger.exception("[DeferredStartup] 备份容量清理失败")
+
+        try:
+            import threading
+
+            _bk_t0 = _time.perf_counter()
+            _bk_thread = threading.Thread(target=_cleanup_backups, daemon=True)
+            _bk_thread.start()
+            logger.debug(f"[DeferredStartup] 备份清理已派发后台线程（派发耗时 {(_time.perf_counter() - _bk_t0) * 1000:.1f}ms）")
+        except Exception:
+            logger.exception("[DeferredStartup] 启动备份清理线程失败")
+        _mark("backup_limit_cleanup(dispatch)")
+
         # 初始化共享 WebEngine Profile（轻量，不启动 Chromium 进程）
         # [PERF] 从主线程关键路径移到这里，首帧不再阻塞
         try:
-            from app.core.webengine_profile import init_shared_web_profile
+            from app.core.infra.webengine_profile import init_shared_web_profile
 
             init_shared_web_profile(parent=app)
         except Exception:
             logger.exception("[DeferredStartup] init_shared_web_profile 失败")
+        _mark("init_shared_web_profile")
 
         # 启动后台 RSS 采样器：把 psutil 进程表遍历从主线程搬走。
         # 采样结果供 B4 强回收阈值判定使用（原为每 content chunk 同步采样，
         # 单次 20-80ms，是流式卡顿主因之一）。
         try:
-            from app.core.rss_sampler import rss_sampler
+            from app.core.infra.rss_sampler import rss_sampler
 
             rss_sampler.ensure_started()
         except Exception:
@@ -224,12 +353,16 @@ def main():
         # import 锁死锁检测，多线程首次并发访问 client.chat/client.responses
         # 会抛 _ModuleLock deadlock。
         try:
-            from app.utils.http_client import preload_openai_resources
+            # [PERF] 冷导入实测 4-5s（`import openai` 3.5s + resources 1.9s），
+            # 改后台线程顺序导入：死锁只在多线程并发导入不同模块时出现，
+            # 单线程串行走完不会触发，主线程不再冻结这段
+            from app.utils.http_client import preload_openai_resources_async
 
-            preload_openai_resources()
-            logger.debug("[DeferredStartup] openai resources 子模块预导入完成")
+            preload_openai_resources_async()
+            logger.debug("[DeferredStartup] openai resources 子模块预导入已转后台线程")
         except Exception:
             logger.exception("[DeferredStartup] openai resources 预导入失败（非致命）")
+        _mark("openai_preload_async")
 
         # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
         # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
@@ -258,11 +391,12 @@ def main():
             logger.debug("[DeferredStartup] WebEngine 预热视图已创建（5s 后释放）")
         except Exception:
             logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
+        _mark("webengine_preheat")
 
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
             try:
-                from app.core.models_dev_sync import load_dynamic_models
+                from app.core.modelmeta.models_dev_sync import load_dynamic_models
 
                 result = load_dynamic_models()
                 dynamic_count = sum(len(v) for v in result.provider_models.values())
@@ -302,32 +436,48 @@ def main():
 
     qInstallMessageHandler(_qt_message_handler)
 
-    # 全局 Python 异常钩子（兜底）
-    import traceback as _traceback
-
-    def _pyqt_exception_hook(exc_type, exc_val, exc_tb):
-        _logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
-        _logger.error("".join(_traceback.format_exception(exc_type, exc_val, exc_tb)))
-
-    sys.excepthook = _pyqt_exception_hook
-
-    # sys.unraisablehook
-    def _unraisable_hook(unraisable):
-        msg = getattr(unraisable.exc_value, "args", (str(unraisable.exc_value),))
-        err_msg = msg[0] if msg else str(unraisable.exc_value)
-        _logger.error(f"[UnraisableException] {unraisable.exc_type.__name__}: {err_msg}")
-        if unraisable.object:
-            _logger.error(f"  Object: {unraisable.object!r}")
-        _logger.error(f"  Err: {unraisable.err_msg}")
-
-    sys.unraisablehook = _unraisable_hook
+    # 全局 Python 异常钩子（兜底）—— [T44] 已提前到模块级安装
+    # （_pyqt_exception_hook / _unraisable_hook / _threading_excepthook_hook，
+    # 见文件头部「全局异常钩子」段），此处不再重复定义。
 
     # 禁用默认退出行为
     app.setQuitOnLastWindowClosed(False)
 
     # ========== 单实例检查 ==========
-    from app.core.single_instance import SingleInstanceGuard
+    from app.core.infra.single_instance import SingleInstanceGuard
     from app.utils.config import Settings
+
+    # [T24 R2] 二次启动 show 请求的接入口必须在拿到单实例锁后**立即**注册。
+    # 此前注册在 _show_popup 末尾（首窗 add_window 之后）：T7 把 main_widget
+    # 级联 import（~3s）后移到该点之前，窗口期内的二次启动请求会因
+    # show_requested 无接收者而静默丢弃（用户感知：双击图标无反应）。
+    # 现在改为：锁即注册；窗口未就绪时先记 pending，首窗就绪后补激活。
+    _show_window_state: dict = {"window": None, "wanted": False}
+
+    def _activate_window(window):
+        """激活窗口：显示 + 置前 + 还原"""
+        window.show()
+        window.activateWindow()
+        window.raise_()
+        if window.isMinimized():
+            window.showNormal()
+
+    def _on_show_requested():
+        """二次启动 show 请求：窗口就绪则激活，未就绪先记 pending（T24 R2）。"""
+        win = _show_window_state["window"]
+        if win is None:
+            _show_window_state["wanted"] = True
+            # [T36 P5] pending 超时兜底：首窗构造异常（如渲染环境崩溃）时，
+            # 二次启动请求会一直挂在 wanted 上被静默丢弃 → 用户双击图标无反应。
+            # 30s 后仍未就绪则清 wanted + 告警（对应 T24 R2 的"窗口期"上限）。
+            def _expire_pending() -> None:
+                if _show_window_state["window"] is None and _show_window_state["wanted"]:
+                    _show_window_state["wanted"] = False
+                    logger.warning("[Main] 二次启动 show 请求超时（30s 内首窗未就绪），已放弃")
+
+            QTimer.singleShot(30000, _expire_pending)
+            return
+        _activate_window(win)
 
     # 锁名带 6 后缀：与 PyQt5 版（Drifox）分开，两版可同时开、互不误判为对方在运行
     _guard = SingleInstanceGuard("Drifox6")
@@ -336,6 +486,9 @@ def main():
         _guard.request_show_window()
         _guard.cleanup()
         return
+
+    # [T24 R2] 锁就绪 → 立即接上 show 请求入口，覆盖后续 import 窗口期
+    _guard.show_requested.connect(_on_show_requested)
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
@@ -369,7 +522,8 @@ def main():
     logger.info("LLM Chatter 启动中...")
 
     from PySide6.QtWidgets import QWidget
-    from app.main_widget import OpenAIChatToolWindow
+
+    _smark("pre_import（单实例/主题/字体）")
 
     class FakePage(QWidget):
         def __init__(self):
@@ -405,14 +559,7 @@ def main():
             pass
 
     fake_page = FakePage()
-
-    def _activate_window(window):
-        """激活窗口：显示 + 置前 + 还原"""
-        window.show()
-        window.activateWindow()
-        window.raise_()
-        if window.isMinimized():
-            window.showNormal()
+    _smark("fake_page")
 
     def _show_popup():
         from app.utils.config import Settings
@@ -428,37 +575,102 @@ def main():
         # ── Tab 模式 ──
         from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
+        _smark("import_tab_manager")
         tm = TabManagerWindow.create_instance()
-        # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 进程级预热
-        # （SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
-        # 首个 ChatWindow 必须在 TabManagerWindow 创建之后构造：
-        # TabManagerWindow.__init__ 里 PluginHostService.ensure_started() 同步完成
-        # PluginManager 扫描；若先构造本窗口，其 setup_ui 的 _load_all_ui_plugins 与
-        # 首帧 singleShot(0) 重试都会早于 ensure_started 执行（pm 未就绪静默 return），
-        # 此后无人再触发 UI 插件装载 → 主窗口插件内容（卡片/侧边栏/输入按钮）全部缺失。
+        _smark("tab_manager_create")
+        # [体验] 置顶 hint 必须在首次 show 之前应用：setWindowFlags 在窗口已可见时
+        # 会销毁并重建 native 窗口，表现为「窗口出现后闪一下（消失又出现）」。
+        # 未 show 时改 flags 不触发重建，后续 tm.show() 一次性显示。
+        _apply_window_topmost(tm)
+        # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 应用级服务启动
+        # → 进程级预热（SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
+        # [PERF 2026-09-14] GatewayService/PluginHostService.ensure_started() 从
+        # TabManagerWindow.__init__ 挪到此处：插件发现 + tools/agents/hooks 注册
+        # 实测 ~1.1s，不再挡在壳窗口出现之前。时序约束不变：首个 ChatWindow 仍
+        # 必须在 ensure_started 之后构造——若先构造首窗，其 _load_all_ui_plugins
+        # 会因 pm 未就绪静默 return 且无人重试，主窗口插件内容（卡片/侧边栏/
+        # 输入按钮）全部缺失。
         tm.show()
         tm.show_boot_placeholder()
+        # [T24 R6] 同步重绘一次，让壳在 import 阻塞前真正画出来。
+        # show() 是异步的（实际绘制等事件循环的 expose），而紧随其后的
+        # main_widget 级联 import 会阻塞主线程 ~3s，期间事件循环不跑 →
+        # 窗口始终未绘制（用户看到白屏/空窗而非「正在准备会话…」）。
+        # repaint() 强制同步绘制当前帧且**不处理事件队列**：
+        # - 方案 a（processEvents）实测会吸入 _deferred_startup 的 singleShot(0)，
+        #   使其在 _show_popup 中途重入执行（打断启动时序约束），故不采用；
+        # - 方案 b（占位文本前置）实测无效：占位在 show 前后设置都一样，
+        #   回调内 paintEvent 根本不被调用（paint 必须等事件循环）。
+        # 兜底：repaint 异常不影响启动主流程。
+        try:
+            tm.repaint()
+        except Exception:
+            pass
+        # [T24 R4] 壳已可见 → 立即启用日志与崩溃捕获，缩小 import 期的取证盲窗
+        _setup_early_forensics()
+        _smark("early_forensics")
+        # [T29 C1] 关键分界点：壳可见 + 日志/崩溃捕获已就绪（import 盲窗已消除）。
+        # info 级别：普通用户日志即可看到「壳可见 → 首窗就绪」的耗时分布。
+        _smark("shell_visible_after_logging", level="info")
+        from app.core.services.gateway_service import GatewayService
+        from app.core.services.plugin_host_service import PluginHostService
+
+        _smark("import_services", level="info")
+        GatewayService.get_instance().ensure_started()
+        PluginHostService.get_instance().ensure_started()
+        _smark("app_services_start")
         from app.utils.preheat import preheat_process_level
 
         preheat_process_level()
+        _smark("preheat_process")
+        # [PERF T7] 巨型 import 后移：main_widget 级联 import（message_card/cards/
+        # tab_manager_window/qfluentwidgets，历史实测 ~3s）原在顶层，挡住启动壳；
+        # 现移到壳显示 + 应用级服务启动 + 进程级预热之后、首窗构造前。
+        # 时序安全：WebEngine 已在启动早期预导入；首窗构造本就要求在
+        # ensure_started/preheat 之后（见上方时序约束注释），import 与首窗
+        # 构造同属此节点，无新增顺序依赖。
+        from app.main_widget import OpenAIChatToolWindow
+
+        _smark("import_main_widget", level="info")
         chat_window = OpenAIChatToolWindow(fake_page)
+        _smark("first_chat_window", level="info")
         tm.add_window(chat_window)
         tm.remove_boot_placeholder()
         tm._mark_first_window_ready()
-        _guard.show_requested.connect(lambda: _activate_window(tm))
-        _apply_window_topmost(tm)
+        # [T24 R2] 窗口就绪 → 登记到共享状态；若 import 窗口期已有二次启动请求
+        # （_on_show_requested 记了 pending），此处立即补激活，不再静默丢失。
+        _show_window_state["window"] = tm
+        if _show_window_state["wanted"]:
+            _show_window_state["wanted"] = False
+            _activate_window(tm)
         logger.info("DriFox 以 Tab 管理器模式启动（壳先行 + 进程级预热）")
 
         # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。
-        # 每条 InfoBar 创建成功即重命名 .reported（显示过就改状态），下次启动不再提示
+        # 每条 InfoBar 创建成功即重命名 .reported（显示过就改状态），下次启动不再提示。
+        # 用户在系统设置 → 通知 → 「进入时崩溃通知」可关闭弹窗，但 dump 文件仍保留在日志目录。
         def _check_last_crash():
             try:
-                from app.core.crash_handler import check_pending_crashes, prompt_crash_report
+                from app.core.infra.crash_handler import check_pending_crashes, prompt_crash_report
+                from app.utils.config import Settings
                 from app.utils.utils import get_app_data_dir
 
                 dumps = check_pending_crashes(get_app_data_dir() / "logs")
+                if not dumps:
+                    return
+                # 用户关闭了「进入时崩溃通知」：扫描仍会跑、把 dump 标记已读
+                # （避免下次开启时历史崩溃全部冒头），但不弹横幅。
+                cfg = Settings.get_instance()
+                notify_enabled = bool(getattr(cfg.crash_notify_on_startup, "value", True))
                 for dump in dumps:
                     logger.warning(f"[CrashHandler] 检测到上次崩溃报告: {dump}")
+                    if not notify_enabled:
+                        logger.info("[CrashHandler] 用户已关闭进入时崩溃通知，跳过 InfoBar")
+                        # 同样改名标记已读，否则下次开启开关会被旧 dump 淹没
+                        try:
+                            dump.rename(dump.with_name(dump.name + ".reported"))
+                        except Exception:
+                            pass
+                        continue
                     prompt_crash_report(dump, parent=tm)
             except Exception:
                 pass
@@ -489,9 +701,45 @@ def main():
 
     app.aboutToQuit.connect(_teardown_tab_windows)
 
+    # ── 插件独立弹窗：应用退出统一销毁（随主窗口关闭销毁的生命周期）──
+    def _teardown_plugin_windows():
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().destroy_all_windows()
+        except Exception:
+            logger.warning("[M2] 退出时销毁插件独立弹窗失败", exc_info=True)
+
+    app.aboutToQuit.connect(_teardown_plugin_windows)
+
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)
+
+    # ── UI 测试服务（默认关）：DRIFOX_UI_TEST_SERVER=host:port 开启（M2）──
+    # 开启时 daemon 线程起 JSON-RPC 服务并置 ARM 总闸；打包产物无 tools/，
+    # lazy import 失败仅 warning 跳过，不影响主程序。
+    _ui_test_addr = os.environ.get("DRIFOX_UI_TEST_SERVER", "")
+    if _ui_test_addr:
+        try:
+            from tools.ui_driver import init_main_caller, setArmed as _ui_test_setArmed
+            from tools.ui_test_server.server import start_ui_test_server as _start_ui_test_server
+
+            # _MainCaller 亲和性必须在主线程定型（工作线程构造会导致 queued 请求永不派发）
+            init_main_caller()
+            _host, _, _port = _ui_test_addr.rpartition(":")
+            _ui_test_thread = threading.Thread(
+                target=_start_ui_test_server,
+                args=(_host or "127.0.0.1", int(_port)),
+                daemon=True,
+                name="ui-test-server",
+            )
+            _ui_test_thread.start()
+            _ui_test_setArmed(True)
+            logger.info(f"[ui-test-server] 已启动 {_ui_test_addr}，ARM 已置位")
+        except Exception as exc:  # noqa: BLE001 — 打包态 ImportError / 端口耗尽均跳过
+            logger.warning(f"[ui-test-server] 启动失败（跳过）: {exc}")
+    # ── UI 测试服务接线结束 ──
 
     sys.exit(app.exec())
 

@@ -107,7 +107,7 @@ def restart_application() -> bool:
 def _release_single_instance_lock() -> None:
     """释放单实例锁（失败不影响重启尝试，最坏只是新进程多试一次）。"""
     try:
-        from app.core.single_instance import release_current_lock
+        from app.core.infra.single_instance import release_current_lock
 
         release_current_lock()
     except Exception as e:

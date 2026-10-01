@@ -26,8 +26,8 @@ import shiboken6 as sip
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QApplication, QWidget
 
-from app.core import window_registry as window_registry_mod
-from app.core.command_manager import CommandManager, CommandType
+from app.core.infra import window_registry as window_registry_mod
+from app.core.commands.command_manager import CommandManager, CommandType
 
 
 TEST_CMD = "shortcut_probe_cmd"

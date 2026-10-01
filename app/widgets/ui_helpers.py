@@ -1484,13 +1484,15 @@ def materialize_batch_with_extras(batch: list, session_id: str, load_extras) -> 
     return out
 
 
-def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
+def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render: bool = True) -> None:
     """
     将消息批次渲染到 assistant 卡片
 
     Args:
         assistant_card: Assistant 卡片
         batch: 消息批次列表
+        immediate_render: 批量加载路径传 False（T11 错峰），避免 N 卡同帧
+            全量重渲；交互路径保持默认 True。
     """
     for msg in batch:
         if msg.get("role") == "assistant":
@@ -1509,7 +1511,7 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
                     combined_content += "\n\n"
                 combined_content += content
             if combined_content:
-                assistant_card.append_text(combined_content)
+                assistant_card.append_text(combined_content, immediate_render=immediate_render)
         elif msg.get("role") == "tool" and msg.get("content", ""):
             assistant_card.append_tool_result(
                 tool_name=msg.get("name", ""),
@@ -1520,7 +1522,7 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
                 diff=msg.get("diff"),
                 echarts=msg.get("echarts"),
             )
-    assistant_card.finish_streaming(history=True)
+    assistant_card.finish_streaming(history=True, immediate=immediate_render)
 
 
 _scroll_last_time = [0.0]  # 使用 list 实现可变闭包
@@ -1867,9 +1869,10 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
         if layout_removed:
             widget.deleteLater()
             deleted += 1
-            logger.info(f"[DELETE] Widget deleted: role={widget.role}")
+            # 无 role 属性的 widget（分隔条/占位等）显示类名，避免 AttributeError
+            logger.info(f"[DELETE] Widget deleted: role={getattr(widget, 'role', type(widget).__name__)}")
         else:
-            logger.warning(f"[DELETE] Widget not found in layout: role={widget.role}")
+            logger.warning(f"[DELETE] Widget not found in layout: role={getattr(widget, 'role', type(widget).__name__)}")
 
     return deleted
 
@@ -1888,7 +1891,10 @@ def create_assistant_card_widget(
     on_save_file=None,
     on_subagent_log=None,
     on_review=None,
+    on_branch=None,
     immediate_render: bool = False,
+    identity=None,
+    source_message: Optional[dict] = None,
 ) -> Any:
     """
     创建助手消息卡片（带标准配置）
@@ -1907,6 +1913,7 @@ def create_assistant_card_widget(
         on_save_file: 保存文件回调
         on_subagent_log: 子智能体日志回调
         on_review: 页脚 Review 按钮回调（收到信号时触发 code-reviewer 子智能体）
+        on_branch: 页脚「分支」按钮回调（以该条助手消息为界开新会话）
         immediate_render: 是否立即创建 QWebEngineView。流式输出需要 True；
                          会话加载设为 False，由懒渲染队列统一控制。
 
@@ -1920,6 +1927,8 @@ def create_assistant_card_widget(
         model_name=model_name,
         provider_name=provider_name,
         config_id=config_id,
+        identity=identity,
+        source_message=source_message,
     )
     card._round_index = round_index
     if immediate_render:
@@ -1942,6 +1951,8 @@ def create_assistant_card_widget(
         card.subAgentLogRequested.connect(on_subagent_log)
     if on_review:
         card.reviewRequested.connect(on_review)
+    if on_branch:
+        card.branchRequested.connect(on_branch)
 
     return card
 

@@ -22,7 +22,7 @@ class FileUndoCard(BaseSettingsCard):
     CANCEL, KEEP_CARD, RESTORE = 0, 1, 2
 
     def __init__(self, operations: List[Dict], file_recorder=None, parent=None):
-        super().__init__("还原文件", "↩️", parent)
+        super().__init__("还原文件", icon_svg="还原", parent=parent)
         self.operations = list(operations)
         self.file_recorder = file_recorder
         self._selected_set = set(range(len(self.operations)))

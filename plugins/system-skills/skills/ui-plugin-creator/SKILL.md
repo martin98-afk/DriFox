@@ -53,6 +53,8 @@ b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素�
 | "输入框加按钮""截图/快捷发图按钮" | **输入框按钮** | `templates-entries.md`（全屏窗口见 `patterns.md` §10） |
 | "标题栏加常驻 tab""顶部 tab 入口" | **标题栏常驻 tab** | `templates-entries.md` |
 | "右侧加个页""工作台加 tab""常驻内容页" | **右侧工作台页** | `templates-workbench.md` |
+| "独立弹窗""弹出窗口""独立出软件窗口""工具窗" | **独立弹窗** | `templates-window.md` |
+| "消息卡片加按钮""用户消息按钮""页脚加信息""页脚统计" | **消息卡片槽位** | `templates-card-slots.md` |
 | "做个插件市场""安装/管理插件" | **完整插件** | `templates-plugins.md` + `architecture.md` |
 | "插件要 requests/PIL/... 第三方包" | **外部依赖（_vendor/）** | `templates-plugins.md`（§五） |
 | "插件要设置项/配置卡/API Key 配置" | **声明式配置** | `plugin-config.md` |
@@ -61,6 +63,7 @@ b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素�
 > ⚠️ 新插件优先浮动卡片（最常见形态）；图表/统计是卡片内组件，从 `widgets-*.md` 复用。
 > ⚠️ 内容渲染器只做"展示"，交互按钮用 data 属性桥接。
 > ⚠️ 消息工厂是高级用法——99% 场景用浮动卡片就够（见 §4 硬停止 6）。
+> ⚠️ 要独立顶级窗口（可脱离主窗、左侧栏条目 + 右键「弹出」）选独立弹窗（`templates-window.md`），不要用浮动卡硬充。
 
 ## 3. 渐进加载表
 
@@ -79,6 +82,8 @@ b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素�
 | 3 入口动作 | templates-entries.md | 输入框按钮/标题栏 tab |
 | 3 声明式配置 | plugin-config.md | 设置项/config_schema/API Key 存储 |
 | 3 工作台页 | templates-workbench.md | 右侧工作台页 |
+| 3 独立弹窗 | templates-window.md | 独立顶级窗口（register_window） |
+| 3 卡片槽位 | templates-card-slots.md | 消息卡片页脚按钮/信息注入（footer_action/footer_stat） |
 | 3 插件级骨架 | templates-plugins.md | register_ui/plugin.json/_vendor |
 | 4 控件选型 | widgets.md | 控件索引与设计原则 |
 | 4 控件细节 | widgets-statcard.md 等 5 件按需 | 统计卡/图表/工具函数/SQLite/主题 |

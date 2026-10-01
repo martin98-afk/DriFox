@@ -32,8 +32,6 @@ from typing import Optional, Tuple
 
 from loguru import logger
 
-from app.tools.process_job import ProcessJob
-
 DEFAULT_TIMEOUT = 300.0  # 单条命令默认超时（秒）
 _IDLE_POLL = 0.05        # 读循环轮询间隔（秒）
 
@@ -76,8 +74,14 @@ class PtyShellSession:
         # /Q 关闭命令回显，减少输出噪音；ConPTY 保证状态（cwd/env）跨调用保留
         self._proc = winpty.PtyProcess.spawn(["cmd.exe", "/Q"])
         # 生命周期挂靠 S3 ProcessJob：cmd 进程树入 Job，close 时 kill-on-close
-        # 统一杀灭（与 BackgroundTaskManager 同一进程管理基建）
-        self._job = ProcessJob() if ProcessJob.is_supported() else None
+        # 统一杀灭（与 BackgroundTaskManager 同一进程管理基建）。
+        # 配额走 create_quota_job（读 SandboxConfig["job_limits"]），与
+        # bg_manager / terminal_tools 同口径；此前裸构造 ProcessJob() 三限额
+        # 全为 0 = 不限，是同体系唯一的遗漏点。
+        # 延迟 import：避免本模块加载时拖入 bg_manager 的重依赖。
+        from app.tools.bg_manager import create_quota_job
+
+        self._job = create_quota_job()
         if self._job is not None:
             self._job.assign(self._proc.pid)
 

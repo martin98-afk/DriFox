@@ -122,7 +122,13 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "storages": lambda d: (d / "storages").exists() and any((d / "storages").glob("*.py")),
     "serializers": lambda d: (d / "serializers").exists() and any((d / "serializers").glob("*.py")),
     "gateways": lambda d: (d / "gateways").exists() and any((d / "gateways").glob("*.py")),
+    "transports": lambda d: (d / "transports").exists() and any((d / "transports").glob("*.py")),
+    "stream_sinks": lambda d: (d / "stream_sinks").exists() and any((d / "stream_sinks").glob("*.py")),
     "engines": lambda d: (d / "engines").exists() and any((d / "engines").glob("*.py")),
+    "context_tiers": lambda d: (d / "context_tiers").exists() and any((d / "context_tiers").glob("*.py")),
+    "budget_resolvers": lambda d: (
+        (d / "budget_resolvers").exists() and any((d / "budget_resolvers").glob("*.py"))
+    ),
 }
 
 
@@ -314,8 +320,9 @@ class PluginManager:
     _SYSTEM_PLUGIN_DIR = _resolve_system_plugin_dir()
     # 不可禁用核心插件名单（黑名单制）：禁用会断核心链路（组件宿主/插件市场自身）。
     # system 插件已按组件类型拆分为 system-* 系列内置插件，其中承载核心链路的
-    # 子集（工具/序列化/存储/模型适配/服务商/Hooks/两类策略/命令/智能体）不可禁用；
-    # 外围插件（主题/技能/MCP/团队模板/UI 页）可整插件禁用。
+    # 子集（工具/序列化/存储/模型适配/服务商/Hooks/两类策略/命令/智能体
+    # /协议传输/流式接收器）不可禁用；
+    # 外围插件（主题/技能/MCP/团队模板/UI 页/上下文策略）可整插件禁用。
     # plugin-marketplace/ui/installer.py 状态分类与本名单保持单一数据源。
     _NON_DISABLEABLE = frozenset(
         {
@@ -329,6 +336,8 @@ class PluginManager:
             "system-hook-policies",
             "system-commands",
             "system-agents",
+            "system-transports",
+            "system-stream-sinks",
             "plugin-marketplace",
         }
     )
@@ -345,6 +354,8 @@ class PluginManager:
         # 组件/细项禁用集缓存（None = 未加载）。Settings 里该项变更极低频，
         # 但 hooks 触发等热路径会高频查询，故缓存到进程内，写操作同步更新。
         self._disabled_components_cache: Optional[frozenset] = None
+        # 插件目录签名缓存（rescan 短路用，None = 尚未扫描过）
+        self._last_scan_signature: Optional[tuple] = None
 
     @classmethod
     def get_instance(cls) -> "PluginManager":
@@ -386,6 +397,13 @@ class PluginManager:
         # 自动从 Settings 恢复已启用状态
         self._restore_enabled_from_settings()
 
+        # 记录首次扫描的目录签名：让启动期那次 rescan（ConfigSync 合并重载兜底）
+        # 能直接短路，省掉一次全量重扫（实测 ~450ms）
+        try:
+            self._last_scan_signature = self._plugins_dir_signature()
+        except Exception:
+            self._last_scan_signature = None
+
     def _restore_enabled_from_settings(self):
         """从 Settings 恢复已启用插件状态，新发现的插件默认启用（D8：跳过禁用集）"""
         try:
@@ -419,7 +437,11 @@ class PluginManager:
         "providers": "system-providers",
         "storages": "system-storages",
         "serializers": "system-serializers",
+        "transports": "system-transports",
+        "stream_sinks": "system-stream-sinks",
         "tools": "system-tools",
+        "context_tiers": "system-context",
+        "budget_resolvers": "system-context",
         # 「ui」组件的系统插件锚点：产物页（工作树/历史已拆分为独立插件）
         "ui": "artifacts-manager",
         "team_templates": "system-team-templates",
@@ -511,10 +533,48 @@ class PluginManager:
     # 运行时重扫
     # ============================================================
 
-    def rescan(self) -> dict:
+    def _plugins_dir_signature(self) -> tuple:
+        """插件目录级签名：各插件根的存在性 + 其下每个插件目录名与 mtime_ns
+
+        用于 rescan 短路：签名未变 = 目录层面的新增/删除状态与上次扫描一致
+        （rescan 语义本就只追踪目录级别变化，不追踪插件内部文件变更），可跳过
+        数十个插件目录的全量重扫。实测全量重扫约 680ms/次，而启动期 ConfigSync
+        的 3s 兜底与热重载合并路径都会调用 rescan。
+        """
+        sig: list = []
+        roots = [self._SYSTEM_PLUGIN_DIR]
+        if self._app_data_dir:
+            roots.append(self._app_data_dir / self._USER_PLUGIN_DIR_NAME)
+        roots.extend((self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR))
+        for root in roots:
+            root_path = Path(root)
+            if not root_path.exists():
+                sig.append((str(root_path), False, 0, ()))
+                continue
+            try:
+                children = sorted(p.name for p in root_path.iterdir())
+            except OSError:
+                children = []
+            entries = []
+            for name in children:
+                try:
+                    entries.append((name, (root_path / name).stat().st_mtime_ns))
+                except OSError:
+                    entries.append((name, -1))
+            try:
+                root_mtime = root_path.stat().st_mtime_ns
+            except OSError:
+                root_mtime = 0
+            sig.append((str(root_path), True, root_mtime, tuple(entries)))
+        return tuple(sig)
+
+    def rescan(self, force: bool = False) -> dict:
         """运行时重新扫描插件目录，检测新增/移除的插件
 
         仅扫描目录级别变化（新增/删除插件目录），不追踪插件内部文件变更。
+
+        Args:
+            force: True 时忽略目录签名缓存，强制全量重扫（显式「重载插件」场景）
 
         Returns:
             {"added": [PluginInfo], "removed": [PluginInfo], "changed": [PluginInfo]}
@@ -526,8 +586,17 @@ class PluginManager:
             logger.warning("[PluginManager] PluginManager not initialized, cannot rescan")
             return {"added": [], "removed": [], "changed": []}
 
+        # 目录签名短路：目录层面无变化时直接返回空 diff（与全量重扫结果等价，
+        # 但省掉三次 _scan_plugins 的全目录遍历与 manifest 解析）
+        sig = self._plugins_dir_signature()
+        if not force and self._plugins and sig == getattr(self, "_last_scan_signature", None):
+            logger.debug("[PluginManager] 插件目录签名未变，rescan 短路（跳过全量重扫）")
+            return {"added": [], "removed": [], "changed": []}
+        self._last_scan_signature = sig
+
         result: Dict[str, list] = {"added": [], "removed": [], "changed": []}
         old_names = set(self._plugins.keys())
+
 
         # 1. 重新扫描系统插件
         system_plugins = self._scan_plugins(self._SYSTEM_PLUGIN_DIR, "system")
@@ -1179,6 +1248,9 @@ class PluginManager:
         raw_schema = manifest.get("config_schema")
         config_schema = parse_config_schema(plugin_name, raw_schema)
         if config_schema is None:
+            # manifest 已无合法 schema：显式清掉历史注册（含自动设置卡），避免残留旧卡。
+            # unload_plugin 已改为保留 auto_config_card，清理只能走这里（manifest 层职责）。
+            self._unregister_config_schema(plugin_name)
             return
 
         # 注册表（必需）
@@ -1200,18 +1272,30 @@ class PluginManager:
                 f"{plugin_name}-config",
                 config_schema.title,
                 make_card_class(plugin_name),
+                metadata={"auto_config_card": True},
             )
         except Exception as e:
             logger.warning(f"[PluginManager] config_schema 设置卡注册失败({plugin_name}): {e}")
 
     def _unregister_config_schema(self, plugin_name: str) -> None:
-        """E1：插件移除时清理 config_schema 注册（设置卡由 UIPluginRegistry.unload_plugin 清理）。"""
+        """E1：插件移除/Schema 删除时清理 config_schema 注册 + 自动设置卡。
+
+        设置卡的清理在此显式触发（manifest 层职责）。UIPluginRegistry.unload_plugin
+        已改为保留 auto_config_card——ui 组件热重载（unload→load）不能误杀
+        rescan 刚注册的卡，清理收敛到本函数单一入口。
+        """
         try:
             from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 
             PluginConfigRegistry.get_instance().unregister_plugin(plugin_name)
         except Exception as e:
             logger.warning(f"[PluginManager] config_schema 清理失败({plugin_name}): {e}")
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().unregister_auto_config_cards(plugin_name)
+        except Exception as e:
+            logger.warning(f"[PluginManager] config_schema 设置卡清理失败({plugin_name}): {e}")
 
     def _discover_system_plugins(self):
         """扫描系统插件目录 app/plugins/"""
@@ -1439,7 +1523,12 @@ class PluginManager:
             if lsp_file.exists():
                 try:
                     with open(lsp_file, "r", encoding="utf-8") as f:
-                        configs.append({"plugin": plugin.name, "config": json.load(f)})
+                        # source：启动安全门禁（mcp_lsp_safety）靠它判定内置源。
+                        # 不传会导致系统插件自带的 LSP 也被要求确认，而 LSP 侧无确认入口
+                        # → server 永远无法启动（EU-G22）
+                        configs.append(
+                            {"plugin": plugin.name, "source": str(lsp_file), "config": json.load(f)}
+                        )
                 except Exception as e:
                     logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
 
@@ -1462,7 +1551,9 @@ class PluginManager:
                         continue
                     try:
                         with open(lsp_file, "r", encoding="utf-8") as f:
-                            configs.append({"plugin": item.name, "config": json.load(f)})
+                            configs.append(
+                                {"plugin": item.name, "source": str(lsp_file), "config": json.load(f)}
+                            )
                         logger.debug(f"[PluginManager] 发现独立 LSP 配置: {item.name}")
                     except Exception as e:
                         logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
@@ -1490,7 +1581,8 @@ class PluginManager:
             return None
         try:
             with open(lsp_file, "r", encoding="utf-8") as f:
-                return {"plugin": plugin_name, "config": json.load(f)}
+                # 热重载路径同样需要 source（否则重载后 server 又启不来）
+                return {"plugin": plugin_name, "source": str(lsp_file), "config": json.load(f)}
         except Exception as e:
             logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
             return None
@@ -1845,7 +1937,7 @@ class PluginManager:
             extra: 附加字段（如 server_config）
         """
         try:
-            from app.core.hook_manager import trigger_plugin_changed_hook
+            from app.core.hooks.hook_manager import trigger_plugin_changed_hook
 
             is_mcp = action.startswith("mcp_")
             context: dict = {

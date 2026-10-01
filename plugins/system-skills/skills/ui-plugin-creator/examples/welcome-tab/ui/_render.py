@@ -11,7 +11,7 @@ render_func 契约：
 数据获取惯例（welcome_changelog 分层）：
 - 纯静态/本地数据：直接在本文件拼 HTML
 - 需要网络/耗时数据：放 _fetcher.py 后台拉取 + 进程内缓存，
-  完成后经 app.core.ui_event_bus 事件通知刷新（勿在 render_func 里阻塞请求）
+  完成后经 app.core.infra.ui_event_bus 事件通知刷新（勿在 render_func 里阻塞请求）
 """
 
 

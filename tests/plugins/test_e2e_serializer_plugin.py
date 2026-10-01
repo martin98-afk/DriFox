@@ -9,7 +9,7 @@
 
 import pytest
 
-from app.core import message_content as mc
+from app.core.conversation import message_content as mc
 from app.plugins.contracts.message_serializer import SerializeContext, SerializeResult
 
 
@@ -106,7 +106,7 @@ def test_reloader_dispatch_serializers(monkeypatch):
     reg.register("serializers", _fake_reloader)
     monkeypatch.setattr(kernel, "get_reloader_registry", lambda: reg)
 
-    backend_cls = pytest.importorskip("app.core.backend").ChatBackend
+    backend_cls = pytest.importorskip("app.core.conversation.backend").ChatBackend
     backend = backend_cls.__new__(backend_cls)
     from unittest.mock import MagicMock
 

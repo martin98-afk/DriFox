@@ -348,10 +348,19 @@ class RuntimeComponentLoader:
 
         语义：注销该插件旧组件 → 恢复被其覆盖的低等级根同名组件 → 重新注册
         该插件当前模块（高等级根再次覆盖）→ 最终状态与全量重扫一致。
+
+        🛡️ 失败回滚：重注册全部失败（如新代码 import 错误）且注销前确有组件时，
+        回滚到旧模块——注册表空态会让所有对话请求撞死在 resolve 报错上，
+        旧组件可用性优于空态（半新半旧优于全无）。回滚仍失败则保留空态并 error。
         """
         with self._scan_lock:
             # 先捕获来源等级（_unload_source 会清除 _source_kind 记录）
             removed_rank = _ROOT_KIND_PRIORITY.get(self._source_kind.get(f"plugin:{plugin_name}", "system"), 0)
+            removed_items = self._occupied_by_source.get(f"plugin:{plugin_name}", set())
+            had_items = bool(removed_items)
+            old_mod_names = [
+                m for m in sys.modules if m.startswith(f"drifox_rt_{self._comp_dir}_{plugin_name}_")
+            ]
             removed_items = self._unload_source(plugin_name)
             if removed_items:
                 logger.info(f"[RuntimeLoader] 重载前注销插件组件: {plugin_name}（{removed_items} 项）")
@@ -372,6 +381,7 @@ class RuntimeComponentLoader:
                 )
                 return
             roots = self._scan_roots_cache or _plugin_roots()
+            loaded_any = False
             for root in roots:
                 if not (root / plugin_name).is_dir():
                     continue
@@ -381,7 +391,31 @@ class RuntimeComponentLoader:
                 for py in sorted(comp.glob("*.py")):
                     if py.name.startswith("_"):
                         continue
-                    self._load_module(py, plugin_name, _root_kind(root))
+                    if self._load_module(py, plugin_name, _root_kind(root)):
+                        loaded_any = True
+            # 🛡️ 失败回滚：新模块全炸且之前有组件 → 旧模块重新 exec 注册
+            if not loaded_any and had_items and old_mod_names:
+                logger.warning(f"[RuntimeLoader] {plugin_name}:{self._comp_dir} 重载失败，回滚到旧模块")
+                for mod_name in old_mod_names:
+                    mod = sys.modules.get(mod_name)
+                    register = getattr(mod, "register", None) if mod is not None else None
+                    if not callable(register):
+                        continue
+                    try:
+                        proxy = _RegistryProxy(
+                            self._registry, plugin_name, _ROOT_KIND_PRIORITY and "system", self._occupied,
+                            self._lock, component=self._comp_dir,
+                        )
+                        register(proxy)
+                        with self._lock:
+                            self._sources.add(f"plugin:{plugin_name}")
+                            self._occupied_by_source.setdefault(f"plugin:{plugin_name}", set()).update(
+                                proxy._occupied_items
+                            )
+                            self._source_kind[f"plugin:{plugin_name}"] = "system"
+                        logger.info(f"[RuntimeLoader] 回滚成功: {plugin_name}:{self._comp_dir}")
+                    except Exception as rollback_exc:
+                        logger.error(f"[RuntimeLoader] 回滚失败 {mod_name}: {rollback_exc}")
 
     def _load_module(self, py: Path, plugin_name: str, kind: str) -> bool:
         mod_name = f"drifox_rt_{self._comp_dir}_{plugin_name}_{py.stem}"
@@ -537,14 +571,21 @@ _hook_loader: Optional[RuntimeComponentLoader] = None
 _storage_loader: Optional[RuntimeComponentLoader] = None
 _serializer_loader: Optional[RuntimeComponentLoader] = None
 _gateway_loader: Optional[RuntimeComponentLoader] = None
+_transport_loader: Optional[RuntimeComponentLoader] = None
+_stream_sink_loader: Optional[RuntimeComponentLoader] = None
 _engine_loader: Optional[RuntimeComponentLoader] = None
+_context_tier_loader: Optional[RuntimeComponentLoader] = None
+_budget_resolver_loader: Optional[RuntimeComponentLoader] = None
 _adapters_watcher: Optional[_RuntimeWatcher] = None
 _loop_watcher: Optional[_RuntimeWatcher] = None
 _hook_watcher: Optional[_RuntimeWatcher] = None
 _storage_watcher: Optional[_RuntimeWatcher] = None
 _serializer_watcher: Optional[_RuntimeWatcher] = None
 _gateway_watcher: Optional[_RuntimeWatcher] = None
+_transport_watcher: Optional[_RuntimeWatcher] = None
+_stream_sink_watcher: Optional[_RuntimeWatcher] = None
 _engine_watcher: Optional[_RuntimeWatcher] = None
+_context_watcher: Optional[_RuntimeWatcher] = None
 _watchers_lock = threading.Lock()
 
 
@@ -578,6 +619,18 @@ def _make_serializer_loader() -> RuntimeComponentLoader:
     return RuntimeComponentLoader("serializers", SerializerRegistry.get_instance())
 
 
+def _make_transport_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.transport_registry import TransportRegistry
+
+    return RuntimeComponentLoader("transports", TransportRegistry.get_instance())
+
+
+def _make_stream_sink_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.stream_sink_registry import StreamSinkRegistry
+
+    return RuntimeComponentLoader("stream_sinks", StreamSinkRegistry.get_instance())
+
+
 def _make_gateway_loader() -> RuntimeComponentLoader:
     from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
 
@@ -588,6 +641,18 @@ def _make_engine_loader() -> RuntimeComponentLoader:
     from app.plugins.registries.engine_registry import EngineRegistry
 
     return RuntimeComponentLoader("engines", EngineRegistry.get_instance())
+
+
+def _make_context_tier_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
+
+    return RuntimeComponentLoader("context_tiers", ContextPolicyRegistry.get_instance())
+
+
+def _make_budget_resolver_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
+
+    return RuntimeComponentLoader("budget_resolvers", ContextPolicyRegistry.get_instance())
 
 
 def ensure_model_adapter_watcher() -> Optional[_RuntimeWatcher]:
@@ -650,6 +715,30 @@ def ensure_serializer_watcher() -> Optional[_RuntimeWatcher]:
         return _serializer_watcher
 
 
+def ensure_transport_watcher() -> Optional[_RuntimeWatcher]:
+    global _transport_loader, _transport_watcher
+    with _watchers_lock:
+        if _transport_watcher is not None:
+            return _transport_watcher
+        _transport_loader = _transport_loader or _make_transport_loader()
+        _transport_watcher = _RuntimeWatcher(_transport_loader, "transports")
+        _transport_watcher.scan_now()
+        _transport_watcher.start()
+        return _transport_watcher
+
+
+def ensure_stream_sink_watcher() -> Optional[_RuntimeWatcher]:
+    global _stream_sink_loader, _stream_sink_watcher
+    with _watchers_lock:
+        if _stream_sink_watcher is not None:
+            return _stream_sink_watcher
+        _stream_sink_loader = _stream_sink_loader or _make_stream_sink_loader()
+        _stream_sink_watcher = _RuntimeWatcher(_stream_sink_loader, "stream_sinks")
+        _stream_sink_watcher.scan_now()
+        _stream_sink_watcher.start()
+        return _stream_sink_watcher
+
+
 def ensure_gateway_watcher() -> Optional[_RuntimeWatcher]:
     global _gateway_loader, _gateway_watcher
     with _watchers_lock:
@@ -674,6 +763,23 @@ def ensure_engine_watcher() -> Optional[_RuntimeWatcher]:
         return _engine_watcher
 
 
+def ensure_context_watcher() -> Optional[_RuntimeWatcher]:
+    """上下文 tier / 预算解析器 watcher。
+
+    两类组件共用 ContextPolicyRegistry，故只起一个 watcher 扫 context_tiers 目录；
+    budget_resolvers 由 warmup 与 reload 路径各自 scan_roots 覆盖。
+    """
+    global _context_tier_loader, _context_watcher
+    with _watchers_lock:
+        if _context_watcher is not None:
+            return _context_watcher
+        _context_tier_loader = _context_tier_loader or _make_context_tier_loader()
+        _context_watcher = _RuntimeWatcher(_context_tier_loader, "context_tiers")
+        _context_watcher.scan_now()
+        _context_watcher.start()
+        return _context_watcher
+
+
 def warmup_runtime_components() -> Dict[str, Set[str]]:
     """启动期一次性加载五类运行时组件（系统插件 plugins/system 提供默认实现）。
 
@@ -687,6 +793,10 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     result["hook_policies"] = _make_hook_loader().scan_roots()
     result["storages"] = _make_storage_loader().scan_roots()
     result["serializers"] = _make_serializer_loader().scan_roots()
+    result["transports"] = _make_transport_loader().scan_roots()
+    result["stream_sinks"] = _make_stream_sink_loader().scan_roots()
     result["gateways"] = _make_gateway_loader().scan_roots()
     result["engines"] = _make_engine_loader().scan_roots()
+    result["context_tiers"] = _make_context_tier_loader().scan_roots()
+    result["budget_resolvers"] = _make_budget_resolver_loader().scan_roots()
     return result

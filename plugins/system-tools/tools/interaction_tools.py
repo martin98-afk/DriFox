@@ -558,7 +558,7 @@ def register(registry):
         preview=_preview_question,
         summarize=_summarize_question,
         keep_in_content=True,  # 提问卡常驻正文，不迁入工具折叠区
-        metadata={"interactive": True, "ui_managed": True},  # UI 弹窗交互，非纯工具执行
+        metadata={"interactive": True, "ui_managed": True, "no_prune": True, "no_offload": True},  # UI 弹窗交互，非纯工具执行；结果小且语义完整
     )
     registry.register(
         "skill", _SKILL_SCHEMA, impl=_skill_impl,
@@ -567,7 +567,7 @@ def register(registry):
         aliases=["Skill"],
         preview=_preview_skill,
         summarize=_summarize_skill,
-        metadata={"protect": True, "permission_arg": "name"},  # 技能内容完整保留；权限按技能名
+        metadata={"protect": True, "permission_arg": "name", "no_prune": True, "no_offload": True},  # 技能内容完整保留；权限按技能名；结果小且语义完整
     )
     registry.register(
         "manage_skill", _MANAGE_SKILL_SCHEMA, impl=_manage_skill_impl,
@@ -576,6 +576,7 @@ def register(registry):
         aliases=["ListSkills", "listSkills", "ManageSkill", "skillmanage"],
         preview=_preview_manage_skill,
         summarize=make_summarize_from_preview(_preview_manage_skill),
+        metadata={"no_offload": True},  # 服务器列表小且结构化，落盘无收益
     )
     registry.register(
         "mcp_list_servers", _MCP_LIST_SCHEMA, impl=_mcp_list_impl,
@@ -584,6 +585,7 @@ def register(registry):
         aliases=["McpListServers", "mcp_list_servers"],
         preview=_preview_mcp_list_servers,
         summarize=make_summarize_from_preview(_preview_mcp_list_servers),
+        metadata={"no_offload": True},  # 服务器列表小且结构化，落盘无收益
     )
     registry.register(
         "upload_file", _UPLOAD_FILE_SCHEMA, impl=_upload_file_impl,

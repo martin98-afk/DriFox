@@ -193,7 +193,7 @@ def test_refresh_persists_new_refresh_token_to_disk(tmp_settings):
 def test_config_sync_uses_backend_ensure_valid_token(tmp_settings):
     """ConfigSyncService._sync_token 必须复用 _ensure_valid_token，
     不能自己再调 refresh_access_token（否则双入口 bug 复发）。"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
     from app.gateway.auth import gitee as gitee_mod
 
     fake, cfg_file = tmp_settings
@@ -239,7 +239,7 @@ def test_config_sync_uses_backend_ensure_valid_token(tmp_settings):
 
 def test_pause_upload_extends_suppress_window():
     """ConfigSyncService.pause_upload() 公开 API 应正确延长抑制窗口。"""
-    from app.core import config_sync as cs_mod
+    from app.core.sync import config_sync as cs_mod
 
     svc = cs_mod.ConfigSyncService.get_instance()
     svc._suppress_until = 0.0

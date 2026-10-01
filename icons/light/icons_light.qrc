@@ -4,6 +4,7 @@
     <file>233键盘-线性.svg</file>
     <file>MCP.svg</file>
     <file>Search.svg</file>
+    <file>chart.svg</file>
     <file>folder.svg</file>
     <file>gitee.svg</file>
     <file>hooks.svg</file>
@@ -11,11 +12,13 @@
     <file>question.svg</file>
     <file>read.svg</file>
     <file>scroll_to_bottom.svg</file>
+    <file>setting.svg</file>
     <file>shell.svg</file>
     <file>tab切换.svg</file>
     <file>todo.svg</file>
     <file>upload-file.svg</file>
     <file>websearch.svg</file>
+    <file>上下文.svg</file>
     <file>主题风格.svg</file>
     <file>云通信.svg</file>
     <file>侧边栏.svg</file>
@@ -57,6 +60,7 @@
     <file>窗体-最小化.svg</file>
     <file>编辑.svg</file>
     <file>置顶.svg</file>
+    <file>取消置顶.svg</file>
     <file>裁剪.svg</file>
     <file>解锁.svg</file>
     <file>设置-subagent.svg</file>

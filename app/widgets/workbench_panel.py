@@ -28,7 +28,8 @@ refresh_workbench 时调用），页面自行实现可选协议 ``refresh_data()
 import json
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+import shiboken6
+from PySide6.QtCore import QEvent, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QFrame,
@@ -44,12 +45,14 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import ScrollArea, TransparentToolButton
 
-from app.core.project_changed import dispatch_project_changed, is_active_window
+from app.core.infra.project_changed import dispatch_project_changed, is_active_window
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
 from loguru import logger
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
-from app.widgets.custom_title_bar import CustomTabButton
+from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
+from app.widgets.elided_label import _ElidedLabel
 from app.widgets.flow_layout import FlowLayout
 from app.widgets.cards.floating.sub_agent_compact_widget import _RotatingIcon
 
@@ -98,12 +101,12 @@ class TasksPage(QWidget):
 
     视觉取舍：条目用**行式（无边框）**而非卡片堆叠——任务清单通常条目多，
     每条目加边框会形成密集的"框中框"，视觉噪声重。改为默认透明、hover 淡背景，
-    靠左侧状态符号的颜色区分状态：pending 实心圆点按优先级着色（高=红、中=黄、低=绿），
-    右侧不放文字标签，进一步降噪。
+    靠左侧状态符号的颜色区分状态；全部条目单行省略（_ElidedLabel，悬浮看全文），
+    长任务不再换行撑高、把"进行中"挤出首屏；进行中条目加左侧琥珀竖条 + 淡琥珀底强调。
     """
 
-    _PRI_COLORS = {"high": "#ef4444", "medium": "#f59e0b", "low": "#3fb950"}
-    # 状态 → (符号, 颜色, 右侧文字)；pending 颜色仅兑底，实际按优先级用 _PRI_COLORS 着色
+    _PRI_LABELS = {"high": "高", "medium": "中", "low": "低"}
+    # 状态 → (符号, 颜色, 右侧文字)；pending 圆点恒为中性灰（优先级着色易误读为出错状态）
     _STATUS_META = {
         "completed": ("✓", "#3fb950", ""),
         "in_progress": ("◐", "#f59e0b", ""),
@@ -127,16 +130,30 @@ class TasksPage(QWidget):
         # 折叠按钮插入到 header 末尾（统计之后）
         hdr_layout = self._header.layout()
         hdr_layout.insertWidget(hdr_layout.count(), self._collapse_btn)
+        # 整行 header 可点折叠（按钮自身消费点击，不会重复触发 eventFilter）
+        self._header.installEventFilter(self)
+        self._header.setCursor(Qt.PointingHandCursor)
+        self._header.setToolTip("点击折叠任务区")
         layout.addWidget(self._header)
 
         # ── 进度条：细横条，显示完成比例 ──
         self._progress = QProgressBar(self)
         self._progress.setObjectName("taskProgressBar")
-        self._progress.setFixedHeight(3)
+        self._progress.setFixedHeight(4)
         self._progress.setTextVisible(False)
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         layout.addWidget(self._progress)
+
+        # ── 进行中常驻条：脱离列表置顶，折叠态也可见 ──
+        self._running_wrap = QFrame(self)
+        self._running_wrap.setObjectName("taskRunningWrap")
+        self._running_wrap.setStyleSheet("background: transparent;")  # 主题色由 refresh_style 统一上
+        self._running_layout = QVBoxLayout(self._running_wrap)
+        self._running_layout.setContentsMargins(2, 2, 2, 2)
+        self._running_layout.setSpacing(1)  # 与列表行距一致（支持多条 in_progress）
+        self._running_wrap.hide()
+        layout.addWidget(self._running_wrap)
 
         # ── 任务列表 ──
         self._scroll = ScrollArea(self)
@@ -172,22 +189,37 @@ class TasksPage(QWidget):
         self._on_collapse_changed = callback
 
     def header_height(self) -> int:
-        """折叠态所需高度：头部 + 进度条 + 间距
+        """折叠态所需高度：头部 + 进度条 + 进行中常驻条（可见时） + 间距
 
         折叠后不能保持展开时的高度，否则只剩 header 的任务区会留一大片空白
-        （用户看到「任务 title 跑中间」）。
+        （用户看到「任务 title 跑中间」）。进行中条脱离列表、折叠态仍显示，
+        宿主收敛高度必须把它算进去，否则会被 splitter 截掉。
         """
         lay = self.layout()
         m = lay.contentsMargins()
-        return self._header.sizeHint().height() + self._progress.height() + lay.spacing() + m.top() + m.bottom()
+        h = self._header.sizeHint().height() + self._progress.height() + lay.spacing() + m.top() + m.bottom()
+        if self._running_wrap.isVisible():
+            h += lay.spacing() + self._running_wrap.sizeHint().height()
+        return h
 
     def _set_collapsed(self, collapsed: bool) -> None:
-        """内部：设置折叠态（不触发回调，避免递归）"""
+        """内部：设置折叠态（不触发回调，避免递归）
+
+        只收起任务列表；进行中常驻条不随折叠隐藏（折叠态保持可见执行中任务）。
+        """
         self._collapsed = collapsed
         self._scroll.setVisible(not collapsed)
         icon = "展开" if collapsed else "折叠"
         self._collapse_btn.setIcon(get_icon(icon))
         self._collapse_btn.setToolTip("展开任务区" if collapsed else "折叠任务区")
+        self._header.setToolTip("点击展开任务区" if collapsed else "点击折叠任务区")
+
+    def eventFilter(self, obj, event) -> bool:
+        """header 整行左键点击 = 折叠/展开切换（按钮自身消费点击，不冒泡到这）"""
+        if obj is self._header and event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            self._on_collapse_clicked()
+            return True
+        return super().eventFilter(obj, event)
 
     def _on_collapse_clicked(self) -> None:
         """折叠按钮：切换折叠态并通知宿主收敛高度"""
@@ -203,6 +235,15 @@ class TasksPage(QWidget):
 
     # ── 数据 ──
 
+    def _item_fields(self, t: Any) -> "tuple[str, str, str]":
+        """单条任务数据归一化：(status, content, priority)，兜存量脏数据"""
+        status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
+        raw = (t.get("content") if isinstance(t, dict) else t) or ""
+        # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（QLabel 只收 str）
+        content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
+        return status, content, priority
+
     def _clear_items(self) -> None:
         """清空列表项（保留 empty_hint 实例，其余彻底销毁）
 
@@ -216,6 +257,13 @@ class TasksPage(QWidget):
             if w is None or w is self._empty_hint:
                 continue
             w.setParent(None)  # ★ 先断开父子关系，立即停止绘制
+            w.deleteLater()
+        while self._running_layout.count():
+            item = self._running_layout.takeAt(0)
+            w = item.widget()
+            if w is None:
+                continue
+            w.setParent(None)
             w.deleteLater()
 
     def update_todos(self, todos: List[Dict[str, Any]]) -> None:
@@ -236,55 +284,48 @@ class TasksPage(QWidget):
         pct = int(round(done * 100 / total)) if total else 0
 
         # 头部统计 + 进度条 + 折叠按钮
-        self._header.set_extra(f"{done}/{total}" if todos else "")
+        self._header.set_extra(f"{pct}% · {done}/{total}" if todos else "")
         self._progress.setValue(pct)
         self._progress.setVisible(bool(todos))
         self._collapse_btn.setVisible(bool(todos))
-        # 有新任务时若处于折叠态则自动展开（避免"有任务却看不见"）
-        if todos and self._collapsed:
-            self._set_collapsed(False)
-        # 整区可见性：无任务时 hide
+        # 整区可见性：无任务时 hide。折叠态不再强制展开：进行中常驻条在
+        # 折叠态也可见，新任务推送不打断用户的折叠意愿
         self.setVisible(bool(todos))
 
-        # 重建列表：empty_hint（按需可见）→ 任务项 → 底部 stretch
+        # 进行中置顶常驻条（折叠态也可见）；下面列表保持完整原序，不受置顶影响
+        running = [t for t in todos if self._item_fields(t)[0] == "in_progress"]
+
+        # 重建进行中常驻条（置顶区条目带重点样式）
+        for t in running:
+            _status, content, priority = self._item_fields(t)
+            self._running_layout.addWidget(
+                self._make_item("in_progress", content, priority, self._running_wrap, pinned=True)
+            )
+        self._running_wrap.setVisible(bool(running))
+
+        # 重建列表：empty_hint（按需可见）→ 全部任务按原序 → 底部 stretch
         self._empty_hint.setVisible(not todos)
         self._list_layout.addWidget(self._empty_hint)
-        active_item: QWidget | None = None
         for t in todos:
-            status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
-            raw = (t.get("content") if isinstance(t, dict) else t) or ""
-            # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（QLabel 只收 str）
-            content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
-            item = self._make_item(status, content, priority)
-            self._list_layout.addWidget(item)
-            if status == "in_progress" and active_item is None:
-                active_item = item
+            status, content, priority = self._item_fields(t)
+            self._list_layout.addWidget(self._make_item(status, content, priority))
         self._list_layout.addStretch(1)
 
         self._notify_collapse_changed()
 
-        # 任务更新后始终把当前正在执行的任务滚进可视区
-        # （全量重建会丢滚动位置；layout 需一帧生效，用 singleShot(0) 延迟滚动）
-        if active_item is not None:
-            QTimer.singleShot(0, lambda: self._scroll_to_item(active_item))
+    def _make_item(
+        self, status: str, content: str, priority: str, parent: QWidget | None = None, *, pinned: bool = False
+    ) -> QFrame:
+        """单条任务：左状态符号 + 中内容（单行省略），右侧不放任何标签
 
-    def _scroll_to_item(self, item: QWidget) -> None:
-        """把指定任务条目滚进可视区（条目已被销毁时静默跳过）"""
-        try:
-            item.windowTitle()  # sip 探活：已销毁的 C++ 对象会抛 RuntimeError
-            self._scroll.ensureWidgetVisible(item, 0, 8)
-        except RuntimeError:
-            pass
-
-    def _make_item(self, status: str, content: str, priority: str) -> QFrame:
-        """单条任务：左状态符号 + 中内容（自动换行），右侧不放任何标签
-
-        视觉降噪：pending 用实心圆点按优先级着色（高=红、中=黄、低=绿），
-        in_progress 用旋转图标，completed 用绿勾；不出现右侧文字标签。
+        置顶区条目（pinned=True）带琥珀竖条 + 600 字重重点样式；列表条目一律
+        普通行样式（completed 划线弱化、pending 中性灰圆点），不随状态强调。
+        优先级与全文合并进单一 tooltip（分设会弹两个气泡）。
+        parent 缺省挂列表，进行中常驻条传自身容器。
         """
-        frame = QFrame(self._list_wrap)
+        frame = QFrame(parent or self._list_wrap)
         frame.setObjectName("taskItem")
+        frame.setProperty("pinned", pinned)
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(8)
@@ -295,18 +336,19 @@ class TasksPage(QWidget):
             mark_widget: QWidget = _RotatingIcon(":/icons/执行中.svg", size=16, parent=frame)
             # 浅色主题叠加半透明黑色，避免亮背景下图标不可见（与子智能体悬浮框一致）
             mark_widget.set_tint("#88000000" if _is_current_theme_light() else None)
-            # _RotatingIcon 无自驱动定时器，条目自带 QTimer 驱动
-            # （60ms/24° 与子智能体悬浮框旋转参数一致；定时器挂 frame，条目销毁自动停）
-            spin_timer = QTimer(mark_widget)
+            # _RotatingIcon 无自驱动定时器，条目自带循环驱动。用 LoopTimer 门控：
+            # 条目不可见（面板收起 / 页签切走）或系统「减少动态效果」时自动跳过
+            # 回调，不再在隐藏状态下空转重绘 SVG。80ms/32° 与子智能体悬浮框
+            # 旋转参数一致（400°/s）；宿主取 mark_widget，条目销毁即自动停。
             _angle = 0
 
             def _spin_tick() -> None:
                 nonlocal _angle
-                _angle = (_angle + 24) % 360
+                _angle = (_angle + 32) % 360
                 mark_widget.set_angle(_angle)
 
-            spin_timer.timeout.connect(_spin_tick)
-            spin_timer.start(60)
+            spin_timer = LoopTimer(mark_widget, 80, _spin_tick)
+            spin_timer.start()
             layout.addWidget(mark_widget)
         else:
             mark_label = QLabel(mark, frame)
@@ -315,9 +357,12 @@ class TasksPage(QWidget):
             mark_label.setAlignment(Qt.AlignCenter)
             layout.addWidget(mark_label)
 
-        content_label = QLabel(content, frame)
+        # 单行省略（_ElidedLabel 随宽度自动重算）：任务清单的
+        # 价值是看进度而非读全文，长任务全文展开会把"进行中"挤出可视区
+        content_label = _ElidedLabel(content, frame)
         content_label.setObjectName("taskContent")
-        content_label.setWordWrap(True)
+        # 单一 tooltip：优先级 + 全文合一（优先级设 frame、全文设 label 会先后弹两个气泡）
+        content_label.setToolTip(f"优先级：{self._PRI_LABELS.get(priority, '中')}\n{content}")
         layout.addWidget(content_label, 1)
 
         frame.setProperty("status", status)
@@ -329,15 +374,15 @@ class TasksPage(QWidget):
         """应用条目样式（行式：默认透明，hover 淡背景；靠状态符号着色）"""
         status = frame.property("status") or "pending"
         _mark, color, _text = self._STATUS_META.get(status, self._STATUS_META["pending"])
-        if status == "pending":
-            # 实心圆点按优先级着色：高=红、中=黄、低=绿
-            color = self._PRI_COLORS.get(frame.property("priority") or "medium", self._PRI_COLORS["medium"])
 
         frame.setStyleSheet(
             "QFrame#taskItem { background: transparent; border: none;"
-            f" border-radius: {BorderRadius.SM}; }}"
+            f" border-left: 3px solid transparent; border-radius: {BorderRadius.SM}; }}"
             "QFrame#taskItem:hover {"
             f" background: {Colors.HOVER_BG}; }}"
+            # 置顶区条目：左琥珀竖条；淡琥珀底由置顶容器承担，列表行不带强调
+            'QFrame#taskItem[pinned="true"] {'
+            f" border-left-color: {Colors.ACCENT_WARM}; }}"
         )
 
         mark_label = frame.findChild(QLabel, "taskMark")
@@ -349,9 +394,12 @@ class TasksPage(QWidget):
 
         content_label = frame.findChild(QLabel, "taskContent")
         if content_label is not None:
-            line = "text-decoration: line-through;" if status == "completed" else ""
-            c = Colors.TEXT_MUTED if status == "completed" else Colors.TEXT_PRIMARY
-            weight = "normal" if status == "completed" else "500"
+            if status == "completed":
+                line, c, weight = "text-decoration: line-through;", Colors.TEXT_MUTED, "normal"
+            elif frame.property("pinned"):
+                line, c, weight = "", Colors.TEXT_PRIMARY, "600"
+            else:
+                line, c, weight = "", Colors.TEXT_PRIMARY, "500"
             content_label.setStyleSheet(
                 f"color: {c}; background: transparent; {line}"
                 f" font-weight: {weight};"
@@ -361,6 +409,11 @@ class TasksPage(QWidget):
     def refresh_style(self) -> None:
         self._header.refresh_style()
         self._empty_hint.refresh_style()
+        # 置顶常驻区：淡琥珀底卡，与下方普通列表视觉区分
+        self._running_wrap.setStyleSheet(
+            "QFrame#taskRunningWrap { background: rgba(245, 158, 11, 0.10);"
+            f" border-radius: {BorderRadius.SM}; }}"
+        )
         # 进度条：轨道 = BORDER 色，已完成块 = completed 绿
         self._progress.setStyleSheet(
             "QProgressBar#taskProgressBar {"
@@ -373,10 +426,11 @@ class TasksPage(QWidget):
             " border-radius: 2px;"
             " }"
         )
-        for i in range(self._list_layout.count()):
-            w = self._list_layout.itemAt(i).widget()
-            if isinstance(w, QFrame) and w.objectName() == "taskItem":
-                self._apply_item_style(w)
+        for lay in (self._running_layout, self._list_layout):
+            for i in range(lay.count()):
+                w = lay.itemAt(i).widget()
+                if isinstance(w, QFrame) and w.objectName() == "taskItem":
+                    self._apply_item_style(w)
 
 
 class WorkbenchPanel(QWidget):
@@ -452,6 +506,14 @@ class WorkbenchPanel(QWidget):
         # FlowLayout：tab 多时自动折行；AlignRight 整体右对齐（每行独立计算）
         self._tab_bar_layout = FlowLayout(tab_bar_host, spacing=2, alignment=Qt.AlignRight, margins=0)
         root.addWidget(tab_bar_host)
+        # 页签滑动指示器：与标题栏顶栏 tab 同款（先于任何按钮创建，天然垫在底层）
+        self._indicator_ctl = TabIndicatorController(
+            tab_bar_host,
+            self,
+            lambda: self._tab_buttons[self._stack.currentIndex()].geometry()
+            if 0 <= self._stack.currentIndex() < len(self._tab_buttons)
+            else None,
+        )
 
         # ── 主体：QSplitter(垂直) 切分内容栈 / 任务区 ──
         # 上：tab 条已上移，这里只剩 QStackedWidget（工作树 / 记忆 / 产物 / 插件页 / 卡片页）
@@ -714,7 +776,7 @@ class WorkbenchPanel(QWidget):
         self._tab_labels = []
         for tab_id, label in specs:
             closable = tab_id in self._card_tabs
-            btn = CustomTabButton(tab_id, label, self, closable=closable)
+            btn = CustomTabButton(tab_id, label, self, closable=closable, indicator_managed=True)
             btn.clicked.connect(self._on_tab_clicked)
             if closable:
                 btn.close_clicked.connect(self.card_tab_close_requested.emit)
@@ -769,8 +831,19 @@ class WorkbenchPanel(QWidget):
         QTimer.singleShot(0, self._run_tab_hover_sync)
 
     def _run_tab_hover_sync(self) -> None:
+        # 面板被销毁后 singleShot(0) 回调仍会到达（deleteLater 与事件循环的竞态窗口），
+        # shiboken 判活拦截，防 RuntimeError 打进 Qt 事件循环（PySide6 下 pytest-qt 会判 FAIL）
+        if not shiboken6.isValid(self):
+            return
         self._hover_sync_pending = False
         self.sync_tab_hover()
+        # 显式钉位：show() 首次布局走 QLayout 同步 activate，不产生
+        # LayoutRequest，controller 的事件链接不到；showEvent 会调度到这里，
+        # 延迟一拍后按钮几何已收敛，能正确落位。与 controller 内建事件链
+        # （覆盖后续动态布局）双保险，幂等。
+        idx = self._stack.currentIndex()
+        if 0 <= idx < len(self._tab_buttons):
+            self._indicator_ctl.move_to(self._tab_buttons[idx].geometry(), animate=False)
 
     def leaveEvent(self, event) -> None:
         # 鼠标离开面板时兜底清空（动画/其它窗口抢焦点时子 widget 的
@@ -1070,7 +1143,7 @@ class WorkbenchPanel(QWidget):
         同时用于 subscribe 与 unsubscribe，否则退订静默失效、留下悬挂回调。
         """
         try:
-            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+            from app.core.infra.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
 
             bus = UIEventBus.get_instance()
             handler = self._on_project_changed_event
@@ -1165,6 +1238,9 @@ class WorkbenchPanel(QWidget):
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
+        # 滑动指示器：用户点击切换时滑过去；程序性切换（切窗恢复 saved）瞬移落位
+        if 0 <= index < len(self._tab_buttons):
+            self._indicator_ctl.move_to(self._tab_buttons[index].geometry(), animate=user)
         # 通知宿主记录（当前页签按对话窗口独立记忆，见 TabManagerWindow 回调）
         if user:
             self.current_tab_changed.emit(index)

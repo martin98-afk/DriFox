@@ -4,7 +4,7 @@
 行为零变化原则：serialize_messages 与 message_content.messages_to_api 逐点等价
 （含 to_api_message 的 system/user+multimodal/assistant+tool_calls+reasoning/tool
 全部分支），serialize_responses 与 messages_to_responses_input 逐点等价。
-辅助函数保持 import 复用 app.core.message_content（不搬动），仅组合逻辑落在此处。
+辅助函数保持 import 复用 app.core.conversation.message_content（不搬动），仅组合逻辑落在此处。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from app.core import message_content as mc
+from app.core.conversation import message_content as mc
 from app.plugins.contracts.message_serializer import SerializeContext
 
 

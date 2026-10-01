@@ -183,6 +183,10 @@ def test_installer_proxy_fallback_direct(monkeypatch, tmp_path):
         # 模拟 clone 产物：在 cache_dir 下生成文件（后续 move 到 target）
         cache_dir.mkdir(parents=True, exist_ok=True)
         (cache_dir / "__init__.py").write_text("# demo", encoding="utf-8")
+        # 新校验要求下载内容带 manifest（对齐真实市场产物）
+        md = cache_dir / ".drifox-plugin"
+        md.mkdir(parents=True, exist_ok=True)
+        (md / "plugin.json").write_text('{"name": "demo", "version": "1.0.0"}', encoding="utf-8")
 
     monkeypatch.setattr(inst.PluginInstaller, "_sparse_clone", fake_sparse)
 

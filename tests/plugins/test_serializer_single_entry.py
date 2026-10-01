@@ -9,7 +9,7 @@
 
 import pytest
 
-from app.core import message_content as mc
+from app.core.conversation import message_content as mc
 from app.plugins.contracts.message_serializer import SerializeContext, SerializeResult
 from app.plugins.contracts.model_adapter import ProtocolFlags
 from importlib import import_module

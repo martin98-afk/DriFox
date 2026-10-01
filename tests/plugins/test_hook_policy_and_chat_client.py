@@ -114,7 +114,7 @@ def test_executor_passes_hook_policy_to_worker():
 
 def test_tool_executor_trigger_hooks_false_skips_hooks():
     """trigger_hooks=False：PostToolUse 不触发（enabled 短路 + 无 backend 跳过）"""
-    from app.core.tool_executor import ToolExecutor
+    from app.core.tools.tool_executor import ToolExecutor
 
     te = ToolExecutor.__new__(ToolExecutor)
     calls = []

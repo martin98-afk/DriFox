@@ -20,8 +20,13 @@ def test_blacklist_rejects_core_plugins(tmp_path, monkeypatch):
     """黑名单插件（system/plugin-marketplace）拒绝禁用，无论 manifest type。"""
     from app.plugins.managers.plugin_manager import PluginManager
 
-    assert "system" in PluginManager._NON_DISABLEABLE
     assert "plugin-marketplace" in PluginManager._NON_DISABLEABLE
+    # 「system」单体已按组件拆分为 system-* 系列，名单中不再有条目名 "system"
+    assert "system" not in PluginManager._NON_DISABLEABLE
+    # 协议传输/流式接收器承载主对话请求链路（禁用后 transport resolve 返 None
+    # → 全部对话 RuntimeError），与核心链路同等级不可禁用
+    assert "system-transports" in PluginManager._NON_DISABLEABLE
+    assert "system-stream-sinks" in PluginManager._NON_DISABLEABLE
 
 
 def test_builtin_system_type_plugin_can_be_disabled(tmp_path, monkeypatch):

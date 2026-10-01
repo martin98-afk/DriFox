@@ -28,7 +28,7 @@ def run_session_switch_scenario(
     duration_sec: float,
 ) -> dict:
     """执行会话切换压测；返回基线摘要 dict。"""
-    from app.core.chat_session import SessionManager
+    from app.core.conversation.chat_session import SessionManager
 
     start_tracemalloc()
     t0 = time.time()

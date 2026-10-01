@@ -250,5 +250,4 @@ def test_get_project_list_sqlite_includes_projects_without_sessions(monkeypatch,
     # 真实 store 口径：sessions ∪ key_documents，含无会话的空项目 zero
     manager._session_store = _FakeSessionStore([], projects=["DriFox", "zero"])
     manager._use_sqlite = True
-
     assert manager.get_project_list() == ["DriFox", "zero"]

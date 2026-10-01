@@ -103,13 +103,15 @@ class LspClient:
             return False
 
         # P1-3：启动门禁（审计 + shell 元字符拒启 + 非内置源确认流）
-        from app.core.mcp_lsp_safety import gate_server_launch
+        from app.core.tools.mcp_lsp_safety import gate_server_launch
 
         verdict = gate_server_launch(
             "lsp",
             self.config.plugin_name,
             self.config.name,
             [self.config.command] + list(self.config.args or []),
+            source=self.config.source_path,
+            command=self.config.command,
         )
         if verdict != "proceed":
             logger.warning(

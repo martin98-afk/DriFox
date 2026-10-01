@@ -219,6 +219,19 @@ class SimpleHoverTooltip(QWidget):
         self._border_radius: int = 6
         self._wrap_w: Optional[int] = None  # 非空表示文本已超限折行，值为折行宽度
 
+        # 🛡️ 残留修复（R3）：自动收起守卫下沉到窗口自身。此前守卫只存在于
+        # _HoverTooltipFilter（guard 轮询），直接实例化本类的用法（插件生态
+        # 模仿 conversation_node_preview 的 mouseMove+show 模式、
+        # show_immediate_tooltip）零兜底：应用失焦（Windows 不合成 mouse
+        # leave，切回也不触发 Enter/Leave 翻转）、模态弹窗阻塞
+        # （WindowBlocked 不发 Leave）等场景下气泡永久残留屏幕。
+        # 任何路径 show 起来都有 120ms 看护强制收起，与 filter 守卫幂等并存。
+        self._anchor_ref: Optional["weakref.ref"] = None
+        self._selfguard = QTimer(self)
+        self._selfguard.setSingleShot(False)
+        self._selfguard.setInterval(120)
+        self._selfguard.timeout.connect(self._self_guard_check)
+
         self._refresh_theme()
         if not transient:
             # 🛡️ 泄漏修复（B7）：注册前先清理死实例，防止注册表只增不减；
@@ -327,6 +340,9 @@ class SimpleHoverTooltip(QWidget):
         self.winId()
         self.move(tx, ty)
         self.show()
+        # 记录锚点（弱引用）：自看护据此判断光标是否仍在目标上
+        self._anchor_ref = weakref.ref(target)
+        self._selfguard.start()
 
     def hide_tip(self):
         """隐藏 tooltip。"""
@@ -334,6 +350,39 @@ class SimpleHoverTooltip(QWidget):
             self.hide()
         except RuntimeError:
             pass
+
+    def showEvent(self, event):
+        """兜底启动自看护（覆盖不经 show_above 的 move+show 用法）。"""
+        super().showEvent(event)
+        if not self._selfguard.isActive():
+            self._selfguard.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._selfguard.stop()
+
+    def _self_guard_check(self):
+        """自看护：失焦/锚点失效/光标离开锚点时强制收起，杜绝永久残留。
+
+        无锚点用法（跟随鼠标的 move+show 模式）只做失焦收起，光标追踪
+        由调用方 mouseMoveEvent/leaveEvent 自理。
+        """
+        if not self.isVisible():
+            self._selfguard.stop()
+            return
+        # 应用失焦（alt-tab 等）→ 收起（与 filter 守卫同语义）
+        if QApplication.activeWindow() is None:
+            self.hide_tip()
+            return
+        anchor = self._anchor_ref() if self._anchor_ref is not None else None
+        if anchor is None:
+            return
+        try:
+            if not anchor.isVisible() or not anchor.rect().contains(anchor.mapFromGlobal(QCursor.pos())):
+                self.hide_tip()
+        except RuntimeError:
+            # C++ 半析构竞态窗口：锚点已亡 → 收起
+            self.hide_tip()
 
     # ── 自绘 ─────────────────────────────────────────
 

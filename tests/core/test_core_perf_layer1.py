@@ -10,8 +10,8 @@
 
 from hashlib import md5
 
-import app.core.context_usage as cu
-from app.core.context_builder import ContextBudgetAllocator
+import app.core.context.usage as cu
+from app.core.context.builder import ContextBudgetAllocator
 
 
 # ============================================================

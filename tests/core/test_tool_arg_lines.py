@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """编辑类工具流式行数估算测试（app/core/tool_arg_lines.py）"""
 
-from app.core.tool_arg_lines import (
+from app.core.tools.tool_arg_lines import (
     build_progress_payload,
     count_escaped_newlines,
     estimate_streaming_lines,

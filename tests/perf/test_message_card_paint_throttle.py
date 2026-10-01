@@ -42,25 +42,18 @@ def test_perf_paint_cache_exists(src_text: str):
 
 
 def test_perf_per_frame_allocation(src_text: str):
-    """性能/回归断言：动画间隔 <=50ms；源码仍含渐变重建与逐 stop 颜色插值（每帧仍有颜色分配）。
+    """性能/回归断言：动画间隔 <=50ms；每帧 QColor 分配已收敛（流式指示从彩虹循环改为单色）。
 
-    说明：3 渐变 × ~9 stop（main 9 / inner 10 / glow 6 / shimmer 3）≈ 27 QColor/帧 × 20fps。
-    lerp_color 在源码中定义为 helper 并在 build_gradient 的 stops 循环内调用 1 次
-    （文本出现 2 处），运行时循环展开为每帧 ~27 次 QColor 分配。
+    说明：旧实现 3 个彩虹渐变 × ~9 stop ≈ 27 QColor/帧 × 20fps（build_gradient + lerp_color）。
+    现改为单色 tint + 底部光块，build_gradient / lerp_color 已移除，每帧固定分配
+    内壁 2 + 描边 1 + 光块 2 = 5 个 QColor，且渐变/裁剪路径仍走缓存（见上一用例）。
+    本用例保留为断言：不得把彩虹逐 stop 插值重新引入热路径。
     """
     m = re.search(r"_anim_timer\.start\((\d+)\)", src_text)
     assert m is not None, "未找到 _anim_timer.start(...) 调用"
     interval = int(m.group(1))
     assert interval <= 50, f"动画定时器间隔应 <=50ms，实际 {interval}ms"
 
-    build_gradient_count = len(re.findall(r"build_gradient\(", src_text))
-    assert build_gradient_count >= 3, (
-        f"paintEvent 应含 >=3 处渐变重建（build_gradient 调用），实际 {build_gradient_count}"
-    )
-
-    lerp_color_count = len(re.findall(r"lerp_color\(", src_text))
-    # 源码中 lerp_color 定义为 helper 并在 build_gradient 循环内调用 1 次（共 2 处文本出现）。
-    # 运行时每次 build_gradient 遍历 stops 调用 lerp_color，3 渐变 × ~9 stop ≈ 27 QColor/帧。
-    assert lerp_color_count >= 2, (
-        f"lerp_color 应至少定义并调用 1 次（证明每帧仍有颜色分配），实际 {lerp_color_count}"
-    )
+    # 逐 stop 彩虹插值不得回归
+    assert "build_gradient(" not in src_text, "彩虹逐 stop 插值 build_gradient 不应重新引入"
+    assert "lerp_color(" not in src_text, "彩虹色插值 lerp_color 不应重新引入"

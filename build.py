@@ -167,12 +167,25 @@ _hidden_imports = [
     "app.tools.task_state",
     "app.tools.process_job",
     "app.tools.bg_manager",
+    # 插件 SDK（app/plugins/sdk.py）：仅被插件源文件 import，主代码零静态引用，
+    # PyInstaller 分析不到，漏打会导致 system-transports/stream-sinks 加载失败
+    "app.plugins.sdk",
     # system 插件引用的第三方包
     "html2text",
     "bs4",
     # 插件源文件（运行时动态加载，PyInstaller 不分析其依赖）引用的标准库：
     # assistant_hub/core/persona.py import getpass，漏打会导致人格卡片全空
     "getpass",
+    # keyring：后端发现走 entry points，PyInstaller 收不齐会报
+    # "No recommended backend was available"（jaraco/keyring #439/#468），
+    # 按平台显式声明后端模块；运行时找不到后端则应用侧自动降级明文（fail-open）
+    "keyring",
+    *(
+        {
+            "Windows": ["keyring.backends.Windows", "win32cred", "pywintypes"],
+            "Darwin": ["keyring.backends.macOS"],
+        }.get(platform.system(), ["keyring.backends.chainer"])
+    ),
 ]
 
 # 打包排除：由插件自包含 deps/ 提供（codegraph-tools / desktop-automation），
@@ -184,6 +197,22 @@ _exclude_modules = [
     "mss",
     "six",
     "colorama",
+    # 开发/测试工具：仅 dev 依赖组安装，运行时零引用（诊断工具走系统 PATH 的
+    # 外部可执行文件，不走这些包）。不排会被 PyInstaller 收进 _internal，
+    # 实测曾把 mypy（0.74MB，black 经 mypy_extensions 连带）打进发行包。
+    # ⚠️ 不要排 pyright：plugins/system-tools/tools/diagnostics_tools.py 有
+    # `from pyright import cli`（try/except 保护，装了就走模块调用），排掉会让
+    # get_diagnostics 在装了该包的用户机上永久降级到外部命令回退路径。
+    "mypy",
+    "mypy_extensions",
+    "mypyc",
+    "pytest",
+    "_pytest",
+    "pympler",
+    "black",
+    "coverage",
+    "nox",
+    "tox",
 ]
 
 # 3. 构造参数列表

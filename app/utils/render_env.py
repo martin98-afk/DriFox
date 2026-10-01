@@ -323,6 +323,11 @@ def default_config_path() -> str:
     Qt 加载之前独立运行。目录名字面量须与 app.utils.utils.APP_DATA_DIR_NAME
     （PySide6 版用 .drifox6 与 PyQt5 版隔离）保持一致。
     """
+    # DRIFOX_DATA_DIR 隔离（与 get_app_data_dir 同规则；本函数是 Qt 前最早
+    # 消费点，必须在 frozen 判断前短路，否则测试/多实例会读到真实配置）。
+    env_dir = os.environ.get("DRIFOX_DATA_DIR")
+    if env_dir:
+        return os.path.join(env_dir, "app.config")
     if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
         if sys.platform == "darwin":
             base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Drifox", ".drifox6")

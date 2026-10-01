@@ -137,9 +137,12 @@ class TestCommandCardDivider:
         card._render(incremental=False)
 
         assert card._divider_count == 3, f"期望 3 个 dividers, 实际 {card._divider_count}"
+        # 视口高度口径：前 8 个 item 槽的结束 y（其间分隔线计入，视口外分隔线排除）。
+        # 本场景前 8 项全是 cmd（divider 均在视口外）→ 高度 = 8 * ITEM_HEIGHT。
+        # 旧口径 visible * ITEM_HEIGHT + divider_count 会把视口外分隔线计入，
+        # 撑高视口使下一个 item 在底部露出半行，hover 即触发异常滚动。
         total = len(card._filtered_items) + card._divider_count
-        visible = min(total, MAX_VISIBLE_ITEMS)
-        expected_h = visible * ITEM_HEIGHT + card._divider_count
+        expected_h = MAX_VISIBLE_ITEMS * ITEM_HEIGHT
         assert card.height() == expected_h, f"高度不匹配: {card.height()} != {expected_h}"
         assert len(card._virtual_slots) == total, "虚拟槽数应与 items+dividers 一致"
 
@@ -156,9 +159,8 @@ class TestCommandCardDivider:
         card._render(incremental=True)
 
         assert card._divider_count == 3, f"incremental=True 首次: 期望 3 dividers, 实际 {card._divider_count}"
-        total = len(card._filtered_items) + card._divider_count
-        visible = min(total, MAX_VISIBLE_ITEMS)
-        expected_h = visible * ITEM_HEIGHT + card._divider_count
+        # 视口高度口径（同 test_incremental_false_full_render）：divider 均在视口外
+        expected_h = MAX_VISIBLE_ITEMS * ITEM_HEIGHT
         assert card.height() == expected_h, f"高度不匹配: {card.height()} != {expected_h}"
 
     def test_incremental_true_same_items(self):
@@ -213,18 +215,16 @@ class TestCommandCardDivider:
         card._filtered_items = list(_SUBSET_NO_DESC)
         card._render(incremental=True)
         assert card._divider_count == 1, f"子集应有 1 个 divider, 实际 {card._divider_count}"
-        total = len(card._filtered_items) + card._divider_count
-        visible = min(total, MAX_VISIBLE_ITEMS)
-        expected_h = visible * ITEM_HEIGHT + card._divider_count
+        # 视口高度口径：子集前 8 项全是 cmd，divider 在视口外 → 8 * ITEM_HEIGHT
+        expected_h = MAX_VISIBLE_ITEMS * ITEM_HEIGHT
         assert card.height() == expected_h, f"子集高度 {card.height()} != {expected_h}"
 
         # 恢复全集
         card._filtered_items = list(_ITEMS_NO_DESC)
         card._render(incremental=True)
         assert card._divider_count == 3, f"全集恢复后应有 3 个 dividers, 实际 {card._divider_count}"
-        total = len(card._filtered_items) + card._divider_count
-        visible = min(total, MAX_VISIBLE_ITEMS)
-        expected_h = visible * ITEM_HEIGHT + card._divider_count
+        # 视口高度口径（同上）：divider 均在视口外 → 8 * ITEM_HEIGHT
+        expected_h = MAX_VISIBLE_ITEMS * ITEM_HEIGHT
         assert card.height() == expected_h, f"全集高度 {card.height()} != {expected_h}"
 
     def test_apply_list_height_sync(self):

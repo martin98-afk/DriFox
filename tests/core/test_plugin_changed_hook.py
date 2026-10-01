@@ -9,7 +9,7 @@
 
 import pytest
 
-from app.core.hook_manager import HookMatchRule, HookManager
+from app.core.hooks.hook_manager import HookMatchRule, HookManager
 
 
 def _rule(matcher: str) -> HookMatchRule:
@@ -64,8 +64,8 @@ class TestTriggerPluginChangedHook:
 
     def test_no_backend_silent(self, monkeypatch):
         """无活跃 backend 时不抛异常（快照基线仍刷新）"""
-        from app.core import hook_manager as hm
-        from app.core.backend import ChatBackend
+        from app.core.hooks import hook_manager as hm
+        from app.core.conversation.backend import ChatBackend
 
         monkeypatch.setattr(ChatBackend, "_active_instances", [])
         hm.trigger_plugin_changed_hook({"action": "mcp_added", "server_name": "x"})
@@ -74,8 +74,8 @@ class TestTriggerPluginChangedHook:
 
     def test_no_registered_hook_skips_trigger(self, monkeypatch):
         """PluginChanged 无注册 hook 时不投递线程池（基线仍刷新）"""
-        from app.core import hook_manager as hm
-        from app.core.backend import ChatBackend
+        from app.core.hooks import hook_manager as hm
+        from app.core.conversation.backend import ChatBackend
 
         submitted: list = []
         monkeypatch.setattr(
@@ -92,19 +92,19 @@ class TestInferAction:
     """PluginHostService._infer_plugin_changed_action 推断"""
 
     def test_sentinel_is_installed(self):
-        from app.core.plugin_host_service import PluginHostService
+        from app.core.services.plugin_host_service import PluginHostService
 
         svc = PluginHostService.__new__(PluginHostService)
         assert svc._infer_plugin_changed_action(PluginHostService._NEW_PLUGIN_SENTINEL) == "installed"
 
     def test_empty_name_is_updated(self):
-        from app.core.plugin_host_service import PluginHostService
+        from app.core.services.plugin_host_service import PluginHostService
 
         svc = PluginHostService.__new__(PluginHostService)
         assert svc._infer_plugin_changed_action("") == "updated"
 
     def test_missing_plugin_is_uninstalled(self, monkeypatch):
-        from app.core.plugin_host_service import PluginHostService
+        from app.core.services.plugin_host_service import PluginHostService
 
         svc = PluginHostService.__new__(PluginHostService)
         monkeypatch.setattr(

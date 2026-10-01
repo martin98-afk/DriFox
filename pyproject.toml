@@ -1,6 +1,6 @@
 [project]
 name = "drifox"
-version = "0.5.11"
+version = "0.6.4"
 description = "DriFox - AI Chat Desktop Application"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -49,6 +49,11 @@ dependencies = [
     "lsprotocol",
     # Windows 平台 pywinpty 仅提供 win_amd64 wheel
     "pywinpty>=3.0.5 ; sys_platform == 'win32'",
+    "keyring>=25.0.0",
+    # keyring 的 Windows 凭证库后端（WinVaultKeyring）需要 win32cred。keyring 会优先
+    # 尝试 pywin32-ctypes，但其 cffi 实现在部分环境损坏且异常类型绕过 ImportError
+    # 回退，直接提供 pywin32 走回退分支最稳
+    "pywin32>=306 ; sys_platform == 'win32'",
 ]
 
 # 依赖组（供 uv sync --group / --all-groups 使用）
@@ -115,12 +120,19 @@ quote-style = "double"
 # pytest 配置
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 仓库根进 sys.path：plugins.* 直导（连字符目录名）不依赖 drifox 是否 editable 安装
+pythonpath = ["."]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
+# tests/ui 为 A 档全链 UI 测试（构建完整主窗口，重）：默认收集排除，
+# 显式 `pytest tests/ui -m ui` 才运行（S3b）
+addopts = "--ignore=tests/ui"
+xfail_strict = true
 markers = [
     "perf: 性能基准测试（测量响应时间）",
     "perf_long: 长时间运行时压测（≥30s/场景，需 QApplication）",
     "stress: 压力测试（连续调用验证稳定性）",
+    "ui: A 档全链 UI 测试（完整主窗口 + WebEngine，需显式 pytest tests/ui -m ui）",
 ]
 
 # 构建系统配置

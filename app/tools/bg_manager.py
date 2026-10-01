@@ -9,6 +9,7 @@
 
 放在 app/tools/（主程序包）后，插件重载不影响后台任务状态。
 """
+
 import subprocess
 import sys
 import threading
@@ -39,13 +40,57 @@ def _smart_decode(data: bytes, command: str = "") -> str:
     # 常见现代工具（输出 UTF-8）
     UTF8_TOOLS = frozenset(
         {
-            "git", "npm", "yarn", "pnpm", "node", "deno", "bun", "python",
-            "python3", "pip", "uv", "cargo", "rustc", "go", "java", "javac",
-            "mvn", "gradle", "docker", "kubectl", "helm", "terraform", "curl",
-            "wget", "gh", "aws", "gcloud", "az", "ruby", "gem", "php", "composer",
-            "lua", "perl", "R", "julia", "ruff", "mypy", "pytest", "eslint", "tsc",
-            "flutter", "dart", "swift", "make", "cmake", "ninja", "meson", "npx",
-            "pip3", "pipx",
+            "git",
+            "npm",
+            "yarn",
+            "pnpm",
+            "node",
+            "deno",
+            "bun",
+            "python",
+            "python3",
+            "pip",
+            "uv",
+            "cargo",
+            "rustc",
+            "go",
+            "java",
+            "javac",
+            "mvn",
+            "gradle",
+            "docker",
+            "kubectl",
+            "helm",
+            "terraform",
+            "curl",
+            "wget",
+            "gh",
+            "aws",
+            "gcloud",
+            "az",
+            "ruby",
+            "gem",
+            "php",
+            "composer",
+            "lua",
+            "perl",
+            "R",
+            "julia",
+            "ruff",
+            "mypy",
+            "pytest",
+            "eslint",
+            "tsc",
+            "flutter",
+            "dart",
+            "swift",
+            "make",
+            "cmake",
+            "ninja",
+            "meson",
+            "npx",
+            "pip3",
+            "pipx",
         }
     )
 
@@ -88,6 +133,27 @@ class BackgroundTask:
         # 限制缓冲区大小，最多保留 10000 行
         if len(self.output_buffer) > 10000:
             self.output_buffer = self.output_buffer[-5000:]
+
+
+def create_quota_job():
+    """按安全中心配置创建带资源配额的 ProcessJob（非 Windows / 不支持时返回 None）
+
+    配额来源：SandboxConfig["job_limits"]（memory_mb / active_process / cpu_time_ms，
+    0 表示不限）。读取失败一律回退无限额 Job，不阻断命令执行。
+    """
+    if not ProcessJob.is_supported():
+        return None
+    memory_mb = active_process = cpu_time_ms = 0
+    try:
+        from app.tools.sandbox import SandboxConfig
+
+        limits = SandboxConfig.get_instance().get("job_limits") or {}
+        memory_mb = int(limits.get("memory_mb") or 0)
+        active_process = int(limits.get("active_process") or 0)
+        cpu_time_ms = int(limits.get("cpu_time_ms") or 0)
+    except Exception as e:  # noqa: BLE001 - 配额读取失败不阻断命令执行
+        logger.debug(f"[ProcessJob] 配额读取失败，使用无限额 Job: {e}")
+    return ProcessJob(memory_mb=memory_mb, active_process=active_process, cpu_time_ms=cpu_time_ms)
 
 
 def _prepare_windows_encoding(command: str, workdir: Optional[Path] = None) -> str:
@@ -199,7 +265,8 @@ class BackgroundTaskManager:
             use_shell = needs_shell(command)
             # S4: 创建 Job Object（Windows）— kill-on-close 兜底杀进程树；
             # assign 失败（进程已在其它 Job）降级为 stop 时的 taskkill/terminate 路径。
-            job = ProcessJob() if ProcessJob.is_supported() else None
+            # L1: 资源配额（内存/进程数/CPU 时间）取自安全中心配置，0 表示不限。
+            job = create_quota_job()
 
             if use_shell:
                 # Path B: 需要 shell 特性 — 使用 shell=True（后台任务暂不强制审批）
@@ -374,4 +441,3 @@ PID: {task.pid}
             lines.append(f"{task.task_id:<14} {status:<10} {task.pid:<8} {elapsed_str:<10} {cmd_preview}")
 
         return "\n".join(lines)
-

@@ -143,7 +143,7 @@ def test_file_operation_recorder_accepts_engine(tmp_path, monkeypatch):
 
 def test_backend_session_store_returns_active_engine(fresh_storage_registry, fresh_serializer_registry):
     """backend.session_store 返回 StorageRegistry 活跃引擎（自定义引擎生效）"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from importlib import import_module
     SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
 
@@ -157,7 +157,7 @@ def test_backend_session_store_returns_active_engine(fresh_storage_registry, fre
 
 def test_backend_session_store_cold_start_sqlite(fresh_storage_registry, fresh_serializer_registry):
     """backend.session_store 空表冷启动 → 幂等加载系统插件 → sqlite 引擎"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = ChatBackend.__new__(ChatBackend)
     engine = backend.session_store
@@ -167,7 +167,7 @@ def test_backend_session_store_cold_start_sqlite(fresh_storage_registry, fresh_s
 def test_ui_attribute_assignment_shape(monkeypatch):
     """main_widget 侧 self.session_store = self.backend.session_store 用法不变"""
     import inspect
-    from app.core import backend as backend_mod
+    from app.core.conversation import backend as backend_mod
 
     assert "session_store" in inspect.getsource(backend_mod.ChatBackend)
     # property 保留（main_widget:1185 属性读取，非方法调用）

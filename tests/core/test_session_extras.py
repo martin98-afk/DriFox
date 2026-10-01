@@ -279,7 +279,7 @@ def test_reload_then_group_preserves_tool_args_for_render(store):
     预览参数全空。修复后 normalize_message 必须透传 _x_idx，渲染端才能
     按 extras 补回 arguments。
     """
-    from app.core.message_content import group_messages_for_display
+    from app.core.conversation.message_content import group_messages_for_display
     from app.widgets.ui_helpers import materialize_batch_with_extras
 
     messages = []
@@ -394,7 +394,7 @@ def test_normalize_message_does_not_fake_empty_arguments():
     伪造的 arguments={} 会让 extract_offload_fields 误判「无剥离字段」，
     掩盖轻量消息泄漏进保存链的事实，是 2026-09-12 数据丢失链的放大器。
     """
-    from app.core.message_content import normalize_message
+    from app.core.conversation.message_content import normalize_message
 
     light = {
         "role": "tool",

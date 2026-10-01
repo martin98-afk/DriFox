@@ -162,7 +162,7 @@ def test_floating_card_auto_registers_command():
     """register_floating_card 应自动注册 /card_id 命令（系统插件用短名）"""
     reg = UIPluginRegistry.get_instance()
     reg.reset()
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     # 系统插件（plugin_name == "system"）→ 短名
@@ -181,7 +181,7 @@ def test_floating_card_user_plugin_namespaced_command():
     """非系统插件的浮动卡片应注册为 namespaced 命令"""
     reg = UIPluginRegistry.get_instance()
     reg.reset()
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     # 用户插件 → plugin_name:card_id 形式
@@ -248,7 +248,7 @@ def test_unload_plugin_clears_registrations():
     assert "card1" not in reg.get_floating_cards()
     assert "plug-y" not in reg._loaded_plugins
 
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     assert cmd_mgr.has_command("card1") is False
@@ -375,7 +375,7 @@ def test_show_floating_card_registers_as_system_card():
     assert main_widget.system_card_registered.count("plug-bot") == 1
 
     # 清理
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-bot:plug-bot")
@@ -700,7 +700,7 @@ def test_move_floating_card_switches_container_and_rebuilds():
     assert main_widget._bottom_card_container.added[0][0] == "plug-move"
 
     # 清理
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-move:plug-move")
@@ -735,7 +735,7 @@ def test_move_floating_card_hidden_card_updates_only_and_bounds():
     assert reg.move_floating_card("not-exist", "top") is False
 
     # 清理
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-move:plug-move")
@@ -779,7 +779,7 @@ def test_show_floating_card_works_without_register_system_card_api():
     assert len(legacy._bottom_card_container.added) == 1
 
     # 清理
-    from app.core.command_manager import CommandManager
+    from app.core.commands.command_manager import CommandManager
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-old:plug-old")
@@ -1459,4 +1459,331 @@ def test_workbench_card_close_signal_wired_per_panel(monkeypatch):
         panel.card_tab_close_requested.emit(card_id)
         assert not panel.has_card_tab(card_id), f"第 {i} 个 panel 的 × 未接上关闭信号"
 
+
+# ── footer_action role 分流 ─────────────────────────────────────────────
+
+def test_footer_action_role_roundtrip():
+    """footer_action role 参数透传；默认 assistant；非法值回退 assistant"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_footer_action("plug-a", "user_btn", tooltip="u", role="user")
+    reg.register_footer_action("plug-a", "both_btn", tooltip="b", role="both")
+    reg.register_footer_action("plug-a", "default_btn", tooltip="d")
+    reg.register_footer_action("plug-a", "bad_btn", tooltip="x", role="bogus")
+    roles = {i.action_id: i.role for i in reg.get_footer_actions()}
+    assert roles["user_btn"] == "user"
+    assert roles["both_btn"] == "both"
+    assert roles["default_btn"] == "assistant"
+    assert roles["bad_btn"] == "assistant"
+    reg.reset()
+
+
+# ── 插件独立弹窗（register_window） ─────────────────────────────────────
+
+def test_register_window_info_and_command():
+    """注册弹窗写入 _windows 并联动命令名登记"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", type, title="测试窗")
+    info = reg.get_window_info("w1")
+    assert info is not None
+    assert info.plugin_name == "plug-a"
+    assert info.title == "测试窗"
+    assert info.widget_class is type
+    assert reg._window_command_names.get("w1") == "w1"  # 短名（无冲突时 _ui_command_name 返回 base_id）
+    reg.reset()
+
+
+def test_open_window_unregistered_returns_none():
+    """未注册的 window_id → open_window 返回 None"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    assert reg.open_window("missing") is None
+    reg.reset()
+
+
+def test_open_window_creates_and_singleton(qapp):
+    """open_window 创建实例；重复调用返回同一实例（单例）"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget, title="w1", width=300, height=200)
+    w1 = reg.open_window("w1")
+    assert w1 is not None
+    assert reg.get_open_windows().get("w1") is w1
+    w2 = reg.open_window("w1")
+    assert w2 is w1  # 单例复用
+    reg.reset()
+
+
+def test_hide_and_close_window(qapp):
+    """hide 保留实例；close 销毁并从 _open_windows 摘除（幂等）"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget)
+    reg.open_window("w1")
+    assert reg.hide_window("w1") is True
+    assert reg.get_open_windows().get("w1") is not None  # 隐藏不销毁
+    assert reg.close_window("w1") is True
+    assert reg.get_open_windows() == {}
+    assert reg.close_window("w1") is False  # 幂等
+    reg.reset()
+
+
+def test_unload_plugin_closes_and_unregisters(qapp):
+    """unload_plugin 销毁该插件全部窗口 + 移除注册 + 注销命令，其它插件不受影响"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget)
+    reg.register_window("plug-a", "w2", QWidget)
+    reg.register_window("plug-b", "w3", QWidget)
+    reg.open_window("w1")
+    reg.open_window("w2")
+    reg.open_window("w3")
+    assert reg.unload_plugin("plug-a") is True
+    assert reg.get_window_info("w1") is None
+    assert reg.get_window_info("w2") is None
+    assert reg.get_window_info("w3") is not None  # 其它插件不受影响
+    assert "w1" not in reg._window_command_names
+    assert "w2" not in reg._window_command_names
+    open_w = reg.get_open_windows()
+    assert list(open_w.keys()) == ["w3"]
+    reg.reset()
+
+
+def test_destroy_all_windows(qapp):
+    """destroy_all_windows 清空全部已开弹窗（应用退出路径）"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget)
+    reg.register_window("plug-b", "w2", QWidget)
+    reg.open_window("w1")
+    reg.open_window("w2")
+    reg.destroy_all_windows()
+    assert reg.get_open_windows() == {}
+    reg.reset()
+
+
+def test_register_window_no_command():
+    """register_command=False 联动命令不登记（popout 合成窗口用）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", type, register_command=False)
+    assert "w1" not in reg._window_command_names
+    assert reg.get_window_info("w1") is not None
+    reg.reset()
+
+
+def test_register_window_group_roundtrip():
+    """register_window group 参数透传；非法值回退空（跟随插件归属）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", type, title="A", group="system")
+    reg.register_window("plug-a", "w2", type, title="B", group="custom")
+    reg.register_window("plug-a", "w3", type, title="C")
+    reg.register_window("plug-a", "w4", type, title="D", group="bogus")
+    groups = {i.window_id: i.group for i in reg.get_window_infos()}
+    assert groups["w1"] == "system"
+    assert groups["w2"] == "custom"
+    assert groups["w3"] == ""
+    assert groups["w4"] == ""
+    reg.reset()
+
+
+def test_get_window_infos():
+    """get_window_infos 返回全部注册（含 popout 合成）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", type, title="A")
+    reg.register_window("plug-b", "w2", type, title="B")
+    infos = {i.window_id: i for i in reg.get_window_infos()}
+    assert set(infos) == {"w1", "w2"}
+    assert infos["w1"].title == "A"
+    reg.reset()
+
+
+def test_toggle_window_semantics(qapp):
+    """左侧栏 toggle：未开→开返回 True；已开→关返回 False"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_window("plug-a", "w1", QWidget)
+    assert reg.toggle_window("w1") is True
+    assert "w1" in reg.get_open_windows()
+    assert reg.toggle_window("w1") is False
+    assert reg.get_open_windows() == {}
+    reg.reset()
+
+
+def test_popout_card_create_and_singleton(qapp):
+    """popout_card：合成 popout:<card_id> 窗口并单例复用；未注册 card 返回 None"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card("plug-a", "my-card", QWidget, container="right", title="我的卡")
+    w1 = reg.popout_card("my-card")
+    assert w1 is not None
+    popout_wid = "popout:my-card"
+    assert reg.get_open_windows().get(popout_wid) is w1
+    assert reg.get_window_info(popout_wid) is not None
+    assert popout_wid not in reg._window_command_names  # 合成窗口不注册命令
+    w2 = reg.popout_card("my-card")
+    assert w2 is w1  # 单例
+    assert reg.popout_card("missing-card") is None
+    assert "popout:missing-card" not in reg._windows
+    reg.reset()
+
+
+# ── 主入口声明（primary_entry）与 card_id 声明式绑定 ──────────────
+
+
+def test_primary_entry_titlebar_derived(qapp):
+    """primary_entry kind=titlebar：注册卡即派生标题栏 tab（tab_id=card_id，回调已生成）"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        "plug-a",
+        "my-card",
+        QWidget,
+        container="full",
+        title="我的卡",
+        metadata={"primary_entry": {"kind": "titlebar", "label": "轨迹", "priority": 3}},
+    )
+    tabs = {t.tab_id: t for t in reg.get_titlebar_tabs()}
+    assert "my-card" in tabs
+    info = tabs["my-card"]
+    assert info.plugin_name == "plug-a"
+    assert info.label == "轨迹"
+    assert info.priority == 3
+    assert info.card_id == "my-card"
+    assert info.on_click is not None  # 框架生成的唤出回调
+    reg.reset()
+
+
+def test_primary_entry_sidebar_str_shorthand(qapp):
+    """primary_entry 字符串简写：kind=sidebar 派生侧栏项，label 缺省用卡 title"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        "plug-a",
+        "my-card",
+        QWidget,
+        container="right",
+        title="我的卡",
+        metadata={"primary_entry": "sidebar"},
+    )
+    items = {i.item_id: i for i in reg.get_sidebar_items()}
+    assert "my-card" in items
+    info = items["my-card"]
+    assert info.plugin_name == "plug-a"
+    assert info.label == "我的卡"
+    assert info.on_click is not None  # 框架生成的 toggle 回调
+    reg.reset()
+
+
+def test_primary_entry_invalid_kind_skipped(qapp):
+    """primary_entry.kind 非法：跳过派生且不抛异常，卡本身注册成功"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        "plug-a",
+        "my-card",
+        QWidget,
+        container="full",
+        title="我的卡",
+        metadata={"primary_entry": {"kind": "bogus"}},
+    )
+    assert reg.get_titlebar_tabs() == []
+    assert reg.get_sidebar_items() == []
+    assert "my-card" in reg.get_floating_cards()
+    reg.reset()
+
+
+def test_no_primary_entry_no_derivation(qapp):
+    """未声明 primary_entry：不派生任何入口（旧行为完全一致）"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card("plug-a", "my-card", QWidget, container="left", title="我的卡")
+    assert reg.get_titlebar_tabs() == []
+    assert reg.get_sidebar_items() == []
+    reg.reset()
+
+
+def test_titlebar_tab_on_click_priority_over_card_id(qapp):
+    """on_click 与 card_id 同传：on_click 优先（兼容路径不受影响）"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card("plug-a", "my-card", QWidget, container="full", title="我的卡")
+
+    def _manual():
+        return None
+
+    reg.register_titlebar_tab("plug-a", "my-card", "轨迹", on_click=_manual, card_id="my-card")
+    (info,) = reg.get_titlebar_tabs()
+    assert info.on_click is _manual
+    assert info.card_id == "my-card"
+    reg.reset()
+
+
+def test_titlebar_tab_card_id_before_card_registration(qapp):
+    """先注册 tab 后注册卡（card_id 暂未注册）：告警不阻断，注册成功"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_titlebar_tab("plug-a", "my-card", "轨迹", card_id="my-card")
+    reg.register_floating_card("plug-a", "my-card", QWidget, container="full", title="我的卡")
+    (info,) = reg.get_titlebar_tabs()
+    assert info.on_click is not None
+    assert info.card_id == "my-card"
+    reg.reset()
+
+
+def test_unload_plugin_clears_derived_entries(qapp):
+    """插件卸载：primary_entry 派生的 tab 与侧栏项一并注销"""
+    from PySide6.QtWidgets import QWidget
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        "plug-a",
+        "my-card",
+        QWidget,
+        container="full",
+        title="我的卡",
+        metadata={"primary_entry": "titlebar"},
+    )
+    reg.register_floating_card(
+        "plug-a",
+        "side-card",
+        QWidget,
+        container="right",
+        title="侧卡",
+        metadata={"primary_entry": "sidebar"},
+    )
+    assert reg.get_titlebar_tabs() != []
+    assert reg.get_sidebar_items() != []
+    reg.unload_plugin("plug-a")
+    assert reg.get_titlebar_tabs() == []
+    assert reg.get_sidebar_items() == []
+    assert reg.get_floating_cards() == {}
     reg.reset()

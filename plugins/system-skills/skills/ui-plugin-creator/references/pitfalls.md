@@ -319,7 +319,69 @@ def transcribe_wav(url: str, model: str, api_key: str, wav_path: str) -> str:
    并递归删 `__pycache__`），重启/热重载生效；
 2. 主程序：`python main.py` 跑 dev 验证，或走打包发版流程；
 3. 排查时先确认用户跑的是哪个（安装版 vs dev）再看「为什么没生效」。
-
+4. **数据目录分裂**（2026-09-15 实测）：dev 版 app_data_dir 是仓库内 `.drifox/`，
+   插件实际加载自 `<仓库>/.drifox/plugins/`；安装版才是 `~/.drifox/plugins/`。
+   改了 home 目录的插件对 dev 版永远无效——先确认用户实例加载的是哪份。
+5. **UI 组件不参与热重载**：改插件 UI 后 watchfiles 日志出现
+   `plugin reloaded: ... ui=False`，输入按钮/浮动卡仍挂旧回调，必须完全重启 DriFox。
 ---
+## 18. 取主程序模型配置：禁直读 app.config，走 services["get_provider_config"]
+**症状**：插件发起 LLM 调用报 `401 log in fail: Please carry the API secret key
+in the 'Authorization' field (1004)`，但同一服务商在主程序对话里正常。
+**原因**：主程序 `SecretMode` 非 `none` 时，`~/.drifox/app.config` 里
+`LLM.SavedProviders[*].API_KEY` 是密文（`password` 模式 `enc:v2:…`）或空串
+（`keyring` 模式密钥已入系统凭证库）。插件 `json.load` 该文件拿到的是密文/空值，
+当 Bearer token 发出必然 401。只有主程序内存态持有解密后的明文。
+**修法**：一律走宿主公开服务（输入按钮 context 自 0.6.2 起含 `services` 键）：
+```python
+# ✅ 正确：宿主读内存态已解锁明文，并叠加模型默认参数
+services = context.get("services") or {}
+get_cfg = services.get("get_provider_config")
+cfg = get_cfg("MiniMax", "MiniMax-M2.7")   # provider/model 均可传空串=当前
+client = build_openai_client(api_key=cfg["API_KEY"], base_url=cfg["API_URL"])
 
+# ❌ 错误：直读磁盘（任何密钥模式下都拿不到可用 key）
+data = json.load(open(os.path.expanduser("~/.drifox/app.config"), encoding="utf-8"))
+key = data["LLM"]["SavedProviders"]["xxx"]["API_KEY"]   # enc:v2:… 或 ""
+```
+- 判据用「**配置非空**」而非「key 非空」：免鉴权服务商（OpenCode 免费模型等）
+  API_KEY 本为空，`build_openai_client` 会剥掉 Authorization 头；
+- 显式指名的服务商解析不到 → 返回 `{}`，插件应报「未找到模型配置」，
+  **不得静默串到当前会话模型**（用户以为在用 A 实际扣的是 B 的额度）；
+- 磁盘文件仍可读**非密钥字段**（`provider_name` / `模型列表`）渲染下拉选项；
+- 实战参照：`drifox-plugins2/plugins/prompt-enhancer/ui/__init__.py`（v0.3.0）
+  与 `plugins/git-panel/ui/llm_config.py`（v2.0.1），回归测试
+  `drifox-plugins2/tests/test_provider_key_channel.py`。
+## 19. 卡片弹出独立窗口后「样式全丢（按钮黑块）+ 数据空白」
+**症状**：浮动卡右键「弹出」为独立窗口后，窗口能开能拖，但内容页样式全丢
+（按钮渲染成黑色方块）、数据空白（如 Git 面板显示不出变更/搁置/分支）。
+**原因**：卡片类插件的模板惯例是 **`__init__` 只建骨架，数据加载与主题应用都收敛在
+`show_card()`**（浮动卡激活时由宿主调用）；主题样式同理（`_apply_latest_theme` →
+`_retheme` 由 show_card 触发）。弹窗宿主早期既不调用 `show_card()`，注入的上下文
+又不是完整 provider（`card_info.context_provider` 多数卡片为 None，
+拿不到 `project_root`）→ 双失败。
+**修法**（主程序侧 2026-09-17 已修，插件侧要点）：
+- 内容页按约定实现 `set_context_provider` / `show_card` / `refresh_theme` 三接口
+  （模板见 `templates-window.md` §15.3）；
+- **别在 `__init__` 里做重加载**：数据/样式统一放 `show_card()`，
+  两种宿主（浮动卡 / 独立窗）才能行为一致；
+- 老主程序上若弹窗内容不刷新，检查宿主版本是否走激活路径
+  （`PluginWindow._build_content` 调 `show_card()`）。
+
+## 20. FramelessWindow 自建窗口：内容把标题栏盖住 → 拖不动、点不到按钮
+**症状**：基于 `qframelesswindow.FramelessWindow` 自建窗口时，内容页铺满整个窗口，
+标题栏被压在下面——窗口拖不动、最小化/关闭点不到。
+**原因**：`FramelessWindow` 的 `titleBar` 是**浮动子控件**（不进布局，靠
+`resizeEvent` 定位在顶部 `(0, 0, w, titleBar.height())`）；内容页后创建 z-order 更高，
+且根布局 margins=0 时内容从 y=0 起铺。
+**修法**：
+```python
+lay = QVBoxLayout(self)
+lay.setContentsMargins(0, self.titleBar.height(), 0, 0)  # 顶部留出标题栏高度
+lay.addWidget(content)
+self.titleBar.raise_()   # content 晚于 titleBar 创建，必须再置顶一次
+```
+（参考实现：`app/widgets/plugin_window.py`；TabManagerWindow 同款在
+`main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)`。）
+---
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。

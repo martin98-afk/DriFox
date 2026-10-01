@@ -28,7 +28,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QLabel, QWidget
 
-from app.utils.design_tokens import Colors, Shadows
+from app.utils.design_tokens import Animations, Colors, Shadows
+from app.utils.motion import retarget
 
 from .assistant_avatar import RoundAvatar, qcolor_from
 
@@ -42,9 +43,14 @@ NAME_AREA = 22  # 名字行高
 ARC_HEADROOM = 32  # 顶部弧度余量（收起态上摆溢出）
 LIFT_HOVER = 6  # 单卡悬停上浮
 CONTAINER_H = ARC_HEADROOM + CARD_SIZE + REST_GAP + NAME_AREA
+PAD = 8  # 卡片控件四周绘制余量：选中光环/缩放会画出内容区，无余量被控件边界裁剪
+CARD_W = CARD_SIZE + 2 * PAD  # 卡片控件实际宽
+CARD_H = CARD_SIZE + NAME_AREA + 2 * PAD  # 卡片控件实际高
+ROW_GAP = 12  # 展开态多行换行时的行间距
+SIDE_MARGIN = 12  # 展开态整行两侧最小留白（收起态弧宽钳制同源）
 
-_DUR_EXPAND = 800  # 展开动画时长（原版 0.8s ease-out）
-_DUR_COLLAPSE = 600
+# 展开/收起动画时长已收敛到全局 token（Animations.SLOW_MS / ENTER_MS）。
+# 旧值 800/600ms 是全局 180–300ms 语言的 3~4 倍，扇形重排显得慢半拍。
 Anim = QPropertyAnimation
 
 
@@ -66,7 +72,7 @@ class _AgentCard(QWidget):
         self._avatar = RoundAvatar(
             size=CARD_SIZE - 6, text=name, color=color, image_path=image_path or None, parent=self
         )
-        self._avatar.move(3, 3)
+        self._avatar.move(3 + PAD, 3 + PAD)
         self._avatar.show()
         # 主助手徽章：独立子控件（z 序高于头像，不被遮挡），set_primary 时显示
         self._badge = QLabel("★", self)
@@ -78,7 +84,7 @@ class _AgentCard(QWidget):
             f"font-size: 9px; font-weight: bold; }}"
         )
         self._badge.hide()
-        self.setFixedSize(CARD_SIZE, CARD_SIZE + NAME_AREA)
+        self.setFixedSize(CARD_W, CARD_H)
         self.setCursor(Qt.PointingHandCursor)
 
     # ── 状态 ──
@@ -109,7 +115,7 @@ class _AgentCard(QWidget):
         size = 16
         cx = CARD_SIZE / 2
         cy = CARD_SIZE / 2 + (CARD_SIZE - 4 - CARD_SIZE / 2) * self._scale - self._lift
-        self._badge.setGeometry(round(cx - size / 2), round(cy - size / 2), size, size)
+        self._badge.setGeometry(PAD + round(cx - size / 2), PAD + round(cy - size / 2), size, size)
 
     def set_avatar_image(self, image_path: Optional[str]) -> None:
         """换人格头像后轻量刷新单卡（不重建堆叠，保留动画状态）。"""
@@ -131,8 +137,8 @@ class _AgentCard(QWidget):
         if size % 2 == 1:
             size -= 1
         cx = cy = CARD_SIZE / 2
-        x = round(cx - size / 2)
-        y = round(cy - size / 2 - round(self._lift))
+        x = PAD + round(cx - size / 2)
+        y = PAD + round(cy - size / 2 - round(self._lift))
         self._avatar.set_avatar_size(size)
         self._avatar.setGeometry(x, y, size, size)
         self._update_badge_geom()
@@ -140,29 +146,43 @@ class _AgentCard(QWidget):
 
     def _apply_lift(self, v: float) -> None:
         self._lift = v
-        self._avatar.move(3, 3 - round(v))
+        self._avatar.move(3 + PAD, 3 + PAD - round(v))
         self._update_badge_geom()
         self.update()
 
+    def _scaled_anim(self, attr: str, apply_cb) -> QVariantAnimation:
+        """取（或惰性创建）缩放/上浮动画对象：同名属性全程只用一个动画
+
+        ★ 旧实现每次 new 一个且不停旧的：连点/快速 hover 时新旧两条同时
+        ``valueChanged`` 写同一个 ``_scale`` / ``_lift`` → 数值打架、非单调抖动。
+        """
+        key = f"{attr}_anim"
+        anim = getattr(self, key, None)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.valueChanged.connect(lambda v: apply_cb(float(v)))
+            setattr(self, key, anim)
+        return anim
+
     def _animate_scale(self, target: float) -> None:
-        anim = QVariantAnimation(self)
-        anim.setDuration(180)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.setStartValue(self._scale)
-        anim.setEndValue(target)
-        anim.valueChanged.connect(lambda v: self._apply_scale(float(v)))
-        anim.finished.connect(anim.deleteLater)
-        anim.start()
+        if not retarget(
+            self._scaled_anim("scale", self._apply_scale),
+            self._scale,
+            target,
+            duration=Animations.HOVER_MS,
+            curve=Animations.EASE_HOVER,
+        ):
+            self._apply_scale(target)
 
     def _animate_lift(self, target: float) -> None:
-        anim = QVariantAnimation(self)
-        anim.setDuration(160)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.setStartValue(self._lift)
-        anim.setEndValue(target)
-        anim.valueChanged.connect(lambda v: self._apply_lift(float(v)))
-        anim.finished.connect(anim.deleteLater)
-        anim.start()
+        if not retarget(
+            self._scaled_anim("lift", self._apply_lift),
+            self._lift,
+            target,
+            duration=Animations.HOVER_MS,
+            curve=Animations.EASE_HOVER,
+        ):
+            self._apply_lift(target)
 
     # ── 事件 ──
     def enterEvent(self, e):  # noqa: N802
@@ -182,6 +202,8 @@ class _AgentCard(QWidget):
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
+        # 余量平移：光环/缩放画出内容区也不被控件边界裁剪（历史坑：光环被裁成弓形）
+        p.translate(PAD, PAD)
         # 缩放绘制（选中 1.06）
         if self._scale != 1.0:
             p.translate(self.width() / 2, CARD_SIZE / 2)
@@ -225,12 +247,13 @@ class _AddCard(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(CARD_SIZE, CARD_SIZE + NAME_AREA)
+        self.setFixedSize(CARD_W, CARD_H)
         self.setCursor(Qt.PointingHandCursor)
 
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
+        p.translate(PAD, PAD)
         rect = QRectF(2, 2, CARD_SIZE - 4, CARD_SIZE - 4)
         pen = QPen(QColor(Colors.TEXT_ACCENT), 1.5, Qt.DashLine)
         pen.setDashPattern([4, 3])
@@ -324,6 +347,28 @@ class ArcCardStack(QWidget):
         self.selectionChanged.emit(aid)
 
     # ── 布局与动画 ──
+    def _row_capacity(self) -> int:
+        """展开态单行容量：步长固定 SPREAD_STEP 不再压缩间距，放不下自动换行。"""
+        avail = self.width() - 2 * SIDE_MARGIN
+        if avail < CARD_SIZE:
+            return 1
+        return max(1, int((avail - CARD_SIZE) // SPREAD_STEP) + 1)
+
+    def _expanded_rows(self) -> int:
+        """展开态总行数（助手卡 + 「新建」卡按容量分行）。"""
+        m = len(self._cards) + 1
+        return max(1, math.ceil(m / self._row_capacity()))
+
+    def _arc_deg_step(self) -> float:
+        """收起态相邻卡圆心角：卡片多时钳制总弧宽不超容器（不再横向溢出）。"""
+        half = len(self._cards) + 1 - 1
+        if half <= 0:
+            return ARC_SPREAD_DEG
+        half = half / 2
+        ratio = (self.width() - CARD_SIZE - 2 * SIDE_MARGIN) / 2 / ARC_RADIUS
+        max_deg = ARC_SPREAD_DEG if ratio >= 1 else math.degrees(math.asin(max(0.0, ratio)))
+        return min(ARC_SPREAD_DEG, max_deg / half)
+
     def _positions(self, expanded: bool) -> List[tuple]:
         """每张助手卡的 (x, y) 位置。
 
@@ -337,17 +382,23 @@ class ArcCardStack(QWidget):
         base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
         m = n + 1  # 助手卡 + 「新建」卡，整体对称分布
         if expanded:
-            # 自适应步长：优先 SPREAD_STEP，超出容器宽则压缩（最小 34 防重叠）
-            step = min(SPREAD_STEP, max(34.0, (total_w - CARD_SIZE - 24) / (m - 1)))
-            spread = step * (m - 1)
-            x0 = (total_w - spread) / 2 - CARD_SIZE / 2
-            return [(x0 + i * step, base_y) for i in range(n)]
-        # 收起态：绕 (cx, base_y + CARD_SIZE/2 + ARC_RADIUS) 旋转 ±ARC_SPREAD_DEG
+            # 步长固定不压缩，放不下自动换行（行内居中，行距 ROW_GAP 向上叠）
+            cap = self._row_capacity()
+            out = []
+            for i in range(n):
+                row, idx = divmod(i, cap)
+                k = min(cap, m - row * cap)  # 该行卡片数
+                row_w = SPREAD_STEP * (k - 1) + CARD_SIZE
+                x0 = (total_w - row_w) / 2
+                out.append((x0 + idx * SPREAD_STEP, base_y - row * (CARD_SIZE + ROW_GAP)))
+            return out
+        # 收起态：绕 (cx, base_y + CARD_SIZE/2 + ARC_RADIUS) 旋转 ±deg_step（多卡时钳制）
         cx = total_w / 2 - CARD_SIZE / 2
         origin_y = base_y + CARD_SIZE / 2 + ARC_RADIUS
+        deg_step = self._arc_deg_step()
         out = []
         for i in range(n):
-            deg = (i - (m - 1) / 2) * ARC_SPREAD_DEG
+            deg = (i - (m - 1) / 2) * deg_step
             rad = math.radians(deg)
             # 旋转 CARD 中心相对 origin 的位置（半径 ARC_RADIUS，垂直向上）
             px = cx + CARD_SIZE / 2 + ARC_RADIUS * math.sin(rad) - CARD_SIZE / 2
@@ -362,18 +413,25 @@ class ArcCardStack(QWidget):
         base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
         m = n + 1
         if expanded:
-            step = min(SPREAD_STEP, max(34.0, (total_w - CARD_SIZE - 24) / (m - 1)))
-            spread = step * (m - 1)
-            x0 = (total_w - spread) / 2 - CARD_SIZE / 2
-            return (x0 + n * step, base_y)
+            cap = self._row_capacity()
+            row, idx = divmod(n, cap)
+            k = min(cap, m - row * cap)
+            row_w = SPREAD_STEP * (k - 1) + CARD_SIZE
+            x0 = (total_w - row_w) / 2
+            return (x0 + idx * SPREAD_STEP, base_y - row * (CARD_SIZE + ROW_GAP))
         cx = total_w / 2 - CARD_SIZE / 2
         origin_y = base_y + CARD_SIZE / 2 + ARC_RADIUS
-        rad = math.radians((n - (m - 1) / 2) * ARC_SPREAD_DEG)
+        rad = math.radians((n - (m - 1) / 2) * self._arc_deg_step())
         px = cx + ARC_RADIUS * math.sin(rad)
         py = origin_y - ARC_RADIUS * math.cos(rad) - CARD_SIZE / 2
         return (px, py)
 
     def _relayout(self, animate: bool) -> None:
+        # 展开态多行时容器动态增高（收起恢复单行高度），外层布局自动下推滚动区
+        rows = self._expanded_rows() if self._expanded else 1
+        target_h = CONTAINER_H + (rows - 1) * (CARD_SIZE + ROW_GAP)
+        if self.height() != target_h:
+            self.setFixedHeight(target_h)
         positions = self._positions(self._expanded)
         base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
         for card in self._cards:
@@ -387,7 +445,14 @@ class ArcCardStack(QWidget):
                 add_x = self.width() / 2 - CARD_SIZE / 2
                 add_y = base_y
         self._anims.stop()
-        self._anims = QParallelAnimationGroup(self)
+        # ★ 复用同一个 group：旧实现每次 relayout 都 new 一个 group，旧的及其
+        # N 条子动画挂在 self 上永不删除 → 每次 hover 泄漏一组动画对象。
+        # clear() 会移除并删除上一次的子动画，再重新装填。
+        self._anims.clear()
+        # 展开/收起时长走全局 token：原 800/600ms 是全局 180–300ms 语言的
+        # 3~4 倍，扇形重排会显得"慢半拍"。
+        duration = Animations.SLOW_MS if self._expanded else Animations.ENTER_MS
+        curve = Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT
         # z 序：从右往左 raise → 左侧盖右侧；选中卡最后 raise（最顶层）
         ordered = list(reversed(list(enumerate(self._cards))))
         if self._selected_aid:
@@ -400,11 +465,12 @@ class ArcCardStack(QWidget):
             if i >= len(positions):
                 continue
             tx, ty = positions[i]
+            tx, ty = tx - PAD, ty - PAD  # 布局给内容区左上角，控件左上角再退 PAD 余量
             card.raise_()
-            if animate:
+            if animate and Animations.motion_enabled():
                 anim = Anim(card, b"pos")
-                anim.setDuration(_DUR_EXPAND if self._expanded else _DUR_COLLAPSE)
-                anim.setEasingCurve(QEasingCurve.OutCubic)
+                anim.setDuration(duration)
+                anim.setEasingCurve(QEasingCurve(curve))
                 anim.setStartValue(card.pos())
                 anim.setEndValue(QPoint(int(tx), int(ty)))
                 self._anims.addAnimation(anim)
@@ -416,16 +482,18 @@ class ArcCardStack(QWidget):
             else:
                 # 收起态：新建卡压在扇形最下层（z 轴正确层级），hover 展开时才抬起
                 self._add_card.lower()
-            if animate:
+            add_x, add_y = add_x - PAD, add_y - PAD
+            if animate and Animations.motion_enabled():
                 anim = Anim(self._add_card, b"pos")
-                anim.setDuration(_DUR_EXPAND if self._expanded else _DUR_COLLAPSE)
-                anim.setEasingCurve(QEasingCurve.OutCubic)
+                anim.setDuration(duration)
+                anim.setEasingCurve(QEasingCurve(curve))
                 anim.setStartValue(self._add_card.pos())
                 anim.setEndValue(QPoint(int(add_x), int(add_y)))
                 self._anims.addAnimation(anim)
             else:
                 self._add_card.move(int(add_x), int(add_y))
-        self._anims.start()
+        if self._anims.animationCount():
+            self._anims.start()
 
     # ── 事件 ──
     def enterEvent(self, e):  # noqa: N802

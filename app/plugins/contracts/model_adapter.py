@@ -8,7 +8,7 @@ protocol_flags(llm_config) 返回消息序列化与 API 形态的全部协议开
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Protocol, runtime_checkable
 
 
@@ -16,15 +16,24 @@ from typing import Any, Dict, Protocol, runtime_checkable
 class ProtocolFlags:
     """协议行为开关（messages_to_api / to_api_message 的全部决策参数）
 
-    serializer_id：序列化器选择（默认 "openai"）。Phase B 只立不消费——
-    薄壳统一解析 openai + 覆盖式替换机制；留给 Phase C「worker 单入口 +
-    adapter 指定序列化策略」时消费。默认值 openai 保证零变化。
+    serializer_id：序列化器选择（默认 "openai"）。
+
+    protocol：端点协议形态（默认 "openai"）。决定请求发出通道与响应解析方式：
+    - "openai"：chat/completions（OpenAI SDK create 调用）
+    - "responses"：/v1/responses（OpenAI SDK responses.create）
+    - "codeassist"：Google Code Assist 原生 REST（generateContent 形态，OAuth Bearer），
+      请求体由 serializer_id 对应序列化器产出，worker 按此分派第三通道。
+    默认 "openai" 保证既有 adapter 零行为变化。
     """
 
     is_gemini: bool = False
     requires_reasoning_content: bool = False
     use_responses_api: bool = False
     serializer_id: str = "openai"
+    protocol: str = "openai"
+    # adapter 透传的 provider 状态（如 Code Assist 的 gcp project id）。
+    # 协议无关方不读此字段，默认空 dict 保证既有 adapter 零行为变化。
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable

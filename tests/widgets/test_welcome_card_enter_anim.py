@@ -87,3 +87,103 @@ def test_refresh_welcome_data_calls_render_with_suppress_true(monkeypatch):
     card._welcome_top = []
     mc.MessageCard.refresh_welcome_data(card, [_S1], [_S2])
     assert captured.get("suppress_anim") is True
+
+
+# ── 增量 DOM 替换（2026-09-28）：软刷新只换 #welcome-sessions-root ──────
+
+
+def test_render_sessions_body_wraps_root_anchor():
+    """sessions body 必须包 #welcome-sessions-root 根锚点（空态同样包）。"""
+    html = _render_sessions_body([_S1], [_S2])
+    assert 'id="welcome-sessions-root"' in html, "有内容态应包根锚点供增量替换定位"
+    empty = _render_sessions_body([], [], suppress_anim=True)
+    assert 'id="welcome-sessions-root"' in empty, "空态也应包根锚点"
+
+
+class _FakePage:
+    def __init__(self):
+        self.calls = []
+
+    def runJavaScript(self, js):
+        self.calls.append(js)
+
+
+class _FakeViewer:
+    def __init__(self, visible=True, js_ready=True, with_page=True):
+        self._visible = visible
+        self._is_js_ready = js_ready
+        self.page_obj = _FakePage() if with_page else None
+
+    def isVisible(self):
+        return self._visible
+
+    def page(self):
+        return self.page_obj
+
+
+def _make_card(viewer, lazy_rendered=True):
+    from app.widgets import message_card as mc
+
+    card = mc.MessageCard.__new__(mc.MessageCard)
+    card._welcome_mode = "sessions"
+    card._welcome_recent = []
+    card._welcome_top = []
+    card._get_welcome_window_context = lambda: {}
+    if viewer is not None:
+        card.viewer = viewer
+    card._lazy_rendered = lazy_rendered
+    return card
+
+
+def test_refresh_welcome_data_prefers_incremental(monkeypatch):
+    """可见且 JS 就绪的窗口软刷新走增量替换，不落整页渲染。"""
+    from app.widgets import message_card as mc
+
+    viewer = _FakeViewer(visible=True, js_ready=True)
+    card = _make_card(viewer)
+
+    def _boom(body_html):
+        raise AssertionError("增量路径生效时不应回退整页渲染")
+
+    card._render_welcome_with_body = _boom
+    monkeypatch.setattr(
+        mc,
+        "_render_welcome_body",
+        lambda mode, recent, top, window_context=None, suppress_anim=False: "<div>x</div>",
+    )
+    mc.MessageCard.refresh_welcome_data(card, [_S1], [_S2])
+    assert len(viewer.page_obj.calls) == 1, "应恰好发出一次增量替换 JS"
+    js = viewer.page_obj.calls[0]
+    assert "welcome-sessions-root" in js and "innerHTML" in js
+    assert "<div>x</div>" in js
+
+
+def test_incremental_refresh_falls_back_when_viewer_not_ready():
+    """viewer 缺失 / 懒渲染未完成 / JS 未就绪 / 不可见 → 回退整页（返回 False）。"""
+    from app.widgets import message_card as mc
+
+    # 无 viewer 属性（__new__ 绕过 __init__ 的 stub 场景）
+    assert mc.MessageCard._refresh_welcome_body_incremental(_make_card(None), "<div>x</div>") is False
+    # 懒渲染未完成
+    assert (
+        mc.MessageCard._refresh_welcome_body_incremental(
+            _make_card(_FakeViewer(visible=True, js_ready=True), lazy_rendered=False), "<div>x</div>"
+        )
+        is False
+    )
+    # JS 未就绪
+    assert (
+        mc.MessageCard._refresh_welcome_body_incremental(_FakeViewerCase.js_not_ready_card(), "<div>x</div>") is False
+    )
+    # 窗口不可见（后台 tab，切回时整页补渲拿新数据）
+    assert mc.MessageCard._refresh_welcome_body_incremental(_FakeViewerCase.hidden_card(), "<div>x</div>") is False
+
+
+class _FakeViewerCase:
+    @staticmethod
+    def js_not_ready_card():
+        return _make_card(_FakeViewer(visible=True, js_ready=False))
+
+    @staticmethod
+    def hidden_card():
+        return _make_card(_FakeViewer(visible=False, js_ready=True))

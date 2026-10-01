@@ -44,6 +44,8 @@ class SerializeResult:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     input_items: List[Dict[str, Any]] = field(default_factory=list)
     instructions: str = ""
+    # 非消息体载荷（如 Code Assist 的 systemInstruction 结构）；协议无关方不读，默认空 dict
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable

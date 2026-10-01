@@ -15,7 +15,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from app.core.plugin_host_service import PluginHostService
+from app.core.services.plugin_host_service import PluginHostService
 from PySide6.QtCore import QObject
 
 
@@ -35,7 +35,7 @@ def _make_host():
 
 def _build_backend():
     """绕过 Qt 初始化构造 ChatBackend 实例"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     backend._agent_manager = None
@@ -203,7 +203,7 @@ def test_root_file_components_contains_drifox_plugin_manifest():
 
 def test_identify_components_recognizes_manifest_change(tmp_path):
     """_identify_all_components_from_changes 识别 .drifox-plugin/plugin.json → __manifest__"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = _make_host()
     plugin_dir = tmp_path / "my-plugin"
@@ -222,7 +222,7 @@ def test_identify_components_fallback_recognizes_manifest_change(tmp_path):
     """fallback 路径（plugin_prefixes 索引过期）也能识别 .drifox-plugin 变更"""
     from pathlib import Path
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from app.plugins.managers.plugin_manager import PluginInfo
 
     plugin_dir = tmp_path / "my-plugin"
@@ -257,7 +257,7 @@ def test_reload_single_plugin_manifest_triggers_all_components(monkeypatch, tmp_
 
     manifest 变更 = 组件清单可能增删，必须全组件重载以重新探测差异。
     """
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from app.plugins.kernel import ComponentReloaderRegistry, ReloadContext, get_reloader_registry
 
     # 插件声明了 3 个组件
@@ -305,7 +305,7 @@ def test_reload_single_plugin_manifest_triggers_all_components(monkeypatch, tmp_
 
 def test_reload_single_plugin_manifest_skips_unknown_component(monkeypatch, tmp_path):
     """manifest 触发的全组件重载：仅遍历该插件实际声明的 components，不调未声明的"""
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from app.plugins.kernel import ComponentReloaderRegistry
 
     fake_plugin = MagicMock()
@@ -371,16 +371,17 @@ def test_plugin_manager_importable_from_new_path():
 
 
 def test_marketplace_update_reload_ui_module_collectable():
-    """修正后 tests/test_plugin_marketplace_update_reload_ui.py 不再有 collection ImportError
+    """修正后 tests/plugins/test_plugin_marketplace_update_reload_ui.py 不再有 collection ImportError
 
     修复前该模块 `from app.core import plugin_manager as pm_mod` 触发 pytest collection 失败
     （Pre-existing ERROR）。本测试不直接 import（避免触发 cards.py 真实 Qt 依赖链），
     只做语法级断言：源文件不含已废弃的旧 import 路径。
+    （文件已随 tests 结构化搬迁 tests/ → tests/plugins/，路径跟随更新）
     """
     from pathlib import Path
 
-    src = Path(__file__).resolve().parent.parent / "test_plugin_marketplace_update_reload_ui.py"
+    src = Path(__file__).resolve().parent / "test_plugin_marketplace_update_reload_ui.py"
     content = src.read_text(encoding="utf-8")
     assert "from app.core import plugin_manager" not in content, (
-        "tests/test_plugin_marketplace_update_reload_ui.py 必须改用 app.plugins.managers.plugin_manager"
+        "test_plugin_marketplace_update_reload_ui.py 必须改用 app.plugins.managers.plugin_manager"
     )

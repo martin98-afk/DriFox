@@ -133,7 +133,7 @@ class ModelConfigCard(QWidget):
             # 可选值（reasoning_effort_values）才显示——无 values = 不支持调整强度，
             # toggle/budget 型思考模型也没有"强度"概念，一并隐藏该配置项
             if key == "思考等级" and self.current_model_name:
-                from app.core.model_capabilities import get_model_capabilities
+                from app.core.modelmeta.model_capabilities import get_model_capabilities
 
                 caps = get_model_capabilities(self.current_model_name)
                 if caps.get("thinking_param") != "reasoning_effort" or not caps.get("reasoning_effort_values"):
@@ -301,7 +301,7 @@ class ModelConfigCard(QWidget):
             # reasoning_options 中 effort 的 values（如 ["high", "max"]）；
             # models.dev 无数据时回退 PARAM_SCHEMA 固定默认。
             if key == "思考等级" and self.current_model_name:
-                from app.core.model_capabilities import get_model_capabilities
+                from app.core.modelmeta.model_capabilities import get_model_capabilities
 
                 caps = get_model_capabilities(self.current_model_name)
                 dyn_values = caps.get("reasoning_effort_values")

@@ -540,7 +540,7 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
     def _update_skill_token_count(self):
         """更新头部 subtitle：已启用计数 + token 占用估算"""
-        from app.core.token_estimator import estimate_tokens
+        from app.core.infra.token_estimator import estimate_tokens
         from app.utils.utils import get_local_skills
 
         enabled = self.enabled_skills or []

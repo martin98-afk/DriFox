@@ -39,14 +39,32 @@ class LspServerRow(CardWidget):
     """LSP 服务器单行展示：状态点 + 名称 + 扩展名列表 + [安装按钮]"""
 
     installRequested = Signal(str, str)  # (server_name, install_hint)
+    confirmRequested = Signal(str, bool)  # (gate_key, allow) —— 安全门禁确认
 
     def __init__(self, name: str, extensions: list, is_running: bool, install_hint: str = "", parent=None):
         super().__init__(parent)
         self._name = name
         self._extensions = extensions
         self._install_hint = install_hint
+        self._gate_key = ""
         self._setup_ui()
         self.set_running(is_running)
+
+    def set_gate_pending(self, gate_key: str) -> None:
+        """标记该服务器处于「待安全确认」：显示放行按钮
+
+        背景（EU-G22）：非内置源（用户级插件）的 LSP server 首启会被门禁判
+        need_confirm；此前 LSP 侧无确认入口 → 用户自装插件永远启不了
+        （`confirm_by_key` 仅 MCP 侧有调用）。此按钮补上该入口。
+        """
+        self._gate_key = gate_key or ""
+        if hasattr(self, "_confirm_btn"):
+            self._confirm_btn.setVisible(bool(self._gate_key))
+            if self._gate_key:
+                self._confirm_btn.setToolTip("该服务器来自用户级插件，首次启动需确认")
+
+    def clear_gate_pending(self) -> None:
+        self.set_gate_pending("")
 
     def set_running(self, running: bool):
         """更新运行状态指示灯"""
@@ -120,6 +138,16 @@ class LspServerRow(CardWidget):
         self._install_btn.setVisible(False)
         layout.addWidget(self._install_btn)
 
+        # 安全确认按钮（仅当该服务器被门禁判 need_confirm 时显示）
+        self._confirm_btn = PushButton("放行", self)
+        self._confirm_btn.setFixedWidth(56)
+        self._confirm_btn.setFixedHeight(24)
+        self._confirm_btn.setStyleSheet(f"font-size: {scale_font_size(11)}px; padding: 2px 8px;")
+        self._confirm_btn.setToolTip("该服务器来自用户级插件，首次启动需确认")
+        self._confirm_btn.clicked.connect(lambda: self.confirmRequested.emit(self._gate_key, True))
+        self._confirm_btn.setVisible(False)
+        layout.addWidget(self._confirm_btn)
+
 
 # ── LSP 列表卡片 ────────────────────────────────────────────────
 
@@ -144,9 +172,14 @@ class LspListSettingCard(ExpandSettingCard):
         # 列表行延迟到首次展开时构建（见 _ensure_built）：_get_lsp_manager()
         # 会首次导入 app.core.lsp.lsp_manager，实测约 0.27s，折叠态下不必付
         self._built = False
-        # 首次加载后延迟刷新一次状态
-        QTimer.singleShot(500, self._refresh_status)
-        self._refresh_timer.start()
+        # ★ 性能（2026-09-13）：构造期既不预热 LSP 管理器、也不启动 3s 轮询。
+        #   原来这里有两笔主线程开销，都会落在「设置卡刚显示」这一刻：
+        #     ① QTimer.singleShot(500, _refresh_status) —— 卡片显示后 0.5s 才在
+        #        主线程补首次 _get_lsp_manager()（首次 import lsp_manager 及依赖链
+        #        ~0.27s），用户表现为"卡片刚出来又卡一下"；
+        #     ② _refresh_timer.start() —— 折叠态、甚至设置弹窗从未打开时也在跑。
+        #   两者都与本类既有设计意图（注释上一条：折叠态下不必付这份开销）相悖，
+        #   改为统一在展开时开始，收起/隐藏即停止（见 setExpand / hideEvent）。
 
     def _ensure_built(self):
         """首次需要时构建列表行（幂等）"""
@@ -156,10 +189,30 @@ class LspListSettingCard(ExpandSettingCard):
         self._rebuild()
 
     def setExpand(self, isExpand: bool):
-        """展开前补齐列表行，保证展开动画算到的是完整高度"""
+        """展开前补齐列表行，保证展开动画算到的是完整高度
+
+        展开同时启动状态轮询并立即取一次真实状态（此时 lsp_manager 已被
+        _rebuild 导入，属缓存命中，不再付导入成本）；收起即停轮询。
+        """
         if isExpand:
             self._ensure_built()
+            self._refresh_status()
+            if not self._refresh_timer.isActive():
+                self._refresh_timer.start()
+        else:
+            self._refresh_timer.stop()
         super().setExpand(isExpand)
+
+    def hideEvent(self, event):
+        """卡片不可见（含设置弹窗收起）时停止轮询，避免后台空转"""
+        self._refresh_timer.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        """重新可见时，仅当仍处于展开态才恢复轮询"""
+        super().showEvent(event)
+        if self.isExpand and not self._refresh_timer.isActive():
+            self._refresh_timer.start()
 
     def _get_lsp_manager(self):
         """获取 LspManager 实例"""
@@ -229,6 +282,7 @@ class LspListSettingCard(ExpandSettingCard):
         while self.viewLayout.count():
             item = self.viewLayout.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
 
         # 更新开关状态（与配置同步）
@@ -258,12 +312,19 @@ class LspListSettingCard(ExpandSettingCard):
                     parent=self.view,
                 )
                 row.installRequested.connect(self._on_install_requested)
+                row.confirmRequested.connect(self._on_confirm_requested)
+                # 门禁待确认态：非内置源（用户级插件）首启被判 need_confirm，
+                # 此前无任何确认入口 → 用户自装 LSP 插件永远启不了（EU-G22）
+                gate_key = self._gate_key_for(client)
+                if gate_key and not client.is_running:
+                    row.set_gate_pending(gate_key)
                 self._rows[name] = row
                 self.viewLayout.addWidget(row)
 
-        from PySide6.QtCore import QCoreApplication
-
-        QCoreApplication.processEvents()
+        # ★ 原实现在这里 QCoreApplication.processEvents()：泵走当时事件队列里的
+        # 全部事件，本函数耗时因此变成"那一刻队列里积压了什么"（实测首建被顶到
+        # 691ms，其中绝大部分是替别人还债）。布局尺寸不需要它：takeAt 已把 item
+        # 摘出布局，sizeHint 不再计入；hide() 保证残留 widget 在被 delete 前不重绘。
         self.viewLayout.activate()
         self.view.updateGeometry()
         self._adjustViewSize()
@@ -327,6 +388,77 @@ class LspListSettingCard(ExpandSettingCard):
 
         self._cmd_warm_thread = threading.Thread(target=_work, name="lsp-cmd-warm", daemon=True)
         self._cmd_warm_thread.start()
+
+    def _gate_key_for(self, client) -> str:
+        """该 LSP 服务器若处于门禁待确认态，返回其 gate key；否则空串
+
+        key 口径与 `mcp_lsp_safety.server_key` 一致：`lsp:<plugin>:<server>`。
+        判定顺序：先看会话拒绝集合（用户点过拒绝 → 不再提示），再看待确认集合。
+        """
+        try:
+            from app.core.tools.mcp_lsp_safety import (
+                config_hash,
+                is_pending_confirm_by_key,
+                is_session_denied,
+                server_key,
+            )
+
+            cfg = getattr(client, "config", None)
+            if cfg is None:
+                return ""
+            # 指纹口径与 gate 调用点一致：args 含 command 本体（[command]+args）。
+            # 属性名是 args（R-G1 P2-A：曾误写 argsTemplate，恒 None → args 全丢，
+            # 指纹与 gate 不一致 → 卡待确认/放行按钮永不出现）
+            cmd = getattr(cfg, "command", None)
+            args = getattr(cfg, "args", None)
+            chash = config_hash(cmd, ([cmd] if cmd else []) + list(args or []))
+            key = server_key("lsp", getattr(cfg, "plugin_name", "") or "", getattr(cfg, "name", "") or "", chash)
+            if is_session_denied(key):
+                return ""
+            return key if is_pending_confirm_by_key(key) else ""
+        except Exception as e:  # noqa: BLE001 - 门禁不可用时不阻断列表渲染
+            logger.debug(f"[LSP] 门禁待确认态查询失败: {e}")
+            return ""
+
+    def _on_confirm_requested(self, gate_key: str, allow: bool):
+        """用户在 LSP 行点「放行」→ 写白名单并尝试启动该服务器
+
+        对齐 MCP 侧 `mcp_setting_card.py:911/917` 的 confirm_by_key 用法。
+        此前 LSP 侧零调用 → 用户自装插件的 server 永远启不了（EU-G22）。
+        """
+        if not gate_key:
+            return
+        try:
+            from app.core.tools.mcp_lsp_safety import confirm_by_key
+
+            confirm_by_key(gate_key, allow=allow)
+            logger.info(f"[LSP] 用户确认门禁: key={gate_key} allow={allow}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[LSP] 门禁确认写入失败: {e}")
+            return
+        # 放行后尝试启动（拒绝则仅清掉按钮，由用户手动重试/重载插件）
+        if allow:
+            self._try_start_after_confirm(gate_key)
+        self._rebuild()
+
+    def _try_start_after_confirm(self, gate_key: str) -> None:
+        """确认放行后尝试启动对应服务器（失败静默：用户可重载插件手动重试）"""
+        try:
+            import asyncio
+
+            mgr = self._get_lsp_manager()
+            loop = getattr(mgr, "_loop", None) if mgr else None
+            if mgr is None or loop is None:
+                return
+            for client in mgr._clients.values():
+                cfg = getattr(client, "config", None)
+                name = getattr(cfg, "name", "") or ""
+                if name and gate_key.endswith(f":{name}"):
+                    asyncio.run_coroutine_threadsafe(client.start(), loop)
+                    logger.info(f"[LSP] 门禁放行后已触发启动: {name}")
+                    return
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[LSP] 确认后启动尝试失败（可手动重载插件）: {e}")
 
     def _on_install_requested(self, server_name: str, install_hint: str):
         """处理安装按钮点击 — 在终端中执行安装命令"""

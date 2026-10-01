@@ -9,7 +9,7 @@ messages_to_responses_input 经 SerializerRegistry 委托，调用点零改动�
 
 import pytest
 
-from app.core import message_content as mc
+from app.core.conversation import message_content as mc
 from app.plugins.contracts.message_serializer import SerializeContext, SerializeResult
 from app.plugins.contracts.model_adapter import ProtocolFlags
 

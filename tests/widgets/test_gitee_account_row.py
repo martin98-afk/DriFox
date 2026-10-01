@@ -50,7 +50,7 @@ def row_factory(qtbot):
                 return_value=cfg,
             ),
             patch(
-                "app.core.config_sync.ConfigSyncService.get_instance",
+                "app.core.sync.config_sync.ConfigSyncService.get_instance",
                 return_value=sync_service,
             ),
         ):
@@ -192,7 +192,7 @@ def test_bound_render_does_not_start_remote_sync(qtbot):
             return_value=cfg,
         ),
         patch(
-            "app.core.config_sync.ConfigSyncService.get_instance",
+            "app.core.sync.config_sync.ConfigSyncService.get_instance",
             return_value=sync_service,
         ),
         patch("app.gateway.auth.get_oauth_backend", return_value=backend),
@@ -283,7 +283,7 @@ def gitee_card_factory(qtbot):
                 return_value=cfg,
             ),
             patch(
-                "app.core.config_sync.ConfigSyncService.get_instance",
+                "app.core.sync.config_sync.ConfigSyncService.get_instance",
                 return_value=sync_service,
             ),
             patch(

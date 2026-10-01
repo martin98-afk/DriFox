@@ -37,10 +37,31 @@ class ContextUsageRing(QWidget):
         self.setFixedSize(22, 22)
         self.setMouseTracking(True)
 
-        self._tooltip = ContextBreakdownTooltip()
+        # [PERF T35] tooltip 懒创建：ContextBreakdownTooltip 构造含 13 处
+        # setStyleSheet + legend 子控件树构建，而 set_usage 以 2Hz 频率调用，
+        # 大多数会话从未 hover 过圆环 → 白付构造开销。
+        # 内部用 _tooltip_obj 持有实例，_tooltip 暴露为惰性 property：
+        # 任何外部读（含既有测试 / 其他调用点）都拿到已构造实例，零调用方改动。
+        self._tooltip_obj = None
         self._tooltip_timer = QTimer(self)
         self._tooltip_timer.setSingleShot(True)
         self._tooltip_timer.timeout.connect(self._show_tooltip)
+
+    @property
+    def _tooltip(self):
+        """惰性 tooltip（首次读取时构造，并立即用当前状态补一次数据）
+
+        补数据的原因：set_usage 高频路径走 _rebuild_tooltip 早退（不构造），
+        首次读取发生在数据已更新之后 —— 若不补，调用方会看到空 tooltip。
+        """
+        if self._tooltip_obj is None:
+            self._tooltip_obj = ContextBreakdownTooltip()
+            self._rebuild_tooltip()  # 此时 _tooltip_obj 非 None，不会递归早退
+        return self._tooltip_obj
+
+    def _ensure_tooltip(self):
+        """显式确保 tooltip 已构造（读取即构造，语义等同访问 _tooltip）"""
+        return self._tooltip
 
     def set_usage(
         self,
@@ -118,6 +139,10 @@ class ContextUsageRing(QWidget):
         self.update()
 
     def _rebuild_tooltip(self):
+        # [PERF T35] 未构造则早退：set_usage 2Hz 调用本方法，tooltip 未 hover
+        # 过时构造它纯属浪费（构造含 13 处 setStyleSheet + legend 重建）。
+        if self._tooltip_obj is None:
+            return
         self._tooltip.set_data(
             {
                 "used_tokens": self._used_tokens,
@@ -135,6 +160,7 @@ class ContextUsageRing(QWidget):
 
     def _show_tooltip(self):
         # 每次显示前刷新 tooltip 数据，确保主题色/字体等与当前主题同步
+        self._ensure_tooltip()
         self._rebuild_tooltip()
 
         # 即使没有会话 / 模型配置，也给出一个轻量提示，避免「hover 圆环却毫无反馈」。
@@ -243,7 +269,8 @@ class ContextUsageRing(QWidget):
 
     def leaveEvent(self, event):
         self._tooltip_timer.stop()
-        self._tooltip.hide()
+        if self._tooltip_obj is not None:
+            self._tooltip_obj.hide()
 
     def wheelEvent(self, event):
         event.ignore()

@@ -12,7 +12,7 @@
 
 from types import MethodType, SimpleNamespace
 
-from app.core.message_content import _is_hook_message, group_messages_for_display
+from app.core.conversation.message_content import _is_hook_message, group_messages_for_display
 from app.widgets.ui_helpers import _is_hook_message_ui, build_node_preview_data
 
 
@@ -166,7 +166,7 @@ class TestGetUserRoundRangesTeamMail:
 
     def test_team_mail_forms_independent_round(self):
         """用户A + 邮件X + 用户B → 3 个 round（TeamMail 独立成 round）。"""
-        from app.core.message_content import get_user_round_ranges
+        from app.core.conversation.message_content import get_user_round_ranges
 
         msgs = [_user("A"), _mail("邮件X"), _user("B")]
         ranges = get_user_round_ranges(msgs)
@@ -178,7 +178,7 @@ class TestGetUserRoundRangesTeamMail:
 
     def test_team_mail_round_index_matches_display(self):
         """B 卡片 round_index=2 必须落在 ranges[2]（UI 渲染 batch 口径一致）。"""
-        from app.core.message_content import get_user_round_ranges
+        from app.core.conversation.message_content import get_user_round_ranges
 
         msgs = [_user("A"), _mail("邮件X"), _user("B")]
         ranges = get_user_round_ranges(msgs)
@@ -193,7 +193,7 @@ class TestGetUserRoundRangesTeamMail:
         注意：用 PreUserMessage hook（非 SessionStart —— SessionStart 是会话级，
         不并入任何 round）。
         """
-        from app.core.message_content import get_user_round_ranges
+        from app.core.conversation.message_content import get_user_round_ranges
 
         pre_hook = {"role": "user", "content": "<reminder>pre</reminder>", "_hook_event": "PreUserMessage"}
         msgs = [_user("A"), pre_hook, _mail("邮件X"), _user("B")]
@@ -204,7 +204,7 @@ class TestGetUserRoundRangesTeamMail:
 
     def test_stop_block_user_still_merged(self):
         """回归：非 TeamMail 的 hook 合成 user（StopBlock）仍并入前一个真实 round。"""
-        from app.core.message_content import get_user_round_ranges
+        from app.core.conversation.message_content import get_user_round_ranges
 
         stop = {"role": "user", "content": "x", "_hook_event": "StopBlock"}
         msgs = [_user("A"), stop, _user("B")]
@@ -213,7 +213,7 @@ class TestGetUserRoundRangesTeamMail:
 
     def test_plain_session_unchanged(self):
         """回归：无 TeamMail 的普通会话 round_ranges 不变。"""
-        from app.core.message_content import get_user_round_ranges
+        from app.core.conversation.message_content import get_user_round_ranges
 
         msgs = [_user("A"), _assistant("回复1"), _user("B"), _assistant("回复2")]
         ranges = get_user_round_ranges(msgs)
@@ -228,7 +228,7 @@ class TestGetUserRoundRangesTeamMail:
         import re
         from pathlib import Path
 
-        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "message_content.py"
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "conversation" / "message_content.py"
         tree = ast.parse(src_path.read_text(encoding="utf-8"))
 
         target = None

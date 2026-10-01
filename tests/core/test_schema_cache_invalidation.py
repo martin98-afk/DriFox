@@ -123,7 +123,7 @@ class TestTeamOnlyFilter:
 
     def _make_agent_manager(self, monkeypatch):
         """构造最小 AgentManager（__new__ 绕过）+ 注入 fake agent"""
-        from app.core.agent import AgentManager
+        from app.core.conversation.agent import AgentManager
 
         am = AgentManager.__new__(AgentManager)
         am._agents = {}

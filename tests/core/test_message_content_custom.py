@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """message_content custom 块测试"""
 
-from app.core.message_content import ensure_content_blocks, content_to_markdown, messages_to_api
+from app.core.conversation.message_content import ensure_content_blocks, content_to_markdown, messages_to_api
 
 
 def test_tool_call_reasoning_content_is_preserved_when_explicitly_empty():

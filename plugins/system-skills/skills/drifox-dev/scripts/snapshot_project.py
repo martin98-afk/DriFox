@@ -37,7 +37,7 @@ KEY_FILES = [
     "app/widgets/webview_pool.py",
     "app/core/backend.py",
     "app/core/workers/chat_worker.py",
-    "app/core/hook_manager.py",
+    "app/core/hooks/hook_manager.py",
     "app/core/conversation/executor.py",
     "app/plugins/kernel.py",
     "app/plugins/registries/ui_plugin_registry.py",

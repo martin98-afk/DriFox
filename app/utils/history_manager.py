@@ -25,8 +25,8 @@ import orjson as json
 from loguru import logger
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
-from app.core.message_content import consolidate_messages, content_to_text
-from app.core.token_estimator import count_messages_tokens
+from app.core.conversation.message_content import consolidate_messages, content_to_text
+from app.core.infra.token_estimator import count_messages_tokens
 from app.utils.utils import APP_DATA_DIR_NAME, deserialize_from_json, get_app_data_dir, serialize_for_json
 
 
@@ -163,7 +163,7 @@ def extract_message_preview(messages: List[Dict], max_len: int = 50) -> str:
         content = msg.get("content", "")
         if role == "user" and content:
             if isinstance(content, list):
-                from app.core.message_content import content_to_text
+                from app.core.conversation.message_content import content_to_text
 
                 content = content_to_text(content)
             return content[:max_len].strip() + ("..." if len(content) > max_len else "")
@@ -463,7 +463,7 @@ class HistoryManager:
         if use_sqlite:
             try:
                 # 函数体内延迟 import：避免与 backend 循环导入
-                from app.core.backend import get_session_storage
+                from app.core.conversation.backend import get_session_storage
 
                 engine = get_session_storage()
                 # hasattr 降级：引擎无 is_initialized（第三方实现）→ 视为未启用 SQLite
@@ -643,6 +643,9 @@ class HistoryManager:
             else:
                 title = "新对话"
 
+        _pair_count = self._count_conversation_pairs(merged_messages)
+        _preview = extract_message_preview(merged_messages)
+        _ctx_tokens = count_messages_tokens(merged_messages)
         return {
             "session_id": session_id,
             "saved_at": saved_at,
@@ -650,14 +653,14 @@ class HistoryManager:
             "project": project or "默认项目",
             "last_time": last_msg_time,
             "messages": merged_messages,
-            "message_count": self._count_conversation_pairs(merged_messages),
-            "preview": extract_message_preview(merged_messages),
+            "message_count": _pair_count,
+            "preview": _preview,
             "compaction_state": dict(compaction_state or {}),
             "compaction_cache": dict(compaction_cache or {}),
             "system_prompt": system_prompt or "",
             "user_edited_title": False,
             "worktree_path": worktree_path or "",
-            "context_usage": count_messages_tokens(merged_messages),
+            "context_usage": _ctx_tokens,
             "last_api_prompt_tokens": last_api_prompt_tokens,
             "last_api_message_count": last_api_message_count,
             # 团队元数据（方案 A 团队会话恢复基础；非团队会话保持空串）
@@ -1530,8 +1533,18 @@ class HistoryManager:
                 if not session.get("messages") and self._session_store and self._session_store.is_initialized:
                     full = self._session_store.get_session(session_id)
                     if full:
-                        session["messages"] = full.get("messages", [])
-                        session["message_count"] = full.get("message_count", len(session["messages"]))
+                        messages = full.get("messages", [])
+                        # [T2f 修复 a] 懒回填改全量物化：主 blob 是轻量消息
+                        # （剥离字段在 session_msg_extras 表），必须按 _x_idx
+                        # 合并回填；轻量消息进保存链会丢历史 extras（2026-09-12
+                        # 根因的读取侧一半）。
+                        extras = self._session_store.load_msg_extras(session_id)
+                        if extras:
+                            from app.core.store.session_repository import merge_extras_into
+
+                            merge_extras_into(messages, extras)
+                        session["messages"] = messages
+                        session["message_count"] = full.get("message_count", len(messages))
                         # system_prompt 轻量列表不再加载，借这次全量查询回填
                         # （full 已含该字段，零额外 I/O）
                         if session.get("system_prompt") is None:
@@ -1834,6 +1847,55 @@ class HistoryManager:
                     )
         except Exception as e:
             logger.error(f"[HistoryManager] flush 穿透异常: {e}")
+
+    def flush_async(self):
+        """后台线程 flush：主线程捕获待保存会话引用，serialize+写盘转后台线程。
+
+        场景：关窗路径主线程同步 flush 全量序列化+zstd+SQL 实测 700ms+
+        （大会话），是"关闭会话卡 1~2 秒"的主因。本方法在主线程完成
+        pending 解析与目标捕获（列表遍历不与主线程 update_session 并发），
+        写盘全部移到后台线程（SessionStore 每线程独立连接，后台 finalize
+        线程已有同款调用先例）。
+
+        ⚠️ 非 daemon 线程：应用退出时解释器 shutdown 会 join 本线程，
+        写完进程才真正退出——最后一窗关闭（=应用退出）的数据安全由
+        此保证（aboutToQuit 遍历存活窗口时已 unregister 的最后一窗被
+        跳过，本方法是唯一保存点）。窗口 UI 即时消失，仅进程后台
+        多活写盘的几百 ms，用户无感。
+
+        竞态说明：
+        - 捕获后主线程仍可能 update_session 同一记录（pop+insert 新 dict），
+          后台写的是捕获时的快照引用——关窗路径窗口已 _is_destroyed，
+          消息不再变更，安全；其他路径调用方自行保证时序。
+        - _save_timer 已排队回调触发 _do_save 时读 pending_id=None 早退，
+          不会与后台线程双写。
+        """
+        if self._save_timer is not None:
+            self._save_timer = None
+        pending_id = self._pending_save_session_id
+        self._pending_save_session_id = None
+        if not pending_id or not (self._use_sqlite and self._session_store):
+            return
+        target = None
+        for session in self._history_sessions:
+            if session.get("session_id") == pending_id:
+                target = session
+                break
+        # 空消息守卫与 _do_save 同口径：内存已释放的会话不回写（防覆盖 DB 全量消息）
+        if not target or not target.get("messages"):
+            return
+        store = self._session_store
+        db = getattr(store, "_db", None) if store is not None else None
+
+        def _bg_flush():
+            try:
+                store.save_session(target)
+                if db is not None and getattr(db, "is_connected", False):
+                    db.flush()
+            except Exception as e:
+                logger.error(f"[HistoryManager] flush_async 后台保存失败: {e}")
+
+        threading.Thread(target=_bg_flush, name="history-flush-async").start()
 
     def _extract_last_message_time(self, messages: List[Dict]) -> str:
         for msg in reversed(messages or []):

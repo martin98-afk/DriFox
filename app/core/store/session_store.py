@@ -284,7 +284,12 @@ class SessionStore:
 
                 # 2. 一次性激活：若文件头 auto_vacuum 不是 INCREMENTAL，执行 VACUUM 永久写入
                 #    (迁移已在同步段完成，VACUUM 基于完整 schema 重建)
-                if file_auto_vacuum and file_auto_vacuum != "incremental":
+                # ⚠️ PRAGMA 返回整数（0/1/2），归一化后再比较——此前 "2" != "incremental"
+                # 恒为真，导致已是 INCREMENTAL 的库每次启动都白跑一次全量 VACUUM（秒级）
+                _av_normalized = {"0": "none", "1": "full", "2": "incremental"}.get(
+                    str(file_auto_vacuum).strip().lower(), file_auto_vacuum
+                )
+                if file_auto_vacuum and _av_normalized != "incremental":
                     logger.info(
                         f"[SessionStore] 文件头 auto_vacuum={file_auto_vacuum}, "
                         f"后台执行一次性 VACUUM 永久激活 INCREMENTAL..."
@@ -846,11 +851,16 @@ class SessionStore:
             return self._session_repo.get_team_first_question_candidates(run_id)
         return []
 
-    def load_msg_extras(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict]:
-        """读取剥离的 UI 态字段（message_extras）。idxs=None 读全部。"""
+    def load_msg_extras(self, session_id: str, idxs: Optional[List[int]] = None) -> Optional[Dict[int, Dict]]:
+        """读取剥离的 UI 态字段（message_extras）。idxs=None 读全部。
+
+        Returns:
+            {msg_idx: {field: value}}；None=读失败（与空 {} 可区分），
+            透传 SessionRepository.load_extras_for_session 契约。
+        """
         if self._session_repo:
             return self._session_repo.load_extras_for_session(session_id, idxs)
-        return {}
+        return None
 
     def get_full_messages(self, session_id: str) -> List[Dict]:
         """主 blob + extras 合并的全量消息（导出 / 深读用）。"""

@@ -128,7 +128,7 @@ class TestAddUserMessageHookEvent:
 
     def test_with_hook_event_writes_field(self):
         """传 _hook_event="TeamMail" → 消息带 _hook_event 字段。"""
-        from app.core.chat_session import ChatSession
+        from app.core.conversation.chat_session import ChatSession
 
         s = ChatSession()
         s.add_user_message("你好", _hook_event="TeamMail")
@@ -138,7 +138,7 @@ class TestAddUserMessageHookEvent:
 
     def test_without_hook_event_no_field(self):
         """不传 _hook_event → 消息不带该字段（历史行为不变）。"""
-        from app.core.chat_session import ChatSession
+        from app.core.conversation.chat_session import ChatSession
 
         s = ChatSession()
         s.add_user_message("你好")
@@ -146,7 +146,7 @@ class TestAddUserMessageHookEvent:
 
     def test_with_params_and_hook_event(self):
         """params 与 _hook_event 可共存，互不影响。"""
-        from app.core.chat_session import ChatSession
+        from app.core.conversation.chat_session import ChatSession
 
         s = ChatSession()
         s.add_user_message("你好", params={"a": 1}, _hook_event="TeamMail")

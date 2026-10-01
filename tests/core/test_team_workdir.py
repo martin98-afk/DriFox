@@ -199,7 +199,7 @@ class TestTeamWorkdirBroadcast:
 
     def test_broadcast_does_not_forward(self, fresh_tm, tmp_path):
         """B4: 广播仅发送方触发一次，接收方不转发（无递归调用）。"""
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
         from app.main_widget import OpenAIChatToolWindow
 
         wd = str(tmp_path / "wd")

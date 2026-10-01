@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 from PySide6.QtCore import QObject, Signal
 
-from app.core.chat_session import ChatSession
+from app.core.conversation.chat_session import ChatSession
 from app.core.conversation.adapters import GatewayConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
@@ -766,6 +766,7 @@ class GatewayEngine(QObject, BaseEngine):
             tools = self._agent_manager.get_agent_tools_schema(
                 agent_name,
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                session_id=str(getattr(s, "session_id", "") or "") if s else "",
             )
         else:
             tools = get_builtin_tools_schema(

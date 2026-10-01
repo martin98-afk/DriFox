@@ -81,7 +81,7 @@ def test_snapshot_no_is_cache_dependency():
 
     通过 monkey-patch count_messages_tokens 抛出异常来验证（如果 snapshot 仍调用它会失败）。
     """
-    from app.core import token_estimator
+    from app.core.infra import token_estimator
 
     messages = [{"role": "user", "content": "x" * 100}] * 5
 

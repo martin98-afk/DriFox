@@ -318,7 +318,7 @@ def _execute_impl(tool_ctx=None, **kw):
 
     # 安全网：用户在权限卡片显式关掉的工具（toggles=False 且 deny 策略），中转也拒绝
     try:
-        from app.core.tool_permission_controller import resolve_tool_off_policy
+        from app.core.tools.tool_permission_controller import resolve_tool_off_policy
         from app.utils.config import Settings
 
         settings = Settings.get_instance()

@@ -161,9 +161,16 @@ def test_guide_install_git_hides_card_and_fills_input(monkeypatch):
     monkeypatch.setattr(tab_manager_window, "TabManagerWindow", FakeWindow)
 
     card = MarketplaceCard.__new__(MarketplaceCard)
-    card._guide_install_git()
+    card._guide_install_git("demo-plugin")
 
     assert FakeUI.hidden == ["plugin-marketplace"], "必须全局隐藏市场浮动卡"
-    assert FakeMainWidget.input_area.text == "本地安装git", "输入框必须填入引导语"
+    prompt = FakeMainWidget.input_area.text
+    assert "demo-plugin" in prompt, "引导语必须带上失败插件名，模型才知道要重裝哪个"
+    assert "git" in prompt.lower(), "引导语必须指向安装 git"
+    # 关键：必须给出本平台可执行的安装命令，而不是泛泛一句「安装 git」
+    assert any(
+        k in prompt for k in ("winget", "brew", "apt", "dnf", "pacman", "git-scm.com")
+    ), f"引导语必须含具体安装命令，实际: {prompt}"
+    assert "git --version" in prompt, "引导语必须含验证步骤"
     assert FakeMainWidget.input_area.focused is True, "输入框必须获得焦点"
 

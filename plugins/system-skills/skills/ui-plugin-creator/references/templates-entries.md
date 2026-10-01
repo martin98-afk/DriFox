@@ -189,28 +189,18 @@ def _on_failed(context, err, rest):
 > 参考实现：`plugins/agent_trace/ui/__init__.py`（轨迹）、`plugins/assistant_hub/ui/__init__.py`（助手）。
 > 适配场景：插件有一个全屏级主界面，入口是窗口顶部常驻 tab（无 ×，点击切换）。
 
-### 10.1 组合模式：titlebar_tab + full 容器浮动卡
+### 10.1 推荐写法：primary_entry 声明式（一处注册、多处分发）
 
-标题栏 tab 只是**入口**（无内容区），点击后显示插件自己的 full 容器浮动卡：
+在 `register_floating_card` 的 metadata 里声明 `primary_entry`，框架自动派生
+标题栏 tab 并生成点击回调（已可见则忽略、否则唤出），插件零回调样板：
 
 ```python
-CARD_ID = "my_feature"  # tab_id 与 card_id 共用同一命名空间
-
-
-def _on_tab_clicked() -> None:
-    """tab 点击 → 切换显示 full 卡。"""
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        UIPluginRegistry.get_instance().toggle_floating_card(CARD_ID)
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"[my_feature] toggle 失败: {e}")
+CARD_ID = "my_feature"  # 派生 tab 的 tab_id = card_id（共用同一命名空间）
 
 
 def register_ui(registry) -> None:
     # 热重载兼容：清理 ui_plugin_my_feature.* 旧子模块（略，见 §4.2）
 
-    # ── full 容器浮动卡（内容本体）──
     registry.register_floating_card(
         plugin_name=PLUGIN_NAME,
         card_id=CARD_ID,
@@ -223,31 +213,36 @@ def register_ui(registry) -> None:
             "icon_light": str(icons_dir / "icon_light.svg"),
             "full_card": True,     # 可被标题栏 full tab 接管（同设置卡）
             "hide_sidebar": True,  # 入口只有标题栏 tab，侧边栏不重复列出
+            # 主入口声明：框架自动派生标题栏 tab（label 缺省用卡 title）
+            "primary_entry": {"kind": "titlebar", "label": "我的功能", "priority": 0},
         },
-    )
-
-    # ── 常驻标题栏 tab（入口）──
-    registry.register_titlebar_tab(
-        plugin_name=PLUGIN_NAME,
-        tab_id=CARD_ID,
-        label="我的功能",
-        on_click=_on_tab_clicked,
-        priority=0,          # 同 tab_id 高优先级覆盖
     )
 ```
 
-### 10.2 踩坑记录（来自 agent_trace 实战）
+侧栏入口同理：`"primary_entry": "sidebar"`（或 dict 带 kind），框架派生侧栏项，
+回调语义为 toggle（已显示则关闭、未显示则打开，对齐侧栏开关直觉）。
 
-- **tab 点击必须走 `UIPluginRegistry.toggle_floating_card(CARD_ID)`**，不能直接用
-  `card_manager.show_card`：插件卡实例是懒创建的（首次点击时才 `_show_floating_card`
-  创建），`show_card` 在 `card_widget is None` 处**静默 return**，表现就是"点了没反应"。
+也可分开注册：`register_titlebar_tab(..., card_id=CARD_ID)` /
+`register_sidebar_item(..., card_id=CARD_ID)`，效果等同，适合 tab 与卡不在同一处
+注册的场景。允许先注册 tab 后注册卡的顺序（card_id 暂未注册仅告警不阻断）。
+
+### 10.2 兼容旧写法（手写 on_click）
+
+`register_titlebar_tab(on_click=...)` / `register_sidebar_item(on_click=...)` 仍完全
+兼容；与 `card_id` 同传时 `on_click` 优先。存量插件不必急着迁移，新代码一律用声明式。
+
+### 10.3 踩坑记录（来自 agent_trace 实战，声明式已由框架承载）
+
+- 手写回调不能用 `card_manager.show_card`：插件卡实例是懒创建的，`show_card` 在
+  `card_widget is None` 处**静默 return**。框架生成的回调内部走
+  `_show_floating_card`（懒创建 + 宿主解析 + 可见性检查单点承载），用声明式可绕开此坑。
 - `register_titlebar_tab` 的 `icon_path` **无主题感知**（CustomTabButton 单一路径渲染，
   不像 register_input_button 有 icon_light_path），深色主题下深色描边图标会不可见。
   **纯文字 label 更安全**；确要图标则给浅色线条 SVG 并实测深浅两主题。
-- Tab 模式宿主是 TabManagerWindow（不是 MainWidget）：直接用
-  `UIPluginRegistry.toggle_floating_card`，内部已做宿主解析；自己遍历 main_widget
-  的 card_manager 在 Tab 模式下会找不到卡片。
-- 语义细节：tab 已可见时再点不做动作（toggle 会关掉它，而点 tab 语义是"切到该 tab"），
+- Tab 模式宿主是 TabManagerWindow（不是 MainWidget）：框架回调内部已做宿主解析
+  （Tab 全局容器 / 单窗口回退），手写回调时注意别遍历单个 main_widget 的 card_manager。
+- 语义差异（框架已按语义分流）：tab 点击 = 已可见忽略不关闭（「切到该页」直觉）；
+  侧栏点击 = toggle（「开关」直觉，right 容器卡沿用「再点关闭页签并收起工作台」）。
   先 `card_manager.is_card_visible(CARD_ID, window_id)` 判断。
 
 ### 10.3 验证清单

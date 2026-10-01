@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from qfluentwidgets import ScrollArea
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import CardStyles, Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.hover_style_guard import style_if_changed
@@ -202,7 +202,7 @@ class _OptionRadioCard(QWidget):
         Colors.refresh()
         if self._selected:
             bg, border = Colors.REALTIME_TAG_BG, Colors.REALTIME_ACCENT
-            rf, tf = Colors.REALTIME_ACCENT, "#ffffff"
+            rf, tf = Colors.REALTIME_ACCENT, Colors.TEXT_PRIMARY
         elif self._hovered:
             bg, border = Colors.HOVER_BG, Colors.REALTIME_TAG_BORDER
             rf, tf = Colors.REALTIME_ACCENT, Colors.REALTIME_TEXT
@@ -329,7 +329,7 @@ class _OptionCheckCard(QWidget):
         Colors.refresh()
         if self._checked:
             bg, border = Colors.REALTIME_TAG_BG, Colors.REALTIME_ACCENT
-            cf, tf = Colors.REALTIME_ACCENT, "#ffffff"
+            cf, tf = Colors.REALTIME_ACCENT, Colors.TEXT_PRIMARY
         elif self._hovered:
             bg, border = Colors.HOVER_BG, Colors.REALTIME_TAG_BORDER
             cf, tf = Colors.REALTIME_ACCENT, Colors.REALTIME_TEXT
@@ -474,9 +474,9 @@ class _CustomInputCard(QWidget):
         self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._text_edit.textChanged.connect(self._on_text_changed)
         self._text_edit.installEventFilter(self)  # 监听 Resize/Show，等布局完成后再算高度
-        # 强制白色文字：Qt 样式表 color 对 QTextEdit 经常不生效，需用 QPalette
+        # QSS color 对 QTextEdit 常不生效，用 QPalette 兜底；色值走主题 token（浅色主题下不能硬编码白字）
         pal = self._text_edit.palette()
-        pal.setColor(QPalette.Text, QColor("#ffffff"))
+        pal.setColor(QPalette.Text, QColor(Colors.TEXT_PRIMARY))
         self._text_edit.setPalette(pal)
         self._right_layout.addWidget(self._text_edit)
 
@@ -587,7 +587,7 @@ class _CustomInputCard(QWidget):
         Colors.refresh()
         if self._active:
             bg, border = Colors.REALTIME_TAG_BG, Colors.REALTIME_ACCENT
-            rf, tf = Colors.REALTIME_ACCENT, "#ffffff"
+            rf, tf = Colors.REALTIME_ACCENT, Colors.TEXT_PRIMARY
         else:
             bg, border = Colors.HOVER_BG, Colors.REALTIME_TAG_BORDER
             rf, tf = Colors.REALTIME_TEXT_SECONDARY, Colors.REALTIME_TEXT
@@ -676,6 +676,9 @@ class QuestionFloatingWidget(QWidget):
         # 高度，QVBoxLayout 空间不足会优先把问题标题区压没。跳过动画让容器
         # 高度直接 snap 到目标值，消除滞后窗口期。
         self.setProperty(CardContainer.NO_ANIMATION_PROP, True)
+        # 自定义 QWidget 子类不设 WA_StyledBackground 时，QSS 写的背景/边框/圆角
+        # 一行都不会绘制（见 CardStyles.floating 说明）。
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._setup_ui()
 
     def showEvent(self, event):
@@ -881,13 +884,9 @@ class QuestionFloatingWidget(QWidget):
 
     def _apply_card_style(self):
         Colors.refresh()
-        self.setStyleSheet(f"""
-            QuestionFloatingWidget {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-radius: 8px 8px 0 0;
-            }}
-        """)
+        # 旧写的 border-radius: 8px 8px 0 0 是 CSS 四值简写，Qt QSS 不认（只支持
+        # 单值或四个 border-*-radius 单角属性），圆角实际也未生效。
+        self.setStyleSheet(CardStyles.floating("QuestionFloatingWidget"))
         self._question_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT};background:transparent;")
         self._hint_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
         if hasattr(self, "_ignore_btn") and self._ignore_btn:
@@ -1372,15 +1371,7 @@ class QuestionFloatingWidget(QWidget):
         self.answered.emit("\n---\n".join(parts))
 
     def set_opacity(self, opacity: float):
+        """淡出通道：底色按 opacity 降 alpha，其余表面参数与 _apply_card_style 同源"""
         Colors.refresh()
-        bg = Colors.REALTIME_BG
-        if bg.startswith("rgba("):
-            alpha = max(1, int(opacity * 255))
-            bg = bg.rsplit(",", 1)[0] + f", {alpha})"
-        self.setStyleSheet(f"""
-            QuestionFloatingWidget {{
-                background-color: {bg};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-radius: 8px 8px 0 0;
-            }}
-        """)
+        alpha = max(1, int(opacity * 255))
+        self.setStyleSheet(CardStyles.floating("QuestionFloatingWidget", alpha=alpha))

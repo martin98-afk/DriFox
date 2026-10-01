@@ -68,8 +68,8 @@ class TestE2E:
         host = WorkspacePageHost()
         host.attach_to(fake_tab_win)
         # 命名约定：plugin_name:page_id
-        from app.core.command_manager import CommandManager
-        from app.core.builtin_commands import FunctionCommandHandlers
+        from app.core.commands.command_manager import CommandManager
+        from app.core.commands.builtin_commands import FunctionCommandHandlers
 
         assert CommandManager.get_instance().has_command("demo:kanban")
         assert FunctionCommandHandlers.has("demo:kanban")
@@ -77,7 +77,7 @@ class TestE2E:
     def test_unload_cleanup_chain(self, fresh_registry, fake_tab_win):
         """卸载链路：unload_plugin → teardown_plugin → 页面销毁 + 命令注销"""
         from app.widgets.workspace_page_host import WorkspacePageHost
-        from app.core.command_manager import CommandManager
+        from app.core.commands.command_manager import CommandManager
 
         class _P:
             def __init__(self, parent=None, context=None):

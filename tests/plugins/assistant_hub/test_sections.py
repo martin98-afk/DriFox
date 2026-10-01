@@ -54,12 +54,25 @@ overlays = _load("overlays", "overlays.py")
 def test_profile_section_bind_emit(qtbot=None):
     host = QWidget()
     s = sections.ProfileSection(host)
-    s.bind("小狐", "cfg-2")  # 两参签名：对话模型跟随系统配置，不再单独设置
+    s.bind("小狐", "mading", "cfg-2")  # 三参签名：(称呼助手, 称呼用户, 记忆整理模型)
     assert s._name.text() == "小狐"
     got = []
-    s.saveRequested.connect(lambda n, u: got.append((n, u)))
+    s.saveRequested.connect(lambda n, u, m: got.append((n, u, m)))
     s._emit_save()
     assert got and got[0][0] == "小狐"
+
+
+def test_profile_user_avatar_accepts_path(tmp_path=None, qtbot=None):
+    """回归：set_user_avatar 传 Path 对象不得触发 QPixmap TypeError（实跑崩过）。"""
+    from pathlib import Path
+
+    host = QWidget()
+    s = sections.ProfileSection(host)
+    p = (Path(tmp_path) / "user.png") if tmp_path else Path("Z:/nonexistent/user.png")
+    s.set_user_avatar(p, "mading")  # Path 入参：内部统一 str()
+    s.set_user_avatar(str(p), "mading")  # str 入参同样可用
+    s.set_user_avatar(None)  # 清除 → 回落色块
+    # 断言即「三种入参均不抛异常」；无额外状态可查（RoundAvatar 内部 pixmap 惰性建）
 
 
 def test_about_section_persona_switch(qtbot=None):

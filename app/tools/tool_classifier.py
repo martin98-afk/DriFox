@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import List
 
 from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
 
@@ -26,13 +26,19 @@ def _registry() -> ToolRegistry:
 
 
 def DANGEROUS_TOOLS() -> frozenset:
-    """危险工具集合（动态，registry 驱动）"""
-    return frozenset(_registry().dangerous_tools())
+    """危险工具集合（动态，registry 驱动）
+
+    [PERF T32] registry 已返回缓存 frozenset，此处不再二次包裹。
+    """
+    return _registry().dangerous_tools()
 
 
 def SAFE_TOOLS() -> frozenset:
-    """安全工具集合（动态，registry 驱动）"""
-    return frozenset(_registry().safe_tools())
+    """安全工具集合（动态，registry 驱动）
+
+    [PERF T32] registry 已返回缓存 frozenset，此处不再二次包裹。
+    """
+    return _registry().safe_tools()
 
 
 # 兼容旧代码：DANGEROUS_TOOLS / SAFE_TOOLS 曾被当作 frozenset 常量使用
@@ -49,11 +55,27 @@ def get_all_tools() -> List[str]:
     return _registry().names()
 
 
-
-
-def get_safe_tools() -> List[str]:
-    """获取全部安全工具名"""
+def get_safe_tools() -> frozenset:
+    """获取全部安全工具名（T32 起返回不可变 frozenset）"""
     return _registry().safe_tools()
+
+
+def _mcp_base_name(tool_name: str) -> str:
+    """MCP 工具名 → base_name（mcp__server__tool → tool；非常规格式返回原名）
+
+    统一 classify_tool_danger 与 _dangerous_contains 的 MCP 口径，
+    避免两处各自切分导致行为分叉。
+    非 "mcp__" 前缀时原样返回。
+    """
+    if not tool_name.startswith("mcp__"):
+        return tool_name
+    parts = tool_name.split("__", 2)
+    return parts[2] if len(parts) > 2 else tool_name
+
+
+def _dangerous_contains(tool_name: str, dangerous: frozenset) -> bool:
+    """工具是否属于危险集（MCP 名按 base_name 比对，与 old 语义一致）"""
+    return _mcp_base_name(tool_name) in dangerous
 
 
 def classify_tool_danger(tool_name: str) -> str:
@@ -67,10 +89,8 @@ def classify_tool_danger(tool_name: str) -> str:
     """
     # MCP 工具：未注册，按 toolname 部分启发式判断（沿用旧语义：不在危险表即安全）
     if tool_name.startswith("mcp__"):
-        parts = tool_name.split("__", 2)
-        base_name = parts[2] if len(parts) > 2 else tool_name
-        dangerous = frozenset(DANGEROUS_TOOLS())
-        return DANGER_DANGEROUS if base_name in dangerous else DANGER_SAFE
+        dangerous = DANGEROUS_TOOLS()
+        return DANGER_DANGEROUS if _dangerous_contains(tool_name, dangerous) else DANGER_SAFE
     return _registry().get_danger(tool_name)
 
 
@@ -83,11 +103,13 @@ def get_tool_counts(toggles: dict) -> tuple:
     Returns:
         (dangerous_count, safe_count)
     """
+    # [PERF T32] 危险集循环外提一次（原先每项 classify_tool_danger → O(N²)）
+    dangerous = DANGEROUS_TOOLS()
     dangerous_count = 0
     safe_count = 0
     for name, enabled in toggles.items():
         if enabled:
-            if classify_tool_danger(name) == DANGER_DANGEROUS:
+            if _dangerous_contains(name, dangerous):
                 dangerous_count += 1
             else:
                 safe_count += 1

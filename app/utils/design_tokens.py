@@ -132,6 +132,19 @@ def font_size_css(size: int) -> str:
     return f"font-size: {scale_font_size(size)}px;"
 
 
+def _set_style_sheet(widget, css: str) -> None:
+    """setStyleSheet 的同串短路（Qt5 自己不做）
+
+    Qt5 每次 setStyleSheet 都会让 QStyleSheetStyle 重建并 repolish 整棵子树，
+    对**完全相同**的样式串也不例外（实测 1200 控件子树单次约 26ms）。全树字号
+    应用 / 外观刷新会反复重写同样的串：设置卡首次显示后的一次外观刷新里
+    194 次 setStyleSheet 占 230ms，其中 97 次来自本模块且绝大多数是同串重写。
+    主题/字号真变化时会走到不同串，届时自然生效，无需额外失效逻辑。
+    """
+    if css != widget.styleSheet():
+        widget.setStyleSheet(css)
+
+
 def apply_font_size_to_widget(widget, base_size: int = 14):
     """递归设置 widget 及其所有子控件的字体像素大小
 
@@ -191,20 +204,23 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
     # ── SettingCard / ExpandSettingCard ──
     # ExpandSettingCard 继承 SettingCard，已被 setting_cards 包含
     for card in setting_cards:
-        card.titleLabel.setStyleSheet(f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
-        card.contentLabel.setStyleSheet(
-            f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
+        _set_style_sheet(card.titleLabel, f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
+        _set_style_sheet(
+            card.contentLabel,
+            f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}",
         )
 
         # ExpandSettingCard 内部的 HeaderSettingCard 需额外覆盖
         if isinstance(card, ExpandSettingCard):
             if hasattr(card, "card") and hasattr(card.card, "titleLabel"):
-                card.card.titleLabel.setStyleSheet(
-                    f"QLabel#titleLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
+                _set_style_sheet(
+                    card.card.titleLabel,
+                    f"QLabel#titleLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}",
                 )
             if hasattr(card, "card") and hasattr(card.card, "contentLabel"):
-                card.card.contentLabel.setStyleSheet(
-                    f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
+                _set_style_sheet(
+                    card.card.contentLabel,
+                    f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}",
                 )
 
     # ── ExpandSettingCard / OptionsSettingCard QSS 硬编码覆盖 ──
@@ -244,7 +260,9 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
     # ── SwitchButton ──
     for switch in switches:
-        switch.setStyleSheet(f"SwitchButton>QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
+        _set_style_sheet(
+            switch, f"SwitchButton>QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
+        )
 
 
 def current_theme() -> dict:
@@ -608,18 +626,56 @@ class Colors:
 
 # ============ 动效系统 ============
 class Animations:
-    """动画时间与缓动 Token — 克制使用，仅关键处动效"""
+    """动画时间与缓动 Token — 克制使用，仅关键处动效
 
+    ## 两套坐标：方向优先，量级兜底
+
+    **首选方向语义**（ENTER/EXIT/HOVER/PRESS），它们编码了「进入慢一点让人看清、
+    退出快一点不拖沓」的手感规则，是全项目唯一推荐用法。``FAST/NORMAL/SLOW``
+    是早期量级式命名，仅为存量代码保留，新代码不要用。
+
+    ## 时长阶梯（ms）
+
+    | 场景 | Token | 值 |
+    |---|---|---|
+    | 按下/释放、极轻反馈 | ``PRESS_MS`` | 80 |
+    | hover 进出、箭头旋转 | ``HOVER_MS`` | 120 |
+    | 收起/退出/淡出 | ``EXIT_MS`` | 170 |
+    | 通用过渡（兼容旧值） | ``NORMAL_MS`` | 200 |
+    | 展开/进入/淡入 | ``ENTER_MS`` | 220 |
+    | 大范围位移、重排 | ``SLOW_MS`` | 300 |
+    """
+
+    # ── 方向语义（新代码用这一组）──
+    PRESS_MS = 80  # 按下/释放：几乎瞬时，只做状态确认
+    HOVER_MS = 120  # hover 进出：要快，慢了显得钝、拖影
+    EXIT_MS = 170  # 收起/退出/淡出：比进入短一档，避免拖沓
+    ENTER_MS = 220  # 展开/进入/淡入：稍长，让眼睛跟上内容变化
+    SLOW_MS = 300  # 大范围位移、整块重排
+
+    # ── 量级语义（存量兼容，勿用于新代码）──
     FAST_MS = 150  # 按钮按下/释放
     NORMAL_MS = 200  # 卡片淡入、过渡
-    SLOW_MS = 300  # 展开/折叠
+    EXPAND_MS = 180  # 展开/折叠（轴向 maximumHeight/Width 动画）
 
     # 缓动曲线（QEasingCurve.Type，用法：QEasingCurve(Animations.EASE_OUT)）
-    EASE_OUT = QEasingCurve.OutCubic
-    EASE_IN_OUT = QEasingCurve.InOutQuad
+    EASE_OUT = QEasingCurve.OutCubic  # 默认：出场快、收尾稳
 
-    # 展开/收起动画标准时长（轴向 maximumHeight/Width 动画）
-    EXPAND_MS = 180
+    # 方向语义配套（与 ENTER_MS/EXIT_MS 成对使用）
+    EASE_ENTER = QEasingCurve.OutCubic  # 进入：起步快、收尾稳
+    # 离场：**不能**用 OutCubic。轴向尺寸按 (1-t)^3 衰减时最后 12.5% 的距离
+    # 要磨掉一半时间，观感是「收到一半顿一下才收完」（工作台面板实测同款成因）。
+    # OutQuad 把尾段压到 25% 距离磨一半时间，收尾利落。
+    EASE_EXIT = QEasingCurve.OutQuad
+
+    EASE_IN = QEasingCurve.InCubic  # 内部使用：起步慢、加速离场
+    EASE_IN_OUT = QEasingCurve.InOutQuad  # 对称位移
+
+    # hover 专用：InOutQuad 两头慢，手指快速划过多个按钮时明显发钝，
+    # 改 OutQuad 起步即到、收尾放缓，手感轻快。
+    EASE_HOVER = QEasingCurve.OutQuad
+    # 轻微回弹（弹入/强调），幅度不可控，慎用于布局类动画
+    EASE_OVERSHOOT = QEasingCurve.OutBack
 
     # 位移量
     FADE_SLIDE_Y = 8  # 淡入上滑像素数
@@ -786,6 +842,37 @@ class CardStyles:
                 border-radius: {BorderRadius.MD};
             }}
         """
+
+    # 浮层卡表面圆角（与 SystemCardFrame / QueueMessageCard / UndoDeleteCard 同族）
+    FLOATING_RADIUS = 10
+
+    @staticmethod
+    def floating(cls_name: str, alpha: int = 250, border: str | None = None) -> str:
+        """浮层卡表面规范单一真源：CARD_BG 底 + 中性边框 + 四角同圆角。
+
+        底部/顶部悬浮卡（子智能体、命令、文件提及、问题、排队、撤销）与系统卡
+        框架共用本函数，避免各卡各写一套导致主题漂移。
+
+        Args:
+            cls_name: QSS 类型选择器名，必须与 widget 类名逐字一致。
+            alpha: 底色不透明度；250 而非 255，留一点透底让边缘过渡自然。
+            border: 边框色，默认主题中性 BORDER。需要状态语义时才传饱和色。
+
+        ⚠️ 配套要求：调用方必须 setAttribute(Qt.WA_StyledBackground, True)。
+        自定义 QWidget 子类不设该属性时，QSS 的 background / border /
+        border-radius 一行都不会绘制（QLabel 例外，它天然绘制背景）。
+        2026-09-14 排查「子智能体/命令/文件卡没有容器」时实测：全项目 13 处
+        自绘表面只有排队卡、撤销卡配对了该属性，其余全部静默失效——样式写了
+        等于没写，卡片内容直接裸浮在对话区上。
+        """
+        Colors.refresh()
+        return (
+            f"{cls_name} {{"
+            f" background-color: {Colors.CARD_BG.format(alpha=alpha)};"
+            f" border: 1px solid {border or Colors.BORDER};"
+            f" border-radius: {CardStyles.FLOATING_RADIUS}px;"
+            f" }}"
+        )
 
 
     @staticmethod

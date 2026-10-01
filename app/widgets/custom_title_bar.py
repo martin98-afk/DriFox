@@ -27,6 +27,7 @@ from PySide6.QtCore import (
     QAbstractAnimation,
     QEasingCurve,
     QEvent,
+    QObject,
     QRect,
     QRectF,
     QSize,
@@ -42,7 +43,7 @@ from loguru import logger
 from qframelesswindow.titlebar import TitleBarBase
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton, TitleBarButtonState
 
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
 
 # ── Windows 原生消息常量（仅 win32 分支使用，模块级常量避免热路径重复定义）──
@@ -91,7 +92,7 @@ def _qcolor(css: str, fallback: str) -> QColor:
     回退到 fallback，保证任何主题下按钮图标都可见（不出现黑叠黑）。
 
     ★ 必须用 ``qcolor_from_token``，不能直接 ``QColor(css)``：
-    PySide6 的 QColor 构造函数不认 CSS 的 ``rgba(r,g,b,a)`` 写法，会静默
+    PyQt5 的 QColor 构造函数不认 CSS 的 ``rgba(r,g,b,a)`` 写法，会静默
     返回 invalid 的黑色 QColor，导致深色主题（text_secondary 为
     ``rgba(..., 0.74)``）下 tab 未选中的文字渲染成黑叠黑，肉眼"看不见"。
     """
@@ -326,7 +327,11 @@ class CustomTabButton(QWidget):
     ALPHA_HOVER = 0.06
     ALPHA_ACTIVE = 0.14
 
-    ANIM_MS = 180
+    ANIM_MS = Animations.HOVER_MS
+
+    #: 文字基准字号（pt）。顶栏用字体设置项的基础字号；嵌入卡片等更紧凑的
+    #: 场景可传更小值，仍随系统字号 delta 缩放（见 font_size）。
+    BASE_FONT_SIZE = 13
 
     def __init__(
         self,
@@ -336,12 +341,21 @@ class CustomTabButton(QWidget):
         *,
         closable: bool = False,
         icon_path: str = "",
+        indicator_managed: bool = False,
+        font_size: Optional[int] = None,
     ):
         super().__init__(parent)
         self.tab_id = tab_id
         self._closable = closable
+        #: 文字字号（未缩放基准）。refresh_style 每次据此重算，改系统字号后
+        #: 由调用方重建设置即可生效（与顶栏一致的重建路径）。
+        self._font_size = self.BASE_FONT_SIZE if font_size is None else int(font_size)
         self._active = False
         self._hovered = False
+        #: True = 选中底色由外部滑动指示器（_TabIndicator）接管，按钮只画
+        #: hover（CustomTitleBar 顶栏专用）；False = 自绘选中底（默认，兼容
+        #: 工作台面板等直接复用方——它们没有指示器，选中表达不能被抽走）
+        self._indicator_managed = indicator_managed
         # 动画进度（0..1），paintEvent 按此插值
         self._hover_t = 0.0
         self._active_t = 0.0
@@ -381,16 +395,31 @@ class CustomTabButton(QWidget):
     def _make_anim(self, slot) -> QVariantAnimation:
         anim = QVariantAnimation(self)
         anim.setDuration(self.ANIM_MS)
-        anim.setEasingCurve(QEasingCurve.InOutQuad)
+        # hover 曲线不能用 InOutQuad：它两头都慢，手指快速划过一排 tab 时
+        # 高亮明显滞后（发钝、拖影）。OutQuad 起步即到、收尾放缓。
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_HOVER))
         anim.valueChanged.connect(slot)
         return anim
 
     @staticmethod
     def _start(anim: QVariantAnimation, current: float, target: float) -> None:
-        """从当前进度续接到目标进度（避免连续 hover 时跳变）"""
+        """从当前进度续接到目标进度（避免连续 hover 时跳变）
+
+        系统「减少动态效果」时直接落终值：hover 仍要给出状态反馈（颜色变化
+        必须可见），只是去掉过渡过程；靠 ``setValue`` 走同一条 valueChanged
+        通路，调用方无需感知两条路径的差异。
+
+        ★ 快速路径（current≈target）也必须先 ``anim.stop()``：enter 后不足
+        一帧就 leave 时，``_hover_t`` 缓存还停在 0，但上一发 0→1 动画仍在
+        跑——只 return 不 stop，旧动画会独自跑完把进度推到 1，hover 底色
+        永久残留（快速扫过一排 tab 必现，是残留类问题的直接根因）。
+        """
+        anim.stop()
         if abs(current - target) < 0.001:
             return
-        anim.stop()
+        if not Animations.motion_enabled():
+            anim.setValue(target)
+            return
         anim.setStartValue(current)
         anim.setEndValue(target)
         anim.start()
@@ -434,6 +463,19 @@ class CustomTabButton(QWidget):
         """进度是否已就位（收尾误差 0.001 内视作到位）"""
         return abs(current - target) < 0.001
 
+    def set_font_size(self, size: int) -> None:
+        """更新文字字号（宿主在系统字号变化时调用，幂等）
+
+        ``_label_css_key`` 不含字号，同色同字重下 QSS 短路会吞掉新字号，
+        所以这里显式失效缓存键。
+        """
+        size = int(size)
+        if size == self._font_size:
+            return
+        self._font_size = size
+        self._label_css_key = None
+        self._apply_label_color()
+
     def set_hover(self, hovered: bool) -> None:
         """设置悬浮态（幂等；进度卡在中途会自动补一次收尾）"""
         target = 1.0 if hovered else 0.0
@@ -465,7 +507,10 @@ class CustomTabButton(QWidget):
         return _qcolor(Colors.TEXT_PRIMARY, "#ffffff")
 
     def _bg_alpha(self) -> float:
-        """当前底色不透明度：选中与 hover 取较大者，不叠加（避免过深）"""
+        """选中底色：indicator_managed 时由滑动指示器画，按钮只承担 hover；
+        普通复用方（工作台面板）自绘选中底 + hover，行为同旧版"""
+        if self._indicator_managed:
+            return self._hover_t * self.ALPHA_HOVER
         return min(1.0, max(self._active_t * self.ALPHA_ACTIVE, self._hover_t * self.ALPHA_HOVER))
 
     def paintEvent(self, e):  # pragma: no cover - 纯绘制
@@ -473,8 +518,8 @@ class CustomTabButton(QWidget):
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(Qt.NoPen)
 
-        # 只画胶囊底色：选中态靠"底更深 + 文字更亮更粗"表达
-        # （早期版本在 tab 下方画过 accent 指示条，反馈太花，已移除）
+        # 只画 hover 底色；选中态的胶囊底已抽到 _TabIndicator（可滑动），
+        # 按钮侧保留文字提亮 + 字重变化（由 _active_t 驱动）
         alpha = self._bg_alpha()
         if alpha > 0.002:
             c = self._fg()
@@ -515,7 +560,7 @@ class CustomTabButton(QWidget):
         t = min(1.0, max(self._active_t, self._hover_t * 0.5))
         weight = 600 if self._active else 400
         q = int(t * self.COLOR_STEPS + 0.5)
-        key = (q, weight, from_c.rgb(), to_c.rgb())
+        key = (q, weight, from_c.rgb(), to_c.rgb(), self._font_size)
         if key == self._label_css_key:
             return
         self._label_css_key = key
@@ -525,8 +570,208 @@ class CustomTabButton(QWidget):
         b = int(round(from_c.blue() + (to_c.blue() - from_c.blue()) * t))
         self._label.setStyleSheet(
             f"color: rgb({r}, {g}, {b}); background: transparent;"
-            f" {get_font_family_css()} {font_size_css(13)}; font-weight: {weight};"
+            f" {get_font_family_css()} {font_size_css(self._font_size)}; font-weight: {weight};"
         )
+
+
+class TabHoverSyncHost(QWidget):
+    """tab 条宿主：兜底清理子按钮 hover 残留（CustomTabButton 列表容器）
+
+    子按钮的 leaveEvent 在以下场景不保证到达（CustomTitleBar._clear_tab_hover
+    同源教训）：
+    - 拖到屏幕边缘触发分屏 / 系统菜单 / 被其它窗口抢走焦点
+    - 布局重排（resize 折行 / 字重变化 invalidate）平移按钮后，鼠标不动则
+      Qt 不重派发 enter/leave，旧按钮 hover 卡住、新命中按钮不亮
+
+    宿主层兜底：Leave 清空全部 hover；Resize/LayoutRequest 延迟一拍按全局
+    鼠标位置命中测试重算（延迟是必要的：此刻几何还没收敛）。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._hover_resync_pending = False
+
+    def _tab_buttons(self) -> list:
+        """宿主下的全部 tab 按钮（滑动胶囊是纯 QWidget 不在 CustomTabButton
+        之列，天然被 findChildren 类型过滤）"""
+        try:
+            return self.findChildren(CustomTabButton)
+        except RuntimeError:
+            return []
+
+    def clear_tab_hover(self) -> None:
+        """清空全部子按钮 hover"""
+        for btn in self._tab_buttons():
+            try:
+                btn.set_hover(False)
+            except RuntimeError:
+                continue
+
+    def sync_tab_hover(self) -> None:
+        """按全局光标位置命中测试，重算所有子按钮 hover"""
+        pos = QCursor.pos()
+        for btn in self._tab_buttons():
+            try:
+                btn.set_hover(btn.isVisible() and btn.rect().contains(btn.mapFromGlobal(pos)))
+            except RuntimeError:
+                continue
+
+    def _schedule_hover_sync(self) -> None:
+        """合并同一事件循环内的多次重算请求（resize/折行常成串到达）"""
+        if self._hover_resync_pending:
+            return
+        self._hover_resync_pending = True
+        QTimer.singleShot(0, self._run_hover_sync)
+
+    def _run_hover_sync(self) -> None:
+        self._hover_resync_pending = False
+        self.sync_tab_hover()
+
+    def leaveEvent(self, event) -> None:
+        # 光标离开宿主：子按钮的 leaveEvent 不保证到达，宿主层统一清空
+        self.clear_tab_hover()
+        super().leaveEvent(event)
+
+    def event(self, e):
+        # 布局重排（Resize/LayoutRequest）后按钮可能平移：延迟一拍按光标
+        # 位置重算 hover（singleShot 落在布局收敛后，命中测试拿到新几何）
+        if e.type() in (QEvent.Resize, QEvent.LayoutRequest):
+            self._schedule_hover_sync()
+        return super().event(e)
+
+
+class _TabIndicator(QWidget):
+    """tab 选中胶囊滑动指示器：单一 widget 承担选中底色，切换时由宿主驱动滑动
+
+    ★ 为什么不留在按钮里画：选中底色若由各按钮自绘，切换只能「旧底淡出、
+    新底淡入」的十字交叉，出不了「胶囊从 A 滑到 B」的连续位移。抽成单一
+    widget，宿主对其 geometry 做 QVariantAnimation 插值，即标准分段控件
+    （segmented control）的滑动指示器。
+
+    层级约定：``_tab_container`` 的子控件但不进 layout，geometry 由宿主按
+    active 按钮的 geometry 写入；构造时机早于任何 add_tab，天然垫在按钮之下
+    （按钮底透明、只画 hover 与文字）。
+    """
+
+    RADIUS = CustomTabButton.RADIUS
+    ALPHA_ACTIVE = CustomTabButton.ALPHA_ACTIVE
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        # 鼠标穿透：胶囊是纯视觉层，点击必须落到下面的 tab 按钮
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def paintEvent(self, e):  # pragma: no cover - 纯绘制
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        c = _qcolor(Colors.TEXT_PRIMARY, "#ffffff")
+        c.setAlphaF(self.ALPHA_ACTIVE)
+        painter.setBrush(c)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
+
+
+class TabIndicatorController(QObject):
+    """滑动胶囊指示器通用控制器：顶栏 tab（CustomTitleBar）与工作台页签共用
+
+    封装指示器 widget + QVariantAnimation + 「动画运行中只重定向目标」的
+    防瞬杀规则；宿主只需在切换激活 tab 时调 ``move_to(btn.geometry())``。
+
+    ★ 布局跟随内建：自己监听指示器宿主的 LayoutRequest/Resize 并钉回当前
+    active 位置（首次钉位时按钮 geometry 常是 sizeHint 初值，FlowLayout /
+    QHBoxLayout 收敛晚于首帧，靠这条链路自愈）。宿主不再各自写监听。
+
+    QObject 子类：需要 eventFilter；生命周期跟随宿主（动画 timer 与指示器
+    的 parent 都是宿主 widget，宿主销毁时它们随之销毁，本对象随之失活）。
+    """
+
+    #: 滑动动画时长；宿主若有「动画结束后再做重活」的需求按此值 + 余量延迟
+    ANIM_MS = Animations.NORMAL_MS
+
+    def __init__(self, indicator_parent: QWidget, anim_parent: QObject, active_geometry: Callable[[], Optional[QRect]]):
+        super().__init__(anim_parent)
+        self._indicator = _TabIndicator(indicator_parent)
+        self._anim = QVariantAnimation(anim_parent)
+        self._anim.setDuration(self.ANIM_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+        self._anim.valueChanged.connect(self._on_value)
+        self._active_geometry = active_geometry
+        self._layout_parent = indicator_parent
+        self._snap_pending = False
+        indicator_parent.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        # 布局收敛 / 宿主尺寸变化都会经过这两个事件（可能跨多拍）
+        if obj is self._layout_parent and event.type() in (QEvent.LayoutRequest, QEvent.Resize):
+            self._schedule_snap()
+        return False
+
+    def _schedule_snap(self) -> None:
+        """延迟一拍钉位（pending 合并）
+
+        ★ 不能在 filter 里立刻 snap：eventFilter 拦截在布局执行**之前**，
+        此刻读按钮 geometry 还是旧值（实测钉回 sizeHint 初值）。singleShot(0)
+        落在布局完成后，才能拿到收敛后的几何。
+        """
+        if self._snap_pending:
+            return
+        self._snap_pending = True
+        QTimer.singleShot(0, self._run_snap)
+
+    def _run_snap(self) -> None:
+        self._snap_pending = False
+        self.snap_to_active()
+
+    def snap_to_active(self) -> None:
+        """把胶囊钉到当前 active 按钮的几何（不动画；无效几何则跳过）"""
+        target = self._active_geometry()
+        if target is not None:
+            self.move_to(QRect(target), animate=False)
+
+    @property
+    def indicator(self) -> "_TabIndicator":
+        return self._indicator
+
+    @property
+    def running(self) -> bool:
+        return self._anim.state() == QAbstractAnimation.Running
+
+    def _on_value(self, value) -> None:
+        self._indicator.setGeometry(value)
+
+    def move_to(self, target: QRect, *, animate: bool) -> None:
+        """把指示器放到 target（animate=True 时平滑滑过去）
+
+        animate=False 用于布局平移场景（resize / 增删 / 折行平移）：按钮整组
+        瞬移时胶囊跟随瞬移，只有显式切换激活 tab 才做滑动动画。
+
+        ★ 动画运行中一律只重定向目标（setEndValue），绝不能瞬移：切换动画
+        期间新 tab 的文字动画逐帧 setStyleSheet（字重 400→600），label 的
+        sizeHint 变化会触发 layout invalidate → LayoutRequest → 宿主 hover
+        sync 以 animate=False 回到这里。若此路径 stop+setGeometry，切换动画
+        会被自己的副作用在第一帧就杀掉（真实平台必现；offscreen 无字体不触发）。
+        """
+        if target.width() <= 0:
+            # 布局还没跑（首帧 / 刚 add），geometry 无效；一拍后由宿主
+            # hover sync 兜底钉位
+            return
+        if self._anim.state() == QAbstractAnimation.Running:
+            self._indicator.show()
+            if QRect(self._anim.endValue()) != target:
+                self._anim.setEndValue(target)
+            return
+        if not animate or not Animations.motion_enabled() or not self._indicator.isVisible():
+            self._anim.stop()
+            self._indicator.setGeometry(target)
+            self._indicator.show()
+            return
+        if QRect(self._indicator.geometry()) == target:
+            return
+        # 从当前几何续接（连点两个 tab 时从中途位置拐向新目标，不跳变）
+        self._anim.stop()
+        self._anim.setStartValue(self._indicator.geometry())
+        self._anim.setEndValue(target)
+        self._anim.start()
 
 
 class CustomTitleBar(TitleBarBase):
@@ -554,8 +799,17 @@ class CustomTitleBar(TitleBarBase):
     sidebar_hover_changed = Signal(bool)  # 左按钮：True=进入 False=离开
     workbench_hover_changed = Signal(bool)  # 右按钮：True=进入 False=离开
 
-    def __init__(self, parent):
+    def __init__(self, parent, minimal: bool = False):
+        """自定义标题栏
+
+        Args:
+            parent: 宿主窗口
+            minimal: 精简模式（插件独立弹窗用）：隐藏侧栏开关 / 工作台开关 /
+                     tab 区，仅保留 icon 区与系统按钮（最小化/最大化/关闭）。
+                     默认 False 保持主窗口（TabManagerWindow）现有完整布局。
+        """
         self._is_mac: bool = sys.platform == "darwin"
+        self._minimal = bool(minimal)
         super().__init__(parent)
         self._tabs: Dict[str, CustomTabButton] = {}
         self._active_id: Optional[str] = None
@@ -600,6 +854,19 @@ class CustomTitleBar(TitleBarBase):
         self._tab_layout.setSpacing(0)
         # 无 tab 时隐藏空容器（add/remove_tab 时同步）
         self._tab_container.hide()
+
+        # ── 选中胶囊滑动指示器（与工作台页签共用 TabIndicatorController）──
+        # 垫在所有 tab 按钮之下的独立 widget（构造早于任何 add_tab，天然在底层）。
+        # 切换 tab 时滑动；布局平移（resize/增删/居中平衡）后由 _run_tab_hover_sync
+        # 直接钉到 active 按钮上，不做动画。
+        self._indicator_ctl = TabIndicatorController(
+            self._tab_container,
+            self,
+            lambda: self._tabs[self._active_id].geometry() if self._active_id in self._tabs else None,
+        )
+        # 布局收敛可能跨多拍（deleteLater 分两拍生效），单次 singleShot 跟不完：
+        # 监听 container 的 LayoutRequest/Resize，每次布局变化都重调度钉位
+        self._tab_container.installEventFilter(self)
 
         # ── 左右平衡占位（见 _sync_tab_centering 的说明）──
         self._left_balance = QWidget(self)
@@ -650,6 +917,24 @@ class CustomTitleBar(TitleBarBase):
         # 标题栏按钮堆的 minimumSizeHint（~340px）会顶住整窗 resize 下限；
         # setMinimumWidth(0) 压不住 hint，必须覆写：宽度全放开，窄窗口下按钮被裁剪
         self.setMinimumWidth(0)
+
+        # ── 精简模式（插件独立弹窗）：隐藏功能控件，仅保留系统按钮 ──
+        if self._minimal:
+            self._sidebar_btn.hide()
+            self._workbench_btn.hide()
+            self._tab_container.hide()  # 无 tab 时本就隐藏，显式声明语义
+            self._left_balance.hide()
+            self._right_balance.hide()
+            # 左区：窗口图标 + 标题（主窗口靠 tab 表达标题，无此需求）
+            self._plugin_icon = QLabel(self)
+            self._plugin_icon.setFixedSize(20, 20)
+            self._plugin_icon.setScaledContents(True)
+            self._plugin_title = QLabel(self)
+            self._plugin_title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            layout.insertWidget(0, self._plugin_icon)
+            layout.insertWidget(1, self._plugin_title)
+            self._apply_plugin_title_style()
+
         self.refresh_style()
         self._sync_tab_centering()
 
@@ -677,6 +962,10 @@ class CustomTitleBar(TitleBarBase):
                 self._emit_sidebar_hover(True)
             elif t == QEvent.HoverLeave:
                 self._emit_sidebar_hover(False)
+        elif obj is self._tab_container:
+            if t in (QEvent.LayoutRequest, QEvent.Resize):
+                # 布局重排（含增删 tab 的延迟删除）后胶囊需重新钉位到 active tab
+                self._schedule_tab_hover_sync()
         elif obj is getattr(self, "_workbench_btn", None):
             if t == QEvent.HoverEnter:
                 self._emit_workbench_hover(True)
@@ -702,6 +991,9 @@ class CustomTitleBar(TitleBarBase):
 
         这里给窄的一侧补一个等宽占位 widget，使两侧固定宽度相等。
         """
+        if self._minimal:
+            # 精简模式无 tab 容器，左右平衡无意义（系统按钮右对齐即可）
+            return
         layout = self.layout()
         if layout is None:
             return
@@ -862,7 +1154,12 @@ class CustomTitleBar(TitleBarBase):
         if tab_id in self._tabs:
             return
         btn = CustomTabButton(
-            tab_id, text, self._tab_container, closable=closable, icon_path=icon_path
+            tab_id,
+            text,
+            self._tab_container,
+            closable=closable,
+            icon_path=icon_path,
+            indicator_managed=True,  # 选中胶囊由 _TabIndicator 滑动接管
         )
         btn.clicked.connect(self._on_tab_clicked)
         btn.close_clicked.connect(self.tab_close_clicked.emit)
@@ -873,13 +1170,17 @@ class CustomTitleBar(TitleBarBase):
         btn.refresh_style()
         self._tab_container.setVisible(True)
         if self._active_id is None:
-            self.set_active_tab(tab_id)
+            self.set_active_tab(tab_id, animate=False)  # 首次落位不滑动
         # 新增 tab 会让后面的 tab 右移；若光标正好落在某个新位置上，
         # Qt 不会补发 enter/leave
         self._schedule_tab_hover_sync()
 
-    def remove_tab(self, tab_id: str) -> None:
-        """移除 tab；若移除的是激活 tab 则自动激活剩余第一个"""
+    def remove_tab(self, tab_id: str, *, reactivate: bool = True) -> None:
+        """移除 tab；reactivate=True 且移除的是激活 tab 时自动激活剩余第一个
+
+        reactivate=False 供「关闭 replace 卡后由补位逻辑接管高亮」的调用点：
+        避免先把高亮甩回「对话」，再从那里长滑到补位 tab（中间态 + 二次动画）。
+        """
         btn = self._tabs.pop(tab_id, None)
         if btn is None:
             return
@@ -889,14 +1190,15 @@ class CustomTitleBar(TitleBarBase):
             self._tab_container.setVisible(False)
         if self._active_id == tab_id:
             self._active_id = None
-            if self._tabs:
-                self.set_active_tab(next(iter(self._tabs)))
+            if reactivate and self._tabs:
+                # 增删后整组按钮在平移补位，胶囊跟随瞬移，不做滑动
+                self.set_active_tab(next(iter(self._tabs)), animate=False)
         # 剩余 tab 会平移到光标下；被删的 tab 若正处于 hover 态，它的
         # leaveEvent 永远不会到达（对象已被 deleteLater）
         self._schedule_tab_hover_sync()
 
-    def set_active_tab(self, tab_id: str) -> None:
-        """设置激活 tab（胶囊高亮）
+    def set_active_tab(self, tab_id: str, *, animate: bool = True) -> None:
+        """设置激活 tab（滑动胶囊 + 高亮）
 
         全量遍历而非只改差异项：``CustomTabButton.set_active`` 自带「去重 +
         收敛」，重复设置同一项不会重启动画，但会把**卡在中途的进度**补回
@@ -907,6 +1209,7 @@ class CustomTitleBar(TitleBarBase):
         self._active_id = tab_id
         for tid, b in self._tabs.items():
             b.set_active(tid == tab_id)
+        self._indicator_ctl.move_to(self._tabs[tab_id].geometry(), animate=animate)
 
     # ── hover 仲裁 ──
 
@@ -950,6 +1253,9 @@ class CustomTitleBar(TitleBarBase):
     def _run_tab_hover_sync(self) -> None:
         self._hover_sync_pending = False
         self.sync_tab_hover()
+        # 布局平移（resize / 增删 tab / 居中平衡）后把胶囊钉到当前 active tab
+        if self._active_id in self._tabs:
+            self._indicator_ctl.move_to(self._tabs[self._active_id].geometry(), animate=False)
 
     def _clear_tab_hover(self) -> None:
         """光标离开标题栏：清掉所有 hover"""
@@ -967,10 +1273,37 @@ class CustomTitleBar(TitleBarBase):
         # show 之前 widget 无有效几何，命中测试无意义；首帧后再补一次
         self._schedule_tab_hover_sync()
 
+    def set_window_icon(self, icon) -> None:
+        """精简模式左区设置窗口图标（主窗口模式 no-op）"""
+        label = getattr(self, "_plugin_icon", None)
+        if label is not None:
+            try:
+                label.setPixmap(icon.pixmap(20, 20))
+            except Exception:
+                pass
+
+    def set_window_title(self, text: str) -> None:
+        """精简模式左区设置窗口标题文本（主窗口模式 no-op）"""
+        label = getattr(self, "_plugin_title", None)
+        if label is not None:
+            label.setText(text or "")
+
+    def _apply_plugin_title_style(self) -> None:
+        """精简模式标题文字样式（主题 token，随 refresh_style 重刷）"""
+        label = getattr(self, "_plugin_title", None)
+        if label is None:
+            return
+        label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY};"
+            f" {get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
+            " background: transparent; border: none; padding: 0 6px;"
+        )
+
     def refresh_style(self) -> None:
         """主题切换后刷新样式（Colors.refresh() 由调用方先执行）"""
         for b in self._tabs.values():
             b.refresh_style()
+        self._indicator_ctl.indicator.update()  # 胶囊色实时取 token，主题切换后触发重绘即可
         # tab 分段槽：整体透明，不画外围胶囊。
         # 早期版本给整组 tab 套了一层淡底 + 1px 边框的胶囊槽，反馈是"多了一圈
         # 多余的框"；现在改由每个 tab 自己的底色（hover 6% / 选中 14%）承担状态表达，
@@ -992,6 +1325,9 @@ class CustomTitleBar(TitleBarBase):
             "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
             f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
         )
+        # 精简模式标题样式随主题刷新
+        if self._minimal:
+            self._apply_plugin_title_style()
         # 品牌（DriFox + 版本号）已按极简要求移除，顶栏只留功能控件。
 
     # ── 内部 ──

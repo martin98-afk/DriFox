@@ -354,3 +354,105 @@ class FileOperationRecorder:
     def _sanitize_filename(self, filename: str) -> str:
         """移除文件名中不合法的字符"""
         return _SANITIZE_FILENAME_PATTERN.sub("_", filename)
+
+
+def enforce_backup_limit(backup_base_dir, limit_mb: float, exclude_names: tuple = ()) -> list:
+    """按 mtime 先进先出清理备份，直到总量 <= limit_mb
+
+    - `limit_mb <= 0` 表示**不限制，不做任何清理**（语义变更说明见下）
+    - `limit_mb > 0`：超出上限时按 mtime 从旧到新删到上限内
+    - `exclude_names`：顶层子目录名命中该元组的项整体跳过（用于分治配额，
+      例如 FileRecorder 备份清理时排除 `deleted/` 删除快照目录）
+
+    返回被删文件路径列表。模块级独立函数：设置页手动触发 / 启动期触发均可调用。
+
+    ⚠ 语义变更（2026-09-21）：旧实现 `limit_mb <= 0` 会**清空全部备份**
+    （因 `limit_bytes > 0` 判断被跳过，全部文件进删除列表）。这对用户是陷阱：
+    想"设为 0 表示不限制"，结果备份被全删。现统一为"0 = 不限"，与 Docker
+    `--memory=0`、多数限流配置的 0 语义一致；且不再依赖调用方自觉加
+    `if limit > 0` 包壳（任何新调用方漏判都会全删备份 —— 现在的实现自处理）。
+    """
+    base = Path(backup_base_dir)
+    if not base.exists():
+        return []
+    if float(limit_mb) <= 0:  # 0 = 不限：不做任何清理
+        return []
+    try:
+        files = [f for f in base.rglob("*") if f.is_file()]
+    except OSError as e:
+        logger.warning(f"[FileRecorder] 备份目录扫描失败: {e}")
+        return []
+    if exclude_names:
+        excluded = tuple(str(n) for n in exclude_names)
+        files = [f for f in files if not _has_excluded_ancestor(f, base, excluded)]
+    if not files:
+        return []
+
+    limit_bytes = int(float(limit_mb) * 1024 * 1024)
+    total = 0
+    for f in files:
+        try:
+            total += f.stat().st_size
+        except OSError:
+            continue
+    if limit_bytes > 0 and total <= limit_bytes:
+        return []
+
+    removed: list = []
+    for f in sorted(files, key=lambda x: x.stat().st_mtime):
+        if limit_bytes > 0 and total <= limit_bytes:
+            break
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            total -= size
+            removed.append(f)
+        except OSError as e:
+            logger.warning(f"[FileRecorder] 备份清理失败: {f} ({e})")
+    if removed:
+        logger.info(f"[FileRecorder] 备份 FIFO 清理 {len(removed)} 个文件，剩余 {total / 1024 / 1024:.1f} MB")
+    return removed
+
+
+def cleanup_backups_partitioned(backups_dir, limit_mb: float) -> dict:
+    """分治清理两类备份（启动期与 UI「立即清理」共用同一入口）
+
+    两类备份**分治配额**，不可改回统算：
+    - FileRecorder 备份（每次编辑一条，高频产物）：配额 = limit_mb，排除 deleted/
+    - 删除保护快照（用户误删后唯一恢复手段）：配额 = max(100, limit_mb // 4)
+      下限 100MB 是保底，避免总配额很小时快照被挤成 0
+
+    共享一个 FIFO 配额会让日常编辑把快照挤干净 —— 安全功能静默失效，不可接受。
+
+    Args:
+        backups_dir: 备份根目录（其下 `deleted/` 为删除快照）
+        limit_mb: 总配额；<= 0 表示不限（两个分支都不清理）
+
+    Returns:
+        {"file_backups_removed": [...], "snapshots_removed": [...], "snapshot_limit_mb": int}
+    """
+    base = Path(backups_dir)
+    limit = int(float(limit_mb or 0))
+    # 快照配额派生规则：总配额 1/4，下限 100MB
+    snapshot_limit = max(100, limit // 4) if limit > 0 else 0
+    removed_files = enforce_backup_limit(base, limit, exclude_names=("deleted",))
+    removed_snaps = enforce_backup_limit(base / "deleted", snapshot_limit)
+    return {
+        "file_backups_removed": removed_files,
+        "snapshots_removed": removed_snaps,
+        "snapshot_limit_mb": snapshot_limit,
+    }
+
+
+def _has_excluded_ancestor(path: Path, base: Path, excluded: tuple) -> bool:
+    """判断 path 是否位于 base 下某个被排除的顶层子目录内
+
+    只看**顶层段**（base 的直接子目录名），不做任意层级匹配——否则
+    `a/deleted/b.bak` 这类深层同名目录也会被误排除。
+    """
+    try:
+        rel = path.relative_to(base)
+    except ValueError:
+        return False
+    parts = rel.parts
+    return bool(parts) and parts[0] in excluded

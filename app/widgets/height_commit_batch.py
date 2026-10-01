@@ -23,7 +23,12 @@ ResizeObserver + 解锁补报）。旧链路是「谁先回来谁立刻 ``setFix
 
 用法::
 
-    batch = HeightCommitBatch(scroll_area, container, follow_bottom_fn)
+    batch = HeightCommitBatch(
+        scroll_area,
+        container,
+        follow_bottom_fn,
+        programmatic_scroll_fn=main_widget._programmatic_scroll,
+    )
     batch.begin()                 # resize 恢复开始
     batch.submit(card, height)    # 卡片高度上报的统一出口
     batch.end()                   # 收尾（自动 flush + 复位锚点）
@@ -50,12 +55,23 @@ class HeightCommitBatch:
         scroll_area: 聊天区的 ``QScrollArea``。
         container: ``scroll_area.widget()``，卡片的直接父容器。
         follow_bottom_fn: 返回当前视口是否处于「跟随底部」状态的回调。
+        programmatic_scroll_fn: 程序滚动豁免上下文工厂（如 ``MainWidget._programmatic_scroll``）。
+            flush 末尾的置底/锚定 ``setValue`` 会包进它，使这些程序行为不参与 away 判定。
+            ``None`` 兼容旧调用方与测试桩（退化为 ``contextlib.nullcontext``）。
     """
 
-    def __init__(self, scroll_area, container: QWidget, follow_bottom_fn: Callable[[], bool]):
+    def __init__(
+        self,
+        scroll_area,
+        container: QWidget,
+        follow_bottom_fn: Callable[[], bool],
+        programmatic_scroll_fn: Optional[Callable[[], contextlib.AbstractContextManager]] = None,
+    ):
         self._sa = scroll_area
         self._container = container
         self._follow_bottom = follow_bottom_fn
+        # T9 away-set 死锁修复：程序滚动豁免上下文工厂（None 兼容测试桩）
+        self._prog_ctx = programmatic_scroll_fn
         self._pending: Dict[int, Tuple["MessageCard", int]] = {}
         self._scheduled = False
         self._active = False
@@ -101,8 +117,9 @@ class HeightCommitBatch:
         if self._anchor_card is None:
             self._capture_anchor()
         self._pending[id(card)] = (card, height)
-        # 与同步路径保持一致的去重语义：同一高度不会被重复提交/重复应用
-        card._last_applied_viewer_height = height
+        # 注：_last_applied_viewer_height 必须在 flush **真正应用后**才写。
+        # 提前写会让后续同值上报被 _apply_viewer_height 的等值短路吞掉；本条一旦
+        # 在 flush 里因卡片被回收而作废，该高度就永久丢失（无重试）。
         if not self._scheduled:
             self._scheduled = True
             QTimer.singleShot(0, self.flush)
@@ -124,26 +141,45 @@ class HeightCommitBatch:
                 self._sa.setUpdatesEnabled(False)
             try:
                 for card, height in items:
-                    with contextlib.suppress(RuntimeError):
+                    # suppress 必须含 AttributeError：卡片在本轮 submit 之后、flush 之前
+                    # 被虚拟滚动池化摘走时 viewer 为 None（detach_viewer 显式置 None），
+                    # 旧实现只 suppress RuntimeError → AttributeError 直接穿出于本循环，
+                    # 同批后面所有卡片的高度全部不应用（表现为 resize 后一片空白）。
+                    with contextlib.suppress(RuntimeError, AttributeError):
+                        viewer = getattr(card, "viewer", None)
+                        if viewer is None:
+                            # 本条作废：卡片重新渲染后会自行上报正确高度
+                            continue
                         # 本轮统一走锚定，关闭 per-card 增量补偿
                         card._last_height_delta = 0
-                        card.viewer.setFixedHeight(height)
+                        # viewer 真实高度到达 → 解除 T42 起步高度钉死（幂等）：
+                        # 不解除的话卡片 min=max=占位高度，与内容的差被布局压给
+                        # 气泡 + 页脚（页脚模型胶囊拉伸成竖条的画面畸变）
+                        unpin = getattr(card, "_unpin_layout_height", None)
+                        if callable(unpin):
+                            unpin()
+                        viewer.setFixedHeight(height)
+                        card._last_applied_viewer_height = height
                         card.heightChanged.emit(height)
             finally:
-                if follow:
-                    # 🐛 同 main_widget._sync_scroll_maximum：卡片 setFixedHeight 之后
-                    # 布局尚未传播，sb.maximum() 仍是旧值 → setValue(maximum) 只会停在
-                    # "上一拍的底"。用即时计算的 sizeHint 校正上界后再置底。
-                    # 双向校正（不设 real > maximum 条件）：follow 即贴底/跟随态，
-                    # 上界虚高时若只抬高，setValue(maximum) 会把视口钉进内容底之下的
-                    # 空白区（「滚到底还能继续下滚」的组成环节之一）。
-                    with contextlib.suppress(RuntimeError):
-                        real = max(0, self._container.sizeHint().height() - self._sa.viewport().height())
-                        sb.setMaximum(real)
-                    sb.setValue(sb.maximum())
-                elif self._anchor_card is not None:
-                    top = self._anchor_card.mapTo(self._container, QPoint(0, 0)).y()
-                    sb.setValue(max(0, top - self._anchor_offset))
+                # T9 away-set 死锁修复：follow 置底与锚定修正都是程序行为，必须包进
+                # 程序滚动豁免上下文，否则这些 setValue 参与 away 判定 → resize 恢复期
+                # 把用户误判为「主动滚离」→ 滚底守卫卡死。
+                with self._prog_ctx() if self._prog_ctx else contextlib.nullcontext():
+                    if follow:
+                        # 🐛 同 main_widget._sync_scroll_maximum：卡片 setFixedHeight 之后
+                        # 布局尚未传播，sb.maximum() 仍是旧值 → setValue(maximum) 只会停在
+                        # "上一拍的底"。用即时计算的 sizeHint 校正上界后再置底。
+                        # 双向校正（不设 real > maximum 条件）：follow 即贴底/跟随态，
+                        # 上界虚高时若只抬高，setValue(maximum) 会把视口钉进内容底之下的
+                        # 空白区（「滚到底还能继续下滚」的组成环节之一）。
+                        with contextlib.suppress(RuntimeError):
+                            real = max(0, self._container.sizeHint().height() - self._sa.viewport().height())
+                            sb.setMaximum(real)
+                        sb.setValue(sb.maximum())
+                    elif self._anchor_card is not None:
+                        top = self._anchor_card.mapTo(self._container, QPoint(0, 0)).y()
+                        sb.setValue(max(0, top - self._anchor_offset))
                 if was_enabled:
                     self._sa.setUpdatesEnabled(True)
 

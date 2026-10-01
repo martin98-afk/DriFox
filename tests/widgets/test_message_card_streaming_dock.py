@@ -182,9 +182,14 @@ def test_sync_streaming_dock_injects_js():
     """_sync_streaming_dock 必须注入 _setStreamingDock(true/false)。"""
     stub = _ViewerStub()
     stub._sync_streaming_dock(True)
-    assert "_setStreamingDock(true)" in stub._page.js_calls[-1]
+    assert "_setStreamingDock(true,false)" in stub._page.js_calls[-1]
     stub._sync_streaming_dock(False)
-    assert "_setStreamingDock(false)" in stub._page.js_calls[-1]
+    assert "_setStreamingDock(false,false)" in stub._page.js_calls[-1]
+    # [T30] 归位即折叠：collapse_after=True 只在归位方向生效
+    stub._sync_streaming_dock(False, collapse_after=True)
+    assert "_setStreamingDock(false,true)" in stub._page.js_calls[-1]
+    stub._sync_streaming_dock(True, collapse_after=True)
+    assert "_setStreamingDock(true,false)" in stub._page.js_calls[-1]
 
 
 def test_sync_streaming_dock_skips_when_js_not_ready():
@@ -210,9 +215,11 @@ class _StubViewerForCard:
     def __init__(self):
         self._streaming = False
         self.dock_calls = []
+        self.collapse_calls = []
 
-    def _sync_streaming_dock(self, active):
+    def _sync_streaming_dock(self, active, collapse_after=False):
         self.dock_calls.append(active)
+        self.collapse_calls.append(collapse_after and not active)
 
 
 def test_start_streaming_anim_turns_dock_on():
@@ -319,7 +326,7 @@ class _DockRecordingViewer:
         self._tool_dom_dirty = False
         self._restore_finished_ids = set()
 
-    def _sync_streaming_dock(self, active):
+    def _sync_streaming_dock(self, active, collapse_after=False):
         self.dock_calls.append(active)
 
     def _schedule_render(self, immediate=False):

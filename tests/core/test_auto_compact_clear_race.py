@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.core import team_manager as tm_mod
+from app.core.team import team_manager as tm_mod
 
 
 

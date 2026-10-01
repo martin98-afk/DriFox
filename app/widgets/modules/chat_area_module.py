@@ -77,7 +77,7 @@ class ChatAreaModule(UIModule):
             pass
         host.chat_layout = QVBoxLayout(host.chat_container)
         host.chat_layout.setContentsMargins(6, 6, 6, 6)
-        host.chat_layout.setSpacing(8)
+        host.chat_layout.setSpacing(6)  # 消息间距（2026-09-23 收敛：8→6，配合卡片内边距收紧）
         host.chat_layout.setAlignment(Qt.AlignBottom)
         host.chat_scroll_area.setWidget(host.chat_container)
 

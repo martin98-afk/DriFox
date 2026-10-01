@@ -12,6 +12,7 @@
   app.tools.command_safety — 命令安全分类/执行
   app.tools.process_job    — Windows Job Object 进程树
 """
+
 import os
 import re
 import subprocess
@@ -27,6 +28,7 @@ from app.tools.bg_manager import (
     BackgroundTaskManager,
     _prepare_windows_encoding,
     _smart_decode,
+    create_quota_job,
 )
 from app.tools.result import ToolResult
 
@@ -135,13 +137,14 @@ def _fix_findstr_pipe(command: str) -> str:
         return command
 
     prefix = command[: m.start(1)] + m.group(1)  # 含 findstr 标志
-    pattern = m.group(2)                          # "error|warning"
-    suffix = command[m.end():]                    # 剩余部分
+    pattern = m.group(2)  # "error|warning"
+    suffix = command[m.end() :]  # 剩余部分
 
     if "|" not in pattern:
         return command
 
     parts = pattern.split("|")
+
     # cmd.exe 中双引号内 " 需要写成 "" ，重建 /c:"..." 时做转义
     def _cmd_escape(s: str) -> str:
         return s.replace('"', '""')
@@ -341,7 +344,7 @@ def _scan_and_rewrite_chain(command: str) -> tuple[str, Optional[str]]:
         # 替换原文中的内联脚本部分（去掉 -c/-e 标志，直接用脚本文件）
         # m.start() = "python" 的起始位置，m.end() = "-c " 之后的引号前位置
         before = result_cmd[: m.start()]  # "cd xxx && " 部分
-        after = result_cmd[start + script_end + 1:]  # 跳过结束引号
+        after = result_cmd[start + script_end + 1 :]  # 跳过结束引号
         result_cmd = f'{before}{interp} "{safe_path}"{after}'
         any_rewritten = True
         logger.debug(f"[Bash] chain inline script → temp: {tmp_path}")
@@ -358,6 +361,7 @@ def _cleanup_script_temp(path: Optional[str]) -> None:
             os.unlink(path)
         except Exception:
             pass
+
 
 class TerminalTools:
     def __init__(self, owner):
@@ -409,11 +413,15 @@ class TerminalTools:
 
             use_shell = needs_shell(command)
 
+            # S4 + L1: 进程树挂 Job Object（kill-on-close），资源配额取安全中心配置
+            job = create_quota_job()
+
             if use_shell:
                 # Path B: 需要 shell 特性（管道、重定向等）
                 cmd = _prepare_windows_encoding(command, self.workdir)
                 process = run_with_shell(
                     cmd,
+                    job=job,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=str(self.workdir),
@@ -422,6 +430,7 @@ class TerminalTools:
                 # Path A: 安全路径 — 无 shell 注入风险
                 process = run_safe(
                     command,
+                    job=job,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=str(self.workdir),
@@ -541,9 +550,11 @@ class TerminalTools:
         content = manager.list_tasks()
         return ToolResult(True, content=content)
 
+
 # ============================================================
 # 工具插件化：owner 包装 / 单例 / impl / register
 # ============================================================
+
 
 class _OwnerShim:
     """TerminalTools 的 owner 最小实现（仅 workdir，由 tool_ctx 注入）"""
@@ -784,9 +795,14 @@ def register(registry):
     # bg_start 的预览/摘要都走带 description 优先的版本
     _bg_start_preview = _desc_preview(_make_bg_preview("bg_start"))
     registry.register(
-        "bash", _BASH_SCHEMA, impl=_bash_impl,
-        danger="dangerous", icon="shell", cn_name="执行命令",
-        group=GROUP_TERMINAL, description="执行shell命令",
+        "bash",
+        _BASH_SCHEMA,
+        impl=_bash_impl,
+        danger="dangerous",
+        icon="shell",
+        cn_name="执行命令",
+        group=GROUP_TERMINAL,
+        description="执行shell命令",
         aliases=["Bash", "Terminal", "RunCommand", "execute_command", "shell", "Command"],
         render=_render_bash_body,
         preview=_desc_preview(_preview_bash),
@@ -794,36 +810,56 @@ def register(registry):
         metadata={"permission_arg": "command"},
     )
     registry.register(
-        "bg_start", _BG_START_SCHEMA, impl=_bg_start_impl,
-        danger="dangerous", icon="shell", cn_name="后台启动",
-        group=GROUP_TERMINAL, description="启动后台命令",
+        "bg_start",
+        _BG_START_SCHEMA,
+        impl=_bg_start_impl,
+        danger="dangerous",
+        icon="shell",
+        cn_name="后台启动",
+        group=GROUP_TERMINAL,
+        description="启动后台命令",
         aliases=["BgStart", "bg_start"],
         render=_render_bg_body,
         preview=_bg_start_preview,
         summarize=_make_bg_summarize(_bg_start_preview),
     )
     registry.register(
-        "bg_stop", _BG_STOP_SCHEMA, impl=_bg_stop_impl,
-        danger="dangerous", icon="shell", cn_name="后台停止",
-        group=GROUP_TERMINAL, description="停止后台任务",
+        "bg_stop",
+        _BG_STOP_SCHEMA,
+        impl=_bg_stop_impl,
+        danger="dangerous",
+        icon="shell",
+        cn_name="后台停止",
+        group=GROUP_TERMINAL,
+        description="停止后台任务",
         aliases=["BgStop", "bg_stop"],
         render=_render_bg_body,
         preview=_make_bg_preview("bg_stop"),
         summarize=_make_bg_summarize(_make_bg_preview("bg_stop")),
     )
     registry.register(
-        "bg_logs", _BG_LOGS_SCHEMA, impl=_bg_logs_impl,
-        danger="safe", icon="shell", cn_name="后台日志",
-        group=GROUP_TERMINAL, description="查看后台任务日志",
+        "bg_logs",
+        _BG_LOGS_SCHEMA,
+        impl=_bg_logs_impl,
+        danger="safe",
+        icon="shell",
+        cn_name="后台日志",
+        group=GROUP_TERMINAL,
+        description="查看后台任务日志",
         aliases=["BgLogs", "bg_logs"],
         render=_render_bg_body,
         preview=_make_bg_preview("bg_logs"),
         summarize=_make_bg_summarize(_make_bg_preview("bg_logs")),
     )
     registry.register(
-        "bg_list", _BG_LIST_SCHEMA, impl=_bg_list_impl,
-        danger="safe", icon="shell", cn_name="后台列表",
-        group=GROUP_TERMINAL, description="列出后台任务状态",
+        "bg_list",
+        _BG_LIST_SCHEMA,
+        impl=_bg_list_impl,
+        danger="safe",
+        icon="shell",
+        cn_name="后台列表",
+        group=GROUP_TERMINAL,
+        description="列出后台任务状态",
         aliases=["BgList", "bg_list"],
         preview=_make_bg_preview("bg_list"),
         summarize=_make_bg_summarize(_make_bg_preview("bg_list")),

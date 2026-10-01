@@ -49,7 +49,16 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import SegmentedWidget
 
-from .trace_models import EntryKind, ThemePalette, TraceRecord, format_duration, kind_color, pretty_json, with_alpha
+from .trace_models import (
+    EntryKind,
+    ThemePalette,
+    TraceRecord,
+    format_duration,
+    format_tokens,
+    kind_color,
+    pretty_json,
+    with_alpha,
+)
 from .turn_list_widget import unified_scrollbar
 
 # tab key → 页面实例槽位
@@ -386,6 +395,8 @@ class DetailPanel(QWidget):
     """右侧详情面板。"""
 
     dismissRequested = Signal()  # 点击 × → 清除选中
+    # 点标题里的 Turn 徽章 → 只看该轮（0 = 清除）
+    turnFilterRequested = Signal(int)
 
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -425,6 +436,12 @@ class DetailPanel(QWidget):
         self._badge.setFixedHeight(18)
         self._badge.setMinimumWidth(72)
         row1.addWidget(self._badge, 0, Qt.AlignVCenter)
+        # 可点 Turn 徽章（点它 = 列表切到只看该轮）
+        self._turn_chip = _ClickLabel(self._title_bar)
+        self._turn_chip.setFixedHeight(18)
+        self._turn_chip.hide()
+        self._turn_chip.clicked.connect(self._on_turn_chip)
+        row1.addWidget(self._turn_chip, 0, Qt.AlignVCenter)
         self._title_label = QLabel("未选中条目", self._title_bar)
         row1.addWidget(self._title_label, 1)
         self._close_btn = _CloseButton(self._title_bar)
@@ -588,6 +605,7 @@ class DetailPanel(QWidget):
             f"QFrame#agentTraceDetailTitle {{ background: transparent; border-bottom: 1px solid {pal.q('border')}; }}"
         )
         self._close_btn.set_palette(pal)
+        self._turn_chip.set_palette(pal)
         self._title_label.setStyleSheet(f"color: {pal.q('text')}; font-family: '{ui}'; font-size: {self._base_px}px;")
         self._meta_label.setStyleSheet(f"color: {pal.q('text_muted')}; font-family: '{ui}'; font-size: {fs}px;")
         for edit in self._existing_text_pages():
@@ -689,12 +707,7 @@ class DetailPanel(QWidget):
         elif key == "thinking":
             # DeepSeek V4 / GLM-5 等思维链：worker 落盘在 msg["reasoning_content"]，
             # collector 投影时搬进 meta["reasoning"]；轻量消息（已剥离）走 loader 懒读。
-            reasoning = str(rec.meta.get("reasoning") or "").strip()
-            if not reasoning and rec.reasoning_loader is not None:
-                try:
-                    reasoning = str(rec.reasoning_loader() or "").strip()
-                except Exception:
-                    reasoning = ""
+            reasoning = self._reasoning_text(rec).strip()
             self._set_content(self._page_text, reasoning or "（空）")
         elif key == "request":
             self._set_content(self._ensure_slot_page("request"), self._tool_request(rec))
@@ -717,12 +730,9 @@ class DetailPanel(QWidget):
 
         # ASSISTANT 带思维链 → 在 Preview 后插入 Thinking tab（没 reasoning 不占位）
         tabs = list(_TABS_BY_KIND.get(rec.kind, _TABS_BY_KIND[EntryKind.USER]))
-        has_reasoning = bool(str(rec.meta.get("reasoning") or "").strip())
-        if not has_reasoning and rec.reasoning_loader is not None:
-            try:
-                has_reasoning = bool(str(rec.reasoning_loader() or "").strip())
-            except Exception:
-                has_reasoning = False
+        # 全文只读一次：tab 插入判断与标题栏字符统计共用（loader 走存储 IO）
+        reasoning_text = self._reasoning_text(rec)
+        has_reasoning = bool(reasoning_text.strip())
         if rec.kind == EntryKind.ASSISTANT and has_reasoning:
             tabs.insert(1, ("thinking", "Thinking"))
         self._rebuild_tabs(tuple(tabs))
@@ -742,15 +752,31 @@ class DetailPanel(QWidget):
 
         self._refresh_badge()
         turn_part = f"Turn {rec.turn_no} · " if rec.turn_no > 0 else ""
+        self._turn_chip.set_turn(rec.turn_no)
         self._title_label.setText(f"{turn_part}{rec.label}")
         bits = [
             rec.status,
             format_duration(rec.duration_ms) if rec.duration_ms > 0 else "—",
             rec.absolute_time,
-            f"{len(rec.raw or ''):,} 字符",
         ]
+        # 工具调用 / hook 注入类消息本来就没有正文 —— 显示「0 字符」是噪音，
+        # 换成 token 数（真正占用上下文的量）。
+        # 字符数 = 正文 + 思考内容（思维链也是模型输出的一部分）。
+        if (rec.raw or "").strip() or reasoning_text.strip():
+            bits.append(f"{len(rec.raw or '') + len(reasoning_text):,} 字符")
+        elif rec.tokens > 0:
+            bits.append(f"{format_tokens(rec.tokens)} tok")
         self._meta_label.setText("  ·  ".join(bits))
         self._fill_active_tab()
+
+    def _on_turn_chip(self) -> None:
+        """点标题里的 Turn 徽章 → 请求列表只看该轮。"""
+        idx = self._current_idx
+        if idx is None or idx >= len(self._records):
+            return
+        rec = self._records[idx]
+        if rec.turn_no > 0:
+            self.turnFilterRequested.emit(rec.turn_no)
 
     def _refresh_badge(self) -> None:
         if self._current_idx is None or self._current_idx >= len(self._records):
@@ -773,6 +799,7 @@ class DetailPanel(QWidget):
         self._stack.setCurrentWidget(self._page_text)
         self._badge.setText("----")
         self._badge.setStyleSheet(self._badge_qss(QColor("#888888")))
+        self._turn_chip.hide()
         self._title_label.setText("未选中条目")
         self._meta_label.setText("点击左侧任意条目查看完整内容")
         for edit in self._existing_text_pages():
@@ -816,12 +843,31 @@ class DetailPanel(QWidget):
             return pretty_json(raw.split("\n\n── result ──\n", 1)[1])
         return raw or "（无结果）"
 
+    @staticmethod
+    def _reasoning_text(rec: TraceRecord) -> str:
+        """思考内容全文：优先 ``meta["reasoning"]``（collector 投影），
+        轻量消息（已剥离）走 ``reasoning_loader`` 懒读（存储 load_msg_extras）。
+        取不到返回空串。"""
+        text = str(rec.meta.get("reasoning") or "")
+        if not text.strip() and rec.reasoning_loader is not None:
+            try:
+                text = str(rec.reasoning_loader() or "")
+            except Exception:
+                text = ""
+        return text
+
+    def _content_size_text(self, rec: TraceRecord) -> str:
+        """内容体量文案：正文 + 思考内容合计字符数（与标题栏口径一致）。"""
+        total = len(rec.raw or "") + len(self._reasoning_text(rec))
+        return f"{total:,} 字符" if total > 0 else "—"
+
     def _headers_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
         """Info 页（原 Headers）：只留有用的三行，元杂项（Kind/Status/Source 等）全部砍掉。"""
         return [
             ("开始时间", self._full_ts(rec.start_ts)),
             ("Turn", str(rec.turn_no) if rec.turn_no > 0 else "-"),
-            ("大小", f"{len(rec.raw or ''):,} 字符"),
+            ("大小", self._content_size_text(rec)),
+            ("Tokens", format_tokens(rec.tokens)),
         ]
 
     def _llm_stat_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
@@ -832,7 +878,11 @@ class DetailPanel(QWidget):
         生成 = 总时长 − 首 token；吞吐量 = 输出 token ÷ 生成秒。
         估算 token（无 tokens_exact）时吞吐量加 ≈ 前缀。
         """
-        rows: List[Tuple[str, str]] = [("开始时间", self._full_ts(rec.start_ts))]
+        model = str(rec.meta.get("model") or "")
+        rows: List[Tuple[str, str]] = []
+        if model:
+            rows.append(("模型", model))
+        rows.append(("开始时间", self._full_ts(rec.start_ts)))
         total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
         rows.append(("总时长", format_duration(total_ms) if total_ms > 0 else "—"))
         ttft = rec.meta.get("ttft_ms")
@@ -946,3 +996,39 @@ def _hms(epoch: float) -> str:
     import datetime as _dt
 
     return _dt.datetime.fromtimestamp(epoch).strftime("%H:%M:%S")
+
+
+class _ClickLabel(QLabel):
+    """可点击的小标签（Turn 徽章）—— hover 加亮、单击发信号。"""
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        self._pal = ThemePalette()
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_palette(self, pal: ThemePalette) -> None:
+        self._pal = pal
+        self._apply_style()
+
+    def set_turn(self, turn_no: int) -> None:
+        if turn_no > 0:
+            self.setText(f"Turn {turn_no}")
+            self.show()
+        else:
+            self.hide()
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        pal = self._pal
+        self.setStyleSheet(
+            f"color: {pal.q('accent')}; background: {pal.q('accent', 36)};"
+            f" border-radius: 3px; padding: 0 6px;"
+            f" font-family: '{pal.font_family}'; font-size: {max(9, pal.font_px - 3)}px;"
+        )
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)

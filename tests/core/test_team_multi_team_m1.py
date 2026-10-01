@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core import team_manager as tm_mod
+from app.core.team import team_manager as tm_mod
 
 try:
     from app.plugins.loaders.plugin_tool_loader import load_plugin_tools

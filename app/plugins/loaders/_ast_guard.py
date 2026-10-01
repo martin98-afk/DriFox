@@ -22,7 +22,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -455,6 +455,22 @@ class GuardResult(NamedTuple):
     syntax_error: bool
 
 
+# guard_plugin_module_once 结果缓存：键 = (path, mtime_ns, size)。
+# 同一模块在启动对齐/热重载/差异补载链路中会被重复审计（实测启动期
+# system-tools 的 subprocess 告警重复打 3 遍，每遍都重新 ast.parse），
+# 文件未变时直接复用上次判定，顺带消除重复告警日志。
+_GUARD_CACHE_MAX = 512
+_guard_cache: Dict[tuple, "GuardResult"] = {}
+
+
+def _guard_cache_key(path: Path) -> Optional[tuple]:
+    try:
+        st = path.stat()
+        return (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def guard_plugin_module_once(
     source: str,
     path: Path,
@@ -475,6 +491,11 @@ def guard_plugin_module_once(
         GuardResult — ok=False 时调用方拒载；dangerous_imports 仅告警不拒载。
     """
     tag = f"[{component}] " if component else ""
+    cache_key = _guard_cache_key(path)
+    if cache_key is not None:
+        cached = _guard_cache.get(cache_key)
+        if cached is not None:
+            return cached
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -511,8 +532,18 @@ def guard_plugin_module_once(
         logger.debug(f"{tag}[ASTGuard] 缺少入口函数 {list(entry_names)}: {path}")
 
     ok = not rejected and (has_register or not require_register)
-    return GuardResult(ok=ok, has_register=has_register, rejected_writes=rejected,
-                       dangerous_imports=dangerous, syntax_error=False)
+    result = GuardResult(
+        ok=ok,
+        has_register=has_register,
+        rejected_writes=rejected,
+        dangerous_imports=dangerous,
+        syntax_error=False,
+    )
+    if cache_key is not None:
+        if len(_guard_cache) >= _GUARD_CACHE_MAX:
+            _guard_cache.clear()  # 简单防膨胀：热重载频率低，全清可接受
+        _guard_cache[cache_key] = result
+    return result
 
 
 # 兼容旧调用点：tool loader 原命名空间使用 _is_tool_entry_module / _is_sys_modules_mutation

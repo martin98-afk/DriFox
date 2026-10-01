@@ -38,7 +38,7 @@ from qfluentwidgets import (
     ToolButton,
 )
 
-from app.core.mcp_lsp_safety import (
+from app.core.tools.mcp_lsp_safety import (
     confirm_by_key,
     is_pending_confirm_by_key,
     is_session_denied,
@@ -871,11 +871,18 @@ class MCPListSettingCard(ExpandSettingCard):
         mgr.connect_server_background(name, config, on_done=on_done)
 
     def _mcp_gate_key(self, name: str) -> str:
-        """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）"""
-        from app.core.mcp_lsp_safety import plugin_from_source, server_key
+        """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）。
 
-        src = next((s.get("_source", "") for s in self._get_servers() if s.get("name", "") == name), "")
-        return server_key("mcp", plugin_from_source(src), name)
+        key 绑定启动配置指纹（command+args，args 含 command 本体与
+        mcp_tools 调用点口径一致）：配置变更后旧 key 失配，需重新确认。"""
+        from app.core.tools.mcp_lsp_safety import config_hash, plugin_from_source, server_key
+
+        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
+        src = server_cfg.get("_source", "")
+        cmd = server_cfg.get("command", "") or ""
+        cmd_args = [cmd] + list(server_cfg.get("args") or []) if cmd else list(server_cfg.get("args") or [])
+        chash = config_hash(cmd, cmd_args)
+        return server_key("mcp", plugin_from_source(src), name, chash)
 
     def _show_mcp_confirm_bar(self, name: str, key: str):
         """need_confirm 确认弹窗：带「允许启动/本次拒绝」按钮，同 key 去重只弹一个"""
@@ -889,10 +896,18 @@ class MCPListSettingCard(ExpandSettingCard):
         from app.widgets.tab_manager_window import TabManagerWindow
 
         _parent = TabManagerWindow.get_instance() or self.window()
+        # 展示完整启动命令行（盲确认修复：此前仅提示来源，用户看不到将执行什么）
+        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
+        cmd = str(server_cfg.get("command", "") or "")
+        cmd_args = " ".join(str(a) for a in (server_cfg.get("args") or []))
         infobar = InfoBar(
             icon=InfoBarIcon.WARNING,
             title=f"MCP 安全确认: {name}",
-            content="该服务器来自非内置源（用户级插件），首次启动需确认是否放行",
+            content=(
+                f"command: {cmd}\n"
+                f"args: {cmd_args}\n"
+                "该服务器来自非内置源（用户级插件），确认后将绑定以上启动配置；配置变更需重新确认。"
+            ),
             orient=Qt.Vertical,
             isClosable=False,
             duration=-1,
@@ -905,7 +920,6 @@ class MCPListSettingCard(ExpandSettingCard):
         btn_layout = QHBoxLayout(btn_container)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(8)
-        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
 
         def _allow():
             confirm_by_key(key, allow=True)
@@ -1109,6 +1123,7 @@ class MCPListSettingCard(ExpandSettingCard):
         while self.viewLayout.count():
             item = self.viewLayout.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
 
         servers = self._get_servers()
@@ -1128,10 +1143,11 @@ class MCPListSettingCard(ExpandSettingCard):
                 self._server_rows[server_data.get("name", "")] = row
                 self.viewLayout.addWidget(row)
 
-        # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确
-        from PySide6.QtCore import QCoreApplication
-
-        QCoreApplication.processEvents()
+        # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确。
+        # ★ 原实现在这里 QCoreApplication.processEvents()：泵走当时事件队列里的
+        # 全部事件，本函数耗时因此变成"那一刻队列里积压了什么"（同 hook/lsp 卡，
+        # 实测把首建成本放大 4~10 倍，且可能事件重入构造出第二张设置卡 P024）。
+        # 布局尺寸不需要它：takeAt 已把 item 摘出布局，sizeHint 不再计入。
         self.viewLayout.activate()
         self.view.updateGeometry()
 
@@ -1145,8 +1161,8 @@ class MCPListSettingCard(ExpandSettingCard):
 
         # 刷新状态指示灯
         self._refresh_status_dots()
-        # 启动状态轮询（卡片展开时持续刷新）
-        self._status_timer.start()
+        # 启动状态轮询（仅在展开 + 可见时，见 _sync_status_timer）
+        self._sync_status_timer()
 
         # 更新头部 subtitle（服务器计数 + token 占用）
         self._update_mcp_token_count()
@@ -1154,6 +1170,30 @@ class MCPListSettingCard(ExpandSettingCard):
         # 重要：新创建的行/标签未应用字体大小，需要重新刷新
         # 否则会回退到 qfluentwidgets 默认的 14px 硬编码字体
         apply_font_size_to_widget(self, 14)
+
+    def _sync_status_timer(self):
+        """状态轮询只在「展开 + 可见」时跑
+
+        ★ 原实现在 _refresh 末尾无条件 start()，而 _refresh 在卡片构造时就跑过
+        一次 —— 于是 3s 轮询从设置卡构造那刻起就在主线程空转，哪怕设置面板根本
+        没打开（每次还带一次 token 估算）。与 LSP 卡同款缺陷，同一套修法。
+        """
+        if self.isExpand and not self.isHidden():
+            self._status_timer.start()
+        else:
+            self._status_timer.stop()
+
+    def setExpand(self, isExpand: bool):
+        super().setExpand(isExpand)
+        self._sync_status_timer()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_status_timer()
+
+    def hideEvent(self, event):
+        self._status_timer.stop()
+        super().hideEvent(event)
 
     def refresh_style(self):
         """主题变更时刷新所有行的命令描述颜色"""
@@ -1295,7 +1335,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
         def _work():
             try:
-                from app.core.token_estimator import estimate_tokens
+                from app.core.infra.token_estimator import estimate_tokens
 
                 servers = self._get_servers()
                 count = len(servers)

@@ -90,7 +90,7 @@ def env(monkeypatch, qapp):
         return {comp: True}  # 热重载「成功」语义：至少一项为真
 
     fake_host.on_plugin_component_toggled.side_effect = _fake_hot_reload
-    monkeypatch.setattr("app.core.plugin_host_service.PluginHostService.get_instance", staticmethod(lambda: fake_host))
+    monkeypatch.setattr("app.core.services.plugin_host_service.PluginHostService.get_instance", staticmethod(lambda: fake_host))
 
     monkeypatch.setattr(
         "app.widgets.cards.settings.plugin_components_card.estimate_component_tokens", lambda p, c: (10, 2)

@@ -601,6 +601,7 @@ class AssistantManager:
                 self._write_yaml(v)
         if changed:
             self._invalidate_session_prompt_caches()
+            self._invalidate_identity_cache()
         return True
 
     def save_order(self, ordered_ids: List[str]) -> bool:
@@ -619,7 +620,16 @@ class AssistantManager:
         self._ensure_dir(path.parent)
         tmp = path.with_suffix(".yaml.tmp")
         tmp.write_text(a.to_yaml(), encoding="utf-8")
-        tmp.replace(path)
+        # Windows 下 Defender/索引服务可能瞬时持有目标句柄，replace 报 WinError 5，
+        # 短退避重试吸收（20/40/80/160ms，总窗口约 300ms），穷尽才抛
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02 * (2**attempt))
 
     # ── ID 校验 ──
 
@@ -668,6 +678,9 @@ class AssistantManager:
         # 同步归属映射（提前落盘，不等轮次结束）
         if aid:
             cls.record_session_aid(session_id, aid)
+        # 身份行跟随：消息身份解析有会话级缓存，override 变化必须失效，
+        # 否则新消息仍显示旧助手（2026-09-22 身份行不更新根因）
+        cls._invalidate_identity_cache()
         return True
 
     @classmethod
@@ -773,7 +786,7 @@ class AssistantManager:
         BuildSystemPrompt hooks → 新助手身份注入）。
         """
         try:
-            from app.core.backend import ChatBackend
+            from app.core.conversation.backend import ChatBackend
 
             for backend in list(ChatBackend._active_instances):
                 sm = getattr(backend, "session_manager", None)
@@ -821,7 +834,7 @@ class AssistantManager:
         if not session_id:
             return
         try:
-            from app.core.backend import ChatBackend
+            from app.core.conversation.backend import ChatBackend
 
             for backend in list(ChatBackend._active_instances):
                 sm = getattr(backend, "session_manager", None)
@@ -849,6 +862,23 @@ class AssistantManager:
             from loguru import logger
 
             logger.debug(f"[assistant_hub] 清空会话 {session_id} prompt 缓存失败: {e}")
+
+    @staticmethod
+    def _invalidate_identity_cache() -> None:
+        """清空主程序消息身份解析缓存（主助手切换 / 会话 override 变化时）。
+
+        ``message_identity.resolve_identity`` 按 (session_id, role) 缓存解析结果，
+        助手身份变化后不清缓存，新消息的身份行（名字+头像）仍解析出旧助手，
+        直到新建会话（新 session_id 换缓存 key）才恢复——2026-09-22 三个症状
+        （切主助手头像不更新 / @临时助手身份行不跟随）的共同根因。
+        解析成本极低，整表清空即可。
+        """
+        try:
+            from app.core.infra.message_identity import clear_cache
+
+            clear_cache()
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 清空身份缓存失败: {e}")
 
     # ── 对外描述 (AGENTS.public.md：其他 agent 调用本助手时看到的简介) ──
 
@@ -926,6 +956,50 @@ class AssistantManager:
             return True
         for old_ext in _avatar_supported_exts():
             old = d / f"agent.{old_ext}"
+            if old.exists():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        return True
+
+    # ── 用户头像（该助手视角下「你」的头像，注入消息身份行显示）──
+
+    def user_avatar_path(self, aid: str) -> Optional[Path]:
+        """用户头像：avatars/user.{ext}，未设置返回 None（渲染层回落色块+首字母）。"""
+        d = self._avatar_dir(aid)
+        if not d.exists():
+            return None
+        for ext in _avatar_supported_exts():
+            p = d / f"user.{ext}"
+            if p.exists():
+                return p
+        return None
+
+    def save_user_avatar_from_bytes(self, aid: str, data: bytes, ext: str) -> Optional[Path]:
+        """保存用户头像（预置库复制与本地上传统一走 bytes 落盘，不引用源路径）。"""
+        ext = ext.lower().lstrip(".")
+        if ext not in _avatar_supported_exts():
+            return None
+        d = self._avatar_dir(aid)
+        self._ensure_dir(d)
+        for old_ext in _avatar_supported_exts():
+            old = d / f"user.{old_ext}"
+            if old.exists():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        target = d / f"user.{ext}"
+        target.write_bytes(data)
+        return target
+
+    def clear_user_avatar(self, aid: str) -> bool:
+        d = self._avatar_dir(aid)
+        if not d.exists():
+            return True
+        for old_ext in _avatar_supported_exts():
+            old = d / f"user.{old_ext}"
             if old.exists():
                 try:
                     old.unlink()

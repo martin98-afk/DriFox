@@ -37,7 +37,11 @@ KNOWN_COMPONENTS: Set[str] = {
     "storages",
     "serializers",
     "gateways",
+    "transports",
+    "stream_sinks",
     "engines",
+    "context_tiers",
+    "budget_resolvers",
 }
 
 # 组件优先级元组（用于多组件批处理中决定先后顺序，与旧 backend._COMPONENT_ORDER dict 数值一致）
@@ -61,7 +65,11 @@ COMPONENT_ORDER: tuple = (
     "storages",
     "serializers",
     "gateways",
+    "transports",
+    "stream_sinks",
     "engines",
+    "context_tiers",
+    "budget_resolvers",
 )
 
 # 插件根目录的关键文件 → 组件类型（.mcp.json/.lsp.json 位于插件根而非子目录）

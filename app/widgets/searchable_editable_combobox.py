@@ -7,6 +7,7 @@ from app.utils.utils import get_font_family_css
 
 MAX_COMBO_VISIBLE_ITEMS = 15  # 下拉框最大同时显示数量
 
+
 class SearchableEditableComboBox(EditableComboBox):
     def __init__(self, parent=None, max_visible_items: int = MAX_COMBO_VISIBLE_ITEMS):
         super().__init__(parent)
@@ -135,23 +136,24 @@ class SearchableEditableComboBox(EditableComboBox):
         except Exception:
             pass
 
-    def addItem(self, text: str, icon = None, userData=None):
-        """重写单条添加"""
+    def addItem(self, text: str, icon=None, userData=None):
+        """重写单条添加：去重（基类 addItem 不查重，重复调用会产生重复菜单项）"""
+        if text in self._item_texts:
+            return
         super().addItem(text, icon, userData)
-        # 去重处理（可选）
-        if text not in self._item_texts:
-            self._item_texts.append(text)
-            self._update_completer_model()
+        self._item_texts.append(text)
+        self._update_completer_model()
         # 刷新最大显示项数
         self._apply_max_visible()
 
     def addItems(self, texts):
-        """重写批量添加"""
-        super().addItems(texts)
-        # 这里的 texts 应该是从 Scanner 获取的所有类型列表
-        self._item_texts = list(set(self._item_texts + list(texts)))
-        self._update_completer_model()
-        self._apply_max_visible()
+        """重写批量添加：逐条走 addItem 保序去重。
+
+        历史实现用 set 合并 _item_texts，顺序随机化——编辑器里拖拽排好的
+        模型顺序写回后被打乱；且基类 addItems 不去重，菜单可能出现重复项。
+        """
+        for t in texts:
+            self.addItem(t)
 
     def _apply_max_visible(self):
         """应用最大显示项数限制"""

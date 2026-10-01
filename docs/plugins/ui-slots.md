@@ -68,13 +68,15 @@ def register_ui(registry):
         plugin_name, card_id, widget_class, container,
         title="", default_visible=False,
         metadata=None, context_provider=None,
-    )  # 自动注册命令 /{card_id}；context_provider 可选覆盖全局上下文
+    )  # 自动注册命令 /{card_id}；context_provider 可选覆盖全局上下文；
+       # metadata["primary_entry"] = {"kind": "titlebar"|"sidebar", ...} 可声明式
+       # 派生常驻入口（tab 唤出语义 / 侧栏 toggle 语义），插件无需手写 on_click 绑定
 
-    # 侧边栏插件项（独立扩展点，与浮动卡解耦）
+    # 侧边栏插件项（独立扩展点，与浮动卡解耦；card_id 声明式绑定等价派生）
     registry.register_sidebar_item(
         plugin_name, item_id, label, icon_path="",
         group="custom", default_visible=True, priority=0,
-        on_click=None, metadata=None,
+        on_click=None, card_id="", metadata=None,
     )
 
     # 输入区工具栏按钮（position: "start"|"before:<id>"|"after:<id>"|"end"）

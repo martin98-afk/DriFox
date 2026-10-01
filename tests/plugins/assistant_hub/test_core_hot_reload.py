@@ -106,7 +106,7 @@ def test_purge_module_prefixes():
     """PluginHostService._purge_module_prefixes：按声明前缀清理 sys.modules。"""
     fake = _load_by_path("assistant_hub_core.fake_mod", _CORE / "memory" / "prompts.py")
     sys.modules["assistant_hub_core.fake_mod.sub"] = fake  # 同对象占位，验证前缀匹配
-    from app.core.plugin_host_service import PluginHostService
+    from app.core.services.plugin_host_service import PluginHostService
 
     removed = PluginHostService._purge_module_prefixes(["assistant_hub_core."])
     assert "assistant_hub_core.fake_mod" in removed

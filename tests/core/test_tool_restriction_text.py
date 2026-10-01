@@ -18,7 +18,7 @@ import pytest
 @pytest.fixture
 def gen():
     """返回 _generate_tool_restriction_text 函数（私有函数直接导入测试）。"""
-    mod = pytest.importorskip("app.core.builtin_commands")
+    mod = pytest.importorskip("app.core.commands.builtin_commands")
     return mod._generate_tool_restriction_text
 
 
@@ -106,7 +106,7 @@ def test_semantics_match_permission_resolver():
     - compaction.md 型：全部工具 deny
     - explore.md 型：deny 列表禁用，其余 allow
     """
-    from app.core.agent import PermissionResolver
+    from app.core.conversation.agent import PermissionResolver
 
     leader = PermissionResolver(
         {"question": "allow", "team_list_members": "allow", "team_send_message": "allow", "*": "deny"}

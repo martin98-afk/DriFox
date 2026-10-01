@@ -67,7 +67,7 @@ def hook(event: str, context: dict) -> str:
     window_id = context.get("window_id", "") or ""
 
     try:
-        from app.core.team_manager import TeamManager
+        from app.core.team.team_manager import TeamManager
 
         tm = TeamManager.get_instance()
         # 🛡️ M1'：按成员所属 run_id 读专属模板槽（templates_by_run_id），

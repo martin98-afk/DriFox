@@ -30,15 +30,18 @@ class _StubPanel:
 
 
 def _make_tm():
-    """轻量 TabManagerWindow：__new__ 绕过完整 __init__，补跑 QObject 初始化
-    （QTimer(self) 需要有效的 QObject 身份）后手工注入依赖"""
+    """轻量 TabManagerWindow：PySide6/shiboken 不允许对非直接继承 QObject 的类
+    调 QObject.__init__（__new__ 补初始化 hack 在 PyQt5 可用、PySide6 报
+    “isn't a direct base class”），改用真实 QObject 身份 + 绑定被测方法：
+    QTimer(self) 拿到合法 parent，防抖语义与真实现一致。"""
     from PySide6.QtCore import QObject
 
     from app.widgets.tab_manager_window import TabManagerWindow
 
-    tm = TabManagerWindow.__new__(TabManagerWindow)
-    QObject.__init__(tm)
+    tm = QObject()
     tm._tab_panel = _StubPanel()
+    for name in ("refresh_workspace_tree", "_flush_tree_refresh", "_on_tab_count_changed_for_tree"):
+        setattr(tm, name, getattr(TabManagerWindow, name).__get__(tm))
     return tm
 
 

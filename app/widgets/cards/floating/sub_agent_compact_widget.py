@@ -26,8 +26,10 @@ from PySide6.QtWidgets import (
 )
 
 from qfluentwidgets import ScrollArea
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import CardStyles, Colors
+from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
+from app.widgets.cards.card_container import CardContainer
 
 # 卡片最大高度（超出时出现滚动条）
 _MAX_CARD_HEIGHT = 320
@@ -125,18 +127,58 @@ class _AgentTaskRow(QFrame):
 
     # ── UI 构建 ──────────────────────────────────────
 
-    def _setup_ui(self):
-        self.setObjectName("AgentTaskRow")
-        self.setStyleSheet("""
+    def _build_row_qss(self) -> str:
+        """[PERF T35] Row 级聚合 QSS（构建与主题刷新两处共用）。
+
+        原先 8 处独立 setStyleSheet（header/detail 容器透明 + 5 个 label
+        文字色/背景）合并为一条；硬纪律：容器级一律 objectName 选择器。
+        主题敏感的动态项（agent_label 标签底色、_expand_indicator 强调色、
+        两个按钮）仍由各自 setStyleSheet 单控件重设。
+        """
+        return f"""
             #AgentTaskRow {{
-                background: rgba(255,255,255,0.03);
+                background: {Colors.HOVER_BG};
                 border: none;
                 border-radius: 6px;
             }}
             #AgentTaskRow:hover {{
-                background: rgba(255,255,255,0.06);
+                background: {Colors.HOVER_BG_STRONG};
             }}
-        """)
+            QFrame#AgentTaskHeader {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#AgentTaskDetail {{
+                background: transparent;
+                border: none;
+            }}
+            QLabel#agentRotatingIcon {{
+                background: transparent;
+                border: none;
+            }}
+            QLabel#agentDescLabel, QLabel#agentToolCountLabel, QLabel#agentTimeLabel {{
+                color: {Colors.REALTIME_TEXT_SECONDARY};
+                background: transparent;
+            }}
+            QLabel#agentTaskSuccessLabel {{
+                background: transparent;
+                border: none;
+            }}
+            QLabel#agentTaskErrorLabel {{
+                font-size: 14px;
+                background: transparent;
+                border: none;
+            }}
+        """
+
+    def _setup_ui(self):
+        self.setObjectName("AgentTaskRow")
+        # 自定义 QWidget 子类不设 WA_StyledBackground 时，QSS 的 background 一行
+        # 都不绘制（见 CardStyles.floating 说明）；原先还写成 {{ 双花括号，
+        # 非 f-string 下是字面量，选择器本身也不合法。两处一起修。
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        Colors.refresh()
+        self.setStyleSheet(self._build_row_qss())
 
         self._main_layout = QVBoxLayout(self)
         self._main_layout.setContentsMargins(0, 0, 0, 0)
@@ -160,8 +202,8 @@ class _AgentTaskRow(QFrame):
         header_layout.addWidget(self._expand_indicator)
 
         # 旋转图标
+        self._rotating_icon.setObjectName("agentRotatingIcon")
         self._rotating_icon.setFixedSize(16, 16)
-        self._rotating_icon.setStyleSheet("background: transparent; border: none;")
         header_layout.addWidget(self._rotating_icon)
 
         # Agent 名称标签
@@ -181,8 +223,8 @@ class _AgentTaskRow(QFrame):
         if len(desc) > 55:
             desc = desc[:55] + "..."
         self.desc_label = QLabel(desc, self._header_widget)
+        self.desc_label.setObjectName("agentDescLabel")
         self.desc_label.setFont(get_unified_font(9))
-        self.desc_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         self.desc_label.setWordWrap(False)
         self.desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.desc_label.setMinimumWidth(20)
@@ -190,14 +232,14 @@ class _AgentTaskRow(QFrame):
 
         # 工具调用次数
         self.tool_count_label = QLabel("🔧0", self._header_widget)
+        self.tool_count_label.setObjectName("agentToolCountLabel")
         self.tool_count_label.setFont(get_unified_font(9))
-        self.tool_count_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         header_layout.addWidget(self.tool_count_label)
 
         # 耗时
         self.time_label = QLabel("⏱00:00", self._header_widget)
+        self.time_label.setObjectName("agentTimeLabel")
         self.time_label.setFont(get_unified_font(9))
-        self.time_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         header_layout.addWidget(self.time_label)
 
         self._main_layout.addWidget(self._header_widget)
@@ -225,7 +267,10 @@ class _AgentTaskRow(QFrame):
             label = QLabel(text, self._detail_panel)
             label.setFont(get_unified_font(8))
             c = text_color if text_color else f"{Colors.REALTIME_TEXT_SECONDARY}"
-            label.setStyleSheet(f"color: {c}; background: transparent;")
+            # [PERF T35] 动态色（调用方可传 text_color）整表保留；默认色路径
+            # 走 Row 级聚合 QSS 的 QLabel 文字色规则（此处仅当显式传色时才设）
+            if text_color:
+                label.setStyleSheet(f"color: {c}; background: transparent;")
             label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             return icon, label
@@ -379,16 +424,16 @@ class _AgentTaskRow(QFrame):
         # 替换旋转图标为完成状态图标
         if success:
             self._success_label = QLabel(self._header_widget)
+            self._success_label.setObjectName("agentTaskSuccessLabel")
             self._success_label.setFixedSize(16, 16)
             self._success_label.setPixmap(self._success_pixmap)
-            self._success_label.setStyleSheet("background: transparent; border: none;")
             idx = self._header_widget.layout().indexOf(self._rotating_icon)
             self._header_widget.layout().removeWidget(self._rotating_icon)
             self._header_widget.layout().insertWidget(idx, self._success_label)
         else:
             self._error_label = QLabel("❌", self._header_widget)
+            self._error_label.setObjectName("agentTaskErrorLabel")
             self._error_label.setFixedSize(16, 16)
-            self._error_label.setStyleSheet("font-size: 14px; background: transparent; border: none;")
             idx = self._header_widget.layout().indexOf(self._rotating_icon)
             self._header_widget.layout().removeWidget(self._rotating_icon)
             self._header_widget.layout().insertWidget(idx, self._error_label)
@@ -420,16 +465,9 @@ class _AgentTaskRow(QFrame):
         # 更新旋转图标叠加色（浅色主题下加深图标）
         if self.is_running and hasattr(self, "_rotating_icon"):
             self._rotating_icon.set_tint("#88000000" if _is_current_theme_light() else None)
-        self.setStyleSheet("""
-            #AgentTaskRow {{
-                background: rgba(255,255,255,0.03);
-                border: none;
-                border-radius: 6px;
-            }}
-            #AgentTaskRow:hover {{
-                background: rgba(255,255,255,0.06);
-            }}
-        """)
+        # [PERF T35] 保留：动态项单控件重设（作用域限自身，不影响聚合表）；
+        # Row 级聚合规则必须随主题重建 → 复用 _build_row_qss()。
+        self.setStyleSheet(self._build_row_qss())
         self.agent_label.setStyleSheet(
             f"color: {Colors.REALTIME_ACCENT}; background-color: {Colors.REALTIME_TAG_BG}; "
             f"padding: 1px 4px; border-radius: 4px;"
@@ -496,23 +534,95 @@ class SubAgentCompactFloatingWidget(QWidget):
         super().__init__(parent)
         self._task_rows: Dict[str, _AgentTaskRow] = {}
         self._rotation_angle = 0
-        self._rotation_timer = QTimer(self)
-        self._rotation_timer.timeout.connect(self._update_all_rotations)
         self._has_running = False
+        # 旋转 tick 与耗时刷新都走 LoopTimer：卡片不可见 / 系统「减少动态效果」
+        # / 没有 running 行时跳过回调 —— 旋转图标每帧要重新光栅化 SVG，是这一
+        # 块最重的绘制，空转代价很高。
+        self._rotation_timer = LoopTimer(self, self._ROTATION_TICK_MS, self._update_all_rotations, gate=self._rotation_needed)
         self._batch_started: bool = False
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(2000)
         self._hide_timer.timeout.connect(self._auto_hide)
 
-        self._time_timer = QTimer(self)
-        self._time_timer.timeout.connect(self._update_all_times)
-        self._time_timer.setInterval(1000)
+        self._time_timer = LoopTimer(self, 1000, self._update_all_times, gate=self._rotation_needed)
 
         self._reflow_deferred_guard = False  # 防止 deferred reflow 无限循环
+        # 自定义 QWidget 子类必须显式开启，否则 _apply_style 写的背景/边框/圆角
+        # 一行都不会绘制（内容直接裸浮在对话区上）。
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._setup_ui()
 
     # ── UI 初始化 ──────────────────────────────────────
+
+    def _container_qss(self, alpha: int = 250, border: str | None = None) -> str:
+        """[PERF T35] 容器表面 + 静态子控件聚合 QSS（单一构造点）。
+
+        原先 5 处独立 setStyleSheet（header_icon / title / status / close_btn /
+        scroll 容器）合并为容器级一条，附加在 CardStyles.floating 之后。
+        硬纪律：容器级一律 objectName 选择器。
+        ⚠️ 本函数的返回值必须由所有容器样式写入点共用（_apply_style /
+        set_opacity）——setStyleSheet 是整体替换，遗漏一处会静默丢规则。
+        """
+        Colors.refresh()
+        extra = f"""
+            QLabel#subAgentHeaderIcon {{
+                background: transparent;
+                border: none;
+            }}
+            QLabel#subAgentTitleLabel {{
+                color: {Colors.REALTIME_ACCENT};
+                background: transparent;
+            }}
+            QLabel#subAgentStatusLabel {{
+                color: {Colors.REALTIME_TEXT_SECONDARY};
+                background: transparent;
+            }}
+            QPushButton#subAgentCloseBtn {{
+                background-color: transparent;
+                color: {Colors.TEXT_MUTED};
+                border: none;
+                {get_font_family_css()}
+                font-size: 12px;
+            }}
+            QPushButton#subAgentCloseBtn:hover {{
+                color: {Colors.TEXT_PRIMARY};
+                background-color: {Colors.CONTENT_BG};
+                border-radius: 3px;
+            }}
+            QScrollArea#subAgentScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#subAgentScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            QScrollArea#subAgentScrollArea QScrollBar:vertical {{
+                background: transparent;
+                width: 4px;
+                margin: 0;
+            }}
+            QScrollArea#subAgentScrollArea QScrollBar::handle:vertical {{
+                background: {Colors.REALTIME_BORDER};
+                border-radius: 2px;
+                min-height: 20px;
+            }}
+            QScrollArea#subAgentScrollArea QScrollBar::handle:vertical:hover {{
+                background: {Colors.REALTIME_ACCENT};
+            }}
+            QScrollArea#subAgentScrollArea QScrollBar::add-line:vertical,
+            QScrollArea#subAgentScrollArea QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+            QScrollArea#subAgentScrollArea QScrollBar::add-page:vertical,
+            QScrollArea#subAgentScrollArea QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+            QWidget#subAgentScrollContent {{
+                background: transparent;
+            }}
+        """
+        return CardStyles.floating("SubAgentCompactFloatingWidget", alpha=alpha, border=border) + extra
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -522,6 +632,10 @@ class SubAgentCompactFloatingWidget(QWidget):
         # 动画期间的 Resize 事件，导致批量 task 到达时卡片高度被锁死。
         # snap 模式确保容器直接跟随 fixedHeight，无动画，无抑制。
         self.setProperty("noContainerAnimation", True)
+        # 高度严格跟随内容（L2 状态层契约，见 2026-09-12-bottom-card-layers-design）：
+        # 批量任务行增删时容器同步收缩/展开。漏声明会让共存的 followContent 卡
+        # （question / command）判定失效 → 容器走 30% 占比地板 → 卡片下方空白。
+        self.setProperty(CardContainer.FOLLOW_CONTENT_PROP, True)
         Colors.refresh()
         self._apply_style(None)
 
@@ -534,40 +648,27 @@ class SubAgentCompactFloatingWidget(QWidget):
         header.setSpacing(6)
 
         self.header_icon = QLabel(self)
+        self.header_icon.setObjectName("subAgentHeaderIcon")
         self.header_icon.setFixedSize(18, 18)
-        self.header_icon.setStyleSheet("background: transparent; border: none;")
         self._update_header_icon()
         header.addWidget(self.header_icon)
 
         self.title_label = QLabel("子智能体", self)
+        self.title_label.setObjectName("subAgentTitleLabel")
         self.title_label.setFont(get_unified_font(10, True))
         Colors.refresh()
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; background: transparent;")
         header.addWidget(self.title_label)
 
         self.status_label = QLabel("", self)
+        self.status_label.setObjectName("subAgentStatusLabel")
         self.status_label.setFont(get_unified_font(9))
-        self.status_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
         header.addWidget(self.status_label)
 
         header.addStretch()
 
         self.close_btn = QPushButton("✕", self)
+        self.close_btn.setObjectName("subAgentCloseBtn")
         self.close_btn.setFixedSize(20, 20)
-        self.close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                color: {Colors.TEXT_MUTED};
-                border: none;
-                {get_font_family_css()}
-                font-size: 12px;
-            }}
-            QPushButton:hover {{
-                color: {Colors.TEXT_PRIMARY};
-                background-color: {Colors.CONTENT_BG};
-                border-radius: 3px;
-            }}
-        """)
         self.close_btn.clicked.connect(self._on_close)
         header.addWidget(self.close_btn)
 
@@ -575,45 +676,16 @@ class SubAgentCompactFloatingWidget(QWidget):
 
         # ── 任务列表滚动容器 ──
         self._scroll_area = ScrollArea(self)
+        self._scroll_area.setObjectName("subAgentScrollArea")
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll_area.setFrameShape(QFrame.NoFrame)
         Colors.refresh()
-        self._scroll_area.setStyleSheet(f"""
-            QScrollArea {{
-                background: transparent;
-                border: none;
-            }}
-            QScrollArea > QWidget > QWidget {{
-                background: transparent;
-            }}
-            QScrollBar:vertical {{
-                background: transparent;
-                width: 4px;
-                margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {Colors.REALTIME_BORDER};
-                border-radius: 2px;
-                min-height: 20px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {Colors.REALTIME_ACCENT};
-            }}
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {{
-                background: transparent;
-            }}
-        """)
 
         # 滚动区域内的内容容器（无 stretch）
         self._scroll_content = QWidget(self._scroll_area)
-        self._scroll_content.setStyleSheet("background: transparent;")
+        self._scroll_content.setObjectName("subAgentScrollContent")
         self._body_layout = QVBoxLayout(self._scroll_content)
         self._body_layout.setContentsMargins(0, 0, 8, 0)
         self._body_layout.setSpacing(4)
@@ -625,25 +697,21 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._reflow()
 
     def _apply_style(self, running: bool = None):
-        """更新卡片样式"""
-        Colors.refresh()
-        if running is None:
-            border_color = Colors.REALTIME_BORDER
-        elif running:
-            border_color = Colors.REALTIME_ACCENT_WARM
-        else:
-            border_color = Colors.REALTIME_SUCCESS
+        """更新卡片表面：底色/圆角走 CardStyles.floating，状态语义只落在边框上
 
-        self.setStyleSheet(f"""
-            SubAgentCompactFloatingWidget {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {border_color};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
-        """)
+        旧写法用 REALTIME_BG 作底 + 上圆角 8 / 下直角。浅色主题下 realtime_bg
+        (#f5f5f5) 比承托它的容器底 (card_bg #ffffff) 还暗，边界几乎为零；而容器
+        已给卡片留出 8px 内边距、卡片底部实际悬空，切直角反而割裂。
+        现统一为四角同圆角，空闲态回落到主题中性边框。
+        """
+        Colors.refresh()
+        if running:
+            border_color = Colors.REALTIME_ACCENT_WARM
+        elif running is False:
+            border_color = Colors.REALTIME_SUCCESS
+        else:
+            border_color = None
+        self.setStyleSheet(self._container_qss(border=border_color))
 
     def _update_header_icon(self):
         """更新头部图标为设置-subagent（主题感知，由 refresh_style 在主题切换时调用）"""
@@ -654,41 +722,8 @@ class SubAgentCompactFloatingWidget(QWidget):
         """响应主题切换"""
         Colors.refresh()
         self._update_header_icon()
-        self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; background: transparent;")
-        self.status_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
-
-        # 刷新滚动条样式
-        self._scroll_area.setStyleSheet(f"""
-            QScrollArea {{
-                background: transparent;
-                border: none;
-            }}
-            QScrollArea > QWidget > QWidget {{
-                background: transparent;
-            }}
-            QScrollBar:vertical {{
-                background: transparent;
-                width: 4px;
-                margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {Colors.REALTIME_BORDER};
-                border-radius: 2px;
-                min-height: 20px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {Colors.REALTIME_ACCENT};
-            }}
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {{
-                background: transparent;
-            }}
-        """)
-
+        # [PERF T35] title/status/scroll_area 的静态规则已并入容器聚合表
+        # （_container_qss），此处不再逐个重设 —— 下行 _apply_style 会一并刷新。
         running = self._has_running
         self._apply_style(running if running else None)
         # 刷新每行样式
@@ -696,38 +731,31 @@ class SubAgentCompactFloatingWidget(QWidget):
             row.refresh_row_style()
 
     def set_opacity(self, opacity: float):
-        """设置透明度"""
+        """淡出通道：底色按 opacity 降 alpha，其余表面参数与 _apply_style 同源"""
         Colors.refresh()
-        bg = Colors.REALTIME_BG
-        if bg.startswith("rgba("):
-            alpha = max(1, int(opacity * 255))
-            bg = bg.rsplit(",", 1)[0] + f", {alpha})"
+        alpha = max(1, int(opacity * 255))
         running = self._has_running
         border_color = Colors.REALTIME_ACCENT_WARM if running else Colors.REALTIME_SUCCESS
-        self.setStyleSheet(f"""
-            SubAgentCompactFloatingWidget {{
-                background-color: {bg};
-                border: 1px solid {border_color};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
-        """)
+        self.setStyleSheet(self._container_qss(alpha=alpha, border=border_color))
 
     # ── 旋转动画 ──────────────────────────────────────
 
-    # [PERF] 旋转指示器刷新间隔：30ms(≈33fps) → 60ms(≈17fps)。
-    # 每行 set_rotation_angle 都会触发一次重绘，子代理并行数较多时这是持续的
-    # CPU/重绘开销。加载指示器对帧率不敏感，60ms 视觉上依然顺滑；
-    # 步长同步由 12° 提到 24°，保持角速度不变（约 400°/s）。
-    _ROTATION_TICK_MS = 60
-    _ROTATION_STEP_DEG = 24
+    # [PERF] 旋转指示器刷新间隔：30ms(≈33fps) → 80ms(12.5fps)。
+    # 每行 set_rotation_angle 都会触发一次重绘（内部要重新光栅化 SVG 到
+    # QPixmap），子代理并行数较多时是这一块最重的持续开销。加载指示器对帧率
+    # 不敏感，80ms 视觉上依然顺滑；步长同步由 12° 提到 32°，保持角速度不变
+    # （80ms × 32° = 400°/s）。再叠加 LoopTimer 门控，不可见时零开销。
+    _ROTATION_TICK_MS = 80
+    _ROTATION_STEP_DEG = 32
+
+    def _rotation_needed(self) -> bool:
+        """门控：只有存在 running 行时才需要旋转 / 刷新耗时"""
+        return bool(getattr(self, "_has_running", False))
 
     def _start_rotation(self):
-        if not self._rotation_timer.isActive():
+        if not self._rotation_timer.running:
             self._rotation_timer.start(self._ROTATION_TICK_MS)
-        if not self._time_timer.isActive():
+        if not self._time_timer.running:
             self._time_timer.start(1000)
 
     def _stop_rotation(self):
@@ -805,7 +833,7 @@ class SubAgentCompactFloatingWidget(QWidget):
         if not model_name:
             return ""
         try:
-            from app.core.model_capabilities import get_model_capabilities
+            from app.core.modelmeta.model_capabilities import get_model_capabilities
 
             caps = get_model_capabilities(model_name)
             ctx_limit = caps.get("context_limit", 0) or caps.get("max_context_tokens", 0) or 0
@@ -1100,7 +1128,7 @@ class SubAgentCompactFloatingWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self._has_running and not self._rotation_timer.isActive():
+        if self._has_running and not self._rotation_timer.running:
             self._start_rotation()
         # widget 变为可见后，子 widget 布局才被 Qt 真正处理，
         # 调度延迟重算以纠正之前隐藏状态下计算的过小高度

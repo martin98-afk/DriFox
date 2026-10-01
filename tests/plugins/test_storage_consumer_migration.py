@@ -68,7 +68,7 @@ def fresh_serializer_registry(monkeypatch):
 
 def test_facade_returns_sqlite_when_empty(fresh_storage_registry, fresh_serializer_registry):
     """注册表空 → 门面触发幂等加载系统插件 → 返回 sqlite 引擎"""
-    from app.core.backend import get_session_storage
+    from app.core.conversation.backend import get_session_storage
 
     engine = get_session_storage()
     assert engine.id == "sqlite"
@@ -76,7 +76,7 @@ def test_facade_returns_sqlite_when_empty(fresh_storage_registry, fresh_serializ
 
 def test_facade_returns_active_plugin_engine(fresh_storage_registry, fresh_serializer_registry):
     """已注册自定义引擎并 set_active → 门面返回自定义引擎"""
-    from app.core.backend import get_session_storage
+    from app.core.conversation.backend import get_session_storage
     from importlib import import_module
     SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
 
@@ -132,12 +132,12 @@ def test_consumer_migration_uses_facade(monkeypatch):
     """history_manager / memory_manager / session_handler 经门面获取引擎（不再直接 SessionStore）"""
     import inspect
     import app.utils.history_manager as hm_mod
-    import app.core.memory_manager as mm_mod
+    import app.core.conversation.memory_manager as mm_mod
     import app.gateway.local_service.session_handler as sh_mod
 
     for mod in (hm_mod, mm_mod, sh_mod):
         src = inspect.getsource(mod)
-        assert "get_session_storage" in src or "from app.core.backend import get_session_storage" in src, (
+        assert "get_session_storage" in src or "from app.core.conversation.backend import get_session_storage" in src, (
             f"{mod.__name__} 必须经 backend 门面获取存储引擎"
         )
 

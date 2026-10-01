@@ -1,0 +1,18 @@
+{
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
+    "name": "system-transports",
+    "description": "DriFox 内置协议传输器：OpenAI chat/completions 请求组装与响应事件归一（协议形状 → StreamEvent）",
+    "version": "1.0.0",
+    "author": {
+        "name": "DriFoxx Team"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "system",
+    "components": {
+        "transports": true
+    }
+}

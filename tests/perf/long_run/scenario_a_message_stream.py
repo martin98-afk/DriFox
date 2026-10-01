@@ -28,7 +28,7 @@ def _build_session_manager():
 
     延迟 import：避免在 conftest 建 QApplication 之前触发 PySide6 import。
     """
-    from app.core.chat_session import SessionManager
+    from app.core.conversation.chat_session import SessionManager
 
     return SessionManager()
 
@@ -73,7 +73,7 @@ def run_message_stream_scenario(
     - stream_chunk 信号回调是否随 QObject 释放
     - messages 累积是否触发 context_usage 单调上涨
     """
-    from app.core.chat_session import SessionManager
+    from app.core.conversation.chat_session import SessionManager
     from PySide6.QtCore import QObject, Signal
     import gc as _gc
 

@@ -168,7 +168,7 @@ def register(registry):
         aliases=["TodoWrite", "todo_write"],
         preview=_preview_todowrite,
         summarize=_summarize_todo,
-        metadata={"protect": True, "ui_managed": True},  # 待办内容压缩时完整保留；UI 专属处理
+        metadata={"protect": True, "ui_managed": True, "no_offload": True},  # 待办内容压缩时完整保留；UI 专属处理；结果小不落盘
     )
     registry.register(
         "todoread", _TODOREAD_SCHEMA, impl=_todoread_impl,
@@ -177,6 +177,6 @@ def register(registry):
         aliases=["TodoRead", "todo_read"],
         render_mode="inline",
         preview=_preview_todoread,
-        metadata={"ui_managed": True},
+        metadata={"ui_managed": True, "no_prune": True, "no_offload": True},  # UI 专属；结果小且语义完整，截断/落盘都会破坏关键信息
         summarize=_summarize_todo,
     )

@@ -12,7 +12,7 @@
   （旧数据不再污染团队首问预览）
 """
 
-from app.core.message_content import normalize_message
+from app.core.conversation.message_content import normalize_message
 
 
 def _team_mail_msg(content="📨 **来自 [build@win_01] 的任务邮件：**\n\n任务内容", role="user"):

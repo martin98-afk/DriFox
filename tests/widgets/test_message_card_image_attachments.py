@@ -24,8 +24,8 @@ import sys
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from app.core.chat_session import ChatSession
-from app.core.message_content import normalize_message
+from app.core.conversation.chat_session import ChatSession
+from app.core.conversation.message_content import normalize_message
 from app.widgets.message_card import extract_image_data_uris, plan_image_attachment_sources
 
 
@@ -71,7 +71,7 @@ def test_write_to_render_roundtrip():
     钉死"历史加载"路径的取值点 _render_message_to_card 中
     batch[0].get("_image_attachments")。
     """
-    from app.core.message_content import group_messages_for_display
+    from app.core.conversation.message_content import group_messages_for_display
 
     s = ChatSession(name="t")
     s.add_user_message("看图", _image_attachments=["D:/a.png"])

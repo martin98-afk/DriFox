@@ -59,7 +59,7 @@ def _make_controller(monkeypatch, fake_llm_cls):
     container = _FakeContainer()
 
     monkeypatch.setattr("app.widgets.cards.settings.llm_settings_card.LLMSettingsCard", fake_llm_cls)
-    monkeypatch.setattr("app.core.hook_manager.HookManager", object)
+    monkeypatch.setattr("app.core.hooks.hook_manager.HookManager", object)
 
     ctrl = gcc.GlobalCardController(fake_tab, container)
     mgr = CardManager.get_instance()

@@ -168,6 +168,89 @@ def test_close_replace_card_keeps_permanent_titlebar_tab(qtbot, monkeypatch):
     assert "assistant_hub" in tm.titleBar._tabs
 
 
+def test_close_background_tab_in_chat_view_no_auto_activate(qtbot, monkeypatch):
+    """回归：对话视图下关闭非激活的后台临时 tab，不得自动激活剩余卡片
+
+    症状：开多个临时 tab 后切回「对话」，点 × 关后台 tab → 胶囊从「对话」
+    一路滑到最右（最后一张剩余卡被 toggle 弹出）。根因：close_replace_card /
+    _on_replace_close_timeout 只要 open 非空就无条件补位激活，未检查关的
+    是不是当前激活卡。
+    """
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active.clear()
+    tm._replace_timers.clear()
+    reg, cm, visible = _patch_reg_and_cm(
+        monkeypatch,
+        cards={
+            "card_a": SimpleNamespace(container="full", title="卡A"),
+            "card_b": SimpleNamespace(container="full", title="卡B"),
+        },
+    )
+
+    # 依次开两张临时 tab（互斥显示，card_b 为激活卡）
+    visible.add("card_a")
+    tm._on_card_visibility_changed({"card_id": "card_a", "visible": True})
+    visible.discard("card_a")
+    visible.add("card_b")
+    tm._on_card_visibility_changed({"card_id": "card_b", "visible": True})
+    assert tm._replace_active[GLOBAL_WINDOW_ID] == "card_b"
+
+    # 切回「对话」：卡片真实隐藏、open 保留、active 回聊天
+    tm._show_conversation_view()
+    visible.clear()
+    assert tm._replace_active[GLOBAL_WINDOW_ID] == CHAT_TAB_ID
+
+    # 关后台 tab A（×）：必须停在对话视图，不得 toggle 弹出剩余卡
+    tm.close_replace_card("card_a")
+    assert "card_a" not in tm._replace_open[GLOBAL_WINDOW_ID]
+    assert "card_a" not in tm.titleBar._tabs
+    assert tm._replace_active[GLOBAL_WINDOW_ID] == CHAT_TAB_ID
+    assert tm.titleBar._active_id == CHAT_TAB_ID
+    reg.toggle_floating_card.assert_not_called()
+
+    # 去抖路径同语义：card_b 同样在对话视图后台关闭 → 无任何自动切换
+    tm._on_card_visibility_changed({"card_id": "card_b", "visible": False})
+    tm._on_replace_close_timeout("card_b")
+    assert "card_b" not in tm._replace_open[GLOBAL_WINDOW_ID]
+    assert "card_b" not in tm.titleBar._tabs
+    assert tm._replace_active[GLOBAL_WINDOW_ID] == CHAT_TAB_ID
+    assert tm.titleBar._active_id == CHAT_TAB_ID
+    reg.toggle_floating_card.assert_not_called()
+
+
+def test_close_active_card_still_activates_remaining(qtbot, monkeypatch):
+    """对照：关闭的是当前激活卡时，补位激活剩余最近一张卡的语义必须保留"""
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active.clear()
+    tm._replace_timers.clear()
+    reg, cm, visible = _patch_reg_and_cm(
+        monkeypatch,
+        cards={
+            "card_a": SimpleNamespace(container="full", title="卡A"),
+            "card_b": SimpleNamespace(container="full", title="卡B"),
+        },
+    )
+
+    visible.add("card_a")
+    tm._on_card_visibility_changed({"card_id": "card_a", "visible": True})
+    visible.discard("card_a")
+    visible.add("card_b")
+    tm._on_card_visibility_changed({"card_id": "card_b", "visible": True})
+    assert tm._replace_active[GLOBAL_WINDOW_ID] == "card_b"
+
+    # 关闭激活卡 B：剩余最近一张（card_a）应被 toggle 弹出，且高亮直接乐观
+    # 落位 card_a（remove_tab reactivate=False 跳过「自动激活第一个」）——
+    # 不得先甩回「对话」再从那里长滑到补位 tab（中间态 + 二次动画）
+    tm.close_replace_card("card_b")
+    reg.toggle_floating_card.assert_called_once_with("card_a")
+    assert tm._replace_active[GLOBAL_WINDOW_ID] == "card_a"
+    assert tm.titleBar._active_id == "card_a"
+
+
 def test_global_replace_cards_sync(qtbot, monkeypatch):
     tm = TabManagerWindow.create_instance()
     qtbot.addWidget(tm)
@@ -438,6 +521,37 @@ class TestTitlebarTabSlot:
         tm._sync_plugin_titlebar_tabs()
         assert "plugin_tab" not in tm.titleBar._tabs
         assert "plugin_tab" not in tm._plugin_titlebar_tab_ids
+
+    def test_overflow_tabs_go_into_more_menu(self, qtbot):
+        """容压：插件 tab 超上限时前 LIMIT-1 个驻留，其余收进「更多」聚合 tab"""
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        reg = UIPluginRegistry.get_instance()
+        limit = TabManagerWindow._PLUGIN_TITLEBAR_TAB_LIMIT
+        total = limit + 1  # 触发溢出：LIMIT-1 驻留 + 2 收进「更多」
+        try:
+            for i in range(total):
+                reg.register_titlebar_tab("pt", f"tab_{i}", f"插件{i}", on_click=lambda: None)
+            tm._sync_plugin_titlebar_tabs()
+            resident = [f"tab_{i}" for i in range(limit - 1)]
+            overflow = [f"tab_{i}" for i in range(limit - 1, total)]
+            assert all(tid in tm.titleBar._tabs for tid in resident)
+            assert all(tid not in tm.titleBar._tabs for tid in overflow)
+            assert TabManagerWindow._MORE_TAB_ID in tm.titleBar._tabs
+            assert [i.tab_id for i in tm._more_tab_infos] == overflow
+            # 回落到上限内：「更多」聚合 tab 移除，条目恢复驻留
+            reg.unregister_titlebar_tabs("pt")
+            for i in range(limit - 1):
+                reg.register_titlebar_tab("pt", f"tab_{i}", f"插件{i}", on_click=lambda: None)
+            tm._sync_plugin_titlebar_tabs()
+            assert TabManagerWindow._MORE_TAB_ID not in tm.titleBar._tabs
+            assert tm._more_tab_infos == []
+        finally:
+            reg.unregister_titlebar_tabs("pt")
+        tm._sync_plugin_titlebar_tabs()
+        assert TabManagerWindow._MORE_TAB_ID not in tm.titleBar._tabs
 
 
 def test_overlay_limit_width_config_only(qtbot):

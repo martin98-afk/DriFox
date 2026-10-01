@@ -64,7 +64,7 @@ class _FakeMcpManager:
 
 def _new_executor(**overrides):
     """轻量构造 ToolExecutor（__new__ 绕过 __init__，仅初始化 execute 路径依赖）。"""
-    ex = object.__new__(__import__("app.core.tool_executor", fromlist=["ToolExecutor"]).ToolExecutor)
+    ex = object.__new__(__import__("app.core.tools.tool_executor", fromlist=["ToolExecutor"]).ToolExecutor)
     ex._builtin_tools = overrides.get("builtin_tools", _FakeBuiltinTools())
     ex._backend = None  # 跳过 Pre/PostToolUse hook 阶段（不引入 backend 依赖）
     ex._lock = threading.Lock()

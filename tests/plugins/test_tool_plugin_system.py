@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 工具插件化系统测试 — registry / loader / 渲染联动 / 权限联动 / 热插拔
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -141,7 +141,7 @@ class TestRegistry:
 
 
 class TestSystemPluginTools:
-    """系统插件工具（plugins/system/tools/）"""
+    """系统插件工具（plugins/system-tools/tools/）"""
 
     def test_all_30_tools_registered(self):
         reg = ToolRegistry.get_instance()
@@ -172,12 +172,11 @@ class TestSystemPluginTools:
             "lsp",
             "subagent_para",
             "subagent_status",
-            "subagent_dag",
             "team_send_message",
             "team_list_members",
             "question",
             "skill",
-            "list_skills",
+            "manage_skill",
             "mcp_list_servers",
             "upload_file",
         }
@@ -350,7 +349,7 @@ def register(registry):
         monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
         user_root = tmp_path / "plugins"
         self._make_user_override_plugin(user_root)
-        system_root = Path(__file__).parent.parent / "plugins"
+        system_root = Path(__file__).parent.parent.parent / "plugins"
         return system_root, user_root
 
     def test_root_kind_priority_constants(self):
@@ -464,7 +463,7 @@ def register(registry):
         """场景 5：所有插件工具的 metadata._plugin_root_kind 都被正确注入"""
         reg = ToolRegistry.get_instance()
         # 显式只加载 system_root，隔离用户插件（如 hashline-edit 覆盖 read）干扰
-        system_root = Path(__file__).parent.parent / "plugins"
+        system_root = Path(__file__).parent.parent.parent / "plugins"
         load_plugin_tools(registry=reg, plugin_roots=[system_root])
         # 系统插件工具：kind=system
         for name in ("read", "write", "bash"):
@@ -474,7 +473,7 @@ def register(registry):
     def test_get_meta_includes_source(self):
         """get_meta 暴露 source 字段，权限卡片已可用"""
         reg = ToolRegistry.get_instance()
-        system_root = Path(__file__).parent.parent / "plugins"
+        system_root = Path(__file__).parent.parent.parent / "plugins"
         load_plugin_tools(registry=reg, plugin_roots=[system_root])
         meta = reg.get_meta("read")
         assert "source" in meta
@@ -508,7 +507,7 @@ def register(registry):
         watcher.scan_now()
         r = reg.get("read")
         assert r is not None, "read 不应丢失"
-        assert r.source == "plugin:system", f"system 应恢复，实际: {r.source}"
+        assert r.source == "plugin:system-tools", f"system 应恢复，实际: {r.source}"
         assert r.cn_name != "读取（用户覆盖）", "cn_name 应为 system 原始值"
 
     def test_unload_plugin_precise_no_other_plugin_touched(self, tmp_path, monkeypatch):
@@ -554,7 +553,7 @@ def register(registry):
         assert "write" not in unregistered, "system 工具 write 不应被 unregister"
         # 3) 跨根覆盖恢复：read 恢复为 system
         r = reg.get("read")
-        assert r is not None and r.source == "plugin:system", f"system 应恢复，实际: {r.source if r else None}"
+        assert r is not None and r.source == "plugin:system-tools", f"system 应恢复，实际: {r.source if r else None}"
         # 4) watcher._loaded 已移除该插件记录
         assert "user-override-plug" not in watcher._loaded
 
@@ -655,7 +654,7 @@ def register(registry):
         cfg.enabled_plugins.value = [p for p in old if p != "user-override-plug"]
         watcher.scan_now()
         r = reg.get("read")
-        assert r is not None and r.source == "plugin:system", f"禁用后 system 应恢复，实际: {r.source if r else None}"
+        assert r is not None and r.source == "plugin:system-tools", f"禁用后 system 应恢复，实际: {r.source if r else None}"
         cfg.enabled_plugins.value = old
 
 
@@ -698,11 +697,11 @@ class TestSourceLabelRender:
         """工具行构建后存在来源 QLabel（与 hook 卡片 sourceLabel 同位置/风格）"""
         from PySide6.QtWidgets import QLabel
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         # 显式只加载 system_root，隔离用户插件（hashline-edit 覆盖 read）干扰
-        system_root = Path(__file__).parent.parent / "plugins"
+        system_root = Path(__file__).parent.parent.parent / "plugins"
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
         load_plugin_tools(registry=reg, plugin_roots=[system_root])
@@ -714,8 +713,10 @@ class TestSourceLabelRender:
         # 收集来源标签文本（内置 / 纯插件名）
         all_labels = card.findChildren(QLabel)
         source_texts = {lbl.text() for lbl in all_labels}
-        # 至少存在系统插件来源标签（插件名 system）或内置标签
-        assert "system" in source_texts or "内置" in source_texts, f"缺来源标签: {source_texts}"
+        # 至少存在系统插件来源标签（拆分后 system-tools 显示截断为 system-t…）或内置标签
+        assert (
+            "system" in source_texts or "system-t…" in source_texts or "内置" in source_texts
+        ), f"缺来源标签: {source_texts}"
 
         card.deleteLater()
         pc.deleteLater()
@@ -777,7 +778,7 @@ class TestPermissionLinkage:
 
     def test_permission_controller(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -785,23 +786,24 @@ class TestPermissionLinkage:
 
         pc = ToolPermissionController()
         toggles = pc.get_toggles()
-        # 系统插件工具基线 30；workbuddy 插件新增 wb_plan/present_files/wb_read_me/wb_tool_search
-        # 共 4 个工具 → 基线 34。codegraph_explore 来自社区插件 codegraph-tools，
-        # 未安装时不注册。用动态下界兼容未来新增：>= 30；精确 34 仅在无 codegraph 时成立。
-        assert len(toggles) >= 30
-        assert (
-            len(toggles) == 34
-            or (len(toggles) == 35 and "codegraph_explore" in toggles)
-            or (len(toggles) == 31 and "codegraph_explore" in toggles)  # 仅 codegraph，无 workbuddy
-            or len(toggles) == 30  # 极简环境（workbuddy/codegraph 均未加载）
-        ), f"工具数异常: {len(toggles)} ({sorted(toggles.keys())})"
+        # 语义：控制器应为「当前注册的全部工具」各产出一个开关，并清理已删除工具的残留。
+        # 工具总数随装了哪些插件而变（workbuddy / codegraph-tools / workflow / win-powershell
+        # 等都会各自贡献工具），硬编码数字必然过期——直接对齐注册表判定。
+        from app.tools.tool_classifier import get_all_tools
+
+        registered = set(get_all_tools())
+        assert len(toggles) >= 30  # 下界：系统插件工具基线
+        assert set(toggles) == registered, (
+            f"开关与注册表不一致：仅开关 {sorted(set(toggles) - registered)} / "
+            f"仅注册表 {sorted(registered - set(toggles))}"
+        )
         assert toggles["read"] is True
         pc.deleteLater()
         qt_app.processEvents()
 
     def test_control_card_groups(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         ToolRegistry.reset_instance()
@@ -823,7 +825,7 @@ class TestPermissionLinkage:
         """回归：watcher 重扫会逐个注销+重注册全部工具（几十次 change 事件），
         卡片必须合并为一次全量重建，不能逐个排队（曾导致 ~180ms/次 × 35 次刷屏 6s）"""
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         ToolRegistry.reset_instance()
@@ -873,7 +875,7 @@ class TestPermissionLinkage:
         import threading
 
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         ToolRegistry.reset_instance()
@@ -942,7 +944,15 @@ class TestPerToolPolicy:
         from app.utils.config import Settings
 
         s = Settings.get_instance()
-        return (s.tool_toggles.value, s.tool_off_behavior.value, s.tool_permission_policy.value)
+        snap = (s.tool_toggles.value, s.tool_off_behavior.value, s.tool_permission_policy.value)
+        # D1：前置用例经 _restore_settings 回写自身快照（restore 即 save 落盘），
+        # 依赖「初始无 per-tool 策略」的用例会被前一用例的脏态污染。快照后统一
+        # 隔离到出厂默认，保证每用例同一基线出发（_restore_settings 不变）。
+        s.tool_toggles.value = {}
+        s.tool_off_behavior.value = "deny"
+        s.tool_permission_policy.value = {}
+        s.save()
+        return snap
 
     @staticmethod
     def _restore_settings(snap):
@@ -954,7 +964,7 @@ class TestPerToolPolicy:
 
     def test_tool_policy_set_persist_fallback(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -984,7 +994,7 @@ class TestPerToolPolicy:
 
     def test_apply_agent_generates_policies_and_copy(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -1022,7 +1032,7 @@ class TestPerToolPolicy:
 
     def test_tool_policy_combo_visibility(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         ToolRegistry.reset_instance()
@@ -1058,7 +1068,7 @@ class TestPerToolPolicy:
 
     def test_behavior_combo_mixed_and_force(self, qt_app):
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import (
             MIXED_OPTION,
             ToolControlCardFrame,
@@ -1099,7 +1109,7 @@ class TestPerToolPolicy:
     def test_engine_off_policy_resolution(self, qt_app):
         """engine/subagent_worker 共用 resolve_tool_off_policy:关闭分支查 per-tool 策略"""
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import (
+        from app.core.tools.tool_permission_controller import (
             ToolPermissionController,
             resolve_tool_off_policy,
         )
@@ -1128,7 +1138,7 @@ class TestPerToolPolicy:
     def test_policy_change_does_not_bypass_template_deny(self, qt_app):
         """MAJOR-1 锚点:改策略不污染 _user_modified → 不绕过 agent 模板 deny"""
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import (
+        from app.core.tools.tool_permission_controller import (
             ToolPermissionController,
             resolve_tool_off_policy,
         )
@@ -1164,7 +1174,7 @@ class TestPerToolPolicy:
     def test_set_policy_agent_mode_active_only(self, qt_app):
         """MINOR-2①:agent 激活时 set_user_tool_policy 只改 active,user 偏好不变"""
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -1198,7 +1208,7 @@ class TestPerToolPolicy:
         """MINOR-2②:Settings 外部变更(ConfigSync 场景)自动刷新 + 回环防护"""
         from app.tools.registry import ToolRegistry
         from app.utils.config import Settings
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
@@ -1211,7 +1221,7 @@ class TestPerToolPolicy:
             # 模拟外部变更(ConfigSync 下载新配置):写 Settings 后由
             # ConfigSyncService.settingsRestored 驱动刷新。控制器不再监听
             # Settings.valueChanged,避免兄弟 tab 本地编辑互相广播刷新。
-            from app.core.config_sync import ConfigSyncService
+            from app.core.sync.config_sync import ConfigSyncService
 
             s.tool_permission_policy.value = {"read": "ask", "stale_tool": "ask"}
             ConfigSyncService.get_instance().settingsRestored.emit()
@@ -1236,7 +1246,7 @@ class TestPerToolPolicy:
         """MINOR-2③:subagent_worker._check_ui_tool_permission 关闭分支查 per-tool 策略"""
         from unittest.mock import MagicMock
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.core.workers.subagent_worker import SubAgentExecutor
 
         ToolRegistry.reset_instance()
@@ -1282,7 +1292,7 @@ class TestPerToolPolicy:
         from unittest.mock import MagicMock
 
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.core.engines.ui.engine import UIEngine
 
         ToolRegistry.reset_instance()
@@ -1334,7 +1344,7 @@ class TestPerToolPolicy:
         from unittest.mock import MagicMock
 
         from app.tools.registry import ToolRegistry
-        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.tools.tool_permission_controller import ToolPermissionController
         from app.core.engines.ui.engine import UIEngine
 
         ToolRegistry.reset_instance()
@@ -1380,7 +1390,7 @@ class TestWebToolsEnvKey:
         """按插件加载器同款方式动态加载 web_tools 模块"""
         import importlib.util
 
-        path = Path(__file__).parent.parent / "plugins" / "system" / "tools" / "web_tools.py"
+        path = Path(__file__).parent.parent.parent / "plugins" / "system-tools" / "tools" / "web_tools.py"
         spec = importlib.util.spec_from_file_location("_test_web_tools", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -1388,15 +1398,18 @@ class TestWebToolsEnvKey:
 
     @staticmethod
     def _schema_defaults():
-        """E1：默认 key 由 plugin.json config_schema 声明（迁移后单一来源）"""
+        """E1：默认 key 由 plugin.json config_schema 声明（迁移后单一来源）。
+
+        字段 default 可选（link/action 等无存储值类型不声明 default），用 .get 容错。
+        """
         import json
 
         manifest = json.loads(
-            (Path(__file__).parent.parent / "plugins" / "system" / ".drifox-plugin" / "plugin.json").read_text(
+            (Path(__file__).parent.parent.parent / "plugins" / "system-tools" / ".drifox-plugin" / "plugin.json").read_text(
                 encoding="utf-8"
             )
         )
-        return {f["key"]: f["default"] for f in manifest["config_schema"]["fields"]}
+        return {f["key"]: f.get("default") for f in manifest["config_schema"]["fields"]}
 
     def test_api_key_reads_env_only(self, monkeypatch):
         mod = self._load_web_tools()
@@ -1404,14 +1417,19 @@ class TestWebToolsEnvKey:
         # 插件内置默认 key 非空(用户配置值由 schema 声明)
         assert defaults["tavily_api_key"]
         assert defaults["tinyfish_api_key"]
-        # E1 契约：_api_key 调用前需注册 schema（模块级常量已迁出）
+        # E1 契约：_api_key 调用前需注册 schema（模块级常量已迁出）。
+        # 注册名必须是 _api_key 内查询的 "system-tools"（曾误写 "system" 导致
+        # schema 不生效、env 优先级分支死路）；同时隔离本机 plugin_data 残留
+        # config.json（存储值优先级高于 default，不清会污染回退断言）。
         from app.plugins.contracts.plugin_config import parse_config_schema
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
         from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 
+        monkeypatch.setattr(PluginConfigStore, "_read_raw", lambda self, name: {})
         reg = PluginConfigRegistry.get_instance()
         reg.register(
             parse_config_schema(
-                "system",
+                "system-tools",
                 {
                     "title": "T",
                     "fields": [
@@ -1448,7 +1466,7 @@ class TestWebToolsEnvKey:
             monkeypatch.delenv("TINYFISH_API_KEY")
             assert mod._api_key({}, "TINYFISH_API_KEY") == defaults["tinyfish_api_key"]
         finally:
-            reg.unregister_plugin("system")
+            reg.unregister_plugin("system-tools")
 
 
 class TestSelfContained:
@@ -1466,7 +1484,7 @@ class TestSelfContained:
             'tool_ctx.get("builtin_tools")',
         ]
         # 只检查 import 行 + builtin_tools 访问（docstring 说明文字不受限）
-        for py in glob.glob("plugins/system/tools/*.py"):
+        for py in glob.glob("plugins/system-tools/tools/*.py"):
             src = open(py, encoding="utf-8").read()
             import_lines = [l for l in src.splitlines() if l.strip().startswith(("import ", "from "))]
             for kw in forbidden:
@@ -1505,7 +1523,7 @@ class TestSelfContained:
 
         ToolRegistry.reset_instance()
         # 显式只加载 system_root，隔离用户插件覆盖（hashline-edit 无 read.svg 图标）
-        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent / "plugins"])
+        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent.parent / "plugins"])
         reg = ToolRegistry.get_instance()
         assert reg.get_icon_dir("read")
         assert reg.get_icon_dir_light("read")
@@ -1526,7 +1544,7 @@ class TestSelfContained:
 
         ToolRegistry.reset_instance()
         # 显式只加载 system_root，隔离用户插件覆盖
-        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent / "plugins"])
+        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent.parent / "plugins"])
         icon_name = _get_tool_icon_name("read")
 
         def svg_of(html):
@@ -1557,24 +1575,6 @@ class TestSelfContained:
         assert reg.get_render("read") is None
         html2 = _render_text_output("普通输出", "read", {"path": "x"})
         assert html2
-
-    def test_dag_echarts_render_closure(self):
-        """subagent_dag 的 echarts 渲染走插件 render 闭包"""
-        import json
-
-        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
-        from app.tools.registry import ToolRegistry
-        from app.widgets.render_helpers import render_tool_block
-
-        ToolRegistry.reset_instance()
-        load_plugin_tools()
-        reg = ToolRegistry.get_instance()
-        assert reg.get_render("subagent_dag") is not None
-        echarts_json = json.dumps({"type": "graph", "data": [], "links": []})
-        html = render_tool_block(
-            "subagent_dag", {"nodes": [{"id": "a"}]}, result="DAG 完成", success=True, echarts=echarts_json
-        )
-        assert "echarts-container" in html
 
     def test_render_mode_and_closures(self):
         """render_mode（inline/none）+ 渲染闭包（edit diff/bash/question）"""
@@ -1815,7 +1815,6 @@ class TestRegistryMetadata:
         reg = ToolRegistry.get_instance()
         kept = reg.keep_in_content_tools()
         assert "subagent_para" in kept
-        assert "subagent_dag" in kept
         assert "write" in kept, "文件写入工具应常驻正文"
         assert "question" in kept, "提问工具应常驻正文"
         # 纯 metadata 语义键（interactive/subagent_task）不再隐式驱动留正文

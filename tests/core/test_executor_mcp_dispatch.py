@@ -67,7 +67,7 @@ def _new_executor(mcp_manager):
     from types import SimpleNamespace
 
     bt = _FakeBuiltinTools(mcp_manager)
-    ex = object.__new__(__import__("app.core.tool_executor", fromlist=["ToolExecutor"]).ToolExecutor)
+    ex = object.__new__(__import__("app.core.tools.tool_executor", fromlist=["ToolExecutor"]).ToolExecutor)
     ex._builtin_tools = bt
     ex._backend = None
     ex._lock = threading.Lock()

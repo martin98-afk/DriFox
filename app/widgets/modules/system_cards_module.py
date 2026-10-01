@@ -11,6 +11,7 @@
 - _model_selector_card _model_selector_card_content
 - _tool_control_card（批1 懒创建：None 占位，_ensure_tool_control_card 按需构建）
 - _question_floating_widget（批1 懒创建：None 占位，_ensure_question_floating_widget 按需构建）
+- _permission_floating_widget（懒创建：None 占位，_ensure_permission_approval_widget 按需构建）
 
 ★ `_history_card` / `_history_popup_card` **不在**本模块契约内：历史会话页已
 插件化（history-manager 插件的工作台页），二者是 `MainWidget` 上的只读代理
@@ -65,6 +66,10 @@ class SystemCardsModule(UIModule):
         # 问题悬浮卡（批1 懒创建）：同上，构造/接线/注册在
         # host._ensure_question_floating_widget() 中按需执行（弹出链入口兜底）。
         host._question_floating_widget = None
+
+        # 权限审批悬浮卡（懒创建）：构造/接线/注册在
+        # host._ensure_permission_approval_widget() 中按需执行（弹出链入口兜底）。
+        host._permission_floating_widget = None
 
         # 注册卡片到 CardManager（优先级：数值越小权限越高）
         host._register_cards_to_manager()

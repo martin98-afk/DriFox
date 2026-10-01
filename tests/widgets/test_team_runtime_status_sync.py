@@ -11,7 +11,7 @@
 
 设计说明：
 - **只写测试文件，绝不触碰 app/ 下任何文件**（build@win_1798 并行修改 main_widget.py）
-- 被测方法 `from app.core.team_manager import ...` 是**方法内运行时导入**，
+- 被测方法 `from app.core.team.team_manager import ...` 是**方法内运行时导入**，
   因此 monkeypatch 模块属性即可生效（无需 import 级 mock）
 - stub 用 SimpleNamespace + MethodType 绑定真实方法：绕开 PyQt 构造函数，
   避免 review 发现的「stub 不调 super().__init__ 时 getattr 窗口属性抛
@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.core import team_manager as tm_mod
+from app.core.team import team_manager as tm_mod
 
 
 @pytest.fixture

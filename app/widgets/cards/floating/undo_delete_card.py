@@ -91,6 +91,12 @@ class UndoDeleteCard(QWidget):
         self._progress_timer.setInterval(100)
         self._progress_timer.timeout.connect(self._tick_progress)
         self.setAttribute(Qt.WA_StyledBackground, True)
+        # 高度严格跟随内容（L2 状态层契约，见 2026-09-12-bottom-card-layers-design）：
+        # 漏声明会让共存的 followContent 卡（question / command）判定失效 →
+        # 容器走 30% 占比地板 → 卡片下方空白。
+        from app.widgets.cards.card_container import CardContainer
+
+        self.setProperty(CardContainer.FOLLOW_CONTENT_PROP, True)
         self.setVisible(False)
         self._setup_ui()
 

@@ -45,7 +45,7 @@ def test_reloaded_components_match_kernel():
 
 def test_watchfiles_attribution_identifies_hook_policies():
     """watchfiles 归因模拟：hook_policies 段变更路径 → 识别为可重载组件。"""
-    from app.core.plugin_host_service import PluginHostService
+    from app.core.services.plugin_host_service import PluginHostService
 
     svc = PluginHostService.__new__(PluginHostService)
     plugin_dir = Path("D:/work/DriFox/plugins/system").resolve()

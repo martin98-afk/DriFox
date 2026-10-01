@@ -361,7 +361,7 @@ class ProviderRegistry:
         """
         static = self.provider_models()
         try:
-            from app.core.models_dev_sync import get_dynamic_models
+            from app.core.modelmeta.models_dev_sync import get_dynamic_models
 
             dynamic = get_dynamic_models()
             dynamic_providers = dynamic.provider_models

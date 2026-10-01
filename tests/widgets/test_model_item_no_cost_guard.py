@@ -27,7 +27,7 @@ def _qapp():
 @pytest.fixture
 def _no_cost_caps(monkeypatch):
     """无 cost 的能力数据（supports_thinking 有、无成本）"""
-    import app.core.model_capabilities as mc
+    import app.core.modelmeta.model_capabilities as mc
 
     monkeypatch.setattr(
         mc,
@@ -39,7 +39,7 @@ def _no_cost_caps(monkeypatch):
 @pytest.fixture
 def _with_cost_caps(monkeypatch):
     """有 cost 的能力数据"""
-    import app.core.model_capabilities as mc
+    import app.core.modelmeta.model_capabilities as mc
 
     monkeypatch.setattr(
         mc,

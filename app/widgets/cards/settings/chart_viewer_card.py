@@ -31,7 +31,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QDialog, QVBoxLayout
 
-from app.core.webengine_profile import create_transient_web_profile
+from app.core.infra.webengine_profile import create_transient_web_profile
 from app.utils.diff_viewer import _cleanup_temp_files, _load_html_to_webview
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
@@ -444,7 +444,7 @@ class ChartViewerCard(BaseSettingsCard):
     """内嵌图表查看卡片，用法类似文件差异对比面板"""
 
     def __init__(self, parent=None):
-        super().__init__("图表查看", "📊", parent=parent)
+        super().__init__("图表查看", icon_svg="chart", parent=parent)
         self.setMinimumHeight(200)
         self.set_height_mode("proportional")
         self._tmp_files: List[str] = []

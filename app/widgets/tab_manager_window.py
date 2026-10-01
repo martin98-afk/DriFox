@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 import shiboken6 as _sip
 
 from loguru import logger
-from app.core import window_registry
+from app.core.infra import window_registry
 from PySide6.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QCloseEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 from qframelesswindow import FramelessWindow
 
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 
@@ -75,14 +75,41 @@ GLOBAL_REPLACE_TITLES = {
     "chart_viewer": "图表查看",
 }
 
-# ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
+# ══════════════════════════════════════════════════════════════════════════
+# 侧边栏宽度常量 —— ★ 单一真源（single source of truth）
+#
+# ★★ 坐标系纪律（此前踩过坑，务必看懂再改）：
+#   - `_FRAME_*` 系列是 **frame 宽**（QSplitter 直接控制的窗格宽度，含 padding）；
+#   - `TabPanel._auto_collapse_width` 等是 **content 宽**（TabPanel.width()
+#     自身宽度 = frame 宽 − 14）。
+#   两套坐标不能混用：早期把 frame 域的值直接塞进 TabPanel 的 content 域比较，
+#   等价于把阈值整体抬高 14px，并让展开/折叠的滞回区被撑成 24px —— 表现为
+#   "手动拉宽到 188px（内容区 174px，视觉上已完全够用）却仍是折叠态"。
+#   因此 content 域常量在此显式定义为 frame 值减去 padding，禁止再手写换算。
+# ══════════════════════════════════════════════════════════════════════════
 
-# ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
-# 挤压折叠后点击展开时，若保存的宽度已被压到折叠阈值以下，展开不得窄于该值，
-# 否则标题文字被压成窄条无法阅读。
-_EXPANDED_MIN_FRAME_WIDTH = 200
+# frame 宽 = 内容宽 + margins 12 + border 2
+_FRAME_PADDING_X = 14
 
-# ── 侧边栏固定默认宽度（px，内容宽）──
+# ── 侧边栏折叠线（px，★ content 宽，= TabPanel.width() 口径）──
+# 展开态拖窄到该宽度以下即视为不可用 → 触发自动折叠；同时作为挤压折叠后
+# 展开的目标下限（不得窄于该值，否则标题文字被压成窄条）。
+#
+# ★★ 取值约束（三者必须满足，否则手感断裂）：
+#   折叠线 < _DEFAULT_PANEL_WIDTH < 展开线
+#   即"默认展开宽度"必须落在折叠线**之上**、展开线**之下或之上**，且
+#   折叠线必须低于默认展开宽度。此前把折叠线取到 186 而默认展开宽度是 187，
+#   再加 6px 滞回区 → 展开线 192 > 187，用户从折叠态拉到"正常宽度"187px
+#   仍判定为折叠态（截图 bug：左栏文字齐全但 tab 还是图标胶囊）。
+#   现取 150：content 150 时标题已明显被压缩（约 11 个中文字以内），
+#   低于它折叠合理；而默认 187 距折叠线有 37px 余量，手感自然。
+_EXPANDED_MIN_CONTENT_WIDTH = 150
+
+# ── frame 域展开最小宽度（px，frame 宽）──
+# 仅用于 QSplitter.setSizes / 窗格宽度计算（那些地方用的是 frame 宽）。
+_EXPANDED_MIN_FRAME_WIDTH = _EXPANDED_MIN_CONTENT_WIDTH + _FRAME_PADDING_X
+
+# ── 侧边栏固定默认宽度（px，content 宽）──
 # 打开时固定默认宽度（不记忆），约原 280 的 2/3。
 _DEFAULT_PANEL_WIDTH = 187
 
@@ -97,6 +124,23 @@ _AUTO_EXPAND_GROWTH = 80  # 自动展开的窗口增长门槛（原 200 过苛�
 # 判定"侧边栏是否真的被挤压"的下限：窗口总宽放得下
 # 「常规展开宽度 + 该值」就不算挤压，侧边栏必须保持展开。
 _MIN_CHAT_WIDTH = 400
+
+# ── 侧边栏收起态宽度（px，content 宽；frame = 该值 + 14 = 60）──
+# 仅容纳图标条的宽度（TabPanel._collapsed_min_width 同源引用）。
+_COLLAPSED_PANEL_WIDTH = 46
+
+# ── 侧边栏拖拽最大宽度（px，content 宽；frame = 该值 + 14 = 414）──
+# TabPanel 内容区的拖拽上限（splitter 实际约束的是 #tabFrame）。
+_TAB_PANEL_MAX_CONTENT_WIDTH = 400
+
+# ── 折叠/展开滞回区宽度（px，★ content 宽）──
+# 折叠线 = _EXPANDED_MIN_CONTENT_WIDTH；展开线 = 折叠线 + 本值。
+# ★ 取值纪律：滞回区只用于吸收"拖拽途中宽度在阈值附近抖动"（手抖 1~2px、
+#   Qt 量化误差），因此必须**明显小于**用户可感知的操作粒度。取 6px：
+#   折叠 <186、展开 >=192。此前误用 frame 域的 10 并在错误的坐标系上叠加，
+#   实际滞回区被撑到 24px content，用户拉宽 20px 仍等不到展开，手感即
+#   "明显拉宽了却还是折叠态"。
+_HYSTERESIS_WIDTH = 6
 
 # ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
@@ -657,6 +701,11 @@ class TabManagerWindow(FramelessWindow):
         # [FLASH_DEBUG] 销毁追踪
         self.destroyed.connect(lambda *_: logger.warning("[FLASH_DEBUG] TabManagerWindow DESTROYED"))
 
+        # 启动分段打点（DEBUG）：定位 __init__ 内部耗时段（TrayManager 单例等）
+        import time as _sm_time
+
+        _sm_t0 = _sm_time.perf_counter()
+
         self._windows: List = []  # List[OpenAIChatToolWindow]
         # ── 几何防抖保存：拖拽/缩放结束后 200ms 才写盘 ──
         self._geo_save_timer = QTimer(self)
@@ -743,18 +792,24 @@ class TabManagerWindow(FramelessWindow):
         self._plugin_titlebar_tab_infos: dict = {}
         # 标题栏高亮重算合并标志（见 _schedule_replace_highlight）
         self._replace_highlight_pending = False
+        # tab 点击重活队列：show/hide 卡片链路是主线程长任务（WebEngine 卡片
+        # 首建 + 系统卡互斥批量显隐），同步执行会饿死滑动指示器的动画帧；
+        # 点击后动画先跑，重活延到动画结束后逐项执行（项间让一帧）
+        self._tab_switch_queue: list = []
+        self._tab_switch_timer: Optional[QTimer] = None
 
         self._setup_ui()
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
-        # ── 应用级服务（本类是应用生命周期容器，故在此创建/启停） ──
-        # 一个应用一个实例：与任何 ChatWindow/tab 生命周期解耦。
-        from app.core.gateway_service import GatewayService
-        from app.core.plugin_host_service import PluginHostService
-
-        GatewayService.get_instance().ensure_started()
-        PluginHostService.get_instance().ensure_started()
+        # ── 应用级服务启动已挪至 main.py（壳显示后、首窗构造前）──
+        # [PERF 2026-09-14] GatewayService/PluginHostService.ensure_started()
+        # （插件发现 55 个 + tools/agents/hooks 注册，实测 ~1.1s）原先同步卡在
+        # __init__ 里挡住壳窗口出现。挪出后本构造只负责 UI；时序约束不变：
+        # 首个 ChatWindow 仍必须在 ensure_started 之后构造（由 main.py 保证），
+        # 否则首窗 _load_all_ui_plugins 会因 pm 未就绪静默 return 且无人重试。
+        _sm_t1 = _sm_time.perf_counter()
+        logger.debug(f"[TabManager] __init__ UI 构建段耗时 {(_sm_t1 - _sm_t0) * 1000:.0f}ms")
 
         # app 级 API 会话处理器：始终路由到当前活跃 tab
         # 修复多 tab 下后建窗口静默覆盖先建窗口的问题（之前由 MainWidget
@@ -783,9 +838,14 @@ class TabManagerWindow(FramelessWindow):
         # 刷新 Tab 面板内嵌的 UI 插件列表
         self._tab_panel.refresh_ui_plugins()
         # 注册到 TrayManager
+        _sm_t2 = _sm_time.perf_counter()
+        logger.debug(f"[TabManager] __init__ API 会话/全局卡段耗时 {(_sm_t2 - _sm_t1) * 1000:.0f}ms")
         from app.tray_manager import TrayManager
 
         TrayManager.get_instance()._tab_manager_window = self
+        logger.debug(
+            f"[TabManager] __init__ TrayManager 单例段耗时 {(_sm_time.perf_counter() - _sm_t2) * 1000:.0f}ms"
+        )
 
         # 注册主题刷新回调（虽主题切换路径不走 dispatch_refresh，
         # 但保持接口一致性便于将来扩展）
@@ -858,7 +918,7 @@ class TabManagerWindow(FramelessWindow):
         # 初始宽度（隐藏态不占空间，展开时生效）
         self._workbench_frame_w = PANEL_WIDTH_DEFAULT + 14
 
-        # ── 右侧工作台 hover 悬浮预览（见 sidebar_hover_preview）──
+        # ── 侧边栏 hover 悬浮预览（见 sidebar_hover_preview）──
         # 标题栏 workbench 按钮 hover → 控制器 → 浮层 fade_in/out；
         # 浮层自身不发信号，由 eventFilter 转发 HoverEnter/Leave 给控制器。
         from app.widgets.sidebar_hover_preview import (
@@ -897,16 +957,45 @@ class TabManagerWindow(FramelessWindow):
         """顶栏 tab 点击：「聊天」→ 对话视图；full 卡片 tab → 切换/显示；
         插件常驻 tab 的展示由注册时的 on_click 回调处理，此处忽略。
 
+        ★ 重活延后：show/hide 卡片链路是主线程长任务（WebEngine 卡片首次
+        创建 + 系统卡互斥批量显隐），同步执行会饿死滑动指示器的动画帧
+        （实测「点 tab 看不到滑动、直接跳变」，内容轻时偶现正常）。
+        这里只入队，重活由 _drain_tab_switch_work 在动画结束后执行。
+        连点不取消只顺延：toggle 语义依赖执行时的卡片状态，乱序取消会
+        产生与点击序列相反的最终状态。
+
         无论走哪条分支，最后都调度一次高亮收敛（见 ``_sync_replace_highlight``）：
         插件常驻 tab 的 on_click 内部若把卡片 toggle 成隐藏，高亮必须回退，
         而这条路径此前完全没有同步点。
         """
         logger.debug(f"[TitleBar] tab clicked: {tab_id}")
+        self._enqueue_tab_switch_work(tab_id)
+        self._schedule_replace_highlight()
+
+    def _enqueue_tab_switch_work(self, tab_id: str) -> None:
+        """tab 切换重活入队，定时器对齐滑动动画结束（减少动态效果时立即执行）"""
+        from app.widgets.custom_title_bar import TabIndicatorController
+
+        self._tab_switch_queue.append(tab_id)
+        if self._tab_switch_timer is None:
+            self._tab_switch_timer = QTimer(self)
+            self._tab_switch_timer.setSingleShot(True)
+            self._tab_switch_timer.timeout.connect(self._drain_tab_switch_work)
+        if not self._tab_switch_timer.isActive():
+            delay = 0 if not Animations.motion_enabled() else TabIndicatorController.ANIM_MS + 30
+            self._tab_switch_timer.start(delay)
+
+    def _drain_tab_switch_work(self) -> None:
+        """依次执行排队的 tab 切换重活；相邻两项之间让出一帧，避免同帧连发集中阻塞"""
+        if not self._tab_switch_queue:
+            return
+        tab_id = self._tab_switch_queue.pop(0)
         if tab_id == CHAT_TAB_ID:
             self._show_conversation_view()
         elif tab_id not in self._plugin_titlebar_tab_ids:
             self._on_replace_tab_clicked(tab_id)
-        self._schedule_replace_highlight()
+        if self._tab_switch_queue:
+            QTimer.singleShot(0, self._drain_tab_switch_work)
 
     def _apply_win11_dwm_chrome(self):
         """Win11 DWM 窗口外观：圆角 + **不画**边框描边（Win10 及更早静默跳过）
@@ -1202,16 +1291,24 @@ class TabManagerWindow(FramelessWindow):
         # 中途反向重启时旧收尾回调直接丢弃，只执行最新一次的回调
         self._wb_anim_finished_cb = on_finished
         anim.stop()
+        # ★ 系统「减少动态效果」：跳过插值直接落位，并走**同一条收尾路径**
+        # （预览抑制、panel 最小宽度、frame 最小尺寸提示都靠它恢复），
+        # 否则这几项开关会永久停在「动画中」状态。
+        if not Animations.motion_enabled():
+            self._apply_wb_width(float(end_w))
+            self._on_wb_anim_finished()
+            return
         # ★ 最小尺寸提示归零必须在 anim.stop() 之后：stop 不发射 finished，
         # 旧回调被丢弃，此处统一保证新动画从"无下限"状态起跑。
         if frame is not None:
             frame.set_min_hint_disabled(True)
-        # ★ 曲线/时长按方向分离：展开 OutCubic（快速露出内容）；收起 OutQuad
-        # + 160ms —— OutCubic 的尾段拖尾（后 12.5% 宽度要磨掉一半时间）在收起
-        # 时观感为“收到一半顿一下才收完”（用户实测反馈）
+        # ★ 曲线/时长按方向分离：Duration/曲线走全局 token —— 进入
+        # ENTER_MS + EASE_ENTER（快速露出内容）；离场 EXIT_MS + EASE_EXIT。
+        # 离场不能用 OutCubic：其尾段拖尾（后 12.5% 宽度要磨掉一半时间）
+        # 观感为“收到一半顿一下才收完”（用户实测反馈）。
         collapsing = end_w < start_w
-        anim.setDuration(160 if collapsing else 200)
-        anim.setEasingCurve(QEasingCurve.OutQuad if collapsing else QEasingCurve.OutCubic)
+        anim.setDuration(Animations.EXIT_MS if collapsing else Animations.ENTER_MS)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_EXIT if collapsing else Animations.EASE_ENTER))
         # ★ 设值期间屏蔽信号：QVariantAnimation 在 setEndValue 后会立刻以
         # 新终值补发一次 valueChanged，导致动画尚未 start 就先 _apply_wb_width(0)
         # 把窗格瞬间推到下限（收起起手闪一下）。起止值就绪后再解除屏蔽。
@@ -2007,7 +2104,8 @@ class TabManagerWindow(FramelessWindow):
         self._tab_panel.setObjectName("tabPanel")
         # 最小宽度取收起状态的窄宽度(46px)，展开时由 splitter 控制实际宽度
         self._tab_panel.setMinimumWidth(self._tab_panel._collapsed_min_width)
-        self._tab_panel.setMaximumWidth(400)
+        # ★ 与 _tab_frame.setMaximumWidth 同源（此前硬编码 400，两处真源易漂移）
+        self._tab_panel.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH)
 
         # ── 左侧 Tab 区域圆角矩形包裹框架（与右侧 #chatFrame 对称，提升呼吸感） ──
         # 在 splitter 里直接给 #tabPanel 设 border 会被 splitter handle 子控件
@@ -2017,10 +2115,10 @@ class TabManagerWindow(FramelessWindow):
         # QSplitter 控制的 child 是 _tab_frame 而非 _tab_panel，因此
         # _tab_frame 必须显式设最大/最小宽度，否则 splitter 拖拽会绕过
         # _tab_panel 的约束：
+        #   frame min = 收起宽(46) + margins(12) + border(2) = 60
         #   frame max = panel max(400) + margins(12) + border(2) = 414
-        #   frame min = panel min(46) + margins(12) + border(2) = 60
-        self._tab_frame.setMinimumWidth(60)
-        self._tab_frame.setMaximumWidth(414)
+        self._tab_frame.setMinimumWidth(_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X)
+        self._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
         tab_frame_layout = QVBoxLayout(self._tab_frame)
         # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
         tab_frame_layout.setContentsMargins(6, 6, 6, 6)
@@ -2207,7 +2305,7 @@ class TabManagerWindow(FramelessWindow):
         # ── full 容器卡片标题栏 tab（替代原 ReplaceTabBar）──
         # full 卡片（UI 插件 full 卡 + 内置全局卡）打开时在标题栏 tab 区显示
         # （带 × 关闭钮，见 _on_card_visibility_changed）。这里仅订阅显隐事件。
-        from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+        from app.core.infra.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
 
         # 订阅 full 卡片显隐事件，同步标题栏 tab open 集合与显隐
         UIEventBus.get_instance().subscribe(EV_CARD_VISIBILITY_CHANGED, self._on_card_visibility_changed)
@@ -2238,12 +2336,21 @@ class TabManagerWindow(FramelessWindow):
         # 形成清晰的"左边框线"视觉效果。
         self._splitter.setHandleWidth(4)
         self._splitter.setChildrenCollapsible(False)
+        # ★ 把手双击 = 折叠/展开侧边栏（与标题栏按钮同语义）
+        #   QSplitter 自带 handle 是内部 QSplitterHandle，无法直接 connect，
+        #   用事件过滤器在 handle 上捕获 MouseButtonDblClick（splitter 自己的
+        #   mouseDoubleClickEvent 在 handle 命中时不会到达，故必须过滤 handle）。
+        #   注册在 index 0 的 handle 上：那是左栏与聊天区之间的分隔条。
+        _h = self._splitter.handle(1)
+        if _h is not None:
+            _h.installEventFilter(self)
+            self._splitter_left_handle = _h
         content_layout.addWidget(self._splitter)
         content_widget.setLayout(content_layout)
         main_layout.addWidget(content_widget, 1)
 
         # 固定默认面板宽度（_DEFAULT_PANEL_WIDTH + 14px 补偿 #tabFrame margins/border），不记忆
-        frame_w = _DEFAULT_PANEL_WIDTH + 14
+        frame_w = _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X
         self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
 
         # 恢复侧边栏收起状态（必须在 splitter sizes 设置之后执行）
@@ -2263,6 +2370,7 @@ class TabManagerWindow(FramelessWindow):
         self.activeTabChanged.connect(self._on_active_tab_changed)
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
+        self._tab_panel.tabSwitchSessionRequested.connect(self._on_tab_switch_session_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
         self._tab_panel.sidebarToggled.connect(self._on_sidebar_toggled)
         self._tab_panel.teamCloseRequested.connect(self._on_team_close_requested)
@@ -2302,26 +2410,32 @@ class TabManagerWindow(FramelessWindow):
             # 收起前保存当前宽度（供展开时恢复）
             if sizes:
                 cur_frame_w = sizes[0]
-                # 挤压折叠场景：resizeEvent 自动折叠时宽度已被压到折叠阈值
-                # （< _auto_collapse_width=100）以下，此刻保存的"当前宽度"只剩
-                # 90px 左右，点击展开只能恢复窄条。此时改用常规展开宽度
-                # （固定默认 _DEFAULT_PANEL_WIDTH）作为恢复目标，保证展开后宽度可读；
-                # 用户手动折叠时宽度正常，照常保存实际宽度。
-                if cur_frame_w < self._tab_panel._auto_collapse_width:
+                # 挤压折叠场景：resizeEvent 自动折叠时宽度已被压到折叠线
+                # （panel._auto_collapse_width 是 **content 宽** → 换算到 frame 域）
+                # 以下，此刻保存的"当前宽度"只剩窄条，点击展开只能恢复窄条。
+                # 此时改用常规展开宽度（固定默认 _DEFAULT_PANEL_WIDTH）作为恢复
+                # 目标，保证展开后可读；用户手动折叠时宽度正常，照常保存实际宽度。
+                if cur_frame_w < self._tab_panel._auto_collapse_width + _FRAME_PADDING_X:
                     saved_w = _DEFAULT_PANEL_WIDTH
-                    cur_frame_w = max(saved_w, _EXPANDED_MIN_FRAME_WIDTH - 14) + 14
+                    cur_frame_w = max(saved_w, _EXPANDED_MIN_CONTENT_WIDTH) + _FRAME_PADDING_X
                 self._saved_panel_frame_width = cur_frame_w
             # 使用 _tab_panel 的收起最小宽度
-            target_w = self._tab_panel._collapsed_min_width + 14  # +12 margins +2 border
+            target_w = self._tab_panel._collapsed_min_width + _FRAME_PADDING_X
         else:
             # 展开：恢复折叠时保存的目标宽度（frame 宽度）。
-            # 下限 _EXPANDED_MIN_FRAME_WIDTH：挤压折叠时保存的窄宽度已被折叠端
-            # 修正为常规宽度，此处兜底保证展开后宽度不小于最小可读宽度。
-            target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+            # ★★ 下限不能用 _EXPANDED_MIN_FRAME_WIDTH —— 它等于折叠线
+            #   （150 content / 164 frame），展开后宽度恰好骑在折叠线上，
+            #   动画结束瞬间 resizeEvent 判定 width() < 折叠线 即再次折叠
+            #   → "点了展开又弹回收起"（实测：双击把手展开直接失败）。
+            #   下限必须是**明显高于展开线**的可读宽度：取 _DEFAULT_PANEL_WIDTH
+            #   （187 content，距折叠线 37px、距展开线 31px），保证展开后
+            #   稳稳落在展开区内侧，且与"固定默认宽度"语义一致。
+            _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
+            target_w = max(_min_expand_w, getattr(self, "_saved_panel_frame_width", _min_expand_w))
             # 拖拽把手拉开的场景（当前宽度已远超收起最小宽度，说明用户
             # 手动拖到位）：保持用户拖出的宽度，不覆盖为保存值。
             # 按钮点击展开时 cur_w == 收起宽度(60)，不满足此条件。
-            if cur_w > self._tab_panel._collapsed_min_width + 14 + 10:
+            if cur_w > self._tab_panel._collapsed_min_width + _FRAME_PADDING_X + _HYSTERESIS_WIDTH:
                 target_w = cur_w
             elif cur_w >= target_w - 4:
                 target_w = cur_w
@@ -2344,7 +2458,7 @@ class TabManagerWindow(FramelessWindow):
         self._start_sidebar_anim(cur_w, target_w, collapsing=collapsed)
 
     def _start_sidebar_anim(self, start_w: int, end_w: int, collapsing: bool):
-        """启动侧边栏宽度动画（200ms OutCubic）"""
+        """启动侧边栏宽度动画（时长/曲线走全局 token，按方向分离）"""
         # ── #31 中间对话区原样实时显示：不再冻结 _content_area 重绘 ──
         # 改为抑制卡片进入 resize 预览模式（WebView 保持可见），动画期
         # 每帧 restart 的宽度同步防抖在动画结束后一次执行。
@@ -2352,8 +2466,6 @@ class TabManagerWindow(FramelessWindow):
         anim = self._sidebar_anim
         if anim is None:
             anim = QVariantAnimation(self)
-            anim.setDuration(200)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
             anim.valueChanged.connect(self._on_sidebar_anim_value)
             anim.finished.connect(self._on_sidebar_anim_finished)
             self._sidebar_anim = anim
@@ -2364,6 +2476,14 @@ class TabManagerWindow(FramelessWindow):
         self._sidebar_anim_collapsing = collapsing
         self._sidebar_anim_ui_switched = False
         anim.stop()
+        # ★ 系统「减少动态效果」：直接落位并走同一条收尾路径 —— 收拾动画
+        # 结束标志 / 解除 TabPanel 抑制 / 恢复 resize 预览都靠它。
+        if not Animations.motion_enabled():
+            self._on_sidebar_anim_value(float(end_w))
+            self._on_sidebar_anim_finished()
+            return
+        anim.setDuration(Animations.EXIT_MS if collapsing else Animations.ENTER_MS)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_EXIT if collapsing else Animations.EASE_ENTER))
         anim.setStartValue(float(start_w))
         anim.setEndValue(float(end_w))
         anim.start()
@@ -2374,14 +2494,21 @@ class TabManagerWindow(FramelessWindow):
         # ★ 必须三值：缺工作台窗格会被 QSplitter 压到 0/最小宽度（见 helper 注释）
         self._splitter.setSizes(self._splitter_sizes_with_left(w))
 
-        # 跨阈值切换 UI：收起时宽度 < 100 切紧凑；展开时宽度 >= 120 切完整。
-        # 阈值取收起最小宽度(46)与展开最小宽度(120) 的中间值，避免展开时
-        # 文字在极窄条中被挤压（先让宽度足够再显示文字）。
+        # 跨阈值切换 UI：收起途中宽度降到"收起态宽度 + 余量"时切紧凑；
+        # 展开途中宽度升到展开线（= 折叠线 + 滞回区）时切完整。
+        # ★ 坐标系：本方法 w 是 **frame 宽**（直接喂给 setSizes），而
+        #   panel._auto_expand_width 是 **content 宽** → 展开侧必须加 padding
+        #   换算；收起侧同理（用 content 量再折算回 frame）。
+        # 收起侧阈值不再写死 100：动画起点是收起宽(60)，旧值会让 UI 在动画
+        # 已过大半时才切紧凑，收尾段闪一帧完整布局。展开侧与 resizeEvent 的
+        # 展开线同源，避免"动画已切完整但 resizeEvent 判定仍算折叠"的双标。
+        _collapse_ui_w = _COLLAPSED_PANEL_WIDTH + _HYSTERESIS_WIDTH + _FRAME_PADDING_X
+        _expand_ui_w = self._tab_panel._auto_expand_width + _FRAME_PADDING_X
         if not self._sidebar_anim_ui_switched:
-            if self._sidebar_anim_collapsing and w <= 100:
+            if self._sidebar_anim_collapsing and w <= _collapse_ui_w:
                 self._sidebar_anim_ui_switched = True
                 self._tab_panel.sync_collapsed_ui()
-            elif not self._sidebar_anim_collapsing and w >= 120:
+            elif not self._sidebar_anim_collapsing and w >= _expand_ui_w:
                 self._sidebar_anim_ui_switched = True
                 self._tab_panel.sync_collapsed_ui()
 
@@ -2393,10 +2520,13 @@ class TabManagerWindow(FramelessWindow):
             # 最终宽度精确落位（插值收尾可能差 1px）
             # ★ 三值 setSizes：保留工作台宽度，否则折叠左侧会连带清掉右侧
             if self._sidebar_anim_collapsing:
-                target_w = self._tab_panel._collapsed_min_width + 14
+                target_w = self._tab_panel._collapsed_min_width + _FRAME_PADDING_X
             else:
-                target_w = getattr(self, "_saved_panel_frame_width", 250)
-                target_w = max(_EXPANDED_MIN_FRAME_WIDTH, target_w)
+                # ★ 同 _on_sidebar_toggled：展开下限必须明显高于折叠线，
+                #   否则落位宽度骑在折叠线上会被 resizeEvent 再次判折叠。
+                _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
+                target_w = getattr(self, "_saved_panel_frame_width", _min_expand_w)
+                target_w = max(_min_expand_w, target_w)
             self._splitter.setSizes(self._splitter_sizes_with_left(target_w))
             # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
             if hasattr(self, "_tab_panel"):
@@ -2450,11 +2580,15 @@ class TabManagerWindow(FramelessWindow):
             return False
         total = sum(sizes)
         left = sizes[0]
-        if total <= 0 or left >= panel._auto_collapse_width:
+        # ★ 坐标系：sizes[0] 是 **frame 宽**，panel._auto_collapse_width 是
+        #   **content 宽**（= TabPanel.width()）→ 比较前必须先换算，否则折叠线
+        #   被隐性抬高 14px。统一折算到 frame 域比较（本方法其余判定都在 frame 域）。
+        collapse_frame_w = panel._auto_collapse_width + _FRAME_PADDING_X
+        if total <= 0 or left >= collapse_frame_w:
             return False  # 宽度正常：没有挤压，无需折叠
         # 空间仍放得下"常规展开宽度 + 聊天区最小宽度" → 只是瞬时压窄，不折叠：
         # 把左面板恢复到常规展开宽度，避免停留在被压扁的窄条上。
-        needed = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        needed = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", _EXPANDED_MIN_FRAME_WIDTH))
         wb_w = sizes[2] if len(sizes) >= 3 else 0
         if total >= needed + _MIN_CHAT_WIDTH + wb_w:
             tab_frame = getattr(self, "_tab_frame", None)
@@ -2467,10 +2601,21 @@ class TabManagerWindow(FramelessWindow):
         # 放不下全布局（含工作台）：先折工作台让位（规则 2，右先折）
         _wb_frame = getattr(self, "_workbench_frame", None)
         _wb_visible = _wb_frame is not None and _wb_frame.isVisible() and not _wb_frame.isHidden()
+        wb_freed = 0
         if _wb_visible:
             self._collapse_workbench_by_squeeze()
+            # ★ 工作台让位不一定把宽度让给中间区：不同实现下它极可能被
+            #   游离窗格（尚未渲染的 39px）或相邻窗格吃掉，而 Qt 会把空出的
+            #   宽度**补到最大窗格**（实测分配 [L=60, chat=304, WB=250]，
+            #   WB 隐藏后 → [60, 554, 0]，左栏纹丝不动）。因此这里必须
+            #   主动把"让位后可用总宽"重新喂给 QSplitter，否则紧随其后的
+            #   重判会基于旧几何，把本可容纳左栏的情形误判为"确实被挤压"。
+            if len(sizes) >= 3:
+                wb_freed = sizes[2]
+            elif getattr(self, "_saved_wb_frame_width", 0):
+                wb_freed = int(self._saved_wb_frame_width)
         # 工作台让位后重判：放得下「左栏展开 + 聊天最小宽」→ 保持左栏展开
-        if total >= needed + _MIN_CHAT_WIDTH:
+        if total + wb_freed >= needed + _MIN_CHAT_WIDTH:
             tab_frame = getattr(self, "_tab_frame", None)
             cap = tab_frame.maximumWidth() if tab_frame is not None else needed
             frame_w = max(0, min(needed, cap))
@@ -2531,7 +2676,9 @@ class TabManagerWindow(FramelessWindow):
                 )
             return
         total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
-        target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        # ★ 展开目标下限须明显高于折叠线（同 _on_sidebar_toggled 注释）
+        _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
+        target_w = max(_min_expand_w, getattr(self, "_saved_panel_frame_width", _min_expand_w))
         chat_min = _MIN_CHAT_WIDTH  # 聊天区最小可用宽度
         # 条件1：相对增长（仅窗口 resize 类触发需要；overlay 布局恢复传 False）
         if growth_required:
@@ -2539,7 +2686,7 @@ class TabManagerWindow(FramelessWindow):
             if base is not None and total < base + _AUTO_EXPAND_GROWTH:
                 return  # 窗口未比折叠时更宽，不自动展开
         # 条件2：绝对下限
-        if total - (self._tab_panel._collapsed_min_width + 14) < target_w + chat_min:
+        if total - (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X) < target_w + chat_min:
             return  # 空间不足，保持折叠
         # 空间足够：自动展开（先清标记防重入）
         panel._collapsed_by_squeeze = False
@@ -2578,13 +2725,13 @@ class TabManagerWindow(FramelessWindow):
             total = sum(self._splitter.sizes())
         except Exception:
             return
-        target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", _EXPANDED_MIN_FRAME_WIDTH))
         wb_min = PANEL_WIDTH_MIN + 14
         if growth_required:
             base = getattr(self, "_squeeze_total_width", None)
             if base is not None and total < base + _AUTO_EXPAND_GROWTH:
                 return  # 窗口未比挤压时更宽，不重开
-        if total - (panel._collapsed_min_width + 14) - wb_min < target_w + _MIN_CHAT_WIDTH:
+        if total - (panel._collapsed_min_width + _FRAME_PADDING_X) - wb_min < target_w + _MIN_CHAT_WIDTH:
             return  # 空间不足，保持折叠
         self._wb_collapsed_by_squeeze = False
         self.set_workbench_visible(True)
@@ -2614,9 +2761,9 @@ class TabManagerWindow(FramelessWindow):
             return
         saved_collapsed = getattr(self, "_restored_sidebar_collapsed", False)
         frame_w = (
-            (self._tab_panel._collapsed_min_width + 14)
+            (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X)
             if saved_collapsed
-            else max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + 14)
+            else max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
         )
         sizes = self._splitter.sizes()
         total = sum(sizes) if sizes else self.width()
@@ -2736,6 +2883,9 @@ class TabManagerWindow(FramelessWindow):
     def _on_replace_close_timeout(self, card_id: str) -> None:
         self._replace_timers.pop(card_id, None)
         if not self._has_other_visible_full(card_id):
+            # 仅当关的是当前窗口的激活卡才补位激活剩余卡；后台 tab ×（对话视图
+            # 或看其他卡时）不得触发自动切换（回归：胶囊从「对话」滑到最右）
+            was_active_current = self._replace_active.get(self._current_window_id()) == card_id
             # 卡片是全局单例：从所有对话的 open 集合中移除（关闭后任何对话都不应再显示）
             owners = [wid for wid, od in self._replace_open.items() if card_id in od]
             for wid in owners:
@@ -2748,9 +2898,11 @@ class TabManagerWindow(FramelessWindow):
                 # open/active，不删 tab：它是插件固定入口，删了无人恢复（回归：
                 # assistant_hub 点「新建人格」后标题栏「助手」tab 消失）
                 if card_id not in self._plugin_titlebar_tab_ids:
-                    self.titleBar.remove_tab(card_id)
-                # 关掉当前卡片且 open 仍有其他 full 卡片 → 自动激活（互斥显示）最近一个
-                self._activate_remaining_replace_card()
+                    # 关的是激活卡时不自动激活第一个：高亮由补位激活接管
+                    self.titleBar.remove_tab(card_id, reactivate=not was_active_current)
+                # 关掉的是当前激活卡 → 自动激活（互斥显示）最近一个；无剩余临时卡时内部回「对话」
+                if was_active_current:
+                    self._activate_remaining_replace_card()
 
     def _activate_remaining_replace_card(self) -> None:
         """当前对话 open 集合非空时，自动激活（互斥显示）最近一个 full 卡片，避免关掉
@@ -2780,7 +2932,15 @@ class TabManagerWindow(FramelessWindow):
             return
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        UIPluginRegistry.get_instance().toggle_floating_card(nid)
+        # 乐观置活：不等 shown 事件，胶囊从被关 tab 直接滑向补位 tab（shown/显隐
+        # 事件到达后同 target 幂等）；显示失败由 _schedule_replace_highlight 收敛
+        # 兜底。不置活的话高亮悬空，等卡片创建完才从原处长滑过去。
+        self._set_replace_active(nid)
+        if nid in KNOWN_GLOBAL_REPLACE_CARDS:
+            # 内置全局卡：toggle_floating_card 对其无效，走 CardManager 对称显示
+            cm.show_card(nid, wid)
+        else:
+            UIPluginRegistry.get_instance().toggle_floating_card(nid)
 
     def _has_other_visible_full(self, exclude_id: str) -> bool:
         """窗口内是否有其他 replace 卡片当前可见（用于区分切换/关闭）"""
@@ -3025,6 +3185,9 @@ class TabManagerWindow(FramelessWindow):
 
         # 卡片是全局单例：从所有对话的 open 集合中移除并清 active（避免切回其他对话仍显示已关卡片）
         cur_wid = self._current_window_id()
+        # 仅当关的是当前窗口的激活卡才补位激活剩余卡；后台 tab ×（对话视图
+        # 或看其他卡时）不得触发自动切换（回归：胶囊从「对话」滑到最右）
+        was_active_current = self._replace_active.get(cur_wid) == card_id
         owners = [wid for wid, od in self._replace_open.items() if card_id in od]
         for wid in owners:
             del self._replace_open[wid][card_id]
@@ -3033,7 +3196,8 @@ class TabManagerWindow(FramelessWindow):
         if owners:
             # 常驻插件 tab 只清 open/active 不删 tab（同 _on_replace_close_timeout）
             if card_id not in self._plugin_titlebar_tab_ids:
-                self.titleBar.remove_tab(card_id)
+                # 关的是激活卡时不自动激活第一个：高亮由补位激活接管
+                self.titleBar.remove_tab(card_id, reactivate=not was_active_current)
 
         # 真正隐藏卡片本身（避免「tab 消失但卡片仍显示」）
         if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
@@ -3050,26 +3214,73 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 pass
 
-        if self._replace_open.get(cur_wid):
+        if was_active_current:
             self._activate_remaining_replace_card()
         # 关掉的是当前高亮项时，_activate_remaining_replace_card 未必命中
         # （例如剩余项都是常驻插件 tab），补一次收敛兜底
         self._schedule_replace_highlight()
 
+    def _toggle_sidebar_from_handle(self) -> None:
+        """双击左栏把手：切换侧边栏收起/展开（与标题栏按钮同语义）
+
+        与标题栏按钮共用 _toggle_sidebar 路径，保证行为完全一致：
+        收起 → 动画收到 46px 图标条；展开 → 恢复 _saved_panel_frame_width。
+        手动切换会清除挤压标记（尊重手动意图，不自动回弹）。
+        """
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None:
+            return
+        panel._collapsed_by_squeeze = False
+        panel._toggle_sidebar()
+
     def _on_splitter_idle(self):
-        """splitter 拖拽防抖超时：松手后恢复内容区绘制 + 解除 TabPanel 节流
+        """splitter 拖拽防抖超时：落定折叠态 + 恢复内容区绘制 + 解除节流
 
         ~120ms 无新 splitterMoved 即视为停手/松手，由 _splitter_idle_timer
-        触发。合并恢复 _content_area.setUpdatesEnabled(True) 与
+        触发。
+
+        ★★ 拖拽落定（抖动修复的收尾）：拖拽期 TabPanel 被置 _dragging_splitter
+        抑制了 emit（否则逐帧跨阈值反复启停动画 = 抖动），因此折叠态与最终宽度
+        必须在这里一次性落定：
+          1. 解除 _dragging_splitter（后续 resizeEvent 恢复正常自治）；
+          2. 按松手时的真实宽度决定目标态——低于折叠线则动画收到收起宽，
+             否则动画恢复到当前拖出的宽度。用动画而非瞬切，保持与按钮切换
+             一致的手感。
+        合并恢复 _content_area.setUpdatesEnabled(True) 与
         _tab_panel.set_resizing(False)，复位拖拽首帧标记供下次拖拽重新冻结。
         """
         self._splitter_dragging = False
+        panel = getattr(self, "_tab_panel", None)
+        # ── 1+2. 拖拽落定：先解除抑制再判定，复用 _on_sidebar_toggled 的动画路径 ──
+        if panel is not None and getattr(panel, "_dragging_splitter", False):
+            panel.set_dragging_splitter(False)
+            sizes = self._splitter.sizes()
+            cur_frame_w = sizes[0] if sizes else 0
+            # 以松手时的真实 frame 宽对照折叠线（content 口径 → frame 域换算）
+            collapse_frame_w = panel._auto_collapse_width + _FRAME_PADDING_X
+            if cur_frame_w < collapse_frame_w:
+                # 拖到折叠线以下：落定收起态
+                if not panel._collapsed:
+                    panel._collapsed = True
+                    panel._collapsed_by_squeeze = False  # 手动拖拽，尊重意图
+                    panel._update_toggle_button(switch_ui=True)
+                self._on_sidebar_toggled(True)
+            else:
+                # 拖到折叠线以上：落定展开态（宽度就位，动画把 UI 切回完整态）
+                if panel._collapsed:
+                    panel._collapsed = False
+                    panel._update_toggle_button(switch_ui=True)
+                    self._saved_panel_frame_width = cur_frame_w
+                    self._on_sidebar_toggled(False)
+                else:
+                    # 本来就展开：同步 UI（拖拽期可能已按阈值切过紧凑态）
+                    panel.sync_collapsed_ui()
         # 规则 4：拖拽把手属用户明确意图，松手落最终折叠态（值不变不写盘）
         from app.utils.config import Settings
 
         _cfg = Settings.get_instance()
-        if _cfg.ui_sidebar_collapsed.value != self._tab_panel._collapsed:
-            _cfg.ui_sidebar_collapsed.value = self._tab_panel._collapsed
+        if panel is not None and _cfg.ui_sidebar_collapsed.value != panel._collapsed:
+            _cfg.ui_sidebar_collapsed.value = panel._collapsed
         # ── #14 收尾：折叠/展开动画仍运行则跳过解冻，交 #4 动画 finally 统一恢复 ──
         # 防「拖拽跨折叠阈值触发动画 + 120ms idle timer 提前解冻」极端路径尾段
         # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复
@@ -3089,23 +3300,26 @@ class TabManagerWindow(FramelessWindow):
             mw._set_cards_resize_preview_mode(False)
 
     def _on_splitter_manually_moved(self, pos: int, index: int):
-        """用户手动拖拽 splitter 把手：清除挤压折叠标记 + 手动拖宽显式展开
+        """用户手动拖拽 splitter 把手：标记拖拽会话 + 清除挤压折叠标记
 
         挤压折叠标记（_collapsed_by_squeeze）仅用于"被外部 relayout 压窄
         自动折叠后自动展开"场景。用户手动拖动把手瘦身到折叠阈值以下，
         视为手动意图——不自动展开，避免关闭卡片/窗口拉宽时把用户拖窄的
         面板再撑开。
 
-        手动拖宽超过展开阈值时显式展开：TabPanel.resizeEvent 的拖宽展开
-        已加挤压标记守卫（仅被动挤压折叠允许布局恢复自动展开），手动拖
-        把手拉开必须在此处理——splitterMoved 晚于 resizeEvent 触发，此时
-        面板宽度已就位，直接按拖到的宽度展开，无时序竞态。
+        ★★ 抖动修复：本方法只负责**开启拖拽会话**（置 panel._dragging_splitter），
+        折叠/展开的落定全部交给 _on_splitter_idle（~120ms 无新事件 = 松手）。
+        此前在拖拽过程中就按 pos 判定并 QTimer.singleShot(0, _on_sidebar_toggled)
+        启动动画，而 splitterMoved 是逐帧触发的 → 拖拽区跨阈值时反复启停
+        200ms 动画，动画与拖拽同时写 setSizes 互相打断 = 抖动。
         """
         if index != 0 or not hasattr(self, "_tab_panel"):
             return
         panel = self._tab_panel
         # 手动拖拽：清除挤压折叠标记（无论方向，尊重手动意图）
         panel._collapsed_by_squeeze = False
+        # ★ 开启拖拽会话：拖拽期 resizeEvent 只跟随 UI 形态，不 emit 折叠信号
+        panel.set_dragging_splitter(True)
         # ── P0 性能优化 OPT-2：拖拽首帧冻结 _content_area 重绘，防抖 timer 松手恢复 ──
         # 仅首帧冻结一次（_splitter_dragging 未置位时）；_tab_panel 全程保持启用，
         # 侧栏 UI 切换/展开逻辑仍须响应。每次 splitterMoved 重置 ~120ms 防抖 timer，
@@ -3116,12 +3330,6 @@ class TabManagerWindow(FramelessWindow):
                 self._content_area.setUpdatesEnabled(False)
         if hasattr(self, "_splitter_idle_timer"):
             self._splitter_idle_timer.start()
-        # 手动拖宽超过展开阈值（滞回区 110+）：显式展开
-        if panel._collapsed and not panel._animating and pos >= panel._auto_collapse_width + 10:
-            panel._collapsed = False
-            panel._update_toggle_button()
-            # 延迟发射，避免在拖拽链中直接嵌套 setSizes
-            QTimer.singleShot(0, lambda: self._on_sidebar_toggled(False))
 
     # ── 窗口管理 ──
 
@@ -3374,7 +3582,7 @@ class TabManagerWindow(FramelessWindow):
         fallback 也为空则返回 ("", "")（header 不显示 icon）。
         """
         try:
-            from app.core.team_manager import TeamManager
+            from app.core.team.team_manager import TeamManager
 
             tm = TeamManager.get_instance()
             run_id = TabManagerWindow._resolve_tab_team_id(window)
@@ -3558,7 +3766,7 @@ class TabManagerWindow(FramelessWindow):
                 pass
             # Phase E：发布 Tab 切换事件
             try:
-                from app.core.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
+                from app.core.infra.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
 
                 UIEventBus.get_instance().publish(
                     EV_TAB_SWITCHED,
@@ -3690,7 +3898,7 @@ class TabManagerWindow(FramelessWindow):
                     if hasattr(window, "_handle_team_leave") and callable(window._handle_team_leave):
                         window._handle_team_leave(silent=True, batch_disband=True)
                     else:
-                        from app.core.team_manager import TeamManager
+                        from app.core.team.team_manager import TeamManager
 
                         # 🛡️ W3a（W2 联调审查问题 4）：降级路径（无 _handle_team_leave
                         # 的老窗口/非主窗口）在 leave_team 前必须先停 team watcher——
@@ -3731,7 +3939,7 @@ class TabManagerWindow(FramelessWindow):
         # save_now=False 挂起（team_manager._save_team_data 仅标记 pending），
         # 此处 flush 一次原子写盘。flush 是优化项，失败静默不破坏解散流程。
         try:
-            from app.core.team_manager import TeamManager
+            from app.core.team.team_manager import TeamManager
 
             TeamManager.get_instance().flush_pending_saves()
         except Exception:
@@ -3912,6 +4120,8 @@ class TabManagerWindow(FramelessWindow):
         session_record: "dict | None" = None,
         project: "str | None" = None,
         branch: bool = False,
+        branch_messages: "list | None" = None,
+        branch_name: "str | None" = None,
     ) -> "OpenAIChatToolWindow | None":
         """统一创建新标签页并加载内容。
 
@@ -3925,6 +4135,9 @@ class TabManagerWindow(FramelessWindow):
             session_record: 直接加载的历史会话记录（注入 showEvent，跳过空会话）
             project: 目标项目上下文（覆盖源窗口当前项目）
             branch: 复制源窗口当前会话消息到新 tab
+            branch_messages: 分支内容（消息卡片级分支用）。传入时以此为分支消息，
+                不传则复制整个当前会话（tab 级分支的原行为）。
+            branch_name: 分支会话标题；不传时由当前会话名 + " [分支]" 生成。
         Returns:
             新窗口实例；失败返回 None（调用方应降级为原行为）
         """
@@ -3940,10 +4153,13 @@ class TabManagerWindow(FramelessWindow):
             if branch:
                 cur = getattr(source_window, "session_manager", None)
                 cur_session = cur.get_current_session() if cur else None
-                if cur_session is not None:
+                # 消息卡片级分支：优先用调用方传入的截断消息；不传则整会话复制（tab 级分支原行为）
+                if cur_session is not None or branch_messages:
+                    messages = list(branch_messages) if branch_messages is not None else list(cur_session.messages)
+                    name = branch_name or ((cur_session.name or "对话") if cur_session is not None else "对话") + " [分支]"
                     new._branch_session_data = {
-                        "messages": list(cur_session.messages),
-                        "name": (cur_session.name or "对话") + " [分支]",
+                        "messages": messages,
+                        "name": name,
                         "project": project or getattr(source_window, "_current_project", None) or "",
                     }
                 new._skip_restore_history = True
@@ -3977,6 +4193,66 @@ class TabManagerWindow(FramelessWindow):
             window = self._windows[index]
             if window is not None:
                 self.spawn_tab(window, branch=True)
+
+    def _on_tab_switch_session_requested(self, index: int):
+        """标签页右键「切换会话」：跳转到该标签页并展开左侧历史会话卡
+
+        两步语义（用户视角是一次点击）：
+        1. **跳转标签页** —— ``_tab_panel.set_active_index(index)`` 同步发
+           ``tabSelected`` → ``_on_tab_selected``（内容区切换 + per-tab 浮动卡
+           投影 + 会话数据同步），无需额外切换动作。
+        2. **打开历史会话** —— 历史卡是 ``container="left"`` 的全局浮动卡
+           （``GLOBAL_WINDOW_ID``），走 ``toggle_floating_card``。★ 该入口是
+           **toggle 语义**：卡片已可见时再调会把卡片关掉，故先用
+           ``CardManager.is_card_visible`` 判定，仅在不可见时调用。
+        3. 卡片按新活跃窗口重刷 —— ``HistoryService.refresh()`` 会经
+           ``_locate_current_index()`` 重新定位「当前会话」，等价于跳到
+           该标签页的会话位置（高亮 + 该分组渲染在列表最前）。
+        """
+        if not (0 <= index < len(self._windows)):
+            return
+        # 1) 跳转标签页（同步：set_active_index → tabSelected → _on_tab_selected）
+        try:
+            self._tab_panel.set_active_index(index)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 切换标签页失败: {e}")
+        # 2) 展开左侧历史会话卡（非 toggle；不可见时才调用）
+        registry = None
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            registry = UIPluginRegistry.get_instance()
+        except Exception:
+            registry = None
+        if registry is None:
+            return
+        card_id = "history-manager"
+        try:
+            from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+            card_manager = getattr(self, "_card_manager", None)
+            wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
+            visible = False
+            if card_manager is not None:
+                visible = card_manager.is_card_visible(card_id, wid)
+            # 「工作台页签」形态：卡片已挂到右侧工作台 tab 时也算已打开
+            if not visible and hasattr(self, "workbench_panel"):
+                try:
+                    visible = self.workbench_panel.has_card_tab(card_id)
+                except Exception:
+                    visible = False
+            if not visible:
+                registry.toggle_floating_card(card_id, main_widget=self.get_current_window())
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 打开历史会话失败: {e}")
+            return
+        # 3) 按新活跃窗口重刷（当前会话高亮 / 分组定位跟随激活窗）
+        service = registry.get_service("history")
+        if service is not None:
+            try:
+                service.refresh()
+            except Exception as e:
+                logger.warning(f"[TabManagerWindow] 刷新历史会话卡失败: {e}")
 
     def _on_new_session_in_workspace(self, project: str, worktree_path: str):
         """工作区树：在指定项目 + 工作树下新建对话页
@@ -4104,9 +4380,7 @@ class TabManagerWindow(FramelessWindow):
         text = QLabel("正在准备会话…", ph)
         text.setAlignment(Qt.AlignCenter)
         text.setFont(get_unified_font(14))
-        text.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(14)}"
-        )
+        text.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(14)}")
         lay.addWidget(text)
         ph.setStyleSheet("background: transparent;")
         self._boot_placeholder = ph
@@ -4124,11 +4398,19 @@ class TabManagerWindow(FramelessWindow):
 
     # ── Tab 面板 UI 插件列表 ──
 
+    #: 插件常驻 tab 容压上限：超过时前 LIMIT-1 个驻留，其余收进「更多」下拉
+    _PLUGIN_TITLEBAR_TAB_LIMIT = 5
+    #: 「更多」聚合 tab 的固定 ID（不与插件 tab_id 冲突的保留名）
+    _MORE_TAB_ID = "__plugin_more__"
+
     def _sync_plugin_titlebar_tabs(self) -> None:
         """同步插件注册的常驻标题栏 tab（无 × 关闭钮；点击走插件 on_click 回调自展示）
 
         幂等：info 对象未变（未重载）的已挂载 tab 跳过；插件热重载后 registry
         中是全新 info → 摘旧挂新；已卸载插件的 tab 移除。注册表为空时仅做清理。
+
+        容压：插件 tab 超过 ``_PLUGIN_TITLEBAR_TAB_LIMIT`` 时，前 LIMIT-1 个驻留，
+        其余收进「更多」聚合下拉（防插件生态增长挤爆标题栏 tab 区）。
         """
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -4136,8 +4418,15 @@ class TabManagerWindow(FramelessWindow):
             infos = UIPluginRegistry.get_instance().get_titlebar_tabs()
         except Exception:
             infos = []
+        # 容压分流：溢出集每次全量重建，「更多」tab 闭包经 self._more_tab_infos 取最新
+        limit = self._PLUGIN_TITLEBAR_TAB_LIMIT
+        overflow_infos = []
+        if len(infos) > limit:
+            overflow_infos = infos[limit - 1 :]
+            infos = infos[: limit - 1]
+        self._more_tab_infos = overflow_infos
         valid_ids = {info.tab_id for info in infos}
-        # 移除已卸载/不再注册的常驻 tab
+        # 移除已卸载/不再注册/被容压收起的常驻 tab
         for tab_id in list(self._plugin_titlebar_tab_ids):
             if tab_id not in valid_ids:
                 self.titleBar.remove_tab(tab_id)
@@ -4160,6 +4449,44 @@ class TabManagerWindow(FramelessWindow):
             )
             self._plugin_titlebar_tab_ids.add(info.tab_id)
             self._plugin_titlebar_tab_infos[info.tab_id] = info
+        # 「更多」聚合 tab：溢出集非空挂载、为空移除；生命周期由本函数显式管理，
+        # 不入 _plugin_titlebar_tab_ids（避免被上面的清理循环误删）
+        more_id = self._MORE_TAB_ID
+        if overflow_infos:
+            if more_id not in self.titleBar._tabs:
+                self.titleBar.add_tab(more_id, "更多", on_click=self._show_more_tabs_menu, closable=False)
+        elif more_id in self.titleBar._tabs:
+            self.titleBar.remove_tab(more_id)
+
+    def _show_more_tabs_menu(self) -> None:
+        """「更多」聚合下拉：列出被容压收起的插件 tab，点击等价点击原 tab"""
+        infos = list(getattr(self, "_more_tab_infos", []))
+        if not infos:
+            return
+        from PySide6.QtGui import QCursor
+
+        try:
+            from qfluentwidgets import Action, RoundMenu
+
+            menu = RoundMenu(parent=self)
+            for info in infos:
+                cb = info.on_click
+                if cb is None:
+                    continue
+                menu.addAction(Action(info.label, lambda _checked=False, f=cb: f()))
+            menu.exec(QCursor.pos())
+        except Exception:
+            # qfluentwidgets 不可用时退化为原生 QMenu（测试环境/旧依赖兜底）
+            from PySide6.QtWidgets import QMenu
+
+            menu = QMenu(self)
+            for info in infos:
+                cb = info.on_click
+                if cb is None:
+                    continue
+                act = menu.addAction(info.label)
+                act.triggered.connect(lambda _checked=False, f=cb: f())
+            menu.exec(QCursor.pos())
 
     def _update_shared_launcher(self) -> None:
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
@@ -4371,10 +4698,11 @@ class TabManagerWindow(FramelessWindow):
         self._sync_wb_overlay_geometry()
 
     def _sync_wb_overlay_geometry(self) -> None:
-        """主窗口 move/resize 后同步 hover 浮层全局坐标（未装配/隐藏时跳过）
+        """主窗口 move/resize 后同步工作台 hover 浮层全局坐标（未装配/隐藏时跳过）
 
         浮层是独立 Tool 顶层窗口，不会随主窗口布局自动移动，须在宿主
-        moveEvent/resizeEvent 里手动重定位（见 sidebar_hover_preview 跟随策略）。"""
+        moveEvent/resizeEvent 里手动重定位（见 sidebar_hover_preview 跟随策略）。
+        """
         ov = getattr(self, "_wb_overlay", None)
         if ov is not None:
             ov.sync_to_window()
@@ -4725,6 +5053,13 @@ class TabManagerWindow(FramelessWindow):
             elif t == QEvent.HoverLeave:
                 ctrl.on_overlay_hover(False)
             # 不 return：让既有 super().eventFilter 继续处理（不影响）
+        # ── 左栏 / 聊天区之间的 splitter 把手：双击折叠/展开侧边栏 ──
+        # ★ 必须在 handle 上过滤：QSplitter 命中 handle 时 MouseButtonDblClick
+        #   不会冒泡到 QSplitter 自身，装在 splitter 上收不到。
+        if obj is getattr(self, "_splitter_left_handle", None) and event.type() == QEvent.MouseButtonDblClick:
+            if event.button() == Qt.LeftButton:
+                self._toggle_sidebar_from_handle()
+                return True
         if obj is self._chat_wrapper and event.type() == QEvent.Resize:
             try:
                 self._sync_chat_wrapper_width()
@@ -4999,8 +5334,8 @@ class TabManagerWindow(FramelessWindow):
         TabManagerWindow._instance = None
         # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
         try:
-            from app.core.gateway_service import GatewayService
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.services.gateway_service import GatewayService
+            from app.core.services.plugin_host_service import PluginHostService
 
             GatewayService.get_instance().stop()
             PluginHostService.get_instance().stop()

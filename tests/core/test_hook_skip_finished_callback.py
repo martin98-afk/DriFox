@@ -22,7 +22,7 @@ import queue
 
 import pytest
 
-from app.core.hook_manager import Hook, HookManager, HookMatchRule, HookType
+from app.core.hooks.hook_manager import Hook, HookManager, HookMatchRule, HookType
 
 
 @pytest.fixture

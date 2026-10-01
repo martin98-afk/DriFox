@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from app.core import team_manager as tm_mod
+from app.core.team import team_manager as tm_mod
 from app.core.store.session_store import SessionStore
 
 

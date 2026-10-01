@@ -60,7 +60,7 @@ def test_hook_manager_async_event_encodes_session_id():
 
     格式 `__async__:<event>:<sid>`，供 backend 回补注入前校验。
     """
-    src = _read_src("core/hook_manager.py")
+    src = _read_src("core/hooks/hook_manager.py")
     lines = src.splitlines()
     tree = ast.parse(src)
     # 用 AST 拿 _execute_hook 的精确行号范围，再对原始源码切片
@@ -81,7 +81,7 @@ def test_backend_on_hook_finished_parses_and_checks_session_id():
 
     会话切换（当前 session != 触发时 session）→ 丢弃输出不注入。
     """
-    src = _read_src("core/backend.py")
+    src = _read_src("core/conversation/backend.py")
     # on_hook_finished 是 __init__ 内的闭包：直接检查 _PRE_DIALOG_EVENTS 定义段
     idx = src.index("_PRE_DIALOG_EVENTS =")
     # 从该定义向前回溯到 on_hook_finished 闭包起点，向后取足够文本覆盖校验逻辑
@@ -98,8 +98,8 @@ def test_backend_on_hook_finished_parses_and_checks_session_id():
 # 行为级：on_hook_finished 校验逻辑（独立模拟）
 # ──────────────────────────────────────────────
 
-from app.core.backend import _inject_hook_to_session  # noqa: E402
-from app.core.chat_session import ChatSession  # noqa: E402
+from app.core.conversation.backend import _inject_hook_to_session  # noqa: E402
+from app.core.conversation.chat_session import ChatSession  # noqa: E402
 
 
 def _make_session(sid: str) -> ChatSession:

@@ -27,7 +27,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import app.main_widget as mw
-from app.core.chat_session import ChatSession, SessionManager
+from app.core.conversation.chat_session import ChatSession, SessionManager
 
 
 def _make_widget(initial_messages: list) -> mw.OpenAIChatToolWindow:

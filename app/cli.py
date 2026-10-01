@@ -9,7 +9,7 @@ DriFox CLI — 无头模式入口
     drifox --version                                      # 版本号
 
 架构原则：
-    - 复用 app.core.backend.ChatBackend 的所有核心组件
+    - 复用 app.core.conversation.backend.ChatBackend 的所有核心组件
     - 通过无头 QApplication 提供 Qt 事件循环（不创建窗口）
     - 信号 → stdout 适配器代替 UI 渲染
 """
@@ -298,7 +298,7 @@ def _init_headless_backend(
     api_key_override: 覆盖 API Key
     """
     try:
-        from app.core.backend import ChatBackend
+        from app.core.conversation.backend import ChatBackend
         from app.utils.config import Settings
 
         settings = Settings.get_instance()
