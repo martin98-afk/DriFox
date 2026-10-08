@@ -3952,7 +3952,10 @@ class CodeWebViewer(QWebEngineView):
                         }}
 
                         // 使用延迟报告，确保浏览器布局完成
-                        setTimeout(() => reportHeight(), 50);
+                        // [F5+B] 走防抖通道：坞态归位/折叠过渡期间由
+                        // _collapsibleHeightReporting 抑制中间态，transitionend 终值
+                        // 单报接管；16ms ≈ 1 帧，布局完成后即可上报。
+                        setTimeout(() => reportHeightDebounced(), 16);
                     }}
                 }}
                 // ===== B1 差量渲染：追加闭合段到 DOM（不整块替换） =====
@@ -6768,6 +6771,10 @@ class CodeWebViewer(QWebEngineView):
         self._finish_t0 = time.perf_counter()
         # 标记"接下来这次非流式渲染是流式结束的终渲染"：它必须同步完成
         # （紧随其后的 _cleanup_render_cache 会让异步结果过期），见 _perform_update。
+        # 🆕 差量收尾接线：满足条件（有稳定差量区、无活跃工具 DOM/待注入工具）时，
+        # 终渲染走 _try_incremental_finalize 差量补尾，稳定区 DOM 不重建；失败由
+        # _perform_update 清标记自动回退全量（行为与旧路径一致）。
+        self._incremental_finalize = self._should_incremental_finalize()
         self._final_render_pending = True
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间

@@ -323,7 +323,7 @@ WHEEL_STUCK_MIN_INTERVAL = 0.1
 # set_finish_height_anim_enabled(False)。
 FINISH_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_FINISH_HEIGHT_ANIM", "1") != "0"
 FINISH_HEIGHT_ANIM_MS = Animations.ENTER_MS  # 与 JS 侧 FLIP 时长 220ms 对齐
-FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪声抖动）
+FINISH_HEIGHT_ANIM_MIN_DELTA = 16  # 小于该变化不值得动画（避免噪声抖动；16≈一行正文，60px 会放过结束态的行级收敛）
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
@@ -343,6 +343,11 @@ STREAM_HEIGHT_TICK_MS = 30
 # 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
 # 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
 STREAM_HEIGHT_TRACK_FACTOR = 0.45
+# 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 0.7），大台阶
+# （代码块/表格整块落地）更快跟上，消除"文字顶边憋一拍再蹦高"；小台阶维持
+# 基线（流式 0.45 / 结束态 0.28）防噪声抖动。
+STREAM_HEIGHT_TRACK_FAR_PX = 80
+STREAM_HEIGHT_TRACK_BOOST = 0.15
 # 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
 STREAM_HEIGHT_TRACK_EPSILON = 2
 # 小于该变化量直接 snap：流式尾巴上的小噪声不值得起追踪（避免常开 tick 空转）

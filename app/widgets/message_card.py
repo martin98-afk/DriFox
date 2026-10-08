@@ -159,8 +159,10 @@ from app.widgets.card_render_core import (
     STREAM_HEIGHT_ANIM_ENABLED,
     STREAM_HEIGHT_ANIM_MIN_DELTA,
     STREAM_HEIGHT_TICK_MS,
+    STREAM_HEIGHT_TRACK_BOOST,
     STREAM_HEIGHT_TRACK_EPSILON,
     STREAM_HEIGHT_TRACK_FACTOR,
+    STREAM_HEIGHT_TRACK_FAR_PX,
     _THINK_SNAKE_SVG,
     _classify_think_tag,
     _count_think_tool_prefix,
@@ -2990,7 +2992,13 @@ class MessageCard(SimpleCardWidget):
                 self._apply_viewer_height(target)
                 self._stop_stream_height_track()
                 return
-            self._apply_viewer_height(int(current_height + diff * self._height_track_factor))
+            # 自适应 factor：小差值维持基线（流式 0.45 / 结束态 0.28），大差值
+            # 提速 +0.15（上限 0.7）跟上大台阶；基于当前基线增量而非硬编码，
+            # 保住结束态比流式更缓的"丝绸尾音"设计。
+            factor = self._height_track_factor
+            if abs(diff) > STREAM_HEIGHT_TRACK_FAR_PX:
+                factor = min(0.7, factor + STREAM_HEIGHT_TRACK_BOOST)
+            self._apply_viewer_height(int(current_height + diff * factor))
         except RuntimeError, AttributeError:
             # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
             # 停拍防泄漏。内容重挂后会自行上报高度，走常规路径校正。
@@ -3189,7 +3197,14 @@ class MessageCard(SimpleCardWidget):
         # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
         # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
         # 未滚动时强制 auto-scroll 到底部。
-        if self._streaming and hasattr(self.viewer, "page") and self.viewer.page():
+        # [F2] 高度追踪 tick 中间拍跳过 auto-scroll IPC：逐拍 setFixedHeight 的
+        # 回环里再逐拍 runJavaScript 是纯浪费（JS 侧 _dfxAppendStreamText 文本
+        # 追加时已同步卡内滚底）；落定拍（value≈target）不跳过，收敛姿态由它保底。
+        _tick_intermediate = (
+            self._stream_height_tick.isActive()
+            and abs(getattr(self, "_target_viewer_height", 0) - value) > STREAM_HEIGHT_TRACK_EPSILON
+        )
+        if self._streaming and hasattr(self.viewer, "page") and self.viewer.page() and not _tick_intermediate:
             try:
                 # 🐛 修复：同步 auto-scroll 取代 setTimeout(0)，避免渲染间隙置顶闪烁
                 # 🐛 修复：auto-scroll 成功后复位 _userScrolledWithin，
