@@ -15,11 +15,14 @@ pyright .                              # 类型
 pytest tests/ -x                       # 全量测试（pytest-asyncio auto 模式）
 pytest tests/test_xxx.py -v            # 单文件
 pytest tests/test_xxx.py::test_name -v # 单用例
-pytest tests/ -m perf                  # 仅性能基准
+pytest tests/perf -v                   # 性能基准（默认收集已排除，须显式指定）
+pytest tests/ui -m ui                  # A 档全链 UI 测试（默认收集已排除）
 ```
 - **依赖组**：dev/build/mac-build/linux-build/gateway；Windows 用 `--all-groups`，mac 用 `build+mac-build`，Linux 用 `build+linux-build`
 - **打包**：`python build.py`（Win+Linux）；mac 额外需 `dmgbuild`+`Pillow`
-- **pytest markers**：`perf`（基准）、`stress`（稳定性）；`asyncio_mode=auto`
+- **pytest markers**：`perf`（基准）、`perf_long`（≥30s/场景长跑）、`stress`（稳定性）、`ui`（全链 UI）；`asyncio_mode=auto`
+- **默认收集排除**：`tests/ui` 与 `tests/perf` 由 `addopts` 排除（前者构建完整主窗口，后者含 25 轮基准与 ≥30s/场景长跑），须显式指定路径才运行
+- **卡死兜底**：`pytest-timeout` 全局 `timeout = 300` + `timeout_method = "thread"`（Windows 可用）。单用例超 300s 即 fail 并打 Python 栈，替代此前无限挂起
 
 ### 行尾（EOL）纪律 —— 提交前必查
 - Windows 上 `open(p, "w")` 会把 `\n` 静默转成 `\r\n`。patch 脚本一次误写 = 整文件行尾翻转 = 声明改动上千行、实质改动几十行，真实 diff 被淹没且 blame 全毁（2026-09-06 一次评审连中 3 个文件）。
@@ -41,7 +44,7 @@ pytest tests/ -m perf                  # 仅性能基准
 | `app/plugins/registries/` | 四注册表单例(adapter/loop policy/storage/serializer) |
 | `plugins/system-*` | 系统插件：tools/model_adapters/loop_policies/storages/serializers/context_tiers/budget_resolvers/hooks/skills/themes/commands/ui |
 | `~/.drifox/plugins/` | 用户级社区插件(watchfiles 热扫描) |
-| `tests/` | 与源码按模块对齐：core/widgets/plugins/utils/perf/gateway/debug |
+| `tests/` | 与源码按模块对齐：core/widgets/plugins/utils/perf/gateway/debug；`tests/ui`（全链 UI，需显式跑）与 `tests/perf`（基准）默认不收集 |
 | `docs/` | plugins/perf/security/superpowers 四大知识库 |
 
 ## 4. 插件化硬约束

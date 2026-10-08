@@ -66,6 +66,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-qt>=4.4.0",
+    "pytest-timeout>=2.3.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
@@ -127,8 +128,15 @@ python_files = ["test_*.py"]
 asyncio_mode = "auto"
 # tests/ui 为 A 档全链 UI 测试（构建完整主窗口，重）：默认收集排除，
 # 显式 `pytest tests/ui -m ui` 才运行（S3b）
-addopts = "--ignore=tests/ui"
+# tests/perf 含真起窗口的基准（test_new_tab_baseline 25 轮）与 ≥30s/场景的长跑
+# （long_run），默认收集排除，显式 `pytest tests/perf` 才运行
+addopts = "--ignore=tests/ui --ignore=tests/perf"
 xfail_strict = true
+# 卡死兜底：单用例超 300s 即 fail 并打 Python 栈（thread 法，Windows 可用）。
+# 无此项时任何死锁（waitSignal 等不到信号 / QEventLoop 不退出）会永久挂起，
+# 无人值守 CI 上表现为无限等待。
+timeout = 300
+timeout_method = "thread"
 markers = [
     "perf: 性能基准测试（测量响应时间）",
     "perf_long: 长时间运行时压测（≥30s/场景，需 QApplication）",

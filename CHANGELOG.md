@@ -3,6 +3,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 🔧 测试基建 (Testing Infrastructure)
+
+- **全量测试卡死与耗时失控修复** (`pyproject.toml`, `tests/perf/long_run/test_long_run_scenarios.py`, `AGENTS.md`):
+  1. **默认收集排除 `tests/perf`**（`addopts` 增 `--ignore=tests/perf`）。该目录含 `test_new_tab_baseline.py`（25 轮真实窗口基准）与 `long_run/`（`DEMO_DURATION_SEC=30.0`，4 用例净等 ≈180s），进默认轮次使全量测试凭空多耗数分钟；显式 `pytest tests/perf` 仍正常收集运行。
+  2. **接入 `pytest-timeout`**（dev 依赖 + `timeout = 300` + `timeout_method = "thread"`）。此前无任何超时兜底，单进程串行跑 5500+ 用例时任何死锁（`waitSignal` 等不到信号 / `QEventLoop` 不退出 / `join()` 不返回）都会永久挂起；现超 300s 即 fail 并打 Python 栈。`thread` 法为 Windows 可用方案。
+  3. 修正 `test_long_run_scenarios.py` docstring：原称「默认 10s」与 `runner.py:39` 实际 `DEMO_DURATION_SEC = 30.0` 不符。
+  4. `AGENTS.md` / 技能 `testing-build.md` 同步收集范围（`tests/ui` + `tests/perf` 双排除）、超时策略，并补充「禁止 `uv sync --group dev`」——该命令会卸载其它依赖组的包（aiohttp/lxml/numpy 等），须用 `--all-groups`。
+
 ## [v0.6.4] - 2026-09-28 (重新发布 #2)
 
 自上一版本以来的变更（累计） | 提交数：26 · 文件变更：94 · +17797/-13924 | 贡献者：dingma, drifox-bot, mading
