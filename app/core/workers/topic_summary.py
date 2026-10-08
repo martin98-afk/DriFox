@@ -185,7 +185,7 @@ class TopicSummaryTask(QRunnable):
                     "```"
                 )
 
-            from app.utils.http_client import build_openai_client
+            from app.utils.http_client import build_openai_client, chat_completion_text
 
             client = build_openai_client(
                 api_key=self.llm_config.get("API_KEY", ""),
@@ -193,19 +193,18 @@ class TopicSummaryTask(QRunnable):
             )
 
             def create_task():
-                return client.chat.completions.create(
+                # 流式发起+聚合：仅流式端点（如 CodeBuddy）非流式请求会 400
+                return chat_completion_text(
+                    client,
                     model=self.llm_config.get("模型名称", "gpt-4o"),
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
                     max_tokens=1500,
                 )
 
-            resp = create_api_call_with_retry(client, create_task, cancel_check=self.cancel_check)
-            if not resp.choices:
-                logger.warning("[TopicSummary] API 返回空 choices，跳过摘要")
-                raw_response = ""
-            else:
-                raw_response = resp.choices[0].message.content.strip()
+            raw_response = create_api_call_with_retry(
+                client, create_task, cancel_check=self.cancel_check
+            ).strip()
             result = _extract_json(raw_response)
             if result:
                 self._emit_result_or_fallback(result.get("topic_summary", ""))

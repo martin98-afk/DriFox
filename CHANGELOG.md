@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 🐛 问题修复 (Bug Fixes)
+
+- **仅流式服务商端点兼容** (`app/utils/http_client.py`, `app/core/context/history_compactor.py`, `app/core/workers/topic_summary.py`): CodeBuddy 等端点仅支持流式请求，非流式直接 400（code 11101 `Non-stream chat request is currently not supported`）。`http_client` 新增 `chat_completion_text()`：以 `stream=True` 发起、在调用方线程内聚合为完整文本返回，异常照常透传 openai 异常族供重试判定识别。会话压缩摘要与标题摘要两条非流式链路切换到该封装；插件侧 prompt-enhancer 同步切换（见 drifox-plugins2 仓库）。子智能体 worker（带 tools 聚合）暂不切换。
+
 ### 🔧 测试基建 (Testing Infrastructure)
 
 - **全量测试卡死与耗时失控修复** (`pyproject.toml`, `tests/perf/long_run/test_long_run_scenarios.py`, `AGENTS.md`):
