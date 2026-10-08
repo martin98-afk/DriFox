@@ -323,7 +323,7 @@ WHEEL_STUCK_MIN_INTERVAL = 0.1
 # set_finish_height_anim_enabled(False)。
 FINISH_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_FINISH_HEIGHT_ANIM", "1") != "0"
 FINISH_HEIGHT_ANIM_MS = Animations.ENTER_MS  # 与 JS 侧 FLIP 时长 220ms 对齐
-FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪声抖动）
+FINISH_HEIGHT_ANIM_MIN_DELTA = 16  # 小于该变化不值得动画（避免噪声抖动；16≈一行正文，60px 会放过结束态的行级收敛）
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
@@ -343,6 +343,11 @@ STREAM_HEIGHT_TICK_MS = 30
 # 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
 # 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
 STREAM_HEIGHT_TRACK_FACTOR = 0.45
+# 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 0.7），大台阶
+# （代码块/表格整块落地）更快跟上，消除"文字顶边憋一拍再蹦高"；小台阶维持
+# 基线（流式 0.45 / 结束态 0.28）防噪声抖动。
+STREAM_HEIGHT_TRACK_FAR_PX = 80
+STREAM_HEIGHT_TRACK_BOOST = 0.15
 # 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
 STREAM_HEIGHT_TRACK_EPSILON = 2
 # 小于该变化量直接 snap：流式尾巴上的小噪声不值得起追踪（避免常开 tick 空转）
@@ -2815,11 +2820,18 @@ _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
 
 @lru_cache(
-    maxsize=16
-)  # 256→64→16：>200KB 大文本已走 __wrapped__ 绕过缓存；实际唯一渲染内容通常 < 16 条，16 与 64 命中率差异 <5%，内存占用 -75%
-def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False, heavy_caps=None) -> str:
+    maxsize=32
+)  # 16→32（T16）：key 加 theme_ver 尾参后深浅两版各占一份；>200KB 大文本已走 __wrapped__ 绕过缓存
+def _render_markdown_to_html_cached_impl(
+    raw_md: str, compact: bool = False, heavy_caps=None, theme_ver: int = 0
+) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
+
+    theme_ver：主题版本号（ThemeRefreshCoordinator.get_version()），随 key 分桶——
+    同一 markdown 在深/浅主题下各存一份渲染结果，来回切换直接命中。
+    默认值 0 供直接调用（历史测试/无主题上下文场景）与 __wrapped__ 绕过分支
+    保持旧签名兼容；生产路径由 _render_markdown_to_html_cached 显式传入。
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _protect_inline_svg_blocks(safe_md)
@@ -2859,7 +2871,12 @@ def _render_markdown_to_html_cached(raw_md: str, compact: bool = False, heavy_ca
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
         return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact, heavy_caps=heavy_caps)
 
-    return _render_markdown_to_html_cached_impl(raw_md, compact=compact, heavy_caps=heavy_caps)
+    # [T16] 主题版本入 key：按 (theme_ver, raw_md, compact, heavy_caps) 分桶，
+    # 深浅主题各自缓存各自的渲染结果（get_version 内部有锁，线程安全）
+    from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+    theme_ver = ThemeRefreshCoordinator.get_version()
+    return _render_markdown_to_html_cached_impl(raw_md, compact=compact, heavy_caps=heavy_caps, theme_ver=theme_ver)
 
 
 # ============================================================
@@ -3090,7 +3107,13 @@ _SKELETON_CACHE_MAX = 48
 # 折叠同帧合并（两个 max-height 变化合成一条 220px→0 过渡曲线），消除结束态
 # 「归位展开到自然高度峰值→再折叠」的往返峰（剧烈抖动主因）。旧骨架无此参数，
 # 归位仍两段式 → 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 36
+# v37（2026-10-08）：任务看板迁出 WebEngine——#todo-panel/#todo-content DOM、
+# .todo-item 全套 CSS、window._updateTodoList / _todoCount / _todoProgressText
+# 全部删除；任务区改由卡片内原生 Qt 面板承担（app/widgets/inline_todo_panel.py）。
+# 旧骨架仍带 todo DOM 与 JS（虽无数据源、恒隐藏），必须靠版本号让旧缓存失效。
+# _SKELETON_CACHE_VERSION +1（v39）：[#12] R2 恢复工具区滚动保护链（_scrollToolContentToBottom
+# + tc scroll 监听 + 意图绑定）；R1 display 空窗 scrollTop 快照保护；R3 flush 纯揭示化。
+_SKELETON_CACHE_VERSION = 39
 
 
 def _js_literal(value) -> str:
@@ -3569,12 +3592,6 @@ _STREAMING_DOCK_CSS = """
                 body.streaming-dock #tool-content {
                     max-height: 220px;
                 }
-                /* 任务列表坞态：固定高度（非仅 max-height）——切断工具区流式抖动向 todo 传导，
-                   项目增减时限高内高度也不变，流式期间观感稳定 */
-                body.streaming-dock #todo-content {
-                    height: 96px;
-                    max-height: 96px;
-                }
 """
 
 _STREAMING_DOCK_JS = """
@@ -3672,8 +3689,6 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0; }
                     var t = document.getElementById('tool-content');
                     if (t) { t.innerHTML = ''; t.scrollTop = 0; }
-                    var td = document.getElementById('todo-content');
-                    if (td) { td.innerHTML = ''; td.scrollTop = 0; }
                     var ts = document.getElementById('tool-section');
                     if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
                     // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）
@@ -3770,7 +3785,19 @@ _TYPEWRITER_JS = """
                     if (st.buf) {
                         var all = st.buf;
                         st.buf = "";
+                        // [#12 R3] updateContent 场景 flush 后立即整页替换，
+                        // _dfxAppendStreamText 尾部的 auto-scroll 与
+                        // _userScrolledWithin/_prevScrollTop 基线复位是有害副作用
+                        // （滚到底随即被替换丢弃，body 滚动与跟随态却被污染）。
+                        // 快照受影响状态、揭示后还原 → 纯揭示语义，不动 _dfx 本体；
+                        // cp 的滚动位置由 _endDomUpdate 锚点机制接管。
+                        var _svWithin = window._userScrolledWithin;
+                        var _svPrev = window._prevScrollTop;
+                        var _svBody = document.body ? document.body.scrollTop : 0;
                         try { window._dfxAppendStreamText(all); } catch (e) {}
+                        if (document.body) document.body.scrollTop = _svBody;
+                        window._userScrolledWithin = _svWithin;
+                        window._prevScrollTop = _svPrev;
                     }
                 };
                 window._twReset = function () {
@@ -3918,7 +3945,7 @@ _FLIP_JS = """
                 window._flipCapture = function () {
                     if (!(window._flipArmedUntil > performance.now())) return null;
                     var map = new Map();
-                    ['tool-section', 'content-placeholder', 'todo-section'].forEach(function (id) {
+                    ['tool-section', 'content-placeholder'].forEach(function (id) {
                         var el = document.getElementById(id);
                         if (el) map.set('#' + id, el.getBoundingClientRect());
                     });
@@ -4140,10 +4167,18 @@ _CONTENT_AUTOSCROLL_JS = """
                         cp._userScrolledUp = s.cp.up;
                     }
                     if (tc && s.tc) {
-                        if (!_applyAnchor(tc, s.tc.a)) {
-                            var tMax = Math.max(0, tc.scrollHeight - tc.clientHeight);
-                            var tWant = Math.min(s.tc.top, tMax);
-                            if (Math.abs(tc.scrollTop - tWant) >= 1) _progScroll(tc, tWant);
+                        // [#12 R1] display:none 期间节点在渲染树外，clientHeight/
+                        // scrollHeight 均为 0 → tMax=0，钳制恢复会把 scrollTop 写 0
+                        // （顶掉 display 切换点的快照）。隐藏时跳过钳制，仅恢复跟随
+                        // 标志；滚动位置由 display='' 处的快照写回接管。
+                        var _tsEl = document.getElementById('tool-section');
+                        var _tsGone = _tsEl && _tsEl.style.display === 'none';
+                        if (!_tsGone) {
+                            if (!_applyAnchor(tc, s.tc.a)) {
+                                var tMax = Math.max(0, tc.scrollHeight - tc.clientHeight);
+                                var tWant = Math.min(s.tc.top, tMax);
+                                if (Math.abs(tc.scrollTop - tWant) >= 1) _progScroll(tc, tWant);
+                            }
                         }
                         tc._userScrolledUp = s.tc.up;
                     }

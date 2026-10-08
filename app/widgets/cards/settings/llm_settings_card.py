@@ -1787,6 +1787,12 @@ class LLMSettingsCard(SystemCardFrame):
             ).show()
 
     def showEvent(self, event):
+        # [T22] 隐藏期主题切换补刷：main_widget 5a 门控把不可见期的主题刷新
+        # 置脏跳过（0.7s 级重型卡白刷），显示时在此自愈。scope 含 font 时门控
+        # 不生效（标记恒 False），此分支空转无害。
+        if getattr(self, "_theme_needs_refresh", False):
+            self._theme_needs_refresh = False
+            self._refresh_appearance_from_config()
         if hasattr(self, "llmProviderCard"):
             self.llmProviderCard._refresh_items()
         # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，

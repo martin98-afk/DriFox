@@ -824,13 +824,21 @@ class TrayManager(QObject):
         self._win_unregister_hotkey()
         ok = _RegisterHotKey(None, _HOTKEY_ID, modifiers, vk)
         if ok:
+            # 已经是 win 模式的热键健康检查重注册（5 分钟一次）不打 info：
+            # 该路径每 5 分钟无条件注销+重注册一次，日志实测刷了 368 条
+            # 「原生全局热键已注册」，把真正有用的模式切换淹没。仅在
+            # 「首次注册」或「kbd 兜底升回原生」这两种真实状态变化时打 info。
+            reinstalled = getattr(self, "_hotkey_mode", None) == "win"
             self._hotkey_id = _HOTKEY_ID
             self._registered_hotkey = hotkey_str
             self._hotkey_mode = "win"
             # 升级到原生热键成功 → 释放可能残留的 keyboard 兜底钩子
             self._kbd_release()
             self._hotkey_failed_once = False
-            logger.info(f"[TrayManager] 原生全局热键已注册: {hotkey_str}")
+            if reinstalled:
+                logger.debug(f"[TrayManager] 原生全局热键健康检查重注册完成: {hotkey_str}")
+            else:
+                logger.info(f"[TrayManager] 原生全局热键已注册: {hotkey_str}")
             return
 
         # —— 注册失败：组合键被占用，回退到 keyboard LL 钩子 ——

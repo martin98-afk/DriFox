@@ -80,13 +80,13 @@ def _make_card(lazy_rendered: bool = False):
 
 @pytest.fixture(autouse=True)
 def _reset_global_pages():
-    """隔离模块级 _global_rendered_pages 计数器"""
-    import app.main_widget as mw
+    """隔离模块级 _global_rendered_pages 计数器（所有权在 memory_governor）"""
+    from app.core.infra import memory_governor
 
-    old = getattr(mw, "_global_rendered_pages", 0)
-    mw._global_rendered_pages = 0
+    old = memory_governor._global_rendered_pages
+    memory_governor._global_rendered_pages = 0
     yield
-    mw._global_rendered_pages = old
+    memory_governor._global_rendered_pages = old
 
 
 # ─── 置底分支（_loading_session 期间批次渲染完成） ───────────────

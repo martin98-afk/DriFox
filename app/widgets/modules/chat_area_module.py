@@ -51,8 +51,8 @@ class ChatAreaModule(UIModule):
         from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
         from qfluentwidgets import SingleDirectionScrollArea
 
-        # CHAT_SCROLL_STYLE 在 main_widget 模块级定义（避免循环引用）
-        from app.main_widget import CHAT_SCROLL_STYLE
+        # CHAT_SCROLL_STYLE 单一数据源在 ui_helpers（2026-09-29 断反向 import）
+        from app.widgets.ui_helpers import CHAT_SCROLL_STYLE
         from app.utils.theme_manager import theme_manager
         from app.widgets.decoration_layer import DecorationLayer
 

@@ -48,8 +48,7 @@ class BottomToolbarModule(UIModule):
             batch_install_hover_tooltips,
             install_hover_tooltip,
         )
-        from app.widgets.ui_helpers import MODEL_BTN_STYLE
-        from app.main_widget import _ThemedIconLabel
+        from app.widgets.ui_helpers import MODEL_BTN_STYLE, _ThemedIconLabel
 
         # bottom_layout 由 input_card 段创建并挂到 _bottom_input_container
         bottom_layout = host._bottom_input_container.layout()

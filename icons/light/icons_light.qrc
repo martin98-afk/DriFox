@@ -26,6 +26,7 @@
     <file>分支.svg</file>
     <file>删除.svg</file>
     <file>历史对话.svg</file>
+    <file>取消置顶.svg</file>
     <file>右侧边栏.svg</file>
     <file>团队.svg</file>
     <file>复制.svg</file>
@@ -46,6 +47,8 @@
     <file>撤销.svg</file>
     <file>新会话.svg</file>
     <file>新建.svg</file>
+    <file>新建会话.svg</file>
+    <file>新建会话_temp.svg</file>
     <file>新建窗口.svg</file>
     <file>无限.svg</file>
     <file>智能体.svg</file>
@@ -60,7 +63,6 @@
     <file>窗体-最小化.svg</file>
     <file>编辑.svg</file>
     <file>置顶.svg</file>
-    <file>取消置顶.svg</file>
     <file>裁剪.svg</file>
     <file>解锁.svg</file>
     <file>设置-subagent.svg</file>

@@ -223,10 +223,19 @@ class GlobalCardController:
             logger.warning(f"[GlobalCard] 插件设置分区重建失败: {e}")
         self._card_manager.toggle_card("settings", GLOBAL_WINDOW_ID)
 
-    def open_settings(self):
-        """打开设置卡片并确保宿主窗口前置"""
+    def open_settings(self, initial_tab: "str | None" = None):
+        """打开设置卡片并确保宿主窗口前置
+
+        Args:
+            initial_tab: 打开后切换到的导航页 tab_id（如 "appearance"/"plugins"），
+                None 保持上次停留页；未知 tab_id 由 _set_active_page 内部守卫静默忽略
+        """
         self.ensure_settings_popup()
-        self._card_manager.toggle_card("settings", GLOBAL_WINDOW_ID)
+        # 先切页再显示：已打开时切 tab 不闪；show_card 只开不关（原 toggle_card 语义
+        # 会在「设置卡已打开」时把跳转点击吞成关闭，用户被迫点两次）
+        if initial_tab:
+            self._settings_popup._set_active_page(initial_tab)
+        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
         if self._card_manager.is_card_visible("settings", GLOBAL_WINDOW_ID):
             tm = self._tab_manager
             if tm.isMinimized():

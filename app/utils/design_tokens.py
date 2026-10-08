@@ -132,7 +132,7 @@ def font_size_css(size: int) -> str:
     return f"font-size: {scale_font_size(size)}px;"
 
 
-def _set_style_sheet(widget, css: str) -> None:
+def set_style_sheet_if_changed(widget, css: str) -> None:
     """setStyleSheet 的同串短路（Qt5 自己不做）
 
     Qt5 每次 setStyleSheet 都会让 QStyleSheetStyle 重建并 repolish 整棵子树，
@@ -204,8 +204,8 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
     # ── SettingCard / ExpandSettingCard ──
     # ExpandSettingCard 继承 SettingCard，已被 setting_cards 包含
     for card in setting_cards:
-        _set_style_sheet(card.titleLabel, f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
-        _set_style_sheet(
+        set_style_sheet_if_changed(card.titleLabel, f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
+        set_style_sheet_if_changed(
             card.contentLabel,
             f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}",
         )
@@ -213,12 +213,12 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
         # ExpandSettingCard 内部的 HeaderSettingCard 需额外覆盖
         if isinstance(card, ExpandSettingCard):
             if hasattr(card, "card") and hasattr(card.card, "titleLabel"):
-                _set_style_sheet(
+                set_style_sheet_if_changed(
                     card.card.titleLabel,
                     f"QLabel#titleLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}",
                 )
             if hasattr(card, "card") and hasattr(card.card, "contentLabel"):
-                _set_style_sheet(
+                set_style_sheet_if_changed(
                     card.card.contentLabel,
                     f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}",
                 )
@@ -260,7 +260,7 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
     # ── SwitchButton ──
     for switch in switches:
-        _set_style_sheet(
+        set_style_sheet_if_changed(
             switch, f"SwitchButton>QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
         )
 

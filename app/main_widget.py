@@ -86,6 +86,28 @@ from app.core.conversation.message_content import _is_hook_message, strip_system
 from app.core.commands.builtin_commands import FunctionCommandHandlers
 from app.core.commands.command_manager import CommandManager, CommandType
 from app.core.modelmeta.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
+from app.core.infra import memory_governor
+from app.core.infra.memory_governor import (
+    _MAX_GLOBAL_RENDERED_PAGES,
+    _MAX_RENDERED_CARDS,
+    _MEM_THRESHOLD_TOTAL_MB,
+    _MEM_THRESHOLD_TOTAL_MB_ACTIVE,
+    _MIN_RENDERED_CARDS_PER_WINDOW,
+    _MIN_RENDERED_CARDS_PER_WINDOW_FLOOR,
+    _OFFSCREEN_BATCHES_FOR_KILL,
+    _OFFSCREEN_BATCHES_FOR_KILL_ACTIVE,
+    _UNLOADED_PIDS_MAX,
+    _WEB_MEM_THRESHOLD_MB,
+    _WEB_MEM_THRESHOLD_MB_ACTIVE,
+    _KILL_BATCH_MAX,
+    _KILL_COOLDOWN_S,
+    _LRU_RENDERER_KEEP,
+    _LRU_RENDERER_KEEP_ACTIVE,
+    _cleanup_global_lru_caches,
+    _compact_process_heap_after_cleanup,
+    _is_sip_deleted,
+    _run_gc_hook,
+)
 from app.core.infra.rss_sampler import rss_sampler
 from app.core.tools.tool_permission_controller import ToolPermissionController
 from app.core.infra import window_registry
@@ -102,10 +124,11 @@ from app.utils.design_tokens import (
     font_size_css,
     scale_font_size,
     scale_icon_size,
+    set_style_sheet_if_changed,
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.provider_icons import get_provider_icon
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.utils import get_app_data_dir, get_font_family_css, get_icon
 
 # ── App Widget 导入 ──
 # Note: 保留模块级导入而非方法内导入，因为 widget 类型在 100+ 方法中通过 isinstance 引用，
@@ -123,6 +146,8 @@ try:
 except Exception:  # noqa: BLE001
     logger.warning("[MainWidget] TabManagerWindow 导入失败，InfoBar parent 回退 self.window()")
 
+from app.widgets import tool_window
+from app.widgets.tool_window import ToolWindow, _ToolReloadNoticeBridge
 from app.widgets.cards import (
     BottomCardContainer,
     CardManager,
@@ -159,10 +184,12 @@ from app.widgets.cards.floating.undo_delete_store import (
 )
 from app.widgets.message_card import (
     MessageCard,
-    clear_global_render_cache,
     create_welcome_card,
     resolve_initial_welcome_mode,
 )
+# [T15] clear_global_render_cache 源头直取：message_card 已删 per-card 转发，
+# 主窗口清缓存提升（消息卡循环前一次）直接从 card_render_core 导入
+from app.widgets.card_render_core import clear_global_render_cache
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
     add_message_to_layout,
@@ -596,26 +623,6 @@ class _ProjectImportOptionDialog(MaskDialogBase):
             self.urlImportRequested.emit()
 
 
-class _ThemedIconLabel(QWidget):
-    """主题感知图标标签 — 使用 QIcon 引擎自动适配浅色/深色
-
-    替代静态 emoji/文字图标，支持主题切换时自动更新图标颜色。
-    通过 QIconEngine（_ThemeIconEngine）实现每次 paint 时按当前主题加载正确颜色。
-    """
-
-    def __init__(self, icon_name: str, size: int = 18, parent=None):
-        super().__init__(parent)
-        self._icon = get_icon(icon_name)
-        self._icon_size = size
-        self.setFixedSize(size, size)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        self._icon.paint(painter, self.rect())
-
-
 def resolve_busy_behavior(behavior: str, inverse: bool) -> str:
     """繁忙时行为判定：设置项 + Ctrl+Enter 互反（模块级纯函数便于测试）
 
@@ -663,249 +670,6 @@ def _abort_team_window(win) -> None:
     except Exception:
         pass
 
-
-class ToolWindowTitleBar(QWidget):
-    """窗口标题栏（原 app/tool_popup.py 定义，随 ToolPopupDialog 下线迁移至此）"""
-
-    popupRequested = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._custom_buttons = []
-        self._popup_mode_buttons = []
-        self._is_compact = False
-        self._setup_ui()
-
-    def _setup_ui(self):
-        self.setFixedHeight(28)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 0, 2, 0)
-        layout.setSpacing(4)
-
-        self._icon_widget = IconWidget(self)
-        self._icon_widget.setFixedSize(20, 20)
-
-        self._title_label = QLabel(self)
-        self._title_label.setObjectName("titleLabel")
-
-        layout.addWidget(self._icon_widget)
-        layout.addWidget(self._title_label)
-        layout.addStretch()
-
-        self._action_container = QWidget(self)
-        self._action_container.setObjectName("actionContainer")
-        self._action_layout = QHBoxLayout(self._action_container)
-        self._action_layout.setContentsMargins(0, 0, 0, 0)
-        self._action_layout.setSpacing(3)
-        layout.addWidget(self._action_container)
-
-        # 设置按钮已移除（移到主窗口内）
-
-        self._min_btn = TransparentToolButton(get_icon("最小化"), self)
-        self._min_btn.setFixedSize(28, 28)
-        self._min_btn.setToolTip("最小化")
-
-        self._popup_btn = TransparentToolButton(FluentIcon.CLOSE, self)
-        self._popup_btn.setFixedSize(28, 28)
-        self._popup_btn.setToolTip("关闭")
-        self._popup_btn.clicked.connect(self._on_popup_clicked)
-
-        layout.addWidget(self._min_btn)
-        layout.addWidget(self._popup_btn)
-
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
-
-        # 使用主题颜色
-        from app.utils.design_tokens import Colors
-
-        Colors.refresh()
-        Colors.refresh()
-        title_color = Colors.TEXT_PRIMARY
-        btn_hover = Colors.HOVER_BG
-        border_color = Colors.BORDER
-
-        self.setStyleSheet(f"""
-            ToolWindowTitleBar {{
-                background-color: {Colors.CONTENT_BG};
-                border-bottom: 1px solid {border_color};
-            }}
-            #titleLabel {{
-                color: {title_color};
-                font-size: {scale_font_size(13)}px;
-                font-weight: bold;
-                font-family: "{font_name}";
-                padding: 0 3px;
-            }}
-            #actionContainer {{
-                background-color: transparent;
-            }}
-            ToolButton {{
-                background-color: transparent;
-                border: none;
-                border-radius: 3px;
-                padding: 1px;
-            }}
-            ToolButton:hover {{
-                background-color: {btn_hover};
-            }}
-            ToolButton:pressed {{
-                background-color: {btn_hover};
-            }}
-        """)
-
-    def set_icon(self, icon):
-        self._icon_widget.setIcon(icon)
-
-    def set_title(self, title):
-        self._title_label.setText(title)
-
-    def set_title_color(self, color: str):
-        """设置标题文字颜色（覆盖默认的 TEXT_PRIMARY）
-
-        传入空字符串 '' 可清除行内颜色样式，恢复默认主题色。
-        """
-        if color:
-            self._title_label.setStyleSheet(f"color: {color};")
-        else:
-            self._title_label.setStyleSheet("")
-
-    def add_button(self, widget, stretch=0):
-        self._action_layout.insertWidget(self._action_layout.count() - 2, widget, stretch=stretch)
-        self._custom_buttons.append(widget)
-
-    def insert_button(self, index, widget, stretch=0):
-        self._action_layout.insertWidget(index, widget, stretch=stretch)
-        self._custom_buttons.append(widget)
-
-    def _on_popup_clicked(self):
-        self.popupRequested.emit()
-
-    def refresh_style(self):
-        """主题/字体变更时刷新标题栏样式"""
-        Colors.refresh()
-        # 重新读取字体
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
-
-        title_color = Colors.TEXT_PRIMARY
-        btn_hover = Colors.HOVER_BG
-        border_color = Colors.BORDER
-
-        # 整体标题栏样式
-        self.setStyleSheet(f"""
-            ToolWindowTitleBar {{
-                background-color: {Colors.CONTENT_BG};
-                border-bottom: 1px solid {border_color};
-            }}
-            #titleLabel {{
-                color: {title_color};
-                font-size: {scale_font_size(13)}px;
-                font-weight: bold;
-                font-family: "{font_name}";
-                padding: 0 3px;
-            }}
-            #actionContainer {{
-                background-color: transparent;
-            }}
-            ToolButton {{
-                background-color: transparent;
-                border: none;
-                border-radius: 3px;
-                padding: 1px;
-            }}
-            ToolButton:hover {{
-                background-color: {btn_hover};
-            }}
-            ToolButton:pressed {{
-                background-color: {btn_hover};
-            }}
-        """)
-
-
-class ToolWindow(QWidget):
-    """工具窗口基类（原 app/tool_popup.py 定义，随 ToolPopupDialog 下线迁移至此）"""
-
-    name: str = "Unnamed"
-    icon = None
-
-    def __init__(self, page):
-        super().__init__()
-        self.homepage = page
-        self._title_bar = None
-        self._content_widget = None
-
-        self._init_unified_font()
-        self._init_title_bar()
-        self.setObjectName("OpenAIChatToolWindow")
-
-    def _init_title_bar(self):
-        if self._title_bar:
-            return
-
-        self._title_bar = ToolWindowTitleBar(self)
-        self._title_bar.set_icon(self.icon)
-        self._title_bar.set_title(self.name)
-        self._title_bar.hide()
-        self._setup_title_bar()
-
-    def _setup_title_bar(self):
-        pass
-
-    def get_title_bar(self):
-        return self._title_bar
-
-    def _init_unified_font(self):
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
-
-        font = self.font()
-        font.setFamily(font_name)
-        self.setFont(font)
-
-        # 只设置字体，不设置背景（背景由子类的 setup_ui 处理）
-        self.setStyleSheet(f"""
-            ToolWindow {{
-                font-family: "{font_name}";
-            }}
-            QLabel, QPushButton, QLineEdit, QComboBox, QTreeWidget, QTableWidget {{
-                font-family: "{font_name}";
-            }}
-        """)
-
-
-class _ToolReloadNoticeBridge(QObject):
-    """工具热重载风险通知桥：watcher 后台线程 emit → 主线程槽执行
-
-    reloaded 由 watcher 后台线程 emit；桥在主线程创建，reloaded→notified
-    跨线程自动 QueuedConnection，确保外部槽在主线程执行。
-    """
-
-    reloaded = pyqtSignal()
-    notified = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.reloaded.connect(self.notified)
-
-
-_tool_reload_notice_bridge: Optional[_ToolReloadNoticeBridge] = None
 
 
 def _image_path_to_data_uri(img_path: str) -> "str | None":
@@ -1014,7 +778,8 @@ class OpenAIChatToolWindow(ToolWindow):
     _tool_call_depth: int = 0
     _pending_tool_calls: int = 0
     _first_tool_result: bool = True
-    _latest_todos: Optional[list] = None  # 最近一次 todowrite 回传的任务列表（推送消息卡片内嵌任务区）
+    _latest_todos: Optional[list] = None  # 最近一次 todowrite 回传的任务列表（卡片内嵌看板数据源）
+    _todo_panel_card = None  # 当前挂载任务看板的卡片（迁移时旧卡卸载用）
     _question_floating_widget = None
     _question_tool_call_id = None
     # 权限审批浮动卡（懒创建；与提问卡解耦，走结构化决策回传）
@@ -1149,6 +914,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 无需重复执行同步子进程（最坏可达 3s 阻塞主线程，拖慢窗口出现速度）。
         self._is_duplicate_window = source_window is not None
         self._source_window = source_window
+        # 临时对话页标记：页内新建会话不落盘、不进历史，工作目录指向独立临时目录，
+        # 关闭时整页目录删除（由 TabManagerWindow.spawn_tab(temp_scope=True) 置位）
+        self._is_temp_scope: bool = False
         # 批4：per-window 延迟任务队列（必须在 super().__init__ 触发 setup_ui
         # 之前创建：setup_ui 内 N9/N10/N11 的注册依赖此实例）
         from app.core.infra.deferred_task_queue import DeferredTaskQueue
@@ -1546,6 +1314,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     cls._about_to_quit_connected = True
                 except Exception:
                     pass
+            # 启动清扫：删除上次崩溃残留的临时页目录（此刻无存活临时页，全删安全）
+            cls._cleanup_orphan_temp_pages()
 
         # 设置文件操作记录的会话上下文
         if self.backend.tool_executor:
@@ -2923,7 +2693,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         对话框背景已完全透明，由外层容器兜底，故此处直接设为透明。
         """
-        self.setStyleSheet("background: transparent;")
+        # [T15] 同串短路：透明度滑条拖动高频进入本方法，同串重写会触发
+        # QStyleSheetStyle 全树 repolish（同病同修，见 design_tokens helper）
+        set_style_sheet_if_changed(self, "background: transparent;")
         self.setAutoFillBackground(False)
 
     def _apply_branch_or_create_session(self):
@@ -6503,6 +6275,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
         title = session.topic_summary or session.name or "新对话"
+        # 临时对话页：窗口/Tab 标题加「临时」前缀（Tab 标题跟随窗口标题）
+        if self.__dict__.get("_is_temp_scope", False) and not title.startswith("临时 · "):
+            title = f"临时 · {title}"
         try:
             dialog = self.window() if hasattr(self, "window") else None
             if dialog and hasattr(dialog, "setWindowTitle"):
@@ -9975,7 +9750,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 全局操作：只执行一次 ──
         ThemeRefreshCoordinator.timer_start("global")
         Colors.refresh()
-        theme_manager.on_theme_changed()
         try:
             from qfluentwidgets import Theme, setTheme
 
@@ -9985,6 +9759,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 setTheme(Theme.DARK)
         except Exception:
             pass
+        # [T12] on_theme_changed（EV_THEME_CHANGED publish）移到 setTheme 之后：
+        # setTheme 触发 qfluentwidgets 全系组件框架级重刷，插件卡若在 setTheme
+        # 前收到 EV 派发 refresh_style，随后又被框架重刷覆盖一遍 → 双刷。
+        # 先框架后派发，插件卡一次刷在最终主题态上。
+        # 铁律：仍居全局段（先于 per-window 循环）、无条件 publish（勿加 scope 过滤）
+        theme_manager.on_theme_changed()
         ThemeRefreshCoordinator.timer_end("global")
 
         # ── Per-window：所有窗口执行样式更新 ──
@@ -10126,7 +9906,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if OpenAIChatToolWindow._tool_reload_notice_registered:
             return
         OpenAIChatToolWindow._tool_reload_notice_registered = True
-        global _tool_reload_notice_bridge
         try:
             from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
@@ -10135,10 +9914,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 # watcher 未就绪（watchfiles 未安装等）→ 解除注册，下次窗口再试
                 OpenAIChatToolWindow._tool_reload_notice_registered = False
                 return
-            if _tool_reload_notice_bridge is None:
-                _tool_reload_notice_bridge = _ToolReloadNoticeBridge()
-                _tool_reload_notice_bridge.notified.connect(OpenAIChatToolWindow._on_tool_reload_notice)
-            watcher.on_tools_reloaded(_tool_reload_notice_bridge.reloaded.emit)
+            if tool_window._tool_reload_notice_bridge is None:
+                tool_window._tool_reload_notice_bridge = _ToolReloadNoticeBridge()
+                tool_window._tool_reload_notice_bridge.notified.connect(OpenAIChatToolWindow._on_tool_reload_notice)
+            watcher.on_tools_reloaded(tool_window._tool_reload_notice_bridge.reloaded.emit)
             logger.debug("[ToolReloadNotice] 工具热重载风险通知监听已注册")
         except Exception as e:
             logger.warning(f"[ToolReloadNotice] 注册热重载监听失败: {e}")
@@ -10624,7 +10403,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
 
             # 对话框背景完全透明，由外层容器兜底，不叠加独立背景层。
-            self.setStyleSheet("background: transparent;")
+            # [T15] 同串短路：主题切换循环内多次进入，同串重写无谓 repolish
+            set_style_sheet_if_changed(self, "background: transparent;")
             self.setAutoFillBackground(False)
 
             # 分支标签
@@ -10648,6 +10428,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 消息卡片主题（per-card 隔离：单卡 refresh_theme 异常不得中断
             # 后续刷新项——2026-09-06 NameError 曾致同窗口输入框/设置弹窗卡片
             # 全部停留在旧主题）
+            # [T16] 无需清渲染缓存：lru_cache 已按主题版本分桶（包装函数自动
+            # 取 ThemeRefreshCoordinator.get_version() 作 key 前缀），旧版本条目
+            # 永不命中，深浅来回切换各自命中各自的桶
             ThemeRefreshCoordinator.timer_start("msg_cards")
             for card in _message_cards:
                 if hasattr(card, "refresh_theme"):
@@ -10799,29 +10582,44 @@ class OpenAIChatToolWindow(ToolWindow):
                     border-radius: 8px;
                 """)
             # 设置弹窗 — 子卡片主题样式
-            if self._settings_popup:
-                for frame in _popup_frames:
-                    self._safe_refresh(frame)
-                # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
-                for card_name in (
-                    "uiFontSizeCard",
-                    "uiLightModeCard",
-                    "uiThemeStyleCard",
-                    "llmFontCard",
-                    "llmSkillsCard",
-                    "llmProviderCard",
-                    "mcpListCard",
-                    "lspListCard",
-                    # 手风琴类卡片（ExpandSettingCard 子类，不在 SystemCardFrame
-                    # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
-                    "pluginToolCard",
-                    "pluginAgentCard",
-                    "secretModeCard",
-                ):
-                    self._safe_refresh(getattr(self._settings_popup, card_name, None))
-                # 刷新设置弹窗分隔标签
-                if hasattr(self._settings_popup, "_refresh_sep_labels"):
-                    self._settings_popup._refresh_sep_labels()
+            # [T22] 隐藏白刷门控：弹窗已构建但不可见且纯主题 scope → 置脏跳过
+            # 本段重型刷新（0.7s 级），显示时 showEvent →
+            # _refresh_appearance_from_config 补刷自愈。保守起见 font scope
+            # 不门控（补刷链虽覆盖字号，但避免低频打开弹窗触发放大刷新）。
+            # 只门控弹窗自身刷新（frames/命名卡/sep/弹窗本体），后续 5a 其余
+            # 刷新（含窗口内 BaseSettingsCard 循环）不受影响。
+            _popup_hidden_skip = (
+                self._settings_popup is not None
+                and not self._settings_popup.isVisible()
+                and not is_font
+            )
+            if _popup_hidden_skip:
+                self._settings_popup._theme_needs_refresh = True
+            else:
+                if self._settings_popup:
+                    for frame in _popup_frames:
+                        self._safe_refresh(frame)
+                    # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
+                    for card_name in (
+                        "uiFontSizeCard",
+                        "uiLightModeCard",
+                        "uiThemeStyleCard",
+                        "llmFontCard",
+                        "llmSkillsCard",
+                        "llmProviderCard",
+                        "mcpListCard",
+                        "lspListCard",
+                        # 手风琴类卡片（ExpandSettingCard 子类，不在 SystemCardFrame
+                        # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
+                        "pluginToolCard",
+                        "pluginAgentCard",
+                        "secretModeCard",
+                    ):
+                        self._safe_refresh(getattr(self._settings_popup, card_name, None))
+                    # 刷新设置弹窗分隔标签
+                    if hasattr(self._settings_popup, "_refresh_sep_labels"):
+                        self._settings_popup._refresh_sep_labels()
+                self._safe_refresh(self._settings_popup)
             # 设置卡片（全窗口递归）
             for card in _base_settings:
                 self._safe_refresh(card)
@@ -10898,9 +10696,9 @@ class OpenAIChatToolWindow(ToolWindow):
         本方法独立覆盖字体变化路径，避免内嵌硬编码 font-size 的 QSS
         不重建导致 setFont 被 QSS 盖住（视觉不响应）。
 
-        同时刷新 UI 插件浮动卡片（plugin-marketplace 等），它们通过
-        ctx 拉取 font_size/font_family，show_card 之后需要主动调
-        _apply_latest_theme 重新拉 ctx 应用新字号/字族。
+        只刷宿主自有卡（上方 9 张）。UI 插件浮动卡的主题/字体刷新由
+        EV_THEME_CHANGED → UIPluginRegistry 全量派发承接（T12 删除了本方法
+        尾部的插件卡直调块，消除与 registry 路径的双刷）。
         """
         # ── 主窗口内嵌浮动卡片（周期内去重：5b 跳过 5a 已刷卡片） ──
         for card in (
@@ -10916,27 +10714,7 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._safe_refresh(card)
 
-        # ── UI 插件浮动卡片：refresh_style 为统一约定（覆盖最全），旧插件的
-        #    _apply_latest_theme / _apply_theme / _retheme 作为兼容兜底排在后面 ──
-        # （detect-by-hasattr 防止强制依赖某个具体方法名，向后兼容多版本插件）
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            reg = UIPluginRegistry.get_instance()
-            instances = reg._card_widget_instances.get(self._window_id, {})
-            for widget in instances.values():
-                if widget is None or not widget.isVisible():
-                    continue
-                for method_name in ("refresh_style", "_apply_latest_theme", "_apply_theme", "_retheme"):
-                    method = getattr(widget, method_name, None)
-                    if callable(method):
-                        try:
-                            method()
-                        except Exception:
-                            pass
-                        break
-        except Exception:
-            pass
+        # 插件卡主题/字体刷新由 EV_THEME_CHANGED → UIPluginRegistry 全量派发承接（依赖 batched 无条件 publish，勿加 scope 过滤）
 
     def _apply_synced_model_selection(self):
         """gitee 配置同步完成后：把本窗口模型选择刷新为云端 llm_selected_model。
@@ -11221,7 +10999,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming:
             tm = TabManagerWindow.get_instance()
             if tm is not None:
-                new = tm.spawn_tab(self, new_session=True)
+                # 临时页内流式中新建会话：新 tab 继承临时属性（页内新建一律临时）
+                new = tm.spawn_tab(self, new_session=True, temp_scope=self.__dict__.get("_is_temp_scope", False))
                 if new is not None:
                     return
             # TabManagerWindow 未就绪则降级原行为（原地停流新建）
@@ -11309,6 +11088,8 @@ class OpenAIChatToolWindow(ToolWindow):
             session = self.backend.create_session()
         finally:
             self._pending_session_hook = False
+        # 临时对话页：页内新建的会话标记临时（自动保存守卫链据此跳过落库）
+        session.is_temp = bool(self.__dict__.get("_is_temp_scope", False))
         _t3 = _time.perf_counter()
 
         # 💡 内存优化：释放旧会话在 HistoryManager 中的消息数据（可被 SQLite 恢复）
@@ -11322,6 +11103,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_history_questions_badge()
         # 新会话重置任务列表快照（工具插件状态由 clear_todo_list 清理）
         self._latest_todos = None
+        self._todo_panel_card = None
         self.backend.clear_todo_list()
         self.backend.set_session_context(self._current_session_id)
         if self._question_floating_widget:
@@ -11415,6 +11197,8 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(100, self._sync_node_preview_to_last)
             # 🐛 修复（产物区刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
             self._push_workbench_updates(refresh_artifacts=True)
+            # 任务看板归属最新卡片：缓存卡片重建后面板需重新挂载
+            QTimer.singleShot(0, lambda: self._sync_todo_panel())
             return
 
         self._clear_chat_area()
@@ -11446,6 +11230,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 重拉工作台产物/任务/项目数据（_load_session_from_record / _create_new_session /
         # _switch_to_session_by_id 等所有加载路径都经过本方法，无需逐处补刷）
         self._push_workbench_updates(refresh_artifacts=True)
+        # 任务看板：重建/懒渲染完成后再挂一次（列表数据是窗口级，不随会话变化）
+        QTimer.singleShot(0, lambda: self._sync_todo_panel())
 
     def _show_initial_welcome(self):
         """仅在UI上显示欢迎卡片，不改动Session数据
@@ -12564,9 +12350,10 @@ class OpenAIChatToolWindow(ToolWindow):
         所有「重算/清零」计数的地方都必须走这里，否则全局计数会漂移，
         进而让闸门误判（配额被永久占用 → 其他窗口被饿死）。
         """
-        global _global_rendered_pages
         new_count = max(0, new_count)
-        _global_rendered_pages = max(0, _global_rendered_pages - self._rendered_card_count + new_count)
+        memory_governor._global_rendered_pages = max(
+            0, memory_governor._global_rendered_pages - self._rendered_card_count + new_count
+        )
         self._rendered_card_count = new_count
 
     def _decr_rendered_count(self, n: int) -> None:
@@ -13047,11 +12834,10 @@ class OpenAIChatToolWindow(ToolWindow):
         150ms singleShot 合并高频路径（清空聊天区/关闭窗口/清空快捷键），
         只在窗口相关大块内存释放后触发一次，避免每帧同步执行。
         """
-        global _gc_hook_pending
-        if _gc_hook_pending:
+        if memory_governor._gc_hook_pending:
             return
-        _gc_hook_pending = True
-        QTimer.singleShot(150, _run_gc_hook)
+        memory_governor._gc_hook_pending = True
+        QTimer.singleShot(150, memory_governor._run_gc_hook)
 
     def _clear_chat_area(self, delete_widgets: bool = True):
         self._current_assistant_card = None
@@ -14015,8 +13801,7 @@ class OpenAIChatToolWindow(ToolWindow):
         new_count = sum(1 for c in batch[:consumed] if getattr(c, "_lazy_rendered", False))
         if new_count > 0:
             self._rendered_card_count += new_count
-            global _global_rendered_pages
-            _global_rendered_pages += new_count
+            memory_governor._global_rendered_pages += new_count
             if self._rendered_card_count > self._effective_max_rendered_cards():
                 QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
@@ -15027,8 +14812,8 @@ class OpenAIChatToolWindow(ToolWindow):
         card.modelLabelClicked.connect(self._on_footer_model_label_clicked)
 
         self._add_chat_widget(card, insert_index=insert_index)
-        # 任务列表已迁至工作台（WorkbenchPanel 任务区），消息卡片不再内嵌 todo 区；
-        # _latest_todos 缓存仍由 todowrite 结果联动（工作台数据源，切 tab 时拉取）。
+        # 新卡建好后任务看板随之迁移（挂在最新 assistant 卡片内）：
+        # _latest_todos 缓存由 todowrite 结果联动，此处按缓存重挂一次。
         # 🐛 这是流式输出期间最热的强制滚底点（`_append_assistant_message`）：
         # 每个工具轮次都会新建 assistant 卡片。此前无条件置底，用户上滚读历史时
         # 只要后台有工具回调就会被拽回。纳入统一守卫。
@@ -15046,10 +14831,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 原实现经 scroll_to_bottom_if_streaming 直写 scrollbar.value，suppress
         # 判定与统一守卫割裂；现收口到 _scroll_to_bottom 单点裁决，提前短路，
         # 不再绕过主窗口的 sticky/同步逻辑。
+        # [F4] 贴底短路：视口已贴底（_is_view_at_bottom 唯一权威判定）时，
+        # 高度锚定补偿通道已负责跟随，无需每条内容都走兜底强制滚底；仅离底
+        # 超 tolerance 才兜底。away 守卫与 _scroll_to_bottom 内部
+        # _programmatic_scroll 豁免原样保留。
         if (
             self._is_streaming
             and not self._scroll_bottom_timer.isActive()
             and not self._user_intentionally_away_from_bottom
+            and not self._is_view_at_bottom()
         ):
             self._scroll_to_bottom()
 
@@ -19240,9 +19030,8 @@ class OpenAIChatToolWindow(ToolWindow):
             todos = []
         if todos:
             self._latest_todos = todos
-            # 任务列表已迁至工作台（不再内嵌消息卡片），仅刷新缓存 + 推工作台
-            # 工作台浮层任务区同步
-            self._push_workbench_updates(todos=todos)
+            # 任务看板内嵌在最新 assistant 卡片内（右侧工作台任务区已移除）
+            self._sync_todo_panel(todos)
         else:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -19960,16 +19749,15 @@ class OpenAIChatToolWindow(ToolWindow):
             except (TypeError, ValueError):
                 content = str(raw_content)
 
-        # 字段驱动：任何工具结果携带 todos 字段 → 更新任务列表缓存
-        # （插件声明，主程序不写死工具名）。显示在工作台任务区，不再内嵌消息卡片。
+        # 字段驱动：任何工具结果携带 todos 字段 → 更新任务看板
+        # （插件声明，主程序不写死工具名）。看板内嵌在最新 assistant 卡片。
         todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
         if todos:
             self._latest_todos = todos
-        # 工作台浮层联动：任务到达推任务；文件写入类工具完成后重拉产物列表
+            self._sync_todo_panel(todos)
+        # 工作台浮层联动：文件写入类工具完成后重拉产物列表
         try:
-            if todos:
-                self._push_workbench_updates(todos=todos)
-            elif (
+            if not todos and (
                 tool_name
                 and self.backend.file_recorder is not None
                 and self.backend.file_recorder.is_tracked_operation(tool_name)
@@ -20407,6 +20195,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _save_current_session_to_history(self):
         session = self.session_manager.get_current_session()
+        # 临时对话页守卫：页内会话一律不落盘、不进历史（流式结束/后台 finalize 高频路径）
+        if getattr(session, "is_temp", False):
+            return
         saved_messages = list(session.messages or []) if session else []
         if not saved_messages:
             return
@@ -21434,6 +21225,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         clean_summary = summary.strip()
 
+        # 临时对话页守卫：页内会话不落库，标题仅更新 UI（跳过 history_manager 首存）
+        session = self.session_manager.get_current_session()
+        if getattr(session, "is_temp", False):
+            if session:
+                session.set_topic_summary(clean_summary)
+            self.title_edit.setText(clean_summary)
+            self._sync_dialog_title()
+            return
+
         # 校验标题长度，超长说明解析异常或LLM输出异常，跳过更新
         MAX_TITLE_LENGTH = 50
         if len(clean_summary) > MAX_TITLE_LENGTH:
@@ -21540,6 +21340,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._last_pb_container_sheet = container_sheet
             self._project_branch_container.setStyleSheet(container_sheet)
         # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
+        # 临时对话页：隐藏整个「项目 avatar + 分支 chip」容器（tmp 目录无项目语义，
+        # 后续任何刷新路径进入本函数都不得重显）
+        if self.__dict__.get("_is_temp_scope", False):
+            container = getattr(self, "_project_branch_container", None)
+            if container is not None:
+                container.setVisible(False)
+            return
         project_color = get_project_color(self._current_project)
         # 同步更新方形 avatar
         if hasattr(self, "_project_avatar"):
@@ -21605,6 +21412,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _resolve_project_workdir(self) -> Optional[str]:
         """解析当前项目的工作目录（多窗口隔离：实例缓存 → DB → tool_executor）"""
+        # 临时对话页：tmp 目录不入实例缓存/DB，三级链会在 DB 层错拿源项目目录，
+        # 直接返回 tool_executor 当前工作目录（= tmp-sessions/{window_id}）
+        if self.__dict__.get("_is_temp_scope", False):
+            if self.backend and self.backend.tool_executor:
+                wd = self.backend.tool_executor.get_workdir()
+                if wd:
+                    return str(wd)
+            return None
         workdir = self._current_workdir.get(self._current_project)
         if not workdir and self.backend and self.backend.memory_manager:
             workdir = self.backend.memory_manager.get_working_directory(self._current_project)
@@ -21756,6 +21571,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not getattr(self, "_team_agent_name", ""):
             return
+        # 临时对话页：禁团队模式，工作目录不参与团队广播（避免 tmp 目录串台普通窗口）
+        if self.__dict__.get("_is_temp_scope", False):
+            return
         from app.core.team.team_manager import TeamManager
 
         tm_mgr = TeamManager.get_instance()
@@ -21804,6 +21622,9 @@ class OpenAIChatToolWindow(ToolWindow):
         workdir 为空 = 发送方清除了工作目录，本地回退临时工作目录兜底。
         """
         if getattr(self, "_is_destroyed", False):
+            return
+        # 临时对话页：不接收团队工作目录广播（tmp 目录不可被覆盖）
+        if self.__dict__.get("_is_temp_scope", False):
             return
         project = self._current_project
         if workdir:
@@ -22708,18 +22529,52 @@ class OpenAIChatToolWindow(ToolWindow):
         if resolved_path:
             self._broadcast_team_workdir(resolved_path)
 
+    # ── 卡片内嵌任务看板 ──
+
+    def _sync_todo_panel(self, todos: Optional[list] = None) -> None:
+        """把任务列表挂到「最新 assistant 卡片」的内嵌看板（旧卡卸载）
+
+        每个工具轮次都会新建 assistant 卡片，看板跟着最新那张走：旧卡
+        ``clear_todo_list()`` 摘除面板，新卡 ``update_todo_list()`` 接管。
+        迁移幂等——同卡重复推送由面板的内容签名比对挡掉，不重建控件。
+
+        Args:
+            todos: None 表示使用 ``_latest_todos`` 缓存（会话恢复 / 重建补推路径）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if todos is None:
+            todos = getattr(self, "_latest_todos", None)
+        if not todos:
+            return
+        card = self._current_assistant_card or self._find_latest_assistant_card()
+        if card is None or not self._is_widget_alive(card):
+            return
+        # 旧卡卸载：遍历已挂过看板的卡片，只保留最新那张
+        try:
+            prev = getattr(self, "_todo_panel_card", None)
+            if prev is not None and prev is not card:
+                if self._is_widget_alive(prev):
+                    prev.clear_todo_list()
+            self._todo_panel_card = card
+        except RuntimeError:
+            self._todo_panel_card = card
+        try:
+            card.update_todo_list(todos)
+        except RuntimeError:
+            pass
+
     # ── 右侧工作台浮层联动 ──
 
-    def _push_workbench_updates(self, todos: Optional[list] = None, refresh_artifacts: bool = False) -> None:
+    def _push_workbench_updates(self, refresh_artifacts: bool = False) -> None:
         """向右侧工作台浮层推送增量更新（面板隐藏/无宿主时零开销跳过）
 
         ★ 标签页隔离：工作台是宿主级单例，数据投影自「当前活跃对话窗口」。
         非活跃窗口的工具回调（如后台正在跑的另一个标签页）只更新自己的
         ``_latest_todos`` 缓存，不写工作台 UI——否则当前标签页的工作台
-        会被其他标签页的任务/产物覆盖。切回时 refresh_workbench 会拉取。
+        会被其他标签页的产物覆盖。切回时 refresh_workbench 会拉取。
 
         Args:
-            todos: todowrite 等工具回传的最新任务列表；None 表示本次不更新任务区
             refresh_artifacts: True 时重拉产物列表（文件写入类工具完成后调用）
         """
         if getattr(self, "_is_destroyed", False):
@@ -22732,11 +22587,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 标签页隔离：仅活跃窗口可推送 UI 更新
             if tm.get_current_window() is not self:
                 return
-            if todos is not None:
-                # todo 更新自动展开工作台（set_workbench_visible 内部会 refresh_workbench）
-                if not tm.is_workbench_visible():
-                    tm.set_workbench_visible(True)
-                panel.update_todos(todos)
             if refresh_artifacts:
                 tm.refresh_workbench()
         except Exception:
@@ -22773,18 +22623,23 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self.backend or not self.backend.tool_executor:
             return
         project = self._current_project
-        # 实例缓存优先（多窗口隔离的关键：保持自身选择，不受其他窗口 DB 写入影响）
-        workdir = self._current_workdir.get(project)
-        if workdir is None:
-            # 首次启动或项目首次切换，从 DB 读取默认值（新窗口恢复用）
-            if self.backend.memory_manager:
-                workdir = self.backend.memory_manager.get_working_directory(project)
-            if workdir:
-                self._current_workdir[project] = workdir
+        # 临时对话页：工作目录固定指向整页临时目录（不入 DB、不进实例缓存），
+        # 之后走公共尾部（set_workdir + 欢迎卡/分支标签/插件联动刷新）
+        if self.__dict__.get("_is_temp_scope", False):
+            workdir = self._ensure_temp_page_workdir()
+        else:
+            # 实例缓存优先（多窗口隔离的关键：保持自身选择，不受其他窗口 DB 写入影响）
+            workdir = self._current_workdir.get(project)
+            if workdir is None:
+                # 首次启动或项目首次切换，从 DB 读取默认值（新窗口恢复用）
+                if self.backend.memory_manager:
+                    workdir = self.backend.memory_manager.get_working_directory(project)
+                if workdir:
+                    self._current_workdir[project] = workdir
 
-        # 无根目录时自动创建临时工作目录
-        if not workdir:
-            workdir = self._ensure_temp_workdir(project)
+            # 无根目录时自动创建临时工作目录
+            if not workdir:
+                workdir = self._ensure_temp_workdir(project)
 
         # workdir 变化时强制重渲染欢迎卡片（project-dashboard 看板等依赖 project_root）：
         # 启动时 workdir 延迟 2s 才同步，同步前渲染会拿到空/兜底路径（显示
@@ -22873,6 +22728,46 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning(f"[MainWidget] Failed to create temp workdir: {e}")
             return ""
 
+    def _ensure_temp_page_workdir(self) -> str:
+        """临时对话页专用工作目录：{app_data}/tmp-sessions/{window_id}/
+
+        - 不入 DB（不调 memory_manager.set_working_directory）
+        - 不写 _current_workdir 实例缓存（避免项目切换/团队同步误读）
+        - 窗口关闭时整目录删除；崩溃残留由启动清扫兜底
+        """
+        try:
+            temp_dir = str(get_app_data_dir() / "tmp-sessions" / str(self._window_id))
+            os.makedirs(temp_dir, exist_ok=True)
+            if self.backend and self.backend.tool_executor:
+                self.backend.tool_executor.set_workdir(temp_dir)
+            return temp_dir
+        except Exception as e:
+            logger.warning(f"[MainWidget] 创建临时页工作目录失败: {e}")
+            return ""
+
+    @staticmethod
+    def _cleanup_orphan_temp_pages():
+        """启动清扫：删除 {app_data}/tmp-sessions/ 下所有孤儿目录
+
+        临时对话页目录本应随窗口关闭删除；崩溃/强杀进程时会残留，
+        启动时统一清扫（此刻尚无存活临时页，全删安全）。
+        """
+        try:
+            import shutil
+
+            base = get_app_data_dir() / "tmp-sessions"
+            if not base.is_dir():
+                return
+            removed = 0
+            for child in base.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                    removed += 1
+            if removed:
+                logger.info(f"[MainWidget] 启动清扫：已删除 {removed} 个临时页残留目录")
+        except Exception as e:
+            logger.warning(f"[MainWidget] 启动清扫临时页目录失败: {e}")
+
     def _on_title_edit_finished(self):
         """标题编辑完成 - 保存用户编辑的标题"""
         new_title = self.title_edit.text().strip()
@@ -22923,6 +22818,17 @@ class OpenAIChatToolWindow(ToolWindow):
         for win in window_registry.alive_window_instances():
             if getattr(win, "_is_destroyed", False):
                 continue
+            # 临时对话页：退出时删除整页临时目录（对齐 closeEvent 行为）
+            if win.__dict__.get("_is_temp_scope", False):
+                try:
+                    import shutil
+
+                    shutil.rmtree(
+                        str(get_app_data_dir() / "tmp-sessions" / str(getattr(win, "_window_id", ""))),
+                        ignore_errors=True,
+                    )
+                except Exception:
+                    pass
             try:
                 win._auto_save_current_session()
             except Exception:
@@ -22952,6 +22858,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _auto_save_current_session(self, flush_mode: str = "sync"):
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
+            return
+
+        # 临时对话页守卫：页内会话一律不落盘、不进历史（守卫链最前，先于一切持久化路径）
+        if getattr(session, "is_temp", False):
             return
 
         # 跳过没有用户消息的会话（SessionStart hook 产生的空会话不应保存到历史）
@@ -23311,6 +23221,17 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
+            # 临时对话页：关闭时删除整页临时工作目录（不入回收站，ignore_errors 防文件占用）。
+            # ★ 必须在 cancel_streaming 之后：流式中关页时 worker 还持有 tmp 目录内
+            # 文件句柄，先删会因 Windows 句柄锁基本失败（review m3）
+            if self.__dict__.get("_is_temp_scope", False):
+                try:
+                    import shutil
+
+                    shutil.rmtree(str(get_app_data_dir() / "tmp-sessions" / str(self._window_id)), ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"[MainWidget] 清理临时页目录失败: {e}")
+
             # 🛡️ 强制关窗路径独立计算并持久化累计运行时长（elapsed）
             #
             # 关键：_on_stop_clicked 第一阶段才会计算 self._stop_elapsed（从
@@ -23404,8 +23325,9 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         # ★ B4 温和层：窗口关闭时全局观测计数递减（本窗口已渲染卡片数）
-        global _global_rendered_pages
-        _global_rendered_pages = max(0, _global_rendered_pages - self._rendered_card_count)
+        memory_governor._global_rendered_pages = max(
+            0, memory_governor._global_rendered_pages - self._rendered_card_count
+        )
         # ★ B4 强回收层：进程退出整体回收，不 kill（窗口销毁时 renderer
         # 子进程随 WebEngine profile 自动退出，显式 kill 反而可能误伤共享进程）
         self._unloaded_pids.clear()
@@ -24044,149 +23966,3 @@ def _is_plugin_override(module_id: str) -> bool:
         return any(name != "system" for name, _p, _f in slot)
     except Exception:
         return False
-
-
-def _is_sip_deleted(obj) -> bool:
-    """判断 PyQt 对象是否已被 C++ 侧销毁（防御 wrapped C/C++ object has been deleted）。
-
-    destroyed 信号在 C++ 对象真正销毁时触发，此时 Python 侧的 self 仍存在但
-    C++ 包装已失效，访问 self 的任何 Qt 属性都会抛 RuntimeError。
-    用于 destroyed 回调 / 清理路径的入口守卫，静默返回 False 兜底。
-    """
-    try:
-        return sip.isdeleted(obj)
-    except Exception:
-        return False
-
-
-# GC 钩子（T9）：模块级防抖标志，150ms 内多次触发只执行一次。
-_gc_hook_pending = False
-
-
-# ── B4 温和层：WebEngine 并发页上限（T12 蓝图） ──
-# 每渲染卡 ~64MB renderer 进程，长对话必须锁峰值：
-# 温和层：并发页 ≤ _MAX_RENDERED_CARDS（18 = 可视 12 批 + 上下 6 批缓冲）。
-# 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
-# 2026-09-09 内存治理：18 → 12（可视 ~8 批 + 上下 4 批缓冲）。真机日志显示
-# 大会话（60+ 批次）内存主体是**并发 WebEngine 页数**而非单卡 HTML 体积
-# （单卡 DOM 数百 KB vs 每页数十 MB 常驻），砍 6 页 ≈ 直接省下数百 MB，
-# 且历史渲染已异步化，回滚重建不再阻塞主线程。
-_MAX_RENDERED_CARDS = 12
-_global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
-
-# ── B4 温和层：跨窗口全局渲染页闸门 ──
-# [PERF] _MAX_RENDERED_CARDS 原本是 **per-window** 常量，多窗口场景下
-# N 窗口 = N×18 张已渲染卡片常驻。每张卡片的 DOM/JS heap 都要挤在
-# --renderer-process-limit 封顶的那几个 renderer 进程里，内存随窗口数线性增长
-# （4 窗口 ≈ 72 页）。改为全局配额：新窗口只能分到「全局剩余配额」，
-# 但每窗口至少保留 _MIN_RENDERED_CARDS_PER_WINDOW 张 —— 宁可全局超限，
-# 也不能让某个窗口白屏（可用性优先于内存）。
-_MAX_GLOBAL_RENDERED_PAGES = 32  # 跨窗口并发渲染页硬闸门
-_MIN_RENDERED_CARDS_PER_WINDOW = 6  # 每窗口保底页数（闸门的下限保护）
-# [MEM] 保底页数的收缩下限。原实现保底是常量 6 —— N 个窗口必然 N×6 页
-# （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），_MAX_GLOBAL_RENDERED_PAGES=32
-# 被完全架空。现在保底随存活窗口数收缩，但降到本值即停，避免窗口被饿死到白屏。
-_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR = 3
-
-# ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
-# 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
-# 避免仅主进程内存高（如 Python 堆）时误杀 renderer。
-# [MEM] 强回收的主判据已改为 WebEngine 子进程 RSS（见 _over_memory_threshold）。
-# 实测（tools/diag_webengine_mem_probe.py，dpr=2.25）：并发 8 个 QWebEngineView
-# 让子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存主体全在 renderer 子进程，
-# 拿主进程 RSS 当门槛等于永远够不着，强回收永不触发 → 子进程一路涨到 4GB。
-_WEB_MEM_THRESHOLD_MB = 600  # 非活跃窗口：WebEngine 子进程 RSS 触发阈值
-_WEB_MEM_THRESHOLD_MB_ACTIVE = 1000  # 活跃窗口：阈值更高，避免滚动回看时重建抖动
-# 兜底：子进程采样不可用时（无 psutil / 尚未创建 view）退回主进程 RSS 判据
-_MEM_THRESHOLD_TOTAL_MB = 900
-_LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
-_KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
-_KILL_BATCH_MAX = 12  # 每轮最多 kill
-_OFFSCREEN_BATCHES_FOR_KILL = 8  # 距可视区 ≥8 批才可 kill（严格离屏护栏）
-
-# ── 活跃窗口强回收（修复「活跃窗口永不回收」导致的内存单调增长）──
-# 活跃窗口用户正在交互，回收需要更保守，但绝不能像旧实现那样直接跳过
-# （跳过 = 单窗口场景永不回收 = 内存溢出）。
-# - 阈值更高：避免刚过阈值就频繁 kill 造成重建抖动
-# - 保留更多：距可视区近的 renderer 留着，回滚时无需重建
-# - 离屏更远才 kill：只回收用户短期内不会滚回的批次
-# - 队列上限做最终兜底：护栏再严也保证队列与 renderer 进程数有界
-_MEM_THRESHOLD_TOTAL_MB_ACTIVE = 1400  # 活跃窗口阈值（高于非活跃的 900MB）
-_LRU_RENDERER_KEEP_ACTIVE = 14  # 活跃窗口保留更多最近 renderer（对比非活跃 8）
-_OFFSCREEN_BATCHES_FOR_KILL_ACTIVE = 12  # 活跃窗口要求离屏更远（对比非活跃 8）
-_UNLOADED_PIDS_MAX = 32  # _unloaded_pids 队列硬上限：超限强制 kill 最老的（背压兜底）
-
-
-def _run_gc_hook():
-    """GC 钩子执行体：清理全局渲染缓存 + 回收进程堆。
-
-    由 _schedule_gc_hook 防抖合并后调用（150ms singleShot），
-    全 try/except 吞异常，不影响主流程。
-    """
-    global _gc_hook_pending
-    _gc_hook_pending = False
-    try:
-        from app.widgets.message_card import clear_global_render_cache
-
-        clear_global_render_cache()
-    except Exception:
-        pass
-    try:
-        _compact_process_heap_after_cleanup()
-    except Exception:
-        pass
-
-
-def _cleanup_global_lru_caches():
-    """清理全局 LRU 缓存，释放旧会话渲染/估算占用的内存。
-
-    在新建会话、切换会话时调用，避免缓存的 HTML 渲染结果和 token 估算值累积。
-    """
-    try:
-        from app.widgets.message_card import clear_global_render_cache
-
-        clear_global_render_cache()
-    except Exception:
-        pass
-    try:
-        from app.core.infra.token_estimator import estimate_tokens
-
-        estimate_tokens.cache_clear()
-    except Exception:
-        pass
-    try:
-        from app.widgets.message_card import _render_tool_block_content
-
-        _render_tool_block_content.cache_clear()
-    except Exception:
-        pass
-    try:
-        from app.widgets.render_helpers import invalidate_render_caches
-
-        invalidate_render_caches()
-    except Exception:
-        pass
-    try:
-        from app.utils.utils import invalidate_icon_cache
-
-        invalidate_icon_cache()
-    except Exception:
-        pass
-    try:
-        from app.utils.provider_icons import invalidate_provider_icon_cache
-
-        invalidate_provider_icon_cache()
-    except Exception:
-        pass
-
-
-def _compact_process_heap_after_cleanup():
-    """卡片清理后触发 gc，回收 Python 对象图（T11：移除失效的 HeapCompact/malloc_trim）。
-
-    T10 实测：Python 3.14 下 ctypes.WinDLL("kernel32").HeapCompact 100% 抛
-    access violation（被 except 吞掉），主线程高频路径（新建/切换/恢复会话、
-    切换项目、undo）上制造无效异常开销；Linux malloc_trim 收益同样有限。
-    故移除两者，保留 gc.collect() —— pymalloc arena 的归还由 CPython
-    内存管理自行处理，gc 收集足够。
-    """
-    gc.collect()
