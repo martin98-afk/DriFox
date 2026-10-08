@@ -4,7 +4,7 @@
 目标：验证用原生 Qt 控件替换 CodeWebViewer (QWebEngineView) 的视觉还原度。
 覆盖块类型：标题/段落(行内格式/链接/行内code)/列表/表格/引用/分隔线/
 代码块(Pygments 高亮+行号+复制)/think 折叠卡/<tool> 工具卡/
-「⚙ 工具与思考」折叠分区/任务列表(update_todo_list)。
+「⚙ 工具与思考」折叠分区。
 不含：ECharts(P2)、图片异步加载(P2)、diff 内嵌高亮(P2)。
 
 设计：
@@ -159,7 +159,6 @@ _BLOCK_ELEMENT_RE = re.compile(
 # 与 WebEngine 版 body.streaming-dock #tool-content 的 max-height 保持一致。
 # 原值 110（≈3-4 行）视觉上与"折叠"难区分，用户反馈误以为工具区默认收起。
 _DOCK_LOG_MAX = 220  # 工具卡区内滚限高 ≈8 行（web #tool-content max-height）
-_DOCK_TODO_H = 96  # 任务列表坞态固定高（web #todo-content height:96px）
 
 _QWIDGETSIZE_MAX = 16777215
 
@@ -1866,10 +1865,6 @@ class ToolSectionWidget(QWidget):
         self._cards_layout.setSpacing(2)
         ch.addLayout(self._cards_layout)
         ch.addStretch(1)
-        # 任务列表面板固定在卡片之后（对齐 WebEngine 版 DOM：#tool-content → #todo-panel）
-        self._panel_holder = QVBoxLayout()
-        self._panel_holder.setContentsMargins(0, 0, 0, 0)
-        cv.addLayout(self._panel_holder)
         root.addWidget(self._content_wrap)
         self.hide()
 
@@ -1896,9 +1891,6 @@ class ToolSectionWidget(QWidget):
         if b["type"] == "think":
             return ThinkCard(b["content"], b["completed"])
         return ToolCardWidget(b)
-
-    def attach_todo_panel(self, panel: QWidget) -> None:
-        self._panel_holder.addWidget(panel)
 
     # ── 坞态接口（对齐 WebEngine 版 body.streaming-dock） ──
     def enter_dock(self) -> None:
@@ -1970,97 +1962,6 @@ class ToolSectionWidget(QWidget):
             self._content_wrap.setVisible(False)
 
 
-class TodoPanel(QWidget):
-    """任务列表面板：分隔条(todo.svg 图标) + 进度 + 状态条目（对齐 WebEngine 版 .todo-item 视觉）。
-
-    列表区常驻 QScrollArea：坞态固定高 _DOCK_TODO_H 内滚（web #todo-content
-    height:96px 语义，切断工具区流式抖动向 todo 传导），非坞态无限高。
-    """
-
-    _PRI_COLORS = {"high": "#ef4444", "medium": "#f59e0b", "low": "#3b82f6"}
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 2, 0, 2)
-        root.setSpacing(2)
-        self._separator = _SeparatorRow("任务列表", self, icon_name="todo")
-        self._separator.clicked.connect(self._toggle)
-        root.addWidget(self._separator)
-        self._list_scroll = ScrollArea(self)
-        self._list_scroll.setWidgetResizable(True)
-        self._list_scroll.setFocusPolicy(Qt.NoFocus)
-        self._list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._list_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._list_scroll.setStyleSheet(
-            "QScrollArea { background:transparent; border:none; }\n" + get_unified_scrollbar_style(6)
-        )
-        self._list_wrap = QWidget()
-        self._list_wrap.setStyleSheet("background:transparent;")
-        self._list_scroll.setWidget(self._list_wrap)
-        lw = QVBoxLayout(self._list_wrap)
-        lw.setContentsMargins(6, 2, 6, 2)
-        lw.setSpacing(1)
-        self._list_layout = QVBoxLayout()
-        self._list_layout.setContentsMargins(0, 0, 0, 0)
-        self._list_layout.setSpacing(1)
-        lw.addLayout(self._list_layout)
-        lw.addStretch(1)
-        root.addWidget(self._list_scroll)
-        self._collapsed = False
-        self.hide()
-
-    def set_dock(self, active: bool) -> None:
-        """坞态任务列表固定高（对齐 web #todo-content height:96px）。"""
-        if active:
-            self._list_scroll.setFixedHeight(_DOCK_TODO_H)
-            self._list_scroll.setMaximumHeight(_DOCK_TODO_H)
-        else:
-            self._list_scroll.setMinimumHeight(0)
-            self._list_scroll.setMaximumHeight(_QWIDGETSIZE_MAX)
-
-    def update_todos(self, todos: List[Dict[str, Any]]) -> None:
-        todos = list(todos or [])
-        while self._list_layout.count():
-            item = self._list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        done = 0
-        for t in todos:
-            status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
-            raw = (t.get("content") if isinstance(t, dict) else t) or ""
-            # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（html.escape 只收 str）
-            content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
-            if status == "completed":
-                done += 1
-            self._list_layout.addWidget(QLabel(self._render_item(status, content, priority)))
-        total = len(todos)
-        self._separator.set_extra(f"{done}/{total} 已完成" if total else "")
-        self.setVisible(bool(todos))
-
-    def _render_item(self, status: str, content: str, priority: str) -> str:
-        esc = _html_mod.escape(content)
-        base_css = f"{get_font_family_css()} font-size:{scale_font_size(13)}px; background:transparent;"
-        if status == "completed":
-            return (
-                f'<div style="{base_css}"><span style="color:#3fb950;font-weight:700;">✓</span> '
-                f'<span style="color:{Colors.ASSISTANT_CARD_MUTED};text-decoration:line-through;">{esc}</span></div>'
-            )
-        if status == "in_progress":
-            warm = "#d97706" if _is_light_theme() else "#f59e0b"
-            return (
-                f'<div style="{base_css}"><span style="color:{warm};">⟳</span> <b style="color:{warm};">{esc}</b></div>'
-            )
-        pri = self._PRI_COLORS.get(priority, self._PRI_COLORS["medium"])
-        return f'<div style="{base_css}"><span style="color:{pri};">○</span> <span style="color:{Colors.ASSISTANT_CARD_TEXT};">{esc}</span></div>'
-
-    def _toggle(self) -> None:
-        self._collapsed = not self._collapsed
-        self._separator.set_collapsed(self._collapsed)
-        self._list_scroll.setVisible(not self._collapsed)
-
-
 # ── 主渲染器 ──────────────────────────────────────────────────────
 class _NullPage:
     """CodeWebViewer.page() 的 no-op 替身：吞掉所有 JS 调用（灰度兼容层）。"""
@@ -2112,8 +2013,7 @@ class MarkdownBlockViewer(QWidget):
     """纯 Qt 块级消息正文渲染器（CodeWebViewer 替换原型）。
 
     对外接口与 CodeWebViewer 对齐：append_chunk / finish_streaming /
-    refresh_theme / get_plain_text / contentHeightChanged；
-    任务列表：update_todo_list(todos)（签名同 MessageCard.update_todo_list）。
+    refresh_theme / get_plain_text / contentHeightChanged。
     """
 
     contentHeightChanged = pyqtSignal(int)
@@ -2129,7 +2029,7 @@ class MarkdownBlockViewer(QWidget):
         # ── 坞态（Streaming Dock）状态 ──
         self._dock_active = False
         # ── CodeWebViewer 兼容属性（MessageCard 动态读写） ──
-        self._is_js_ready = True  # _push_todo_list 判断：Qt 渲染器始终"就绪"
+        self._is_js_ready = True  # Qt 渲染器无 JS 层，恒为就绪态
         self._tool_compact_mode = True  # 简洁模式：工具卡默认折叠（坞态仅此模式启用）
         self._needs_full_render = True
         self._stable_html = ""
@@ -2144,11 +2044,8 @@ class MarkdownBlockViewer(QWidget):
         self._vbox.setSpacing(2)
         Colors.refresh()
 
-        # 「工具与思考」区在正文之上（对齐 WebEngine 版 DOM 顺序），
-        # todo panel 挂在其内部（对齐 #todo-panel 位于 #tool-section 内）
+        # 「工具与思考」区在正文之上（对齐 WebEngine 版 DOM 顺序）
         self._tool_section = ToolSectionWidget(self)
-        self._todo_panel = TodoPanel(self)
-        self._tool_section.attach_todo_panel(self._todo_panel)
         # 正文块统一挂独立容器：坞态搬移只动 tool_section，body 追加顺序不受影响
         self._body_box = QWidget()
         self._body_box.setStyleSheet("background:transparent;")
@@ -2189,10 +2086,6 @@ class MarkdownBlockViewer(QWidget):
     def get_plain_text(self) -> str:
         return self._md
 
-    def update_todo_list(self, todos: List[Dict[str, Any]]) -> None:
-        """更新任务列表（签名同 MessageCard.update_todo_list）。空列表隐藏。"""
-        self._todo_panel.update_todos(list(todos or []))
-
     def refresh_theme(self) -> None:
         Colors.refresh()
         self._reconcile(force=True)
@@ -2224,8 +2117,8 @@ class MarkdownBlockViewer(QWidget):
     def _sync_streaming_dock(self, active: bool) -> None:
         """流式活动坞（对齐 WebEngine 版 _setStreamingDock）：
 
-        简洁模式 + 流式期间：工具/思考区从顶部沉底、卡片区限高内滚、任务列表
-        固定高 → 卡片底部一块固定高度的实时日志；流式结束归位顶部并折叠。
+        简洁模式 + 流式期间：工具/思考区从顶部沉底、卡片区限高内滚 →
+        卡片底部一块固定高度的实时日志；流式结束归位顶部并折叠。
         纯 layout 搬移（同 widget remove+add），无控件重建，无闪烁。
         正文高度交给外层聊天滚动链路（流式自动滚底跟随，视口底部即日志区），
         不做 viewer 级限高——QScrollArea 尺寸协商会撑爆卡片高度（实测教训）。
@@ -2239,11 +2132,9 @@ class MarkdownBlockViewer(QWidget):
         if on:
             self._vbox.addWidget(self._tool_section)  # 沉底
             self._tool_section.enter_dock()
-            self._todo_panel.set_dock(True)
         else:
             self._vbox.insertWidget(0, self._tool_section)  # 归位顶部
             self._tool_section.exit_dock()
-            self._todo_panel.set_dock(False)
         QTimer.singleShot(0, lambda: self.contentHeightChanged.emit(self.height()))
 
     def _copy_to_clipboard(self, copy_selection: bool = False) -> None:

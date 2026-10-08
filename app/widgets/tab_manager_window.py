@@ -1572,12 +1572,14 @@ class TabManagerWindow(FramelessWindow):
         force: bool = False,
         force_plugin: str = "",
     ) -> None:
-        """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
+        """从当前活跃窗口拉取数据填充工作台（产物/项目记忆）
 
         数据源均为既有单一数据源：
         - 产物：backend.file_recorder 会话级文件写入记录
-        - 任务：窗口 _latest_todos（todowrite 结果联动缓存），缺失回退 tool_executor
         - 项目：win._current_project + _current_workdir → MemoryCardContent
+
+        任务（todowrite）已迁至消息卡片内嵌看板（见 app/widgets/inline_todo_panel.py），
+        不再属于工作台数据。
 
         force=True：插件页强制重建（ui 热重载后签名未变但实现已变）。
 
@@ -1599,8 +1601,6 @@ class TabManagerWindow(FramelessWindow):
             )
         except Exception:
             pass
-        win = self.get_current_window()
-        backend = getattr(win, "backend", None) if win is not None else None
         # 当前页数据刷新：页面自拉（插件页可选协议 refresh_data()）。
         # ★ 宿主不再为具体页面推送数据（原 update_project / update_artifacts），
         #   页面自己从 context / 活跃窗口取数，面板保持零页面语义。
@@ -1608,14 +1608,6 @@ class TabManagerWindow(FramelessWindow):
             panel.refresh_current_page_data()
         except Exception:
             logger.exception("[Workbench] 当前页数据刷新失败")
-        # 任务：优先窗口缓存（todowrite 结果联动），缺失回退 tool_executor 实时读
-        todos = getattr(win, "_latest_todos", None)
-        if not todos and backend is not None and getattr(backend, "_tool_executor", None) is not None:
-            try:
-                todos = backend._tool_executor.get_todos()
-            except Exception:
-                todos = []
-        panel.update_todos(todos or [])
 
     def _deferred_workbench_refresh(self, win, saved_tab, seq: int = 0) -> None:
         """切标签后的工作台数据刷新（延迟一帧执行，见 _on_tab_selected）

@@ -146,7 +146,6 @@ from app.widgets.card_render_core import (
     _CODE_FONT_SIZE,
     _FILE_EDIT_TOOLS_FALLBACK_TEXT,
     _MAX_CHART_PAYLOAD_B64,
-    _MarkdownBlockViewerCls,
     _PLACEHOLDER_QSS,
     _QWIDGETSIZE_MAX,
     _RESIZE_GHOST_QSS,
@@ -304,9 +303,11 @@ class MessageCard(SimpleCardWidget):
         # 缺失此标志时，本轮消息在虚拟滚动回收重建后会被误判为历史而突然折叠。
         self._streaming_finished = False
         self._retrying = False  # 重试模式标志
-        # 任务列表快照（卡片底部内嵌 todo 区数据）：viewer 未创建/JS 未就绪时
-        # 暂存，viewer 就绪后补推；骨架重载后据此恢复。
-        self._todos_snapshot: Optional[list] = None
+        # 卡片底部内嵌任务看板（懒创建：首个非空任务到达时才建，挂气泡内正文下方）
+        self._todo_panel = None
+        self._todo_panel_host = None  # 面板挂载的布局容器（气泡布局）
+        self._todo_panel_todos: list = []  # 任务数据快照（重建补推用）
+        self._todo_panel_height_cache = 0  # 面板占高缓存（高度增量上报用）
         self._retry_error_type = ""  # 重试错误类型
         self._retry_attempt = 0  # 当前重试次数
         self._retry_max = 15  # 最大重试次数
@@ -626,6 +627,12 @@ class MessageCard(SimpleCardWidget):
                 self._welcome_indicator_ctl.indicator.update()
             except RuntimeError:
                 self._welcome_indicator_ctl = None
+        # 内嵌任务看板：行式条目/进度条/置顶条的 QSS 在构造期固化，需随主题重放
+        if self._todo_panel is not None:
+            try:
+                self._todo_panel.refresh_style()
+            except RuntimeError:
+                self._todo_panel = None
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
@@ -2548,9 +2555,9 @@ class MessageCard(SimpleCardWidget):
             self.viewer._markdown_text = markdown_text
             self.viewer._schedule_render(immediate=True)
 
-        # 任务列表随 viewer 重建补推（_pending_todos 由 viewer._on_js_ready 消费）
-        if self._todos_snapshot is not None:
-            self._push_todo_list()
+        # 任务看板是原生 Qt 控件，不随 viewer 重建；仅补推一次数据（幂等，签名未变会跳过）
+        if self._todo_panel is not None:
+            self._todo_panel.update_todos(self._todo_panel_todos or [])
 
         # 恢复正常样式
         self._apply_card_style()
@@ -2765,7 +2772,7 @@ class MessageCard(SimpleCardWidget):
     def is_user_reading_inside(self) -> bool:
         """用户是否正在卡片内部（WebEngine 侧）滚动阅读。
 
-        body / #content-placeholder / #tool-content / #todo-content 任一容器被
+        body / #content-placeholder / #tool-content 任一容器被
         用户上滚即为 True。WebEngine 内滚动不会移动 Qt 滚动条，宿主的
         ``_user_intentionally_away_from_bottom`` 对卡内阅读完全失明；外层滚底
         判定必须显式查询此状态让位，否则流式中每个高度变化都会把卡片拉回
@@ -3674,8 +3681,6 @@ class MessageCard(SimpleCardWidget):
                 self._viewer_layout.addWidget(self.viewer)
                 self._lazy_rendered = True
                 self._render_deferred = False
-                if self._todos_snapshot is not None:
-                    self._push_todo_list()
                 if self._pending_content is not None:
                     self.set_content(self._pending_content)
                     self._pending_content = None
@@ -3746,10 +3751,6 @@ class MessageCard(SimpleCardWidget):
             # 创建 viewer 完成（不可见门控已放行），清除"推迟渲染"标记；
             # 若下方 set_content 因 JS 未就绪再次 deferred，由 _on_js_ready 兜底补渲。
             self._render_deferred = False
-
-            # 任务列表随 viewer 创建补推（JS 未就绪时由 _on_js_ready 兜底）
-            if self._todos_snapshot is not None:
-                self._push_todo_list()
 
             # 如果有等待渲染的内容，现在渲染
             if self._pending_content is not None:
@@ -4891,51 +4892,89 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             pass
 
-    # ── 任务列表（卡片底部内嵌 todo 区，替代原悬浮卡片）──
+    # ── 任务看板（卡片内嵌 · 气泡内正文下方、页脚上方）──
 
     def update_todo_list(self, todos):
-        """更新卡片底部任务列表
+        """更新卡片内嵌任务看板（原生 Qt 面板，不进 WebEngine）
+
+        面板懒创建：首个非空任务到达时才建，挂进 assistant 气泡布局的末尾
+        （正文 viewer 之后、页脚之前）；空列表不建面板（无任务零高度）。
 
         Args:
             todos: [{status: pending|in_progress|completed, content: str, priority: ...}, ...]
-                   空列表 → 隐藏任务区。
+                   空列表 → 隐藏任务区（面板保留实例，只隐藏）。
         """
-        self._todos_snapshot = list(todos or [])
-        self._push_todo_list()
+        self._todo_panel_todos = list(todos or [])
+        if self.role != "assistant":
+            return
+        if not self._todo_panel_todos or self._assistant_bubble is None:
+            panel = self._todo_panel
+            if panel is not None:
+                panel.update_todos(self._todo_panel_todos)
+            return
+        panel = self._ensure_todo_panel()
+        if panel is not None:
+            panel.update_todos(self._todo_panel_todos)
 
-    def _push_todo_list(self):
-        """把 _todos_snapshot 推送到 viewer 内的 #todo-section
+    def clear_todo_list(self):
+        """清空并卸载任务看板（任务迁往新卡片时由宿主调用）
 
-        viewer 未创建（懒加载）/ JS 未就绪时仅写 viewer._pending_todos，
-        由 viewer 创建点或 _on_js_ready 兜底补推。
+        面板实例随卡片存活，此处只清空数据 + 隐藏，避免重建同一张卡片时
+        重新创建控件。面板从布局中摘除（任务看板只属于最新卡片）。
         """
-        v = self.viewer
-        if v is None:
+        self._todo_panel_todos = []
+        panel = self._todo_panel
+        if panel is None:
             return
-        # 灰度：纯 Qt viewer 走原生任务列表面板
-        # 延迟导入：未开启灰度时 _MarkdownBlockViewerCls 为 None，
-        # 此时 viewer 必然是 CodeWebViewer，跳过判断即可。
-        _qt_cls = _MarkdownBlockViewerCls
-        if _qt_cls is not None and isinstance(v, _qt_cls):
-            v.update_todo_list(self._todos_snapshot or [])
-            return
-        if not isinstance(v, CodeWebViewer):
-            return
-        v._pending_todos = self._todos_snapshot
-        if not getattr(v, "_is_js_ready", False):
-            return
+        panel.update_todos([])
+        host = self._todo_panel_host
+        if host is not None:
+            host.removeWidget(panel)
+
+    def _ensure_todo_panel(self):
+        """懒创建任务看板并挂进气泡布局末尾（正文 viewer 之后、页脚之前）"""
+        if self._todo_panel is not None:
+            host = self._todo_panel_host
+            if host is not None and host.indexOf(self._todo_panel) < 0:
+                host.addWidget(self._todo_panel)
+            return self._todo_panel
         try:
-            payload = [
-                {
-                    "status": item.get("status", "pending") if isinstance(item, dict) else "pending",
-                    "content": escape(item.get("content", "") if isinstance(item, dict) else str(item)),
-                    # 优先级：high/medium/low（来自 todowrite 工具 _normalize_todos 默认 medium）
-                    "priority": (item.get("priority", "medium") if isinstance(item, dict) else "medium") or "medium",
-                }
-                for item in (self._todos_snapshot or [])
-            ]
-            data = json.dumps(payload).decode("utf-8")
-            v.page().runJavaScript(f"window._updateTodoList && window._updateTodoList({data});")
+            from app.widgets.inline_todo_panel import InlineTodoPanel
+
+            panel = InlineTodoPanel(self._assistant_bubble)
+        except Exception as e:
+            logger.warning(f"[MessageCard] 任务看板创建失败: {e}")
+            return None
+        # 面板高度变化（折叠切换 / 任务增减）→ 重算卡片高度并上报外层锚定
+        panel.heightChanged.connect(lambda _p=panel: self._on_todo_panel_height_changed())
+        bubble_lay = self._assistant_bubble.layout()
+        if bubble_lay is not None:
+            bubble_lay.addWidget(panel)
+            self._todo_panel_host = bubble_lay
+        self._todo_panel = panel
+        return panel
+
+    def _on_todo_panel_height_changed(self):
+        """任务看板高度变化：重算卡片高度并通知外层做锚定补偿
+
+        ``_last_height_delta`` 是外层滚动锚定补偿的增量令牌（见 main_widget
+        ``_on_message_card_height_changed``）；面板显隐/折叠/任务增减都会改变
+        气泡高度，这里按面板自身占高差给出增量，让视口不因面板展开而漂移。
+        """
+        try:
+            panel = self._todo_panel
+            cur = panel.sizeHint().height() if (panel is not None and panel.isVisible()) else 0
+            prev = getattr(self, "_todo_panel_height_cache", 0)
+            self._todo_panel_height_cache = cur
+            delta = int(cur - prev)
+            if not delta:
+                return
+            bubble = getattr(self, "_assistant_bubble", None)
+            if bubble is not None:
+                bubble.updateGeometry()
+            self.updateGeometry()
+            self._last_height_delta += delta
+            self.heightChanged.emit(self.height())
         except RuntimeError:
             pass
 

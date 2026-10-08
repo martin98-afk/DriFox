@@ -3090,7 +3090,11 @@ _SKELETON_CACHE_MAX = 48
 # 折叠同帧合并（两个 max-height 变化合成一条 220px→0 过渡曲线），消除结束态
 # 「归位展开到自然高度峰值→再折叠」的往返峰（剧烈抖动主因）。旧骨架无此参数，
 # 归位仍两段式 → 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 36
+# v37（2026-10-08）：任务看板迁出 WebEngine——#todo-panel/#todo-content DOM、
+# .todo-item 全套 CSS、window._updateTodoList / _todoCount / _todoProgressText
+# 全部删除；任务区改由卡片内原生 Qt 面板承担（app/widgets/inline_todo_panel.py）。
+# 旧骨架仍带 todo DOM 与 JS（虽无数据源、恒隐藏），必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 37
 
 
 def _js_literal(value) -> str:
@@ -3569,12 +3573,6 @@ _STREAMING_DOCK_CSS = """
                 body.streaming-dock #tool-content {
                     max-height: 220px;
                 }
-                /* 任务列表坞态：固定高度（非仅 max-height）——切断工具区流式抖动向 todo 传导，
-                   项目增减时限高内高度也不变，流式期间观感稳定 */
-                body.streaming-dock #todo-content {
-                    height: 96px;
-                    max-height: 96px;
-                }
 """
 
 _STREAMING_DOCK_JS = """
@@ -3672,8 +3670,6 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0; }
                     var t = document.getElementById('tool-content');
                     if (t) { t.innerHTML = ''; t.scrollTop = 0; }
-                    var td = document.getElementById('todo-content');
-                    if (td) { td.innerHTML = ''; td.scrollTop = 0; }
                     var ts = document.getElementById('tool-section');
                     if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
                     // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）
@@ -3918,7 +3914,7 @@ _FLIP_JS = """
                 window._flipCapture = function () {
                     if (!(window._flipArmedUntil > performance.now())) return null;
                     var map = new Map();
-                    ['tool-section', 'content-placeholder', 'todo-section'].forEach(function (id) {
+                    ['tool-section', 'content-placeholder'].forEach(function (id) {
                         var el = document.getElementById(id);
                         if (el) map.set('#' + id, el.getBoundingClientRect());
                     });

@@ -103,7 +103,6 @@ from app.widgets.card_render_core import (
     _SKELETON_CACHE_VERSION,
     _STREAMING_DOCK_CSS,
     _STREAMING_DOCK_JS,
-    _THINK_SNAKE_SVG,
     _TYPEWRITER_JS,
     _accent_rgba,
     _defer_emit,
@@ -1079,7 +1078,6 @@ class CodeWebViewer(QWebEngineView):
         self._cached_raw_md_hash = 0
         self._last_rendered_html = None
         self._render_deferred = False
-        self._pending_todos = None
         if hasattr(self, "_tool_md_cache"):
             with contextlib.suppress(Exception):
                 self._tool_md_cache.clear()
@@ -1267,15 +1265,6 @@ class CodeWebViewer(QWebEngineView):
             self._renderer_pid = self.page().renderProcessPid()
         except Exception:
             self._renderer_pid = 0
-        # 任务列表补推：骨架重载（主题/字体变化 setHtml）会清空 JS 注入的
-        # todo DOM；JS 就绪后按 _pending_todos 快照重推，保证卡片底部
-        # 任务列表在骨架重建后不丢失。
-        if getattr(self, "_pending_todos", None) is not None:
-            try:
-                payload = json.dumps(self._pending_todos).decode("utf-8")
-                self.page().runJavaScript(f"window._updateTodoList && window._updateTodoList({payload});")
-            except RuntimeError:
-                pass
 
     def _load_skeleton(self):
         # 获取系统字体
@@ -1525,10 +1514,9 @@ class CodeWebViewer(QWebEngineView):
                 body::-webkit-scrollbar-track {{
                     background: transparent;
                 }}
-                /* 内层滚动容器（工具区/任务列表/思考体/工具结果）轨道同样隐形：
+                /* 内层滚动容器（工具区/思考体/工具结果）轨道同样隐形：
                    常驻轨道(scroll) + 右 padding 扣减 6px，消除滚动条带来的右侧加宽 */
                 #tool-content::-webkit-scrollbar-track,
-                #todo-content::-webkit-scrollbar-track,
                 .think-content::-webkit-scrollbar-track,
                 .result-content::-webkit-scrollbar-track {{
                     background: transparent;
@@ -2909,116 +2897,6 @@ class CodeWebViewer(QWebEngineView):
                     overflow: hidden;
                 }}
 
-                /* ── 任务列表（工具区最底部）── */
-                #todo-panel {{
-                    margin: 2px 2px 0 2px;
-                }}
-                /* 工具区折叠时 todo 面板一起收起 */
-                #tool-section[data-collapsed="true"] #todo-panel {{
-                    display: none;
-                }}
-                /* 任务列表分隔线（与 #tool-separator 同源样式）：标题+完成统计嵌在分隔线中间，任务项在其下 */
-                #todo-separator {{
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    font-size: 13px;
-                    color: var(--text-muted);
-                    user-select: none;
-                    padding: 2px 2px 6px 2px;
-                }}
-                #todo-separator::before,
-                #todo-separator::after {{
-                    content: '';
-                    flex: 1;
-                    height: 1px;
-                    background: var(--border);
-                    opacity: 0.6;
-                }}
-                #todo-separator #todo-progress {{
-                    font-size: 12px;
-                    color: var(--text-muted);
-                    white-space: nowrap;
-                }}
-                .todo-panel-header {{
-                    display: flex;
-                    align-items: center;
-                    gap: 6px;
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: var(--text-muted);
-                    user-select: none;
-                    padding: 2px 4px 3px 4px;
-                }}
-                /* 列表限高与 #tool-content 同尺度（600px），超出滚动 */
-                #todo-content {{
-                    position: relative;  /* 子项 offsetTop 相对本容器计算（in_progress 定位滚动依赖） */
-                    max-height: 600px;
-                    overflow-y: scroll;  /* 轨道常驻 + 右 padding 扣减：同 #tool-content */
-                    /* 🐛 修复（偶发横向滚动条）：同上 #tool-content，显式 hidden 阻止
-                       overflow-x 自动计算为 auto，避免长 todo 文本撑出横向滚动条 */
-                    overflow-x: hidden;
-                    overflow-anchor: none;
-                    background: transparent;
-                    border-radius: 6px;
-                    padding: 2px 0 2px 4px;
-                }}
-                .todo-item {{
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    padding: 4px 6px;
-                    font-size: {scale_font_size(13)}px;
-                    line-height: 1.5;
-                    color: var(--text);
-                }}
-                .todo-item + .todo-item {{
-                    margin-top: 1px;
-                }}
-                /* 进行中：左侧蛇形转圈（.think-snake 由 _animateThinkSnake 统一驱动） */
-                .todo-item .todo-spin {{
-                    display: inline-flex;
-                    align-items: center;
-                    justify-content: center;
-                    flex: 0 0 auto;
-                }}
-                .todo-item .todo-spin svg {{
-                    display: block;
-                }}
-                .todo-item[data-status="in_progress"] .todo-text {{
-                    color: var(--accent-warm);
-                    font-weight: 600;
-                }}
-                /* 完成：✓ + 划掉 */
-                .todo-item .todo-done-icon {{
-                    flex: 0 0 auto;
-                    color: rgba(63, 185, 80, 0.95);
-                    font-weight: 700;
-                }}
-                .todo-item[data-status="completed"] .todo-text {{
-                    color: var(--text-muted);
-                    text-decoration: line-through;
-                }}
-                /* 待办：○ */
-                .todo-item .todo-pending-icon {{
-                    flex: 0 0 auto;
-                    color: var(--text-muted);
-                }}
-                /* 优先级染色：仅影响待办 ○ 圆点（in_progress 是 SVG 动画、completed 是 ✓ 已带语义色） */
-                .todo-item[data-priority="high"] .todo-pending-icon {{
-                    color: #ef4444;
-                }}
-                .todo-item[data-priority="medium"] .todo-pending-icon {{
-                    color: #f59e0b;
-                }}
-                .todo-item[data-priority="low"] .todo-pending-icon {{
-                    color: #3b82f6;
-                }}
-                .todo-item .todo-text {{
-                    flex: 1 1 auto;
-                    min-width: 0;
-                    overflow-wrap: break-word;
-                }}
                 /* 新工具块入场动效 — 仅对"真正新"的块生效
                    （无 data-tool-call-id 且非 restore 的块）。
                    流式/恢复的块已有 data-tool-call-id 或 data-restored，跳过动画避免闪烁。 */
@@ -3052,10 +2930,6 @@ class CodeWebViewer(QWebEngineView):
                 <span class="tool-separator-tooltip">点击折叠/展开工具与思考区</span>
               </div>
               <div id="tool-content"></div>
-              <div id="todo-panel" style="display: none;">
-                <div id="todo-separator"><span>📋 任务列表</span><span id="todo-progress"></span></div>
-                <div id="todo-content"></div>
-              </div>
             </div>
             <div id="content-placeholder"></div>
             <script>
@@ -4177,7 +4051,7 @@ class CodeWebViewer(QWebEngineView):
                     // 故在高频回传中顺带携带 body 的 scrollTop / clientHeight，
                     // Python 侧据此算出真实可滚动量 = scrollHeight - clientHeight。
                     // 注意保持'|'分隔协议，旧解析器（仅高度）仍可工作。
-                    // 🐛 第 4 字段「卡片内阅读标志」：body/cp/tc/todo 任一被用户上滚
+                    // 🐛 第 4 字段「卡片内阅读标志」：body/cp/tc 任一被用户上滚
                     // 即为 1（语义与各容器自动滚底守卫同源，单一真相）。缺此字段时
                     // 流式每个高度变化都会把卡片拉回「底部对齐」固定姿态。
                     var _rd = (window._userScrolledWithin === true);
@@ -4186,8 +4060,6 @@ class CodeWebViewer(QWebEngineView):
                         if (_cpR && _cpR._userScrolledUp === true) _rd = true;
                         var _tcR = document.getElementById('tool-content');
                         if (_tcR && _tcR._userScrolledUp === true) _rd = true;
-                        var _tdR = document.getElementById('todo-content');
-                        if (_tdR && _tdR._userScrolledUp === true) _rd = true;
                     }} catch (_e) {{}}
                     console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0'));
                 }}
@@ -4252,8 +4124,8 @@ class CodeWebViewer(QWebEngineView):
                         '[data-tool-call-id]' + _EDIT_TOOLS_SELECTOR
                     );
                     if (blocks.length === 0) {{
-                        // 容器没有需要迁移的块 —— 若 tool-content 空且无 todo 就隐藏整个区
-                        if (toolContent.children.length === 0 && !window._todoCount) {{
+                        // 容器没有需要迁移的块 —— 若 tool-content 空就隐藏整个区
+                        if (toolContent.children.length === 0) {{
                             toolSection.style.display = 'none';
                             return;
                         }}
@@ -5131,131 +5003,6 @@ class CodeWebViewer(QWebEngineView):
                 new MutationObserver(_ensureThinkSnake).observe(document.body, {{ childList: true, subtree: true }});
                 _ensureThinkSnake();
 
-                // ===== 任务列表（嵌入工具区，随工具区折叠/归位/沉底）=====
-                var _TODO_SNAKE_SVG = '{_THINK_SNAKE_SVG}';
-                window._todoCount = 0;
-                window._todoProgressText = '';
-                window._updateTodoList = function(todos) {{
-                    var panel = document.getElementById('todo-panel');
-                    if (!panel) return;
-                    var content = document.getElementById('todo-content');
-                    var prog = document.getElementById('todo-progress');
-                    var ts = document.getElementById('tool-section');
-                    var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : null;
-                    if (!todos || !todos.length) {{
-                        window._todoCount = 0;
-                        window._todoProgressText = '';
-                        if (prog) prog.textContent = '';
-                        if (panel.style.display !== 'none') {{
-                            panel.style.display = 'none';
-                            // 无工具块时连工具区一起隐藏
-                            var _tc0 = document.getElementById('tool-content');
-                            if (ts && _tc0 && _tc0.children.length === 0) ts.style.display = 'none';
-                            if (hr) hr();
-                        }}
-                        if (ts && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
-                        return;
-                    }}
-                    var html = '';
-                    var done = 0;
-                    for (var i = 0; i < todos.length; i++) {{
-                        var t = todos[i] || {{}};
-                        var status = t.status || 'pending';
-                        if (status === 'completed') done++;
-                        var icon;
-                        if (status === 'in_progress') {{
-                            icon = '<span class="todo-spin">' + _TODO_SNAKE_SVG + '</span>';
-                        }} else if (status === 'completed') {{
-                            icon = '<span class="todo-done-icon">✓</span>';
-                        }} else {{
-                            icon = '<span class="todo-pending-icon">○</span>';
-                        }}
-                        html += '<div class="todo-item" data-status="' + status + '" data-priority="' + (t.priority || 'medium') + '">' + icon +
-                                '<span class="todo-text">' + (t.content || '') + '</span></div>';
-                    }}
-                    window._todoCount = todos.length;
-                    // 重建前保存用户滚动状态：innerHTML 重建会把 scrollTop 归零，
-                    // 且归零触发的 scroll 事件会误置 _userScrolledUp（用 _progScroll 吞掉）
-                    var _wasUp = !!content._userScrolledUp;
-                    var _prevTop = content.scrollTop;
-                    _progBegin(content);
-                    content.innerHTML = html;
-                    var progText = ' ' + done + '/' + todos.length + ' 完成';
-                    window._todoProgressText = progText;
-                    if (prog) prog.textContent = progText;
-                    panel.style.display = '';
-                    // 有 todo 时工具区必须可见（即使暂无工具/思考块）
-                    if (ts) ts.style.display = '';
-                    if (ts && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
-                    // 始终保持第一个进行中任务可见（列表超出限高时滚动到可视区）
-                    // 双 rAF：面板可能刚 display:''，等布局完成后再读 offsetTop/clientHeight。
-                    // 手动设 scrollTop 只动本容器，不扰动祖先链（scrollIntoView 会连带滚 body/工具区）。
-                    // 用户上滚查看中 → 恢复原位置；未滚动 → 定位到进行中项
-                    window._todoScrollToken = (window._todoScrollToken || 0) + 1;
-                    var _tk = window._todoScrollToken;
-                    requestAnimationFrame(function() {{
-                        requestAnimationFrame(function() {{
-                            if (_tk !== window._todoScrollToken) return;  // 已有更新，放弃旧滚动
-                            if (_wasUp) {{
-                                var _maxT = Math.max(0, content.scrollHeight - content.clientHeight);
-                                _progScroll(content, Math.min(_prevTop, _maxT));
-                                return;
-                            }}
-                            var act = content.querySelector('.todo-item[data-status="in_progress"]');
-                            if (!act) return;
-                            var target = act.offsetTop - (content.clientHeight - act.offsetHeight) / 2;
-                            var maxScroll = content.scrollHeight - content.clientHeight;
-                            _progScroll(content, Math.max(0, Math.min(target, Math.max(0, maxScroll))));
-                        }});
-                    }});
-                    if (hr) hr();
-                }};
-
-                // ===== 工具区（#tool-content）自动滚底 =====
-                // 当工具/思考区有新内容时，自动滚动到底部，让用户始终看到最新状态。
-                // 用户主动上滚后不再打扰（_userScrolledUp），滚回底部附近自动恢复跟随。
-                function _scrollToolContentToBottom() {{
-                    var tc = document.getElementById('tool-content');
-                    if (!tc) return;
-                    // 用户主动向上滚动了工具区则不自动滚底
-                    if (tc._userScrolledUp) return;
-                    // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
-                    // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
-                    // 会错误置位 _userScrolledUp 导致跟随中断。
-                    _progScroll(tc, tc.scrollHeight);
-                }}
-                // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
-                document.getElementById('tool-content')?.addEventListener('scroll', function() {{
-                    var tc = this;
-                    // 🐛 修复（流式滚动位置重置）：updateContent / save-restore 的 DOM
-                    // 操作窗口内 scrollTop 被钳制产生的程序性 scroll 事件（异步派发
-                    // 到达时 _suppressScrollEvent 已复位）不得误判为用户滚动——否则
-                    // 钳制位置恰在底部附近时 _userScrolledUp 被误复位 → 跟随重新激活
-                    // → 后续每次流式更新强制拉底，用户阅读位置反复丢失。与
-                    // #content-placeholder 监听的 _suppressScrollEvent 抑制对称。
-                    if (window._suppressScrollEvent) return;
-                    // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
-                    if (tc._progDepth > 0) {{ tc._progDepth--; return; }}
-                    var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
-                    tc._userScrolledUp = !atBottom;
-                    if (atBottom) tc._userScrolledUp = false;
-                }});
-                // 🐛 修复（流式滚动位置重置）：wheel 事件同步标记上滚意图——scroll
-                // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：
-                // 用户滚轮后 scroll 未派发，流式 JS 判 _userScrolledUp=false 抢先拉底
-                // 覆盖阅读位置。对齐 #content-placeholder 的 wheel 修复模式。
-                // 用户滚动意图绑定（wheel / 触摸 / 键盘），语义见 _bindUserScrollIntent
-                _bindUserScrollIntent(document.getElementById('tool-content'));
-                // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
-                document.getElementById('todo-content')?.addEventListener('scroll', function() {{
-                    var td = this;
-                    if (window._suppressScrollEvent) return;
-                    if (td._progDepth > 0) {{ td._progDepth--; return; }}
-                    var atBottom = Math.abs(td.scrollHeight - td.scrollTop - td.clientHeight) < 30;
-                    td._userScrolledUp = !atBottom;
-                    if (atBottom) td._userScrolledUp = false;
-                }});
-                _bindUserScrollIntent(document.getElementById('todo-content'));
                 {_STREAMING_DOCK_JS}
                 {_TYPEWRITER_JS}
                 {_PREVIEW_TYPEWRITER_JS}
@@ -6619,7 +6366,7 @@ class CodeWebViewer(QWebEngineView):
             "if(typeof _scrollToolContentToBottom==='function')_scrollToolContentToBottom();"
             "if(window._toolCompactMode){"
             "var _ts2=document.getElementById('tool-section');"
-            "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)||window._todoCount?'':'none';_updateToolSectionHeader();}"
+            "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
             "}"
             "})();"
         )
