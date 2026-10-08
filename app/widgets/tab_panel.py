@@ -1415,9 +1415,10 @@ class TabPanel(QWidget):
         self._new_chat_row.mousePressEvent = self._on_new_chat_row_clicked
         top_layout.addWidget(self._new_chat_row, 1)
         self._update_new_chat_icon()
-        # 项目统一 hover tooltip（禁用 Qt 原生样式；行/三点各自文案）
+        # 项目统一 hover tooltip（禁用 Qt 原生样式）。只挂行级一份：
+        # filter 覆盖整行几何（含 icon/文案/三点按钮），子控件穿越不闪断；
+        # 子控件再单独挂会造成同屏双 tooltip 叠加。
         install_hover_tooltip(self._new_chat_row, "新建对话")
-        install_hover_tooltip(self._new_more_btn, "更多新建方式")
 
         layout.addWidget(self._top_bar)
 

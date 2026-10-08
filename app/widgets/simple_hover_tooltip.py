@@ -498,6 +498,19 @@ class _HoverTooltipFilter(QObject):
             # 团队 header 按钮（关闭团队 close_btn 等）在团队关闭时随 header 容器
             # 隐藏，旧分支只捕 Hide/Leave/HoverLeave → tooltip 不隐藏 → 屏幕残留
             # "飘着的 tooltip"。补上 HideToParent 使容器隐藏即收掉 tooltip。
+            #
+            # 🛡️ 子控件穿越修复：鼠标从 widget 移入其子控件（如「新建对话」行的
+            # 文案/三点按钮）时，widget 会收到 Leave —— 光标其实仍在 widget
+            # 几何内。此处若直接隐藏，tooltip 就"显示一下又立马消失"。
+            # Leave/HoverLeave 先校验光标是否仍在目标几何内：在 → 不隐藏，
+            # 交由 _guard_check 兜底（光标真正离开 rect 才收）。
+            # Hide/HideToParent（容器被隐藏）无条件收起。
+            if t in (event.Leave, event.HoverLeave):
+                p2 = self._parent()
+                if p2 is not None and p2.isVisible():
+                    local = p2.mapFromGlobal(QCursor.pos())
+                    if p2.rect().contains(local):
+                        return False
             self._timer.stop()
             self._hide()
         elif t in (event.MouseButtonPress, event.MouseButtonDblClick):

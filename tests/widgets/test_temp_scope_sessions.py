@@ -385,6 +385,65 @@ class TestTempTabVisual:
         assert emitted == [], emitted
 
 
+class TestHoverTooltipChildTraversal:
+    """tooltip 子控件穿越修复：Leave 时光标仍在控件几何内不隐藏
+
+    场景：「新建对话」行含子控件（icon/文案/三点按钮），鼠标移入子控件时
+    行收到 Leave——旧行为直接隐藏 tooltip，表现为"显示一下又立马消失"。
+    """
+
+    def _leave_event(self):
+        from PyQt5.QtCore import QEvent
+
+        return QEvent(QEvent.Type.Leave)
+
+    def test_row_installs_single_filter(self, panel):
+        """行只挂一份 filter（三点按钮不重复安装，防同屏双 tooltip 叠加）"""
+        from app.widgets.simple_hover_tooltip import get_hover_filter
+
+        assert get_hover_filter(panel._new_chat_row) is not None
+        assert get_hover_filter(panel._new_more_btn) is None
+
+    def test_leave_with_cursor_inside_geometry_keeps_tooltip(self, panel, qtbot):
+        """Leave 时光标仍在行几何内（= 移到子控件上）→ 不隐藏"""
+        from PyQt5.QtCore import QPoint
+        from PyQt5.QtGui import QCursor
+        from app.widgets.simple_hover_tooltip import get_hover_filter
+
+        panel.show()
+        qtbot.waitExposed(panel)
+        row = panel._new_chat_row
+        row.resize(200, 32)
+        f = get_hover_filter(row)
+        hides = []
+        original_hide = f._hide
+        f._hide = lambda: hides.append(1)
+        try:
+            inside_global = row.mapToGlobal(QPoint(row.width() // 2, row.height() // 2))
+            with patch.object(QCursor, "pos", return_value=inside_global):
+                f.eventFilter(row, self._leave_event())
+            assert hides == [], "光标仍在行几何内（子控件上）不应隐藏 tooltip"
+        finally:
+            f._hide = original_hide
+
+    def test_leave_with_cursor_outside_geometry_hides_tooltip(self, panel):
+        """Leave 时光标已离开行几何 → 正常隐藏（原有行为不回退）"""
+        from PyQt5.QtCore import QPoint
+        from PyQt5.QtGui import QCursor
+        from app.widgets.simple_hover_tooltip import get_hover_filter
+
+        row = panel._new_chat_row
+        row.resize(200, 32)
+        f = get_hover_filter(row)
+        hides = []
+        f._hide = lambda: hides.append(1)
+        inside_global = row.mapToGlobal(QPoint(row.width() // 2, row.height() // 2))
+        outside_global = inside_global + QPoint(10000, 10000)
+        with patch.object(QCursor, "pos", return_value=outside_global):
+            f.eventFilter(row, self._leave_event())
+        assert len(hides) == 1, "光标真正离开几何应隐藏 tooltip"
+
+
 class TestNewChatRow:
     """顶栏改版：icon + 「新建对话」行 + 三点菜单（独立临时按钮已移除）"""
 
