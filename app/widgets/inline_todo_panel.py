@@ -6,7 +6,7 @@
 
 1. **默认折叠**：卡片空间宝贵，常态只占「分隔条 + 进度条 + 进行中常驻条」；
    用户点击分隔条（或右侧折叠按钮）展开完整清单。
-2. **展开限高**：列表区最大 ``_LIST_MAX_H`` 内滚，不把卡片撑成整屏。
+2. **展开全量**：列表不限高、不内滚，展开即完整展示全部待办。
 3. **无任务整区隐藏**：会话无待办时不占任何高度（与旧实现一致）。
 
 视觉与数据契约保持原样：分隔条（图标 + 标题 + 完成统计 + 折叠按钮）、
@@ -31,9 +31,6 @@ from app.utils.utils import _is_current_theme_light, get_font_family_css, get_ic
 from app.widgets._workbench_helpers import _SectionHeader
 from app.widgets.cards.floating.sub_agent_compact_widget import _RotatingIcon
 from app.widgets.elided_label import _ElidedLabel
-
-# 展开态列表限高：超出内滚，避免任务多时把卡片撑成整屏
-_LIST_MAX_H = 240
 
 
 class InlineTodoPanel(QWidget):
@@ -105,7 +102,7 @@ class InlineTodoPanel(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setFocusPolicy(Qt.NoFocus)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # 展开全量展示，不内滚
         self._scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }\n" + get_unified_scrollbar_style(6)
         )
@@ -116,7 +113,6 @@ class InlineTodoPanel(QWidget):
         self._list_layout.setContentsMargins(0, 0, 2, 0)
         self._list_layout.setSpacing(1)  # 行式条目：紧凑行距
         self._list_layout.addStretch(1)
-        self._scroll.setMaximumHeight(_LIST_MAX_H)
         self._scroll.setVisible(False)  # 默认折叠
         layout.addWidget(self._scroll)
 

@@ -2,7 +2,7 @@
 """InlineTodoPanel（消息卡片内嵌任务看板）回归测试
 
 看板从右侧工作台任务区迁入消息卡片气泡内（正文下方、页脚上方）后的行为契约：
-默认折叠、无任务整区隐藏、展开限高、进行中常驻条、条目渲染、高度变化信号。
+默认折叠、无任务整区隐藏、展开全量展示、进行中常驻条、条目渲染、高度变化信号。
 纯离屏（offscreen）运行。
 """
 
@@ -17,7 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtCore import Qt  # noqa: E402
 from PyQt5.QtWidgets import QFrame, QLabel, QWidget  # noqa: E402
 
-from app.widgets.inline_todo_panel import _LIST_MAX_H, InlineTodoPanel  # noqa: E402
+from app.widgets.inline_todo_panel import InlineTodoPanel  # noqa: E402
 
 
 @pytest.fixture()
@@ -96,9 +96,10 @@ def test_header_click_toggles_collapse(panel):
     assert panel.is_collapsed()
 
 
-def test_list_has_max_height(panel):
-    """展开态列表限高（不把卡片撑成整屏）"""
-    assert panel._scroll.maximumHeight() == _LIST_MAX_H
+def test_list_no_inner_scroll(panel):
+    """展开态列表不限高、不内滚，全量展示待办"""
+    assert panel._scroll.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+    assert panel._scroll.maximumHeight() == 16777215  # QWIDGETSIZE_MAX
 
 
 def test_running_row_visible_when_collapsed(panel):

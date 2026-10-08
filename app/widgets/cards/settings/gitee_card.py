@@ -9,12 +9,22 @@ Gitee 账号绑定设置卡片
 import hashlib
 import sip
 import threading
+import time
 import webbrowser
 from loguru import logger
 from PyQt5.QtCore import Qt, QSize, pyqtSignal, QPoint, QRectF, QTimer
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
-from PyQt5.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import FluentIcon, InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
 
 from app.core.infra import window_registry
 from app.utils.config import Settings
@@ -293,6 +303,8 @@ class GiteeAccountRow(QFrame):
         from qfluentwidgets import TransparentToolButton as _TransparentToolButton
 
         self._settings_btn = _TransparentToolButton(self)
+        # popup 关闭时刻（monotonic 秒）：防抖用，见 _toggle_popup
+        self._popup_closed_at = 0.0
         self._settings_btn.setIcon(_FIF.SETTING)
         btn_size = scale_font_size(24)
         self._settings_btn.setFixedSize(btn_size, btn_size)
@@ -467,6 +479,7 @@ class GiteeAccountRow(QFrame):
     def _on_bind(self):
         if self._binding:
             return
+
         dialog = _RepoVisibilityDialog(self.window())
         dialog.chosen.connect(self._start_oauth_with_backup)
         dialog.exec_()
@@ -599,6 +612,11 @@ class GiteeAccountRow(QFrame):
         if self._binding:
             return
 
+        # 防抖：Qt.Popup 被点击外部关闭的瞬间，⚙ 按钮的 click 才到达；
+        # 此时 _popup 已被置 None，不拦住就会「关闭后立刻重开」（表现为点切换失效）
+        if time.monotonic() - self._popup_closed_at < 0.3:
+            return
+
         # 防御性检查：如果 C++ 对象已被删除，清理引用
         if self._popup is not None and sip.isdeleted(self._popup):
             self._popup = None
@@ -671,20 +689,83 @@ class GiteeAccountRow(QFrame):
     def _on_popup_closed(self):
         """浮动卡片关闭后的清理"""
         self._popup = None
+        self._popup_closed_at = time.monotonic()
 
 
 # ── 浮动卡片 ──────────────────────────────────────────────
 
 
-class _GiteeMorePopup(QWidget):
-    """Gitee 更多操作浮动卡片 — WorkBuddy 风格
+def _menu_icon_pixmap(icon_src, size: int) -> QPixmap:
+    """菜单行图标 → QPixmap：字符串走主题感知资源图标，FluentIcon 枚举走动态主题图标"""
+    if isinstance(icon_src, str):
+        return get_icon(icon_src).pixmap(size, size)
+    if hasattr(icon_src, "qicon"):
+        return icon_src.qicon().pixmap(size, size)
+    if hasattr(icon_src, "icon"):
+        return icon_src.icon().pixmap(size, size)
+    return QPixmap()
 
-    点击 GiteeAccountRow 的 ⋮ 按钮后弹出，
-    包含账号绑定/解绑操作 + 快捷设置（主题、输出模式、桌宠）。
+
+class _MenuRow(QPushButton):
+    """WorkBuddy 风格菜单行：图标 + 文字 + 右侧插槽（开关/箭头），hover 圆角高亮
+
+    借 QPushButton 的 :hover/:pressed 伪类实现高亮；文字/图标子控件
+    设鼠标穿透保证整行 hover 生效。右侧交互控件（SwitchButton）自身
+    消费鼠标事件，点击开关时行高亮暂时消失属预期行为。
+    """
+
+    def __init__(self, icon_src, text: str, right: QWidget | None = None, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(scale_font_size(34))
+        row_layout = QHBoxLayout(self)
+        row_layout.setContentsMargins(scale_font_size(12), 0, scale_font_size(12), 0)
+        row_layout.setSpacing(scale_font_size(10))
+
+        icon_lbl = QLabel(self)
+        icon_lbl.setPixmap(_menu_icon_pixmap(icon_src, scale_font_size(16)))
+        icon_lbl.setFixedSize(scale_font_size(16), scale_font_size(16))
+        icon_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        row_layout.addWidget(icon_lbl)
+
+        text_lbl = QLabel(text, self)
+        text_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)};"
+        )
+        text_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        row_layout.addWidget(text_lbl)
+        row_layout.addStretch(1)
+
+        if right is not None:
+            row_layout.addWidget(right)
+
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 8px;
+                text-align: left;
+                padding: 0;
+            }}
+            QPushButton:hover {{ background: {Colors.HOVER_BG}; }}
+            QPushButton:pressed {{ background: {Colors.SELECTED_BG}; }}
+        """)
+
+
+class _GiteeMorePopup(QWidget):
+    """Gitee 更多操作浮动卡片 — WorkBuddy 风格悬浮菜单
+
+    点击 GiteeAccountRow 的 ⚙ 按钮后弹出，分区结构：
+    ① 账号区（头像 + 名称/仓库，点击跳仓库）+ 绑定/解绑
+    ② 快捷开关：深色模式 / 窗口置顶
+    ③ 快捷导航：外观 / 插件设置（直跳设置卡对应页）
+    ④ 设置 / 帮助与反馈（新建会话发起 issue 提交引导）
     """
 
     def __init__(self, account_row: "GiteeAccountRow", parent=None):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        # NoDropShadowWindowHint：禁掉 Windows 对 popup 的系统直角投影（会在透明边距外露出套层直角框）
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._account_row = account_row
@@ -694,39 +775,32 @@ class _GiteeMorePopup(QWidget):
     def _build_ui(self):
         Colors.refresh()
 
-        # ── 主容器 ──
+        # ── 主容器：圆角卡片背景（阴影由 paintEvent 自绘；DropShadowEffect
+        # 在 Qt.Popup + WA_TranslucentBackground 上会带出直角不透明底框，不可用）──
         self._container = QWidget(self)
         self._container.setObjectName("giteePopupContainer")
-        layout = QVBoxLayout(self._container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # ── 标题行 ──
-        title_label = QLabel("Gitee 账号", self._container)
-        title_label.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                background: transparent;
-                {get_font_family_css()} {font_size_css(13)};
-                font-weight: bold;
-                padding: 10px 14px 4px;
+        self._container.setStyleSheet(f"""
+            #giteePopupContainer {{
+                background: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 12px;
             }}
         """)
-        layout.addWidget(title_label)
 
-        # ── 虚线分隔 ──
-        sep1 = self._make_separator()
-        layout.addWidget(sep1)
+        layout = QVBoxLayout(self._container)
+        layout.setContentsMargins(scale_font_size(6), scale_font_size(6), scale_font_size(6), scale_font_size(6))
+        layout.setSpacing(0)
+        self._container.setFixedWidth(scale_font_size(252))
 
         # ── 账号信息区域（可点击跳转仓库） ──
         self._info_widget = QWidget(self._container)
         self._info_widget.setCursor(Qt.PointingHandCursor)
         info_layout = QHBoxLayout(self._info_widget)
-        info_layout.setContentsMargins(14, 8, 14, 8)
+        info_layout.setContentsMargins(scale_font_size(10), scale_font_size(8), scale_font_size(10), scale_font_size(8))
         info_layout.setSpacing(10)
 
         self._popup_avatar = _AvatarCircleWidget("?", self._info_widget)
-        self._popup_avatar.set_size(36)
+        self._popup_avatar.set_size(scale_font_size(34))
         # 鼠标事件穿透，由 _info_widget 统一处理点击
         self._popup_avatar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         info_layout.addWidget(self._popup_avatar)
@@ -759,138 +833,94 @@ class _GiteeMorePopup(QWidget):
         self._popup_action_btn.clicked.connect(self._on_action_clicked)
         layout.addWidget(self._popup_action_btn, 0, Qt.AlignCenter)
 
-        # ── 间距 ──
-        layout.addSpacing(4)
+        layout.addSpacing(scale_font_size(6))
 
         # ── 分隔线 ──
-        sep2 = self._make_separator()
-        layout.addWidget(sep2)
+        layout.addWidget(self._make_separator())
 
-        # ── 快捷设置标题 ──
-        quick_title = QLabel("快捷设置", self._container)
-        quick_title.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_MUTED};
-                background: transparent;
-                {get_font_family_css()} {font_size_css(11)};
-                padding: 6px 14px 2px;
-            }}
-        """)
-        layout.addWidget(quick_title)
-
-        # ── 深色模式切换 ──
-        self._dark_mode_row = self._make_switch_row(
-            "🌓  深色模式",
-            not self._cfg.ui_light_mode.value,
-            self._on_dark_mode_toggled,
-        )
+        # ── 快捷开关：深色模式 / 窗口置顶 ──
+        dark_switch = SwitchButton(self._container)
+        dark_switch.setChecked(not self._cfg.ui_light_mode.value)
+        dark_switch.checkedChanged.connect(self._on_dark_mode_toggled)
+        self._dark_mode_row = _MenuRow(FluentIcon.BRIGHTNESS, "深色模式", right=dark_switch, parent=self._container)
         layout.addWidget(self._dark_mode_row)
 
-        # ── 简洁输出切换 ──
-        self._compact_row = self._make_switch_row(
-            "📝  简洁输出",
-            self._cfg.ui_compact_tool_area.value,
-            self._on_compact_toggled,
-        )
-        layout.addWidget(self._compact_row)
-
-        # ── 桌宠开关 ──
-        self._pet_row = self._make_switch_row(
-            "🐾  桌宠",
-            self._cfg.pet_enabled.value,
-            self._on_pet_toggled,
-        )
-        layout.addWidget(self._pet_row)
-
-        # ── 窗口置顶开关 ──
-        self._topmost_row = self._make_switch_row(
-            "📌  窗口置顶",
-            self._cfg.window_always_on_top.value,
-            self._on_topmost_toggled,
-        )
+        topmost_switch = SwitchButton(self._container)
+        topmost_switch.setChecked(bool(self._cfg.window_always_on_top.value))
+        topmost_switch.checkedChanged.connect(self._on_topmost_toggled)
+        self._topmost_row = _MenuRow(FluentIcon.PIN, "窗口置顶", right=topmost_switch, parent=self._container)
         layout.addWidget(self._topmost_row)
+        # 保持 Python 引用，防止 SwitchButton 被提前 GC 回收
+        self._switch_refs = [dark_switch, topmost_switch]
 
-        layout.addSpacing(6)
+        layout.addWidget(self._make_separator())
 
-        # ── 分隔线 ──
-        sep3 = self._make_separator()
-        layout.addWidget(sep3)
+        # ── 快捷导航：直跳设置卡对应页 ──
+        self._appearance_row = _MenuRow(
+            "主题风格", "外观", right=self._make_chevron(), parent=self._container
+        )
+        self._appearance_row.clicked.connect(lambda: self._open_settings_tab("appearance"))
+        layout.addWidget(self._appearance_row)
 
-        # ── 打开设置按钮（点击跳转到完整设置卡片） ──
-        self._open_settings_btn = QPushButton("⚙️  打开全部设置", self._container)
-        self._open_settings_btn.setCursor(Qt.PointingHandCursor)
-        self._open_settings_btn.setFixedHeight(36)
+        self._plugins_row = _MenuRow(
+            FluentIcon.APPLICATION, "插件设置", right=self._make_chevron(), parent=self._container
+        )
+        self._plugins_row.clicked.connect(lambda: self._open_settings_tab("plugins"))
+        layout.addWidget(self._plugins_row)
+
+        layout.addWidget(self._make_separator())
+
+        # ── 设置 / 帮助与反馈 ──
+        self._open_settings_btn = _MenuRow(
+            "配置管理", "设置", right=self._make_chevron(), parent=self._container
+        )
         self._open_settings_btn.clicked.connect(self._on_open_settings)
-        self._open_settings_btn.setStyleSheet(f"""
-            QPushButton {{
-                color: {Colors.TEXT_PRIMARY};
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-                padding: 4px 14px;
-                text-align: left;
-                {get_font_family_css()} {font_size_css(12)};
-            }}
-            QPushButton:hover {{
-                background: {Colors.HOVER_BG};
-            }}
-        """)
         layout.addWidget(self._open_settings_btn)
 
-        layout.addSpacing(2)
+        self._feedback_row = _MenuRow(
+            FluentIcon.FEEDBACK, "帮助与反馈", right=self._make_chevron(), parent=self._container
+        )
+        self._feedback_row.clicked.connect(self._on_help_feedback)
+        layout.addWidget(self._feedback_row)
 
-        # 容器样式
-        self._container.setStyleSheet("""
-            #giteePopupContainer {
-                background: transparent;
-            }
-        """)
-
+        # 阴影透明边距：投影画在容器外（popup 自身为透明层）
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(
+            scale_font_size(10), scale_font_size(10), scale_font_size(10), scale_font_size(14)
+        )
         main_layout.addWidget(self._container)
 
         # 刷新账号状态
         self._refresh_account_state()
 
-    def _make_separator(self) -> QFrame:
-        sep = QFrame(self._container)
+    def _make_separator(self) -> QWidget:
+        """带左右留白的分隔线（全宽直顶圆角边不够精致）"""
+        wrap = QWidget(self._container)
+        wrap.setStyleSheet("background: transparent;")
+        wrap_layout = QVBoxLayout(wrap)
+        wrap_layout.setContentsMargins(scale_font_size(10), 0, scale_font_size(10), 0)
+        sep = QFrame(wrap)
         sep.setFrameShape(QFrame.HLine)
         sep.setFixedHeight(1)
         sep.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
-        return sep
+        wrap_layout.addWidget(sep)
+        return wrap
 
-    def _make_switch_row(self, label_text: str, checked: bool, callback) -> QWidget:
-        row = QWidget(self._container)
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(14, 3, 14, 3)
-        row_layout.setSpacing(8)
-
-        lbl = QLabel(label_text, row)
+    def _make_chevron(self) -> QLabel:
+        """导航行右侧箭头"""
+        lbl = QLabel("›", self._container)
         lbl.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)};"
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)};"
         )
-        switch = SwitchButton(row)
-        switch.setChecked(checked)
-        switch.checkedChanged.connect(callback)
-
-        row_layout.addWidget(lbl)
-        row_layout.addStretch(1)
-        row_layout.addWidget(switch)
-
-        # 保持 Python 引用，防止 SwitchButton 被提前 GC 回收
-        if not hasattr(self, "_switch_refs"):
-            self._switch_refs = []
-        self._switch_refs.append(switch)
-
-        return row
+        lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        return lbl
 
     def _refresh_account_state(self):
         """根据当前绑定状态刷新账号信息区域"""
         is_bound = bool(self._cfg.gitee_bound.value)
         owner = str(self._cfg.gitee_user_owner.value or "")
         repo = str(self._cfg.gitee_user_repo.value or "")
-        avatar_size = 36
+        avatar_size = scale_font_size(34)
 
         if is_bound and owner:
             self._popup_avatar.set_avatar(owner)
@@ -951,12 +981,60 @@ class _GiteeMorePopup(QWidget):
         QTimer.singleShot(0, self.close)
 
     def _on_open_settings(self):
-        """打开全部设置卡片"""
+        """打开设置卡片（默认页）"""
         self.close()
         if self._account_row:
             self._account_row._toggle_settings_card()
 
-    # ── 快捷设置回调 ──
+    def _open_settings_tab(self, tab_id: str):
+        """直跳设置卡并切换到指定导航页（appearance/plugins 等）"""
+        self.close()
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc.open_settings(tab_id)
+            return
+        # 兜底：控制器不可用时走原 toggle 链（无指定页）
+        if self._account_row:
+            self._account_row._toggle_settings_card()
+
+    def _on_help_feedback(self):
+        """帮助与反馈：新建会话并自动发起 issue 提交引导（issue-reporter 技能）"""
+        self.close()
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        tm = TabManagerWindow.get_instance()
+        if tm is None:
+            return
+        source = tm.get_current_window()
+        if source is None and self._account_row is not None:
+            source = self._account_row.window()
+        if source is None:
+            return
+        new_win = tm.spawn_tab(source, new_session=True)
+        if new_win is None:
+            return
+        # 等新 tab 就绪再预填输入框（不自动发送，用户改完自己发）；经类名调用避免捕获已销毁的 self
+        QTimer.singleShot(300, lambda w=new_win: _GiteeMorePopup._send_feedback_prompt(w))
+
+    @staticmethod
+    def _send_feedback_prompt(win):
+        """把 issue 提交引导 prompt 预填到新窗口输入框，由用户修改后自行发送"""
+        try:
+            if getattr(win, "_is_destroyed", False):
+                return
+            prompt = (
+                "我想给 DriFox 提交一个 issue（反馈 bug / 建议）。"
+                "请使用 issue-reporter 技能：先自动收集环境信息（版本、系统、最近错误日志），"
+                "再引导我补充问题描述，与我确认后提交到 GitHub 仓库，并把 issue 链接贴给我。"
+            )
+            win.input_area.setPlainText(prompt)
+            win.input_area.setFocus()
+        except Exception:
+            pass
+
+    # ── 快捷开关回调 ──
 
     def _on_dark_mode_toggled(self, checked: bool):
         """深色模式切换
@@ -988,16 +1066,6 @@ class _GiteeMorePopup(QWidget):
             self._cfg.set(self._cfg.ui_theme_style, target_theme, save=True)
         theme_manager.dispatch_refresh()
 
-    def _on_compact_toggled(self, checked: bool):
-        """简洁输出模式切换"""
-        self._cfg.ui_compact_tool_area.value = checked
-        self._cfg.save()
-
-    def _on_pet_toggled(self, checked: bool):
-        """桌宠开关切换"""
-        self._cfg.pet_enabled.value = checked
-        self._cfg.save()
-
     def _on_topmost_toggled(self, checked: bool):
         """窗口置顶开关切换
 
@@ -1019,27 +1087,20 @@ class _GiteeMorePopup(QWidget):
 
         _apply_window_topmost(window)
 
-    # ── 绘制圆角背景 ──
+    # ── 自绘柔和阴影（画在卡片下层的透明边距内）──
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
         Colors.refresh()
-        bg = QColor(Colors.CONTENT_BG)
-        painter.setBrush(bg)
+        margin = scale_font_size(10)
+        radius = scale_font_size(12)
+        # 与 main_layout 边距一致（底部多 4px 给下沉阴影），container 覆盖中部露出外环
+        card = self.rect().adjusted(margin, margin, -margin, -(margin + scale_font_size(4)))
         painter.setPen(Qt.NoPen)
-        r = 10
-        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), r, r)
-
-        # 边框
-        painter.setPen(QColor(Colors.BORDER))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), r, r)
-        painter.setPen(Qt.NoPen)
-
-    def sizeHint(self):
-        return self._container.sizeHint()
+        for grow, alpha in ((7, 7), (5, 11), (3, 15), (1, 20)):
+            painter.setBrush(QColor(0, 0, 0, alpha))
+            painter.drawRoundedRect(card.adjusted(-grow, -grow, grow, grow), radius + grow, radius + grow)
 
     def closeEvent(self, event):
         if self._account_row:
