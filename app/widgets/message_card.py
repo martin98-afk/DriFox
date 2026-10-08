@@ -4995,6 +4995,19 @@ class MessageCard(SimpleCardWidget):
         """
         try:
             panel = self._todo_panel
+            # [DEBUG-todo-h] 临时诊断：面板被压缩时输出几何全貌（定位后删除）
+            logger.info(
+                "[DEBUG-todo-h] panelChanged "
+                f"card.h={self.height()} card.min={self.minimumHeight()} card.max={self.maximumHeight()} "
+                f"pinned={getattr(self, '_layout_height_pinned', None)} "
+                f"viewer.h={self.viewer.height() if self.viewer else -1} "
+                f"viewer.min={self.viewer.minimumHeight() if self.viewer else -1} "
+                f"viewer.max={self.viewer.maximumHeight() if self.viewer else -1} "
+                f"panel.sizeHint={panel.sizeHint().height() if panel is not None else -1} "
+                f"panel.h={panel.height() if panel is not None else -1} "
+                f"panel.vis={panel.isVisible() if panel is not None else None} "
+                f"bubble.h={self._assistant_bubble.height() if self._assistant_bubble else -1}"
+            )
             cur = panel.sizeHint().height() if (panel is not None and panel.isVisible()) else 0
             prev = getattr(self, "_todo_panel_height_cache", 0)
             self._todo_panel_height_cache = cur

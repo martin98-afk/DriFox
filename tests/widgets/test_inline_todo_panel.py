@@ -58,7 +58,7 @@ def _running_items(panel):
 def test_collapsed_by_default(panel):
     """卡片内嵌场景默认折叠（卡片空间宝贵）"""
     assert panel.is_collapsed() is True
-    assert not panel._scroll.isVisible()
+    assert not panel._list_wrap.isVisible()
 
 
 def test_hidden_when_no_tasks(panel):
@@ -80,7 +80,7 @@ def test_expand_shows_list_and_emits_height_changed(panel):
     seen.clear()
     panel._on_collapse_clicked()
     assert panel.is_collapsed() is False
-    assert panel._scroll.isVisible()
+    assert panel._list_wrap.isVisible()
     assert seen, "折叠切换应触发 heightChanged（宿主据此外层锚定）"
 
 
@@ -96,10 +96,26 @@ def test_header_click_toggles_collapse(panel):
     assert panel.is_collapsed()
 
 
-def test_list_no_inner_scroll(panel):
-    """展开态列表不限高、不内滚，全量展示待办"""
-    assert panel._scroll.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
-    assert panel._scroll.maximumHeight() == 16777215  # QWIDGETSIZE_MAX
+def test_list_plain_container_no_scroll(panel):
+    """展开态列表是普通容器（非 QScrollArea）：sizeHint 实时准确、不内滚
+
+    QScrollArea 的 sizeHint() 依赖内部 widgetSize 缓存（仅 widget resize 时刷新），
+    动态增删行后返回滞后值甚至 0，宿主高度链会拿到错误面板高度 → 裁切 + 外层
+    滚动上界虚抬。普通 QWidget 容器的布局 sizeHint 永远实时。
+    """
+    assert not isinstance(panel._list_wrap, QScrollArea)
+    panel.update_todos(
+        [{"content": f"任务 {i}", "status": "pending", "priority": "medium"} for i in range(10)]
+    )
+    panel._set_collapsed(False)
+    h10 = panel._list_wrap.sizeHint().height()
+    assert h10 > 200  # 10 行应全量计入
+    # 增行后 sizeHint 必须同步增长（QScrollArea 在此返回滞后值）
+    panel.update_todos(
+        [{"content": f"任务 {i}", "status": "pending", "priority": "medium"} for i in range(12)]
+    )
+    panel._set_collapsed(False)
+    assert panel._list_wrap.sizeHint().height() > h10
 
 
 def test_running_row_visible_when_collapsed(panel):
@@ -111,7 +127,7 @@ def test_running_row_visible_when_collapsed(panel):
         ]
     )
     assert panel.is_collapsed()
-    assert not panel._scroll.isVisible()
+    assert not panel._list_wrap.isVisible()
     assert panel._running_wrap.isVisible()
 
 

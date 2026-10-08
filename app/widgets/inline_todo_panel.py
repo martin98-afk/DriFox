@@ -23,9 +23,9 @@ from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
-from qfluentwidgets import ScrollArea, TransparentToolButton
+from qfluentwidgets import TransparentToolButton
 
-from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import BorderRadius, Colors, font_size_css
 from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
 from app.widgets._workbench_helpers import _SectionHeader
@@ -97,24 +97,19 @@ class InlineTodoPanel(QWidget):
         self._running_wrap.hide()
         layout.addWidget(self._running_wrap)
 
-        # ── 任务列表（展开态可见，限高内滚）──
-        self._scroll = ScrollArea(self)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setFocusPolicy(Qt.NoFocus)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # 展开全量展示，不内滚
-        self._scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }\n" + get_unified_scrollbar_style(6)
-        )
-        self._list_wrap = QWidget()
+        # ── 任务列表（展开态可见，全量展示不内滚）──
+        # 刻意不用 QScrollArea：其 sizeHint() 依赖内部 widgetSize 缓存（仅在
+        # widget resize 事件时刷新），动态增删行后返回滞后值甚至 0，宿主高度链
+        # 会拿到错误面板高度 → 列表被裁切 + 外层滚动上界虚抬。全量展示不内滚，
+        # 普通容器 + QVBoxLayout 的 sizeHint 永远实时准确。
+        self._list_wrap = QWidget(self)
         self._list_wrap.setStyleSheet("background: transparent;")
-        self._scroll.setWidget(self._list_wrap)
         self._list_layout = QVBoxLayout(self._list_wrap)
         self._list_layout.setContentsMargins(0, 0, 2, 0)
         self._list_layout.setSpacing(1)  # 行式条目：紧凑行距
         self._list_layout.addStretch(1)
-        self._scroll.setVisible(False)  # 默认折叠
-        layout.addWidget(self._scroll)
+        self._list_wrap.setVisible(False)  # 默认折叠
+        layout.addWidget(self._list_wrap)
 
         self.hide()  # 无任务整区隐藏
         self.refresh_style()
@@ -130,7 +125,7 @@ class InlineTodoPanel(QWidget):
         只收起任务列表；进行中常驻条不随折叠隐藏（折叠态保持可见执行中任务）。
         """
         self._collapsed = collapsed
-        self._scroll.setVisible(not collapsed)
+        self._list_wrap.setVisible(not collapsed)
         icon = "展开" if collapsed else "折叠"
         self._collapse_btn.setIcon(get_icon(icon))
         self._collapse_btn.setToolTip("展开任务列表" if collapsed else "折叠任务列表")
@@ -143,8 +138,37 @@ class InlineTodoPanel(QWidget):
             return True
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event) -> None:
+        """变为可见时补 emit：挂载/恢复可见导致的占高变化没有数据路径可 emit
+
+        宿主（MessageCard._on_todo_panel_height_changed）用 `_todo_panel_height_cache`
+        做增量记账，欠账后下一次数据 emit 会把历史差额全额虚报给外层
+        （sb.setMaximum(+delta) 虚抬滚动上界且内容不变时不会被 Qt 覆盖 →
+        滚到底仍可滚出一片空白）。在高度真实出现/恢复的瞬间对账。
+        """
+        super().showEvent(event)
+        # [DEBUG-todo-h] 临时诊断（定位后删除）
+        try:
+            from loguru import logger as _lg
+
+            _lg.info(
+                f"[DEBUG-todo-h] panelShow panel.sizeHint={self.sizeHint().height()} "
+                f"panel.h={self.height()} wrap.sizeHint={self._list_wrap.sizeHint().height()}"
+            )
+        except Exception:
+            pass
+        lay = self.layout()
+        if lay is not None:
+            lay.invalidate()  # 清 QBoxLayout sizeHint 缓存（滞后一拍的根源）
+        self.updateGeometry()
+        self.heightChanged.emit()
+
     def _on_collapse_clicked(self) -> None:
         self._set_collapsed(not self._collapsed)
+        lay = self.layout()
+        if lay is not None:
+            lay.invalidate()  # 清 QBoxLayout sizeHint 缓存（滞后一拍的根源）
+        self.updateGeometry()
         self.heightChanged.emit()
 
     # ── 数据 ──
@@ -218,6 +242,14 @@ class InlineTodoPanel(QWidget):
             self._list_layout.addWidget(self._make_item(status, content, priority))
         self._list_layout.addStretch(1)
 
+        # 强制本面板布局立即重算：子布局（_list_wrap）invalidate 不会即时传播到
+        # 本层 sizeHint 缓存（QBoxLayout cached geom），宿主在 heightChanged 里读
+        # panel.sizeHint() 记账，不 invalidate 会拿到滞后一拍的旧值 → 面板被按旧
+        # 高度压缩（裁切）且外层滚动上界错账。
+        lay = self.layout()
+        if lay is not None:
+            lay.invalidate()  # 清 QBoxLayout sizeHint 缓存（滞后一拍的根源）
+        self.updateGeometry()
         self.heightChanged.emit()
 
     def _make_item(

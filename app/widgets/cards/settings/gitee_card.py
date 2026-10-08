@@ -645,18 +645,18 @@ class GiteeAccountRow(QFrame):
         else:
             win_rect = QApplication.primaryScreen().availableGeometry()
 
-        # X：左边缘与窗口左边缘对齐（留 8px 边距），不超出窗口左右边界
-        x = win_rect.left() + 8
-        if x + popup_width > win_rect.right() - 8:
-            x = win_rect.right() - 8 - popup_width
-        if x < win_rect.left() + 4:
-            x = win_rect.left() + 4
+        # X：贴近窗口左边框（留 3px 呼吸），不超出窗口左右边界
+        x = win_rect.left() + 3
+        if x + popup_width > win_rect.right() - 4:
+            x = win_rect.right() - 4 - popup_width
+        if x < win_rect.left() + 2:
+            x = win_rect.left() + 2
 
-        # Y：在当前行上方弹出，不超出窗口上下边界
-        y = row_global.y() - popup_height - 6
+        # Y：贴着本行（设置栏）上方弹出，留 3px 呼吸
+        y = row_global.y() - popup_height - 3
         if y < win_rect.top() + 4:
             # 空间不够则向下弹出
-            y = row_global.y() + self.height() + 6
+            y = row_global.y() + self.height() + 3
             # 向下弹出也超出底部时，对齐窗口底部
             if y + popup_height > win_rect.bottom() - 4:
                 y = win_rect.bottom() - 4 - popup_height
@@ -883,10 +883,20 @@ class _GiteeMorePopup(QWidget):
         self._feedback_row.clicked.connect(self._on_help_feedback)
         layout.addWidget(self._feedback_row)
 
-        # 阴影透明边距：投影画在容器外（popup 自身为透明层）
+        # ── 检查更新（右侧显示当前版本号，与托盘菜单同款）──
+        version_lbl = QLabel(str(self._cfg.current_version or ""), self._container)
+        version_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)};"
+        )
+        version_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._update_row = _MenuRow(FluentIcon.UPDATE, "检查更新", right=version_lbl, parent=self._container)
+        self._update_row.clicked.connect(self._on_check_update)
+        layout.addWidget(self._update_row)
+
+        # 阴影透明边距：投影画在容器外（popup 自身为透明层）；收紧边距让卡片贴近窗口边角
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(
-            scale_font_size(10), scale_font_size(10), scale_font_size(10), scale_font_size(14)
+            scale_font_size(5), scale_font_size(5), scale_font_size(5), scale_font_size(7)
         )
         main_layout.addWidget(self._container)
 
@@ -1018,6 +1028,21 @@ class _GiteeMorePopup(QWidget):
         # 等新 tab 就绪再预填输入框（不自动发送，用户改完自己发）；经类名调用避免捕获已销毁的 self
         QTimer.singleShot(300, lambda w=new_win: _GiteeMorePopup._send_feedback_prompt(w))
 
+    def _on_check_update(self):
+        """检查更新：手动触发，结果 InfoBar 落地在 TabManagerWindow（与托盘同款）"""
+        self.close()
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        tm = TabManagerWindow.get_instance()
+        if tm is None:
+            return
+        try:
+            from app.update_checker import UpdateChecker
+
+            UpdateChecker.get_instance(tm).check_update()
+        except Exception as e:
+            logger.warning(f"[gitee-popup] 检查更新失败: {e}")
+
     @staticmethod
     def _send_feedback_prompt(win):
         """把 issue 提交引导 prompt 预填到新窗口输入框，由用户修改后自行发送"""
@@ -1093,12 +1118,12 @@ class _GiteeMorePopup(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         Colors.refresh()
-        margin = scale_font_size(10)
+        margin = scale_font_size(5)
         radius = scale_font_size(12)
-        # 与 main_layout 边距一致（底部多 4px 给下沉阴影），container 覆盖中部露出外环
-        card = self.rect().adjusted(margin, margin, -margin, -(margin + scale_font_size(4)))
+        # 与 main_layout 边距一致（底部多 2px 给下沉阴影），container 覆盖中部露出外环
+        card = self.rect().adjusted(margin, margin, -margin, -(margin + scale_font_size(2)))
         painter.setPen(Qt.NoPen)
-        for grow, alpha in ((7, 7), (5, 11), (3, 15), (1, 20)):
+        for grow, alpha in ((4, 8), (3, 12), (2, 16), (1, 22)):
             painter.setBrush(QColor(0, 0, 0, alpha))
             painter.drawRoundedRect(card.adjusted(-grow, -grow, grow, grow), radius + grow, radius + grow)
 

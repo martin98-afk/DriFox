@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
-- **左下角系统菜单重做 + 帮助与反馈** (`app/widgets/cards/settings/gitee_card.py`, `app/widgets/cards/global_card_controller.py`, `plugins/system-skills/skills/issue-reporter/` 新增): 侧栏 Gitee 账号行悬浮菜单按 WorkBuddy 风格重做：圆角卡片 + 柔和投影、图标菜单行（hover 圆角高亮 + 右箭头）；移除「简洁输出」「桌宠」两个快捷开关（设置卡内仍可配），保留深色模式 / 窗口置顶；「打开全部设置」更名「设置」，新增「外观」「插件设置」直跳（打开设置卡并切到对应导航页，插件页懒构建自动触发）与「帮助与反馈」（新建会话并预填 issue 提交引导 prompt 到输入框，用户确认后发送）。`GlobalCardController.open_settings` 新增 `initial_tab` 参数。新增系统技能 `issue-reporter`：collect_env.py 自动收集版本/系统/最近错误日志（密钥掩码），create_issue.py 走 GitHub API 提交（读 GITHUB_TOKEN），无 token 自动降级浏览器预填页。
+- **左下角系统菜单重做 + 帮助与反馈** (`app/widgets/cards/settings/gitee_card.py`, `app/widgets/cards/global_card_controller.py`, `plugins/system-skills/skills/issue-reporter/` 新增): 侧栏 Gitee 账号行悬浮菜单按 WorkBuddy 风格重做：圆角卡片 + 柔和投影、图标菜单行（hover 圆角高亮 + 右箭头）；移除「简洁输出」「桌宠」两个快捷开关（设置卡内仍可配），保留深色模式 / 窗口置顶；「打开全部设置」更名「设置」，新增「外观」「插件设置」直跳（打开设置卡并切到对应导航页，插件页懒构建自动触发）与「帮助与反馈」（新建会话并预填 issue 提交引导 prompt 到输入框，用户确认后发送），尾部新增「检查更新」（右侧显示当前版本号，点击走 UpdateChecker 手动检查，与托盘同款）。`GlobalCardController.open_settings` 新增 `initial_tab` 参数。新增系统技能 `issue-reporter`：collect_env.py 自动收集版本/系统/最近错误日志（密钥掩码），create_issue.py 走 GitHub API 提交（读 GITHUB_TOKEN），无 token 自动降级浏览器预填页。
 
 ### 🐛 问题修复 (Bug Fixes)
 
