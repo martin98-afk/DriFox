@@ -3574,8 +3574,10 @@ class CodeWebViewer(QWebEngineView):
                         // _saveCharts）之前捕获锚点，否则捕获到的已是被钳制的位置。
                         _beginDomUpdate();
                         // 打字机：本次将整体替换增量节点，Python 侧 markdown 已含全部
-                        // 文本（含尚未揭示部分），故丢弃揭示缓冲，避免重复追加。
-                        if (typeof window._twReset === 'function') window._twReset();
+                        // 文本（含尚未揭示部分）。[方案C] 用 _twFlush 替代 _twReset：
+                        // 同一次 IPC 内先把未揭示缓冲立即上屏再整体替换，消除 flush 与
+                        // 替换之间的帧间隙（替换前后文字量一致，高度不二段跳）。
+                        if (typeof window._twFlush === 'function') window._twFlush();
                         // FLIP：替换前记录工具/思考区与正文容器的视口位置，
                         // 重排后用位移动画补间（消除"结束态弹到最顶上"的瞬移感）。
                         var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
@@ -5669,8 +5671,13 @@ class CodeWebViewer(QWebEngineView):
                     self._final_render_pending = False
                     self._last_rendered_markdown = self._markdown_text
                     return
-                # 收尾失败 / 不适用 → 清标记，回退原全量路径
+                # 收尾失败 / 不适用 → 清标记 + 清稳定区基线，回退原全量路径。
+                # _try 失败时 _stable_md_len/_stable_html 可能已被部分推进
+                # （先 extract 推进、后 rest 检查未闭合），残值是脏偏移；本轮
+                # 全量重建 DOM 不读它们，但必须清掉防下一轮差量续写错位。
                 self._incremental_finalize = False
+                self._stable_html = ""
+                self._stable_md_len = 0
                 self._refresh_viewer_font_css()
                 # 如果有懒回调，执行一次获取最终 markdown
                 if self._lazy_markdown_cb:
@@ -6453,11 +6460,18 @@ class CodeWebViewer(QWebEngineView):
                 仍全部同步执行。
         """
         self._streaming = False
+        # 🆕 差量收尾判定必须在 [B1] 清空**前**取样：_should_incremental_finalize
+        # 以 _stable_md_len > 0 为第二守卫，B1 先清零会让判定恒 False（env=1 下
+        # 差量收尾静默失效）。走差量时 [B1] 不清 _stable_md_len/_stable_html，
+        # 保留给 _perform_update 内 _try_incremental_finalize 作续写偏移；
+        # 不走差量（判定 False）时照旧清空，全量路径基线干净。
+        self._incremental_finalize = self._should_incremental_finalize()
         # [B1] 流式结束：差量缓存失效（尾部未闭合内容需全量渲染收尾），
-        # 清空稳定区避免差量/全量混合导致重复段落。
+        # 清空稳定区避免差量/全量混合导致重复段落。走差量时保留（见上）。
         self._needs_full_render = True
-        self._stable_html = ""
-        self._stable_md_len = 0
+        if not self._incremental_finalize:
+            self._stable_html = ""
+            self._stable_md_len = 0
         # [B3] 流式结束：递增渲染序号使在途线程池任务过期（避免旧流式 HTML
         # 晚到覆盖最终非流式渲染结果）；pending 积压清空。
         self._render_seq += 1
@@ -6518,10 +6532,7 @@ class CodeWebViewer(QWebEngineView):
         self._finish_t0 = time.perf_counter()
         # 标记"接下来这次非流式渲染是流式结束的终渲染"：它必须同步完成
         # （紧随其后的 _cleanup_render_cache 会让异步结果过期），见 _perform_update。
-        # 🆕 差量收尾接线：满足条件（有稳定差量区、无活跃工具 DOM/待注入工具）时，
-        # 终渲染走 _try_incremental_finalize 差量补尾，稳定区 DOM 不重建；失败由
-        # _perform_update 清标记自动回退全量（行为与旧路径一致）。
-        self._incremental_finalize = self._should_incremental_finalize()
+        # （差量收尾判定已在函数开头 [B1] 前取样，见 _incremental_finalize。）
         self._final_render_pending = True
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间

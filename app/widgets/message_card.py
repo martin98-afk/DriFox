@@ -4431,8 +4431,25 @@ class MessageCard(SimpleCardWidget):
                 # lambda 捕获动态属性判空——0ms 内 viewer 被 cleanup 置 None 时
                 # 避免 AttributeError traceback。
                 def _dock_off_and_collapse() -> None:
+                    # [#8] 历史卡守卫：历史加载（history=True）不走
+                    # stop_streaming_anim，_streaming_finished 恒 False → 整体跳过
+                    # （含窗口重开与归位派发）。历史卡坞态从未开启（池化复用时
+                    # _RESET_CONTENT_FOR_REUSE_JS 已清 streaming-dock class 与
+                    # _streamingActive），归位调用本为 JS no-op（on===wasOn），
+                    # 跳过与调用等价且省一次 IPC，不改变 HEAD 既有行为；同时
+                    # 消除 #6 窗口重开对历史卡懒渲染高度收敛的动画化波及。
+                    # S1 卡与打断卡已走 stop_streaming_anim（True），兜底归位
+                    # 路径保持生效。
+                    if not self._streaming_finished:
+                        return
                     if self.viewer is None:
                         return
+                    # [方案D] S1 兜底归位重开 FINISH 窗口：归位+折叠的高度跳变
+                    # 也走结束态缓动（追踪 tick），消除"流式平滑、兜底归位却
+                    # snap"的两段感。符号用法与 finish_streaming 主路径同款，
+                    # 只影响本兜底路径，坞态调用结构不变。
+                    self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
+                    self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
                     self.viewer._sync_streaming_dock(False, collapse_after=True)
 
                 QTimer.singleShot(0, _dock_off_and_collapse)

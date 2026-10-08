@@ -3099,7 +3099,9 @@ _SKELETON_CACHE_MAX = 48
 # .todo-item 全套 CSS、window._updateTodoList / _todoCount / _todoProgressText
 # 全部删除；任务区改由卡片内原生 Qt 面板承担（app/widgets/inline_todo_panel.py）。
 # 旧骨架仍带 todo DOM 与 JS（虽无数据源、恒隐藏），必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 37
+# _SKELETON_CACHE_VERSION +1（v38）：方案 C——updateContent 入口 _twReset→_twFlush，
+# 消除打字机 flush 与整体替换的帧间隙（终渲染高度不二段跳）。
+_SKELETON_CACHE_VERSION = 38
 
 
 def _js_literal(value) -> str:

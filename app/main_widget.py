@@ -14811,10 +14811,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 原实现经 scroll_to_bottom_if_streaming 直写 scrollbar.value，suppress
         # 判定与统一守卫割裂；现收口到 _scroll_to_bottom 单点裁决，提前短路，
         # 不再绕过主窗口的 sticky/同步逻辑。
+        # [F4] 贴底短路：视口已贴底（_is_view_at_bottom 唯一权威判定）时，
+        # 高度锚定补偿通道已负责跟随，无需每条内容都走兜底强制滚底；仅离底
+        # 超 tolerance 才兜底。away 守卫与 _scroll_to_bottom 内部
+        # _programmatic_scroll 豁免原样保留。
         if (
             self._is_streaming
             and not self._scroll_bottom_timer.isActive()
             and not self._user_intentionally_away_from_bottom
+            and not self._is_view_at_bottom()
         ):
             self._scroll_to_bottom()
 
