@@ -687,6 +687,8 @@ class CodeWebViewer(QWebEngineView):
         self._render_deferred: bool = False
         # [PERF] 主题刷新期间不可见 → 跳过 JS 注入，恢复可见时补注入标记
         self._theme_css_pending: bool = False
+        # [T6] 主题重渲分帧队列脏标记：refresh_theme 置 True + 入队，队列消费时清除
+        self._theme_render_pending: bool = False
         # [B1] 差量渲染状态：
         # - _stable_html：已追加到 DOM 的稳定格式化 HTML 累积
         # - _stable_md_len：已差量消费的 markdown 偏移（后续 _extract_closed_segments 从这扫描）
@@ -1078,6 +1080,10 @@ class CodeWebViewer(QWebEngineView):
         self._cached_raw_md_hash = 0
         self._last_rendered_html = None
         self._render_deferred = False
+        # [T6] 复用前摘出主题补渲队列：复用后本 viewer 已属新卡片，残留的
+        # 旧主题补渲会打到新内容上（或空转打断新卡的流式节拍）
+        _theme_rerender_queue.discard(self)
+        self._theme_render_pending = False
         if hasattr(self, "_tool_md_cache"):
             with contextlib.suppress(Exception):
                 self._tool_md_cache.clear()
@@ -7640,10 +7646,99 @@ class CodeWebViewer(QWebEngineView):
 
         # [B4-强回收] 防悬挂：清理时清零 renderer PID（进程可能已随页面销毁退出）
         self._renderer_pid = 0
+        # [T6] 销毁前摘出主题补渲队列（weakref 失效亦会兜底，这里显式摘除）
+        _theme_rerender_queue.discard(self)
 
     def deleteLater(self):
         self.cleanup()
         super().deleteLater()
+
+
+class _ThemeRerenderQueue:
+    """主题切换正文重渲分帧队列（T6 错峰）
+
+    主题切换触发的 CodeWebViewer 全量 markdown 重渲（单卡 40~120ms 主线程
+    阻塞，见 _perform_update 非流式分支注释）原先在 MessageCard.refresh_theme
+    里逐卡 immediate 执行，N 卡同拍 = 240~700ms 主线程冻结。改为「脏标记 +
+    分帧队列」：每帧最多补渲 _FRAME_BUDGET_CARDS 张，总耗时不变但不再单拍
+    卡死（对齐 main_widget._UI_PLUGIN_FRAME_BUDGET_MS 分帧先例）。
+
+    - 流式卡不入队（MessageCard.refresh_theme 判断）：refresh_theme 已置
+      _needs_full_render=True，下一次流式节拍自然全量带新主题
+    - 消费时 viewer 不可见：_perform_update 的 V1 门控置 _render_deferred，
+      showEvent 补渲链路兜底（隐藏卡不丢主题态、不丢正文）
+    - viewer 池化复用/销毁：_reset_for_reuse / cleanup 调 discard 摘队
+    """
+
+    _FRAME_BUDGET_CARDS = 2  # 每帧最多补渲张数（可见优先）
+    _FRAME_INTERVAL_MS = 16  # ≈60fps 一帧
+
+    def __init__(self):
+        # id(viewer) → weakref；dict 保序，插入序 ≈ 入队序
+        self._pending: "dict[int, weakref.ref]" = {}
+        self._timer: Optional[QTimer] = None
+
+    def enqueue(self, viewer) -> None:
+        """登记待补渲 viewer（幂等，已入队的不重复登记）"""
+        key = id(viewer)
+        if key in self._pending:
+            return
+        self._pending[key] = weakref.ref(viewer)
+        if self._timer is None:
+            # 无 parent QTimer：队列清空时 deleteLater 显式释放（对齐
+            # main_widget._theme_batch_timer 的生命周期管理写法）
+            self._timer = QTimer()
+            self._timer.setSingleShot(True)
+            self._timer.timeout.connect(self._drain)
+        self._timer.start(self._FRAME_INTERVAL_MS)
+
+    def discard(self, viewer) -> None:
+        """viewer 被池化复用/销毁前摘队"""
+        self._pending.pop(id(viewer), None)
+
+    def _drain(self) -> None:
+        """帧回调：可见优先取最多 _FRAME_BUDGET_CARDS 张执行补渲"""
+        if self._timer is not None:
+            self._timer.stop()
+        if not self._pending:
+            if self._timer is not None:
+                self._timer.deleteLater()
+                self._timer = None
+            return
+
+        def _visible_first(kv):
+            v = kv[1]()
+            return 0 if v is not None and v.isVisible() else 1
+
+        entries = sorted(self._pending.items(), key=_visible_first)
+        consumed = 0
+        for key, ref in entries:
+            if consumed >= self._FRAME_BUDGET_CARDS:
+                break
+            viewer = ref()
+            self._pending.pop(key, None)
+            if viewer is None:
+                continue  # C++ 对象已销毁：顺手清理
+            viewer._theme_render_pending = False
+            consumed += 1
+            try:
+                # 与原 refresh_theme immediate 路径同一原语：置全量标记 +
+                # _schedule_render(immediate=True)；不可见时 _perform_update
+                # 内部 V1 门控转 _render_deferred，由 showEvent 补渲
+                viewer._refresh_viewer_font()
+            except RuntimeError:
+                continue
+            except Exception as e:
+                logger.warning(f"[ThemeRerenderQueue] 补渲失败 {type(viewer).__name__}: {e}")
+        if self._pending:
+            self._timer.start(self._FRAME_INTERVAL_MS)
+        else:
+            self._timer.deleteLater()
+            self._timer = None
+
+
+# 模块级单例：消息卡主题补渲共用一条分帧队列
+_theme_rerender_queue = _ThemeRerenderQueue()
 
 
 class PlainTextViewer(QWidget):

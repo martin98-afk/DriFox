@@ -111,6 +111,7 @@ from app.utils.design_tokens import (
     get_unified_scrollbar_style,
     scale_font_size,
     scale_icon_size,
+    set_style_sheet_if_changed,
 )
 
 from app.utils.utils import get_font_family_css, get_icon
@@ -205,7 +206,6 @@ from app.widgets.card_render_core import (
     _unwrap_code_blocks_with_context_links,
     _update_icon_prefix,
     _wrap_code_blocks_with_copy_button_web,
-    clear_global_render_cache,
     ensure_bubble_contrast,
     format_relative_time,
     get_font_family_css,
@@ -229,6 +229,7 @@ from app.widgets.card_viewers import (
     _fence_assets_for_skeleton,
     _logical_height_cap,
     _show_image_preview,
+    _theme_rerender_queue,
     extract_image_data_uris,
     plan_image_attachment_sources,
 )
@@ -553,10 +554,9 @@ class MessageCard(SimpleCardWidget):
 
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换"""
-        # 🐛 清空 LRU 渲染缓存 + 骨架 HTML 缓存，强制下次渲染使用新主题颜色。
-        # 否则 _render_markdown_to_html_cached 的 @lru_cache 会返回旧主题的 HTML
-        # （旧 pygments 代码高亮 + 旧图标路径），导致代码块颜色与背景混淆而"消失"。
-        clear_global_render_cache()
+        # [T16] 渲染缓存已按主题版本分桶（lru key 含 ThemeRefreshCoordinator
+        # 版本号），主题切换无需清空——旧版本条目永不命中，深浅来回切换
+        # 直接命中各自版本桶，无需逐卡 clear。
         # 同步全局性能缓存（图标前缀和字号），确保下次渲染使用新主题
         _update_icon_prefix()
         global _CODE_FONT_SIZE
@@ -568,28 +568,32 @@ class MessageCard(SimpleCardWidget):
         self._apply_card_style()
         # 更新头像
         if hasattr(self, "_av_label"):
-            self._av_label.setStyleSheet(self._build_avatar_style())
+            set_style_sheet_if_changed(self._av_label, self._build_avatar_style())
         # 更新标题
         if hasattr(self, "_name_label"):
             font_css = get_font_family_css()
-            self._name_label.setStyleSheet(
+            set_style_sheet_if_changed(
+                self._name_label,
                 f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
             )
         # 更新副标题
         if hasattr(self, "_subtitle_label"):
             font_css = get_font_family_css()
-            self._subtitle_label.setStyleSheet(
+            set_style_sheet_if_changed(
+                self._subtitle_label,
                 f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
             )
         # 更新时间戳
         if hasattr(self, "_ts_label"):
             if self.role == "user":
                 # 简洁气泡：无胶囊背景的弱化小字
-                self._ts_label.setStyleSheet(
+                set_style_sheet_if_changed(
+                    self._ts_label,
                     f"{get_font_family_css()} font-size: {scale_font_size(11)}px; color: {self._theme['muted']};"
                 )
             else:
-                self._ts_label.setStyleSheet(
+                set_style_sheet_if_changed(
+                    self._ts_label,
                     f"""
                     QLabel {{
                         {get_font_family_css()} font-size: {scale_font_size(11)}px;
@@ -614,8 +618,17 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
             self.viewer.refresh_theme()
         # 刷新富文本视图字体并触发重渲染（缓存已在 refresh_theme 中失效）
+        # [T6] 分帧错峰：全量重渲（单卡 40~120ms 主线程）不再逐卡 immediate
+        # 同拍执行，改置脏 + 入分帧队列（每帧最多 2 张，可见优先）；
+        # 流式卡不入队：上方 refresh_theme 已置 _needs_full_render=True，
+        # 下一次流式节拍自然全量带新主题，不丢主题态不丢正文，也不打断
+        # 流式自适应节流（_schedule_render 的边界合并窗口）。
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
-            self.viewer._refresh_viewer_font()
+            if getattr(self.viewer, "_streaming", False):
+                self.viewer._theme_render_pending = False
+            else:
+                self.viewer._theme_render_pending = True
+                _theme_rerender_queue.enqueue(self.viewer)
         # 欢迎 tab 条：文字/hover/选中底色都由 CustomTabButton 实时取 Colors token，
         # refresh_style 重算 QSS 即可；胶囊（_TabIndicator）配色每次 paint 实时读，
         # 补一次 update 触发重绘。

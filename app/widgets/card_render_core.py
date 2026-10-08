@@ -2820,11 +2820,18 @@ _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
 
 @lru_cache(
-    maxsize=16
-)  # 256→64→16：>200KB 大文本已走 __wrapped__ 绕过缓存；实际唯一渲染内容通常 < 16 条，16 与 64 命中率差异 <5%，内存占用 -75%
-def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False, heavy_caps=None) -> str:
+    maxsize=32
+)  # 16→32（T16）：key 加 theme_ver 尾参后深浅两版各占一份；>200KB 大文本已走 __wrapped__ 绕过缓存
+def _render_markdown_to_html_cached_impl(
+    raw_md: str, compact: bool = False, heavy_caps=None, theme_ver: int = 0
+) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
+
+    theme_ver：主题版本号（ThemeRefreshCoordinator.get_version()），随 key 分桶——
+    同一 markdown 在深/浅主题下各存一份渲染结果，来回切换直接命中。
+    默认值 0 供直接调用（历史测试/无主题上下文场景）与 __wrapped__ 绕过分支
+    保持旧签名兼容；生产路径由 _render_markdown_to_html_cached 显式传入。
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _protect_inline_svg_blocks(safe_md)
@@ -2864,7 +2871,12 @@ def _render_markdown_to_html_cached(raw_md: str, compact: bool = False, heavy_ca
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
         return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact, heavy_caps=heavy_caps)
 
-    return _render_markdown_to_html_cached_impl(raw_md, compact=compact, heavy_caps=heavy_caps)
+    # [T16] 主题版本入 key：按 (theme_ver, raw_md, compact, heavy_caps) 分桶，
+    # 深浅主题各自缓存各自的渲染结果（get_version 内部有锁，线程安全）
+    from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+    theme_ver = ThemeRefreshCoordinator.get_version()
+    return _render_markdown_to_html_cached_impl(raw_md, compact=compact, heavy_caps=heavy_caps, theme_ver=theme_ver)
 
 
 # ============================================================

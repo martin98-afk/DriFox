@@ -124,6 +124,7 @@ from app.utils.design_tokens import (
     font_size_css,
     scale_font_size,
     scale_icon_size,
+    set_style_sheet_if_changed,
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.provider_icons import get_provider_icon
@@ -183,10 +184,12 @@ from app.widgets.cards.floating.undo_delete_store import (
 )
 from app.widgets.message_card import (
     MessageCard,
-    clear_global_render_cache,
     create_welcome_card,
     resolve_initial_welcome_mode,
 )
+# [T15] clear_global_render_cache 源头直取：message_card 已删 per-card 转发，
+# 主窗口清缓存提升（消息卡循环前一次）直接从 card_render_core 导入
+from app.widgets.card_render_core import clear_global_render_cache
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
     add_message_to_layout,
@@ -2685,7 +2688,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         对话框背景已完全透明，由外层容器兜底，故此处直接设为透明。
         """
-        self.setStyleSheet("background: transparent;")
+        # [T15] 同串短路：透明度滑条拖动高频进入本方法，同串重写会触发
+        # QStyleSheetStyle 全树 repolish（同病同修，见 design_tokens helper）
+        set_style_sheet_if_changed(self, "background: transparent;")
         self.setAutoFillBackground(False)
 
     def _apply_branch_or_create_session(self):
@@ -9737,7 +9742,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 全局操作：只执行一次 ──
         ThemeRefreshCoordinator.timer_start("global")
         Colors.refresh()
-        theme_manager.on_theme_changed()
         try:
             from qfluentwidgets import Theme, setTheme
 
@@ -9747,6 +9751,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 setTheme(Theme.DARK)
         except Exception:
             pass
+        # [T12] on_theme_changed（EV_THEME_CHANGED publish）移到 setTheme 之后：
+        # setTheme 触发 qfluentwidgets 全系组件框架级重刷，插件卡若在 setTheme
+        # 前收到 EV 派发 refresh_style，随后又被框架重刷覆盖一遍 → 双刷。
+        # 先框架后派发，插件卡一次刷在最终主题态上。
+        # 铁律：仍居全局段（先于 per-window 循环）、无条件 publish（勿加 scope 过滤）
+        theme_manager.on_theme_changed()
         ThemeRefreshCoordinator.timer_end("global")
 
         # ── Per-window：所有窗口执行样式更新 ──
@@ -10385,7 +10395,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
 
             # 对话框背景完全透明，由外层容器兜底，不叠加独立背景层。
-            self.setStyleSheet("background: transparent;")
+            # [T15] 同串短路：主题切换循环内多次进入，同串重写无谓 repolish
+            set_style_sheet_if_changed(self, "background: transparent;")
             self.setAutoFillBackground(False)
 
             # 分支标签
@@ -10409,6 +10420,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 消息卡片主题（per-card 隔离：单卡 refresh_theme 异常不得中断
             # 后续刷新项——2026-09-06 NameError 曾致同窗口输入框/设置弹窗卡片
             # 全部停留在旧主题）
+            # [T16] 无需清渲染缓存：lru_cache 已按主题版本分桶（包装函数自动
+            # 取 ThemeRefreshCoordinator.get_version() 作 key 前缀），旧版本条目
+            # 永不命中，深浅来回切换各自命中各自的桶
             ThemeRefreshCoordinator.timer_start("msg_cards")
             for card in _message_cards:
                 if hasattr(card, "refresh_theme"):
@@ -10677,27 +10691,7 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._safe_refresh(card)
 
-        # ── UI 插件浮动卡片：refresh_style 为统一约定（覆盖最全），旧插件的
-        #    _apply_latest_theme / _apply_theme / _retheme 作为兼容兜底排在后面 ──
-        # （detect-by-hasattr 防止强制依赖某个具体方法名，向后兼容多版本插件）
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            reg = UIPluginRegistry.get_instance()
-            instances = reg._card_widget_instances.get(self._window_id, {})
-            for widget in instances.values():
-                if widget is None or not widget.isVisible():
-                    continue
-                for method_name in ("refresh_style", "_apply_latest_theme", "_apply_theme", "_retheme"):
-                    method = getattr(widget, method_name, None)
-                    if callable(method):
-                        try:
-                            method()
-                        except Exception:
-                            pass
-                        break
-        except Exception:
-            pass
+        # 插件卡主题/字体刷新由 EV_THEME_CHANGED → UIPluginRegistry 全量派发承接（依赖 batched 无条件 publish，勿加 scope 过滤）
 
     def _apply_synced_model_selection(self):
         """gitee 配置同步完成后：把本窗口模型选择刷新为云端 llm_selected_model。
