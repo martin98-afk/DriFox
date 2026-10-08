@@ -1328,7 +1328,6 @@ class HistoryCompactor:
         req_kwargs = {
             "model": model,
             "messages": self._build_compaction_messages(messages),
-            "stream": False,
             "max_tokens": max_tokens,
         }
 
@@ -1340,15 +1339,16 @@ class HistoryCompactor:
             req_kwargs["top_p"] = top_p
 
         try:
+            from app.utils.http_client import chat_completion_text
 
             def create_task():
-                return client.chat.completions.create(**req_kwargs)
+                # 流式发起+聚合：仅流式端点（如 CodeBuddy）非流式请求会 400
+                return chat_completion_text(client, **req_kwargs)
 
-            resp = create_api_call_with_retry(client, create_task)
-            if not resp.choices:
-                logger.warning("[Compaction] API 返回空 choices，跳过摘要")
+            content = create_api_call_with_retry(client, create_task).strip()
+            if not content:
+                logger.warning("[Compaction] API 返回空内容，跳过摘要")
                 return ""
-            content = (resp.choices[0].message.content or "").strip()
 
             # 更新迭代摘要缓存
             self._previous_summary = content

@@ -124,3 +124,46 @@ def build_openai_client(api_key: str, base_url: str, timeout=None):
         # 免 key 调用：自定义 transport 剥离 authorization 头
         kwargs["http_client"] = httpx.Client(timeout=timeout, transport=_StripAuthTransport())
     return OpenAI(**kwargs)
+
+
+def chat_completion_text(
+    client,
+    *,
+    model,
+    messages,
+    temperature=None,
+    max_tokens=None,
+    top_p=None,
+):
+    """以流式发起 chat/completions 并聚合为完整文本返回（非流式语义的兼容封装）。
+
+    背景：部分服务商端点（如 CodeBuddy）仅支持流式请求，非流式直接 400
+    （code 11101 "Non-stream chat request is currently not supported"）。
+    所有「要完整结果、不需要逐字渲染」的调用方（提示词增强 / 会话压缩 /
+    标题摘要）统一走本函数，天然兼容仅流式端点。
+
+    说明：
+    - 聚合在调用方线程内同步完成（这些调用本就在后台线程执行）。
+    - 只聚合 delta.content；思考内容（reasoning / <think>）由调用方按需过滤，
+      与原非流式行为一致。
+    - 异常透传 openai 异常族（HTTP 错误在拿 Stream 时抛出，断流在迭代时抛出），
+      可直接被 create_api_call_with_retry 的重试判定识别。
+    """
+    kwargs = {"model": model, "messages": messages, "stream": True}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+
+    stream = client.chat.completions.create(**kwargs)
+    parts = []
+    for chunk in stream:
+        # 终结 chunk（如携带 usage 的最后一片）choices 可能为空列表，防越界
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta and delta.content:
+            parts.append(delta.content)
+    return "".join(parts)
