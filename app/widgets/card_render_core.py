@@ -3099,9 +3099,9 @@ _SKELETON_CACHE_MAX = 48
 # .todo-item 全套 CSS、window._updateTodoList / _todoCount / _todoProgressText
 # 全部删除；任务区改由卡片内原生 Qt 面板承担（app/widgets/inline_todo_panel.py）。
 # 旧骨架仍带 todo DOM 与 JS（虽无数据源、恒隐藏），必须靠版本号让旧缓存失效。
-# _SKELETON_CACHE_VERSION +1（v38）：方案 C——updateContent 入口 _twReset→_twFlush，
-# 消除打字机 flush 与整体替换的帧间隙（终渲染高度不二段跳）。
-_SKELETON_CACHE_VERSION = 38
+# _SKELETON_CACHE_VERSION +1（v39）：[#12] R2 恢复工具区滚动保护链（_scrollToolContentToBottom
+# + tc scroll 监听 + 意图绑定）；R1 display 空窗 scrollTop 快照保护；R3 flush 纯揭示化。
+_SKELETON_CACHE_VERSION = 39
 
 
 def _js_literal(value) -> str:
@@ -3773,7 +3773,19 @@ _TYPEWRITER_JS = """
                     if (st.buf) {
                         var all = st.buf;
                         st.buf = "";
+                        // [#12 R3] updateContent 场景 flush 后立即整页替换，
+                        // _dfxAppendStreamText 尾部的 auto-scroll 与
+                        // _userScrolledWithin/_prevScrollTop 基线复位是有害副作用
+                        // （滚到底随即被替换丢弃，body 滚动与跟随态却被污染）。
+                        // 快照受影响状态、揭示后还原 → 纯揭示语义，不动 _dfx 本体；
+                        // cp 的滚动位置由 _endDomUpdate 锚点机制接管。
+                        var _svWithin = window._userScrolledWithin;
+                        var _svPrev = window._prevScrollTop;
+                        var _svBody = document.body ? document.body.scrollTop : 0;
                         try { window._dfxAppendStreamText(all); } catch (e) {}
+                        if (document.body) document.body.scrollTop = _svBody;
+                        window._userScrolledWithin = _svWithin;
+                        window._prevScrollTop = _svPrev;
                     }
                 };
                 window._twReset = function () {
@@ -4143,10 +4155,18 @@ _CONTENT_AUTOSCROLL_JS = """
                         cp._userScrolledUp = s.cp.up;
                     }
                     if (tc && s.tc) {
-                        if (!_applyAnchor(tc, s.tc.a)) {
-                            var tMax = Math.max(0, tc.scrollHeight - tc.clientHeight);
-                            var tWant = Math.min(s.tc.top, tMax);
-                            if (Math.abs(tc.scrollTop - tWant) >= 1) _progScroll(tc, tWant);
+                        // [#12 R1] display:none 期间节点在渲染树外，clientHeight/
+                        // scrollHeight 均为 0 → tMax=0，钳制恢复会把 scrollTop 写 0
+                        // （顶掉 display 切换点的快照）。隐藏时跳过钳制，仅恢复跟随
+                        // 标志；滚动位置由 display='' 处的快照写回接管。
+                        var _tsEl = document.getElementById('tool-section');
+                        var _tsGone = _tsEl && _tsEl.style.display === 'none';
+                        if (!_tsGone) {
+                            if (!_applyAnchor(tc, s.tc.a)) {
+                                var tMax = Math.max(0, tc.scrollHeight - tc.clientHeight);
+                                var tWant = Math.min(s.tc.top, tMax);
+                                if (Math.abs(tc.scrollTop - tWant) >= 1) _progScroll(tc, tWant);
+                            }
                         }
                         tc._userScrolledUp = s.tc.up;
                     }

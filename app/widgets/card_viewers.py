@@ -4130,6 +4130,11 @@ class CodeWebViewer(QWebEngineView):
                     );
                     if (blocks.length === 0) {{
                         // 容器没有需要迁移的块 —— 若 tool-content 空就隐藏整个区
+                        // [#12 R1] display:none 会把节点移出渲染树（scrollTop 强制
+                        // 归零），切 none 前快照、恢复 '' 后写回，避免折叠框内滚动
+                        // 位置丢失（"折叠框内滚轮置顶"回归修复）。
+                        var _r1WasHidden = toolSection.style.display === 'none';
+                        if (!_r1WasHidden) toolSection._r1SavedTop = toolContent.scrollTop;
                         if (toolContent.children.length === 0) {{
                             toolSection.style.display = 'none';
                             return;
@@ -4137,6 +4142,7 @@ class CodeWebViewer(QWebEngineView):
                         // tool-content 仍有 data-tool-injected 流式块 / 旧搬移块
                         // （markdown 被缩短、块被删除），仍需刷新 header
                         toolSection.style.display = '';
+                        if (_r1WasHidden) _progScroll(toolContent, toolSection._r1SavedTop || 0);
                         _updateToolSectionHeader();
                         // 坞态（流式中）：自动滚底显示最新活动（尊重用户上滚）
                         if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
@@ -4394,7 +4400,12 @@ class CodeWebViewer(QWebEngineView):
                         }}
                         toolContent.__lastOrder = _curKeys;
                     }}
+                    // [#12 R1] display 切换空窗保护：none→'' 恢复时写回快照，
+                    // ''→none 前更新快照（同 reorganizeContent 空分支语义）。
+                    var _r1WasHidden = toolSection.style.display === 'none';
+                    if (!_r1WasHidden) toolSection._r1SavedTop = toolContent.scrollTop;
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
+                    if (_r1WasHidden && toolSection.style.display === '') _progScroll(toolContent, toolSection._r1SavedTop || 0);
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
                     if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
@@ -5007,6 +5018,46 @@ class CodeWebViewer(QWebEngineView):
                 window._ensureThinkSnake = _ensureThinkSnake;
                 new MutationObserver(_ensureThinkSnake).observe(document.body, {{ childList: true, subtree: true }});
                 _ensureThinkSnake();
+
+                // ===== 工具区（#tool-content）自动滚底 =====
+                // 当工具/思考区有新内容时，自动滚动到底部，让用户始终看到最新状态。
+                // 用户主动上滚后不再打扰（_userScrolledUp），滚回底部附近自动恢复跟随。
+                // [#12 R2] v37(45463d9b) 误删工具区滚动保护链，从 77882330 基线恢复；
+                // :4142/:4400/:6376 三处残留调用由此复活。todo-content 同款监听不恢复
+                // （v37 todo 已迁移内嵌，不回摆）。
+                function _scrollToolContentToBottom() {{
+                    var tc = document.getElementById('tool-content');
+                    if (!tc) return;
+                    // 用户主动向上滚动了工具区则不自动滚底
+                    if (tc._userScrolledUp) return;
+                    // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
+                    // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
+                    // 会错误置位 _userScrolledUp 导致跟随中断。
+                    _progScroll(tc, tc.scrollHeight);
+                }}
+                // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
+                document.getElementById('tool-content')?.addEventListener('scroll', function() {{
+                    var tc = this;
+                    // 🐛 修复（流式滚动位置重置）：updateContent / save-restore 的 DOM
+                    // 操作窗口内 scrollTop 被钳制产生的程序性 scroll 事件（异步派发
+                    // 到达时 _suppressScrollEvent 已复位）不得误判为用户滚动——否则
+                    // 钳制位置恰在底部附近时 _userScrolledUp 被误复位 → 跟随重新激活
+                    // → 后续每次流式更新强制拉底，用户阅读位置反复丢失。与
+                    // #content-placeholder 监听的 _suppressScrollEvent 抑制对称。
+                    if (window._suppressScrollEvent) return;
+                    // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
+                    if (tc._progDepth > 0) {{ tc._progDepth--; return; }}
+                    var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
+                    tc._userScrolledUp = !atBottom;
+                    if (atBottom) tc._userScrolledUp = false;
+                }});
+                // 🐛 修复（流式滚动位置重置）：wheel 事件同步标记上滚意图——scroll
+                // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：
+                // 用户滚轮后 scroll 未派发，流式 JS 判 _userScrolledUp=false 抢先拉底
+                // 覆盖阅读位置。对齐 #content-placeholder 的 wheel 修复模式。
+                // 用户滚动意图绑定（wheel / 触摸 / 键盘），语义见 _bindUserScrollIntent
+                // （定义在 card_render_core 骨架，v37 未删，仅调用侧被误删）。
+                _bindUserScrollIntent(document.getElementById('tool-content'));
 
                 {_STREAMING_DOCK_JS}
                 {_TYPEWRITER_JS}
@@ -6376,7 +6427,15 @@ class CodeWebViewer(QWebEngineView):
             "if(typeof _scrollToolContentToBottom==='function')_scrollToolContentToBottom();"
             "if(window._toolCompactMode){"
             "var _ts2=document.getElementById('tool-section');"
-            "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
+            "if(_ts2){"
+            # [R1] display 切换空窗保护：none→'' 恢复时写回快照（此前钳制恢复的
+            # scrollTop 否则停在 0），''→none 前更新快照供下次恢复。
+            "var _r1Hidden=(_ts2.style.display==='none');"
+            "if(!_r1Hidden&&_tc)_ts2._r1SavedTop=_tc.scrollTop;"
+            "_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';"
+            "if(_r1Hidden&&_ts2.style.display===''&&_tc){_progScroll(_tc,_ts2._r1SavedTop||0);}"
+            "_updateToolSectionHeader();"
+            "}"
             "}"
             "})();"
         )
