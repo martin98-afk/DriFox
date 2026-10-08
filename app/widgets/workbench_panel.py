@@ -6,8 +6,7 @@
 不进任何 layout，与桌宠（PixelPetWidget）同模式。由标题栏「右侧边栏」
 按钮 toggle 显隐。
 
-内置区域：
-- 任务：todowrite 工具回传的待办列表（窗口级）—— 置顶常驻，不进页签
+内置区域：无（页签全部由插件注册，见下）
 
 ★ 页面已**完全插件化 · 零保留槽位**：面板不内置任何页实现、不识任何
 page_id 语义，全部页由插件通过
@@ -25,47 +24,32 @@ refresh_workbench 时调用），页面自行实现可选协议 ``refresh_data()
 ``context`` / 活跃窗口取数 —— 面板不承载任何页面专属逻辑、不持有 backend 引用。
 """
 
-import json
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import QEvent, QRect, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QProgressBar,
     QSizePolicy,
-    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ScrollArea, TransparentToolButton
 
 from app.core.infra.project_changed import dispatch_project_changed, is_active_window
-from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
-from app.utils.motion import LoopTimer
-from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
+from app.utils.design_tokens import Colors
 from loguru import logger
-from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
+from app.widgets._workbench_helpers import _EmptyHint
 from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
-from app.widgets.elided_label import _ElidedLabel
 from app.widgets.flow_layout import FlowLayout
-from app.widgets.cards.floating.sub_agent_compact_widget import _RotatingIcon
 
 # ── 尺寸常量 ──
 PANEL_WIDTH_DEFAULT = 480  # 默认宽度（splitter 初始分配用）
 PANEL_WIDTH_MIN = 320  # 拖拽最小宽
 PANEL_WIDTH_MAX = 820  # 拖拽最大宽
-TASKS_MIN_HEIGHT = 0  # 任务区最小高度（无任务时折叠到此）
-TASKS_MAX_HEIGHT = 360  # 任务区最大高度（splitter 上限）
-TASKS_DEFAULT_HEIGHT = 180  # 任务区默认高度
 
 
-# 注：_EmptyHint / _SectionHeader 已迁移到 app.widgets._workbench_helpers 共享模块，
-# 被 TasksPage 和 plugins/artifacts-manager/ui/artifacts_page.py 共用。
+# 注：_EmptyHint 已迁移到 app.widgets._workbench_helpers 共享模块，
+# 被本模块与 plugins/artifacts-manager/ui/artifacts_page.py 共用。
 
 
 class _PagePlaceholder(QWidget):
@@ -91,345 +75,6 @@ class _PagePlaceholder(QWidget):
 
     def refresh_style(self) -> None:
         self._hint.refresh_style()
-
-
-class TasksPage(QWidget):
-    """任务区：todowrite 待办列表（置顶常驻，不进内容栈；与下方 tab+stack 用 splitter 隔开）
-
-    结构：头部（图标 + 标题 + 进度统计 + 折叠按钮）→ 细进度条 → 行式任务清单。
-
-    视觉取舍：条目用**行式（无边框）**而非卡片堆叠——任务清单通常条目多，
-    每条目加边框会形成密集的"框中框"，视觉噪声重。改为默认透明、hover 淡背景，
-    靠左侧状态符号的颜色区分状态；全部条目单行省略（_ElidedLabel，悬浮看全文），
-    长任务不再换行撑高、把"进行中"挤出首屏；进行中条目加左侧琥珀竖条 + 淡琥珀底强调。
-    """
-
-    _PRI_LABELS = {"high": "高", "medium": "中", "low": "低"}
-    # 状态 → (符号, 颜色, 右侧文字)；pending 圆点恒为中性灰（优先级着色易误读为出错状态）
-    _STATUS_META = {
-        "completed": ("✓", "#3fb950", ""),
-        "in_progress": ("◐", "#f59e0b", ""),
-        "pending": ("●", "#6b7280", ""),
-    }
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._collapsed = False
-        self._on_collapse_changed = None  # 折叠状态变化回调（宿主收敛 splitter 高度）
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        # ── 头部：图标 + 标题 + 统计 + 折叠按钮 ──
-        self._header = _SectionHeader("任务", "todo", self)
-        self._collapse_btn = TransparentToolButton(get_icon("折叠"), self)
-        self._collapse_btn.setFixedSize(22, 22)
-        self._collapse_btn.setToolTip("折叠任务区")
-        self._collapse_btn.clicked.connect(self._on_collapse_clicked)
-        # 折叠按钮插入到 header 末尾（统计之后）
-        hdr_layout = self._header.layout()
-        hdr_layout.insertWidget(hdr_layout.count(), self._collapse_btn)
-        # 整行 header 可点折叠（按钮自身消费点击，不会重复触发 eventFilter）
-        self._header.installEventFilter(self)
-        self._header.setCursor(Qt.PointingHandCursor)
-        self._header.setToolTip("点击折叠任务区")
-        layout.addWidget(self._header)
-
-        # ── 进度条：细横条，显示完成比例 ──
-        self._progress = QProgressBar(self)
-        self._progress.setObjectName("taskProgressBar")
-        self._progress.setFixedHeight(4)
-        self._progress.setTextVisible(False)
-        self._progress.setRange(0, 100)
-        self._progress.setValue(0)
-        layout.addWidget(self._progress)
-
-        # ── 进行中常驻条：脱离列表置顶，折叠态也可见 ──
-        self._running_wrap = QFrame(self)
-        self._running_wrap.setObjectName("taskRunningWrap")
-        self._running_wrap.setStyleSheet("background: transparent;")  # 主题色由 refresh_style 统一上
-        self._running_layout = QVBoxLayout(self._running_wrap)
-        self._running_layout.setContentsMargins(2, 2, 2, 2)
-        self._running_layout.setSpacing(1)  # 与列表行距一致（支持多条 in_progress）
-        self._running_wrap.hide()
-        layout.addWidget(self._running_wrap)
-
-        # ── 任务列表 ──
-        self._scroll = ScrollArea(self)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setFocusPolicy(Qt.NoFocus)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }\n" + get_unified_scrollbar_style(6)
-        )
-        self._list_wrap = QWidget()
-        self._list_wrap.setStyleSheet("background: transparent;")
-        self._scroll.setWidget(self._list_wrap)
-        self._list_layout = QVBoxLayout(self._list_wrap)
-        self._list_layout.setContentsMargins(0, 0, 2, 0)
-        self._list_layout.setSpacing(1)  # 行式条目：紧凑行距
-        self._empty_hint = _EmptyHint("暂无任务\n\nAI 使用 todowrite 建立的任务列表会显示在这里", self._list_wrap)
-        self._list_layout.addWidget(self._empty_hint)
-        self._list_layout.addStretch(1)
-        layout.addWidget(self._scroll, 1)
-
-        # 初始无任务：整区隐藏（不占高度），折叠按钮一并隐藏
-        self._collapse_btn.hide()
-        self.hide()
-        self.refresh_style()
-        # 任务列表内容签名（数据未变时 update_todos 跳过全量重建）
-        self._last_todos_sig: Optional[str] = None
-
-    # ── 折叠 ──
-
-    def set_collapse_callback(self, callback) -> None:
-        """宿主注入折叠状态变化回调（用于收敛 splitter 上半高度）"""
-        self._on_collapse_changed = callback
-
-    def header_height(self) -> int:
-        """折叠态所需高度：头部 + 进度条 + 进行中常驻条（可见时） + 间距
-
-        折叠后不能保持展开时的高度，否则只剩 header 的任务区会留一大片空白
-        （用户看到「任务 title 跑中间」）。进行中条脱离列表、折叠态仍显示，
-        宿主收敛高度必须把它算进去，否则会被 splitter 截掉。
-        """
-        lay = self.layout()
-        m = lay.contentsMargins()
-        h = self._header.sizeHint().height() + self._progress.height() + lay.spacing() + m.top() + m.bottom()
-        if self._running_wrap.isVisible():
-            h += lay.spacing() + self._running_wrap.sizeHint().height()
-        return h
-
-    def _set_collapsed(self, collapsed: bool) -> None:
-        """内部：设置折叠态（不触发回调，避免递归）
-
-        只收起任务列表；进行中常驻条不随折叠隐藏（折叠态保持可见执行中任务）。
-        """
-        self._collapsed = collapsed
-        self._scroll.setVisible(not collapsed)
-        icon = "展开" if collapsed else "折叠"
-        self._collapse_btn.setIcon(get_icon(icon))
-        self._collapse_btn.setToolTip("展开任务区" if collapsed else "折叠任务区")
-        self._header.setToolTip("点击展开任务区" if collapsed else "点击折叠任务区")
-
-    def eventFilter(self, obj, event) -> bool:
-        """header 整行左键点击 = 折叠/展开切换（按钮自身消费点击，不冒泡到这）"""
-        if obj is self._header and event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
-            self._on_collapse_clicked()
-            return True
-        return super().eventFilter(obj, event)
-
-    def _on_collapse_clicked(self) -> None:
-        """折叠按钮：切换折叠态并通知宿主收敛高度"""
-        self._set_collapsed(not self._collapsed)
-        self._notify_collapse_changed()
-
-    def _notify_collapse_changed(self) -> None:
-        if callable(self._on_collapse_changed):
-            try:
-                self._on_collapse_changed(self._collapsed)
-            except Exception:
-                pass
-
-    # ── 数据 ──
-
-    def _item_fields(self, t: Any) -> "tuple[str, str, str]":
-        """单条任务数据归一化：(status, content, priority)，兜存量脏数据"""
-        status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
-        raw = (t.get("content") if isinstance(t, dict) else t) or ""
-        # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（QLabel 只收 str）
-        content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-        priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
-        return status, content, priority
-
-    def _clear_items(self) -> None:
-        """清空列表项（保留 empty_hint 实例，其余彻底销毁）
-
-        ★ ``deleteLater()`` 只是"预约删除"——在事件循环真正处理前，widget 仍挂在
-        parent 的 children 链上并继续绘制。此前只 deleteLater 不 setParent(None)，
-        旧条目残影会盖在新列表第一项上（现象：第一项重复显示上一次的最后一项）。
-        """
-        while self._list_layout.count():
-            item = self._list_layout.takeAt(0)
-            w = item.widget()
-            if w is None or w is self._empty_hint:
-                continue
-            w.setParent(None)  # ★ 先断开父子关系，立即停止绘制
-            w.deleteLater()
-        while self._running_layout.count():
-            item = self._running_layout.takeAt(0)
-            w = item.widget()
-            if w is None:
-                continue
-            w.setParent(None)
-            w.deleteLater()
-
-    def update_todos(self, todos: List[Dict[str, Any]]) -> None:
-        """刷新任务列表（无任务时整区 hide，由宿主 splitter 收敛；非空时显示并默认展开）
-
-        ★ 数据未变时跳过重建（内容签名比对）：切对话标签等高频路径每次都会
-        全量推送，任务多时逐条重建 widget 成本可观；签名相同 → 渲染结果
-        相同，直接跳过。
-        """
-        todos = list(todos or [])
-        sig = json.dumps(todos, ensure_ascii=False, sort_keys=True, default=str)
-        if sig == self._last_todos_sig:
-            return
-        self._last_todos_sig = sig
-        self._clear_items()
-        done = sum(1 for t in todos if (t.get("status") or "pending") == "completed")
-        total = len(todos)
-        pct = int(round(done * 100 / total)) if total else 0
-
-        # 头部统计 + 进度条 + 折叠按钮
-        self._header.set_extra(f"{pct}% · {done}/{total}" if todos else "")
-        self._progress.setValue(pct)
-        self._progress.setVisible(bool(todos))
-        self._collapse_btn.setVisible(bool(todos))
-        # 整区可见性：无任务时 hide。折叠态不再强制展开：进行中常驻条在
-        # 折叠态也可见，新任务推送不打断用户的折叠意愿
-        self.setVisible(bool(todos))
-
-        # 进行中置顶常驻条（折叠态也可见）；下面列表保持完整原序，不受置顶影响
-        running = [t for t in todos if self._item_fields(t)[0] == "in_progress"]
-
-        # 重建进行中常驻条（置顶区条目带重点样式）
-        for t in running:
-            _status, content, priority = self._item_fields(t)
-            self._running_layout.addWidget(
-                self._make_item("in_progress", content, priority, self._running_wrap, pinned=True)
-            )
-        self._running_wrap.setVisible(bool(running))
-
-        # 重建列表：empty_hint（按需可见）→ 全部任务按原序 → 底部 stretch
-        self._empty_hint.setVisible(not todos)
-        self._list_layout.addWidget(self._empty_hint)
-        for t in todos:
-            status, content, priority = self._item_fields(t)
-            self._list_layout.addWidget(self._make_item(status, content, priority))
-        self._list_layout.addStretch(1)
-
-        self._notify_collapse_changed()
-
-    def _make_item(
-        self, status: str, content: str, priority: str, parent: QWidget | None = None, *, pinned: bool = False
-    ) -> QFrame:
-        """单条任务：左状态符号 + 中内容（单行省略），右侧不放任何标签
-
-        置顶区条目（pinned=True）带琥珀竖条 + 600 字重重点样式；列表条目一律
-        普通行样式（completed 划线弱化、pending 中性灰圆点），不随状态强调。
-        优先级与全文合并进单一 tooltip（分设会弹两个气泡）。
-        parent 缺省挂列表，进行中常驻条传自身容器。
-        """
-        frame = QFrame(parent or self._list_wrap)
-        frame.setObjectName("taskItem")
-        frame.setProperty("pinned", pinned)
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
-
-        mark, _color, _status_text = self._STATUS_META.get(status, self._STATUS_META["pending"])
-        if status == "in_progress":
-            # 进行中：子智能体运行中同款旋转 SVG 图标（QPainter 原地旋转，无抖动）
-            mark_widget: QWidget = _RotatingIcon(":/icons/执行中.svg", size=16, parent=frame)
-            # 浅色主题叠加半透明黑色，避免亮背景下图标不可见（与子智能体悬浮框一致）
-            mark_widget.set_tint("#88000000" if _is_current_theme_light() else None)
-            # _RotatingIcon 无自驱动定时器，条目自带循环驱动。用 LoopTimer 门控：
-            # 条目不可见（面板收起 / 页签切走）或系统「减少动态效果」时自动跳过
-            # 回调，不再在隐藏状态下空转重绘 SVG。80ms/32° 与子智能体悬浮框
-            # 旋转参数一致（400°/s）；宿主取 mark_widget，条目销毁即自动停。
-            _angle = 0
-
-            def _spin_tick() -> None:
-                nonlocal _angle
-                _angle = (_angle + 32) % 360
-                mark_widget.set_angle(_angle)
-
-            spin_timer = LoopTimer(mark_widget, 80, _spin_tick)
-            spin_timer.start()
-            layout.addWidget(mark_widget)
-        else:
-            mark_label = QLabel(mark, frame)
-            mark_label.setObjectName("taskMark")
-            mark_label.setFixedWidth(16)
-            mark_label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(mark_label)
-
-        # 单行省略（_ElidedLabel 随宽度自动重算）：任务清单的
-        # 价值是看进度而非读全文，长任务全文展开会把"进行中"挤出可视区
-        content_label = _ElidedLabel(content, frame)
-        content_label.setObjectName("taskContent")
-        # 单一 tooltip：优先级 + 全文合一（优先级设 frame、全文设 label 会先后弹两个气泡）
-        content_label.setToolTip(f"优先级：{self._PRI_LABELS.get(priority, '中')}\n{content}")
-        layout.addWidget(content_label, 1)
-
-        frame.setProperty("status", status)
-        frame.setProperty("priority", priority)
-        self._apply_item_style(frame)
-        return frame
-
-    def _apply_item_style(self, frame: QFrame) -> None:
-        """应用条目样式（行式：默认透明，hover 淡背景；靠状态符号着色）"""
-        status = frame.property("status") or "pending"
-        _mark, color, _text = self._STATUS_META.get(status, self._STATUS_META["pending"])
-
-        frame.setStyleSheet(
-            "QFrame#taskItem { background: transparent; border: none;"
-            f" border-left: 3px solid transparent; border-radius: {BorderRadius.SM}; }}"
-            "QFrame#taskItem:hover {"
-            f" background: {Colors.HOVER_BG}; }}"
-            # 置顶区条目：左琥珀竖条；淡琥珀底由置顶容器承担，列表行不带强调
-            'QFrame#taskItem[pinned="true"] {'
-            f" border-left-color: {Colors.ACCENT_WARM}; }}"
-        )
-
-        mark_label = frame.findChild(QLabel, "taskMark")
-        if mark_label is not None:
-            mark_label.setStyleSheet(
-                f"color: {color}; background: transparent; font-weight: 700;"
-                f" {get_font_family_css()} {font_size_css(13)};"
-            )
-
-        content_label = frame.findChild(QLabel, "taskContent")
-        if content_label is not None:
-            if status == "completed":
-                line, c, weight = "text-decoration: line-through;", Colors.TEXT_MUTED, "normal"
-            elif frame.property("pinned"):
-                line, c, weight = "", Colors.TEXT_PRIMARY, "600"
-            else:
-                line, c, weight = "", Colors.TEXT_PRIMARY, "500"
-            content_label.setStyleSheet(
-                f"color: {c}; background: transparent; {line}"
-                f" font-weight: {weight};"
-                f" {get_font_family_css()} {font_size_css(12)};"
-            )
-
-    def refresh_style(self) -> None:
-        self._header.refresh_style()
-        self._empty_hint.refresh_style()
-        # 置顶常驻区：淡琥珀底卡，与下方普通列表视觉区分
-        self._running_wrap.setStyleSheet(
-            "QFrame#taskRunningWrap { background: rgba(245, 158, 11, 0.10);"
-            f" border-radius: {BorderRadius.SM}; }}"
-        )
-        # 进度条：轨道 = BORDER 色，已完成块 = completed 绿
-        self._progress.setStyleSheet(
-            "QProgressBar#taskProgressBar {"
-            f" background: {Colors.BORDER};"
-            " border: none;"
-            " border-radius: 2px;"
-            " }"
-            "QProgressBar#taskProgressBar::chunk {"
-            f" background: {self._STATUS_META['completed'][1]};"
-            " border-radius: 2px;"
-            " }"
-        )
-        for lay in (self._running_layout, self._list_layout):
-            for i in range(lay.count()):
-                w = lay.itemAt(i).widget()
-                if isinstance(w, QFrame) and w.objectName() == "taskItem":
-                    self._apply_item_style(w)
 
 
 class WorkbenchPanel(QWidget):
@@ -477,8 +122,8 @@ class WorkbenchPanel(QWidget):
         self.setMinimumWidth(PANEL_WIDTH_MIN)
         self.setMaximumWidth(PANEL_WIDTH_MAX)
 
-        # 当前任务区高度（splitter 拖拽持久化用）
-        self._tasks_height = TASKS_DEFAULT_HEIGHT
+        # 任务区已迁至消息卡片内嵌看板（见 app/widgets/inline_todo_panel.py），
+        # 面板不再有下半区：内容栈直接吃满整个面板。
         # 页面账本（由插件注册表 reconcile，见 sync_plugin_pages）
         # ★ 面板不认任何 page_id 语义、不保留槽位：worktree / artifacts / history
         #   与其它插件页一视同仁，顺序由 metadata["order_hint"] 决定。
@@ -514,26 +159,7 @@ class WorkbenchPanel(QWidget):
             else None,
         )
 
-        # ── 主体：QSplitter(垂直) 切分内容栈 / 任务区 ──
-        # 上：tab 条已上移，这里只剩 QStackedWidget（工作树 / 记忆 / 产物 / 插件页 / 卡片页）
-        # 下：TasksPage（底部独立任务区，无任务时整区 hide）
-        self._body_splitter = QSplitter(Qt.Vertical, self)
-        self._body_splitter.setObjectName("workbenchBodySplitter")
-        self._body_splitter.setChildrenCollapsible(False)
-        self._body_splitter.setHandleWidth(4)
-        self._body_splitter.setStyleSheet(
-            "QSplitter#workbenchBodySplitter { background: transparent; border: none; }"
-            "QSplitter#workbenchBodySplitter::handle:vertical {"
-            f" background: transparent;"
-            f" border-top: 1px solid {Colors.BORDER};"
-            " margin: 0 4px;"
-            " }"
-            "QSplitter#workbenchBodySplitter::handle:vertical:hover {"
-            f" border-top: 1px solid {Colors.BORDER_ACCENT};"
-            " }"
-        )
-
-        # 上半：内容栈容器（tab 条已上移至面板顶部，这里只剩 stack）
+        # ── 主体：内容栈容器（tab 条已上移至面板顶部，这里只剩 stack）──
         self._bottom = QWidget(self)
         self._bottom_layout = QVBoxLayout(self._bottom)
         self._bottom_layout.setContentsMargins(0, 0, 0, 0)
@@ -548,26 +174,7 @@ class WorkbenchPanel(QWidget):
         # 初始无任何插件页 → 先挂空态页（首帧不出现空白无提示）
         self._sync_empty_page()
 
-        self._body_splitter.addWidget(self._bottom)
-
-        # 下半：任务区（底部独立区域）
-        self.tasks_page = TasksPage(self)
-        self.tasks_page.setMinimumHeight(TASKS_MIN_HEIGHT)
-        self.tasks_page.setMaximumHeight(TASKS_MAX_HEIGHT)
-        # 折叠状态变化 → 收敛 splitter 下半高度（否则折叠后留大片空白）
-        self.tasks_page.set_collapse_callback(self._on_tasks_collapsed)
-        self._body_splitter.addWidget(self.tasks_page)
-
-        # 内容区吃掉剩余空间（stretch 1），任务区固定高度（stretch 0）。
-        # ★ 不能给下半区 setSizes 传 0：QSplitter 会把它压到 0 高度，
-        #   任务区内容显示不出来。无任务时由 apply_tasks_visible 走 [1, 0]。
-        self._body_splitter.setStretchFactor(0, 1)
-        self._body_splitter.setStretchFactor(1, 0)
-        self._body_splitter.setSizes([1, 0])
-        # splitter 拖拽结束时把下半尺寸持久化（无任务时 tasks_page hide 高度=0）
-        self._body_splitter.splitterMoved.connect(self._on_splitter_moved)
-
-        root.addWidget(self._body_splitter, 1)
+        root.addWidget(self._bottom, 1)
 
         # 插件页签：{page_id: widget}，按注册表 reconcile（见 sync_plugin_pages）
         self._plugin_widgets: Dict[str, QWidget] = {}
@@ -620,46 +227,6 @@ class WorkbenchPanel(QWidget):
         None 表示「查看所有产物差异」（由宿主从当前 ops 重新计算）。
         """
         self.diff_requested.emit(file_paths)
-
-    # ── splitter 拖拽 ──
-
-    def _on_splitter_moved(self, pos: int, index: int) -> None:
-        """splitter 拖拽结束：把下半（任务区）高度持久化（折叠态与无任务态不记忆）"""
-        sizes = self._body_splitter.sizes()
-        if sizes and sizes[1] > 0 and not self.tasks_page._collapsed:
-            self._tasks_height = max(TASKS_MIN_HEIGHT, min(TASKS_MAX_HEIGHT, sizes[1]))
-
-    def _on_tasks_collapsed(self, collapsed: bool) -> None:
-        """任务区折叠/展开：收敛 splitter 下半高度
-
-        折叠时不能保持展开高度——否则任务区只剩 header 却仍占 ~180px。
-        这里把下半收敛到 header 高度（约 50px），展开时恢复记忆高度。
-        """
-        if not self.tasks_page.isVisible():
-            self._body_splitter.setSizes([1, 0])
-            return
-        if collapsed:
-            h = max(TASKS_MIN_HEIGHT, self.tasks_page.header_height())
-            self._body_splitter.setSizes([1, h])
-        else:
-            self._body_splitter.setSizes([1, self._tasks_height])
-
-    def apply_tasks_visible(self) -> None:
-        """根据 tasks_page 可见性收敛 splitter 下半高度
-
-        无任务时 tasks_page 已 hide → 下半置 0，内容区（stretch 1）占满。
-        有任务时按记忆高度恢复（折叠态则用 header 高度）。
-
-        ★ 下半区永远给 >=1 的初值：setSizes 传 0 会让任务区塌成 0 高度。
-        """
-        if not self.tasks_page.isVisible():
-            self._body_splitter.setSizes([1, 0])
-        elif self.tasks_page._collapsed:
-            h = max(TASKS_MIN_HEIGHT, self.tasks_page.header_height())
-            self._body_splitter.setSizes([1, h])
-        else:
-            h = max(TASKS_MIN_HEIGHT, min(TASKS_MAX_HEIGHT, self._tasks_height))
-            self._body_splitter.setSizes([1, h])
 
     # ── 动态卡片 tab（right 容器 UI 插件卡片） ──
 
@@ -1253,47 +820,14 @@ class WorkbenchPanel(QWidget):
         """
         return self._tab_id_at(self._stack.currentIndex())
 
-    # ── 数据入口（宿主驱动；仅任务区，页面数据由页面自拉） ──
-
-    def update_todos(self, todos: List[Dict[str, Any]]) -> None:
-        """刷新任务列表
-
-        高度收敛由 TasksPage 的折叠回调（``_on_tasks_collapsed``）驱动，
-        它已覆盖「无任务 / 折叠 / 展开」三种情形，此处不再重复 setSizes。
-        """
-        self.tasks_page.update_todos(todos)
-
     # ── 主题 ──
 
     def refresh_style(self) -> None:
         Colors.refresh()
         # 嵌入式：背景透明（由外层 #workbenchFrame 圆角矩形容器提供背景）
         self.setStyleSheet("QWidget#workbenchPanel { background: transparent; border: none; }")
-        # splitter handle 边框色随主题（构造时用旧 Colors 固化）
-        self._body_splitter.setStyleSheet(
-            "QSplitter#workbenchBodySplitter { background: transparent; border: none; }"
-            "QSplitter#workbenchBodySplitter::handle:vertical {"
-            f" background: transparent;"
-            f" border-top: 1px solid {Colors.BORDER};"
-            " margin: 0 4px;"
-            " }"
-            "QSplitter#workbenchBodySplitter::handle:vertical:hover {"
-            f" border-top: 1px solid {Colors.BORDER_ACCENT};"
-            " }"
-        )
         for btn in self._tab_buttons:
             btn.refresh_style()
-        # ★ 逐页隔离分发：任何一页 refresh_style 抛异常都会中断后续分发
-        #   （历史实锤：真机上 worktree 页残留 azure 旧色而 artifacts 正常，
-        #   dispatch 外层 except 吞掉异常只留一行 warning）。每页独立捕获，
-        #   异常带页类名落日志，保证一页炸不掉整面板。
-        for _label, _page in (("tasks", self.tasks_page),):
-            if _page is None or not hasattr(_page, "refresh_style"):
-                continue
-            try:
-                _page.refresh_style()
-            except Exception:  # noqa: BLE001 — 诊断日志见 except 内
-                logger.exception(f"[WorkbenchPanel] 页面主题刷新失败: {_label} ({type(_page).__name__})")
         # 插件页签 / 卡片 tab（right 容器 UI 插件卡片）：外部不广播主题事件，
         # 面板统一分发；无 refresh_style 的插件页跳过。
         # 分发后追加 replay_theme_qss 兜底：重放页面上登记过的 QSS 工厂，

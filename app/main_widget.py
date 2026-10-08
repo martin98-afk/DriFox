@@ -775,7 +775,8 @@ class OpenAIChatToolWindow(ToolWindow):
     _tool_call_depth: int = 0
     _pending_tool_calls: int = 0
     _first_tool_result: bool = True
-    _latest_todos: Optional[list] = None  # 最近一次 todowrite 回传的任务列表（推送消息卡片内嵌任务区）
+    _latest_todos: Optional[list] = None  # 最近一次 todowrite 回传的任务列表（卡片内嵌看板数据源）
+    _todo_panel_card = None  # 当前挂载任务看板的卡片（迁移时旧卡卸载用）
     _question_floating_widget = None
     _question_tool_call_id = None
     # 权限审批浮动卡（懒创建；与提问卡解耦，走结构化决策回传）
@@ -11082,6 +11083,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_history_questions_badge()
         # 新会话重置任务列表快照（工具插件状态由 clear_todo_list 清理）
         self._latest_todos = None
+        self._todo_panel_card = None
         self.backend.clear_todo_list()
         self.backend.set_session_context(self._current_session_id)
         if self._question_floating_widget:
@@ -11175,6 +11177,8 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(100, self._sync_node_preview_to_last)
             # 🐛 修复（产物区刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
             self._push_workbench_updates(refresh_artifacts=True)
+            # 任务看板归属最新卡片：缓存卡片重建后面板需重新挂载
+            QTimer.singleShot(0, lambda: self._sync_todo_panel())
             return
 
         self._clear_chat_area()
@@ -11206,6 +11210,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 重拉工作台产物/任务/项目数据（_load_session_from_record / _create_new_session /
         # _switch_to_session_by_id 等所有加载路径都经过本方法，无需逐处补刷）
         self._push_workbench_updates(refresh_artifacts=True)
+        # 任务看板：重建/懒渲染完成后再挂一次（列表数据是窗口级，不随会话变化）
+        QTimer.singleShot(0, lambda: self._sync_todo_panel())
 
     def _show_initial_welcome(self):
         """仅在UI上显示欢迎卡片，不改动Session数据
@@ -14786,8 +14792,8 @@ class OpenAIChatToolWindow(ToolWindow):
         card.modelLabelClicked.connect(self._on_footer_model_label_clicked)
 
         self._add_chat_widget(card, insert_index=insert_index)
-        # 任务列表已迁至工作台（WorkbenchPanel 任务区），消息卡片不再内嵌 todo 区；
-        # _latest_todos 缓存仍由 todowrite 结果联动（工作台数据源，切 tab 时拉取）。
+        # 新卡建好后任务看板随之迁移（挂在最新 assistant 卡片内）：
+        # _latest_todos 缓存由 todowrite 结果联动，此处按缓存重挂一次。
         # 🐛 这是流式输出期间最热的强制滚底点（`_append_assistant_message`）：
         # 每个工具轮次都会新建 assistant 卡片。此前无条件置底，用户上滚读历史时
         # 只要后台有工具回调就会被拽回。纳入统一守卫。
@@ -18999,9 +19005,8 @@ class OpenAIChatToolWindow(ToolWindow):
             todos = []
         if todos:
             self._latest_todos = todos
-            # 任务列表已迁至工作台（不再内嵌消息卡片），仅刷新缓存 + 推工作台
-            # 工作台浮层任务区同步
-            self._push_workbench_updates(todos=todos)
+            # 任务看板内嵌在最新 assistant 卡片内（右侧工作台任务区已移除）
+            self._sync_todo_panel(todos)
         else:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -19719,16 +19724,15 @@ class OpenAIChatToolWindow(ToolWindow):
             except (TypeError, ValueError):
                 content = str(raw_content)
 
-        # 字段驱动：任何工具结果携带 todos 字段 → 更新任务列表缓存
-        # （插件声明，主程序不写死工具名）。显示在工作台任务区，不再内嵌消息卡片。
+        # 字段驱动：任何工具结果携带 todos 字段 → 更新任务看板
+        # （插件声明，主程序不写死工具名）。看板内嵌在最新 assistant 卡片。
         todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
         if todos:
             self._latest_todos = todos
-        # 工作台浮层联动：任务到达推任务；文件写入类工具完成后重拉产物列表
+            self._sync_todo_panel(todos)
+        # 工作台浮层联动：文件写入类工具完成后重拉产物列表
         try:
-            if todos:
-                self._push_workbench_updates(todos=todos)
-            elif (
+            if not todos and (
                 tool_name
                 and self.backend.file_recorder is not None
                 and self.backend.file_recorder.is_tracked_operation(tool_name)
@@ -22467,18 +22471,52 @@ class OpenAIChatToolWindow(ToolWindow):
         if resolved_path:
             self._broadcast_team_workdir(resolved_path)
 
+    # ── 卡片内嵌任务看板 ──
+
+    def _sync_todo_panel(self, todos: Optional[list] = None) -> None:
+        """把任务列表挂到「最新 assistant 卡片」的内嵌看板（旧卡卸载）
+
+        每个工具轮次都会新建 assistant 卡片，看板跟着最新那张走：旧卡
+        ``clear_todo_list()`` 摘除面板，新卡 ``update_todo_list()`` 接管。
+        迁移幂等——同卡重复推送由面板的内容签名比对挡掉，不重建控件。
+
+        Args:
+            todos: None 表示使用 ``_latest_todos`` 缓存（会话恢复 / 重建补推路径）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if todos is None:
+            todos = getattr(self, "_latest_todos", None)
+        if not todos:
+            return
+        card = self._current_assistant_card or self._find_latest_assistant_card()
+        if card is None or not self._is_widget_alive(card):
+            return
+        # 旧卡卸载：遍历已挂过看板的卡片，只保留最新那张
+        try:
+            prev = getattr(self, "_todo_panel_card", None)
+            if prev is not None and prev is not card:
+                if self._is_widget_alive(prev):
+                    prev.clear_todo_list()
+            self._todo_panel_card = card
+        except RuntimeError:
+            self._todo_panel_card = card
+        try:
+            card.update_todo_list(todos)
+        except RuntimeError:
+            pass
+
     # ── 右侧工作台浮层联动 ──
 
-    def _push_workbench_updates(self, todos: Optional[list] = None, refresh_artifacts: bool = False) -> None:
+    def _push_workbench_updates(self, refresh_artifacts: bool = False) -> None:
         """向右侧工作台浮层推送增量更新（面板隐藏/无宿主时零开销跳过）
 
         ★ 标签页隔离：工作台是宿主级单例，数据投影自「当前活跃对话窗口」。
         非活跃窗口的工具回调（如后台正在跑的另一个标签页）只更新自己的
         ``_latest_todos`` 缓存，不写工作台 UI——否则当前标签页的工作台
-        会被其他标签页的任务/产物覆盖。切回时 refresh_workbench 会拉取。
+        会被其他标签页的产物覆盖。切回时 refresh_workbench 会拉取。
 
         Args:
-            todos: todowrite 等工具回传的最新任务列表；None 表示本次不更新任务区
             refresh_artifacts: True 时重拉产物列表（文件写入类工具完成后调用）
         """
         if getattr(self, "_is_destroyed", False):
@@ -22491,11 +22529,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 标签页隔离：仅活跃窗口可推送 UI 更新
             if tm.get_current_window() is not self:
                 return
-            if todos is not None:
-                # todo 更新自动展开工作台（set_workbench_visible 内部会 refresh_workbench）
-                if not tm.is_workbench_visible():
-                    tm.set_workbench_visible(True)
-                panel.update_todos(todos)
             if refresh_artifacts:
                 tm.refresh_workbench()
         except Exception:
