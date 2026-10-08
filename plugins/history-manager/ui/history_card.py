@@ -1121,27 +1121,73 @@ class HistoryCard(QWidget):
         return provider
 
     def _resolve_worktree_branch(self, worktree_path: str) -> str:
-        """从 worktree 路径解析分支名（带缓存）"""
+        """从 worktree 路径解析分支名（带缓存）
+
+        [PERF] 快路径直接读 HEAD 文件解析（零子进程，微秒级）：
+        - 主仓库：``<path>/.git/HEAD``，内容 ``ref: refs/heads/<branch>``
+        - worktree：``<path>/.git`` 是文件（``gitdir: <主仓库>/.git/worktrees/<名>``），
+          HEAD 在该 gitdir 目录下
+        旧实现每个**不同** worktree 路径都要起一次 ``git branch --show-current``
+        子进程，且发生在渲染批次（主线程）内串行执行 —— Windows + Defender 下
+        实测每个子进程 100-300ms（见 git_worktree.py 注释），首屏几十条跨
+        worktree 的会话 = 数秒冻结，是历史页初始加载卡顿的主因。
+        """
         if not worktree_path:
             return ""
         # 缓存命中
         cached = self._worktree_branch_cache.get(worktree_path)
         if cached is not None:
             return cached
-        # 调用 git 获取分支名
-        try:
-            from app.utils.git_worktree import GitWorktreeDetector
 
-            branch = GitWorktreeDetector.get_current_branch(worktree_path)
-            if branch:
-                self._worktree_branch_cache[worktree_path] = branch
-                return branch
+        branch, head_readable = self._read_head_branch(worktree_path)
+        if not branch and not head_readable:
+            # HEAD 读不到/异常路径：退回 git 子进程兜底
+            try:
+                from app.utils.git_worktree import GitWorktreeDetector
+
+                branch = GitWorktreeDetector.get_current_branch(worktree_path)
+            except Exception:
+                branch = ""
+        if not branch:
+            # detached HEAD（head_readable=True 但无分支名）或 git 也为空：
+            # 与旧 ``git branch --show-current`` 空串语义一致，用目录名显示
+            branch = os.path.basename(worktree_path.rstrip("/\\"))
+        self._worktree_branch_cache[worktree_path] = branch
+        return branch
+
+    @staticmethod
+    def _read_head_branch(path: str) -> tuple:
+        """读 ``.git/HEAD`` 解析当前分支名（零子进程）
+
+        Returns:
+            (branch, head_readable)：branch 为空表示 detached HEAD 或无法解析；
+            head_readable=False 表示 HEAD 不可读（调用方据此决定是否走 git 兜底）
+        """
+        try:
+            git_path = os.path.join(path, ".git")
+            gitdir = git_path
+            if os.path.isfile(git_path):
+                # worktree：.git 是文件，内容 ``gitdir: <路径>``（可能为相对路径）
+                with open(git_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read().strip()
+                if not content.startswith("gitdir:"):
+                    return "", False
+                gitdir = content[len("gitdir:") :].strip().rstrip("/\\")
+                if gitdir and not os.path.isabs(gitdir):
+                    gitdir = os.path.join(path, gitdir)
+            elif not os.path.isdir(git_path):
+                return "", False
+            head_path = os.path.join(gitdir, "HEAD")
+            if not os.path.isfile(head_path):
+                return "", False
+            with open(head_path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read().strip()
+            if head.startswith("ref: refs/heads/"):
+                return head[len("ref: refs/heads/") :].strip(), True
+            # detached HEAD：HEAD 可读但非分支引用
+            return "", True
         except Exception:
-            pass
-        # 兜底：用目录名作为显示
-        fallback = os.path.basename(worktree_path.rstrip("/\\"))
-        self._worktree_branch_cache[worktree_path] = fallback
-        return fallback
+            return "", False
 
     def set_search_filter(self, text: str):
         """设置搜索过滤文本（带防抖 200ms）"""

@@ -8,7 +8,7 @@ import colorsys
 import os
 import re
 import zlib
-from typing import Dict
+from typing import Dict, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter
@@ -241,9 +241,35 @@ class ProjectItem(QWidget):
         self._worktree_count = 0
         self._project_color = get_project_color(name)
         self._root_dir = ""
+        self._check_label: Optional[QLabel] = None  # 「✓」当前项目指示（set_current 复用切换时按需创建）
         self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
+
+    def set_current(self, is_current: bool):
+        """切换「当前项目」高亮（缓存复用路径：就地刷样式，不重建 widget）
+
+        [PERF] 面板行缓存复用配套：每次打开面板都会重刷列表（旧实现全量重建），
+        当前项目归属变化时命中行只需换样式，无需走构造路径。
+        """
+        is_current = bool(is_current)
+        if self._is_current == is_current:
+            return
+        self._is_current = is_current
+        if self._is_all_entry:
+            return  # 聚合行无高亮语义
+        # ✓ 指示标签：构造期 current 行才创建，复用切换时按需补建/显隐
+        if is_current and self._check_label is None:
+            self._check_label = QLabel("✓", self)
+            self._check_label.setStyleSheet(
+                f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;"
+            )
+            self._check_label.setAlignment(Qt.AlignVCenter)
+            self.layout().insertWidget(0, self._check_label)
+        if self._check_label is not None:
+            self._check_label.setVisible(is_current)
+        self._apply_base_style()
+        self._apply_name_style()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -499,6 +525,9 @@ class ProjectSelectorCardContent(QWidget):
         self._meta_map: Dict[str, Dict[str, int]] = {}
         self._root_dir_map: Dict[str, str] = {}
         self._project_items: list = []  # 存储 ProjectItem 实例，用于过滤
+        # [PERF] 项目名 → ProjectItem 行缓存：打开面板每次都刷新列表，
+        # 旧实现全量 deleteLater+重建 26 行（130+ 次 setStyleSheet），改为命中复用
+        self._item_cache: Dict[str, ProjectItem] = {}
         self._filter_text: str = ""
         self._all_entry_label: str = ""  # 非空时列表首行插入该聚合行（历史插件项目选择面板用）
         self._setup_ui()
@@ -665,39 +694,78 @@ class ProjectSelectorCardContent(QWidget):
                 item.setVisible(keyword in item._name.lower())
 
     def _refresh_project_list(self):
-        """刷新项目列表"""
-        # 清空现有项
-        while self._content_layout.count():
-            child = self._content_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+        """刷新项目列表（缓存复用：项目名 → ProjectItem）
+
+        [PERF] 旧实现每次全量 deleteLater + 重建全部行：26 行 = 130+ 次
+        setStyleSheet + TransparentToolButton 重建，热态实测 63-88ms，且每次
+        打开面板（展开前刷新）都重付。项目集合在两次刷新间高度稳定，改为按
+        项目名缓存复用：命中行只做 set_meta / set_root_dir / set_current
+        就地更新，仅新增/消失的项目才建/销。
+        """
+        layout = self._content_layout
+        cached_ids = {id(w) for w in self._item_cache.values()}
+        # 摘空布局：缓存行保留待复用，非缓存行（历史遗留）销毁
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None and id(w) not in cached_ids:
+                w.deleteLater()
         self._project_items.clear()
+
+        # 清理不再出现的项目缓存行
+        wanted = set(self._projects)
+        if self._all_entry_label:
+            wanted.add("__all__")
+        for k in [k for k in self._item_cache if k not in wanted]:
+            w = self._item_cache.pop(k, None)
+            if w is not None:
+                w.deleteLater()
+
+        def _attach(w: ProjectItem, key: str, is_current: bool):
+            self._ensure_item_signals(w)
+            if key != "__all__":
+                meta = self._meta_map.get(key, {})
+                w.set_meta(session_count=meta.get("sessions", 0), worktree_count=meta.get("worktrees", 0))
+                w.set_root_dir(self._root_dir_map.get(key, ""))
+                w.set_current(is_current)
+            layout.addWidget(w)
+            w.show()
+            self._project_items.append(w)
 
         # 聚合首行（「全部项目」）：无项目实体、无元数据、无导出/归档操作
         if self._all_entry_label:
-            all_item = ProjectItem(self._all_entry_label, False, self, is_all_entry=True)
-            all_item.allClicked.connect(self.allProjectsSelected.emit)
-            self._content_layout.addWidget(all_item)
-            self._project_items.append(all_item)
+            w = self._item_cache.get("__all__")
+            if w is None:
+                w = ProjectItem(self._all_entry_label, False, self, is_all_entry=True)
+                self._item_cache["__all__"] = w
+            _attach(w, "__all__", False)
 
         # 添加项目
         for proj_name in self._projects:
-            is_current = proj_name == self._current_project
-            item = ProjectItem(proj_name, is_current, self)
-            # 设置元数据
-            meta = self._meta_map.get(proj_name, {})
-            item.set_meta(
-                session_count=meta.get("sessions", 0),
-                worktree_count=meta.get("worktrees", 0),
-            )
-            # 设置根目录（空字符串时 ProjectItem 内部隐藏该行）
-            item.set_root_dir(self._root_dir_map.get(proj_name, ""))
-            item.clicked.connect(self._on_project_item_clicked)
-            item.archiveClicked.connect(self._on_archive_clicked)
-            item.exportClicked.connect(self._on_export_clicked)
-            item.openFolderClicked.connect(self._on_open_folder_clicked)
-            self._content_layout.addWidget(item)
-            self._project_items.append(item)
+            w = self._item_cache.get(proj_name)
+            if w is None:
+                w = ProjectItem(proj_name, proj_name == self._current_project, self)
+                self._item_cache[proj_name] = w
+            _attach(w, proj_name, proj_name == self._current_project)
+
+    def _ensure_item_signals(self, item: ProjectItem):
+        """（重）连接行信号：缓存复用行先断旧连接防重复触发"""
+        for sig, slot in (
+            (item.clicked, self._on_project_item_clicked),
+            (item.archiveClicked, self._on_archive_clicked),
+            (item.exportClicked, self._on_export_clicked),
+            (item.openFolderClicked, self._on_open_folder_clicked),
+        ):
+            try:
+                sig.disconnect()
+            except TypeError:
+                pass
+            sig.connect(slot)
+        try:
+            item.allClicked.disconnect()
+        except TypeError:
+            pass
+        item.allClicked.connect(self.allProjectsSelected.emit)
 
         self._content_layout.addStretch(1)
 
