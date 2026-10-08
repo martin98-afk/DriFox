@@ -1401,7 +1401,6 @@ class TabPanel(QWidget):
         self._new_chat_icon = QLabel(self._new_chat_row)
         self._new_chat_icon.setFixedSize(scale_icon_size(16), scale_icon_size(16))
         self._new_chat_icon.setStyleSheet("background: transparent;")
-        self._new_chat_icon.setToolTip("新建对话")
         new_row_layout.addWidget(self._new_chat_icon)
         self._new_chat_label = _ElidedLabel("新建对话", self._new_chat_row)
         new_row_layout.addWidget(self._new_chat_label, 1)
@@ -1411,7 +1410,6 @@ class TabPanel(QWidget):
         self._new_more_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
         self._new_more_btn.setFixedSize(20, 20)
         self._new_more_btn.setCursor(Qt.PointingHandCursor)
-        self._new_more_btn.setToolTip("更多新建方式")
         self._new_more_btn.clicked.connect(self._show_new_chat_menu)
         new_row_layout.addWidget(self._new_more_btn)
         self._new_chat_row.mousePressEvent = self._on_new_chat_row_clicked
