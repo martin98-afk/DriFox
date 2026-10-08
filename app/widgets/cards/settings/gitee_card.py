@@ -840,12 +840,18 @@ class _GiteeMorePopup(QWidget):
 
         # ── 快捷开关：深色模式 / 窗口置顶 ──
         dark_switch = SwitchButton(self._container)
+        dark_switch.setOnText("")
+        dark_switch.setOffText("")
+        dark_switch.label.setVisible(False)  # 只留开关本体；_updateText 会重写文字，仅 setText 压不住
         dark_switch.setChecked(not self._cfg.ui_light_mode.value)
         dark_switch.checkedChanged.connect(self._on_dark_mode_toggled)
         self._dark_mode_row = _MenuRow(FluentIcon.BRIGHTNESS, "深色模式", right=dark_switch, parent=self._container)
         layout.addWidget(self._dark_mode_row)
 
         topmost_switch = SwitchButton(self._container)
+        topmost_switch.setOnText("")
+        topmost_switch.setOffText("")
+        topmost_switch.label.setVisible(False)
         topmost_switch.setChecked(bool(self._cfg.window_always_on_top.value))
         topmost_switch.checkedChanged.connect(self._on_topmost_toggled)
         self._topmost_row = _MenuRow(FluentIcon.PIN, "窗口置顶", right=topmost_switch, parent=self._container)
