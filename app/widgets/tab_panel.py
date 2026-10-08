@@ -64,7 +64,7 @@ from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
-from app.widgets.panel_mode_popup import PanelModePopup
+from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from app.widgets.workspace_tree import (
     KIND_PROJECT,
     KIND_SESSION,
@@ -113,13 +113,9 @@ _TREE_INDENT_SESSION = 42
 # 单个工作树下最多渲染的历史会话条数（侧栏窄，防止一次性构建上百行）
 _TREE_MAX_SESSIONS = 50
 
-# 模式选择悬浮框的选项（(mode, 主标签, 说明)）
-_PANEL_MODE_OPTIONS = (
-    (PANEL_MODE_LIST, "列表模式", "按打开顺序平铺对话页"),
-    (PANEL_MODE_TREE, "工作区树模式", "按项目 / 工作树归组"),
-)
 
 # 顶部标题文案随模式切换（列表模式=「对话页」/树模式=「工作区」）
+# 顶栏改版后暂无消费方（「新建对话」行替代标题），保留常量供模式语义参考
 _PANEL_MODE_TITLES = {
     PANEL_MODE_LIST: "对话页",
     PANEL_MODE_TREE: "工作区",
@@ -521,17 +517,22 @@ class TabItem(QFrame):
         self._icon_widget.setToolTip(title)
 
     def _apply_project_to_icon(self):
-        """将项目信息交给 _TabProjectIcon 绘制"""
+        """将项目信息交给 _TabProjectIcon 绘制；无项目数据时隐藏色块（对齐团队框惯例）"""
         if self._project_initials and self._project_color:
             self._icon_widget.set_project(self._project_initials, self._project_color)
+        else:
+            self._icon_widget.setVisible(False)
 
     def set_project(self, initials: str, color_rgba: str):
-        """设置项目头像（缩写+颜色）"""
+        """设置项目头像（缩写+颜色）；initials 为空时隐藏色块图标（如临时对话页）"""
         self._project_initials = initials
         self._project_color = color_rgba
         self._apply_project_to_icon()
+        # 有项目数据：确保色块可见（隐藏仅由空数据/团队模式触发）
+        if initials and color_rgba:
+            self._icon_widget.setVisible(True)
         # 紧凑态非团队：保持图标显示（项目 icon 为折叠态唯一标识）
-        if self._compact and not self._team_mode:
+        if self._compact and not self._team_mode and initials:
             self._icon_widget.setVisible(True)
 
     def set_icon(self, icon):
@@ -687,7 +688,8 @@ class TabItem(QFrame):
             self.layout().setContentsMargins(4, 4, 4, 4)
             if self._team_mode:
                 self._apply_compact_icon()
-            else:
+            elif self._project_initials and self._project_color:
+                # 无项目数据（如临时对话页）保持色块隐藏
                 self._icon_widget.setVisible(True)
         else:
             saved = self._compact_saved or {}
@@ -1187,6 +1189,7 @@ class TabPanel(QWidget):
     tabBranchRequested = pyqtSignal(int)  # 分支窗口 Tab 索引
     tabSwitchSessionRequested = pyqtSignal(int)  # 切换会话（跳转 Tab + 打开历史会话）Tab 索引
     newTabRequested = pyqtSignal()  # 新建 Tab
+    newTempTabRequested = pyqtSignal()  # 新建临时对话页（页内会话不落盘、不进历史）
     tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
     sidebarToggled = pyqtSignal(bool)  # 侧边栏收起(true)/展开(false)
     teamCloseRequested = pyqtSignal(str)  # 关闭整个团队（传 team_id）
@@ -1267,7 +1270,6 @@ class TabPanel(QWidget):
         self._auto_collapse_suppressed: bool = False
         # ── 对话页显示模式（列表 / 工作区树）──
         self._mode: str = PANEL_MODE_LIST
-        self._mode_popup = None  # 模式选择悬浮框（Qt.Popup，二次点击收起）
         self._tree_scroll: Optional[ScrollArea] = None
         self._tree_widget: Optional[WorkspaceTree] = None
         self._tree_snapshot = None  # 树节点签名，用于跳过无变化的重建
@@ -1381,37 +1383,43 @@ class TabPanel(QWidget):
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
-        # ── 顶部：左「对话页」标题 + 右 新建/模式 纯图标按钮 ──
-        # 布局：标题左对齐占满剩余空间（stretch=1），图标按钮靠右。
-        # 收起态隐藏标题与模式按钮，只保留新建（46px 窄条容不下）。
+        # ── 顶部：「新建对话」行（复用插件行 uiPluginRow 布局惯例）+ 模式按钮 ──
+        # 行结构：icon 最前 + 文案 + 行尾三点（菜单含「新建临时对话页」）。
+        # 收起态隐藏文案与三点，只留 icon（46px 窄条容不下）。
         # ★ 分支入口已迁移到助手消息卡片页脚（用户可在任意一条消息处分支）。
         self._top_bar = QWidget(self)
         top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(8, 4, 4, 2)
-        top_layout.setSpacing(0)
+        top_layout.setContentsMargins(6, 4, 4, 2)
+        top_layout.setSpacing(4)
 
-        self._sessions_label = QLabel("对话页", self._top_bar)
-        self._sessions_label.setObjectName("sessionsLabel")
-        top_layout.addWidget(self._sessions_label, 1)
-
-        self._new_btn = TransparentToolButton(self._top_bar)
-        self._new_btn.setIcon(FIF.ADD)
-        self._new_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
-        self._new_btn.setFixedSize(24, 24)
-        self._new_btn.setCursor(Qt.PointingHandCursor)
-        self._new_btn.setToolTip("新建空白标签页")
-        self._new_btn.clicked.connect(self.newTabRequested.emit)
-        top_layout.addWidget(self._new_btn)
-
-        # 模式切换：竖向「⋯」→ 悬浮框选择「列表模式 / 工作区树模式」
-        self._mode_btn = TransparentToolButton(self._top_bar)
-        self._mode_btn.setIcon(_vertical_more_icon())
-        self._mode_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
-        self._mode_btn.setFixedSize(24, 24)
-        self._mode_btn.setCursor(Qt.PointingHandCursor)
-        self._mode_btn.setToolTip("切换对话页显示模式")
-        self._mode_btn.clicked.connect(self._on_mode_btn_clicked)
-        top_layout.addWidget(self._mode_btn)
+        self._new_chat_row = QFrame(self._top_bar)
+        self._new_chat_row.setObjectName("uiPluginRow")
+        self._new_chat_row.setCursor(Qt.PointingHandCursor)
+        new_row_layout = QHBoxLayout(self._new_chat_row)
+        new_row_layout.setContentsMargins(4, 2, 4, 2)
+        new_row_layout.setSpacing(6)
+        self._new_chat_icon = QLabel(self._new_chat_row)
+        self._new_chat_icon.setFixedSize(scale_icon_size(16), scale_icon_size(16))
+        self._new_chat_icon.setStyleSheet("background: transparent;")
+        self._new_chat_icon.setToolTip("新建对话")
+        new_row_layout.addWidget(self._new_chat_icon)
+        self._new_chat_label = _ElidedLabel("新建对话", self._new_chat_row)
+        new_row_layout.addWidget(self._new_chat_label, 1)
+        # 行尾三点：更多新建方式（临时对话页收在菜单里，不再单独占一个按钮）
+        self._new_more_btn = TransparentToolButton(self._new_chat_row)
+        self._new_more_btn.setIcon(_vertical_more_icon())
+        self._new_more_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
+        self._new_more_btn.setFixedSize(20, 20)
+        self._new_more_btn.setCursor(Qt.PointingHandCursor)
+        self._new_more_btn.setToolTip("更多新建方式")
+        self._new_more_btn.clicked.connect(self._show_new_chat_menu)
+        new_row_layout.addWidget(self._new_more_btn)
+        self._new_chat_row.mousePressEvent = self._on_new_chat_row_clicked
+        top_layout.addWidget(self._new_chat_row, 1)
+        self._update_new_chat_icon()
+        # 项目统一 hover tooltip（禁用 Qt 原生样式；行/三点各自文案）
+        install_hover_tooltip(self._new_chat_row, "新建对话")
+        install_hover_tooltip(self._new_more_btn, "更多新建方式")
 
         layout.addWidget(self._top_bar)
 
@@ -1915,19 +1923,19 @@ class TabPanel(QWidget):
             return
 
         if self._collapsed:
-            # 收起时隐藏标题与模式按钮，仅保留新建图标按钮（46px 窄条）
-            self._sessions_label.setVisible(False)
-            self._new_btn.setVisible(True)
-            if hasattr(self, "_mode_btn"):
-                self._mode_btn.setVisible(False)
+            # 收起时新建行只剩 icon（46px 窄条容不下文案与三点）
+            if getattr(self, "_new_chat_row", None) is not None:
+                self._new_chat_label.setVisible(False)
+                self._new_more_btn.setVisible(False)
+                self._new_chat_row.layout().setContentsMargins(4, 4, 4, 4)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
         else:
-            # 展开时恢复标题 + 新建/模式图标按钮
-            self._sessions_label.setVisible(True)
-            self._new_btn.setVisible(True)
-            if hasattr(self, "_mode_btn"):
-                self._mode_btn.setVisible(True)
+            # 展开时恢复新建行完整形态
+            if getattr(self, "_new_chat_row", None) is not None:
+                self._new_chat_label.setVisible(True)
+                self._new_more_btn.setVisible(True)
+                self._new_chat_row.layout().setContentsMargins(4, 2, 4, 2)
             # 展开时恢复 Gitee 完整显示
             self._gitee_account_row.set_show_only_avatar(False)
 
@@ -2095,20 +2103,78 @@ class TabPanel(QWidget):
         # ── 顶部：「对话页」标题 + 新建/模式图标按钮随主题/字号刷新 ──
         self._refresh_top_bar_style()
 
+    def _update_new_chat_icon(self):
+        """刷新「新建对话」行图标（主题感知，浅/深色主题图标不同，需重取 pixmap）"""
+        if getattr(self, "_new_chat_icon", None) is None:
+            return
+        size = scale_icon_size(16)
+        self._new_chat_icon.setFixedSize(size, size)
+        icon = get_icon("新建会话")
+        if icon is not None and not icon.isNull():
+            self._new_chat_icon.setPixmap(icon.pixmap(size, size))
+
+    def _on_new_chat_row_clicked(self, event):
+        """「新建对话」行点击 = 普通新建对话页（三点按钮自身消费事件不冒泡）"""
+        from PyQt5.QtCore import Qt as _Qt
+
+        if event.button() == _Qt.LeftButton:
+            self.newTabRequested.emit()
+
+    def _show_new_chat_menu(self):
+        """行尾三点菜单：更多新建方式 + 对话页显示模式切换
+
+        原 _mode_btn（模式切换）已并入本菜单 —— 顶栏只保留一个三点入口。
+        """
+        from PyQt5.QtCore import QPoint
+
+        menu = QMenu(self._new_more_btn)
+        menu.setStyleSheet(self._tab_menu_stylesheet())
+        temp_action = menu.addAction("新建临时对话页")
+        menu.addSeparator()
+        list_action = menu.addAction("列表模式")
+        tree_action = menu.addAction("工作区树模式")
+        list_action.setCheckable(True)
+        tree_action.setCheckable(True)
+        list_action.setChecked(self._mode != PANEL_MODE_TREE)
+        tree_action.setChecked(self._mode == PANEL_MODE_TREE)
+        try:
+            action = menu.exec_(self._new_more_btn.mapToGlobal(QPoint(0, self._new_more_btn.height())))
+        finally:
+            pass
+        if action == temp_action:
+            self.newTempTabRequested.emit()
+        elif action == list_action:
+            self.set_mode(PANEL_MODE_LIST)
+        elif action == tree_action:
+            self.set_mode(PANEL_MODE_TREE)
+
     def _refresh_top_bar_style(self):
-        """刷新顶部行样式：「对话页」标题（颜色/字体）+ 图标按钮（主题图标/图标尺寸）"""
-        if hasattr(self, "_sessions_label") and self._sessions_label is not None:
-            self._sessions_label.setFont(get_unified_font(12))
-            self._sessions_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}; font-weight: bold;"
+        """刷新顶部行样式：「新建对话」行（颜色/字体/图标）+ 图标按钮（主题图标/图标尺寸）"""
+        # 「新建对话」行：复用插件行样式惯例（hover 背景 + 圆角），随主题刷新
+        if getattr(self, "_new_chat_row", None) is not None:
+            self._new_chat_row.setStyleSheet(
+                f"""
+                #uiPluginRow {{
+                    background: transparent;
+                    border-radius: 5px;
+                }}
+                #uiPluginRow:hover {{
+                    background: {Colors.HOVER_BG};
+                }}
+            """
             )
+        if getattr(self, "_new_chat_label", None) is not None:
+            self._new_chat_label.setFont(get_unified_font(12))
+            self._new_chat_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
+            )
+        self._update_new_chat_icon()
         # 竖向「⋯」是旋转位图（不随主题自动变色），主题/字号变更时必须重新生成
-        if hasattr(self, "_mode_btn") and self._mode_btn is not None:
-            self._mode_btn.setIcon(_vertical_more_icon())
+        if getattr(self, "_new_more_btn", None) is not None:
+            self._new_more_btn.setIcon(_vertical_more_icon())
         _icon_px = scale_icon_size(14)
         for _btn in (
-            getattr(self, "_new_btn", None),
-            getattr(self, "_mode_btn", None),
+            getattr(self, "_new_more_btn", None),
         ):
             if _btn is not None:
                 _btn.setIconSize(QSize(_icon_px, _icon_px))
@@ -3091,12 +3157,7 @@ class TabPanel(QWidget):
             self._scroll_area.setVisible(not tree_active)
         if self._tree_widget is not None:
             self._tree_widget.set_compact(self._collapsed)
-        # 顶部标题文案跟模式走：列表模式=「对话页」/树模式=「工作区」
-        # 折叠态下标题被收起隐藏，文字不影响视觉，但保持同步避免展开后闪现旧文案。
-        title = _PANEL_MODE_TITLES.get(self._mode, "对话页")
-        if hasattr(self, "_sessions_label") and self._sessions_label is not None:
-            if self._sessions_label.text() != title:
-                self._sessions_label.setText(title)
+        # 顶栏改版后无独立模式标题（「新建对话」行替代），标题语义由列表自身承载。
         # ⚠️ 切换容器后两侧布局都被搬空过，必须作废两边的快照缓存：
         # 否则 _rebuild_team_layout / _rebuild_tree_layout 会因签名未变直接
         # return —— 表现为「切回列表后空白」或「树模式专属状态没复位」。
@@ -3149,41 +3210,6 @@ class TabPanel(QWidget):
             _state_set("workspace_tree_expansion", dict(self._pending_expansion or {}))
         except Exception:
             pass
-
-    def _on_mode_btn_clicked(self):
-        """竖向「⋯」按钮：弹出/收起模式选择悬浮框"""
-        if self._mode_popup is not None:
-            try:
-                self._mode_popup.close()
-            except Exception:
-                pass
-            self._mode_popup = None
-            return
-        popup = PanelModePopup(list(_PANEL_MODE_OPTIONS), self._mode, self)
-        popup.modeSelected.connect(self.set_mode)
-        popup.destroyed.connect(self._on_mode_popup_destroyed)
-        self._mode_popup = popup
-        popup.adjustSize()
-        width = max(popup.sizeHint().width(), 196)
-        height = popup.sizeHint().height()
-        popup.setFixedSize(width, height)
-        # 往左弹：按钮贴着面板右缘，往右弹会被窗口右边界裁掉。
-        # 用按钮的 bottomRight 做锚点，弹窗右边缘与按钮右边缘对齐。
-        anchor = self._mode_btn.mapToGlobal(self._mode_btn.rect().bottomRight())
-        gx, gy = anchor.x() - width, anchor.y()
-        host = self.window()
-        if host is not None:
-            frame = host.frameGeometry()
-            # 左侧也放不下（极窄窗口）才回落成贴左边缘
-            if gx < frame.left():
-                gx = min(frame.left() + 4, frame.right() - width - 4)
-            if gy + height > frame.bottom():
-                gy = max(frame.top() + 4, anchor.y() - height - self._mode_btn.height() - 4)
-        popup.move(gx, gy)
-        popup.show()
-
-    def _on_mode_popup_destroyed(self, *_args):
-        self._mode_popup = None
 
     def _active_list_container(self) -> QWidget:
         """当前生效的行容器（树模式 → 树 widget；否则列表 widget）
@@ -4038,7 +4064,15 @@ class TabPanel(QWidget):
             switch_session_action = menu.addAction("切换会话")
             menu.addSeparator()
         new_action = menu.addAction("新建标签页")
-        if clicked_index >= 0:
+        new_temp_action = menu.addAction("新建临时对话页")
+        # 临时对话页做分支无意义：菜单不出现「分支标签页」入口
+        _host = self._resolve_tab_host()
+        _is_temp_tab = (
+            clicked_index >= 0
+            and 0 <= clicked_index < len(getattr(_host, "_windows", []) or [])
+            and getattr(_host._windows[clicked_index], "_is_temp_scope", False)
+        )
+        if clicked_index >= 0 and not _is_temp_tab:
             branch_action = menu.addAction("分支标签页")
         menu.addSeparator()
         if clicked_index >= 0:
@@ -4060,8 +4094,10 @@ class TabPanel(QWidget):
             self.tabSwitchSessionRequested.emit(clicked_index)
         elif action == new_action:
             self.newTabRequested.emit()
+        elif action == new_temp_action:
+            self.newTempTabRequested.emit()
         elif clicked_index >= 0:
             if action == close_action:
                 self.tabCloseRequested.emit(clicked_index)
-            elif action == branch_action:
+            elif branch_action is not None and action == branch_action:
                 self.tabBranchRequested.emit(clicked_index)

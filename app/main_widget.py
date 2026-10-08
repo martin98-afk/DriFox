@@ -128,7 +128,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.provider_icons import get_provider_icon
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.utils import get_app_data_dir, get_font_family_css, get_icon
 
 # ── App Widget 导入 ──
 # Note: 保留模块级导入而非方法内导入，因为 widget 类型在 100+ 方法中通过 isinstance 引用，
@@ -914,6 +914,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 无需重复执行同步子进程（最坏可达 3s 阻塞主线程，拖慢窗口出现速度）。
         self._is_duplicate_window = source_window is not None
         self._source_window = source_window
+        # 临时对话页标记：页内新建会话不落盘、不进历史，工作目录指向独立临时目录，
+        # 关闭时整页目录删除（由 TabManagerWindow.spawn_tab(temp_scope=True) 置位）
+        self._is_temp_scope: bool = False
         # 批4：per-window 延迟任务队列（必须在 super().__init__ 触发 setup_ui
         # 之前创建：setup_ui 内 N9/N10/N11 的注册依赖此实例）
         from app.core.infra.deferred_task_queue import DeferredTaskQueue
@@ -1311,6 +1314,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     cls._about_to_quit_connected = True
                 except Exception:
                     pass
+            # 启动清扫：删除上次崩溃残留的临时页目录（此刻无存活临时页，全删安全）
+            cls._cleanup_orphan_temp_pages()
 
         # 设置文件操作记录的会话上下文
         if self.backend.tool_executor:
@@ -6270,6 +6275,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
         title = session.topic_summary or session.name or "新对话"
+        # 临时对话页：窗口/Tab 标题加「临时」前缀（Tab 标题跟随窗口标题）
+        if self.__dict__.get("_is_temp_scope", False) and not title.startswith("临时 · "):
+            title = f"临时 · {title}"
         try:
             dialog = self.window() if hasattr(self, "window") else None
             if dialog and hasattr(dialog, "setWindowTitle"):
@@ -10991,7 +10999,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming:
             tm = TabManagerWindow.get_instance()
             if tm is not None:
-                new = tm.spawn_tab(self, new_session=True)
+                # 临时页内流式中新建会话：新 tab 继承临时属性（页内新建一律临时）
+                new = tm.spawn_tab(self, new_session=True, temp_scope=self.__dict__.get("_is_temp_scope", False))
                 if new is not None:
                     return
             # TabManagerWindow 未就绪则降级原行为（原地停流新建）
@@ -11079,6 +11088,8 @@ class OpenAIChatToolWindow(ToolWindow):
             session = self.backend.create_session()
         finally:
             self._pending_session_hook = False
+        # 临时对话页：页内新建的会话标记临时（自动保存守卫链据此跳过落库）
+        session.is_temp = bool(self.__dict__.get("_is_temp_scope", False))
         _t3 = _time.perf_counter()
 
         # 💡 内存优化：释放旧会话在 HistoryManager 中的消息数据（可被 SQLite 恢复）
@@ -20184,6 +20195,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _save_current_session_to_history(self):
         session = self.session_manager.get_current_session()
+        # 临时对话页守卫：页内会话一律不落盘、不进历史（流式结束/后台 finalize 高频路径）
+        if getattr(session, "is_temp", False):
+            return
         saved_messages = list(session.messages or []) if session else []
         if not saved_messages:
             return
@@ -21211,6 +21225,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         clean_summary = summary.strip()
 
+        # 临时对话页守卫：页内会话不落库，标题仅更新 UI（跳过 history_manager 首存）
+        session = self.session_manager.get_current_session()
+        if getattr(session, "is_temp", False):
+            if session:
+                session.set_topic_summary(clean_summary)
+            self.title_edit.setText(clean_summary)
+            self._sync_dialog_title()
+            return
+
         # 校验标题长度，超长说明解析异常或LLM输出异常，跳过更新
         MAX_TITLE_LENGTH = 50
         if len(clean_summary) > MAX_TITLE_LENGTH:
@@ -21317,6 +21340,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._last_pb_container_sheet = container_sheet
             self._project_branch_container.setStyleSheet(container_sheet)
         # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
+        # 临时对话页：隐藏整个「项目 avatar + 分支 chip」容器（tmp 目录无项目语义，
+        # 后续任何刷新路径进入本函数都不得重显）
+        if self.__dict__.get("_is_temp_scope", False):
+            container = getattr(self, "_project_branch_container", None)
+            if container is not None:
+                container.setVisible(False)
+            return
         project_color = get_project_color(self._current_project)
         # 同步更新方形 avatar
         if hasattr(self, "_project_avatar"):
@@ -21382,6 +21412,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _resolve_project_workdir(self) -> Optional[str]:
         """解析当前项目的工作目录（多窗口隔离：实例缓存 → DB → tool_executor）"""
+        # 临时对话页：tmp 目录不入实例缓存/DB，三级链会在 DB 层错拿源项目目录，
+        # 直接返回 tool_executor 当前工作目录（= tmp-sessions/{window_id}）
+        if self.__dict__.get("_is_temp_scope", False):
+            if self.backend and self.backend.tool_executor:
+                wd = self.backend.tool_executor.get_workdir()
+                if wd:
+                    return str(wd)
+            return None
         workdir = self._current_workdir.get(self._current_project)
         if not workdir and self.backend and self.backend.memory_manager:
             workdir = self.backend.memory_manager.get_working_directory(self._current_project)
@@ -21533,6 +21571,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not getattr(self, "_team_agent_name", ""):
             return
+        # 临时对话页：禁团队模式，工作目录不参与团队广播（避免 tmp 目录串台普通窗口）
+        if self.__dict__.get("_is_temp_scope", False):
+            return
         from app.core.team.team_manager import TeamManager
 
         tm_mgr = TeamManager.get_instance()
@@ -21581,6 +21622,9 @@ class OpenAIChatToolWindow(ToolWindow):
         workdir 为空 = 发送方清除了工作目录，本地回退临时工作目录兜底。
         """
         if getattr(self, "_is_destroyed", False):
+            return
+        # 临时对话页：不接收团队工作目录广播（tmp 目录不可被覆盖）
+        if self.__dict__.get("_is_temp_scope", False):
             return
         project = self._current_project
         if workdir:
@@ -22579,18 +22623,23 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self.backend or not self.backend.tool_executor:
             return
         project = self._current_project
-        # 实例缓存优先（多窗口隔离的关键：保持自身选择，不受其他窗口 DB 写入影响）
-        workdir = self._current_workdir.get(project)
-        if workdir is None:
-            # 首次启动或项目首次切换，从 DB 读取默认值（新窗口恢复用）
-            if self.backend.memory_manager:
-                workdir = self.backend.memory_manager.get_working_directory(project)
-            if workdir:
-                self._current_workdir[project] = workdir
+        # 临时对话页：工作目录固定指向整页临时目录（不入 DB、不进实例缓存），
+        # 之后走公共尾部（set_workdir + 欢迎卡/分支标签/插件联动刷新）
+        if self.__dict__.get("_is_temp_scope", False):
+            workdir = self._ensure_temp_page_workdir()
+        else:
+            # 实例缓存优先（多窗口隔离的关键：保持自身选择，不受其他窗口 DB 写入影响）
+            workdir = self._current_workdir.get(project)
+            if workdir is None:
+                # 首次启动或项目首次切换，从 DB 读取默认值（新窗口恢复用）
+                if self.backend.memory_manager:
+                    workdir = self.backend.memory_manager.get_working_directory(project)
+                if workdir:
+                    self._current_workdir[project] = workdir
 
-        # 无根目录时自动创建临时工作目录
-        if not workdir:
-            workdir = self._ensure_temp_workdir(project)
+            # 无根目录时自动创建临时工作目录
+            if not workdir:
+                workdir = self._ensure_temp_workdir(project)
 
         # workdir 变化时强制重渲染欢迎卡片（project-dashboard 看板等依赖 project_root）：
         # 启动时 workdir 延迟 2s 才同步，同步前渲染会拿到空/兜底路径（显示
@@ -22679,6 +22728,46 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning(f"[MainWidget] Failed to create temp workdir: {e}")
             return ""
 
+    def _ensure_temp_page_workdir(self) -> str:
+        """临时对话页专用工作目录：{app_data}/tmp-sessions/{window_id}/
+
+        - 不入 DB（不调 memory_manager.set_working_directory）
+        - 不写 _current_workdir 实例缓存（避免项目切换/团队同步误读）
+        - 窗口关闭时整目录删除；崩溃残留由启动清扫兜底
+        """
+        try:
+            temp_dir = str(get_app_data_dir() / "tmp-sessions" / str(self._window_id))
+            os.makedirs(temp_dir, exist_ok=True)
+            if self.backend and self.backend.tool_executor:
+                self.backend.tool_executor.set_workdir(temp_dir)
+            return temp_dir
+        except Exception as e:
+            logger.warning(f"[MainWidget] 创建临时页工作目录失败: {e}")
+            return ""
+
+    @staticmethod
+    def _cleanup_orphan_temp_pages():
+        """启动清扫：删除 {app_data}/tmp-sessions/ 下所有孤儿目录
+
+        临时对话页目录本应随窗口关闭删除；崩溃/强杀进程时会残留，
+        启动时统一清扫（此刻尚无存活临时页，全删安全）。
+        """
+        try:
+            import shutil
+
+            base = get_app_data_dir() / "tmp-sessions"
+            if not base.is_dir():
+                return
+            removed = 0
+            for child in base.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                    removed += 1
+            if removed:
+                logger.info(f"[MainWidget] 启动清扫：已删除 {removed} 个临时页残留目录")
+        except Exception as e:
+            logger.warning(f"[MainWidget] 启动清扫临时页目录失败: {e}")
+
     def _on_title_edit_finished(self):
         """标题编辑完成 - 保存用户编辑的标题"""
         new_title = self.title_edit.text().strip()
@@ -22729,6 +22818,17 @@ class OpenAIChatToolWindow(ToolWindow):
         for win in window_registry.alive_window_instances():
             if getattr(win, "_is_destroyed", False):
                 continue
+            # 临时对话页：退出时删除整页临时目录（对齐 closeEvent 行为）
+            if win.__dict__.get("_is_temp_scope", False):
+                try:
+                    import shutil
+
+                    shutil.rmtree(
+                        str(get_app_data_dir() / "tmp-sessions" / str(getattr(win, "_window_id", ""))),
+                        ignore_errors=True,
+                    )
+                except Exception:
+                    pass
             try:
                 win._auto_save_current_session()
             except Exception:
@@ -22758,6 +22858,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _auto_save_current_session(self, flush_mode: str = "sync"):
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
+            return
+
+        # 临时对话页守卫：页内会话一律不落盘、不进历史（守卫链最前，先于一切持久化路径）
+        if getattr(session, "is_temp", False):
             return
 
         # 跳过没有用户消息的会话（SessionStart hook 产生的空会话不应保存到历史）
@@ -23116,6 +23220,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
             except Exception:
                 pass
+
+            # 临时对话页：关闭时删除整页临时工作目录（不入回收站，ignore_errors 防文件占用）。
+            # ★ 必须在 cancel_streaming 之后：流式中关页时 worker 还持有 tmp 目录内
+            # 文件句柄，先删会因 Windows 句柄锁基本失败（review m3）
+            if self.__dict__.get("_is_temp_scope", False):
+                try:
+                    import shutil
+
+                    shutil.rmtree(str(get_app_data_dir() / "tmp-sessions" / str(self._window_id)), ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"[MainWidget] 清理临时页目录失败: {e}")
 
             # 🛡️ 强制关窗路径独立计算并持久化累计运行时长（elapsed）
             #

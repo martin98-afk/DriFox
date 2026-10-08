@@ -67,6 +67,8 @@ class ChatSession:
         # 用于"对话进行中切换项目导致落盘错存"bug 的兜底：
         # 一旦锁定不再改变，即使后续切换项目，会话仍归属首发项目。
         self.originating_project: str = ""
+        # 临时会话标记：临时对话页内新建的会话不落盘、不进历史
+        self.is_temp: bool = False
         # [PERF T33] 发送前处理缓存版本号：消息列表内容/顺序任何变化都自增，
         # 供 ContextBudgetAllocator 的 consolidate+token 估算缓存做失效判定。
         # 缓存本身不持久化（to_dict 不输出），进程内复用。
@@ -302,6 +304,7 @@ class ChatSession:
             "last_api_message_count": self.last_api_message_count,
             "last_api_prompt_from_usage": self.last_api_prompt_from_usage,
             "originating_project": self.originating_project,
+            "is_temp": self.is_temp,
         }
 
     @classmethod
@@ -327,6 +330,8 @@ class ChatSession:
         session.last_api_message_count = data.get("last_api_message_count", 0)
         session.last_api_prompt_from_usage = data.get("last_api_prompt_from_usage", False)
         session.originating_project = data.get("originating_project", "") or ""
+        # 旧记录无此字段时默认 False，兼容
+        session.is_temp = bool(data.get("is_temp", False))
         return session
 
     def set_user_edited_title(self, edited: bool = True):

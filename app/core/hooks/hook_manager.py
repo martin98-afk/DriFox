@@ -2438,8 +2438,16 @@ class HookManager:
                 return None
 
         logger.debug("[HookManager] No script in command, returning None for cwd")
+        # 3. 无脚本：回退窗口工作目录（context.project_root 由各触发点注入，
+        #    即 tool_executor.get_workdir()：临时对话页为 tmp-sessions/{window_id}，
+        #    普通窗口为项目根目录）——对齐本函数 docstring「默认项目根目录」语义。
+        #    此前回退 None → 子进程继承主进程 cwd（应用启动目录），临时页 hook
+        #    因此落在原项目目录。缓存仍存 None：fallback 是窗口相关值，
+        #    不可按 hook 静态配置缓存（类级共享缓存会跨窗口串台）。
+        fallback_cwd = (context.get("project_root") or "") or None
         self._cwd_resolve_cache[cache_key] = (None, time.monotonic())
-        return None
+        logger.debug(f"[HookManager] No script in command, fallback cwd: {fallback_cwd}")
+        return fallback_cwd
 
     def _maybe_sweep_cwd_cache(self, now: float) -> None:
         """低频清扫过期的 cwd 解析缓存条目（类级共享字典，所有实例共用）。

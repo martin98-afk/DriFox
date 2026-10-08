@@ -371,6 +371,11 @@ def _update_tab_icon(tab_idx: int, project: str):
                     tm._tab_panel.set_team_project(team_id, initials, color)
                     return
 
+        # 临时对话页：Tab 用固定隐身紫「临」图标（不用项目色），标题前缀由窗口标题携带
+        if 0 <= tab_idx < len(tm._windows) and getattr(tm._windows[tab_idx], "_is_temp_scope", False):
+            tm._tab_panel.update_tab_project(tab_idx, "临", "#8B5CF6")
+            return
+
         from app.widgets.cards.settings.project_selector_card import (
             extract_project_initials,
             get_project_color,
@@ -2346,6 +2351,7 @@ class TabManagerWindow(FramelessWindow):
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.tabSwitchSessionRequested.connect(self._on_tab_switch_session_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
+        self._tab_panel.newTempTabRequested.connect(lambda: self._on_new_tab_requested(temp_scope=True))
         self._tab_panel.sidebarToggled.connect(self._on_sidebar_toggled)
         self._tab_panel.teamCloseRequested.connect(self._on_team_close_requested)
         self._tab_panel.teamAddMemberRequested.connect(self._on_team_add_member_requested)
@@ -3353,7 +3359,12 @@ class TabManagerWindow(FramelessWindow):
             # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
             tab_project_initials = ""
             tab_project_color = ""
-            if project:
+            # 临时对话页：初始标题加「临时」前缀；图标用固定隐身紫「临」（不用项目色）
+            if getattr(window, "_is_temp_scope", False):
+                title = f"临时 · {title}"
+                tab_project_initials = "临"
+                tab_project_color = "#8B5CF6"
+            elif project:
                 try:
                     from app.widgets.cards.settings.project_selector_card import (
                         extract_project_initials,
@@ -4096,6 +4107,7 @@ class TabManagerWindow(FramelessWindow):
         branch: bool = False,
         branch_messages: "list | None" = None,
         branch_name: "str | None" = None,
+        temp_scope: bool = False,
     ) -> "OpenAIChatToolWindow | None":
         """统一创建新标签页并加载内容。
 
@@ -4112,6 +4124,8 @@ class TabManagerWindow(FramelessWindow):
             branch_messages: 分支内容（消息卡片级分支用）。传入时以此为分支消息，
                 不传则复制整个当前会话（tab 级分支的原行为）。
             branch_name: 分支会话标题；不传时由当前会话名 + " [分支]" 生成。
+            temp_scope: 临时对话页（页内会话不落盘、不进历史，
+                使用独立临时工作目录，关闭时删除）。
         Returns:
             新窗口实例；失败返回 None（调用方应降级为原行为）
         """
@@ -4123,6 +4137,16 @@ class TabManagerWindow(FramelessWindow):
             new = self._build_new_window(source_window, project=project)
             if new is None:
                 return None
+            # 临时对话页标记：必须在 showEvent 前设置（_sync_working_directory
+            # 首次同步时读此标记决定 workdir 指向）
+            new._is_temp_scope = temp_scope
+            # 临时对话页：窗口内部「项目 avatar + 分支 chip」容器整体隐藏
+            # （构造期已创建；首次 show 前置为不可见，后续
+            # _refresh_project_branch_style 会保持隐藏）
+            if temp_scope:
+                container = getattr(new, "_project_branch_container", None)
+                if container is not None:
+                    container.setVisible(False)
 
             if branch:
                 cur = getattr(source_window, "session_manager", None)
@@ -4165,6 +4189,9 @@ class TabManagerWindow(FramelessWindow):
         """分支窗口 — 从指定标签页创建分支"""
         if 0 <= index < len(self._windows):
             window = self._windows[index]
+            # 临时对话页做分支无意义（不落盘）：入口已隐藏，此处兑底忽略
+            if getattr(window, "_is_temp_scope", False):
+                return
             if window is not None:
                 self.spawn_tab(window, branch=True)
 
@@ -4304,8 +4331,12 @@ class TabManagerWindow(FramelessWindow):
         if panel is not None and getattr(panel, "current_mode", lambda: "list")() == "tree":
             self.refresh_workspace_tree()
 
-    def _on_new_tab_requested(self):
-        """新建窗口 — 走当前窗口的复制逻辑，复用后端状态"""
+    def _on_new_tab_requested(self, temp_scope: bool = False):
+        """新建窗口 — 走当前窗口的复制逻辑，复用后端状态
+
+        Args:
+            temp_scope: True 时新建临时对话页（页内会话不落盘、不进历史）。
+        """
         # 批5 5b：壳期（首窗构造中）点击 + → 排队，ready 后由
         # _mark_first_window_ready 补执行恰一次
         if not getattr(self, "_first_window_ready", True):
@@ -4314,13 +4345,14 @@ class TabManagerWindow(FramelessWindow):
         current = self.get_current_window()
         if current is not None:
             # 从当前窗口复制（保留后端上下文）并新开标签页
-            self.spawn_tab(current, new_session=True)
+            self.spawn_tab(current, new_session=True, temp_scope=temp_scope)
         else:
             # 没有当前窗口时，走基础创建逻辑
             from app.main_widget import OpenAIChatToolWindow
 
             fake_page = self._create_fake_page()
             new_window = OpenAIChatToolWindow(fake_page)
+            new_window._is_temp_scope = temp_scope
             self.add_window(new_window)
             if not self.isVisible():
                 self.show()
