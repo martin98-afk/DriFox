@@ -302,3 +302,139 @@ class TestComposeWithDpr:
         out = viewer._compose_with_solid_bg(QPixmap(), 60, 30, dpr=0.5)
         assert out.width() == 60 and out.height() == 30
         assert abs(out.devicePixelRatio() - 1.0) < 1e-6
+
+
+class TestThemeIpcGate:
+    """[T24] refresh_theme 图表 IPC 门控：无图卡零图表 IPC，有图卡两段合并一次"""
+
+    @staticmethod
+    def _make_viewer_stub(has_charts: bool, visible: bool):
+        from types import MethodType
+
+        from app.widgets.message_card import CodeWebViewer
+
+        class _StubPage:
+            def __init__(self):
+                self.js_calls = []
+
+            def runJavaScript(self, js_code, callback=None):
+                self.js_calls.append(js_code)
+
+        v = CodeWebViewer.__new__(CodeWebViewer)
+        v._last_theme_version = -1
+        v._render_seq = 0
+        v._stub_page = _StubPage()
+        v.page = MethodType(lambda self: self._stub_page, v)
+        v.isVisible = MethodType(lambda self: visible, v)
+        v._has_charts = has_charts
+        return v
+
+    @staticmethod
+    def _bump_version(monkeypatch, value=7):
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        monkeypatch.setattr(ThemeRefreshCoordinator, "get_version", classmethod(lambda cls: value))
+
+    def test_no_chart_card_skips_chart_ipc(self, qapp, monkeypatch):
+        """无图可见卡：仅发一次 IPC（常量串 + CSS 变量），无 vault/echarts 重置段
+
+        [T28] 常量与重活解耦：无图卡也要收 echarts init 主题常量（流式新增
+        图表用新主题 init），但跳过 vault dispose 重活。
+        """
+        self._bump_version(monkeypatch)
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator._current_theme_id = None  # 强制版本推进
+        v = self._make_viewer_stub(has_charts=False, visible=True)
+        v.refresh_theme()
+        assert v._stub_page.js_calls, "常量串 + CSS 变量注入仍应发出"
+        assert len(v._stub_page.js_calls) == 1, "常量应并入 CSS 段，仍一次 IPC"
+        js = v._stub_page.js_calls[0]
+        assert "_applyChartTheme" in js, "常量串（echarts init 主题）必须发"
+        assert "--panel" in js, "CSS 变量段应保留"
+        assert "__chartVault" not in js, "无图卡不应发 vault/echarts 释放重活"
+
+    def test_no_chart_hidden_card_sends_const_only(self, qapp, monkeypatch):
+        """[T28] 无图隐藏卡：仅发轻量常量串（语义变化：T24 的零 IPC → 常量串）"""
+        self._bump_version(monkeypatch)
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator._current_theme_id = None
+        v = self._make_viewer_stub(has_charts=False, visible=False)
+        v.refresh_theme()
+        assert len(v._stub_page.js_calls) == 1, "仅发一次常量串"
+        js = v._stub_page.js_calls[0]
+        assert "_applyChartTheme" in js and "_MMD_THEME_VARS" in js
+        assert "__chartVault" not in js and "--panel" not in js, "无重置段、无 CSS 段"
+        assert v._theme_css_pending is True
+
+    def test_chart_card_merges_both_segments_in_one_ipc(self, qapp, monkeypatch):
+        """有图卡（可见）：常量+重置+CSS 三段合并为一次 runJavaScript"""
+        self._bump_version(monkeypatch)
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator._current_theme_id = None
+        v = self._make_viewer_stub(has_charts=True, visible=True)
+        v.refresh_theme()
+        assert len(v._stub_page.js_calls) == 1, f"三段应合并为一次 IPC，实际 {len(v._stub_page.js_calls)} 次"
+        merged = v._stub_page.js_calls[0]
+        assert "_applyChartTheme" in merged and "__chartVault" in merged, "常量+重置段应保留"
+        assert "--panel" in merged, "CSS 变量段应保留"
+        assert merged.count("try{") == 3, "三段应各自 try/catch 包裹（异常域隔离）"
+
+    def test_hidden_chart_card_sends_reset_only(self, qapp, monkeypatch):
+        """有图卡（隐藏）：常量+重置合并一次（vault 必须释放），CSS 走 pending 补注入"""
+        self._bump_version(monkeypatch)
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator._current_theme_id = None
+        v = self._make_viewer_stub(has_charts=True, visible=False)
+        v.refresh_theme()
+        assert len(v._stub_page.js_calls) == 1, "隐藏有图卡只发一次（常量+重置）"
+        js = v._stub_page.js_calls[0]
+        assert "_applyChartTheme" in js and "__chartVault" in js
+        assert "--panel" not in js, "CSS 不应出现（走 pending 补注入）"
+        assert v._theme_css_pending is True
+
+    def test_no_chart_card_theme_const_covers_late_charts(self, qapp, monkeypatch):
+        """[T28 B1 场景] 无图卡切主题收常量串 → 流式新增图表 → 用新主题常量 init
+
+        明暗错配回归：无图卡切浅色（is_dark=False），常量串必须携带
+        _applyChartTheme(false)；随后流式新增图表块置位 _has_charts，
+        其后 echarts init 读到的运行时常量已是新主题。
+        """
+        from app.utils.theme_manager import theme_manager as tm_mod
+
+        monkeypatch.setattr(tm_mod, "is_light_theme", lambda theme_id=None: True)  # 浅色
+        self._bump_version(monkeypatch)
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator._current_theme_id = None
+        v = self._make_viewer_stub(has_charts=False, visible=False)  # 隐藏无图卡
+        v.refresh_theme()
+        const_js = v._stub_page.js_calls[0]
+        assert "window._applyChartTheme(false);" in const_js, "浅色主题常量应为 is_dark=false"
+
+        # 模拟流式新增图表块（差量置位路径）：标记置位后，后续 init 用新常量
+        assert v._has_charts is False
+        v._mark_has_charts('<div class="echarts-container"></div>')
+        assert v._has_charts is True
+        # 常量串已先于图表落地送达 renderer（_stub_page.js_calls 顺序即投递序）
+        assert const_js in v._stub_page.js_calls
+
+    def test_mark_has_charts_latches(self, qapp):
+        """_mark_has_charts 只置不清：命中任一图表标记置位，普通 HTML 不置位"""
+        from app.widgets.message_card import CodeWebViewer
+
+        v = CodeWebViewer.__new__(CodeWebViewer)
+        v._has_charts = False
+        v._mark_has_charts("<p>plain text</p>")
+        assert v._has_charts is False
+        v._mark_has_charts('<div class="echarts-container"></div>')
+        assert v._has_charts is True
+        v._has_charts = False
+        v._mark_has_charts('<div class="mermaid-block"></div>')
+        assert v._has_charts is True
+        v._has_charts = False
+        v._mark_has_charts('<div class="chart-streaming"></div>')
+        assert v._has_charts is True

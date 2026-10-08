@@ -166,7 +166,10 @@ def replay_theme_qss(root: Any) -> int:
         if apply_theme_qss(obj, ensure_colors=False):
             count += 1
         try:
-            stack.extend(obj.findChildren(QWidget))
+            # [T20] children() 只取直接子级（O(N) 线性 BFS）：原 findChildren(QWidget)
+            # 对每个节点都递归拉全部后代，同一 widget 被重复入栈/重复 apply，O(N²)。
+            # children() 返回 QObject（含 QLayout/QAction 等），必须 isinstance 过滤。
+            stack.extend(c for c in obj.children() if isinstance(c, QWidget))
         except (RuntimeError, AttributeError):
             continue  # C++ 对象已销毁 / 非 QWidget
     return count

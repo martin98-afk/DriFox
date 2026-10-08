@@ -10574,29 +10574,44 @@ class OpenAIChatToolWindow(ToolWindow):
                     border-radius: 8px;
                 """)
             # 设置弹窗 — 子卡片主题样式
-            if self._settings_popup:
-                for frame in _popup_frames:
-                    self._safe_refresh(frame)
-                # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
-                for card_name in (
-                    "uiFontSizeCard",
-                    "uiLightModeCard",
-                    "uiThemeStyleCard",
-                    "llmFontCard",
-                    "llmSkillsCard",
-                    "llmProviderCard",
-                    "mcpListCard",
-                    "lspListCard",
-                    # 手风琴类卡片（ExpandSettingCard 子类，不在 SystemCardFrame
-                    # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
-                    "pluginToolCard",
-                    "pluginAgentCard",
-                    "secretModeCard",
-                ):
-                    self._safe_refresh(getattr(self._settings_popup, card_name, None))
-                # 刷新设置弹窗分隔标签
-                if hasattr(self._settings_popup, "_refresh_sep_labels"):
-                    self._settings_popup._refresh_sep_labels()
+            # [T22] 隐藏白刷门控：弹窗已构建但不可见且纯主题 scope → 置脏跳过
+            # 本段重型刷新（0.7s 级），显示时 showEvent →
+            # _refresh_appearance_from_config 补刷自愈。保守起见 font scope
+            # 不门控（补刷链虽覆盖字号，但避免低频打开弹窗触发放大刷新）。
+            # 只门控弹窗自身刷新（frames/命名卡/sep/弹窗本体），后续 5a 其余
+            # 刷新（含窗口内 BaseSettingsCard 循环）不受影响。
+            _popup_hidden_skip = (
+                self._settings_popup is not None
+                and not self._settings_popup.isVisible()
+                and not is_font
+            )
+            if _popup_hidden_skip:
+                self._settings_popup._theme_needs_refresh = True
+            else:
+                if self._settings_popup:
+                    for frame in _popup_frames:
+                        self._safe_refresh(frame)
+                    # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
+                    for card_name in (
+                        "uiFontSizeCard",
+                        "uiLightModeCard",
+                        "uiThemeStyleCard",
+                        "llmFontCard",
+                        "llmSkillsCard",
+                        "llmProviderCard",
+                        "mcpListCard",
+                        "lspListCard",
+                        # 手风琴类卡片（ExpandSettingCard 子类，不在 SystemCardFrame
+                        # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
+                        "pluginToolCard",
+                        "pluginAgentCard",
+                        "secretModeCard",
+                    ):
+                        self._safe_refresh(getattr(self._settings_popup, card_name, None))
+                    # 刷新设置弹窗分隔标签
+                    if hasattr(self._settings_popup, "_refresh_sep_labels"):
+                        self._settings_popup._refresh_sep_labels()
+                self._safe_refresh(self._settings_popup)
             # 设置卡片（全窗口递归）
             for card in _base_settings:
                 self._safe_refresh(card)
@@ -10673,9 +10688,9 @@ class OpenAIChatToolWindow(ToolWindow):
         本方法独立覆盖字体变化路径，避免内嵌硬编码 font-size 的 QSS
         不重建导致 setFont 被 QSS 盖住（视觉不响应）。
 
-        同时刷新 UI 插件浮动卡片（plugin-marketplace 等），它们通过
-        ctx 拉取 font_size/font_family，show_card 之后需要主动调
-        _apply_latest_theme 重新拉 ctx 应用新字号/字族。
+        只刷宿主自有卡（上方 9 张）。UI 插件浮动卡的主题/字体刷新由
+        EV_THEME_CHANGED → UIPluginRegistry 全量派发承接（T12 删除了本方法
+        尾部的插件卡直调块，消除与 registry 路径的双刷）。
         """
         # ── 主窗口内嵌浮动卡片（周期内去重：5b 跳过 5a 已刷卡片） ──
         for card in (

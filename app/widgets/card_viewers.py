@@ -689,6 +689,10 @@ class CodeWebViewer(QWebEngineView):
         self._theme_css_pending: bool = False
         # [T6] 主题重渲分帧队列脏标记：refresh_theme 置 True + 入队，队列消费时清除
         self._theme_render_pending: bool = False
+        # [T24] 图表存在标记（只置不清）：全量渲染产物含图表容器任一标记即置位。
+        # 不清的理由：流式期间新增图表块的保守防护（首渲后有图必然置位）；
+        # 复用/新内容残留 True 仅导致多一次无害 IPC，不影响正确性。
+        self._has_charts: bool = False
         # [B1] 差量渲染状态：
         # - _stable_html：已追加到 DOM 的稳定格式化 HTML 累积
         # - _stable_md_len：已差量消费的 markdown 偏移（后续 _extract_closed_segments 从这扫描）
@@ -5650,24 +5654,26 @@ class CodeWebViewer(QWebEngineView):
         # 避免 updateContent 复用旧骨架 CSS 变量导致主题色残留。
         try:
             if self.page():
-                # [vault] 主题切换：清空图表暂存区 + dispose 旧主题 echarts 实例。
-                # echarts 主题在 init 时确定、实例不可变色，复用旧实例会残留旧配色；
-                # 清空 vault + 置 _echartInited=false 后，下次全量渲染按新主题重 init。
-                # 轻量纯 JS 不做可见性门控（隐藏 tab 下执行无害；且必须执行——否则
-                # 恢复可见后 vault 回插的仍是旧主题实例）。图标重置与 CSS 变量注入
-                # 解耦，_theme_css_pending 补注入逻辑不受影响。
+                # [T28] 常量更新与重活解耦：三件套（_applyChartTheme / _MMD_THEME_VARS /
+                # _mmdApplyTheme）是 echarts init 主题的唯一运行时更新通道，属便宜
+                # 常量写入，对所有 page 存活的卡无条件发送（无图卡流式新增图表也要
+                # 用新主题常量 init，否则明暗错配——T27 审查 B1）。
+                _chart_theme_const_js = (
+                    f"window._applyChartTheme({str(not _is_light).lower()});"
+                    f"window._MMD_THEME_VARS = {_mmd_theme_vars_js(body_font_size)};"
+                    "window._mmdApplyTheme();"
+                )
+                # [vault] 主题切换：清空图表暂存区 + dispose 旧主题 echarts 实例
+                # （重活，严格按象限门控）。echarts 主题在 init 时确定、实例不可变色，
+                # 复用旧实例会残留旧配色；清空 vault + 置 _echartInited=false 后，
+                # 下次全量渲染按新主题重 init。有图卡隐藏时仍必须执行——否则恢复
+                # 可见后 vault 回插的仍是旧主题实例。
                 # [PERF] 主题切换会丢弃全部已渲染图表，必须**逐个 dispose** 而非
                 # 只 clear() Map：vault 里每个节点都持有 echarts 实例 + ResizeObserver
                 # （RO 对 target 是强引用，不 disconnect 则整棵子树常驻）。原实现
                 # clear() 丢弃引用但不释放资源，每次主题切换泄漏一批，与流式期间
                 # 的孤儿实例叠加 → 多图卡片 renderer 进程 OOM 白屏。
                 _chart_reset_js = (
-                    # 图表主题运行时同步：这三值原先是骨架构建期常量，refresh_theme
-                    # 只注入 CSS 变量、不重 setHtml → 切主题后已存在卡片的 echarts
-                    # 明暗 / PNG 导出底色 / 工具栏图标永久停在旧值。
-                    f"window._applyChartTheme({str(not _is_light).lower()});"
-                    f"window._MMD_THEME_VARS = {_mmd_theme_vars_js(body_font_size)};"
-                    "window._mmdApplyTheme();"
                     "if (window.__chartVault && window.__chartVault.size) {"
                     "  window.__chartVault.forEach(function (el) { window._disposeChartNode(el); });"
                     "  window.__chartVault.clear();"
@@ -5679,14 +5685,52 @@ class CodeWebViewer(QWebEngineView):
                     "  });"
                     "}"
                 )
-                self.page().runJavaScript(_chart_reset_js)
+
+                def _wrap_try(js: str, tag: str) -> str:
+                    return (
+                        "try{" + js + f"}}catch(err){{if(window.console)console.warn('[theme] {tag} failed',err);}}"
+                    )
+
+                # [T28] 四象限分发（互斥）。常量串对所有象限必发（象限 4 由 T24 的
+                # 零 IPC 变为仅发轻量常量串——语义变化，见上）；vault 释放重活仍
+                # 严格按有图门控。可见象限合并为一次 IPC。
+                # _has_charts 用 getattr 防御：__new__ 绕过 __init__ 的测试桩
+                # 无此属性（项目惯例，如 test_message_card_refresh_theme）。
                 if self.isVisible():
-                    self.page().runJavaScript(js_code)
+                    if getattr(self, "_has_charts", False):
+                        # 有图可见：常量 + 重置 + CSS 三段合并一次 IPC（各自 try/catch
+                        # 异常域隔离，一段抛错不拖垮另一段，T8 风险 2）
+                        _combined_js = (
+                            _wrap_try(_chart_theme_const_js, "chart const")
+                            + _wrap_try(_chart_reset_js, "chart reset")
+                            + _wrap_try(js_code, "css vars")
+                        )
+                        self.page().runJavaScript(_combined_js)
+                    else:
+                        # 无图可见：常量并入 CSS 段，仍一次 IPC
+                        self.page().runJavaScript(_wrap_try(_chart_theme_const_js, "chart const") + _wrap_try(js_code, "css vars"))
                     self._theme_css_pending = False
+                elif getattr(self, "_has_charts", False):
+                    # 有图隐藏：常量 + 重置合并；CSS 变量走 _theme_css_pending 补注入
+                    self.page().runJavaScript(
+                        _wrap_try(_chart_theme_const_js, "chart const") + _wrap_try(_chart_reset_js, "chart reset")
+                    )
+                    self._theme_css_pending = True
                 else:
+                    # 无图隐藏：仅发轻量常量串（T28 语义变化），CSS 走补注入
+                    self.page().runJavaScript(_wrap_try(_chart_theme_const_js, "chart const"))
                     self._theme_css_pending = True
         except RuntimeError:
             pass
+
+    def _mark_has_charts(self, html: str) -> None:
+        """[T24] 全量渲染产物含图表容器任一标记 → 置位 _has_charts（只置不清）"""
+        if (
+            "echarts-container" in html
+            or "mermaid-block" in html
+            or "chart-streaming" in html
+        ):
+            self._has_charts = True
 
     def _perform_update(self):
         # ⚠️ 必须无条件取时间：此前写成 `perf_counter() if FINISH_TIMING_ENABLED else 0.0`，
@@ -5781,6 +5825,8 @@ class CodeWebViewer(QWebEngineView):
                 self._final_render_pending = False
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
+                # [T24] 非流式全量产物入图检测（只置不清）
+                self._mark_has_charts(html_content)
                 # 🐛 修复：非流式路径也会在"流式结束但工具仍在并行执行"时触发
                 # （finish_streaming 将 _streaming 置 False 后走此分支）。
                 # 此时 DOM 中存在 JS 增量注入的"工具运行折叠框"（data-tool-call-id），
@@ -5904,6 +5950,9 @@ class CodeWebViewer(QWebEngineView):
                         f"{json.dumps(new_html).decode('utf-8')},"
                         f"{json.dumps(_tail_html).decode('utf-8')});"
                     )
+                    # [T28] 差量产物入图检测（只置不清）：流式新增图表块不再拉长
+                    # 无图卡窗口期（与全量置位点同款）
+                    self._mark_has_charts(new_html + _tail_html)
                     self.page().runJavaScript(js)
                     # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
                     self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
@@ -5987,6 +6036,9 @@ class CodeWebViewer(QWebEngineView):
             return
         try:
             js = f"updateTailHtml({json.dumps(html).decode('utf-8')});"
+            # [T28] 差量尾部入图检测（chart-streaming 骨架在闭合后才落地，此处是
+            # 流式期图表置位的主动径，只置不清）
+            self._mark_has_charts(html)
             self.page().runJavaScript(js)
         except RuntimeError:
             pass
@@ -6115,6 +6167,8 @@ class CodeWebViewer(QWebEngineView):
                 return
             self._last_rendered_html = html
             self._height_report_pending = True
+            # [T24] 线程池全量产物入图检测（只置不清）
+            self._mark_has_charts(html)
             # [B1] 全量渲染成功应用后：重置差量基线——差量稳定区与全量内容对齐，
             # 后续流式新段从当前 markdown 末尾继续差量追加（不再重复渲染已全量覆盖的内容）。
             # ⚠️ 必须用 _last_rendered_markdown（线程池提交时的渲染对象），而非
@@ -6505,6 +6559,8 @@ class CodeWebViewer(QWebEngineView):
                     f"{json.dumps(new_html).decode('utf-8')},"
                     f"{json.dumps(tail_html).decode('utf-8')});"
                 )
+                # [T28] 差量收尾产物入图检测（与全量置位点同款，只置不清）
+                self._mark_has_charts(new_html + tail_html)
             if replacements:
                 self.page().runJavaScript(f"finalizeStreamingBlocks({json.dumps(replacements).decode('utf-8')});")
             self._height_report_pending = True

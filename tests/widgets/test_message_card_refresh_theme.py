@@ -66,12 +66,18 @@ def test_refresh_theme_no_name_error(qapp=None):
 
 
 def test_refresh_theme_injects_chart_theme_js():
-    """图表主题 JS（_MMD_THEME_VARS / _applyChartTheme）必须被注入"""
+    """图表主题 JS（_MMD_THEME_VARS / _applyChartTheme）必须被注入
+
+    [T24] 桩改为有图卡（_has_charts=True）：无图+隐藏卡在 T24 四象限分发下
+    合法零 IPC；本测试意图是锁定「有图卡的图表主题 JS 注入链不断」，故桩
+    置有图 + 隐藏（走图表重置单独 IPC 路径，js_calls[0] 即图表重置段）。
+    """
     _ensure_qapp()
     from app.utils.theme_refresh import ThemeRefreshCoordinator
 
     ThemeRefreshCoordinator._current_theme_id = None
     v = _make_viewer_stub()
+    v._has_charts = True
     v.refresh_theme()
     assert v._stub_page.js_calls, "refresh_theme 未注入任何 JS"
     chart_js = v._stub_page.js_calls[0]

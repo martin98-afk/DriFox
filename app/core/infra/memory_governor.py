@@ -97,7 +97,7 @@ def _run_gc_hook():
     global _gc_hook_pending
     _gc_hook_pending = False
     try:
-        from app.widgets.message_card import clear_global_render_cache
+        from app.widgets.card_render_core import clear_global_render_cache
 
         clear_global_render_cache()
     except Exception:
@@ -114,7 +114,7 @@ def _cleanup_global_lru_caches():
     在新建会话、切换会话时调用，避免缓存的 HTML 渲染结果和 token 估算值累积。
     """
     try:
-        from app.widgets.message_card import clear_global_render_cache
+        from app.widgets.card_render_core import clear_global_render_cache
 
         clear_global_render_cache()
     except Exception:
