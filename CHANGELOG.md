@@ -1,15 +1,47 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.6.5] - 2026-10-08
+
+自上一版本以来的变更 | 提交数：19 · 文件变更：64 · +4847/-2575 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
 - **左下角系统菜单重做 + 帮助与反馈** (`app/widgets/cards/settings/gitee_card.py`, `app/widgets/cards/global_card_controller.py`, `plugins/system-skills/skills/issue-reporter/` 新增): 侧栏 Gitee 账号行悬浮菜单按 WorkBuddy 风格重做：圆角卡片 + 柔和投影、图标菜单行（hover 圆角高亮 + 右箭头）；移除「简洁输出」「桌宠」两个快捷开关（设置卡内仍可配），保留深色模式 / 窗口置顶；「打开全部设置」更名「设置」，新增「外观」「插件设置」直跳（打开设置卡并切到对应导航页，插件页懒构建自动触发）与「帮助与反馈」（新建会话并预填 issue 提交引导 prompt 到输入框，用户确认后发送），尾部新增「检查更新」（右侧显示当前版本号，点击走 UpdateChecker 手动检查，与托盘同款）。`GlobalCardController.open_settings` 新增 `initial_tab` 参数。新增系统技能 `issue-reporter`：collect_env.py 自动收集版本/系统/最近错误日志（密钥掩码），create_issue.py 走 GitHub API 提交（读 GITHUB_TOKEN），无 token 自动降级浏览器预填页。
 
+- **流式卡片动画优化** (`635d248c`, `669d40e0`): 高度追踪自适应、结束态缓动阈值 16px、打字机 flush 后终渲染、S1 兑底重开 FINISH 窗口（含历史卡守卫）、贴底短路、差量收尾接线（默认关，env 开启）；另含直报防抖降低延迟、tick 自适应提速、auto-scroll IPC 降频。
+
+- **主题切换插件卡批量刷新** (`239ea4db`): 主题切换时插件卡片改为批量刷新，防止双渲染闪烁。
+
+- **任务看板内嵌 assistant 卡片** (`45463d9b`): 任务看板从工作台迁移至最新 assistant 卡片内嵌展示。
+
+- **项目选择卡片性能优化** (`c2dd9dfe`): project_selector_card 引入行缓存复用机制，减少重建开销，提升面板刷新效率；新增当前项目指示标签。
+
+- **设置卡功能增强与 Gitee 账号管理** (`d5819944`): 增强设置卡功能，改进 Gitee 账号管理体验。
+
+- **深色模式/窗口置顶开关简化** (`61f1d8a1`): 深色模式与窗口置顶开关隐藏标签，提升 UI 清晰度。
+
+- **新增「取消置顶」「新建会话」图标资源** (`af8293e9`)。
+
+- **tooltip 行为优化** (`af03d5cd`, `a5dc053e`): 修复子控件 hover 时 tooltip 闪烁；TabPanel 新建会话与更多按钮移除 tooltip。
+
 ### 🐛 问题修复 (Bug Fixes)
 
 - **仅流式服务商端点兼容** (`app/utils/http_client.py`, `app/core/context/history_compactor.py`, `app/core/workers/topic_summary.py`): CodeBuddy 等端点仅支持流式请求，非流式直接 400（code 11101 `Non-stream chat request is currently not supported`）。`http_client` 新增 `chat_completion_text()`：以 `stream=True` 发起、在调用方线程内聚合为完整文本返回，异常照常透传 openai 异常族供重试判定识别。会话压缩摘要与标题摘要两条非流式链路切换到该封装；插件侧 prompt-enhancer 同步切换（见 drifox-plugins2 仓库）。子智能体 worker（带 tools 聚合）暂不切换。
+
+- **折叠框内滚轮置顶回归修复** (`ab5c125c`): card_viewers 恢复 v37 误删的工具区滚动保护链（display 空窗 scrollTop 快照写回、_scrollToolContentToBottom/滚动意图监听三件套），_twFlush 纯揭示化；_SKELETON_CACHE_VERSION 39。
+
+- **时间线 Token 模式刻度修复** (`9384df01`): timeline_panel 修复 Token 模式滚动后刻度起点显示为 0 的问题。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **内存管理与 UI 组件重构** (`a74ce881`)。
+
+- **热键注册日志与 pypinyin 内存优化** (`8f2a5c53`): 优化热键注册日志输出，改进 pypinyin 延迟导入的内存管理。
+
+### ⚡ 性能优化 (Performance)
+
+- **主题刷新链路重构** (`d691472b`): 主题刷新链路重构与性能优化：隐藏弹窗门控 + showEvent 按需补刷，消息卡样式短路，全局缓存统一清理，控件级 QSS 绑定改造。
 
 ### 🔧 测试基建 (Testing Infrastructure)
 
@@ -18,6 +50,10 @@ All notable changes to this project will be documented in this file.
   2. **接入 `pytest-timeout`**（dev 依赖 + `timeout = 300` + `timeout_method = "thread"`）。此前无任何超时兜底，单进程串行跑 5500+ 用例时任何死锁（`waitSignal` 等不到信号 / `QEventLoop` 不退出 / `join()` 不返回）都会永久挂起；现超 300s 即 fail 并打 Python 栈。`thread` 法为 Windows 可用方案。
   3. 修正 `test_long_run_scenarios.py` docstring：原称「默认 10s」与 `runner.py:39` 实际 `DEMO_DURATION_SEC = 30.0` 不符。
   4. `AGENTS.md` / 技能 `testing-build.md` 同步收集范围（`tests/ui` + `tests/perf` 双排除）、超时策略，并补充「禁止 `uv sync --group dev`」——该命令会卸载其它依赖组的包（aiohttp/lxml/numpy 等），须用 `--all-groups`。
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号升级至 v0.6.5（pyproject.toml / config.py / installer.iss / README）(`b1168b74`)
 
 ## [v0.6.4] - 2026-09-28 (重新发布 #2)
 
