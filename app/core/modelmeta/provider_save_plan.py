@@ -22,10 +22,32 @@ from typing import Any, Callable, Dict, Iterable, List, Tuple
 FORM_KEYS = ("API_URL", "API_KEY", "模型名称", "认证方式", "name")
 
 
+def filter_disabled_models(models: Iterable[Any], provider_info: Dict[str, Any]) -> List[str]:
+    """从模型列表中滤除「模型关闭列表」成员（P1-9 OpenCode 风格清单）。
+
+    关闭的模型不在选择器/装配结果显示，但仍存在于「模型列表」（存在性由
+    「模型列表」管，可见性由「模型关闭列表」管）。键缺失/空列表 = 全部启用。
+    兼容磁盘旧数据：字符串形态（ast 字面量）同样解析。
+    """
+    disabled = provider_info.get("模型关闭列表") or []
+    if isinstance(disabled, str):
+        try:
+            import ast
+
+            disabled = ast.literal_eval(disabled)
+        except Exception:
+            disabled = []
+    if not isinstance(disabled, list):
+        return list(models)
+    dset = {str(m) for m in disabled}
+    return [m for m in models if m not in dset]
+
+
 def build_provider_save_plan(
     form_values: Dict[str, Any],
     old_info: Dict[str, Any],
     extra_fields: Dict[str, Any],
+    disabled_models: List[str] | None = None,
 ) -> Dict[str, Any]:
     """组装一次保存动作的执行计划。
 
@@ -36,6 +58,8 @@ def build_provider_save_plan(
             ``fetch_meta``（可选，``{"ts": str, "status": str}`` 手动刷新结果）
         old_info: 编辑前的 provider_info（用于取 ``config_id`` 与 ``模型列表``）
         extra_fields: 套餐用量等额外字段的当前值（**含空串**；空串是显式清空）
+        disabled_models: 「模型关闭列表」（P1-9 OpenCode 风格清单：行内启停开关，
+            关闭的模型不在选择器显示但仍在「模型列表」）。恒写入（含空列表）。
 
     Returns:
         ``{"confirm_clear": bool, "payload": dict}``
@@ -43,18 +67,29 @@ def build_provider_save_plan(
         - ``confirm_clear``：用户清空了模型列表而旧列表非空 → 调用方需弹确认框。
         - ``payload``：交给 ``apply_provider_save`` 的 provider_info。五键恒存在
           （含空串 = 显式清空）；``config_id`` 仅在旧配置有时写入；``模型列表``
-          恒写入（空列表同样是显式值）；**两个开关恒写 bool（含 False = 显式关）**；
+          恒写入（空列表同样是显式值）；``模型关闭列表`` 恒写入（含空列表）；
+          **两个开关恒写 bool（含 False = 显式关）**；
           ``fetch_meta`` 携带时写「上次模型刷新」+「模型刷新状态」；
           ``extra_fields`` 覆盖同键。
+
+        「模型名称」自动维护三态（星标语义退役后的替代，P1-9）：值在启用列表
+        （models − disabled）内 → 保持；不在 → 自动写启用列表首项；启用列表
+        空 → 置空串。用户在对话界面的选择仍走既有链更新它。
     """
     models: List[str] = list(form_values.get("models") or [])
+    disabled: List[str] = list(disabled_models or [])
     old_models = old_info.get("模型列表") or []
     confirm_clear = (not models) and bool(old_models)
+
+    enabled = [m for m in models if m not in set(disabled)]
+    model_value = str(form_values.get("model", "") or "").strip()
+    if model_value not in enabled:
+        model_value = enabled[0] if enabled else ""
 
     payload: Dict[str, Any] = {
         "API_URL": str(form_values.get("api_url", "") or "").strip(),
         "API_KEY": str(form_values.get("api_key", "") or "").strip(),
-        "模型名称": str(form_values.get("model", "") or "").strip(),
+        "模型名称": model_value,
         "认证方式": str(form_values.get("auth_type", "") or "").strip(),
         "name": str(form_values.get("name", "") or "").strip(),
     }
@@ -66,6 +101,8 @@ def build_provider_save_plan(
 
     # 模型列表恒写入：空列表 = 用户在确认框里确认过的清空意图
     payload["模型列表"] = models
+    # 模型关闭列表恒写入：空列表 = 全部启用（与「模型列表」同语义，P1-9）
+    payload["模型关闭列表"] = disabled
 
     # 双开关恒写 bool（显式 False 同样要写入，否则关不掉）
     payload["自动刷新模型"] = bool(form_values.get("auto_refresh", False))

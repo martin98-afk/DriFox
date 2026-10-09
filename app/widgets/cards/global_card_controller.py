@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 GlobalCardController — Tab 级全局卡片控制器（单例）
 
@@ -271,6 +271,7 @@ class GlobalCardController:
         self._provider_edit_card.setMinimumHeight(300)
         self._provider_edit_card.set_height_mode("content")
         self._provider_edit_popup = ProviderEditCard(parent=self._provider_edit_card)
+        # P0 回退：760 限宽系美化批自拟参数，用户否决——表单恢复铺满容器
         self._provider_edit_popup.saved.connect(
             lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
         )

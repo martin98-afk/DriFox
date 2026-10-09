@@ -62,9 +62,13 @@ def test_confirm_clear_when_old_info_lacks_models_key():
 
 
 def test_payload_five_keys_always_present_even_empty():
-    """五键恒存在：表单值全空也要写出空串（显式清空），不得省略键"""
+    """五键恒存在：表单值全空也要写出空串（显式清空），不得省略键
+
+    P1-9：「模型名称」由 plan 自动维护——空 model + 非空启用列表会补首项，
+    故纯空场景需同时传 models=[]（启用列表空才保持空串）。
+    """
     plan = build_provider_save_plan(
-        _form(api_url="", api_key="", model="", auth_type="", name=""),
+        _form(api_url="", api_key="", model="", auth_type="", name="", models=[]),
         {},
         {},
     )
@@ -72,6 +76,29 @@ def test_payload_five_keys_always_present_even_empty():
     for key in FORM_KEYS:
         assert key in payload, f"五键必须恒存在，缺 {key}"
         assert payload[key] == ""
+
+
+def test_payload_disabled_models_always_written_and_model_name_maintained():
+    """P1-9 三态：模型关闭列表恒写；「模型名称」自动维护（保持/切首项/置空）"""
+    # ① 存档 model 在启用列表 → 保持
+    p = build_provider_save_plan(_form(model="m1"), {}, {}, disabled_models=["m2"])
+    assert p["payload"]["模型关闭列表"] == ["m2"]
+    assert p["payload"]["模型名称"] == "m1"
+
+    # ② 存档 model 被关闭（不在启用列表）→ 自动切启用首项
+    p = build_provider_save_plan(_form(model="m2"), {}, {}, disabled_models=["m2"])
+    assert p["payload"]["模型名称"] == "m1"
+
+    # ③ 启用列表空（全关/空表）→ 置空串
+    p = build_provider_save_plan(
+        _form(model="m1", models=["m1"]), {}, {}, disabled_models=["m1"]
+    )
+    assert p["payload"]["模型名称"] == ""
+    assert p["payload"]["模型关闭列表"] == ["m1"]
+
+    # ④ 默认不传 disabled → 恒写空列表（全部启用）
+    p = build_provider_save_plan(_form(), {}, {})
+    assert p["payload"]["模型关闭列表"] == []
 
 
 def test_payload_strips_whitespace():

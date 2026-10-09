@@ -51,8 +51,8 @@ from app.core.conversation.message_content import append_text_block, consolidate
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
     get_caps_max_output_tokens,
-    get_model_capabilities,
     normalize_reasoning_effort,
+    resolve_model_capabilities,
 )
 from app.core.modelmeta.provider_profile import get_provider_profile
 from app.core.tools.tool_call_parser import smart_parse_arguments
@@ -257,9 +257,6 @@ class OpenAIChatWorker(QThread):
                     self._cache_tracker.set_provider_hooks(pdef.usage_semantics, pdef.usage_normalizer)
             except Exception as e:
                 logger.debug(f"[CacheTracker] 注入服务商 usage 钩子失败（回退内置解析）: {e}")
-
-        # 缓存模型是否支持视觉，用于过滤 image_url 块
-        self._supports_vision = bool(get_model_capabilities(model_name).get("supports_vision"))
 
         # ========== 性能优化：API 消息缓存 ==========
         # 向后兼容：保留 PyQt Signal，但通过 EventBus 统一发射
@@ -1927,10 +1924,17 @@ class OpenAIChatWorker(QThread):
         if self.tools:
             kwargs["tools"] = self._tools_to_responses(self.tools)
 
-        # 思考参数：responses 用 reasoning.effort（含 "none" 关闭）
+        # 思考参数：responses 用 reasoning.effort（含 "none" 关闭）。
+        # 声明_思考强度经 resolve 链生效：给了 values 则 normalize 校验等级
+        # （无效等级回退中位；无 values 原样返回，行为兼容）——P1-9 批 d。
         thinking_mode = self.llm_config.get("思考模式")
         if thinking_mode is True:
-            kwargs["reasoning"] = {"effort": self.llm_config.get("思考等级", "medium")}
+            _caps = resolve_model_capabilities(self.llm_config)
+            kwargs["reasoning"] = {
+                "effort": normalize_reasoning_effort(
+                    self.llm_config.get("思考等级", "medium"), _caps.get("reasoning_effort_values")
+                )
+            }
         elif thinking_mode is False:
             kwargs["reasoning"] = {"effort": "none"}
 
@@ -2859,9 +2863,9 @@ class OpenAIChatWorker(QThread):
             # 保持旧工具名兜底，视觉判断不静默失效
             _provides_image = frozenset({"screenshot", "read"})
 
-        # 检查模型是否支持视觉
+        # 检查模型是否支持视觉（effective：声明_支持图像非空时以声明为准，P1-9 批 d）
         model_name = str(self.llm_config.get("模型名称", "") or "")
-        caps = get_model_capabilities(model_name)
+        caps = resolve_model_capabilities(self.llm_config)
         if not caps.get("supports_vision"):
             # 不支持视觉的模型：在已构建的 tool 消息 content 追加提示，防止模型幻觉
             _non_vision_tools = set()
@@ -4579,10 +4583,10 @@ class OpenAIChatWorker(QThread):
             )
         ):
             try:
-                from app.core.modelmeta.model_capabilities import get_model_capabilities
+                from app.core.modelmeta.model_capabilities import resolve_model_capabilities
 
-                _model_name = str(self.llm_config.get("模型名称", "") or "")
-                _caps = get_model_capabilities(_model_name)
+                # effective：声明_支持图像非空时以声明为准（P1-9 批 d）
+                _caps = resolve_model_capabilities(self.llm_config)
                 if _caps.get("supports_vision"):
                     result_content = str(result_content) + (
                         "\n\n[Vision Notice] 截图已自动以图片形式注入你的视觉上下文，"

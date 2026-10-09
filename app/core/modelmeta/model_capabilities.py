@@ -64,6 +64,63 @@ DEFAULT_MODEL_PARAMS: Dict[str, Any] = {
     # 这些字段对不支持的模型无意义，仅在 MODEL_CAPABILITIES 标记 supports_thinking=True 时才注入。
 }
 
+# =============================================================================
+# 能力声明键（P1-9）：用户在模型参数卡显式声明的「声明_*」六键 → caps 字段映射。
+# 声明键经 model_overrides["provider||model"] 落盘、发送链 config.update 灌入
+# llm_config（main_widget._get_current_model_config）；本表是 resolve 链的 L0 层。
+# 中文键名是双挡防护的第一挡：PARAM_SCHEMA 不给 api_param + 中文过不了
+# _VALID_IDENTIFIER_PATTERN（openai_chat / subagent_worker 各挡一次），
+# 声明键永远不会泄漏进 API 请求体。
+# =============================================================================
+DECLARED_CAPABILITY_KEYS: Dict[str, str] = {
+    "声明_上下文长度": "context_limit",
+    "声明_最大输出": "max_output_tokens",
+    "声明_支持图像": "supports_vision",
+    "声明_支持思考": "supports_thinking",
+    "声明_思考参数": "thinking_param",
+    "声明_思考强度": "reasoning_effort_values",
+}
+
+
+def _parse_declared_value(field: str, value: Any) -> Any:
+    """按目标字段类型解析声明值；无法解析返回 None（调用方跳过走下一层）。"""
+    if field in ("context_limit", "max_output_tokens"):
+        try:
+            parsed = int(value)
+        except (ValueError, TypeError):
+            return None
+        return parsed if parsed > 0 else None
+    if field in ("supports_vision", "supports_thinking"):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "1", "yes", "on", "是"):
+                return True
+            if low in ("false", "0", "no", "off", "否"):
+                return False
+        return None
+    if field == "thinking_param":
+        text = str(value).strip()
+        return text or None
+    if field == "reasoning_effort_values":
+        if isinstance(value, (list, tuple)):
+            items = [str(v).strip() for v in value]
+        else:
+            raw = (
+                str(value)
+                .replace("，", ",")
+                .replace("、", ",")
+                .replace("；", ";")
+                .replace(";", ",")
+                .replace("/", ",")
+            )
+            items = [p.strip() for p in raw.split(",")]
+        return [p for p in items if p] or None
+    return None
+
 
 # =============================================================================
 # 模型能力字典
@@ -597,7 +654,11 @@ def get_caps_max_output_tokens(model: str, llm_config: Optional[Dict[str, Any]] 
     return parsed if parsed > 0 else None
 
 
-def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+def apply_model_defaults(
+    config: Dict[str, Any],
+    model_name: str,
+    declared: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """对 config 字典叠加上模型默认值，返回新 dict（不修改原对象）。
 
     合并顺序（低 → 高）：
@@ -611,35 +672,162 @@ def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, A
     用途：当服务商不在 providers 插件（自定义服务商）时，
     确保 UI 能看到合理的默认值（温度 0.7、top_p 1.0 等）。
     当服务商已知但模型能力更强时，模型能力会覆盖服务商默认（最大Token 等）。
+
+    Args:
+        declared: 「声明_*」六键子集（P1-9 批 b，来自 model_overrides 的用户
+            显式声明）。调用点的 overrides 在本函数之后才灌入 config，故需
+            提前传入。规则：declared["声明_支持思考"] 非空时**以声明为准**——
+            模型能力说不支持也不摘思考字段（声明 True 场景）；同时跳过思考
+            字段的默认补值（声明 False / True 场景都不替用户做主）。
+            只不摘、不补，不改其余行为。缺省 None = 无声明，原行为。
     """
     result = {}
     # L1: 硬编码兜底
     result.update(DEFAULT_MODEL_PARAMS)
     # L2: config 已有值（saved_providers + 插件默认）
     result.update(config)
+    # 声明层判定（批 b）：声明_支持思考非空 = 用户显式声明思考能力
+    declared_present = False
+    if declared:
+        declared_thinking = declared.get("声明_支持思考")
+        declared_present = declared_thinking not in (None, "")
     # L3: 模型能力（覆盖前两层，之后 model_overrides 还会覆盖回来）
     caps = get_model_capabilities(model_name)
     if caps.get("context_limit"):
         result["最大Token"] = caps["context_limit"]
         result["上下文长度"] = caps["context_limit"]
         if caps.get("supports_thinking"):
-            # 仅在 config 还没显式设置时填默认（避免覆盖用户的 model_overrides）
-            if "思考模式" not in result:
-                result["思考模式"] = True
-            # 思考等级只对 reasoning_effort 型模型有意义（toggle/budget 型无强度概念）
-            if "思考等级" not in result and caps.get("thinking_param") == "reasoning_effort":
-                # 默认等级优先取 models.dev 给出的 effort 可选值第一个，
-                # 否则回退固定默认（如 deepseek 等无 values 数据的模型）
-                effort_values = caps.get("reasoning_effort_values") or []
-                # 默认取第一个"非关闭"档位：values 首项常是 none/no_think
-                default_effort = next(
-                    (v for v in effort_values if str(v).lower() not in _EFFORT_OFF_VALUES), None
-                )
-                result["思考等级"] = default_effort or (effort_values[0] if effort_values else "medium")
-        else:
-            # 模型不支持思考 → 主动移除思考相关字段
-            # （用户如果之前在 model_overrides 里显式开过，会在 _load_model_config_to_card 后续被补回）
+            # 仅在 config 还没显式设置时填默认（避免覆盖用户的 model_overrides）；
+            # 有声明时不补——思考字段的最终归属由声明场景全权决定
+            if not declared_present:
+                if "思考模式" not in result:
+                    result["思考模式"] = True
+                # 思考等级只对 reasoning_effort 型模型有意义（toggle/budget 型无强度概念）
+                if "思考等级" not in result and caps.get("thinking_param") == "reasoning_effort":
+                    # 默认等级优先取 models.dev 给出的 effort 可选值第一个，
+                    # 否则回退固定默认（如 deepseek 等无 values 数据的模型）
+                    effort_values = caps.get("reasoning_effort_values") or []
+                    # 默认取第一个"非关闭"档位：values 首项常是 none/no_think
+                    default_effort = next(
+                        (v for v in effort_values if str(v).lower() not in _EFFORT_OFF_VALUES), None
+                    )
+                    result["思考等级"] = default_effort or (effort_values[0] if effort_values else "medium")
+        elif not declared_present:
+            # 模型不支持思考 → 主动移除思考相关字段。
+            # 声明_支持思考 非空时跳过摘除：用户显式声明支持思考，models.dev
+            # 数据缺失/错误不得反向覆盖（补回由 _ensure_thinking_fields 按
+            # effective 判定收口）。
             result.pop("思考模式", None)
             result.pop("思考等级", None)
             result.pop("思考预算", None)
     return result
+
+
+def resolve_model_capabilities(
+    llm_config: Dict[str, Any],
+    provider_name: str = "",
+    sources: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """模型能力的统一解析入口：声明层优先，自动链兜底（P1-9）。
+
+    层链（每键独立，高 → 低）：
+        L0 声明_*   llm_config 里的「声明_*」六键（model_overrides 灌入的用户显式声明）
+        L1 caps     get_model_capabilities(model, provider)
+                    （内部已按 models.dev 动态 > 硬编码 MODEL_CAPABILITIES 归并）
+        L3 family   providers 插件聚合的 family 能力（get_provider_profile）
+        L4 default  DEFAULT_MODEL_PARAMS 兜底（仅 context_limit；max_output_tokens
+                    语义拆分后无兜底——「最大Token」是窗口键，当输出上限兜底会
+                    让 max_tokens 恒发默认值，违背 P1-21 拆分意图）
+
+    六键映射：声明_上下文长度→context_limit、声明_最大输出→max_output_tokens、
+    声明_支持图像→supports_vision、声明_支持思考→supports_thinking、
+    声明_思考参数→thinking_param、声明_思考强度→reasoning_effort_values。
+
+    声明值判空规则：v not in (None, "") 才算声明；空串/None = 自动（走自动链）。
+    声明值解析失败（如上下文长度填了非数字）→ 跳过该层走自动链，不抛错。
+
+    Args:
+        llm_config: 发送链 llm_config（含「模型名称」/「provider_name」/声明键）。
+        provider_name: 服务商名；缺省从 llm_config["provider_name"] 取。
+        sources: 可选输出参数——调用方传 dict 进来，本函数按 caps 字段名
+            就地填每键生效层（"declared"/"caps"/"family"/"default"，无值 None）。
+            供段三来源标注复用一次解析的结果。
+
+    Returns:
+        caps 同构 dict（只含有值的键），消费方可直接替换
+        get_model_capabilities 的返回值使用。
+    """
+    cfg = llm_config or {}
+    model = str(cfg.get("模型名称", "") or "")
+    provider = str(provider_name or cfg.get("provider_name", "") or "").strip()
+
+    fields = list(DECLARED_CAPABILITY_KEYS.values())
+    out: Dict[str, Any] = {}
+    src = sources if sources is not None else None
+    if src is None:
+        src = {}
+    for field in fields:
+        src[field] = None
+
+    # L0：声明层（空 = 自动，走链；解析失败同空处理）
+    for decl_key, field in DECLARED_CAPABILITY_KEYS.items():
+        raw = cfg.get(decl_key)
+        if raw in (None, ""):
+            continue
+        parsed = _parse_declared_value(field, raw)
+        if parsed is None:
+            continue
+        out[field] = parsed
+        src[field] = "declared"
+
+    # L1：模型能力（动态 models.dev > 硬编码，已在 get_model_capabilities 内归并）
+    caps: Dict[str, Any] = {}
+    if model:
+        caps = get_model_capabilities(model, provider)
+    for field in fields:
+        if field in out:
+            continue
+        if field in caps and caps[field] not in (None, ""):
+            out[field] = caps[field]
+            src[field] = "caps"
+    # 辅助字段透传（非六键、无声明层/family/default）：thinking.type 的具体取值
+    # （如 MiniMax 系 "adaptive"），思考发送链（_apply_thinking）与 caps 同构消费
+    if "thinking_enable_value" in caps and caps["thinking_enable_value"] not in (None, ""):
+        out.setdefault("thinking_enable_value", caps["thinking_enable_value"])
+
+    # L3：family 能力（providers 插件按 family 聚合声明）
+    if any(src.get(f) is None for f in fields):
+        profile_cfg = {"provider_name": provider} if provider else dict(cfg)
+        try:
+            profile = get_provider_profile(profile_cfg)
+        except Exception:
+            profile = {}
+        for field in fields:
+            if field in out:
+                continue
+            if field in profile and profile[field] not in (None, ""):
+                out[field] = profile[field]
+                src[field] = "family"
+
+    # L4：DEFAULT_MODEL_PARAMS 兜底（仅 context_limit，见 docstring）
+    if "context_limit" not in out:
+        fallback = DEFAULT_MODEL_PARAMS.get("上下文长度")
+        if fallback not in (None, ""):
+            out["context_limit"] = fallback
+            src["context_limit"] = "default"
+
+    return out
+
+
+def get_model_capability_sources(model: str, provider: str = "") -> Dict[str, str]:
+    """查六键能力的自动链生效层（无声明场景，段三来源标注用）。
+
+    Returns:
+        {caps 字段名: 生效层}。层取值 "caps"/"family"/"default"，
+        全链无值的键为 None。声明层（"declared"）只会在带 llm_config 的
+        resolve_model_capabilities 里出现——本函数专查静态自动链。
+    """
+    sources: Dict[str, str] = {}
+    resolve_model_capabilities({"模型名称": model or "", "provider_name": provider or ""}, provider, sources)
+    return sources
+

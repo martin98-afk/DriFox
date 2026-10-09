@@ -25,7 +25,7 @@ from qfluentwidgets import (
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Colors, font_size_css
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 
@@ -37,6 +37,7 @@ _FIELD_GROUPS = [
     ("上下文", ("最大Token", "上下文长度", "最大输出")),
     ("思考",   ("思考模式", "思考预算", "思考等级")),
     ("采样",   ("温度", "temp", "top_p", "max_new_tokens")),
+    ("能力声明", ("声明_支持思考", "声明_支持图像", "声明_上下文长度", "声明_最大输出", "声明_思考参数", "声明_思考强度")),
 ]
 
 # =============================================================================
@@ -146,6 +147,14 @@ class ModelConfigCard(QWidget):
             items.append((order, key, value, meta))
 
         items.sort(key=lambda x: x[0])
+
+        # 声明键常驻渲染（P1-9 段三）：config 里没有也要显示——默认「自动」/空
+        # = 未声明。不常驻的话用户永远看不到声明入口。
+        existing_keys = {it[1] for it in items}
+        for decl_key, decl_meta in PARAM_SCHEMA.items():
+            if decl_key.startswith("声明_") and decl_key not in existing_keys and not decl_meta.get("hide_in_card"):
+                items.append((decl_meta.get("order", 999), decl_key, None, decl_meta))
+
         groups = self._group_items(items)
 
         # 渲染各组
@@ -165,6 +174,21 @@ class ModelConfigCard(QWidget):
                 f"padding: 0 0 4px 2px;"
             )
             self.layout.addWidget(header)
+            # 能力声明组：有生效声明时组头风险提示（声明值压制自动探测，
+            # 异常声明会覆盖真实能力——文档 §6.11）
+            if group_name == "能力声明":
+                has_declared = any(v not in (None, "") for _o, _k, v, _m in group_items)
+                warn = BodyLabel(
+                    "已声明：值优先于模型自动探测，异常值会覆盖真实能力"
+                    if has_declared
+                    else "留空/自动 = 跟随模型数据（models.dev / 服务商声明）",
+                    self,
+                )
+                warn.setStyleSheet(
+                    f"color: {'#e05656' if has_declared else Colors.TEXT_MUTED}; "
+                    f"{font_size_css(10)}; padding: 0 0 2px 2px; background: transparent; border: none;"
+                )
+                self.layout.addWidget(warn)
 
             # 字段行
             for _order, key, value, meta in group_items:
@@ -178,6 +202,26 @@ class ModelConfigCard(QWidget):
                 hlayout.setSpacing(8)
                 hlayout.addWidget(label, 0)
                 hlayout.addWidget(widget, 1)
+                # 声明键未声明时：行尾小字标自动链生效层（P1-9 段三）
+                if key.startswith("声明_") and value in (None, "") and self.current_model_name:
+                    try:
+                        from app.core.modelmeta.model_capabilities import (
+                            DECLARED_CAPABILITY_KEYS,
+                            get_model_capability_sources,
+                        )
+
+                        field = DECLARED_CAPABILITY_KEYS.get(key, "")
+                        src = get_model_capability_sources(self.current_model_name).get(field)
+                        src_text = {"caps": "模型数据", "family": "服务商声明", "default": "内置默认"}.get(src)
+                        if src_text:
+                            hint = BodyLabel(f"自动: {src_text}", self)
+                            hint.setStyleSheet(
+                                f"color: {Colors.TEXT_MUTED}; {font_size_css(10)}; "
+                                f"background: transparent; border: none;"
+                            )
+                            hlayout.addWidget(hint, 0)
+                    except Exception:
+                        pass
                 self.layout.addLayout(hlayout)
                 self._widgets[key] = (label, widget)
 
@@ -294,6 +338,32 @@ class ModelConfigCard(QWidget):
             widget.checkedChanged.connect(lambda: self._on_field_changed())
             return widget
 
+        elif ui_type == "tri_state":
+            # 声明键三态（P1-9 段三）：自动/开启/关闭。「自动」= 未声明
+            # （get_config 删键，防 copy 残留）；键缺失/空值回显「自动」
+            widget = ComboBox(self)
+            widget.addItems(["自动", "开启", "关闭"])
+            if isinstance(value, bool) or value in (0, 1):
+                widget.setCurrentText("开启" if value else "关闭")
+            elif isinstance(value, str) and value.strip().lower() in ("true", "1", "yes", "on", "是"):
+                widget.setCurrentText("开启")
+            elif isinstance(value, str) and value.strip().lower() in ("false", "0", "no", "off", "否"):
+                widget.setCurrentText("关闭")
+            else:
+                widget.setCurrentText("自动")
+            widget.setMinimumWidth(280)
+            widget.currentTextChanged.connect(lambda: self._on_field_changed())
+            return widget
+
+        elif ui_type == "lineedit_int":
+            # 声明数值键：允许留空（空 = 未声明，get_config 删键）
+            widget = LineEdit(self)
+            widget.setPlaceholderText("自动")
+            widget.setText(str(value) if value not in (None, "") else "")
+            widget.setMinimumWidth(280)
+            widget.textChanged.connect(lambda: self._on_field_changed())
+            return widget
+
         elif ui_type == "combobox":
             widget = ComboBox(self)
             options = list(meta.get("options", []))
@@ -352,9 +422,21 @@ class ModelConfigCard(QWidget):
             actual_key = "模型名称" if key == "选择模型" else key
 
             if isinstance(widget, LineEdit):
-                result[actual_key] = widget.text().strip()
+                text = widget.text().strip()
+                if not text and PARAM_SCHEMA.get(key, {}).get("ui_type") == "lineedit_int":
+                    # 声明数值键留空 = 未声明 → 删键（防 copy 残留旧值假声明）
+                    result.pop(actual_key, None)
+                else:
+                    result[actual_key] = text
             elif isinstance(widget, ComboBox):
-                result[actual_key] = widget.currentText()
+                if PARAM_SCHEMA.get(key, {}).get("ui_type") == "tri_state":
+                    # 声明三态：「自动」= 未声明 → 删键（最关键一行，防 copy 残留）
+                    if widget.currentText() == "自动":
+                        result.pop(actual_key, None)
+                    else:
+                        result[actual_key] = widget.currentText() == "开启"
+                else:
+                    result[actual_key] = widget.currentText()
             elif isinstance(widget, SearchableEditableComboBox):
                 text = (
                     widget.text().strip()

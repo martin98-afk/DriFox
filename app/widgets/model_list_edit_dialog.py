@@ -1,113 +1,136 @@
 # -*- coding: utf-8 -*-
 """
-极简模型列表编辑器（嵌入式 Widget）
-Enter 新增，Delete 删除，双击编辑，拖拽排序；
-顶部输入框可搜索过滤 / 回车快速添加（支持换行与逗号分隔批量粘贴）；
-重复项自动标红；可展示「被过滤的非对话模型」并点击加回。
+模型列表编辑器（OpenCode 风格清单，P1-9）
 
-行首星标（★/☆）标记**默认模型**（点击切换），行尾 tooltip 展示模型能力。
-候选区（``set_candidate_models``）默认折叠，展开后可点击加回主列表。
+行内启停开关：每行 = 双行文本（模型名 + 灰字能力摘要）+ 能力徽章 + SwitchButton。
+- 「模型列表」管存在性（get_models() 返回全部）；
+- 「模型关闭列表」管可见性（get_disabled_models()；关闭的模型不在选择器显示，
+  但仍在列表里，随时可开回来）。
+- 保留：搜索过滤 / Enter 新增 / Ctrl+V 批量粘贴 / Delete 删除（删除 = 移出主
+  列表回到候选区，可找回）。
+- 裁剪（OpenCode 无此二者，且与 setItemWidget 技术互斥）：拖拽排序、双击行内编辑。
+- 「设默认模型」语义退役：「模型名称」由保存链自动维护（见 provider_save_plan）。
 """
 
-from PyQt5.QtCore import QEvent, QRect, Qt, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QStyledItemDelegate,
-    QStyleOptionViewItem,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import SwitchButton
 
-from app.utils.design_tokens import Colors, get_unified_scrollbar_style, scale_font_size
+from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css
+from app.widgets.capability_badges import ModelCapabilityBadges, build_capability_tooltip
+from app.widgets.flow_layout import FlowLayout  # noqa: F401  （候选区/外部沿用导入路径）
 
 _DUP_COLOR = "#e05656"  # 重复项前景色
 
-# 星标列宽（行首保留区）：paint 画在这里，editorEvent 也在这里拦截
-_STAR_COL_W = 24
+_ROW_H = 46  # 行高：双行文本（名称 + 灰字摘要）+ 开关
 
 
-class _StarDelegate(QStyledItemDelegate):
-    """列表项 delegate：行首画默认模型星标 + 注入编辑器主题样式。
+def _accent_rgba(alpha_pct: int) -> str:
+    """accent 色 → rgba() 串（QSS 不支持 #RRGGBBAA，透明度按百分比）"""
+    color = QColor(Colors.SYSTEM_ACCENT)
+    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha_pct / 100:.2f})"
 
-    继承原 `_ItemEditorDelegate` 的编辑器样式逻辑（双击编辑时主题化输入框）。
 
-    ⚠ 点击处理的分寸：星标区（0-24px）内的鼠标按下被 consume（切换默认模型）；
-    **其余区域必须放行** —— 否则 QListWidget 收不到按下事件，双击编辑/拖拽全失效。
-    """
+class _ModelRowWidget(QWidget):
+    """单个模型行（setItemWidget 真控件）：双行文本 + 能力徽章 + 启停开关。"""
 
-    # (model_name) — 星标区内点击时发射
-    defaultChanged = pyqtSignal(str)
-
-    def __init__(self, parent=None, is_default=None):
+    def __init__(
+        self,
+        name: str,
+        caps: dict,
+        enabled: bool,
+        on_toggle,  # Callable[[str, bool], None]
+        parent=None,
+    ):
         super().__init__(parent)
-        # 回调：模型名 → 是否当前默认（由宿主列表维护状态）
-        self._is_default = is_default or (lambda name: False)
+        self.model_name = str(name)
+        self._on_toggle = on_toggle
+        self._duplicate = False
 
-    def set_default_checker(self, checker):
-        self._is_default = checker or (lambda name: False)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 4, 8, 4)
+        row.setSpacing(8)
 
-    # ── 绘制 ──
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(1)
 
-    def paint(self, painter: QPainter, option, index):
-        # 文本绘制区左边界右移一个星标列宽：super().paint 画的文本/选中态
-        # 从 option.rect.left() 起，不偏移的话星标会叠在首字符上（用户实测反馈）。
-        # 星标画在腾出的 0-_STAR_COL_W 保留区，与 editorEvent 命中区同坐标系。
-        text_option = QStyleOptionViewItem(option)
-        text_option.rect = QRect(option.rect)
-        text_option.rect.setLeft(option.rect.left() + _STAR_COL_W)
-        super().paint(painter, text_option, index)
-        name = str(index.data(Qt.DisplayRole) or "")
-        if not name:
-            return
-        painter.save()
+        self.name_label = QLabel(self.model_name, self)
+        self.sub_label = QLabel(self._summary_text(caps), self)
+        text_col.addWidget(self.name_label)
+        if self.sub_label.text():
+            text_col.addWidget(self.sub_label)
+        else:
+            self.sub_label.setVisible(False)
+        row.addLayout(text_col, 1)
+
+        self.badges = ModelCapabilityBadges(caps or {}, parent=self)
+        if self.badges.has_any_badge():
+            row.addWidget(self.badges, 0, Qt.AlignVCenter)
+
+        self.switch = SwitchButton(self)
+        self.switch.setChecked(enabled)
+        self.switch.checkedChanged.connect(self._emit_toggle)
+        row.addWidget(self.switch, 0, Qt.AlignVCenter)
+
+        self._apply_text_style()
+
+    @staticmethod
+    def _summary_text(caps: dict) -> str:
+        """灰字摘要：上下文长度 + 能力短语（无数据隐藏整行）"""
+        caps = caps or {}
+        parts: list = []
+        ctx = caps.get("context_limit")
+        if isinstance(ctx, int) and ctx > 0:
+            parts.append(f"上下文 {ctx // 1000}K" if ctx >= 1000 else f"上下文 {ctx}")
+        phrase = build_capability_tooltip(caps)
+        if phrase:
+            parts.append(phrase)
+        return "  ·  ".join(parts)
+
+    def _emit_toggle(self, checked):
+        if callable(self._on_toggle):
+            self._on_toggle(self.model_name, bool(checked))
+
+    def set_enabled_state(self, enabled: bool, animate: bool = False):
+        """外部同步开关态（不触发回调；供 set_disabled_models 批量刷新）"""
+        self.switch.blockSignals(True)
+        self.switch.setChecked(enabled)
+        self.switch.blockSignals(False)
+        self._apply_text_style()
+
+    def set_duplicate(self, duplicate: bool):
+        """重复项标红（不阻止操作；保存链仍会去重）"""
+        self._duplicate = bool(duplicate)
+        self._apply_text_style()
+
+    def _apply_text_style(self):
         Colors.refresh()
-        star = "★" if self._is_default(name) else "☆"
-        color = Colors.TEXT_ACCENT if self._is_default(name) else Colors.TEXT_MUTED
-        painter.setPen(QColor(color))
-        font = painter.font()
-        font.setPointSize(max(9, scale_font_size(12)))
-        painter.setFont(font)
-        rect = QRect(option.rect.left() + 2, option.rect.top(), _STAR_COL_W - 4, option.rect.height())
-        painter.drawText(rect, Qt.AlignVCenter | Qt.AlignHCenter, star)
-        painter.restore()
+        enabled = self.switch.isChecked()
+        muted = self._duplicate
+        name_color = _DUP_COLOR if muted else (Colors.TEXT_MUTED if not enabled else Colors.TEXT_PRIMARY)
+        self.name_label.setStyleSheet(
+            f"color: {name_color}; font-weight: 600; {get_font_family_css()} "
+            f"{font_size_css(13)}; background: transparent; border: none;"
+        )
+        self.sub_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}; "
+            f"background: transparent; border: none;"
+        )
 
-    def editorEvent(self, event, model, option, index):
-        if event.type() == QEvent.MouseButtonRelease:
-            x = event.pos().x() - option.rect.left()
-            if 0 <= x < _STAR_COL_W:
-                # 星标区：切换默认模型并吃掉事件（不再触发选中/编辑）
-                name = str(index.data(Qt.DisplayRole) or "")
-                if name:
-                    self.defaultChanged.emit(name)
-                return True
-        # 文本区及任何其它事件：交回基类（双击编辑 / 拖拽 / 选中均依赖此路径）
-        return super().editorEvent(event, model, option, index)
-
-    def createEditor(self, parent, option, index):
-        editor = super().createEditor(parent, option, index)
-        if isinstance(editor, QLineEdit):
-            Colors.refresh()
-            editor.setStyleSheet(
-                f"""
-                QLineEdit {{
-                    background-color: {Colors.CONTENT_BG};
-                    color: {Colors.TEXT_PRIMARY};
-                    border: 1px solid {Colors.INPUT_FOCUS_BORDER};
-                    border-radius: 3px;
-                    padding: 2px 4px;
-                    {get_font_family_css()}
-                    font-size: {scale_font_size(13)}px;
-                    selection-background-color: {Colors.TEXT_ACCENT};
-                    selection-color: #ffffff;
-                }}
-                """
-            )
-        return editor
+    def refresh_style(self):
+        self._apply_text_style()
 
 
 def _split_model_input(text: str) -> list:
@@ -123,25 +146,44 @@ def _split_model_input(text: str) -> list:
 
 
 class ModelListEditorWidget(QWidget):
-    """极简模型列表编辑器 — 可内嵌到表单卡片中，点击按钮切换显隐"""
+    """模型列表编辑器（OpenCode 风格清单）— 可内嵌到表单卡片中。
 
-    # (model_name) — 默认模型变更（含被动切换，如删除默认行后自动切首项）
-    defaultChanged = pyqtSignal(str)
+    交互：Enter 新增 / Delete 删除（回候选区可找回）/ Ctrl+V 批量粘贴 /
+    搜索过滤 / 行内开关启停。无拖拽、无双击编辑（setItemWidget 互斥 + OpenCode
+    形态裁剪）；「设默认」语义退役，「模型名称」由保存链自动维护。
+    """
 
     def __init__(self, models: list | None = None, parent=None, default_model: str = ""):
         super().__init__(parent)
-        # 默认模型（行首★标记；保存时写入「模型名称」）
-        self._default_model = str(default_model or "")
+        # default_model 参数保留接收但已废弃（星标语义退役，P1-9）：调用方
+        # （provider_edit_card）构造点未同步清理，收下不用的参数避免破签名。
         # 候选区状态（折叠/展开 + 数据源）
+        self._disabled: set = set()
+        self._caps_cache: dict = {}
         self._candidate_models: list = []
         self._candidate_expanded = False
         self._candidate_folded_hint = "其他"
-        self._init_ui(models or [])
+        self._init_ui(self._dedupe(models or []))
         self.refresh_style()
+
+    @staticmethod
+    def _dedupe(models) -> list:
+        """去重保序（P0：磁盘「模型列表」可能积累重复，任何写主列表的入口
+        都过这里——重复行会触发重复名场景的一切边界问题）"""
+        seen: set = set()
+        out: list = []
+        for m in models or []:
+            name = str(m or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out
 
     def _build_qss(self) -> str:
         """构建主题 QSS（refresh_style 时重建，保证颜色/字号随系统）"""
         Colors.refresh()
+        # 选中/hover 用 accent 低透明度浅色（用户反馈：原实底色太深）。
+        # 三档递进：hover 6% < 选中 10% < 选中+hover 14%，文字一律 TEXT_PRIMARY。
         return f"""
             QWidget {{
                 background: transparent;
@@ -157,18 +199,18 @@ class ModelListEditorWidget(QWidget):
             }}
             QListWidget::item {{
                 background-color: transparent;
-                padding: 4px 8px;
+                padding: 0px;
                 border-radius: 3px;
             }}
             QListWidget::item:hover {{
-                background-color: {Colors.HOVER_BG};
+                background-color: {_accent_rgba(6)};
             }}
             QListWidget::item:selected {{
-                background-color: {Colors.INPUT_FOCUS_BORDER};
+                background-color: {_accent_rgba(10)};
                 color: {Colors.TEXT_PRIMARY};
             }}
             QListWidget::item:selected:hover {{
-                background-color: {Colors.HOVER_BG_STRONG};
+                background-color: {_accent_rgba(14)};
             }}
             QLineEdit {{
                 background-color: {Colors.CONTENT_BG};
@@ -181,6 +223,17 @@ class ModelListEditorWidget(QWidget):
             }}
             QLineEdit:focus {{
                 border-color: {Colors.INPUT_FOCUS_BORDER};
+            }}
+            QLabel#editorHint {{
+                color: {Colors.TEXT_MUTED};
+                {font_size_css(10)} {get_font_family_css()}
+                background: transparent; border: none; padding: 0;
+            }}
+            QLabel#candidateLink {{
+                color: {Colors.TEXT_MUTED};
+                {font_size_css(11)} {get_font_family_css()}
+                background: transparent; border: none; padding: 0;
+                text-decoration: underline;
             }}
         """ + get_unified_scrollbar_style(6)
 
@@ -197,29 +250,57 @@ class ModelListEditorWidget(QWidget):
             search.setPlaceholderText("搜索过滤；输入后回车添加（支持多行/逗号分隔）")
         hint = getattr(self, "hint_label", None)
         if hint is not None:
-            hint.setStyleSheet(
-                f"background: transparent; border: none; {get_font_family_css()}"
-                f" font-size: {scale_font_size(11)}px; padding: 0;"
-            )
+            hint.setStyleSheet("")  # 样式走 QSS objectName 选择器，refresh 随本表重建
         title = getattr(self, "candidate_title", None)
         if title is not None:
-            title.setStyleSheet(
-                f"background: transparent; border: none; {get_font_family_css()}"
-                f" font-size: {scale_font_size(11)}px; padding: 0; color: {Colors.TEXT_SECONDARY};"
-            )
-        # 星标重绘（主题色可能变）
+            title.setStyleSheet("")  # 样式走 QSS objectName 选择器
         lw = getattr(self, "listWidget", None)
         if lw is not None:
-            try:
-                lw.viewport().update()
-            except RuntimeError:
-                pass
+            for i in range(lw.count()):
+                row = lw.itemWidget(lw.item(i))
+                if row is not None and hasattr(row, "refresh_style"):
+                    try:
+                        row.refresh_style()
+                    except RuntimeError:
+                        pass
 
-    def _make_item(self, text: str) -> QListWidgetItem:
-        """创建可编辑列表项（QListWidget.addItems 的默认项不含 Editable 标记）"""
-        item = QListWidgetItem(text)
-        item.setFlags(item.flags() | Qt.ItemIsEditable)
+    def _caps_for(self, name: str) -> dict:
+        """查模型能力（refresh 时批量查一次缓存复用；几十行规模可接受）"""
+        if name not in self._caps_cache:
+            try:
+                from app.core.modelmeta.model_capabilities import get_model_capabilities
+
+                self._caps_cache[name] = get_model_capabilities(name) or {}
+            except Exception:
+                self._caps_cache[name] = {}
+        return self._caps_cache[name]
+
+    def _make_row_item(self, name: str) -> QListWidgetItem:
+        """创建一行：模型名存 Qt.UserRole（item 本体**零绘制文本**，防与行容器
+        双绘叠印——P0 用户实测）；行控件负责全部显示"""
+        item = QListWidgetItem()
+        item.setData(Qt.UserRole, str(name))
+        item.setSizeHint(QSize(0, _ROW_H))
+        row = _ModelRowWidget(
+            str(name),
+            self._caps_for(name),
+            enabled=name not in self._disabled,
+            on_toggle=self._on_row_toggle,
+            parent=self.listWidget,
+        )
+        # 行容器横向 Expanding：跟随 viewport 拉满（防窄窗口下挤压叠印）
+        row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.listWidget.addItem(item)
+        self.listWidget.setItemWidget(item, row)
         return item
+
+    def _row_of(self, name: str):
+        """按模型名即时反查行控件（不建 name→widget 索引：重复名场景会互相覆盖）"""
+        for i in range(self.listWidget.count()):
+            item = self.listWidget.item(i)
+            if item.data(Qt.UserRole) == name:
+                return self.listWidget.itemWidget(item)
+        return None
 
     def _init_ui(self, models: list):
         layout = QVBoxLayout(self)
@@ -233,34 +314,26 @@ class ModelListEditorWidget(QWidget):
         self.searchEdit.returnPressed.connect(self._on_search_return)
         layout.addWidget(self.searchEdit)
 
-        # 提示行
+        # 提示行（Caption 弱化：灰小字，用户已知操作不拉视线）
         self.hint_label = QLabel(
-            "<span style='color:#808080;'>双击编辑</span> · <span style='color:#606060;'>Enter 新增</span>"
-            " · <span style='color:#606060;'>Delete 删除</span> · <span style='color:#606060;'>拖拽排序</span>"
-            " · <span style='color:#606060;'>Ctrl+V 批量粘贴</span>"
+            "Enter 新增  ·  Delete 删除  ·  Ctrl+V 粘贴"
         )
+        self.hint_label.setObjectName("editorHint")
         self.hint_label.setStyleSheet(
             f"background: transparent; border: none; {get_font_family_css()}"
             f" font-size: {scale_font_size(11)}px; padding: 0;"
         )
         layout.addWidget(self.hint_label)
 
-        # 主列表
+        # 主列表（行内开关启停；无拖拽、无双击编辑）
         self.listWidget = QListWidget()
         # 最大高度：内容少时自适应矮，超出封顶后内部滚动
-        self.listWidget.setMaximumHeight(200)
-        self.listWidget.setDragDropMode(QListWidget.InternalMove)
-        self.listWidget.setDefaultDropAction(Qt.MoveAction)
+        self.listWidget.setMaximumHeight(220)
         self.listWidget.setSelectionBehavior(QListWidget.SelectRows)
-        self.listWidget.setEditTriggers(QListWidget.DoubleClicked | QListWidget.EditKeyPressed)
-        # 星标 delegate（行首★=默认模型，点击切换；文本区事件放行保双击编辑）
-        self._star_delegate = _StarDelegate(self.listWidget, self._is_default_model)
-        self._star_delegate.defaultChanged.connect(self.setDefaultModel)
-        self.listWidget.setItemDelegate(self._star_delegate)
-        self.listWidget.itemDoubleClicked.connect(self._start_edit)
+        self.listWidget.setSelectionMode(QListWidget.SingleSelection)
         self.listWidget.itemChanged.connect(lambda _item: self._check_duplicates())
         for m in models:
-            self.listWidget.addItem(self._make_item(m))
+            self._make_row_item(str(m))
         layout.addWidget(self.listWidget)
 
         # 候选模型区（默认折叠：只显示标题行，点击展开）
@@ -269,11 +342,13 @@ class ModelListEditorWidget(QWidget):
         candidate_layout.setContentsMargins(0, 0, 0, 0)
         candidate_layout.setSpacing(4)
         self.candidate_title = QLabel("")
+        self.candidate_title.setObjectName("candidateLink")
         self.candidate_title.setCursor(Qt.PointingHandCursor)
         self.candidate_title.mousePressEvent = self._toggle_candidates
         candidate_layout.addWidget(self.candidate_title)
         self.candidateList = QListWidget()
-        self.candidateList.setMaximumHeight(90)
+        # 展开态固定可视高度 + 内部滚动（用户反馈：90px 被截断且被开关行遮挡）
+        self.candidateList.setFixedHeight(180)
         self.candidateList.itemClicked.connect(self._restore_candidate)
         candidate_layout.addWidget(self.candidateList)
         self.candidateWidget.setVisible(False)
@@ -286,30 +361,29 @@ class ModelListEditorWidget(QWidget):
 
         self.listWidget.setFocus()
 
-    # ── 默认模型（星标）────────────────────────────────────
+    # ── 行内启停（「模型关闭列表」）────────────────────────
 
-    def _is_default_model(self, name: str) -> bool:
-        """给 delegate 的查询回调：该模型是否当前默认"""
-        return bool(self._default_model) and str(name) == self._default_model
+    def _on_row_toggle(self, name: str, checked: bool):
+        """开关切换：更新关闭集 + 行淡化（不重建整列表）"""
+        if checked:
+            self._disabled.discard(name)
+        else:
+            self._disabled.add(name)
+        row = self._row_of(name)
+        if row is not None:
+            row._apply_text_style()
 
-    def setDefaultModel(self, model_name: str):
-        """设置默认模型（星标切换；不校验存在性，由调用方保证）"""
-        self._default_model = str(model_name or "")
-        self.listWidget.viewport().update()  # 重绘星标
-        self.defaultChanged.emit(self._default_model)
+    def set_disabled_models(self, models: list):
+        """装载「模型关闭列表」（磁盘值；装载后同步各行开关态）"""
+        self._disabled = {str(m) for m in (models or [])}
+        for i in range(self.listWidget.count()):
+            row = self.listWidget.itemWidget(self.listWidget.item(i))
+            if row is not None and hasattr(row, "set_enabled_state"):
+                row.set_enabled_state(row.model_name not in self._disabled)
 
-    def getDefaultModel(self) -> str:
-        return self._default_model
-
-    def _ensure_default_after_change(self):
-        """主列表变化后校正默认：不在列表里 → 取首项；列表空 → 空串"""
-        models = self.get_models()
-        if not models:
-            if self._default_model:
-                self.setDefaultModel("")
-            return
-        if self._default_model not in models:
-            self.setDefaultModel(models[0])
+    def get_disabled_models(self) -> list:
+        """关闭的模型（按主列表序返回；恒为主列表子集）"""
+        return [m for m in self.get_models() if m in self._disabled]
 
     # ── 过滤与添加 ─────────────────────────────────────────
 
@@ -317,21 +391,8 @@ class ModelListEditorWidget(QWidget):
         """按搜索框关键词隐藏/显示主列表项（仅视觉过滤，不删数据）"""
         kw = self.searchEdit.text().strip().lower()
         for i in range(self.listWidget.count()):
-            item = self.listWidget.item(i)
-            item.setHidden(bool(kw) and kw not in item.text().lower())
-
-    def _apply_item_tooltip(self, item: QListWidgetItem):
-        """行 tooltip：模型能力（复用波6 的纯函数，与选择卡/模型按钮同源）"""
-        try:
-            from app.core.modelmeta.model_capabilities import get_model_capabilities
-            from app.widgets.capability_badges import build_capability_tooltip
-
-            caps = get_model_capabilities(item.text()) or {}
-            tip = build_capability_tooltip(caps)
-            if tip:
-                item.setToolTip(tip)
-        except Exception:
-            pass
+            name = str(self.listWidget.item(i).data(Qt.UserRole) or "")
+            self.listWidget.item(i).setHidden(bool(kw) and kw not in name.lower())
 
     def _on_search_return(self):
         """搜索框回车：把框内文本（可多行/逗号分隔）作为新模型批量加入"""
@@ -350,36 +411,29 @@ class ModelListEditorWidget(QWidget):
         for t in tokens:
             if t in existing:
                 continue
-            item = self._make_item(t)
-            self._apply_item_tooltip(item)
-            self.listWidget.addItem(item)
+            self._make_row_item(t)
             existing.add(t)
             added += 1
         if added:
             self._check_duplicates()
             self._apply_filter()
-            self._ensure_default_after_change()
         return added
 
     def _notify_skipped(self, count: int):
         """提示被跳过的重复项数量（信息展示在提示行，不弹窗打断）"""
         self.hint_label.setText(
             f"<span style='color:{_DUP_COLOR};'>跳过 {count} 个重复项</span>"
-            " · <span style='color:#606060;'>双击编辑 · Enter 新增 · Delete 删除 · 拖拽排序</span>"
+            "  ·  Enter 新增 · Delete 删除 · Ctrl+V 粘贴"
         )
 
     # ── 编辑操作 ───────────────────────────────────────────
-
-    def _start_edit(self, item):
-        """双击开始编辑"""
-        self.listWidget.editItem(item)
 
     def keyPressEvent(self, event):
         key = event.key()
         mods = event.modifiers()
 
         if key in (Qt.Key_Return, Qt.Key_Enter) and not mods:
-            self._add_new()
+            self._on_search_return()
             return
 
         if key == Qt.Key_Delete:
@@ -410,57 +464,28 @@ class ModelListEditorWidget(QWidget):
         except Exception:
             return ""
 
-    def _add_new(self):
-        """添加新项并立即编辑"""
-        item = self._make_item("新模型")
-        self.listWidget.addItem(item)
-        self.listWidget.setCurrentItem(item)
-        self.listWidget.editItem(item)
-
     def _delete_selected(self):
-        """删除选中项；删的是默认模型时自动切换到首项并提示"""
+        """删除选中行 = 移出「模型列表」（候选区可找回）；关闭态随之清除"""
         row = self.listWidget.currentRow()
         if row < 0:
             return
-        removed_item = self.listWidget.item(row)
-        removed_name = removed_item.text() if removed_item is not None else ""
-        was_default = bool(removed_name) and self._is_default_model(removed_name)
+        item = self.listWidget.item(row)
+        name = str(item.data(Qt.UserRole) or "") if item is not None else ""
+        self._disabled.discard(name)
         self.listWidget.takeItem(row)
         self._check_duplicates()
-        if not was_default:
-            self._ensure_default_after_change()
-            return
-        # 默认行被删 → 显式提示新默认（静默切换会让用户困惑）
-        self._ensure_default_after_change()
-        new_default = self._default_model
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-            from PyQt5.QtWidgets import QApplication
-
-            parent = self.window() or QApplication.activeWindow()
-            msg = f"默认切换为 {new_default}" if new_default else "列表已清空，默认模型置空"
-            InfoBar.warning(
-                f"已移除默认模型 {removed_name}",
-                msg,
-                parent=parent,
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-        except Exception:
-            pass
 
     def _check_duplicates(self):
         """重复项标红提示（不阻止操作；写回下拉时仍会自动去重）"""
         counts: dict = {}
         for i in range(self.listWidget.count()):
-            t = self.listWidget.item(i).text()
+            t = str(self.listWidget.item(i).data(Qt.UserRole) or "")
             counts[t] = counts.get(t, 0) + 1
         for i in range(self.listWidget.count()):
             item = self.listWidget.item(i)
-            if counts.get(item.text(), 0) > 1:
-                item.setForeground(QColor(_DUP_COLOR))
-            else:
-                item.setData(Qt.ForegroundRole, None)
+            row = self.listWidget.itemWidget(item)
+            if row is not None and hasattr(row, "set_duplicate"):
+                row.set_duplicate(counts.get(str(item.data(Qt.UserRole) or ""), 0) > 1)
 
     # ── 候选区（默认折叠，点击展开）────────────────────────
 
@@ -529,7 +554,7 @@ class ModelListEditorWidget(QWidget):
         - 已拉取：`fetched_models`（编辑卡最近一次「获取模型列表」的结果）
         - 残留：当前候选区里还没被加回的项（重算时不能丢）
 
-        去重保序：词典 → 已拉取 → 残留。
+        去重保序：词典 → 已拉取 → 残留。关闭的模型不过滤（仍可见可找回）。
         """
         in_main = set(self.get_models())
         ordered: list = []
@@ -561,24 +586,15 @@ class ModelListEditorWidget(QWidget):
     # ── 数据读写 ───────────────────────────────────────────
 
     def set_models(self, models: list):
-        """装载模型列表（清空后填入）"""
+        """装载模型列表（去重保序；清空后填入；关闭集保留交集，行开关按其回显）"""
         self.listWidget.clear()
-        for m in models:
-            item = self._make_item(m)
-            self._apply_item_tooltip(item)
-            self.listWidget.addItem(item)
+        for m in self._dedupe(models):
+            self._make_row_item(str(m))
         self._check_duplicates()
         self._apply_filter()
-        self._ensure_default_after_change()
-        self.listWidget.viewport().update()
 
     def get_models(self) -> list:
-        return [self.listWidget.item(i).text() for i in range(self.listWidget.count())]
-
-    def closeEvent(self, event):
-        """关闭时摘除列表内部拖拽模式，避免析构后 drop 回调触达已释放项。"""
-        try:
-            self.listWidget.setDragDropMode(QListWidget.NoDragDrop)
-        except RuntimeError, AttributeError:
-            pass
-        super().closeEvent(event)
+        return [
+            str(self.listWidget.item(i).data(Qt.UserRole) or "")
+            for i in range(self.listWidget.count())
+        ]

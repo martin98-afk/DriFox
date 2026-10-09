@@ -111,6 +111,43 @@ PARAM_SCHEMA = {
         "api_param": "reasoning_effort",
         "order": 220,
     },
+    # ── P1-9 段三：能力声明六键（model_overrides 持久化；resolve 链 L0 层）──
+    # ⚠ 绝不给 api_param：声明键是中文，_VALID_IDENTIFIER_PATTERN 第二挡也过不去，
+    #   双挡保证它们永远不会泄漏进 API 请求体。
+    # tri_state：ComboBox「自动/开启/关闭」——「自动」= 未声明（get_config 删键）。
+    "声明_支持思考": {
+        "display_name": "声明: 支持思考",
+        "ui_type": "tri_state",
+        "order": 500,
+    },
+    "声明_支持图像": {
+        "display_name": "声明: 支持图像",
+        "ui_type": "tri_state",
+        "order": 501,
+    },
+    # lineedit_int allow_empty：空串 = 未声明（get_config 删键）
+    "声明_上下文长度": {
+        "display_name": "声明: 上下文长度",
+        "ui_type": "lineedit_int",
+        "order": 502,
+    },
+    "声明_最大输出": {
+        "display_name": "声明: 最大输出",
+        "ui_type": "lineedit_int",
+        "order": 503,
+    },
+    # lineedit：自由文本（思考参数 thinking/thinking_budget/reasoning_effort；
+    # 思考强度逗号分隔等级列表）。空串 = 未声明（resolve 链容忍，不删键）
+    "声明_思考参数": {
+        "display_name": "声明: 思考参数",
+        "ui_type": "lineedit",
+        "order": 504,
+    },
+    "声明_思考强度": {
+        "display_name": "声明: 思考强度",
+        "ui_type": "lineedit",
+        "order": 505,
+    },
     "启用技能": {
         "display_name": "启用技能",
         "ui_type": "checkbox",
@@ -133,7 +170,8 @@ PARAM_SCHEMA = {
 MODEL_LEVEL_KEYS = frozenset(
     "温度 temp 最大Token 上下文长度 max_new_tokens "
     "top_p frequency_penalty presence_penalty "
-    "思考模式 思考预算 思考等级 启用技能".split()
+    "思考模式 思考预算 思考等级 启用技能 "
+    "声明_支持思考 声明_支持图像 声明_上下文长度 声明_最大输出 声明_思考参数 声明_思考强度".split()
 )
 
 # ──────────────────────────────────────────────────────────────

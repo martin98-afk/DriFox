@@ -96,13 +96,15 @@ class TestEditorConstruction:
 
         w = ModelListEditorWidget()
         assert w.get_models() == []
-        assert w.getDefaultModel() == ""
+        assert w.get_disabled_models() == []
 
     def test_ctor_with_default_model(self, qapp):
+        """default_model 参数保留可传（星标语义已废弃，P1-9）：收下不用不崩"""
         from app.widgets.model_list_edit_dialog import ModelListEditorWidget
 
         w = ModelListEditorWidget(["a", "b"], default_model="b")
-        assert w.getDefaultModel() == "b"
+        assert w.get_models() == ["a", "b"]
+        assert not hasattr(w, "setDefaultModel"), "星标语义应零残留"
 
     def test_refresh_style_tolerates_missing_children(self, qapp):
         """refresh_style 在子控件未创建时不得抛（构造早期调用的防御）"""
@@ -114,6 +116,46 @@ class TestEditorConstruction:
             w.__dict__.pop(attr, None)
         # 不得抛 AttributeError（防御式取属性）
         w.refresh_style()
+
+    def test_on_provider_changed_all_branches_no_crash(self, qapp, monkeypatch):
+        """P0 回归：_on_provider_changed 全分支（预置/自定义/名称自动维护）不崩。
+
+        崩溃史：星标退役后残留 setDefaultModel 调用（预置分支），用户点开
+        编辑既有服务商即 AttributeError。本例锁死全部分支。
+        """
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+        from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="百度千帆",
+                api_url="https://qianfan.baidubce.com/v2",
+                default_model="ernie-4.0",
+            ),
+            source="plugin:test",
+        )
+        reg.register(ProviderDef(name="DeepSeek", api_url="https://api.deepseek.com"), source="plugin:test")
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+
+        card = ProviderEditCard(provider_name="", provider_info={}, is_new=True, preset_provider="")
+        # 分支①：切到有插件预置的服务商（曾在此崩）
+        card.nameCombo.setCurrentText("百度千帆")
+        card._on_provider_changed("百度千帆")
+        assert "ernie-4.0" in card.modelListEditor.get_models()
+        # 分支②：配置名自动维护（用户没手填时跟随服务商名）
+        assert card.configNameEdit.text() == "百度千帆"
+        # 分支③：切到无预置的服务商（provider_default_config miss 分支）
+        card._on_provider_changed("DeepSeek")
+        assert card.modelListEditor is not None
+        # 分支④：编辑态构造（非预置）同样不崩
+        card2 = ProviderEditCard(
+            provider_name="DeepSeek",
+            provider_info={"provider_name": "DeepSeek", "API_URL": "https://api.deepseek.com"},
+            is_new=False,
+        )
+        assert card2.modelListEditor is not None
 
     def test_provider_edit_card_constructs_with_preset(self, qapp, monkeypatch):
         """用户实测路径：编辑卡 + preset_provider 构造不崩（P1 崩溃点）"""
@@ -193,26 +235,25 @@ class TestEditorBulkAdd:
 
 class TestEditorDuplicateMark:
     def test_duplicate_marked_red(self, editor):
-        """重复项前景色标红，唯一项恢复默认"""
-        editor._add_tokens(["model-a"])  # 内部跳过重复，直接构造重复场景：
-        dup = editor._make_item("model-a")
-        editor.listWidget.addItem(dup)
+        """重复项行内名称标红，唯一项不受影响（setItemWidget 后走行控件）"""
+        editor._make_row_item("model-a")  # 直接构造重复场景（_add_tokens 会跳过）
         editor._check_duplicates()
-        assert dup.foreground().color() == QColor("#e05656")
-        assert editor.listWidget.item(0).foreground().color() == QColor("#e05656")
-        assert editor.listWidget.item(1).foreground().color() != QColor("#e05656")
+        assert editor._row_of("model-a")._duplicate is True
+        assert editor._row_of("model-b")._duplicate is False
 
     def test_remove_duplicate_restores_color(self, editor):
-        dup = editor._make_item("model-a")
-        editor.listWidget.addItem(dup)
+        editor._make_row_item("model-a")
+        editor.listWidget.setCurrentRow(2)  # 新加的重复行
+        editor._delete_selected()  # 走真实删除路径（同步 _disabled）
         editor._check_duplicates()
-        editor.listWidget.takeItem(editor.listWidget.row(dup))
-        editor._check_duplicates()
-        assert editor.listWidget.item(0).foreground().color() != QColor("#e05656")
+        assert editor._row_of("model-a")._duplicate is False
 
-    def test_initial_items_editable(self, editor):
-        """回归：set_models/addItems 的默认项无 ItemIsEditable，双击编辑失效"""
-        assert bool(editor.listWidget.item(0).flags() & Qt.ItemIsEditable)
+    def test_rows_not_editable_and_no_dragdrop(self, editor):
+        """P1-9 OpenCode 形态：setItemWidget 互斥 → 行不可编辑、无拖拽"""
+        from PyQt5.QtWidgets import QListWidget
+
+        assert not bool(editor.listWidget.item(0).flags() & Qt.ItemIsEditable)
+        assert editor.listWidget.dragDropMode() == QListWidget.NoDragDrop
 
 
 class TestEditorFiltered:
@@ -249,131 +290,108 @@ class TestEditorFiltered:
 # ── ProviderEditCard 获取策略 ─────────────────────────────────
 
 
-class TestEditorDefaultModel:
-    """波8：行首星标（★/☆）标记默认模型 + 删除保护 + 迁移自动设默认"""
+class TestEditorEnableToggle:
+    """P1-9 OpenCode 风格清单：行内启停开关（「模型关闭列表」语义）"""
 
-    def test_star_click_sets_default_and_emits(self, editor):
-        """星标区点击 → 设默认 + 发 defaultChanged"""
+    def test_toggle_off_adds_to_disabled(self, editor):
+        """开关关 → 进关闭集；开关开 → 移出；get_disabled 按主列表序"""
         editor.set_models(["m1", "m2", "m3"])
-        got = []
-        editor.defaultChanged.connect(got.append)
+        editor._on_row_toggle("m2", False)
+        editor._on_row_toggle("m1", False)
+        assert editor.get_disabled_models() == ["m1", "m2"], "应按主列表序"
+        assert editor.get_models() == ["m1", "m2", "m3"], "关闭不改存在性"
 
-        editor.setDefaultModel("m2")
-        assert editor.getDefaultModel() == "m2"
-        assert got[-1] == "m2"
-        assert editor._is_default_model("m2") is True
-        assert editor._is_default_model("m1") is False
+        editor._on_row_toggle("m1", True)
+        assert editor.get_disabled_models() == ["m2"]
 
-    def test_star_delegate_consumes_only_star_area(self, editor):
-        """红线：星标区 consume，文本区放行（过度 consume 会杀双击编辑）"""
-        from PyQt5.QtCore import QEvent, QPoint, Qt
-        from PyQt5.QtGui import QMouseEvent
-        from PyQt5.QtWidgets import QStyleOptionViewItem
+    def test_row_widget_reflects_toggle(self, editor):
+        """开关切换不重建列表：行控件即时反映开关态与淡化（真实信号链路）"""
+        editor.set_models(["m1", "m2"])
+        assert editor.listWidget.count() == 2
+        row = editor._row_of("m1")
+        assert row.switch.isChecked() is True
 
-        editor.set_models(["m1"])
-        model = editor.listWidget.model()
-        index = model.index(0, 0)
-        option = QStyleOptionViewItem()
-        option.rect = editor.listWidget.visualRect(index)
-        delegate = editor._star_delegate
+        row.switch.setChecked(False)  # 真实路径：checkedChanged → _emit_toggle
+        assert editor.get_disabled_models() == ["m1"]
+        assert row.switch.isChecked() is False
+        assert editor.listWidget.count() == 2, "不重建整列表"
 
-        # ① 星标区（x=2）：consume
-        star_pos = QPoint(option.rect.left() + 2, option.rect.center().y())
-        ev_star = QMouseEvent(
-            QEvent.MouseButtonRelease, star_pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier
-        )
-        assert delegate.editorEvent(ev_star, model, option, index) is True, "星标区应 consume"
-        assert editor.getDefaultModel() == "m1"
+    def test_set_disabled_models_loads_disk_value(self, editor):
+        """装载磁盘「模型关闭列表」：行开关回显，不触回调"""
+        editor.set_models(["m1", "m2"])
+        editor.set_disabled_models(["m2"])
+        assert editor._row_of("m2").switch.isChecked() is False
+        assert editor._row_of("m1").switch.isChecked() is True
+        assert editor.get_disabled_models() == ["m2"]
 
-        # ② 文本区（x=100，超出星标列）：必须放行（返回基类结果，不吞事件）
-        text_pos = QPoint(option.rect.left() + 100, option.rect.center().y())
-        ev_text = QMouseEvent(
-            QEvent.MouseButtonRelease, text_pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier
-        )
-        result = delegate.editorEvent(ev_text, model, option, index)
-        assert result is not True, "文本区不得被 consume（否则双击编辑/拖拽失效）"
-
-    def test_star_delegate_paint_offsets_text(self, editor, monkeypatch):
-        """红线：paint 给 super 的文本区左边界右移一个星标列宽（星标不再压首字符）"""
-        from PyQt5.QtGui import QPixmap, QPainter
-        from PyQt5.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
-
-        from app.widgets.model_list_edit_dialog import _STAR_COL_W
-
-        editor.set_models(["m1"])
-        model = editor.listWidget.model()
-        index = model.index(0, 0)
-        option = QStyleOptionViewItem()
-        option.rect = editor.listWidget.visualRect(index)
-
-        captured = {}
-        base_paint = QStyledItemDelegate.paint
-
-        def probe(paint_self, painter, opt, idx):
-            captured["left"] = opt.rect.left()
-            base_paint(paint_self, painter, opt, idx)
-
-        monkeypatch.setattr(QStyledItemDelegate, "paint", probe)
-        delegate = editor._star_delegate
-        pm = QPixmap(option.rect.size())
-        painter = QPainter(pm)
-        try:
-            delegate.paint(painter, option, index)
-        finally:
-            painter.end()
-
-        assert captured.get("left") == option.rect.left() + _STAR_COL_W, (
-            f"文本区应右移 {_STAR_COL_W}px（星标保留区），实际 left={captured.get('left')}"
-        )
-
-    def test_delete_default_row_warns_and_switches_to_first(self, editor, monkeypatch):
-        """删默认行 → InfoBar 提示 + 默认切到首项"""
-        shown = _stub_infobar(monkeypatch)
-        editor.set_models(["m1", "m2", "m3"])
-        editor.setDefaultModel("m2")
-        editor.listWidget.setCurrentRow(1)  # m2
-
-        editor._delete_selected()
-
-        assert editor.get_models() == ["m1", "m3"]
-        assert editor.getDefaultModel() == "m1", "应切到首项"
-        assert any("已移除默认模型" in t for _, t, _ in shown), f"应有提示，实际 {shown}"
-        assert any("m1" in c for _, _, c in shown), "提示应写明新默认"
-
-    def test_clear_all_sets_default_empty(self, editor, monkeypatch):
-        """列表清空 → 默认置空串"""
-        _stub_infobar(monkeypatch)
-        editor.set_models(["only"])
-        editor.setDefaultModel("only")
+    def test_delete_row_clears_disabled_state(self, editor):
+        """删除行 = 移出主列表，关闭态随之清除（删除后回候选区可找回）"""
+        editor.set_models(["m1", "m2"])
+        editor._on_row_toggle("m1", False)
         editor.listWidget.setCurrentRow(0)
         editor._delete_selected()
+        assert editor.get_models() == ["m2"]
+        assert editor.get_disabled_models() == []
 
-        assert editor.get_models() == []
-        assert editor.getDefaultModel() == "", "空列表默认应为空串"
+    def test_construct_with_existing_disabled_list_shows_off(self, qapp):
+        """P0 回显红线：带存量「模型关闭列表」构造 → 对应行初始 Off"""
+        from app.widgets.model_list_edit_dialog import ModelListEditorWidget
 
-    def test_set_models_auto_defaults_when_missing(self, editor):
-        """迁移场景：装载后主列表非空但默认不在其中 → 自动设首项"""
-        editor._default_model = ""  # 模拟未设默认
-        editor.set_models(["x1", "x2"])
-        assert editor.getDefaultModel() == "x1"
+        w = ModelListEditorWidget(["m1", "m2", "m3"])
+        w.set_disabled_models(["m2"])
+        assert w._row_of("m2").switch.isChecked() is False, "存量关闭列表必须回显 Off"
+        assert w._row_of("m1").switch.isChecked() is True
+        assert w.get_disabled_models() == ["m2"]
 
-    def test_set_models_keeps_existing_default(self, editor):
-        """装载后默认仍在列表里 → 保持不变"""
-        editor._default_model = "x2"
-        editor.set_models(["x1", "x2"])
-        assert editor.getDefaultModel() == "x2"
+    def test_construct_member_not_in_disabled_list_shows_on(self, qapp):
+        """P0 回显补例：主列表存在但不在关闭列表 → 初始 On"""
+        from app.widgets.model_list_edit_dialog import ModelListEditorWidget
 
-    def test_non_default_delete_keeps_default(self, editor, monkeypatch):
-        """删非默认行 → 默认不变、无提示"""
-        shown = _stub_infobar(monkeypatch)
+        w = ModelListEditorWidget(["m1", "m2"])
+        w.set_disabled_models(["m2"])
+        assert w._row_of("m1").switch.isChecked() is True, "不在关闭列表的成员必须回显 On"
+
+    def test_disabled_model_not_in_candidates(self, editor):
+        """候选区自查：关闭模型在主列表 → 天然不进候选区（候选区排除主列表全员）"""
         editor.set_models(["m1", "m2"])
-        editor.setDefaultModel("m2")
-        editor.listWidget.setCurrentRow(0)  # m1（非默认）
+        editor._on_row_toggle("m1", False)
+        editor.refresh_candidates("某服务商", fetched_models=["m1", "m9"])
+        assert "m1" not in editor.get_candidate_models(), "关闭模型在主列表，不得进候选区"
+        assert "m9" in editor.get_candidate_models()
 
-        editor._delete_selected()
 
-        assert editor.getDefaultModel() == "m2"
-        assert shown == [], "非默认行删除不该弹提示"
+class TestDedupeAndRowWidth:
+    """P0：磁盘「模型列表」重复数据 → 写入源头唯一；行宽跟随 viewport 铺满"""
+
+    def test_set_models_dedupes_preserving_order(self, editor):
+        """set_models 重复项去重保序（磁盘存量重复不得入列表）"""
+        editor.set_models(["m2", "m1", "m2", "m3", "m1"])
+        assert editor.get_models() == ["m2", "m1", "m3"]
+        assert editor.listWidget.count() == 3, "重复行不得渲染"
+
+    def test_ctor_dedupes(self, qapp):
+        """构造入口同样去重（词典初始化漏一路的兜底）"""
+        from app.widgets.model_list_edit_dialog import ModelListEditorWidget
+
+        w = ModelListEditorWidget(["a", "b", "a"])
+        assert w.get_models() == ["a", "b"]
+
+    def test_row_widget_fills_viewport_width(self, qapp):
+        """行宽自适应：容器拉宽后行 widget 宽度跟随 viewport（铺满无空白）"""
+        from app.widgets.model_list_edit_dialog import ModelListEditorWidget
+
+        w = ModelListEditorWidget(["m1", "m2"])
+        w.resize(700, 300)
+        w.show()
+        qapp.processEvents()
+        w.resize(1400, 300)
+        qapp.processEvents()
+        vp_w = w.listWidget.viewport().width()
+        for i in range(w.listWidget.count()):
+            row = w.listWidget.itemWidget(w.listWidget.item(i))
+            assert row is not None
+            assert row.width() == vp_w, f"行 widget 应铺满 viewport（{row.width()} != {vp_w}）"
+        w.close()
 
 
 class TestEditorCandidates:
@@ -467,24 +485,10 @@ class TestApplyFetched:
         assert card.modelListEditor.get_models() == ["m1", "m2"]
 
     def test_merge_keeps_manual_models(self, card):
-        """merge：现有在前、新增去重追加"""
+        """merge：现有在前、新增去重追加（旧 default 断言随星标退役删除）"""
         card.modelListEditor.set_models(["manual-1", "remote-a"])
         card._apply_fetched(["remote-a", "remote-b"], mode="merge")
         assert card.modelListEditor.get_models() == ["manual-1", "remote-a", "remote-b"]
-
-    def test_replace_keeps_default_if_present(self, card):
-        """replace 后默认模型仍在列表里 → 保持不变"""
-        card.modelListEditor.set_models(["old-1", "old-2"])
-        card.modelListEditor.setDefaultModel("old-2")
-        card._apply_fetched(["x1", "old-2"], mode="replace")
-        assert card.modelListEditor.getDefaultModel() == "old-2"
-
-    def test_replace_sets_first_when_default_missing(self, card):
-        """replace 后默认不在新列表 → 自动切首项（编辑器内部校正）"""
-        card.modelListEditor.set_models(["old-1"])
-        card.modelListEditor.setDefaultModel("old-1")
-        card._apply_fetched(["new-1"], mode="replace")
-        assert card.modelListEditor.getDefaultModel() == "new-1"
 
 
 class TestFetchTupleUnpack:
@@ -538,16 +542,16 @@ class TestFetchSuccessInjectsCandidates:
         assert card._fetch_meta.get("ts")
 
     def test_default_missing_warns_but_keeps_list(self, card, monkeypatch):
-        """默认模型不在拉取结果 → 提示，但主列表与默认都不动"""
-        shown = _stub_infobar(monkeypatch)
-        card.modelListEditor.set_models(["old-1"])
-        card.modelListEditor.setDefaultModel("old-1")
+        """拉取结果含已关闭模型 → 仍进候选区（关闭模型不过滤，可找回）"""
+        _stub_infobar(monkeypatch)
+        card.modelListEditor.set_models(["keep-1"])
+        card.modelListEditor._on_row_toggle("old-1", False)
+        card.modelListEditor.set_models(["keep-1"])  # 重装模拟关闭行已移出主列表
 
-        card._on_fetch_success(["new-1", "new-2"])
+        card._on_fetch_success(["new-1", "old-1"])
 
-        assert card.modelListEditor.getDefaultModel() == "old-1", "不得静默改默认"
-        assert card.modelListEditor.get_models() == ["old-1"], "不得改主列表"
-        assert any("默认模型不在拉取结果中" in t for _, t, _ in shown), f"应有提示，实际 {shown}"
+        assert "old-1" in card.modelListEditor.get_candidate_models(), "关闭的模型不应被过滤出候选区"
+        assert card.modelListEditor.get_models() == ["keep-1"], "不得改主列表"
 
 
 class TestSaveEmptyConfirm:
@@ -609,11 +613,34 @@ class TestSaveEmptyConfirm:
         card._on_save()
         assert saved.get("info", {}).get("模型列表") == ["a", "b"]
 
-    def test_save_writes_default_model(self, card, monkeypatch):
-        """波8：保存时「模型名称」取编辑器默认模型（★）"""
+    def test_save_writes_model_name_auto_maintained(self, card, monkeypatch):
+        """P1-9：「模型名称」由 plan 自动维护——存档值不在启用列表 → 切启用首项"""
+        card.provider_info = {"模型名称": "b"}
         card.modelListEditor.set_models(["a", "b"])
-        card.modelListEditor.setDefaultModel("b")
+        card.modelListEditor._on_row_toggle("b", False)  # b 关闭 → 启用列表只剩 a
         saved = {}
         card.saved.connect(lambda name, info: saved.update(info=info))
         card._on_save()
-        assert saved.get("info", {}).get("模型名称") == "b"
+        info = saved.get("info", {})
+        assert info.get("模型名称") == "a", "存档值被关闭 → 自动切启用首项"
+        assert info.get("模型列表") == ["a", "b"], "存在性不动"
+        assert info.get("模型关闭列表") == ["b"], "关闭列表恒写"
+
+    def test_save_model_name_in_enabled_list_kept(self, card):
+        """存档值在启用列表 → 保持不变"""
+        card.provider_info = {"模型名称": "a"}
+        card.modelListEditor.set_models(["a", "b"])
+        saved = {}
+        card.saved.connect(lambda name, info: saved.update(info=info))
+        card._on_save()
+        assert saved.get("info", {}).get("模型名称") == "a"
+
+    def test_save_model_name_empty_list_cleared(self, card):
+        """启用列表空（全关/空表）→ 「模型名称」置空串"""
+        card.provider_info = {"模型名称": "a", "模型列表": ["a"]}
+        card.modelListEditor.set_models(["a"])
+        card.modelListEditor._on_row_toggle("a", False)
+        saved = {}
+        card.saved.connect(lambda name, info: saved.update(info=info))
+        card._on_save()
+        assert saved.get("info", {}).get("模型名称") == ""

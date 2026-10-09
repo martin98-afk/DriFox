@@ -18,10 +18,10 @@ from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
     get_caps_max_output_tokens,
-    get_model_capabilities,
     normalize_reasoning_effort,
     resolve_context_limit,
     resolve_max_output_tokens,
+    resolve_model_capabilities,
 )
 from app.core.conversation.message_content import extract_reasoning_delta
 from app.core.modelmeta.provider_profile import get_provider_profile
@@ -1039,10 +1039,11 @@ class SubAgentExecutor(QThread):
         if "max_tokens" in req_kwargs:
             req_kwargs["max_tokens"] = self._cap_max_output_tokens(model, req_kwargs["max_tokens"], config)
 
-        # 处理思考模式
+        # 处理思考模式（P1-9 批 d：能力查询走 resolve 链——声明_思考参数/
+        # 声明_思考强度非空时压制 caps/family 自动链；profile 兜底保留）
         thinking_mode = config.get("思考模式")
         if thinking_mode is not None:
-            caps = get_model_capabilities(model)
+            caps = resolve_model_capabilities(config)
             t_param = None
             enable_value = "enabled"
             if caps:

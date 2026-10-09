@@ -157,9 +157,8 @@ def test_form_keys_overwritten_by_new_values(card):
     cid = compute_provider_config_id(old_info)
     old_info["config_id"] = cid  # 编辑态必带：让 apply_provider_save 认作同一条目
     c = card(old_info)
-    # 波8：默认模型由编辑器「★」表示（setDefaultModel）
+    # P1-9：星标退役——新增模型经保存链自动维护「模型名称」（不在启用列表切首项）
     c.modelListEditor._add_tokens(["new-model"])
-    c.modelListEditor.setDefaultModel("new-model")
     c.configNameEdit.setText("新配置名")
 
     saved_providers = {cid: dict(old_info)}
@@ -168,7 +167,9 @@ def test_form_keys_overwritten_by_new_values(card):
 
     assert new_id == cid, "URL/KEY 未变，应原位更新同一条目"
     stored = saved_providers[cid]
-    assert stored["模型名称"] == "new-model", "表单值应覆盖旧值"
+    # P1-9：星标退役后「模型名称」自动维护三态——old-model 仍在启用列表
+    # （编辑器初始 test-model/old-model + 新增 new-model，全启用）→ 保持不变
+    assert stored["模型名称"] == "old-model", "存档模型仍在启用列表应保持"
     assert stored["name"] == "新配置名"
     assert stored["API_KEY"] == "sk-old"
     assert stored["API_URL"] == "https://api.example.com/v1"
@@ -207,7 +208,6 @@ def test_new_provider_save_does_not_raise(card):
     c = card({"API_URL": "", "API_KEY": "", "模型名称": ""}, is_new=True)
     c.apiKeyEdit.setText("sk-brand-new")
     c.modelListEditor.set_models(["test-model"])
-    c.modelListEditor.setDefaultModel("test-model")
 
     saved_providers = {}
     captured = _save(c)

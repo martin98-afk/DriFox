@@ -85,7 +85,12 @@ from app.core import (
 from app.core.conversation.message_content import _is_hook_message, strip_system_reminder
 from app.core.commands.builtin_commands import FunctionCommandHandlers
 from app.core.commands.command_manager import CommandManager, CommandType
-from app.core.modelmeta.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
+from app.core.modelmeta.model_capabilities import (
+    apply_model_defaults,
+    get_model_capabilities,
+    normalize_reasoning_effort,
+    resolve_model_capabilities,
+)
 from app.core.infra import memory_governor
 from app.core.infra.memory_governor import (
     _MAX_GLOBAL_RENDERED_PAGES,
@@ -2220,16 +2225,53 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同时避免鼠标/动画等高频事件长时间占住主线程）。
         QApplication.processEvents(QEventLoop.AllEvents, 5)
 
-    def _ensure_thinking_fields(self, config: dict):
-        """以 models.dev / 模型能力为准，确保思考字段与模型实际能力一致。
+    def _current_model_declared_capabilities(self) -> dict:
+        """读取当前模型的「声明_*」六键子集（来自 model_overrides，P1-9 批 b）。
 
+        供 apply_model_defaults(declared=...) 在 overrides 灌入 config 之前
+        感知声明（思考摘除/补值判定需要它）。键缺失 = 未声明，原行为。
+        """
+        from app.core.modelmeta.model_capabilities import DECLARED_CAPABILITY_KEYS
+
+        declared: dict = {}
+        model_overrides = getattr(self.cfg, "llm_model_overrides", None)
+        if not model_overrides or not self._current_model_name:
+            return declared
+        override_data = model_overrides.value or {}
+        overrides = None
+        if self._current_provider_name:
+            pname = self._valid_configs.get(self._current_provider_name, {}).get(
+                "provider_name", self._current_provider_name
+            )
+            overrides = override_data.get(f"{pname}||{self._current_model_name}")
+        # 向后兼容：旧格式（纯模型名）兑底
+        if overrides is None:
+            overrides = override_data.get(self._current_model_name, {})
+        if overrides:
+            for key in DECLARED_CAPABILITY_KEYS:
+                if key in overrides:
+                    declared[key] = overrides[key]
+        return declared
+
+    def _ensure_thinking_fields(self, config: dict):
+        """以声明层 / 模型能力为准，确保思考字段与实际能力一致（effective 判定）。
+
+        effective 规则（P1-9 批 b）：config["声明_支持思考"] 非空 → 以声明为准
+        （不摘不补）；未声明 → 查 caps（带 provider 走分区精确查，防同名模型串味）。
         在 model_overrides 叠加后调用，防止旧覆盖数据回补思考字段。
         """
         if not self._current_model_name:
             return
+        if config.get("声明_支持思考") not in (None, ""):
+            return  # 声明优先：用户显式声明思考能力，caps 不得反向覆盖
         from app.core.modelmeta.model_capabilities import get_model_capabilities
 
-        caps = get_model_capabilities(self._current_model_name)
+        provider = ""
+        if self._current_provider_name:
+            provider = self._valid_configs.get(self._current_provider_name, {}).get(
+                "provider_name", self._current_provider_name
+            )
+        caps = get_model_capabilities(self._current_model_name, provider)
         if not caps.get("supports_thinking", False):
             config.pop("思考模式", None)
             config.pop("思考等级", None)
@@ -2259,7 +2301,10 @@ class OpenAIChatToolWindow(ToolWindow):
             if self._current_model_name:
                 config["模型名称"] = self._current_model_name
             # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 providers 插件的部分默认值）
-            config = apply_model_defaults(config, self._current_model_name)
+            # declared 提前传声明子集：overrides 在下方才 update（P1-9 批 b effective 时序）
+            config = apply_model_defaults(
+                config, self._current_model_name, declared=self._current_model_declared_capabilities()
+            )
             # 叠加用户按模型名覆盖的参数（最高优先级）
             # key = "服务商名||模型名"，按服务商隔离同名模型
             model_overrides = getattr(self.cfg, "llm_model_overrides", None)
@@ -6496,7 +6541,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return None
 
     def _get_model_list_for_provider(self, provider: str) -> List[str]:
-        """获取指定服务商的模型列表（供模糊匹配用）"""
+        """获取指定服务商的模型列表（供模糊匹配用；滤除「模型关闭列表」）"""
+        from app.core.modelmeta.provider_save_plan import filter_disabled_models
+
         config = self._valid_configs.get(provider, {})
         model_list = config.get("模型列表", [])
         if isinstance(model_list, str):
@@ -6516,6 +6563,8 @@ class OpenAIChatToolWindow(ToolWindow):
             merged = get_merged_provider_models()
             if pname in merged:
                 model_list = list(merged[pname])
+        # 关闭的模型不参与匹配（P1-9）；当前选中模型豁免（正被使用，insert 在滤后）
+        model_list = filter_disabled_models(model_list, config)
         # 也把当前选中的模型加进去（万一不在列表里）
         current = config.get("模型名称", "")
         if current and current not in model_list:
@@ -7199,6 +7248,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     model_list = list(merged_provider_models[pname])
             elif pname in merged_provider_models:
                 model_list = list(merged_provider_models[pname])
+            # 关闭的模型不在选择卡片显示（P1-9 OpenCode 风格清单；仍在「模型列表」）
+            from app.core.modelmeta.provider_save_plan import filter_disabled_models
+
+            model_list = filter_disabled_models(model_list, config)
             cur_model = config.get("模型名称", "")
             if cur_model and cur_model not in model_list:
                 model_list.insert(0, cur_model)
@@ -8637,7 +8690,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 叠加模型默认值（三层兜底：硬编码 > 模型能力 > 已有配置）
         # 当服务商不在 providers 插件（自定义服务商）时，温度/top_p 等参数仍能有合理默认值
-        config = apply_model_defaults(config, self._current_model_name)
+        # declared 提前传声明子集：overrides 在下方才 update（P1-9 批 b effective 时序）
+        config = apply_model_defaults(
+            config, self._current_model_name, declared=self._current_model_declared_capabilities()
+        )
 
         # 叠加用户按模型名保存的覆盖值（最高优先级）
         # 按「服务商名||模型名」隔离同名模型
@@ -18322,9 +18378,9 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 检查当前模型是否支持视觉
+        # 检查当前模型是否支持视觉（effective：声明_支持图像非空时以声明为准，P1-9 批 d）
         _model_name = str(llm_config.get("模型名称", "") or "")
-        _model_caps = get_model_capabilities(_model_name)
+        _model_caps = resolve_model_capabilities(llm_config)
         _supports_vision = bool(_model_caps.get("supports_vision"))
 
         # ---- 拼接附件路径到用户文本 + 图片附件处理 ----
