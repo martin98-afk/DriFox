@@ -34,12 +34,24 @@ PARAM_SCHEMA = {
         "order": 300,
         "hide_in_card": True,  # "温度" 的别名
     },
+    # P1-21：「最大Token」只作**上下文窗口**（不再直发 max_tokens）。
+    # api_param 保留 max_tokens 是历史字段名兼容，发送侧已改为只读「最大输出」。
     "最大Token": {
         "display_name": "上下文长度",
         "ui_type": "spinbox",
         "range": {"min": 1, "max": 99999999, "step": 1, "type": "int"},
         "api_param": "max_tokens",
         "order": 100,
+    },
+    # P1-21 语义拆分：输出上限独立成键（旧「最大Token」一键双语义——既当上下文
+    # 窗口又直接当 max_tokens 发出——已被拆开）。api_param 必须为 max_tokens，
+    # 这是发送链识别它的唯一依据（subagent 通配分支按 api_param 收集请求参数）。
+    "最大输出": {
+        "display_name": "最大输出",
+        "ui_type": "spinbox",
+        "range": {"min": 1, "max": 99999999, "step": 1, "type": "int"},
+        "api_param": "max_tokens",
+        "order": 101,
     },
     "上下文长度": {
         "display_name": "上下文长度",

@@ -19,6 +19,15 @@ from qfluentwidgets import IconWidget, ScrollArea
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.capability_badges import (
+    ALL_BADGES,
+    BADGE_EFFORT,
+    BADGE_THINKING,
+    BADGE_VISION,
+    ModelCapabilityBadges,
+    build_capability_tooltip,
+    effort_values_of,
+)
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 
 
@@ -48,39 +57,9 @@ def _measure_name_width(names) -> int:
     return (max(widths) if widths else 0) + 12
 
 
-def _lighten_hex(hex_color: str, amount: float) -> str:
-    """将 6 位 hex 颜色向白色提亮 amount（0~1），用于深色底上的标签文字更醒目。"""
-    h = hex_color.lstrip("#")
-    if len(h) != 6:
-        return hex_color
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    r = int(r + (255 - r) * amount)
-    g = int(g + (255 - g) * amount)
-    b = int(b + (255 - b) * amount)
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
-def _cap_badge_colors() -> Tuple[str, str, str, str, str, str]:
-    """能力徽章配色（开关思考 / 多模态 / 思考强度）。
-
-    深色主题下整体提亮——文字向白提亮、背景 alpha 略增，避免颜色在深底上显得过深；
-    浅色主题保持主题 token 原值（深色文字配合浅底，避免亮字看不清）。
-    返回：(think_text, think_bg, vision_text, vision_bg, effort_text, effort_bg)
-    """
-    Colors.refresh()
-    from app.utils.theme_manager import theme_manager
-
-    if theme_manager.is_light_theme():
-        return (
-            Colors.TAG_ORANGE_TEXT, "rgba(255,179,102,0.18)",
-            Colors.TAG_ACCENT_TEXT, "rgba(102,198,255,0.18)",
-            Colors.TAG_PURPLE_TEXT, "rgba(179,136,255,0.15)",
-        )
-    return (
-        _lighten_hex(Colors.TAG_ORANGE_TEXT, 0.22), "rgba(255,179,102,0.28)",
-        _lighten_hex(Colors.TAG_ACCENT_TEXT, 0.22), "rgba(102,198,255,0.28)",
-        _lighten_hex(Colors.TAG_PURPLE_TEXT, 0.22), "rgba(179,136,255,0.24)",
-    )
+# 能力徽章配色/组件已抽到 app/widgets/capability_badges.py（P2-13）。
+# _format_cost_number 与成本逻辑**故意留在本模块**：main_widget 跨文件 import 它，
+# 迁移会破坏既有引用（见设计卡 §6.17 红线）。
 
 
 # item 高度常量
@@ -149,8 +128,8 @@ class ModelItem(QWidget):
 
     clicked = pyqtSignal(str, str)  # provider_name, model_name
 
-    # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛 / 思考强度-紫）
-    # 颜色不再硬编码：由 _cap_badge_colors() 按主题明暗动态计算（深色提亮）。
+    # 能力徽章（文字胶囊：推理-琥珀 / 多模态-青靛 / 思考强度-紫）已抽到
+    # app/widgets/capability_badges.py（P2-13）；配色随主题明暗动态计算在组件内。
 
     def __init__(
         self,
@@ -182,8 +161,7 @@ class ModelItem(QWidget):
 
     def _effort_values(self) -> list:
         """思考强度可选值（models.dev reasoning_effort values，如 ["high","max"]）"""
-        values = self._caps.get("reasoning_effort_values")
-        return [str(v) for v in values] if values else []
+        return effort_values_of(self._caps)
 
     def _cost_text(self) -> str:
         """组装成本文本：{in}/{out}/{cache_read} · $/M。三值全无返回空串。"""
@@ -219,30 +197,11 @@ class ModelItem(QWidget):
             v = cost.get(key)
             if v is not None:
                 parts.append(f"{label}: {_format_cost_number(v)}")
-        # 能力信息
-        if self._caps.get("supports_thinking"):
-            parts.append("开关思考")
-        effort_values = self._effort_values()
-        if effort_values:
-            parts.append(f"思考强度: {'/'.join(effort_values)}")
-        if self._caps.get("supports_vision"):
-            parts.append("多模态")
+        # 能力信息（共用纯函数，与 main_widget 模型按钮 tooltip 同源）
+        cap_text = build_capability_tooltip(self._caps)
+        if cap_text:
+            parts.append(cap_text)
         return "  ".join(parts)
-
-    def _make_cap_badge(self, text: str, text_color: str, bg_color: str, tip: str) -> QLabel:
-        """构造能力徽章（文字胶囊，替换 emoji）"""
-        lbl = QLabel(text, self)
-        lbl.setStyleSheet(
-            f"color: {text_color};"
-            f"background-color: {bg_color};"
-            f"border-radius: 4px; padding: 0 6px 0 6px;"
-            f"font-weight: 600;"
-            f"{get_font_family_css()} {font_size_css(10)};"
-        )
-        lbl.setFixedHeight(18)
-        lbl.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        lbl.setToolTip(tip)
-        return lbl
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -256,11 +215,17 @@ class ModelItem(QWidget):
 
         # 模型名（第一位的文本；组内有 trailing 信息时固定宽度 = 组内最长名，成本列对齐）
         self.name_label = QLabel(self.model_name, self)
+        # ⚠ 掩码必须与下方 ModelCapabilityBadges 的 show 一致：此处判定「有无 trailing」
+        # 决定名称列是否定宽，算错会让整列对齐错乱（当前掩码 = ALL_BADGES 全显）
+        badges_shown = ALL_BADGES
         has_trailing = bool(
             self._cost_text()
-            or self._caps.get("supports_thinking")
-            or self._effort_values()
-            or self._caps.get("supports_vision")
+            or (
+                BADGE_THINKING in badges_shown
+                and self._caps.get("supports_thinking")
+            )
+            or (BADGE_EFFORT in badges_shown and self._effort_values())
+            or (BADGE_VISION in badges_shown and self._caps.get("supports_vision"))
             or self._note
         )
         if has_trailing and self._name_width:
@@ -287,26 +252,13 @@ class ModelItem(QWidget):
             layout.addWidget(self.cost_label, 0)
 
         # 能力徽章（交互：思考 / 多模态 / 思考强度），替换 emoji
-        # 颜色随主题明暗动态调整（深色主题下提亮，避免颜色在深底上显得过深）
-        (
-            think_text, think_bg,
-            vision_text, vision_bg,
-            effort_text_c, effort_bg,
-        ) = _cap_badge_colors()
-        if self._caps.get("supports_thinking"):
-            self.think_label = self._make_cap_badge("开关思考", think_text, think_bg, "支持思考开关")
-            layout.addWidget(self.think_label, 0)
-        # 思考强度徽章：模型有 reasoning_effort 可选值（如 high/max）→ 可调强度
-        effort_values = self._effort_values()
-        if effort_values:
-            effort_text = "/".join(effort_values)
-            self.effort_label = self._make_cap_badge(
-                "思考强度", effort_text_c, effort_bg, f"支持的思考强度: {effort_text}"
-            )
-            layout.addWidget(self.effort_label, 0)
-        if self._caps.get("supports_vision"):
-            self.vision_label = self._make_cap_badge("多模态", vision_text, vision_bg, "支持多模态输入")
-            layout.addWidget(self.vision_label, 0)
+        # 颜色随主题明暗动态调整的逻辑在组件内（capability_badges.cap_badge_colors）
+        self.cap_badges = ModelCapabilityBadges(self._caps, badges_shown, self)
+        layout.addWidget(self.cap_badges, 0)
+        # 兼容既有属性访问（测试/外部若按名字取徽章标签）
+        self.think_label = getattr(self.cap_badges, "think_label", None)
+        self.effort_label = getattr(self.cap_badges, "effort_label", None)
+        self.vision_label = getattr(self.cap_badges, "vision_label", None)
 
         # 描述 info（SVG question 图标，紧跟内容区，悬停显示完整描述）
         if self._note:

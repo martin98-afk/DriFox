@@ -145,9 +145,14 @@ class OpenAIChatTransport:
                 continue
             extra_body[en_key] = value
 
-        max_tokens = llm_config.get("最大Token")
-        if max_tokens is not None:
-            extra_body["max_tokens"] = cap_max_tokens(model, max_tokens) if callable(cap_max_tokens) else max_tokens
+        # P1-21 语义拆分：「最大输出」是唯一的输出上限键（api_param="max_tokens"）；
+        # 「最大Token」只作上下文窗口，不再直发。旧值不回退——用户没填「最大输出」
+        # 时不发 max_tokens，由服务端按模型默认处理（配合 worker 侧 caps 链兜底）。
+        max_output = llm_config.get("最大输出")
+        if max_output is not None:
+            extra_body["max_tokens"] = (
+                cap_max_tokens(model, max_output) if callable(cap_max_tokens) else max_output
+            )
 
         self._apply_thinking(extra_body, llm_config, model)
 
@@ -166,7 +171,9 @@ class OpenAIChatTransport:
         thinking_mode = llm_config.get("思考模式")
         if thinking_mode is None:
             return
-        caps = get_model_capabilities(model) or {}
+        # 带 provider 走分区精确查（同名模型跨服务商串味时取本服务商的能力）
+        provider = str(llm_config.get("provider_name", "") or "").strip()
+        caps = get_model_capabilities(model, provider) or {}
         t_param = caps.get("thinking_param")
         enable_value = caps.get("thinking_enable_value", "enabled")
         if not t_param:

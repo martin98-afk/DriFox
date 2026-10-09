@@ -16,10 +16,10 @@
 
 查找优先级（resolve_context_limit）：
     L1: 用户在 llm_config 显式填的最大Token / context_limit / 上下文长度
-    L2: models.dev 动态数据（覆盖 L3 同名 key）
-    L3: MODEL_CAPABILITIES[模型名].context_limit      ← 本模块硬编码
-    L4: providers 插件声明默认 最大Token       ← 服务商默认
-    L5: PROVIDER_CAPABILITIES[family].context_limit   ← family 兜底
+    L2: 模型能力（models.dev per-model，带 provider 走分区精确查；未命中降级
+        全局扁平索引，再未命中落到本模块硬编码 MODEL_CAPABILITIES）
+    L3: providers 插件声明默认 最大Token       ← 服务商默认
+    L4: family 能力（PROVIDER_CAPABILITIES[family].context_limit）  ← family 兜底
 
 get_model_capabilities 返回值的优先级：
     models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES
@@ -39,6 +39,10 @@ from app.core.modelmeta.provider_profile import get_provider_profile
 # 字段名候选（按这个顺序查 llm_config 里的显式值）
 # =============================================================================
 _CONTEXT_LIMIT_KEYS = ("最大Token", "context_limit", "上下文长度", "max_context_tokens")
+
+# 绝对输出上限兜底值（仅当插件未声明 absolute_limit **且** family 能力链也拿不到时生效）。
+# 语义：防止用户填出明显错误的极值（如 99999999）打爆请求。
+ABSOLUTE_FALLBACK_CEILING = 65536
 
 # 表示"关闭思考"的 reasoning_effort 取值：不参与默认等级选择，也不作为
 # 无效值的回退目标（models.dev 把 none/no_think 排在 values 首位，如
@@ -162,14 +166,6 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "supports_vision": True,
         "source": "models.dev",
         "note": "通义 Qwen3.6-Plus，2026-04-02 发布；API 格式同 DashScope 系",
-    },
-    "qwen3.5-plus": {
-        "context_limit": 128000,
-        "supports_thinking": True,
-        "thinking_param": "thinking",
-        "supports_vision": True,
-        "source": "inferred",
-        "note": "OpenCode Zen 提供；thinking 控制方式同 qwen3.6-plus",
     },
     "qwen3.7-max": {
         "context_limit": 1000000,
@@ -354,13 +350,65 @@ def _get_dynamic_model_capabilities(model_name: str) -> Optional[Dict[str, Any]]
         return None
 
 
-def get_model_capabilities(model_name: str) -> Dict[str, Any]:
+def _get_models_dev_map() -> Dict[str, str]:
+    """服务商名 → models.dev provider id（运行时读插件声明；失败返回空表）"""
+    try:
+        from app.plugins.registries.provider_registry import ProviderRegistry
+
+        return ProviderRegistry.get_instance().models_dev_map()
+    except Exception:
+        return {}
+
+
+def _get_partitioned_model_capabilities(model_name: str, provider: str) -> Optional[Dict[str, Any]]:
+    """按 (provider, model) 精确查 models.dev 分区索引；查不到返回 None。
+
+    分区索引是 provider_id → model_id → caps 的嵌套 dict（不合并），
+    先用插件声明的 models_dev_id 把服务商名换成 provider_id，再做两级精确匹配
+    （精确 → 小写，与扁平索引同款宽松度）。分区缺失（老缓存）或未命中 → None。
+    """
+    try:
+        from app.core.modelmeta.models_dev_sync import get_dynamic_models
+
+        dynamic = get_dynamic_models()
+        partitioned = getattr(dynamic, "model_capabilities_partitioned", None) or {}
+        if not partitioned:
+            return None
+        provider_id = _get_models_dev_map().get(provider, "")
+        if not provider_id:
+            return None
+        partition = partitioned.get(provider_id)
+        if not isinstance(partition, dict):
+            return None
+        name = model_name.strip()
+        found = partition.get(name)
+        if found is None:
+            found = partition.get(name.lower())
+        if found is None:
+            # 分区键大小写不一（models.dev 偶有大写混写）→ 做一次归一化扫描
+            lower = name.lower()
+            for key, value in partition.items():
+                if str(key).lower() == lower:
+                    found = value
+                    break
+        return found if isinstance(found, dict) else None
+    except Exception:
+        return None
+
+
+def get_model_capabilities(model_name: str, provider: str = "") -> Dict[str, Any]:
     """按模型名查表，返回能力 dict；查不到返回空 dict。
 
     匹配规则：先按 strip 后的精确匹配，再按小写精确匹配。
     优先级：models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES。
     动态数据更准确（可修正硬编码错误），同名 key 用动态值覆盖。
     硬编码独有的字段（如 thinking_enable_value）保留作为补充。
+
+    Args:
+        model_name: 模型名
+        provider: 服务商名（ProviderDef.name）。**给了就走 provider 维度的精确查**
+            （先查 models.dev 分区索引，命中即用该分区的 caps）；未命中或未给
+            则降级到原有的「全局扁平索引」行为。15 处既有调用不传该参 → 行为不变。
     """
     if not model_name:
         return {}
@@ -378,7 +426,12 @@ def get_model_capabilities(model_name: str) -> Dict[str, Any]:
             result = MODEL_CAPABILITIES[name_lower]
 
     # models.dev 动态数据覆盖硬编码（动态数据是唯一权威）
-    dynamic_caps = _get_dynamic_model_capabilities(name)
+    # 给了 provider → 先试分区精确查（同名模型跨服务商不串味）；未命中降级扁平查
+    dynamic_caps = None
+    if provider:
+        dynamic_caps = _get_partitioned_model_capabilities(name, provider)
+    if dynamic_caps is None:
+        dynamic_caps = _get_dynamic_model_capabilities(name)
     if dynamic_caps is not None:
         # models.dev 完全为准：思考相关字段（supports_thinking / thinking_param）
         # 直接用动态值，不与本地硬编码做 OR 拉回。
@@ -426,9 +479,9 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
 
     优先级（高 -> 低）：
         L1: llm_config 显式填的 最大Token / context_limit / 上下文长度 / max_context_tokens
-        L2: MODEL_CAPABILITIES[模型名].context_limit
+        L2: 模型能力（models.dev per-model，带 provider 精确查；降级链见模块 docstring）
         L3: providers 插件声明默认 最大Token
-        L4: PROVIDER_CAPABILITIES[family].context_limit（由 get_provider_profile 提供）
+        L4: family 能力（PROVIDER_CAPABILITIES[family].context_limit）
         兜底: default
 
     返回值始终 >= 1。
@@ -445,9 +498,10 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
             except (ValueError, TypeError):
                 continue
 
-    # L2: 模型名查表
+    # L2: 模型名查表（带 provider 走分区精确查，防同名模型跨服务商串味）
     model = str(llm_config.get("模型名称", "") or "").strip()
-    caps = get_model_capabilities(model)
+    provider_for_l2 = str(llm_config.get("provider_name", "") or "").strip()
+    caps = get_model_capabilities(model, provider_for_l2)
     if caps.get("context_limit"):
         try:
             return max(1, int(caps["context_limit"]))
@@ -478,18 +532,19 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
     """统一查找「最大输出 tokens」。
 
     优先级：
-        L1: llm_config 显式填的 最大新Token / max_tokens / max_output_tokens
-        L2: provider_profile.max_output_tokens
+        L1: llm_config 显式填的 最大输出 / 最大新Token / max_tokens / max_output_tokens
+        L2: 模型真实输出上限（models.dev caps.max_output_tokens，带 provider 分区精确查）
+        L3: provider_profile.max_output_tokens（family 级）
         兜底: default
 
-    注：api_param="max_tokens" 对应"最大输出 token 数"，schema 上把它 display_name
-    写成"上下文长度"是历史遗留问题（见 PARAM_SCHEMA.最大Token）。本函数读取的是
-    真实含义——输出上限。
+    语义拆分（P1-21）：「最大输出」是新键（api_param="max_tokens"），「最大Token」
+    只作上下文窗口，不再在这里被读成输出上限——旧行为把"最大Token"一键双语义，
+    用户填 200000（窗口）会被当 max_tokens 发出。
     """
     if not isinstance(llm_config, dict):
         return max(1, int(default))
 
-    for key in ("最大新Token", "max_tokens", "max_output_tokens"):
+    for key in ("最大输出", "最大新Token", "max_tokens", "max_output_tokens"):
         value = llm_config.get(key)
         if value not in (None, ""):
             try:
@@ -497,11 +552,49 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
             except (ValueError, TypeError):
                 continue
 
+    # L2: 模型真实输出上限（models.dev per-model，带 provider 走分区精确查）
+    model = str(llm_config.get("模型名称", "") or "").strip()
+    provider = str(llm_config.get("provider_name", "") or "").strip()
+    caps = get_model_capabilities(model, provider)
+    caps_max = caps.get("max_output_tokens")
+    if caps_max not in (None, ""):
+        try:
+            return max(1, int(caps_max))
+        except (ValueError, TypeError):
+            pass
+
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("max_output_tokens", default)))
     except (ValueError, TypeError):
         return max(1, int(default))
+
+
+def get_caps_max_output_tokens(model: str, llm_config: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """查模型真实输出上限（models.dev per-model 的 max_output_tokens）。
+
+    这是 `_cap_max_output_tokens` 的 L0 层数据源：命中即返回该上限（供
+    ``min(用户值, caps 上限)`` 使用），未命中返回 None 表示调用方应继续走
+    原有的 family / absolute_limit 链。
+
+    带 provider（llm_config["provider_name"]）时走分区精确查，防同名模型串味。
+
+    Returns:
+        正整数上限，或 None（无 caps 数据 / 值非法）。
+    """
+    if not model:
+        return None
+    cfg = llm_config or {}
+    provider = str(cfg.get("provider_name", "") or "").strip()
+    caps = get_model_capabilities(model, provider)
+    value = caps.get("max_output_tokens")
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, Any]:

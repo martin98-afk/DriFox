@@ -1126,6 +1126,12 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.infra.usage_service import UsageService
 
         self._reg_sig(UsageService.get_instance().coding_plan_ready, self._on_coding_plan_result)
+        # ★ 模型列表定时刷新（P1-12 / 波7）：进程级单例，跨窗口共一份 active 集。
+        # 首次调用须在主线程（QTimer 归属主线程）；active 集由配置重建。
+        from app.core.modelmeta.model_refresh_service import ModelRefreshService
+
+        self._reg_sig(ModelRefreshService.get_instance().refresh_finished, self._on_model_refresh_finished)
+        ModelRefreshService.get_instance().sync_from_config()
         # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
         self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：models.dev 动态数据后台刷新结果回主线程
@@ -7602,10 +7608,12 @@ class OpenAIChatToolWindow(ToolWindow):
             extra_parts = []
             if cost_parts:
                 extra_parts.append(" ".join(cost_parts) + " $/M")
-            if caps.get("supports_vision"):
-                extra_parts.append("多模态")
-            if caps.get("supports_thinking"):
-                extra_parts.append("开关思考")
+            # 能力段（与模型选择卡 tooltip 同源纯函数，避免两处判定漂移）
+            from app.widgets.capability_badges import build_capability_tooltip
+
+            cap_text = build_capability_tooltip(caps)
+            if cap_text:
+                extra_parts.append(cap_text)
             tooltip = f"{display} · {self._current_model_name}"
             if extra_parts:
                 tooltip += " · " + " ".join(extra_parts)
@@ -8018,6 +8026,39 @@ class OpenAIChatToolWindow(ToolWindow):
         cc = get_global_card_controller()
         if cc is not None:
             cc._on_provider_edit_saved(provider_name, provider_info, is_new)
+        # 保存后让定时刷新服务感知新配置（双开关 / 条目变更）。
+        # 先 invalidate 旧快照（服务商名/URL 可能被改），再全量 sync。
+        try:
+            from app.core.modelmeta.model_refresh_service import ModelRefreshService
+
+            svc = ModelRefreshService.get_instance()
+            config_id = str((provider_info or {}).get("config_id", "") or "")
+            if config_id:
+                svc.invalidate(config_id)
+            svc.sync_from_config(self.cfg.llm_saved_providers.value or {})
+        except Exception:
+            pass
+
+    def _on_model_refresh_finished(self, config_id: str, ok: bool, status: str, models: list):
+        """定时刷新完成回调（主线程）。
+
+        落盘由 ModelRefreshService._on_refresh_result 负责（它已持 cfg）；
+        本处只管 UI：本窗口若正在显示设置卡则刷新服务商列表（状态点 / 副标题）。
+        列表自身也会经 cfg valueChanged → `_refresh_items` 自动刷新，此处是
+        兜底（配置值未变时 valueChanged 不触发）。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            if (
+                hasattr(self, "_card_manager")
+                and self._card_manager.is_card_visible("settings", self._window_id)
+                and hasattr(self, "_settings_popup")
+                and hasattr(self._settings_popup, "llmProviderCard")
+            ):
+                self._settings_popup.llmProviderCard._refresh_items()
+        except Exception:
+            pass
 
     def _on_provider_edit_closed(self):
         """（委托全局卡片控制器 GlobalCardController）"""
@@ -8028,12 +8069,16 @@ class OpenAIChatToolWindow(ToolWindow):
             cc._on_provider_edit_closed()
 
     def _show_provider_add_card(self):
-        """（委托全局卡片控制器 GlobalCardController）"""
+        """（委托全局卡片控制器 GlobalCardController）
+
+        P1-7 起先开预置卡片墙（`_show_provider_picker_card`），由卡片墙决定
+        进「预置表单」还是「自定义表单」。
+        """
         from app.widgets.cards.global_card_controller import get_global_card_controller
 
         cc = get_global_card_controller()
         if cc is not None:
-            cc._show_provider_add_card()
+            cc._show_provider_picker_card()
 
     def _show_hook_add_card(self):
         """（委托全局卡片控制器 GlobalCardController）"""
@@ -9814,9 +9859,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """服务商配置变更时的回调（多窗口同步）
 
         当一个窗口添加/修改/删除了服务商，所有窗口都会收到此通知。
-        刷新本地 _valid_configs 并更新 UI。
+        刷新本地 _valid_configs 并更新 UI，并让定时刷新服务重建 active 集
+        （双开关被改 / 条目被增删都要即时反映）。
         """
         self._load_model_configs()
+        # 定时刷新服务：全量重建 active 集（幂等，内部只读配置）
+        try:
+            from app.core.modelmeta.model_refresh_service import ModelRefreshService
+
+            ModelRefreshService.get_instance().sync_from_config(self.cfg.llm_saved_providers.value or {})
+        except Exception:
+            pass
         # 如果设置卡片当前可见（同窗口），刷新服务商列表
         if (
             hasattr(self, "_card_manager")

@@ -34,7 +34,7 @@ from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 # key 在哪个元组里就归到哪个组；不在任何组里的会归到"其他"（一般不会出现）
 # =============================================================================
 _FIELD_GROUPS = [
-    ("上下文", ("最大Token", "上下文长度")),
+    ("上下文", ("最大Token", "上下文长度", "最大输出")),
     ("思考",   ("思考模式", "思考预算", "思考等级")),
     ("采样",   ("温度", "temp", "top_p", "max_new_tokens")),
 ]

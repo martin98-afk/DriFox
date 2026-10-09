@@ -48,7 +48,12 @@ _PLUGIN_CODE_ERRORS = (AttributeError, NameError, TypeError, KeyError, ImportErr
 from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
-from app.core.modelmeta.model_capabilities import get_model_capabilities, normalize_reasoning_effort
+from app.core.modelmeta.model_capabilities import (
+    ABSOLUTE_FALLBACK_CEILING,
+    get_caps_max_output_tokens,
+    get_model_capabilities,
+    normalize_reasoning_effort,
+)
 from app.core.modelmeta.provider_profile import get_provider_profile
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.core.infra.token_estimator import count_messages_tokens
@@ -1930,9 +1935,10 @@ class OpenAIChatWorker(QThread):
             kwargs["reasoning"] = {"effort": "none"}
 
         # 最大输出 token（复用 chat 分支的上限保护）
-        max_tokens = self.llm_config.get("最大Token")
-        if max_tokens is not None:
-            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_tokens)
+        # P1-21：「最大输出」为唯一输出上限键；用户没填则不传，由服务端默认
+        max_output = self.llm_config.get("最大输出")
+        if max_output is not None:
+            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_output)
 
         # 会话标识
         if self.session_id:
@@ -3690,6 +3696,13 @@ class OpenAIChatWorker(QThread):
         except Exception:
             return requested
 
+        # 0. 模型真实输出上限优先（models.dev per-model，带 provider 走分区精确查）：
+        #    命中即用 min(用户值, caps 上限)；用户未设（<=0）则直接用 caps 上限。
+        #    这一层接通了此前被 family 级 8192/65536 覆盖掉的 per-model 真实上限。
+        caps_max = get_caps_max_output_tokens(model, self.llm_config)
+        if caps_max is not None:
+            return caps_max if requested_int <= 0 else min(requested_int, caps_max)
+
         profile = get_provider_profile(self.llm_config)
 
         # 1. 如果用户没有设置或设置值 <= 0，使用 provider 默认值
@@ -3697,7 +3710,8 @@ class OpenAIChatWorker(QThread):
             return int(profile.get("max_output_tokens", 8192))
 
         # 2. 获取绝对上限（防止用户设置极端值）
-        absolute_limit = int(profile.get("absolute_limit", 65536))
+        #    插件声明的 absolute_limit 优先；两级都缺失时才用兜底常量
+        absolute_limit = int(profile.get("absolute_limit") or ABSOLUTE_FALLBACK_CEILING)
 
         # 3. 针对特定模型系列的软限制（仅当用户设置值超出时才生效）
         family = profile.get("family", "")

@@ -1,6 +1,28 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [未发布]
+
+### ⚠️ 行为变化 (Breaking Changes)
+
+- **「最大Token」不再直接作为 API 输出上限发出** (`app/constants.py`, `app/core/modelmeta/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`, `plugins/system-transports/transports/openai_chat.py`): 该配置项语义收敛为**上下文窗口**（此前一键双语义：既当窗口又直接当 `max_tokens` 发出）。新增独立配置项「最大输出」承担输出上限语义，发送链只读它。
+
+  **存量用户影响**：此前「最大Token」= 4096 之类的值会被直接当输出上限发送；现在该键不再进入请求，输出上限改由「最大输出」（用户填）→ 模型真实上限（models.dev per-model）→ 服务商 family 级 默认值 的链路决定。**若你此前依赖「最大Token」控制输出长度，请在模型配置卡「上下文」组填写「最大输出」**。未填「最大输出」时不发送 `max_tokens`，由服务端按模型默认处理（等价于放开原有限制）。
+
+- **per-model 输出上限接通，模型输出能力不再被 family 级截断** (`app/core/modelmeta/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`): 此前 61 个模型的真实输出上限被 family 级默认值（8192 / 65536）覆盖，最高折损 74%（如 space-bunny 524288、MiniMax-M3 512000、grok-4.7 500000 被压到 65536）。现在读取 models.dev 的 per-model `max_output_tokens`：发送值 = `min(用户「最大输出」, 模型真实上限)`；用户未填则用模型真实上限。全局兜底常量更名为 `ABSOLUTE_FALLBACK_CEILING`（65536），仅在插件与 family 两级都缺失时生效。
+
+- **SiliconFlow 能力族判定修正** (`app/core/modelmeta/provider_profile.py`): family 探测新增「插件声明优先」层。SiliconFlow 的默认模型为 `deepseek-ai/DeepSeek-R1` 且模型池含大量 `deepseek-ai/*`，此前被原 if 链的模型名前缀规则误判为 `deepseek` 族，套用了 DeepSeek 的能力参数（上下文窗口 / 输出上限 / 思考控制方式均不符）。现按其插件声明的 `siliconflow` 族取参。
+
+### ✨ 新功能 (New Features)
+
+- **服务商配置体验优化**（P0 批次）: 服务商列表新增搜索框（150ms 防抖，按显示名 / 服务商名 / 模型名过滤）与四组分组渲染（OAuth / Coding Plan / 本地 / API，判据全部来自插件声明）；编辑保存不再丢弃非白名单字段（未知键保留），用户清空的字段不再被旧值合并复活。
+
+- **认证方式 / URL 预设 / 能力族统一走插件声明** (`app/utils/provider_ui_meta.py` 新增): 新增取值基座（`get_auth_type` / `get_preset_urls` / `get_family`），消除 UI 层三条硬编码链与 providers 插件声明的双源漂移。修复百度千帆（`auth_type="bce"`）此前无法通过 UI 正确配置的问题；火山方舟 URL 预设对齐插件声明的 `api/coding/v3`。
+
+- **models.dev 数据按 provider 分区索引** (`app/core/modelmeta/models_dev_sync.py`, `app/core/modelmeta/model_capabilities.py`): 新增 provider 维度的嵌套能力索引（不合并），同名模型跨服务商不再串味（此前 kimi-k2.5 在 moonshotai / opencode-go 之间会走「取更支持者」的合并，导致 A 家模型被 B 家元数据抬升）。带 provider 时走精确查，未命中降级原扁平索引；老缓存（无分区键）自动降级不报错。
+
+- **配置迁移基建** (`app/utils/config.py`): 新增 `_MIGRATIONS` 注册表与 `_run_migrations`，迁移项串行执行、单项异常隔离（不中断启动，仅记日志）。
+
 ## [v0.6.5] - 2026-10-08
 
 自上一版本以来的变更 | 提交数：19 · 文件变更：64 · +4847/-2575 | 贡献者：dingma, mading

@@ -48,7 +48,7 @@ def get_auth_type(provider_name: str, saved_auth_type: str = "") -> str:
 
 
 def get_preset_urls(provider_name: str) -> List[str]:
-    """解析服务商预设 API URL 列表：插件 preset_urls → [api_url] → 默认配置 → []。
+    """解析服务商预设 API URL 列表：插件 preset_urls → [api_url] → []。
 
     返回的列表已去重且保序（插件声明序），可直接喂给 URL 下拉框。
     """
@@ -60,17 +60,7 @@ def get_preset_urls(provider_name: str) -> List[str]:
         logger.debug(f"[provider_ui_meta] get_preset_urls 查注册表失败 provider={provider_name!r}: {e}")
         p = None
     if p is None:
-        # 第三层：未注册名（历史别名 / 老配置里的旧服务商名）回退默认配置入口，
-        # 拿不到就空列表。容错优先，绝不抛异常。
-        try:
-            from app.constants import provider_default_config
-
-            cfg = provider_default_config(provider_name) or {}
-        except Exception as e:
-            logger.debug(f"[provider_ui_meta] get_preset_urls 回退默认配置失败 provider={provider_name!r}: {e}")
-            cfg = {}
-        url = str(cfg.get("API_URL", "") or "").strip()
-        return [url] if url else []
+        return []
 
     # strip 后滤空：与 fallback 分支口径一致（声明里可能混入空白串）
     urls: List[str] = [u.strip() for u in (getattr(p, "preset_urls", None) or []) if str(u or "").strip()]

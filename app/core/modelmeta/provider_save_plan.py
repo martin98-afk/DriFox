@@ -31,7 +31,9 @@ def build_provider_save_plan(
 
     Args:
         form_values: 表单当前值，键为 ``api_url`` / ``api_key`` / ``model`` /
-            ``auth_type`` / ``name`` / ``models``（models 为模型名列表）
+            ``auth_type`` / ``name`` / ``models``（models 为模型名列表）/
+            ``auto_refresh`` / ``health_check``（bool，双开关；缺省视作 False）/
+            ``fetch_meta``（可选，``{"ts": str, "status": str}`` 手动刷新结果）
         old_info: 编辑前的 provider_info（用于取 ``config_id`` 与 ``模型列表``）
         extra_fields: 套餐用量等额外字段的当前值（**含空串**；空串是显式清空）
 
@@ -41,7 +43,9 @@ def build_provider_save_plan(
         - ``confirm_clear``：用户清空了模型列表而旧列表非空 → 调用方需弹确认框。
         - ``payload``：交给 ``apply_provider_save`` 的 provider_info。五键恒存在
           （含空串 = 显式清空）；``config_id`` 仅在旧配置有时写入；``模型列表``
-          恒写入（空列表同样是显式值）；``extra_fields`` 覆盖同键。
+          恒写入（空列表同样是显式值）；**两个开关恒写 bool（含 False = 显式关）**；
+          ``fetch_meta`` 携带时写「上次模型刷新」+「模型刷新状态」；
+          ``extra_fields`` 覆盖同键。
     """
     models: List[str] = list(form_values.get("models") or [])
     old_models = old_info.get("模型列表") or []
@@ -62,6 +66,20 @@ def build_provider_save_plan(
 
     # 模型列表恒写入：空列表 = 用户在确认框里确认过的清空意图
     payload["模型列表"] = models
+
+    # 双开关恒写 bool（显式 False 同样要写入，否则关不掉）
+    payload["自动刷新模型"] = bool(form_values.get("auto_refresh", False))
+    payload["健康检查"] = bool(form_values.get("health_check", False))
+
+    # 手动刷新的状态元数据（有则随保存落盘，供列表行状态点 / 上次刷新时间显示）
+    fetch_meta = form_values.get("fetch_meta") or {}
+    if isinstance(fetch_meta, dict) and fetch_meta:
+        ts = str(fetch_meta.get("ts", "") or "")
+        status = str(fetch_meta.get("status", "") or "")
+        if ts:
+            payload["上次模型刷新"] = ts
+        if status:
+            payload["模型刷新状态"] = status
 
     # 额外字段覆盖同键（空串同样覆盖 → 清空生效）
     payload.update(extra_fields)

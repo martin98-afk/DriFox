@@ -58,6 +58,8 @@ class GlobalCardController:
         # 若不加保护，会在 _settings_popup 赋值前递归构建多张设置卡（P024：重叠显示）。
         self._settings_popup_building = False
         self._provider_edit_card = None
+        self._provider_picker_card = None
+        self._provider_picker_popup = None
         self._hook_edit_card = None
         self._mcp_edit_card = None
         self._provider_edit_popup = None
@@ -283,15 +285,58 @@ class GlobalCardController:
         )
         self._global_card_container.add_card("provider_edit", self._provider_edit_card)
 
-    def _show_provider_add_card(self):
-        """显示添加服务商卡片"""
+    def _ensure_provider_picker_card(self):
+        """确保服务商预置卡片墙已创建并注册（P1-7，懒构建）"""
+        if self._provider_picker_card is not None:
+            return
+        from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+        from app.widgets.cards.settings.provider_picker_card import ProviderPickerCard
+
+        self._provider_picker_card = BaseSettingsCard("添加服务商", icon_svg="大模型", parent=self._tab_manager)
+        self._provider_picker_card.setMinimumHeight(300)
+        self._provider_picker_card.set_height_mode("content")
+        self._provider_picker_popup = ProviderPickerCard(parent=self._provider_picker_card)
+        # 点预置卡 → 带预置参数进编辑表单；点「自定义」→ 原手工表单
+        self._provider_picker_popup.providerPicked.connect(self._show_provider_preset_card)
+        self._provider_picker_popup.customPicked.connect(self._show_provider_custom_card)
+        self._provider_picker_card.content_layout.addWidget(self._provider_picker_popup)
+        self._provider_picker_card.setVisible(False)
+        mgr = self._card_manager
+        mgr.register_card(
+            GLOBAL_WINDOW_ID, ContainerType.TOP, "provider_picker", self._provider_picker_card, system_card=True
+        )
+        self._global_card_container.add_card("provider_picker", self._provider_picker_card)
+
+    def _show_provider_picker_card(self):
+        """显示服务商预置卡片墙（添加服务商的统一入口）"""
+        self._ensure_provider_picker_card()
+        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
+        self._card_manager.show_card("provider_picker", GLOBAL_WINDOW_ID)
+
+    def _show_provider_preset_card(self, provider_name: str):
+        """卡片墙选中某服务商 → 带预置参数进编辑表单（只补 API_KEY）"""
+        self._show_provider_edit_card_for_new(preset_provider=provider_name)
+
+    def _show_provider_custom_card(self):
+        """「自定义服务商」→ 原手工表单（全参数自填）"""
+        self._show_provider_edit_card_for_new(preset_provider="")
+
+    def _show_provider_edit_card_for_new(self, preset_provider: str = ""):
+        """新建服务商表单（preset_provider 非空时锁定服务商并预填）"""
         from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 
         self._ensure_provider_edit_card()
+        if self._provider_picker_card is not None:
+            self._card_manager.hide_card("provider_picker", GLOBAL_WINDOW_ID)
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._provider_edit_card.set_title("添加服务商", icon_svg="大模型")
+        title = f"添加: {preset_provider}" if preset_provider else "添加服务商"
+        self._provider_edit_card.set_title(title, icon_svg="大模型")
         self._provider_edit_popup = ProviderEditCard(
-            provider_name="", provider_info={}, is_new=True, parent=self._provider_edit_card
+            provider_name="",
+            provider_info={},
+            is_new=True,
+            parent=self._provider_edit_card,
+            preset_provider=preset_provider,
         )
         self._provider_edit_popup.saved.connect(
             lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
@@ -307,6 +352,10 @@ class GlobalCardController:
 
         apply_font_size_to_widget(self._provider_edit_popup, 14)
         self._card_manager.show_card("provider_edit", GLOBAL_WINDOW_ID)
+
+    def _show_provider_add_card(self):
+        """显示添加服务商卡片（P1-7 起先走卡片墙）"""
+        self._show_provider_picker_card()
 
     def _show_provider_edit_card(self, config_id: str, provider_info: dict):
         """显示编辑服务商卡片"""

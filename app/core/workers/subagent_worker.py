@@ -16,6 +16,8 @@ from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.core.modelmeta.model_capabilities import (
+    ABSOLUTE_FALLBACK_CEILING,
+    get_caps_max_output_tokens,
     get_model_capabilities,
     normalize_reasoning_effort,
     resolve_context_limit,
@@ -31,6 +33,11 @@ from app.tools.result import ToolResult
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
 _TOOL_TAG_PATTERN = re.compile(r"<tool>[\s\S]*?</tool>")  # 过滤工具调用标签
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标识符格式
+
+# 仅作「上下文窗口」语义的键（P1-21 语义拆分后不再作为输出上限发出）。
+# 这些键的 api_param 也是 "max_tokens"（历史字段名），若不排除会在通配分支里
+# 与「最大输出」抢同一个 req_kwargs["max_tokens"]（按 dict 迭代序覆盖）。
+_CONTEXT_WINDOW_ONLY_KEYS = frozenset({"最大Token", "上下文长度"})
 
 # ========== 上下文注入预算常量 ==========
 CHARS_PER_TOKEN = 4  # 与 HistoryCompactor 保持一致
@@ -1018,6 +1025,12 @@ class SubAgentExecutor(QThread):
                 en_key = cn_key
             if not en_key:
                 continue
+            # P1-21 语义拆分收尾：四个键共享 api_param="max_tokens"（最大Token /
+            # 最大输出 / 上下文长度 / max_new_tokens），通配分支按 dict 迭代序赋值
+            # → 后迭代者覆盖先者，窗口值（最大Token/上下文长度）会顶掉输出值。
+            # 这里跳过窗口语义的两个键，只让「最大输出」（及英文同义键）进 max_tokens。
+            if cn_key in _CONTEXT_WINDOW_ONLY_KEYS:
+                continue
             elif en_key in ["temperature", "max_tokens", "top_p"]:
                 req_kwargs[en_key] = value
             else:
@@ -1196,9 +1209,10 @@ class SubAgentExecutor(QThread):
         elif thinking_mode is False:
             kwargs["reasoning"] = {"effort": "none"}
 
-        max_tokens = config.get("最大Token")
-        if max_tokens is not None:
-            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_tokens, config)
+        # P1-21：「最大输出」为唯一输出上限键（与 chat_worker responses 分支同源）
+        max_output = config.get("最大输出")
+        if max_output is not None:
+            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_output, config)
 
         task_session_id = getattr(self, "_task_session_id", None)
         if task_session_id:
@@ -1305,6 +1319,13 @@ class SubAgentExecutor(QThread):
             return requested
 
         config = llm_config if llm_config is not None else self.llm_config
+
+        # 0. 模型真实输出上限优先（与 chat_worker._cap_max_output_tokens 同源同序，
+        #    两处漏改 = 主对话与子智能体输出上限分叉）
+        caps_max = get_caps_max_output_tokens(model, config)
+        if caps_max is not None:
+            return caps_max if requested_int <= 0 else min(requested_int, caps_max)
+
         profile = get_provider_profile(config)
 
         # 1. 如果用户没有设置或设置值 <= 0，使用 provider 默认值
@@ -1312,7 +1333,8 @@ class SubAgentExecutor(QThread):
             return int(profile.get("max_output_tokens", 8192))
 
         # 2. 获取绝对上限（防止用户设置极端值）
-        absolute_limit = int(profile.get("absolute_limit", 65536))
+        #    插件声明的 absolute_limit 优先；两级都缺失时才用兜底常量
+        absolute_limit = int(profile.get("absolute_limit") or ABSOLUTE_FALLBACK_CEILING)
 
         # 3. 针对特定模型系列的软限制（仅当用户设置值超出时才生效）
         family = profile.get("family", "")

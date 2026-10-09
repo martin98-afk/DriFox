@@ -164,3 +164,45 @@ def test_collect_extra_fields_strips_values():
     rows = {("目标服务商", "cookie"): (None, "e1")}
     out = collect_extra_fields("目标服务商", rows.items(), lambda a: _FakeEditor("  abc  "))
     assert out == {"cookie": "abc"}
+
+
+# ══════════════════════════════════════════════════════════════════
+# 双开关 + fetch_meta（波7）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_payload_writes_both_switches_always():
+    """双开关恒写 bool：True/False 都要写入（False = 显式关，缺键则关不掉）"""
+    on = build_provider_save_plan(_form(auto_refresh=True, health_check=False), {}, {})["payload"]
+    assert on["自动刷新模型"] is True
+    assert on["健康检查"] is False
+
+    off = build_provider_save_plan(_form(), {}, {})["payload"]
+    assert off["自动刷新模型"] is False
+    assert off["健康检查"] is False
+
+
+def test_payload_carries_fetch_meta_when_present():
+    """手动刷新元数据携带时 → 写「上次模型刷新」+「模型刷新状态」"""
+    payload = build_provider_save_plan(
+        _form(fetch_meta={"ts": "2026-10-09 12:00:00", "status": "ok"}),
+        {},
+        {},
+    )["payload"]
+    assert payload["上次模型刷新"] == "2026-10-09 12:00:00"
+    assert payload["模型刷新状态"] == "ok"
+
+
+def test_payload_omits_fetch_meta_when_absent():
+    """未刷过（无 meta / 空 dict）→ 不写这两个键（不覆盖旧值）"""
+    for meta in ({}, None):
+        payload = build_provider_save_plan(_form(fetch_meta=meta), {}, {})["payload"]
+        assert "上次模型刷新" not in payload
+        assert "模型刷新状态" not in payload
+
+
+def test_payload_partial_fetch_meta():
+    """meta 只有 ts（status 缺失）→ 只写时间戳，不写状态"""
+    payload = build_provider_save_plan(_form(fetch_meta={"ts": "2026-10-09 12:00:00"}), {}, {})["payload"]
+    assert payload["上次模型刷新"] == "2026-10-09 12:00:00"
+    assert "模型刷新状态" not in payload
