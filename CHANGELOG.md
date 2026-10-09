@@ -23,9 +23,9 @@ All notable changes to this project will be documented in this file.
 
 - **配置迁移基建** (`app/utils/config.py`): 新增 `_MIGRATIONS` 注册表与 `_run_migrations`，迁移项串行执行、单项异常隔离（不中断启动，仅记日志）。
 
-## [v0.6.5] - 2026-10-08 (重新发布)
+## [v0.6.5] - 2026-10-08 (重新发布 #2)
 
-自上一版本以来的变更（累计） | 提交数：36 · 文件变更：168 · +16129/-4362 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更（累计） | 提交数：37 · 文件变更：169 · +16149/-4364 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -98,6 +98,8 @@ All notable changes to this project will be documented in this file.
 - 版本号升级至 v0.6.5（pyproject.toml / config.py / installer.iss / README）(`b1168b74`)
 - 许可证由 MIT 切换为 GPL-3.0-or-later (`bc66eff9`, `09b7ff93`)
 - marketplace 自动再生成自 plugin.json (`db8df443`)
+### 🐛 问题修复 (Bug Fixes) (重新发布 #2 追加)
+- **历史面板项目选择列表行对齐修复** (`a36ec0ce`): `_ensure_item_signals` 末尾的 `addStretch(1)` 被逐行调用，N 个项目 = N 个弹簧夹在行间平分剩余空间，展开面板后项目行被均匀撒开（首行悬中、末行沉底）。弹簧改为列表重建完成后追加一次，并加静态回归守卫。
 
 ## [v0.6.4] - 2026-09-28 (重新发布 #2)
 
