@@ -42,7 +42,7 @@ REPO_DESCRIPTION = (
 )
 REPO_URL = "https://github.com/martin98-afk/DriFox"
 DEFAULT_REF = "master"
-DEFAULT_LICENSE = "MIT"
+DEFAULT_LICENSE = "GPL-3.0-or-later"
 
 # ============================================================
 # 输出样式
