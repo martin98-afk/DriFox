@@ -8,7 +8,7 @@
             "description": "智能体轨迹查看器 — 常驻顶部 tab，一键展开当前消息列表所有隐藏内容（system / user / hook / assistant / tool）以及每个步骤的耗时，类似 DeepSeek Harness 的轨迹面板",
             "version": "0.1.0",
             "author": "DriFox Contributors",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui"
             ],
@@ -32,7 +32,7 @@
             "description": "DriFox 内置 UI 组件：工作台产物页（按用户问题分组展示会话文件产物）",
             "version": "1.0.0",
             "author": "DriFox Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui"
             ],
@@ -56,7 +56,7 @@
             "description": "智能体助手中心 — 助手切换 + 人格（persona）切换：人格是只读的内置预设（personas/<id>/persona.md），点卡片即切换；新增人格在对话里说「创建新人格」走 persona-creator 技能。含置顶记忆（pinned.md）、当下/长期记忆、Dream 自动整理、专属技能、头像库、预置工具三档快捷切换（全量/只读/极简，控制初始注入的工具 schema，未注入的可经 tool_search 搜索、tool_execute 中转调用）、经验库（recall/record_experience 工具 + 每日反思，分类少而稳定）。激活助手后通过系统提示词替换当前智能体身份注入（不改动原 build 智能体，仍可被子智能体调用）。",
             "version": "0.3.0",
             "author": "DriFox Contributors",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui",
                 "tool"
@@ -85,7 +85,7 @@
             "description": "当前项目文件树浏览 — 直观展示项目目录结构，支持右键菜单与实时文件监听",
             "version": "0.1.0",
             "author": "DriFox Contributors",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui"
             ],
@@ -109,7 +109,7 @@
             "description": "DriFox 内置 UI 组件：工作台历史会话页（历史 / 归档列表、项目切换、置顶、归档 · 恢复 · 导入）",
             "version": "1.0.0",
             "author": "DriFox Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui"
             ],
@@ -133,7 +133,7 @@
             "description": "DriFox 官方插件市场 — 浏览、安装、管理插件",
             "version": "0.3.1",
             "author": "DriFox Contributors",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui"
             ],
@@ -203,7 +203,7 @@
             "description": "DriFox 内置智能体：build / plan / review / explore / leader / code-reviewer 等",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "agent"
             ],
@@ -227,7 +227,7 @@
             "description": "系统清理工具 — 一键清理 DriFox 缓存垃圾（备份/日志/应用缓存/截图/归档会话），释放磁盘空间与内存",
             "version": "0.1.1",
             "author": "DriFox Contributors",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui"
             ],
@@ -251,7 +251,7 @@
             "description": "DriFox 内置斜杠命令：/new /compact /team /theme /debug /release 等",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "workflow"
             ],
@@ -275,7 +275,7 @@
             "description": "发送请求前自动给上下文瘦身：超长的工具结果先落盘成文件（上下文留预览块，模型可读回全文），较长的截断头尾、省略中段；同一结果每轮投影一致，不破坏 prompt cache。预算解析按模型上下文容量计算历史消息可用 token，达标即停。各层可单独开关，阈值在下方细项的插件设置里调",
             "version": "2.4.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -298,7 +298,7 @@
             "description": "DriFox 内置 Hook 触发策略：all / none / tool_only / subagent_default / team_member",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -320,7 +320,7 @@
             "description": "DriFox 内置 Hooks：系统提示注入、编码契约、时间日期、安全防护、技能内容注入等",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "workflow"
             ],
@@ -344,7 +344,7 @@
             "description": "DriFox 内置循环策略：default / minimal / subagent",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -366,7 +366,7 @@
             "description": "DriFox 内置 MCP 服务器配置：MiniMax / GitHub / Playwright（默认关闭）",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "mcp"
             ],
@@ -390,7 +390,7 @@
             "description": "DriFox 内置模型协议适配器：OpenAI / DeepSeek / Gemini 协议家族",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -412,7 +412,7 @@
             "description": "DriFox 内置服务商定义：DeepSeek / 智谱 / 通达 / 阿里 / 火山 / MiniMax / SiliconFlow / Gemini / 百度 / OpenCode / CodeBuddy",
             "version": "1.1.1",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -434,7 +434,7 @@
             "description": "DriFox 内置消息序列化器：OpenAI 消息格式",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -456,7 +456,7 @@
             "description": "DriFox 内置技能库：brainstorming / tdd / diagnose / drifox-dev / visualization 等",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "workflow"
             ],
@@ -480,7 +480,7 @@
             "description": "DriFox 内置会话存储引擎：SQLite",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -502,7 +502,7 @@
             "description": "DriFox 内置流式事件接收器：把 transport 归一的 StreamEvent 驱动 worker 状态机（默认实现 id=\"openai_chat\"；搬迁自 chat_worker._process_response）",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -524,7 +524,7 @@
             "description": "DriFox 内置团队模板：default-team",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -546,7 +546,7 @@
             "description": "DriFox 内置主题：17 款浅色/深色配色",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "theme"
             ],
@@ -570,7 +570,7 @@
             "description": "DriFox 内置工具集：文件读写、终端执行、网页搜索、诊断、任务管理、子智能体调度、用户交互，含 Tavily/TinyFish 搜索 API Key 配置",
             "version": "1.0.1",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "tool"
             ],
@@ -594,7 +594,7 @@
             "description": "DriFox 内置协议传输器：OpenAI chat/completions 请求组装与响应事件归一（协议形状 → StreamEvent）",
             "version": "1.0.0",
             "author": "DriFoxx Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [],
             "source": {
                 "type": "git-subdir",
@@ -616,7 +616,7 @@
             "description": "欢迎卡片「更新」tab — 拉取 DriFox GitHub Releases 作为更新日志展示。禁用插件后该 tab 消失。",
             "version": "1.0.1",
             "author": "DriFox Contributors",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui"
             ],
@@ -636,7 +636,7 @@
             "description": "DriFox 内置 UI 组件：工作台工作树页、git worktree 管理与分支标签",
             "version": "1.0.0",
             "author": "DriFox Team",
-            "license": "MIT",
+            "license": "GPL-3.0-or-later",
             "categories": [
                 "ui",
                 "tool"
