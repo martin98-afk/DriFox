@@ -833,7 +833,7 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_pill = diff_pill
         layout.addWidget(diff_pill)
 
-        # 右侧操作区：hover 浮现组（复制 / 分支 / 插件按钮）。
+        # 右侧操作区：常显操作组（复制 / 分支 / 插件按钮）。
         # 固定尺寸占位：按钮显隐切换时 footer 尺寸不变，卡片不跳动、不重排。
         hover_btns = QWidget(self)
         self._assistant_action_btns = hover_btns
@@ -887,7 +887,9 @@ class MessageCard(SimpleCardWidget):
         # 不会撑宽卡片）。非 hover 时容器退出布局 = 不占宽度；行高恒定改由
         # bar.setFixedHeight 保证（见下），否则 Qt 布局跳过隐藏控件的 sizeHint，
         # 行高在文本高度（≈14px）与按钮高度（20px）间跳变 → 卡片高度抖动。
-        hover_btns.setVisible(False)
+        # 常显（2026-10-10 需求）：助手卡片操作按钮不再走 hover 浮现，始终可见。
+        # user 卡片维持 hover 显隐（见 enterEvent/leaveEvent 的 role=user 分支）。
+        hover_btns.setVisible(True)
         layout.addWidget(hover_btns)
 
         # 行高下界 = 按钮高度：非 hover 时按钮容器退出布局，行高会由文本元素
@@ -2844,7 +2846,8 @@ class MessageCard(SimpleCardWidget):
     def _update_height(self, h):
         target_height = max(40, h)
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
-        self._target_viewer_height = target_height
+        # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
+        # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。
         # [L3] 稳定状态下的高度才写入宽度→高度缓存
         if not self._streaming and not self._resize_preview_mode:
             self._remember_height_for_width(target_height)
@@ -2857,8 +2860,29 @@ class MessageCard(SimpleCardWidget):
         # 重启补间 → 永远走不到终点、退化成锯齿。隔离后补间独占这条通道，
         # 收尾由 _on_height_anim_state_changed 主动校正一次。
         if self._stream_height_anim_active:
-            # 只更新已知的目标值，不打断进行中的动画
-            self._target_viewer_height = target_height
+            # [B1 回缩守卫] 追踪中上报分方向处理（仅流式中）：
+            #   上调/等值（真实增长或意愿未变）→ 实时 retarget + 取消挂起收缩；
+            #   下调 → 一律进 500ms 稳定窗挂起，不实时改向。
+            # 为什么下调不能实时改 target：save/restore、reorganizeContent
+            # 等 DOM 事务存在跨帧 scrollHeight 塌缩窗口（P052 自证），塌缩
+            # 读数穿透 rAF 合并 + 80ms 防抖后到达此处；若直接改小 target，
+            # tick 朝小值滑几拍、恢复值到达再拉回 = 肉眼可见的「生长中回缩」
+            # （2026-10-09 用户报告的流式卡片诡异抖动）。
+            # ⚠️ 守卫不得覆盖 FINISH 结束态追踪（_streaming 已 False）：彼时
+            # 上报是坞态折叠动画的真实收敛值，必须实时跟随；若也挂起，
+            # _apply_pending_shrink 会因 _streaming=False 丢弃收拢，tick 收敛
+            # 在旧 target → 流式结束后卡片底部大片空白（真机截图回归）。
+            prev_target = int(getattr(self, "_target_viewer_height", 0) or 0)
+            if not self._streaming:
+                self._target_viewer_height = target_height
+                return
+            if target_height >= prev_target:
+                self._target_viewer_height = target_height
+                # 等值也是「内容意愿未变」的确认：挂起的塌缩读数实为噪声，
+                # 不取消会在 500ms 后错误落地 → 抖动残留（同日真机复测）。
+                self._cancel_pending_shrink()
+            else:
+                self._schedule_pending_shrink(target_height)
             return
 
         # 🆕 结束态高度动画进行中：reportHeight 回环（setFixedHeight → 视口变化 →
@@ -2884,6 +2908,14 @@ class MessageCard(SimpleCardWidget):
             self._debounced_target_height = target_height
             if not self._stream_height_timer.isActive():
                 self._stream_height_timer.start()
+            return
+
+        # [B1 噪声死区] 非流式 ±2px 以内的上报（字体度量/亚像素取整/
+        # ResizeObserver 重测抖动）直接忽略。原逻辑对 <10px 双向立即 snap，
+        # 「应用 → 重测 → 反向噪声」会形成持续振荡 = 静态卡片底边忽高忽低
+        # （2026-10-09 用户报告「卡片高度跳变」）。真实 ≤2px 变化（如图片
+        # 加载完 +1px）被忽略也无感知。
+        if abs(target_height - current_height) <= 2:
             return
 
         # 非流式小变化（<10px）→ 立即跳转避免闪烁
@@ -3068,25 +3100,14 @@ class MessageCard(SimpleCardWidget):
                 else:
                     self._apply_viewer_height(h)
         else:
-            # 收拢方向：小步回弹（<40px）不立即应用（流式块→完成块的 DOM
-            # 替换、滚动条出现/消失的重排噪声，立即应用会"长一下又缩回去"抖动）。
-            # 🐛 但旧实现直接丢弃会累积虚高：12 个工具依次完成，每次
-            # "运行框→折叠行"缩 ~24px 全被吞 → 累积 250px+ 底部空白；
-            # 正文增长会暂时填平看不出，纯工具执行阶段（正文静默）即暴露。
-            # 修复：改为**延迟落地**——500ms 稳定窗合并连续抖动，窗口期被
-            # 增长取消（内容填平），静止的收缩最终落地。大幅收拢（≥40px）
-            # 仍立即应用。
-            if current_height - h >= 40:
-                self._cancel_pending_shrink()
-                # [T29] 大幅收拢同样走追踪：多个工具框同时到期会一次性回落
-                # 数百 px，snap 是「掉下去」，追踪是「滑下去」。
-                if STREAM_HEIGHT_ANIM_ENABLED and Animations.motion_enabled():
-                    self._target_viewer_height = h
-                    self._begin_stream_height_track(h)
-                else:
-                    self._apply_viewer_height(h)
-            else:
-                self._schedule_pending_shrink(h)
+            # [B1 回缩守卫] 收拢方向统一 500ms 稳定窗：≥40px 的大收拢不再
+            # 立即应用。原设计假设大收拢必为真实 DOM 变化，但工具框批量折叠、
+            # 坞态归位等事务的瞬时塌缩读数同样可 >40px（save/restore 跨帧窗口
+            # 穿透 rAF + 80ms 防抖），立即应用 = 先缩后涨的「生长中回缩」。
+            # 挂起窗口内被增长取消、静止落地（_apply_pending_shrink 落地仍走
+            # 追踪滑下去，无台阶感）。代价：真实大收拢最晚延迟 500ms 落地，
+            # 用户注意力在正文增长时无感。新挂起覆盖旧挂起值（取最新收拢意愿）。
+            self._schedule_pending_shrink(h)
 
     def _schedule_pending_shrink(self, target: int):
         """挂起一次小步收拢：500ms 稳定窗后落地，窗口内被增长/finish 取消。"""
@@ -3435,18 +3456,14 @@ class MessageCard(SimpleCardWidget):
             pass
 
     def enterEvent(self, event):
-        # 用户气泡 / assistant 全减：hover 浮现操作按钮，保持静态简洁
+        # 仅 user 气泡走 hover 浮现；assistant 操作按钮常显（见 _assistant_action_btns 构建处）
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, True)
-        elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._assistant_action_btns.setVisible(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, False)
-        elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._assistant_action_btns.setVisible(False)
         super().leaveEvent(event)
 
     @staticmethod
@@ -5021,7 +5038,7 @@ class MessageCard(SimpleCardWidget):
                 f"panel.vis={panel.isVisible() if panel is not None else None} "
                 f"bubble.h={self._assistant_bubble.height() if self._assistant_bubble else -1}"
             )
-            cur = panel.sizeHint().height() if (panel is not None and panel.isVisible()) else 0
+            cur = self._todo_panel_effective_height(panel)
             prev = getattr(self, "_todo_panel_height_cache", 0)
             self._todo_panel_height_cache = cur
             delta = int(cur - prev)
@@ -5035,6 +5052,27 @@ class MessageCard(SimpleCardWidget):
             self.heightChanged.emit(self.height())
         except RuntimeError:
             pass
+
+    def _todo_panel_effective_height(self, panel) -> int:
+        """任务看板「当前实际占高」，供锚定补偿记账。
+
+        ⚠️ 必须用布局**实际占高**，不能用 ``sizeHint()``：后者是"意愿高度"，
+        在面板重建 / 折叠切换的当拍与布局落定值不同源——面板刚由 update_todos
+        重建时内部 sizeHint 缓存已刷新到新值，而 Qt 尚未重新布局，``height()``
+        仍是旧值（或反之）。两者混用会让 delta 符号与实际卡片变化相反：
+        面板在涨、delta 算出负值 → 外层按收缩处理、卡片按增长落高，中间态
+        把卡片撑成"虚高"，下一拍布局收敛再缩回（2026-10-09 真机现象：
+        卡片高度突然异常增高然后再收缩回正常）。
+
+        取两者较大值：布局未跟上的那拍，谁大取谁，保证单调、不会少记高度；
+        收敛后两者相等，退化为精确值（幂等）。
+        """
+        if panel is None or not panel.isVisible():
+            return 0
+        try:
+            return max(int(panel.sizeHint().height()), int(panel.height()))
+        except RuntimeError:
+            return 0
 
     def update_tool_streaming(
         self,

@@ -229,7 +229,9 @@ def register(registry):
             ],
             models_dev_id="opencode",
             family="opencode",
-            capabilities=_ZEN_CAPABILITIES,
+            # Zen 是按量 API 型（非订阅）：显式声明列表分组，
+            # 避免被「有 coding_plan_fetcher → Coding Plan」自动判据误归
+            capabilities={**_ZEN_CAPABILITIES, "list_group": "API"},
             extra_quota_fields=_QUOTA_FIELDS,
             coding_plan_fetcher=_fetch_opencode_coding_plan,
         )
@@ -271,7 +273,7 @@ def register(registry):
             ],
             models_dev_id="opencode-go",
             family="opencode",
-            capabilities=_ZEN_CAPABILITIES,
+            capabilities={**_ZEN_CAPABILITIES, "list_group": "Coding Plan"},
             extra_quota_fields=_QUOTA_FIELDS,
             coding_plan_fetcher=_fetch_opencode_coding_plan,
         )

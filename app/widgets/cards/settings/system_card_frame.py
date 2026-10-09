@@ -95,6 +95,20 @@ class SystemCardFrame(QFrame):
         self.title_label.setStyleSheet(f"color: {Colors.TEXT_ACCENT};")
 
         self._header_layout.addWidget(self.icon_label)
+
+        # ── 面包屑导航（默认隐藏；有面包屑时 title_label 互斥隐藏）──
+        # 用途：卡内多级视图的方位指示 + 祖先级回退入口（服务商卡等）。
+        # 容器独立成 widget 是必要的：QHBoxLayout 无法整体显隐。
+        self._breadcrumb_widget = QWidget(self)
+        self._breadcrumb_widget.setStyleSheet("background: transparent;")
+        self._breadcrumb_layout = QHBoxLayout(self._breadcrumb_widget)
+        self._breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
+        self._breadcrumb_layout.setSpacing(4)
+        self._breadcrumb_widget.setVisible(False)
+        # 已设置的层级项（refresh_style 时按此重建，保证颜色随主题）
+        self._breadcrumb_items: list = []
+        self._header_layout.addWidget(self._breadcrumb_widget)
+
         self._header_layout.addWidget(self.title_label)
 
         # 数量统计
@@ -225,6 +239,10 @@ class SystemCardFrame(QFrame):
                 padding: 0 2px 0 6px;
                 font-weight: bold;
             """)
+
+        # ── 面包屑（颜色 token 随主题重建） ──
+        if hasattr(self, "_breadcrumb_items") and self._breadcrumb_items:
+            self._apply_breadcrumb_styles()
 
         # ── 内容区子控件递归刷新（SettingCard 等子卡片） ──
         self._refresh_content_children()
@@ -359,6 +377,72 @@ class SystemCardFrame(QFrame):
         self._search_input.textChanged.connect(callback)
         self._search_container.addWidget(self._search_input)
 
+    def set_breadcrumb(self, items) -> None:
+        """设置头部面包屑导航（卡内多级视图的方位指示 + 祖先级回退入口）
+
+        Args:
+            items: [{"text": "服务商", "handler": callback},  # 有 handler 则可点
+                    {"text": "添加 OpenCode Go"}]             # 无 handler = 当前项，不可点
+                   传 None / [] → 清空并隐藏，恢复 title_label。
+                   单项（如 [{"text": "服务商"}]）也显示——纯方位指示，无可点层级。
+
+        样式全部走 Colors token，refresh_style 时重刷（主题切换跟随）。
+        """
+        # 清掉旧项
+        while self._breadcrumb_layout.count():
+            item = self._breadcrumb_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        # 分隔符用 ›，与项交替插入
+        self._breadcrumb_items = list(items or [])
+        if not self._breadcrumb_items:
+            self._breadcrumb_widget.setVisible(False)
+            self.title_label.setVisible(True)
+            return
+
+        for idx, spec in enumerate(self._breadcrumb_items):
+            if idx:
+                sep = QLabel("›", self._breadcrumb_widget)
+                sep.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; background: transparent;")
+                self._breadcrumb_layout.addWidget(sep)
+            label = QLabel(str(spec.get("text", "")), self._breadcrumb_widget)
+            label.setFont(get_unified_font(11, True))
+            handler = spec.get("handler")
+            if callable(handler):
+                label.setCursor(Qt.PointingHandCursor)
+                label.mousePressEvent = lambda e, h=handler: h()
+            self._breadcrumb_layout.addWidget(label)
+        self._apply_breadcrumb_styles()
+        self._breadcrumb_widget.setVisible(True)
+        self.title_label.setVisible(False)
+
+    def _apply_breadcrumb_styles(self) -> None:
+        """面包屑配色（祖先项=强调色可点，当前项=正文色不可点；分隔符=弱化色）"""
+        Colors.refresh()
+        for idx, spec in enumerate(self._breadcrumb_items):
+            # layout 中每项占 2 个槽位（除首项）：[item, sep, item, sep, ...]
+            pos = 0 if idx == 0 else idx * 2
+            item = self._breadcrumb_layout.itemAt(pos)
+            label = item.widget() if item is not None else None
+            if label is None:
+                continue
+            clickable = callable(spec.get("handler"))
+            color = Colors.TEXT_ACCENT if clickable else Colors.TEXT_PRIMARY
+            label.setStyleSheet(
+                f"color: {color}; {font_size_css(11)} font-weight: 600; {get_font_family_css()}; "
+                f"background: transparent; border: none;"
+            )
+        # 分隔符槽位：1, 3, 5, ...
+        for i in range(1, self._breadcrumb_layout.count(), 2):
+            item = self._breadcrumb_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; "
+                    f"{get_font_family_css()}; background: transparent; border: none;"
+                )
+
     def set_header_sticky(self, text: str):
         """在标题栏显示标签（如吸顶服务商名称），置于标题和搜索框之间
 
@@ -448,11 +532,15 @@ class SystemCardFrame(QFrame):
             btn.mousePressEvent = lambda e, h=btn_data["handler"]: h()
             self._mode_buttons_container.addWidget(btn)
 
-    def set_save_button_handler(self, handler):
+    def clear_save_button(self):
+        """清空头部额外按钮区（卡内多视图切换用：非编辑视图无保存钮）"""
         while self._extra_buttons_container.count():
             item = self._extra_buttons_container.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+    def set_save_button_handler(self, handler):
+        self.clear_save_button()
 
         btn = PrimaryToolButton(FluentIcon.SAVE, self)
         btn.setFixedSize(30, 30)

@@ -1,9 +1,31 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.5] - 2026-10-08
+## [未发布]
 
-自上一版本以来的变更 | 提交数：19 · 文件变更：64 · +4847/-2575 | 贡献者：dingma, mading
+### ⚠️ 行为变化 (Breaking Changes)
+
+- **「最大Token」不再直接作为 API 输出上限发出** (`app/constants.py`, `app/core/modelmeta/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`, `plugins/system-transports/transports/openai_chat.py`): 该配置项语义收敛为**上下文窗口**（此前一键双语义：既当窗口又直接当 `max_tokens` 发出）。新增独立配置项「最大输出」承担输出上限语义，发送链只读它。
+
+  **存量用户影响**：此前「最大Token」= 4096 之类的值会被直接当输出上限发送；现在该键不再进入请求，输出上限改由「最大输出」（用户填）→ 模型真实上限（models.dev per-model）→ 服务商 family 级 默认值 的链路决定。**若你此前依赖「最大Token」控制输出长度，请在模型配置卡「上下文」组填写「最大输出」**。未填「最大输出」时不发送 `max_tokens`，由服务端按模型默认处理（等价于放开原有限制）。
+
+- **per-model 输出上限接通，模型输出能力不再被 family 级截断** (`app/core/modelmeta/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`): 此前 61 个模型的真实输出上限被 family 级默认值（8192 / 65536）覆盖，最高折损 74%（如 space-bunny 524288、MiniMax-M3 512000、grok-4.7 500000 被压到 65536）。现在读取 models.dev 的 per-model `max_output_tokens`：发送值 = `min(用户「最大输出」, 模型真实上限)`；用户未填则用模型真实上限。全局兜底常量更名为 `ABSOLUTE_FALLBACK_CEILING`（65536），仅在插件与 family 两级都缺失时生效。
+
+- **SiliconFlow 能力族判定修正** (`app/core/modelmeta/provider_profile.py`): family 探测新增「插件声明优先」层。SiliconFlow 的默认模型为 `deepseek-ai/DeepSeek-R1` 且模型池含大量 `deepseek-ai/*`，此前被原 if 链的模型名前缀规则误判为 `deepseek` 族，套用了 DeepSeek 的能力参数（上下文窗口 / 输出上限 / 思考控制方式均不符）。现按其插件声明的 `siliconflow` 族取参。
+
+### ✨ 新功能 (New Features)
+
+- **服务商配置体验优化**（P0 批次）: 服务商列表新增搜索框（150ms 防抖，按显示名 / 服务商名 / 模型名过滤）与四组分组渲染（OAuth / Coding Plan / 本地 / API，判据全部来自插件声明）；编辑保存不再丢弃非白名单字段（未知键保留），用户清空的字段不再被旧值合并复活。
+
+- **认证方式 / URL 预设 / 能力族统一走插件声明** (`app/utils/provider_ui_meta.py` 新增): 新增取值基座（`get_auth_type` / `get_preset_urls` / `get_family`），消除 UI 层三条硬编码链与 providers 插件声明的双源漂移。修复百度千帆（`auth_type="bce"`）此前无法通过 UI 正确配置的问题；火山方舟 URL 预设对齐插件声明的 `api/coding/v3`。
+
+- **models.dev 数据按 provider 分区索引** (`app/core/modelmeta/models_dev_sync.py`, `app/core/modelmeta/model_capabilities.py`): 新增 provider 维度的嵌套能力索引（不合并），同名模型跨服务商不再串味（此前 kimi-k2.5 在 moonshotai / opencode-go 之间会走「取更支持者」的合并，导致 A 家模型被 B 家元数据抬升）。带 provider 时走精确查，未命中降级原扁平索引；老缓存（无分区键）自动降级不报错。
+
+- **配置迁移基建** (`app/utils/config.py`): 新增 `_MIGRATIONS` 注册表与 `_run_migrations`，迁移项串行执行、单项异常隔离（不中断启动，仅记日志）。
+
+## [v0.6.5] - 2026-10-08 (重新发布)
+
+自上一版本以来的变更（累计） | 提交数：36 · 文件变更：168 · +16129/-4362 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -25,7 +47,25 @@ All notable changes to this project will be documented in this file.
 
 - **tooltip 行为优化** (`af03d5cd`, `a5dc053e`): 修复子控件 hover 时 tooltip 闪烁；TabPanel 新建会话与更多按钮移除 tooltip。
 
+- **服务商模型管理 UI 重做** (`8d370e7f`, `d7377224`, `d499be97`): ProviderEditCard 与 ModelListEditorWidget 模型管理重构——`_RowSwitch` 开关组件（消除文本间距）、预设服务商支持、构造稳定性加固与错误处理完善；配置卡限宽保持 UI 一致性。
+
+- **服务商托管键与配置过滤** (`429353cf`): 新增 `PROVIDER_MANAGED_KEYS`，模型配置不再渲染/保存服务商托管键；provider picker 卡接入全局卡控制器并适配主题刷新。
+
+- **SystemCardFrame 面包屑导航** (`dcc26e7b`): 多级视图面包屑指示（祖先可点、当前不可点），样式随主题刷新；同提交含 todo 面板高度记账修复（sizeHint/height 拍差虚高）、服务商 tab 标题统一、opencode 图标深浅双版重绘。
+
+- **GitHub Copilot 认证接入** (`7cf6834f`): Copilot 认证与令牌管理实现，新增 SVG 图标，沉淀已知坑文档。
+
+- **助手消息卡操作按钮常显** (`0efec811`): 助手卡复制/分支/插件按钮不再 hover 浮现、始终可见（user 卡维持 hover 显隐）；页脚行高由 bar 托底，显隐切换不再引起卡片高度跳动。
+
+- **消息卡高度动画增强** (`cb81e711`): MessageCard 高度动画处理增强，新增待收缩取消的回归测试。
+
+- **服务商卡尺寸与 OpenCode 分组** (`aaf9168c`): 服务商卡尺寸自适应内容，OpenCode 服务商分组分类增强。
+
+- **内置市场源版本同步** (`34363fbf`): 内置插件市场源与当前版本默认值同步。
+
 ### 🐛 问题修复 (Bug Fixes)
+
+- **排队消息卡切主题不跟随** (`app/main_widget.py`, `app/widgets/modules/input_card_module.py`, `tests/widgets/test_theme_refresh_covers_queue_card.py` 新增): `QueueMessageCard`（input_card_module 装配的「排队消息」卡）有 `refresh_style`，但从未被主题刷新链触达 —— 5a 颜色块与 5b 字体块（`_refresh_floating_cards_font_style`）两张手工维护的宿主浮动卡清单都漏了它，卡片样式永久停在构造时的主题值（`CARD_BG` / `CARD_BG_DIM` / 图标静态 pixmap 全在构造时写死进 QSS）。表现为浅色切深色后已打开的排队卡仍是白底白页眉。两处清单补入 `_queue_message_card`（用 `getattr(..., None)`，与 `_command_card` 等同口径，兼容懒创建），并新增回归测试用源码文本断言锁住两处清单覆盖 + 5b 路径恰好刷 1 次。
 
 - **仅流式服务商端点兼容** (`app/utils/http_client.py`, `app/core/context/history_compactor.py`, `app/core/workers/topic_summary.py`): CodeBuddy 等端点仅支持流式请求，非流式直接 400（code 11101 `Non-stream chat request is currently not supported`）。`http_client` 新增 `chat_completion_text()`：以 `stream=True` 发起、在调用方线程内聚合为完整文本返回，异常照常透传 openai 异常族供重试判定识别。会话压缩摘要与标题摘要两条非流式链路切换到该封装；插件侧 prompt-enhancer 同步切换（见 drifox-plugins2 仓库）。子智能体 worker（带 tools 聚合）暂不切换。
 
@@ -51,9 +91,13 @@ All notable changes to this project will be documented in this file.
   3. 修正 `test_long_run_scenarios.py` docstring：原称「默认 10s」与 `runner.py:39` 实际 `DEMO_DURATION_SEC = 30.0` 不符。
   4. `AGENTS.md` / 技能 `testing-build.md` 同步收集范围（`tests/ui` + `tests/perf` 双排除）、超时策略，并补充「禁止 `uv sync --group dev`」——该命令会卸载其它依赖组的包（aiohttp/lxml/numpy 等），须用 `--all-groups`。
 
+- **provider 域回归测试批量补齐** (`75475475`, `90ff02a8`, `381a5f0b`): provider UI 元数据取值基座（`get_auth_type` / `get_preset_urls` / `get_family`）、认证方式保存回读、未知键保留与清空字段不复活、列表分组渲染、搜索防抖、picker 卡渲染与信号、双开关 payload 写入、能力徽章 tooltip、模型禁用语义与 payload 五键恒在等回归测试。
+
 ### 🔧 其他 (Chores & Build)
 
 - 版本号升级至 v0.6.5（pyproject.toml / config.py / installer.iss / README）(`b1168b74`)
+- 许可证由 MIT 切换为 GPL-3.0-or-later (`bc66eff9`, `09b7ff93`)
+- marketplace 自动再生成自 plugin.json (`db8df443`)
 
 ## [v0.6.4] - 2026-09-28 (重新发布 #2)
 

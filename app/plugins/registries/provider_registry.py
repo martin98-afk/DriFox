@@ -59,6 +59,9 @@ class ProviderDef:
     icon_dir: str = ""  # 插件自带深色图标目录（绝对路径；空 → 渲染回退主程序 qrc 资源）
     icon_dir_light: str = ""  # 插件自带浅色图标目录（主题感知；空 → 回退深色/qrc）
     api_url: str = ""  # 默认 API URL
+    # 可选 API URL 预设列表（UI 下拉框候选；空 → 由 api_url 单条兜底，
+    # 取值统一走 app.utils.provider_ui_meta.get_preset_urls）
+    preset_urls: List[str] = field(default_factory=list)
     auth_type: str = "bearer"  # 认证方式：bearer / bce / none / anthropic
     default_model: str = ""  # 默认模型名（"模型名称"）
     default_params: Dict[str, Any] = field(default_factory=dict)  # 其他默认参数（温度/最大Token/思考模式…）

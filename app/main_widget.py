@@ -69,6 +69,7 @@ from qfluentwidgets import (
 from app.constants import (
     IMAGE_EXTENSIONS,
     MODEL_LEVEL_KEYS,
+    PROVIDER_MANAGED_KEYS,
     get_merged_provider_models,
     provider_default_config,
     provider_quota_exclude_keys,
@@ -85,7 +86,12 @@ from app.core import (
 from app.core.conversation.message_content import _is_hook_message, strip_system_reminder
 from app.core.commands.builtin_commands import FunctionCommandHandlers
 from app.core.commands.command_manager import CommandManager, CommandType
-from app.core.modelmeta.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
+from app.core.modelmeta.model_capabilities import (
+    apply_model_defaults,
+    get_model_capabilities,
+    normalize_reasoning_effort,
+    resolve_model_capabilities,
+)
 from app.core.infra import memory_governor
 from app.core.infra.memory_governor import (
     _MAX_GLOBAL_RENDERED_PAGES,
@@ -1126,6 +1132,12 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.infra.usage_service import UsageService
 
         self._reg_sig(UsageService.get_instance().coding_plan_ready, self._on_coding_plan_result)
+        # ★ 模型列表定时刷新（P1-12 / 波7）：进程级单例，跨窗口共一份 active 集。
+        # 首次调用须在主线程（QTimer 归属主线程）；active 集由配置重建。
+        from app.core.modelmeta.model_refresh_service import ModelRefreshService
+
+        self._reg_sig(ModelRefreshService.get_instance().refresh_finished, self._on_model_refresh_finished)
+        ModelRefreshService.get_instance().sync_from_config()
         # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
         self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：models.dev 动态数据后台刷新结果回主线程
@@ -2214,16 +2226,53 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同时避免鼠标/动画等高频事件长时间占住主线程）。
         QApplication.processEvents(QEventLoop.AllEvents, 5)
 
-    def _ensure_thinking_fields(self, config: dict):
-        """以 models.dev / 模型能力为准，确保思考字段与模型实际能力一致。
+    def _current_model_declared_capabilities(self) -> dict:
+        """读取当前模型的「声明_*」六键子集（来自 model_overrides，P1-9 批 b）。
 
+        供 apply_model_defaults(declared=...) 在 overrides 灌入 config 之前
+        感知声明（思考摘除/补值判定需要它）。键缺失 = 未声明，原行为。
+        """
+        from app.core.modelmeta.model_capabilities import DECLARED_CAPABILITY_KEYS
+
+        declared: dict = {}
+        model_overrides = getattr(self.cfg, "llm_model_overrides", None)
+        if not model_overrides or not self._current_model_name:
+            return declared
+        override_data = model_overrides.value or {}
+        overrides = None
+        if self._current_provider_name:
+            pname = self._valid_configs.get(self._current_provider_name, {}).get(
+                "provider_name", self._current_provider_name
+            )
+            overrides = override_data.get(f"{pname}||{self._current_model_name}")
+        # 向后兼容：旧格式（纯模型名）兑底
+        if overrides is None:
+            overrides = override_data.get(self._current_model_name, {})
+        if overrides:
+            for key in DECLARED_CAPABILITY_KEYS:
+                if key in overrides:
+                    declared[key] = overrides[key]
+        return declared
+
+    def _ensure_thinking_fields(self, config: dict):
+        """以声明层 / 模型能力为准，确保思考字段与实际能力一致（effective 判定）。
+
+        effective 规则（P1-9 批 b）：config["声明_支持思考"] 非空 → 以声明为准
+        （不摘不补）；未声明 → 查 caps（带 provider 走分区精确查，防同名模型串味）。
         在 model_overrides 叠加后调用，防止旧覆盖数据回补思考字段。
         """
         if not self._current_model_name:
             return
+        if config.get("声明_支持思考") not in (None, ""):
+            return  # 声明优先：用户显式声明思考能力，caps 不得反向覆盖
         from app.core.modelmeta.model_capabilities import get_model_capabilities
 
-        caps = get_model_capabilities(self._current_model_name)
+        provider = ""
+        if self._current_provider_name:
+            provider = self._valid_configs.get(self._current_provider_name, {}).get(
+                "provider_name", self._current_provider_name
+            )
+        caps = get_model_capabilities(self._current_model_name, provider)
         if not caps.get("supports_thinking", False):
             config.pop("思考模式", None)
             config.pop("思考等级", None)
@@ -2253,7 +2302,10 @@ class OpenAIChatToolWindow(ToolWindow):
             if self._current_model_name:
                 config["模型名称"] = self._current_model_name
             # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 providers 插件的部分默认值）
-            config = apply_model_defaults(config, self._current_model_name)
+            # declared 提前传声明子集：overrides 在下方才 update（P1-9 批 b effective 时序）
+            config = apply_model_defaults(
+                config, self._current_model_name, declared=self._current_model_declared_capabilities()
+            )
             # 叠加用户按模型名覆盖的参数（最高优先级）
             # key = "服务商名||模型名"，按服务商隔离同名模型
             model_overrides = getattr(self.cfg, "llm_model_overrides", None)
@@ -2682,9 +2734,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新权限审批悬浮框
         if self._permission_floating_widget:
             self._permission_floating_widget.set_opacity(opacity)
-        # 更新服务商编辑卡片
+        # 更新服务商卡（卡内含卡片墙/编辑表单两级视图）
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
+        if self._provider_picker_card:
+            self._provider_picker_card.set_opacity(opacity)
         # 更新主窗口背景透明度
         self._update_window_bg_opacity(opacity)
 
@@ -6490,7 +6544,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return None
 
     def _get_model_list_for_provider(self, provider: str) -> List[str]:
-        """获取指定服务商的模型列表（供模糊匹配用）"""
+        """获取指定服务商的模型列表（供模糊匹配用；滤除「模型关闭列表」）"""
+        from app.core.modelmeta.provider_save_plan import filter_disabled_models
+
         config = self._valid_configs.get(provider, {})
         model_list = config.get("模型列表", [])
         if isinstance(model_list, str):
@@ -6510,6 +6566,8 @@ class OpenAIChatToolWindow(ToolWindow):
             merged = get_merged_provider_models()
             if pname in merged:
                 model_list = list(merged[pname])
+        # 关闭的模型不参与匹配（P1-9）；当前选中模型豁免（正被使用，insert 在滤后）
+        model_list = filter_disabled_models(model_list, config)
         # 也把当前选中的模型加进去（万一不在列表里）
         current = config.get("模型名称", "")
         if current and current not in model_list:
@@ -7193,6 +7251,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     model_list = list(merged_provider_models[pname])
             elif pname in merged_provider_models:
                 model_list = list(merged_provider_models[pname])
+            # 关闭的模型不在选择卡片显示（P1-9 OpenCode 风格清单；仍在「模型列表」）
+            from app.core.modelmeta.provider_save_plan import filter_disabled_models
+
+            model_list = filter_disabled_models(model_list, config)
             cur_model = config.get("模型名称", "")
             if cur_model and cur_model not in model_list:
                 model_list.insert(0, cur_model)
@@ -7602,10 +7664,12 @@ class OpenAIChatToolWindow(ToolWindow):
             extra_parts = []
             if cost_parts:
                 extra_parts.append(" ".join(cost_parts) + " $/M")
-            if caps.get("supports_vision"):
-                extra_parts.append("多模态")
-            if caps.get("supports_thinking"):
-                extra_parts.append("开关思考")
+            # 能力段（与模型选择卡 tooltip 同源纯函数，避免两处判定漂移）
+            from app.widgets.capability_badges import build_capability_tooltip
+
+            cap_text = build_capability_tooltip(caps)
+            if cap_text:
+                extra_parts.append(cap_text)
             tooltip = f"{display} · {self._current_model_name}"
             if extra_parts:
                 tooltip += " · " + " ".join(extra_parts)
@@ -8018,6 +8082,39 @@ class OpenAIChatToolWindow(ToolWindow):
         cc = get_global_card_controller()
         if cc is not None:
             cc._on_provider_edit_saved(provider_name, provider_info, is_new)
+        # 保存后让定时刷新服务感知新配置（双开关 / 条目变更）。
+        # 先 invalidate 旧快照（服务商名/URL 可能被改），再全量 sync。
+        try:
+            from app.core.modelmeta.model_refresh_service import ModelRefreshService
+
+            svc = ModelRefreshService.get_instance()
+            config_id = str((provider_info or {}).get("config_id", "") or "")
+            if config_id:
+                svc.invalidate(config_id)
+            svc.sync_from_config(self.cfg.llm_saved_providers.value or {})
+        except Exception:
+            pass
+
+    def _on_model_refresh_finished(self, config_id: str, ok: bool, status: str, models: list):
+        """定时刷新完成回调（主线程）。
+
+        落盘由 ModelRefreshService._on_refresh_result 负责（它已持 cfg）；
+        本处只管 UI：本窗口若正在显示设置卡则刷新服务商列表（状态点 / 副标题）。
+        列表自身也会经 cfg valueChanged → `_refresh_items` 自动刷新，此处是
+        兜底（配置值未变时 valueChanged 不触发）。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            if (
+                hasattr(self, "_card_manager")
+                and self._card_manager.is_card_visible("settings", self._window_id)
+                and hasattr(self, "_settings_popup")
+                and hasattr(self._settings_popup, "llmProviderCard")
+            ):
+                self._settings_popup.llmProviderCard._refresh_items()
+        except Exception:
+            pass
 
     def _on_provider_edit_closed(self):
         """（委托全局卡片控制器 GlobalCardController）"""
@@ -8028,12 +8125,16 @@ class OpenAIChatToolWindow(ToolWindow):
             cc._on_provider_edit_closed()
 
     def _show_provider_add_card(self):
-        """（委托全局卡片控制器 GlobalCardController）"""
+        """（委托全局卡片控制器 GlobalCardController）
+
+        P1-7 起先开预置卡片墙（`_show_provider_picker_card`），由卡片墙决定
+        进「预置表单」还是「自定义表单」。
+        """
         from app.widgets.cards.global_card_controller import get_global_card_controller
 
         cc = get_global_card_controller()
         if cc is not None:
-            cc._show_provider_add_card()
+            cc._show_provider_picker_card()
 
     def _show_hook_add_card(self):
         """（委托全局卡片控制器 GlobalCardController）"""
@@ -8592,7 +8693,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 叠加模型默认值（三层兜底：硬编码 > 模型能力 > 已有配置）
         # 当服务商不在 providers 插件（自定义服务商）时，温度/top_p 等参数仍能有合理默认值
-        config = apply_model_defaults(config, self._current_model_name)
+        # declared 提前传声明子集：overrides 在下方才 update（P1-9 批 b effective 时序）
+        config = apply_model_defaults(
+            config, self._current_model_name, declared=self._current_model_declared_capabilities()
+        )
 
         # 叠加用户按模型名保存的覆盖值（最高优先级）
         # 按「服务商名||模型名」隔离同名模型
@@ -8620,12 +8724,12 @@ class OpenAIChatToolWindow(ToolWindow):
             "模型名称",
             "API_URL",
             "API_KEY",
-            "模型列表",
             "provider_name",
             "name",
             "config_id",
             "display_name",
             "认证方式",
+            *PROVIDER_MANAGED_KEYS,  # 服务商级管理键（非模型参数）
             *provider_quota_exclude_keys(),  # 套餐用量查询字段不应出现在模型参数配置中
         ]:
             config.pop(pop_key, None)
@@ -9814,9 +9918,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """服务商配置变更时的回调（多窗口同步）
 
         当一个窗口添加/修改/删除了服务商，所有窗口都会收到此通知。
-        刷新本地 _valid_configs 并更新 UI。
+        刷新本地 _valid_configs 并更新 UI，并让定时刷新服务重建 active 集
+        （双开关被改 / 条目被增删都要即时反映）。
         """
         self._load_model_configs()
+        # 定时刷新服务：全量重建 active 集（幂等，内部只读配置）
+        try:
+            from app.core.modelmeta.model_refresh_service import ModelRefreshService
+
+            ModelRefreshService.get_instance().sync_from_config(self.cfg.llm_saved_providers.value or {})
+        except Exception:
+            pass
         # 如果设置卡片当前可见（同窗口），刷新服务商列表
         if (
             hasattr(self, "_card_manager")
@@ -10632,6 +10744,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._share_card_content,
                 self._history_questions_card_content,
                 self._undo_delete_card,
+                # 排队消息卡（input_card_module 装配）：漏刷会导致切主题后
+                # 卡片停在构造时主题（浅→深仍是白底白页眉）
+                getattr(self, "_queue_message_card", None),
             ):
                 self._safe_refresh(card)
             # 卡片容器
@@ -10708,6 +10823,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._share_card_content,
             self._history_questions_card_content,
             self._undo_delete_card,
+            # 排队消息卡（与 5a 同口径；字体变化路径 5a 不走，靠这里补刷）
+            getattr(self, "_queue_message_card", None),
             getattr(self, "_command_card", None),
             getattr(self, "_file_mention_card", None),
             getattr(self, "_tool_control_card", None),
@@ -10776,7 +10893,10 @@ class OpenAIChatToolWindow(ToolWindow):
             pname = config.get("provider_name", config_id)
             default_config = provider_default_config(pname) or {}
             for default_key, default_value in default_config.items():
-                if default_key not in config:
+                # 「认证方式」例外：插件声明的 auth_type 是权威值，老配置里存的
+                # 可能是历史写死的 "bearer"（P0-5 修复前的产物）。这条治愈只改
+                # 内存合并结果，磁盘不动，下次用户编辑保存时才被显式写入。
+                if default_key not in config or default_key == "认证方式":
                     config[default_key] = default_value
             # 附加 display_name（含后缀）供 UI 显示使用，不持久化
             # 优先使用用户填的"配置名称"（name），空则回退到 provider_name
@@ -18266,9 +18386,9 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 检查当前模型是否支持视觉
+        # 检查当前模型是否支持视觉（effective：声明_支持图像非空时以声明为准，P1-9 批 d）
         _model_name = str(llm_config.get("模型名称", "") or "")
-        _model_caps = get_model_capabilities(_model_name)
+        _model_caps = resolve_model_capabilities(llm_config)
         _supports_vision = bool(_model_caps.get("supports_vision"))
 
         # ---- 拼接附件路径到用户文本 + 图片附件处理 ----

@@ -171,7 +171,7 @@ def test_classify_error_missing_args(transport):
 def test_build_request_kwargs_basic(transport, monkeypatch):
     monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)  # 隔离思考映射（另有测试）
     out = transport.build_request_kwargs(
-        {"模型名称": "gpt-4o", "API_KEY": "sk-x", "API_URL": "https://x", "最大Token": 100}
+        {"模型名称": "gpt-4o", "API_KEY": "sk-x", "API_URL": "https://x", "最大输出": 100}
     )
     assert out["model"] == "gpt-4o"
     assert out["extra_body"]["max_tokens"] == 100
@@ -219,7 +219,7 @@ def test_build_request_kwargs_bce_auth_not_in_transport(transport, monkeypatch):
 
 def test_build_request_kwargs_caps_max_tokens(transport, monkeypatch):
     monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
-    out = transport.build_request_kwargs({"模型名称": "m", "最大Token": 999999}, cap_max_tokens=lambda m, r: 8192)
+    out = transport.build_request_kwargs({"模型名称": "m", "最大输出": 999999}, cap_max_tokens=lambda m, r: 8192)
     assert out["extra_body"]["max_tokens"] == 8192
 
 
@@ -243,7 +243,7 @@ def test_cap_max_tokens_injected_applies_to_request(transport):
     实况：MiniMax 限制 max_tokens ∈ [1, 131072]，用户配 200000 → 400 code 1210。
     """
     out = transport.build_request_kwargs(
-        {"模型名称": "MiniMax-M2", "最大Token": 200000},
+        {"模型名称": "MiniMax-M2", "最大输出": 200000},
         cap_max_tokens=lambda model, req: min(int(req), 65536),
     )
     assert out["extra_body"]["max_tokens"] == 65536
@@ -252,7 +252,7 @@ def test_cap_max_tokens_injected_applies_to_request(transport):
 def test_cap_max_tokens_none_passes_through(transport):
     """未注入时不钳制（独立使用场景；worker 路径必须注入）"""
     out = transport.build_request_kwargs(
-        {"模型名称": "m", "最大Token": 200000}, cap_max_tokens=transport._cap_max_tokens
+        {"模型名称": "m", "最大输出": 200000}, cap_max_tokens=transport._cap_max_tokens
     )
     assert out["extra_body"]["max_tokens"] == 200000
 

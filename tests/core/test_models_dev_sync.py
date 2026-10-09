@@ -243,7 +243,7 @@ def test_parse_models_dev_data_filters_whitelist():
             }
         },
     }
-    provider_models, caps = sync._parse_models_dev_data(data)
+    provider_models, caps, partitioned = sync._parse_models_dev_data(data)
     assert "OpenAI" in provider_models
     assert "OpenCode Zen" in provider_models
     assert "gpt-test" in provider_models["OpenAI"]
@@ -253,6 +253,10 @@ def test_parse_models_dev_data_filters_whitelist():
     # opencode-test: reasoning=True 但 reasoning_options=[] → 无控制方式，不支持思考开关
     assert caps["opencode-test"]["supports_thinking"] is False
     assert "thinking_param" not in caps["opencode-test"]
+    # 分区索引（P1-22）：provider_id → model_id → caps，不合并
+    assert partitioned["openai"]["gpt-test"]["context_limit"] == 128000
+    assert partitioned["opencode"]["opencode-test"]["supports_thinking"] is False
+    assert "unknown-provider" not in partitioned
 
 
 # ============================================================

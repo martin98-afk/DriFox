@@ -15,7 +15,7 @@ models.dev 模型元数据同步模块。
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -520,14 +520,22 @@ def _get_models_dev_map() -> Dict[str, str]:
         return {}
 
 
-def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
-    """解析 models.dev 数据，返回 (provider_models, model_capabilities)。
+def _parse_models_dev_data(
+    data: Dict[str, Any],
+) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Dict[str, Any]]]]:
+    """解析 models.dev 数据，返回 (provider_models, model_capabilities, model_capabilities_partitioned)。
 
     只处理 providers 插件声明的 models.dev 白名单内的服务商。
+
+    ``model_capabilities_partitioned`` 是 **provider 维度的嵌套索引**
+    （provider_id → model_id → caps，**不合并**）：同一模型在不同 provider 下
+    能力可能不同（同名模型跨服务商串味是已知缺陷），精确查必须先分区。
+    旧的扁平 ``model_capabilities`` 保留不动（向后兼容 + 未提供 provider 时兜底）。
     """
     provider_map = _get_models_dev_map()
     provider_models: Dict[str, List[str]] = {name: [] for name in provider_map}
     model_capabilities: Dict[str, Dict[str, Any]] = {}
+    model_capabilities_partitioned: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     for dfox_name, provider_id in provider_map.items():
         provider_info = data.get(provider_id)
@@ -537,11 +545,14 @@ def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], 
         if not isinstance(models, dict):
             continue
 
+        partition = model_capabilities_partitioned.setdefault(provider_id, {})
         for model_id, model_info in models.items():
             transformed = _transform_model(provider_id, model_id, model_info)
             if transformed is None:
                 continue
             provider_models[dfox_name].append(model_id)
+            # 分区索引：同 provider 内同名模型后到者覆盖（同一 provider 内不该重复）
+            partition[model_id] = transformed
             existing = model_capabilities.get(model_id)
             if existing is None:
                 model_capabilities[model_id] = transformed
@@ -550,7 +561,7 @@ def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], 
                 # 取"更支持"的合并结果，防止某 provider 数据不全把能力降级。
                 model_capabilities[model_id] = _merge_model_caps(existing, transformed)
 
-    return provider_models, model_capabilities
+    return provider_models, model_capabilities, model_capabilities_partitioned
 
 
 def _merge_model_caps(existing: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
@@ -584,6 +595,9 @@ class DynamicModelsResult:
 
     provider_models: Dict[str, List[str]]
     model_capabilities: Dict[str, Dict[str, Any]]
+    # provider 维度分区索引（provider_id → model_id → caps，不合并）；
+    # 老缓存缺该键时为 {}（调用方降级到扁平索引）
+    model_capabilities_partitioned: Dict[str, Dict[str, Dict[str, Any]]] = field(default_factory=dict)
     from_cache: bool = False
     fetched_at: Optional[float] = None
 
@@ -624,7 +638,7 @@ def load_dynamic_models(
             logger.info(f"[models.dev] 尝试同步最新模型元数据... (content_version={CACHE_CONTENT_VERSION})")
             remote_data, fetched_url = _fetch_remote()
             if remote_data is not None:
-                provider_models, model_capabilities = _parse_models_dev_data(remote_data)
+                provider_models, model_capabilities, model_capabilities_partitioned = _parse_models_dev_data(remote_data)
 
                 # ── 叠加 OpenCode Zen 免费模型 ──
                 opencode_free_models, opencode_free_caps = _fetch_opencode_zen_free_models(
@@ -640,6 +654,10 @@ def load_dynamic_models(
                             provider_models["OpenCode Zen"].append(model)
                             seen.add(key)
                     model_capabilities.update(opencode_free_caps)
+                    # 分区索引同步叠加（OpenCode Zen 的 models.dev id 为 "opencode"）
+                    zen_partition = model_capabilities_partitioned.setdefault("opencode", {})
+                    for model, caps in opencode_free_caps.items():
+                        zen_partition[model] = caps
 
                 cache = {
                     "_cached_at": time.time(),
@@ -648,11 +666,13 @@ def load_dynamic_models(
                     "_content_version": CACHE_CONTENT_VERSION,
                     "provider_models": provider_models,
                     "model_capabilities": model_capabilities,
+                    "model_capabilities_partitioned": model_capabilities_partitioned,
                 }
                 _save_cache(cache, path)
                 return DynamicModelsResult(
                     provider_models=provider_models,
                     model_capabilities=model_capabilities,
+                    model_capabilities_partitioned=model_capabilities_partitioned,
                     from_cache=False,
                     fetched_at=cache["_cached_at"],
                 )
@@ -669,6 +689,8 @@ def load_dynamic_models(
         return DynamicModelsResult(
             provider_models=cache.get("provider_models", {}),
             model_capabilities=cache.get("model_capabilities", {}),
+            # 老缓存无分区键 → get 默认空 dict，调用方降级到扁平索引
+            model_capabilities_partitioned=cache.get("model_capabilities_partitioned", {}),
             from_cache=True,
             fetched_at=cache.get("_cached_at"),
         )

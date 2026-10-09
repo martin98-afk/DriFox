@@ -13,6 +13,7 @@
 import atexit
 from copy import deepcopy
 from enum import Enum
+from typing import Any, Callable, List
 import uuid
 
 import orjson as json
@@ -61,6 +62,27 @@ _LEGACY_OPENCODE_DEFAULT_MODELS = frozenset(
 )
 
 
+# 配置迁移注册表（P0-7）：启动时由 Settings._run_migrations 串行执行。
+#
+# 契约：每项签名 ``(instance) -> bool``，返回「是否已改动配置」；落盘由各迁移项
+# 自行负责（通常是「构造新值 → 比较 → 有变化才 save」）。单项抛异常被隔离，
+# 不中断启动，后续迁移继续。
+#
+# 新增迁移：追加到列表尾部（顺序敏感——后面的迁移可能依赖前面已完成的形态）。
+# 条目写成模块级转发函数而非 lambda：`__name__` 可用于日志定位，且**运行期**
+# 解析 Settings 属性，测试 monkeypatch 类方法后注册表条目同样失效，隔离手段有效。
+
+
+def _migrate_saved_providers_entry(instance) -> bool:
+    """注册表首项：服务商配置 config_id 迁移（原 get_instance 裸调用项）"""
+    return Settings._migrate_saved_providers(instance)
+
+
+_MIGRATIONS: List[Callable[[Any], bool]] = [
+    _migrate_saved_providers_entry,
+]
+
+
 class Settings(QConfig):
     _instance = None
     # 类级别关闭标志 — 一旦设置，任何实例的 save() 都会跳过
@@ -101,8 +123,8 @@ class Settings(QConfig):
                 cls._extend_theme_validator_before_load()
                 cls._instance.load()
                 cls._config_loaded = True  # 标记配置成功加载
-                # 迁移旧格式的服务商配置
-                cls._migrate_saved_providers(cls._instance)
+                # 迁移旧格式配置（注册表串行执行，单项失败不中断启动）
+                cls._run_migrations(cls._instance)
                 # 确保内置 OpenCode 免费默认配置存在
                 cls._ensure_default_opencode_provider(cls._instance)
             except Exception:
@@ -121,24 +143,51 @@ class Settings(QConfig):
                 pass
         return cls._instance
 
+    # ── 配置迁移基建（P0-7） ────────────────────────────────
+    #
+    # 注册表 `_MIGRATIONS` 定义在模块级（本类之前）。契约：迁移函数签名
+    # ``(instance) -> bool``，返回「是否已改动配置」；落盘由各迁移项自行负责。
+    #
+    # ⚠️ `_ensure_default_opencode_provider` 是**不变式维护**（保证内置免费服务
+    # 商存在），不是版本迁移，故保持原位原顺序调用，不得塞进注册表。
+
     @classmethod
-    def _migrate_saved_providers(cls, instance):
+    def _run_migrations(cls, instance) -> bool:
+        """串行执行全部注册迁移，返回「是否有任一迁移改动了配置」。
+
+        单项异常被吞并记录：迁移失败不应阻断启动（用户仍能用旧配置打开软件），
+        后续迁移继续执行。
+        """
+        changed = False
+        for migrate in _MIGRATIONS:
+            try:
+                if migrate(instance):
+                    changed = True
+            except Exception:
+                logger.exception(f"配置迁移失败（已跳过）: {getattr(migrate, '__name__', migrate)}")
+        return changed
+
+    @classmethod
+    def _migrate_saved_providers(cls, instance) -> bool:
         """迁移旧格式的服务商配置：键统一为 apikey 的稳定 hash（替代旧 uuid）。
 
         - 旧格式 1（provider_name 为键）→ 新格式
         - 旧格式 2（uuid 为键但 value 内缺 config_id 字段）→ 补齐 config_id，
           并把 key 重映射为 apikey hash（与 value 内一致）
         - 同 apikey 的重复条目：合并为 1 条（dict 顺序中后写入者胜出）
+
+        Returns:
+            True = 配置被改动并已落盘；False = 无需改动（含被跳过的情形）。
         """
         saved_providers = instance.llm_saved_providers.value
         if not saved_providers or not isinstance(saved_providers, dict):
-            return
+            return False
         # 密码模式未解锁：API_KEY 仍是密文（AES-GCM nonce 随机 → 密文每次不同），
         # 此时按 hash 重算 config_id 会让 id 每次启动漂移，导致服务商条目与
         # 已选模型映射错乱 → 整段跳过，解锁后由 unlock_secrets 补跑。
         if getattr(instance, "secrets_locked", False):
             logger.info("[_migrate_saved_providers] 密钥未解锁，跳过 config_id 重算")
-            return
+            return False
 
         from app.core.modelmeta.provider_profile import apply_provider_save
 
@@ -159,7 +208,7 @@ class Settings(QConfig):
         if new_saved_providers.keys() == saved_providers.keys() and all(
             isinstance(v, dict) and v.get("config_id") == k for k, v in new_saved_providers.items()
         ):
-            return
+            return False
 
         instance.llm_saved_providers.value = new_saved_providers
         # 同步更新已选模型：旧 key → 新 key
@@ -170,6 +219,7 @@ class Settings(QConfig):
         logger.info(
             f"已迁移 {len(saved_providers)} 个服务商配置到 apikey hash 格式 （合并后 {len(new_saved_providers)} 条）"
         )
+        return True
 
     @classmethod
     def _ensure_default_opencode_provider(cls, instance):

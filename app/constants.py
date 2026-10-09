@@ -34,12 +34,24 @@ PARAM_SCHEMA = {
         "order": 300,
         "hide_in_card": True,  # "温度" 的别名
     },
+    # P1-21：「最大Token」只作**上下文窗口**（不再直发 max_tokens）。
+    # api_param 保留 max_tokens 是历史字段名兼容，发送侧已改为只读「最大输出」。
     "最大Token": {
         "display_name": "上下文长度",
         "ui_type": "spinbox",
         "range": {"min": 1, "max": 99999999, "step": 1, "type": "int"},
         "api_param": "max_tokens",
         "order": 100,
+    },
+    # P1-21 语义拆分：输出上限独立成键（旧「最大Token」一键双语义——既当上下文
+    # 窗口又直接当 max_tokens 发出——已被拆开）。api_param 必须为 max_tokens，
+    # 这是发送链识别它的唯一依据（subagent 通配分支按 api_param 收集请求参数）。
+    "最大输出": {
+        "display_name": "最大输出",
+        "ui_type": "spinbox",
+        "range": {"min": 1, "max": 99999999, "step": 1, "type": "int"},
+        "api_param": "max_tokens",
+        "order": 101,
     },
     "上下文长度": {
         "display_name": "上下文长度",
@@ -99,6 +111,43 @@ PARAM_SCHEMA = {
         "api_param": "reasoning_effort",
         "order": 220,
     },
+    # ── P1-9 段三：能力声明六键（model_overrides 持久化；resolve 链 L0 层）──
+    # ⚠ 绝不给 api_param：声明键是中文，_VALID_IDENTIFIER_PATTERN 第二挡也过不去，
+    #   双挡保证它们永远不会泄漏进 API 请求体。
+    # tri_state：ComboBox「自动/开启/关闭」——「自动」= 未声明（get_config 删键）。
+    "声明_支持思考": {
+        "display_name": "声明: 支持思考",
+        "ui_type": "tri_state",
+        "order": 500,
+    },
+    "声明_支持图像": {
+        "display_name": "声明: 支持图像",
+        "ui_type": "tri_state",
+        "order": 501,
+    },
+    # lineedit_int allow_empty：空串 = 未声明（get_config 删键）
+    "声明_上下文长度": {
+        "display_name": "声明: 上下文长度",
+        "ui_type": "lineedit_int",
+        "order": 502,
+    },
+    "声明_最大输出": {
+        "display_name": "声明: 最大输出",
+        "ui_type": "lineedit_int",
+        "order": 503,
+    },
+    # lineedit：自由文本（思考参数 thinking/thinking_budget/reasoning_effort；
+    # 思考强度逗号分隔等级列表）。空串 = 未声明（resolve 链容忍，不删键）
+    "声明_思考参数": {
+        "display_name": "声明: 思考参数",
+        "ui_type": "lineedit",
+        "order": 504,
+    },
+    "声明_思考强度": {
+        "display_name": "声明: 思考强度",
+        "ui_type": "lineedit",
+        "order": 505,
+    },
     "启用技能": {
         "display_name": "启用技能",
         "ui_type": "checkbox",
@@ -121,8 +170,35 @@ PARAM_SCHEMA = {
 MODEL_LEVEL_KEYS = frozenset(
     "温度 temp 最大Token 上下文长度 max_new_tokens "
     "top_p frequency_penalty presence_penalty "
-    "思考模式 思考预算 思考等级 启用技能".split()
+    "思考模式 思考预算 思考等级 启用技能 "
+    "声明_支持思考 声明_支持图像 声明_上下文长度 声明_最大输出 声明_思考参数 声明_思考强度".split()
 )
+
+# ============================================================
+# 服务商级管理键（非模型参数，禁止渲染到模型配置卡）
+# ============================================================
+# 「模型列表」生命周期管理链（ProviderEditCard 保存计划 + ModelRefreshService
+# 定时刷新）写入 saved_providers[config_id] 的字段。语义属于**服务商**而非模型，
+# 与 PARAM_SCHEMA 无关。
+#
+# ⚠ 模型配置卡必须过滤掉这些键：它们没有 schema，会落入 _infer_fallback_type
+#   启发式分支渲染出无意义控件（bool 曾因 isinstance(True, int) 命中 slider 分支，
+#   渲染成 0~2 滑条）。更糟的是 get_config 全量回传，滑块拖动值会覆盖 bool。
+#
+# ⚠ 两处过滤清单（main_widget._load_model_config_to_card 的 pop_key /
+#   ModelConfigCard.set_config 的 skip_keys）统一引用本集合。新增此类键必须
+#   同步此处，否则会静默泄漏进模型参数卡。
+#
+# 与 model_refresh_service.KEY_* 同值（那是刷新服务内部的读写键名常量）。
+# 「模型名称」不在本集合：它带 UI 别名映射（"选择模型"），由两处清单原位处理。
+PROVIDER_MANAGED_KEYS = frozenset({
+    "模型列表",
+    "模型关闭列表",
+    "自动刷新模型",
+    "健康检查",
+    "上次模型刷新",
+    "模型刷新状态",
+})
 
 # ──────────────────────────────────────────────────────────────
 # 服务商数据全部移入 providers 插件（万物为插件）：
