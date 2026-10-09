@@ -717,11 +717,14 @@ class ProviderEditCard(QWidget):
         from app.widgets.tab_manager_window import TabManagerWindow
 
         parent = TabManagerWindow.get_instance() or self.window()
+        # 提示文案可由服务商声明（如 Copilot：告知 user_code 在剪贴板，
+        # 避免「浏览器开了但不知道填什么」的断片——用户实测踩过）
+        hint = str(p.capabilities.get("login_hint", "") or "") or "已打开浏览器等待授权，完成后自动回填（最长等待 5 分钟）"
         InfoBar.info(
             "登录",
-            "已打开浏览器等待授权，完成后自动回填（最长等待 5 分钟）",
+            hint,
             parent=parent,
-            duration=6000,
+            duration=10000,
             position=InfoBarPosition.BOTTOM,
         )
         threading.Thread(target=self._do_login_thread, args=(hook,), daemon=True).start()

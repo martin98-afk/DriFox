@@ -2844,7 +2844,8 @@ class MessageCard(SimpleCardWidget):
     def _update_height(self, h):
         target_height = max(40, h)
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
-        self._target_viewer_height = target_height
+        # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
+        # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。
         # [L3] 稳定状态下的高度才写入宽度→高度缓存
         if not self._streaming and not self._resize_preview_mode:
             self._remember_height_for_width(target_height)
@@ -2857,8 +2858,21 @@ class MessageCard(SimpleCardWidget):
         # 重启补间 → 永远走不到终点、退化成锯齿。隔离后补间独占这条通道，
         # 收尾由 _on_height_anim_state_changed 主动校正一次。
         if self._stream_height_anim_active:
-            # 只更新已知的目标值，不打断进行中的动画
-            self._target_viewer_height = target_height
+            # [B1 回缩守卫] 追踪中上报分方向处理：
+            #   上调（真实增长）→ 实时 retarget + 填平取消挂起收缩；
+            #   下调 → 一律进 500ms 稳定窗挂起，不实时改向。
+            # 为什么下调不能实时改 target：save/restore、reorganizeContent
+            # 等 DOM 事务存在跨帧 scrollHeight 塌缩窗口（P052 自证），塌缩
+            # 读数穿透 rAF 合并 + 80ms 防抖后到达此处；若直接改小 target，
+            # tick 朝小值滑几拍、恢复值到达再拉回 = 肉眼可见的「生长中回缩」
+            # （2026-10-09 用户报告的流式卡片诡异抖动）。
+            prev_target = int(getattr(self, "_target_viewer_height", 0) or 0)
+            if target_height > prev_target:
+                self._target_viewer_height = target_height
+                self._cancel_pending_shrink()
+            elif target_height < prev_target:
+                self._schedule_pending_shrink(target_height)
+            # target == prev_target：重复上报，忽略
             return
 
         # 🆕 结束态高度动画进行中：reportHeight 回环（setFixedHeight → 视口变化 →
@@ -2884,6 +2898,14 @@ class MessageCard(SimpleCardWidget):
             self._debounced_target_height = target_height
             if not self._stream_height_timer.isActive():
                 self._stream_height_timer.start()
+            return
+
+        # [B1 噪声死区] 非流式 ±2px 以内的上报（字体度量/亚像素取整/
+        # ResizeObserver 重测抖动）直接忽略。原逻辑对 <10px 双向立即 snap，
+        # 「应用 → 重测 → 反向噪声」会形成持续振荡 = 静态卡片底边忽高忽低
+        # （2026-10-09 用户报告「卡片高度跳变」）。真实 ≤2px 变化（如图片
+        # 加载完 +1px）被忽略也无感知。
+        if abs(target_height - current_height) <= 2:
             return
 
         # 非流式小变化（<10px）→ 立即跳转避免闪烁
@@ -3068,25 +3090,14 @@ class MessageCard(SimpleCardWidget):
                 else:
                     self._apply_viewer_height(h)
         else:
-            # 收拢方向：小步回弹（<40px）不立即应用（流式块→完成块的 DOM
-            # 替换、滚动条出现/消失的重排噪声，立即应用会"长一下又缩回去"抖动）。
-            # 🐛 但旧实现直接丢弃会累积虚高：12 个工具依次完成，每次
-            # "运行框→折叠行"缩 ~24px 全被吞 → 累积 250px+ 底部空白；
-            # 正文增长会暂时填平看不出，纯工具执行阶段（正文静默）即暴露。
-            # 修复：改为**延迟落地**——500ms 稳定窗合并连续抖动，窗口期被
-            # 增长取消（内容填平），静止的收缩最终落地。大幅收拢（≥40px）
-            # 仍立即应用。
-            if current_height - h >= 40:
-                self._cancel_pending_shrink()
-                # [T29] 大幅收拢同样走追踪：多个工具框同时到期会一次性回落
-                # 数百 px，snap 是「掉下去」，追踪是「滑下去」。
-                if STREAM_HEIGHT_ANIM_ENABLED and Animations.motion_enabled():
-                    self._target_viewer_height = h
-                    self._begin_stream_height_track(h)
-                else:
-                    self._apply_viewer_height(h)
-            else:
-                self._schedule_pending_shrink(h)
+            # [B1 回缩守卫] 收拢方向统一 500ms 稳定窗：≥40px 的大收拢不再
+            # 立即应用。原设计假设大收拢必为真实 DOM 变化，但工具框批量折叠、
+            # 坞态归位等事务的瞬时塌缩读数同样可 >40px（save/restore 跨帧窗口
+            # 穿透 rAF + 80ms 防抖），立即应用 = 先缩后涨的「生长中回缩」。
+            # 挂起窗口内被增长取消、静止落地（_apply_pending_shrink 落地仍走
+            # 追踪滑下去，无台阶感）。代价：真实大收拢最晚延迟 500ms 落地，
+            # 用户注意力在正文增长时无感。新挂起覆盖旧挂起值（取最新收拢意愿）。
+            self._schedule_pending_shrink(h)
 
     def _schedule_pending_shrink(self, target: int):
         """挂起一次小步收拢：500ms 稳定窗后落地，窗口内被增长/finish 取消。"""

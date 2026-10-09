@@ -21,6 +21,7 @@
 | P003 | 末尾闪现孤立空代码块 | 分段产出把 fence 切成多段 | fence 闭合时回溯起点，整段作为单段产出 |
 | P001 | SVG 卡片的按钮消失 | 扫描器只认顶层裸 svg，被包一层就漏 | 扫描穿透「唯一子节点为 svg」的容器 |
 | P028 | 用户气泡 resize 后高度不变 | 守卫条件误伤（本意只保护 CodeWebViewer） | 加守卫时明确保护对象，别用宽泛条件 |
+| P008 | 流式卡片「生长中回缩」（缩了再长回）；静态卡片底边几像素跳变 | save/restore、reorganizeContent 的 DOM 事务存在**跨帧 scrollHeight 塌缩窗口**（P052 自证），塌缩读数穿透 rAF 合并 + 80ms 防抖后：追踪中 target 无方向守卫被直接改小（tick 朝小值滑）；非追踪下调 ≥40px 立即应用；非流式 <10px 双向立即 snap 形成噪声振荡 | 追踪中上报分方向：上调 retarget、下调挂 500ms 稳定窗（`_schedule_pending_shrink`）；流式收拢统一挂起；非流式 ±2px 噪声死区。回归 `tests/widgets/test_stream_height_noise_guard.py` |
 
 > 模式总结：**渲染链路的 bug 80% 出在「状态由启发式推断」**。改成显式状态机 / 显式标记，是反复验证有效的解法。
 
