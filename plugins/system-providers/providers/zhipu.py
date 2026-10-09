@@ -95,6 +95,10 @@ def register(registry):
             name="智谱AI",
             icon="智谱",
             api_url="https://open.bigmodel.cn/api/coding/paas/v4",
+            preset_urls=[
+                "https://open.bigmodel.cn/api/coding/paas/v4",
+                "https://open.bigmodel.cn/api/paas/v4",
+            ],
             auth_type="bearer",
             default_model="glm-4-flash",
             default_params={

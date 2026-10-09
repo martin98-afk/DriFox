@@ -122,6 +122,11 @@ def register(registry):
             name="火山方舟",
             icon="火山引擎",
             api_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+            preset_urls=[
+                # 首位与 api_url 对齐（插件声明为 coding 端点，历史 UI 硬编码只有 api/v3）
+                "https://ark.cn-beijing.volces.com/api/coding/v3",
+                "https://ark.cn-beijing.volces.com/api/v3",
+            ],
             auth_type="bearer",
             default_model="doubao-pro-32k",
             default_params={

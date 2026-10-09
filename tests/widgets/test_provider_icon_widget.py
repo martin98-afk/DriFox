@@ -13,6 +13,10 @@ import sys
 import pytest
 from PyQt5.QtWidgets import QApplication
 
+# 模块级强引用：QApplication 只被局部变量引用时，wrapper 会被 GC，
+# 之后进程退出/建 QWidget 会触发 0xC0000409（fastfail，无栈无日志）。
+_APP_HOLDER: list = []
+
 
 def _ensure_qapp():
     app = QApplication.instance()
@@ -21,6 +25,7 @@ def _ensure_qapp():
 
         QApplication.setAttribute(_Qt.AA_ShareOpenGLContexts)
         app = QApplication(sys.argv)
+    _APP_HOLDER.append(app)
     return app
 
 

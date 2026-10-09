@@ -10776,7 +10776,10 @@ class OpenAIChatToolWindow(ToolWindow):
             pname = config.get("provider_name", config_id)
             default_config = provider_default_config(pname) or {}
             for default_key, default_value in default_config.items():
-                if default_key not in config:
+                # 「认证方式」例外：插件声明的 auth_type 是权威值，老配置里存的
+                # 可能是历史写死的 "bearer"（P0-5 修复前的产物）。这条治愈只改
+                # 内存合并结果，磁盘不动，下次用户编辑保存时才被显式写入。
+                if default_key not in config or default_key == "认证方式":
                     config[default_key] = default_value
             # 附加 display_name（含后缀）供 UI 显示使用，不持久化
             # 优先使用用户填的"配置名称"（name），空则回退到 provider_name

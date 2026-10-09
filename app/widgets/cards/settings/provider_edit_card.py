@@ -28,6 +28,7 @@ from app.constants import (
 from app.plugins.registries.provider_registry import ProviderRegistry
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.provider_icons import get_provider_icon
+from app.utils.provider_ui_meta import get_auth_type, get_preset_urls
 from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.model_list_edit_dialog import ModelListEditorWidget
@@ -300,8 +301,8 @@ class ProviderEditCard(QWidget):
                 self.modelCombo.addItems(saved_models)
             elif selected_provider in merged_provider_models:
                 self.modelCombo.addItems(merged_provider_models[selected_provider])
-            elif "DeepSeek" in merged_provider_models:
-                self.modelCombo.addItems(merged_provider_models["DeepSeek"])
+            # 无匹配 → 保持空列表（不再硬编码回退到 DeepSeek：那是服务商名硬编码，
+            # 且会把 DeepSeek 的模型塞给任意新服务商）
         else:
             has_saved_models = (
                 "模型列表" in self.provider_info and isinstance(saved_models, list) and len(saved_models) > 0
@@ -426,63 +427,14 @@ class ProviderEditCard(QWidget):
                 pass
 
     def _load_preset_urls(self, provider_name: str = None, template_url: str = ""):
-        """加载预设的 API URL 端点"""
-        preset_urls = []
+        """加载预设的 API URL 端点
 
-        if provider_name:
-            if provider_name == "DeepSeek":
-                preset_urls = [
-                    "https://api.deepseek.com",
-                    "https://api.deepseek.com/chat/completions",
-                ]
-            elif provider_name == "SiliconFlow (硅基流动)":
-                preset_urls = [
-                    "https://api.siliconflow.cn/v1",
-                    "https://api.siliconflow.cn/v1/chat/completions",
-                ]
-            elif provider_name == "MiniMax" or provider_name == "MiniMax (月之暗面)":
-                preset_urls = [
-                    "https://api.minimax.chat/v1",
-                    "https://api.minimax.chat/v1/chat/completions",
-                ]
-            elif provider_name == "阿里云 (DashScope)":
-                preset_urls = [
-                    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-                    "https://llm-liz0icd5zqudfrqm.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-                ]
-            elif provider_name == "智谱AI":
-                preset_urls = [
-                    "https://open.bigmodel.cn/api/coding/paas/v4",
-                    "https://open.bigmodel.cn/api/paas/v4",
-                ]
-            elif provider_name == "百度千帆":
-                preset_urls = [
-                    "https://qianfan.baidubce.com/v2",
-                    "https://qianfan.baidubce.com/v2/chat/completions",
-                ]
-            elif provider_name == "OpenAI":
-                preset_urls = [
-                    "https://api.openai.com/v1",
-                    "https://api.openai.com/v1/chat/completions",
-                ]
-            elif provider_name == "火山方舟":
-                preset_urls = [
-                    "https://ark.cn-beijing.volces.com/api/v3",
-                ]
-            elif provider_name == "OpenCode Zen":
-                preset_urls = [
-                    "https://opencode.ai/zen/v1",
-                ]
-            elif provider_name == "OpenCode Go":
-                preset_urls = [
-                    "https://opencode.ai/zen/go/v1",
-                ]
-            else:
-                default_cfg = provider_default_config(provider_name)
-                if default_cfg:
-                    url = default_cfg.get("API_URL", "")
-                    if url:
-                        preset_urls.append(url)
+        候选来源单一化：全部走 app.utils.provider_ui_meta.get_preset_urls
+        （插件 preset_urls 声明 → api_url → 默认配置兜底）。原先的 10 个
+        elif 硬编码链已删除——它与插件声明双源且已漂移（火山插件声明
+        api/coding/v3，硬编码只给 api/v3；阿里云/智谱各 2 个 URL 也只在一处）。
+        """
+        preset_urls = get_preset_urls(provider_name) if provider_name else []
 
         all_urls = list(dict.fromkeys(preset_urls + [template_url]))
 
@@ -674,7 +626,8 @@ class ProviderEditCard(QWidget):
                 "API_URL": api_url,
                 "API_KEY": api_key,
                 "模型名称": self.modelCombo.currentText().strip(),
-                "认证方式": "bearer",
+                # 认证方式必须问插件声明（百度千帆是 bce），写死 bearer 会让签名走错分支
+                "认证方式": get_auth_type(provider_name),
             }
             threading.Thread(target=self._do_fetch_thread, args=(hook, hook_config), daemon=True).start()
             return
@@ -864,14 +817,41 @@ class ProviderEditCard(QWidget):
         不再手工保留 config_id——config_id 现在由 main_widget 端基于 apikey
         的稳定 hash 计算（见 app.core.modelmeta.provider_profile.apply_provider_save），
         编辑同 apikey 始终命中同一条目，不会再产生重复。
+
+        取值 / 判空 / 组字典 三段已抽到 provider_save_plan（纯函数可单测），
+        本方法只负责 UI 交互（确认框）与发信号。
         """
+        from app.core.modelmeta.provider_save_plan import build_provider_save_plan, collect_extra_fields
+
         if self.modelListEditor.isVisible():
             self._filtered_out_models = self.modelListEditor.get_filtered_models()
             self._sync_editor_to_combo()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
         current_models = self.modelCombo.get_all_models()
-        existing_models = self.provider_info.get("模型列表", [])
-        if not current_models and existing_models:
+
+        # 套餐用量额外字段：显式管理键恒写入（含空串），详见 collect_extra_fields
+        extra_fields = collect_extra_fields(
+            provider_name,
+            self._extra_field_rows.items(),
+            lambda attr: getattr(self, attr, None),
+        )
+
+        plan = build_provider_save_plan(
+            form_values={
+                "api_url": self.apiUrlCombo.currentText(),
+                "api_key": self.apiKeyEdit.text(),
+                "model": self.modelCombo.currentText(),
+                # 认证方式问插件声明（bce/none/anthropic…）；未注册的服务商回落到
+                # 存档值，再兜底 bearer——写死 bearer 会覆盖百度千帆的 bce 签名
+                "auth_type": get_auth_type(provider_name, self.provider_info.get("认证方式", "")),
+                "name": self.configNameEdit.text(),
+                "models": current_models,
+            },
+            old_info=self.provider_info,
+            extra_fields=extra_fields,
+        )
+
+        if plan["confirm_clear"]:
             # 用户清空了列表但旧列表非空：确认后才允许存空（旧逻辑会静默恢复旧数据）
             from app.widgets.common_dialogs import ConfirmDialog
             from app.widgets.tab_manager_window import TabManagerWindow
@@ -889,41 +869,8 @@ class ProviderEditCard(QWidget):
             dialog.exec_()
             if not confirmed.get("yes"):
                 return
-        # 编辑场景下保留旧 config_id，让 main_widget 能据此判断 apikey 是否被改过
-        existing_config_id = self.provider_info.get("config_id", "")
-        # 先提取套餐用量额外字段（在覆盖 self.provider_info 之前）
-        extra_fields = {}
-        provider_key = provider_name
-        for (pname, config_key), (_row, edit_attr) in self._extra_field_rows.items():
-            if pname != provider_key:
-                continue
-            editor = getattr(self, edit_attr, None)
-            if editor is not None:
-                val = editor.text().strip()
-                if val:
-                    extra_fields[config_key] = val
-            else:
-                old_val = self.provider_info.get(config_key, "")
-                if old_val:
-                    extra_fields[config_key] = old_val
-        self.provider_info = {
-            "API_URL": self.apiUrlCombo.currentText().strip(),
-            "API_KEY": self.apiKeyEdit.text().strip(),
-            "模型名称": self.modelCombo.currentText().strip(),
-            "认证方式": "bearer",
-            "name": self.configNameEdit.text().strip(),
-        }
-        if existing_config_id:
-            self.provider_info["config_id"] = existing_config_id
-        if current_models:
-            self.provider_info["模型列表"] = current_models
-        else:
-            # 走到这里：要么旧列表本来就空，要么用户已在确认框里确认清空
-            self.provider_info["模型列表"] = []
 
-        # 写入套餐用量额外字段
-        self.provider_info.update(extra_fields)
-
+        self.provider_info = plan["payload"]
         self.saved.emit(provider_name, self.provider_info)
 
     def _on_cancel(self):

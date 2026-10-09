@@ -189,6 +189,10 @@ def register(registry):
             name="阿里云 (DashScope)",
             icon="qwen",
             api_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            preset_urls=[
+                "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                "https://llm-liz0icd5zqudfrqm.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            ],
             auth_type="bearer",
             default_model="qwen3.5-plus",
             default_params={
