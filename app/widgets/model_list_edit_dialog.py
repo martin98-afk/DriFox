@@ -16,6 +16,7 @@ from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
     QHBoxLayout,
+    QFrame,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -24,16 +25,38 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import SwitchButton
+from qfluentwidgets import PushButton, SwitchButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css
-from app.widgets.capability_badges import ModelCapabilityBadges, build_capability_tooltip
+from app.widgets.capability_badges import ModelCapabilityBadges
 from app.widgets.flow_layout import FlowLayout  # noqa: F401  （候选区/外部沿用导入路径）
 
 _DUP_COLOR = "#e05656"  # 重复项前景色
 
-_ROW_H = 46  # 行高：双行文本（名称 + 灰字摘要）+ 开关
+_ROW_H = 46  # 行高：双行文本（名称 + 灰字摘要）+ 开关 + 底部分隔线
+# 表格列宽（行控件与表头共用）：价格/开关列固定；徽章列随字号缩放（_badges_col_width）
+_COL_PRICE_W = 76  # 单个价格列（右对齐）
+_COL_SWITCH_W = 68  # 开关列
+_PRICE_NA = "-"  # models.dev 无价格占位（对齐 opencode 的空价列）
+
+
+def _fmt_price(v) -> str:
+    """价格显示：$/M tokens 两位小数；models.dev 无数据返回占位符"""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        return _PRICE_NA
+    return f"${v:.2f}"
+
+
+def _badges_col_width() -> int:
+    """能力徽章列宽：随系统字号缩放（三个文字 chip 最宽组合）。
+
+    固定基准值在高字号档位下会截断 chip（用户实测「开关思考」被裁）。
+    估宽：11 个字 ×(11+delta) + 三 chip padding ≈36 + 间距/边距 ≈20，再留余量。
+    """
+    delta = scale_font_size(11) - 11
+    return 11 * (11 + delta) + 56
+
 
 
 def _accent_rgba(alpha_pct: int) -> str:
@@ -57,15 +80,20 @@ class _ModelRowWidget(QWidget):
         self.model_name = str(name)
         self._on_toggle = on_toggle
         self._duplicate = False
+        caps = caps or {}
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(8, 4, 8, 4)
-        row.setSpacing(8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
+        row = QHBoxLayout()
+        row.setContentsMargins(12, 4, 8, 4)
+        row.setSpacing(0)
+
+        # 名称列：模型名 + 灰字上下文（双行；第二行空则隐藏）
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(1)
-
         self.name_label = QLabel(self.model_name, self)
         self.sub_label = QLabel(self._summary_text(caps), self)
         text_col.addWidget(self.name_label)
@@ -75,29 +103,65 @@ class _ModelRowWidget(QWidget):
             self.sub_label.setVisible(False)
         row.addLayout(text_col, 1)
 
-        self.badges = ModelCapabilityBadges(caps or {}, parent=self)
+        # 能力徽章列：固定宽（保证价格/开关列跨行严格对齐，无徽章也占位）；
+        # 宽度随系统字号缩放，字号变更时 refresh_style 同步；
+        # chip 自带 tooltip 在本列表一律清除（用户要求：此列表不要悬浮提示）
+        self.badges = ModelCapabilityBadges(caps, parent=self)
+        for attr in ("think_label", "effort_label", "vision_label"):
+            chip = getattr(self.badges, attr, None)
+            if chip is not None:
+                chip.setToolTip("")
+        self.badge_holder = QWidget(self)
+        self.badge_holder.setFixedWidth(_badges_col_width())
+        badge_lay = QHBoxLayout(self.badge_holder)
+        badge_lay.setContentsMargins(0, 0, 8, 0)
         if self.badges.has_any_badge():
-            row.addWidget(self.badges, 0, Qt.AlignVCenter)
+            badge_lay.addWidget(self.badges, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        row.addWidget(self.badge_holder, 0, Qt.AlignVCenter)
 
+        # 价格四列（caps["cost"] 来自 models.dev，$/M tokens；无数据显示 "-"；
+        # 不设独立 tooltip：行 tooltip 已含能力细节，多重悬浮反而乱）
+        cost = caps.get("cost") if isinstance(caps.get("cost"), dict) else {}
+        self.price_labels: list = []
+        for key in ("input", "output", "cache_read", "cache_write"):
+            lbl = QLabel(_fmt_price(cost.get(key)), self)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            lbl.setFixedWidth(_COL_PRICE_W)
+            self.price_labels.append(lbl)
+            row.addWidget(lbl)
+
+        # 开关列：开关旁不显 On/Off 文字（QLabel 恒占宽且与双行文本行打架；
+        # 启用态已由行淡化表达）
         self.switch = SwitchButton(self)
+        self.switch.setOnText("")
+        self.switch.setOffText("")
         self.switch.setChecked(enabled)
         self.switch.checkedChanged.connect(self._emit_toggle)
-        row.addWidget(self.switch, 0, Qt.AlignVCenter)
+        switch_holder = QWidget(self)
+        switch_holder.setFixedWidth(_COL_SWITCH_W)
+        switch_lay = QHBoxLayout(switch_holder)
+        switch_lay.setContentsMargins(0, 0, 0, 0)
+        switch_lay.addWidget(self.switch, 0, Qt.AlignVCenter)
+        row.addWidget(switch_holder, 0, Qt.AlignVCenter)
+
+        outer.addLayout(row)
+
+        # 行底分隔线（表格行界线，opencode 风格）
+        self._line = QFrame(self)
+        self._line.setFixedHeight(1)
+        outer.addWidget(self._line)
 
         self._apply_text_style()
 
     @staticmethod
     def _summary_text(caps: dict) -> str:
-        """灰字摘要：上下文长度 + 能力短语（无数据隐藏整行）"""
+        """灰字摘要：只留上下文长度。能力短语（开关思考/思考强度档位等）与右侧
+        徽章重复且长文本挤压行内布局，细节收进行 tooltip（用户反馈列表「混乱」）"""
         caps = caps or {}
-        parts: list = []
         ctx = caps.get("context_limit")
         if isinstance(ctx, int) and ctx > 0:
-            parts.append(f"上下文 {ctx // 1000}K" if ctx >= 1000 else f"上下文 {ctx}")
-        phrase = build_capability_tooltip(caps)
-        if phrase:
-            parts.append(phrase)
-        return "  ·  ".join(parts)
+            return f"上下文 {ctx // 1000}K" if ctx >= 1000 else f"上下文 {ctx}"
+        return ""
 
     def _emit_toggle(self, checked):
         if callable(self._on_toggle):
@@ -122,15 +186,29 @@ class _ModelRowWidget(QWidget):
         name_color = _DUP_COLOR if muted else (Colors.TEXT_MUTED if not enabled else Colors.TEXT_PRIMARY)
         self.name_label.setStyleSheet(
             f"color: {name_color}; font-weight: 600; {get_font_family_css()} "
-            f"{font_size_css(13)}; background: transparent; border: none;"
+            f"{font_size_css(14)}; background: transparent; border: none;"
         )
         self.sub_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}; "
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}; "
             f"background: transparent; border: none;"
         )
+        # 价格列：启用态正文色、关闭/重复态灰化（opencode 关闭模型整行变灰的等价表达）
+        price_color = _DUP_COLOR if muted else (Colors.TEXT_MUTED if not enabled else Colors.TEXT_SECONDARY)
+        price_style = (
+            f"color: {price_color}; {get_font_family_css()} {font_size_css(12)}; "
+            f"background: transparent; border: none;"
+        )
+        for lbl in self.price_labels:
+            lbl.setStyleSheet(price_style)
+        self._line.setStyleSheet(f"background-color: {Colors.BORDER}; border: none;")
 
     def refresh_style(self):
         self._apply_text_style()
+        # 字号档位变更 → 徽章列宽同步（防高字号下 chip 截断）
+        try:
+            self.badge_holder.setFixedWidth(_badges_col_width())
+        except RuntimeError:
+            pass
 
 
 def _split_model_input(text: str) -> list:
@@ -178,6 +256,29 @@ class ModelListEditorWidget(QWidget):
                 seen.add(name)
                 out.append(name)
         return out
+
+    def _build_header(self) -> QWidget:
+        """表头行：与行控件共用列宽常量（改列宽两处同步）；样式走 objectName QSS"""
+        header = QWidget(self)
+        lay = QHBoxLayout(header)
+        # 左右比行控件多 1px：QListWidget QSS 边框把 viewport 内容整体推移 1px，
+        # 表头直接在 layout 里不吃这 1px，补偿后列线才对齐
+        lay.setContentsMargins(13, 6, 9, 6)
+        lay.setSpacing(0)
+        lay.addWidget(QLabel("模型", header), 1)
+        self.header_feats_label = QLabel("能力", header)
+        self.header_feats_label.setFixedWidth(_badges_col_width())
+        lay.addWidget(self.header_feats_label)
+        for cn in ("输入", "输出", "缓存读", "缓存写"):
+            lbl = QLabel(cn, header)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            lbl.setFixedWidth(_COL_PRICE_W)
+            lay.addWidget(lbl)
+        en = QLabel("启用", header)
+        en.setAlignment(Qt.AlignCenter)
+        en.setFixedWidth(_COL_SWITCH_W)
+        lay.addWidget(en)
+        return header
 
     def _build_qss(self) -> str:
         """构建主题 QSS（refresh_style 时重建，保证颜色/字号随系统）"""
@@ -235,6 +336,16 @@ class ModelListEditorWidget(QWidget):
                 background: transparent; border: none; padding: 0;
                 text-decoration: underline;
             }}
+            QWidget#modelTableHeader {{
+                background: transparent;
+                border: none;
+                border-bottom: 1px solid {Colors.BORDER};
+            }}
+            QWidget#modelTableHeader QLabel {{
+                color: {Colors.TEXT_MUTED};
+                {font_size_css(11)} {get_font_family_css()}
+                background: transparent; border: none; font-weight: 600;
+            }}
         """ + get_unified_scrollbar_style(6)
 
     def refresh_style(self):
@@ -247,13 +358,17 @@ class ModelListEditorWidget(QWidget):
         self.setStyleSheet(self._build_qss())
         search = getattr(self, "searchEdit", None)
         if search is not None:
-            search.setPlaceholderText("搜索过滤；输入后回车添加（支持多行/逗号分隔）")
-        hint = getattr(self, "hint_label", None)
-        if hint is not None:
-            hint.setStyleSheet("")  # 样式走 QSS objectName 选择器，refresh 随本表重建
+            search.setPlaceholderText("搜索过滤；输入后回车或点「添加」新增（支持多行/逗号分隔）")
         title = getattr(self, "candidate_title", None)
         if title is not None:
             title.setStyleSheet("")  # 样式走 QSS objectName 选择器
+        # 字号档位变更 → 表头徽章列宽同步（行内列宽由各行 refresh_style 自行更新）
+        feats = getattr(self, "header_feats_label", None)
+        if feats is not None:
+            try:
+                feats.setFixedWidth(_badges_col_width())
+            except RuntimeError:
+                pass
         lw = getattr(self, "listWidget", None)
         if lw is not None:
             for i in range(lw.count()):
@@ -275,9 +390,9 @@ class ModelListEditorWidget(QWidget):
                 self._caps_cache[name] = {}
         return self._caps_cache[name]
 
-    def _make_row_item(self, name: str) -> QListWidgetItem:
+    def _make_row_item(self, name: str, insert_at: int = -1) -> QListWidgetItem:
         """创建一行：模型名存 Qt.UserRole（item 本体**零绘制文本**，防与行容器
-        双绘叠印——P0 用户实测）；行控件负责全部显示"""
+        双绘叠印——P0 用户实测）；行控件负责全部显示；insert_at>=0 时头插"""
         item = QListWidgetItem()
         item.setData(Qt.UserRole, str(name))
         item.setSizeHint(QSize(0, _ROW_H))
@@ -290,7 +405,10 @@ class ModelListEditorWidget(QWidget):
         )
         # 行容器横向 Expanding：跟随 viewport 拉满（防窄窗口下挤压叠印）
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.listWidget.addItem(item)
+        if insert_at < 0:
+            self.listWidget.addItem(item)
+        else:
+            self.listWidget.insertItem(insert_at, item)
         self.listWidget.setItemWidget(item, row)
         return item
 
@@ -307,52 +425,64 @@ class ModelListEditorWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # 搜索/快速添加框
+        # 搜索/快速添加行：显式「添加」按钮给新建一个肉眼可见的入口——只靠
+        # placeholder 里「回车添加」用户找不到新建路径，且中文输入法首次回车
+        # 会被候选词吞掉，按钮彻底绕开这两个坑（用户反馈「无法手动新建」）
         self.searchEdit = QLineEdit()
         self.searchEdit.setClearButtonEnabled(True)
         self.searchEdit.textChanged.connect(lambda _t: self._apply_filter())
         self.searchEdit.returnPressed.connect(self._on_search_return)
-        layout.addWidget(self.searchEdit)
+        self.addBtn = PushButton("添加")
+        self.addBtn.clicked.connect(self._on_search_return)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
+        search_row.addWidget(self.searchEdit, 1)
+        search_row.addWidget(self.addBtn)
+        layout.addLayout(search_row)
 
-        # 提示行（Caption 弱化：灰小字，用户已知操作不拉视线）
-        self.hint_label = QLabel(
-            "Enter 新增  ·  Delete 删除  ·  Ctrl+V 粘贴"
-        )
-        self.hint_label.setObjectName("editorHint")
-        self.hint_label.setStyleSheet(
-            f"background: transparent; border: none; {get_font_family_css()}"
-            f" font-size: {scale_font_size(11)}px; padding: 0;"
-        )
-        layout.addWidget(self.hint_label)
+        # 表头（opencode 表格风；列宽常量与行控件共享 → 跨行严格对齐）
+        self.headerWidget = self._build_header()
+        layout.addWidget(self.headerWidget)
 
-        # 主列表（行内开关启停；无拖拽、无双击编辑）
-        self.listWidget = QListWidget()
-        # 最大高度：内容少时自适应矮，超出封顶后内部滚动
-        self.listWidget.setMaximumHeight(220)
-        self.listWidget.setSelectionBehavior(QListWidget.SelectRows)
-        self.listWidget.setSelectionMode(QListWidget.SingleSelection)
-        self.listWidget.itemChanged.connect(lambda _item: self._check_duplicates())
-        for m in models:
-            self._make_row_item(str(m))
-        layout.addWidget(self.listWidget)
-
-        # 候选模型区（默认折叠：只显示标题行，点击展开）
+        # 候选模型区（默认折叠：只显示标题行，点击展开；右侧「全部加回」一键批量）
+        # 布局在主列表**上方**：获取模型列表后自动展开，新模型直接出现在眼前
         self.candidateWidget = QWidget()
         candidate_layout = QVBoxLayout(self.candidateWidget)
         candidate_layout.setContentsMargins(0, 0, 0, 0)
         candidate_layout.setSpacing(4)
+        # 标题行：左侧「其他 N 个（点击展开）」+ 右侧「全部加回」（拉取几十个模型后逐个点太累）
+        candidate_header = QHBoxLayout()
+        candidate_header.setContentsMargins(0, 0, 0, 0)
         self.candidate_title = QLabel("")
         self.candidate_title.setObjectName("candidateLink")
         self.candidate_title.setCursor(Qt.PointingHandCursor)
         self.candidate_title.mousePressEvent = self._toggle_candidates
-        candidate_layout.addWidget(self.candidate_title)
+        candidate_header.addWidget(self.candidate_title)
+        candidate_header.addStretch(1)
+        self.candidate_add_all = QLabel("全部加回")
+        self.candidate_add_all.setObjectName("candidateLink")
+        self.candidate_add_all.setCursor(Qt.PointingHandCursor)
+        self.candidate_add_all.mousePressEvent = self._add_all_candidates
+        candidate_header.addWidget(self.candidate_add_all)
+        candidate_layout.addLayout(candidate_header)
         self.candidateList = QListWidget()
-        # 展开态固定可视高度 + 内部滚动（用户反馈：90px 被截断且被开关行遮挡）
-        self.candidateList.setFixedHeight(180)
+        # 高度随候选数自适应全部展开，不内滚（点行即加回主列表）
+        self.candidateList.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.candidateList.itemClicked.connect(self._restore_candidate)
         candidate_layout.addWidget(self.candidateList)
         self.candidateWidget.setVisible(False)
         layout.addWidget(self.candidateWidget)
+
+        # 主列表（行内开关启停；无拖拽、无双击编辑；高度全展开不内滚，滚动交给外层卡片）
+        self.listWidget = QListWidget()
+        self.listWidget.setSelectionBehavior(QListWidget.SelectRows)
+        self.listWidget.setSelectionMode(QListWidget.SingleSelection)
+        self.listWidget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.listWidget.itemChanged.connect(lambda _item: self._check_duplicates())
+        for m in models:
+            self._make_row_item(str(m))
+        self._update_list_height()
+        layout.addWidget(self.listWidget)
 
         # 属性别名：候选区的前身是「被过滤模型」区，旧名仍有调用方/测试引用
         self.filteredWidget = self.candidateWidget
@@ -388,11 +518,12 @@ class ModelListEditorWidget(QWidget):
     # ── 过滤与添加 ─────────────────────────────────────────
 
     def _apply_filter(self):
-        """按搜索框关键词隐藏/显示主列表项（仅视觉过滤，不删数据）"""
+        """按搜索框关键词隐藏/显示主列表项（仅视觉过滤，不删数据）；隐藏后重算高度"""
         kw = self.searchEdit.text().strip().lower()
         for i in range(self.listWidget.count()):
             name = str(self.listWidget.item(i).data(Qt.UserRole) or "")
             self.listWidget.item(i).setHidden(bool(kw) and kw not in name.lower())
+        self._update_list_height()
 
     def _on_search_return(self):
         """搜索框回车：把框内文本（可多行/逗号分隔）作为新模型批量加入"""
@@ -400,30 +531,49 @@ class ModelListEditorWidget(QWidget):
         self.searchEdit.clear()
         if not tokens:
             return
-        added = self._add_tokens(tokens)
-        if added < len(tokens):
-            self._notify_skipped(len(tokens) - added)
+        self._add_tokens(tokens)
 
     def _add_tokens(self, tokens: list) -> int:
-        """批量添加模型，跳过与现有重复项；返回实际新增数"""
+        """批量添加模型到列表**头部**（新模型置顶，用户要求），跳过重复项。
+
+        成功新增时滚动到顶部并选中首行（新增直接可见）。
+        """
         existing = set(self.get_models())
         added = 0
-        for t in tokens:
+        # 逆序遍历头插：最终顺序与输入一致（首个 token 在最上）
+        for t in reversed(tokens):
             if t in existing:
                 continue
-            self._make_row_item(t)
+            self._make_row_item(t, insert_at=0)
             existing.add(t)
             added += 1
         if added:
             self._check_duplicates()
             self._apply_filter()
+            self.listWidget.scrollToTop()
+            self.listWidget.setCurrentRow(0)
         return added
+
+    def add_models(self, models: list) -> int:
+        """公开入口：批量并入模型到列表头部（拉取结果直接进表，不走候选区）"""
+        clean = [str(m or "").strip() for m in (models or [])]
+        return self._add_tokens([m for m in clean if m])
+
+    def _update_list_height(self):
+        """主列表高度随可见行数全部展开，不内滚（滚动交给外层编辑卡）；表头随行数显隐"""
+        visible = sum(
+            1 for i in range(self.listWidget.count()) if not self.listWidget.item(i).isHidden()
+        )
+        self.listWidget.setFixedHeight(max(visible, 1) * _ROW_H + 8)
+        header = getattr(self, "headerWidget", None)
+        if header is not None:
+            header.setVisible(self.listWidget.count() > 0)
 
     def _notify_skipped(self, count: int):
         """提示被跳过的重复项数量（信息展示在提示行，不弹窗打断）"""
         self.hint_label.setText(
             f"<span style='color:{_DUP_COLOR};'>跳过 {count} 个重复项</span>"
-            "  ·  Enter 新增 · Delete 删除 · Ctrl+V 粘贴"
+            "  ·  Enter 或点添加 新增 · Delete 删除 · Ctrl+V 粘贴"
         )
 
     # ── 编辑操作 ───────────────────────────────────────────
@@ -444,9 +594,7 @@ class ModelListEditorWidget(QWidget):
             clipboard = self._clipboard_text()
             if clipboard:
                 tokens = _split_model_input(clipboard)
-                added = self._add_tokens(tokens)
-                if added < len(tokens):
-                    self._notify_skipped(len(tokens) - added)
+                self._add_tokens(tokens)
                 return
             event.ignore()
             return
@@ -474,6 +622,7 @@ class ModelListEditorWidget(QWidget):
         self._disabled.discard(name)
         self.listWidget.takeItem(row)
         self._check_duplicates()
+        self._update_list_height()
 
     def _check_duplicates(self):
         """重复项标红提示（不阻止操作；写回下拉时仍会自动去重）"""
@@ -512,13 +661,28 @@ class ModelListEditorWidget(QWidget):
         self.candidateList.clear()
         if self._candidate_expanded:
             for m in self._candidate_models:
-                self.candidateList.addItem(QListWidgetItem(m))
+                it = QListWidgetItem(m)
+                it.setSizeHint(QSize(0, 30))
+                self.candidateList.addItem(it)
+            # 高度按与 setSizeHint 一致的项高累计（30/项），否则内容不足
+            # 设定高度 → 底部大片空白（用户实测截图）
+            self.candidateList.setFixedHeight(max(self.candidateList.count(), 1) * 30 + 10)
         self.candidateList.setVisible(self._candidate_expanded)
 
     def _toggle_candidates(self, _event=None):
         """点击标题行：展开/收起候选区"""
         self._candidate_expanded = not self._candidate_expanded
         self._render_candidates()
+
+    def _add_all_candidates(self, _event=None):
+        """候选区一键全部加回主列表（获取模型列表后逐个点击太累，批量入口）"""
+        if not self._candidate_models:
+            return
+        models = list(self._candidate_models)
+        self._candidate_models.clear()
+        self._add_tokens(models)
+        self._render_candidates()
+        self.candidateWidget.setVisible(False)
 
     def get_candidate_models(self) -> list:
         """当前仍在候选区的模型（加回后的项会从这里移除）"""
@@ -547,12 +711,15 @@ class ModelListEditorWidget(QWidget):
         """薄别名：候选区（旧名 get_filtered_models）"""
         return self.get_candidate_models()
 
-    def refresh_candidates(self, provider_name: str = "", fetched_models: list | None = None):
+    def refresh_candidates(
+        self, provider_name: str = "", fetched_models: list | None = None, expand: bool = False
+    ):
         """重建候选区数据源：词典 ∪ 已拉取 ∪ 候选区残留 − 已在主列表。
 
         - 词典：`get_merged_provider_models()[provider_name]`（插件声明 + models.dev）
         - 已拉取：`fetched_models`（编辑卡最近一次「获取模型列表」的结果）
         - 残留：当前候选区里还没被加回的项（重算时不能丢）
+        - expand：True 时候选非空则自动展开（获取成功后免得再点一次标题）
 
         去重保序：词典 → 已拉取 → 残留。关闭的模型不过滤（仍可见可找回）。
         """
@@ -582,8 +749,10 @@ class ModelListEditorWidget(QWidget):
             _push(m)
 
         self.set_candidate_models(ordered, folded_hint="其他")
-
-    # ── 数据读写 ───────────────────────────────────────────
+        # set_candidate_models 会重置折叠态，展开要求在其后补（候选为空时无意义）
+        if expand and ordered:
+            self._candidate_expanded = True
+            self._render_candidates()
 
     def set_models(self, models: list):
         """装载模型列表（去重保序；清空后填入；关闭集保留交集，行开关按其回显）"""
@@ -592,6 +761,7 @@ class ModelListEditorWidget(QWidget):
             self._make_row_item(str(m))
         self._check_duplicates()
         self._apply_filter()
+        self._update_list_height()
 
     def get_models(self) -> list:
         return [

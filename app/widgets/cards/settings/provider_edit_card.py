@@ -405,81 +405,8 @@ class ProviderEditCard(QWidget):
         key_row.addWidget(self.loginBtn)
         main_layout.addLayout(key_row)
 
-        # ── 模型管理区（波8 重构：combo + 「编辑列表」按钮 → 常驻列表编辑器）──
-        # 旧形态是「下拉选一个默认模型 + 点按钮展开列表编辑器」，两处割裂；
-        # 新形态只留一个常驻编辑器：行首★=默认模型，列表即「模型列表」。
-        # 保存链：models = get_models()、关闭 = get_disabled_models()；
-        # 「模型名称」由 plan 自动维护（见 provider_save_plan，P1-9）
-        current_model = self.provider_info.get("模型名称", template.get("模型名称", ""))
-        saved_models = self.provider_info.get("模型列表", [])
-        initial_models: list = list(saved_models) if isinstance(saved_models, list) else []
-        if not initial_models:
-            # 无存档列表 → 取词典（插件声明 + models.dev），与旧 combo 行为一致
-            merged_provider_models = get_merged_provider_models()
-            key = self.nameCombo.currentText() if self.is_new else self.provider_name
-            if key in merged_provider_models:
-                initial_models = list(merged_provider_models[key])
-            elif not self.is_new and provider_default_config(self.provider_name) is not None:
-                dm = (provider_default_config(self.provider_name) or {}).get("模型名称", "")
-                if dm:
-                    initial_models = [dm]
-        if current_model and current_model not in initial_models:
-            initial_models.append(current_model)
-
-        # ── 节二：模型 ──
-        main_layout.addWidget(self._section_header("模型"))
-        model_row = QHBoxLayout()
-        model_row.addWidget(BodyLabel("模型管理:"))
-        model_row.addStretch(1)
-        # 按钮右对齐：与 Key 行「获取 API KEY」同列右缘（用户反馈）
-        # 按钮层级：次级样式，与「获取 API KEY」同列右缘
-        self.fetchBtn = PushButton("获取模型列表")
-        self.fetchBtn.clicked.connect(self._on_fetch_models)
-        model_row.addWidget(self.fetchBtn)
-        main_layout.addLayout(model_row)
-
-        # 模型列表编辑器（常驻可见；旧代码是点「编辑列表」才显示）
-        self.modelListEditor = ModelListEditorWidget(
-            initial_models, parent=self, default_model=str(current_model or "")
-        )
-        # P1-9：存量「模型关闭列表」回显（与选择器过滤链同口径；键缺失 = 全部启用）。
-        # 行构造读编辑器 _disabled，不灌这里重开编辑卡开关会全部回显 On。
-        self.modelListEditor.set_disabled_models(
-            list(self.provider_info.get("模型关闭列表") or [])
-        )
-        self.modelListEditor.setVisible(True)
-        main_layout.addWidget(self.modelListEditor)
-
-        # 自动刷新 / 健康检查（per-provider 双开关，随配置落盘）
-        # ⚠ 红线：开关值走 build_provider_save_plan 的 form_values（bool 直传），
-        # **绝不进 extra_fields** —— collect_extra_fields 对编辑器调 .text()，
-        # SwitchButton 没有该方法，必炸 AttributeError。
-        from qfluentwidgets import SwitchButton
-
-        switch_row = QHBoxLayout()
-        # 整组右对齐：与上方「获取模型列表」/「获取 API KEY」按钮同一右边缘
-        switch_row.addStretch(1)
-        auto_label = BodyLabel("自动刷新模型")
-        auto_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        switch_row.addWidget(auto_label)
-        self.autoRefreshSwitch = SwitchButton()
-        self.autoRefreshSwitch.setChecked(bool(self.provider_info.get("自动刷新模型", False)))
-        self.autoRefreshSwitch.setToolTip("每 24 小时拉取一次模型列表；默认模型仍可用时静默更新")
-        switch_row.addWidget(self.autoRefreshSwitch)
-        switch_row.addSpacing(16)
-        health_label = BodyLabel("健康检查")
-        health_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        switch_row.addWidget(health_label)
-        self.healthCheckSwitch = SwitchButton()
-        self.healthCheckSwitch.setChecked(bool(self.provider_info.get("健康检查", False)))
-        self.healthCheckSwitch.setToolTip("每 24 小时探测一次可用性，只更新状态不修改模型列表")
-        switch_row.addWidget(self.healthCheckSwitch)
-        main_layout.addLayout(switch_row)
-
-        # 双开关行（后面是套餐用量区）
-
-        # 套餐用量查询额外配置（可选）— 由 providers 插件声明（ProviderDef.extra_quota_fields）。
-        # P2 美化：默认折叠（节头点击展开），长 hash 输入不再常驻。
+        # ── 套餐用量查询额外配置（可选）— 由 providers 插件声明（ProviderDef.extra_quota_fields）。
+        # 默认折叠（节头点击展开）；放在基础连接末尾，模型节前不据版面（用户要求）
         self._extra_expanded = False
         self._extra_config_section = QWidget()
         extra_layout = QVBoxLayout(self._extra_config_section)
@@ -529,6 +456,76 @@ class ProviderEditCard(QWidget):
 
         # 初始可见性由当前服务商决定
         self._update_extra_config_visibility()
+
+        # ── 模型管理区（波8 重构：combo + 「编辑列表」按钮 → 常驻列表编辑器）──
+        # 旧形态是「下拉选一个默认模型 + 点按钮展开列表编辑器」，两处割裂；
+        # 新形态只留一个常驻编辑器：行首★=默认模型，列表即「模型列表」。
+        # 保存链：models = get_models()、关闭 = get_disabled_models()；
+        # 「模型名称」由 plan 自动维护（见 provider_save_plan，P1-9）
+        current_model = self.provider_info.get("模型名称", template.get("模型名称", ""))
+        saved_models = self.provider_info.get("模型列表", [])
+        initial_models: list = list(saved_models) if isinstance(saved_models, list) else []
+        if not initial_models:
+            # 无存档列表 → 取词典（插件声明 + models.dev），与旧 combo 行为一致
+            merged_provider_models = get_merged_provider_models()
+            key = self.nameCombo.currentText() if self.is_new else self.provider_name
+            if key in merged_provider_models:
+                initial_models = list(merged_provider_models[key])
+            elif not self.is_new and provider_default_config(self.provider_name) is not None:
+                dm = (provider_default_config(self.provider_name) or {}).get("模型名称", "")
+                if dm:
+                    initial_models = [dm]
+        if current_model and current_model not in initial_models:
+            initial_models.append(current_model)
+
+        # ── 节二：模型 ──
+        main_layout.addWidget(self._section_header("模型"))
+        # 单行：模型管理 | stretch | 自动刷新模型 | 健康检查 | 获取模型列表
+        # 双开关放按钮前面同行（用户要求）；⚠ 红线：开关值走 build_provider_save_plan
+        # 的 form_values（bool 直传），**绝不进 extra_fields** —— collect_extra_fields
+        # 对编辑器调 .text()，SwitchButton 没有该方法，必炸 AttributeError。
+        from qfluentwidgets import SwitchButton
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(BodyLabel("模型管理:"))
+        model_row.addStretch(1)
+
+        auto_label = BodyLabel("自动刷新模型")
+        model_row.addWidget(auto_label)
+        self.autoRefreshSwitch = SwitchButton()
+        self.autoRefreshSwitch.setOnText("")
+        self.autoRefreshSwitch.setOffText("")
+        self.autoRefreshSwitch.setChecked(bool(self.provider_info.get("自动刷新模型", False)))
+        self.autoRefreshSwitch.setToolTip("每 24 小时拉取一次模型列表；默认模型仍可用时静默更新")
+        model_row.addWidget(self.autoRefreshSwitch)
+        model_row.addSpacing(16)
+
+        health_label = BodyLabel("健康检查")
+        model_row.addWidget(health_label)
+        self.healthCheckSwitch = SwitchButton()
+        self.healthCheckSwitch.setOnText("")
+        self.healthCheckSwitch.setOffText("")
+        self.healthCheckSwitch.setChecked(bool(self.provider_info.get("健康检查", False)))
+        self.healthCheckSwitch.setToolTip("每 24 小时探测一次可用性，只更新状态不修改模型列表")
+        model_row.addWidget(self.healthCheckSwitch)
+        model_row.addSpacing(16)
+
+        self.fetchBtn = PushButton("获取模型列表")
+        self.fetchBtn.clicked.connect(self._on_fetch_models)
+        model_row.addWidget(self.fetchBtn)
+        main_layout.addLayout(model_row)
+
+        # 模型列表编辑器（常驻可见；旧代码是点「编辑列表」才显示）
+        self.modelListEditor = ModelListEditorWidget(
+            initial_models, parent=self, default_model=str(current_model or "")
+        )
+        # P1-9：存量「模型关闭列表」回显（与选择器过滤链同口径；键缺失 = 全部启用）。
+        # 行构造读编辑器 _disabled，不灌这里重开编辑卡开关会全部回显 On。
+        self.modelListEditor.set_disabled_models(
+            list(self.provider_info.get("模型关闭列表") or [])
+        )
+        self.modelListEditor.setVisible(True)
+        main_layout.addWidget(self.modelListEditor)
 
         # 底部弹性空间：将所有内容推到上方
         main_layout.addStretch(1)
@@ -869,9 +866,9 @@ class ProviderEditCard(QWidget):
         self.fetchBtn.setEnabled(True)
         self._fetched_models = [str(m) for m in (models or []) if m]
 
-        # 拉取结果 → 候选区（与词典合并去重；已在主列表的排除）
-        provider_key = self.nameCombo.currentText() if self.is_new else self.provider_name
-        self.modelListEditor.refresh_candidates(provider_key, self._fetched_models)
+        # 拉取结果直接并入主列表头部（新模型默认启用）——不再走候选区逐个加回；
+        # 不想要的模型用行内开关关闭即可（opencode 同款流程，用户反馈候选区太绕）
+        added = self.modelListEditor.add_models(self._fetched_models)
 
         # 波7 状态元数据：在候选注入完成之后写（与刷新服务同键）
         from app.core.modelmeta.model_refresh_service import STATUS_OK, now_ts_str
@@ -901,7 +898,7 @@ class ProviderEditCard(QWidget):
             parent = TabManagerWindow.get_instance() or self.window()
             InfoBar.success(
                 "已获取",
-                f"{len(self._fetched_models)} 个模型已加入候选区（点击展开加回）",
+                f"{len(self._fetched_models)} 个模型已加入列表（新增 {added} 个，已置顶）",
                 parent=parent,
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,

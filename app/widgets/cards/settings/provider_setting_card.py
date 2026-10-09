@@ -181,13 +181,15 @@ class ProviderItem(QWidget):
         main_layout.addWidget(btn_widget, 0, Qt.AlignRight | Qt.AlignVCenter)
 
     def _subtitle_text(self) -> str:
-        """副标题：「{模型名称} · {N} 个模型」；无「模型列表」键（词典兜底态）只显模型名。"""
-        model = str(self.provider_info.get("模型名称", "") or "")
+        """副标题：「N 个模型」。
+
+        默认模型语义已随星标退役（「模型名称」由保存链自动维护，对用户无意义），
+        不再展示；无「模型列表」键（词典兜底态）返回空串。
+        """
         models = self.provider_info.get("模型列表")
         if isinstance(models, list):
-            count = len(models)
-            return f"{model} · {count} 个模型" if model else f"{count} 个模型"
-        return model
+            return f"{len(models)} 个模型"
+        return ""
 
     def _has_refresh_capability(self) -> bool:
         """是否具备刷新能力（有 models_hook 或有 API_URL）；无能力不画状态点。"""
