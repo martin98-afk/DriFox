@@ -108,6 +108,36 @@ class TestPickerRendering:
         assert card.provider_names() == [mod.CUSTOM_ENTRY]
 
 
+class TestTileFixedWidth:
+    """用户裁决（第三轮）：限制的是卡片本体宽度——tile setFixedSize 固定，
+    容器多宽 tile 都不跟（系统配置卡家族 setFixedWidth 同款写法）"""
+
+    def test_tile_size_constant(self, _qapp, registry):
+        """tile 固定 176×68，构造即定，无 width 参数"""
+        from app.widgets.cards.settings.provider_picker_card import _CARD_H, _CARD_W, ProviderPickerCard
+
+        registry.register(ProviderDef(name="DeepSeek", api_url="https://api.deepseek.com"), source="plugin:test")
+        card = ProviderPickerCard()
+        for tile in card.tiles():
+            assert (tile.width(), tile.height()) == (_CARD_W, _CARD_H), "tile 尺寸应为固定常量"
+            assert tile.maximumWidth() == _CARD_W, "tile 必须有宽度上限约束（setFixedSize 副作用）"
+
+    def test_tile_width_invariant_under_container_resize(self, _qapp, registry):
+        """红线：容器 resize（含 1920 宽）后 tile 宽度恒定不变"""
+        from app.widgets.cards.settings.provider_picker_card import _CARD_W, ProviderPickerCard
+
+        registry.register(ProviderDef(name="DeepSeek", api_url="https://api.deepseek.com"), source="plugin:test")
+        card = ProviderPickerCard()
+        card.resize(700, 400)
+        _qapp.processEvents()
+        card.resize(1280, 400)
+        _qapp.processEvents()
+        card.resize(1920, 400)
+        _qapp.processEvents()
+        for tile in card.tiles():
+            assert tile.width() == _CARD_W, f"容器拉宽到 1920 后 tile 宽度不得变（实际 {tile.width()}）"
+
+
 # ══════════════════════════════════════════════════════════════════
 # 信号路由
 # ══════════════════════════════════════════════════════════════════
@@ -210,7 +240,7 @@ class TestEditCardPreset:
         assert "预置服务商" in labels, "静态行应带「预置服务商」小标"
         assert card.apiUrlCombo.currentText() == "https://qianfan.baidubce.com/v2", "URL 应预填"
         assert not card.apiUrlCombo.isEnabled(), "预置态 URL 应只读"
-        assert card.modelCombo.currentText() == "ernie-4.0", "默认模型应预填"
+        assert card.modelListEditor.getDefaultModel() == "ernie-4.0", "默认模型应预填"
         assert card.apiKeyEdit.isEnabled(), "API_KEY 必须可编辑（唯一需用户填的）"
 
     def test_preset_static_row_has_icon(self, _qapp, registry):
@@ -244,7 +274,7 @@ class TestEditCardPreset:
         )
         card = ProviderEditCard(provider_name="", provider_info={}, is_new=True, preset_provider="阿里云 (DashScope)")
         assert card.apiUrlCombo.currentText() == "https://token-plan.example.com/v1"
-        assert card.modelCombo.currentText() == "qwen3.5-plus"
+        assert card.modelListEditor.getDefaultModel() == "qwen3.5-plus"
 
     def test_no_preset_keeps_manual_flow(self, _qapp, registry):
         """无预置（自定义路径）：下拉可编辑，走原手工流程"""

@@ -72,8 +72,8 @@ def test_save_payload_uses_declared_bce(card):
     captured = {}
     c.saved.connect(lambda name, info: captured.update(info=info))
     c.apiKeyEdit.setText("sk-x")
-    c.modelCombo.addItem("ernie-4.0")
-    c.modelCombo.setCurrentIndex(c.modelCombo.findText("ernie-4.0"))
+    c.modelListEditor._add_tokens(["ernie-4.0"])
+    c.modelListEditor.setDefaultModel("ernie-4.0")
     c._on_save()
 
     assert captured["info"]["认证方式"] == "bce", "插件声明的 bce 必须被保留"

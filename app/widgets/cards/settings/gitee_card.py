@@ -760,7 +760,9 @@ class _GiteeMorePopup(QWidget):
     ① 账号区（头像 + 名称/仓库，点击跳仓库）+ 绑定/解绑
     ② 快捷开关：深色模式 / 窗口置顶
     ③ 快捷导航：外观 / 插件设置（直跳设置卡对应页）
-    ④ 设置 / 帮助与反馈（新建会话发起 issue 提交引导）
+    ③ 快捷导航：外观 / 插件设置（直跳设置卡对应页）
+    ④ 帮助与反馈（新建会话发起 issue 提交引导）/ 检查更新
+    ⑤ 设置（底部）
     """
 
     def __init__(self, account_row: "GiteeAccountRow", parent=None):
@@ -874,15 +876,7 @@ class _GiteeMorePopup(QWidget):
         self._plugins_row.clicked.connect(lambda: self._open_settings_tab("plugins"))
         layout.addWidget(self._plugins_row)
 
-        layout.addWidget(self._make_separator())
-
-        # ── 设置 / 帮助与反馈 ──
-        self._open_settings_btn = _MenuRow(
-            "配置管理", "设置", right=self._make_chevron(), parent=self._container
-        )
-        self._open_settings_btn.clicked.connect(self._on_open_settings)
-        layout.addWidget(self._open_settings_btn)
-
+        # ── 帮助与反馈 ──
         self._feedback_row = _MenuRow(
             FluentIcon.FEEDBACK, "帮助与反馈", right=self._make_chevron(), parent=self._container
         )
@@ -898,6 +892,15 @@ class _GiteeMorePopup(QWidget):
         self._update_row = _MenuRow(FluentIcon.UPDATE, "检查更新", right=version_lbl, parent=self._container)
         self._update_row.clicked.connect(self._on_check_update)
         layout.addWidget(self._update_row)
+
+        layout.addWidget(self._make_separator())
+
+        # ── 设置（最底部） ──
+        self._open_settings_btn = _MenuRow(
+            "配置管理", "设置", right=self._make_chevron(), parent=self._container
+        )
+        self._open_settings_btn.clicked.connect(self._on_open_settings)
+        layout.addWidget(self._open_settings_btn)
 
         # 阴影透明边距：投影画在容器外（popup 自身为透明层）；收紧边距让卡片贴近窗口边角
         main_layout = QVBoxLayout(self)

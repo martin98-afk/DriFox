@@ -11,7 +11,8 @@
 - 内部**横向分区**：左图标区（固定 30px）+ 右文字区（QVBox：名称 / host）
   —— 绝不叠放（早期版本图标压字）
 - 名称超宽走 elide，全名与 host 进 tooltip
-- 尺寸统一（宽 160 × 高 68），FlowLayout 自动换行出网格感
+- 卡片本体 setFixedSize 固定 176×68（系统配置卡同款写法）：容器多宽 tile 都不跟，
+  FlowLayout 自动换行出网格感
 
 数据源：``ProviderRegistry``（providers 插件声明的 ``ProviderDef``），零硬编码。
 分组复用 ``provider_setting_card._group_of``，配色复用 ``_GROUP_COLORS``。
@@ -26,9 +27,12 @@ from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 from app.widgets.flow_layout import FlowLayout
 
-# 卡片统一尺寸（FlowLayout 换行后成网格感）
-_CARD_W = 160
+# 卡片尺寸：固定 176×68（用户裁决：限制的是**卡片本体宽度**，照搬系统配置卡
+# 家族的 setFixedWidth/setFixedSize 写法）。不按容器推导——实测宽窗口下
+# tile 被拉成 230px 横条铺满。
+_CARD_W = 176
 _CARD_H = 68
+
 # 图标区边长与图标边长（横向分区，不与文字重叠）
 _ICON_BOX = 30
 _ICON_SIZE = 22
@@ -263,7 +267,7 @@ class ProviderPickerCard(QWidget):
         self._add_flow_row([(CUSTOM_ENTRY, "手动填写全部参数")])
 
     def _add_flow_row(self, entries: List[tuple]) -> None:
-        """一行 FlowLayout（卡片按可用宽度自动换行）"""
+        """一行 FlowLayout（卡片固定尺寸，按可用宽度自动换行）"""
         row = QWidget(self)
         row.setStyleSheet("background: transparent;")
         flow = FlowLayout(row, spacing=_TILE_SPACING, margins=0)

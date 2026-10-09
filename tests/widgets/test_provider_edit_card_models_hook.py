@@ -119,8 +119,8 @@ def test_models_hook_empty_result_emits_failure(card_with_hook):
     assert card.fetchBtn.isEnabled()
 
 
-def test_models_hook_success_updates_combo(card_with_hook):
-    """成功路径：模型列表写入下拉框"""
+def test_models_hook_success_feeds_candidates(card_with_hook):
+    """成功路径：hook 返回的模型进入候选区（波8 起不再写下拉框）"""
 
     def hook(config):
         return ["glm-5.3", "hy3"]
@@ -130,9 +130,10 @@ def test_models_hook_success_updates_combo(card_with_hook):
     card._on_fetch_models()
     _wait_threads(card)
 
-    items = [card.modelCombo.itemText(i) for i in range(card.modelCombo.count())]
-    assert "glm-5.3" in items
-    assert "hy3" in items
+    candidates = card.modelListEditor.get_candidate_models()
+    assert "glm-5.3" in candidates, f"hook 结果应进候选区，实际 {candidates}"
+    assert "hy3" in candidates
+    assert card._fetched_models == ["glm-5.3", "hy3"], "原始结果留存供候选区重算"
 
 
 def test_on_fetch_failed_shows_reason(monkeypatch):

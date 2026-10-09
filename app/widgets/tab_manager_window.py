@@ -43,10 +43,10 @@ _MAX_CHAT_WIDTH = 1000
 
 # ── 覆盖层「配置类」卡片最大宽度（px）──
 # 比对话区稍宽，同样在超宽窗口下限宽居中，避免系统配置卡片无限拉伸。
-# 仅作用于配置类卡片（系统设置/服务商/Hook/MCP）；差异对比、子智能体
+# 仅作用于配置类卡片（系统设置/服务商/添加服务商/Hook/MCP）；差异对比、子智能体
 # 会话等内容型卡片不限宽，铺满对话区。
 _MAX_OVERLAY_WIDTH = _MAX_CHAT_WIDTH + 100
-_CONFIG_REPLACE_CARDS = frozenset({"settings", "provider_edit", "hook_edit", "mcp_edit"})
+_CONFIG_REPLACE_CARDS = frozenset({"settings", "provider_edit", "provider_picker", "hook_edit", "mcp_edit"})
 
 # ── 标题栏 tab：内置「聊天」常驻 tab + 已知「内置替换」全局卡片 ──
 # full 容器卡片（UI 插件 full 卡 + 下列内置全局卡）打开时在标题栏 tab 区显示

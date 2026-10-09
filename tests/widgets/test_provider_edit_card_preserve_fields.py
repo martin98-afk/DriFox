@@ -157,9 +157,9 @@ def test_form_keys_overwritten_by_new_values(card):
     cid = compute_provider_config_id(old_info)
     old_info["config_id"] = cid  # 编辑态必带：让 apply_provider_save 认作同一条目
     c = card(old_info)
-    # modelCombo.currentText() 取的是当前 index 的 item 文本，故必须先入列再定位
-    c.modelCombo.addItem("new-model")
-    c.modelCombo.setCurrentIndex(c.modelCombo.findText("new-model"))
+    # 波8：默认模型由编辑器「★」表示（setDefaultModel）
+    c.modelListEditor._add_tokens(["new-model"])
+    c.modelListEditor.setDefaultModel("new-model")
     c.configNameEdit.setText("新配置名")
 
     saved_providers = {cid: dict(old_info)}
@@ -206,7 +206,8 @@ def test_new_provider_save_does_not_raise(card):
     """新建态：保存不报错，且不引入「幽灵键」（未编辑的字段不进 payload）"""
     c = card({"API_URL": "", "API_KEY": "", "模型名称": ""}, is_new=True)
     c.apiKeyEdit.setText("sk-brand-new")
-    c.modelCombo.setCurrentText("test-model")
+    c.modelListEditor.set_models(["test-model"])
+    c.modelListEditor.setDefaultModel("test-model")
 
     saved_providers = {}
     captured = _save(c)

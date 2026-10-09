@@ -335,8 +335,10 @@ class ProviderEditCard(QWidget):
                 self.apiUrlCombo.setCurrentIndex(idx)
             else:
                 self.apiUrlCombo.setCurrentText(current_url)
-        if self.preset_provider:
-            # 预置态：URL 由插件声明给定，禁改（避免用户误改 endpoint 后无法调用）
+        if self.is_new and self.preset_provider:
+            # 预置态：URL 由插件声明给定，禁改（避免用户误改 endpoint 后无法调用）。
+            # ⚠ 必须限 is_new：编辑态 preset_provider 无意义，若也走只读会把
+            # 用户编辑既有配置的 URL 锁死（R6-4 发现的真 bug）。
             self.apiUrlCombo.setDisabled(True)
         url_row.addWidget(self.apiUrlCombo, 1)
         main_layout.addLayout(url_row)
@@ -362,58 +364,41 @@ class ProviderEditCard(QWidget):
         key_row.addWidget(self.loginBtn)
         main_layout.addLayout(key_row)
 
-        # 获取按钮行
-        self.fetchBtn = PrimaryPushButton("获取模型列表")
-        self.fetchBtn.clicked.connect(self._on_fetch_models)
-
-        model_row = QHBoxLayout()
-        model_row.addWidget(BodyLabel("默认模型:"))
-        self.modelCombo = SearchableEditableComboBox()
-        self._searchable_combos.append(self.modelCombo)
-        self.modelCombo.setMaxVisibleItems(10)
-        self.modelCombo.setDisabled(False)
+        # ── 模型管理区（波8 重构：combo + 「编辑列表」按钮 → 常驻列表编辑器）──
+        # 旧形态是「下拉选一个默认模型 + 点按钮展开列表编辑器」，两处割裂；
+        # 新形态只留一个常驻编辑器：行首★=默认模型，列表即「模型列表」。
+        # 保存链：model = getDefaultModel()、models = get_models()（见 _on_save）。
         current_model = self.provider_info.get("模型名称", template.get("模型名称", ""))
         saved_models = self.provider_info.get("模型列表", [])
+        initial_models: list = list(saved_models) if isinstance(saved_models, list) else []
+        if not initial_models:
+            # 无存档列表 → 取词典（插件声明 + models.dev），与旧 combo 行为一致
+            merged_provider_models = get_merged_provider_models()
+            key = self.nameCombo.currentText() if self.is_new else self.provider_name
+            if key in merged_provider_models:
+                initial_models = list(merged_provider_models[key])
+            elif not self.is_new and provider_default_config(self.provider_name) is not None:
+                dm = (provider_default_config(self.provider_name) or {}).get("模型名称", "")
+                if dm:
+                    initial_models = [dm]
+        if current_model and current_model not in initial_models:
+            initial_models.append(current_model)
 
-        merged_provider_models = get_merged_provider_models()
-        if self.is_new:
-            selected_provider = self.nameCombo.currentText()
-            if saved_models and isinstance(saved_models, list):
-                self.modelCombo.addItems(saved_models)
-            elif selected_provider in merged_provider_models:
-                self.modelCombo.addItems(merged_provider_models[selected_provider])
-            # 无匹配 → 保持空列表（不再硬编码回退到 DeepSeek：那是服务商名硬编码，
-            # 且会把 DeepSeek 的模型塞给任意新服务商）
-        else:
-            has_saved_models = (
-                "模型列表" in self.provider_info and isinstance(saved_models, list) and len(saved_models) > 0
-            )
-            if has_saved_models:
-                self.modelCombo.addItems(saved_models)
-            elif self.provider_name in merged_provider_models:
-                self.modelCombo.addItems(merged_provider_models[self.provider_name])
-            elif provider_default_config(self.provider_name) is not None:
-                default_model = (provider_default_config(self.provider_name) or {}).get("模型名称", "")
-                if default_model:
-                    self.modelCombo.addItem(default_model)
+        model_row = QHBoxLayout()
+        model_row.addWidget(BodyLabel("模型管理:"))
 
-        if current_model:
-            existing = [self.modelCombo.itemText(i) for i in range(self.modelCombo.count())]
-            if current_model not in existing:
-                self.modelCombo.addItem(current_model)
-            idx = self.modelCombo.findText(current_model)
-            if idx >= 0:
-                self.modelCombo.setCurrentIndex(idx)
-
-        model_row.addWidget(self.modelCombo, 1)
+        self.fetchBtn = PrimaryPushButton("获取模型列表")
+        self.fetchBtn.clicked.connect(self._on_fetch_models)
         model_row.addWidget(self.fetchBtn)
-
-        # 管理模型列表按钮
-        self.manageModelsBtn = PrimaryPushButton("编辑列表")
-        self.manageModelsBtn.clicked.connect(self._on_manage_models)
-        model_row.addWidget(self.manageModelsBtn)
-
+        model_row.addStretch(1)
         main_layout.addLayout(model_row)
+
+        # 模型列表编辑器（常驻可见；旧代码是点「编辑列表」才显示）
+        self.modelListEditor = ModelListEditorWidget(
+            initial_models, parent=self, default_model=str(current_model or "")
+        )
+        self.modelListEditor.setVisible(True)
+        main_layout.addWidget(self.modelListEditor)
 
         # 自动刷新 / 健康检查（per-provider 双开关，随配置落盘）
         # ⚠ 红线：开关值走 build_provider_save_plan 的 form_values（bool 直传），
@@ -440,10 +425,7 @@ class ProviderEditCard(QWidget):
         switch_row.addStretch(1)
         main_layout.addLayout(switch_row)
 
-        # 模型列表内嵌编辑器（点击「编辑列表」展开/收起）
-        self.modelListEditor = ModelListEditorWidget(parent=self)
-        self.modelListEditor.setVisible(False)
-        main_layout.addWidget(self.modelListEditor)
+        # 双开关行（后面是套餐用量区）
 
         # 套餐用量查询额外配置（可选）— 由 providers 插件声明（ProviderDef.extra_quota_fields）
         self._extra_config_section = QWidget()
@@ -572,20 +554,22 @@ class ProviderEditCard(QWidget):
                 self.apiUrlCombo.setCurrentText(preset_url)
 
             merged_provider_models = get_merged_provider_models()
-            self.modelCombo.blockSignals(True)
-            self.modelCombo.clear()
-            if name in merged_provider_models:
-                self.modelCombo.addItems(merged_provider_models[name])
+            # 切服务商 → 主列表重建为该服务商词典（默认取首项），候选区跟随刷新。
+            # （旧实现是刷 combo 下拉；现在是「主列表 + 候选区」双区模型）
+            models = list(merged_provider_models.get(name, []))
             default_model = template.get("模型名称", "")
-            if default_model:
-                self.modelCombo.addItem(default_model)
-            if self.modelCombo.count() > 0:
-                self.modelCombo.setCurrentIndex(0)
-            self.modelCombo.blockSignals(False)
-        # 编辑器可见时同步刷新，保持与下拉一致（防双源漂移）
-        if self.modelListEditor.isVisible():
-            self.modelListEditor.set_models(self.modelCombo.get_all_models())
-            self.modelListEditor.set_filtered_models([])
+            if default_model and default_model not in models:
+                models.append(default_model)
+            self.modelListEditor.setDefaultModel(default_model if default_model else "")
+            self.modelListEditor.set_models(models)
+            if not default_model and models:
+                self.modelListEditor.setDefaultModel(models[0])
+        # 候选区跟随当前服务商（词典 ∪ 已拉取 ∪ 残留，排除主列表已有的）
+        try:
+            target_provider = self.nameCombo.currentText() if self.is_new else self.provider_name
+            self.modelListEditor.refresh_candidates(target_provider, self._fetched_models)
+        except Exception:
+            pass
         self._update_extra_config_visibility()
 
     def _update_extra_config_visibility(self):
@@ -731,7 +715,7 @@ class ProviderEditCard(QWidget):
             hook_config = {
                 "API_URL": api_url,
                 "API_KEY": api_key,
-                "模型名称": self.modelCombo.currentText().strip(),
+                "模型名称": self.modelListEditor.getDefaultModel().strip(),
                 # 认证方式问插件声明（百度千帆是 bce），写死 bearer 会让签名走错分支；
                 # 未注册的服务商回落到存档值，再兜底 bearer
                 "认证方式": get_auth_type(provider_name, self.provider_info.get("认证方式", "")),
@@ -787,88 +771,86 @@ class ProviderEditCard(QWidget):
     def _on_fetch_success(self, models: list):
         """获取成功（主线程）。
 
-        现有列表非空时不再静默覆盖（会吞掉手工编辑结果），弹三选：
-        合并 / 替换 / 取消；列表为空（首次获取）时直接填入。
+        波8 重构：不再弹「合并 / 替换」三选弹窗，而是把拉取结果**整体注入候选区**
+        （与词典/被过滤项同区），由用户点击加回所需模型。理由：三选弹窗强制用户
+        在「看不到当前列表」的情况下做决策，而候选区让两边的差异一目了然、可逐个取舍。
+
+        默认模型失效判定保留（若默认不在拉取结果里，提示但不动主列表）。
         """
         self.fetchBtn.setEnabled(True)
-        from app.widgets.tab_manager_window import TabManagerWindow
+        self._fetched_models = [str(m) for m in (models or []) if m]
 
-        parent = TabManagerWindow.get_instance() or self.window()
-        existing = self.modelCombo.get_all_models()
-        if not existing:
-            self._apply_fetched(models, mode="replace")
-            return
-        from app.widgets.common_dialogs import ChoiceDialog
+        # 默认模型失效提示（保留原语义，只是不再改主列表）
+        current_default = self.modelListEditor.getDefaultModel()
+        if current_default and self._fetched_models and current_default not in self._fetched_models:
+            try:
+                from qfluentwidgets import InfoBar, InfoBarPosition
+                from app.widgets.tab_manager_window import TabManagerWindow
 
-        dialog = ChoiceDialog(
-            title="获取成功",
-            content=f"获取到 {len(models)} 个模型，现有列表 {len(existing)} 个，如何处理？",
-            options=[("merge", "合并"), ("replace", "替换")],
-            parent=parent,
-        )
-        dialog.chosen.connect(lambda key: self._apply_fetched(models, mode=key))
-        dialog.exec_()
+                parent = TabManagerWindow.get_instance() or self.window()
+                InfoBar.warning(
+                    "默认模型不在拉取结果中",
+                    f"「{current_default}」未出现在本次获取的列表里（已保留，可手动确认）",
+                    parent=parent,
+                    duration=4000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            except Exception:
+                pass
 
-    def _apply_fetched(self, models: list, mode: str):
-        """把获取结果写入模型下拉与内嵌编辑器。
+        # 拉取结果 → 候选区（与词典合并去重；已在主列表的排除）
+        provider_key = self.nameCombo.currentText() if self.is_new else self.provider_name
+        self.modelListEditor.refresh_candidates(provider_key, self._fetched_models)
 
-        合并 = 现有列表在前、新模型去重追加；替换 = 直接覆盖。
-        默认模型若不在结果中：提示并切到第一项，不再静默改值。
-        """
-        from qfluentwidgets import InfoBar
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        parent = TabManagerWindow.get_instance() or self.window()
-        if mode == "merge":
-            existing = self.modelCombo.get_all_models()
-            new_list = existing + [m for m in models if m not in existing]
-            added = len(new_list) - len(existing)
-        else:
-            new_list = list(models)
-            added = len(new_list)
-
-        self.modelCombo.blockSignals(True)
-        current = self.modelCombo.currentText()
-        self.modelCombo.clear()
-        self.modelCombo.addItems(new_list)
-        if current and self.modelCombo.findText(current) >= 0:
-            self.modelCombo.setCurrentIndex(self.modelCombo.findText(current))
-        elif current and self.modelCombo.count() > 0:
-            self.modelCombo.setCurrentIndex(0)
-            InfoBar.warning(
-                "默认模型已失效",
-                f"「{current}」不在获取结果中，已切换为「{self.modelCombo.currentText()}」",
-                parent=parent,
-                duration=4000,
-                position=InfoBarPosition.BOTTOM,
-            )
-        self.modelCombo.blockSignals(False)
-
-        # 内嵌编辑器可见时同步刷新，避免收起时旧数据把获取结果写回吞掉
-        if self.modelListEditor.isVisible():
-            self.modelListEditor.set_models(new_list)
-            self.modelListEditor.set_filtered_models(self._filtered_out_models)
-
-        if mode == "merge":
-            InfoBar.success(
-                "已合并",
-                f"新增 {added} 个，保留原有 {len(new_list) - added} 个",
-                parent=parent,
-                duration=2500,
-                position=InfoBarPosition.BOTTOM,
-            )
-        else:
-            InfoBar.success(
-                "已替换",
-                f"获取到 {len(new_list)} 个模型",
-                parent=parent,
-                duration=2000,
-                position=InfoBarPosition.BOTTOM,
-            )
-        # 手动刷新的状态元数据：随下次保存携带（写「上次模型刷新」+「模型刷新状态」）
+        # 波7 状态元数据：在候选注入完成之后写（与刷新服务同键）
         from app.core.modelmeta.model_refresh_service import STATUS_OK, now_ts_str
 
         self._fetch_meta = {"ts": now_ts_str(), "status": STATUS_OK}
+
+        if not self._fetched_models:
+            try:
+                from qfluentwidgets import InfoBar, InfoBarPosition
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                parent = TabManagerWindow.get_instance() or self.window()
+                InfoBar.info(
+                    "未获取到模型",
+                    "接口返回为空，请检查服务商配置",
+                    parent=parent,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            except Exception:
+                pass
+            return
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            parent = TabManagerWindow.get_instance() or self.window()
+            InfoBar.success(
+                "已获取",
+                f"{len(self._fetched_models)} 个模型已加入候选区（点击展开加回）",
+                parent=parent,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        except Exception:
+            pass
+
+    def _apply_fetched(self, models: list, mode: str = "replace"):
+        """兼容入口：把拉取结果写入主列表（旧三选弹窗的合并/替换语义）。
+
+        波8 起默认路径走 `_on_fetch_success` → 候选区；本方法保留供测试与
+        插件/外部直接调用（合并 = 现有在前去重追加；替换 = 覆盖）。
+        """
+        new_list = list(models or [])
+        if mode == "merge":
+            existing = self.modelListEditor.get_models()
+            new_list = existing + [m for m in new_list if m not in existing]
+        self.modelListEditor.set_models(new_list)
+        if not self.modelListEditor.getDefaultModel() and new_list:
+            self.modelListEditor.setDefaultModel(new_list[0])
 
     def _on_fetch_failed(self, reason: str = ""):
         """获取失败（主线程）；reason 为插件抛出的原因，空串走通用提示"""
@@ -890,43 +872,17 @@ class ProviderEditCard(QWidget):
         )
 
     def _on_manage_models(self):
-        """展开/收起内嵌模型列表编辑器；收起时把编辑结果写回模型下拉"""
-        if self.modelListEditor.isVisible():
-            # 编辑器里加回的被过滤项同步回卡片缓存，下次展开不再展示
-            self._filtered_out_models = self.modelListEditor.get_filtered_models()
-            self._sync_editor_to_combo()
-            self.modelListEditor.setVisible(False)
-            self.manageModelsBtn.setText("编辑列表")
-        else:
-            self.modelListEditor.set_models(self.modelCombo.get_all_models())
-            self.modelListEditor.set_filtered_models(self._filtered_out_models)
-            self.modelListEditor.setVisible(True)
-            self.manageModelsBtn.setText("收起列表")
+        """（已废弃）旧「编辑列表」按钮的展开/收起逻辑。
+
+        波8 起编辑器**常驻可见**，不再需要显式切换；方法保留为空壳以防外部
+        （插件/旧代码）仍有引用，调用无副作用。
+        """
 
     def _sync_editor_to_combo(self):
-        """把内嵌编辑器中的列表写回模型下拉"""
-        from qfluentwidgets import InfoBar
-        from app.widgets.tab_manager_window import TabManagerWindow
+        """（已废弃）旧的「编辑器 → 下拉」单向同步。
 
-        new_models = self.modelListEditor.get_models()
-        self.modelCombo.blockSignals(True)
-        current = self.modelCombo.currentText()
-        self.modelCombo.clear()
-        self.modelCombo.addItems(new_models)
-        if current and self.modelCombo.findText(current) >= 0:
-            self.modelCombo.setCurrentIndex(self.modelCombo.findText(current))
-        elif current and self.modelCombo.count() > 0:
-            # 默认模型被用户从列表删除：提示后再切换，不再静默改值
-            self.modelCombo.setCurrentIndex(0)
-            parent = TabManagerWindow.get_instance() or self.window()
-            InfoBar.warning(
-                "默认模型已失效",
-                f"「{current}」已从列表移除，已切换为「{self.modelCombo.currentText()}」",
-                parent=parent,
-                duration=4000,
-                position=InfoBarPosition.BOTTOM,
-            )
-        self.modelCombo.blockSignals(False)
+        波8 起只有一份数据源（编辑器），不存在双源漂移，故无需同步。
+        """
 
     def _on_save(self):
         """保存。
@@ -940,11 +896,10 @@ class ProviderEditCard(QWidget):
         """
         from app.core.modelmeta.provider_save_plan import build_provider_save_plan, collect_extra_fields
 
-        if self.modelListEditor.isVisible():
-            self._filtered_out_models = self.modelListEditor.get_filtered_models()
-            self._sync_editor_to_combo()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
-        current_models = self.modelCombo.get_all_models()
+        # 单一数据源：编辑器（行首★为默认模型，列表即「模型列表」）
+        current_models = self.modelListEditor.get_models()
+        default_model = self.modelListEditor.getDefaultModel()
 
         # 套餐用量额外字段：显式管理键恒写入（含空串），详见 collect_extra_fields
         extra_fields = collect_extra_fields(
@@ -957,7 +912,8 @@ class ProviderEditCard(QWidget):
             form_values={
                 "api_url": self.apiUrlCombo.currentText(),
                 "api_key": self.apiKeyEdit.text(),
-                "model": self.modelCombo.currentText(),
+                # 「模型名称」恒写含空串语义不变（plan 会 strip；空串=显式清空）
+                "model": default_model,
                 # 认证方式问插件声明（bce/none/anthropic…）；未注册的服务商回落到
                 # 存档值，再兜底 bearer——写死 bearer 会覆盖百度千帆的 bce 签名
                 "auth_type": get_auth_type(provider_name, self.provider_info.get("认证方式", "")),

@@ -710,6 +710,18 @@ def main():
 
     app.aboutToQuit.connect(_teardown_plugin_windows)
 
+    # ── 模型刷新服务：退出前停表（后台线程为 daemon，不阻塞退出）──
+    def _teardown_model_refresh():
+        try:
+            from app.core.modelmeta.model_refresh_service import ModelRefreshService
+
+            if ModelRefreshService._instance is not None:
+                ModelRefreshService._instance.stop()
+        except Exception:
+            logger.warning("[M2] 退出时停止模型刷新服务失败", exc_info=True)
+
+    app.aboutToQuit.connect(_teardown_model_refresh)
+
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)
