@@ -2858,21 +2858,29 @@ class MessageCard(SimpleCardWidget):
         # 重启补间 → 永远走不到终点、退化成锯齿。隔离后补间独占这条通道，
         # 收尾由 _on_height_anim_state_changed 主动校正一次。
         if self._stream_height_anim_active:
-            # [B1 回缩守卫] 追踪中上报分方向处理：
-            #   上调（真实增长）→ 实时 retarget + 填平取消挂起收缩；
+            # [B1 回缩守卫] 追踪中上报分方向处理（仅流式中）：
+            #   上调/等值（真实增长或意愿未变）→ 实时 retarget + 取消挂起收缩；
             #   下调 → 一律进 500ms 稳定窗挂起，不实时改向。
             # 为什么下调不能实时改 target：save/restore、reorganizeContent
             # 等 DOM 事务存在跨帧 scrollHeight 塌缩窗口（P052 自证），塌缩
             # 读数穿透 rAF 合并 + 80ms 防抖后到达此处；若直接改小 target，
             # tick 朝小值滑几拍、恢复值到达再拉回 = 肉眼可见的「生长中回缩」
             # （2026-10-09 用户报告的流式卡片诡异抖动）。
+            # ⚠️ 守卫不得覆盖 FINISH 结束态追踪（_streaming 已 False）：彼时
+            # 上报是坞态折叠动画的真实收敛值，必须实时跟随；若也挂起，
+            # _apply_pending_shrink 会因 _streaming=False 丢弃收拢，tick 收敛
+            # 在旧 target → 流式结束后卡片底部大片空白（真机截图回归）。
             prev_target = int(getattr(self, "_target_viewer_height", 0) or 0)
-            if target_height > prev_target:
+            if not self._streaming:
                 self._target_viewer_height = target_height
+                return
+            if target_height >= prev_target:
+                self._target_viewer_height = target_height
+                # 等值也是「内容意愿未变」的确认：挂起的塌缩读数实为噪声，
+                # 不取消会在 500ms 后错误落地 → 抖动残留（同日真机复测）。
                 self._cancel_pending_shrink()
-            elif target_height < prev_target:
+            else:
                 self._schedule_pending_shrink(target_height)
-            # target == prev_target：重复上报，忽略
             return
 
         # 🆕 结束态高度动画进行中：reportHeight 回环（setFixedHeight → 视口变化 →

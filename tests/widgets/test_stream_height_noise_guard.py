@@ -105,6 +105,39 @@ class TestTrackDirectionGuard:
             container.deleteLater()
             qapp.processEvents()
 
+    def test_equal_report_cancels_pending(self, qapp):
+        """等值上报 = 内容意愿未变：必须取消挂起的塌缩读数，否则 500ms 后错误落地。"""
+        container, card = _make_streaming_card(qapp)
+        try:
+            card._target_viewer_height = 600
+            card._stream_height_anim_active = True
+            card._pending_shrink_height = 400  # 此前一笔塌缩挂起
+            card._update_height(600)  # 恢复上报 == 意愿值
+            assert card._target_viewer_height == 600
+            assert card._pending_shrink_height is None
+        finally:
+            container.deleteLater()
+            qapp.processEvents()
+
+    def test_finish_track_follows_shrink_report(self, qapp):
+        """FINISH 结束态追踪（_streaming=False）：上报是折叠动画真实收敛值，必须实时跟随。
+
+        回归背景：守卫若覆盖结束态，折叠后的收拢上报被挂起，而
+        _apply_pending_shrink 因 _streaming=False 丢弃 → tick 收敛在旧
+        target → 流式结束后卡片底部大片空白（2026-10-09 真机截图）。
+        """
+        container, card = _make_streaming_card(qapp, viewer_height=1300)
+        try:
+            card._streaming = False
+            card._target_viewer_height = 1300
+            card._stream_height_anim_active = True
+            card._update_height(1100)  # 折叠动画完成后的真实值
+            assert card._target_viewer_height == 1100
+            assert card._pending_shrink_height is None
+        finally:
+            container.deleteLater()
+            qapp.processEvents()
+
 
 class TestStreamingShrinkSuspends:
     """非追踪流式路径：收拢（含 >=40px 大步）统一挂起。"""
