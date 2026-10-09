@@ -65,6 +65,25 @@ def _accent_rgba(alpha_pct: int) -> str:
     return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha_pct / 100:.2f})"
 
 
+class _RowSwitch(SwitchButton):
+    """无文字间隔开关：qfw 的 SWITCH_BUTTON.qss 带 ``qproperty-spacing: 12``，
+    polish / 主题刷新时 Qt 在 C++ 元对象层直写 spacing（setSpacing/property
+    都拦不住），空文本 label 会被推开，开关右侧留 12px 悬空空白（用户实测）。
+    治法：直接隐藏空 label——hBox 只剩 indicator 一个元素，spacing 无作用
+    对象，qss 写多少都无视觉影响。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setOnText("")
+        self.setOffText("")
+        self.label.hide()
+        # 定宽 = indicator 实宽（2 + 42）：无文字后不再吃 adjustSize 的动态宽度，
+        # 右对齐放置时指示器始终贴列右缘
+        self.setFixedWidth(44)
+        # 触发一次 _updateText → setText("")+adjustSize：同步布局状态
+        self._updateText()
+
+
 class _ModelRowWidget(QWidget):
     """单个模型行（setItemWidget 真控件）：双行文本 + 能力徽章 + 启停开关。"""
 
@@ -131,17 +150,15 @@ class _ModelRowWidget(QWidget):
             row.addWidget(lbl)
 
         # 开关列：开关旁不显 On/Off 文字（QLabel 恒占宽且与双行文本行打架；
-        # 启用态已由行淡化表达）
-        self.switch = SwitchButton(self)
-        self.switch.setOnText("")
-        self.switch.setOffText("")
+        # 启用态已由行淡化表达）；_RowSwitch 隐藏空 label 消除右侧悬空空白
+        self.switch = _RowSwitch(self)
         self.switch.setChecked(enabled)
         self.switch.checkedChanged.connect(self._emit_toggle)
         switch_holder = QWidget(self)
         switch_holder.setFixedWidth(_COL_SWITCH_W)
         switch_lay = QHBoxLayout(switch_holder)
         switch_lay.setContentsMargins(0, 0, 0, 0)
-        switch_lay.addWidget(self.switch, 0, Qt.AlignVCenter)
+        switch_lay.addWidget(self.switch, 0, Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(switch_holder, 0, Qt.AlignVCenter)
 
         outer.addLayout(row)

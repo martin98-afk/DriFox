@@ -484,17 +484,18 @@ class ProviderEditCard(QWidget):
         # 双开关放按钮前面同行（用户要求）；⚠ 红线：开关值走 build_provider_save_plan
         # 的 form_values（bool 直传），**绝不进 extra_fields** —— collect_extra_fields
         # 对编辑器调 .text()，SwitchButton 没有该方法，必炸 AttributeError。
-        from qfluentwidgets import SwitchButton
 
         model_row = QHBoxLayout()
         model_row.addWidget(BodyLabel("模型管理:"))
         model_row.addStretch(1)
 
+        # 双开关用 _RowSwitch（无文字间隔）：qfw SwitchButton 空文本时
+        # setText 仍会自适应回 12px spacing，开关右侧留悬空空白
+        from app.widgets.model_list_edit_dialog import _RowSwitch
+
         auto_label = BodyLabel("自动刷新模型")
         model_row.addWidget(auto_label)
-        self.autoRefreshSwitch = SwitchButton()
-        self.autoRefreshSwitch.setOnText("")
-        self.autoRefreshSwitch.setOffText("")
+        self.autoRefreshSwitch = _RowSwitch()
         self.autoRefreshSwitch.setChecked(bool(self.provider_info.get("自动刷新模型", False)))
         self.autoRefreshSwitch.setToolTip("每 24 小时拉取一次模型列表；默认模型仍可用时静默更新")
         model_row.addWidget(self.autoRefreshSwitch)
@@ -502,9 +503,7 @@ class ProviderEditCard(QWidget):
 
         health_label = BodyLabel("健康检查")
         model_row.addWidget(health_label)
-        self.healthCheckSwitch = SwitchButton()
-        self.healthCheckSwitch.setOnText("")
-        self.healthCheckSwitch.setOffText("")
+        self.healthCheckSwitch = _RowSwitch()
         self.healthCheckSwitch.setChecked(bool(self.provider_info.get("健康检查", False)))
         self.healthCheckSwitch.setToolTip("每 24 小时探测一次可用性，只更新状态不修改模型列表")
         model_row.addWidget(self.healthCheckSwitch)
