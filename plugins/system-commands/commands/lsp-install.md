@@ -107,7 +107,7 @@ prompt_sections:
     "name": "DriFox LSP Installer"
   },
   "homepage": "https://github.com/martin98-afk/DriFox",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "type": "user",
   "components": {
     "lsp": true

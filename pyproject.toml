@@ -4,7 +4,7 @@ version = "0.6.5"
 description = "DriFox - AI Chat Desktop Application"
 readme = "README.md"
 requires-python = ">=3.14"
-license = {text = "MIT"}
+license = {text = "GPL-3.0-or-later"}
 authors = [
     {name = "98-afk", email = "98-afk@drifox.com"}
 ]
@@ -12,7 +12,7 @@ keywords = ["ai", "chat", "llm", "desktop", "pyqt5"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",

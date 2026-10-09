@@ -79,7 +79,7 @@ DriFox 把"团队"建模为**多窗口 + 文件邮箱**——把"团队协作"�
 | **委派深度限制** | ❌ | ❌ | ✅ `depthLimit`（descriptor 校验） |
 | **会话内容级恢复** | ✅ **一键恢复团队 + 每个成员的历史消息** | partial（session resume，不含内容恢复） | ✅ cold-resume |
 | **多模型后端** | ✅ **原生 OpenAI 兼容**：OpenAI / Claude / DeepSeek / Gemini / Groq / MiniMax / 通义 / 智谱 / Ollama / 火山方舟 / 百度千帆 / SiliconFlow | ⚠️ 需 proxy（claude-code-proxy / claude-code-openai-wrapper / Bifrost gateway） | ✅ plugin-based，可接入任意 LLM 适配器 |
-| **开源协议** | MIT | 闭源（商业） | MIT |
+| **开源协议** | GPL-3.0-or-later | 闭源（商业） | MIT |
 | **技术栈** | Python 3.14+ / PyQt5 | TypeScript / Node | TypeScript + Cordis 插件框架 |
 | **开发成熟度** | v0.5.5（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
 
@@ -382,7 +382,7 @@ plugins/system/          # 系统内置插件（打包在 exe 中）
 
 ## 许可证
 
-MIT License © 2025~2026 Martin98-afk
+GPL-3.0-or-later © 2025~2026 Martin98-afk
 
 ---
 

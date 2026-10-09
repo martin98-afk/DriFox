@@ -136,7 +136,7 @@ def _build_stdio_env(env: Optional[dict]) -> dict:
 
 # ── MCP stdio 子进程安全校验 ─────────────────────────────
 # 参考 AstrBot(AGPL-3.0) core/agent/mcp_client.py 的 validate_mcp_stdio_config
-# 设计移植（MIT 协议下的独立实现）：
+# 设计移植（GPL-3.0-or-later 协议下的独立实现）：
 #   1. 命令名白名单 — 只允许可信的运行时（python/node/deno/uv 等）拉起 MCP server
 #   2. 危险命令黑名单 — 禁止用 shell / 网络 / 文件破坏类命令当 launcher
 #   3. Shell 元字符检查 — 防止 command 字段里夹带 `;`/`>`/`$()` 等注入

@@ -125,7 +125,7 @@
   "version": "0.1.0",
   "author": {"name": "DriFox Contributors"},
   "homepage": "https://github.com/martin98-afk/DriFox",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "type": "user",
   "components": {"ui": true}
 }

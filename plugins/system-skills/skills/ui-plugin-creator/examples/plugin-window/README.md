@@ -23,7 +23,7 @@ plugin-window/
 >   "description": "独立弹窗示例",
 >   "version": "0.1.0",
 >   "author": { "name": "you" },
->   "license": "MIT",
+>   "license": "GPL-3.0-or-later",
 >   "components": { "ui": true }
 > }
 > ```
