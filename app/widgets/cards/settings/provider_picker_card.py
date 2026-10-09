@@ -27,9 +27,8 @@ from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 from app.widgets.flow_layout import FlowLayout
 
-# 卡片尺寸：固定 176×68（用户裁决：限制的是**卡片本体宽度**，照搬系统配置卡
-# 家族的 setFixedWidth/setFixedSize 写法）。不按容器推导——实测宽窗口下
-# tile 被拉成 230px 横条铺满。
+# 卡片尺寸：高度固定、宽度随内容自适应（下限 _CARD_W 防短名卡片过窄）。
+# 不按容器推导——实测宽窗口下 tile 被拉成 230px 横条铺满。
 _CARD_W = 176
 _CARD_H = 68
 
@@ -119,7 +118,10 @@ class ProviderPickerTile(QFrame):
     def __init__(self, provider_name: str, caption: str, parent=None):
         super().__init__(parent)
         self.provider_name = provider_name
-        self.setFixedSize(_CARD_W, _CARD_H)
+        # 高度固定、宽度自适应内容（QLabel 全文自然宽度撑开）：固定 176px 会截断
+        # 「阿里云 (DashScope)」「SiliconFlow (硅基流动)」这类长名（用户实测）
+        self.setFixedHeight(_CARD_H)
+        self.setMinimumWidth(_CARD_W)
         self.setCursor(Qt.PointingHandCursor)
         self._apply_style()
 
@@ -136,10 +138,10 @@ class ProviderPickerTile(QFrame):
         text_col.setSpacing(2)
 
         full_name = provider_name if provider_name != CUSTOM_ENTRY else "自定义服务商"
-        self.nameLabel = QLabel(self._elide(full_name, 11), self)
+        self.nameLabel = QLabel(full_name, self)
         text_col.addWidget(self.nameLabel)
 
-        self.captionLabel = QLabel(self._elide(caption, 16), self)
+        self.captionLabel = QLabel(caption, self)
         text_col.addWidget(self.captionLabel)
 
         # 文字样式在建完控件后统一施加（含主题 token）
@@ -148,18 +150,9 @@ class ProviderPickerTile(QFrame):
         text_col.addStretch(1)
         layout.addLayout(text_col, 1)
 
-        # 名称/说明可能被截断 → tooltip 给全名与完整说明
+        # tooltip 只留卡片本体一处：全局 setToolTip patch 会给每个调用装一个
+        # 自绘悬浮气泡，子控件再各设一份 → hover 文字区时双气泡重叠（用户实测）
         self.setToolTip(f"{full_name}\n{caption}" if caption else full_name)
-        self.nameLabel.setToolTip(full_name)
-        self.captionLabel.setToolTip(caption)
-
-    @staticmethod
-    def _elide(text: str, max_chars: int) -> str:
-        """超宽截断（QLabel 无自动 elide，按字符数近似；tooltip 补全名）。"""
-        text = str(text or "")
-        if len(text) <= max_chars:
-            return text
-        return text[: max_chars - 1] + "…"
 
     def _apply_style(self):
         """卡片样式（内嵌主题 token，refresh_style 时需重建）"""

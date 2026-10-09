@@ -281,6 +281,8 @@ def _group_of(provider_name: str, info: dict) -> str:
     """判定一条服务商配置所属分组
 
     判据全部来自插件声明（零服务商硬编码）：
+      ⓪ 显式声明  ← capabilities["list_group"] ∈ 分组名（优先，覆盖自动判据；
+                    用于「有用量查询但非订阅制」的服务商，如 OpenCode Zen）
       ① OAuth       ← capabilities["login_hook"] 存在
       ② Coding Plan ← coding_plan_fetcher 非空，或名称含 "-coding"（自定义命名兜底）
       ③ 本地        ← 认证方式 none 或 API_URL 含 localhost
@@ -290,6 +292,10 @@ def _group_of(provider_name: str, info: dict) -> str:
         p = ProviderRegistry.get_instance().get(provider_name)
     except Exception:
         p = None
+    if p is not None:
+        declared = str(p.capabilities.get("list_group", "") or "")
+        if declared in _GROUP_ORDER:
+            return declared
     if p is not None and p.capabilities.get("login_hook"):
         return "OAuth"
     if (p is not None and p.coding_plan_fetcher) or "-coding" in str(provider_name or "").lower():
