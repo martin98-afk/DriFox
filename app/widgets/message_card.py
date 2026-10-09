@@ -5040,7 +5040,7 @@ class MessageCard(SimpleCardWidget):
                 f"panel.vis={panel.isVisible() if panel is not None else None} "
                 f"bubble.h={self._assistant_bubble.height() if self._assistant_bubble else -1}"
             )
-            cur = panel.sizeHint().height() if (panel is not None and panel.isVisible()) else 0
+            cur = self._todo_panel_effective_height(panel)
             prev = getattr(self, "_todo_panel_height_cache", 0)
             self._todo_panel_height_cache = cur
             delta = int(cur - prev)
@@ -5054,6 +5054,27 @@ class MessageCard(SimpleCardWidget):
             self.heightChanged.emit(self.height())
         except RuntimeError:
             pass
+
+    def _todo_panel_effective_height(self, panel) -> int:
+        """任务看板「当前实际占高」，供锚定补偿记账。
+
+        ⚠️ 必须用布局**实际占高**，不能用 ``sizeHint()``：后者是"意愿高度"，
+        在面板重建 / 折叠切换的当拍与布局落定值不同源——面板刚由 update_todos
+        重建时内部 sizeHint 缓存已刷新到新值，而 Qt 尚未重新布局，``height()``
+        仍是旧值（或反之）。两者混用会让 delta 符号与实际卡片变化相反：
+        面板在涨、delta 算出负值 → 外层按收缩处理、卡片按增长落高，中间态
+        把卡片撑成"虚高"，下一拍布局收敛再缩回（2026-10-09 真机现象：
+        卡片高度突然异常增高然后再收缩回正常）。
+
+        取两者较大值：布局未跟上的那拍，谁大取谁，保证单调、不会少记高度；
+        收敛后两者相等，退化为精确值（幂等）。
+        """
+        if panel is None or not panel.isVisible():
+            return 0
+        try:
+            return max(int(panel.sizeHint().height()), int(panel.height()))
+        except RuntimeError:
+            return 0
 
     def update_tool_streaming(
         self,

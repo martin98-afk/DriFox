@@ -49,6 +49,8 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **排队消息卡切主题不跟随** (`app/main_widget.py`, `app/widgets/modules/input_card_module.py`, `tests/widgets/test_theme_refresh_covers_queue_card.py` 新增): `QueueMessageCard`（input_card_module 装配的「排队消息」卡）有 `refresh_style`，但从未被主题刷新链触达 —— 5a 颜色块与 5b 字体块（`_refresh_floating_cards_font_style`）两张手工维护的宿主浮动卡清单都漏了它，卡片样式永久停在构造时的主题值（`CARD_BG` / `CARD_BG_DIM` / 图标静态 pixmap 全在构造时写死进 QSS）。表现为浅色切深色后已打开的排队卡仍是白底白页眉。两处清单补入 `_queue_message_card`（用 `getattr(..., None)`，与 `_command_card` 等同口径，兼容懒创建），并新增回归测试用源码文本断言锁住两处清单覆盖 + 5b 路径恰好刷 1 次。
+
 - **仅流式服务商端点兼容** (`app/utils/http_client.py`, `app/core/context/history_compactor.py`, `app/core/workers/topic_summary.py`): CodeBuddy 等端点仅支持流式请求，非流式直接 400（code 11101 `Non-stream chat request is currently not supported`）。`http_client` 新增 `chat_completion_text()`：以 `stream=True` 发起、在调用方线程内聚合为完整文本返回，异常照常透传 openai 异常族供重试判定识别。会话压缩摘要与标题摘要两条非流式链路切换到该封装；插件侧 prompt-enhancer 同步切换（见 drifox-plugins2 仓库）。子智能体 worker（带 tools 聚合）暂不切换。
 
 - **折叠框内滚轮置顶回归修复** (`ab5c125c`): card_viewers 恢复 v37 误删的工具区滚动保护链（display 空窗 scrollTop 快照写回、_scrollToolContentToBottom/滚动意图监听三件套），_twFlush 纯揭示化；_SKELETON_CACHE_VERSION 39。

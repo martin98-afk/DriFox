@@ -2734,9 +2734,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新权限审批悬浮框
         if self._permission_floating_widget:
             self._permission_floating_widget.set_opacity(opacity)
-        # 更新服务商编辑卡片
+        # 更新服务商卡（卡内含卡片墙/编辑表单两级视图）
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
+        if self._provider_picker_card:
+            self._provider_picker_card.set_opacity(opacity)
         # 更新主窗口背景透明度
         self._update_window_bg_opacity(opacity)
 
@@ -10742,6 +10744,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._share_card_content,
                 self._history_questions_card_content,
                 self._undo_delete_card,
+                # 排队消息卡（input_card_module 装配）：漏刷会导致切主题后
+                # 卡片停在构造时主题（浅→深仍是白底白页眉）
+                getattr(self, "_queue_message_card", None),
             ):
                 self._safe_refresh(card)
             # 卡片容器
@@ -10818,6 +10823,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._share_card_content,
             self._history_questions_card_content,
             self._undo_delete_card,
+            # 排队消息卡（与 5a 同口径；字体变化路径 5a 不走，靠这里补刷）
+            getattr(self, "_queue_message_card", None),
             getattr(self, "_command_card", None),
             getattr(self, "_file_mention_card", None),
             getattr(self, "_tool_control_card", None),

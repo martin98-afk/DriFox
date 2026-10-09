@@ -14,6 +14,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from PyQt5.QtCore import QEvent, QPoint, Qt
+from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtWidgets import QLabel, QWidget
 
 from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
 
@@ -116,7 +119,7 @@ class TestPickerTitlebarTab:
         from app.widgets.tab_manager_window import GLOBAL_REPLACE_TITLES, KNOWN_GLOBAL_REPLACE_CARDS
 
         assert "provider_picker" in KNOWN_GLOBAL_REPLACE_CARDS
-        assert GLOBAL_REPLACE_TITLES["provider_picker"] == "添加服务商"
+        assert GLOBAL_REPLACE_TITLES["provider_picker"] == "服务商"
 
     def test_visibility_event_adds_tab(self, qtbot, monkeypatch):
         """卡片显示 → 标题栏出现「添加服务商」tab"""
@@ -141,8 +144,8 @@ class TestPickerTitlebarTab:
 
         try:
             tm._on_card_visibility_changed({"card_id": "provider_picker", "visible": True})
-            assert tm._replace_open.get(GLOBAL_WINDOW_ID, {}).get("provider_picker") == "添加服务商"
-            assert tm.titleBar._tabs["provider_picker"]._label.text() == "添加服务商"
+            assert tm._replace_open.get(GLOBAL_WINDOW_ID, {}).get("provider_picker") == "服务商"
+            assert tm.titleBar._tabs["provider_picker"]._label.text() == "服务商"
         finally:
             for t in list(tm._replace_timers.values()):
                 t.stop()
@@ -183,3 +186,178 @@ class TestModelTableHeaderTheme:
                 assert got == Colors.TEXT_MUTED, f"表头 {lb.text()!r} 未取主题色: {got}"
         finally:
             editor.hide()
+
+
+# ══════════════════════════════════════════════════════════════════
+# 服务商卡面包屑与卡内导航（2026-10-10 单卡双视图重构）
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestSystemCardFrameBreadcrumb:
+    """SystemCardFrame.set_breadcrumb API"""
+
+    def test_set_and_clear(self, _qapp):
+        """设置两项 → title 隐藏面包屑显示；清空 → 恢复 title"""
+        from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+
+        card = BaseSettingsCard("服务商", icon_svg="大模型")
+        card.show()
+        _qapp.processEvents()
+
+        assert not card._breadcrumb_widget.isVisible()
+        assert card.title_label.isVisible()
+
+        card.set_breadcrumb([{"text": "服务商", "handler": lambda: None}, {"text": "OpenCode Go"}])
+        assert card.title_label.isHidden(), "有面包屑时 title 应隐藏"
+        assert card._breadcrumb_widget.isVisible()
+
+        texts = [
+            card._breadcrumb_layout.itemAt(i).widget().text()
+            for i in range(card._breadcrumb_layout.count())
+            if card._breadcrumb_layout.itemAt(i).widget() is not None
+        ]
+        assert texts == ["服务商", "›", "OpenCode Go"], f"面包屑文本异常: {texts}"
+
+        card.set_breadcrumb([])
+        assert card.title_label.isVisible(), "清空后 title 应恢复"
+        assert not card._breadcrumb_widget.isVisible()
+
+    def test_ancestor_click_invokes_handler(self, _qapp):
+        """点祖先项触发 handler；当前项不可点"""
+        from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+
+        card = BaseSettingsCard("服务商", icon_svg="大模型")
+        hits = []
+        card.set_breadcrumb([{"text": "服务商", "handler": lambda: hits.append(1)}, {"text": "OpenCode Go"}])
+        _qapp.processEvents()
+
+        # 祖先项 = layout 第 0 个 widget
+        ancestor = card._breadcrumb_layout.itemAt(0).widget()
+        ancestor.mousePressEvent(
+            QMouseEvent(QEvent.MouseButtonPress, QPoint(1, 1), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        )
+        assert hits == [1]
+
+        # 当前项（第 2 个 widget）没有手型光标（不可点）
+        current = card._breadcrumb_layout.itemAt(2).widget()
+        assert current.cursor().shape() != Qt.PointingHandCursor
+
+    def test_refresh_restyles(self, _qapp, monkeypatch):
+        """主题刷新重刷面包屑颜色"""
+        from app.utils.design_tokens import Colors
+        from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+
+        card = BaseSettingsCard("服务商", icon_svg="大模型")
+        card.set_breadcrumb([{"text": "服务商", "handler": lambda: None}, {"text": "x"}])
+        _qapp.processEvents()
+
+        monkeypatch.setattr(Colors, "TEXT_ACCENT", "#010203", raising=False)
+        card.refresh_style()
+        ancestor = card._breadcrumb_layout.itemAt(0).widget()
+        assert "#010203" in ancestor.styleSheet()
+
+
+class TestProviderCardNav:
+    """服务商卡单卡双视图导航（controller 层）"""
+
+    @pytest.fixture()
+    def cc(self, _qapp, monkeypatch):
+        """构建最小可用的 GlobalCardController（CardManager/注册表打桩）"""
+        from unittest.mock import MagicMock
+
+        from app.plugins.registries.provider_registry import ProviderRegistry
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID  # noqa: F401 （供断言引用）
+        from app.widgets.cards.global_card_controller import GlobalCardController
+
+        reg = ProviderRegistry()
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        reg.register(ProviderDef(name="DeepSeek", api_url="https://api.deepseek.com"), source="plugin:test")
+
+        cm = MagicMock()
+        monkeypatch.setattr("app.widgets.cards.card_manager.CardManager.get_instance", lambda: cm)
+
+        host = QWidget()  # 卡片 parent 要求真 QWidget（QFrame 类型检查）
+        controller = GlobalCardController(host, MagicMock())
+        controller._card_manager = cm
+        return controller
+
+    def test_picker_view_mounts_wall(self, cc):
+        """卡片墙视图：内容区挂墙、无保存钮、无面包屑（title 显示）"""
+        cc._show_provider_picker_card()
+        card = cc._provider_picker_card
+        card.show()
+        _qapp.processEvents()
+        layout = card.content_layout
+        assert layout.count() == 1
+        assert layout.itemAt(0).widget() is cc._provider_picker_popup
+        assert card.title_label.isVisible()
+        assert not card._breadcrumb_widget.isVisible()
+        assert cc._provider_view == "picker"
+
+    def test_edit_view_swaps_in_form(self, cc):
+        """进编辑视图：同一张卡内容区换表单，面包屑两项，保存钮挂上"""
+        cc._show_provider_picker_card()
+        cc._show_provider_preset_card("DeepSeek")
+
+        assert cc._provider_view == "edit"
+        assert cc._provider_origin == "picker"
+        layout = cc._provider_picker_card.content_layout
+        assert layout.count() == 1
+        assert layout.itemAt(0).widget() is cc._provider_edit_popup
+        # 面包屑：根 + 当前项
+        texts = [
+            cc._provider_picker_card._breadcrumb_layout.itemAt(i).widget().text()
+            for i in range(cc._provider_picker_card._breadcrumb_layout.count())
+            if cc._provider_picker_card._breadcrumb_layout.itemAt(i).widget() is not None
+        ]
+        assert texts == ["服务商", "›", "添加: DeepSeek"]
+        # 同一张卡：不再打开 provider_edit
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+        cc._card_manager.show_card.assert_called_with("provider_picker", GLOBAL_WINDOW_ID)
+
+    def test_breadcrumb_back_returns_to_wall(self, cc):
+        """添加链：点面包屑根 → 卡内切回卡片墙，不关卡"""
+        cc._show_provider_picker_card()
+        cc._show_provider_preset_card("DeepSeek")
+        cc._on_provider_breadcrumb_root()
+
+        assert cc._provider_view == "picker"
+        layout = cc._provider_picker_card.content_layout
+        assert layout.itemAt(0).widget() is cc._provider_picker_popup
+        # 不关卡：show_card("settings") 不应被调用
+        for call in cc._card_manager.show_card.call_args_list:
+            assert call.args[0] != "settings", "卡内回退不得打开设置卡"
+
+    def test_settings_origin_back_opens_settings(self, cc, monkeypatch):
+        """编辑链：点面包屑根 → 关卡 + 回设置卡服务商页"""
+        opened = []
+        monkeypatch.setattr(cc, "open_settings", lambda tab=None: opened.append(tab))
+
+        cc._show_provider_picker_card()
+        cc._show_provider_edit_card("cfg-1", {"name": "MyProvider", "API_URL": "https://x"})
+        assert cc._provider_origin == "settings"
+
+        cc._on_provider_breadcrumb_root()
+        assert opened == ["provider"]
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+        cc._card_manager.hide_card.assert_called_with("provider_picker", GLOBAL_WINDOW_ID)
+
+    def test_save_closes_card(self, cc, monkeypatch):
+        """保存成功 → 关整张卡（保持现状），回设置卡"""
+        closed = []
+        monkeypatch.setattr(cc, "_close_edit_card", lambda cid: closed.append(cid))
+
+        cc._show_provider_picker_card()
+        cc._show_provider_preset_card("DeepSeek")
+        info = {
+            "provider_name": "DeepSeek",
+            "name": "DeepSeek",
+            "API_URL": "https://api.deepseek.com",
+            "API_KEY": "sk-test",
+            "认证方式": "bearer",
+        }
+        cc._on_provider_edit_saved("DeepSeek", info, is_new=True)
+        assert closed == ["provider_picker"]

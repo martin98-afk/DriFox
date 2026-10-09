@@ -1621,12 +1621,12 @@ def _render_tool_streaming_block(
         _seed = f"{tool_name}|{preview}|{streaming_state}"
         _syn_key_attr = ' data-block-key="syn-' + hashlib.sha1(_seed.encode("utf-8")).hexdigest()[:12] + '"'
 
-    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}"{_syn_key_attr}{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}"{_syn_key_attr}{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 4px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; line-height: 22px;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
         <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
