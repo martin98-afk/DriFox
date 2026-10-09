@@ -282,7 +282,7 @@ class TestProviderCardNav:
         controller._card_manager = cm
         return controller
 
-    def test_picker_view_mounts_wall(self, cc):
+    def test_picker_view_mounts_wall(self, _qapp, cc):
         """卡片墙视图：内容区挂墙、无保存钮、无面包屑（title 显示）"""
         cc._show_provider_picker_card()
         card = cc._provider_picker_card
@@ -291,8 +291,9 @@ class TestProviderCardNav:
         layout = card.content_layout
         assert layout.count() == 1
         assert layout.itemAt(0).widget() is cc._provider_picker_popup
-        assert card.title_label.isVisible()
-        assert not card._breadcrumb_widget.isVisible()
+        # isHidden 只看自身显隐标记（isVisible 依赖父链，host 未 show 会误判）
+        assert not card.title_label.isHidden()
+        assert card._breadcrumb_widget.isHidden()
         assert cc._provider_view == "picker"
 
     def test_edit_view_swaps_in_form(self, cc):
@@ -349,15 +350,18 @@ class TestProviderCardNav:
         """保存成功 → 关整张卡（保持现状），回设置卡"""
         closed = []
         monkeypatch.setattr(cc, "_close_edit_card", lambda cid: closed.append(cid))
+        # 杜绝测试读写用户真实配置（Settings 进程单例跨测试残留 → 假冲突）
+        monkeypatch.setattr(type(cc.cfg).llm_saved_providers, "value", {}, raising=False)
+        monkeypatch.setattr(cc.cfg, "set", lambda *a, **kw: None)
 
         cc._show_provider_picker_card()
         cc._show_provider_preset_card("DeepSeek")
         info = {
-            "provider_name": "DeepSeek",
-            "name": "DeepSeek",
-            "API_URL": "https://api.deepseek.com",
+            "provider_name": "TestProvider",
+            "name": "TestProvider",
+            "API_URL": "https://api.test.example",
             "API_KEY": "sk-test",
             "认证方式": "bearer",
         }
-        cc._on_provider_edit_saved("DeepSeek", info, is_new=True)
+        cc._on_provider_edit_saved("TestProvider", info, is_new=True)
         assert closed == ["provider_picker"]

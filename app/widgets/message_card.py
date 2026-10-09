@@ -833,7 +833,7 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_pill = diff_pill
         layout.addWidget(diff_pill)
 
-        # 右侧操作区：hover 浮现组（复制 / 分支 / 插件按钮）。
+        # 右侧操作区：常显操作组（复制 / 分支 / 插件按钮）。
         # 固定尺寸占位：按钮显隐切换时 footer 尺寸不变，卡片不跳动、不重排。
         hover_btns = QWidget(self)
         self._assistant_action_btns = hover_btns
@@ -887,7 +887,9 @@ class MessageCard(SimpleCardWidget):
         # 不会撑宽卡片）。非 hover 时容器退出布局 = 不占宽度；行高恒定改由
         # bar.setFixedHeight 保证（见下），否则 Qt 布局跳过隐藏控件的 sizeHint，
         # 行高在文本高度（≈14px）与按钮高度（20px）间跳变 → 卡片高度抖动。
-        hover_btns.setVisible(False)
+        # 常显（2026-10-10 需求）：助手卡片操作按钮不再走 hover 浮现，始终可见。
+        # user 卡片维持 hover 显隐（见 enterEvent/leaveEvent 的 role=user 分支）。
+        hover_btns.setVisible(True)
         layout.addWidget(hover_btns)
 
         # 行高下界 = 按钮高度：非 hover 时按钮容器退出布局，行高会由文本元素
@@ -3454,18 +3456,14 @@ class MessageCard(SimpleCardWidget):
             pass
 
     def enterEvent(self, event):
-        # 用户气泡 / assistant 全减：hover 浮现操作按钮，保持静态简洁
+        # 仅 user 气泡走 hover 浮现；assistant 操作按钮常显（见 _assistant_action_btns 构建处）
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, True)
-        elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._assistant_action_btns.setVisible(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, False)
-        elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._assistant_action_btns.setVisible(False)
         super().leaveEvent(event)
 
     @staticmethod
