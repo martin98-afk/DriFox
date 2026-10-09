@@ -427,7 +427,11 @@ class UIEngine(BaseEngine):
             try:
                 if self._backend:
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
-                    worktree_ctx.update(self._backend.build_key_documents_context() or {})
+                    # 临时会话无项目语义：跳过关键文档注入。_current_project 继承自源窗口，
+                    # 按它查 DB 会把原项目关键文档泄进临时页（is_temp 落盘/workdir 已隔离，
+                    # 项目上下文未隔离，此处为注入侧最后防线）
+                    if not getattr(session, "is_temp", False):
+                        worktree_ctx.update(self._backend.build_key_documents_context() or {})
             except Exception:
                 pass
             # ⚠️ metadata.pop 必须在主线程（避免与 worker 线程竞态）
