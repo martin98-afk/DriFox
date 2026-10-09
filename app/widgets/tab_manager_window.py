@@ -56,6 +56,7 @@ KNOWN_GLOBAL_REPLACE_CARDS = frozenset(
     {
         "settings",
         "provider_edit",
+        "provider_picker",
         "hook_edit",
         "mcp_edit",
         "diff_viewer",
@@ -67,6 +68,7 @@ KNOWN_GLOBAL_REPLACE_CARDS = frozenset(
 GLOBAL_REPLACE_TITLES = {
     "settings": "系统设置",
     "provider_edit": "服务商编辑",
+    "provider_picker": "添加服务商",
     "hook_edit": "Hook 编辑",
     "mcp_edit": "MCP 编辑",
     "diff_viewer": "文件差异对比",

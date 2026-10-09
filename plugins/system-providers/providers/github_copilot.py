@@ -128,10 +128,14 @@ def _auto_login():
 def _fetch_models(config):
     """模型列表获取钩子：按本配置的 gho 拉取 /models（权威池，随订阅而异）。
 
-    过滤规则（不过滤会把不可用模型塞进表格，聊天时报 model_not_supported）：
-    - policy.state == "disabled" 的剔除（订阅/管理员未启用）
-    - model_picker_enabled 为 False 的剔除（不支持 chat 选择器）
-    每项的 vendor / id 记入日志，便于诊断「选了仍不支持」类问题。
+    过滤规则：policy.state == "disabled" 的剔除（订阅/管理员未启用）。
+
+    ⚠ 不能用 model_picker_enabled 过滤（2026-10-09 实测修正）：免费版
+    （sku=free_limited_copilot）可用模型 gpt-4o / gpt-4o-mini 等该字段均为
+    False，而 picker=True 的新模型 claude-fable-5 / kimi-k3 等反而 400
+    model_not_supported。订阅级可用性无静态字段可判别（policy / endpoints /
+    vendor 均试过无效），只能实测。每项的 vendor / id 记入日志，便于诊断
+    「选了仍不支持」类问题。
     """
     from loguru import logger
 
@@ -161,9 +165,6 @@ def _fetch_models(config):
         if str(policy.get("state", "enabled")).lower() == "disabled":
             skipped.append(f"{mid}(disabled)")
             continue
-        if x.get("model_picker_enabled") is False:
-            skipped.append(f"{mid}(picker-off)")
-            continue
         out.append(mid)
         logger.info(f"[GitHub Copilot] 可用模型: {mid} vendor={x.get('vendor')}")
     if skipped:
@@ -172,15 +173,16 @@ def _fetch_models(config):
     return out
 
 
-# 内置兜底（权威池以 models_hook 拉取的 /models 为准；id 为 Copilot 历史稳定项）
+# 内置兜底（权威池以 models_hook 拉取的 /models 为准）
+# 实测修正（2026-10-09，免费版 sku=free_limited_copilot）：原列表 o1 / o3-mini /
+# claude-3.5-sonnet / claude-3.7-sonnet / gemini-2.0-flash-001 已全部 400
+# model_not_supported，换成下列实测 200 的稳定项。
 _MODELS = [
     "gpt-4o",
     "gpt-4o-mini",
-    "o1",
-    "o3-mini",
-    "claude-3.5-sonnet",
-    "claude-3.7-sonnet",
-    "gemini-2.0-flash-001",
+    "gpt-4.1",
+    "gpt-4o-2024-11-20",
+    "gpt-4o-mini-2024-07-18",
 ]
 
 

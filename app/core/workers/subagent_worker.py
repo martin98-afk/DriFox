@@ -14,6 +14,7 @@ from loguru import logger
 from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
 from app.constants import PARAM_SCHEMA
+from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
@@ -1013,8 +1014,9 @@ class SubAgentExecutor(QThread):
                 "_suffix_index",
                 "备注",
                 "获取地址",
-                "模型列表",
             }:
+                continue
+            if cn_key in PROVIDER_MANAGED_KEYS:
                 continue
             if cn_key in QUOTA_EXCLUDE_KEYS():
                 continue

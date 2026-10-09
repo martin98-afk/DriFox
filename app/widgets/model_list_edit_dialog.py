@@ -277,6 +277,10 @@ class ModelListEditorWidget(QWidget):
     def _build_header(self) -> QWidget:
         """表头行：与行控件共用列宽常量（改列宽两处同步）；样式走 objectName QSS"""
         header = QWidget(self)
+        # ★ objectName 是 _build_qss 里 `QWidget#modelTableHeader` 的唯一锚点。
+        # 此前从未设置 → 整条表头规则（含文字色/底边线）静默失效，表头在深色
+        # 主题下仍走系统默认黑字（用户实测）。
+        header.setObjectName("modelTableHeader")
         lay = QHBoxLayout(header)
         # 左右比行控件多 1px：QListWidget QSS 边框把 viewport 内容整体推移 1px，
         # 表头直接在 layout 里不吃这 1px，补偿后列线才对齐

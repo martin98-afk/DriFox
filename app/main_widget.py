@@ -69,6 +69,7 @@ from qfluentwidgets import (
 from app.constants import (
     IMAGE_EXTENSIONS,
     MODEL_LEVEL_KEYS,
+    PROVIDER_MANAGED_KEYS,
     get_merged_provider_models,
     provider_default_config,
     provider_quota_exclude_keys,
@@ -8721,12 +8722,12 @@ class OpenAIChatToolWindow(ToolWindow):
             "模型名称",
             "API_URL",
             "API_KEY",
-            "模型列表",
             "provider_name",
             "name",
             "config_id",
             "display_name",
             "认证方式",
+            *PROVIDER_MANAGED_KEYS,  # 服务商级管理键（非模型参数）
             *provider_quota_exclude_keys(),  # 套餐用量查询字段不应出现在模型参数配置中
         ]:
             config.pop(pop_key, None)

@@ -24,6 +24,7 @@ from qfluentwidgets import (
 )
 
 from app.constants import PARAM_SCHEMA
+from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.utils.design_tokens import Colors, font_size_css
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
@@ -106,20 +107,25 @@ class ModelConfigCard(QWidget):
     # 渲染
     # ------------------------------------------------------------------
     def set_config(self, title: str, config: dict, model_name: str = ""):
-        self.config = config.copy()
         self.current_provider = title
         self.current_model_name = model_name or ""
-
-        self._clear_layout(self.layout)
-        self._widgets.clear()
 
         # 连接信息 + 系统字段（不渲染到参数列表中）
         skip_keys = {
             "模型名称", "API_URL", "API_KEY", "认证方式", "获取地址",
-            "模型列表", "选择模型", "provider_name", "name", "config_id",
+            "选择模型", "provider_name", "name", "config_id",
             "display_name", "_suffix_index",
             *QUOTA_EXCLUDE_KEYS(),  # 套餐用量查询字段不渲染到参数列表
+            *PROVIDER_MANAGED_KEYS,  # 服务商级管理键（模型列表生命周期，非模型参数）
         }
+
+        # ⚠ 过滤必须发生在入口：get_config 从 self.config.copy() 起步全量回传，
+        # 任何留在 self.config 里的键都会被 emit 出去并写回磁盘配置。
+        # 只挡渲染不够——服务商管理键（bool / 时间戳）经此往返会被改坏。
+        self.config = {k: v for k, v in config.items() if k not in skip_keys}
+
+        self._clear_layout(self.layout)
+        self._widgets.clear()
 
         # 收集要渲染的字段：[(order, key, value, meta), ...]
         items = []
@@ -258,6 +264,11 @@ class ModelConfigCard(QWidget):
         key_lower = key.lower()
         if "key" in key_lower or ("token" in key_lower and key not in ["最大Token", "上下文长度"]):
             return "password"
+        # ⚠ bool 必须排在 int/float 之前：bool 是 int 的子类，
+        # isinstance(True, int) 为真，且 True == 1 落在 0~2 区间，
+        # 会被下面的 slider 分支命中渲染成滑条（值拖动后变 float，覆盖原 bool）。
+        if isinstance(value, bool):
+            return "checkbox"
         if isinstance(value, (int, float)):
             if 0 <= value <= 2:
                 return "slider"

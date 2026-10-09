@@ -174,6 +174,32 @@ MODEL_LEVEL_KEYS = frozenset(
     "声明_支持思考 声明_支持图像 声明_上下文长度 声明_最大输出 声明_思考参数 声明_思考强度".split()
 )
 
+# ============================================================
+# 服务商级管理键（非模型参数，禁止渲染到模型配置卡）
+# ============================================================
+# 「模型列表」生命周期管理链（ProviderEditCard 保存计划 + ModelRefreshService
+# 定时刷新）写入 saved_providers[config_id] 的字段。语义属于**服务商**而非模型，
+# 与 PARAM_SCHEMA 无关。
+#
+# ⚠ 模型配置卡必须过滤掉这些键：它们没有 schema，会落入 _infer_fallback_type
+#   启发式分支渲染出无意义控件（bool 曾因 isinstance(True, int) 命中 slider 分支，
+#   渲染成 0~2 滑条）。更糟的是 get_config 全量回传，滑块拖动值会覆盖 bool。
+#
+# ⚠ 两处过滤清单（main_widget._load_model_config_to_card 的 pop_key /
+#   ModelConfigCard.set_config 的 skip_keys）统一引用本集合。新增此类键必须
+#   同步此处，否则会静默泄漏进模型参数卡。
+#
+# 与 model_refresh_service.KEY_* 同值（那是刷新服务内部的读写键名常量）。
+# 「模型名称」不在本集合：它带 UI 别名映射（"选择模型"），由两处清单原位处理。
+PROVIDER_MANAGED_KEYS = frozenset({
+    "模型列表",
+    "模型关闭列表",
+    "自动刷新模型",
+    "健康检查",
+    "上次模型刷新",
+    "模型刷新状态",
+})
+
 # ──────────────────────────────────────────────────────────────
 # 服务商数据全部移入 providers 插件（万物为插件）：
 #   PROVIDER_MODELS / FREE_PROVIDERS / PROVIDER_ICONS /

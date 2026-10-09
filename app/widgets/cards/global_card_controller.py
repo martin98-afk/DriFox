@@ -89,6 +89,7 @@ class GlobalCardController:
         for card in (
             self._settings_popup,
             self._provider_edit_card,
+            self._provider_picker_card,
             self._hook_edit_card,
             self._mcp_edit_card,
             self._diff_viewer_card,
@@ -302,6 +303,10 @@ class GlobalCardController:
         self._provider_picker_popup.customPicked.connect(self._show_provider_custom_card)
         self._provider_picker_card.content_layout.addWidget(self._provider_picker_popup)
         self._provider_picker_card.setVisible(False)
+        # 关闭按钮（SystemCardFrame 自带 ×）直接 setVisible(False) 会绕过
+        # CardManager → 显隐事件不发布 → 标题栏 tab 残留。接 closed 走统一
+        # 关闭链（与 provider_edit/hook_edit 对称）。
+        self._provider_picker_card.closed.connect(self._on_provider_picker_card_closed)
         mgr = self._card_manager
         mgr.register_card(
             GLOBAL_WINDOW_ID, ContainerType.TOP, "provider_picker", self._provider_picker_card, system_card=True
@@ -357,6 +362,14 @@ class GlobalCardController:
     def _show_provider_add_card(self):
         """显示添加服务商卡片（P1-7 起先走卡片墙）"""
         self._show_provider_picker_card()
+
+    def _on_provider_picker_card_closed(self):
+        """添加服务商卡片（SystemCardFrame）关闭回调 → 移除 tab + 回设置面板
+
+        与 _on_provider_edit_card_closed 对称：接上标题栏 tab 后，× 必须走统一
+        关闭链，否则卡片自身 setVisible(False) 绕过 CardManager，tab 残留。
+        """
+        self._close_edit_card("provider_picker")
 
     def _show_provider_edit_card(self, config_id: str, provider_info: dict):
         """显示编辑服务商卡片"""

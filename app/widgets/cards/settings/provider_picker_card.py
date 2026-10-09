@@ -208,6 +208,8 @@ class ProviderPickerCard(QWidget):
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
         self._tiles: List[ProviderPickerTile] = []
+        # 组头控件引用 (anchor, label, color)：color=None 表示跟随主题 TEXT_MUTED
+        self._headers: List[tuple] = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(0)
@@ -254,9 +256,9 @@ class ProviderPickerCard(QWidget):
                 ]
             )
 
-        # 「+ 自定义」入口（固定末位）
+        # 「+ 自定义」入口（固定末位）。color=None → 用主题 TEXT_MUTED（refresh 时重算）
         self._layout.addSpacing(_CUSTOM_SPACING)
-        self._add_group_header("其他", 1, Colors.TEXT_MUTED, first=False)
+        self._add_group_header("其他", 1, None, first=False)
         self._add_flow_row([(CUSTOM_ENTRY, "手动填写全部参数")])
 
     def _add_flow_row(self, entries: List[tuple]) -> None:
@@ -271,7 +273,7 @@ class ProviderPickerCard(QWidget):
             self._tiles.append(tile)
         self._layout.addWidget(row)
 
-    def _add_group_header(self, group: str, count: int, color: str, first: bool) -> None:
+    def _add_group_header(self, group: str, count: int, color, first: bool) -> None:
         header = QWidget(self)
         header.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(header)
@@ -279,15 +281,47 @@ class ProviderPickerCard(QWidget):
         layout.setSpacing(8)
         anchor = QWidget(header)
         anchor.setFixedSize(3, 12)
-        anchor.setStyleSheet(f"background: {color}; border: none; border-radius: 1px;")
+        anchor.setStyleSheet(self._anchor_style(color))
         layout.addWidget(anchor)
         label = QLabel(f"{group}（{count}）", header)
-        label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: 600; {get_font_family_css()}")
+        label.setStyleSheet(self._header_label_style())
         layout.addWidget(label)
         layout.addStretch(1)
         if not first:
             self._layout.addSpacing(max(0, _GROUP_SPACING - _GROUP_HEADER_TOP))
         self._layout.addWidget(header)
+        # 主题切换需重刷（token 在构建时已写死进样式串）
+        self._headers.append((anchor, label, color))
+
+    @staticmethod
+    def _anchor_style(color) -> str:
+        """组头色条样式（color=None 表示跟随主题 TEXT_MUTED）"""
+        return f"background: {color or Colors.TEXT_MUTED}; border: none; border-radius: 1px;"
+
+    @staticmethod
+    def _header_label_style() -> str:
+        return f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: 600; {get_font_family_css()}"
+
+    def refresh_style(self):
+        """主题切换：重刷全部卡片与组头
+
+        ProviderPickerCard 是懒构建的（首次打开「添加服务商」才建），但构建后
+        若无本方法，卡片/组头的样式串会停留在构建时的主题态（浅色期建 + 切深色
+        = 整面白卡）。宿主 BaseSettingsCard 的 _refresh_content_children 按
+        hasattr(w, "refresh_style") 级联，本方法补齐后即自动接入主题刷新链。
+        """
+        Colors.refresh()
+        for tile in list(self._tiles):
+            try:
+                tile.refresh_style()
+            except RuntimeError:
+                continue
+        for anchor, label, color in list(self._headers):
+            try:
+                anchor.setStyleSheet(self._anchor_style(color))
+                label.setStyleSheet(self._header_label_style())
+            except RuntimeError:
+                continue
 
     def _on_tile_picked(self, provider_name: str):
         if provider_name == CUSTOM_ENTRY:
