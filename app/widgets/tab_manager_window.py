@@ -2841,6 +2841,17 @@ class TabManagerWindow(FramelessWindow):
         # 把手，覆盖层卡片无法被左右侧边栏挤压）。卡片自身下限已各自放开。
         self._content_stack.set_min_hint_disabled(has_visible)
         if has_visible:
+            # [PERF] 承接覆盖层容器隐藏期主题刷新门控的补刷（见
+            # CardContainer.refresh_style）。覆盖层走 QStackedWidget 切页，
+            # 不触发 showEvent，故补刷挂在此处；★必须在 setCurrentIndex 之前
+            # 完成，否则会先显示旧主题背景再刷（闪一帧）。
+            _top_c = getattr(self, "_global_top_container", None)
+            if _top_c is not None and getattr(_top_c, "_theme_needs_refresh", False):
+                _top_c._theme_needs_refresh = False
+                try:
+                    _top_c._apply_background_style()
+                except RuntimeError:
+                    pass
             self._content_stack.setCurrentIndex(1)
         else:
             self._content_stack.setCurrentIndex(0)
