@@ -1,7 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [未发布]
+## [v0.6.5] - 2026-10-08 (重新发布 #3)
+
+自上一版本以来的变更（累计） | 提交数：72 · 文件变更：235 · +23359/-5159 | 贡献者：dingma, drifox-bot, mading
 
 ### ⚠️ 行为变化 (Breaking Changes)
 
@@ -12,20 +14,6 @@ All notable changes to this project will be documented in this file.
 - **per-model 输出上限接通，模型输出能力不再被 family 级截断** (`app/core/modelmeta/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`): 此前 61 个模型的真实输出上限被 family 级默认值（8192 / 65536）覆盖，最高折损 74%（如 space-bunny 524288、MiniMax-M3 512000、grok-4.7 500000 被压到 65536）。现在读取 models.dev 的 per-model `max_output_tokens`：发送值 = `min(用户「最大输出」, 模型真实上限)`；用户未填则用模型真实上限。全局兜底常量更名为 `ABSOLUTE_FALLBACK_CEILING`（65536），仅在插件与 family 两级都缺失时生效。
 
 - **SiliconFlow 能力族判定修正** (`app/core/modelmeta/provider_profile.py`): family 探测新增「插件声明优先」层。SiliconFlow 的默认模型为 `deepseek-ai/DeepSeek-R1` 且模型池含大量 `deepseek-ai/*`，此前被原 if 链的模型名前缀规则误判为 `deepseek` 族，套用了 DeepSeek 的能力参数（上下文窗口 / 输出上限 / 思考控制方式均不符）。现按其插件声明的 `siliconflow` 族取参。
-
-### ✨ 新功能 (New Features)
-
-- **服务商配置体验优化**（P0 批次）: 服务商列表新增搜索框（150ms 防抖，按显示名 / 服务商名 / 模型名过滤）与四组分组渲染（OAuth / Coding Plan / 本地 / API，判据全部来自插件声明）；编辑保存不再丢弃非白名单字段（未知键保留），用户清空的字段不再被旧值合并复活。
-
-- **认证方式 / URL 预设 / 能力族统一走插件声明** (`app/utils/provider_ui_meta.py` 新增): 新增取值基座（`get_auth_type` / `get_preset_urls` / `get_family`），消除 UI 层三条硬编码链与 providers 插件声明的双源漂移。修复百度千帆（`auth_type="bce"`）此前无法通过 UI 正确配置的问题；火山方舟 URL 预设对齐插件声明的 `api/coding/v3`。
-
-- **models.dev 数据按 provider 分区索引** (`app/core/modelmeta/models_dev_sync.py`, `app/core/modelmeta/model_capabilities.py`): 新增 provider 维度的嵌套能力索引（不合并），同名模型跨服务商不再串味（此前 kimi-k2.5 在 moonshotai / opencode-go 之间会走「取更支持者」的合并，导致 A 家模型被 B 家元数据抬升）。带 provider 时走精确查，未命中降级原扁平索引；老缓存（无分区键）自动降级不报错。
-
-- **配置迁移基建** (`app/utils/config.py`): 新增 `_MIGRATIONS` 注册表与 `_run_migrations`，迁移项串行执行、单项异常隔离（不中断启动，仅记日志）。
-
-## [v0.6.5] - 2026-10-08 (重新发布 #2)
-
-自上一版本以来的变更（累计） | 提交数：37 · 文件变更：169 · +16149/-4364 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -62,6 +50,14 @@ All notable changes to this project will be documented in this file.
 - **服务商卡尺寸与 OpenCode 分组** (`aaf9168c`): 服务商卡尺寸自适应内容，OpenCode 服务商分组分类增强。
 
 - **内置市场源版本同步** (`34363fbf`): 内置插件市场源与当前版本默认值同步。
+
+- **服务商配置体验优化**（P0 批次）: 服务商列表新增搜索框（150ms 防抖，按显示名 / 服务商名 / 模型名过滤）与四组分组渲染（OAuth / Coding Plan / 本地 / API，判据全部来自插件声明）；编辑保存不再丢弃非白名单字段（未知键保留），用户清空的字段不再被旧值合并复活。
+
+- **认证方式 / URL 预设 / 能力族统一走插件声明** (`app/utils/provider_ui_meta.py` 新增): 新增取值基座（`get_auth_type` / `get_preset_urls` / `get_family`），消除 UI 层三条硬编码链与 providers 插件声明的双源漂移。修复百度千帆（`auth_type="bce"`）此前无法通过 UI 正确配置的问题；火山方舟 URL 预设对齐插件声明的 `api/coding/v3`。
+
+- **models.dev 数据按 provider 分区索引** (`app/core/modelmeta/models_dev_sync.py`, `app/core/modelmeta/model_capabilities.py`): 新增 provider 维度的嵌套能力索引（不合并），同名模型跨服务商不再串味（此前 kimi-k2.5 在 moonshotai / opencode-go 之间会走「取更支持者」的合并，导致 A 家模型被 B 家元数据抬升）。带 provider 时走精确查，未命中降级原扁平索引；老缓存（无分区键）自动降级不报错。
+
+- **配置迁移基建** (`app/utils/config.py`): 新增 `_MIGRATIONS` 注册表与 `_run_migrations`，迁移项串行执行、单项异常隔离（不中断启动，仅记日志）。
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -100,6 +96,56 @@ All notable changes to this project will be documented in this file.
 - marketplace 自动再生成自 plugin.json (`db8df443`)
 ### 🐛 问题修复 (Bug Fixes) (重新发布 #2 追加)
 - **历史面板项目选择列表行对齐修复** (`a36ec0ce`): `_ensure_item_signals` 末尾的 `addStretch(1)` 被逐行调用，N 个项目 = N 个弹簧夹在行间平分剩余空间，展开面板后项目行被均匀撒开（首行悬中、末行沉底）。弹簧改为列表重建完成后追加一次，并加静态回归守卫。
+
+### 🆕 重新发布 #3 增量（自 v0.6.5 重新发布 #2 起 · 35 commits · 66 files · +7210/-795）
+
+#### ⚡ 性能优化 (Performance)
+
+- **启动链路提速** (`0169bd7f`, `697bffcf`, `3fd02097`, `09f12bc6`): `chat_worker` 的 `openai` 顶层 import 延迟化，消除启动期 1.9s 同步阻塞；httpx / httpcore 延迟化再减 0.3s；models.dev 数据迁移前移出关键路径；预热阶段剔除插件工具全量注册并延后至 idle。实测窗口开启 1164.6ms（-50.3%），设置页 2127.8ms（-28.3%），总计 8210.9ms（-15.6%）。
+
+- **流式渲染三层节拍对齐** (`3df0274c`, `0a49f22c`, `afcec469`, `b1f57c8c`, `b59b0b70`, `d0073823`): 高度回环三层节拍统一对齐 40ms 消除互质漂移；差量渲染接入 roots 作用域查询，消除每拍 O(n²) 全量比较；高度直报改走防抖通道并作废 viewer 复用在途异步渲染；打字机闸门改为 FIFO 队列（此前单槽闸门在高节拍下丢内容），简洁模式不再成块蹦字；工具调用到达时冲刷残留思考批次，消除思考内容延迟刷新。骨架 bump v42→43，流式追加文本 IPC 由骨架接管，每拍省约 4KB。
+
+- **贴底抖动消除** (`43fe811a`): 流式期间贴底跟随改为差分判定 + 折叠态优先查询，滚底容差 ±1px 直接跳过，`reorganizeContent` 走 header diff 化重排。
+
+- **内存治理** (`1aa78021`): 渲染页配额按 dpr 收缩，强回收判据由单路改双路。
+
+- **主题刷新与插件发现** (`6bef51ea`, `8db21f82`, `01a2dccd`+`9f5d00f4`, `07c92898`, `5b832fdb`): tab_manager 主题串拆分并只刷顶层三容器可见区、隐藏容器按需补刷；插件发现结果持久化缓存命中即跳过全扫（合并公共函数 `a430bc41`）；gateway 会话列表改轻量加载、按需回源全量。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **高 DPI 白底消息卡根治** (`f873aadf`): 4K 屏 3840×2160 + 225% 缩放下，viewer 逻辑高度 ×2.25 超过 GPU 单纹理 8192 物理 px 上限（临界约 3640 逻辑 px），表面创建失败后回退白底 page 并固化。`card_viewers._clamp_height` 按 `8192 / dpr` 统一钳高，`message_card._update_height` 入口单点钳全链一致，`heightChanged` 发钳后值；卡片骨架 body `max-height` 由 10000px 改为 `100vh`，超长内容落卡内内滚兜底。同时 `ensure_transparent_composition()` 在池化 viewer 跨顶层 reparent（卡 → `WA_DontShowOnScreen` 宿主 → 新卡）后重申透明合成，修掉 Windows Chromium 合成上下文丢失的次因。取证脚本留档 `tests/debug/white_card_color_repro.py`。
+
+- **窗口本体底色回归** (`afdc3d6b`): 底色随主题刷新的回归，根因是 `6bef51ea` 删掉了 `#tabManagerWindow{background:CONTENT_BG}`，已回加动态 f-string（`test_tab_manager_theme_scope` 8 passed）。
+
+- **主题链防御加固** (`37035d1f`, `0c058260`, `75bb55bd`, `d7fc1cae`, `615103cc`): 主题串拆分防御构造期未创建的容器帧；全局卡刷新循环防御已销毁对象；`ThemeRefreshCoordinator` 保证随主题变更更新；分组标题在重建后可见。
+
+- **打字机内容丢失** (`411c9241`): 单槽闸门改 FIFO 队列，消除高节拍下流式文字丢内容。
+
+- **插件工具加载可自愈** (`124b99ff`): 加载失败不再永久卡死，下次请求自动重试。
+
+- **打包缺失依赖** (`012d4190`): 补 `pypinyin` 隐藏导入，修复历史拼音排序在打包版失效。
+
+- **插话撤回** (`7530199b`): 修掉取消窗口期出现双气泡、撤销后不回填输入框的问题。
+
+- **配置与同步并发** (`961d380f`): 修并发写盘竞态与上传失败丢变更。
+
+- **归档会话复活** (`cb4e6677`): gateway 归档会话补真实删除，此前删除后会复活。
+
+#### ✨ 新功能 (New Features)
+
+- **服务商管理动态刷新** (`4ae2b978`): provider 管理支持动态刷新与重建。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **插件发现合并公共函数** (`a430bc41`): 发现与合并逻辑抽公共入口，供缓存路径复用。
+
+#### 🧪 测试 (Tests)
+
+- **streaming 契约测试迁移符号路径** (`152dbdf9`): 跟随 card_render_core / card_viewers 拆分后的模块路径更新。
+
+#### 🔧 其他 (Chores & Build)
+
+- 清理临时脚本 probe 入库 (`63045d0f`)。
 
 ## [v0.6.4] - 2026-09-28 (重新发布 #2)
 
