@@ -3916,6 +3916,16 @@ class OpenAIChatWorker(QThread):
             # ----- 工具调用参数累积 -----
             elif etype == "response.function_call_arguments.delta":
                 tool_calls_found = True
+                # 工具调用开始 → 思考阶段结束：先冲刷残留的思考批次。
+                # 不冲刷时，模型最后吐的一小段思考（<20 字且距上次发射 <80ms）
+                # 会卡在批次里，一直等到**流结束**（工具执行完）才发射 —— 用户
+                # 感知就是"思考内容等工具执行完才刷新"。
+                if _reasoning_batch:
+                    self._emit_with_callback(
+                        "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
+                    )
+                    _reasoning_batch = ""
+                    _reasoning_batch_time = time.time()
                 item_id = getattr(event, "item_id", "")
                 piece = getattr(event, "delta", "") or ""
                 buffer = self._tool_calls_buffer.get(item_id)
@@ -3935,6 +3945,13 @@ class OpenAIChatWorker(QThread):
                 item = getattr(event, "item", None) or {}
                 if self._responses_item_get(item, "type") == "function_call":
                     tool_calls_found = True
+                    # 思考阶段结束：冲刷残留批次（见 function_call_arguments.delta 注释）
+                    if _reasoning_batch:
+                        self._emit_with_callback(
+                            "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
+                        )
+                        _reasoning_batch = ""
+                        _reasoning_batch_time = time.time()
                     item_id = self._responses_item_get(item, "id")
                     name = self._responses_item_get(item, "name") or ""
                     if item_id and name:
