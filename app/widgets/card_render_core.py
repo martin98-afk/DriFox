@@ -3117,7 +3117,11 @@ _SKELETON_CACHE_MAX = 48
 # updateTailHtml / updateContentAppend 挂起到缓冲降到水位再执行，消除"揭示途中被替换
 # 打断 → 文字整块跳变"（实测每 ~200ms 一次、单次 4~9 字符）。旧骨架无 _twGate →
 # 调用被判 undefined 走原路径（无字幕），必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 40
+# _SKELETON_CACHE_VERSION +1（v41）：[T28/P0-1] 差量渲染接入 roots 作用域查询——
+# updateContentAppend/updateTailHtml 八个后处理收窄到新增区间；_initEchartsIn/
+# renderWidgetToolbars/_runFenceAssets/_initWidgets/_scanFenceLangs 加 roots 形参
+# （null/undefined 退化全文档，全量路径兼容）。骨架 JS 结构变更必须 bump。
+_SKELETON_CACHE_VERSION = 41
 
 
 def _js_literal(value) -> str:

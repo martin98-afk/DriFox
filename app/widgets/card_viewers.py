@@ -3523,12 +3523,13 @@ class CodeWebViewer(QWebEngineView):
                         }});
                     }});
                 }}
-                window._initEchartsIn = function (container) {{
+                window._initEchartsIn = function (roots) {{
                     if (!window.echarts) {{
-                        window._echartsEnsure(function () {{ window._initEchartsIn(container); }});
+                        window._echartsEnsure(function () {{ window._initEchartsIn(roots); }});
                         return;
                     }}
-                    container.querySelectorAll('.echarts-container').forEach(function(el) {{
+                    // [T28] roots 为 null/undefined 时 _scopeQuery 退化全文档（全量路径兼容）
+                    window._scopeQuery(roots, '.echarts-container').forEach(function(el) {{
                         var jsonB64 = el.getAttribute('data-echarts-json');
                         if (!jsonB64 || el._echartInited || el._echQueued) return;
                         window._queueEcharts(el);
@@ -3907,6 +3908,9 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
+                    // [T28] 差量基线：_from = 旧增量节点仍在场时的顶层节点数；
+                    // 本轮新内容（新段 + tailDiv）只会落在 children[_from..] 区间
+                    var _from = container.children.length;
                     // 段落分隔已由本次渲染的 HTML 表达，清掉挂起分段标记
                     container.removeAttribute('data-pending-break');
                     // 追加格式化 HTML（含 table 包裹等后续处理）
@@ -3925,6 +3929,10 @@ class CodeWebViewer(QWebEngineView):
                         tailDiv.innerHTML = tailHtml;
                         container.appendChild(tailDiv);
                     }}
+                    // [T28] 在删除旧增量节点**之前**取 roots：旧增量都在 _from 之前
+                    // 不在区间内，roots = 本轮新增的顶层节点（新段 + tailDiv），
+                    // 且此刻仍挂在文档内（引用有效）。
+                    var roots = window._nodesSince(container, _from);
                     // 🐛 修复（阅读位置被钳制）：旧增量节点改为**最后**删除。
                     // 「先删后插」会让容器 scrollHeight 瞬时塌陷，浏览器把 scrollTop 钳到
                     // 更小的 max —— 坞态正文内滚时每来一个 chunk 用户位置就漂一次。
@@ -3939,15 +3947,10 @@ class CodeWebViewer(QWebEngineView):
                     // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
                     if (window._toolCompactMode) reorganizeContent();
                     // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
-                    container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
-                        if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
-                        var wrapper = document.createElement('div');
-                        wrapper.className = 'table-scroll-wrapper';
-                        table.parentNode.insertBefore(wrapper, table);
-                        wrapper.appendChild(table);
-                    }});
+                    // [T28] 八个后处理全部收窄到 roots 作用域（O(新增段)，替代全文扫描）
+                    window._wrapTablesIn(roots);
                     // 恢复展开状态
-                    restoreCollapsibleStates(container);
+                    restoreCollapsibleStates(roots);
                     // 同步滚动到底（流式期间通常期望跟到底部）
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
@@ -3963,16 +3966,16 @@ class CodeWebViewer(QWebEngineView):
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     // 初始化 ECharts 图表（追加的闭合段可能含 echarts 代码块；rAF 排队）
-                    window._initEchartsIn(container);
+                    window._initEchartsIn(roots);
                     // 渲染 Mermaid 图表（追加的闭合段可能含 ```mermaid 代码块）
-                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
+                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks(roots);
                     // 渲染 KaTeX 公式（追加的闭合段可能含公式）
-                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks();
+                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks(roots);
                     // SVG / HTML widget 工具栏挂载（同上时机）
-                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
+                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars(roots);
                     // 插件 fence：追加的闭合段可能带入新的插件 fence
-                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
-                    if (typeof window._initWidgets === 'function') window._initWidgets();
+                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets(roots);
+                    if (typeof window._initWidgets === 'function') window._initWidgets(roots);
                     // 预览文字打字机：差量段里新落地的思考/工具预览行逐字显现
                     if (typeof window._ptPlay === 'function') window._ptPlay();
                     // 使用延迟报告，确保浏览器布局完成
@@ -4038,6 +4041,8 @@ class CodeWebViewer(QWebEngineView):
                     tailDiv.setAttribute('data-rendered', 'true');
                     tailDiv.innerHTML = html;
                     container.appendChild(tailDiv);
+                    // [T28] 本路径新增内容恰为 tailDiv 一个顶层节点
+                    var roots = [tailDiv];
                     // 🐛 修复（阅读位置被钳制）：同 updateContentAppend，先加后删。
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         if (el !== tailDiv) el.remove();
@@ -4045,14 +4050,9 @@ class CodeWebViewer(QWebEngineView):
                     // 骨架挂回末尾（图表仍在生成中）；闭合时 _reattachSkeleton 自动丢弃
                     window._reattachSkeleton(container, _skel, html, '', tailDiv);
                     // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
-                    container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
-                        if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
-                        var wrapper = document.createElement('div');
-                        wrapper.className = 'table-scroll-wrapper';
-                        table.parentNode.insertBefore(wrapper, table);
-                        wrapper.appendChild(table);
-                    }});
-                    restoreCollapsibleStates(container);
+                    // [T28] 八个后处理全部收窄到 roots 作用域（O(新增段)，替代全文扫描）
+                    window._wrapTablesIn(roots);
+                    restoreCollapsibleStates(roots);
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
                         _autoScrollStreamingBody();
@@ -4070,13 +4070,13 @@ class CodeWebViewer(QWebEngineView):
                     // 图表/公式 fence。原先缺这四连 → 走 updateTailHtml 路径（无空行
                     // 分隔的长段落）时 echarts / mermaid / katex / widget 工具栏
                     // 全部静默不初始化。
-                    window._initEchartsIn(container);
-                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
-                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks();
-                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
+                    window._initEchartsIn(roots);
+                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks(roots);
+                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks(roots);
+                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars(roots);
                     // 插件 fence：尾部整段替换同样可能带入新的插件 fence
-                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
-                    if (typeof window._initWidgets === 'function') window._initWidgets();
+                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets(roots);
+                    if (typeof window._initWidgets === 'function') window._initWidgets(roots);
                     setTimeout(() => reportHeightDebounced(), 30);
                 }}
                 {_CONTENT_AUTOSCROLL_JS}
@@ -4726,10 +4726,15 @@ class CodeWebViewer(QWebEngineView):
                 // 经 _protect_inline_svg_blocks 包 <div> / markdown 段落包 <p>，svg 沉一层，
                 // 只扫顶层会漏挂）。尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon）。
                 // svg._widgetToolbar 防重挂（innerHTML 全量重建后 DOM 全新，标记自然失效，重扫重挂）。
-                window.renderWidgetToolbars = function() {{
-                    var root = document.getElementById('content-placeholder');
-                    if (!root) return;
-                    var children = root.children;
+                window.renderWidgetToolbars = function(roots) {{
+                    // [T28] 无参（全量路径）退化为 content-placeholder 顶层集合；
+                    // 差量路径传入 roots（恰为新增顶层节点）只遍历新增段
+                    if (!roots) {{
+                        var _cp = document.getElementById('content-placeholder');
+                        if (!_cp) return;
+                        roots = _cp.children;
+                    }}
+                    var children = roots;
                     for (var i = 0; i < children.length; i++) {{
                         var el = children[i];
                         var svg = null;
@@ -4769,8 +4774,9 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 插件 fence：assets 按需注入 + 权限桥 =====
                 window.__fenceLoaded = {{}};
-                function _scanFenceLangs() {{
-                    var out = [], nodes = document.querySelectorAll('[data-fence-renderer]');
+                function _scanFenceLangs(roots) {{
+                    // [T28] roots 为 null/undefined 时退化全文档（全量路径兼容）
+                    var out = [], nodes = window._scopeQuery(roots, '[data-fence-renderer]');
                     for (var i = 0; i < nodes.length; i++) {{
                         var l = nodes[i].getAttribute('data-fence-renderer');
                         if (l && out.indexOf(l) < 0) out.push(l);
@@ -4851,8 +4857,9 @@ class CodeWebViewer(QWebEngineView):
                         console.error('[fence] bridge sync:', e);
                     }}
                 }}
-                window._runFenceAssets = function () {{
-                    var _flangs = _scanFenceLangs();
+                window._runFenceAssets = function (roots) {{
+                    // [T28] 首扫收窄到 roots；assets 回调内二次装配保持全文档不动
+                    var _flangs = _scanFenceLangs(roots);
                     // 桥必须先于 assets 装配：插件脚本末尾常有"首帧兜底"的主动初始化
                     // （一执行就跑），那时若桥还是空的，插件会把"未授权"状态写死在
                     // 节点上，之后再装配也救不回来（幂等标记已打）。
@@ -4934,8 +4941,9 @@ class CodeWebViewer(QWebEngineView):
                     node.appendChild(f);
                     try {{ f.setAttribute('srcdoc', _widgetBuildDoc(src)); }} catch (e) {{}}
                 }}
-                window._initWidgets = function () {{
-                    var nodes = document.querySelectorAll('.drifox-widget[data-widget-src]');
+                window._initWidgets = function (roots) {{
+                    // [T28] roots 为 null/undefined 时退化全文档（全量路径兼容）
+                    var nodes = window._scopeQuery(roots, '.drifox-widget[data-widget-src]');
                     for (var i = 0; i < nodes.length; i++) _initOneWidget(nodes[i]);
                 }};
                 window.addEventListener('message', function (e) {{
