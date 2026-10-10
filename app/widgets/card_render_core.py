@@ -327,6 +327,14 @@ FINISH_HEIGHT_ANIM_MIN_DELTA = 16  # 小于该变化不值得动画（避免噪�
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
+# ======== 流式期「坞态预算」高度上限（起步跳变兜底）========
+# [T36] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
+# 完成时正文按自然高度排版、坞态到达再压回 → 起步「先胀大再缩回」。
+# T36 去掉坞态正文限高后，坞态生效前后正文都是自然高度（坞态只影响工具区
+# 沉底/限高，高度扰动 ~几十 px），竞态窗口不复存在。常量保留仅供回滚参考，
+# 使用点已移除（message_card._update_height）。
+STREAM_DOCK_BUDGET_PX = 900
+
 # ======== 流式期高度追踪（默认开，出问题可一键关）========
 # 背景：流式期间卡片高度是「台阶式落地」——上报延迟（打字机节流 + Python 侧
 # 防抖）之后一次性 setFixedHeight 到目标值。文字是连续出来的，卡片高度却每
@@ -337,9 +345,13 @@ FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排�
 # 关闭方式：环境变量 DRIFOX_STREAM_HEIGHT_ANIM=0，或运行时
 # set_stream_height_anim_enabled(False)。
 STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") != "0"
-# 追踪节拍（ms）：30ms ≈ 2 帧。每拍一次 setFixedHeight，回环已被
-# _stream_height_anim_active 上报隔离封死，频率即成本上限。
-STREAM_HEIGHT_TICK_MS = 30
+# 追踪节拍（ms）。[T28/P0-2] 曾统一为 40ms（与 JS 上报、message_card 防抖
+# 同拍，消除互质漂移）。[T34] 40 → 16（≈单帧）：流式正文由打字机按 rAF
+# 每 ~17ms 揭示一次，容器高度却按 40ms 一格逼近 —— 文字连续长、容器跳格，
+# 底部一行反复「顶到边缘 → 憋住 → 蹦一下」。16ms 让容器与 rAF 同频，二者
+# 视觉上同步生长。成本实测：setFixedHeight p50≈1ms，62 次/秒 ≈ 6% 主线程
+# 占用，且回环已被 _stream_height_anim_active 上报隔离封死。
+STREAM_HEIGHT_TICK_MS = 16
 # 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
 # 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
 STREAM_HEIGHT_TRACK_FACTOR = 0.45
@@ -351,11 +363,18 @@ STREAM_HEIGHT_TRACK_BOOST = 0.15
 # 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
 STREAM_HEIGHT_TRACK_EPSILON = 2
 # 小于该变化量直接 snap：流式尾巴上的小噪声不值得起追踪（避免常开 tick 空转）
-STREAM_HEIGHT_ANIM_MIN_DELTA = 8
-# 结束态（FINISH 窗口）追踪的逼近比例：比流式（0.45）更缓——结束态的高度变化
+# [T34] 8 → 2：流式期实测高度变化幅度 p50=4 / max=14 —— 也就是说**大部分**
+# 变化都落在 8px 阈值之下被直接 snap 成硬跳，追踪只在偶发大台阶才生效，
+# 「容器台阶式蹦高」的体感正来源于此。降到 EPSILON(=2) 后凡超过落定阈值
+# 的变化一律走追踪；tick 本身在收敛后即停（EPSILON 内对齐并停拍），
+# 不存在「常开空转」问题（那是 MIN_DELTA 存在的历史原因，已被 epsilon
+# 停拍机制覆盖）。
+STREAM_HEIGHT_ANIM_MIN_DELTA = 2
+# 结束态（FINISH 窗口）追踪的逼近比例：比流式更缓——结束态的高度变化
 # 与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级，追踪太快会"Qt 侧先到、
-# 页面还在动"的两段感；0.28 → 约 10 拍（300ms）收敛 96%，即丝绸尾音。
-FINISH_HEIGHT_TRACK_FACTOR = 0.28
+# 页面还在动"的两段感，即丝绸尾音。[T34] 0.28 → 0.12：按 τ 不变重算
+# （原 0.28@40ms → τ≈121ms；16ms 拍 f'=1-0.72^(16/40)≈0.12）。
+FINISH_HEIGHT_TRACK_FACTOR = 0.12
 
 
 def set_stream_height_anim_enabled(enabled: bool) -> None:
@@ -369,8 +388,14 @@ def set_stream_height_anim_enabled(enabled: bool) -> None:
 # 稳定区（流式期间已差量渲染好的段落）被一起销毁重建 → 结束瞬间整体重排闪一下，
 # 工具区坞态归位也跟着跳。差量收尾改为：稳定区 DOM 不动，只把剩余段差量上去 +
 # 流式思考块就地定稿（按 data-flip-key 位置键配对替换）。
-# ⚠️ 默认关闭：先合代码不行为，实机验证通过后再打开（DRIFOX_INCREMENTAL_FINALIZE=1）。
-INCREMENTAL_FINALIZE_ENABLED = os.getenv("DRIFOX_INCREMENTAL_FINALIZE", "0") == "1"
+# [T35] 默认**打开**（验证见 tests/debug/finalize_probe.py）：
+#   ① 稳定区 DOM 保留率 100%（纯段落 / 未闭合代码块 / think 块 / 混合）；
+#   ② 五个场景的最终 DOM 文本与全量终渲染**字节级一致** —— 此前不一致的
+#      根因是 _render_inline_tail 缺代码块包装，已修（见 _TAIL_CODE_WRAP_MAX_CHARS）。
+# 收益：结束这一拍不再整页 innerHTML 替换，稳定段落不被销毁重建 →
+# 消除每轮回答结束必然发生一次的整页重排闪烁。
+# 回滚：环境变量 DRIFOX_INCREMENTAL_FINALIZE=0，无需改代码。
+INCREMENTAL_FINALIZE_ENABLED = os.getenv("DRIFOX_INCREMENTAL_FINALIZE", "1") != "0"
 
 
 # 结束态耗时打点（默认关）：环境变量 DRIFOX_FINISH_TIMING=1 打开，
@@ -3113,7 +3138,30 @@ _SKELETON_CACHE_MAX = 48
 # 旧骨架仍带 todo DOM 与 JS（虽无数据源、恒隐藏），必须靠版本号让旧缓存失效。
 # _SKELETON_CACHE_VERSION +1（v39）：[#12] R2 恢复工具区滚动保护链（_scrollToolContentToBottom
 # + tc scroll 监听 + 意图绑定）；R1 display 空窗 scrollTop 快照保护；R3 flush 纯揭示化。
-_SKELETON_CACHE_VERSION = 39
+# _SKELETON_CACHE_VERSION +1（v40）：打字机 DOM 替换闸门（window._twGate/_twDrainGate）：
+# updateTailHtml / updateContentAppend 挂起到缓冲降到水位再执行，消除"揭示途中被替换
+# 打断 → 文字整块跳变"（实测每 ~200ms 一次、单次 4~9 字符）。旧骨架无 _twGate →
+# 调用被判 undefined 走原路径（无字幕），必须靠版本号让旧缓存失效。
+# _SKELETON_CACHE_VERSION +1（v41）：[T28/P0-1] 差量渲染接入 roots 作用域查询——
+# updateContentAppend/updateTailHtml 八个后处理收窄到新增区间；_initEchartsIn/
+# renderWidgetToolbars/_runFenceAssets/_initWidgets/_scanFenceLangs 加 roots 形参
+# （null/undefined 退化全文档，全量路径兼容）。骨架 JS 结构变更必须 bump。
+# _SKELETON_CACHE_VERSION +1（v42）：[T31] 打字机闸门单槽改 FIFO 队列——
+# _gateFn（新覆盖旧）→ _gateQueue（按序执行全部）。单槽对 updateTailHtml 成立
+# （每轮传入当前全文尾部，后者含前者），对追加语义的 updateContentAppend 不成立
+# （newHtml 只含本轮新闭合段，Python 已推进 _stable_md_len）→ 被覆盖那轮段格式化
+# HTML 永不落地，紧随替换又移除 [data-incremental] 节点 → 该段从屏上消失。
+# 实测 40 段 × 30ms：覆盖 3 次、流式态缺 7 段 token；禁用闸门 0 覆盖 0 缺失。
+# 旧骨架仍为单槽 → 必须靠版本号让旧缓存失效。
+# _SKELETON_CACHE_VERSION +1（v43）：[T35] _render_inline_tail 补代码块包装 +
+# [T36] 坞态正文去限高（_STREAMING_DOCK_CSS 的 max-height/overflow-y 移除、
+# 工具区 220→264px）。CSS 资产变更必须 bump。
+# _SKELETON_CACHE_VERSION +1（v44）：[T37] reportHeight 协议加第 5 字段
+# （cp 可见文本长度，内容哨兵数据源，见 card_viewers._content_sentinel_check）。
+# 旧解析器对多余字段兼容，但旧骨架永不发第 5 字段 → 哨兵失效，必须 bump。
+# _SKELETON_CACHE_VERSION +1（v45）：[T38] 空正文折叠——坞态下正文无可见内容
+# 时收为零高度（body.cp-blank，CSS + reportHeight 维护 + 复用复位）。
+_SKELETON_CACHE_VERSION = 45
 
 
 def _js_literal(value) -> str:
@@ -3468,6 +3516,18 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
 # 命中快路径时直接 escape 输出（与 nl2br 扩展对齐：空行分段、段内换行转
 # <br>），把 O(tail) × 10+ 降为 O(tail) × 1。判据保守：只要出现任一语法字符
 # 就退回完整管线，**宁可少快一次，不可错渲染一次**。
+# 尾部代码块包装（pygments 高亮 + copy 按钮 + 语言标签）的规模上限（字符）。
+# [T35] _render_inline_tail 原本**不包装**代码块 —— 与全量渲染
+# （_render_markdown_to_html_cached_impl）和差量段（_render_stable_segment）
+# 都不一致：流式期间代码块是素色 <pre>（实测同一段 md：inline_tail 87 字节
+# vs 全量 2663 字节，差 30 倍），流式结束全量渲染时才变成带高亮/行号/语言
+# 标签的卡片 → 每轮回答结束都「代码块整体变样」一次，也是差量收尾产物与
+# 全量不一致的根因。补上包装后二者字节级一致。
+# 代价：pygments 是 tail 渲染里最贵的一步（200 行 ≈ 5.7ms，而整段 markdown
+# convert 只要 0.2ms）。流式期间代码块单调增长、每轮 tail 都重高亮整块 →
+# O(n²)。超过本阈值退回素色，结束后由全量渲染补齐。
+_TAIL_CODE_WRAP_MAX_CHARS = 4000
+
 _TAIL_MD_SYNTAX_RE = re.compile(
     r"[`*_~\[\]#<>|\\$]"  # 行内/块级 markdown 标记（$ 为公式定界符，一并保守排除）
     r"|!\["  # 图片
@@ -3546,6 +3606,15 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
+    # [T35] 与全量/差量段渲染对齐：补代码块包装（pygments 高亮 + copy 按钮 +
+    # 语言标签）。缺它时流式期间代码块是素色 <pre>，结束全量渲染才变样 ——
+    # 每轮回答结束一次的可见「代码块变脸」，且让差量收尾产物与全量不一致。
+    # 规模保护：超大 tail 退回素色（成本说明见 _TAIL_CODE_WRAP_MAX_CHARS）。
+    if len(md_text) <= _TAIL_CODE_WRAP_MAX_CHARS:
+        try:
+            html = _wrap_code_blocks_with_copy_button_web(html)
+        except Exception:  # 包装失败绝不能让正文消失：保留未包装的 HTML
+            pass
     html = _resolve_image_src(html)
     return html
 
@@ -3564,20 +3633,16 @@ _STREAMING_DOCK_CSS = """
                 }
                 body.streaming-dock #content-placeholder {
                     order: 1;
-                    /* 坞态正文限高：容器自身滚动，卡片总高稳定不随流式增长，
-                       工具区+todo 保持可见；流式结束归位后恢复自然高度。
-                       330→450→600：流式长回复展示更多正文。 */
-                    max-height: 600px;
-                    overflow-y: auto;
-                    /* 🐛 修复（禁横向滚动）：单轴 auto 时另一轴 visible 会被计算为
-                       auto → 长行（URL/无空格长 token）超宽出现容器级横向滚动条。
-                       对齐 body 的 overflow-x:hidden；代码块(.code-content)/表格
-                       (table-scroll-wrapper) 自带嵌套横向滚动不受影响。
-                       overflow-wrap:break-word 让超宽长词强制断行（仅无断行点时
-                       生效，正常文本不受影响），避免 hidden 只裁切看不到尾巴。 */
+                    /* [T36] 不再限高：正文按自然高度随流式生长（与普通模式一致）。
+                       原设计（max-height 600px + 容器内滚）把「卡片总高稳定」放在
+                       阅读体验之上，实际代价是三重糟感：长回复流式期间看不到正在
+                       生成的文字（要手动内滚）；结束后 600→自然高度一次大跳变
+                       （数千 px 长回复尤其剧烈）；内滚容器与消息列表滚动跟随两层
+                       滚动打架。坞态的价值保留在「工具/思考实时条目沉底可见」，
+                       正文增长交给消息列表滚动跟随（贴底已修复）。
+                       保留横向裁剪（原 🐛 修复依然需要）。 */
                     overflow-x: hidden;
                     overflow-wrap: break-word;
-                    overflow-anchor: none;
                 }
                 body.streaming-dock #tool-section {
                     order: 2;
@@ -3588,9 +3653,21 @@ _STREAMING_DOCK_CSS = """
                    视觉上与"折叠"难区分 —— 用户反馈误以为工具区默认收起了。
                    放宽到 220px（≈8 行）后，常规工具序列可完整看到实时进度，
                    同时仍为 max-height（非无限增长），保持"卡片总高不随流式膨胀"
-                   的坞态设计意图。 */
+                   的坞态设计意图。
+                   [T36] 220 → 264px：正文不限高后，坞态唯一职责就是工具区可见，
+                   再压着它没有意义；264 ≈ 9-10 行，配合正文自然生长消除"拥挤"感。 */
                 body.streaming-dock #tool-content {
-                    max-height: 220px;
+                    max-height: 264px;
+                }
+                /* ── [T38] 空正文折叠 ──
+                   长工具循环期间（LLM 连续调工具、尚未输出正文）正文区没有任何
+                   可见内容，但仍占着 padding/min-height 的一块空白 —— 真机截图里
+                   表现为「卡片顶部一块约 45px 的纯白空白」，用户直接读作"白屏"。
+                   判据由 reportHeight 维护（body.cp-blank）：正文无可见文本且无
+                   图片/公式/表格等实体内容时置位，有内容即摘除。
+                   仅坞态生效：非坞态工具区在顶部，正文为空本来就不占视觉主体。 */
+                body.streaming-dock.cp-blank #content-placeholder {
+                    display: none;
                 }
 """
 
@@ -3693,6 +3770,11 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
                     // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）
                     document.body.classList.remove('streaming-dock');
+                    // [T38] 空正文折叠标志同样复位：上一张卡可能停在 cp-blank，
+                    // 不复位会让新卡片一开始就隐藏正文区
+                    document.body.classList.remove('cp-blank');
+                    var _cpR = document.getElementById('content-placeholder');
+                    if (_cpR) _cpR._blankState = undefined;
                     document.body.scrollTop = 0;
                     window._userScrolledWithin = false;
                     window._userScrolledUp = false;
@@ -3732,7 +3814,29 @@ _TYPEWRITER_JS = """
                     last: 0,          // 上一帧时间戳
                     enabled: true,    // 总开关（灰度/降级用）
                     CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
-                    BURST_LEN: 400    // 超过该积压视为突发，加速揭示
+                    BURST_LEN: 400,   // 超过该积压视为突发，加速揭示
+                    GATE_MIN_BUF: 3,  // DOM 替换闸门：缓冲不高于此值即执行（跳变量上限）
+                    GATE_STILL_MS: 60,      // 静默窗：距最近一次 push 超此毫秒即认为"间隙"，可执行替换
+                    GATE_POLL_MS: 30,       // 静默窗轮询间隔（buf 空时 rAF 停摆，需独立轮询）
+                    GATE_MAX_WAIT_MS: 400,  // 硬上限：连续高速流式下防格式化无限延后
+                    BOOST_FACTOR: 0.3,      // 挂起期间揭示加速（τ × 此系数）
+                    pushed: 0,        // 累计 push 字符数
+                    _boost: false,    // 闸门挂起中：揭示加速标记
+                    _force: false,    // 强制执行一次标记（超时兜底路径放行，防自我挂起）
+                    _lastPushAt: 0,   // 最近一次 push 时刻（静默窗判定）
+                    _gateDeadline: 0, // 挂起硬上限时刻
+                    // [T31] 挂起的 DOM 替换改为 FIFO 队列（原单槽覆盖）：
+                    // updateContentAppend 的 newHtml **只含本轮新闭合段**（Python 侧
+                    // 每轮推进 _stable_md_len，后续轮次不再包含早前段），因此
+                    // 「新任务含更多文本、旧任务语义被包含」的前提对它不成立 ——
+                    // 单槽覆盖 = 被覆盖那轮的段格式化 HTML 永不落地，而紧随的替换
+                    // 又无条件移除全部 [data-incremental] 节点（含承载该段纯文本的
+                    // 节点）→ 该段从屏上消失且无人补回（用户可见“流式正文偶发丢段”）。
+                    // 实测：40 段 × 30ms 喂入，闸门覆盖 3 次 → 流式态缺 7 个段落 token；
+                    // 禁用闸门后覆盖 0 次、缺失 0。
+                    _gateQueue: [],   // 挂起的 DOM 替换队列（按序执行，不丢任务）
+                    _gateTimer: 0,    // 静默窗轮询句柄
+                    _gateExtra: ''    // 挂起期间新 push 的文本（不在替换快照里，替换后补回）
                 };
                 window._twPush = function (text) {
                     var st = window._tw;
@@ -3740,6 +3844,11 @@ _TYPEWRITER_JS = """
                     // 骨架尚未注册追加函数（理论上不会发生）：退化为直接调用
                     if (typeof window._dfxAppendStreamText !== 'function') return;
                     st.buf += text;
+                    st.pushed += text.length;
+                    st._lastPushAt = performance.now();
+                    // 闸门挂起期间的新文本不在替换快照里：记账并在替换后补回
+                    // （它已随揭示上屏，替换会整段移除，不补回就真丢了）
+                    if (st._gateQueue.length) st._gateExtra += text;
                     if (!st.raf) {
                         st.last = performance.now();
                         st.raf = requestAnimationFrame(window._twStep);
@@ -3753,8 +3862,12 @@ _TYPEWRITER_JS = """
                     var now = (typeof ts === 'number' && ts > 0) ? ts : performance.now();
                     var dt = Math.max(1, Math.min(200, now - st.last));
                     st.last = now;
+                    // 揭示时间常数：闸门挂起中（等替换）时缩短，尽快把积压放完
+                    // ——跳变量 = 执行替换时的剩余缓冲，加速直接压低它
+                    var _tau = st.CATCHUP_MS;
+                    if (st._boost) _tau = Math.max(16, st.CATCHUP_MS * (st.BOOST_FACTOR || 0.3));
                     // 每帧揭示量：按"剩余缓冲在 CATCHUP_MS 内排空"做指数追赶（最少 1 字）
-                    var n = Math.max(1, Math.ceil(st.buf.length * (dt / st.CATCHUP_MS)));
+                    var n = Math.max(1, Math.ceil(st.buf.length * (dt / _tau)));
                     // 突发积压（网络一次送来一大段）：提高下限，避免越拖越长
                     if (st.buf.length > st.BURST_LEN) {
                         n = Math.max(n, Math.ceil(st.buf.length / 8));
@@ -3773,8 +3886,89 @@ _TYPEWRITER_JS = """
                     try {
                         window._dfxAppendStreamText(slice, _skipReport);
                     } catch (e) {}
+                    // 缓冲降到水位（或已空）：执行挂起的 DOM 替换
+                    if (st._gateQueue.length && st.buf.length <= (st.GATE_MIN_BUF || 3)) {
+                        window._twDrainGate();
+                    }
+                    // ⚠️ 不得在此 return：drainGate 后 buf 可能仍非空（非水位路径），
+                    // 提前返回会断掉 rAF 链，残留文本不再揭示
                     if (st.buf) {
                         st.raf = requestAnimationFrame(window._twStep);
+                    }
+                };
+                // ── DOM 替换闸门（消除"成块蹦字"）──
+                // 背景：updateTailHtml / updateContentAppend 会用「含全部文本」的
+                // 格式化 HTML 整体替换增量节点，并在入口 _twReset() 丢弃未揭示缓冲
+                // —— 揭示途中被打断时，文字从"已揭示量"瞬跳到"全量"（实测每
+                // ~200ms 一次、单次 4~9 字符），观感就是"一顿一顿成块蹦出"。
+                //
+                // 执行时机（三者取先）：
+                //   ① 缓冲降到水位（buf <= GATE_MIN_BUF）：跳变量压到水位以内；
+                //   ② 静默窗（距最近 push >= GATE_STILL_MS）：chunk 间隙到了——
+                //      持续流式下 buf 稳态高于水位，仅靠①永不触发（只能等超时 →
+                //      大跳变），间隙是天然的"文字已停在屏上"时刻；
+                //   ③ 硬上限（挂起累计 >= GATE_MAX_WAIT_MS）：防格式化无限延后。
+                // 挂起期间揭示加速（τ×BOOST_FACTOR），尽快把积压放完压低①的等待。
+                // 返回 true = 已挂起；返回 false = 立即执行（缓冲已在水位内）。
+                window._twGate = function (fn) {
+                    var st = window._tw;
+                    if (!st || !st.enabled || typeof fn !== 'function') return false;
+                    // 强制执行标记（超时兜底 / 排空放行）：本次放行，防自我挂起
+                    if (st._force) { st._force = false; return false; }
+                    if (!st.buf || st.buf.length <= (st.GATE_MIN_BUF || 3)) return false;
+                    // [T31] 入队而非覆盖：追加语义的 updateContentAppend 之间互相
+                    // 不包含（newHtml 只含本轮新闭合段），覆盖即永久丢失该段。
+                    st._gateQueue.push(fn);
+                    // 清空 extra：新快照含旧 extra 的全部文本（Python 侧 markdown
+                    // 是单调增长的），旧账不清会重复补回
+                    st._gateExtra = '';
+                    st._boost = true;
+                    if (!st._gateTimer) {
+                        // 静默窗轮询：buf 揭示完时 rAF 链停摆，静默判定必须独立于
+                        // _twStep（否则高速流式挂起后无人检查窗口）
+                        st._gateDeadline = performance.now() + (st.GATE_MAX_WAIT_MS || 400);
+                        st._gateTimer = setInterval(function () {
+                            var now = performance.now();
+                            var quiet = (now - (st._lastPushAt || 0)) >= (st.GATE_STILL_MS || 60);
+                            if (quiet || now >= st._gateDeadline) {
+                                window._twDrainGate();  // 内部 clearInterval
+                            }
+                        }, st.GATE_POLL_MS || 30);
+                    }
+                    return true;
+                };
+                window._twDrainGate = function () {
+                    // 执行挂起的 DOM 替换（水位 / 静默窗 / 硬上限）
+                    var st = window._tw;
+                    if (!st || !st._gateQueue.length) return;
+                    if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
+                    st._boost = false;
+                    var queue = st._gateQueue;
+                    var extra = st._gateExtra;
+                    st._gateQueue = [];
+                    st._gateExtra = '';
+                    // 强制放行：f 内部重入渲染入口 → _twGate 时必须直接执行
+                    // （硬上限路径下缓冲可能仍高于水位，无此标记会再次挂起自己 →
+                    //  替换永不执行、格式化永久停留纯文本）
+                    // [T31] 按序执行全部挂起任务（原实现为单槽，后者覆盖丢弃前者）：
+                    // updateContentAppend 各轮的 newHtml 互不包含（只含本轮新闭合段），
+                    // 覆盖即该段格式化 HTML 永不落地 → 随后替换又移除 [data-incremental]
+                    // 节点 → 该段从屏上消失。逐任务独立 try：单个失败不阻断其余。
+                    for (var _qi = 0; _qi < queue.length; _qi++) {
+                        st._force = true;
+                        try {
+                            queue[_qi]();
+                        } catch (e) {
+                        } finally {
+                            // f 未重入（异常/其他路径）时清理，防标记外泄误放行下一次
+                            st._force = false;
+                        }
+                    }
+                    // 替换快照不含挂起期间新 push 的文本：替换后补回。走 _twPush
+                    // 而非直接上屏 —— 保留打字机节奏，避免补回本身变成一次跳变
+                    // （挂起期间该文本已在屏上，同帧重排无闪烁）。
+                    if (extra) {
+                        try { window._twPush(extra); } catch (e) {}
                     }
                 };
                 window._twFlush = function () {
@@ -3782,6 +3976,12 @@ _TYPEWRITER_JS = """
                     var st = window._tw;
                     if (!st) return;
                     if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+                    // 挂起的 DOM 替换作废：flush 后的调用方（updateContent）
+                    // 会用含全部文本的新 HTML 整页替换，旧替换已无意义
+                    if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
+                    st._gateQueue = [];
+                    st._gateExtra = '';
+                    st._boost = false;
                     if (st.buf) {
                         var all = st.buf;
                         st.buf = "";
@@ -3807,6 +4007,12 @@ _TYPEWRITER_JS = """
                     if (!st) return;
                     if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
                     st.buf = "";
+                    // 挂起的替换同样作废：它即将执行的替换对象（旧 DOM）已被本次
+                    // 替换覆盖，残留执行会造成旧 HTML 回灌
+                    if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
+                    st._gateQueue = [];
+                    st._gateExtra = '';
+                    st._boost = false;
                 };
 """
 

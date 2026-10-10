@@ -9,6 +9,7 @@ SystemCardFrame — QFrame 基类 + 标准头部布局 + 固定边框
 """
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -406,8 +407,7 @@ class SystemCardFrame(QFrame):
                 sep = QLabel("›", self._breadcrumb_widget)
                 sep.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; background: transparent;")
                 self._breadcrumb_layout.addWidget(sep)
-            label = QLabel(str(spec.get("text", "")), self._breadcrumb_widget)
-            label.setFont(get_unified_font(11, True))
+            label = StrongBodyLabel(str(spec.get("text", "")), self._breadcrumb_widget)
             handler = spec.get("handler")
             if callable(handler):
                 label.setCursor(Qt.PointingHandCursor)
@@ -420,6 +420,13 @@ class SystemCardFrame(QFrame):
     def _apply_breadcrumb_styles(self) -> None:
         """面包屑配色（祖先项=强调色可点，当前项=正文色不可点；分隔符=弱化色）"""
         Colors.refresh()
+        # 字号基准 = title_label 本尊：先把 title 规格化到当前档（refresh_style
+        # 同款 12pt，消除「title 构造早期取档 / 面包屑打开时取档」的 delta 漂移
+        # 差，用户实测面包屑比 title 大一点），再克隆同一 QFont 给每个项——
+        # 无论档位何时变化，面包屑与 title 逐像素恒等。QSS 串禁写 font-size
+        # （QSS 优先级高于 setFont，写了就覆盖）。
+        self.title_label.setFont(get_unified_font(12, True))
+        title_font = self.title_label.font()
         for idx, spec in enumerate(self._breadcrumb_items):
             # layout 中每项占 2 个槽位（除首项）：[item, sep, item, sep, ...]
             pos = 0 if idx == 0 else idx * 2
@@ -429,9 +436,9 @@ class SystemCardFrame(QFrame):
                 continue
             clickable = callable(spec.get("handler"))
             color = Colors.TEXT_ACCENT if clickable else Colors.TEXT_PRIMARY
+            label.setFont(QFont(title_font))
             label.setStyleSheet(
-                f"color: {color}; {font_size_css(11)} font-weight: 600; {get_font_family_css()}; "
-                f"background: transparent; border: none;"
+                f"color: {color}; background: transparent; border: none;"
             )
         # 分隔符槽位：1, 3, 5, ...
         for i in range(1, self._breadcrumb_layout.count(), 2):

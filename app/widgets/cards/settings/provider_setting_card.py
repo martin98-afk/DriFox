@@ -494,6 +494,11 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         layout.addWidget(label)
         layout.addStretch(1)
         self._group_headers.append(label)
+        # 必须显式 show：首开时 showEvent 的 _refresh_items 重建行发生在卡片树
+        # 首帧布局前，组头若停在 hidden 态，QLayout.sizeHint() 会剔除它——
+        # 紧随其后的自动展开按缺组头的高度定格，列表底部被裁掉一块；
+        # 行（_add_provider_item）与空态标签同此理，均已显式 show
+        header.show()
         return header
 
     @staticmethod

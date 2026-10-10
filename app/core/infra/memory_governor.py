@@ -45,6 +45,20 @@ _gc_hook_pending = False
 _MAX_RENDERED_CARDS = 12
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
 
+# ── [MEM] dpr 感知的并发页配额 ──
+# 实测（tools/diag_webengine_mem_probe.py --show，8 个可见 QWebEngineView）：
+# 单个 view 的成本 ≈ **9.2MB / 百万物理像素**，且与「宽 × 高 × dpr²」严格线性
+# （截距≈0，549×2000 逻辑 → 50.5MB/view；244×2000 → 22.1MB/view）。
+# 也就是说固定写死「12 页」在 dpr=2.25 的高分屏上等于把内存预算放大 5.06 倍
+# （225% 缩放的 4K 屏 vs 100% 缩放的 1080p 屏）—— 这正是「同一份代码，独显/
+# 高分屏机器内存远高于老机器」的主因。
+#
+# 故配额随 dpr 收缩（∝1/dpr，比理论上的 1/dpr² 温和一档，给滚动缓冲留余量），
+# 下限取 _MIN_RENDERED_CARDS_PER_WINDOW_FLOOR 与 6 的较大者：再省也不能让
+# 视口上下没缓冲（会变成「滚一下建一次」的重建抖动）。
+_DPR_QUOTA_MIN = 6
+
+
 # ── B4 温和层：跨窗口全局渲染页闸门 ──
 # [PERF] _MAX_RENDERED_CARDS 原本是 **per-window** 常量，多窗口场景下
 # N 窗口 = N×18 张已渲染卡片常驻。每张卡片的 DOM/JS heap 都要挤在
@@ -86,6 +100,28 @@ _MEM_THRESHOLD_TOTAL_MB_ACTIVE = 1400  # 活跃窗口阈值（高于非活跃的
 _LRU_RENDERER_KEEP_ACTIVE = 14  # 活跃窗口保留更多最近 renderer（对比非活跃 8）
 _OFFSCREEN_BATCHES_FOR_KILL_ACTIVE = 12  # 活跃窗口要求离屏更远（对比非活跃 8）
 _UNLOADED_PIDS_MAX = 32  # _unloaded_pids 队列硬上限：超限强制 kill 最老的（背压兜底）
+
+
+def effective_render_quota(base: int = _MAX_RENDERED_CARDS, dpr: float = 1.0) -> int:
+    """按本机 devicePixelRatio 收缩并发渲染页配额（纯函数，便于单测）。
+
+    dpr ≤ 1 时返回 base（老机器 / 1080p@100% 行为完全不变）；
+    dpr > 1 时按 1/dpr 收缩，但不低于 ``_DPR_QUOTA_MIN``。
+
+    Args:
+        base: 基准配额（默认 _MAX_RENDERED_CARDS=12）。
+        dpr: 本机 devicePixelRatio；非法值（0/None/非数）按 1.0 处理。
+
+    Returns:
+        int: 本窗口的并发已渲染卡片上限。
+    """
+    try:
+        dpr = float(dpr)
+    except (TypeError, ValueError):
+        dpr = 1.0
+    if dpr <= 1.0:
+        return base
+    return max(_DPR_QUOTA_MIN, int(round(base / dpr)))
 
 
 def _run_gc_hook():

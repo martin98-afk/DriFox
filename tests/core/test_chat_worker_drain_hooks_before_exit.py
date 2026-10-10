@@ -154,6 +154,43 @@ def test_policy_exception_falls_back_continue():
     assert w._emit_calls == [("finished_with_messages", ([],))]
 
 
+def test_cancelled_reclaims_interject_without_continuation():
+    """已取消 → 不注入不续跑（False），_interject 条目 stash 回收，其余放回队列
+
+    场景（2026-10-10 双气泡根因）：第一轮流式自然结束后 worker 仍在完成路径
+    （Stop hook 外部调用耗时），用户点停止（_is_cancelled=True）并撤回插话卡。
+    退出前收尾若照旧注入续跑，已撤回的插话会被复活出回复卡，且
+    finished_with_messages 把已撤回消息写回 session（数据复活）。
+    取消 = 一切中止：插话 stash 回收交 UI 停止链路统一回填输入框。
+    """
+    w = _make_worker(_DefaultLikePolicy())
+    w._is_cancelled = True
+    backend = w.tool_executor._backend
+    stashed = []
+    backend.stash_recovered_interjects = lambda items: stashed.extend(items)
+    q = backend._hook_message_queue
+    q.put({"role": "user", "content": "插话", "_interject": True})
+    q.put({"role": "user", "content": "通知", "_hook_event": "SubAgentFinished"})
+    q.put({"role": "user", "content": "邮件", "_hook_event": "TeamMail"})
+
+    assert w._drain_pending_hooks_before_exit([]) is False
+    assert len(stashed) == 1 and stashed[0].get("_interject") is True, "插话必须 stash 回收"
+    assert q.qsize() == 1, "非插话条目应放回队列供下一对话消费"
+    leftover_back = q.get_nowait()
+    assert leftover_back.get("_hook_event") == "SubAgentFinished", "放回的应只有非 TeamMail 通知"
+    assert w._emit_calls == [], "取消路径不得发射续跑信号"
+    assert w._inject_calls == [], "取消路径不得注入消息到对话流"
+
+
+def test_not_cancelled_still_continues_round():
+    """未取消 → 行为不变（对照）：队列有插话仍注入续跑"""
+    w = _make_worker(_DefaultLikePolicy())
+    w._is_cancelled = False
+    w.tool_executor._backend._hook_message_queue.put({"role": "user", "content": "插话", "_interject": True})
+    assert w._drain_pending_hooks_before_exit([]) is True
+    assert w._inject_calls == [{"session_messages_target": [], "include_team_mail": True}]
+
+
 def test_missing_backend_takes_finish_path():
     """tool_executor/backend/队列缺失 → 完成路径不炸（防御风格一致）"""
     worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker

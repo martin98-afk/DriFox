@@ -228,6 +228,7 @@ from app.widgets.card_viewers import (
     _download_and_preview,
     _fence_assets_for_skeleton,
     _logical_height_cap,
+    _logical_height_cap_for_area,
     _show_image_preview,
     _theme_rerender_queue,
     extract_image_data_uris,
@@ -377,12 +378,16 @@ class MessageCard(SimpleCardWidget):
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
-        # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick（30ms）已把"应用"
+        # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick 已把"应用"
         # 侧的节拍连续化，防抖只负责合并同一窗口内的上报，不再需要独自扛
         # 削峰 —— 拉长只会平白增加"文字已出、目标未到"的滞后。
         self._stream_height_timer = QTimer(self)
         self._stream_height_timer.setSingleShot(True)
-        self._stream_height_timer.setInterval(32)
+        # [T28/P0-2] 与 card_render_core.STREAM_HEIGHT_TICK_MS 对齐单一节拍，
+        # 消除 30/32/40 三层互质节拍的漂移叠加。
+        # [T34] 不再是独立常量：tick 已是 16ms，防抖若仍 40ms 就等于把目标值
+        # 按 40ms 一节喂给 16ms 的追踪 —— 追踪被喂成阶梯，等于白改。
+        self._stream_height_timer.setInterval(STREAM_HEIGHT_TICK_MS)
         self._stream_height_timer.timeout.connect(self._apply_debounced_height)
         self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)
@@ -2845,6 +2850,10 @@ class MessageCard(SimpleCardWidget):
 
     def _update_height(self, h):
         target_height = max(40, h)
+        # [T33→T36] 坞态预算上限已随坞态正文限高一并移除：正文不再限高后，
+        # 坞态生效前后高度都等于自然高度（工具区沉底只带来 ~几十 px 扰动），
+        # 「渲染抢跑 → 先胀大再压回」的竞态窗口不存在了。若回滚 T36
+        # （恢复 _STREAMING_DOCK_CSS 的 max-height），需同时恢复此处 clamp。
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
         # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。
@@ -3218,6 +3227,14 @@ class MessageCard(SimpleCardWidget):
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
+        # [MEM] 面积上限：上报高度先按「物理面积封顶」钳一次（成本 ∝ 宽×高×dpr²，
+        # 见 CodeWebViewer.MAX_SURFACE_MPX）。必须在下面所有记账/广播之前完成 ——
+        # 否则 widget 被钳短、heightChanged 仍报原值，外层聊天列表会按未钳高度做
+        # 滚动锚定补偿 → 回滚/流式时视口漂移。
+        try:
+            height = self.viewer.clamp_surface_height(height)
+        except Exception:
+            pass
         if height == self._last_applied_viewer_height:
             return
         # 🐛 记录本次高度增量：外层聊天列表（main_widget）据此做滚动锚定补偿
@@ -3744,6 +3761,10 @@ class MessageCard(SimpleCardWidget):
                 try:
                     pooled.setParent(self)
                     pooled.setUpdatesEnabled(True)
+                    # [白卡修复] 第二次跨顶层 reparent（隐藏宿主 → 本卡）已完成：
+                    # 重申透明合成，防 Windows 原生 HWND 迁移后 Chromium 透明丢失
+                    # （复用卡 HTML 区白底固化，气泡正常仅内容区变白）。
+                    pooled.ensure_transparent_composition()
                     # 🛡️ 与 detach_viewer 的 hide() 成对：显式隐藏过的 widget 不会
                     # 随父控件 show() 自动恢复可见，复用时必须显式 show()，
                     # 否则卡片区域是一片空白（viewer 存在但不可见）。
@@ -3760,6 +3781,11 @@ class MessageCard(SimpleCardWidget):
                     # （updateContent 不存在 → 静默失败 → 卡片永久空白）。
                     if not getattr(pooled, "_is_js_ready", False):
                         pooled._load_skeleton()
+                    # 🐛 池化复用 JS 全局残留：window._toolCompactMode 只在骨架首次
+                    # 就绪时同步一次，复用实例不重载骨架 → 残留上一张卡片的旧值，
+                    # reorganizeContent 等守卫按旧模式归拢工具/思考块（"切换简洁
+                    # 模式对复用卡片永不生效"）。绑定时按当前配置重同步。
+                    pooled.sync_compact_mode_to_js()
                     self.viewer = pooled
                 except Exception:
                     # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建

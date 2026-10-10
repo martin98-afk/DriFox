@@ -100,8 +100,9 @@ class APIHistoryManager:
         """从 SQLite 加载会话到内存"""
         if self._session_store and self._session_store.is_initialized:
             try:
-                self._api_sessions = self._session_store.get_sessions(limit=100)
-                logger.debug(f"[APIHistoryManager] 从 SQLite 加载 {len(self._api_sessions)} 条会话")
+                # [N1] 轻量投影（不含 messages）：O(100) 全量 BLOB 解压改为 15 列，按需经 get_session_by_session_id 懒回源
+                self._api_sessions = self._session_store.get_sessions_lightweight(limit=100)
+                logger.debug(f"[APIHistoryManager] 从 SQLite 轻量加载 {len(self._api_sessions)} 条会话")
             except Exception as e:
                 logger.error(f"[APIHistoryManager] 加载失败: {e}")
 
@@ -137,6 +138,23 @@ class APIHistoryManager:
     def get_session_by_session_id(self, session_id: str) -> Optional[Dict]:
         for s in self._api_sessions:
             if s.get("session_id") == session_id:
+                # 💡 轻量模式：messages 为空时从 SQLite 懒回源全量（同 HistoryManager 模式）
+                if not s.get("messages") and self._session_store and self._session_store.is_initialized:
+                    full = self._session_store.get_session(session_id)
+                    if full:
+                        messages = full.get("messages", [])
+                        # [T2f] 轻量 blob 的剥离字段在 session_msg_extras 表，必须合并回填；
+                        # 否则轻量消息进后续保存链会丢历史 extras
+                        extras = self._session_store.load_msg_extras(session_id)
+                        if extras:
+                            from app.core.store.session_repository import merge_extras_into
+
+                            merge_extras_into(messages, extras)
+                        s["messages"] = messages
+                        s["message_count"] = full.get("message_count", len(messages))
+                        # system_prompt 轻量列表不加载（None 哨兵），借全量查询回填
+                        if s.get("system_prompt") is None:
+                            s["system_prompt"] = full.get("system_prompt", "")
                 self._revive_session_images(s)
                 return s
         if self._session_store and self._session_store.is_initialized:
@@ -148,7 +166,15 @@ class APIHistoryManager:
 
     def get_session_by_index(self, idx: int) -> Optional[List[Dict]]:
         if 0 <= idx < len(self._api_sessions):
-            msgs = self._api_sessions[idx].get("messages", [])
+            session = self._api_sessions[idx]
+            # 💡 轻量模式：messages 为空时按 session_id 委托懒回源（同 HistoryManager）
+            if not session.get("messages"):
+                session_id = session.get("session_id")
+                if session_id:
+                    full_session = self.get_session_by_session_id(session_id)
+                    if full_session:
+                        session = full_session
+            msgs = session.get("messages", [])
             from app.core.store.session_repository import revive_vision_image_refs
 
             try:
@@ -179,6 +205,7 @@ class APIHistoryManager:
             "messages": messages,
             "created_at": now,
             "updated_at": now,
+            "last_time": now,
             "compaction_state": {},
             "compaction_cache": {},
             "system_prompt": "",
@@ -204,6 +231,8 @@ class APIHistoryManager:
             self._api_sessions.pop(idx)
             if self._session_store and self._session_store.is_initialized:
                 try:
+                    # [fix] 必须真删 SQLite 行：此前只打日志，重载后归档会话复活
+                    self._session_store.delete_session(session_id)
                     logger.debug(f"[APIHistoryManager] 删除会话: {session_id}")
                 except Exception as e:
                     logger.error(f"[APIHistoryManager] 删除失败: {e}")
@@ -346,7 +375,7 @@ class APISessionHandler:
                         "id": s.get("session_id", ""),
                         "title": s.get("title", "未命名"),
                         "created_at": s.get("created_at", ""),
-                        "updated_at": s.get("last_updated", ""),
+                        "updated_at": s.get("last_time") or s.get("updated_at", ""),
                         "message_count": s.get("message_count", 0),
                     }
                     for s in sessions

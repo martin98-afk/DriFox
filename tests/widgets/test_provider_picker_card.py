@@ -42,6 +42,9 @@ def registry(monkeypatch):
     reg = ProviderRegistry()
     monkeypatch.setattr(ProviderRegistry, "_instance", reg)
     monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+    # all()/get() 会触发 ensure_loaded 扫真实插件目录（12 家内置混入断言），
+    # 置预热完成标志阻断扫描，注册表内容完全由用例自控
+    reg._warmup_done = True
     return reg
 
 
@@ -339,3 +342,43 @@ class TestLocalGroup:
         card = ProviderPickerCard()
         labels = [lb.text() for lb in card.findChildren(QLabel)]
         assert "本地（1）" in labels, f"localhost URL 应落本地组，实际: {labels}"
+
+
+class TestPickerRebuild:
+    """插件安装/卸载后卡片墙重建：构建时快照必须可按当前 ProviderRegistry 刷新"""
+
+    def test_rebuild_picks_up_newly_installed_provider(self, _qapp, registry):
+        """注册表新增服务商（插件安装）→ rebuild 后卡片墙出现新卡"""
+        from app.widgets.cards.settings.provider_picker_card import CUSTOM_ENTRY, ProviderPickerCard
+
+        registry.register(ProviderDef(name="DeepSeek", api_url="https://api.deepseek.com"), source="plugin:test")
+        card = ProviderPickerCard()
+        assert "NewProvider" not in card.provider_names()
+
+        registry.register(ProviderDef(name="NewProvider", api_url="https://api.new.com"), source="plugin:new")
+        card.rebuild()
+        names = card.provider_names()
+        assert "NewProvider" in names, f"rebuild 后应拾取新服务商，实际: {names}"
+        assert names[-1] == CUSTOM_ENTRY, "自定义入口仍固定末位"
+
+    def test_rebuild_twice_no_duplicate(self, _qapp, registry):
+        """连续 rebuild 不产生重复卡（清空彻底）"""
+        from app.widgets.cards.settings.provider_picker_card import CUSTOM_ENTRY, ProviderPickerCard
+
+        registry.register(ProviderDef(name="DeepSeek", api_url="https://api.deepseek.com"), source="plugin:test")
+        card = ProviderPickerCard()
+        card.rebuild()
+        card.rebuild()
+        assert card.provider_names() == ["DeepSeek", CUSTOM_ENTRY]
+
+    def test_rebuild_drops_uninstalled_provider(self, _qapp, registry):
+        """注册表移除服务商（插件卸载）→ rebuild 后卡片消失"""
+        from app.widgets.cards.settings.provider_picker_card import CUSTOM_ENTRY, ProviderPickerCard
+
+        registry.register(ProviderDef(name="DeepSeek", api_url="https://api.deepseek.com"), source="plugin:test")
+        card = ProviderPickerCard()
+        assert "DeepSeek" in card.provider_names()
+
+        registry.clear_source("plugin:test")
+        card.rebuild()
+        assert card.provider_names() == [CUSTOM_ENTRY], "卸载后只应剩自定义入口"

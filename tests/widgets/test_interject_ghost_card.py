@@ -168,3 +168,66 @@ def test_no_match_returns_false(monkeypatch):
 
     assert w._remove_interject_ghost_card("不存在的文本") is False
     assert ghost in w.chat_layout._widgets
+
+
+# ============ M4：撤回兜底回填输入框 + 停止回填去重（2026-10-10） ============
+
+
+def test_m4_undo_fallback_restores_input():
+    """M4：幽灵卡兜底撤回成功后必须回填输入框并登记已撤回文本"""
+    src = inspect.getsource(mw.OpenAIChatToolWindow._undo_from_message)
+    assert "_withdraw_interject_to_input" in src, (
+        "幽灵卡片兜底只删卡不回填 = 插话文本丢失（2026-10-10 撤销不回输入框根因），"
+        "撤回成功后必须取回输入框"
+    )
+
+
+class _FakeInputArea:
+    def __init__(self, text=""):
+        self._text = text
+
+    def toPlainText(self):
+        return self._text
+
+    def setPlainText(self, t):
+        self._text = t
+
+
+def _make_withdraw_widget():
+    """构造撤回回填所需最小 widget"""
+    w = mw.OpenAIChatToolWindow.__new__(mw.OpenAIChatToolWindow)
+    w.input_area = _FakeInputArea()
+    w._interject_withdrawn_texts = set()
+    return w
+
+
+def test_withdraw_to_input_empty_box_sets_text():
+    """输入框为空 → 直接回填文本并登记去重集合"""
+    w = _make_withdraw_widget()
+    card = _FakeCard(role="user", text="插话消息")
+    w._withdraw_interject_to_input(card)
+    assert w.input_area.toPlainText() == "插话消息"
+    assert "插话消息" in w._interject_withdrawn_texts
+
+
+def test_withdraw_to_input_nonempty_box_appends():
+    """输入框非空 → 追加（与停止回填链路同语义）"""
+    w = _make_withdraw_widget()
+    w.input_area = _FakeInputArea("已有草稿")
+    card = _FakeCard(role="user", text="插话消息")
+    w._withdraw_interject_to_input(card)
+    assert w.input_area.toPlainText() == "已有草稿\n插话消息"
+
+
+def test_filter_withdrawn_interjects_skips_and_unregisters():
+    """停止回填过滤：已撤回文本被跳过（防 stash 迟到重复回填）且只消费一次"""
+    w = _make_withdraw_widget()
+    w._interject_withdrawn_texts.add("插话消息")
+    recovered = [
+        {"_interject_text": "插话消息"},
+        {"_interject_text": "另一条"},
+    ]
+    kept = w._filter_withdrawn_interjects(recovered)
+    assert [item["_interject_text"] for item in kept] == ["另一条"]
+    # 一次性消费：同文本第二次出现不再拦截（对齐新插入的同文本插话）
+    assert "插话消息" not in w._interject_withdrawn_texts

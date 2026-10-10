@@ -7,7 +7,12 @@
 
 - SessionStore 单例（建库 + 完整性检查/修复 `_check_and_repair_database`）
 - `get_session_storage()`（StorageRegistry 活跃引擎激活）
-- `tool_classifier.get_all_tools()`（app.tools 内置工具级联 import）
+
+曾经的第三项 `tool_classifier.get_all_tools()`（插件 tools 全量注册）已移出：
+它会级联加载全部插件 tools/*.py（含 bs4 ~230ms，实测占 preheat 449~903ms
+主体），现改由首窗后 DeferredTaskQueue 的 register_plugin_tools 任务执行
+（main_widget，排在 create_new_session 之后），ToolRegistry.on_change 事件
+自动补刷工具计数 UI。
 
 ⚠️ 刻意**不含** HistoryManager：其 get_instance 无锁（非线程安全）且 __init__
 构造 QObject（必须主线程）——留原路径，见总纲 v2 批5 / T8 结论。
@@ -34,12 +39,6 @@ def _preheat_session_storage():
     get_session_storage()
 
 
-def _preheat_tools():
-    from app.tools.tool_classifier import get_all_tools
-
-    return get_all_tools()
-
-
 def preheat_process_level() -> None:
     """进程级预热入口（主线程调用；进程内幂等）。"""
     global _done
@@ -50,10 +49,9 @@ def preheat_process_level() -> None:
     try:
         _preheat_session_store()
         _preheat_session_storage()
-        tools = _preheat_tools()
         logger.info(
             f"[Preheat] 进程级预热完成 "
-            f"{(time.perf_counter() - t0) * 1000:.0f}ms（SessionStore/StorageRegistry/tools×{len(tools)}）"
+            f"{(time.perf_counter() - t0) * 1000:.0f}ms（SessionStore/StorageRegistry）"
         )
     except Exception:  # noqa: BLE001
         # 预热失败不阻塞启动（首窗构造路径会自然重建这些单例）

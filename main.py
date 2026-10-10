@@ -40,6 +40,16 @@ from app.utils.render_env import apply_render_env, default_config_path
 
 RENDER_SETTINGS = apply_render_env(default_config_path())
 
+# ========== [C2] 数据迁移前置 ==========
+# 原在壳显示后的 _setup_early_forensics 内执行（保留幂等二次调用）。迁移必须先于后续任何数据目录 I/O
+# （渲染配置、日志、会话库），避免迁移期间读到旧路径。失败不阻断启动（forensics 二次调用兜底）。
+try:
+    from app.utils.utils import migrate_app_data_if_needed
+
+    migrate_app_data_if_needed()
+except Exception:
+    pass
+
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
     os.environ.pop(_env_key, None)
@@ -212,6 +222,17 @@ def main():
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
 
+    # [A1] openai 资源预导入前移：QApp 就绪即启动预热线程（原在首窗构建后的
+    # _deferred_startup，预热完成点被首窗构建推迟 2-3s）。预热线程单线程顺序导入
+    # 不触发 Python 3.14 import 锁死锁；后续 worker 线程若等待 openai 模块锁为单向等待、无环。
+    try:
+        from app.utils.http_client import preload_openai_resources_async
+
+        preload_openai_resources_async()
+        logger.debug("[Startup] openai resources 子模块预导入已转后台线程（前移）")
+    except Exception:
+        logger.exception("[Startup] openai resources 预导入失败（非致命）")
+
     # ========== 延迟启动的非关键 I/O 操作 ==========
     # 以下操作不阻塞首帧渲染，放到一次性定时器中执行
 
@@ -347,21 +368,6 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] prewarm_markdown_block_viewer 失败")
 
-        # 预导入 openai resources 子模块（chat/responses 等）
-        # 必须在任何 worker 线程启动前完成：openai SDK 懒加载 + Python 3.14
-        # import 锁死锁检测，多线程首次并发访问 client.chat/client.responses
-        # 会抛 _ModuleLock deadlock。
-        try:
-            # [PERF] 冷导入实测 4-5s（`import openai` 3.5s + resources 1.9s），
-            # 改后台线程顺序导入：死锁只在多线程并发导入不同模块时出现，
-            # 单线程串行走完不会触发，主线程不再冻结这段
-            from app.utils.http_client import preload_openai_resources_async
-
-            preload_openai_resources_async()
-            logger.debug("[DeferredStartup] openai resources 子模块预导入已转后台线程")
-        except Exception:
-            logger.exception("[DeferredStartup] openai resources 预导入失败（非致命）")
-        _mark("openai_preload_async")
 
         # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
         # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时

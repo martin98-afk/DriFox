@@ -147,6 +147,36 @@ from app.widgets.card_render_core import (
 )
 
 
+def _parse_height_payload(payload: str):
+    """[T37] 解析 pywebview_height 载荷（纯函数，便于无 GUI 单元验证）。
+
+    协议：'``<scrollHeight>[|<scrollTop>|<clientHeight>[|<reading>[|<domTextLen>]]]``'
+    后续字段由新骨架逐版本增加，旧格式（仅高度）仍兼容。
+
+    Returns:
+        (h, scroll_top, client_height, reading, dom_text_len)；
+        可选字段缺失时为 None；载荷非法返回 None（调用方静默忽略）。
+    """
+    try:
+        parts = payload.split("|", 4)
+        if not parts or not parts[0]:
+            return None
+        h = int(float(parts[0]))
+        scroll_top = int(float(parts[1])) if len(parts) >= 3 else 0
+        client_height = int(float(parts[2])) if len(parts) >= 3 else 0
+        reading = (parts[3] == "1") if len(parts) >= 4 else None
+        # ⚠️ maxsplit 必须是 4：3 会把第 5 字段并进 parts[3]，破坏阅读标志判定
+        dom_text_len: Optional[int] = None
+        if len(parts) >= 5:
+            try:
+                dom_text_len = int(float(parts[4]))
+            except Exception:  # noqa: BLE001
+                dom_text_len = None
+        return h, scroll_top, client_height, reading, dom_text_len
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
@@ -228,29 +258,23 @@ class ConsoleMonitorPage(QWebEnginePage):
         # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
         # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
         if msg.startswith("pywebview_height:"):
-            # 协议：'pywebview_height:<scrollHeight>[|<scrollTop>|<clientHeight>]'
-            # 后两字段由 body 几何上报新增；旧格式（仅高度）仍兼容——骨架在 JS
-            # 尚未注入、或第三方/降级路径下可能只发高度，此时不发射几何信号，
-            # wheelEvent 回退到保守策略。
-            try:
-                payload = msg.split(":", 1)[1]
-                if "|" in payload:
-                    # 第 4 字段（可选，旧格式兼容）：卡片内用户阅读标志。
-                    # 翻转才发信号：reportHeight 高频（流式 ~30ms/条），布尔去重后
-                    # 信号量与用户滚动行为同阶，宿主侧零轮询成本。
-                    parts = payload.split("|", 3)
-                    h = int(float(parts[0]))
-                    if len(parts) >= 4:
-                        _rd = parts[3] == "1"
-                        if _rd != getattr(self, "_last_card_reading", False):
-                            self._last_card_reading = _rd
-                            self.cardReadingChanged.emit(_rd)
-                    self.heightReported.emit(h)
-                    self.bodyGeometryReported.emit(h, int(float(parts[1])), int(float(parts[2])))
-                else:
-                    self.heightReported.emit(int(float(payload)))
-            except Exception:
-                pass
+            payload = msg.split(":", 1)[1]
+            parsed = _parse_height_payload(payload)
+            if parsed is None:
+                return
+            h, scroll_top, client_height, reading, dom_text_len = parsed
+            # [T37] 第 5 字段：正文可见文本长度（内容哨兵，见 _content_sentinel_check）；
+            # None = 旧骨架/降级路径未携带 → 存 -1，哨兵视作"未知"不动作。
+            self._dom_text_len = dom_text_len if dom_text_len is not None else -1
+            # 第 4 字段：卡片内用户阅读标志。翻转才发信号：reportHeight 高频
+            # （流式 ~30ms/条），布尔去重后信号量与用户滚动行为同阶，宿主侧零轮询成本。
+            if reading is not None and reading != getattr(self, "_last_card_reading", False):
+                self._last_card_reading = reading
+                self.cardReadingChanged.emit(reading)
+            self.heightReported.emit(h)
+            # 旧格式（仅高度，无几何字段）不发几何信号：wheelEvent 回退保守策略
+            if dom_text_len is not None or reading is not None:
+                self.bodyGeometryReported.emit(h, scroll_top, client_height)
         elif msg == "pywebview_ready":
             self.contentReady.emit()
         elif msg.startswith("pywebview_action:"):
@@ -577,6 +601,37 @@ _dialog_event_filter = _DialogEventFilter()
 _PHYSICAL_TEXTURE_LIMIT = 16000
 
 
+def _logical_height_cap_for_area(width_logical, dpr, area_mpx) -> int:
+    """给定逻辑宽度 + dpr，返回不超「物理面积上限」的最大逻辑高度（纯函数）。
+
+    物理面积 = (w·dpr)·(h·dpr) = w·h·dpr²，故 h ≤ area_mpx·1e6 / (w·dpr²)。
+    异常入参（0/负数/None/非数）按 dpr=1.0、w=MAX_WIDTH 兜底；结果保底 200
+    逻辑高（病态值下不留 0 高控件）。
+
+    与 `_logical_height_cap` 的分工：后者管**单边**物理纹理上限（16384px 硬限，
+    撞上会直接丢 GPU 上下文），本函数管**面积**成本（内存，成本 ∝ 面积）。
+    """
+    try:
+        _dpr = float(dpr)
+    except (TypeError, ValueError):
+        _dpr = 1.0
+    if _dpr <= 0:
+        _dpr = 1.0
+    try:
+        w = float(width_logical)
+    except (TypeError, ValueError):
+        w = 0.0
+    if w <= 0:
+        w = 0.0
+    try:
+        area = float(area_mpx)
+    except (TypeError, ValueError):
+        area = 0.0
+    if w <= 0 or area <= 0:
+        return 200
+    return max(200, int(area * 1_000_000.0 / (w * _dpr) / _dpr))
+
+
 def _logical_height_cap(dpr, physical_limit: int = _PHYSICAL_TEXTURE_LIMIT) -> int:
     """DPR → 不超物理纹理上限的逻辑高度（纯函数，供单测复用）。
 
@@ -624,6 +679,18 @@ class CodeWebViewer(QWebEngineView):
     MAX_WIDTH = 1800
     MAX_HEIGHT = 10000
 
+    # [MEM] 单 view 物理面积上限（百万像素）。为什么单边上限不够：
+    # Chromium 离屏合成表面按「逻辑尺寸 × dpr」分配，**成本只与宽×高×dpr² 有关**
+    # —— 实测（tools/diag_webengine_mem_probe.py --show，线性拟合截距≈0）
+    # 9.2MB / 百万物理像素：549×2000 逻辑 @dpr2.25 → 50.5MB/view，
+    # 244×2000 逻辑 @dpr2.25 → 22.1MB/view（面积比 2.25×，成本比 2.29×）。
+    # 只卡 MAX_HEIGHT 挡不住它：dpr=2.25 时 1800×7111 逻辑 = 4050×16000 物理
+    # = 65Mpx ≈ 590MB 单卡。
+    # 12Mpx 换算：dpr=2.25 + 700 逻辑宽 → 高度上限 ≈3387 逻辑（≈110MB/卡）；
+    # dpr=1 + 700 逻辑宽 → ≈17142 逻辑高（超过 MAX_HEIGHT）→ **老机器完全不生效**。
+    # 超限内容回退卡内滚动（wheelEvent 内外转发的安全网，见 MAX_HEIGHT 注释）。
+    MAX_SURFACE_MPX = 12.0
+
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
         # 🛡️ 物理纹理上限钳制：Chromium 离屏表面按「逻辑尺寸 × DPR」分配物理纹理，
@@ -645,6 +712,11 @@ class CodeWebViewer(QWebEngineView):
         self._streaming = True
         self._is_history = False  # 历史会话标志（非流式加载的历史消息）
         self._is_js_ready = False
+        # [T33] 本轮流式的坞态是否已发起过同步（False = 尚未发起，首次渲染前必须补发）。
+        # 作用：坞态是 runJavaScript 异步生效的，若内容渲染早于它落地，正文会先按
+        # **自然高度**布局（无 600px 限高），坞态生效后再被压回 → "卡片先胀成很大
+        # 再缩回"的起步跳变。这里保证内容永远排在坞态同步之后。
+        self._dock_sync_requested = False
         # 下一次非流式渲染是否为"流式结束的终渲染"（决定能否走线程池，见
         # _perform_update）：仅在 CodeWebViewer.__init__ 初始化一次。
         self._final_render_pending = False
@@ -668,6 +740,10 @@ class CodeWebViewer(QWebEngineView):
         # DOM）或代际变化（_tool_dom_dirty_gen 递增，期间有新注入）时**不清除**，避免下一次
         # 全量渲染误判"无工具 DOM 需保护"→ 裸 updateContent 抹掉运行框。
         self._tool_dom_dirty: bool = False
+        # [T37] 内容哨兵状态：DOM 正文可见文本长度（reportHeight 第 5 字段，
+        # -1 = 未知/旧骨架）+ 哨兵触发冷却时间戳。见 _content_sentinel_check。
+        self._dom_text_len: int = -1
+        self._sentinel_last_ts: float = 0.0
         # [B2] 工具 DOM 脏标记代际：每次置 True 时递增，JS 回调清除时与捕获值比较，
         # 防止"旧渲染回调误清新注入的 dirty"（新注入已递增代际 → 旧回调放弃清除）。
         self._tool_dom_dirty_gen: int = 0
@@ -911,6 +987,22 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             return True
 
+    def sync_compact_mode_to_js(self) -> None:
+        """把当前简洁模式配置同步到 JS 全局 window._toolCompactMode。
+
+        该标志在 JS 侧是全局单值（reorganizeContent / 坞态等守卫读取），
+        仅在骨架首次就绪（_on_js_ready）时同步一次；池化复用的 viewer 不重载
+        骨架，JS 全局会残留上一张卡片的旧值 → 用户切换简洁模式后，复用卡片
+        仍按旧模式归拢工具/思考块（"关闭简洁模式不生效"）。绑定复用实例时
+        必须调用本方法按当前配置重同步。
+        """
+        try:
+            if self.page() and self._is_js_ready:
+                compact = "true" if self._tool_compact_mode else "false"
+                self.page().runJavaScript(f"window._toolCompactMode = {compact};")
+        except RuntimeError:
+            pass
+
     @property
     def _tool_target_id(self) -> str:
         return "tool-content" if self._tool_compact_mode else "content-placeholder"
@@ -979,32 +1071,62 @@ class CodeWebViewer(QWebEngineView):
             pass
         return super().event(event)
 
+    def _surface_area_height_cap(self, width_logical) -> int:
+        """给定逻辑宽度，返回「不超物理面积上限」的最大逻辑高度。"""
+        dpr = 1.0
+        try:
+            dpr = float(self.devicePixelRatioF()) or 1.0
+        except Exception:
+            pass
+        if not width_logical:
+            width_logical = self.MAX_WIDTH
+        return _logical_height_cap_for_area(width_logical, dpr, self.MAX_SURFACE_MPX)
+
+    def clamp_surface_height(self, height) -> int:
+        """把想要的逻辑高度钳进「单边上限 + 物理面积上限」。
+
+        MessageCard 在上报高度前调用它，保证「widget 落地高度」与
+        「heightChanged 广播高度」一致（否则外层滚动锚定会按未钳值补偿而漂移）。
+        """
+        try:
+            h = int(height)
+        except (TypeError, ValueError):
+            return int(self.MAX_HEIGHT)
+        cap = self._surface_area_height_cap(self.width() or self.MAX_WIDTH)
+        return max(40, min(h, self.MAX_HEIGHT, cap))
+
     def setFixedSize(self, *args, **kwargs):
-        """限制最大尺寸，防止 GPU 内存溢出"""
+        """限制最大尺寸，防止 GPU 内存溢出（单边上限 + 物理面积上限）"""
         # 计算安全尺寸
         w = args[0] if len(args) > 0 else kwargs.get("width", self.MAX_WIDTH)
         h = args[1] if len(args) > 1 else kwargs.get("height", self.MAX_HEIGHT)
 
         # 限制最大尺寸
         safe_w = min(w, self.MAX_WIDTH) if isinstance(w, int) else w
-        safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
+        if isinstance(safe_w, int) and isinstance(h, int):
+            safe_h = min(h, self.MAX_HEIGHT, self._surface_area_height_cap(safe_w))
+        else:
+            safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
 
         super().setFixedSize(safe_w, safe_h)
 
     def resize(self, *args, **kwargs):
-        """限制 resize 尺寸，防止过大导致 GPU 内存溢出"""
+        """限制 resize 尺寸，防止过大导致 GPU 内存溢出（单边上限 + 物理面积上限）"""
         w = args[0] if len(args) > 0 else kwargs.get("width", self.MAX_WIDTH)
         h = args[1] if len(args) > 1 else kwargs.get("height", self.MAX_HEIGHT)
 
         # 限制最大尺寸
         safe_w = min(w, self.MAX_WIDTH) if isinstance(w, int) else w
-        safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
+        if isinstance(safe_w, int) and isinstance(h, int):
+            safe_h = min(h, self.MAX_HEIGHT, self._surface_area_height_cap(safe_w))
+        else:
+            safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
 
         super().resize(safe_w, safe_h)
 
     def setFixedHeight(self, height):
-        """限制最大高度，防止 GPU 内存溢出"""
-        safe_h = min(height, self.MAX_HEIGHT)
+        """限制最大高度，防止 GPU 内存溢出（面积上限按当前宽度换算）"""
+        safe_h = self.clamp_surface_height(height)
         super().setFixedHeight(safe_h)
 
     def setFixedWidth(self, width):
@@ -1015,6 +1137,26 @@ class CodeWebViewer(QWebEngineView):
     def _install_dialog_filter(self):
         """注册到全局单例事件过滤器（注册表方式，不再每 viewer 安装一个过滤器）"""
         _dialog_event_filter.register(self)
+
+    def ensure_transparent_composition(self) -> None:
+        """池化复用跨顶层 reparent 后重申透明合成属性。
+
+        Windows 上 QWebEngineView 是原生 HWND 子窗口；池化 release/acquire 各做
+        一次跨顶层窗口的 setParent（卡片 → WA_DontShowOnScreen 隐藏宿主 → 新卡
+        片），原生窗口迁移后 Chromium 合成面的透明属性**偶发**丢失 → page 回退
+        默认白底，此后 setHtml 不再恢复（白底固化：气泡是 Qt 自绘不受影响，
+        仅 HTML 内容区变白）。
+
+        两条 reparent 路径后各重申一次；backgroundColor 在下一次加载生效，
+        复用后首次渲染（setHtml）天然满足时序。幂等，代价两条属性写入。
+        """
+        try:
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+            page = self.page()
+            if page is not None:
+                page.setBackgroundColor(Qt.transparent)
+        except RuntimeError:
+            pass
 
     def reset_for_reuse(self):
         """归还 ``WebViewPool`` 前的重置：**保留骨架**，只清空内容与卡片状态。
@@ -1055,6 +1197,8 @@ class CodeWebViewer(QWebEngineView):
             pass
         self._streaming = False
         self._is_history = False
+        # [T33] 坞态同步确认随卡片状态复位（新卡片新一轮流式的首次渲染需重新补发）
+        self._dock_sync_requested = False
         self._stable_html = ""
         self._stable_md_len = 0
         self._needs_full_render = True
@@ -1084,6 +1228,10 @@ class CodeWebViewer(QWebEngineView):
         self._cached_raw_md_hash = 0
         self._last_rendered_html = None
         self._render_deferred = False
+        # [perf-fix] 作废在途异步渲染：复用后旧任务结果不得落到新卡片
+        self._render_seq += 1
+        self._render_inflight = False
+        self._render_pending = None
         # [T6] 复用前摘出主题补渲队列：复用后本 viewer 已属新卡片，残留的
         # 旧主题补渲会打到新内容上（或空转打断新卡的流式节拍）
         _theme_rerender_queue.discard(self)
@@ -1091,6 +1239,9 @@ class CodeWebViewer(QWebEngineView):
         if hasattr(self, "_tool_md_cache"):
             with contextlib.suppress(Exception):
                 self._tool_md_cache.clear()
+        # [白卡修复] 归还时 reparent 进隐藏宿主已发生：重申透明合成，防原生窗口
+        # 迁移后 Chromium 透明丢失（复用后 HTML 区白底固化，详见方法 docstring）。
+        self.ensure_transparent_composition()
 
     def _is_mask_dialog(self, obj) -> bool:
         """判断是否为透明遮罩对话框（WA_TranslucentBackground，需防穿透）"""
@@ -1157,9 +1308,46 @@ class CodeWebViewer(QWebEngineView):
                 logger.info(f"[finish-render] js_land+layout={_el:.1f}ms height={h}")
         self._height_report_pending = False
         self._document_height = h  # 跟踪文档高度用于 wheelEvent 边界判断
+        self._content_sentinel_check()
         final_h = h + 2
         if abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
+
+    def _content_sentinel_check(self):
+        """[T37] 内容哨兵：流式中正文几乎空但 markdown 大量积压 → 强制补渲。
+
+        背景：真机长会话（多工具 + 长回复）出现「viewer 全白、高度只剩骨架默认值」，
+        复现探针（tests/debug/stream_blank_collapse_probe.py）证实内容停在 Python→JS
+        链路的某一层后**再无任何恢复路径**——增量注入、调度渲染各自都有静默 return
+        分支，叠加后没有任何环节负责"发现内容丢了"。
+        本哨兵借 reportHeight 高频回传（第 5 字段 = cp 可见文本长度，见
+        _handle_message）做被动巡检：markdown 积压 >800 字符、cp 文本 <200、
+        且 think 未闭合排除（静默累积是设计行为）→ 强制全量补渲。3s 冷却防风暴。
+        覆盖面：池化误清、增量停摆、JS 注入失败等一切"内容丢失"型白屏——
+        无论根因在哪一层，渲染最终都收敛到 _perform_update 全量路径。
+        """
+        if not self._streaming or not self._is_js_ready:
+            return
+        md_len = len(self._markdown_text or "")
+        if md_len < 800:
+            return
+        # _dom_text_len 由 Page 解析（javaScriptConsoleMessage），Viewer 经 page() 读取
+        _page = self.page()
+        dom_len = getattr(_page, "_dom_text_len", -1) if _page is not None else -1
+        if dom_len < 0 or dom_len >= 200:
+            return  # 未知（旧骨架）或正文健康
+        # think 未闭合期间正文静默累积是设计行为（防 spinner 闪烁），不触发
+        if _has_unclosed_think(self._markdown_text):
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_sentinel_last_ts", 0.0) < 3.0:
+            return
+        self._sentinel_last_ts = now
+        logger.warning(
+            f"[content-sentinel] 正文近乎空(dom={dom_len})但 markdown 积压 {md_len} 字符 → 强制补渲"
+        )
+        self._render_deferred = False
+        self._schedule_render(immediate=True)
 
     def _on_body_geometry_reported(self, scroll_height: int, scroll_top: int, client_height: int):
         """缓存 body 的真实滚动几何（reportHeight 顺带回传）。
@@ -1230,12 +1418,9 @@ class CodeWebViewer(QWebEngineView):
 
     def _on_js_ready(self):
         self._is_js_ready = True
-        # 同步简洁模式标志到 JS
+        # 同步简洁模式标志到 JS（统一走 sync_compact_mode_to_js）
+        self.sync_compact_mode_to_js()
         try:
-            from app.utils.config import Settings
-
-            compact = "true" if Settings.get_instance().ui_compact_tool_area.value else "false"
-            self.page().runJavaScript(f"window._toolCompactMode = {compact};")
             # 历史会话：先折叠工具区（设置 data-collapsed="true"，dock sync 需要读取此值）
             if getattr(self, "_is_history", False):
                 self.page().runJavaScript(
@@ -1351,6 +1536,11 @@ class CodeWebViewer(QWebEngineView):
         if cached is not None:
             _skeleton_cache.move_to_end(cache_key)  # LRU：命中提升为最新
             self.setHtml(cached, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
+            # 🛡️ 透明合成重申：page 的 backgroundColor 只在「下一次导航」才生效，
+            # 而白底固化（Chromium 合成属性丢失后回退默认白底）一旦发生，
+            # 仅 setHtml 之外的重申都无法恢复。这里紧跟导航之后重申，覆盖
+            # 新建 / 池化复用 / renderer 崩溃自愈三条路径（详见方法 docstring）。
+            self.ensure_transparent_composition()
             return
 
         tag_css = []
@@ -3506,12 +3696,13 @@ class CodeWebViewer(QWebEngineView):
                         }});
                     }});
                 }}
-                window._initEchartsIn = function (container) {{
+                window._initEchartsIn = function (roots) {{
                     if (!window.echarts) {{
-                        window._echartsEnsure(function () {{ window._initEchartsIn(container); }});
+                        window._echartsEnsure(function () {{ window._initEchartsIn(roots); }});
                         return;
                     }}
-                    container.querySelectorAll('.echarts-container').forEach(function(el) {{
+                    // [T28] roots 为 null/undefined 时 _scopeQuery 退化全文档（全量路径兼容）
+                    window._scopeQuery(roots, '.echarts-container').forEach(function(el) {{
                         var jsonB64 = el.getAttribute('data-echarts-json');
                         if (!jsonB64 || el._echartInited || el._echQueued) return;
                         window._queueEcharts(el);
@@ -3880,11 +4071,19 @@ class CodeWebViewer(QWebEngineView):
                 function updateContentAppend(newHtml, tailHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
+                    // 打字机闸门：与 updateTailHtml 同款——缓冲未排空时挂起，
+                    // 防未揭示文本随替换瞬间上屏（成块蹦字）。挂起期间的新文本
+                    // 由 _gateExtra 记账，替换后原样补回，顺序天然正确。
+                    if (typeof window._twGate === 'function'
+                        && window._twGate(function () {{ updateContentAppend(newHtml, tailHtml); }})) return;
                     // 打字机：增量节点即将被移除并以格式化 HTML 重建（含未揭示文本），
                     // 丢弃揭示缓冲防重复追加。
                     if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
+                    // [T28] 差量基线：_from = 旧增量节点仍在场时的顶层节点数；
+                    // 本轮新内容（新段 + tailDiv）只会落在 children[_from..] 区间
+                    var _from = container.children.length;
                     // 段落分隔已由本次渲染的 HTML 表达，清掉挂起分段标记
                     container.removeAttribute('data-pending-break');
                     // 追加格式化 HTML（含 table 包裹等后续处理）
@@ -3903,6 +4102,10 @@ class CodeWebViewer(QWebEngineView):
                         tailDiv.innerHTML = tailHtml;
                         container.appendChild(tailDiv);
                     }}
+                    // [T28] 在删除旧增量节点**之前**取 roots：旧增量都在 _from 之前
+                    // 不在区间内，roots = 本轮新增的顶层节点（新段 + tailDiv），
+                    // 且此刻仍挂在文档内（引用有效）。
+                    var roots = window._nodesSince(container, _from);
                     // 🐛 修复（阅读位置被钳制）：旧增量节点改为**最后**删除。
                     // 「先删后插」会让容器 scrollHeight 瞬时塌陷，浏览器把 scrollTop 钳到
                     // 更小的 max —— 坞态正文内滚时每来一个 chunk 用户位置就漂一次。
@@ -3917,15 +4120,10 @@ class CodeWebViewer(QWebEngineView):
                     // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
                     if (window._toolCompactMode) reorganizeContent();
                     // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
-                    container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
-                        if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
-                        var wrapper = document.createElement('div');
-                        wrapper.className = 'table-scroll-wrapper';
-                        table.parentNode.insertBefore(wrapper, table);
-                        wrapper.appendChild(table);
-                    }});
+                    // [T28] 八个后处理全部收窄到 roots 作用域（O(新增段)，替代全文扫描）
+                    window._wrapTablesIn(roots);
                     // 恢复展开状态
-                    restoreCollapsibleStates(container);
+                    restoreCollapsibleStates(roots);
                     // 同步滚动到底（流式期间通常期望跟到底部）
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
@@ -3941,20 +4139,20 @@ class CodeWebViewer(QWebEngineView):
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     // 初始化 ECharts 图表（追加的闭合段可能含 echarts 代码块；rAF 排队）
-                    window._initEchartsIn(container);
+                    window._initEchartsIn(roots);
                     // 渲染 Mermaid 图表（追加的闭合段可能含 ```mermaid 代码块）
-                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
+                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks(roots);
                     // 渲染 KaTeX 公式（追加的闭合段可能含公式）
-                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks();
+                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks(roots);
                     // SVG / HTML widget 工具栏挂载（同上时机）
-                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
+                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars(roots);
                     // 插件 fence：追加的闭合段可能带入新的插件 fence
-                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
-                    if (typeof window._initWidgets === 'function') window._initWidgets();
+                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets(roots);
+                    if (typeof window._initWidgets === 'function') window._initWidgets(roots);
                     // 预览文字打字机：差量段里新落地的思考/工具预览行逐字显现
                     if (typeof window._ptPlay === 'function') window._ptPlay();
                     // 使用延迟报告，确保浏览器布局完成
-                    setTimeout(() => reportHeight(), 30);
+                    setTimeout(() => reportHeightDebounced(), 30);
                 }}
                 // ===== 差量收尾：流式思考块就地定稿 =====
                 // 结束这一拍不再整页替换 innerHTML：只把仍处流式态的 .think-streaming
@@ -3984,7 +4182,7 @@ class CodeWebViewer(QWebEngineView):
                             }}
                         }}
                         if (window._toolCompactMode && typeof reorganizeContent === 'function') reorganizeContent();
-                        if (typeof reportHeight === 'function') setTimeout(function () {{ reportHeight(); }}, 30);
+                        if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 30);
                     }} catch (e) {{
                         if (window.console) console.log('finalize-failed:' + e);
                     }}
@@ -3998,6 +4196,11 @@ class CodeWebViewer(QWebEngineView):
                 function updateTailHtml(html) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container || !html) return;
+                    // 打字机闸门：缓冲未排空时挂起本次替换，等揭示到水位再执行。
+                    // 直接执行会让未揭示文本随替换瞬间上屏（成块蹦字），
+                    // 闸门内执行时 DOM 文本量已与快照一致 → 替换只升级格式。
+                    if (typeof window._twGate === 'function'
+                        && window._twGate(function () {{ updateTailHtml(html); }})) return;
                     // 打字机：尾部将被整体行内重渲染（含未揭示文本），丢弃揭示缓冲。
                     if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
@@ -4011,6 +4214,8 @@ class CodeWebViewer(QWebEngineView):
                     tailDiv.setAttribute('data-rendered', 'true');
                     tailDiv.innerHTML = html;
                     container.appendChild(tailDiv);
+                    // [T28] 本路径新增内容恰为 tailDiv 一个顶层节点
+                    var roots = [tailDiv];
                     // 🐛 修复（阅读位置被钳制）：同 updateContentAppend，先加后删。
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         if (el !== tailDiv) el.remove();
@@ -4018,14 +4223,9 @@ class CodeWebViewer(QWebEngineView):
                     // 骨架挂回末尾（图表仍在生成中）；闭合时 _reattachSkeleton 自动丢弃
                     window._reattachSkeleton(container, _skel, html, '', tailDiv);
                     // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
-                    container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
-                        if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
-                        var wrapper = document.createElement('div');
-                        wrapper.className = 'table-scroll-wrapper';
-                        table.parentNode.insertBefore(wrapper, table);
-                        wrapper.appendChild(table);
-                    }});
-                    restoreCollapsibleStates(container);
+                    // [T28] 八个后处理全部收窄到 roots 作用域（O(新增段)，替代全文扫描）
+                    window._wrapTablesIn(roots);
+                    restoreCollapsibleStates(roots);
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
                         _autoScrollStreamingBody();
@@ -4043,14 +4243,14 @@ class CodeWebViewer(QWebEngineView):
                     // 图表/公式 fence。原先缺这四连 → 走 updateTailHtml 路径（无空行
                     // 分隔的长段落）时 echarts / mermaid / katex / widget 工具栏
                     // 全部静默不初始化。
-                    window._initEchartsIn(container);
-                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
-                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks();
-                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
+                    window._initEchartsIn(roots);
+                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks(roots);
+                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks(roots);
+                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars(roots);
                     // 插件 fence：尾部整段替换同样可能带入新的插件 fence
-                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
-                    if (typeof window._initWidgets === 'function') window._initWidgets();
-                    setTimeout(() => reportHeight(), 30);
+                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets(roots);
+                    if (typeof window._initWidgets === 'function') window._initWidgets(roots);
+                    setTimeout(() => reportHeightDebounced(), 30);
                 }}
                 {_CONTENT_AUTOSCROLL_JS}
                 function reportHeight() {{
@@ -4076,7 +4276,34 @@ class CodeWebViewer(QWebEngineView):
                         var _tcR = document.getElementById('tool-content');
                         if (_tcR && _tcR._userScrolledUp === true) _rd = true;
                     }} catch (_e) {{}}
-                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0'));
+                    // [T37] 第 5 字段：正文可见文本长度（内容哨兵数据源）。
+                    // Python 侧用它对照 _markdown_text 积压量，检测"DOM 内容丢失"
+                    // （池化误清 / 渲染链路停摆 / JS 注入失败等各类根因）并自动补渲。
+                    // 查询失败发 -1：Python 侧视作"未知"，哨兵不动作（旧骨架无此字段同效）。
+                    var _cl = -1;
+                    try {{
+                        var _cpL = document.getElementById('content-placeholder');
+                        if (_cpL) _cl = (_cpL.textContent || '').length;
+                    }} catch (_e2) {{}}
+                    // [T38] 空正文折叠：长工具循环期间正文无内容却仍占一块空白，
+                    // 被误读为"白屏"。无可见文本且无实体内容（图片/公式/表格/图表/
+                    // 代码块）时给 body 打 cp-blank，CSS 在坞态下把正文区收为零高度；
+                    // 一旦有内容立即摘除。翻转才改 class，避免高频写 DOM 属性。
+                    try {{
+                        var _cpE = document.getElementById('content-placeholder');
+                        if (_cpE) {{
+                            var _hasText = ((_cpE.textContent || '').trim().length > 0);
+                            var _hasSolid = _hasText || _cpE.querySelectorAll(
+                                'img,video,canvas,table,pre,svg,.katex,.code-block,[data-fence],iframe'
+                            ).length > 0;
+                            var _blank = !_hasSolid;
+                            if (_blank !== _cpE._blankState) {{
+                                _cpE._blankState = _blank;
+                                document.body.classList.toggle('cp-blank', _blank);
+                            }}
+                        }}
+                    }} catch (_e3) {{}}
+                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0') + '|' + _cl);
                 }}
                 // 批量报告高度：合并同一帧内的多次请求，动画期间仍暂停报告。
                 //
@@ -4699,10 +4926,15 @@ class CodeWebViewer(QWebEngineView):
                 // 经 _protect_inline_svg_blocks 包 <div> / markdown 段落包 <p>，svg 沉一层，
                 // 只扫顶层会漏挂）。尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon）。
                 // svg._widgetToolbar 防重挂（innerHTML 全量重建后 DOM 全新，标记自然失效，重扫重挂）。
-                window.renderWidgetToolbars = function() {{
-                    var root = document.getElementById('content-placeholder');
-                    if (!root) return;
-                    var children = root.children;
+                window.renderWidgetToolbars = function(roots) {{
+                    // [T28] 无参（全量路径）退化为 content-placeholder 顶层集合；
+                    // 差量路径传入 roots（恰为新增顶层节点）只遍历新增段
+                    if (!roots) {{
+                        var _cp = document.getElementById('content-placeholder');
+                        if (!_cp) return;
+                        roots = _cp.children;
+                    }}
+                    var children = roots;
                     for (var i = 0; i < children.length; i++) {{
                         var el = children[i];
                         var svg = null;
@@ -4742,8 +4974,9 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 插件 fence：assets 按需注入 + 权限桥 =====
                 window.__fenceLoaded = {{}};
-                function _scanFenceLangs() {{
-                    var out = [], nodes = document.querySelectorAll('[data-fence-renderer]');
+                function _scanFenceLangs(roots) {{
+                    // [T28] roots 为 null/undefined 时退化全文档（全量路径兼容）
+                    var out = [], nodes = window._scopeQuery(roots, '[data-fence-renderer]');
                     for (var i = 0; i < nodes.length; i++) {{
                         var l = nodes[i].getAttribute('data-fence-renderer');
                         if (l && out.indexOf(l) < 0) out.push(l);
@@ -4824,8 +5057,9 @@ class CodeWebViewer(QWebEngineView):
                         console.error('[fence] bridge sync:', e);
                     }}
                 }}
-                window._runFenceAssets = function () {{
-                    var _flangs = _scanFenceLangs();
+                window._runFenceAssets = function (roots) {{
+                    // [T28] 首扫收窄到 roots；assets 回调内二次装配保持全文档不动
+                    var _flangs = _scanFenceLangs(roots);
                     // 桥必须先于 assets 装配：插件脚本末尾常有"首帧兜底"的主动初始化
                     // （一执行就跑），那时若桥还是空的，插件会把"未授权"状态写死在
                     // 节点上，之后再装配也救不回来（幂等标记已打）。
@@ -4907,8 +5141,9 @@ class CodeWebViewer(QWebEngineView):
                     node.appendChild(f);
                     try {{ f.setAttribute('srcdoc', _widgetBuildDoc(src)); }} catch (e) {{}}
                 }}
-                window._initWidgets = function () {{
-                    var nodes = document.querySelectorAll('.drifox-widget[data-widget-src]');
+                window._initWidgets = function (roots) {{
+                    // [T28] roots 为 null/undefined 时退化全文档（全量路径兼容）
+                    var nodes = window._scopeQuery(roots, '.drifox-widget[data-widget-src]');
                     for (var i = 0; i < nodes.length; i++) _initOneWidget(nodes[i]);
                 }};
                 window.addEventListener('message', function (e) {{
@@ -5160,6 +5395,8 @@ class CodeWebViewer(QWebEngineView):
             _skeleton_cache.popitem(last=False)  # LRU：淘汰最久未用
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
+        # 🛡️ 同上（缓存命中分支）：导航后重申透明合成，防 HTML 区白底固化。
+        self.ensure_transparent_composition()
 
     # ========== 差量渲染常量 ==========
     # 安全兜底渲染间隔（ms）：无自然边界到达时强制全量渲染
@@ -5748,6 +5985,13 @@ class CodeWebViewer(QWebEngineView):
             if not self.isVisible():
                 self._render_deferred = True
                 return
+
+            # [T33] 坞态先于内容：本轮流式的首个 chunk 若先于 _sync_streaming_dock
+            # 的 IPC 落地，正文会先按自然高度排版（坞态 600px 限高未生效），
+            # 坞态到达后再被压回 → 起步瞬间"卡片先胀很大再缩回"。
+            # runJavaScript 按派发顺序执行，此处补发一次即可保证顺序（幂等）。
+            if self._streaming and not self._light_skeleton and not self._dock_sync_requested:
+                self._sync_streaming_dock(True)
 
             # 预览文字打字机开关：只在本轮流式（含结束后的终渲染）播放。
             # 历史会话加载时 _streaming / _streaming_finished 均为 False —— 一次
@@ -6726,6 +6970,8 @@ class CodeWebViewer(QWebEngineView):
             if self._is_js_ready and self.page():
                 flag = "true" if active else "false"
                 collapse = "true" if (collapse_after and not active) else "false"
+                # 已发出同步请求（JS 端 on===wasOn 时幂等 return，重复发零成本）
+                self._dock_sync_requested = True
                 self.page().runJavaScript(
                     f"if(typeof _setStreamingDock==='function')_setStreamingDock({flag},{collapse});"
                 )

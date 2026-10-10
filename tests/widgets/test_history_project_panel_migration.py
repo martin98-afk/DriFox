@@ -339,6 +339,22 @@ def test_panel_crossfade_height_is_conserved_and_monotonic(qapp):
         page.deleteLater()
 
 
+def test_project_list_stretch_added_once_not_per_row():
+    """★ 项目列表的末尾弹簧只能加一次（列表重建完成后），不能逐行加
+
+    ``_ensure_item_signals`` 被每个项目行调用（``_attach`` → 每行一次）；
+    若把 ``addStretch(1)`` 写在里面，N 个项目 = N 个弹簧夹在行与行之间，
+    剩余空间被平分 → 历史面板展开后项目行被均匀撒开（首行悬在中部、
+    末行沉底，2026-10-10 实测截图）。弹簧必须在 ``_refresh_project_list``
+    全部行挂完后加一次。
+    """
+    src = _read(_CARD)
+    ensure = src[src.index("def _ensure_item_signals") : src.index("def _on_project_item_clicked")]
+    assert "addStretch" not in ensure
+    refresh = src[src.index("def _refresh_project_list") : src.index("def _ensure_item_signals")]
+    assert refresh.count("layout.addStretch(1)") == 1
+
+
 def test_panel_takeover_from_mid_animation_does_not_jump(qapp):
     """连点反向：从当前高度续接，不先跳回 0 / 终值再动"""
     mod = _load_page_module()

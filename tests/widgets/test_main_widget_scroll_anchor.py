@@ -511,7 +511,10 @@ def test_streaming_card_keeps_bottom_follow_when_user_at_bottom(qapp):
     card._last_height_delta = 20
     card.heightChanged.emit(1220)
 
-    bar.setValue.assert_called_once_with(320)  # 300 + 20 == 新的 maximum
+    # [T32] 跟随态不再走「value + delta」累加，而是直接取当前上界贴底：
+    # 累加与 Qt 布局传播后的真实上界存在系统性偏差（实测恒定欠 12px），
+    # 且追踪收尾拍会清零 delta 吞掉最后一拍增量 → 视口长期离底十几 px 浮动。
+    bar.setValue.assert_called_once_with(5000)  # == maximum（贴底）
 
 
 def test_short_streaming_card_keeps_bottom_follow(qapp):
@@ -524,7 +527,8 @@ def test_short_streaming_card_keeps_bottom_follow(qapp):
     card._last_height_delta = 30
     card.heightChanged.emit(230)
 
-    bar.setValue.assert_called_once_with(330)  # 300 + 30
+    # [T32] 跟随态贴底（见上一用例注释）：卡片矮于视口时同样只认上界
+    bar.setValue.assert_called_once_with(5000)
 
 
 def test_card_entirely_above_viewport_compensated_even_when_user_away(qapp):
@@ -767,7 +771,9 @@ def test_negative_delta_clamped_at_zero(qapp):
     card._last_height_delta = -80
     card.heightChanged.emit(1120)
 
-    bar.setValue.assert_called_once_with(0)  # max(0, 30 - 80)
+    # [T32] 跟随态贴底：负增量不再参与 value 算术（不可能为负）。
+    # 非跟随态的锚定分支仍走 max(0, value + delta)，由下方用例覆盖。
+    bar.setValue.assert_called_once_with(5000)
 
 
 # ─── T5-5: _build_node_to_batch_mapping 等价性（指纹缓存 + 单 pass） ───────────

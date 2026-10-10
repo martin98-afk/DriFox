@@ -30,12 +30,19 @@ from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parents[2] / "app" / "widgets" / "message_card.py"
+_SOURCES = [
+    Path(__file__).resolve().parents[2] / "app" / "widgets" / "card_render_core.py",
+    Path(__file__).resolve().parents[2] / "app" / "widgets" / "card_viewers.py",
+    Path(__file__).resolve().parents[2] / "app" / "widgets" / "message_card.py",
+]
 
 
 @pytest.fixture(scope="module")
 def src_text() -> str:
-    return _SRC.read_text(encoding="utf-8")
+    # [T22] 符号已跨文件分布：JS 资产与注入点在 card_render_core / card_viewers，
+    # 卡方法（finish_streaming/_update_height 等）在 message_card / card_viewers。
+    # 拼接供 src_text.find 系断言统一检索。
+    return "\n".join(p.read_text(encoding="utf-8") for p in _SOURCES)
 
 
 def _func_body(src: str, header: str) -> str:
@@ -97,7 +104,9 @@ class TestTypewriterQueue:
         start = src_text.find(fn)
         assert start != -1, f"未找到 {fn}"
         body = src_text[start : start + 1500]
-        assert "window._twReset" in body, f"{fn} 必须在替换 DOM 前调用 window._twReset()"
+        # updateContent 走 _twFlush（方案C：未揭示缓冲先上屏再替换，零丢字），
+        # 其余入口仍为 _twReset——两者皆为「替换前复位队列」的合法形态
+        assert "window._twReset" in body or "window._twFlush" in body, f"{fn} 必须在替换 DOM 前复位打字机队列"
 
 
 class TestFinishTickCost:
@@ -111,15 +120,20 @@ class TestFinishTickCost:
         丢弃 → 终渲染永不落地（卡片停在流式形态、高度不收敛）。曾踩过。
         """
         body = _func_body(src_text, "def _perform_update(self):")
-        non_streaming = body.split("if not self._streaming:", 1)[1].split("以下为流式模式", 1)[0]
-        assert "self._sequence_render(" in non_streaming, "长历史卡应走线程池（真机 40~120ms/张）"
-        # 异步分支必须带着"非结束态"守卫（getattr 形式防御历史实例缺属性）
-        assert 'not getattr(self, "_final_render_pending", False)' in non_streaming, (
-            "异步分支必须排除流式结束的终渲染（_final_render_pending）"
-        )
+        # [T22] 差量收尾分支（_incremental_finalize）插入后，「以下为流式模式」分隔
+        # 注释已不存在；三点核心判据改在整函数体上断言（守卫表达式仍唯一指向
+        # 异步提交前的结束态排除）。
+        assert "self._sequence_render(" in body, "长历史卡应走线程池（真机 40~120ms/张）"
+        # 异步分支必须带着"非结束态"守卫（getattr 形式防御历史实例缺属性）；
+        # 守卫调用的换行排版不固定，空白归一后断言
+        import re as _re
+
+        assert _re.search(
+            r'not\s+getattr\(\s*self,\s*"_final_render_pending",\s*False\s*\)', body
+        ), ("异步分支必须排除流式结束的终渲染（_final_render_pending）")
         assert "_cleanup_render_cache" in body, "需保留为何结束态不能异步的说明"
         # finish_streaming 必须打开该守卫
-        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False):")
+        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False, immediate: bool = True):")
         assert "_final_render_pending = True" in fin, "finish_streaming 必须标记终渲染为同步"
 
     def test_finish_timing_probe_available(self, src_text: str):
@@ -150,7 +164,7 @@ class TestFinishHeightTransition:
 
     def test_finish_window_opened_only_for_streaming_end(self, src_text: str):
         """只有流式结束打开窗口；history 加载是首帧建卡，不需要过渡"""
-        body = _func_body(src_text, "def finish_streaming(self, history: bool = False):")
+        body = _func_body(src_text, "def finish_streaming(self, history: bool = False, force_dock_off: bool = False, immediate: bool = True):")
         assert "_finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S" in body
         assert "_finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES" in body
         assert "if not history:" in body
@@ -182,9 +196,9 @@ class TestFlipTransitions:
 
     def test_dock_toggle_wrapped_by_flip(self, src_text: str):
         """_setStreamingDock 的 order 换位是瞬移，必须用 FLIP 补间"""
-        start = src_text.find("function _setStreamingDock(active)")
+        start = src_text.find("function _setStreamingDock(active, collapseAfter)")
         assert start != -1
-        body = src_text[start : src_text.find("\n}", start)]
+        body = src_text[start : src_text.find("\n                function ", start)]
         assert "_flipCapture" in body, "坞态切换前必须记录位置"
         assert "_flipPlay" in body, "坞态切换后必须播放位移动画"
 
@@ -207,7 +221,7 @@ class TestFlipTransitions:
         assert "window._flipArm" in body, "缺少 arm 入口"
         assert "_flipArmedUntil > performance.now()" in body, "未 arm 时 _flipCapture 必须直接返回 null"
         # 结束态重排前 Python 必须 arm（否则 updateContent 的 capture 永远拿不到位置）
-        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False):")
+        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False, immediate: bool = True):")
         assert "_flipArm" in fin, "finish_streaming 必须在最终渲染前 arm FLIP"
 
     def test_think_block_carries_positional_flip_key(self, src_text: str):
@@ -226,3 +240,104 @@ class TestFlipTransitions:
         assert "window._animNext" in src_text
         body = _func_body(src_text, "def _auto_collapse_tool_section(self):")
         assert "window._animEnqueue" in body, "自动折叠必须入队，排在归位/重排之后"
+
+
+class TestDiffScopeQuery:
+    """[T28/P0-1] 差量渲染 roots 作用域查询接线（消除 O(n²) 累积）"""
+
+    def test_nodes_since_used_by_both_diff_entries(self, src_text: str):
+        """两个差量入口都必须经 _nodesSince 取新增区间"""
+        assert "window._nodesSince(container, _from)" in src_text, "updateContentAppend 须取 roots"
+        assert "var roots = [tailDiv];" in src_text, "updateTailHtml 的 roots 恰为 tailDiv"
+
+    def test_from_baseline_precedes_incremental_removal(self, src_text: str):
+        """_from 基线必须先于旧增量节点删除（否则 roots 区间污染）"""
+        s = src_text.find("function updateContentAppend(newHtml, tailHtml)")
+        e = src_text.find("function finalizeStreamingBlocks", s)
+        body = src_text[s:e]
+        from_at = body.find("var _from = container.children.length;")
+        del_at = body.find('[data-incremental="true"]')
+        roots_at = body.find("var roots = window._nodesSince(container, _from);")
+        assert -1 not in (from_at, del_at, roots_at)
+        assert from_at < roots_at < del_at, "时序须为 _from → 取 roots → 删旧增量节点"
+
+    def test_scope_query_in_five_functions(self, src_text: str):
+        """五个后处理函数必须支持 roots 作用域（_scopeQuery 退化全文档兼容全量路径）"""
+        for header in (
+            "window._initEchartsIn = function (roots)",
+            "window.renderWidgetToolbars = function(roots)",
+            "window._runFenceAssets = function (roots)",
+            "window._initWidgets = function (roots)",
+            "function _scanFenceLangs(roots)",
+        ):
+            assert header in src_text, f"缺少 roots 形参: {header}"
+            s = src_text.find(header)
+            seg = src_text[s : s + 2000]
+            # [T28] _runFenceAssets 委托 _scanFenceLangs(roots)；renderWidgetToolbars
+            # 无参退化走顶层集合；其余直接 _scopeQuery(roots)
+            probe = {
+                "window._runFenceAssets": "_scanFenceLangs(roots)",
+                "window.renderWidgetToolbars": "roots = _cp.children",
+            }.get(header.split(" = ")[0], "_scopeQuery(roots")
+            assert probe in seg, f"{header} 体内应走 {probe}"
+
+    def test_wrap_tables_in_roots_both_entries(self, src_text: str):
+        """两入口的表格包裹必须走 _wrapTablesIn(roots)（原 inline 全文循环移除）"""
+        s = src_text.find("function updateContentAppend(newHtml, tailHtml)")
+        e = src_text.find("function finalizeStreamingBlocks", s)
+        append_body = src_text[s:e]
+        s2 = src_text.find("function updateTailHtml(html)")
+        e2 = src_text.find("_CONTENT_AUTOSCROLL_JS", s2)
+        tail_body = src_text[s2:e2]
+        assert "window._wrapTablesIn(roots);" in append_body
+        assert "window._wrapTablesIn(roots);" in tail_body
+        assert "table:not(.code-table):not(.layout-table)').forEach" not in append_body, (
+            "差量入口不得保留 inline 全文表格循环"
+        )
+
+    def test_skeleton_version_bumped_for_roots(self, src_text: str):
+        """骨架 JS 结构变更必须 bump 版本（roots 接线 = v41）"""
+        import re as _re
+
+        m = _re.search(r"^_SKELETON_CACHE_VERSION = (\d+)", src_text, _re.M)
+        assert m is not None, "找不到 _SKELETON_CACHE_VERSION 定义"
+        version = int(m.group(1))
+        assert version >= 41, f"roots 接线后 _SKELETON_CACHE_VERSION 必须 >=41，实际 {version}"
+
+
+class TestHeightTickAlignment:
+    """[T34] 高度回环节拍与打字机 rAF 同频，且防抖不得另立一拍"""
+
+    def test_tick_matches_frame_budget(self):
+        """追踪 tick 必须落在单帧量级（<=20ms），与打字机 rAF(~17ms) 同频。
+
+        文字按 rAF 每 ~17ms 揭示一次，容器高度若按 40ms 一格逼近，就会出现
+        「文字连续长、容器跳格」的台阶感 —— 这是 [T34] 修复的体感来源。
+        """
+        from pathlib import Path
+
+        widgets_dir = Path(__file__).resolve().parents[2] / "app" / "widgets"
+        core_text = (widgets_dir / "card_render_core.py").read_text(encoding="utf-8")
+        card_text = (widgets_dir / "message_card.py").read_text(encoding="utf-8")
+        s = core_text.find("STREAM_HEIGHT_TICK_MS = ")
+        assert s != -1
+        tick = int(core_text[s : core_text.find("\n", s)].split("=")[1].strip())
+        assert tick <= 20, f"STREAM_HEIGHT_TICK_MS 应 <=20ms（单帧量级），实际 {tick}"
+        # 防抖不得硬编码成另一拍：会把它喂给追踪的目标值切成阶梯
+        assert (
+            "self._stream_height_timer.setInterval(STREAM_HEIGHT_TICK_MS)" in card_text
+        ), "防抖须复用 STREAM_HEIGHT_TICK_MS，不得另立硬编码节拍"
+        assert "setInterval(32)" not in card_text, "旧 32ms 防抖应已移除"
+        assert "setInterval(40)" not in card_text, "旧 40ms 防抖应已移除"
+
+    def test_min_delta_no_worse_than_epsilon(self):
+        """snap 阈值不得高于落定阈值，否则大部分高度变化会被硬跳。
+
+        实测流式期高度变化幅度 p50=4px；阈值 8px 时它们全被 snap 成硬跳。
+        """
+        from app.widgets import card_render_core as core
+
+        assert core.STREAM_HEIGHT_ANIM_MIN_DELTA <= core.STREAM_HEIGHT_TRACK_EPSILON + 1, (
+            f"MIN_DELTA({core.STREAM_HEIGHT_ANIM_MIN_DELTA}) 高于 "
+            f"EPSILON({core.STREAM_HEIGHT_TRACK_EPSILON}) 会让小步增长全部退化成硬跳"
+        )

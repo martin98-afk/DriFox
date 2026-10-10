@@ -392,6 +392,10 @@ class LLMSettingsCard(SystemCardFrame):
 
     _autostart_toggling = False  # 类级防重入标志
     _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
+    # 隐藏期主题刷新补刷协议标记（见 showEvent / GlobalCardController.refresh_theme_styles）。
+    # 类级默认值必需：门控方用 hasattr 探测协议，实例属性首次赋值前 hasattr 为 False，
+    # 会导致隐藏门控失效（2026-10-10 实测 gcc 门控因此未生效，226ms 白付）。
+    _theme_needs_refresh: bool = False
     # 插件分区指纹的类级默认：`__new__` 造的桩（测试 fixture）不跑 __init__，
     # QObject 未初始化时读实例属性会抛 RuntimeError 而非 AttributeError → 必须给默认值
     _plugin_cards_sig: tuple | None = None
@@ -1302,13 +1306,7 @@ class LLMSettingsCard(SystemCardFrame):
                     # 落在同一 tick，这个前置条件不再自动成立，故显式定尺。
                     inner = card.widget() if hasattr(card, "widget") else None
                     if inner is not None and inner.sizeHint().height() > inner.height():
-                        print(
-                            f"[ADJUST] {type(card).__name__} inner.sizeHint={inner.sizeHint().height()} "
-                            f"inner.h={inner.height()} view.h={card.view.height()} "
-                            f"viewLayout.hint={card.viewLayout.sizeHint().height()} card.w={card.width()}"
-                        )
                         inner.adjustSize()
-                        print(f"[ADJUST] 调整后 inner.h={inner.height()}")
                     card.toggleExpand()
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] {tab_id} 页卡片展开失败: {e}")

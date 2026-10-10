@@ -748,6 +748,10 @@ class ProjectSelectorCardContent(QWidget):
                 self._item_cache[proj_name] = w
             _attach(w, proj_name, proj_name == self._current_project)
 
+        # 末尾补弹簧把项目行顶到列表上部（只在重建完成后加一次；
+        # 逐行加会把行与行之间全隔上弹簧，被剩余空间平分撒开）
+        layout.addStretch(1)
+
     def _ensure_item_signals(self, item: ProjectItem):
         """（重）连接行信号：缓存复用行先断旧连接防重复触发"""
         for sig, slot in (
@@ -766,8 +770,6 @@ class ProjectSelectorCardContent(QWidget):
         except TypeError:
             pass
         item.allClicked.connect(self.allProjectsSelected.emit)
-
-        self._content_layout.addStretch(1)
 
     def _on_project_item_clicked(self, name: str):
         """项目被点击"""

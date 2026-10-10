@@ -50,6 +50,11 @@ class CardContainer(QWidget):
     # 声明后，容器高度会直接 snap 到目标值，不再走 QPropertyAnimation。
     NO_ANIMATION_PROP = "noContainerAnimation"
 
+    # 隐藏期主题刷新补刷协议标记（见 refresh_style / showEvent）。
+    # 类级默认值必需：门控读写此属性，实例首次赋值前 getattr 默认 False
+    # 会让「隐藏期置脏」判定失效（同类教训见 LLMSettingsCard._theme_needs_refresh）。
+    _theme_needs_refresh: bool = False
+
     # 卡片可通过 setProperty(FOLLOW_CONTENT_PROP, True) 声明"高度必须严格跟随内容"：
     # 即使容器处于停靠（dock）模式（高度由 QSplitter 分配、默认不随内容收缩，
     # 且首次展开套 30% 对话区下限 / 二次展开恢复记忆高度），也会锁定容器高度 =
@@ -226,7 +231,24 @@ class CardContainer(QWidget):
         """响应主题切换：刷新容器背景 + 边框
 
         主题切换时由 main_widget 的全局 refresh 链调用。
+
+        [PERF] 隐藏容器门控：本方法成本 ∝ 容器卡片子树规模（设置弹窗宿主
+        容器 1088 控件，实测单次 241ms）。容器隐藏时用户看不见，刷新纯属
+        白付；置 _theme_needs_refresh 后由显示路径补刷自愈。
+        仅门控隐藏态；可见态行为完全不变。
+
+        ⚠️ 补刷不能只挂 showEvent：覆盖层模式的容器由 QStackedWidget 切页
+        显隐（叠放化改造，不触发 showEvent），实际补刷点是
+        TabManagerWindow._on_overlay_state_changed。非 overlay 的 dock/普通
+        容器仍走 showEvent。
         """
+        try:
+            if not self.isVisible():
+                self._theme_needs_refresh = True
+                return
+        except RuntimeError:
+            return  # C++ 对象已销毁
+        self._theme_needs_refresh = False
         self._apply_background_style()
 
     @property
@@ -683,7 +705,9 @@ class CardContainer(QWidget):
         """
         super().showEvent(event)
         # 覆盖层模式：按当前可见卡片重判透明/面板样式（透明卡片显隐会切换容器可见性）
-        if self._overlay_mode:
+        # [PERF] 同时承接隐藏期 refresh_style 门控的补刷（置脏语义）
+        if self._overlay_mode or getattr(self, "_theme_needs_refresh", False):
+            self._theme_needs_refresh = False
             self._apply_background_style()
         # 延迟到当前 show 事件处理完成后再展开（此时布局已激活）
         # not isHidden()：容器自身隐藏期间被 setVisible(True) 的卡片

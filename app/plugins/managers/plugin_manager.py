@@ -56,6 +56,9 @@ from app.plugins.deps_loader import check_platform, ensure_deps_on_path
 # 严禁路径分隔符与 `..`（plugin_name 会参与配置存储路径拼接，见 plugin_config_store）
 _PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
+# [T26/H2] 插件发现缓存 schema 版本：缓存结构变化时递增（整体失效）
+_DISCOVERY_CACHE_SCHEMA_VERSION = 1
+
 
 def _normalize_plugin_name(raw: object, fallback: str) -> Optional[str]:
     """把清单里的 name 归一为安全插件名；非法返回 None（调用方跳过该插件）。
@@ -381,6 +384,18 @@ class PluginManager:
         # 0. 一次性迁移：system 单体插件拆分为 system-* 系列后的旧状态键改写
         self._migrate_split_system_states()
 
+        # [T26/H2] 插件发现缓存命中 → 跳过三连全扫（热态 -0.8~2.5s）。
+        # 命中路径复用 _merge_discovered 合并语义 + 重放幂等副作用
+        # （ensure_deps_on_path / _register_config_schema）；异常回退全扫。
+        if self._try_load_from_discovery_cache():
+            self._initialized = True
+            self._restore_enabled_from_settings()
+            try:
+                self._last_scan_signature = self._plugins_dir_signature()
+            except Exception:
+                self._last_scan_signature = None
+            return
+
         # 1. 扫描系统插件
         self._discover_system_plugins()
 
@@ -403,6 +418,9 @@ class PluginManager:
             self._last_scan_signature = self._plugins_dir_signature()
         except Exception:
             self._last_scan_signature = None
+
+        # [T26] 全扫成功 → 回写发现缓存（下次启动命中；含损坏自修复）
+        self._save_discovery_cache()
 
     def _restore_enabled_from_settings(self):
         """从 Settings 恢复已启用插件状态，新发现的插件默认启用（D8：跳过禁用集）"""
@@ -568,6 +586,237 @@ class PluginManager:
             sig.append((str(root_path), True, root_mtime, tuple(entries)))
         return tuple(sig)
 
+    # ============================================================
+    # 插件发现持久化缓存（[T26/H2]：命中跳过全量插件扫描）
+    # ============================================================
+
+    def _discovery_cache_path(self) -> Path:
+        """发现缓存落盘路径：<data_dir>/cache/plugin_discovery.json"""
+        from app.utils.utils import get_app_data_dir
+
+        return get_app_data_dir() / "cache" / "plugin_discovery.json"
+
+    def _discovery_signature(self) -> tuple:
+        """目录签名（_plugins_dir_signature）+ 每个 manifest 的 (size, mtime_ns)。
+
+        目录签名只覆盖插件目录级变化（新增/删除/目录 mtime）；manifest 文件内容
+        编辑（version/api_version 等）不改变父目录 mtime（NTFS 父目录 mtime 陷阱），
+        追加 manifest 元数据保证内容级失效。
+        """
+        base = self._plugins_dir_signature()
+        manifest_meta: list = []
+        roots = [self._SYSTEM_PLUGIN_DIR]
+        if self._app_data_dir:
+            roots.append(self._app_data_dir / self._USER_PLUGIN_DIR_NAME)
+        roots.extend((self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR))
+        for root in roots:
+            root_path = Path(root)
+            if not root_path.exists():
+                continue
+            try:
+                children = sorted(p.name for p in root_path.iterdir())
+            except OSError:
+                continue
+            for name in children:
+                for mf in (
+                    root_path / name / ".drifox-plugin" / "plugin.json",
+                    root_path / name / ".claude-plugin" / "plugin.json",
+                ):
+                    try:
+                        st = mf.stat()
+                    except OSError:
+                        continue
+                    manifest_meta.append((str(mf), st.st_size, st.st_mtime_ns))
+        return base + (tuple(manifest_meta),)
+
+    def _discovery_cache_key(self) -> list:
+        """缓存键四元组：schema 版本 + 宿主版本 + 插件 API 契约版本 + 目录/清单签名。"""
+        from app.plugins.version_gate import HOST_PLUGIN_API_VERSION, host_version
+
+        return [
+            _DISCOVERY_CACHE_SCHEMA_VERSION,
+            host_version(),
+            HOST_PLUGIN_API_VERSION,
+            self._discovery_signature(),
+        ]
+
+    @staticmethod
+    def _serialize_plugin_info(p: PluginInfo) -> dict:
+        return {
+            "name": p.name,
+            "manifest": p.manifest,
+            "path": str(p.path),
+            "plugin_type": p.plugin_type,
+            "platform_compatible": p.platform_compatible,
+            "version_compatible": p.version_compatible,
+            "version_reason": p.version_reason,
+            "api_compatible": p.api_compatible,
+            "api_reason": p.api_reason,
+            "manifest_warnings": p.manifest_warnings,
+            "overridden_by": p.overridden_by,
+        }
+
+    @staticmethod
+    def _plugin_info_from_cached(d: dict) -> Optional[PluginInfo]:
+        """缓存条目 → PluginInfo（str→Path）；缺失/类型异常返回 None（全扫兜底）。"""
+        try:
+            return PluginInfo(
+                name=d["name"],
+                manifest=d["manifest"],
+                path=Path(d["path"]),
+                plugin_type=d.get("plugin_type", "user"),
+                platform_compatible=d.get("platform_compatible", True),
+                version_compatible=d.get("version_compatible", True),
+                version_reason=d.get("version_reason", ""),
+                api_compatible=d.get("api_compatible", True),
+                api_reason=d.get("api_reason", ""),
+                manifest_warnings=list(d.get("manifest_warnings", [])),
+                overridden_by=d.get("overridden_by", ""),
+            )
+        except Exception:
+            return None
+
+    def _save_discovery_cache(self) -> None:
+        """原子回写发现缓存（tmp + replace）；写失败吞异常（缓存永不致命）。"""
+        try:
+            groups: Dict[str, list] = {"system": [], "claude": [], "user": []}
+            for p in self._plugins.values():
+                bucket = groups.get(p.plugin_type)
+                if bucket is not None:
+                    bucket.append(self._serialize_plugin_info(p))
+            payload = {"key": self._discovery_cache_key(), "groups": groups}
+            cache_file = self._discovery_cache_path()
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cache_file.with_name(cache_file.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(cache_file)
+            logger.debug(f"[PluginManager] 发现缓存已回写 full scan 结果（{len(self._plugins)} 个插件）")
+        except Exception as e:
+            logger.warning(f"[PluginManager] 发现缓存写入失败（忽略）: {e}")
+
+    def _try_load_from_discovery_cache(self) -> bool:
+        """尝试命中发现缓存：重建 _plugins 并重放幂等副作用。
+
+        任何一步异常 / 键不等 / 条目损坏 → 返回 False 走三连全扫兜底。
+        验收日志：命中打 "from cache"、全扫不打（键不等打 "full scan"）。
+        """
+        try:
+            cache_file = self._discovery_cache_path()
+            if not cache_file.exists():
+                return False
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            # [T26] 键比较用规范化 JSON 串：signature 含 tuple，JSON roundtrip 后
+            # tuple→list，直接 != 会恒不等导致缓存永不命中
+            if json.dumps(payload.get("key"), sort_keys=True) != json.dumps(
+                self._discovery_cache_key(), sort_keys=True
+            ):
+                logger.info("[PluginManager] 插件发现缓存键不匹配，full scan")
+                return False
+            groups = payload.get("groups", {})
+            rebuilt: Dict[str, Dict[str, PluginInfo]] = {}
+            for gtype in ("system", "claude", "user"):
+                infos = []
+                for d in groups.get(gtype, []):
+                    pi = self._plugin_info_from_cached(d)
+                    if pi is None:
+                        logger.info("[PluginManager] 发现缓存条目损坏，full scan")
+                        return False
+                    infos.append(pi)
+                rebuilt[gtype] = {p.name: p for p in infos}
+            if not rebuilt["system"]:
+                return False
+            # 合并重跑（与 rescan 同源语义，[T26]）
+            allow_user_override = True
+            try:
+                from app.utils.config import Settings
+
+                allow_user_override = bool(Settings.get_instance().allow_user_override.value)
+            except Exception:
+                pass
+            new_plugins, _changed = self._merge_discovered(
+                rebuilt["system"], rebuilt["claude"], rebuilt["user"], allow_user_override
+            )
+            self._plugins = new_plugins
+            # 副作用重放（幂等）：deps 注入仅门禁通过插件（G3 对齐）；config_schema 注册
+            for p in self._plugins.values():
+                if not p.load_blocked:
+                    ensure_deps_on_path(p.path)
+                self._register_config_schema(p.name, p.manifest)
+            logger.info(
+                f"[PluginManager] 插件发现命中缓存 from cache: {len(self._plugins)} 个插件（跳过全扫）"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[PluginManager] 发现缓存读取异常，回退全扫: {e}")
+            return False
+
+    def _invalidate_discovery_cache(self) -> None:
+        """删除发现缓存文件（热扫描/新插件注册后，内存态与缓存可能不一致）。"""
+        try:
+            cache_file = self._discovery_cache_path()
+            if cache_file.exists():
+                cache_file.unlink()
+                logger.debug("[PluginManager] 发现缓存已作废（文件已删除）")
+        except Exception as e:
+            logger.warning(f"[PluginManager] 发现缓存删除失败（忽略）: {e}")
+
+    def _merge_discovered(
+        self,
+        current_system: Dict[str, PluginInfo],
+        current_claude: Dict[str, PluginInfo],
+        current_user: Dict[str, PluginInfo],
+        allow_user_override: bool,
+    ) -> tuple:
+        """按优先级合并三路发现结果：系统 → Claude → 用户（最高）。
+
+        [T26] 从 rescan 抽出的公共合并语义：rescan 与发现缓存命中路径共用，
+        保证覆盖关系单源（overridden_by 标记 + changed 收集 + _plugins 顺手写回）。
+
+        Args:
+            allow_user_override: False 时用户目录同名插件跳过，保留现有版本
+
+        Returns:
+            (new_plugins, changed)：合并后映射 + 因覆盖而变化的插件列表
+        """
+        new_plugins: Dict[str, PluginInfo] = {}
+        changed: List[PluginInfo] = []
+        # 先加系统插件
+        for name, p in current_system.items():
+            new_plugins[name] = p
+        # Claude 插件同名覆盖系统（同名覆盖显性化：warning + overridden_by 标记）
+        for name, p in current_claude.items():
+            if name in new_plugins:
+                overridden = new_plugins[name]
+                logger.warning(
+                    f"[PluginManager] Rescan: '{name}' 被 Claude 插件覆盖 "
+                    f"({overridden.plugin_type}: {overridden.path} → claude: {p.path})"
+                )
+                p.overridden_by = overridden.plugin_type
+                changed.append(p)
+                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
+                self._plugins[name] = p
+            new_plugins[name] = p
+        # 用户插件同名覆盖前两者（最高优先级）
+        for name, p in current_user.items():
+            if name in new_plugins:
+                if not allow_user_override:
+                    logger.warning(
+                        f"[PluginManager] Rescan: 用户插件 '{name}' 因 allow_user_override=false 跳过，"
+                        f"保留现有版本: {new_plugins[name].path}"
+                    )
+                    continue
+                overridden = new_plugins[name]
+                logger.warning(
+                    f"[PluginManager] Rescan: '{name}' 被用户插件覆盖 "
+                    f"({overridden.plugin_type}: {overridden.path} → user: {p.path})"
+                )
+                p.overridden_by = overridden.plugin_type
+                changed.append(p)
+                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
+                self._plugins[name] = p
+            new_plugins[name] = p
+        return new_plugins, changed
+
     def rescan(self, force: bool = False) -> dict:
         """运行时重新扫描插件目录，检测新增/移除的插件
 
@@ -615,8 +864,7 @@ class PluginManager:
             claude_plugins.extend(self._scan_plugins(claude_dir, "claude"))
         current_claude = {p.name: p for p in claude_plugins}
 
-        # 3. 构建新插件映射（优先级: 系统 → Claude → 用户）
-        new_plugins: Dict[str, PluginInfo] = {}
+        # 3. 优先级合并（公共函数：rescan 与发现缓存命中路径共用同一语义，[T26]）
         # allow_user_override=false 时用户目录同名插件跳过，系统版生效
         allow_user_override = True
         try:
@@ -625,41 +873,10 @@ class PluginManager:
             allow_user_override = bool(Settings.get_instance().allow_user_override.value)
         except Exception:
             pass
-        # 先加系统插件
-        for name, p in current_system.items():
-            new_plugins[name] = p
-        # Claude 插件同名覆盖系统（同名覆盖显性化：warning + overridden_by 标记）
-        for name, p in current_claude.items():
-            if name in new_plugins:
-                overridden = new_plugins[name]
-                logger.warning(
-                    f"[PluginManager] Rescan: '{name}' 被 Claude 插件覆盖 "
-                    f"({overridden.plugin_type}: {overridden.path} → claude: {p.path})"
-                )
-                p.overridden_by = overridden.plugin_type
-                result["changed"].append(p)
-                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
-                self._plugins[name] = p
-            new_plugins[name] = p
-        # 用户插件同名覆盖前两者（最高优先级）
-        for name, p in current_user.items():
-            if name in new_plugins:
-                if not allow_user_override:
-                    logger.warning(
-                        f"[PluginManager] Rescan: 用户插件 '{name}' 因 allow_user_override=false 跳过，"
-                        f"保留现有版本: {new_plugins[name].path}"
-                    )
-                    continue
-                overridden = new_plugins[name]
-                logger.warning(
-                    f"[PluginManager] Rescan: '{name}' 被用户插件覆盖 "
-                    f"({overridden.plugin_type}: {overridden.path} → user: {p.path})"
-                )
-                p.overridden_by = overridden.plugin_type
-                result["changed"].append(p)
-                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
-                self._plugins[name] = p
-            new_plugins[name] = p
+        new_plugins, changed_list = self._merge_discovered(
+            current_system, current_claude, current_user, allow_user_override
+        )
+        result["changed"] = changed_list
 
         new_names = set(new_plugins.keys())
 
@@ -688,6 +905,8 @@ class PluginManager:
         logger.info(f"[PluginManager] Rescan done: added={len(added_names)}, removed={len(removed_names)}")
         # MCP 配置可能因插件增删而变更，失效缓存（列表刷新/连接清理依赖最新数据）
         self.invalidate_mcp_cache()
+        # [T26] 全量重扫成功 → 回写发现缓存（短路路径不回写，缓存仍有效）
+        self._save_discovery_cache()
         return result
 
     def rescan_plugin(self, name: str):
@@ -708,6 +927,8 @@ class PluginManager:
             self._discover_and_register(name)
             # 新插件可能带入 MCP 配置，失效缓存（否则列表/断连逻辑读到旧数据）
             self.invalidate_mcp_cache()
+            # [T26] 热扫描作废发现缓存（内存态已变，缓存不再可信）
+            self._invalidate_discovery_cache()
             return
 
         plugin_dir = old.path
@@ -718,6 +939,8 @@ class PluginManager:
             logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
             # 插件被移除，其 MCP 配置需从缓存中剔除
             self.invalidate_mcp_cache()
+            # [T26] 热扫描作废发现缓存（内存态已变，缓存不再可信）
+            self._invalidate_discovery_cache()
             return
 
         # 只扫描这一个插件目录，不走全量遍历
@@ -733,6 +956,8 @@ class PluginManager:
             logger.info(f"[PluginManager] Plugin removed during rescan (manifest gone): {name}")
         # 无论更新还是移除，MCP 配置都可能变化，失效缓存
         self.invalidate_mcp_cache()
+        # [T26] 热扫描作废发现缓存
+        self._invalidate_discovery_cache()
 
     def _discover_and_register(self, name: str) -> Optional[PluginInfo]:
         """在已知插件目录中按名称搜索新插件，找到后扫描并注册到 _plugins
@@ -767,6 +992,8 @@ class PluginManager:
                 # 同步 Settings 启用状态（新插件默认启用）
                 self._restore_enabled_from_settings()
                 logger.info(f"[PluginManager] 发现并注册新插件 '{name}' ({plugin_type})")
+                # [T26] 新插件注册 → 发现缓存作废
+                self._invalidate_discovery_cache()
                 return info
             # 目录存在但没有 manifest（.drifox-plugin/plugin.json）
             # 此时目录存在但插件格式不对，继续搜索其他目录

@@ -192,21 +192,33 @@ _CACHE_AGENT_REF: Optional[object] = None  # 缓存对应的 agent_manager 引�
 _CACHE_TTL = 5.0  # 秒
 
 _plugin_tools_loaded = False
+_plugin_tools_last_fail_ts = 0.0
+_PLUGIN_TOOLS_RETRY_INTERVAL = 60.0  # 秒；加载失败后的节流重试间隔
 
 
 def _ensure_plugin_tools_loaded() -> None:
-    """确保系统插件工具已加载（模块导入时 + 幂等，进程级一次）"""
-    global _plugin_tools_loaded
+    """确保系统插件工具已加载（幂等；失败不置位，60s 节流重试）
+
+    [T17-2] 原实现在 try 前置位：首次加载失败（插件文件瞬时锁/半写、门禁异常等）
+    后进程内永不重试，工具永久缺失。改为成功才置位；失败记时间戳，60s 内直接
+    返回（消费方每次读 registry 都会进来，节流避免频繁真扫盘）。
+    """
+    global _plugin_tools_loaded, _plugin_tools_last_fail_ts
     if _plugin_tools_loaded:
         return
-    _plugin_tools_loaded = True
+    import time as _time
+
+    if _time.monotonic() - _plugin_tools_last_fail_ts < _PLUGIN_TOOLS_RETRY_INTERVAL:
+        return
     try:
         from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher, load_plugin_tools
 
         load_plugin_tools()
         ensure_plugin_tool_watcher()
+        _plugin_tools_loaded = True
     except Exception as e:
-        logger.warning(f"[BuiltinTools] 插件工具加载失败: {e}")
+        _plugin_tools_last_fail_ts = _time.monotonic()
+        logger.warning(f"[BuiltinTools] 插件工具加载失败（60s 后可重试）: {e}")
 
 
 def _invalidate_schema_cache(version: int) -> None:
