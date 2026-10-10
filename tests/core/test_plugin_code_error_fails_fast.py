@@ -136,3 +136,60 @@ def test_network_error_still_retries_regression(monkeypatch):
     assert client.calls == 2, "网络错误应重试 1 次后成功"
     assert result == (True, True)
     assert worker.retry_status.emitted and worker.retry_status.emitted[0][0] == "ConnectionError"
+
+
+# ── [T16-B1] openai 异常类惰性加载：except 合并后的语义等价性锚 ──
+
+
+def _make_bad_request(message: str) -> "BadRequestError":
+    """构造带 httpx response 的 BadRequestError（openai v1 APIStatusError 签名）。"""
+    from openai import BadRequestError
+
+    return BadRequestError(
+        message,
+        response=httpx.Response(400, request=httpx.Request("POST", "https://api.example/v1/chat/completions")),
+        body=None,
+    )
+
+
+def test_bad_request_2013_auto_fix(monkeypatch):
+    """2013 tool result 顺序错误 → _fix_tool_result_order 被调一次并重试成功。
+
+    守卫迁移（原 except BadRequestError 独立子句 → except Exception 内
+    isinstance 守卫）后语义锚：修复命中即 continue 重试，行为不变。
+    """
+    client = _FakeClient([_make_bad_request("Error code: 400 - {'code': '2013', 'message': 'tool call result does not follow tool call'}")])
+    worker, _ = _make_worker(client, monkeypatch)
+
+    fixed_called = {"n": 0}
+
+    def _fake_fix(api_messages):
+        fixed_called["n"] += 1
+        return list(api_messages), True
+
+    monkeypatch.setattr(worker, "_fix_tool_result_order", _fake_fix)
+
+    result = worker._make_api_call([{"role": "user", "content": "hi"}])
+    assert fixed_called["n"] == 1, "2013 修复函数应被恰好调用一次"
+    assert result == (True, True)
+    assert client.calls == 2, "2013 修复后应立即重试（共 2 次调用）"
+
+
+def test_bad_request_other_still_raises(monkeypatch):
+    """非 2013 BadRequestError：不可修复 → 块尾保持原 raise，不进重试循环。"""
+    client = _FakeClient([_make_bad_request("Error code: 400 - invalid api key format")])
+    worker, _ = _make_worker(client, monkeypatch)
+    with pytest.raises(Exception) as ei:
+        worker._make_api_call([{"role": "user", "content": "hi"}])
+    assert client.calls == 1, "非 2013 BadRequestError 不应触发修复重试"
+    assert not isinstance(ei.value, (httpx.HTTPError,)), "应原样抛出 BadRequestError 本体"
+
+
+def test_handle_error_uses_lazy_registry(monkeypatch):
+    """_handle_error 经 _get_openai_errors() 字典完成异常分派（惰性加载一致性）。"""
+    worker, _ = _make_worker(_FakeClient([]), monkeypatch)
+    worker.error_occurred = _SignalStub()
+    worker._emit_with_callback = lambda _name, signal, msg: signal.emit(msg)
+
+    worker._handle_error(_make_bad_request("Error code: 400 - invalid api key"))
+    assert worker.error_occurred.emitted, "BadRequestError 文案应经字典分派发出"
