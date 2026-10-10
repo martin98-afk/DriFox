@@ -568,6 +568,63 @@ class PluginManager:
             sig.append((str(root_path), True, root_mtime, tuple(entries)))
         return tuple(sig)
 
+    def _merge_discovered(
+        self,
+        current_system: Dict[str, PluginInfo],
+        current_claude: Dict[str, PluginInfo],
+        current_user: Dict[str, PluginInfo],
+        allow_user_override: bool,
+    ) -> tuple:
+        """按优先级合并三路发现结果：系统 → Claude → 用户（最高）。
+
+        [T26] 从 rescan 抽出的公共合并语义：rescan 与发现缓存命中路径共用，
+        保证覆盖关系单源（overridden_by 标记 + changed 收集 + _plugins 顺手写回）。
+
+        Args:
+            allow_user_override: False 时用户目录同名插件跳过，保留现有版本
+
+        Returns:
+            (new_plugins, changed)：合并后映射 + 因覆盖而变化的插件列表
+        """
+        new_plugins: Dict[str, PluginInfo] = {}
+        changed: List[PluginInfo] = []
+        # 先加系统插件
+        for name, p in current_system.items():
+            new_plugins[name] = p
+        # Claude 插件同名覆盖系统（同名覆盖显性化：warning + overridden_by 标记）
+        for name, p in current_claude.items():
+            if name in new_plugins:
+                overridden = new_plugins[name]
+                logger.warning(
+                    f"[PluginManager] Rescan: '{name}' 被 Claude 插件覆盖 "
+                    f"({overridden.plugin_type}: {overridden.path} → claude: {p.path})"
+                )
+                p.overridden_by = overridden.plugin_type
+                changed.append(p)
+                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
+                self._plugins[name] = p
+            new_plugins[name] = p
+        # 用户插件同名覆盖前两者（最高优先级）
+        for name, p in current_user.items():
+            if name in new_plugins:
+                if not allow_user_override:
+                    logger.warning(
+                        f"[PluginManager] Rescan: 用户插件 '{name}' 因 allow_user_override=false 跳过，"
+                        f"保留现有版本: {new_plugins[name].path}"
+                    )
+                    continue
+                overridden = new_plugins[name]
+                logger.warning(
+                    f"[PluginManager] Rescan: '{name}' 被用户插件覆盖 "
+                    f"({overridden.plugin_type}: {overridden.path} → user: {p.path})"
+                )
+                p.overridden_by = overridden.plugin_type
+                changed.append(p)
+                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
+                self._plugins[name] = p
+            new_plugins[name] = p
+        return new_plugins, changed
+
     def rescan(self, force: bool = False) -> dict:
         """运行时重新扫描插件目录，检测新增/移除的插件
 
@@ -615,8 +672,7 @@ class PluginManager:
             claude_plugins.extend(self._scan_plugins(claude_dir, "claude"))
         current_claude = {p.name: p for p in claude_plugins}
 
-        # 3. 构建新插件映射（优先级: 系统 → Claude → 用户）
-        new_plugins: Dict[str, PluginInfo] = {}
+        # 3. 优先级合并（公共函数：rescan 与发现缓存命中路径共用同一语义，[T26]）
         # allow_user_override=false 时用户目录同名插件跳过，系统版生效
         allow_user_override = True
         try:
@@ -625,41 +681,10 @@ class PluginManager:
             allow_user_override = bool(Settings.get_instance().allow_user_override.value)
         except Exception:
             pass
-        # 先加系统插件
-        for name, p in current_system.items():
-            new_plugins[name] = p
-        # Claude 插件同名覆盖系统（同名覆盖显性化：warning + overridden_by 标记）
-        for name, p in current_claude.items():
-            if name in new_plugins:
-                overridden = new_plugins[name]
-                logger.warning(
-                    f"[PluginManager] Rescan: '{name}' 被 Claude 插件覆盖 "
-                    f"({overridden.plugin_type}: {overridden.path} → claude: {p.path})"
-                )
-                p.overridden_by = overridden.plugin_type
-                result["changed"].append(p)
-                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
-                self._plugins[name] = p
-            new_plugins[name] = p
-        # 用户插件同名覆盖前两者（最高优先级）
-        for name, p in current_user.items():
-            if name in new_plugins:
-                if not allow_user_override:
-                    logger.warning(
-                        f"[PluginManager] Rescan: 用户插件 '{name}' 因 allow_user_override=false 跳过，"
-                        f"保留现有版本: {new_plugins[name].path}"
-                    )
-                    continue
-                overridden = new_plugins[name]
-                logger.warning(
-                    f"[PluginManager] Rescan: '{name}' 被用户插件覆盖 "
-                    f"({overridden.plugin_type}: {overridden.path} → user: {p.path})"
-                )
-                p.overridden_by = overridden.plugin_type
-                result["changed"].append(p)
-                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
-                self._plugins[name] = p
-            new_plugins[name] = p
+        new_plugins, changed_list = self._merge_discovered(
+            current_system, current_claude, current_user, allow_user_override
+        )
+        result["changed"] = changed_list
 
         new_names = set(new_plugins.keys())
 
