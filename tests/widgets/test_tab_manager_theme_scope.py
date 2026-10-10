@@ -62,14 +62,28 @@ class _TMStub(QFrame):
 # ── 源码断言 ──
 
 
-def test_src_static_qss_has_no_color_values():
-    """静态窗口串不得含主题色值（同串短路的关键前提）"""
-    s = _src().find("qss = \"\"\"")
-    assert s != -1
+def test_src_static_qss_only_window_base_color():
+    """静态窗口串仅保留窗口本体底色例外（CONTENT_BG），其余主题色值下沉容器串
+
+    [T30-P0fix] 窗口底色无独立承载链，窗口串是唯一挂点（f-string 动态色值，
+    CONTENT_BG 变则串变，同串短路语义不受影响）。
+    """
+    s = _src().find('qss = f"""')
+    assert s != -1, "窗口串应恢复 f-string（动态底色）"
     body = _src()[s : _src().find('"""', s + 10)]
     assert "CARD_BG" not in body, "静态串不得含 CARD_BG 色值（拆到容器串）"
     assert "BORDER" not in body, "静态串不得含 BORDER 色值"
-    assert "CONTENT_BG" not in body, "静态串不得含 CONTENT_BG（空规则已删）"
+    assert "{Colors.CONTENT_BG}" in body, "窗口本体底色例外应保留（动态 CONTENT_BG）"
+    assert "background: transparent" in body
+
+
+def test_src_window_qss_shape_not_double_braces():
+    """f-string 转义规整：源码 {{ 为合法转义形态；渲染正确性由 behavior 用例验证"""
+    s = _src().find('qss = f"""')
+    assert s != -1, "窗口串应恢复 f-string（动态底色）"
+    body = _src()[s : _src().find('"""', s + 10)]
+    assert "#tabManagerWindow {{" in body, "f-string 转义形态应正确（{{ 保留字面花括号）"
+    assert "{Colors.CONTENT_BG}" in body
 
 
 def test_src_apply_has_visibility_gating():
@@ -148,6 +162,26 @@ def test_behavior_construction_phase_no_frames_attr():
     stub._apply_theme_stylesheet()
     for f in (stub._tab_frame, stub._chat_frame, stub._workbench_frame):
         assert f._theme_needs_refresh is True, "构造后未 show 的 frame 应置脏"
+
+
+def test_behavior_window_base_color_follows_theme():
+    """[T30-P0fix] 窗口本体底色随主题 token 变化（窗口串含动态 CONTENT_BG）"""
+    stub = _make_stub()
+    stub._apply_theme_stylesheet()
+    assert "CONTENT_BG" in stub.styleSheet() or "#2a2a2e" in stub.styleSheet(), (
+        "窗口串应含窗口本体底色规则"
+    )
+    base_before = stub.styleSheet()
+
+    real_bg = Colors.CONTENT_BG
+    try:
+        Colors.CONTENT_BG = "#0A0A0F"
+        stub._apply_theme_stylesheet()
+        assert "#0A0A0F" in stub.styleSheet(), "主题 token 变化后窗口底色应随之刷新"
+        assert stub.styleSheet() != base_before, "底色变化应使窗口串变化（打破同串短路）"
+    finally:
+        Colors.CONTENT_BG = real_bg
+    stub._apply_theme_stylesheet()
 
 
 def test_behavior_color_switch_updates_visible_and_dirties_hidden():

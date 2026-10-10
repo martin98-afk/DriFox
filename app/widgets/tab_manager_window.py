@@ -1917,7 +1917,12 @@ class TabManagerWindow(FramelessWindow):
         margin 留在静态窗口串——它们与主题色无关且会被 wb 属性切换路径
         独立更新，拆走反而让该路径多一次容器串重刷。
         """
-        # [T30] 窗口串缩为**静态部分**（几何/透明/圆角，零主题色值）：
+        # [T30] 窗口串缩为静态部分（几何/透明/圆角）；主题色值仅保留一处例外：
+        # 窗口本体底色 #tabManagerWindow（无独立承载链，窗口串是唯一挂点），
+        # 其余色值全部下沉到顶层三兄弟容器（_qss_tab_frame/_qss_chat_frame/
+        # _qss_workbench_frame）的独立串上。字号变化/同主题场景串恒定 →
+        # 同串短路直接跳过整窗 repolish（0ms）；真换主题时窗口串与三个可见
+        # 容器各自重刷，隐藏者置脏由补刷点恢复。
         # 主题色值全部下沉到顶层三兄弟容器（_qss_tab_frame/_qss_chat_frame/
         # _qss_workbench_frame）的独立串上。字号变化/同主题场景串恒定 →
         # 同串短路直接跳过整窗 repolish（0ms）；真换主题时仅三个可见容器
@@ -1926,41 +1931,50 @@ class TabManagerWindow(FramelessWindow):
         # wb_hidden 路径独立成串重设窗口串即可，无需触碰色值容器串）。
         # 只拆**顶层三兄弟**的原因：子树重叠容器（chatFrame/chatManagerContent
         # 各含 1400+ 控件）逐个设反而更慢（拆分合计 1245ms vs 整窗 320ms，实测）。
-        qss = """
-            #tabFrame {
+        qss = f"""
+            #tabManagerWindow {{
+                /* [T30-P0fix] 窗口本体底色：无独立承载链，窗口串是唯一挂点。
+                   f-string 动态色值——CONTENT_BG 变则串变，同串短路语义不受影响
+                   （字号/同主题场景色值不变，仍走短路）。
+                   ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
+                   圆角外侧三角区不会被绘制，底层透出系统默认窗口色。窗口圆角
+                   由 DWM 负责（_apply_win11_dwm_chrome）。 */
+                background: {Colors.CONTENT_BG};
+            }}
+            #tabFrame {{
                 /* 左侧圆角矩形容器，与右侧 #chatFrame 对称，提升呼吸感 */
                 border-radius: 8px;
                 margin: 4px 0 4px 4px;  /* 四边与窗口 4px 边距，右 0 让位 splitter handle */
-            }
-            #chatFrame {
+            }}
+            #chatFrame {{
                 border-radius: 8px;
                 /* 左右 margin 均 0，让位给 splitter handle：三窗格布局下
                    中间窗格两侧各有一个 4px handle，若此处保留右 4px margin，
                    右间距会变成 8px 而左间距只有 4px，两侧不对称。 */
                 margin: 4px 0 4px 0;
-            }
+            }}
             /* 工作台隐藏后右侧 handle 消失，需补回窗口右边距，
                否则对话区圆角矩形贴死窗口边框 */
-            #chatFrame[wbHidden="true"] {
+            #chatFrame[wbHidden="true"] {{
                 margin: 4px 4px 4px 0;
-            }
-            #tabManagerContent {
+            }}
+            #tabManagerContent {{
                 background: transparent;
                 border-radius: 8px;
-            }
-            #contentArea {
+            }}
+            #contentArea {{
                 background: transparent;
-            }
-            #contentStack {
+            }}
+            #contentStack {{
                 background: transparent;
-            }
-            #globalOverlay {
+            }}
+            #globalOverlay {{
                 /* 覆盖层页面透明：面板底由内部 CardContainer 按卡片状态自绘
                    （transparentOverlay 卡片 → 容器透明，透出 #chatFrame 半透明
                    面板与对话区无缝衔接；普通卡片 → 容器自画 alpha=246 面板底）。 */
                 background: transparent;
                 border-radius: 8px;
-            }
+            }}
         """
         if qss != self.styleSheet():
             self.setStyleSheet(qss)
