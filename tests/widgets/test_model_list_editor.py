@@ -66,6 +66,73 @@ class TestComboOrdering:
         assert combo._item_texts == ["m1"]
 
 
+class TestDeferredRowBuild:
+    """大批量行控件分批异步构建（进卡冻结回归，2026-10-10）
+
+    背景：单行行控件 ~7ms（qfluentwidgets 开关 4.5ms 占大头），几百行的
+    「模型列表」同步建冻结 UI 数秒（用户实测进卡卡很久）。策略：item（纯
+    数据）同步全建，行控件超出阈值入 QTimer 分批队列。
+    """
+
+    def test_small_list_builds_rows_sync(self, qapp):
+        """阈值内（≤30 行）保持旧行为：行控件同步建，itemWidget 立即可用"""
+        from app.widgets.model_list_edit_dialog import ModelListEditorWidget
+
+        w = ModelListEditorWidget([f"m-{i}" for i in range(10)])
+        assert len(w._pending_rows) == 0, "小列表不应有分批队列"
+        assert all(
+            w.listWidget.itemWidget(w.listWidget.item(i)) is not None for i in range(10)
+        ), "阈值内行控件应同步挂载"
+
+    def test_large_list_items_sync_rows_deferred(self, qapp):
+        """大列表：item 同步全建（get_models 立即完整），行控件分批"""
+        from app.widgets.model_list_edit_dialog import _DEFER_ROW_THRESHOLD, ModelListEditorWidget
+
+        n = _DEFER_ROW_THRESHOLD + 50
+        w = ModelListEditorWidget([f"m-{i}" for i in range(n)])
+        assert len(w.get_models()) == n, "item（数据）必须同步全建，保存链立即完整"
+        assert len(w._pending_rows) == n - _DEFER_ROW_THRESHOLD
+        assert w._row_build_timer is not None and w._row_build_timer.isActive()
+
+    def test_batch_drain_mounts_all_rows(self, qapp):
+        """分批清空队列后全部行挂载（模拟事件循环驱动 timer）"""
+        from app.widgets.model_list_edit_dialog import ModelListEditorWidget
+
+        w = ModelListEditorWidget([f"m-{i}" for i in range(80)])
+        while len(w._pending_rows) > 0:
+            w._build_rows_batch()
+        assert all(
+            w.listWidget.itemWidget(w.listWidget.item(i)) is not None for i in range(80)
+        ), "队列清空后所有行控件应挂载"
+        assert not w._row_build_timer.isActive()
+
+    def test_batch_skips_deleted_items(self, qapp):
+        """分批期间 item 被删除（用户 Delete）→ 建行批次跳过已删项不崩"""
+        from app.widgets.model_list_edit_dialog import ModelListEditorWidget
+
+        w = ModelListEditorWidget([f"m-{i}" for i in range(80)])
+        victim = w._pending_rows[0]
+        w.listWidget.takeItem(w.listWidget.row(victim))
+        while len(w._pending_rows) > 0:
+            w._build_rows_batch()
+        assert w.listWidget.count() == 79, "已删 item 不得复活"
+        assert all(
+            w.listWidget.itemWidget(w.listWidget.item(i)) is not None for i in range(79)
+        )
+
+    def test_set_models_resets_pending(self, qapp):
+        """set_models 重装时清空旧队列 + 停 timer（旧 item 已随 clear 失效）"""
+        from app.widgets.model_list_edit_dialog import ModelListEditorWidget
+
+        w = ModelListEditorWidget([f"m-{i}" for i in range(80)])
+        w.set_models(["a", "b"])
+        assert len(w._pending_rows) == 0
+        assert w.get_models() == ["a", "b"]
+        assert all(
+            w.listWidget.itemWidget(w.listWidget.item(i)) is not None for i in range(2)
+        )
+
+
 # ── ModelListEditorWidget ─────────────────────────────────────
 
 

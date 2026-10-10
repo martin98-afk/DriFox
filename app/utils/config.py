@@ -11,6 +11,7 @@
 """
 
 import atexit
+import threading
 from copy import deepcopy
 from enum import Enum
 from typing import Any, Callable, List
@@ -87,6 +88,10 @@ class Settings(QConfig):
     _instance = None
     # 类级别关闭标志 — 一旦设置，任何实例的 save() 都会跳过
     _closing_down = False
+    # 进程内写盘互斥：token 刷新（同步后台线程）与主线程 UI 可能并发 save，
+    # 整文件覆盖非原子，交错写会丢一方变更甚至写坏 JSON；
+    # gitee.py _persist_tokens 的直写兜底也共用此锁
+    _save_lock = threading.Lock()
     # 配置是否成功从文件加载（用于外部判断默认值与实际值的区别）
     _config_loaded = False
 
@@ -389,26 +394,28 @@ class Settings(QConfig):
                 return
         except Exception:
             pass
-        # 确保目录存在
-        self.file.parent.mkdir(parents=True, exist_ok=True)
-        # toDict() 内层值与 item.value 共享引用，必须深拷贝后剥钥，
-        # 否则会污染内存态导致 UI 回显 / API 请求丢 key
-        data = deepcopy(self.toDict())
-        mode = str(self.secret_mode.value or MODE_KEYRING)
-        if mode != MODE_NONE:
-            try:
-                from app.utils.secret_store import SecretStore, seal_secrets, strip_secrets
+        # 🛡️ 进程内写盘互斥：守卫命中走上方快速 return，不占锁
+        with Settings._save_lock:
+            # 确保目录存在
+            self.file.parent.mkdir(parents=True, exist_ok=True)
+            # toDict() 内层值与 item.value 共享引用，必须深拷贝后剥钥，
+            # 否则会污染内存态导致 UI 回显 / API 请求丢 key
+            data = deepcopy(self.toDict())
+            mode = str(self.secret_mode.value or MODE_KEYRING)
+            if mode != MODE_NONE:
+                try:
+                    from app.utils.secret_store import SecretStore, seal_secrets, strip_secrets
 
-                if mode == MODE_PASSWORD:
-                    # 密码模式：明文加密落盘；locked 期间用备份密文原样回写
-                    seal_secrets(data, self._secret_password, self._cipher_backup, kdf_salt=self._password_kdf_salt())
-                else:
-                    strip_secrets(data, SecretStore(), mode=mode)
-            except Exception:
-                logger.exception("[SecretStore] 密钥剥出失败，本次按明文落盘")
-        # 写入文件
-        with open(self.file, "wb") as f:
-            f.write(json.dumps(data, option=json.OPT_INDENT_2))
+                    if mode == MODE_PASSWORD:
+                        # 密码模式：明文加密落盘；locked 期间用备份密文原样回写
+                        seal_secrets(data, self._secret_password, self._cipher_backup, kdf_salt=self._password_kdf_salt())
+                    else:
+                        strip_secrets(data, SecretStore(), mode=mode)
+                except Exception:
+                    logger.exception("[SecretStore] 密钥剥出失败，本次按明文落盘")
+            # 写入文件
+            with open(self.file, "wb") as f:
+                f.write(json.dumps(data, option=json.OPT_INDENT_2))
 
     def load(self):
         """load config，加载后按 secret_mode 回填服务商 API_KEY。

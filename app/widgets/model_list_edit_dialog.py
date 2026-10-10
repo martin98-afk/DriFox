@@ -12,7 +12,7 @@
 - 「设默认模型」语义退役：「模型名称」由保存链自动维护（见 provider_save_plan）。
 """
 
-from PyQt5.QtCore import QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
     QHBoxLayout,
@@ -35,6 +35,11 @@ from app.widgets.flow_layout import FlowLayout  # noqa: F401  （候选区/外�
 _DUP_COLOR = "#e05656"  # 重复项前景色
 
 _ROW_H = 46  # 行高：双行文本（名称 + 灰字摘要）+ 开关 + 底部分隔线
+# 行控件分批异步构建：单行 ~7ms（qfluentwidgets 开关 4.5ms 占大头），几百行同步建
+# 会冻结 UI 数秒（用户实测「模型列表多时进卡卡很久」）。item（纯数据）同步全建，
+# 行控件超出阈值的部分入队由 QTimer 分批建，拍间事件循环呼吸，UI 全程可响应。
+_DEFER_ROW_THRESHOLD = 30  # 同步建行上限（阈值内行为与旧版一致，兼容测试同步断言）
+_ROW_BUILD_BATCH = 40  # 每拍建行数（~280ms/拍）
 # 表格列宽（行控件与表头共用）：价格/开关列固定；徽章列随字号缩放（_badges_col_width）
 _COL_PRICE_W = 76  # 单个价格列（右对齐）
 _COL_SWITCH_W = 68  # 开关列
@@ -258,6 +263,9 @@ class ModelListEditorWidget(QWidget):
         self._candidate_models: list = []
         self._candidate_expanded = False
         self._candidate_folded_hint = "其他"
+        # 分批建行队列：待建行控件的 item（数据已同步建好，见 _make_row_item）
+        self._pending_rows: list = []
+        self._row_build_timer: QTimer | None = None
         self._init_ui(self._dedupe(models or []))
         self.refresh_style()
 
@@ -411,14 +419,31 @@ class ModelListEditorWidget(QWidget):
                 self._caps_cache[name] = {}
         return self._caps_cache[name]
 
-    def _make_row_item(self, name: str, insert_at: int = -1) -> QListWidgetItem:
+    def _make_row_item(self, name: str, insert_at: int = -1, defer: bool = False) -> QListWidgetItem:
         """创建一行：模型名存 Qt.UserRole（item 本体**零绘制文本**，防与行容器
-        双绘叠印——P0 用户实测）；行控件负责全部显示；insert_at>=0 时头插"""
+        双绘叠印——P0 用户实测）；行控件负责全部显示；insert_at>=0 时头插。
+
+        defer=True：item 同步入列表（数据立即可查），行控件入分批队列异步建
+        （大批量时避免同步构建冻结 UI）；defer=False 保持旧行为同步建。
+        """
         item = QListWidgetItem()
         item.setData(Qt.UserRole, str(name))
         item.setSizeHint(QSize(0, _ROW_H))
+        if insert_at < 0:
+            self.listWidget.addItem(item)
+        else:
+            self.listWidget.insertItem(insert_at, item)
+        if defer:
+            self._pending_rows.append(item)
+        else:
+            self._build_row_for(item)
+        return item
+
+    def _build_row_for(self, item: QListWidgetItem):
+        """为已入列的 item 构建并挂载行控件（行位置由 item 决定，与建行顺序无关）"""
+        name = str(item.data(Qt.UserRole) or "")
         row = _ModelRowWidget(
-            str(name),
+            name,
             self._caps_for(name),
             enabled=name not in self._disabled,
             on_toggle=self._on_row_toggle,
@@ -426,12 +451,34 @@ class ModelListEditorWidget(QWidget):
         )
         # 行容器横向 Expanding：跟随 viewport 拉满（防窄窗口下挤压叠印）
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        if insert_at < 0:
-            self.listWidget.addItem(item)
-        else:
-            self.listWidget.insertItem(insert_at, item)
         self.listWidget.setItemWidget(item, row)
-        return item
+        return row
+
+    def _schedule_row_build(self):
+        """启动分批建行 timer（队列空则不动；timer 挂 self，销毁级联自动停）"""
+        if not self._pending_rows:
+            return
+        if self._row_build_timer is None:
+            self._row_build_timer = QTimer(self)
+            self._row_build_timer.setInterval(0)
+            self._row_build_timer.timeout.connect(self._build_rows_batch)
+        self._row_build_timer.start()
+
+    def _build_rows_batch(self):
+        """每拍建一批行控件；队列清空后收尾（停 timer + 重算过滤/重复标红）"""
+        batch = self._pending_rows[:_ROW_BUILD_BATCH]
+        del self._pending_rows[:_ROW_BUILD_BATCH]
+        for item in batch:
+            # item 可能已被删除（分批期间用户 Delete/set_models）——不在列表则跳过
+            if self.listWidget.row(item) >= 0:
+                self._build_row_for(item)
+        if self._pending_rows:
+            self._check_duplicates()
+        else:
+            if self._row_build_timer is not None:
+                self._row_build_timer.stop()
+            self._check_duplicates()
+            self._apply_filter()
 
     def _row_of(self, name: str):
         """按模型名即时反查行控件（不建 name→widget 索引：重复名场景会互相覆盖）"""
@@ -500,8 +547,7 @@ class ModelListEditorWidget(QWidget):
         self.listWidget.setSelectionMode(QListWidget.SingleSelection)
         self.listWidget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.listWidget.itemChanged.connect(lambda _item: self._check_duplicates())
-        for m in models:
-            self._make_row_item(str(m))
+        self._fill_rows(models)
         self._update_list_height()
         layout.addWidget(self.listWidget)
 
@@ -561,14 +607,20 @@ class ModelListEditorWidget(QWidget):
         """
         existing = set(self.get_models())
         added = 0
-        # 逆序遍历头插：最终顺序与输入一致（首个 token 在最上）
+        # 逆序遍历头插：最终顺序与输入一致（首个 token 在最上）。
+        # 总量超阈值时，超出部分 defer（行控件异步建，item 同步入列保数据完整）
+        added_count = sum(1 for t in tokens if t not in existing)
+        seen_in_batch = 0
         for t in reversed(tokens):
             if t in existing:
                 continue
-            self._make_row_item(t, insert_at=0)
+            seen_in_batch += 1
+            defer = added_count > _DEFER_ROW_THRESHOLD and seen_in_batch <= added_count - _DEFER_ROW_THRESHOLD
+            self._make_row_item(t, insert_at=0, defer=defer)
             existing.add(t)
             added += 1
         if added:
+            self._schedule_row_build()
             self._check_duplicates()
             self._apply_filter()
             self.listWidget.scrollToTop()
@@ -778,11 +830,24 @@ class ModelListEditorWidget(QWidget):
     def set_models(self, models: list):
         """装载模型列表（去重保序；清空后填入；关闭集保留交集，行开关按其回显）"""
         self.listWidget.clear()
-        for m in self._dedupe(models):
-            self._make_row_item(str(m))
+        # 丢弃旧分批队列（旧 item 已随 clear 失效）
+        self._pending_rows.clear()
+        if self._row_build_timer is not None:
+            self._row_build_timer.stop()
+        self._fill_rows(self._dedupe(models))
         self._check_duplicates()
         self._apply_filter()
         self._update_list_height()
+
+    def _fill_rows(self, models: list):
+        """批量装行：前 _DEFER_ROW_THRESHOLD 行同步建（首屏即时可见，兼容
+        测试的同步断言），超出部分 item 同步入列 + 行控件入分批队列异步建"""
+        models = list(models or [])
+        for m in models[:_DEFER_ROW_THRESHOLD]:
+            self._make_row_item(str(m))
+        for m in models[_DEFER_ROW_THRESHOLD:]:
+            self._make_row_item(str(m), defer=True)
+        self._schedule_row_build()
 
     def get_models(self) -> list:
         return [

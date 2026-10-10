@@ -1067,6 +1067,10 @@ class ConfigSyncService(QObject):
                 self.syncDone.emit(True, "配置已同步（token 已随本地恢复刷新）")
                 return
             logger.error("[ConfigSync] 本地重载后刷新仍失败：refresh_token 已失效，清除绑定")
+            # 先停同步服务：清绑后 watcher 若继续运行，每次文件变更都会走
+            # 「防抖 → _sync_token → is_bound=False → 上传失败」的静默失败循环，
+            # 且 UI 无法从 stateChanged 感知同步已停止
+            self.disable()
             try:
                 cfg = Settings.get_instance()
                 cfg.gitee_bound.value = False
@@ -1377,6 +1381,16 @@ class ConfigSyncService(QObject):
                             logger.warning(f"[ConfigSync] 同步内容上传失败: {provider_id}")
                 if ext_ok:
                     self._save_sha_cache()
+
+            # 🛡️ 失败项回滚脏标记：上传失败（网络抖动/401）时本次变更不得丢失，
+            # 恢复 dirty 供下次防抖重试；与 ext provider 的失败保留语义对齐
+            #（ext 实时读标记，失败时标记本就未清）
+            if not config_ok:
+                self._config_dirty = True
+            if not custom_ok:
+                self._custom_dirty = True
+            if not records_ok:
+                self._records_dirty = True
 
             if config_ok and custom_ok and records_ok and ext_ok:
                 self._set_state("idle")

@@ -256,6 +256,34 @@ class TestSystemCardFrameBreadcrumb:
         ancestor = card._breadcrumb_layout.itemAt(0).widget()
         assert "#010203" in ancestor.styleSheet()
 
+    def test_item_font_matches_title_size(self, _qapp):
+        """面包屑项字体必须与 title_label 逐项一致，QSS font-size 不得覆盖
+
+        缺陷史两轮（用户实测）：
+        1. 项样式串带 font_size_css(11)（11px）而 title 是 setFont pt 模式 →
+           进入面包屑后字体骤小；
+        2. 改 setFont(get_unified_font(12)) 后，title 在启动早期取档、面包屑
+           打开时取档，字号档位缓存（delta）漂移 → 面包屑比 title 大一点。
+        终案：_apply_breadcrumb_styles 先把 title 规格化到当前档，再克隆同一
+        QFont 给每项——无论档位何时变化，面包屑与 title 恒等。
+        """
+        from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+
+        card = SystemCardFrame()
+        card.set_title_text("服务商")
+        card.set_breadcrumb([{"text": "服务商", "handler": lambda: None}, {"text": "OpenCode Go"}])
+        _qapp.processEvents()
+
+        title_font = card.title_label.font()
+        for pos in (0, 2):
+            item = card._breadcrumb_layout.itemAt(pos).widget()
+            assert item.font().pointSize() == title_font.pointSize(), (
+                f"面包屑项 {item.font().pointSize()}pt 应与 title {title_font.pointSize()}pt 一致"
+            )
+            assert item.font().bold() == title_font.bold()
+            assert item.font().pixelSize() == title_font.pixelSize()
+            assert "font-size" not in item.styleSheet(), "样式串含 font-size 会覆盖 setFont"
+
 
 class TestProviderCardNav:
     """服务商卡单卡双视图导航（controller 层）"""
