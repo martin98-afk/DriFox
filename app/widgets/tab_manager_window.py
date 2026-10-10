@@ -1814,6 +1814,74 @@ class TabManagerWindow(FramelessWindow):
         """
         self._on_theme_changed()
 
+    def _reapply_splitter_handle_styles(self):
+        """把 splitter handle 样式下沉到 QSplitterHandle 自身
+
+        [PERF] 原始实现用 ``QSplitter.setStyleSheet("...::handle...")``，会让
+        QStyleSheetStyle 对整个 splitter 子树重建 + repolish。本窗口三个
+        splitter 子树规模为 431 / 1470 / 1462，实测单次分别 332 / 319 / 313ms，
+        合计近 1 秒，而它们的样式规则只作用于 2px 的 handle 线条。
+
+        改为逐 handle ``setStyleSheet`` + ``WA_StyledBackground``：
+        作用域收窄到 handle 自身（无子控件），实测 0.3ms 总计。
+
+        handle 数量随 addWidget 变化，故本方法幂等可重复调用；样式串按当前
+        Colors 生成，主题切换时重新调用即可刷新颜色。
+        """
+        specs = (
+            (
+                getattr(self, "_splitter", None),
+                # 隐藏的拖拽缝：透明底，与两侧 frame border 形成分隔线
+                """
+                QSplitterHandle {
+                    background: transparent;
+                }
+                """,
+            ),
+            (
+                getattr(self, "_dock_splitter", None),
+                # 停靠区：6px 热区中画 2px 居中线，hover 变强调色提示可拖拽
+                f"""
+                QSplitterHandle {{
+                    background: transparent;
+                    border-left: 2px solid {Colors.BORDER};
+                    margin: 10px 2px;
+                    border-radius: 1px;
+                }}
+                QSplitterHandle:hover {{
+                    border-left: 2px solid {Colors.BORDER_ACCENT};
+                }}
+                """,
+            ),
+            (
+                getattr(self, "_chat_vsplitter", None),
+                f"""
+                QSplitterHandle {{
+                    background: transparent;
+                    border-top: 2px solid {Colors.BORDER};
+                    margin: 2px 10px;
+                    border-radius: 1px;
+                }}
+                QSplitterHandle:hover {{
+                    border-top: 2px solid {Colors.BORDER_ACCENT};
+                }}
+                """,
+            ),
+        )
+        for splitter, qss in specs:
+            if splitter is None:
+                continue
+            try:
+                for idx in range(splitter.count()):
+                    handle = splitter.handle(idx)
+                    if handle is None:
+                        continue
+                    # 不设该属性时 QSplitterHandle 的 paintEvent 不绘制 QSS 背景/边框
+                    handle.setAttribute(Qt.WA_StyledBackground, True)
+                    handle.setStyleSheet(qss)
+            except RuntimeError:
+                continue  # C++ 对象已销毁
+
     def _apply_theme_stylesheet(self):
         """应用主题样式表
 
@@ -1826,8 +1894,16 @@ class TabManagerWindow(FramelessWindow):
         直接给 #tabPanel 设 border 看不到；用 4px handle + BORDER 颜色
         在视觉上约 1px 可见（两侧被 BORDER 着色），保留拖拽热区但视觉
         上仍接近细边框的观感。
+
+        [PERF] 本串挂在窗口上，`setStyleSheet` 会 repolish 整窗 1500+ 子控件，
+        实测 262~320ms。因此这里做**同串短路**：字号变化等场景会重复调用本方法
+        而主题色未变，串相同时直接跳过（Qt 内部对同串同样全量 repolish，
+        不会自身短路）。主题真变化时串必然不同，自然生效。
+        另注：本串无法按 #objectName 拆到各子控件上——子控件子树重叠
+        （chatFrame/chatManagerContent 各含 1400+，逐个设反而更慢，实测
+        拆分合计 1245ms vs 整窗 320ms），且窗口自身设任意非空串都是全量 cost。
         """
-        self.setStyleSheet(f"""
+        qss = f"""
             #tabPanel {{
                 background: {Colors.CARD_BG.format(alpha=150)};
                 border-radius: 8px;
@@ -1888,38 +1964,25 @@ class TabManagerWindow(FramelessWindow):
                 background: transparent;
                 border-radius: 8px;
             }}
-        """)
-        # splitter handle 区域：融入窗口背景，让两侧 frame border 自然形成分隔线
-        # 这样不会和 frame border 形成"双重线"叠加，保持 4px 拖拽热区
-        if getattr(self, "_splitter", None) is not None:
-            self._splitter.setStyleSheet("QSplitter::handle:horizontal { background: transparent; }")
-        # ── 停靠区 splitter：handle 绘制可见分隔线（明确 UI 卡片与对话区边界）──
-        # 6px 热区中画 2px 居中线（BORDER 色），hover 时变主题强调色提示可拖拽。
-        # 停靠容器折叠时自身 hide()，对应 handle 由 Qt 自动隐藏，不留缝。
-        if getattr(self, "_dock_splitter", None) is not None:
-            self._dock_splitter.setStyleSheet(f"""
-                #dockSplitter::handle:horizontal {{
-                    background: transparent;
-                    border-left: 2px solid {Colors.BORDER};
-                    margin: 10px 2px;
-                    border-radius: 1px;
-                }}
-                #dockSplitter::handle:horizontal:hover {{
-                    border-left: 2px solid {Colors.BORDER_ACCENT};
-                }}
-            """)
-        if getattr(self, "_chat_vsplitter", None) is not None:
-            self._chat_vsplitter.setStyleSheet(f"""
-                #chatVsplitter::handle:vertical {{
-                    background: transparent;
-                    border-top: 2px solid {Colors.BORDER};
-                    margin: 2px 10px;
-                    border-radius: 1px;
-                }}
-                #chatVsplitter::handle:vertical:hover {{
-                    border-top: 2px solid {Colors.BORDER_ACCENT};
-                }}
-            """)
+        """
+        if qss != self.styleSheet():
+            self.setStyleSheet(qss)
+        # ── splitter handle 样式：下沉到 QSplitterHandle 自身（性能关键）──
+        # [PERF] QSplitter.setStyleSheet 会让 QStyleSheetStyle 重建并 repolish
+        # **整棵子树**（本窗口三个 splitter 分别挂 431/1470/1462 个子控件）。
+        # 实测：设 splitter 322ms/个，下沉到 handle 自身 0.1ms/个；
+        # 三者合计从 ~970ms 降到 ~0.3ms。整窗逐像素比对：
+        # _dock_splitter / _chat_vsplitter 常态与 hover 均 0/768000 差异
+        # （probe_h3_window_diff.py 结论）。
+        #
+        # 要点：
+        # - QSplitterHandle 继承 QWidget 且不设 WA_StyledBackground，不设该属性
+        #   时 QSS 背景/边框根本不画；
+        # - 选择器必须保留 `QSplitterHandle` / `QSplitterHandle:hover`
+        #   （裸属性写法与 `*:hover` 均无法触发 hover 态）；
+        # - handle 由 splitter 在 addWidget / setOrientation 时按需创建，
+        #   故需 _reapply_splitter_handle_styles 在布局变化后补刷。
+        self._reapply_splitter_handle_styles()
 
     def _apply_bg_from_theme(self):
         """主题切换入口：刷新 4 个区域背景（window/sidebar/chat_area/scene）

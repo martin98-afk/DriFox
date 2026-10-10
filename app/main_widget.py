@@ -9859,10 +9859,19 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             from qfluentwidgets import Theme, setTheme
 
+            # [PERF] lazy=True：qfluentwidgets 默认对**所有**已注册控件逐个
+            # setStyleSheet（含隐藏的设置弹窗 1087 控件、未打开的工作台页），
+            # 实测 295ms。lazy=True 时不可见控件（visibleRegion 为空）跳过
+            # 重设、只置 dirty-qss 属性，由框架自带的 DirtyStyleSheetWatcher
+            # 在恢复可见时补刷。
+            # 验证：整窗逐像素比对（eager vs lazy，含 6 帧稳定窗口与弹窗填充
+            # 场景）0/768000 差异；成本 295ms → 8.6ms（probe_settheme_lazy.py）。
+            # 补刷链由框架保证：style_sheet.py:402 `widget.visibleRegion().isNull()`
+            # → `register(file, widget)` + dirty 标记，显示时重放。
             if theme_manager.is_light_theme():
-                setTheme(Theme.LIGHT)
+                setTheme(Theme.LIGHT, lazy=True)
             else:
-                setTheme(Theme.DARK)
+                setTheme(Theme.DARK, lazy=True)
         except Exception:
             pass
         # [T12] on_theme_changed（EV_THEME_CHANGED publish）移到 setTheme 之后：
@@ -10519,13 +10528,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 theme_manager.on_theme_changed()
 
                 # 同步 qfluentwidgets 基础主题
+                # [PERF] lazy=True 同 _execute_batched_theme_refresh 的全局段
+                # （批处理路径已刷，此处是非批处理/单窗口直调兜底，语义一致）
                 try:
                     from qfluentwidgets import Theme, setTheme
 
                     if theme_manager.is_light_theme():
-                        setTheme(Theme.LIGHT)
+                        setTheme(Theme.LIGHT, lazy=True)
                     else:
-                        setTheme(Theme.DARK)
+                        setTheme(Theme.DARK, lazy=True)
                 except Exception:
                     pass
 
@@ -10750,7 +10761,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 设置卡片（全窗口递归）
             for card in _base_settings:
                 self._safe_refresh(card)
-            self._safe_refresh(self._settings_popup)
+            # [PERF] 此处原有无条件 self._safe_refresh(self._settings_popup)，
+            # 绕过上方 T22 隐藏门控（该调用在 else 块之外）——弹窗隐藏时
+            # 本卡重型刷新（1087 子控件，实测单次 ~260ms，其内部 24 个
+            # ScrollArea 再各刷一次 ~500ms）被白付。可见时该调用被 _safe_refresh
+            # 周期去重命中 else 块内的同 key 调用，本就是 no-op。删除后：
+            # 可见路径不变（else 块内已刷），隐藏路径交 showEvent 补刷自愈。
             # 浮动卡片
             for card in (
                 self._question_floating_widget,

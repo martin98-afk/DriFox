@@ -392,6 +392,10 @@ class LLMSettingsCard(SystemCardFrame):
 
     _autostart_toggling = False  # 类级防重入标志
     _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
+    # 隐藏期主题刷新补刷协议标记（见 showEvent / GlobalCardController.refresh_theme_styles）。
+    # 类级默认值必需：门控方用 hasattr 探测协议，实例属性首次赋值前 hasattr 为 False，
+    # 会导致隐藏门控失效（2026-10-10 实测 gcc 门控因此未生效，226ms 白付）。
+    _theme_needs_refresh: bool = False
     # 插件分区指纹的类级默认：`__new__` 造的桩（测试 fixture）不跑 __init__，
     # QObject 未初始化时读实例属性会抛 RuntimeError 而非 AttributeError → 必须给默认值
     _plugin_cards_sig: tuple | None = None

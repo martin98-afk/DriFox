@@ -103,6 +103,12 @@ class GlobalCardController:
         这些卡片 parent 挂在 TabManagerWindow 层，不在 main_widget widget
         树内，main_widget._apply_runtime_ui_settings 的 findChildren 扫不到，
         需由 TabManagerWindow._on_theme_changed 显式调用。
+
+        [PERF] 隐藏卡跳过 + 置脏：主题刷新成本 ∝ 控件子树规模
+        （设置弹窗 1087 子控件单次 ~260ms，其内部 40 个 ScrollArea 再各刷
+        一遍）。隐藏卡用户看不见，刷新纯属白付；置 _theme_needs_refresh
+        后由其自身 showEvent 补刷自愈（LLMSettingsCard 已有该链路）。
+        无补刷链路的卡（实现 _theme_needs_refresh 才是协议）保守照常刷。
         """
         for card in (
             self._settings_popup,
@@ -115,11 +121,20 @@ class GlobalCardController:
             self._file_undo_card,
             self._sub_agent_session_card,
         ):
-            if card is not None and hasattr(card, "refresh_style"):
+            if card is None or not hasattr(card, "refresh_style"):
+                continue
+            # 仅对「有补刷链路」+ 隐藏的卡做门控，避免主题更新永久丢失
+            if hasattr(card, "_theme_needs_refresh"):
                 try:
-                    card.refresh_style()
-                except Exception as e:
-                    logger.warning(f"[GlobalCard] 卡片主题刷新失败: {e}")
+                    if not card.isVisible():
+                        card._theme_needs_refresh = True
+                        continue
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+            try:
+                card.refresh_style()
+            except Exception as e:
+                logger.warning(f"[GlobalCard] 卡片主题刷新失败: {e}")
 
     def _active_window(self):
         """当前激活的对话窗口（per-window 状态的读写目标）"""
