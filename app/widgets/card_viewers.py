@@ -3880,6 +3880,11 @@ class CodeWebViewer(QWebEngineView):
                 function updateContentAppend(newHtml, tailHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
+                    // 打字机闸门：与 updateTailHtml 同款——缓冲未排空时挂起，
+                    // 防未揭示文本随替换瞬间上屏（成块蹦字）。挂起期间的新文本
+                    // 由 _gateExtra 记账，替换后原样补回，顺序天然正确。
+                    if (typeof window._twGate === 'function'
+                        && window._twGate(function () {{ updateContentAppend(newHtml, tailHtml); }})) return;
                     // 打字机：增量节点即将被移除并以格式化 HTML 重建（含未揭示文本），
                     // 丢弃揭示缓冲防重复追加。
                     if (typeof window._twReset === 'function') window._twReset();
@@ -3998,6 +4003,11 @@ class CodeWebViewer(QWebEngineView):
                 function updateTailHtml(html) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container || !html) return;
+                    // 打字机闸门：缓冲未排空时挂起本次替换，等揭示到水位再执行。
+                    // 直接执行会让未揭示文本随替换瞬间上屏（成块蹦字），
+                    // 闸门内执行时 DOM 文本量已与快照一致 → 替换只升级格式。
+                    if (typeof window._twGate === 'function'
+                        && window._twGate(function () {{ updateTailHtml(html); }})) return;
                     // 打字机：尾部将被整体行内重渲染（含未揭示文本），丢弃揭示缓冲。
                     if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）

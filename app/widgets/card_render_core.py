@@ -3113,7 +3113,11 @@ _SKELETON_CACHE_MAX = 48
 # 旧骨架仍带 todo DOM 与 JS（虽无数据源、恒隐藏），必须靠版本号让旧缓存失效。
 # _SKELETON_CACHE_VERSION +1（v39）：[#12] R2 恢复工具区滚动保护链（_scrollToolContentToBottom
 # + tc scroll 监听 + 意图绑定）；R1 display 空窗 scrollTop 快照保护；R3 flush 纯揭示化。
-_SKELETON_CACHE_VERSION = 39
+# _SKELETON_CACHE_VERSION +1（v40）：打字机 DOM 替换闸门（window._twGate/_twDrainGate）：
+# updateTailHtml / updateContentAppend 挂起到缓冲降到水位再执行，消除"揭示途中被替换
+# 打断 → 文字整块跳变"（实测每 ~200ms 一次、单次 4~9 字符）。旧骨架无 _twGate →
+# 调用被判 undefined 走原路径（无字幕），必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 40
 
 
 def _js_literal(value) -> str:
@@ -3732,7 +3736,20 @@ _TYPEWRITER_JS = """
                     last: 0,          // 上一帧时间戳
                     enabled: true,    // 总开关（灰度/降级用）
                     CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
-                    BURST_LEN: 400    // 超过该积压视为突发，加速揭示
+                    BURST_LEN: 400,   // 超过该积压视为突发，加速揭示
+                    GATE_MIN_BUF: 3,  // DOM 替换闸门：缓冲不高于此值即执行（跳变量上限）
+                    GATE_STILL_MS: 60,      // 静默窗：距最近一次 push 超此毫秒即认为"间隙"，可执行替换
+                    GATE_POLL_MS: 30,       // 静默窗轮询间隔（buf 空时 rAF 停摆，需独立轮询）
+                    GATE_MAX_WAIT_MS: 400,  // 硬上限：连续高速流式下防格式化无限延后
+                    BOOST_FACTOR: 0.3,      // 挂起期间揭示加速（τ × 此系数）
+                    pushed: 0,        // 累计 push 字符数
+                    _boost: false,    // 闸门挂起中：揭示加速标记
+                    _force: false,    // 强制执行一次标记（超时兜底路径放行，防自我挂起）
+                    _lastPushAt: 0,   // 最近一次 push 时刻（静默窗判定）
+                    _gateDeadline: 0, // 挂起硬上限时刻
+                    _gateFn: null,    // 挂起的 DOM 替换（单槽，新覆盖旧）
+                    _gateTimer: 0,    // 静默窗轮询句柄
+                    _gateExtra: ''    // 挂起期间新 push 的文本（不在替换快照里，替换后补回）
                 };
                 window._twPush = function (text) {
                     var st = window._tw;
@@ -3740,6 +3757,11 @@ _TYPEWRITER_JS = """
                     // 骨架尚未注册追加函数（理论上不会发生）：退化为直接调用
                     if (typeof window._dfxAppendStreamText !== 'function') return;
                     st.buf += text;
+                    st.pushed += text.length;
+                    st._lastPushAt = performance.now();
+                    // 闸门挂起期间的新文本不在替换快照里：记账并在替换后补回
+                    // （它已随揭示上屏，替换会整段移除，不补回就真丢了）
+                    if (st._gateFn) st._gateExtra += text;
                     if (!st.raf) {
                         st.last = performance.now();
                         st.raf = requestAnimationFrame(window._twStep);
@@ -3753,8 +3775,12 @@ _TYPEWRITER_JS = """
                     var now = (typeof ts === 'number' && ts > 0) ? ts : performance.now();
                     var dt = Math.max(1, Math.min(200, now - st.last));
                     st.last = now;
+                    // 揭示时间常数：闸门挂起中（等替换）时缩短，尽快把积压放完
+                    // ——跳变量 = 执行替换时的剩余缓冲，加速直接压低它
+                    var _tau = st.CATCHUP_MS;
+                    if (st._boost) _tau = Math.max(16, st.CATCHUP_MS * (st.BOOST_FACTOR || 0.3));
                     // 每帧揭示量：按"剩余缓冲在 CATCHUP_MS 内排空"做指数追赶（最少 1 字）
-                    var n = Math.max(1, Math.ceil(st.buf.length * (dt / st.CATCHUP_MS)));
+                    var n = Math.max(1, Math.ceil(st.buf.length * (dt / _tau)));
                     // 突发积压（网络一次送来一大段）：提高下限，避免越拖越长
                     if (st.buf.length > st.BURST_LEN) {
                         n = Math.max(n, Math.ceil(st.buf.length / 8));
@@ -3773,8 +3799,80 @@ _TYPEWRITER_JS = """
                     try {
                         window._dfxAppendStreamText(slice, _skipReport);
                     } catch (e) {}
+                    // 缓冲降到水位（或已空）：执行挂起的 DOM 替换
+                    if (st._gateFn && st.buf.length <= (st.GATE_MIN_BUF || 3)) {
+                        window._twDrainGate();
+                    }
+                    // ⚠️ 不得在此 return：drainGate 后 buf 可能仍非空（非水位路径），
+                    // 提前返回会断掉 rAF 链，残留文本不再揭示
                     if (st.buf) {
                         st.raf = requestAnimationFrame(window._twStep);
+                    }
+                };
+                // ── DOM 替换闸门（消除"成块蹦字"）──
+                // 背景：updateTailHtml / updateContentAppend 会用「含全部文本」的
+                // 格式化 HTML 整体替换增量节点，并在入口 _twReset() 丢弃未揭示缓冲
+                // —— 揭示途中被打断时，文字从"已揭示量"瞬跳到"全量"（实测每
+                // ~200ms 一次、单次 4~9 字符），观感就是"一顿一顿成块蹦出"。
+                //
+                // 执行时机（三者取先）：
+                //   ① 缓冲降到水位（buf <= GATE_MIN_BUF）：跳变量压到水位以内；
+                //   ② 静默窗（距最近 push >= GATE_STILL_MS）：chunk 间隙到了——
+                //      持续流式下 buf 稳态高于水位，仅靠①永不触发（只能等超时 →
+                //      大跳变），间隙是天然的"文字已停在屏上"时刻；
+                //   ③ 硬上限（挂起累计 >= GATE_MAX_WAIT_MS）：防格式化无限延后。
+                // 挂起期间揭示加速（τ×BOOST_FACTOR），尽快把积压放完压低①的等待。
+                // 返回 true = 已挂起；返回 false = 立即执行（缓冲已在水位内）。
+                window._twGate = function (fn) {
+                    var st = window._tw;
+                    if (!st || !st.enabled || typeof fn !== 'function') return false;
+                    // 强制执行标记（超时兜底 / 排空放行）：本次放行，防自我挂起
+                    if (st._force) { st._force = false; return false; }
+                    if (!st.buf || st.buf.length <= (st.GATE_MIN_BUF || 3)) return false;
+                    st._gateFn = fn;   // 单槽覆盖：新任务含更多文本，旧任务语义被包含
+                    // 清空 extra：新快照含旧 extra 的全部文本（Python 侧 markdown
+                    // 是单调增长的），旧账不清会重复补回
+                    st._gateExtra = '';
+                    st._boost = true;
+                    if (!st._gateTimer) {
+                        // 静默窗轮询：buf 揭示完时 rAF 链停摆，静默判定必须独立于
+                        // _twStep（否则高速流式挂起后无人检查窗口）
+                        st._gateDeadline = performance.now() + (st.GATE_MAX_WAIT_MS || 400);
+                        st._gateTimer = setInterval(function () {
+                            var now = performance.now();
+                            var quiet = (now - (st._lastPushAt || 0)) >= (st.GATE_STILL_MS || 60);
+                            if (quiet || now >= st._gateDeadline) {
+                                window._twDrainGate();  // 内部 clearInterval
+                            }
+                        }, st.GATE_POLL_MS || 30);
+                    }
+                    return true;
+                };
+                window._twDrainGate = function () {
+                    // 执行挂起的 DOM 替换（水位 / 静默窗 / 硬上限）
+                    var st = window._tw;
+                    if (!st || !st._gateFn) return;
+                    if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
+                    st._boost = false;
+                    var f = st._gateFn;
+                    var extra = st._gateExtra;
+                    st._gateFn = null;
+                    st._gateExtra = '';
+                    // 强制放行：f 内部重入渲染入口 → _twGate 时必须直接执行
+                    // （硬上限路径下缓冲可能仍高于水位，无此标记会再次挂起自己 →
+                    //  替换永不执行、格式化永久停留纯文本）
+                    st._force = true;
+                    try {
+                        if (f) f();
+                    } finally {
+                        // f 未重入（异常/其他路径）时清理，防标记外泄误放行下一次
+                        st._force = false;
+                    }
+                    // 替换快照不含挂起期间新 push 的文本：替换后补回。走 _twPush
+                    // 而非直接上屏 —— 保留打字机节奏，避免补回本身变成一次跳变
+                    // （挂起期间该文本已在屏上，同帧重排无闪烁）。
+                    if (extra) {
+                        try { window._twPush(extra); } catch (e) {}
                     }
                 };
                 window._twFlush = function () {
@@ -3782,6 +3880,12 @@ _TYPEWRITER_JS = """
                     var st = window._tw;
                     if (!st) return;
                     if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+                    // 挂起的 DOM 替换作废：flush 后的调用方（updateContent）
+                    // 会用含全部文本的新 HTML 整页替换，旧替换已无意义
+                    if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
+                    st._gateFn = null;
+                    st._gateExtra = '';
+                    st._boost = false;
                     if (st.buf) {
                         var all = st.buf;
                         st.buf = "";
@@ -3807,6 +3911,12 @@ _TYPEWRITER_JS = """
                     if (!st) return;
                     if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
                     st.buf = "";
+                    // 挂起的替换同样作废：它即将执行的替换对象（旧 DOM）已被本次
+                    // 替换覆盖，残留执行会造成旧 HTML 回灌
+                    if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
+                    st._gateFn = null;
+                    st._gateExtra = '';
+                    st._boost = false;
                 };
 """
 
