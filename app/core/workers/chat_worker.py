@@ -23,8 +23,6 @@ except ImportError:
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-import httpcore
-import httpx
 import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -51,14 +49,18 @@ def _get_openai_errors() -> Dict[str, type]:
     if _OPENAI_ERRORS is None:
         with _OPENAI_ERRORS_LOCK:
             if _OPENAI_ERRORS is None:
-                from openai import (
-                    APIConnectionError,
-                    APIError,
-                    APITimeoutError,
-                    BadRequestError,
-                    InternalServerError,
-                    RateLimitError,
-                )
+                try:
+                    from openai import (
+                        APIConnectionError,
+                        APIError,
+                        APITimeoutError,
+                        BadRequestError,
+                        InternalServerError,
+                        RateLimitError,
+                    )
+                except ImportError as import_err:
+                    # [P2] 保留异常链：调用方拿到的报错含底层 import 失败上下文
+                    raise ImportError(f"openai SDK 导入失败: {import_err}") from import_err
 
                 _OPENAI_ERRORS = {
                     "bad_request": BadRequestError,
@@ -1749,6 +1751,10 @@ class OpenAIChatWorker(QThread):
         获取或创建复用的 HTTP 客户端。
         避免每次 API 调用都创建新的客户端。
         """
+        # [T22-B1] httpx 延迟化：顶层 import 在启动 critical 泵同步拉起 httpx
+        # （~0.3s），仅本函数与异常路径使用，函数内按需加载
+        import httpx
+
         if self._http_client is None:
             # 无 API key 时剥离 Authorization 头（免 key 匿名调用）：
             # - 本地免认证端点（auth=none，如 Ollama）服务端不校验 key
@@ -3446,6 +3452,11 @@ class OpenAIChatWorker(QThread):
         2. 使用缓存的 HTTP 客户端，避免每次都创建新客户端
         3. 预构建 API 参数，避免每次都重复处理
         """
+        # [T22-B1] httpx/httpcore 延迟化：重试分类与 ReadError 捕获所需，
+        # 函数内按需加载（本函数是唯一消费点；首次调用时 openai 已由
+        # build_openai_client 拉起 httpx，此处零额外成本）
+        import httpcore
+        import httpx
         # 🛡️ 清除旧响应引用，确保 cancel() 不关闭过期连接
         with self._stream_lock:
             self._current_response = None
