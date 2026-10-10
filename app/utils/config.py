@@ -304,56 +304,34 @@ class Settings(QConfig):
         instance.save()
         logger.info(f"已自动注入默认 OpenCode 免费服务商配置: {config_name} ({config_id})")
 
-    # 内置主题 ID 白名单（plugins/system-themes/themes/*.yaml 的 id 字段，17 套）。
-    # [C1] 供主题验证器免加载 theme_manager 使用；新增内置主题时同步追加。
-    _BUILTIN_THEME_IDS = (
-        "amber",
-        "azure",
-        "bordeaux",
-        "crema",
-        "fallout",
-        "forest",
-        "graphite",
-        "jade",
-        "laven",
-        "lumia",
-        "midnight",
-        "minta",
-        "obsidian",
-        "ocean",
-        "rosee",
-        "sakura",
-        "slate",
-    )
-
-    @staticmethod
-    def _read_saved_theme_style() -> str:
-        """加载前直读配置文件中的已保存主题值（不触发 load 的验证链）。"""
-        try:
-            inst = Settings._instance
-            if inst and inst.file and inst.file.exists():
-                import orjson as json
-
-                data = json.loads(inst.file.read_text(encoding="utf-8"))
-                return str(data.get("UI", {}).get("ThemeStyle") or "")
-        except Exception:
-            pass
-        return ""
-
     @classmethod
     def _extend_theme_validator_before_load(cls):
         """加载配置前扩展主题验证器，确保已保存的主题不会被拒绝
 
-        [C1 瘦身] 不再 import theme_manager（其 import 链拉起 yaml 等重依赖，
-        曾进入 Settings 初始化关键路径）。白名单 = 内置主题 ID 常量 + 配置文件
-        saved_theme 直读值：validator 放行两者。插件主题/未知主题依赖 saved_theme
-        直读放行（与原行为一致——原实现同样把任意 saved 值临时加入列表）。
+        此时 PluginManager 可能未初始化，只能获取系统/内置主题。
+        通过直接读取配置文件中的已保存主题值，将其也加入验证器列表，
+        避免 load() 时验证器拒绝未知的插件主题 ID 并重置为默认值。
         """
         try:
-            themes = list(cls._BUILTIN_THEME_IDS)
-            saved = cls._read_saved_theme_style()
-            if saved and saved not in themes:
-                themes.append(saved)  # 临时加入，防止 load 时被拒绝
+            from app.utils.theme_manager import theme_manager
+
+            # 获取当前已加载的主题（可能只有系统主题）
+            themes = list(theme_manager.list_themes().keys())
+            if not themes:
+                return
+
+            # 直接在文件中读取已保存的主题值（不触发 load 的验证）
+            if cls._instance.file and cls._instance.file.exists():
+                try:
+                    raw = cls._instance.file.read_text(encoding="utf-8")
+                    import orjson as json
+
+                    data = json.loads(raw)
+                    saved_theme = data.get("UI", {}).get("ThemeStyle")
+                    if saved_theme and saved_theme not in themes:
+                        themes.append(saved_theme)  # 临时加入，防止 load 时被拒绝
+                except Exception:
+                    pass
 
             cls._instance.ui_theme_style.validator.__init__(themes)
         except Exception as e:
