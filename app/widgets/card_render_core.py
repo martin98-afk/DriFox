@@ -3122,7 +3122,14 @@ _SKELETON_CACHE_MAX = 48
 # updateContentAppend/updateTailHtml 八个后处理收窄到新增区间；_initEchartsIn/
 # renderWidgetToolbars/_runFenceAssets/_initWidgets/_scanFenceLangs 加 roots 形参
 # （null/undefined 退化全文档，全量路径兼容）。骨架 JS 结构变更必须 bump。
-_SKELETON_CACHE_VERSION = 41
+# _SKELETON_CACHE_VERSION +1（v42）：[T31] 打字机闸门单槽改 FIFO 队列——
+# _gateFn（新覆盖旧）→ _gateQueue（按序执行全部）。单槽对 updateTailHtml 成立
+# （每轮传入当前全文尾部，后者含前者），对追加语义的 updateContentAppend 不成立
+# （newHtml 只含本轮新闭合段，Python 已推进 _stable_md_len）→ 被覆盖那轮段格式化
+# HTML 永不落地，紧随替换又移除 [data-incremental] 节点 → 该段从屏上消失。
+# 实测 40 段 × 30ms：覆盖 3 次、流式态缺 7 段 token；禁用闸门 0 覆盖 0 缺失。
+# 旧骨架仍为单槽 → 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 42
 
 
 def _js_literal(value) -> str:
@@ -3752,7 +3759,16 @@ _TYPEWRITER_JS = """
                     _force: false,    // 强制执行一次标记（超时兜底路径放行，防自我挂起）
                     _lastPushAt: 0,   // 最近一次 push 时刻（静默窗判定）
                     _gateDeadline: 0, // 挂起硬上限时刻
-                    _gateFn: null,    // 挂起的 DOM 替换（单槽，新覆盖旧）
+                    // [T31] 挂起的 DOM 替换改为 FIFO 队列（原单槽覆盖）：
+                    // updateContentAppend 的 newHtml **只含本轮新闭合段**（Python 侧
+                    // 每轮推进 _stable_md_len，后续轮次不再包含早前段），因此
+                    // 「新任务含更多文本、旧任务语义被包含」的前提对它不成立 ——
+                    // 单槽覆盖 = 被覆盖那轮的段格式化 HTML 永不落地，而紧随的替换
+                    // 又无条件移除全部 [data-incremental] 节点（含承载该段纯文本的
+                    // 节点）→ 该段从屏上消失且无人补回（用户可见“流式正文偶发丢段”）。
+                    // 实测：40 段 × 30ms 喂入，闸门覆盖 3 次 → 流式态缺 7 个段落 token；
+                    // 禁用闸门后覆盖 0 次、缺失 0。
+                    _gateQueue: [],   // 挂起的 DOM 替换队列（按序执行，不丢任务）
                     _gateTimer: 0,    // 静默窗轮询句柄
                     _gateExtra: ''    // 挂起期间新 push 的文本（不在替换快照里，替换后补回）
                 };
@@ -3766,7 +3782,7 @@ _TYPEWRITER_JS = """
                     st._lastPushAt = performance.now();
                     // 闸门挂起期间的新文本不在替换快照里：记账并在替换后补回
                     // （它已随揭示上屏，替换会整段移除，不补回就真丢了）
-                    if (st._gateFn) st._gateExtra += text;
+                    if (st._gateQueue.length) st._gateExtra += text;
                     if (!st.raf) {
                         st.last = performance.now();
                         st.raf = requestAnimationFrame(window._twStep);
@@ -3805,7 +3821,7 @@ _TYPEWRITER_JS = """
                         window._dfxAppendStreamText(slice, _skipReport);
                     } catch (e) {}
                     // 缓冲降到水位（或已空）：执行挂起的 DOM 替换
-                    if (st._gateFn && st.buf.length <= (st.GATE_MIN_BUF || 3)) {
+                    if (st._gateQueue.length && st.buf.length <= (st.GATE_MIN_BUF || 3)) {
                         window._twDrainGate();
                     }
                     // ⚠️ 不得在此 return：drainGate 后 buf 可能仍非空（非水位路径），
@@ -3834,7 +3850,9 @@ _TYPEWRITER_JS = """
                     // 强制执行标记（超时兜底 / 排空放行）：本次放行，防自我挂起
                     if (st._force) { st._force = false; return false; }
                     if (!st.buf || st.buf.length <= (st.GATE_MIN_BUF || 3)) return false;
-                    st._gateFn = fn;   // 单槽覆盖：新任务含更多文本，旧任务语义被包含
+                    // [T31] 入队而非覆盖：追加语义的 updateContentAppend 之间互相
+                    // 不包含（newHtml 只含本轮新闭合段），覆盖即永久丢失该段。
+                    st._gateQueue.push(fn);
                     // 清空 extra：新快照含旧 extra 的全部文本（Python 侧 markdown
                     // 是单调增长的），旧账不清会重复补回
                     st._gateExtra = '';
@@ -3856,22 +3874,29 @@ _TYPEWRITER_JS = """
                 window._twDrainGate = function () {
                     // 执行挂起的 DOM 替换（水位 / 静默窗 / 硬上限）
                     var st = window._tw;
-                    if (!st || !st._gateFn) return;
+                    if (!st || !st._gateQueue.length) return;
                     if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
                     st._boost = false;
-                    var f = st._gateFn;
+                    var queue = st._gateQueue;
                     var extra = st._gateExtra;
-                    st._gateFn = null;
+                    st._gateQueue = [];
                     st._gateExtra = '';
                     // 强制放行：f 内部重入渲染入口 → _twGate 时必须直接执行
                     // （硬上限路径下缓冲可能仍高于水位，无此标记会再次挂起自己 →
                     //  替换永不执行、格式化永久停留纯文本）
-                    st._force = true;
-                    try {
-                        if (f) f();
-                    } finally {
-                        // f 未重入（异常/其他路径）时清理，防标记外泄误放行下一次
-                        st._force = false;
+                    // [T31] 按序执行全部挂起任务（原实现为单槽，后者覆盖丢弃前者）：
+                    // updateContentAppend 各轮的 newHtml 互不包含（只含本轮新闭合段），
+                    // 覆盖即该段格式化 HTML 永不落地 → 随后替换又移除 [data-incremental]
+                    // 节点 → 该段从屏上消失。逐任务独立 try：单个失败不阻断其余。
+                    for (var _qi = 0; _qi < queue.length; _qi++) {
+                        st._force = true;
+                        try {
+                            queue[_qi]();
+                        } catch (e) {
+                        } finally {
+                            // f 未重入（异常/其他路径）时清理，防标记外泄误放行下一次
+                            st._force = false;
+                        }
                     }
                     // 替换快照不含挂起期间新 push 的文本：替换后补回。走 _twPush
                     // 而非直接上屏 —— 保留打字机节奏，避免补回本身变成一次跳变
@@ -3888,7 +3913,7 @@ _TYPEWRITER_JS = """
                     // 挂起的 DOM 替换作废：flush 后的调用方（updateContent）
                     // 会用含全部文本的新 HTML 整页替换，旧替换已无意义
                     if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
-                    st._gateFn = null;
+                    st._gateQueue = [];
                     st._gateExtra = '';
                     st._boost = false;
                     if (st.buf) {
@@ -3919,7 +3944,7 @@ _TYPEWRITER_JS = """
                     // 挂起的替换同样作废：它即将执行的替换对象（旧 DOM）已被本次
                     // 替换覆盖，残留执行会造成旧 HTML 回灌
                     if (st._gateTimer) { clearInterval(st._gateTimer); st._gateTimer = 0; }
-                    st._gateFn = null;
+                    st._gateQueue = [];
                     st._gateExtra = '';
                     st._boost = false;
                 };
