@@ -3760,6 +3760,11 @@ class MessageCard(SimpleCardWidget):
                     # （updateContent 不存在 → 静默失败 → 卡片永久空白）。
                     if not getattr(pooled, "_is_js_ready", False):
                         pooled._load_skeleton()
+                    # 🐛 池化复用 JS 全局残留：window._toolCompactMode 只在骨架首次
+                    # 就绪时同步一次，复用实例不重载骨架 → 残留上一张卡片的旧值，
+                    # reorganizeContent 等守卫按旧模式归拢工具/思考块（"切换简洁
+                    # 模式对复用卡片永不生效"）。绑定时按当前配置重同步。
+                    pooled.sync_compact_mode_to_js()
                     self.viewer = pooled
                 except Exception:
                     # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建

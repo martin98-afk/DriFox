@@ -557,6 +557,16 @@ class ThemeManager:
         new_data = self.get_theme(old_id)
         if new_data != old_data:
             # 当前主题被修改/删除 → 全量刷新 UI
+            # ⚠️ 同 id 内容变化必须显式推进 ThemeRefreshCoordinator 版本：
+            # dispatch_refresh → on_theme_changed → should_skip(theme_id) 因
+            # id 未变幂等短路、版本号不推进 → 消息卡 CodeWebViewer.refresh_theme
+            # 同版本直接 return（实例级 _cached_streaming_html 不失效、
+            # _needs_full_render 不置位），且 T16 lru 按版本分桶命中旧主题 HTML
+            # → 卡片 HTML 正文/代码高亮不跟随刷新。QSS 部分不走版本号会正常
+            # 刷新，形成"框架刷了、内容没刷"的错位观感。
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            ThemeRefreshCoordinator.on_theme_changed(old_id)
             self.dispatch_refresh()
 
         # 兼容旧回调（用于设置面板更新主题下拉列表等，无论当前主题是否变化都需要）

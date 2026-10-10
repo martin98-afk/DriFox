@@ -911,6 +911,22 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             return True
 
+    def sync_compact_mode_to_js(self) -> None:
+        """把当前简洁模式配置同步到 JS 全局 window._toolCompactMode。
+
+        该标志在 JS 侧是全局单值（reorganizeContent / 坞态等守卫读取），
+        仅在骨架首次就绪（_on_js_ready）时同步一次；池化复用的 viewer 不重载
+        骨架，JS 全局会残留上一张卡片的旧值 → 用户切换简洁模式后，复用卡片
+        仍按旧模式归拢工具/思考块（"关闭简洁模式不生效"）。绑定复用实例时
+        必须调用本方法按当前配置重同步。
+        """
+        try:
+            if self.page() and self._is_js_ready:
+                compact = "true" if self._tool_compact_mode else "false"
+                self.page().runJavaScript(f"window._toolCompactMode = {compact};")
+        except RuntimeError:
+            pass
+
     @property
     def _tool_target_id(self) -> str:
         return "tool-content" if self._tool_compact_mode else "content-placeholder"
@@ -1230,12 +1246,9 @@ class CodeWebViewer(QWebEngineView):
 
     def _on_js_ready(self):
         self._is_js_ready = True
-        # 同步简洁模式标志到 JS
+        # 同步简洁模式标志到 JS（统一走 sync_compact_mode_to_js）
+        self.sync_compact_mode_to_js()
         try:
-            from app.utils.config import Settings
-
-            compact = "true" if Settings.get_instance().ui_compact_tool_area.value else "false"
-            self.page().runJavaScript(f"window._toolCompactMode = {compact};")
             # 历史会话：先折叠工具区（设置 data-collapsed="true"，dock sync 需要读取此值）
             if getattr(self, "_is_history", False):
                 self.page().runJavaScript(
