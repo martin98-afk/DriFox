@@ -526,6 +526,10 @@ class _WorkbenchFrame(QFrame):
     窗格才能真正收到 0；动画结束立刻恢复，不影响拖拽下限。
     """
 
+    # [T30] 主题切换时不可见即置脏（_apply_theme_stylesheet 跳过重刷），
+    # 由 _refresh_theme_dirty_frames 在可见性恢复点补刷
+    _theme_needs_refresh: bool = False
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._min_hint_disabled = False
@@ -1325,6 +1329,8 @@ class TabManagerWindow(FramelessWindow):
         if frame is not None:
             frame.set_min_hint_disabled(False)
         self._set_windows_resize_preview_suppressed(False)
+        # [T30] 动画结束可见性恢复点：补刷隐藏期置脏的顶层容器
+        self._refresh_theme_dirty_frames()
 
     # ── 右侧工作台 hover 悬浮预览：进入/退出回调 ──
 
@@ -1404,6 +1410,8 @@ class TabManagerWindow(FramelessWindow):
                 self.set_workbench_visible(True)
             else:
                 self._wb_visible_target = None  # 回挂收起后回到"看 isVisible"，关闭态 False
+            # [T30] 预览离开可见性恢复点：补刷隐藏期置脏的顶层容器
+            self._refresh_theme_dirty_frames()
 
         self._wb_overlay.slide_out(on_done=_done)
 
@@ -1902,71 +1910,79 @@ class TabManagerWindow(FramelessWindow):
         另注：本串无法按 #objectName 拆到各子控件上——子控件子树重叠
         （chatFrame/chatManagerContent 各含 1400+，逐个设反而更慢，实测
         拆分合计 1245ms vs 整窗 320ms），且窗口自身设任意非空串都是全量 cost。
+
+        [T30] 作用域拆分只拆**顶层三兄弟**（_tab_frame/_chat_frame/
+        _workbench_frame）：它们互不重叠、各自子树规模可控；更深的子树
+        重叠容器拆分实测反而更慢（1245ms 教训）。margin/radius 与 wbHidden
+        margin 留在静态窗口串——它们与主题色无关且会被 wb 属性切换路径
+        独立更新，拆走反而让该路径多一次容器串重刷。
         """
-        qss = f"""
-            #tabPanel {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border-radius: 8px;
-            }}
-            #tabFrame {{
+        # [T30] 窗口串缩为**静态部分**（几何/透明/圆角，零主题色值）：
+        # 主题色值全部下沉到顶层三兄弟容器（_qss_tab_frame/_qss_chat_frame/
+        # _qss_workbench_frame）的独立串上。字号变化/同主题场景串恒定 →
+        # 同串短路直接跳过整窗 repolish（0ms）；真换主题时仅三个可见容器
+        # 各自 repolish 自身子树，隐藏者置脏由补刷点恢复。
+        # margin/radius 留在静态串的原因：wbHidden 属性切换只改 margin（
+        # wb_hidden 路径独立成串重设窗口串即可，无需触碰色值容器串）。
+        # 只拆**顶层三兄弟**的原因：子树重叠容器（chatFrame/chatManagerContent
+        # 各含 1400+ 控件）逐个设反而更慢（拆分合计 1245ms vs 整窗 320ms，实测）。
+        qss = """
+            #tabFrame {
                 /* 左侧圆角矩形容器，与右侧 #chatFrame 对称，提升呼吸感 */
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 margin: 4px 0 4px 4px;  /* 四边与窗口 4px 边距，右 0 让位 splitter handle */
-            }}
-            #tabManagerWindow {{
-                background: {Colors.CONTENT_BG};
-                /* ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
-                   圆角外侧的三角区不会被绘制，底层透出系统默认窗口色 —— 表现为
-                   窗口四角隐约有一圈"系统窗口"的白边，resize 重绘时尤其明显。
-                   窗口圆角由 DWM 负责（见 _apply_win11_dwm_chrome），Qt 侧保持
-                   矩形即可；该处同时把 DWM 的边框描边设为 DWMWA_COLOR_NONE，
-                   避免窗口最外圈出现一圈随激活状态忽明忽暗的 2px 白线。 */
-            }}
-            #tabManagerContent {{
-                background: transparent;
-                border-radius: 8px;
-            }}
-            #chatFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
+            }
+            #chatFrame {
                 border-radius: 8px;
                 /* 左右 margin 均 0，让位给 splitter handle：三窗格布局下
                    中间窗格两侧各有一个 4px handle，若此处保留右 4px margin，
                    右间距会变成 8px 而左间距只有 4px，两侧不对称。 */
                 margin: 4px 0 4px 0;
-            }}
+            }
             /* 工作台隐藏后右侧 handle 消失，需补回窗口右边距，
                否则对话区圆角矩形贴死窗口边框 */
-            #chatFrame[wbHidden="true"] {{
+            #chatFrame[wbHidden="true"] {
                 margin: 4px 4px 4px 0;
-            }}
-            #workbenchFrame {{
-                /* 右侧工作台圆角矩形容器，与 #tabFrame / #chatFrame 同款 */
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
+            }
+            #tabManagerContent {
+                background: transparent;
                 border-radius: 8px;
-                margin: 4px 4px 4px 0;  /* 右 4px 为窗口右边距，左 0 让位 handle */
-            }}
-            #contentArea {{
+            }
+            #contentArea {
                 background: transparent;
-            }}
-            #contentStack {{
+            }
+            #contentStack {
                 background: transparent;
-            }}
-            #globalOverlay {{
+            }
+            #globalOverlay {
                 /* 覆盖层页面透明：面板底由内部 CardContainer 按卡片状态自绘
                    （transparentOverlay 卡片 → 容器透明，透出 #chatFrame 半透明
-                   面板与对话区无缝衔接；普通卡片 → 容器自画 alpha=246 面板底）。
-                   此处若画实色底（旧值 CARD_BG alpha=246）会盖住对话区，导致
-                   assistant_hub 等透明卡打开时整页呈不透明面板。 */
+                   面板与对话区无缝衔接；普通卡片 → 容器自画 alpha=246 面板底）。 */
                 background: transparent;
                 border-radius: 8px;
-            }}
+            }
         """
         if qss != self.styleSheet():
             self.setStyleSheet(qss)
+        # [T30] 顶层三兄弟：可见者即时刷色值串并清脏；不可见者置脏跳过
+        #（repolish 留到可见性恢复点 _refresh_theme_dirty_frames）
+        for frame, qss_method in (
+            (self._tab_frame, self._qss_tab_frame),
+            (self._chat_frame, self._qss_chat_frame),
+            (self._workbench_frame, self._qss_workbench_frame),
+        ):
+            if frame is None:
+                continue
+            try:
+                frame_qss = qss_method()
+                if frame.isVisible():
+                    if frame_qss != frame.styleSheet():
+                        frame.setStyleSheet(frame_qss)
+                    frame._theme_needs_refresh = False
+                else:
+                    frame._theme_needs_refresh = True
+            except RuntimeError:
+                continue  # C++ 对象已销毁
         # ── splitter handle 样式：下沉到 QSplitterHandle 自身（性能关键）──
         # [PERF] QSplitter.setStyleSheet 会让 QStyleSheetStyle 重建并 repolish
         # **整棵子树**（本窗口三个 splitter 分别挂 431/1470/1462 个子控件）。
@@ -1983,6 +1999,62 @@ class TabManagerWindow(FramelessWindow):
         # - handle 由 splitter 在 addWidget / setOrientation 时按需创建，
         #   故需 _reapply_splitter_handle_styles 在布局变化后补刷。
         self._reapply_splitter_handle_styles()
+
+    def _qss_tab_frame(self) -> str:
+        """#tabPanel/#tabFrame 主题色值串（[T30] 静态串拆出的色值组）"""
+        return f"""
+            #tabPanel {{
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border-radius: 8px;
+            }}
+            #tabFrame {{
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border: 1px solid {Colors.BORDER};
+            }}
+        """
+
+    def _qss_chat_frame(self) -> str:
+        """#chatFrame 主题色值串"""
+        return f"""
+            #chatFrame {{
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border: 1px solid {Colors.BORDER};
+            }}
+        """
+
+    def _qss_workbench_frame(self) -> str:
+        """#workbenchFrame 主题色值串（radius/margin 一并在此：静态串无此规则）"""
+        return f"""
+            #workbenchFrame {{
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                margin: 4px 4px 4px 0;
+            }}
+        """
+
+    def _refresh_theme_dirty_frames(self) -> None:
+        """补刷隐藏期置脏的顶层三容器（可见性恢复点：动画结束/预览离开/showEvent）
+
+        [T30] hasattr/RuntimeError 防御：容器可能已销毁（窗口关闭竞态）。
+        """
+        for frame, qss_method in (
+            (self._tab_frame, self._qss_tab_frame),
+            (self._chat_frame, self._qss_chat_frame),
+            (self._workbench_frame, self._qss_workbench_frame),
+        ):
+            if frame is None:
+                continue
+            try:
+                if not getattr(frame, "_theme_needs_refresh", False):
+                    continue
+                if frame.isVisible():
+                    frame_qss = qss_method()
+                    if frame_qss != frame.styleSheet():
+                        frame.setStyleSheet(frame_qss)
+                    frame._theme_needs_refresh = False
+            except RuntimeError:
+                continue  # C++ 对象已销毁
 
     def _apply_bg_from_theme(self):
         """主题切换入口：刷新 4 个区域背景（window/sidebar/chat_area/scene）
@@ -4700,6 +4772,8 @@ class TabManagerWindow(FramelessWindow):
         # macOS：close→show 循环后修复标题栏错位（见 _refresh_mac_fullsize_content）
         if _IS_MAC:
             self._refresh_mac_fullsize_content()
+        # [T30] 窗口重新显示可见性恢复点：补刷隐藏期置脏的顶层容器
+        self._refresh_theme_dirty_frames()
 
     def _refresh_mac_fullsize_content(self) -> None:
         """macOS：强制重算 NSWindow 的 fullSizeContentView 布局
