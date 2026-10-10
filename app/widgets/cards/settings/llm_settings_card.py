@@ -1302,13 +1302,7 @@ class LLMSettingsCard(SystemCardFrame):
                     # 落在同一 tick，这个前置条件不再自动成立，故显式定尺。
                     inner = card.widget() if hasattr(card, "widget") else None
                     if inner is not None and inner.sizeHint().height() > inner.height():
-                        print(
-                            f"[ADJUST] {type(card).__name__} inner.sizeHint={inner.sizeHint().height()} "
-                            f"inner.h={inner.height()} view.h={card.view.height()} "
-                            f"viewLayout.hint={card.viewLayout.sizeHint().height()} card.w={card.width()}"
-                        )
                         inner.adjustSize()
-                        print(f"[ADJUST] 调整后 inner.h={inner.height()}")
                     card.toggleExpand()
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] {tab_id} 页卡片展开失败: {e}")
