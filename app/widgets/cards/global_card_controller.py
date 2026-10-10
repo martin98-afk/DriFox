@@ -121,18 +121,22 @@ class GlobalCardController:
             self._file_undo_card,
             self._sub_agent_session_card,
         ):
-            if card is None or not hasattr(card, "refresh_style"):
+            if card is None:
                 continue
-            # 仅对「有补刷链路」+ 隐藏的卡做门控，避免主题更新永久丢失
-            if hasattr(card, "_theme_needs_refresh"):
-                try:
+            # [A2] hasattr 一并移入 try：已销毁 C++ 对象的属性访问会抛 RuntimeError
+            # （wrapped C/C++ object deleted），原写在 try 外会让整个刷新循环中断，
+            # 序列后续健康卡全部漏刷。RuntimeError 单独捕获跳过本卡，序列继续。
+            try:
+                if not hasattr(card, "refresh_style"):
+                    continue
+                # 仅对「有补刷链路」+ 隐藏的卡做门控，避免主题更新永久丢失
+                if hasattr(card, "_theme_needs_refresh"):
                     if not card.isVisible():
                         card._theme_needs_refresh = True
                         continue
-                except RuntimeError:
-                    continue  # C++ 对象已销毁
-            try:
                 card.refresh_style()
+            except RuntimeError:
+                continue  # C++ 对象已销毁（本卡跳过，序列继续）
             except Exception as e:
                 logger.warning(f"[GlobalCard] 卡片主题刷新失败: {e}")
 
