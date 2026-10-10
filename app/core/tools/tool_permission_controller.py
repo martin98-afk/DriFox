@@ -60,22 +60,25 @@ class ToolPermissionController(QObject):
     userBehaviorChanged = pyqtSignal(str)
     userPoliciesChanged = pyqtSignal(dict)
 
+    # [T7 H1] registry 版本变化桥接（ToolRegistry.on_change 回调可能来自后台
+    # watcher 线程 → 经 Qt 信号排队主线程，对齐 main_widget._tool_registry_changed）
+    _registry_version_changed = pyqtSignal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # 加载全局默认值(用户最后修改的偏好)
         settings = Settings.get_instance()
         saved_toggles = dict(settings.tool_toggles.value or {})
         if not saved_toggles:
-            all_tools = get_all_tools()
-            saved_toggles = get_default_toggles(all_tools)
-
-        # 清理已删除工具的残留配置(只保留当前已知的工具)
-        known_tools = set(get_all_tools())
-        cleaned_toggles = {k: v for k, v in saved_toggles.items() if k in known_tools}
-        # 补全新增工具的默认开启
-        for tool in known_tools:
-            if tool not in cleaned_toggles:
-                cleaned_toggles[tool] = True
+            # 冷配置（首次启动/清空）：同步加载全量插件工具生成默认开关（必要成本）
+            cleaned_toggles = get_default_toggles(get_all_tools())
+        else:
+            # [T7 H1] 热配置：构造期不触发插件工具全量加载（原无条件 get_all_tools()
+            # 会在首窗构造内同步执行 bs4 + 全部插件 tools 注册，与 preheat 双链叠加；
+            # preheat 剔除 tools 后这里是唯一关键路径触发点）。初始已知集=已存
+            # 开关键，注册完成后经 ToolRegistry.on_change → _sync_known_tools
+            # 补跑清理/补全。
+            cleaned_toggles = dict(saved_toggles)
         # 若发现残留,持久化清理后的结果,避免下次启动仍带过期条目
         if cleaned_toggles != saved_toggles:
             try:
@@ -91,8 +94,15 @@ class ToolPermissionController(QObject):
         self._user_tool_toggles: Dict[str, bool] = dict(cleaned_toggles)
         self._user_tool_off_behavior: str = settings.tool_off_behavior.value or "deny"
         # per-tool 关闭策略(用户偏好层)：{tool_name: "deny"|"ask"}，缺失回退全局 behavior
+        # [T7 H1] 构造期仅过滤非法值，不做「已删除工具」清理（那需要全量工具表，
+        # 会触发插件加载）；清理延后到 _sync_known_tools，显示层 getter 读时按
+        # 全量表补全/过滤，行为等价。
         saved_policies = dict(settings.tool_permission_policy.value or {})
-        self._user_tool_policies: Dict[str, str] = self._clean_policies(saved_policies)
+        self._user_tool_policies: Dict[str, str] = (
+            {k: v for k, v in saved_policies.items() if v in VALID_TOOL_POLICIES}
+            if isinstance(saved_policies, dict)
+            else {}
+        )
         # ★ T28：用户显式调整过的工具集合（区分"显式开启"与"默认开启"）
         # 执行层用它实现"UI 覆盖模板"：显式开启 → UI 为准放行（覆盖模板 deny）
         self._user_modified: set = set()
@@ -122,6 +132,21 @@ class ToolPermissionController(QObject):
                 ConfigSyncService.get_instance().settingsRestored,
                 self._on_config_synced,
             )
+        except Exception:
+            pass
+
+        # [T7 H1] registry 变更订阅（bound method 弱引用，本对象销毁后自动失效；
+        # 仍主动 off_change 兑底）。订阅本身会立即回调一次：此时 deferred 注册
+        # 未完成，由 _sync_known_tools 内部守卫跳过。
+        try:
+            from app.tools.registry import ToolRegistry
+
+            _registry = ToolRegistry.get_instance()
+            _registry.on_change(self._on_registry_version_changed)
+            self.destroyed.connect(
+                lambda: _registry.off_change(self._on_registry_version_changed)
+            )
+            self._registry_version_changed.connect(self._sync_known_tools)
         except Exception:
             pass
 
@@ -177,6 +202,78 @@ class ToolPermissionController(QObject):
             k: v for k, v in policies.items()
             if k in known_tools and v in VALID_TOOL_POLICIES
         }
+
+    # ── [T7 H1] 插件工具注册完成后的已知集补全 ──────────────
+
+    def _on_registry_version_changed(self, version: int) -> None:
+        """ToolRegistry.on_change 桥接：回调可能在后台 watcher 线程，转 Qt 信号排队主线程"""
+        self._registry_version_changed.emit(version)
+
+    def _sync_known_tools(self, _version: int = 0) -> None:
+        """补跑 known_tools 清理/补全（主线程，幂等）。
+
+        [T7 H1] 热配置启动时构造期不加载全量插件工具（已知集=已存开关键），
+        register_plugin_tools（首窗 deferred 队列）完成注册后由
+        ToolRegistry.on_change 触发本方法：清理已删除工具残留 + 补全新增
+        默认开启 + 有变更时持久化并广播（工具计数 UI 经现有闭环接住）。
+
+        守卫：on_change 订阅时会立即回调一次，此时 deferred 注册未完成，
+        app.tools._plugin_tools_loaded 为 False → 直接返回，避免把未注册
+        工具误判为残留删掉。同线程内 Qt 信号排队保证：注册任务同步跑完后
+        才会处理排队的补全回调，故触发时机必然晚于注册完成。
+        """
+        import app.tools as _tools_pkg
+
+        # 守卫前置：注册未完成时零成本返回（不触碰 registry——on_change 订阅
+        # 本身会立即回调一次，此处不得成为热配置启动路径的加载触发点）
+        if not _tools_pkg._plugin_tools_loaded:
+            return
+        known = set(get_all_tools())
+        if not known:
+            return
+        settings = Settings.get_instance()
+        saved = dict(settings.tool_toggles.value or {})
+        # 清理已删除工具残留 + 补全新增默认开启（对齐原 __init__ 语义）
+        cleaned = {k: v for k, v in saved.items() if k in known}
+        for tool in known:
+            if tool not in cleaned:
+                cleaned[tool] = True
+        # 内存态对齐（user/active 两层；不覆盖用户显式值）
+        changed = False
+        for tool, enabled in cleaned.items():
+            if tool not in self._user_tool_toggles:
+                self._user_tool_toggles[tool] = enabled
+                self._active_tool_toggles[tool] = enabled
+                changed = True
+        for tool in [t for t in self._user_tool_toggles if t not in known]:
+            self._user_tool_toggles.pop(tool, None)
+            self._active_tool_toggles.pop(tool, None)
+            changed = True
+        if cleaned != saved:
+            try:
+                settings.tool_toggles.value = dict(cleaned)
+                settings.save()
+                stale = set(saved.keys()) - set(cleaned.keys())
+                if stale:
+                    logger.info(f"[ToolPermission] 清理已删除工具的残留开关: {sorted(stale)}")
+            except Exception as e:
+                logger.warning(f"[ToolPermission] 持久化清理残留开关失败: {e}")
+        # per-tool 策略持久化清理（对齐 toggles 清理时机；构造期已不碰 registry）
+        saved_policies = dict(settings.tool_permission_policy.value or {})
+        if isinstance(saved_policies, dict) and saved_policies:
+            cleaned_policies = {
+                k: v for k, v in saved_policies.items()
+                if k in known and v in VALID_TOOL_POLICIES
+            }
+            if cleaned_policies != saved_policies:
+                try:
+                    settings.tool_permission_policy.value = dict(cleaned_policies)
+                    settings.save()
+                except Exception as e:
+                    logger.warning(f"[ToolPermission] 持久化清理残留策略失败: {e}")
+        if changed:
+            self.togglesChanged.emit(dict(self._active_tool_toggles))
+            self.userTogglesChanged.emit(dict(self._user_tool_toggles))
 
     def get_toggles(self) -> Dict[str, bool]:
         """获取当前生效的工具开关(供 engine 使用)"""

@@ -1051,6 +1051,23 @@ class OpenAIChatToolWindow(ToolWindow):
         q.add_order_constraint("create_tool_executor", "create_engines")  # O3
         q.add_order_constraint("create_engines", "apply_pending_agent")  # O8
         q.add_order_constraint("create_tool_executor", "resync_workdir_after_executor")  # O9
+        # [T7 H1] 插件工具全量注册移出 preheat（启动关键路径热态 -300~700ms），
+        # 改在首窗延迟泵内执行：idle 优先级天然排在 critical 链之后，另加约束
+        # 排 create_new_session（含 openai 包 import ~1.9s 重活，T2 画像）之后，
+        # 不抢主线程。三个会话分支都会触发 openai import，约束对全部分支名声明
+        # （未注册的分支名约束自动失效）。注册完成 → ToolRegistry.on_change →
+        # self._on_tool_registry_changed 自动补刷工具计数 UI（__init__ 现成闭环）。
+        from app.tools import _ensure_plugin_tools_loaded
+
+        q.register(
+            "register_plugin_tools",
+            lambda: self._safe_timer_call(_ensure_plugin_tools_loaded),
+            priority="idle",
+            delay_ms=0,
+        )
+        q.add_order_constraint("load_session_from_record", "register_plugin_tools")
+        q.add_order_constraint("apply_branch_or_create_session", "register_plugin_tools")
+        q.add_order_constraint("create_new_session", "register_plugin_tools")
         q.start()
         # 🛡️ 将 controller 绑定到工具控制卡片(批1 懒创建后卡片通常尚未创建，
         # ensure 内为主绑定路径；此处仅兜底极端时序——卡片已建而 controller 后到)
