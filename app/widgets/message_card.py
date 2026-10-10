@@ -156,6 +156,7 @@ from app.widgets.card_render_core import (
     _STREAM_BAND_REPAINT_PAD,
     _STREAM_BAND_SWEEP_MS,
     _STREAM_TINT_RETRY,
+    STREAM_DOCK_BUDGET_PX,
     STREAM_HEIGHT_ANIM_ENABLED,
     STREAM_HEIGHT_ANIM_MIN_DELTA,
     STREAM_HEIGHT_TICK_MS,
@@ -2847,6 +2848,15 @@ class MessageCard(SimpleCardWidget):
 
     def _update_height(self, h):
         target_height = max(40, h)
+        # [T33] 坞态预算上限：简洁模式坞态把正文限高 600px、工具区限高 220px，
+        # CSS 生效后实测卡片总高恒 < STREAM_DOCK_BUDGET_PX（真机日志封顶 863px）。
+        # 坞态由 runJavaScript 异步生效，若某条渲染抢在它落地前完成，正文会先按
+        # 自然高度排版（长回复数千 px），坞态到达再被压回 —— 就是起步瞬间
+        # 「卡片先胀成很大再缩回」。上限只在那个竞态窗口内起作用，不误伤常态。
+        if self._streaming and target_height > STREAM_DOCK_BUDGET_PX:
+            _vw = getattr(self, "viewer", None)
+            if _vw is not None and getattr(_vw, "_tool_compact_mode", False):
+                target_height = STREAM_DOCK_BUDGET_PX
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
         # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。

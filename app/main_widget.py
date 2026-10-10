@@ -17816,7 +17816,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
                 card_bottom = card_top + sender.height()
-                if card_bottom <= value or self._should_follow_bottom():
+                follow = self._should_follow_bottom()
+                if follow:
+                    # [T32] 跟随态直接贴底，不用「value + delta」累加。
+                    # 累加有两个系统性偏差 Qt 永不纠正：
+                    #   ① 手工上界（maximum + delta）是估计值，与 Qt 布局传播后的
+                    #      真实上界常有数 px~十几 px 的差（实测稳定欠 12px）；
+                    #   ② 追踪 tick 收尾拍会把 _last_height_delta 清零，最后一拍
+                    #      增量无人补偿。二者叠加 = 视口长期停在离底十几 px，
+                    #      且每次高度变化都在这个缝里浮动 → 用户看到的"轻微抖动"。
+                    # 贴底改为「每拍都取当前上界」，误差不累积。
+                    with self._programmatic_scroll():
+                        sb.setValue(sb.maximum())
+                elif card_bottom <= value:
+                    # 非跟随态：卡片整体在视口上方 → 锚定补偿，保持其相对位置
                     with self._programmatic_scroll():
                         sb.setValue(max(0, value + delta))
         except RuntimeError:

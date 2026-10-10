@@ -645,6 +645,11 @@ class CodeWebViewer(QWebEngineView):
         self._streaming = True
         self._is_history = False  # 历史会话标志（非流式加载的历史消息）
         self._is_js_ready = False
+        # [T33] 本轮流式的坞态是否已发起过同步（False = 尚未发起，首次渲染前必须补发）。
+        # 作用：坞态是 runJavaScript 异步生效的，若内容渲染早于它落地，正文会先按
+        # **自然高度**布局（无 600px 限高），坞态生效后再被压回 → "卡片先胀成很大
+        # 再缩回"的起步跳变。这里保证内容永远排在坞态同步之后。
+        self._dock_sync_requested = False
         # 下一次非流式渲染是否为"流式结束的终渲染"（决定能否走线程池，见
         # _perform_update）：仅在 CodeWebViewer.__init__ 初始化一次。
         self._final_render_pending = False
@@ -1091,6 +1096,8 @@ class CodeWebViewer(QWebEngineView):
             pass
         self._streaming = False
         self._is_history = False
+        # [T33] 坞态同步确认随卡片状态复位（新卡片新一轮流式的首次渲染需重新补发）
+        self._dock_sync_requested = False
         self._stable_html = ""
         self._stable_md_len = 0
         self._needs_full_render = True
@@ -1391,6 +1398,11 @@ class CodeWebViewer(QWebEngineView):
         if cached is not None:
             _skeleton_cache.move_to_end(cache_key)  # LRU：命中提升为最新
             self.setHtml(cached, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
+            # 🛡️ 透明合成重申：page 的 backgroundColor 只在「下一次导航」才生效，
+            # 而白底固化（Chromium 合成属性丢失后回退默认白底）一旦发生，
+            # 仅 setHtml 之外的重申都无法恢复。这里紧跟导航之后重申，覆盖
+            # 新建 / 池化复用 / renderer 崩溃自愈三条路径（详见方法 docstring）。
+            self.ensure_transparent_composition()
             return
 
         tag_css = []
@@ -5218,6 +5230,8 @@ class CodeWebViewer(QWebEngineView):
             _skeleton_cache.popitem(last=False)  # LRU：淘汰最久未用
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
+        # 🛡️ 同上（缓存命中分支）：导航后重申透明合成，防 HTML 区白底固化。
+        self.ensure_transparent_composition()
 
     # ========== 差量渲染常量 ==========
     # 安全兜底渲染间隔（ms）：无自然边界到达时强制全量渲染
@@ -5806,6 +5820,13 @@ class CodeWebViewer(QWebEngineView):
             if not self.isVisible():
                 self._render_deferred = True
                 return
+
+            # [T33] 坞态先于内容：本轮流式的首个 chunk 若先于 _sync_streaming_dock
+            # 的 IPC 落地，正文会先按自然高度排版（坞态 600px 限高未生效），
+            # 坞态到达后再被压回 → 起步瞬间"卡片先胀很大再缩回"。
+            # runJavaScript 按派发顺序执行，此处补发一次即可保证顺序（幂等）。
+            if self._streaming and not self._light_skeleton and not self._dock_sync_requested:
+                self._sync_streaming_dock(True)
 
             # 预览文字打字机开关：只在本轮流式（含结束后的终渲染）播放。
             # 历史会话加载时 _streaming / _streaming_finished 均为 False —— 一次
@@ -6784,6 +6805,8 @@ class CodeWebViewer(QWebEngineView):
             if self._is_js_ready and self.page():
                 flag = "true" if active else "false"
                 collapse = "true" if (collapse_after and not active) else "false"
+                # 已发出同步请求（JS 端 on===wasOn 时幂等 return，重复发零成本）
+                self._dock_sync_requested = True
                 self.page().runJavaScript(
                     f"if(typeof _setStreamingDock==='function')_setStreamingDock({flag},{collapse});"
                 )
