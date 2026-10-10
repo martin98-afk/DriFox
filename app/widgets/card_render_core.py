@@ -328,12 +328,11 @@ FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高�
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
 # ======== 流式期「坞态预算」高度上限（起步跳变兜底）========
-# 简洁模式坞态下 CSS 把正文限高 600px、工具区限高 220px，卡片总高因此天然封顶
-# （真机日志实测封顶值 863px）。但坞态是 runJavaScript 异步生效的：若某条渲染
-# 路径抢在它落地之前完成，正文会先按**自然高度**排版（长回复可达数千 px），
-# 坞态到达后再被压回 → 起步瞬间「卡片先胀成很大再缩回」。
-# 这里给流式期的上报高度加一道软上限：只在坞态未生效的竞态窗口内起作用
-# （CSS 一旦生效，实测高度恒 < 本值，不会误伤），把那一次跳变压成无感。
+# [T36] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
+# 完成时正文按自然高度排版、坞态到达再压回 → 起步「先胀大再缩回」。
+# T36 去掉坞态正文限高后，坞态生效前后正文都是自然高度（坞态只影响工具区
+# 沉底/限高，高度扰动 ~几十 px），竞态窗口不复存在。常量保留仅供回滚参考，
+# 使用点已移除（message_card._update_height）。
 STREAM_DOCK_BUDGET_PX = 900
 
 # ======== 流式期高度追踪（默认开，出问题可一键关）========
@@ -3154,7 +3153,15 @@ _SKELETON_CACHE_MAX = 48
 # HTML 永不落地，紧随替换又移除 [data-incremental] 节点 → 该段从屏上消失。
 # 实测 40 段 × 30ms：覆盖 3 次、流式态缺 7 段 token；禁用闸门 0 覆盖 0 缺失。
 # 旧骨架仍为单槽 → 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 42
+# _SKELETON_CACHE_VERSION +1（v43）：[T35] _render_inline_tail 补代码块包装 +
+# [T36] 坞态正文去限高（_STREAMING_DOCK_CSS 的 max-height/overflow-y 移除、
+# 工具区 220→264px）。CSS 资产变更必须 bump。
+# _SKELETON_CACHE_VERSION +1（v44）：[T37] reportHeight 协议加第 5 字段
+# （cp 可见文本长度，内容哨兵数据源，见 card_viewers._content_sentinel_check）。
+# 旧解析器对多余字段兼容，但旧骨架永不发第 5 字段 → 哨兵失效，必须 bump。
+# _SKELETON_CACHE_VERSION +1（v45）：[T38] 空正文折叠——坞态下正文无可见内容
+# 时收为零高度（body.cp-blank，CSS + reportHeight 维护 + 复用复位）。
+_SKELETON_CACHE_VERSION = 45
 
 
 def _js_literal(value) -> str:
@@ -3626,20 +3633,16 @@ _STREAMING_DOCK_CSS = """
                 }
                 body.streaming-dock #content-placeholder {
                     order: 1;
-                    /* 坞态正文限高：容器自身滚动，卡片总高稳定不随流式增长，
-                       工具区+todo 保持可见；流式结束归位后恢复自然高度。
-                       330→450→600：流式长回复展示更多正文。 */
-                    max-height: 600px;
-                    overflow-y: auto;
-                    /* 🐛 修复（禁横向滚动）：单轴 auto 时另一轴 visible 会被计算为
-                       auto → 长行（URL/无空格长 token）超宽出现容器级横向滚动条。
-                       对齐 body 的 overflow-x:hidden；代码块(.code-content)/表格
-                       (table-scroll-wrapper) 自带嵌套横向滚动不受影响。
-                       overflow-wrap:break-word 让超宽长词强制断行（仅无断行点时
-                       生效，正常文本不受影响），避免 hidden 只裁切看不到尾巴。 */
+                    /* [T36] 不再限高：正文按自然高度随流式生长（与普通模式一致）。
+                       原设计（max-height 600px + 容器内滚）把「卡片总高稳定」放在
+                       阅读体验之上，实际代价是三重糟感：长回复流式期间看不到正在
+                       生成的文字（要手动内滚）；结束后 600→自然高度一次大跳变
+                       （数千 px 长回复尤其剧烈）；内滚容器与消息列表滚动跟随两层
+                       滚动打架。坞态的价值保留在「工具/思考实时条目沉底可见」，
+                       正文增长交给消息列表滚动跟随（贴底已修复）。
+                       保留横向裁剪（原 🐛 修复依然需要）。 */
                     overflow-x: hidden;
                     overflow-wrap: break-word;
-                    overflow-anchor: none;
                 }
                 body.streaming-dock #tool-section {
                     order: 2;
@@ -3650,9 +3653,21 @@ _STREAMING_DOCK_CSS = """
                    视觉上与"折叠"难区分 —— 用户反馈误以为工具区默认收起了。
                    放宽到 220px（≈8 行）后，常规工具序列可完整看到实时进度，
                    同时仍为 max-height（非无限增长），保持"卡片总高不随流式膨胀"
-                   的坞态设计意图。 */
+                   的坞态设计意图。
+                   [T36] 220 → 264px：正文不限高后，坞态唯一职责就是工具区可见，
+                   再压着它没有意义；264 ≈ 9-10 行，配合正文自然生长消除"拥挤"感。 */
                 body.streaming-dock #tool-content {
-                    max-height: 220px;
+                    max-height: 264px;
+                }
+                /* ── [T38] 空正文折叠 ──
+                   长工具循环期间（LLM 连续调工具、尚未输出正文）正文区没有任何
+                   可见内容，但仍占着 padding/min-height 的一块空白 —— 真机截图里
+                   表现为「卡片顶部一块约 45px 的纯白空白」，用户直接读作"白屏"。
+                   判据由 reportHeight 维护（body.cp-blank）：正文无可见文本且无
+                   图片/公式/表格等实体内容时置位，有内容即摘除。
+                   仅坞态生效：非坞态工具区在顶部，正文为空本来就不占视觉主体。 */
+                body.streaming-dock.cp-blank #content-placeholder {
+                    display: none;
                 }
 """
 
@@ -3755,6 +3770,11 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
                     // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）
                     document.body.classList.remove('streaming-dock');
+                    // [T38] 空正文折叠标志同样复位：上一张卡可能停在 cp-blank，
+                    // 不复位会让新卡片一开始就隐藏正文区
+                    document.body.classList.remove('cp-blank');
+                    var _cpR = document.getElementById('content-placeholder');
+                    if (_cpR) _cpR._blankState = undefined;
                     document.body.scrollTop = 0;
                     window._userScrolledWithin = false;
                     window._userScrolledUp = false;

@@ -112,6 +112,7 @@ from app.core.infra.memory_governor import (
     _cleanup_global_lru_caches,
     _compact_process_heap_after_cleanup,
     _is_sip_deleted,
+    effective_render_quota,
     _run_gc_hook,
 )
 from app.core.infra.rss_sampler import rss_sampler
@@ -646,6 +647,21 @@ def resolve_busy_behavior(behavior: str, inverse: bool) -> str:
     return base
 
 
+def _primary_screen_dpr() -> float:
+    """主屏 devicePixelRatio（取不到回落 1.0）。
+
+    只用于启动期计算并发渲染配额（``memory_governor.effective_render_quota``）：
+    QWidget 尚未上屏时 ``self.devicePixelRatioF()`` 会回落 1.0，用主屏值更准。
+    """
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        scr = QApplication.primaryScreen()
+        return float(scr.devicePixelRatio()) if scr is not None else 1.0
+    except Exception:
+        return 1.0
+
+
 def _abort_team_window(win) -> None:
     """回收建窗成功但注册/join 失败的团队窗口（幽灵窗口兜底，E1/E2 共用）。
 
@@ -1137,7 +1153,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bg_finalize_started = False
         # ★ B4 温和层：WebEngine 并发页上限（本窗口已渲染未卸载卡片数）
         self._rendered_card_count: int = 0
-        self._max_rendered_cards: int = _MAX_RENDERED_CARDS
+        # [MEM] 配额按本机 dpr 收缩：单卡合成表面成本 ∝ 宽×高×dpr²（实测
+        # 9.2MB/百万物理像素），固定 12 页在 225% 缩放的 4K 屏上等于把内存
+        # 预算放大 5 倍。dpr=1 的机器行为不变（见 effective_render_quota）。
+        self._max_rendered_cards: int = effective_render_quota(_MAX_RENDERED_CARDS, _primary_screen_dpr())
         self._render_tick: float = 0.0
         self._recycle_lru_call_count: int = 0  # 计数校准（每 20 次重算实际计数）
         # ★ B4 强回收层：已卸载 renderer 进程登记（LRU 淘汰用）
@@ -12752,8 +12771,8 @@ class OpenAIChatToolWindow(ToolWindow):
         几乎全落在 renderer 子进程上，主进程 RSS 根本涨不到 900/1400MB 门槛，
         强回收因此永不触发，子进程一路涨到 4GB。
 
-        现改为子进程 RSS 单独作主判据；主进程 RSS 只在子进程采样不可用时兜底。
-        原设计意图（不因 Python 堆高就误杀 renderer）依然成立：子进程不高就不触发。
+        现改为「子进程单项」OR「主进程 + 子进程合计」双路判据（历史两版各漏
+        一边，见方法体内注释）；主进程 RSS 只在采样完全不可用时兜底。
 
         Args:
             active: 本窗口是否处于激活状态。活跃窗口用户正在交互，采用更高的
@@ -12766,22 +12785,33 @@ class OpenAIChatToolWindow(ToolWindow):
         子进程采样不可用时退化：并发页 > _MAX_RENDERED_CARDS 且存在
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
         """
+        # [MEM] 判据 = 「子进程单项超限」OR「主进程 + 子进程合计超限」。
+        #
+        # 演进脉络（勿再退回单项）：
+        # - 初版：主进程 RSS AND 子进程 RSS（双 AND）→ 主进程涨不到门槛，
+        #   强回收永不触发，子进程一路涨到 4GB（T30 记录）。
+        # - T30：改成**只看子进程** → 反而漏掉另一半：软件档（--disable-gpu）
+        #   下 Chromium 把合成表面留在**主进程**（实测 8 个可见 view：主进程
+        #   +404MB、子进程 +0MB），hardware 档才落 renderer 子进程。
+        #   实测现场：主进程 1968MB + 子进程 854MB，而活跃窗口阈值 1000MB 只
+        #   管子进程 → 差 146MB 不到阈值 → 单窗口活跃场景内存单调涨到 2.8GB。
+        # - 现在：两边都看。合计阈值沿用既有常量（活跃 1400 / 非活跃 900），
+        #   子进程单项阈值（1000 / 600）保留为更敏感的那一路。
+        # 「不因 Python 堆高就误杀 renderer」的原意仍受保护：强回收只 kill
+        # 距可视区 ≥ N 批的离屏 renderer，且 LRU 保留最近 8/14 个。
         try:
             web_mb = rss_sampler.web_rss_mb()
-        except Exception:
-            web_mb = 0.0
-        if web_mb > 0.0:
-            web_threshold = _WEB_MEM_THRESHOLD_MB_ACTIVE if active else _WEB_MEM_THRESHOLD_MB
-            return web_mb >= web_threshold
-        # 子进程采样不可用（无 psutil / 尚未创建 view）→ 退回主进程 RSS 判据
-        try:
             rss_mb = rss_sampler.rss_mb()
         except Exception:
             return self._over_memory_threshold_fallback()
-        if rss_mb <= 0.0:
+        if web_mb <= 0.0 and rss_mb <= 0.0:
+            # 采样不可用（无 psutil / 尚未创建 view）→ 退化判据
             return self._over_memory_threshold_fallback()
-        threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
-        return rss_mb > threshold
+        web_threshold = _WEB_MEM_THRESHOLD_MB_ACTIVE if active else _WEB_MEM_THRESHOLD_MB
+        if web_mb >= web_threshold:
+            return True
+        total_threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
+        return (rss_mb + web_mb) > total_threshold
 
     def _over_memory_threshold_fallback(self) -> bool:
         """psutil 不可用时的退化判定：并发页超限 + 存在远距已卸载批次。

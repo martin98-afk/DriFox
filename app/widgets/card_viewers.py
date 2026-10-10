@@ -147,6 +147,36 @@ from app.widgets.card_render_core import (
 )
 
 
+def _parse_height_payload(payload: str):
+    """[T37] 解析 pywebview_height 载荷（纯函数，便于无 GUI 单元验证）。
+
+    协议：'``<scrollHeight>[|<scrollTop>|<clientHeight>[|<reading>[|<domTextLen>]]]``'
+    后续字段由新骨架逐版本增加，旧格式（仅高度）仍兼容。
+
+    Returns:
+        (h, scroll_top, client_height, reading, dom_text_len)；
+        可选字段缺失时为 None；载荷非法返回 None（调用方静默忽略）。
+    """
+    try:
+        parts = payload.split("|", 4)
+        if not parts or not parts[0]:
+            return None
+        h = int(float(parts[0]))
+        scroll_top = int(float(parts[1])) if len(parts) >= 3 else 0
+        client_height = int(float(parts[2])) if len(parts) >= 3 else 0
+        reading = (parts[3] == "1") if len(parts) >= 4 else None
+        # ⚠️ maxsplit 必须是 4：3 会把第 5 字段并进 parts[3]，破坏阅读标志判定
+        dom_text_len: Optional[int] = None
+        if len(parts) >= 5:
+            try:
+                dom_text_len = int(float(parts[4]))
+            except Exception:  # noqa: BLE001
+                dom_text_len = None
+        return h, scroll_top, client_height, reading, dom_text_len
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
@@ -228,29 +258,23 @@ class ConsoleMonitorPage(QWebEnginePage):
         # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
         # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
         if msg.startswith("pywebview_height:"):
-            # 协议：'pywebview_height:<scrollHeight>[|<scrollTop>|<clientHeight>]'
-            # 后两字段由 body 几何上报新增；旧格式（仅高度）仍兼容——骨架在 JS
-            # 尚未注入、或第三方/降级路径下可能只发高度，此时不发射几何信号，
-            # wheelEvent 回退到保守策略。
-            try:
-                payload = msg.split(":", 1)[1]
-                if "|" in payload:
-                    # 第 4 字段（可选，旧格式兼容）：卡片内用户阅读标志。
-                    # 翻转才发信号：reportHeight 高频（流式 ~30ms/条），布尔去重后
-                    # 信号量与用户滚动行为同阶，宿主侧零轮询成本。
-                    parts = payload.split("|", 3)
-                    h = int(float(parts[0]))
-                    if len(parts) >= 4:
-                        _rd = parts[3] == "1"
-                        if _rd != getattr(self, "_last_card_reading", False):
-                            self._last_card_reading = _rd
-                            self.cardReadingChanged.emit(_rd)
-                    self.heightReported.emit(h)
-                    self.bodyGeometryReported.emit(h, int(float(parts[1])), int(float(parts[2])))
-                else:
-                    self.heightReported.emit(int(float(payload)))
-            except Exception:
-                pass
+            payload = msg.split(":", 1)[1]
+            parsed = _parse_height_payload(payload)
+            if parsed is None:
+                return
+            h, scroll_top, client_height, reading, dom_text_len = parsed
+            # [T37] 第 5 字段：正文可见文本长度（内容哨兵，见 _content_sentinel_check）；
+            # None = 旧骨架/降级路径未携带 → 存 -1，哨兵视作"未知"不动作。
+            self._dom_text_len = dom_text_len if dom_text_len is not None else -1
+            # 第 4 字段：卡片内用户阅读标志。翻转才发信号：reportHeight 高频
+            # （流式 ~30ms/条），布尔去重后信号量与用户滚动行为同阶，宿主侧零轮询成本。
+            if reading is not None and reading != getattr(self, "_last_card_reading", False):
+                self._last_card_reading = reading
+                self.cardReadingChanged.emit(reading)
+            self.heightReported.emit(h)
+            # 旧格式（仅高度，无几何字段）不发几何信号：wheelEvent 回退保守策略
+            if dom_text_len is not None or reading is not None:
+                self.bodyGeometryReported.emit(h, scroll_top, client_height)
         elif msg == "pywebview_ready":
             self.contentReady.emit()
         elif msg.startswith("pywebview_action:"):
@@ -577,6 +601,37 @@ _dialog_event_filter = _DialogEventFilter()
 _PHYSICAL_TEXTURE_LIMIT = 16000
 
 
+def _logical_height_cap_for_area(width_logical, dpr, area_mpx) -> int:
+    """给定逻辑宽度 + dpr，返回不超「物理面积上限」的最大逻辑高度（纯函数）。
+
+    物理面积 = (w·dpr)·(h·dpr) = w·h·dpr²，故 h ≤ area_mpx·1e6 / (w·dpr²)。
+    异常入参（0/负数/None/非数）按 dpr=1.0、w=MAX_WIDTH 兜底；结果保底 200
+    逻辑高（病态值下不留 0 高控件）。
+
+    与 `_logical_height_cap` 的分工：后者管**单边**物理纹理上限（16384px 硬限，
+    撞上会直接丢 GPU 上下文），本函数管**面积**成本（内存，成本 ∝ 面积）。
+    """
+    try:
+        _dpr = float(dpr)
+    except (TypeError, ValueError):
+        _dpr = 1.0
+    if _dpr <= 0:
+        _dpr = 1.0
+    try:
+        w = float(width_logical)
+    except (TypeError, ValueError):
+        w = 0.0
+    if w <= 0:
+        w = 0.0
+    try:
+        area = float(area_mpx)
+    except (TypeError, ValueError):
+        area = 0.0
+    if w <= 0 or area <= 0:
+        return 200
+    return max(200, int(area * 1_000_000.0 / (w * _dpr) / _dpr))
+
+
 def _logical_height_cap(dpr, physical_limit: int = _PHYSICAL_TEXTURE_LIMIT) -> int:
     """DPR → 不超物理纹理上限的逻辑高度（纯函数，供单测复用）。
 
@@ -623,6 +678,18 @@ class CodeWebViewer(QWebEngineView):
     # 极端长内容仍会回退到内滚（wheel 转发逻辑因此必须保留），但那是安全网而非常态。
     MAX_WIDTH = 1800
     MAX_HEIGHT = 10000
+
+    # [MEM] 单 view 物理面积上限（百万像素）。为什么单边上限不够：
+    # Chromium 离屏合成表面按「逻辑尺寸 × dpr」分配，**成本只与宽×高×dpr² 有关**
+    # —— 实测（tools/diag_webengine_mem_probe.py --show，线性拟合截距≈0）
+    # 9.2MB / 百万物理像素：549×2000 逻辑 @dpr2.25 → 50.5MB/view，
+    # 244×2000 逻辑 @dpr2.25 → 22.1MB/view（面积比 2.25×，成本比 2.29×）。
+    # 只卡 MAX_HEIGHT 挡不住它：dpr=2.25 时 1800×7111 逻辑 = 4050×16000 物理
+    # = 65Mpx ≈ 590MB 单卡。
+    # 12Mpx 换算：dpr=2.25 + 700 逻辑宽 → 高度上限 ≈3387 逻辑（≈110MB/卡）；
+    # dpr=1 + 700 逻辑宽 → ≈17142 逻辑高（超过 MAX_HEIGHT）→ **老机器完全不生效**。
+    # 超限内容回退卡内滚动（wheelEvent 内外转发的安全网，见 MAX_HEIGHT 注释）。
+    MAX_SURFACE_MPX = 12.0
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
@@ -673,6 +740,10 @@ class CodeWebViewer(QWebEngineView):
         # DOM）或代际变化（_tool_dom_dirty_gen 递增，期间有新注入）时**不清除**，避免下一次
         # 全量渲染误判"无工具 DOM 需保护"→ 裸 updateContent 抹掉运行框。
         self._tool_dom_dirty: bool = False
+        # [T37] 内容哨兵状态：DOM 正文可见文本长度（reportHeight 第 5 字段，
+        # -1 = 未知/旧骨架）+ 哨兵触发冷却时间戳。见 _content_sentinel_check。
+        self._dom_text_len: int = -1
+        self._sentinel_last_ts: float = 0.0
         # [B2] 工具 DOM 脏标记代际：每次置 True 时递增，JS 回调清除时与捕获值比较，
         # 防止"旧渲染回调误清新注入的 dirty"（新注入已递增代际 → 旧回调放弃清除）。
         self._tool_dom_dirty_gen: int = 0
@@ -1000,32 +1071,62 @@ class CodeWebViewer(QWebEngineView):
             pass
         return super().event(event)
 
+    def _surface_area_height_cap(self, width_logical) -> int:
+        """给定逻辑宽度，返回「不超物理面积上限」的最大逻辑高度。"""
+        dpr = 1.0
+        try:
+            dpr = float(self.devicePixelRatioF()) or 1.0
+        except Exception:
+            pass
+        if not width_logical:
+            width_logical = self.MAX_WIDTH
+        return _logical_height_cap_for_area(width_logical, dpr, self.MAX_SURFACE_MPX)
+
+    def clamp_surface_height(self, height) -> int:
+        """把想要的逻辑高度钳进「单边上限 + 物理面积上限」。
+
+        MessageCard 在上报高度前调用它，保证「widget 落地高度」与
+        「heightChanged 广播高度」一致（否则外层滚动锚定会按未钳值补偿而漂移）。
+        """
+        try:
+            h = int(height)
+        except (TypeError, ValueError):
+            return int(self.MAX_HEIGHT)
+        cap = self._surface_area_height_cap(self.width() or self.MAX_WIDTH)
+        return max(40, min(h, self.MAX_HEIGHT, cap))
+
     def setFixedSize(self, *args, **kwargs):
-        """限制最大尺寸，防止 GPU 内存溢出"""
+        """限制最大尺寸，防止 GPU 内存溢出（单边上限 + 物理面积上限）"""
         # 计算安全尺寸
         w = args[0] if len(args) > 0 else kwargs.get("width", self.MAX_WIDTH)
         h = args[1] if len(args) > 1 else kwargs.get("height", self.MAX_HEIGHT)
 
         # 限制最大尺寸
         safe_w = min(w, self.MAX_WIDTH) if isinstance(w, int) else w
-        safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
+        if isinstance(safe_w, int) and isinstance(h, int):
+            safe_h = min(h, self.MAX_HEIGHT, self._surface_area_height_cap(safe_w))
+        else:
+            safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
 
         super().setFixedSize(safe_w, safe_h)
 
     def resize(self, *args, **kwargs):
-        """限制 resize 尺寸，防止过大导致 GPU 内存溢出"""
+        """限制 resize 尺寸，防止过大导致 GPU 内存溢出（单边上限 + 物理面积上限）"""
         w = args[0] if len(args) > 0 else kwargs.get("width", self.MAX_WIDTH)
         h = args[1] if len(args) > 1 else kwargs.get("height", self.MAX_HEIGHT)
 
         # 限制最大尺寸
         safe_w = min(w, self.MAX_WIDTH) if isinstance(w, int) else w
-        safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
+        if isinstance(safe_w, int) and isinstance(h, int):
+            safe_h = min(h, self.MAX_HEIGHT, self._surface_area_height_cap(safe_w))
+        else:
+            safe_h = min(h, self.MAX_HEIGHT) if isinstance(h, int) else h
 
         super().resize(safe_w, safe_h)
 
     def setFixedHeight(self, height):
-        """限制最大高度，防止 GPU 内存溢出"""
-        safe_h = min(height, self.MAX_HEIGHT)
+        """限制最大高度，防止 GPU 内存溢出（面积上限按当前宽度换算）"""
+        safe_h = self.clamp_surface_height(height)
         super().setFixedHeight(safe_h)
 
     def setFixedWidth(self, width):
@@ -1207,9 +1308,46 @@ class CodeWebViewer(QWebEngineView):
                 logger.info(f"[finish-render] js_land+layout={_el:.1f}ms height={h}")
         self._height_report_pending = False
         self._document_height = h  # 跟踪文档高度用于 wheelEvent 边界判断
+        self._content_sentinel_check()
         final_h = h + 2
         if abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
+
+    def _content_sentinel_check(self):
+        """[T37] 内容哨兵：流式中正文几乎空但 markdown 大量积压 → 强制补渲。
+
+        背景：真机长会话（多工具 + 长回复）出现「viewer 全白、高度只剩骨架默认值」，
+        复现探针（tests/debug/stream_blank_collapse_probe.py）证实内容停在 Python→JS
+        链路的某一层后**再无任何恢复路径**——增量注入、调度渲染各自都有静默 return
+        分支，叠加后没有任何环节负责"发现内容丢了"。
+        本哨兵借 reportHeight 高频回传（第 5 字段 = cp 可见文本长度，见
+        _handle_message）做被动巡检：markdown 积压 >800 字符、cp 文本 <200、
+        且 think 未闭合排除（静默累积是设计行为）→ 强制全量补渲。3s 冷却防风暴。
+        覆盖面：池化误清、增量停摆、JS 注入失败等一切"内容丢失"型白屏——
+        无论根因在哪一层，渲染最终都收敛到 _perform_update 全量路径。
+        """
+        if not self._streaming or not self._is_js_ready:
+            return
+        md_len = len(self._markdown_text or "")
+        if md_len < 800:
+            return
+        # _dom_text_len 由 Page 解析（javaScriptConsoleMessage），Viewer 经 page() 读取
+        _page = self.page()
+        dom_len = getattr(_page, "_dom_text_len", -1) if _page is not None else -1
+        if dom_len < 0 or dom_len >= 200:
+            return  # 未知（旧骨架）或正文健康
+        # think 未闭合期间正文静默累积是设计行为（防 spinner 闪烁），不触发
+        if _has_unclosed_think(self._markdown_text):
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_sentinel_last_ts", 0.0) < 3.0:
+            return
+        self._sentinel_last_ts = now
+        logger.warning(
+            f"[content-sentinel] 正文近乎空(dom={dom_len})但 markdown 积压 {md_len} 字符 → 强制补渲"
+        )
+        self._render_deferred = False
+        self._schedule_render(immediate=True)
 
     def _on_body_geometry_reported(self, scroll_height: int, scroll_top: int, client_height: int):
         """缓存 body 的真实滚动几何（reportHeight 顺带回传）。
@@ -4138,7 +4276,34 @@ class CodeWebViewer(QWebEngineView):
                         var _tcR = document.getElementById('tool-content');
                         if (_tcR && _tcR._userScrolledUp === true) _rd = true;
                     }} catch (_e) {{}}
-                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0'));
+                    // [T37] 第 5 字段：正文可见文本长度（内容哨兵数据源）。
+                    // Python 侧用它对照 _markdown_text 积压量，检测"DOM 内容丢失"
+                    // （池化误清 / 渲染链路停摆 / JS 注入失败等各类根因）并自动补渲。
+                    // 查询失败发 -1：Python 侧视作"未知"，哨兵不动作（旧骨架无此字段同效）。
+                    var _cl = -1;
+                    try {{
+                        var _cpL = document.getElementById('content-placeholder');
+                        if (_cpL) _cl = (_cpL.textContent || '').length;
+                    }} catch (_e2) {{}}
+                    // [T38] 空正文折叠：长工具循环期间正文无内容却仍占一块空白，
+                    // 被误读为"白屏"。无可见文本且无实体内容（图片/公式/表格/图表/
+                    // 代码块）时给 body 打 cp-blank，CSS 在坞态下把正文区收为零高度；
+                    // 一旦有内容立即摘除。翻转才改 class，避免高频写 DOM 属性。
+                    try {{
+                        var _cpE = document.getElementById('content-placeholder');
+                        if (_cpE) {{
+                            var _hasText = ((_cpE.textContent || '').trim().length > 0);
+                            var _hasSolid = _hasText || _cpE.querySelectorAll(
+                                'img,video,canvas,table,pre,svg,.katex,.code-block,[data-fence],iframe'
+                            ).length > 0;
+                            var _blank = !_hasSolid;
+                            if (_blank !== _cpE._blankState) {{
+                                _cpE._blankState = _blank;
+                                document.body.classList.toggle('cp-blank', _blank);
+                            }}
+                        }}
+                    }} catch (_e3) {{}}
+                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0') + '|' + _cl);
                 }}
                 // 批量报告高度：合并同一帧内的多次请求，动画期间仍暂停报告。
                 //
