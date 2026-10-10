@@ -1100,6 +1100,10 @@ class CodeWebViewer(QWebEngineView):
         self._cached_raw_md_hash = 0
         self._last_rendered_html = None
         self._render_deferred = False
+        # [perf-fix] 作废在途异步渲染：复用后旧任务结果不得落到新卡片
+        self._render_seq += 1
+        self._render_inflight = False
+        self._render_pending = None
         # [T6] 复用前摘出主题补渲队列：复用后本 viewer 已属新卡片，残留的
         # 旧主题补渲会打到新内容上（或空转打断新卡的流式节拍）
         _theme_rerender_queue.discard(self)
@@ -3972,7 +3976,7 @@ class CodeWebViewer(QWebEngineView):
                     // 预览文字打字机：差量段里新落地的思考/工具预览行逐字显现
                     if (typeof window._ptPlay === 'function') window._ptPlay();
                     // 使用延迟报告，确保浏览器布局完成
-                    setTimeout(() => reportHeight(), 30);
+                    setTimeout(() => reportHeightDebounced(), 30);
                 }}
                 // ===== 差量收尾：流式思考块就地定稿 =====
                 // 结束这一拍不再整页替换 innerHTML：只把仍处流式态的 .think-streaming
@@ -4002,7 +4006,7 @@ class CodeWebViewer(QWebEngineView):
                             }}
                         }}
                         if (window._toolCompactMode && typeof reorganizeContent === 'function') reorganizeContent();
-                        if (typeof reportHeight === 'function') setTimeout(function () {{ reportHeight(); }}, 30);
+                        if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 30);
                     }} catch (e) {{
                         if (window.console) console.log('finalize-failed:' + e);
                     }}
@@ -4073,7 +4077,7 @@ class CodeWebViewer(QWebEngineView):
                     // 插件 fence：尾部整段替换同样可能带入新的插件 fence
                     if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
                     if (typeof window._initWidgets === 'function') window._initWidgets();
-                    setTimeout(() => reportHeight(), 30);
+                    setTimeout(() => reportHeightDebounced(), 30);
                 }}
                 {_CONTENT_AUTOSCROLL_JS}
                 function reportHeight() {{
