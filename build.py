@@ -206,6 +206,10 @@ _hidden_imports = [
             "Darwin": ["keyring.backends.macOS"],
         }.get(platform.system(), ["keyring.backends.chainer"])
     ),
+    # pypinyin：history-manager 插件历史卡片拼音排序用。主代码零静态引用
+    # （插件源文件运行时动态加载，PyInstaller 不分析插件依赖），漏打会导致
+    # 插件 import pypinyin 失败、拼音排序静默降级
+    "pypinyin",
 ]
 
 # 打包排除：由插件自包含 deps/ 提供（codegraph-tools / desktop-automation），
