@@ -353,6 +353,9 @@ class GlobalCardController:
                 w.hide()
         if self._provider_view == "picker":
             wall = self._provider_picker_popup
+            # 每次进入卡片墙视图都按当前注册表重建：provider 插件热装/卸载
+            # 后注册表已变，懒构建的旧快照必须丢弃（装完插件再打开必是新内容）
+            wall.rebuild()
             layout.addWidget(wall)
             wall.show()
             card.clear_save_button()
@@ -371,6 +374,20 @@ class GlobalCardController:
                     ]
                 )
         card.updateGeometry()
+
+    def refresh_provider_wall(self):
+        """插件变更广播回调：卡片墙处于 picker 视图且已挂载显示时重建
+
+        由 main_widget._on_plugin_hot_reload 在 plugin_changed 广播时调用，
+        覆盖「卡片墙/其 tab 开着时装了 provider 插件」的场景。编辑视图或
+        卡片未构建时不动作（墙隐藏，下次打开 _mount_provider_view 会重建）。
+        """
+        if self._provider_picker_card is None or self._provider_view != "picker":
+            return
+        wall = self._provider_picker_popup
+        if wall is None or wall.isHidden():
+            return
+        wall.rebuild()
 
     def _on_provider_breadcrumb_root(self):
         """面包屑根节点「服务商」点击 → 按来源回退（用户裁决：按来源回退）"""

@@ -272,6 +272,8 @@ class TestProviderCardNav:
         reg = ProviderRegistry()
         monkeypatch.setattr(ProviderRegistry, "_instance", reg)
         monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        # 阻断 ensure_loaded 扫真实插件目录（同 test_provider_picker_card.registry）
+        reg._warmup_done = True
         reg.register(ProviderDef(name="DeepSeek", api_url="https://api.deepseek.com"), source="plugin:test")
 
         cm = MagicMock()
@@ -365,3 +367,43 @@ class TestProviderCardNav:
         }
         cc._on_provider_edit_saved("TestProvider", info, is_new=True)
         assert closed == ["provider_picker"]
+
+    def test_picker_wall_refreshes_on_reopen(self, cc):
+        """插件安装（注册表新增）后重开卡片墙 → 内容拾取新服务商"""
+        cc._show_provider_picker_card()
+        assert "NewProvider" not in cc._provider_picker_popup.provider_names()
+
+        ProviderRegistry.get_instance().register(
+            ProviderDef(name="NewProvider", api_url="https://api.new.com"), source="plugin:new"
+        )
+        cc._show_provider_picker_card()
+        assert "NewProvider" in cc._provider_picker_popup.provider_names()
+
+    def test_refresh_provider_wall_picks_up_in_picker_view(self, cc):
+        """picker 视图 + 墙已挂载显示 → 广播刷新拾取新服务商"""
+        cc._show_provider_picker_card()
+        assert cc._provider_view == "picker"
+        assert not cc._provider_picker_popup.isHidden(), "mount 后墙应处于显示态"
+
+        ProviderRegistry.get_instance().register(
+            ProviderDef(name="NewProvider", api_url="https://api.new.com"), source="plugin:new"
+        )
+        cc.refresh_provider_wall()
+        assert "NewProvider" in cc._provider_picker_popup.provider_names()
+
+    def test_refresh_provider_wall_skipped_in_edit_view(self, cc):
+        """编辑视图时广播刷新不动作（墙非当前视图，不打扰表单）"""
+        cc._show_provider_picker_card()
+        cc._show_provider_preset_card("DeepSeek")
+        assert cc._provider_view == "edit"
+
+        ProviderRegistry.get_instance().register(
+            ProviderDef(name="NewProvider", api_url="https://api.new.com"), source="plugin:new"
+        )
+        cc.refresh_provider_wall()
+        assert "NewProvider" not in cc._provider_picker_popup.provider_names()
+
+    def test_refresh_provider_wall_safe_before_ensure(self, cc):
+        """卡片未懒构建时调用刷新 → 静默无副作用（广播早于首次打开）"""
+        assert cc._provider_picker_card is None
+        cc.refresh_provider_wall()  # 不抛错即可

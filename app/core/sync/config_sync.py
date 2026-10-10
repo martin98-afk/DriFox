@@ -675,7 +675,12 @@ class ConfigSyncService(QObject):
                     _file_data = _json.load(_f)
 
                 # 密钥回填：keyring 化后落盘文件不含明文密钥，写回内存前
-                # 从 OS 凭证库取回；密码模式则用本机密码解密密文
+                # 从 OS 凭证库取回；密码模式则用本机密码解密密文。
+                # 密钥态判定（locked/备份清理）统一推迟到写回循环之后：
+                # _has_locked_cipher 检查内存值，写回前判定拿到的是同步前旧值
+                _secret_mode = ""
+                _secret_pwd = ""
+                _secret_backup: dict = {}
                 try:
                     from app.utils.secret_store import (
                         MASTER_PASSWORD_ACCOUNT,
@@ -683,23 +688,37 @@ class ConfigSyncService(QObject):
                         MODE_PASSWORD,
                         SecretStore,
                         collect_ciphertexts,
+                        is_ciphertext,
                         unwrap_secrets,
                     )
 
-                    _mode = str(cfg.secret_mode.value or MODE_KEYRING)
-                    if _mode == MODE_PASSWORD:
-                        cfg._cipher_backup = collect_ciphertexts(_file_data)
-                        _pwd = cfg._secret_password or SecretStore().get(MASTER_PASSWORD_ACCOUNT)
-                        unwrap_secrets(_file_data, SecretStore(), mode=_mode, password=_pwd)
-                        cfg._secrets_locked = cfg._has_locked_cipher()
-                        if not cfg._secrets_locked:
-                            # 与 Settings._apply_secret_mode 同一语义：解锁成功即清备份，
-                            # 否则设置卡会把「有密文备份」误读成「等待解锁」
-                            cfg._cipher_backup = {}
+                    _secret_mode = str(cfg.secret_mode.value or MODE_KEYRING)
+                    if _secret_mode == MODE_PASSWORD:
+                        _secret_backup = collect_ciphertexts(_file_data)
+                        _secret_pwd = cfg._secret_password or SecretStore().get(MASTER_PASSWORD_ACCOUNT)
+                        unwrap_secrets(_file_data, SecretStore(), mode=_secret_mode, password=_secret_pwd)
+                        # 🔒 本机权威：解密失败/无密码被置空的条目，若内存已有明文 key，
+                        # 恢复内存值。云端解不开的密文严禁把可用密钥覆盖成空
+                        # （历史 bug：同步后 API Key 无效、重启才恢复）。
+                        _mem_saved = cfg.llm_saved_providers.value
+                        _cloud_saved = (_file_data.get("LLM") or {}).get("SavedProviders")
+                        if isinstance(_mem_saved, dict) and isinstance(_cloud_saved, dict):
+                            for _cid, _info in _cloud_saved.items():
+                                if not (isinstance(_info, dict) and str(_cid) in _secret_backup):
+                                    continue
+                                if str(_info.get("API_KEY") or ""):
+                                    continue
+                                _mem_info = _mem_saved.get(_cid)
+                                _mem_key = str(_mem_info.get("API_KEY") or "") if isinstance(_mem_info, dict) else ""
+                                if _mem_key and not is_ciphertext(_mem_key):
+                                    _info["API_KEY"] = _mem_key
                     else:
-                        unwrap_secrets(_file_data, SecretStore(), mode=_mode)
+                        unwrap_secrets(_file_data, SecretStore(), mode=_secret_mode)
                 except Exception as _se:
+                    # 回填异常时清零模式标记：写回后的密钥态判定整体跳过，
+                    # 保留 Settings 现有 locked/备份态，避免误清备份或误置 locked
                     logger.warning(f"[SecretStore] 同步回填失败: {_se}")
+                    _secret_mode = ""
 
                 for _section_name, _section_data in _file_data.items():
                     for _key, _value in _section_data.items():
@@ -736,6 +755,16 @@ class ConfigSyncService(QObject):
                             if getattr(cfg, _matched).value != _value:
                                 getattr(cfg, _matched).value = _value
 
+                # 🔒 密钥态判定必须在写回循环之后（基于新内存值）：
+                # - 无锁定条目且密码在手上 → 清备份（解锁成功即清，防设置卡误读「等待解锁」）；
+                # - 无锁定条目但密码为空（Windows 凭据偶发读取失败）且内存有可用 key →
+                #   保留备份：落盘时 seal_secrets 用备份密文原样回写，防止无密码明文落盘；
+                # - 有锁定条目 → 保留备份并置 locked，提示用户输入密码。
+                if _secret_mode == "password":  # 与 secret_store.MODE_PASSWORD 同值，防 import 失败时未绑定
+                    cfg._cipher_backup = _secret_backup
+                    cfg._secrets_locked = cfg._has_locked_cipher()
+                    if not cfg._secrets_locked and _secret_pwd:
+                        cfg._cipher_backup = {}
                 logger.debug("[ConfigSync] 全量配置已从文件同步到内存（含本地 Gitee token）")
             except Exception as _e:
                 logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")

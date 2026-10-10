@@ -10356,6 +10356,19 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] LSP server list refreshed")
 
+        # 服务商变更：刷新添加服务商卡片墙（provider 插件热装/卸载后注册表
+        # 已更新，但卡片墙是构建时快照；refresh_provider_wall 内部按视图
+        # 状态判定，非 picker 视图/卡片未打开时零成本）
+        try:
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            _cc = get_global_card_controller()
+            if _cc is not None:
+                _cc.refresh_provider_wall()
+        except (RuntimeError, AttributeError):
+            # 多窗口竞态：窗口/卡片已被销毁
+            pass
+
         # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
         # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
         if result.get("ui"):

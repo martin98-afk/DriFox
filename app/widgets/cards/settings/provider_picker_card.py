@@ -261,6 +261,22 @@ class ProviderPickerCard(QWidget):
         self._add_group_header("其他", 1, None, first=False)
         self._add_flow_row([(CUSTOM_ENTRY, "手动填写全部参数")])
 
+    def rebuild(self):
+        """按当前 ProviderRegistry 重建卡片墙（插件安装/卸载后刷新）
+
+        构造时的 _build() 只是快照；provider 插件热装/卸载后注册表已变，
+        必须清空重扫。旧 row（含内部 FlowLayout 与 tile）整体 deleteLater，
+        引用列表同步清零防悬挂。
+        """
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._tiles.clear()
+        self._headers.clear()
+        self._build()
+
     def _add_flow_row(self, entries: List[tuple]) -> None:
         """一行 FlowLayout（卡片固定尺寸，按可用宽度自动换行）"""
         row = QWidget(self)

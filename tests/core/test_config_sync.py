@@ -1386,3 +1386,172 @@ class TestAutoStartExcludedFromSync:
         reset_sync_service._reload_settings_on_main_thread()
 
         assert fake.auto_start.value is True, "开机自启为设备本地属性，云端 False 不得覆盖本机 True"
+
+
+# =============================================================================
+# N. _reload_settings_on_main_thread 密钥回填 — 同步后 API Key 无效回归
+# =============================================================================
+
+
+class TestSecretReloadOnSync:
+    """修复回归：Gitee 同步回填把内存可用密钥覆盖成空值。
+
+    历史 bug：_reload_settings_on_main_thread 密码模式回填中，
+    _has_locked_cipher() 在写回循环【之前】基于同步前的内存旧值判定，
+    内存有明文 key 时永远误判「已解锁」→ 误清 _cipher_backup、不置 locked；
+    unwrap_secrets 解密失败/无密码被置空的 _file_data 随后整体覆盖内存 →
+    发消息 401「API Key无效」，且无「重新输入密码」提示；重启后磁盘密文
+    重新解锁才恢复。修复语义：
+    1. 解密失败条目若内存已有明文 → 本机权威，恢复内存值不被覆盖；
+    2. locked 判定挪到写回循环之后（基于新内存值）；
+    3. 无密码但内存有 key：保留备份（落盘时 seal 原样回写，防明文落盘）。
+    """
+
+    class _FakeSettings:
+        """Settings 替身：ConfigItem 须为类属性（写回循环按 dir(cfg.__class__) 匹配）"""
+
+        ui_theme_style = ConfigItem("UI", "ThemeStyle", "lumia")
+        secret_mode = ConfigItem("General", "SecretMode", "password")
+        llm_saved_providers = ConfigItem("LLM", "SavedProviders", {})
+
+        def __init__(self, memory_key: str = ""):
+            self.file = Path("")
+            type(self).secret_mode.value = "password"
+            type(self).llm_saved_providers.value = {"prov_a": {"API_KEY": memory_key}} if memory_key else {}
+            self._cipher_backup: dict = {}
+            self._secrets_locked = False
+            self._secret_password = ""
+
+        def get_instance(self):
+            return self
+
+        def _has_locked_cipher(self) -> bool:
+            """与 Settings._has_locked_cipher 同语义：备份中有条目但内存为空"""
+            if not self._cipher_backup:
+                return False
+            saved = self.llm_saved_providers.value
+            if not isinstance(saved, dict):
+                return False
+            for cid in self._cipher_backup:
+                info = saved.get(cid)
+                if isinstance(info, dict) and not str(info.get("API_KEY") or ""):
+                    return True
+            return False
+
+    @staticmethod
+    def _setup(
+        monkeypatch,
+        svc,
+        fake,
+        tmp_path: Path,
+        cloud_ciphertext: str,
+        master_pwd: str,
+    ) -> str:
+        """写云端密文配置 + mock 凭据读取/主题链，返回 cfg_id"""
+        from app.core.sync import config_sync as cs
+
+        cfg_id = "prov_a"
+        cfg_path = tmp_path / "app.config"
+        cfg_path.write_text(
+            json.dumps({"LLM": {"SavedProviders": {cfg_id: {"API_KEY": cloud_ciphertext}}}}),
+            encoding="utf-8",
+        )
+        fake.file = cfg_path
+
+        monkeypatch.setattr("app.utils.secret_store.SecretStore.get", lambda self, account: master_pwd)
+        monkeypatch.setattr("app.utils.config.update_theme_options", lambda: None)
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.reload", lambda self: None)
+        monkeypatch.setattr(cs, "Settings", fake)
+        monkeypatch.setattr(cs.QTimer, "singleShot", staticmethod(lambda ms, cb: None))
+        return cfg_id
+
+    def test_keyring_read_failure_keeps_memory_key(self, reset_sync_service, tmp_path, monkeypatch):
+        """凭据偶发读取失败（master_pwd=""）+ 内存有明文 → key 不得被置空覆盖"""
+        from app.utils.secret_store import encrypt_secret
+
+        fake = self._FakeSettings(memory_key="sk-memory")
+        cfg_id = self._setup(monkeypatch, reset_sync_service, fake, tmp_path, encrypt_secret("sk-cloud", "P"), "")
+        reset_sync_service._reload_settings_on_main_thread()
+
+        saved = fake.llm_saved_providers.value
+        assert saved[cfg_id]["API_KEY"] == "sk-memory", "凭据读取失败时内存明文 key 不得被云端密文（置空）覆盖"
+        assert fake._secrets_locked is False, "内存 key 可用，不应提示解锁"
+        assert fake._cipher_backup, "无密码落盘风险：应保留备份密文供 seal 原样回写"
+
+    def test_decrypt_success_uses_cloud_key_and_clears_backup(self, reset_sync_service, tmp_path, monkeypatch):
+        """正常路径不回归：密码可解 → 内存用云端明文，备份清空，不置 locked"""
+        from app.utils.secret_store import encrypt_secret
+
+        fake = self._FakeSettings(memory_key="sk-memory")
+        cfg_id = self._setup(monkeypatch, reset_sync_service, fake, tmp_path, encrypt_secret("sk-cloud", "P"), "P")
+        reset_sync_service._reload_settings_on_main_thread()
+
+        saved = fake.llm_saved_providers.value
+        assert saved[cfg_id]["API_KEY"] == "sk-cloud", "解密成功应回填云端明文 key"
+        assert fake._cipher_backup == {}, "解锁成功应清备份（防设置卡误读「等待解锁」）"
+        assert fake._secrets_locked is False
+
+    def test_unlocked_memory_keeps_locked_state_for_prompt(self, reset_sync_service, tmp_path, monkeypatch):
+        """locked 正常态不回归：内存无 key + 无密码 → 保持空、置 locked、留备份"""
+        from app.utils.secret_store import encrypt_secret
+
+        fake = self._FakeSettings(memory_key="")
+        cfg_id = self._setup(monkeypatch, reset_sync_service, fake, tmp_path, encrypt_secret("sk-cloud", "P"), "")
+        reset_sync_service._reload_settings_on_main_thread()
+
+        saved = fake.llm_saved_providers.value
+        assert saved[cfg_id]["API_KEY"] == "", "无密码且内存无 key：保持空等待解锁"
+        assert fake._secrets_locked is True, "应提示用户输入密码"
+        assert fake._cipher_backup, "locked 期间备份密文必须保留（落盘原样回写）"
+
+    def test_password_mismatch_keeps_memory_key(self, reset_sync_service, tmp_path, monkeypatch):
+        """云端密文为旧密码加密，本机密码解不开 + 内存有明文 → 本机权威不被清"""
+        from app.utils.secret_store import encrypt_secret
+
+        fake = self._FakeSettings(memory_key="sk-memory")
+        cfg_id = self._setup(
+            monkeypatch, reset_sync_service, fake, tmp_path, encrypt_secret("sk-cloud-old", "P-old"), "P"
+        )
+        reset_sync_service._reload_settings_on_main_thread()
+
+        saved = fake.llm_saved_providers.value
+        assert saved[cfg_id]["API_KEY"] == "sk-memory", "旧密码密文解不开时不得清掉内存可用 key"
+        assert fake._secrets_locked is False
+        assert fake._cipher_backup == {}, "密码在手上且无锁定条目：备份应清"
+
+    def test_new_cipher_entry_locked_judged_after_writeback(self, reset_sync_service, tmp_path, monkeypatch):
+        """新增密文条目（内存原本没有）+ 无密码 → 写回后判定 locked（修复前漏判）"""
+        from app.utils.secret_store import encrypt_secret
+        from app.core.sync import config_sync as cs
+
+        new_token = encrypt_secret("sk-new", "P")
+        cfg_path = tmp_path / "app.config"
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "LLM": {
+                        "SavedProviders": {
+                            "prov_old": {"API_KEY": "sk-old"},
+                            "prov_new": {"API_KEY": new_token},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        fake = self._FakeSettings(memory_key="")
+        type(fake).llm_saved_providers.value = {"prov_old": {"API_KEY": "sk-old"}}
+        fake.file = cfg_path
+        monkeypatch.setattr("app.utils.secret_store.SecretStore.get", lambda self, account: "")
+        monkeypatch.setattr("app.utils.config.update_theme_options", lambda: None)
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.reload", lambda self: None)
+        monkeypatch.setattr(cs, "Settings", fake)
+        monkeypatch.setattr(cs.QTimer, "singleShot", staticmethod(lambda ms, cb: None))
+
+        reset_sync_service._reload_settings_on_main_thread()
+
+        saved = fake.llm_saved_providers.value
+        assert saved["prov_old"]["API_KEY"] == "sk-old", "明文条目不受影响"
+        assert saved["prov_new"]["API_KEY"] == "", "新增密文条目无密码：保持空"
+        assert fake._secrets_locked is True, "写回后判定：新增密文解不开应置 locked 提示解锁"
+        assert fake._cipher_backup, "locked 期间备份必须保留"
