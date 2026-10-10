@@ -128,6 +128,28 @@ def test_behavior_hidden_frames_dirty_until_shown():
         assert "rgba(" in f.styleSheet(), "补刷后容器串应含主题色值（渲染后的 rgba 形态）"
 
 
+def test_behavior_construction_phase_no_frames_attr():
+    """[T30-P0] 构造期未创建 frame 属性：直接调 _apply_theme_stylesheet 不得炸
+
+    真机崩溃根因：_setup_ui 早期调用本方法时 _workbench_frame 尚未创建，
+    直接属性访问抛 AttributeError。getattr 防御后未创建属正常态（跳过，
+    静态串照常设置），后续主题切换/showEvent 补刷兜住。
+    """
+    stub = _TMStub.__new__(_TMStub)  # 不跑 __init__：模拟 frame 属性未创建
+    QFrame.__init__(stub)
+    assert not hasattr(stub, "_tab_frame")
+    stub._apply_theme_stylesheet()  # 不抛即通过
+    assert stub.styleSheet().strip() != "", "静态串应照常设置（几何/透明规则与 frame 无关）"
+
+    # 随后创建 frame → 再调用 → 正常门控逻辑（未 show 全部置脏）
+    stub._tab_frame = QFrame(stub)
+    stub._chat_frame = QFrame(stub)
+    stub._workbench_frame = _WorkbenchFrame(stub)
+    stub._apply_theme_stylesheet()
+    for f in (stub._tab_frame, stub._chat_frame, stub._workbench_frame):
+        assert f._theme_needs_refresh is True, "构造后未 show 的 frame 应置脏"
+
+
 def test_behavior_color_switch_updates_visible_and_dirties_hidden():
     """切色值：可见容器即时更新为新色；隐藏容器仅置脏不更新"""
     stub = _make_stub()

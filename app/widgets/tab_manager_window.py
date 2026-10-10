@@ -1966,10 +1966,13 @@ class TabManagerWindow(FramelessWindow):
             self.setStyleSheet(qss)
         # [T30] 顶层三兄弟：可见者即时刷色值串并清脏；不可见者置脏跳过
         #（repolish 留到可见性恢复点 _refresh_theme_dirty_frames）
+        # [T30-P0] getattr 防御：本方法在构造期（_setup_ui）即被调用，
+        # 此时 frame 属性可能尚未创建——未创建属正常态，跳过即可，
+        # 后续主题切换 / showEvent / 动画结束等补刷点会兜住。
         for frame, qss_method in (
-            (self._tab_frame, self._qss_tab_frame),
-            (self._chat_frame, self._qss_chat_frame),
-            (self._workbench_frame, self._qss_workbench_frame),
+            (getattr(self, "_tab_frame", None), self._qss_tab_frame),
+            (getattr(self, "_chat_frame", None), self._qss_chat_frame),
+            (getattr(self, "_workbench_frame", None), self._qss_workbench_frame),
         ):
             if frame is None:
                 continue
@@ -2038,10 +2041,13 @@ class TabManagerWindow(FramelessWindow):
 
         [T30] hasattr/RuntimeError 防御：容器可能已销毁（窗口关闭竞态）。
         """
+        # [T30-P0] getattr 防御：本方法在构造期（_setup_ui）即被调用，
+        # 此时 frame 属性可能尚未创建——未创建属正常态，跳过即可，
+        # 后续主题切换 / showEvent / 动画结束等补刷点会兜住。
         for frame, qss_method in (
-            (self._tab_frame, self._qss_tab_frame),
-            (self._chat_frame, self._qss_chat_frame),
-            (self._workbench_frame, self._qss_workbench_frame),
+            (getattr(self, "_tab_frame", None), self._qss_tab_frame),
+            (getattr(self, "_chat_frame", None), self._qss_chat_frame),
+            (getattr(self, "_workbench_frame", None), self._qss_workbench_frame),
         ):
             if frame is None:
                 continue
