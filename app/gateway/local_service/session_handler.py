@@ -231,6 +231,8 @@ class APIHistoryManager:
             self._api_sessions.pop(idx)
             if self._session_store and self._session_store.is_initialized:
                 try:
+                    # [fix] 必须真删 SQLite 行：此前只打日志，重载后归档会话复活
+                    self._session_store.delete_session(session_id)
                     logger.debug(f"[APIHistoryManager] 删除会话: {session_id}")
                 except Exception as e:
                     logger.error(f"[APIHistoryManager] 删除失败: {e}")
