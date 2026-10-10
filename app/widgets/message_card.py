@@ -378,14 +378,16 @@ class MessageCard(SimpleCardWidget):
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
-        # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick（30ms）已把"应用"
+        # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick 已把"应用"
         # 侧的节拍连续化，防抖只负责合并同一窗口内的上报，不再需要独自扛
         # 削峰 —— 拉长只会平白增加"文字已出、目标未到"的滞后。
         self._stream_height_timer = QTimer(self)
         self._stream_height_timer.setSingleShot(True)
-        # [T28/P0-2] 与 card_render_core.STREAM_HEIGHT_TICK_MS 对齐单一节拍（40ms），
-        # 消除 30/32/40 三层互质节拍的漂移叠加
-        self._stream_height_timer.setInterval(40)
+        # [T28/P0-2] 与 card_render_core.STREAM_HEIGHT_TICK_MS 对齐单一节拍，
+        # 消除 30/32/40 三层互质节拍的漂移叠加。
+        # [T34] 不再是独立常量：tick 已是 16ms，防抖若仍 40ms 就等于把目标值
+        # 按 40ms 一节喂给 16ms 的追踪 —— 追踪被喂成阶梯，等于白改。
+        self._stream_height_timer.setInterval(STREAM_HEIGHT_TICK_MS)
         self._stream_height_timer.timeout.connect(self._apply_debounced_height)
         self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)

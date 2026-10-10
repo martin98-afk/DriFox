@@ -148,12 +148,16 @@ def run_scenario(card, viewer, name, text):
         except Exception:  # noqa: BLE001
             pass
 
+    # [T34] 采样间隔 50 → 12ms：追踪 tick 已是 16ms 单帧量级，50ms 采样会把
+    # 多个追踪步合并成一个读数，「步进变细」的收益被采样本身抹掉（实测
+    # 16ms 拍 + 0.45 在 50ms 采样下反而显示幅度 p50 4→11px 的假恶化）。
     hs = QTimer()
+    hs.setTimerType(Qt.PreciseTimer)
     hs.timeout.connect(sample_h)
-    hs.start(50)
+    hs.start(12)
 
     while sent < total:
-        QTest.qWait(50)
+        QTest.qWait(8)
     QTest.qWait(2000)
     hs.stop()
 

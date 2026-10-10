@@ -306,10 +306,14 @@ class TestDiffScopeQuery:
 
 
 class TestHeightTickAlignment:
-    """[T28/P0-2] 高度回环三层节拍对齐 40ms（消除互质漂移）"""
+    """[T34] 高度回环节拍与打字机 rAF 同频，且防抖不得另立一拍"""
 
-    def test_constants_equal_40(self):
-        """JS 追踪 tick 与 Python 防抖值必须同拍 40ms"""
+    def test_tick_matches_frame_budget(self):
+        """追踪 tick 必须落在单帧量级（<=20ms），与打字机 rAF(~17ms) 同频。
+
+        文字按 rAF 每 ~17ms 揭示一次，容器高度若按 40ms 一格逼近，就会出现
+        「文字连续长、容器跳格」的台阶感 —— 这是 [T34] 修复的体感来源。
+        """
         from pathlib import Path
 
         widgets_dir = Path(__file__).resolve().parents[2] / "app" / "widgets"
@@ -318,6 +322,22 @@ class TestHeightTickAlignment:
         s = core_text.find("STREAM_HEIGHT_TICK_MS = ")
         assert s != -1
         tick = int(core_text[s : core_text.find("\n", s)].split("=")[1].strip())
-        assert tick == 40, f"STREAM_HEIGHT_TICK_MS 应为 40，实际 {tick}"
-        assert "self._stream_height_timer.setInterval(40)" in card_text, "防抖须与追踪 tick 同拍 40ms"
+        assert tick <= 20, f"STREAM_HEIGHT_TICK_MS 应 <=20ms（单帧量级），实际 {tick}"
+        # 防抖不得硬编码成另一拍：会把它喂给追踪的目标值切成阶梯
+        assert (
+            "self._stream_height_timer.setInterval(STREAM_HEIGHT_TICK_MS)" in card_text
+        ), "防抖须复用 STREAM_HEIGHT_TICK_MS，不得另立硬编码节拍"
         assert "setInterval(32)" not in card_text, "旧 32ms 防抖应已移除"
+        assert "setInterval(40)" not in card_text, "旧 40ms 防抖应已移除"
+
+    def test_min_delta_no_worse_than_epsilon(self):
+        """snap 阈值不得高于落定阈值，否则大部分高度变化会被硬跳。
+
+        实测流式期高度变化幅度 p50=4px；阈值 8px 时它们全被 snap 成硬跳。
+        """
+        from app.widgets import card_render_core as core
+
+        assert core.STREAM_HEIGHT_ANIM_MIN_DELTA <= core.STREAM_HEIGHT_TRACK_EPSILON + 1, (
+            f"MIN_DELTA({core.STREAM_HEIGHT_ANIM_MIN_DELTA}) 高于 "
+            f"EPSILON({core.STREAM_HEIGHT_TRACK_EPSILON}) 会让小步增长全部退化成硬跳"
+        )

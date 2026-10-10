@@ -346,10 +346,13 @@ STREAM_DOCK_BUDGET_PX = 900
 # 关闭方式：环境变量 DRIFOX_STREAM_HEIGHT_ANIM=0，或运行时
 # set_stream_height_anim_enabled(False)。
 STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") != "0"
-# 追踪节拍（ms）：40ms ≈ 2.7 帧。[T28/P0-2] 与 JS 上报节拍、message_card 防抖
-# 统一为单一 40ms 节拍消除互质漂移。每拍一次 setFixedHeight，回环已被
-# _stream_height_anim_active 上报隔离封死，频率即成本上限。
-STREAM_HEIGHT_TICK_MS = 40
+# 追踪节拍（ms）。[T28/P0-2] 曾统一为 40ms（与 JS 上报、message_card 防抖
+# 同拍，消除互质漂移）。[T34] 40 → 16（≈单帧）：流式正文由打字机按 rAF
+# 每 ~17ms 揭示一次，容器高度却按 40ms 一格逼近 —— 文字连续长、容器跳格，
+# 底部一行反复「顶到边缘 → 憋住 → 蹦一下」。16ms 让容器与 rAF 同频，二者
+# 视觉上同步生长。成本实测：setFixedHeight p50≈1ms，62 次/秒 ≈ 6% 主线程
+# 占用，且回环已被 _stream_height_anim_active 上报隔离封死。
+STREAM_HEIGHT_TICK_MS = 16
 # 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
 # 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
 STREAM_HEIGHT_TRACK_FACTOR = 0.45
@@ -361,11 +364,18 @@ STREAM_HEIGHT_TRACK_BOOST = 0.15
 # 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
 STREAM_HEIGHT_TRACK_EPSILON = 2
 # 小于该变化量直接 snap：流式尾巴上的小噪声不值得起追踪（避免常开 tick 空转）
-STREAM_HEIGHT_ANIM_MIN_DELTA = 8
-# 结束态（FINISH 窗口）追踪的逼近比例：比流式（0.45）更缓——结束态的高度变化
+# [T34] 8 → 2：流式期实测高度变化幅度 p50=4 / max=14 —— 也就是说**大部分**
+# 变化都落在 8px 阈值之下被直接 snap 成硬跳，追踪只在偶发大台阶才生效，
+# 「容器台阶式蹦高」的体感正来源于此。降到 EPSILON(=2) 后凡超过落定阈值
+# 的变化一律走追踪；tick 本身在收敛后即停（EPSILON 内对齐并停拍），
+# 不存在「常开空转」问题（那是 MIN_DELTA 存在的历史原因，已被 epsilon
+# 停拍机制覆盖）。
+STREAM_HEIGHT_ANIM_MIN_DELTA = 2
+# 结束态（FINISH 窗口）追踪的逼近比例：比流式更缓——结束态的高度变化
 # 与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级，追踪太快会"Qt 侧先到、
-# 页面还在动"的两段感；0.28 → 约 10 拍（300ms）收敛 96%，即丝绸尾音。
-FINISH_HEIGHT_TRACK_FACTOR = 0.28
+# 页面还在动"的两段感，即丝绸尾音。[T34] 0.28 → 0.12：按 τ 不变重算
+# （原 0.28@40ms → τ≈121ms；16ms 拍 f'=1-0.72^(16/40)≈0.12）。
+FINISH_HEIGHT_TRACK_FACTOR = 0.12
 
 
 def set_stream_height_anim_enabled(enabled: bool) -> None:
@@ -379,8 +389,14 @@ def set_stream_height_anim_enabled(enabled: bool) -> None:
 # 稳定区（流式期间已差量渲染好的段落）被一起销毁重建 → 结束瞬间整体重排闪一下，
 # 工具区坞态归位也跟着跳。差量收尾改为：稳定区 DOM 不动，只把剩余段差量上去 +
 # 流式思考块就地定稿（按 data-flip-key 位置键配对替换）。
-# ⚠️ 默认关闭：先合代码不行为，实机验证通过后再打开（DRIFOX_INCREMENTAL_FINALIZE=1）。
-INCREMENTAL_FINALIZE_ENABLED = os.getenv("DRIFOX_INCREMENTAL_FINALIZE", "0") == "1"
+# [T35] 默认**打开**（验证见 tests/debug/finalize_probe.py）：
+#   ① 稳定区 DOM 保留率 100%（纯段落 / 未闭合代码块 / think 块 / 混合）；
+#   ② 五个场景的最终 DOM 文本与全量终渲染**字节级一致** —— 此前不一致的
+#      根因是 _render_inline_tail 缺代码块包装，已修（见 _TAIL_CODE_WRAP_MAX_CHARS）。
+# 收益：结束这一拍不再整页 innerHTML 替换，稳定段落不被销毁重建 →
+# 消除每轮回答结束必然发生一次的整页重排闪烁。
+# 回滚：环境变量 DRIFOX_INCREMENTAL_FINALIZE=0，无需改代码。
+INCREMENTAL_FINALIZE_ENABLED = os.getenv("DRIFOX_INCREMENTAL_FINALIZE", "1") != "0"
 
 
 # 结束态耗时打点（默认关）：环境变量 DRIFOX_FINISH_TIMING=1 打开，
@@ -3493,6 +3509,18 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
 # 命中快路径时直接 escape 输出（与 nl2br 扩展对齐：空行分段、段内换行转
 # <br>），把 O(tail) × 10+ 降为 O(tail) × 1。判据保守：只要出现任一语法字符
 # 就退回完整管线，**宁可少快一次，不可错渲染一次**。
+# 尾部代码块包装（pygments 高亮 + copy 按钮 + 语言标签）的规模上限（字符）。
+# [T35] _render_inline_tail 原本**不包装**代码块 —— 与全量渲染
+# （_render_markdown_to_html_cached_impl）和差量段（_render_stable_segment）
+# 都不一致：流式期间代码块是素色 <pre>（实测同一段 md：inline_tail 87 字节
+# vs 全量 2663 字节，差 30 倍），流式结束全量渲染时才变成带高亮/行号/语言
+# 标签的卡片 → 每轮回答结束都「代码块整体变样」一次，也是差量收尾产物与
+# 全量不一致的根因。补上包装后二者字节级一致。
+# 代价：pygments 是 tail 渲染里最贵的一步（200 行 ≈ 5.7ms，而整段 markdown
+# convert 只要 0.2ms）。流式期间代码块单调增长、每轮 tail 都重高亮整块 →
+# O(n²)。超过本阈值退回素色，结束后由全量渲染补齐。
+_TAIL_CODE_WRAP_MAX_CHARS = 4000
+
 _TAIL_MD_SYNTAX_RE = re.compile(
     r"[`*_~\[\]#<>|\\$]"  # 行内/块级 markdown 标记（$ 为公式定界符，一并保守排除）
     r"|!\["  # 图片
@@ -3571,6 +3599,15 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
+    # [T35] 与全量/差量段渲染对齐：补代码块包装（pygments 高亮 + copy 按钮 +
+    # 语言标签）。缺它时流式期间代码块是素色 <pre>，结束全量渲染才变样 ——
+    # 每轮回答结束一次的可见「代码块变脸」，且让差量收尾产物与全量不一致。
+    # 规模保护：超大 tail 退回素色（成本说明见 _TAIL_CODE_WRAP_MAX_CHARS）。
+    if len(md_text) <= _TAIL_CODE_WRAP_MAX_CHARS:
+        try:
+            html = _wrap_code_blocks_with_copy_button_web(html)
+        except Exception:  # 包装失败绝不能让正文消失：保留未包装的 HTML
+            pass
     html = _resolve_image_src(html)
     return html
 
