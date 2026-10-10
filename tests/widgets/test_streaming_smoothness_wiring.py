@@ -30,12 +30,19 @@ from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parents[2] / "app" / "widgets" / "message_card.py"
+_SOURCES = [
+    Path(__file__).resolve().parents[2] / "app" / "widgets" / "card_render_core.py",
+    Path(__file__).resolve().parents[2] / "app" / "widgets" / "card_viewers.py",
+    Path(__file__).resolve().parents[2] / "app" / "widgets" / "message_card.py",
+]
 
 
 @pytest.fixture(scope="module")
 def src_text() -> str:
-    return _SRC.read_text(encoding="utf-8")
+    # [T22] 符号已跨文件分布：JS 资产与注入点在 card_render_core / card_viewers，
+    # 卡方法（finish_streaming/_update_height 等）在 message_card / card_viewers。
+    # 拼接供 src_text.find 系断言统一检索。
+    return "\n".join(p.read_text(encoding="utf-8") for p in _SOURCES)
 
 
 def _func_body(src: str, header: str) -> str:
@@ -97,7 +104,9 @@ class TestTypewriterQueue:
         start = src_text.find(fn)
         assert start != -1, f"未找到 {fn}"
         body = src_text[start : start + 1500]
-        assert "window._twReset" in body, f"{fn} 必须在替换 DOM 前调用 window._twReset()"
+        # updateContent 走 _twFlush（方案C：未揭示缓冲先上屏再替换，零丢字），
+        # 其余入口仍为 _twReset——两者皆为「替换前复位队列」的合法形态
+        assert "window._twReset" in body or "window._twFlush" in body, f"{fn} 必须在替换 DOM 前复位打字机队列"
 
 
 class TestFinishTickCost:
@@ -111,15 +120,20 @@ class TestFinishTickCost:
         丢弃 → 终渲染永不落地（卡片停在流式形态、高度不收敛）。曾踩过。
         """
         body = _func_body(src_text, "def _perform_update(self):")
-        non_streaming = body.split("if not self._streaming:", 1)[1].split("以下为流式模式", 1)[0]
-        assert "self._sequence_render(" in non_streaming, "长历史卡应走线程池（真机 40~120ms/张）"
-        # 异步分支必须带着"非结束态"守卫（getattr 形式防御历史实例缺属性）
-        assert 'not getattr(self, "_final_render_pending", False)' in non_streaming, (
-            "异步分支必须排除流式结束的终渲染（_final_render_pending）"
-        )
+        # [T22] 差量收尾分支（_incremental_finalize）插入后，「以下为流式模式」分隔
+        # 注释已不存在；三点核心判据改在整函数体上断言（守卫表达式仍唯一指向
+        # 异步提交前的结束态排除）。
+        assert "self._sequence_render(" in body, "长历史卡应走线程池（真机 40~120ms/张）"
+        # 异步分支必须带着"非结束态"守卫（getattr 形式防御历史实例缺属性）；
+        # 守卫调用的换行排版不固定，空白归一后断言
+        import re as _re
+
+        assert _re.search(
+            r'not\s+getattr\(\s*self,\s*"_final_render_pending",\s*False\s*\)', body
+        ), ("异步分支必须排除流式结束的终渲染（_final_render_pending）")
         assert "_cleanup_render_cache" in body, "需保留为何结束态不能异步的说明"
         # finish_streaming 必须打开该守卫
-        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False):")
+        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False, immediate: bool = True):")
         assert "_final_render_pending = True" in fin, "finish_streaming 必须标记终渲染为同步"
 
     def test_finish_timing_probe_available(self, src_text: str):
@@ -150,7 +164,7 @@ class TestFinishHeightTransition:
 
     def test_finish_window_opened_only_for_streaming_end(self, src_text: str):
         """只有流式结束打开窗口；history 加载是首帧建卡，不需要过渡"""
-        body = _func_body(src_text, "def finish_streaming(self, history: bool = False):")
+        body = _func_body(src_text, "def finish_streaming(self, history: bool = False, force_dock_off: bool = False, immediate: bool = True):")
         assert "_finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S" in body
         assert "_finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES" in body
         assert "if not history:" in body
@@ -182,9 +196,9 @@ class TestFlipTransitions:
 
     def test_dock_toggle_wrapped_by_flip(self, src_text: str):
         """_setStreamingDock 的 order 换位是瞬移，必须用 FLIP 补间"""
-        start = src_text.find("function _setStreamingDock(active)")
+        start = src_text.find("function _setStreamingDock(active, collapseAfter)")
         assert start != -1
-        body = src_text[start : src_text.find("\n}", start)]
+        body = src_text[start : src_text.find("\n                function ", start)]
         assert "_flipCapture" in body, "坞态切换前必须记录位置"
         assert "_flipPlay" in body, "坞态切换后必须播放位移动画"
 
@@ -207,7 +221,7 @@ class TestFlipTransitions:
         assert "window._flipArm" in body, "缺少 arm 入口"
         assert "_flipArmedUntil > performance.now()" in body, "未 arm 时 _flipCapture 必须直接返回 null"
         # 结束态重排前 Python 必须 arm（否则 updateContent 的 capture 永远拿不到位置）
-        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False):")
+        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False, immediate: bool = True):")
         assert "_flipArm" in fin, "finish_streaming 必须在最终渲染前 arm FLIP"
 
     def test_think_block_carries_positional_flip_key(self, src_text: str):
