@@ -3746,6 +3746,10 @@ class MessageCard(SimpleCardWidget):
                 try:
                     pooled.setParent(self)
                     pooled.setUpdatesEnabled(True)
+                    # [白卡修复] 第二次跨顶层 reparent（隐藏宿主 → 本卡）已完成：
+                    # 重申透明合成，防 Windows 原生 HWND 迁移后 Chromium 透明丢失
+                    # （复用卡 HTML 区白底固化，气泡正常仅内容区变白）。
+                    pooled.ensure_transparent_composition()
                     # 🛡️ 与 detach_viewer 的 hide() 成对：显式隐藏过的 widget 不会
                     # 随父控件 show() 自动恢复可见，复用时必须显式 show()，
                     # 否则卡片区域是一片空白（viewer 存在但不可见）。

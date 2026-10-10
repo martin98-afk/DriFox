@@ -1032,6 +1032,26 @@ class CodeWebViewer(QWebEngineView):
         """注册到全局单例事件过滤器（注册表方式，不再每 viewer 安装一个过滤器）"""
         _dialog_event_filter.register(self)
 
+    def ensure_transparent_composition(self) -> None:
+        """池化复用跨顶层 reparent 后重申透明合成属性。
+
+        Windows 上 QWebEngineView 是原生 HWND 子窗口；池化 release/acquire 各做
+        一次跨顶层窗口的 setParent（卡片 → WA_DontShowOnScreen 隐藏宿主 → 新卡
+        片），原生窗口迁移后 Chromium 合成面的透明属性**偶发**丢失 → page 回退
+        默认白底，此后 setHtml 不再恢复（白底固化：气泡是 Qt 自绘不受影响，
+        仅 HTML 内容区变白）。
+
+        两条 reparent 路径后各重申一次；backgroundColor 在下一次加载生效，
+        复用后首次渲染（setHtml）天然满足时序。幂等，代价两条属性写入。
+        """
+        try:
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+            page = self.page()
+            if page is not None:
+                page.setBackgroundColor(Qt.transparent)
+        except RuntimeError:
+            pass
+
     def reset_for_reuse(self):
         """归还 ``WebViewPool`` 前的重置：**保留骨架**，只清空内容与卡片状态。
 
@@ -1111,6 +1131,9 @@ class CodeWebViewer(QWebEngineView):
         if hasattr(self, "_tool_md_cache"):
             with contextlib.suppress(Exception):
                 self._tool_md_cache.clear()
+        # [白卡修复] 归还时 reparent 进隐藏宿主已发生：重申透明合成，防原生窗口
+        # 迁移后 Chromium 透明丢失（复用后 HTML 区白底固化，详见方法 docstring）。
+        self.ensure_transparent_composition()
 
     def _is_mask_dialog(self, obj) -> bool:
         """判断是否为透明遮罩对话框（WA_TranslucentBackground，需防穿透）"""
