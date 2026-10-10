@@ -240,3 +240,84 @@ class TestFlipTransitions:
         assert "window._animNext" in src_text
         body = _func_body(src_text, "def _auto_collapse_tool_section(self):")
         assert "window._animEnqueue" in body, "自动折叠必须入队，排在归位/重排之后"
+
+
+class TestDiffScopeQuery:
+    """[T28/P0-1] 差量渲染 roots 作用域查询接线（消除 O(n²) 累积）"""
+
+    def test_nodes_since_used_by_both_diff_entries(self, src_text: str):
+        """两个差量入口都必须经 _nodesSince 取新增区间"""
+        assert "window._nodesSince(container, _from)" in src_text, "updateContentAppend 须取 roots"
+        assert "var roots = [tailDiv];" in src_text, "updateTailHtml 的 roots 恰为 tailDiv"
+
+    def test_from_baseline_precedes_incremental_removal(self, src_text: str):
+        """_from 基线必须先于旧增量节点删除（否则 roots 区间污染）"""
+        s = src_text.find("function updateContentAppend(newHtml, tailHtml)")
+        e = src_text.find("function finalizeStreamingBlocks", s)
+        body = src_text[s:e]
+        from_at = body.find("var _from = container.children.length;")
+        del_at = body.find('[data-incremental="true"]')
+        roots_at = body.find("var roots = window._nodesSince(container, _from);")
+        assert -1 not in (from_at, del_at, roots_at)
+        assert from_at < roots_at < del_at, "时序须为 _from → 取 roots → 删旧增量节点"
+
+    def test_scope_query_in_five_functions(self, src_text: str):
+        """五个后处理函数必须支持 roots 作用域（_scopeQuery 退化全文档兼容全量路径）"""
+        for header in (
+            "window._initEchartsIn = function (roots)",
+            "window.renderWidgetToolbars = function(roots)",
+            "window._runFenceAssets = function (roots)",
+            "window._initWidgets = function (roots)",
+            "function _scanFenceLangs(roots)",
+        ):
+            assert header in src_text, f"缺少 roots 形参: {header}"
+            s = src_text.find(header)
+            seg = src_text[s : s + 2000]
+            # [T28] _runFenceAssets 委托 _scanFenceLangs(roots)；renderWidgetToolbars
+            # 无参退化走顶层集合；其余直接 _scopeQuery(roots)
+            probe = {
+                "window._runFenceAssets": "_scanFenceLangs(roots)",
+                "window.renderWidgetToolbars": "roots = _cp.children",
+            }.get(header.split(" = ")[0], "_scopeQuery(roots")
+            assert probe in seg, f"{header} 体内应走 {probe}"
+
+    def test_wrap_tables_in_roots_both_entries(self, src_text: str):
+        """两入口的表格包裹必须走 _wrapTablesIn(roots)（原 inline 全文循环移除）"""
+        s = src_text.find("function updateContentAppend(newHtml, tailHtml)")
+        e = src_text.find("function finalizeStreamingBlocks", s)
+        append_body = src_text[s:e]
+        s2 = src_text.find("function updateTailHtml(html)")
+        e2 = src_text.find("_CONTENT_AUTOSCROLL_JS", s2)
+        tail_body = src_text[s2:e2]
+        assert "window._wrapTablesIn(roots);" in append_body
+        assert "window._wrapTablesIn(roots);" in tail_body
+        assert "table:not(.code-table):not(.layout-table)').forEach" not in append_body, (
+            "差量入口不得保留 inline 全文表格循环"
+        )
+
+    def test_skeleton_version_bumped_for_roots(self, src_text: str):
+        """骨架 JS 结构变更必须 bump 版本（roots 接线 = v41）"""
+        import re as _re
+
+        m = _re.search(r"^_SKELETON_CACHE_VERSION = (\d+)", src_text, _re.M)
+        assert m is not None, "找不到 _SKELETON_CACHE_VERSION 定义"
+        version = int(m.group(1))
+        assert version >= 41, f"roots 接线后 _SKELETON_CACHE_VERSION 必须 >=41，实际 {version}"
+
+
+class TestHeightTickAlignment:
+    """[T28/P0-2] 高度回环三层节拍对齐 40ms（消除互质漂移）"""
+
+    def test_constants_equal_40(self):
+        """JS 追踪 tick 与 Python 防抖值必须同拍 40ms"""
+        from pathlib import Path
+
+        widgets_dir = Path(__file__).resolve().parents[2] / "app" / "widgets"
+        core_text = (widgets_dir / "card_render_core.py").read_text(encoding="utf-8")
+        card_text = (widgets_dir / "message_card.py").read_text(encoding="utf-8")
+        s = core_text.find("STREAM_HEIGHT_TICK_MS = ")
+        assert s != -1
+        tick = int(core_text[s : core_text.find("\n", s)].split("=")[1].strip())
+        assert tick == 40, f"STREAM_HEIGHT_TICK_MS 应为 40，实际 {tick}"
+        assert "self._stream_height_timer.setInterval(40)" in card_text, "防抖须与追踪 tick 同拍 40ms"
+        assert "setInterval(32)" not in card_text, "旧 32ms 防抖应已移除"

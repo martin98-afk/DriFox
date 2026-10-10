@@ -337,9 +337,10 @@ FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排�
 # 关闭方式：环境变量 DRIFOX_STREAM_HEIGHT_ANIM=0，或运行时
 # set_stream_height_anim_enabled(False)。
 STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") != "0"
-# 追踪节拍（ms）：30ms ≈ 2 帧。每拍一次 setFixedHeight，回环已被
+# 追踪节拍（ms）：40ms ≈ 2.7 帧。[T28/P0-2] 与 JS 上报节拍、message_card 防抖
+# 统一为单一 40ms 节拍消除互质漂移。每拍一次 setFixedHeight，回环已被
 # _stream_height_anim_active 上报隔离封死，频率即成本上限。
-STREAM_HEIGHT_TICK_MS = 30
+STREAM_HEIGHT_TICK_MS = 40
 # 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
 # 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
 STREAM_HEIGHT_TRACK_FACTOR = 0.45

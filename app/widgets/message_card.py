@@ -382,7 +382,9 @@ class MessageCard(SimpleCardWidget):
         # 削峰 —— 拉长只会平白增加"文字已出、目标未到"的滞后。
         self._stream_height_timer = QTimer(self)
         self._stream_height_timer.setSingleShot(True)
-        self._stream_height_timer.setInterval(32)
+        # [T28/P0-2] 与 card_render_core.STREAM_HEIGHT_TICK_MS 对齐单一节拍（40ms），
+        # 消除 30/32/40 三层互质节拍的漂移叠加
+        self._stream_height_timer.setInterval(40)
         self._stream_height_timer.timeout.connect(self._apply_debounced_height)
         self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)
