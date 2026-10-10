@@ -1167,6 +1167,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 繁忙时排队消息（内存态，不持久化；切会话清空）──
         self._pending_message_queue: list = []  # [{id, text, image_paths}]
         self._pending_message_seq: int = 0
+        # 已撤回的插话文本（撤回兜底登记，停止回填链路去重，一次性消费）
+        self._interject_withdrawn_texts: set = set()
 
         # [PERF] 底部锚定定时器：100ms 已足够维持粘性滚底
         self._bottom_anchor_timer = QTimer(self)
@@ -16394,6 +16396,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 确定），其余情况维持告警不误删。
             if self._remove_interject_ghost_card(card.get_plain_text()):
                 logger.info("[UNDO] 幽灵插话卡片已移除（session 无对应消息），撤回完成")
+                # 🛡️ 撤回语义 = 取回输入：插话文本回输入框（2026-10-10 撤销不回填根因），
+                # 并登记已撤回文本，防止 worker 取消排空的 stash 迟到后
+                # take_recovered_interjects 重复回填。
+                self._withdraw_interject_to_input(card)
                 return
             logger.warning("[UNDO] Cannot determine valid round_index for card")
             return
@@ -18736,6 +18742,47 @@ class OpenAIChatToolWindow(ToolWindow):
         self._refresh_all_cards_round_index()
         return True
 
+    def _withdraw_interject_to_input(self, card: MessageCard):
+        """幽灵插话卡撤回后取回输入框（文本回填 + 登记去重）
+
+        与停止链路回填同语义：输入框空 → 直接写入，非空 → 追加。
+        登记进 ``_interject_withdrawn_texts`` 供 ``_filter_withdrawn_interjects``
+        去重：worker 取消排空的 stash 可能晚于本次撤回（take_recovered_interjects
+        在停止 finalize 时统一消费），不登记会二次回填同一文本。
+
+        注：附件不回填——幽灵卡上无附件路径列表（缩略图即弃），带图插话撤回
+        属边缘场景，文本保住即达标。
+        """
+        text = card.get_plain_text()
+        if not text:
+            return
+        if not self.input_area.toPlainText().strip():
+            self.input_area.setPlainText(text)
+        else:
+            self.input_area.setPlainText(self.input_area.toPlainText() + "\n" + text)
+        self._interject_withdrawn_texts.add(text)
+
+    def _filter_withdrawn_interjects(self, recovered: list) -> list:
+        """停止回填前过滤已撤回的插话条目（一次性消费）
+
+        Args:
+            recovered: take_recovered_interjects 取出的条目列表（含 _interject_text）
+
+        Returns:
+            未被撤回的条目（可直接回填输入框）
+        """
+        kept: list = []
+        for item in recovered:
+            text = str(item.get("_interject_text", "") or "")
+            if text and text in self._interject_withdrawn_texts:
+                # 用户已手动撤回并回填，跳过防止重复；集合登记一次性消费，
+                # 之后同文本的新插话不受影响
+                self._interject_withdrawn_texts.discard(text)
+                logger.info(f"[Interject] 跳过已撤回插话的迟到回填: {text[:40]!r}")
+                continue
+            kept.append(item)
+        return kept
+
     def _refresh_queue_card(self):
         """按队列状态刷新排队卡片内容与显隐
 
@@ -18869,6 +18916,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _clear_pending_message_queue(self):
         """切会话/新建会话时清空排队消息（内存态不跨会话）"""
         self._pending_message_queue = []
+        # 已撤回插话登记同为会话级内存态：旧会话登记残留会在跨会话同文本
+        # + stash 迟到时序下误吞新会话本应回填的插话
+        self._interject_withdrawn_texts = set()
         self._refresh_queue_card()
 
     def _on_queued_user_injected(self, count: int):
@@ -23788,6 +23838,8 @@ class OpenAIChatToolWindow(ToolWindow):
             recovered = self.backend.take_recovered_interjects() if self.backend else []
         except Exception:
             recovered = []
+        # 🛡️ 过滤用户已手动撤回的插话（撤回兜底已回填过，防迟到 stash 二次回填）
+        recovered = self._filter_withdrawn_interjects(recovered)
         for item in recovered:
             text = str(item.get("_interject_text", "") or "")
             if not text:

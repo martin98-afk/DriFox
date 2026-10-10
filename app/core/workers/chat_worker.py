@@ -743,6 +743,38 @@ class OpenAIChatWorker(QThread):
         """
         backend = getattr(self.tool_executor, "_backend", None)
         hook_q = getattr(backend, "_hook_message_queue", None) if backend else None
+        # 🛡️ 取消路径收尾（2026-10-10 双气泡根因）：用户已点停止 = 一切中止。
+        # 第一轮流式自然结束后 worker 仍停留在完成路径（Stop hook 外部调用耗时），
+        # 此窗口内用户点停止 + 撤回插话时，若照旧注入续跑，已撤回的插话会被
+        # 复活出回复卡，且 finished_with_messages 把已撤回消息写回 session。
+        # 故已取消时不注入不续跑：_interject 条目 stash 回收（UI 停止链路
+        # take_recovered_interjects 统一回填输入框 + 删幽灵卡），其余条目放回
+        # 队列供下一对话消费；TeamMail 丢弃（F1 P0-2：取消上下文的邮件残留
+        # 会被下一对话 _inject_pending_hook_messages 重复消费），与
+        # _cancel_with_stop_hook 尾部排空同语义。
+        if getattr(self, "_is_cancelled", False) and hook_q is not None and not hook_q.empty():
+            leftover: List[Dict] = []
+            while True:
+                try:
+                    leftover.append(hook_q.get_nowait())
+                except queue.Empty:
+                    break
+            recovered: List[Dict] = []
+            for m in leftover:
+                if isinstance(m, dict) and m.get("_interject") is True:
+                    recovered.append(m)
+                elif isinstance(m, dict) and m.get("_hook_event") == "TeamMail":
+                    continue  # 取消上下文的 TeamMail 丢弃，防下一对话重复消费
+                else:
+                    hook_q.put(m)
+            if recovered and backend is not None:
+                try:
+                    backend.stash_recovered_interjects(recovered)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[HookManager] 取消路径回收插话失败: {e}")
+            if recovered:
+                logger.info(f"[Interject] 已取消，回收 {len(recovered)} 条未消费插话（不续跑）")
+            return False
         if hook_q is not None and not hook_q.empty():
             from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 
