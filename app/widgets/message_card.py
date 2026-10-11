@@ -2854,6 +2854,17 @@ class MessageCard(SimpleCardWidget):
         # 坞态生效前后高度都等于自然高度（工具区沉底只带来 ~几十 px 扰动），
         # 「渲染抢跑 → 先胀大再压回」的竞态窗口不存在了。若回滚 T36
         # （恢复 _STREAMING_DOCK_CSS 的 max-height），需同时恢复此处 clamp。
+        #
+        # [MEM-2] 上报值是**文档内容**高度，可远超 widget 的高度上限（物理面积
+        # 上限，见 CodeWebViewer.MAX_SURFACE_MPX）：目标值必须先按同一上限钳一次，
+        # 否则追踪 tick 的目标永远够不到（h > cap 恒成立）→ tick 永不收敛、流式
+        # 全程空转 16ms 节拍，且「追踪中」分支会吞掉之后所有上报。钳后目标 = 上限，
+        # tick 收敛即停拍。超限部分由 body 的卡内滚动承接（_apply_viewer_height
+        # 同刻把文档滚动容器上限降到同值）。
+        try:
+            target_height = min(target_height, self.viewer.body_max_height_cap())
+        except Exception:
+            pass
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
         # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。
@@ -3233,6 +3244,14 @@ class MessageCard(SimpleCardWidget):
         # 滚动锚定补偿 → 回滚/流式时视口漂移。
         try:
             height = self.viewer.clamp_surface_height(height)
+        except Exception:
+            pass
+        # [MEM-2] 钳短的同时必须把「文档滚动容器上限」降到同一个值：否则内容高介于
+        # 两者之间时 body 无溢出（不可滚），被 widget 裁掉的尾部既看不见也滚不到
+        # （2026-10-11「文本内容超出可视区域造成文本遮挡」）。幂等：仅在
+        # 宽度/dpr 变化导致上限变化时才真正下发一次 JS。
+        try:
+            self.viewer.sync_body_max_height()
         except Exception:
             pass
         if height == self._last_applied_viewer_height:

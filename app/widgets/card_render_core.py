@@ -3161,7 +3161,10 @@ _SKELETON_CACHE_MAX = 48
 # 旧解析器对多余字段兼容，但旧骨架永不发第 5 字段 → 哨兵失效，必须 bump。
 # _SKELETON_CACHE_VERSION +1（v45）：[T38] 空正文折叠——坞态下正文无可见内容
 # 时收为零高度（body.cp-blank，CSS + reportHeight 维护 + 复用复位）。
-_SKELETON_CACHE_VERSION = 45
+# _SKELETON_CACHE_VERSION +1（v46）：[MEM-2] body 的 max-height 改走
+# CSS 变量 --dfx-body-max-h（Python 下发 = widget 高度上限），并注入
+# _BODY_HEIGHT_CAP_JS（window._dfxSetBodyMaxH）。CSS + JS 双资产变更，必须 bump。
+_SKELETON_CACHE_VERSION = 46
 
 
 def _js_literal(value) -> str:
@@ -4448,6 +4451,42 @@ _CONTENT_AUTOSCROLL_JS = """
                         _autoScrollStreamingBody();
                     }
                 }
+"""
+
+# ── [MEM-2] 文档滚动容器（body）高度上限同步 ──
+# 背景（2026-10-11 真机「文本内容超出可视区域造成文本遮挡」）：
+#   html{overflow:hidden} 决定了文档级滚动被禁用，body 是**唯一**的滚动容器；
+#   而 widget（QWebEngineView）的高度上限自 1aa78021 起按「物理面积」收缩
+#   （CodeWebViewer.clamp_surface_height，dpr 2.25 + 1200 逻辑宽 → 仅 ~1975px），
+#   远小于 body 的静态 max-height（MAX_HEIGHT = 7111px @dpr2.25）。两者不等就会：
+#       内容高 > widget 上限，但 内容高 ≤ body max-height
+#     → body 自身没有溢出（clientHeight == scrollHeight）→ 不可滚，
+#       被 widget 视口裁掉的那一段**既不在视口内、也没有任何滚动手径**
+#       （滚轮内外转发读到的可滚动量恒为 0，自动滚底也吃不掉）。
+#   修法：Python 每次算出上限后用 _dfxSetBodyMaxH 下发，保证
+#      「widget 高度上限」≡「文档滚动容器上限」，
+#   超限内容才能按原设计回退为卡内滚动（wheelEvent 内外转发的安全网）。
+#   注入时机：骨架 <script>（早于任何内容渲染），值由 _on_js_ready / resizeEvent /
+#   高度应用点幂等下发；未下发前走 CSS 的静态 fallback，行为与改动前一致。
+_BODY_HEIGHT_CAP_JS = """
+                // ===== [MEM-2] 文档滚动容器上限同步（Python 下发）=====
+                // px 必须等于 widget 的高度上限，否则被裁内容不可达（见 Python 侧注释）。
+                window._dfxSetBodyMaxH = function (px) {
+                    var v = Math.max(200, px | 0);
+                    var root = document.documentElement;
+                    if (root.style.getPropertyValue('--dfx-body-max-h') === (v + 'px')) return;
+                    root.style.setProperty('--dfx-body-max-h', v + 'px');
+                    // 上限变化 ⇒ body 的 clientHeight（可滚动量）变化：
+                    //  ① 流式中且用户未上滚 → 贴底，别让正文尾巴落在新视口之外；
+                    //  ② 立刻重报几何，让 Python 的卡内滚动判据
+                    //     （scrollHeight - clientHeight）与滚轮内外转发即时跟上。
+                    try {
+                        if (window._streamingActive && window._userScrolledWithin !== true) {
+                            document.body.scrollTop = document.body.scrollHeight;
+                        }
+                    } catch (e) {}
+                    if (typeof reportHeight === 'function') reportHeight();
+                };
 """
 
 

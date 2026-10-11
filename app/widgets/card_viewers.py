@@ -85,6 +85,7 @@ from app.widgets.card_render_core import (
     FINISH_TIMING_ENABLED,
     INCREMENTAL_FINALIZE_ENABLED,
     RenderCrashQueue,
+    _BODY_HEIGHT_CAP_JS,
     _BORDER_RADIUS_CSS_VARS,
     _BUILTIN_FENCE_PERMS,
     _CHAR_COUNT_HTML,
@@ -704,6 +705,13 @@ class CodeWebViewer(QWebEngineView):
         self.MAX_HEIGHT = min(
             CodeWebViewer.MAX_HEIGHT, _logical_height_cap(self.devicePixelRatioF())
         )
+        # [MEM-2] 文档滚动容器上限的同步状态：
+        # _body_max_h_applied = 最近一次下发给 JS 的值（幂等判据，避免每次高度
+        # 应用都发一条 IPC）；_body_max_h_pending = JS 未就绪时挂起的待推标记
+        # （由 _on_js_ready 补推）；_clamp_warn_ts = 钳制告警节流时间戳。
+        self._body_max_h_applied: int = 0
+        self._body_max_h_pending: bool = False
+        self._clamp_warn_ts: float = 0.0
         # [B4-强回收] renderer 进程 PID（强回收层 kill 离屏进程用；0 = 未就绪/已清理）
         self._renderer_pid: int = 0
         # [B3] 连接线程池渲染完成信号（worker 线程 emit → 本槽在主线程执行）
@@ -1082,18 +1090,71 @@ class CodeWebViewer(QWebEngineView):
             width_logical = self.MAX_WIDTH
         return _logical_height_cap_for_area(width_logical, dpr, self.MAX_SURFACE_MPX)
 
+    def body_max_height_cap(self) -> int:
+        """本 view 的高度上限（= 文档滚动容器 body 的 max-height 上限）。
+
+        ⚠️ **单一真相**：`clamp_surface_height`（widget 落地高度）与
+        `sync_body_max_height`（文档滚动容器上限）必须取同一个值。若两者不等，
+        超出 widget 的那一段内容既不在视口内、也没有任何滚动手径 ——
+        html{overflow:hidden} 关闭了文档级滚动，body 只有在「内容高 > 自身
+        max-height」时才是滚动容器。这正是 2026-10-11「文本内容超出可视区域
+        造成文本遮挡」的根因（面积上限引入后 widget 变小、body 上限没跟着变小）。
+        """
+        max_h = getattr(self, "MAX_HEIGHT", CodeWebViewer.MAX_HEIGHT)
+        return int(min(max_h, self._surface_area_height_cap(self.width() or self.MAX_WIDTH)))
+
     def clamp_surface_height(self, height) -> int:
         """把想要的逻辑高度钳进「单边上限 + 物理面积上限」。
 
         MessageCard 在上报高度前调用它，保证「widget 落地高度」与
         「heightChanged 广播高度」一致（否则外层滚动锚定会按未钳值补偿而漂移）。
+        钳掉的部分由「文档滚动容器上限 = 本上限」接住（见 body_max_height_cap）。
         """
+        cap = self.body_max_height_cap()
         try:
             h = int(height)
         except (TypeError, ValueError):
-            return int(self.MAX_HEIGHT)
-        cap = self._surface_area_height_cap(self.width() or self.MAX_WIDTH)
-        return max(40, min(h, self.MAX_HEIGHT, cap))
+            return cap
+        # 钳制打点（5s 节流）：此前的钳制是**静默**的，真机出现「文字被裁」
+        # 时日志里查不到任何线索 —— 补一条可诊断记录。
+        if h > cap:
+            now = time.monotonic()
+            if now - getattr(self, "_clamp_warn_ts", 0.0) > 5.0:
+                self._clamp_warn_ts = now
+                try:
+                    logger.warning(
+                        f"[CodeWebViewer] 内容高 {h}px 超卡片高度上限 {cap}px "
+                        f"(宽 {self.width()} dpr {self.devicePixelRatioF():.2f})，回退卡内滚动"
+                    )
+                except (RuntimeError, AttributeError, TypeError):
+                    # 已析构/取不到 dpr：打点失败绝不能影响高度钳制
+                    pass
+        return max(40, min(h, cap))
+
+    def sync_body_max_height(self, force: bool = False) -> int:
+        """把「文档滚动容器上限」同步给页面（幂等，仅变化时下发）。
+
+        下发后 body 的 max-height 与 widget 高度上限一致，超限内容回退为卡内
+        滚动（wheelEvent 内外转发的安全网），而不是被静默裁掉。
+        JS 未就绪时只记待推值，由 ``_on_js_ready`` 补一次（不能丢，否则整个
+        渲染周期都停在不匹配的静态上限上）。
+        """
+        cap = self.body_max_height_cap()
+        if not force and cap == getattr(self, "_body_max_h_applied", 0):
+            return cap
+        self._body_max_h_applied = cap
+        # 构造期（resizeEvent 可能早于 __init__ 收尾）取不到 _is_js_ready → 视作未就绪
+        if not getattr(self, "_is_js_ready", False):
+            self._body_max_h_pending = True
+            return cap
+        self._body_max_h_pending = False
+        try:
+            page = self.page()
+            if page is not None:
+                page.runJavaScript(f"window._dfxSetBodyMaxH && window._dfxSetBodyMaxH({cap});")
+        except (RuntimeError, AttributeError):
+            pass
+        return cap
 
     def setFixedSize(self, *args, **kwargs):
         """限制最大尺寸，防止 GPU 内存溢出（单边上限 + 物理面积上限）"""
@@ -1420,6 +1481,11 @@ class CodeWebViewer(QWebEngineView):
         self._is_js_ready = True
         # 同步简洁模式标志到 JS（统一走 sync_compact_mode_to_js）
         self.sync_compact_mode_to_js()
+        # [MEM-2] 文档滚动容器上限（body max-height）必须与 widget 高度上限同值：
+        # 骨架里的静态 fallback 按 MAX_HEIGHT 走，而面积上限可远小于它 → 此处
+        # 强制补推一次真实值（否则整个渲染周期都停在不匹配的上限上，超限内容
+        # 被静默裁掉且不可滚）。幂等，未变化时仅一次属性读取。
+        self.sync_body_max_height(force=True)
         try:
             # 历史会话：先折叠工具区（设置 data-collapsed="true"，dock sync 需要读取此值）
             if getattr(self, "_is_history", False):
@@ -1699,8 +1765,13 @@ class CodeWebViewer(QWebEngineView):
                        真实内容几乎不会触及 → body 不会溢出 → 不出现内滚条 →
                        滚动统一由外层 chat_scroll_area 承载。
                        触及上限时（极端长内容）才回退为卡内滚动，此时 wheelEvent 的
-                       内外转发逻辑仍然生效，是最后一道兜底。 */
-                    max-height: {self.MAX_HEIGHT}px;
+                       内外转发逻辑仍然生效，是最后一道兜底。
+                       [MEM-2] 上限改走 CSS 变量，由 Python 下发 **widget 的高度上限**
+                       （随 dpr / 卡片宽度收缩的面积上限，见 MAX_SURFACE_MPX）：
+                       两者必须同值，否则被 widget 裁掉的那段既不可见也不可滚
+                       （2026-10-11「文本内容超出可视区域造成文本遮挡」根因）。
+                       变量未下发时走静态 fallback（= 改动前行为）。 */
+                    max-height: var(--dfx-body-max-h, {self.MAX_HEIGHT}px);
                     /* 🛡️ 稳定性修复：滚动条轨道常驻，内容可用宽度恒定。
                        overflow-y:auto 时滚动条出现/消失会使内容宽度 ±6px 波动 →
                        长行换行变化 → scrollHeight 波动 → 高度报告 → setFixedHeight
@@ -5221,6 +5292,12 @@ class CodeWebViewer(QWebEngineView):
             AUTO_SCROLL_THRESHOLD
         };
                     window._userScrolledWithin = !_nearBottom;
+                    // [MEM-2] 卡内滚动改变的是 body 的滚动几何（scrollTop）与「用户正在
+                    // 卡内阅读」标志——两者都只随 reportHeight 回传。补一次上报，否则
+                    // 用户上滚阅读期间 Python 侧判据与阅读态要等到下一轮内容更新才刷新。
+                    // reportHeightDebounced 自带 rAF 合并 + 折叠过渡抑制，代价与流式
+                    // 常规上报同量级。
+                    if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                 }});
                 // ======================================================
 
@@ -5305,6 +5382,7 @@ class CodeWebViewer(QWebEngineView):
                 _bindUserScrollIntent(document.getElementById('tool-content'));
 
                 {_STREAMING_DOCK_JS}
+                {_BODY_HEIGHT_CAP_JS}
                 {_TYPEWRITER_JS}
                 {_PREVIEW_TYPEWRITER_JS}
                 {_FLIP_JS}
@@ -7820,6 +7898,13 @@ class CodeWebViewer(QWebEngineView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # [MEM-2] 宽度变化 → 面积上限变化 → 文档滚动容器上限必须跟着变。
+        # 必须放在下面的 `_streaming` 早退之前：流式期间同样会 resize（窗口拖拽、
+        # 面板开合），漏掉就会在流式全程维持一个不匹配的上限（文字被裁且不可滚）。
+        try:
+            self.sync_body_max_height()
+        except Exception:
+            pass
         if self._streaming:
             return
 
@@ -7833,6 +7918,13 @@ class CodeWebViewer(QWebEngineView):
         self._resize_unlock_timer.start()
 
     def wheelEvent(self, event: QWheelEvent):
+        # 滚轮归属规则（两级链式）：
+        #  ① 外层聊天滚动区还有余量 → 归外层（保持"滚轮滚页面"的既有体感）；
+        #  ② 外层已到边界（顶/底）→ 把事件交回页面：内容被高度上限截断时
+        #     （[MEM] 物理面积上限让 widget 变矮），body 才是唯一还能滚的容器。
+        #     ⚠️ 缺 ② 时被裁掉的尾部**永远滚不到**——事件被外层吞掉、外层到底后
+        #     空转，卡内滚动等于不存在（2026-10-11「文本内容超出可视区域造成
+        #     文本遮挡」的第二半：几何修好了也没有滚动手径）。
         # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部。
         # 转发外层滚动区走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
         # ⚠️ 宿主层级可变（曾直挂卡片，2026-09-23 起移入 assistant 气泡），
@@ -7849,10 +7941,15 @@ class CodeWebViewer(QWebEngineView):
             scroll_area = card._parent.chat_scroll_area if card is not None else None
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
-                if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
-                    scroll_area.wheelEvent(event)
-                    event.accept()
-                    return
+                dy = event.angleDelta().y()
+                if vbar and vbar.minimum() != vbar.maximum() and dy != 0:
+                    _at_bound = (dy > 0 and vbar.value() <= vbar.minimum()) or (
+                        dy < 0 and vbar.value() >= vbar.maximum()
+                    )
+                    if not _at_bound:
+                        scroll_area.wheelEvent(event)
+                        event.accept()
+                        return
         except Exception:
             pass
         super().wheelEvent(event)
