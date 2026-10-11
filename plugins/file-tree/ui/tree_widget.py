@@ -105,16 +105,28 @@ class FileTreeModel(QAbstractItemModel):
         super().__init__(parent)
         self._root_entries: List[_FileNode] = []
         self._project_root: str = ""
-        self._loading: set = set()  # 正在扫描中的目录路径
+        self._loading: set = set()  # 正在扫描/排队中的目录（normpath 归一）
+        self._failed: set = set()  # 扫描失败过的目录（熔断：不再自动重试）
 
     # ── 公开 API（cards.py 调用） ──
 
     def set_project(self, project_root: str, entries):
-        """设置项目根目录并加载顶级条目（scanner 结果）"""
+        """设置项目根目录并加载顶级条目（scanner 结果）
+
+        ★ 整体 reset：QTreeView 会丢弃全部展开/选中/滚动状态。**只在项目根
+        真的变化时调用**（见 cards.py ``_apply_root_entries``）；同项目刷新
+        一律走 ``refresh_root`` 增量。
+        """
         self.beginResetModel()
         self._project_root = os.path.normpath(project_root)
         self._root_entries = self._build_nodes(entries, None)
+        self._loading.clear()
+        self._failed.clear()  # 换了项目：旧根的标记全部失效
         self.endResetModel()
+
+    def project_root(self) -> str:
+        """当前项目根（已 normpath 归一，供卡片判定「根是否变化」）"""
+        return self._project_root
 
     def populate_children(self, dir_path: str, entries) -> bool:
         """扫描完成后填充子节点"""
@@ -211,9 +223,39 @@ class FileTreeModel(QAbstractItemModel):
         """检查某路径是否正在异步扫描中"""
         return os.path.normpath(path) in self._loading
 
+    def mark_loading(self, path: str):
+        """标记某路径正在扫描（从入队起就置位，到扫描落定才清）
+
+        ★ 置位窗口必须覆盖「入队 → 扫描完成」全程：Qt 会对「已展开且
+        canFetchMore 为真」的节点每轮布局请求一次 fetchMore，若只在扫描执行
+        期间置位，排队中的目录仍可 fetch，会与扫描请求互相踩踏（实测导致
+        扫描风暴 + 主线程反复阻塞）。
+        """
+        self._loading.add(os.path.normpath(path))
+
     def clear_loading(self, path: str):
-        """扫描失败时清除加载标记"""
+        """扫描落定时清除加载标记"""
         self._loading.discard(os.path.normpath(path))
+
+    def clear_all_loading(self):
+        """清空全部加载标记（换项目 / 重置调度时用）"""
+        self._loading.clear()
+
+    def mark_failed(self, path: str):
+        """标记某目录扫描失败（熔断：canFetchMore 返回 False，不再自动重试）
+
+        无此熔断时，持续失败的目录（无权限 / 已删除）会被 Qt 每轮布局重试，
+        形成慢速请求风暴。用户点刷新（``clear_failed``）可手动重试。
+        """
+        self._failed.add(os.path.normpath(path))
+
+    def clear_failed(self):
+        """清除失败熔断（手动刷新时允许重试）"""
+        self._failed.clear()
+
+    def node_is_failed(self, path: str) -> bool:
+        """该目录是否已熔断（扫描失败过，不再自动重试）"""
+        return os.path.normpath(path) in self._failed
 
     def node_is_loaded(self, idx: QModelIndex) -> bool:
         if not idx.isValid():
@@ -266,7 +308,7 @@ class FileTreeModel(QAbstractItemModel):
         return True  # 未加载的目录假设有子节点
 
     def canFetchMore(self, parent: QModelIndex) -> bool:
-        """Qt 在展开节点前调用 — 未加载且未在扫描中才返回 True"""
+        """Qt 在展开节点前调用 — 未加载、未在扫描/排队、且未失败过才返回 True"""
         if not parent.isValid():
             return False
         node: _FileNode = parent.internalPointer()
@@ -274,8 +316,11 @@ class FileTreeModel(QAbstractItemModel):
             return False
         if node.loaded:
             return False
-        if node.path in self._loading:
+        key = os.path.normpath(node.path)
+        if key in self._loading:
             return False
+        if key in self._failed:
+            return False  # 熔断：失败过的目录不自动重试，避免 Qt 每轮布局重试
         return True
 
     def fetchMore(self, parent: QModelIndex):
@@ -283,7 +328,7 @@ class FileTreeModel(QAbstractItemModel):
         node: _FileNode = parent.internalPointer()
         if not node or not node.is_dir:
             return
-        self._loading.add(node.path)
+        self._loading.add(os.path.normpath(node.path))  # 口径与 mark_loading 一致
         self.need_scan.emit(node.path)
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
