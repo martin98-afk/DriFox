@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.6] - 2026-10-11 (重新发布 #2)
+## [v0.6.6] - 2026-10-11 (重新发布 #3)
 
-自上一版本以来的变更（累计） | 提交数：8 · 文件变更：49 · +4181/-544 | 贡献者：dingma, martin98-afk
+自上一版本以来的变更（累计） | 提交数：9 · 文件变更：51 · +4187/-546 | 贡献者：dingma, martin98-afk
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -26,6 +26,10 @@ All notable changes to this project will be documented in this file.
 - **会话上下文用量估算精度** (`4d8ed7b2`): `from_api` 改三态并新增自适应校准因子；`last_api_prompt_from_usage` 改为 `Optional[bool]` 三态语义（True/False/None=未知按可用），避免老记录被误判为本地估算而丢弃权威 API `prompt_tokens`；`ChatSession` 新增 `token_calibration` / `token_calibration_model` 字段并持久化，`api_usage_dict()` 统一导出保证所有保存链透传权威用量字段不被清零；引入 `resolve_calibration` / `blend_calibration`：本地 token 估算按 API usage 反推的校准因子修正，按模型隔离，换模型即失效；用量快照 breakdown 分量与增量 delta 同步缩放，保证与总量口径一致。
 
 - **压缩清空失效与占位重建滚动抖动** (`6bdd7127`): 压缩清空守卫改用 wall-clock 时间切断点（`_post_compact_cutoff_ms`），修复 epoch 被 `_do_trigger_callback` +1 后旧 worker 延迟快照被误放行、清空被复活的问题；释放态会话不再被误判为空而跳过清空，清空结果通过 `save_cleared_session` 立即落库，避免重载后旧消息"复活"；内存治理释放消息时标记 `_messages_released`，与保存链空消息守卫同口径；批次占位记录卡片固定开销 `content_overhead`，重建时还原增量口径，修复锚定补偿导致视口跳动；`get_project_color` 改从 `app.utils.project_meta` 导入。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+
+- **history-manager 内容被浮层滚动条遮挡** (`a73d0156`): `history_page` 与 `project_selector_card` 内容布局右边距调整为 14px，防止内容被 qfluentwidgets ScrollArea 的浮层滚动条（占右缘 13px）遮挡。
 
 ## [v0.6.5] - 2026-10-11 (重新发布 #4)
 
