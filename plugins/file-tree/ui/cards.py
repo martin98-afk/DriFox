@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QModelIndex, QSize, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QEvent, QItemSelectionModel, QModelIndex, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
@@ -62,6 +62,17 @@ from .watcher import _DirWatcher
 # ── 路径常量 ──────────────────────────────────────────────
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _same_path(a: str, b: str) -> bool:
+    """路径同一性判定（Windows 大小写不敏感 + 分隔符 / 尾斜杠归一）
+
+    裸字符串比较会把 ``D:/work/X`` 与 ``d:\\work\\X\\`` 判为不同根目录，
+    导致同一项目的扫描结果被误当「换项目」处理（整树 reset → 展开状态全丢）。
+    """
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
 
 # ── 主题色辅助 ────────────────────────────────────────────
@@ -286,9 +297,22 @@ class FileTreeCard(QWidget):
             self._context_provider = _ctx_provider
         self._worker_thread: Optional[QThread] = None
         self._scanner: Optional[_TreeScanner] = None
+        # 扫描串行队列：[(dir, dedup_key, on_done)]。任何时刻只一个扫描在跑，
+        # 其余排队 —— 不杀线程（quit 打断不了 os.scandir，wait 会阻塞主线程）
+        self._scan_queue: List[Tuple[str, str, Callable]] = []
+        self._scan_queued: set = set()  # 已排队/在途的 dedup_key（幂等去重）
+        self._scan_gen: int = 0  # 树世代：换根时 +1，在途扫描的旧世代回调作废
         self._colors: dict = {}
         self._project_root: str = ""
         self._current_scan_target: str = ""  # 当前扫描目标目录
+
+        # 视图状态缓存：按项目根索引保存展开/选中/滚动（换项目时先存旧根，
+        # 切回同根时还原 —— 整树 reset 唯一的兜底）
+        self._view_state_cache: dict = {}
+        # 视图状态恢复队列（整树 reset 后按路径串行还原展开/选中/滚动）
+        self._pending_expand: List[str] = []
+        self._pending_selected: List[str] = []
+        self._pending_scroll: int = 0
 
         # 剪贴板: [(路径, 是否剪切)]
         self._clipboard: List[Tuple[str, bool]] = []
@@ -441,6 +465,122 @@ class FileTreeCard(QWidget):
         """项目 / 工作目录变更（宿主经 EV_PROJECT_CHANGED 派发）：立即重载目录树"""
         self.refresh_data()
 
+    # ── 视图状态快照 / 恢复（整树 reset 的兜底） ──
+
+    def _expanded_source_paths(self) -> List[str]:
+        """当前展开中的目录 source 路径（BFS，父在子前 —— 恢复时须按此序串行展开）"""
+        paths: List[str] = []
+        stack = [QModelIndex()]
+        while stack:
+            parent = stack.pop(0)
+            for row in range(self._source_model.rowCount(parent)):
+                src_idx = self._source_model.index(row, 0, parent)
+                if not src_idx.isValid() or not src_idx.data(FileTreeModel.COL_IS_DIR):
+                    continue
+                proxy_idx = self._proxy_model.mapFromSource(src_idx)
+                if not proxy_idx.isValid() or not self._tree_view.isExpanded(proxy_idx):
+                    continue
+                path = src_idx.data(FileTreeModel.COL_PATH)
+                if path:
+                    paths.append(path)
+                stack.append(src_idx)
+        return paths
+
+    def _snapshot_view_state(self) -> dict:
+        """记录展开 / 选中 / 滚动位置 —— 必须在 ``beginResetModel`` **之前**调用
+
+        ``beginResetModel`` 会连带清空 selectionModel 的选中项，reset 后再取只剩空集。
+        """
+        return {
+            "expanded": self._expanded_source_paths(),
+            "selected": self._tree_view.selected_source_paths(),
+            "scroll": self._tree_view.verticalScrollBar().value(),
+        }
+
+    def _stash_view_state(self, root: str) -> None:
+        """把当前视图状态存进按项目根索引的缓存（换项目前存旧根）"""
+        if not root:
+            return
+        key = os.path.normcase(os.path.normpath(root))
+        self._view_state_cache[key] = self._snapshot_view_state()
+        if len(self._view_state_cache) > 32:  # 上限保护：丢掉最早的一项
+            self._view_state_cache.pop(next(iter(self._view_state_cache)))
+
+    def _restore_view_state(self, state: dict) -> None:
+        """按快照还原视图状态：串行展开 → 选中 → 滚动"""
+        self._pending_expand: List[str] = list(state.get("expanded") or [])
+        self._pending_selected: List[str] = list(state.get("selected") or [])
+        self._pending_scroll: int = int(state.get("scroll") or 0)
+        self._process_expand_queue()
+
+    def _process_expand_queue(self) -> None:
+        """推进状态恢复队列：逐个展开，未加载目录先请求扫描
+
+        ★ 完全串行：一次只处理队首一个目录，数据未就绪就 ``return``，由扫描
+        回调回来继续 —— 下载式推进避免一次性连带多次扫描。
+        ★ 不依赖 ``expand()`` 内部触发 ``fetchMore``：视图不可见 / 布局首帧时
+        Qt 可能推迟该调用，展开时机不可控；这里显式请求扫描，展开必定紧跟数据。
+        """
+        while self._pending_expand:
+            path = self._pending_expand[0]
+            node = self._source_model.find_node(path)
+            if node is None or not node.is_dir:
+                self._pending_expand.pop(0)
+                continue  # 路径已不在（换了项目 / 已被删除）
+            if self._source_model.node_is_failed(path):
+                self._pending_expand.pop(0)
+                continue  # 熔断：不反复重试（用户点刷新可恢复）
+            src_idx = self._source_model._index_for_node(node)
+            proxy_idx = self._proxy_model.mapFromSource(src_idx)
+            if not proxy_idx.isValid():
+                self._pending_expand.pop(0)
+                continue  # 父级尚未加载，当前不可达
+            if not node.loaded:
+                # 请求扫描（入队即占位 loading，幂等）；回调回来再推进
+                self._on_lazy_scan(path)
+                return
+            self._pending_expand.pop(0)
+            if not self._tree_view.isExpanded(proxy_idx):
+                self._tree_view.expand(proxy_idx)
+        self._finish_state_restore()
+
+    def _finish_state_restore(self) -> None:
+        """还原选中项与滚动位置（展开队列排空后调用；无恢复任务时为零操作）"""
+        selected = self._pending_selected
+        self._pending_selected = []
+        sm = self._tree_view.selectionModel()
+        if selected and sm is not None:
+            sm.clearSelection()
+            first = QModelIndex()
+            for path in selected:
+                node = self._source_model.find_node(path)
+                if node is None:
+                    continue
+                proxy_idx = self._proxy_model.mapFromSource(self._source_model._index_for_node(node))
+                if not proxy_idx.isValid():
+                    continue
+                sm.select(proxy_idx, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+                if not first.isValid():
+                    first = proxy_idx
+            if first.isValid():
+                self._tree_view.setCurrentIndex(first)
+        scroll = self._pending_scroll
+        self._pending_scroll = 0
+        if scroll > 0:
+            # 延后一帧：展开后 scrollBar.maximum 需等布局重算，立即 setValue 会被旧上限截断
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self._restore_scroll(scroll))
+            timer.start(0)
+
+    def _restore_scroll(self, scroll: int) -> None:
+        """还原滚动位置（钳到当前上限，避免越界跳顶）"""
+        if not self._tree_view.isVisible():
+            return
+        bar = self._tree_view.verticalScrollBar()
+        if bar is not None:
+            bar.setValue(min(scroll, bar.maximum()))
+
     def refresh_data(self) -> None:
         """工作台页刷新协议入口（宿主切页 / 项目联动共用）
 
@@ -558,8 +698,53 @@ class FileTreeCard(QWidget):
             self._show_error("项目目录不存在，请先设置工作目录")
             return
 
+        if _same_path(scan_dir, self._project_root):
+            self._request_scan(scan_dir, self._on_root_scan_done, urgent=True)
+        else:
+            self._request_scan(scan_dir, lambda entries, _d=scan_dir: self._on_child_scan_done(entries, _d))
+
+    def _request_scan(self, scan_dir: str, on_done, *, urgent: bool = False) -> bool:
+        """请求扫描（串行队列 + 幂等去重），返回是否新入队
+
+        ★ 为什么不“杀掉上一个扫描再起新的”（旧实现）：``QThread.quit()`` 只停
+          事件循环，**打断不了工作线程里正在执行的 ``os.scandir``**，``wait(3000)``
+          会把主线程真阻塞住。用户连续展开 N 个目录 = N 次阻塞；更糟的是被杀
+          目录的 loading 标记被清后回到「已展开且 canFetchMore」状态，Qt 下一轮
+          布局再次请求它 —— 与扫描请求互相踩踏形成自激循环。实测 6 个目录触发
+          223 次扫描、主线程累计阻塞 25s（卡死）。
+        ★ 现改为串行队列：任何时刻只一个扫描在执行，其余排队等待；入队即占位
+          loading，Qt 既不会重复请求，也不会有目录永远卡在空态。
+
+        Args:
+            urgent: 根目录扫描（树换血）—— 丢弃排队中的子目录扫描、世代 +1 让
+                在途扫描的回调作废；但**不杀线程**（结果被丢弃即可）。
+        """
+        key = os.path.normcase(os.path.normpath(scan_dir))
+        if urgent:
+            self._scan_queue = []
+            self._scan_queued.clear()
+            self._source_model.clear_all_loading()
+            self._source_model.clear_failed()  # 重扫重置熔断（点刷新可恢复失败目录）
+            self._scan_gen += 1
+        elif key in self._scan_queued:
+            return False  # 已排队 / 在途：幂等，不重复排
+        self._scan_queued.add(key)
+        self._source_model.mark_loading(scan_dir)  # 入队即占位，覆盖整个生命周期
+        item = (scan_dir, key, on_done)
+        if urgent:
+            self._scan_queue.insert(0, item)
+        else:
+            self._scan_queue.append(item)
+        self._pump_scan_queue()
+        return True
+
+    def _pump_scan_queue(self) -> None:
+        """推进扫描队列：空闲则取队首开扫（任何时刻至多一个扫描在跑）"""
+        if self._worker_thread is not None or not self._scan_queue:
+            return
+        scan_dir, key, on_done = self._scan_queue.pop(0)
+        gen = self._scan_gen
         self._current_scan_target = scan_dir
-        self._cleanup_worker()
 
         self._worker_thread = QThread()
         self._scanner = _TreeScanner()
@@ -567,14 +752,56 @@ class FileTreeCard(QWidget):
 
         _scanner = self._scanner
         self._worker_thread.started.connect(lambda: _scanner.scan(scan_dir))
-        self._scanner.finished.connect(lambda entries: self._on_scan_finished(entries, scan_dir))
-        self._scanner.error.connect(self._on_scan_error)
+        self._scanner.finished.connect(lambda entries: self._dispatch_scan_done(gen, key, scan_dir, on_done, entries))
+        self._scanner.error.connect(lambda msg: self._dispatch_scan_error(gen, key, scan_dir, msg))
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
 
         self._worker_thread.start()
 
+    def _dispatch_scan_done(self, gen: int, key: str, scan_dir: str, on_done, entries: List[_DirEntry]):
+        """扫描成功回调（旧世代结果作废）"""
+        self._worker_thread = None
+        self._scanner = None
+        # key 无论世代都要摘：漏摘会让该目录永久留在 _scan_queued，此后
+        # 所有请求都被当成重复而丢弃（该目录再也加载不出来）
+        self._scan_queued.discard(key)
+        if gen != self._scan_gen:
+            self._pump_scan_queue()  # 世代已变（换根）：丢弃结果，继续跑新队列
+            return
+        self._source_model.clear_loading(scan_dir)
+        on_done(entries)
+        # 落地后仍未加载（节点丢失 / 目录不可读）→ 熔断，避免反反复重扫
+        if not _same_path(scan_dir, self._project_root):
+            node = self._source_model.find_node(scan_dir)
+            if node is not None and node.is_dir and not node.loaded:
+                self._source_model.mark_failed(scan_dir)
+        self._pump_scan_queue()
+        self._process_expand_queue()  # 队列推进：下一个目录入队 / 收尾
+
+    def _dispatch_scan_error(self, gen: int, key: str, scan_dir: str, error_msg: str):
+        """扫描失败回调（旧世代丢弃）"""
+        self._worker_thread = None
+        self._scanner = None
+        # key 无论世代都要摘（同 _dispatch_scan_done：漏摘会让目录永久卡死）
+        self._scan_queued.discard(key)
+        if gen != self._scan_gen:
+            self._pump_scan_queue()
+            return
+        self._source_model.clear_loading(scan_dir)
+        self._source_model.mark_failed(scan_dir)  # 熔断：不再自动重试
+        logger.error(f"[FileTree] 扫描失败: {error_msg}")
+        if _same_path(scan_dir, self._project_root):
+            self._show_error("扫描目录时出错")  # 仅根目录失败才报错（子目录失败不空整树）
+        self._pump_scan_queue()
+        self._process_expand_queue()
+
     def _cleanup_worker(self):
+        """停止扫描并清空队列（仅供销毁 / 关闭路径）"""
+        self._scan_queue = []
+        self._scan_queued.clear()
+        interrupted = ""
         if self._worker_thread is not None:
+            interrupted = self._current_scan_target
             try:
                 self._worker_thread.quit()
                 self._worker_thread.wait(3000)
@@ -582,32 +809,43 @@ class FileTreeCard(QWidget):
                 pass
             self._worker_thread = None
             self._scanner = None
+        if interrupted:
+            self._source_model.clear_loading(interrupted)
 
-    def _on_scan_finished(self, entries: List[_DirEntry], scan_dir: str):
-        self._worker_thread = None
-        self._scanner = None
+    def _on_root_scan_done(self, entries: List[_DirEntry]):
+        """项目根扫描完成：落地条目 + 重挂根目录监听"""
+        scan_dir = self._project_root
+        self._apply_root_entries(scan_dir, entries)
+        if self._project_root and os.path.isdir(self._project_root):
+            self._watcher.add_path(self._project_root)
 
-        is_root = scan_dir == self._project_root
+    def _on_child_scan_done(self, entries: List[_DirEntry], dir_path: str):
+        """指定子目录扫描完成（``_async_load_tree(target)`` 路径）"""
+        self._source_model.populate_children(dir_path, entries)
 
-        if is_root:
-            self._source_model.set_project(scan_dir, entries)
-            self._stack.setCurrentIndex(0 if entries else 1)
-            if not entries:
-                self._placeholder.setText("项目目录为空")
+    def _apply_root_entries(self, scan_dir: str, entries: List[_DirEntry]) -> None:
+        """项目根扫描结果落地：同根走增量，异根才整体重建
 
-            if self._project_root and os.path.isdir(self._project_root):
-                self._watcher.add_path(self._project_root)
+        ★ 旧实现无条件 ``set_project``（``beginResetModel``）。切工作台页签、
+        切对话标签、点刷新、项目上下文同步都经此重扫根目录，QTreeView 随之
+        丢弃全部展开 / 选中 / 滚动状态 —— 用户展开的层级被「刷没」。同一项目根
+        下目录内容只增删少量条目，``refresh_root`` 已实现增量同步（不 reset、
+        未变节点保持原引用），状态天然保留。
+        ★ 异根（真换项目）：reset 不可免，走视图状态缓存 —— 离开旧根先存，
+        回到该根时还原，故 A→B→A 来回切不丢用户展开的层级。
+        """
+        model_root = self._source_model.project_root()
+        if _same_path(scan_dir, model_root):
+            self._source_model.refresh_root(entries)
         else:
-            self._source_model.populate_children(scan_dir, entries)
-
-    def _on_scan_error(self, error_msg: str):
-        self._worker_thread = None
-        self._scanner = None
-        logger.error(f"[FileTree] 扫描失败: {error_msg}")
-        self._show_error("扫描目录时出错")
-        # 清除 model 中的加载标记
-        if self._current_scan_target and self._current_scan_target != self._project_root:
-            self._source_model.clear_loading(self._current_scan_target)
+            self._stash_view_state(model_root)  # 必须先存：reset 后旧状态已不可取
+            self._source_model.set_project(scan_dir, entries)
+            cached = self._view_state_cache.get(os.path.normcase(os.path.normpath(scan_dir)))
+            if cached:
+                self._restore_view_state(cached)
+        self._stack.setCurrentIndex(0 if entries else 1)
+        if not entries:
+            self._placeholder.setText("项目目录为空")
 
     def _show_error(self, message: str):
         self._placeholder.setText(f"⚠️ {message}")
@@ -616,28 +854,14 @@ class FileTreeCard(QWidget):
     # ── 懒加载（展开触发扫描） ──
 
     def _on_lazy_scan(self, dir_path: str):
-        """Model 请求扫描某目录的子节点"""
-        self._current_scan_target = dir_path
-        self._cleanup_worker()
-
-        self._worker_thread = QThread()
-        self._scanner = _TreeScanner()
-        self._scanner.moveToThread(self._worker_thread)
-
-        _scanner = self._scanner
-        self._worker_thread.started.connect(lambda: _scanner.scan(dir_path))
-        self._scanner.finished.connect(lambda entries: self._on_lazy_scan_done(entries, dir_path))
-        self._scanner.error.connect(self._on_scan_error)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-
-        self._worker_thread.start()
+        """Model 请求扫描某目录的子节点（走串行队列，幂等去重）"""
+        self._request_scan(dir_path, lambda entries, _d=dir_path: self._on_lazy_scan_done(entries, _d))
 
     def _on_lazy_scan_done(self, entries: List[_DirEntry], dir_path: str):
-        self._worker_thread = None
-        self._scanner = None
         self._source_model.populate_children(dir_path, entries)
         if os.path.isdir(dir_path):
             self._watcher.add_path(dir_path)
+        self._process_expand_queue()  # 恢复队列：本层加载完成，展开下一层
 
     # ── 展开/折叠 ──
 
@@ -687,23 +911,11 @@ class FileTreeCard(QWidget):
             node = self._source_model.find_node(dir_path)
             if node is None or not node.loaded:
                 return
-        # 异步重新扫描
-        self._current_scan_target = dir_path
-        self._cleanup_worker()
-        self._worker_thread = QThread()
-        self._scanner = _TreeScanner()
-        self._scanner.moveToThread(self._worker_thread)
-        _scanner = self._scanner
-        self._worker_thread.started.connect(lambda: _scanner.scan(dir_path))
-        self._scanner.finished.connect(lambda entries: self._on_watcher_reload(entries, dir_path))
-        self._scanner.error.connect(self._on_scan_error)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        # 异步重新扫描（走串行队列）
+        self._request_scan(dir_path, lambda entries, _d=dir_path: self._on_watcher_reload(entries, _d))
 
     def _on_watcher_reload(self, entries: List[_DirEntry], dir_path: str):
-        self._worker_thread = None
-        self._scanner = None
-        if os.path.normpath(dir_path) == os.path.normpath(self._project_root):
+        if _same_path(dir_path, self._project_root):
             self._source_model.refresh_root(entries)
             if entries:
                 self._stack.setCurrentIndex(0)
@@ -1186,8 +1398,16 @@ class FileTreeCard(QWidget):
     # ── 刷新与关闭 ──
 
     def _on_refresh(self):
-        self._watcher.clear()
+        # 增量刷新不重建节点，已展开目录的监听保持有效，只补缺失项
+        self._rebuild_watcher_paths()
         self._async_load_tree()
+
+    def _rebuild_watcher_paths(self):
+        """补挂监听：根目录 + 全部展开中的目录（``add_path`` 幂等）"""
+        if self._project_root and os.path.isdir(self._project_root):
+            self._watcher.add_path(self._project_root)
+        for path in self._expanded_source_paths():
+            self._watcher.add_path(path)
 
     def _on_close(self):
         self._cleanup_worker()
