@@ -18,7 +18,10 @@
 属性（转发插件服务），任何宿主模块都不应赋值。
 
 ★ 项目选择卡片（_project_selector_card / _project_new_edit 等）已迁入
-history-manager 插件（左侧停靠区「历史会话」卡内的可折叠面板）。
+history-manager 插件（左侧停靠区「历史会话」卡内的可折叠面板）；
+卡片本体 ProjectSelectorCardContent / ProjectItem 亦已下沉为插件自包含
+组件（plugins/history-manager/ui/project_selector_card.py），纯函数与
+头像在宿主公共层（app/utils/project_meta.py / app/widgets/square_avatar.py）。
 host 方法依赖（build 内调用/连接，插件 override 时应保持同名）：
 - _card_manager(_bottom_card_container) / _register_cards_to_manager / _system_card_ids
 - _init_builtin_commands（经 QTimer.singleShot 延迟注册）
@@ -59,9 +62,9 @@ class SystemCardsModule(UIModule):
         # 模型选择卡片框架懒创建（P0-1）：见上方 _ensure_model_selector_card() 说明
 
         # 项目选择卡片已迁入 history-manager 插件：左侧停靠区「历史会话」卡片内的
-        # 可折叠项目选择面板（复用 ProjectSelectorCardContent，首行「全部项目」）。
+        # 可折叠项目选择面板（卡片本体为插件自包含组件，首行「全部项目」）。
         # 宿主只保留项目数据与切换方法（_on_project_selected / _on_new_project_created 等），
-        # 面板 UI 与信号转发见 plugins/history-manager/ui/history_page.py。
+        # 面板 UI 与信号转发见 plugins/history-manager/ui/（history_page + project_selector_card）。
 
         # 问题悬浮卡（批1 懒创建）：同上，构造/接线/注册在
         # host._ensure_question_floating_widget() 中按需执行（弹出链入口兜底）。

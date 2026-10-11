@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-项目选择卡片内容 - 卡片形式展示所有项目，支持选择、新建、归档
-替代原来的 ProjectSelectorPopup 弹窗
+项目选择卡片内容（history-manager 插件自包含组件）
+
+卡片形式展示所有项目，支持选择、新建、归档。2026-10 自宿主
+``app/widgets/cards/settings/project_selector_card.py`` 迁入插件：
+UI 本体（ProjectItem / ProjectSelectorCardContent）随插件自包含；
+纯函数（缩写/配色/淡染）与方形头像保留在宿主公共层
+（``app/utils/project_meta.py`` / ``app/widgets/square_avatar.py``），
+供主窗、标签页、标题栏与本插件共同使用。
 """
 
-import colorsys
 import os
-import re
-import zlib
 from typing import Dict, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -23,200 +25,13 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import ScrollArea, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
-from app.utils.utils import get_font_family_css, get_icon, get_unified_font
+from app.utils.project_meta import _alpha_tint, extract_project_initials, get_project_color
+from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.square_avatar import _SquareAvatar
 # [PERF] 直接从源头导入 _ElidedLabel（mcp_setting_card 同样转引自 app.widgets.elided_label），
 # 避免为这一个类拉起 mcp_setting_card → mcp SDK（~715ms）整条重链
 from app.widgets.elided_label import _ElidedLabel
 from app.widgets.hover_style_guard import style_if_changed
-
-
-def extract_project_initials(name: str) -> str:
-    """从项目名提取最多 2 个字符的缩写
-
-    优先级：
-    1. 中文 → 首个汉字
-    2. 分隔符（_/-/空格）→ 首段首字母 + 末段首字母
-    3. 驼峰/帕斯卡 → 首个词首字母 + 末个词首字母
-    4. 其他 → 前 2 个字母大写
-
-    Args:
-        name: 项目名
-
-    Returns:
-        1-2 个字符的缩写字符串
-    """
-    if not name:
-        return "??"
-
-    # ── 中文：首个汉字 ──
-    has_cjk = any("\u4e00" <= c <= "\u9fff" for c in name)
-    if has_cjk:
-        for c in name:
-            if "\u4e00" <= c <= "\u9fff":
-                return c
-        return name[0]
-
-    # ── 分隔符拆分（下划线/中划线/空格）──
-    # 取第一个段的第一个字母 + 最后一个段的第一个字母
-    for delim in ("_", "-", " "):
-        if delim in name:
-            parts = [p for p in name.split(delim) if p]
-            if len(parts) >= 2:
-                return (parts[0][0] + parts[-1][0]).upper()
-            # 只有一个段，退化到后续逻辑
-            name = parts[0]
-            break
-
-    # ── 驼峰/帕斯卡：拆分为词 ──
-    # 处理连写缩写：OpenAIChat → Open|AI|Chat
-    s = re.sub(r"([a-z0-9])([A-Z])", r"\1|\2", name)
-    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1|\2", s)
-    words = [w for w in s.split("|") if w]
-
-    if len(words) >= 2:
-        # 取首词首字母 + 末词首字母
-        return (words[0][0] + words[-1][0]).upper()
-
-    # ── 普通单词：前 2 字母大写 ──
-    if len(name) >= 2:
-        return name[:2].upper()
-    return name.upper()
-
-
-def get_project_color(name: str, alpha: int = 255) -> str:
-    """根据项目名计算固定颜色（HSL 全空间哈希）
-
-    旧实现：仅在 12 色调色板中取色 → 项目超过 ~30 个即发生明显撞色
-    （生日悖论），尤其是首字母相同或前缀相近的项目。
-
-    新实现：在 HSL 圆柱上从完整字符串 zlib.crc32 直接采样：
-      - H ∈ [0°, 360°)   → 色相覆盖整圈，永不局限于 12 离散点
-      - S ∈ [55%, 85%]   → 足够鲜艳，避免灰色
-      - L ∈ [50%, 65%]   → 在 #212126 深色背景上清晰；白字仍可读
-
-    采样自同一 CRC32 的不同 bit 段（H 低位、S 中位、L 高位），
-    保证首字母相同 / 前缀相近的项目也能得到不同颜色。
-
-    使用 zlib.crc32 替代内置 hash()，避免 Python 的
-    进程间随机化种子（PYTHONHASHSEED）导致每次启动颜色不一致。
-
-    Args:
-        name: 项目名
-        alpha: 透明度 0-255
-
-    Returns:
-        RGBA 颜色字符串，如 "rgba(33, 139, 255, 255)"
-    """
-    crc = zlib.crc32(name.encode("utf-8"))
-    # 三个分量取自 CRC32 不同 bit 段，相关性低
-    h = crc % 360  # 0-359°  色相
-    s = 55 + ((crc >> 8) % 31)  # 55-85%  饱和度
-    l = 50 + ((crc >> 16) % 16)  # 50-65%  亮度
-
-    r, g, b = colorsys.hls_to_rgb(h / 360.0, l / 100.0, s / 100.0)
-    return f"rgba({int(round(r * 255))}, {int(round(g * 255))}, {int(round(b * 255))}, {alpha})"
-
-
-def _alpha_tint(rgba: str, ratio: float, fallback: str = "transparent") -> str:
-    """把 ``rgba(r, g, b, a)`` 色按比例压成淡染底色（保持同色系关联）
-
-    用于「当前项目」行静止态底纹：取项目强调色的一层极淡底色，与头像/色条
-    同色系。解析失败（主题 token 占位符等）回退 ``fallback``。
-    """
-    try:
-        inner = rgba[rgba.index("(") + 1 : rgba.rindex(")")]
-        parts = [p.strip() for p in inner.split(",")]
-        r, g, b = (int(float(parts[0])), int(float(parts[1])), int(float(parts[2])))
-        return f"rgba({r}, {g}, {b}, {int(round(255 * ratio))})"
-    except Exception:
-        return fallback
-
-
-class _SquareAvatar(QWidget):
-    """使用 QPainter 绘制的方形项目头像 — flat design squircle 风格
-
-    纯色圆角矩形 + 1-2 个白色缩写字母，用于项目卡片列表和面包屑标签。
-    Qt QSS 在小尺寸（24×24）上同时渲染 border + border-radius 时存在
-    抗锯齿走样问题。本类用 QPainter 精确绘制，保证像素完美。
-    """
-
-    def __init__(self, text: str, color: str, parent=None, size: int = 24):
-        super().__init__(parent)
-        self._text = text if text else "?"
-        # get_project_color() 返回 "rgba(r,g,b,a)" 格式，
-        # QColor(string) 不解析此 CSS 格式，需拆解为数值构造
-        self._color = self._parse_rgba(color)
-        self._size = size
-        self.setFixedSize(size, size)
-
-    @staticmethod
-    def _parse_rgba(rgba_str: str) -> QColor:
-        """解析 "rgba(r,g,b,a)" 字符串为 QColor，失败时返回灰色"""
-        if rgba_str.startswith("#"):
-            return QColor(rgba_str)
-        try:
-            import re
-
-            m = re.match(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)", rgba_str)
-            if m:
-                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                a = int(m.group(4)) if m.group(4) else 255
-                return QColor(r, g, b, a)
-        except Exception:
-            pass
-        return QColor(128, 128, 128)  # fallback 灰色
-
-    def set_project(self, name: str, color: str):
-        """更新项目名和颜色（用于面包屑等动态场景）"""
-        self._text = extract_project_initials(name)
-        self._color = self._parse_rgba(color)
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setRenderHint(QPainter.TextAntialiasing, True)
-
-        rect = self.rect()
-        # 微妙圆角（约 5px，like VS Code squircle）
-        corner_radius = 5
-
-        # 纯色填充背景（无边框，flat design）
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self._color)
-        painter.drawRoundedRect(rect, corner_radius, corner_radius)
-
-        # 居中白字，使用系统配置字体
-        painter.setPen(Qt.white)
-        font = get_unified_font()
-        # 单字符（中文）字号稍大，双字符略小
-        if len(self._text) <= 1:
-            font.setPixelSize(scale_font_size(self._size * 14 // 24))
-        else:
-            font.setPixelSize(scale_font_size(self._size * 14 // 24))
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(rect, Qt.AlignCenter, self._text)
-
-    # ── 立即显示 tooltip ─────────────────────────────────────
-    # 默认 Qt tooltip 延迟约 700ms，用户体验偏慢。
-    # 这里重写 enter/leave，直接用自绘 tooltip 立即显示，
-    # 鼠标移出立即隐藏，体感与按钮 hover 行为一致。
-    def enterEvent(self, event):
-        tip = self.toolTip()
-        if tip:
-            from app.widgets.simple_hover_tooltip import show_immediate_tooltip
-
-            self._avatar_tip = show_immediate_tooltip(self, tip, duration_ms=0)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        tip = getattr(self, "_avatar_tip", None)
-        if tip is not None:
-            tip.hide()
-            tip.deleteLater()
-            self._avatar_tip = None
-        super().leaveEvent(event)
 
 
 class ProjectItem(QWidget):
@@ -227,6 +42,7 @@ class ProjectItem(QWidget):
     archiveClicked = pyqtSignal(str)
     exportClicked = pyqtSignal(str)  # 导出项目压缩包
     openFolderClicked = pyqtSignal(str, str)  # project_name, root_dir
+    newSessionClicked = pyqtSignal(str)  # 行内「新建会话」按钮：切到该项目并新建会话
 
     # 单行高度（无根目录）；有根目录时切换为 _DOUBLE_LINE_HEIGHT
     _SINGLE_LINE_HEIGHT = 30
@@ -242,6 +58,14 @@ class ProjectItem(QWidget):
         self._project_color = get_project_color(name)
         self._root_dir = ""
         self._check_label: Optional[QLabel] = None  # 「✓」当前项目指示（set_current 复用切换时按需创建）
+        self._menu_open = False  # 行操作菜单（更多/右键）执行中：leaveEvent 跳过复位以保持 hover
+        # QWidget 子类用 QSS background/border 必须显式声明，否则部分平台不绘制背景
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        # ★ 自身样式用 ID 选择器提特异性：滚动区祖先 styleSheet 里的
+        #   ``QScrollArea > QWidget > QWidget { background: transparent; }``
+        #   特异性 (0,0,3) 压过裸类型选择器 ``ProjectItem`` (0,0,1)，
+        #   导致行背景（静止淡染/hover 底）从未被渲染过。ID 选择器 (0,1,1) 反超。
+        self.setObjectName("projectItem")
         self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
@@ -316,10 +140,12 @@ class ProjectItem(QWidget):
         self._meta_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(self._meta_label)
 
-        # 归档按钮（默认隐藏，hover 时显示）
-        self._archive_btn = TransparentToolButton(get_icon("归档"), self)
-        self._archive_btn.setFixedSize(24, 24)
-        self._archive_btn.setStyleSheet(f"""
+        # 行内操作按钮（默认隐藏，hover 时显示）：新建会话 + 更多（菜单含归档/导出/打开根目录）
+        self._row_btns = QWidget(self)
+        row_btns_layout = QHBoxLayout(self._row_btns)
+        row_btns_layout.setContentsMargins(0, 0, 0, 0)
+        row_btns_layout.setSpacing(0)
+        _row_btn_style = f"""
             QToolButton {{
                 background: transparent;
                 border: none;
@@ -329,11 +155,21 @@ class ProjectItem(QWidget):
                 background: rgba(255, 255, 255, 50);
                 border-radius: 4px;
             }}
-        """)
-        self._archive_btn.clicked.connect(self._emit_archive)
-        self._archive_btn.setToolTip("归档此项目")
-        self._archive_btn.hide()
-        layout.addWidget(self._archive_btn)
+        """
+        self._new_session_btn = TransparentToolButton(get_icon("新会话"), self._row_btns)
+        self._new_session_btn.setFixedSize(24, 24)
+        self._new_session_btn.setStyleSheet(_row_btn_style)
+        self._new_session_btn.clicked.connect(self._emit_new_session)
+        self._new_session_btn.setToolTip("新建会话")
+        row_btns_layout.addWidget(self._new_session_btn)
+        self._more_btn = TransparentToolButton(get_icon("更多"), self._row_btns)
+        self._more_btn.setFixedSize(24, 24)
+        self._more_btn.setStyleSheet(_row_btn_style)
+        self._more_btn.clicked.connect(self._show_more_menu)
+        self._more_btn.setToolTip("更多")
+        row_btns_layout.addWidget(self._more_btn)
+        self._row_btns.hide()
+        layout.addWidget(self._row_btns)
 
         # 静止态底色（当前项目淡染 + 左侧项目色条）
         self._apply_base_style()
@@ -361,7 +197,7 @@ class ProjectItem(QWidget):
             style_if_changed(
                 self,
                 f"""
-                ProjectItem {{
+                ProjectItem#projectItem {{
                     background: {tint};
                     border-left: 3px solid {self._project_color};
                     border-radius: 6px;
@@ -372,7 +208,7 @@ class ProjectItem(QWidget):
             style_if_changed(
                 self,
                 """
-                ProjectItem {
+                ProjectItem#projectItem {
                     background: transparent;
                     border-left: 3px solid transparent;
                     border-radius: 6px;
@@ -386,14 +222,15 @@ class ProjectItem(QWidget):
     def _emit_archive(self):
         self.archiveClicked.emit(self._name)
 
+    def _emit_new_session(self):
+        self.newSessionClicked.emit(self._name)
+
     def _emit_open_folder(self):
         if self._root_dir:
             self.openFolderClicked.emit(self._name, self._root_dir)
 
-    def contextMenuEvent(self, event):
-        """右键菜单：打开项目根目录 / 导出项目压缩包（原 hover 按钮迁此，精简 hover 密度）"""
-        if self._is_all_entry:
-            return  # 聚合行（「全部项目」）无单项目操作
+    def _build_project_menu(self) -> QMenu:
+        """构建项目操作菜单（归档 / 导出 / 打开根目录），「更多」按钮与右键共用"""
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
@@ -412,15 +249,40 @@ class ProjectItem(QWidget):
                 background: {Colors.HOVER_BG};
             }}
         """)
-        act_open = menu.addAction("打开项目根目录") if self._root_dir else None
-        act_export = menu.addAction("导出项目压缩包")
-        chosen = menu.exec(event.globalPos())
-        if chosen is None:
-            return
-        if chosen is act_open:
-            self._emit_open_folder()
-        elif chosen is act_export:
-            self._emit_export()
+        menu.addAction("归档此项目", self._emit_archive)
+        menu.addAction("导出项目压缩包", self._emit_export)
+        if self._root_dir:
+            menu.addAction("打开项目根目录", self._emit_open_folder)
+        return menu
+
+    def _show_more_menu(self) -> None:
+        """「更多」按钮点击：弹项目操作菜单（与右键菜单同构）"""
+        menu = self._build_project_menu()
+        pos = self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft())
+        self._exec_menu_keep_hover(menu, pos)
+
+    def contextMenuEvent(self, event):
+        """右键菜单：归档 / 导出项目压缩包 / 打开项目根目录（与「更多」按钮菜单同构）"""
+        if self._is_all_entry:
+            return  # 聚合行（「全部项目」）无单项目操作
+        menu = self._build_project_menu()
+        self._exec_menu_keep_hover(menu, event.globalPos())
+
+    def _exec_menu_keep_hover(self, menu: "QMenu", pos) -> None:
+        """弹出菜单并在菜单打开期间保持行 hover 态
+
+        ``menu.exec`` 阻塞期间鼠标移入菜单会触发 leaveEvent，行立即复位成
+        静止态（底色消失 + 按钮隐藏），用户回看时认不出菜单属于哪一行。
+        置 ``_menu_open`` 让 leaveEvent 跳过复位；菜单关闭后鼠标若已不在
+        行内，再统一复位。
+        """
+        self._menu_open = True
+        try:
+            menu.exec(pos)
+        finally:
+            self._menu_open = False
+        if not self.underMouse():
+            self._restore_base_style()
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
@@ -471,38 +333,55 @@ class ProjectItem(QWidget):
             )
 
     def enterEvent(self, event):
-        # hover 时：整行加半透明背景 + 更亮的项目颜色 + 元数据提亮
+        # hover 仅调底色（弱反馈但跨主题可见）：非当前行用主题交互染底
+        # TAB_ACTIVE_BG（深 30% / 浅 18%，HOVER_BG 仅 8% 叠面板底肉眼难辨）；
+        # 当前行同色系明显提亮（0.10 → 0.28）。不做「名字变色加粗 + 元数据
+        # 提亮」的强反馈，左色条语义保持：当前行项目色、非当前行透明。
         Colors.refresh()
-        style_if_changed(
-            self,
-            f"""
-            ProjectItem {{
-                background: {Colors.HOVER_BG_STRONG};
-                border-left: 3px solid {self._project_color};
-                border-radius: 6px;
-            }}
-        """,
-        )
-        hover_color = get_project_color(self._name, alpha=240)
-        style_if_changed(
-            self._name_label, f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
-        )
-        style_if_changed(
-            self._meta_label, f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};"
-        )
-        # 聚合行（「全部项目」）不提供单项目操作：无归档按钮
+        if self._is_current:
+            tint = _alpha_tint(self._project_color, 0.28, fallback=Colors.TAB_ACTIVE_BG)
+            style_if_changed(
+                self,
+                f"""
+                ProjectItem#projectItem {{
+                    background: {tint};
+                    border-left: 3px solid {self._project_color};
+                    border-radius: 6px;
+                }}
+            """,
+            )
+        else:
+            style_if_changed(
+                self,
+                f"""
+                ProjectItem#projectItem {{
+                    background: {Colors.TAB_ACTIVE_BG};
+                    border-left: 3px solid transparent;
+                    border-radius: 6px;
+                }}
+            """,
+            )
+        # 聚合行（「全部项目」）不提供单项目操作：无行内按钮
         if not self._is_all_entry:
-            self._archive_btn.show()
+            self._row_btns.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        # 复位到静止态（当前项目保留淡染底 + 色条，非当前项目透明）
+        # 行操作菜单执行中跳过复位（鼠标移入菜单触发的假离开），
+        # 保持 hover 态；菜单关闭后由 _exec_menu_keep_hover 统一收尾。
+        if self._menu_open:
+            super().leaveEvent(event)
+            return
+        self._restore_base_style()
+        super().leaveEvent(event)
+
+    def _restore_base_style(self) -> None:
+        """复位到静止态（当前项目保留淡染底 + 色条，非当前项目透明）"""
         self._apply_base_style()
         self._apply_name_style()
         Colors.refresh()
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
-        self._archive_btn.hide()
-        super().leaveEvent(event)
+        self._row_btns.hide()
 
 
 class ProjectSelectorCardContent(QWidget):
@@ -517,6 +396,7 @@ class ProjectSelectorCardContent(QWidget):
     openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
     folderDropped = pyqtSignal(str)  # 拖拽文件夹路径
     allProjectsSelected = pyqtSignal()  # 「全部项目」首行点击（聚合视图，无对应项目实体）
+    newSessionRequested = pyqtSignal(str)  # 项目行内「新建会话」：切到该项目并新建会话
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -759,6 +639,7 @@ class ProjectSelectorCardContent(QWidget):
             (item.archiveClicked, self._on_archive_clicked),
             (item.exportClicked, self._on_export_clicked),
             (item.openFolderClicked, self._on_open_folder_clicked),
+            (item.newSessionClicked, self._on_new_session_clicked),
         ):
             try:
                 sig.disconnect()
@@ -779,12 +660,16 @@ class ProjectSelectorCardContent(QWidget):
         """打开项目根目录按钮被点击"""
         self.openFolderRequested.emit(project_name, root_dir)
 
+    def _on_new_session_clicked(self, project_name: str):
+        """行内「新建会话」按钮被点击（切到该项目并新建会话，由承载方实现）"""
+        self.newSessionRequested.emit(project_name)
+
     def _on_export_clicked(self, project_name: str):
         """导出按钮被点击"""
         self.exportProject.emit(project_name)
 
     def _on_archive_clicked(self, project_name: str):
-        """归档按钮被点击"""
+        """归档被点击（行内菜单 / 右键菜单入口）"""
         from app.widgets.common_dialogs import ConfirmDialog
 
         _confirmed: list[bool] = [False]

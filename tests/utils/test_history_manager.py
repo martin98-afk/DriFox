@@ -137,8 +137,12 @@ def test_do_save_does_not_overwrite_db_with_released_empty_messages(monkeypatch,
         }
     ]
 
-    # 模拟内存消息被释放置空（发生在 _schedule_save 的延迟窗口内）
+    # 模拟内存消息被释放置空（发生在 _schedule_save 的延迟窗口内）。
+    # 释放路径（_release_inactive_session_messages / remove_session(
+    # release_messages_only=True)）会同步打 _messages_released 标记——
+    # 守卫靠它区分「内存释放，无数据可写」与「显式清空，就是要写空」。
     manager._history_sessions[0]["messages"] = []
+    manager._history_sessions[0]["_messages_released"] = True
     manager._pending_save_session_id = "session-1"
 
     manager._do_save()
@@ -146,6 +150,35 @@ def test_do_save_does_not_overwrite_db_with_released_empty_messages(monkeypatch,
     # DB 不得收到空 messages 的覆盖写；pending 需正常清空
     assert store.saved_session_ids == []
     assert manager._pending_save_session_id is None
+
+
+def test_do_save_writes_explicitly_cleared_empty_messages(monkeypatch, tmp_path):
+    """🔴 /compact --clear 根因回归：显式清空的空列表**必须**落库。
+
+    修复前：_do_save 一刀切 `not messages` 跳过 → 清空只在内存生效，
+    DB 保留旧消息，任何重载（切会话/重开/重启）都把旧消息读回 =
+    「清不掉」。收窄判据后只有带 _messages_released 的释放态才跳过。
+    """
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [],  # 显式清空，且**无**释放标记
+            "last_time": "2026-10-11 19:40:00",
+        }
+    ]
+    manager._pending_save_session_id = "session-1"
+
+    manager._do_save()
+
+    assert store.saved_session_ids == ["session-1"], "显式清空的会话必须写库（不被空守卫吞）"
+    assert store._saved_sessions["session-1"]["messages"] == []
 
 
 def test_import_before_first_history_load_survives_immediate_refresh(monkeypatch, tmp_path):
@@ -251,3 +284,104 @@ def test_get_project_list_sqlite_includes_projects_without_sessions(monkeypatch,
     manager._session_store = _FakeSessionStore([], projects=["DriFox", "zero"])
     manager._use_sqlite = True
     assert manager.get_project_list() == ["DriFox", "zero"]
+
+
+# ---------- /compact --clear 显式清空落库 + 空守卫收窄（2026-10-11 根因修复） ----------
+
+
+def _clearable_manager(monkeypatch, tmp_path, sid="session-1"):
+    """构造一条内存记录含真实消息、且已挂 sqlite store 的 manager。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": sid,
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [
+                {"role": "user", "content": "旧提问", "timestamp": "2026-10-11 19:00:00"},
+                {"role": "assistant", "content": "旧回复", "timestamp": "2026-10-11 19:00:01"},
+            ],
+            "compaction_cache": {},
+            "compaction_state": {},
+            "last_time": "2026-10-11 19:00:01",
+        }
+    ]
+    manager._session_store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    return manager, manager._session_store
+
+
+def test_save_cleared_session_writes_empty_messages(monkeypatch, tmp_path):
+    """🔴 /compact --clear 核心回归：save_cleared_session 必须把空列表写进 store。
+
+    修复前清空回调全程不落库；即便走延迟保存链也会被「空消息守卫」吞掉 →
+    DB 保留旧消息 → 任何重载把旧消息读回 = 用户看到「清不掉」。
+    """
+    manager, store = _clearable_manager(monkeypatch, tmp_path)
+
+    ok = manager.save_cleared_session("session-1", compaction_cache={"active": True, "kind": "auto_compact"})
+
+    assert ok is True
+    assert store.saved_session_ids == ["session-1"]
+    saved = store._saved_sessions["session-1"]
+    assert saved["messages"] == [], "清空后的空列表必须落库（不被空守卫吞）"
+    assert saved["compaction_cache"]["active"] is True, "压缩缓存须随清空一并落库"
+    # 内存记录同步替换为清空版，避免后续 _do_save 又把旧消息写回
+    assert manager._history_sessions[0]["session_id"] == "session-1"
+    assert manager._history_sessions[0]["messages"] == []
+
+
+def test_save_cleared_session_invalidates_pending_save(monkeypatch, tmp_path):
+    """清空需作废该会话排队中的延迟保存，否则旧快照会在清空写盘后再次写回。"""
+    manager, store = _clearable_manager(monkeypatch, tmp_path)
+    manager._pending_save_session_id = "session-1"
+    manager._save_timer = object()
+
+    manager.save_cleared_session("session-1")
+
+    assert manager._pending_save_session_id is None
+    assert manager._save_timer is None
+
+
+def test_save_cleared_session_returns_false_when_session_absent(monkeypatch, tmp_path):
+    """会话不在内存记录中时跳过（返回 False），不得凭空造记录。"""
+    manager, store = _clearable_manager(monkeypatch, tmp_path)
+    assert manager.save_cleared_session("not-there") is False
+    assert store.saved_session_ids == []
+
+
+def test_save_cleared_session_requires_sqlite(monkeypatch, tmp_path):
+    """未启用 SQLite 时返回 False（无落库目标）。"""
+    manager, _store = _clearable_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    assert manager.save_cleared_session("session-1") is False
+
+
+def test_flush_async_skips_only_released_target(monkeypatch, tmp_path):
+    """flush_async 与 _do_save 同口径：只拦释放态，显式清空照写。"""
+    manager, store = _clearable_manager(monkeypatch, tmp_path)
+
+    # flush_async 把写盘丢给后台线程；测试里换成同步执行以消除竞态
+    class _SyncThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            if self._target:
+                self._target()
+
+    monkeypatch.setattr(history_module.threading, "Thread", _SyncThread)
+
+    # 释放态：被打 _messages_released 标记 → 不写
+    manager._history_sessions[0]["messages"] = []
+    manager._history_sessions[0]["_messages_released"] = True
+    manager._pending_save_session_id = "session-1"
+    manager.flush_async()
+    assert store.saved_session_ids == [], "释放态不得回写空列表覆盖 DB"
+
+    # 显式清空：无标记 → 写
+    del manager._history_sessions[0]["_messages_released"]
+    manager._pending_save_session_id = "session-1"
+    manager.flush_async()
+    assert store.saved_session_ids == ["session-1"], "显式清空必须落库"

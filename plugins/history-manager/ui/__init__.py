@@ -5,7 +5,7 @@
 - 注册对话左侧停靠区浮动卡「历史会话」（``card_id="history-manager"``，
   ``container="left"``，默认常驻显示），页面自带 ``HistoryCard``（搜索 /
   项目选择折叠面板 / 会话列表）与自拉数据逻辑（``HistoryManager`` 全局单例）。
-  项目选择面板复用宿主 ``ProjectSelectorCardContent``（首行「全部项目」），
+  项目选择面板使用插件自包含组件 ``ProjectSelectorCardContent``（首行「全部项目」），
   面板数据的拉取/展开由宿主标题栏项目 icon 经服务入口驱动（见下）。
   左侧栏顶部系统插件区自动派生按钮（浮动卡兼容映射）。
 - 注册 ``HistoryService``（``SERVICE_NAME="history"``）：宿主 ``MainWidget``

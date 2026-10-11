@@ -10,8 +10,8 @@ setStyleSheet 会放大成每帧两次的样式风暴，表现为滚动掉帧。
 一次 :func:`style_if_changed`，样式串未变化时零开销跳过。
 
 已接入：ModelItem（model_selector_card.py，内联同款串比较）、
-ProjectItem（project_selector_card.py）、_CustomInputCard
-（question_floating_widget.py）。
+ProjectItem（plugins/history-manager/ui/project_selector_card.py）、
+_CustomInputCard（question_floating_widget.py）。
 """
 
 from PyQt5.QtWidgets import QWidget

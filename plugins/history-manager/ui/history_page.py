@@ -15,7 +15,7 @@
 - 当前会话高亮：只读活跃窗口 ``_current_session_id``（窗口态）
 
 项目选择面板（可折叠，默认收起）：折叠头一行展示当前过滤目标（项目 icon +
-项目名），点开复用宿主 ``ProjectSelectorCardContent``（项目选择卡片本体：
+项目名），点开使用插件自包含的 ``ProjectSelectorCardContent``（项目选择卡片本体：
 首行「全部项目」→ 不过滤项目，视图下行内显示项目小标签；点具体项目 →
 宿主窗口切项目并自动切工作目录，本页同时过滤到该项目）。新建 / 选择文件夹 /
 导入项目的工具条随面板一起迁入本页，均转调宿主窗口方法执行。
@@ -54,16 +54,14 @@ from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
 from loguru import logger
 
 from app.utils.design_tokens import Animations, Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.project_meta import _alpha_tint, get_project_color
 from app.utils.theme_style import bind_theme_qss, replay_theme_qss
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets._workbench_helpers import _EmptyHint
-from app.widgets.cards.settings.project_selector_card import (
-    ProjectItem,
-    ProjectSelectorCardContent,
-    _SquareAvatar,
-    get_project_color,
-)
 from app.widgets.custom_title_bar import CustomTabButton
+from app.widgets.square_avatar import _SquareAvatar
+
+from .project_selector_card import ProjectItem, ProjectSelectorCardContent
 
 
 # 项目过滤器哨兵值（「当前项目」跟随活跃窗口；「全部项目」混合视图）
@@ -331,21 +329,6 @@ class _ProjectSelectorHeader(QFrame):
         super().mousePressEvent(event)
 
 
-def _alpha_tint(rgba: str, ratio: float, fallback: str = "transparent") -> str:
-    """把 ``rgba(r, g, b, a)`` 色按比例压成淡染底色（保持同色系关联）
-
-    用于「当前项目」折叠头/列表行的静止态底纹：取项目强调色的一层极淡底色，
-    与头像/色条同色系。解析失败（主题 token 占位符等）回退 ``fallback``。
-    """
-    try:
-        inner = rgba[rgba.index("(") + 1 : rgba.rindex(")")]
-        parts = [p.strip() for p in inner.split(",")]
-        r, g, b = (int(float(parts[0])), int(float(parts[1])), int(float(parts[2])))
-        return f"rgba({r}, {g}, {b}, {int(round(255 * ratio))})"
-    except Exception:
-        return fallback
-
-
 def _active_history_manager():
     """会话数据全局唯一入口（HistoryManager 单例）；异常时返回 None"""
     try:
@@ -534,17 +517,16 @@ class HistoryPage(QWidget):
         # 展开或宿主驱动刷新时再拉，避免卡片创建路径上多打一轮 DB 统计查询。
         self._sync_project_header()
 
-    # ── 项目选择面板（折叠；复用宿主项目选择卡片） ──
+    # ── 项目选择面板（折叠；插件自包含的项目选择卡片） ──
 
     def _build_project_panel(self, host: QWidget) -> QWidget:
         """构建项目选择面板：「裁剪外壳 + 钉住内容」两层结构 + 工具条/列表
 
         外壳只做圆角底与逐帧高度裁剪，内容挂 ``body``：若内容直接挂外壳，逐帧
         ``setFixedHeight`` 时外壳内 QVBoxLayout 会压缩子控件（内嵌滚动区自带
-        ``setMinimumHeight(40)``）→ 视觉上「内容被挤扁往中间缩」。复用宿主
-        ``ProjectSelectorCardContent``（项目行 icon / 元数据 / hover 导出归档与
-        宿主项目卡片完全一致）；项目增删等数据操作仍由宿主窗口实现，插件只做
-        UI 承载与信号转发。
+        ``setMinimumHeight(40)``）→ 视觉上「内容被挤扁往中间缩」。卡片本体为插件自包含
+        ``ProjectSelectorCardContent``（项目行 icon / 元数据 / hover「新建会话 +
+        更多」）；项目增删等数据操作仍由宿主窗口实现，插件只做 UI 承载与信号转发。
         """
         panel = QFrame(host)
         panel.setObjectName("projectSelectorPanel")
@@ -644,6 +626,7 @@ class HistoryPage(QWidget):
         self._project_selector.openFolderRequested.connect(
             lambda name, root: self._call_window("_on_open_project_folder", name, root)
         )
+        self._project_selector.newSessionRequested.connect(self._on_row_new_session)
         self._project_selector.folderDropped.connect(lambda path: self._call_window("_on_project_folder_dropped", path))
         vbox.addWidget(self._project_selector, 1)
         shell.addWidget(body, 1)
@@ -895,23 +878,47 @@ class HistoryPage(QWidget):
         self.refresh()
 
     def _on_new_session_clicked(self) -> None:
-        """新建会话：当前筛选到具体项目时先切到该项目；「全部项目」下保持原项目
+        """新建会话（顶部按钮）：当前筛选到具体项目时先切到该项目；「全部项目」下保持原项目
 
         与「点项目行仅做筛选」配套：筛选本身不动窗口项目；点「新建会话」时
         才把窗口项目切到被筛选的项目（宿主 ``_on_project_selected`` 内含
         「切项目 + 工作目录 + 新建会话 + 团队广播」）。筛选为「全部项目」
         或跟随当前项目时，直接在原项目下新建。
+        收尾隐藏历史会话卡片：新建 = 真切换，卡片让位（与卡片 × 关闭同一
+        registry 通道；切回该标签页不再自动恢复）。
         """
         target = self._get_tab_filter()
         win = _active_window()
         current = getattr(win, "_current_project", None) if win is not None else None
         if target and target not in (_PROJECT_ALL, _PROJECT_CURRENT) and target != current:
-            # 宿主 _on_project_selected 内含 close_history=True，切完自动收页签
+            # 宿主 _on_project_selected 内含 close_history=True，切完自动让位
             self._call_window("_on_project_selected", target)
-            return
-        self._call_window("_create_new_session")
-        # 🆕 新建会话 = 真切换：本页签让位（与宿主 close_history 语义一致）
-        self._call_window("_close_history_panel")
+        else:
+            self._call_window("_create_new_session")
+        # 新建会话 = 真切换：隐藏历史会话卡片，让出左侧停靠区
+        self.closed.emit()
+
+    def _on_row_new_session(self, project_name: str) -> None:
+        """项目行内「新建会话」：窗口项目切到行所属项目 + 新建会话 + 卡片让位
+
+        与顶部「新建会话」按钮（``_on_new_session_clicked``，跟随筛选）不同，
+        本入口以**行所属项目**为目标：点哪个项目，窗口项目就切到哪个项目并
+        在其下新建会话。非当前项目走宿主 ``_on_project_selected``（内含切项目
+        + 切工作目录 + 新建会话 + 团队广播 + 收起面板）；已是当前项目则直接
+        新建。收尾：项目选择跟随窗口新项目（折叠头/列表/勾选与新项目一致），
+        并隐藏历史会话卡片——新建 = 真切换，卡片让位，用户可从历史入口重开。
+        """
+        win = _active_window()
+        current = getattr(win, "_current_project", None) if win is not None else None
+        if project_name and project_name != current:
+            # 宿主 _on_project_selected 内含切项目 + 工作目录 + 新建会话 + 团队广播
+            self._call_window("_on_project_selected", project_name)
+        else:
+            self._call_window("_create_new_session")
+        # 项目选择跟随窗口新项目（窗口项目已切到行项目，折叠头/列表/勾选一致）
+        self.follow_window_project()
+        # 新建会话 = 真切换：隐藏历史会话卡片，让出左侧停靠区
+        self.closed.emit()
 
     def _on_new_project_submitted(self) -> None:
         """工具条输入框回车 / + 按钮：交窗口统一处理（命中已有项目则切换）"""

@@ -123,7 +123,7 @@ _PANEL_MODE_TITLES = {
 
 
 # 项目头像（缩写 + 稳定色）缓存：颜色由 crc32(name) 决定，与会话无关，可安全缓存。
-# ⚠️ 延迟导入 project_selector_card —— 它是设置页的重模块，模块级 import 会拖慢启动。
+# 纯函数已拆至 app/utils/project_meta.py（轻模块，无 Qt/重依赖）。
 _PROJECT_ICON_CACHE: dict = {}
 
 
@@ -133,10 +133,7 @@ def _project_icon_data(name: str) -> tuple:
     if cached is not None:
         return cached
     try:
-        from app.widgets.cards.settings.project_selector_card import (
-            extract_project_initials,
-            get_project_color,
-        )
+        from app.utils.project_meta import extract_project_initials, get_project_color
 
         data = (extract_project_initials(name), get_project_color(name, alpha=255))
     except Exception:
