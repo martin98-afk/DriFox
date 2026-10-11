@@ -14,7 +14,9 @@
 - 不导入 app.core 或 app.widgets 内部的任何模块
 """
 
+import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -307,8 +309,16 @@ class FileTreeCard(QWidget):
         self._current_scan_target: str = ""  # 当前扫描目标目录
 
         # 视图状态缓存：按项目根索引保存展开/选中/滚动（换项目时先存旧根，
-        # 切回同根时还原 —— 整树 reset 唯一的兜底）
-        self._view_state_cache: dict = {}
+        # 切回同根时还原 —— 整树 reset 唯一的兜底）。
+        # ★ 磁盘兜底：插件热重载（watchfiles 监控仓库 plugins/，改任一插件文件
+        # 即触发）会把工作台页销毁重建，实例属性全部归零 —— 展开态必须落盘才能
+        # 跨实例存活。读盘失败静默（缓存无关紧要）。
+        self._view_state_cache: dict = self._load_persisted_view_state()
+        # 当前展开目录（原路径，实时维护；persist 时合并进当前根条目）
+        self._live_expanded: set = set()
+        self._persist_timer: QTimer = QTimer(self)
+        self._persist_timer.setSingleShot(True)
+        self._persist_timer.timeout.connect(self._persist_view_state_now)
         # 视图状态恢复队列（整树 reset 后按路径串行还原展开/选中/滚动）
         self._pending_expand: List[str] = []
         self._pending_selected: List[str] = []
@@ -323,7 +333,9 @@ class FileTreeCard(QWidget):
         self._setup_connections()
         self._setup_shortcuts()
 
+        # 销毁前同步落盘展开态（插件热重载先杀旧实例，防抖 timer 等不到触发）
         self.destroyed.connect(self._cleanup_worker)
+        self.destroyed.connect(self._flush_persist)
         self._first_show_done = False
 
     # ── UI 初始化 ──
@@ -497,6 +509,67 @@ class FileTreeCard(QWidget):
             "scroll": self._tree_view.verticalScrollBar().value(),
         }
 
+    # ── 视图状态磁盘持久化（跨实例存活：插件热重载会销毁重建本卡片） ──
+
+    def _persist_state_path(self):
+        """视图状态缓存文件路径：dev 模式（仓库 .drifox 存在）写仓库数据目录，
+        安装态回退 ~/.drifox；均在 gitignore 内，不污染仓库"""
+        base = _PROJECT_ROOT / ".drifox"
+        if not base.is_dir():
+            base = pathlib.Path.home() / ".drifox"
+        return base / "plugins" / "file-tree" / "view_state.json"
+
+    def _load_persisted_view_state(self) -> dict:
+        """启动时读盘：还原按项目根索引的视图状态缓存"""
+        try:
+            data = json.loads(self._persist_state_path().read_text(encoding="utf-8"))
+            roots = data.get("roots") or {}
+            if not isinstance(roots, dict):
+                return {}
+            return dict(list(roots.items())[-32:])  # 与内存缓存同上限
+        except Exception:
+            return {}
+
+    def _persist_view_state_now(self) -> None:
+        """把当前缓存落盘（合并实时展开集；磁盘结构 {v, roots}）
+
+        ★ 写前必须读盘合并：该文件被**所有窗口的 file-tree 卡片共享**，
+        直接用内存缓存整文件覆盖会冲掉其他窗口刚写入的其他项目条目
+        （多窗口多项目各开一份文件树的场景）。合并时内存优先（本窗口
+        刚操作的条目最新）。
+        """
+        root = self._project_root
+        if root:
+            key = os.path.normcase(os.path.normpath(root))
+            entry = self._view_state_cache.setdefault(key, {})
+            entry["expanded"] = sorted(self._live_expanded)
+        try:
+            path = self._persist_state_path()
+            disk_roots = {}
+            try:
+                disk_roots = json.loads(path.read_text(encoding="utf-8")).get("roots") or {}
+            except Exception:
+                disk_roots = {}
+            merged = dict(disk_roots)
+            merged.update(self._view_state_cache)  # 内存优先
+            data = {"v": 1, "roots": dict(list(merged.items())[-32:])}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass  # 缓存写盘失败不影响功能
+
+    def _schedule_persist(self) -> None:
+        """防抖 2s 落盘（展开/折叠高频，不能每次都写）"""
+        self._persist_timer.start(2000)
+
+    def _flush_persist(self) -> None:
+        """同步落盘（销毁前调用：热重载先杀旧实例，防抖 timer 等不到触发）"""
+        try:
+            self._persist_timer.stop()
+        except RuntimeError:
+            pass  # 销毁期 C++ 对象可能已拆
+        self._persist_view_state_now()
+
     def _stash_view_state(self, root: str) -> None:
         """把当前视图状态存进按项目根索引的缓存（换项目前存旧根）"""
         if not root:
@@ -505,6 +578,7 @@ class FileTreeCard(QWidget):
         self._view_state_cache[key] = self._snapshot_view_state()
         if len(self._view_state_cache) > 32:  # 上限保护：丢掉最早的一项
             self._view_state_cache.pop(next(iter(self._view_state_cache)))
+        self._schedule_persist()
 
     def _restore_view_state(self, state: dict) -> None:
         """按快照还原视图状态：串行展开 → 选中 → 滚动"""
@@ -838,6 +912,7 @@ class FileTreeCard(QWidget):
         if _same_path(scan_dir, model_root):
             self._source_model.refresh_root(entries)
         else:
+            self._live_expanded.clear()  # 旧根的实时展开路径不写进新根条目
             self._stash_view_state(model_root)  # 必须先存：reset 后旧状态已不可取
             self._source_model.set_project(scan_dir, entries)
             cached = self._view_state_cache.get(os.path.normcase(os.path.normpath(scan_dir)))
@@ -872,10 +947,12 @@ class FileTreeCard(QWidget):
         dir_path = src_idx.data(FileTreeModel.COL_PATH)
         if not dir_path or not os.path.isdir(dir_path):
             return
-        # fetchMore 已在 Qt 层自动触发扫描，这里只管理文件监听
+        # fetchMore 已在 Qt 层自动触发扫描，这里只管理文件监听与展开态落盘
         if not self._source_model.node_is_loading(dir_path) and not self._source_model.node_is_loaded(src_idx):
             logger.debug(f"[FileTree] 展开未加载目录(应由 fetchMore 触发): {dir_path}")
         self._watcher.add_path(dir_path)
+        self._live_expanded.add(dir_path)
+        self._schedule_persist()
 
     def _on_proxy_collapsed(self, proxy_idx: QModelIndex):
         src_idx = self._proxy_model.mapToSource(proxy_idx)
@@ -884,6 +961,8 @@ class FileTreeCard(QWidget):
         dir_path = src_idx.data(FileTreeModel.COL_PATH)
         if dir_path:
             self._watcher.remove_path(dir_path)
+            self._live_expanded.discard(dir_path)
+            self._schedule_persist()
 
     # ── Enter 展开 ──
 

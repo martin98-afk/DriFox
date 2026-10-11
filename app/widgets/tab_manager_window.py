@@ -1486,6 +1486,11 @@ class TabManagerWindow(FramelessWindow):
             # ★ 必须显式 show panel：panel 构造后调过 hide()，
             #   Qt 中被显式 hide 的子 widget 不会因 parent.show() 自动恢复。
             panel.set_panel_visible(True)
+            # [T30] 瞬切打开（animate=False：启动恢复 / 切窗 per-tab 恢复）不跑
+            # 动画 → 没有动画结束补刷点，frame 若在隐藏期被主题刷新置脏，会带
+            # 空 styleSheet 显示 → 无背景/边框/圆角。此处立即补刷；未置脏时
+            # 本调用为 no-op，动画路径动画结束后另有一次（同串短路，零开销）。
+            self._refresh_theme_dirty_frames()
             # ★ 不调 restore_last_tab：hide 期间 stack 当前页本就保持，
             #   重新 show 天然恢复用户上次选择的页签；首次默认第一个页签由
             #   面板 __init__ 保证。若在此恢复上次关闭时页签，会覆盖
@@ -2054,6 +2059,11 @@ class TabManagerWindow(FramelessWindow):
         """补刷隐藏期置脏的顶层三容器（可见性恢复点：动画结束/预览离开/showEvent）
 
         [T30] hasattr/RuntimeError 防御：容器可能已销毁（窗口关闭竞态）。
+        [T30-fix] 不再以 _theme_needs_refresh 作补刷门控：样式可能被旁路清空
+        （_wb_preview_leave 回挂时 setStyleSheet("") 不置脏），门控会漏刷 →
+        面板裸奔无背景。改为可见者无条件「串不一致就刷」，比对开销可忽略；
+        不可见者置脏留给 _apply_theme_stylesheet 快速跳过（setStyleSheet 全量
+        repolish 贵，隐藏期白刷）。
         """
         # [T30-P0] getattr 防御：本方法在构造期（_setup_ui）即被调用，
         # 此时 frame 属性可能尚未创建——未创建属正常态，跳过即可，
@@ -2065,14 +2075,18 @@ class TabManagerWindow(FramelessWindow):
         ):
             if frame is None:
                 continue
+            # 预览态：workbench frame 摘在浮层且带专用内联串（无 margin 版），
+            # 不参与补刷，由 _wb_frame_inline_qss 负责（回挂后清串走正常补刷）
+            if frame is getattr(self, "_workbench_frame", None) and getattr(self, "_wb_in_preview", False):
+                continue
             try:
-                if not getattr(frame, "_theme_needs_refresh", False):
-                    continue
                 if frame.isVisible():
                     frame_qss = qss_method()
                     if frame_qss != frame.styleSheet():
                         frame.setStyleSheet(frame_qss)
                     frame._theme_needs_refresh = False
+                else:
+                    frame._theme_needs_refresh = True
             except RuntimeError:
                 continue  # C++ 对象已销毁
 

@@ -1,6 +1,22 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.6] - 2026-10-11
+
+自上一版本以来的变更 | 提交数：4 · 文件变更：10 · +940/-78 | 贡献者：dingma
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **file-tree 树状态稳定性 + 展开目录多了卡死** (`plugins/file-tree/ui/tree_widget.py`, `plugins/file-tree/ui/cards.py`, `plugins/file-tree/.drifox-plugin/plugin.json`, `marketplace.json`, `tests/widgets/test_file_tree_state_stability.py` 新增): 两类用户痛点。**① 树状态被刷没**：同根重扫改走 `refresh_root` 增量（原无条件 `set_project` → `beginResetModel` 丢弃全部展开/选中/滚动态）；路径比较归一（`normcase`+`normpath`），修 `scan_dir == project_root` 裸字符串比较导致带尾斜杠/大小写差异时根扫描被误判为子目录扫描而静默不刷新；换项目整树 reset 时按项目根缓存视图状态，A→B→A 来回切还原展开与选中；展开恢复串行推进，不依赖 `expand()` 内部触发 `fetchMore`（视图不可见/首帧布局时 Qt 会推迟该调用）。**② 展开目录多了卡死，真凶是扫描互杀**：旧实现每来扫描请求即 `_cleanup_worker()` 杀掉在跑的扫描，`QThread.quit()` 打断不了工作线程中的 `os.scandir`，`wait(3000)` 真阻塞主线程；被杀目录的 loading 标记被清后回到「已展开且 canFetchMore」状态，Qt 下一轮布局再次请求它，与扫描请求互相踩踏成自激循环（实测 6 目录触发 223 次扫描、主线程累计阻塞 25s）。改为串行队列（至多一个扫描在跑，入队即占位 loading 覆盖「排队→扫描→落地」全程）+ 请求幂等去重 + 根扫描 urgent 插队与世代作废（在途结果作废）+ 扫描失败目录熔断（`canFetchMore` 返 False，点刷新解除）。实测对照：修复前 223 次扫描 / 主线程阻塞 25162ms / 加载 0-6，修复后 7 次扫描 / 阻塞 0ms / 加载 6-6；30 目录 × 50ms 场景扫描 31 次（理想值）、零阻塞、30/30 全加载。新增 16 条回归测试（路径归一 / 同根保展开与 loaded 孙级 / 换项目切回还原 / 队列不互杀 / 幂等去重 / loading 覆盖排队窗口 / 根插队 / 世代作废 / 失败熔断），与既有 `test_file_tree_root_watch.py` 合计 28 条全通过。插件版本 file-tree 0.1.0 → 0.2.0。`d4ddba3c`
+
+- **瞬切打开面板背景丢失** (`app/widgets/tab_manager_window.py`): 瞬切打开（`animate=False`）时立即补刷主题置脏 frame，避免空 styleSheet 显示；`_refresh_theme_dirty_frames` 移除 `_theme_needs_refresh` 门控，改为可见者串不一致即刷、不可见者置脏；预览态下 workbench frame 跳过补刷（由专用内联 QSS 管理）。`65ceecd3`
+
+- **file-tree 展开状态持久化，插件热重载不再丢层级** (`plugins/file-tree/ui/cards.py`): 上一条只覆盖「实例存活期间的刷新」。插件热重载（watchfiles 监控仓库 `plugins/` 目录，任一文件变更——agent 改代码 / git 操作 / 版本号提交触碰 plugin.json——都会触发「manifest changed, reloaded all components」→ 工作台页销毁重建）仍会把展开态归零，因为展开态与 `_view_state_cache` 都是卡片实例属性，重建即归零。改为视图状态落盘 `<仓库根>/.drifox/plugins/file-tree/view_state.json`（安装态回退 `~/.drifox`，均在 gitignore 内）：`_live_expanded` 由 expand/collapse 即时增删 + 防抖 2s 落盘，销毁前（`destroyed`）同步 flush（热重载先杀旧实例，防抖 timer 等不到）；写前读盘合并，防该文件被多窗口 file-tree 卡片共享时整文件覆盖冲掉其他窗口刚写入的其他项目条目；换根时清空实时展开集；读盘失败静默（缓存无关紧要）；上限与内存缓存一致（32 项）。端到端验证：实例1 展开 6 目录（含三层深路径）→ 落盘 → 销毁 → 实例2 读盘重建，6/6 展开态完整还原；窗口 A(项目X) 与窗口 B(项目Y) 先后落盘条目并存，新实例读盘双双还原。`a6993144`
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号升级至 v0.6.6（pyproject.toml / config.py / installer.iss / README）(`2de628e7`)
+
 ## [v0.6.5] - 2026-10-11 (重新发布 #4)
 
 自上一版本以来的变更（累计） | 提交数：74 · 文件变更：241 · +23987/-5173 | 贡献者：dingma, drifox-bot, mading
