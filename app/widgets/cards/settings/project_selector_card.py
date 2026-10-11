@@ -227,6 +227,7 @@ class ProjectItem(QWidget):
     archiveClicked = pyqtSignal(str)
     exportClicked = pyqtSignal(str)  # 导出项目压缩包
     openFolderClicked = pyqtSignal(str, str)  # project_name, root_dir
+    newSessionClicked = pyqtSignal(str)  # 行内「新建会话」按钮：切到该项目并新建会话
 
     # 单行高度（无根目录）；有根目录时切换为 _DOUBLE_LINE_HEIGHT
     _SINGLE_LINE_HEIGHT = 30
@@ -316,10 +317,12 @@ class ProjectItem(QWidget):
         self._meta_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(self._meta_label)
 
-        # 归档按钮（默认隐藏，hover 时显示）
-        self._archive_btn = TransparentToolButton(get_icon("归档"), self)
-        self._archive_btn.setFixedSize(24, 24)
-        self._archive_btn.setStyleSheet(f"""
+        # 行内操作按钮（默认隐藏，hover 时显示）：新建会话 + 更多（菜单含归档/导出/打开根目录）
+        self._row_btns = QWidget(self)
+        row_btns_layout = QHBoxLayout(self._row_btns)
+        row_btns_layout.setContentsMargins(0, 0, 0, 0)
+        row_btns_layout.setSpacing(0)
+        _row_btn_style = f"""
             QToolButton {{
                 background: transparent;
                 border: none;
@@ -329,11 +332,21 @@ class ProjectItem(QWidget):
                 background: rgba(255, 255, 255, 50);
                 border-radius: 4px;
             }}
-        """)
-        self._archive_btn.clicked.connect(self._emit_archive)
-        self._archive_btn.setToolTip("归档此项目")
-        self._archive_btn.hide()
-        layout.addWidget(self._archive_btn)
+        """
+        self._new_session_btn = TransparentToolButton(get_icon("新会话"), self._row_btns)
+        self._new_session_btn.setFixedSize(24, 24)
+        self._new_session_btn.setStyleSheet(_row_btn_style)
+        self._new_session_btn.clicked.connect(self._emit_new_session)
+        self._new_session_btn.setToolTip("新建会话")
+        row_btns_layout.addWidget(self._new_session_btn)
+        self._more_btn = TransparentToolButton(get_icon("更多"), self._row_btns)
+        self._more_btn.setFixedSize(24, 24)
+        self._more_btn.setStyleSheet(_row_btn_style)
+        self._more_btn.clicked.connect(self._show_more_menu)
+        self._more_btn.setToolTip("更多")
+        row_btns_layout.addWidget(self._more_btn)
+        self._row_btns.hide()
+        layout.addWidget(self._row_btns)
 
         # 静止态底色（当前项目淡染 + 左侧项目色条）
         self._apply_base_style()
@@ -386,14 +399,15 @@ class ProjectItem(QWidget):
     def _emit_archive(self):
         self.archiveClicked.emit(self._name)
 
+    def _emit_new_session(self):
+        self.newSessionClicked.emit(self._name)
+
     def _emit_open_folder(self):
         if self._root_dir:
             self.openFolderClicked.emit(self._name, self._root_dir)
 
-    def contextMenuEvent(self, event):
-        """右键菜单：打开项目根目录 / 导出项目压缩包（原 hover 按钮迁此，精简 hover 密度）"""
-        if self._is_all_entry:
-            return  # 聚合行（「全部项目」）无单项目操作
+    def _build_project_menu(self) -> QMenu:
+        """构建项目操作菜单（归档 / 导出 / 打开根目录），「更多」按钮与右键共用"""
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
@@ -412,15 +426,24 @@ class ProjectItem(QWidget):
                 background: {Colors.HOVER_BG};
             }}
         """)
-        act_open = menu.addAction("打开项目根目录") if self._root_dir else None
-        act_export = menu.addAction("导出项目压缩包")
-        chosen = menu.exec(event.globalPos())
-        if chosen is None:
-            return
-        if chosen is act_open:
-            self._emit_open_folder()
-        elif chosen is act_export:
-            self._emit_export()
+        menu.addAction("归档此项目", self._emit_archive)
+        menu.addAction("导出项目压缩包", self._emit_export)
+        if self._root_dir:
+            menu.addAction("打开项目根目录", self._emit_open_folder)
+        return menu
+
+    def _show_more_menu(self) -> None:
+        """「更多」按钮点击：弹项目操作菜单（与右键菜单同构）"""
+        menu = self._build_project_menu()
+        pos = self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft())
+        menu.exec(pos)
+
+    def contextMenuEvent(self, event):
+        """右键菜单：归档 / 导出项目压缩包 / 打开项目根目录（与「更多」按钮菜单同构）"""
+        if self._is_all_entry:
+            return  # 聚合行（「全部项目」）无单项目操作
+        menu = self._build_project_menu()
+        menu.exec(event.globalPos())
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
@@ -490,9 +513,9 @@ class ProjectItem(QWidget):
         style_if_changed(
             self._meta_label, f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};"
         )
-        # 聚合行（「全部项目」）不提供单项目操作：无归档按钮
+        # 聚合行（「全部项目」）不提供单项目操作：无行内按钮
         if not self._is_all_entry:
-            self._archive_btn.show()
+            self._row_btns.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -501,7 +524,7 @@ class ProjectItem(QWidget):
         self._apply_name_style()
         Colors.refresh()
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
-        self._archive_btn.hide()
+        self._row_btns.hide()
         super().leaveEvent(event)
 
 
@@ -517,6 +540,7 @@ class ProjectSelectorCardContent(QWidget):
     openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
     folderDropped = pyqtSignal(str)  # 拖拽文件夹路径
     allProjectsSelected = pyqtSignal()  # 「全部项目」首行点击（聚合视图，无对应项目实体）
+    newSessionRequested = pyqtSignal(str)  # 项目行内「新建会话」：切到该项目并新建会话
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -759,6 +783,7 @@ class ProjectSelectorCardContent(QWidget):
             (item.archiveClicked, self._on_archive_clicked),
             (item.exportClicked, self._on_export_clicked),
             (item.openFolderClicked, self._on_open_folder_clicked),
+            (item.newSessionClicked, self._on_new_session_clicked),
         ):
             try:
                 sig.disconnect()
@@ -779,12 +804,16 @@ class ProjectSelectorCardContent(QWidget):
         """打开项目根目录按钮被点击"""
         self.openFolderRequested.emit(project_name, root_dir)
 
+    def _on_new_session_clicked(self, project_name: str):
+        """行内「新建会话」按钮被点击（切到该项目并新建会话，由承载方实现）"""
+        self.newSessionRequested.emit(project_name)
+
     def _on_export_clicked(self, project_name: str):
         """导出按钮被点击"""
         self.exportProject.emit(project_name)
 
     def _on_archive_clicked(self, project_name: str):
-        """归档按钮被点击"""
+        """归档被点击（行内菜单 / 右键菜单入口）"""
         from app.widgets.common_dialogs import ConfirmDialog
 
         _confirmed: list[bool] = [False]

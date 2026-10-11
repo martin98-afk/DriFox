@@ -66,6 +66,17 @@ def parse_team_members_snapshot(snap_raw: str) -> List[Dict]:
     return out
 
 
+# 「API 权威上下文占用」相关字段。保存链必须原样透传，否则历史会话加载后
+# 只剩本地估算（与真实差几倍）。None 语义 = 调用方未提供 → 保留会话现有值。
+_API_USAGE_FIELDS = (
+    "last_api_prompt_tokens",
+    "last_api_message_count",
+    "last_api_prompt_from_usage",
+    "token_calibration",
+    "token_calibration_model",
+)
+
+
 def _clean_orphan_tool_calls(messages: List[Dict]) -> List[Dict]:
     """清理消息列表中的孤立 tool_calls（没有对应 tool 结果的 tool_call）
 
@@ -500,8 +511,11 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
-        last_api_prompt_tokens: int = 0,
-        last_api_message_count: int = 0,
+        last_api_prompt_tokens: Optional[int] = None,
+        last_api_message_count: Optional[int] = None,
+        last_api_prompt_from_usage: Optional[bool] = None,
+        token_calibration: Optional[float] = None,
+        token_calibration_model: Optional[str] = None,
         team_run_id: str = None,
         team_name: str = None,
         agent_name: str = None,
@@ -511,6 +525,11 @@ class HistoryManager:
         """保存会话
 
         Args:
+            last_api_prompt_tokens / last_api_message_count /
+            last_api_prompt_from_usage / token_calibration / token_calibration_model:
+                API 权威上下文占用与自适应校准因子。None（默认）= 保留会话现有值
+                ——保存链若不带这些字段绝不能清零，否则历史会话加载后只能退回
+                本地估算（与真实值差几倍）。
             team_run_id: 团队运行标识（方案 A 团队会话恢复；非团队会话留空）
                 None 表示保留现值（与 update_session 语义对齐）——当会话已
                 存在（内存/SQLite）时不覆盖其团队元数据，防止普通编辑把
@@ -558,6 +577,20 @@ class HistoryManager:
                 existing_for_pin = self.get_session_by_session_id(session_id)
             pinned = bool(existing_for_pin.get("pinned", False)) if existing_for_pin else False
 
+        # API 用量字段「None→保留现值」：高频保存路径不带这些字段时，沿用会话
+        # 现有值（旧实现默认 0，每次保存都把 API 权威值抹掉）。
+        _usage_provided = {
+            "last_api_prompt_tokens": last_api_prompt_tokens,
+            "last_api_message_count": last_api_message_count,
+            "last_api_prompt_from_usage": last_api_prompt_from_usage,
+            "token_calibration": token_calibration,
+            "token_calibration_model": token_calibration_model,
+        }
+        _existing_for_usage = None
+        if any(v is None for v in _usage_provided.values()) and session_id:
+            _existing_for_usage = self.get_session_by_session_id(session_id)
+        _usage = self._resolve_api_usage_fields(_usage_provided, _existing_for_usage)
+
         merged_messages = merge_session_messages(messages)
         session_record = self._build_session_record(
             merged_messages,
@@ -568,8 +601,7 @@ class HistoryManager:
             system_prompt=system_prompt,
             project=project,
             worktree_path=worktree_path,
-            last_api_prompt_tokens=last_api_prompt_tokens,
-            last_api_message_count=last_api_message_count,
+            **_usage,
             team_run_id=team_run_id,
             team_name=team_name,
             agent_name=agent_name,
@@ -603,6 +635,32 @@ class HistoryManager:
         if self._use_sqlite and self._session_store:
             self._schedule_save(session_record.get("session_id"))
 
+    def _resolve_api_usage_fields(self, provided: Dict, existing: Optional[Dict]) -> Dict:
+        """合并 API 用量字段：调用方未提供的（None）沿用会话现有值。
+
+        与 team_* 同范式：保存路径（尤其高频 update_session）不带这些字段时
+        必须保留现值，否则每保存一次就把 API 权威值清零（旧实现正是如此，
+        导致历史会话永远走本地重算）。
+        """
+        resolved = {}
+        for key in _API_USAGE_FIELDS:
+            value = provided.get(key, None)
+            if value is None and existing:
+                value = existing.get(key, None)
+            if key == "last_api_prompt_tokens" or key == "last_api_message_count":
+                resolved[key] = int(value or 0)
+            elif key == "token_calibration":
+                try:
+                    resolved[key] = float(value or 0)
+                except (TypeError, ValueError):
+                    resolved[key] = 0.0
+            elif key == "token_calibration_model":
+                resolved[key] = str(value or "")
+            else:
+                # last_api_prompt_from_usage：三态（True/False/None）
+                resolved[key] = None if value is None else bool(value)
+        return resolved
+
     def _build_session_record(
         self,
         merged_messages: List[Dict],
@@ -613,8 +671,11 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
-        last_api_prompt_tokens: int = 0,
-        last_api_message_count: int = 0,
+        last_api_prompt_tokens: Optional[int] = None,
+        last_api_message_count: Optional[int] = None,
+        last_api_prompt_from_usage: Optional[bool] = None,
+        token_calibration: Optional[float] = None,
+        token_calibration_model: Optional[str] = None,
         team_run_id: str = "",
         team_name: str = "",
         agent_name: str = "",
@@ -661,8 +722,12 @@ class HistoryManager:
             "user_edited_title": False,
             "worktree_path": worktree_path or "",
             "context_usage": _ctx_tokens,
-            "last_api_prompt_tokens": last_api_prompt_tokens,
-            "last_api_message_count": last_api_message_count,
+            "last_api_prompt_tokens": last_api_prompt_tokens if last_api_prompt_tokens is not None else 0,
+            "last_api_message_count": last_api_message_count if last_api_message_count is not None else 0,
+            # None → 保持 None（未知），不能落成 False
+            "last_api_prompt_from_usage": last_api_prompt_from_usage,
+            "token_calibration": token_calibration if token_calibration is not None else 0.0,
+            "token_calibration_model": token_calibration_model or "",
             # 团队元数据（方案 A 团队会话恢复基础；非团队会话保持空串）
             "team_run_id": team_run_id or "",
             "team_name": team_name or "",
@@ -1723,6 +1788,11 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
+        last_api_prompt_tokens: Optional[int] = None,
+        last_api_message_count: Optional[int] = None,
+        last_api_prompt_from_usage: Optional[bool] = None,
+        token_calibration: Optional[float] = None,
+        token_calibration_model: Optional[str] = None,
         team_run_id: str = None,
         team_name: str = None,
         agent_name: str = None,
@@ -1733,12 +1803,26 @@ class HistoryManager:
         team_run_id/team_name/agent_name/team_members 为 None 时保留现有值
         （最小侵入，不传则不触碰团队元数据），传入非 None 才更新——避免
         update 链路把团队会话的元数据覆盖成空。
+
+        last_api_* / token_calibration* 同为「None → 保留现值」语义：update 是
+        每轮消息都跑的高频路径，不带这些字段时必须沿用，否则 API 返回的精确
+        上下文占用会在第一轮保存后即被清零。
         """
         if 0 <= index < len(self._history_sessions):
             merged_messages = merge_session_messages(messages)
             # 🛡️ 落地前清理孤立 tool_calls，保证下一轮加载时消息天然干净
             merged_messages = _clean_orphan_tool_calls(merged_messages)
             existing = self._history_sessions[index]
+            _usage = self._resolve_api_usage_fields(
+                {
+                    "last_api_prompt_tokens": last_api_prompt_tokens,
+                    "last_api_message_count": last_api_message_count,
+                    "last_api_prompt_from_usage": last_api_prompt_from_usage,
+                    "token_calibration": token_calibration,
+                    "token_calibration_model": token_calibration_model,
+                },
+                existing,
+            )
             updated = self._build_session_record(
                 merged_messages,
                 title=existing.get("title"),
@@ -1756,6 +1840,7 @@ class HistoryManager:
                 ),
                 project=project if project is not None else existing.get("project", "默认项目"),
                 worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
+                **_usage,
                 team_run_id=team_run_id if team_run_id is not None else existing.get("team_run_id", ""),
                 team_name=team_name if team_name is not None else existing.get("team_name", ""),
                 agent_name=agent_name if agent_name is not None else existing.get("agent_name", ""),

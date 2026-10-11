@@ -84,7 +84,8 @@ def snapshot_usage_for_hooks(
                     llm_config,
                     api_prompt_tokens=int(getattr(session, "last_api_prompt_tokens", 0) or 0),
                     api_message_count=int(getattr(session, "last_api_message_count", 0) or 0),
-                    from_api=bool(getattr(session, "last_api_prompt_from_usage", False)),
+                    # 三态透传：None = 未知（老记录无该标记）→ 引擎按"可用"处理
+                    from_api=getattr(session, "last_api_prompt_from_usage", None),
                 )
                 or {}
             )

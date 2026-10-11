@@ -943,6 +943,8 @@ def create_session_from_record(session_record: dict, messages: list, title: str 
     session_id = session_record.get("session_id")
     title = title or session_record.get("name") or "历史对话"
 
+    # ⚠️ API 权威上下文占用值必须透传（旧实现漏传 → 加载后 last_api_prompt_tokens
+    # 恒为 0，圆环/卡片只能退回本地重新估算，与 API 真实值差出几倍）。
     return ChatSession.from_dict(
         {
             "session_id": session_id,
@@ -951,6 +953,14 @@ def create_session_from_record(session_record: dict, messages: list, title: str 
             "topic_summary": title,
             "compaction_state": session_record.get("compaction_state", {}),
             "compaction_cache": session_record.get("compaction_cache", {}),
+            "system_prompt": session_record.get("system_prompt", "") or "",
+            "context_usage": session_record.get("context_usage", 0),
+            "last_api_prompt_tokens": session_record.get("last_api_prompt_tokens", 0),
+            "last_api_message_count": session_record.get("last_api_message_count", 0),
+            # None 表示"未知"（老记录），按来自 API 处理
+            "last_api_prompt_from_usage": session_record.get("last_api_prompt_from_usage", None),
+            "token_calibration": session_record.get("token_calibration", 0),
+            "token_calibration_model": session_record.get("token_calibration_model", "") or "",
         }
     )
 
@@ -1215,6 +1225,9 @@ def save_or_archive_session(
     save_kwargs = dict(compaction_info)
     if resolved_project is not None:
         save_kwargs["project"] = resolved_project
+    # API 权威上下文占用值随保存透传（否则一次保存即清零，加载后退回本地估算）
+    if session is not None and hasattr(session, "api_usage_dict"):
+        save_kwargs.update(session.api_usage_dict())
 
     if current_session_id is not None:
         idx = history_manager.find_index_by_session_id(current_session_id)

@@ -398,6 +398,10 @@ class SessionStore:
                         {"name": "context_usage", "type": "INTEGER", "default": 0},
                         {"name": "last_api_prompt_tokens", "type": "INTEGER", "default": 0},
                         {"name": "last_api_message_count", "type": "INTEGER", "default": 0},
+                        # 三态：1=来自 API usage / 0=本地估算 / NULL=未知（老记录）
+                        {"name": "last_api_prompt_from_usage", "type": "INTEGER", "default": None},
+                        {"name": "token_calibration", "type": "REAL", "default": 0},
+                        {"name": "token_calibration_model", "type": "TEXT", "default": ""},
                         {"name": "team_run_id", "type": "TEXT", "default": ""},
                         {"name": "team_name", "type": "TEXT", "default": ""},
                         {"name": "agent_name", "type": "TEXT", "default": ""},
@@ -500,6 +504,7 @@ class SessionStore:
                 self._migrate_add_preview_column()
                 self._migrate_add_context_usage_column()
                 self._migrate_add_api_context_columns()
+                self._migrate_add_token_calibration_columns()
                 self._migrate_add_team_columns()
                 self._migrate_add_team_members_column()
                 self._migrate_add_first_user_columns()
@@ -649,19 +654,46 @@ class SessionStore:
             logger.warning(f"[SessionStore] context_usage 列迁移失败(可能已存在): {e}")
 
     def _migrate_add_api_context_columns(self):
-        """迁移：添加 last_api_prompt_tokens / last_api_message_count 列
+        """迁移：添加 last_api_prompt_tokens / last_api_message_count / last_api_prompt_from_usage 列
 
         持久化 API 返回的精确上下文占用值，供历史会话加载时校准显示。
+
+        ⚠️ from_usage 列是后补的（此前只落 token 值与消息数，加载后无法判断
+        prompt_tokens 是否来自真实 usage，只能退回本地重新估算 —— 表现为
+        "历史会话明明有 API 精确值，加载后圆环却显示本地估算值"）。老行该列
+        为 NULL = 未知，按"可用"处理（详见 ChatSession.last_api_prompt_from_usage）。
         """
         if not self._db or not self._db.is_connected:
             return
-        for col in ("last_api_prompt_tokens", "last_api_message_count"):
+        for col in ("last_api_prompt_tokens", "last_api_message_count", "last_api_prompt_from_usage"):
             try:
                 columns = self._db.get_table_info(self.TABLE_NAME)
                 col_names = [c.get("name", "") for c in columns]
                 if col not in col_names:
                     logger.info(f"[SessionStore] 迁移：添加 {col} 列")
-                    self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} INTEGER DEFAULT 0")
+                    self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} INTEGER DEFAULT NULL")
+            except Exception as e:
+                logger.warning(f"[SessionStore] {col} 列迁移失败(可能已存在): {e}")
+
+    def _migrate_add_token_calibration_columns(self):
+        """迁移：添加 token_calibration / token_calibration_model 列
+
+        持久化 API usage 自适应校准因子（本地估算 → 真实 token 的换算系数），
+        使历史会话加载后即使没有新的 API 返回值，本地估算也能贴近真实量级，
+        不再差出几倍（详见 token_estimator.blend_calibration）。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        for col, decl in (
+            ("token_calibration", "REAL DEFAULT 0"),
+            ("token_calibration_model", "TEXT DEFAULT ''"),
+        ):
+            try:
+                columns = self._db.get_table_info(self.TABLE_NAME)
+                col_names = [c.get("name", "") for c in columns]
+                if col not in col_names:
+                    logger.info(f"[SessionStore] 迁移：添加 {col} 列")
+                    self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} {decl}")
             except Exception as e:
                 logger.warning(f"[SessionStore] {col} 列迁移失败(可能已存在): {e}")
 

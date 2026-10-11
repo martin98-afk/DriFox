@@ -7866,7 +7866,8 @@ class OpenAIChatToolWindow(ToolWindow):
         llm_config = self._get_current_model_config()
         api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
         api_message_count = int(getattr(session, "last_api_message_count", 0) or 0)
-        from_api = bool(getattr(session, "last_api_prompt_from_usage", False))
+        # 三态：None = 未知（老会话无该标记）→ 引擎按"来自 API"处理，避免丢弃权威值
+        from_api = getattr(session, "last_api_prompt_from_usage", None)
         snapshot = self.backend.get_context_usage_snapshot(
             session,
             llm_config,
@@ -8794,10 +8795,16 @@ class OpenAIChatToolWindow(ToolWindow):
             panel.set_current_tab_by_id("worktree-manager", user=True)
 
     def _close_history_panel(self):
-        """历史卡片关闭钮收出口：仅在用户显式点 × 时离开历史页
+        """历史会话卡让位收出口：隐藏左侧停靠区「历史会话」浮动卡
 
-        ★ 加载会话路径已不再调用本方法（页签按用户选择保持）；
-        本方法只服务 ``HistoryPage.closed`` 的显式关闭语义。
+        「新建会话 = 真切换」的用户路径（新建会话 / 切项目 / 加载会话 / 归档
+        当前项目 / 新建项目）都经本方法让历史卡让位。历史页曾为工作台页签，
+        de49617c 起迁为 ``history-manager`` 插件的 ``container="left"`` 浮动卡
+        （``card_id="history-manager"``，Tab 模式挂 GLOBAL_WINDOW_ID），让位
+        动作随之从「切工作台页签」更新为「经 registry 公开通道隐藏浮动卡」；
+        页签切换保留兜底（历史页若回挂工作台仍生效）。卡片本就不可见时为
+        幂等 no-op；隐藏会把本卡从当前标签页可见集合移除（切回不再自动恢复），
+        用户可从底部历史按钮 / ``/history`` 命令 / 标题栏项目 icon 重开。
         """
         try:
             tm = TabManagerWindow.get_instance()
@@ -8806,6 +8813,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 panel.set_current_tab_by_id("worktree-manager", user=True)
         except Exception:
             pass
+        # 左侧停靠区「历史会话」浮动卡：经 registry 公开隐藏通道让位
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().hide_floating_card_globally("history-manager")
+        except Exception as e:
+            logger.warning(f"[OpenAIChatToolWindow] 隐藏历史会话浮动卡失败: {e}")
 
     def _refresh_history_page_if_active(self):
         """触发历史插件页自刷新（仅本窗口为活跃窗口且页面可见时）
@@ -13679,9 +13693,14 @@ class OpenAIChatToolWindow(ToolWindow):
         sid = getattr(session, "session_id", None) if session else None
         if used is None or _reload_sid != sid:
             try:
-                used = self.backend.get_context_usage_snapshot(session, self._get_current_model_config()).get(
-                    "used_tokens", 0
-                )
+                # 带上会话的 API 权威值（含三态标记），否则重载后走纯本地估算
+                used = self.backend.get_context_usage_snapshot(
+                    session,
+                    self._get_current_model_config(),
+                    api_prompt_tokens=int(getattr(session, "last_api_prompt_tokens", 0) or 0),
+                    api_message_count=int(getattr(session, "last_api_message_count", 0) or 0),
+                    from_api=getattr(session, "last_api_prompt_from_usage", None),
+                ).get("used_tokens", 0)
             except Exception:
                 used = 0
             self._reload_ctx_used_tokens = used
@@ -16208,6 +16227,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     idx,
                     session.messages,
                     **compaction_info,
+                    **self._api_usage_kwargs(session),
                     **worktree_kwargs,
                 )
             else:
@@ -16221,6 +16241,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     session_id=session.session_id,
                     project=resolved_project,
                     **compaction_info,
+                    **self._api_usage_kwargs(session),
                     **worktree_kwargs,
                 )
         except Exception as e:
@@ -20452,6 +20473,31 @@ class OpenAIChatToolWindow(ToolWindow):
         # 3. 兜底：current_project
         return current_project
 
+    @staticmethod
+    def _api_usage_kwargs(session) -> Dict[str, Any]:
+        """导出会话的「API 权威上下文占用」字段，供保存链透传。
+
+        history_manager 对这些字段按「None → 保留现值」处理，所以保存时必须
+        显式带上（带 None 也不行：会让旧值被保留，而不是更新）。漏传的后果是
+        每一次保存都把 API 返回的精确 prompt_tokens 清零 → 历史会话加载后只能
+        退回本地重新估算，与真实占用差出几倍。
+        """
+        if session is None:
+            return {}
+        getter = getattr(session, "api_usage_dict", None)
+        if callable(getter):
+            try:
+                return dict(getter())
+            except Exception:
+                pass
+        return {
+            "last_api_prompt_tokens": getattr(session, "last_api_prompt_tokens", 0) or 0,
+            "last_api_message_count": getattr(session, "last_api_message_count", 0) or 0,
+            "last_api_prompt_from_usage": getattr(session, "last_api_prompt_from_usage", None),
+            "token_calibration": getattr(session, "token_calibration", 0) or 0,
+            "token_calibration_model": getattr(session, "token_calibration_model", "") or "",
+        }
+
     def _save_current_session_to_history(self):
         session = self.session_manager.get_current_session()
         # 临时对话页守卫：页内会话一律不落盘、不进历史（流式结束/后台 finalize 高频路径）
@@ -20506,6 +20552,8 @@ class OpenAIChatToolWindow(ToolWindow):
         system_prompt = getattr(session, "system_prompt", "") or ""
         # 优先使用已有的 topic_summary，避免被用户消息前30字覆盖
         session_title = getattr(session, "topic_summary", "") or ""
+        # API 权威上下文占用值（prompt_tokens / 校准因子）随每次保存透传
+        api_usage_kwargs = self._api_usage_kwargs(session)
         worktree_path = self._get_current_worktree_path()
         # 🛡️ 始终记录当前 worktree_path（空字符串表示主仓库，清除旧关联）
         worktree_kwargs = {"worktree_path": worktree_path or ""}
@@ -20520,6 +20568,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
+                    **api_usage_kwargs,
                     **worktree_kwargs,
                     **team_kwargs,
                 )
@@ -20537,6 +20586,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
                     project=resolved_project,
+                    **api_usage_kwargs,
                     **worktree_kwargs,
                     **team_kwargs,
                 )
@@ -20556,6 +20606,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 compaction_cache=getattr(session, "compaction_cache", {}),
                 system_prompt=system_prompt,
                 project=resolved_project,
+                **api_usage_kwargs,
                 **worktree_kwargs,
                 **team_kwargs,
             )
@@ -21529,6 +21580,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 compaction_state=getattr(session, "compaction_state", {}),
                 compaction_cache=getattr(session, "compaction_cache", {}),
                 project=resolved_project,
+                **self._api_usage_kwargs(session),
                 **worktree_kwargs,
                 **team_kwargs,
             )
@@ -23202,6 +23254,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_state=getattr(session, "compaction_state", {}),
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
+                    **self._api_usage_kwargs(session),
                     **worktree_kwargs,
                     **team_kwargs,
                 )
@@ -23231,6 +23284,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
                     project=resolved_project,
+                    **self._api_usage_kwargs(session),
                     **team_save_kwargs,
                     **worktree_kwargs,
                 )
@@ -23252,6 +23306,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 agent_name=self._team_agent_name or "",
                 # 🛡️ F3：团队成员快照随会话落库（见上方 update 分支注释）
                 team_members=self._get_team_members_snapshot_json(),
+                **self._api_usage_kwargs(session),
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id

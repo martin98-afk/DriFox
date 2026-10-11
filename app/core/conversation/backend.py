@@ -1076,9 +1076,12 @@ class ChatBackend(QObject):
         llm_config,
         api_prompt_tokens: int = 0,
         api_message_count: int = 0,
-        from_api: bool = False,
+        from_api: Optional[bool] = None,
     ) -> Dict:
-        """获取上下文使用快照"""
+        """获取上下文使用快照
+
+        from_api 三态：True=来自 API usage / False=本地估算 / None=未知（按 True）。
+        """
         if self._chat_engine:
             return self._chat_engine.get_context_usage_snapshot(
                 session,
