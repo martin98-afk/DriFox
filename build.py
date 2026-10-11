@@ -339,6 +339,68 @@ def _remove_items(root, items):
                     print(f"  [Cleanup] remove {folder} failed: {e}")
 
 
+_MAC_INFO_PLIST = {
+    # macOS TCC 麦克风权限描述。缺此键时系统不弹授权弹窗、直接拒绝请求，
+    # 录音流程能跑通但全程为数字静音（peak=0），表现为「点了没反应」。
+    # 插件 voice-input 的 macOS 录音后端（AVFoundation）依赖本声明。
+    "NSMicrophoneUsageDescription": (
+        "DriFox 需要使用麦克风录制您的语音，用于语音听写功能"
+        "（录音文件仅用于您配置的语音识别服务转文字）。"
+    ),
+}
+
+
+def inject_macos_info_plist(dist_path):
+    """把 macOS 权限描述写入 .app 的 Info.plist（仅 Darwin 生效）。
+
+    PyInstaller 的 BUNDLE 在 assemble 阶段才写 Info.plist 并随即 adhoc 签名，
+    CLI 参数表没有 info_plist 入口，故此处后置重写 plist 并重签。
+
+    重签必须递归处理内层二进制：Contents/Frameworks 下游有 Qt framework、
+    QtWebEngineProcess 等可执行体，只签外层会使签名与内层不一致。
+    不做重签则签名密封（CodeResources）与 Info.plist 实际内容不符，
+    启动时 Gatekeeper 可能直接拒绝。
+    """
+    if platform.system() != "Darwin":
+        return
+    import plistlib
+    import subprocess
+
+    app_path = dist_path + ".app"
+    if not os.path.isdir(app_path):
+        print(f"  [Plist] 跳过：未找到 {app_path}")
+        return
+    plist_path = os.path.join(app_path, "Contents", "Info.plist")
+    if not os.path.isfile(plist_path):
+        print(f"  [Plist] 跳过：未找到 {plist_path}")
+        return
+
+    with open(plist_path, "rb") as fh:
+        info = plistlib.load(fh)
+    changed = {k: v for k, v in _MAC_INFO_PLIST.items() if info.get(k) != v}
+    if not changed:
+        print("  [Plist] 权限描述已存在，无需改动")
+        return
+    info.update(changed)
+    with open(plist_path, "wb") as fh:
+        plistlib.dump(info, fh)
+    for key in changed:
+        print(f"  [Plist] 已写入 {key}")
+
+    # 重签：与 PyInstaller 默认一致走 adhoc（identity=None → '-'）
+    result = subprocess.run(
+        ["/usr/bin/codesign", "-s", "-", "--force", "--deep", app_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+    )
+    if result.returncode:
+        print(f"  [Plist] 警告：重签失败（退出码 {result.returncode}）")
+        print(f"  [Plist] {result.stdout.strip()[:500]}")
+    else:
+        print("  [Plist] 已重签 .app（adhoc，deep）")
+
+
 def post_build_cleanup(dist_path):
     """Post-build cleanup to reduce package size"""
     targets = _cleanup_targets(dist_path)
@@ -377,7 +439,10 @@ if __name__ == "__main__":
     # 4. 后置处理
     dist_final = os.path.join("dist", "Drifox")
     if os.path.exists(dist_final):
+        # 顺序不可颠倒：先做体积精简（删文件），再注入 plist 并重签。
+        # 若先重签再删文件，签名密封（CodeResources）会与实际内容不符而失效。
         post_build_cleanup(dist_final)
+        inject_macos_info_plist(dist_final)
 
     print("[Build] Build completed successfully!")
 

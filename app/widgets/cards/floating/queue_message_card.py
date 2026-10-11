@@ -11,10 +11,10 @@
 - 「编辑」→ 行内编辑，回车/失焦保存 emit editRequested(msg_id, new_text)，Esc 取消；
 - 「删除」→ removeRequested(msg_id)：移出队列；
 - 卡片不自管数据，set_entries 全量刷新（单一数据源在 main_widget）；
+- 高度精确跟随内容：提供 heightForWidth + heightChanged（见下方"高度契约"）；
 - 无 TTL（区别于 UndoDeleteCard）。
 
 设计说明（2026-09-12 视觉重做）
-------------------------------
 旧版用 ``REALTIME_BG`` 作底 + 1px 饱和蓝（``REALTIME_BORDER`` #2563eb）做全宽
 行分隔线。在浅色主题下 ``realtime_bg`` 与对话区底色几乎同色（lumia: #f5f5f5 vs
 #ffffff），卡片没有任何可见边界，整块区域只剩两根高饱和蓝线 —— 实测像素对比度
@@ -67,6 +67,11 @@ class QueueMessageCard(QWidget):
     insertRequested = pyqtSignal(str)  # msg_id：立即注入该条（不停 worker）
     removeRequested = pyqtSignal(str)  # msg_id：移出队列
     editRequested = pyqtSignal(str, str)  # msg_id, new_text：编辑保存
+    # 内容高度变化：容器据此重算高度（add_card 已通用接线 → _schedule_expand）。
+    # 不能只依赖卡片 Resize 事件——展开/折叠动画窗口内 Resize 会被容器守卫
+    # 丢弃（防自激），窗口过后几何不再变化 → 容器永久锁在旧高度（多条时
+    # 第 2 行起被裁切的根因）。
+    heightChanged = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -243,6 +248,31 @@ class QueueMessageCard(QWidget):
         self.refresh_style()
 
     # ───────────────────────────────────────────────────────────
+    # 高度契约（容器 follow_content 分支取高接口）
+    # ───────────────────────────────────────────────────────────
+
+    def _content_height(self) -> int:
+        """按当前行数直算精确卡片高度（不读 Qt 布局缓存）
+
+        布局口径（与 _setup_ui 一致）：页眉 HEADER_H + 条目区上下 margin +
+        n 行 × ROW_H + 行间距。实测 1/2/3/5 行 = 76/109/142/208，与
+        sizeHint 收敛值一致；不读 sizeHint 是刻意的——它带布局缓存，
+        set_entries 同 tick 内是残值（实测 44 vs 真值 109）。
+        """
+        n = self._list_layout.count()
+        m = self._list_layout.contentsMargins()
+        spacing = self._list_layout.spacing() * max(0, n - 1)
+        return self.HEADER_H + m.top() + m.bottom() + n * self.ROW_H + spacing
+
+    def hasHeightForWidth(self):
+        # 与 CommandCard 同款：供容器 _follow_content_natural_h 精确取高
+        return True
+
+    def heightForWidth(self, w):
+        """按行数返回卡片目标高度（容器 follow_content 分支的直接输入）"""
+        return self._content_height()
+
+    # ───────────────────────────────────────────────────────────
     # 对外 API
     # ───────────────────────────────────────────────────────────
 
@@ -265,8 +295,11 @@ class QueueMessageCard(QWidget):
         self._count_label.setText(f"{len(entries)} 条" if len(entries) > 1 else "")
         self._count_label.setVisible(len(entries) > 1)
         self._refresh_rows_style()
-        # 主动触发卡片 Resize → 容器 eventFilter → _schedule_expand 收缩/展开
+        # 布局缓存失效，再主动通知容器重算：容器读 heightForWidth（按行数直算），
+        # 不读 sizeHint 缓存，故本 tick 内 emit 也拿到正确新高度。
+        self.updateGeometry()
         self.adjustSize()
+        self.heightChanged.emit()
 
     def _build_row(self, entry: dict, index: int) -> QWidget:
         row = QWidget(self._list_container)
