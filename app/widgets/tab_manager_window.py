@@ -378,7 +378,7 @@ def _update_tab_icon(tab_idx: int, project: str):
             tm._tab_panel.update_tab_project(tab_idx, "临", "#8B5CF6")
             return
 
-        from app.widgets.cards.settings.project_selector_card import (
+        from app.utils.project_meta import (
             extract_project_initials,
             get_project_color,
         )
@@ -3548,7 +3548,7 @@ class TabManagerWindow(FramelessWindow):
                 tab_project_color = "#8B5CF6"
             elif project:
                 try:
-                    from app.widgets.cards.settings.project_selector_card import (
+                    from app.utils.project_meta import (
                         extract_project_initials,
                         get_project_color,
                     )
@@ -3759,7 +3759,7 @@ class TabManagerWindow(FramelessWindow):
                 project = fallback
             if not project:
                 return ("", "")
-            from app.widgets.cards.settings.project_selector_card import (
+            from app.utils.project_meta import (
                 extract_project_initials,
                 get_project_color,
             )

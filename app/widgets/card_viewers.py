@@ -6233,8 +6233,39 @@ class CodeWebViewer(QWebEngineView):
 
             # [B1] 差量渲染快路径：流式且非全量模式时，仅增量渲染已闭合的完整段。
             # 条件：流式 + 未强制全量 + 无活跃工具 DOM（工具块走 save/restore 全量保护）
+            # 🐛 差量基线错位防护（流式「正文只剩碎片」「一张卡混两条消息内容」根因族）：
+            # _stable_md_len 只在「同一份 markdown 单调追加」的前提下有效。若本轮
+            # _markdown_text 不是上次已渲染 md 的前缀延伸（内容被整体替换 / 回退），
+            # 该偏移指向的是**旧内容**的位置 → 差量追加会把新 md 的中段当"新闭合段"
+            # 推送到 DOM（表现为正文只剩一个中段碎片），且上一份内容已渲染的非增量
+            # 节点不会被移除（表现为旧卡片节点残留）。此时必须复位基线并回退全量渲染。
+            if (
+                self._streaming
+                and self._stable_md_len > 0
+                and not self._markdown_text.startswith(self._last_rendered_markdown or "")
+            ):
+                self._stable_html = ""
+                self._stable_md_len = 0
+                self._needs_full_render = True
             if self._streaming and not self._needs_full_render and not self._has_active_tool_dom():
                 stable_len, segs = _extract_closed_segments(self._markdown_text[self._stable_md_len :])
+                # 🐛 修复（流式重复/残留 —— 「同一张卡里出现两份 PLAN/两条工具框」根因）：
+                # 基线停在 0 但本消息**已经全量渲染过**（DOM 已含 md[0:len(_last_rendered
+                # _markdown)] 的产物）。此时首个 \n\n 一到，segs 会把 md[0:...] 的闭合段
+                # ——已渲染过的 plan/工具/思考块/正文——**再追加一遍**：这些块的 DOM 节点
+                # 不带 data-incremental，updateContentAppend 不会移除它们 → 同一段重复
+                # 出现；同时被标为增量的末段节点被移除、又不在 tail 范围内 → 该段正文
+                # 丢失。基线为 0 只出现在「本轮全量渲染的 md 完全没有 \n\n」
+                # （_last_break == -1，如整条消息此刻只有一个协议块或单段文本）的情形。
+                # 本轮回退全量渲染（updateContent 整体替换，不追加）；全量渲染后 md 已有
+                # \n\n，基线随之下移到最后一个段落边界，故该回退每条消息至多一次。
+                if segs and self._stable_md_len == 0 and self._last_rendered_markdown:
+                    if self._streaming:
+                        self._render_tail_inline()
+                    self._refresh_viewer_font_css()
+                    self._last_rendered_markdown = self._markdown_text
+                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                    return
                 if segs:
                     # 增量渲染闭合段：sanitize→inject→md.convert（主线程小段快速路径）
                     # 差量段很小（单个段落/代码块），同步渲染耗时 <1ms，无需线程池

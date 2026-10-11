@@ -174,7 +174,7 @@ _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")
 # 仅保留 jump/create/generate/view/session 的旧 markdown 链接兼容。
 _CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((jump|create|generate|view|session)(?:\|([^)]*))?\)")
 # 追问新格式：<ask>内容</ask>，直接生成胶囊（空内容丢弃整段标签，避免 [](ask) 残留）
-# 内容段两条硬约束（防误匹配吞正文，详见 _ask_content_ok）：
+# 内容段两条硬约束（防误匹配吞正文，详见 _is_ask_content_valid）：
 #   1. 禁止再出现 <ask>（防嵌套标签把两段之间的正文一起吃掉）
 #   2. 长度封顶 _ASK_MAX_CONTENT_LEN（追问是一句话，跨段落的超长"内容"必是误匹配）
 _ASK_MAX_CONTENT_LEN = 120
@@ -182,12 +182,23 @@ _ASK_CONTENT_BODY = rf"(?:(?!<ask>).){{0,{_ASK_MAX_CONTENT_LEN}}}?"
 _ASK_TAG_PATTERN = re.compile(rf"<ask>({_ASK_CONTENT_BODY})</ask>", re.DOTALL)
 # 追问收拢：摘除正文里的 ask 标签（连带行内多余空白），改由末尾区块统一渲染
 _ASK_STRIP_PATTERN = re.compile(rf"[ \t]*<ask>({_ASK_CONTENT_BODY})</ask>[ \t]*", re.DOTALL)
-# 协议块（思考 / 工具）：摘除发生在 think/tool 注入之前，块内文本不当正文处理，
-# 其中的 <ask> 字面量不参与收拢（否则会一路吃到文末真追问，把块尾与正文一起摘走）
-_ASK_PROTO_BLOCK_PATTERN = re.compile(r"<(think|tool)\b[^>]*>.*?(?:</\1>|\Z)", re.DOTALL | re.IGNORECASE)
+# 协议块（think / tool / hook / system-reminder / plan / mood / 插件注册 tag）：
+# 这是「非正文」区间，块内的 <ask> 字面量一律不参与收拢 ——
+#   - think / tool：否则会一路吃到文末真追问，把块尾与正文一起摘走；
+#   - hook / system-reminder：块内 <ask> 是**提示词模板示例**，收拢后会变成
+#     用户可见的假追问胶囊（该块本身由 _inject_hook_blocks 整段丢弃）；
+#   - plan / mood 等卡片块：块内 <ask> 属卡片正文，摘走 = 卡片掉字。
+# 区间正则见 _ask_proto_block_pattern()（插件注册 tag 动态并入）。
+_ASK_STATIC_PROTO_TAGS = ("hook", "system-reminder", "plan", "mood")
+# 缩进代码块（4 空格 / Tab）：markdown 的另一种代码块形态，``` 围栏正则
+# （_CODE_BLOCK_PATTERN）覆盖不到 → 文档示例里的 <ask> 会被当追问摘走：
+# 占位词形态还会走「删除且不展示」分支 = 纯丢字。
+_ASK_INDENTED_CODE_PATTERN = re.compile(r"^(?: {4,}|\t)[^\n]*$", re.MULTILINE)
 # 补充保护区间：~~~ 围栏与行内代码（``` 围栏由 _CODE_BLOCK_PATTERN 覆盖）
 _ASK_TILDE_FENCE_PATTERN = re.compile(r"~~~[^\n]*\n.*?~~~", re.DOTALL)
 _ASK_INLINE_CODE_PATTERN = re.compile(r"`[^`\n]{1,80}`")
+# 协议块正则缓存：(标签名元组, 编译结果)。注册 tag 随插件热重载变化，元组变了才重编译。
+_ASK_PROTO_CACHE = None
 # 摘除后可能残留的空列表项（"-" 后无内容）
 _ASK_EMPTY_BULLET_PATTERN = re.compile(r"^[ \t]*[-*+][ \t]*$", re.MULTILINE)
 # 追问区块最多展示条数（模型通常给 1~3 条，超量截断避免卡片尾部过长）
@@ -4528,6 +4539,25 @@ def get_random_greeting() -> str:
     return random.choice(WELCOME_GREETINGS)
 
 
+def _ask_proto_block_pattern():
+    """think/tool + hook/system-reminder/plan/mood + 插件注册 tag 的块区间正则。
+
+    语义：这些区间里的 `<ask>` 字面量**不属于正文**，一律不参与收拢
+    （`_is_ask_content_valid` 只按内容形态熔断，管不到「这行文本属于哪个块」）。
+    注册 tag 随插件热重载动态变化 → 按标签名元组缓存，元组变了才重编译。
+    """
+    global _ASK_PROTO_CACHE
+    tags = ("think", "tool", *_ASK_STATIC_PROTO_TAGS, *_registered_tag_names_safe())
+    tags = tuple(dict.fromkeys(tags))  # 去重保序
+    cached = _ASK_PROTO_CACHE
+    if cached is not None and cached[0] == tags:
+        return cached[1]
+    names = "|".join(re.escape(t) for t in tags)
+    pattern = re.compile(rf"<({names})\b[^>]*>.*?(?:</\1>|\Z)", re.DOTALL | re.IGNORECASE)
+    _ASK_PROTO_CACHE = (tags, pattern)
+    return pattern
+
+
 def _is_ask_content_valid(content: str) -> bool:
     """判断一段 <ask> 内容是否像真追问（一句话）。
 
@@ -4555,25 +4585,39 @@ def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
     去重（保序、忽略空白差异），交给 _build_ask_suggest_block 在文末集中渲染。
     strip 后空内容（如 <ask></ask>、<ask>   </ask>）直接丢弃。
 
-    ⚠ 只摘"像追问"的标签：判据见 _is_ask_content_valid，宁可残留字面量也不能吞正文。
+    ⚠ 两条硬不变量：
+    1. **只摘「像追问」的标签**（判据见 _is_ask_content_valid），宁可残留字面量也不能吞正文；
+    2. **删掉的必须展示出来**——摘除集合 ≡ 文末区块的展示集合。凡是「删了但不上区块」
+       的形态（占位词 / 超出条数上限）一律原样保留，否则就是纯粹的正文丢字。
     """
     # 受保护区间：这些位置里的 <ask> 是示例 / 非正文文本，一律不摘（摘了等于删内容）
     #   - ``` 围栏（_CODE_BLOCK_PATTERN）与 ~~~ 围栏：代码块内容原样展示
+    #   - 缩进代码块（4 空格 / Tab）：markdown 的另一种代码块形态
     #   - 行内代码：同理
-    #   - think / tool 协议块：本函数跑在 think/tool 注入之前，块内此时还是裸文本
+    #   - 协议块（think/tool/hook/system-reminder/plan/mood/注册 tag）：块内不是正文
+    proto_pattern = _ask_proto_block_pattern()
     protected = [
         (m.start(), m.end())
         for p in (
             _CODE_BLOCK_PATTERN,
             _ASK_TILDE_FENCE_PATTERN,
+            _ASK_INDENTED_CODE_PATTERN,
             _ASK_INLINE_CODE_PATTERN,
-            _ASK_PROTO_BLOCK_PATTERN,
+            proto_pattern,
         )
         for m in p.finditer(md_text)
     ]
 
     def _in_protected(pos: int) -> bool:
         return any(s <= pos < e for s, e in protected)
+
+    def _ask_key(content: str) -> str:
+        return _MULTIPLE_SPACES_PATTERN.sub(" ", content)
+
+    def _is_placeholder(key: str) -> bool:
+        # 占位词（模型照抄提示词模板）不是真追问：不产出条目。
+        # 但**不删正文**（删了不展示 = 丢字），交给下方 _strip 原样保留。
+        return key.lower() in _ASK_PLACEHOLDER_TEXTS or key.strip("？?。. ") in _ASK_PLACEHOLDER_TEXTS
 
     items: list[str] = []
     seen: set[str] = set()
@@ -4588,9 +4632,8 @@ def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
         # 形态不像追问（超长 / 跨段 / 夹协议标签）→ 疑似误匹配，不收拢也不摘除
         if not _is_ask_content_valid(content):
             continue
-        key = _MULTIPLE_SPACES_PATTERN.sub(" ", content)
-        # 占位词（模型照抄提示词模板）不是真追问
-        if key.lower() in _ASK_PLACEHOLDER_TEXTS or key.strip("？?。. ") in _ASK_PLACEHOLDER_TEXTS:
+        key = _ask_key(content)
+        if _is_placeholder(key):
             continue
         if key in seen:
             continue
@@ -4600,11 +4643,17 @@ def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
     if not found:
         return md_text, []
 
+    # 实际会上文末区块的条目（去重后截断）——只有它们的原文 span 允许被摘除
+    shown_keys = {_ask_key(it) for it in items[:_ASK_MAX_ITEMS]}
     source = md_text
 
     def _strip(m: re.Match) -> str:
         # 受保护区间 / 不像追问的匹配：原样保留（宁可残留字面量，也不能吞掉正文）
         if _in_protected(m.start()) or not _is_ask_content_valid(m.group(1)):
+            return m.group(0)
+        content = m.group(1).strip()
+        # 非空内容但不会上文末区块（占位词 / 超上限）→ 保留原文，杜绝「删除且不展示」
+        if content and _ask_key(content) not in shown_keys:
             return m.group(0)
         before = source[m.start() - 1] if m.start() > 0 else ""
         after = source[m.end()] if m.end() < len(source) else ""

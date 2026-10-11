@@ -16,13 +16,20 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 _PAGE = _ROOT / "plugins" / "history-manager" / "ui" / "history_page.py"
 _PLUGIN_INIT = _ROOT / "plugins" / "history-manager" / "ui" / "__init__.py"
-_CARD = _ROOT / "app" / "widgets" / "cards" / "settings" / "project_selector_card.py"
+_CARD = _ROOT / "plugins" / "history-manager" / "ui" / "project_selector_card.py"
 _MAIN = _ROOT / "app" / "main_widget.py"
 _CARDS_MODULE = _ROOT / "app" / "widgets" / "modules" / "system_cards_module.py"
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _load_card_module():
+    """导入插件自包含的项目选择卡片模块（插件目录带连字符，走 import_module）"""
+    from importlib import import_module
+
+    return import_module("plugins.history-manager.ui.project_selector_card")
 
 
 def test_floating_card_declares_min_width():
@@ -33,9 +40,9 @@ def test_floating_card_declares_min_width():
 
 
 def test_project_panel_reuses_selector_card_with_all_entry():
-    """插件面板复用宿主项目选择卡片，聚合行「全部项目」在面板首行工具条自建"""
+    """插件面板复用插件自包含的项目选择卡片，聚合行「全部项目」在面板首行工具条自建"""
     page = _read(_PAGE)
-    assert "from app.widgets.cards.settings.project_selector_card import" in page
+    assert "from .project_selector_card import" in page
     assert "ProjectSelectorCardContent(body)" in page
     assert 'ProjectItem("全部项目", False, body, is_all_entry=True)' in page
     assert "collapse_project_selector" in page
@@ -287,10 +294,7 @@ def test_panel_release_clears_both_min_and_max():
 def test_project_header_is_visually_prominent():
     """折叠头视觉强化：左侧项目色条 + 展开态/收起态可辨 + 旋转箭头动画"""
     src = _read(_PAGE)
-    header = (
-        src[src.index("class _HeaderChevron") : src.index("def _alpha_tint")]
-        + src[src.index("def _alpha_tint") : src.index("def _active_history_manager")]
-    )
+    header = src[src.index("class _HeaderChevron") : src.index("def _active_history_manager")]
     assert "border-left: 3px solid" in header  # 左侧项目色条
     assert "BORDER_ACCENT" in header  # 展开/hover 描边强调色
     assert "CARD_BG" in header or "HOVER_BG_STRONG" in header  # 更实的底色
@@ -478,7 +482,7 @@ def test_top_new_session_hides_history_card(qapp):
 
 def test_project_row_buttons_real_widget(qapp):
     """实机：两按钮存在、「更多」菜单含归档项、新建会话信号携带行所属项目名"""
-    from app.widgets.cards.settings.project_selector_card import ProjectItem
+    ProjectItem = _load_card_module().ProjectItem
 
     item = ProjectItem("回归测试项目")
     try:
@@ -506,7 +510,7 @@ def test_all_entry_row_has_no_row_buttons(qapp):
     from PyQt5.QtCore import QPoint
     from PyQt5.QtGui import QEnterEvent
 
-    from app.widgets.cards.settings.project_selector_card import ProjectItem
+    ProjectItem = _load_card_module().ProjectItem
 
     all_item = ProjectItem("全部项目", is_all_entry=True)
     try:

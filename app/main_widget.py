@@ -174,9 +174,7 @@ from app.widgets.cards.floating.share_card import ShareCardContent
 from app.widgets.cards.settings.base_settings_card import (
     BaseSettingsCard,
 )
-from app.widgets.cards.settings.project_selector_card import (
-    get_project_color,
-)
+from app.utils.project_meta import get_project_color
 from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
 )
@@ -883,6 +881,10 @@ class OpenAIChatToolWindow(ToolWindow):
     # 压缩清空时刻的 _send_epoch 快照：与 _send_epoch 相等 → 清空前 worker；
     # 不等 → 清空后有新发送，其消息属于新 worker，守卫必须放行
     _post_compact_epoch: int = -1
+    # 压缩清空时刻的 wall-clock 毫秒时间戳（时间线切断点）：守卫的首选判据。
+    # 旧 worker 延迟快照的尾部时间戳 < 本值 → 拦截；清空后新 worker ≥ 本值 → 放行。
+    # 时间戳缺失时回退 _post_compact_epoch 判据。
+    _post_compact_cutoff_ms: int = 0
     # Tab 模式下延迟刷新的标记（主题变更时非可见窗口跳过刷新，激活时补刷）
     _theme_needs_refresh: bool = False
     # P5b：延迟刷新时记录的待刷 scope（theme/font_family/font_size/None），
@@ -1130,6 +1132,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 见 `_install_batch_placeholder` —— 没有它，回收会让容器高度瞬间塌陷，
         # 随后卡片高度再异步上报，与滚底重试链叠加成长对话滚动期抖动。
         self._batch_placeholders: Dict[int, QWidget] = {}
+        # 占位批次 → 卸载时量出的「viewer 之外的卡片固定开销」K
+        # （= card.height() - card.viewer.height()，含页脚/内边距/身份行）。
+        # 重建时随占位高度一起还给新卡，否则新卡只能按「viewer 从 40 起步」的口径
+        # 上报增量 → 外层锚定补偿把视口拽走数百 px（滚轮乱飞）。见
+        # `MessageCard.pin_layout_height(content_overhead=...)`。
+        self._batch_placeholder_overhead: Dict[int, int] = {}
         # 前缀和缓存：_user_prefix[i] = 前 i 个 batch 中有多少个 user（用于 O(1) 的 round_index 计算）
         self._user_prefix_cache: List[int] = []
         self._visible_batch_start = 0
@@ -1231,6 +1239,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 清空时刻快照，供 _on_messages_updated 精确区分旧/新 worker
         self._send_epoch = 0
         self._post_compact_epoch = -1
+        # 🛡️ 清空时间切断点（毫秒）：压缩清空时刻的 wall-clock 快照。
+        # _on_messages_updated 用它做**时间线判据**——旧 worker 的延迟全量快照
+        # 其尾部消息时间戳必然早于清空时刻，清空后新 worker 的尾部必然晚于。
+        # 比 epoch 判据可靠：epoch 只区分"清空前/后"，而 _do_trigger_callback
+        # 会主动 +1 epoch，一旦 epoch 变过，旧快照也会被误判成"新 worker"放行
+        # → 清空被复活（守卫实际 0 次命中，见 2026-10-11 日志）。
+        self._post_compact_cutoff_ms = 0
         # 🛡️ 会话脏标记：会话 messages 自上次保存后是否有过变更。
         # 用于跳过无实际变更的重复持久化（如：流式完成后 _do_post_stream_cleanup
         # 再次调用 _save_current_session_to_history、或新建会话/关闭窗口时
@@ -6881,11 +6896,24 @@ class OpenAIChatToolWindow(ToolWindow):
             if s.session_id == session_id:
                 target_session = s
                 break
-        if not target_session or not target_session.messages:
+        if target_session is None:
             logger.info(
-                f"[DEBUG-cc] early-return: session missing/empty (task={task_id[:8]}, sid={session_id[:8]}, "
-                f"target={target_session is not None}, msg_len={len(target_session.messages) if target_session else -1}, "
+                f"[DEBUG-cc] early-return: session not found (task={task_id[:8]}, sid={session_id[:8]}, "
                 f"sessions={len(self.session_manager.sessions)})"
+            )
+            self._safe_resume_team_mail_after_compact()
+            return
+        # 🛡️ 不能用 `not target_session.messages` 判「无内容可清」：内存治理会
+        # 释放非活跃会话的消息体（_messages=[] + released=True），此时属性读取
+        # 依赖 loader 重载，而 loader 不可用时会**静默返回空列表**（见
+        # chat_session.ChatSession._reload_messages 的 loaded is None 分支：不写空
+        # 也不报错）。于是「已被释放」与「真的为空」在调用点不可区分 → 清空回调
+        # 被误杀（2026-10-11 19:37:32 `early-return: session missing/empty
+        # (target=True, msg_len=0)`）。释放态一律继续走清空：清空的目标状态就是
+        # 空列表，重复清空幂等且安全。
+        if not target_session.messages and not getattr(target_session, "messages_released", False):
+            logger.info(
+                f"[DEBUG-cc] early-return: nothing to clear (task={task_id[:8]}, sid={session_id[:8]})"
             )
             self._safe_resume_team_mail_after_compact()
             return
@@ -6937,6 +6965,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # epoch 相等 → 清空前旧 worker 延迟快照（丢弃）；epoch 已变 → 清空后
         # 新 worker 的结果（放行，避免团队成员压缩后大模型回复被误吞）
         self._post_compact_epoch = self._send_epoch
+        # 🛡️ F2b：同时记录 wall-clock 切断点（毫秒）。epoch 判据有个致命弱点：
+        # _do_trigger_callback 会主动 +1 epoch，此后旧 worker 的延迟全量快照
+        # 也会因"epoch 已变"被放行 → 清空被复活。时间线判据不受此影响：
+        # 旧快照尾部时间戳 < 切断点（拦截），清空后新 worker ≥ 切断点（放行）。
+        self._post_compact_cutoff_ms = int(time.time() * 1000)
         # 弹出卡片缓存，避免对已 deleteLater 的 widget 残留引用
         self._session_card_cache.pop(target_session.session_id, None)
 
@@ -6965,6 +6998,28 @@ class OpenAIChatToolWindow(ToolWindow):
                     "source_message_count": src_message_count,
                 }
             )
+
+        # 🛡️ 清空必须**立即落库**：清空不是「内存释放」，空列表 + 压缩缓存就是要
+        # 写进 SQLite 的结果状态。走常规保存链会被启发式吞掉 ——
+        # main_widget 高频保存路径有 `not saved_messages → return` 与
+        # `not has_user_message → return`（清空后正好两条都命中），
+        # history_manager 的延迟保存链也有空消息守卫。结果是清空只在内存生效、
+        # DB 仍保留旧消息 → 之后任何一次 ensure_messages 重载（切会话/重开/
+        # 重启）都会把旧消息读回来，用户看到的就是"清不掉"（2026-10-11 报障根因，
+        # DB 实证：成功清空的会话 compaction_cache.active=True 且 messages≈5 条，
+        # 失败的仍是 550 条旧消息 + active=False）。
+        # save_cleared_session 直连 session_store 同步写盘并穿透提交，不经过上述启发式。
+        try:
+            if self.history_manager.save_cleared_session(
+                target_session.session_id,
+                compaction_state=getattr(target_session, "compaction_state", None),
+                compaction_cache=getattr(target_session, "compaction_cache", None),
+                **self._api_usage_kwargs(target_session),
+            ):
+                # 已落库 → 清脏标记，避免后续无变更的重复全量保存
+                self._session_dirty = False
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[MainWidget] 压缩清空后落库失败: {e}")
 
         # 🛡️ F3b：压缩清空完成后，安全重启被暂缓的 pending 团队邮件处理。
         # 此时会话已清空、守卫就位、_auto_compact_in_progress 已复位，
@@ -11359,6 +11414,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     if pending_id and sid == pending_id:
                         continue  # 跳过 pending 会话，避免空消息覆盖 DB
                     session["messages"] = []
+                    # 🛡️ 释放态标记：与 history_manager 的 `_do_save` /
+                    # `flush_async` 空消息守卫同口径 —— 只有打了本标记的空列表
+                    # 才被当作「无数据可写」跳过落库；显式清空（/compact --clear）
+                    # 的空列表必须照写，否则清空只在内存生效、DB 保留旧消息。
+                    session["_messages_released"] = True
                     released += 1
             if released:
                 from loguru import logger
@@ -11778,7 +11838,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
         return total + self._batch_slot_gap(len(alive))
 
-    def _install_batch_placeholder(self, batch_idx: int, height: int, layout_index: int) -> bool:
+    def _install_batch_placeholder(self, batch_idx: int, height: int, layout_index: int, content_overhead: int | None = None) -> bool:
         """卸载批次后在原位留一个等高空白占位。
 
         目的：B4 回收把卡片从 chat_layout 移除后，容器高度会瞬间归零，随后卡片
@@ -11791,6 +11851,8 @@ class OpenAIChatToolWindow(ToolWindow):
             height: 被移除卡片在布局中占据的高度（卡高 + 槽内间距，见
                 ``_batch_layout_height``；<=0 时不安装）
             layout_index: 被移除的第一张卡片在 chat_layout 中的位置
+            content_overhead: 卸载时量出的卡片固定开销 K（viewer 之外的部分）。
+                重建时用它把增量还原成「卡片真实变化」，避免锚定补偿失真。
 
         Returns:
             是否成功安装。False = 调用方必须回退到「滚动值补偿」的旧行为。
@@ -11807,6 +11869,16 @@ class OpenAIChatToolWindow(ToolWindow):
             if old is not None:
                 self._remove_placeholder_widget(old)
             self._batch_placeholders[batch_idx] = spacer
+            if content_overhead is not None:
+                # 桩/旧实例可能没有该字段（测试用 __new__ 构造），按需补建。
+                # ⚠️ 不能写 getattr(self, "_x", None)：未经 __init__ 的 PyQt 桩上
+                # 带默认值的 getattr 仍抛 RuntimeError（super-class __init__ never called）。
+                try:
+                    overheads = self._batch_placeholder_overhead
+                except (AttributeError, RuntimeError):
+                    overheads = {}
+                    self._batch_placeholder_overhead = overheads
+                overheads[batch_idx] = int(content_overhead)
             return True
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[virtual-scroll] 批次 {batch_idx} 占位安装失败，回退补偿: {e}")
@@ -11858,7 +11930,20 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return None
 
-    def _apply_placeholder_height(self, cards: list, height: int) -> None:
+    def _pop_batch_overhead(self, batch_idx: int) -> int | None:
+        """取出并注销该占位批次记录的卡片固定开销 K（一次性）。
+
+        与 `_take_batch_placeholder` 分开是为了不破坏后者的返回签名；调用方总是
+        成对调用这两个。
+        """
+        # 同上：桩实例上带默认值的 getattr 会抛 RuntimeError
+        try:
+            overheads = self._batch_placeholder_overhead
+        except (AttributeError, RuntimeError):
+            return None
+        return overheads.pop(batch_idx, None)
+
+    def _apply_placeholder_height(self, cards: list, height: int, content_overhead: int | None = None) -> None:
         """把占位高度还原到重建出来的卡片上（T42 高度守恒）。
 
         新建卡片从 MessageCard 最小高度（40px）起步，直接进布局会让容器总高在
@@ -11868,6 +11953,11 @@ class OpenAIChatToolWindow(ToolWindow):
         传入的 ``height`` 是**布局高度**（含槽内间距），而卡片插回布局后间距
         由 Qt 自动补回，故先扣掉 gap 再分配，否则总高凭空多出
         ``(n-1) × spacing``。
+
+        ``content_overhead``（K）随高度一起还给卡片：解锁 `_apply_viewer_height`
+        按「卡片真实变化」记账（见 `MessageCard.pin_layout_height`）。没有它，
+        新卡只能按 viewer 从 40 起步的口径上报增量，外层锚定补偿会据此把视口
+        拽走数百 px —— 滚动时动态加载卡片后「滚轮到处乱飞」的直接成因。
 
         单卡批次（绝大多数，历史消息按 user 轮分组）：占位就是这张卡的实高，
         直接钉回。
@@ -11895,7 +11985,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # pin_layout_height = setFixedHeight + 钉死标记：viewer 首个真实
                 # 高度上报时由卡片侧解除（_unpin_layout_height）。若只裸钉不解除，
                 # H 与内容实际高度的差会被布局压给气泡 + 页脚（页脚拉伸畸变）。
-                card.pin_layout_height(max(1, target))
+                card.pin_layout_height(max(1, target), content_overhead=content_overhead)
             except (RuntimeError, AttributeError):
                 continue
 
@@ -11908,6 +11998,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         widgets = list(self._batch_placeholders.values())
         self._batch_placeholders.clear()
+        try:
+            self._batch_placeholder_overhead.clear()
+        except (AttributeError, RuntimeError):
+            pass
         if not remove_from_layout:
             return
         for w in widgets:
@@ -12084,11 +12178,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     if cards:
                         batch_cards = []
                         batch_height = 0
+                        batch_overhead = None
                         first_index = -1
                         for card in cards:
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                                 if first_index < 0:
                                     first_index = self.chat_layout.indexOf(card)
+                                # 量出「viewer 之外的固定开销」K：重建时靠它把首次
+                                # 高度上报还原成卡片的真实变化量（否则外面会按
+                                # viewer 从 40 起步的口径补偿 → 视口被拽走数百 px）
+                                if batch_overhead is None:
+                                    viewer = getattr(card, "viewer", None)
+                                    if viewer is not None:
+                                        try:
+                                            batch_overhead = int(card.height()) - int(viewer.height())
+                                        except (RuntimeError, TypeError, ValueError):
+                                            batch_overhead = None
                                 batch_height += card.height()
                                 recycled_card_ids.add(id(card))
                                 batch_cards.append(card)
@@ -12100,7 +12205,7 @@ class OpenAIChatToolWindow(ToolWindow):
                             batch_height += self._batch_slot_gap(len(batch_cards))
                             # 🐛 等高占位优先：总高度在回收瞬间保持不变，下面的
                             # setValue 补偿就成了空操作 —— 不再与滚底重试链打架。
-                            if not self._install_batch_placeholder(batch_idx, batch_height, first_index):
+                            if not self._install_batch_placeholder(batch_idx, batch_height, first_index, batch_overhead):
                                 above_removed_height += batch_height
                             above_widgets.extend(batch_cards)
                             # [池化] 高度已记录、占位已装好，此时摘 WebView 不影响几何
@@ -12124,18 +12229,29 @@ class OpenAIChatToolWindow(ToolWindow):
                     if cards:
                         batch_cards = []
                         batch_height = 0
+                        batch_overhead = None
                         first_index = -1
                         for card in cards:
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                                 if first_index < 0:
                                     first_index = self.chat_layout.indexOf(card)
+                                # 量出「viewer 之外的固定开销」K：重建时靠它把首次
+                                # 高度上报还原成卡片的真实变化量（否则外面会按
+                                # viewer 从 40 起步的口径补偿 → 视口被拽走数百 px）
+                                if batch_overhead is None:
+                                    viewer = getattr(card, "viewer", None)
+                                    if viewer is not None:
+                                        try:
+                                            batch_overhead = int(card.height()) - int(viewer.height())
+                                        except (RuntimeError, TypeError, ValueError):
+                                            batch_overhead = None
                                 batch_height += card.height()
                                 recycled_card_ids.add(id(card))
                                 batch_cards.append(card)
                         if batch_cards:
                             # 同上方批次：优先留等高占位（含槽内间距），保持容器总高度不变
                             batch_height += self._batch_slot_gap(len(batch_cards))
-                            self._install_batch_placeholder(batch_idx, batch_height, first_index)
+                            self._install_batch_placeholder(batch_idx, batch_height, first_index, batch_overhead)
                             below_widgets.extend(batch_cards)
                             # [池化] 同上：几何已固定后再摘 WebView
                             for card in batch_cards:
@@ -12300,11 +12416,17 @@ class OpenAIChatToolWindow(ToolWindow):
         removed_h = 0
         alive_cards = []
         first_index = -1
+        overhead: int | None = None
         for card in cards:
             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                 try:
                     if first_index < 0:
                         first_index = self.chat_layout.indexOf(card)
+                    # 同回收路径：量出 K（viewer 之外的固定开销），重建时还原增量口径
+                    if overhead is None:
+                        viewer = getattr(card, "viewer", None)
+                        if viewer is not None:
+                            overhead = int(card.height()) - int(viewer.height())
                     removed_h += card.height()
                 except RuntimeError:
                     pass
@@ -12331,7 +12453,7 @@ class OpenAIChatToolWindow(ToolWindow):
             delete_widgets_from_layout(alive_cards, self.chat_layout, call_cleanup=True)
             # 🐛 等高占位优先：总高度不变 → 调用方无需补偿，也就不会与
             # _ensure_at_bottom 的重试链相互拉扯。失败则回退旧的补偿行为。
-            placeholder_ok = self._install_batch_placeholder(batch_idx, removed_h, first_index)
+            placeholder_ok = self._install_batch_placeholder(batch_idx, removed_h, first_index, overhead)
         # 占位成功 = 布局没丢高度 → 返回 0，调用方的 setValue(value - 0) 成为空操作
         net_removed_h = 0 if placeholder_ok else removed_h
         # 🛡️ B9：只置 _batch_cards=None（卸载 UI），保留 _message_batch 数据
@@ -13789,9 +13911,13 @@ class OpenAIChatToolWindow(ToolWindow):
             # 并再触发一轮回收的自激回路（T42）。高度在下方把所有卡片建完后
             # 统一还原（`_apply_placeholder_height`）。
             ph_height = 0
+            ph_overhead = None
             ph = self._take_batch_placeholder(global_batch_index)
             if ph is not None:
                 insert_index, ph_height = ph
+                # K（卡片固定开销）与占位高度配套：缺了它，新卡的首次高度上报只能
+                # 按「viewer 从 40 起步」记账 → 锚定补偿把视口拽走数百 px。
+                ph_overhead = self._pop_batch_overhead(global_batch_index)
             cards = []
             if role == "user":
                 content = self._sanitize_user_message_for_display(batch[0].get("content", ""))
@@ -13870,7 +13996,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 落进新的占位区而再触发一轮回收，形成自激循环。
             # 放在卡片全部建完之后：多卡批次要按总高均摊，得先知道张数。
             if ph_height > 0 and cards:
-                self._apply_placeholder_height(cards, ph_height)
+                self._apply_placeholder_height(cards, ph_height, content_overhead=ph_overhead)
 
         # 批量处理懒渲染：渲染完所有卡片后再统一触发，避免每次都触发滚动
         # 收集需要懒渲染的卡片
@@ -16163,6 +16289,15 @@ class OpenAIChatToolWindow(ToolWindow):
             self._batch_placeholders = {
                 (k + restored_count if k >= batch_index else k): v for k, v in self._batch_placeholders.items()
             }
+            # K 表与占位表同源，必须一起重映射（否则重建时拿不到开销 → 增量口径失真）
+            try:
+                overheads = self._batch_placeholder_overhead
+            except (AttributeError, RuntimeError):
+                overheads = None
+            if overheads:
+                self._batch_placeholder_overhead = {
+                    (k + restored_count if k >= batch_index else k): v for k, v in overheads.items()
+                }
 
         # 可见窗口同步：
         # - 视口本来就在底部（end == 原总数）→ 跟随到新底部，否则刚渲染的
@@ -19929,13 +20064,18 @@ class OpenAIChatToolWindow(ToolWindow):
             self._register_new_cards_into_batches()
             # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
             self._sync_node_preview_to_last()
-            # 🆕 发送纪元 +1 并解除压缩守卫：本回调路径不走 _on_send_clicked
-            # （无 15266 处的守卫清零），压缩清空后由本路径发起的新 worker
-            # 若不解除守卫，其 finished_with_messages 会被 _on_messages_updated
-            # 误判为"旧 worker 延迟快照"丢弃 → 回复写入 session 却永不显示
-            # （团队成员自动压缩后看不到大模型恢复结果的直接根因）
+            # 🆕 发送纪元 +1（**不再解除压缩守卫**）。
+            # 本回调路径不走 _on_send_clicked，因此必须自己推进 epoch；但旧实现
+            # 顺手把 _post_compact_guard 置 False 是错的：一旦守卫被关，旧 worker
+            # 的延迟全量快照（清空前那 400+ 条）就会在 _on_messages_updated 里
+            # 静默覆写已清空的会话 → 清空被复活、DB 又被写回旧消息
+            # （2026-10-11 `/compact --clear` 清不掉的核心路径）。
+            # 正确做法：守卫保持开启，由 _on_messages_updated 用**时间线切断点**
+            # 判定放行 —— 本路径写入的 callback 消息 ts_ms ≥ 切断点，新 worker 的
+            # 快照会被放行；旧快照尾部 < 切断点，被拦截。原先担心的
+            # "守卫吞掉新回复"（团队成员自动压缩后看不到大模型恢复结果）由
+            # 时间线判据 + 时间戳缺失时的 epoch 回退共同兜住。
             self._send_epoch += 1
-            self._post_compact_guard = False
 
     def _prepare_ui_for_callback_message(self, callback_text: str):
         """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）
@@ -20653,6 +20793,27 @@ class OpenAIChatToolWindow(ToolWindow):
                         return True
         return False
 
+    @staticmethod
+    def _max_message_ts_ms(messages: List[Dict], window: int = 8) -> int:
+        """取消息列表尾部若干条的最大毫秒时间戳（0 = 无法判定）。
+
+        用途：压缩守卫的时间线判据。旧 worker 的延迟全量快照，其尾部消息
+        必然是清空**之前**产生的，故尾窗最大 ts_ms < 清空切断点；清空后新
+        worker 的最新消息必然 ≥ 切断点。取尾窗而非只看最后一条，是因为收尾
+        阶段可能追加无 ts_ms 的合成消息（错误提示 / hook 注入）。
+
+        与 ``_contains_user_text`` 同族：都为「旧快照 vs 新 worker」提供
+        与 epoch 无关的客观判据。
+        """
+        best = 0
+        for msg in messages[-window:]:
+            if not isinstance(msg, dict):
+                continue
+            ts = msg.get("ts_ms")
+            if isinstance(ts, int) and ts > best:
+                best = ts
+        return best
+
     def _on_messages_updated(self, messages: List[Dict[str, Any]]):
         # 🛡️ 关闭窗口路径守护：强制停止后 closeEvent 同步清理 backend，
         # 跨线程 queued 的 finished_with_messages 可能在 widget 已 _is_destroyed 后才被
@@ -20668,27 +20829,41 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_post_compact_guard", False):
             _cur_session = self.session_manager.get_current_session() if self.session_manager else None
             if _cur_session and messages and len(messages) > len(_cur_session.messages):
-                # 🛡️ F2：发送纪元精确判定——epoch 与清空时快照相等说明清空后
-                # 没有任何新发送，本批消息必为清空前旧 worker 的延迟快照，丢弃；
-                # epoch 已变化说明清空后发起了新一轮请求（_on_send_clicked /
-                # _do_trigger_callback 回调路径），本批消息属于新 worker，
-                # 必须放行，否则出现"回复写入 worker 却被守卫吞掉、UI 永远
-                # 不显示大模型结果"（团队成员自动压缩 bug 的直接根因）
-                if getattr(self, "_send_epoch", 0) != getattr(self, "_post_compact_epoch", -1):
+                # 🛡️ F2b（首选判据）：时间线切断点。旧 worker 的延迟全量快照其
+                # 尾部消息时间戳必然 < 清空时刻；清空后新 worker 的尾部必然 ≥。
+                # 这条判据不受 epoch 自增干扰，因此 _do_trigger_callback 主动
+                # +1 epoch 也不会把旧快照放行（epoch 单独用时等于没拦：日志实证
+                # 守卫 0 次命中，清空被旧快照复活）。
+                _cutoff = getattr(self, "_post_compact_cutoff_ms", 0)
+                _tail_ms = self._max_message_ts_ms(messages)
+                if _cutoff and _tail_ms:
+                    _is_stale = _tail_ms < _cutoff
+                else:
+                    # 🛡️ 回退判据：时间戳不可判定（老数据/构造期消息无 ts_ms）时
+                    # 仍用 epoch——epoch 与清空快照相等说明清空后没有新发送，
+                    # 本批必为旧 worker 延迟快照，丢弃；已变化则属新 worker，
+                    # 必须放行，否则出现"回复写入 worker 却被守卫吞掉、UI 永远
+                    # 不显示大模型结果"（团队成员自动压缩 bug 的直接根因）
+                    _is_stale = getattr(self, "_send_epoch", 0) == getattr(self, "_post_compact_epoch", -1)
+                if not _is_stale:
                     self._post_compact_guard = False
+                    self._post_compact_cutoff_ms = 0
                     from loguru import logger
 
                     logger.info(
                         f"[MessagesUpdated] 压缩守卫放行新 worker 消息: "
+                        f"tail_ms={_tail_ms}, cutoff_ms={_cutoff}, "
                         f"send_epoch={self._send_epoch}, compact_epoch={self._post_compact_epoch}"
                     )
                 else:
                     self._post_compact_guard = False
+                    self._post_compact_cutoff_ms = 0
                     from loguru import logger
 
                     logger.info(
                         f"[MessagesUpdated] 压缩守卫拦截旧 worker 延迟消息: "
-                        f"msg_count={len(messages)}, current_len={len(_cur_session.messages)}"
+                        f"msg_count={len(messages)}, current_len={len(_cur_session.messages)}, "
+                        f"tail_ms={_tail_ms}, cutoff_ms={_cutoff}"
                     )
                     return
         # 🛡️ 会话切换哨兵：_create_new_session 会创建新会话并 stop_streaming，

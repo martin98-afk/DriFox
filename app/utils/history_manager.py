@@ -1285,6 +1285,10 @@ class HistoryManager:
                 if release_messages_only:
                     if s.get("messages"):
                         s["messages"] = []
+                        # 🛡️ 释放态标记：_do_save / flush_async 的空消息守卫据此
+                        # 区分「内存已释放、无数据可写」与「显式清空、就是要写空」。
+                        # 由 _build_session_record 重建记录时自然清除。
+                        s["_messages_released"] = True
                 else:
                     self._history_sessions.pop(i)
                     self._mark_cache_dirty()
@@ -1852,6 +1856,104 @@ class HistoryManager:
             self._mark_cache_dirty()
             self._schedule_save(existing.get("session_id"))
 
+    def save_cleared_session(
+        self,
+        session_id: str,
+        compaction_state: Dict = None,
+        compaction_cache: Dict = None,
+        **api_usage_kwargs,
+    ) -> bool:
+        """显式清空会话后**立即**把空消息列表落库。
+
+        为什么必须独立入口（不复用 update_session + 延迟保存链）：
+
+        1. **必须允许写空**。`_do_save` / `flush_async` 有一条空消息守卫，
+           目的是拦截「内存已释放、无数据可写」的记录覆盖 DB 全量消息。
+           `update_session` 走的是延迟保存链，清空会被这条守卫吞掉 →
+           清空只在内存生效、DB 保留旧消息、任何重载都把旧消息读回
+           （`/compact --clear` 清不掉的根因）。本方法直连 session_store，
+           与守卫解耦。
+        2. **必须同步**。清空是「用户明确要求的结果状态」，延迟 1s 会出现
+           窗口期：会话被重载 → 从 SQLite 读回旧消息 → 刚清掉的消息复活。
+           这里同步写盘 + 穿透提交，写完成后再返回。
+        3. 空列表的内容指纹是 (0, 0)，与「上次落库也是空」相同时会命中
+           SessionRepository 的去重短路 —— 那正是我们要的幂等行为。
+
+        Args:
+            session_id: 目标会话 ID（必须已在 _history_sessions 中）
+            compaction_state / compaction_cache: 压缩状态，None → 保留现值
+            api_usage_kwargs: last_api_* 等 API 权威占用字段（None → 保留现值）
+
+        Returns:
+            是否写库成功（未启用 SQLite / 会话不在内存 → False）
+        """
+        if not (self._use_sqlite and self._session_store):
+            return False
+        if not session_id:
+            return False
+        index = self.find_index_by_session_id(session_id)
+        if index is None:
+            logger.warning(f"[HistoryManager] 清空会话不在内存记录中，跳过落库: {session_id[:8]}...")
+            return False
+
+        existing = self._history_sessions[index]
+        _usage = self._resolve_api_usage_fields(
+            {
+                "last_api_prompt_tokens": api_usage_kwargs.get("last_api_prompt_tokens"),
+                "last_api_message_count": api_usage_kwargs.get("last_api_message_count"),
+                "last_api_prompt_from_usage": api_usage_kwargs.get("last_api_prompt_from_usage"),
+                "token_calibration": api_usage_kwargs.get("token_calibration"),
+                "token_calibration_model": api_usage_kwargs.get("token_calibration_model"),
+            },
+            existing,
+        )
+        cleared = self._build_session_record(
+            [],
+            title=existing.get("title"),
+            session_id=session_id,
+            compaction_state=(
+                compaction_state if compaction_state is not None else existing.get("compaction_state", {})
+            ),
+            compaction_cache=(
+                compaction_cache if compaction_cache is not None else existing.get("compaction_cache", {})
+            ),
+            system_prompt=self._resolve_existing_system_prompt(existing),
+            project=existing.get("project", "默认项目"),
+            worktree_path=existing.get("worktree_path", ""),
+            **_usage,
+            team_run_id=existing.get("team_run_id", ""),
+            team_name=existing.get("team_name", ""),
+            agent_name=existing.get("agent_name", ""),
+            team_members=existing.get("team_members", ""),
+            pinned=existing.get("pinned", False),
+        )
+        self._history_sessions.pop(index)
+        self._history_sessions.insert(0, cleared)
+        self._mark_cache_dirty()
+
+        # 该会话若已有排队中的延迟保存，先作废：目标记录已被替换为清空版，
+        # 留着只会在清空写盘后再跑一次同内容（多余），且 pending 期间调用方
+        # 持有的旧消息快照有再次写回的风险。
+        if self._pending_save_session_id == session_id:
+            self._pending_save_session_id = None
+            self._save_timer = None
+
+        try:
+            ok = bool(self._session_store.save_session(cleared))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[HistoryManager] 清空会话落库失败 {session_id[:8]}: {e}")
+            return False
+        # 穿透提交：清空后立即重载必须读到空，不能停留在挂起事务里
+        try:
+            db = getattr(self._session_store, "_db", None)
+            if db is not None and getattr(db, "is_connected", False):
+                db.flush()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HistoryManager] 清空会话穿透提交失败: {e}")
+        if ok:
+            logger.info(f"[HistoryManager] 清空会话已落库: session_id={session_id[:8]}...")
+        return ok
+
     def _schedule_save(self, session_id: str = None):
         """
         延迟保存会话，指定 session_id 时只保存该会话。
@@ -1892,13 +1994,15 @@ class HistoryManager:
         logger.debug(f"[HistoryManager] 保存会话: pending_id={pending_id[:8]}...")
         for session in self._history_sessions:
             if session.get("session_id") == pending_id:
-                # 🛡️ 空消息守卫：内存记录 messages 已被释放置空
-                # （_release_inactive_session_messages / remove_session
-                # release_messages_only）时跳过写库。若照常保存会用
-                # serialize([]) 覆盖 DB 中已有完整消息的会话（preview/
-                # message_count 保留、messages 变空 → 历史会话加载后
-                # 消息列表为空且无任何报错，根因）。
-                if not session.get("messages"):
+                # 🛡️ 空消息守卫（收窄版）：只拦截「内存释放态」——记录 messages
+                # 被 _release_inactive_session_messages / remove_session(
+                # release_messages_only=True) 置空且打了 _messages_released 标记。
+                # 旧实现一刀切 `not messages` 跳过，把**显式清空**也一并吞掉
+                # （/compact --clear、auto-compact 的目标状态本来就是空列表）→
+                # 清空只在内存生效、DB 保留旧消息、任何重载都把旧消息读回
+                # （"无法清空"根因）。判据换成释放标记后两类空列表可区分：
+                # 「无数据可写」跳过，「明确要写空」照写。
+                if not session.get("messages") and session.get("_messages_released"):
                     logger.warning(f"[HistoryManager] 跳过空消息会话保存（内存已释放）: session_id={pending_id[:8]}...")
                     break
                 self._session_store.save_session(session)
@@ -1966,8 +2070,9 @@ class HistoryManager:
             if session.get("session_id") == pending_id:
                 target = session
                 break
-        # 空消息守卫与 _do_save 同口径：内存已释放的会话不回写（防覆盖 DB 全量消息）
-        if not target or not target.get("messages"):
+        # 空消息守卫与 _do_save 同口径（收窄版）：只拦「内存释放态」不回写，
+        # 显式清空的空列表必须照写（防覆盖 DB 全量消息 vs 明确要写空）
+        if not target or (not target.get("messages") and target.get("_messages_released")):
             return
         store = self._session_store
         db = getattr(store, "_db", None) if store is not None else None

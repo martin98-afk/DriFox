@@ -3186,16 +3186,26 @@ class MessageCard(SimpleCardWidget):
             widget = widget.parentWidget()
         return None
 
-    def pin_layout_height(self, height: int) -> None:
+    def pin_layout_height(self, height: int, content_overhead: int | None = None) -> None:
         """T42 占位守恒：把卡片钉死在起步高度（min=max），重建瞬间容器总高不变。
 
         只作起步高度，不锁死：viewer 首个真实高度上报到达时由
         ``_unpin_layout_height`` 解除。方法形式（而非调用方直接 setFixedHeight）
         是为了让「钉死」带上标记，解除路径才有据可依。
+
+        Args:
+            height: 起步高度（= 卸载时该批次留下的等高占位高度 H）。
+            content_overhead: 卸载时量出的「viewer 之外的卡片固定开销」K
+                （= 当时的 ``card.height() - card.viewer.height()``，含页脚/内边距/
+                身份行）。有它才能在解除拍算出**卡片真实**的高度增量；没它只能
+                退回「viewer 增量」口径，在重建路径上会严重高估（见
+                ``_apply_viewer_height`` 的说明）。
         """
         try:
             self.setFixedHeight(max(1, int(height)))
             self._layout_height_pinned = True
+            self._pinned_height = int(height)
+            self._pinned_overhead = content_overhead
         except RuntimeError, AttributeError:
             pass
 
@@ -3254,11 +3264,22 @@ class MessageCard(SimpleCardWidget):
             self.viewer.sync_body_max_height()
         except Exception:
             pass
-        if height == self._last_applied_viewer_height:
+        if height == self._last_applied_viewer_height and not getattr(self, "_layout_height_pinned", False):
             return
         # 🐛 记录本次高度增量：外层聊天列表（main_widget）据此做滚动锚定补偿
         # （Qt 滚动区无 scroll anchoring，卡片高度变化时视口内容会被推走）。
-        self._last_height_delta = height - self.viewer.height()
+        #
+        # ⚠️ T42 占位重建路径必须换口径：卡片被 pin 在占位高度 H，而新建 viewer 仍
+        # 停在最小高度 40（固定高度的卡片不会把 viewer 拉伸）。此时
+        # `height - viewer.height()` 是「viewer 从 40 涨到 HF」的量（成百上千 px），
+        # 而**卡片实际**只变了 `(HF + K) - H`（K = 页脚/内边距/身份行等固定开销，
+        # 实测 144）—— 差一个数量级，外层按它 `value += delta` 会把视口凭空拽走数百 px
+        # （「滚动时动态加载卡片后滚轮到处乱飞」）。K 由卸载侧量出并随占位传递。
+        _pinned_oh = getattr(self, "_pinned_overhead", None)
+        if getattr(self, "_layout_height_pinned", False) and _pinned_oh is not None:
+            self._last_height_delta = (height + int(_pinned_oh)) - int(getattr(self, "_pinned_height", 0) or 0)
+        else:
+            self._last_height_delta = height - self.viewer.height()
         self._last_applied_viewer_height = height
         # [PERF] resize preview 期间 viewer 已 hide + setUpdatesEnabled(False)，
         # 此时 setFixedHeight 仍会触发 Qt 布局链 → QWebEngineView Chromium
