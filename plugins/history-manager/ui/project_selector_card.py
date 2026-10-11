@@ -441,7 +441,9 @@ class ProjectSelectorCardContent(QWidget):
         self._content_widget.setAcceptDrops(True)
         # 内容 widget 也接受拖拽，扩大拖拽热区
         self._content_layout = QVBoxLayout(self._content_widget)
-        self._content_layout.setContentsMargins(0, 2, 0, 2)
+        # 右 margin 14：qfluentwidgets ScrollArea 的滚动条是 overlay 浮层
+        # （原生条被 SmoothScrollDelegate 强制隐藏），占右缘 13px，须留位避让
+        self._content_layout.setContentsMargins(0, 2, 14, 2)
         # 项目行间距 2px：当前项目带常驻底纹 + 左色条后，1px 会让相邻行块面
         # 粘在一起（淡染底贴着色条像同一块），2px 让每行边界清楚但仍紧凑
         self._content_layout.setSpacing(2)

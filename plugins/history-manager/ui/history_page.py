@@ -486,7 +486,9 @@ class HistoryPage(QWidget):
         self._content_widget = QWidget()
         self._content_widget.setStyleSheet("background: transparent;")
         self._content_layout = QVBoxLayout(self._content_widget)
-        self._content_layout.setContentsMargins(4, 2, 4, 2)
+        # 右 margin 14：qfluentwidgets ScrollArea 的滚动条是 overlay 浮层
+        # （原生条被 SmoothScrollDelegate 强制隐藏），占右缘 13px，须留位避让
+        self._content_layout.setContentsMargins(4, 2, 14, 2)
         self._content_layout.setSpacing(4)
         self._scroll_area.setWidget(self._content_widget)
         self._scroll_area.hide()  # attach 前隐藏（空滚动区会闪白底）
