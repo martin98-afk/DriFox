@@ -241,6 +241,9 @@ _STREAM_BAND_BOTTOM = 3  # 光块距卡片底边(px)
 _STREAM_BAND_REPAINT_PAD = 1
 
 # ===== 性能缓存：图标前缀和字号（避免每块代码都查主题和计算字号） =====
+# ⚠️ 默认值按「深色」写（`qrc:/icons` 是白图标）；浅色主题下必须由
+# `_update_icon_prefix()` 换成 `qrc:/icons_light`，**且只能经 `current_icon_prefix()`
+# 读**——见其 docstring 的导入陷阱。
 _ICON_PREFIX_CACHE: str = "qrc:/icons"
 _CODE_FONT_SIZE: int = scale_font_size(13)
 
@@ -249,6 +252,27 @@ def _update_icon_prefix():
     """主题切换时更新图标前缀缓存（单一来源 get_tool_qrc_prefix）"""
     global _ICON_PREFIX_CACHE
     _ICON_PREFIX_CACHE = get_tool_qrc_prefix()
+
+
+def current_icon_prefix() -> str:
+    """实时读取当前主题的图标前缀（唯一正确读法）。
+
+    ⚠️ **禁止**在别的模块 `from ... import _ICON_PREFIX_CACHE`：模块级变量会被
+    ``_update_icon_prefix()`` 用 `global` **重新绑定**，`from ... import` 拿到的是
+    导入那一刻的旧值，且**永远不再更新**。
+
+    真实事故（2026-10-11 用户报「代码块右上角两个按钮在浅色模式下也是白色的」）：
+    ``card_viewers`` 顶部按值导入了 ``_ICON_PREFIX_CACHE``，线程池渲染快照
+    （`_collect_render_snapshot`）用它当 `icon_prefix` → 无论主题怎么切，走异步
+    渲染路径的卡片，代码块工具栏始终带 `qrc:/icons/导入.svg`、`qrc:/icons/复制.svg`
+    （**白色**），在浅色卡片上就是两个看不见的白按钮；主线程渲染路径走的是本模块
+    的函数默认值（实时读全局）所以正常 —— 两条路径产物不一致，正好解释了
+    「同一份代码，有的卡片图标正常、有的发白」。
+
+    顺带：本模块的默认值写死深色，浅色主题冷启动若首次渲染就走异步路径，也会白发；
+    故快照侧会先调一次 `_update_icon_prefix()`。
+    """
+    return _ICON_PREFIX_CACHE
 
 
 # HTML 实体解码函数（str.maketrans 只能做单字符→单字符，无法解码 &quot; 等多字符实体）
@@ -638,12 +662,12 @@ def _wrap_code_blocks_with_copy_button_web(
 
     Args:
         html: markdown 渲染后的 HTML
-        icon_prefix: 图标前缀（None=用全局 _ICON_PREFIX_CACHE，主线程默认）
+        icon_prefix: 图标前缀（None=用当前主题缓存，主线程默认；见 current_icon_prefix）
         font_size: 代码字号（None=用全局 _CODE_FONT_SIZE，主线程默认）
         formatter: Pygments formatter（None=用全局缓存 formatter，主线程默认；
                    B3 线程池 worker 必须传入线程局部 formatter，避免跨线程共享）
     """
-    _icon_prefix = icon_prefix if icon_prefix is not None else _ICON_PREFIX_CACHE
+    _icon_prefix = icon_prefix if icon_prefix is not None else current_icon_prefix()
     _font_size = font_size if font_size is not None else _CODE_FONT_SIZE
 
     def replacer(match):
@@ -3161,7 +3185,10 @@ _SKELETON_CACHE_MAX = 48
 # 旧解析器对多余字段兼容，但旧骨架永不发第 5 字段 → 哨兵失效，必须 bump。
 # _SKELETON_CACHE_VERSION +1（v45）：[T38] 空正文折叠——坞态下正文无可见内容
 # 时收为零高度（body.cp-blank，CSS + reportHeight 维护 + 复用复位）。
-_SKELETON_CACHE_VERSION = 45
+# _SKELETON_CACHE_VERSION +1（v46）：[MEM-2] body 的 max-height 改走
+# CSS 变量 --dfx-body-max-h（Python 下发 = widget 高度上限），并注入
+# _BODY_HEIGHT_CAP_JS（window._dfxSetBodyMaxH）。CSS + JS 双资产变更，必须 bump。
+_SKELETON_CACHE_VERSION = 46
 
 
 def _js_literal(value) -> str:
@@ -4448,6 +4475,42 @@ _CONTENT_AUTOSCROLL_JS = """
                         _autoScrollStreamingBody();
                     }
                 }
+"""
+
+# ── [MEM-2] 文档滚动容器（body）高度上限同步 ──
+# 背景（2026-10-11 真机「文本内容超出可视区域造成文本遮挡」）：
+#   html{overflow:hidden} 决定了文档级滚动被禁用，body 是**唯一**的滚动容器；
+#   而 widget（QWebEngineView）的高度上限自 1aa78021 起按「物理面积」收缩
+#   （CodeWebViewer.clamp_surface_height，dpr 2.25 + 1200 逻辑宽 → 仅 ~1975px），
+#   远小于 body 的静态 max-height（MAX_HEIGHT = 7111px @dpr2.25）。两者不等就会：
+#       内容高 > widget 上限，但 内容高 ≤ body max-height
+#     → body 自身没有溢出（clientHeight == scrollHeight）→ 不可滚，
+#       被 widget 视口裁掉的那一段**既不在视口内、也没有任何滚动手径**
+#       （滚轮内外转发读到的可滚动量恒为 0，自动滚底也吃不掉）。
+#   修法：Python 每次算出上限后用 _dfxSetBodyMaxH 下发，保证
+#      「widget 高度上限」≡「文档滚动容器上限」，
+#   超限内容才能按原设计回退为卡内滚动（wheelEvent 内外转发的安全网）。
+#   注入时机：骨架 <script>（早于任何内容渲染），值由 _on_js_ready / resizeEvent /
+#   高度应用点幂等下发；未下发前走 CSS 的静态 fallback，行为与改动前一致。
+_BODY_HEIGHT_CAP_JS = """
+                // ===== [MEM-2] 文档滚动容器上限同步（Python 下发）=====
+                // px 必须等于 widget 的高度上限，否则被裁内容不可达（见 Python 侧注释）。
+                window._dfxSetBodyMaxH = function (px) {
+                    var v = Math.max(200, px | 0);
+                    var root = document.documentElement;
+                    if (root.style.getPropertyValue('--dfx-body-max-h') === (v + 'px')) return;
+                    root.style.setProperty('--dfx-body-max-h', v + 'px');
+                    // 上限变化 ⇒ body 的 clientHeight（可滚动量）变化：
+                    //  ① 流式中且用户未上滚 → 贴底，别让正文尾巴落在新视口之外；
+                    //  ② 立刻重报几何，让 Python 的卡内滚动判据
+                    //     （scrollHeight - clientHeight）与滚轮内外转发即时跟上。
+                    try {
+                        if (window._streamingActive && window._userScrolledWithin !== true) {
+                            document.body.scrollTop = document.body.scrollHeight;
+                        }
+                    } catch (e) {}
+                    if (typeof reportHeight === 'function') reportHeight();
+                };
 """
 
 
