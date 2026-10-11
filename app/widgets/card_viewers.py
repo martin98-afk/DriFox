@@ -93,7 +93,6 @@ from app.widgets.card_render_core import (
     _CONTENT_AUTOSCROLL_JS,
     _FLIP_JS,
     _HISTORY_TOOL_CAPS,
-    _ICON_PREFIX_CACHE,
     _MAX_CHART_PAYLOAD_B64,
     _PREVIEW_TYPEWRITER_JS,
     _PROJECT_ROOT,
@@ -141,6 +140,7 @@ from app.widgets.card_render_core import (
     _update_icon_prefix,
     _wrap_code_blocks_with_copy_button_web,
     clear_global_render_cache,
+    current_icon_prefix,
     get_font_family_css,
     get_icon,
     get_markdown_instance,
@@ -6417,13 +6417,19 @@ class CodeWebViewer(QWebEngineView):
             _style = "friendly" if theme_manager.is_light_theme() else "dracula"
         except Exception:
             _style = "dracula"
+        # [FIX] 图标前缀必须**实时**取（`current_icon_prefix()`），不能按值导入
+        # `_ICON_PREFIX_CACHE`：那个模块级变量会被 card_render_core 的
+        # `_update_icon_prefix()` 重新绑定，本模块导入期拿到的是永不更新的旧值
+        # → 线程池渲染的代码块永远带深色（白色）图标，浅色主题下两个按钮发白。
+        # 先补一次刷新：浅色主题冷启动若首个渲染就走异步路径，缓存还是深色默认值。
+        _update_icon_prefix()
         return {
             "md": md,
             "streaming": self._streaming,
             "thinking_finalized": getattr(self, "_thinking_finalized", False),
             "compact": compact,
             "pygments_style": _style,
-            "icon_prefix": _ICON_PREFIX_CACHE,
+            "icon_prefix": current_icon_prefix(),
             "heavy_caps": _HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
             "code_font_size": _CODE_FONT_SIZE,
         }
