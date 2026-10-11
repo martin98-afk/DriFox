@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.5] - 2026-10-08 (重新发布 #3)
+## [v0.6.5] - 2026-10-11 (重新发布 #4)
 
-自上一版本以来的变更（累计） | 提交数：72 · 文件变更：235 · +23359/-5159 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更（累计） | 提交数：74 · 文件变更：241 · +23987/-5173 | 贡献者：dingma, drifox-bot, mading
 
 ### ⚠️ 行为变化 (Breaking Changes)
 
@@ -146,6 +146,14 @@ All notable changes to this project will be documented in this file.
 #### 🔧 其他 (Chores & Build)
 
 - 清理临时脚本 probe 入库 (`63045d0f`)。
+
+### 🆕 重新发布 #4 增量（自 v0.6.5 重新发布 #3 起 · 2 commits · 6 files · +628/-14）
+#### ✨ 新功能 (New Features)
+- **body 滚动上限与 widget 高度上限同步** (`1d450038`, `app/widgets/card_render_core.py`, `app/widgets/card_viewers.py`, `app/widgets/message_card.py`): 内存治理（`1aa78021`）把 `QWebEngineView` 表面高度按物理面积（dpr 2.25 + 1200 逻辑宽 → ~1975px）收缩后，骨架里 body 的静态 `max-height`（7111px @dpr2.25）远大于 widget 上限。`html{overflow:hidden}` 下 body 是唯一滚动容器，于是出现死区：内容高 > widget 上限但 ≤ body max-height → body 自身不溢出（`clientHeight == scrollHeight`）→ 被裁掉的尾部不可滚达。修法：Python 每次算出上限后经 `_dfxSetBodyMaxH` 下发 CSS 变量 `--dfx-body-max-h`（值变化才写，随后按流式态与用户滚动位置决定是否贴底并重报几何）；`message_card` 高度追踪入口先按同一上限钳 `target_height`，避免「h > cap 恒成立」导致 tick 永不收敛。骨架 `_SKELETON_CACHE_VERSION` 45→46（CSS + JS 双资产变更）。
+#### 🐛 问题修复 (Bug Fixes)
+- **代码块图标前缀不跟随主题** (`1d473df4`, `app/widgets/card_render_core.py`, `app/widgets/card_viewers.py`): 浅色主题下 `get_tool_qrc_prefix()` 返回 `qrc:/icons_light`，但 `card_viewers` 顶部 `from ... import _ICON_PREFIX_CACHE` 是**按值**导入，拿到的是导入期快照；`_update_icon_prefix()` 用 `global` 重新绑定模块级变量后，旧引用永不更新。结果走线程池异步渲染路径的卡片，代码块工具栏始终带深色主题的 `qrc:/icons/导入.svg`、`复制.svg` —— 浅底上不可见。新增 `current_icon_prefix()` 作为唯一读取入口，快照侧先调 `_update_icon_prefix()` 再取当前值。
+#### 🧪 测试 (Tests)
+- **两项回归测试 + 骨架契约校验脚本** (`tests/widgets/test_body_height_cap_sync.py`, `tests/widgets/test_code_block_icon_theme.py`, `tools/check_skeleton_js.py`): 覆盖 body 上限同步（钳高、JS 下发时序、贴底条件）与图标前缀主题跟随；`check_skeleton_js.py` 用于校验骨架 JS 与缓存版本的一致性。
 
 ## [v0.6.4] - 2026-09-28 (重新发布 #2)
 
