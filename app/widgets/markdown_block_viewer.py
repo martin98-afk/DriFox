@@ -19,9 +19,19 @@ import hashlib
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QFile, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, pyqtSignal
+
+# [X1] 四级派发间隔：常量权威定义在 card_render_core（模块级导出）。
+# 本模块由 message_card 懒导入，彼时 card_render_core 已在 sys.modules，零额外成本。
+from app.widgets.card_render_core import (
+    ADAPTIVE_FAST_MS,
+    ADAPTIVE_SAFETY_MS,
+    ADAPTIVE_SLOW_MS,
+    SOFT_BOUNDARY_MERGE_MS,
+)
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap, QTextOption
 from PyQt5.QtWidgets import (
     QApplication,
@@ -2024,6 +2034,13 @@ class MarkdownBlockViewer(QWidget):
         self._light = light
         self._md = ""
         self._streaming = True
+        # ── [X1] 四级渲染派发状态：立即 / 100ms 合并 / 自适应 150-300-500 / 非流式 40ms ──
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._perform_update)
+        self._last_render_ts = 0.0
+        self._current_adaptive_interval = 300
+        self._last_chunk_ns = 0
         self._keys: List[Tuple[str, str]] = []
         self._widgets: List[QWidget] = []
         # ── 坞态（Streaming Dock）状态 ──
@@ -2067,7 +2084,18 @@ class MarkdownBlockViewer(QWidget):
         if not text:
             return
         self._md += text
-        self._reconcile()
+        # [X1] chunk 间隔自适应更新派发档位 + 合并派发（不再每 chunk 同步全量）
+        now_ns = time.monotonic_ns()
+        if self._last_chunk_ns:
+            gap_ms = (now_ns - self._last_chunk_ns) / 1e6
+            if gap_ms < 200:
+                self._current_adaptive_interval = ADAPTIVE_FAST_MS
+            elif gap_ms > 500:
+                self._current_adaptive_interval = ADAPTIVE_SLOW_MS
+            else:
+                self._current_adaptive_interval = ADAPTIVE_SAFETY_MS
+        self._last_chunk_ns = now_ns
+        self._schedule_render(immediate=False)
 
     def finish_streaming(self, keep_dock: bool = False, immediate: bool = True) -> None:
         """流式结束。keep_dock=True 时保留坞态（S1：文本先于工具结果结束），
@@ -2081,6 +2109,8 @@ class MarkdownBlockViewer(QWidget):
         self._streaming = False
         if not keep_dock and self._dock_active:
             self._sync_streaming_dock(False)
+        # [X1] 收尾后挂起拍不得再触发（终态由本次 force reconcile 落定）
+        self._render_timer.stop()
         self._reconcile(force=True)
 
     def get_plain_text(self) -> str:
@@ -2150,17 +2180,50 @@ class MarkdownBlockViewer(QWidget):
         self.set_markdown(value or "")
 
     def _schedule_render(self, immediate: bool = False) -> None:
-        """兼容 MessageCard 渲染调度：消费懒回调后全量重解析。"""
+        """[X1] 四级渲染派发（对齐 WebEngine 版 _schedule_render 同构策略）。
+
+        immediate（批量加载等）→ 立即同步；流式 + 硬边界（\\n\\n / ``` /
+        </think>）→ 立即同步；流式 + 软边界（句号）→ 100ms 合并窗；无边界
+        → 自适应间隔派发；非流式 → 40ms。cb（MessageCard 增量构建回调）
+        统一由 _perform_update 消费，本函数不再同步消费。
+        """
+        if immediate:
+            self._render_timer.stop()
+            self._perform_update()
+            return
+        if not self._streaming:
+            self._render_timer.start(40)
+            return
+        if self._has_reached_clean_boundary(self._md):
+            self._render_timer.stop()
+            self._perform_update()
+            return
+        if self._has_reached_soft_boundary(self._md):
+            # 软边界（句号）：100ms 合并窗。窗内挂起一拍（已激活且间隔更大则
+            # 收紧到合并窗）；窗外距上次渲染足够远 → 同步渲染
+            since_s = time.monotonic() - self._last_render_ts
+            if since_s < SOFT_BOUNDARY_MERGE_MS / 1000.0:
+                if self._render_timer.isActive() and self._render_timer.interval() > SOFT_BOUNDARY_MERGE_MS:
+                    self._render_timer.start(SOFT_BOUNDARY_MERGE_MS)
+                elif not self._render_timer.isActive():
+                    self._render_timer.start(SOFT_BOUNDARY_MERGE_MS)
+                return
+            self._render_timer.stop()
+            self._perform_update()
+            return
+        # 无边界：自适应间隔派发
+        self._render_timer.start(self._current_adaptive_interval)
+
+    def _perform_update(self) -> None:
+        """[X1] 派发落点：停增量兑底、消费 cb、刷新基准、全量 reconcile。"""
+        if getattr(self, "_incr_timer", None) is not None and self._incr_timer.isActive():
+            self._incr_timer.stop()
+        self._last_render_ts = time.monotonic()
         cb = getattr(self, "_lazy_markdown_cb", None)
         if cb is not None:
             self._lazy_markdown_cb = None
-            self.set_markdown(cb())
-        else:
-            self._reconcile(force=immediate)
-
-    def _perform_update(self) -> None:
-        """兼容 set_html_direct：按当前 markdown 全量渲染。"""
-        self.set_markdown(self._md)
+            self._md = cb()
+        self._reconcile(force=True)
 
     def _append_text_incremental(self, text: str) -> None:
         """兼容 CodeWebViewer 流式差量注入：Qt 渲染器无 DOM 注入层，
@@ -2174,10 +2237,13 @@ class MarkdownBlockViewer(QWidget):
             self._incr_timer.start()
 
     def _do_incremental_render(self) -> None:
+        # [X1] 双向防双全量：80ms 兑底出字前停掉派发拍，一次 chunk 只闪一次
+        self._render_timer.stop()
         cb = getattr(self, "_lazy_markdown_cb", None)
         if cb is not None:
             self._lazy_markdown_cb = None
-            self.set_markdown(cb())
+            self._md = cb()
+            self._reconcile(force=True)
 
     @staticmethod
     def _has_reached_clean_boundary(md_text: str) -> bool:

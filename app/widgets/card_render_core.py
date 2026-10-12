@@ -478,6 +478,14 @@ WELCOME_GREETINGS = [
     "嗨！我是你的 AI 搭档，有问题尽管问 🤖",
 ]
 
+# ── [X1] Qt 通道（MarkdownBlockViewer）四级渲染派发间隔 ──
+# 与 card_viewers.py CodeWebViewer 的类常量同值互指（_SOFT_BOUNDARY_MERGE_MS
+# 与自适应三档），Qt 侧走模块级常量；两侧数值需同步维护。
+SOFT_BOUNDARY_MERGE_MS = 100
+ADAPTIVE_FAST_MS = 150
+ADAPTIVE_SLOW_MS = 500
+ADAPTIVE_SAFETY_MS = 300
+
 
 def get_markdown_instance():
     global _md_instance
