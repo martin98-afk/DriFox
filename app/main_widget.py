@@ -17890,15 +17890,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 兜底：away 标志与实际位置不一致时以实际位置为准，避免标志卡死
         return self._is_view_at_bottom()
 
-    def _scroll_to_bottom_if_following(self):
-        """延迟兜底滚底：只有用户仍在跟随底部时才真的滚。
-
-        供 `QTimer.singleShot` 直接连接 —— 兜底触发时用户可能已经上滚，
-        此时再滚一次就是纯粹的打断。
-        """
-        if self._should_follow_bottom():
-            self._scroll_to_bottom()
-
     def _reset_bottom_follow(self):
         """用户明确表达「我要看最新内容」→ 恢复自动跟随。
 

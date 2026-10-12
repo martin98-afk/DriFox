@@ -263,16 +263,6 @@ def test_ensure_at_bottom_skipped_when_user_away():
     bar.setValue.assert_not_called()
 
 
-def test_scroll_to_bottom_if_following_guarded():
-    """延迟兜底滚底（500ms/1000ms）同样要过守卫"""
-    win = _make_window(_user_intentionally_away_from_bottom=True)
-    bar = win.chat_scroll_area.verticalScrollBar()
-    bar.maximum.return_value = 1000
-    bar.value.return_value = 0
-    win._scroll_to_bottom_if_following()
-    win._scroll_to_bottom.assert_not_called()
-
-
 # ─── 批次卸载等高占位 ───────────────────────────────────────────
 # 背景：B4 回收把卡片移出布局后容器高度瞬间塌陷，随后卡片高度再异步上报，
 # 与 _ensure_at_bottom 的 8×300ms 重试链重叠 → 长对话滚动期抖动。
