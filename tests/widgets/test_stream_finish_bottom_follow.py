@@ -60,6 +60,13 @@ def _make_win(**overrides):
     scroll_bar.value.return_value = 735  # 离底 127px：补偿欠账的典型现场
     area = MagicMock()
     area.verticalScrollBar.return_value = scroll_bar
+    # _landed_bottom_value 换算「已落地底」= min(maximum, 2000-200=1800)
+    landed_container = MagicMock()
+    landed_container.height.return_value = 2000
+    landed_viewport = MagicMock()
+    landed_viewport.height.return_value = 200
+    area.widget.return_value = landed_container
+    area.viewport.return_value = landed_viewport
     win.chat_scroll_area = area
     for key, value in overrides.items():
         setattr(win, key, value)
@@ -119,13 +126,22 @@ def test_user_scroll_cancels_bottom_anchor():
 
 
 def test_maintain_bottom_anchor_uses_synced_maximum():
-    """锚定维护必须走 _sync_scroll_maximum，否则一直拿滞后的旧上界置底"""
+    """锚定维护必须走 _sync_scroll_maximum，否则一直拿滞后的旧上界置底
+
+    [2026-10-12 露白修复] 贴底 value 语义迁移：不再直接贴 sync 返回的预抬
+    上界（widget 实际高度下一拍布局周期才落地，贴预抬值会露一帧背景色），
+    改贴 `_landed_bottom_value()`（已落地内容底，= min(滚动条上界,
+    container 高 - viewport 高)）。真实现里 sync 校正会 setMaximum(预抬值)，
+    故本用例把 bar.maximum 桩成 sync 后的现值 1234：landed = min(1234, 1800)
+    = 1234，贴底落点仍是校正后的上界。
+    """
     win = _make_win(_bottom_anchor_deadline=time.monotonic() + 1.0)
     sb = win.chat_scroll_area.verticalScrollBar()
-    sb.maximum.return_value = 800  # Qt 现值（布局尚未传播，滞后）
     win._sync_scroll_maximum = MagicMock(return_value=1234)  # sizeHint 校正值
+    sb.maximum.return_value = 1234  # sync setMaximum 校正后的现值
 
     win._maintain_bottom_anchor()
 
+    win._sync_scroll_maximum.assert_called_once()  # 上界校正必须发生
     sb.setValue.assert_called_once_with(1234)
     win._bottom_anchor_timer.start.assert_called_once()

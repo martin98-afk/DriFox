@@ -144,6 +144,17 @@ _TAB_PANEL_MAX_CONTENT_WIDTH = 400
 #   "明显拉宽了却还是折叠态"。
 _HYSTERESIS_WIDTH = 6
 
+
+def _tab_frame_max_expanded(card_w: int = 0) -> int:
+    """#tabFrame 的最大宽度（frame 域）
+
+    卡片区未展开（card_w=0）：静态上限 = TabPanel 最大内容宽 + padding。
+    卡片区展开：上限额外叠加卡片宽，使拖主 splitter 时 frame 能被拖宽
+    （增量全部落到卡片区，TabPanel 锁定收起宽，见 _on_left_card_area_toggled）。
+    """
+    return _TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X + max(0, card_w)
+
+
 # ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
 # 这里预先缓存平台判定与 ctypes cast 函数，避免 per-message 开销。
@@ -374,8 +385,10 @@ def _update_tab_icon(tab_idx: int, project: str):
                     return
 
         # 临时对话页：Tab 用固定隐身紫「临」图标（不用项目色），标题前缀由窗口标题携带
+        # 字色固定白：隐身紫是语义常量色，白字随色定义处声明，不走亮度自适应
+        # （#8B5CF6 lum 0.198 落在自适应黑字分支，紫底黑字与全站白字惯例冲突）
         if 0 <= tab_idx < len(tm._windows) and getattr(tm._windows[tab_idx], "_is_temp_scope", False):
-            tm._tab_panel.update_tab_project(tab_idx, "临", "#8B5CF6")
+            tm._tab_panel.update_tab_project(tab_idx, "临", "#8B5CF6", "#FFFFFF")
             return
 
         from app.utils.project_meta import (
@@ -413,7 +426,18 @@ class _DockSideWrapper(QWidget):
     默认收起（hide + splitter 分配 0 空间）；任一子 show 时恢复记忆展开宽度；
     全 hide 时记忆当前宽度并把 splitter 大小压回 0。解决 T3 接线后无卡片时
     splitter 默认均分空间导致空白 handle 显示的视觉 bug。
+
+    ── 嵌入侧边栏模式（set_partner_pane） ──
+    当宿主把本 wrapper 挂进 #tabFrame 内部的 sidebarSplitter（左卡片贴边栏右侧）时，
+    可指定伙伴窗格（多为 TabPanel）：卡片显隐时同步收紧/恢复伙伴宽度，实现
+    「卡片打开 → tab 列表让位收窄；卡片关闭 → tab 列表恢复」。
+    未指定伙伴窗格时行为与旧版完全一致（对话区左停靠区模式）。
     """
+
+    # 卡片区展开/收起状态变化（True=有可见卡片展开，False=已收起）。
+    # 宿主（TabManagerWindow）监听：驱动 #tabFrame 整体宽度加宽/缩回、
+    # 对话区让位/回收、TabPanel 折叠态同步（防 resizeEvent 回路）。
+    expandedChanged = pyqtSignal(bool)
 
     DEFAULT_EXPANDED_WIDTH = 300  # 首展开无记忆时的默认宽度
 
@@ -439,6 +463,17 @@ class _DockSideWrapper(QWidget):
         self._splitter: Optional[QWidget] = None  # QSplitter（类型注解避免循环引用）
         self._splitter_index: int = -1
         self._expanded_width: int = 0
+        # ── 伙伴窗格联动（嵌入侧边栏模式；None = 旧行为）──
+        self._partner_pane: Optional[QWidget] = None
+        self._partner_splitter_index: int = -1
+        self._partner_saved_size: int = 0  # 卡片打开前的伙伴宽（关闭时恢复）
+        self._partner_collapsed_size: int = 0  # 卡片打开时伙伴收窄目标（0=用 min 宽）
+        # 伙伴自动收窄开关产生的 setSizes 会被 splitterMoved 视为"用户拖拽"？
+        # Qt 的编程式 setSizes 不发 splitterMoved（实测），无需额外守卫；
+        # 但本 wrapper 自身 show/hide 会触发 _sync 重入，用标志位防环。
+        self._syncing = False
+        # 重入期又有显隐请求（置脏）→ 当前轮跑完后补跑一轮，保证状态收敛
+        self._sync_dirty = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -448,10 +483,25 @@ class _DockSideWrapper(QWidget):
         stack.installEventFilter(self)
         self.hide()  # 默认收起
 
+    def set_partner_pane(self, pane: QWidget, collapsed_size: int = 0) -> None:
+        """指定伙伴窗格（嵌入侧边栏模式）：卡片打开时收窄它、关闭时恢复
+
+        Args:
+            pane: 伙伴窗格（同一 splitter 内的另一个直接子项，如 TabPanel/其 frame）
+            collapsed_size: 卡片打开时伙伴收窄到的尺寸（px）；0 = 用其 minimumWidth()
+        """
+        self._partner_pane = pane
+        self._partner_collapsed_size = int(collapsed_size)
+
     def attach_to_splitter(self, splitter: QWidget, index: int) -> None:
         """关联宿主 splitter：联动 setSizes 维持收起态"""
         self._splitter = splitter
         self._splitter_index = index
+        if self._partner_pane is not None:
+            try:
+                self._partner_splitter_index = splitter.indexOf(self._partner_pane)
+            except Exception:
+                self._partner_splitter_index = -1
         # 立即同步：默认两子均 hide → 立即压回 splitter 0 大小，
         # 避免 addWidget 后 splitter 默认均分空间导致空白 handle 显示
         self._sync()
@@ -474,43 +524,129 @@ class _DockSideWrapper(QWidget):
         return super().eventFilter(obj, ev)
 
     def _sync(self) -> None:
-        any_visible = self._child_visible_intent(self._primary) or self._child_visible_intent(self._stack)
-        if self._splitter is None or self._splitter_index < 0:
-            # 未关联 splitter 时只切自身 visibility（测试 / 单实例场景）
-            self.setVisible(any_visible)
+        # ★ 重入处理：_sync 内部会 setSizes → 触发新一轮 hide/show 事件 →
+        # 经 singleShot 回到 _sync。若直接丢弃（旧实现直接 return），在该时序下
+        # 卡片显隐的最终状态可能永远不被处理（实测关闭 left 卡片后 wrapper
+        # 停在展开态、卡片槽位不归 0）。改为置脏标记：当前跑完后若期间又有
+        # 请求，立即补跑一轮，保证最终状态一定收敛。
+        if self._syncing:
+            self._sync_dirty = True
             return
-        sizes = self._splitter.sizes()
-        idx = self._splitter_index
-        if any_visible:
-            if self.isHidden():
-                self.show()
-                # 预置展开宽度（仅槽位为 0 的全收起重开）：
-                # - primary（CardContainer）有可见卡片：用容器 dock 协议已算好
-                #   的展开目标（_last_expand_target，按插件独立记忆），wrapper
-                #   单值记忆会覆盖 per-card 记忆造成二次弹跳；splitter 对
-                #   hidden 子项的 setSizes 无效，容器展开时的预置可能被
-                #   wrapper 随后 show 冲掉，此处 show 后统一归位。
-                # - 仅 stack 侧可见：用 wrapper 自身记忆/默认宽。
-                primary_active = self._child_visible_intent(self._primary)
-                if primary_active:
-                    target = getattr(self._primary, "_last_expand_target", 0)
-                    expand_w = target if target > 0 else (self._expanded_width or self.DEFAULT_EXPANDED_WIDTH)
-                else:
-                    if self._expanded_width == 0:
-                        self._expanded_width = self.DEFAULT_EXPANDED_WIDTH
-                    expand_w = self._expanded_width
-                if idx < len(sizes) and sizes[idx] == 0:
-                    sizes[idx] = expand_w
-                    self._splitter.setSizes(sizes)
+        self._syncing = True
+        self._sync_dirty = False
+        try:
+            any_visible = self._child_visible_intent(self._primary) or self._child_visible_intent(self._stack)
+            if self._splitter is None or self._splitter_index < 0:
+                # 未关联 splitter 时只切自身 visibility（测试 / 单实例场景）
+                self.setVisible(any_visible)
+                return
+            sizes = self._splitter.sizes()
+            idx = self._splitter_index
+            if any_visible:
+                self._on_expand(sizes, idx)
+            else:
+                self._on_collapse(sizes, idx)
+        finally:
+            self._syncing = False
+        # 期间又有显隐请求 → 立即补跑（最多收敛若干轮，状态稳定后自然停止）
+        if self._sync_dirty:
+            self._sync_dirty = False
+            self._sync()
+
+    def _on_expand(self, sizes: List[int], idx: int) -> None:
+        """卡片可见：展开自身；伙伴窗格（若指定）同步收窄让位
+
+        ★ 信号时序纪律：expandedChanged(True) 必须在改内部分配之前同步发出，
+        宿主回调里先把 TabPanel 置入收起态（静默 set_collapsed，不 emit）——
+        随后本方法把伙伴收窄到 46px 时，TabPanel.resizeEvent 因 _collapsed
+        已为 True 而不再发 sidebarToggled(True)，阻断「伙伴收窄 → 宿主把
+        frame 压到收起宽 → 卡片被挤没」的回路。
+        """
+        if self.isHidden():
+            self.show()
+            # 预置展开宽度（仅槽位为 0 的全收起重开）：
+            # - primary（CardContainer）有可见卡片：用容器 dock 协议已算好
+            #   的展开目标（_last_expand_target，按插件独立记忆），wrapper
+            #   单值记忆会覆盖 per-card 记忆造成二次弹跳；splitter 对
+            #   hidden 子项的 setSizes 无效，容器展开时的预置可能被
+            #   wrapper 随后 show 冲掉，此处 show 后统一归位。
+            # - 仅 stack 侧可见：用 wrapper 自身记忆/默认宽。
+            primary_active = self._child_visible_intent(self._primary)
+            if primary_active:
+                target = getattr(self._primary, "_last_expand_target", 0)
+                expand_w = target if target > 0 else (self._expanded_width or self.DEFAULT_EXPANDED_WIDTH)
+            else:
+                if self._expanded_width == 0:
+                    self._expanded_width = self.DEFAULT_EXPANDED_WIDTH
+                expand_w = self._expanded_width
+            if idx < len(sizes) and sizes[idx] == 0:
+                self.expandedChanged.emit(True)  # 宿主先备 TabPanel 收起态
+                sizes[idx] = expand_w
+                self._shrink_partner(sizes)
+                sp = self._splitter
+                if sp is not None:
+                    sp.setSizes(sizes)
         else:
-            if not self.isHidden():
-                if idx < len(sizes):
-                    self._expanded_width = (
-                        sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
-                    )
-                    sizes[idx] = 0
-                    self._splitter.setSizes(sizes)
-                self.hide()
+            # 已展开（互斥切卡）：槽位可能与新卡片记忆不符，交由容器
+            # _apply_visible_card_dock_size 处理；此处只保证伙伴已收窄
+            if self._partner_pane is not None and idx < len(sizes) and sizes[idx] > 0:
+                before = list(sizes)
+                self._shrink_partner(sizes)
+                sp = self._splitter
+                if sizes != before and sp is not None:
+                    sp.setSizes(sizes)
+
+    def _on_collapse(self, sizes: List[int], idx: int) -> None:
+        """卡片全隐：收起自身；伙伴窗格（若指定）恢复打开前宽度
+
+        ★ 信号时序同 _on_expand：expandedChanged(False) 先发，宿主在回调里
+        把 TabPanel 置回展开态（静默），随后伙伴恢复宽度时不会误 emit。
+        """
+        if self.isHidden():
+            return
+        sp = self._splitter
+        if idx < len(sizes) and sp is not None:
+            self._expanded_width = sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
+            self.expandedChanged.emit(False)  # 宿主先备 TabPanel 展开态
+            sizes[idx] = 0
+            self._restore_partner(sizes)
+            sp.setSizes(sizes)
+        self.hide()
+
+    def _shrink_partner(self, sizes: List[int]) -> None:
+        """把伙伴窗格收窄到目标尺寸，差额转给本 wrapper 槽位"""
+        pane_idx = self._partner_splitter_index
+        if self._partner_pane is None or pane_idx < 0 or pane_idx >= len(sizes):
+            return
+        target = self._partner_collapsed_size
+        if target <= 0:
+            target = self._partner_pane.minimumWidth()
+        cur = sizes[pane_idx]
+        if cur <= target:
+            return
+        if self._partner_saved_size <= 0:
+            # 首次收窄：记忆打开前宽度（供关闭恢复）
+            self._partner_saved_size = cur
+        delta = cur - target
+        sizes[pane_idx] = target
+        if self._splitter_index < len(sizes):
+            sizes[self._splitter_index] += delta
+
+    def _restore_partner(self, sizes: List[int]) -> None:
+        """把伙伴窗格恢复到卡片打开前的宽度（从本 wrapper 槽位归还）"""
+        pane_idx = self._partner_splitter_index
+        if self._partner_pane is None or pane_idx < 0 or pane_idx >= len(sizes):
+            return
+        if self._partner_saved_size <= 0:
+            return
+        cur = sizes[pane_idx]
+        if cur >= self._partner_saved_size:
+            return
+        delta = self._partner_saved_size - cur
+        if self._splitter_index < len(sizes) and sizes[self._splitter_index] >= delta:
+            sizes[self._splitter_index] -= delta
+            sizes[pane_idx] = self._partner_saved_size
+        self._partner_saved_size = 0
 
 
 class _WorkbenchFrame(QFrame):
@@ -743,6 +879,17 @@ class TabManagerWindow(FramelessWindow):
         self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
         # 拖拽首帧冻结标记：本次拖拽会话仅冻结一次，松手(device idle)后复位
         self._splitter_dragging: bool = False
+
+        # ── 侧边栏内 left 卡片区（嵌入 sidebarSplitter）──
+        # 卡片打开前的 TabPanel frame 宽（卡片关闭时恢复）与「卡片占位期间」标记
+        self._left_card_saved_panel_frame_w: int = 0
+        # 卡片打开期拖主把手：起点 tab 宽（保持不动）/ 目标 frame 宽 / 本次拖拽脏标记
+        self._left_card_tab_w_keep: int = 0
+        self._left_card_frame_target_w: int = 0
+        self._left_card_drag_dirty: bool = False
+        # 卡片打开前 TabPanel 是否处于折叠态（关闭卡片时按其恢复，避免
+        # 「折叠态 → 开插件 → 关插件」意外展开侧边栏）
+        self._left_card_prev_collapsed: bool = False
 
         self.setWindowTitle("飘狐-DriFox")
         self.setObjectName("tabManagerWindow")
@@ -1867,6 +2014,27 @@ class TabManagerWindow(FramelessWindow):
                 """,
             ),
             (
+                getattr(self, "_sidebar_splitter", None),
+                # 侧边栏内部分隔条（TabPanel ↔ left 卡片区）：4px 热区画 2px
+                # 竖线，hover 变强调色提示可拖拽（卡片打开后此线可见、可拖动
+                # 在两窗格间互借宽度）。不接线时 QSplitterHandle 默认透明，
+                # 外观上「分割线消失」。
+                # ★ 不留上下 margin（margin: 0）：卡片打开时卡片区与侧栏同高，
+                #   分隔条应贯穿上下，与 #tabFrame 圆角内缘贴合；用 margin 收缩
+                #   会在头尾留出空白段（用户反馈「没有完全连到上下」）。
+                f"""
+                QSplitterHandle {{
+                    background: transparent;
+                    border-left: 2px solid {Colors.BORDER};
+                    margin: 0;
+                    border-radius: 1px;
+                }}
+                QSplitterHandle:hover {{
+                    border-left: 2px solid {Colors.BORDER_ACCENT};
+                }}
+                """,
+            ),
+            (
                 getattr(self, "_chat_vsplitter", None),
                 f"""
                 QSplitterHandle {{
@@ -2273,7 +2441,27 @@ class TabManagerWindow(FramelessWindow):
         # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
         tab_frame_layout.setContentsMargins(6, 6, 6, 6)
         tab_frame_layout.setSpacing(0)
-        tab_frame_layout.addWidget(self._tab_panel)
+
+        # ── 侧边栏内部横向 splitter：TabPanel | left 卡片区 ──
+        # left 卡片（container="left"）由「对话区左停靠区」迁到此处：嵌入
+        # #tabFrame 内部右侧，视觉上像从侧边栏里长出来，与对话区彻底解耦。
+        # 拖拽语义（产品确认）：
+        # - 卡片打开：TabPanel 自动收起让位（宿主在 expandedChanged 里驱动），
+        #   卡片区展开（默认 300 / 按插件 per-card 记忆）；
+        # - 拖主 splitter（tabFrame ↔ chatFrame）：增量只加卡片区宽度，
+        #   TabPanel 锁定收起宽不动（宿主 _on_splitter_manually_moved 改写）；
+        # - 拖内部分隔条（TabPanel ↔ 卡片区）：两者互借宽度，frame 总宽不变、
+        #   对话区不动，可把 tab 列表重新拉开；
+        # - 卡片关闭：卡片区收 0 + hide，TabPanel 恢复打开前宽度，frame 缩回。
+        from PyQt5.QtWidgets import QSplitter as _SidebarSplitter
+
+        self._sidebar_splitter = _SidebarSplitter(Qt.Horizontal, self._tab_frame)
+        self._sidebar_splitter.setObjectName("sidebarSplitter")
+        self._sidebar_splitter.addWidget(self._tab_panel)
+        self._sidebar_splitter.setStretchFactor(0, 0)
+        self._sidebar_splitter.setHandleWidth(4)
+        self._sidebar_splitter.setChildrenCollapsible(False)
+        tab_frame_layout.addWidget(self._sidebar_splitter)
 
         # 右侧内容区
         self._content_area = QStackedWidget(content_widget)
@@ -2427,31 +2615,45 @@ class TabManagerWindow(FramelessWindow):
 
         # 堆叠卡容器（Phase G）：与单卡 CardContainer 并行挂于同侧停靠区下方。
         # LEFT/RIGHT 侧用 wrapper（QVBoxLayout）包裹 [单卡容器, 堆叠容器]，
-        # wrapper 作为 dock_splitter 直接子项——dock mode 协议依赖 CardContainer
+        # wrapper 作为宿主 splitter 直接子项——dock mode 协议依赖 CardContainer
         # 为 splitter 直接子项，故经 wrapper 承载二者（_splitter_index 兼容之）。
         from app.widgets.cards.card_stack_container import CardStackContainer
 
-        self._global_left_stack = CardStackContainer(self._chat_frame)
+        self._global_left_stack = CardStackContainer(self._tab_frame)
         self._global_left_stack.setObjectName("globalLeftStack")
 
         # 停靠区侧 wrapper：默认收起，子控件 visibility 联动 wrapper 与 splitter 大小
         # （避免无卡片时 splitter 均分空间显示空白 splitter handle）
+        # ★ left 卡片宿主已从对话区 dock_splitter 迁到侧边栏内部 sidebarSplitter：
+        #   卡片嵌在 #tabFrame 右侧、TabPanel 右侧，视觉上从侧边栏长出（产品确认形态）。
+        #   伙伴窗格联动：卡片打开时 TabPanel 收到收起宽（_COLLAPSED_PANEL_WIDTH），
+        #   卡片关闭时恢复打开前宽度。
         self._global_left_wrapper = _DockSideWrapper(
-            self._global_left_container, self._global_left_stack, self._chat_frame
+            self._global_left_container, self._global_left_stack, self._tab_frame
         )
         self._global_left_wrapper.setObjectName("globalLeftWrapper")
         self._global_left_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.LEFT)
         self._global_left_container.set_stack_sibling(self._global_left_stack)
 
-        self._dock_splitter.addWidget(self._global_left_wrapper)
+        self._sidebar_splitter.addWidget(self._global_left_wrapper)
+        self._sidebar_splitter.setStretchFactor(1, 1)  # 卡片区吸收多余宽度
+        self._sidebar_splitter.setStretchFactor(0, 0)  # TabPanel 不随宽度拉伸
+        self._global_left_wrapper.set_partner_pane(self._tab_panel, collapsed_size=_COLLAPSED_PANEL_WIDTH)
+        # wrapper 关联 splitter：联动 setSizes 维持收起态 + 伙伴窗格让位
+        _sidebar_idx = self._sidebar_splitter.indexOf(self._global_left_wrapper)
+        self._global_left_wrapper.attach_to_splitter(self._sidebar_splitter, _sidebar_idx)
+        # 卡片显隐 → 宿主编排（tabFrame 加宽/缩回、对话区让位、TabPanel 收起态）
+        self._global_left_wrapper.expandedChanged.connect(self._on_left_card_area_toggled)
+
+        # dock_splitter：left 停靠区迁走后仅剩对话列一个窗格。
+        # 保留该对象（外部按 objectName "dockSplitter" 探测 Tab 模式，见
+        # main_widget.resizeEvent / test_card_container_priority），
+        # 但不再承载左卡片区；handle 相应消失。
         self._dock_splitter.addWidget(self._chat_vsplitter)
-        self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
-        self._dock_splitter.setStretchFactor(1, 1)  # 内容区(含覆盖层)吃掉多余空间
+        self._dock_splitter.setStretchFactor(0, 1)  # 对话列吃掉全部空间
         self._dock_splitter.setHandleWidth(6)
         # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
         self._dock_splitter.setChildrenCollapsible(False)
-        # wrapper 关联 splitter：联动 setSizes 维持收起态
-        self._global_left_wrapper.attach_to_splitter(self._dock_splitter, 0)
         # ── full 容器卡片标题栏 tab（替代原 ReplaceTabBar）──
         # full 卡片（UI 插件 full 卡 + 内置全局卡）打开时在标题栏 tab 区显示
         # （带 × 关闭钮，见 _on_card_visibility_changed）。这里仅订阅显隐事件。
@@ -2530,6 +2732,8 @@ class TabManagerWindow(FramelessWindow):
         # 工作区树模式：在项目 + 工作树下新建对话页 / 打开历史会话
         self._tab_panel.newSessionInWorkspaceRequested.connect(self._on_new_session_in_workspace)
         self._tab_panel.openSessionRecordRequested.connect(self._on_open_session_record)
+        # 工作区树「工作区」标题行 + → 新建项目（选文件夹流程）
+        self._tab_panel.newProjectRequested.connect(self._on_new_project_requested)
         # Tab 增删后同步工作区树（会话归属/历史列表会变）
         self.tabCountChanged.connect(self._on_tab_count_changed_for_tree)
         # 用户手动拖拽 splitter 把手 → 折叠是用户主动，不标记挤压，
@@ -2541,6 +2745,160 @@ class TabManagerWindow(FramelessWindow):
         if _IS_MAC:
             QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
+    # ── 侧边栏内 left 卡片区：宿主编排（frame 加宽 / TabPanel 折叠态 / 对话区让位） ──
+
+    def _left_card_area_active(self) -> bool:
+        """left 卡片区当前是否已展开（wrapper 有可见意图）"""
+        wrapper = getattr(self, "_global_left_wrapper", None)
+        if wrapper is None:
+            return False
+        return _DockSideWrapper._child_visible_intent(wrapper._primary) or _DockSideWrapper._child_visible_intent(
+            wrapper._stack
+        )
+
+    def _left_card_frame_extra(self) -> int:
+        """卡片区占用的 frame 额外宽度（0 = 未展开）
+
+        取值口径与 wrapper 槽位一致（splitter sizes），无槽位时回落到记忆/默认宽。
+        """
+        wrapper = getattr(self, "_global_left_wrapper", None)
+        sp = getattr(self, "_sidebar_splitter", None)
+        if wrapper is None or sp is None:
+            return 0
+        try:
+            sizes = sp.sizes()
+            idx = sp.indexOf(wrapper)
+            if 0 <= idx < len(sizes) and sizes[idx] > 0:
+                return sizes[idx]
+        except Exception:
+            pass
+        return getattr(wrapper, "_expanded_width", 0) or 0
+
+    def _on_left_card_area_toggled(self, expanded: bool) -> None:
+        """left 卡片区展开/收起 → 编排 #tabFrame 宽度 + TabPanel 折叠态
+
+        产品语义（已确认）：
+        - 卡片打开：TabPanel 让位收窄到收起宽（46px 图标条），卡片区展开，
+          #tabFrame 整体加宽（TabPanel + 卡片），对话区被挤窄；
+        - 卡片关闭：卡片区收 0，TabPanel 恢复打开前宽度，#tabFrame 缩回，
+          对话区回收空间。
+
+        关键时序：本回调由 _DockSideWrapper 在**改内部分配之前**同步调用，
+        此处先把 TabPanel 的 _collapsed/_collapsed_by_squeeze 置好（静默，
+        不发信号），随后伙伴窗格收窄时 TabPanel.resizeEvent 不会再 emit
+        sidebarToggled → 阻断「收窄 → 宿主把 frame 压到 60px → 卡片被挤没」回路。
+        """
+        if not hasattr(self, "_tab_frame") or not hasattr(self, "_splitter"):
+            return
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None:
+            return
+        sizes = self._splitter.sizes()
+        if not sizes:
+            return
+        tab_w = sizes[0]
+
+        if expanded:
+            # 1) 记忆 TabPanel 当前宽度（关闭时恢复），并按收起态静默落位。
+            #    ★ 同时记忆打开前的折叠态：卡片打开前侧边栏本就是折叠的（用户
+            #      此前手动收起），关闭卡片后必须回到折叠态，不能无条件展开
+            #      （否则「折叠态 → 开插件 → 关插件」会意外变成展开态）。
+            self._left_card_prev_collapsed = bool(panel._collapsed)
+            if not panel._collapsed:
+                self._left_card_saved_panel_frame_w = max(
+                    tab_w, max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
+                )
+            panel._collapsed = True
+            panel._collapsed_by_squeeze = False  # 卡片让位属程序行为，非挤压
+            panel._left_card_present = True  # 占位期禁用面板宽度自治（防坍缩）
+            panel.sync_collapsed_ui()
+            # 2) frame 目标宽 = TabPanel 收起宽 + 卡片区当前槽位（首帧 0 时用记忆/默认）
+            #    ★ 槽位此刻是旧 frame 总宽下的钳制值（内层尚未加宽），不能直接
+            #      采信：容器无记忆首开 target=_DOCK_DEFAULT_W(360)，若按钳后
+            #      槽位(~300 兜底)编排 frame，容器意图永远落不了位（实测 360
+            #      被钳到 292，表现为"默认宽度没变"）。取容器意图 _last_expand_target
+            #      （与 wrapper._on_expand 落位同源）参与 max。
+            card_w = self._left_card_frame_extra()
+            if card_w <= 0:
+                card_w = _DockSideWrapper.DEFAULT_EXPANDED_WIDTH
+            _cont = getattr(self._global_left_wrapper, "_primary", None)
+            _intent_w = int(getattr(_cont, "_last_expand_target", 0) or 0)
+            card_w = max(card_w, _intent_w)
+            target = self._left_card_frame_target(card_w)
+            # 3) 放宽 frame max（允许加宽）后落位
+            self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(), target))
+            if abs(tab_w - target) > 1:
+                self._splitter.setSizes(self._splitter_sizes_with_left(target))
+        else:
+            # 1) TabPanel 恢复打开前的状态：折叠前是收起态就回收起态，
+            #    展开态才恢复打开前的宽度（否则会意外把用户收起的侧边栏撑开）。
+            #    ★ 例外：占位期用户拖内部分隔条把面板拉开了（宽度越过展开线、
+            #      _collapsed 已被形态自治置 False），这是明确意图——此时不得
+            #      再按打开前的折叠态收回去，改为按用户拖出的实际宽度落位。
+            prev_collapsed = bool(getattr(self, "_left_card_prev_collapsed", False))
+            self._left_card_prev_collapsed = False
+            panel._left_card_present = False  # 卡片已退场：恢复面板宽度自治
+            user_widened = not panel._collapsed and prev_collapsed
+            panel._collapsed = prev_collapsed and not user_widened
+            panel._collapsed_by_squeeze = False
+            panel.sync_collapsed_ui()
+            if panel._collapsed:
+                target = panel._collapsed_min_width + _FRAME_PADDING_X
+            elif user_widened:
+                # 用户拖出的宽度即目标（下限保证不骑折叠线）
+                _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
+                cur_panel_w = 0
+                sp = getattr(self, "_sidebar_splitter", None)
+                if sp is not None:
+                    sizes_in = sp.sizes()
+                    tab_idx = sp.indexOf(panel)
+                    if 0 <= tab_idx < len(sizes_in):
+                        cur_panel_w = sizes_in[tab_idx]
+                target = max(_min_expand_w, cur_panel_w + _FRAME_PADDING_X)
+                self._saved_panel_frame_width = target
+            else:
+                target = getattr(self, "_left_card_saved_panel_frame_w", 0) or max(
+                    _EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X
+                )
+            # 2) 收回 frame max（回到无卡片时的静态上限）后落位
+            self._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
+            if abs(tab_w - target) > 1:
+                self._splitter.setSizes(self._splitter_sizes_with_left(target))
+        # 卡片区宽度变化会改 frame 上限，同步一次（拖拽增量全部给卡片）
+        self._sync_tab_frame_cap()
+
+    def _left_card_frame_target(self, card_w: int) -> int:
+        """卡片打开时的 frame 目标宽：TabPanel 收起宽 + 卡片宽（含 padding）
+
+        上限取「可见区能容纳」的最大值：窗口总宽 - 工作台宽 - 聊天区最小宽。
+        """
+        base = _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X
+        target = base + max(0, card_w)
+        try:
+            sizes = self._splitter.sizes()
+            wb_w = sizes[2] if len(sizes) >= 3 else 0
+            total = sum(sizes) if sizes else self.width()
+            cap = max(base, total - wb_w - _MIN_CHAT_WIDTH)
+            target = min(target, cap)
+        except Exception:
+            pass
+        return target
+
+    def _sync_tab_frame_cap(self) -> None:
+        """同步 #tabFrame 的 maximumWidth：卡片打开时放宽，关闭时回到静态上限
+
+        拖主 splitter 时卡片区可被拖宽，frame 上限须同步放开，否则被钳住。
+        上限 = TabPanel 最大内容宽 + 卡片当前槽位 + padding。
+        """
+        frame = getattr(self, "_tab_frame", None)
+        if frame is None:
+            return
+        if not self._left_card_area_active():
+            frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
+            return
+        card_w = self._left_card_frame_extra() or _DockSideWrapper.DEFAULT_EXPANDED_WIDTH
+        frame.setMaximumWidth(_tab_frame_max_expanded(card_w))
+
     # ── 侧边栏收起/展开（宽度平滑动画） ──
 
     def _on_sidebar_toggled(self, collapsed: bool, animate: bool = True):
@@ -2550,6 +2908,44 @@ class TabManagerWindow(FramelessWindow):
             collapsed: True=收起 False=展开
             animate: 是否走宽度动画（启动恢复配置时传 False 瞬时切换）
         """
+        # ── 卡片占位期：按钮语义 = 先收卡片，面板落到按钮请求的态 ──
+        # 占位期 panel._collapsed 是编排状态（True=面板让位给卡片），与按钮
+        # 语义（用户对面板形态的意图）混用同一状态位：点击翻转后发出的请求
+        # 与用户意图相反，且照常走宽度路径只会把 frame 压小，卡片区因未
+        # 隐藏被挤成细条残留（实测：折叠后卡片仍显示）。
+        # 收卡片必须逐卡走 registry hide（卡片的 visible 状态在容器内部，
+        # 直接 hide 容器会被 _do_expand 的 has_visible 判定 show 回来）；
+        # 卡片全部隐藏后容器状态机自行折叠 → wrapper._sync 收卡片槽 →
+        # expandedChanged(False) → _on_left_card_area_toggled(False) 按
+        # _left_card_prev_collapsed 把面板直接落位到请求态。
+        if self._left_card_area_active():
+            # 占位期面板已是 46px 窄条（编排收窄），按钮图标不分形态，
+            # 用户此时点击的唯一合理意图 = 收起一切：卡片隐藏 + 面板折叠。
+            # ★ _toggle_sidebar 在 emit 前已把 _collapsed 翻转（编排 True→False）
+            #   并落盘 False，不矫正的话卡片关闭回调的 user_widened 会误判为
+            #   True（"用户拖开了面板"），把面板展开落位而非折叠。
+            panel = getattr(self, "_tab_panel", None)
+            if panel is not None:
+                panel._collapsed = True
+                panel._collapsed_by_squeeze = False
+                from app.utils.config import Settings
+
+                Settings.get_instance().ui_sidebar_collapsed.value = True
+                panel._update_toggle_button(switch_ui=False)
+            self._left_card_prev_collapsed = True
+            try:
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+                reg = UIPluginRegistry.get_instance()
+                for cid, info in list(reg.get_floating_cards().items()):
+                    if getattr(info, "container", None) == "left":
+                        try:
+                            reg.hide_floating_card_globally(cid)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return
         sizes = self._splitter.sizes()
         total_w = sum(sizes) if sizes else self.width()
         cur_w = sizes[0] if sizes else (self._tab_frame.width() if hasattr(self, "_tab_frame") else 250)
@@ -2721,6 +3117,12 @@ class TabManagerWindow(FramelessWindow):
         panel = getattr(self, "_tab_panel", None)
         if panel is None or panel._collapsed or panel._animating:
             return False
+        # ★ 卡片占位期：面板与卡片区共享 sidebarSplitter，宽度语义由卡片编排
+        #   独占（拖内把手 = 两窗格互借，不代表窗口挤压）。此时若照常按宽度
+        #   判定，会把用户拖窄的 tab 判成"被挤压"再弹回/折叠，破坏内拖手感。
+        #   拖拽会话中同理（松手由 _on_splitter_idle 统一落定）。
+        if getattr(panel, "_left_card_present", False) or getattr(panel, "_dragging_splitter", False):
+            return False
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return False
         try:
@@ -2811,6 +3213,11 @@ class TabManagerWindow(FramelessWindow):
         if not hasattr(self, "_tab_panel"):
             return
         panel = self._tab_panel
+        # ★ 卡片占位期：面板宽度语义由卡片编排独占（见 _evaluate_squeeze_collapse
+        #   同款注释）。此时不得按"挤压恢复"逻辑自动展开面板——那会把用户拖出的
+        #   内部分配覆盖掉。
+        if getattr(panel, "_left_card_present", False):
+            return
         if not panel._collapsed:
             # 左栏已展开：只查工作台的挤压恢复（规则 2 反向，先左后右由调用序保证）
             self._maybe_restore_workbench_after_squeeze(growth_required=growth_required)
@@ -2909,6 +3316,11 @@ class TabManagerWindow(FramelessWindow):
     def _apply_restored_panel_width(self):
         """按存档折叠态恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
+            return
+        # ★ left 卡片区展开期间跳过：该状态下 TabPanel 收起、frame 加宽均为
+        #   卡片编排的主动结果，启动补射（80/200/400/700ms）若照常按存档态
+        #   落位会把卡片编排冲掉（表现为卡片打开后 TabPanel 又弹回展开态）。
+        if self._left_card_area_active():
             return
         saved_collapsed = getattr(self, "_restored_sidebar_collapsed", False)
         frame_w = (
@@ -3413,6 +3825,51 @@ class TabManagerWindow(FramelessWindow):
         """
         self._splitter_dragging = False
         panel = getattr(self, "_tab_panel", None)
+        # ── 卡片打开期拖主把手：增量全部转入卡片区（TabPanel 锁定收起宽）──
+        # 用户拖出的 frame 宽 pos 已在 _on_splitter_manually_moved 登记
+        # （_left_card_drag_extra = 超出 TabPanel 收起宽的余量）；此处把
+        # frame 收回到「TabPanel 收起宽 + 拖出余量」，新增余量即卡片槽位宽。
+        if panel is not None and self._left_card_area_active() and getattr(self, "_left_card_drag_dirty", False):
+            panel.set_dragging_splitter(False)
+            self._left_card_drag_dirty = False
+            sp = getattr(self, "_sidebar_splitter", None)
+            wrapper = getattr(self, "_global_left_wrapper", None)
+            if sp is not None and wrapper is not None:
+                tab_keep = max(
+                    self._tab_panel._collapsed_min_width,
+                    min(getattr(self, "_left_card_tab_w_keep", _COLLAPSED_PANEL_WIDTH), _TAB_PANEL_MAX_CONTENT_WIDTH),
+                )
+                # ★ 折叠态按 tab_keep 实际宽度决定，不硬写 True：用户可能已在
+                #   占位期拖内把手把 tab 拉宽（形态自治置 _collapsed=False），
+                #   此处硬写会把用户拖出的展开态压回图标条。
+                panel._collapsed = tab_keep < panel._auto_expand_width
+                panel._collapsed_by_squeeze = False
+                panel.sync_collapsed_ui()
+                # frame 目标宽：不小于「tab 保留宽 + 卡片下限」，且不挤压聊天区
+                frame_target = max(
+                    tab_keep + _FRAME_PADDING_X + 40,
+                    int(getattr(self, "_left_card_frame_target_w", 0)),
+                )
+                frame_target = self._left_card_frame_target(frame_target - tab_keep - _FRAME_PADDING_X) + (
+                    tab_keep - _COLLAPSED_PANEL_WIDTH
+                )
+                card_w = max(0, frame_target - tab_keep - _FRAME_PADDING_X)
+                self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(card_w), frame_target))
+                # ★ 显式锁死内部分配 [tab=保留宽, 卡片=card_w]：
+                #   外层 frame 宽变化会被 QSplitter 按内层窗格**比例**重排,
+                #   仅改外层会让 tab 被摊窄（实测 46→19），必须一次 setSizes 同步。
+                idx = sp.indexOf(wrapper)
+                tab_idx = sp.indexOf(panel)
+                sizes = sp.sizes()
+                if 0 <= idx < len(sizes) and 0 <= tab_idx < len(sizes):
+                    new_sizes = list(sizes)
+                    new_sizes[tab_idx] = tab_keep
+                    new_sizes[idx] = card_w
+                    sp.setSizes(new_sizes)
+                if abs(self._splitter.sizes()[0] - frame_target) > 1:
+                    self._splitter.setSizes(self._splitter_sizes_with_left(frame_target))
+            self._finish_splitter_idle()
+            return
         # ── 1+2. 拖拽落定：先解除抑制再判定，复用 _on_sidebar_toggled 的动画路径 ──
         if panel is not None and getattr(panel, "_dragging_splitter", False):
             panel.set_dragging_splitter(False)
@@ -3448,6 +3905,10 @@ class TabManagerWindow(FramelessWindow):
         # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复
         # _content_area(setUpdatesEnabled True) 与 _set_cards_resize_preview_mode(False)。
         # _splitter_dragging 已先行复位，后续 splitterMoved 可重新冻结下一拖拽会话。
+        self._finish_splitter_idle()
+
+    def _finish_splitter_idle(self):
+        """splitter 拖拽会话收尾：动画运行则跳过，否则解冻绘制 + 复位节流"""
         if self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running:
             return
         if hasattr(self, "_content_area"):
@@ -3475,11 +3936,36 @@ class TabManagerWindow(FramelessWindow):
         启动动画，而 splitterMoved 是逐帧触发的 → 拖拽区跨阈值时反复启停
         200ms 动画，动画与拖拽同时写 setSizes 互相打断 = 抖动。
         """
-        if index != 0 or not hasattr(self, "_tab_panel"):
+        if not hasattr(self, "_tab_panel") or not hasattr(self, "_splitter"):
+            return
+        # ★ 门控按「把手位置」判定，不硬编码 index：splitterMoved 上报的 index
+        #   是**被移动把手右侧**窗格索引（实测 [tabFrame|chatFrame] 两窗格时
+        #   左把手 index=1）。旧实现写 index != 0 直接 return，导致本条路径
+        #   从未生效（拖拽会话不开启、侧栏抖动修复与本文件的卡片占位期改写全部
+        #   落空）。改为：仅当该把手左邻是 tab_frame（即左栏与聊天区之间那条）
+        #   才接管。
+        if 0 <= index - 1 < self._splitter.count() and self._splitter.widget(index - 1) is not self._tab_frame:
             return
         panel = self._tab_panel
         # 手动拖拽：清除挤压折叠标记（无论方向，尊重手动意图）
         panel._collapsed_by_squeeze = False
+        # ★ 卡片打开期的拖拽改写（产品语义：拖主把手增量只加卡片宽度，
+        #   TabPanel 保持它当时的宽度不动）。此处只登记本次拖拽的起点与目标：
+        #   - _left_card_tab_w_keep：拖拽起点 TabPanel 宽（用户此前拖内把手
+        #     拉开的宽度要保留，不能硬编码收起宽——那会把用户拉开的 tab 收回）；
+        #   - _left_card_frame_target_w：用户拖出的 frame 目标宽（= 把手位置）。
+        #   真正的落定（改 outer/inner 分配）统一在 _on_splitter_idle 执行。
+        if self._left_card_area_active():
+            if not getattr(self, "_left_card_drag_dirty", False):
+                sp = getattr(self, "_sidebar_splitter", None)
+                if sp is not None:
+                    sizes = sp.sizes()
+                    tab_idx = sp.indexOf(panel)
+                    self._left_card_tab_w_keep = sizes[tab_idx] if 0 <= tab_idx < len(sizes) else _COLLAPSED_PANEL_WIDTH
+                else:
+                    self._left_card_tab_w_keep = _COLLAPSED_PANEL_WIDTH
+            self._left_card_drag_dirty = True
+            self._left_card_frame_target_w = max(_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X, int(pos))
         # ★ 开启拖拽会话：拖拽期 resizeEvent 只跟随 UI 形态，不 emit 折叠信号
         panel.set_dragging_splitter(True)
         # ── P0 性能优化 OPT-2：拖拽首帧冻结 _content_area 重绘，防抖 timer 松手恢复 ──
@@ -3541,11 +4027,13 @@ class TabManagerWindow(FramelessWindow):
             # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
             tab_project_initials = ""
             tab_project_color = ""
-            # 临时对话页：初始标题加「临时」前缀；图标用固定隐身紫「临」（不用项目色）
+            tab_project_text_color = ""
+            # 临时对话页：初始标题加「临时」前缀；图标用固定隐身紫「临」（不用项目色，字色固定白）
             if getattr(window, "_is_temp_scope", False):
                 title = f"临时 · {title}"
                 tab_project_initials = "临"
                 tab_project_color = "#8B5CF6"
+                tab_project_text_color = "#FFFFFF"
             elif project:
                 try:
                     from app.utils.project_meta import (
@@ -3559,7 +4047,11 @@ class TabManagerWindow(FramelessWindow):
                     pass
 
             tab_idx = panel.add_tab(
-                title, icon=None, project_initials=tab_project_initials, project_color=tab_project_color
+                title,
+                icon=None,
+                project_initials=tab_project_initials,
+                project_color=tab_project_color,
+                project_text_color=tab_project_text_color,
             )
 
             # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
@@ -4459,6 +4951,22 @@ class TabManagerWindow(FramelessWindow):
                 new_window._switch_to_worktree(worktree_path)
             except Exception as e:
                 logger.warning(f"[TabManagerWindow] 切换到工作树失败: {e}")
+
+    def _on_new_project_requested(self):
+        """工作区树「工作区」标题行 + ：新建项目（选文件夹流程）
+
+        复用当前窗口的 _on_project_open_folder_btn（文件夹选择器 → 弹建项目
+        对话框 → 绑定根目录），与既有拖拽建项目同一流程、同一数据路径。
+        """
+        source = self.get_current_window()
+        if source is None:
+            return
+        opener = getattr(source, "_on_project_open_folder_btn", None)
+        if callable(opener):
+            try:
+                opener()
+            except Exception as e:
+                logger.warning(f"[TabManagerWindow] 新建项目失败: {e}")
 
     def _on_open_session_record(self, record):
         """工作区树：打开一条历史会话（新开标签页，不动当前页）

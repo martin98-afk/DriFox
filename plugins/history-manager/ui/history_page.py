@@ -300,7 +300,12 @@ class _ProjectSelectorHeader(QFrame):
         )
 
     def refresh_style(self) -> None:
-        """主题/字体变更后重刷样式"""
+        """主题/字体变更后重刷样式
+
+        头像色块是 QPainter 自绘（不读 QSS），须显式按新主题重取颜色：
+        深浅档切换时 ``get_project_color`` 返回不同明度，不刷新会残留旧档色。
+        """
+        self._avatar.set_project(self._project_name, get_project_color(self._project_name))
         self._apply_style()
 
     def set_project(self, name: str, is_all: bool = False) -> None:
@@ -486,9 +491,16 @@ class HistoryPage(QWidget):
         self._content_widget = QWidget()
         self._content_widget.setStyleSheet("background: transparent;")
         self._content_layout = QVBoxLayout(self._content_widget)
-        self._content_layout.setContentsMargins(4, 2, 4, 2)
+        # 右 margin 14：qfluentwidgets ScrollArea 的滚动条是 overlay 浮层
+        # （原生条被 SmoothScrollDelegate 强制隐藏），占右缘 13px，须留位避让
+        self._content_layout.setContentsMargins(4, 2, 14, 2)
         self._content_layout.setSpacing(4)
         self._scroll_area.setWidget(self._content_widget)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        from app.utils.design_tokens import make_card_content_opaque
+
+        make_card_content_opaque(self._content_widget, 246)
         self._scroll_area.hide()  # attach 前隐藏（空滚动区会闪白底）
         list_body_lay.addWidget(self._scroll_area, 1)
         # 交叉驱动：head = 面板、tail = 列表区（两端高度严格互补）

@@ -64,6 +64,10 @@ def register_ui(registry):
 ```python
 def register_ui(registry):
     # 浮动卡片（container: "top"|"bottom"|"left"|"right"|"full"；Tab 窗口级容器对应方位）
+    # ★ left 语义（2026-10-12 起）：挂 #tabFrame 内部的 sidebarSplitter，
+    #   嵌在侧边栏圆角框内、TabPanel 右侧（视觉上从侧边栏长出）。卡片打开时
+    #   TabPanel 自动收起让位（46px）、frame 加宽、对话区让位；关闭时全部恢复。
+    #   拖主 splitter 增量只加卡片宽度；拖内部分隔条 TabPanel ↔ 卡片区互借宽度。
     registry.register_floating_card(
         plugin_name, card_id, widget_class, container,
         title="", default_visible=False,

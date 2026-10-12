@@ -42,7 +42,7 @@ from app.widgets.resize_orchestrator import ResizeOrchestrator  # noqa: E402
 
 
 class _FakeViewer:
-    """只实现 _do_resize_check / _on_resize_unlock 用到的三个成员。"""
+    """只实现 _do_resize_check / _on_resize_unlock 用到的成员。"""
 
     def __init__(self):
         self._resize_locked = False
@@ -66,6 +66,10 @@ def _do_resize_check(viewer):
 
 def _on_resize_unlock(viewer):
     CodeWebViewer._on_resize_unlock(viewer)
+
+
+def _update_height(viewer):
+    CodeWebViewer.update_height(viewer)
 
 
 class TestL0ResizeLockCompensation:
@@ -101,6 +105,38 @@ class TestL0ResizeLockCompensation:
         _do_resize_check(v)
         assert v._height_report_pending is False
         assert v.calls == ["reportHeight();"]
+
+    def test_update_height_respects_resize_lock(self):
+        """``update_height()`` 走 ``_do_resize_check``：锁定期只登记补报，不立即上报。
+
+        回归点（2026-10-12 实测事故）：把 update_height 改成无条件直报
+        ``_safe_report_height`` 会导致「resize 后消息区大面积内容消失」——
+        恢复链退出占位时 ``viewer.show()`` 同步触发 resizeEvent 重新上锁，
+        此刻 Chromium 视口尚未完成重排，抢跑的 reportHeight 回传中间值/极小值
+        → 卡片被钉到错误高度。必须等解锁补报（150ms 后布局稳定）那一拍。
+        """
+        v = _FakeViewer()
+        v._resize_locked = True
+        _update_height(v)
+        assert v.calls == [], "锁定期 update_height 不得立即上报（抢跑会拿到未重排的中间值）"
+        assert v._height_report_pending is True, "锁定期必须登记补报，等解锁那一拍上报"
+
+    def test_update_height_reports_when_unlocked(self):
+        """无锁时 update_height 立即上报（常规宽度同步路径）"""
+        v = _FakeViewer()
+        _update_height(v)
+        assert v.calls == ["reportHeight();"]
+        assert v._height_report_pending is False
+
+    def test_update_height_after_lock_unlock_cycle(self):
+        """锁定 → 解锁补报：update_height 登记的 pending 由解锁那一拍消费。"""
+        v = _FakeViewer()
+        v._resize_locked = True
+        _update_height(v)
+        assert v.calls == []
+        _on_resize_unlock(v)
+        assert v._resize_locked is False
+        assert v.calls == ["reportHeight();"], "解锁后必须补发一次上报"
 
 
 # ---------------------------------------------------------------- L1 桩

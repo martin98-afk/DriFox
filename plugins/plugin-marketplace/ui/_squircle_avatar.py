@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """SquircleAvatar — 椭方块形插件头像
 
-仿照 app/widgets/cards/settings/project_selector_card.py 的 _SquareAvatar
-实现：纯色圆角矩形 + 白色加粗缩写。用于插件列表行，每个插件得到唯一
-的视觉标识（颜色由名称 CRC32 哈希而来，缩写由智能规则提取）。
+仿照 app/widgets/square_avatar.py 的 _SquareAvatar 实现：纯色圆角矩形 +
+自适应字色加粗缩写。用于插件列表行，每个插件得到唯一的视觉标识（颜色由
+名称 CRC32 哈希而来，缩写由智能规则提取）。
 
 尺寸自适应：接受 font_size 参数，按 font_size * 1.7 缩放图标边长
 （最低 20px）。字号变化时调用 set_font_size() 实时更新。
@@ -12,6 +12,10 @@
 - 不导入 app.core 或 app.widgets
 - 不导入 app.utils.utils（避免与 Settings 单例耦合）
 - 仅依赖 PyQt5 + stdlib
+
+配色与宿主同源：色彩算法与 ``app.utils.project_meta.get_project_color`` 保持
+一致（含主题感知明度）。为避免模块级耦合，走**函数内延迟导入 + 本地回退**：
+宿主可用时直接复用其实现（消除双份算法漂移），不可用时回退本模块内联实现。
 """
 
 import colorsys
@@ -87,15 +91,24 @@ def extract_initials(name: str) -> str:
 
 
 def name_color(name: str, alpha: int = 255) -> str:
-    """根据插件名计算固定 RGBA 颜色（HSL 全空间哈希）
+    """根据插件名计算固定 RGBA 颜色（HSL 全空间哈希 + 主题感知明度）
 
-    与 project_selector_card.get_project_color 算法完全一致：
-    - H ∈ [0°, 360°)  crc % 360
-    - S ∈ [55%, 85%]  55 + ((crc >> 8) % 31)
-    - L ∈ [50%, 65%]  50 + ((crc >> 16) % 16)
+    与宿主 ``app.utils.project_meta.get_project_color`` 完全同源：优先委托
+    宿主实现（含主题感知明度求解），宿主不可用时回退本地等价实现。
+    历史上本函数是宿主算法的逐字副本（注释「算法完全一致」），双份实现
+    在配色规则演进时会漂移；改为委托后单点维护。
 
-    用 zlib.crc32 而非内置 hash()，避免 PYTHONHASHSEED 随机化导致颜色漂移。
+    本地回退保留旧采样区间（H/S 全空间哈希，L ∈ [50%, 65%]），保证插件在
+    独立环境下仍能取到稳定颜色（crc32 而非内置 hash()，免受 PYTHONHASHSEED
+    随机化影响）。
     """
+    try:
+        from app.utils.project_meta import get_project_color
+
+        return get_project_color(name, alpha=alpha)
+    except Exception:
+        pass
+
     crc = zlib.crc32(name.encode("utf-8"))
     h = crc % 360
     s = 55 + ((crc >> 8) % 31)
@@ -105,10 +118,20 @@ def name_color(name: str, alpha: int = 255) -> str:
     return f"rgba({int(round(r * 255))}, {int(round(g * 255))}, {int(round(b * 255))}, {alpha})"
 
 
+def _avatar_text_color(color: str) -> QColor:
+    """缩写字色恒白（用户决策 2026-10-12，与宿主 _SquareAvatar 同规）
+
+    宿主 ``app.utils.project_meta.contrast_text_color`` 已随恒白决策删除：
+    项目色被 get_project_color 双向 clamp 压进白字可读带（浅档白字≥5.1 /
+    深档≥3.5），恒白即可读；自适应黑白曾致深色档头像出黑字。
+    """
+    return QColor("#ffffff")
+
+
 class SquircleAvatar(QWidget):
     """椭方块形插件头像 — flat design squircle 风格
 
-    纯色圆角矩形 + 白色 1-2 字符缩写。QPainter 精确绘制，
+    纯色圆角矩形 + 自适应字色 1-2 字符缩写。QPainter 精确绘制，
     避免 QSS 在小尺寸下 border + border-radius 抗锯齿走样。
 
     尺寸自适应：
@@ -136,6 +159,7 @@ class SquircleAvatar(QWidget):
         super().__init__(parent)
         self._text = text if text else "?"
         self._color = self._parse_rgba(color)
+        self._text_color = _avatar_text_color(color)
         # size 优先级提升：显式 size > 0 时直接用（让 PluginIconWidget 等容器
         # 可以强制覆盖，避免与 SVG 图标尺寸不一致）
         if size > 0:
@@ -172,6 +196,7 @@ class SquircleAvatar(QWidget):
         """更新缩写和颜色（用于状态变化场景）"""
         self._text = extract_initials(text) if text else "?"
         self._color = self._parse_rgba(color)
+        self._text_color = _avatar_text_color(color)
         self.update()
 
     def set_font_size(self, font_size: int):
@@ -212,7 +237,7 @@ class SquircleAvatar(QWidget):
         except RuntimeError:
             dpr = 1.0
         font = self.font()
-        key = (self._text, self._color.rgba(), self._size, dpr, font.family())
+        key = (self._text, self._color.rgba(), self._text_color.name(), self._size, dpr, font.family())
         if self._pix_key == key and self._pix is not None:
             return self._pix
 
@@ -232,8 +257,8 @@ class SquircleAvatar(QWidget):
         painter.setBrush(self._color)
         painter.drawRoundedRect(QRectF(0, 0, s, s), corner_radius, corner_radius)
 
-        # 居中白字
-        painter.setPen(Qt.white)
+        # 居中缩写，字色按色块亮度自适应
+        painter.setPen(self._text_color)
         # 字号按 size 比例缩放（参考源算法：14/24 ≈ 0.58）
         font.setPixelSize(max(8, self._size * 14 // 24))
         font.setBold(True)

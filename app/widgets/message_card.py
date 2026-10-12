@@ -158,6 +158,7 @@ from app.widgets.card_render_core import (
     _STREAM_TINT_RETRY,
     STREAM_HEIGHT_ANIM_ENABLED,
     STREAM_HEIGHT_ANIM_MIN_DELTA,
+    STREAM_HEIGHT_DEBOUNCE_MS,
     STREAM_HEIGHT_TICK_MS,
     STREAM_HEIGHT_TRACK_BOOST,
     STREAM_HEIGHT_TRACK_EPSILON,
@@ -234,6 +235,22 @@ from app.widgets.card_viewers import (
     extract_image_data_uris,
     plan_image_attachment_sources,
 )
+
+
+def user_bubble_target_width(container_width: int) -> int:
+    """用户气泡卡片的落定目标宽度（**全链唯一口径**）。
+
+    气泡本体由 PlainTextViewer 按内容自适应收缩（``set_width_cap`` 只是上限），
+    卡片撑到 ``target`` 只是给气泡留出右侧对齐的透明区。因此这里算的是
+    「气泡最多能有多宽」，不是视觉宽度本身。
+
+    🐛 口径分裂修复（2026-10-12）：margin 曾在三处各算一份——拖拽路径用
+    ``0.25``，而落定两条路径（全量宽度同步 / 滚动同步）残留 ``0.06``。松手
+    瞬间卡片从 75% 跳回 94% → PlainTextViewer 按新宽重折行 → 高度变 →
+    ``setFixedHeight`` → 宿主锚定补偿，一整套二次收敛，即用户报告的
+    「松手后跳一下才稳定」。现收敛到本函数，调用点不得再自行算 margin。
+    """
+    return max(320, int(container_width) - max(24, int(container_width * 0.25)))
 
 
 class MessageCard(SimpleCardWidget):
@@ -385,9 +402,9 @@ class MessageCard(SimpleCardWidget):
         self._stream_height_timer.setSingleShot(True)
         # [T28/P0-2] 与 card_render_core.STREAM_HEIGHT_TICK_MS 对齐单一节拍，
         # 消除 30/32/40 三层互质节拍的漂移叠加。
-        # [T34] 不再是独立常量：tick 已是 16ms，防抖若仍 40ms 就等于把目标值
-        # 按 40ms 一节喂给 16ms 的追踪 —— 追踪被喂成阶梯，等于白改。
-        self._stream_height_timer.setInterval(STREAM_HEIGHT_TICK_MS)
+        # [T34→P1步骤4] 演化为独立常量 STREAM_HEIGHT_DEBOUNCE_MS：追踪 tick
+        # 降频 33ms 后防抖仍保持 16ms 单帧，只降追踪拍频率、不增加上报滞后。
+        self._stream_height_timer.setInterval(STREAM_HEIGHT_DEBOUNCE_MS)
         self._stream_height_timer.timeout.connect(self._apply_debounced_height)
         self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)
@@ -2217,6 +2234,21 @@ class MessageCard(SimpleCardWidget):
         if not self.isVisible():
             self._anim_clock.restart()
             return
+        # [P2-7] 视口门控：卡片滚出 chat 视口可见范围时不空耗 update()（20fps
+        # 整卡动画在长会话里大多发生在屏幕外）。与隐藏分支同款相位语义：
+        # 时钟 restart，滚回视口后从原相位继续，无视觉跳变。
+        try:
+            top = self.window()
+            card_tl = self.mapTo(top, self.rect().topLeft())
+            viewport = self._parent.chat_scroll_area.viewport()
+            vp_tl = viewport.mapTo(top, viewport.rect().topLeft())
+            card_rect = QRect(card_tl, self.rect().size())
+            vp_rect = QRect(vp_tl, viewport.rect().size())
+            if not card_rect.intersects(vp_rect):
+                self._anim_clock.restart()
+                return
+        except RuntimeError:
+            pass
         # 系统「减少动态效果」：底部光块是纯装饰动画，直接不重绘。
         # 这是流式热路径上的逐帧绘制，关掉即省下这段开销。
         if not Animations.motion_enabled():
@@ -2994,7 +3026,7 @@ class MessageCard(SimpleCardWidget):
            24px 阈值 → stop + 重启，补间被打断成锯齿（"剧烈抖动"的 Qt 侧成分）。
         2. QVariantAnimation 不支持运行中改终值，新目标只能 stop+start，同样
            丢进度。追踪 tick 天然 retarget + 隔离，与流式同一套机制。
-        追踪比例换更缓的 ``FINISH_HEIGHT_TRACK_FACTOR``（0.28，约 300ms 收敛），
+        追踪比例换更缓的 ``FINISH_HEIGHT_TRACK_FACTOR``（现值 0.12，约 300ms 收敛），
         与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级收尾，丝绸不抢拍。
         """
         # 消费一次预算；预算用尽则关闭窗口
@@ -3069,7 +3101,7 @@ class MessageCard(SimpleCardWidget):
             # 保住结束态比流式更缓的"丝绸尾音"设计。
             factor = self._height_track_factor
             if abs(diff) > STREAM_HEIGHT_TRACK_FAR_PX:
-                factor = min(0.7, factor + STREAM_HEIGHT_TRACK_BOOST)
+                factor = min(0.85, factor + STREAM_HEIGHT_TRACK_BOOST)
             self._apply_viewer_height(int(current_height + diff * factor))
         except RuntimeError, AttributeError:
             # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
@@ -3348,11 +3380,10 @@ class MessageCard(SimpleCardWidget):
                 return
             parent_width = parent.width()
             if self.role == "user":
-                # 与 main_widget 的比例 margin 保持一致（约容器 94%，留少量对齐余量）
-                horizontal_margin = max(150, int(parent_width * 0.15))
+                # 与 main_widget 共用唯一口径（见 user_bubble_target_width 注释）
+                target_width = user_bubble_target_width(parent_width)
             else:
-                horizontal_margin = 20
-            target_width = max(320, parent_width - horizontal_margin)
+                target_width = max(320, parent_width - 20)
 
         # 性能优化：只有宽度真正变化时才更新（user/非 user 统一守卫）
         if not force and target_width == self._last_synced_width:
@@ -4107,6 +4138,19 @@ class MessageCard(SimpleCardWidget):
                 self.viewer._needs_full_render = True
                 self.viewer._schedule_render(immediate=immediate_render)
             self.viewer._tag_text_streaming = _tag_unclosed
+            # [P0-1] 渲染型 fence（```echarts/mermaid 等）未闭合期间唯一可见反馈：
+            # 增量注入跳过 + _render_tail_inline 直接 return + 差量不产出 → DOM
+            # 无新内容。占位只进 DOM 不进 _content_data，持久化/历史加载零残留。
+            if _fence_unclosed != getattr(self.viewer, "_fence_text_streaming", False):
+                if _fence_unclosed and not getattr(self.viewer, "_fence_note_shown", False):
+                    self.viewer._fence_note_shown = True
+                    if self.viewer._is_js_ready and self.viewer.page():
+                        self.viewer.page().runJavaScript('window._dfxStreamNote && window._dfxStreamNote.show("正在生成图表/代码块…");')
+                elif not _fence_unclosed:
+                    self.viewer._fence_note_shown = False
+                    if self.viewer._is_js_ready and self.viewer.page():
+                        self.viewer.page().runJavaScript("window._dfxStreamNote && window._dfxStreamNote.hide();")
+                self.viewer._fence_text_streaming = _fence_unclosed
             # <think> 已闭合或无 think 标签：恢复正常渲染
             self.viewer._think_text_streaming_started = False
             # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离

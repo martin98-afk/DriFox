@@ -180,9 +180,12 @@ class ProjectItem(QWidget):
                 f"color: {self._project_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
             )
         else:
-            # 非当前项目用半透明版本
-            semi_color = get_project_color(self._name, alpha=160)
-            self._name_label.setStyleSheet(f"color: {semi_color}; {get_font_family_css()} {font_size_css(13)};")
+            # 非当前项目用同色（不压 alpha）：半透明会把项目色对底对比度打到
+            # 一半（浅色主题下 4.6:1 → 2.4:1），配色修复前功尽弃。当前项已有
+            # ✓ / 加粗 / 同色淡染底 / 左侧色条四重信号，无需再靠透明度区分。
+            self._name_label.setStyleSheet(
+                f"color: {self._project_color}; {get_font_family_css()} {font_size_css(13)};"
+            )
 
     def _apply_base_style(self) -> None:
         """静止态底色：当前项目常驻淡染 + 左侧项目色条（hover 态在 enterEvent 覆盖）
@@ -322,8 +325,14 @@ class ProjectItem(QWidget):
         self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
 
     def refresh_style(self) -> None:
-        """主题/字体变更后重刷动态样式（与 _ProjectSelectorHeader.refresh_style 同链路调用）"""
+        """主题/字体变更后重刷动态样式（与 _ProjectSelectorHeader.refresh_style 同链路调用）
+
+        项目色是主题感知的（深浅档明度不同），须重取：``_project_color`` 是
+        构造期缓存的实例字段，头像色块又是 QPainter 自绘，不重取会残留旧档色。
+        """
         Colors.refresh()
+        self._project_color = get_project_color(self._name)
+        self._avatar_label.set_project(self._name, self._project_color)
         self._apply_base_style()
         self._apply_name_style()
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
@@ -441,12 +450,19 @@ class ProjectSelectorCardContent(QWidget):
         self._content_widget.setAcceptDrops(True)
         # 内容 widget 也接受拖拽，扩大拖拽热区
         self._content_layout = QVBoxLayout(self._content_widget)
-        self._content_layout.setContentsMargins(0, 2, 0, 2)
+        # 右 margin 14：qfluentwidgets ScrollArea 的滚动条是 overlay 浮层
+        # （原生条被 SmoothScrollDelegate 强制隐藏），占右缘 13px，须留位避让
+        self._content_layout.setContentsMargins(0, 2, 14, 2)
         # 项目行间距 2px：当前项目带常驻底纹 + 左色条后，1px 会让相邻行块面
         # 粘在一起（淡染底贴着色条像同一块），2px 让每行边界清楚但仍紧凑
         self._content_layout.setSpacing(2)
 
         self._scroll_area.setWidget(self._content_widget)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        from app.utils.design_tokens import make_card_content_opaque
+
+        make_card_content_opaque(self._content_widget, 246)
         self._scroll_area.setMinimumHeight(40)
         # scroll_area 本身也启用拖拽（用户可能拖到空白区）
         self._scroll_area.setAcceptDrops(True)

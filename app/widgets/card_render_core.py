@@ -384,15 +384,22 @@ STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") !=
 # 同拍，消除互质漂移）。[T34] 40 → 16（≈单帧）：流式正文由打字机按 rAF
 # 每 ~17ms 揭示一次，容器高度却按 40ms 一格逼近 —— 文字连续长、容器跳格，
 # 底部一行反复「顶到边缘 → 憋住 → 蹦一下」。16ms 让容器与 rAF 同频，二者
-# 视觉上同步生长。成本实测：setFixedHeight p50≈1ms，62 次/秒 ≈ 6% 主线程
-# 占用，且回环已被 _stream_height_anim_active 上报隔离封死。
-STREAM_HEIGHT_TICK_MS = 16
-# 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
-# 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
-STREAM_HEIGHT_TRACK_FACTOR = 0.45
-# 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 0.7），大台阶
-# （代码块/表格整块落地）更快跟上，消除"文字顶边憋一拍再蹦高"；小台阶维持
-# 基线（流式 0.45 / 结束态 0.28）防噪声抖动。
+# 视觉上同步生长。
+# [P1 步骤4] 16 → 33（30Hz）：16ms tick 每拍 setFixedHeight → Chromium 跨进程
+# resize → ResizeObserver 回传 → 下一拍再 set 的回环频率减半；TRACK_FACTOR
+# 同步 0.45→0.70、boost cap 0.85 保持收敛时间不变，防抖独立常量
+# STREAM_HEIGHT_DEBOUNCE_MS 保持 16ms。
+STREAM_HEIGHT_TICK_MS = 33
+# 流式高度上报防抖（ms）：目标值进入追踪的合并窗口。tick 降频后防抖仍保持
+# 单帧 16ms，只降追踪拍频率、不增加上报滞后。
+STREAM_HEIGHT_DEBOUNCE_MS = 16
+# 每拍逼近比例：剩余差值的 70%。[P1 步骤4] 0.45 → 0.70：tick 16→33 降频后
+# 单拍间隔翻倍，按比例提速保持收敛时间不变；过小（<0.3）会明显滞后，
+# 过大（>0.85）趋近 snap。
+STREAM_HEIGHT_TRACK_FACTOR = 0.70
+# 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 0.85 = 基线
+# 0.70 + 0.15），大台阶（代码块/表格整块落地）更快跟上，消除"文字顶边憋
+# 一拍再蹦高"；小台阶维持基线（流式 0.70 / 结束态 0.12）防噪声抖动。
 STREAM_HEIGHT_TRACK_FAR_PX = 80
 STREAM_HEIGHT_TRACK_BOOST = 0.15
 # 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
@@ -474,6 +481,14 @@ WELCOME_GREETINGS = [
     "欢迎使用 Drifox 飘狐！我是你的智能助手 🚀",
     "嗨！我是你的 AI 搭档，有问题尽管问 🤖",
 ]
+
+# ── [X1] Qt 通道（MarkdownBlockViewer）四级渲染派发间隔 ──
+# 与 card_viewers.py CodeWebViewer 的类常量同值互指（_SOFT_BOUNDARY_MERGE_MS
+# 与自适应三档），Qt 侧走模块级常量；两侧数值需同步维护。
+SOFT_BOUNDARY_MERGE_MS = 100
+ADAPTIVE_FAST_MS = 150
+ADAPTIVE_SLOW_MS = 500
+ADAPTIVE_SAFETY_MS = 300
 
 
 def get_markdown_instance():
@@ -2847,11 +2862,20 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     out_lines: list[str] = []
     buf: list[str] | None = None
     fence_marker = ""
+    offset = 0  # 当前行之前累计的字符数（供协议块未闭合判定取样前缀）
     for line in md_text.split("\n"):
         stripped = line.lstrip()
         if buf is None:
             m = _RE_KATEX_FENCE_OPEN.match(stripped)
-            if m:
+            # 🐛 孤儿 fence 熔断（2026-10-12 消息卡内容截断根因）：
+            # 开栏时若处于未闭合协议块（<think>/<tool>/注册 tag）内部，
+            # 这是协议块内容里的字面 fence（典型：模型思考里贴代码忘写闭合）。
+            # 此类 fence 绝不能提取：提取的哨兵落在协议块内部，会被后续
+            # _inject_think_cards/_inject_tool_blocks 的协议块替换一并吞掉，
+            # _restore_fenced_code 找不回哨兵 → 从 fence 到文末的全部内容
+            # 永久丢失（历史会话重开同样丢失，"偶尔内容显示不全"根因）。
+            # 放行后 fence 原文留在协议块内，由 think/tool 卡自身处理。
+            if m and not _has_unclosed_think_or_tool(md_text[:offset]):
                 fence_marker = m.group(1)
                 buf = [line]
             else:
@@ -2862,6 +2886,7 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
                 fences.append("\n".join(buf))
                 out_lines.append(f"\x00F{len(fences) - 1}\x00")
                 buf = None
+        offset += len(line) + 1
     if buf is not None:
         # 未闭合 fence：原样放回（流式中间态兜底，语义与 _extract_formulas 一致）
         out_lines.extend(buf)
@@ -3887,6 +3912,11 @@ _TYPEWRITER_JS = """
                     // 闸门挂起期间的新文本不在替换快照里：记账并在替换后补回
                     // （它已随揭示上屏，替换会整段移除，不补回就真丢了）
                     if (st._gateQueue.length) st._gateExtra += text;
+                    // 异常态绝对保险：正常指数追赶下 buf 稳态 ~几百字符；超 2000 =
+                    // 揭示链被闸门/rAF 饥饿卡死，此时打字机动效已无观感价值，瞬时
+                    // 全显优于继续追。_twFlush 会 cancel rAF 并清 buf，必须直接
+                    // return，不得再走下方 rAF 分支重起动画链。
+                    if (st.buf.length > 2000) { window._twFlush(); return; }
                     if (!st.raf) {
                         st.last = performance.now();
                         st.raf = requestAnimationFrame(window._twStep);

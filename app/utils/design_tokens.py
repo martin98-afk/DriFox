@@ -1396,3 +1396,103 @@ def _ensure_qfluentwidgets_tooltip_patch() -> None:
 
 
 # 从 utils 导入字体家族 CSS 函数供复用
+
+
+# ── 滚动性能：不透明内容层底色 ──────────────────────────
+
+
+def opaque_surface_color(fg: str, alpha: int, backdrop: str) -> "QColor":
+    """把「半透明前景叠在背景上」预合成成等价的不透明 QColor。
+
+    用途：QScrollArea 的滚动位块传输（blit）优化要求内容 widget 自身不透明，
+    否则 Qt 无法判断搬移后残留像素是否需与下层合成，会退化成全视口重绘
+    （实测 200 行列表：透明 30 次 paint/滚动步 → 实底 4 次）。
+
+    但多数滚动内容层下面垫的是**半透明面板**（如 #chatFrame 的
+    ``CARD_BG alpha=150``），直接刷成 CARD_BG 实色会改变观感。本函数按
+    source-over 预合成出视觉等价的实色，使「改实底」成为零视觉变更。
+
+    公式（source-over，前景不透明度 a）：
+        out = fg * a + backdrop * (1 - a)
+
+    Args:
+        fg: 前景色串（#rrggbb 或 rgba(r,g,b,a)），含 alpha 时以 alpha 参数为准。
+        alpha: 前景不透明度 0-255。
+        backdrop: 背景色串，必须是下层实际呈现的颜色。
+
+    Returns:
+        alpha 恒为 255 的 QColor；解析失败时回退中灰。
+    """
+    from PyQt5.QtGui import QColor
+
+    f = _rgba_to_qcolor(fg)
+    b = _rgba_to_qcolor(backdrop)
+    if not f.isValid() or not b.isValid():
+        return QColor("#2a2a2e")
+    a = max(0.0, min(1.0, alpha / 255.0))
+    r = int(round(f.red() * a + b.red() * (1 - a)))
+    g = int(round(f.green() * a + b.green() * (1 - a)))
+    bl = int(round(f.blue() * a + b.blue() * (1 - a)))
+    return QColor(r, g, bl, 255)
+
+
+def card_container_surface_color(container_alpha: int = 246) -> "QColor":
+    """浮动卡 content 层的等价实底色（三层合成）
+
+    层级：窗口 CONTENT_BG ← #chatFrame(CARD_BG a150) ← CardContainer(CARD_BG alpha)
+    逐层 source-over 合成，得到 content 层应刷的实色。
+
+    Args:
+        container_alpha: 容器面板不透明度；覆盖层/停靠区为 246，普通容器为 232。
+    """
+    Colors.refresh()
+    fg = Colors.CARD_BG.format(alpha=255)
+    layer1 = opaque_surface_color(fg, 150, Colors.CONTENT_BG)
+    return opaque_surface_color(fg, container_alpha, layer1.name())
+
+
+def make_card_content_opaque(content, container_alpha: int = 246) -> bool:
+    """给浮动卡内的滚动 content 刷等价实底（启用 Qt 滚动 blit）
+
+    ★ 必须在 QScrollArea.setWidget(content) 之后调用。
+    ★ 走 palette + autoFillBackground，QSS 无效（不改写 opaque 判定）。
+    """
+    try:
+        from PyQt5.QtGui import QPalette
+
+        color = card_container_surface_color(container_alpha)
+        pal = content.palette()
+        pal.setColor(QPalette.Window, color)
+        content.setPalette(pal)
+        content.setAutoFillBackground(True)
+        return True
+    except RuntimeError:
+        return False  # widget 已销毁
+
+
+def make_scroll_content_opaque(content, fg: str, alpha: int, backdrop: str) -> bool:
+    """给滚动内容 widget 刷不透明实底（启用 Qt 滚动 blit 优化）。
+
+    ★ 必须用 palette + autoFillBackground，不能用 setStyleSheet：QSS 背景由
+    QStyleSheetStyle 在 paintEvent 内绘制，不改写 QWidget 的 opaque 判定，
+    blit 仍被禁用（实测与透明时同为 30 次 paint/步）。
+
+    ★ 调用点必须在该 widget 被 ``QScrollArea.setWidget()`` 之后：setWidget
+    会把它 reparent 到视口并重置部分属性，提前设置会被清掉。
+
+    Args:
+        content: QScrollArea 的内容 widget。
+        fg / alpha / backdrop: 见 opaque_surface_color。
+
+    Returns:
+        是否成功（content 已被 C++ 销毁时返回 False）。
+    """
+    try:
+        color = opaque_surface_color(fg, alpha, backdrop)
+        pal = content.palette()
+        pal.setColor(content.backgroundRole(), color)
+        content.setPalette(pal)
+        content.setAutoFillBackground(True)
+        return True
+    except RuntimeError:
+        return False  # widget 已销毁

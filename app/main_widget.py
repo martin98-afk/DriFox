@@ -191,6 +191,7 @@ from app.widgets.message_card import (
     MessageCard,
     create_welcome_card,
     resolve_initial_welcome_mode,
+    user_bubble_target_width,
 )
 # [T15] clear_global_render_cache 源头直取：message_card 已删 per-card 转发，
 # 主窗口清缓存提升（消息卡循环前一次）直接从 card_render_core 导入
@@ -228,14 +229,21 @@ from app.widgets.ui_helpers import (
 AT_BOTTOM_TOLERANCE = 24
 
 # [PERF] 滚动条上界校正里 `container.sizeHint()` 计算结果的复用窗口（秒）。
-# sizeHint() 是一次 O(卡片数) 的完整布局计算，而「程序置底 → valueChanged →
-# _on_scroll_changed → _is_view_at_bottom → _sync_scroll_maximum」构成 20Hz 级
-# 自激回路，长会话下是「滚动不跟手」的主因。窗口内直接复用上次结果；
+# sizeHint() 是一次 O(卡片数) 的完整布局计算。[历史] 曾因「程序置底 →
+# valueChanged → _on_scroll_changed → _is_view_at_bottom → _sync_scroll_maximum」
+# 构成 20Hz 级自激回路（「滚动不跟手」主因）——a88072ea 起
+# _is_view_at_bottom 改锚 landed value、不再调本函数，回路已断；现存触发源
+# 为锚定拍（_maintain_bottom_anchor）与 _ensure_at_bottom 兑底链。
+# 窗口内直接复用上次结果；
 # 高度收敛的及时性由 _ensure_at_bottom 的 8×300ms 重试链兜底。
 # [T23] 0.03 → 0.12：覆盖 sticky 锚定期的 100ms 拍间隔（_maintain_bottom_anchor
 # 每拍调 _sync_scroll_maximum）；窗口内命中直接返回，锚定拍不再每拍重算 sizeHint。
 # 高度真变化时由 _on_message_card_height_changed 主动置 None 失效，不会读到陈旧值。
 SCROLL_MAX_CACHE_TTL = 0.12
+
+# 置底跟随事件驱动开关（P1 步骤6）：finish 阶段由 rangeChanged 即时贴底，
+# 取代 500/1000ms 盲滚底。DRIFOX_EVENT_SCROLL=0 回退到纯时间驱动重试链。
+STREAM_BOTTOM_EVENT_DRIVEN = os.environ.get("DRIFOX_EVENT_SCROLL", "1") != "0"
 
 # 「回到底部」胶囊的显示阈值（px）：视口离底超过它才浮出。
 # ⚠️ 故意比 AT_BOTTOM_TOLERANCE 大一个数量级 —— 两者语义不同：
@@ -1196,6 +1204,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_bottom_timer.setSingleShot(True)
         self._scroll_bottom_timer.setInterval(50)
         self._scroll_bottom_timer.timeout.connect(self._do_scroll_to_bottom)
+        # [P1 步骤6] 事件驱动贴底窗口状态：_ensure_at_bottom 链活跃期间
+        # rangeChanged 即时贴底（until 为 2.4s 保险丝，与原 8×300ms 同窗）。
+        # ⚠️ rangeChanged 接线不在 __init__ 早期：chat_scroll_area 在 _setup_ui
+        # 深处（兜底装配 / chat_area_module.build 两分支）才创建，提前访问
+        # AttributeError（真机弹窗路径 P0 崩溃）。由 _wire_scroll_range_changed
+        # 在两分支收尾时接线。
+        self._ensure_ab_active = False
+        self._ensure_ab_active_until = 0.0
         # 团队模式：文件系统监听器（检测新邮件到达）
         self._team_fs_watcher = QFileSystemWatcher(self)
         self._team_fs_watcher.directoryChanged.connect(self._on_team_mailbox_changed)
@@ -3151,6 +3167,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 下方卡片容器
                 layout.addWidget(self._bottom_card_container)
 
+                # [P1 步骤6] chat_scroll_area 就绪后接 rangeChanged 事件驱动贴底
+                self._wire_scroll_range_changed()
+
         # ── 六张系统卡片框架懒创建（Phase F：已迁移到 SystemCardsModule，由 compose 驱动）──
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         from app.widgets.modules.system_cards_module import SystemCardsModule
@@ -3613,10 +3632,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 # _refresh_welcome_cards 在缓存缺失（被历史变更广播/项目同步
                 # invalidate pop）时走 skipped_no_cache 分支不再触发重渲染，
                 # 导致欢迎卡上插件 tab 缺失。此处失效 + 重建一次保证最终一致。
+                # [修复 2026-10-12] 加精确判据：仅在卡片 tab 集合与当前注册表
+                # 不一致时才重建。新窗口场景（registry.list_loaded_plugins() 非空
+                # → _load_all_ui_plugins 直接 on_done）卡片创建时读的就是完整注册
+                # 表，无条件 invalidate+重建 = 每次新建对话页白付一次 QWebEngineView
+                # 重建（100-500ms/窗口），实测单窗欢迎卡被重建 4-5 次。
                 try:
-                    self._invalidate_welcome_card()
-                    if getattr(self, "_displayed_session_id", None) is None:
-                        self._show_initial_welcome()
+                    if self._welcome_card_tabs_stale():
+                        self._invalidate_welcome_card()
+                        if getattr(self, "_displayed_session_id", None) is None:
+                            self._show_initial_welcome()
+                    else:
+                        logger.debug(f"[MainWidget] 欢迎卡 tab 集合同步，跳过装载完成重建（wid={self._window_id}）")
                 except Exception as e:
                     logger.warning(f"[MainWidget] 装载完成刷新欢迎卡失败: {e}")
             except Exception as e:
@@ -9400,7 +9427,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 预计算各类卡片的 margin，避免 per-card 重复
         welcome_margin = 20
-        assistant_margin = 20
+
+        # 用户气泡目标宽全链唯一口径（见 user_bubble_target_width 注释）
+        user_target_width = user_bubble_target_width(viewport_width)
 
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
@@ -9417,10 +9446,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if card.role == "welcome":
                 margin = welcome_margin
             elif card.role == "user":
-                # 用户气泡：最大宽度约容器的 94%（留少量对齐余量），自适应收缩见 PlainTextViewer
-                margin = max(24, int(viewport_width * 0.06))
+                # 用户气泡：宽度由唯一口径给（不在此处算 margin）
+                card.sync_width(target_width=user_target_width)
+                continue
             else:
-                margin = assistant_margin
+                margin = 20
 
             # 从视口宽度直接推算目标宽度，绕过循环依赖
             card.sync_width(target_width=max(320, viewport_width - margin))
@@ -9495,12 +9525,19 @@ class OpenAIChatToolWindow(ToolWindow):
         queue = self._sync_width_queue
         idx = self._sync_width_idx
         end = min(idx + _SYNC_WIDTH_BATCH, len(queue))
+        # 用户气泡目标宽全链唯一口径（见 user_bubble_target_width 注释）。
+        # 🐛 修复：此处曾残留 0.06（94%），与拖拽路径的 0.25 分裂 → 松手落定瞬间
+        # 气泡跳宽 → PlainTextViewer 重折行 → 高度变 → 二次收敛（用户报告的
+        # 「松手后收敛慢/跳变」）。口径统一后落定与拖拽同宽，无二次重排。
+        user_target_width = user_bubble_target_width(viewport_width) if viewport_width > 0 else 0
         for i in range(idx, end):
             card = queue[i]
             try:
                 if viewport_width > 0:
-                    margin = 20 if card.role != "user" else max(24, int(viewport_width * 0.06))
-                    card.sync_width(force=True, target_width=max(320, viewport_width - margin))
+                    if card.role == "user":
+                        card.sync_width(force=True, target_width=user_target_width)
+                    else:
+                        card.sync_width(force=True, target_width=max(320, viewport_width - 20))
                 else:
                     card.sync_width(force=True)
             except RuntimeError:
@@ -9711,8 +9748,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._last_chat_viewport_width = viewport_width
         try:
             if viewport_width > 0:
-                margin = 20 if card.role != "user" else max(24, int(viewport_width * 0.06))
-                card.sync_width(force=force, target_width=max(320, viewport_width - margin))
+                # 用户气泡目标宽全链唯一口径（见 user_bubble_target_width 注释）。
+                # 🐛 此处同为 0.06 残留点：滚动同步 / 新增卡片路径会把已按 75%
+                # 落定的气泡重新按 94% 撑宽 → 与拖拽路径互相打架。
+                if card.role == "user":
+                    card.sync_width(force=force, target_width=user_bubble_target_width(viewport_width))
+                else:
+                    card.sync_width(force=force, target_width=max(320, viewport_width - 20))
             else:
                 card.sync_width(force=force)
         except RuntimeError:
@@ -11521,6 +11563,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
     _WELCOME_SLOT_MS = 50  # 相邻窗口 welcome 渲染的最小间隔
     _WELCOME_SLOT_COUNT = 20  # 槽位数：50ms × 20 = 1000ms 上限轮转
+    # 同批判定窗（秒）：与上次调度间隔 < 该值视为同批（同一事件循环批次内的
+    # 并发建窗/批量刷新，需 0/50/100ms 递增错峰）；间隔超窗 = 用户先后手动
+    # 操作，计数器重置为 1 → delay=0 立即渲染。
+    # 修复（2026-10-12）：原计数器类级单调递增且永不复位，单窗口顺序新建时
+    # delay 一路涨到 950ms 再归零（实测日志 slot=20 delay=950ms），点击后
+    # 近 1 秒才见到欢迎卡片。
+    _WELCOME_SLOT_BATCH_GAP_S = 0.1
     # pending 守卫超时：slot 回调丢失（QTimer 竞态）时强制放行重建，防永久熔断
     _WELCOME_PENDING_TIMEOUT_S = 3.0
     # 启动窗口合并：进程启动后该时长内，首屏渲染之后的重复 welcome 调度
@@ -11539,8 +11588,11 @@ class OpenAIChatToolWindow(ToolWindow):
         连续渲染 N 个 welcome，界面卡死数十秒。
 
         做法：类级计数器分配 0/50/100/.../950ms 槽位（模 20 轮转），让 N 个
-        窗口的渲染请求均匀散开。单窗场景槽位为 0ms（立即，与原来 singleShot(0)
-        无感知差异）；类级而非实例级，确保不同窗口拿到递增槽位。
+        窗口的渲染请求均匀散开。类级而非实例级，确保不同窗口拿到递增槽位。
+        计数器按「同批」语义重置：与上次调度间隔 ≥ _WELCOME_SLOT_BATCH_GAP_S
+        视为用户先后独立操作 → slot 归 1，delay=0 立即渲染；仅同批次内的并发
+        调度继续递增错峰（修复前计数器单调递增永不复位，单窗口顺序新建时
+        delay 累积到 950ms，点击后近 1 秒才见欢迎卡片）。
 
         🛡️ pending 守卫：同一窗口已有待执行的 welcome 渲染时跳过本次调度。
         会话数据变更统一入口（_notify_history_data_changed）与 _create_new_session
@@ -11606,8 +11658,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._welcome_render_pending = True
         self._welcome_render_pending_since = now
         cls = type(self)
-        slot = getattr(cls, "_welcome_slot", 0) + 1
+        # 同批错峰：与上次调度间隔 < _WELCOME_SLOT_BATCH_GAP_S 才递增槽位
+        # （同一事件循环批次的并发建窗/批量刷新）。超窗 = 用户先后独立操作，
+        # 计数器归零 → 本次 delay=0 立即渲染，不再累积到 950ms。
+        last_at = getattr(cls, "_welcome_last_schedule_at", None)
+        if last_at is not None and (now - last_at) < cls._WELCOME_SLOT_BATCH_GAP_S:
+            slot = getattr(cls, "_welcome_slot", 0) + 1
+        else:
+            slot = 1
         setattr(cls, "_welcome_slot", slot)
+        setattr(cls, "_welcome_last_schedule_at", now)
         delay = ((slot - 1) % self._WELCOME_SLOT_COUNT) * self._WELCOME_SLOT_MS
         logger.debug(
             f"[OpenAIChatToolWindow] _schedule_initial_welcome: wid={self._window_id} slot={slot} delay={delay}ms"
@@ -11632,6 +11692,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 if getattr(widget, "_is_welcome", False):
                     self.chat_layout.removeWidget(widget)
                     widget.hide()
+
+    def _welcome_card_tabs_stale(self) -> bool:
+        """缓存欢迎卡片的 tab 集合是否与当前插件注册表不一致（需重建）
+
+        判据：卡片**已构建的按钮集合**（`_welcome_tab_ids`，创建/重建时刻的
+        快照）与**当前注册表**（`_welcome_tab_specs()` 动态读取）不等即陈旧。
+        插件新装/卸载会改变注册表 → 判定陈旧 → 走 invalidate + 重建补正。
+
+        返回 True 也包含「无缓存卡片 / 卡片已销毁 / 接口异常」——这些场景无
+        有效快照可比，交给重建路径兜底（与其他失效点语义一致）。
+        """
+        card = self._welcome_card_cache.get(self._window_id)
+        if card is None or not OpenAIChatToolWindow._qt_widget_alive(card):
+            return True
+        try:
+            built_ids = [str(k) for k in (getattr(card, "_welcome_tab_ids", None) or [])]
+            current_ids = [str(key) for key, _label in card._welcome_tab_specs()]
+        except Exception:  # noqa: BLE001
+            # 卡片异常（stub / API 变更）→ 保守判定陈旧，走重建路径
+            return True
+        return built_ids != current_ids
 
     def _rerender_welcome_card(self):
         """同 mode 重渲染欢迎卡片 body（不重建 QWebEngineView）
@@ -17697,15 +17778,24 @@ class OpenAIChatToolWindow(ToolWindow):
     def _is_view_at_bottom(self, tolerance: int = AT_BOTTOM_TOLERANCE) -> bool:
         """视口是否贴在底部（全项目唯一权威判定）。
 
+        锚定「已落地底」（_landed_bottom_value）而非滚动条预抬上界：预抬上界
+        领先布局一拍，程序置底后视口贴的是「未来底」，用它判定会把贴底误判
+        离底 → away 误置位 → 跟随失效 + 取消挂起置底。视觉底语义对所有
+        调用点（away 状态机 / 跟底守卫）均更正确。
+
         Args:
             tolerance: 距底部多少 px 内算「贴底」，默认 `AT_BOTTOM_TOLERANCE`。
 
         Returns:
             True = 视口在底部附近（或内容不足一屏，无处可滚）。
         """
-        scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        self._sync_scroll_maximum()
-        return scroll_bar.maximum() - scroll_bar.value() <= tolerance
+        try:
+            landed = self._landed_bottom_value()
+            value = self.chat_scroll_area.verticalScrollBar().value()
+        except RuntimeError:
+            # 析构窗口保守判贴底：不再触发任何 away 翻转 / 取消挂起置底
+            return True
+        return landed - value <= tolerance
 
     @contextlib.contextmanager
     def _programmatic_scroll(self):
@@ -17731,13 +17821,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
         只**抬高**不压低：Qt 随后自己算出的上界会覆盖它，不会互相打架。
 
-        [PERF] `container.sizeHint()` 是一次 O(卡片数) 的完整布局计算。本函数被
-        `_is_view_at_bottom` 调用，而后者挂在滚动信号上 —— 程序置底 →
-        `valueChanged` → `_on_scroll_changed` → `_is_view_at_bottom` → 本函数，
-        形成 20Hz 级的自激回路；长会话（数百张卡）下这条回路把主线程占满，
-        滚轮事件排队 → 「滚动不跟手」。故对 sizeHint 结果加 30ms 复用窗口：
-        窗口内直接返回当前 maximum（Qt 自己算的新上界只会更大，与「只抬高」
-        语义一致）。高度收敛的及时性由 `_ensure_at_bottom` 的 8×300ms 重试链兜底。
+        [PERF][历史] `container.sizeHint()` 是一次 O(卡片数) 的完整布局计算。
+        本函数曾挂在 `_is_view_at_bottom`（滚动信号路径）上形成 20Hz 级自激
+        回路（程序置底 → valueChanged → _on_scroll_changed → 判定 → 本函数），
+        长会话下把主线程占满 → 「滚动不跟手」；a88072ea 起判定换锚 landed
+        value、本函数退出该路径，回路已断（现存触发源：锚定拍 / 兜底重试链）。
+        复用窗口现为 0.12s（SCROLL_MAX_CACHE_TTL，[T23] 0.03→0.12 覆盖 100ms
+        锚定拍间隔）：窗口内直接返回当前 maximum（Qt 自己算的新上界只会更大，
+        与「只抬高」语义一致）。高度收敛的及时性由 `_ensure_at_bottom` 重试链兜底。
         """
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         now = time.monotonic()
@@ -17758,6 +17849,32 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_max_cache = (now, scroll_bar.maximum())
         return scroll_bar.maximum()
 
+    def _landed_bottom_value(self) -> int:
+        """「已落地」的贴底 value：只认布局已真正落地的内容底。
+
+        滚动条上界会被预抬（高度回调的 delta 增量补偿 / 本类 sizeHint 校正，
+        都抢在 Qt 布局传播之前），而 widget 实际高度要下一拍布局周期才落地。
+        贴到预抬上界时视口底部露出一帧背景色，布局落地后才被填上 —— 流式
+        16ms tick 每拍重复一次，即置底状态下页脚轻微波动、画面不稳的根因
+        （2026-10-12 探针 tests/debug/probe_bottom_stick_flash.py 实证：
+        贴预抬上界后 value + viewport 超出 container 实际高度 40px+）。
+
+        container.height() 与 widget 实际几何同源同步，用它换算的上界与视口
+        可见内容底严格对齐，贴底动作本身不产生任何露白。a88072ea 起
+        `_is_view_at_bottom` 判定也换锚本值（预抬「未来底」会把贴底误判
+        离底 → away 误置位）；预抬上界仅保留给滚动条 range 本身。布局未
+        落地的余量由锚定拍 / `_ensure_at_bottom` 重试链在落地后继续追平。
+        """
+        scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        container = self.chat_scroll_area.widget()
+        if container is None:
+            return scroll_bar.maximum()
+        try:
+            landed = container.height() - self.chat_scroll_area.viewport().height()
+        except RuntimeError:
+            return scroll_bar.maximum()
+        return max(0, min(scroll_bar.maximum(), landed))
+
     def _should_follow_bottom(self) -> bool:
         """程序是否应该把视口拽回底部。
 
@@ -17772,15 +17889,6 @@ class OpenAIChatToolWindow(ToolWindow):
             return True
         # 兜底：away 标志与实际位置不一致时以实际位置为准，避免标志卡死
         return self._is_view_at_bottom()
-
-    def _scroll_to_bottom_if_following(self):
-        """延迟兜底滚底：只有用户仍在跟随底部时才真的滚。
-
-        供 `QTimer.singleShot` 直接连接 —— 兜底触发时用户可能已经上滚，
-        此时再滚一次就是纯粹的打断。
-        """
-        if self._should_follow_bottom():
-            self._scroll_to_bottom()
 
     def _reset_bottom_follow(self):
         """用户明确表达「我要看最新内容」→ 恢复自动跟随。
@@ -17861,11 +17969,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._pending_scroll_to_bottom:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        max_val = self._sync_scroll_maximum()
+        # sizeHint 校正保留（滚动条 range 需反映真实内容高），但贴底 value
+        # 只贴已落地底：布局未落地的余量由下方锚定/重试链追平，不在本拍
+        # 抢跑贴上（露白一帧）。
+        self._sync_scroll_maximum()
         with self._programmatic_scroll():
-            scroll_bar.setValue(max_val)
+            scroll_bar.setValue(self._landed_bottom_value())
             # 再次设置确保卡片高度变化后仍在底部
-            scroll_bar.setValue(max_val)
+            scroll_bar.setValue(self._landed_bottom_value())
         self._pending_scroll_to_bottom = False
         # 🐛 原此处无条件 `self._user_intentionally_away_from_bottom = False`：
         # 任何一次程序置底都会清空用户的「我在读历史」意图，于是守卫形同虚设
@@ -17878,18 +17989,17 @@ class OpenAIChatToolWindow(ToolWindow):
             self._bottom_anchor_timer.start()
         else:
             # 即使anchor到期，也再延迟多次检查，防止多批懒渲染卡片撑开高度导致没到底
-            # 🆕 retries 3 → 8：延长兜底窗口（8×300ms ≈ 2.4s），覆盖 WebEngine
-            # 全量重渲染异步完成后的最终高度（长消息渲染可能超时）。
-            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
+            # [P1 步骤6] 盲重试 8 改 2，剩余高度变化由 rangeChanged 事件即时贴底
+            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=2))
         # 加载完成后抑制滚动同步，避免节点跑到渲染的卡片数量位置
         self._suppress_scroll_sync_count = 0
 
-    def _ensure_at_bottom(self, retries: int = 8):
+    def _ensure_at_bottom(self, retries: int = None):
         """确保滚动条在底部，用于懒渲染卡片高度变化后的二次修正
 
         Args:
-            retries: 剩余重试次数，即使 bottom anchor 过期，也重试几次处理懒加载
-                （默认 8 次 × 300ms 间隔 ≈ 2.4s 兜底窗口，覆盖长消息重渲染延迟）
+            retries: 剩余重试次数。None（默认）按开关取值：事件驱动 2 拍
+                （rangeChanged 接管剩余高度变化），关闭时保持原 8 次 × 300ms。
         """
         # 窗口已销毁时跳过：避免 QTimer.singleShot 回调在 closeEvent 之后
         # 访问已释放的 chat_scroll_area 触发 RuntimeError
@@ -17900,17 +18010,61 @@ class OpenAIChatToolWindow(ToolWindow):
         # `_user_intentionally_away_from_bottom` 精确表达，不需要宽限期来猜。
         if not self._should_follow_bottom():
             return
+        # [P1 步骤6] 事件驱动窗口：链活跃期间 rangeChanged 即时贴底；
+        # until 与原 8×300ms 同窗（2.4s）作保险丝。
+        self._ensure_ab_active = True
+        self._ensure_ab_active_until = time.monotonic() + 2.4
+        # None 默认值按开关分派（修复 767bdb19 遗留：无参重入 None 流入
+        # retries > 0 抛 TypeError，重试链静默中断）
+        if retries is None:
+            retries = 2 if STREAM_BOTTOM_EVENT_DRIVEN else 8
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         self._sync_scroll_maximum()
         if not self._is_view_at_bottom():
             with self._programmatic_scroll():
-                scroll_bar.setValue(scroll_bar.maximum())
+                # 贴已落地底：判定仍用预抬上界（欠贴 → 继续重试），贴则只贴
+                # 布局真正落地的高度，消除抢跑露白。
+                scroll_bar.setValue(self._landed_bottom_value())
             # 懒渲染可能需要更长时间，延迟再次检查
             # 如果还有重试次数，即使 bottom anchor 过期也继续重试
             if retries > 0:
                 QTimer.singleShot(300, lambda: self._ensure_at_bottom(retries - 1))
             elif self._bottom_anchor_deadline > time.monotonic():
                 QTimer.singleShot(300, self._ensure_at_bottom)
+            else:
+                # 重试耗尽：关事件驱动窗口（下次链启动重新开启）
+                self._ensure_ab_active = False
+        else:
+            # 已贴底：无高度变化要追，关窗减少 rangeChanged 空转
+            self._ensure_ab_active = False
+
+    def _wire_scroll_range_changed(self):
+        """[P0 修复] rangeChanged 事件驱动贴底接线：必须在 chat_scroll_area 创建后调用。
+
+        __init__ 早期装配区早于 _setup_ui 对话区创建——兜底装配与
+        chat_area_module.build 两分支各自收尾时调用本方法，互斥不重入。
+        """
+        self.chat_scroll_area.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
+
+    def _on_scroll_range_changed(self, _mn: int, _mx: int):
+        """rangeChanged 事件驱动的贴底跟随（P1 步骤6）。
+
+        终渲染把 maximum 推高时即时贴底（早于原 500ms 盲滚底）；range 未变
+        时不空跑。程序预抬 setMaximum 同样触发本 handler，靠 follow 守卫 +
+        landed setValue 幂等兑底；实测空转显著则再加节流。
+        """
+        if not STREAM_BOTTOM_EVENT_DRIVEN:
+            return
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not self._ensure_ab_active:
+            return
+        if time.monotonic() > self._ensure_ab_active_until:
+            self._ensure_ab_active = False
+            return
+        if self._should_follow_bottom():
+            with self._programmatic_scroll():
+                self.chat_scroll_area.verticalScrollBar().setValue(self._landed_bottom_value())
 
     def _maintain_bottom_anchor(self):
         # 窗口已销毁时跳过：避免 _bottom_anchor_timer 回调在 closeEvent 之后
@@ -17931,9 +18085,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🐛 原此处直接 setValue(scroll_bar.maximum())：卡片 setFixedHeight 后 Qt
         # 的 maximum 要下一轮事件循环才更新，锚定期一直拿旧上界置底 → 追不上
         # 终渲染的高度暴涨。与 _do_scroll_to_bottom 对齐，先用 sizeHint 校正上界。
-        max_val = self._sync_scroll_maximum()
+        # sizeHint 校正保留，贴底 value 换已落地底（同 _do_scroll_to_bottom）。
+        self._sync_scroll_maximum()
         with self._programmatic_scroll():
-            scroll_bar.setValue(max_val)
+            scroll_bar.setValue(self._landed_bottom_value())
         self._bottom_anchor_timer.start()
 
     def _on_message_card_height_changed(self, _height: int):
@@ -17990,14 +18145,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 if delta > 0:
                     with self._programmatic_scroll():
                         sb.setMaximum(max(0, sb.maximum() + delta))
-                    # 缓存同步抬到新上界（而非置 None）：否则下拍 _is_view_at_bottom
-                    # 又会触发一次全量 sizeHint，O(1) 优化等于没做。
+                    # 缓存同步抬到新上界（而非置 None）：贴底/锚定拍与兑底链随后
+                    # 读取时命中缓存即可，不再触发全量 sizeHint，O(1) 优化不白做。
                     self._scroll_max_cache = (time.monotonic(), sb.maximum())
                 else:
                     # 收缩方向无法用增量表达（Qt 会自行压低上界）。不在此处补偿：
                     # setValue 会被 Qt 自动钳到新上界，语义等价。仅失效缓存，让
-                    # 下一次读取落到 Qt 的真实值（避免 `_is_view_at_bottom` 期间
-                    # 又跑一次全量 sizeHint，抵消本优化的收益）。
+                    # 下一次读取（锚定拍/兑底链）落到 Qt 的真实值，避免读到陈旧
+                    # 上界抵消本优化的收益。
                     self._scroll_max_cache = None
                 value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
@@ -18012,12 +18167,17 @@ class OpenAIChatToolWindow(ToolWindow):
                     #      增量无人补偿。二者叠加 = 视口长期停在离底十几 px，
                     #      且每次高度变化都在这个缝里浮动 → 用户看到的"轻微抖动"。
                     # 贴底改为「每拍都取当前上界」，误差不累积。
+                    # 🐛 但「当前上界」在上一行刚被 +delta 预抬，widget 实际高度
+                    # 下一拍布局周期才落地：贴预抬值 = 视口底露一帧背景色，流式
+                    # 每拍重复 = 置底页脚轻微波动（探针实证）。改贴「已落地」底：
                     with self._programmatic_scroll():
-                        sb.setValue(sb.maximum())
+                        sb.setValue(self._landed_bottom_value())
                 elif card_bottom <= value:
-                    # 非跟随态：卡片整体在视口上方 → 锚定补偿，保持其相对位置
+                    # 非跟随态：卡片整体在视口上方 → 锚定补偿，保持其相对位置。
+                    # 落点同样钳到已落地底：上界可能刚被预抬，value+delta 落在
+                    # 预抬区间时 widget 还没长高，视口底部同样露白。
                     with self._programmatic_scroll():
-                        sb.setValue(max(0, value + delta))
+                        sb.setValue(min(max(0, value + delta), self._landed_bottom_value()))
         except RuntimeError:
             pass
         if not sender._content_just_loaded:
@@ -20366,12 +20526,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # delta 补偿 + 8×300ms 兜底」系统性追不上（补偿落点偏小）。锚定期每
             # 100ms 强制 setValue(maximum)，用户一滚立即失效（_on_scroll_changed）。
             self._scroll_to_bottom(sticky_ms=1500)
-            # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
-            # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
-            # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
-            # ⚠️ 兜底同样要守卫：用户可能在等待期间上滚去看别的内容。
-            QTimer.singleShot(500, self._scroll_to_bottom_if_following)
-            QTimer.singleShot(1000, self._scroll_to_bottom_if_following)
+            # [P1 步骤6] 原 500/1000ms 两处 singleShot(_scroll_to_bottom_if_following)
+            # 盲滚底已删：终渲染高度变化经 rangeChanged 即时贴底，早于 500ms，
+            # 不再与用户滚轮竞争。
 
         # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
         # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。

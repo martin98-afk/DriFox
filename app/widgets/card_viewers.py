@@ -752,6 +752,11 @@ class CodeWebViewer(QWebEngineView):
         # -1 = 未知/旧骨架）+ 哨兵触发冷却时间戳。见 _content_sentinel_check。
         self._dom_text_len: int = -1
         self._sentinel_last_ts: float = 0.0
+        # [P0-2] 二级哨兵（dom 停滞检测）状态：停滞起点时间戳 / 起点 dom 长度 /
+        # 起点 md 长度。见 _content_sentinel_check 二级触发。
+        self._sentinel_stall_ts: float = 0.0
+        self._sentinel_stall_dom: int = -1
+        self._sentinel_stall_md: int = 0
         # [B2] 工具 DOM 脏标记代际：每次置 True 时递增，JS 回调清除时与捕获值比较，
         # 防止"旧渲染回调误清新注入的 dirty"（新注入已递增代际 → 旧回调放弃清除）。
         self._tool_dom_dirty_gen: int = 0
@@ -1389,6 +1394,41 @@ class CodeWebViewer(QWebEngineView):
         """
         if not self._streaming or not self._is_js_ready:
             return
+        # ── 二级触发（P0-2）：dom 停滞检测 ──
+        # 一级只覆盖 md≥800 且 dom<200 的重度白屏；盲区是 md<800、dom 200~800
+        # 缓慢增长、开头即白屏。渲染链停摆的指纹是「md 在涨、dom 不动」：
+        # dom 停滞 ≥2s（约 4-8 个渲染节拍周期，区分「慢」与「停」）且期间
+        # md 增长 ≥300（数个 chunk 正常增长量，排除模型天然空闲）→ 强制补渲。
+        # 与一级只排除 think 不同：二级无 dom<200 门槛，tag/fence 静默累积
+        # 场景下 dom 停滞是设计行为，须用含注册 tag 的完整排除集双判。
+        _page_l2 = self.page()
+        dom = getattr(_page_l2, "_dom_text_len", -1) if _page_l2 is not None else -1
+        md_len_l2 = len(self._markdown_text or "")
+        now_l2 = time.monotonic()
+        if dom >= 0 and dom != self._sentinel_stall_dom:
+            # dom 变化：刷新停滞基准
+            self._sentinel_stall_ts = now_l2
+            self._sentinel_stall_dom = dom
+            self._sentinel_stall_md = md_len_l2
+        elif (
+            self._sentinel_stall_ts
+            and now_l2 - self._sentinel_stall_ts >= 2.0
+            and md_len_l2 - self._sentinel_stall_md >= 300
+            and not _has_unclosed_think_or_tool(self._markdown_text)
+            and not _has_unclosed_chart_fence(self._markdown_text)
+        ):
+            # 先清停滞基准：补渲无效时避免每拍重入；补渲生效则 dom 恢复
+            # 增长自然刷新基准，双保险
+            self._sentinel_stall_ts = 0.0
+            # 与一级共用 3s 冷却防风暴
+            if now_l2 - getattr(self, "_sentinel_last_ts", 0.0) < 3.0:
+                return
+            self._sentinel_last_ts = now_l2
+            logger.warning(
+                f"[content-sentinel-L2] dom 停滞 {dom} 但 md 增长 {md_len_l2 - self._sentinel_stall_md} 字符 → 强制补渲"
+            )
+            self._render_deferred = False
+            self._schedule_render(immediate=True)
         md_len = len(self._markdown_text or "")
         if md_len < 800:
             return
@@ -1441,6 +1481,13 @@ class CodeWebViewer(QWebEngineView):
         导致 resize 恢复后完全被动等待 JS 的 ResizeObserver + rAF×3 才上报，
         卡片高度收敛慢（表现为"窗口变大后内容迟迟不适配"）。补此方法后，
         宽度同步可主动驱动一次上报，无需等 ResizeObserver 的三帧延迟。
+
+        ⚠️ 必须走 ``_do_resize_check``（受 resize 锁约束），**不得**改成无条件
+        直报 ``_safe_report_height``：恢复链退出占位时 ``viewer.show()`` 会同步
+        触发 resizeEvent 重新上锁，此刻 Chromium 视口未必已完成重排，抢跑的
+        reportHeight 可能回传未重排的中间值/极小值 → 卡片被钉到错误高度。
+        锁的语义正是「等布局稳定后再合并上报」，解锁补报（150ms，
+        ``_on_resize_unlock`` 无条件重发）负责这一拍。
         """
         self._do_resize_check()
 
@@ -3003,6 +3050,17 @@ class CodeWebViewer(QWebEngineView):
                     from {{ transform: translateX(-100%); }}
                     to   {{ transform: translateX(100%); }}
                 }}
+                /* 流式占位提示（渲染型 fence 未闭合）：弱化斜体 + 纯 CSS 呼吸，
+                   禁 JS 定时器（流式热路径不新增 update() 源） */
+                .dfx-stream-note {{
+                    opacity: .55;
+                    font-style: italic;
+                    animation: dfxNote 1.6s ease-in-out infinite;
+                }}
+                @keyframes dfxNote {{
+                    0%, 100% {{ opacity: .35; }}
+                    50%      {{ opacity: .75; }}
+                }}
                 /* ── 减少动态效果：停掉所有**无限循环**的装饰性 CSS 动画 ──
                    这些动画（骨架脉冲/扫光、思考提示流光、工具预览流光）会一直
                    重绘直到元素被移除；流式期间与逐字渲染叠加会明显加剧掉帧与
@@ -3010,6 +3068,7 @@ class CodeWebViewer(QWebEngineView):
                 @media (prefers-reduced-motion: reduce) {{
                     .chart-skeleton__bars i,
                     .chart-skeleton::after,
+                    .dfx-stream-note,
                     .think-streaming-tip,
                     .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{ animation: none !important; }}
                 }}
@@ -3840,6 +3899,7 @@ class CodeWebViewer(QWebEngineView):
                 }}
 
                 function updateContent(newHtml) {{
+                    if (window._dfxStreamNote) window._dfxStreamNote.hide();
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
                         // 🐛 DOM 重建事务：必须在**任何** DOM 操作（_twReset / _stashCharts /
@@ -4140,6 +4200,7 @@ class CodeWebViewer(QWebEngineView):
                 }};
 
                 function updateContentAppend(newHtml, tailHtml) {{
+                    if (window._dfxStreamNote) window._dfxStreamNote.hide();
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
                     // 打字机闸门：与 updateTailHtml 同款——缓冲未排空时挂起，
@@ -4265,6 +4326,7 @@ class CodeWebViewer(QWebEngineView):
                 // （纯文本 + 已渲染），DOM 尾部始终是**一个** data-rendered 渲染节点，
                 // 后续 _append_text_incremental 在其后追加纯文本，差量/全量渲染再整体替换。
                 function updateTailHtml(html) {{
+                    if (window._dfxStreamNote) window._dfxStreamNote.hide();
                     const container = document.getElementById('content-placeholder');
                     if (!container || !html) return;
                     // 打字机闸门：缓冲未排空时挂起本次替换，等揭示到水位再执行。
@@ -5498,6 +5560,15 @@ class CodeWebViewer(QWebEngineView):
     # 大部分软边界仍落在窗口外 → 仍逐句重渲染。100ms 覆盖典型 chunk 间隔的
     # 2-5 倍，合并生效且不拖慢慢速流式（慢速流式距上次渲染远超 100ms → 仍即时）。
     _SOFT_BOUNDARY_MERGE_MS = 100
+    # [P2-8 F1] tail 行内渲染降载：软边界 ~每 30 字触发一次全量 tail convert
+    # （主线程同步），无空行长文 tail 线性增长 → 总开销 O(n²)。增量阈值 512
+    # 字符（≈中文 2-4 句，触发频率降 ~16 倍）+ 时间旁路 1.5s（保证慢速流式
+    # 每 1.5s 至少格式化一次）。尾部最后 1-2 句的格式化延迟由 finish 全量
+    # 渲染兜底（终态正确）。
+    # ⚠️ 阈值 return 路径不得更新 _tail_html_hash，否则下次 hash 比对把
+    # 「内容变了」误判「没变」永久跳渲。
+    _TAIL_INLINE_MIN_DELTA = 512
+    _TAIL_INLINE_MIN_INTERVAL_S = 1.5
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
@@ -5605,12 +5676,32 @@ class CodeWebViewer(QWebEngineView):
                 text_clean = text_clean[:2000] + "\n\n..."
             js = f"""
             (function() {{
+                // ── 流式占位提示（渲染型 fence 未闭合期间唯一可见反馈）──
+                // 只注册一次（与 _dfxAppendStreamText 同款守卫）
+                if (typeof window._dfxStreamNote === 'undefined') {{
+                window._dfxStreamNote = {{
+                    show: function(text) {{
+                        var c = document.getElementById('content-placeholder');
+                        if (!c || document.getElementById('dfx-stream-note')) return;
+                        var note = document.createElement('div');
+                        note.id = 'dfx-stream-note';
+                        note.className = 'dfx-stream-note';
+                        note.textContent = text || '';
+                        c.appendChild(note);
+                    }},
+                    hide: function() {{
+                        var n = document.getElementById('dfx-stream-note');
+                        if (n && n.parentNode) n.parentNode.removeChild(n);
+                    }}
+                }};
+                }}
                 // ── 追加逻辑注册为全局函数（只注册一次）──
                 // 打字机揭示队列（window._twPush）需要按帧调用同一套"把一段文本
                 // 接到正文尾部"的逻辑；注册成函数后队列与直接调用共用一份实现，
                 // 避免两处逻辑漂移（段落/host 判定一旦分叉就会出现跳位）。
                 if (typeof window._dfxAppendStreamText !== 'function') {{
                 window._dfxAppendStreamText = function(text, skipReport) {{
+                if (window._dfxStreamNote) window._dfxStreamNote.hide();
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
                 // ── 尾部文本宿主定位 ──
@@ -6371,6 +6462,13 @@ class CodeWebViewer(QWebEngineView):
         _tail = self._markdown_text[self._stable_md_len :]
         if not _tail or not _tail.strip():
             return
+        # [P2-8 F1] 增量阈值 + 时间旁路：软边界高频触发下降载为线性。
+        # ⚠️ 此处 return 不得更新 _tail_html_hash（顺序死规定，见常量区注释）。
+        _now = time.monotonic()
+        _since = _now - getattr(self, "_tail_last_rendered_ts", 0.0)
+        _grown = len(_tail) - getattr(self, "_tail_last_rendered_len", 0)
+        if _grown < self._TAIL_INLINE_MIN_DELTA and _since < self._TAIL_INLINE_MIN_INTERVAL_S:
+            return
         # 🐛 未闭合 think/tool：静默累积，不在此渲染（过滤标签会把思考内容
         # 当正文泄漏显示），等闭合后由差量段/全量渲染处理。
         if _has_unclosed_think_or_tool(_tail):
@@ -6381,10 +6479,15 @@ class CodeWebViewer(QWebEngineView):
             return
         _h = hash(_tail)
         if _h == self._tail_html_hash:
+            # hash 命中：内容未变，刷新降载状态基准（与渲染完成处同口径）
+            self._tail_last_rendered_len = len(_tail)
+            self._tail_last_rendered_ts = _now
             return
         html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
         # 无论结果是否为空都记录哈希（think/tool 尾部返回空串时避免重复计算）
         self._tail_html_hash = _h
+        self._tail_last_rendered_len = len(_tail)
+        self._tail_last_rendered_ts = _now
         if not html:
             return
         try:
@@ -7113,6 +7216,9 @@ class CodeWebViewer(QWebEngineView):
         self._last_rendered_html = None
         self._last_rendered_markdown = ""
         self._markdown_text = ""
+        # [P2-8 F1] 清 tail 行内渲染降载状态（下一轮流式从零起算）
+        self._tail_last_rendered_ts = 0.0
+        self._tail_last_rendered_len = 0
         # 不再清除 _lazy_markdown_cb——主题切换 / 卡片复用需要按需从
         # MessageCard._content_data 重新生成 markdown，避免 2 份等价文本常驻。
         # 真正释放卡片时才由 cleanup() 统一置 None。

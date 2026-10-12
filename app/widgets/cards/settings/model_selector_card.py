@@ -17,7 +17,12 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import IconWidget, ScrollArea
 
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import (
+    Colors,
+    font_size_css,
+    get_unified_scrollbar_style,
+    make_scroll_content_opaque,
+)
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.capability_badges import (
     ALL_BADGES,
@@ -402,6 +407,9 @@ class ModelSelectorCardContent(QWidget):
 
         self.scroll_area.setWidget(self.content_widget)
 
+        # 内容层刷不透明实底（启用 Qt 滚动 blit，否则每步全视口重绘）。
+        # 必须在 setWidget 之后设置。
+        self._apply_content_surface()
         # 连接滚动事件，更新吸顶服务商
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
@@ -514,10 +522,19 @@ class ModelSelectorCardContent(QWidget):
             # 第二次尝试：50ms后，确保布局已完全稳定（首次打开卡片时需要更长时间）
             QTimer.singleShot(50, lambda p=scroll_target_provider, m=scroll_target_model: self._deferred_scroll(p, m))
 
+    def _apply_content_surface(self):
+        """内容层不透明实底（滚动 blit 前置条件，视觉与透明时等价）"""
+        make_scroll_content_opaque(
+            self.content_widget,
+            fg=Colors.CARD_BG.format(alpha=255),
+            alpha=230,
+            backdrop=Colors.CONTENT_BG,
+        )
+
     def refresh_style(self):
         """刷新主题样式"""
         Colors.refresh()
-        self.content_widget.setStyleSheet("background: transparent;")
+        self._apply_content_surface()
         # 刷新滚动区域样式（含滚动条颜色）
         self.scroll_area.setStyleSheet(f"""
             QScrollArea {{

@@ -131,6 +131,9 @@ class ChatAreaModule(UIModule):
         except Exception:
             pass
 
+        # [P1 步骤6] chat_scroll_area 就绪后接 rangeChanged 事件驱动贴底
+        host._wire_scroll_range_changed()
+
         # 初始加载（延迟到首帧后，避免阻塞 setup_ui 关键路径）
         QTimer.singleShot(0, host._apply_decorations)
 

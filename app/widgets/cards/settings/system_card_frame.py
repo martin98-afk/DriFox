@@ -21,7 +21,15 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import FluentIcon, PrimaryToolButton, ScrollArea, StrongBodyLabel, TransparentToolButton
 
-from app.utils.design_tokens import CardStyles, Colors, TabStyles, font_size_css, get_unified_scrollbar_style, scale_icon_size
+from app.utils.design_tokens import (
+    CardStyles,
+    Colors,
+    TabStyles,
+    font_size_css,
+    get_unified_scrollbar_style,
+    make_scroll_content_opaque,
+    scale_icon_size,
+)
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -167,6 +175,11 @@ class SystemCardFrame(QFrame):
         self._content_layout.setSpacing(4)
 
         self.scroll_area.setWidget(self.content_widget)
+        # 内容层刷不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行：30 次 paint/步 → 4 次）。
+        # 底色取「卡片表面 CARD_BG alpha=230 叠在浮层承托底上」的预合成值，
+        # 视觉与透明时完全一致。必须在 setWidget 之后设置。
+        self._apply_content_surface()
         main_layout.addWidget(self.scroll_area, 1)
 
     @property
@@ -180,6 +193,20 @@ class SystemCardFrame(QFrame):
         # 表面规范与浮层卡同源（CardStyles.floating），alpha 沿用原本的 230。
         self.setStyleSheet(CardStyles.floating("SystemCardFrame", alpha=230))
 
+    def _apply_content_surface(self):
+        """内容层不透明实底（滚动 blit 前置条件）
+
+        卡片本体表面是 CARD_BG alpha=230（见 _apply_base_style），下层由
+        覆盖层容器承托；这里把两者预合成成等价实色，避免改实底后观感变化。
+        """
+        # fg 只取 CARD_BG 的 rgb 分量（工具内部忽略串自带 alpha，以 alpha 参数为准）
+        make_scroll_content_opaque(
+            self.content_widget,
+            fg=Colors.CARD_BG.format(alpha=255),
+            alpha=230,
+            backdrop=Colors.CONTENT_BG,
+        )
+
     def refresh_style(self):
         """刷新主题底色和边框 — 子控件样式各自独立更新，不依赖 Qt 级联
 
@@ -192,6 +219,7 @@ class SystemCardFrame(QFrame):
 
         # ── 卡片本体（背景 + 边框） ──
         self._apply_base_style()
+        self._apply_content_surface()
 
         # ── 字体/图标 ──
         self.title_label.setFont(get_unified_font(12, True))

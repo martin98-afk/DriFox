@@ -34,6 +34,10 @@ class CardContainer(QWidget):
     # 这些真实卡片的内容下限，避免窗口缩小时卡片被压扁/裁切。
     _DOCK_MIN_H = 40  # 横向停靠区（LEFT/RIGHT）最小宽（每张卡片自身 minimumWidth 仍受尊重）
     _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
+    # 横向停靠区（LEFT/RIGHT）无记忆首开的默认宽下限：首开时卡片内容常未
+    # 完成测量/异步加载，sizeHint 偏小（嵌入侧边栏的新一代面板卡尤甚），
+    # 直接信 sizeHint 会首开过窄；用户拖宽后按卡片记忆，不再走此下限。
+    _DOCK_DEFAULT_W = 360
     # 纵向停靠区（TOP/BOTTOM）首次展开时强制占对话区（vdock splitter）的
     # 最小比例，避免卡片天然尺寸过小（内容未测量 / 空卡片 / 异步加载）时
     # 容器被压成极矮细条。用户已手动拖拽调过比例（按卡片记忆 >0）后
@@ -933,8 +937,9 @@ class CardContainer(QWidget):
                 if self._horizontal:
                     # 记忆优先（含拖窄场景——旧逻辑"记忆<natural 用 natural"会把
                     # 用户拖窄丢弃，tab 切换折叠重开后恢复默认）；无记忆才用自然
-                    # 尺寸；clamp 下限防细条。
-                    target = max(mem, min_floor) if mem > 0 else natural_h
+                    # 尺寸；clamp 下限防细条。无记忆时叠加默认宽下限（同纵向
+                    # ratio_floor 的对位兄底，防 sizeHint 未测量首开过窄）。
+                    target = max(mem, min_floor) if mem > 0 else max(natural_h, self._DOCK_DEFAULT_W)
                 else:
                     if mem > 0:
                         target = max(mem, ratio_floor)

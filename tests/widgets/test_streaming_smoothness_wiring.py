@@ -306,13 +306,16 @@ class TestDiffScopeQuery:
 
 
 class TestHeightTickAlignment:
-    """[T34] 高度回环节拍与打字机 rAF 同频，且防抖不得另立一拍"""
+    """[T34→P1步骤4] 追踪节拍 16→33ms 降频（砍 Chromium resize 回环），防抖不得另立一拍"""
 
     def test_tick_matches_frame_budget(self):
-        """追踪 tick 必须落在单帧量级（<=20ms），与打字机 rAF(~17ms) 同频。
+        """追踪 tick 降频 33ms（30Hz）砍 Chromium resize 回环，防抖保持 16ms 复用 DEBOUNCE 常量。
 
-        文字按 rAF 每 ~17ms 揭示一次，容器高度若按 40ms 一格逼近，就会出现
-        「文字连续长、容器跳格」的台阶感 —— 这是 [T34] 修复的体感来源。
+        [T34] 曾要求 tick 与打字机 rAF(~17ms) 同频（<=20ms）；P1 步骤4 改为
+        33ms：追高回环 setFixedHeight → Chromium resize → ResizeObserver 回传
+        的频率减半，factor 同步提速（基线 0.45→0.70，boost cap 0.85）保持收敛
+        时间不变。防抖维持 16ms（STREAM_HEIGHT_DEBOUNCE_MS），只降追踪拍、
+        不增加上报滞后。
         """
         from pathlib import Path
 
@@ -322,11 +325,11 @@ class TestHeightTickAlignment:
         s = core_text.find("STREAM_HEIGHT_TICK_MS = ")
         assert s != -1
         tick = int(core_text[s : core_text.find("\n", s)].split("=")[1].strip())
-        assert tick <= 20, f"STREAM_HEIGHT_TICK_MS 应 <=20ms（单帧量级），实际 {tick}"
-        # 防抖不得硬编码成另一拍：会把它喂给追踪的目标值切成阶梯
+        assert tick <= 35, f"STREAM_HEIGHT_TICK_MS 应 <=35ms（33ms tick + 2ms 余量），实际 {tick}"
+        # 防抖不得硬编码成另一拍：tick 降频后防抖仍须复用 DEBOUNCE 常量保持单帧
         assert (
-            "self._stream_height_timer.setInterval(STREAM_HEIGHT_TICK_MS)" in card_text
-        ), "防抖须复用 STREAM_HEIGHT_TICK_MS，不得另立硬编码节拍"
+            "self._stream_height_timer.setInterval(STREAM_HEIGHT_DEBOUNCE_MS)" in card_text
+        ), "防抖须复用 STREAM_HEIGHT_DEBOUNCE_MS，不得另立硬编码节拍"
         assert "setInterval(32)" not in card_text, "旧 32ms 防抖应已移除"
         assert "setInterval(40)" not in card_text, "旧 40ms 防抖应已移除"
 
