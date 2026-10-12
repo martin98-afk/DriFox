@@ -247,6 +247,10 @@ def contrast_text_color(color: str) -> str:
     在明亮色块上对比度低至 1.25:1，缩写完全糊掉。切换阈值 0.1791 是白字与
     黑字对比度相等的色块亮度，该点两种字色同为 4.58:1，即本方案最坏情况。
 
+    语义常量色（如临时会话隐身紫 #8B5CF6）不适用本算法：它们与算法生成色
+    落在同一亮度带但诉求相反（惯例白字 vs 对比度最优），字色由定义处显式
+    传入（set_project 的 text_color 参数），不走本函数。
+
     Args:
         color: "rgba(r, g, b, a)"（get_project_color 返回值）或 "#RRGGBB"
 

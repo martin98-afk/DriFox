@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.widgets.tab_panel import PANEL_MODE_LIST, PANEL_MODE_TREE, TabPanel
-from app.widgets.workspace_tree import KIND_PROJECT, KIND_SESSION, KIND_WORKTREE
+from app.widgets.workspace_tree import KIND_PROJECT, KIND_SESSION, KIND_WORKTREE, tree_content_left
 
 
 @pytest.fixture
@@ -77,13 +77,14 @@ def test_no_worktree_nodes(panel):
 
 
 def test_session_subtitle_composed(panel):
-    """会话行副行 = 预览 · 工作树名（非主仓库） · 相对时间"""
+    """会话行副行 = 左段（预览·工作树名）+ 右段（相对时间，右对齐）"""
     specs = _collect(panel, [_rec("s1", "会话一", preview="帮我看看这段代码")])
     sess = [s for s in specs if s.kind == KIND_SESSION]
     assert len(sess) == 1
-    sub = sess[0].subtitle
-    assert "帮我看看这段代码" in sub
-    assert "·" in sub
+    assert "帮我看看这段代码" in sess[0].subtitle
+    # 时间独立成段（右对齐需要它有自己的控件，不能混在省略文本里）
+    assert sess[0].subtitle_time
+    assert "·" not in sess[0].subtitle_time
 
 
 def test_pinned_sorts_first(panel):
@@ -102,6 +103,16 @@ def test_project_has_no_branch_action(panel):
     specs = _collect(panel, [])
     proj = [s for s in specs if s.kind == KIND_PROJECT][0]
     assert proj.actions == (), f"项目行 actions 应为空，实际 {proj.actions}"
+
+
+def test_project_row_no_count_tag(panel):
+    """项目行不再渲染计数 tag；总数转为副行文本（会话总数）"""
+    records = [_rec("s1", "会话一"), _rec("s2", "会话二"), _rec("s3", "会话三")]
+    specs = _collect(panel, records)
+    proj = [s for s in specs if s.kind == KIND_PROJECT][0]
+    assert proj.count == 0, "计数 tag 已去除（count 不再参与渲染）"
+    assert "3" in proj.subtitle, f"总数应在副行文本里，实际 {proj.subtitle!r}"
+    assert proj.is_project is True, "项目头需标记 is_project（44px 两行式）"
 
 
 def test_tree_header_visibility_and_signal(panel, qtbot):

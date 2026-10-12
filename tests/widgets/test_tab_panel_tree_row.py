@@ -16,7 +16,7 @@ from PyQt5.QtCore import QEvent
 
 from app.utils.design_tokens import scale_font_size
 from app.widgets.tab_panel import PANEL_MODE_LIST, PANEL_MODE_TREE, TabPanel, TreeNodeSpec
-from app.widgets.workspace_tree import KIND_PROJECT, KIND_WIDGET
+from app.widgets.workspace_tree import KIND_PROJECT, KIND_WIDGET, tree_content_left
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def _add_tab(panel):
 def _tree_specs_with(item):
     """构造含该 TabItem 的最小树节点序列（v2：项目直挂会话，无工作树层）"""
     return [
-        TreeNodeSpec(key="project:Demo", kind=KIND_PROJECT, title="Demo", expanded_by_default=True),
+        TreeNodeSpec(key="project:Demo", kind=KIND_PROJECT, title="Demo", is_project=True, expanded_by_default=True),
         TreeNodeSpec(
             key="tab:0",
             kind=KIND_WIDGET,
@@ -45,7 +45,8 @@ def _tree_specs_with(item):
             indent=14,
             widget=item,
             record={"session_id": "s1", "preview": "测试预览"},
-            subtitle="测试预览 · 刚刚",
+            subtitle="测试预览",
+            subtitle_time="刚刚",
         ),
     ]
 
@@ -59,7 +60,7 @@ def _switch_to_tree(panel, item):
 
 
 def test_tree_mode_marks_item_as_tree_row(panel):
-    """树模式重建：行高 44 / 图标隐藏 / 12px / 副行可见"""
+    """树模式重建：行高 44 / 图标隐藏 / 12px / 副行可见 / 缩进对齐引导线"""
     item = _add_tab(panel)
     _switch_to_tree(panel, item)
     assert item._tree_row is True
@@ -68,15 +69,18 @@ def test_tree_mode_marks_item_as_tree_row(panel):
     assert item._icon_widget.isHidden() is True
     # 字号断 stylesheet（font().pointSize() 会被 stylesheet 合成字体置 -1）
     assert f"font-size: {scale_font_size(12)}px" in item._title_label.styleSheet()
-    assert item.layout().getContentsMargins() == (8, 5, 6, 5)
-    assert item._sub_label.isHidden() is False
+    # 内容左缘 = 引导线 x + 间距（表达从属于上方项目）
+    assert item.layout().getContentsMargins()[0] == tree_content_left()
+    assert item.width() == 0 or item.layout().getContentsMargins() == (tree_content_left(), 5, 6, 5)
+    assert item._sub_row.isHidden() is False
 
 
 def test_tree_mode_syncs_subtitle(panel):
-    """树模式副行文本按 spec 同步（预览 · 时间）"""
+    """树模式副行文本按 spec 同步（左段预览 + 右段时间分居两侧）"""
     item = _add_tab(panel)
     _switch_to_tree(panel, item)
-    assert item._sub_label.text() == "测试预览 · 刚刚"
+    assert item._sub_label.text() == "测试预览"
+    assert item._sub_time.text() == "刚刚"
 
 
 def test_switch_back_to_list_resets_tree_row(panel):
@@ -89,7 +93,7 @@ def test_switch_back_to_list_resets_tree_row(panel):
     assert item._icon_widget.isHidden() is False
     assert f"font-size: {scale_font_size(13)}px" in item._title_label.styleSheet()
     assert item.layout().getContentsMargins() == (8, 4, 4, 4)
-    assert item._sub_label.isHidden() is True
+    assert item._sub_row.isHidden() is True
 
 
 def test_tree_row_selected_paints_tint(panel, monkeypatch):

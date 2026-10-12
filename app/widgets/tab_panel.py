@@ -73,6 +73,8 @@ from app.widgets.workspace_tree import (
     KIND_WIDGET,
     TreeNodeSpec,
     WorkspaceTree,
+    draw_tree_guide,
+    tree_content_left,
 )
 
 
@@ -332,14 +334,21 @@ class _TabProjectIcon(QWidget):
         self._fallback_pixmap: Optional[QPixmap] = None
         self.setFixedSize(size, size)
 
-    def set_project(self, initials: str, color_rgba: str):
-        """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）"""
+    def set_project(self, initials: str, color_rgba: str, text_color: str = ""):
+        """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）
+
+        text_color 非空时直接用作缩写字色（语义常量色如临时会话隐身紫，
+        字色随色定义处声明），空则按色块亮度自适应（contrast_text_color）。
+        """
         self._initials = initials if initials else "?"
         self._color = self._parse_rgba(color_rgba)
-        # 字色按色块亮度自适应（与 _SquareAvatar 同源，走共享纯函数）
-        from app.utils.project_meta import contrast_text_color
+        # 字色：显式指定优先，否则按色块亮度自适应（与 _SquareAvatar 同源，走共享纯函数）
+        if text_color:
+            self._text_color = QColor(text_color)
+        else:
+            from app.utils.project_meta import contrast_text_color
 
-        self._text_color = QColor(contrast_text_color(color_rgba))
+            self._text_color = QColor(contrast_text_color(color_rgba))
         self._fallback_pixmap = None  # 清除 pixmap fallback
         self.update()
 
@@ -426,6 +435,7 @@ class TabItem(QFrame):
         self._title = title
         self._project_initials = project_initials
         self._project_color = project_color
+        self._project_text_color = ""  # 语义常量色的固定字色（空=按亮度自适应）
         self._selected = False
         self._streaming = False
         self._stream_error = False
@@ -489,11 +499,21 @@ class TabItem(QFrame):
         self._title_label = _ElidedLabel(self._title, self._body)
         body_layout.addWidget(self._title_label)
 
-        # 副行（树行化才显示）：预览 · 时间
-        self._sub_label = _ElidedLabel("", self._body)
+        # 副行（树行化才显示）：预览·工作树名 | 相对时间（右对齐）
+        self._sub_row = QWidget(self._body)
+        self._sub_row.setStyleSheet("background: transparent;")
+        _sub_layout = QHBoxLayout(self._sub_row)
+        _sub_layout.setContentsMargins(0, 0, 0, 0)
+        _sub_layout.setSpacing(6)
+        self._sub_label = _ElidedLabel("", self._sub_row)
         self._sub_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self._sub_label.setVisible(False)
-        body_layout.addWidget(self._sub_label)
+        _sub_layout.addWidget(self._sub_label, 1)
+        self._sub_time = QLabel("", self._sub_row)
+        self._sub_time.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self._sub_time.setStyleSheet("background: transparent;")
+        _sub_layout.addWidget(self._sub_time, 0)
+        self._sub_row.setVisible(False)
+        body_layout.addWidget(self._sub_row)
         layout.addWidget(self._body, 1)
         self._apply_title_style()
 
@@ -539,6 +559,10 @@ class TabItem(QFrame):
         self._sub_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
+        self._sub_time.setFont(get_unified_font(10))
+        self._sub_time.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        )
 
     def refresh_style(self):
         """主题 / 字体变更后刷新样式，重新调整图标尺寸与文字字号/颜色"""
@@ -548,6 +572,7 @@ class TabItem(QFrame):
             self._icon_size = new_size
             self._icon_widget.setFixedSize(self._icon_size, self._icon_size)
             self._apply_project_to_icon()
+        self._refresh_tree_indent()
         self._apply_title_style()
         # 紧凑态团队模式：字号缩放后幂等重刷首字符图标（补充点 3）
         if self._compact and self._team_mode:
@@ -576,14 +601,18 @@ class TabItem(QFrame):
     def _apply_project_to_icon(self):
         """将项目信息交给 _TabProjectIcon 绘制；无项目数据时隐藏色块（对齐团队框惯例）"""
         if self._project_initials and self._project_color:
-            self._icon_widget.set_project(self._project_initials, self._project_color)
+            self._icon_widget.set_project(self._project_initials, self._project_color, self._project_text_color)
         else:
             self._icon_widget.setVisible(False)
 
-    def set_project(self, initials: str, color_rgba: str):
-        """设置项目头像（缩写+颜色）；initials 为空时隐藏色块图标（如临时对话页）"""
+    def set_project(self, initials: str, color_rgba: str, text_color: str = ""):
+        """设置项目头像（缩写+颜色）；initials 为空时隐藏色块图标（如临时对话页）
+
+        text_color：语义常量色的固定字色（如临时紫配白），空=按亮度自适应。
+        """
         self._project_initials = initials
         self._project_color = color_rgba
+        self._project_text_color = text_color
         self._apply_project_to_icon()
         # 树行化：无图标形态（归属由工作树节点表达），数据照常写入但色块保持隐藏
         if self._tree_row:
@@ -607,7 +636,8 @@ class TabItem(QFrame):
 
         树行化后已打开对话页与树内历史会话行同构：44px 两行式（标题 /
         预览·时间，副行文本由 set_tree_subtitle 逐帧同步）、无项目图标、
-        标题 12px、关闭钮 hover 才显、图钉置顶后常显。
+        内容左缘缩进对齐项目名 + 左侧引导竖线、标题 12px、关闭钮 hover 才显、
+        图钉置顶后常显。
 
         ⚠️ 只由 TabPanel 在「树布局重建（True）/ 列表重建复位（False）」两个
         点调用；与紧凑态互斥（树模式折叠时降级列表渲染）。
@@ -617,26 +647,30 @@ class TabItem(QFrame):
             return
         self._tree_row = on
         if on:
-            self.layout().setContentsMargins(8, 5, 6, 5)
+            self.layout().setContentsMargins(tree_content_left(), 5, 6, 5)
             self._icon_widget.setVisible(False)
-            self._sub_label.setVisible(True)
+            self._sub_row.setVisible(True)
             self._close_btn.setVisible(False)  # hover 才显（enterEvent）
             self._sync_pin()
         else:
             self.layout().setContentsMargins(8, 4, 4, 4)
             # 图标恢复现行语义：团队模式 / 无项目数据 → 隐藏
             self._icon_widget.setVisible(bool(self._project_initials and self._project_color) and not self._team_mode)
-            self._sub_label.setVisible(False)
+            self._sub_row.setVisible(False)
             self._pin_btn.setVisible(False)
         self._apply_title_style()
         self._refresh_row_height()
         self.update()
 
-    def set_tree_subtitle(self, text: str):
-        """树行化副行文本（预览 · 时间）；空串保持副行占位不塌行"""
+    def set_tree_subtitle(self, text: str, time_text: str = ""):
+        """树行化副行文本：左段（预览·工作树名，可省略）+ 右段（相对时间，右对齐）"""
         text = str(text or "")
         if self._sub_label.text() != text:
             self._sub_label.setText(text)
+        time_text = str(time_text or "")
+        if self._sub_time.text() != time_text:
+            self._sub_time.setText(time_text)
+        self._sub_time.setVisible(bool(time_text))
 
     def set_pinned(self, pinned: bool):
         """置顶态同步：置顶常显图钉（金色），未置顶 hover 才显"""
@@ -718,6 +752,15 @@ class TabItem(QFrame):
         in_list = self._panel is None or getattr(self._panel, "_mode", PANEL_MODE_LIST) != PANEL_MODE_TREE
         self.setFixedHeight(32 if (self._team_mode and in_list) else 40)
 
+    def _refresh_tree_indent(self):
+        """树行化内容左缩进随缩放档位重算（字号缩放后对齐点会变）"""
+        if not self._tree_row:
+            return
+        m = self.layout().getContentsMargins()
+        left = tree_content_left()
+        if m[0] != left:
+            self.layout().setContentsMargins(left, m[1], m[2], m[3])
+
     def _apply_compact_icon(self):
         """紧凑态团队模式：用角色胶囊首字符 + 胶囊色绘制图标（折叠态成员可区分）
 
@@ -760,7 +803,7 @@ class TabItem(QFrame):
             }
             # 隐藏文字类控件，仅留图标
             self._title_label.setVisible(False)
-            self._sub_label.setVisible(False)
+            self._sub_row.setVisible(False)
             self._capsule_label.setVisible(False)
             self._close_btn.setVisible(False)
             self._pin_btn.setVisible(False)
@@ -782,7 +825,7 @@ class TabItem(QFrame):
             # 展开态按当前语义恢复（非折叠前现场）：折叠期间可能加入团队/设置胶囊，
             # 旧现场会漏显示——标题恒显、副行按树行化态、胶囊按团队模式+文本、close 恒隐（hover 再显）
             self._title_label.setVisible(True)
-            self._sub_label.setVisible(bool(self._tree_row))
+            self._sub_row.setVisible(bool(self._tree_row))
             has_capsule_text = bool((self._capsule_label.text() or "").strip())
             self._capsule_label.setVisible(self._team_mode and has_capsule_text)
             # 关闭钮恒隐待 hover（树行同样 hover 才显）
@@ -953,6 +996,10 @@ class TabItem(QFrame):
         elif self._selected and not self._tree_row:
             # 左侧选中指示条（贴合圆角曲线）——树行选中由淡靛蓝底表达，无左条
             _draw_left_indicator(painter, _round_rect, h, _CACHED_INFO)
+
+        # ── 树行化：左侧从属引导竖线（最后画，不被选中底色盖住）──
+        if self._tree_row:
+            draw_tree_guide(painter, 0, h)
 
         super().paintEvent(event)
 
@@ -2348,12 +2395,22 @@ class TabPanel(QWidget):
             self._pending_empty_teams = set()
             self._rebuild_layout()
 
-    def add_tab(self, title: str, icon=None, project_initials: str = "", project_color: str = "") -> int:
-        """添加 Tab 项，返回其索引"""
+    def add_tab(
+        self, title: str, icon=None, project_initials: str = "", project_color: str = "", project_text_color: str = ""
+    ) -> int:
+        """添加 Tab 项，返回其索引（project_text_color：头像字色固定值，空=自适应）"""
         idx = len(self._items)
         item = TabItem(
-            title, icon, self._list_widget, panel=self, project_initials=project_initials, project_color=project_color
+            title,
+            icon,
+            self._list_widget,
+            panel=self,
+            project_initials=project_initials,
+            project_color=project_color,
         )
+        if project_text_color:
+            item._project_text_color = project_text_color
+            item._apply_project_to_icon()  # 构造时已按自适应字色绘过一次，补刷
 
         # 连接信号 — ★ 使用动态索引查找，防止删除前序 tab 后索引漂移
         # 不能用 lambda 捕获 idx，否则删除 tab 0 后 tab 1 的 lambda 中 idx 仍为 1
@@ -3504,7 +3561,9 @@ class TabPanel(QWidget):
                     # 项目根用项目 icon（缩写字色块），与 Tab 上的项目头像同一套视觉
                     initials=p_initials,
                     color=p_color,
-                    count=len(plain_pairs) + len(opened_pairs),
+                    # 计数 tag 已去掉（用户要求）；总数转为副行文本 + tooltip
+                    is_project=True,
+                    subtitle=f"{len(plain_pairs) + len(opened_pairs)} 个会话",
                     active_count=len(opened_pairs),
                     project=project,
                     worktree="",
@@ -3555,9 +3614,10 @@ class TabPanel(QWidget):
             return ""
 
     def _session_spec(self, project: str, wt: str, rec: dict) -> TreeNodeSpec:
-        """历史会话的 TreeNodeSpec（两行式副行：预览 · 工作树名 · 相对时间）"""
+        """历史会话的 TreeNodeSpec（两行式副行：预览·工作树名 | 时间右对齐）"""
         sid = str(rec.get("session_id") or "")
         title = (rec.get("title") or "").strip() or "未命名会话"
+        sub, when = self._session_subtitle_parts(rec, wt)
         return TreeNodeSpec(
             key=f"session:{sid}",
             kind=KIND_SESSION,
@@ -3567,11 +3627,13 @@ class TabPanel(QWidget):
             worktree=wt,
             record=rec,
             tooltip=title,
-            subtitle=self._session_subtitle(rec, wt),
+            subtitle=sub,
+            subtitle_time=when,
         )
 
     def _opened_tab_spec(self, index: int, project: str, wt: str, rec: dict) -> TreeNodeSpec:
         """已打开对话页的 TreeNodeSpec（两行式副行；副行数据由 TabItem 逐帧同步）"""
+        sub, when = self._session_subtitle_parts(rec, wt)
         return TreeNodeSpec(
             key=f"tab:{index}",
             kind=KIND_WIDGET,
@@ -3579,12 +3641,17 @@ class TabPanel(QWidget):
             indent=_TREE_INDENT_TAB,
             widget=self._items[index],
             record=rec,
-            subtitle=self._session_subtitle(rec, wt),
+            subtitle=sub,
+            subtitle_time=when,
         )
 
     @staticmethod
-    def _session_subtitle(rec: dict, wt: str) -> str:
-        """会话行副行文本：预览 · 工作树名（非主仓库时） · 相对时间"""
+    def _session_subtitle_parts(rec: dict, wt: str) -> tuple:
+        """会话行副行拆两段：(左段预览·工作树名, 右段相对时间)
+
+        时间必须独立成段——右对齐要求它在自己的控件里（与左段混在一条
+        省略文本里，省略长度一变时间位置就飘）。
+        """
         from app.utils.session_preview import format_relative_time
 
         parts: List[str] = []
@@ -3594,9 +3661,7 @@ class TabPanel(QWidget):
         if wt:
             parts.append(os.path.basename(wt.rstrip("/\\")) or wt)
         when = format_relative_time(str((rec or {}).get("last_time") or ""))
-        if when:
-            parts.append(when)
-        return " · ".join(parts)
+        return " · ".join(parts), when
 
     @staticmethod
     def _norm_registered(registered) -> list:
@@ -3646,22 +3711,24 @@ class TabPanel(QWidget):
         if self._tree_widget is None:
             return
         specs = self._collect_tree_specs()
-        # 签名快照：节点关键展示字段（含副行/置顶），未变则跳过重建
-        snapshot = tuple((s.key, s.title, s.count, s.subtitle) for s in specs)
+        # 签名快照：节点关键展示字段（含副行左右段/置顶），未变则跳过重建
+        snapshot = tuple((s.key, s.title, s.subtitle, s.subtitle_time, s.active_count) for s in specs)
         if getattr(self, "_tree_snapshot", None) == snapshot:
             return
         self._tree_snapshot = snapshot
         self._tree_widget.rebuild(specs)
         compact = self._collapsed
-        # 已打开行的副行/置顶态：从 spec 回填（KIND_WIDGET 的 subtitle/record 在此同步给 TabItem）
+        # 已打开行的副行/置顶态：从 spec 回填（KIND_WIDGET 的 subtitle 两段在此同步给 TabItem）
         meta_by_key = {
-            s.key: (s.subtitle, bool((s.record or {}).get("pinned", False))) for s in specs if s.kind == KIND_WIDGET
+            s.key: (s.subtitle, s.subtitle_time, bool((s.record or {}).get("pinned", False)))
+            for s in specs
+            if s.kind == KIND_WIDGET
         }
         for i, item in enumerate(self._items):
             # 已打开对话页树行化：44px 两行式 / 无项目图标 / 淡靛蓝选中 / hover 才显关闭钮
-            sub, pinned = meta_by_key.get(f"tab:{i}", ("", False))
+            sub, when, pinned = meta_by_key.get(f"tab:{i}", ("", "", False))
             item.set_tree_row(True)
-            item.set_tree_subtitle(sub)
+            item.set_tree_subtitle(sub, when)
             item.set_pinned(pinned)
             item.set_compact(compact)
         # ⚠️ 团队只在列表模式渲染：树模式不生成团队框节点，但框体 widget 仍在
@@ -3793,10 +3860,10 @@ class TabPanel(QWidget):
         if 0 <= index < len(self._items):
             self._items[index].set_title(title)
 
-    def update_tab_project(self, index: int, initials: str, color_rgba: str):
-        """更新 Tab 的项目头像（缩写+颜色，直接 QPainter 绘制）"""
+    def update_tab_project(self, index: int, initials: str, color_rgba: str, text_color: str = ""):
+        """更新 Tab 的项目头像（缩写+颜色，直接 QPainter 绘制；text_color 固定字色，空=自适应）"""
         if 0 <= index < len(self._items):
-            self._items[index].set_project(initials, color_rgba)
+            self._items[index].set_project(initials, color_rgba, text_color)
 
     def update_tab_capsule(self, index: int, text: str):
         """显示团队角色胶囊"""

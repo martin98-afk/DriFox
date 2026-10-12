@@ -385,8 +385,10 @@ def _update_tab_icon(tab_idx: int, project: str):
                     return
 
         # 临时对话页：Tab 用固定隐身紫「临」图标（不用项目色），标题前缀由窗口标题携带
+        # 字色固定白：隐身紫是语义常量色，白字随色定义处声明，不走亮度自适应
+        # （#8B5CF6 lum 0.198 落在自适应黑字分支，紫底黑字与全站白字惯例冲突）
         if 0 <= tab_idx < len(tm._windows) and getattr(tm._windows[tab_idx], "_is_temp_scope", False):
-            tm._tab_panel.update_tab_project(tab_idx, "临", "#8B5CF6")
+            tm._tab_panel.update_tab_project(tab_idx, "临", "#8B5CF6", "#FFFFFF")
             return
 
         from app.utils.project_meta import (
@@ -4025,11 +4027,13 @@ class TabManagerWindow(FramelessWindow):
             # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
             tab_project_initials = ""
             tab_project_color = ""
-            # 临时对话页：初始标题加「临时」前缀；图标用固定隐身紫「临」（不用项目色）
+            tab_project_text_color = ""
+            # 临时对话页：初始标题加「临时」前缀；图标用固定隐身紫「临」（不用项目色，字色固定白）
             if getattr(window, "_is_temp_scope", False):
                 title = f"临时 · {title}"
                 tab_project_initials = "临"
                 tab_project_color = "#8B5CF6"
+                tab_project_text_color = "#FFFFFF"
             elif project:
                 try:
                     from app.utils.project_meta import (
@@ -4043,7 +4047,11 @@ class TabManagerWindow(FramelessWindow):
                     pass
 
             tab_idx = panel.add_tab(
-                title, icon=None, project_initials=tab_project_initials, project_color=tab_project_color
+                title,
+                icon=None,
+                project_initials=tab_project_initials,
+                project_color=tab_project_color,
+                project_text_color=tab_project_text_color,
             )
 
             # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
