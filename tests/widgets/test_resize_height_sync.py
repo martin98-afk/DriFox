@@ -42,7 +42,7 @@ from app.widgets.resize_orchestrator import ResizeOrchestrator  # noqa: E402
 
 
 class _FakeViewer:
-    """只实现 _do_resize_check / _safe_report_height / _on_resize_unlock 用到的成员。"""
+    """只实现 _do_resize_check / _on_resize_unlock 用到的成员。"""
 
     def __init__(self):
         self._resize_locked = False
@@ -58,10 +58,6 @@ class _FakeViewer:
     # _on_resize_unlock 会回调 _do_resize_check，桩上挂到真实实现
     def _do_resize_check(self):
         CodeWebViewer._do_resize_check(self)
-
-    # update_height 走 _safe_report_height，桩上挂到真实实现
-    def _safe_report_height(self):
-        CodeWebViewer._safe_report_height(self)
 
 
 def _do_resize_check(viewer):

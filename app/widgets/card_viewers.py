@@ -1444,11 +1444,10 @@ class CodeWebViewer(QWebEngineView):
 
         ⚠️ 必须走 ``_do_resize_check``（受 resize 锁约束），**不得**改成无条件
         直报 ``_safe_report_height``：恢复链退出占位时 ``viewer.show()`` 会同步
-        触发 resizeEvent 重新上锁，此刻 Chromium 视口还没完成重排，抢跑的
-        reportHeight 会回传旧值/极小值 → 卡片被钉到错误高度。实测（2026-10-12）
-        抢跑版本导致「resize 后消息区大面积内容消失」。锁的语义正是「等布局
-        稳定后再合并上报」，解锁补报（150ms，_on_resize_unlock 无条件重发）
-        负责这一拍。
+        触发 resizeEvent 重新上锁，此刻 Chromium 视口未必已完成重排，抢跑的
+        reportHeight 可能回传未重排的中间值/极小值 → 卡片被钉到错误高度。
+        锁的语义正是「等布局稳定后再合并上报」，解锁补报（150ms，
+        ``_on_resize_unlock`` 无条件重发）负责这一拍。
         """
         self._do_resize_check()
 

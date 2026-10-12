@@ -3455,8 +3455,11 @@ class TabPanel(QWidget):
 
         # ⚠️ 宿主可能处于「半成品」状态：TabPanel 是在 TabManagerWindow.__init__
         # 里创建的，此刻 TabManagerWindow._tab_panel 尚未赋值，而
-        # get_current_window() 会去读它 → AttributeError。整体兜住，
-        # 取不到就按「无历史数据」渲染（只剩已打开 Tab 的骨架）。
+        # get_current_window() 会去读它 → AttributeError。整体兜住。
+        # ⚠️ 数据源必须与「窗口是否存活」解耦：HistoryManager / MemoryManagerCore
+        # 均为全局单例（跨窗口共享），所有窗口关完后 _windows 为空，若此时仍从
+        # 窗口链取用，树会退化成「默认项目 / 0 个会话」空壳（实测复现）。
+        # 因此无窗口时回落到单例入口。
         try:
             host = self._resolve_tab_host()
             windows = list(getattr(host, "_windows", []) or [])
@@ -3468,6 +3471,21 @@ class TabPanel(QWidget):
         except Exception:
             host, windows, current, source = None, [], None, None
             backend = history = memory = None
+        # 回落：窗口链取不到共用服务时，直接拿全局单例（不依赖任何窗口）
+        if history is None:
+            try:
+                from app.utils.history_manager import HistoryManager
+
+                history = HistoryManager.get_instance()
+            except Exception:
+                history = None
+        if memory is None:
+            try:
+                from app.core.conversation.memory_manager import MemoryManagerCore
+
+                memory = MemoryManagerCore.get_instance()
+            except Exception:
+                memory = None
 
         open_sids = self._open_session_ids(windows)
         owners = self._tab_owners(windows)
@@ -3733,7 +3751,11 @@ class TabPanel(QWidget):
             grp.setVisible(False)
 
     def _on_tree_pin_session(self, record, pinned: bool):
-        """历史会话行图钉：写置顶标记后刷新树（置顶会跨分组重排）"""
+        """历史会话行图钉：写置顶标记后刷新树（置顶会跨分组重排）
+
+        ⚠️ 写路径同样走「窗口链 → 全局单例」回落：无窗口时仍要能切置顶
+        （HistoryManager 是全局单例，与窗口存活无关）。
+        """
         try:
             sid = str((record or {}).get("session_id") or "")
             if not sid:
@@ -3741,6 +3763,10 @@ class TabPanel(QWidget):
             host = self._resolve_tab_host()
             current = host.get_current_window() if hasattr(host, "get_current_window") else None
             history = getattr(getattr(current, "backend", None), "history_manager", None)
+            if history is None:
+                from app.utils.history_manager import HistoryManager
+
+                history = HistoryManager.get_instance()
             if history is None:
                 return
             history.set_session_pinned(sid, bool(pinned))

@@ -144,3 +144,52 @@ def test_session_pin_toggle_writes_history(panel):
         panel._on_tree_pin_session({"session_id": "s2"}, True)
     history.set_session_pinned.assert_called_once_with("s2", True)
     assert refresh_mock.called, "置顶后应刷新树（跨分组重排）"
+
+
+def test_tree_specs_fallback_to_singleton_when_no_window(panel):
+    """所有窗口关闭后（_windows 为空），树仍从全局单例取数据
+
+    回归背景：HistoryManager / MemoryManagerCore 是全局单例（跨窗口共享），
+    但树的取数链曾强依赖「当前窗口」。全部 Tab 关闭后 windows 为空、
+    source=None → history=None，树退化成「默认项目 / 0 个会话」空壳，
+    历史项目与会话全部消失。修复：取不到时回落单例入口。
+    """
+    host = MagicMock()
+    host._windows = []
+    host.get_current_window.return_value = None
+    history = _make_history([_rec("s1", "窗口关完后的历史会话")])
+
+    with (
+        patch.object(panel, "_resolve_tab_host", return_value=host),
+        patch("app.utils.history_manager.HistoryManager.get_instance", return_value=history),
+        patch(
+            "app.core.conversation.memory_manager.MemoryManagerCore.get_instance",
+            return_value=MagicMock(),
+        ),
+    ):
+        specs = panel._collect_tree_specs()
+
+    projects = [s for s in specs if s.kind == KIND_PROJECT]
+    sessions = [s for s in specs if s.kind == KIND_SESSION]
+    assert projects, "窗口全关后仍应有项目节点（回落全局单例）"
+    assert projects[0].title == "Demo", f"应显示真实项目名，实际 {projects[0].title!r}"
+    assert sessions, "窗口全关后历史会话不应消失"
+    assert sessions[0].title == "窗口关完后的历史会话"
+
+
+def test_pin_toggle_falls_back_to_singleton_when_no_window(panel):
+    """所有窗口关闭后，置顶写路径仍可用（回落全局单例）"""
+    host = MagicMock()
+    host._windows = []
+    host.get_current_window.return_value = None
+    history = _make_history([_rec("s2", "会话")])
+
+    with (
+        patch.object(panel, "_resolve_tab_host", return_value=host),
+        patch("app.utils.history_manager.HistoryManager.get_instance", return_value=history),
+        patch.object(panel, "refresh_tree") as refresh_mock,
+    ):
+        panel._on_tree_pin_session({"session_id": "s2"}, True)
+
+    history.set_session_pinned.assert_called_once_with("s2", True)
+    assert refresh_mock.called, "无窗口时置顶后同样应刷新树"
