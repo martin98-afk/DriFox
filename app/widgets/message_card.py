@@ -236,6 +236,22 @@ from app.widgets.card_viewers import (
 )
 
 
+def user_bubble_target_width(container_width: int) -> int:
+    """用户气泡卡片的落定目标宽度（**全链唯一口径**）。
+
+    气泡本体由 PlainTextViewer 按内容自适应收缩（``set_width_cap`` 只是上限），
+    卡片撑到 ``target`` 只是给气泡留出右侧对齐的透明区。因此这里算的是
+    「气泡最多能有多宽」，不是视觉宽度本身。
+
+    🐛 口径分裂修复（2026-10-12）：margin 曾在三处各算一份——拖拽路径用
+    ``0.25``，而落定两条路径（全量宽度同步 / 滚动同步）残留 ``0.06``。松手
+    瞬间卡片从 75% 跳回 94% → PlainTextViewer 按新宽重折行 → 高度变 →
+    ``setFixedHeight`` → 宿主锚定补偿，一整套二次收敛，即用户报告的
+    「松手后跳一下才稳定」。现收敛到本函数，调用点不得再自行算 margin。
+    """
+    return max(320, int(container_width) - max(24, int(container_width * 0.25)))
+
+
 class MessageCard(SimpleCardWidget):
     heightChanged = pyqtSignal(int)
     deleteRequested = pyqtSignal()
@@ -3348,11 +3364,10 @@ class MessageCard(SimpleCardWidget):
                 return
             parent_width = parent.width()
             if self.role == "user":
-                # 与 main_widget 的比例 margin 保持一致（约容器 75%）
-                horizontal_margin = max(150, int(parent_width * 0.25))
+                # 与 main_widget 共用唯一口径（见 user_bubble_target_width 注释）
+                target_width = user_bubble_target_width(parent_width)
             else:
-                horizontal_margin = 20
-            target_width = max(320, parent_width - horizontal_margin)
+                target_width = max(320, parent_width - 20)
 
         # 性能优化：只有宽度真正变化时才更新（user/非 user 统一守卫）
         if not force and target_width == self._last_synced_width:

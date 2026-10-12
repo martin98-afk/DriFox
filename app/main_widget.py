@@ -191,6 +191,7 @@ from app.widgets.message_card import (
     MessageCard,
     create_welcome_card,
     resolve_initial_welcome_mode,
+    user_bubble_target_width,
 )
 # [T15] clear_global_render_cache 源头直取：message_card 已删 per-card 转发，
 # 主窗口清缓存提升（消息卡循环前一次）直接从 card_render_core 导入
@@ -9408,7 +9409,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 预计算各类卡片的 margin，避免 per-card 重复
         welcome_margin = 20
-        assistant_margin = 20
+
+        # 用户气泡目标宽全链唯一口径（见 user_bubble_target_width 注释）
+        user_target_width = user_bubble_target_width(viewport_width)
 
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
@@ -9425,10 +9428,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if card.role == "welcome":
                 margin = welcome_margin
             elif card.role == "user":
-                # 用户气泡：最大宽度约容器的 75%，自适应收缩见 PlainTextViewer
-                margin = max(24, int(viewport_width * 0.25))
+                # 用户气泡：宽度由唯一口径给（不在此处算 margin）
+                card.sync_width(target_width=user_target_width)
+                continue
             else:
-                margin = assistant_margin
+                margin = 20
 
             # 从视口宽度直接推算目标宽度，绕过循环依赖
             card.sync_width(target_width=max(320, viewport_width - margin))
@@ -9503,12 +9507,19 @@ class OpenAIChatToolWindow(ToolWindow):
         queue = self._sync_width_queue
         idx = self._sync_width_idx
         end = min(idx + _SYNC_WIDTH_BATCH, len(queue))
+        # 用户气泡目标宽全链唯一口径（见 user_bubble_target_width 注释）。
+        # 🐛 修复：此处曾残留 0.06（94%），与拖拽路径的 0.25 分裂 → 松手落定瞬间
+        # 气泡跳宽 → PlainTextViewer 重折行 → 高度变 → 二次收敛（用户报告的
+        # 「松手后收敛慢/跳变」）。口径统一后落定与拖拽同宽，无二次重排。
+        user_target_width = user_bubble_target_width(viewport_width) if viewport_width > 0 else 0
         for i in range(idx, end):
             card = queue[i]
             try:
                 if viewport_width > 0:
-                    margin = 20 if card.role != "user" else max(24, int(viewport_width * 0.06))
-                    card.sync_width(force=True, target_width=max(320, viewport_width - margin))
+                    if card.role == "user":
+                        card.sync_width(force=True, target_width=user_target_width)
+                    else:
+                        card.sync_width(force=True, target_width=max(320, viewport_width - 20))
                 else:
                     card.sync_width(force=True)
             except RuntimeError:
@@ -9719,8 +9730,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._last_chat_viewport_width = viewport_width
         try:
             if viewport_width > 0:
-                margin = 20 if card.role != "user" else max(24, int(viewport_width * 0.06))
-                card.sync_width(force=force, target_width=max(320, viewport_width - margin))
+                # 用户气泡目标宽全链唯一口径（见 user_bubble_target_width 注释）。
+                # 🐛 此处同为 0.06 残留点：滚动同步 / 新增卡片路径会把已按 75%
+                # 落定的气泡重新按 94% 撑宽 → 与拖拽路径互相打架。
+                if card.role == "user":
+                    card.sync_width(force=force, target_width=user_bubble_target_width(viewport_width))
+                else:
+                    card.sync_width(force=force, target_width=max(320, viewport_width - 20))
             else:
                 card.sync_width(force=force)
         except RuntimeError:
