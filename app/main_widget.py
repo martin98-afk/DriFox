@@ -229,9 +229,12 @@ from app.widgets.ui_helpers import (
 AT_BOTTOM_TOLERANCE = 24
 
 # [PERF] 滚动条上界校正里 `container.sizeHint()` 计算结果的复用窗口（秒）。
-# sizeHint() 是一次 O(卡片数) 的完整布局计算，而「程序置底 → valueChanged →
-# _on_scroll_changed → _is_view_at_bottom → _sync_scroll_maximum」构成 20Hz 级
-# 自激回路，长会话下是「滚动不跟手」的主因。窗口内直接复用上次结果；
+# sizeHint() 是一次 O(卡片数) 的完整布局计算。[历史] 曾因「程序置底 →
+# valueChanged → _on_scroll_changed → _is_view_at_bottom → _sync_scroll_maximum」
+# 构成 20Hz 级自激回路（「滚动不跟手」主因）——a88072ea 起
+# _is_view_at_bottom 改锚 landed value、不再调本函数，回路已断；现存触发源
+# 为锚定拍（_maintain_bottom_anchor）与 _ensure_at_bottom 兑底链。
+# 窗口内直接复用上次结果；
 # 高度收敛的及时性由 _ensure_at_bottom 的 8×300ms 重试链兜底。
 # [T23] 0.03 → 0.12：覆盖 sticky 锚定期的 100ms 拍间隔（_maintain_bottom_anchor
 # 每拍调 _sync_scroll_maximum）；窗口内命中直接返回，锚定拍不再每拍重算 sizeHint。
@@ -17818,13 +17821,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
         只**抬高**不压低：Qt 随后自己算出的上界会覆盖它，不会互相打架。
 
-        [PERF] `container.sizeHint()` 是一次 O(卡片数) 的完整布局计算。本函数被
-        `_is_view_at_bottom` 调用，而后者挂在滚动信号上 —— 程序置底 →
-        `valueChanged` → `_on_scroll_changed` → `_is_view_at_bottom` → 本函数，
-        形成 20Hz 级的自激回路；长会话（数百张卡）下这条回路把主线程占满，
-        滚轮事件排队 → 「滚动不跟手」。故对 sizeHint 结果加 30ms 复用窗口：
-        窗口内直接返回当前 maximum（Qt 自己算的新上界只会更大，与「只抬高」
-        语义一致）。高度收敛的及时性由 `_ensure_at_bottom` 的 8×300ms 重试链兜底。
+        [PERF][历史] `container.sizeHint()` 是一次 O(卡片数) 的完整布局计算。
+        本函数曾挂在 `_is_view_at_bottom`（滚动信号路径）上形成 20Hz 级自激
+        回路（程序置底 → valueChanged → _on_scroll_changed → 判定 → 本函数），
+        长会话下把主线程占满 → 「滚动不跟手」；a88072ea 起判定换锚 landed
+        value、本函数退出该路径，回路已断（现存触发源：锚定拍 / 兜底重试链）。
+        复用窗口现为 0.12s（SCROLL_MAX_CACHE_TTL，[T23] 0.03→0.12 覆盖 100ms
+        锚定拍间隔）：窗口内直接返回当前 maximum（Qt 自己算的新上界只会更大，
+        与「只抬高」语义一致）。高度收敛的及时性由 `_ensure_at_bottom` 重试链兜底。
         """
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         now = time.monotonic()
@@ -17856,10 +17860,10 @@ class OpenAIChatToolWindow(ToolWindow):
         贴预抬上界后 value + viewport 超出 container 实际高度 40px+）。
 
         container.height() 与 widget 实际几何同源同步，用它换算的上界与视口
-        可见内容底严格对齐，贴底动作本身不产生任何露白。预抬上界仍保留给
-        滚动条 range 与 `_is_view_at_bottom` 判定（知道「未来底」），仅贴底
-        动作换用本值；布局未落地的余量由锚定拍 / `_ensure_at_bottom` 重试
-        链在落地后继续追平。
+        可见内容底严格对齐，贴底动作本身不产生任何露白。a88072ea 起
+        `_is_view_at_bottom` 判定也换锚本值（预抬「未来底」会把贴底误判
+        离底 → away 误置位）；预抬上界仅保留给滚动条 range 本身。布局未
+        落地的余量由锚定拍 / `_ensure_at_bottom` 重试链在落地后继续追平。
         """
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         container = self.chat_scroll_area.widget()
@@ -18150,14 +18154,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 if delta > 0:
                     with self._programmatic_scroll():
                         sb.setMaximum(max(0, sb.maximum() + delta))
-                    # 缓存同步抬到新上界（而非置 None）：否则下拍 _is_view_at_bottom
-                    # 又会触发一次全量 sizeHint，O(1) 优化等于没做。
+                    # 缓存同步抬到新上界（而非置 None）：贴底/锚定拍与兑底链随后
+                    # 读取时命中缓存即可，不再触发全量 sizeHint，O(1) 优化不白做。
                     self._scroll_max_cache = (time.monotonic(), sb.maximum())
                 else:
                     # 收缩方向无法用增量表达（Qt 会自行压低上界）。不在此处补偿：
                     # setValue 会被 Qt 自动钳到新上界，语义等价。仅失效缓存，让
-                    # 下一次读取落到 Qt 的真实值（避免 `_is_view_at_bottom` 期间
-                    # 又跑一次全量 sizeHint，抵消本优化的收益）。
+                    # 下一次读取（锚定拍/兑底链）落到 Qt 的真实值，避免读到陈旧
+                    # 上界抵消本优化的收益。
                     self._scroll_max_cache = None
                 value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()

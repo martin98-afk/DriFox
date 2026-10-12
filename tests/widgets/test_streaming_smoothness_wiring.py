@@ -306,7 +306,7 @@ class TestDiffScopeQuery:
 
 
 class TestHeightTickAlignment:
-    """[T34] 高度回环节拍与打字机 rAF 同频，且防抖不得另立一拍"""
+    """[T34→P1步骤4] 追踪节拍 16→33ms 降频（砍 Chromium resize 回环），防抖不得另立一拍"""
 
     def test_tick_matches_frame_budget(self):
         """追踪 tick 降频 33ms（30Hz）砍 Chromium resize 回环，防抖保持 16ms 复用 DEBOUNCE 常量。

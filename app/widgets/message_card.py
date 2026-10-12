@@ -402,8 +402,8 @@ class MessageCard(SimpleCardWidget):
         self._stream_height_timer.setSingleShot(True)
         # [T28/P0-2] 与 card_render_core.STREAM_HEIGHT_TICK_MS 对齐单一节拍，
         # 消除 30/32/40 三层互质节拍的漂移叠加。
-        # [T34] 不再是独立常量：tick 已是 16ms，防抖若仍 40ms 就等于把目标值
-        # 按 40ms 一节喂给 16ms 的追踪 —— 追踪被喂成阶梯，等于白改。
+        # [T34→P1步骤4] 演化为独立常量 STREAM_HEIGHT_DEBOUNCE_MS：追踪 tick
+        # 降频 33ms 后防抖仍保持 16ms 单帧，只降追踪拍频率、不增加上报滞后。
         self._stream_height_timer.setInterval(STREAM_HEIGHT_DEBOUNCE_MS)
         self._stream_height_timer.timeout.connect(self._apply_debounced_height)
         self._debounced_target_height = 40
@@ -3026,7 +3026,7 @@ class MessageCard(SimpleCardWidget):
            24px 阈值 → stop + 重启，补间被打断成锯齿（"剧烈抖动"的 Qt 侧成分）。
         2. QVariantAnimation 不支持运行中改终值，新目标只能 stop+start，同样
            丢进度。追踪 tick 天然 retarget + 隔离，与流式同一套机制。
-        追踪比例换更缓的 ``FINISH_HEIGHT_TRACK_FACTOR``（0.28，约 300ms 收敛），
+        追踪比例换更缓的 ``FINISH_HEIGHT_TRACK_FACTOR``（现值 0.12，约 300ms 收敛），
         与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级收尾，丝绸不抢拍。
         """
         # 消费一次预算；预算用尽则关闭窗口

@@ -384,18 +384,22 @@ STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") !=
 # 同拍，消除互质漂移）。[T34] 40 → 16（≈单帧）：流式正文由打字机按 rAF
 # 每 ~17ms 揭示一次，容器高度却按 40ms 一格逼近 —— 文字连续长、容器跳格，
 # 底部一行反复「顶到边缘 → 憋住 → 蹦一下」。16ms 让容器与 rAF 同频，二者
-# 视觉上同步生长。成本实测：setFixedHeight p50≈1ms，62 次/秒 ≈ 6% 主线程
-# 占用，且回环已被 _stream_height_anim_active 上报隔离封死。
+# 视觉上同步生长。
+# [P1 步骤4] 16 → 33（30Hz）：16ms tick 每拍 setFixedHeight → Chromium 跨进程
+# resize → ResizeObserver 回传 → 下一拍再 set 的回环频率减半；TRACK_FACTOR
+# 同步 0.45→0.70、boost cap 0.85 保持收敛时间不变，防抖独立常量
+# STREAM_HEIGHT_DEBOUNCE_MS 保持 16ms。
 STREAM_HEIGHT_TICK_MS = 33
 # 流式高度上报防抖（ms）：目标值进入追踪的合并窗口。tick 降频后防抖仍保持
 # 单帧 16ms，只降追踪拍频率、不增加上报滞后。
 STREAM_HEIGHT_DEBOUNCE_MS = 16
-# 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
-# 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
+# 每拍逼近比例：剩余差值的 70%。[P1 步骤4] 0.45 → 0.70：tick 16→33 降频后
+# 单拍间隔翻倍，按比例提速保持收敛时间不变；过小（<0.3）会明显滞后，
+# 过大（>0.85）趋近 snap。
 STREAM_HEIGHT_TRACK_FACTOR = 0.70
-# 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 0.7），大台阶
-# （代码块/表格整块落地）更快跟上，消除"文字顶边憋一拍再蹦高"；小台阶维持
-# 基线（流式 0.45 / 结束态 0.28）防噪声抖动。
+# 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 0.85 = 基线
+# 0.70 + 0.15），大台阶（代码块/表格整块落地）更快跟上，消除"文字顶边憋
+# 一拍再蹦高"；小台阶维持基线（流式 0.70 / 结束态 0.12）防噪声抖动。
 STREAM_HEIGHT_TRACK_FAR_PX = 80
 STREAM_HEIGHT_TRACK_BOOST = 0.15
 # 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
