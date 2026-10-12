@@ -3050,6 +3050,17 @@ class CodeWebViewer(QWebEngineView):
                     from {{ transform: translateX(-100%); }}
                     to   {{ transform: translateX(100%); }}
                 }}
+                /* 流式占位提示（渲染型 fence 未闭合）：弱化斜体 + 纯 CSS 呼吸，
+                   禁 JS 定时器（流式热路径不新增 update() 源） */
+                .dfx-stream-note {{
+                    opacity: .55;
+                    font-style: italic;
+                    animation: dfxNote 1.6s ease-in-out infinite;
+                }}
+                @keyframes dfxNote {{
+                    0%, 100% {{ opacity: .35; }}
+                    50%      {{ opacity: .75; }}
+                }}
                 /* ── 减少动态效果：停掉所有**无限循环**的装饰性 CSS 动画 ──
                    这些动画（骨架脉冲/扫光、思考提示流光、工具预览流光）会一直
                    重绘直到元素被移除；流式期间与逐字渲染叠加会明显加剧掉帧与
@@ -3057,6 +3068,7 @@ class CodeWebViewer(QWebEngineView):
                 @media (prefers-reduced-motion: reduce) {{
                     .chart-skeleton__bars i,
                     .chart-skeleton::after,
+                    .dfx-stream-note,
                     .think-streaming-tip,
                     .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{ animation: none !important; }}
                 }}
@@ -3887,6 +3899,7 @@ class CodeWebViewer(QWebEngineView):
                 }}
 
                 function updateContent(newHtml) {{
+                    if (window._dfxStreamNote) window._dfxStreamNote.hide();
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
                         // 🐛 DOM 重建事务：必须在**任何** DOM 操作（_twReset / _stashCharts /
@@ -4187,6 +4200,7 @@ class CodeWebViewer(QWebEngineView):
                 }};
 
                 function updateContentAppend(newHtml, tailHtml) {{
+                    if (window._dfxStreamNote) window._dfxStreamNote.hide();
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
                     // 打字机闸门：与 updateTailHtml 同款——缓冲未排空时挂起，
@@ -4312,6 +4326,7 @@ class CodeWebViewer(QWebEngineView):
                 // （纯文本 + 已渲染），DOM 尾部始终是**一个** data-rendered 渲染节点，
                 // 后续 _append_text_incremental 在其后追加纯文本，差量/全量渲染再整体替换。
                 function updateTailHtml(html) {{
+                    if (window._dfxStreamNote) window._dfxStreamNote.hide();
                     const container = document.getElementById('content-placeholder');
                     if (!container || !html) return;
                     // 打字机闸门：缓冲未排空时挂起本次替换，等揭示到水位再执行。
@@ -5652,12 +5667,32 @@ class CodeWebViewer(QWebEngineView):
                 text_clean = text_clean[:2000] + "\n\n..."
             js = f"""
             (function() {{
+                // ── 流式占位提示（渲染型 fence 未闭合期间唯一可见反馈）──
+                // 只注册一次（与 _dfxAppendStreamText 同款守卫）
+                if (typeof window._dfxStreamNote === 'undefined') {{
+                window._dfxStreamNote = {{
+                    show: function(text) {{
+                        var c = document.getElementById('content-placeholder');
+                        if (!c || document.getElementById('dfx-stream-note')) return;
+                        var note = document.createElement('div');
+                        note.id = 'dfx-stream-note';
+                        note.className = 'dfx-stream-note';
+                        note.textContent = text || '';
+                        c.appendChild(note);
+                    }},
+                    hide: function() {{
+                        var n = document.getElementById('dfx-stream-note');
+                        if (n && n.parentNode) n.parentNode.removeChild(n);
+                    }}
+                }};
+                }}
                 // ── 追加逻辑注册为全局函数（只注册一次）──
                 // 打字机揭示队列（window._twPush）需要按帧调用同一套"把一段文本
                 // 接到正文尾部"的逻辑；注册成函数后队列与直接调用共用一份实现，
                 // 避免两处逻辑漂移（段落/host 判定一旦分叉就会出现跳位）。
                 if (typeof window._dfxAppendStreamText !== 'function') {{
                 window._dfxAppendStreamText = function(text, skipReport) {{
+                if (window._dfxStreamNote) window._dfxStreamNote.hide();
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
                 // ── 尾部文本宿主定位 ──

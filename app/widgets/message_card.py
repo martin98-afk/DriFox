@@ -4123,6 +4123,19 @@ class MessageCard(SimpleCardWidget):
                 self.viewer._needs_full_render = True
                 self.viewer._schedule_render(immediate=immediate_render)
             self.viewer._tag_text_streaming = _tag_unclosed
+            # [P0-1] 渲染型 fence（```echarts/mermaid 等）未闭合期间唯一可见反馈：
+            # 增量注入跳过 + _render_tail_inline 直接 return + 差量不产出 → DOM
+            # 无新内容。占位只进 DOM 不进 _content_data，持久化/历史加载零残留。
+            if _fence_unclosed != getattr(self.viewer, "_fence_text_streaming", False):
+                if _fence_unclosed and not getattr(self.viewer, "_fence_note_shown", False):
+                    self.viewer._fence_note_shown = True
+                    if self.viewer._is_js_ready and self.viewer.page():
+                        self.viewer.page().runJavaScript('window._dfxStreamNote && window._dfxStreamNote.show("正在生成图表/代码块…");')
+                elif not _fence_unclosed:
+                    self.viewer._fence_note_shown = False
+                    if self.viewer._is_js_ready and self.viewer.page():
+                        self.viewer.page().runJavaScript("window._dfxStreamNote && window._dfxStreamNote.hide();")
+                self.viewer._fence_text_streaming = _fence_unclosed
             # <think> 已闭合或无 think 标签：恢复正常渲染
             self.viewer._think_text_streaming_started = False
             # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
