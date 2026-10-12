@@ -3900,6 +3900,11 @@ _TYPEWRITER_JS = """
                     // 闸门挂起期间的新文本不在替换快照里：记账并在替换后补回
                     // （它已随揭示上屏，替换会整段移除，不补回就真丢了）
                     if (st._gateQueue.length) st._gateExtra += text;
+                    // 异常态绝对保险：正常指数追赶下 buf 稳态 ~几百字符；超 2000 =
+                    // 揭示链被闸门/rAF 饥饿卡死，此时打字机动效已无观感价值，瞬时
+                    // 全显优于继续追。_twFlush 会 cancel rAF 并清 buf，必须直接
+                    // return，不得再走下方 rAF 分支重起动画链。
+                    if (st.buf.length > 2000) { window._twFlush(); return; }
                     if (!st.raf) {
                         st.last = performance.now();
                         st.raf = requestAnimationFrame(window._twStep);
