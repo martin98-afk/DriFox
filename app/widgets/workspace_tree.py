@@ -61,8 +61,9 @@ _ROW_HEIGHT = 28
 _HEADER_HEIGHT = 28
 
 # hover 背景（模块级常量，避免 paintEvent 里反复构造）
-_HOVER_DARK = QColor(99, 102, 241, 32)
-_HOVER_LIGHT = QColor(120, 130, 160, 30)
+# 公开导出：tab_panel 的树行化复用同一组色值（单一数据源）
+HOVER_DARK = QColor(99, 102, 241, 32)
+HOVER_LIGHT = QColor(120, 130, 160, 30)
 
 # ── 样式纪元 ───────────────────────────────────────────────────────
 # 树每次 rebuild 都会对**所有**行调用 apply_spec，而 apply_spec 末尾的
@@ -557,7 +558,7 @@ class _NodeHeader(QFrame):
         if self._hovered:
             path = QPainterPath()
             path.addRoundedRect(QRectF(2, 2, self.width() - 4, self.height() - 4), 6, 6)
-            painter.fillPath(path, _HOVER_DARK if isDarkTheme() else _HOVER_LIGHT)
+            painter.fillPath(path, HOVER_DARK if isDarkTheme() else HOVER_LIGHT)
         super().paintEvent(event)
 
 
@@ -677,7 +678,7 @@ class _SessionRow(QFrame):
         if self._hovered:
             path = QPainterPath()
             path.addRoundedRect(QRectF(2, 2, self.width() - 4, self.height() - 4), 6, 6)
-            painter.fillPath(path, _HOVER_DARK if isDarkTheme() else _HOVER_LIGHT)
+            painter.fillPath(path, HOVER_DARK if isDarkTheme() else HOVER_LIGHT)
         super().paintEvent(event)
 
 

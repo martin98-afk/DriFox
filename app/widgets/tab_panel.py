@@ -66,6 +66,8 @@ from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from app.widgets.workspace_tree import (
+    HOVER_DARK,
+    HOVER_LIGHT,
     KIND_PROJECT,
     KIND_SESSION,
     KIND_WIDGET,
@@ -98,14 +100,19 @@ def _parse_rgba(rgba_str: str) -> _QColor:
 _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
 _CACHED_INFO = _parse_rgba(Colors.INFO)
 
+# 树行化选中底色：淡靛蓝（深 22% / 浅 17%），比列表模式青蓝 35% 弱一档；
+# hover 色值复用 workspace_tree 的 HOVER_DARK / HOVER_LIGHT（树节点头同源）
+_TREE_ROW_SELECTED_DARK = _QColor(99, 102, 241, 56)
+_TREE_ROW_SELECTED_LIGHT = _QColor(99, 102, 241, 43)
+
 # ── 对话页面板显示模式 ──
 PANEL_MODE_LIST = "list"  # 列表模式（默认）：已打开对话页 + 团队框平铺
 PANEL_MODE_TREE = "tree"  # 工作区树模式：项目 → 工作树 → 会话
 
-# 树模式缩进（像素）：项目头 0 / 工作树头·团队头 8 / 已打开 Tab 14 / 会话行 42
-# 四个数值是配套的，改一个必须同步另外三个：
-#   已打开 Tab：内部左边距 8+14，项目图标 20px + 间距 6 → 文字起点 48
-#   会话行    ：左边距 6+42 → 文字起点 48（会话行不带图标，见 workspace_tree）
+# 树模式缩进（像素）：项目头 0 / 工作树头·团队头 8 / 已打开 Tab 节点 14 / 会话行 42
+# 已打开行内容起点 48 = 6+42（与历史会话行同一竖线），由 TabItem.set_tree_row
+# 的 margins 直接承担，不经 spec.indent；_TREE_INDENT_TAB 仍供树折叠跳过逻辑
+# 判层（须落在 工作树头 8 与 会话行 42 之间）。
 _TREE_INDENT_PROJECT = 0
 _TREE_INDENT_WORKTREE = 8
 _TREE_INDENT_TAB = 14
@@ -397,10 +404,9 @@ class TabItem(QFrame):
         self._hovered = False  # 鼠标悬停态
         self._team_mode = False  # 团队模式：隐藏项目 icon（项目 icon 移到团队标题处）
         self._compact = False  # 紧凑模式（侧边栏折叠态）：仅图标 + 状态指示条
-        self._indent = 0  # 树模式缩进（左侧内边距增量，像素）
-        # 树模式专属：已激活（该会话占用一个后端）标记 + 关闭按钮常显
-        self._open_marker = False
-        self._close_persistent = False
+        # 树行化（列表模式复位）：28px / 无图标 / 淡靛蓝选中 / 关闭钮 hover 才显。
+        # 单入口 set_tree_row 收敛，由 TabPanel 在树/列表两个重建点调用。
+        self._tree_row = False
         self._capsule_color = ""  # 胶囊颜色（紧凑态首字符图标用同色）
         self._compact_saved = None  # 紧凑态恢复现场（展开时逐控件配对还原）
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
@@ -410,13 +416,13 @@ class TabItem(QFrame):
         self._close_timer.setSingleShot(True)
         self._close_timer.setInterval(3000)
         self._close_timer.timeout.connect(self._cancel_close_confirm)
-        # ── paintEvent 缓存：当尺寸未变时复用 QPainterPath ──
-        self._cached_rect_key = (-1, -1)
+        # ── paintEvent 缓存：当尺寸/树行化状态未变时复用 QPainterPath ──
+        self._cached_rect_key = (-1, -1, None)
         self._cached_round_rect = None
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setFixedHeight(40)  # 行高分档由 _refresh_row_height 决定（团队列表态 32 / 其余 40）
+        self.setFixedHeight(40)  # 行高分档由 _refresh_row_height 决定（树行 28 / 团队列表态 32 / 其余 40）
         self.setCursor(Qt.PointingHandCursor)
 
         # 图标尺寸：跟随系统字体缩放
@@ -431,13 +437,6 @@ class TabItem(QFrame):
         self._icon_widget.setToolTip(self._title)
         self._apply_project_to_icon()
         layout.addWidget(self._icon_widget)
-
-        # ── 已激活标记（树模式）：一个会话占用一个后端，需可辨识 + 可关闭 ──
-        self._active_dot = QLabel(self)
-        self._active_dot.setFixedSize(6, 6)
-        self._active_dot.setVisible(False)
-        self._active_dot.setToolTip("已激活：占用一个后端")
-        layout.addWidget(self._active_dot)
 
         # ── 团队角色胶囊（默认隐藏）──
         self._capsule_label = QLabel(self)
@@ -471,11 +470,13 @@ class TabItem(QFrame):
         """
         from app.utils.utils import get_unified_font
 
+        # 树行化后并入 12px 体系（与历史会话行一致）；列表模式保持 13px
+        size = 12 if self._tree_row else 13
         # 直接通过 setFont 强制应用字体（避开 stylesheet 继承坑）
-        self._title_label.setFont(get_unified_font(13))
+        self._title_label.setFont(get_unified_font(size))
         # 颜色随主题刷新（字体同一行写也能 setFont，但颜色走 stylesheet 更稳）
         self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(13)}"
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(size)}"
         )
 
     def refresh_style(self):
@@ -487,8 +488,6 @@ class TabItem(QFrame):
             self._icon_widget.setFixedSize(self._icon_size, self._icon_size)
             self._apply_project_to_icon()
         self._apply_title_style()
-        # 「已激活」圆点用 INFO 色（主题感知，浅色/深色都可见）
-        self._active_dot.setStyleSheet(f"background: {Colors.INFO}; border-radius: 3px; border: none;")
         # 紧凑态团队模式：字号缩放后幂等重刷首字符图标（补充点 3）
         if self._compact and self._team_mode:
             self._apply_compact_icon()
@@ -525,6 +524,10 @@ class TabItem(QFrame):
         self._project_initials = initials
         self._project_color = color_rgba
         self._apply_project_to_icon()
+        # 树行化：无图标形态（归属由工作树节点表达），数据照常写入但色块保持隐藏
+        if self._tree_row:
+            self._icon_widget.setVisible(False)
+            return
         # 有项目数据：确保色块可见（隐藏仅由空数据/团队模式触发）
         if initials and color_rgba:
             self._icon_widget.setVisible(True)
@@ -538,43 +541,32 @@ class TabItem(QFrame):
         self._project_color = ""
         self._icon_widget.set_fallback_pixmap(icon)
 
-    def set_indent(self, px: int):
-        """树模式缩进：只调左侧内边距，其余三边保持不变
+    def set_tree_row(self, on: bool):
+        """树行化：单入口收敛 行高 / 图标 / 关闭钮 / 字号 / 内边距
 
-        背景仍铺满整行（paintEvent 用 self.rect()），缩进只影响内容起点，
-        与树里其它行（工作树头 / 会话行）共用一套像素体系。
-        """
-        px = max(0, int(px))
-        if self._indent == px:
-            return
-        self._indent = px
-        lay = self.layout()
-        if lay is not None:
-            lay.setContentsMargins(8 + px, 4, 4, 4)
+        树行化后已打开对话页与树内其它行（节点头 / 历史会话行）同一体系：
+        28px 行高、无项目图标（归属由所在工作树节点表达）、标题 12px、
+        文字起点 48px 与历史会话行首字对齐、关闭钮 hover 才显。
 
-    def set_open_marker(self, on: bool):
-        """树模式「已激活」标记：该对话页已占用一个后端
-
-        紧凑态（46px 窄条）不显示，退出紧凑时由 set_compact 按标记恢复。
+        ⚠️ 只由 TabPanel 在「树布局重建（True）/ 列表重建复位（False）」两个
+        点调用，不提供细粒度 setter；与紧凑态互斥（树模式折叠时降级列表渲染）。
         """
         on = bool(on)
-        if self._open_marker == on:
+        if self._tree_row == on:
             return
-        self._open_marker = on
-        if not self._compact:
-            self._active_dot.setVisible(on)
-
-    def set_close_persistent(self, on: bool):
-        """树模式：关闭按钮常显（已激活会话占着后端，必须一眼看到可关）
-
-        列表模式下恒为 False（保持 hover 才显的既有行为）。
-        """
-        on = bool(on)
-        if self._close_persistent == on:
-            return
-        self._close_persistent = on
-        if not self._compact:
-            self._close_btn.setVisible(on)
+        self._tree_row = on
+        if on:
+            # 文字起点 48 = 历史会话行 6+_TREE_INDENT_SESSION，两处同一竖线
+            self.layout().setContentsMargins(6 + _TREE_INDENT_SESSION, 0, 6, 0)
+            self._icon_widget.setVisible(False)
+            self._close_btn.setVisible(False)  # hover 才显（enterEvent）
+        else:
+            self.layout().setContentsMargins(8, 4, 4, 4)
+            # 图标恢复现行语义：团队模式 / 无项目数据 → 隐藏
+            self._icon_widget.setVisible(bool(self._project_initials and self._project_color) and not self._team_mode)
+        self._apply_title_style()
+        self._refresh_row_height()
+        self.update()
 
     def set_capsule(self, text: str, color: str = ""):
         """显示团队角色胶囊"""
@@ -622,17 +614,21 @@ class TabItem(QFrame):
                 self._apply_project_to_icon()
                 self._icon_widget.setVisible(True)
         else:
-            self._icon_widget.setVisible(not team_mode)
+            # 树行化：无图标形态，不因模式切换重新点亮色块
+            self._icon_widget.setVisible(not team_mode and not self._tree_row)
         # 行高分档跟随模式：团队模式（列表态）成员行 32px
         self._refresh_row_height()
         self.update()
 
     def _refresh_row_height(self):
-        """行高分档：团队模式（列表态）成员行 32px 紧凑；树模式复用 / 非团队保持 40px
+        """行高分档：树行 28px / 团队模式（列表态）成员行 32px / 其余 40px
 
-        树模式下团队成员同样 _team_mode=True（角色胶囊仍在），但以 panel._mode
-        判定当前渲染容器；paintEvent 缓存按 (w, h) 自适应，行高变化无需额外失效。
+        树模式下团队成员同样 _team_mode=True（角色胶囊仍在），但以 _tree_row
+        优先判定；paintEvent 缓存按 (w, h, _tree_row) 自适应，行高变化无需额外失效。
         """
+        if self._tree_row:
+            self.setFixedHeight(28)
+            return
         in_list = self._panel is None or getattr(self._panel, "_mode", PANEL_MODE_LIST) != PANEL_MODE_TREE
         self.setFixedHeight(32 if (self._team_mode and in_list) else 40)
 
@@ -674,24 +670,22 @@ class TabItem(QFrame):
                 "title_visible": not self._title_label.isHidden(),
                 "capsule_visible": not self._capsule_label.isHidden(),
                 "close_visible": not self._close_btn.isHidden(),
-                "dot_visible": not self._active_dot.isHidden(),
                 "margins": self.layout().getContentsMargins(),
             }
             # 隐藏文字类控件，仅留图标
             self._title_label.setVisible(False)
             self._capsule_label.setVisible(False)
             self._close_btn.setVisible(False)
-            self._active_dot.setVisible(False)
             self.layout().setContentsMargins(4, 4, 4, 4)
             if self._team_mode:
                 self._apply_compact_icon()
-            elif self._project_initials and self._project_color:
-                # 无项目数据（如临时对话页）保持色块隐藏
+            elif self._project_initials and self._project_color and not self._tree_row:
+                # 无项目数据（如临时对话页）保持色块隐藏；树行化无图标形态同样保持隐藏
                 self._icon_widget.setVisible(True)
         else:
             saved = self._compact_saved or {}
-            # 团队模式：icon 恢复隐藏；非团队：恢复原可见性
-            if self._team_mode:
+            # 团队模式 / 树行化：icon 恒隐藏；其余恢复原可见性
+            if self._team_mode or self._tree_row:
                 self._icon_widget.setVisible(False)
             else:
                 self._icon_widget.setVisible(bool(saved.get("icon_visible", True)))
@@ -702,9 +696,8 @@ class TabItem(QFrame):
             self._title_label.setVisible(True)
             has_capsule_text = bool((self._capsule_label.text() or "").strip())
             self._capsule_label.setVisible(self._team_mode and has_capsule_text)
-            # 树模式语义优先于折叠前现场：常显关闭钮 / 已激活标记按当前标记恢复
-            self._close_btn.setVisible(bool(self._close_persistent))
-            self._active_dot.setVisible(bool(self._open_marker))
+            # 关闭钮恒隐待 hover（树行同样 hover 才显）
+            self._close_btn.setVisible(False)
             if "margins" in saved:
                 self.layout().setContentsMargins(*saved["margins"])
             self._compact_saved = None
@@ -782,9 +775,13 @@ class TabItem(QFrame):
         self._hovered = False
         # 移出 Tab 时若处于关闭确认态：取消确认（防止悬停残留误删）
         self._cancel_close_confirm()
-        if not self._selected and not self._compact:
-            # 树模式常显关闭钮：移出后仍保留（已激活会话占着后端）
-            self._close_btn.setVisible(bool(self._close_persistent))
+        if self._tree_row:
+            # 树行：hover 才显、移出即隐（选中不保持；选中态由底色表达）
+            if not self._compact:
+                self._close_btn.setVisible(False)
+        elif not self._selected and not self._compact:
+            # 列表模式：未选中或紧凑态恢复隐藏
+            self._close_btn.setVisible(False)
         self.update()
         super().leaveEvent(event)
 
@@ -794,29 +791,37 @@ class TabItem(QFrame):
 
         w, h = self.width(), self.height()
 
-        # ── 构建统一圆角路径（与 hover 一致，8px 圆角 + 2px 内边距） ──
-        # ★ 缓存：尺寸未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
-        _key = (w, h)
+        # ── 构建统一圆角路径（列表 8px 圆角 / 树行 6px，与节点头对齐 + 2px 内边距） ──
+        # ★ 缓存：尺寸与树行化状态未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
+        _key = (w, h, self._tree_row)
         if _key != self._cached_rect_key:
             self._cached_round_rect = _QPainterPath()
-            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
+            _radius = 6 if self._tree_row else 8
+            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, _radius, _radius)
             self._cached_rect_key = _key
         _round_rect = self._cached_round_rect
 
         # ── 选中背景（圆角矩形，视觉与 hover 统一） ──
         if self._selected:
-            painter.fillPath(_round_rect, _CACHED_SELECTED_BG)
-
-        # ── 悬停：圆角渐变背景（使用缓存颜色常量） ──
-        if self._hovered and not self._selected:
-            hover_grad = _QLinearGradient(0, 0, w, 0)
-            if isDarkTheme():
-                hover_grad.setColorAt(0.0, _HOVER_DARK_COLORS[0])
-                hover_grad.setColorAt(1.0, _HOVER_DARK_COLORS[1])
+            if self._tree_row:
+                # 树行：淡靛蓝（比列表模式青蓝 35% 弱一档），无左指示条
+                painter.fillPath(_round_rect, _TREE_ROW_SELECTED_DARK if isDarkTheme() else _TREE_ROW_SELECTED_LIGHT)
             else:
-                hover_grad.setColorAt(0.0, _HOVER_LIGHT_COLORS[0])
-                hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
-            painter.fillPath(_round_rect, hover_grad)
+                painter.fillPath(_round_rect, _CACHED_SELECTED_BG)
+
+        # ── 悬停：列表渐变 / 树行纯色（与树节点头同款） ──
+        if self._hovered and not self._selected:
+            if self._tree_row:
+                painter.fillPath(_round_rect, HOVER_DARK if isDarkTheme() else HOVER_LIGHT)
+            else:
+                hover_grad = _QLinearGradient(0, 0, w, 0)
+                if isDarkTheme():
+                    hover_grad.setColorAt(0.0, _HOVER_DARK_COLORS[0])
+                    hover_grad.setColorAt(1.0, _HOVER_DARK_COLORS[1])
+                else:
+                    hover_grad.setColorAt(0.0, _HOVER_LIGHT_COLORS[0])
+                    hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
+                painter.fillPath(_round_rect, hover_grad)
 
         # ── 流式/错误状态 ──
         _is_resizing = bool(self._panel and self._panel._is_resizing)
@@ -853,8 +858,8 @@ class TabItem(QFrame):
                 _question_color.setAlpha(max(0, min(255, alpha)))
                 _draw_left_indicator(painter, _round_rect, h, _question_color)
                 _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
-        elif self._selected:
-            # 左侧选中指示条（贴合圆角曲线）
+        elif self._selected and not self._tree_row:
+            # 左侧选中指示条（贴合圆角曲线）——树行选中由淡靛蓝底表达，无左条
             _draw_left_indicator(painter, _round_rect, h, _CACHED_INFO)
 
         super().paintEvent(event)
@@ -3077,16 +3082,13 @@ class TabPanel(QWidget):
         else:
             self._list_layout.addStretch()
 
-        # ── 列表模式复位：清掉树模式留下的缩进 / 已激活标记 / 常显关闭钮 ──
+        # ── 列表模式复位：清掉树行化留下的行高 / 图标 / 字号 / margins 状态 ──
         # 同时强制可见：树里被折叠节点跳过的成员会被 WorkspaceTree.rebuild
         # 隐藏（否则会以旧几何继续绘制形成残影），切回列表必须显式显示，
         # 否则表现为「列表空白」。
         for item in self._items:
-            item.set_indent(0)
-            item.set_open_marker(False)
-            item.set_close_persistent(False)
-            # 行高分档跟随当前渲染容器（列表团队 32 / 其余 40）
-            item._refresh_row_height()
+            # 树行化复位（含行高/图标/字号/margins）；列表模式幂等无副作用
+            item.set_tree_row(False)
             item.setVisible(True)
         for grp in self._team_groups.values():
             grp.setVisible(True)
@@ -3431,7 +3433,6 @@ class TabPanel(QWidget):
                 for i, w, _tid in opened_pairs:
                     if w != wt:
                         continue
-                    self._items[i].set_indent(_TREE_INDENT_TAB)
                     specs.append(
                         TreeNodeSpec(
                             key=f"tab:{i}",
@@ -3549,12 +3550,9 @@ class TabPanel(QWidget):
         self._tree_widget.rebuild(specs)
         compact = self._collapsed
         for item in self._items:
-            # 已激活的对话页（一个会话一个后端）在树里要可辨识 + 可关闭
-            item.set_open_marker(not compact)
-            item.set_close_persistent(not compact)
+            # 已打开对话页树行化：28px / 无项目图标 / 淡靛蓝选中 / hover 才显关闭钮
+            item.set_tree_row(True)
             item.set_compact(compact)
-            # 树模式成员行回 40px 分档（32 档仅列表团队态生效）
-            item._refresh_row_height()
         # ⚠️ 团队只在列表模式渲染：树模式不生成团队框节点，但框体 widget 仍在
         # _team_groups 里且上次可能入过布局 —— 不显式隐藏就会以旧几何继续绘制成残影。
         for grp in self._team_groups.values():
