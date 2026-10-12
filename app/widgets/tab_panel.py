@@ -800,6 +800,11 @@ class TabItem(QFrame):
             # 隐藏文字类控件，仅留图标
             self._title_label.setVisible(False)
             self._sub_row.setVisible(False)
+            # _body 以 stretch=1 占位（_setup_ui），只藏子控件会把 icon 推到
+            # 最左侧：新建对话行/插件行无 stretch，QHBoxLayout 富余空间整体
+            # 居中；TabItem 富余全被 _body 吃掉 → icon 中心 18 vs 面板中线 23
+            # （46px 窄条下偏左 5px，与顶栏图标列错位）。连 _body 一起藏。
+            self._body.setVisible(False)
             self._capsule_label.setVisible(False)
             self._close_btn.setVisible(False)
             self._pin_btn.setVisible(False)
@@ -820,6 +825,7 @@ class TabItem(QFrame):
             self._apply_project_to_icon()
             # 展开态按当前语义恢复（非折叠前现场）：折叠期间可能加入团队/设置胶囊，
             # 旧现场会漏显示——标题恒显、副行按树行化态、胶囊按团队模式+文本、close 恒隐（hover 再显）
+            self._body.setVisible(True)
             self._title_label.setVisible(True)
             self._sub_row.setVisible(bool(self._tree_row))
             has_capsule_text = bool((self._capsule_label.text() or "").strip())
