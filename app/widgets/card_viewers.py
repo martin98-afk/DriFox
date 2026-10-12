@@ -752,6 +752,11 @@ class CodeWebViewer(QWebEngineView):
         # -1 = 未知/旧骨架）+ 哨兵触发冷却时间戳。见 _content_sentinel_check。
         self._dom_text_len: int = -1
         self._sentinel_last_ts: float = 0.0
+        # [P0-2] 二级哨兵（dom 停滞检测）状态：停滞起点时间戳 / 起点 dom 长度 /
+        # 起点 md 长度。见 _content_sentinel_check 二级触发。
+        self._sentinel_stall_ts: float = 0.0
+        self._sentinel_stall_dom: int = -1
+        self._sentinel_stall_md: int = 0
         # [B2] 工具 DOM 脏标记代际：每次置 True 时递增，JS 回调清除时与捕获值比较，
         # 防止"旧渲染回调误清新注入的 dirty"（新注入已递增代际 → 旧回调放弃清除）。
         self._tool_dom_dirty_gen: int = 0
@@ -1389,6 +1394,41 @@ class CodeWebViewer(QWebEngineView):
         """
         if not self._streaming or not self._is_js_ready:
             return
+        # ── 二级触发（P0-2）：dom 停滞检测 ──
+        # 一级只覆盖 md≥800 且 dom<200 的重度白屏；盲区是 md<800、dom 200~800
+        # 缓慢增长、开头即白屏。渲染链停摆的指纹是「md 在涨、dom 不动」：
+        # dom 停滞 ≥2s（约 4-8 个渲染节拍周期，区分「慢」与「停」）且期间
+        # md 增长 ≥300（数个 chunk 正常增长量，排除模型天然空闲）→ 强制补渲。
+        # 与一级只排除 think 不同：二级无 dom<200 门槛，tag/fence 静默累积
+        # 场景下 dom 停滞是设计行为，须用含注册 tag 的完整排除集双判。
+        _page_l2 = self.page()
+        dom = getattr(_page_l2, "_dom_text_len", -1) if _page_l2 is not None else -1
+        md_len_l2 = len(self._markdown_text or "")
+        now_l2 = time.monotonic()
+        if dom >= 0 and dom != self._sentinel_stall_dom:
+            # dom 变化：刷新停滞基准
+            self._sentinel_stall_ts = now_l2
+            self._sentinel_stall_dom = dom
+            self._sentinel_stall_md = md_len_l2
+        elif (
+            self._sentinel_stall_ts
+            and now_l2 - self._sentinel_stall_ts >= 2.0
+            and md_len_l2 - self._sentinel_stall_md >= 300
+            and not _has_unclosed_think_or_tool(self._markdown_text)
+            and not _has_unclosed_chart_fence(self._markdown_text)
+        ):
+            # 先清停滞基准：补渲无效时避免每拍重入；补渲生效则 dom 恢复
+            # 增长自然刷新基准，双保险
+            self._sentinel_stall_ts = 0.0
+            # 与一级共用 3s 冷却防风暴
+            if now_l2 - getattr(self, "_sentinel_last_ts", 0.0) < 3.0:
+                return
+            self._sentinel_last_ts = now_l2
+            logger.warning(
+                f"[content-sentinel-L2] dom 停滞 {dom} 但 md 增长 {md_len_l2 - self._sentinel_stall_md} 字符 → 强制补渲"
+            )
+            self._render_deferred = False
+            self._schedule_render(immediate=True)
         md_len = len(self._markdown_text or "")
         if md_len < 800:
             return
