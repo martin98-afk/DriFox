@@ -5560,6 +5560,15 @@ class CodeWebViewer(QWebEngineView):
     # 大部分软边界仍落在窗口外 → 仍逐句重渲染。100ms 覆盖典型 chunk 间隔的
     # 2-5 倍，合并生效且不拖慢慢速流式（慢速流式距上次渲染远超 100ms → 仍即时）。
     _SOFT_BOUNDARY_MERGE_MS = 100
+    # [P2-8 F1] tail 行内渲染降载：软边界 ~每 30 字触发一次全量 tail convert
+    # （主线程同步），无空行长文 tail 线性增长 → 总开销 O(n²)。增量阈值 512
+    # 字符（≈中文 2-4 句，触发频率降 ~16 倍）+ 时间旁路 1.5s（保证慢速流式
+    # 每 1.5s 至少格式化一次）。尾部最后 1-2 句的格式化延迟由 finish 全量
+    # 渲染兜底（终态正确）。
+    # ⚠️ 阈值 return 路径不得更新 _tail_html_hash，否则下次 hash 比对把
+    # 「内容变了」误判「没变」永久跳渲。
+    _TAIL_INLINE_MIN_DELTA = 512
+    _TAIL_INLINE_MIN_INTERVAL_S = 1.5
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
@@ -6453,6 +6462,13 @@ class CodeWebViewer(QWebEngineView):
         _tail = self._markdown_text[self._stable_md_len :]
         if not _tail or not _tail.strip():
             return
+        # [P2-8 F1] 增量阈值 + 时间旁路：软边界高频触发下降载为线性。
+        # ⚠️ 此处 return 不得更新 _tail_html_hash（顺序死规定，见常量区注释）。
+        _now = time.monotonic()
+        _since = _now - getattr(self, "_tail_last_rendered_ts", 0.0)
+        _grown = len(_tail) - getattr(self, "_tail_last_rendered_len", 0)
+        if _grown < self._TAIL_INLINE_MIN_DELTA and _since < self._TAIL_INLINE_MIN_INTERVAL_S:
+            return
         # 🐛 未闭合 think/tool：静默累积，不在此渲染（过滤标签会把思考内容
         # 当正文泄漏显示），等闭合后由差量段/全量渲染处理。
         if _has_unclosed_think_or_tool(_tail):
@@ -6463,10 +6479,15 @@ class CodeWebViewer(QWebEngineView):
             return
         _h = hash(_tail)
         if _h == self._tail_html_hash:
+            # hash 命中：内容未变，刷新降载状态基准（与渲染完成处同口径）
+            self._tail_last_rendered_len = len(_tail)
+            self._tail_last_rendered_ts = _now
             return
         html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
         # 无论结果是否为空都记录哈希（think/tool 尾部返回空串时避免重复计算）
         self._tail_html_hash = _h
+        self._tail_last_rendered_len = len(_tail)
+        self._tail_last_rendered_ts = _now
         if not html:
             return
         try:
@@ -7195,6 +7216,9 @@ class CodeWebViewer(QWebEngineView):
         self._last_rendered_html = None
         self._last_rendered_markdown = ""
         self._markdown_text = ""
+        # [P2-8 F1] 清 tail 行内渲染降载状态（下一轮流式从零起算）
+        self._tail_last_rendered_ts = 0.0
+        self._tail_last_rendered_len = 0
         # 不再清除 _lazy_markdown_cb——主题切换 / 卡片复用需要按需从
         # MessageCard._content_data 重新生成 markdown，避免 2 份等价文本常驻。
         # 真正释放卡片时才由 cleanup() 统一置 None。
