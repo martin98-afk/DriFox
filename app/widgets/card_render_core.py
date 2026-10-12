@@ -2847,11 +2847,20 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     out_lines: list[str] = []
     buf: list[str] | None = None
     fence_marker = ""
+    offset = 0  # 当前行之前累计的字符数（供协议块未闭合判定取样前缀）
     for line in md_text.split("\n"):
         stripped = line.lstrip()
         if buf is None:
             m = _RE_KATEX_FENCE_OPEN.match(stripped)
-            if m:
+            # 🐛 孤儿 fence 熔断（2026-10-12 消息卡内容截断根因）：
+            # 开栏时若处于未闭合协议块（<think>/<tool>/注册 tag）内部，
+            # 这是协议块内容里的字面 fence（典型：模型思考里贴代码忘写闭合）。
+            # 此类 fence 绝不能提取：提取的哨兵落在协议块内部，会被后续
+            # _inject_think_cards/_inject_tool_blocks 的协议块替换一并吞掉，
+            # _restore_fenced_code 找不回哨兵 → 从 fence 到文末的全部内容
+            # 永久丢失（历史会话重开同样丢失，"偶尔内容显示不全"根因）。
+            # 放行后 fence 原文留在协议块内，由 think/tool 卡自身处理。
+            if m and not _has_unclosed_think_or_tool(md_text[:offset]):
                 fence_marker = m.group(1)
                 buf = [line]
             else:
@@ -2862,6 +2871,7 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
                 fences.append("\n".join(buf))
                 out_lines.append(f"\x00F{len(fences) - 1}\x00")
                 buf = None
+        offset += len(line) + 1
     if buf is not None:
         # 未闭合 fence：原样放回（流式中间态兜底，语义与 _extract_formulas 一致）
         out_lines.extend(buf)
