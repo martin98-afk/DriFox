@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.6] - 2026-10-11 (重新发布 #3)
+## [v0.6.6] - 2026-10-13 (重新发布 #4)
 
-自上一版本以来的变更（累计） | 提交数：9 · 文件变更：51 · +4187/-546 | 贡献者：dingma, martin98-afk
+自上一版本以来的变更（累计） | 提交数：44 · 文件变更：109 · +10440/-1447 | 贡献者：dingma, martin98-afk, mading
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -30,6 +30,81 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
 
 - **history-manager 内容被浮层滚动条遮挡** (`a73d0156`): `history_page` 与 `project_selector_card` 内容布局右边距调整为 14px，防止内容被 qfluentwidgets ScrollArea 的浮层滚动条（占右缘 13px）遮挡。
+
+### 🆕 重新发布 #4 增量（自 v0.6.6 重新发布 #3 起 · 35 commits · 58 files · +6253/-901）
+
+#### ✨ 新功能 (New Features)
+
+- **左侧卡片嵌入侧边栏，与对话区解耦** (`app/widgets/tab_manager_window.py`, `app/widgets/tab_panel.py`, `docs/plugins/ui-slots.md`, `tests/widgets/test_left_card_sidebar_embed.py` 新增): `container="left"` 的全局浮动卡（历史会话 / 快捷指令等）宿主从对话区 `dockSplitter` 左停靠区迁到 `#tabFrame` 内部新建 `sidebarSplitter`，嵌在侧边栏圆角框内、TabPanel 右侧，视觉上从侧边栏长出。交互语义：卡片打开时 TabPanel 收起让位（46px 图标条）、卡片区展开（默认 300px，按插件 per-card 记忆）、`#tabFrame` 整体加宽、对话区让位；关闭反向恢复。拖主 splitter 增量只加卡片宽度、TabPanel 保持不动；拖内部分隔条两者互借宽度、frame 总宽不变。实现：`_DockSideWrapper` 新增 `expandedChanged` 信号与伙伴窗格联动（`set_partner_pane`），`_sync` 重入改置脏补跑；宿主编排显式锁死内部分配 `[tab宽, 卡片宽]`，避免 QSplitter 按比例重排把 TabPanel 摊窄（实测 46→19）。修三处：① 卡片期拖内部分隔条致侧边栏坍缩（实测 frame 被压到 60px）——根因 TabPanel 宽度自治在共享 splitter 下仍 emit `sidebarToggled`，新增 `_left_card_present` 占位期抑制开关；② 分隔条未贯穿样式（`margin: 10px 2px` → `margin: 0`）；③ 主把手拖拽门控失效——`splitterMoved` 上报的是右邻窗格索引（左把手 = 1），硬编码 `index != 0` 使拖拽会话从未开启。新增 15 条回归测试。`9c1bb1e1`
+
+- **工作区树 v2：扁平化 + 两行式会话行 + 会话置顶** (`app/widgets/tab_panel.py`, `app/widgets/workspace_tree.py`, `app/widgets/tab_manager_window.py`, `tests/widgets/test_tab_panel_tree_v2.py`, `tests/debug/probe_tree_header_geometry.py` 新增, `tests/debug/probe_tree_render.py` 新增): 去掉工作树中间层，项目直挂会话，工作树名降级为会话行副行信息位；会话行改两行式（44px：标题 / 预览·工作树名·相对时间），已打开行与历史行同构；置顶跨分组（已打开+历史排项目下最前，按 `last_time` 降序），图钉 hover 才显、置顶后常显金色；「工作区」标题行右侧 + 新建项目（复用选文件夹流程）；项目行撤掉「分支」快捷入口（管理工作树入口随工作树层一起退役）。数据链复用 `history_manager.set_session_pinned`（内存+pinned 列）。新增 v2 结构回归 6 条（扁平/副行/置顶排序/标题行/图钉写链）。`e3892681` `5cebf686`
+
+- **已打开对话页行树行化，与树内其它行同一视觉体系** (`app/widgets/tab_panel.py`, `app/widgets/workspace_tree.py`, `tests/widgets/test_tab_panel_tree_row.py`): `TabItem` 新增 `set_tree_row` 单入口（28px 行高 / 无项目图标 / 标题 12px / 内容起点 48px 与历史会话行对齐 / 关闭钮 hover 才显）；树行选中改淡靛蓝（深 22% / 浅 17%，无左指示条），hover 纯色复用 `workspace_tree` 的 HOVER_DARK/LIGHT 单一数据源；删除树行化后失去调用点的 `set_open_marker` / `set_close_persistent` / `set_indent` 与蓝点控件；流式/报错/提问的 shimmer 与状态左指示条原样保留，列表模式与紧凑态零变化。5 条回归测试。`57fefeb4`
+
+- **项目色主题感知对比度** (`app/utils/project_meta.py`, `app/widgets/square_avatar.py`, `plugins/history-manager/ui/history_page.py`, `plugins/history-manager/ui/project_selector_card.py`, `plugins/plugin-marketplace/ui/_squircle_avatar.py`, `app/main_widget.py`, `app/widgets/tab_panel.py`, `app/widgets/workspace_tree.py`, `tests/utils/test_project_meta_contrast.py` 新增): `get_project_color` 按当前主题动态调整亮度，使项目色在明暗两套主题下均满足 WCAG 对比度；引入颜色缓存避免重复计算；新增 `contrast_text_color` 依背景亮度定字色；`_SquareAvatar` / `_TabProjectIcon` / `_ProjectBadge` 等统一接入。`8ddbbdee`
+
+- **未闭合渲染围栏占位提示** (`app/widgets/card_viewers.py`, `app/widgets/message_card.py`): WebEngine 骨架 JS 新增 `window._dfxStreamNote{show,hide}`（`typeof` 只注册一次），`#content-placeholder` 末尾挂 `dfx-stream-note` 占位行；`_dfxAppendStreamText` 首行与 `updateContent` / `updateContentAppend` / `updateTailHtml` 三入口首行 hide（正文一有真实内容即撤，任何差量/全量兜底清除）；骨架 CSS 加斜体弱化 + 纯 CSS 呼吸动画（禁 JS 定时器），reduced-motion 列表同步停用；`message_card.append_text` 在 tag 翻转块后加 fence 翻转块：首现 show「正在生成图表/代码块…」、闭合 hide，占位只进 DOM 不进 `_content_data`。`7376e065`
+
+- **Qt 渲染器调度对齐 WebEngine 四级策略** (`app/widgets/card_render_core.py`, `app/widgets/markdown_block_viewer.py`): `append_chunk` 不再每 chunk 同步全量 reconcile，改按 chunk 间隔自适应档位（<200ms→150 / >500ms→500 / 其余 300）合并派发；`_schedule_render` 四级（立即 / 流式硬边界同步 / 流式软边界 100ms 合并窗 / 无边界自适应；非流式 40ms）；`_perform_update` 统一消费 lazy cb 并刷新 `_last_render_ts`；`_do_incremental_render` 与 `_perform_update` 双向 stop 防一次 chunk 双全量；`finish_streaming` 收尾停派发拍；四级间隔常量模块级导出于 `card_render_core`（与 `CodeWebViewer` 类常量同值互指）。`0319b49f`
+
+- **共享界面滚动内容层加不透明底色，走 Qt blit 快路径** (`app/utils/design_tokens.py`, `app/widgets/cards/settings/model_selector_card.py`, `app/widgets/cards/settings/system_card_frame.py`, `app/widgets/cards/settings/llm_settings_card.py`, `app/widgets/cards/floating/command_card.py`, `app/widgets/tab_panel.py`, plugins 侧 `history-manager` / `plugin-marketplace` / `share-history` / `shortcut-manager` / `system-cleaner` / `artifacts-manager` 六处卡片页, `tests/perf/test_marketplace_scroll_blit.py` 新增): 新增 `_apply_content_surface` / `_apply_content_surface_color`，滚动区内容层设实色背景（此前半透明合成使 Qt 无法走 blit 优化，滚动逐帧重绘），在 `setWidget` 后统一调用保证视觉一致。`f848de70`
+
+- **用户气泡目标宽全链统一口径** (`app/widgets/message_card.py`, `app/main_widget.py`, `tests/widgets/test_user_bubble_width_consistency.py` 新增, `tests/debug/diag_hover_jitter.py` 新增, `tests/debug/probe_hover_geometry.py` 新增): 抽出 `user_bubble_target_width()` 唯一口径。此前拖拽路径用 0.25、而滚动同步 / 批量同步 / 新增卡片三处残留 0.06（94%），两者分裂 → 松手落定瞬间气泡跳宽 → `PlainTextViewer` 重折行 → 高度变 → 二次收敛（用户报告的「松手后收敛慢 / 跳变」）。口径统一后落定与拖拽同宽，无二次重排。`ba8ad6e4`
+
+- **单行省略控件控制字符归一化** (`app/widgets/elided_label.py`, `plugins/shortcut-manager/ui/__init__.py`, `tests/widgets/test_elided_label.py`): `_ElidedLabel` 按单行渲染（行高由外部列表行钉死），而原文（会话预览、命令描述）常带 `\n` / `\t`；直接交给 QLabel 会真换行渲染，但 `QFontMetrics.elidedText` 把控制字符当**零宽**处理（实测 `"a\nb"` 比 `"a b"` 窄 7px），测量与渲染不一致 → 省略结果仍含控制字符 → 被行高截断。新增 `_to_single_line()` 渲染/测量统一走归一化（长度不变保证高亮下标对齐原文），`_full_text` 保留原文（tooltip 与 setText 回读语义不变）。`531209fd`
+
+- **share-history 卡片图标换 FluentIcons** (`plugins/share-history/ui/cards.py`, `tests/plugins/test_share_history_cards_smoke.py` 新增): emoji 图标换 FluentIcons 并更新按钮类型，补 216 行冒烟测试。`bcfddb32`
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **消息卡内容被截断丢失（未闭合协议块里的孤围栏）** (`app/widgets/card_render_core.py`): `_extract_fenced_code` 开栏时若处于未闭合协议块（`<think>` / `<tool>` / 注册 tag）内部，那是协议块内容里的字面 fence（典型：模型思考里贴代码忘写闭合）；提取出的哨兵落在协议块内部，被后续 `_inject_think_cards` / `_inject_tool_blocks` 的协议块替换一并吞掉，`_restore_fenced_code` 找不回哨兵 → **从 fence 到文末的全部内容永久丢失**（历史会话重开同样丢失，即用户报告的「偶尔内容显示不全」根因）。修法：开栏时按前缀 `_has_unclosed_think_or_tool()` 判定，命中则放行不提取，fence 原文留在协议块内由 think/tool 卡自身处理。`de762aaf`
+
+- **真机弹窗路径 P0：`rangeChanged` 接线早于对话区创建** (`app/main_widget.py`, `app/widgets/modules/chat_area_module.py`): `__init__` 早期装配区的 `rangeChanged.connect` 早于 `_setup_ui` 对话区创建（兜底装配 / `chat_area_module.build` 两分支），真机弹窗路径必 AttributeError。抽 `_wire_scroll_range_changed()`，两分支收尾各自接线（互斥不重入）；`__init__` 仅保留 `_ensure_ab_active` / `_ensure_ab_active_until` 纯状态字段。`57ea992a`
+
+- **流式结束期盲滚底改事件驱动** (`app/main_widget.py`): `_ensure_at_bottom` 链活跃期 `rangeChanged` 即时贴底（`_ensure_ab_active` 窗口 + 2.4s 保险丝），盲重试 8 改 2；删 `_on_stream_finished` 500/1000ms 两处盲滚底（`_scroll_to_bottom_if_following`），由 `rangeChanged` 事件接管；sticky 1500ms 与 100ms 锚定保留；rangeChanged 在程序预抬 `setMaximum` 时也触发，靠 follow 守卫 + landed `setValue` 幂等兜底；回滚开关 `DRIFOX_EVENT_SCROLL=0`（默认开，关闭时重试链保持原 8 次）。`767bdb19`
+  - 后续修复：`_ensure_at_bottom` 默认参数改 None 后函数体缺 None 分派，无参重入（anchor 过期接力 `singleShot`）流入 `retries > 0` 抛 TypeError 致重试链静默中断；改为按开关分派（事件驱动 2 拍 / 回退 8 次）。`8aca88cd`
+
+- **贴底判定锚到已落地底值，消除预抬窗口误判** (`app/main_widget.py`, `tests/widgets/test_main_widget_scroll_anchor.py`): `_is_view_at_bottom` 改锚 `_landed_bottom_value`（已落地底），并从 `_sync_scroll_maximum` 调用中移出（`sizeHint` 退出每帧判定路径）。行为变化：away 判定从预抬「未来底」变「视觉底」，预抬窗口内不再误停 `_scroll_bottom_timer` / 清 `_pending_scroll_to_bottom`；析构窗口 RuntimeError 保守判贴底。同步测试基建：`_make_window` 补 landed 语义 mock。`a88072ea`
+
+- **底部锚定消除滚动白边** (`app/main_widget.py`, `app/widgets/card_viewers.py`): 引入 `_landed_bottom_value()` 精确判定布局更新后内容底部位置（替代预抬的 maximum），滚动位置与实际内容高对齐，防滚动期间视觉白边；移除 `contrast_text_color`，头像字色统一恒白保证两套主题可读；补探针用例确认无白边。`cab2c300`
+
+- **流式高度 tick 16ms→33ms，防抖指回 16ms** (`app/widgets/card_render_core.py`, `app/widgets/message_card.py`, `tests/widgets/test_streaming_smoothness_wiring.py`): `STREAM_HEIGHT_TICK_MS` 16→33（对齐 30fps 预算），新增 `STREAM_HEIGHT_DEBOUNCE_MS=16`（防抖 `setInterval` 改用 DEBOUNCE 常量保持 16ms 单帧）；`TRACK_FACTOR` 0.45→0.70、提速 cap 0.7→0.85（收敛时间不变）；同步测试守卫 `test_tick_matches_frame_budget` 至新节拍口径。`4ddcaf4d`
+
+- **typewriter 揭示链积压绝对上限** (`app/widgets/card_render_core.py`): `_twPush` 尾部加 `buf > 2000` 绝对上限，触发即 `_twFlush()` 瞬时全显并 return（flush 已 cancel rAF 清 buf，不得再走 rAF 分支重启动画链）。正常流永不命中（buf 稳态 <600），纯异常态保险（揭示链被闸门 / rAF 饥饿卡死）。`70f0e1de`
+
+- **空白流式的二级哨兵（DOM 停滞触发）** (`app/widgets/card_viewers.py`): 一级哨兵盲区（md<800、dom 200~800 缓慢增长、开头即白屏）新增二级触发：dom 停滞 ≥2s 且期间 md 增长 ≥300 且无未闭合 think/tag/fence → 清基准 + 强制补渲；排除集用 `_has_unclosed_think_or_tool`（含注册 tag）+ `_has_unclosed_chart_fence` 双判；触发即清 `_sentinel_stall_ts` 防补渲无效时每拍重入，与一级共用 3s 冷却。`cf0d1533`
+
+- **Qt 自适应渲染定时器饿死守卫** (`app/widgets/markdown_block_viewer.py`, `tests/widgets/test_markdown_block_viewer_adaptive.py`): 无边界分支无条件 `_render_timer.start()` 对激活中单发定时器重置倒计时，快速流式（chunk 间隔 < 档位）下每 chunk 重启 → 无边界内容（纯代码流 / 无句号英文段）格式化饿死至完成。对齐 WebEngine 版 `isActive()` 守卫（`card_viewers.py:5893-5895` 同构）。行为级用例：8ms 无边界流喂入中途断言 `_perform_update` 已触发（饿死版 FAILED、修复版 PASSED）。`3126f3a1`
+
+- **无窗口时历史 / 记忆管理器单例回落** (`app/widgets/tab_panel.py`, `app/widgets/card_viewers.py`, `tests/widgets/test_tab_panel_tree_v2.py`): HistoryManager / MemoryManagerCore 均为全局单例（跨窗口共享），所有窗口关完后 `_windows` 为空，若仍从窗口链取用，树会退化成「默认项目 / 0 个会话」空壳（实测复现）。读路径回落 `HistoryManager.get_instance()` / `MemoryManagerCore.get_instance()`，置顶写路径同款回落（无窗口时仍要能切置顶）。`c3f4c071`
+
+- **折叠态 TabItem 图标水平居中** (`app/widgets/tab_panel.py`, `tests/widgets/test_tab_panel_compact.py`): `_body` 以 `stretch=1` 占位，只藏子控件会把 icon 推到最左（46px 窄条下 icon 中心 18 vs 面板中线 23，与顶栏图标列错位 5px）；连 `_body` 一起藏。`36211e96`
+
+- **树形面板右边距与滚动条避让、引导线绘制顺序** (`app/widgets/workspace_tree.py`, `app/widgets/tab_panel.py`): `tree_row` 右边距改用 `_SCROLLBAR_RESERVE`，避免时间文字被浮层滚动条压住；自定义插件卡片非对称收紧右边距，与主 tab 列表滚动条位置对齐；会话行引导竖线改为 hover 背景后绘制，防被背景覆盖。`f8c11b8d`
+
+- **卡片占位期分隔条形态三连修** (`app/widgets/tab_manager_window.py`, `app/widgets/cards/card_container.py`, `app/main_widget.py`, `app/widgets/message_card.py`, `tests/widgets/test_left_card_sidebar_embed.py`, `tests/debug/repro_default_width_sequence.py` 新增, `tests/debug/repro_left_card_collapse_btn.py` 新增, `tests/debug/repro_three_pane_overflow.py` 新增): ① 占位期内拖分隔条无法退出折叠形态——TabPanel 占位期/拖拽期改形态自治（按滞回阈值切紧凑/展开 UI 但仍不 emit，防宿主把 frame 压塌），卡片关闭时尊重用户拖出的展开宽度落位，占位期与拖拽会话禁用挤压判定与自动展开恢复，折叠落定按 `tab_keep` 实际宽度决定不硬写 True；② 拖内部分隔条时面板形态不正确；③ 占位期宽度逻辑调整，保用户气泡与面板在折叠态正确显示。新增回归 `test_inner_drag_can_exit_collapsed_form`。`767fa357` `3fa73acc` `d8c01660`
+
+- **share-history / shortcut-manager 容器位调整** (`plugins/share-history/ui/__init__.py`, `plugins/shortcut-manager/ui/__init__.py`): share-history `right`→`left`（迁入新侧边栏卡片区），shortcut-manager `left`→`full`。`ba0f3d60`
+
+#### ⚡ 性能优化 (Performance)
+
+- **tail 行内渲染加增量阈值节流** (`app/widgets/card_viewers.py`): 软边界下约每 30 字全量 tail convert 的 O(n²) 降为线性——增量阈值 512 字符 + 时间旁路 1.5s（慢速流式每 1.5s 至少格式化一次）。阈值 return 路径**不写** `_tail_html_hash`（防 hash 比对把内容变化误判为未变而永久跳渲）；状态写入仅 hash 命中处与渲染完成处；`_cleanup_render_cache` 清零两个状态字段；切段边界不动，尾部格式化延迟由 finish 全量渲染兜底。`936bfbd0`
+
+- **卡片离屏时跳过流式动画** (`app/widgets/message_card.py`): `_update_anim` 在 `isVisible` 门控后追加视口门控——卡片矩形与 chat 视口矩形（经窗口坐标换算）无交集则跳过 `update()`。与隐藏分支同款相位语义：`_anim_clock.restart`，滚回视口后从原相位继续。`4274abfc`
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **删除孤儿 `_scroll_to_bottom_if_following`** (`app/main_widget.py`, `tests/widgets/test_main_widget_scroll_anchor.py`): `767bdb19` 删除两处 `singleShot` 调用点后该函数无任何存活调用，整函数与对应用例一并移除。`1654af02`
+
+- **shortcut-manager 移除卡片头部命令计数标签** (`plugins/shortcut-manager/ui/cards.py`): 移除 `_count_lb` 及其布局占位。`187a1a15`
+
+#### 📚 文档 (Docs)
+
+- **滚动注释与落地锚点 / 33ms 节拍对齐** (`app/main_widget.py`, `app/widgets/card_render_core.py`, `app/widgets/message_card.py`, `tests/widgets/test_streaming_smoothness_wiring.py`): 九项注释/docstring 与实际行为对齐（landed 换锚说明、自激回路标注 [历史] 并补现存触发源、30ms→0.12s 复用窗口、tick/Factor/Boost 演化理由、DEBOUNCE 独立常量化、`FINISH_TRACK_FACTOR` 0.28→0.12）。`3bbc0ce8`
+
+#### 🧪 测试 (Tests)
+
+- **流式渲染真机基准双通道** (`tests/perf/test_stream_render_bench.py` 新增, `tests/perf/test_stream_render_bench_web.py` 新增): Qt 灰度通道（`MarkdownBlockViewer`）与生产默认 `CodeWebViewer` 通道互补对照基准。环境守卫：offscreen / 无图形会话模块级 skip（WebEngine 原生层 0xC0000409 必崩，防误跑）；头注注明须真机桌面会话、运行前关闭 DriFox 实例；`js_ready` 等待放宽 30s（WebEngine 首次骨架注入 ~2-5s）；断言策略同款（链路可用 + 数据完整，不断言性能数值）。`beaf1014` `9f34c3aa`
 
 ## [v0.6.5] - 2026-10-11 (重新发布 #4)
 
