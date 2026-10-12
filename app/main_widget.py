@@ -238,6 +238,10 @@ AT_BOTTOM_TOLERANCE = 24
 # 高度真变化时由 _on_message_card_height_changed 主动置 None 失效，不会读到陈旧值。
 SCROLL_MAX_CACHE_TTL = 0.12
 
+# 置底跟随事件驱动开关（P1 步骤6）：finish 阶段由 rangeChanged 即时贴底，
+# 取代 500/1000ms 盲滚底。DRIFOX_EVENT_SCROLL=0 回退到纯时间驱动重试链。
+STREAM_BOTTOM_EVENT_DRIVEN = os.environ.get("DRIFOX_EVENT_SCROLL", "1") != "0"
+
 # 「回到底部」胶囊的显示阈值（px）：视口离底超过它才浮出。
 # ⚠️ 故意比 AT_BOTTOM_TOLERANCE 大一个数量级 —— 两者语义不同：
 #   - AT_BOTTOM_TOLERANCE 问的是「还算贴底吗」（决定是否跟随流式输出）
@@ -1197,6 +1201,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_bottom_timer.setSingleShot(True)
         self._scroll_bottom_timer.setInterval(50)
         self._scroll_bottom_timer.timeout.connect(self._do_scroll_to_bottom)
+        # [P1 步骤6] 事件驱动贴底窗口状态：_ensure_at_bottom 链活跃期间
+        # rangeChanged 即时贴底（until 为 2.4s 保险丝，与原 8×300ms 同窗）
+        self._ensure_ab_active = False
+        self._ensure_ab_active_until = 0.0
+        self.chat_scroll_area.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
         # 团队模式：文件系统监听器（检测新邮件到达）
         self._team_fs_watcher = QFileSystemWatcher(self)
         self._team_fs_watcher.directoryChanged.connect(self._on_team_mailbox_changed)
@@ -17979,18 +17988,17 @@ class OpenAIChatToolWindow(ToolWindow):
             self._bottom_anchor_timer.start()
         else:
             # 即使anchor到期，也再延迟多次检查，防止多批懒渲染卡片撑开高度导致没到底
-            # 🆕 retries 3 → 8：延长兜底窗口（8×300ms ≈ 2.4s），覆盖 WebEngine
-            # 全量重渲染异步完成后的最终高度（长消息渲染可能超时）。
-            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
+            # [P1 步骤6] 盲重试 8 改 2，剩余高度变化由 rangeChanged 事件即时贴底
+            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=2))
         # 加载完成后抑制滚动同步，避免节点跑到渲染的卡片数量位置
         self._suppress_scroll_sync_count = 0
 
-    def _ensure_at_bottom(self, retries: int = 8):
+    def _ensure_at_bottom(self, retries: int = None):
         """确保滚动条在底部，用于懒渲染卡片高度变化后的二次修正
 
         Args:
-            retries: 剩余重试次数，即使 bottom anchor 过期，也重试几次处理懒加载
-                （默认 8 次 × 300ms 间隔 ≈ 2.4s 兜底窗口，覆盖长消息重渲染延迟）
+            retries: 剩余重试次数。None（默认）按开关取值：事件驱动 2 拍
+                （rangeChanged 接管剩余高度变化），关闭时保持原 8 次 × 300ms。
         """
         # 窗口已销毁时跳过：避免 QTimer.singleShot 回调在 closeEvent 之后
         # 访问已释放的 chat_scroll_area 触发 RuntimeError
@@ -18001,6 +18009,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # `_user_intentionally_away_from_bottom` 精确表达，不需要宽限期来猜。
         if not self._should_follow_bottom():
             return
+        # [P1 步骤6] 事件驱动窗口：链活跃期间 rangeChanged 即时贴底；
+        # until 与原 8×300ms 同窗（2.4s）作保险丝。
+        self._ensure_ab_active = True
+        self._ensure_ab_active_until = time.monotonic() + 2.4
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         self._sync_scroll_maximum()
         if not self._is_view_at_bottom():
@@ -18014,6 +18026,32 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(300, lambda: self._ensure_at_bottom(retries - 1))
             elif self._bottom_anchor_deadline > time.monotonic():
                 QTimer.singleShot(300, self._ensure_at_bottom)
+            else:
+                # 重试耗尽：关事件驱动窗口（下次链启动重新开启）
+                self._ensure_ab_active = False
+        else:
+            # 已贴底：无高度变化要追，关窗减少 rangeChanged 空转
+            self._ensure_ab_active = False
+
+    def _on_scroll_range_changed(self, _mn: int, _mx: int):
+        """rangeChanged 事件驱动的贴底跟随（P1 步骤6）。
+
+        终渲染把 maximum 推高时即时贴底（早于原 500ms 盲滚底）；range 未变
+        时不空跑。程序预抬 setMaximum 同样触发本 handler，靠 follow 守卫 +
+        landed setValue 幂等兑底；实测空转显著则再加节流。
+        """
+        if not STREAM_BOTTOM_EVENT_DRIVEN:
+            return
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not self._ensure_ab_active:
+            return
+        if time.monotonic() > self._ensure_ab_active_until:
+            self._ensure_ab_active = False
+            return
+        if self._should_follow_bottom():
+            with self._programmatic_scroll():
+                self.chat_scroll_area.verticalScrollBar().setValue(self._landed_bottom_value())
 
     def _maintain_bottom_anchor(self):
         # 窗口已销毁时跳过：避免 _bottom_anchor_timer 回调在 closeEvent 之后
@@ -20475,12 +20513,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # delta 补偿 + 8×300ms 兜底」系统性追不上（补偿落点偏小）。锚定期每
             # 100ms 强制 setValue(maximum)，用户一滚立即失效（_on_scroll_changed）。
             self._scroll_to_bottom(sticky_ms=1500)
-            # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
-            # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
-            # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
-            # ⚠️ 兜底同样要守卫：用户可能在等待期间上滚去看别的内容。
-            QTimer.singleShot(500, self._scroll_to_bottom_if_following)
-            QTimer.singleShot(1000, self._scroll_to_bottom_if_following)
+            # [P1 步骤6] 原 500/1000ms 两处 singleShot(_scroll_to_bottom_if_following)
+            # 盲滚底已删：终渲染高度变化经 rangeChanged 即时贴底，早于 500ms，
+            # 不再与用户滚轮竞争。
 
         # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
         # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。
