@@ -386,10 +386,13 @@ STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") !=
 # 底部一行反复「顶到边缘 → 憋住 → 蹦一下」。16ms 让容器与 rAF 同频，二者
 # 视觉上同步生长。成本实测：setFixedHeight p50≈1ms，62 次/秒 ≈ 6% 主线程
 # 占用，且回环已被 _stream_height_anim_active 上报隔离封死。
-STREAM_HEIGHT_TICK_MS = 16
+STREAM_HEIGHT_TICK_MS = 33
+# 流式高度上报防抖（ms）：目标值进入追踪的合并窗口。tick 降频后防抖仍保持
+# 单帧 16ms，只降追踪拍频率、不增加上报滞后。
+STREAM_HEIGHT_DEBOUNCE_MS = 16
 # 每拍逼近比例：剩余差值的 45%。0.45 → 约 5 拍（150ms）收敛 94%，慢流式下
 # 观感为"卡片跟着文字匀速生长"；过小（<0.3）会明显滞后，过大（>0.7）趋近 snap。
-STREAM_HEIGHT_TRACK_FACTOR = 0.45
+STREAM_HEIGHT_TRACK_FACTOR = 0.70
 # 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 0.7），大台阶
 # （代码块/表格整块落地）更快跟上，消除"文字顶边憋一拍再蹦高"；小台阶维持
 # 基线（流式 0.45 / 结束态 0.28）防噪声抖动。

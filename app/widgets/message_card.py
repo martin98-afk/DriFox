@@ -158,6 +158,7 @@ from app.widgets.card_render_core import (
     _STREAM_TINT_RETRY,
     STREAM_HEIGHT_ANIM_ENABLED,
     STREAM_HEIGHT_ANIM_MIN_DELTA,
+    STREAM_HEIGHT_DEBOUNCE_MS,
     STREAM_HEIGHT_TICK_MS,
     STREAM_HEIGHT_TRACK_BOOST,
     STREAM_HEIGHT_TRACK_EPSILON,
@@ -403,7 +404,7 @@ class MessageCard(SimpleCardWidget):
         # 消除 30/32/40 三层互质节拍的漂移叠加。
         # [T34] 不再是独立常量：tick 已是 16ms，防抖若仍 40ms 就等于把目标值
         # 按 40ms 一节喂给 16ms 的追踪 —— 追踪被喂成阶梯，等于白改。
-        self._stream_height_timer.setInterval(STREAM_HEIGHT_TICK_MS)
+        self._stream_height_timer.setInterval(STREAM_HEIGHT_DEBOUNCE_MS)
         self._stream_height_timer.timeout.connect(self._apply_debounced_height)
         self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)
@@ -3085,7 +3086,7 @@ class MessageCard(SimpleCardWidget):
             # 保住结束态比流式更缓的"丝绸尾音"设计。
             factor = self._height_track_factor
             if abs(diff) > STREAM_HEIGHT_TRACK_FAR_PX:
-                factor = min(0.7, factor + STREAM_HEIGHT_TRACK_BOOST)
+                factor = min(0.85, factor + STREAM_HEIGHT_TRACK_BOOST)
             self._apply_viewer_height(int(current_height + diff * factor))
         except RuntimeError, AttributeError:
             # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
