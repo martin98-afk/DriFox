@@ -66,6 +66,15 @@ def _make_window(**overrides):
     scroll_bar.value.return_value = 0  # 顶部
     area = MagicMock()
     area.verticalScrollBar.return_value = scroll_bar
+    # _is_view_at_bottom 走「已落地底」（_landed_bottom_value）：container.height
+    # 动态跟随 maximum、viewport 高度 0 → landed 恒等 maximum，与旧
+    # maximum - value 判定严格等价；个别测试覆写 maximum 后自动跟随。
+    landed_container = MagicMock()
+    landed_container.height.side_effect = lambda: scroll_bar.maximum()
+    area.widget.return_value = landed_container
+    landed_viewport = MagicMock()
+    landed_viewport.height.return_value = 0
+    area.viewport.return_value = landed_viewport
     win.chat_scroll_area = area
     for key, value in overrides.items():
         setattr(win, key, value)

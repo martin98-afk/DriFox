@@ -17760,15 +17760,24 @@ class OpenAIChatToolWindow(ToolWindow):
     def _is_view_at_bottom(self, tolerance: int = AT_BOTTOM_TOLERANCE) -> bool:
         """视口是否贴在底部（全项目唯一权威判定）。
 
+        锚定「已落地底」（_landed_bottom_value）而非滚动条预抬上界：预抬上界
+        领先布局一拍，程序置底后视口贴的是「未来底」，用它判定会把贴底误判
+        离底 → away 误置位 → 跟随失效 + 取消挂起置底。视觉底语义对所有
+        调用点（away 状态机 / 跟底守卫）均更正确。
+
         Args:
             tolerance: 距底部多少 px 内算「贴底」，默认 `AT_BOTTOM_TOLERANCE`。
 
         Returns:
             True = 视口在底部附近（或内容不足一屏，无处可滚）。
         """
-        scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        self._sync_scroll_maximum()
-        return scroll_bar.maximum() - scroll_bar.value() <= tolerance
+        try:
+            landed = self._landed_bottom_value()
+            value = self.chat_scroll_area.verticalScrollBar().value()
+        except RuntimeError:
+            # 析构窗口保守判贴底：不再触发任何 away 翻转 / 取消挂起置底
+            return True
+        return landed - value <= tolerance
 
     @contextlib.contextmanager
     def _programmatic_scroll(self):
