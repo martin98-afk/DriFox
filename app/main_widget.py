@@ -1202,10 +1202,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_bottom_timer.setInterval(50)
         self._scroll_bottom_timer.timeout.connect(self._do_scroll_to_bottom)
         # [P1 步骤6] 事件驱动贴底窗口状态：_ensure_at_bottom 链活跃期间
-        # rangeChanged 即时贴底（until 为 2.4s 保险丝，与原 8×300ms 同窗）
+        # rangeChanged 即时贴底（until 为 2.4s 保险丝，与原 8×300ms 同窗）。
+        # ⚠️ rangeChanged 接线不在 __init__ 早期：chat_scroll_area 在 _setup_ui
+        # 深处（兜底装配 / chat_area_module.build 两分支）才创建，提前访问
+        # AttributeError（真机弹窗路径 P0 崩溃）。由 _wire_scroll_range_changed
+        # 在两分支收尾时接线。
         self._ensure_ab_active = False
         self._ensure_ab_active_until = 0.0
-        self.chat_scroll_area.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
         # 团队模式：文件系统监听器（检测新邮件到达）
         self._team_fs_watcher = QFileSystemWatcher(self)
         self._team_fs_watcher.directoryChanged.connect(self._on_team_mailbox_changed)
@@ -3160,6 +3163,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 layout.addWidget(self.chat_scroll_area, 1)
                 # 下方卡片容器
                 layout.addWidget(self._bottom_card_container)
+
+                # [P1 步骤6] chat_scroll_area 就绪后接 rangeChanged 事件驱动贴底
+                self._wire_scroll_range_changed()
 
         # ── 六张系统卡片框架懒创建（Phase F：已迁移到 SystemCardsModule，由 compose 驱动）──
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -18036,6 +18042,14 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             # 已贴底：无高度变化要追，关窗减少 rangeChanged 空转
             self._ensure_ab_active = False
+
+    def _wire_scroll_range_changed(self):
+        """[P0 修复] rangeChanged 事件驱动贴底接线：必须在 chat_scroll_area 创建后调用。
+
+        __init__ 早期装配区早于 _setup_ui 对话区创建——兜底装配与
+        chat_area_module.build 两分支各自收尾时调用本方法，互斥不重入。
+        """
+        self.chat_scroll_area.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
 
     def _on_scroll_range_changed(self, _mn: int, _mx: int):
         """rangeChanged 事件驱动的贴底跟随（P1 步骤6）。
