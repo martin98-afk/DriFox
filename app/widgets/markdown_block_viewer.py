@@ -2211,100 +2211,198 @@ class MarkdownBlockViewer(QWidget):
             self._render_timer.stop()
             self._perform_update()
             return
-        # 无边界：自适应间隔派发
-        self._render_timer.start(self._current_adaptive_interval)
+        # 无边界：自适应间隔派发。⚠️ 必须 isActive 守卫：QTimer.start() 对激活中
+
+        # 的单发定时器重置倒计时，快速流式（chunk 间隔 < 档位）下每 chunk 重启
+
+        # → 倒计时永不到期 → 无边界内容（纯代码流/无句号英文段）格式化渲染
+
+        # 饿死至 finish（对齐 WebEngine 版 isActive 守卫）。
+
+        if not self._render_timer.isActive():
+
+            self._render_timer.start(self._current_adaptive_interval)
+
 
     def _perform_update(self) -> None:
+
         """[X1] 派发落点：停增量兑底、消费 cb、刷新基准、全量 reconcile。"""
+
         if getattr(self, "_incr_timer", None) is not None and self._incr_timer.isActive():
+
             self._incr_timer.stop()
+
         self._last_render_ts = time.monotonic()
+
         cb = getattr(self, "_lazy_markdown_cb", None)
+
         if cb is not None:
+
             self._lazy_markdown_cb = None
+
             self._md = cb()
+
         self._reconcile(force=True)
 
+
     def _append_text_incremental(self, text: str) -> None:
+
         """兼容 CodeWebViewer 流式差量注入：Qt 渲染器无 DOM 注入层，
+
         用 80ms 节流的全量刷新代替（key 指纹 reconcile 只重建尾部变化块）。"""
+
         if not hasattr(self, "_incr_timer"):
+
             self._incr_timer = QTimer(self)
+
             self._incr_timer.setSingleShot(True)
+
             self._incr_timer.setInterval(80)
+
             self._incr_timer.timeout.connect(self._do_incremental_render)
+
         if not self._incr_timer.isActive():
+
             self._incr_timer.start()
 
+
     def _do_incremental_render(self) -> None:
+
         # [X1] 双向防双全量：80ms 兑底出字前停掉派发拍，一次 chunk 只闪一次
+
         self._render_timer.stop()
+
         cb = getattr(self, "_lazy_markdown_cb", None)
+
         if cb is not None:
+
             self._lazy_markdown_cb = None
+
             self._md = cb()
+
             self._reconcile(force=True)
 
+
     @staticmethod
+
     def _has_reached_clean_boundary(md_text: str) -> bool:
+
         """兼容 MessageCard.append_text：自然边界检测（简化复刻 CodeWebViewer 同名逻辑）。"""
+
         if not md_text:
+
             return False
+
         if md_text.endswith("\n\n"):
+
             return True
+
         stripped = md_text.rstrip()
+
         return stripped.endswith("</think>") or stripped.endswith("```")
 
+
     @staticmethod
+
     def _has_reached_soft_boundary(md_text: str) -> bool:
+
         """兼容 MessageCard.append_text：句号类软边界检测。"""
+
         stripped = (md_text or "").rstrip()
+
         return bool(stripped) and stripped[-1] in "。！？!?.；;"
 
+
     # ── 内部 ──
+
     def _reconcile(self, force: bool = False) -> None:
+
         blocks = parse_blocks(self._md)
+
         # 分区规则对齐 WebEngine 版：think + 非编辑工具进「工具与思考」折叠区；
+
         # 编辑类工具结果始终展示在正文之中（按文档位置）
+
         side_items = _slot_items(
+
             [b for b in blocks if b["type"] == "think" or (b["type"] == "tool" and not b.get("is_edit"))]
+
         )
+
         body_items = _slot_items(
+
             [
+
                 b
+
                 for b in blocks
+
                 if b["type"] in ("html", "code", "tag", "quote", "table", "hr")
+
                 or (b["type"] == "tool" and b.get("is_edit"))
+
             ]
+
         )
+
         self._widgets, self._keys = reconcile_widgets(
+
             self._body_lay, self._widgets, self._keys, body_items, self._build_block_widget, self._streaming
+
         )
+
         self._tool_section.reconcile(side_items, self._streaming)
 
+
     @staticmethod
+
     def _build_block_widget(b: Dict[str, Any]) -> QWidget:
+
         if b["type"] == "code":
+
             notice = _chart_fence_notice(b["lang"])
+
             if notice is not None:
+
                 # 图表类 fence：上方说明卡片 + 下方源码，而不是把图表源码
+
                 # 默默当成普通代码高亮（用户会以为"图表渲染成这样了"）
+
                 holder = QWidget()
+
                 lay = QVBoxLayout(holder)
+
                 lay.setContentsMargins(0, 0, 0, 0)
+
                 lay.setSpacing(6)
+
                 lay.addWidget(notice)
+
                 lay.addWidget(CodeBlockWidget(b["code"], b["lang"]))
+
                 return holder
+
             return CodeBlockWidget(b["code"], b["lang"])
+
         if b["type"] == "tool":
+
             return ToolCardWidget(b)  # 编辑类工具：结果展示在正文之中
+
         if b["type"] == "tag":
+
             return RichTextLabel(b["html"])  # 插件内联标签卡（已由渲染器生成 HTML）
+
         if b["type"] == "quote":
+
             return QuoteCard(b["html"])
+
         if b["type"] == "table":
+
             return TableBlockWidget(b["header"], b["rows"])
+
         if b["type"] == "hr":
+
             return HRSeparator()
+
         return RichTextLabel(b["html"])
+
