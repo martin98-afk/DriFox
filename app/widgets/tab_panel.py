@@ -135,8 +135,19 @@ _PROJECT_ICON_CACHE: dict = {}
 
 
 def _project_icon_data(name: str) -> tuple:
-    """返回项目头像的 (缩写, rgba 颜色)，与 TabItem 的项目 icon 同一套算法"""
-    cached = _PROJECT_ICON_CACHE.get(name)
+    """返回项目头像的 (缩写, rgba 颜色)，与 TabItem 的项目 icon 同一套算法
+
+    缓存 key 含当前主题深浅档：配色现为主题感知（浅色压亮、深色提亮），
+    不参与分桶会在切主题后残留旧档颜色。
+    """
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        is_light = bool(theme_manager.is_light_theme())
+    except Exception:
+        is_light = False
+    cache_key = (name, is_light)
+    cached = _PROJECT_ICON_CACHE.get(cache_key)
     if cached is not None:
         return cached
     try:
@@ -145,15 +156,25 @@ def _project_icon_data(name: str) -> tuple:
         data = (extract_project_initials(name), get_project_color(name, alpha=255))
     except Exception:
         data = ("?", "rgba(128,128,128,255)")
-    _PROJECT_ICON_CACHE[name] = data
+    _PROJECT_ICON_CACHE[cache_key] = data
     return data
 
 
 def _invalidate_cached_colors():
-    """主题变更后重新解析缓存颜色，确保 paintEvent 使用最新色值"""
+    """主题变更后重新解析缓存颜色，确保 paintEvent 使用最新色值
+
+    含项目头像缓存：其颜色现为主题感知，切主题必须整体作废重算。
+    """
     global _CACHED_SELECTED_BG, _CACHED_INFO
     _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
     _CACHED_INFO = _parse_rgba(Colors.INFO)
+    _PROJECT_ICON_CACHE.clear()
+    try:
+        from app.utils.project_meta import invalidate_color_cache
+
+        invalidate_color_cache()
+    except Exception:
+        pass
 
 
 # 彩虹动画颜色列表（模块级常量，避免每次 paint 创建 10 个 QColor）
@@ -309,6 +330,7 @@ class _TabProjectIcon(QWidget):
         self._size = size
         self._initials = ""
         self._color = QColor(128, 128, 128)
+        self._text_color = QColor("#ffffff")
         self._fallback_pixmap: Optional[QPixmap] = None
         self.setFixedSize(size, size)
 
@@ -316,6 +338,10 @@ class _TabProjectIcon(QWidget):
         """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）"""
         self._initials = initials if initials else "?"
         self._color = self._parse_rgba(color_rgba)
+        # 字色按色块亮度自适应（与 _SquareAvatar 同源，走共享纯函数）
+        from app.utils.project_meta import contrast_text_color
+
+        self._text_color = QColor(contrast_text_color(color_rgba))
         self._fallback_pixmap = None  # 清除 pixmap fallback
         self.update()
 
@@ -349,13 +375,13 @@ class _TabProjectIcon(QWidget):
 
         rect = self.rect()
 
-        # ── 项目头像模式：直接画圆角矩形 + 白字 ──
+        # ── 项目头像模式：直接画圆角矩形 + 自适应字色 ──
         if self._initials:
             painter.setPen(Qt.NoPen)
             painter.setBrush(self._color)
             painter.drawRoundedRect(rect, 5, 5)
 
-            painter.setPen(Qt.white)
+            painter.setPen(self._text_color)
             font = get_unified_font()
             font.setPixelSize(scale_font_size(self._size * 14 // 24))
             font.setBold(True)

@@ -3613,10 +3613,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 # _refresh_welcome_cards 在缓存缺失（被历史变更广播/项目同步
                 # invalidate pop）时走 skipped_no_cache 分支不再触发重渲染，
                 # 导致欢迎卡上插件 tab 缺失。此处失效 + 重建一次保证最终一致。
+                # [修复 2026-10-12] 加精确判据：仅在卡片 tab 集合与当前注册表
+                # 不一致时才重建。新窗口场景（registry.list_loaded_plugins() 非空
+                # → _load_all_ui_plugins 直接 on_done）卡片创建时读的就是完整注册
+                # 表，无条件 invalidate+重建 = 每次新建对话页白付一次 QWebEngineView
+                # 重建（100-500ms/窗口），实测单窗欢迎卡被重建 4-5 次。
                 try:
-                    self._invalidate_welcome_card()
-                    if getattr(self, "_displayed_session_id", None) is None:
-                        self._show_initial_welcome()
+                    if self._welcome_card_tabs_stale():
+                        self._invalidate_welcome_card()
+                        if getattr(self, "_displayed_session_id", None) is None:
+                            self._show_initial_welcome()
+                    else:
+                        logger.debug(f"[MainWidget] 欢迎卡 tab 集合同步，跳过装载完成重建（wid={self._window_id}）")
                 except Exception as e:
                     logger.warning(f"[MainWidget] 装载完成刷新欢迎卡失败: {e}")
             except Exception as e:
@@ -11521,6 +11529,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
     _WELCOME_SLOT_MS = 50  # 相邻窗口 welcome 渲染的最小间隔
     _WELCOME_SLOT_COUNT = 20  # 槽位数：50ms × 20 = 1000ms 上限轮转
+    # 同批判定窗（秒）：与上次调度间隔 < 该值视为同批（同一事件循环批次内的
+    # 并发建窗/批量刷新，需 0/50/100ms 递增错峰）；间隔超窗 = 用户先后手动
+    # 操作，计数器重置为 1 → delay=0 立即渲染。
+    # 修复（2026-10-12）：原计数器类级单调递增且永不复位，单窗口顺序新建时
+    # delay 一路涨到 950ms 再归零（实测日志 slot=20 delay=950ms），点击后
+    # 近 1 秒才见到欢迎卡片。
+    _WELCOME_SLOT_BATCH_GAP_S = 0.1
     # pending 守卫超时：slot 回调丢失（QTimer 竞态）时强制放行重建，防永久熔断
     _WELCOME_PENDING_TIMEOUT_S = 3.0
     # 启动窗口合并：进程启动后该时长内，首屏渲染之后的重复 welcome 调度
@@ -11539,8 +11554,11 @@ class OpenAIChatToolWindow(ToolWindow):
         连续渲染 N 个 welcome，界面卡死数十秒。
 
         做法：类级计数器分配 0/50/100/.../950ms 槽位（模 20 轮转），让 N 个
-        窗口的渲染请求均匀散开。单窗场景槽位为 0ms（立即，与原来 singleShot(0)
-        无感知差异）；类级而非实例级，确保不同窗口拿到递增槽位。
+        窗口的渲染请求均匀散开。类级而非实例级，确保不同窗口拿到递增槽位。
+        计数器按「同批」语义重置：与上次调度间隔 ≥ _WELCOME_SLOT_BATCH_GAP_S
+        视为用户先后独立操作 → slot 归 1，delay=0 立即渲染；仅同批次内的并发
+        调度继续递增错峰（修复前计数器单调递增永不复位，单窗口顺序新建时
+        delay 累积到 950ms，点击后近 1 秒才见欢迎卡片）。
 
         🛡️ pending 守卫：同一窗口已有待执行的 welcome 渲染时跳过本次调度。
         会话数据变更统一入口（_notify_history_data_changed）与 _create_new_session
@@ -11606,8 +11624,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._welcome_render_pending = True
         self._welcome_render_pending_since = now
         cls = type(self)
-        slot = getattr(cls, "_welcome_slot", 0) + 1
+        # 同批错峰：与上次调度间隔 < _WELCOME_SLOT_BATCH_GAP_S 才递增槽位
+        # （同一事件循环批次的并发建窗/批量刷新）。超窗 = 用户先后独立操作，
+        # 计数器归零 → 本次 delay=0 立即渲染，不再累积到 950ms。
+        last_at = getattr(cls, "_welcome_last_schedule_at", None)
+        if last_at is not None and (now - last_at) < cls._WELCOME_SLOT_BATCH_GAP_S:
+            slot = getattr(cls, "_welcome_slot", 0) + 1
+        else:
+            slot = 1
         setattr(cls, "_welcome_slot", slot)
+        setattr(cls, "_welcome_last_schedule_at", now)
         delay = ((slot - 1) % self._WELCOME_SLOT_COUNT) * self._WELCOME_SLOT_MS
         logger.debug(
             f"[OpenAIChatToolWindow] _schedule_initial_welcome: wid={self._window_id} slot={slot} delay={delay}ms"
@@ -11632,6 +11658,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 if getattr(widget, "_is_welcome", False):
                     self.chat_layout.removeWidget(widget)
                     widget.hide()
+
+    def _welcome_card_tabs_stale(self) -> bool:
+        """缓存欢迎卡片的 tab 集合是否与当前插件注册表不一致（需重建）
+
+        判据：卡片**已构建的按钮集合**（`_welcome_tab_ids`，创建/重建时刻的
+        快照）与**当前注册表**（`_welcome_tab_specs()` 动态读取）不等即陈旧。
+        插件新装/卸载会改变注册表 → 判定陈旧 → 走 invalidate + 重建补正。
+
+        返回 True 也包含「无缓存卡片 / 卡片已销毁 / 接口异常」——这些场景无
+        有效快照可比，交给重建路径兜底（与其他失效点语义一致）。
+        """
+        card = self._welcome_card_cache.get(self._window_id)
+        if card is None or not OpenAIChatToolWindow._qt_widget_alive(card):
+            return True
+        try:
+            built_ids = [str(k) for k in (getattr(card, "_welcome_tab_ids", None) or [])]
+            current_ids = [str(key) for key, _label in card._welcome_tab_specs()]
+        except Exception:  # noqa: BLE001
+            # 卡片异常（stub / API 变更）→ 保守判定陈旧，走重建路径
+            return True
+        return built_ids != current_ids
 
     def _rerender_welcome_card(self):
         """同 mode 重渲染欢迎卡片 body（不重建 QWebEngineView）

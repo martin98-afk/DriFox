@@ -157,7 +157,7 @@ class TreeNodeSpec:
 
 
 class _ProjectBadge(QWidget):
-    """项目头像：圆角色块 + 白色缩写
+    """项目头像：圆角色块 + 自适应字色缩写
 
     与 TabItem 的项目 icon（``_TabProjectIcon``）保持同一套视觉，只是尺寸更小。
     直接 QPainter 绘制，Qt 自动处理 devicePixelRatio，无需中间 QPixmap。
@@ -168,12 +168,17 @@ class _ProjectBadge(QWidget):
         self._size = size
         self._initials = ""
         self._color = QColor(128, 128, 128)
+        self._text_color = QColor("#ffffff")
         self.setFixedSize(size, size)
         self.setVisible(False)
 
     def set_project(self, initials: str, color_rgba: str):
         self._initials = (initials or "").strip() or "?"
         self._color = _parse_rgba(color_rgba)
+        # 字色按色块亮度自适应（与 _SquareAvatar 同源，走共享纯函数）
+        from app.utils.project_meta import contrast_text_color
+
+        self._text_color = QColor(contrast_text_color(color_rgba))
         self.update()
 
     def set_px(self, px: int):
@@ -192,7 +197,7 @@ class _ProjectBadge(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(self._color)
         painter.drawRoundedRect(QRectF(self.rect()), 4, 4)
-        painter.setPen(Qt.white)
+        painter.setPen(self._text_color)
         font = get_unified_font()
         font.setPixelSize(max(7, int(self._size * 0.58)))
         font.setBold(True)

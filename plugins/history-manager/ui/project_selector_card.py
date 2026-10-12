@@ -180,9 +180,12 @@ class ProjectItem(QWidget):
                 f"color: {self._project_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
             )
         else:
-            # 非当前项目用半透明版本
-            semi_color = get_project_color(self._name, alpha=160)
-            self._name_label.setStyleSheet(f"color: {semi_color}; {get_font_family_css()} {font_size_css(13)};")
+            # 非当前项目用同色（不压 alpha）：半透明会把项目色对底对比度打到
+            # 一半（浅色主题下 4.6:1 → 2.4:1），配色修复前功尽弃。当前项已有
+            # ✓ / 加粗 / 同色淡染底 / 左侧色条四重信号，无需再靠透明度区分。
+            self._name_label.setStyleSheet(
+                f"color: {self._project_color}; {get_font_family_css()} {font_size_css(13)};"
+            )
 
     def _apply_base_style(self) -> None:
         """静止态底色：当前项目常驻淡染 + 左侧项目色条（hover 态在 enterEvent 覆盖）
@@ -322,8 +325,14 @@ class ProjectItem(QWidget):
         self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
 
     def refresh_style(self) -> None:
-        """主题/字体变更后重刷动态样式（与 _ProjectSelectorHeader.refresh_style 同链路调用）"""
+        """主题/字体变更后重刷动态样式（与 _ProjectSelectorHeader.refresh_style 同链路调用）
+
+        项目色是主题感知的（深浅档明度不同），须重取：``_project_color`` 是
+        构造期缓存的实例字段，头像色块又是 QPainter 自绘，不重取会残留旧档色。
+        """
         Colors.refresh()
+        self._project_color = get_project_color(self._name)
+        self._avatar_label.set_project(self._name, self._project_color)
         self._apply_base_style()
         self._apply_name_style()
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")

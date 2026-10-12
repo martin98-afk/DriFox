@@ -300,7 +300,12 @@ class _ProjectSelectorHeader(QFrame):
         )
 
     def refresh_style(self) -> None:
-        """主题/字体变更后重刷样式"""
+        """主题/字体变更后重刷样式
+
+        头像色块是 QPainter 自绘（不读 QSS），须显式按新主题重取颜色：
+        深浅档切换时 ``get_project_color`` 返回不同明度，不刷新会残留旧档色。
+        """
+        self._avatar.set_project(self._project_name, get_project_color(self._project_name))
         self._apply_style()
 
     def set_project(self, name: str, is_all: bool = False) -> None:
