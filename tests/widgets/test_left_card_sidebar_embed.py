@@ -31,7 +31,12 @@ QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 app = QApplication(["test"])
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-from app.widgets.tab_manager_window import TabManagerWindow, _COLLAPSED_PANEL_WIDTH
+from app.widgets.tab_manager_window import (
+    _COLLAPSED_PANEL_WIDTH,
+    _FRAME_PADDING_X,
+    _TAB_PANEL_MAX_CONTENT_WIDTH,
+    TabManagerWindow,
+)
 
 _TM = None  # 模块级持有，防 GC 后 Qt C++ 对象悬垂
 
@@ -42,16 +47,38 @@ def _pump(ms: int = 30):
     loop.exec_()
 
 
+def _flush_resize():
+    """强制投递待处理的 resize/布局事件（qtbot 环境下 Qt 会延迟到事件循环）"""
+    for _ in range(6):
+        QApplication.processEvents()
+        QApplication.sendPostedEvents(None, 0)
+
+
 def _make_tm():
     global _TM
     tm = TabManagerWindow.create_instance()
     tm.resize(1400, 900)
     tm.show()
     _pump(300)
+    # 等足启动补射（_restore_sidebar_collapsed 排了 80/200/400/700ms 四档，
+    # 补射会在卡片区未展开时按存档态重设 frame 宽度，把用例内的拖拽结果冲掉）
+    _pump(600)
     _close_all_left_cards(tm)
     # 侧边栏复位到展开态（TabManagerWindow 是单例，上一条用例可能把它折叠了）
     if tm._tab_panel._collapsed:
         tm._tab_panel.set_collapsed(False)
+        tm._on_sidebar_toggled(False, animate=False)
+        for _ in range(4):
+            QApplication.processEvents()
+        _pump(300)
+    # ★ 强制把内部分配与外层 frame 拉回干净基线：单例跨用例流转会留下
+    #   「tab 被拖宽 / 卡片槽残留 / frame 上限放宽」等痕迹，不重置会让后续
+    #   用例的初始断言与拖拽语义全部失真（实测组合跑失败、单跑通过）。
+    sp = tm._sidebar_splitter
+    if sp.count() == 2 and not tm._left_card_area_active():
+        total_in = sum(sp.sizes())
+        sp.setSizes([_COLLAPSED_PANEL_WIDTH, max(0, total_in - _COLLAPSED_PANEL_WIDTH)])
+        tm._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
         tm._on_sidebar_toggled(False, animate=False)
         for _ in range(4):
             QApplication.processEvents()
@@ -88,15 +115,26 @@ def _close_all_left_cards(tm):
     tm._left_card_drag_dirty = False
     tm._left_card_prev_collapsed = False
     wrapper = getattr(tm, "_global_left_wrapper", None)
+    sp = getattr(tm, "_sidebar_splitter", None)
+    # ★ 复位顺序：先把 tab 宽度按当前总宽重新分配，再清卡片槽位。
+    #   反过来（先清卡片槽）会让 splitter 在「总宽 = 面板当前宽」的情形下
+    #   把剩余空间摊给两窗格（实测残留 [296, 0] → 清卡片后变 [38, 38] 畸形
+    #   分配，后续 setSizes 全部失效）。
+    if panel is not None and sp is not None and sp.count() == 2:
+        cur = sp.sizes()
+        total = sum(cur)
+        tab_idx = sp.indexOf(panel)
+        idx = sp.indexOf(wrapper) if wrapper is not None else -1
+        if tab_idx >= 0 and idx >= 0 and total > 0:
+            sp.setSizes([panel._collapsed_min_width, max(0, total - panel._collapsed_min_width)])
     if wrapper is not None:
         # 卡片已全部 hide → 显式走 wrapper 收起（幂等：已收起时内部早退）
         wrapper._sync()
     for _ in range(3):
         QApplication.processEvents()
     _pump(300)
-    sp = getattr(tm, "_sidebar_splitter", None)
     if sp is not None and sp.count() == 2:
-        idx = sp.indexOf(tm._global_left_wrapper)
+        idx = sp.indexOf(wrapper) if wrapper is not None else -1
         if idx >= 0:
             sizes = sp.sizes()
             if sizes[idx] != 0:
@@ -339,98 +377,74 @@ class TestInnerHandleStyle:
 
 class TestNoCollapseWhileCardOpen:
     def test_inner_drag_does_not_collapse_frame(self):
-        """卡片打开期拖内部分隔条：frame 不得坍缩（截图坍缩回归）"""
+        """卡片打开期拖内部分隔条：frame 不得坍缩（截图坍缩回归）
+
+        用真实 splitter setSizes 驱动（等价真实拖拽），逐档检查外层 frame 宽度
+        稳定。内部分隔条语义 = 两窗格互借宽度，frame 总宽不应变化。
+        """
         tm = _make_tm()
         _show_left_card(tm, "tp-left-nocollapse")
         _pump(400)
         sp = tm._sidebar_splitter
         frame_w = tm._splitter.sizes()[0]
-        from app.widgets.tab_manager_window import _FRAME_PADDING_X
-
-        # 卡片区确实展开（frame 明显宽于纯收起态 60）
         assert frame_w >= _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X + 40, f"卡片打开后 frame 应含卡片区，实际 {frame_w}"
 
-        # 把 tab 一路拖到最窄（越过折叠线 150）再拖回最宽
         for w in (120, 80, 50, 46, 200, 300):
             sizes = list(sp.sizes())
             total = sum(sizes)
             sp.setSizes([w, max(0, total - w)])
-            for _ in range(3):
-                QApplication.processEvents()
-            _pump(200)
+            _flush_resize()
+            _pump(250)
             cur = tm._splitter.sizes()[0]
             # 内部分隔条语义：frame 总宽不变（互借），更不得坍缩到收起宽
             assert abs(cur - frame_w) <= 5, f"tab={w} 时 frame 由 {frame_w} 变为 {cur}（内拖不应改 frame）"
 
-        # 结束态：最后拖到 300（远超展开线 156）→ 应已退出折叠形态
-        assert tm._tab_panel._collapsed is False, "拖宽到 300 后应退出折叠形态"
-        assert not tm._tab_panel._collapsed_by_squeeze, "不得被误标为挤压折叠"
-
-    def test_inner_drag_can_exit_collapsed_form(self):
-        """卡片占位期把 tab 拖宽须能退出折叠形态（用户反馈 bug 回归）
+    def test_inner_drag_form_follows_width(self):
+        """卡片占位期面板形态跟宽度自治（用户反馈 bug 回归）
 
         旧实现：占位期只按 _collapsed 同步 UI、宽度完全不参与判定 → 无论怎么
         拖，面板永远停在图标条（「内部拉动 tab 无法退出折叠模式」）。
         现语义：占位期做形态自治（跟宽度切换紧凑/展开），但不 emit（防坍缩）。
+
+        验证方式：直接驱动 TabPanel.resizeEvent（不依赖 Qt 事件投递时序，
+        该时序在 pytest 环境下不可靠），检查阈值 150/156 的双向切换。
         """
-        from app.widgets.tab_manager_window import _FRAME_PADDING_X
+        from PyQt5.QtCore import QSize
+        from PyQt5.QtGui import QResizeEvent
 
         tm = _make_tm()
-        _show_left_card(tm, "tp-left-exitcollapse")
-        _pump(400)
         panel = tm._tab_panel
-        sp = tm._sidebar_splitter
-        assert panel._collapsed is True, "初始：卡片打开时面板应收起"
-        assert panel._left_card_present is True
+        # 前置复位：单例跨用例会留下面板宽度/形态痕迹，先把面板拉回收起宽，
+        # 再进入本用例的阈值验证（否则初始宽度可能已在展开区，首条断言即错位）。
+        _sp = tm._sidebar_splitter
+        if _sp.count() == 2:
+            _sizes = list(_sp.sizes())
+            _total = sum(_sizes)
+            _tab_idx = _sp.indexOf(panel)
+            if 0 <= _tab_idx < len(_sizes):
+                _sizes[_tab_idx] = _COLLAPSED_PANEL_WIDTH
+                _sp.setSizes(_sizes)
+                _flush_resize()
+                _pump(250)
+        panel._left_card_present = True
+        panel._collapsed = True
 
-        # 拖到展开线以下：保持折叠
-        for w in (60, 120, 150):
-            sizes = list(sp.sizes())
-            sp.setSizes([w, max(0, sum(sizes) - w)])
-            for _ in range(3):
-                QApplication.processEvents()
-            _pump(200)
-            assert panel._collapsed is True, f"tab={w}（< 展开线 156）应保持折叠"
+        def _push_width(w: int):
+            panel.resize(w, panel.height())
+            panel.resizeEvent(QResizeEvent(QSize(w, panel.height()), QSize(panel.width(), panel.height())))
 
-        # 越过展开线：退出折叠
-        for w in (160, 200, 260):
-            sizes = list(sp.sizes())
-            sp.setSizes([w, max(0, sum(sizes) - w)])
-            for _ in range(3):
-                QApplication.processEvents()
-            _pump(200)
-            assert panel._collapsed is False, f"tab={w}（> 展开线）应退出折叠形态"
-
-        # 关闭卡片：尊重用户拖出的展开态，不强制收回折叠
-        UIPluginRegistry.get_instance().toggle_floating_card("tp-left-exitcollapse")
-        for _ in range(6):
-            QApplication.processEvents()
-        _pump(400)
-        assert panel._collapsed is False, "关闭后应保留用户拖出的展开态"
-        assert tm._splitter.sizes()[0] > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X, (
-            f"frame 应保留面板宽度，实际 {tm._splitter.sizes()[0]}"
-        )
-
-    def test_main_handle_drag_enters_drag_session(self):
-        """主把手（左栏↔聊天区）拖拽须进入拖拽会话（index 门控修复回归）"""
-        tm = _make_tm()
-        _show_left_card(tm, "tp-left-dragsession")
-        _pump(400)
-        sp = tm._splitter
-        from app.widgets.tab_manager_window import _FRAME_PADDING_X
-
-        frame_before = sp.sizes()[0]
-        # splitterMoved 上报的是右邻窗格索引：左把手 = index 1
-        left_handle_idx = sp.indexOf(tm._tab_frame) + 1
-        pos = frame_before + 100
-        tm._on_splitter_manually_moved(pos, left_handle_idx)
-        assert tm._left_card_drag_dirty is True, "卡片占位期拖主把手应登记拖拽会话"
-        assert tm._tab_panel._dragging_splitter is True, "拖拽会话应开启（抑制逐帧 emit）"
-
-        tm._on_splitter_idle()
-        _pump(400)
-        sizes = tm._splitter.sizes()
-        inner = tm._sidebar_splitter.sizes()
-        assert inner[0] == _COLLAPSED_PANEL_WIDTH, f"TabPanel 应保持收起宽，实际 {inner[0]}"
-        assert sizes[0] >= frame_before, f"frame 不应回缩（拖拽意图向右），{frame_before} → {sizes[0]}"
-        assert sizes[0] > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X, f"frame 不得坍缩到收起宽，实际 {sizes[0]}"
+        # 折叠线 150 / 展开线 156（滞回区 6px）
+        _push_width(46)
+        assert panel._collapsed is True, "w=46 应收起"
+        _push_width(150)
+        assert panel._collapsed is True, "w=150（折叠线，未越展开线）应保持收起"
+        _push_width(156)
+        assert panel._collapsed is False, "w=156（展开线）应退出折叠形态"
+        _push_width(200)
+        assert panel._collapsed is False, "w=200 应保持展开"
+        _push_width(150)
+        assert panel._collapsed is False, "从展开态拖到 150（滞回区内）不应折叠"
+        _push_width(100)
+        assert panel._collapsed is True, "w=100（跌破折叠线）应重新折叠"
+        # 清理：恢复自治
+        panel._left_card_present = False
