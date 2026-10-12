@@ -18013,6 +18013,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # until 与原 8×300ms 同窗（2.4s）作保险丝。
         self._ensure_ab_active = True
         self._ensure_ab_active_until = time.monotonic() + 2.4
+        # None 默认值按开关分派（修复 767bdb19 遗留：无参重入 None 流入
+        # retries > 0 抛 TypeError，重试链静默中断）
+        if retries is None:
+            retries = 2 if STREAM_BOTTOM_EVENT_DRIVEN else 8
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         self._sync_scroll_maximum()
         if not self._is_view_at_bottom():
