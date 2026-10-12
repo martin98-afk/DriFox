@@ -456,7 +456,9 @@ class _NodeHeader(QFrame):
     def _sync_margins(self):
         """内容边距：左缘含缩进；项目头（两行）上下 5px 对齐会话行"""
         is_big = self._is_project and not self._compact
-        self.layout().setContentsMargins(6 + self._indent, 5 if is_big else 0, 4, 5 if is_big else 0)
+        self.layout().setContentsMargins(
+            6 + self._indent, 5 if is_big else 0, _SCROLLBAR_RESERVE, 5 if is_big else 0
+        )
 
     def set_has_children(self, has_children: bool):
         """项目头：展开且有子行时，从头像底部向下画引导线（与子行接线）"""
@@ -839,12 +841,13 @@ class _SessionRow(QFrame):
     def paintEvent(self, event):  # noqa: N802 - Qt 约定
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        if self._guide:
-            draw_tree_guide(painter, 0, self.height())
         if self._hovered:
             path = QPainterPath()
             path.addRoundedRect(QRectF(2, 2, self.width() - 4, self.height() - 4), 6, 6)
             painter.fillPath(path, HOVER_DARK if isDarkTheme() else HOVER_LIGHT)
+        # 引导竖线最后画：hover 背景从 x=2 起铺，先画线会被盖住
+        if self._guide:
+            draw_tree_guide(painter, 0, self.height())
         super().paintEvent(event)
 
 

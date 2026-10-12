@@ -66,6 +66,7 @@ from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from app.widgets.workspace_tree import (
+    _SCROLLBAR_RESERVE,
     HOVER_DARK,
     HOVER_LIGHT,
     KIND_PROJECT,
@@ -642,7 +643,7 @@ class TabItem(QFrame):
             return
         self._tree_row = on
         if on:
-            self.layout().setContentsMargins(tree_content_left(), 5, 6, 5)
+            self.layout().setContentsMargins(tree_content_left(), 5, _SCROLLBAR_RESERVE, 5)
             self._icon_widget.setVisible(False)
             self._sub_row.setVisible(True)
             self._close_btn.setVisible(False)  # hover 才显（enterEvent）
@@ -4101,7 +4102,11 @@ class TabPanel(QWidget):
         if not hasattr(self, "_custom_plugin_card"):
             return
         Colors.refresh()
-        margin = "3px 4px" if compact else "4px 6px"
+        # 右边距刻意收紧（非对称四值 "上 右 下 左"）：滚动条由 qfluentwidgets
+        # 自绘，其右缘距面板右缘 = 本值 + 1px(vbar 内缩) + 3px(handle 内缩)，
+        # 原 6px 右边距让滚动条悬在离右缘 10px 处、明显比主 tab 列表(4px)空旷；
+        # 左值保持 6/4 不动，维持与系统插件区行的左对齐
+        margin = "3px 2px 3px 4px" if compact else "4px 2px 4px 6px"
         self._custom_plugin_card.setStyleSheet(f"""
             #customPluginCard {{
                 background: {Colors.CARD_BG.format(alpha=25)};

@@ -16,7 +16,7 @@ from PyQt5.QtCore import QEvent
 
 from app.utils.design_tokens import scale_font_size
 from app.widgets.tab_panel import PANEL_MODE_LIST, PANEL_MODE_TREE, TabPanel, TreeNodeSpec
-from app.widgets.workspace_tree import KIND_PROJECT, KIND_WIDGET, tree_content_left
+from app.widgets.workspace_tree import _SCROLLBAR_RESERVE, KIND_PROJECT, KIND_WIDGET, tree_content_left
 
 
 @pytest.fixture
@@ -69,9 +69,8 @@ def test_tree_mode_marks_item_as_tree_row(panel):
     assert item._icon_widget.isHidden() is True
     # 字号断 stylesheet（font().pointSize() 会被 stylesheet 合成字体置 -1）
     assert f"font-size: {scale_font_size(12)}px" in item._title_label.styleSheet()
-    # 内容左缘 = 引导线 x + 间距（表达从属于上方项目）
-    assert item.layout().getContentsMargins()[0] == tree_content_left()
-    assert item.width() == 0 or item.layout().getContentsMargins() == (tree_content_left(), 5, 6, 5)
+    # 内容左缘 = 引导线 x + 间距；右缘留出浮层滚动条避让位（否则时间文字被压）
+    assert item.layout().getContentsMargins() == (tree_content_left(), 5, _SCROLLBAR_RESERVE, 5)
     assert item._sub_row.isHidden() is False
 
 
