@@ -139,6 +139,7 @@ class _Anchor(QObject):
     _should_follow_bottom = OpenAIChatToolWindow._should_follow_bottom
     _is_view_at_bottom = OpenAIChatToolWindow._is_view_at_bottom
     _programmatic_scroll = OpenAIChatToolWindow._programmatic_scroll
+    _landed_bottom_value = OpenAIChatToolWindow._landed_bottom_value
     _sync_scroll_maximum = lambda self: 20000  # noqa: E731
 
 
@@ -155,6 +156,11 @@ def test_anchor_compensation_matches_real_change(_card, qapp):
     area = MagicMock()
     area.widget.return_value = container
     area.verticalScrollBar.return_value = bar
+    # _landed_bottom_value 换算「已落地底」需要 viewport 高度；
+    # 200 使 landed = min(20000, 6000-200=5800) > VIEW_START，不钳本用例落点
+    viewport = MagicMock()
+    viewport.height.return_value = 200
+    area.viewport.return_value = viewport
 
     win = _Anchor()
     win.chat_scroll_area = area

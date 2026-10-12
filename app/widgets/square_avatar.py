@@ -11,7 +11,7 @@ from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import QWidget
 
 from app.utils.design_tokens import scale_font_size
-from app.utils.project_meta import contrast_text_color, extract_project_initials
+from app.utils.project_meta import extract_project_initials
 from app.utils.utils import get_unified_font
 
 
@@ -29,9 +29,10 @@ class _SquareAvatar(QWidget):
         # get_project_color() 返回 "rgba(r,g,b,a)" 格式，
         # QColor(string) 不解析此 CSS 格式，需拆解为数值构造
         self._color = self._parse_rgba(color)
-        # 缩写字色按色块亮度自适应（深底白字 / 浅底黑字）：固定白字在明亮
-        # 色块（如黄绿系）上对比度低至 1.25:1，缩写完全糊掉
-        self._text_color = QColor(contrast_text_color(color))
+        # 字色恒白（用户决策 2026-10-12）：两种主题的项目色都被 get_project_color
+        # 压进白字可读带（浅档 lum≤0.153 白字≥5.1 / 深档 lum≤0.25 白字≥3.5），
+        # 彩色块白字也是全站惯例；自适应黑白曾致深色档头像出黑字
+        self._text_color = QColor("#ffffff")
         self._size = size
         self.setFixedSize(size, size)
 
@@ -53,10 +54,9 @@ class _SquareAvatar(QWidget):
         return QColor(128, 128, 128)  # fallback 灰色
 
     def set_project(self, name: str, color: str):
-        """更新项目名和颜色（用于面包屑等动态场景）"""
+        """更新项目名和颜色（用于面包屑等动态场景）；字色恒白，见 __init__ 注释"""
         self._text = extract_project_initials(name)
         self._color = self._parse_rgba(color)
-        self._text_color = QColor(contrast_text_color(color))
         self.update()
 
     def paintEvent(self, event):
@@ -73,7 +73,7 @@ class _SquareAvatar(QWidget):
         painter.setBrush(self._color)
         painter.drawRoundedRect(rect, corner_radius, corner_radius)
 
-        # 居中缩写，字色按色块亮度自适应，使用系统配置字体
+        # 居中缩写（字色恒白），使用系统配置字体
         painter.setPen(self._text_color)
         font = get_unified_font()
         # 单字符（中文）字号稍大，双字符略小

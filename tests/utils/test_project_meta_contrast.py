@@ -7,7 +7,7 @@
 
 本文件锁定修复后的契约：
 1. 色相对项目底 / 深色底达标（浅 4.5:1 / 深 3:1）
-2. 缩写字色对色块达标（4.5:1）
+2. 头像缩写字恒白，且项目色被压进白字可读带（浅档 ≥4.4 / 深档 ≥3.4）
 3. 色相 H 与饱和度 S 保持不变（项目身份色不串）
 4. crc32 决定颜色，跨进程稳定（不受 PYTHONHASHSEED 影响）
 5. 深色主题下原本已达标项目的颜色零变化（防回归）
@@ -27,7 +27,6 @@ import yaml
 from app.utils import project_meta
 from app.utils.project_meta import (
     _relative_luminance,
-    contrast_text_color,
     extract_project_initials,
     get_project_color,
     invalidate_color_cache,
@@ -36,8 +35,9 @@ from app.utils.project_meta import (
 # 断言阈值：修复目标（留 0.1 余量抵消 8bit 取整）
 LIGHT_MIN_CONTRAST = 4.4
 DARK_MIN_CONTRAST = 3.0
-# 缩写字色对色块（切换阈值处白/黑字同为 4.58:1，留余量）
-AVATAR_TEXT_MIN_CONTRAST = 4.4
+# 头像缩写字恒白：浅档 cap 0.153 → 白字 5.1，深档 cap 0.25 → 白字 3.5（留余量）
+AVATAR_TEXT_MIN_CONTRAST_LIGHT = 4.4
+AVATAR_TEXT_MIN_CONTRAST_DARK = 3.4
 
 # 真实项目名样本（含用户截图里读不清的那批）
 _SAMPLE_PROJECTS = [
@@ -202,19 +202,23 @@ def test_dark_theme_colors_meet_contrast_on_all_backgrounds(_force_theme_mode):
 
 
 def test_avatar_text_color_readable_on_swatch(_force_theme_mode):
-    """头像缩写字色：对色块自身达 4.5:1（两种主题模式下均成立）"""
+    """头像缩写字恒白：项目色被压进白字可读带（浅档 ≥4.4 / 深档 ≥3.4）
+
+    恒白是用户决策（2026-10-12）：自适应黑白曾致深色档头像出黑字，
+    彩色块白字也是全站惯例。可读性靠项目色双向 clamp 保证，
+    不再依赖字色切换算法（contrast_text_color 已删除）。
+    """
     failures = []
     for is_light in (True, False):
         _force_theme_mode(is_light)
+        min_ratio = AVATAR_TEXT_MIN_CONTRAST_LIGHT if is_light else AVATAR_TEXT_MIN_CONTRAST_DARK
         for name in _SAMPLE_PROJECTS:
             color = get_project_color(name)
             rgb = _rgb_of(color)
-            text = contrast_text_color(color)
-            text_rgb = (255, 255, 255) if text == "#ffffff" else (0, 0, 0)
-            ratio = _contrast(rgb, text_rgb)
-            if ratio < AVATAR_TEXT_MIN_CONTRAST:
+            ratio = _contrast(rgb, (255, 255, 255))  # 字色恒白
+            if ratio < min_ratio:
                 failures.append(f"{'light' if is_light else 'dark'}/{name}: {ratio:.2f}")
-    assert not failures, "头像字色对比度不达标:\n" + "\n".join(failures)
+    assert not failures, "头像白字对比度不达标:\n" + "\n".join(failures)
 
 
 # ── 测试：身份色不串 ──────────────────────────────────────
@@ -241,9 +245,10 @@ def test_hue_and_saturation_preserved(_force_theme_mode):
 
 
 def test_dark_theme_already_compliant_colors_unchanged(_force_theme_mode):
-    """深色主题：原本已达标（3:1 以上）的项目颜色零变化
+    """深色主题：白字可读带 [floor, cap] 内的项目颜色零变化
 
-    修复只应抬升深色下不达标的颜色，不得改动已达标项，否则是观感回归。
+    恒白决策（2026-10-12）后深色分支双向 clamp：低于 floor 抬、高于 cap 压
+    都是合法修正（为保头像白字可读）；带内项目不得被误改，否则是观感回归。
     """
     _force_theme_mode(False)
     dark_bg = (33, 33, 38)  # midnight card 底（深色基准）
@@ -251,8 +256,8 @@ def test_dark_theme_already_compliant_colors_unchanged(_force_theme_mode):
     for name in _SAMPLE_PROJECTS:
         h, s, l = _hsl_of(name)
         original = tuple(int(round(c * 255)) for c in colorsys.hls_to_rgb(h / 360.0, l, s / 100.0))
-        if _contrast(original, dark_bg) < 3.0:
-            continue  # 原本不达标，允许被修正
+        if _contrast(original, dark_bg) < 3.0 or _relative_luminance(original) > project_meta._DARK_CAP_LUM:
+            continue  # 原本不达标，或超出白字可读带（cap 压低是合法修正）
         actual = _rgb_of(get_project_color(name))
         if actual != original:
             changed.append(f"{name}: {original} → {actual}")
@@ -314,9 +319,8 @@ def test_edge_case_names_still_produce_valid_color(name, _force_theme_mode):
     assert isinstance(extract_project_initials(name), str)
 
 
-def test_contrast_text_color_fallbacks():
-    """文字色解析兜底：非法输入回退白字（不抛异常）"""
-    assert contrast_text_color("") == "#ffffff"
-    assert contrast_text_color("not-a-color") == "#ffffff"
-    assert contrast_text_color("rgba(0, 0, 0, 255)") == "#ffffff"  # 深底 → 白字
-    assert contrast_text_color("#ffffff") == "#000000"  # 浅底 → 黑字
+def test_contrast_text_color_fallbacks_removed():
+    """头像字恒白后 contrast_text_color 已删：防复活哨兵"""
+    assert not hasattr(project_meta, "contrast_text_color"), (
+        "contrast_text_color 已随恒白决策删除；头像字色请直接用白色，可读性由 get_project_color 双向 clamp 保证"
+    )

@@ -66,6 +66,9 @@ _SESSION_ROW_HEIGHT = 44  # 会话行（两行式：标题 / 预览·时间）
 # 各自整行画同一 x 的竖线，相邻行自然拼成一整条；内容左缘 = 竖线 + 12px
 _GUIDE_X = 18
 _CONTENT_GAP = 12
+# 右缘避让：qfluentwidgets 浮层滚动条（ScrollBarGroove）贴右缘占 12px，
+# 不从内容里让出空间就会压住副行右侧的时间文字（history_page 同口径 14px）
+_SCROLLBAR_RESERVE = 14
 _GUIDE_COLOR_CACHE: dict = {}
 
 
@@ -217,10 +220,9 @@ class _ProjectBadge(QWidget):
     def set_project(self, initials: str, color_rgba: str):
         self._initials = (initials or "").strip() or "?"
         self._color = _parse_rgba(color_rgba)
-        # 字色按色块亮度自适应（与 _SquareAvatar 同源，走共享纯函数）
-        from app.utils.project_meta import contrast_text_color
-
-        self._text_color = QColor(contrast_text_color(color_rgba))
+        # 字色恒白（用户决策 2026-10-12，与 _SquareAvatar/_TabProjectIcon 同规）：
+        # 项目色已被 get_project_color 压进白字可读带，自适应黑白曾致深色档黑字
+        self._text_color = QColor("#ffffff")
         self.update()
 
     def set_px(self, px: int):
@@ -688,7 +690,7 @@ class _SessionRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(tree_content_left(), 5, 6, 5)
+        layout.setContentsMargins(tree_content_left(), 5, _SCROLLBAR_RESERVE, 5)
         layout.setSpacing(6)
 
         # 两行式主体：标题 / 副行（左：预览·工作树名 | 右：相对时间）
@@ -810,19 +812,10 @@ class _SessionRow(QFrame):
         self._pin_btn.setIconSize(self._pin_btn.size())
 
     def _refresh_indent(self):
-        """内容左缘同步（几何常量变更/重建后幂等校正）"""
+        """内容水平边距同步（左缘缩进 + 右缘滚动条避让，重建后幂等校正）"""
         m = self.layout().getContentsMargins()
-        left = tree_content_left()
-        if m[0] != left:
-            self.layout().setContentsMargins(left, m[1], m[2], m[3])
-
-    def set_guide(self, guide: bool):
-        """从属引导线开关（默认开；紧凑态关闭）"""
-        guide = bool(guide)
-        if self._guide == guide:
-            return
-        self._guide = guide
-        self.update()
+        if m[0] != tree_content_left() or m[2] != _SCROLLBAR_RESERVE:
+            self.layout().setContentsMargins(tree_content_left(), m[1], _SCROLLBAR_RESERVE, m[3])
 
     def enterEvent(self, event):  # noqa: N802 - Qt 约定
         self._hovered = True

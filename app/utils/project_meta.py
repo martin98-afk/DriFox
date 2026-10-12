@@ -30,11 +30,10 @@ _DARK_BG_LUM = 0.021511
 _LIGHT_TARGET_CONTRAST = 4.7  # 小字正文：WCAG AA 4.5:1，留 0.2 余量
 _DARK_TARGET_CONTRAST = 3.2  # 图形元素（色块）：WCAG AA 3:1，留 0.2 余量
 
-# 头像缩写文字色：切换阈值 0.1791 是白/黑字对比度相等的色块亮度，
-# 该点两种字色同为 4.58:1，即本方案的最坏情况（仍高于 4.5:1）。
-_AVATAR_TEXT_SWITCH_LUM = 0.1791
-_AVATAR_TEXT_LIGHT = "#ffffff"
-_AVATAR_TEXT_DARK = "#000000"
+# 头像缩写字恒白（用户决策 2026-10-12）：两种主题下项目色都被压进白字可读带
+#   浅色档 cap_lum=0.153（4.7:1 定标）→ 白字 ≥5.1:1
+#   深色档 cap 到 _DARK_CAP_LUM → 白字 ≥3.5:1（粗体大字，饱和彩底观感可读）
+_DARK_CAP_LUM = 0.25
 
 _RGBA_RE = re.compile(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
 _HEX_COLOR_RE = re.compile(r"#([0-9a-fA-F]{6})")
@@ -217,9 +216,14 @@ def get_project_color(name: str, alpha: int = 255) -> str:
         if _relative_luminance(_hsl_to_rgb8(h, s, l)) > cap_lum:
             l = _l_for_target_luminance(h, s, cap_lum)
     else:
+        # 双向 clamp 进白字可读带：低于 floor 抬（对深底 3.2:1），高于 cap 压
+        # （0.30+ 的亮色版配白字掉到 3:1 以下，且曾触发头像字自适应黑字）
         floor_lum = _DARK_TARGET_CONTRAST * (_DARK_BG_LUM + 0.05) - 0.05
-        if _relative_luminance(_hsl_to_rgb8(h, s, l)) < floor_lum:
+        lum = _relative_luminance(_hsl_to_rgb8(h, s, l))
+        if lum < floor_lum:
             l = _l_for_target_luminance(h, s, floor_lum)
+        elif lum > _DARK_CAP_LUM:
+            l = _l_for_target_luminance(h, s, _DARK_CAP_LUM)
 
     r, g, b = _hsl_to_rgb8(h, s, l)
     result = f"rgba({r}, {g}, {b}, {alpha})"
@@ -238,31 +242,6 @@ def invalidate_color_cache() -> None:
     未来调整定标常量或强制重算使用。
     """
     _COLOR_CACHE.clear()
-
-
-def contrast_text_color(color: str) -> str:
-    """按背景色亮度选出可读的文字色（深底配白字 / 浅底配黑字）
-
-    用于项目头像的缩写字母：原先统配白字（``painter.setPen(Qt.white)``），
-    在明亮色块上对比度低至 1.25:1，缩写完全糊掉。切换阈值 0.1791 是白字与
-    黑字对比度相等的色块亮度，该点两种字色同为 4.58:1，即本方案最坏情况。
-
-    语义常量色（如临时会话隐身紫 #8B5CF6）不适用本算法：它们与算法生成色
-    落在同一亮度带但诉求相反（惯例白字 vs 对比度最优），字色由定义处显式
-    传入（set_project 的 text_color 参数），不走本函数。
-
-    Args:
-        color: "rgba(r, g, b, a)"（get_project_color 返回值）或 "#RRGGBB"
-
-    Returns:
-        文字色 "#ffffff" 或 "#000000"；解析失败回退白字
-    """
-    rgb = _parse_rgb(color)
-    if rgb is None:
-        return _AVATAR_TEXT_LIGHT
-    if _relative_luminance(rgb) > _AVATAR_TEXT_SWITCH_LUM:
-        return _AVATAR_TEXT_DARK
-    return _AVATAR_TEXT_LIGHT
 
 
 def _alpha_tint(rgba: str, ratio: float, fallback: str = "transparent") -> str:

@@ -17805,6 +17805,32 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_max_cache = (now, scroll_bar.maximum())
         return scroll_bar.maximum()
 
+    def _landed_bottom_value(self) -> int:
+        """「已落地」的贴底 value：只认布局已真正落地的内容底。
+
+        滚动条上界会被预抬（高度回调的 delta 增量补偿 / 本类 sizeHint 校正，
+        都抢在 Qt 布局传播之前），而 widget 实际高度要下一拍布局周期才落地。
+        贴到预抬上界时视口底部露出一帧背景色，布局落地后才被填上 —— 流式
+        16ms tick 每拍重复一次，即置底状态下页脚轻微波动、画面不稳的根因
+        （2026-10-12 探针 tests/debug/probe_bottom_stick_flash.py 实证：
+        贴预抬上界后 value + viewport 超出 container 实际高度 40px+）。
+
+        container.height() 与 widget 实际几何同源同步，用它换算的上界与视口
+        可见内容底严格对齐，贴底动作本身不产生任何露白。预抬上界仍保留给
+        滚动条 range 与 `_is_view_at_bottom` 判定（知道「未来底」），仅贴底
+        动作换用本值；布局未落地的余量由锚定拍 / `_ensure_at_bottom` 重试
+        链在落地后继续追平。
+        """
+        scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        container = self.chat_scroll_area.widget()
+        if container is None:
+            return scroll_bar.maximum()
+        try:
+            landed = container.height() - self.chat_scroll_area.viewport().height()
+        except RuntimeError:
+            return scroll_bar.maximum()
+        return max(0, min(scroll_bar.maximum(), landed))
+
     def _should_follow_bottom(self) -> bool:
         """程序是否应该把视口拽回底部。
 
@@ -17908,11 +17934,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._pending_scroll_to_bottom:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        max_val = self._sync_scroll_maximum()
+        # sizeHint 校正保留（滚动条 range 需反映真实内容高），但贴底 value
+        # 只贴已落地底：布局未落地的余量由下方锚定/重试链追平，不在本拍
+        # 抢跑贴上（露白一帧）。
+        self._sync_scroll_maximum()
         with self._programmatic_scroll():
-            scroll_bar.setValue(max_val)
+            scroll_bar.setValue(self._landed_bottom_value())
             # 再次设置确保卡片高度变化后仍在底部
-            scroll_bar.setValue(max_val)
+            scroll_bar.setValue(self._landed_bottom_value())
         self._pending_scroll_to_bottom = False
         # 🐛 原此处无条件 `self._user_intentionally_away_from_bottom = False`：
         # 任何一次程序置底都会清空用户的「我在读历史」意图，于是守卫形同虚设
@@ -17951,7 +17980,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_scroll_maximum()
         if not self._is_view_at_bottom():
             with self._programmatic_scroll():
-                scroll_bar.setValue(scroll_bar.maximum())
+                # 贴已落地底：判定仍用预抬上界（欠贴 → 继续重试），贴则只贴
+                # 布局真正落地的高度，消除抢跑露白。
+                scroll_bar.setValue(self._landed_bottom_value())
             # 懒渲染可能需要更长时间，延迟再次检查
             # 如果还有重试次数，即使 bottom anchor 过期也继续重试
             if retries > 0:
@@ -17978,9 +18009,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🐛 原此处直接 setValue(scroll_bar.maximum())：卡片 setFixedHeight 后 Qt
         # 的 maximum 要下一轮事件循环才更新，锚定期一直拿旧上界置底 → 追不上
         # 终渲染的高度暴涨。与 _do_scroll_to_bottom 对齐，先用 sizeHint 校正上界。
-        max_val = self._sync_scroll_maximum()
+        # sizeHint 校正保留，贴底 value 换已落地底（同 _do_scroll_to_bottom）。
+        self._sync_scroll_maximum()
         with self._programmatic_scroll():
-            scroll_bar.setValue(max_val)
+            scroll_bar.setValue(self._landed_bottom_value())
         self._bottom_anchor_timer.start()
 
     def _on_message_card_height_changed(self, _height: int):
@@ -18059,12 +18091,17 @@ class OpenAIChatToolWindow(ToolWindow):
                     #      增量无人补偿。二者叠加 = 视口长期停在离底十几 px，
                     #      且每次高度变化都在这个缝里浮动 → 用户看到的"轻微抖动"。
                     # 贴底改为「每拍都取当前上界」，误差不累积。
+                    # 🐛 但「当前上界」在上一行刚被 +delta 预抬，widget 实际高度
+                    # 下一拍布局周期才落地：贴预抬值 = 视口底露一帧背景色，流式
+                    # 每拍重复 = 置底页脚轻微波动（探针实证）。改贴「已落地」底：
                     with self._programmatic_scroll():
-                        sb.setValue(sb.maximum())
+                        sb.setValue(self._landed_bottom_value())
                 elif card_bottom <= value:
-                    # 非跟随态：卡片整体在视口上方 → 锚定补偿，保持其相对位置
+                    # 非跟随态：卡片整体在视口上方 → 锚定补偿，保持其相对位置。
+                    # 落点同样钳到已落地底：上界可能刚被预抬，value+delta 落在
+                    # 预抬区间时 widget 还没长高，视口底部同样露白。
                     with self._programmatic_scroll():
-                        sb.setValue(max(0, value + delta))
+                        sb.setValue(min(max(0, value + delta), self._landed_bottom_value()))
         except RuntimeError:
             pass
         if not sender._content_just_loaded:

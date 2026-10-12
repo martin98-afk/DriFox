@@ -338,17 +338,12 @@ class _TabProjectIcon(QWidget):
         """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）
 
         text_color 非空时直接用作缩写字色（语义常量色如临时会话隐身紫，
-        字色随色定义处声明），空则按色块亮度自适应（contrast_text_color）。
+        字色随色定义处声明），空则恒白：两种主题的项目色都被 get_project_color
+        压进白字可读带（浅档白字≥5.1 / 深档白字≥3.5）。
         """
         self._initials = initials if initials else "?"
         self._color = self._parse_rgba(color_rgba)
-        # 字色：显式指定优先，否则按色块亮度自适应（与 _SquareAvatar 同源，走共享纯函数）
-        if text_color:
-            self._text_color = QColor(text_color)
-        else:
-            from app.utils.project_meta import contrast_text_color
-
-            self._text_color = QColor(contrast_text_color(color_rgba))
+        self._text_color = QColor(text_color) if text_color else QColor("#ffffff")
         self._fallback_pixmap = None  # 清除 pixmap fallback
         self.update()
 

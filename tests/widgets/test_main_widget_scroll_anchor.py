@@ -418,6 +418,7 @@ class _AnchorHarness(QObject):
     _should_follow_bottom = OpenAIChatToolWindow._should_follow_bottom
     _is_view_at_bottom = OpenAIChatToolWindow._is_view_at_bottom
     _programmatic_scroll = OpenAIChatToolWindow._programmatic_scroll
+    _landed_bottom_value = OpenAIChatToolWindow._landed_bottom_value
     # _make_anchor_window 运行时注入的实例属性（类型声明供 pyright 收窄）
     _programmatic_scroll_depth: int
     _sync_scroll_maximum: Callable[[], int]
@@ -460,7 +461,10 @@ def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=Fa
     # 末尾 stretch：否则 QVBoxLayout 会把唯一子项垂直居中，card_top 不可控
     layout.addStretch(1)
     # 显式布排：未 show 的顶层 widget 不会自动激活布局，card_top 会恒为 0
-    total_h = max(2000, card_top + card_height + 500)
+    # 底高 ≥5200：贴底动作改贴「已落地底」（_landed_bottom_value = container
+    # 高 - viewport 高），container 需足够高使 landed ≥ maximum，跟随态断言
+    # 的贴底值才能继续等于 maximum（bar 桩值 5000）。
+    total_h = max(5200, card_top + card_height + 500)
     container.resize(400, total_h)
     layout.setGeometry(QRect(0, 0, 400, total_h))
 
@@ -473,6 +477,10 @@ def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=Fa
     area = MagicMock()
     area.widget.return_value = container
     area.verticalScrollBar.return_value = bar
+    # _landed_bottom_value 需要 viewport 高度换算「已落地底」
+    viewport = MagicMock()
+    viewport.height.return_value = 200
+    area.viewport.return_value = viewport
 
     win = _AnchorHarness()
     win.chat_scroll_area = area
@@ -606,6 +614,14 @@ def _make_sticky_window(away=False):
     bar = _FakeScrollBar(maximum=1000, value=1000)  # 贴底起点
     area = MagicMock()
     area.verticalScrollBar.return_value = bar
+    # _landed_bottom_value 换算「已落地底」= min(maximum, 2000-200=1800)：
+    # 用例里 bar._max 最高抬到 1400，landed 恒取 maximum，断言值不变
+    landed_container = MagicMock()
+    landed_container.height.return_value = 2000
+    landed_viewport = MagicMock()
+    landed_viewport.height.return_value = 200
+    area.widget.return_value = landed_container
+    area.viewport.return_value = landed_viewport
     win.chat_scroll_area = area
     return win
 

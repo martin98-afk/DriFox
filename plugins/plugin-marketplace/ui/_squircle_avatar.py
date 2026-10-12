@@ -119,18 +119,13 @@ def name_color(name: str, alpha: int = 255) -> str:
 
 
 def _avatar_text_color(color: str) -> QColor:
-    """缩写文字色：按色块亮度自适应（深底白字 / 浅底黑字）
+    """缩写字色恒白（用户决策 2026-10-12，与宿主 _SquareAvatar 同规）
 
-    与宿主 ``app.utils.project_meta.contrast_text_color`` 同源，走同一套
-    延迟导入 + 回退策略。固定白字在明亮色块（黄绿系）上对比度低至 1.25:1，
-    缩写完全糊掉。
+    宿主 ``app.utils.project_meta.contrast_text_color`` 已随恒白决策删除：
+    项目色被 get_project_color 双向 clamp 压进白字可读带（浅档白字≥5.1 /
+    深档≥3.5），恒白即可读；自适应黑白曾致深色档头像出黑字。
     """
-    try:
-        from app.utils.project_meta import contrast_text_color
-
-        return QColor(contrast_text_color(color))
-    except Exception:
-        return QColor("#ffffff")
+    return QColor("#ffffff")
 
 
 class SquircleAvatar(QWidget):
