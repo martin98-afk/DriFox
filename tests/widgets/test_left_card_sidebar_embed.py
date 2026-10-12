@@ -362,8 +362,54 @@ class TestNoCollapseWhileCardOpen:
             # 内部分隔条语义：frame 总宽不变（互借），更不得坍缩到收起宽
             assert abs(cur - frame_w) <= 5, f"tab={w} 时 frame 由 {frame_w} 变为 {cur}（内拖不应改 frame）"
 
-        assert tm._tab_panel._collapsed is True, "卡片占位期 TabPanel 折叠态由宿主编排（恒为收起）"
+        # 结束态：最后拖到 300（远超展开线 156）→ 应已退出折叠形态
+        assert tm._tab_panel._collapsed is False, "拖宽到 300 后应退出折叠形态"
         assert not tm._tab_panel._collapsed_by_squeeze, "不得被误标为挤压折叠"
+
+    def test_inner_drag_can_exit_collapsed_form(self):
+        """卡片占位期把 tab 拖宽须能退出折叠形态（用户反馈 bug 回归）
+
+        旧实现：占位期只按 _collapsed 同步 UI、宽度完全不参与判定 → 无论怎么
+        拖，面板永远停在图标条（「内部拉动 tab 无法退出折叠模式」）。
+        现语义：占位期做形态自治（跟宽度切换紧凑/展开），但不 emit（防坍缩）。
+        """
+        from app.widgets.tab_manager_window import _FRAME_PADDING_X
+
+        tm = _make_tm()
+        _show_left_card(tm, "tp-left-exitcollapse")
+        _pump(400)
+        panel = tm._tab_panel
+        sp = tm._sidebar_splitter
+        assert panel._collapsed is True, "初始：卡片打开时面板应收起"
+        assert panel._left_card_present is True
+
+        # 拖到展开线以下：保持折叠
+        for w in (60, 120, 150):
+            sizes = list(sp.sizes())
+            sp.setSizes([w, max(0, sum(sizes) - w)])
+            for _ in range(3):
+                QApplication.processEvents()
+            _pump(200)
+            assert panel._collapsed is True, f"tab={w}（< 展开线 156）应保持折叠"
+
+        # 越过展开线：退出折叠
+        for w in (160, 200, 260):
+            sizes = list(sp.sizes())
+            sp.setSizes([w, max(0, sum(sizes) - w)])
+            for _ in range(3):
+                QApplication.processEvents()
+            _pump(200)
+            assert panel._collapsed is False, f"tab={w}（> 展开线）应退出折叠形态"
+
+        # 关闭卡片：尊重用户拖出的展开态，不强制收回折叠
+        UIPluginRegistry.get_instance().toggle_floating_card("tp-left-exitcollapse")
+        for _ in range(6):
+            QApplication.processEvents()
+        _pump(400)
+        assert panel._collapsed is False, "关闭后应保留用户拖出的展开态"
+        assert tm._splitter.sizes()[0] > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X, (
+            f"frame 应保留面板宽度，实际 {tm._splitter.sizes()[0]}"
+        )
 
     def test_main_handle_drag_enters_drag_session(self):
         """主把手（左栏↔聊天区）拖拽须进入拖拽会话（index 门控修复回归）"""

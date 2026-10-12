@@ -1540,20 +1540,18 @@ class TabPanel(QWidget):
         # 被误判成"用户把面板拖窄"。
         if self._auto_collapse_suppressed:
             return
-        # ★ left 卡片占位期（卡片打开，与卡片区共享 sidebarSplitter）：
-        #   宽度自治关闭，折叠态与 UI 形态完全由宿主编排（见 _left_card_present
-        #   注释）。此前不抑制 → 用户拖内部分隔条把本面板宽度压到折叠线以下时，
-        #   此处 emit sidebarToggled(True) → 宿主把 frame 整体压到「面板收起宽」，
-        #   卡片区被连带压成细条（截图坍缩根因）。
-        #   仅做一件事：按当前 _collapsed 同步紧凑/展开 UI（幂等），不发信号、
-        #   不改状态。
-        if self._left_card_present:
-            self._update_toggle_button(switch_ui=True)
-            return
-        # ★★ 拖拽期：只跟随 UI 形态，绝不 emit（抖动的根因，见 _dragging_splitter 注释）。
-        #   此处按同一对阈值（content 口径）即时切换紧凑/展开，保证拖拽时文字不会
-        #   在窄条里被挤压；但折叠态与宽度落定一律等松手后由宿主处理。
-        if self._dragging_splitter:
+        # ★ left 卡片占位期（卡片打开，与卡片区共享 sidebarSplitter）+
+        #   ★★ 拖拽期：只跟随 UI 形态，绝不 emit。
+        #   共同语义：折叠态与宽度落定由宿主编排（占位期）或等松手（拖拽期）
+        #   处理，此处按滞回阈值即时切换紧凑/展开形态。
+        #
+        #   占位期为何也走形态自治：卡片打开时宿主把本面板置收起态，用户拖
+        #   内部分隔条拉宽本面板是明确意图（想看 tab 列表）——若此处只按
+        #   _collapsed 同步形态（旧实现），面板永远停在图标条，表现为
+        #   「内部拉动 tab 无法退出折叠模式」（用户反馈 bug）。
+        #   但 emit 仍必须禁止：占位期 emit 会让宿主把 frame 压到面板收起宽，
+        #   卡片区被连带压成细条（坍缩）。形态自治 + 不发信号 = 两全。
+        if self._left_card_present or self._dragging_splitter:
             # ★ 滞回区正确语义：**进入方向决定保持态**，而不是各自单向判定。
             #   已折叠 → 只有越过展开线才转展开（滞回区内保持折叠）；
             #   已展开 → 只有跌破折叠线才转折叠（滞回区内保持展开）。

@@ -2820,14 +2820,30 @@ class TabManagerWindow(FramelessWindow):
         else:
             # 1) TabPanel 恢复打开前的状态：折叠前是收起态就回收起态，
             #    展开态才恢复打开前的宽度（否则会意外把用户收起的侧边栏撑开）。
+            #    ★ 例外：占位期用户拖内部分隔条把面板拉开了（宽度越过展开线、
+            #      _collapsed 已被形态自治置 False），这是明确意图——此时不得
+            #      再按打开前的折叠态收回去，改为按用户拖出的实际宽度落位。
             prev_collapsed = bool(getattr(self, "_left_card_prev_collapsed", False))
             self._left_card_prev_collapsed = False
             panel._left_card_present = False  # 卡片已退场：恢复面板宽度自治
-            panel._collapsed = prev_collapsed
+            user_widened = not panel._collapsed and prev_collapsed
+            panel._collapsed = prev_collapsed and not user_widened
             panel._collapsed_by_squeeze = False
             panel.sync_collapsed_ui()
-            if prev_collapsed:
+            if panel._collapsed:
                 target = panel._collapsed_min_width + _FRAME_PADDING_X
+            elif user_widened:
+                # 用户拖出的宽度即目标（下限保证不骑折叠线）
+                _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
+                cur_panel_w = 0
+                sp = getattr(self, "_sidebar_splitter", None)
+                if sp is not None:
+                    sizes_in = sp.sizes()
+                    tab_idx = sp.indexOf(panel)
+                    if 0 <= tab_idx < len(sizes_in):
+                        cur_panel_w = sizes_in[tab_idx]
+                target = max(_min_expand_w, cur_panel_w + _FRAME_PADDING_X)
+                self._saved_panel_frame_width = target
             else:
                 target = getattr(self, "_left_card_saved_panel_frame_w", 0) or max(
                     _EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X
@@ -3051,6 +3067,12 @@ class TabManagerWindow(FramelessWindow):
         panel = getattr(self, "_tab_panel", None)
         if panel is None or panel._collapsed or panel._animating:
             return False
+        # ★ 卡片占位期：面板与卡片区共享 sidebarSplitter，宽度语义由卡片编排
+        #   独占（拖内把手 = 两窗格互借，不代表窗口挤压）。此时若照常按宽度
+        #   判定，会把用户拖窄的 tab 判成"被挤压"再弹回/折叠，破坏内拖手感。
+        #   拖拽会话中同理（松手由 _on_splitter_idle 统一落定）。
+        if getattr(panel, "_left_card_present", False) or getattr(panel, "_dragging_splitter", False):
+            return False
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return False
         try:
@@ -3141,6 +3163,11 @@ class TabManagerWindow(FramelessWindow):
         if not hasattr(self, "_tab_panel"):
             return
         panel = self._tab_panel
+        # ★ 卡片占位期：面板宽度语义由卡片编排独占（见 _evaluate_squeeze_collapse
+        #   同款注释）。此时不得按"挤压恢复"逻辑自动展开面板——那会把用户拖出的
+        #   内部分配覆盖掉。
+        if getattr(panel, "_left_card_present", False):
+            return
         if not panel._collapsed:
             # 左栏已展开：只查工作台的挤压恢复（规则 2 反向，先左后右由调用序保证）
             self._maybe_restore_workbench_after_squeeze(growth_required=growth_required)
@@ -3758,12 +3785,16 @@ class TabManagerWindow(FramelessWindow):
             sp = getattr(self, "_sidebar_splitter", None)
             wrapper = getattr(self, "_global_left_wrapper", None)
             if sp is not None and wrapper is not None:
-                panel._collapsed = True
-                panel.sync_collapsed_ui()
                 tab_keep = max(
                     self._tab_panel._collapsed_min_width,
                     min(getattr(self, "_left_card_tab_w_keep", _COLLAPSED_PANEL_WIDTH), _TAB_PANEL_MAX_CONTENT_WIDTH),
                 )
+                # ★ 折叠态按 tab_keep 实际宽度决定，不硬写 True：用户可能已在
+                #   占位期拖内把手把 tab 拉宽（形态自治置 _collapsed=False），
+                #   此处硬写会把用户拖出的展开态压回图标条。
+                panel._collapsed = tab_keep < panel._auto_expand_width
+                panel._collapsed_by_squeeze = False
+                panel.sync_collapsed_ui()
                 # frame 目标宽：不小于「tab 保留宽 + 卡片下限」，且不挤压聊天区
                 frame_target = max(
                     tab_keep + _FRAME_PADDING_X + 40,
