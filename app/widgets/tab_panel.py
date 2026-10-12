@@ -1259,6 +1259,13 @@ class TabPanel(QWidget):
         self._auto_collapse_width: int = _EXPANDED_MIN_CONTENT_WIDTH
         self._auto_expand_width: int = _EXPANDED_MIN_CONTENT_WIDTH + _HYSTERESIS_WIDTH
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
+        # ★ left 卡片占位期抑制（嵌入 sidebarSplitter 模式）：卡片打开时 TabPanel
+        #   与卡片区共享同一 splitter，用户拖内部分隔条会让本面板宽度跨过折叠线，
+        #   若照常触发自治折叠/展开 → 宿主把整个 frame 压到 60px → 卡片区被压成
+        #   细条（实测坍缩为 19px）。该期间折叠态由宿主编排独占（卡片打开时面板
+        #   恒为收起窄条，除非用户拖内把手把它拉宽），本面板不自作主张。
+        #   由 TabManagerWindow 在卡片显隐时置位/复位。
+        self._left_card_present: bool = False
         # 窗口 resize / relayout 过渡期抑制自动折叠：几何瞬变（_force_relayout
         # 重算、最大化/还原）会把左面板瞬时压到折叠阈值以下，若 resizeEvent
         # 据此折叠会误判为"用户拖窄"。由 TabManagerWindow 在 resize 周期开始
@@ -1532,6 +1539,16 @@ class TabPanel(QWidget):
         # 统一判定（_evaluate_squeeze_collapse），避免最大化/还原等几何瞬变
         # 被误判成"用户把面板拖窄"。
         if self._auto_collapse_suppressed:
+            return
+        # ★ left 卡片占位期（卡片打开，与卡片区共享 sidebarSplitter）：
+        #   宽度自治关闭，折叠态与 UI 形态完全由宿主编排（见 _left_card_present
+        #   注释）。此前不抑制 → 用户拖内部分隔条把本面板宽度压到折叠线以下时，
+        #   此处 emit sidebarToggled(True) → 宿主把 frame 整体压到「面板收起宽」，
+        #   卡片区被连带压成细条（截图坍缩根因）。
+        #   仅做一件事：按当前 _collapsed 同步紧凑/展开 UI（幂等），不发信号、
+        #   不改状态。
+        if self._left_card_present:
+            self._update_toggle_button(switch_ui=True)
             return
         # ★★ 拖拽期：只跟随 UI 形态，绝不 emit（抖动的根因，见 _dragging_splitter 注释）。
         #   此处按同一对阈值（content 口径）即时切换紧凑/展开，保证拖拽时文字不会
