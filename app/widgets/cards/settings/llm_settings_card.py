@@ -41,6 +41,7 @@ from app.utils.design_tokens import (
     font_size_css,
     get_ui_font_size,
     invalidate_font_cache,
+    make_scroll_content_opaque,
     scale_icon_size,
 )
 from app.utils.startup_manager import (
@@ -1172,6 +1173,8 @@ class LLMSettingsCard(SystemCardFrame):
         body_layout.addStretch(1)
 
         scroll.setWidget(body)
+        # 内容层不透明实底（启用 Qt 滚动 blit），必须在 setWidget 之后
+        make_scroll_content_opaque(body, Colors.CARD_BG.format(alpha=255), 230, Colors.CONTENT_BG)
         outer.addWidget(scroll)
         # 宽度按最长项自适应（sizeHint 已含图标/文字/内边距，只补左侧指示条与外边距）
         widest = max((btn.sizeHint().width() for btn in self._nav_buttons.values()), default=150)
@@ -1203,6 +1206,8 @@ class LLMSettingsCard(SystemCardFrame):
         layout.setContentsMargins(0, 4, 6, 4)
         layout.setSpacing(6)
         page.setWidget(inner)
+        # 内容层不透明实底（启用 Qt 滚动 blit），必须在 setWidget 之后
+        make_scroll_content_opaque(inner, Colors.CARD_BG.format(alpha=255), 230, Colors.CONTENT_BG)
         return page, layout
 
     def _set_active_page(self, tab_id: str):

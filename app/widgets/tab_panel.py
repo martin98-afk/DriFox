@@ -1511,6 +1511,14 @@ class TabPanel(QWidget):
         self._custom_plugin_layout = custom_plugin_layout
         self._custom_plugin_section.setStyleSheet("background: transparent;")
         self._custom_plugin_scroll.setWidget(self._custom_plugin_section)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
+        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
+        from app.utils.design_tokens import Colors, make_scroll_content_opaque
+
+        make_scroll_content_opaque(
+            self._custom_plugin_section, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
+        )
         self._custom_plugin_scroll.setVisible(False)
         card_layout.addWidget(self._custom_plugin_scroll)
 
@@ -1602,6 +1610,14 @@ class TabPanel(QWidget):
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
+        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
+        from app.utils.design_tokens import Colors, make_scroll_content_opaque
+
+        make_scroll_content_opaque(
+            self._list_widget, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
+        )
         layout.addWidget(self._scroll_area, 1)
 
         # ── 中间（树模式）：工作区树 项目 → 工作树 → 会话 ──
@@ -1652,6 +1668,14 @@ class TabPanel(QWidget):
         self._refresh_tree_header_style()
         self._tree_header.setVisible(False)
         self._tree_scroll.setWidget(self._tree_widget)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
+        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
+        from app.utils.design_tokens import Colors, make_scroll_content_opaque
+
+        make_scroll_content_opaque(
+            self._tree_widget, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
+        )
         self._tree_scroll.setVisible(False)
         layout.addWidget(self._tree_scroll, 1)
 

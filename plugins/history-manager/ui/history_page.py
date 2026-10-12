@@ -496,6 +496,11 @@ class HistoryPage(QWidget):
         self._content_layout.setContentsMargins(4, 2, 14, 2)
         self._content_layout.setSpacing(4)
         self._scroll_area.setWidget(self._content_widget)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        from app.utils.design_tokens import make_card_content_opaque
+
+        make_card_content_opaque(self._content_widget, 246)
         self._scroll_area.hide()  # attach 前隐藏（空滚动区会闪白底）
         list_body_lay.addWidget(self._scroll_area, 1)
         # 交叉驱动：head = 面板、tail = 列表区（两端高度严格互补）

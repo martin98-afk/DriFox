@@ -399,6 +399,11 @@ class SystemCleanerCard(QWidget):
         self._content_layout.setSpacing(0)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        from app.utils.design_tokens import make_card_content_opaque
+
+        make_card_content_opaque(self._content, 246)
         SmoothScrollDelegate(self._scroll)  # 平滑滚动（与主程序同款引擎）
         root.addWidget(self._scroll, 1)
 
