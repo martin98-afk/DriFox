@@ -57,8 +57,8 @@ KIND_WIDGET = "widget"  # 外部 widget（已打开的对话页 / 团队框）
 
 _HEADER_KINDS = (KIND_PROJECT, KIND_WORKTREE, KIND_TEAM)
 
-_ROW_HEIGHT = 28
 _HEADER_HEIGHT = 28
+_SESSION_ROW_HEIGHT = 44  # 会话行（两行式：标题 / 预览·时间）
 
 # hover 背景（模块级常量，避免 paintEvent 里反复构造）
 # 公开导出：tab_panel 的树行化复用同一组色值（单一数据源）
@@ -112,14 +112,6 @@ def _parse_rgba(rgba_str: str) -> QColor:
     return QColor(rgba_str)
 
 
-def _short_time(value: str) -> str:
-    """'2026-08-30 19:06:52' → '08-30 19:06'；异常输入原样返回"""
-    text = (value or "").strip()
-    if len(text) >= 16:
-        return text[5:16]
-    return text
-
-
 @dataclass
 class TreeNodeSpec:
     """树的一个节点描述（由调用方编排，本模块只做渲染）"""
@@ -137,6 +129,7 @@ class TreeNodeSpec:
     expanded_by_default: bool = False
     bold: bool = False  # 标题加粗（项目头用）
     record: Optional[dict] = None  # 会话记录（KIND_SESSION）
+    subtitle: str = ""  # 副行文本（会话行：「预览 · 时间」）
     widget: Optional[QWidget] = field(default=None, repr=False)  # KIND_WIDGET 的外部 widget
     # ── 项目头像（与 TabItem 的项目 icon 同一套视觉）：非空时优先于 icon 渲染 ──
     initials: str = ""  # 缩写（1-2 字符）
@@ -568,39 +561,57 @@ class _NodeHeader(QFrame):
 
 
 class _SessionRow(QFrame):
-    """历史会话行：标题 + 时间；点击请求打开
+    """会话行（两行式）：标题 / 预览·工作树·相对时间；hover 出图钉
 
-    不画图标：项目根节点已经用项目 icon 表达了归属，会话行再叠一层图标纯噪声
-    （用户明确要求）。层级只靠缩进 + 字号/颜色区分。
+    不画图标（用户明确要求）。已打开的 Tab 行由外部 TabItem 承担（KIND_WIDGET），
+    本类只管历史会话；两行式布局下预览与时间入副行，与树里其它行同一基线。
     """
 
     openRequested = pyqtSignal(dict)
+    pinToggled = pyqtSignal(dict, bool)  # (record, 目标置顶态)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._hovered = False
-        self._indent = 0
         self._record: dict = {}
+        self._pinned = False
         self._compact = False
         # 样式纪元收敛（见 _STYLE_EPOCH）
         self._spec_sig = None
         self._style_epoch = -1
         self._theme_sig = None
 
-        self.setFixedHeight(_ROW_HEIGHT)
+        self.setFixedHeight(_SESSION_ROW_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setContentsMargins(8, 5, 6, 5)
         layout.setSpacing(6)
 
-        self._title = _ElidedLabel("", self)
-        self._title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        layout.addWidget(self._title, 1)
+        # 两行式主体：标题 / 副行（预览 · 工作树 · 时间）
+        self._body = QWidget(self)
+        body_layout = QVBoxLayout(self._body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(2)
 
-        self._meta = QLabel("", self)
-        self._meta.setStyleSheet("background: transparent;")
-        layout.addWidget(self._meta)
+        self._title = _ElidedLabel("", self._body)
+        self._title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        body_layout.addWidget(self._title)
+
+        self._sub = _ElidedLabel("", self._body)
+        self._sub.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        body_layout.addWidget(self._sub)
+        layout.addWidget(self._body, 1)
+
+        # 图钉：hover 才显、置顶后常显（金色）
+        self._pin_btn = TransparentToolButton(self)
+        self._pin_btn.setFixedSize(20, 20)
+        self._pin_btn.setIconSize(self._pin_btn.size())
+        self._pin_btn.setCursor(Qt.PointingHandCursor)
+        self._pin_btn.setVisible(False)
+        self._pin_btn.setAttribute(Qt.WA_NoMousePropagation, True)
+        self._pin_btn.clicked.connect(self._on_pin_clicked)
+        layout.addWidget(self._pin_btn)
 
         self._apply_appearance()
 
@@ -613,22 +624,27 @@ class _SessionRow(QFrame):
         tip = spec.tooltip or title
         self.setToolTip(tip)
         self._title.setToolTip(tip)
-        meta = _short_time(str(record.get("last_time", "")))
-        if self._meta.text() != meta:
-            self._meta.setText(meta)
-        if spec.indent != self._indent:
-            self._indent = spec.indent
-            self.layout().setContentsMargins(6 + spec.indent, 0, 6, 0)
+        sub = str(spec.subtitle or "")
+        if self._sub.text() != sub:
+            self._sub.setText(sub)
+        self._pinned = bool(record.get("pinned", False))
+        self._sync_pin()
         self._sync_appearance(spec)
+
+    def _sync_pin(self):
+        """图钉态同步：置顶常显金色，未置顶 hover 才显"""
+        self._pin_btn.setIcon(get_icon("取消置顶" if self._pinned else "置顶"))
+        self._pin_btn.setToolTip("取消置顶" if self._pinned else "置顶")
+        self._pin_btn.setVisible(self._pinned or self._hovered)
+
+    def _on_pin_clicked(self):
+        if self._record:
+            self.pinToggled.emit(self._record, not self._pinned)
 
     def _sync_appearance(self, spec: "TreeNodeSpec"):
         """内容签名 + 样式纪元双条件下才真正重刷 QSS（见 _STYLE_EPOCH 注释）"""
-        sig = (spec.key, spec.title, spec.tooltip, spec.indent, self._meta.text())
-        if (
-            sig == self._spec_sig
-            and self._style_epoch == _STYLE_EPOCH
-            and _theme_sig() == self._theme_sig
-        ):
+        sig = (spec.key, spec.title, spec.tooltip, self._sub.text(), self._pinned)
+        if sig == self._spec_sig and self._style_epoch == _STYLE_EPOCH and _theme_sig() == self._theme_sig:
             return
         self._spec_sig = sig
         self._style_epoch = _STYLE_EPOCH
@@ -640,33 +656,38 @@ class _SessionRow(QFrame):
             return
         self._compact = compact
         self._title.setVisible(not compact)
-        self._meta.setVisible(not compact)
+        self._sub.setVisible(not compact)
+        if compact:
+            self._pin_btn.setVisible(False)
+        else:
+            self._sync_pin()
 
     def _apply_appearance(self):
         Colors.refresh()
         self.setStyleSheet("QFrame { background: transparent; border: none; }")
         self._title.setFont(get_unified_font(12))
         self._title.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; background: transparent; "
-            f"{get_font_family_css()} {font_size_css(12)};"
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)};"
         )
-        self._meta.setFont(get_unified_font(10))
-        self._meta.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; "
-            f"{get_font_family_css()} {font_size_css(10)};"
+        self._sub.setFont(get_unified_font(10))
+        self._sub.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
 
     def refresh_style(self):
         self._style_epoch = _STYLE_EPOCH
         self._apply_appearance()
+        self._pin_btn.setIconSize(self._pin_btn.size())
 
     def enterEvent(self, event):  # noqa: N802 - Qt 约定
         self._hovered = True
+        self._sync_pin()
         self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):  # noqa: N802 - Qt 约定
         self._hovered = False
+        self._sync_pin()
         self.update()
         super().leaveEvent(event)
 
@@ -700,6 +721,7 @@ class WorkspaceTree(QWidget):
 
     newSessionRequested = pyqtSignal(str, str)
     openSessionRequested = pyqtSignal(dict)
+    pinSessionRequested = pyqtSignal(dict, bool)  # (record, 目标置顶态)
     expansionChanged = pyqtSignal(dict)
 
     def __init__(self, parent=None):
@@ -802,6 +824,7 @@ class WorkspaceTree(QWidget):
                 if row is None:
                     row = _SessionRow(self)
                     row.openRequested.connect(self.openSessionRequested)
+                    row.pinToggled.connect(self.pinSessionRequested)
                     self._rows[spec.key] = row
                 row.apply_spec(spec)
                 row.set_compact(False)

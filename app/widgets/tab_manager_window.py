@@ -2730,6 +2730,8 @@ class TabManagerWindow(FramelessWindow):
         # 工作区树模式：在项目 + 工作树下新建对话页 / 打开历史会话
         self._tab_panel.newSessionInWorkspaceRequested.connect(self._on_new_session_in_workspace)
         self._tab_panel.openSessionRecordRequested.connect(self._on_open_session_record)
+        # 工作区树「工作区」标题行 + → 新建项目（选文件夹流程）
+        self._tab_panel.newProjectRequested.connect(self._on_new_project_requested)
         # Tab 增删后同步工作区树（会话归属/历史列表会变）
         self.tabCountChanged.connect(self._on_tab_count_changed_for_tree)
         # 用户手动拖拽 splitter 把手 → 折叠是用户主动，不标记挤压，
@@ -4941,6 +4943,22 @@ class TabManagerWindow(FramelessWindow):
                 new_window._switch_to_worktree(worktree_path)
             except Exception as e:
                 logger.warning(f"[TabManagerWindow] 切换到工作树失败: {e}")
+
+    def _on_new_project_requested(self):
+        """工作区树「工作区」标题行 + ：新建项目（选文件夹流程）
+
+        复用当前窗口的 _on_project_open_folder_btn（文件夹选择器 → 弹建项目
+        对话框 → 绑定根目录），与既有拖拽建项目同一流程、同一数据路径。
+        """
+        source = self.get_current_window()
+        if source is None:
+            return
+        opener = getattr(source, "_on_project_open_folder_btn", None)
+        if callable(opener):
+            try:
+                opener()
+            except Exception as e:
+                logger.warning(f"[TabManagerWindow] 新建项目失败: {e}")
 
     def _on_open_session_record(self, record):
         """工作区树：打开一条历史会话（新开标签页，不动当前页）
