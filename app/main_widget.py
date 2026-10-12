@@ -9417,8 +9417,8 @@ class OpenAIChatToolWindow(ToolWindow):
             if card.role == "welcome":
                 margin = welcome_margin
             elif card.role == "user":
-                # 用户气泡：最大宽度约容器的 94%（留少量对齐余量），自适应收缩见 PlainTextViewer
-                margin = max(24, int(viewport_width * 0.06))
+                # 用户气泡：最大宽度约容器的 75%，自适应收缩见 PlainTextViewer
+                margin = max(24, int(viewport_width * 0.25))
             else:
                 margin = assistant_margin
 

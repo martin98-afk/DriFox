@@ -3348,8 +3348,8 @@ class MessageCard(SimpleCardWidget):
                 return
             parent_width = parent.width()
             if self.role == "user":
-                # 与 main_widget 的比例 margin 保持一致（约容器 94%，留少量对齐余量）
-                horizontal_margin = max(150, int(parent_width * 0.15))
+                # 与 main_widget 的比例 margin 保持一致（约容器 75%）
+                horizontal_margin = max(150, int(parent_width * 0.25))
             else:
                 horizontal_margin = 20
             target_width = max(320, parent_width - horizontal_margin)

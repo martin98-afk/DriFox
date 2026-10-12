@@ -2809,9 +2809,17 @@ class TabManagerWindow(FramelessWindow):
             panel._left_card_present = True  # 占位期禁用面板宽度自治（防坍缩）
             panel.sync_collapsed_ui()
             # 2) frame 目标宽 = TabPanel 收起宽 + 卡片区当前槽位（首帧 0 时用记忆/默认）
+            #    ★ 槽位此刻是旧 frame 总宽下的钳制值（内层尚未加宽），不能直接
+            #      采信：容器无记忆首开 target=_DOCK_DEFAULT_W(360)，若按钳后
+            #      槽位(~300 兜底)编排 frame，容器意图永远落不了位（实测 360
+            #      被钳到 292，表现为"默认宽度没变"）。取容器意图 _last_expand_target
+            #      （与 wrapper._on_expand 落位同源）参与 max。
             card_w = self._left_card_frame_extra()
             if card_w <= 0:
                 card_w = _DockSideWrapper.DEFAULT_EXPANDED_WIDTH
+            _cont = getattr(self._global_left_wrapper, "_primary", None)
+            _intent_w = int(getattr(_cont, "_last_expand_target", 0) or 0)
+            card_w = max(card_w, _intent_w)
             target = self._left_card_frame_target(card_w)
             # 3) 放宽 frame max（允许加宽）后落位
             self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(), target))
@@ -2896,6 +2904,44 @@ class TabManagerWindow(FramelessWindow):
             collapsed: True=收起 False=展开
             animate: 是否走宽度动画（启动恢复配置时传 False 瞬时切换）
         """
+        # ── 卡片占位期：按钮语义 = 先收卡片，面板落到按钮请求的态 ──
+        # 占位期 panel._collapsed 是编排状态（True=面板让位给卡片），与按钮
+        # 语义（用户对面板形态的意图）混用同一状态位：点击翻转后发出的请求
+        # 与用户意图相反，且照常走宽度路径只会把 frame 压小，卡片区因未
+        # 隐藏被挤成细条残留（实测：折叠后卡片仍显示）。
+        # 收卡片必须逐卡走 registry hide（卡片的 visible 状态在容器内部，
+        # 直接 hide 容器会被 _do_expand 的 has_visible 判定 show 回来）；
+        # 卡片全部隐藏后容器状态机自行折叠 → wrapper._sync 收卡片槽 →
+        # expandedChanged(False) → _on_left_card_area_toggled(False) 按
+        # _left_card_prev_collapsed 把面板直接落位到请求态。
+        if self._left_card_area_active():
+            # 占位期面板已是 46px 窄条（编排收窄），按钮图标不分形态，
+            # 用户此时点击的唯一合理意图 = 收起一切：卡片隐藏 + 面板折叠。
+            # ★ _toggle_sidebar 在 emit 前已把 _collapsed 翻转（编排 True→False）
+            #   并落盘 False，不矫正的话卡片关闭回调的 user_widened 会误判为
+            #   True（"用户拖开了面板"），把面板展开落位而非折叠。
+            panel = getattr(self, "_tab_panel", None)
+            if panel is not None:
+                panel._collapsed = True
+                panel._collapsed_by_squeeze = False
+                from app.utils.config import Settings
+
+                Settings.get_instance().ui_sidebar_collapsed.value = True
+                panel._update_toggle_button(switch_ui=False)
+            self._left_card_prev_collapsed = True
+            try:
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+                reg = UIPluginRegistry.get_instance()
+                for cid, info in list(reg.get_floating_cards().items()):
+                    if getattr(info, "container", None) == "left":
+                        try:
+                            reg.hide_floating_card_globally(cid)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return
         sizes = self._splitter.sizes()
         total_w = sum(sizes) if sizes else self.width()
         cur_w = sizes[0] if sizes else (self._tab_frame.width() if hasattr(self, "_tab_frame") else 250)

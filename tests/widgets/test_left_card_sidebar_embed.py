@@ -227,6 +227,33 @@ class TestOpenClose:
             f"frame 应收回到打开前宽度 {base_frame_w}，实际 {tm._splitter.sizes()[0]}"
         )
 
+    def test_titlebar_toggle_while_card_open_collapses_all(self):
+        """卡片占位期点标题栏折叠按钮：卡片隐藏 + 面板落折叠态（不留细条）
+
+        修复前：占位期按钮点击翻转编排态后 emit，宿主宽度路径只压 frame，
+        卡片未隐藏被挤成细条残留；且按钮翻转污染 panel._collapsed 后，
+        卡片关闭回调的 user_widened 误判把面板展开落位。
+        """
+        from app.utils.config import Settings
+
+        tm = _make_tm()
+        _show_left_card(tm, "tp-left-toggle-all")
+        _pump(400)
+        assert tm._left_card_area_active(), "前置：卡片应已打开"
+        tm.titleBar._sidebar_btn.click()
+        for _ in range(6):
+            QApplication.processEvents()
+        _pump(400)
+        _, _, tab_w, card_w = _inner(tm)
+        assert card_w == 0, f"卡片槽位应收 0，实际 {card_w}"
+        assert not tm._left_card_area_active(), "卡片可见意图应清除"
+        assert tm._tab_panel._collapsed is True, "面板应落折叠态"
+        assert abs(tm._splitter.sizes()[0] - (_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X)) <= 4, (
+            f"frame 应收到收起宽 {_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X}，实际 {tm._splitter.sizes()[0]}"
+        )
+        assert Settings.get_instance().ui_sidebar_collapsed.value is True, "用户终态应落盘为折叠"
+        assert tm.titleBar._sidebar_btn.toolTip() == "展开侧边栏", "按钮提示应回到折叠态文案"
+
 
 class TestMainSplitterDrag:
     def test_drag_main_splitter_only_adds_card_width(self):
