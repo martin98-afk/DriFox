@@ -2234,6 +2234,21 @@ class MessageCard(SimpleCardWidget):
         if not self.isVisible():
             self._anim_clock.restart()
             return
+        # [P2-7] 视口门控：卡片滚出 chat 视口可见范围时不空耗 update()（20fps
+        # 整卡动画在长会话里大多发生在屏幕外）。与隐藏分支同款相位语义：
+        # 时钟 restart，滚回视口后从原相位继续，无视觉跳变。
+        try:
+            top = self.window()
+            card_tl = self.mapTo(top, self.rect().topLeft())
+            viewport = self._parent.chat_scroll_area.viewport()
+            vp_tl = viewport.mapTo(top, viewport.rect().topLeft())
+            card_rect = QRect(card_tl, self.rect().size())
+            vp_rect = QRect(vp_tl, viewport.rect().size())
+            if not card_rect.intersects(vp_rect):
+                self._anim_clock.restart()
+                return
+        except RuntimeError:
+            pass
         # 系统「减少动态效果」：底部光块是纯装饰动画，直接不重绘。
         # 这是流式热路径上的逐帧绘制，关掉即省下这段开销。
         if not Animations.motion_enabled():
