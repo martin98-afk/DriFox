@@ -3330,11 +3330,11 @@ class TabManagerWindow(FramelessWindow):
                 _cur = getattr(_win, "_tab_sidebar_frame_w", None) if _win is not None else None
             else:
                 _cur = getattr(self, "_saved_panel_frame_width", None)
-            if _cur is not None and int(_cur) != int(_val):
+            if _cur is not None and (_val is None or int(_cur) != int(_val)):
                 logger.debug(
                     f"[TSW] restore 放弃 prev={prev_left_w} 基准已变 {_val}->{_cur} ({_kind})"
                 )
-                return  # 切页后有新的宽度编排：快照过时，不覆盖
+                return  # 切页后有新的宽度编排（含 saved 从无到有）：快照过时，不覆盖
         # ★ 卡片态守卫：left 卡片显隐是 per-tab 的，切页投影会让卡片态翻转
         #   （如「A 开卡 → B 无卡 → 切回 A」）。目标页卡片活跃时宽度语义由
         #   卡片编排独占（重开卡片时编排自己会把 frame 落位到卡片态宽），
