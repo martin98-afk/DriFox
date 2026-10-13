@@ -3011,6 +3011,12 @@ class TabManagerWindow(FramelessWindow):
                         ) + _FRAME_PADDING_X
                 else:
                     self._saved_panel_frame_width = cur_frame_w
+                # 手动折叠（非挤压）：清当前活跃窗口的 per-tab 宽度记忆——
+                # 用户显式收起是意图，切页不得按旧记忆展开回拖拽宽度
+                if not panel._collapsed_by_squeeze:
+                    _cur_win = self.get_current_window()
+                    if _cur_win is not None:
+                        _cur_win._tab_sidebar_frame_w = None
                 logger.debug(
                     f"[TSW] 折叠存意图 cur_frame_w={sizes[0]} saved->{self._saved_panel_frame_width}"
                 )
@@ -3131,12 +3137,31 @@ class TabManagerWindow(FramelessWindow):
             # （resize 结束检测在动画中会被 _animating 跳过）。
             if self._sidebar_anim_collapsing:
                 self._maybe_auto_expand_after_squeeze()
+            else:
+                # ★ 展开动画结束：恢复内容区重绘（finally）会触发重排，chat 区
+                #   sizeHint 恢复 → QSplitter 重排可能把左栏压穿折叠线，此时
+                #   _animating 已复位，resizeEvent 误判"用户拖窄"而自动折叠
+                #   （实测：拖宽 414 落定 1s 内被弹回图标条）。延迟两拍复检：
+                #   压窄未折 → _evaluate_squeeze_collapse 恢复宽度；
+                #   已挤压折叠 → _maybe_auto_expand 按意图宽展开（无窗口增长要求）。
+                QTimer.singleShot(150, self._post_expand_squeeze_check)
+                QTimer.singleShot(400, self._post_expand_squeeze_check)
         finally:
             # ── #31 动画结束恢复卡片 resize 预览能力 ──
             # 若本回调又同步启动了新动画（_maybe_auto_expand 走 _start_sidebar_anim
             # 重新抑制），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
             if not (self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running):
                 self._set_windows_resize_preview_suppressed(False)
+
+    def _post_expand_squeeze_check(self):
+        """展开动画收尾后的重排挤压复检（见 _on_sidebar_anim_finished 展开分支）"""
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None or getattr(panel, "_left_card_present", False) or panel._dragging_splitter:
+            return
+        if self._evaluate_squeeze_collapse():
+            return  # 真挤压：已走折叠动画
+        # 未折叠压窄（上一调用已恢复）或已挤压折叠：按意图宽展开（无增长要求）
+        self._maybe_auto_expand_after_squeeze(growth_required=False)
 
     def _evaluate_squeeze_collapse(self) -> bool:
         """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠（含双面板协调）
@@ -3272,10 +3297,15 @@ class TabManagerWindow(FramelessWindow):
             pass
         _snapshot = getattr(self, "_tab_switch_saved_snapshot", None)
         if _snapshot is not None:
-            _cur_saved = getattr(self, "_saved_panel_frame_width", None)
-            if _cur_saved is not None and _cur_saved != _snapshot:
+            _kind, _val = _snapshot
+            if _kind == "win":
+                _win = self.get_current_window()
+                _cur = getattr(_win, "_tab_sidebar_frame_w", None) if _win is not None else None
+            else:
+                _cur = getattr(self, "_saved_panel_frame_width", None)
+            if _cur is not None and int(_cur) != int(_val):
                 logger.debug(
-                    f"[TSW] restore 放弃 prev={prev_left_w} saved已变 {_snapshot}->{_cur_saved}"
+                    f"[TSW] restore 放弃 prev={prev_left_w} 基准已变 {_val}->{_cur} ({_kind})"
                 )
                 return  # 切页后有新的宽度编排：快照过时，不覆盖
         if getattr(panel, "_animating", False):
@@ -3283,10 +3313,10 @@ class TabManagerWindow(FramelessWindow):
             logger.debug(f"[TSW] restore 延迟(动画中) prev={prev_left_w}")
             QTimer.singleShot(250, lambda: self._restore_tab_frame_after_tab_switch(prev_left_w, prev_collapsed))
             return
-        # 卡片占位期宽度语义归卡片编排独占，不动（对齐 _evaluate_squeeze_collapse）
-        if getattr(panel, "_left_card_present", False):
-            logger.debug(f"[TSW] restore 跳过(卡片占位) prev={prev_left_w}")
-            return
+        # 卡片占位期：restore 仍执行——prev_left_w 是外层 frame 总宽（TabPanel+
+        # 卡片），恢复它按切前比例还原内层分配，不破坏卡片编排；折叠态切前被
+        # 编排锁定为折叠（prev_collapsed 一致），下方还原分支自然跳过。
+        # （原实现一刀切跳过：用户环境 left 卡片常驻 → 切页保宽永不生效。）
         try:
             sizes = self._splitter.sizes()
         except Exception:
@@ -3308,8 +3338,17 @@ class TabManagerWindow(FramelessWindow):
             f"[TSW] restore 执行 prev={prev_left_w} collapsed={prev_collapsed} {_before}->{_after}"
         )
         if not prev_collapsed:
-            # 展开态恢复值即意图宽，回写 saved 供折叠→展开/挤压恢复复用
+            # 展开态恢复值即意图宽：回写全局 saved + 目标窗口 per-tab 记忆
             self._saved_panel_frame_width = prev_left_w
+            _cur_win = self.get_current_window()
+            if _cur_win is not None:
+                _cur_win._tab_sidebar_frame_w = int(prev_left_w)
+
+    def _write_tab_sidebar_memory(self, w: int) -> None:
+        """把拖拽落定的宽度写进当前活跃对话窗口的 per-tab 宽度记忆"""
+        win = self.get_current_window()
+        if win is not None:
+            win._tab_sidebar_frame_w = int(w)
 
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度（含工作台反向恢复）
@@ -4013,11 +4052,13 @@ class TabManagerWindow(FramelessWindow):
                     panel._collapsed = False
                     panel._update_toggle_button(switch_ui=True)
                     self._saved_panel_frame_width = cur_frame_w
+                    self._write_tab_sidebar_memory(cur_frame_w)
                     self._on_sidebar_toggled(False)
                 else:
                     # 本来就展开：记录用户拖出的意图宽（切页保宽恢复基准）
                     # + 同步 UI（拖拽期可能已按阈值切过紧凑态）
                     self._saved_panel_frame_width = cur_frame_w
+                    self._write_tab_sidebar_memory(cur_frame_w)
                     logger.debug(f"[TSW] 拖拽落定(已展开) left={cur_frame_w} saved->{cur_frame_w}")
                     panel.sync_collapsed_ui()
         # 规则 4：拖拽把手属用户明确意图，松手落最终折叠态（值不变不写盘）
@@ -4552,13 +4593,28 @@ class TabManagerWindow(FramelessWindow):
                 #   saved），切回后应恢复展开，而非停留在挤压折叠的图标条。
                 if _prev_collapsed and getattr(self._tab_panel, "_collapsed_by_squeeze", False):
                     _prev_collapsed = False
-                # ★ 展开态以用户意图宽为恢复基准：即时宽度可能已被其他标签页
-                #   的工作台挤压污染（切回后空间释放，意图宽仍有效且可达）。
-                #   saved 缺省（从未拖拽）时退化为即时宽，行为不变。
-                _prev_left_w = self._tab_switch_baseline_width(_prev_left_w, _prev_collapsed)
-                # 快照切页时刻的意图宽：restore 执行时（含 250ms 动画重试）若
-                # saved 已变（中间发生了新拖拽/挤压恢复/卡片编排），放弃恢复
-                self._tab_switch_saved_snapshot = getattr(self, "_saved_panel_frame_width", None)
+                # ★ per-tab 宽度：目标窗口有独立宽度记忆时优先（每页记住自己
+                #   拖出的宽度，互不串扰）；无记忆回落到全局意图宽逻辑。
+                _win_mem = None
+                try:
+                    _win_mem = getattr(self._windows[index], "_tab_sidebar_frame_w", None)
+                except Exception:
+                    pass
+                if _win_mem and int(_win_mem) > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X:
+                    _prev_left_w = int(_win_mem)
+                    _prev_collapsed = False
+                    self._tab_switch_saved_snapshot = ("win", int(_win_mem))
+                else:
+                    # ★ 展开态以用户意图宽为恢复基准：即时宽度可能已被其他标签页
+                    #   的工作台挤压污染（切回后空间释放，意图宽仍有效且可达）。
+                    #   saved 缺省（从未拖拽）时退化为即时宽，行为不变。
+                    _prev_left_w = self._tab_switch_baseline_width(_prev_left_w, _prev_collapsed)
+                    # 快照切页时刻的意图宽：restore 执行时（含 250ms 动画重试）若
+                    # 基准已变（中间发生了新拖拽/挤压恢复/卡片编排），放弃恢复
+                    self._tab_switch_saved_snapshot = (
+                        "saved",
+                        getattr(self, "_saved_panel_frame_width", None),
+                    )
                 logger.debug(
                     f"[TSW] 切页 idx={index} raw={_sizes[0] if _sizes else 0} collapsed={_prev_collapsed} "
                     f"baseline={_prev_left_w} saved={self._tab_switch_saved_snapshot}"

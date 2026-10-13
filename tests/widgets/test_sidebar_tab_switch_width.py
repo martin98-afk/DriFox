@@ -61,6 +61,9 @@ class _StubWindow:
         self._tab_panel = _StubPanel()
         self._splitter = _StubSplitter(sizes)
 
+    def get_current_window(self):
+        return None  # 无活跃窗口：memory 回写/守卫自动跳过
+
     def _splitter_sizes_with_left(self, left_w):
         """与 TabManagerWindow 真实现同构（含工作台三窗格分支）"""
         sizes = self._splitter.sizes()
@@ -113,12 +116,15 @@ def test_restore_noop_when_unchanged(qapp):
     assert win._tab_panel.sync_calls == 0
 
 
-def test_restore_skipped_when_card_present(qapp):
-    """卡片占位期宽度语义归卡片编排独占，不动"""
+def test_restore_runs_when_card_present(qapp):
+    """卡片占位期：restore 按外层 frame 总宽恢复（按比例还原内层，不破坏编排）
+
+    用户环境 left 卡片常驻，旧实现一刀切跳过导致切页保宽永不生效。
+    """
     win = _StubWindow([160, 1040, 0])
     win._tab_panel._left_card_present = True
     TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
-    assert win._splitter.sizes()[0] == 160
+    assert win._splitter.sizes()[0] == 414
 
 
 def test_restore_clears_suppression(qapp):

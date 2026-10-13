@@ -118,7 +118,17 @@ def step_b_widen() -> None:
         tm._splitter.setSizes([414, max(0, total - 414 - wb), wb])
         tm._on_splitter_idle()
         log("B-widened")
-        QTimer.singleShot(500, step_switch_a)  # 展开动画 200ms + 余量
+
+        def _squeeze():
+            # 模拟展开动画结束后解冻重排把左栏压穿折叠线（chat sizeHint 恢复）
+            sizes = tm._splitter.sizes()
+            total = sum(sizes)
+            wb = sizes[2] if len(sizes) >= 3 else 0
+            tm._splitter.setSizes([60, max(0, total - 60 - wb), wb])
+            log("B-resqueeze(模拟重排挤压)")
+
+        QTimer.singleShot(260, _squeeze)  # 展开动画 200ms 结束后
+        QTimer.singleShot(900, step_switch_a)  # 给钉回复检（150/400ms）留时间
 
     QTimer.singleShot(300, _widen)
 
