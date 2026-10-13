@@ -10870,6 +10870,11 @@ class OpenAIChatToolWindow(ToolWindow):
         #     内嵌硬编码 font-size 的 QSS 不重建，setFont 被 QSS 盖住，视觉不响应
         self._refresh_floating_cards_font_style()
 
+        # 工具计数小字（含 font_size_css/get_font_family_css，颜色+字体双敏感）：
+        # 漏刷则字体切换后右下角计数停留旧 QSS（QSS 压制 setFont，视觉不响应）
+        if getattr(self, "_tool_count_label", None) is not None:
+            self._refresh_tool_toggle_btn()
+
         # 模型按钮文字（含 font_size_css，颜色+字体双敏感）
         if hasattr(self, "_model_btn_text"):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())

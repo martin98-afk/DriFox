@@ -236,6 +236,81 @@ def test_baseline_collapsed_uses_current_width(qapp):
     assert TabManagerWindow._tab_switch_baseline_width(win, 60, True) == 60
 
 
+# ── Bug 3：卡片态切页往返宽度丢失 ──
+
+
+def test_restore_aborts_when_card_becomes_active(qapp):
+    """切页后目标页卡片活跃（态翻转 False→True）：放弃恢复，宽度归卡片编排
+
+    实测场景：A 页开 left 卡片（frame=428）→ 切到无卡 B 页（frame=201）
+    → 切回 A。切页排队的 restore 携「B 页无卡宽 201」，执行时卡片编排
+    已把 A 恢复到 428（卡片重开）——若放行，201 会覆盖 428，卡片区被
+    挤成残条（用户报告「切回后变成没有卡片时的宽度」）。
+    """
+    win = _StubWindow([201, 1099, 0])
+    calls = []
+
+    def _card_active():
+        calls.append(1)
+        return True  # 执行时卡片已恢复活跃
+
+    win._left_card_area_active = _card_active
+    win._tab_switch_card_active_snapshot = False  # 切页时卡片未活跃
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 201, False)
+    assert win._splitter.sizes()[0] == 201, "卡片活跃时不做恢复（宽度归相机编排重落位）"
+    assert calls, "守卫必须检查卡片态"
+
+
+def test_restore_runs_when_card_state_unchanged(qapp):
+    """卡片态未变（True→True，卡片常驻切页）：守卫放行，挤压照常还原
+
+    用户环境 left 卡片常驻：切页时卡片态不变，切页挤压仍需 restore 还原。
+    守卫不得把常驻场景一刀切拦掉（回归保护）。
+    """
+    win = _StubWindow([160, 1040, 0])
+    win._left_card_area_active = lambda: True
+    win._tab_switch_card_active_snapshot = True
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert win._splitter.sizes()[0] == 414
+
+
+def test_restore_runs_when_card_state_unchanged_inactive(qapp):
+    """卡片态未变（False→False，均无卡）：守卫放行，普通切页挤压照常还原"""
+    win = _StubWindow([160, 1040, 0])
+    win._left_card_area_active = lambda: False
+    win._tab_switch_card_active_snapshot = False
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert win._splitter.sizes()[0] == 414
+
+
+def test_restore_runs_when_card_becomes_inactive(qapp):
+    """切页后卡片从活跃→不活跃（A 卡 → B 无卡）：目标页宽度回归普通左栏语义
+
+    卡片已关的页面宽度就是普通左栏宽，per-tab 记忆/基线恢复照常生效。
+    """
+    win = _StubWindow([160, 1040, 0])
+    win._left_card_area_active = lambda: False
+    win._tab_switch_card_active_snapshot = True  # 切页时卡片活跃，执行时已关
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert win._splitter.sizes()[0] == 414
+
+
+def test_restore_runs_without_card_snapshot(qapp):
+    """无卡片态快照（stub/旧路径）：守卫跳过，行为不变"""
+    win = _StubWindow([160, 1040, 0])
+    win._left_card_area_active = lambda: True
+    # 不设 _tab_switch_card_active_snapshot
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert win._splitter.sizes()[0] == 414
+
+
+def test_card_slot_chrome_extra_constant(qapp):
+    """卡片槽位→frame 换算补偿常量存在且为正（防回退成 0 引入逐轮递减）"""
+    from app.widgets.tab_manager_window import _CARD_SLOT_CHROME_EXTRA
+
+    assert _CARD_SLOT_CHROME_EXTRA == 8
+
+
 # ── Bug 2：left 卡片 frame 目标宽 ──
 
 

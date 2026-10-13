@@ -93,6 +93,15 @@ GLOBAL_REPLACE_TITLES = {
 # frame 宽 = 内容宽 + margins 12 + border 2
 _FRAME_PADDING_X = 14
 
+# ── 卡片态 frame↔槽位二次换算补偿（px，frame 域）──
+# 卡片打开期 #tabFrame 内多出两处未计入 _FRAME_PADDING_X 的装饰：
+#   #tabFrame QSS margin-left(4) + sidebarSplitter handle(4)。
+# 实测几何方程（卡片态）：frame 宽 = TabPanel 宽 + 卡片槽位 + 22
+# （= _FRAME_PADDING_X 14 + handle 4 + QSS margin 4）。
+# 卡片打开编排若不补偿，卡片槽每次重开被净吞 8px，连续切页时
+# 360→352→344 逐轮递减（表现为「切页往返后卡片越切越窄」）。
+_CARD_SLOT_CHROME_EXTRA = 8
+
 # ── 侧边栏折叠线（px，★ content 宽，= TabPanel.width() 口径）──
 # 展开态拖窄到该宽度以下即视为不可用 → 触发自动折叠；同时作为挤压折叠后
 # 展开的目标下限（不得窄于该值，否则标题文字被压成窄条）。
@@ -2851,6 +2860,12 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 pass
             target = self._left_card_frame_target(card_w)
+            # ★ 槽位→frame 换算补偿（+8）：_FRAME_PADDING_X(14) 只覆盖
+            #   layout margins(12) + border(2)；卡片态下内层还有 QSS
+            #   margin-left(4) 与 splitter handle(4) 未计——不补偿时卡片槽
+            #   每次重开被压缩 8px（实测连续切页卡片槽 360→352→344 逐轮
+            #   递减，表现为「切页往返后卡片宽度越来越窄」）。
+            target += _CARD_SLOT_CHROME_EXTRA
             # 3) 放宽 frame max（允许加宽）后落位
             self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(), target))
             if abs(tab_w - target) > 1:
