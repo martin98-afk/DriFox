@@ -16,7 +16,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import (
@@ -48,17 +48,30 @@ from PyQt5.QtWidgets import (
 # ══════════════════════════════════════════════════════════
 
 _FILE_ICON_PROVIDER: Optional[QFileIconProvider] = None
+# 图标缓存：Qt 视图不缓存 DecorationRole，hover / 滚动 / 选中变化都会重绘
+# 并重新调 data()；QFileInfo 构造（stat 磁盘）+ QFileIconProvider.icon
+# （Windows Shell 调用）在冷类别文件上单次可达 2ms，重绘高频下纯浪费。
+_ICON_CACHE: Dict[str, QIcon] = {}
+_ICON_CACHE_MAX = 8192
 
 
 def _get_file_icon(file_path: str) -> QIcon:
+    cached = _ICON_CACHE.get(file_path)
+    if cached is not None:
+        return cached
     global _FILE_ICON_PROVIDER
     if _FILE_ICON_PROVIDER is None:
         _FILE_ICON_PROVIDER = QFileIconProvider()
     info = QFileInfo(file_path)
     icon = _FILE_ICON_PROVIDER.icon(info)
     if icon and not icon.isNull():
-        return icon
-    return QApplication.style().standardIcon(QStyle.SP_FileIcon)
+        pass
+    else:
+        icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
+    if len(_ICON_CACHE) >= _ICON_CACHE_MAX:
+        _ICON_CACHE.clear()  # 简单上限保护：全清重冷一次，避免无界增长
+    _ICON_CACHE[file_path] = icon
+    return icon
 
 
 def _get_dir_icon() -> QIcon:

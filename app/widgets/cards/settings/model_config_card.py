@@ -9,6 +9,7 @@
   4. 标签最小宽度 80px，右边控件对齐
   5. 渲染完后根据字段数估算内容高度，调整父 BaseSettingsCard 的高度
 """
+
 import webbrowser
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -26,7 +27,7 @@ from qfluentwidgets import (
 from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Colors
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 
@@ -36,22 +37,21 @@ from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 # =============================================================================
 _FIELD_GROUPS = [
     ("上下文", ("最大Token", "上下文长度", "最大输出")),
-    ("思考",   ("思考模式", "思考预算", "思考等级")),
-    ("采样",   ("温度", "temp", "top_p", "max_new_tokens")),
-    ("能力声明", ("声明_支持思考", "声明_支持图像", "声明_上下文长度", "声明_最大输出", "声明_思考参数", "声明_思考强度")),
+    ("思考", ("思考模式", "思考预算", "思考等级")),
+    ("采样", ("温度", "temp", "top_p", "max_new_tokens")),
 ]
 
 # =============================================================================
 # 高度估算（px）
 # =============================================================================
-_FIELD_ROW_HEIGHT = 34        # 每个字段行（label + widget）
-_GROUP_HEADER_HEIGHT = 22     # 分组标题
-_GROUP_SPACING = 14           # 组间额外间距
-_CONTENT_PADDING = 12         # 内容区上下内边距
-_CARD_HEADER_HEIGHT = 30      # BaseSettingsCard 头部（图标+标题+关闭）
-_MIN_CARD_HEIGHT = 240        # 卡片最小高度
-_MAX_CARD_HEIGHT = 460        # 卡片最大高度
-_LABEL_MIN_WIDTH = 80         # 标签最小宽度（让控件对齐）
+_FIELD_ROW_HEIGHT = 34  # 每个字段行（label + widget）
+_GROUP_HEADER_HEIGHT = 22  # 分组标题
+_GROUP_SPACING = 14  # 组间额外间距
+_CONTENT_PADDING = 12  # 内容区上下内边距
+_CARD_HEADER_HEIGHT = 30  # BaseSettingsCard 头部（图标+标题+关闭）
+_MIN_CARD_HEIGHT = 240  # 卡片最小高度
+_MAX_CARD_HEIGHT = 460  # 卡片最大高度
+_LABEL_MIN_WIDTH = 80  # 标签最小宽度（让控件对齐）
 
 
 class ModelConfigCard(QWidget):
@@ -112,9 +112,17 @@ class ModelConfigCard(QWidget):
 
         # 连接信息 + 系统字段（不渲染到参数列表中）
         skip_keys = {
-            "模型名称", "API_URL", "API_KEY", "认证方式", "获取地址",
-            "选择模型", "provider_name", "name", "config_id",
-            "display_name", "_suffix_index",
+            "模型名称",
+            "API_URL",
+            "API_KEY",
+            "认证方式",
+            "获取地址",
+            "选择模型",
+            "provider_name",
+            "name",
+            "config_id",
+            "display_name",
+            "_suffix_index",
             *QUOTA_EXCLUDE_KEYS(),  # 套餐用量查询字段不渲染到参数列表
             *PROVIDER_MANAGED_KEYS,  # 服务商级管理键（模型列表生命周期，非模型参数）
         }
@@ -142,7 +150,7 @@ class ModelConfigCard(QWidget):
             if key == "思考等级" and self.current_model_name:
                 from app.core.modelmeta.model_capabilities import get_model_capabilities
 
-                caps = get_model_capabilities(self.current_model_name)
+                caps = get_model_capabilities(self.current_model_name, self.current_provider)
                 if caps.get("thinking_param") != "reasoning_effort" or not caps.get("reasoning_effort_values"):
                     continue
             display_name = meta.get("display_name", key)
@@ -153,13 +161,6 @@ class ModelConfigCard(QWidget):
             items.append((order, key, value, meta))
 
         items.sort(key=lambda x: x[0])
-
-        # 声明键常驻渲染（P1-9 段三）：config 里没有也要显示——默认「自动」/空
-        # = 未声明。不常驻的话用户永远看不到声明入口。
-        existing_keys = {it[1] for it in items}
-        for decl_key, decl_meta in PARAM_SCHEMA.items():
-            if decl_key.startswith("声明_") and decl_key not in existing_keys and not decl_meta.get("hide_in_card"):
-                items.append((decl_meta.get("order", 999), decl_key, None, decl_meta))
 
         groups = self._group_items(items)
 
@@ -175,27 +176,9 @@ class ModelConfigCard(QWidget):
             # 分组标题
             header = BodyLabel(group_name, self)
             header.setStyleSheet(
-                f"color: {Colors.TEXT_SECONDARY}; "
-                f"font-size: 11px; font-weight: 600; "
-                f"padding: 0 0 4px 2px;"
+                f"color: {Colors.TEXT_SECONDARY}; font-size: 11px; font-weight: 600; padding: 0 0 4px 2px;"
             )
             self.layout.addWidget(header)
-            # 能力声明组：有生效声明时组头风险提示（声明值压制自动探测，
-            # 异常声明会覆盖真实能力——文档 §6.11）
-            if group_name == "能力声明":
-                has_declared = any(v not in (None, "") for _o, _k, v, _m in group_items)
-                warn = BodyLabel(
-                    "已声明：值优先于模型自动探测，异常值会覆盖真实能力"
-                    if has_declared
-                    else "留空/自动 = 跟随模型数据（models.dev / 服务商声明）",
-                    self,
-                )
-                warn.setStyleSheet(
-                    f"color: {'#e05656' if has_declared else Colors.TEXT_MUTED}; "
-                    f"{font_size_css(10)}; padding: 0 0 2px 2px; background: transparent; border: none;"
-                )
-                self.layout.addWidget(warn)
-
             # 字段行
             for _order, key, value, meta in group_items:
                 ui_type = meta.get("ui_type") or self._infer_fallback_type(key, value)
@@ -208,26 +191,6 @@ class ModelConfigCard(QWidget):
                 hlayout.setSpacing(8)
                 hlayout.addWidget(label, 0)
                 hlayout.addWidget(widget, 1)
-                # 声明键未声明时：行尾小字标自动链生效层（P1-9 段三）
-                if key.startswith("声明_") and value in (None, "") and self.current_model_name:
-                    try:
-                        from app.core.modelmeta.model_capabilities import (
-                            DECLARED_CAPABILITY_KEYS,
-                            get_model_capability_sources,
-                        )
-
-                        field = DECLARED_CAPABILITY_KEYS.get(key, "")
-                        src = get_model_capability_sources(self.current_model_name).get(field)
-                        src_text = {"caps": "模型数据", "family": "服务商声明", "default": "内置默认"}.get(src)
-                        if src_text:
-                            hint = BodyLabel(f"自动: {src_text}", self)
-                            hint.setStyleSheet(
-                                f"color: {Colors.TEXT_MUTED}; {font_size_css(10)}; "
-                                f"background: transparent; border: none;"
-                            )
-                            hlayout.addWidget(hint, 0)
-                    except Exception:
-                        pass
                 self.layout.addLayout(hlayout)
                 self._widgets[key] = (label, widget)
 
@@ -284,9 +247,7 @@ class ModelConfigCard(QWidget):
             return widget
 
         elif ui_type == "slider":
-            range_info = meta.get(
-                "range", {"min": 0.0, "max": 1.0, "step": 0.01, "type": "float"}
-            )
+            range_info = meta.get("range", {"min": 0.0, "max": 1.0, "step": 0.01, "type": "float"})
             min_val = range_info["min"]
             max_val = range_info["max"]
             step = range_info["step"]
@@ -309,9 +270,7 @@ class ModelConfigCard(QWidget):
             slider.valueChanged.connect(lambda: self._on_field_changed())
 
             display_value = current if is_float else int(current)
-            label = BodyLabel(
-                f"{display_value:.2f}" if is_float else str(int(display_value)), self
-            )
+            label = BodyLabel(f"{display_value:.2f}" if is_float else str(int(display_value)), self)
             label.setFixedWidth(60)
             label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
@@ -384,7 +343,7 @@ class ModelConfigCard(QWidget):
             if key == "思考等级" and self.current_model_name:
                 from app.core.modelmeta.model_capabilities import get_model_capabilities
 
-                caps = get_model_capabilities(self.current_model_name)
+                caps = get_model_capabilities(self.current_model_name, self.current_provider)
                 dyn_values = caps.get("reasoning_effort_values")
                 if dyn_values:
                     options = list(dyn_values)
@@ -449,17 +408,11 @@ class ModelConfigCard(QWidget):
                 else:
                     result[actual_key] = widget.currentText()
             elif isinstance(widget, SearchableEditableComboBox):
-                text = (
-                    widget.text().strip()
-                    if callable(getattr(widget, "text", None))
-                    else ""
-                )
+                text = widget.text().strip() if callable(getattr(widget, "text", None)) else ""
                 if text:
                     result[actual_key] = text
                 else:
-                    result[actual_key] = (
-                        widget.currentText() if hasattr(widget, "currentText") else ""
-                    )
+                    result[actual_key] = widget.currentText() if hasattr(widget, "currentText") else ""
             elif hasattr(widget, "slider"):
                 logical_value = widget.slider.value() / widget.scale
                 range_info = getattr(widget, "range_info", {})
@@ -474,4 +427,3 @@ class ModelConfigCard(QWidget):
             else:
                 result[actual_key] = ""
         return result
-

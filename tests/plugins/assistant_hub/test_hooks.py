@@ -24,8 +24,6 @@ class _A:
 class _Mgr:
     """假 manager：固定 active 助手与注入内容。"""
 
-    last_on_stop = 0
-
     def __init__(self):
         self.session_overrides = {}
         self.session_map = {}
@@ -45,20 +43,16 @@ class _Mgr:
     def get(self, aid):
         return _A()
 
+    def list_assistants_sorted_by_stable(self):
+        return [_A()]
+
     def identity_and_persona(self, aid):
         return "# 小狐\n\n你是 小狐——马丁的专属 AI 助手。"
 
     def read_pinned(self, aid):
         return [("pin-1", "用户喜欢简洁回复")]
 
-    def compiled_memory(self, aid):
-        return "## 今日\n\n- 在开发助手中心"
-
-    def experience_read_index(self, aid):
-        return "# 经验索引"
-
     def identity_block(self, aid):
-        """模拟 manager.identity_block（BuildSystemPrompt hook 注入系统提示词）。"""
         a = self.get(aid)
         persona = self.identity_and_persona(aid)
         if not persona.strip():
@@ -66,16 +60,20 @@ class _Mgr:
         header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}"
         return header + "\n\n" + persona.strip()
 
-    def memory_block(self, aid):
-        """模拟 manager.memory_block（SessionStart hook 注入会话消息）。"""
+    def memory_system_block(self, aid, workdir=""):
         a = self.get(aid)
-        parts = []
-        pin_lines = [f"- {(c or '').strip()}" for _pid, c in self.read_pinned(aid) if (c or "").strip()]
-        if pin_lines:
-            parts.append("# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines))
-        if a.memory_enabled:
-            parts += ["## 记忆使用规则", "# 长期记忆\n\n" + self.compiled_memory(aid)]
-        return "\n\n".join(parts)
+        if a is None or not a.memory_enabled:
+            return ""
+        return (
+            "<memory_system>\n\n# 第一层 — 全局记忆\n文件：hub/xiaohu-x1/MEMORY.md\n\n"
+            "# 第二层 — 项目记忆\n目录：.drifox/memory/xiaohu-x1/\n\n</memory_system>"
+            "\n\n<global_memory>\n用户喜欢简洁回复\n</global_memory>"
+            "<project_memory>\n项目：DriFox 重构中\n</project_memory>"
+            "<daily_logs>\n- 2026-10-13（120 字）\n</daily_logs>"
+        )
+
+    def pinned_block(self, aid):
+        return "# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n- 用户喜欢简洁回复"
 
 
 def _patch_mgr(monkeypatch):
@@ -84,54 +82,17 @@ def _patch_mgr(monkeypatch):
     return mgr
 
 
-def test_identity_block_persona_only(monkeypatch):
-    """BuildSystemPrompt hook 用的 identity_block：人格段 + header，不含记忆。"""
+def test_hook_injects_identity_and_memory(monkeypatch):
+    """BuildSystemPrompt hook：身份块 + 记忆体系块（说明书/全局/项目/日志）全进系统提示词。"""
     _patch_mgr(monkeypatch)
-    block = m._identity_block("xiaohu-x1")
-    assert block.startswith("# 助手：小狐")
-    assert "小狐" in block  # persona 段
-    # 关键：记忆已迁出系统提示词
-    assert "记忆使用规则" not in block
-    assert "人工提示" not in block
-    assert "今日" not in block
-    assert "经验索引" not in block  # 经验不注入 prompt（渐进式披露走工具）
-
-
-def test_memory_block_pinned_rules_memory(monkeypatch):
-    """SessionStart hook 用的 memory_block：人工提示 + 记忆规则 + 长期记忆。"""
-    _patch_mgr(monkeypatch)
-    block = m._memory_block("xiaohu-x1")
-    assert block  # 非空
-    assert "人工提示" in block and "用户喜欢简洁回复" in block
-    assert "记忆使用规则" in block
-    assert "今日" in block
-    # 不含人格 header（人格在 BuildSystemPrompt 注入）
-    assert "# 助手：" not in block
-
-
-def test_memory_block_disabled_no_rules(monkeypatch):
-    """memory_enabled=False：memory_block 不输出记忆规则 + 长期记忆，但人工提示仍保留。"""
-    mgr = _patch_mgr(monkeypatch)
-
-    class _A2(_A):
-        memory_enabled = False
-
-    mgr.get = lambda aid: _A2()
-    block = m._memory_block("xiaohu-x1")
-    assert "记忆使用规则" not in block
-    assert "今日" not in block
-    assert "人工提示" in block and "用户喜欢简洁回复" in block  # 不受开关控制
-
-
-def test_hook_replaces_identity_context(monkeypatch):
-    """BuildSystemPrompt hook：注入人格块到 system prompt，置空预取防重复。"""
-    _patch_mgr(monkeypatch)
-    context = {"current_role": "primary", "agent_identity_content": "原build提示词"}
+    context = {"current_role": "primary", "agent_identity_content": "原build提示词", "project_root": "/proj"}
     out = m.hook("BuildSystemPrompt", context)
     assert out and "小狐" in out
-    # 关键：BuildSystemPrompt hook 输出不再含记忆
-    assert "记忆使用规则" not in out
-    assert "人工提示" not in out
+    assert "# 助手：小狐" in out
+    assert "memory_system" in out and "第一层" in out
+    assert "<global_memory>" in out and "简洁回复" in out
+    assert "<project_memory>" in out and "DriFox 重构中" in out
+    assert "<daily_logs>" in out
     assert context["agent_identity_content"] == ""  # 置空防重复注入
 
 
@@ -141,99 +102,85 @@ def test_hook_non_primary_noop(monkeypatch):
     assert m.hook("BuildSystemPrompt", context) == ""
 
 
-def test_on_session_start_returns_memory(monkeypatch):
-    """SessionStart hook：注入人工提示 + 记忆块到 session.messages（不进系统提示词）。"""
+def test_hook_memory_disabled_no_memory_block(monkeypatch):
+    """助手记忆关闭：memory_system_block 返回空，身份块保留。"""
+    mgr = _patch_mgr(monkeypatch)
+
+    class _A2(_A):
+        memory_enabled = False
+
+    mgr.get = lambda aid: _A2()
+    mgr.memory_system_block = lambda aid, workdir="": ""
+    out = m.hook("BuildSystemPrompt", {"current_role": "primary", "project_root": "/proj"})
+    assert "小狐" in out and "memory_system" not in out
+
+
+def test_on_session_start_injects_pinned_only(monkeypatch):
+    """SessionStart hook：只注入人工提示（记忆走系统提示词单一通道）。"""
     _patch_mgr(monkeypatch)
     out = m.on_session_start("SessionStart", {"state": "startup"})
-    assert out
-    assert "人工提示" in out and "用户喜欢简洁回复" in out
-    assert "记忆使用规则" in out
-    assert "今日" in out
-    # 不含人格 header（人格由 BuildSystemPrompt 提供）
+    assert out and "人工提示" in out and "简洁回复" in out
+    # 记忆内容不进会话消息
+    assert "memory_system" not in out and "global_memory" not in out
     assert "# 助手：" not in out
 
 
 def test_on_session_start_no_active_assistant(monkeypatch):
-    """无激活助手：SessionStart hook 返回空串，不报错。"""
     mgr = _patch_mgr(monkeypatch)
     mgr.active_id = lambda: ""
     assert m.on_session_start("SessionStart", {}) == ""
 
 
 def test_on_session_start_uses_session_override(monkeypatch):
-    """会话 override 优先：重启/压缩后按临时助手的记忆开关注入，不用主助手。"""
+    """会话 override 优先：临时助手无 pinned 时返回空串，不回落到主助手。"""
     mgr = _patch_mgr(monkeypatch)
     mgr.session_overrides["s2"] = "temp-1"
-
-    class _ATemp(_A):
-        memory_enabled = False  # 临时助手关了记忆开关
-
-    mgr.get = lambda aid: _ATemp()
+    mgr.pinned_block = lambda aid: "" if aid == "temp-1" else "# 人工提示\n\n- x"
     out = m.on_session_start("SessionStart", {"state": "compact", "session_id": "s2"})
-    assert out
-    assert "人工提示" in out  # pinned 始终注入
-    assert "记忆使用规则" not in out  # 临时助手的记忆开关生效
-    assert "今日" not in out
-
-
-def test_on_session_start_no_override_falls_back_to_active(monkeypatch):
-    """有 session_id 但无 override：回落主助手。"""
-    _patch_mgr(monkeypatch)
-    out = m.on_session_start("SessionStart", {"state": "startup", "session_id": "s3"})
-    assert out and "记忆使用规则" in out
+    assert out == ""
 
 
 def test_on_session_start_mgr_unavailable(monkeypatch):
-    """manager 不可用：返回空串，不抛异常。"""
     monkeypatch.setattr(m, "_get_manager", lambda: None)
     assert m.on_session_start("SessionStart", {}) == ""
 
 
-def test_on_stop_counts_turn(monkeypatch):
+def test_on_pre_user_mention_switches(monkeypatch):
+    """@提及：命中助手名 → 设置会话 override 并失效 prompt 缓存。"""
     mgr = _patch_mgr(monkeypatch)
-    calls = []
+    invalidated = []
+    mgr.set_session_override = lambda sid, aid: (mgr.session_overrides.update({sid: aid}), True)[1]
+    mgr._invalidate_session_prompt = lambda sid: invalidated.append(sid)
+    out = m.on_pre_user("PreUserMessage", {"current_role": "primary", "message": "让 @小狐 看看", "session_id": "s1"})
+    assert out == ""
+    assert mgr.session_overrides["s1"] == "xiaohu-x1"
+    assert invalidated == ["s1"]
 
-    class _Ticker:
-        @staticmethod
-        def on_turn_finished(aid):
-            calls.append(aid)
 
-    monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
+def test_on_pre_user_no_mention(monkeypatch):
+    mgr = _patch_mgr(monkeypatch)
+    out = m.on_pre_user("PreUserMessage", {"current_role": "primary", "message": "普通消息", "session_id": "s1"})
+    assert out == "" and mgr.session_overrides == {}
+
+
+def test_on_stop_records_map(monkeypatch):
+    mgr = _patch_mgr(monkeypatch)
     out = m.on_stop("Stop", {"current_role": "primary", "session_id": "s1"})
-    assert out == "" and calls == ["xiaohu-x1"]  # 无 override → 主助手
-    assert mgr.session_map == {"s1": "xiaohu-x1"}  # 归属已记录
-    # 无活跃助手：不异常
+    assert out == "" and mgr.session_map == {"s1": "xiaohu-x1"}
+    # 无活跃助手：不异常、不记录
     mgr.active_id = lambda: ""
-    assert m.on_stop("Stop", {"current_role": "primary"}) == ""
+    assert m.on_stop("Stop", {"current_role": "primary", "session_id": "s2"}) == ""
+    assert "s2" not in mgr.session_map
 
 
 def test_on_stop_uses_session_override(monkeypatch):
-    """临时助手会话：轮次计入临时助手并记录归属，不落主助手。"""
     mgr = _patch_mgr(monkeypatch)
     mgr.session_overrides["s2"] = "b-1"
-    calls = []
-
-    class _Ticker:
-        @staticmethod
-        def on_turn_finished(aid):
-            calls.append(aid)
-
-    monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
     out = m.on_stop("Stop", {"current_role": "primary", "session_id": "s2"})
-    assert out == "" and calls == ["b-1"]
-    assert mgr.session_map == {"s2": "b-1"}
+    assert out == "" and mgr.session_map == {"s2": "b-1"}
 
 
 def test_on_stop_non_primary_noop(monkeypatch):
     mgr = _patch_mgr(monkeypatch)
-    calls = []
-
-    class _Ticker:
-        @staticmethod
-        def on_turn_finished(aid):
-            calls.append(aid)
-
-    monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
     out = m.on_stop("Stop", {"current_role": "subagent", "session_id": "s1"})
-    assert out == "" and calls == []
-    assert mgr.session_map == {}
+    assert out == "" and mgr.session_map == {}

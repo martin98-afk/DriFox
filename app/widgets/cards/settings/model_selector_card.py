@@ -159,10 +159,10 @@ class ModelItem(QWidget):
         self._setup_ui()
 
     def _get_caps(self):
-        """查询模型能力（thinking + vision）"""
+        """查询模型能力（thinking + vision；带 provider 走插件 per-model 层）"""
         from app.core.modelmeta.model_capabilities import get_model_capabilities
 
-        return get_model_capabilities(self.model_name)
+        return get_model_capabilities(self.model_name, self.provider_name)
 
     def _effort_values(self) -> list:
         """思考强度可选值（models.dev reasoning_effort values，如 ["high","max"]）"""
@@ -225,10 +225,7 @@ class ModelItem(QWidget):
         badges_shown = ALL_BADGES
         has_trailing = bool(
             self._cost_text()
-            or (
-                BADGE_THINKING in badges_shown
-                and self._caps.get("supports_thinking")
-            )
+            or (BADGE_THINKING in badges_shown and self._caps.get("supports_thinking"))
             or (BADGE_EFFORT in badges_shown and self._effort_values())
             or (BADGE_VISION in badges_shown and self._caps.get("supports_vision"))
             or self._note

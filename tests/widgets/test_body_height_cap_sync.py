@@ -9,7 +9,7 @@
     html{overflow:hidden} 关闭了文档级滚动，body 是唯一滚动容器；而 widget
     高度自 1aa78021 起按「物理面积」收缩（CodeWebViewer.MAX_SURFACE_MPX，
     dpr=2.25 + 卡片 1200 逻辑宽 → 上限仅 ~1975px），body 的 max-height 却仍是
-    静态 MAX_HEIGHT（dpr=2.25 时 7111px）。于是内容高介于两者之间时：
+    静态 MAX_HEIGHT（当时 10000 → dpr=2.25 时 7111px）。于是内容高介于两者之间时：
         内容高 > widget 上限（被裁）   且   内容高 ≤ body max-height（body 无溢出）
     → body 不可滚、滚轮被外层聊天区吞掉 → 被裁内容既不可见也无任何滚动手径。
 

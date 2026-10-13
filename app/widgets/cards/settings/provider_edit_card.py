@@ -514,15 +514,18 @@ class ProviderEditCard(QWidget):
         model_row.addWidget(self.fetchBtn)
         main_layout.addLayout(model_row)
 
-        # 模型列表编辑器（常驻可见；旧代码是点「编辑列表」才显示）
+        # 模型列表编辑器（常驻可见；旧代码是点「编辑列表」才显示）。
+        # provider_name：能力查询走插件 per-model 层（服务商私有模型 ID
+        # 在 models.dev 不存在，不带 provider 查会能力列全 "-"）
         self.modelListEditor = ModelListEditorWidget(
-            initial_models, parent=self, default_model=str(current_model or "")
+            initial_models,
+            parent=self,
+            default_model=str(current_model or ""),
+            provider_name="" if self.is_new else self.provider_name,
         )
         # P1-9：存量「模型关闭列表」回显（与选择器过滤链同口径；键缺失 = 全部启用）。
         # 行构造读编辑器 _disabled，不灌这里重开编辑卡开关会全部回显 On。
-        self.modelListEditor.set_disabled_models(
-            list(self.provider_info.get("模型关闭列表") or [])
-        )
+        self.modelListEditor.set_disabled_models(list(self.provider_info.get("模型关闭列表") or []))
         self.modelListEditor.setVisible(True)
         main_layout.addWidget(self.modelListEditor)
 
@@ -620,6 +623,10 @@ class ProviderEditCard(QWidget):
             template_url = template.get("API_URL", "")
             self._load_preset_urls(name, template_url)
 
+            # 新建卡切服务商：能力查询跟随切换（须在 set_models 重建行之前）
+            if self.is_new:
+                self.modelListEditor.set_provider_name(name)
+
             preset_url = template.get("API_URL", "")
             existing_items = [self.apiUrlCombo.itemText(i) for i in range(self.apiUrlCombo.count())]
             if preset_url and preset_url in existing_items:
@@ -673,9 +680,7 @@ class ProviderEditCard(QWidget):
         # 折叠态：有字段也只显节头（P2 可选区折叠；编辑器在对象树，保存链不受影响）
         if hasattr(self, "_extra_rows_widget"):
             self._extra_rows_widget.setVisible(shown > 0 and self._extra_expanded)
-            self._extra_section_title.setText(
-                ("▾" if self._extra_expanded else "▸") + " 套餐用量查询（可选）"
-            )
+            self._extra_section_title.setText(("▾" if self._extra_expanded else "▸") + " 套餐用量查询（可选）")
         self._sync_login_btn()
 
     def _toggle_extra_section(self):
@@ -719,7 +724,9 @@ class ProviderEditCard(QWidget):
         parent = TabManagerWindow.get_instance() or self.window()
         # 提示文案可由服务商声明（如 Copilot：告知 user_code 在剪贴板，
         # 避免「浏览器开了但不知道填什么」的断片——用户实测踩过）
-        hint = str(p.capabilities.get("login_hint", "") or "") or "已打开浏览器等待授权，完成后自动回填（最长等待 5 分钟）"
+        hint = (
+            str(p.capabilities.get("login_hint", "") or "") or "已打开浏览器等待授权，完成后自动回填（最长等待 5 分钟）"
+        )
         InfoBar.info(
             "登录",
             hint,

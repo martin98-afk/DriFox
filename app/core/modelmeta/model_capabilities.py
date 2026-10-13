@@ -87,7 +87,7 @@ def _parse_declared_value(field: str, value: Any) -> Any:
     if field in ("context_limit", "max_output_tokens"):
         try:
             parsed = int(value)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
         return parsed if parsed > 0 else None
     if field in ("supports_vision", "supports_thinking"):
@@ -110,12 +110,7 @@ def _parse_declared_value(field: str, value: Any) -> Any:
             items = [str(v).strip() for v in value]
         else:
             raw = (
-                str(value)
-                .replace("，", ",")
-                .replace("、", ",")
-                .replace("；", ";")
-                .replace(";", ",")
-                .replace("/", ",")
+                str(value).replace("，", ",").replace("、", ",").replace("；", ";").replace(";", ",").replace("/", ",")
             )
             items = [p.strip() for p in raw.split(",")]
         return [p for p in items if p] or None
@@ -453,19 +448,47 @@ def _get_partitioned_model_capabilities(model_name: str, provider: str) -> Optio
         return None
 
 
+def _get_provider_model_caps(name: str, provider: str) -> Dict[str, Any]:
+    """查服务商插件的 per-model 能力声明（ProviderDef.model_capabilities）。
+
+    命中条件：provider 名精确对应已注册 ProviderDef，且其 model_capabilities
+    含该模型（strip 后全等；再兜一次小写）。返回副本防调用方改写声明。
+    """
+    if not provider:
+        return {}
+    try:
+        from app.plugins.registries.provider_registry import ProviderRegistry
+
+        pdef = ProviderRegistry.get_instance().get(provider)
+    except Exception:
+        return {}
+    declared = getattr(pdef, "model_capabilities", None)
+    if not isinstance(declared, dict) or not declared:
+        return {}
+    caps = declared.get(name)
+    if not isinstance(caps, dict):
+        caps = declared.get(name.lower())
+    return dict(caps) if isinstance(caps, dict) else {}
+
+
 def get_model_capabilities(model_name: str, provider: str = "") -> Dict[str, Any]:
     """按模型名查表，返回能力 dict；查不到返回空 dict。
 
     匹配规则：先按 strip 后的精确匹配，再按小写精确匹配。
-    优先级：models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES。
-    动态数据更准确（可修正硬编码错误），同名 key 用动态值覆盖。
-    硬编码独有的字段（如 thinking_enable_value）保留作为补充。
+    优先级：插件 per-model 声明 > models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES。
+    插件 per-model（ProviderDef.model_capabilities）是服务商对自家模型在自家
+    网关下的权威声明：能力/限额/思考字段以插件为准（网关限额与官方 API 各自
+    成立，不反向拉回）；插件未声明的展示性字段（cost 等）从下层补缺——否则
+    私有 ID 命中插件层后价格信息丢失（2026-10-13 用户实测回归）。models.dev
+    动态数据次之（可修正硬编码错误），同名 key 用动态值覆盖，硬编码独有字段
+    （如 thinking_enable_value）保留作为补充。
 
     Args:
         model_name: 模型名
         provider: 服务商名（ProviderDef.name）。**给了就走 provider 维度的精确查**
-            （先查 models.dev 分区索引，命中即用该分区的 caps）；未命中或未给
-            则降级到原有的「全局扁平索引」行为。15 处既有调用不传该参 → 行为不变。
+            （先查插件 per-model 声明，再查 models.dev 分区索引，命中即用）；
+            未命中或未给则降级到原有的「全局扁平索引」行为。15 处既有调用
+            不传该参 → 行为不变。
     """
     if not model_name:
         return {}
@@ -473,6 +496,22 @@ def get_model_capabilities(model_name: str, provider: str = "") -> Dict[str, Any
     if not name:
         return {}
 
+    # L-1: 服务商插件 per-model 声明（provider 维度最精确）：能力/限额/思考
+    # 以插件为准；插件未声明的展示性字段（cost 等）从下层链补缺
+    provider_caps = _get_provider_model_caps(name, provider)
+    if provider_caps:
+        lower = _lower_chain_caps(name, provider)
+        merged = dict(provider_caps)
+        for k, v in lower.items():
+            if k not in merged:
+                merged[k] = v
+        return merged
+
+    return _lower_chain_caps(name, provider)
+
+
+def _lower_chain_caps(name: str, provider: str) -> Dict[str, Any]:
+    """下层链（硬编码 MODEL_CAPABILITIES ← models.dev 动态覆盖），供 L-1 补缺复用。"""
     # 先从硬编码取
     result: Dict[str, Any] = {}
     if name in MODEL_CAPABILITIES:
@@ -552,7 +591,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
 
     # L2: 模型名查表（带 provider 走分区精确查，防同名模型跨服务商串味）
@@ -562,7 +601,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
     if caps.get("context_limit"):
         try:
             return max(1, int(caps["context_limit"]))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
 
     # L3: 服务商默认
@@ -574,14 +613,14 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
             if v not in (None, ""):
                 try:
                     return max(1, int(v))
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     pass
 
     # L4: family 兜底
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("context_limit", default)))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return max(1, int(default))
 
 
@@ -606,7 +645,7 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
 
     # L2: 模型真实输出上限（models.dev per-model，带 provider 走分区精确查）
@@ -617,13 +656,13 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
     if caps_max not in (None, ""):
         try:
             return max(1, int(caps_max))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
 
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("max_output_tokens", default)))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return max(1, int(default))
 
 
@@ -649,7 +688,7 @@ def get_caps_max_output_tokens(model: str, llm_config: Optional[Dict[str, Any]] 
         return None
     try:
         parsed = int(value)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     return parsed if parsed > 0 else None
 
@@ -658,6 +697,7 @@ def apply_model_defaults(
     config: Dict[str, Any],
     model_name: str,
     declared: Optional[Dict[str, Any]] = None,
+    provider: str = "",
 ) -> Dict[str, Any]:
     """对 config 字典叠加上模型默认值，返回新 dict（不修改原对象）。
 
@@ -692,7 +732,9 @@ def apply_model_defaults(
         declared_thinking = declared.get("声明_支持思考")
         declared_present = declared_thinking not in (None, "")
     # L3: 模型能力（覆盖前两层，之后 model_overrides 还会覆盖回来）
-    caps = get_model_capabilities(model_name)
+    # provider 走 L-1 插件 per-model 层：私有模型 ID 在 models.dev 不存在，
+    # 不带 provider 查 caps 全链落空 → 思考字段默认值整段跳过（参数卡无思考配置）
+    caps = get_model_capabilities(model_name, provider)
     if caps.get("context_limit"):
         result["最大Token"] = caps["context_limit"]
         result["上下文长度"] = caps["context_limit"]
@@ -708,9 +750,7 @@ def apply_model_defaults(
                     # 否则回退固定默认（如 deepseek 等无 values 数据的模型）
                     effort_values = caps.get("reasoning_effort_values") or []
                     # 默认取第一个"非关闭"档位：values 首项常是 none/no_think
-                    default_effort = next(
-                        (v for v in effort_values if str(v).lower() not in _EFFORT_OFF_VALUES), None
-                    )
+                    default_effort = next((v for v in effort_values if str(v).lower() not in _EFFORT_OFF_VALUES), None)
                     result["思考等级"] = default_effort or (effort_values[0] if effort_values else "medium")
         elif not declared_present:
             # 模型不支持思考 → 主动移除思考相关字段。
@@ -830,4 +870,3 @@ def get_model_capability_sources(model: str, provider: str = "") -> Dict[str, st
     sources: Dict[str, str] = {}
     resolve_model_capabilities({"模型名称": model or "", "provider_name": provider or ""}, provider, sources)
     return sources
-

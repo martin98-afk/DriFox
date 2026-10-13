@@ -67,17 +67,25 @@ class _DirEntry:
 
 
 class _TreeScanner(QObject):
-    """后台线程目录扫描器"""
+    """后台线程目录扫描器
+
+    ★ 目录在构造时绑定、``scan()`` 无参：``QThread.started`` 只能连接到
+    bound method（receiver=scanner，亲和 worker 线程）才能让扫描真正落在
+    worker 线程执行。此前 connect 到 lambda（无 receiver）会被 PyQt queued
+    回主线程，扫描全程占用主线程（卡 UI 元凶之一）。
+    """
 
     finished = pyqtSignal(object)  # List[_DirEntry]
     error = pyqtSignal(str)
 
-    def __init__(self):
+    def __init__(self, directory: str):
         super().__init__()
+        self._directory = directory
 
-    def scan(self, directory: str):
-        """扫描目录的即时子条目（在工作线程中调用）"""
+    def scan(self):
+        """扫描构造时绑定的目录（在工作线程中调用）"""
         try:
+            directory = self._directory
             entries: List[_DirEntry] = []
             if not os.path.isdir(directory):
                 self.finished.emit(entries)

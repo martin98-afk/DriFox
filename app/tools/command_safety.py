@@ -446,10 +446,17 @@ SHELL_ENCODED_FLAGS = {
 }
 
 # 解释器载荷里的危险调用特征（无法按命令分类，做特征匹配）
+# ⚠ 覆盖纪律：新增写形态必须补此处 —— `write_text(` 不含子串 `write(`（下划线
+# 顶掉左括号），只写 `write(` 会漏掉 pathlib 全部写方法（实测 `python -c
+# "Path('D:/a.txt').write_text('x')"` 曾判 allow 静默写界外）。
 INTERPRETER_DANGEROUS_TOKENS = (
     "shutil.rmtree", "os.remove", "os.unlink", "os.rmdir", "os.system",
     "subprocess", "os.popen", "rmdir(", "open(", "write(", "exec(", "eval(",
     "unlink(", "remove(", "rmtree(", "child_process", "fs.rm",
+    # 写文件族（pathlib / node fs / shutil / os）
+    "write_text(", "write_bytes(", "writefile", "appendfile", "createwritestream",
+    "copyfile", "copytree", "move(", "rename(", "makedirs(", "mkdir(",
+    "truncate(", "atomic_write",
 )
 
 # PowerShell cmdlet 危险名（classify_command 的名单是 POSIX/CMD 向，缺 cmdlet）

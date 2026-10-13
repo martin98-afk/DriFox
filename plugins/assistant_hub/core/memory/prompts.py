@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-"""prompts.py — 记忆/Dream/经验的全部 LLM prompt 模板（中文）。
+"""prompts.py — 记忆系统说明书 + 经验体系 LLM 模板（中文）。
 
-约定：
-- 每个 build_* 返回 chat messages（[{"role","content"},...]）。
-- 模板语言为中文（DriFox 主语境）；输出严格按要求格式，不解释、不加代码围栏。
-- 对齐 openhanako lib/memory/prompts/{compile,dream,fact-extraction}.ts 的语义。
+结构对齐 WorkBuddy 的 workbuddy-memory-system.md（三层记忆规范），
+品牌词全部替换为 drifox。编译/传送带（openhanako 系）prompt 已随管线删除。
 """
 
 from typing import Dict, List
@@ -33,147 +31,54 @@ def _msg(user_text: str) -> list:
     ]
 
 
-# ── 传送带编译 ────────────────────────────────────────────
+# ── 记忆系统说明书（BuildSystemPrompt 注入，照抄 WorkBuddy 结构）────
 
 
-def build_compile_today(turns: str, prev_today: str) -> list:
-    prev = prev_today.strip() or "（今日暂无记忆草稿）"
-    return _msg(
-        "把新对话中有价值的信息合并进已有草稿，输出**更新后的完整今日记忆**。\n"
-        + _STYLE
-        + "- 相似碎片合并，过时碎片修正或删除，寒暄丢弃\n"
-        "- 草稿中已完成的待办改写成完成事实；未完成的待办直接丢弃，不带入输出\n"
-        "- 按重要度排序；总量 ≤20 行且 ≤2800 字符，每行 ≤60 字符；接近上限砍最低价值条目\n"
-        "- 不编造新对话里没有的信息\n\n"
-        f"【已有草稿】\n{prev}\n\n【今日新对话】\n{turns.strip() or '（无）'}"
-    )
+def build_memory_system(global_file: str, project_dir: str) -> str:
+    """生成记忆系统说明书（含实际路径）。
 
+    对照 WorkBuddy workbuddy-memory-system.md：
+    - 三层（云记忆/用户级/工作区）→ 本实现两层（全局/项目）+ 经验体系（工具层）。
+    - 写入工具从通用 Edit 收口为 memory_write（DriFox 沙箱下工作目录外写会弹审批）。
+    """
+    return f"""IMPORTANT: 你拥有跨会话的长期记忆系统，分两层，各自的写入策略不同。
+<memory_system>
 
-def build_compile_daily(prev_today: str) -> list:
-    return _msg(
-        "把昨日全天「今日记忆」草稿蒸馏成日记文件，输出格式：\n"
-        "第一行：`TOPIC: 主题`（≤12 字，概括当日核心事项；禁标点、空格、路径字符）\n"
-        "空一行后输出正文：≤3 条碎片，一行一条，每条 ≤60 字符，总量 ≤800 字符，\n"
-        "只留那天的重要进展、决定、踩坑；接近上限时删最低价值条目。\n"
-        + _STYLE
-        + f"\n【昨日记忆草稿】\n{prev_today.strip() or '（空）'}"
-    )
+# 第一层 — 全局记忆（跨项目，读写）
 
+文件：{global_file}｜作用域：所有项目｜注入上限：4,000 字符
 
-def build_shrink_overrun(text: str, budget: int) -> list:
-    """编译输出超预算时的压缩重试模板（compile_today/daily 硬校验配套）。"""
-    return _msg(
-        f"下面的记忆内容超长（{len(text)} 字符，预算 {budget} 字符）。压缩到预算以内：\n"
-        "- 语义相近的碎片合并成一条，删除最低价值的条目，保持一行一条碎片格式\n"
-        "- 数字/路径/函数名/错误原文逐字保留，不新增原文不存在的信息\n"
-        "- 只输出压缩后的内容\n\n"
-        f"【原文】\n{text}"
-    )
+当用户明确要求你长期记住某事、且此事不绑定具体项目时，用 memory_write（scope=global）
+整体更新此文件，保持精简。与项目记忆不同，这里只写显式要求——精确、必须严格执行的规则。
 
+# 第二层 — 项目记忆（当前项目，读写）
 
-def build_compile_facts(existing_facts: str, turns: str) -> list:
-    existing = existing_facts.strip() or "（暂无）"
-    return _msg(
-        "从新对话提取值得长期记住的事实（身份、关系、偏好、约束、长期项目、硬性要求），"
-        "与已有事实合并去重，输出**完整的重要事实清单**。\n"
-        + _STYLE
-        + "- 只收「过时会让助手犯错」级别的事实，一次性话题不收\n"
-        "- 待办、任务进度、当前状态等实时性内容不收\n"
-        "- 与已有事实冲突时以新对话为准\n"
-        "- 旧有事实在新对话中未再提及：默认原样保留，只有确证已过时/被覆盖才删，存疑即留\n"
-        "- 总量 ≤30 行，每行 ≤80 字符；接近上限时合并同类、淘汰最陈旧最不关键的\n\n"
-        f"【已有重要事实】\n{existing}\n\n【新对话】\n{turns.strip() or '（无）'}"
-    )
+目录：{project_dir}/｜作用域：仅当前项目
 
+文件：
+- {project_dir}/YYYY-MM-DD.md — 每日工作日志。**只追加，绝不覆盖**（memory_write scope=daily）。文件名即日期，content 勿再写日期标题。
+- {project_dir}/MEMORY.md — 项目长期笔记（memory_write scope=project 整体更新）。上限 3,000 字符。
+- 今天的日志不存在时，memory_write 会自动创建；不要手动建文件。
 
-# ── Dream 五步（对齐 dream/runner.ts 管线语义）──────────
+取历史上下文：按需选择来源，不需要全读。
+- 查本项目的过往工作 → memory_read（scope=daily，带 date 读某天；最近的优先）或读项目 MEMORY.md。
+- 跨项目、位置不确定 → 读全局记忆，或直接问用户。
 
+角色边界：记忆只是补充，不替代正常回复、最终答案或用户要求的任何交付物。
 
-def build_dream_atomize(memory_text: str) -> list:
-    return _msg(
-        "把下面的记忆文本拆成**原子记忆单元**：每条只包含一个独立的事实/事件/偏好/约定，"
-        "一行一条，`- ` 开头。丢弃纯寒暄和已失效的临时信息。不要合并，不要改写事实本身。\n\n"
-        f"【记忆文本】\n{memory_text}"
-    )
+**何时写（必须遵守）：** 完成实质工作后，立即用 memory_write（scope=daily）往当日日志追加一条简短记录。实质工作包括：
+- 建好或修改了网站/应用/插件
+- 修复了 bug
+- 写了或生成报告/文档
+- 完成代码重构或架构调整
+- 选定了技术方案（框架、设计模式等）
+- 用户分享了项目约定或偏好 → 同时整体更新项目 MEMORY.md（scope=project）
 
+日志只追加。不记录瞬时信息（搜索结果、临时路径、工具报错）。只沉淀跨会话仍有价值的内容。
 
-def build_dream_dedupe(units: str) -> list:
-    return _msg(
-        "下面是记忆单元列表。找出语义重复的条目（同一件事的不同表述），"
-        "输出**去重后的单元列表**（保留信息最完整的一条表述），`- ` 开头，一行一条。\n"
-        "只删语义重复，不删相似但不同的事实。\n\n"
-        f"【记忆单元】\n{units}"
-    )
+维护：把超过 30 天的日志按主题蒸馏进项目 MEMORY.md，然后删除旧日志文件（bash）。除用户明确要求，不存密钥。
 
-
-def build_dream_optimize(units: str) -> list:
-    return _msg(
-        "优化下面记忆单元的表述：指代不明的词（如「那个」「上次」）改成具体对象/绝对日期，"
-        "其余按碎片风格压缩，信息不丢。输出优化后的完整列表，`- ` 开头，一行一条，不增不删。\n"
-        + _STYLE
-        + f"\n【记忆单元】\n{units}"
-    )
-
-
-def build_dream_compose(optimized: str) -> list:
-    return _msg(
-        "把优化后的记忆单元整理成结构化**长期记忆**文档，固定以下四个分类，按顺序输出：\n"
-        "- `## 工作背景`：用户的工作全景——在手项目（定位、当前形态、规模）、技术栈、架构要点、团队协作方式\n"
-        "- `## 个人背景`：用户的身份、沟通风格、工作习惯、偏好与反感，含对助手的明确要求\n"
-        "- `## 关键事实`：决策、坑、硬约束、环境限制等零散但重要的独立事实\n"
-        "- `## 当前关注`：正在推进的任务、当前痛点、待解决的问题（实时状态，随后续整理更新）\n\n"
-        "写法（读者是 LLM）：\n"
-        "- 每个分类一段浓缩长文：语义相近的信息织进同一句，信息密度优先，不追求一行一条\n"
-        "- 重点词用 **加粗**；数字/路径/函数名/API/错误原文逐字保留，不翻译不改写、不自造缩写\n"
-        "- 时间用绝对日期（如 09-03），禁「昨天/上次/最近」\n"
-        "- 工作背景/个人背景/关键事实只写稳定内容；实时性状态（待办、进行中事项）只进「当前关注」\n"
-        "- 每条自包含，脱离上下文可解码；语义等价的单元必须合并；已过时或被覆盖的信息丢弃\n"
-        "- 不确定的信息不写，禁止脑补\n"
-        "- 总长 ≤6000 字符，四段按信息量分配；某分类无内容时输出该标题加（暂无）\n\n"
-        f"【记忆单元】\n{optimized}"
-    )
-
-
-def build_dream_verify(current_sections: str, composed: str) -> list:
-    return _msg(
-        "你是记忆整理的质量校验员。对比「整理前」和「整理后」，检查：\n"
-        "1. 语义保真：整理后有没有新增原文不存在的事实？\n"
-        "2. 溯源完整：原文中独立的长期事实有没有被误删？\n"
-        "3. 压缩合理：是否完成了实质压缩（而不是原样照抄）？\n\n"
-        "判定标准（宁可宽松，不要吹毛求疵）：\n"
-        "- 整理是「压缩合并」而非「逐条照抄」：多条相近碎片合并成一条、长条目改写成碎片表述、\n"
-        "  细枝末节被聚合概括，都算正常，不算遗漏；只有「整块独立事实完全消失」才判 provenance_ok=false\n"
-        "- 过时的、已被新信息覆盖的条目被删除是预期行为，不算遗漏\n\n"
-        '只输出一个 JSON 对象：{"semantic_ok": true/false, "provenance_ok": true/false, '
-        '"sufficient_compression": true/false, "feedback": "失败原因一句话"}\n'
-        "全部通过则 feedback 留空。\n\n"
-        f"【整理前】\n{current_sections}\n\n【整理后】\n{composed}"
-    )
-
-
-def build_dream_forget(facts_draft: str, longterm: str, today: str, daily: List[Dict[str, str]]) -> list:
-    daily_text = "\n\n".join(f"【{d['date']}】\n{d['body']}" for d in daily) or "（无）"
-    return _msg(
-        "【火灾取物 · 物竞天择】记忆库发生火灾，只能抢救有限名额，"
-        "每条记忆必须证明自己值得占一个名额，平庸即淘汰。\n"
-        "淘汰优先：一次性信息、可从外部重新获得的内容（公开文档/代码可查）、"
-        "被新版本覆盖的旧表述、模糊薄弱脱离上下文不可解码的条目、长期沉寂无引用的条目；"
-        "「当前关注」分类中的实时状态是例外，不按待办淘汰（该分类本身就承载进行中事项）。\n"
-        "存活优先：仍活跃的项目/约束/偏好、具体可执行的坑与决策、身份关系类硬事实。\n"
-        + _STYLE
-        + "- 硬性预算：facts ≤6000 字符，**保持合成稿的四个分类（工作背景/个人背景/关键事实/当前关注）结构**；"
-        "longterm ≤20 条；daily 保留 ≤3 天\n"
-        "- facts 内部的淘汰在分类内进行：某分类整体平庸才整段删，能留则留，保住画像完整性\n"
-        "- **输出必须按重要度从高到低排序**（超名额时末尾条目会被截断，最重要的必须在最前）\n"
-        "- 只删/合并，不增不改写：输出中出现的事实必须来自输入；语义等价碎片可合并挤一个名额\n"
-        "- today 仅供参考视野，不在输出范围\n\n"
-        '只输出一个 JSON 对象：{"facts": "保留后的重要事实全文", "keep_daily": ["日期"], '
-        '"longterm": "保留后的长期记忆全文"}；某段全无可保留则输出空字符串/空数组。\n\n'
-        f"【facts 候选（合成稿）】\n{facts_draft.strip() or '（空）'}\n\n"
-        f"【longterm】\n{longterm.strip() or '（空）'}\n\n"
-        f"【today（只读视野）】\n{today.strip() or '（空）'}\n\n"
-        f"【daily 候选】\n{daily_text}"
-    )
+</memory_system>"""
 
 
 # ── 经验库压缩 ──────────────────────────────────────────

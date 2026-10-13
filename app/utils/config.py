@@ -48,21 +48,6 @@ class ListDictValidator(ConfigValidator):
         return []
 
 
-
-
-# OpenCode Zen 插件历史声明过的 default_model 值（插件演进过程中用过的默认模型）。
-# 用途：老配置若「模型名称」仍是这些值之一，说明用户从未手动切换过模型，
-# 可在插件升级默认模型后安全地随之升级；用户改成白名单外的值（自己选的模型）
-# 一律不碰，避免覆盖用户选择。
-#
-# 维护：providers 插件每次修改 ProviderDef(default_model=...) 时，把旧值追加到此集合。
-_LEGACY_OPENCODE_DEFAULT_MODELS = frozenset(
-    {
-        "deepseek-v4-flash-free",  # 初版默认（2026-09 实测已下线，服务端报 Model is unavailable）
-    }
-)
-
-
 # 配置迁移注册表（P0-7）：启动时由 Settings._run_migrations 串行执行。
 #
 # 契约：每项签名 ``(instance) -> bool``，返回「是否已改动配置」；落盘由各迁移项
@@ -79,8 +64,23 @@ def _migrate_saved_providers_entry(instance) -> bool:
     return Settings._migrate_saved_providers(instance)
 
 
+def _migrate_remove_opencode_free_provider_entry(instance) -> bool:
+    """注册表次项：移除内置注入的「opencode免费模型」配置（免费模型已下线）。
+
+    OpenCode 免费模型不可用后，旧的自动注入逻辑已删除；存量用户配置里
+    仍留有自动注入的条目（name="opencode免费模型"），保留只会让用户在模型
+    选择器里选中后请求 403。一次性清理：
+    - 删除 saved_providers 中 name 完全匹配的条目；
+    - llm_selected_model 指向被删条目时置空（加载链回退首项）；
+    - 同步清理 _cipher_backup 中对应的孤儿密文（密码模式下）。
+    用户自建/改名的 OpenCode Zen/Go 配置一律不受影响。
+    """
+    return Settings._migrate_remove_opencode_free_provider(instance)
+
+
 _MIGRATIONS: List[Callable[[Any], bool]] = [
     _migrate_saved_providers_entry,
+    _migrate_remove_opencode_free_provider_entry,
 ]
 
 
@@ -130,8 +130,6 @@ class Settings(QConfig):
                 cls._config_loaded = True  # 标记配置成功加载
                 # 迁移旧格式配置（注册表串行执行，单项失败不中断启动）
                 cls._run_migrations(cls._instance)
-                # 确保内置 OpenCode 免费默认配置存在
-                cls._ensure_default_opencode_provider(cls._instance)
             except Exception:
                 logger.exception("无法加载配置文件")
                 cls._config_loaded = False
@@ -152,9 +150,6 @@ class Settings(QConfig):
     #
     # 注册表 `_MIGRATIONS` 定义在模块级（本类之前）。契约：迁移函数签名
     # ``(instance) -> bool``，返回「是否已改动配置」；落盘由各迁移项自行负责。
-    #
-    # ⚠️ `_ensure_default_opencode_provider` 是**不变式维护**（保证内置免费服务
-    # 商存在），不是版本迁移，故保持原位原顺序调用，不得塞进注册表。
 
     @classmethod
     def _run_migrations(cls, instance) -> bool:
@@ -227,82 +222,36 @@ class Settings(QConfig):
         return True
 
     @classmethod
-    def _ensure_default_opencode_provider(cls, instance):
-        """确保内置 OpenCode 免费默认配置存在（免 key 匿名调用）。
+    def _migrate_remove_opencode_free_provider(cls, instance) -> bool:
+        """移除内置注入的「opencode免费模型」服务商配置（OpenCode 免费模型已下线）。
 
-        - 防重复：若 saved_providers 中已有同 name 的配置，不再注入。
-        - 用户手动删除后，下次启动会自动恢复。
-        - 历史迁移：老版本注入过内置共享 key 的配置（含 legacy key），
-          启动时自动清空 API_KEY 升级为免 key 配置（无共享 key 概念后，
-          内置 key 已失效且免 key 端点不接受假 key）。
+        - 按 name 精确匹配删除（用户改名/自建配置不受影响）；
+        - llm_selected_model 指向被删条目时置空，避免选中已删除的服务商；
+        - 密码模式：同步清理 _cipher_backup 中对应孤儿密文。
         """
-        from app.constants import provider_default_config
-        from app.core.modelmeta.provider_profile import compute_provider_config_id
-
-        provider_name = "OpenCode Zen"
-        # 数据源从硬编码 FREE_PROVIDERS 迁移到 providers 插件（OpenCode Zen 插件注册表）
-        default_config = provider_default_config(provider_name)
-        if not default_config:
-            return
-
-        api_url = default_config.get("API_URL", "")
-        config_name = "opencode免费模型"
-
         saved_providers = instance.llm_saved_providers.value
-        if not isinstance(saved_providers, dict):
-            saved_providers = {}
+        if not saved_providers or not isinstance(saved_providers, dict):
+            return False
 
-        # 已存在同名配置：标记已注入（用户可改名/替换 key 来隐藏或自定义）
-        #
-        # 附带幂等迁移：若该配置的「模型名称」仍是插件历史默认值（用户从未
-        # 手动切换过模型），则升级为插件当前声明的 default_model。修复的是
-        # 「插件换了默认模型，老用户配置仍指向已下线模型」的问题——旧默认值
-        # 下线后这类配置每次启动都拿不到可用默认，且异步刷新只回填「模型列表」
-        # 不碰「模型名称」。用户自行选过的模型（白名单外）一律保持不动。
-        declared_model = str(default_config.get("模型名称", "") or "")
-        for config_id, info in saved_providers.items():
-            if not isinstance(info, dict):
-                continue
-            if info.get("name") != config_name:
-                continue
-            instance.llm_default_opencode_injected.value = True
-            current_model = str(info.get("模型名称", "") or "")
-            if declared_model and current_model and current_model != declared_model:
-                if current_model in _LEGACY_OPENCODE_DEFAULT_MODELS:
-                    # deepcopy 后再写回：直接原地修改不会触发 valueChanged 信号
-                    upgraded = deepcopy(saved_providers)
-                    upgraded[config_id]["模型名称"] = declared_model
-                    instance.llm_saved_providers.value = upgraded
-                    instance.save()
-                    logger.info(
-                        f"OpenCode 默认配置模型已升级: {current_model} -> {declared_model} ({config_id})"
-                    )
-            return
-
-        provider_info = {
-            "provider_name": provider_name,
-            "name": config_name,
-            "API_URL": api_url,
-            "API_KEY": "",  # 免 key 匿名调用：空 key 走剥离 Authorization 头逻辑
+        removed_ids = {
+            str(cfg_id)
+            for cfg_id, info in saved_providers.items()
+            if isinstance(info, dict) and info.get("name") == "opencode免费模型"
         }
-        # 「模型名称」不在此写死 —— 由下方 default_config 注入插件声明的
-        # ProviderDef.default_model（单一数据源在 providers 插件，本处只做消费）。
-        # 不写 模型列表 —— 空列表会让模型选择器显示为空，
-        # 不写此键则回退到 merged_provider_models（插件模型 + models.dev + 异步刷新），
-        # 等异步刷新完成后才写入实际列表。
-        # 继承 providers 插件默认配置中的其他默认参数（模型名/温度/最大Token/认证方式等）
-        for key, value in default_config.items():
-            if key not in provider_info:
-                provider_info[key] = value
+        if not removed_ids:
+            return False
 
-        config_id = compute_provider_config_id(provider_info)
-        provider_info["config_id"] = config_id
-        saved_providers[config_id] = provider_info
-
-        instance.llm_saved_providers.value = saved_providers
-        instance.llm_default_opencode_injected.value = True
+        instance.llm_saved_providers.value = {k: v for k, v in saved_providers.items() if str(k) not in removed_ids}
+        selected = instance.llm_selected_model.value
+        if selected and str(selected) in removed_ids:
+            instance.llm_selected_model.value = ""
+        backup = getattr(instance, "_cipher_backup", None)
+        if isinstance(backup, dict):
+            for cfg_id in removed_ids:
+                backup.pop(cfg_id, None)
         instance.save()
-        logger.info(f"已自动注入默认 OpenCode 免费服务商配置: {config_name} ({config_id})")
+        logger.info(f"已移除内置「opencode免费模型」服务商配置 {len(removed_ids)} 条（免费模型已下线）")
+        return True
 
     @classmethod
     def _extend_theme_validator_before_load(cls):
@@ -338,7 +287,6 @@ class Settings(QConfig):
             import logging
 
             logging.warning(f"[_extend_theme_validator_before_load] failed: {e}")
-
 
     def set(self, item, value, save=False, copy=True):
         """set the value of config item
@@ -408,7 +356,9 @@ class Settings(QConfig):
 
                     if mode == MODE_PASSWORD:
                         # 密码模式：明文加密落盘；locked 期间用备份密文原样回写
-                        seal_secrets(data, self._secret_password, self._cipher_backup, kdf_salt=self._password_kdf_salt())
+                        seal_secrets(
+                            data, self._secret_password, self._cipher_backup, kdf_salt=self._password_kdf_salt()
+                        )
                     else:
                         strip_secrets(data, SecretStore(), mode=mode)
                 except Exception:
@@ -728,8 +678,6 @@ class Settings(QConfig):
     # ========== 大模型对话默认配置 ==========
     # 保存的免费/自定义服务商配置
     llm_saved_providers = ConfigItem("LLM", "SavedProviders", {})
-    # 默认 OpenCode 免费配置是否已注入（防止用户删除后反复自动创建）
-    llm_default_opencode_injected = ConfigItem("LLM", "DefaultOpencodeInjected", False, BoolValidator())
     # 按模型名覆盖的参数（最大Token、温度、思考相关等），key=模型名
     llm_model_overrides = ConfigItem("LLM", "ModelOverrides", {})
     # 最近选择的模型
@@ -742,7 +690,16 @@ class Settings(QConfig):
     llm_enabled_skills = ConfigItem(
         "LLM",
         "EnabledSkills",
-        ["brainstorming", "visualization", "writing-plans", "find-skills", "skill-creator", "git-commit", "plugin-creator", "ui-plugin-creator"],
+        [
+            "brainstorming",
+            "visualization",
+            "writing-plans",
+            "find-skills",
+            "skill-creator",
+            "git-commit",
+            "plugin-creator",
+            "ui-plugin-creator",
+        ],
     )
     # 主智能体选择（单选，通过 inject_agent_identity hook 注入系统提示词）
     llm_primary_agent = ConfigItem("LLM", "PrimaryAgent", "")
@@ -804,9 +761,7 @@ class Settings(QConfig):
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", False, BoolValidator())
     # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
-    tab_panel_mode = OptionsConfigItem(
-        "UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"])
-    )
+    tab_panel_mode = OptionsConfigItem("UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"]))
     pet_size = OptionsConfigItem("UI", "PetSize", "small", OptionsValidator(["small", "medium", "large"]))
 
     # 注：上次项目/上次欢迎 tab/树折叠态等「上次状态」已迁至 app_state（.drifox/cache/app_state.json），
@@ -937,9 +892,7 @@ class Settings(QConfig):
         OptionsValidator(["auto", "on", "off"]),
     )
     # Chromium renderer 进程硬上限（内存治理核心项）
-    render_renderer_process_limit = RangeConfigItem(
-        "Render", "RendererProcessLimit", 6, RangeValidator(1, 32)
-    )
+    render_renderer_process_limit = RangeConfigItem("Render", "RendererProcessLimit", 6, RangeValidator(1, 32))
     # 单 renderer JS 堆上限（MB），防单页膨胀
     render_js_heap_mb = RangeConfigItem("Render", "JsHeapMb", 128, RangeValidator(64, 1024))
     # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）。
@@ -953,9 +906,7 @@ class Settings(QConfig):
     # 后台渲染节流：关（默认，Chromium 原生节流）/ 开 ——
     # 追加 --disable-renderer-backgrounding + --disable-backgrounding-occluded-windows。
     # 长对话里离屏卡片被降优先级导致的流式卡顿可开，代价是离屏卡片回收变慢。
-    render_disable_background_throttling = ConfigItem(
-        "Render", "DisableBackgroundThrottling", False, BoolValidator()
-    )
+    render_disable_background_throttling = ConfigItem("Render", "DisableBackgroundThrottling", False, BoolValidator())
     # 共享 GL 上下文（Qt.AA_ShareOpenGLContexts）：默认开，省约 12.7% per-view 常驻
     # 内存；代价是全部消息卡共用一个 GL 上下文。多卡/图表闪烁排查时可关掉验证。
     render_share_gl_contexts = ConfigItem("Render", "ShareGLContexts", True, BoolValidator())

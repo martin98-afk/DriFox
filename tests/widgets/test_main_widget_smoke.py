@@ -390,11 +390,12 @@ class TestSignals:
         "executionResultProduced",
         "toolStartUiSyncRequested",
         "ai_state_changed",
-        "_opencode_models_ready",
+        "_models_dev_ready",
+        "_tool_registry_changed",
     }
 
     def test_all_signals_defined_in_ast(self):
-        """AST 层面：11 个 pyqtSignal 类属性全部定义"""
+        """AST 层面：12 个 pyqtSignal 类属性全部定义"""
         cls = _get_target_class()
         signal_names = set()
         for stmt in cls.body:
@@ -420,10 +421,10 @@ class TestSignals:
         extra = signal_names - self._EXPECTED_SIGNALS
         assert not missing, f"缺少信号: {sorted(missing)}"
         assert not extra, f"多余的信号定义（_EXPECTED_SIGNALS 需更新）: {sorted(extra)}"
-        assert len(signal_names) == 11, f"应有 11 个信号，实际 {len(signal_names)}"
+        assert len(signal_names) == 12, f"应有 12 个信号，实际 {len(signal_names)}"
 
     def test_all_signals_accessible_as_class_attribute(self):
-        """运行时：11 个信号均可通过类属性访问"""
+        """运行时：12 个信号均可通过类属性访问"""
         from app.main_widget import OpenAIChatToolWindow
 
         for sig in sorted(self._EXPECTED_SIGNALS):

@@ -82,8 +82,8 @@ from app.widgets.tab_manager_window import TabManagerWindow  # noqa: E402
 # 禁用 models.dev 后台拉取：避免后台线程在窗口销毁后回调 _models_dev_ready 到已删除
 # C++ 对象，触发原生崩溃（STATUS_STACK_BUFFER_OVERRUN）。perf_regression 同思路禁用网络副作用。
 OpenAIChatToolWindow._start_models_dev_sync = lambda self: None
-# 禁用所有延迟初始化（_safe_timer_call 调度 _sync_working_directory / _load_model_configs /
-# _async_refresh_opencode_models 等后台回调）：避免窗口快速销毁后这些回调/线程进已删 widget
+# 禁用所有延迟初始化（_safe_timer_call 调度 _sync_working_directory / _load_model_configs
+# 等后台回调）：避免窗口快速销毁后这些回调/线程进已删 widget
 # 触发原生崩溃。内存压测只关心"标签开/关生命周期"，与这些延迟特性无关。
 OpenAIChatToolWindow._safe_timer_call = lambda self, *a, **k: None
 

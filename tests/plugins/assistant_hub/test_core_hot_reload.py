@@ -3,9 +3,8 @@
 
 背景：assistant_hub 的 core 模块经 importlib 手动注册 sys.modules（前缀
 assistant_hub_core.*），app 侧热重载的 purge 历史上不覆盖该前缀，命中即返回
-会让热更新后的新代码不可见（如 prompts 新增 build_dream_forget）。现四处加载点
-（dream._load / compile._core / experience._prompts / ticker._load_session_store）
-均带 mtime 自检：磁盘 mtime 更新 → 重新加载替换缓存对象。
+会让热更新后的新代码不可见。现加载点（assistant_manager._load_core_module /
+experience._prompts）均带 mtime 自检：磁盘 mtime 更新 → 重新加载替换缓存对象。
 """
 
 import importlib.util
@@ -18,9 +17,8 @@ _CORE = _ROOT / "plugins" / "assistant_hub" / "core"
 
 _CACHED_KEYS = {
     "assistant_hub_core.memory.prompts",
-    "assistant_hub_core.memory.dream",
-    "assistant_hub_core.memory.compile",
-    "assistant_hub_core.session_store",
+    "assistant_hub_core.memory.store",
+    "assistant_hub_core.experience",
 }
 
 # 被 _bump_mtime 推过 mtime 的文件 → 原 (atime, mtime)，teardown 统一还原
@@ -59,47 +57,34 @@ def _bump_mtime(path: Path):
     os.utime(path, (future, future))
 
 
-def test_dream_load_reload_on_mtime_change():
-    m = _load_by_path("assistant_hub_core.memory.dream", _CORE / "memory" / "dream.py")
-    prompts1 = m._load("memory.prompts", "memory/prompts.py")
-    assert getattr(prompts1, "_source_mtime", -1.0) >= 0.0
-    _bump_mtime(_CORE / "memory" / "prompts.py")
-    prompts2 = m._load("memory.prompts", "memory/prompts.py")
-    assert prompts1 is not prompts2
-    assert prompts2._source_mtime > prompts1._source_mtime
+def test_manager_load_core_module_reload_on_mtime_change():
+    """_load_core_module：store.py 更新后重新加载，mtime 未变则命中缓存。"""
+    mpath = _ROOT / "plugins" / "assistant_hub" / "assistant_manager.py"
+    spec = importlib.util.spec_from_file_location("test_hot_manager_mod", str(mpath))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["test_hot_manager_mod"] = mod
+    spec.loader.exec_module(mod)
+    s1 = mod._load_core_module("memory.store", "memory/store.py")
+    assert getattr(s1, "_source_mtime", -1.0) >= 0.0
+    _bump_mtime(_CORE / "memory" / "store.py")
+    s2 = mod._load_core_module("memory.store", "memory/store.py")
+    assert s1 is not s2
+    assert s2._source_mtime > s1._source_mtime
     # mtime 未再变化 → 命中缓存
-    assert m._load("memory.prompts", "memory/prompts.py") is prompts2
-
-
-def test_compile_core_reload_on_mtime_change():
-    m = _load_by_path("assistant_hub_core.memory.compile", _CORE / "memory" / "compile.py")
-    store1 = m._core("session_store")
-    assert getattr(store1, "_source_mtime", -1.0) >= 0.0
-    _bump_mtime(_CORE / "session_store.py")
-    store2 = m._core("session_store")
-    assert store1 is not store2
+    assert mod._load_core_module("memory.store", "memory/store.py") is s2
 
 
 def test_experience_prompts_reload_on_mtime_change():
     m = _load_by_path("assistant_hub_core.experience", _CORE / "experience.py")
-    p1 = m._prompts()
+    p1 = m._prompts("build_reflect")
     assert getattr(p1, "_source_mtime", -1.0) >= 0.0
     _bump_mtime(_CORE / "memory" / "prompts.py")
-    p2 = m._prompts("build_consolidate")
+    p2 = m._prompts("build_reflect")
     assert p1 is not p2
     # required 兜底：函数缺失时即使 mtime 未变也重载
-    del p2.build_consolidate  # 模拟函数缺失（hasattr 对 None 值仍为 True，须真删）
-    p3 = m._prompts("build_consolidate")
+    del p2.build_reflect  # 模拟函数缺失（hasattr 对 None 值仍为 True，须真删）
+    p3 = m._prompts("build_reflect")
     assert p3 is not p2
-
-
-def test_ticker_session_store_reload_on_mtime_change():
-    m = _load_by_path("assistant_hub_core.memory.ticker", _CORE / "memory" / "ticker.py")
-    s1 = m._load_session_store()
-    assert getattr(s1, "_source_mtime", -1.0) >= 0.0
-    _bump_mtime(_CORE / "session_store.py")
-    s2 = m._load_session_store()
-    assert s1 is not s2
 
 
 def test_purge_module_prefixes():
