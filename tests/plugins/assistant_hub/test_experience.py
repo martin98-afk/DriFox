@@ -54,8 +54,8 @@ def test_delete_entry(tmp_path):
 
 
 def test_normalize_category():
-    assert m.normalize_category(" 代码 风格 ") == "代码 风格"[:8].strip() or True
-    assert len(m.normalize_category("x" * 100)) <= 8
+    assert m.normalize_category(" 代码 风格 ") == "代码 风格"[: m._MAX_CATEGORY].strip() or True
+    assert len(m.normalize_category("x" * 100)) <= m._MAX_CATEGORY
 
 
 def test_category_soft_limit(tmp_path):

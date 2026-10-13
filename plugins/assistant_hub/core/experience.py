@@ -22,9 +22,13 @@ from typing import Callable, Dict, List
 logger = logging.getLogger(__name__)
 
 _THIS = Path(__file__).resolve()
-_MAX_CATEGORY = 8
-# 全库经验条目总数超过该值时触发自动压缩（反思落库后检查）；软限制：只整理不拒绝记录
-_CONSOLIDATE_THRESHOLD = 50
+_MAX_CATEGORY = 12
+# 全库经验条目总数超过该值时才考虑自动压缩。
+# 定 120 而非 50：条目本身高度原子（踩坑/决策各一条、语义不重叠）时，
+# 压不动是正常结果；水位过低会让「已无冗余可压」的库反复触发压缩。
+_CONSOLIDATE_THRESHOLD = 120
+# 距上次成功压缩后新增多少条才再压：防止压完不减（或减少极少）时死循环触发。
+_CONSOLIDATE_GROWTH = 30
 # 分批压缩单批条目上限：条目多时单批 prompt+全量 JSON 输出耗时撞 LLM 超时线
 # （实测 113 条 26k 字符 prompt 单次 >240s 无产出，见 2026-10-13 排查）
 _CONSOLIDATE_BATCH = 60
@@ -196,35 +200,62 @@ def total_entries(aid_dir: Path) -> int:
 
 
 def needs_consolidate(aid_dir: Path) -> bool:
-    """全库条目总数超过压缩水位。"""
-    return total_entries(aid_dir) > _CONSOLIDATE_THRESHOLD
+    """自动压缩判据：总量超水位 **且** 距上次成功压缩后新增条目达增长量。
+
+    只判总量会死循环：条目高度原子（语义不重叠）时压缩只能减 1-2 条，
+    下次反思照样超水位再压一次（2026-10-13 实测 112 条压完仍 112）。
+    增量判据让「已无冗余可压」的库安静下来。
+    """
+    total = total_entries(aid_dir)
+    if total <= _CONSOLIDATE_THRESHOLD:
+        return False
+    data = _read_state(aid_dir)
+    last = float(data.get("last_total", 0))
+    return total >= (last + _CONSOLIDATE_GROWTH)
 
 
 def _consolidate_state_path(aid_dir: Path) -> Path:
     return experience_dir(aid_dir) / ".consolidate_state.json"
 
 
-def _mark_consolidate_failed(aid_dir: Path) -> None:
+def _read_state(aid_dir: Path) -> Dict[str, Any]:
     try:
-        _consolidate_state_path(aid_dir).write_text(json.dumps({"failed_at": time.time()}), encoding="utf-8")
+        data = json.loads(_consolidate_state_path(aid_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_state(aid_dir: Path, data: Dict[str, Any]) -> None:
+    try:
+        experience_dir(aid_dir).mkdir(parents=True, exist_ok=True)
+        _consolidate_state_path(aid_dir).write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         pass
+
+
+def _mark_consolidate_failed(aid_dir: Path) -> None:
+    data = _read_state(aid_dir)
+    data["failed_at"] = time.time()
+    _write_state(aid_dir, data)
 
 
 def _clear_consolidate_state(aid_dir: Path) -> None:
-    try:
-        _consolidate_state_path(aid_dir).unlink(missing_ok=True)
-    except OSError:
-        pass
+    """压缩成功：清失败冷却，记本次压缩后的总量作下次增量判据基线。
+
+    记 after 而非 before：以压缩后实际存量为基线，
+    「新增 N 条再压」的语义才对得上。
+    """
+    data = _read_state(aid_dir)
+    data.pop("failed_at", None)
+    data["last_total"] = float(total_entries(aid_dir))
+    _write_state(aid_dir, data)
 
 
 def consolidate_in_cooldown(aid_dir: Path) -> bool:
     """上次压缩失败后是否仍在冷却期（自动路径跳过；手动不受限）。"""
-    try:
-        data = json.loads(_consolidate_state_path(aid_dir).read_text(encoding="utf-8"))
-        return (time.time() - float(data.get("failed_at", 0))) < _CONSOLIDATE_COOLDOWN
-    except Exception:
-        return False
+    at = float(_read_state(aid_dir).get("failed_at", 0))
+    return bool(at) and (time.time() - at) < _CONSOLIDATE_COOLDOWN
 
 
 def write_all_entries(aid_dir: Path, items: List[Dict[str, str]]) -> Dict:
