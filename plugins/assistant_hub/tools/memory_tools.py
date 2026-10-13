@@ -155,14 +155,12 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
     try:
         if scope == "global":
             _retry(lambda: mgr.write_global_memory(aid, content))
-            _invalidate_prompt_caches(mgr)
             return ToolResult(True, content="已更新全局记忆 MEMORY.md。")
 
         if scope == "project":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法写项目记忆。")
             _retry(lambda: mgr.write_project_memory(aid, wd, content))
-            _invalidate_prompt_caches(mgr)
             return ToolResult(True, content="已更新项目记忆 MEMORY.md。")
 
         if scope == "daily":
@@ -171,7 +169,6 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
             r = _retry(lambda: mgr.append_daily(aid, wd, content, date))
             if not r.get("ok"):
                 return ToolResult(False, error=f"写日志失败: {r.get('error')}")
-            _invalidate_prompt_caches(mgr)
             return ToolResult(True, content=f"已追加到 {r.get('date')} 工作日志（现 {r.get('chars')} 字）。")
 
         return ToolResult(False, error="scope 必须是 global / project / daily 之一")
@@ -179,16 +176,12 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
         return ToolResult(False, error=f"写入记忆失败: {e}")
 
 
-def _invalidate_prompt_caches(mgr) -> None:
-    """写后失效各会话 system prompt 缓存：下轮重建注入块，新记忆即时可见。
-
-    复用 manager 的跨窗口实现（_invalidate_session_prompt_caches）；失败静默
-    （注入按会话启动/下一轮重建兜底，不影响写盘本身）。
-    """
-    try:
-        mgr._invalidate_session_prompt_caches()
-    except Exception:
-        pass
+# 注：写入后**不**失效会话 system prompt 缓存（用户决策 2026-10-13）。
+# 已有会话的历史消息本就不会因记忆变化而更新，中途重建 system prompt 只会
+# 造成前缀抖动（浪费 API prompt cache），且刚写完的记忆模型自己最清楚。
+# 新记忆的可见路径：① 本会话随时 memory_read 读取；② 新会话/清空/压缩时
+# 自然重建注入；③ UI「查看」直读磁盘。记忆开关/人格等结构性变更仍走失效
+# （见 assistant_card 的开关处理，那类变更各会话必须重新构建身份块）。
 
 
 _READ_SCHEMA = {

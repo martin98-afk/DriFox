@@ -24,6 +24,7 @@ from PyQt5.QtCore import (
     QByteArray,
     QEasingCurve,
     QElapsedTimer,
+    QEvent,
     QObject,
     QRect,
     QSize,
@@ -843,6 +844,9 @@ class CodeWebViewer(QWebEngineView):
         self._wheel_last_scroll_top = -1
         self._wheel_last_ts = 0.0
         self._wheel_delegated_inner = False
+        # delegate 侧 wheel 抢断的安装目标（RenderWidgetHostViewQtDelegateWidget）。
+        # 必须先于 setPage() 初始化：delegate 的 ChildAdded 在 setPage 链内即触发。
+        self._wheel_filter_target = None
 
         # 1. 渲染定时器
         self._render_timer = QTimer(self)
@@ -897,6 +901,8 @@ class CodeWebViewer(QWebEngineView):
         self._page.renderCrashed.connect(self._on_render_crashed)
 
         self._load_skeleton()
+        # delegate 可能已在 setPage 链内挂好：首装一次（幂等）
+        self._ensure_wheel_filter_installed()
 
         # ── 对话框层级管理 ──
         # _hidden_dialogs: set，记录当前导致 WebView 隐藏的对话框对象
@@ -1366,6 +1372,8 @@ class CodeWebViewer(QWebEngineView):
         self._user_reading_inside = reading
 
     def _on_height_reported(self, h):
+        # delegate wheel 抢断补装：高频回报时仅一次 is 比较，崩溃重建后自然重装
+        self._ensure_wheel_filter_installed()
         # 🐛 打点：结束这一拍的"JS 落地 + 布局"耗时 = 渲染派发 → 首个 reportHeight。
         if getattr(self, "_finish_t0", 0.0) > 0.0:
             _el = (time.perf_counter() - self._finish_t0) * 1000
@@ -1520,6 +1528,8 @@ class CodeWebViewer(QWebEngineView):
             if self._is_js_ready:
                 self._render_deferred = False
                 self._schedule_render(immediate=True)
+        # delegate wheel 抢断补装（幂等；hide/show 或 tab 切回后 focusProxy 若重建则重挂）
+        self._ensure_wheel_filter_installed()
             # 🛡️ F2：JS 未就绪时保留 deferred（不清标志）——先清标志再调
             # _schedule_render 会因 JS 未就绪直接 return，积压请求被清但永不
             # 补渲；保留后由 _on_js_ready 统一补渲（可以延迟，不能丢失）。
@@ -8060,19 +8070,23 @@ class CodeWebViewer(QWebEngineView):
         self._resize_unlock_timer.stop()
         self._resize_unlock_timer.start()
 
-    def wheelEvent(self, event: QWheelEvent):
-        # 滚轮归属规则（两级链式）：
-        #  ① 外层聊天滚动区还有余量 → 归外层（保持"滚轮滚页面"的既有体感）；
-        #  ② 外层已到边界（顶/底）→ 把事件交回页面：内容被高度上限截断时
-        #     （[MEM] 物理面积上限让 widget 变矮），body 才是唯一还能滚的容器。
-        #     ⚠️ 缺 ② 时被裁掉的尾部**永远滚不到**——事件被外层吞掉、外层到底后
-        #     空转，卡内滚动等于不存在（2026-10-11「文本内容超出可视区域造成
-        #     文本遮挡」的第二半：几何修好了也没有滚动手径）。
-        # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部。
-        # 转发外层滚动区走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
-        # ⚠️ 宿主层级可变（曾直挂卡片，2026-09-23 起移入 assistant 气泡），
-        # 不能写死 parent().parent() 层数 —— 层数变了 _parent 取不到，
-        # AttributeError 被吞后滚轮静默失效。沿父链找持 _parent 的 MessageCard。
+    def _route_wheel_to_chat_area(self, event) -> bool:
+        """滚轮归属两级裁决（唯一实现：wheelEvent 与 delegate eventFilter 共用）。
+
+        ① 外层聊天滚动区还有余量 → 转发外层并吃掉事件（返回 True），保持
+        "滚轮滚页面"的既有体感；
+        ② 外层已到边界（顶/底）→ 放行（返回 False）：内容被高度上限截断时
+        （[MEM] 物理面积上限让 widget 变矮），body 才是唯一还能滚的容器。
+        ⚠️ 缺 ② 时被裁掉的尾部**永远滚不到**——事件被外层吞掉、外层到底后
+        空转，卡内滚动等于不存在（2026-10-11「文本内容超出可视区域造成
+        文本遮挡」的第二半：几何修好了也没有滚动手径）。
+
+        内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部。
+        转发外层滚动区走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
+        ⚠️ 宿主层级可变（曾直挂卡片，2026-09-23 起移入 assistant 气泡），
+        不能写死 parent().parent() 层数 —— 层数变了 _parent 取不到，
+        AttributeError 被吞后滚轮静默失效。沿父链找持 _parent 的 MessageCard。
+        """
         try:
             node = self.parent()
             card = None
@@ -8092,9 +8106,51 @@ class CodeWebViewer(QWebEngineView):
                     if not _at_bound:
                         scroll_area.wheelEvent(event)
                         event.accept()
-                        return
+                        return True
         except Exception:
             pass
+        return False
+
+    def _ensure_wheel_filter_installed(self):
+        """幂等把 self 挂为 WebEngine delegate 的 eventFilter（滚动失效根修）。
+
+        背景：滚轮事件的真实第一接收者是 WebEngine 内部 delegate
+        （RenderWidgetHostViewQtDelegateWidget，即 focusProxy），body 有滚动空间
+        （[MEM] 面积上限截断、高度收敛窗口期的瞬时溢出）时 Chromium 直接消费
+        wheel，本类 wheelEvent() override 永远收不到 → "外层优先"两级规则失效；
+        卡内滚到边界后 Blink 也不向 Qt 宿主 scroll-chaining → 事件黑洞（悬浮
+        卡片滚轮彻底无效）。实测：tests/debug/probe_webview_wheel_sendinput.py
+        （S2 超限卡 8/8 全吞、S3 卡内到边界后仍全吞；修复原型
+        probe_webview_wheel_fix.py）。
+
+        ⚠️ 不能用 QEvent.ChildAdded 安装：delegate 是构造期直接挂 parent 的，
+        不发 ChildAdded（实测 filter_target 恒 None）。改在 focusProxy 就绪后
+        幂等补装：init 尾部 + showEvent + heightReported（高频回报时 is 比较零开销），
+        renderer 崩溃重建 delegate 后由下一次回报自然重装。
+        """
+        try:
+            fp = self.focusProxy()
+        except RuntimeError:
+            return
+        if fp is None or fp is self or fp is getattr(self, "_wheel_filter_target", None):
+            return
+        fp.installEventFilter(self)
+        self._wheel_filter_target = fp
+
+    def eventFilter(self, obj, ev):
+        # delegate 侧 wheel 抢断：与 wheelEvent() 共用同一裁决函数，两路语义一致
+        # （filter 放行后 Chromium 不消费时事件仍会上抛进 wheelEvent，二次裁决
+        # 结果相同，不会双重滚动）。
+        if ev.type() == QEvent.Wheel and obj is getattr(self, "_wheel_filter_target", None):
+            if self._route_wheel_to_chat_area(ev):
+                return True
+        return super().eventFilter(obj, ev)
+
+    def wheelEvent(self, event: QWheelEvent):
+        # 仅在 Chromium 不消费 wheel（body 无溢出）事件上抛时被调，作第二道转发；
+        # 首道裁决见 _ensure_wheel_filter_installed() 装上的 delegate 抢断。
+        if self._route_wheel_to_chat_area(event):
+            return
         super().wheelEvent(event)
 
     def cleanup(self):

@@ -786,6 +786,25 @@ def _image_path_to_data_uri(img_path: str) -> "str | None":
         return None
 
 
+# ── 应用级共享线程池（标题生成等窗口后台任务的宿主）──
+# 历史：每个窗口自建 QThreadPool 承载标题生成任务。关闭窗口时 closeEvent 的
+# waitForDone(1000) 会同步等满 1 秒（实测 1000.2ms，占关页耗时 94%），且池
+# 随窗口回收时析构会再次同步等待任务跑完（实测按任务剩余时长阻塞）。标题
+# 生成是 LLM HTTP 往返（常 3-10s），"刚对话完就关页"必然撞上 → 关闭卡 1s+。
+# 改为应用级共享池：任务生命周期脱离窗口，窗口销毁不再等待、池析构不再
+# 拖累关页（任务取消走 _topic_summary_cancelled 标志 + 回调侧 RuntimeError 守卫）。
+_gen_thread_pool_shared: Optional[QThreadPool] = None
+
+
+def _get_gen_thread_pool() -> QThreadPool:
+    """获取应用级共享线程池（懒建；maxThreadCount=2 与原窗口池口径一致）"""
+    global _gen_thread_pool_shared
+    if _gen_thread_pool_shared is None:
+        _gen_thread_pool_shared = QThreadPool()
+        _gen_thread_pool_shared.setMaxThreadCount(2)
+    return _gen_thread_pool_shared
+
+
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐"
     icon = get_icon("drifox")
@@ -1154,8 +1173,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._virtual_scroll_timer.setInterval(500)  # 滚动停止 500ms 后再回收，避免连续滚动反复重建
         self._virtual_scroll_timer.timeout.connect(self._recycle_out_of_view_batches)
         self._suspend_auto_scroll = False
-        self._gen_thread_pool = QThreadPool()
-        self._gen_thread_pool.setMaxThreadCount(2)
+        # 后台任务池：应用级共享（标题生成等）。不再每窗口自建——窗口私有池
+        # 在关页时会双重等待（closeEvent waitForDone + 池析构等任务跑完），
+        # 标题任务是 LLM HTTP 往返，"刚对话完就关页"会卡 1s+（实测）。
+        # 属性名保留 _gen_thread_pool：插件仓有 getattr(main_widget, "_gen_thread_pool")
+        # 兼容读取（chinese-chess / git-panel / prompt-enhancer），测试也注入此属性。
+        self._gen_thread_pool = _get_gen_thread_pool()
         # 线程安全桥接：后台线程发射信号 → 主线程执行 _on_topic_summary_generated
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
         # 线程安全桥接：中断完成后回到主线程保存会话
@@ -21765,7 +21788,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 线程安全包装：QRunnable 在后台线程直接调用 callback，
         # 通过 pyqtSignal emit 桥接到主线程，避免 GUI 操作崩溃
         def _thread_safe_callback(result, error=None):
-            self._topic_summary_ready.emit(result, error)
+            # 🛡️ 关页后任务才返回的丢弃守卫：任务跑在应用级共享池上，
+            # 生命周期不再与窗口绑定——窗口销毁后任务仍会跑完并回调。
+            # 对已销毁 QObject emit 会抛 RuntimeError（旧窗口池路径靠
+            # waitForDone 等待规避；现改用守卫显式丢弃，防池线程异常）。
+            if getattr(self, "_is_destroyed", False):
+                return
+            try:
+                self._topic_summary_ready.emit(result, error)
+            except RuntimeError:
+                pass
 
         task = TopicSummaryTask(
             messages=session.messages,
@@ -21777,6 +21809,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._gen_thread_pool.start(task)
 
     def _on_topic_summary_generated(self, result, error: str = None):
+        # 🛡️ 关页守卫：任务在共享池上跑，窗口销毁后才返回的回调直接丢弃
+        # （信号已由 _thread_safe_callback 拦截，此处兜底防其它 emit 路径）
+        if getattr(self, "_is_destroyed", False):
+            return
         if error:
             logger.error(f"[Topic Summary] Failed to generate: {error}")
             return
@@ -23702,12 +23738,12 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
-        # 🔧 内存泄漏修复：停止窗口级 ThreadPool
-        if hasattr(self, "_gen_thread_pool") and self._gen_thread_pool:
-            try:
-                self._gen_thread_pool.waitForDone(1000)
-            except Exception:
-                pass
+        # 后台任务池：应用级共享，窗口关闭不再同步等待。
+        # 历史：此处 waitForDone(1000) 等标题生成任务（LLM HTTP 往返常 3-10s），
+        # 实测同步段 1000.2ms 占关页耗时 94%（"刚对话完关页卡 1 秒"的主因）。
+        # 任务取消由 _topic_summary_cancelled 标志 + 回调侧 _is_destroyed 守卫
+        # 兜底（_on_topic_summary_generated 访问已销毁 UI 的路径已有防护），
+        # 共享池的生命周期不再与窗口绑定，析构等待亦不落在关页路径上。
 
         # 从全局实例列表中移除
         try:
