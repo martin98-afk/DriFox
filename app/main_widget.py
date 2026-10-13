@@ -917,8 +917,6 @@ class OpenAIChatToolWindow(ToolWindow):
     _models_dev_cache: Optional[object] = None
     # 同上 inflight 守卫：避免并发重复发起；首请求完成后再被广播唤醒。
     _models_dev_fetch_inflight: bool = False
-    # OpenCode Zen 免费模型列表 inflight 守卫（同上语义）
-    _opencode_fetch_inflight: bool = False
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -931,8 +929,6 @@ class OpenAIChatToolWindow(ToolWindow):
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
     # 桌宠用：AI 状态变化信号（idle / thinking / streaming / question / error）
     ai_state_changed = pyqtSignal(str)
-    # OpenCode Zen 免费模型列表异步刷新完成（后台线程 → 主线程）
-    _opencode_models_ready = pyqtSignal(object)
     # models.dev 动态模型数据后台刷新完成（后台线程 → 主线程）
     _models_dev_ready = pyqtSignal(object)
     # 工具注册表变更桥接（registry.on_change 回调可能来自后台 watcher 线程 → 主线程）
@@ -1190,8 +1186,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._reg_sig(ModelRefreshService.get_instance().refresh_finished, self._on_model_refresh_finished)
         ModelRefreshService.get_instance().sync_from_config()
-        # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
-        self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：models.dev 动态数据后台刷新结果回主线程
         self._models_dev_ready.connect(self._on_models_dev_ready)
         # 分支检测信号/缓存已随工作树插件化迁入 plugins/worktree-manager（BranchChip per-window 状态）
@@ -2641,15 +2635,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.exception(f"[InitComplete] 补应用成员工具权限覆盖失败: {_team_agent}")
 
         # 复制/分支窗口的 _valid_configs（含模型列表）已在 _duplicate_window 中
-        # 从源窗口直接复制，不需要再重新拉取 OpenCode 免费模型列表，避免冗余网络请求和日志
+        # 从源窗口直接复制，不需要再重新拉取模型列表，避免冗余网络请求和日志
         if not getattr(self, "_is_duplicate_window", False):
-            # 批4 N14/N15：迁移至队列（屏障后动态注册）
-            self._deferred_queue.register(
-                "opencode_model_refresh",
-                lambda: self._safe_timer_call(self._async_refresh_opencode_models),
-                priority="idle",
-                delay_ms=3000,
-            )
             # 设置弹窗在 3500ms 构建，提醒在 5s 后弹（确保弹窗已就绪）
             self._deferred_queue.register(
                 "gitee_sync_reminder",
@@ -6641,11 +6628,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 model_list = ast.literal_eval(model_list)
             except Exception:
                 model_list = []
-        # 模型列表缺失/为空 → 回退到 merged_provider_models（硬编码 + models.dev），
-        # 与 _load_model_selector_to_card 的兜底逻辑一致。默认注入的 OpenCode
-        # 免费服务商故意不写"模型列表"键（依赖异步刷新回填），在异步刷新尚未
+        # 模型列表缺失/为空 → 回退到 merged_provider_models（插件模型 + models.dev），
+        # 与 _load_model_selector_to_card 的兜底逻辑一致。用户添加服务商时可能
+        # 不写"模型列表"键（依赖 models.dev 动态数据回填），在动态数据尚未
         # 完成/失败时，若不回退会导致 _resolve_subagent_model_config 匹配不到
-        # 用户已保存的免费模型（如 mimo-v2.5-free），弹"模型不存在"警告并回退主模型。
+        # 用户已保存的模型，弹"模型不存在"警告并回退主模型。
         if not model_list:
             pname = config.get("provider_name", provider)
             merged = get_merged_provider_models()
@@ -7487,89 +7474,6 @@ class OpenAIChatToolWindow(ToolWindow):
             and hasattr(self._settings_popup, "llmProviderCard")
         ):
             self._settings_popup.llmProviderCard._refresh_items()
-
-    # ──────────────────────────────────────────────
-    # OpenCode Zen 免费模型异步刷新
-    # ──────────────────────────────────────────────
-    def _async_refresh_opencode_models(self):
-        """后台线程异步刷新内置默认 OpenCode 免费服务商（name="opencode免费模型"）的模型列表。
-
-        只刷新内置默认，不碰用户自己添加的 OpenCode 实例，避免覆盖用户自定义模型列表。
-        启动后立即返回，不阻塞 UI。
-        网络与解析逻辑在 app.core.modelmeta.models_dev_sync 的
-        fetch_opencode_free_models_for_providers，本方法只负责收集实例、
-        调度线程、把结果经信号回主线程刷新 UI。
-
-        多窗口并发：inflight 期间直接返回；首个发起者负责网络请求，结果
-        经 _opencode_models_ready 信号广播到全部活跃窗口（每个窗口按自身
-        _valid_configs 决定是否消费）。
-        """
-        import threading
-
-        from app.core.modelmeta.models_dev_sync import fetch_opencode_free_models_for_providers
-
-        # 类级 inflight 守卫：已有窗口在拉取 → 跳过，结果会在 on_done 回调中广播
-        if OpenAIChatToolWindow._opencode_fetch_inflight:
-            return
-
-        # 只刷新内置默认的 OpenCode 免费服务商（name="opencode免费模型"），
-        # 不动用户自己添加的 OpenCode 实例，防止覆盖用户自定义模型列表。
-        targets: list[tuple[str, str, str]] = []
-        for config_id, config in self._valid_configs.items():
-            if config.get("name") != "opencode免费模型":
-                continue
-            api_url = config.get("API_URL", "")
-            api_key = config.get("API_KEY", "")
-            if api_url:
-                targets.append((config_id, api_url, api_key))
-
-        if not targets:
-            return
-
-        OpenAIChatToolWindow._opencode_fetch_inflight = True
-
-        def _do_fetch():
-            """后台线程执行：批量拉取各实例免费模型，逐个广播回传主线程"""
-            try:
-                results = fetch_opencode_free_models_for_providers(targets)
-                wins = window_registry.alive_window_instances()
-                for config_id, free_models in results.items():
-                    for win in wins:
-                        try:
-                            if getattr(win, "_is_destroyed", False):
-                                continue
-                            win._opencode_models_ready.emit((config_id, free_models))
-                        except RuntimeError:
-                            continue
-            finally:
-                OpenAIChatToolWindow._opencode_fetch_inflight = False
-
-        threading.Thread(target=_do_fetch, daemon=True).start()
-
-    @pyqtSlot(object)
-    def _on_opencode_models_ready(self, result: tuple):
-        """主线程处理 OpenCode Zen 免费模型异步刷新结果。"""
-        config_id, free_models = result
-
-        if config_id not in self._valid_configs:
-            return
-
-        # 更新持久化配置
-        saved = self.cfg.llm_saved_providers.value
-        if isinstance(saved, dict) and config_id in saved:
-            saved[config_id]["模型列表"] = free_models
-            self.cfg.llm_saved_providers.value = saved
-            self.cfg.save()
-
-        # 更新本地缓存
-        self._valid_configs[config_id]["模型列表"] = free_models
-
-        # 如果当前模型选择器已打开，刷新显示
-        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible("model_selector", self._window_id):
-            self._load_model_selector_to_card()
-
-        # 更新模型选择按钮标签
-        self._update_model_selector_btn()
 
     def _update_model_selector_header(self):
         """根据当前服务商/模型状态，更新模型选择卡片的头部（图标 + 初始标题）
