@@ -4154,6 +4154,19 @@ class TabManagerWindow(FramelessWindow):
         _cfg = Settings.get_instance()
         if panel is not None and _cfg.ui_sidebar_collapsed.value != panel._collapsed:
             _cfg.ui_sidebar_collapsed.value = panel._collapsed
+        # ★ 双向对称：拖拽落定后按最终几何补跑一次 squeeze 判定。
+        #   拖右把手（拉宽工作台）时 Qt 只压相邻对话区、不递归到工作台
+        #   （离屏实测 [158,500,334] 拖左把手不变），工作台被压穿硬 min
+        #   也永不折叠，必须在此显式判定；空间已恢复则顺带自动展开。
+        #   与窗口 resize 收拢路径（_deferred_resize_complete）共用同一套判定，
+        #   growth_required=False：拖回原宽属布局性恢复，窗口总宽未变，
+        #   不适用「比折叠时宽 80px」的相对增长条件。
+        #   resize 周期内不判：几何尚未收拢（splitterMoved 也由 relayout 产生），
+        #   误折风险高，统一交给 _deferred_resize_complete。
+        #   卡片占位期 / 拖拽会话中由 _evaluate_squeeze_collapse 内部门控跳过。
+        if hasattr(self, "_splitter") and self._splitter.count() > 0 and not getattr(self, "_resize_blocking", False):
+            if not self._evaluate_squeeze_collapse():
+                self._maybe_auto_expand_after_squeeze(growth_required=False)
         # ── #14 收尾：折叠/展开动画仍运行则跳过解冻，交 #4 动画 finally 统一恢复 ──
         # 防「拖拽跨折叠阈值触发动画 + 120ms idle timer 提前解冻」极端路径尾段
         # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复

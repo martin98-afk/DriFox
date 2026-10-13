@@ -134,6 +134,17 @@ class _StubWindow:
 
         TabManagerWindow._collapse_workbench_by_squeeze(self)
 
+    def _evaluate_squeeze_collapse(self):
+        # 委托真实现（stub 只提供几何面）
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        return TabManagerWindow._evaluate_squeeze_collapse(self)
+
+    def _maybe_auto_expand_after_squeeze(self, growth_required=True, _retried=False):
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        TabManagerWindow._maybe_auto_expand_after_squeeze(self, growth_required=growth_required, _retried=_retried)
+
     def _splitter_sizes_with_left(self, left_w):
         """与 TabManagerWindow 真实现同构的最小版（stub 无工作台窗格，走两窗格分支）"""
         sizes = self._splitter.sizes()
