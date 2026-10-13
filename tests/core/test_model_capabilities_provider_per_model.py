@@ -62,6 +62,30 @@ def test_provider_per_model_hit_wins(provider_registry, monkeypatch):
     assert caps["reasoning_effort_values"] == ["low", "high"]
 
 
+def test_provider_per_model_cost_filled_from_lower(provider_registry, monkeypatch):
+    """插件未声明的展示性字段（cost）从 models.dev 补缺；限额不被反向覆盖
+
+    回归（2026-10-13 用户实测）：命中插件层后价格列全 "-"——插件不声明
+    cost，整体返回把 models.dev 的价格挡掉了。
+    """
+    monkeypatch.setattr(
+        mc,
+        "_get_partitioned_model_capabilities",
+        lambda n, p: {
+            "context_limit": 111111,  # 下层同键 → 被插件压住
+            "max_output_tokens": 999,
+            "cost": {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.12},
+        },
+    )
+    monkeypatch.setattr(mc, "_get_dynamic_model_capabilities", lambda n: None)
+    caps = get_model_capabilities("gw-opus", _PROVIDER)
+    # 插件权威键不拉回
+    assert caps["context_limit"] == 400000
+    assert caps["max_output_tokens"] == 131072
+    # 插件未声明的展示字段补缺
+    assert caps["cost"] == {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.12}
+
+
 def test_provider_per_model_beats_models_dev(provider_registry, monkeypatch):
     """models.dev 有数据时插件仍优先（网关限额与官方 API 各自成立）"""
     monkeypatch.setattr(

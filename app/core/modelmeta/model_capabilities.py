@@ -477,9 +477,11 @@ def get_model_capabilities(model_name: str, provider: str = "") -> Dict[str, Any
     匹配规则：先按 strip 后的精确匹配，再按小写精确匹配。
     优先级：插件 per-model 声明 > models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES。
     插件 per-model（ProviderDef.model_capabilities）是服务商对自家模型在自家
-    网关下的权威声明，命中即整体返回（网关限额与官方 API 各自成立，不与下层
-    合并）；models.dev 动态数据次之（可修正硬编码错误），同名 key 用动态值覆盖，
-    硬编码独有字段（如 thinking_enable_value）保留作为补充。
+    网关下的权威声明：能力/限额/思考字段以插件为准（网关限额与官方 API 各自
+    成立，不反向拉回）；插件未声明的展示性字段（cost 等）从下层补缺——否则
+    私有 ID 命中插件层后价格信息丢失（2026-10-13 用户实测回归）。models.dev
+    动态数据次之（可修正硬编码错误），同名 key 用动态值覆盖，硬编码独有字段
+    （如 thinking_enable_value）保留作为补充。
 
     Args:
         model_name: 模型名
@@ -494,11 +496,22 @@ def get_model_capabilities(model_name: str, provider: str = "") -> Dict[str, Any
     if not name:
         return {}
 
-    # L-1: 服务商插件 per-model 声明（provider 维度最精确，命中即权威）
+    # L-1: 服务商插件 per-model 声明（provider 维度最精确）：能力/限额/思考
+    # 以插件为准；插件未声明的展示性字段（cost 等）从下层链补缺
     provider_caps = _get_provider_model_caps(name, provider)
     if provider_caps:
-        return provider_caps
+        lower = _lower_chain_caps(name, provider)
+        merged = dict(provider_caps)
+        for k, v in lower.items():
+            if k not in merged:
+                merged[k] = v
+        return merged
 
+    return _lower_chain_caps(name, provider)
+
+
+def _lower_chain_caps(name: str, provider: str) -> Dict[str, Any]:
+    """下层链（硬编码 MODEL_CAPABILITIES ← models.dev 动态覆盖），供 L-1 补缺复用。"""
     # 先从硬编码取
     result: Dict[str, Any] = {}
     if name in MODEL_CAPABILITIES:

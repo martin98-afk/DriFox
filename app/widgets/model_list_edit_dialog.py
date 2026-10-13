@@ -63,7 +63,6 @@ def _badges_col_width() -> int:
     return 11 * (11 + delta) + 56
 
 
-
 def _accent_rgba(alpha_pct: int) -> str:
     """accent 色 → rgba() 串（QSS 不支持 #RRGGBBAA，透明度按百分比）"""
     color = QColor(Colors.SYSTEM_ACCENT)
@@ -217,8 +216,7 @@ class _ModelRowWidget(QWidget):
         # 价格列：启用态正文色、关闭/重复态灰化（opencode 关闭模型整行变灰的等价表达）
         price_color = _DUP_COLOR if muted else (Colors.TEXT_MUTED if not enabled else Colors.TEXT_SECONDARY)
         price_style = (
-            f"color: {price_color}; {get_font_family_css()} {font_size_css(12)}; "
-            f"background: transparent; border: none;"
+            f"color: {price_color}; {get_font_family_css()} {font_size_css(12)}; background: transparent; border: none;"
         )
         for lbl in self.price_labels:
             lbl.setStyleSheet(price_style)
@@ -253,13 +251,20 @@ class ModelListEditorWidget(QWidget):
     形态裁剪）；「设默认」语义退役，「模型名称」由保存链自动维护。
     """
 
-    def __init__(self, models: list | None = None, parent=None, default_model: str = ""):
+    def __init__(
+        self,
+        models: list | None = None,
+        parent=None,
+        default_model: str = "",
+        provider_name: str = "",
+    ):
         super().__init__(parent)
         # default_model 参数保留接收但已废弃（星标语义退役，P1-9）：调用方
         # （provider_edit_card）构造点未同步清理，收下不用的参数避免破签名。
         # 候选区状态（折叠/展开 + 数据源）
         self._disabled: set = set()
         self._caps_cache: dict = {}
+        self._provider_name = str(provider_name or "").strip()
         self._candidate_models: list = []
         self._candidate_expanded = False
         self._candidate_folded_hint = "其他"
@@ -408,13 +413,26 @@ class ModelListEditorWidget(QWidget):
                     except RuntimeError:
                         pass
 
+    def set_provider_name(self, name: str):
+        """切换所属服务商（新建卡切下拉时调用）：能力查询跟随，缓存作废。
+
+        已建行不重建（调用方随后的 set_models 会以新 provider 重建主列表）。
+        """
+        self._provider_name = str(name or "").strip()
+        self._caps_cache.clear()
+
     def _caps_for(self, name: str) -> dict:
-        """查模型能力（refresh 时批量查一次缓存复用；几十行规模可接受）"""
+        """查模型能力（refresh 时批量查一次缓存复用；几十行规模可接受）。
+
+        带 provider 名走 get_model_capabilities 的 L-1 插件 per-model 层——
+        服务商私有模型 ID（如 CodeBuddy 的 claude-opus-4.8 带点命名）在
+        models.dev 不存在，不带 provider 查会全链落空、能力列全 "-"。
+        """
         if name not in self._caps_cache:
             try:
                 from app.core.modelmeta.model_capabilities import get_model_capabilities
 
-                self._caps_cache[name] = get_model_capabilities(name) or {}
+                self._caps_cache[name] = get_model_capabilities(name, self._provider_name) or {}
             except Exception:
                 self._caps_cache[name] = {}
         return self._caps_cache[name]
@@ -634,9 +652,7 @@ class ModelListEditorWidget(QWidget):
 
     def _update_list_height(self):
         """主列表高度随可见行数全部展开，不内滚（滚动交给外层编辑卡）；表头随行数显隐"""
-        visible = sum(
-            1 for i in range(self.listWidget.count()) if not self.listWidget.item(i).isHidden()
-        )
+        visible = sum(1 for i in range(self.listWidget.count()) if not self.listWidget.item(i).isHidden())
         self.listWidget.setFixedHeight(max(visible, 1) * _ROW_H + 8)
         header = getattr(self, "headerWidget", None)
         if header is not None:
@@ -784,9 +800,7 @@ class ModelListEditorWidget(QWidget):
         """薄别名：候选区（旧名 get_filtered_models）"""
         return self.get_candidate_models()
 
-    def refresh_candidates(
-        self, provider_name: str = "", fetched_models: list | None = None, expand: bool = False
-    ):
+    def refresh_candidates(self, provider_name: str = "", fetched_models: list | None = None, expand: bool = False):
         """重建候选区数据源：词典 ∪ 已拉取 ∪ 候选区残留 − 已在主列表。
 
         - 词典：`get_merged_provider_models()[provider_name]`（插件声明 + models.dev）
@@ -850,7 +864,4 @@ class ModelListEditorWidget(QWidget):
         self._schedule_row_build()
 
     def get_models(self) -> list:
-        return [
-            str(self.listWidget.item(i).data(Qt.UserRole) or "")
-            for i in range(self.listWidget.count())
-        ]
+        return [str(self.listWidget.item(i).data(Qt.UserRole) or "") for i in range(self.listWidget.count())]
