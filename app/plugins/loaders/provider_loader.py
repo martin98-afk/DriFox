@@ -242,8 +242,18 @@ def _load_module(plugin_name: str, path: Path):
         return None
     from app.plugins.loaders._ast_guard import guard_plugin_module_once
 
+    # 声明式放行：与 ui/tool/runtime loader 同口径——插件在 plugin.json 声明的
+    # module_prefixes 允许注册自有共享模块；历史缺口：此处漏传 → 摘除（热重载
+    # purge 按声明）与放行不对称，重载后共享模块进不了 sys.modules。
+    from app.plugins.contracts.manifest_schema import read_manifest_module_prefixes
+
     guard = guard_plugin_module_once(
-        source, path, require_register=True, component="ProviderLoader", plugin_dir=path.parent.parent
+        source,
+        path,
+        require_register=True,
+        component="ProviderLoader",
+        allowed_sys_modules=read_manifest_module_prefixes(path.parent.parent),
+        plugin_dir=path.parent.parent,
     )
     if guard.syntax_error or guard.rejected_writes or not guard.has_register:
         sys.modules.pop(mod_name, None)

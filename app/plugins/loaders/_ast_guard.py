@@ -406,7 +406,8 @@ def guard_plugin_module(
         entry_names: 入口函数名集合（A1：透传给 has_register_function；
             tools/runtime/providers 用默认 ("register",)，ui 组件传 ("register_ui",)）
         allowed_sys_modules: 声明式放行名单（plugin.json 的 module_prefixes）。
-            不传 = 一刀切拒载任何 sys.modules 写入（tool/runtime/provider 保持原语义）
+            不传 = 拒载任何 sys.modules 写入；四个 loader（ui/tool/runtime/provider）
+            均已按插件声明透传（2026-10-13 口径统一，此前 tool/runtime/provider 漏传）。
         plugin_dir: 插件根目录（判定"覆盖的是不是自己的模块"）；缺省按
             path.parent.parent 推断（ui/tools/runtime/providers 均适用）
 
