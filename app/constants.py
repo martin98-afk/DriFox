@@ -119,22 +119,26 @@ PARAM_SCHEMA = {
         "display_name": "声明: 支持思考",
         "ui_type": "tri_state",
         "order": 500,
+        "hide_in_card": True,  # 参数卡不渲染（2026-10-13 用户决策）；声明走 resolve 链
     },
     "声明_支持图像": {
         "display_name": "声明: 支持图像",
         "ui_type": "tri_state",
         "order": 501,
+        "hide_in_card": True,  # 参数卡不渲染（2026-10-13 用户决策）；声明走 resolve 链
     },
     # lineedit_int allow_empty：空串 = 未声明（get_config 删键）
     "声明_上下文长度": {
         "display_name": "声明: 上下文长度",
         "ui_type": "lineedit_int",
         "order": 502,
+        "hide_in_card": True,  # 参数卡不渲染（2026-10-13 用户决策）；声明走 resolve 链
     },
     "声明_最大输出": {
         "display_name": "声明: 最大输出",
         "ui_type": "lineedit_int",
         "order": 503,
+        "hide_in_card": True,  # 参数卡不渲染（2026-10-13 用户决策）；声明走 resolve 链
     },
     # lineedit：自由文本（思考参数 thinking/thinking_budget/reasoning_effort；
     # 思考强度逗号分隔等级列表）。空串 = 未声明（resolve 链容忍，不删键）
@@ -142,11 +146,13 @@ PARAM_SCHEMA = {
         "display_name": "声明: 思考参数",
         "ui_type": "lineedit",
         "order": 504,
+        "hide_in_card": True,  # 参数卡不渲染（2026-10-13 用户决策）；声明走 resolve 链
     },
     "声明_思考强度": {
         "display_name": "声明: 思考强度",
         "ui_type": "lineedit",
         "order": 505,
+        "hide_in_card": True,  # 参数卡不渲染（2026-10-13 用户决策）；声明走 resolve 链
     },
     "启用技能": {
         "display_name": "启用技能",

@@ -70,6 +70,12 @@ class ProviderDef:
     models_dev_id: str = ""  # models.dev provider id（MODELS_DEV_PROVIDER_MAP 值）
     family: str = ""  # 能力族（detect_provider_family 返回值，如 "deepseek"）
     capabilities: Dict[str, Any] = field(default_factory=dict)  # family 能力覆盖（PROVIDER_CAPABILITIES 条目）
+    # per-model 能力声明（model_id → caps dict，条目同 MODEL_CAPABILITIES）。
+    # 服务商对自家模型在自家网关下的权威声明，优先级最高（高于 models.dev）：
+    # 网关限额常与官方 API 不同（如 CodeBuddy 的 claude-opus-4.8 为 400K/131K，
+    # 与 anthropic 官方 1M/128K 各自成立）。键按 llm_config["模型名称"] 精确匹配
+    # （strip 后全等，大小写敏感与 MODEL_CAPABILITIES 一致）。
+    model_capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     extra_quota_fields: List[QuotaField] = field(default_factory=list)  # 用量查询额外字段
     # 余额查询 fetcher：签名 (config: dict) -> {"balance":float,"currency":str,"provider":str}
     #   或 {"hide":True,"provider":str,"tooltip":str|省略} | None

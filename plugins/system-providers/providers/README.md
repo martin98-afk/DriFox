@@ -83,6 +83,7 @@ def register(registry):
 | `models_dev_id` | models.dev provider id | MODELS_DEV_PROVIDER_MAP |
 | `family` | 能力族 | detect_provider_family 返回值 |
 | `capabilities` | family 能力 | PROVIDER_CAPABILITIES |
+| `model_capabilities` | per-model 能力声明（model_id → caps dict，同 MODEL_CAPABILITIES 条目）。服务商对自家网关的权威值，**优先级最高**（高于 models.dev：命中即整体返回），键按「模型名称」精确匹配 | — |
 | `extra_quota_fields` | 用量查询额外字段（不进模型参数/API 请求） | QUOTA_EXCLUDE_KEYS + edit_card 硬编码 |
 | `balance_fetcher` | 余额查询函数 | BALANCE_APIS |
 | `coding_plan_fetcher` | 套餐用量查询函数 | coding_plan_fetcher 注册表 |
