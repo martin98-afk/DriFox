@@ -2886,6 +2886,18 @@ class TabManagerWindow(FramelessWindow):
                 target = getattr(self, "_left_card_saved_panel_frame_w", 0) or max(
                     _EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X
                 )
+                # ★ 切页投影触发的卡片关闭：当前活跃页有独立宽度记忆
+                #   （per-tab）时以它为准——_left_card_saved_panel_frame_w 是
+                #   卡片打开那页的无卡宽，拿它落位别的页会把该页宽度打回
+                #   打开页基准（实测：A 开卡（201）→ 切到记忆 500 的 B 页，
+                #   卡片投影关闭用 201 覆盖 B 的 500）。
+                try:
+                    _cur_win = self.get_current_window()
+                    _win_mem = getattr(_cur_win, "_tab_sidebar_frame_w", None) if _cur_win is not None else None
+                    if _win_mem and int(_win_mem) > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X:
+                        target = max(_EXPANDED_MIN_FRAME_WIDTH, int(_win_mem))
+                except Exception:
+                    pass
             # 2) 收回 frame max（回到无卡片时的静态上限）后落位
             self._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
             if abs(tab_w - target) > 1:
@@ -3308,6 +3320,26 @@ class TabManagerWindow(FramelessWindow):
                     f"[TSW] restore 放弃 prev={prev_left_w} 基准已变 {_val}->{_cur} ({_kind})"
                 )
                 return  # 切页后有新的宽度编排：快照过时，不覆盖
+        # ★ 卡片态守卫：left 卡片显隐是 per-tab 的，切页投影会让卡片态翻转
+        #   （如「A 开卡 → B 无卡 → 切回 A」）。目标页卡片活跃时宽度语义由
+        #   卡片编排独占（重开卡片时编排自己会把 frame 落位到卡片态宽），
+        #   restore 携的 prev 是旧页语义（含/不含卡片槽），覆盖即把卡片区
+        #   挤成残条（实测：无卡宽 201 覆盖卡片态 412）。卡片态未变（卡片
+        #   常驻，切页挤压仍需 restore 还原）或目标页无卡（宽度回归普通左栏
+        #   语义，per-tab 记忆照常恢复）时放行。
+        _snap_card = getattr(self, "_tab_switch_card_active_snapshot", None)
+        if _snap_card is not None:
+            _fn = getattr(self, "_left_card_area_active", None)
+            if callable(_fn):
+                try:
+                    _card_now = bool(_fn())
+                except Exception:
+                    _card_now = None
+                if _card_now is not None and _card_now != bool(_snap_card) and _card_now:
+                    logger.debug(
+                        f"[TSW] restore 放弃 prev={prev_left_w} 卡片态已变 {bool(_snap_card)}->{_card_now}"
+                    )
+                    return  # 目标页卡片活跃：宽度归卡片编排，不迁移旧页基准
         if getattr(panel, "_animating", False):
             # 切页时上一动作的宽度动画仍在跑：等动画结束再恢复（动画 200ms）
             logger.debug(f"[TSW] restore 延迟(动画中) prev={prev_left_w}")
@@ -4620,6 +4652,9 @@ class TabManagerWindow(FramelessWindow):
                     f"baseline={_prev_left_w} saved={self._tab_switch_saved_snapshot}"
                 )
                 self._tab_panel.set_auto_collapse_suppressed(True)
+                # ★ 卡片态快照：记录切页瞬间（目标页投影前）left 卡片区显隐。
+                #   restore 执行时与此刻不一致 → 宽度基准不可迁移（见守卫）。
+                self._tab_switch_card_active_snapshot = bool(self._left_card_area_active())
             except Exception:
                 pass
             win = self._windows[index]
