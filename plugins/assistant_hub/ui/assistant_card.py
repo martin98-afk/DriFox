@@ -8,7 +8,7 @@
     │   名称 + ★主助手 + 操作行（重命名等）  │
     │   基本信息（对话模型 / 记忆整理模型）    │
     │   关于 Ta（人格 chips 切换）          │
-    │   记忆（传送带 + Dream + 版本）        │
+    │   记忆（全局 + 项目 + 日志）           │
     │   经验（工具型 + 反思）               │
     │   专属技能                          │
     └────────────────────────────────────┘
@@ -44,7 +44,7 @@ from assistant_hub_manager import AssistantManager
 
 from .arc_stack import ArcCardStack
 from .assistant_avatar import RoundAvatar
-from .overlays import DreamRevisionOverlay, TextViewOverlay, _dialog_btn
+from .overlays import TextViewOverlay, _dialog_btn
 
 CARD_ID = "assistant_hub"
 from .rename_dialog import RenameDialog
@@ -135,9 +135,8 @@ class AssistantCardWidget(QWidget):
 
     # 后台线程 → 主线程调度的唯一通道。
     # ⚠️ 不能用 QTimer.singleShot(0, fn)：Qt 的 singleShot 会在**调用方线程**
-    # 创建 QSingleShotTimer，而 Dream / 经验反思跑在纯 Python daemon 线程里
-    # （没有 Qt 事件循环）→ 计时器永不触发 → _dream_done() 永不执行 →
-    # _dream_running 永远为 True，UI 一直卡在"Dream 整理中…"且后续点击全被忽略。
+    # 创建 QSingleShotTimer，而经验反思跑在纯 Python daemon 线程里
+    # （没有 Qt 事件循环）→ 计时器永不触发 → 回调永不执行。
     # 信号 + QueuedConnection 会把调用投递到本 widget 所在线程（主线程）的事件循环。
     _main_thread_call = pyqtSignal(object)
 
@@ -145,7 +144,6 @@ class AssistantCardWidget(QWidget):
         super().__init__(parent)
         self._mgr = AssistantManager.get_instance()
         self._active_aid: str = ""
-        self._dream_running = False
         self._main_thread_call.connect(self._run_on_main_thread, Qt.QueuedConnection)
         # ── 插件背景完全透明（对齐主程序对话区做法）──
         # 不叠加任何背景层：Tab 内嵌时由 #chatFrame 半透明面板透出。
@@ -168,8 +166,7 @@ class AssistantCardWidget(QWidget):
         """主程序注入的卡片上下文（UIPluginRegistry 创建卡片时调用）。
 
         把 ctx["services"]（含 create_engine_session）提前缓存进 core/llm_client：
-        记忆传送带 / Dream / 经验反思都在后台线程跑，拿不到卡片 context，只能靠
-        注册表兜底解析（多窗口时可能取到非本窗口的 services）。
+        经验反思等后台任务拿不到卡片 context，只能靠注册表兜底解析（多窗口时可能取到非本窗口的 services）。
         """
         try:
             services = (ctx or {}).get("services")
@@ -280,11 +277,9 @@ class AssistantCardWidget(QWidget):
 
         self._memory = MemorySection()
         self._memory.toggleMemory.connect(self._on_memory_toggle)
-        self._memory.toggleDreamAuto.connect(self._on_dream_auto_toggle)
-        self._memory.viewToday.connect(self._on_view_today)
-        self._memory.dreamRun.connect(self._on_dream_run)
-        self._memory.dreamRestore.connect(self._on_dream_restore)
-        self._memory.viewAll.connect(self._on_view_all)
+        self._memory.viewGlobal.connect(self._on_view_global)
+        self._memory.viewProject.connect(self._on_view_project)
+        self._memory.viewDaily.connect(self._on_view_daily)
         self._memory.clearAll.connect(self._on_clear_all)
         self._inner_v.addWidget(self._memory)
 
@@ -442,10 +437,8 @@ class AssistantCardWidget(QWidget):
             self._project.set_notes(a.project_notes_enabled)
             self._project.set_context_enabled(a.project_context_enabled)
             self._memory.set_memory_enabled(a.memory_enabled)
-            self._memory.set_dream_auto(a.dream_auto_enabled)
             self._pinned.reload_pins(mgr.read_pinned(aid_capture))
             self._memory.set_status(self._memory_status(aid_capture))
-            self._memory.set_dream_hint("")
             self._experience.set_enabled(a.experience_enabled)
             self._experience.reload_categories(mgr.experience_list(aid_capture))
             self._tool_access.set_mode(a.tool_access)
@@ -453,9 +446,15 @@ class AssistantCardWidget(QWidget):
         QTimer.singleShot(0, _do_bind)
 
     def _memory_status(self, aid: str) -> str:
+        """记忆状态文案：累计全局 + 项目记忆 + 日志字数。"""
         try:
-            text = self._mgr.compiled_memory(aid)
-            return f"已编译 {len(text)} 字" if text else "暂无记忆"
+            wd = self._mgr._current_workdir()
+            g = len((self._mgr.read_global_memory(aid) or "").strip())
+            p = len((self._mgr.read_project_memory(aid, wd) or "").strip()) if wd else 0
+            days = len(self._mgr.list_daily(aid, wd, limit=999)) if wd else 0
+            if not g and not p and not days:
+                return "暂无记忆"
+            return f"全局 {g} 字 · 项目 {p} 字 · 日志 {days} 天"
         except Exception:
             return "暂无记忆"
 
@@ -534,7 +533,7 @@ class AssistantCardWidget(QWidget):
         if not changed:
             return
         self._mgr.update(a)
-        self._mgr.invalidate_context(a.id)
+        self._mgr._invalidate_session_prompt_caches()
         self._clear_identity_cache()  # 称呼/名字变更后新消息立即用新身份（会话级缓存失效）
         # 轻量更新显示（不整页 reload，避免打断节流保存中的编辑）
         if name:
@@ -584,7 +583,7 @@ class AssistantCardWidget(QWidget):
             return
         a.yuan = pid
         self._mgr.update(a)
-        self._mgr.invalidate_context(a.id)
+        self._mgr._invalidate_session_prompt_caches()
         self._about.set_persona(pid)
         # 头像跟随人格：刷新编辑区头像与弧形卡（显示链：人格头像 → 助手自有头像）
         ap = self._mgr.assistant_avatar_path(a.id)
@@ -602,7 +601,7 @@ class AssistantCardWidget(QWidget):
             return
         a.project_notes_enabled = bool(on)
         self._mgr.update(a)
-        self._mgr.invalidate_context(a.id)
+        self._mgr._invalidate_session_prompt_caches()
 
     def _on_project_context_toggle(self, on: bool) -> None:
         a = self._mgr.get(self._active_aid)
@@ -610,7 +609,7 @@ class AssistantCardWidget(QWidget):
             return
         a.project_context_enabled = bool(on)
         self._mgr.update(a)
-        self._mgr.invalidate_context(a.id)
+        self._mgr._invalidate_session_prompt_caches()
 
     def _on_memory_toggle(self, on: bool) -> None:
         a = self._mgr.get(self._active_aid)
@@ -618,16 +617,8 @@ class AssistantCardWidget(QWidget):
             return
         a.memory_enabled = bool(on)
         self._mgr.update(a)
-        self._mgr.invalidate_context(a.id)
+        self._mgr._invalidate_session_prompt_caches()
         self._memory.setEnabled_all(bool(on))
-
-    def _on_dream_auto_toggle(self, on: bool) -> None:
-        a = self._mgr.get(self._active_aid)
-        if not a:
-            return
-        a.dream_auto_enabled = bool(on)
-        self._mgr.update(a)
-        # 开关状态本身可见，不重复展示文案
 
     def _reload_pinned(self, aid: str) -> None:
         """写盘后回刷置顶列表：UI 永远以盘上数据为准（增删改即时可见）。"""
@@ -640,7 +631,6 @@ class AssistantCardWidget(QWidget):
         items = self._mgr.read_pinned(aid)
         items.append((f"pin-{uuid.uuid4().hex[:12]}", text))
         self._mgr.write_pinned(aid, items)
-        self._mgr.invalidate_context(aid)
         self._reload_pinned(aid)
 
     def _on_pin_edit(self, pid: str, text: str) -> None:
@@ -649,7 +639,6 @@ class AssistantCardWidget(QWidget):
             return  # 空内容忽略，避免误清
         items = [(p, text if p == pid else c) for p, c in self._mgr.read_pinned(aid)]
         self._mgr.write_pinned(aid, items)
-        self._mgr.invalidate_context(aid)
 
     def _on_pin_delete(self, pid: str) -> None:
         aid = self._active_aid
@@ -665,113 +654,63 @@ class AssistantCardWidget(QWidget):
         ):
             return
         self._mgr.write_pinned(aid, [(p, c) for p, c in items if p != pid])
-        self._mgr.invalidate_context(aid)
         self._reload_pinned(aid)
 
-    def _on_view_today(self) -> None:
+    def _on_view_global(self) -> None:
+        """查看全局记忆（跨项目 MEMORY.md）。"""
         if not self._active_aid:
             return
-        path = self._mgr.memory_dir(self._active_aid) / "today.md"
-        text = path.read_text(encoding="utf-8") if Path(path).exists() else ""
-        _open_dialog(TextViewOverlay("当下记忆", text or "（暂无当下记忆）", parent=_host_window() or self.window()))
+        text = self._mgr.read_global_memory(self._active_aid)
+        paths = self._mgr.memory_paths(self._active_aid)
+        title = f"全局记忆 · {paths.get('global', '')}"
+        _open_dialog(TextViewOverlay(title, text.strip() or "（暂无全局记忆）", parent=_host_window() or self.window()))
 
-    def _on_view_all(self) -> None:
+    def _on_view_project(self) -> None:
+        """查看项目记忆（当前工作目录 .drifox/memory/<aid>/MEMORY.md）。"""
         if not self._active_aid:
             return
-        text = self._mgr.compiled_memory(self._active_aid)
-        _open_dialog(TextViewOverlay("所有记忆", text or "（暂无记忆）", parent=_host_window() or self.window()))
-
-    def _on_dream_run(self) -> None:
-        if not self._active_aid or self._dream_running:
+        wd = self._mgr._current_workdir()
+        if not wd:
+            self._notify_error("当前没有设置工作目录")
             return
-        aid = self._active_aid
-        self._dream_running = True
-        self._memory.set_dream_running(True)
+        text = self._mgr.read_project_memory(self._active_aid, wd)
+        paths = self._mgr.memory_paths(self._active_aid, wd)
+        title = f"项目记忆 · {paths.get('project', '')}"
+        _open_dialog(TextViewOverlay(title, text.strip() or "（暂无项目记忆）", parent=_host_window() or self.window()))
 
-        def _progress(step: int, total: int, name: str) -> None:
-            # daemon 线程 → 必须走信号投递（QTimer.singleShot 在这里永不触发）
-            self._main_thread_call.emit(lambda: self._memory.set_dream_hint(f"（{step}/{total} {name}）"))
-
-        def _worker():
-            try:
-                result = self._mgr.dream_start(aid, "manual", progress=_progress)
-            except Exception as e:
-                result = {"ok": False, "error": str(e)}
-            self._main_thread_call.emit(lambda: self._dream_done(result))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _dream_done(self, result: dict) -> None:
-        self._dream_running = False
-        self._memory.set_dream_running(False)
-        # 开关状态本身可见，不再重复展示「已开启/未开启」文案（空 = 隐藏状态行）
-        self._memory.set_dream_hint("")
-        if result.get("ok"):
-            self._memory.set_status(self._memory_status(self._active_aid))
-            msg = "Dream 整理完成" + ("（内容无变化）" if not result.get("changed") else "")
-            warn = str(result.get("warning") or "")
-            if warn:
-                msg += f"（质检提示：{warn}）"
-            self._notify(msg)
-        else:
-            err = str(result.get("error", "未知错误"))
-            if err == "dream_no_memory":
-                err = "暂无任何记忆内容（今日/近期/事实/长期全为空），先正常对话积累几轮后再试"
-            elif err == "memory_changed":
-                err = "整理期间记忆发生了变化，请稍后再试"
-            elif err == "dream_already_running":
-                err = "上一次整理仍在进行中，请稍候"
-            self._notify_error(f"Dream 失败：{err}")
-
-    def _on_dream_restore(self) -> None:
+    def _on_view_daily(self) -> None:
+        """查看工作日志（最近一天全文 + 更早日期索引）。"""
         if not self._active_aid:
             return
-        aid = self._active_aid
-        revisions = self._mgr.dream_revisions(aid)
-        if not revisions:
-            self._notify_error("暂无 Dream 版本")
+        wd = self._mgr._current_workdir()
+        if not wd:
+            self._notify_error("当前没有设置工作目录")
             return
-
-        def _preview(rid: str) -> str:
-            try:
-                p = self._mgr.dream_dir(aid) / "revisions" / f"{rid}.json"
-                if not p.exists():
-                    return "（无法读取版本内容）"
-                before = (json.loads(p.read_text(encoding="utf-8")) or {}).get("before") or {}
-                parts = [f"# 事实\n{before.get('facts', '')}", f"# 长期\n{before.get('longterm', '')}"]
-                for d in before.get("daily") or []:
-                    parts.append(f"# {d.get('date')}\n{d.get('body', '')}")
-                return "\n\n".join(parts)
-            except Exception:
-                return "（无法读取版本内容）"
-
-        dlg = DreamRevisionOverlay(
-            revisions,
-            preview_fn=_preview,
-            restore_fn=lambda rid: self._mgr.dream_restore(aid, rid),
-            parent=_host_window() or self.window(),
+        items = self._mgr.list_daily(self._active_aid, wd, limit=14)
+        if not items:
+            _open_dialog(TextViewOverlay("工作日志", "（暂无工作日志）", parent=_host_window() or self.window()))
+            return
+        parts = [f"# {items[0]['date']}\n{self._mgr.read_daily(self._active_aid, wd, items[0]['date']).strip()}"]
+        if len(items) > 1:
+            parts.append(
+                "# 更早的日志\n" + "\n".join(f"- {it['date']}（{it['chars']} 字）" for it in items[1:])
+            )
+        _open_dialog(
+            TextViewOverlay("工作日志", "\n\n".join(parts), parent=_host_window() or self.window())
         )
-        _open_dialog(dlg)
-        self._memory.set_status(self._memory_status(aid))
 
     def _on_clear_all(self) -> None:
         if not self._active_aid:
             return
         aid = self._active_aid
         ret = _confirm_dialog(
-            _host_window() or self.window(), "清除记忆", "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。"
+            _host_window() or self.window(),
+            "清除记忆",
+            "确定清除该助手的全部记忆（全局 + 项目，人工提示保留）？\n该操作不可撤销。",
         )
         if not ret:
             return
-        mem = self._mgr.memory_dir(aid)
-        for name in ("today.md", "longterm.md", "facts.md", "memory.md"):
-            p = mem / name
-            try:
-                if p.exists():
-                    p.unlink()
-            except OSError:
-                pass
-        self._mgr.invalidate_context(aid)
+        self._mgr.clear_all_memory(aid, self._mgr._current_workdir())
         self._memory.set_status(self._memory_status(aid))
         self._notify("记忆已清除")
 
@@ -842,12 +781,11 @@ class AssistantCardWidget(QWidget):
             self._mgr._core_experience().rebuild_index(self._mgr.assistant_dir(aid))
         except Exception:
             pass
-        self._mgr.invalidate_context(aid)
         self._experience.reload_categories(self._mgr.experience_list(aid))
         self._notify(f"经验分类「{category}」已删除")
 
     def _on_reflect(self) -> None:
-        if not self._active_aid or self._dream_running:
+        if not self._active_aid:
             return
         aid = self._active_aid
         self._notify("反思进行中…")
@@ -874,7 +812,7 @@ class AssistantCardWidget(QWidget):
 
     def _on_experience_consolidate(self) -> None:
         """手动全库压缩：确认 → 后台线程跑 LLM 合并 → 刷新列表。"""
-        if not self._active_aid or self._dream_running:
+        if not self._active_aid:
             return
         aid = self._active_aid
         ret = _confirm_dialog(

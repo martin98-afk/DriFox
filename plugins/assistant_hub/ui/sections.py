@@ -2,7 +2,7 @@
 """sections.py — 助手中心单列分区组件（对齐 openhanako AgentTab 分区结构）
 
 分区：ProfileSection（名称/模型）→ AboutSection（人格切换，只读）→
-MemorySection（记忆传送带）→ ExperienceSection（经验）。
+MemorySection（全局/项目/日志）→ ExperienceSection（经验）。
 
 视觉基调（对齐原版纸张风）：细边框卡 + 12px 圆角 + 小字 hint + 大量留白；
 去 emoji，统一 FluentIcon / 文字标签。
@@ -413,7 +413,7 @@ class ProfileSection(_Section):
         self.body().addLayout(wrap)
         self.body().addWidget(
             _hint(
-                "对话模型跟随系统配置；记忆整理模型用于记忆编译 / Dream / 经验反思，跟随全局即用当前对话模型。"
+                "对话模型跟随系统配置；记忆整理模型用于经验反思，跟随全局即用当前对话模型。"
                 "用户头像显示在消息列表中你的消息旁，每个助手独立设置。改动自动保存。"
             )
         )
@@ -850,14 +850,16 @@ class PinnedSection(_Section):
 
 
 class MemorySection(_Section):
-    """记忆传送带 UI：开关 + 状态 + 当下 + Dream + 所有记忆（人工提示已独立为 PinnedSection）。"""
+    """记忆分区：开关 + 状态 + 全局记忆/项目记忆/工作日志查看 + 清除。
+
+    记忆体系照抄 WorkBuddy：全局 MEMORY.md（跨项目）+ 项目 .drifox/memory/（笔记+日志），
+    模型经 memory_read/memory_write 自主读写；UI 只做查看与清理。
+    """
 
     toggleMemory = pyqtSignal(bool)
-    toggleDreamAuto = pyqtSignal(bool)
-    viewToday = pyqtSignal()
-    dreamRun = pyqtSignal()
-    dreamRestore = pyqtSignal()
-    viewAll = pyqtSignal()
+    viewGlobal = pyqtSignal()
+    viewProject = pyqtSignal()
+    viewDaily = pyqtSignal()
     clearAll = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -869,101 +871,74 @@ class MemorySection(_Section):
         self.set_context(self._memory_switch)
 
         # 状态条
-        self._status = _hint("记忆状态：暂未编译", 10)
+        self._status = _hint("记忆状态：暂无记忆", 10)
         self.body().addWidget(self._status)
 
-        self.body().addWidget(_sep())
-        today_row = QHBoxLayout()
-        today_row.addWidget(_title_label("当下记忆", 11))
-        today_row.addStretch()
-        view_today = QPushButton("查看")
-        view_today.setStyleSheet(_btn_style())
-        view_today.clicked.connect(self.viewToday.emit)
-        today_row.addWidget(view_today)
-        self.body().addLayout(today_row)
-        self.body().addWidget(_hint("关于你的重要事项与近期动态。"))
+        self._body_wrap = QWidget()
+        self._wrap_v = QVBoxLayout(self._body_wrap)
+        self._wrap_v.setContentsMargins(0, 0, 0, 0)
+        self._wrap_v.setSpacing(6)
 
-        self.body().addWidget(_sep())
+        self._wrap_v.addWidget(_hint("助手在工作后自动沉淀：全局记忆跨项目，项目记忆跟项目走。"))
 
-        # Dream：标题行右侧挂「每日自动」开关；运行状态并入按钮行右侧（空则隐藏）
-        dream_row = QHBoxLayout()
-        dream_row.addWidget(_title_label("Dream 整理", 11))
-        dream_row.addStretch()
-        auto_lbl = QLabel("每日自动")
-        auto_lbl.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
-            f"{get_font_family_css()} {font_size_css(10)};"
-        )
-        dream_row.addWidget(auto_lbl)
-        self._dream_switch = SwitchButton()
-        self._dream_switch.setOnText("开")
-        self._dream_switch.setOffText("关")
-        self._dream_switch.setChecked(False)
-        self._dream_switch.checkedChanged.connect(self.toggleDreamAuto.emit)
-        dream_row.addWidget(self._dream_switch)
-        self.body().addLayout(dream_row)
-        # 说明与操作同行：说明吃满剩余宽度，状态提示出现在按钮左侧（空则隐藏）
-        hint_row = QHBoxLayout()
-        hint_row.addWidget(_hint("去重合并重要事实与长期情况，清理过时内容。"), 1)
-        self._dream_hint = _hint("", 10)
-        self._dream_hint.setVisible(False)
-        hint_row.addWidget(self._dream_hint)
-        self._dream_btn = QPushButton("立即整理")
-        self._dream_btn.setStyleSheet(_btn_style())
-        self._dream_btn.clicked.connect(self.dreamRun.emit)
-        hint_row.addWidget(self._dream_btn)
-        restore_btn = QPushButton("恢复版本")
-        restore_btn.setStyleSheet(_btn_style())
-        restore_btn.clicked.connect(self.dreamRestore.emit)
-        hint_row.addWidget(restore_btn)
-        self.body().addLayout(hint_row)
+        self._wrap_v.addWidget(_sep())
 
-        self.body().addWidget(_sep())
+        # 全局记忆：标题 + 查看
+        g_row = QHBoxLayout()
+        g_row.addWidget(_title_label("全局记忆", 11))
+        g_row.addStretch()
+        g_btn = QPushButton("查看")
+        g_btn.setStyleSheet(_btn_style())
+        g_btn.clicked.connect(self.viewGlobal.emit)
+        g_row.addWidget(g_btn)
+        self._wrap_v.addLayout(g_row)
+        self._wrap_v.addWidget(_hint("跨项目的长期偏好与要求（MEMORY.md）。"))
 
-        # 所有记忆：标题与入口同行
-        all_row = QHBoxLayout()
-        all_row.addWidget(_title_label("所有记忆", 11))
-        all_row.addStretch()
-        view_all = QPushButton("查看")
-        view_all.setStyleSheet(_btn_style())
-        view_all.clicked.connect(self.viewAll.emit)
-        all_row.addWidget(view_all)
+        # 项目记忆：标题 + 查看
+        p_row = QHBoxLayout()
+        p_row.addWidget(_title_label("项目记忆", 11))
+        p_row.addStretch()
+        p_btn = QPushButton("查看")
+        p_btn.setStyleSheet(_btn_style())
+        p_btn.clicked.connect(self.viewProject.emit)
+        p_row.addWidget(p_btn)
+        self._wrap_v.addLayout(p_row)
+        self._wrap_v.addWidget(_hint("当前项目的长期笔记（.drifox/memory/助手/MEMORY.md）。"))
+
+        # 工作日志：标题 + 查看
+        d_row = QHBoxLayout()
+        d_row.addWidget(_title_label("工作日志", 11))
+        d_row.addStretch()
+        d_btn = QPushButton("查看")
+        d_btn.setStyleSheet(_btn_style())
+        d_btn.clicked.connect(self.viewDaily.emit)
+        d_row.addWidget(d_btn)
+        self._wrap_v.addLayout(d_row)
+        self._wrap_v.addWidget(_hint("按天记录的详细工作过程（YYYY-MM-DD.md，只追加）。"))
+
+        self._wrap_v.addWidget(_sep())
+
+        # 清除记忆
+        clear_row = QHBoxLayout()
+        clear_row.addStretch()
         clear_btn = QPushButton("清除记忆")
         clear_btn.setStyleSheet(_btn_style(danger=True))
         clear_btn.clicked.connect(self.clearAll.emit)
-        all_row.addWidget(clear_btn)
-        self.body().addLayout(all_row)
+        clear_row.addWidget(clear_btn)
+        self._wrap_v.addLayout(clear_row)
+
+        self.body().addWidget(self._body_wrap)
 
     def set_memory_enabled(self, on: bool) -> None:
         self._memory_switch.setChecked(on)
         self.setEnabled_all(on)
 
     def setEnabled_all(self, on: bool) -> None:  # noqa: N802
-        """记忆开关关闭时灰置记忆内容（开关本身保持可用）。"""
-        for i in range(1, self.body().count()):
-            item = self.body().itemAt(i)
-            w = item.widget()
-            if w is not None:
-                w.setVisible(on)
-            elif item.layout() is not None:
-                for j in range(item.layout().count()):
-                    sub = item.layout().itemAt(j)
-                    if sub.widget() is not None:
-                        sub.widget().setVisible(on)
-
-    def set_dream_auto(self, on: bool) -> None:
-        self._dream_switch.setChecked(on)
+        """记忆开关关闭时灰置记忆内容（开关与状态条保持可见）。"""
+        self._body_wrap.setVisible(bool(on))
 
     def set_status(self, text: str) -> None:
         self._status.setText(f"记忆状态：{text}")
-
-    def set_dream_hint(self, text: str) -> None:
-        self._dream_hint.setText(text)
-        self._dream_hint.setVisible(bool(text))
-
-    def set_dream_running(self, running: bool) -> None:
-        self._dream_btn.setEnabled(not running)
-        self._dream_btn.setText("整理中…" if running else "立即整理")
 
 
 # ── 经验分区 ────────────────────────────────────────────
@@ -991,7 +966,7 @@ class ExperienceSection(_Section):
         self._wrap_v.setContentsMargins(0, 0, 0, 0)
         self._wrap_v.setSpacing(6)
         top_row = QHBoxLayout()
-        self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验；每日 Dream 后会自动反思整理。")
+        self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验；可在下方手动反思整理。")
         top_row.addWidget(self._hint, 1)
         cons_btn = QPushButton("压缩整理")
         cons_btn.setStyleSheet(_btn_style())

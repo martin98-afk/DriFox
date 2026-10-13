@@ -7,18 +7,18 @@
 3. 人格注入（identity_and_persona：只拼 personas/<yuan>/persona.md 基底；
    人格由 PersonaRegistry 管理，新增人格走 persona-creator 技能）
 4. 头像管理（avatars/assistant.{png,jpg,webp,svg}）
-5. 置顶记忆（pinned.md，自动解析为 list[tuple[str, str]] = (title, content)）
-6. 当下记忆（memory/today.md，对应当下/今日记忆）
-7. 长期记忆（memory/longterm.md，Dream 整理结果）
-8. Dream 自动整理（原子化 → 去重 → 优化 → 合成 → 验证；持久化修订）
+5. 人工提示（pinned.md，SessionStart 注入会话消息）
+6. 记忆体系（照抄 WorkBuddy 双层结构 · 每助手独立）：
+   - 全局记忆  <aid_dir>/MEMORY.md（跨项目）
+   - 项目记忆  {workdir}/.drifox/memory/<aid>/（MEMORY.md + YYYY-MM-DD.md 日志）
+   - 注入走 BuildSystemPrompt（记忆说明书 + 全局 + 项目 + 日志索引）
+   - 写入走 memory_read / memory_write 专用工具（模型自主写，无后台管线）
 
 AssistantManager 与 AgentManager 解耦：
 - 不修改 /plugins/system/agents/*.md
 - 不修改 AgentManager 既有行为
 - 通过 register_assistant_agent() 派生一个动态 agent（name = "assistant_<id>"，
   mode=subagent）注入 AgentManager。
-  调用 subagent_para(name="assistant_<id>") 即"调用助手"，被调用的助手看到
-  的是 persona.md + pinned.md + today.md + longterm.md 拼出的 system prompt。
 
 存储根目录：<app_data_dir>/assistant_hub/<assistant_id>/
 """
@@ -31,7 +31,7 @@ import shutil
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -80,10 +80,8 @@ class Assistant:
     avatar_path: str = ""  # 相对 avatars/ 的文件路径，空表示内置色块
     primary: bool = False  # 是否主助手
     order: int = 0
-    # 是否启用 memory 体系（关闭后 today/longterm 都不注入）
+    # 是否启用记忆体系（关闭后记忆不注入、memory_write 暂停）
     memory_enabled: bool = True
-    # dream 自动整理：默认关闭（手动触发）
-    dream_auto_enabled: bool = False
     # 模型覆盖：空表示继承 yuan
     model: str = ""
     temperature: Optional[float] = None
@@ -116,7 +114,6 @@ class Assistant:
             "primary": self.primary,
             "order": self.order,
             "memory_enabled": self.memory_enabled,
-            "dream_auto_enabled": self.dream_auto_enabled,
             "model": self.model,
             "temperature": self.temperature,
             "steps": self.steps,
@@ -146,7 +143,6 @@ class Assistant:
             primary=bool(data.get("primary", False)),
             order=int(data.get("order", 0) or 0),
             memory_enabled=bool(data.get("memory_enabled", True)),
-            dream_auto_enabled=bool(data.get("dream_auto_enabled", False)),
             model=str(data.get("model") or ""),
             temperature=data.get("temperature"),
             steps=data.get("steps"),
@@ -178,7 +174,6 @@ class Assistant:
             primary=False,
             order=0,
             memory_enabled=True,
-            dream_auto_enabled=False,
             model="",
             temperature=None,
             steps=None,
@@ -193,38 +188,6 @@ class Assistant:
 # ────────────────────────────────────────────────────────────────────
 # 助手运行时上下文（推送至 dynamic agent 时用）
 # ────────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class AssistantContext:
-    """助手运行时上下文（单实例，随当前活跃助手可变）"""
-
-    pinned: List[Tuple[str, str]] = field(default_factory=list)  # (pin_id, content)
-    today: str = ""
-    longterm: str = ""
-
-    def to_prompt_block(self, max_pins: int = 30, max_each_chars: int = 1200) -> str:
-        """把上下文格式化为注入 system prompt 的 markdown 块（参考 openhanako compile.ts）"""
-        parts: List[str] = []
-        # 置顶
-        if self.pinned:
-            pin_lines = []
-            for pid, content in self.pinned[:max_pins]:
-                content = (content or "").strip()
-                if not content:
-                    continue
-                if len(content) > max_each_chars:
-                    content = content[:max_each_chars].rstrip() + "…"
-                pin_lines.append(f"- {content}")
-            if pin_lines:
-                parts.append("## 置顶记忆\n\n" + "\n".join(pin_lines))
-        # 当下
-        if self.today.strip():
-            parts.append("## 当下记忆\n\n" + self.today.strip()[:max_each_chars])
-        # 长期
-        if self.longterm.strip():
-            parts.append("## 长期记忆\n\n" + self.longterm.strip()[:max_each_chars])
-        return "\n\n".join(parts)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -341,15 +304,13 @@ class AssistantManager:
     _session_overrides: Dict[str, str] = {}
 
     # 会话归属映射：{session_id: assistant_id}（持久化 _session_map.json）；
-    # 记忆传送带按它过滤素材，保证各助手记忆互相独立
+    # memory_read/memory_write 工具按它解析记忆归属，保证各助手记忆互相独立
     _session_map: Dict[str, str] = {}
 
     def __init__(self, root_dir: Optional[str] = None):
         self._root: Path = Path(root_dir) if root_dir else self._default_root()
         self._assistants: Dict[str, Assistant] = {}
         self._loaded = False
-        # 唯一来源的运行时上下文（每个活跃助手一份）
-        self._contexts: Dict[str, AssistantContext] = {}
 
     # ── 单例 ──
 
@@ -403,15 +364,6 @@ class AssistantManager:
 
     def _pinned_path(self, aid: str) -> Path:
         return self._assistant_dir(aid) / "pinned.md"
-
-    def _today_path(self, aid: str) -> Path:
-        return self._assistant_dir(aid) / "memory" / "today.md"
-
-    def _longterm_path(self, aid: str) -> Path:
-        return self._assistant_dir(aid) / "memory" / "longterm.md"
-
-    def _dream_history_path(self, aid: str) -> Path:
-        return self._assistant_dir(aid) / "memory" / "dream_history.json"
 
     def _avatar_dir(self, aid: str) -> Path:
         return self._assistant_dir(aid) / "avatars"
@@ -547,7 +499,6 @@ class AssistantManager:
             return False  # 主助手与唯一助手不可删除
         path = self._assistant_dir(aid)
         self._assistants.pop(aid, None)
-        self._contexts.pop(aid, None)
         try:
             if path.exists():
                 shutil.rmtree(path)
@@ -1035,8 +986,8 @@ class AssistantManager:
 
     @staticmethod
     def _dump_pinned(items: List[Tuple[str, str]]) -> str:
-        lines = ["# 置顶记忆", ""]
-        lines.append("本文件的内容会始终注入到助手的 system prompt，永不衰减或被 Dream 覆盖。")
+        lines = ["# 人工提示", ""]
+        lines.append("本文件的内容会在会话启动时注入，永不衰减。")
         lines.append("可以直接编辑保存；在 UI 中也可以一条条增删。")
         lines.append("")
         for pid, content in items:
@@ -1045,6 +996,8 @@ class AssistantManager:
                 continue
             lines.append(f"- {content} <!-- pin:{pid} -->")
         return "\n".join(lines) + "\n"
+
+    # ── 人工提示（pinned.md）──
 
     def read_pinned(self, aid: str) -> List[Tuple[str, str]]:
         path = self._pinned_path(aid)
@@ -1062,192 +1015,6 @@ class AssistantManager:
         path.write_text(self._dump_pinned(items), encoding="utf-8")
         return True
 
-    # ── 当下 / 长期记忆 ──
-
-    def read_today(self, aid: str) -> str:
-        path = self._today_path(aid)
-        if not path.exists():
-            return ""
-        try:
-            return path.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
-    def write_today(self, aid: str, content: str) -> bool:
-        path = self._today_path(aid)
-        self._ensure_dir(path.parent)
-        path.write_text(content, encoding="utf-8")
-        return True
-
-    def read_longterm(self, aid: str) -> str:
-        path = self._longterm_path(aid)
-        if not path.exists():
-            return ""
-        try:
-            return path.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
-    def write_longterm(self, aid: str, content: str) -> bool:
-        path = self._longterm_path(aid)
-        self._ensure_dir(path.parent)
-        path.write_text(content, encoding="utf-8")
-        return True
-
-    # ── Dream 自动整理 ──
-
-    def dream_history(self, aid: str) -> List[Dict[str, Any]]:
-        path = self._dream_history_path(aid)
-        if not path.exists():
-            return []
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
-        except Exception:
-            return []
-
-    def _append_dream_history(self, aid: str, entry: Dict[str, Any]) -> None:
-        history = self.dream_history(aid)
-        history.insert(0, entry)
-        history = history[:50]  # 最多保留 50 条
-        path = self._dream_history_path(aid)
-        self._ensure_dir(path.parent)
-        path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def run_dream(
-        self,
-        aid: str,
-        trigger: str = "manual",
-        on_progress: Optional[Any] = None,
-    ) -> Dict[str, Any]:
-        """Dream 自动整理（参考 openhanako lib/memory/dream/runner.ts）
-
-        本地无 LLM 调度器（避免与项目既有 LLM 调度冲突）。Dream 步骤：
-        1. **读取（gather）**: 合并 today + longterm → 原始文本
-        2. **原子化（atomize）**: 按段落 / 行拆为原子单元
-        3. **去重（dedupe）**: 保留首条完全相同的文本，去掉后续重复
-        4. **优化（optimize）**: 去掉空白/空行，标准化标点
-        5. **合成（compose）**: 排序后写入 longterm.md，并写一条 revision
-        6. **验证（verify）**: 检查生成结果可被再读回
-
-        Args:
-            aid: 助手 id
-            trigger: 触发来源（"manual" / "auto"），保留在历史中
-            on_progress: 可选回调 fn(stage: str, payload: dict)
-        """
-        if not self.has(aid):
-            return {"ok": False, "error": "assistant not found"}
-        ts = _now_iso()
-        run_id = f"dream-{int(time.time() * 1000)}"
-
-        def _notify(stage: str, **payload: Any) -> None:
-            if on_progress:
-                try:
-                    on_progress(stage, payload)
-                except Exception as e:  # 回调失败不影响主流程
-                    logger.warning(f"[assistant_hub.dream] 回调失败 ({stage}): {e}")
-
-        _notify("start", run_id=run_id, trigger=trigger)
-
-        today = self.read_today(aid)
-        longterm = self.read_longterm(aid)
-        merged = "\n".join([s for s in (today, longterm) if s and s.strip()]).strip()
-        _notify("gather", today_chars=len(today), longterm_chars=len(longterm))
-
-        if not merged:
-            entry = {
-                "run_id": run_id,
-                "ts": ts,
-                "trigger": trigger,
-                "stages": {"gather": 0, "atomize": 0, "dedupe": 0, "optimize": 0, "compose": 0},
-                "result": "empty",
-            }
-            self._append_dream_history(aid, entry)
-            _notify("done", run_id=run_id, units=0)
-            return {"ok": True, "run_id": run_id, "units": 0, "result": "empty"}
-
-        # 1) atomize: 行级
-        units: List[str] = []
-        for line in merged.splitlines():
-            s = line.strip()
-            if not s:
-                continue
-            # 跳过 markdown 标题 / 注释行
-            if s.startswith("#"):
-                continue
-            units.append(s)
-        _notify("atomize", units=len(units))
-
-        # 2) dedupe: 完全相同只保留首
-        seen = set()
-        deduped: List[str] = []
-        for u in units:
-            norm = re.sub(r"\s+", "", u).lower()
-            if norm in seen:
-                continue
-            seen.add(norm)
-            deduped.append(u)
-        _notify("dedupe", units=len(deduped))
-
-        # 3) optimize: 合并相邻空行 / 修整标点
-        optimized: List[str] = []
-        for s in deduped:
-            s = re.sub(r"\s{2,}", " ", s).strip()
-            s = re.sub(r"^[•·]+\s*", "- ", s)
-            if not s.endswith((".", "!", "?", "。", "！", "？", "；")):
-                pass
-            optimized.append(s)
-        _notify("optimize", units=len(optimized))
-
-        # 4) compose
-        header = f"# 长期记忆（Dream {run_id} · {ts}）\n\n"
-        body = "\n".join(f"- {s}" for s in optimized)
-        new_longterm = header + body + "\n"
-        old_longterm = longterm
-        self.write_longterm(aid, new_longterm)
-        _notify("compose", units=len(optimized))
-
-        # 5) verify: 再读一次，确保一致
-        verify_text = self.read_longterm(aid)
-        ok = verify_text == new_longterm
-        _notify("verify", ok=ok)
-
-        entry = {
-            "run_id": run_id,
-            "ts": ts,
-            "trigger": trigger,
-            "stages": {
-                "gather": len(merged),
-                "atomize": len(units),
-                "dedupe": len(deduped),
-                "optimize": len(optimized),
-                "compose": len(new_longterm),
-            },
-            "result": "ok" if ok else "verify_mismatch",
-            "prev_longterm_chars": len(old_longterm),
-            "new_longterm_chars": len(new_longterm),
-        }
-        self._append_dream_history(aid, entry)
-        _notify("done", run_id=run_id, units=len(optimized))
-        return {"ok": ok, "run_id": run_id, "units": len(optimized)}
-
-    # ── 上下文快照 ──
-
-    def get_context(self, aid: str) -> AssistantContext:
-        """读取助手当下 context（缓存；任何写入会自动 invalidate）"""
-        if aid in self._contexts:
-            return self._contexts[aid]
-        ctx = AssistantContext(
-            pinned=self.read_pinned(aid),
-            today=self.read_today(aid),
-            longterm=self.read_longterm(aid),
-        )
-        self._contexts[aid] = ctx
-        return ctx
-
-    def invalidate_context(self, aid: str) -> None:
-        self._contexts.pop(aid, None)
-
     # ── 公开元数据（不带敏感字段）──
 
     def public_metadata(self, a: Assistant) -> Dict[str, Any]:
@@ -1259,7 +1026,6 @@ class AssistantManager:
             "avatar_path": a.avatar_path,
             "primary": a.primary,
             "memory_enabled": a.memory_enabled,
-            "dream_auto_enabled": a.dream_auto_enabled,
             "experience_enabled": a.experience_enabled,
             "model": a.model,
             "public_description": a.public_description,
@@ -1268,7 +1034,7 @@ class AssistantManager:
         }
 
     # ════════════════════════════════════════════════════════════════
-    #  v2 门面：人格 / 记忆传送带 / Dream / 经验（转发 core 子包）
+    #  v2 门面：人格 / 记忆（双层 store）/ 经验（转发 core 子包）
     # ════════════════════════════════════════════════════════════════
 
     # ── core 模块懒加载 ──
@@ -1279,17 +1045,14 @@ class AssistantManager:
     def _core_llm(self):
         return _load_core_module("llm_client", "llm_client.py")
 
-    def _core_compile(self):
-        return _load_core_module("memory.compile", "memory/compile.py")
+    def _core_store(self):
+        return _load_core_module("memory.store", "memory/store.py")
 
-    def _core_dream(self):
-        return _load_core_module("memory.dream", "memory/dream.py")
+    def _core_prompts(self):
+        return _load_core_module("memory.prompts", "memory/prompts.py")
 
     def _core_experience(self):
         return _load_core_module("experience", "experience.py")
-
-    def _core_ticker(self):
-        return _load_core_module("memory.ticker", "memory/ticker.py")
 
     def _utility_llm(self, aid: str):
         """返回绑定了该助手记忆整理模型的 chat_once（走主对话引擎，单回合）。
@@ -1366,17 +1129,11 @@ class AssistantManager:
     def assistant_dir(self, aid: str) -> Path:
         return self._assistant_dir(aid)
 
-    def memory_dir(self, aid: str) -> Path:
-        return self._assistant_dir(aid) / "memory"
-
     def experience_dir(self, aid: str) -> Path:
         return self._assistant_dir(aid) / "experience"
 
     def experience_index_path(self, aid: str) -> Path:
         return self._assistant_dir(aid) / "experience.md"
-
-    def dream_dir(self, aid: str) -> Path:
-        return self._assistant_dir(aid) / "memory" / "dream"
 
     # ── 人格段组装 ──
 
@@ -1399,22 +1156,14 @@ class AssistantManager:
             return ""
         return reg.render(a.yuan, persona.prompt.strip(), agent_name=agent_name, user_name=user)
 
-    # ── 完整注入块（BuildSystemPrompt hook 与 UI 统计共用，单一数据源）──
-
-    _MEMORY_RULES = """## 记忆使用规则
-
-记忆和用户档案是你内化的背景知识。你和{user}是认识很久的人，这些事你本来就知道。
-
-- **只有当{user}提到相关内容，记忆才参与**，而且方式是无声的：影响你的角度、语气、判断，不出现在文字里。{user}没提起的话题，不要主动从记忆里翻出来讲。
-- **永远不要让{user}感觉到"记忆"这个东西的存在。** 禁止"我记得""你之前说过""根据记忆"这类表述，除非{user}主动问"你还记得 xxx 吗"。
-- **记忆可能过时，当前对话永远优先。** 信息冲突时以对话为准，不要用旧记忆纠正{user}。"""
+    # ── 注入块（BuildSystemPrompt / SessionStart hook 与 UI 统计共用，单一数据源）──
 
     def identity_block(self, aid: str) -> str:
         """人格块（BuildSystemPrompt hook 注入系统提示词）。
 
-        仅含助手身份与人格段；不包含人工提示 / 记忆段（这两段由
-        SessionStart hook 以会话消息形式注入，不进系统提示词）。
-        无人格段时返回空串，与原 prompt_block 行为对齐。
+        仅含助手身份与人格段；记忆说明书与记忆内容由 memory_system_block
+        追加（同 hook 内拼接），人工提示由 SessionStart hook 以会话消息注入。
+        无人格段时返回空串（保持原行为）。
         """
         a = self.get(aid)
         if a is None:
@@ -1425,155 +1174,135 @@ class AssistantManager:
         header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}——一个由用户创建的专属 AI 助手。"
         return header + "\n\n" + persona_block.strip()
 
-    def memory_block(self, aid: str) -> str:
-        """记忆块（SessionStart hook 注入会话消息，role=user 的 hook 消息）。
+    def pinned_block(self, aid: str) -> str:
+        """人工提示块（SessionStart hook 注入会话消息，role=user 的 hook 消息）。
 
-        含人工提示（pinned）+ 记忆使用规则 + 编译的长期记忆；不进系统提示词，
-        避免长记忆挤占每次请求都带的 system prompt 空间。会话启动/清空/压缩
-        时注入一次，后续模型从历史中取到。
+        人工添加的明确要求，不受 memory_enabled 控制，始终注入。
         """
         a = self.get(aid)
         if a is None:
             return ""
-
-        parts: list[str] = []
-
-        # 2a. 人工提示（pinned）：人工添加，无自动记忆风险，不受 memory_enabled 控制，始终注入
         pinned = self.read_pinned(aid)
-        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or "").strip()]
-        if pin_lines:
-            parts.append("# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines))
+        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or '').strip()]
+        if not pin_lines:
+            return ""
+        return "# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines)
 
-        # 2b. 记忆段（memory_enabled 才注入）：无声规则 + 编译记忆（自动整理产物，有风险）
-        if a.memory_enabled:
-            rule = self._MEMORY_RULES.replace("{user}", self.user_name())
-            mem_parts = [rule]
-            try:
-                memory_md = (self.compiled_memory(aid) or "").strip()
-            except Exception:
-                memory_md = ""
-            if memory_md:
-                mem_parts.append("# 长期记忆\n\n" + memory_md)
-            if len(mem_parts) > 1:  # 规则之外还有实际记忆内容才注入整段
-                parts.append("\n\n".join(mem_parts))
+    def memory_system_block(self, aid: str, workdir: str = "") -> str:
+        """记忆体系块（BuildSystemPrompt hook 注入系统提示词）。
+
+        照抄 WorkBuddy 注入结构：说明书 + <global_memory> + <project_memory> +
+        <daily_logs> 索引 + 超期蒸馏 ACTION。memory_enabled=False 返回空串；
+        记忆超限时截断并附 ACTION 指令逼模型先整理。
+        """
+        a = self.get(aid)
+        if a is None or not a.memory_enabled:
+            return ""
+        store = self._core_store()
+        prompts = self._core_prompts()
+        aid_dir = self._assistant_dir(aid)
+
+        global_file = str(store.global_memory_path(aid_dir))
+        proj_dir = (
+            str(store.project_dir(workdir, aid))
+            if workdir
+            else "{项目根}/" + store.PROJECT_DIR_NAME + "/" + store.MEMORY_SUBDIR + "/" + aid
+        )
+        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir)]
+
+        # 全局记忆
+        g_text = (store.read_global_memory(aid_dir) or "").strip()
+        if g_text:
+            if len(g_text) > store.GLOBAL_MEMORY_MAX_CHARS:
+                g_text = (
+                    g_text[: store.GLOBAL_MEMORY_MAX_CHARS]
+                    + "\n... (全局记忆超限，已截断)\n\n**ACTION REQUIRED**: 全局记忆已超上限。先整理 "
+                    + global_file
+                    + "：合并去重、删过时内容、保持精简，然后继续用户的任务。"
+                )
+            parts.append(
+                "<global_memory>\n以下是跨项目的全局记忆（用户对助手长期稳定的要求）。\n\n" + g_text + "\n</global_memory>"
+            )
+
+        # 项目记忆
+        p_text = (store.read_project_memory(workdir, aid) or "").strip() if workdir else ""
+        if p_text:
+            p_file = str(store.project_memory_path(workdir, aid))
+            if len(p_text) > store.PROJECT_MEMORY_MAX_CHARS:
+                p_text = (
+                    p_text[: store.PROJECT_MEMORY_MAX_CHARS]
+                    + "\n... (项目记忆超限，已截断)\n\n**ACTION REQUIRED**: 项目记忆已超上限。先整理 "
+                    + p_file
+                    + "：合并去重、删过时内容、保持精简，然后继续用户的任务。"
+                )
+            parts.append("<project_memory>\n以下是本项目的工作记忆。\n\n" + p_text + "\n</project_memory>")
+
+        # 近期日志索引 + 超期蒸馏提示
+        if workdir:
+            index = store.daily_index_text(workdir, aid)
+            if index:
+                parts.append("<daily_logs>\n" + index + "\n</daily_logs>")
+            stale = store.stale_daily(workdir, aid)
+            if stale:
+                parts.append(
+                    "**ACTION REQUIRED**: 以下旧日志已超过 30 天，请先把它们按主题蒸馏进项目 MEMORY.md，然后删除旧文件："
+                    + "、".join(stale[:10])
+                )
 
         return "\n\n".join(parts)
 
-    def prompt_block(self, aid: str) -> str:
-        """完整注入块（UI 统计 / 欢迎卡 token 估计，单一数据源 = identity + memory 拼接）。
-
-        与拆前的输出格式等价：header + persona + pinned + memory。无人格段时返回
-        空串（保持原行为；此时 SessionStart 仍会按 memory_block 注入记忆上下文）。
-        """
-        identity = self.identity_block(aid)
-        if not identity:
-            return ""
-        memory = self.memory_block(aid)
-        return identity + ("\n\n" + memory if memory else "")
-
     def prompt_stats(self, aid: str) -> Dict[str, int]:
-        """注入块统计：chars=完整块字符数；tokens_est≈中文场景 1.6 字符/token 粗估。"""
+        """注入块统计：chars=人格+人工提示+记忆体系块字符数；tokens_est≈1.6 字符/token。"""
         block = ""
         try:
-            block = self.prompt_block(aid)
+            parts = [self.identity_block(aid), self.pinned_block(aid), self.memory_system_block(aid)]
+            block = "\n\n".join(p for p in parts if p)
         except Exception:
             pass
         chars = len(block)
         return {"chars": chars, "tokens_est": int(chars / 1.6)}
 
-    # ── 记忆传送带 ──
+    # ── 记忆读写门面（hook / 工具 / UI 共用）──
 
-    def compiled_memory(self, aid: str) -> str:
-        """assemble 产物 memory.md（缺失/空返回 ""）。"""
-        return self._core_compile().assemble(self._assistant_dir(aid))
-
-    def compile_chain(self, aid: str, *, light: bool = False, require_new: bool = False) -> Dict[str, Any]:
-        """跑编译链（ticker/手动入口）。
-
-        light=True：只 compile_today + assemble（每 10 轮轻量链）
-        light=False：完整日批（daily→today→roll→facts→assemble）
-        require_new=True：今日无新增轮次时跳过 facts 等后续 LLM 步骤
-        （日批遍历多助手时避免对无活动助手白烧调用）。
-
-        素材过滤：compile_today 按会话归属映射（_session_map）只取
-        本助手名下会话，保证各助手记忆互相独立；映射无记录的旧会话
-        归主助手（与升级前行为一致）。
-
-        LLM 不可用时各步静默降级（返回各步状态）。
-        """
+    def memory_paths(self, aid: str, workdir: str = "") -> Dict[str, str]:
+        """该助手的记忆路径集合（UI 展示用）。"""
+        store = self._core_store()
         aid_dir = self._assistant_dir(aid)
-        cm = self._core_compile()
-        result: Dict[str, Any] = {"ok": True, "steps": {}}
-        try:
-            llm = self._utility_llm(aid)
-        except Exception as e:
-            return {"ok": False, "error": f"llm_unavailable: {e}"}
-        try:
-            active = self.active_id()
-            session_map = dict(type(self)._session_map)
+        out = {"global": str(store.global_memory_path(aid_dir))}
+        if workdir:
+            out["project_dir"] = str(store.project_dir(workdir, aid))
+            out["project"] = str(store.project_memory_path(workdir, aid))
+        return out
 
-            def _filter(s: dict) -> bool:
-                return session_map.get(s.get("session_id", ""), active) == aid
+    def read_global_memory(self, aid: str) -> str:
+        return self._core_store().read_global_memory(self._assistant_dir(aid))
 
-            if not light:
-                # 日批顺序铁律：先蒸馏昨日草稿，再增量编译今日
-                prev_today = (
-                    (aid_dir / "memory" / "today.md").read_text(encoding="utf-8")
-                    if (aid_dir / "memory" / "today.md").exists()
-                    else ""
-                )
-                yesterday = cm.logical_yesterday()
-                result["steps"]["compile_daily"] = cm.compile_daily(aid_dir, prev_today, yesterday, llm=llm)
-            result["steps"]["compile_today"] = cm.compile_today(aid_dir, llm=llm, _session_filter=_filter)
-            if not light:
-                result["steps"]["roll_daily_window"] = {"folded": cm.roll_daily_window(aid_dir)}
-                if require_new and not result["steps"]["compile_today"].get("changed"):
-                    # 今日无新增：跳过 facts（LLM 成本），assemble 收尾
-                    text = cm.assemble(aid_dir)
-                    result["steps"]["assemble"] = {"chars": len(text)}
-                    if not text:
-                        result["memory_empty"] = True
-                    self.invalidate_context(aid)
-                    return result
-                result["steps"]["compile_facts"] = cm.compile_facts(aid_dir, llm=llm)
-            text = cm.assemble(aid_dir)
-            result["steps"]["assemble"] = {"chars": len(text)}
-            if not text:
-                result["memory_empty"] = True
-            # 同步失效旧 context 缓存
-            self.invalidate_context(aid)
-        except Exception as e:
-            logger.warning(f"[assistant_hub] 编译链异常: {e}")
-            result["ok"] = False
-            result["error"] = str(e)
-        return result
+    def write_global_memory(self, aid: str, content: str) -> bool:
+        return self._core_store().write_global_memory(self._assistant_dir(aid), content)
 
-    # ── Dream ──
+    def read_project_memory(self, aid: str, workdir: str) -> str:
+        return self._core_store().read_project_memory(workdir, aid)
 
-    def dream_runner(self, aid: str, progress=None):
-        return self._core_dream().DreamRunner(self._assistant_dir(aid), llm=self._utility_llm(aid), progress=progress)
+    def write_project_memory(self, aid: str, workdir: str, content: str) -> bool:
+        return self._core_store().write_project_memory(workdir, aid, content)
 
-    def dream_start(self, aid: str, trigger: str = "manual", progress=None) -> Dict[str, Any]:
-        return self.dream_runner(aid, progress=progress).start(trigger)
+    def append_daily(self, aid: str, workdir: str, text: str, date: str = "") -> Dict[str, Any]:
+        return self._core_store().append_daily(workdir, aid, text, date)
 
-    def dream_status(self, aid: str) -> Dict[str, Any]:
-        return self.dream_runner(aid).status()
+    def list_daily(self, aid: str, workdir: str, limit: int = 7) -> List[Dict[str, Any]]:
+        return self._core_store().list_daily(workdir, aid, limit)
 
-    def dream_revisions(self, aid: str) -> List[Dict[str, Any]]:
-        return self.dream_runner(aid).list_revisions()
+    def read_daily(self, aid: str, workdir: str, date: str = "") -> str:
+        return self._core_store().read_daily(workdir, aid, date)
 
-    def dream_restore(self, aid: str, revision_id: str) -> Dict[str, Any]:
-        return self.dream_runner(aid).restore_revision(revision_id)
-
-    def dream_start_auto_if_eligible(self, aid: str, logical_date: str) -> Optional[Dict[str, Any]]:
-        return self.dream_runner(aid).start_automatic_if_eligible(logical_date)
+    def clear_all_memory(self, aid: str, workdir: str = "") -> None:
+        """清除该助手全部记忆（全局 MEMORY.md + 项目记忆目录）；人工提示保留。"""
+        self._core_store().clear_memory(self._assistant_dir(aid), workdir)
 
     # ── 经验 ──
 
     def experience_record(self, aid: str, category: str, content: str) -> Dict[str, Any]:
-        r = self._core_experience().record_entry(self._assistant_dir(aid), category, content)
-        self.invalidate_context(aid)
-        return r
+        return self._core_experience().record_entry(self._assistant_dir(aid), category, content)
 
     def experience_list(self, aid: str) -> List[Dict[str, Any]]:
         return self._core_experience().list_documents(self._assistant_dir(aid))
@@ -1588,7 +1317,10 @@ class AssistantManager:
         return self._core_experience().delete_entry(self._assistant_dir(aid), category, index)
 
     def experience_reflect(self, aid: str) -> Dict[str, Any]:
-        """经验反思：从 memory.md 提炼工作心得，随后自动压缩超限分类（需 LLM；LLM 不可用静默返回）。"""
+        """经验反思：从近期日志/项目记忆提炼工作心得，随后自动压缩超限分类（需 LLM）。
+
+        数据源改版（拆传送带后）：项目 MEMORY.md + 近期日志拼接，取代原编译产物 memory.md。
+        """
         try:
             llm = self._utility_llm(aid)
         except Exception as e:
@@ -1596,11 +1328,45 @@ class AssistantManager:
         r = self._core_experience().reflect(
             self._assistant_dir(aid),
             identity_and_persona=self.identity_and_persona(aid),
-            memory_md=self.compiled_memory(aid),
+            memory_md=self._recent_memory_text(aid),
             llm=llm,
         )
         r["consolidated"] = self._experience_auto_consolidate(aid, llm)
         return r
+
+    def _recent_memory_text(self, aid: str) -> str:
+        """反思素材：项目 MEMORY.md + 最近日志（无 workdir 时取全局记忆兑底）。"""
+        parts: list[str] = []
+        wd = self._current_workdir()
+        if wd:
+            pm = self.read_project_memory(aid, wd).strip()
+            if pm:
+                parts.append("# 项目记忆\n" + pm)
+            for it in self.list_daily(aid, wd, limit=3):
+                body = self.read_daily(aid, wd, it["date"]).strip()
+                if body:
+                    parts.append(f"# {it['date']}\n{body}")
+        if not parts:
+            g = self.read_global_memory(aid).strip()
+            if g:
+                parts.append("# 全局记忆\n" + g)
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _current_workdir() -> str:
+        """当前主窗口工作目录（反思/统计等无 tool_ctx 场景用）；取不到返回空串。"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            reg = UIPluginRegistry.get_instance()
+            mw = getattr(reg, "_main_widget", None) or next(
+                iter(getattr(reg, "_window_main_widgets", {}).values()), None
+            )
+            if mw is not None and getattr(mw, "backend", None) is not None:
+                return str(mw.backend.tool_executor.get_workdir() or "")
+        except Exception:
+            pass
+        return ""
 
     def _experience_auto_consolidate(self, aid: str, llm) -> List[Dict[str, Any]]:
         """水位检查：全库条目超阈值时自动压缩一次（无人管理，反思收尾时跑）。"""
@@ -1613,8 +1379,6 @@ class AssistantManager:
             r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
         except Exception as e:
             return [{"error": str(e)}]
-        if r.get("changed"):
-            self.invalidate_context(aid)
         return [r]
 
     def experience_consolidate(self, aid: str) -> Dict[str, Any]:
@@ -1624,6 +1388,4 @@ class AssistantManager:
         except Exception as e:
             return {"changed": False, "error": f"llm_unavailable: {e}"}
         r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
-        if r.get("changed"):
-            self.invalidate_context(aid)
         return r

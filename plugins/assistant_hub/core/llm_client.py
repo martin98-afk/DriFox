@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""llm_client.py — 助手记忆/Dream/经验的一次性 LLM 调用（走主对话引擎 + 单回合循环策略）。
+"""llm_client.py — 助手经验反思等后台 LLM 任务的一次性调用（走主对话引擎 + 单回合循环策略）。
 
 历史（已废弃）
 ==============
@@ -19,15 +19,15 @@ should_continue 恒 STOP）。
 
 关键约定
 ========
-- 同步阻塞：只允许在后台线程调用（ticker 的 daemon 线程 / Dream 的 QThread）。
+- 同步阻塞：只允许在后台线程调用（经验反思等 daemon 线程 / QThread）。
 - 循环策略经 ``loop_policy_id=`` **按 id 直接取对象**，不调用
   ``LoopPolicyRegistry.set_active`` → 不影响主对话的全局激活槽。
-- hook_policy=none / permission_strategy=auto_deny / tools=[] —— 记忆整理是纯
+- hook_policy=none / permission_strategy=auto_deny / tools=[] —— 反思是纯
   文本进出，不触发全局 hooks，不给任何工具。
 - 会话按「模型覆盖配置」分池复用（槽位 busy 时自动新建），避免每轮重建
   ConversationCore；跨线程复用安全（会话本身无 QObject，worker QThread 在
   execute() 内随调用线程创建）。
-- 任何失败抛 ``LLMUnavailableError``，由调用方（ticker/dream/experience）静默降级。
+- 任何失败抛 ``LLMUnavailableError``，由调用方（experience）静默降级。
 """
 
 from __future__ import annotations
