@@ -209,7 +209,9 @@ def test_transform_model_missing_context():
 # ============================================================
 # _parse_models_dev_data
 # ============================================================
-def test_parse_models_dev_data_filters_whitelist():
+def test_parse_models_dev_data_filters_whitelist(monkeypatch):
+    # 白名单来自 providers 插件（运行时变化），mock 固定映射避免依赖插件环境
+    monkeypatch.setattr(sync, "_get_models_dev_map", lambda: {"OpenAI": "openai", "OpenCode Zen": "opencode"})
     data = {
         "openai": {
             "models": {
@@ -549,7 +551,8 @@ def test_load_dynamic_models_refetches_when_content_stale(monkeypatch, tmp_path:
             }
         }
     }
-    monkeypatch.setattr(sync, "_fetch_remote", lambda: remote_data)
+    monkeypatch.setattr(sync, "_get_models_dev_map", lambda: {"OpenAI": "openai"})
+    monkeypatch.setattr(sync, "_fetch_remote", lambda timeout=30.0: (remote_data, "https://fake"))
     result = sync.load_dynamic_models(cache_path=tmp_path / "cache.json")
     # 内容版本偏低 → 忽略旧缓存、拉取远程新数据
     assert result.provider_models["OpenAI"] == ["gpt-new"]
@@ -622,7 +625,7 @@ def test_load_dynamic_models_uses_cache_when_valid(monkeypatch, tmp_path: Path):
     def _fake_fetch():
         nonlocal fetch_called
         fetch_called = True
-        return None
+        return None, "https://fake"
 
     monkeypatch.setattr(sync, "_fetch_remote", _fake_fetch)
     result = sync.load_dynamic_models(cache_path=tmp_path / "cache.json")
@@ -649,7 +652,8 @@ def test_load_dynamic_models_fetches_when_expired(monkeypatch, tmp_path: Path):
             }
         }
     }
-    monkeypatch.setattr(sync, "_fetch_remote", lambda: remote_data)
+    monkeypatch.setattr(sync, "_get_models_dev_map", lambda: {"OpenAI": "openai"})
+    monkeypatch.setattr(sync, "_fetch_remote", lambda timeout=30.0: (remote_data, "https://fake"))
     result = sync.load_dynamic_models(cache_path=tmp_path / "cache.json")
     assert "gpt-new" in result.provider_models["OpenAI"]
 
@@ -661,14 +665,14 @@ def test_load_dynamic_models_fallback_to_stale_cache(monkeypatch, tmp_path: Path
         "model_capabilities": {},
     }
     sync._save_cache(stale, tmp_path / "cache.json")
-    monkeypatch.setattr(sync, "_fetch_remote", lambda: None)
+    monkeypatch.setattr(sync, "_fetch_remote", lambda timeout=30.0: (None, "https://fake"))
     result = sync.load_dynamic_models(cache_path=tmp_path / "cache.json")
     assert result.provider_models["OpenAI"] == ["gpt-stale"]
     assert result.from_cache is True
 
 
 def test_load_dynamic_models_empty_when_no_cache_and_fetch_fails(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr(sync, "_fetch_remote", lambda: None)
+    monkeypatch.setattr(sync, "_fetch_remote", lambda timeout=30.0: (None, "https://fake"))
     result = sync.load_dynamic_models(cache_path=tmp_path / "cache.json")
     assert result.provider_models == {}
     assert result.model_capabilities == {}
@@ -680,7 +684,7 @@ def test_load_dynamic_models_empty_when_no_cache_and_fetch_fails(monkeypatch, tm
 def test_get_merged_provider_models_deduplicates_and_keeps_static_first(monkeypatch):
     dynamic = sync.DynamicModelsResult(
         provider_models={
-            "OpenAI": ["gpt-4o", "gpt-new"],
+            "DeepSeek": ["deepseek-chat", "deepseek-new"],
         },
         model_capabilities={},
         from_cache=False,
@@ -690,18 +694,18 @@ def test_get_merged_provider_models_deduplicates_and_keeps_static_first(monkeypa
     from app.constants import get_merged_provider_models
     from app.plugins.registries.provider_registry import ProviderRegistry
 
-    # 静态模型来自 providers 插件（OpenAI 插件注册表）
-    static_models = ProviderRegistry.get_instance().provider_models()["OpenAI"]
+    # 静态模型来自 providers 插件（DeepSeek 插件注册表）
+    static_models = ProviderRegistry.get_instance().provider_models()["DeepSeek"]
 
     merged = get_merged_provider_models()
-    openai_models = merged["OpenAI"]
+    merged_models = merged["DeepSeek"]
     # 静态模型在前
-    assert openai_models[0] == static_models[0]
-    # 去重：gpt-4o 只出现一次
-    assert openai_models.count("gpt-4o") == 1
-    assert "gpt-new" in openai_models
+    assert merged_models[0] == static_models[0]
+    # 去重：deepseek-chat 只出现一次
+    assert merged_models.count("deepseek-chat") == 1
+    assert "deepseek-new" in merged_models
     # 静态模型顺序不变
-    assert openai_models[:5] == static_models[:5]
+    assert merged_models[: len(static_models)] == static_models
 
 
 def test_get_merged_provider_models_fallback_on_sync_exception(monkeypatch):
@@ -784,7 +788,8 @@ def test_refresh_dynamic_models_async_fills_memory_cache(monkeypatch, tmp_path: 
             }
         }
     }
-    monkeypatch.setattr(sync, "_fetch_remote", lambda: remote_data)
+    monkeypatch.setattr(sync, "_get_models_dev_map", lambda: {"OpenAI": "openai"})
+    monkeypatch.setattr(sync, "_fetch_remote", lambda: (remote_data, "https://fake"))
     monkeypatch.setattr(sync, "_get_cache_path", lambda: tmp_path / "cache.json")
 
     done = threading.Event()
@@ -803,6 +808,60 @@ def test_refresh_dynamic_models_async_fills_memory_cache(monkeypatch, tmp_path: 
     assert "gpt-refreshed" in sync.get_dynamic_models().provider_models["OpenAI"]
 
 
+def test_load_dynamic_models_empty_parse_keeps_old_cache(monkeypatch, tmp_path: Path):
+    """远程拉取成功但解析结果为空（如 providers 插件未就绪）→ 不得覆盖旧缓存。
+
+    曾发事故：启动早期 ProviderRegistry 未 warmup，models_dev_map() 返回空，
+    空解析结果带着最新版本号覆盖缓存 → 24h 内费用信息全无且重启无效。
+    """
+    cache_path = tmp_path / "cache.json"
+    good_caps = {
+        "gpt-test": {
+            "context_limit": 128000,
+            "supports_thinking": False,
+            "source": "models.dev",
+            "cost": {"input": 1.0, "output": 2.0},
+        }
+    }
+    old_cache = {
+        "_cached_at": time.time() - 25 * 3600,  # 过期，触发重拉
+        "_url": "old",
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION,
+        "provider_models": {"OpenAI": ["gpt-test"]},
+        "model_capabilities": good_caps,
+        "model_capabilities_partitioned": {"openai": good_caps},
+    }
+    cache_path.write_text(json.dumps(old_cache), encoding="utf-8")
+
+    remote_data = {"openai": {"models": {"gpt-x": {"limit": {"context": 8000}}}}}
+    monkeypatch.setattr(sync, "_fetch_remote", lambda timeout=30.0: (remote_data, "https://fake"))
+    # 模拟启动早期：providers 插件未加载 → 映射为空 → 解析产出全空
+    monkeypatch.setattr(sync, "_get_models_dev_map", lambda: {})
+
+    result = sync.load_dynamic_models(cache_path=cache_path)
+
+    # 缓存文件未被空结果覆盖
+    after = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert after["model_capabilities"] == good_caps
+    assert after["provider_models"] == {"OpenAI": ["gpt-test"]}
+    # 返回旧缓存内容
+    assert result.from_cache is True
+    assert result.model_capabilities == good_caps
+
+
+def test_models_dev_map_ensures_loaded():
+    """models_dev_map 必须兜底 ensure_loaded（曾因缺失导致空映射写空缓存）。
+
+    与同注册表 get/names/all/family_capabilities 等读路径行为保持一致。
+    """
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    mapping = ProviderRegistry.get_instance().models_dev_map()
+    assert len(mapping) > 0, "ensure_loaded 兜底后映射不应为空"
+    assert any(v == "deepseek" for v in mapping.values())
+
+
 def test_refresh_dynamic_models_async_singleton_dedup(monkeypatch, tmp_path: Path):
     """并发触发多次后台刷新只发一路网络请求（单飞去重）。"""
     call_count = []
@@ -810,7 +869,7 @@ def test_refresh_dynamic_models_async_singleton_dedup(monkeypatch, tmp_path: Pat
     def _slow_fetch():
         call_count.append(True)
         time.sleep(0.3)
-        return {}
+        return {}, "https://fake"
 
     monkeypatch.setattr(sync, "_fetch_remote", _slow_fetch)
     monkeypatch.setattr(sync, "_get_cache_path", lambda: tmp_path / "cache.json")

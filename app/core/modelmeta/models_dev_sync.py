@@ -38,7 +38,7 @@ CACHE_SCHEMA_VERSION = 3
 # 默认值或合并规则等非结构变更——就把本值 +1。任何本地缓存的 _content_version
 # 低于此值的，即便仍在 24h TTL 内也视为过期、强制向 models.dev 重新拉取，
 # 让用户及时用上新逻辑，而不必等 TTL 自然到期。
-CACHE_CONTENT_VERSION = 3  # +1：移除 OpenCode 免费模型叠加（免费模型已下线，旧缓存需重拉清洗）
+CACHE_CONTENT_VERSION = 4  # +1：修复启动早期空解析覆盖缓存的事故，已被写空的缓存需强制重拉
 
 
 def _default_cache_path() -> Path:
@@ -417,23 +417,29 @@ def load_dynamic_models(
                     remote_data
                 )
 
-                cache = {
-                    "_cached_at": time.time(),
-                    "_url": fetched_url,
-                    "_schema_version": CACHE_SCHEMA_VERSION,
-                    "_content_version": CACHE_CONTENT_VERSION,
-                    "provider_models": provider_models,
-                    "model_capabilities": model_capabilities,
-                    "model_capabilities_partitioned": model_capabilities_partitioned,
-                }
-                _save_cache(cache, path)
-                return DynamicModelsResult(
-                    provider_models=provider_models,
-                    model_capabilities=model_capabilities,
-                    model_capabilities_partitioned=model_capabilities_partitioned,
-                    from_cache=False,
-                    fetched_at=cache["_cached_at"],
-                )
+                if not provider_models:
+                    # 解析产出为空（如 providers 插件未就绪导致白名单映射为空）→
+                    # 视为异常刷新，不覆盖缓存：空结果一旦写入，24h TTL 内"结构合法
+                    # 内容全空"，费用/动态模型全部消失且重启无效。保留旧缓存更安全。
+                    logger.warning("[models.dev] 远程拉取成功但解析结果为空（服务商白名单未就绪？），保留现有缓存")
+                else:
+                    cache = {
+                        "_cached_at": time.time(),
+                        "_url": fetched_url,
+                        "_schema_version": CACHE_SCHEMA_VERSION,
+                        "_content_version": CACHE_CONTENT_VERSION,
+                        "provider_models": provider_models,
+                        "model_capabilities": model_capabilities,
+                        "model_capabilities_partitioned": model_capabilities_partitioned,
+                    }
+                    _save_cache(cache, path)
+                    return DynamicModelsResult(
+                        provider_models=provider_models,
+                        model_capabilities=model_capabilities,
+                        model_capabilities_partitioned=model_capabilities_partitioned,
+                        from_cache=False,
+                        fetched_at=cache["_cached_at"],
+                    )
             # 远程失败：回退到缓存（即使过期）
             if cache is not None:
                 logger.info("[models.dev] 远程拉取失败，使用过期缓存")

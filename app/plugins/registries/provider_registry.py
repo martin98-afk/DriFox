@@ -302,6 +302,7 @@ class ProviderRegistry:
 
     def provider_models(self) -> Dict[str, List[str]]:
         """所有服务商的模型列表（PROVIDER_MODELS 替代）"""
+        self.ensure_loaded()
         with self._lock:
             return {name: list(p.models) for name, p in self._providers.items() if p.models}
 
@@ -336,6 +337,7 @@ class ProviderRegistry:
 
     def models_dev_map(self) -> Dict[str, str]:
         """服务商 → models.dev provider id（MODELS_DEV_PROVIDER_MAP 替代）"""
+        self.ensure_loaded()
         with self._lock:
             return {name: p.models_dev_id for name, p in self._providers.items() if p.models_dev_id}
 
