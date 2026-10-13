@@ -2,11 +2,9 @@
 """models.dev 同步模块的单元测试。"""
 
 import json
-import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict
 
 import pytest
 
@@ -720,224 +718,6 @@ def test_get_merged_provider_models_fallback_on_sync_exception(monkeypatch):
 
 
 # ============================================================
-# fetch_opencode_free_models_for_providers（缓存 + in-flight 去重）
-# ============================================================
-@pytest.fixture(autouse=True)
-def _clean_opencode_free_cache():
-    """清理模块级缓存，避免测试间互相污染。"""
-    with sync._OPENCODE_FREE_CACHE_LOCK:
-        sync._OPENCODE_FREE_CACHE.clear()
-        sync._OPENCODE_FREE_INFLIGHT.clear()
-    yield
-    with sync._OPENCODE_FREE_CACHE_LOCK:
-        sync._OPENCODE_FREE_CACHE.clear()
-        sync._OPENCODE_FREE_INFLIGHT.clear()
-
-
-class _FakeResponse:
-    """模拟 httpx 响应对象。"""
-
-    def __init__(self, data, status_code: int = 200):
-        self._data = data
-        self.status_code = status_code
-
-    def json(self):
-        return self._data
-
-
-class _FakeClient:
-    """模拟 httpx.Client：记录每次 GET 请求，返回预设响应。"""
-
-    def __init__(self, responses):
-        self._responses = responses
-        self.get_calls: list[tuple[str, Dict]] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def get(self, url, headers=None):
-        self.get_calls.append((url, headers or {}))
-        resp = self._responses.pop(0)
-        if isinstance(resp, Exception):
-            raise resp
-        return resp
-
-
-def _fake_httpx_client_factory(monkeypatch, responses):
-    """用 _FakeClient 替换 httpx.Client，返回 fake 客户端实例供断言。"""
-    fake = _FakeClient(responses)
-
-    class _FakeModule:
-        Client = lambda *a, **kw: fake
-        Timeout = lambda *a, **kw: kw.get("timeout", a[0] if a else None)
-
-    monkeypatch.setitem(sys.modules, "httpx", _FakeModule())
-    return fake
-
-
-def test_fetch_opencode_free_models_cache_hit(monkeypatch):
-    """同一实例在 TTL 窗口内第二次调用不再发网络请求。"""
-    fake = _fake_httpx_client_factory(
-        monkeypatch,
-        [_FakeResponse({"data": [{"id": "model-a-free"}, {"id": "model-b-free"}]})],
-    )
-    targets = [("cid-1", "https://api.example.com/v1", "key-1")]
-
-    first = sync.fetch_opencode_free_models_for_providers(targets)
-    second = sync.fetch_opencode_free_models_for_providers(targets)
-
-    assert first == {"cid-1": ["model-a-free", "model-b-free"]}
-    assert second == {"cid-1": ["model-a-free", "model-b-free"]}
-    # 只发了一次网络请求（第二次命中缓存）
-    assert len(fake.get_calls) == 1
-
-
-def test_fetch_opencode_free_models_cache_expired_refetch(monkeypatch):
-    """缓存过期后再次调用会重新发起网络请求。"""
-    fake = _fake_httpx_client_factory(
-        monkeypatch,
-        [
-            _FakeResponse({"data": [{"id": "model-a-free"}]}),
-            _FakeResponse({"data": [{"id": "model-b-free"}]}),
-        ],
-    )
-    targets = [("cid-2", "https://api.example.com/v1", "key-2")]
-
-    sync.fetch_opencode_free_models_for_providers(targets)
-    # 人为让缓存过期
-    cache_key = ("cid-2", "https://api.example.com/v1", "key-2")
-    with sync._OPENCODE_FREE_CACHE_LOCK:
-        old_ts, models = sync._OPENCODE_FREE_CACHE[cache_key]
-        sync._OPENCODE_FREE_CACHE[cache_key] = (old_ts - sync._OPENCODE_FREE_CACHE_TTL - 1, models)
-
-    result = sync.fetch_opencode_free_models_for_providers(targets)
-    assert result == {"cid-2": ["model-b-free"]}
-    assert len(fake.get_calls) == 2
-
-
-def test_fetch_opencode_free_models_inflight_dedup(monkeypatch):
-    """并发调用同一实例只发一次网络请求，其余等待同一结果。"""
-    fake = _FakeClient([_FakeResponse({"data": [{"id": "model-a-free"}]})])
-    started = threading.Event()
-    release = threading.Event()
-
-    original_get = fake.get
-
-    def _slow_get(url, headers=None):
-        started.set()
-        release.wait(timeout=5)
-        return original_get(url, headers)
-
-    fake.get = _slow_get
-
-    class _FakeModule:
-        Client = lambda *a, **kw: fake
-        Timeout = lambda *a, **kw: kw.get("timeout", a[0] if a else None)
-
-    monkeypatch.setitem(sys.modules, "httpx", _FakeModule())
-
-    targets = [("cid-3", "https://api.example.com/v1", "key-3")]
-    results: Dict[str, Dict] = {}
-
-    def _run(name: str):
-        results[name] = sync.fetch_opencode_free_models_for_providers(targets)
-
-    t1 = threading.Thread(target=_run, args=("t1",))
-    t2 = threading.Thread(target=_run, args=("t2",))
-    t1.start()
-    assert started.wait(timeout=5)  # t1 已进入网络请求
-    t2.start()
-    time.sleep(0.3)  # 给 t2 时间到达 in-flight 检查点
-    release.set()
-    t1.join(timeout=5)
-    t2.join(timeout=5)
-
-    # 两个调用都拿到结果，但只发了一次网络请求
-    assert results["t1"] == {"cid-3": ["model-a-free"]}
-    assert results["t2"] == {"cid-3": ["model-a-free"]}
-    assert len(fake.get_calls) == 1
-
-
-def test_fetch_opencode_free_models_different_instances_independent(monkeypatch):
-    """不同实例互不影响：各自独立拉取。"""
-    fake = _fake_httpx_client_factory(
-        monkeypatch,
-        [
-            _FakeResponse({"data": [{"id": "model-a-free"}]}),
-            _FakeResponse({"data": [{"id": "model-b-free"}]}),
-        ],
-    )
-    targets = [
-        ("cid-a", "https://api-a.example.com/v1", "key-a"),
-        ("cid-b", "https://api-b.example.com/v1", "key-b"),
-    ]
-    result = sync.fetch_opencode_free_models_for_providers(targets)
-    assert result == {"cid-a": ["model-a-free"], "cid-b": ["model-b-free"]}
-    assert len(fake.get_calls) == 2
-
-
-def test_fetch_opencode_free_models_failure_not_cached(monkeypatch):
-    """网络失败不写缓存：下一次调用会重试。"""
-    fake = _FakeClient([RuntimeError("network down")])
-
-    class _FakeModule:
-        Client = lambda *a, **kw: fake
-        Timeout = lambda *a, **kw: kw.get("timeout", a[0] if a else None)
-
-    monkeypatch.setitem(sys.modules, "httpx", _FakeModule())
-
-    targets = [("cid-4", "https://api.example.com/v1", "key-4")]
-    assert sync.fetch_opencode_free_models_for_providers(targets) == {}
-    cache_key = ("cid-4", "https://api.example.com/v1", "key-4")
-    with sync._OPENCODE_FREE_CACHE_LOCK:
-        assert cache_key not in sync._OPENCODE_FREE_CACHE
-        assert cache_key not in sync._OPENCODE_FREE_INFLIGHT
-
-
-def test_fetch_opencode_free_models_key_includes_instance_params(monkeypatch):
-    """P1-1：同 cid 修改 API_URL/API_KEY 后不命中旧缓存，重新拉取。"""
-    fake = _fake_httpx_client_factory(
-        monkeypatch,
-        [
-            _FakeResponse({"data": [{"id": "model-old-free"}]}),
-            _FakeResponse({"data": [{"id": "model-new-free"}]}),
-        ],
-    )
-    targets_old = [("cid-x", "https://old.example.com/v1", "key-old")]
-    targets_new = [("cid-x", "https://new.example.com/v1", "key-new")]
-
-    first = sync.fetch_opencode_free_models_for_providers(targets_old)
-    second = sync.fetch_opencode_free_models_for_providers(targets_new)
-
-    assert first == {"cid-x": ["model-old-free"]}
-    # 同 cid 不同实例参数：重新发请求，拿到新实例结果
-    assert second == {"cid-x": ["model-new-free"]}
-    assert len(fake.get_calls) == 2
-
-
-def test_fetch_opencode_free_models_exception_cleans_inflight(monkeypatch):
-    """P1-2：owner 请求抛异常时仍清理 in-flight，不残留导致后续永久等待。"""
-    fake = _FakeClient([RuntimeError("boom")])
-
-    class _FakeModule:
-        Client = lambda *a, **kw: fake
-        Timeout = lambda *a, **kw: kw.get("timeout", a[0] if a else None)
-
-    monkeypatch.setitem(sys.modules, "httpx", _FakeModule())
-
-    targets = [("cid-5", "https://api.example.com/v1", "key-5")]
-    # 第一次：请求异常 → 不写缓存，但 in-flight 必须清干净
-    assert sync.fetch_opencode_free_models_for_providers(targets) == {}
-    cache_key = ("cid-5", "https://api.example.com/v1", "key-5")
-    with sync._OPENCODE_FREE_CACHE_LOCK:
-        assert cache_key not in sync._OPENCODE_FREE_INFLIGHT
-        assert cache_key not in sync._OPENCODE_FREE_CACHE
-
-
-# ============================================================
 # get_dynamic_models（主线程安全：永不发网络）+ refresh_dynamic_models_async
 # ============================================================
 @pytest.fixture(autouse=True)
@@ -1005,7 +785,6 @@ def test_refresh_dynamic_models_async_fills_memory_cache(monkeypatch, tmp_path: 
         }
     }
     monkeypatch.setattr(sync, "_fetch_remote", lambda: remote_data)
-    monkeypatch.setattr(sync, "_fetch_opencode_zen_free_models", lambda **kw: ([], {}))
     monkeypatch.setattr(sync, "_get_cache_path", lambda: tmp_path / "cache.json")
 
     done = threading.Event()
@@ -1034,7 +813,6 @@ def test_refresh_dynamic_models_async_singleton_dedup(monkeypatch, tmp_path: Pat
         return {}
 
     monkeypatch.setattr(sync, "_fetch_remote", _slow_fetch)
-    monkeypatch.setattr(sync, "_fetch_opencode_zen_free_models", lambda **kw: ([], {}))
     monkeypatch.setattr(sync, "_get_cache_path", lambda: tmp_path / "cache.json")
 
     started1 = sync.refresh_dynamic_models_async()

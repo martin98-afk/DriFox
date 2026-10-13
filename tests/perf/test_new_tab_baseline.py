@@ -334,7 +334,6 @@ def tab_env():
 
     # stub 网络类延迟预热（与新建标签页链路无关，避免污染计时/引入抖动）
     mp.setattr(OpenAIChatToolWindow, "_start_models_dev_sync", lambda self: None, raising=False)
-    mp.setattr(OpenAIChatToolWindow, "_async_refresh_opencode_models", lambda self: None, raising=False)
     mp.setattr(OpenAIChatToolWindow, "_check_gitee_sync_reminder", lambda self: None, raising=False)
 
     # 预热窗口 w0：吃掉全局首次开销（Qt 组件/WebEngine profile/插件系统）

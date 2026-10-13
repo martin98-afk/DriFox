@@ -202,7 +202,6 @@ class TestCacheFileShape:
             }
         }
         monkeypatch.setattr(sync, "_fetch_remote", lambda: (remote, "http://fake"))
-        monkeypatch.setattr(sync, "_fetch_opencode_zen_free_models", lambda **kwargs: ([], {}))
         path = tmp_path / "cache.json"
         sync.load_dynamic_models(force=True, cache_path=path)
 
