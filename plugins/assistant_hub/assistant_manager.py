@@ -1389,14 +1389,21 @@ class AssistantManager:
         return ""
 
     def _experience_auto_consolidate(self, aid: str, llm) -> List[Dict[str, Any]]:
-        """水位检查：全库条目超阈值时自动压缩一次（无人管理，反思收尾时跑）。"""
+        """水位检查：全库条目超阈值时自动压缩一次（无人管理，反思收尾时跑）。
+
+        冷却熔断：上次失败 30 分钟内跳过（防失败任务每次反思重烧双倍超时）；
+        retries=0（失败有冷却兜底，重试只翻倍烧时间）。手动压缩不受限。
+        """
         try:
-            if not self._core_experience().needs_consolidate(self._assistant_dir(aid)):
+            core = self._core_experience()
+            if not core.needs_consolidate(self._assistant_dir(aid)):
+                return []
+            if core.consolidate_in_cooldown(self._assistant_dir(aid)):
                 return []
         except Exception:
             return []
         try:
-            r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
+            r = core.consolidate(self._assistant_dir(aid), llm=llm, retries=0)
         except Exception as e:
             return [{"error": str(e)}]
         return [r]

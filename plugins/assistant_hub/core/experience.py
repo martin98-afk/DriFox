@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -24,6 +25,11 @@ _THIS = Path(__file__).resolve()
 _MAX_CATEGORY = 8
 # 全库经验条目总数超过该值时触发自动压缩（反思落库后检查）；软限制：只整理不拒绝记录
 _CONSOLIDATE_THRESHOLD = 50
+# 分批压缩单批条目上限：条目多时单批 prompt+全量 JSON 输出耗时撞 LLM 超时线
+# （实测 113 条 26k 字符 prompt 单次 >240s 无产出，见 2026-10-13 排查）
+_CONSOLIDATE_BATCH = 60
+# 压缩失败后自动路径冷却秒数：防失败任务每次反思重烧双倍超时（手动压缩不受限）
+_CONSOLIDATE_COOLDOWN = 30 * 60
 
 
 def _prompts(*required: str):
@@ -194,6 +200,33 @@ def needs_consolidate(aid_dir: Path) -> bool:
     return total_entries(aid_dir) > _CONSOLIDATE_THRESHOLD
 
 
+def _consolidate_state_path(aid_dir: Path) -> Path:
+    return experience_dir(aid_dir) / ".consolidate_state.json"
+
+
+def _mark_consolidate_failed(aid_dir: Path) -> None:
+    try:
+        _consolidate_state_path(aid_dir).write_text(json.dumps({"failed_at": time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_consolidate_state(aid_dir: Path) -> None:
+    try:
+        _consolidate_state_path(aid_dir).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def consolidate_in_cooldown(aid_dir: Path) -> bool:
+    """上次压缩失败后是否仍在冷却期（自动路径跳过；手动不受限）。"""
+    try:
+        data = json.loads(_consolidate_state_path(aid_dir).read_text(encoding="utf-8"))
+        return (time.time() - float(data.get("failed_at", 0))) < _CONSOLIDATE_COOLDOWN
+    except Exception:
+        return False
+
+
 def write_all_entries(aid_dir: Path, items: List[Dict[str, str]]) -> Dict:
     """全库重写：旧文件备份到 experience.bak/ 后按新分类重建；条目级去重。"""
     d = experience_dir(aid_dir)
@@ -226,31 +259,44 @@ def write_all_entries(aid_dir: Path, items: List[Dict[str, str]]) -> Dict:
     return {"count": total}
 
 
-def consolidate(aid_dir: Path, *, llm: Callable) -> Dict:
-    """LLM 全库压缩（跨分类语义合并去重 + 重新归类）；LLM 失败/输出异常时不动原文件。"""
+def consolidate(aid_dir: Path, *, llm: Callable, timeout: float = 240.0, retries: int = 1) -> Dict:
+    """LLM 全库压缩（分批跨分类语义合并去重 + 重新归类）；失败时不动原文件并记冷却。
+
+    分批原因：条目多时单批 prompt 与全量 JSON 输出的总耗时撞 LLM 超时线，
+    分批让单批远离红线。任一批失败即整体失败：不动原文件、记录冷却
+    （auto 路径按 consolidate_in_cooldown 跳过，防每轮反思重烧超时）。
+    """
     entries = read_all_entries(aid_dir)
     before = len(entries)
     if before < 2:
         return {"changed": False, "reason": "too_few", "before": before, "after": before}
-    try:
-        prompts = _prompts("build_consolidate")
-        raw = (llm(prompts.build_consolidate(entries)) or "").strip()
-    except Exception as e:
-        logger.warning(f"[assistant_hub.experience] 压缩 LLM 失败: {e}")
-        return {"changed": False, "reason": f"llm_error: {e}", "before": before, "after": before}
-    raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return {"changed": False, "reason": "bad_json", "before": before, "after": before}
-    if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
-        return {"changed": False, "reason": "bad_json", "before": before, "after": before}
-    # 安全阀：输出空数组或条目数不减 → 视为无价值/异常输出，不动原文件
-    if not data:
+    prompts = _prompts("build_consolidate")
+    batches = [entries[i : i + _CONSOLIDATE_BATCH] for i in range(0, len(entries), _CONSOLIDATE_BATCH)]
+    merged: List[Dict[str, str]] = []
+    for bi, batch in enumerate(batches):
+        try:
+            raw = (llm(prompts.build_consolidate(batch), timeout=timeout, retries=retries) or "").strip()
+        except Exception as e:
+            _mark_consolidate_failed(aid_dir)
+            logger.warning(f"[assistant_hub.experience] 压缩 LLM 失败（批 {bi + 1}/{len(batches)}）: {e}")
+            return {"changed": False, "reason": f"llm_error: {e}", "before": before, "after": before}
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        try:
+            data = json.loads(raw)
+        except Exception:
+            _mark_consolidate_failed(aid_dir)
+            return {"changed": False, "reason": "bad_json", "before": before, "after": before}
+        if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+            _mark_consolidate_failed(aid_dir)
+            return {"changed": False, "reason": "bad_json", "before": before, "after": before}
+        merged.extend(x for x in data if isinstance(x, dict))
+    # 安全阀：全部批次输出为空 → 视为异常输出，不动原文件
+    if not merged:
         return {"changed": False, "reason": "empty_output", "before": before, "after": before}
-    r = write_all_entries(aid_dir, data)
+    r = write_all_entries(aid_dir, merged)
     if r.get("rejected"):
         return {"changed": False, "reason": "rejected", "before": before, "after": before}
+    _clear_consolidate_state(aid_dir)
     return {"changed": True, "before": before, "after": r["count"]}
 
 

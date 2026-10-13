@@ -101,3 +101,80 @@ def test_reflect_with_fake_llm(tmp_path):
 
     r3 = m.reflect(aid, identity_and_persona="", memory_md="", llm=boom)
     assert r3["added"] == 0 and "error" in r3
+
+
+def _seed_entries(aid, n):
+    for i in range(n):
+        m.record_entry(aid, f"分类{i % 7}", f"经验条目内容{i}：对象+动作+细节")
+
+
+def test_consolidate_batches_llm_calls(tmp_path):
+    """超过单批上限时分多次 LLM 调用，成功后清冷却状态。"""
+    aid = tmp_path / "c1"
+    _seed_entries(aid, 65)
+    calls = []
+
+    def fake_llm(messages, **kw):
+        calls.append(kw)
+        import re as _re
+
+        body = messages[1]["content"]
+        items = _re.findall(r"- \[([^\]]+)\] (.+)", body)
+        return json.dumps([{"category": c, "content": t} for c, t in items], ensure_ascii=False)
+
+    r = m.consolidate(aid, llm=fake_llm)
+    assert r["changed"] is True and r["before"] == 65
+    assert len(calls) == 2  # 60 + 5 → 两批
+    assert calls[0]["retries"] == 1 and calls[0]["timeout"] == 240.0
+    assert m.consolidate_in_cooldown(aid) is False  # 成功清状态
+
+
+def test_consolidate_failure_marks_cooldown(tmp_path):
+    """LLM 失败：整体失败不动原文件，进入冷却。"""
+    aid = tmp_path / "c2"
+    _seed_entries(aid, 10)
+    docs_before = m.list_documents(aid)
+
+    def boom(messages, **kw):
+        raise RuntimeError("timeout")
+
+    r = m.consolidate(aid, llm=boom)
+    assert r["changed"] is False and r["reason"].startswith("llm_error")
+    assert m.total_entries(aid) == 10  # 原文件未动
+    assert m.consolidate_in_cooldown(aid) is True
+
+    # 坏 JSON 同样进冷却
+    def bad(messages, **kw):
+        return "不是json"
+
+    r2 = m.consolidate(aid, llm=bad)
+    assert r2["reason"] == "bad_json" and m.consolidate_in_cooldown(aid) is True
+    assert docs_before == m.list_documents(aid)
+
+
+def test_consolidate_cooldown_expiry(tmp_path):
+    """冷却过期后恢复可用。"""
+    aid = tmp_path / "c3"
+    _seed_entries(aid, 5)
+    import time as _t
+
+    p = m._consolidate_state_path(aid)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"failed_at": _t.time() - m._CONSOLIDATE_COOLDOWN - 1}), encoding="utf-8")
+    assert m.consolidate_in_cooldown(aid) is False
+
+
+def test_consolidate_single_batch_under_limit(tmp_path):
+    """低于单批上限只调一次 LLM；全部批次输出为空视为异常输出不动原文件。"""
+    aid = tmp_path / "c4"
+    _seed_entries(aid, 8)
+    calls = []
+
+    def empty_llm(messages, **kw):
+        calls.append(1)
+        return "[]"
+
+    r = m.consolidate(aid, llm=empty_llm)
+    assert len(calls) == 1
+    assert r["changed"] is False and r["reason"] == "empty_output"
+    assert m.total_entries(aid) == 8
