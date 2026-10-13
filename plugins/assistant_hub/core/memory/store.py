@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,6 +47,14 @@ def _lock_for(path: Path) -> threading.Lock:
         return lock
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def is_date_name(stem: str) -> bool:
+    """文件名是否标准日期（YYYY-MM-DD）；同时是 date 参数的穿越防线。"""
+    return bool(_DATE_RE.match(stem))
+
+
 # ── 路径 ─────────────────────────────────────────────────
 
 
@@ -64,8 +73,14 @@ def project_memory_path(workdir: str | Path, aid: str) -> Path:
 
 
 def daily_path(workdir: str | Path, aid: str, date: str = "") -> Path:
-    """当日日志文件路径；date 缺省今天（YYYY-MM-DD）。"""
+    """当日日志文件路径；date 缺省今天（YYYY-MM-DD）。
+
+    date 必须是标准日期格式：它会被拼进文件名，而 memory_write 是
+    danger=safe 工具（不弹审批），不校验就是沙箱穿越向量。
+    """
     d = date or datetime.now().strftime("%Y-%m-%d")
+    if not is_date_name(d):
+        raise ValueError(f"非法日志日期: {d!r}（须为 YYYY-MM-DD）")
     return project_dir(workdir, aid) / f"{d}.md"
 
 
@@ -108,8 +123,8 @@ def list_daily(workdir: str | Path, aid: str, limit: int = DAILY_LOOKBACK) -> Li
         return []
     out: List[Dict] = []
     for f in sorted(d.glob("*.md"), key=lambda p: p.name, reverse=True):
-        if f.name == PROJECT_MEMORY_FILE:
-            continue
+        if f.name == PROJECT_MEMORY_FILE or not is_date_name(f.stem):
+            continue  # MEMORY.md 与用户杂项不进日志索引
         try:
             size = len(f.read_text(encoding="utf-8").strip())
         except Exception:
@@ -132,12 +147,9 @@ def stale_daily(workdir: str | Path, aid: str, days: int = STALE_DAILY_DAYS) -> 
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     out: List[str] = []
     for f in sorted(d.glob("*.md")):
-        if f.name == PROJECT_MEMORY_FILE:
-            continue
+        if f.name == PROJECT_MEMORY_FILE or not is_date_name(f.stem):
+            continue  # 只认标准日期名，其余当用户杂项跳过
         stem = f.stem
-        # 只认标准日期名（YYYY-MM-DD），其余文件当用户杂项跳过
-        if len(stem) != 10 or stem[4] != "-" or stem[7] != "-":
-            continue
         if stem < cutoff:
             out.append(stem)
     return out

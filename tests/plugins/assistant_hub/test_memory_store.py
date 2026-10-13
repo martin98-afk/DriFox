@@ -50,6 +50,33 @@ def test_append_daily_empty_rejected(tmp_path):
     assert not r["ok"] and r["error"] == "empty"
 
 
+def test_daily_path_rejects_non_date(tmp_path):
+    """date 参数仅接受 YYYY-MM-DD：memory_write 是 safe 工具，须防路径穿越。"""
+    for bad in ["../evil", "..\\evil", "2026-10-1a", "x/y", "  "]:
+        wd = str(tmp_path / "proj")
+        m.append_daily(wd, "build", "- 正常写入", "2026-10-13")
+        try:
+            m.read_daily(wd, "build", bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, f"date={bad!r} 应拒绝"
+    # 空串 = 缺省今天，合法
+    assert m.read_daily(str(tmp_path / "proj2"), "build", "") == ""
+
+
+def test_list_daily_filters_non_date_files(tmp_path):
+    """用户放进 memory 目录的杂项 .md 不进日志索引。"""
+    wd = str(tmp_path / "proj")
+    d = Path(wd) / ".drifox" / "memory" / "build"
+    d.mkdir(parents=True)
+    (d / "2026-10-01.md").write_text("- 日志", encoding="utf-8")
+    (d / "notes.md").write_text("杂项", encoding="utf-8")
+    (d / "MEMORY.md").write_text("笔记", encoding="utf-8")
+    items = m.list_daily(wd, "build", limit=10)
+    assert [it["date"] for it in items] == ["2026-10-01"]
+
+
 def test_append_daily_no_workdir_rejected():
     r = m.append_daily("", "build", "- x")
     assert not r["ok"] and r["error"] == "no_workdir"
