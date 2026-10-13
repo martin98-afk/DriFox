@@ -3237,25 +3237,8 @@ class TabManagerWindow(FramelessWindow):
         #   **content 宽**（= TabPanel.width()）→ 比较前必须先换算，否则折叠线
         #   被隐性抬高 14px。统一折算到 frame 域比较（本方法其余判定都在 frame 域）。
         collapse_frame_w = panel._auto_collapse_width + _FRAME_PADDING_X
-        if total <= 0:
-            return False
-        if left >= collapse_frame_w:
-            # ★ 双向对称：左栏宽度正常时，继续查右栏（工作台）是否被压穿硬 min。
-            #   QSplitter 拖右把手时 Qt 会递归压远端左栏（离屏实测
-            #   [158,500,334] → [60,500,432]，对话区顶着 minimumSizeHint 不动），
-            #   但反向拖左把手时只压相邻对话区、不递归到工作台（→ 三值不变），
-            #   故工作台只能在此显式判定，否则右栏被压穿也永不折叠。
-            wb_cur = sizes[2] if len(sizes) >= 3 else 0
-            _wb_frame = getattr(self, "_workbench_frame", None)
-            _wb_vis = _wb_frame is not None and _wb_frame.isVisible() and not _wb_frame.isHidden()
-            if not _wb_vis or wb_cur <= 0:
-                return False  # 工作台未展开：无右栏可折
-            from app.widgets.workbench_panel import PANEL_WIDTH_MIN
-
-            if wb_cur >= PANEL_WIDTH_MIN + _FRAME_PADDING_X:
-                return False  # 工作台宽度在硬 min 之上：可用，不折
-            self._collapse_workbench_by_squeeze()
-            return True
+        if total <= 0 or left >= collapse_frame_w:
+            return False  # 宽度正常：没有挤压，无需折叠
         # 空间仍放得下"常规展开宽度 + 聊天区最小宽度" → 只是瞬时压窄，不折叠：
         # 把左面板恢复到常规展开宽度，避免停留在被压扁的窄条上。
         needed = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", _EXPANDED_MIN_FRAME_WIDTH))
@@ -3301,21 +3284,7 @@ class TabManagerWindow(FramelessWindow):
         return True
 
     def _collapse_workbench_by_squeeze(self) -> None:
-        """挤压协调第一步：瞬切收起工作台并打标记（animate=False 避开动画互打断）
-
-        ★ 记忆折叠前宽度（`_wb_saved_frame_width`）：用户把工作台拖到 700 后被
-        挤折叠，空间恢复时应回到 700，而非默认 494。仅在工作台可见时记录
-        （重复触发不得把已收起的 0 写进记忆）。同步写 `_workbench_frame_w`
-        （`set_workbench_visible(True)` 的展开目标读它），否则重开时宽度回退默认。
-        """
-        try:
-            sizes = self._splitter.sizes()
-            wb_now = sizes[2] if len(sizes) >= 3 else 0
-        except Exception:
-            wb_now = 0
-        if wb_now > 0:
-            self._wb_saved_frame_width = int(wb_now)
-            self._workbench_frame_w = int(wb_now)
+        """挤压协调第一步：瞬切收起工作台并打标记（animate=False 避开动画互打断）"""
         self._wb_collapsed_by_squeeze = True
         self.set_workbench_visible(False, animate=False)
 
@@ -3531,15 +3500,6 @@ class TabManagerWindow(FramelessWindow):
                 return  # 窗口未比挤压时更宽，不重开
         if total - (panel._collapsed_min_width + _FRAME_PADDING_X) - wb_min < target_w + _MIN_CHAT_WIDTH:
             return  # 空间不足，保持折叠
-        # ★ 按挤压折叠前的宽度重开：用户把工作台拖到 700 后被挤折叠，
-        #   空间恢复应回到 700，而非默认 494。同步写 _workbench_frame_w
-        #   （set_workbench_visible(True) 的展开目标读它）。
-        #   无记忆（启动后首次挤压折叠）时不写，保持既有默认行为。
-        _saved_wb = int(getattr(self, "_wb_saved_frame_width", 0) or 0)
-        if _saved_wb > 0:
-            from app.widgets.workbench_panel import PANEL_WIDTH_MAX
-
-            self._workbench_frame_w = max(wb_min, min(_saved_wb, PANEL_WIDTH_MAX + _FRAME_PADDING_X))
         self._wb_collapsed_by_squeeze = False
         self.set_workbench_visible(True)
 
@@ -4154,19 +4114,6 @@ class TabManagerWindow(FramelessWindow):
         _cfg = Settings.get_instance()
         if panel is not None and _cfg.ui_sidebar_collapsed.value != panel._collapsed:
             _cfg.ui_sidebar_collapsed.value = panel._collapsed
-        # ★ 双向对称：拖拽落定后按最终几何补跑一次 squeeze 判定。
-        #   拖右把手（拉宽工作台）时 Qt 只压相邻对话区、不递归到工作台
-        #   （离屏实测 [158,500,334] 拖左把手不变），工作台被压穿硬 min
-        #   也永不折叠，必须在此显式判定；空间已恢复则顺带自动展开。
-        #   与窗口 resize 收拢路径（_deferred_resize_complete）共用同一套判定，
-        #   growth_required=False：拖回原宽属布局性恢复，窗口总宽未变，
-        #   不适用「比折叠时宽 80px」的相对增长条件。
-        #   resize 周期内不判：几何尚未收拢（splitterMoved 也由 relayout 产生），
-        #   误折风险高，统一交给 _deferred_resize_complete。
-        #   卡片占位期 / 拖拽会话中由 _evaluate_squeeze_collapse 内部门控跳过。
-        if hasattr(self, "_splitter") and self._splitter.count() > 0 and not getattr(self, "_resize_blocking", False):
-            if not self._evaluate_squeeze_collapse():
-                self._maybe_auto_expand_after_squeeze(growth_required=False)
         # ── #14 收尾：折叠/展开动画仍运行则跳过解冻，交 #4 动画 finally 统一恢复 ──
         # 防「拖拽跨折叠阈值触发动画 + 120ms idle timer 提前解冻」极端路径尾段
         # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复

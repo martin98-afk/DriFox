@@ -36,27 +36,11 @@ class _StubSplitter:
 
 
 class _StubFrame:
-    def __init__(self, maximum_width=414, minimum_width=0, visible=False):
+    def __init__(self, maximum_width=414):
         self._max = maximum_width
-        self._min = minimum_width
-        self._visible = visible
 
     def maximumWidth(self):
         return self._max
-
-    def minimumWidth(self):
-        return self._min
-
-    def isVisible(self):
-        return self._visible
-
-    def isHidden(self):
-        return not self._visible
-
-
-class _StubWorkbenchPanel:
-    def set_panel_visible(self, visible):
-        self._panel_visible = visible
 
 
 class _StubPanel:
@@ -67,16 +51,12 @@ class _StubPanel:
     """
 
     def __init__(self):
-        from app.widgets.tab_manager_window import (
-            _COLLAPSED_PANEL_WIDTH,
-            _EXPANDED_MIN_CONTENT_WIDTH,
-        )
+        from app.widgets.tab_manager_window import _EXPANDED_MIN_CONTENT_WIDTH
 
         self._collapsed = False
         self._collapsed_by_squeeze = False
         self._animating = False
         self._auto_collapse_width = _EXPANDED_MIN_CONTENT_WIDTH
-        self._collapsed_min_width = _COLLAPSED_PANEL_WIDTH  # content 宽 46（同真实现）
         self._auto_collapse_suppressed = False
         self.sync_calls = 0
         self.toggle_btn_calls = 0
@@ -92,58 +72,19 @@ class _StubPanel:
 
 
 class _StubWindow:
-    """承载 _evaluate_squeeze_collapse 所需的最小宿主
+    """承载 _evaluate_squeeze_collapse 所需的最小宿主"""
 
-    wb_width > 0 时构造三窗格（左栏 | 对话区 | 工作台），并补齐工作台折叠/
-    恢复路径所需的最小面（_workbench_frame / workbench_panel /
-    _wb_visible_target / _workbench_frame_w）。
-    """
-
-    def __init__(self, left, total, saved_frame_width=None, max_frame_width=414, wb_width=0):
+    def __init__(self, left, total, saved_frame_width=None, max_frame_width=414):
         self._tab_panel = _StubPanel()
-        sizes = [left, max(0, total - left - wb_width)]
-        if wb_width > 0:
-            sizes.append(wb_width)
-        self._splitter = _StubSplitter(sizes)
+        self._splitter = _StubSplitter([left, max(0, total - left)])
         self._tab_frame = _StubFrame(max_frame_width)
         self._resize_blocking = False
         if saved_frame_width is not None:
             self._saved_panel_frame_width = saved_frame_width
         self.toggled = []
-        # 工作台状态（默认未展开：与真实现 __init__ 中 frame.hide() 一致）
-        self._workbench_frame_w = 0
-        self._wb_collapsed_by_squeeze = False
-        self._wb_visible_target = False
-        if wb_width > 0:
-            self._workbench_frame = _StubFrame(maximum_width=834, visible=True)
-            self.workbench_panel = _StubWorkbenchPanel()
-            self._wb_visible_target = True
-        else:
-            self._workbench_frame = None
-            self.workbench_panel = None
 
     def _on_sidebar_toggled(self, collapsed):
         self.toggled.append(collapsed)
-
-    def set_workbench_visible(self, visible, animate=True, persist=False):
-        self._wb_visible_target = visible
-
-    def _collapse_workbench_by_squeeze(self):
-        # 委托真实现：宽度记忆逻辑在里面
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        TabManagerWindow._collapse_workbench_by_squeeze(self)
-
-    def _evaluate_squeeze_collapse(self):
-        # 委托真实现（stub 只提供几何面）
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        return TabManagerWindow._evaluate_squeeze_collapse(self)
-
-    def _maybe_auto_expand_after_squeeze(self, growth_required=True, _retried=False):
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        TabManagerWindow._maybe_auto_expand_after_squeeze(self, growth_required=growth_required, _retried=_retried)
 
     def _splitter_sizes_with_left(self, left_w):
         """与 TabManagerWindow 真实现同构的最小版（stub 无工作台窗格，走两窗格分支）"""
@@ -246,106 +187,3 @@ def test_evaluate_squeeze_collapse_respects_collapsed_and_animating(qapp):
     win2._tab_panel._animating = True
     assert TabManagerWindow._evaluate_squeeze_collapse(win2) is False
     assert win2._tab_panel._collapsed is False
-
-
-def test_workbench_squeezed_below_min_collapses(qapp):
-    """★ 双向对称（本次核心）：拖右把手把工作台压穿硬 min → 工作台自动折叠
-
-    根因：QSplitter 拖右把手时对话区顶着 minimumSizeHint 不动，Qt 递归压
-    远端左栏（离屏实测 [158,500,334] → [60,500,432]）；反向拖左把手时 Qt
-    只压相邻对话区、不递归到工作台（→ [158,500,334] 不变）→ 右栏永不折。
-    因此工作台只能在 _evaluate_squeeze_collapse 里显式判定。
-    """
-    from app.widgets.tab_manager_window import _FRAME_PADDING_X
-    from app.widgets.workbench_panel import PANEL_WIDTH_MIN
-
-    wb_min_frame = PANEL_WIDTH_MIN + _FRAME_PADDING_X  # 334
-    # 左栏正常展开(414)，对话区被压到 100，工作台被压到 300（< 硬 min 334）
-    win = _StubWindow(left=414, total=814, wb_width=300)
-    assert win._splitter.sizes()[2] < wb_min_frame
-    assert TabManagerWindow._evaluate_squeeze_collapse(win) is True
-    assert win._wb_collapsed_by_squeeze is True, "工作台被压穿必须折叠"
-    assert win._wb_visible_target is False
-    # 记忆折叠前宽度（供空间恢复时按原宽度重开）
-    assert win._wb_saved_frame_width == 300
-    assert win._workbench_frame_w == 300
-    # 左栏不应被连带折叠（本次 bug 就是它被误折）
-    assert win._tab_panel._collapsed is False
-
-
-def test_workbench_not_collapsed_when_above_min(qapp):
-    """工作台宽度在硬 min 之上 → 不折叠（不得把用户正常拖出的宽度收掉）"""
-    from app.widgets.workbench_panel import PANEL_WIDTH_MIN
-
-    from app.widgets.tab_manager_window import _FRAME_PADDING_X
-
-    wb_min_frame = PANEL_WIDTH_MIN + _FRAME_PADDING_X
-    # 左栏正常 + 工作台 400（> 334）：空间够，什么都不该动
-    win = _StubWindow(left=414, total=1214, wb_width=400)
-    assert win._splitter.sizes()[2] > wb_min_frame
-    assert TabManagerWindow._evaluate_squeeze_collapse(win) is False
-    assert win._wb_collapsed_by_squeeze is False
-    assert win._tab_panel._collapsed is False
-
-
-def test_workbench_collapse_skipped_when_wb_hidden(qapp):
-    """工作台未展开 → 无右栏可折，直接返回 False（不得误置挤压标记）"""
-    win = _StubWindow(left=414, total=814)  # 无第三窗格
-    assert TabManagerWindow._evaluate_squeeze_collapse(win) is False
-    assert getattr(win, "_wb_collapsed_by_squeeze", False) is False
-
-
-def test_workbench_restores_to_squeezed_width(qapp):
-    """★ 挤压折叠的工作台重开时回到折叠前宽度，而非默认 494"""
-    win = _StubWindow(left=414, total=1200)
-    win._workbench_frame = _StubFrame(maximum_width=834, minimum_width=334, visible=False)
-    win.workbench_panel = _StubWorkbenchPanel()
-    win._wb_collapsed_by_squeeze = True
-    win._wb_saved_frame_width = 700  # 折叠前用户拖到的宽度
-    win._squeeze_total_width = 1100
-    TabManagerWindow._maybe_restore_workbench_after_squeeze(win)
-    assert win._wb_visible_target is True
-    assert win._wb_collapsed_by_squeeze is False
-    assert win._workbench_frame_w == 700, "必须按折叠前宽度重开"
-
-
-def test_workbench_restore_falls_back_to_default_without_memory(qapp):
-    """无折叠前宽度记忆（如启动后首次挤压折叠）→ 不写 _workbench_frame_w，走默认"""
-    win = _StubWindow(left=414, total=1200)
-    win._workbench_frame = _StubFrame(maximum_width=834, minimum_width=334, visible=False)
-    win.workbench_panel = _StubWorkbenchPanel()
-    win._wb_collapsed_by_squeeze = True
-    win._squeeze_total_width = 1100
-    TabManagerWindow._maybe_restore_workbench_after_squeeze(win)
-    assert win._wb_visible_target is True
-    assert win._workbench_frame_w == 0, "无记忆时不得乱写宽度"
-
-
-def test_drag_settle_triggers_workbench_collapse(qapp):
-    """★ 拖右把手落定后必须跑一次 squeeze 判定（否则工作台被压穿也不折）
-
-    拖左把手时 Qt 会递归压左栏，左栏有 resizeEvent 自动折叠兜底；但拖右把手
-    （拉宽工作台）时 Qt 不递归到工作台，只能靠 _on_splitter_idle 末尾显式补判定。
-    """
-    win = _StubWindow(left=414, total=814, wb_width=300)
-    win._splitter_dragging = False
-    win._left_card_area_active = lambda: False
-    win._finish_splitter_idle = lambda: None
-    win._tab_panel._dragging_splitter = False
-    win._tab_panel.set_dragging_splitter = lambda d: None
-    TabManagerWindow._on_splitter_idle(win)
-    assert win._wb_collapsed_by_squeeze is True, "拖右把手落定必须折工作台"
-    assert win._wb_visible_target is False
-
-
-def test_drag_settle_skipped_during_resize_blocking(qapp):
-    """窗口 resize 周期内（几何未收拢）→ idle 不跑 squeeze 判定，交给 _deferred_resize_complete"""
-    win = _StubWindow(left=414, total=814, wb_width=300)
-    win._splitter_dragging = False
-    win._left_card_area_active = lambda: False
-    win._finish_splitter_idle = lambda: None
-    win._tab_panel._dragging_splitter = False
-    win._tab_panel.set_dragging_splitter = lambda d: None
-    win._resize_blocking = True  # resize 周期中
-    TabManagerWindow._on_splitter_idle(win)
-    assert win._wb_collapsed_by_squeeze is False, "resize 期不得在 idle 里判定"
