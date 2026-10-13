@@ -21436,19 +21436,20 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         pass
 
-    def _classify_permission_source(self, tool_name: str, arguments: dict) -> tuple:
+    def _classify_permission_source(self, tool_name: str, arguments: dict, workdir=None) -> tuple:
         """判定审批来源 → (source_key, 人类可读文案)
 
         判定顺序与 chat_worker._check_permission 一致：先沙箱（deny/confirm），
         再删除类，最后回落到工具权限策略。沙箱关闭时 sandbox_check_tool 立即
         返回 ALLOW，重算成本可忽略。
+        workdir：相对路径判定的基准（与 worker 侧同源，避免进程 cwd 串味）。
         """
         args = dict(arguments or {})
         command = str(args.get("command") or "")
         try:
             from app.tools.sandbox import is_delete_command, sandbox_check_tool
 
-            verdict = sandbox_check_tool(tool_name, args)
+            verdict = sandbox_check_tool(tool_name, args, workdir=workdir)
             if verdict in ("confirm", "deny"):
                 return "sandbox", "⚠ 安全中心拦截"
             if command and is_delete_command(command):
@@ -21481,8 +21482,12 @@ class OpenAIChatToolWindow(ToolWindow):
             return "warn"
         return "info"
 
-    def _build_permission_impact(self, tool_name: str, arguments: dict) -> dict:
-        """计算影响范围（新卡只渲染，解析全部在此完成）"""
+    def _build_permission_impact(self, tool_name: str, arguments: dict, workdir=None) -> dict:
+        """计算影响范围（新卡只渲染，解析全部在此完成）
+
+        workdir：相对删除目标解析基准（与 worker 侧同源；不传时回退进程 cwd，
+        会让相对路径目标显示成不存在的路径）。
+        """
         args = dict(arguments or {})
         impact: dict = {"paths": [], "missing": [], "domains": [], "writes": False}
         command = str(args.get("command") or "")
@@ -21491,7 +21496,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 from app.tools.sandbox import delete_targets, is_delete_command
 
                 if is_delete_command(command):
-                    targets = delete_targets(command)
+                    targets = delete_targets(command, workdir)
                     impact["paths"] = [str(p) for p in (targets.get("existing") or [])]
                     impact["missing"] = [str(p) for p in (targets.get("missing") or [])]
             except Exception as e:  # noqa: BLE001
@@ -21639,16 +21644,27 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多 Tab 场景下切走窗口也能知道本窗口在等审批
         self._notify_if_inactive("需要授权", f"工具 {tool_name} 等待你的确认")
 
-        source, source_text = self._classify_permission_source(tool_name, arguments)
-        risk = self._grade_permission_risk(tool_name, arguments, source)
-        impact = self._build_permission_impact(tool_name, arguments)
+        # workdir 先取：沙箱来源判定与删除目标解析都要用它做相对路径基准
+        # 优先 backend.tool_executor.get_workdir()（与 worker 侧判定同源）；
+        # 取不到时回退 _current_workdir()（全局单例，多窗口可能串味）
+        workdir = ""
         try:
-            from app.tools.sandbox import _current_workdir
-
-            workdir = str(_current_workdir())
+            wd = self.backend.tool_executor.get_workdir() if self.backend and self.backend.tool_executor else None
+            if wd:
+                workdir = str(wd)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[Permission] workdir 读取失败: {e}")
-            workdir = ""
+        if not workdir:
+            try:
+                from app.tools.sandbox import _current_workdir
+
+                workdir = str(_current_workdir())
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[Permission] workdir 回退读取失败: {e}")
+
+        source, source_text = self._classify_permission_source(tool_name, arguments, workdir=workdir or None)
+        risk = self._grade_permission_risk(tool_name, arguments, source)
+        impact = self._build_permission_impact(tool_name, arguments, workdir=workdir or None)
 
         widget = self._permission_floating_widget
         # 先填充内容再展开容器：见 _on_question_asked 同源 bug 注释

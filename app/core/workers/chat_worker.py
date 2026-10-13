@@ -4552,22 +4552,39 @@ class OpenAIChatWorker(QThread):
         return True  # 允许执行
 
     def _sandbox_verdict(self, tool_name, arguments):
-        """沙箱判定；失败放行（fail-open：安全增强不可阻断正常使用）"""
+        """沙箱判定；失败放行（fail-open：安全增强不可阻断正常使用）
+
+        显式传本执行器的 workdir：`_current_workdir()` 回退源是全局单例，
+        多窗口并发时会拿到"最后一次调用者"的 workdir（串味）。
+        """
         try:
+            from pathlib import Path
+
             from app.tools.sandbox import sandbox_check_tool
 
-            return sandbox_check_tool(tool_name, dict(arguments or {}))
+            wd = None
+            try:
+                wd = self.tool_executor.get_workdir()
+            except Exception:  # noqa: BLE001 - 取不到基准时回退内部默认
+                wd = None
+            return sandbox_check_tool(tool_name, dict(arguments or {}), workdir=Path(wd) if wd else None)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Sandbox] 检查失败放行: {e}")
             return None
 
     def _sandbox_after_approve(self, tool_name, arguments):
-        """审批通过后钩子：删除保护开启时，对删除命令做执行前快照"""
+        """审批通过后钩子：删除保护开启时，对删除命令做执行前快照
+
+        显式传 workdir（同 `_sandbox_verdict`）：相对路径目标按工作目录解析，
+        否则快照会按进程 cwd 解析而静默漏拍（2026-10-13 实测缺陷）。
+        """
         try:
             args = dict(arguments or {})
             command = str(args.get("command") or "")
             if not command:
                 return
+            from pathlib import Path
+
             from app.tools.sandbox import SandboxConfig, snapshot_paths_before_delete
 
             cfg = SandboxConfig.get_instance()
@@ -4576,7 +4593,12 @@ class OpenAIChatWorker(QThread):
             from app.utils.utils import get_app_data_dir
 
             backup_root = get_app_data_dir() / "backups" / "deleted"
-            snapshot_paths_before_delete(command, backup_root)
+            wd = None
+            try:
+                wd = self.tool_executor.get_workdir()
+            except Exception:  # noqa: BLE001 - 取不到基准时回退内部默认
+                wd = None
+            snapshot_paths_before_delete(command, backup_root, workdir=Path(wd) if wd else None)
         except Exception as e:  # noqa: BLE001 - 快照失败不阻断已批准执行
             logger.warning(f"[Sandbox] 删除保护快照异常: {e}")
 

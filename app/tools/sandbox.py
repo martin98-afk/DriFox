@@ -436,6 +436,221 @@ def check_network(command: str, cfg: Optional[SandboxConfig] = None) -> Optional
 
 
 # ============================================================
+# 命令写目标提取（写边界收缩：重定向 / tee / mkdir / touch）
+# ============================================================
+# 背景：命令分支原只做「黑名单读取检查 + workdir 边界不判」，导致 bash 类工具
+# 的写入（`echo x > D:/out.txt` / `mkdir D:/new` / `tee` / `touch`）零拦截 ——
+# workdir 写边界只对 write/edit/multi_edit 三个文件工具生效。AI 可经 bash 自由
+# 写工作目录外的任意位置，绕开用户对「写只在工作目录内」的预期。
+#
+# 设计（写窄读宽在命令层的落地）：
+# - 只提取**明确写语义**的形态：重定向符（> / >> / N> / &>）、`tee`、
+#   `mkdir`/`md`、`touch`。不做泛化「所有位置参数都当写」——那会把 `git clone url dest`
+#   / `npm install` 等全打成 confirm，误报率不可接受。
+# - 提取结果只走 `check_path(mode="write")`：黑名单（读写都拦）+ 白名单 + workdir
+#   边界。命中返回 CONFIRM（审批），与文件工具口径一致。
+# - 判定失败/提取不出目标 → 不改变原判定（fail-open，与全模块一致）。
+# - 幂等性：目标相对路径按 workdir 解析（不是进程 cwd），与白名单条目同款。
+
+# 写入类命令（首 token）：值 = 该命令是否取「全部非 flag 位置参数」为写目标
+_WRITE_CMD_TOKENS = frozenset({"mkdir", "md", "touch"})
+# 目标取单个（后续参数）的写入命令：tee（可接多个文件，取全部非 flag 段）
+_TEE_TOKEN = "tee"
+# 重定向目标终止字符（`> f` 的 f 到空白/控制符为止）
+_TARGET_STOP = frozenset(" \t<>|&;")
+
+
+def _split_segments(command: str) -> list:
+    """按顶层分隔符（| ; && || & 换行）切段，引号内不切
+
+    用途：管道/命令链里**段首才是真正的命令**（`a | tee f` 的写命令是 tee）。
+    `2>&1` 的 `&` 后跟数字 → fd 复制，不视为分隔（留在段内）。
+    """
+    segments: list = []
+    buf: list = []
+    quote = ""
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "&":
+            nxt = command[i + 1] if i + 1 < n else ""
+            if nxt == "&":
+                segments.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            if nxt.isdigit() or nxt == "-":
+                buf.append(ch)  # 2>&1 / >&- 的 fd 复制，留在段内
+                i += 1
+                continue
+            segments.append("".join(buf))  # 命令分隔（含 &>file 的 &）
+            buf = []
+            i += 1
+            continue
+        if ch == "|":
+            segments.append("".join(buf))
+            buf = []
+            i += 2 if (i + 1 < n and command[i + 1] == "|") else 1
+            continue
+        if ch == ";" or ch in "\r\n":
+            segments.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    segments.append("".join(buf))
+    return [s for s in (seg.strip() for seg in segments) if s]
+
+
+def _scan_redirects(segment: str) -> list:
+    """段内提取重定向写目标（`> f` / `>> f` / `2> f` / `&> f` / 无空格 `x>f`）
+
+    引号感知（引号内 `>` 不参与）；排除 fd 复制（`2>&1` / `>&2`，目标以 `&` 开头）。
+    不用正则：需处理"无空格重定向 + 引号目标"组合，正则易漏易误。
+    """
+    targets: list = []
+    quote = ""
+    i = 0
+    n = len(segment)
+    while i < n:
+        ch = segment[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            i += 1
+            continue
+        if ch == ">":
+            j = i + 1
+            if j < n and segment[j] == ">":
+                j += 1
+            while j < n and segment[j] in " \t":
+                j += 1
+            if j >= n:
+                break
+            if segment[j] in "\"'":
+                q = segment[j]
+                k = segment.find(q, j + 1)
+                if k < 0:
+                    break
+                raw = segment[j + 1 : k]
+                i = k + 1
+            else:
+                k = j
+                while k < n and segment[k] not in _TARGET_STOP:
+                    k += 1
+                raw = segment[j:k]
+                i = k
+            raw = raw.strip()
+            if raw and not raw.startswith("&"):
+                targets.append(raw)
+            continue
+        i += 1
+    return targets
+
+
+def _positional_targets(segment: str, head: str) -> list:
+    """段内位置参数提取（mkdir/md/touch/tee 的写目标）
+
+    `-p` / `-c` 等 flag 与 `--` 分隔符跳过；引号包裹整段保留为一个目标。
+    """
+    if head not in _WRITE_CMD_TOKENS and head != _TEE_TOKEN:
+        return []
+    targets = []
+    for tok in _split_tokens(segment)[1:]:
+        raw = _strip_quotes(tok)
+        if not raw or raw == "--" or raw.startswith("-"):
+            continue
+        targets.append(raw)
+    return targets
+
+
+def _segment_write_targets(segment: str) -> list:
+    """单段的写目标 = 重定向目标 + 段首写命令的位置参数
+
+    段首判定用 `_first_token`（去路径前缀/.exe），`cmd /c mkdir X` 这类壳形态
+    在 write_targets 里经解壳递归处理，此处不重复。
+    """
+    targets = _scan_redirects(segment)
+    head = _first_token(segment)
+    targets.extend(_positional_targets(segment, head))
+    return targets
+
+
+def _shell_payload_write_targets(command: str) -> list:
+    """壳命令载荷内的写目标（cmd /c mkdir X、bash -c 'echo x > f' 等）
+
+    复用 command_safety 的壳表（SHELL_WRAPPER_FLAGS）。
+    ⚠ 不用 shlex.split 定位载荷：shlex 会吞 Windows 反斜杠（C:\\tmp → C:tmp），
+    载荷用引号剥离 + 首 token 直接切的方式还原，保路径原样。
+    """
+    try:
+        from app.tools.command_safety import SHELL_WRAPPER_FLAGS
+    except Exception:  # noqa: BLE001 - 依赖不可用不改判定
+        return []
+    stripped = command.strip()
+    if not stripped:
+        return []
+    head = _first_token(stripped)
+    flags = SHELL_WRAPPER_FLAGS.get(head)
+    if flags is None:
+        return []
+    # 跳过首 token（命令名）本身
+    rest = stripped.split(None, 1)
+    payload = rest[1] if len(rest) > 1 else ""
+    if flags and payload:
+        # 有定位 flag：取 flag 之后的整段（flag 可能带引号）
+        lowered = payload.lower().lstrip()
+        for flag in flags:
+            if lowered.startswith(flag) and (len(lowered) == len(flag) or lowered[len(flag)] in " \t\"'"):
+                payload = payload.lstrip()[len(flag) :]
+                break
+    payload = payload.strip().strip("\"'").strip()
+    if not payload:
+        return []
+    return [_t for seg in _split_segments(payload) for _t in _segment_write_targets(seg)]
+
+
+def write_targets(command: str) -> list:
+    """命令的写入目标路径列表（重定向 + tee/mkdir/touch，含壳命令载荷）
+
+    供 sandbox_check_tool 的写边界判定使用；提取失败返回 []（不改判定）。
+    去重保序。
+    """
+    if not command or not command.strip():
+        return []
+    seen: set = set()
+    result: list = []
+    for seg in _split_segments(command):
+        candidates = _segment_write_targets(seg)
+        if not candidates:
+            candidates = _shell_payload_write_targets(seg)
+        for raw in candidates:
+            key = raw.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(raw)
+    return result
+
+
+# ============================================================
 # 工具路由（worker 层唯一入口）
 # ============================================================
 # 分组名与插件侧 GROUP_WRITE/GROUP_READ（plugins/system-tools/tools/file_tools.py:109）
@@ -513,7 +728,7 @@ def sandbox_check_tool(
             and not _matches_any_prefix(command, cfg.get("command.confirm_prefixes"))
         ):
             verdict = ALLOW
-        if verdict == CONFIRM and is_delete_command(command) and delete_exempt(command, cfg):
+        if verdict == CONFIRM and is_delete_command(command) and delete_exempt(command, cfg, workdir):
             return ALLOW
         # ── 黑名单定向检查（命令类工具的路径边界）──
         # 背景：command 分支原不查路径，导致 path.blacklist 对命令类工具完全失效
@@ -539,6 +754,25 @@ def sandbox_check_tool(
                     if not item or item.startswith(("-", "/")):
                         continue
                     if check_path(wd, item, "read", cfg) == CONFIRM:
+                        return CONFIRM
+        # ── 写边界（命令层）：重定向 / tee / mkdir / touch 的目标过 check_path(write) ──
+        # 背景：本分支原只做黑名单读取检查，workdir 写边界对命令类写入零约束，
+        # `echo x > D:/out.txt` / `mkdir D:/new` / `tee` / `touch` 全部静默放行。
+        # 设计：提取明确写语义的目标后过 `check_path(mode="write")`（黑名单 + 白名单
+        # + workdir 边界），命中 CONFIRM。与文件工具口径一致：越界写 = 弹审批。
+        # ⚠ 两个坑（已踩）：
+        #   ① verdict == DENY 时必须跳过本块 —— 否则 `cacls ... > D:/out.txt` 会被
+        #      本块降级为 CONFIRM（block 命令的硬拒不能因附带重定向而放宽）。
+        #   ② 相对目标必须按 **workdir** 解析（bash 进程 cwd = workdir，
+        #      terminal_tools chdir 到 workdir；check_path 内部 _norm 按进程 cwd
+        #      解析相对路径，直接传会全误报）。
+        # 幂等：非写形态命令 write_targets 返回空 → 零行为变化。
+        if verdict != DENY:
+            _wt = write_targets(command)
+            if _wt:
+                wd_w = workdir if workdir is not None else _current_workdir()
+                for item in _wt:
+                    if check_path(wd_w, str(_resolve_cmd_path(item, wd_w)), "write", cfg) == CONFIRM:
                         return CONFIRM
         if verdict == ALLOW:
             net = check_network(command, cfg)
@@ -603,12 +837,29 @@ def _strip_quotes(token: str) -> str:
     return stripped
 
 
-def delete_targets(command: str) -> dict:
+def _resolve_cmd_path(item: str, workdir: Optional[Path] = None) -> Path:
+    """命令内路径解析：expandvars/expanduser 后，相对路径按 workdir 补齐
+
+    ⚠ 相对路径的基准是 **workdir**（bash 进程 cwd = workdir，terminal_tools
+    chdir 到该目录），不是进程 cwd。实测踩坑：`rm -rf subdir`（workdir 下确有
+    subdir）在快照时按进程 cwd 解析 → 目标不存在 → **静默漏拍快照**，
+    删除保护失效而不报错。delete_targets / snapshot_paths_before_delete /
+    delete_exempt 及写目标判定全部走本函数，不得各自展开。
+    """
+    p = Path(os.path.expandvars(item)).expanduser()
+    if not p.is_absolute():
+        base = workdir if workdir is not None else _current_workdir()
+        p = Path(base) / p
+    return p
+
+
+def delete_targets(command: str, workdir: Optional[Path] = None) -> dict:
     """解析删除命令的目标路径（供审批展示与豁免判定共用）
 
     Returns:
         {"existing": [Path, ...], "missing": [str, ...]}——
         existing 为真实存在的目标（去重），missing 为命令里写了但当前不存在的候选
+        （两者均为**按 workdir 解析后**的绝对路径；相对目标不再按进程 cwd 失真）
     """
     result: dict = {"existing": [], "missing": []}
     if not is_delete_command(command):
@@ -629,7 +880,7 @@ def delete_targets(command: str) -> dict:
                 continue
             if item.startswith(("-", "/")) and not _looks_like_path(item):
                 continue
-            candidate = Path(os.path.expandvars(item)).expanduser()
+            candidate = _resolve_cmd_path(item, workdir)
             key = str(candidate)
             if key in seen:
                 continue
@@ -637,7 +888,7 @@ def delete_targets(command: str) -> dict:
             if candidate.exists():
                 result["existing"].append(candidate)
             else:
-                result["missing"].append(item)
+                result["missing"].append(str(candidate))
     return result
 
 
@@ -664,7 +915,7 @@ def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None, workdir: Op
     exempt = [str(p) for p in (cfg.get("delete.exempt_paths") or [])]
     if not exempt:
         return False
-    targets = delete_targets(command)
+    targets = delete_targets(command, workdir)
     candidates = targets["existing"] + [Path(m) for m in targets["missing"]]
     if not candidates:
         return False
@@ -706,10 +957,15 @@ def is_delete_command(command: str) -> bool:
     return False
 
 
-def snapshot_paths_before_delete(command: str, backup_root: Union[str, Path]) -> list:
+def snapshot_paths_before_delete(command: str, backup_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
     """删除命令执行前，把命令中「存在」的路径快照到 backup_root，返回快照路径列表
 
     只在审批放行后调用；非删除命令返回 []。快照失败不阻断（用户已批准删除）。
+
+    ⚠ workdir 基准（2026-10-13 实测缺陷修复）：相对路径目标必须按 workdir 解析。
+    修前 `rm -rf subdir`（workdir 下确有 subdir）按进程 cwd 解析 → exists() False
+    → **静默漏拍**，用户以为有快照实际无。调用方应从 tool_executor.get_workdir()
+    显式传入；未传回退 `_current_workdir()`（多窗口时会串味，见该函数注释）。
     """
     if not is_delete_command(command):
         return []
@@ -732,7 +988,7 @@ def snapshot_paths_before_delete(command: str, backup_root: Union[str, Path]) ->
                 continue
             if item.startswith(("-", "/")):
                 continue
-            candidate = Path(os.path.expandvars(item)).expanduser()
+            candidate = _resolve_cmd_path(item, workdir)
             if not candidate.exists() or str(candidate) in seen:
                 continue
             seen.add(str(candidate))
