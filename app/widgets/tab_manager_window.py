@@ -3237,8 +3237,25 @@ class TabManagerWindow(FramelessWindow):
         #   **content 宽**（= TabPanel.width()）→ 比较前必须先换算，否则折叠线
         #   被隐性抬高 14px。统一折算到 frame 域比较（本方法其余判定都在 frame 域）。
         collapse_frame_w = panel._auto_collapse_width + _FRAME_PADDING_X
-        if total <= 0 or left >= collapse_frame_w:
-            return False  # 宽度正常：没有挤压，无需折叠
+        if total <= 0:
+            return False
+        if left >= collapse_frame_w:
+            # ★ 双向对称：左栏宽度正常时，继续查右栏（工作台）是否被压穿硬 min。
+            #   QSplitter 拖右把手时 Qt 会递归压远端左栏（离屏实测
+            #   [158,500,334] → [60,500,432]，对话区顶着 minimumSizeHint 不动），
+            #   但反向拖左把手时只压相邻对话区、不递归到工作台（→ 三值不变），
+            #   故工作台只能在此显式判定，否则右栏被压穿也永不折叠。
+            wb_cur = sizes[2] if len(sizes) >= 3 else 0
+            _wb_frame = getattr(self, "_workbench_frame", None)
+            _wb_vis = _wb_frame is not None and _wb_frame.isVisible() and not _wb_frame.isHidden()
+            if not _wb_vis or wb_cur <= 0:
+                return False  # 工作台未展开：无右栏可折
+            from app.widgets.workbench_panel import PANEL_WIDTH_MIN
+
+            if wb_cur >= PANEL_WIDTH_MIN + _FRAME_PADDING_X:
+                return False  # 工作台宽度在硬 min 之上：可用，不折
+            self._collapse_workbench_by_squeeze()
+            return True
         # 空间仍放得下"常规展开宽度 + 聊天区最小宽度" → 只是瞬时压窄，不折叠：
         # 把左面板恢复到常规展开宽度，避免停留在被压扁的窄条上。
         needed = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", _EXPANDED_MIN_FRAME_WIDTH))
@@ -3284,7 +3301,21 @@ class TabManagerWindow(FramelessWindow):
         return True
 
     def _collapse_workbench_by_squeeze(self) -> None:
-        """挤压协调第一步：瞬切收起工作台并打标记（animate=False 避开动画互打断）"""
+        """挤压协调第一步：瞬切收起工作台并打标记（animate=False 避开动画互打断）
+
+        ★ 记忆折叠前宽度（`_wb_saved_frame_width`）：用户把工作台拖到 700 后被
+        挤折叠，空间恢复时应回到 700，而非默认 494。仅在工作台可见时记录
+        （重复触发不得把已收起的 0 写进记忆）。同步写 `_workbench_frame_w`
+        （`set_workbench_visible(True)` 的展开目标读它），否则重开时宽度回退默认。
+        """
+        try:
+            sizes = self._splitter.sizes()
+            wb_now = sizes[2] if len(sizes) >= 3 else 0
+        except Exception:
+            wb_now = 0
+        if wb_now > 0:
+            self._wb_saved_frame_width = int(wb_now)
+            self._workbench_frame_w = int(wb_now)
         self._wb_collapsed_by_squeeze = True
         self.set_workbench_visible(False, animate=False)
 

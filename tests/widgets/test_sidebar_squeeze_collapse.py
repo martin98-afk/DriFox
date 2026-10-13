@@ -124,6 +124,12 @@ class _StubWindow:
     def set_workbench_visible(self, visible, animate=True, persist=False):
         self._wb_visible_target = visible
 
+    def _collapse_workbench_by_squeeze(self):
+        # 委托真实现：宽度记忆逻辑在里面
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        TabManagerWindow._collapse_workbench_by_squeeze(self)
+
     def _splitter_sizes_with_left(self, left_w):
         """与 TabManagerWindow 真实现同构的最小版（stub 无工作台窗格，走两窗格分支）"""
         sizes = self._splitter.sizes()
