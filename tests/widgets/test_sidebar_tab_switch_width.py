@@ -136,24 +136,29 @@ def test_restore_clears_suppression(qapp):
 
 
 def test_restore_aborts_when_saved_changed(qapp):
-    """切页后 saved 被新编排改写（如用户重新拖拽）：快照过时，恢复放弃
+    """切页后窗口记忆被新编排改写（如用户重新拖拽）：快照过时，恢复放弃
 
     实测场景（探针 repro_sidebar_tab_width）：切页排队的 restore 撞上
-    250ms 动画重试，执行时用户已拖出新宽度并更新 saved——过时的 prev
-    会把新意图覆盖掉（saved 414 被打回 201，此后一切恢复失效）。
+    250ms 动画重试，执行时用户已拖出新宽度并更新记忆——过时的 prev
+    会把新意图覆盖掉（记忆 414 被打回 201，此后一切恢复失效）。
     """
+
+    class _ActiveWin:
+        _tab_sidebar_frame_w = 414  # 执行时已被新拖拽改写
+
     win = _StubWindow([414, 786, 0])
-    win._tab_switch_saved_snapshot = 201  # 切页时 saved=201
-    win._saved_panel_frame_width = 414  # 执行时已被新拖拽改写
+    active = _ActiveWin()
+    win.get_current_window = lambda: active
+    win._tab_switch_saved_snapshot = ("win", 201)  # 切页时基准=窗口记忆 201
     TabManagerWindow._restore_tab_frame_after_tab_switch(win, 201, False)
     assert win._splitter.sizes()[0] == 414  # 新意图不被覆盖
-    assert win._saved_panel_frame_width == 414
+    assert active._tab_sidebar_frame_w == 414
 
 
 def test_restore_runs_when_snapshot_matches(qapp):
-    """saved 未变（快照一致）：守卫放行，正常恢复"""
+    """基准未变（快照一致）：守卫放行，正常恢复"""
     win = _StubWindow([150, 1050, 0])
-    win._tab_switch_saved_snapshot = 414
+    win._tab_switch_saved_snapshot = ("saved", 414)
     win._saved_panel_frame_width = 414
     TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
     assert win._splitter.sizes()[0] == 414
@@ -164,6 +169,19 @@ def test_restore_runs_without_snapshot(qapp):
     win = _StubWindow([150, 1050, 0])
     TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
     assert win._splitter.sizes()[0] == 414
+
+
+def test_restore_writes_back_tab_memory(qapp):
+    """展开态恢复后回写当前活跃窗口的 per-tab 宽度记忆"""
+
+    class _Win:
+        _tab_sidebar_frame_w = None
+
+    win = _StubWindow([150, 1050, 0])
+    active = _Win()
+    win.get_current_window = lambda: active
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert active._tab_sidebar_frame_w == 414
 
 
 def test_restore_ignores_invalid_prev_width(qapp):

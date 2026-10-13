@@ -3013,7 +3013,7 @@ class TabManagerWindow(FramelessWindow):
                     self._saved_panel_frame_width = cur_frame_w
                 # 手动折叠（非挤压）：清当前活跃窗口的 per-tab 宽度记忆——
                 # 用户显式收起是意图，切页不得按旧记忆展开回拖拽宽度
-                if not panel._collapsed_by_squeeze:
+                if not self._tab_panel._collapsed_by_squeeze:
                     _cur_win = self.get_current_window()
                     if _cur_win is not None:
                         _cur_win._tab_sidebar_frame_w = None
