@@ -1354,7 +1354,27 @@ class AssistantManager:
 
     @staticmethod
     def _current_workdir() -> str:
-        """当前主窗口工作目录（反思/统计等无 tool_ctx 场景用）；取不到返回空串。"""
+        """当前激活对话窗口的工作目录（UI 查看/反思/统计等无 tool_ctx 场景用）。
+
+        多窗口多项目：跟随 TabManager 当前选中标签页的窗口取 workdir。
+        不取注册表第一个窗口——多窗口选不同项目时那会看错项目记忆
+        （同 chat_worker/subagent_worker 已修过的「全局单例串味」问题）。
+        激活窗口命中即以它为准（workdir 未设置就返回空串，不回退别窗）；
+        拿不到激活窗口时才回退 UIPluginRegistry 注册表（单窗/嵌入场景）。
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                w = tm.get_current_window()
+                if w is not None and not getattr(w, "_is_destroyed", False):
+                    backend = getattr(w, "backend", None)
+                    te = getattr(backend, "tool_executor", None)
+                    if te is not None:
+                        return str(te.get_workdir() or "")
+        except Exception:
+            pass
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
