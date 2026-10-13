@@ -4523,7 +4523,8 @@ _CONTENT_AUTOSCROLL_JS = """
 #   html{overflow:hidden} 决定了文档级滚动被禁用，body 是**唯一**的滚动容器；
 #   而 widget（QWebEngineView）的高度上限自 1aa78021 起按「物理面积」收缩
 #   （CodeWebViewer.clamp_surface_height，dpr 2.25 + 1200 逻辑宽 → 仅 ~1975px），
-#   远小于 body 的静态 max-height（MAX_HEIGHT = 7111px @dpr2.25）。两者不等就会：
+#   远小于 body 的静态 max-height（当时 MAX_HEIGHT=10000 → dpr2.25 时 7111px）。
+#   两者不等就会：
 #       内容高 > widget 上限，但 内容高 ≤ body max-height
 #     → body 自身没有溢出（clientHeight == scrollHeight）→ 不可滚，
 #       被 widget 视口裁掉的那一段**既不在视口内、也没有任何滚动手径**

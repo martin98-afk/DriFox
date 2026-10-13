@@ -670,37 +670,40 @@ class CodeWebViewer(QWebEngineView):
     # 降低 MAX_HEIGHT 可大幅减少每个 Chromium 实例的离屏渲染缓冲区
     # 4000→2000 将单视图 GPU 缓冲区从 ~28.8MB 降至 ~14.4MB
     #
-    # 🐛 滚动体验重构（2026-08-30）：原 3000px 会让长回复（多个代码块 + 工具结果）
-    # **在卡片内部**出现滚动条 —— 消息列表于是变成「外层 1 个 QScrollArea + 每张卡
-    # 各自 1 个内滚区」，滚轮要先问「里面还能滚吗」再决定转发，是滚动发黏的根因。
-    # 现在把上限抬到 10000px：真实内容几乎不可能触及，卡内滚动条不再出现，
-    # 滚动统一由外层 chat_scroll_area 承载。
-    # 保留上限的原因（**不能删**）：这是 Chromium 合成表面的硬约束兜底 ——
-    # 卡片宽度 ~700px 时 10000px 高 ≈ 28MB 合成表面，再往上会明显放大 GPU 内存。
-    # 极端长内容仍会回退到内滚（wheel 转发逻辑因此必须保留），但那是安全网而非常态。
+    # 📐 3000px = 消息卡片最高高度（2026-10-13 用户要求下调）：
+    # 超过 3000px 的长回复回退「卡片内部滚动」，卡片不再撑满整屏。
+    # 历史：2026-08-30 曾从 3000 抬到 10000 —— 当年卡内滚动是「滚动发黏」的
+    # 根因（滚轮要先问「里面还能滚吗」再转发，且 Chromium 吞掉卡内到边界的
+    # 事件、不向 Qt 宿主 scroll-chaining）。2026-10-13 修复 wheel 转发
+    # （delegate eventFilter 抢断，见 _ensure_wheel_filter_installed 与坑点 P045）
+    # 后卡内滚动已可靠，3000 上限的代价重新变得可接受。
+    # 保留上限兜底的原因（**不能删**）：这是 Chromium 合成表面的硬约束 ——
+    # 成本 ∝ 宽×高×dpr²（实测见 MAX_SURFACE_MPX 注释），上限是第一道闸。
     MAX_WIDTH = 1800
-    MAX_HEIGHT = 10000
+    MAX_HEIGHT = 3000
 
     # [MEM] 单 view 物理面积上限（百万像素）。为什么单边上限不够：
     # Chromium 离屏合成表面按「逻辑尺寸 × dpr」分配，**成本只与宽×高×dpr² 有关**
     # —— 实测（tools/diag_webengine_mem_probe.py --show，线性拟合截距≈0）
     # 9.2MB / 百万物理像素：549×2000 逻辑 @dpr2.25 → 50.5MB/view，
     # 244×2000 逻辑 @dpr2.25 → 22.1MB/view（面积比 2.25×，成本比 2.29×）。
-    # 只卡 MAX_HEIGHT 挡不住它：dpr=2.25 时 1800×7111 逻辑 = 4050×16000 物理
-    # = 65Mpx ≈ 590MB 单卡。
-    # 12Mpx 换算：dpr=2.25 + 700 逻辑宽 → 高度上限 ≈3387 逻辑（≈110MB/卡）；
-    # dpr=1 + 700 逻辑宽 → ≈17142 逻辑高（超过 MAX_HEIGHT）→ **老机器完全不生效**。
+    # 当前值下 MAX_HEIGHT=3000 是**主闸**，本上限只在 DPR ≥ 2.4 时先咬：
+    #   dpr=2.25 + 700 逻辑宽 → 面积上限 ≈3387 逻辑（>3000，不生效）；
+    #   dpr=3.0 + 700 逻辑宽 → ≈1905 逻辑（<3000，先咬）。
+    # 保留原因（**不能删**）：高 DPI + 宽卡片的组合下成本仍能失控 ——
+    # 若只留单边上限，1800×3000 逻辑 @dpr2.25 = 4050×6750 ≈ 27Mpx ≈ 250MB 单卡。
     # 超限内容回退卡内滚动（wheelEvent 内外转发的安全网，见 MAX_HEIGHT 注释）。
     MAX_SURFACE_MPX = 12.0
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
         # 🛡️ 物理纹理上限钳制：Chromium 离屏表面按「逻辑尺寸 × DPR」分配物理纹理，
-        # D3D11/WARP 单纹理硬上限 16384px。225% 缩放（DPR 2.25）下 10000 逻辑
-        # → 22500 物理 → ResizeOffscreenFramebuffer 分配失败 → GPU 上下文丢失
-        # （gles2_cmd_decoder "excessive dimensions" → MakeCurrent failed for GetTextureQt）。
-        # 逻辑上限随本机 DPR 收缩，保物理 ≤ 16000（留 384 余量）；
-        # 超限内容回退内滚安全网（wheelEvent 内外转发，见 MAX_HEIGHT 注释）。
+        # D3D11/WARP 单纹理硬上限 16384px。逻辑上限随本机 DPR 收缩，保物理
+        # ≤ 16000（留 384 余量）。历史案例：10000 逻辑 @DPR2.25 → 22500 物理 →
+        # ResizeOffscreenFramebuffer 分配失败 → GPU 上下文丢失（gles2_cmd_decoder
+        # "excessive dimensions" → MakeCurrent failed for GetTextureQt）。
+        # 现行 MAX_HEIGHT=3000 下该钳制在 DPR ≤ 5.3 时不再先咬（3000×2.25=6750），
+        # 保留作结构性兜底（防上限再被调大 + 极端 DPR 机器）。
         # 实例属性覆盖类常量：下方 resize/setFixedHeight 钳制与骨架 CSS
         # max-height 均按 self.MAX_HEIGHT 取值，全部自动生效。
         self.MAX_HEIGHT = min(
@@ -1539,7 +1542,7 @@ class CodeWebViewer(QWebEngineView):
         # 同步简洁模式标志到 JS（统一走 sync_compact_mode_to_js）
         self.sync_compact_mode_to_js()
         # [MEM-2] 文档滚动容器上限（body max-height）必须与 widget 高度上限同值：
-        # 骨架里的静态 fallback 按 MAX_HEIGHT 走，而面积上限可远小于它 → 此处
+        # 骨架里的静态 fallback 按 MAX_HEIGHT 走，实际值可能与面积上限不同 → 此处
         # 强制补推一次真实值（否则整个渲染周期都停在不匹配的上限上，超限内容
         # 被静默裁掉且不可滚）。幂等，未变化时仅一次属性读取。
         self.sync_body_max_height(force=True)
@@ -1818,11 +1821,9 @@ class CodeWebViewer(QWebEngineView):
                     /* 右侧 8px = 14px 视觉边距 - 6px 常驻滚动轨道：轨道占位使
                        内容右视觉边距比左侧多 6px，扣减后左右对称 */
                     padding: 6px 8px 0 14px;
-                    /* ⚠️ 安全网，非常态：MAX_HEIGHT 已抬到 10000px（见类常量注释），
-                       真实内容几乎不会触及 → body 不会溢出 → 不出现内滚条 →
-                       滚动统一由外层 chat_scroll_area 承载。
-                       触及上限时（极端长内容）才回退为卡内滚动，此时 wheelEvent 的
-                       内外转发逻辑仍然生效，是最后一道兜底。
+                    /* ⚠️ 长内容回退卡内滚动是**预期行为**：MAX_HEIGHT=3000px
+                       （见类常量注释），超过即出现内滚条；wheelEvent 的内外
+                       转发逻辑（含 delegate eventFilter 抢断）保证体感可用。
                        [MEM-2] 上限改走 CSS 变量，由 Python 下发 **widget 的高度上限**
                        （随 dpr / 卡片宽度收缩的面积上限，见 MAX_SURFACE_MPX）：
                        两者必须同值，否则被 widget 裁掉的那段既不可见也不可滚
