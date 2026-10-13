@@ -3531,6 +3531,15 @@ class TabManagerWindow(FramelessWindow):
                 return  # 窗口未比挤压时更宽，不重开
         if total - (panel._collapsed_min_width + _FRAME_PADDING_X) - wb_min < target_w + _MIN_CHAT_WIDTH:
             return  # 空间不足，保持折叠
+        # ★ 按挤压折叠前的宽度重开：用户把工作台拖到 700 后被挤折叠，
+        #   空间恢复应回到 700，而非默认 494。同步写 _workbench_frame_w
+        #   （set_workbench_visible(True) 的展开目标读它）。
+        #   无记忆（启动后首次挤压折叠）时不写，保持既有默认行为。
+        _saved_wb = int(getattr(self, "_wb_saved_frame_width", 0) or 0)
+        if _saved_wb > 0:
+            from app.widgets.workbench_panel import PANEL_WIDTH_MAX
+
+            self._workbench_frame_w = max(wb_min, min(_saved_wb, PANEL_WIDTH_MAX + _FRAME_PADDING_X))
         self._wb_collapsed_by_squeeze = False
         self.set_workbench_visible(True)
 
