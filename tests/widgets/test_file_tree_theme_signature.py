@@ -49,6 +49,51 @@ cards_mod = _load_module("file_tree_theme_ui.cards", _PLUGIN_UI / "cards.py")
 
 FileTreeCard = cards_mod.FileTreeCard
 
+# ── 同步桩：替换 QThread / _TreeScanner，规避无头环境 QThread 崩溃 ──
+
+
+class _FakeSignal:
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot):
+        self._slots.append(slot)
+
+    def emit(self, *args):
+        for s in list(self._slots):
+            s(*args)
+
+
+class _FakeThread:
+    def __init__(self):
+        self.started = _FakeSignal()
+        self.finished = _FakeSignal()
+
+    def start(self):
+        self.started.emit()
+
+    def quit(self):
+        self.finished.emit()
+
+    def wait(self, ms=0):
+        return True
+
+    def deleteLater(self):
+        pass
+
+
+class _FakeScanner:
+    def __init__(self, directory=""):
+        self._directory = directory
+        self.finished = _FakeSignal()
+        self.error = _FakeSignal()
+
+    def moveToThread(self, thread):
+        pass
+
+    def scan(self):
+        self.finished.emit([])
+
 # stub 全局滚动条样式（真实 get_unified_scrollbar_style 首调 ~1.7s，测试不承受）
 import types  # noqa: E402
 
@@ -159,6 +204,41 @@ class TestThemeSignature:
             card.refresh_data()
             assert calls["style"] == after_first, "refresh_data 不应重复应用未变化的主题"
         finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+
+class TestExpandQueueTimeout:
+    """恢复队列超时跳过：队首目录扫描迟迟不回时不堵死整队"""
+
+    def test_timeout_skips_stuck_head(self, monkeypatch, tmp_path):
+        root = tmp_path / "proj"
+        sub = root / "sub"
+        sub.mkdir(parents=True)
+
+        monkeypatch.setattr(cards_mod, "QThread", _FakeThread)
+        monkeypatch.setattr(cards_mod, "_TreeScanner", _FakeScanner)
+        card = FileTreeCard()
+        card._project_root = str(root)
+        card._tree_view.project_root = str(root)
+        card._watcher.set_root(str(root))
+        try:
+            card._async_load_tree()
+            QApplication.processEvents()  # 桩同步落地根扫描
+
+            # 挂一个未加载目录在队首，模拟扫描永不回调
+            stuck = str(sub)
+            card._source_model.mark_loading(stuck)  # 占位 loading：node.loaded 保持 False
+            card._pending_expand = [stuck, str(root)]
+            monkeypatch.setattr(cards_mod, "_EXPAND_WAIT_TIMEOUT_S", 0.0)  # 立即超时
+            card._pending_expand_since = 1.0  # 已等待很久
+            card._process_expand_queue()
+
+            assert stuck not in card._pending_expand, "超时队首应被跳过"
+            assert str(root) in card._pending_expand or not card._pending_expand, "后续目录应继续推进"
+        finally:
+            card._worker_thread = None
             card._cleanup_worker()
             card.deleteLater()
             QApplication.processEvents()
