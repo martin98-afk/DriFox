@@ -1,6 +1,45 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.7] - 2026-10-14
+
+自上一版本以来的变更 | 提交数：39 · 文件变更：171 · +8027/-5941 | 贡献者：dingma, drifox-bot, mading
+
+### ✨ 新功能 (New Features)
+
+- **工作台挤压折叠（squeeze）与宽度记忆** (`app/widgets/tab_manager_window.py` 等): 拖拽落定触发双向 squeeze 判定；工作台压穿硬 min 自动折叠（与左栏双向对称）；挤压折叠的工作台按折叠前宽度恢复；切页 restore 兼容 saved 宽度从无到有；TabManagerWindow 增加 per-tab 卡片宽度记忆与快照处理；新增 baseline 宽度恢复（切页）与拖拽落定/压穿自动折叠回归测试 (`8c43ee51` `21550657` `3b66dfc0` `c48c70aa` `b9e6b398` `d716bf4d` `1b0d2438` `b7181cc4` `a5e1594a` `336cd2f4`)
+- **后台任务共享线程池** (`85951e77`): 实现共享 QThreadPool 处理后台任务，改善关窗性能（关页不再 waitForDone 阻塞）
+- **assistant hub 内存管理与 UI 重构** (`9aa38fe6` `fbabf382`): 重构 memory 管理与 UI 组件；新增工具计数标签刷新与卡片槽宽补偿逻辑
+- **沙箱命令显式 workdir 支持** (`32672da8`): 增强 sandbox 命令处理，安全校验支持显式工作目录
+- **模型能力按 provider 拉取与 per-model 能力** (`4962395c` `268083f0` `5c4befe0`): 集成 provider 支持增强模型能力检索；编辑器接入 provider；实现 per-model 能力并隐藏声明键
+- **history 输入处理与格式污染回归测试** (`91d35c29`)
+- **展开队列超时跳过卡死目录** (`057f7eb4`)
+- **BalanceDisplay 用主题 SVG 图标替换 emoji** (`2bd33ddc`)
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **card_viewers 滚轮事件处理优化** (`6aa9b52b`)
+- **render 提升 changelog 段落 max-height 可见性** (`0c6deb02`)
+- **assistant_hub 经验压缩分批+失败冷却** (`70e5a1f9`): 修 113 条单批超 240s 恶性超时
+- **assistant_hub 记忆分层铁律 + 压缩水位 120+增量判据** (`0506c834`): 防抄 AGENTS.md；分类名限 12 字
+- **assistant_hub memory 日志 date 参数防路径穿越** + 日志索引过滤杂项文件 (`e0d1fece`)
+- **assistant_hub 项目记忆跟随当前激活标签页窗口取 workdir** (`e95a89df`): 修多窗口串味
+- **assistant_hub daily 日志去日期标题改纯条目流** (`e5b27a9b`)
+- **models.dev 空解析结果覆盖缓存致模型费用信息消失** (`a4ed6ce7`)
+- **plugin loaders module_prefixes 统一透传** (`b93fb750`)
+- **file-tree 打开文件树整窗卡死，QThread 用法全面纠正 (v0.2.1)** (`1314de72`)
+
+### ♻️ 代码重构 (Refactoring)
+
+- **移除 OpenCode Zen 免费模型集成及关联逻辑** (`dee505ec`)
+- **render MAX_HEIGHT 调整改善渲染性能与滚动** (`f112416a`)
+- **测试重构 + 新增用例** (`8ea1fe2d` `2c465cc3`)
+
+### 🔧 其他 (Chores & Build)
+
+- marketplace 由 plugin.json 自动重新生成（[skip ci]，`1d8b49b2` `6c35fc75` `e03a892a`）
+- diagnostic-report agent 创建前基线 (`43e0a33a`)
+
 ## [v0.6.6] - 2026-10-13 (重新发布 #4)
 
 自上一版本以来的变更（累计） | 提交数：44 · 文件变更：109 · +10440/-1447 | 贡献者：dingma, martin98-afk, mading
