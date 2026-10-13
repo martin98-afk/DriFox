@@ -847,6 +847,18 @@ class CodeWebViewer(QWebEngineView):
         self._wheel_last_scroll_top = -1
         self._wheel_last_ts = 0.0
         self._wheel_delegated_inner = False
+        # [WHEEL-ARM] "卡内滚"激活态：用户点击过卡片正文 → True。
+        # 未激活（含纯悬浮）保持既有"外层优先"体感；激活后改为"内部优先"。
+        # ⚠️ 不用 Qt focus 判定：QWebEngineView 的 focusProxy 是 Chromium
+        # delegate，真焦点方案会把键盘焦点从输入框抢走，且 Chromium 内部
+        # 焦点（body/可编辑区）变化不回传 Qt，判据不可靠。点击是唯一显式意图。
+        self._wheel_inner_armed = False
+        # 激活态自愈：连续"判为可滚但放行后 body.scrollTop 未变化"的次数。
+        # 达阈值即交外层，防"怎么滚都没反应"。仅在 state=="scroll" 下累计
+        # （body 确实有溢出时才成立），不溢出场景不参与，见 _inner_wheel_state。
+        self._wheel_arm_streak = 0
+        self._wheel_arm_last_top = -1
+        self._wheel_arm_last_ts = 0.0
         # delegate 侧 wheel 抢断的安装目标（RenderWidgetHostViewQtDelegateWidget）。
         # 必须先于 setPage() 初始化：delegate 的 ChildAdded 在 setPage 链内即触发。
         self._wheel_filter_target = None
@@ -8071,6 +8083,63 @@ class CodeWebViewer(QWebEngineView):
         self._resize_unlock_timer.stop()
         self._resize_unlock_timer.start()
 
+    def _inner_wheel_state(self, dy: int) -> str:
+        """激活态判据：卡内在该方向处于哪种状态。
+
+        返回：
+          "scroll"   — body 明确还能往该方向滚 → 放行给 Chromium；
+          "boundary" — body 已到该方向边界 → 交外层（链式，不锁死）；
+          "unknown"  — body 不溢出（无内滚条）→ 放行给 Chromium：内层容器
+                       （#tool-content / 代码块 / 图表区）才是滚动目标，
+                       直接交外层会把这些区域的滚轮抢走。
+                       ⚠️ 不能拿 body.scrollTop 变化当自愈判据——内层容器
+                       滚动不改 body 几何，会把正常滚动误判为"卡住"。
+
+        判据只认 body 滚动几何（``_inner_scroll_range``）：Qt 侧的
+        page().scrollPosition() / contentsSize() 是文档级指标，在
+        body-scroller 架构下恒为 0，不可用作边界判定。
+        """
+        if not self._body_geom_valid:
+            return "unknown"
+        top, max_scroll = self._inner_scroll_range()
+        if max_scroll <= 0:
+            return "unknown"
+        if dy > 0 and top <= 0:
+            return "boundary"  # 已在顶部，继续上滚 → 交外层
+        if dy < 0 and top >= max_scroll:
+            return "boundary"  # 已在底部，继续下滚 → 交外层
+        return "scroll"
+
+    def _route_wheel_armed(self, event) -> bool:
+        """激活态裁决：内部优先，卡内到边界才交外层（链式，不锁死）。
+
+        与未激活态 ``_route_wheel_to_chat_area`` 的差别只有优先级方向；
+        外层转发走同一条 SmoothScroll 路径，手感一致。
+        返回 True = 事件已消费（调用方应拦截），False = 放行给 Chromium。
+        """
+        dy = event.angleDelta().y()
+        if dy == 0:
+            return False
+        state = self._inner_wheel_state(dy)
+        if state == "unknown":
+            # 放行：内层容器可能可滚；若 Chromium 谁都不消费，事件自然上抛进
+            # wheelEvent 二次裁决，最终由 MessageCard.wheelEvent 转发外层。
+            return False
+        if state == "scroll":
+            # 自愈：放行后 body.scrollTop 若在下一轮仍未变化（几何缓存滞后、
+            # 实际滚不动），累计到阈值即交外层，防"怎么滚都没反应"。
+            now = time.monotonic()
+            if self._wheel_arm_last_top == self._body_scroll_top and now - self._wheel_arm_last_ts < 1.5:
+                self._wheel_arm_streak += 1
+            else:
+                self._wheel_arm_streak = 0
+            self._wheel_arm_last_top = self._body_scroll_top
+            self._wheel_arm_last_ts = now
+            if self._wheel_arm_streak < 3:
+                return False
+            self._wheel_arm_streak = 0
+        return self._route_wheel_to_chat_area(event)
+
     def _route_wheel_to_chat_area(self, event) -> bool:
         """滚轮归属两级裁决（唯一实现：wheelEvent 与 delegate eventFilter 共用）。
 
@@ -8142,15 +8211,30 @@ class CodeWebViewer(QWebEngineView):
         # delegate 侧 wheel 抢断：与 wheelEvent() 共用同一裁决函数，两路语义一致
         # （filter 放行后 Chromium 不消费时事件仍会上抛进 wheelEvent，二次裁决
         # 结果相同，不会双重滚动）。
-        if ev.type() == QEvent.Wheel and obj is getattr(self, "_wheel_filter_target", None):
-            if self._route_wheel_to_chat_area(ev):
+        if obj is not getattr(self, "_wheel_filter_target", None):
+            return super().eventFilter(obj, ev)
+        et = ev.type()
+        # [WHEEL-ARM] 点击正文 = 用户显式表达"我要滚这块内容" → 进入卡内滚态。
+        # 纯悬浮不置位（保持外层优先体感）。
+        if et == QEvent.MouseButtonPress:
+            self._wheel_inner_armed = True
+            self._wheel_arm_streak = 0
+            self._wheel_arm_last_top = -1
+        # 鼠标移出 delegate（卡片正文区）→ 退出卡内滚态，恢复外层优先。
+        elif et == QEvent.Leave:
+            self._wheel_inner_armed = False
+        elif et == QEvent.Wheel:
+            route = self._route_wheel_armed if self._wheel_inner_armed else self._route_wheel_to_chat_area
+            if route(ev):
                 return True
         return super().eventFilter(obj, ev)
 
     def wheelEvent(self, event: QWheelEvent):
         # 仅在 Chromium 不消费 wheel（body 无溢出）事件上抛时被调，作第二道转发；
         # 首道裁决见 _ensure_wheel_filter_installed() 装上的 delegate 抢断。
-        if self._route_wheel_to_chat_area(event):
+        # 激活态走同一裁决函数，保证两路语义一致（不双重滚动）。
+        route = self._route_wheel_armed if self._wheel_inner_armed else self._route_wheel_to_chat_area
+        if route(event):
             return
         super().wheelEvent(event)
 
