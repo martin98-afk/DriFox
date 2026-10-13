@@ -697,6 +697,7 @@ def apply_model_defaults(
     config: Dict[str, Any],
     model_name: str,
     declared: Optional[Dict[str, Any]] = None,
+    provider: str = "",
 ) -> Dict[str, Any]:
     """对 config 字典叠加上模型默认值，返回新 dict（不修改原对象）。
 
@@ -731,7 +732,9 @@ def apply_model_defaults(
         declared_thinking = declared.get("声明_支持思考")
         declared_present = declared_thinking not in (None, "")
     # L3: 模型能力（覆盖前两层，之后 model_overrides 还会覆盖回来）
-    caps = get_model_capabilities(model_name)
+    # provider 走 L-1 插件 per-model 层：私有模型 ID 在 models.dev 不存在，
+    # 不带 provider 查 caps 全链落空 → 思考字段默认值整段跳过（参数卡无思考配置）
+    caps = get_model_capabilities(model_name, provider)
     if caps.get("context_limit"):
         result["最大Token"] = caps["context_limit"]
         result["上下文长度"] = caps["context_limit"]

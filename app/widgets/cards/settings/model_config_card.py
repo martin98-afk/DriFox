@@ -9,6 +9,7 @@
   4. 标签最小宽度 80px，右边控件对齐
   5. 渲染完后根据字段数估算内容高度，调整父 BaseSettingsCard 的高度
 """
+
 import webbrowser
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -36,21 +37,21 @@ from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 # =============================================================================
 _FIELD_GROUPS = [
     ("上下文", ("最大Token", "上下文长度", "最大输出")),
-    ("思考",   ("思考模式", "思考预算", "思考等级")),
-    ("采样",   ("温度", "temp", "top_p", "max_new_tokens")),
+    ("思考", ("思考模式", "思考预算", "思考等级")),
+    ("采样", ("温度", "temp", "top_p", "max_new_tokens")),
 ]
 
 # =============================================================================
 # 高度估算（px）
 # =============================================================================
-_FIELD_ROW_HEIGHT = 34        # 每个字段行（label + widget）
-_GROUP_HEADER_HEIGHT = 22     # 分组标题
-_GROUP_SPACING = 14           # 组间额外间距
-_CONTENT_PADDING = 12         # 内容区上下内边距
-_CARD_HEADER_HEIGHT = 30      # BaseSettingsCard 头部（图标+标题+关闭）
-_MIN_CARD_HEIGHT = 240        # 卡片最小高度
-_MAX_CARD_HEIGHT = 460        # 卡片最大高度
-_LABEL_MIN_WIDTH = 80         # 标签最小宽度（让控件对齐）
+_FIELD_ROW_HEIGHT = 34  # 每个字段行（label + widget）
+_GROUP_HEADER_HEIGHT = 22  # 分组标题
+_GROUP_SPACING = 14  # 组间额外间距
+_CONTENT_PADDING = 12  # 内容区上下内边距
+_CARD_HEADER_HEIGHT = 30  # BaseSettingsCard 头部（图标+标题+关闭）
+_MIN_CARD_HEIGHT = 240  # 卡片最小高度
+_MAX_CARD_HEIGHT = 460  # 卡片最大高度
+_LABEL_MIN_WIDTH = 80  # 标签最小宽度（让控件对齐）
 
 
 class ModelConfigCard(QWidget):
@@ -111,9 +112,17 @@ class ModelConfigCard(QWidget):
 
         # 连接信息 + 系统字段（不渲染到参数列表中）
         skip_keys = {
-            "模型名称", "API_URL", "API_KEY", "认证方式", "获取地址",
-            "选择模型", "provider_name", "name", "config_id",
-            "display_name", "_suffix_index",
+            "模型名称",
+            "API_URL",
+            "API_KEY",
+            "认证方式",
+            "获取地址",
+            "选择模型",
+            "provider_name",
+            "name",
+            "config_id",
+            "display_name",
+            "_suffix_index",
             *QUOTA_EXCLUDE_KEYS(),  # 套餐用量查询字段不渲染到参数列表
             *PROVIDER_MANAGED_KEYS,  # 服务商级管理键（模型列表生命周期，非模型参数）
         }
@@ -141,7 +150,7 @@ class ModelConfigCard(QWidget):
             if key == "思考等级" and self.current_model_name:
                 from app.core.modelmeta.model_capabilities import get_model_capabilities
 
-                caps = get_model_capabilities(self.current_model_name)
+                caps = get_model_capabilities(self.current_model_name, self.current_provider)
                 if caps.get("thinking_param") != "reasoning_effort" or not caps.get("reasoning_effort_values"):
                     continue
             display_name = meta.get("display_name", key)
@@ -167,9 +176,7 @@ class ModelConfigCard(QWidget):
             # 分组标题
             header = BodyLabel(group_name, self)
             header.setStyleSheet(
-                f"color: {Colors.TEXT_SECONDARY}; "
-                f"font-size: 11px; font-weight: 600; "
-                f"padding: 0 0 4px 2px;"
+                f"color: {Colors.TEXT_SECONDARY}; font-size: 11px; font-weight: 600; padding: 0 0 4px 2px;"
             )
             self.layout.addWidget(header)
             # 字段行
@@ -240,9 +247,7 @@ class ModelConfigCard(QWidget):
             return widget
 
         elif ui_type == "slider":
-            range_info = meta.get(
-                "range", {"min": 0.0, "max": 1.0, "step": 0.01, "type": "float"}
-            )
+            range_info = meta.get("range", {"min": 0.0, "max": 1.0, "step": 0.01, "type": "float"})
             min_val = range_info["min"]
             max_val = range_info["max"]
             step = range_info["step"]
@@ -265,9 +270,7 @@ class ModelConfigCard(QWidget):
             slider.valueChanged.connect(lambda: self._on_field_changed())
 
             display_value = current if is_float else int(current)
-            label = BodyLabel(
-                f"{display_value:.2f}" if is_float else str(int(display_value)), self
-            )
+            label = BodyLabel(f"{display_value:.2f}" if is_float else str(int(display_value)), self)
             label.setFixedWidth(60)
             label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
@@ -340,7 +343,7 @@ class ModelConfigCard(QWidget):
             if key == "思考等级" and self.current_model_name:
                 from app.core.modelmeta.model_capabilities import get_model_capabilities
 
-                caps = get_model_capabilities(self.current_model_name)
+                caps = get_model_capabilities(self.current_model_name, self.current_provider)
                 dyn_values = caps.get("reasoning_effort_values")
                 if dyn_values:
                     options = list(dyn_values)
@@ -405,17 +408,11 @@ class ModelConfigCard(QWidget):
                 else:
                     result[actual_key] = widget.currentText()
             elif isinstance(widget, SearchableEditableComboBox):
-                text = (
-                    widget.text().strip()
-                    if callable(getattr(widget, "text", None))
-                    else ""
-                )
+                text = widget.text().strip() if callable(getattr(widget, "text", None)) else ""
                 if text:
                     result[actual_key] = text
                 else:
-                    result[actual_key] = (
-                        widget.currentText() if hasattr(widget, "currentText") else ""
-                    )
+                    result[actual_key] = widget.currentText() if hasattr(widget, "currentText") else ""
             elif hasattr(widget, "slider"):
                 logical_value = widget.slider.value() / widget.scale
                 range_info = getattr(widget, "range_info", {})
@@ -430,4 +427,3 @@ class ModelConfigCard(QWidget):
             else:
                 result[actual_key] = ""
         return result
-
