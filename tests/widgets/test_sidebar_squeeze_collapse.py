@@ -67,12 +67,16 @@ class _StubPanel:
     """
 
     def __init__(self):
-        from app.widgets.tab_manager_window import _EXPANDED_MIN_CONTENT_WIDTH
+        from app.widgets.tab_manager_window import (
+            _COLLAPSED_PANEL_WIDTH,
+            _EXPANDED_MIN_CONTENT_WIDTH,
+        )
 
         self._collapsed = False
         self._collapsed_by_squeeze = False
         self._animating = False
         self._auto_collapse_width = _EXPANDED_MIN_CONTENT_WIDTH
+        self._collapsed_min_width = _COLLAPSED_PANEL_WIDTH  # content 宽 46（同真实现）
         self._auto_collapse_suppressed = False
         self.sync_calls = 0
         self.toggle_btn_calls = 0
@@ -278,3 +282,29 @@ def test_workbench_collapse_skipped_when_wb_hidden(qapp):
     win = _StubWindow(left=414, total=814)  # 无第三窗格
     assert TabManagerWindow._evaluate_squeeze_collapse(win) is False
     assert getattr(win, "_wb_collapsed_by_squeeze", False) is False
+
+
+def test_workbench_restores_to_squeezed_width(qapp):
+    """★ 挤压折叠的工作台重开时回到折叠前宽度，而非默认 494"""
+    win = _StubWindow(left=414, total=1200)
+    win._workbench_frame = _StubFrame(maximum_width=834, minimum_width=334, visible=False)
+    win.workbench_panel = _StubWorkbenchPanel()
+    win._wb_collapsed_by_squeeze = True
+    win._wb_saved_frame_width = 700  # 折叠前用户拖到的宽度
+    win._squeeze_total_width = 1100
+    TabManagerWindow._maybe_restore_workbench_after_squeeze(win)
+    assert win._wb_visible_target is True
+    assert win._wb_collapsed_by_squeeze is False
+    assert win._workbench_frame_w == 700, "必须按折叠前宽度重开"
+
+
+def test_workbench_restore_falls_back_to_default_without_memory(qapp):
+    """无折叠前宽度记忆（如启动后首次挤压折叠）→ 不写 _workbench_frame_w，走默认"""
+    win = _StubWindow(left=414, total=1200)
+    win._workbench_frame = _StubFrame(maximum_width=834, minimum_width=334, visible=False)
+    win.workbench_panel = _StubWorkbenchPanel()
+    win._wb_collapsed_by_squeeze = True
+    win._squeeze_total_width = 1100
+    TabManagerWindow._maybe_restore_workbench_after_squeeze(win)
+    assert win._wb_visible_target is True
+    assert win._workbench_frame_w == 0, "无记忆时不得乱写宽度"
