@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""test_prompts.py — prompt 模板 sanity 检查。"""
+"""test_prompts.py — prompt 模板 sanity 检查（记忆说明书 + 经验）。"""
 
 import importlib.util
 import sys
@@ -20,33 +20,24 @@ def _roles_ok(msgs):
     return msgs[-1]["content"]
 
 
-def test_compile_today():
-    c = _roles_ok(m.build_compile_today("新对话内容", "旧草稿"))
-    assert "已有草稿" in c and "新对话" in c
-
-
-def test_compile_daily():
-    assert "蒸馏" in _roles_ok(m.build_compile_daily("昨天的草稿"))
-
-
-def test_compile_facts():
-    c = _roles_ok(m.build_compile_facts("已有事实", "新对话"))
-    assert "重要事实" in c
-
-
-def test_dream_chain():
-    a = _roles_ok(m.build_dream_atomize("记忆文本"))
-    assert "原子" in a
-    d = _roles_ok(m.build_dream_dedupe("- 单元1"))
-    assert "去重" in d
-    o = _roles_ok(m.build_dream_optimize("- 单元1"))
-    assert "优化" in o
-    c = _roles_ok(m.build_dream_compose("- 单元1"))
-    assert "长期记忆" in c
-    v = _roles_ok(m.build_dream_verify("整理前", "整理后"))
-    assert "semantic_ok" in v
+def test_memory_system_contains_layers_and_paths():
+    """记忆说明书：两层结构 + 实际路径 + 写入时机 + 维护规则，且不含 workbuddy 品牌词。"""
+    text = m.build_memory_system("/data/MEMORY.md", "/proj/.drifox/memory/build")
+    assert "# 第一层 — 全局记忆" in text
+    assert "# 第二层 — 项目记忆" in text
+    assert "/data/MEMORY.md" in text
+    assert "/proj/.drifox/memory/build" in text
+    assert "memory_write" in text and "memory_read" in text
+    assert "何时写" in text and "维护" in text
+    assert "workbuddy" not in text.lower()
+    assert "drifox" in text.lower()
 
 
 def test_reflect():
     c = _roles_ok(m.build_reflect("人格", "记忆", "经验"))
     assert "JSON" in c and "category" in c
+
+
+def test_consolidate():
+    c = _roles_ok(m.build_consolidate([{"category": "测试", "content": "一条经验"}]))
+    assert "JSON" in c and "测试" in c and "一条经验" in c
