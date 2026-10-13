@@ -129,11 +129,87 @@ def test_restore_clears_suppression(qapp):
     assert win._tab_panel._auto_collapse_suppressed is False
 
 
+def test_restore_aborts_when_saved_changed(qapp):
+    """切页后 saved 被新编排改写（如用户重新拖拽）：快照过时，恢复放弃
+
+    实测场景（探针 repro_sidebar_tab_width）：切页排队的 restore 撞上
+    250ms 动画重试，执行时用户已拖出新宽度并更新 saved——过时的 prev
+    会把新意图覆盖掉（saved 414 被打回 201，此后一切恢复失效）。
+    """
+    win = _StubWindow([414, 786, 0])
+    win._tab_switch_saved_snapshot = 201  # 切页时 saved=201
+    win._saved_panel_frame_width = 414  # 执行时已被新拖拽改写
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 201, False)
+    assert win._splitter.sizes()[0] == 414  # 新意图不被覆盖
+    assert win._saved_panel_frame_width == 414
+
+
+def test_restore_runs_when_snapshot_matches(qapp):
+    """saved 未变（快照一致）：守卫放行，正常恢复"""
+    win = _StubWindow([150, 1050, 0])
+    win._tab_switch_saved_snapshot = 414
+    win._saved_panel_frame_width = 414
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert win._splitter.sizes()[0] == 414
+
+
+def test_restore_runs_without_snapshot(qapp):
+    """无快照（stub/旧路径）：守卫跳过，行为不变"""
+    win = _StubWindow([150, 1050, 0])
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert win._splitter.sizes()[0] == 414
+
+
 def test_restore_ignores_invalid_prev_width(qapp):
     """prev_left_w<=0（splitter 未就绪）不动作"""
     win = _StubWindow([160, 1040, 0])
     TabManagerWindow._restore_tab_frame_after_tab_switch(win, 0, False)
     assert win._splitter.sizes()[0] == 160
+
+
+def test_restore_writes_back_saved_width_when_expanded(qapp):
+    """展开态恢复后回写 _saved_panel_frame_width（供折叠→展开/挤压恢复复用）"""
+    win = _StubWindow([150, 1050, 0])
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert win._saved_panel_frame_width == 414
+
+
+def test_restore_no_saved_writeback_when_collapsed(qapp):
+    """折叠态恢复不写 saved（saved 语义是下次展开的宽度）"""
+    win = _StubWindow([150, 1050, 0])
+    win._tab_panel._collapsed = True
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, _BASE_FRAME_W, True)
+    assert not hasattr(win, "_saved_panel_frame_width")
+
+
+# ── 切页恢复基准宽（Bug 1 二次修复：即时宽度已被污染的场景）──
+
+
+def test_baseline_expanded_uses_saved_width(qapp):
+    """展开态：即时宽被其他标签页工作台挤压污染（414→150）时，基准取意图宽 414"""
+    win = _StubWindow([150, 1050, 0])
+    win._saved_panel_frame_width = 414
+    assert TabManagerWindow._tab_switch_baseline_width(win, 150, False) == 414
+
+
+def test_baseline_expanded_falls_back_to_current(qapp):
+    """展开态：saved 缺省（从未拖拽）→ 退化为即时宽，行为不变"""
+    win = _StubWindow([201, 999, 0])
+    assert TabManagerWindow._tab_switch_baseline_width(win, 201, False) == 201
+
+
+def test_baseline_expanded_current_wider_than_saved(qapp):
+    """展开态：即时宽大于 saved（saved 落后）→ 取即时宽"""
+    win = _StubWindow([414, 786, 0])
+    win._saved_panel_frame_width = 201
+    assert TabManagerWindow._tab_switch_baseline_width(win, 414, False) == 414
+
+
+def test_baseline_collapsed_uses_current_width(qapp):
+    """折叠态：基准即即时宽（折叠宽就是意图），不受 saved 影响"""
+    win = _StubWindow([60, 1140, 0])
+    win._saved_panel_frame_width = 414
+    assert TabManagerWindow._tab_switch_baseline_width(win, 60, True) == 60
 
 
 # ── Bug 2：left 卡片 frame 目标宽 ──

@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -326,6 +327,8 @@ class FileTreeCard(QWidget):
         self._pending_expand: List[str] = []
         self._pending_selected: List[str] = []
         self._pending_scroll: int = 0
+        # 主题签名缓存（_apply_latest_theme 产出全等时跳过全部 set，切页高频路径）
+        self._theme_signature: Optional[tuple] = None
 
         # 剪贴板: [(路径, 是否剪切)]
         self._clipboard: List[Tuple[str, bool]] = []
@@ -602,14 +605,17 @@ class FileTreeCard(QWidget):
             path = self._pending_expand[0]
             node = self._source_model.find_node(path)
             if node is None or not node.is_dir:
+                logger.debug(f"[FileTree] 恢复队列跳过(节点不存在): {path}")
                 self._pending_expand.pop(0)
                 continue  # 路径已不在（换了项目 / 已被删除）
             if self._source_model.node_is_failed(path):
+                logger.debug(f"[FileTree] 恢复队列跳过(已熔断): {path}")
                 self._pending_expand.pop(0)
                 continue  # 熔断：不反复重试（用户点刷新可恢复）
             src_idx = self._source_model._index_for_node(node)
             proxy_idx = self._proxy_model.mapFromSource(src_idx)
             if not proxy_idx.isValid():
+                logger.debug(f"[FileTree] 恢复队列跳过(proxy 无效): {path}")
                 self._pending_expand.pop(0)
                 continue  # 父级尚未加载，当前不可达
             if not node.loaded:
@@ -618,7 +624,11 @@ class FileTreeCard(QWidget):
                 return
             self._pending_expand.pop(0)
             if not self._tree_view.isExpanded(proxy_idx):
+                t0 = time.perf_counter()
                 self._tree_view.expand(proxy_idx)
+                dt = (time.perf_counter() - t0) * 1000
+                if dt > 50:
+                    logger.warning(f"[FileTree] 恢复展开慢: {path} expand {dt:.0f}ms")
         self._finish_state_restore()
 
     def _finish_state_restore(self) -> None:
@@ -714,18 +724,6 @@ class FileTreeCard(QWidget):
         font_family = ctx.get("font_family", "Microsoft YaHei")
         font_size = ctx.get("font_size", 14)
 
-        self._title_label.setStyleSheet(
-            f"color: {tc}; background: transparent; "
-            f"font-family: '{font_family}'; font-size: {font_size}px; font-weight: bold;"
-        )
-
-        self._top_bar.setStyleSheet(
-            f"#file-tree-top-bar {{"
-            f"  background: transparent;"
-            f"  border-bottom: 1px solid {border_c.name() + hex(border_c.alpha())[2:].zfill(2)};"
-            f"}}"
-        )
-
         is_dark = ctx.get("is_dark", True)
         hover_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.06)"
 
@@ -737,7 +735,18 @@ class FileTreeCard(QWidget):
             scrollbar_style = get_unified_scrollbar_style()
         except Exception:
             scrollbar_style = ""
-        self._tree_view.setStyleSheet(
+
+        title_style = (
+            f"color: {tc}; background: transparent; "
+            f"font-family: '{font_family}'; font-size: {font_size}px; font-weight: bold;"
+        )
+        top_bar_style = (
+            f"#file-tree-top-bar {{"
+            f"  background: transparent;"
+            f"  border-bottom: 1px solid {border_c.name() + hex(border_c.alpha())[2:].zfill(2)};"
+            f"}}"
+        )
+        tree_style = (
             f"#file-tree-widget {{"
             f"  background: transparent; border: none;"
             f"  color: {tc_hex}; font-size: {font_size}px;"
@@ -750,6 +759,24 @@ class FileTreeCard(QWidget):
             f"}}"
             f"{scrollbar_style}"
         )
+        ph_color = "rgba(255,255,255,0.4)" if is_dark else "rgba(0,0,0,0.4)"
+        placeholder_style = (
+            f"color: {ph_color}; background: transparent; font-family: '{font_family}'; font-size: {font_size}px;"
+        )
+
+        # ★ 签名缓存：产出（全部样式串 + 字体）与上次全等时跳过所有 set。
+        # 切工作台页 / 项目联动高频走这里，对整棵 QTreeView 重复
+        # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
+        # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
+        # 产出必然不变 —— 跳过后切页路径零成本。
+        signature = (title_style, top_bar_style, tree_style, placeholder_style, font_family, font_size)
+        if signature == self._theme_signature:
+            return
+        self._theme_signature = signature
+
+        self._title_label.setStyleSheet(title_style)
+        self._top_bar.setStyleSheet(top_bar_style)
+        self._tree_view.setStyleSheet(tree_style)
 
         self._scroll_area.setStyleSheet("#file-tree-scroll { background: transparent; border: none;}")
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
@@ -757,10 +784,7 @@ class FileTreeCard(QWidget):
         self._tree_view.setFont(QFont(font_family, font_size))
 
         # 占位页主题色
-        _ph_color = "rgba(255,255,255,0.4)" if is_dark else "rgba(0,0,0,0.4)"
-        self._placeholder.setStyleSheet(
-            f"color: {_ph_color}; background: transparent; font-family: '{font_family}'; font-size: {font_size}px;"
-        )
+        self._placeholder.setStyleSheet(placeholder_style)
         self._ph_page.setStyleSheet("background: transparent;")
         self._stack.setStyleSheet("background: transparent;")
 
@@ -952,9 +976,13 @@ class FileTreeCard(QWidget):
         self._request_scan(dir_path, lambda entries, _d=dir_path: self._on_lazy_scan_done(entries, _d))
 
     def _on_lazy_scan_done(self, entries: List[_DirEntry], dir_path: str):
+        t0 = time.perf_counter()
         self._source_model.populate_children(dir_path, entries)
         if os.path.isdir(dir_path):
             self._watcher.add_path(dir_path)
+        dt = (time.perf_counter() - t0) * 1000
+        if dt > 50:
+            logger.warning(f"[FileTree] 子目录落地慢: {dir_path} populate+watch {dt:.0f}ms ({len(entries)} 条)")
         self._process_expand_queue()  # 恢复队列：本层加载完成，展开下一层
 
     # ── 展开/折叠 ──
@@ -969,7 +997,11 @@ class FileTreeCard(QWidget):
         # fetchMore 已在 Qt 层自动触发扫描，这里只管理文件监听与展开态落盘
         if not self._source_model.node_is_loading(dir_path) and not self._source_model.node_is_loaded(src_idx):
             logger.debug(f"[FileTree] 展开未加载目录(应由 fetchMore 触发): {dir_path}")
-        self._watcher.add_path(dir_path)
+        # ★ add_path 挪出 expanded 同步信号链：QFileSystemWatcher.addPath 在
+        # Windows 上对被占用的目录（IDE/其他实例持有句柄、杀毒实时扫描）可能
+        # 长时间阻塞，同步执行会把 expand() 整体冻结（实测恢复展开状态时出现
+        # 10s 级卡顿）。延迟到下一轮事件循环，目录监听晚一拍无感知。
+        QTimer.singleShot(0, lambda p=dir_path: self._watcher.add_path(p))
         self._live_expanded.add(dir_path)
         self._schedule_persist()
 
