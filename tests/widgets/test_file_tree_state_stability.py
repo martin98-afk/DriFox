@@ -22,6 +22,9 @@ from pathlib import Path
 from PyQt5.QtCore import QItemSelectionModel
 from PyQt5.QtWidgets import QApplication
 
+# FileTreeCard 是 QWidget：构造前必须存在 QApplication（否则 qFatal 0xC0000409）
+_QAPP = QApplication.instance() or QApplication(sys.argv)
+
 _PLUGIN_UI = Path(__file__).resolve().parent.parent.parent / "plugins" / "file-tree" / "ui"
 
 
@@ -89,7 +92,8 @@ class _FakeThread:
         self.started.emit()
 
     def quit(self):
-        pass
+        # 对齐真实语义：quit → 线程事件循环退出 → finished（收尾槽置 None + pump）
+        self.finished.emit()
 
     def wait(self, ms=0):
         return True
@@ -99,15 +103,18 @@ class _FakeThread:
 
 
 class _FakeScanner:
-    def __init__(self):
+    """同步桩：目录构造时绑定、scan() 无参（对齐 _TreeScanner 新接口）"""
+
+    def __init__(self, directory=""):
+        self._directory = directory
         self.finished = _FakeSignal()
         self.error = _FakeSignal()
 
     def moveToThread(self, thread):
         pass
 
-    def scan(self, directory):
-        self.finished.emit(_scan_dir(directory))
+    def scan(self):
+        self.finished.emit(_scan_dir(self._directory))
 
 
 def _make_card(root, monkeypatch):
@@ -412,9 +419,14 @@ class TestScanQueueNoMutualKill:
             stale_path = str(root / "stale_dir")
             card._scan_queued.add(os.path.normcase(os.path.normpath(stale_path)))
             called = []
-            card._dispatch_scan_done(
-                gen, os.path.normcase(os.path.normpath(stale_path)), stale_path, lambda e: called.append(e), []
+            card._worker_thread = _FakeThread()  # 新收尾槽会调 quit()，须可调用
+            card._current_dispatch = (
+                gen,
+                os.path.normcase(os.path.normpath(stale_path)),
+                stale_path,
+                lambda e: called.append(e),
             )
+            card._on_scan_finished([])
 
             assert called == []  # 旧世代结果丢弃
             # key 必须摘掉：漏摘会让该目录此后所有请求被当成重复而丢弃
@@ -439,7 +451,9 @@ class TestScanQueueNoMutualKill:
             card._scan_gen_free = None
 
             gen = card._scan_gen
-            card._dispatch_scan_error(gen, "k", str(sub), "boom")
+            card._worker_thread = _FakeThread()  # 新收尾槽会调 quit()，须可调用
+            card._current_dispatch = (gen, "k", str(sub), None)
+            card._on_scan_error("boom")
 
             assert card._source_model.node_is_failed(str(sub)) is True
             assert card._source_model.canFetchMore(src_idx) is False
@@ -465,7 +479,9 @@ class TestScanQueueNoMutualKill:
             # 桩：回调收到空 entries 且节点未 loaded（populate_children 找不到节点）
             card._source_model.remove_node(str(sub))
             gen = card._scan_gen
-            card._dispatch_scan_done(gen, "k", str(sub), lambda e: None, [])
+            card._worker_thread = _FakeThread()  # 新收尾槽会调 quit()，须可调用
+            card._current_dispatch = (gen, "k", str(sub), lambda e: None)
+            card._on_scan_finished([])
 
             # 节点已被移除 → 不误加熔断（find_node 返回 None）
             assert card._source_model.node_is_failed(str(sub)) is False
@@ -499,6 +515,136 @@ class TestInterruptedScanLoadingMark:
             assert card._source_model.node_is_loading(str(sub)) is False
         finally:
             card._worker_thread = None
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+
+class TestRealThreadScanLifecycle:
+    """真实 QThread 生命周期回归（打开文件树整窗卡死的根因）
+
+    旧实现三宗罪（同一根源：lambda 连接 + 不 quit）：
+    1. ``started.connect(lambda: scan)`` 无 receiver → PyQt queued 回主线程
+       → ``os.scandir`` 全程占用主线程（大目录卡 UI）
+    2. 扫描完成直接 ``self._worker_thread = None`` → Python GC 掉**仍在运行**
+       的 QThread → Qt5 ``~QThread`` qFatal → 0xC0000409 整窗死
+       （root_watch 同步桩注释里的 STATUS_STACK_BUFFER_OVERRUN 即此 bug）
+    3. 无 quit() → worker 事件循环永不退出 → 每次扫描泄漏一个线程
+
+    本用例走**真实 QThread**（不换桩），泵主线程事件循环驱动全链路：
+    - scan 必须在 worker 线程执行（thread id != 主线程）
+    - finished 回调必须回主线程（model 操作不越线程）
+    - 收尾后 ``_worker_thread is None``（线程真 finished 才置 None，GC 安全）
+    """
+
+    def test_scan_runs_in_worker_thread_and_cleans_up(self, tmp_path, monkeypatch):
+        import threading
+        import time as _time
+
+        main_tid = threading.get_ident()
+        scan_tids = set()
+
+        # spy：记录 scan() 实际执行线程（真实 _TreeScanner.scan 在 worker 亲和下被调）
+        orig_scan = cards_mod._TreeScanner.scan
+
+        def _spy_scan(self):
+            scan_tids.add(threading.get_ident())
+            return orig_scan(self)
+
+        monkeypatch.setattr(cards_mod._TreeScanner, "scan", _spy_scan)
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "a.txt").write_text("x")
+        (root / "b.txt").write_text("y")
+
+        card = FileTreeCard()
+        try:
+            card._project_root = str(root)
+            card._tree_view.project_root = str(root)
+            card._watcher.set_root(str(root))
+
+            card._async_load_tree()
+
+            deadline = _time.monotonic() + 10.0
+            while _time.monotonic() < deadline:
+                QApplication.processEvents()
+                if card._worker_thread is None and card._source_model._root_entries:
+                    # 收集 scan 线程 id：scanner 已在 pump 中创建过
+                    break
+                _time.sleep(0.005)
+
+            # 泵到队列完全排空（_on_thread_finished 收尾）
+            deadline = _time.monotonic() + 5.0
+            while _time.monotonic() < deadline:
+                QApplication.processEvents()
+                if card._worker_thread is None and not card._scan_queue:
+                    break
+                _time.sleep(0.005)
+
+            assert card._source_model._root_entries, "根扫描结果未落地"
+            assert card._worker_thread is None, "worker 线程未收尾（泄漏 / GC 风险）"
+            assert card._scan_queued == set(), "dedup 集合未清空"
+            assert scan_tids, "scan 未被调用"
+            assert main_tid not in scan_tids, "scan 在主线程执行（lambda 连接回退 bug 回归）"
+
+            # 用 model 回调链路验证线程归属：再发起一次子目录扫描，回调走真实落地链
+            (root / "sub").mkdir()
+            orig_populate = card._source_model.populate_children
+            captured = {}
+
+            def _spy_populate(dir_path, entries):
+                captured["tid"] = threading.get_ident()
+                return orig_populate(dir_path, entries)
+
+            card._source_model.populate_children = _spy_populate
+            sub_dir = str(root / "sub")
+            card._request_scan(sub_dir, lambda e, _d=sub_dir: card._on_lazy_scan_done(e, _d))
+            deadline = _time.monotonic() + 10.0
+            while _time.monotonic() < deadline:
+                QApplication.processEvents()
+                if "tid" in captured:
+                    break
+                _time.sleep(0.005)
+
+            assert "tid" in captured, "子目录扫描未完成"
+            assert captured["tid"] == main_tid, "populate_children 必须在主线程执行（model 线程纪律）"
+        finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+    def test_worker_thread_never_leaks_across_rounds(self, tmp_path):
+        """连续多轮扫描：每轮线程都收尾，不留悬挂 QThread（泄漏回归）"""
+        import time as _time
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        for i in range(4):
+            (root / f"d{i}").mkdir()
+
+        card = FileTreeCard()
+        try:
+            card._project_root = str(root)
+            card._tree_view.project_root = str(root)
+            card._watcher.set_root(str(root))
+            card._async_load_tree()
+            done_calls = []
+            for i in range(4):
+                card._request_scan(str(root / f"d{i}"), lambda e, _i=i: done_calls.append(_i))
+
+            deadline = _time.monotonic() + 15.0
+            while _time.monotonic() < deadline:
+                QApplication.processEvents()
+                if card._worker_thread is None and not card._scan_queue and not card._scan_queued:
+                    break
+                _time.sleep(0.005)
+
+            assert card._worker_thread is None
+            assert not card._scan_queue and not card._scan_queued
+            # 4 轮扫描回调全部按队列序消化（串行队列不丢任务、不悬挂线程）
+            assert sorted(done_calls) == [0, 1, 2, 3]
+        finally:
             card._cleanup_worker()
             card.deleteLater()
             QApplication.processEvents()

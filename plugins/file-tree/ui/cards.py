@@ -307,6 +307,9 @@ class FileTreeCard(QWidget):
         self._colors: dict = {}
         self._project_root: str = ""
         self._current_scan_target: str = ""  # 当前扫描目标目录
+        # 当前在途扫描的派发上下文 (gen, key, scan_dir, on_done)。串行队列保证
+        # 同一时刻至多一个在途扫描，回调经主线程槽读取无需加锁。
+        self._current_dispatch: tuple = ()
 
         # 视图状态缓存：按项目根索引保存展开/选中/滚动（换项目时先存旧根，
         # 切回同根时还原 —— 整树 reset 唯一的兜底）。
@@ -813,61 +816,77 @@ class FileTreeCard(QWidget):
         return True
 
     def _pump_scan_queue(self) -> None:
-        """推进扫描队列：空闲则取队首开扫（任何时刻至多一个扫描在跑）"""
+        """推进扫描队列：空闲则取队首开扫（任何时刻至多一个扫描在跑）
+
+        ★ 信号连接纪律（此前卡死根因，勿改回 lambda）：必须连接 **bound
+          method**，PyQt 按 receiver 的线程亲和决定执行线程 ——
+          - ``started → scanner.scan``：receiver=scanner（worker 亲和）→ 扫描
+            真正落在 worker 线程；连 lambda 时会被 queued 回主线程，扫描全程
+            卡 UI。
+          - ``scanner.finished/error → card 槽``：receiver=card（主线程亲和）→
+            结果排队回主线程处理，model 操作不越线程。
+        ★ 生命周期：结果槽里 ``quit()`` 收线程 → ``_on_thread_finished``
+          （线程真 finished 后）才置 None。直接置 None 会 GC 掉仍在运行的
+          QThread，Qt5 ``~QThread`` 直接 qFatal（0xC0000409 整窗死）。
+        """
         if self._worker_thread is not None or not self._scan_queue:
             return
         scan_dir, key, on_done = self._scan_queue.pop(0)
         gen = self._scan_gen
         self._current_scan_target = scan_dir
+        self._current_dispatch = (gen, key, scan_dir, on_done)
 
         self._worker_thread = QThread()
-        self._scanner = _TreeScanner()
+        self._scanner = _TreeScanner(scan_dir)
         self._scanner.moveToThread(self._worker_thread)
 
-        _scanner = self._scanner
-        self._worker_thread.started.connect(lambda: _scanner.scan(scan_dir))
-        self._scanner.finished.connect(lambda entries: self._dispatch_scan_done(gen, key, scan_dir, on_done, entries))
-        self._scanner.error.connect(lambda msg: self._dispatch_scan_error(gen, key, scan_dir, msg))
+        self._worker_thread.started.connect(self._scanner.scan)
+        self._scanner.finished.connect(self._on_scan_finished)
+        self._scanner.error.connect(self._on_scan_error)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        self._worker_thread.finished.connect(self._on_thread_finished)
 
         self._worker_thread.start()
 
-    def _dispatch_scan_done(self, gen: int, key: str, scan_dir: str, on_done, entries: List[_DirEntry]):
-        """扫描成功回调（旧世代结果作废）"""
-        self._worker_thread = None
-        self._scanner = None
+    def _on_scan_finished(self, entries: List[_DirEntry]):
+        """扫描成功（主线程槽，scanner.finished queued 回）：落地结果 + 收线程"""
+        gen, key, scan_dir, on_done = self._current_dispatch
         # key 无论世代都要摘：漏摘会让该目录永久留在 _scan_queued，此后
         # 所有请求都被当成重复而丢弃（该目录再也加载不出来）
         self._scan_queued.discard(key)
-        if gen != self._scan_gen:
-            self._pump_scan_queue()  # 世代已变（换根）：丢弃结果，继续跑新队列
-            return
-        self._source_model.clear_loading(scan_dir)
-        on_done(entries)
-        # 落地后仍未加载（节点丢失 / 目录不可读）→ 熔断，避免反反复重扫
-        if not _same_path(scan_dir, self._project_root):
-            node = self._source_model.find_node(scan_dir)
-            if node is not None and node.is_dir and not node.loaded:
-                self._source_model.mark_failed(scan_dir)
-        self._pump_scan_queue()
-        self._process_expand_queue()  # 队列推进：下一个目录入队 / 收尾
+        if gen == self._scan_gen:
+            self._source_model.clear_loading(scan_dir)
+            on_done(entries)
+            # 落地后仍未加载（节点丢失 / 目录不可读）→ 熔断，避免反反复复重扫
+            if not _same_path(scan_dir, self._project_root):
+                node = self._source_model.find_node(scan_dir)
+                if node is not None and node.is_dir and not node.loaded:
+                    self._source_model.mark_failed(scan_dir)
+        if self._worker_thread is not None:
+            self._worker_thread.quit()  # 异步退出 → finished → _on_thread_finished 收尾
 
-    def _dispatch_scan_error(self, gen: int, key: str, scan_dir: str, error_msg: str):
-        """扫描失败回调（旧世代丢弃）"""
+    def _on_scan_error(self, error_msg: str):
+        """扫描失败（主线程槽）：熔断 + 收线程（旧世代丢弃）"""
+        gen, key, scan_dir, _on_done = self._current_dispatch
+        # key 无论世代都要摘（同 _on_scan_finished：漏摘会让目录永久卡死）
+        self._scan_queued.discard(key)
+        if gen == self._scan_gen:
+            self._source_model.clear_loading(scan_dir)
+            self._source_model.mark_failed(scan_dir)  # 熔断：不再自动重试
+            logger.error(f"[FileTree] 扫描失败: {error_msg}")
+            if _same_path(scan_dir, self._project_root):
+                self._show_error("扫描目录时出错")  # 仅根目录失败才报错（子目录失败不空整树）
+        if self._worker_thread is not None:
+            self._worker_thread.quit()
+
+    def _on_thread_finished(self):
+        """worker 线程真 finished 后的收尾（主线程槽）：此刻置 None 才不会
+        GC 到仍在运行的 QThread（qFatal 0xC0000409 卡死根因），随后推进队列
+        与展开恢复队列。"""
         self._worker_thread = None
         self._scanner = None
-        # key 无论世代都要摘（同 _dispatch_scan_done：漏摘会让目录永久卡死）
-        self._scan_queued.discard(key)
-        if gen != self._scan_gen:
-            self._pump_scan_queue()
-            return
-        self._source_model.clear_loading(scan_dir)
-        self._source_model.mark_failed(scan_dir)  # 熔断：不再自动重试
-        logger.error(f"[FileTree] 扫描失败: {error_msg}")
-        if _same_path(scan_dir, self._project_root):
-            self._show_error("扫描目录时出错")  # 仅根目录失败才报错（子目录失败不空整树）
         self._pump_scan_queue()
-        self._process_expand_queue()
+        self._process_expand_queue()  # 队列推进：下一个目录入队 / 收尾
 
     def _cleanup_worker(self):
         """停止扫描并清空队列（仅供销毁 / 关闭路径）"""
