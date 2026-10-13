@@ -308,3 +308,33 @@ def test_workbench_restore_falls_back_to_default_without_memory(qapp):
     TabManagerWindow._maybe_restore_workbench_after_squeeze(win)
     assert win._wb_visible_target is True
     assert win._workbench_frame_w == 0, "无记忆时不得乱写宽度"
+
+
+def test_drag_settle_triggers_workbench_collapse(qapp):
+    """★ 拖右把手落定后必须跑一次 squeeze 判定（否则工作台被压穿也不折）
+
+    拖左把手时 Qt 会递归压左栏，左栏有 resizeEvent 自动折叠兜底；但拖右把手
+    （拉宽工作台）时 Qt 不递归到工作台，只能靠 _on_splitter_idle 末尾显式补判定。
+    """
+    win = _StubWindow(left=414, total=814, wb_width=300)
+    win._splitter_dragging = False
+    win._left_card_area_active = lambda: False
+    win._finish_splitter_idle = lambda: None
+    win._tab_panel._dragging_splitter = False
+    win._tab_panel.set_dragging_splitter = lambda d: None
+    TabManagerWindow._on_splitter_idle(win)
+    assert win._wb_collapsed_by_squeeze is True, "拖右把手落定必须折工作台"
+    assert win._wb_visible_target is False
+
+
+def test_drag_settle_skipped_during_resize_blocking(qapp):
+    """窗口 resize 周期内（几何未收拢）→ idle 不跑 squeeze 判定，交给 _deferred_resize_complete"""
+    win = _StubWindow(left=414, total=814, wb_width=300)
+    win._splitter_dragging = False
+    win._left_card_area_active = lambda: False
+    win._finish_splitter_idle = lambda: None
+    win._tab_panel._dragging_splitter = False
+    win._tab_panel.set_dragging_splitter = lambda d: None
+    win._resize_blocking = True  # resize 周期中
+    TabManagerWindow._on_splitter_idle(win)
+    assert win._wb_collapsed_by_squeeze is False, "resize 期不得在 idle 里判定"
