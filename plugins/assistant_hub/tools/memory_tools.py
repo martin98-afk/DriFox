@@ -276,7 +276,7 @@ _WRITE_SCHEMA = {
                 },
                 "content": {
                     "type": "string",
-                    "description": "要写入的内容（daily=一条简短记录；project/global=完整的新文件内容）",
+                    "description": "要写入的内容（daily=一条简短记录，勿写日期标题；project/global=完整的新文件内容）",
                 },
                 "date": {"type": "string", "description": "scope=daily 可选：补写某天的日期 YYYY-MM-DD，缺省今天"},
             },

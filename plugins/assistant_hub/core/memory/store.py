@@ -172,7 +172,7 @@ def write_project_memory(workdir: str | Path, aid: str, content: str) -> bool:
 
 
 def append_daily(workdir: str | Path, aid: str, text: str, date: str = "") -> Dict:
-    """追加一条到当日日志（append-only；首条自动补 `# YYYY-MM-DD` 标题）。"""
+    """追加一条到当日日志（append-only；纯条目流，日期由文件名承载，条目间空行分隔）。"""
     if not workdir:
         return {"ok": False, "error": "no_workdir"}
     body = (text or "").strip()
@@ -183,8 +183,8 @@ def append_daily(workdir: str | Path, aid: str, text: str, date: str = "") -> Di
         path.parent.mkdir(parents=True, exist_ok=True)
         is_new = not path.exists() or path.stat().st_size == 0
         with open(path, "a", encoding="utf-8") as f:
-            if is_new:
-                f.write(f"# {path.stem}\n\n")
+            if not is_new:
+                f.write("\n")  # 条目间空行分隔（Markdown 段落边界）
             f.write(body + "\n")
     try:
         chars = len(path.read_text(encoding="utf-8"))

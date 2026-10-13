@@ -31,17 +31,18 @@ def test_project_memory_roundtrip(tmp_path):
     assert m.project_memory_path(wd, "build") == Path(wd) / ".drifox" / "memory" / "build" / "MEMORY.md"
 
 
-def test_append_daily_first_creates_header(tmp_path):
+def test_append_daily_no_header_entry_stream(tmp_path):
     wd = str(tmp_path / "proj")
     r1 = m.append_daily(wd, "build", "- 修复了 X 崩溃")
     assert r1["ok"]
     r2 = m.append_daily(wd, "build", "- 新增了 Y 功能")
     assert r2["ok"]
     body = m.read_daily(wd, "build")
-    # 首条自动补日期标题，仅一次
-    assert body.count("# ") == 1
+    # 文件名即日期：正文纯条目流，无日期标题；条目间空行分隔
+    assert not body.lstrip().startswith("#")
     assert "修复了 X 崩溃" in body and "新增了 Y 功能" in body
     assert body.index("X 崩溃") < body.index("Y 功能")
+    assert "\n\n" in body  # 条目间有空行
 
 
 def test_append_daily_empty_rejected(tmp_path):

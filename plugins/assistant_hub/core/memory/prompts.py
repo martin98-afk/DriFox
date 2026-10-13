@@ -56,7 +56,7 @@ def build_memory_system(global_file: str, project_dir: str) -> str:
 目录：{project_dir}/｜作用域：仅当前项目
 
 文件：
-- {project_dir}/YYYY-MM-DD.md — 每日工作日志。**只追加，绝不覆盖**（memory_write scope=daily）。
+- {project_dir}/YYYY-MM-DD.md — 每日工作日志。**只追加，绝不覆盖**（memory_write scope=daily）。文件名即日期，content 勿再写日期标题。
 - {project_dir}/MEMORY.md — 项目长期笔记（memory_write scope=project 整体更新）。上限 3,000 字符。
 - 今天的日志不存在时，memory_write 会自动创建；不要手动建文件。
 
