@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 TabManagerWindow — Tab 管理器宿主窗口（无边框现代化窗口）
 
@@ -37,15 +37,31 @@ from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 
-# ── 对话区最大宽度（px）：窗口过宽时限制对话区宽度并居中，两侧留白 ──
-# 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
-_MAX_CHAT_WIDTH = 1000
+# ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
+# 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
+# full 档返回 0 = 不限宽，对话区占满窗口。
+_CHAT_WIDTH_PRESETS = {"narrow": 820, "standard": 1000, "wide": 1200, "full": 0}
+
+
+def _current_chat_width() -> int:
+    """当前对话区限宽（px）；0 = 不限宽"""
+    try:
+        key = Settings.get_instance().ui_chat_width.value
+    except Exception:
+        key = "standard"
+    return _CHAT_WIDTH_PRESETS.get(key, _CHAT_WIDTH_PRESETS["standard"])
+
 
 # ── 覆盖层「配置类」卡片最大宽度（px）──
 # 比对话区稍宽，同样在超宽窗口下限宽居中，避免系统配置卡片无限拉伸。
 # 仅作用于配置类卡片（系统设置/服务商/添加服务商/Hook/MCP）；差异对比、子智能体
 # 会话等内容型卡片不限宽，铺满对话区。
-_MAX_OVERLAY_WIDTH = _MAX_CHAT_WIDTH + 100
+# 不限宽档（full）下覆盖层同步铺满，否则跟随对话区宽度 +100。
+def _current_overlay_width() -> int:
+    chat_w = _current_chat_width()
+    return chat_w + 100 if chat_w > 0 else 0
+
+
 _CONFIG_REPLACE_CARDS = frozenset({"settings", "provider_edit", "provider_picker", "hook_edit", "mcp_edit"})
 
 # ── 标题栏 tab：内置「聊天」常驻 tab + 已知「内置替换」全局卡片 ──
@@ -2565,7 +2581,7 @@ class TabManagerWindow(FramelessWindow):
         #    仅内容区（_content_stack：消息列表+输入区+覆盖层）限宽居中。
         #    wrapper 作为 _dock_splitter 的中间窗格与左右 dock 容器并列：
         #    dock 卡片展开时从 wrapper 借空间、可占满边框全宽；
-        #    wrapper 内部 content_stack 按 _MAX_CHAT_WIDTH 动态居中留白。 ──
+        #    wrapper 内部 content_stack 按当前限宽档位动态居中留白。 ──
         self._chat_wrapper = QWidget(self._chat_frame)
         self._chat_wrapper.setObjectName("chatWrapper")
         self._chat_wrapper_layout = QHBoxLayout(self._chat_wrapper)
@@ -2721,6 +2737,24 @@ class TabManagerWindow(FramelessWindow):
         # macOS 软置顶：应用激活时补抬升（详见 _on_app_state_changed）
         if _IS_MAC:
             QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
+
+        # 对话区限宽档位变更（设置-外观）→ 立即重算 wrapper margins，
+        # 无需等窗口 resize；同时通知已存在的消息卡按新宽度重新折行。
+        try:
+            Settings.get_instance().ui_chat_width.valueChanged.connect(self._on_chat_width_changed)
+        except Exception:
+            pass
+
+    def _on_chat_width_changed(self, *_args):
+        """限宽档位变化 → 重算对话区/覆盖层留白 + 消息卡宽度"""
+        self._sync_chat_wrapper_width()
+        # 强制所有窗口的消息卡按新容器宽度重算（full 档铺满 / 窄档收紧）。
+        # 走既有的分帧宽度同步链，30 张卡不会冻结主线程。
+        for win in self._windows:
+            try:
+                win._sync_all_cards_width()
+            except Exception:
+                pass
 
     # ── 侧边栏内 left 卡片区：宿主编排（frame 加宽 / TabPanel 折叠态 / 对话区让位） ──
 
@@ -5949,9 +5983,9 @@ class TabManagerWindow(FramelessWindow):
     def eventFilter(self, obj, event):
         """对话区 wrapper Resize → 动态调整左右 margins 实现限宽居中
 
-        窗口超宽时：wrapper 宽度 > _MAX_CHAT_WIDTH，左右各留
-        (wrapper_w - _MAX_CHAT_WIDTH)/2 的空白，chat_frame 精确居中；
-        窗口不足该宽度时 margins 归零，chat_frame 占满 wrapper。
+        窗口超宽时：wrapper 宽度 > 当前限宽档位，左右各留
+        (wrapper_w - 档位宽)/2 的空白，chat_frame 精确居中；
+        窗口不足该宽度（或档位为 full）时 margins 归零，chat_frame 占满 wrapper。
         """
         # ── 右侧工作台浮层 hover 转发 ──
         # 浮层自身 WA_Hover 触发 HoverEnter/Leave，但不开信号；
@@ -6014,9 +6048,9 @@ class TabManagerWindow(FramelessWindow):
     def _sync_chat_wrapper_width(self):
         """按当前 wrapper 宽度设置左右 margins，实现限宽居中
 
-        - 对话区（index 0）：按 _MAX_CHAT_WIDTH 限宽居中
+        - 对话区（index 0）：按当前宽度档位限宽居中；full 档不限宽，margins 归零
         - 覆盖层（index 1）：配置类卡片（系统设置/服务商/Hook/MCP）按
-          _MAX_OVERLAY_WIDTH 限宽居中；内容型卡片（diff_viewer、
+          覆盖层宽度限宽居中；内容型卡片（diff_viewer、
           子智能体会话、full 浮动卡）铺满全宽
         """
         wrapper = self._chat_wrapper
@@ -6024,9 +6058,11 @@ class TabManagerWindow(FramelessWindow):
         if w <= 0:
             return
         if self._content_stack.currentIndex() == 1:
-            pad = max(0, (w - _MAX_OVERLAY_WIDTH) // 2) if self._overlay_should_limit_width() else 0
+            overlay_w = _current_overlay_width()
+            pad = max(0, (w - overlay_w) // 2) if overlay_w and self._overlay_should_limit_width() else 0
         else:
-            pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
+            chat_w = _current_chat_width()
+            pad = max(0, (w - chat_w) // 2) if chat_w else 0
         layout = self._chat_wrapper_layout
         if layout.contentsMargins().left() != pad:
             layout.setContentsMargins(pad, 0, pad, 0)
