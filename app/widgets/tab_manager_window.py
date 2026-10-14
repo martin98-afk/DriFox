@@ -4264,7 +4264,7 @@ class TabManagerWindow(FramelessWindow):
             window._tab_title_changed_slot = _on_win_title_changed
             window.windowTitleChanged.connect(_on_win_title_changed)
 
-            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示 + 全局桌宠）
+            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
             def _on_ai_state_changed(state, _win=window):
                 if _sip.isdeleted(_win):
                     return
@@ -4283,10 +4283,6 @@ class TabManagerWindow(FramelessWindow):
                 else:  # idle
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
-                # 聚合 AI 状态 → 全局桌宠：仅当前激活窗的状态被转发，
-                # 避免多 tab 下旧窗状态串扰（pet 只连一次 active_ai_state_changed）。
-                if _win is self.get_current_window():
-                    self.active_ai_state_changed.emit(state)
 
             window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)

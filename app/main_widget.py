@@ -8583,11 +8583,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.refresh_layer(self._window_id, "status")
 
     # ══════════════════════════════════════════════════════════════
-    # 像素小狐桌宠 — 集中 AI 状态管理
+    # ══════════════════════════════════════════════════════════════
+    # AI 状态管理（驱动 Tab 边框动画 + 团队 runtime 状态同步）
     # ══════════════════════════════════════════════════════════════
 
     def _set_ai_state(self, state: str) -> None:
-        """设置 AI 状态并通知桌宠（仅变化时发射信号）"""
+        """设置 AI 状态并发射信号（仅变化时）"""
         if state != self._ai_state:
             self._ai_state = state
             self.ai_state_changed.emit(state)
@@ -8606,41 +8607,6 @@ class OpenAIChatToolWindow(ToolWindow):
         elif state == "idle":
             TeamManager.get_instance().set_member_runtime_status(self._window_id, "idle")
         # error 等其余状态不覆盖（重试期保持 busy，避免闪烁）
-
-    def _on_pet_typing(self) -> None:
-        """★ 用户输入文字时让全局桌宠好奇看向输入框
-
-        桌宠已下沉为 TabManagerWindow 唯一全局浮层（见 tab_manager_window），
-        本窗口仅作转发：输入框打字 → 全局 pet 播放陪写动画。
-        """
-        if getattr(self, "_is_destroyed", False):
-            return
-        # 只在有实际内容输入时触发（避免清空/加载历史时的误触发）
-        text = self.input_area.toPlainText().strip() if hasattr(self, "input_area") else ""
-        if not text:
-            return
-        tm = TabManagerWindow.get_instance()
-        if tm is not None and getattr(tm, "pixel_pet", None) is not None:
-            tm.pixel_pet.on_user_typing()
-
-    def _pet_set_state(self, state: str) -> None:
-        """转发业务/AI 状态到 TabManager 全局桌宠。
-
-        仅当前激活窗的状态驱动全局桌宠，避免多 tab 下后台窗状态串扰
-        （语义对齐原"每窗独立 pet"：仅本窗可见时其状态才上宠）。
-        """
-        tm = TabManagerWindow.get_instance()
-        if tm is None:
-            return
-        pet = getattr(tm, "pixel_pet", None)
-        if pet is None:
-            return
-        if self is not tm.get_current_window():
-            return
-        try:
-            pet.set_state(state)
-        except Exception:
-            pass
 
     # ══════════════════════════════════════════════════════════════
 
@@ -14421,24 +14387,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(200, self._process_next_lazy_batch)
 
     def _archive_history_session(self, index: int):
-        ## 触发警示动画
-        self._pet_set_state("warning")
 
         # 🛡️ 使用历史面板缓存的 _all_history 列表查找 session_id，
         # 避免因流式保存导致排序变化后 index 偏移指向错误会话。
         session_record = self._history_popup_card.get_history_at_index(index)
         if not session_record:
-            self._pet_set_state("idle")
             return
         session_id = session_record.get("session_id")
         if not session_id:
-            self._pet_set_state("idle")
             return
         # 通过 session_id 找到全量列表中的真实 index
         full_index = self.history_manager.find_index_by_session_id(session_id)
         if full_index is None:
             # 会话不存在，恢复状态
-            self._pet_set_state("idle")
             return
 
         archived_current = self._current_session_id is not None and session_id == self._current_session_id
@@ -14487,8 +14448,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 回退：手术式删除失败，走全量刷新
                     self._notify_history_data_changed()
 
-        # 操作完成，恢复正常状态
-        self._pet_set_state("idle")
 
     def _on_team_archive_requested(self, run_id: str):
         """归档团队会话（合并条目「归档」按钮）
@@ -14500,15 +14459,12 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not run_id or not self.history_manager:
             return
-        ## 触发警示动画
-        self._pet_set_state("warning")
 
         try:
             members = self.history_manager.get_team_sessions_by_run_id(run_id)
         except Exception:
             members = []
         if not members:
-            self._pet_set_state("idle")
             InfoBar.warning(
                 "归档失败",
                 "未找到该团队的会话记录",
@@ -14568,8 +14524,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
-        # 操作完成，恢复正常状态
-        self._pet_set_state("idle")
 
     def _rename_history_session(self, index: int, new_title: str):
         if not self.history_manager:
@@ -14677,8 +14631,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_archived_session_deleted(self, file_path: str):
         """彻底删除归档会话"""
-        ## 触发警示动画
-        self._pet_set_state("warning")
         from app.widgets.common_dialogs import ConfirmDialog
 
         # 确认对话框
@@ -14700,8 +14652,6 @@ class OpenAIChatToolWindow(ToolWindow):
         _dialog.confirmed.connect(_on_delete_confirm)
         _dialog.exec_()
         if not _confirmed[0]:
-            # 取消操作，恢复正常状态
-            self._pet_set_state("idle")
             return
 
         try:
@@ -14732,9 +14682,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 parent=TabManagerWindow.get_instance() or self.window(),
             )
-        finally:
-            # 操作完成（不论成功或失败），恢复正常状态
-            self._pet_set_state("idle")
 
     def _on_archived_session_renamed(self, file_path: str, new_title: str):
         """重命名归档会话"""
@@ -21399,7 +21346,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复输入框 + 工具栏 + 胶囊发光层
         self._set_bottom_input_visible(True)
         self._restore_after_question_close()
-        self._pet_set_state("streaming")  # 回答后继续回复
         if not self._question_tool_call_id:
             return
 
@@ -21420,7 +21366,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复输入框 + 工具栏 + 胶囊发光层
         self._set_bottom_input_visible(True)
         self._restore_after_question_close()
-        self._pet_set_state("idle")  # 取消则回 idle
 
         if not self._question_tool_call_id:
             return
@@ -21622,7 +21567,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def _restore_after_permission_close(self) -> None:
         """审批结束统一收尾：切回 streaming 态 + 恢复输入区（对齐提问卡收尾顺序）"""
         self._set_ai_state("streaming")
-        self._pet_set_state("streaming")
         self._set_bottom_input_visible(True)
         self._restore_after_question_close()
         self._focus_input_if_active()
@@ -22463,10 +22407,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
-        ## 触发警示动画
-        self._pet_set_state("warning")
         if not self.history_manager:
-            self._pet_set_state("idle")
             return
 
         # 后端执行归档（可能返回0个会话，但项目本身仍应被清理）
@@ -22542,8 +22483,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新历史插件内的项目选择面板（已归档项目应从列表消失）
         self._refresh_project_selector()
 
-        # 操作完成，恢复正常状态
-        self._pet_set_state("idle")
 
     def _on_export_project(self, project_name: str):
         """导出项目为 .drifox_project 压缩包 — 先选方式再导出（后台线程避免 UI 冻结）"""
@@ -22581,7 +22520,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 root_dir_map = self._build_project_root_dir_map([project_name])
                 root_dir = root_dir_map.get(project_name, "")
 
-            self._pet_set_state("warning")
 
             # 后台线程导出 ZIP，避免大项目阻塞 UI
             self._export_thread = _ProjectExportThread(self.history_manager, project_name, root_dir)
@@ -22597,7 +22535,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_project_export_done(self, zip_path: str, error: str, project_name: str, mode: int):
         """后台导出完成回调（主线程）"""
-        self._pet_set_state("idle")
 
         if error:
             InfoBar.error(
