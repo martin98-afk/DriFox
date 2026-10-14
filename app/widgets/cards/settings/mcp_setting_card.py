@@ -61,6 +61,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
+from app.widgets.status_dot import StatusDot
 
 
 class NoWheelComboBox(ComboBox):
@@ -111,15 +112,6 @@ _MCP_TYPE_GROUPS = [
     ("http", "远程服务 · HTTP"),
     ("sse", "远程服务 · SSE"),
 ]
-
-
-def _status_dot_qss(color: str) -> str:
-    """连接状态灯样式：CSS 圆点（矢量绘制，清晰不裁切）。
-
-    不用 ● 文本字符：小字号实心圆抗锯齿发虚，且全角字形 advance 宽度
-    超出定宽 QLabel 时两侧被裁切。
-    """
-    return f"background-color: {color}; border-radius: 5px; border: none; padding: 0;"
 
 
 def _auth_btn_qss(kind: str) -> str:
@@ -795,7 +787,7 @@ class MCPServerRow(CardWidget):
             tip = error if len(error) <= 400 else error[:400] + "..."
 
         self._current_state = state
-        self._status_dot.setStyleSheet(_status_dot_qss(color))
+        self._status_dot.set_color(color)
         self._status_dot.setToolTip(tip)
 
     def refresh_style(self):
@@ -807,7 +799,7 @@ class MCPServerRow(CardWidget):
         self._token_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
         )
-        self._status_dot.setStyleSheet(_status_dot_qss(_disabled_dot_color()))
+        self._status_dot.set_color(_disabled_dot_color())
         if self._auth_btn is not None and self._auth_btn.isEnabled():
             self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
 
@@ -840,16 +832,6 @@ class MCPServerRow(CardWidget):
         else:
             self._icon_label.deleteLater()
 
-        # 连接状态指示灯（黄=启动中 / 绿=成功 / 红=失败 / 黑=关闭）
-        # 字号压到 11px：● 是实心圆，16px 时比图标还抢眼，主次颠倒。
-        self._current_state = MCPState.DISABLED
-        self._status_dot = QLabel("●")
-        self._status_dot.setFixedWidth(12)
-        self._status_dot.setAlignment(Qt.AlignCenter)
-        self._status_dot.setToolTip("已关闭")
-        self._status_dot.setStyleSheet(
-            f"color: {_disabled_dot_color()}; font-size: {scale_font_size(11)}px; background: transparent; padding: 0;"
-        )
         name_label = StrongBodyLabel(data.get("name", ""))
         name_label.setFixedWidth(100)
         top.addWidget(name_label)
@@ -893,7 +875,13 @@ class MCPServerRow(CardWidget):
             self._auth_btn.clicked.connect(self._on_auth_clicked)
             self.set_authorized(self._has_oauth_token(data))
 
-        # 操作组靠右成组：授权 + 开关 + 编辑 + 删除
+        # 操作组靠右成组：token 占用 + 授权 + 开关 + 编辑 + 删除
+        self._token_label = QLabel("")
+        self._token_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._token_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        )
+        top.addWidget(self._token_label)
         if self._auth_btn is not None:
             top.addWidget(self._auth_btn)
         top.addWidget(self.switch)
@@ -903,24 +891,15 @@ class MCPServerRow(CardWidget):
         # 连接状态指示灯（黄=启动中 / 绿=成功 / 红=失败 / 黑=关闭），放第二行行首，
         # 避免与第一行彩色图标形成双圆点并排。CSS 圆点矢量绘制，不发虚不裁切。
         self._current_state = MCPState.DISABLED
-        self._status_dot = QLabel()
-        self._status_dot.setFixedSize(10, 10)
+        self._status_dot = StatusDot(10, color=_disabled_dot_color())
         self._status_dot.setToolTip("已关闭")
-        self._status_dot.setStyleSheet(_status_dot_qss(_disabled_dot_color()))
 
-        # 第二行：状态灯 + 描述 + 本行 token 占用（token 右对齐，与上行操作组右缘齐平）
+        # 第二行：状态灯 + 描述（token 占用已上移到第一行操作组左侧）
         bottom = QHBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)
         bottom.setSpacing(8)
         bottom.addWidget(self._status_dot)
         bottom.addWidget(self._desc_label, 1)
-
-        self._token_label = QLabel("")
-        self._token_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self._token_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
-        )
-        bottom.addWidget(self._token_label)
 
         layout.addLayout(top)
         layout.addLayout(bottom)
