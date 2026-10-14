@@ -867,15 +867,24 @@ class MCPServerRow(CardWidget):
         self.switch.setChecked(data.get("enabled", True))
         self.switch.checkedChanged.connect(lambda v: self.enabledChanged.emit(self._name, v))
 
-        edit_btn = ToolButton(FluentIcon.EDIT)
-        edit_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
-        edit_btn.setStyleSheet(ButtonStyles.tool_button())
-        edit_btn.clicked.connect(lambda: self.editRequested.emit(self._name))
+        # 编辑 / 删除按钮：只给用户自己添加的 server。
+        # 插件自带的 .mcp.json 是插件的一部分，改它会在插件更新时被覆盖，
+        # 删它更糟：插件仍在、配置没了，且该文件可能被同插件的多个 server 共用，
+        # 删一个会连累其他。用户要停用直接关开关即可，所以插件来源只留开关。
+        # 判定依据：来源是否落在 user-custom 插件（UI 添加的 MCP 只写这里）。
+        _editable = self._is_user_added(data)
+        edit_btn = None
+        del_btn = None
+        if _editable:
+            edit_btn = ToolButton(FluentIcon.EDIT)
+            edit_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
+            edit_btn.setStyleSheet(ButtonStyles.tool_button())
+            edit_btn.clicked.connect(lambda: self.editRequested.emit(self._name))
 
-        del_btn = ToolButton(FluentIcon.CLOSE)
-        del_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
-        del_btn.setStyleSheet(ButtonStyles.tool_button())
-        del_btn.clicked.connect(lambda: self.removeRequested.emit(self._name))
+            del_btn = ToolButton(FluentIcon.CLOSE)
+            del_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
+            del_btn.setStyleSheet(ButtonStyles.tool_button())
+            del_btn.clicked.connect(lambda: self.removeRequested.emit(self._name))
 
         # OAuth 授权按钮：仅 auth.type == "oauth" 的 server 显示。
         # 双态切换：未授权 → 「授权」，点击走完整授权流程；已授权 → 「解绑」，
@@ -899,8 +908,10 @@ class MCPServerRow(CardWidget):
         if self._auth_btn is not None:
             top.addWidget(self._auth_btn)
         top.addWidget(self.switch)
-        top.addWidget(edit_btn)
-        top.addWidget(del_btn)
+        if edit_btn is not None:
+            top.addWidget(edit_btn)
+        if del_btn is not None:
+            top.addWidget(del_btn)
 
         # 连接状态指示灯（黄=启动中 / 绿=成功 / 红=失败 / 黑=关闭），放第二行行首，
         # 避免与第一行彩色图标形成双圆点并排。CSS 圆点矢量绘制，不发虚不裁切。
@@ -918,9 +929,10 @@ class MCPServerRow(CardWidget):
         layout.addLayout(top)
         layout.addLayout(bottom)
 
-        # 第三行（仅声明了 credential 的 server）：「获取 Key」按钮 + Key 输入框 + 保存。
-        # 免环境变量：Key 存插件 config.json，连接时按 credential.inject 注入。
+        # 第三行（仅声明了 credential 的 server）：「获取 Key」按钮 + Key 输入框。
+        # Key 存插件 config.json，连接时按 credential.inject 注入；输入框失焦即保存。
         self._cred_edit = None
+        self._cred_saved_value = ""
         self._setup_credential_row(data, layout)
 
     def _credential_plugin(self) -> str:
@@ -930,10 +942,28 @@ class MCPServerRow(CardWidget):
             return Path(str(source)).parent.name
         return ""
 
+    @staticmethod
+    def _is_user_added(data: dict) -> bool:
+        """该 server 是否由用户在界面添加（可编辑/可删除）。
+
+        界面添加的 MCP 一律写进 user-custom 插件，插件自带的则落在
+        各自插件目录下。取不到 _source 时按「用户添加」放行 —— 宁可多给
+        两个按钮，也不要让用户自己加的配置变得不可维护。
+        """
+        source = data.get("_source", "")
+        if not source or not str(source).endswith(".json"):
+            return True
+        return Path(str(source)).parent.name == "user-custom"
+
     def _setup_credential_row(self, data: dict, layout: QVBoxLayout):
-        """按 .mcp.json 的 credential 声明构造 Key 输入行；无声明则不加行。"""
+        """按 .mcp.json 的 credential 声明构造 Key 输入行；无声明则不加行。
+
+        注意判断必须是「非空 dict」：PluginManager._build_mcp_entry 对没有
+        credential 的 server 填的是空 dict（作为字段缺省值），只判类型会让
+        OAuth 型与本地 stdio 型也长出一行空的 Key 输入框。
+        """
         cred = data.get("credential")
-        if not isinstance(cred, dict):
+        if not isinstance(cred, dict) or not cred:
             return
 
         from app.tools.mcp_tools import get_credential
@@ -948,30 +978,29 @@ class MCPServerRow(CardWidget):
 
         edit = QLineEdit()
         edit.setClearButtonEnabled(True)
-        edit.setPlaceholderText(cred.get("placeholder") or "粘贴 Key 后按保存")
+        edit.setPlaceholderText(cred.get("placeholder") or "粘贴 Key 后自动保存")
         edit.setFixedHeight(Sizes.TOOL_BUTTON_SZ.height())
         edit.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 0 6px;")
-        # 已存过的默认明文显示便于核对；未存过的用密码模式
-        existing = get_credential(self._credential_plugin(), self._name)
-        edit.setEchoMode(QLineEdit.Normal if existing else QLineEdit.Password)
+        # 始终密码模式：Key 是敏感信息，不摊在屏幕上
+        edit.setEchoMode(QLineEdit.Password)
+        _plugin = self._credential_plugin()
+        existing = get_credential(_plugin, self._name)
         if existing:
             edit.setText(existing)
-        edit.returnPressed.connect(self._on_save_credential)
+        # 无保存按钮：失焦或回车即写入并重连。editingFinished 两者都覆盖，
+        # 且不像 textChanged 那样每敲一个字符都落盘。
+        self._cred_saved_value = existing
+        edit.editingFinished.connect(self._on_save_credential)
         row.addWidget(edit, 1)
         self._cred_edit = edit
 
         get_url = cred.get("getUrl")
         if get_url:
             get_btn = PushButton("获取 Key")
-            get_btn.setFixedSize(72, Sizes.TOOL_BUTTON_SZ.height())
+            get_btn.setFixedSize(88, Sizes.TOOL_BUTTON_SZ.height())
             get_btn.setToolTip(get_url)
             get_btn.clicked.connect(lambda: self._open_get_url(get_url))
             row.addWidget(get_btn)
-
-        save_btn = PushButton("保存")
-        save_btn.setFixedSize(56, Sizes.TOOL_BUTTON_SZ.height())
-        save_btn.clicked.connect(self._on_save_credential)
-        row.addWidget(save_btn)
 
         layout.addLayout(row)
 
@@ -986,19 +1015,23 @@ class MCPServerRow(CardWidget):
             InfoBar.warning(title="打开失败", content=str(e), parent=self)
 
     def _on_save_credential(self):
-        """保存 Key 并触发热重连。"""
+        """保存 Key 并触发热重连（无保存按钮，输入框失焦或回车时自动调用）。
+
+        失焦是高频动作：点一下别处就会触发，所以值没变时直接返回，
+        不写盘也不弹提示。提示也只在真正出错时给，成功不打扰。
+        """
         from app.tools.mcp_tools import set_credential
 
         if self._cred_edit is None:
             return
         value = self._cred_edit.text().strip()
+        if value == self._cred_saved_value:
+            return
         plugin = self._credential_plugin()
         if not plugin:
-            InfoBar.warning(title="无法保存", content="该服务器不属于插件，没有存储位置", parent=self)
             return
         if set_credential(plugin, self._name, value):
-            # 保存后切回密码显示，避免明文长期摊在界面上
-            self._cred_edit.setEchoMode(QLineEdit.Password if value else QLineEdit.Normal)
+            self._cred_saved_value = value
             self.credentialSaved.emit(self._name)
         else:
             InfoBar.error(title="保存失败", content="写入插件配置时出错，详见日志", parent=self)
@@ -1322,9 +1355,9 @@ class MCPListSettingCard(ExpandSettingCard):
             return
 
         self._hot_disconnect(name)
-        # 先让断开落地，再把重连推到下一轮事件循环
+        # 先让断开落地，再把重连推到下一轮事件循环。
+        # 不给成功提示：输入框失焦是高频动作，每次弹条会烦人。
         QTimer.singleShot(0, lambda: self._hot_connect(name, config, force=True))
-        InfoBar.success(title="Key 已保存", content=f"正在重连「{name}」", parent=self)
 
     def _mcp_gate_key(self, name: str) -> str:
         """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）。
@@ -1698,6 +1731,17 @@ class MCPListSettingCard(ExpandSettingCard):
     def _on_remove_server(self, name: str):
         from app.widgets.common_dialogs import ConfirmDialog
 
+        servers = self._get_servers()
+        server_data = next((s for s in servers if s.get("name") == name), None)
+        # 插件自带的配置不提供删除（按钮已隐藏，这里兜底防其他入口进入）
+        if server_data and not MCPServerRow._is_user_added(server_data):
+            InfoBar.warning(
+                title="不可删除",
+                content=f"「{name}」由插件提供，无法删除。停用请直接关闭开关，或禁用该插件。",
+                parent=self.window(),
+            )
+            return
+
         _confirmed: list[bool] = [False]
 
         def _on_confirm():
@@ -1726,8 +1770,17 @@ class MCPListSettingCard(ExpandSettingCard):
     def _show_edit_dialog(self, name: str):
         servers = self._get_servers()
         server_data = next((s for s in servers if s.get("name") == name), None)
-        if server_data:
-            self.showEditCard.emit(name, server_data)
+        if not server_data:
+            return
+        # 插件自带的配置不提供编辑（按钮已隐藏，这里兜底防其他入口进入）
+        if not MCPServerRow._is_user_added(server_data):
+            InfoBar.warning(
+                title="不可编辑",
+                content=f"「{name}」由插件提供，配置随插件更新。如需修改请编辑插件目录下的 .mcp.json。",
+                parent=self.window(),
+            )
+            return
+        self.showEditCard.emit(name, server_data)
 
     def _on_enabled_changed(self, name: str, enabled: bool):
         """单个服务器开关变化（滚动防抖）

@@ -2190,7 +2190,9 @@ class PluginManager:
     def remove_mcp_server(self, name: str):
         """从来源插件的 .mcp.json 中移除指定 MCP 服务器
 
-        如果来源是 system 插件则只禁用（不删除），来源是 user-mcp 则删除。
+        只有 user-custom（界面添加的）才真删。插件自带的配置一律只禁用：
+        删掉后插件仍在、配置消失，且同一 .mcp.json 常被多个 server 共用，
+        删一个会连累其他；插件更新时被删的条目还会重新出现，徒增困惑。
         """
         # 找到该服务器属于哪个 .mcp.json
         servers = self.get_mcp_servers()
@@ -2221,14 +2223,8 @@ class PluginManager:
             if not isinstance(mcp_servers, dict):
                 return
 
-            if source.parent.name == "system":
-                # 系统插件：只禁用，不删除
-                if name in mcp_servers:
-                    mcp_servers[name]["enabled"] = False
-                    source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
-                    logger.info(f"[PluginManager] Disabled system MCP server '{name}'")
-            else:
-                # 用户插件（user-custom、.claude-plugin 等）：直接删除
+            if source.parent.name == "user-custom":
+                # 界面添加的：真删
                 if name in mcp_servers:
                     del mcp_servers[name]
                     if is_claude_format and not mcp_servers:
@@ -2236,7 +2232,14 @@ class PluginManager:
                         source.write_text("{}", encoding="utf-8")
                     else:
                         source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
-                    logger.info(f"[PluginManager] Removed MCP server '{name}'")
+                    logger.info(f"[PluginManager] Removed user MCP server '{name}'")
+            else:
+                # 插件自带（system / 市场插件 / Claude 插件）：只禁用，不删文件条目。
+                # 同插件多 server 共用一份 .mcp.json，删单个会误伤其他条目。
+                if name in mcp_servers:
+                    mcp_servers[name]["enabled"] = False
+                    source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
+                    logger.info(f"[PluginManager] Disabled plugin-owned MCP server '{name}'")
 
             self.invalidate_mcp_cache()
         except Exception as e:

@@ -1214,6 +1214,24 @@ class MCPClientManager:
         # 注入用户在设置界面填的 Key（credential 声明），优先级高于 ${env.VAR}
         config = _resolve_mcp_credentials(config)
 
+        # ── 已声明 credential 但用户还没填 Key 的预检 ────────────────────
+        # 这类 server 的端点几乎都要求凭据。不拦的话，远端要么回 401，
+        # 要么像高德那样回 200 + 业务错误 JSON —— 后者会让 mcp SDK 把
+        # 响应当成"读流里的异常消息"而非抛错，最终挂到 90 秒超时才失败。
+        # 直接说清楚去哪儿填，比等超时好。
+        _cred = config.get("credential")
+        if isinstance(_cred, dict) and _cred and not get_credential(
+            _plugin_name_from_source(config), config.get("name", "")
+        ):
+            label = _cred.get("label") or "Key"
+            reject = f"未配置凭据：请在设置 → MCP 连接器中为本服务器填写「{label}」"
+            logger.warning(f"[MCP] 拒绝启动服务器 '{name}': {reject}")
+            conn = MCPServerConnection(name, config)
+            conn.set_state(MCPState.FAILED, reject)
+            with self._lock:
+                self._connections[name] = conn
+            return False, reject
+
         # ── 未展开的 ${env.VAR} 预检 ────────────────────────────────────
         # 展开后 url / headers 里若还留着 ${env.X}，说明该环境变量没设。
         # 此时继续连只会拿到 401/400，或像高德那样返回 200 + 业务错误 JSON，
