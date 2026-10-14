@@ -559,8 +559,15 @@ class MCPClientManager:
                 conn._ready_event.set()
             else:
                 # 已就绪后才异常 → 运行中掉线，标记失败让指示灯转红
-                logger.warning(f"[MCP] 服务器 '{conn.name}' 运行中断开: {e}")
-                conn.set_state(MCPState.FAILED, f"运行中断开: {_extract_real_error(e)}")
+                # anyio TaskGroup 会把真实异常包成 ExceptionGroup，str(e) 只有
+                # "unhandled errors in a TaskGroup (N sub-exception)"，
+                # 真实原因（stream closed / read timeout / auth 失败）全在子异常里。
+                # 必须先提取再记日志，否则掉线原因不可诊断。
+                actual = _extract_real_error(e)
+                logger.warning(
+                    f"[MCP] 服务器 '{conn.name}' 运行中断开: {type(actual).__name__}: {actual}"
+                )
+                conn.set_state(MCPState.FAILED, f"运行中断开: {actual}")
         finally:
             was_connected = conn.state == MCPState.CONNECTED
             conn.session = None

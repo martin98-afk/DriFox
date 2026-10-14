@@ -143,6 +143,38 @@ def test_delegate_filter_ignores_non_target(viewer):
     assert outer._got == []
 
 
+# ── ⑤ [WHEEL-ARM] 武装态无内滚条时的外层兜底（2026-10-14 修） ──
+
+
+def test_armed_state_forwards_outer_when_body_has_no_overflow(viewer):
+    """点击过正文（armed）+ body 无溢出 → 滚轮必须交外层。
+
+    修复前：delegate filter 走 _route_wheel_armed，unknown 分支 return False
+    后直接落到 super().eventFilter，事件被 delegate 终结、不上抛 wheelEvent
+    → 外层滚动区永远收不到。表现为"点击过卡片正文的无内滚条消息，滚轮彻底失效"。
+    """
+    fp = _ready_filter_target(viewer)
+    outer = _mount_with_scroll_area(viewer, 100, 0, 500)
+    # 武装态 + body 几何有效但不溢出（max_scroll == 0 → state == "unknown"）
+    viewer._wheel_inner_armed = True
+    viewer._on_body_geometry_reported(scroll_height=400, scroll_top=0, client_height=400)
+    ev = _wheel(-120)
+    assert viewer.eventFilter(fp, ev) is True, "无内滚条的武装态必须接手转发外层"
+    assert outer._got == [True]
+    assert ev.isAccepted()
+
+
+def test_armed_state_does_not_double_scroll_when_body_overflows(viewer):
+    """armed + body 溢出 → 卡内滚，外层不得动（防兜底打穿"内部优先"）。"""
+    fp = _ready_filter_target(viewer)
+    outer = _mount_with_scroll_area(viewer, 100, 0, 500)
+    viewer._wheel_inner_armed = True
+    viewer._on_body_geometry_reported(scroll_height=1200, scroll_top=0, client_height=400)
+    ev = _wheel(-120)
+    assert viewer.eventFilter(fp, ev) is False, "body 溢出态必须放行给卡内滚动"
+    assert outer._got == [], "外层不得被兜底误触发（否则内外双重滚动）"
+
+
 # ── ④ 静态接线守卫 ──
 
 

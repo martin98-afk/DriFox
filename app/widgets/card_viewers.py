@@ -8227,6 +8227,16 @@ class CodeWebViewer(QWebEngineView):
             route = self._route_wheel_armed if self._wheel_inner_armed else self._route_wheel_to_chat_area
             if route(ev):
                 return True
+            if self._wheel_inner_armed and self._inner_wheel_state(ev.angleDelta().y()) == "unknown":
+                # [WHEEL-ARM] 仅「body 不溢出」分支兜底：该分支放行给 Chromium，
+                # 而内层容器（#tool-content / 代码块 / 图表区）同样无滚轮时没人消费，
+                # 事件落到 super().eventFilter 就被 delegate 终结、不上抛 wheelEvent
+                # —— 表现为"点击过卡片正文的无内滚条消息，滚轮彻底失效"
+                # （2026-10-14 修，探针 tests/debug/probe_wheel_armed.py B2）。
+                # ⚠️ 兜底必须只在这一支：body 溢出的 "scroll" 分支是刻意让
+                # Chromium 滚卡内，若一并兜底会外层+卡内双重滚动（C 场景 3/3 误动）。
+                if self._route_wheel_to_chat_area(ev):
+                    return True
         return super().eventFilter(obj, ev)
 
     def wheelEvent(self, event: QWheelEvent):
@@ -8236,6 +8246,17 @@ class CodeWebViewer(QWebEngineView):
         route = self._route_wheel_armed if self._wheel_inner_armed else self._route_wheel_to_chat_area
         if route(event):
             return
+        if self._wheel_inner_armed:
+            # [WHEEL-ARM] 事件上抛到此处 = delegate 放行后 Chromium 谁也不消费
+            #（内层容器同样不可滚）→ 必须接手转发外层。若仍走 super()，事件被喂回
+            # Chromium 而终结传播，外层滚动区永远收不到：表现为"点击过卡片正文的
+            # 无内滚条消息，滚轮彻底失效"（2026-10-14 修，探针见
+            # tests/debug/probe_wheel_armed.py B2：几何有效 max_scroll=0 时外层 0/5）。
+            # 此处接手不会抢走内层可滚区域的滚轮：那种情况 Chromium 已消费、不上抛。
+            # 仅兜底 body 无溢出支：body 溢出的 "scroll" 分支刻意留给卡内滚动。
+            if self._inner_wheel_state(event.angleDelta().y()) == "unknown":
+                if self._route_wheel_to_chat_area(event):
+                    return
         super().wheelEvent(event)
 
     def cleanup(self):
