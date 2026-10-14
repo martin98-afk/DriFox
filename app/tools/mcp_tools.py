@@ -380,6 +380,31 @@ class MCPServerConnection:
         self._ready_event: Optional[asyncio.Event] = None
         self._connect_error: Optional[Exception] = None
         self._stderr_path: Optional[str] = None
+        # 调用队列：session 及底层 anyio stream 由 lifespan Task 创建，
+        # 有 Task 亲和性。跨 Task 直接 await session.call_tool 会永久挂死
+        # （实测同 Task 9.8s 成功、跨 Task 30s 超时无响应）。
+        # 所有 session 操作必须经此队列丢回 lifespan Task 执行。
+        self._call_queue: Optional[asyncio.Queue] = None
+
+    def submit_call(self, coro_factory) -> "asyncio.Future":
+        """把一个 session 调用提交给 lifespan Task 执行，返回 awaitable future。
+
+        Args:
+            coro_factory: 无参可调用，返回协程。延迟到 lifespan Task 内
+                才调用它，避免在提交方 Task 里提前创建协程对象。
+
+        Returns:
+            concurrent.futures.Future（run_coroutine_threadsafe 风格），
+            调用方用 .result(timeout) 同步拿结果。
+
+        Raises:
+            RuntimeError: 连接未就绪 / 队列不存在（已断开）
+        """
+        if self._call_queue is None or self._loop is None:
+            raise RuntimeError(f"服务器 '{self.name}' 未就绪，无法提交调用")
+        future: asyncio.Future = self._loop.create_future()
+        self._call_queue.put_nowait((coro_factory, future))
+        return future
 
     def set_state(self, state: str, error: str = "") -> None:
         """更新连接状态（mcp 事件循环线程调用）
@@ -512,6 +537,10 @@ class MCPClientManager:
         try:
             return future.result(timeout=timeout)
         except asyncio.TimeoutError:
+            # 必须真正 cancel，不能只放弃等待。否则协程仍挂在后台循环里
+            # 继续跑（典型：MCP session.call_tool 等读流），变成孤儿协程，
+            # 它持有的 stream 引用会把 lifespan TaskGroup 拖崩。
+            future.cancel()
             raise TimeoutError(f"协程执行超时（{timeout}秒）")
         except asyncio.CancelledError:
             # 🛡️ 透传取消信号，不拦截
@@ -535,6 +564,9 @@ class MCPClientManager:
         断开时通过 _disconnect_event 信号自然退出。
         """
         server_type = conn.server_type
+        # 调用循环：单独 Task，但在本 lifespan Task 的 scope 内创建，
+        # 因此与 session 同属一个 anyio TaskGroup，满足 stream 的 Task 亲和性。
+        call_loop_task = asyncio.ensure_future(self._call_loop(conn), loop=self._loop)
         try:
             if server_type == "stdio":
                 await self._lifespan_stdio(conn)
@@ -569,6 +601,9 @@ class MCPClientManager:
                 )
                 conn.set_state(MCPState.FAILED, f"运行中断开: {actual}")
         finally:
+            # 调用循环先停，避免 session 已置空后它还去碰
+            if not call_loop_task.done():
+                call_loop_task.cancel()
             was_connected = conn.state == MCPState.CONNECTED
             conn.session = None
             conn.tools = []
@@ -578,6 +613,56 @@ class MCPClientManager:
                 detail = _read_stderr_tail(conn._stderr_path)
                 conn.set_state(MCPState.FAILED, f"服务器进程意外退出{(': ' + detail) if detail else ''}")
             logger.info(f"[MCP] 已断开服务器 '{conn.name}'")
+
+    async def _call_loop(self, conn: MCPServerConnection) -> None:
+        """在 lifespan Task 的 scope 内消费调用队列。
+
+        为什么需要它：ClientSession 及其底层 anyio memory stream 由
+        lifespan Task 创建，有 Task 亲和性。call_tool_sync 来自 ToolExecutor
+        所在线程，经 run_coroutine_threadsafe 会把协程丢进一个新 Task；
+        在新 Task 里 await session.call_tool 会永久挂死（实测同 Task 9.8s
+        成功、跨 Task 30s 无响应超时）。因此所有 session 操作都必须在这里执行。
+
+        队列项为 (coro_factory, future)：coro_factory 延迟到本 Task 内调用，
+        避免在提交方 Task 提前创建协程对象导致 "coroutine was never awaited"。
+
+        每次调用单独起 Task 执行，调用方取消 future 时能把取消传播进去，
+        避免 session.call_tool 变成挂在读流上的孤儿协程拖崩 lifespan。
+        """
+        queue = conn._call_queue
+        if queue is None:
+            return
+        while True:
+            coro_factory, future = await queue.get()
+            if future.done():
+                # 调用方已放弃，别再白跑
+                continue
+
+            async def _run(factory=coro_factory):
+                return await factory()
+
+            task = asyncio.ensure_future(_run(), loop=self._loop)
+
+            def _propagate_cancel(f, t=task):
+                # 调用方主动取消（外层超时/强制停止）时，把取消传给执行 Task，
+                # 让 session.call_tool 内部立刻收 CancelledError。
+                if f.cancelled():
+                    t.cancel()
+
+            future.add_done_callback(_propagate_cancel)
+
+            try:
+                result = await task
+            except asyncio.CancelledError:
+                # 本 Task 被取消（调用方放弃或 lifespan 收尾）→ 同步取消 future
+                if not future.done():
+                    future.cancel()
+            except Exception as e:
+                if not future.done():
+                    future.set_exception(_extract_real_error(e))
+            else:
+                if not future.done():
+                    future.set_result(result)
 
     async def _lifespan_stdio(self, conn: MCPServerConnection) -> None:
         command = conn.config.get("command", "")
@@ -1008,6 +1093,11 @@ class MCPClientManager:
 
         timeout = config.get("timeout") or self.DEFAULT_CONNECT_TIMEOUT
 
+        # 调用队列与 loop 引用必须在 lifespan Task 启动前就位，
+        # 否则 submit_call 可能在 Task 尚未开跑时就认为未就绪。
+        conn._loop = self._loop
+        conn._call_queue = asyncio.Queue()
+
         # 在后台事件循环中启动生命周期 Task
         conn._task = asyncio.ensure_future(self._server_lifespan(conn), loop=self._loop)
 
@@ -1239,7 +1329,10 @@ class MCPClientManager:
         if not conn or not conn.session:
             return ToolResult(False, error=f"MCP 服务器 '{server_name}' 未连接")
 
-        try:
+        # session 有 Task 亲和性，必须在 lifespan Task 内调用。
+        # call_tool_sync 已在后台循环的独立 Task 里跑本协程，此处再经队列
+        # 中转一次，让真正的 session.call_tool 落到 lifespan Task 上执行。
+        async def _do_call():
             result = await conn.session.call_tool(tool_name, arguments)
 
             text_parts = []
@@ -1253,9 +1346,18 @@ class MCPClientManager:
 
             if result.isError:
                 return ToolResult(False, error=output)
-
             return ToolResult(True, content=output)
 
+        try:
+            # 已在后台事件循环内（call_tool_sync 用 run_coroutine_threadsafe 送进来），
+            # 直接 await 队列 future 即可，无需再套一层线程桥。
+            return await asyncio.wrap_future(conn.submit_call(_do_call))
+        except asyncio.CancelledError:
+            # 🛡️ 透传取消：调用方超时会 cancel 本协程，此时必须让
+            # _call_loop 里那个仍在跑的 session.call_tool 也感受到取消，
+            # 否则它会变成孤儿协程挂在读流上，最终把 lifespan TaskGroup 拖崩
+            # （表现为「调用一次工具后连接就断」）。
+            raise
         except Exception as e:
             logger.error(f"[MCP] 调用工具 '{prefixed_name}' 失败: {e}")
             return ToolResult(False, error=f"MCP 工具调用失败: {e}")
