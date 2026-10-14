@@ -8,9 +8,9 @@ All notable changes to this project will be documented in this file.
 ### ⚡ 性能优化 (Performance)
 - **移除简洁模式工具/思考折叠内的预览文字打字机** (app/widgets/card_render_core.py · app/widgets/card_viewers.py · app/widgets/message_card.py): 删除 `_PREVIEW_TYPEWRITER_JS`（`window._pt/_ptType/_ptPlay`）、全部 `[data-dfx-preview]` 标记与 6 处渲染路径调用，工具块预览行与思考块预览文字改为渲染落地即全显。消除渲染落地后 240ms 内逐帧 rAF 文本写入与每轮全量渲染的 `querySelectorAll('[data-dfx-preview]')` 遍历；`_SKELETON_CACHE_VERSION` 46 → 47；删除对应测试 tests/widgets/test_preview_typewriter.py 与复现脚本 tests/debug/preview_typewriter_repro.py。
 
-## [v0.6.7] - 2026-10-14
+## [v0.6.7] - 2026-10-14 (重新发布 #2)
 
-自上一版本以来的变更 | 提交数：39 · 文件变更：171 · +8027/-5941 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更（累计） | 提交数：60 · 文件变更：303 · +16731/-10259 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -46,6 +46,34 @@ All notable changes to this project will be documented in this file.
 
 - marketplace 由 plugin.json 自动重新生成（[skip ci]，`1d8b49b2` `6c35fc75` `e03a892a`）
 - diagnostic-report agent 创建前基线 (`43e0a33a`)
+
+### ✨ 新功能 (New Features) · 重新发布 #2 追加
+
+- **MCP OAuth 授权体系与 token 存储** (`1344166d` `2d6cddf9` `7167deca` `d778e66f` `e6dbeb47`): 新增 `app/core/mcp_oauth/` 包（token_store / callback_server / provider / manager），实现 OAuth 2.1 授权码流程：Protected Resource Metadata 发现（RFC 9728）、Authorization Server Metadata 发现（RFC 8414）、PKCE(S256)、动态客户端注册（RFC 7591）、本地 HTTP 回调（127.0.0.1 随机端口 /callback）与 token 自动刷新。`.mcp.json` 通过 `auth: {type: "oauth", client_name, scope}` 声明，`auth` 加入 `_MCP_PERSIST_FIELDS` 保证 UI 编辑不丢；token 复用 PluginConfigStore 落 `plugin_data/<plugin>/config.json`（键名 `_mcp_oauth_<server>`）。MCPServerRow 增加「授权/解绑」双态按钮，解绑前弹确认。附带 SDK 兼容性补丁：basic 认证模式下从 body 移除 client_id（RFC 6749 §2.3.1，否则 Notion 返回 400）。文档 `docs/plugins/mcp-oauth.md`；测试 `tests/core/test_mcp_oauth.py`（36 例）+ `tests/widgets/test_mcp_row_oauth.py`
+- **MCP 调用队列与 lifespan 任务执行** (`dd5840f3`): MCPClientManager 改为按 server 分组工具 schema 供 token 估算；会话操作经调用队列串行执行，lifespan 任务独立运行，避免并发握手竞态。测试 `tests/core/test_mcp_call_task_affinity.py`
+- **MCP 插件 credential 字段** (`e6dbeb47`): 插件配置新增 `credential` 字段，用户在设置界面直接填 API key；经 PluginConfigStore 存取并在建连前注入 MCPClientManager；MCPServerRow 提供从指定 URL 取 key 的按钮
+- **StatusDot 组件** (`05ec681a`): 新增 `app/widgets/status_dot.py`，替换 MCP/LSP/question 卡片里的字符状态点
+- **diff stats 批量处理** (`22141d20`): 历史加载时批量处理差异统计，减少渲染往返；测试 `tests/widgets/test_history_load_speedup.py`
+- **聊天宽度配置项** (`879dd1ff`): LLM 设置卡新增 chat width 配置，TabManagerWindow 按配置调整布局
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #2 追加
+
+- **隐藏控件前解除焦点，修多余滚动** (`8f81f804` `0a98d67d`): 控件隐藏前先清除焦点，避免焦点控件被移除时 Qt 触发意外 scroll 行为；新增回归测试 `tests/widgets/test_delete_focus_scroll_guard.py`
+- **高度载荷解析补第六字段，修几何信号断链** (`f6fe3726`): card_viewers 高度 payload 增加第六字段（内层可滚标志），并修正 `bodyGeometryReported` 必须无条件 emit——此前新增字段时误把它替换成 `bodyInnerScrollableChanged.emit`，只发后者导致 `_body_geom_valid` 恒 False、武装态卡片内滚到边界后内外双死锁；同步扩充 ui-plugin-creator references/pitfalls.md 自检清单（窄窗口 / 明暗双态 / 悬停 tooltip / 数据加载判 key）
+- **card_viewers 滚轮事件在可内滚容器中的委派** (`7167deca` `2d6cddf9`): 内层可滚容器按 armed 状态与 overflow 条件决定是否吞掉滚轮事件
+
+### ⚡ 性能优化 (Performance) · 重新发布 #2 追加
+
+- **移除简洁模式工具/思考折叠内的预览文字打字机** (`a04d0b4c`): 删除 `_PREVIEW_TYPEWRITER_JS`（`window._pt/_ptType/_ptPlay`）、全部 `[data-dfx-preview]` 标记与 6 处渲染路径调用，工具块预览行与思考块预览文字改为渲染落地即全显。消除渲染落地后 240ms 内逐帧 rAF 文本写入与每轮全量渲染的 `querySelectorAll('[data-dfx-preview]')` 遍历；`_SKELETON_CACHE_VERSION` 46 → 47；删除对应测试 `tests/widgets/test_preview_typewriter.py` 与复现脚本 `tests/debug/preview_typewriter_repro.py`
+
+### ♻️ 代码重构 (Refactoring) · 重新发布 #2 追加
+
+- **移除 PixelPet（像素宠物）全链路** (`f50bf42e` `9ac3b28e` `f87e0d0c` `a18da0cc` `e6dbeb47`): 删除 `app/widgets/pixel_pet.py`、MainWidget 与 TabManagerWindow 的全部调用点、worktree-manager UI 集成、主题管理器与图标映射相关逻辑、`icons/pet.png` 与雪碧图生成脚本，并清理剩余测试引用
+- **GiteeAccountRow 布局与样式调整** (`68f535f5`)
+
+### 🔧 其他 (Chores & Build) · 重新发布 #2 追加
+
+- marketplace 由 plugin.json 自动重新生成（[skip ci]，`3a9262f6` `c7f246f8`）
 
 ## [v0.6.6] - 2026-10-13 (重新发布 #4)
 
