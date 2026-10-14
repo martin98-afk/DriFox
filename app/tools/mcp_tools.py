@@ -290,22 +290,40 @@ def _validate_stdio_config(config: dict) -> str:
 #   2. 用户通过 UI 直接新增含占位符的服务器（未走 get_mcp_servers）；
 #   3. 旧版打包产物（dist）不含展开逻辑。
 # 在真正拉起子进程前做一次兜底解析，保证子进程永远拿到绝对路径。
+#
+# ${env.VAR} 展开：docs/mcp.md 的参考示例一直写着 headers 里用
+# ${env.GITHUB_TOKEN}，但代码侧从未实现，该写法会带着字面量发往服务端，
+# 鉴权必然失败。这里补上：命中环境变量则替换，未设置则保留原样，
+# 让下游按字面量处理，便于识别是漏配而非静默变成空串。
+_ENV_PLACEHOLDER = re.compile(r"\$\{env\.([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env_placeholder(value: str) -> str:
+    """把字符串中的 ${env.VAR} 替换为环境变量的值；未设置则原样保留。"""
+    if not isinstance(value, str) or "${env." not in value:
+        return value
+    return _ENV_PLACEHOLDER.sub(lambda m: os.environ.get(m.group(1), m.group(0)), value)
+
+
 def _expand_mcp_placeholder(value: str, plugin_root: Path) -> str:
-    """将单个字符串中的 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA} 解析为绝对路径。"""
+    """展开单个字符串中的 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA} / ${env.VAR}。"""
     if not isinstance(value, str) or not value:
         return value
     root = plugin_root.as_posix()
     data = (plugin_root / "data").as_posix()
     normalized = value.replace("\\", "/")
     # 先替换长的（DATA 含 ROOT 前缀），避免 ${CLAUDE_PLUGIN_ROOT}/data 被部分替换
-    return normalized.replace("${CLAUDE_PLUGIN_DATA}", data).replace("${CLAUDE_PLUGIN_ROOT}", root)
+    normalized = normalized.replace("${CLAUDE_PLUGIN_DATA}", data).replace("${CLAUDE_PLUGIN_ROOT}", root)
+    return _expand_env_placeholder(normalized)
 
 
 def _resolve_plugin_paths(config: dict) -> dict:
-    """启动前兜底解析 config 中的插件路径占位符（防御旧缓存 / 热重载竞态 / UI 直增）。
+    """启动前兜底解析 config 中的占位符（防御旧缓存 / 热重载竞态 / UI 直增）。
 
-    通过 config["_source"]（.mcp.json 路径）反推 plugin_root；无法反推时原样返回，
-    不影响普通绝对/相对路径配置。
+    两类占位符分两条路：
+    - ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA}：需经 config["_source"]
+      反推 plugin_root，拿不到就跳过（原样返回）。
+    - ${env.VAR}：只依赖进程环境变量，与插件根无关，任何时候都能展开。
     """
     source = config.get("_source", "")
     plugin_root = None
@@ -313,18 +331,26 @@ def _resolve_plugin_paths(config: dict) -> dict:
         p = Path(source)
         if p.parent.exists():
             plugin_root = p.parent
-    if plugin_root is None:
-        return config
+
     cfg = copy.deepcopy(config)
-    cfg["command"] = _expand_mcp_placeholder(cfg.get("command", ""), plugin_root)
-    cfg["args"] = [_expand_mcp_placeholder(a, plugin_root) for a in cfg.get("args", [])]
-    cfg["url"] = _expand_mcp_placeholder(cfg.get("url", ""), plugin_root)
-    cfg["env"] = {
-        k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v for k, v in cfg.get("env", {}).items()
-    }
+    if plugin_root is not None:
+        cfg["command"] = _expand_mcp_placeholder(cfg.get("command", ""), plugin_root)
+        cfg["args"] = [_expand_mcp_placeholder(a, plugin_root) for a in cfg.get("args", [])]
+        cfg["url"] = _expand_mcp_placeholder(cfg.get("url", ""), plugin_root)
+        cfg["env"] = {
+            k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v
+            for k, v in cfg.get("env", {}).items()
+        }
+        cfg["headers"] = {
+            k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v
+            for k, v in cfg.get("headers", {}).items()
+        }
+        return cfg
+
+    # 无 plugin_root：至少把 env 占位符展开掉，避免字面量 "${env.X}" 发往服务端
+    cfg["url"] = _expand_env_placeholder(cfg.get("url", ""))
     cfg["headers"] = {
-        k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v
-        for k, v in cfg.get("headers", {}).items()
+        k: _expand_env_placeholder(v) if isinstance(v, str) else v for k, v in cfg.get("headers", {}).items()
     }
     return cfg
 

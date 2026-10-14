@@ -33,7 +33,11 @@ def _user_btn_count(card: MessageCard) -> int:
 
 
 def _assistant_btn_count(card: MessageCard) -> int:
-    """助手卡片页脚 hover 按钮组按钮数（内置分支/复制 + 插件按钮）"""
+    """助手卡片页脚按钮组按钮数（内置审查/分支/复制 + 插件按钮）
+
+    审查按钮 2026-10-14 从差异胶囊内移入按钮组，初始隐藏（有 diff 才显示），
+    但控件始终存在于布局中，findChildren 会计入。
+    """
     btns = getattr(card, "_assistant_action_btns", None)
     assert btns is not None
     return len(btns.findChildren(TransparentToolButton))
@@ -68,11 +72,11 @@ def test_user_card_skips_role_assistant(qapp):
 
 
 def test_assistant_card_skips_role_user_button(qapp):
-    """assistant 卡片：role=user 插件按钮不渲染（仅 2 内置：分支/复制）"""
+    """assistant 卡片：role=user 插件按钮不渲染（仅 3 内置：审查/分支/复制）"""
     reg = _fresh_reg()
     reg.register_footer_action("plug-a", "user-btn", tooltip="U", role="user")
     card = _make_card("assistant")
-    assert _assistant_btn_count(card) == 2
+    assert _assistant_btn_count(card) == 3
     UIPluginRegistry.get_instance().reset()
 
 
@@ -83,7 +87,7 @@ def test_both_role_renders_both_sides(qapp):
     user_card = _make_card("user")
     assert _user_btn_count(user_card) == 4  # 3 内置 + both
     assist_card = _make_card("assistant")
-    assert _assistant_btn_count(assist_card) == 3  # 分支/复制 + both
+    assert _assistant_btn_count(assist_card) == 4  # 审查/分支/复制 + both
     UIPluginRegistry.get_instance().reset()
 
 
