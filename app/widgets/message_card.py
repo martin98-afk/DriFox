@@ -3747,6 +3747,13 @@ class MessageCard(SimpleCardWidget):
         try:
             self._disconnect_viewer_signals()
             self._viewer_layout.removeWidget(viewer)
+            # 🐛 焦点摘除先于 hide()：焦点在 viewer 子树内（用户点击过正文，
+            # delegate 持有焦点）时，hide() 会触发 Qt 焦点链自动转移 + 滚动区
+            # scrollContentsBy 自动滚动（视口瞬跳，见 ui_helpers 同名注释）。
+            # 延迟导入：ui_helpers 顶层 import MessageCard，模块级反向依赖成环。
+            from app.widgets.ui_helpers import _detach_focus_from_widgets
+
+            _detach_focus_from_widgets([viewer])
             # 🛡️ 必须先 hide() 再 setParent(None)：CodeWebViewer 持有原生 HWND，
             # 可见状态下脱离父窗口树会让 Chromium 弹出独立原生窗口（白窗一闪），
             # 与 main_widget 里其它 detach 点（_clear_chat_area / ui_helpers）同一护栏。

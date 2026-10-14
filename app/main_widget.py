@@ -199,6 +199,7 @@ from app.widgets.message_card import (
 from app.widgets.card_render_core import clear_global_render_cache
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
+    _detach_focus_from_widgets,
     add_message_to_layout,
     build_node_preview_from_session,
     clear_and_show_welcome,
@@ -13207,6 +13208,10 @@ class OpenAIChatToolWindow(ToolWindow):
             item = self.chat_layout.takeAt(0)
             if item and item.widget():
                 widgets.append(item.widget())
+        # 🐛 焦点摘除先于任何 hide()：焦点在待删子树内时，hide() 会触发 Qt
+        # 焦点链自动转移 + 滚动区 scrollContentsBy 自动滚动（视口瞬跳，见
+        # ui_helpers._detach_focus_from_widgets 注释）
+        _detach_focus_from_widgets(widgets)
         for widget in widgets:
             if delete_widgets:
                 # cleanup 释放 WebEngine renderer（viewer.cleanup → setHtml("")）；
@@ -13244,6 +13249,11 @@ class OpenAIChatToolWindow(ToolWindow):
             item = self.chat_layout.takeAt(0)
             if item and item.widget():
                 w = item.widget()
+                # 🐛 焦点摘除先于 hide()：焦点在待删子树内时 hide() 会触发 Qt
+                # 焦点链自动转移 + 滚动区 scrollContentsBy 自动滚动（视口瞬跳，
+                # 见 ui_helpers._detach_focus_from_widgets 注释）。列表在循环内
+                # 逐个取出，故每次 hide 前调用；首次命中后焦点已清，后续零成本。
+                _detach_focus_from_widgets([w])
                 # 跳过欢迎卡片：它由 _welcome_card_cache 独立管理，
                 # 不应被 _cache_current_session_cards 的 deleteLater 误删。
                 if getattr(w, "_is_welcome", False):
