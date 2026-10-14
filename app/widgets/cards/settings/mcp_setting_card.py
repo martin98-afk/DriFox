@@ -49,12 +49,14 @@ from app.core.tools.mcp_lsp_safety import (
 from app.tools.mcp_tools import MCPState
 from app.utils.config import Settings
 from app.utils.design_tokens import (
+    BorderRadius,
     ButtonStyles,
     CardStyles,
     Colors,
     Sizes,
     SwitchStyles,
     apply_font_size_to_widget,
+    font_size_css,
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css
@@ -109,6 +111,35 @@ _MCP_TYPE_GROUPS = [
     ("http", "远程服务 · HTTP"),
     ("sse", "远程服务 · SSE"),
 ]
+
+
+def _status_dot_qss(color: str) -> str:
+    """连接状态灯样式：CSS 圆点（矢量绘制，清晰不裁切）。
+
+    不用 ● 文本字符：小字号实心圆抗锯齿发虚，且全角字形 advance 宽度
+    超出定宽 QLabel 时两侧被裁切。
+    """
+    return f"background-color: {color}; border-radius: 5px; border: none; padding: 0;"
+
+
+def _auth_btn_qss(kind: str) -> str:
+    """授权按钮双态样式：authorize = 主题色实心（主操作）；unbind = 红字描边（危险操作）。"""
+    if kind == "authorize":
+        return (
+            f"PushButton {{ background-color: {Colors.TEXT_ACCENT}; color: {Colors.BUTTON_TEXT_ON_ACCENT};"
+            f" border: none; border-radius: {BorderRadius.SM}; padding: 0 10px;"
+            f" {font_size_css(12)} font-weight: bold; }}"
+            f"PushButton:hover {{ background-color: {Colors.BORDER_ACCENT}; }}"
+            f"PushButton:pressed {{ background-color: {Colors.BORDER_ACCENT}; }}"
+            f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; background-color: transparent; }}"
+        )
+    return (
+        f"PushButton {{ background-color: transparent; color: {Colors.ERROR};"
+        f" border: 1px solid {Colors.ERROR}; border-radius: {BorderRadius.SM}; padding: 0 10px;"
+        f" {font_size_css(12)} }}"
+        f"PushButton:hover {{ background-color: rgba(239, 68, 68, 0.12); }}"
+        f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; border-color: {Colors.TEXT_MUTED}; }}"
+    )
 
 
 def _group_header_style() -> str:
@@ -722,9 +753,11 @@ class MCPServerRow(CardWidget):
         if authorized:
             self._auth_btn.setText("解绑")
             self._auth_btn.setToolTip("清除已保存的授权凭证并断开连接，下次连接需重新授权")
+            self._auth_btn.setStyleSheet(_auth_btn_qss("unbind"))
         else:
             self._auth_btn.setText("授权")
             self._auth_btn.setToolTip("点击后在浏览器完成 OAuth 授权")
+            self._auth_btn.setStyleSheet(_auth_btn_qss("authorize"))
         self._auth_btn.setEnabled(True)
 
     def _set_auth_busy(self, busy: bool):
@@ -732,6 +765,8 @@ class MCPServerRow(CardWidget):
         if self._auth_btn is None:
             return
         self._auth_btn.setText("授权中" if busy else ("解绑" if self._authorized else "授权"))
+        # busy 时保留当前态样式，disabled 伪态负责置灰；恢复时按当前授权态重设
+        self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
         self._auth_btn.setEnabled(not busy)
 
     def _on_auth_clicked(self):
@@ -760,14 +795,11 @@ class MCPServerRow(CardWidget):
             tip = error if len(error) <= 400 else error[:400] + "..."
 
         self._current_state = state
-        self._status_dot.setText("●")
-        self._status_dot.setStyleSheet(
-            f"color: {color}; font-size: {scale_font_size(11)}px; background: transparent; padding: 0;"
-        )
+        self._status_dot.setStyleSheet(_status_dot_qss(color))
         self._status_dot.setToolTip(tip)
 
     def refresh_style(self):
-        """主题变更时刷新命令描述文字颜色 + 指示灯（黑色需随明暗主题调整）"""
+        """主题变更时刷新描述/token 颜色 + 状态灯 + 授权按钮双态配色"""
         Colors.refresh()
         self._desc_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
@@ -775,11 +807,9 @@ class MCPServerRow(CardWidget):
         self._token_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
         )
-        if getattr(self, "_current_state", None) == MCPState.DISABLED:
-            self._status_dot.setStyleSheet(
-                f"color: {_disabled_dot_color()}; font-size: {scale_font_size(11)}px;"
-                f" background: transparent; padding: 0;"
-            )
+        self._status_dot.setStyleSheet(_status_dot_qss(_disabled_dot_color()))
+        if self._auth_btn is not None and self._auth_btn.isEnabled():
+            self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
 
     def _setup_ui(self, data: dict):
         # 两行布局：第一行 = 图标 + 名称 + (弹性) + 授权按钮 + 开关 + 编辑/删除（操作组靠右）；
@@ -854,12 +884,12 @@ class MCPServerRow(CardWidget):
         # OAuth 授权按钮：仅 auth.type == "oauth" 的 server 显示。
         # 双态切换：未授权 → 「授权」，点击走完整授权流程；已授权 → 「解绑」，
         # 点击确认后断开连接并清除本地凭证。
-        # 紧凑宽度：与编辑/删除小方钮同族，不做默认宽的大按钮。
+        # 紧凑宽度：与编辑/删除小方钮同族，不做默认宽的大按钮；
+        # 双态配色由 set_authorized 设置（授权=主题色实心 / 解绑=红字描边）。
         self._auth_btn = None
         if (data.get("auth") or {}).get("type") == "oauth":
             self._auth_btn = PushButton("授权")
-            self._auth_btn.setFixedSize(52, Sizes.TOOL_BUTTON_SZ.height())
-            self._auth_btn.setStyleSheet(ButtonStyles.tool_button())
+            self._auth_btn.setFixedSize(64, Sizes.TOOL_BUTTON_SZ.height())
             self._auth_btn.clicked.connect(self._on_auth_clicked)
             self.set_authorized(self._has_oauth_token(data))
 
@@ -871,16 +901,12 @@ class MCPServerRow(CardWidget):
         top.addWidget(del_btn)
 
         # 连接状态指示灯（黄=启动中 / 绿=成功 / 红=失败 / 黑=关闭），放第二行行首，
-        # 避免与第一行彩色图标形成双圆点并排。
-        # 字号压到 11px：● 是实心圆，16px 时比图标还抢眼，主次颠倒。
+        # 避免与第一行彩色图标形成双圆点并排。CSS 圆点矢量绘制，不发虚不裁切。
         self._current_state = MCPState.DISABLED
-        self._status_dot = QLabel("●")
-        self._status_dot.setFixedWidth(12)
-        self._status_dot.setAlignment(Qt.AlignCenter)
+        self._status_dot = QLabel()
+        self._status_dot.setFixedSize(10, 10)
         self._status_dot.setToolTip("已关闭")
-        self._status_dot.setStyleSheet(
-            f"color: {_disabled_dot_color()}; font-size: {scale_font_size(11)}px; background: transparent; padding: 0;"
-        )
+        self._status_dot.setStyleSheet(_status_dot_qss(_disabled_dot_color()))
 
         # 第二行：状态灯 + 描述 + 本行 token 占用（token 右对齐，与上行操作组右缘齐平）
         bottom = QHBoxLayout()
