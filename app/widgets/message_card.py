@@ -4867,8 +4867,6 @@ class MessageCard(SimpleCardWidget):
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     hr();
-                    // 预览文字打字机：预览文本更新后逐字补齐增量
-                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }} else {{
                     // text-only 模式下不存在块：不创建
                     if ({_text_only_js}) return;
@@ -4906,8 +4904,6 @@ class MessageCard(SimpleCardWidget):
                         if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
                     hr();
-                    // 预览文字打字机：新工具块的预览行逐字显现
-                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }}
             }})();
             """
@@ -5061,8 +5057,6 @@ class MessageCard(SimpleCardWidget):
                 }} else if (typeof reportHeight === 'function') {{
                     reportHeight();
                 }}
-                // 预览文字打字机：思考块转完成态时预览行逐字显现
-                if (typeof window._ptPlay === 'function') window._ptPlay();
             }})();
             """
             self.viewer.page().runJavaScript(js_code)

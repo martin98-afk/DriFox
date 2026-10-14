@@ -95,7 +95,6 @@ from app.widgets.card_render_core import (
     _FLIP_JS,
     _HISTORY_TOOL_CAPS,
     _MAX_CHART_PAYLOAD_B64,
-    _PREVIEW_TYPEWRITER_JS,
     _PROJECT_ROOT,
     _RENDER_POOL,
     _RESET_CONTENT_FOR_REUSE_JS,
@@ -4190,9 +4189,6 @@ class CodeWebViewer(QWebEngineView):
                         // 把位置突变补间成平滑位移；入队串行，避免与归位/折叠动画叠加。
                         if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
 
-                        // 预览文字打字机：本次渲染新落地的思考/工具预览行逐字显现
-                        if (typeof window._ptPlay === 'function') window._ptPlay();
-
                         // ── 恢复全透明度：在下一帧前 fade in，CSS transition 驱动平滑淡入 ──
                         // 🛡️ 竞态防护：递增 token + 定时器引用，防止连续 updateContent 时
                         // 上轮清理误清本轮 transition，或清理定时器残留导致 transition 提前消失。
@@ -4336,8 +4332,6 @@ class CodeWebViewer(QWebEngineView):
                     // 插件 fence：追加的闭合段可能带入新的插件 fence
                     if (typeof window._runFenceAssets === 'function') window._runFenceAssets(roots);
                     if (typeof window._initWidgets === 'function') window._initWidgets(roots);
-                    // 预览文字打字机：差量段里新落地的思考/工具预览行逐字显现
-                    if (typeof window._ptPlay === 'function') window._ptPlay();
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeightDebounced(), 30);
                 }}
@@ -4851,8 +4845,6 @@ class CodeWebViewer(QWebEngineView):
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
                     if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
-                    // 预览文字打字机：搬移进工具区的思考/工具预览行逐字显现
-                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -5518,7 +5510,6 @@ class CodeWebViewer(QWebEngineView):
                 {_STREAMING_DOCK_JS}
                 {_BODY_HEIGHT_CAP_JS}
                 {_TYPEWRITER_JS}
-                {_PREVIEW_TYPEWRITER_JS}
                 {_FLIP_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
@@ -6233,16 +6224,6 @@ class CodeWebViewer(QWebEngineView):
             # runJavaScript 按派发顺序执行，此处补发一次即可保证顺序（幂等）。
             if self._streaming and not self._light_skeleton and not self._dock_sync_requested:
                 self._sync_streaming_dock(True)
-
-            # 预览文字打字机开关：只在本轮流式（含结束后的终渲染）播放。
-            # 历史会话加载时 _streaming / _streaming_finished 均为 False —— 一次
-            # 加载几十张卡片，若都逐字播放会同时起几十个 rAF 抢帧，且"打字机"
-            # 对已存在的历史内容没有意义，故关闭（文字按渲染结果直接全显）。
-            _pt_enabled = "true" if (self._streaming or getattr(self, "_streaming_finished", False)) else "false"
-            try:
-                self.page().runJavaScript(f"if (window._pt) window._pt.enabled = {_pt_enabled};")
-            except RuntimeError:
-                pass
 
             # 已完成（结果已到达）的工具 id 集合，供下方 restore 逻辑判断运行框是否可复活
             _finished_ids = list(getattr(self, "_restore_finished_ids", set()) or set())

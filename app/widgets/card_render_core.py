@@ -1704,7 +1704,7 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; line-height: 22px;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
-        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span class="tool-streaming-preview" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
         </span>{badge_html}
     </div>"""
@@ -1731,8 +1731,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
             preview_right = (
-                f'<span data-dfx-preview data-dfx-key="{block_key}" data-dfx-text="{escape(preview)}" '
-                f'style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
+                f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
                 f"{escape(preview)}</span>"
             )
             return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
@@ -1745,8 +1744,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
         summary_right = (
-            f'<span data-dfx-preview data-dfx-key="{block_key}" data-dfx-text="{escape(preview)}" '
-            f'style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
             f"{escape(preview)}</span>"
         )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
@@ -1791,8 +1789,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
         summary_right = (
-            f'<span data-dfx-preview data-dfx-key="think-light" data-dfx-text="{escape(preview)}" '
-            f'style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
             f"{escape(preview)}</span>"
         )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
@@ -3224,7 +3221,10 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v46）：[MEM-2] body 的 max-height 改走
 # CSS 变量 --dfx-body-max-h（Python 下发 = widget 高度上限），并注入
 # _BODY_HEIGHT_CAP_JS（window._dfxSetBodyMaxH）。CSS + JS 双资产变更，必须 bump。
-_SKELETON_CACHE_VERSION = 46
+# _SKELETON_CACHE_VERSION +1（v47）：移除预览文字打字机（_PREVIEW_TYPEWRITER_JS：
+# window._pt/_ptType/_ptPlay + 全部 [data-dfx-preview] 标记 + 三处渲染路径调用）。
+# 预览/思考预览行改为渲染落地即全显，不再逐字。旧骨架仍带 _pt 资产与调用必须失效。
+_SKELETON_CACHE_VERSION = 47
 
 
 def _js_literal(value) -> str:
@@ -4081,85 +4081,6 @@ _TYPEWRITER_JS = """
                     st._gateQueue = [];
                     st._gateExtra = '';
                     st._boost = false;
-                };
-"""
-
-# ── 预览文字打字机（Preview Typewriter）骨架资产 ──
-# 背景：思考/工具预览文字是「静默累积 → 一次性全量渲染」落地的（append_reasoning 的
-# 既定设计，避免每 chunk 全量重排导致 think-streaming DOM 反复销毁重建），因此它
-# 出现在 DOM 的那一刻是整段瞬间出现，观感生硬。这里让**预览行**逐字显现：
-#   - 首次落地：从空打到完整预览文本
-#   - 后续更新：从"已显示文本"续打到新文本，只补增量，不重放已显示部分
-# 只作用于带 [data-dfx-preview] 的短文本预览行（单行、nowrap、高度恒定），
-# 不动正文/思考正文——长文本逐字成本高且与 _tw 揭示队列职责重叠。
-# 全文存 data-dfx-text 属性（HTML 已转义），JS 只写首个文本节点，
-# 子元素（如工具的"(N字符)"计数 span）不受影响。
-_PREVIEW_TYPEWRITER_JS = """
-                // ===== 预览文字打字机 =====
-                window._pt = {
-                    shown: Object.create(null),  // key -> 已显现文本
-                    node: Object.create(null),   // key -> 当前正在写的文本节点
-                    raf: Object.create(null),    // key -> rAF 句柄（0 = 空闲）
-                    enabled: true,
-                    TOTAL_MS: 240,   // 单次要补的字符数在此时间内补齐
-                    MAX_CHARS: 120   // 超过该长度直接全显（长预览不逐字）
-                };
-                window._ptType = function (el, key, full) {
-                    var st = window._pt;
-                    if (!st || !st.enabled || !el) return;
-                    if (st.shown[key] === full) return;
-                    var node = el.firstChild;
-                    if (!node || node.nodeType !== 3) {
-                        // 没有可直接写的文本节点（理论上预览行必有）：
-                        // 退化直接显示，不影响可见性
-                        st.shown[key] = full;
-                        return;
-                    }
-                    // 打字中被全量重渲染打断（流式每 150~500ms 就会 innerHTML 重建一次，
-                    // 且 updateContent 内部 reorganizeContent 之后还会再播一次）：
-                    // 新节点携带完整文本，若从头重打会"全显→清空→再补"闪一下。
-                    // 这里只把写指针切到新节点的首个文本节点，动画按原进度续跑。
-                    if (st.raf[key]) {
-                        if (st.node[key] !== node) st.node[key] = node;
-                        return;
-                    }
-                    var shown = st.shown[key] || "";
-                    // 非前缀延续（预览被整体替换/回退）→ 从头重打
-                    if (full.indexOf(shown) !== 0) shown = "";
-                    var delta = full.length - shown.length;
-                    if (delta > st.MAX_CHARS) {
-                        node.nodeValue = full;
-                        st.shown[key] = full;
-                        return;
-                    }
-                    node.nodeValue = shown;
-                    var step = Math.max(1, Math.ceil(delta / (st.TOTAL_MS / 16)));
-                    var pos = shown.length;
-                    st.node[key] = node;
-                    var tick = function () {
-                        pos = Math.min(full.length, pos + step);
-                        var n = st.node[key];
-                        if (n && n.nodeType === 3) n.nodeValue = full.slice(0, pos);
-                        if (pos < full.length) {
-                            st.raf[key] = requestAnimationFrame(tick);
-                        } else {
-                            st.raf[key] = 0;
-                            st.node[key] = null;
-                            st.shown[key] = full;
-                        }
-                    };
-                    st.raf[key] = requestAnimationFrame(tick);
-                };
-                window._ptPlay = function (root) {
-                    var st = window._pt;
-                    if (!st || !st.enabled) return;
-                    var els = (root || document).querySelectorAll('[data-dfx-preview]');
-                    for (var i = 0; i < els.length; i++) {
-                        var el = els[i];
-                        var full = el.getAttribute('data-dfx-text');
-                        if (full === null) continue;
-                        window._ptType(el, el.getAttribute('data-dfx-key') || ('pt' + i), full);
-                    }
                 };
 """
 
