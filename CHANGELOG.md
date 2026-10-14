@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [未发布]
+### ✨ 新功能 (New Features)
+- **MCP OAuth 登录** (app/core/mcp_oauth/ · app/tools/mcp_tools.py · app/plugins/managers/plugin_manager.py): 新增 app/core/mcp_oauth/ 包（token_store / callback_server / provider / manager），给 MCP 客户端加 OAuth 2.1 授权码流程支持。覆盖 Protected Resource Metadata 发现（RFC 9728）、Authorization Server Metadata 发现（RFC 8414）、PKCE(S256)、动态客户端注册（RFC 7591）、本地 HTTP 回调（127.0.0.1 随机端口 /callback）、token 自动刷新。.mcp.json 通过 auth: {type: "oauth", client_name, scope} 声明，auth 已加入 _MCP_PERSIST_FIELDS 保证 UI 编辑不丢。token 复用 PluginConfigStore 落 plugin_data/<plugin>/config.json（键名 _mcp_oauth_<server>，明文存储已在文档标注）。附带 SDK 兼容性补丁：basic 认证模式下从 body 移除 client_id（RFC 6749 §2.3.1，否则 Notion 返回 400）。文档 docs/plugins/mcp-oauth.md；测试 tests/core/test_mcp_oauth.py（36 例）
+
 ## [v0.6.7] - 2026-10-14
 
 自上一版本以来的变更 | 提交数：39 · 文件变更：171 · +8027/-5941 | 贡献者：dingma, drifox-bot, mading

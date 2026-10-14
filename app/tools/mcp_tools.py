@@ -329,6 +329,39 @@ def _resolve_plugin_paths(config: dict) -> dict:
     return cfg
 
 
+# ── MCP OAuth 支持 ────────────────────────────────────
+# .mcp.json 里声明 "auth": {"type": "oauth", ...} 的 server 走 OAuth 授权码流程。
+# 核心实现见 app/core/mcp_oauth/，这里只负责从 config 反推归属插件并取 provider。
+
+
+def _plugin_name_from_source(config: dict) -> str:
+    """从 config["_source"]（.mcp.json 路径）反推插件名，取不到返回空串。"""
+    source = config.get("_source", "")
+    if source and source.endswith(".json"):
+        return Path(source).parent.name
+    return ""
+
+
+def _get_oauth_provider(config: dict):
+    """按 config 里的 auth 声明取得 OAuthClientProvider；非 oauth 型返回 None。"""
+    auth = config.get("auth")
+    if not isinstance(auth, dict) or auth.get("type") != "oauth":
+        return None
+
+    from app.core.mcp_oauth import McpOAuthManager
+
+    plugin_name = _plugin_name_from_source(config)
+    if not plugin_name:
+        raise ValueError("OAuth 型 MCP 服务器必须来自插件（.mcp.json），无法确定 token 存储位置")
+
+    return McpOAuthManager.get_instance().get_provider(
+        plugin_name,
+        config.get("name", ""),
+        config.get("url", ""),
+        auth,
+    )
+
+
 class MCPServerConnection:
     """单个 MCP Server 的连接管理"""
 
@@ -611,6 +644,20 @@ class MCPClientManager:
     async def _lifespan_http(self, conn: MCPServerConnection) -> None:
         url = conn.config.get("url", "")
         headers = conn.config.get("headers")
+        # OAuth 型服务器：provider 内部持 token 并按需刷新/重授权，
+        # 比静态 headers 优先级高（headers 留作非 OAuth 场景）。
+        auth_provider = _get_oauth_provider(conn.config)
+
+        if auth_provider is not None:
+            async with streamablehttp_client(url=url, auth=auth_provider) as (read_stream, write_stream, _):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    conn.session = session
+                    conn.tools = result.tools
+                    conn._ready_event.set()
+                    await conn._disconnect_event.wait()
+            return
 
         async with streamablehttp_client(url=url, headers=headers) as (read_stream, write_stream, _):
             async with ClientSession(read_stream, write_stream) as session:

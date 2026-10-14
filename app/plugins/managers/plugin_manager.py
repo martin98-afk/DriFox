@@ -1978,6 +1978,9 @@ class PluginManager:
             "env": PluginManager._expand_mcp_vars(cfg.get("env", {}), plugin_root),
             "url": PluginManager._expand_mcp_vars(cfg.get("url", ""), plugin_root),
             "headers": PluginManager._expand_mcp_vars(cfg.get("headers", {}), plugin_root),
+            # OAuth 等认证声明。缺省空 dict，非 OAuth 服务器行为不变。
+            # 仅 http/sse 型有意义；stdio 型忽略此字段。
+            "auth": cfg.get("auth", {}),
             "_source": str(source_file),
         }
 
@@ -2015,7 +2018,8 @@ class PluginManager:
 
         # 逆展开：将运行时绝对路径还原为 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA}
         # 只处理持久化字段，避免污染 _source 等元数据
-        _MCP_PERSIST_FIELDS = ("command", "args", "env", "url", "headers")
+        # auth 不含路径占位符，但需持久化，否则用户从 UI 保存会丢 OAuth 声明
+        _MCP_PERSIST_FIELDS = ("command", "args", "env", "url", "headers", "auth")
         for key in _MCP_PERSIST_FIELDS:
             if key in server_data:
                 server_data[key] = PluginManager._unexpand_mcp_vars(server_data[key], source_path.parent)
