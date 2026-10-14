@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """TabManagerWindow 缩放掉帧回归测试
 
-背景：用户反馈 TabManagerWindow 缩放时持续掉帧/画面抖动。静态分析定位到三个
+背景：用户反馈 TabManagerWindow 缩放时持续掉帧/画面抖动。静态分析定位到两个
 高嫌疑点（[DEBUG-r4d3] 缩放卡顿分析）：
 
-1. **pixel_pet._animate_to 动画风暴**：缩放期间每秒数十次 resize 事件，每次都
-   新建 QPropertyAnimation 并 start() 但不 stop 旧动画 → 多动画并行 tick 打架
-2. **_bg_label 每帧重绘**：TabManagerWindow resize 阶段二仍调用
+1. **_bg_label 每帧重绘**：TabManagerWindow resize 阶段二仍调用
    _bg_label.resize()，setScaledContents(True) 触发每帧 QPixmap 整图重绘
-3. **OpenAIChatToolWindow timer 漏防**：TabManagerWindow 阶段二阻断
+2. **OpenAIChatToolWindow timer 漏防**：TabManagerWindow 阶段二阻断
    super().resizeEvent()，嵌入窗口的 100ms _resize_complete_timer 没有后续
    reset → 缩放中途触发 _sync_all_cards_width 取消 preview 占位 → 视觉跳变
 
@@ -289,7 +287,7 @@ class TestExternalResizeBlocking:
         def _stub_resize_event(self, event):
             if getattr(self, "_external_resize_blocking", False):
                 return
-            # 实际场景下后续会调：_set_cards_resize_preview_mode / timer / _position_bottom_toolbar / pixel_pet
+            # 实际场景下后续应调：_set_cards_resize_preview_mode / timer / _position_bottom_toolbar
             # 这里因为是 stub，让它们都是 MagicMock，下面就能验证 .called == 0
             self._set_cards_resize_preview_mode(True)
             self._pending_resize_sync = True
@@ -298,8 +296,6 @@ class TestExternalResizeBlocking:
             self._resize_complete_timer.stop()
             self._resize_complete_timer.start()
             self._position_bottom_toolbar()
-            if self.pixel_pet:
-                self.pixel_pet.resize_handle(self.width(), self.height())
 
         monkeypatch.setattr(OpenAIChatToolWindow, "resizeEvent", _stub_resize_event)
 
@@ -315,7 +311,6 @@ class TestExternalResizeBlocking:
                 self._pending_resize_sync = False
                 self._resize_preview_active = False
                 self._position_bottom_toolbar = MagicMock()
-                self.pixel_pet = MagicMock()
                 self._set_cards_resize_preview_mode = MagicMock()
                 self._external_resize_blocking = False
 
@@ -339,9 +334,6 @@ class TestExternalResizeBlocking:
         )
         win._position_bottom_toolbar.assert_not_called(), (
             "冻结期间 resizeEvent 应早退，不应触发 _position_bottom_toolbar"
-        )
-        win.pixel_pet.resize_handle.assert_not_called(), (
-            "冻结期间 resizeEvent 应早退，不应触发桌宠定位"
         )
         assert not win._resize_debounce_timer.isActive(), (
             "冻结期间 resizeEvent 不应启动 _resize_debounce_timer"

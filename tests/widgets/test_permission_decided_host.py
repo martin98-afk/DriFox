@@ -102,7 +102,6 @@ def _make_host(*, delivered=True, raise_exc=False):
     host._set_bottom_input_visible = lambda v: host.input_visible_log.append(v)
     host.ai_state_log = []
     host._set_ai_state = lambda s: host.ai_state_log.append(s)
-    host._pet_set_state = lambda s: None
     host._restore_after_question_close = lambda: None
     host._focus_input_if_active = lambda *a, **k: None
     host.notify_log = []
