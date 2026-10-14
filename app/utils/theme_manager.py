@@ -281,26 +281,6 @@ class ThemeManager:
         resource_path = theme_dir / filename
         return resource_path if resource_path.exists() else None
 
-    def get_theme_pet(self, theme_id: str) -> dict:
-        """获取主题的 pet 配置。"""
-        self._ensure_loaded()
-        theme = self._themes.get(theme_id) or {}
-        pet_cfg = theme.get("pet") or {}
-        image_rel = pet_cfg.get("image")
-        if not image_rel:
-            return {}
-
-        theme_dir = self.get_theme_dir(theme_id)
-        if not theme_dir:
-            return {}
-
-        image_path = theme_dir / image_rel
-        if image_path.exists():
-            return {"image": image_path, "source": "theme"}
-
-        logger.warning(f"[ThemeManager] 主题 {theme_id} 声明的 pet 不存在: {image_path}，fallback 到内嵌默认")
-        return {}
-
     # ── 浅色/深色模式检测 ──────────────────────────────
 
     # 缓存：上次检测的 theme_id 和结果
@@ -481,7 +461,7 @@ class ThemeManager:
             #   isVisible 全为 False，朴素跳过无补刷链路导致主题不更新；故要求
             #   顶层可见才跳过，与 _execute_batched_theme_refresh 的 _tab_active_win
             #   语义对齐（顶层不可见时仍全量刷新）。
-            # - 无 _theme_needs_refresh 属性的 target（PixelPetWidget 等）保守不跳过
+            # - 无 _theme_needs_refresh 属性的 target 保守不跳过
             #   ——避免隐藏期间主题更新永久丢失（无补刷链路时跳过=不可恢复）。
             try:
                 if (

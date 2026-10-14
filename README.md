@@ -13,7 +13,7 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.6.6-brightgreen)
+![Version](https://img.shields.io/badge/version-0.6.7-brightgreen)
 
 </div>
 
@@ -117,7 +117,6 @@ DriFox 把"团队"建模为**多窗口 + 文件邮箱**——把"团队协作"�
 | 🔌 **Hook 系统** | 6 种事件钩子，PreToolUse 可 BLOCK |
 | 🧩 **Skill 系统** | 25+ 即用技能，可自行扩展 |
 | 🖼️ **图片富媒体** | Markdown/HTML 图片原生渲染 |
-| 🐾 **桌宠系统** | PixelPet 桌面宠物，状态动画 |
 | 🚀 **自动更新** | 自动检查新版本 |
 | 🌐 **models.dev 动态同步** | 启动时从 models.dev 拉取最新模型元数据，24h 缓存，增量合并 |
 | 🧩 **模型参数服务商级隔离** | 同名模型在不同服务商下的参数配置互不干扰 |
@@ -156,10 +155,10 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.6.6 架构                  │
+│                    DriFox v0.6.7 架构                  │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      悬浮窗口 / 消息卡片 / 差异视图 / 输入区         │
-│             浮动卡片 / 桌宠 / 系统托盘 / 设置面板            │
+│             浮动卡片 / 系统托盘 / 设置面板                 │
 │  渲染层     Markdown→HTML / ECharts / 图片 / 代码高亮       │
 │  引擎层     对话引擎 / 工具执行 / 插件管理 / DAG 编排        │
 │             Agent管理 / Hook管理 / 上下文压缩 / Gateway      │

@@ -33,7 +33,7 @@ from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
 from html import escape, unescape
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import orjson as json
 import sip
@@ -339,10 +339,14 @@ class MessageCard(SimpleCardWidget):
         self._footer_bar: Optional[QWidget] = None
         self._footer_model_label: Optional[QLabel] = None
         self._footer_elapsed_label: Optional[QLabel] = None
-        self._footer_diff_stats_label: Optional[QLabel] = None  # 差异胶囊内文本
-        self._footer_diff_pill: Optional[QWidget] = None  # 差异胶囊容器（文本 + 🔍 同舱）
+        self._footer_diff_stats_label: Optional[QLabel] = None  # 差异统计首段（N 文件）
+        # 差异统计分段（N 文件 / +N / / / -N）：多段纯文本而非单个 RichText
+        # （富文本 sizeHint 与基线同纯文本不同，与左区并排会垂直错位）
+        self._footer_diff_parts: List[QLabel] = []
         # 左区成员表 [(分隔点或None, label)]：耗时 + 插件 stat，· 分隔动态管理
         self._footer_left_items: List[Tuple[Optional[QLabel], QLabel]] = []
+        # 右区成员表：模型名 + 差异统计，· 分隔动态管理
+        self._footer_right_items: List[Tuple[Optional[QLabel], QLabel]] = []
         # 插件注册的页脚信息项（footer_stat 槽位）：{stat_id: QLabel}
         self._footer_stat_labels: Dict[str, QLabel] = {}
         # 耗时实时计时器
@@ -734,8 +738,8 @@ class MessageCard(SimpleCardWidget):
     def _build_footer_bar(self, main: QVBoxLayout):
         """构建助手卡片底部极简元信息栏
 
-        布局：左侧纯文本（耗时 + 插件注册信息项），右侧全可点击
-        （模型胶囊 / 差异胶囊含内嵌 Review，分支+复制 hover 浮现 + 插件按钮）。
+        布局：左侧纯文本（耗时 + 插件注册信息项），右侧纯文本信息
+        （模型名 / 差异统计，· 分隔）+ 常显按钮组（审查 / 分支 / 复制 / 插件按钮）。
         token 总量与吞吐量的展示已移除，由插件经 footer_stat 槽位注入。
         """
         bar = QWidget(self)
@@ -787,39 +791,14 @@ class MessageCard(SimpleCardWidget):
             layout.addWidget(stat_l)
             self._footer_left_items.append((sep, stat_l))
 
-        # Review 图标（内嵌差异胶囊右端；点击触发 code-reviewer 子智能体）
-        # ★ 胶囊存在时常显，不与 hover 组一起隐现。
-        icon_size = scale_font_size(10)
-        review_icon = QLabel(self)
-        review_icon.setObjectName("footer_review_icon")
-        review_icon.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
-        review_icon.setFixedSize(icon_size + 4, icon_size + 4)
-        review_icon.setScaledContents(True)
-        review_icon.setStyleSheet(
-            "QLabel {"
-            " background: transparent; padding: 1px; margin: 0px;"
-            # 父级差异胶囊用 QWidget 选择器设了 1px 实线边框，类型选择器会级联到
-            # 子 QLabel；不显式清掉就会在放大镜外露出一圈方框
-            " border: none; border-radius: 3px;"
-            " }"
-            "QLabel:hover { background: rgba(128,128,128,0.18); border: none; }"
-        )
-        review_icon.setAlignment(Qt.AlignCenter)
-        review_icon.setCursor(Qt.PointingHandCursor)
-        review_icon.mousePressEvent = lambda e: self._emit_review_requested()
-        install_hover_tooltip(review_icon, "用 code-reviewer 子智能体快速审查本次修改")
-        self._footer_review_icon = review_icon
-
-        # 弹性分隔：左侧纯文本信息区 | 右侧可点击区（胶囊/按钮）
+        # 弹性分隔：左侧纯文本信息区 | 右侧信息 + 操作区
         layout.addStretch()
 
-        # 模型胶囊（可点击跳目标配置；仅显示模型名，服务商名隐藏但保留用于跳转）
+        # 右区纯文本信息（· 分隔，与左区同款；原胶囊边框已去除）
+        # 模型名（可点击跳目标配置；仅显示模型名，服务商名隐藏但保留用于跳转）
         footer_text = self._get_footer_model_text()
         model_l = QLabel(footer_text, self)
-        model_l.setStyleSheet(
-            f"{font_css} font-size: {scale_font_size(10)}px; color: {self._theme['muted']};"
-            f" border: 1px solid {Colors.BORDER}; border-radius: 8px; padding: 1px 8px;"
-        )
+        model_l.setStyleSheet(label_style)
         model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
@@ -827,41 +806,56 @@ class MessageCard(SimpleCardWidget):
         install_hover_tooltip(model_l, "点击切换到目标模型配置")
         self._footer_model_label = model_l
         layout.addWidget(model_l)
+        self._footer_right_items.append((None, model_l))
 
-        # 差异胶囊：文本（点击弹差异弹窗）+ 🔍（点击触发 Review）同舱，有 diff 才显示
-        diff_pill = QWidget(self)
-        diff_pill.setAttribute(Qt.WA_StyledBackground, True)  # 纯 QWidget 让 QSS border 生效
-        diff_pill.setStyleSheet(
-            f"QWidget {{ background: transparent; border: 1px solid {Colors.BORDER};"
-            f" border-radius: 8px; margin-left: 4px; }}"
-        )
-        dp = QHBoxLayout(diff_pill)
-        dp.setContentsMargins(8, 0, 2, 0)
-        dp.setSpacing(2)
-        diff_l = QLabel("", diff_pill)
-        diff_l.setStyleSheet(
-            f"{font_css} font-size: {scale_font_size(10)}px; color: {self._theme['muted']};"
-            f" background: transparent; border: none; padding: 1px 0px; margin: 0px;"
-        )
-        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        diff_l.setVisible(False)
-        diff_l.setCursor(Qt.PointingHandCursor)
-        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
-        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
-        self._footer_diff_stats_label = diff_l
-        dp.addWidget(diff_l)
-        dp.addWidget(review_icon, 0, Qt.AlignVCenter)
-        diff_pill.setVisible(False)
-        self._footer_diff_pill = diff_pill
-        layout.addWidget(diff_pill)
+        # 差异统计文本（点击弹差异弹窗），前置 · 分隔，有 diff 才显示。
+        # ⚠️ 拆成多段纯文本 label（N 文件 / +N / / / -N）而非单个 RichText：
+        # 富文本的 sizeHint 与基线同纯文本 label 不同（实测 sh 17 vs 15），
+        # 与左区标签并排会垂直错位（同 _refresh_footer_stats 的既有教训）。
+        diff_sep = QLabel("·", self)
+        diff_sep.setStyleSheet(label_style)
+        diff_sep.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        diff_sep.setVisible(False)
+        layout.addWidget(diff_sep)
+        diff_parts: List[QLabel] = []
+        for _color in (None, "#2ea043", None, "#f85149"):
+            p = QLabel("", self)
+            p.setStyleSheet(label_style if _color is None else f"{label_style} color: {_color};")
+            p.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            p.setTextFormat(Qt.PlainText)
+            p.setVisible(False)
+            p.setCursor(Qt.PointingHandCursor)
+            p.mousePressEvent = lambda e: self._emit_card_diff_requested()
+            install_hover_tooltip(p, "点击查看当条消息的文件差异详情")
+            layout.addWidget(p)
+            diff_parts.append(p)
+        self._footer_diff_stats_label = diff_parts[0]
+        self._footer_diff_add_label = diff_parts[1]
+        self._footer_diff_slash_label = diff_parts[2]
+        self._footer_diff_del_label = diff_parts[3]
+        self._footer_diff_parts = diff_parts
+        self._footer_right_items.append((diff_sep, diff_parts[0]))
 
-        # 右侧操作区：常显操作组（复制 / 分支 / 插件按钮）。
+        # 右侧操作区：常显操作组（审查 / 分支 / 复制 / 插件按钮）。
         # 固定尺寸占位：按钮显隐切换时 footer 尺寸不变，卡片不跳动、不重排。
         hover_btns = QWidget(self)
         self._assistant_action_btns = hover_btns
         hb = QHBoxLayout(hover_btns)
-        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setContentsMargins(6, 0, 0, 0)
         hb.setSpacing(2)
+
+        # 审查按钮：与分支/复制同排；仅在有 diff 时显示（set_diff_stats 控制），
+        # 点击触发 code-reviewer 子智能体快速审查本次修改
+        review_icon = TransparentToolButton(get_icon("Search"), self)
+        review_icon.setObjectName("footer_review_icon")
+        review_icon.setFixedSize(20, 20)
+        review_icon.clicked.connect(lambda: self._emit_review_requested())
+        review_icon.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
+        install_hover_tooltip(review_icon, delay_ms=200)
+        review_icon.setVisible(False)
+        self._footer_review_icon = review_icon
+        hb.addWidget(review_icon)
+
         for ic, tp, cb in [
             (get_icon("分支"), "从此条分支新对话", lambda: self._emit_branch_requested()),
             (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
@@ -991,29 +985,29 @@ class MessageCard(SimpleCardWidget):
         if not self._footer_diff_stats_label:
             return
         if files_count == 0 and additions == 0 and deletions == 0:
-            # 无 diff：整舱隐藏（文本 + 内嵌 Review 同舱联动）
-            if self._footer_diff_pill:
-                self._footer_diff_pill.setVisible(False)
+            # 无 diff：清空差异文本（驱动 · 分隔收敛）与审查按钮
+            for p in getattr(self, "_footer_diff_parts", []):
+                p.setText("")
+                p.setVisible(False)
+            if getattr(self, "_footer_review_icon", None):
+                self._footer_review_icon.setVisible(False)
+            self._refresh_footer_separators()
             return
 
-        muted = self._theme.get("muted", "#888888")
-        html = f'<span style="color:{muted};">{files_count} 文件</span>'
+        # 逐段纯文本着色（不用 RichText，见 _build_footer_bar 处说明）
+        # 空格挂在首段尾部：分段 label 间距为 0，靠它维持「4 文件 +26/-2」排版
+        # （挂尾部可保证只有 -N 时也显示「4 文件 -2」）
+        self._footer_diff_stats_label.setText(f"{files_count} 文件 ")
+        self._footer_diff_add_label.setText(f"+{additions}" if additions > 0 else "")
+        self._footer_diff_slash_label.setText("/" if additions > 0 and deletions > 0 else "")
+        self._footer_diff_del_label.setText(f"-{deletions}" if deletions > 0 else "")
+        for p in self._footer_diff_parts:
+            p.setVisible(bool(p.text()))
 
-        add_del = []
-        if additions > 0:
-            add_del.append('<span style="color:#2ea043;">+{}</span>'.format(additions))
-        if deletions > 0:
-            add_del.append('<span style="color:#f85149;">-{}</span>'.format(deletions))
-        if add_del:
-            html += "&nbsp;" + "/".join(add_del)
-
-        self._footer_diff_stats_label.setText(html)
-        self._footer_diff_stats_label.setTextFormat(Qt.RichText)
-        self._footer_diff_stats_label.setVisible(True)
-
-        # 整舱显示（含内嵌 Review 图标）
-        if self._footer_diff_pill:
-            self._footer_diff_pill.setVisible(True)
+        # 审查按钮随 diff 出现（· 分隔联动刷新）
+        if getattr(self, "_footer_review_icon", None):
+            self._footer_review_icon.setVisible(True)
+        self._refresh_footer_separators()
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0, seen_files: set = None):
         """增量累加差异统计（工具执行时实时调用，文件级去重避免多次编辑同一文件重复计数）
@@ -1064,18 +1058,22 @@ class MessageCard(SimpleCardWidget):
             )
 
     def _refresh_footer_separators(self):
-        """左区 · 分隔点可见性：前段有可见成员且当前成员非空才显示（比 isVisible 更可靠）"""
-        try:
-            seen_visible = False
-            for sep, label in getattr(self, "_footer_left_items", []):
-                label_ok = bool(label and label.text())
-                if sep is not None:
-                    sep.setVisible(seen_visible and label_ok)
-                seen_visible = seen_visible or label_ok
-        except RuntimeError:
-            # 🛡️ 防御：footer label / separator 可能已被 C++ 侧销毁（deleteLater 排队中），
-            # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。静默忽略。
-            pass
+        """左/右区 · 分隔点可见性：前段有可见成员且当前成员非空才显示（比 isVisible 更可靠）"""
+        for items in (
+            getattr(self, "_footer_left_items", []),
+            getattr(self, "_footer_right_items", []),
+        ):
+            try:
+                seen_visible = False
+                for sep, label in items:
+                    label_ok = bool(label and label.text())
+                    if sep is not None:
+                        sep.setVisible(seen_visible and label_ok)
+                    seen_visible = seen_visible or label_ok
+            except RuntimeError:
+                # 🛡️ 防御：footer label / separator 可能已被 C++ 侧销毁（deleteLater 排队中），
+                # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。静默忽略。
+                pass
 
     def _resolve_footer_host(self):
         """沿父链查找宿主窗口（带 _window_id 的祖先），插件回调 context 用"""

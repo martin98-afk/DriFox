@@ -130,8 +130,6 @@ class InputCardModule(UIModule):
         host.input_area.historyModeExited.connect(host._on_history_mode_exited)
         # 正文里的 [[basename]] 被删除 → 同步移除附件栏对应的 chip（反向同步）
         host.input_area.attachmentsRemoved.connect(host._on_attachments_removed_from_text)
-        # ★ 用户输入时通知桌宠好奇看向输入框
-        host.input_area.textChanged.connect(host._on_pet_typing)
         card_layout.addWidget(host.input_area)
 
         # 加载输入历史

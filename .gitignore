@@ -27,7 +27,7 @@ Thumbs.db
 /.drifox/app.config
 .workbuddy/
 
-# docs 仅白名单 6 个 tracked 文件入库
+# docs 仅白名单 7 个 tracked 文件入库
 /docs/*
 !docs/plugin-architecture.md
 !docs/plugins/
@@ -37,6 +37,7 @@ docs/plugins/*
 !docs/plugins/ui-modules.md
 !docs/plugins/ui-slots.md
 !docs/plugins/ui-workspace.md
+!docs/plugins/mcp-oauth.md
 
 # Build artifacts
 dist/

@@ -290,22 +290,40 @@ def _validate_stdio_config(config: dict) -> str:
 #   2. 用户通过 UI 直接新增含占位符的服务器（未走 get_mcp_servers）；
 #   3. 旧版打包产物（dist）不含展开逻辑。
 # 在真正拉起子进程前做一次兜底解析，保证子进程永远拿到绝对路径。
+#
+# ${env.VAR} 展开：docs/mcp.md 的参考示例一直写着 headers 里用
+# ${env.GITHUB_TOKEN}，但代码侧从未实现，该写法会带着字面量发往服务端，
+# 鉴权必然失败。这里补上：命中环境变量则替换，未设置则保留原样，
+# 让下游按字面量处理，便于识别是漏配而非静默变成空串。
+_ENV_PLACEHOLDER = re.compile(r"\$\{env\.([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env_placeholder(value: str) -> str:
+    """把字符串中的 ${env.VAR} 替换为环境变量的值；未设置则原样保留。"""
+    if not isinstance(value, str) or "${env." not in value:
+        return value
+    return _ENV_PLACEHOLDER.sub(lambda m: os.environ.get(m.group(1), m.group(0)), value)
+
+
 def _expand_mcp_placeholder(value: str, plugin_root: Path) -> str:
-    """将单个字符串中的 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA} 解析为绝对路径。"""
+    """展开单个字符串中的 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA} / ${env.VAR}。"""
     if not isinstance(value, str) or not value:
         return value
     root = plugin_root.as_posix()
     data = (plugin_root / "data").as_posix()
     normalized = value.replace("\\", "/")
     # 先替换长的（DATA 含 ROOT 前缀），避免 ${CLAUDE_PLUGIN_ROOT}/data 被部分替换
-    return normalized.replace("${CLAUDE_PLUGIN_DATA}", data).replace("${CLAUDE_PLUGIN_ROOT}", root)
+    normalized = normalized.replace("${CLAUDE_PLUGIN_DATA}", data).replace("${CLAUDE_PLUGIN_ROOT}", root)
+    return _expand_env_placeholder(normalized)
 
 
 def _resolve_plugin_paths(config: dict) -> dict:
-    """启动前兜底解析 config 中的插件路径占位符（防御旧缓存 / 热重载竞态 / UI 直增）。
+    """启动前兜底解析 config 中的占位符（防御旧缓存 / 热重载竞态 / UI 直增）。
 
-    通过 config["_source"]（.mcp.json 路径）反推 plugin_root；无法反推时原样返回，
-    不影响普通绝对/相对路径配置。
+    两类占位符分两条路：
+    - ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA}：需经 config["_source"]
+      反推 plugin_root，拿不到就跳过（原样返回）。
+    - ${env.VAR}：只依赖进程环境变量，与插件根无关，任何时候都能展开。
     """
     source = config.get("_source", "")
     plugin_root = None
@@ -313,20 +331,184 @@ def _resolve_plugin_paths(config: dict) -> dict:
         p = Path(source)
         if p.parent.exists():
             plugin_root = p.parent
-    if plugin_root is None:
-        return config
+
     cfg = copy.deepcopy(config)
-    cfg["command"] = _expand_mcp_placeholder(cfg.get("command", ""), plugin_root)
-    cfg["args"] = [_expand_mcp_placeholder(a, plugin_root) for a in cfg.get("args", [])]
-    cfg["url"] = _expand_mcp_placeholder(cfg.get("url", ""), plugin_root)
-    cfg["env"] = {
-        k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v for k, v in cfg.get("env", {}).items()
-    }
+    if plugin_root is not None:
+        cfg["command"] = _expand_mcp_placeholder(cfg.get("command", ""), plugin_root)
+        cfg["args"] = [_expand_mcp_placeholder(a, plugin_root) for a in cfg.get("args", [])]
+        cfg["url"] = _expand_mcp_placeholder(cfg.get("url", ""), plugin_root)
+        cfg["env"] = {
+            k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v
+            for k, v in cfg.get("env", {}).items()
+        }
+        cfg["headers"] = {
+            k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v
+            for k, v in cfg.get("headers", {}).items()
+        }
+        return cfg
+
+    # 无 plugin_root：至少把 env 占位符展开掉，避免字面量 "${env.X}" 发往服务端
+    cfg["url"] = _expand_env_placeholder(cfg.get("url", ""))
     cfg["headers"] = {
-        k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v
-        for k, v in cfg.get("headers", {}).items()
+        k: _expand_env_placeholder(v) if isinstance(v, str) else v for k, v in cfg.get("headers", {}).items()
     }
     return cfg
+
+
+# ── MCP 凭据（API Key）存储与注入 ───────────────────────────
+# .mcp.json 可声明 credential 段，让用户在设置界面直接填 Key 并一键打开申请页，
+# 不必去配环境变量。形态与 Hana 的 connector.json 对齐：
+#
+#   "credential": {
+#     "label": "API Key",           # 输入框前的标签（缺省 "Key"）
+#     "placeholder": "sk-...",      # 输入框占位提示
+#     "getUrl": "https://...",      # 「获取 Key」按钮打开的申请页；缺省不显示按钮
+#     "inject": {
+#       "type": "header",           #   header → 写成 headers[name]
+#       "name": "Authorization",    #     header 名
+#       "scheme": "Bearer"          #     可选前缀；缺省原样写入
+#     },
+#     "inject": {                   #   query → 追加为 URL 查询参数
+#       "type": "query",
+#       "name": "key"
+#     },
+#     "inject": {                   #   url → 整条端点由用户提供
+#       "type": "url"
+#     }
+#   }
+#
+# 存储走 PluginConfigStore（与 OAuth token 同一处），键名 _mcp_cred_<server>。
+# 同为明文存储，风险口径与 OAuth token 一致。
+_CRED_KEY_PREFIX = "_mcp_cred_"
+
+
+def credential_storage_key(server_name: str) -> str:
+    """该 server 在插件 config.json 中的 Key 存储键。"""
+    return f"{_CRED_KEY_PREFIX}{server_name}"
+
+
+def get_credential(plugin_name: str, server_name: str) -> str:
+    """读取已保存的 Key；无则空串。异常一律按「无凭据」处理，不阻断连接。"""
+    if not plugin_name:
+        return ""
+    try:
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+        raw = PluginConfigStore()._read_raw(plugin_name)
+        val = raw.get(credential_storage_key(server_name))
+        return val if isinstance(val, str) else ""
+    except Exception as e:
+        logger.debug(f"[MCP] 读取凭据失败 {plugin_name}/{server_name}: {e}")
+        return ""
+
+
+def set_credential(plugin_name: str, server_name: str, value: str) -> bool:
+    """保存 Key；空串表示清除。"""
+    if not plugin_name:
+        return False
+    try:
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+        return PluginConfigStore().set_values(plugin_name, {credential_storage_key(server_name): value or ""})
+    except Exception as e:
+        logger.warning(f"[MCP] 保存凭据失败 {plugin_name}/{server_name}: {e}")
+        return False
+
+
+def _inject_credential(config: dict, cred: dict) -> dict:
+    """把已保存的 Key 按 credential.inject 注入 config，返回新 dict。
+
+    无 credential 声明或无已存 Key 时原样返回。优先级高于 ${env.VAR}：
+    用户在界面显式填的 Key 应覆盖占位符。
+    """
+    if not isinstance(cred, dict):
+        return config
+    key = get_credential(_plugin_name_from_source(config), config.get("name", ""))
+    if not key:
+        return config
+
+    cfg = copy.deepcopy(config)
+    inject = cred.get("inject") or {}
+    kind = inject.get("type", "header")
+
+    if kind == "url":
+        # 整条端点由用户提供（服务方签发的专属链接），Key 即 URL
+        cfg["url"] = key
+    elif kind == "query":
+        name = inject.get("name") or "key"
+        base, _, query = cfg.get("url", "").partition("?")
+        # 剥掉同名旧参数与 ${cred.url} 占位，避免重复追加
+        parts = [p for p in query.split("&") if p and not p.startswith(f"{name}=")] if query else []
+        parts = [p for p in parts if p != "${cred.url}"]
+        url = f"{base}?{'&'.join(parts)}" if parts else base
+        sep = "&" if "?" in url else "?"
+        cfg["url"] = f"{url}{sep}{name}={key}"
+    else:
+        header = inject.get("name") or "Authorization"
+        scheme = inject.get("scheme")
+        headers = dict(cfg.get("headers") or {})
+        headers[header] = f"{scheme} {key}" if scheme else key
+        cfg["headers"] = headers
+    return cfg
+
+
+def _resolve_mcp_credentials(config: dict) -> dict:
+    """连接前注入 credential 声明的 Key（若用户已保存）。"""
+    return _inject_credential(config, config.get("credential") or {})
+
+
+def _find_unresolved_env(config: dict) -> list:
+    """列出 config 的 url / headers 中仍未解析的 ${env.VAR} 变量名。
+
+    供 _connect_single 在连接前预检：变量未设置时提前失败，避免远端把
+    缺凭据响应成 200 + 业务错误 JSON，导致 mcp SDK 挂到超时才报错。
+    """
+    missing: list = []
+
+    def _scan(value) -> None:
+        if not isinstance(value, str):
+            return
+        for name in _ENV_PLACEHOLDER.findall(value):
+            if name not in missing:
+                missing.append(name)
+
+    _scan(config.get("url"))
+    for v in (config.get("headers") or {}).values():
+        _scan(v)
+    return missing
+
+
+# ── MCP OAuth 支持 ────────────────────────────────────
+# .mcp.json 里声明 "auth": {"type": "oauth", ...} 的 server 走 OAuth 授权码流程。
+# 核心实现见 app/core/mcp_oauth/，这里只负责从 config 反推归属插件并取 provider。
+
+
+def _plugin_name_from_source(config: dict) -> str:
+    """从 config["_source"]（.mcp.json 路径）反推插件名，取不到返回空串。"""
+    source = config.get("_source", "")
+    if source and source.endswith(".json"):
+        return Path(source).parent.name
+    return ""
+
+
+def _get_oauth_provider(config: dict):
+    """按 config 里的 auth 声明取得 OAuthClientProvider；非 oauth 型返回 None。"""
+    auth = config.get("auth")
+    if not isinstance(auth, dict) or auth.get("type") != "oauth":
+        return None
+
+    from app.core.mcp_oauth import McpOAuthManager
+
+    plugin_name = _plugin_name_from_source(config)
+    if not plugin_name:
+        raise ValueError("OAuth 型 MCP 服务器必须来自插件（.mcp.json），无法确定 token 存储位置")
+
+    return McpOAuthManager.get_instance().get_provider(
+        plugin_name,
+        config.get("name", ""),
+        config.get("url", ""),
+        auth,
+    )
 
 
 class MCPServerConnection:
@@ -347,6 +529,31 @@ class MCPServerConnection:
         self._ready_event: Optional[asyncio.Event] = None
         self._connect_error: Optional[Exception] = None
         self._stderr_path: Optional[str] = None
+        # 调用队列：session 及底层 anyio stream 由 lifespan Task 创建，
+        # 有 Task 亲和性。跨 Task 直接 await session.call_tool 会永久挂死
+        # （实测同 Task 9.8s 成功、跨 Task 30s 超时无响应）。
+        # 所有 session 操作必须经此队列丢回 lifespan Task 执行。
+        self._call_queue: Optional[asyncio.Queue] = None
+
+    def submit_call(self, coro_factory) -> "asyncio.Future":
+        """把一个 session 调用提交给 lifespan Task 执行，返回 awaitable future。
+
+        Args:
+            coro_factory: 无参可调用，返回协程。延迟到 lifespan Task 内
+                才调用它，避免在提交方 Task 里提前创建协程对象。
+
+        Returns:
+            concurrent.futures.Future（run_coroutine_threadsafe 风格），
+            调用方用 .result(timeout) 同步拿结果。
+
+        Raises:
+            RuntimeError: 连接未就绪 / 队列不存在（已断开）
+        """
+        if self._call_queue is None or self._loop is None:
+            raise RuntimeError(f"服务器 '{self.name}' 未就绪，无法提交调用")
+        future: asyncio.Future = self._loop.create_future()
+        self._call_queue.put_nowait((coro_factory, future))
+        return future
 
     def set_state(self, state: str, error: str = "") -> None:
         """更新连接状态（mcp 事件循环线程调用）
@@ -479,6 +686,10 @@ class MCPClientManager:
         try:
             return future.result(timeout=timeout)
         except asyncio.TimeoutError:
+            # 必须真正 cancel，不能只放弃等待。否则协程仍挂在后台循环里
+            # 继续跑（典型：MCP session.call_tool 等读流），变成孤儿协程，
+            # 它持有的 stream 引用会把 lifespan TaskGroup 拖崩。
+            future.cancel()
             raise TimeoutError(f"协程执行超时（{timeout}秒）")
         except asyncio.CancelledError:
             # 🛡️ 透传取消信号，不拦截
@@ -502,6 +713,9 @@ class MCPClientManager:
         断开时通过 _disconnect_event 信号自然退出。
         """
         server_type = conn.server_type
+        # 调用循环：单独 Task，但在本 lifespan Task 的 scope 内创建，
+        # 因此与 session 同属一个 anyio TaskGroup，满足 stream 的 Task 亲和性。
+        call_loop_task = asyncio.ensure_future(self._call_loop(conn), loop=self._loop)
         try:
             if server_type == "stdio":
                 await self._lifespan_stdio(conn)
@@ -526,9 +740,19 @@ class MCPClientManager:
                 conn._ready_event.set()
             else:
                 # 已就绪后才异常 → 运行中掉线，标记失败让指示灯转红
-                logger.warning(f"[MCP] 服务器 '{conn.name}' 运行中断开: {e}")
-                conn.set_state(MCPState.FAILED, f"运行中断开: {_extract_real_error(e)}")
+                # anyio TaskGroup 会把真实异常包成 ExceptionGroup，str(e) 只有
+                # "unhandled errors in a TaskGroup (N sub-exception)"，
+                # 真实原因（stream closed / read timeout / auth 失败）全在子异常里。
+                # 必须先提取再记日志，否则掉线原因不可诊断。
+                actual = _extract_real_error(e)
+                logger.warning(
+                    f"[MCP] 服务器 '{conn.name}' 运行中断开: {type(actual).__name__}: {actual}"
+                )
+                conn.set_state(MCPState.FAILED, f"运行中断开: {actual}")
         finally:
+            # 调用循环先停，避免 session 已置空后它还去碰
+            if not call_loop_task.done():
+                call_loop_task.cancel()
             was_connected = conn.state == MCPState.CONNECTED
             conn.session = None
             conn.tools = []
@@ -538,6 +762,56 @@ class MCPClientManager:
                 detail = _read_stderr_tail(conn._stderr_path)
                 conn.set_state(MCPState.FAILED, f"服务器进程意外退出{(': ' + detail) if detail else ''}")
             logger.info(f"[MCP] 已断开服务器 '{conn.name}'")
+
+    async def _call_loop(self, conn: MCPServerConnection) -> None:
+        """在 lifespan Task 的 scope 内消费调用队列。
+
+        为什么需要它：ClientSession 及其底层 anyio memory stream 由
+        lifespan Task 创建，有 Task 亲和性。call_tool_sync 来自 ToolExecutor
+        所在线程，经 run_coroutine_threadsafe 会把协程丢进一个新 Task；
+        在新 Task 里 await session.call_tool 会永久挂死（实测同 Task 9.8s
+        成功、跨 Task 30s 无响应超时）。因此所有 session 操作都必须在这里执行。
+
+        队列项为 (coro_factory, future)：coro_factory 延迟到本 Task 内调用，
+        避免在提交方 Task 提前创建协程对象导致 "coroutine was never awaited"。
+
+        每次调用单独起 Task 执行，调用方取消 future 时能把取消传播进去，
+        避免 session.call_tool 变成挂在读流上的孤儿协程拖崩 lifespan。
+        """
+        queue = conn._call_queue
+        if queue is None:
+            return
+        while True:
+            coro_factory, future = await queue.get()
+            if future.done():
+                # 调用方已放弃，别再白跑
+                continue
+
+            async def _run(factory=coro_factory):
+                return await factory()
+
+            task = asyncio.ensure_future(_run(), loop=self._loop)
+
+            def _propagate_cancel(f, t=task):
+                # 调用方主动取消（外层超时/强制停止）时，把取消传给执行 Task，
+                # 让 session.call_tool 内部立刻收 CancelledError。
+                if f.cancelled():
+                    t.cancel()
+
+            future.add_done_callback(_propagate_cancel)
+
+            try:
+                result = await task
+            except asyncio.CancelledError:
+                # 本 Task 被取消（调用方放弃或 lifespan 收尾）→ 同步取消 future
+                if not future.done():
+                    future.cancel()
+            except Exception as e:
+                if not future.done():
+                    future.set_exception(_extract_real_error(e))
+            else:
+                if not future.done():
+                    future.set_result(result)
 
     async def _lifespan_stdio(self, conn: MCPServerConnection) -> None:
         command = conn.config.get("command", "")
@@ -611,6 +885,20 @@ class MCPClientManager:
     async def _lifespan_http(self, conn: MCPServerConnection) -> None:
         url = conn.config.get("url", "")
         headers = conn.config.get("headers")
+        # OAuth 型服务器：provider 内部持 token 并按需刷新/重授权，
+        # 比静态 headers 优先级高（headers 留作非 OAuth 场景）。
+        auth_provider = _get_oauth_provider(conn.config)
+
+        if auth_provider is not None:
+            async with streamablehttp_client(url=url, auth=auth_provider) as (read_stream, write_stream, _):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    conn.session = session
+                    conn.tools = result.tools
+                    conn._ready_event.set()
+                    await conn._disconnect_event.wait()
+            return
 
         async with streamablehttp_client(url=url, headers=headers) as (read_stream, write_stream, _):
             async with ClientSession(read_stream, write_stream) as session:
@@ -923,6 +1211,43 @@ class MCPClientManager:
         # 兜底解析插件路径占位符（防御旧缓存 / 热重载竞态 / UI 直增未展开的情况）
         config = _resolve_plugin_paths(config)
 
+        # 注入用户在设置界面填的 Key（credential 声明），优先级高于 ${env.VAR}
+        config = _resolve_mcp_credentials(config)
+
+        # ── 已声明 credential 但用户还没填 Key 的预检 ────────────────────
+        # 这类 server 的端点几乎都要求凭据。不拦的话，远端要么回 401，
+        # 要么像高德那样回 200 + 业务错误 JSON —— 后者会让 mcp SDK 把
+        # 响应当成"读流里的异常消息"而非抛错，最终挂到 90 秒超时才失败。
+        # 直接说清楚去哪儿填，比等超时好。
+        _cred = config.get("credential")
+        if isinstance(_cred, dict) and _cred and not get_credential(
+            _plugin_name_from_source(config), config.get("name", "")
+        ):
+            label = _cred.get("label") or "Key"
+            reject = f"未配置凭据：请在设置 → MCP 连接器中为本服务器填写「{label}」"
+            logger.warning(f"[MCP] 拒绝启动服务器 '{name}': {reject}")
+            conn = MCPServerConnection(name, config)
+            conn.set_state(MCPState.FAILED, reject)
+            with self._lock:
+                self._connections[name] = conn
+            return False, reject
+
+        # ── 未展开的 ${env.VAR} 预检 ────────────────────────────────────
+        # 展开后 url / headers 里若还留着 ${env.X}，说明该环境变量没设。
+        # 此时继续连只会拿到 401/400，或像高德那样返回 200 + 业务错误 JSON，
+        # 而 mcp SDK 会把这类响应当成"读流里的一条异常消息"而非抛错，
+        # 最终表现是挂住直到 connect timeout，用户看到一堆 pydantic 噪音。
+        # 提前拦住，直接说缺哪个变量。
+        _unresolved = _find_unresolved_env(config)
+        if _unresolved:
+            reject = f"环境变量未设置: {', '.join(_unresolved)}（配置中的 ${{env.*}} 占位符未解析）"
+            logger.warning(f"[MCP] 拒绝启动服务器 '{name}': {reject}")
+            conn = MCPServerConnection(name, config)
+            conn.set_state(MCPState.FAILED, reject)
+            with self._lock:
+                self._connections[name] = conn
+            return False, reject
+
         # 如果已存在，先断开（清理旧进程，避免端口/文件锁被占导致新进程起不来）
         with self._lock:
             existing = self._connections.get(name)
@@ -953,6 +1278,11 @@ class MCPClientManager:
             self._connections[name] = conn
 
         timeout = config.get("timeout") or self.DEFAULT_CONNECT_TIMEOUT
+
+        # 调用队列与 loop 引用必须在 lifespan Task 启动前就位，
+        # 否则 submit_call 可能在 Task 尚未开跑时就认为未就绪。
+        conn._loop = self._loop
+        conn._call_queue = asyncio.Queue()
 
         # 在后台事件循环中启动生命周期 Task
         conn._task = asyncio.ensure_future(self._server_lifespan(conn), loop=self._loop)
@@ -1133,11 +1463,19 @@ class MCPClientManager:
     def get_tool_schemas(self) -> List[Dict]:
         """获取所有 MCP 工具的 OpenAI function calling schema"""
         schemas = []
+        for server_schemas in self.get_tool_schemas_by_server().values():
+            schemas.extend(server_schemas)
+        return schemas
+
+    def get_tool_schemas_by_server(self) -> Dict[str, List[Dict]]:
+        """按服务器分组获取 MCP 工具的 OpenAI function calling schema（设置卡逐行 token 估算用）"""
+        by_server: Dict[str, List[Dict]] = {}
         with self._lock:
             items = list(self._connections.items())
         for server_name, conn in items:
             if not conn.session or not conn.enabled:
                 continue
+            schemas = by_server.setdefault(server_name, [])
             for tool in conn.tools:
                 prefixed_name = f"{self.TOOL_PREFIX}{server_name}__{tool.name}"
                 schema = {
@@ -1153,7 +1491,7 @@ class MCPClientManager:
                     },
                 }
                 schemas.append(schema)
-        return schemas
+        return by_server
 
     # ── 工具调用 ──────────────────────────────────────
 
@@ -1185,7 +1523,10 @@ class MCPClientManager:
         if not conn or not conn.session:
             return ToolResult(False, error=f"MCP 服务器 '{server_name}' 未连接")
 
-        try:
+        # session 有 Task 亲和性，必须在 lifespan Task 内调用。
+        # call_tool_sync 已在后台循环的独立 Task 里跑本协程，此处再经队列
+        # 中转一次，让真正的 session.call_tool 落到 lifespan Task 上执行。
+        async def _do_call():
             result = await conn.session.call_tool(tool_name, arguments)
 
             text_parts = []
@@ -1199,9 +1540,18 @@ class MCPClientManager:
 
             if result.isError:
                 return ToolResult(False, error=output)
-
             return ToolResult(True, content=output)
 
+        try:
+            # 已在后台事件循环内（call_tool_sync 用 run_coroutine_threadsafe 送进来），
+            # 直接 await 队列 future 即可，无需再套一层线程桥。
+            return await asyncio.wrap_future(conn.submit_call(_do_call))
+        except asyncio.CancelledError:
+            # 🛡️ 透传取消：调用方超时会 cancel 本协程，此时必须让
+            # _call_loop 里那个仍在跑的 session.call_tool 也感受到取消，
+            # 否则它会变成孤儿协程挂在读流上，最终把 lifespan TaskGroup 拖崩
+            # （表现为「调用一次工具后连接就断」）。
+            raise
         except Exception as e:
             logger.error(f"[MCP] 调用工具 '{prefixed_name}' 失败: {e}")
             return ToolResult(False, error=f"MCP 工具调用失败: {e}")

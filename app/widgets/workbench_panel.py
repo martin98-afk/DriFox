@@ -3,8 +3,7 @@
 右侧工作台浮层（WorkbenchPanel）— 纯悬浮，不挤压窗口内部元素
 
 形态：TabManagerWindow 的 child widget，几何贴主窗口右侧（标题栏下方），
-不进任何 layout，与桌宠（PixelPetWidget）同模式。由标题栏「右侧边栏」
-按钮 toggle 显隐。
+不进任何 layout，作为悬浮层由标题栏「右侧边栏」按钮 toggle 显隐。
 
 内置区域：无（页签全部由插件注册，见下）
 

@@ -1978,6 +1978,12 @@ class PluginManager:
             "env": PluginManager._expand_mcp_vars(cfg.get("env", {}), plugin_root),
             "url": PluginManager._expand_mcp_vars(cfg.get("url", ""), plugin_root),
             "headers": PluginManager._expand_mcp_vars(cfg.get("headers", {}), plugin_root),
+            # OAuth 等认证声明。缺省空 dict，非 OAuth 服务器行为不变。
+            # 仅 http/sse 型有意义；stdio 型忽略此字段。
+            "auth": cfg.get("auth", {}),
+            # API Key 凭据声明（label/getUrl/inject）。连接层据此把用户
+            # 在设置界面填的 Key 注入 url 或 headers。缺省空 dict。
+            "credential": cfg.get("credential", {}),
             "_source": str(source_file),
         }
 
@@ -2015,7 +2021,9 @@ class PluginManager:
 
         # 逆展开：将运行时绝对路径还原为 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA}
         # 只处理持久化字段，避免污染 _source 等元数据
-        _MCP_PERSIST_FIELDS = ("command", "args", "env", "url", "headers")
+        # auth 不含路径占位符，但需持久化，否则用户从 UI 保存会丢 OAuth 声明
+        # credential 同理：丢了就没法在设置界面填/读 API Key
+        _MCP_PERSIST_FIELDS = ("command", "args", "env", "url", "headers", "auth", "credential")
         for key in _MCP_PERSIST_FIELDS:
             if key in server_data:
                 server_data[key] = PluginManager._unexpand_mcp_vars(server_data[key], source_path.parent)
@@ -2182,7 +2190,9 @@ class PluginManager:
     def remove_mcp_server(self, name: str):
         """从来源插件的 .mcp.json 中移除指定 MCP 服务器
 
-        如果来源是 system 插件则只禁用（不删除），来源是 user-mcp 则删除。
+        只有 user-custom（界面添加的）才真删。插件自带的配置一律只禁用：
+        删掉后插件仍在、配置消失，且同一 .mcp.json 常被多个 server 共用，
+        删一个会连累其他；插件更新时被删的条目还会重新出现，徒增困惑。
         """
         # 找到该服务器属于哪个 .mcp.json
         servers = self.get_mcp_servers()
@@ -2213,14 +2223,8 @@ class PluginManager:
             if not isinstance(mcp_servers, dict):
                 return
 
-            if source.parent.name == "system":
-                # 系统插件：只禁用，不删除
-                if name in mcp_servers:
-                    mcp_servers[name]["enabled"] = False
-                    source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
-                    logger.info(f"[PluginManager] Disabled system MCP server '{name}'")
-            else:
-                # 用户插件（user-custom、.claude-plugin 等）：直接删除
+            if source.parent.name == "user-custom":
+                # 界面添加的：真删
                 if name in mcp_servers:
                     del mcp_servers[name]
                     if is_claude_format and not mcp_servers:
@@ -2228,7 +2232,14 @@ class PluginManager:
                         source.write_text("{}", encoding="utf-8")
                     else:
                         source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
-                    logger.info(f"[PluginManager] Removed MCP server '{name}'")
+                    logger.info(f"[PluginManager] Removed user MCP server '{name}'")
+            else:
+                # 插件自带（system / 市场插件 / Claude 插件）：只禁用，不删文件条目。
+                # 同插件多 server 共用一份 .mcp.json，删单个会误伤其他条目。
+                if name in mcp_servers:
+                    mcp_servers[name]["enabled"] = False
+                    source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
+                    logger.info(f"[PluginManager] Disabled plugin-owned MCP server '{name}'")
 
             self.invalidate_mcp_cache()
         except Exception as e:

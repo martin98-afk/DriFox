@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """TabManagerWindow 缩放掉帧回归测试
 
-背景：用户反馈 TabManagerWindow 缩放时持续掉帧/画面抖动。静态分析定位到三个
+背景：用户反馈 TabManagerWindow 缩放时持续掉帧/画面抖动。静态分析定位到两个
 高嫌疑点（[DEBUG-r4d3] 缩放卡顿分析）：
 
-1. **pixel_pet._animate_to 动画风暴**：缩放期间每秒数十次 resize 事件，每次都
-   新建 QPropertyAnimation 并 start() 但不 stop 旧动画 → 多动画并行 tick 打架
-2. **_bg_label 每帧重绘**：TabManagerWindow resize 阶段二仍调用
+1. **_bg_label 每帧重绘**：TabManagerWindow resize 阶段二仍调用
    _bg_label.resize()，setScaledContents(True) 触发每帧 QPixmap 整图重绘
-3. **OpenAIChatToolWindow timer 漏防**：TabManagerWindow 阶段二阻断
+2. **OpenAIChatToolWindow timer 漏防**：TabManagerWindow 阶段二阻断
    super().resizeEvent()，嵌入窗口的 100ms _resize_complete_timer 没有后续
    reset → 缩放中途触发 _sync_all_cards_width 取消 preview 占位 → 视觉跳变
 
@@ -224,70 +222,6 @@ class TestWindowsResizeBlockingNotification:
         )
 
 
-class TestPixelPetAnimateReuse:
-    """修复 #1：pixel_pet._animate_to 复用并 stop 旧动画
-
-    通过隔离 _animate_to 验证行为：
-    - 第二次 _animate_to 调用前应 stop 旧的 self._position_anim
-    - self._position_anim 引用应指向新动画
-    """
-
-    def test_animate_to_stops_previous_animation(self, qtbot):
-        """_animate_to 第二次调用应先 stop 旧动画"""
-        # 用 mock 替换 QPropertyAnimation，避免真实动画开销
-        with patch("app.widgets.pixel_pet.QPropertyAnimation") as MockAnim:
-            from app.widgets.pixel_pet import PixelPetWidget
-
-            pet = PixelPetWidget()
-            qtbot.addWidget(pet)
-            pet.resize(48, 60)  # 给一个非零尺寸让 _apply_pending_resize 跑
-
-            # 第一次 _animate_to：创建第一个动画
-            anim1 = MagicMock()
-            MockAnim.return_value = anim1
-            pet._animate_to(100, 200)
-            assert pet._position_anim is anim1
-            assert not anim1.stop.called, "首次 _animate_to 无旧动画可 stop"
-
-            # 第二次 _animate_to：创建第二个动画，旧动画应先 stop
-            anim2 = MagicMock()
-            MockAnim.return_value = anim2
-            pet._animate_to(150, 250)
-            assert pet._position_anim is anim2, "self._position_anim 应指向新动画"
-            assert anim1.stop.called, (
-                "第二次 _animate_to 应先 stop 旧动画，避免多动画并行 tick"
-            )
-
-    def test_resize_handle_throttles_burst(self, qtbot):
-        """resize_handle 在 throttle 窗口内应仅记录目标，不重复启动动画"""
-        from app.widgets.pixel_pet import PixelPetWidget
-
-        pet = PixelPetWidget()
-        qtbot.addWidget(pet)
-        pet.resize(48, 60)
-
-        # mock _apply_pending_resize：跟踪调用次数
-        with patch.object(pet, "_apply_pending_resize") as mock_apply:
-            # 第一次 resize_handle：应立即触发（throttle 不在窗口内）
-            pet.resize_handle(800, 600)
-            assert mock_apply.call_count == 1
-
-            # 后续 resize_handle 在 80ms 窗口内：应被 throttle，仅记录目标
-            for w in (810, 820, 830, 840):
-                pet.resize_handle(w, 600)
-            assert mock_apply.call_count == 1, (
-                f"80ms 内连续 resize 应被 throttle，_apply_pending_resize 只调用 1 次，"
-                f"实际 {mock_apply.call_count} 次"
-            )
-            # 记录的目标值应是最后一次
-            assert pet._pending_resize_w == 840
-
-            # throttle timer 超时后手动触发 _apply_pending_resize
-            pet._resize_throttle_timer.stop()
-            pet._apply_pending_resize()
-            assert mock_apply.call_count == 2, "throttle 到期后应执行一次最终定位"
-
-
 class TestExternalResizeBlocking:
     """OpenAIChatToolWindow._set_external_resize_blocking 行为"""
 
@@ -353,7 +287,7 @@ class TestExternalResizeBlocking:
         def _stub_resize_event(self, event):
             if getattr(self, "_external_resize_blocking", False):
                 return
-            # 实际场景下后续会调：_set_cards_resize_preview_mode / timer / _position_bottom_toolbar / pixel_pet
+            # 实际场景下后续应调：_set_cards_resize_preview_mode / timer / _position_bottom_toolbar
             # 这里因为是 stub，让它们都是 MagicMock，下面就能验证 .called == 0
             self._set_cards_resize_preview_mode(True)
             self._pending_resize_sync = True
@@ -362,8 +296,6 @@ class TestExternalResizeBlocking:
             self._resize_complete_timer.stop()
             self._resize_complete_timer.start()
             self._position_bottom_toolbar()
-            if self.pixel_pet:
-                self.pixel_pet.resize_handle(self.width(), self.height())
 
         monkeypatch.setattr(OpenAIChatToolWindow, "resizeEvent", _stub_resize_event)
 
@@ -379,7 +311,6 @@ class TestExternalResizeBlocking:
                 self._pending_resize_sync = False
                 self._resize_preview_active = False
                 self._position_bottom_toolbar = MagicMock()
-                self.pixel_pet = MagicMock()
                 self._set_cards_resize_preview_mode = MagicMock()
                 self._external_resize_blocking = False
 
@@ -403,9 +334,6 @@ class TestExternalResizeBlocking:
         )
         win._position_bottom_toolbar.assert_not_called(), (
             "冻结期间 resizeEvent 应早退，不应触发 _position_bottom_toolbar"
-        )
-        win.pixel_pet.resize_handle.assert_not_called(), (
-            "冻结期间 resizeEvent 应早退，不应触发桌宠定位"
         )
         assert not win._resize_debounce_timer.isActive(), (
             "冻结期间 resizeEvent 不应启动 _resize_debounce_timer"

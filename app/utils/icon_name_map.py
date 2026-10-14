@@ -10,7 +10,6 @@ ICON_NAME_TO_FILE = {
     "hooks": "hooks.svg",
     "lsp": "lsp.svg",
     "MCP": "MCP.svg",
-    "pet": "pet.png",
     "question": "question.svg",
     "read": "read.svg",
     "scroll_to_bottom": "scroll_to_bottom.svg",

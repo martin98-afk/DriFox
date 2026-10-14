@@ -143,6 +143,145 @@ def test_delegate_filter_ignores_non_target(viewer):
     assert outer._got == []
 
 
+# ── ⑤ [WHEEL-ARM] 武装态无内滚条时的外层兜底（2026-10-14 修） ──
+
+
+def test_armed_state_forwards_outer_when_body_has_no_overflow(viewer):
+    """点击过正文（armed）+ 内外都无内滚条 → 滚轮必须交外层。
+
+    修复前：delegate filter 走 _route_wheel_armed，unknown 分支 return False
+    后直接落到 super().eventFilter，事件被 delegate 终结、不上抛 wheelEvent
+    → 外层滚动区永远收不到。表现为"点击过卡片正文的无内滚条消息，滚轮彻底失效"。
+
+    ⚠️ 本用例必须显式声明内层容器不可滚。只看 body 几何的初版兜底把
+    #tool-content 的滚轮也判给了外层（折叠框内部滚不动），判据已收紧为
+    「内外都滚不动」，见 test_wheel_belongs_to_outer_unit。
+    """
+    fp = _ready_filter_target(viewer)
+    outer = _mount_with_scroll_area(viewer, 100, 0, 500)
+    # 武装态 + body 几何有效但不溢出 + 内层容器也不溢出
+    viewer._wheel_inner_armed = True
+    viewer._on_body_geometry_reported(scroll_height=400, scroll_top=0, client_height=400)
+    viewer._on_inner_scrollable_reported(False)
+    ev = _wheel(-120)
+    assert viewer.eventFilter(fp, ev) is True, "内外都无滚轮时必须接手转发外层"
+    assert outer._got == [True]
+    assert ev.isAccepted()
+
+
+def test_armed_state_does_not_double_scroll_when_body_overflows(viewer):
+    """armed + body 溢出 → 卡内滚，外层不得动（防兜底打穿"内部优先"）。"""
+    fp = _ready_filter_target(viewer)
+    outer = _mount_with_scroll_area(viewer, 100, 0, 500)
+    viewer._wheel_inner_armed = True
+    viewer._on_body_geometry_reported(scroll_height=1200, scroll_top=0, client_height=400)
+    ev = _wheel(-120)
+    assert viewer.eventFilter(fp, ev) is False, "body 溢出态必须放行给卡内滚动"
+    assert outer._got == [], "外层不得被兜底误触发（否则内外双重滚动）"
+
+
+# ── ⑥ [WHEEL-ARM] 折叠框滚轮归属（2026-10-14 第二修） ──
+
+
+def test_armed_state_keeps_inner_scroll_when_body_has_no_overflow(viewer):
+    """armed + body 不溢出 + 内层容器（#tool-content）可滚 → 必须放行给卡内。
+
+    折叠框是独立 max-height 滚动区，滚动不改变 body 几何。只看 body 几何的
+    兜底会把它的滚轮误判给外层 → "工具与思考折叠框内部滚不动"。
+    """
+    fp = _ready_filter_target(viewer)
+    outer = _mount_with_scroll_area(viewer, 100, 0, 500)
+    viewer._wheel_inner_armed = True
+    viewer._on_body_geometry_reported(scroll_height=400, scroll_top=0, client_height=400)
+    viewer._on_inner_scrollable_reported(True)
+    ev = _wheel(-120)
+    assert viewer.eventFilter(fp, ev) is False, "内层容器可滚时必须放行给 Chromium"
+    assert outer._got == [], "外层不得抢走折叠框的滚轮"
+
+
+def test_armed_state_forwards_outer_only_when_nothing_inner_scrolls(viewer):
+    """armed + body 不溢出 + 内层容器也不可滚 → 才交外层（兜底收紧后的正确形态）。"""
+    fp = _ready_filter_target(viewer)
+    outer = _mount_with_scroll_area(viewer, 100, 0, 500)
+    viewer._wheel_inner_armed = True
+    viewer._on_body_geometry_reported(scroll_height=400, scroll_top=0, client_height=400)
+    viewer._on_inner_scrollable_reported(False)
+    ev = _wheel(-120)
+    assert viewer.eventFilter(fp, ev) is True, "内外都滚不动才接手转发外层"
+    assert outer._got == [True]
+
+
+def test_armed_state_passes_when_inner_scrollability_unknown(viewer):
+    """旧骨架未回传内层可滚标志（None）→ 保守放行，不抢内层滚轮。"""
+    fp = _ready_filter_target(viewer)
+    outer = _mount_with_scroll_area(viewer, 100, 0, 500)
+    viewer._wheel_inner_armed = True
+    viewer._on_body_geometry_reported(scroll_height=400, scroll_top=0, client_height=400)
+    viewer._on_inner_scrollable_reported(None)
+    ev = _wheel(-120)
+    assert viewer.eventFilter(fp, ev) is False
+    assert outer._got == []
+
+
+def test_wheel_belongs_to_outer_unit(viewer):
+    """兜底判据纯逻辑：只有"内外都滚不动"才归外层。"""
+    # body 溢出 → 卡内的事，外层别碰
+    viewer._on_body_geometry_reported(1200, 0, 400)
+    viewer._on_inner_scrollable_reported(True)
+    assert viewer._wheel_belongs_to_outer(-120) is False
+    # body 不溢出 + 内层可滚 → 折叠框的事，外层别碰
+    viewer._on_body_geometry_reported(400, 0, 400)
+    viewer._on_inner_scrollable_reported(True)
+    assert viewer._wheel_belongs_to_outer(-120) is False
+    # body 不溢出 + 内层不可滚 → 外层
+    viewer._on_inner_scrollable_reported(False)
+    assert viewer._wheel_belongs_to_outer(-120) is True
+    # 内层未知 → 保守放行
+    viewer._on_inner_scrollable_reported(None)
+    assert viewer._wheel_belongs_to_outer(-120) is False
+    # 几何未回传 → 保守放行
+    viewer._body_geom_valid = False
+    viewer._on_inner_scrollable_reported(False)
+    assert viewer._wheel_belongs_to_outer(-120) is False
+
+
+def test_inner_scrollable_reset_on_reuse(viewer):
+    """viewer 复用必须清空内层可滚缓存，否则上张卡的状态污染下一张。"""
+    viewer._on_inner_scrollable_reported(True)
+    viewer._on_body_geometry_reported(400, 0, 400)
+    viewer.reset_for_reuse()
+    assert viewer._inner_scrollable is None
+    assert viewer._body_geom_valid is False
+
+def test_height_payload_parses_inner_scrollable_field():
+    """[WHEEL-ARM] 第 6 字段解析：'1'/'0'/缺失 三态。"""
+    from app.widgets.card_viewers import _parse_height_payload
+
+    # 新骨架：6 字段齐全
+    assert _parse_height_payload("400|0|400|1|123|1")[5] is True
+    assert _parse_height_payload("400|0|400|1|123|0")[5] is False
+    # 旧骨架：只到第 5 字段 → None（Python 侧按"可能可滚"放行）
+    assert _parse_height_payload("400|0|400|1|123")[5] is None
+    # 更旧骨架：仅高度 → None
+    assert _parse_height_payload("400")[5] is None
+    # 第 6 字段非 0/1 → None
+    assert _parse_height_payload("400|0|400|1|123|2")[5] is None
+
+
+def test_inner_scrollable_signal_wired():
+    """静态接线守卫：信号必须连到缓存方法（防断线后折叠框滚轮被抢）。"""
+    import io
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    src = io.open(os.path.join(root, "app", "widgets", "card_viewers.py"), encoding="utf-8").read()
+    assert "bodyInnerScrollableChanged" in src, "必须存在内层可滚信号"
+    assert "_on_inner_scrollable_reported" in src, "必须存在缓存方法"
+    assert "_wheel_belongs_to_outer" in src, "兜底判据必须含内层容器可滚性"
+    # JS 侧必须真的回传第 6 字段（探针验证过 tool-content 能滚但 body 几何不动）
+    assert "+ '|' + _ins" in src, "reportHeight 必须携带内层可滚字段"
+
+
 # ── ④ 静态接线守卫 ──
 
 

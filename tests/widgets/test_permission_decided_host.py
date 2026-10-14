@@ -102,7 +102,6 @@ def _make_host(*, delivered=True, raise_exc=False):
     host._set_bottom_input_visible = lambda v: host.input_visible_log.append(v)
     host.ai_state_log = []
     host._set_ai_state = lambda s: host.ai_state_log.append(s)
-    host._pet_set_state = lambda s: None
     host._restore_after_question_close = lambda: None
     host._focus_input_if_active = lambda *a, **k: None
     host.notify_log = []
@@ -460,7 +459,7 @@ def test_no_text_label_parsing_in_main_widget():
 
 
 def test_ai_state_question_contract_kept():
-    """三合一契约：_set_ai_state("question") 必须保留（Tab 动画 + 桌宠 + 并行会话计数）"""
+    """三合一契约：_set_ai_state("question") 必须保留（Tab 动画 + 并行会话计数）"""
     import inspect
 
     from app.main_widget import OpenAIChatToolWindow

@@ -830,8 +830,6 @@ class TabManagerWindow(FramelessWindow):
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
-    # 聚合 AI 状态 → 全局桌宠（仅当前激活窗的状态被转发，避免多窗串扰）
-    active_ai_state_changed = pyqtSignal(str)
 
     @classmethod
     def get_instance(cls) -> Optional["TabManagerWindow"]:
@@ -1010,27 +1008,6 @@ class TabManagerWindow(FramelessWindow):
         # 但保持接口一致性便于将来扩展）
         theme_manager.register_refresh_target(self)
 
-        # ── 全局桌宠（单例浮层，下沉自 MainWidget）──
-        # 多 tab 下唯一常驻：不随窗口销毁，切 tab 平滑跟随激活窗 send_btn。
-        # pet_enabled=False 时 hide 而非 destroy（保留实例，便于实时开关）。
-        from app.widgets.pixel_pet import PixelPetWidget
-
-        self.pixel_pet = PixelPetWidget(self)
-        if Settings.get_instance().pet_enabled.value:
-            self.pixel_pet.show()
-            self.pixel_pet.raise_()
-        else:
-            self.pixel_pet.hide()
-        Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
-        # 主题 / 字号刷新（取代 main 的 pet 级连接）：仅在此处完成一次。
-        # 注意：_pixel_pet 自身的 __init__ 已调用 _connect_config_signals()，
-        # 此处【不可】重复调用，否则 pet_size 信号会被连两次。
-        theme_manager.register_refresh_target(self.pixel_pet)
-        # AI 状态：pet 只连一次聚合信号（切 tab 由聚合信号改发当前窗状态）
-        self.active_ai_state_changed.connect(self.pixel_pet._on_ai_state_changed)
-        # 初始定位到右下角（首个窗口加入 + 激活后会精确对齐 send_btn）
-        self.pixel_pet.resize_handle(self.width(), self.height())
-
         # ── 右侧工作台面板（**嵌入式**：对话区右侧第三窗格，与左侧 TabPanel 对称）──
         # 放弃悬浮：QWebEngineView 是原生 HWND，悬浮面板必然与之争 z-order
         # （child 盖不住 / WA_NativeWindow 吞主窗口边缘 resize / Tool 窗口跟随延迟）。
@@ -1052,7 +1029,7 @@ class TabManagerWindow(FramelessWindow):
         # 页面请求切换工作目录 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
         self.workbench_panel.workingDirChanged.connect(self._on_workbench_working_dir_changed)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
-        # 主题 / 字号刷新：与桌宠同路径注册
+        # 主题 / 字号刷新注册
         theme_manager.register_refresh_target(self.workbench_panel)
 
         # 圆角矩形容器（与 #tabFrame / #chatFrame 同款），作为 splitter 第三窗格。
@@ -1295,20 +1272,6 @@ class TabManagerWindow(FramelessWindow):
             pass
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
-
-    def _on_pet_enabled_changed(self, enabled: bool) -> None:
-        """桌宠显示开关实时响应（全局桌宠由 TabManager 统一管理）"""
-        pet = getattr(self, "pixel_pet", None)
-        if pet is None:
-            return
-        if enabled:
-            pet.show()
-            pet.raise_()
-            # 重新对齐当前激活窗 send_btn
-            pet.reposition_to_active_window()
-        else:
-            # hide 而非 destroy：保留实例，便于再次开启无需重建
-            pet.hide()
 
     # ── 右侧工作台（嵌入式：toggle 显隐 / 数据刷新） ──
 
@@ -1985,13 +1948,7 @@ class TabManagerWindow(FramelessWindow):
             logger.warning(f"[WorkbenchDiff] {msg}")
 
     def refresh_theme(self):
-        """ThemeManager 统一刷新入口（dispatch_refresh 调用）
-
-        全局桌宠配色随主题刷新交由 theme_manager 统一派发：
-        pet 已通过 register_refresh_target 注册，dispatch_refresh 会直接
-        调用 pet.refresh_theme() → refresh_pet() 重载 spritesheet，无需此处
-        再显式调用（避免重复刷新）。
-        """
+        """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
         self._on_theme_changed()
 
     def _reapply_splitter_handle_styles(self):
@@ -4307,7 +4264,7 @@ class TabManagerWindow(FramelessWindow):
             window._tab_title_changed_slot = _on_win_title_changed
             window.windowTitleChanged.connect(_on_win_title_changed)
 
-            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示 + 全局桌宠）
+            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
             def _on_ai_state_changed(state, _win=window):
                 if _sip.isdeleted(_win):
                     return
@@ -4326,10 +4283,6 @@ class TabManagerWindow(FramelessWindow):
                 else:  # idle
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
-                # 聚合 AI 状态 → 全局桌宠：仅当前激活窗的状态被转发，
-                # 避免多 tab 下旧窗状态串扰（pet 只连一次 active_ai_state_changed）。
-                if _win is self.get_current_window():
-                    self.active_ai_state_changed.emit(state)
 
             window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)
@@ -4720,14 +4673,6 @@ class TabManagerWindow(FramelessWindow):
                     scope = getattr(win, "_theme_needs_refresh_scope", None) or None
                     win._theme_needs_refresh_scope = None
                     win._apply_runtime_ui_settings(scope=scope, _skip_global=True)
-                except Exception:
-                    pass
-            # 切换 tab 时同步全局桌宠：① 平滑重定位到激活窗 send_btn；
-            # ② 改发当前窗 AI 状态（旧窗状态不串扰，全局 pet 跟随激活窗）。
-            if getattr(self, "pixel_pet", None) is not None:
-                self.pixel_pet.reposition_to_active_window()
-                try:
-                    self.pixel_pet._on_ai_state_changed(getattr(win, "_ai_state", "idle"))
                 except Exception:
                     pass
             # 切 tab 时工作台跟随激活窗：显隐/页签均按窗口独立记忆
@@ -6187,9 +6132,6 @@ class TabManagerWindow(FramelessWindow):
             self._tab_panel.update()
         if hasattr(self, "_content_area"):
             self._content_area.update()
-        # 全局桌宠跟随窗体缩放：resize 结束后精确重定位到激活窗 send_btn
-        if getattr(self, "pixel_pet", None) is not None:
-            self.pixel_pet.reposition_to_active_window()
 
         # ── 几何已收拢：解除抑制 + 按最终宽度判定"是否真被挤压" ──
         # 整个 resize 周期（含 _force_relayout 瞬变）内 TabPanel 不自动折叠，
@@ -6308,12 +6250,6 @@ class TabManagerWindow(FramelessWindow):
             PluginHostService.get_instance().stop()
         except Exception:
             pass
-        # ★ 清理全局桌宠（停止所有定时器），先于窗口关闭避免悬空引用
-        if getattr(self, "pixel_pet", None) is not None:
-            try:
-                self.pixel_pet.cleanup()
-            except Exception:
-                pass
         for w in list(self._windows):
             try:
                 w.close()

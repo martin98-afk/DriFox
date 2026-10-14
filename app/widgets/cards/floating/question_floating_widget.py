@@ -27,6 +27,7 @@ from app.utils.design_tokens import CardStyles, Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.hover_style_guard import style_if_changed
+from app.widgets.status_dot import StatusDot
 
 # ═══════════════════════════════════════════════════════════
 # 自适应高度滚动区
@@ -163,10 +164,9 @@ class _OptionRadioCard(QWidget):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(10)
 
-        self._icon = QLabel("○")
-        self._icon.setFont(get_unified_font(13))
-        self._icon.setFixedWidth(18)
-        self._icon.setAlignment(Qt.AlignCenter)
+        self._icon = StatusDot(12, color=Colors.REALTIME_TEXT_SECONDARY, hollow=True)
+        # 顶对齐 + 上边距 3px：圆点与标题行垂直居中，desc 撑高时不飘移
+        self._icon.setContentsMargins(0, 3, 0, 0)
         self._icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         text_layout = QVBoxLayout()
@@ -212,14 +212,14 @@ class _OptionRadioCard(QWidget):
             rf, tf = Colors.REALTIME_TEXT_SECONDARY, Colors.REALTIME_TEXT
 
         self.setStyleSheet(f"_OptionRadioCard{{background-color:{bg};border:1px solid {border};border-radius:8px;}}")
-        self._icon.setStyleSheet(f"color:{rf};background:transparent;")
+        self._icon.set_color(rf)
         self._title_label.setStyleSheet(f"color:{tf};background:transparent;")
         if self._desc_text:
             self._desc_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
 
     def set_selected(self, s: bool):
         self._selected = s
-        self._icon.setText("●" if s else "○")
+        self._icon.set_hollow(not s)
         self._apply_style()
 
     def reuse(self, label: str, description: str = ""):
@@ -228,7 +228,7 @@ class _OptionRadioCard(QWidget):
         self._desc_text = description
         self._selected = False
         self._hovered = False
-        self._icon.setText("○")
+        self._icon.set_hollow(True)
         self._title_label.setText(label)
         self._desc_label.setText(description)
         self._desc_label.setVisible(bool(description))
@@ -442,12 +442,17 @@ class _CustomInputCard(QWidget):
         self._layout.setContentsMargins(12, 10, 12, 10)
         self._layout.setSpacing(10)
 
-        self._icon = QLabel("□" if self._multiple else "○")
-        self._icon.setFont(get_unified_font(13))
-        self._icon.setFixedWidth(18)
-        self._icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        # 单选：CSS 圆点（不发虚不裁切）；多选：保留字符方框体系（与 ☑ 一致）。
+        # 顶对齐 + 上边距 3px 与标题行垂直居中（下方输入框撑高时圆点不飘移）。
+        if self._multiple:
+            self._icon = QLabel("□")
+            self._icon.setFont(get_unified_font(13))
+            self._icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        else:
+            self._icon = StatusDot(12, color=Colors.REALTIME_TEXT_SECONDARY, hollow=True)
+            self._icon.setContentsMargins(0, 3, 0, 0)
         self._icon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._layout.addWidget(self._icon, 0)
+        self._layout.addWidget(self._icon, 0, Qt.AlignTop)
 
         # 右侧：标题 + 描述/输入框（垂直布局）
         self._right_layout = QVBoxLayout()
@@ -566,9 +571,10 @@ class _CustomInputCard(QWidget):
     def set_active(self, active: bool):
         """切换选中态：输入框常驻，此处仅更新图标与样式"""
         self._active = active
-        a_icon = "☑" if self._multiple else "●"
-        i_icon = "□" if self._multiple else "○"
-        self._icon.setText(a_icon if active else i_icon)
+        if self._multiple:
+            self._icon.setText("☑" if active else "□")
+        else:
+            self._icon.set_hollow(not active)
         self._apply_style()
 
     def _emit_height_update(self):
@@ -594,7 +600,10 @@ class _CustomInputCard(QWidget):
             rf, tf = Colors.REALTIME_TEXT_SECONDARY, Colors.REALTIME_TEXT
 
         self.setStyleSheet(f"_CustomInputCard{{background-color:{bg};border:1px solid {border};border-radius:8px;}}")
-        self._icon.setStyleSheet(f"color:{rf};background:transparent;")
+        if self._multiple:
+            self._icon.setStyleSheet(f"color:{rf};background:transparent;")
+        else:
+            self._icon.set_color(rf)
         self._title_label.setStyleSheet(f"color:{tf};background:transparent;")
 
         te_border = Colors.REALTIME_ACCENT if self._active else Colors.REALTIME_TAG_BORDER
