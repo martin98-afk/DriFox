@@ -2,7 +2,8 @@
 """MCP 设置卡 OAuth 授权入口 + 插件图标回归测试。
 
 覆盖两块新增 UI：
-1. MCPServerRow：插件图标解析、授权按钮的构造与三态切换（授权 / 已授权 / 授权中）
+1. MCPServerRow：插件图标解析、授权按钮的构造与双态切换
+   （未授权 → 「授权」可点发起授权；已授权 → 「解绑」可点撤销授权）+ 授权中忙态
 2. MCPListSettingCard._on_authorize_server：参数校验、后台线程启动、
    _on_authorize_done 的结果分发（成功触发热连接 / 失败只提示）
 
@@ -41,6 +42,7 @@ def _make_row(data: dict):
     row._name = data.get("name", "")
     row._server_data = data
     row._auth_btn = None
+    row._authorized = False
     row._current_state = "disabled"
     return row
 
@@ -68,15 +70,16 @@ class TestAuthorizeButtonVisibility:
 
 
 class TestSetAuthorized:
-    def test_authorized_disables_button(self):
+    def test_authorized_shows_unbind(self):
+        """已授权 → 「解绑」可点（撤销授权），tooltip 说明清除凭证语义"""
         row = _make_row({"name": "n"})
         row._auth_btn = MagicMock()
 
         row.set_authorized(True)
 
-        assert row._auth_btn.setText.call_args[0][0] == "已授权"
-        assert row._auth_btn.setEnabled.call_args[0][0] is False
-        assert "已授权" in row._auth_btn.setToolTip.call_args[0][0]
+        assert row._auth_btn.setText.call_args[0][0] == "解绑"
+        assert row._auth_btn.setEnabled.call_args[0][0] is True
+        assert "凭证" in row._auth_btn.setToolTip.call_args[0][0]
 
     def test_unauthorized_enables_button(self):
         row = _make_row({"name": "n"})
@@ -87,6 +90,36 @@ class TestSetAuthorized:
         assert row._auth_btn.setText.call_args[0][0] == "授权"
         assert row._auth_btn.setEnabled.call_args[0][0] is True
         assert "浏览器" in row._auth_btn.setToolTip.call_args[0][0]
+
+
+class TestAuthClickDispatch:
+    """授权按钮双态分发：未授权点 → authorizeRequested，已授权点 → unbindRequested"""
+
+    def test_click_unauthorized_emits_authorize(self):
+        from app.widgets.cards.settings.mcp_setting_card import MCPServerRow
+
+        row = _make_row({"name": "n"})
+        row._authorized = False
+        row.authorizeRequested = MagicMock()
+        row.unbindRequested = MagicMock()
+
+        MCPServerRow._on_auth_clicked(row)
+
+        row.authorizeRequested.emit.assert_called_once_with("n")
+        row.unbindRequested.emit.assert_not_called()
+
+    def test_click_authorized_emits_unbind(self):
+        from app.widgets.cards.settings.mcp_setting_card import MCPServerRow
+
+        row = _make_row({"name": "n"})
+        row._authorized = True
+        row.authorizeRequested = MagicMock()
+        row.unbindRequested = MagicMock()
+
+        MCPServerRow._on_auth_clicked(row)
+
+        row.unbindRequested.emit.assert_called_once_with("n")
+        row.authorizeRequested.emit.assert_not_called()
 
 
 class TestHasOauthToken:

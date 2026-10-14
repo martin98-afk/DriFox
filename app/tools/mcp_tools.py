@@ -1277,11 +1277,19 @@ class MCPClientManager:
     def get_tool_schemas(self) -> List[Dict]:
         """获取所有 MCP 工具的 OpenAI function calling schema"""
         schemas = []
+        for server_schemas in self.get_tool_schemas_by_server().values():
+            schemas.extend(server_schemas)
+        return schemas
+
+    def get_tool_schemas_by_server(self) -> Dict[str, List[Dict]]:
+        """按服务器分组获取 MCP 工具的 OpenAI function calling schema（设置卡逐行 token 估算用）"""
+        by_server: Dict[str, List[Dict]] = {}
         with self._lock:
             items = list(self._connections.items())
         for server_name, conn in items:
             if not conn.session or not conn.enabled:
                 continue
+            schemas = by_server.setdefault(server_name, [])
             for tool in conn.tools:
                 prefixed_name = f"{self.TOOL_PREFIX}{server_name}__{tool.name}"
                 schema = {
@@ -1297,7 +1305,7 @@ class MCPClientManager:
                     },
                 }
                 schemas.append(schema)
-        return schemas
+        return by_server
 
     # ── 工具调用 ──────────────────────────────────────
 

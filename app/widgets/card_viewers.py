@@ -152,15 +152,19 @@ from app.widgets.card_render_core import (
 def _parse_height_payload(payload: str):
     """[T37] 解析 pywebview_height 载荷（纯函数，便于无 GUI 单元验证）。
 
-    协议：'``<scrollHeight>[|<scrollTop>|<clientHeight>[|<reading>[|<domTextLen>]]]``'
+    协议：'``<scrollHeight>[|<scrollTop>|<clientHeight>[|<reading>[|<domTextLen>[|<innerScrollable>]]]]``'
     后续字段由新骨架逐版本增加，旧格式（仅高度）仍兼容。
 
     Returns:
-        (h, scroll_top, client_height, reading, dom_text_len)；
+        (h, scroll_top, client_height, reading, dom_text_len, inner_scrollable)；
         可选字段缺失时为 None；载荷非法返回 None（调用方静默忽略）。
+
+    ``inner_scrollable``：卡内**除 body 外**的滚动容器（#tool-content / 代码块 /
+    图表区等）当前有无可滚量。None = 旧骨架未携带（Python 侧按"可能有"处理，
+    见 ``_inner_wheel_state`` 注释）。
     """
     try:
-        parts = payload.split("|", 4)
+        parts = payload.split("|", 5)
         if not parts or not parts[0]:
             return None
         h = int(float(parts[0]))
@@ -174,7 +178,11 @@ def _parse_height_payload(payload: str):
                 dom_text_len = int(float(parts[4]))
             except Exception:  # noqa: BLE001
                 dom_text_len = None
-        return h, scroll_top, client_height, reading, dom_text_len
+        # [WHEEL-ARM] 第 6 字段：内层容器可滚标志。'1'/'0' 之外的旧值视作 None
+        inner_scrollable: Optional[bool] = None
+        if len(parts) >= 6:
+            inner_scrollable = parts[5] == "1" if parts[5] in ("1", "0") else None
+        return h, scroll_top, client_height, reading, dom_text_len, inner_scrollable
     except Exception:  # noqa: BLE001
         return None
 
@@ -194,6 +202,11 @@ class ConsoleMonitorPage(QWebEnginePage):
     # 故在 reportHeight 回传时顺带携带 body 的真实滚动几何：
     # (scrollHeight, scrollTop, clientHeight)。
     bodyGeometryReported = pyqtSignal(int, int, int)
+    # [WHEEL-ARM] 第 4 参：内层滚动容器（#tool-content / 代码块 / 图表区）可滚标志。
+    # body 几何判不出这类容器：它们是独立 max-height 滚动区，滚动不改变 body 几何。
+    # 缺此判据时武装态（点击过正文）会把折叠框的滚轮误判给外层，
+    # 表现为"工具与思考折叠框内部滚不动"（2026-10-14 修）。
+    bodyInnerScrollableChanged = pyqtSignal(bool)
     contentReady = pyqtSignal()
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
@@ -264,7 +277,7 @@ class ConsoleMonitorPage(QWebEnginePage):
             parsed = _parse_height_payload(payload)
             if parsed is None:
                 return
-            h, scroll_top, client_height, reading, dom_text_len = parsed
+            h, scroll_top, client_height, reading, dom_text_len, inner_scrollable = parsed
             # [T37] 第 5 字段：正文可见文本长度（内容哨兵，见 _content_sentinel_check）；
             # None = 旧骨架/降级路径未携带 → 存 -1，哨兵视作"未知"不动作。
             self._dom_text_len = dom_text_len if dom_text_len is not None else -1
@@ -276,7 +289,10 @@ class ConsoleMonitorPage(QWebEnginePage):
             self.heightReported.emit(h)
             # 旧格式（仅高度，无几何字段）不发几何信号：wheelEvent 回退保守策略
             if dom_text_len is not None or reading is not None:
-                self.bodyGeometryReported.emit(h, scroll_top, client_height)
+                # [WHEEL-ARM] 内层可滚标志单独走信号：不破坏 bodyGeometryReported
+                # 既有三参签名（调用方无需跟着改）。
+                if inner_scrollable is not None:
+                    self.bodyInnerScrollableChanged.emit(inner_scrollable)
         elif msg == "pywebview_ready":
             self.contentReady.emit()
         elif msg.startswith("pywebview_action:"):
@@ -840,6 +856,12 @@ class CodeWebViewer(QWebEngineView):
         self._body_client_height = 0
         self._body_scroll_top = 0
         self._body_geom_valid = False
+        # [WHEEL-ARM] 内层滚动容器（#tool-content / 代码块 / 图表区）可滚标志。
+        # 折叠框滚轮必须归它，而它的滚动**不改 body 几何**（独立 max-height
+        # 容器），只看 body 会把它误判成"卡内没人能滚"→ 武装态滚轮被外层抢走，
+        # 表现为"工具与思考折叠框内部滚不动"（2026-10-14 修）。
+        # None = 旧骨架未携带，按"可能有"处理（保守放行给 Chromium）。
+        self._inner_scrollable = None
         # 自愈计数：连续判定为"内部处理"但 body.scrollTop 纹丝不动的滚轮次数。
         # 达到阈值说明内部其实滚不动（几何缓存滞后/内容未溢出），强制转发外部，
         # 彻底消除"怎么滚都没反应"的粘性失效。
@@ -904,6 +926,7 @@ class CodeWebViewer(QWebEngineView):
         self._user_reading_inside = False
         self._page.heightReported.connect(self._on_height_reported)
         self._page.bodyGeometryReported.connect(self._on_body_geometry_reported)
+        self._page.bodyInnerScrollableChanged.connect(self._on_inner_scrollable_reported)
         self._page.cardReadingChanged.connect(self._on_card_reading_changed)
         self._page.contentReady.connect(self._on_js_ready)
         self._page.toolDiffRequested.connect(self.toolDiffRequested)
@@ -1305,6 +1328,7 @@ class CodeWebViewer(QWebEngineView):
         self._body_client_height = 0
         self._body_scroll_top = 0
         self._body_geom_valid = False
+        self._inner_scrollable = None
         # 🐛 内容态必须一并清：_markdown_text / _cached_streaming_html 若残留，
         # 复用后 _on_js_ready 会拿旧文本立即渲染一次（与新卡片内容无关），
         # 多一次全量渲染 = 多一份内存与主线程开销（大会话加载时逐卡叠加）。
@@ -1486,6 +1510,14 @@ class CodeWebViewer(QWebEngineView):
         self._body_scroll_top = scroll_top
         self._body_client_height = client_height
         self._body_geom_valid = client_height > 0
+
+    def _on_inner_scrollable_reported(self, scrollable: bool):
+        """[WHEEL-ARM] 缓存内层滚动容器可滚标志（独立信号，见类属性注释）。
+
+        只在翻转时写，避免高频回传里重复赋值（reportHeight 流式期间每周期多次）。
+        """
+        if self._inner_scrollable is not scrollable:
+            self._inner_scrollable = scrollable
 
     def _inner_scroll_range(self) -> tuple:
         """返回 (scroll_top, max_scroll)：body 当前滚动位置与最大可滚动距离。
@@ -4459,7 +4491,24 @@ class CodeWebViewer(QWebEngineView):
                             }}
                         }}
                     }} catch (_e3) {{}}
-                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0') + '|' + _cl);
+                    // [WHEEL-ARM] 第 6 字段：body 之外的滚动容器有无可滚量。
+                    // #tool-content / 代码块 / 图表区都是独立 max-height 滚动区，
+                    // 它们的滚动**不改变 body 几何**，只靠 body 三个值判不出
+                    // "卡内还能不能滚"→ 武装态（点击过正文）的滚轮会被误判给
+                    // 外层，折叠框内部滚不动（2026-10-14 修）。
+                    // 逐容器累加可滚量，任一 > 0 即发 '1'。查询异常发 '0' 由
+                    // Python 侧按"不可滚"处理：真异常时内层同样滚不动，交外层更合理。
+                    var _ins = 0;
+                    try {{
+                        var _tcs = document.querySelectorAll(
+                            '#tool-content, .code-container, .code-content, .table-scroll-wrapper, .echarts-container'
+                        );
+                        for (var _ti = 0; _ti < _tcs.length; _ti++) {{
+                            var _te = _tcs[_ti];
+                            if (_te.scrollHeight - _te.clientHeight > 1) _ins = 1;
+                        }}
+                    }} catch (_e4) {{}}
+                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0') + '|' + _cl + '|' + _ins);
                 }}
                 // 批量报告高度：合并同一帧内的多次请求，动画期间仍暂停报告。
                 //
@@ -8089,9 +8138,11 @@ class CodeWebViewer(QWebEngineView):
         返回：
           "scroll"   — body 明确还能往该方向滚 → 放行给 Chromium；
           "boundary" — body 已到该方向边界 → 交外层（链式，不锁死）；
-          "unknown"  — body 不溢出（无内滚条）→ 放行给 Chromium：内层容器
-                       （#tool-content / 代码块 / 图表区）才是滚动目标，
-                       直接交外层会把这些区域的滚轮抢走。
+          "unknown"  — body 不溢出（无内滚条）→ 由调用方看内层容器判据：
+                       ``_inner_scrollable`` 为 True/None 时放行给 Chromium
+                       （#tool-content / 代码块 / 图表区才是滚动目标，直接交
+                       外层会把这些区域的滚轮抢走，表现为折叠框内部滚不动）；
+                       为 False 时内外都滚不动 → 交外层。
                        ⚠️ 不能拿 body.scrollTop 变化当自愈判据——内层容器
                        滚动不改 body 几何，会把正常滚动误判为"卡住"。
 
@@ -8109,6 +8160,25 @@ class CodeWebViewer(QWebEngineView):
         if dy < 0 and top >= max_scroll:
             return "boundary"  # 已在底部，继续下滚 → 交外层
         return "scroll"
+
+    def _wheel_belongs_to_outer(self, dy: int) -> bool:
+        """[WHEEL-ARM] 卡内是否**确定**没人能消费这个滚轮事件。
+
+        只对 "内外都滚不动" 返回 True。判据两条，缺一不可：
+          ① body 不溢出（max_scroll <= 0，或几何尚未回传）；
+          ② 内层滚动容器（#tool-content / 代码块 / 图表区）不溢出。
+
+        ⚠️ ② 为 None（旧骨架未回传）时按"可能可滚"处理 → 返回 False 放行。
+        折叠框的滚动不改 body 几何，只看 ① 会把它误判成没人要：2026-10-14
+        修"点击正文后折叠框内部滚不动"时，第一版兜底就错在只查 body 几何。
+        """
+        if not self._body_geom_valid:
+            return False
+        top, max_scroll = self._inner_scroll_range()
+        if max_scroll > 0:
+            return False  # body 自己就能滚
+        # None = 旧骨架/降级路径未回传：保守放行，不抢内层滚轮
+        return self._inner_scrollable is False
 
     def _route_wheel_armed(self, event) -> bool:
         """激活态裁决：内部优先，卡内到边界才交外层（链式，不锁死）。
@@ -8227,14 +8297,14 @@ class CodeWebViewer(QWebEngineView):
             route = self._route_wheel_armed if self._wheel_inner_armed else self._route_wheel_to_chat_area
             if route(ev):
                 return True
-            if self._wheel_inner_armed and self._inner_wheel_state(ev.angleDelta().y()) == "unknown":
-                # [WHEEL-ARM] 仅「body 不溢出」分支兜底：该分支放行给 Chromium，
-                # 而内层容器（#tool-content / 代码块 / 图表区）同样无滚轮时没人消费，
-                # 事件落到 super().eventFilter 就被 delegate 终结、不上抛 wheelEvent
+            if self._wheel_inner_armed and self._wheel_belongs_to_outer(ev.angleDelta().y()):
+                # [WHEEL-ARM] 仅「内外都滚不动」时兜底：该分支放行给 Chromium，
+                # 而事件落到 super().eventFilter 就被 delegate 终结、不上抛 wheelEvent
                 # —— 表现为"点击过卡片正文的无内滚条消息，滚轮彻底失效"
                 # （2026-10-14 修，探针 tests/debug/probe_wheel_armed.py B2）。
-                # ⚠️ 兜底必须只在这一支：body 溢出的 "scroll" 分支是刻意让
-                # Chromium 滚卡内，若一并兜底会外层+卡内双重滚动（C 场景 3/3 误动）。
+                # ⚠️ 判据必须含内层容器可滚性（见 _wheel_belongs_to_outer）：
+                # #tool-content / 代码块 / 图表区滚动不改 body 几何，只看 body
+                # 会把折叠框的滚轮误判给外层，导致"折叠框内部滚不动"。
                 if self._route_wheel_to_chat_area(ev):
                     return True
         return super().eventFilter(obj, ev)
@@ -8252,9 +8322,8 @@ class CodeWebViewer(QWebEngineView):
             # Chromium 而终结传播，外层滚动区永远收不到：表现为"点击过卡片正文的
             # 无内滚条消息，滚轮彻底失效"（2026-10-14 修，探针见
             # tests/debug/probe_wheel_armed.py B2：几何有效 max_scroll=0 时外层 0/5）。
-            # 此处接手不会抢走内层可滚区域的滚轮：那种情况 Chromium 已消费、不上抛。
-            # 仅兜底 body 无溢出支：body 溢出的 "scroll" 分支刻意留给卡内滚动。
-            if self._inner_wheel_state(event.angleDelta().y()) == "unknown":
+            # 判据同 eventFilter 侧，含内层容器可滚性（防折叠框滚轮被抢）。
+            if self._wheel_belongs_to_outer(event.angleDelta().y()):
                 if self._route_wheel_to_chat_area(event):
                     return
         super().wheelEvent(event)

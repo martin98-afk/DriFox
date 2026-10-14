@@ -103,6 +103,26 @@ def _disabled_dot_color() -> str:
 # 状态灯压到 11px 字号 + 12px 列宽，避免实心圆抢主次。
 _MCP_ROW_ICON_SZ = 26
 
+# 传输类型分组（顺序即渲染顺序，对齐 Hook 卡按事件分组的呈现方式）
+_MCP_TYPE_GROUPS = [
+    ("stdio", "本地进程 · stdio"),
+    ("http", "远程服务 · HTTP"),
+    ("sse", "远程服务 · SSE"),
+]
+
+
+def _group_header_style() -> str:
+    """分组标题样式：浅色主题对齐 Hook 卡分组头，暗色主题退化为深底浅字"""
+    if isDarkTheme():
+        return (
+            f"background-color: #2b2b2b; color: #ddd; font-weight: bold; "
+            f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
+        )
+    return (
+        f"background-color: #F0F0F0; color: #333; font-weight: bold; "
+        f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
+    )
+
 
 def _resolve_mcp_server_icon(server_data: dict):
     """按 .mcp.json 的来源插件解析图标，失败返回 None（调用方用 FluentIcon 兜底）。
@@ -665,11 +685,13 @@ class MCPServerRow(CardWidget):
     editRequested = pyqtSignal(str)
     enabledChanged = pyqtSignal(str, bool)
     authorizeRequested = pyqtSignal(str)
+    unbindRequested = pyqtSignal(str)
 
     def __init__(self, server_data: dict, parent=None):
         super().__init__(parent)
         self._name = server_data.get("name", "")
         self._server_data = server_data
+        self._authorized = False
         self._setup_ui(server_data)
 
     def set_enabled(self, enabled: bool):
@@ -693,12 +715,31 @@ class MCPServerRow(CardWidget):
             return False
 
     def set_authorized(self, authorized: bool):
-        """切换授权按钮态：已授权置灰不可点，未授权可点。无授权按钮时忽略。"""
+        """切换授权按钮双态：未授权 → 「授权」，已授权 → 「解绑」（均可点）。无授权按钮时忽略。"""
+        self._authorized = authorized
         if self._auth_btn is None:
             return
-        self._auth_btn.setText("已授权" if authorized else "授权")
-        self._auth_btn.setEnabled(not authorized)
-        self._auth_btn.setToolTip("该服务器已授权，可直接连接" if authorized else "点击后在浏览器完成 OAuth 授权")
+        if authorized:
+            self._auth_btn.setText("解绑")
+            self._auth_btn.setToolTip("清除已保存的授权凭证并断开连接，下次连接需重新授权")
+        else:
+            self._auth_btn.setText("授权")
+            self._auth_btn.setToolTip("点击后在浏览器完成 OAuth 授权")
+        self._auth_btn.setEnabled(True)
+
+    def _set_auth_busy(self, busy: bool):
+        """授权/解绑进行中：按钮显示进行中文案并禁用，防止重复点击。无授权按钮时忽略。"""
+        if self._auth_btn is None:
+            return
+        self._auth_btn.setText("授权中" if busy else ("解绑" if self._authorized else "授权"))
+        self._auth_btn.setEnabled(not busy)
+
+    def _on_auth_clicked(self):
+        """授权按钮双态分发：未授权 → 发起授权；已授权 → 请求解绑"""
+        if self._authorized:
+            self.unbindRequested.emit(self._name)
+        else:
+            self.authorizeRequested.emit(self._name)
 
     def set_status(self, state: str, error: str = "", tool_count: int = 0):
         """更新连接状态指示灯（四态）
@@ -731,6 +772,9 @@ class MCPServerRow(CardWidget):
         self._desc_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
         )
+        self._token_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        )
         if getattr(self, "_current_state", None) == MCPState.DISABLED:
             self._status_dot.setStyleSheet(
                 f"color: {_disabled_dot_color()}; font-size: {scale_font_size(11)}px;"
@@ -738,9 +782,15 @@ class MCPServerRow(CardWidget):
             )
 
     def _setup_ui(self, data: dict):
-        layout = QHBoxLayout(self)
+        # 两行布局：第一行 = 图标 + 名称 + (弹性) + 授权按钮 + 开关 + 编辑/删除（操作组靠右）；
+        # 第二行 = 状态灯 + 描述（URL/命令）+ 本行 token 占用，两行左缘对齐
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 6, 12, 6)
-        layout.setSpacing(8)
+        layout.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
 
         # 插件图标（仅来自 DriFox 插件图标体系；用户手写的 server 取不到则不留空位）
         # 用 QLabel 直接放 pixmap：TransparentToolButton 在部分主题下不渲染 SVG，
@@ -754,7 +804,7 @@ class MCPServerRow(CardWidget):
             pix = server_icon.pixmap(_MCP_ROW_ICON_SZ, _MCP_ROW_ICON_SZ)
             if not pix.isNull():
                 self._icon_label.setPixmap(pix)
-                layout.addWidget(self._icon_label)
+                top.addWidget(self._icon_label)
             else:
                 self._icon_label.deleteLater()
         else:
@@ -770,10 +820,11 @@ class MCPServerRow(CardWidget):
         self._status_dot.setStyleSheet(
             f"color: {_disabled_dot_color()}; font-size: {scale_font_size(11)}px; background: transparent; padding: 0;"
         )
-        layout.addWidget(self._status_dot)
         name_label = StrongBodyLabel(data.get("name", ""))
         name_label.setFixedWidth(100)
-        layout.addWidget(name_label)
+        top.addWidget(name_label)
+        # 名称与操作组之间的弹性：短名后空白收拢在中间，操作控件靠右成组
+        top.addStretch(1)
         server_type = data.get("type", "stdio")
         if server_type == "stdio":
             desc = f"{data.get('command', '')} {' '.join(data.get('args', []))}".strip()
@@ -784,37 +835,78 @@ class MCPServerRow(CardWidget):
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
         )
         self._desc_label.setMinimumWidth(40)
-        layout.addWidget(self._desc_label, 1)
 
         self.switch = SwitchButton()
         SwitchStyles.configure(self.switch)
         self.switch.setChecked(data.get("enabled", True))
         self.switch.checkedChanged.connect(lambda v: self.enabledChanged.emit(self._name, v))
-        layout.addWidget(self.switch)
 
         edit_btn = ToolButton(FluentIcon.EDIT)
         edit_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         edit_btn.setStyleSheet(ButtonStyles.tool_button())
         edit_btn.clicked.connect(lambda: self.editRequested.emit(self._name))
-        layout.addWidget(edit_btn)
 
         del_btn = ToolButton(FluentIcon.CLOSE)
         del_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         del_btn.setStyleSheet(ButtonStyles.tool_button())
         del_btn.clicked.connect(lambda: self.removeRequested.emit(self._name))
-        layout.addWidget(del_btn)
 
         # OAuth 授权按钮：仅 auth.type == "oauth" 的 server 显示。
-        # 已授权 → 置灰显示「已授权」；未授权 → 「授权」，点击走完整授权流程。
+        # 双态切换：未授权 → 「授权」，点击走完整授权流程；已授权 → 「解绑」，
+        # 点击确认后断开连接并清除本地凭证。
+        # 紧凑宽度：与编辑/删除小方钮同族，不做默认宽的大按钮。
         self._auth_btn = None
         if (data.get("auth") or {}).get("type") == "oauth":
             self._auth_btn = PushButton("授权")
-            # TOOL_BUTTON_SZ 是 QSize，取高度让按钮与同行 icon/开关齐平
-            self._auth_btn.setFixedHeight(Sizes.TOOL_BUTTON_SZ.height())
+            self._auth_btn.setFixedSize(52, Sizes.TOOL_BUTTON_SZ.height())
             self._auth_btn.setStyleSheet(ButtonStyles.tool_button())
-            self._auth_btn.clicked.connect(lambda: self.authorizeRequested.emit(self._name))
-            layout.addWidget(self._auth_btn)
+            self._auth_btn.clicked.connect(self._on_auth_clicked)
             self.set_authorized(self._has_oauth_token(data))
+
+        # 操作组靠右成组：授权 + 开关 + 编辑 + 删除
+        if self._auth_btn is not None:
+            top.addWidget(self._auth_btn)
+        top.addWidget(self.switch)
+        top.addWidget(edit_btn)
+        top.addWidget(del_btn)
+
+        # 连接状态指示灯（黄=启动中 / 绿=成功 / 红=失败 / 黑=关闭），放第二行行首，
+        # 避免与第一行彩色图标形成双圆点并排。
+        # 字号压到 11px：● 是实心圆，16px 时比图标还抢眼，主次颠倒。
+        self._current_state = MCPState.DISABLED
+        self._status_dot = QLabel("●")
+        self._status_dot.setFixedWidth(12)
+        self._status_dot.setAlignment(Qt.AlignCenter)
+        self._status_dot.setToolTip("已关闭")
+        self._status_dot.setStyleSheet(
+            f"color: {_disabled_dot_color()}; font-size: {scale_font_size(11)}px; background: transparent; padding: 0;"
+        )
+
+        # 第二行：状态灯 + 描述 + 本行 token 占用（token 右对齐，与上行操作组右缘齐平）
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(8)
+        bottom.addWidget(self._status_dot)
+        bottom.addWidget(self._desc_label, 1)
+
+        self._token_label = QLabel("")
+        self._token_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._token_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        )
+        bottom.addWidget(self._token_label)
+
+        layout.addLayout(top)
+        layout.addLayout(bottom)
+
+    def set_token_count(self, count):
+        """更新本行 token 占用显示（None/缺失 → 清空，未连接时不展示）"""
+        if not count:
+            self._token_label.setText("")
+            self._token_label.setToolTip("")
+        else:
+            self._token_label.setText(f"~{count:,} tokens")
+            self._token_label.setToolTip("该服务器工具 schema 的 token 估算占用")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -831,8 +923,9 @@ class MCPListSettingCard(ExpandSettingCard):
 
     # 内部信号（从后台线程桥接到主线程 UI 更新）
     _hotConnectResult = pyqtSignal(str, bool, str)
-    _tokenCountReady = pyqtSignal(str)
+    _tokenCountReady = pyqtSignal(str, dict)
     _authorizeDone = pyqtSignal(str, bool, str)
+    _unbindDone = pyqtSignal(str, bool, str)
 
     def __init__(self, icon, title: str, content: str = None, parent=None):
         self.cfg = Settings.get_instance()
@@ -875,6 +968,7 @@ class MCPListSettingCard(ExpandSettingCard):
         self._hotConnectResult.connect(self._on_hot_connect_result)
         self._tokenCountReady.connect(self.setCount)
         self._authorizeDone.connect(self._on_authorize_done)
+        self._unbindDone.connect(self._on_unbind_done)
         # token 估算后台线程运行标志（避免重复启动）
         self._token_calc_running = False
 
@@ -961,9 +1055,8 @@ class MCPListSettingCard(ExpandSettingCard):
             return
 
         row = self._server_rows.get(name)
-        if row is not None and row._auth_btn is not None:
-            row._auth_btn.setText("授权中...")
-            row._auth_btn.setEnabled(False)
+        if row is not None:
+            row._set_auth_busy(True)
 
         def _work():
             from app.core.mcp_oauth import McpOAuthManager
@@ -1000,6 +1093,84 @@ class MCPListSettingCard(ExpandSettingCard):
             InfoBar.error(
                 "授权失败",
                 error or "授权未完成，请重试。",
+                parent=self.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+    def _on_unbind_server(self, name: str):
+        """解绑 OAuth 授权入口：确认 → 断开连接 + 后台清除本地凭证"""
+        from app.widgets.common_dialogs import ConfirmDialog
+
+        _confirmed: list[bool] = [False]
+
+        def _on_confirm():
+            _confirmed[0] = True
+
+        dialog = ConfirmDialog(
+            title="解绑授权",
+            content=f"确定要解除「{name}」的 OAuth 授权吗？\n将断开连接并清除本地保存的凭证，下次连接需重新授权。",
+            confirm_text="解绑",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(_on_confirm)
+        dialog.exec_()
+        if not _confirmed[0]:
+            return
+
+        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), None)
+        if not server_cfg:
+            return
+        src = str(server_cfg.get("_source", ""))
+        plugin = Path(src).parent.name if src.endswith(".json") else ""
+        if not plugin:
+            InfoBar.warning(
+                "无法解绑",
+                "该服务器不在插件目录内，无法定位已保存的凭证。",
+                parent=self.window(),
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 先断开已建立的连接，避免连接继续持有旧 token（后台执行）
+        self._hot_disconnect(name)
+
+        row = self._server_rows.get(name)
+        if row is not None:
+            row._set_auth_busy(True)
+
+        def _work():
+            from app.core.mcp_oauth import McpOAuthManager
+
+            try:
+                ok = McpOAuthManager.get_instance().revoke(plugin, name)
+                msg = "" if ok else "凭证清除失败，请查看日志"
+            except Exception as e:  # pragma: no cover - 解绑链路兜底
+                ok, msg = False, str(e)
+            self._unbindDone.emit(name, ok, msg)
+
+        threading.Thread(target=_work, name=f"mcp-oauth-unbind-{name}", daemon=True).start()
+
+    def _on_unbind_done(self, name: str, ok: bool, error: str):
+        """解绑完成回调（主线程）：更新按钮态 + 提示"""
+        row = self._server_rows.get(name)
+        if row is not None:
+            row.set_authorized(False)
+
+        if ok:
+            InfoBar.success(
+                "已解绑",
+                f"「{name}」的授权凭证已清除，下次连接需重新授权。",
+                parent=self.window(),
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        else:
+            InfoBar.error(
+                "解绑失败",
+                error or "凭证清除失败，请查看日志。",
                 parent=self.window(),
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
@@ -1295,14 +1466,32 @@ class MCPListSettingCard(ExpandSettingCard):
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
         else:
+            # 按传输类型分组渲染（stdio / http / sse），对齐 Hook 卡按事件分组的呈现方式
+            buckets: Dict[str, list] = {}
             for server_data in servers:
-                row = MCPServerRow(server_data, self.view)
-                row.removeRequested.connect(self._on_remove_server)
-                row.editRequested.connect(self._show_edit_dialog)
-                row.enabledChanged.connect(self._on_enabled_changed)
-                row.authorizeRequested.connect(self._on_authorize_server)
-                self._server_rows[server_data.get("name", "")] = row
-                self.viewLayout.addWidget(row)
+                buckets.setdefault(server_data.get("type") or "stdio", []).append(server_data)
+
+            def _render_group(title: str, group_servers: list):
+                header = QLabel(title, self.view)
+                header.setStyleSheet(_group_header_style())
+                self.viewLayout.addWidget(header)
+                for server_data in group_servers:
+                    row = MCPServerRow(server_data, self.view)
+                    row.removeRequested.connect(self._on_remove_server)
+                    row.editRequested.connect(self._show_edit_dialog)
+                    row.enabledChanged.connect(self._on_enabled_changed)
+                    row.authorizeRequested.connect(self._on_authorize_server)
+                    row.unbindRequested.connect(self._on_unbind_server)
+                    self._server_rows[server_data.get("name", "")] = row
+                    self.viewLayout.addWidget(row)
+
+            # 已知类型按固定顺序渲染，剩余未知类型兜底追加（防御 .mcp.json 写了别的 type）
+            for type_key, title in _MCP_TYPE_GROUPS:
+                group_servers = buckets.pop(type_key, None)
+                if group_servers:
+                    _render_group(title, group_servers)
+            for type_key, group_servers in buckets.items():
+                _render_group(f"其他 · {type_key}", group_servers)
 
         # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确。
         # ★ 原实现在这里 QCoreApplication.processEvents()：泵走当时事件队列里的
@@ -1366,10 +1555,19 @@ class MCPListSettingCard(ExpandSettingCard):
                 except RuntimeError:
                     pass
 
-    def setCount(self, text: str):
+    def setCount(self, text: str, per_server: dict = None):
         card = self.card
         if hasattr(card, "contentLabel"):
             card.contentLabel.setText(text)
+        # 行级 token 占用：未连接的 server 不在 per_server 里，行内清空
+        counts = per_server or {}
+        for name, row in self._server_rows.items():
+            if row is None:
+                continue
+            try:
+                row.set_token_count(counts.get(name))
+            except RuntimeError:
+                pass  # 行已被销毁
 
     def _on_remove_server(self, name: str):
         from app.widgets.common_dialogs import ConfirmDialog
@@ -1503,16 +1701,20 @@ class MCPListSettingCard(ExpandSettingCard):
                 enabled_count = sum(1 for s in servers if s.get("enabled", True))
                 base = f"{enabled_count}/{count}"
 
-                # 获取已连接的 MCP 工具 schema 并计算 token 数
+                # 按服务器分组估算：头部展示总数，行内展示各自占用
                 mgr = self._get_mcp_manager()
                 token_count = 0
+                per_server: dict = {}
                 if mgr and self.cfg.mcp_enabled.value:
-                    schemas = mgr.get_tool_schemas()
-                    if schemas:
-                        text = json.dumps(schemas, ensure_ascii=False)
-                        token_count = estimate_tokens(text)
+                    schemas_by_server = mgr.get_tool_schemas_by_server()
+                    for name, schemas in schemas_by_server.items():
+                        if not schemas:
+                            continue
+                        n = estimate_tokens(json.dumps(schemas, ensure_ascii=False))
+                        per_server[name] = n
+                        token_count += n
 
-                self._tokenCountReady.emit(f"{base} · ~{token_count:,} tokens")
+                self._tokenCountReady.emit(f"{base} · ~{token_count:,} tokens", per_server)
             except RuntimeError:
                 pass  # 卡片已销毁
             except Exception as e:
