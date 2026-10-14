@@ -125,7 +125,7 @@ def ui_app(request):
 
     yield {"tm": tm, "chat_window": chat_window, "app": app, "data_dir": _UI_DATA_DIR}
 
-    # 会话收尾：走 TabManager 完整清理（保存/网关停机/桌宠停止）
+    # 会话收尾：走 TabManager 完整清理（保存/网关停机）
     try:
         tm.cleanup()
     except Exception:  # noqa: BLE001

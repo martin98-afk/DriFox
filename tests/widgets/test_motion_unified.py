@@ -146,7 +146,7 @@ def test_height_animator_releases_min_and_max(qapp):
 
 
 def test_loop_timer_respects_visibility_gate(qapp):
-    """宿主不可见时零回调（桌宠/面板隐藏后不再空转重绘）"""
+    """宿主不可见时零回调（隐藏的控件不再空转重绘）"""
     from PyQt5.QtTest import QTest
     from PyQt5.QtWidgets import QWidget
 
@@ -196,7 +196,6 @@ _SRC = {
     "viewer": "app/widgets/markdown_block_viewer.py",
     "card": "app/widgets/cards/card_container.py",
     "stop_btn": "app/widgets/stop_button.py",
-    "pet": "app/widgets/pixel_pet.py",
     "arc": "plugins/assistant_hub/ui/arc_stack.py",
     "subagent": "app/widgets/cards/floating/sub_agent_compact_widget.py",
 }

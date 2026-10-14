@@ -355,6 +355,129 @@ def _resolve_plugin_paths(config: dict) -> dict:
     return cfg
 
 
+# ── MCP 凭据（API Key）存储与注入 ───────────────────────────
+# .mcp.json 可声明 credential 段，让用户在设置界面直接填 Key 并一键打开申请页，
+# 不必去配环境变量。形态与 Hana 的 connector.json 对齐：
+#
+#   "credential": {
+#     "label": "API Key",           # 输入框前的标签（缺省 "Key"）
+#     "placeholder": "sk-...",      # 输入框占位提示
+#     "getUrl": "https://...",      # 「获取 Key」按钮打开的申请页；缺省不显示按钮
+#     "inject": {
+#       "type": "header",           #   header → 写成 headers[name]
+#       "name": "Authorization",    #     header 名
+#       "scheme": "Bearer"          #     可选前缀；缺省原样写入
+#     },
+#     "inject": {                   #   query → 追加为 URL 查询参数
+#       "type": "query",
+#       "name": "key"
+#     },
+#     "inject": {                   #   url → 整条端点由用户提供
+#       "type": "url"
+#     }
+#   }
+#
+# 存储走 PluginConfigStore（与 OAuth token 同一处），键名 _mcp_cred_<server>。
+# 同为明文存储，风险口径与 OAuth token 一致。
+_CRED_KEY_PREFIX = "_mcp_cred_"
+
+
+def credential_storage_key(server_name: str) -> str:
+    """该 server 在插件 config.json 中的 Key 存储键。"""
+    return f"{_CRED_KEY_PREFIX}{server_name}"
+
+
+def get_credential(plugin_name: str, server_name: str) -> str:
+    """读取已保存的 Key；无则空串。异常一律按「无凭据」处理，不阻断连接。"""
+    if not plugin_name:
+        return ""
+    try:
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+        raw = PluginConfigStore()._read_raw(plugin_name)
+        val = raw.get(credential_storage_key(server_name))
+        return val if isinstance(val, str) else ""
+    except Exception as e:
+        logger.debug(f"[MCP] 读取凭据失败 {plugin_name}/{server_name}: {e}")
+        return ""
+
+
+def set_credential(plugin_name: str, server_name: str, value: str) -> bool:
+    """保存 Key；空串表示清除。"""
+    if not plugin_name:
+        return False
+    try:
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+        return PluginConfigStore().set_values(plugin_name, {credential_storage_key(server_name): value or ""})
+    except Exception as e:
+        logger.warning(f"[MCP] 保存凭据失败 {plugin_name}/{server_name}: {e}")
+        return False
+
+
+def _inject_credential(config: dict, cred: dict) -> dict:
+    """把已保存的 Key 按 credential.inject 注入 config，返回新 dict。
+
+    无 credential 声明或无已存 Key 时原样返回。优先级高于 ${env.VAR}：
+    用户在界面显式填的 Key 应覆盖占位符。
+    """
+    if not isinstance(cred, dict):
+        return config
+    key = get_credential(_plugin_name_from_source(config), config.get("name", ""))
+    if not key:
+        return config
+
+    cfg = copy.deepcopy(config)
+    inject = cred.get("inject") or {}
+    kind = inject.get("type", "header")
+
+    if kind == "url":
+        # 整条端点由用户提供（服务方签发的专属链接），Key 即 URL
+        cfg["url"] = key
+    elif kind == "query":
+        name = inject.get("name") or "key"
+        base, _, query = cfg.get("url", "").partition("?")
+        # 剥掉同名旧参数与 ${cred.url} 占位，避免重复追加
+        parts = [p for p in query.split("&") if p and not p.startswith(f"{name}=")] if query else []
+        parts = [p for p in parts if p != "${cred.url}"]
+        url = f"{base}?{'&'.join(parts)}" if parts else base
+        sep = "&" if "?" in url else "?"
+        cfg["url"] = f"{url}{sep}{name}={key}"
+    else:
+        header = inject.get("name") or "Authorization"
+        scheme = inject.get("scheme")
+        headers = dict(cfg.get("headers") or {})
+        headers[header] = f"{scheme} {key}" if scheme else key
+        cfg["headers"] = headers
+    return cfg
+
+
+def _resolve_mcp_credentials(config: dict) -> dict:
+    """连接前注入 credential 声明的 Key（若用户已保存）。"""
+    return _inject_credential(config, config.get("credential") or {})
+
+
+def _find_unresolved_env(config: dict) -> list:
+    """列出 config 的 url / headers 中仍未解析的 ${env.VAR} 变量名。
+
+    供 _connect_single 在连接前预检：变量未设置时提前失败，避免远端把
+    缺凭据响应成 200 + 业务错误 JSON，导致 mcp SDK 挂到超时才报错。
+    """
+    missing: list = []
+
+    def _scan(value) -> None:
+        if not isinstance(value, str):
+            return
+        for name in _ENV_PLACEHOLDER.findall(value):
+            if name not in missing:
+                missing.append(name)
+
+    _scan(config.get("url"))
+    for v in (config.get("headers") or {}).values():
+        _scan(v)
+    return missing
+
+
 # ── MCP OAuth 支持 ────────────────────────────────────
 # .mcp.json 里声明 "auth": {"type": "oauth", ...} 的 server 走 OAuth 授权码流程。
 # 核心实现见 app/core/mcp_oauth/，这里只负责从 config 反推归属插件并取 provider。
@@ -1087,6 +1210,25 @@ class MCPClientManager:
         """
         # 兜底解析插件路径占位符（防御旧缓存 / 热重载竞态 / UI 直增未展开的情况）
         config = _resolve_plugin_paths(config)
+
+        # 注入用户在设置界面填的 Key（credential 声明），优先级高于 ${env.VAR}
+        config = _resolve_mcp_credentials(config)
+
+        # ── 未展开的 ${env.VAR} 预检 ────────────────────────────────────
+        # 展开后 url / headers 里若还留着 ${env.X}，说明该环境变量没设。
+        # 此时继续连只会拿到 401/400，或像高德那样返回 200 + 业务错误 JSON，
+        # 而 mcp SDK 会把这类响应当成"读流里的一条异常消息"而非抛错，
+        # 最终表现是挂住直到 connect timeout，用户看到一堆 pydantic 噪音。
+        # 提前拦住，直接说缺哪个变量。
+        _unresolved = _find_unresolved_env(config)
+        if _unresolved:
+            reject = f"环境变量未设置: {', '.join(_unresolved)}（配置中的 ${{env.*}} 占位符未解析）"
+            logger.warning(f"[MCP] 拒绝启动服务器 '{name}': {reject}")
+            conn = MCPServerConnection(name, config)
+            conn.set_state(MCPState.FAILED, reject)
+            with self._lock:
+                self._connections[name] = conn
+            return False, reject
 
         # 如果已存在，先断开（清理旧进程，避免端口/文件锁被占导致新进程起不来）
         with self._lock:

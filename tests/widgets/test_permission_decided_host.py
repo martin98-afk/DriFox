@@ -460,7 +460,7 @@ def test_no_text_label_parsing_in_main_widget():
 
 
 def test_ai_state_question_contract_kept():
-    """三合一契约：_set_ai_state("question") 必须保留（Tab 动画 + 桌宠 + 并行会话计数）"""
+    """三合一契约：_set_ai_state("question") 必须保留（Tab 动画 + 并行会话计数）"""
     import inspect
 
     from app.main_widget import OpenAIChatToolWindow

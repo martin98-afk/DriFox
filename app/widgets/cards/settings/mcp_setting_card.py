@@ -622,6 +622,11 @@ class MCPEditCard(QWidget):
                 # 保留来源信息（从原始数据继承，供 PluginManager 更新使用）
                 if self._original_name:
                     server_data["_source"] = self._original_name
+                # JSON 模式若没写 auth / credential，从原数据继承，避免丢配置
+                for _key in ("auth", "credential"):
+                    _val = self._server_data.get(_key)
+                    if isinstance(_val, dict) and _val and not server_data.get(_key):
+                        server_data[_key] = _val
             except (ValueError, KeyError, TypeError) as e:
                 InfoBar.warning(
                     "提示", f"配置解析失败: {e}", parent=_parent, duration=3000, position=InfoBarPosition.BOTTOM
@@ -693,6 +698,13 @@ class MCPEditCard(QWidget):
         if self._original_name:
             server_data["_source"] = self._original_name
 
+        # 表单不含 OAuth / API Key 声明，从原数据继承，避免用户在表单里
+        # 改个 URL 就把授权配置或凭据声明丢掉。
+        for _key in ("auth", "credential"):
+            _val = self._server_data.get(_key)
+            if isinstance(_val, dict) and _val:
+                server_data[_key] = _val
+
         self.saved.emit(server_data)
 
 
@@ -709,6 +721,8 @@ class MCPServerRow(CardWidget):
     enabledChanged = pyqtSignal(str, bool)
     authorizeRequested = pyqtSignal(str)
     unbindRequested = pyqtSignal(str)
+    # 用户在凭据行保存了 Key：参数为 server name。列表卡接到后热重连。
+    credentialSaved = pyqtSignal(str)
 
     def __init__(self, server_data: dict, parent=None):
         super().__init__(parent)
@@ -903,6 +917,91 @@ class MCPServerRow(CardWidget):
 
         layout.addLayout(top)
         layout.addLayout(bottom)
+
+        # 第三行（仅声明了 credential 的 server）：「获取 Key」按钮 + Key 输入框 + 保存。
+        # 免环境变量：Key 存插件 config.json，连接时按 credential.inject 注入。
+        self._cred_edit = None
+        self._setup_credential_row(data, layout)
+
+    def _credential_plugin(self) -> str:
+        """该 server 所属插件名（凭据存储的命名空间）。"""
+        source = self._server_data.get("_source", "")
+        if source and str(source).endswith(".json"):
+            return Path(str(source)).parent.name
+        return ""
+
+    def _setup_credential_row(self, data: dict, layout: QVBoxLayout):
+        """按 .mcp.json 的 credential 声明构造 Key 输入行；无声明则不加行。"""
+        cred = data.get("credential")
+        if not isinstance(cred, dict):
+            return
+
+        from app.tools.mcp_tools import get_credential
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 2, 0, 0)
+        row.setSpacing(6)
+
+        label = BodyLabel(cred.get("label") or "Key")
+        label.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px;")
+        row.addWidget(label)
+
+        edit = QLineEdit()
+        edit.setClearButtonEnabled(True)
+        edit.setPlaceholderText(cred.get("placeholder") or "粘贴 Key 后按保存")
+        edit.setFixedHeight(Sizes.TOOL_BUTTON_SZ.height())
+        edit.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 0 6px;")
+        # 已存过的默认明文显示便于核对；未存过的用密码模式
+        existing = get_credential(self._credential_plugin(), self._name)
+        edit.setEchoMode(QLineEdit.Normal if existing else QLineEdit.Password)
+        if existing:
+            edit.setText(existing)
+        edit.returnPressed.connect(self._on_save_credential)
+        row.addWidget(edit, 1)
+        self._cred_edit = edit
+
+        get_url = cred.get("getUrl")
+        if get_url:
+            get_btn = PushButton("获取 Key")
+            get_btn.setFixedSize(72, Sizes.TOOL_BUTTON_SZ.height())
+            get_btn.setToolTip(get_url)
+            get_btn.clicked.connect(lambda: self._open_get_url(get_url))
+            row.addWidget(get_btn)
+
+        save_btn = PushButton("保存")
+        save_btn.setFixedSize(56, Sizes.TOOL_BUTTON_SZ.height())
+        save_btn.clicked.connect(self._on_save_credential)
+        row.addWidget(save_btn)
+
+        layout.addLayout(row)
+
+    def _open_get_url(self, url: str):
+        """打开 Key 申请页（系统默认浏览器）。"""
+        import webbrowser
+
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            logger.warning(f"[MCP] 打开申请页失败 {url}: {e}")
+            InfoBar.warning(title="打开失败", content=str(e), parent=self)
+
+    def _on_save_credential(self):
+        """保存 Key 并触发热重连。"""
+        from app.tools.mcp_tools import set_credential
+
+        if self._cred_edit is None:
+            return
+        value = self._cred_edit.text().strip()
+        plugin = self._credential_plugin()
+        if not plugin:
+            InfoBar.warning(title="无法保存", content="该服务器不属于插件，没有存储位置", parent=self)
+            return
+        if set_credential(plugin, self._name, value):
+            # 保存后切回密码显示，避免明文长期摊在界面上
+            self._cred_edit.setEchoMode(QLineEdit.Password if value else QLineEdit.Normal)
+            self.credentialSaved.emit(self._name)
+        else:
+            InfoBar.error(title="保存失败", content="写入插件配置时出错，详见日志", parent=self)
 
     def set_token_count(self, count):
         """更新本行 token 占用显示（None/缺失 → 清空，未连接时不展示）"""
@@ -1206,6 +1305,27 @@ class MCPListSettingCard(ExpandSettingCard):
 
         mgr.connect_server_background(name, config, on_done=on_done)
 
+    def _on_credential_saved(self, name: str):
+        """Key 保存后重连该服务器。
+
+        Key 存在插件 config.json 里，_connect_single 会读出来注入 url/headers，
+        所以这里用原 config 重连即可，不必改写配置。
+        重连前先断开，避免旧连接（缺凭据那次）残留占用。
+        """
+        servers = {s.get("name"): s for s in self._get_servers()}
+        config = servers.get(name)
+        if config is None:
+            logger.warning(f"[MCP] 凭据已保存但找不到服务器 '{name}' 的配置，跳过重连")
+            return
+        if not config.get("enabled", True):
+            logger.debug(f"[MCP] '{name}' 处于关闭状态，Key 已保存，启用时生效")
+            return
+
+        self._hot_disconnect(name)
+        # 先让断开落地，再把重连推到下一轮事件循环
+        QTimer.singleShot(0, lambda: self._hot_connect(name, config, force=True))
+        InfoBar.success(title="Key 已保存", content=f"正在重连「{name}」", parent=self)
+
     def _mcp_gate_key(self, name: str) -> str:
         """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）。
 
@@ -1487,6 +1607,7 @@ class MCPListSettingCard(ExpandSettingCard):
                     row.enabledChanged.connect(self._on_enabled_changed)
                     row.authorizeRequested.connect(self._on_authorize_server)
                     row.unbindRequested.connect(self._on_unbind_server)
+                    row.credentialSaved.connect(self._on_credential_saved)
                     self._server_rows[server_data.get("name", "")] = row
                     self.viewLayout.addWidget(row)
 

@@ -758,11 +758,8 @@ class Settings(QConfig):
     # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
     ui_message_identity = ConfigItem("UI", "MessageIdentity", True, BoolValidator())
 
-    # ========== 像素桌宠 ==========
-    pet_enabled = ConfigItem("UI", "PetEnabled", False, BoolValidator())
     # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
     tab_panel_mode = OptionsConfigItem("UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"]))
-    pet_size = OptionsConfigItem("UI", "PetSize", "small", OptionsValidator(["small", "medium", "large"]))
 
     # 注：上次项目/上次欢迎 tab/树折叠态等「上次状态」已迁至 app_state（.drifox/cache/app_state.json），
     # 不再作为系统配置项；旧 app.config 中的值由 app_state 首次加载时一次性迁入。

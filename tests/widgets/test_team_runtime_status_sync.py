@@ -178,7 +178,7 @@ class TestNonMemberShortCircuit:
 
         stub._set_ai_state("thinking")
 
-        assert stub._ai_state == "thinking", "AI 状态应照常更新（桌宠动画不受影响）"
+        assert stub._ai_state == "thinking", "AI 状态应照常更新"
         stub.ai_state_changed.emit.assert_called_once_with("thinking")
         spy.assert_not_called(), "非成员窗口同步链路应短路"
 

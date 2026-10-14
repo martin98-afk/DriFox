@@ -225,6 +225,10 @@ def _mk_clear_fake(*, msgs=None, save_ok=True):
             self.compaction_state = {}
             self.compaction_cache = {}
             self.messages_released = False
+            # API 权威上下文占用字段（P6 复位对象）
+            self.last_api_prompt_tokens = 90000
+            self.last_api_message_count = len(messages)
+            self.last_api_prompt_from_usage = True
 
         def set_messages(self, messages, **kwargs):
             set_rec(messages, **kwargs)
@@ -308,6 +312,33 @@ class TestCompactClearPersists:
         fake._on_compact_clear_finished("compact_1", "摘要结果", "sess_0001")
         assert fake._post_compact_cutoff_ms > 0, "应记录 wall-clock 切断点（毫秒）"
         assert fake._post_compact_guard is True
+
+    def test_clear_resets_api_usage_fields(self):
+        """🔴 P6：清空必须复位 API 权威占用字段，否则反复触发自动压缩。
+
+        根因：这三个字段是 session 级跨轮缓存，只清 messages 不动它们 →
+        快照的 API 权威值路径沿用旧值（len(messages) ≤ api_message_count
+        时直接返回旧权威值）→ 清空后 ratio 仍 90% → 下一轮 hook 再次触发。
+        """
+        fake = _mk_clear_fake()
+        target = fake._session_obj
+        assert target.last_api_prompt_tokens > 0, "前提：清空前有 API 权威占用值"
+        fake._on_compact_clear_finished("compact_1", "摘要结果", "sess_0001")
+        assert target.last_api_prompt_tokens == 0
+        assert target.last_api_message_count == 0
+        # 复位为 None（三态"未知"）而非 False（"本地估算"）：
+        # 后续首轮 API 调用回来时会正常写入 True
+        assert target.last_api_prompt_from_usage is None
+
+    def test_clear_persists_reset_api_usage(self):
+        """复位的 API 占用字段必须随清空一起落库（否则重载又读回旧值）。"""
+        fake = _mk_clear_fake()
+        fake._on_compact_clear_finished("compact_1", "摘要结果", "sess_0001")
+        assert len(fake._save_calls) == 1
+        _, kwargs = fake._save_calls[0]
+        assert kwargs["last_api_prompt_tokens"] == 0
+        assert kwargs["last_api_message_count"] == 0
+        assert kwargs["last_api_prompt_from_usage"] is None
 
 
 class TestCompactClearReleasedState:

@@ -376,7 +376,6 @@ class LLMSettingsCard(SystemCardFrame):
             (
                 ("appearance", "外观", "主题风格"),
                 ("render", "渲染", FluentIcon.SPEED_HIGH),
-                # ("pet", "桌宠", "pet"),
             ),
         ),
         (
@@ -848,31 +847,6 @@ class LLMSettingsCard(SystemCardFrame):
         self._setup_font_card()
         appearance_layout.addWidget(self.llmFontCard)
         appearance_layout.addStretch(1)
-
-        # # ════ 桌宠页 ════
-        # pet_layout = self._page_layouts["pet"]
-
-        # # 桌宠显示开关
-        # self.petCard = SwitchSettingCard(
-        #     FluentIcon.HEART,
-        #     "桌宠显示",
-        #     "在主窗口上显示像素小狐桌宠",
-        #     configItem=self.cfg.pet_enabled,
-        #     parent=self,
-        # )
-        # pet_layout.addWidget(self.petCard)
-
-        # # 桌宠大小
-        # self.petSizeCard = OptionsSettingCard(
-        #     self.cfg.pet_size,
-        #     FluentIcon.ZOOM,
-        #     "桌宠大小",
-        #     "调整像素桌宠的显示尺寸",
-        #     texts=["小 (32px)", "中 (48px)", "大 (64px)"],
-        #     parent=self,
-        # )
-        # pet_layout.addWidget(self.petSizeCard)
-        # pet_layout.addStretch(1)
 
         # ════ 版本更新页 ════
         update_layout = self._page_layouts["update"]

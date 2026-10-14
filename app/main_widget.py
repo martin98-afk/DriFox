@@ -946,7 +946,6 @@ class OpenAIChatToolWindow(ToolWindow):
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
-    # 桌宠用：AI 状态变化信号（idle / thinking / streaming / question / error）
     ai_state_changed = pyqtSignal(str)
     # models.dev 动态模型数据后台刷新完成（后台线程 → 主线程）
     _models_dev_ready = pyqtSignal(object)
@@ -1353,7 +1352,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._strong_recycle_timer.start()
         self.toolStartUiSyncRequested.connect(self._handle_tool_start_ui_sync, type=Qt.QueuedConnection)
         self._is_streaming = False
-        self._ai_state = "idle"  # 桌宠用：当前 AI 状态
+        self._ai_state = "idle"  # 当前 AI 状态（驱动 Tab 边框动画）
         self._topic_summary_cancelled = False  # 用于取消正在进行的标题生成任务
         self._response_start_time = None
         self._stop_elapsed = None  # 手动停止时暂存的耗时
@@ -2508,7 +2507,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def showEvent(self, event):
         # P2 懒加载：窗口变为可见（Tab 模式被选中 / 独立窗口显示）时，
-        # 补建此前因未激活而延迟的重型内容（7 张卡片 / settings / 桌宠）。
         # 已构建的窗口此方法为空操作，不影响现有首次初始化流程。
         self._maybe_build_deferred_content()
         if getattr(self, "_session_initialized", False):
@@ -6996,6 +6994,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 清空目标 session 的 messages（保留 session 自身，topic_summary / name 不变）
         # 用 set_messages 而非 session.clear()，避免把 topic_summary 重置为 ""
         target_session.set_messages([], preserve_compaction=False)
+        # 🛡️ P6：清空必须同步复位「API 权威上下文占用」字段。这三个字段是
+        # session 级跨轮缓存（_on_context_updated 每轮写入、随保存落库），
+        # 只清 messages 不动它们 → 快照的 API 权威值路径
+        # （api_prompt_tokens>0 且 from_api is not False）在
+        # len(messages) ≤ api_message_count 时直接沿用旧权威值，
+        # 于是清空后上下文虽已归零，ratio 仍高达 90% → 下一轮
+        # PostToolUse / PreAssistantMessage hook 再次触发自动压缩，
+        # 表现为「上下文很少还是反复压缩」。
+        # 复位后快照走本地估算（est_total），占用随 messages 真实回落。
+        target_session.last_api_prompt_tokens = 0
+        target_session.last_api_message_count = 0
+        target_session.last_api_prompt_from_usage = None
         # 🛡️ 压缩守卫：清空后旧 worker 的 finished_with_messages（取消时 emit 的
         # 旧消息快照）可能延迟到达主线程，_on_messages_updated 全量覆写会恢复
         # 已清空的会话 → 压缩失效 + 反复触发。守卫拦截"消息数远多于当前 session"
@@ -17836,7 +17846,7 @@ class OpenAIChatToolWindow(ToolWindow):
         ``value`` 停在旧位置，距底 gap 可达数千 px。
 
         负责追平的调用点此前不存在：``TabManagerWindow._on_tab_selected``
-        只做浮动卡投影/主题补刷/桌宠/工作台；补渲路径
+        只做浮动卡投影/主题补刷/工作台；补渲路径
         （``_render_deferred → showEvent → _schedule_render``）不置
         ``_content_just_loaded``，heightChanged 只走单卡 delta 增量补偿，
         追不上一整段积压。
@@ -19233,7 +19243,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 避免多个 worker 迭代（如工具执行后重开 API 调用）时耗时被重置。
         if self._response_start_time is None:
             self._response_start_time = time.time()
-        self._set_ai_state("streaming")  # 桌宠：开始回复
+        self._set_ai_state("streaming")
         if self._current_assistant_card:
             # 身份行刷新：占位卡身份在发送同步段解析，早于 PreUserMessage hook
             # （@助手切换在后台线程）；流式开始时 hook 必已完成，以最新身份重画。
@@ -19258,10 +19268,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_content_received(self, content_piece: str):
         if getattr(self, "_is_destroyed", False):
             return
-        # ★ 推理结束后首个内容到达时，确保桌宠从 thinking 切回 streaming
         # 背景：stream_started 在 worker 启动时即触发（早于任何内容），
         # 随后 thinking_started（推理内容到达）覆盖为 thinking，
-        # 但内容到达时没有信号通知桌宠切回 streaming。
         if self._ai_state == "thinking":
             self._set_ai_state("streaming")
 
@@ -19289,7 +19297,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """新轮次思考开始，为当前助手卡片创建新的独立思考块"""
         if getattr(self, "_is_destroyed", False):
             return
-        self._set_ai_state("thinking")  # 桌宠：开始思考
+        self._set_ai_state("thinking")
         card = self._current_assistant_card
         if card and getattr(card, "_content_data", None) is not None:
             card.start_streaming_anim()
@@ -20363,7 +20371,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._is_streaming = False
         self._toggle_send_stop(False)
-        self._set_ai_state("idle")  # 桌宠：任务完成
+        self._set_ai_state("idle")
         # 缺陷 3：流结束仍有待输入浮动卡残留时一并收起（幂等）
         self._dismiss_pending_overlay_cards()
 
@@ -21122,7 +21130,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         self._is_streaming = False
-        self._set_ai_state("error")  # 桌宠：发生错误
+        self._set_ai_state("error")
 
         self._toggle_send_stop(False)
         # 缺陷 3：引擎错误时收起残留的待输入浮动卡（幂等）
@@ -21161,7 +21169,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_node_preview_to_last()
 
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
-        """API 重试状态通知 - 更新卡片边框和状态栏，同时通知桌宠报错"""
+        """API 重试状态通知 - 更新卡片边框和状态栏，并切到 error 状态"""
         if getattr(self, "_is_destroyed", False):
             return
         # 🛡️ 不在流式状态时忽略重试信号（说明已停止或不在对话中）
@@ -21172,16 +21180,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_assistant_card.start_retry_anim(error_type, attempt, max_retries, wait_time)
             else:
                 self._current_assistant_card.update_retry_status(error_type, attempt, max_retries, wait_time)
-        # 通知桌宠：重试 = 出错了（等待恢复）
         self._set_ai_state("error")
 
     def _on_retry_resolved(self):
-        """API 重试成功 - 恢复卡片彩虹边框，通知桌宠继续回复"""
+        """API 重试成功 - 恢复卡片彩虹边框，切回 streaming 状态"""
         if getattr(self, "_is_destroyed", False):
             return
         if self._current_assistant_card:
             self._current_assistant_card.stop_retry_anim()
-        # 通知桌宠：重试成功，回到 streaming
         self._set_ai_state("streaming")
 
     def _on_context_updated(self, token_count: int, limit: int, from_api: bool = False):
@@ -21302,7 +21308,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._ensure_question_floating_widget()
-        self._set_ai_state("question")  # 桌宠：等待用户回答
+        self._set_ai_state("question")
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
         #  必须单独隐藏，否则会与提问卡片重叠）
@@ -21341,7 +21347,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_question_answered(self, answer: str):
         if getattr(self, "_is_destroyed", False):
             return
-        self._set_ai_state("streaming")  # 桌宠：已回答，准备继续生成
+        self._set_ai_state("streaming")
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
         self._set_bottom_input_visible(True)
@@ -21361,7 +21367,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """用户关闭问题窗口时，返回空答案让大模型继续"""
         if getattr(self, "_is_destroyed", False):
             return
-        self._set_ai_state("idle")  # 桌宠：取消提问，恢复空闲
+        self._set_ai_state("idle")
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
         self._set_bottom_input_visible(True)
@@ -21607,7 +21613,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._ensure_permission_approval_widget()
         # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态。
         # ⚠ 三合一契约（勿删勿改语义）：① TabPanel 边框 question 动画
-        # ② 桌宠 question 态 ③ 并行会话新增的 _question_count 计数体系。
         self._set_ai_state("question")
         # 宿主自持待决 id（要求 1）：决策到达时不再从 worker 反查
         self._pending_permission_id = tool_call_id
@@ -23933,7 +23938,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.cancel_streaming()
 
         self._is_streaming = False
-        self._set_ai_state("idle")  # 桌宠：用户手动停止
+        self._set_ai_state("idle")
 
         self._toggle_send_stop(False)
         if self._current_assistant_card and not _is_sip_deleted(self._current_assistant_card):

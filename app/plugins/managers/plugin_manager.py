@@ -1981,6 +1981,9 @@ class PluginManager:
             # OAuth 等认证声明。缺省空 dict，非 OAuth 服务器行为不变。
             # 仅 http/sse 型有意义；stdio 型忽略此字段。
             "auth": cfg.get("auth", {}),
+            # API Key 凭据声明（label/getUrl/inject）。连接层据此把用户
+            # 在设置界面填的 Key 注入 url 或 headers。缺省空 dict。
+            "credential": cfg.get("credential", {}),
             "_source": str(source_file),
         }
 
@@ -2019,7 +2022,8 @@ class PluginManager:
         # 逆展开：将运行时绝对路径还原为 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA}
         # 只处理持久化字段，避免污染 _source 等元数据
         # auth 不含路径占位符，但需持久化，否则用户从 UI 保存会丢 OAuth 声明
-        _MCP_PERSIST_FIELDS = ("command", "args", "env", "url", "headers", "auth")
+        # credential 同理：丢了就没法在设置界面填/读 API Key
+        _MCP_PERSIST_FIELDS = ("command", "args", "env", "url", "headers", "auth", "credential")
         for key in _MCP_PERSIST_FIELDS:
             if key in server_data:
                 server_data[key] = PluginManager._unexpand_mcp_vars(server_data[key], source_path.parent)

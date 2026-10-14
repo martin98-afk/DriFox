@@ -13,7 +13,7 @@ Bug 复现（离屏 Qt 探针实测，QStackedWidget 隐藏页 + QScrollArea）�
 准确。故切走期间的高度增长不会反映到滚动条上，切回瞬间 value 停在旧位置。
 
 负责追平的调用点此前不存在：
-  - ``TabManagerWindow._on_tab_selected`` 只做浮动卡投影/主题补刷/桌宠/工作台
+  - ``TabManagerWindow._on_tab_selected`` 只做浮动卡投影/主题补刷/工作台
   - 补渲路径 ``_render_deferred → showEvent → _schedule_render`` 不置
     ``_content_just_loaded``，heightChanged 只走单卡 delta 增量补偿，追不上积压
 
