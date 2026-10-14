@@ -288,6 +288,13 @@ class ConsoleMonitorPage(QWebEnginePage):
             self.heightReported.emit(h)
             # 旧格式（仅高度，无几何字段）不发几何信号：wheelEvent 回退保守策略
             if dom_text_len is not None or reading is not None:
+                # ⚠️ bodyGeometryReported 必须**无条件**发：_body_geom_valid 是
+                # _inner_wheel_state / _wheel_belongs_to_outer 两个滚轮判据的开关，
+                # 一旦缺失 → 激活态判据恒 unknown、兜底判据恒 False → 武装态
+                # 卡片内滚到边界后既不交外层也不上抛，内外双死锁
+                # （2026-10-14 回归：新增第 6 字段时误把它替换成
+                #  bodyInnerScrollableChanged.emit，只发后者导致几何链整条断）。
+                self.bodyGeometryReported.emit(h, scroll_top, client_height)
                 # [WHEEL-ARM] 内层可滚标志单独走信号：不破坏 bodyGeometryReported
                 # 既有三参签名（调用方无需跟着改）。
                 if inner_scrollable is not None:
