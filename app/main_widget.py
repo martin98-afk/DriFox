@@ -27,6 +27,7 @@ from PyQt5.QtCore import (
     QEvent,
     QEventLoop,
     QFileSystemWatcher,
+    QMetaObject,
     QObject,
     QRunnable,
     Qt,
@@ -1258,6 +1259,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 否则终渲染那几百毫秒里「补偿落点 < 真实 maximum」会被记成用户上滚，
         # 而 away 一旦置位又因 value 不再变化而永不复位 → 视口永久停在列表中段。
         self._programmatic_scroll_depth = 0
+        # 跟随态贴底任务在队列中标志：同一轮内多次高度回调只投递一次
+        # （见 _schedule_bottom_snap）。
+        self._bottom_snap_queued = False
         # 🛡️ 会话切换哨兵：_create_new_session 中置 True，丢弃 stop_streaming 后
         # 仍可能跨线程到达的 worker 旧回调（_on_messages_updated / _do_post_stream_cleanup
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
@@ -17818,6 +17822,44 @@ class OpenAIChatToolWindow(ToolWindow):
         self._scroll_max_cache = (now, scroll_bar.maximum())
         return scroll_bar.maximum()
 
+    @pyqtSlot()
+    def _snap_bottom_queued(self):
+        """跟随态贴底的延迟执行体：此时布局已传播，landed 即时准确。"""
+        self._bottom_snap_queued = False
+        try:
+            sb = self.chat_scroll_area.verticalScrollBar()
+            with self._programmatic_scroll():
+                sb.setValue(self._landed_bottom_value())
+        except RuntimeError:
+            # 会话/窗口切换中对象已销毁，放弃本次贴底
+            pass
+
+    def _schedule_bottom_snap(self):
+        """跟随态贴底：投递到事件队列，等布局传播落地后一次贴准。
+
+        🐛 折叠栏抖动修复（2026-10-15，探针 tests/debug/dock_jitter_probe2.py 实测）。
+        setFixedHeight 只改尺寸约束，container 实际高度要下一轮 LayoutRequest 才
+        传播 → 在 heightChanged 回调里同步贴底，读到的 landed 是上一拍的底 →
+        视口内容突跳本拍 delta，下一拍追踪 tick 补偿才弹回。折叠栏贴卡片底，
+        每个高度台阶都是一次「凸出-弹回」（实测 dev 0→261→0 循环、16 次翻转）；
+        内容超过 viewer MAX_HEIGHT 卡片高度钳停后脉冲消失，抖动随之停止
+        （与用户观察一致）。
+
+        时机选择：invokeMethod(QueuedConnection) 是 posted event，与 LayoutRequest
+        同队列 FIFO —— 执行顺序 LayoutRequest（布局落地）→ 本任务（贴底）→
+        paint（画的是贴底后状态），用户看不到中间帧。
+        ⚠️ 实测淘汰的两个替代：
+        - 回调内同步贴底：landed 滞后一拍，即本 bug 本身；
+        - QTimer.singleShot(0)：零毫秒定时器在窗口系统事件之后才执行，
+          中间帧照样被画出来（探针 dev 仍 558/261 脉冲、5 次翻转）；
+        - 回调内 invalidate+activate+resize 强制同步落地布局：QWebEngineView
+          的大小协商使卡片 sizeHint 相对 viewer 约束滞后一拍，前几拍无效。
+        """
+        if getattr(self, "_bottom_snap_queued", False):
+            return
+        self._bottom_snap_queued = True
+        QMetaObject.invokeMethod(self, "_snap_bottom_queued", Qt.QueuedConnection)
+
     def _landed_bottom_value(self) -> int:
         """「已落地」的贴底 value：只认布局已真正落地的内容底。
 
@@ -18138,9 +18180,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 贴底改为「每拍都取当前上界」，误差不累积。
                     # 🐛 但「当前上界」在上一行刚被 +delta 预抬，widget 实际高度
                     # 下一拍布局周期才落地：贴预抬值 = 视口底露一帧背景色，流式
-                    # 每拍重复 = 置底页脚轻微波动（探针实证）。改贴「已落地」底：
-                    with self._programmatic_scroll():
-                        sb.setValue(self._landed_bottom_value())
+                    # 每拍重复 = 置底页脚轻微波动（探针实证）。改贴「已落地」底。
+                    # 🐛 又：同步贴底读到的 landed 仍是上一拍的（布局未传播），
+                    # 视口内容突跳本拍 delta → 折叠栏频繁抖动（见
+                    # _schedule_bottom_snap 注释）。投递到布局落地后贴底。
+                    self._schedule_bottom_snap()
                 elif card_bottom <= value:
                     # 非跟随态：卡片整体在视口上方 → 锚定补偿，保持其相对位置。
                     # 落点同样钳到已落地底：上界可能刚被预抬，value+delta 落在

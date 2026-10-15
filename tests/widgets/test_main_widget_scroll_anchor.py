@@ -418,9 +418,13 @@ class _AnchorHarness(QObject):
     _is_view_at_bottom = OpenAIChatToolWindow._is_view_at_bottom
     _programmatic_scroll = OpenAIChatToolWindow._programmatic_scroll
     _landed_bottom_value = OpenAIChatToolWindow._landed_bottom_value
+    # 跟随态贴底（invokeMethod 排队版，2026-10-15 折叠栏抖动修复引入）
+    _schedule_bottom_snap = OpenAIChatToolWindow._schedule_bottom_snap
+    _snap_bottom_queued = OpenAIChatToolWindow._snap_bottom_queued
     # _make_anchor_window 运行时注入的实例属性（类型声明供 pyright 收窄）
     _programmatic_scroll_depth: int
     _sync_scroll_maximum: Callable[[], int]
+    _bottom_snap_queued: bool
 
 
 def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=False, away=False):
@@ -488,6 +492,7 @@ def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=Fa
     # T9：_is_view_at_bottom / 补偿分支依赖的程序滚动状态
     win._programmatic_scroll_depth = 0
     win._sync_scroll_maximum = MagicMock(return_value=maximum)
+    win._bottom_snap_queued = False
 
     card.heightChanged.connect(win._on_message_card_height_changed)
     return win, card, bar
@@ -517,6 +522,8 @@ def test_streaming_card_keeps_bottom_follow_when_user_at_bottom(qapp):
     win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=300, streaming=True, away=False)
     card._last_height_delta = 20
     card.heightChanged.emit(1220)
+    # [2026-10-15] 跟随态贴底改为 invokeMethod 排队（等布局落地），需派发队列
+    qapp.processEvents()
 
     # [T32] 跟随态不再走「value + delta」累加，而是直接取当前上界贴底：
     # 累加与 Qt 布局传播后的真实上界存在系统性偏差（实测恒定欠 12px），
@@ -533,6 +540,7 @@ def test_short_streaming_card_keeps_bottom_follow(qapp):
     win, card, bar = _make_anchor_window(card_top=1000, card_height=200, value=300, streaming=True, away=False)
     card._last_height_delta = 30
     card.heightChanged.emit(230)
+    qapp.processEvents()  # 跟随态贴底已排队（2026-10-15）
 
     # [T32] 跟随态贴底（见上一用例注释）：卡片矮于视口时同样只认上界
     bar.setValue.assert_called_once_with(5000)
@@ -785,6 +793,7 @@ def test_negative_delta_clamped_at_zero(qapp):
     win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=30, streaming=False, away=False)
     card._last_height_delta = -80
     card.heightChanged.emit(1120)
+    qapp.processEvents()  # 跟随态贴底已排队（2026-10-15）
 
     # [T32] 跟随态贴底：负增量不再参与 value 算术（不可能为负）。
     # 非跟随态的锚定分支仍走 max(0, value + delta)，由下方用例覆盖。

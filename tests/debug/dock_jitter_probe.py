@@ -200,7 +200,9 @@ def main():
     QTest.qWait(1500)
 
     # ── 注入工具与思考块：让折叠栏有内容并沉底（坞态）──
-    # 绕开 start_streaming_anim（_anim_timer 回调依赖 main_widget 上下文，探针环境无 _parent）
+    # ⚠️ 勿用 start_streaming_anim：其 _anim_timer 回调依赖 main_widget 上下文
+    # （_parent.chat_scroll_area），探针环境无 _parent → 0xC0000005。
+    # 直接开坞态复现「坞态 + 正文流式」场景。
     card.viewer._sync_streaming_dock(True)
     QTest.qWait(300)
     card.append_reasoning("先分析任务，规划执行步骤。")
