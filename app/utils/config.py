@@ -755,6 +755,15 @@ class Settings(QConfig):
     # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
 
+    # 对话区限宽档位：窗口过宽时限制对话内容宽度并居中留白
+    # narrow=720 / standard=900 / wide=1200 / full=不限宽（铺满）
+    ui_chat_width = OptionsConfigItem(
+        "UI",
+        "ChatWidth",
+        "standard",
+        OptionsValidator(["narrow", "standard", "wide", "full"]),
+    )
+
     # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
     ui_message_identity = ConfigItem("UI", "MessageIdentity", True, BoolValidator())
 

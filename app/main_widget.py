@@ -199,6 +199,7 @@ from app.widgets.message_card import (
 from app.widgets.card_render_core import clear_global_render_cache
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
+    _detach_focus_from_widgets,
     add_message_to_layout,
     build_node_preview_from_session,
     clear_and_show_welcome,
@@ -1297,6 +1298,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._user_intentionally_away_from_bottom = False
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
+        # 差异统计延迟队列：[（入队时会话 ID, 卡片）, ...]。历史加载时每张
+        # assistant 卡都曾各排一个 QTimer.singleShot(0) 去做「读备份文件 +
+        # difflib」，N 卡 = N 个事件循环回调，与懒渲染节拍互相抢主线程；
+        # 合并为单队列 + 时间片批量消费（见 _drain_pending_diff_stats）。
+        self._pending_diff_stats_queue: List[tuple[str, MessageCard]] = []
+        self._pending_diff_stats_ids: set = set()
+        self._diff_stats_timer_active = False
         # resize 防抖定时器 - 性能优化：32ms（~30fps）已足够覆盖感知刷新率
         # 每帧比 16ms 少一次布局重算，在慢速 resize 拖拽场景下人眼不会感知差异
         self._resize_debounce_timer = QTimer(self)
@@ -11718,16 +11726,35 @@ class OpenAIChatToolWindow(ToolWindow):
         # 的悬垂 widget，实测会导致 hide() access violation 闪退）
         if not OpenAIChatToolWindow._qt_widget_alive(cached):
             return
-        # 从父控件摘除（如果还在布局里）。这里不调 removeWidget，因为
-        # _clear_chat_area/deleteLater 路径会处理；摘 setParent 已经能断
-        # 干净引用，避免下一帧布局刷新时再访问一个已被本流程标记为"待删"的 widget。
+        # 从 chat_layout 摘除：**必须先于 setParent(None)**。
+        # setParent(None) 会让 widget 从布局的 item 列表移除吗？不会——Qt 只在
+        # reparent 时同步摘 item，但本处的隐患是时序：deleteLater() 只是把销毁
+        # 事件排进队列，**并不立即执行**。若不同步清掉 layout item，紧随其后的
+        # 重建路径（_refresh_welcome_cards → _schedule_initial_welcome →
+        # _show_initial_welcome → _clear_chat_area）会用 takeAt(0) 把这个
+        # "已标记待删"的 widget 再取出来并对其 hide()（delete_widgets=False 分支）
+        # → 对已脱离父树的 QWebEngineView 调 hide() → access violation 闪退。
+        # 实测 2026-10-15 13:41 / 13:42 连崩两次，崩点正是
+        # _clear_chat_area 的 widget.hide()。
+        # removeWidget 只摘 item 不动 widget 生命周期，安全。
+        try:
+            self.chat_layout.removeWidget(cached)
+        except Exception:
+            pass
         # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView 原生
         # HWND）若直接脱离父窗口树会变成独立顶层窗口 → Chromium 弹出原生窗口
         # （白窗一闪），deleteLater 之后才销毁。先隐藏摘除可见性，再断父引用。
         try:
-            if cached.parent() is not None:
-                cached.hide()
-                cached.setParent(None)
+            cached.hide()
+            cached.setParent(None)
+        except Exception:
+            pass
+        # 🛡️ 打上待删标记：deleteLater() 只把销毁事件排进队列，不立即执行。
+        # 在事件轮到之前，任何路径（_clear_chat_area 的 takeAt / 其他清理函数）
+        # 再对这个已脱离父树的 QWebEngineView 调 hide()/setParent 都会
+        # access violation。标记让下游能识别并跳过。
+        try:
+            cached._pending_delete = True
         except Exception:
             pass
         cached.deleteLater()
@@ -13188,6 +13215,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_loading_history_batches = False
         self._pending_lazy_cards.clear()
         self._lazy_batch_timer_active = False
+        self._clear_pending_diff_stats()
         # 🐛 清空聊天区 = 会话上下文已切换，必须复位底部跟随。
         # 否则上一个会话遗留的 away=True 会让新会话首屏停在历史中间。
         self._reset_bottom_follow()
@@ -13199,6 +13227,28 @@ class OpenAIChatToolWindow(ToolWindow):
             item = self.chat_layout.takeAt(0)
             if item and item.widget():
                 widgets.append(item.widget())
+        # 🛡️ 剔除已标记待删的 widget：_invalidate_welcome_card 对它做过
+        # hide() + setParent(None) + deleteLater()，deleteLater 只排队不立即
+        # 执行，此时其 C++ 对象仍活着但已脱离父窗口树。若继续走下方 hide()
+        # （delete_widgets=False 分支）或 _detach_focus_from_widgets，会对一个
+        # 半死的 QWebEngineView 操作原生 HWND → access violation 闪退。
+        # 实测 2026-10-15 13:41 / 13:42 连崩两次，路径为插件热重载
+        # → _invalidate_welcome_card → _schedule_initial_welcome →
+        # _show_initial_welcome → 本函数。
+        # _welcome_card_cache 已 pop 掉该项（invalidate 内），故此处不会再被复用。
+        alive_widgets = [w for w in widgets if not getattr(w, "_pending_delete", False)]
+        for w in widgets:
+            if getattr(w, "_pending_delete", False):
+                # 从缓存/布局双重摘除，杜绝后续任何路径再触达
+                try:
+                    self.chat_layout.removeWidget(w)
+                except Exception:
+                    pass
+        widgets = alive_widgets
+        # 🐛 焦点摘除先于任何 hide()：焦点在待删子树内时，hide() 会触发 Qt
+        # 焦点链自动转移 + 滚动区 scrollContentsBy 自动滚动（视口瞬跳，见
+        # ui_helpers._detach_focus_from_widgets 注释）
+        _detach_focus_from_widgets(widgets)
         for widget in widgets:
             if delete_widgets:
                 # cleanup 释放 WebEngine renderer（viewer.cleanup → setHtml("")）；
@@ -13236,6 +13286,11 @@ class OpenAIChatToolWindow(ToolWindow):
             item = self.chat_layout.takeAt(0)
             if item and item.widget():
                 w = item.widget()
+                # 🐛 焦点摘除先于 hide()：焦点在待删子树内时 hide() 会触发 Qt
+                # 焦点链自动转移 + 滚动区 scrollContentsBy 自动滚动（视口瞬跳，
+                # 见 ui_helpers._detach_focus_from_widgets 注释）。列表在循环内
+                # 逐个取出，故每次 hide 前调用；首次命中后焦点已清，后续零成本。
+                _detach_focus_from_widgets([w])
                 # 跳过欢迎卡片：它由 _welcome_card_cache 独立管理，
                 # 不应被 _cache_current_session_cards 的 deleteLater 误删。
                 if getattr(w, "_is_welcome", False):
@@ -13263,6 +13318,7 @@ class OpenAIChatToolWindow(ToolWindow):
         widgets = self._take_chat_widgets()
         self._pending_lazy_cards.clear()
         self._lazy_batch_timer_active = False
+        self._clear_pending_diff_stats()
 
         current_session = self.session_manager.get_current_session()
         if current_session:
@@ -13983,8 +14039,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     render_batch_to_assistant_card(assistant_card, batch, immediate_render=False)
                     # 从 batch 中恢复元信息（耗时和 token）
                     self._restore_meta_from_batch(assistant_card, batch)
-                    # 延迟恢复差异统计（避免文件 I/O 阻塞首屏渲染）
-                    QTimer.singleShot(0, lambda c=assistant_card: self._update_card_diff_stats(c))
+                    # 延迟恢复差异统计（避免文件 I/O 阻塞首屏渲染）：
+                    # 并入统一队列（不再每卡一个 QTimer(0)，见队列初始化处注释）。
+                    # 记录入队时会话 ID，消费前校验仍是当前会话，防切会话串算。
+                    self._enqueue_card_diff_stats(assistant_card)
                 if insert_index is not None and assistant_card:
                     insert_index += 1
 
@@ -14001,11 +14059,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._apply_placeholder_height(cards, ph_height, content_overhead=ph_overhead)
 
         # 批量处理懒渲染：渲染完所有卡片后再统一触发，避免每次都触发滚动
-        # 收集需要懒渲染的卡片
+        # 🛡️ 视口优先（历史加载「卡片一张张慢慢浮现」的根因修复）：
+        # 批号升序 = 从最旧到最新，而历史加载后视口 sticky 在**底部**（用户看的
+        # 是最新几条）。队列 FIFO 会让用户盯着的那几张排在队尾 —— 每个节拍只
+        # 消费约 2 张（16ms 时间片），30 张卡要等约 2.4s 才轮到可见区。
+        # 批次**反序**收集 = 最新批次先入队，可见区第一拍就出来，历史方向的卡片
+        # 随后安静补齐（用户已滚到底，那些本来就在屏幕外）。
+        # ⚠️ 只反批次、不反批内卡片（批内 user/assistant 保持原顺序）。
+        # ⚠️ 只在「视口不在加载窗口顶部」时反序：向上翻历史（insert_at_top /
+        # 用户已滚离底部）时用户正在看的是**旧**批次，方向必须保持原样。
+        batch_indices = list(range(batch_offset, min(batch_offset + len(batches), len(self._batch_cards))))
+        if not insert_at_top and not self._user_intentionally_away_from_bottom:
+            batch_indices.reverse()
         pending_lazy_cards = []
-        for batch_idx in range(batch_offset, batch_offset + len(batches)):
-            if batch_idx >= len(self._batch_cards):
-                break
+        for batch_idx in batch_indices:
             cards = self._batch_cards[batch_idx]
             if cards:
                 for card in cards:
@@ -20601,6 +20668,86 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[DiffStats] 计算差异统计失败: {e}")
 
+    # 差异统计批量消费：单时间片预算（毫秒）。每张卡要读备份文件 + 当前文件
+    # + difflib，单卡实测受文件大小影响，取与懒渲染同级的 16ms 预算。
+    _DIFF_STATS_SLICE_MS = 16
+    # 懒渲染队列未排空时的重试间隔：先把主线程让给卡片构造/渲染，全排空再算。
+    _DIFF_STATS_DEFER_MS = 120
+
+    def _enqueue_card_diff_stats(self, card) -> None:
+        """把卡片的差异统计计算排队（同一卡片去重，统一批量消费）。
+
+        历史加载时每张 assistant 卡都曾各排一个 QTimer.singleShot(0) 直接
+        算差异（读备份文件 + 当前文件 + difflib）。N 卡 = N 个事件循环回调
+        在懒渲染节拍之间抢主线程，且多为屏幕外卡片白算。此处改为去重入队 +
+        时间片批量消费，且懒渲染队列排空后才开始，避免与卡片构造互抢。
+        """
+        try:
+            if card is None:
+                return
+            card_id = id(card)
+            if card_id in self._pending_diff_stats_ids:
+                return
+            session_id = self._current_session_id_for_extras()
+            if not session_id:
+                return
+            self._pending_diff_stats_ids.add(card_id)
+            self._pending_diff_stats_queue.append((session_id, card))
+            if not self._diff_stats_timer_active:
+                self._diff_stats_timer_active = True
+                QTimer.singleShot(0, self._drain_pending_diff_stats)
+        except Exception as e:
+            logger.debug(f"[DiffStats] 入队失败（不影响渲染）: {e}")
+
+    def _drain_pending_diff_stats(self):
+        """批量消费差异统计队列（时间片 + 懒渲染优先 + 会话/存活双重校验）。
+
+        - 懒渲染队列未排空时整体推迟：先让卡片构造/渲染用完主线程；
+        - 单时间片最多 16ms，超预算的部分下拍继续；
+        - 每张卡消费前校验：卡片仍在 + 仍是入队时的会话（切会话后旧卡
+          的数字不得写回/串算）。
+        """
+        try:
+            if getattr(self, "_is_destroyed", False):
+                self._clear_pending_diff_stats()
+                return
+            if self._pending_lazy_cards:
+                # 懒渲染优先：整体推迟一拍再试（渲染完再算差异，互不抢主线程）
+                QTimer.singleShot(self._DIFF_STATS_DEFER_MS, self._drain_pending_diff_stats)
+                return
+            deadline = time.monotonic() + self._DIFF_STATS_SLICE_MS / 1000.0
+            while self._pending_diff_stats_queue:
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    session_id, card = self._pending_diff_stats_queue.pop(0)
+                except IndexError:
+                    break
+                self._pending_diff_stats_ids.discard(id(card))
+                if not self._is_widget_alive(card):
+                    continue
+                if self._current_session_id_for_extras() != session_id:
+                    continue  # 已切会话：丢弃（避免给旧卡写错数字）
+                try:
+                    self._update_card_diff_stats(card)
+                except Exception as e:
+                    logger.debug(f"[DiffStats] 单卡统计失败（跳过）: {e}")
+            if self._pending_diff_stats_queue:
+                # 未排空：下一拍继续（间隔与懒渲染同级，给事件循环呼吸空间）
+                QTimer.singleShot(self._DIFF_STATS_SLICE_MS, self._drain_pending_diff_stats)
+            else:
+                self._diff_stats_timer_active = False
+        except Exception as e:
+            # 任何异常都不打断：清标志退场（队列残留不会洩漏主线程）
+            self._diff_stats_timer_active = False
+            logger.debug(f"[DiffStats] 批量消费异常终止: {e}")
+
+    def _clear_pending_diff_stats(self) -> None:
+        """清空待算差异统计队列（会话切换/清空聊天区/关窗时调用）。"""
+        self._pending_diff_stats_queue.clear()
+        self._pending_diff_stats_ids.clear()
+        self._diff_stats_timer_active = False
+
     def _refresh_balance(self):
         """刷新余额显示（对话完成后调用）— 用量聚合 T6：委托 UsageService 单例"""
         logger.debug(f"[Balance] _refresh_balance called, config_id={getattr(self, '_current_provider_name', 'None')}")
@@ -23849,6 +23996,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._message_batch = []
             self._batch_cards = []
             self._pending_lazy_cards.clear()
+            self._clear_pending_diff_stats()
             wc = self._welcome_card_cache.pop(self._window_id, None)
             if wc is not None and OpenAIChatToolWindow._qt_widget_alive(wc):
                 if hasattr(wc, "cleanup"):

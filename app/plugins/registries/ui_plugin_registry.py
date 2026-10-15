@@ -844,6 +844,18 @@ class UIPluginRegistry:
     def get_instance(cls) -> "UIPluginRegistry":
         if cls._instance is None:
             cls._instance = cls()
+            # 主线程建 UIEventBus 的跨线程中转器：插件后台线程（采集 worker /
+            # gateway loop / fetcher）publish 时才能回跳主线程派发。
+            # QObject 线程亲和 = 创建线程，若等后台线程首次 publish 时才建，
+            # relay 会绑到后台线程，QueuedConnection 投回去仍是后台线程。
+            # 故必须在此处（主线程启动路径）建好。
+            try:
+                from app.core.infra.ui_event_bus import UIEventBus
+
+                UIEventBus.get_instance().bind_relay()
+            except Exception:
+                # 无 GUI 环境（测试）：不 bind，publish 走同步直调
+                pass
         return cls._instance
 
     # ── 项目 / 工作目录联动（UI 插件可选协议 on_project_changed） ──

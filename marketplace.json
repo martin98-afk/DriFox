@@ -386,37 +386,6 @@
             }
         },
         {
-            "name": "system-mcp-oauth-demo",
-            "description": "MCP OAuth 登录演示：Notion 官方 MCP（需 OAuth 授权）。",
-            "version": "0.1.0",
-            "author": "DriFox",
-            "license": "MIT",
-            "categories": [
-                "mcp"
-            ],
-            "source": {
-                "type": "git-subdir",
-                "url": "https://github.com/martin98-afk/DriFox",
-                "path": "plugins/system-mcp-oauth-demo",
-                "ref": "master"
-            },
-            "components": {
-                "mcp": true
-            },
-            "keywords": [
-                "mcp",
-                "oauth",
-                "notion"
-            ],
-            "drifox": {
-                "min_version": "0.6.0"
-            },
-            "icon": {
-                "light": "icon.svg",
-                "dark": "icon_dark.svg"
-            }
-        },
-        {
             "name": "system-model-adapters",
             "description": "DriFox 内置模型协议适配器：OpenAI / DeepSeek / Gemini 协议家族",
             "version": "1.0.0",

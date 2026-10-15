@@ -840,6 +840,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 界面字号、浅色模式、主题风格
         self._setup_appearance_cards()
         appearance_layout.addWidget(self.uiFontSizeCard)
+        appearance_layout.addWidget(self.uiChatWidthCard)
         appearance_layout.addWidget(self.uiLightModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
@@ -1407,6 +1408,14 @@ class LLMSettingsCard(SystemCardFrame):
             self.cfg,
             self,
         )
+        self.uiChatWidthCard = OptionsSettingCard(
+            self.cfg.ui_chat_width,
+            FluentIcon.LAYOUT,
+            "对话区宽度",
+            "窗口过宽时限制内容宽度并居中",
+            texts=["窄", "标准", "宽", "不限宽"],
+            parent=self,
+        )
         self.uiLightModeCard = SwitchSettingCard(
             get_icon("主题风格"),
             "浅色模式",
@@ -1554,6 +1563,9 @@ class LLMSettingsCard(SystemCardFrame):
             LLMSettingsCard._last_change_type = "font_family"
         elif sender is self.cfg.ui_font_size:
             LLMSettingsCard._last_change_type = "font_size"
+        elif sender is self.cfg.ui_chat_width:
+            # 只改对话区限宽，不涉及字体/主题缓存失效
+            LLMSettingsCard._last_change_type = "chat_width"
         else:
             LLMSettingsCard._last_change_type = None  # 未知类型，全量刷新
 
@@ -1598,6 +1610,7 @@ class LLMSettingsCard(SystemCardFrame):
         # AppearanceComboCard / FontSettingCard（SettingCard 子类，不在以上遍历范围）
         for card_name in (
             "uiFontSizeCard",
+            "uiChatWidthCard",
             "uiLightModeCard",
             "uiThemeStyleCard",
             "llmFontCard",

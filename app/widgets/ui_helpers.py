@@ -22,7 +22,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPainter, QPixmap
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
+from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QLineEdit, QWidget
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_icon
@@ -1820,6 +1820,37 @@ def refresh_history_card_if_visible(history_card, refresh_func=None) -> None:
         refresh_func()
 
 
+def _detach_focus_from_widgets(widgets: list) -> None:
+    """把焦点从待删 widget 子树中摘出（防 Qt 焦点链自动滚动）。
+
+    🐛 根因链（2026-10-14 探针 tests/debug/_tmp_probe_scroll_entry.py 实证）：
+    ``widget.hide()`` 时若焦点仍在被隐藏子树内，Qt 会走 ``focusNextPrevChild``
+    自动把焦点移到**下一个可聚焦控件**；若该控件位于滚动区内，Qt 随即调用
+    ``scrollContentsBy`` 把视口滚到它旁边（实测 value 8602 → 388，跳 8214px）。
+    用户可见症状：点击过某条消息卡片内的按钮（焦点遗留）后，虚拟滚动回收
+    该卡片时视口瞬跳；长会话上下滚动「动态加载后滚轮跳变、不保持原位」。
+
+    ``clearFocus()`` 让焦点退到窗口级，隐藏过程不再触发 Qt 的自动转移滚动。
+    只处理焦点确实落在待删子树内的情形，其余保持不动（不误伤输入框焦点）。
+    """
+    app = QApplication.instance()
+    if app is None:
+        return
+    try:
+        focused = app.focusWidget()
+    except RuntimeError:
+        return
+    if focused is None:
+        return
+    for widget in widgets:
+        try:
+            if widget is focused or widget.isAncestorOf(focused):
+                focused.clearFocus()
+                return
+        except RuntimeError:
+            continue
+
+
 def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanup: bool = True) -> int:
     """
     从布局中删除指定的 widgets
@@ -1838,6 +1869,10 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
     一次传入几十张卡）卡片数上千时是滚动卡顿的隐性来源。
     改为先建一次 ``id(widget)`` 索引集合，整体降为 O(n+m)。
     """
+    # 🐛 焦点摘除必须先于任何 hide()：焦点在待删子树内时 hide() 会触发
+    # Qt 焦点链自动转移 + 滚动区自动滚动（视口瞬跳，见辅助函数注释）。
+    _detach_focus_from_widgets(widgets_to_remove)
+
     deleted = 0
     # 一次性快照布局成员（removeWidget 会改变布局索引，故必须预先建索引）
     layout_member_ids = set()

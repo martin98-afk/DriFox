@@ -95,7 +95,6 @@ from app.widgets.card_render_core import (
     _FLIP_JS,
     _HISTORY_TOOL_CAPS,
     _MAX_CHART_PAYLOAD_B64,
-    _PREVIEW_TYPEWRITER_JS,
     _PROJECT_ROOT,
     _RENDER_POOL,
     _RESET_CONTENT_FOR_REUSE_JS,
@@ -146,6 +145,18 @@ from app.widgets.card_render_core import (
     get_icon,
     get_markdown_instance,
     set_pygments_style,
+)
+
+
+# [WHEEL-ARM] body 滚动几何 + 内层容器可滚标志的直读表达式（轮询兜底与
+# armed 事件校准共用）。返回 "sh|st|ch|ins"；body 未就绪返回 ''。
+_BODY_GEOM_READ_JS = (
+    "(function(){var b=document.body;if(!b)return '';"
+    "var ins=-1;try{var ts=document.querySelectorAll("
+    "'#tool-content,.code-container,.code-content,.table-scroll-wrapper,.echarts-container');"
+    "ins=0;for(var i=0;i<ts.length;i++){var t=ts[i];"
+    "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
+    "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()"
 )
 
 
@@ -289,6 +300,13 @@ class ConsoleMonitorPage(QWebEnginePage):
             self.heightReported.emit(h)
             # 旧格式（仅高度，无几何字段）不发几何信号：wheelEvent 回退保守策略
             if dom_text_len is not None or reading is not None:
+                # ⚠️ bodyGeometryReported 必须**无条件**发：_body_geom_valid 是
+                # _inner_wheel_state / _wheel_belongs_to_outer 两个滚轮判据的开关，
+                # 一旦缺失 → 激活态判据恒 unknown、兜底判据恒 False → 武装态
+                # 卡片内滚到边界后既不交外层也不上抛，内外双死锁
+                # （2026-10-14 回归：新增第 6 字段时误把它替换成
+                #  bodyInnerScrollableChanged.emit，只发后者导致几何链整条断）。
+                self.bodyGeometryReported.emit(h, scroll_top, client_height)
                 # [WHEEL-ARM] 内层可滚标志单独走信号：不破坏 bodyGeometryReported
                 # 既有三参签名（调用方无需跟着改）。
                 if inner_scrollable is not None:
@@ -875,15 +893,26 @@ class CodeWebViewer(QWebEngineView):
         # delegate，真焦点方案会把键盘焦点从输入框抢走，且 Chromium 内部
         # 焦点（body/可编辑区）变化不回传 Qt，判据不可靠。点击是唯一显式意图。
         self._wheel_inner_armed = False
-        # 激活态自愈：连续"判为可滚但放行后 body.scrollTop 未变化"的次数。
-        # 达阈值即交外层，防"怎么滚都没反应"。仅在 state=="scroll" 下累计
-        # （body 确实有溢出时才成立），不溢出场景不参与，见 _inner_wheel_state。
-        self._wheel_arm_streak = 0
-        self._wheel_arm_last_top = -1
-        self._wheel_arm_last_ts = 0.0
+        # 事件驱动几何校准节流：armed 放行前异步拉真实几何（runJavaScript），
+        # 150ms 内不重复发（滚轮节拍 ~50ms，连续滚动时逐拍刷新，边界判定跟上
+        # 真实 DOM；console 链 finish 后断、DOM 后续收缩无人上报的过期值被
+        # 逐拍纠正）。
+        self._geom_sync_last_ts = 0.0
         # delegate 侧 wheel 抢断的安装目标（RenderWidgetHostViewQtDelegateWidget）。
         # 必须先于 setPage() 初始化：delegate 的 ChildAdded 在 setPage 链内即触发。
         self._wheel_filter_target = None
+
+        # [WHEEL-ARM] 几何轮询兜底：pywebview_height console 回报链在历史渲染
+        # （bare 路径）等场景可能整条不达（探针 probe_wheel_trace_chain T1 实测
+        # console 计数 0），_body_geom_valid 恒 False → 武装态滚轮被 not-geom
+        # 兜底抢给外层（2026-10-15 用户实测："没滚到头底外层就滚"）。此定时器
+        # 在几何未达期间用 runJavaScript 直读 body 几何（不经 console 链），
+        # 拿到一次即停；20 次上限防极端死循环。流式卡 console 链活跃时轮询
+        # 首拍即命中，成本可忽略。
+        self._geom_poll_count = 0
+        self._geom_poll_timer = QTimer(self)
+        self._geom_poll_timer.setInterval(300)
+        self._geom_poll_timer.timeout.connect(self._poll_body_geometry)
 
         # 1. 渲染定时器
         self._render_timer = QTimer(self)
@@ -941,6 +970,10 @@ class CodeWebViewer(QWebEngineView):
         self._load_skeleton()
         # delegate 可能已在 setPage 链内挂好：首装一次（幂等）
         self._ensure_wheel_filter_installed()
+        # 几何轮询兜底：console 回报链不达时由 runJavaScript 直读补齐（详见
+        # _geom_poll_timer 初始化处注释）；几何一到即自停，上限 20 次。
+        self._geom_poll_count = 0
+        self._geom_poll_timer.start()
 
         # ── 对话框层级管理 ──
         # _hidden_dialogs: set，记录当前导致 WebView 隐藏的对话框对象
@@ -1329,6 +1362,10 @@ class CodeWebViewer(QWebEngineView):
         self._body_scroll_top = 0
         self._body_geom_valid = False
         self._inner_scrollable = None
+        # [WHEEL-ARM] 几何轮询随新内容周期重启：console 回报链对新内容可能
+        # 再次不达（历史 bare 路径），不能沿用上一周期"到达即停"的旧状态。
+        self._geom_poll_count = 0
+        self._geom_poll_timer.start()
         # 🐛 内容态必须一并清：_markdown_text / _cached_streaming_html 若残留，
         # 复用后 _on_js_ready 会拿旧文本立即渲染一次（与新卡片内容无关），
         # 多一次全量渲染 = 多一份内存与主线程开销（大会话加载时逐卡叠加）。
@@ -1510,6 +1547,66 @@ class CodeWebViewer(QWebEngineView):
         self._body_scroll_top = scroll_top
         self._body_client_height = client_height
         self._body_geom_valid = client_height > 0
+
+    def _poll_body_geometry(self):
+        """[WHEEL-ARM] 几何轮询兜底（console 回报链不达时经 runJavaScript 补齐）。
+
+        历史渲染（bare 路径）等场景 pywebview_height console 回报可能整条不达
+        （探针 probe_wheel_trace_chain T1 实测），_body_geom_valid 恒 False：
+        武装态滚轮被 not-geom 兜底抢给外层，表现为"卡内没滚到边界外层就滚"。
+        直读 body 三值 + 内层容器可滚标志（同 reportHeight 第 6 字段判据），
+        复用 _on_body_geometry_reported / _on_inner_scrollable_reported 落账。
+        几何一旦有效或轮询 20 次上限即停；armed 滚动期的持续校准另见
+        _schedule_geometry_sync（事件驱动，零空转成本）。
+        """
+        if self._body_geom_valid:
+            self._geom_poll_timer.stop()
+            return
+        self._geom_poll_count += 1
+        if self._geom_poll_count > 20:
+            self._geom_poll_timer.stop()
+            return
+        try:
+            self.page().runJavaScript(_BODY_GEOM_READ_JS, self._on_geom_poll_result)
+        except RuntimeError:
+            # page 已销毁（viewer 回收/关闭）：停止轮询
+            self._geom_poll_timer.stop()
+
+    def _schedule_geometry_sync(self):
+        """[WHEEL-ARM] 事件驱动几何校准：armed 放行前异步拉一次真实几何。
+
+        console 链在 finish_streaming 后断报时，DOM 后续变化（延迟整理任务
+        收缩内容等）无人上报，Python 缓存定格过期值 → 边界判据失真：真实已到
+        边界仍判 "scroll" 放行（Chromium 终结，旧代码黑洞）或缓存 max 偏小误判
+        "boundary" 抢交外层（2026-10-15 用户实测"没滚到头底外层就滚"）。
+        每拍放行前拉一次（150ms 节流），下一拍裁决即用新值，过期窗口 ≤1 拍。
+        """
+        now = time.monotonic()
+        if now - self._geom_sync_last_ts < 0.15:
+            return
+        self._geom_sync_last_ts = now
+        try:
+            self.page().runJavaScript(_BODY_GEOM_READ_JS, self._on_geom_poll_result)
+        except RuntimeError:
+            pass
+
+    def _on_geom_poll_result(self, result):
+        if not result:
+            return
+        try:
+            parts = str(result).split("|")
+            if len(parts) < 3:
+                return
+            sh, st, ch = (int(float(x)) for x in parts[:3])
+        except Exception:  # noqa: BLE001
+            return
+        # 无论缓存此前是否有效都落账：校准的本意就是纠正过期值
+        self._on_body_geometry_reported(sh, st, ch)
+        # 第 4 字段：内层可滚标志。-1 = 查询异常，保持 None（保守放行语义）
+        if len(parts) >= 4 and parts[3] in ("0", "1"):
+            self._on_inner_scrollable_reported(parts[3] == "1")
+        if self._body_geom_valid:
+            self._geom_poll_timer.stop()
 
     def _on_inner_scrollable_reported(self, scrollable: bool):
         """[WHEEL-ARM] 缓存内层滚动容器可滚标志（独立信号，见类属性注释）。
@@ -4190,9 +4287,6 @@ class CodeWebViewer(QWebEngineView):
                         // 把位置突变补间成平滑位移；入队串行，避免与归位/折叠动画叠加。
                         if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
 
-                        // 预览文字打字机：本次渲染新落地的思考/工具预览行逐字显现
-                        if (typeof window._ptPlay === 'function') window._ptPlay();
-
                         // ── 恢复全透明度：在下一帧前 fade in，CSS transition 驱动平滑淡入 ──
                         // 🛡️ 竞态防护：递增 token + 定时器引用，防止连续 updateContent 时
                         // 上轮清理误清本轮 transition，或清理定时器残留导致 transition 提前消失。
@@ -4336,8 +4430,6 @@ class CodeWebViewer(QWebEngineView):
                     // 插件 fence：追加的闭合段可能带入新的插件 fence
                     if (typeof window._runFenceAssets === 'function') window._runFenceAssets(roots);
                     if (typeof window._initWidgets === 'function') window._initWidgets(roots);
-                    // 预览文字打字机：差量段里新落地的思考/工具预览行逐字显现
-                    if (typeof window._ptPlay === 'function') window._ptPlay();
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeightDebounced(), 30);
                 }}
@@ -4851,8 +4943,6 @@ class CodeWebViewer(QWebEngineView):
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
                     if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
-                    // 预览文字打字机：搬移进工具区的思考/工具预览行逐字显现
-                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -5518,7 +5608,6 @@ class CodeWebViewer(QWebEngineView):
                 {_STREAMING_DOCK_JS}
                 {_BODY_HEIGHT_CAP_JS}
                 {_TYPEWRITER_JS}
-                {_PREVIEW_TYPEWRITER_JS}
                 {_FLIP_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
@@ -6233,16 +6322,6 @@ class CodeWebViewer(QWebEngineView):
             # runJavaScript 按派发顺序执行，此处补发一次即可保证顺序（幂等）。
             if self._streaming and not self._light_skeleton and not self._dock_sync_requested:
                 self._sync_streaming_dock(True)
-
-            # 预览文字打字机开关：只在本轮流式（含结束后的终渲染）播放。
-            # 历史会话加载时 _streaming / _streaming_finished 均为 False —— 一次
-            # 加载几十张卡片，若都逐字播放会同时起几十个 rAF 抢帧，且"打字机"
-            # 对已存在的历史内容没有意义，故关闭（文字按渲染结果直接全显）。
-            _pt_enabled = "true" if (self._streaming or getattr(self, "_streaming_finished", False)) else "false"
-            try:
-                self.page().runJavaScript(f"if (window._pt) window._pt.enabled = {_pt_enabled};")
-            except RuntimeError:
-                pass
 
             # 已完成（结果已到达）的工具 id 集合，供下方 restore 逻辑判断运行框是否可复活
             _finished_ids = list(getattr(self, "_restore_finished_ids", set()) or set())
@@ -8196,18 +8275,17 @@ class CodeWebViewer(QWebEngineView):
             # wheelEvent 二次裁决，最终由 MessageCard.wheelEvent 转发外层。
             return False
         if state == "scroll":
-            # 自愈：放行后 body.scrollTop 若在下一轮仍未变化（几何缓存滞后、
-            # 实际滚不动），累计到阈值即交外层，防"怎么滚都没反应"。
-            now = time.monotonic()
-            if self._wheel_arm_last_top == self._body_scroll_top and now - self._wheel_arm_last_ts < 1.5:
-                self._wheel_arm_streak += 1
-            else:
-                self._wheel_arm_streak = 0
-            self._wheel_arm_last_top = self._body_scroll_top
-            self._wheel_arm_last_ts = now
-            if self._wheel_arm_streak < 3:
-                return False
-            self._wheel_arm_streak = 0
+            # 放行：Chromium 是滚动能否发生的唯一真相——能滚则消费事件（外层
+            # 不参与）；滚不动则 ignore 上抛二道 wheelEvent 转外层。
+            # ⚠️ 此处不放"连续 3 拍 scrollTop 未变即转外层"的自愈：该判据比较
+            # 的是 JS 异步回报值（80ms 防抖 + rAF + IPC），快速滚动时回报恒滞后
+            # → streak 虚增 → 未到边界就误交外层，表现为卡内滚几下外层插进来
+            # （2026-10-15 用户实测回归，探针 probe_wheel_real_skeleton R4）。
+            # "滚不动"的一切分支由二道 wheelEvent 必转发 + boundary 判据闭环。
+            # 边界判据失真（console 链 finish 后断、DOM 后续收缩无人上报）用
+            # 事件驱动校准补：每拍放行前异步拉一次真实几何，下一拍用新值裁决。
+            self._schedule_geometry_sync()
+            return False
         return self._route_wheel_to_chat_area(event)
 
     def _route_wheel_to_chat_area(self, event) -> bool:
@@ -8288,8 +8366,6 @@ class CodeWebViewer(QWebEngineView):
         # 纯悬浮不置位（保持外层优先体感）。
         if et == QEvent.MouseButtonPress:
             self._wheel_inner_armed = True
-            self._wheel_arm_streak = 0
-            self._wheel_arm_last_top = -1
         # 鼠标移出 delegate（卡片正文区）→ 退出卡内滚态，恢复外层优先。
         elif et == QEvent.Leave:
             self._wheel_inner_armed = False
@@ -8297,14 +8373,20 @@ class CodeWebViewer(QWebEngineView):
             route = self._route_wheel_armed if self._wheel_inner_armed else self._route_wheel_to_chat_area
             if route(ev):
                 return True
-            if self._wheel_inner_armed and self._wheel_belongs_to_outer(ev.angleDelta().y()):
-                # [WHEEL-ARM] 仅「内外都滚不动」时兜底：该分支放行给 Chromium，
-                # 而事件落到 super().eventFilter 就被 delegate 终结、不上抛 wheelEvent
-                # —— 表现为"点击过卡片正文的无内滚条消息，滚轮彻底失效"
-                # （2026-10-14 修，探针 tests/debug/probe_wheel_armed.py B2）。
-                # ⚠️ 判据必须含内层容器可滚性（见 _wheel_belongs_to_outer）：
-                # #tool-content / 代码块 / 图表区滚动不改 body 几何，只看 body
-                # 会把折叠框的滚轮误判给外层，导致"折叠框内部滚不动"。
+            # [WHEEL-ARM] 武装态兜底：放行给 Chromium 后事件被 delegate 终结、
+            # 不上抛 wheelEvent（实测 probe_wheel_trace_chain T2）——凡放行即黑洞，
+            # 必须在首道就决定归属。
+            #   几何有效 → 按 _wheel_belongs_to_outer（内外都确认滚不动才交外层，
+            #   保住折叠框/代码块内部滚轮，2026-10-14 B2 修）；
+            #   几何未回传（_body_geom_valid=False：历史渲染 JS 回报未达 / 渲染初期
+            #   窗口 / renderer 重建）→ belongs_to_outer 恒 False，若同样放行即
+            #   武装态黑洞（2026-10-15 修：探针 probe_wheel_real_host W2、
+            #   probe_wheel_trace_chain T2，外层 0/5）。此窗口兜底转发外层：
+            #   代价是"内层容器恰可滚 + 几何未达"时其滚轮暂被外层接管
+            #   （几何回传后自动恢复内部优先），远好于滚轮彻底失效。
+            if self._wheel_inner_armed and (
+                not self._body_geom_valid or self._wheel_belongs_to_outer(ev.angleDelta().y())
+            ):
                 if self._route_wheel_to_chat_area(ev):
                     return True
         return super().eventFilter(obj, ev)
@@ -8318,14 +8400,18 @@ class CodeWebViewer(QWebEngineView):
             return
         if self._wheel_inner_armed:
             # [WHEEL-ARM] 事件上抛到此处 = delegate 放行后 Chromium 谁也不消费
-            #（内层容器同样不可滚）→ 必须接手转发外层。若仍走 super()，事件被喂回
+            # （内层容器同样不可滚）→ 必须接手转发外层。若仍走 super()，事件被喂回
             # Chromium 而终结传播，外层滚动区永远收不到：表现为"点击过卡片正文的
             # 无内滚条消息，滚轮彻底失效"（2026-10-14 修，探针见
             # tests/debug/probe_wheel_armed.py B2：几何有效 max_scroll=0 时外层 0/5）。
-            # 判据同 eventFilter 侧，含内层容器可滚性（防折叠框滚轮被抢）。
-            if self._wheel_belongs_to_outer(event.angleDelta().y()):
-                if self._route_wheel_to_chat_area(event):
-                    return
+            # ⚠️ 二道不再查 _wheel_belongs_to_outer：该判据在几何未回传时
+            # （_body_geom_valid=False，历史渲染路径 JS 回报可能不达）恒 False，
+            # 保守放行 → super() 又把事件喂回 Chromium 终结 → 武装态黑洞
+            # （2026-10-15 修，探针 probe_wheel_real_host.py W2：外层 0/5）。
+            # 二道被调本身就证明卡内无人消费（body / 内层容器 Chromium 都判过），
+            # 转发外层不会抢走任何内部滚轮；"防折叠框滚轮被抢"只在首道有意义。
+            if self._route_wheel_to_chat_area(event):
+                return
         super().wheelEvent(event)
 
     def cleanup(self):
@@ -8347,6 +8433,7 @@ class CodeWebViewer(QWebEngineView):
         timers_to_stop = [
             self._render_timer,
             self._resize_unlock_timer,
+            self._geom_poll_timer,
         ]
         for timer in timers_to_stop:
             try:

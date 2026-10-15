@@ -55,17 +55,17 @@ class TestHeightPayloadParsing:
     def test_full_five_fields(self):
         from app.widgets.card_viewers import _parse_height_payload
 
-        assert _parse_height_payload("1200|0|800|0|4567") == (1200, 0, 800, False, 4567)
+        assert _parse_height_payload("1200|0|800|0|4567") == (1200, 0, 800, False, 4567, None)
 
     def test_four_fields(self):
         from app.widgets.card_viewers import _parse_height_payload
 
-        assert _parse_height_payload("1200|0|800|1") == (1200, 0, 800, True, None)
+        assert _parse_height_payload("1200|0|800|1") == (1200, 0, 800, True, None, None)
 
     def test_legacy_height_only(self):
         from app.widgets.card_viewers import _parse_height_payload
 
-        assert _parse_height_payload("1200") == (1200, 0, 0, None, None)
+        assert _parse_height_payload("1200") == (1200, 0, 0, None, None, None)
 
     def test_invalid(self):
         from app.widgets.card_viewers import _parse_height_payload
@@ -107,6 +107,61 @@ class TestBridgeDispatch:
         n = page.bodyGeometryReported.emit.call_count
         page.javaScriptConsoleMessage(0, "pywebview_height:900", 0, "")
         assert page.bodyGeometryReported.emit.call_count == n
+
+    def test_geometry_and_inner_scrollable_emitted_together(self, page):
+        """回归：bodyGeometryReported 不得被第 6 字段挤掉。
+
+        2026-10-14 新增第 6 字段时把 bodyGeometryReported.emit 替换成了
+        bodyInnerScrollableChanged.emit → _body_geom_valid 恒 False →
+        _inner_wheel_state 恒 unknown、_wheel_belongs_to_outer 恒 False →
+        武装态卡片内滚到边界后内外双死锁（外层不接管）。
+        两者必须同时发：几何是滚轮判据的总开关，内层可滚只是补充判据。
+        """
+        page.heightReported = MagicMock()
+        page.bodyGeometryReported = MagicMock()
+        page.bodyInnerScrollableChanged = MagicMock()
+        page.javaScriptConsoleMessage(0, "pywebview_height:1200|0|800|0|4567|1", 0, "")
+        assert page.bodyGeometryReported.emit.call_args[0] == (1200, 0, 800)
+        assert page.bodyInnerScrollableChanged.emit.call_args[0] == (True,)
+
+    def test_geometry_emitted_when_inner_field_absent(self, page):
+        """五字段（无第 6 字段）载荷：几何信号照发，内层信号不发。"""
+        page.heightReported = MagicMock()
+        page.bodyGeometryReported = MagicMock()
+        page.bodyInnerScrollableChanged = MagicMock()
+        page.javaScriptConsoleMessage(0, "pywebview_height:1200|0|800|0|4567", 0, "")
+        assert page.bodyGeometryReported.emit.call_args[0] == (1200, 0, 800)
+        page.bodyInnerScrollableChanged.emit.assert_not_called()
+
+    def test_viewer_geometry_cache_populated_from_console(self, viewer):
+        """端到端守卫：console 载荷 → 信号 → viewer 几何缓存必须真的生效。
+
+        单独测 page 的 emit 不够：上一道回归就是 emit 没了而 page 级单测
+        （手动调 _on_body_geometry_reported）全绿。这里把 viewer.page() 当真实
+        链路入口，验证 _body_geom_valid / _inner_scroll_range 端到端可用 ——
+        这两个值是 _inner_wheel_state 与 _wheel_belongs_to_outer 的输入，
+        一旦恒为初值，卡内滚到边界后外层永不接管。
+        """
+        page = viewer.page()
+        assert page is not None
+        viewer._body_geom_valid = False
+        page.javaScriptConsoleMessage(0, "pywebview_height:1200|300|400|1|4567|1", 0, "")
+        assert viewer._body_geom_valid is True
+        assert viewer._inner_scroll_range() == (300, 800)
+        assert viewer._inner_scrollable is True
+        # body 自己还能往下滚 → 卡内的事（激活态放行给 Chromium）
+        assert viewer._inner_wheel_state(-120) == "scroll"
+        # 滚到底后继续下滚 → boundary，由 _route_wheel_armed 交外层（链式接管）
+        page.javaScriptConsoleMessage(0, "pywebview_height:1200|800|400|1|4567|0", 0, "")
+        assert viewer._inner_scroll_range() == (800, 800)
+        assert viewer._inner_scrollable is False
+        assert viewer._inner_wheel_state(-120) == "boundary"
+        # _wheel_belongs_to_outer 只覆盖"body 完全不溢出"场景（max_scroll=0）：
+        # 溢出态的边界接管由 _inner_wheel_state 的 boundary 分支负责，两者不重叠。
+        page.javaScriptConsoleMessage(0, "pywebview_height:400|0|400|1|4567|0", 0, "")
+        assert viewer._inner_scroll_range() == (0, 0)
+        assert viewer._inner_wheel_state(-120) == "unknown"
+        assert viewer._wheel_belongs_to_outer(-120) is True
 
 
 class TestContentSentinel:

@@ -280,50 +280,46 @@ class GiteeAccountRow(QFrame):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 6, 4, 6)
+        layout.setSpacing(7)
 
-        avatar_size = scale_font_size(28)
+        avatar_size = scale_font_size(22)
         self._avatar = _AvatarCircleWidget("?", self)
         self._avatar.set_size(avatar_size)
         layout.addWidget(self._avatar)
 
-        text_container = QVBoxLayout()
-        text_container.setContentsMargins(0, 0, 0, 0)
-        text_container.setSpacing(0)
-
+        # 单行布局：名字 + 齿轮设置按钮，状态文案移入 tooltip
         self._name_label = _ClickableElidedLabel("", self)
-        self._repo_label = _ClickableElidedLabel("", self)
-        text_container.addWidget(self._name_label)
-        text_container.addWidget(self._repo_label)
-        layout.addLayout(text_container, 1)
+        layout.addWidget(self._name_label, 1)
 
-        # ── 设置按钮（齿轮图标，点击打开完整设置卡片） ──
         from qfluentwidgets import FluentIcon as _FIF
         from qfluentwidgets import TransparentToolButton as _TransparentToolButton
 
-        self._settings_btn = _TransparentToolButton(self)
         # popup 关闭时刻（monotonic 秒）：防抖用，见 _toggle_popup
         self._popup_closed_at = 0.0
-        self._settings_btn.setIcon(_FIF.SETTING)
-        btn_size = scale_font_size(24)
-        self._settings_btn.setFixedSize(btn_size, btn_size)
-        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
-        self._settings_btn.setToolTip("设置")
-        self._settings_btn.setCursor(Qt.PointingHandCursor)
-        self._settings_btn.setFocusPolicy(Qt.NoFocus)
+
+        def _make_icon_btn(icon, tooltip: str) -> "_TransparentToolButton":
+            btn = _TransparentToolButton(self)
+            btn.setIcon(icon)
+            btn.setFixedSize(scale_font_size(20), scale_font_size(20))
+            btn.setIconSize(QSize(scale_font_size(13), scale_font_size(13)))
+            btn.setToolTip(tooltip)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+            return btn
+
+        # 设置按钮（齿轮图标，点击打开完整设置卡片）
+        self._settings_btn = _make_icon_btn(_FIF.SETTING, "设置")
+        self._settings_btn.clicked.connect(self._toggle_settings_card)
         layout.addWidget(self._settings_btn)
 
-        # 整块区域点击触发 Gitee 管理弹窗（头像/名称/仓库）
-        # 设置按钮独立触发完整设置卡片
+        # 整块区域点击触发 Gitee 管理弹窗（头像/名称）
+        # 图标按钮独立：外链打开仓库 / 齿轮打开完整设置卡片
         self.setCursor(Qt.PointingHandCursor)
         self._avatar.setCursor(Qt.PointingHandCursor)
         self._name_label.setCursor(Qt.PointingHandCursor)
-        self._repo_label.setCursor(Qt.PointingHandCursor)
         self._avatar.clicked.connect(self._toggle_popup)
         self._name_label.clicked.connect(self._toggle_popup)
-        self._repo_label.clicked.connect(self._toggle_popup)
-        self._settings_btn.clicked.connect(self._toggle_settings_card)
         self.oauthResult.connect(self._on_oauth_result)
         self._popup: "_GiteeMorePopup" | None = None
 
@@ -405,44 +401,33 @@ class GiteeAccountRow(QFrame):
         is_bound = bool(self.cfg.gitee_bound.value)
         owner = str(self.cfg.gitee_user_owner.value or "")
         repo = str(self.cfg.gitee_user_repo.value or "")
-        avatar_size = scale_font_size(28)
 
         if self._invalid:
             # 绑定已失效：红色警示，明显区别于「从未绑定」（失效信号优先于 cfg 绑定态）
             self._bound_owner = ""
             self._bound_repo = ""
             self._avatar.set_avatar(owner or "?")
-            self._avatar.set_size(avatar_size)
             self._avatar.set_invalid(True)
             self._avatar.setToolTip("绑定已失效，点击重新绑定")
             self._name_label.setText("绑定已失效")
             self._name_label.setToolTip("绑定已失效，点击重新绑定")
-            self._repo_label.setText("点击重新绑定")
-            self._repo_label.setToolTip("点击重新绑定")
         elif is_bound and owner:
             self._bound_owner = owner
             self._bound_repo = repo
             self._avatar.set_avatar(owner)
-            self._avatar.set_size(avatar_size)
             self._avatar.set_invalid(False)
-            self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
+            self._avatar.setToolTip(f"{owner}/{repo} · 点击打开仓库")
             self._name_label.setText(owner)
-            self._name_label.setToolTip(owner)
-            self._repo_label.setText(f"{repo} ↗")
-            self._repo_label.setToolTip(repo)
+            self._name_label.setToolTip(f"{owner}/{repo} · 点击管理")
         else:
             self._bound_owner = ""
             self._bound_repo = ""
             self._avatar.set_avatar("?")
-            self._avatar.set_size(avatar_size)
             self._avatar.set_invalid(False)
             self._avatar.setToolTip("未绑定")
             self._name_label.setText("Gitee 未绑定")
-            self._name_label.setToolTip("Gitee 未绑定")
-            self._repo_label.setText("绑定后可备份与分享")
-            self._repo_label.setToolTip("绑定后可备份与分享")
+            self._name_label.setToolTip("绑定后可备份与分享")
 
-        # 更新整行可点状态
         self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
 
@@ -453,18 +438,17 @@ class GiteeAccountRow(QFrame):
                 border: none;
             }
         """)
-        # 失效时名称显示红色警示
+        # 失效时名称显示红色警示；字重降为 500 避免与头像/图标争抢视觉
         name_color = "#f85149" if self._invalid else Colors.TEXT_PRIMARY
         self._name_label.setStyleSheet(
             f"color: {name_color}; background: transparent; "
-            f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+            f"{get_font_family_css()} {font_size_css(12)}; font-weight: 500;"
         )
-        self._repo_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
-        )
-        btn_size = scale_font_size(24)
-        self._settings_btn.setFixedSize(btn_size, btn_size)
-        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
+        # 图标染灰（弱于前景色）；主题/字号变化经 refresh_style → _refresh_ui → 本方法重染
+        from qfluentwidgets import FluentIcon as _FIF
+
+        muted = QColor(Colors.TEXT_MUTED)
+        self._settings_btn.setIcon(_FIF.SETTING.colored(muted, muted))
         self._settings_btn.setStyleSheet("""
             TransparentToolButton {
                 background: transparent;
@@ -593,18 +577,16 @@ class GiteeAccountRow(QFrame):
             )
 
     def set_show_only_avatar(self, avatar_only: bool):
-        """收起侧边栏时仅显示头像，隐藏文字和设置按钮"""
+        """收起侧边栏时仅显示头像，隐藏文字和图标按钮"""
         self._settings_btn.setVisible(not avatar_only)
         self._name_label.setVisible(not avatar_only)
-        self._repo_label.setVisible(not avatar_only)
 
     def refresh_style(self):
         """主题或字号变化后重建头像、尺寸和样式。"""
-        avatar_size = scale_font_size(28)
-        self._avatar.set_size(avatar_size)
-        btn_size = scale_font_size(24)
+        self._avatar.set_size(scale_font_size(22))
+        btn_size = scale_font_size(20)
         self._settings_btn.setFixedSize(btn_size, btn_size)
-        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
+        self._settings_btn.setIconSize(QSize(scale_font_size(13), scale_font_size(13)))
         self._refresh_ui()
 
     def _toggle_popup(self):
