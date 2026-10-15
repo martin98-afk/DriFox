@@ -9,9 +9,9 @@ All notable changes to this project will be documented in this file.
 ### ⚡ 性能优化 (Performance)
 - **移除简洁模式工具/思考折叠内的预览文字打字机** (app/widgets/card_render_core.py · app/widgets/card_viewers.py · app/widgets/message_card.py): 删除 `_PREVIEW_TYPEWRITER_JS`（`window._pt/_ptType/_ptPlay`）、全部 `[data-dfx-preview]` 标记与 6 处渲染路径调用，工具块预览行与思考块预览文字改为渲染落地即全显。消除渲染落地后 240ms 内逐帧 rAF 文本写入与每轮全量渲染的 `querySelectorAll('[data-dfx-preview]')` 遍历；`_SKELETON_CACHE_VERSION` 46 → 47；删除对应测试 tests/widgets/test_preview_typewriter.py 与复现脚本 tests/debug/preview_typewriter_repro.py。
 
-## [v0.6.7] - 2026-10-14 (重新发布 #3)
+## [v0.6.7] - 2026-10-14 (重新发布 #4)
 
-自上一版本以来的变更（累计） | 提交数：64 · 文件变更：314 · +18266/-10311 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更（累计） | 提交数：65 · 文件变更：330 · +18646/-10331 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -79,6 +79,10 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes) · 重新发布 #3 追加
 
 - **滚轮事件链路线程安全与几何校准** (`14201f4b` `a6b6ece1` `6f69b039` `3eef164f`): UIEventBus 及关联组件加线程安全检查，阻止访问违例；UIPluginRegistry 在主线程初始化 UIEventBus 中继；CodeWebViewer 改为事件驱动的几何校准，修正 armed 态卡片内滚边界判定；新增 `tests/debug/probe_wheel_*.py` 系列真实宿主/合成事件探针与 `tests/widgets/test_welcome_card_pending_delete.py`（防待删除控件在 UI 更新中崩溃）
+
+### ✨ 新功能 (New Features) · 重新发布 #4 追加
+
+- **TLS 信任系统证书链** (`8a07b24a`): 修复企业网络/代理对 HTTPS 做 TLS 拦截（插入自签 CA）时 CodeBuddy 登录、模型列表拉取、用量查询、更新检查全链路报 `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`。新增 `app/utils/tls_trust.py` 用 truststore（pip 官方同款）把验证委托给系统信任库（macOS 钥匙串 / Windows 证书存储 / Linux 系统 CA），进程级缓存；`http_client` / `update_proxy` 接入；system-providers 插件 8 个 provider（buddy_auth / copilot_auth / codebuddy / dashscope / github_copilot / minimax / opencode / volcengine / zhipu）内联 helper 保持零主程序依赖；buddy_auth / copilot_auth 把 SSL 类报错翻译成带指引的中文。依赖新增 `truststore>=0.9.0`；测试 `tests/utils/test_tls_trust.py`（6 例）+ `tests/utils/test_update_proxy.py`
 
 ## [v0.6.6] - 2026-10-13 (重新发布 #4)
 
