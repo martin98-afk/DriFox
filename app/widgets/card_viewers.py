@@ -891,6 +891,18 @@ class CodeWebViewer(QWebEngineView):
         # 必须先于 setPage() 初始化：delegate 的 ChildAdded 在 setPage 链内即触发。
         self._wheel_filter_target = None
 
+        # [WHEEL-ARM] 几何轮询兜底：pywebview_height console 回报链在历史渲染
+        # （bare 路径）等场景可能整条不达（探针 probe_wheel_trace_chain T1 实测
+        # console 计数 0），_body_geom_valid 恒 False → 武装态滚轮被 not-geom
+        # 兜底抢给外层（2026-10-15 用户实测："没滚到头底外层就滚"）。此定时器
+        # 在几何未达期间用 runJavaScript 直读 body 几何（不经 console 链），
+        # 拿到一次即停；20 次上限防极端死循环。流式卡 console 链活跃时轮询
+        # 首拍即命中，成本可忽略。
+        self._geom_poll_count = 0
+        self._geom_poll_timer = QTimer(self)
+        self._geom_poll_timer.setInterval(300)
+        self._geom_poll_timer.timeout.connect(self._poll_body_geometry)
+
         # 1. 渲染定时器
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -947,6 +959,10 @@ class CodeWebViewer(QWebEngineView):
         self._load_skeleton()
         # delegate 可能已在 setPage 链内挂好：首装一次（幂等）
         self._ensure_wheel_filter_installed()
+        # 几何轮询兜底：console 回报链不达时由 runJavaScript 直读补齐（详见
+        # _geom_poll_timer 初始化处注释）；几何一到即自停，上限 20 次。
+        self._geom_poll_count = 0
+        self._geom_poll_timer.start()
 
         # ── 对话框层级管理 ──
         # _hidden_dialogs: set，记录当前导致 WebView 隐藏的对话框对象
@@ -1335,6 +1351,10 @@ class CodeWebViewer(QWebEngineView):
         self._body_scroll_top = 0
         self._body_geom_valid = False
         self._inner_scrollable = None
+        # [WHEEL-ARM] 几何轮询随新内容周期重启：console 回报链对新内容可能
+        # 再次不达（历史 bare 路径），不能沿用上一周期"到达即停"的旧状态。
+        self._geom_poll_count = 0
+        self._geom_poll_timer.start()
         # 🐛 内容态必须一并清：_markdown_text / _cached_streaming_html 若残留，
         # 复用后 _on_js_ready 会拿旧文本立即渲染一次（与新卡片内容无关），
         # 多一次全量渲染 = 多一份内存与主线程开销（大会话加载时逐卡叠加）。
@@ -1516,6 +1536,54 @@ class CodeWebViewer(QWebEngineView):
         self._body_scroll_top = scroll_top
         self._body_client_height = client_height
         self._body_geom_valid = client_height > 0
+
+    def _poll_body_geometry(self):
+        """[WHEEL-ARM] 几何轮询兜底（console 回报链不达时经 runJavaScript 补齐）。
+
+        历史渲染（bare 路径）等场景 pywebview_height console 回报可能整条不达
+        （探针 probe_wheel_trace_chain T1 实测），_body_geom_valid 恒 False：
+        武装态滚轮被 not-geom 兜底抢给外层，表现为"卡内没滚到边界外层就滚"。
+        此处直读 body 三值 + 内层容器可滚标志（同 reportHeight 第 6 字段判据），
+        复用既有 _on_body_geometry_reported / _on_inner_scrollable_reported 落账。
+        几何一旦有效或轮询 20 次上限即停。
+        """
+        if self._body_geom_valid:
+            self._geom_poll_timer.stop()
+            return
+        self._geom_poll_count += 1
+        if self._geom_poll_count > 20:
+            self._geom_poll_timer.stop()
+            return
+        try:
+            self.page().runJavaScript(
+                "(function(){var b=document.body;if(!b)return '';"
+                "var ins=-1;try{var ts=document.querySelectorAll("
+                "'#tool-content,.code-container,.code-content,.table-scroll-wrapper,.echarts-container');"
+                "ins=0;for(var i=0;i<ts.length;i++){var t=ts[i];"
+                "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
+                "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()",
+                self._on_geom_poll_result,
+            )
+        except RuntimeError:
+            # page 已销毁（viewer 回收/关闭）：停止轮询
+            self._geom_poll_timer.stop()
+
+    def _on_geom_poll_result(self, result):
+        if self._body_geom_valid or not result:
+            return
+        try:
+            parts = str(result).split("|")
+            if len(parts) < 3:
+                return
+            sh, st, ch = (int(float(x)) for x in parts[:3])
+        except Exception:  # noqa: BLE001
+            return
+        self._on_body_geometry_reported(sh, st, ch)
+        # 第 4 字段：内层可滚标志。-1 = 查询异常，保持 None（保守放行语义）
+        if len(parts) >= 4 and parts[3] in ("0", "1"):
+            self._on_inner_scrollable_reported(parts[3] == "1")
+        if self._body_geom_valid:
+            self._geom_poll_timer.stop()
 
     def _on_inner_scrollable_reported(self, scrollable: bool):
         """[WHEEL-ARM] 缓存内层滚动容器可滚标志（独立信号，见类属性注释）。
@@ -8345,6 +8413,7 @@ class CodeWebViewer(QWebEngineView):
         timers_to_stop = [
             self._render_timer,
             self._resize_unlock_timer,
+            self._geom_poll_timer,
         ]
         for timer in timers_to_stop:
             try:

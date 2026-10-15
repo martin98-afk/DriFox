@@ -11726,16 +11726,35 @@ class OpenAIChatToolWindow(ToolWindow):
         # 的悬垂 widget，实测会导致 hide() access violation 闪退）
         if not OpenAIChatToolWindow._qt_widget_alive(cached):
             return
-        # 从父控件摘除（如果还在布局里）。这里不调 removeWidget，因为
-        # _clear_chat_area/deleteLater 路径会处理；摘 setParent 已经能断
-        # 干净引用，避免下一帧布局刷新时再访问一个已被本流程标记为"待删"的 widget。
+        # 从 chat_layout 摘除：**必须先于 setParent(None)**。
+        # setParent(None) 会让 widget 从布局的 item 列表移除吗？不会——Qt 只在
+        # reparent 时同步摘 item，但本处的隐患是时序：deleteLater() 只是把销毁
+        # 事件排进队列，**并不立即执行**。若不同步清掉 layout item，紧随其后的
+        # 重建路径（_refresh_welcome_cards → _schedule_initial_welcome →
+        # _show_initial_welcome → _clear_chat_area）会用 takeAt(0) 把这个
+        # "已标记待删"的 widget 再取出来并对其 hide()（delete_widgets=False 分支）
+        # → 对已脱离父树的 QWebEngineView 调 hide() → access violation 闪退。
+        # 实测 2026-10-15 13:41 / 13:42 连崩两次，崩点正是
+        # _clear_chat_area 的 widget.hide()。
+        # removeWidget 只摘 item 不动 widget 生命周期，安全。
+        try:
+            self.chat_layout.removeWidget(cached)
+        except Exception:
+            pass
         # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView 原生
         # HWND）若直接脱离父窗口树会变成独立顶层窗口 → Chromium 弹出原生窗口
         # （白窗一闪），deleteLater 之后才销毁。先隐藏摘除可见性，再断父引用。
         try:
-            if cached.parent() is not None:
-                cached.hide()
-                cached.setParent(None)
+            cached.hide()
+            cached.setParent(None)
+        except Exception:
+            pass
+        # 🛡️ 打上待删标记：deleteLater() 只把销毁事件排进队列，不立即执行。
+        # 在事件轮到之前，任何路径（_clear_chat_area 的 takeAt / 其他清理函数）
+        # 再对这个已脱离父树的 QWebEngineView 调 hide()/setParent 都会
+        # access violation。标记让下游能识别并跳过。
+        try:
+            cached._pending_delete = True
         except Exception:
             pass
         cached.deleteLater()
@@ -13208,6 +13227,24 @@ class OpenAIChatToolWindow(ToolWindow):
             item = self.chat_layout.takeAt(0)
             if item and item.widget():
                 widgets.append(item.widget())
+        # 🛡️ 剔除已标记待删的 widget：_invalidate_welcome_card 对它做过
+        # hide() + setParent(None) + deleteLater()，deleteLater 只排队不立即
+        # 执行，此时其 C++ 对象仍活着但已脱离父窗口树。若继续走下方 hide()
+        # （delete_widgets=False 分支）或 _detach_focus_from_widgets，会对一个
+        # 半死的 QWebEngineView 操作原生 HWND → access violation 闪退。
+        # 实测 2026-10-15 13:41 / 13:42 连崩两次，路径为插件热重载
+        # → _invalidate_welcome_card → _schedule_initial_welcome →
+        # _show_initial_welcome → 本函数。
+        # _welcome_card_cache 已 pop 掉该项（invalidate 内），故此处不会再被复用。
+        alive_widgets = [w for w in widgets if not getattr(w, "_pending_delete", False)]
+        for w in widgets:
+            if getattr(w, "_pending_delete", False):
+                # 从缓存/布局双重摘除，杜绝后续任何路径再触达
+                try:
+                    self.chat_layout.removeWidget(w)
+                except Exception:
+                    pass
+        widgets = alive_widgets
         # 🐛 焦点摘除先于任何 hide()：焦点在待删子树内时，hide() 会触发 Qt
         # 焦点链自动转移 + 滚动区 scrollContentsBy 自动滚动（视口瞬跳，见
         # ui_helpers._detach_focus_from_widgets 注释）
