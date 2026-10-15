@@ -809,6 +809,11 @@ class CodeWebViewer(QWebEngineView):
         self._render_seq: int = 0
         self._render_inflight: bool = False
         self._render_pending: Optional[tuple] = None
+        # [render-diag] 渲染管线分支计数（停摆定位用临时打点，5s 汇总进 all.log）
+        from collections import Counter as _Counter
+
+        self._rdiag: "dict[str, int]" = _Counter()
+        self._rdiag_last: float = 0.0
         # [V1] 可见性门控：隐藏 tab 期间被门控跳过的渲染请求标记，
         # 恢复可见时（showEvent）据此补渲，保证流式/工具结果最终完整性。
         self._render_deferred: bool = False
@@ -1459,9 +1464,27 @@ class CodeWebViewer(QWebEngineView):
         self._height_report_pending = False
         self._document_height = h  # 跟踪文档高度用于 wheelEvent 边界判断
         self._content_sentinel_check()
+        # [DOCK-BLANK 诊断] viewer 实际高度显著大于 JS 侧内容高度 = 折叠框下方
+        # 露出空白（用户 2026-10-15 复测：折叠框下大小不一的空白导致抖动，
+        # 正文出现滚轮钳停后消失）。带 2s 冷却防刷屏；定位虚高来源后移除。
+        vh_now = self.height()
+        if self._streaming and vh_now - h > 16:
+            now_blank = time.monotonic()
+            if now_blank - getattr(self, "_blank_diag_last_ts", 0.0) >= 2.0:
+                self._blank_diag_last_ts = now_blank
+                logger.warning(
+                    f"[dock-blank] viewer 虚高 {vh_now - h}px (viewer={vh_now} scrollHeight={h} "
+                    f"pending_shrink={getattr(self, '_pending_shrink_height', None)}) → 折叠框下空白"
+                )
         final_h = h + 2
         if abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
+
+    def _rdiag_hit(self, key: str) -> None:
+        """[render-diag] 计数打点（勿用 `getattr and update` 短路写法：空 Counter 为 falsy 会静默丢弃）"""
+        c = getattr(self, "_rdiag", None)
+        if c is not None:
+            c[key] += 1
 
     def _content_sentinel_check(self):
         """[T37] 内容哨兵：流式中正文几乎空但 markdown 大量积压 → 强制补渲。
@@ -1478,6 +1501,20 @@ class CodeWebViewer(QWebEngineView):
         """
         if not self._streaming or not self._is_js_ready:
             return
+        # [render-diag] 每 5s 汇总渲染管线各分支计数（停摆定位用，随本修复上线，
+        # 定位后移除）。同时输出基线长度对照：md vs last_rendered vs stable——
+        # 三者关系直接暴露「基线与 DOM 脱节」类停摆。
+        now_diag = time.monotonic()
+        if now_diag - getattr(self, "_rdiag_last", 0.0) >= 5.0:
+            self._rdiag_last = now_diag
+            c = getattr(self, "_rdiag", None)
+            if c is not None and sum(c.values()):
+                logger.info(
+                    f"[render-diag] {dict(c)} md={len(self._markdown_text or '')} "
+                    f"last_r={len(self._last_rendered_markdown or '')} stable={self._stable_md_len} "
+                    f"inflight={self._render_inflight} pending={self._render_pending is not None}"
+                )
+                c.clear()
         # ── 二级触发（P0-2）：dom 停滞检测 ──
         # 一级只覆盖 md≥800 且 dom<200 的重度白屏；盲区是 md<800、dom 200~800
         # 缓慢增长、开头即白屏。渲染链停摆的指纹是「md 在涨、dom 不动」：
@@ -1501,6 +1538,16 @@ class CodeWebViewer(QWebEngineView):
             and not _has_unclosed_think_or_tool(self._markdown_text)
             and not _has_unclosed_chart_fence(self._markdown_text)
         ):
+            # ── 不可见短路（2026-10-15）：V1 门控下隐藏期间渲染本就挂起（_perform_update
+            # 收尾 `_render_deferred = True; return`），DOM 停滞是设计行为。此时强制补渲
+            # 会被同一门控吞掉：每 3s 冷却到期又触发，无限空转（真机实证：16 分钟流式
+            # 会话 all.log 记录 564 次 content-sentinel，其中 21:25~21:26 每 5s 一次
+            # 连续 8 次全部无效，dom 卡死 182~196 长达 40s）。改置 deferred 标记，
+            # 由 showEvent 既有链路在恢复可见时补渲。
+            if not self.isVisible():
+                self._render_deferred = True
+                self._sentinel_stall_ts = 0.0
+                return
             # 先清停滞基准：补渲无效时避免每拍重入；补渲生效则 dom 恢复
             # 增长自然刷新基准，双保险
             self._sentinel_stall_ts = 0.0
@@ -1512,6 +1559,14 @@ class CodeWebViewer(QWebEngineView):
                 f"[content-sentinel-L2] dom 停滞 {dom} 但 md 增长 {md_len_l2 - self._sentinel_stall_md} 字符 → 强制补渲"
             )
             self._render_deferred = False
+            # 🐛 补渲必须强制走全量（2026-10-15 复现会话实证：哨兵 18 次补渲全部
+            # 无效，dom 全程 87~120、md 积压 3456）：流式中 _perform_update 的差量
+            # 快路径以 _stable_md_len/_last_rendered_markdown 为「已渲染」基线，
+            # DOM 丢失后基线仍指向旧位置 → 差量判定「无新内容」直接 return。
+            # 置 _needs_full_render 让差量让位 + 复位基线，全量才能真正落地。
+            self._needs_full_render = True
+            self._stable_md_len = 0
+            self._last_rendered_markdown = ""
             self._schedule_render(immediate=True)
         md_len = len(self._markdown_text or "")
         if md_len < 800:
@@ -1527,11 +1582,19 @@ class CodeWebViewer(QWebEngineView):
         now = time.monotonic()
         if now - getattr(self, "_sentinel_last_ts", 0.0) < 3.0:
             return
+        # 不可见短路（同 L2 注释）：隐藏期间补渲必被 V1 门控吞掉，空转无意义
+        if not self.isVisible():
+            self._render_deferred = True
+            return
         self._sentinel_last_ts = now
         logger.warning(
             f"[content-sentinel] 正文近乎空(dom={dom_len})但 markdown 积压 {md_len} 字符 → 强制补渲"
         )
         self._render_deferred = False
+        # 🐛 补渲必须强制走全量（同 L2 注释：差量基线与 DOM 状态脱节会让补渲空转）
+        self._needs_full_render = True
+        self._stable_md_len = 0
+        self._last_rendered_markdown = ""
         self._schedule_render(immediate=True)
 
     def _on_body_geometry_reported(self, scroll_height: int, scroll_top: int, client_height: int):
@@ -6471,6 +6534,8 @@ class CodeWebViewer(QWebEngineView):
             # [PERF-opt] 内容变化检测：markdown 未变化时跳过全量渲染
             # 避免定时器空转、回调无变化等场景下的冗余 innerHTML 替换
             if self._markdown_text == self._last_rendered_markdown:
+                # [render-diag] 停摆定位：基线认为已渲染（DOM 丢失时此分支会吞掉所有补渲）
+                self._rdiag_hit("skip_same_md")
                 return
 
             # [B1] 差量渲染快路径：流式且非全量模式时，仅增量渲染已闭合的完整段。
@@ -6548,6 +6613,7 @@ class CodeWebViewer(QWebEngineView):
                     # [T28] 差量产物入图检测（只置不清）：流式新增图表块不再拉长
                     # 无图卡窗口期（与全量置位点同款）
                     self._mark_has_charts(new_html + _tail_html)
+                    self._rdiag_hit("diff_applied")
                     self.page().runJavaScript(js)
                     # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
                     self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
@@ -6580,6 +6646,7 @@ class CodeWebViewer(QWebEngineView):
             # 节点，对工具 DOM 安全），在差量不可走的流式路径也先执行，保证流式
             # 期间 markdown 语法（**加粗**、`code`、[链接]）即时格式化。
             if self._streaming:
+                self._rdiag_hit("tail_inline")
                 self._render_tail_inline()
 
             # 刷新字体 CSS var
@@ -6589,6 +6656,7 @@ class CodeWebViewer(QWebEngineView):
             # 主线程不再同步执行 md.convert（20-80ms 阻塞消除），
             # 渲染参数以快照形式传引用（md 不复制）。
             self._last_rendered_markdown = self._markdown_text
+            self._rdiag_hit("full_submit")
             self._sequence_render(self._markdown_text, self._tool_compact_mode)
 
         except RuntimeError:
@@ -6773,6 +6841,7 @@ class CodeWebViewer(QWebEngineView):
         try:
             if seq != self._render_seq:
                 # 过期结果：丢弃（新渲染已提交或已失效）
+                self._rdiag_hit("seq_drop")
                 return
             if html is None:
                 return
@@ -6780,6 +6849,7 @@ class CodeWebViewer(QWebEngineView):
                 return
             self._last_rendered_html = html
             self._height_report_pending = True
+            self._rdiag_hit("apply_ok")
             # [T24] 线程池全量产物入图检测（只置不清）
             self._mark_has_charts(html)
             # [B1] 全量渲染成功应用后：重置差量基线——差量稳定区与全量内容对齐，

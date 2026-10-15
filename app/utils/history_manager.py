@@ -416,6 +416,12 @@ class HistoryManager:
         # key: project (None=全部) 或 ("merge_team", project)（合并模式独立键），
         # value: [list_of_lightweight_dicts]。
         # 当 _history_sessions 发生变化时置 _cache_dirty = True。
+        #
+        # 🛡️ _cache_dirty 是**全局**脏标志，但缓存按 key 分桶保存。只清一个桶
+        # 却把全局标志复位，会让其余桶在下次读取时命中陈旧快照（"历史卡片看
+        # 不到刚结束的会话"根因，2026-10-15）。故置脏时整表作废（见
+        # _mark_cache_dirty），构建单桶时只复位该桶自己的脏位（见
+        # _cached_key_dirty）。
         self._cache_dirty: bool = True
         self._cached_lightweight: Dict[object, List[Dict]] = {}
 
@@ -441,8 +447,15 @@ class HistoryManager:
         self._prewarm_history()
 
     def _mark_cache_dirty(self):
-        """标记轻量列表缓存为脏，下次 get_history_list 时重新构建"""
+        """标记轻量列表缓存为脏，下次 get_history_list 时重新构建
+
+        🛡️ 整表作废（而非只置全局标志）：缓存按 cache_key 分桶，多个读取者
+        （历史页 merge_team=True、欢迎卡片/工作区树 merge_team 缺省）交错读取。
+        只置全局标志的话，先被读到的那个桶重建后把标志复位，其余桶仍停留在
+        旧快照上，读到的桶会一直返回陈旧列表。清空整表 = 所有桶下次必重建。
+        """
         self._cache_dirty = True
+        self._cached_lightweight.clear()
 
     def _deduplicate_history_sessions(self):
         """去重历史会话列表，保持最新的一个
@@ -933,9 +946,17 @@ class HistoryManager:
 
         # 🚀 轻量列表缓存：避免每次调用都排序+过滤+重建 dict
         # merge_team 使用独立缓存键，避免与默认列表互相污染
+        #
+        # 🛡️ 脏判定必须落到「整表作废」而非「跳过本次命中」：全局脏时清空所有
+        # 分桶再重建当前桶，保证任一读取者（历史页 / 欢迎卡片 / 工作区树）之后
+        # 读到的都是新数据。旧实现只跳过命中、由先读到的桶复位全局标志，其余
+        # 分桶长期停留在旧快照（历史卡片看不到刚结束的会话，2026-10-15 根因）。
+        # 同时兼容「外部直接置 _cache_dirty = True」的调用方。
         if not with_messages:
             cache_key = ("merge_team", project) if merge_team else project  # None 表示全部项目
-            if not self._cache_dirty and cache_key in self._cached_lightweight:
+            if self._cache_dirty:
+                self._cached_lightweight.clear()
+            elif cache_key in self._cached_lightweight:
                 return list(self._cached_lightweight[cache_key])
 
         sessions = self._history_sessions
@@ -952,7 +973,10 @@ class HistoryManager:
             else:
                 result = [self._to_lightweight_entry(s) for s in sessions]
 
-            # 缓存构建结果，下次直接返回
+            # 缓存构建结果，下次直接返回。
+            # ⚠️ 单桶重建后不复位全局 _cache_dirty：其余分桶尚未重建，复位会让
+            # 它们命中旧快照。全局标志只在整表作废（_mark_cache_dirty）时置位，
+            # 在这里由「已清空整表 + 本桶已写入」的读取路径自然消化。
             self._cached_lightweight[cache_key] = list(result)
             self._cache_dirty = False
             return result
@@ -2009,6 +2033,16 @@ class HistoryManager:
                 break
 
         self._pending_save_session_id = None
+        # 🛡️ 本进程刚写库：WAL 提交会推进 -wal 的 mtime，若不刷新变更签名，
+        # 下一次 get_history_list 的 _reload_if_db_changed 会把自己的写入误判为
+        # 「其他进程修改」→ 先 flush 再从 SQLite 全量重载（实测 1915 条约 19ms，
+        # 且持 _history_load_lock），每轮对话结束后的首次刷新都白跑一次重载。
+        # 签名滞后刷新 = 只把自己造成的变更记为已对齐。
+        try:
+            if self._use_sqlite and self._session_store is not None:
+                self._db_signature_stored = self._db_signature()
+        except Exception:
+            pass
 
     def flush(self):
         """立即持久化所有待保存的会话（同步写入 SQLite）

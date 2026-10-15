@@ -729,6 +729,17 @@ class SubAgentExecutor(QThread):
         from app.plugins.contracts.message_serializer import SerializeContext
         from app.plugins.registries.serializer_registry import SerializerRegistry
 
+        # [方案 1] image_ref → data:image 读侧恢复（persist 的逆操作）；
+        # 缺失文件降级 text 占位块，不抛错。与 chat_worker 对称——
+        # 继承的主智能体历史可能含用户发送的图片（image_ref），不恢复会以
+        # 内部格式漏进 API content 数组（type=image_ref 非法，同样触发 400）
+        try:
+            from app.core.store.session_repository import revive_vision_image_refs
+
+            messages = revive_vision_image_refs(messages)
+        except Exception as e:  # noqa: BLE001 — revive 失败不阻断发送
+            logger.warning(f"[SubAgentWorker] revive image_refs 失败（按原消息发送）: {e}")
+
         config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
         flags = self._protocol_flags(config)
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
@@ -985,6 +996,12 @@ class SubAgentExecutor(QThread):
             raise RuntimeError(
                 "子代理暂不支持 Gemini OAuth（Code Assist）协议：请在团队/子代理配置中改用 OpenAI 兼容模型"
             )
+
+        # chat/completions 分支同样必须过序列化单入口：inherit_history 继承的主智能体
+        # 历史是内部格式（assistant.content 可含 tool_result block、image_ref 等），
+        # 裸发给 API 会被严格校验的 provider 拒绝
+        # （实测 GLM 400 code=1214 "messages[N].content[M].type类型错误"）
+        messages = self._serialize_for_api(messages, config).messages
 
         req_kwargs = {
             "model": model,
