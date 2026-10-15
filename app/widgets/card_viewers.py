@@ -8285,14 +8285,20 @@ class CodeWebViewer(QWebEngineView):
             route = self._route_wheel_armed if self._wheel_inner_armed else self._route_wheel_to_chat_area
             if route(ev):
                 return True
-            if self._wheel_inner_armed and self._wheel_belongs_to_outer(ev.angleDelta().y()):
-                # [WHEEL-ARM] 仅「内外都滚不动」时兜底：该分支放行给 Chromium，
-                # 而事件落到 super().eventFilter 就被 delegate 终结、不上抛 wheelEvent
-                # —— 表现为"点击过卡片正文的无内滚条消息，滚轮彻底失效"
-                # （2026-10-14 修，探针 tests/debug/probe_wheel_armed.py B2）。
-                # ⚠️ 判据必须含内层容器可滚性（见 _wheel_belongs_to_outer）：
-                # #tool-content / 代码块 / 图表区滚动不改 body 几何，只看 body
-                # 会把折叠框的滚轮误判给外层，导致"折叠框内部滚不动"。
+            # [WHEEL-ARM] 武装态兜底：放行给 Chromium 后事件被 delegate 终结、
+            # 不上抛 wheelEvent（实测 probe_wheel_trace_chain T2）——凡放行即黑洞，
+            # 必须在首道就决定归属。
+            #   几何有效 → 按 _wheel_belongs_to_outer（内外都确认滚不动才交外层，
+            #   保住折叠框/代码块内部滚轮，2026-10-14 B2 修）；
+            #   几何未回传（_body_geom_valid=False：历史渲染 JS 回报未达 / 渲染初期
+            #   窗口 / renderer 重建）→ belongs_to_outer 恒 False，若同样放行即
+            #   武装态黑洞（2026-10-15 修：探针 probe_wheel_real_host W2、
+            #   probe_wheel_trace_chain T2，外层 0/5）。此窗口兜底转发外层：
+            #   代价是"内层容器恰可滚 + 几何未达"时其滚轮暂被外层接管
+            #   （几何回传后自动恢复内部优先），远好于滚轮彻底失效。
+            if self._wheel_inner_armed and (
+                not self._body_geom_valid or self._wheel_belongs_to_outer(ev.angleDelta().y())
+            ):
                 if self._route_wheel_to_chat_area(ev):
                     return True
         return super().eventFilter(obj, ev)
@@ -8306,14 +8312,18 @@ class CodeWebViewer(QWebEngineView):
             return
         if self._wheel_inner_armed:
             # [WHEEL-ARM] 事件上抛到此处 = delegate 放行后 Chromium 谁也不消费
-            #（内层容器同样不可滚）→ 必须接手转发外层。若仍走 super()，事件被喂回
+            # （内层容器同样不可滚）→ 必须接手转发外层。若仍走 super()，事件被喂回
             # Chromium 而终结传播，外层滚动区永远收不到：表现为"点击过卡片正文的
             # 无内滚条消息，滚轮彻底失效"（2026-10-14 修，探针见
             # tests/debug/probe_wheel_armed.py B2：几何有效 max_scroll=0 时外层 0/5）。
-            # 判据同 eventFilter 侧，含内层容器可滚性（防折叠框滚轮被抢）。
-            if self._wheel_belongs_to_outer(event.angleDelta().y()):
-                if self._route_wheel_to_chat_area(event):
-                    return
+            # ⚠️ 二道不再查 _wheel_belongs_to_outer：该判据在几何未回传时
+            # （_body_geom_valid=False，历史渲染路径 JS 回报可能不达）恒 False，
+            # 保守放行 → super() 又把事件喂回 Chromium 终结 → 武装态黑洞
+            # （2026-10-15 修，探针 probe_wheel_real_host.py W2：外层 0/5）。
+            # 二道被调本身就证明卡内无人消费（body / 内层容器 Chromium 都判过），
+            # 转发外层不会抢走任何内部滚轮；"防折叠框滚轮被抢"只在首道有意义。
+            if self._route_wheel_to_chat_area(event):
+                return
         super().wheelEvent(event)
 
     def cleanup(self):

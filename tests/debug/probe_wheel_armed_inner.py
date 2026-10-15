@@ -71,6 +71,9 @@ class FakeArea:
         self._got = 0
         self.vbar = FakeScrollBar(value, minimum, maximum)
 
+    def verticalScrollBar(self):
+        return self.vbar
+
     def wheelEvent(self, ev):
         self._got += 1
 
