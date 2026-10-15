@@ -37,6 +37,8 @@ dependencies = [
     "markdown",
     "pygments",
     "requests",
+    # TLS 信任系统证书链（企业网/代理自签 CA 场景，见 app/utils/tls_trust.py）
+    "truststore>=0.9.0",
     "orjson>=3.8.0",
     "pypinyin",
     # 全局热键

@@ -64,6 +64,36 @@ def build_headers(access_token: str = "", refresh_token: str = "") -> Dict[str, 
     return headers
 
 
+_SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
+
+
+def _system_ssl_context():
+    """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储，兼容独立 CLI 运行）；
+    truststore 不可用时回退 None（走默认验证）。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import ssl
+
+            import truststore
+
+            _SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:
+            _SSL_CONTEXT = False
+    return _SSL_CONTEXT or None
+
+
+def _friendly_ssl_error(exc: Exception) -> str:
+    """把证书校验类网络错误翻译成带指引的人话；其余原样透出。"""
+    reason = str(getattr(exc, "reason", "") or exc)
+    if "CERTIFICATE_VERIFY_FAILED" in reason or "SSL" in reason.upper():
+        return (
+            f"TLS 证书校验失败（{reason}）。常见于企业网络/代理/抓包工具拦截 HTTPS"
+            "（自签名证书未受信任）；请在系统信任库信任对应证书或更换网络重试"
+        )
+    return str(exc)
+
+
 def _request(
     method: str,
     path: str,
@@ -84,7 +114,7 @@ def _request(
         headers=build_headers(access_token, refresh_token),
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_system_ssl_context()) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
@@ -92,6 +122,8 @@ def _request(
             return json.loads(raw)
         except json.JSONDecodeError:
             return {"code": -1, "message": f"HTTP {exc.code}: {raw[:200]}"}
+    except urllib.error.URLError as exc:
+        raise RuntimeError(_friendly_ssl_error(exc)) from exc
 
 
 def _payload_data(payload: Dict[str, Any]) -> Dict[str, Any]:
