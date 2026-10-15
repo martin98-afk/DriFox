@@ -148,6 +148,18 @@ from app.widgets.card_render_core import (
 )
 
 
+# [WHEEL-ARM] body 滚动几何 + 内层容器可滚标志的直读表达式（轮询兜底与
+# armed 事件校准共用）。返回 "sh|st|ch|ins"；body 未就绪返回 ''。
+_BODY_GEOM_READ_JS = (
+    "(function(){var b=document.body;if(!b)return '';"
+    "var ins=-1;try{var ts=document.querySelectorAll("
+    "'#tool-content,.code-container,.code-content,.table-scroll-wrapper,.echarts-container');"
+    "ins=0;for(var i=0;i<ts.length;i++){var t=ts[i];"
+    "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
+    "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()"
+)
+
+
 def _parse_height_payload(payload: str):
     """[T37] 解析 pywebview_height 载荷（纯函数，便于无 GUI 单元验证）。
 
@@ -881,12 +893,11 @@ class CodeWebViewer(QWebEngineView):
         # delegate，真焦点方案会把键盘焦点从输入框抢走，且 Chromium 内部
         # 焦点（body/可编辑区）变化不回传 Qt，判据不可靠。点击是唯一显式意图。
         self._wheel_inner_armed = False
-        # 激活态自愈：连续"判为可滚但放行后 body.scrollTop 未变化"的次数。
-        # 达阈值即交外层，防"怎么滚都没反应"。仅在 state=="scroll" 下累计
-        # （body 确实有溢出时才成立），不溢出场景不参与，见 _inner_wheel_state。
-        self._wheel_arm_streak = 0
-        self._wheel_arm_last_top = -1
-        self._wheel_arm_last_ts = 0.0
+        # 事件驱动几何校准节流：armed 放行前异步拉真实几何（runJavaScript），
+        # 150ms 内不重复发（滚轮节拍 ~50ms，连续滚动时逐拍刷新，边界判定跟上
+        # 真实 DOM；console 链 finish 后断、DOM 后续收缩无人上报的过期值被
+        # 逐拍纠正）。
+        self._geom_sync_last_ts = 0.0
         # delegate 侧 wheel 抢断的安装目标（RenderWidgetHostViewQtDelegateWidget）。
         # 必须先于 setPage() 初始化：delegate 的 ChildAdded 在 setPage 链内即触发。
         self._wheel_filter_target = None
@@ -1543,9 +1554,10 @@ class CodeWebViewer(QWebEngineView):
         历史渲染（bare 路径）等场景 pywebview_height console 回报可能整条不达
         （探针 probe_wheel_trace_chain T1 实测），_body_geom_valid 恒 False：
         武装态滚轮被 not-geom 兜底抢给外层，表现为"卡内没滚到边界外层就滚"。
-        此处直读 body 三值 + 内层容器可滚标志（同 reportHeight 第 6 字段判据），
-        复用既有 _on_body_geometry_reported / _on_inner_scrollable_reported 落账。
-        几何一旦有效或轮询 20 次上限即停。
+        直读 body 三值 + 内层容器可滚标志（同 reportHeight 第 6 字段判据），
+        复用 _on_body_geometry_reported / _on_inner_scrollable_reported 落账。
+        几何一旦有效或轮询 20 次上限即停；armed 滚动期的持续校准另见
+        _schedule_geometry_sync（事件驱动，零空转成本）。
         """
         if self._body_geom_valid:
             self._geom_poll_timer.stop()
@@ -1555,21 +1567,31 @@ class CodeWebViewer(QWebEngineView):
             self._geom_poll_timer.stop()
             return
         try:
-            self.page().runJavaScript(
-                "(function(){var b=document.body;if(!b)return '';"
-                "var ins=-1;try{var ts=document.querySelectorAll("
-                "'#tool-content,.code-container,.code-content,.table-scroll-wrapper,.echarts-container');"
-                "ins=0;for(var i=0;i<ts.length;i++){var t=ts[i];"
-                "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
-                "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()",
-                self._on_geom_poll_result,
-            )
+            self.page().runJavaScript(_BODY_GEOM_READ_JS, self._on_geom_poll_result)
         except RuntimeError:
             # page 已销毁（viewer 回收/关闭）：停止轮询
             self._geom_poll_timer.stop()
 
+    def _schedule_geometry_sync(self):
+        """[WHEEL-ARM] 事件驱动几何校准：armed 放行前异步拉一次真实几何。
+
+        console 链在 finish_streaming 后断报时，DOM 后续变化（延迟整理任务
+        收缩内容等）无人上报，Python 缓存定格过期值 → 边界判据失真：真实已到
+        边界仍判 "scroll" 放行（Chromium 终结，旧代码黑洞）或缓存 max 偏小误判
+        "boundary" 抢交外层（2026-10-15 用户实测"没滚到头底外层就滚"）。
+        每拍放行前拉一次（150ms 节流），下一拍裁决即用新值，过期窗口 ≤1 拍。
+        """
+        now = time.monotonic()
+        if now - self._geom_sync_last_ts < 0.15:
+            return
+        self._geom_sync_last_ts = now
+        try:
+            self.page().runJavaScript(_BODY_GEOM_READ_JS, self._on_geom_poll_result)
+        except RuntimeError:
+            pass
+
     def _on_geom_poll_result(self, result):
-        if self._body_geom_valid or not result:
+        if not result:
             return
         try:
             parts = str(result).split("|")
@@ -1578,6 +1600,7 @@ class CodeWebViewer(QWebEngineView):
             sh, st, ch = (int(float(x)) for x in parts[:3])
         except Exception:  # noqa: BLE001
             return
+        # 无论缓存此前是否有效都落账：校准的本意就是纠正过期值
         self._on_body_geometry_reported(sh, st, ch)
         # 第 4 字段：内层可滚标志。-1 = 查询异常，保持 None（保守放行语义）
         if len(parts) >= 4 and parts[3] in ("0", "1"):
@@ -8252,18 +8275,17 @@ class CodeWebViewer(QWebEngineView):
             # wheelEvent 二次裁决，最终由 MessageCard.wheelEvent 转发外层。
             return False
         if state == "scroll":
-            # 自愈：放行后 body.scrollTop 若在下一轮仍未变化（几何缓存滞后、
-            # 实际滚不动），累计到阈值即交外层，防"怎么滚都没反应"。
-            now = time.monotonic()
-            if self._wheel_arm_last_top == self._body_scroll_top and now - self._wheel_arm_last_ts < 1.5:
-                self._wheel_arm_streak += 1
-            else:
-                self._wheel_arm_streak = 0
-            self._wheel_arm_last_top = self._body_scroll_top
-            self._wheel_arm_last_ts = now
-            if self._wheel_arm_streak < 3:
-                return False
-            self._wheel_arm_streak = 0
+            # 放行：Chromium 是滚动能否发生的唯一真相——能滚则消费事件（外层
+            # 不参与）；滚不动则 ignore 上抛二道 wheelEvent 转外层。
+            # ⚠️ 此处不放"连续 3 拍 scrollTop 未变即转外层"的自愈：该判据比较
+            # 的是 JS 异步回报值（80ms 防抖 + rAF + IPC），快速滚动时回报恒滞后
+            # → streak 虚增 → 未到边界就误交外层，表现为卡内滚几下外层插进来
+            # （2026-10-15 用户实测回归，探针 probe_wheel_real_skeleton R4）。
+            # "滚不动"的一切分支由二道 wheelEvent 必转发 + boundary 判据闭环。
+            # 边界判据失真（console 链 finish 后断、DOM 后续收缩无人上报）用
+            # 事件驱动校准补：每拍放行前异步拉一次真实几何，下一拍用新值裁决。
+            self._schedule_geometry_sync()
+            return False
         return self._route_wheel_to_chat_area(event)
 
     def _route_wheel_to_chat_area(self, event) -> bool:
@@ -8344,8 +8366,6 @@ class CodeWebViewer(QWebEngineView):
         # 纯悬浮不置位（保持外层优先体感）。
         if et == QEvent.MouseButtonPress:
             self._wheel_inner_armed = True
-            self._wheel_arm_streak = 0
-            self._wheel_arm_last_top = -1
         # 鼠标移出 delegate（卡片正文区）→ 退出卡内滚态，恢复外层优先。
         elif et == QEvent.Leave:
             self._wheel_inner_armed = False
