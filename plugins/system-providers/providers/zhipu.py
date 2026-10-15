@@ -13,6 +13,24 @@ from typing import Any, Dict, Optional
 from app.plugins.registries.provider_registry import ProviderDef
 
 
+_SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
+
+
+def _system_ssl_context():
+    """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储）；不可用回退 None。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import ssl
+
+            import truststore
+
+            _SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:
+            _SSL_CONTEXT = False
+    return _SSL_CONTEXT or None
+
+
 def _fetch_zhipu_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """从智谱 BigModel / Z.ai 获取 GLM Coding Plan 积分用量。
 
@@ -44,7 +62,7 @@ def _fetch_zhipu_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_system_ssl_context()) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
             raw = resp.read().decode(charset, errors="replace")
     except Exception:

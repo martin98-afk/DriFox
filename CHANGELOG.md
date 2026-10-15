@@ -3,6 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 ### ✨ 新功能 (New Features)
+- **TLS 信任系统证书链** (app/utils/tls_trust.py · plugins/system-providers/providers/* · app/utils/http_client.py · app/utils/update_proxy.py): 修复企业网络/代理对 HTTPS 做 TLS 拦截（插入自签 CA）时 CodeBuddy 登录、模型列表拉取、用量查询、更新检查全链路报 `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`。truststore（pip 官方同款）把验证委托给系统信任库（macOS 钥匙串 / Windows 证书存储 / Linux 系统 CA），插件侧 helper 内联保持零主程序依赖；SSL 类报错翻译成带指引的中文（buddy_auth / copilot_auth）。依赖新增 `truststore>=0.9.0`；测试 tests/utils/test_tls_trust.py（6 例）
 - **MCP OAuth 登录** (app/core/mcp_oauth/ · app/tools/mcp_tools.py · app/plugins/managers/plugin_manager.py): 新增 app/core/mcp_oauth/ 包（token_store / callback_server / provider / manager），给 MCP 客户端加 OAuth 2.1 授权码流程支持。覆盖 Protected Resource Metadata 发现（RFC 9728）、Authorization Server Metadata 发现（RFC 8414）、PKCE(S256)、动态客户端注册（RFC 7591）、本地 HTTP 回调（127.0.0.1 随机端口 /callback）、token 自动刷新。.mcp.json 通过 auth: {type: "oauth", client_name, scope} 声明，auth 已加入 _MCP_PERSIST_FIELDS 保证 UI 编辑不丢。token 复用 PluginConfigStore 落 plugin_data/<plugin>/config.json（键名 _mcp_oauth_<server>，明文存储已在文档标注）。附带 SDK 兼容性补丁：basic 认证模式下从 body 移除 client_id（RFC 6749 §2.3.1，否则 Notion 返回 400）。文档 docs/plugins/mcp-oauth.md；测试 tests/core/test_mcp_oauth.py（36 例）
 
 ### ⚡ 性能优化 (Performance)

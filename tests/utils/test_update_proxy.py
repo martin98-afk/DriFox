@@ -98,34 +98,43 @@ def test_system_mode_rewrites_nothing(cfg):
 
 # ── httpx 参数 ──
 
+import ssl
+
+
+def _strip_verify(kwargs):
+    """剥离 verify 键单独校验（TLS 系统证书链注入为横切行为，不属代理语义）"""
+    verify = kwargs.pop("verify", "missing")
+    assert verify is None or isinstance(verify, ssl.SSLContext)
+    return kwargs
+
 
 def test_httpx_kwargs_direct_forces_no_env(cfg):
     """direct 必须显式 trust_env=False：proxy=None 不生效"""
-    assert update_proxy.httpx_kwargs() == {"trust_env": False}
+    assert _strip_verify(update_proxy.httpx_kwargs()) == {"trust_env": False}
 
 
 def test_httpx_kwargs_system_uses_lib_default(cfg):
     _mode(cfg, update_proxy.MODE_SYSTEM)
-    assert update_proxy.httpx_kwargs() == {}
+    assert _strip_verify(update_proxy.httpx_kwargs()) == {}
 
 
 def test_httpx_kwargs_prefix_forces_no_env(cfg):
     """prefix 是显式指定，不该被环境变量二次干扰"""
     _mode(cfg, update_proxy.MODE_PREFIX)
-    assert update_proxy.httpx_kwargs() == {"trust_env": False}
+    assert _strip_verify(update_proxy.httpx_kwargs()) == {"trust_env": False}
 
 
 def test_httpx_kwargs_http_returns_proxy(cfg):
     _mode(cfg, update_proxy.MODE_HTTP)
     _url(cfg, "http://127.0.0.1:7890")
-    assert update_proxy.httpx_kwargs() == {"proxy": "http://127.0.0.1:7890"}
+    assert _strip_verify(update_proxy.httpx_kwargs()) == {"proxy": "http://127.0.0.1:7890"}
 
 
 def test_httpx_kwargs_http_empty_addr_degrades(cfg):
     """http 模式没填地址 → 退化直连，不把空串当代理"""
     _mode(cfg, update_proxy.MODE_HTTP)
     _url(cfg, "")
-    assert update_proxy.httpx_kwargs() == {"trust_env": False}
+    assert _strip_verify(update_proxy.httpx_kwargs()) == {"trust_env": False}
 
 
 # ── requests session 参数 ──

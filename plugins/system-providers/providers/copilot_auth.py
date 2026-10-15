@@ -44,6 +44,25 @@ LOGIN_POLL_INTERVAL = 5.0
 SLOW_DOWN_EXTRA = 5.0
 
 
+_SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
+
+
+def _system_ssl_context():
+    """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储，纯标准库环境也可运行）；
+    truststore 不可用时回退 None（走默认验证）。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import ssl
+
+            import truststore
+
+            _SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:
+            _SSL_CONTEXT = False
+    return _SSL_CONTEXT or None
+
+
 def build_chat_headers(copilot_token: str) -> Dict[str, str]:
     """构造 Copilot 网关聊天请求头（身份伪装 + 鉴权；缺 Integration-Id 会 403）。"""
     return {
@@ -69,7 +88,7 @@ def _post_form(url: str, form: Dict[str, str], timeout: float = DEFAULT_TIMEOUT)
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_system_ssl_context()) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
@@ -94,6 +113,12 @@ def start_device_flow() -> Dict[str, Any]:
 
 def _wrap_net_error(exc: Exception) -> RuntimeError:
     """把底层网络异常包装成人话（URLError 原文对用户不友好且被 InfoBar 截断）"""
+    detail = str(getattr(exc, "reason", "") or exc)
+    if "CERTIFICATE_VERIFY_FAILED" in detail or "SSL" in detail.upper():
+        return RuntimeError(
+            f"TLS 证书校验失败（{detail}）。常见于企业网络/代理/抓包工具拦截 HTTPS；"
+            "请在系统信任库信任对应证书或更换网络重试"
+        )
     return RuntimeError(f"GitHub 连接失败（{exc.__class__.__name__}）：请检查网络/代理是否能访问 github.com")
 
 
@@ -144,7 +169,7 @@ def fetch_copilot_token(github_token: str, timeout: float = DEFAULT_TIMEOUT) -> 
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_system_ssl_context()) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"换取 Copilot token 失败: HTTP {exc.code}（401 需重新登录）") from exc
