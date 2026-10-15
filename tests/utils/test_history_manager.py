@@ -385,3 +385,58 @@ def test_flush_async_skips_only_released_target(monkeypatch, tmp_path):
     manager._pending_save_session_id = "session-1"
     manager.flush_async()
     assert store.saved_session_ids == ["session-1"], "显式清空必须落库"
+
+
+# ---------- 轻量列表缓存：多 key 交错读取不得返回陈旧列表（2026-10-15 根因） ----------
+
+
+def test_cache_key_interleave_must_not_serve_stale_list(monkeypatch, tmp_path):
+    """🔴 回归：缓存多 key 共用单一脏标志 → 交错读取会返回不含最新会话的旧列表。
+
+    根因序列（真实链路：历史页 merge_team=True，欢迎卡片/工作区树 merge_team 缺省）：
+      读 key1(merge_team) → 保存新会话置脏 → 读 key2 清脏 → 再读 key1 命中旧缓存。
+    修复前 key1 返回保存前的快照 → 用户「历史卡片看不到刚结束的会话」。
+    """
+    manager = _make_manager_with_records(monkeypatch, tmp_path, [_mk_record("a"), _mk_record("b")])
+
+    # ① 历史页先构建 merge_team 键缓存
+    first = [s["session_id"] for s in manager.get_history_list("默认项目", merge_team=True)]
+    assert first == ["a", "b"], first
+
+    # ② 一轮对话结束：保存新会话（置脏）
+    manager.save_session(
+        [{"role": "user", "content": "新问题", "timestamp": "2026-09-12 02:00:00"}],
+        title="会话c",
+        session_id="c",
+    )
+    assert manager._cache_dirty is True
+
+    # ③ 欢迎卡片/工作区树读取另一个键（清掉全局脏标志）
+    other = [s["session_id"] for s in manager.get_history_list("默认项目")]
+    assert "c" in other, other
+
+    # ④ 用户查看历史卡片：merge_team 键必须已重建
+    final = [s["session_id"] for s in manager.get_history_list("默认项目", merge_team=True)]
+    assert "c" in final, f"历史卡片返回陈旧缓存：{final}"
+
+
+def test_cache_key_interleave_reverse_direction(monkeypatch, tmp_path):
+    """反方向交错同样必须拿到新数据（先读普通键、后读 merge_team 键）。"""
+    manager = _make_manager_with_records(monkeypatch, tmp_path, [_mk_record("a")])
+
+    # ① 欢迎卡片先构建普通键缓存
+    assert [s["session_id"] for s in manager.get_history_list("默认项目")] == ["a"]
+
+    # ② 一轮对话结束：保存新会话（置脏）
+    manager.save_session(
+        [{"role": "user", "content": "新问题", "timestamp": "2026-09-12 03:00:00"}],
+        title="会话b",
+        session_id="b",
+    )
+
+    # ③ 历史页读 merge_team 键 → 必须已包含 b
+    merged = [s["session_id"] for s in manager.get_history_list("默认项目", merge_team=True)]
+    assert "b" in merged, f"历史卡片返回陈旧缓存：{merged}"
+    # ④ 普通键也已刷新（整表作废后重建，不再是旧快照）
+    plain = [s["session_id"] for s in manager.get_history_list("默认项目")]
+    assert "b" in plain, f"普通列表返回陈旧缓存：{plain}"

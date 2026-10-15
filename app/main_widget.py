@@ -22655,6 +22655,15 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_history_project = self._current_project
             self._notify_history_data_changed()
 
+        # 🛡️ 归档项目后必须重置历史页的项目筛选（2026-10-15 修复）：
+        # 若用户此前把筛选切到了被归档的项目 X，_project_filter_by_tab 里仍残留
+        # "X"，而 X 的会话已全部归档、get_history_list("X") 恒空 → 列表永空白、
+        # 折叠头仍显示已归档的 X，只能手动点「全部项目」恢复。
+        # 与 _on_project_selected / _on_new_project_created 同口径：
+        # 收起面板 + 筛选跟随窗口项目（归档当前项目时窗口已切回默认项目）。
+        self._collapse_project_selector_panel()
+        self._history_page_follow_window_project()
+
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
 
