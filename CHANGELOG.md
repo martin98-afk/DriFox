@@ -8,9 +8,9 @@ All notable changes to this project will be documented in this file.
 ### ⚡ 性能优化 (Performance)
 - **移除简洁模式工具/思考折叠内的预览文字打字机** (app/widgets/card_render_core.py · app/widgets/card_viewers.py · app/widgets/message_card.py): 删除 `_PREVIEW_TYPEWRITER_JS`（`window._pt/_ptType/_ptPlay`）、全部 `[data-dfx-preview]` 标记与 6 处渲染路径调用，工具块预览行与思考块预览文字改为渲染落地即全显。消除渲染落地后 240ms 内逐帧 rAF 文本写入与每轮全量渲染的 `querySelectorAll('[data-dfx-preview]')` 遍历；`_SKELETON_CACHE_VERSION` 46 → 47；删除对应测试 tests/widgets/test_preview_typewriter.py 与复现脚本 tests/debug/preview_typewriter_repro.py。
 
-## [v0.6.7] - 2026-10-14 (重新发布 #2)
+## [v0.6.7] - 2026-10-14 (重新发布 #3)
 
-自上一版本以来的变更（累计） | 提交数：60 · 文件变更：303 · +16731/-10259 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更（累计） | 提交数：64 · 文件变更：314 · +18266/-10311 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -74,6 +74,10 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build) · 重新发布 #2 追加
 
 - marketplace 由 plugin.json 自动重新生成（[skip ci]，`3a9262f6` `c7f246f8`）
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #3 追加
+
+- **滚轮事件链路线程安全与几何校准** (`14201f4b` `a6b6ece1` `6f69b039` `3eef164f`): UIEventBus 及关联组件加线程安全检查，阻止访问违例；UIPluginRegistry 在主线程初始化 UIEventBus 中继；CodeWebViewer 改为事件驱动的几何校准，修正 armed 态卡片内滚边界判定；新增 `tests/debug/probe_wheel_*.py` 系列真实宿主/合成事件探针与 `tests/widgets/test_welcome_card_pending_delete.py`（防待删除控件在 UI 更新中崩溃）
 
 ## [v0.6.6] - 2026-10-13 (重新发布 #4)
 
