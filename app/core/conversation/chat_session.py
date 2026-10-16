@@ -378,6 +378,8 @@ class SessionManager(QObject):
         self.max_cached_sessions: int = max_cached
         self.keep_messages: int = keep_messages
         self._messages_loader: Optional[Callable[[str], Optional[List[Dict]]]] = None
+        # [MEM] 批 IV：淘汰回调（evict 时整会话被丢弃，由宿主注入全局释放钩子）
+        self._on_evict: Optional[Callable[[str], None]] = None
         self.current_index = -1
 
     # ── 消息体惰性重载（内存治理）──────────────────────────────
@@ -386,6 +388,15 @@ class SessionManager(QObject):
         self._messages_loader = loader
         for s in self.sessions:
             s._messages_loader = loader
+
+    def set_on_evict(self, hook: Callable[[str], None]) -> None:
+        """注入淘汰回调：_evict_if_needed pop 掉会话对象后以 sid 调用。
+
+        evict 是「丢弃整个 ChatSession」路径，比 _release_stale_messages 更
+        彻底；宿主（backend）借此把被淘汰会话在 HistoryManager 内存记录里的
+        消息体一并释放（所有权收敛唯一入口 release_messages_except）。
+        """
+        self._on_evict = hook
 
     def _attach_loader(self, session: ChatSession) -> None:
         session._messages_loader = self._messages_loader
@@ -480,6 +491,13 @@ class SessionManager(QObject):
             self.sessions.pop(idx)
             self._last_access.pop(sid, None)
             removed += 1
+            # [MEM] 批 IV：evict = 丢弃整个 ChatSession（比 _release_stale_messages
+            # 更彻底），通知宿主释放该会话在 HistoryManager 内存记录中的消息体。
+            if self._on_evict:
+                try:
+                    self._on_evict(sid)
+                except Exception as e:
+                    logger.warning(f"[SessionManager] evict 回调异常 (sid={sid[:8]}): {e}")
             # 调整当前索引
             if idx <= self.current_index and self.current_index > 0:
                 self.current_index -= 1
