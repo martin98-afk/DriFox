@@ -1323,6 +1323,22 @@ class AssistantManager:
     ) -> Dict[str, Any]:
         return self._core_store().read_daily_paged(workdir, aid, date, page, per_page)
 
+    def query_daily(
+        self,
+        aid: str,
+        workdir: str,
+        from_date: str = "",
+        to_date: str = "",
+        levels: Optional[List[str]] = None,
+        search: str = "",
+        summary_only: bool = False,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> Dict[str, Any]:
+        return self._core_store().query_daily(
+            workdir, aid, from_date, to_date, levels, search, summary_only, page, per_page
+        )
+
     def daily_exists(self, aid: str, workdir: str, date: str = "") -> bool:
         return self._core_store().daily_exists(workdir, aid, date)
 

@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.tools.result import ToolResult
 
@@ -135,6 +135,21 @@ def _to_int(v, default: int) -> int:
         return default
 
 
+_LOG_LEVEL_SET = {"DEBUG", "INFO", "WARNING", "ERROR"}
+
+
+def _parse_levels(v) -> "List[str] | str":
+    """level 参数（逗号分隔，大小写/中文逗号容错）→ 等级列表；非法时返回错误文案。"""
+    raw = str(v or "").strip()
+    if not raw:
+        return []
+    out = [s.strip().upper() for s in raw.replace("，", ",").split(",") if s.strip()]
+    bad = [s for s in out if s not in _LOG_LEVEL_SET]
+    if bad:
+        return f"非法等级: {','.join(bad)}（可选 DEBUG/INFO/WARNING/ERROR，逗号分隔）"
+    return out
+
+
 def _read_impl(tool_ctx, **kw) -> ToolResult:
     mgr = _get_manager()
     if mgr is None:
@@ -172,7 +187,17 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
         if scope == "daily":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法读取项目日志。")
-            if date:
+            levels = _parse_levels(kw.get("level"))
+            if isinstance(levels, str):
+                return ToolResult(False, error=levels)
+            from_d = str(kw.get("from_date") or "").strip()
+            to_d = str(kw.get("to_date") or "").strip()
+            search = str(kw.get("search") or "").strip()
+            summary_only = bool(kw.get("summary_only"))
+            has_filter = bool(levels or search or summary_only or from_d or to_d)
+            if (date and (from_d or to_d)) or (from_d and to_d and from_d > to_d):
+                return ToolResult(False, error="date 与 from/to 互斥；from 不得晚于 to")
+            if date and not has_filter:
                 # 单日全文（条目分页：防长日志整块砸上下文）
                 page = _to_int(kw.get("page"), 1)
                 r = mgr.read_daily_paged(aid, wd, date, page=page)
@@ -186,6 +211,41 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
                 body = str(r.get("content") or "")
                 if r["pages"] > 1 and r["page"] < r["pages"]:
                     body += f"\n\n（后续还有内容：翻页加 page={r['page'] + 1}，共 {r['pages']} 页）"
+                return ToolResult(True, content=f"{head}\n\n{body}")
+            if date or has_filter:
+                # 运维查询模式：日期范围 + 等级 + 搜索 + 仅摘要，跨天条目流分页（时间线正序，含已蒸馏）
+                try:
+                    r = mgr.query_daily(
+                        aid,
+                        wd,
+                        from_date=from_d or date,
+                        to_date=to_d or date,
+                        levels=levels,
+                        search=search,
+                        summary_only=summary_only,
+                        page=_to_int(kw.get("page"), 1),
+                    )
+                except ValueError as e:
+                    return ToolResult(False, error=str(e))
+                if not r.get("ok"):
+                    return ToolResult(False, error=f"查询日志失败: {r.get('error')}")
+                cond = [f"{from_d or date or '最早'}~{to_d or date or '今天'}"]
+                if levels:
+                    cond.append("等级 " + ",".join(levels))
+                if search:
+                    mode = "正则" if r.get("search_mode") == "regex" else "子串"
+                    cond.append(f"搜索「{search}」（{mode}）")
+                if summary_only:
+                    cond.append("仅摘要")
+                stat = f"命中 {r['matched']}/{r['total']} 条 · 第 {r['page']}/{r['pages']} 页"
+                if r.get("days"):
+                    stat += f" · 涉及 {len(r['days'])} 天"
+                if r["pages"] > 1 and r["page"] < r["pages"]:
+                    stat += f"（翻页加 page={r['page'] + 1}）"
+                head = f"日志查询（{' · '.join(cond)}）：{stat}"
+                body = str(r.get("content") or "")
+                if not body:
+                    return ToolResult(True, content=f"{head}（无命中）")
                 return ToolResult(True, content=f"{head}\n\n{body}")
             # 近期索引：limit 可调（默认 7，上限 90，防日多被截）
             limit = min(max(_to_int(kw.get("limit"), 7), 1), 90)
@@ -338,6 +398,8 @@ _READ_SCHEMA = {
         "description": (
             "读长期记忆。scope=global/project：返回对应 MEMORY.md 全文（超上限时截断并附整理原则，整理后用 memory_write 写回精简版）；"
             "scope=daily 带 date 读某天日志全文（长日志自动分页，翻页加 page）；不带 date 列近期索引（limit 控制条数）；"
+            "scope=daily 带 level/from_date/to_date/search/summary_only 任一参数进入查询模式：按等级/日期范围/正则过滤，"
+            "summary_only=true 只看「时刻|等级|摘要」，跨天条目流按时间线正序分页（date 收窄为单日过滤，与 from_date/to_date 互斥）；"
             "不传 scope 返回概览。已蒸馏日志（.distilled）仍可读。"
             "用户提到过去工作、旧决策、项目约定而当前上下文没有时，先来这里查。"
         ),
@@ -345,10 +407,33 @@ _READ_SCHEMA = {
             "type": "object",
             "properties": {
                 "scope": {"type": "string", "description": "global / project / daily；缺省返回概览"},
-                "date": {"type": "string", "description": "scope=daily 时的日期 YYYY-MM-DD；缺省列出近期索引"},
+                "date": {
+                    "type": "string",
+                    "description": "scope=daily 时的日期 YYYY-MM-DD；缺省列出近期索引；与 from_date/to_date 互斥",
+                },
                 "page": {
                     "type": "integer",
                     "description": "scope=daily 且带 date 时：条目分页页码（每页 20 条），缺省第 1 页",
+                },
+                "level": {
+                    "type": "string",
+                    "description": "scope=daily 查询模式：按等级过滤，逗号分隔多值，如 WARNING 或 info,error",
+                },
+                "from_date": {
+                    "type": "string",
+                    "description": "scope=daily 查询模式：起始日期 YYYY-MM-DD（含），缺省不限；与 date 互斥",
+                },
+                "to_date": {
+                    "type": "string",
+                    "description": "scope=daily 查询模式：结束日期 YYYY-MM-DD（含），缺省今天；与 date 互斥",
+                },
+                "search": {
+                    "type": "string",
+                    "description": "scope=daily 查询模式：按正则（忽略大小写）过滤条目，编译失败自动回落子串",
+                },
+                "summary_only": {
+                    "type": "boolean",
+                    "description": "scope=daily 查询模式：true 只输出「时刻 | 等级 | 摘要」一行，不含正文",
                 },
                 "limit": {
                     "type": "integer",

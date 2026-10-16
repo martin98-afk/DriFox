@@ -380,3 +380,100 @@ def test_drift_current_memory_nonempty_is_normal(tmp_path):
     m.touch_workdir(aid_dir, str(tmp_path / "elsewhere"))
     m.write_project_memory(wd, "build", "当前有记忆")
     assert m.detect_workdir_drift(aid_dir, wd)["drifted"] is False
+
+
+# ── 条目解析 + 结构化查询（运维视图）─────────────────────
+
+
+def test_parse_daily_entries_prefix_and_plain(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "正文第一行 | 含竖线\n正文第二行", "2026-10-16", level="WARNING", summary="修了 X")
+    d = Path(wd) / ".drifox" / "memory" / "build"
+    raw = (d / "2026-10-16.md").read_text(encoding="utf-8")
+    ents = m.parse_daily_entries(raw)
+    assert len(ents) == 1
+    e = ents[0]
+    assert e["level"] == "WARNING" and e["summary"] == "修了 X"
+    assert "正文第一行 | 含竖线" in e["body"] and "正文第二行" in e["body"]
+    assert re.match(r"^2026-10-16 \d{2}:\d{2}:\d{2}$", e["ts"])
+    # 无前缀条目：字段留空，raw 保留原文
+    ents2 = m.parse_daily_entries("- 手写条目\n第二行")
+    assert ents2[0]["ts"] == "" and ents2[0]["level"] == "" and ents2[0]["raw"] == "- 手写条目\n第二行"
+    # 仅三段（无正文）
+    ents3 = m.parse_daily_entries("2026-10-16 08:00:00 | INFO | 只有摘要")
+    assert ents3[0]["summary"] == "只有摘要" and ents3[0]["body"] == ""
+
+
+def test_query_daily_level_filter(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 普通进展", "2026-10-15", summary="常规")
+    m.append_daily(wd, "build", "- 坑 A", "2026-10-15", level="WARNING", summary="坑A")
+    m.append_daily(wd, "build", "- 崩 B", "2026-10-16", level="ERROR", summary="崩B")
+    d = Path(wd) / ".drifox" / "memory" / "build"
+    (d / "2026-10-14.md").write_text("2026-10-14 09:00:00 | INFO | 无等级条目 | 手工", encoding="utf-8")
+    (d / "2026-10-13.md").write_text("- 完全无前缀", encoding="utf-8")
+    r = m.query_daily(wd, "build", levels=["WARNING", "ERROR"])
+    assert r["ok"] and r["matched"] == 2 and r["total"] == 5
+    assert "坑 A" in r["content"] and "崩 B" in r["content"]
+    assert "普通进展" not in r["content"] and "无等级条目" not in r["content"] and "完全无前缀" not in r["content"]
+    # 天间正序（旧→新）
+    assert r["content"].index("坑 A") < r["content"].index("崩 B")
+
+
+def test_query_daily_range_paging_distilled(tmp_path):
+    wd = str(tmp_path / "proj")
+    for i, day in enumerate(["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"]):
+        m.append_daily(wd, "build", f"- 第{i}条", day, summary=f"第{i}条")
+    d = Path(wd) / ".drifox" / "memory" / "build"
+    (d / "2026-10-09.md").write_text("2026-10-09 10:00:00 | INFO | 界外 | 不该出现", encoding="utf-8")
+    # 2026-10-11 打蒸馏标（查询仍须覆盖）
+    assert m.mark_distilled(wd, "build", "2026-10-11")["ok"]
+    r = m.query_daily(wd, "build", from_date="2026-10-10", to_date="2026-10-12", page=1, per_page=2)
+    assert r["ok"] and r["matched"] == 3 and r["total"] == 3 and r["pages"] == 2
+    assert r["days"] == ["2026-10-10", "2026-10-11", "2026-10-12"]
+    assert "第0条" in r["content"] and "第1条" in r["content"] and "第2条" not in r["content"]
+    r2 = m.query_daily(wd, "build", from_date="2026-10-10", to_date="2026-10-12", page=2, per_page=2)
+    assert "第2条" in r2["content"] and "第1条" not in r2["content"]
+
+
+def test_query_daily_search_regex_fallback(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 修复崩溃问题", "2026-10-15", summary="修崩溃")
+    m.append_daily(wd, "build", "- 写了文档", "2026-10-16", summary="文档")
+    r = m.query_daily(wd, "build", search=r"崩\s*溃")
+    assert r["ok"] and r["matched"] == 1 and r["search_mode"] == "regex"
+    assert "崩" in r["content"] and "文档" not in r["content"]
+    # 非法正则 → 回落子串（仅编译失败才走 text 模式）
+    r2 = m.query_daily(wd, "build", search=r"[非法(")
+    assert r2["ok"] and r2["search_mode"] == "text" and r2["matched"] == 0
+    r3 = m.query_daily(wd, "build", search="写了文档")
+    assert r3["ok"] and r3["search_mode"] == "regex" and r3["matched"] == 1
+
+
+def test_query_daily_summary_only_format(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "细节正文很长很长", "2026-10-15", level="WARNING", summary="一句话摘要")
+    r = m.query_daily(wd, "build", summary_only=True)
+    line = r["content"].strip()
+    # 时刻是写入时的真实时钟（非文件日期）；summary_only 只保留前缀行
+    assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| WARNING \| 一句话摘要$", line)
+    assert "细节正文" not in r["content"]
+
+
+def test_query_daily_bad_date_raises(tmp_path):
+    wd = str(tmp_path / "proj")
+    for bad in ["2026-10-1a", "../x", "x/y"]:
+        try:
+            m.query_daily(wd, "build", from_date=bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, f"from_date={bad!r} 应抛 ValueError"
+
+
+def test_query_daily_empty_and_no_hit(tmp_path):
+    assert m.query_daily(str(tmp_path / "none"), "build")["error"] == "not_found"
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 有内容", "2026-10-15")
+    r = m.query_daily(wd, "build", search="不存在的词")
+    assert r["ok"] and r["matched"] == 0 and r["content"] == "" and r["total"] == 1

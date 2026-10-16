@@ -182,6 +182,126 @@ def read_daily_paged(workdir: str | Path, aid: str, date: str = "", page: int = 
     }
 
 
+_ENTRY_HEAD_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<lvl>DEBUG|INFO|WARNING|ERROR) \| ")
+
+
+def parse_daily_entries(raw: str) -> List[Dict]:
+    """日志原文 → 条目列表，解析 loguru 风格前缀（append_daily 写入格式）。
+
+    每条 {"ts","level","summary","body","raw"}；无程序前缀的旧条目/手工条目
+    ts/level/summary 为空串，body=原文。summary 与 body 以第一个 " | " 分界，
+    body 内部（含换行与 " | "）保持原样。
+    """
+    out: List[Dict] = []
+    for e in (x.strip() for x in re.split(r"\n\s*\n", raw)):
+        if not e:
+            continue
+        m = _ENTRY_HEAD_RE.match(e)
+        if not m:
+            out.append({"ts": "", "level": "", "summary": "", "body": e, "raw": e})
+            continue
+        rest = e[m.end() :]
+        parts = rest.split(" | ", 1)
+        out.append(
+            {
+                "ts": m.group("ts"),
+                "level": m.group("lvl"),
+                "summary": parts[0].strip(),
+                "body": parts[1].strip() if len(parts) > 1 else "",
+                "raw": e,
+            }
+        )
+    return out
+
+
+def format_daily_entry(ent: Dict, summary_only: bool = False) -> str:
+    """条目 → 展示文本：仅摘要时输出「时刻 | 等级 | 摘要」，否则原样。"""
+    if not summary_only:
+        return str(ent.get("raw") or "")
+    if ent.get("ts"):
+        return f"{ent['ts']} | {ent['level']} | {ent['summary']}"
+    first = str(ent.get("body") or "").splitlines()
+    return first[0] if first else ""
+
+
+def query_daily(
+    workdir: str | Path,
+    aid: str,
+    from_date: str = "",
+    to_date: str = "",
+    levels: Optional[List[str]] = None,
+    search: str = "",
+    summary_only: bool = False,
+    page: int = 1,
+    per_page: int = 20,
+) -> Dict:
+    """跨天日志结构化查询（运维视图）：日期范围 + 等级 + 搜索 + 仅摘要。
+
+    天间旧→新（时间线正序），含已蒸馏文件；等级过滤时无前缀条目不命中；
+    search 先按正则（忽略大小写），编译失败回落子串（结果带 search_mode）。
+    条目流统一分页。非法日期抛 ValueError。返回
+    {ok, content, page, pages, total, matched, days, search_mode}。
+    """
+    if not workdir:
+        return {"ok": False, "error": "no_workdir"}
+    for v in (from_date, to_date):
+        if v and not is_date_name(v):
+            raise ValueError(f"非法日期: {v!r}（须为 YYYY-MM-DD）")
+    d = project_dir(workdir, aid)
+    if not d.exists():
+        return {"ok": False, "error": "not_found"}
+    pat = None
+    if search:
+        try:
+            pat = re.compile(search, re.IGNORECASE)
+        except re.error:
+            pat = None
+    q = search.strip().lower()
+    lv = {str(x).upper() for x in (levels or [])}
+    files: List[tuple] = []
+    for f in d.glob("*.md"):
+        parsed = parse_daily_stem(f.stem)
+        if f.name == PROJECT_MEMORY_FILE or parsed is None:
+            continue
+        date, _distilled = parsed
+        if from_date and date < from_date:
+            continue
+        if to_date and date > to_date:
+            continue
+        files.append((date, f))
+    total = 0
+    matched: List[str] = []
+    days: set = set()
+    for _date, f in sorted(files):
+        raw = read_text(f)
+        if not raw.strip():
+            continue
+        for ent in parse_daily_entries(raw):
+            total += 1
+            if lv and ent["level"] not in lv:
+                continue
+            if search:
+                hay = ent["raw"]
+                if not (pat.search(hay) if pat is not None else q in hay.lower()):
+                    continue
+            days.add(_date)
+            matched.append(format_daily_entry(ent, summary_only))
+    sep = "\n" if summary_only else "\n\n"
+    pages = max(1, (len(matched) + per_page - 1) // per_page)
+    page = min(max(int(page or 1), 1), pages)
+    start = (page - 1) * per_page
+    return {
+        "ok": True,
+        "content": sep.join(matched[start : start + per_page]),
+        "page": page,
+        "pages": pages,
+        "total": total,
+        "matched": len(matched),
+        "days": sorted(days),
+        "search_mode": ("regex" if pat is not None else ("text" if search else "")),
+    }
+
+
 def list_daily(workdir: str | Path, aid: str, limit: int = DAILY_LOOKBACK) -> List[Dict]:
     """近期日志列表（新→旧）：[{"date", "chars", "distilled"}...]；已蒸馏仍列出。"""
     if not workdir:
