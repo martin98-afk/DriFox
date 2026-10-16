@@ -406,6 +406,10 @@ class SessionManager(QObject):
         candidates.sort(key=lambda s: self._last_access.get(s.session_id, 0.0))
         for s in candidates[: len(candidates) - self.keep_messages]:
             released = s.release_messages()
+            # 防御性双写：release_messages 内部已清 _send_prep_cache，但其
+            # 「已释放/_messages 为空」早退路径清不到；cascade 投影缓存与
+            # 消息体同生命周期，这里无条件清一次兜底。
+            s._send_prep_cache = None
             if released:
                 logger.debug(f"[Memory] 释放非活跃会话消息 {s.session_id[:8]} ({released} 条)")
 
