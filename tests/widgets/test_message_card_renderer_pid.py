@@ -14,6 +14,7 @@ kill 链路用 fake psutil 模块验证判定逻辑本身。
 运行::
     python -m pytest tests/widgets/test_message_card_renderer_pid.py -v
 """
+
 import inspect
 import sys
 import types
@@ -51,6 +52,7 @@ class _StubViewer:
 # ─────────────────────────────────────────────
 # 1/2/3：_renderer_pid property 转发 + 缓存兜底
 # ─────────────────────────────────────────────
+
 
 def test_renderer_pid_forwards_to_alive_viewer(qapp):
     """viewer 存活时 card._renderer_pid == viewer._renderer_pid。"""
@@ -119,6 +121,7 @@ def test_cleanup_resets_pid_cache_not_break_forwarding(qapp):
 # ─────────────────────────────────────────────
 # 4：_kill_renderer 平台感知判定（fake psutil）
 # ─────────────────────────────────────────────
+
 
 class _FakeProcess:
     """psutil.Process 桩：按注册表返回，记录 terminate/kill 调用。"""
@@ -246,6 +249,7 @@ def test_kill_renderer_no_such_process(fake_psutil):
 # 5：finish_streaming 清零 _stream_text_acc
 # ─────────────────────────────────────────────
 
+
 def test_finish_streaming_clears_stream_text_acc(qapp):
     """finish_streaming 落定后 _stream_text_acc == ""（流式全文副本不残留）。"""
     _ensure_qapp()
@@ -273,6 +277,7 @@ def test_finish_streaming_clears_acc_history_path(qapp):
 # ─────────────────────────────────────────────
 # 6：closeEvent 释放循环跳过 pending 会话（TOCTOU）
 # ─────────────────────────────────────────────
+
 
 def test_close_event_pending_skip_structure():
     """源码结构断言：pending 读取在 flush 调用之前 + 循环含跳过分支。
