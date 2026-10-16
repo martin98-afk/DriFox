@@ -1153,6 +1153,7 @@ class UIPluginRow(QFrame):
     clicked = pyqtSignal()
     positionRequested = pyqtSignal(str, str)  # (card_id, container) 右键选择插入方位
     popoutRequested = pyqtSignal(str)  # (key) 右键「弹出为独立窗口」
+    pinToggled = pyqtSignal(str)  # (plugin_name) 右键「固定到常驻区/取消固定」切换
 
     def __init__(
         self,
@@ -1170,6 +1171,7 @@ class UIPluginRow(QFrame):
         self._card_id = card_id  # 存储卡片/窗口 ID，右键菜单定位用
         self._enable_position_menu = enable_position_menu  # 独立 sidebar 项无卡片方位概念，禁用右键菜单
         self._kind = kind  # "sidebar" | "card" | "window"（决定右键菜单构成）
+        self._pin_action = None  # 菜单固定项 QAction（构建于 _build_context_menu，exec_ 返回值分发用）
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
         # 图标 tooltip：收起态只有图标时悬浮可见插件名（与 TabItem 一致）
@@ -1187,11 +1189,10 @@ class UIPluginRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("uiPluginRow")
         self.set_icon(icon)
-        # 右键菜单：card → 插入方位 + 弹出独立窗口；window → 弹出独立窗口；
-        # sidebar 无右键（无内容 widget 可弹）
-        if enable_position_menu or kind == "window":
-            self.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.customContextMenuRequested.connect(self._show_context_menu)
+        # 右键菜单：card → 插入方位 + 弹出 + 固定；window → 弹出 + 固定；
+        # sidebar → 仅固定（无内容 widget 可弹）
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         # 初始应用字体和颜色，避免在 refresh_style() 被调用前显示默认 Qt 字体
         from app.utils.utils import get_unified_font
 
@@ -1305,23 +1306,77 @@ class UIPluginRow(QFrame):
                     lambda checked=False, c=container: self.positionRequested.emit(self._card_id, c)
                 )
             menu.addSeparator()
-        menu.addAction(_make_popout_icon(), "弹出").triggered.connect(
-            lambda checked=False: self.popoutRequested.emit(self._card_id)
-        )
+        if self._kind != "sidebar":
+            menu.addAction(_make_popout_icon(), "弹出").triggered.connect(
+                lambda checked=False: self.popoutRequested.emit(self._card_id)
+            )
+            menu.addSeparator()
+        # 固定到常驻区（用户级，写 app_state；触发经 exec_ 返回值路径，见 _activate_menu_action）
+        self._pin_action = None
+        if self._plugin_name:
+            is_pinned = self._plugin_name in _get_pinned_plugins()
+            self._pin_action = menu.addAction(
+                FIF.UNPIN.icon() if is_pinned else FIF.PIN.icon(),
+                "取消固定" if is_pinned else "固定到常驻区",
+            )
         return menu
 
     def _show_context_menu(self, pos):
-        """显示右键菜单（仅内存生效，不持久化）"""
-        self._build_context_menu().exec_(self.mapToGlobal(pos))
+        """显示右键菜单（方位/弹出仅内存生效；固定项写 app_state）"""
+        menu = self._build_context_menu()
+        self._activate_menu_action(menu.exec_(self.mapToGlobal(pos)))
+
+    def _activate_menu_action(self, action):
+        """菜单关闭后的动作分发（走 exec_ 返回值，不在 triggered 同步栈内发信号：
+        固定项的 handler 会重建行，触发源行与菜单同 parent 链，需等菜单关闭）"""
+        if action is not None and action is self._pin_action:
+            self.pinToggled.emit(self._plugin_name)
 
 
-def _sort_plugin_entries(entries: list) -> list:
-    """插件条目统一排序：priority 降序 → title 字母序兜底（稳定）
+# ── 侧边栏插件固定（pin）──
+# 固定状态存 app_state.json 的 pinned_plugins 键（元素为插件名），
+# 与命令卡处置顶（command_pins）同范式：固定项置常驻区最顶部。
+PINNED_PLUGINS_KEY = "pinned_plugins"
+
+
+def _get_pinned_plugins() -> set:
+    """读取固定在常驻区的插件名集合（异常/脏数据回退空集）"""
+    try:
+        pinned = _state_get(PINNED_PLUGINS_KEY, [])
+        return set(pinned) if isinstance(pinned, list) else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+# ── 侧边栏插件归属判定 ──
+def _resolve_plugin_entry_group(plugin_name: str, explicit_group: str, pm, pinned: set) -> str:
+    """侧边栏条目归属区判定：返回 "system"（常驻区）| "custom"（自定义折叠区）
+
+    优先序：用户固定（pin）> 显式注册 group > 插件归属。
+    插件归属 = is_system（仓库内置）或 overridden_by == "system"——后者是
+    「用户根同名副本覆盖内置版」（插件市场更新内置插件的影子副本策略），
+    不消费该标记时更新后的内置插件条目会从常驻区掉进自定义区。
+    """
+    if plugin_name in pinned:
+        return "system"
+    if explicit_group in ("system", "custom"):
+        return explicit_group
+    try:
+        plugin_info = pm.get_plugin(plugin_name)
+    except Exception:  # noqa: BLE001
+        plugin_info = None
+    if plugin_info is not None and (plugin_info.is_system or getattr(plugin_info, "overridden_by", "") == "system"):
+        return "system"
+    return "custom"
+
+
+def _sort_plugin_entries(entries: list, pinned: frozenset = frozenset()) -> list:
+    """插件条目统一排序：固定项置顶 → priority 降序 → title 字母序兜底（稳定）
 
     regression：refresh_ui_plugins 曾直接 `sort(key=title.lower())`
     导致 SidebarItemInfo.priority 失效（注册优先级被字母序覆盖）。
     """
-    return sorted(entries, key=lambda e: (-e[4], e[2].lower()))
+    return sorted(entries, key=lambda e: (0 if e[3] in pinned else 1, -e[4], e[2].lower()))
 
 
 class TabPanel(QWidget):
@@ -1812,6 +1867,9 @@ class TabPanel(QWidget):
 
         pm = PluginManager.get_instance()
 
+        # 用户固定（pin）：优先级最高，固定项置常驻区顶部（_sort_plugin_entries 消费）
+        pinned = _get_pinned_plugins()
+
         # 兼容映射：已注册独立 sidebar 项的插件 → 跳过其 container="left" 卡片派生
         sidebar_plugin_names = {info.plugin_name for info in sidebar_items}
 
@@ -1826,7 +1884,7 @@ class TabPanel(QWidget):
                 info.plugin_name,
                 info.priority,
             )
-            if info.group == "system":
+            if _resolve_plugin_entry_group(info.plugin_name, info.group, pm, pinned) == "system":
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1835,11 +1893,6 @@ class TabPanel(QWidget):
             # 合成弹窗（popout_card 生成）不出现在左侧栏，避免与源卡片重复条目
             if info.window_id.startswith("popout:"):
                 continue
-            try:
-                plugin_info = pm.get_plugin(info.plugin_name)
-                is_system = plugin_info.is_system if plugin_info else False
-            except Exception:
-                is_system = False
             entry = (
                 "window",
                 info.window_id,
@@ -1849,11 +1902,7 @@ class TabPanel(QWidget):
             )
             # group 注册参数覆盖插件归属（"system" 常驻 / "custom" 自定义 / 空跟随）
             group = getattr(info, "group", "") or ""
-            if group == "system":
-                system_infos.append(entry)
-            elif group == "custom":
-                custom_infos.append(entry)
-            elif is_system:
+            if _resolve_plugin_entry_group(info.plugin_name, group, pm, pinned) == "system":
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1867,10 +1916,8 @@ class TabPanel(QWidget):
                 continue
             try:
                 title = (info.title or "").strip() or card_id
-                plugin_info = pm.get_plugin(info.plugin_name)
-                is_system = plugin_info.is_system if plugin_info else False
                 entry = ("card", card_id, title, info.plugin_name, 0)
-                if is_system:
+                if _resolve_plugin_entry_group(info.plugin_name, "", pm, pinned) == "system":
                     system_infos.append(entry)
                 else:
                     custom_infos.append(entry)
@@ -1878,7 +1925,8 @@ class TabPanel(QWidget):
                 continue
         # Phase E：按 priority 降序 → title 字母序兜底（regression: 旧 sort
         # 只看 title.lower() 抹平了 priority，导致高优先级插件被字母序压在后面）
-        system_infos = _sort_plugin_entries(system_infos)
+        # 用户固定项置顶（pin > priority 降序 > title 字母序）
+        system_infos = _sort_plugin_entries(system_infos, frozenset(pinned))
         custom_infos = _sort_plugin_entries(custom_infos)
         self._plugin_infos = system_infos + custom_infos
 
@@ -1889,7 +1937,28 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._system_plugin_buttons = []
+        seen_pinned_row = False  # 已成功渲染的固定行（分隔线只插在固定行之后）
+        divider_added = False
         for kind, key, title, plugin_name, _priority in system_infos:
+            # 常驻区（固定项）↔ 未固定插件之间的分隔线；无固定项不显示。
+            # 样式对齐 _plugin_separator_2（1px DIVIDER_COLOR）。
+            if not divider_added and seen_pinned_row and plugin_name not in pinned:
+                divider = QFrame(self._system_plugin_section)
+                divider.setFrameShape(QFrame.HLine)
+                divider.setStyleSheet(
+                    f"""
+                    QFrame {{
+                        background: {Colors.DIVIDER_COLOR};
+                        border: none;
+                        min-height: 1px;
+                        max-height: 1px;
+                        margin-top: 4px;
+                        margin-bottom: 2px;
+                    }}
+                    """
+                )
+                self._system_plugin_layout.addWidget(divider)
+                divider_added = True
             # ★ T3 修复：单行构造异常不中断整体刷新（任一插件构造抛异常时
             # 跳过该插件，其余插件继续重建——否则一个"毒条目"导致整批
             # UI 插件按钮全部不显示）。
@@ -1916,8 +1985,11 @@ class TabPanel(QWidget):
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
                 row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
+            row.pinToggled.connect(self._on_ui_plugin_pin_toggled)
             self._system_plugin_layout.addWidget(row)
             self._system_plugin_buttons.append(row)
+            if plugin_name in pinned:
+                seen_pinned_row = True
         has_system = bool(system_infos)
         self._system_plugin_section.setVisible(has_system)
 
@@ -1953,6 +2025,7 @@ class TabPanel(QWidget):
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
                 row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
+            row.pinToggled.connect(self._on_ui_plugin_pin_toggled)
             self._custom_plugin_layout.addWidget(row)
             # 显式 show：清除 Qt 的 hidden 标志。折叠/展开态刷新时 scroll 被强制
             # 隐藏重建，未 show 的新行会被 QWidgetItem 视为空（sizeHint 贡献 0），
@@ -2260,6 +2333,18 @@ class TabPanel(QWidget):
                 registry.open_window(key)
         except Exception as e:
             logger.error(f"[TabPanel] 插件弹窗 {key} 弹出失败：{e}")
+
+    def _on_ui_plugin_pin_toggled(self, plugin_name: str):
+        """侧边栏插件行右键「固定到常驻区/取消固定」：写 app_state 后整表刷新"""
+        if not plugin_name:
+            return
+        pinned = set(_get_pinned_plugins())
+        if plugin_name in pinned:
+            pinned.discard(plugin_name)
+        else:
+            pinned.add(plugin_name)
+        _state_set(PINNED_PLUGINS_KEY, sorted(pinned))
+        self.refresh_ui_plugins()
 
     def _on_ui_plugin_position_requested(self, card_id: str, container: str):
         """按指定方位移动 UI 插件卡片（仅内存生效，不持久化）"""

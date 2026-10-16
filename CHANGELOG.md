@@ -1,9 +1,11 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.9] - 2026-10-16 (重新发布 #2)
+## [未发布]
 
-自 v0.6.8 以来的变更（累计） | 提交数：43 · 文件变更：53 · +3893/-460 | 贡献者：dingma, mading, martin98-afk
+## [v0.6.9] - 2026-10-16 (重新发布 #3)
+
+自 v0.6.8 以来的变更（累计） | 提交数：59 · 文件变更：68 · +5430/-556 | 贡献者：dingma, mading, martin98-afk
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -56,6 +58,30 @@ All notable changes to this project will be documented in this file.
 ### 🔧 测试基建 (Testing Infrastructure) · 重新发布 #2 追加
 
 - 蒸馏与分页回归（`523afba1` `07fb8ea6`, tests/plugins/assistant_hub/）: test_memory_store 补蒸馏打标与门禁清单用例、test_memory_tools 补分页读取/打标/门禁拦截/summary 前缀/超限拒绝对应用例、test_prompts 补说明书收缩与门禁指令断言、test_manager_ext 与 test_llm_client 同步适配
+
+### ✨ 新功能 (New Features) · 重新发布 #3 追加
+
+- **记忆快照/健康/迁移体系** (`f4c8ea42`, `5579de2c`, `d1953557`, `b15470da`, plugins/assistant_hub/): 记忆快照存储层（快照/轮换/预览/恢复）；工作目录漂移检测与记忆迁移；manager 门面统一入口，清除记忆前强制快照；memory_write 覆盖全局/项目记忆前自动快照。
+
+- **助手中心记忆健康行与恢复弹窗** (`a5865676`, `b1488e07`, `4b82111d`, plugins/assistant_hub/): 记忆区健康状态行与漂移迁移提示；快照恢复弹窗（浏览/预览/恢复）接入助手中心。
+
+- **记忆系统文档与日志查询** (`53df8e29`): 记忆系统使用文档；memory_read 日志查询支持按日期范围、等级与正则过滤。
+
+- **侧边栏插件右键固定到常驻区** (`a1492e2b`, `f1e8ab70`, `8e752208`, `43f82a50`, app/widgets/tab_panel.py · tests/widgets/test_tab_panel.py): 插件行右键「固定到常驻区/取消固定」；固定态存 app_state `pinned_plugins`，固定项置常驻区顶部并以分隔线区隔未固定项；右键菜单图标随固定状态切换；归属优先序：用户固定 > 注册 `group` > 插件归属。
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #3 追加
+
+- **插件市场更新内置插件后侧边栏条目掉进自定义区** (`fd817d1b`, app/widgets/tab_panel.py · tests/widgets/test_tab_panel.py): 内置插件更新采用影子副本（新版装用户根 `~/.drifox/plugins/<name>` 覆盖内置版），覆盖后 `is_system=False` 使侧边栏归属翻转。归属判定补消费 `overridden_by == "system"`，更新后的内置插件条目保持常驻区显示。
+
+- **快照恢复弹窗对齐 OverlayBase 视觉体系** (`6100ed99`, plugins/assistant_hub/): 遮罩卡片/主题控件/统一按钮。
+
+### 📚 文档 (Documentation) · 重新发布 #3 追加
+
+- 同步侧边栏插件固定功能与归属修复（`388925ef`）。
+
+### 🔧 测试基建 (Testing Infrastructure) · 重新发布 #3 追加
+
+- TabPanel UI 插件测试过期写法修复（菜单方法名/metadata/__init__ 签名）（`8a5df261`）。
 
 ## [v0.6.8] - 2026-10-16
 

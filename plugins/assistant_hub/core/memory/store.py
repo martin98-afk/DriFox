@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -28,6 +30,13 @@ GLOBAL_MEMORY_FILE = "MEMORY.md"
 PROJECT_MEMORY_FILE = "MEMORY.md"
 # 已蒸馏日志后缀：YYYY-MM-DD.md → YYYY-MM-DD.distilled.md（内容保留可查，蒸馏/门禁时忽略）
 DISTILLED_SUFFIX = ".distilled"
+
+# ── 快照（覆盖写前的历史版本，集中存助手目录，随 Gitee 同步走）──────
+SNAPSHOT_DIR_NAME = "memory_snapshots"
+SNAPSHOT_KEEP = 10
+WORKDIR_STATE_FILE = "workdir_state.json"
+
+_SNAP_NAME_RE = re.compile(r"^\d{8}-\d{6}\.md$")
 
 # 注入相关内容量（manager/prompts 使用）
 DAILY_LOOKBACK = 7  # 注入的近期日志条数
@@ -170,6 +179,126 @@ def read_daily_paged(workdir: str | Path, aid: str, date: str = "", page: int = 
         "pages": pages,
         "total": total,
         "distilled": distilled,
+    }
+
+
+_ENTRY_HEAD_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<lvl>DEBUG|INFO|WARNING|ERROR) \| ")
+
+
+def parse_daily_entries(raw: str) -> List[Dict]:
+    """日志原文 → 条目列表，解析 loguru 风格前缀（append_daily 写入格式）。
+
+    每条 {"ts","level","summary","body","raw"}；无程序前缀的旧条目/手工条目
+    ts/level/summary 为空串，body=原文。summary 与 body 以第一个 " | " 分界，
+    body 内部（含换行与 " | "）保持原样。
+    """
+    out: List[Dict] = []
+    for e in (x.strip() for x in re.split(r"\n\s*\n", raw)):
+        if not e:
+            continue
+        m = _ENTRY_HEAD_RE.match(e)
+        if not m:
+            out.append({"ts": "", "level": "", "summary": "", "body": e, "raw": e})
+            continue
+        rest = e[m.end() :]
+        parts = rest.split(" | ", 1)
+        out.append(
+            {
+                "ts": m.group("ts"),
+                "level": m.group("lvl"),
+                "summary": parts[0].strip(),
+                "body": parts[1].strip() if len(parts) > 1 else "",
+                "raw": e,
+            }
+        )
+    return out
+
+
+def format_daily_entry(ent: Dict, summary_only: bool = False) -> str:
+    """条目 → 展示文本：仅摘要时输出「时刻 | 等级 | 摘要」，否则原样。"""
+    if not summary_only:
+        return str(ent.get("raw") or "")
+    if ent.get("ts"):
+        return f"{ent['ts']} | {ent['level']} | {ent['summary']}"
+    first = str(ent.get("body") or "").splitlines()
+    return first[0] if first else ""
+
+
+def query_daily(
+    workdir: str | Path,
+    aid: str,
+    from_date: str = "",
+    to_date: str = "",
+    levels: Optional[List[str]] = None,
+    search: str = "",
+    summary_only: bool = False,
+    page: int = 1,
+    per_page: int = 20,
+) -> Dict:
+    """跨天日志结构化查询（运维视图）：日期范围 + 等级 + 搜索 + 仅摘要。
+
+    天间旧→新（时间线正序），含已蒸馏文件；等级过滤时无前缀条目不命中；
+    search 先按正则（忽略大小写），编译失败回落子串（结果带 search_mode）。
+    条目流统一分页。非法日期抛 ValueError。返回
+    {ok, content, page, pages, total, matched, days, search_mode}。
+    """
+    if not workdir:
+        return {"ok": False, "error": "no_workdir"}
+    for v in (from_date, to_date):
+        if v and not is_date_name(v):
+            raise ValueError(f"非法日期: {v!r}（须为 YYYY-MM-DD）")
+    d = project_dir(workdir, aid)
+    if not d.exists():
+        return {"ok": False, "error": "not_found"}
+    pat = None
+    if search:
+        try:
+            pat = re.compile(search, re.IGNORECASE)
+        except re.error:
+            pat = None
+    q = search.strip().lower()
+    lv = {str(x).upper() for x in (levels or [])}
+    files: List[tuple] = []
+    for f in d.glob("*.md"):
+        parsed = parse_daily_stem(f.stem)
+        if f.name == PROJECT_MEMORY_FILE or parsed is None:
+            continue
+        date, _distilled = parsed
+        if from_date and date < from_date:
+            continue
+        if to_date and date > to_date:
+            continue
+        files.append((date, f))
+    total = 0
+    matched: List[str] = []
+    days: set = set()
+    for _date, f in sorted(files):
+        raw = read_text(f)
+        if not raw.strip():
+            continue
+        for ent in parse_daily_entries(raw):
+            total += 1
+            if lv and ent["level"] not in lv:
+                continue
+            if search:
+                hay = ent["raw"]
+                if not (pat.search(hay) if pat is not None else q in hay.lower()):
+                    continue
+            days.add(_date)
+            matched.append(format_daily_entry(ent, summary_only))
+    sep = "\n" if summary_only else "\n\n"
+    pages = max(1, (len(matched) + per_page - 1) // per_page)
+    page = min(max(int(page or 1), 1), pages)
+    start = (page - 1) * per_page
+    return {
+        "ok": True,
+        "content": sep.join(matched[start : start + per_page]),
+        "page": page,
+        "pages": pages,
+        "total": total,
+        "matched": len(matched),
+        "days": sorted(days),
+        "search_mode": ("regex" if pat is not None else ("text" if search else "")),
     }
 
 
@@ -370,3 +499,185 @@ def daily_index_text(workdir: str | Path, aid: str, limit: int = DAILY_LOOKBACK)
         tag = " · 已蒸馏" if it.get("distilled") else ""
         lines.append(f"- {it['date']}（{it['chars']} 字{tag}）")
     return "\n".join(lines)
+
+
+# ── 快照 ─────────────────────────────────────────────────
+
+
+def _workdir_key(workdir: str) -> str:
+    """workdir → 稳定短哈希（项目快照组目录名，Windows 大小写不敏感）。"""
+    norm = os.path.normcase(os.path.normpath(str(workdir)))
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:10]
+
+
+def snapshot_dir(aid_dir: Path, kind: str, workdir: str = "") -> Path:
+    """快照组目录：global 固定组；project 按工作目录哈希分组。非法参数抛 ValueError。"""
+    if kind == "global":
+        return Path(aid_dir) / SNAPSHOT_DIR_NAME / "global"
+    if kind == "project" and workdir:
+        return Path(aid_dir) / SNAPSHOT_DIR_NAME / f"project_{_workdir_key(workdir)}"
+    raise ValueError(f"非法快照组: kind={kind!r} workdir={workdir!r}")
+
+
+def _prune_snapshots(sdir: Path) -> None:
+    """按文件名（即时间）排序裁剪，只删合法快照名，origin.json 等不动。"""
+    snaps = sorted(p for p in sdir.glob("*.md") if _SNAP_NAME_RE.match(p.name))
+    for p in snaps[: max(len(snaps) - SNAPSHOT_KEEP, 0)]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def snapshot_memory(aid_dir: Path, kind: str, source: Path, workdir: str = "") -> Dict:
+    """把 source 文件快照入组；源缺失/空白不快照；异常吞掉返回 ok=False（不得阻断主写）。"""
+    try:
+        src = Path(source)
+        if not src.exists() or src.stat().st_size <= 0:
+            return {"ok": False, "error": "no_source"}
+        text = src.read_text(encoding="utf-8")
+        if not text.strip():
+            return {"ok": False, "error": "empty_source"}
+        sdir = snapshot_dir(aid_dir, kind, workdir)
+        sdir.mkdir(parents=True, exist_ok=True)
+        if kind == "project":
+            origin = sdir / "origin.json"
+            if not origin.exists():
+                origin.write_text(json.dumps({"workdir": str(workdir)}, ensure_ascii=False), encoding="utf-8")
+        name = datetime.now().strftime("%Y%m%d-%H%M%S") + ".md"
+        while (sdir / name).exists():  # 同秒冲突 +1s，保持名格式即时间序
+            dt = datetime.strptime(name[:15], "%Y%m%d-%H%M%S") + timedelta(seconds=1)
+            name = dt.strftime("%Y%m%d-%H%M%S") + ".md"
+        _atomic_write(sdir / name, text)
+        _prune_snapshots(sdir)
+        return {"ok": True, "file": name}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def list_snapshots(aid_dir: Path, kind: str, workdir: str = "") -> List[Dict]:
+    """快照列表（新→旧）：[{"file", "ts", "chars"}]；非法组或无目录返回 []。"""
+    try:
+        sdir = snapshot_dir(aid_dir, kind, workdir)
+    except ValueError:
+        return []
+    if not sdir.exists():
+        return []
+    out: List[Dict] = []
+    for p in sorted((q for q in sdir.glob("*.md") if _SNAP_NAME_RE.match(q.name)), reverse=True):
+        ts = f"{p.name[0:4]}-{p.name[4:6]}-{p.name[6:8]} {p.name[9:11]}:{p.name[11:13]}:{p.name[13:15]}"
+        out.append({"file": p.name, "ts": ts, "chars": len(read_text(p).strip())})
+    return out
+
+
+def read_snapshot(aid_dir: Path, kind: str, name: str, workdir: str = "") -> str:
+    """读快照全文；name 仅接受 YYYYMMDD-HHMMSS.md（防穿越），非法抛 ValueError。"""
+    if not _SNAP_NAME_RE.match(name or ""):
+        raise ValueError(f"非法快照名: {name!r}")
+    return read_text(snapshot_dir(aid_dir, kind, workdir) / name)
+
+
+def restore_snapshot(aid_dir: Path, kind: str, name: str, target: Path, workdir: str = "") -> Dict:
+    """恢复快照到 target；恢复前 target 现有内容先入快照（可反悔），原子写回。"""
+    content = read_snapshot(aid_dir, kind, name, workdir)
+    tgt = Path(target)
+    backup = ""
+    if tgt.exists() and tgt.stat().st_size > 0:
+        r = snapshot_memory(aid_dir, kind, tgt, workdir)
+        backup = str(r.get("file") or "")
+    _atomic_write(tgt, content)
+    return {"ok": True, "restored_from": name, "backup": backup}
+
+
+# ── 工作目录状态与漂移 ───────────────────────────────────
+
+
+def _workdir_state_path(aid_dir: Path) -> Path:
+    return Path(aid_dir) / WORKDIR_STATE_FILE
+
+
+def _read_workdir_state(aid_dir: Path) -> Dict:
+    try:
+        data = json.loads(_workdir_state_path(aid_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_workdir_state(aid_dir: Path, data: Dict) -> None:
+    _atomic_write(_workdir_state_path(aid_dir), json.dumps(data, ensure_ascii=False))
+
+
+def touch_workdir(aid_dir: Path, workdir: str) -> None:
+    """记录最近使用的工作目录（仅变化时落盘；memory 工具每次带 workdir 调用）。"""
+    if not workdir:
+        return
+    data = _read_workdir_state(aid_dir)
+    if data.get("last_workdir") != str(workdir):
+        data["last_workdir"] = str(workdir)
+        _write_workdir_state(aid_dir, data)
+
+
+def detect_workdir_drift(aid_dir: Path, workdir: str) -> Dict:
+    """漂移检测：当前项目记忆为空而上次工作目录有记忆 → 可能换了目录（提示，不自动动）。
+
+    当前记忆非空视为正常（顺带 touch）；无记录/同目录/旧记忆为空/已忽略 → 不报。
+    """
+    if not workdir:
+        return {"drifted": False}
+    if read_project_memory(workdir, Path(aid_dir).name).strip():
+        touch_workdir(aid_dir, workdir)
+        return {"drifted": False}
+    data = _read_workdir_state(aid_dir)
+    old = str(data.get("last_workdir") or "")
+    if not old or os.path.normcase(old) == os.path.normcase(str(workdir)):
+        return {"drifted": False}
+    if _workdir_key(old) in (data.get("dismissed") or []):
+        return {"drifted": False}
+    old_mem = read_project_memory(old, Path(aid_dir).name).strip()
+    if not old_mem:
+        return {"drifted": False}
+    return {"drifted": True, "old_workdir": old, "old_chars": len(old_mem)}
+
+
+def dismiss_drift(aid_dir: Path, workdir: str) -> None:
+    """把某工作目录加入忽略名单（用户明确说不是漂移）。"""
+    if not workdir:
+        return
+    data = _read_workdir_state(aid_dir)
+    key = _workdir_key(workdir)
+    dismissed = list(data.get("dismissed") or [])
+    if key not in dismissed:
+        dismissed.append(key)
+        data["dismissed"] = dismissed
+        _write_workdir_state(aid_dir, data)
+
+
+def migrate_project_memory(aid_dir: Path, old_workdir: str, new_workdir: str) -> Dict:
+    """把旧工作目录的项目记忆整体迁到新目录（MEMORY.md + 全部日志）；仅新位置记忆为空时允许。
+
+    旧目录文件保留不删（安全）；迁移后 touch 新目录，漂移自然消失。
+    """
+    if not old_workdir or not new_workdir:
+        return {"ok": False, "error": "bad_args"}
+    if os.path.normcase(old_workdir) == os.path.normcase(new_workdir):
+        return {"ok": False, "error": "same_dir"}
+    aid = Path(aid_dir).name
+    if read_project_memory(new_workdir, aid).strip():
+        return {"ok": False, "error": "target_not_empty"}
+    src_dir = project_dir(old_workdir, aid)
+    if not src_dir.exists():
+        return {"ok": False, "error": "no_source"}
+    dst_dir = project_dir(new_workdir, aid)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    moved: List[str] = []
+    for f in sorted(src_dir.glob("*.md")):
+        parsed = parse_daily_stem(f.stem)
+        if f.name != PROJECT_MEMORY_FILE and parsed is None:
+            continue  # 用户杂项文件不迁
+        _atomic_write(dst_dir / f.name, read_text(f))
+        moved.append(f.name)
+    if not moved:
+        return {"ok": False, "error": "no_source"}
+    touch_workdir(aid_dir, new_workdir)
+    return {"ok": True, "moved": moved}

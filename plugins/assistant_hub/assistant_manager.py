@@ -1323,6 +1323,22 @@ class AssistantManager:
     ) -> Dict[str, Any]:
         return self._core_store().read_daily_paged(workdir, aid, date, page, per_page)
 
+    def query_daily(
+        self,
+        aid: str,
+        workdir: str,
+        from_date: str = "",
+        to_date: str = "",
+        levels: Optional[List[str]] = None,
+        search: str = "",
+        summary_only: bool = False,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> Dict[str, Any]:
+        return self._core_store().query_daily(
+            workdir, aid, from_date, to_date, levels, search, summary_only, page, per_page
+        )
+
     def daily_exists(self, aid: str, workdir: str, date: str = "") -> bool:
         return self._core_store().daily_exists(workdir, aid, date)
 
@@ -1345,9 +1361,78 @@ class AssistantManager:
             str(store.global_memory_path(self._assistant_dir(aid))),
         )
 
+    # ── 快照 / 健康（用户侧恢复与状态，模型工具面不含）──
+
+    def snapshot_memory(self, aid: str, kind: str, workdir: str = "") -> Dict[str, Any]:
+        """覆盖写前快照：global 取全局 MEMORY.md；project 取当前 workdir 的 MEMORY.md。"""
+        store = self._core_store()
+        a_dir = self._assistant_dir(aid)
+        src = store.global_memory_path(a_dir) if kind == "global" else store.project_memory_path(workdir, aid)
+        return store.snapshot_memory(a_dir, kind, src, workdir)
+
+    def memory_snapshots(self, aid: str, kind: str, workdir: str = "") -> List[Dict[str, Any]]:
+        return self._core_store().list_snapshots(self._assistant_dir(aid), kind, workdir)
+
+    def read_memory_snapshot(self, aid: str, kind: str, name: str, workdir: str = "") -> str:
+        return self._core_store().read_snapshot(self._assistant_dir(aid), kind, name, workdir)
+
+    def restore_memory_snapshot(self, aid: str, kind: str, name: str, workdir: str = "") -> Dict[str, Any]:
+        store = self._core_store()
+        a_dir = self._assistant_dir(aid)
+        target = store.global_memory_path(a_dir) if kind == "global" else store.project_memory_path(workdir, aid)
+        return store.restore_snapshot(a_dir, kind, name, target, workdir)
+
+    def memory_health(self, aid: str, workdir: str = "") -> Dict[str, Any]:
+        """健康聚合：未蒸馏天数 / 超限 / 上次蒸馏 / 快照数 / 漂移（UI 状态行 + 恢复弹窗数据源）。"""
+        store = self._core_store()
+        a_dir = self._assistant_dir(aid)
+        lims = self.memory_max_chars(aid)
+        g_text = store.read_global_memory(a_dir).strip()
+        p_text = store.read_project_memory(workdir, aid).strip() if workdir else ""
+        stale_days = 0
+        last_distill = ""
+        if workdir:
+            pdir = store.project_dir(workdir, aid)
+            if pdir.exists():
+                undistilled = store.undistilled_before(workdir, aid)
+                if undistilled:
+                    d0 = datetime.strptime(undistilled[0], "%Y-%m-%d").date()
+                    stale_days = (datetime.now().date() - d0).days
+                newest = ""
+                for f in pdir.glob("*.md"):
+                    parsed = store.parse_daily_stem(f.stem)
+                    if parsed and parsed[1] and parsed[0] > newest:
+                        newest = parsed[0]
+                last_distill = newest
+        return {
+            "stale_days": stale_days,
+            "over_limit": {
+                "global": len(g_text) > lims["global"],
+                "project": bool(workdir) and len(p_text) > lims["project"],
+            },
+            "usage": {"global": [len(g_text), lims["global"]], "project": [len(p_text), lims["project"]]},
+            "last_distill": last_distill,
+            "snapshot_counts": {
+                "global": len(store.list_snapshots(a_dir, "global")),
+                "project": len(store.list_snapshots(a_dir, "project", workdir)) if workdir else 0,
+            },
+            "drift": store.detect_workdir_drift(a_dir, workdir) if workdir else {"drifted": False},
+        }
+
+    def migrate_project_memory(self, aid: str, old_workdir: str, new_workdir: str) -> Dict[str, Any]:
+        return self._core_store().migrate_project_memory(self._assistant_dir(aid), old_workdir, new_workdir)
+
+    def dismiss_workdir_drift(self, aid: str, old_workdir: str) -> None:
+        self._core_store().dismiss_drift(self._assistant_dir(aid), old_workdir)
+
     def clear_all_memory(self, aid: str, workdir: str = "") -> None:
-        """清除该助手全部记忆（全局 MEMORY.md + 项目记忆目录）；人工提示保留。"""
-        self._core_store().clear_memory(self._assistant_dir(aid), workdir)
+        """清除该助手全部记忆（全局 MEMORY.md + 项目记忆目录）；清除前强制快照（可恢复）；人工提示保留。"""
+        store = self._core_store()
+        a_dir = self._assistant_dir(aid)
+        store.snapshot_memory(a_dir, "global", store.global_memory_path(a_dir))
+        if workdir:
+            store.snapshot_memory(a_dir, "project", store.project_memory_path(workdir, aid), workdir)
+        store.clear_memory(a_dir, workdir)
 
     # ── 经验 ──
 

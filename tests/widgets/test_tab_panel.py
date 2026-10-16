@@ -22,6 +22,16 @@ def panel(qtbot):
     return p
 
 
+@pytest.fixture
+def isolated_app_state(tmp_path, monkeypatch):
+    """app_state 隔离到 tmp_path（不读写真实缓存文件）；范式对齐 test_tab_panel_team_collapse.py"""
+    from app.utils import app_state
+
+    monkeypatch.setattr(app_state, "_state_file", lambda: tmp_path / "app_state.json")
+    monkeypatch.setattr(app_state, "_cache", {})
+    yield app_state
+
+
 class TestTabPanel:
     def test_gitee_account_row_exists(self, panel):
         """验证底部存在 GiteeAccountRow 且其右侧为设置按钮"""
@@ -327,24 +337,27 @@ class TestUIPluginRowPositionMenu:
         received = []
         row.positionRequested.connect(lambda cid, cont: received.append((cid, cont)))
 
-        menu = row._build_position_menu()
+        menu = row._build_context_menu()
         actions = menu.actions()
-        labels = [a.text() for a in actions]
-        assert labels == ["下", "左", "右", "替换"]
+        pos_actions = actions[:4]
+        assert [a.text() for a in pos_actions] == ["下", "左", "右", "替换"]
         # 每项都带图标（黑=显示位置，白=空白）
-        assert all(not a.icon().isNull() for a in actions)
+        assert all(not a.icon().isNull() for a in pos_actions)
+        # 第 5 项为分隔线，其后为「弹出」
+        assert actions[4].isSeparator()
+        assert actions[5].text() == "弹出"
         # 触发「替换」→ full
-        actions[3].trigger()
+        pos_actions[3].trigger()
         assert received == [("card_x", "full")]
         # 触发「左」→ left
-        actions[1].trigger()
+        pos_actions[1].trigger()
         assert received == [("card_x", "full"), ("card_x", "left")]
 
     def test_refresh_ui_plugins_position_requested_connected(self, panel, qtbot):
         """refresh_ui_plugins 后系统/自定义插件行的 positionRequested 均已连接处理函数"""
         cards = {
-            "sys_card": MagicMock(title="系统卡", plugin_name="sys_plugin"),
-            "custom_card": MagicMock(title="自定义卡", plugin_name="custom_plugin"),
+            "sys_card": MagicMock(title="系统卡", plugin_name="sys_plugin", metadata={}),
+            "custom_card": MagicMock(title="自定义卡", plugin_name="custom_plugin", metadata={}),
         }
         sys_plugin = MagicMock(is_system=True)
         custom_plugin = MagicMock(is_system=False)
@@ -370,7 +383,9 @@ class TestUIPluginRowPositionMenu:
         panel.setParent(host)
 
         with (
-            patch("app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry),
+            patch(
+                "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
+            ),
             patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
         ):
             panel.refresh_ui_plugins()
@@ -484,10 +499,12 @@ class TestRefreshUIPluginsPoisonIsolation:
 
         real_init = UIPluginRow.__init__
 
-        def poison_init(self, title, icon=None, parent=None, plugin_name="", card_id="", enable_position_menu=True):
+        def poison_init(
+            self, title, icon=None, parent=None, plugin_name="", card_id="", enable_position_menu=True, kind="card"
+        ):
             if card_id == "poison-card":
                 raise RuntimeError("poison row construction")
-            real_init(self, title, icon, parent, plugin_name, card_id, enable_position_menu)
+            real_init(self, title, icon, parent, plugin_name, card_id, enable_position_menu, kind)
 
         with (
             patch("app.widgets.tab_panel.UIPluginRow.__init__", poison_init),
@@ -498,3 +515,155 @@ class TestRefreshUIPluginsPoisonIsolation:
 
         card_ids = [row._card_id for row in panel._system_plugin_buttons]
         assert card_ids == ["good-card"], f"毒条目应被跳过、正常条目保留: {card_ids}"
+
+
+class TestPluginEntryGroupResolve:
+    """侧边栏插件条目归属判定：overridden_by 消费（影子副本回常驻区）"""
+
+    def test_shadow_copy_stays_in_system_area(self, panel):
+        """用户根副本覆盖内置插件（overridden_by="system"）→ 条目仍归常驻区"""
+        cards = {
+            "shadow_card": MagicMock(title="影子卡", plugin_name="shadow_plugin", metadata={}),
+            "user_card": MagicMock(title="用户卡", plugin_name="user_plugin", metadata={}),
+        }
+        shadow_plugin = MagicMock(is_system=False, overridden_by="system")
+        user_plugin = MagicMock(is_system=False, overridden_by="")
+        fake_pm = MagicMock()
+        fake_pm.get_plugin.side_effect = lambda name: shadow_plugin if name == "shadow_plugin" else user_plugin
+        fake_registry = MagicMock()
+        fake_registry.get_floating_cards.return_value = cards
+        fake_registry.get_sidebar_items.return_value = []
+        fake_registry.get_window_infos.return_value = []
+
+        with (
+            patch(
+                "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
+            ),
+            patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+        ):
+            panel.refresh_ui_plugins()
+
+        assert [row._card_id for row in panel._system_plugin_buttons] == ["shadow_card"]
+        assert [row._card_id for row in panel._custom_plugin_buttons] == ["user_card"]
+
+    def test_pinned_plugin_moves_to_system_top(self, panel, isolated_app_state):
+        """被固定的用户插件：进常驻区且置顶（即使标题字母序靠后）"""
+        cards = {
+            "sys_card": MagicMock(title="A系统卡", plugin_name="sys_plugin", metadata={}),
+            "pinned_card": MagicMock(title="Z固定卡", plugin_name="pinned_plugin", metadata={}),
+        }
+        sys_plugin = MagicMock(is_system=True, overridden_by="")
+        pinned_plugin = MagicMock(is_system=False, overridden_by="")
+        fake_pm = MagicMock()
+        fake_pm.get_plugin.side_effect = lambda name: sys_plugin if name == "sys_plugin" else pinned_plugin
+        fake_registry = MagicMock()
+        fake_registry.get_floating_cards.return_value = cards
+        fake_registry.get_sidebar_items.return_value = []
+        fake_registry.get_window_infos.return_value = []
+        isolated_app_state.set("pinned_plugins", ["pinned_plugin"])
+
+        with (
+            patch(
+                "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
+            ),
+            patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+        ):
+            panel.refresh_ui_plugins()
+
+        # 固定项置顶：排在系统条目之前（标题字母序靠后也不影响）
+        assert [row._card_id for row in panel._system_plugin_buttons] == ["pinned_card", "sys_card"]
+        assert panel._custom_plugin_buttons == []
+
+
+class TestUIPluginRowPinMenu:
+    """UIPluginRow 右键「固定到常驻区」菜单"""
+
+    def test_card_menu_pin_action(self, panel, isolated_app_state):
+        """card 菜单：方位×4 + 分隔 + 弹出 + 分隔 + 固定；动作经 exec_ 返回值路径触发"""
+        row = UIPluginRow("测试插件", None, panel, plugin_name="test_plugin", card_id="card_x")
+        received = []
+        row.pinToggled.connect(lambda name: received.append(name))
+
+        actions = row._build_context_menu().actions()
+        assert [a.text() for a in actions if not a.isSeparator()] == [
+            "下",
+            "左",
+            "右",
+            "替换",
+            "弹出",
+            "固定到常驻区",
+        ]
+        assert row._pin_action is not None
+        # 模拟菜单关闭后的分发（_show_context_menu 内部同路径）
+        row._activate_menu_action(row._pin_action)
+        assert received == ["test_plugin"]
+
+    def test_card_menu_pin_label_when_pinned(self, panel, isolated_app_state):
+        """已固定插件：菜单项文案切换为「取消固定」"""
+        isolated_app_state.set("pinned_plugins", ["test_plugin"])
+        row = UIPluginRow("测试插件", None, panel, plugin_name="test_plugin", card_id="card_x")
+        row._build_context_menu()
+        assert row._pin_action.text() == "取消固定"
+
+    def test_window_menu_pin_action(self, panel, isolated_app_state):
+        """window 菜单：弹出 + 分隔 + 固定（无方位段）"""
+        row = UIPluginRow(
+            "窗口",
+            None,
+            panel,
+            plugin_name="win_plugin",
+            card_id="win_x",
+            enable_position_menu=False,
+            kind="window",
+        )
+        labels = [a.text() for a in row._build_context_menu().actions() if not a.isSeparator()]
+        assert labels == ["弹出", "固定到常驻区"]
+
+    def test_sidebar_menu_pin_only(self, panel, isolated_app_state):
+        """sidebar 条目放开右键：菜单仅「固定到常驻区」（无方位/弹出）"""
+        row = UIPluginRow(
+            "侧栏项",
+            None,
+            panel,
+            plugin_name="side_plugin",
+            card_id="item_x",
+            enable_position_menu=False,
+            kind="sidebar",
+        )
+        assert row.contextMenuPolicy() == Qt.CustomContextMenu
+        labels = [a.text() for a in row._build_context_menu().actions()]
+        assert labels == ["固定到常驻区"]
+
+
+class TestPluginPinFlow:
+    """固定端到端：行信号（已连接）→ app_state 落盘 → 刷新分区 → 取消固定回落"""
+
+    def test_pin_signal_flow(self, panel, isolated_app_state):
+        cards = {"custom_card": MagicMock(title="用户卡", plugin_name="custom_plugin", metadata={})}
+        custom_plugin = MagicMock(is_system=False, overridden_by="")
+        fake_pm = MagicMock()
+        fake_pm.get_plugin.return_value = custom_plugin
+        fake_registry = MagicMock()
+        fake_registry.get_floating_cards.return_value = cards
+        fake_registry.get_sidebar_items.return_value = []
+        fake_registry.get_window_infos.return_value = []
+
+        with (
+            patch(
+                "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
+            ),
+            patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+        ):
+            panel.refresh_ui_plugins()
+            assert [r._card_id for r in panel._custom_plugin_buttons] == ["custom_card"]
+
+            # 固定：行信号（已连接）→ 写 app_state → 刷新后条目进常驻区
+            panel._custom_plugin_buttons[0].pinToggled.emit("custom_plugin")
+            assert isolated_app_state.get("pinned_plugins") == ["custom_plugin"]
+            assert [r._card_id for r in panel._system_plugin_buttons] == ["custom_card"]
+            assert panel._custom_plugin_buttons == []
+
+            # 取消固定：行已重建，从新行再发
+            panel._system_plugin_buttons[0].pinToggled.emit("custom_plugin")
+            assert isolated_app_state.get("pinned_plugins") == []
+            assert [r._card_id for r in panel._custom_plugin_buttons] == ["custom_card"]

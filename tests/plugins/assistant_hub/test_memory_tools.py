@@ -9,6 +9,7 @@ import importlib.util
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 _ROOT = Path(__file__).resolve().parents[3]
 _MODULE = _ROOT / "plugins" / "assistant_hub" / "tools" / "memory_tools.py"
@@ -35,6 +36,8 @@ class _Mgr:
         self.gate_calls = 0
         self.last_level = ""  # 最近一次 append_daily 的 level（透传测试）
         self.last_summary = ""
+        self.last_query: Optional[Dict[str, Any]] = None  # 最近一次 query_daily 的参数（查询模式透传测试）
+        self.snapshots = []  # (aid, kind) — 写前快照调用记录
         self._tmp = tmp_path
 
     def _today(self):
@@ -135,11 +138,51 @@ class _Mgr:
     def memory_max_chars(self, aid=""):
         return {"global": 4000, "project": 3000}
 
+    def snapshot_memory(self, aid, kind, workdir=""):
+        self.snapshots.append((aid, kind))
+        return {"ok": True, "file": "snap.md"}
+
     def memory_paths(self, aid, wd=""):
         out = {"global": str(self._tmp / "MEMORY.md")}
         if wd:
             out["project"] = str(self._tmp / "proj" / "MEMORY.md")
         return out
+
+    def query_daily(
+        self,
+        aid,
+        wd,
+        from_date="",
+        to_date="",
+        levels=None,
+        search="",
+        summary_only=False,
+        page=1,
+        per_page=20,
+    ):
+        """打桩：记录参数并返回固定命中（透传与分支测试）。"""
+        self.last_query = {
+            "aid": aid,
+            "wd": wd,
+            "from_date": from_date,
+            "to_date": to_date,
+            "levels": list(levels or []),
+            "search": search,
+            "summary_only": summary_only,
+            "page": page,
+        }
+        return {
+            "ok": True,
+            "content": "2026-10-16 10:00:00 | INFO | 桩条目 | 正文"
+            if (levels or search or summary_only or from_date or to_date)
+            else "",
+            "page": 1,
+            "pages": 1,
+            "total": 1,
+            "matched": 1 if (levels or search or summary_only or from_date or to_date) else 0,
+            "days": ["2026-10-16"] if (levels or search or summary_only or from_date or to_date) else [],
+            "search_mode": ("regex" if search else ""),
+        }
 
 
 def _patch(monkeypatch, tmp_path):
@@ -318,10 +361,92 @@ def test_read_daily_index_limit(monkeypatch, tmp_path):
         m._write_impl(_ctx("/proj"), scope="daily", content=f"- {d}", date=d)
     r = m._read_impl(_ctx("/proj"), scope="daily", limit=2)
     assert "2026-10-03" in r.content and "2026-10-02" in r.content and "2026-10-01" not in r.content
-    # 已蒸馏标注
-    m._write_impl(_ctx("/proj"), scope="daily", date="2026-10-03", mark_distilled=True)
+
+
+# ── 查询模式（等级 / 日期范围 / 搜索 / 仅摘要）──────────────
+
+
+def test_read_daily_query_level(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    r = m._read_impl(_ctx("/proj"), scope="daily", level="warning,error")
+    assert r.success and "等级 WARNING,ERROR" in r.content and "命中 1/1" in r.content
+    assert "桩条目" in r.content
+    q = mgr.last_query
+    assert q is not None and q["levels"] == ["WARNING", "ERROR"] and q["from_date"] == "" and q["to_date"] == ""
+    # 不带过滤参数不走查询（近期索引）
+    mgr.last_query = None
+    m._write_impl(_ctx("/proj"), scope="daily", content="- 有条目", date="2026-10-01")
     r2 = m._read_impl(_ctx("/proj"), scope="daily")
-    assert "已蒸馏" in r2.content
+    assert mgr.last_query is None and "近期工作日志" in r2.content and "2026-10-01" in r2.content
+
+
+def test_read_daily_query_range_and_summary_only(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    r = m._read_impl(_ctx("/proj"), scope="daily", from_date="2026-10-10", to_date="2026-10-16", summary_only=True)
+    assert r.success and "仅摘要" in r.content and "2026-10-10~2026-10-16" in r.content
+    q = mgr.last_query
+    assert q is not None and q["from_date"] == "2026-10-10" and q["to_date"] == "2026-10-16" and q["summary_only"] is True
+
+
+def test_read_daily_query_single_date_with_filter(monkeypatch, tmp_path):
+    """date + 过滤参数 → 单日过滤查询（from=to=date）。"""
+    mgr = _patch(monkeypatch, tmp_path)
+    r = m._read_impl(_ctx("/proj"), scope="daily", date="2026-10-16", search="坑")
+    assert r.success and "搜索「坑」（正则）" in r.content
+    q = mgr.last_query
+    assert q is not None and q["from_date"] == "2026-10-16" and q["to_date"] == "2026-10-16" and q["search"] == "坑"
+
+
+def test_read_daily_query_param_errors(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    r = m._read_impl(_ctx("/proj"), scope="daily", level="bogus")
+    assert not r.success and "非法等级" in (r.error or "")
+    r2 = m._read_impl(_ctx("/proj"), scope="daily", date="2026-10-16", from_date="2026-10-10")
+    assert not r2.success and "互斥" in (r2.error or "")
+    r3 = m._read_impl(_ctx("/proj"), scope="daily", from_date="2026-10-16", to_date="2026-10-10")
+    assert not r3.success and "不得晚于" in (r3.error or "")
+
+
+def test_read_daily_query_no_hit(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    # 打桩：无命中（空 content）
+    mgr.last_query = None
+    orig = mgr.query_daily
+
+    def _empty(
+        aid,
+        wd,
+        from_date="",
+        to_date="",
+        levels=None,
+        search="",
+        summary_only=False,
+        page=1,
+        per_page=20,
+    ):
+        mgr.last_query = {
+            "from_date": from_date,
+            "to_date": to_date,
+            "levels": list(levels or []),
+            "search": search,
+            "summary_only": summary_only,
+            "page": page,
+        }
+        return {
+            "ok": True,
+            "content": "",
+            "page": 1,
+            "pages": 1,
+            "total": 5,
+            "matched": 0,
+            "days": [],
+            "search_mode": "text",
+        }
+
+    mgr.query_daily = _empty
+    r = m._read_impl(_ctx("/proj"), scope="daily", search="不存在")
+    assert r.success and "无命中" in r.content and "命中 0/5" in r.content
+    assert "桩条目" not in r.content
 
 
 def test_register_registers_both(monkeypatch):
@@ -335,3 +460,17 @@ def test_register_registers_both(monkeypatch):
     reg = _Reg()
     m.register(reg)
     assert reg.names == ["memory_read", "memory_write"]
+
+
+def test_write_global_snapshots_before_write(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    r = m._write_impl(_ctx(), scope="global", content="新全局记忆")
+    assert r.success
+    assert ("build", "global") in mgr.snapshots
+
+
+def test_write_project_snapshots_before_write(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    r = m._write_impl(_ctx("/proj"), scope="project", content="新项目记忆")
+    assert r.success
+    assert ("build", "project") in mgr.snapshots
