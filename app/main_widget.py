@@ -11370,35 +11370,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         从长对话新建会话后，旧会话的消息数据仍缓存在 HistoryManager._history_sessions
         中占用内存。将其标记为可释放（messages 置空），后续访问时从 SQLite 按需重载。
+
+        [MEM] 批 IV：实现委托给 HistoryManager.release_messages_except（唯一
+        权威释放入口，pending 竞态守卫 / 释放态标记均内聚在那里），本方法只
+        负责「活跃集合 = 本窗口 SessionManager 当前持有」的调用适配。
         """
         if not hasattr(self, "session_manager") or not self.session_manager:
             return
+        hm = getattr(self, "history_manager", None)
+        if hm is None or not hasattr(hm, "release_messages_except"):
+            return
         active_ids = {s.session_id for s in self.session_manager.get_all_sessions()}
-        # 🛡️ 竞态守卫：延迟保存（_schedule_save → QTimer 1000ms → _do_save）
-        # 窗口内若本方法把 pending 会话的 messages 置空，_do_save 会用
-        # serialize([]) 覆盖 SQLite 中该会话的完整消息（历史消息丢失、
-        # 加载后列表为空的根因之一）。pending 会话跳过释放，等落库后再回收。
-        pending_id = getattr(self.history_manager, "_pending_save_session_id", None)
-        released = 0
-        try:
-            for session in self.history_manager._history_sessions:
-                sid = session.get("session_id")
-                if sid and sid not in active_ids and session.get("messages"):
-                    if pending_id and sid == pending_id:
-                        continue  # 跳过 pending 会话，避免空消息覆盖 DB
-                    session["messages"] = []
-                    # 🛡️ 释放态标记：与 history_manager 的 `_do_save` /
-                    # `flush_async` 空消息守卫同口径 —— 只有打了本标记的空列表
-                    # 才被当作「无数据可写」跳过落库；显式清空（/compact --clear）
-                    # 的空列表必须照写，否则清空只在内存生效、DB 保留旧消息。
-                    session["_messages_released"] = True
-                    released += 1
-            if released:
-                from loguru import logger
-
-                logger.debug(f"[Memory] 已释放 {released} 个非活跃会话的消息数据")
-        except Exception:
-            pass
+        released = hm.release_messages_except(active_ids)
+        if released:
+            logger.debug(f"[Memory] 已释放 {released} 个非活跃会话的消息数据")
 
     def _display_current_session(self):
         # 会话切换：撤销条目绑定在具体 session 上，跨会话一律失效
