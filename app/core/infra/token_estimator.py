@@ -212,22 +212,55 @@ def _fast_estimate_tokens(text: str) -> int:
 
 
 
-@lru_cache(maxsize=1024)
 def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     """
     估算文本的 token 数量
-    
+
     Args:
         text: 要估算的文本
         model: 模型名称 (用于选择编码)
-    
+
     Returns:
         token 数量
-    
+
     Note:
-        使用 lru_cache 缓存结果，相同文本只需计算一次。
-        对于长文本或重复调用的场景效果显著。
+        🔧 缓存键改 hash：外层无缓存（同时承担空文本短路），把
+        (hash(text), len(text), model) 传给内层 lru_cache——缓存不再持有
+        消息全文引用（长消息曾致缓存峰值膨胀且阻止已压缩消息字符串被 GC）。
+        hash+len 双键防跨文本碰撞误命中；hash() 进程内一致即可（lru_cache
+        本就是进程内生命周期，不跨进程）。容量 1024 → 256（键已轻量，
+        下调无命中率损失）。
+        原文传递：lru_cache MISS 时内层需要原文重算，经 thread-local 单槽
+        寄存器获取——同线程内 estimate_tokens 非重入，MISS 必然紧跟外层
+        调用，单槽无交错风险；命中路径不读寄存器，纯缓存返回。
     """
+    if not text:
+        return 0
+    _cache_text_reg.text = text
+    return _estimate_tokens_cached(hash(text), len(text), model)
+
+
+# 内层缓存的原文寄存器：thread-local（各线程独立，无锁）
+_cache_text_reg = threading.local()
+
+
+@lru_cache(maxsize=256)
+def _estimate_tokens_cached(text_hash: int, text_len: int, model: str) -> int:
+    """内层缓存实现：键为 (hash, len, model)，不持消息全文。
+
+    仅在 MISS 时从 _cache_text_reg 取原文计算；命中时完全不触碰寄存器。
+    """
+    text = getattr(_cache_text_reg, "text", "") or ""
+    # 尝试使用 tiktoken
+    encoder = _get_encoder(_get_encoding_name(model))
+    if encoder:
+        try:
+            tokens = encoder.encode(text, disallowed_special=())
+            return len(tokens)
+        except Exception:
+            pass
+    # 降级到快速估算
+    return _fast_estimate_tokens(text)
     if not text:
         return 0
 
