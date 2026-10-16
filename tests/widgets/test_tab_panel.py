@@ -327,24 +327,27 @@ class TestUIPluginRowPositionMenu:
         received = []
         row.positionRequested.connect(lambda cid, cont: received.append((cid, cont)))
 
-        menu = row._build_position_menu()
+        menu = row._build_context_menu()
         actions = menu.actions()
-        labels = [a.text() for a in actions]
-        assert labels == ["下", "左", "右", "替换"]
+        pos_actions = actions[:4]
+        assert [a.text() for a in pos_actions] == ["下", "左", "右", "替换"]
         # 每项都带图标（黑=显示位置，白=空白）
-        assert all(not a.icon().isNull() for a in actions)
+        assert all(not a.icon().isNull() for a in pos_actions)
+        # 第 5 项为分隔线，其后为「弹出」
+        assert actions[4].isSeparator()
+        assert actions[5].text() == "弹出"
         # 触发「替换」→ full
-        actions[3].trigger()
+        pos_actions[3].trigger()
         assert received == [("card_x", "full")]
         # 触发「左」→ left
-        actions[1].trigger()
+        pos_actions[1].trigger()
         assert received == [("card_x", "full"), ("card_x", "left")]
 
     def test_refresh_ui_plugins_position_requested_connected(self, panel, qtbot):
         """refresh_ui_plugins 后系统/自定义插件行的 positionRequested 均已连接处理函数"""
         cards = {
-            "sys_card": MagicMock(title="系统卡", plugin_name="sys_plugin"),
-            "custom_card": MagicMock(title="自定义卡", plugin_name="custom_plugin"),
+            "sys_card": MagicMock(title="系统卡", plugin_name="sys_plugin", metadata={}),
+            "custom_card": MagicMock(title="自定义卡", plugin_name="custom_plugin", metadata={}),
         }
         sys_plugin = MagicMock(is_system=True)
         custom_plugin = MagicMock(is_system=False)
@@ -370,7 +373,9 @@ class TestUIPluginRowPositionMenu:
         panel.setParent(host)
 
         with (
-            patch("app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry),
+            patch(
+                "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
+            ),
             patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
         ):
             panel.refresh_ui_plugins()
@@ -484,10 +489,12 @@ class TestRefreshUIPluginsPoisonIsolation:
 
         real_init = UIPluginRow.__init__
 
-        def poison_init(self, title, icon=None, parent=None, plugin_name="", card_id="", enable_position_menu=True):
+        def poison_init(
+            self, title, icon=None, parent=None, plugin_name="", card_id="", enable_position_menu=True, kind="card"
+        ):
             if card_id == "poison-card":
                 raise RuntimeError("poison row construction")
-            real_init(self, title, icon, parent, plugin_name, card_id, enable_position_menu)
+            real_init(self, title, icon, parent, plugin_name, card_id, enable_position_menu, kind)
 
         with (
             patch("app.widgets.tab_panel.UIPluginRow.__init__", poison_init),
