@@ -545,3 +545,31 @@ class TestPluginEntryGroupResolve:
 
         assert [row._card_id for row in panel._system_plugin_buttons] == ["shadow_card"]
         assert [row._card_id for row in panel._custom_plugin_buttons] == ["user_card"]
+
+    def test_pinned_plugin_moves_to_system_top(self, panel, isolated_app_state):
+        """被固定的用户插件：进常驻区且置顶（即使标题字母序靠后）"""
+        cards = {
+            "sys_card": MagicMock(title="A系统卡", plugin_name="sys_plugin", metadata={}),
+            "pinned_card": MagicMock(title="Z固定卡", plugin_name="pinned_plugin", metadata={}),
+        }
+        sys_plugin = MagicMock(is_system=True, overridden_by="")
+        pinned_plugin = MagicMock(is_system=False, overridden_by="")
+        fake_pm = MagicMock()
+        fake_pm.get_plugin.side_effect = lambda name: sys_plugin if name == "sys_plugin" else pinned_plugin
+        fake_registry = MagicMock()
+        fake_registry.get_floating_cards.return_value = cards
+        fake_registry.get_sidebar_items.return_value = []
+        fake_registry.get_window_infos.return_value = []
+        isolated_app_state.set("pinned_plugins", ["pinned_plugin"])
+
+        with (
+            patch(
+                "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
+            ),
+            patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+        ):
+            panel.refresh_ui_plugins()
+
+        # 固定项置顶：排在系统条目之前（标题字母序靠后也不影响）
+        assert [row._card_id for row in panel._system_plugin_buttons] == ["pinned_card", "sys_card"]
+        assert panel._custom_plugin_buttons == []

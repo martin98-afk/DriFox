@@ -1315,15 +1315,32 @@ class UIPluginRow(QFrame):
         self._build_context_menu().exec_(self.mapToGlobal(pos))
 
 
+# ── 侧边栏插件固定（pin）──
+# 固定状态存 app_state.json 的 pinned_plugins 键（元素为插件名），
+# 与命令卡处置顶（command_pins）同范式：固定项置常驻区最顶部。
+PINNED_PLUGINS_KEY = "pinned_plugins"
+
+
+def _get_pinned_plugins() -> set:
+    """读取固定在常驻区的插件名集合（异常/脏数据回退空集）"""
+    try:
+        pinned = _state_get(PINNED_PLUGINS_KEY, [])
+        return set(pinned) if isinstance(pinned, list) else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 # ── 侧边栏插件归属判定 ──
-def _resolve_plugin_entry_group(plugin_name: str, explicit_group: str, pm) -> str:
+def _resolve_plugin_entry_group(plugin_name: str, explicit_group: str, pm, pinned: set) -> str:
     """侧边栏条目归属区判定：返回 "system"（常驻区）| "custom"（自定义折叠区）
 
-    优先序：显式注册 group > 插件归属。
+    优先序：用户固定（pin）> 显式注册 group > 插件归属。
     插件归属 = is_system（仓库内置）或 overridden_by == "system"——后者是
     「用户根同名副本覆盖内置版」（插件市场更新内置插件的影子副本策略），
     不消费该标记时更新后的内置插件条目会从常驻区掉进自定义区。
     """
+    if plugin_name in pinned:
+        return "system"
     if explicit_group in ("system", "custom"):
         return explicit_group
     try:
@@ -1335,13 +1352,13 @@ def _resolve_plugin_entry_group(plugin_name: str, explicit_group: str, pm) -> st
     return "custom"
 
 
-def _sort_plugin_entries(entries: list) -> list:
-    """插件条目统一排序：priority 降序 → title 字母序兜底（稳定）
+def _sort_plugin_entries(entries: list, pinned: frozenset = frozenset()) -> list:
+    """插件条目统一排序：固定项置顶 → priority 降序 → title 字母序兜底（稳定）
 
     regression：refresh_ui_plugins 曾直接 `sort(key=title.lower())`
     导致 SidebarItemInfo.priority 失效（注册优先级被字母序覆盖）。
     """
-    return sorted(entries, key=lambda e: (-e[4], e[2].lower()))
+    return sorted(entries, key=lambda e: (0 if e[3] in pinned else 1, -e[4], e[2].lower()))
 
 
 class TabPanel(QWidget):
@@ -1832,6 +1849,9 @@ class TabPanel(QWidget):
 
         pm = PluginManager.get_instance()
 
+        # 用户固定（pin）：优先级最高，固定项置常驻区顶部（_sort_plugin_entries 消费）
+        pinned = _get_pinned_plugins()
+
         # 兼容映射：已注册独立 sidebar 项的插件 → 跳过其 container="left" 卡片派生
         sidebar_plugin_names = {info.plugin_name for info in sidebar_items}
 
@@ -1846,7 +1866,7 @@ class TabPanel(QWidget):
                 info.plugin_name,
                 info.priority,
             )
-            if _resolve_plugin_entry_group(info.plugin_name, info.group, pm) == "system":
+            if _resolve_plugin_entry_group(info.plugin_name, info.group, pm, pinned) == "system":
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1864,7 +1884,7 @@ class TabPanel(QWidget):
             )
             # group 注册参数覆盖插件归属（"system" 常驻 / "custom" 自定义 / 空跟随）
             group = getattr(info, "group", "") or ""
-            if _resolve_plugin_entry_group(info.plugin_name, group, pm) == "system":
+            if _resolve_plugin_entry_group(info.plugin_name, group, pm, pinned) == "system":
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1879,7 +1899,7 @@ class TabPanel(QWidget):
             try:
                 title = (info.title or "").strip() or card_id
                 entry = ("card", card_id, title, info.plugin_name, 0)
-                if _resolve_plugin_entry_group(info.plugin_name, "", pm) == "system":
+                if _resolve_plugin_entry_group(info.plugin_name, "", pm, pinned) == "system":
                     system_infos.append(entry)
                 else:
                     custom_infos.append(entry)
@@ -1887,7 +1907,8 @@ class TabPanel(QWidget):
                 continue
         # Phase E：按 priority 降序 → title 字母序兜底（regression: 旧 sort
         # 只看 title.lower() 抹平了 priority，导致高优先级插件被字母序压在后面）
-        system_infos = _sort_plugin_entries(system_infos)
+        # 用户固定项置顶（pin > priority 降序 > title 字母序）
+        system_infos = _sort_plugin_entries(system_infos, frozenset(pinned))
         custom_infos = _sort_plugin_entries(custom_infos)
         self._plugin_infos = system_infos + custom_infos
 
