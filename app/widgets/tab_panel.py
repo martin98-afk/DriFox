@@ -1937,7 +1937,28 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._system_plugin_buttons = []
+        seen_pinned_row = False  # 已成功渲染的固定行（分隔线只插在固定行之后）
+        divider_added = False
         for kind, key, title, plugin_name, _priority in system_infos:
+            # 常驻区（固定项）↔ 未固定插件之间的分隔线；无固定项不显示。
+            # 样式对齐 _plugin_separator_2（1px DIVIDER_COLOR）。
+            if not divider_added and seen_pinned_row and plugin_name not in pinned:
+                divider = QFrame(self._system_plugin_section)
+                divider.setFrameShape(QFrame.HLine)
+                divider.setStyleSheet(
+                    f"""
+                    QFrame {{
+                        background: {Colors.DIVIDER_COLOR};
+                        border: none;
+                        min-height: 1px;
+                        max-height: 1px;
+                        margin-top: 4px;
+                        margin-bottom: 2px;
+                    }}
+                    """
+                )
+                self._system_plugin_layout.addWidget(divider)
+                divider_added = True
             # ★ T3 修复：单行构造异常不中断整体刷新（任一插件构造抛异常时
             # 跳过该插件，其余插件继续重建——否则一个"毒条目"导致整批
             # UI 插件按钮全部不显示）。
@@ -1967,6 +1988,8 @@ class TabPanel(QWidget):
             row.pinToggled.connect(self._on_ui_plugin_pin_toggled)
             self._system_plugin_layout.addWidget(row)
             self._system_plugin_buttons.append(row)
+            if plugin_name in pinned:
+                seen_pinned_row = True
         has_system = bool(system_infos)
         self._system_plugin_section.setVisible(has_system)
 
