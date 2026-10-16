@@ -237,8 +237,8 @@ def hook_notes(event: str, context: dict) -> str:
             logger.error(f"[assistant_hub.project_notes] 创建 {agents_path} 失败: {e}")
 
     if notes_content:
-        return f"## 项目笔记\n[当前项目: {project_name}]\n{notes_content}"
-    return f"## 项目笔记\n[当前项目: {project_name}]\n（项目笔记为空）"
+        return f"<project_notes>\n[当前项目: {project_name}]\n{notes_content}\n</project_notes>"
+    return f"<project_notes>\n[当前项目: {project_name}]\n（项目笔记为空）\n</project_notes>"
 
 
 # ============================================================

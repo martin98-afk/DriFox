@@ -44,8 +44,9 @@ class _FakeSession:
         self.results = list(results)
         self.turns = []
 
-    def turn(self, messages=None, *, system=None, user=None, tools=None, callbacks=None, timeout=300.0,
-             auto_history=False):
+    def turn(
+        self, messages=None, *, system=None, user=None, tools=None, callbacks=None, timeout=300.0, auto_history=False
+    ):
         self.turns.append({"messages": list(messages or []), "tools": tools, "timeout": timeout})
         r = self.results.pop(0) if self.results else _FakeResult("默认文本")
         if isinstance(r, Exception):

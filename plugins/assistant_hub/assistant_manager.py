@@ -1183,7 +1183,7 @@ class AssistantManager:
         if a is None:
             return ""
         pinned = self.read_pinned(aid)
-        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or '').strip()]
+        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or "").strip()]
         if not pin_lines:
             return ""
         return "# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines)
@@ -1221,7 +1221,9 @@ class AssistantManager:
                     + "：合并去重、删过时内容、保持精简，然后继续用户的任务。"
                 )
             parts.append(
-                "<global_memory>\n以下是跨项目的全局记忆（用户对助手长期稳定的要求）。\n\n" + g_text + "\n</global_memory>"
+                "<global_memory>\n以下是跨项目的全局记忆（用户对助手长期稳定的要求）。\n\n"
+                + g_text
+                + "\n</global_memory>"
             )
 
         # 项目记忆
@@ -1245,8 +1247,8 @@ class AssistantManager:
             stale = store.stale_daily(workdir, aid)
             if stale:
                 parts.append(
-                    "**ACTION REQUIRED**: 以下旧日志已超过 30 天，请先把它们按主题蒸馏进项目 MEMORY.md，然后删除旧文件："
-                    + "、".join(stale[:10])
+                    "**ACTION REQUIRED**: 以下旧日志已超过 30 天且未蒸馏，请按记忆说明书蒸馏流程处理"
+                    "（校对→并入项目 MEMORY.md→严选全局→打标 mark_distilled）：" + "、".join(stale[:10])
                 )
 
         return "\n\n".join(parts)
@@ -1286,14 +1288,41 @@ class AssistantManager:
     def write_project_memory(self, aid: str, workdir: str, content: str) -> bool:
         return self._core_store().write_project_memory(workdir, aid, content)
 
-    def append_daily(self, aid: str, workdir: str, text: str, date: str = "") -> Dict[str, Any]:
-        return self._core_store().append_daily(workdir, aid, text, date)
+    def append_daily(self, aid: str, workdir: str, text: str, date: str = "", level: str = "INFO") -> Dict[str, Any]:
+        return self._core_store().append_daily(workdir, aid, text, date, level)
 
     def list_daily(self, aid: str, workdir: str, limit: int = 7) -> List[Dict[str, Any]]:
         return self._core_store().list_daily(workdir, aid, limit)
 
     def read_daily(self, aid: str, workdir: str, date: str = "") -> str:
         return self._core_store().read_daily(workdir, aid, date)
+
+    def read_daily_paged(
+        self, aid: str, workdir: str, date: str = "", page: int = 1, per_page: int = 20
+    ) -> Dict[str, Any]:
+        return self._core_store().read_daily_paged(workdir, aid, date, page, per_page)
+
+    def daily_exists(self, aid: str, workdir: str, date: str = "") -> bool:
+        return self._core_store().daily_exists(workdir, aid, date)
+
+    def undistilled_daily_before(self, aid: str, workdir: str, before: str = "") -> List[str]:
+        return self._core_store().undistilled_before(workdir, aid, before)
+
+    def mark_daily_distilled(self, aid: str, workdir: str, date: str) -> Dict[str, Any]:
+        return self._core_store().mark_distilled(workdir, aid, date)
+
+    def distill_gate_block(self, aid: str, workdir: str) -> str:
+        """新日首写门禁的蒸馏指令；无未蒸馏旧日志返回空串（工具层据此放行）。"""
+        store = self._core_store()
+        prompts = self._core_prompts()
+        dates = store.undistilled_before(workdir, aid)
+        if not dates:
+            return ""
+        return prompts.build_distill_gate(
+            dates,
+            str(store.project_memory_path(workdir, aid)),
+            str(store.global_memory_path(self._assistant_dir(aid))),
+        )
 
     def clear_all_memory(self, aid: str, workdir: str = "") -> None:
         """清除该助手全部记忆（全局 MEMORY.md + 项目记忆目录）；人工提示保留。"""

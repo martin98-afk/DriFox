@@ -33,6 +33,29 @@ def test_memory_system_contains_layers_and_paths():
     assert "drifox" in text.lower()
 
 
+def test_memory_system_contains_distill_rules():
+    """说明书含蒸馏流程 + 全局严选标准；触发时机归程序判断，不写静态说教。"""
+    text = m.build_memory_system("/data/MEMORY.md", "/proj/.drifox/memory/build")
+    assert "新日门禁" not in text  # 触发时机由程序在 memory_write 时判断，说明书不写
+    assert "memory_write 执行时判断" in text
+    assert "mark_distilled" in text
+    assert ".distilled" in text
+    assert "最珍贵" in text and "项目无关" in text
+    # 全局准入：显式要求 + 蒸馏严选两类
+    assert "蒸馏" in text and "宁缺勿滥" in text
+
+
+def test_build_distill_gate():
+    """蒸馏门禁指令：待蒸馏日期 + 校对/严选/打标步骤齐全。"""
+    c = m.build_distill_gate(["2026-10-14", "2026-10-15"], "/proj/MEMORY.md", "/data/MEMORY.md")
+    assert "2026-10-14" in c and "2026-10-15" in c
+    assert "memory_read(scope=daily, date=2026-10-14)" in c
+    assert "memory_write(scope=daily, date=2026-10-15, mark_distilled=true)" in c
+    assert "校对" in c
+    assert "最珍贵" in c and "项目无关" in c and "宁缺勿滥" in c
+    assert "/proj/MEMORY.md" in c and "/data/MEMORY.md" in c
+
+
 def test_reflect():
     c = _roles_ok(m.build_reflect("人格", "记忆", "经验"))
     assert "JSON" in c and "category" in c

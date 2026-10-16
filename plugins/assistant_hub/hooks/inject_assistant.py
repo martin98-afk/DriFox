@@ -92,7 +92,7 @@ def hook(event: str, context: Dict[str, Any]) -> str:
         aid = _resolve_aid(mgr, context or {})
         if not aid:
             return ""
-        parts = [mgr.identity_block(aid)]
+        parts = [f"<assistant_identity>\n{mgr.identity_block(aid)}\n</assistant_identity>"]
         workdir = str((context or {}).get("project_root") or "")
         parts.append(mgr.memory_system_block(aid, workdir))
         block = "\n\n".join(p for p in parts if p)

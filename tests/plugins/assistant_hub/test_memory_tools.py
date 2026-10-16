@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
-"""test_memory_tools.py — memory_read / memory_write 工具回归（假 manager 注入）。"""
+"""test_memory_tools.py — memory_read / memory_write 工具回归（假 manager 注入）。
+
+覆盖：基本读写、蒸馏门禁（新日首写拦截/放行）、打标（mark_distilled）、
+单日条目分页、索引 limit。
+"""
 
 import importlib.util
 import sys
+from datetime import datetime
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -24,8 +29,15 @@ class _Mgr:
     def __init__(self, tmp_path):
         self._g = {}
         self._p = {}
-        self._d = {}
+        self._d = {}  # (aid, wd, date) -> [entries]
+        self._distilled = set()  # (aid, wd, date)
+        self.gate_text = ""  # distill_gate_block 返回值（门禁测试可控）
+        self.gate_calls = 0
+        self.last_level = ""  # 最近一次 append_daily 的 level（透传测试）
         self._tmp = tmp_path
+
+    def _today(self):
+        return datetime.now().strftime("%Y-%m-%d")
 
     def has(self, aid):
         return aid == "build"
@@ -57,21 +69,66 @@ class _Mgr:
         self._p[(aid, wd)] = content
         return True
 
-    def append_daily(self, aid, wd, text, date=""):
-        date = date or "2026-10-13"
+    def append_daily(self, aid, wd, text, date="", level="INFO"):
+        date = date or self._today()
+        self.last_level = level
         self._d.setdefault((aid, wd, date), []).append(text)
         return {"ok": True, "date": date, "chars": sum(len(x) for x in self._d[(aid, wd, date)])}
 
     def list_daily(self, aid, wd, limit=7):
         items = [
-            {"date": k[2], "chars": sum(len(x) for x in v)} for k, v in self._d.items() if k[0] == aid and k[1] == wd
+            {
+                "date": k[2],
+                "chars": sum(len(x) for x in v),
+                "distilled": k in self._distilled,
+            }
+            for k, v in self._d.items()
+            if k[0] == aid and k[1] == wd
         ]
         items.sort(key=lambda it: it["date"], reverse=True)
         return items[:limit]
 
     def read_daily(self, aid, wd, date=""):
-        date = date or "2026-10-13"
-        return "\n".join(self._d.get((aid, wd, date), []))
+        date = date or self._today()
+        return "\n\n".join(self._d.get((aid, wd, date), []))
+
+    def read_daily_paged(self, aid, wd, date="", page=1, per_page=20):
+        date = date or self._today()
+        entries = self._d.get((aid, wd, date), [])
+        if not entries:
+            return {"ok": False, "error": "not_found"}
+        total = len(entries)
+        pages = max(1, (total + per_page - 1) // per_page)
+        page = min(max(int(page or 1), 1), pages)
+        return {
+            "ok": True,
+            "content": "\n\n".join(entries[(page - 1) * per_page : page * per_page]),
+            "page": page,
+            "pages": pages,
+            "total": total,
+            "distilled": (aid, wd, date) in self._distilled,
+        }
+
+    def daily_exists(self, aid, wd, date=""):
+        date = date or self._today()
+        return bool(self._d.get((aid, wd, date)))
+
+    def undistilled_daily_before(self, aid, wd, before=""):
+        b = before or self._today()
+        return sorted(k[2] for k in self._d if k[0] == aid and k[1] == wd and k[2] < b and k not in self._distilled)
+
+    def mark_daily_distilled(self, aid, wd, date):
+        key = (aid, wd, date)
+        if not any(k[0] == aid and k[1] == wd and k[2] == date for k in self._d):
+            return {"ok": False, "error": "not_found"}
+        if key in self._distilled:
+            return {"ok": False, "error": "already"}
+        self._distilled.add(key)
+        return {"ok": True, "date": date, "file": ""}
+
+    def distill_gate_block(self, aid, wd):
+        self.gate_calls += 1
+        return self.gate_text
 
     def memory_paths(self, aid, wd=""):
         out = {"global": str(self._tmp / "MEMORY.md")}
@@ -91,14 +148,15 @@ def _ctx(wd=""):
 
 
 def test_write_daily_then_read(monkeypatch, tmp_path):
-    _patch(monkeypatch, tmp_path)
+    mgr = _patch(monkeypatch, tmp_path)
+    today = mgr._today()
     r = m._write_impl(_ctx("/proj"), scope="daily", content="- 完成了记忆重构")
     assert r.success and "追加" in r.content
     # 不带 date：返回近期日志索引
     r2 = m._read_impl(_ctx("/proj"), scope="daily")
-    assert "2026-10-13" in r2.content
+    assert today in r2.content
     # 带 date 精确读全文
-    r3 = m._read_impl(_ctx("/proj"), scope="daily", date="2026-10-13")
+    r3 = m._read_impl(_ctx("/proj"), scope="daily", date=today)
     assert "完成了记忆重构" in r3.content
 
 
@@ -157,6 +215,107 @@ def test_manager_unavailable(monkeypatch):
     assert not r.success
     r2 = m._write_impl(_ctx("/proj"), scope="daily", content="x")
     assert not r2.success
+
+
+# ── 新日蒸馏门禁 ──────────────────────────────────────────
+
+
+def test_gate_blocks_first_write_of_day(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.gate_text = "【蒸馏指令】先蒸馏昨日日志"
+    r = m._write_impl(_ctx("/proj"), scope="daily", content="- 今天第一条")
+    assert not r.success
+    assert "蒸馏" in (r.error or "")
+    assert mgr.gate_calls == 1
+
+
+def test_gate_passes_when_all_distilled(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.gate_text = ""  # 无未蒸馏旧日志
+    r = m._write_impl(_ctx("/proj"), scope="daily", content="- 今天第一条")
+    assert r.success and "追加" in r.content
+
+
+def test_gate_passes_once_day_started(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.gate_text = "【蒸馏指令】"
+    today = mgr._today()
+    # 隔天补录（显式 date=过去）：不走门禁
+    m._write_impl(_ctx("/proj"), scope="daily", content="- 补录", date="2020-01-01")
+    assert mgr.gate_calls == 0
+    # 当天已写过一条后，第二条不再拦截
+    mgr._d[(mgr.active_id(), "/proj", today)] = ["- 首条"]
+    r = m._write_impl(_ctx("/proj"), scope="daily", content="- 第二条")
+    assert r.success and mgr.gate_calls == 0
+
+
+def test_gate_query_failure_does_not_block(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+
+    def _boom(aid, wd):
+        raise RuntimeError("boom")
+
+    mgr.distill_gate_block = _boom
+    r = m._write_impl(_ctx("/proj"), scope="daily", content="- 今天第一条")
+    assert r.success  # 门禁异常放行，不阻断写入
+
+
+# ── 打标 mark_distilled ──────────────────────────────────
+
+
+def test_mark_distilled_flow(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    today = mgr._today()
+    m._write_impl(_ctx("/proj"), scope="daily", content="- 甲")
+    # 缺 date 拒绝；content 允许为空
+    r = m._write_impl(_ctx("/proj"), scope="daily", mark_distilled=True)
+    assert not r.success and "date" in (r.error or "")
+    r2 = m._write_impl(_ctx("/proj"), scope="daily", date=today, mark_distilled=True)
+    assert r2.success and "打蒸馏标" in r2.content
+    # 重复打标失败
+    r3 = m._write_impl(_ctx("/proj"), scope="daily", date=today, mark_distilled=True)
+    assert not r3.success and "已打" in (r3.error or "")
+    assert (mgr.active_id(), "/proj", today) in mgr._distilled
+
+
+# ── 读取分页 / 索引 limit ─────────────────────────────────
+
+
+def test_read_daily_paged_tool(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    today = mgr._today()
+    for i in range(25):
+        m._write_impl(_ctx("/proj"), scope="daily", content=f"- 条目{i}")
+    r = m._read_impl(_ctx("/proj"), scope="daily", date=today)
+    assert f"{today}（第 1/2 页，共 25 条）" in r.content
+    assert "条目0" in r.content and "条目20" not in r.content
+    assert "page=2" in r.content
+    r2 = m._read_impl(_ctx("/proj"), scope="daily", date=today, page=2)
+    assert "第 2/2 页" in r2.content and "条目24" in r2.content
+    assert "翻页" not in r2.content  # 末页不再提示翻页
+    # 无日志
+    r3 = m._read_impl(_ctx("/proj"), scope="daily", date="2020-01-01")
+    assert r3.success and "无日志" in r3.content
+
+
+def test_write_daily_level_passthrough(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    m._write_impl(_ctx("/proj"), scope="daily", content="- 甲")
+    assert mgr.last_level == "INFO"
+    m._write_impl(_ctx("/proj"), scope="daily", content="- 乙", level="WARNING")
+    assert mgr.last_level == "WARNING"
+
+
+def test_read_daily_index_limit(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    for d in ["2026-10-01", "2026-10-02", "2026-10-03"]:
+        m._write_impl(_ctx("/proj"), scope="daily", content=f"- {d}", date=d)
+    r = m._read_impl(_ctx("/proj"), scope="daily", limit=2)
+    assert "2026-10-03" in r.content and "2026-10-02" in r.content and "2026-10-01" not in r.content
+    # 已蒸馏标注
+    m._write_impl(_ctx("/proj"), scope="daily", date="2026-10-03", mark_distilled=True)
+    r2 = m._read_impl(_ctx("/proj"), scope="daily")
+    assert "已蒸馏" in r2.content
 
 
 def test_register_registers_both(monkeypatch):

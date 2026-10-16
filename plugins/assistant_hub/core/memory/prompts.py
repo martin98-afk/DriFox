@@ -49,7 +49,9 @@ def build_memory_system(global_file: str, project_dir: str) -> str:
 文件：{global_file}｜作用域：所有项目｜注入上限：4,000 字符
 
 当用户明确要求你长期记住某事、且此事不绑定具体项目时，用 memory_write（scope=global）
-整体更新此文件，保持精简。与项目记忆不同，这里只写显式要求——精确、必须严格执行的规则。
+整体更新此文件，保持精简。全局记忆准入门槛极严，只有两类内容可进：
+① 用户显式要求记住的跨项目规则；② 蒸馏流程筛出的「最珍贵且与项目无关」的经验
+（珍贵性与项目无关性缺一不可，宁缺勿滥；项目特有的做法永远留在项目记忆）。
 
 # 第二层 — 项目记忆（当前项目，读写）
 
@@ -57,6 +59,8 @@ def build_memory_system(global_file: str, project_dir: str) -> str:
 
 文件：
 - {project_dir}/YYYY-MM-DD.md — 每日工作日志。**只追加，绝不覆盖**（memory_write scope=daily）。文件名即日期，content 勿再写日期标题。
+  每条记录由程序自动加「时刻 | 等级 | 」前缀（loguru 风格）：content 里不要自己写时间戳；
+  等级用 level 参数（坑/失败用 WARNING，严重问题用 ERROR，默认 INFO）。
 - {project_dir}/MEMORY.md — 项目长期笔记（memory_write scope=project 整体更新）。上限 3,000 字符。
 - 今天的日志不存在时，memory_write 会自动创建；不要手动建文件。
 
@@ -84,9 +88,49 @@ def build_memory_system(global_file: str, project_dir: str) -> str:
 
 日志只追加。不记录瞬时信息（搜索结果、临时路径、工具报错）。只沉淀跨会话仍有价值的内容。
 
-维护：把超过 30 天的日志按主题蒸馏进项目 MEMORY.md，然后删除旧日志文件（bash）。除用户明确要求，不存密钥。
+维护（蒸馏）：日志蒸馏的触发与拦截由程序在 memory_write 执行时判断并给出待蒸馏清单，
+按指令执行即可。蒸馏动作：校对旧日志（移除不实/过时/被推翻的条目）、蒸馏进项目
+MEMORY.md、筛出最珍贵且与项目无关的进全局 MEMORY.md，然后给日志打蒸馏标
+（memory_write scope=daily date=YYYY-MM-DD mark_distilled=true）。已打标的日志保留可查
+（文件名带 .distilled），蒸馏与门禁均忽略它们。除用户明确要求，不存密钥。
 
 </memory_system>"""
+
+
+# ── 日志蒸馏门禁（新日首写拦截时返回给模型的指令）──────
+
+
+def build_distill_gate(dates: List[str], project_file: str, global_file: str) -> str:
+    """生成蒸馏指令：新的一天首次写日志前，必须先蒸馏全部未蒸馏旧日志。
+
+    dates 为待蒸馏日期（旧→新）。指令强调：校对去伪 → 项目蒸馏 → 全局严选 → 打标。
+    """
+    date_list = "、".join(dates)
+    reads = "\n".join(f"   memory_read(scope=daily, date={d})" for d in dates)
+    marks = "\n".join(f"   memory_write(scope=daily, date={d}, mark_distilled=true)" for d in dates)
+    return f"""本次写入被暂时拒绝：今天的第一条日志之前，必须先蒸馏所有未蒸馏的旧日志。
+
+待蒸馏日志：{date_list}
+
+请严格按以下步骤执行（全部用 memory_read / memory_write 完成，不要用 bash）：
+
+1. 逐日读取原文：
+{reads}
+
+2. 校对记忆（去伪存真）：逐条核对，移除不实、过时、已被后续实践推翻的内容；
+   与 {project_file} 现有条目重复的直接丢弃；数字/路径/错误原文必须与日志一致，禁止脑补。
+
+3. 蒸馏进项目记忆：把校对后仍成立的内容合并进 {project_file}
+   （memory_write scope=project 整体更新，先读后写，保持精简，遵守 AGENTS.md 分层铁律）。
+
+4. 严选全局记忆：只把「最珍贵 **且** 与项目无关」的经验放进 {global_file}
+   （memory_write scope=global 整体更新）。两个条件缺一不可：珍贵但不独特的不进、
+   珍贵但属于本项目特有的不进；没有合格条目就不改全局记忆，宁缺勿滥。
+
+5. 给已蒸馏日志打标（保留可查，之后蒸馏/门禁均忽略）：
+{marks}
+
+6. 全部完成后，重试刚才的日志写入。"""
 
 
 # ── 经验库压缩 ──────────────────────────────────────────
