@@ -1,6 +1,11 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [未发布]
+自 v0.6.8 以来的变更 | 贡献者：dingma
+### 🐛 问题修复 (Bug Fixes)
+- **插件依赖 wheel 平台串台致插件静默失效** (`plugins/plugin-marketplace/ui/deps_installer.py` · `tests/plugins/test_deps_installer_wheel_tags.py`): `_platform_wheel_tags()` 无条件把 `win_{arch}` 放进候选集且只声明 `macosx_11_0_{arch}`，两个缺陷叠加：①非 Windows 平台上 win tag 仍参与排序（Intel Mac 上 `win_amd64` 排第 2 位、压过 macosx/manylinux），会把 Windows 原生模块（`.pyd`）装进 `deps/<platform>/`，darwin 上 import 直接 `OSError: Cannot load native module`；②PyPI 上 macosx wheel 主流形态是 `macosx_10_9_universal2`（pycryptodome / charset-normalizer 均如此），前缀匹配永远不中 → 依赖装不上、`deps/darwin/` 始终为空。实测故障链：gateway-feishu 的 pycryptodome 装成 win_amd64 → `lark_oapi/core/utils/decryptor.py` 顶层 `from Crypto.Cipher import AES` 炸 → 整个 `gateways/feishu.py` 模块加载失败 → feishu 从未进 `GatewayPlatformRegistry`，表现为「配置 enabled=true 但日志只有『无启用平台』、设置卡开关无效」。修复：候选集按 `sys.platform` 严格分发（win32→`win_*`、darwin→`macosx_*`、其余→`manylinux*`/`linux_*`），通用层补 `cp{ver}-abi3` 与 `macosx_10_9_universal2`。新增回归测试 23 用例覆盖 win32/linux/darwin × x86_64/arm64 六组合（断言候选集不含他平台 OS tag、universal2/abi3 恒在、真实 PyPI wheel 文件名匹配结果）；已反向验证旧代码下 16 用例失败。`tools/generate_marketplace.py --check` 一致性通过
+
 ## [v0.6.8] - 2026-10-16
 
 自 v0.6.7 以来的变更 | 提交数：3 · 文件变更：13 · +988/-45 | 贡献者：dingma
