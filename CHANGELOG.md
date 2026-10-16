@@ -1,6 +1,16 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [未发布]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **插件市场更新内置插件后侧边栏条目掉进自定义区** (`fd817d1b`, app/widgets/tab_panel.py · tests/widgets/test_tab_panel.py): 内置插件更新采用影子副本（新版装用户根 `~/.drifox/plugins/<name>` 覆盖内置版），覆盖后 `is_system=False` 使侧边栏归属翻转。归属判定补消费 `overridden_by == "system"`，更新后的内置插件条目保持常驻区显示。
+
+### ✨ 新功能 (New Features)
+
+- **侧边栏插件右键固定到常驻区** (`a1492e2b`, `f1e8ab70`, app/widgets/tab_panel.py · tests/widgets/test_tab_panel.py): 插件行右键「固定到常驻区/取消固定」（card/window 菜单追加，sidebar 条目放开右键仅此一项）；固定态存 app_state `pinned_plugins`（按插件名），固定项置常驻区顶部；归属优先序：用户固定 > 注册 `group` > 插件归属。
+
 ## [v0.6.9] - 2026-10-16 (重新发布 #2)
 
 自 v0.6.8 以来的变更（累计） | 提交数：43 · 文件变更：53 · +3893/-460 | 贡献者：dingma, mading, martin98-afk
