@@ -1315,7 +1315,10 @@ class UIPluginRow(QFrame):
         self._pin_action = None
         if self._plugin_name:
             is_pinned = self._plugin_name in _get_pinned_plugins()
-            self._pin_action = menu.addAction("取消固定" if is_pinned else "固定到常驻区")
+            self._pin_action = menu.addAction(
+                FIF.UNPIN.icon() if is_pinned else FIF.PIN.icon(),
+                "取消固定" if is_pinned else "固定到常驻区",
+            )
         return menu
 
     def _show_context_menu(self, pos):
