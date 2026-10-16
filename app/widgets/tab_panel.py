@@ -1315,6 +1315,26 @@ class UIPluginRow(QFrame):
         self._build_context_menu().exec_(self.mapToGlobal(pos))
 
 
+# ── 侧边栏插件归属判定 ──
+def _resolve_plugin_entry_group(plugin_name: str, explicit_group: str, pm) -> str:
+    """侧边栏条目归属区判定：返回 "system"（常驻区）| "custom"（自定义折叠区）
+
+    优先序：显式注册 group > 插件归属。
+    插件归属 = is_system（仓库内置）或 overridden_by == "system"——后者是
+    「用户根同名副本覆盖内置版」（插件市场更新内置插件的影子副本策略），
+    不消费该标记时更新后的内置插件条目会从常驻区掉进自定义区。
+    """
+    if explicit_group in ("system", "custom"):
+        return explicit_group
+    try:
+        plugin_info = pm.get_plugin(plugin_name)
+    except Exception:  # noqa: BLE001
+        plugin_info = None
+    if plugin_info is not None and (plugin_info.is_system or getattr(plugin_info, "overridden_by", "") == "system"):
+        return "system"
+    return "custom"
+
+
 def _sort_plugin_entries(entries: list) -> list:
     """插件条目统一排序：priority 降序 → title 字母序兜底（稳定）
 
@@ -1826,7 +1846,7 @@ class TabPanel(QWidget):
                 info.plugin_name,
                 info.priority,
             )
-            if info.group == "system":
+            if _resolve_plugin_entry_group(info.plugin_name, info.group, pm) == "system":
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1835,11 +1855,6 @@ class TabPanel(QWidget):
             # 合成弹窗（popout_card 生成）不出现在左侧栏，避免与源卡片重复条目
             if info.window_id.startswith("popout:"):
                 continue
-            try:
-                plugin_info = pm.get_plugin(info.plugin_name)
-                is_system = plugin_info.is_system if plugin_info else False
-            except Exception:
-                is_system = False
             entry = (
                 "window",
                 info.window_id,
@@ -1849,11 +1864,7 @@ class TabPanel(QWidget):
             )
             # group 注册参数覆盖插件归属（"system" 常驻 / "custom" 自定义 / 空跟随）
             group = getattr(info, "group", "") or ""
-            if group == "system":
-                system_infos.append(entry)
-            elif group == "custom":
-                custom_infos.append(entry)
-            elif is_system:
+            if _resolve_plugin_entry_group(info.plugin_name, group, pm) == "system":
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1867,10 +1878,8 @@ class TabPanel(QWidget):
                 continue
             try:
                 title = (info.title or "").strip() or card_id
-                plugin_info = pm.get_plugin(info.plugin_name)
-                is_system = plugin_info.is_system if plugin_info else False
                 entry = ("card", card_id, title, info.plugin_name, 0)
-                if is_system:
+                if _resolve_plugin_entry_group(info.plugin_name, "", pm) == "system":
                     system_infos.append(entry)
                 else:
                     custom_infos.append(entry)

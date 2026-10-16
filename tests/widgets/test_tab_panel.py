@@ -22,6 +22,16 @@ def panel(qtbot):
     return p
 
 
+@pytest.fixture
+def isolated_app_state(tmp_path, monkeypatch):
+    """app_state 隔离到 tmp_path（不读写真实缓存文件）；范式对齐 test_tab_panel_team_collapse.py"""
+    from app.utils import app_state
+
+    monkeypatch.setattr(app_state, "_state_file", lambda: tmp_path / "app_state.json")
+    monkeypatch.setattr(app_state, "_cache", {})
+    yield app_state
+
+
 class TestTabPanel:
     def test_gitee_account_row_exists(self, panel):
         """验证底部存在 GiteeAccountRow 且其右侧为设置按钮"""
@@ -505,3 +515,33 @@ class TestRefreshUIPluginsPoisonIsolation:
 
         card_ids = [row._card_id for row in panel._system_plugin_buttons]
         assert card_ids == ["good-card"], f"毒条目应被跳过、正常条目保留: {card_ids}"
+
+
+class TestPluginEntryGroupResolve:
+    """侧边栏插件条目归属判定：overridden_by 消费（影子副本回常驻区）"""
+
+    def test_shadow_copy_stays_in_system_area(self, panel):
+        """用户根副本覆盖内置插件（overridden_by="system"）→ 条目仍归常驻区"""
+        cards = {
+            "shadow_card": MagicMock(title="影子卡", plugin_name="shadow_plugin", metadata={}),
+            "user_card": MagicMock(title="用户卡", plugin_name="user_plugin", metadata={}),
+        }
+        shadow_plugin = MagicMock(is_system=False, overridden_by="system")
+        user_plugin = MagicMock(is_system=False, overridden_by="")
+        fake_pm = MagicMock()
+        fake_pm.get_plugin.side_effect = lambda name: shadow_plugin if name == "shadow_plugin" else user_plugin
+        fake_registry = MagicMock()
+        fake_registry.get_floating_cards.return_value = cards
+        fake_registry.get_sidebar_items.return_value = []
+        fake_registry.get_window_infos.return_value = []
+
+        with (
+            patch(
+                "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
+            ),
+            patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+        ):
+            panel.refresh_ui_plugins()
+
+        assert [row._card_id for row in panel._system_plugin_buttons] == ["shadow_card"]
+        assert [row._card_id for row in panel._custom_plugin_buttons] == ["user_card"]
