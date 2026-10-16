@@ -258,6 +258,11 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                         "处理原则：先 memory_read(scope=global) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
                     ),
                 )
+            # 写前快照：保住即将被覆盖的旧版；快照失败不阻断写入
+            try:
+                mgr.snapshot_memory(aid, "global")
+            except Exception:
+                pass
             _retry(lambda: mgr.write_global_memory(aid, content))
             return ToolResult(True, content="已更新全局记忆 MEMORY.md。")
 
@@ -273,6 +278,11 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                         "处理原则：先 memory_read(scope=project) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
                     ),
                 )
+            # 写前快照：保住即将被覆盖的旧版；快照失败不阻断写入
+            try:
+                mgr.snapshot_memory(aid, "project", wd)
+            except Exception:
+                pass
             _retry(lambda: mgr.write_project_memory(aid, wd, content))
             return ToolResult(True, content="已更新项目记忆 MEMORY.md。")
 

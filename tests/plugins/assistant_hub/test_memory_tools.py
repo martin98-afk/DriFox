@@ -35,6 +35,7 @@ class _Mgr:
         self.gate_calls = 0
         self.last_level = ""  # 最近一次 append_daily 的 level（透传测试）
         self.last_summary = ""
+        self.snapshots = []  # (aid, kind) — 写前快照调用记录
         self._tmp = tmp_path
 
     def _today(self):
@@ -134,6 +135,10 @@ class _Mgr:
 
     def memory_max_chars(self, aid=""):
         return {"global": 4000, "project": 3000}
+
+    def snapshot_memory(self, aid, kind, workdir=""):
+        self.snapshots.append((aid, kind))
+        return {"ok": True, "file": "snap.md"}
 
     def memory_paths(self, aid, wd=""):
         out = {"global": str(self._tmp / "MEMORY.md")}
@@ -335,3 +340,17 @@ def test_register_registers_both(monkeypatch):
     reg = _Reg()
     m.register(reg)
     assert reg.names == ["memory_read", "memory_write"]
+
+
+def test_write_global_snapshots_before_write(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    r = m._write_impl(_ctx(), scope="global", content="新全局记忆")
+    assert r.success
+    assert ("build", "global") in mgr.snapshots
+
+
+def test_write_project_snapshots_before_write(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    r = m._write_impl(_ctx("/proj"), scope="project", content="新项目记忆")
+    assert r.success
+    assert ("build", "project") in mgr.snapshots
