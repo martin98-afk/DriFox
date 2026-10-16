@@ -146,3 +146,72 @@ def test_clear_resets_released_flag(manager):
     s.clear()
     assert not s.messages_released
     assert s.messages == []
+
+
+# ══ 批 IV：evict hook（_on_evict）══
+def test_hook_none_by_default(manager):
+    """未注入 set_on_evict 时 _on_evict 为 None，淘汰路径静默跳过回调。"""
+    assert manager._on_evict is None
+    for _ in range(manager.max_cached_sessions + 3):
+        s = manager.create_new_session()
+        s.set_messages(_msgs("x", 2))
+    # 不抛异常即通过（回调分支被 None 守卫跳过）
+
+
+def test_on_evict_receives_evicted_sid(manager):
+    """淘汰发生时回调收到被淘汰会话的 session_id。"""
+    evicted = []
+    manager.set_on_evict(evicted.append)
+    first = manager.create_new_session()
+    first.set_messages(_msgs("first", 2))
+    manager._last_access[first.session_id] = 1.0
+    for _ in range(manager.max_cached_sessions + 1):
+        s = manager.create_new_session()
+        s.set_messages(_msgs("x", 2))
+    assert first.session_id in evicted, "最久未访问的会话应被淘汰并通知"
+
+
+def test_on_evict_exception_isolated(manager):
+    """回调抛异常不影响淘汰流程本身（异常被隔离记日志）。"""
+    def boom(_sid):
+        raise RuntimeError("hook boom")
+
+    manager.set_on_evict(boom)
+    first = manager.create_new_session()
+    first.set_messages(_msgs("first", 2))
+    manager._last_access[first.session_id] = 1.0
+    for _ in range(manager.max_cached_sessions + 1):
+        s = manager.create_new_session()
+        s.set_messages(_msgs("x", 2))
+    assert first.session_id not in [s.session_id for s in manager.sessions], "淘汰仍执行"
+    assert manager.current_index >= 0, "索引一致性与主流程不受影响"
+
+
+def test_evict_cleans_history_dict(manager):
+    """端到端：evict 回调接 HistoryManager 权威释放，被淘汰 sid 的消息被置空。"""
+    from app.utils.history_manager import HistoryManager
+
+    hm = HistoryManager()
+    hm._history_loaded = True
+    hm._history_sessions = []
+    active = {s.session_id for s in manager.sessions}
+    manager.set_on_evict(lambda sid: hm.release_messages_except(active))
+
+    first = manager.create_new_session()
+    first_sid = first.session_id
+    first.set_messages(_msgs("first", 3))
+    # 预置 HistoryManager 记录（模拟历史面板已有的该会话记录）
+    hm._history_sessions.append({
+        "session_id": first_sid,
+        "title": "t",
+        "messages": [{"role": "user", "content": "cached"}],
+    })
+
+    manager._last_access[first_sid] = 1.0
+    for _ in range(manager.max_cached_sessions + 1):
+        s = manager.create_new_session()
+        s.set_messages(_msgs("x", 2))
+
+    rec = next(r for r in hm._history_sessions if r["session_id"] == first_sid)
+    assert rec["messages"] == [], "evict 后 HistoryManager 记录的 messages 应被权威入口置空"
+    assert rec["_messages_released"] is True
