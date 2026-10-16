@@ -404,14 +404,21 @@ class HistoryPage(QWidget):
         # 否则 A 标签页筛选项目 X 后 B 标签页打开也是 X。
         self._project_filter_by_tab: Dict[str, str] = {}
         # tab 切换时投影切到新活跃标签页自己的筛选记忆（页面可见才刷）
+        #
+        # 🛡️ 信号名必须是 ``activeTabChanged``（2026-10-15 修复）：旧代码连的是
+        # ``currentChanged``，而 TabManagerWindow 本身**没有**该信号（它只存在于
+        # 内部类 _ContentStack，语义是「对话页 ↔ 覆盖层页」切换，与标签页无关）
+        # → 连接阶段抛 AttributeError、被下方 except 静默吞掉，分桶刷新从未生效。
+        # 症状：A 页展开项目面板后切到 B 页，列表按 B 的项目刷新了，但面板高亮
+        # 仍停留在 A 的项目（refresh_project_selector_data 未被调用）。
         try:
             from app.widgets.tab_manager_window import TabManagerWindow
 
             tm = TabManagerWindow.get_instance()
             if tm is not None:
-                tm.currentChanged.connect(self._on_host_tab_changed)
+                tm.activeTabChanged.connect(self._on_host_tab_changed)
         except Exception:
-            pass
+            logger.warning("[history-manager] 连接标签页切换信号失败（项目面板跨页同步将失效）")
 
         self._search_input = QLineEdit(self)
         self._search_input.setPlaceholderText("🔍 搜索会话...")
@@ -656,7 +663,15 @@ class HistoryPage(QWidget):
                 logger.warning(f"[history-manager] 调用窗口方法 {method_name} 失败")
 
     def _sync_project_header(self) -> None:
-        """折叠头显示当前过滤目标（「全部项目」/ 具体项目）"""
+        """折叠头显示当前过滤目标（「全部项目」/ 具体项目）
+
+        🛡️ 归档子页签不做项目过滤（归档轻量记录无 project 字段，见
+        ``_enrich_archived_list`` 注释），此时头部若仍显示具体项目名，会给出
+        「列表只含该项目归档会话」的错误暗示 —— 归档页签统一显示全量语义。
+        """
+        if self._current_tab == "archived":
+            self._project_header.set_project("全部项目的归档", is_all=True)
+            return
         if self._get_tab_filter() == _PROJECT_ALL:
             self._project_header.set_project("全部项目", is_all=True)
             return
@@ -1049,6 +1064,9 @@ class HistoryPage(QWidget):
         """写当前活跃标签页的筛选记忆（跟随模式清除桶条目）"""
         wid = self._active_window_id()
         if wid is None:
+            # TabManagerWindow 尚未就绪 / 无活跃窗口时无法分桶。此时静默 return
+            # 会让「点项目行」整个没反应且毫无线索，至少留一条可诊断的日志。
+            logger.warning("[history-manager] 无法写入项目筛选：未取得活跃 window_id")
             return
         if value == _PROJECT_CURRENT:
             self._project_filter_by_tab.pop(wid, None)
@@ -1059,9 +1077,28 @@ class HistoryPage(QWidget):
         """tab 切换：投影切到新活跃标签页自己的筛选记忆（页面可见才刷）"""
         if not self.isVisible():
             return
+        # 🛡️ 搜索词跟着窗口走：卡片是单例，不清会让上一个标签页的搜索词在
+        # 新标签页继续过滤（列表残缺且用户不知情）。与子页签切换同口径
+        # （_on_tab_changed 已 clear 输入框）——此处补卡片侧与输入框侧两处状态。
+        self._clear_search_state()
         self.refresh()
         if self._project_panel_open:
             self.refresh_project_selector_data()
+
+    def _clear_search_state(self) -> None:
+        """清空搜索状态（卡片过滤词 + 输入框文本 + 待触发的防抖定时器）"""
+        if self._card is not None and hasattr(self._card, "clear_search"):
+            try:
+                self._card.clear_search()
+            except Exception:
+                pass
+        if self._search_input is not None:
+            try:
+                self._search_input.blockSignals(True)
+                self._search_input.clear()
+                self._search_input.blockSignals(False)
+            except Exception:
+                pass
 
     def _resolved_project_filter(self) -> Optional[str]:
         """解析项目过滤器（「当前项目」跟随活跃窗口；「全部项目」→ None 不过滤）"""
@@ -1099,6 +1136,10 @@ class HistoryPage(QWidget):
         if hm is None:
             return []
         archived_list = hm.get_archived_sessions()
+        # 注：归档记录只有 path/session_id/title（project 在文件正文里，轻量列表
+        # 未读取），故归档子页签无法按项目过滤。两侧语义由 _sync_project_header
+        # 在归档页签下显式标注「全部项目的归档」来对齐，避免头部写"项目X"、
+        # 列表却是全量的歧义。
         if not hasattr(self, "_archived_cache"):
             self._archived_cache = {}  # path → (mtime, enrich_dict)
 

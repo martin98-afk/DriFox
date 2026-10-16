@@ -4079,6 +4079,10 @@ class MessageCard(SimpleCardWidget):
         # [L3] 内容增长：此前的「宽度→高度」预测失效（流式期间本就不写缓存，
         # 这里兜底处理流式中途插入内容等路径）
         self._height_cache.clear()
+        # [render-diag] chunk 到达计数（停摆定位：对比 append 与各渲染分支计数）
+        _v = getattr(self, "viewer", None)
+        if _v is not None and hasattr(_v, "_rdiag_hit"):
+            _v._rdiag_hit("append_text")
         if self.role == "user" and self.viewer is None:
             self._ensure_user_viewer()
         if self.role == "assistant":

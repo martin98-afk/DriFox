@@ -2,16 +2,27 @@
 All notable changes to this project will be documented in this file.
 
 ## [未发布]
+自 v0.6.8 以来的变更 | 贡献者：dingma
+### 🐛 问题修复 (Bug Fixes)
+- **插件依赖 wheel 平台串台致插件静默失效** (`plugins/plugin-marketplace/ui/deps_installer.py` · `tests/plugins/test_deps_installer_wheel_tags.py`): `_platform_wheel_tags()` 无条件把 `win_{arch}` 放进候选集且只声明 `macosx_11_0_{arch}`，两个缺陷叠加：①非 Windows 平台上 win tag 仍参与排序（Intel Mac 上 `win_amd64` 排第 2 位、压过 macosx/manylinux），会把 Windows 原生模块（`.pyd`）装进 `deps/<platform>/`，darwin 上 import 直接 `OSError: Cannot load native module`；②PyPI 上 macosx wheel 主流形态是 `macosx_10_9_universal2`（pycryptodome / charset-normalizer 均如此），前缀匹配永远不中 → 依赖装不上、`deps/darwin/` 始终为空。实测故障链：gateway-feishu 的 pycryptodome 装成 win_amd64 → `lark_oapi/core/utils/decryptor.py` 顶层 `from Crypto.Cipher import AES` 炸 → 整个 `gateways/feishu.py` 模块加载失败 → feishu 从未进 `GatewayPlatformRegistry`，表现为「配置 enabled=true 但日志只有『无启用平台』、设置卡开关无效」。修复：候选集按 `sys.platform` 严格分发（win32→`win_*`、darwin→`macosx_*`、其余→`manylinux*`/`linux_*`），通用层补 `cp{ver}-abi3` 与 `macosx_10_9_universal2`。新增回归测试 23 用例覆盖 win32/linux/darwin × x86_64/arm64 六组合（断言候选集不含他平台 OS tag、universal2/abi3 恒在、真实 PyPI wheel 文件名匹配结果）；已反向验证旧代码下 16 用例失败。`tools/generate_marketplace.py --check` 一致性通过
+
+## [v0.6.8] - 2026-10-16
+
+自 v0.6.7 以来的变更 | 提交数：3 · 文件变更：13 · +988/-45 | 贡献者：dingma
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **简洁模式流式折叠栏抖动三层修复** (`73f23c3d`, app/main_widget.py · app/widgets/card_viewers.py · app/widgets/message_card.py · tests/widgets/test_main_widget_scroll_anchor.py · tests/debug/dock_jitter_probe.py): ①跟随态贴底由 heightChanged 回调内同步贴 `_landed_bottom_value()` 改为 `QMetaObject.invokeMethod(QueuedConnection)` 排队执行（posted event 与 LayoutRequest 同队列 FIFO：布局落地→贴底→paint，用户看不到中间帧），消除「上一拍底」滞后造成的视口内容突跳-弹回循环（卡片高度增长期抖动；探针 dev 0→261→0、16 次翻转）；②内容哨兵补渲强制走全量渲染（置 `_needs_full_render` + 复位差量基线 `_stable_md_len`/`_last_rendered_markdown`）——流式中补渲原本进差量快路径被「无新内容」拦截，真机实证 18 次补渲全部无效、DOM 卡死 ~100 字符达 3 分钟（渲染管线停摆→间歇恢复→积压涌入即折叠框大幅跳动主因）；③哨兵不可见短路：V1 门控下隐藏期间渲染本就挂起，补渲只会空转（旧日志 564 次空转），改置 deferred 由 showEvent 恢复时补渲。附带渲染管线分支计数打点（render-diag，5s 汇总 all.log）与 dock-blank 虚高诊断（带 2s 冷却）。测试：test_main_widget_scroll_anchor.py harness 补绑 `_schedule_bottom_snap`/`_snap_bottom_queued` + 断言前 processEvents；复现探针 tests/debug/dock_jitter_probe.py
+
+- **HistoryManager 缓存键交错致陈旧列表返回** (`cfe63847`, app/utils/history_manager.py · app/main_widget.py · plugins/history-manager/ui/history_card.py · plugins/history-manager/ui/history_page.py · tests/utils/test_history_manager.py): `_cache_dirty` 是全局脏标志，但轻量列表缓存按 cache_key 分桶（`project` / `("merge_team", project)`）。原实现只置全局标志、由先被读到的桶在重建后复位，其余分桶长期停留在旧快照——历史页（merge_team=True）与欢迎卡片/工作区树（merge_team 缺省）交错读取时，「历史卡片看不到刚结束的会话」。改为置脏即整表作废（`_mark_cache_dirty` 清空 `_cached_lightweight`），单桶重建不复位全局标志，同时兼容外部直接置 `_cache_dirty = True` 的调用方。附带本进程写库后刷新 SQLite 变更签名：WAL 提交会推进 -wal mtime，不刷新会让下一次 `get_history_list` 的 `_reload_if_db_changed` 把自己的写入误判为「其他进程修改」，每轮对话结束后首次刷新都白跑一次全量重载（实测 1915 条约 19ms，且持 `_history_load_lock`）
+
 ### ✨ 新功能 (New Features)
-- **TLS 信任系统证书链** (app/utils/tls_trust.py · plugins/system-providers/providers/* · app/utils/http_client.py · app/utils/update_proxy.py): 修复企业网络/代理对 HTTPS 做 TLS 拦截（插入自签 CA）时 CodeBuddy 登录、模型列表拉取、用量查询、更新检查全链路报 `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`。truststore（pip 官方同款）把验证委托给系统信任库（macOS 钥匙串 / Windows 证书存储 / Linux 系统 CA），插件侧 helper 内联保持零主程序依赖；SSL 类报错翻译成带指引的中文（buddy_auth / copilot_auth）。依赖新增 `truststore>=0.9.0`；测试 tests/utils/test_tls_trust.py（6 例）
-- **MCP OAuth 登录** (app/core/mcp_oauth/ · app/tools/mcp_tools.py · app/plugins/managers/plugin_manager.py): 新增 app/core/mcp_oauth/ 包（token_store / callback_server / provider / manager），给 MCP 客户端加 OAuth 2.1 授权码流程支持。覆盖 Protected Resource Metadata 发现（RFC 9728）、Authorization Server Metadata 发现（RFC 8414）、PKCE(S256)、动态客户端注册（RFC 7591）、本地 HTTP 回调（127.0.0.1 随机端口 /callback）、token 自动刷新。.mcp.json 通过 auth: {type: "oauth", client_name, scope} 声明，auth 已加入 _MCP_PERSIST_FIELDS 保证 UI 编辑不丢。token 复用 PluginConfigStore 落 plugin_data/<plugin>/config.json（键名 _mcp_oauth_<server>，明文存储已在文档标注）。附带 SDK 兼容性补丁：basic 认证模式下从 body 移除 client_id（RFC 6749 §2.3.1，否则 Notion 返回 400）。文档 docs/plugins/mcp-oauth.md；测试 tests/core/test_mcp_oauth.py（36 例）
 
-### ⚡ 性能优化 (Performance)
-- **移除简洁模式工具/思考折叠内的预览文字打字机** (app/widgets/card_render_core.py · app/widgets/card_viewers.py · app/widgets/message_card.py): 删除 `_PREVIEW_TYPEWRITER_JS`（`window._pt/_ptType/_ptPlay`）、全部 `[data-dfx-preview]` 标记与 6 处渲染路径调用，工具块预览行与思考块预览文字改为渲染落地即全显。消除渲染落地后 240ms 内逐帧 rAF 文本写入与每轮全量渲染的 `querySelectorAll('[data-dfx-preview]')` 遍历；`_SKELETON_CACHE_VERSION` 46 → 47；删除对应测试 tests/widgets/test_preview_typewriter.py 与复现脚本 tests/debug/preview_typewriter_repro.py。
+- **子代理继承历史序列化与探针工具** (`382fa697`, app/core/workers/subagent_worker.py · tests/core/test_subagent_serialize_internal_format.py · tests/debug/dock_jitter_probe.py · tests/debug/_bisect_webengine_boot.py): ①SubAgentExecutor 发送前补 image_ref 读侧恢复（`revive_vision_image_refs`，persist 的逆操作；缺失文件降级 text 占位块不抛错，与 chat_worker 对称）——继承的主智能体历史含用户图片时，不恢复会以内部格式漏进 API content 数组（`type=image_ref` 非法，触发 400）；②chat/completions 分支同样强制过序列化单入口 `_serialize_for_api`——inherit_history 继承的历史是内部格式（assistant.content 可含 tool_result block、image_ref），裸发会被严格校验的 provider 拒绝（实测 GLM 400 code=1214 "messages[N].content[M].type类型错误"）；新增 `tests/debug/dock_jitter_probe.py`（折叠栏抖动复现探针）与 `tests/debug/_bisect_webengine_boot.py`（WebEngine 崩溃点二分定位），测试 `tests/core/test_subagent_serialize_internal_format.py`
 
-## [v0.6.7] - 2026-10-14 (重新发布 #3)
+## [v0.6.7] - 2026-10-14 (重新发布 #4)
 
-自上一版本以来的变更（累计） | 提交数：64 · 文件变更：314 · +18266/-10311 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更（累计） | 提交数：65 · 文件变更：330 · +18646/-10331 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -79,6 +90,10 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes) · 重新发布 #3 追加
 
 - **滚轮事件链路线程安全与几何校准** (`14201f4b` `a6b6ece1` `6f69b039` `3eef164f`): UIEventBus 及关联组件加线程安全检查，阻止访问违例；UIPluginRegistry 在主线程初始化 UIEventBus 中继；CodeWebViewer 改为事件驱动的几何校准，修正 armed 态卡片内滚边界判定；新增 `tests/debug/probe_wheel_*.py` 系列真实宿主/合成事件探针与 `tests/widgets/test_welcome_card_pending_delete.py`（防待删除控件在 UI 更新中崩溃）
+
+### ✨ 新功能 (New Features) · 重新发布 #4 追加
+
+- **TLS 信任系统证书链** (`8a07b24a`): 修复企业网络/代理对 HTTPS 做 TLS 拦截（插入自签 CA）时 CodeBuddy 登录、模型列表拉取、用量查询、更新检查全链路报 `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`。新增 `app/utils/tls_trust.py` 用 truststore（pip 官方同款）把验证委托给系统信任库（macOS 钥匙串 / Windows 证书存储 / Linux 系统 CA），进程级缓存；`http_client` / `update_proxy` 接入；system-providers 插件 8 个 provider（buddy_auth / copilot_auth / codebuddy / dashscope / github_copilot / minimax / opencode / volcengine / zhipu）内联 helper 保持零主程序依赖；buddy_auth / copilot_auth 把 SSL 类报错翻译成带指引的中文。依赖新增 `truststore>=0.9.0`；测试 `tests/utils/test_tls_trust.py`（6 例）+ `tests/utils/test_update_proxy.py`
 
 ## [v0.6.6] - 2026-10-13 (重新发布 #4)
 
