@@ -76,8 +76,11 @@ class DatabaseManager:
             cursor.execute("PRAGMA journal_mode=WAL")
             # 同步模式改为 NORMAL（比 FULL 快 10-100x，仅丢失最近一次事务）
             cursor.execute("PRAGMA synchronous=NORMAL")
-            # 缓存大小提升到 64MB（默认 2MB，减少 I/O）
-            cursor.execute("PRAGMA cache_size=-65536")
+            # 页缓存 15.6MB（负值单位 KB，-16000 = 15.6MB）。原 64MB 的热查询
+            # 收益与 15.6MB 无感知差异，大库省约 29MB 真驻留。
+            # 与 session_store.py 的 cache_size=-16000 保持一致：后设连接覆盖
+            # 先设值，两处必须同值。
+            cursor.execute("PRAGMA cache_size=-16000")
             # 临时存储放到内存（加速 ORDER BY/GROUP BY）
             cursor.execute("PRAGMA temp_store=MEMORY")
             # 启用 mmap 读取（减少系统调用）
