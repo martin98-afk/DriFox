@@ -328,3 +328,55 @@ def test_snapshot_bad_name_and_kind_rejected(tmp_path):
     except ValueError:
         raised = True
     assert raised
+
+
+# ── 工作目录状态与漂移 ───────────────────────────────────
+
+
+def test_workdir_drift_detect_and_migrate(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    old_wd = str(tmp_path / "old")
+    new_wd = str(tmp_path / "new")
+    m.write_project_memory(old_wd, "build", "旧项目记忆")
+    # 无 last_workdir 记录 → 不报漂移
+    assert m.detect_workdir_drift(aid_dir, new_wd)["drifted"] is False
+    m.touch_workdir(aid_dir, old_wd)
+    d = m.detect_workdir_drift(aid_dir, new_wd)
+    assert d["drifted"] is True and d["old_workdir"] == old_wd and d["old_chars"] > 0
+    # 迁移：MEMORY.md + 日志一起搬到新目录（旧目录文件保留）
+    m.append_daily(old_wd, "build", "- 旧日志条目", date="2026-10-10")
+    r = m.migrate_project_memory(aid_dir, old_wd, new_wd)
+    assert r["ok"] and "MEMORY.md" in r["moved"]
+    assert "旧项目记忆" in m.read_project_memory(new_wd, "build")
+    assert "旧日志条目" in m.read_daily(new_wd, "build", "2026-10-10")
+    # 迁移后 touch 新目录 → 不再报漂移
+    assert m.detect_workdir_drift(aid_dir, new_wd)["drifted"] is False
+
+
+def test_drift_dismiss_stops_reporting(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    old_wd = str(tmp_path / "old")
+    new_wd = str(tmp_path / "new")
+    m.touch_workdir(aid_dir, old_wd)
+    m.write_project_memory(old_wd, "build", "旧记忆")
+    assert m.detect_workdir_drift(aid_dir, new_wd)["drifted"] is True
+    m.dismiss_drift(aid_dir, old_wd)
+    assert m.detect_workdir_drift(aid_dir, new_wd)["drifted"] is False
+
+
+def test_migrate_rejects_non_empty_target(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    old_wd = str(tmp_path / "old")
+    new_wd = str(tmp_path / "new")
+    m.write_project_memory(old_wd, "build", "旧")
+    m.write_project_memory(new_wd, "build", "新")
+    r = m.migrate_project_memory(aid_dir, old_wd, new_wd)
+    assert not r["ok"] and r["error"] == "target_not_empty"
+
+
+def test_drift_current_memory_nonempty_is_normal(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    wd = str(tmp_path / "cur")
+    m.touch_workdir(aid_dir, str(tmp_path / "elsewhere"))
+    m.write_project_memory(wd, "build", "当前有记忆")
+    assert m.detect_workdir_drift(aid_dir, wd)["drifted"] is False

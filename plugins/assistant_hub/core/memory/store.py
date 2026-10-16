@@ -467,3 +467,97 @@ def restore_snapshot(aid_dir: Path, kind: str, name: str, target: Path, workdir:
         backup = str(r.get("file") or "")
     _atomic_write(tgt, content)
     return {"ok": True, "restored_from": name, "backup": backup}
+
+
+# ── 工作目录状态与漂移 ───────────────────────────────────
+
+
+def _workdir_state_path(aid_dir: Path) -> Path:
+    return Path(aid_dir) / WORKDIR_STATE_FILE
+
+
+def _read_workdir_state(aid_dir: Path) -> Dict:
+    try:
+        data = json.loads(_workdir_state_path(aid_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_workdir_state(aid_dir: Path, data: Dict) -> None:
+    _atomic_write(_workdir_state_path(aid_dir), json.dumps(data, ensure_ascii=False))
+
+
+def touch_workdir(aid_dir: Path, workdir: str) -> None:
+    """记录最近使用的工作目录（仅变化时落盘；memory 工具每次带 workdir 调用）。"""
+    if not workdir:
+        return
+    data = _read_workdir_state(aid_dir)
+    if data.get("last_workdir") != str(workdir):
+        data["last_workdir"] = str(workdir)
+        _write_workdir_state(aid_dir, data)
+
+
+def detect_workdir_drift(aid_dir: Path, workdir: str) -> Dict:
+    """漂移检测：当前项目记忆为空而上次工作目录有记忆 → 可能换了目录（提示，不自动动）。
+
+    当前记忆非空视为正常（顺带 touch）；无记录/同目录/旧记忆为空/已忽略 → 不报。
+    """
+    if not workdir:
+        return {"drifted": False}
+    if read_project_memory(workdir, Path(aid_dir).name).strip():
+        touch_workdir(aid_dir, workdir)
+        return {"drifted": False}
+    data = _read_workdir_state(aid_dir)
+    old = str(data.get("last_workdir") or "")
+    if not old or os.path.normcase(old) == os.path.normcase(str(workdir)):
+        return {"drifted": False}
+    if _workdir_key(old) in (data.get("dismissed") or []):
+        return {"drifted": False}
+    old_mem = read_project_memory(old, Path(aid_dir).name).strip()
+    if not old_mem:
+        return {"drifted": False}
+    return {"drifted": True, "old_workdir": old, "old_chars": len(old_mem)}
+
+
+def dismiss_drift(aid_dir: Path, workdir: str) -> None:
+    """把某工作目录加入忽略名单（用户明确说不是漂移）。"""
+    if not workdir:
+        return
+    data = _read_workdir_state(aid_dir)
+    key = _workdir_key(workdir)
+    dismissed = list(data.get("dismissed") or [])
+    if key not in dismissed:
+        dismissed.append(key)
+        data["dismissed"] = dismissed
+        _write_workdir_state(aid_dir, data)
+
+
+def migrate_project_memory(aid_dir: Path, old_workdir: str, new_workdir: str) -> Dict:
+    """把旧工作目录的项目记忆整体迁到新目录（MEMORY.md + 全部日志）；仅新位置记忆为空时允许。
+
+    旧目录文件保留不删（安全）；迁移后 touch 新目录，漂移自然消失。
+    """
+    if not old_workdir or not new_workdir:
+        return {"ok": False, "error": "bad_args"}
+    if os.path.normcase(old_workdir) == os.path.normcase(new_workdir):
+        return {"ok": False, "error": "same_dir"}
+    aid = Path(aid_dir).name
+    if read_project_memory(new_workdir, aid).strip():
+        return {"ok": False, "error": "target_not_empty"}
+    src_dir = project_dir(old_workdir, aid)
+    if not src_dir.exists():
+        return {"ok": False, "error": "no_source"}
+    dst_dir = project_dir(new_workdir, aid)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    moved: List[str] = []
+    for f in sorted(src_dir.glob("*.md")):
+        parsed = parse_daily_stem(f.stem)
+        if f.name != PROJECT_MEMORY_FILE and parsed is None:
+            continue  # 用户杂项文件不迁
+        _atomic_write(dst_dir / f.name, read_text(f))
+        moved.append(f.name)
+    if not moved:
+        return {"ok": False, "error": "no_source"}
+    touch_workdir(aid_dir, new_workdir)
+    return {"ok": True, "moved": moved}
