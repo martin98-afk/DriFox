@@ -2,6 +2,7 @@
 """test_memory_store.py — 记忆存储层（双层结构 + 注入视图）回归。"""
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -246,3 +247,84 @@ def test_distilled_index_tag(tmp_path):
     m.mark_distilled(wd, "build", "2026-10-14")
     text = m.daily_index_text(wd, "build")
     assert "已蒸馏" in text
+
+
+# ── 快照（覆盖写前的历史版本）──────────────────────────
+
+
+def _mk_aid(tmp_path):
+    aid_dir = tmp_path / "hub" / "build"
+    aid_dir.mkdir(parents=True)
+    return aid_dir
+
+
+def test_snapshot_roundtrip_and_restore_backup(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    g = aid_dir / "MEMORY.md"
+    g.write_text("v1 内容", encoding="utf-8")
+    r1 = m.snapshot_memory(aid_dir, "global", g)
+    assert r1["ok"] and r1["file"]
+    g.write_text("v2 内容", encoding="utf-8")
+    r2 = m.snapshot_memory(aid_dir, "global", g)
+    snaps = m.list_snapshots(aid_dir, "global")
+    assert len(snaps) == 2
+    assert snaps[0]["file"] == r2["file"]  # 时间倒序，最新在前
+    assert m.read_snapshot(aid_dir, "global", r2["file"]) == "v2 内容"
+    # 恢复 v1：恢复前当前版 v2 自动入快照
+    rr = m.restore_snapshot(aid_dir, "global", r1["file"], g)
+    assert rr["ok"] and rr["backup"]
+    assert m.read_text(g) == "v1 内容"
+    assert len(m.list_snapshots(aid_dir, "global")) == 3
+
+
+def test_snapshot_no_source_rejected(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    assert m.snapshot_memory(aid_dir, "global", aid_dir / "不存在.md")["ok"] is False
+    empty = aid_dir / "空.md"
+    empty.write_text("   ", encoding="utf-8")
+    assert m.snapshot_memory(aid_dir, "global", empty)["ok"] is False
+
+
+def test_snapshot_prune_keeps_ten(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    g = aid_dir / "MEMORY.md"
+    g.write_text("x", encoding="utf-8")
+    sdir = m.snapshot_dir(aid_dir, "global")
+    sdir.mkdir(parents=True)
+    for d in range(1, 13):  # 手工造 12 份历史快照（名字即时间序）
+        (sdir / f"20261001-0000{d:02d}.md").write_text(f"s{d}", encoding="utf-8")
+    m.snapshot_memory(aid_dir, "global", g)
+    snaps = m.list_snapshots(aid_dir, "global")
+    assert len(snaps) == 10
+    names = [s["file"] for s in snaps]
+    assert "20261001-000001.md" not in names  # 最旧被裁
+    assert "20261001-000012.md" in names
+
+
+def test_snapshot_project_origin_json(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    wd = str(tmp_path / "proj")
+    m.write_project_memory(wd, "build", "项目记忆")
+    r = m.snapshot_memory(aid_dir, "project", m.project_memory_path(wd, "build"), wd)
+    assert r["ok"]
+    origin = m.snapshot_dir(aid_dir, "project", wd) / "origin.json"
+    assert origin.exists() and json.loads(origin.read_text(encoding="utf-8"))["workdir"] == wd
+    # origin.json 不计入快照列表，也不被裁剪
+    assert all(s["file"] != "origin.json" for s in m.list_snapshots(aid_dir, "project", wd))
+
+
+def test_snapshot_bad_name_and_kind_rejected(tmp_path):
+    aid_dir = _mk_aid(tmp_path)
+    for bad in ["../evil.md", "x.md", ""]:
+        try:
+            m.read_snapshot(aid_dir, "global", bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, f"name={bad!r} 应拒绝"
+    try:
+        m.snapshot_dir(aid_dir, "bogus")
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised

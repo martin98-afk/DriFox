@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -28,6 +30,13 @@ GLOBAL_MEMORY_FILE = "MEMORY.md"
 PROJECT_MEMORY_FILE = "MEMORY.md"
 # 已蒸馏日志后缀：YYYY-MM-DD.md → YYYY-MM-DD.distilled.md（内容保留可查，蒸馏/门禁时忽略）
 DISTILLED_SUFFIX = ".distilled"
+
+# ── 快照（覆盖写前的历史版本，集中存助手目录，随 Gitee 同步走）──────
+SNAPSHOT_DIR_NAME = "memory_snapshots"
+SNAPSHOT_KEEP = 10
+WORKDIR_STATE_FILE = "workdir_state.json"
+
+_SNAP_NAME_RE = re.compile(r"^\d{8}-\d{6}\.md$")
 
 # 注入相关内容量（manager/prompts 使用）
 DAILY_LOOKBACK = 7  # 注入的近期日志条数
@@ -370,3 +379,91 @@ def daily_index_text(workdir: str | Path, aid: str, limit: int = DAILY_LOOKBACK)
         tag = " · 已蒸馏" if it.get("distilled") else ""
         lines.append(f"- {it['date']}（{it['chars']} 字{tag}）")
     return "\n".join(lines)
+
+
+# ── 快照 ─────────────────────────────────────────────────
+
+
+def _workdir_key(workdir: str) -> str:
+    """workdir → 稳定短哈希（项目快照组目录名，Windows 大小写不敏感）。"""
+    norm = os.path.normcase(os.path.normpath(str(workdir)))
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:10]
+
+
+def snapshot_dir(aid_dir: Path, kind: str, workdir: str = "") -> Path:
+    """快照组目录：global 固定组；project 按工作目录哈希分组。非法参数抛 ValueError。"""
+    if kind == "global":
+        return Path(aid_dir) / SNAPSHOT_DIR_NAME / "global"
+    if kind == "project" and workdir:
+        return Path(aid_dir) / SNAPSHOT_DIR_NAME / f"project_{_workdir_key(workdir)}"
+    raise ValueError(f"非法快照组: kind={kind!r} workdir={workdir!r}")
+
+
+def _prune_snapshots(sdir: Path) -> None:
+    """按文件名（即时间）排序裁剪，只删合法快照名，origin.json 等不动。"""
+    snaps = sorted(p for p in sdir.glob("*.md") if _SNAP_NAME_RE.match(p.name))
+    for p in snaps[: max(len(snaps) - SNAPSHOT_KEEP, 0)]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def snapshot_memory(aid_dir: Path, kind: str, source: Path, workdir: str = "") -> Dict:
+    """把 source 文件快照入组；源缺失/空白不快照；异常吞掉返回 ok=False（不得阻断主写）。"""
+    try:
+        src = Path(source)
+        if not src.exists() or src.stat().st_size <= 0:
+            return {"ok": False, "error": "no_source"}
+        text = src.read_text(encoding="utf-8")
+        if not text.strip():
+            return {"ok": False, "error": "empty_source"}
+        sdir = snapshot_dir(aid_dir, kind, workdir)
+        sdir.mkdir(parents=True, exist_ok=True)
+        if kind == "project":
+            origin = sdir / "origin.json"
+            if not origin.exists():
+                origin.write_text(json.dumps({"workdir": str(workdir)}, ensure_ascii=False), encoding="utf-8")
+        name = datetime.now().strftime("%Y%m%d-%H%M%S") + ".md"
+        while (sdir / name).exists():  # 同秒冲突 +1s，保持名格式即时间序
+            dt = datetime.strptime(name[:15], "%Y%m%d-%H%M%S") + timedelta(seconds=1)
+            name = dt.strftime("%Y%m%d-%H%M%S") + ".md"
+        _atomic_write(sdir / name, text)
+        _prune_snapshots(sdir)
+        return {"ok": True, "file": name}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def list_snapshots(aid_dir: Path, kind: str, workdir: str = "") -> List[Dict]:
+    """快照列表（新→旧）：[{"file", "ts", "chars"}]；非法组或无目录返回 []。"""
+    try:
+        sdir = snapshot_dir(aid_dir, kind, workdir)
+    except ValueError:
+        return []
+    if not sdir.exists():
+        return []
+    out: List[Dict] = []
+    for p in sorted((q for q in sdir.glob("*.md") if _SNAP_NAME_RE.match(q.name)), reverse=True):
+        ts = f"{p.name[0:4]}-{p.name[4:6]}-{p.name[6:8]} {p.name[9:11]}:{p.name[11:13]}:{p.name[13:15]}"
+        out.append({"file": p.name, "ts": ts, "chars": len(read_text(p).strip())})
+    return out
+
+
+def read_snapshot(aid_dir: Path, kind: str, name: str, workdir: str = "") -> str:
+    """读快照全文；name 仅接受 YYYYMMDD-HHMMSS.md（防穿越），非法抛 ValueError。"""
+    if not _SNAP_NAME_RE.match(name or ""):
+        raise ValueError(f"非法快照名: {name!r}")
+    return read_text(snapshot_dir(aid_dir, kind, workdir) / name)
+
+
+def restore_snapshot(aid_dir: Path, kind: str, name: str, target: Path, workdir: str = "") -> Dict:
+    """恢复快照到 target；恢复前 target 现有内容先入快照（可反悔），原子写回。"""
+    content = read_snapshot(aid_dir, kind, name, workdir)
+    tgt = Path(target)
+    backup = ""
+    if tgt.exists() and tgt.stat().st_size > 0:
+        r = snapshot_memory(aid_dir, kind, tgt, workdir)
+        backup = str(r.get("file") or "")
+    _atomic_write(tgt, content)
+    return {"ok": True, "restored_from": name, "backup": backup}
