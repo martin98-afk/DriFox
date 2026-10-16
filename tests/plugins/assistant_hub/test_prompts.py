@@ -21,28 +21,18 @@ def _roles_ok(msgs):
 
 
 def test_memory_system_contains_layers_and_paths():
-    """记忆说明书：两层结构 + 实际路径 + 写入时机 + 维护规则，且不含 workbuddy 品牌词。"""
+    """说明书极简：指针 + 路径，规则全部指向工具说明。"""
     text = m.build_memory_system("/data/MEMORY.md", "/proj/.drifox/memory/build")
-    assert "# 第一层 — 全局记忆" in text
-    assert "# 第二层 — 项目记忆" in text
+    assert "memory_read" in text and "memory_write" in text
     assert "/data/MEMORY.md" in text
     assert "/proj/.drifox/memory/build" in text
-    assert "memory_write" in text and "memory_read" in text
-    assert "何时写" in text and "维护" in text
+    assert "工具说明" in text
     assert "workbuddy" not in text.lower()
-    assert "drifox" in text.lower()
-
-
-def test_memory_system_contains_distill_rules():
-    """说明书含蒸馏流程 + 全局严选标准；触发时机归程序判断，不写静态说教。"""
-    text = m.build_memory_system("/data/MEMORY.md", "/proj/.drifox/memory/build")
-    assert "新日门禁" not in text  # 触发时机由程序在 memory_write 时判断，说明书不写
-    assert "memory_write 执行时判断" in text
-    assert "mark_distilled" in text
-    assert ".distilled" in text
-    assert "最珍贵" in text and "项目无关" in text
-    # 全局准入：显式要求 + 蒸馏严选两类
-    assert "蒸馏" in text and "宁缺勿滥" in text
+    # 极简断言：规则/蒸馏细节不在说明书
+    assert len(text) < 600
+    assert "何时写" not in text and "维护" not in text
+    assert "mark_distilled" not in text and ".distilled" not in text
+    assert "最珍贵" not in text
 
 
 def test_build_distill_gate():

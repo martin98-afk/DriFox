@@ -35,66 +35,13 @@ def _msg(user_text: str) -> list:
 
 
 def build_memory_system(global_file: str, project_dir: str) -> str:
-    """生成记忆系统说明书（含实际路径）。
-
-    对照 WorkBuddy workbuddy-memory-system.md：
-    - 三层（云记忆/用户级/工作区）→ 本实现两层（全局/项目）+ 经验体系（工具层）。
-    - 写入工具从通用 Edit 收口为 memory_write（DriFox 沙箱下工作目录外写会弹审批）。
-    """
-    return f"""IMPORTANT: 你拥有跨会话的长期记忆系统，分两层，各自的写入策略不同。
-<memory_system>
-
-# 第一层 — 全局记忆（跨项目，读写）
-
-文件：{global_file}｜作用域：所有项目｜注入上限：4,000 字符
-
-当用户明确要求你长期记住某事、且此事不绑定具体项目时，用 memory_write（scope=global）
-整体更新此文件，保持精简。全局记忆准入门槛极严，只有两类内容可进：
-① 用户显式要求记住的跨项目规则；② 蒸馏流程筛出的「最珍贵且与项目无关」的经验
-（珍贵性与项目无关性缺一不可，宁缺勿滥；项目特有的做法永远留在项目记忆）。
-
-# 第二层 — 项目记忆（当前项目，读写）
-
-目录：{project_dir}/｜作用域：仅当前项目
-
-文件：
-- {project_dir}/YYYY-MM-DD.md — 每日工作日志。**只追加，绝不覆盖**（memory_write scope=daily）。文件名即日期，content 勿再写日期标题。
-  每条记录由程序自动加「时刻 | 等级 | 」前缀（loguru 风格）：content 里不要自己写时间戳；
-  等级用 level 参数（坑/失败用 WARNING，严重问题用 ERROR，默认 INFO）。
-- {project_dir}/MEMORY.md — 项目长期笔记（memory_write scope=project 整体更新）。上限 3,000 字符。
-- 今天的日志不存在时，memory_write 会自动创建；不要手动建文件。
-
-取历史上下文：按需选择来源，不需要全读。
-- 查本项目的过往工作 → memory_read（scope=daily，带 date 读某天；最近的优先）或读项目 MEMORY.md。
-- 跨项目、位置不确定 → 读全局记忆，或直接问用户。
-
-角色边界：记忆只是补充，不替代正常回复、最终答案或用户要求的任何交付物。
-
-**分层铁律（防重复）**：
-- 仓库内的 AGENTS.md（已自动注入，见系统提示词「项目笔记」段）是静态规范的唯一来源：
-  构建/测试命令、目录结构、插件化约束、代码风格、提交规范、EOL 纪律等一律**只存在于 AGENTS.md，禁止抄进 MEMORY.md**。
-- 项目 MEMORY.md 只写 AGENTS.md 里没有的动态沉淀：踩过的坑、决策理由、易错点、用户偏好、本次改动为何这么做。
-- 更新 MEMORY.md 前先自问：这条在 AGENTS.md 里已有吗？已有则不写或删掉既有重复。
-- 发现 MEMORY.md 与 AGENTS.md 重复时，删掉 MEMORY.md 里的重复段（AGENTS.md 为准）。
-
-**何时写（必须遵守）：** 完成实质工作后，立即用 memory_write（scope=daily）往当日日志追加一条简短记录。实质工作包括：
-- 建好或修改了网站/应用/插件
-- 修复了 bug
-- 写了或生成报告/文档（**不含** AGENTS.md 类静态规范的同步——那是 AGENTS.md 的事，不写日志）
-- 完成代码重构或架构调整
-- 选定了技术方案（框架、设计模式等）
-- 用户分享了**行为偏好**（回复风格、协作方式）→ 同时更新项目 MEMORY.md
-  （注意：项目约定/规范类内容属 AGENTS.md，不进 MEMORY.md，见上文分层铁律）
-
-日志只追加。不记录瞬时信息（搜索结果、临时路径、工具报错）。只沉淀跨会话仍有价值的内容。
-
-维护（蒸馏）：日志蒸馏的触发与拦截由程序在 memory_write 执行时判断并给出待蒸馏清单，
-按指令执行即可。蒸馏动作：校对旧日志（移除不实/过时/被推翻的条目）、蒸馏进项目
-MEMORY.md、筛出最珍贵且与项目无关的进全局 MEMORY.md，然后给日志打蒸馏标
-（memory_write scope=daily date=YYYY-MM-DD mark_distilled=true）。已打标的日志保留可查
-（文件名带 .distilled），蒸馏与门禁均忽略它们。除用户明确要求，不存密钥。
-
-</memory_system>"""
+    """生成记忆体系指针（极简）：只报结构位置，全部规则见工具 schema description。"""
+    return (
+        "IMPORTANT: 你拥有跨会话长期记忆。读写用 memory_read / memory_write，"
+        "全部使用规则（写入时机、内容纪律、超限处理、蒸馏）见工具说明。\n"
+        f"全局记忆文件：{global_file}\n"
+        f"项目记忆目录：{project_dir}"
+    )
 
 
 # ── 日志蒸馏门禁（新日首写拦截时返回给模型的指令）──────

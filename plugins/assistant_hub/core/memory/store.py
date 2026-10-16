@@ -297,11 +297,14 @@ def write_project_memory(workdir: str | Path, aid: str, content: str) -> bool:
     return True
 
 
-def append_daily(workdir: str | Path, aid: str, text: str, date: str = "", level: str = "INFO") -> Dict:
+def append_daily(
+    workdir: str | Path, aid: str, text: str, date: str = "", level: str = "INFO", summary: str = ""
+) -> Dict:
     """追加一条到当日日志（append-only；条目间空行分隔）。
 
-    程序给每条记录打 loguru 风格前缀：`YYYY-MM-DD HH:MM:SS | LEVEL | 内容`。
-    时刻与等级是精确字段，由程序生成；模型只提供内容与 level（非法回落 INFO）。
+    程序给每条记录打 loguru 风格前缀：`YYYY-MM-DD HH:MM:SS | LEVEL | 摘要 | 细节`。
+    时刻与等级是精确字段，由程序生成；模型提供 summary（一句话，便于浏览）与
+    text（细节）；level 非法回落 INFO，summary 缺省时退化为三段式。
     """
     if not workdir:
         return {"ok": False, "error": "no_workdir"}
@@ -312,6 +315,10 @@ def append_daily(workdir: str | Path, aid: str, text: str, date: str = "", level
     if lvl not in _LOG_LEVELS:
         lvl = "INFO"
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    head = f"{stamp} | {lvl} | "
+    s = (summary or "").strip()
+    if s:
+        head += f"{s.splitlines()[0].strip()} | "
     path = daily_path(workdir, aid, date)
     with _lock_for(path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,7 +326,7 @@ def append_daily(workdir: str | Path, aid: str, text: str, date: str = "", level
         with open(path, "a", encoding="utf-8") as f:
             if not is_new:
                 f.write("\n")  # 条目间空行分隔（Markdown 段落边界）
-            f.write(f"{stamp} | {lvl} | {body}\n")
+            f.write(head + body + "\n")
     try:
         chars = len(path.read_text(encoding="utf-8"))
     except Exception:

@@ -34,6 +34,7 @@ class _Mgr:
         self.gate_text = ""  # distill_gate_block 返回值（门禁测试可控）
         self.gate_calls = 0
         self.last_level = ""  # 最近一次 append_daily 的 level（透传测试）
+        self.last_summary = ""
         self._tmp = tmp_path
 
     def _today(self):
@@ -69,9 +70,10 @@ class _Mgr:
         self._p[(aid, wd)] = content
         return True
 
-    def append_daily(self, aid, wd, text, date="", level="INFO"):
+    def append_daily(self, aid, wd, text, date="", level="INFO", summary=""):
         date = date or self._today()
         self.last_level = level
+        self.last_summary = summary
         self._d.setdefault((aid, wd, date), []).append(text)
         return {"ok": True, "date": date, "chars": sum(len(x) for x in self._d[(aid, wd, date)])}
 
@@ -129,6 +131,9 @@ class _Mgr:
     def distill_gate_block(self, aid, wd):
         self.gate_calls += 1
         return self.gate_text
+
+    def memory_max_chars(self, aid=""):
+        return {"global": 4000, "project": 3000}
 
     def memory_paths(self, aid, wd=""):
         out = {"global": str(self._tmp / "MEMORY.md")}
@@ -302,8 +307,9 @@ def test_write_daily_level_passthrough(monkeypatch, tmp_path):
     mgr = _patch(monkeypatch, tmp_path)
     m._write_impl(_ctx("/proj"), scope="daily", content="- 甲")
     assert mgr.last_level == "INFO"
-    m._write_impl(_ctx("/proj"), scope="daily", content="- 乙", level="WARNING")
+    m._write_impl(_ctx("/proj"), scope="daily", content="- 乙", level="WARNING", summary="摘要乙")
     assert mgr.last_level == "WARNING"
+    assert mgr.last_summary == "摘要乙"
 
 
 def test_read_daily_index_limit(monkeypatch, tmp_path):

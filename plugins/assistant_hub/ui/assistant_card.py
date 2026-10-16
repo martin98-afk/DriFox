@@ -281,6 +281,7 @@ class AssistantCardWidget(QWidget):
         self._memory.viewProject.connect(self._on_view_project)
         self._memory.viewDaily.connect(self._on_view_daily)
         self._memory.clearAll.connect(self._on_clear_all)
+        self._memory.limitsChanged.connect(self._on_memory_limits)
         self._inner_v.addWidget(self._memory)
 
         self._experience = ExperienceSection()
@@ -437,6 +438,7 @@ class AssistantCardWidget(QWidget):
             self._project.set_notes(a.project_notes_enabled)
             self._project.set_context_enabled(a.project_context_enabled)
             self._memory.set_memory_enabled(a.memory_enabled)
+            self._memory.set_limits(a.global_memory_max_chars, a.project_memory_max_chars)
             self._pinned.reload_pins(mgr.read_pinned(aid_capture))
             self._memory.set_status(self._memory_status(aid_capture))
             self._experience.set_enabled(a.experience_enabled)
@@ -619,6 +621,18 @@ class AssistantCardWidget(QWidget):
         self._mgr.update(a)
         self._mgr._invalidate_session_prompt_caches()
         self._memory.setEnabled_all(bool(on))
+
+    def _on_memory_limits(self, global_chars: int, project_chars: int) -> None:
+        """记忆字符上限变更：存助手配置（工具拦截/注入截断即时生效）。"""
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        changed = a.global_memory_max_chars != global_chars or a.project_memory_max_chars != project_chars
+        a.global_memory_max_chars = int(global_chars)
+        a.project_memory_max_chars = int(project_chars)
+        if changed:
+            self._mgr.update(a)
+            self._memory.set_status(self._memory_status(self._active_aid))
 
     def _reload_pinned(self, aid: str) -> None:
         """写盘后回刷置顶列表：UI 永远以盘上数据为准（增删改即时可见）。"""

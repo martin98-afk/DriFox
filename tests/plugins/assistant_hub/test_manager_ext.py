@@ -177,7 +177,7 @@ def test_prompt_blocks_assemble_sections(tmp_path):
     assert "人工提示" in pinned and "回复保持简短" in pinned
 
     mem = mgr.memory_system_block(a.id, str(tmp_path / "proj"))
-    assert "第一层" in mem and "第二层" in mem  # 说明书
+    assert "memory_read" in mem and "memory_write" in mem  # 指针级说明书
     assert "<global_memory>" in mem and "用户偏好简洁" in mem
     assert "<project_memory>" in mem and "DriFox 重构中" in mem
 
