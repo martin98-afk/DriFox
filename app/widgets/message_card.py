@@ -277,6 +277,23 @@ class MessageCard(SimpleCardWidget):
     # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
     _LIVE_GAP_CAP_S = 2.0
 
+    @property
+    def _renderer_pid(self) -> int:
+        """renderer 进程 PID（转发 viewer；B4 强回收链路读 card._renderer_pid）。
+        历史上 card 层只清零不转发，导致 _unloaded_pids 恒空、强回收从未生效。"""
+        v = self.__dict__.get("viewer")
+        if v is not None:
+            try:
+                return getattr(v, "_renderer_pid", 0) or 0
+            except RuntimeError:
+                return 0
+        return self.__dict__.get("_renderer_pid_cache", 0)
+
+    @_renderer_pid.setter
+    def _renderer_pid(self, value: int) -> None:
+        # cleanup 的「清零」语义改为缓存兜底值：viewer 已摘除后仍需可读
+        self.__dict__["_renderer_pid_cache"] = int(value or 0)
+
     def __init__(
         self,
         role: str,
