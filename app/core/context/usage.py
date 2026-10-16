@@ -11,6 +11,7 @@ count_messages_tokens(session.messages)（原始未截断全量、不含 tools/s
 同参数），快照不可用时回退旧本地估算。
 """
 
+from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 from loguru import logger
@@ -18,7 +19,10 @@ from loguru import logger
 # 快照签名缓存：键 session_id（无则 id(session)），值 (sig, result)。
 # 签名 = (消息数, 末条消息对象 id, API prompt_tokens)：任一变化即失效，
 # 保证 auto-compact 判定新鲜度（不设 TTL）。仅包主路径快照，legacy 回退不缓存。
-_snap_cache: dict = {}
+# 🔧 有界化：原裸 dict 会话数无上限增长；改 LRU 上限 64，命中刷新位，
+# 未命中/签名不匹配不刷位（与 builder._system_tokens_cache 同法）。
+_snap_cache: "OrderedDict" = OrderedDict()
+_SNAP_CACHE_MAX = 64
 
 
 def _snapshot_sig(session) -> tuple:
@@ -74,6 +78,8 @@ def snapshot_usage_for_hooks(
         key = _cache_key(session)
         cached = _snap_cache.get(key)
         if cached is not None and cached[0] == sig:
+            # 命中刷新 LRU 位；未命中/签名不匹配不刷位（保持旧条目优先淘汰）
+            _snap_cache.move_to_end(key)
             return cached[1]
 
         snap = {}
@@ -94,6 +100,9 @@ def snapshot_usage_for_hooks(
         if used > 0 and budget > 0:
             result = (used, budget)
             _snap_cache[key] = (sig, result)
+            _snap_cache.move_to_end(key)
+            if len(_snap_cache) > _SNAP_CACHE_MAX:
+                _snap_cache.popitem(last=False)
             return result
     except Exception as e:
         logger.warning(f"[ContextUsage] hook 快照口径失败，回退本地估算: {e}")

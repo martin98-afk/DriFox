@@ -309,6 +309,12 @@ class _ArchiveScanTask(QRunnable):
                     self._cache[fp_str] = (mtime, info)
                 enriched.append(self._enrich_from_info(fp_str, fp_path, mtime, info))
 
+            # 阶段 3：反向对账——归档文件已删除的缓存条目清除（原实现只 add
+            # 不 remove，文件删除后条目永驻：路径→(mtime, info) 慢速累积）。
+            with self._cache_lock:
+                for stale_key in set(self._cache.keys()) - set(mtimes.keys()):
+                    self._cache.pop(stale_key, None)
+
             # 按修改时间倒序
             enriched.sort(key=lambda x: x.get("mtime", 0.0), reverse=True)
             self._signals.finished.emit(self._request_id, enriched)
@@ -1318,6 +1324,50 @@ class HistoryManager:
                     self._mark_cache_dirty()
                 return True
         return False
+
+    def release_messages_except(self, active_session_ids: set, extra_skip: "set | None" = None) -> int:
+        """释放非活跃会话在内存中的消息体（保留元数据，SQLite 懒加载回填）。
+
+        [MEM] messages 所有权收敛（批 IV）：唯一权威释放入口。
+
+        - 调用方只需提供「活跃 session_id 集合」（通常 = SessionManager 当前持有）
+        - _history_sessions 里其余全部置空 + 打 _messages_released 标记
+        - 关窗 / 多窗口 / 跨进程场景自动覆盖，无 UI 层重复实现
+
+        守卫语义（与 remove_session(release_messages_only=True) 一致）：
+        messages 置空 + _messages_released=True；_do_save / flush_async 的
+        空消息守卫据此区分「释放态」与「显式清空」。
+        ⚠️ 本标记打在 session record dict 上，与 ChatSession._messages_released
+        实例属性完全无关（历史命名撞车，不可混用）。
+
+        Args:
+            active_session_ids: 需保留消息体的 session_id 集合
+            extra_skip: 额外跳过的 session_id 集合（如 closeEvent 正在后台
+                flush 的 pending 会话——归档导入的 pending 不属任何窗口，
+                必须由此参数传入）
+        Returns:
+            本次释放的会话数
+        """
+        self._ensure_history_loaded()
+        _skip = active_session_ids | (extra_skip or set())
+        pending_id = getattr(self, "_pending_save_session_id", None)
+        released = 0
+        for session in self._history_sessions:
+            sid = session.get("session_id")
+            if not sid or sid in _skip:
+                continue
+            if not session.get("messages"):
+                continue
+            # 🛡️ 竞态守卫：延迟保存窗口内置空 pending 会话会让 _do_save 用
+            # serialize([]) 覆盖 SQLite 完整消息。pending 会话跳过释放。
+            if pending_id and sid == pending_id:
+                continue
+            session["messages"] = []
+            session["_messages_released"] = True
+            released += 1
+        if released:
+            logger.debug(f"[Memory] release_messages_except 释放 {released} 个非活跃会话消息")
+        return released
 
     def archive_sessions_by_run_id(self, run_id: str) -> int:
         """按团队 run_id 归档该 run 下全部成员会话。

@@ -76,7 +76,16 @@ _ANGLE_PLATFORM = {
 
 # 与 app/utils/config.py Render 组默认值/范围保持一致
 _DEFAULT_BACKEND = "software"  # 出厂默认：软件 (WARP)，不碰显卡驱动
-_DEFAULT_RENDERER_LIMIT = 6
+# 进程上限须 ≥ 单窗口卡片配额（effective_render_quota(_MAX_RENDERED_CARDS, dpr)
+# 最大值 12，见 app/core/infra/memory_governor.py）：低于配额时 Chromium 合并
+# renderer 进程，kill 粒度失效（须配合批 I 的 PID 修复 ce9bb11d）。
+# ⚠️ 多窗口取舍（有意为之，非缺陷）：跨窗口全局页闸门
+# _MAX_GLOBAL_RENDERED_PAGES=32（memory_governor，页数口径）仍可能被多窗口
+# 合计配额突破 → Chromium 合并进程 → kill 粒度退化为「按进程组」。注意它与
+# 本文件 RangeValidator 的滑条范围 (1, 32) 是两个无关的 32——拉滑条解决不了
+# 多窗口合并。单窗口场景（绝大多数）默认 12 已覆盖配额上限，不为多窗口极端
+# 场景抬高默认值。
+_DEFAULT_RENDERER_LIMIT = 12
 _RENDERER_LIMIT_RANGE = (1, 32)
 _DEFAULT_JS_HEAP_MB = 128
 _JS_HEAP_RANGE = (64, 1024)

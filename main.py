@@ -23,6 +23,18 @@ if os.name == "nt" and any(arg.startswith("--configure-auto-start=") for arg in 
 from qfluentwidgets import setFontFamilies
 
 warnings.filterwarnings("ignore")
+
+# TLS 根证书兜底：打包环境默认 CA 路径可能失效，导致进程内所有 HTTPS/wss
+# 校验失败（飞书 WS 长连接即挂、urllib 报 self-signed certificate in chain）。
+# 必须早于任何网络库 import，也早于业务代码里任何 ssl.create_default_context()；
+# 幂等且不覆盖用户显式配置，详见 app/utils/ca_bundle.py。
+try:
+    from app.utils.ca_bundle import ensure_ca_bundle as _ensure_ca_bundle
+
+    _ensure_ca_bundle()
+except Exception:
+    pass
+
 # 内存治理(#21)：禁用 pypinyin 对 PINYIN_DICT/PHRASES_DICT 的二次 .copy()，省 ~一半拼音库内存
 # 必须在任何 pypinyin 相关 import 之前设置（main.py 为进程启动最早期入口）
 os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")

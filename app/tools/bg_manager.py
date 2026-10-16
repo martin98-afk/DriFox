@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from loguru import logger
 
@@ -126,6 +126,7 @@ class BackgroundTask:
     status: str = "running"  # running, stopped, completed
     pid: int = 0
     job: object = None  # S4: Windows Job Object（kill-on-close 杀树），非 Windows 为 None
+    finished_at: float = 0.0  # 进入 stopped/completed 终态的单调时刻（惰性回收用，0=运行中）
 
     def append_output(self, text: str):
         """追加输出到缓冲区"""
@@ -181,6 +182,17 @@ class BackgroundTaskManager:
 
     _instance = None
     _lock = threading.Lock()
+
+    # 实例字段声明（__new__ 动态初始化，此处仅类型声明供 pyright 推断）
+    _tasks: Dict[str, "BackgroundTask"]
+    _manager_lock: threading.Lock
+    _get_workdir: Optional[Callable[[], Path]]
+    _event_callbacks: List[Callable]
+
+    # 已结束任务的保留策略：最近 _FINISHED_KEEP 条 且 结束超 30 分钟才回收。
+    # 之前 _tasks 条目完成后永驻（Popen/output_buffer 全留），是进程级无界驻留。
+    _FINISHED_KEEP = 20
+    _FINISHED_TTL_S = 30 * 60
 
     def __new__(cls, owner_getter: Callable = None):
         if cls._instance is None:
@@ -330,7 +342,40 @@ class BackgroundTaskManager:
             # 覆盖为 completed，否则「已停止任务」会被误标完成并多发 completed 事件。
             if task.status == "running":
                 task.status = "completed"
+                task.finished_at = time.monotonic()
                 self._emit("completed", task.task_id, "completed")
+            self._sweep_finished_tasks()
+
+    def _sweep_finished_tasks(self) -> None:
+        """惰性回收已结束任务条目（消除 _tasks 无界驻留）。
+
+        策略：非 running 且满足「结束超 30 分钟」的条目回收；但保留最近
+        _FINISHED_KEEP(20) 条已结束条目供 list_tasks 回看。锁内执行，
+        与 start/stop/get_logs 并发安全。由 _capture_output finally 与
+        list_tasks 触发（无后台定时器，无新线程）。
+        """
+        with self._manager_lock:
+            self._sweep_finished_tasks_locked()
+
+    def _sweep_finished_tasks_locked(self) -> None:
+        """同上，须持 _manager_lock 调用。"""
+        now = time.monotonic()
+        finished = [t for t in self._tasks.values() if t.status != "running"]
+        # 保留最近 N 条已结束条目（按结束时间排序，未打时间戳的视为最旧）
+        finished.sort(key=lambda t: t.finished_at)
+        keep = set(id(t) for t in finished[-self._FINISHED_KEEP:])
+        stale = [
+            tid
+            for tid, t in self._tasks.items()
+            if t.status != "running"
+            and id(t) not in keep
+            and t.finished_at
+            and now - t.finished_at > self._FINISHED_TTL_S
+        ]
+        for tid in stale:
+            self._tasks.pop(tid, None)
+        if stale:
+            logger.debug(f"[BackgroundTaskManager] 惰性回收 {len(stale)} 条已结束任务")
 
     def stop(self, task_id: str) -> tuple[bool, str]:
         """停止指定任务"""
@@ -345,6 +390,7 @@ class BackgroundTaskManager:
 
         try:
             task.status = "stopped"
+            task.finished_at = time.monotonic()
 
             # S4: 优先用 Job Object 杀进程树（内核级，比 taskkill 更可靠，
             # 不依赖命令行解析；kill-on-close 兜底防止任务对象泄漏）。
@@ -356,6 +402,9 @@ class BackgroundTaskManager:
                         pass
                     task.job.close()
                     self._emit("stopped", task_id, "stopped", "job-kill")
+                    # 成功终止即回收条目（日志已随事件广播，get_logs 随进程死亡失效）
+                    with self._manager_lock:
+                        self._tasks.pop(task_id, None)
                     return True, f"✅ 已终止任务: {task_id} (PID: {task.pid}, Job 杀进程树)"
 
             # Windows: 使用 taskkill /T 杀死进程树（包括子进程）— 降级路径
@@ -368,6 +417,8 @@ class BackgroundTaskManager:
                 )
                 if result.returncode == 0:
                     self._emit("stopped", task_id, "stopped", "taskkill")
+                    with self._manager_lock:
+                        self._tasks.pop(task_id, None)
                     return True, f"✅ 已终止任务: {task_id} (PID: {task.pid}, 含子进程)"
                 else:
                     # taskkill 失败，尝试直接 terminate + wait
@@ -378,6 +429,8 @@ class BackgroundTaskManager:
                         task.process.kill()
                         task.process.wait(timeout=1)
                     self._emit("stopped", task_id, "stopped", "terminate")
+                    with self._manager_lock:
+                        self._tasks.pop(task_id, None)
                     return True, f"✅ 已终止任务: {task_id} (使用 terminate/kill)"
             else:
                 # Unix: 使用 terminate 和 SIGTERM
@@ -387,6 +440,8 @@ class BackgroundTaskManager:
                 except subprocess.TimeoutExpired:
                     task.process.kill()
                 self._emit("stopped", task_id, "stopped", "terminate")
+                with self._manager_lock:
+                    self._tasks.pop(task_id, None)
                 return True, f"✅ 已终止任务: {task_id}"
 
         except Exception as e:
@@ -423,6 +478,7 @@ PID: {task.pid}
     def list_tasks(self) -> str:
         """列出所有任务"""
         with self._manager_lock:
+            self._sweep_finished_tasks_locked()
             tasks = list(self._tasks.values())
 
         if not tasks:

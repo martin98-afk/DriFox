@@ -1,10 +1,47 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [未发布]
-自 v0.6.8 以来的变更 | 贡献者：dingma
+## [v0.6.9] - 2026-10-16
+
+自 v0.6.8 以来的变更 | 提交数：41 · 文件变更：37 · +3019/-337 | 贡献者：mading, martin98-afk
+
 ### 🐛 问题修复 (Bug Fixes)
+
+- **进程级 CA 兜底，修打包环境 TLS 校验全线失败** (`0b4d717b`): 打包环境系统证书链加载失败导致所有 HTTPS 请求校验不通过（插件市场、模型 API 全挂），启动早期落进程级 CA 兜底，信任链恢复。
+
+- **顶栏 tab reduce-motion 落终值崩溃** (`8c836bcd`): reduce-motion 分支经 QVariantAnimation.setValue 落终值，在动画对象生命周期边缘触发崩溃，改走 setCurrentTime 直达终值。
+
+- **关窗释放 TOCTOU 写空窗口三重防护** (`e9b31ad8`, `0e562341`, `fd6d19f5`, `d777f1ad`): 关窗 async flush 期间 pending 会话被并发释放、归档导入 pending 缺口，均可能把会话写空。三道防线：flush 返回值判定跳过、closeEvent 接 extra_skip 双保护层、release_messages_except 支持额外跳过集。
+
+- **强回收渲染进程链路修复** (`ce9bb11d`, `f5642719`, `0fff70de`): MessageCard._renderer_pid 登记断链致强回收拿不到 PID，恢复登记；_kill_renderer 平台感知，mac/Linux terminate→kill 真正生效；finish_streaming 清零 _stream_text_acc 消除流式残留。
+
+- **进程级缓存无界驻留清理** (`0d59eff8`, `b3ad4987`, `8a785ad0`, `0afbb421`, `e0daccaa`, `71212288`, `152d6adf`): BackgroundTask 完成后回收条目；token 估算缓存键改 hash 不再持消息全文；_snap_cache LRU 有界化（上限 64）；释放非活跃会话同步清 _send_prep_cache；SubAgent queried_tasks 按 session 生命周期清理；归档元数据缓存随文件删除对账清理；hook 函数缓存键加 mtime，编辑后旧函数不驻留。
+
+- **SQLite 与渲染进程内存水位下调** (`6e4650fc`, `47d8d7a5`, `5741fa1e`, `69c9f9d8`): SQLite 页缓存 64MB→15.6MB（大库省约 29MB 真驻留）、mmap 64MB→16MB（省约 45MB RSS）；temp_store 显式 FILE 防大结果集排序占内存；Chromium 进程上限 6→12 与卡片配额对齐，kill 粒度成立。
+
+- **插件更新后 native 依赖二次初始化崩溃** (`b0d5b605`): marketplace purge 豁免 .pyd/.so 扩展模块，更新后插件不再因扩展被误删而崩。
+
 - **插件依赖 wheel 平台串台致插件静默失效** (`plugins/plugin-marketplace/ui/deps_installer.py` · `tests/plugins/test_deps_installer_wheel_tags.py`): `_platform_wheel_tags()` 无条件把 `win_{arch}` 放进候选集且只声明 `macosx_11_0_{arch}`，两个缺陷叠加：①非 Windows 平台上 win tag 仍参与排序（Intel Mac 上 `win_amd64` 排第 2 位、压过 macosx/manylinux），会把 Windows 原生模块（`.pyd`）装进 `deps/<platform>/`，darwin 上 import 直接 `OSError: Cannot load native module`；②PyPI 上 macosx wheel 主流形态是 `macosx_10_9_universal2`（pycryptodome / charset-normalizer 均如此），前缀匹配永远不中 → 依赖装不上、`deps/darwin/` 始终为空。实测故障链：gateway-feishu 的 pycryptodome 装成 win_amd64 → `lark_oapi/core/utils/decryptor.py` 顶层 `from Crypto.Cipher import AES` 炸 → 整个 `gateways/feishu.py` 模块加载失败 → feishu 从未进 `GatewayPlatformRegistry`，表现为「配置 enabled=true 但日志只有『无启用平台』、设置卡开关无效」。修复：候选集按 `sys.platform` 严格分发（win32→`win_*`、darwin→`macosx_*`、其余→`manylinux*`/`linux_*`），通用层补 `cp{ver}-abi3` 与 `macosx_10_9_universal2`。新增回归测试 23 用例覆盖 win32/linux/darwin × x86_64/arm64 六组合（断言候选集不含他平台 OS tag、universal2/abi3 恒在、真实 PyPI wheel 文件名匹配结果）；已反向验证旧代码下 16 用例失败。`tools/generate_marketplace.py --check` 一致性通过
+
+### ✨ 新功能 (New Features)
+
+- **标准 logging 接管进 loguru** (`dcbbc4e4`): 此前用 logging.getLogger() 的第三方库与插件日志一条不落盘，现统一接管进 loguru，排障信息完整可见。
+
+- **会话消息权威释放入口** (`440e3b45`, `88882e4c`, `e6612bb2`, `3cfdd57e`): HistoryManager.release_messages_except 成为消息释放唯一权威入口；SessionManager evict 回调接入权威释放；closeEvent/会话释放统一委托，语义收窄至非本窗口会话，杜绝多处各自释放的竞争。
+
+- **FileTreeModel 异步图标加载** (`47d8962f`): 文件树图标异步加载 + 超时回落，大目录展开不再卡 UI。
+
+### 📚 文档 (Documentation)
+
+- 审查收口注释修正（`a961821e`, `8edec5c2`）: render/hooks/workers 与 store/render 的审查意见落注释——两个 32 混写、缓存键三元组、prune 挂载点、mmap 分工口径、多窗口取舍、TMPDIR 依赖。
+
+### 🎨 样式改进 (Style)
+
+- B4 测试文件 ruff format 空行规范（`989f10f1`）。
+
+### 🔧 测试基建 (Testing Infrastructure)
+
+- 消息所有权与释放回归族（`73f1e007`, `ad08c0e4`, `715d4267`, `e35e6386`, `c943c560`, `3bcea826`）: messages 所有权收敛端到端 4 用例、evict hook 4 用例（默认 None/回调传参/异常隔离/端到端）、release_messages_except 权威释放入口 9 用例、B4 批 I（PID 转发/kill 判定/流式残留/TOCTOU 跳过）、Chromium 进程上限断言同步、归档导入 pending 缺口双向回归 + reasoning_content 回填断言（#21）。
 
 ## [v0.6.8] - 2026-10-16
 

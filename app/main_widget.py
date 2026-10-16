@@ -11370,35 +11370,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         从长对话新建会话后，旧会话的消息数据仍缓存在 HistoryManager._history_sessions
         中占用内存。将其标记为可释放（messages 置空），后续访问时从 SQLite 按需重载。
+
+        [MEM] 批 IV：实现委托给 HistoryManager.release_messages_except（唯一
+        权威释放入口，pending 竞态守卫 / 释放态标记均内聚在那里），本方法只
+        负责「活跃集合 = 本窗口 SessionManager 当前持有」的调用适配。
         """
         if not hasattr(self, "session_manager") or not self.session_manager:
             return
+        hm = getattr(self, "history_manager", None)
+        if hm is None or not hasattr(hm, "release_messages_except"):
+            return
         active_ids = {s.session_id for s in self.session_manager.get_all_sessions()}
-        # 🛡️ 竞态守卫：延迟保存（_schedule_save → QTimer 1000ms → _do_save）
-        # 窗口内若本方法把 pending 会话的 messages 置空，_do_save 会用
-        # serialize([]) 覆盖 SQLite 中该会话的完整消息（历史消息丢失、
-        # 加载后列表为空的根因之一）。pending 会话跳过释放，等落库后再回收。
-        pending_id = getattr(self.history_manager, "_pending_save_session_id", None)
-        released = 0
-        try:
-            for session in self.history_manager._history_sessions:
-                sid = session.get("session_id")
-                if sid and sid not in active_ids and session.get("messages"):
-                    if pending_id and sid == pending_id:
-                        continue  # 跳过 pending 会话，避免空消息覆盖 DB
-                    session["messages"] = []
-                    # 🛡️ 释放态标记：与 history_manager 的 `_do_save` /
-                    # `flush_async` 空消息守卫同口径 —— 只有打了本标记的空列表
-                    # 才被当作「无数据可写」跳过落库；显式清空（/compact --clear）
-                    # 的空列表必须照写，否则清空只在内存生效、DB 保留旧消息。
-                    session["_messages_released"] = True
-                    released += 1
-            if released:
-                from loguru import logger
-
-                logger.debug(f"[Memory] 已释放 {released} 个非活跃会话的消息数据")
-        except Exception:
-            pass
+        released = hm.release_messages_except(active_ids)
+        if released:
+            logger.debug(f"[Memory] 已释放 {released} 个非活跃会话的消息数据")
 
     def _display_current_session(self):
         # 会话切换：撤销条目绑定在具体 session 上，跨会话一律失效
@@ -12891,8 +12876,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
             p = psutil.Process(pid)
             cmd = " ".join(p.cmdline() or [])
-            if "QtWebEngineProcess.exe" not in cmd or "--type=renderer" not in cmd:
-                return False  # PID 复用误杀防护
+            # 进程名：Windows QtWebEngineProcess.exe / mac+linux QtWebEngineProcess。
+            # ⚠️ 用 p.name() 而非 cmd 子串：cmd 可能因路径含同名字样误判，且
+            # name() 平台无关。--type=renderer 是硬判据，gpu-process / utility /
+            # crashpad 同为 QtWebEngineProcess，杀它们会让所有卡片同时黑屏。
+            proc_name = (p.name() or "").lower()
+            if not proc_name.startswith("qtwebengineprocess") or "--type=renderer" not in cmd:
+                logger.debug(f"[B4-strong] kill 拒绝非 renderer 子进程: pid={pid} name={proc_name}")
+                return False
             p.terminate()
             try:
                 p.wait(timeout=1.0)
@@ -23608,14 +23599,23 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return ""
 
-    def _auto_save_current_session(self, flush_mode: str = "sync"):
+    def _auto_save_current_session(self, flush_mode: str = "sync") -> Optional[str]:
+        """自动保存当前会话。
+
+        Returns:
+            async 模式：返回本次交给后台 flush 的 session_id，供关窗释放循环
+                跳过，防 TOCTOU 写空窗口（常态关窗 save timer 已消费旧 pending，
+                提前读 _pending_save_session_id 拿不到值，返回值方案无此缺口）；
+                早退（空会话/临时页/无脏标记）返回 None。
+            sync 模式：保持原行为，返回会话标题（无人消费，兼容保留）。
+        """
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
-            return
+            return None
 
         # 临时对话页守卫：页内会话一律不落盘、不进历史（守卫链最前，先于一切持久化路径）
         if getattr(session, "is_temp", False):
-            return
+            return None
 
         # 跳过没有用户消息的会话（SessionStart hook 产生的空会话不应保存到历史）
         # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
@@ -23625,13 +23625,13 @@ class OpenAIChatToolWindow(ToolWindow):
             for msg in session.messages
         )
         if not has_user_message:
-            return
+            return None
 
         # 🛡️ 跳过无变更保存：自上次保存后会话没有被修改，
         # 避免新建会话/加载历史/关闭窗口时对已持久化的会话做无意义重复保存。
         # 脏标记由各个消息修改点置 True，由本 save 函数置 False。
         if not self._session_dirty:
-            return
+            return None
 
         # 🛡️ 落库前回填：给有 model_name 但缺 provider_name 的 assistant 消息补上
         # 策略：优先精确匹配当前选中的服务商，其次模糊匹配
@@ -23759,8 +23759,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 落盘模式：sync=主线程立即写（退出路径，确保数据落盘）；
         # async=后台 daemon 线程写（关窗路径，实测主线程同步 flush
         # 全量序列化+zstd+SQL 700ms+，是关窗卡顿主因）
+        _flushed_id: Optional[str] = None
         if self.history_manager:
             if flush_mode == "async":
+                # 🛡️ 在 flush 调用前一行读 pending：此值即 flush_async 将消费并
+                # 交给后台线程的 session_id（两者之间无其他代码，值必然一致）。
+                # 经返回值交给关窗释放循环跳过该会话，防 TOCTOU 写空窗口。
+                _flushed_id = self.history_manager._pending_save_session_id
                 self.history_manager.flush_async()
             else:
                 self.history_manager.flush()
@@ -23770,6 +23775,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 历史面板可能已展开；且欢迎卡片 recent_sessions 依赖 last_time/message_count）
         self._notify_history_data_changed()
 
+        # async 模式（关窗路径）优先返回 flushed_id：调用方（closeEvent 释放循环）
+        # 只消费该值；title 返回无人消费，让位于数据安全语义。
+        if flush_mode == "async":
+            return _flushed_id
         if self._current_session_id:
             idx = self.history_manager.find_index_by_session_id(self._current_session_id)
             if idx is not None:
@@ -24026,19 +24035,34 @@ class OpenAIChatToolWindow(ToolWindow):
             # 用非 daemon 线程，应用退出时解释器 shutdown join 保证写盘
             # 完成（aboutToQuit 跳过已 unregister 的最后一窗，此处是
             # 唯一保存点，数据安全由非 daemon join 兜底）。
-            self._auto_save_current_session(flush_mode="async")
-        except Exception:
-            pass
+            # 🛡️ 返回值 = 本次交给后台 flush 的 pending 会话 id（失败为 None），
+            # 经 extra_skip 传给下方释放入口。
+            _pending_flush = self._auto_save_current_session(flush_mode="async")
 
-        # ★ 泄漏修复（P0-1）：关闭窗口时释放 HistoryManager 内存缓存中的
-        # 会话消息驻留（删会话/关标签不清理 → 全局单例 _history_sessions
-        # 持全量消息不回落）。保留记录元数据，重开会话时 SQLite 懒加载回填。
-        try:
-            if hasattr(self, "session_manager") and self.session_manager:
-                for _s in self.session_manager.get_all_sessions():
-                    _sid = getattr(_s, "session_id", None)
-                    if _sid and getattr(self, "history_manager", None):
-                        self.history_manager.remove_session(_sid, release_messages_only=True)
+            # ★ 泄漏修复（P0-1）：关闭窗口时释放 HistoryManager 内存缓存中的
+            # 会话消息驻留。保留记录元数据，重开会话时 SQLite 懒加载回填。
+            # [MEM] 批 IV：委托唯一权威入口，语义收窄为「只释放非本窗口会话」。
+            # 🛡️ 双保护层（own_ids + extra_skip）：
+            # - own_ids 覆盖本窗口持有的会话（flush_async 已清 pending 字段，
+            #   本窗口 pending 会话靠此层跳过）；
+            # - extra_skip 覆盖「后台 flush 正在写的非窗口会话」——归档导入/
+            #   导入包的 pending 不属任何窗口 SessionManager，own_ids 拦不住，
+            #   只能由返回值显式传入（缺口回归：
+            #   test_release_does_not_clobber_non_own_pending）。
+            # （remove_session(release_messages_only=True) 只置空+打标、无
+            # _mark_cache_dirty 副作用，权威入口同语义，关窗路径无缺失。）
+            hm = getattr(self, "history_manager", None)
+            if hm is not None and hasattr(hm, "release_messages_except"):
+                own_ids = (
+                    {s.session_id for s in self.session_manager.get_all_sessions()}
+                    if self.session_manager
+                    else set()
+                )
+                released = hm.release_messages_except(
+                    own_ids, extra_skip={_pending_flush} if _pending_flush else None
+                )
+                if released:
+                    logger.debug(f"[Memory] 关窗释放 {released} 个非本窗口会话消息")
         except Exception:
             pass
 

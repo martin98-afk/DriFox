@@ -2058,8 +2058,29 @@ class SubAgentManager(QObject):
         """获取正在运行的任务ID列表"""
         return list(self._running_tasks.keys())
 
+    def _prune_queried_tasks(self) -> None:
+        """惰性清理 _queried_tasks（原只增不删：session 键 + task_id 集合无界）。
+
+        对账规则：queried 集合仅对 finished 任务标记，task_id 不在
+        _finished_tasks（被 _BoundedTaskDict maxlen=200 挤出）即视为已消费
+        → 移除；集合空则删除 session 键。与 _finished_tasks 同生命周期，
+        无新线程/定时器。挂载点 get_finished_tasks 覆盖高频路径；判据与
+        get_all_active_tasks_with_details 遍历源同一字典，对两个入口都安全。
+        """
+        for sid in list(self._queried_tasks.keys()):
+            queried = self._queried_tasks.get(sid)
+            if not queried:
+                self._queried_tasks.pop(sid, None)
+                continue
+            # 对账：不在 _finished_tasks 的 task_id 已被挤出上限 → 移除
+            for tid in [t for t in queried if t not in self._finished_tasks]:
+                queried.discard(tid)
+            if not queried:
+                self._queried_tasks.pop(sid, None)
+
     def get_finished_tasks(self) -> List[str]:
         """获取已完成的任务ID列表（清理已完成的从running列表）"""
+        self._prune_queried_tasks()
         finished = []
         for task_id in list(self._running_tasks.keys()):
             executor = self._running_tasks[task_id]

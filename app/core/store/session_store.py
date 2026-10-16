@@ -373,8 +373,14 @@ class SessionStore:
                 # ========== WAL 模式优化：提升并发读写性能 ==========
                 self._db.execute_sql("PRAGMA journal_mode=WAL")
                 self._db.execute_sql("PRAGMA synchronous=NORMAL")
-                self._db.execute_sql("PRAGMA cache_size=-64000")
-                self._db.execute_sql("PRAGMA temp_store=MEMORY")
+                # 页缓存 15.6MB（负值单位 KB）。原 64MB 热查询收益无感知差异，
+                # 大库省约 29MB 真驻留；与 db_manager.py 的 cache_size=-16000
+                # 保持一致（本连接后设覆盖，两处必须同值）。
+                self._db.execute_sql("PRAGMA cache_size=-16000")
+                # 临时存储显式 FILE（与 db_manager.py 同口径）：实测 KB 级 temp
+                # b-tree 与 MEMORY 无延迟差异；显式 FILE 防无 LIMIT 的全表排序
+                # 把结果集堆进内存。
+                self._db.execute_sql("PRAGMA temp_store=FILE")
                 # 先设连接级 INCREMENTAL（若文件头已是 INCREMENTAL 则直接生效；
                 # 若文件头是 NONE，后续 _activate_incremental_auto_vacuum 执行 VACUUM 后永久写入）
                 self._db.execute_sql("PRAGMA auto_vacuum=INCREMENTAL")
