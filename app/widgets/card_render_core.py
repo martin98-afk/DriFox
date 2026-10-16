@@ -389,19 +389,38 @@ STREAM_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_STREAM_HEIGHT_ANIM", "1") !=
 # resize → ResizeObserver 回传 → 下一拍再 set 的回环频率减半；TRACK_FACTOR
 # 同步 0.45→0.70、boost cap 0.85 保持收敛时间不变，防抖独立常量
 # STREAM_HEIGHT_DEBOUNCE_MS 保持 16ms。
-STREAM_HEIGHT_TICK_MS = 33
+# [R4-A] 33 → 50（20Hz）：#14 实测单次跨进程 resize 往返 p50=2.18ms（DOM 800
+# 节点负载），33ms tick = 30.3 次/s = 66ms/s 主线程同步等待，是流式卡顿主因。
+# 降到 50ms 后 20 次/s = 44ms/s（主线程占用 -34%），回环频率同步下降。
+# TRACK_FACTOR 0.70 → 0.84、boost cap 0.85 → 0.90 配套：拍数减少 1/1.5，按
+# (1-f_new) = (1-f_old)^k（k = 50/33）反解，保持「收敛到 ±EPSILON」的**时间**
+# 基本不变（实测大台阶 132ms → 150ms，+14% 可接受）。
+# 回退：环境变量 DRIFOX_STREAM_HEIGHT_TICK_MS / _TRACK_FACTOR / _TRACK_MAX_FACTOR /
+# _TRACK_BOOST / _FINISH_FACTOR 五个都可单独回退旧值（见各常量定义处的 env 读取），
+# 组合回退才算完整回到 R4-A 之前的行为。
+STREAM_HEIGHT_TICK_MS = int(os.environ.get("DRIFOX_STREAM_HEIGHT_TICK_MS", "50"))
 # 流式高度上报防抖（ms）：目标值进入追踪的合并窗口。tick 降频后防抖仍保持
 # 单帧 16ms，只降追踪拍频率、不增加上报滞后。
 STREAM_HEIGHT_DEBOUNCE_MS = 16
-# 每拍逼近比例：剩余差值的 70%。[P1 步骤4] 0.45 → 0.70：tick 16→33 降频后
-# 单拍间隔翻倍，按比例提速保持收敛时间不变；过小（<0.3）会明显滞后，
-# 过大（>0.85）趋近 snap。
-STREAM_HEIGHT_TRACK_FACTOR = 0.70
-# 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 0.85 = 基线
-# 0.70 + 0.15），大台阶（代码块/表格整块落地）更快跟上，消除"文字顶边憋
-# 一拍再蹦高"；小台阶维持基线（流式 0.70 / 结束态 0.12）防噪声抖动。
+# 每拍逼近比例：剩余差值的 84%。[R4-A] 0.70 → 0.84：tick 33→50 降频后单拍
+# 间隔 ×1.5、拍数减少 1/1.5，按 (1-f_new)=(1-f_old)^k 反解提速，保持收敛
+# 时间不变；过小（<0.3）会明显滞后，过大（>0.92）趋近 snap 失去连续生长感。
+# 回退：DRIFOX_STREAM_HEIGHT_TRACK_FACTOR=0.70
+STREAM_HEIGHT_TRACK_FACTOR = float(os.environ.get("DRIFOX_STREAM_HEIGHT_TRACK_FACTOR", "0.84"))
+# 自适应提速：|diff| 超过 FAR_PX 的拍次 factor 加 BOOST（上限 MAX_FACTOR），
+# 大台阶（代码块/表格整块落地）更快跟上，消除"文字顶边憋一拍再蹦高"；
+# 小台阶维持基线（流式 0.84 / 结束态 0.178）防噪声抖动。
+# [R4-A] cap 0.85 → 0.90：基线已提到 0.84，cap 需同步上移才留得出自适应空间
+# （否则 cap=0.85 时 boost 只多 0.01，自适应等于失效）。
+# [#20-M1] 0.06 → 0.20：FINISH 态 baseline 已从 0.12 提到 0.178，boost 需同步
+# 加大才能让 FINISH 的大台阶也配套（0.178+0.20=0.378 ≈ 配套目标 0.379）。
+# 对流式态无害：0.84+0.20=1.04 被 cap 0.90 挡住，仍等于 0.90。
+# 回退：DRIFOX_STREAM_HEIGHT_TRACK_BOOST=0.15
 STREAM_HEIGHT_TRACK_FAR_PX = 80
-STREAM_HEIGHT_TRACK_BOOST = 0.15
+STREAM_HEIGHT_TRACK_BOOST = float(os.environ.get("DRIFOX_STREAM_HEIGHT_TRACK_BOOST", "0.20"))
+# [R4-A/#20-M1] boost cap：与流式基线 0.84 配套（boost 把流式顶到 cap）。
+# 回退：DRIFOX_STREAM_HEIGHT_TRACK_MAX_FACTOR=0.85
+STREAM_HEIGHT_TRACK_MAX_FACTOR = float(os.environ.get("DRIFOX_STREAM_HEIGHT_TRACK_MAX_FACTOR", "0.90"))
 # 落定阈值（px）：剩余差小于它直接对齐并停 tick，避免无限趋近。
 STREAM_HEIGHT_TRACK_EPSILON = 2
 # 小于该变化量直接 snap：流式尾巴上的小噪声不值得起追踪（避免常开 tick 空转）
@@ -416,7 +435,13 @@ STREAM_HEIGHT_ANIM_MIN_DELTA = 2
 # 与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级，追踪太快会"Qt 侧先到、
 # 页面还在动"的两段感，即丝绸尾音。[T34] 0.28 → 0.12：按 τ 不变重算
 # （原 0.28@40ms → τ≈121ms；16ms 拍 f'=1-0.72^(16/40)≈0.12）。
-FINISH_HEIGHT_TRACK_FACTOR = 0.12
+# [R4-A/#20-M1] 0.12 → 0.178：tick 33→50 后若不配套，FINISH 态收敛劣化
+# 61~69%（#19 实测：200px 1056→1700ms、600px 1155→1950ms）。按同一套配套
+# 公式 f_new = 1-(1-f_old)^k（k = 50/33 = 1.515）反解得 0.176，取 0.178。
+# τ 口径校验：0.12@33ms → τ=258ms；0.178@50ms → τ=255ms，基本不变。
+# 五档 diff 验算（15/80/200/600/2000）劣化拉到 −1%~+4%，见
+# tests/widgets/test_stream_height_track_throttle.py。
+FINISH_HEIGHT_TRACK_FACTOR = float(os.environ.get("DRIFOX_STREAM_HEIGHT_FINISH_FACTOR", "0.178"))
 
 
 def set_stream_height_anim_enabled(enabled: bool) -> None:
@@ -1889,6 +1914,177 @@ def _is_render_fence_lang(lang: str) -> bool:
         return lang in UIPluginRegistry.get_instance().get_all_fence_renderers()
     except Exception:
         return False
+
+
+# ===== 按内容类型自动选渲染通道（R2）· 默认关闭 = 能力储备 =====
+#
+# ⚠️ 当前默认**关闭**：本区块是纯 Qt 渲染器补齐能力后的储备，不参与默认路径。
+#
+# 原理：纯 Qt 块级渲染器（MarkdownBlockViewer）单卡约 3 MB，QWebEngineView 约
+# 40 MB（实测见 tests/perf/test_ui_memory_baseline.py），差约 13 倍。故可按内容
+# 判定：普通对话卡走纯 Qt 省内存，只有 echarts / mermaid / 公式 / 图片 / 插件
+# fence 才付 40 MB 走 WebEngine。
+#
+# 为什么默认关闭（终态，非临时措施）：
+#   1. **用户明确否决画质妥协**——纯 Qt 渲染器与 WebEngine 的视觉还原度差距过大
+#      （缺 echarts / mermaid / LaTeX / 图片 / 插件 fence / diff 内嵌高亮），
+#      在画质上不能妥协，不接受靠切渲染器省内存。
+#   2. `markdown_block_viewer.py:1` 自称「原型」，与 CodeWebViewer 的接口对齐度
+#      未做系统验证。默认启用会把「只有灰度用户走的分支」变成「所有用户的默认
+#      分支」，风险不配收益（#12 regression-guard 审查结论）。
+#
+# 启用条件（待满足后再评估）：
+#   - MarkdownBlockViewer 补齐 echarts / mermaid / LaTeX / 图片 / 插件 fence
+#   - 与 CodeWebViewer 的接口对齐度有测试覆盖
+#
+# 开关：环境变量 DRIFOX_RENDER_CHANNEL_AUTO=1 显式启用；未设置 / 其它值一律关闭。
+_RENDER_CHANNEL_AUTO_ENV = "DRIFOX_RENDER_CHANNEL_AUTO"
+
+# 行内/块级 LaTeX：先匹配块级 $$...$$（允许换行），再匹配行内 $...$（不跨行）
+_LATEX_DOLLAR_RE = re.compile(r"\$\$[^\s$][\s\S]*?\$\$|\$\$[\s\S]*?[^\s$][\s\S]*?\$\$|(?<!\$)\$[^\s$]+?\$")
+_LATEX_BRACKET_RE = re.compile(r"\\\[[\s\S]*?\\\]")
+# markdown 图片语法 ![alt](url)
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+
+
+def _registered_fence_langs() -> Optional[frozenset]:
+    """插件注册的 fence lang 集合；拿不到（registry 未加载/异常）返回 None。
+
+    返回 None 是**故意**的：调用方据此走保守分支（判定为需要 WebEngine），
+    不能与「空集合（确实没有注册任何插件 fence）」混淆 —— 插件 fence 是动态
+    注册的，预扫时 registry 可能尚未加载完。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return frozenset(UIPluginRegistry.get_instance().get_all_fence_renderers().keys())
+    except Exception:
+        return None
+
+
+def _content_needs_webengine(content: Any) -> bool:
+    """判定内容是否**必须**走 WebEngine（纯 Qt 渲染器渲染不了）。
+
+    保守原则：任何不确定（拿不到插件表 / 内容不可解析 / 异常）一律返回 True，
+    即走 WebEngine。宁可少省内存，绝不让本该正常显示的内容降级。
+
+    ⚠️ 覆盖范围说明（#12 审查要求补充）：本函数经 ``content_to_text`` 取文本，
+    **不含 tool_result 的结果体**。若工具结果里含 echarts JSON，本函数会漏判 ——
+    但工具结果在纯 Qt 渲染器里本就不渲染图表（只走 ``_tool`` 卡片），属「本来就
+    不渲染」而非降级，故不影响判定正确性。后续若纯 Qt 渲染器开始支持工具结果
+    图表，需同步扩展本函数。
+
+    Args:
+        content: 待渲染内容（str，或 content blocks 列表）。
+
+    Returns:
+        True = 必须走 WebEngine；False = 纯 Qt 渲染器可胜任。
+    """
+    if content is None:
+        return True
+    if isinstance(content, list):
+        # content blocks：图片块在 blocks 里有独立类型标记，仅取文本会丢语义 → 保守
+        try:
+            from app.core.conversation.message_content import content_to_text
+
+            text = content_to_text(content) or ""
+        except Exception:
+            return True
+        if not isinstance(text, str):
+            return True
+    elif isinstance(content, str):
+        text = content
+    else:
+        return True
+
+    if not text:
+        # 空内容没有可降级的东西
+        return False
+
+    # 插件注册的 fence lang：拿不到表 → 保守
+    plugin_langs = _registered_fence_langs()
+    if plugin_langs is None:
+        return True
+
+    # 渲染型 fence（内置 echarts/mermaid/html/widget/svg + 插件注册）
+    for m in _CHART_FENCE_OPEN_RE.finditer(text):
+        lang = (m.group(2) or "").strip().lower()
+        if not lang:
+            continue
+        if lang in _CHART_FENCE_LANGS or lang in plugin_langs:
+            return True
+        # 插件表可能滞后注册（热加载时序）：动态查询兜底
+        try:
+            if _is_render_fence_lang(lang):
+                return True
+        except Exception:
+            return True
+
+    # LaTeX 公式
+    if _LATEX_DOLLAR_RE.search(text) or _LATEX_BRACKET_RE.search(text):
+        return True
+
+    # markdown 正文图片
+    if _MD_IMAGE_RE.search(text):
+        return True
+
+    return False
+
+
+def _auto_render_channel_enabled() -> bool:
+    """是否启用「按内容类型自动选渲染通道」。
+
+    **默认关闭**（见本区块头部注释：用户否决画质妥协，等 MarkdownBlockViewer
+    能力补齐 + 接口对齐度测试落地后再评估启用）。
+
+    环境变量 DRIFOX_RENDER_CHANNEL_AUTO：
+      "1"/"true"/"on"/"yes" → 启用
+      其它 / 未设置          → 关闭，退回原「全局二值开关」行为
+    """
+    import os
+
+    raw = os.environ.get(_RENDER_CHANNEL_AUTO_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true", "on", "yes")
+
+
+def _should_use_qt_renderer(content: Any, streaming: bool = False) -> bool:
+    """建 viewer 前的通道决策：True = 纯 Qt 渲染器，False = WebEngine。
+
+    ⚠️ 流式时序问题（本机制最大的风险点）：流式期间内容是**增量增长**的，
+    预扫发生在流式结束前则内容不全 —— 例如 echarts fence 还没流式出来就被
+    判为「不需要 WebEngine」，等 fence 到达时已选了纯 Qt 通道，图表永久降级。
+    故 ``streaming=True`` 时**一律走 WebEngine**（保守），只在内容已完整的
+    场景（历史会话加载 / 内容整体替换 / 流式已结束）才启用自动判定。
+    代价：本轮新产生的卡片不享受省内存收益，但历史会话（占绝大多数卡片）
+    享受，且绝不会有内容被错误降级。
+
+    优先级（显式强制 > 自动判定 > 内容判定）：
+      1. ``DRIFOX_QT_RENDERER=1`` 是**用户显式强制**开关，直接走纯 Qt —— 它
+         优先于自动判定，否则测试 / 排障场景下这个强制开关会被内容判定覆盖。
+      2. 自动通道未启用（``DRIFOX_RENDER_CHANNEL_AUTO`` 未设为 1，**默认即关闭**）
+         → 退回原行为（只看 ``_qt_renderer_enabled()``），判定函数不被调用。
+      3. 流式期间 → 保守走 WebEngine（内容不全，见上）。
+      4. 内容需要 WebEngine → 走 WebEngine；否则纯 Qt。
+
+    Args:
+        content: 待渲染内容（str 或 content blocks 列表）。
+        streaming: 卡片是否处于流式输出中。True 时强制走 WebEngine。
+    """
+    import os
+
+    # ① 用户显式强制：优先于一切自动判定（DRIFOX_QT_RENDERER=1 是排障/测试开关）
+    if os.environ.get("DRIFOX_QT_RENDERER") == "1":
+        return True
+    if not _auto_render_channel_enabled():
+        return _qt_renderer_enabled()
+    if streaming:
+        # 内容不全，漏判风险不可接受 → 保守走 WebEngine
+        return False
+    if _content_needs_webengine(content):
+        return False
+    return True
 
 
 def _has_unclosed_chart_fence(text: str) -> bool:

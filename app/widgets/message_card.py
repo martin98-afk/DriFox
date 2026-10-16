@@ -164,6 +164,7 @@ from app.widgets.card_render_core import (
     STREAM_HEIGHT_TRACK_EPSILON,
     STREAM_HEIGHT_TRACK_FACTOR,
     STREAM_HEIGHT_TRACK_FAR_PX,
+    STREAM_HEIGHT_TRACK_MAX_FACTOR,
     _THINK_SNAKE_SVG,
     _classify_think_tag,
     _count_think_tool_prefix,
@@ -193,6 +194,7 @@ from app.widgets.card_render_core import (
     _plugin_fence_placeholder,
     _protect_inline_svg_blocks,
     _qt_renderer_enabled,
+    _should_use_qt_renderer,
     _render_inline_tail,
     _render_markdown_to_html_cached_impl,
     _render_plugin_fence,
@@ -3111,12 +3113,14 @@ class MessageCard(SimpleCardWidget):
                 self._apply_viewer_height(target)
                 self._stop_stream_height_track()
                 return
-            # 自适应 factor：小差值维持基线（流式 0.45 / 结束态 0.28），大差值
-            # 提速 +0.15（上限 0.7）跟上大台阶；基于当前基线增量而非硬编码，
-            # 保住结束态比流式更缓的"丝绸尾音"设计。
+            # 自适应 factor：小差值维持基线（流式 0.84 / 结束态 0.12），大差值
+            # 提速跟上大台阶；基于当前基线增量而非硬编码，保住结束态比流式更缓的
+            # "丝绸尾音"设计。
             factor = self._height_track_factor
             if abs(diff) > STREAM_HEIGHT_TRACK_FAR_PX:
-                factor = min(0.85, factor + STREAM_HEIGHT_TRACK_BOOST)
+                # [R4-A] cap 改用常量 STREAM_HEIGHT_TRACK_MAX_FACTOR（0.90）：原先硬编码
+                # 0.85 与基线 0.84 只差 0.01，自适应提速等于失效。
+                factor = min(STREAM_HEIGHT_TRACK_MAX_FACTOR, factor + STREAM_HEIGHT_TRACK_BOOST)
             self._apply_viewer_height(int(current_height + diff * factor))
         except RuntimeError, AttributeError:
             # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
@@ -3248,6 +3252,26 @@ class MessageCard(SimpleCardWidget):
                 退回「viewer 增量」口径，在重建路径上会严重高估（见
                 ``_apply_viewer_height`` 的说明）。
         """
+        # 🐛 用户卡片（PlainTextViewer）不参与钉死：PlainTextViewer 同步定型，
+        # set_text 当拍即 setFixedSize 到实测尺寸，contentHeightChanged emit 时
+        # viewer.height() 已等于上报值 → 卡片侧 _update_height 的 ±2px 噪声死区
+        # （target == current）恒命中 return，高度永远到不了 _apply_viewer_height
+        # 的 unpin 出口。T42 重建时序又是「建卡（emit 已被死区消费）→ 钉死」，
+        # 钉死后不再有任何自然上报 → 卡片永久 min=max=占位高度 H，H 与真实内容
+        # 高的任何偏差（批次均摊、卸载到重建之间的宽度变化、字体度量漂移）都被
+        # 固化成永久高度错误（长历史会话向上翻页时上方重建的用户卡片偶现异常）。
+        # 跳钉后高度由布局按 PlainTextViewer.sizeHint()（实测值）自然分配，
+        # viewer 已建立即正确；viewer 未建（兜底）→ 创建后同样走布局，均可自愈。
+        # assistant/welcome 的 CodeWebViewer 异步上报（reportHeight 在 pin 后到达，
+        # 起步 40 → 真实高的差必 > 2px）不受死区影响，钉死行为保持不变。
+        if self.role == "user":
+            v = self.viewer
+            if v is not None:
+                try:
+                    self._apply_viewer_height(int(v.height()))
+                except RuntimeError:
+                    pass
+            return
         try:
             self.setFixedHeight(max(1, int(height)))
             self._layout_height_pinned = True
@@ -3819,7 +3843,13 @@ class MessageCard(SimpleCardWidget):
 
             # welcome 卡片使用轻量骨架（无 echarts CDN）
             is_welcome = self.role == "welcome"
-            if not is_welcome and _qt_renderer_enabled():
+            # R2：按内容类型自动选渲染通道 —— 普通对话卡走纯 Qt 渲染器（约 3 MB/卡），
+            # 只有内容真需要 WebEngine（echarts / mermaid / 公式 / 图片 / 插件
+            # fence）才付 ~40 MB。保守原则：判定不确定 / 流式期间内容不全 →
+            # 走 WebEngine（详见 card_render_core._should_use_qt_renderer）。
+            if not is_welcome and _should_use_qt_renderer(
+                self._pending_content, streaming=bool(getattr(self, "_streaming", False))
+            ):
                 # 灰度：纯 Qt 块级渲染器（无 Chromium/JS 层）
                 self.viewer = _get_markdown_block_viewer_cls()(self)
                 self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
@@ -5634,6 +5664,12 @@ class MessageCard(SimpleCardWidget):
         self._markdown_text = None  # 大 markdown 文本
         self._last_rendered_html = None  # 大 HTML 字符串
         self._last_rendered_markdown = None  # 可能很大的 markdown
+        # 🐛 流式原文副本：update_content 逐 chunk 累加进 _stream_text_acc
+        # （约 20 KB/卡，长会话单调增长）。轮次落定有两处清零（set_meta_info
+        # 的 elapsed 分支 / finish_streaming），但卡片在落定前被回收（B4 卸载、
+        # 切会话、关标签页）时走不到那两处，必须在这里兜住。读取点
+        # _footer_stat_context 用 getattr(..., "") or "" 兜底，置 None 安全。
+        self._stream_text_acc = None
         self._rendered_code_blocks = []  # 代码块缓存
         self._pending_content = None  # 待渲染内容
         self._finished_streaming_ids.clear()  # 流式 ID 集合
