@@ -21,6 +21,7 @@ import importlib.util
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -127,6 +128,13 @@ def _enabled_or_reload(mgr, aid: str, a) -> bool:
 # ── memory_read ──────────────────────────────────────────
 
 
+def _to_int(v, default: int) -> int:
+    try:
+        return int(v)
+    except TypeError, ValueError:
+        return default
+
+
 def _read_impl(tool_ctx, **kw) -> ToolResult:
     mgr = _get_manager()
     if mgr is None:
@@ -140,33 +148,66 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
 
     try:
         if scope == "global":
-            text = mgr.read_global_memory(aid)
-            return ToolResult(True, content=text.strip() or "（全局记忆为空）")
+            text = mgr.read_global_memory(aid).strip()
+            lim = mgr.memory_max_chars(aid)["global"]
+            if len(text) > lim:
+                text = (
+                    text[:lim]
+                    + f"\n...（截断：全文 {len(text)} 字符超上限 {lim}。处理原则：合并去重、删过时条目、压缩表述，"
+                    "再用 memory_write(scope=global) 整体写回精简版。）"
+                )
+            return ToolResult(True, content=text or "（全局记忆为空）")
         if scope == "project":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法读取项目记忆。")
-            text = mgr.read_project_memory(aid, wd)
-            return ToolResult(True, content=text.strip() or "（项目记忆为空）")
+            text = mgr.read_project_memory(aid, wd).strip()
+            lim = mgr.memory_max_chars(aid)["project"]
+            if len(text) > lim:
+                text = (
+                    text[:lim]
+                    + f"\n...（截断：全文 {len(text)} 字符超上限 {lim}。处理原则：合并去重、删过时条目、压缩表述，"
+                    "再用 memory_write(scope=project) 整体写回精简版。）"
+                )
+            return ToolResult(True, content=text or "（项目记忆为空）")
         if scope == "daily":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法读取项目日志。")
             if date:
-                text = mgr.read_daily(aid, wd, date)
-                return ToolResult(True, content=text.strip() or f"（{date} 无日志）")
-            items = mgr.list_daily(aid, wd, limit=7)
+                # 单日全文（条目分页：防长日志整块砸上下文）
+                page = _to_int(kw.get("page"), 1)
+                r = mgr.read_daily_paged(aid, wd, date, page=page)
+                if not r.get("ok"):
+                    if r.get("error") == "not_found":
+                        return ToolResult(True, content=f"（{date} 无日志）")
+                    return ToolResult(False, error=f"读日志失败: {r.get('error')}")
+                head = f"{date}（第 {r['page']}/{r['pages']} 页，共 {r['total']} 条）"
+                if r.get("distilled"):
+                    head += " · 已蒸馏"
+                body = str(r.get("content") or "")
+                if r["pages"] > 1 and r["page"] < r["pages"]:
+                    body += f"\n\n（后续还有内容：翻页加 page={r['page'] + 1}，共 {r['pages']} 页）"
+                return ToolResult(True, content=f"{head}\n\n{body}")
+            # 近期索引：limit 可调（默认 7，上限 90，防日多被截）
+            limit = min(max(_to_int(kw.get("limit"), 7), 1), 90)
+            items = mgr.list_daily(aid, wd, limit=limit)
             if not items:
                 return ToolResult(True, content="（暂无工作日志）")
-            lines = ["近期工作日志（读某天加 date=YYYY-MM-DD）："]
+            lines = [f"近期工作日志（读某天全文加 date=YYYY-MM-DD，长日志翻页加 page=N；本列前 {len(items)} 天）："]
             for it in items:
-                lines.append(f"- {it['date']}（{it['chars']} 字）")
+                tag = " · 已蒸馏" if it.get("distilled") else ""
+                lines.append(f"- {it['date']}（{it['chars']} 字{tag}）")
             return ToolResult(True, content="\n".join(lines))
         # 无 scope：概览
         paths = mgr.memory_paths(aid, wd)
         lines = [f"全局记忆：{paths.get('global')}（{len(mgr.read_global_memory(aid).strip())} 字）"]
         if wd:
             lines.append(f"项目记忆：{paths.get('project')}（{len(mgr.read_project_memory(aid, wd).strip())} 字）")
-            items = mgr.list_daily(aid, wd, limit=7)
-            lines.append("近期日志：" + ("、".join(f"{it['date']}（{it['chars']} 字）" for it in items) or "（无）"))
+            items = mgr.list_daily(aid, wd, limit=90)
+            daily = "、".join(
+                (f"{it['date']}（{it['chars']} 字）" if not it.get("distilled") else f"{it['date']}（已蒸馏）")
+                for it in items
+            )
+            lines.append("日志：" + (daily or "（无）"))
         else:
             lines.append("项目记忆：（当前无工作目录）")
         return ToolResult(True, content="\n".join(lines))
@@ -191,7 +232,8 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
     scope = str(kw.get("scope") or "").strip().lower()
     content = str(kw.get("content") or "").strip()
     date = str(kw.get("date") or "").strip()
-    if not content:
+    is_mark = scope == "daily" and bool(kw.get("mark_distilled"))
+    if not content and not is_mark:
         return ToolResult(False, error="content 不能为空")
     wd = _workdir(tool_ctx)
 
@@ -207,19 +249,61 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
 
     try:
         if scope == "global":
+            lim = mgr.memory_max_chars(aid)["global"]
+            if len(content) > lim:
+                return ToolResult(
+                    False,
+                    error=(
+                        f"写入被拒绝：全局记忆超上限（{len(content)}/{lim} 字符）。"
+                        "处理原则：先 memory_read(scope=global) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
+                    ),
+                )
             _retry(lambda: mgr.write_global_memory(aid, content))
             return ToolResult(True, content="已更新全局记忆 MEMORY.md。")
 
         if scope == "project":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法写项目记忆。")
+            lim = mgr.memory_max_chars(aid)["project"]
+            if len(content) > lim:
+                return ToolResult(
+                    False,
+                    error=(
+                        f"写入被拒绝：项目记忆超上限（{len(content)}/{lim} 字符）。"
+                        "处理原则：先 memory_read(scope=project) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
+                    ),
+                )
             _retry(lambda: mgr.write_project_memory(aid, wd, content))
             return ToolResult(True, content="已更新项目记忆 MEMORY.md。")
 
         if scope == "daily":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法写工作日志。")
-            r = _retry(lambda: mgr.append_daily(aid, wd, content, date))
+            # 打蒸馏标：给 date 指定的日志重命名为 .distilled（保留可查，蒸馏/门禁均忽略）
+            if kw.get("mark_distilled"):
+                if not date:
+                    return ToolResult(False, error="mark_distilled=true 时必须给 date=YYYY-MM-DD")
+                r = _retry(lambda: mgr.mark_daily_distilled(aid, wd, date))
+                if not r.get("ok"):
+                    hint = {"not_found": f"{date} 无未打标日志", "already": f"{date} 已打过标"}.get(
+                        str(r.get("error")), str(r.get("error"))
+                    )
+                    return ToolResult(False, error=f"打标失败: {hint}")
+                return ToolResult(True, content=f"已给 {date} 日志打蒸馏标（保留可查，后续蒸馏/门禁均忽略）。")
+            # 新日门禁：目标是今天、今天还没写过、且存在未蒸馏旧日志 → 拒绝并返回蒸馏指令
+            today = datetime.now().strftime("%Y-%m-%d")
+            if (date or today) == today:
+                try:
+                    gate = mgr.distill_gate_block(aid, wd) if not mgr.daily_exists(aid, wd, today) else ""
+                except Exception:
+                    gate = ""  # 门禁查询异常不阻断正常写入
+                if gate:
+                    return ToolResult(False, error=gate)
+            r = _retry(
+                lambda: mgr.append_daily(
+                    aid, wd, content, date, str(kw.get("level") or "INFO"), str(kw.get("summary") or "")
+                )
+            )
             if not r.get("ok"):
                 return ToolResult(False, error=f"写日志失败: {r.get('error')}")
             return ToolResult(True, content=f"已追加到 {r.get('date')} 工作日志（现 {r.get('chars')} 字）。")
@@ -242,16 +326,24 @@ _READ_SCHEMA = {
     "function": {
         "name": "memory_read",
         "description": (
-            "读你的长期记忆。scope=global 读跨项目全局记忆；scope=project 读当前项目长期笔记；"
-            "scope=daily 读项目工作日志（带 date=YYYY-MM-DD 读某天，不带 date 列出近期日志索引）。"
-            "不传 scope 返回记忆概览（路径+字数）。"
-            "用户提到过去的工作、旧决策、项目约定而当前上下文没有时，先来这里查。"
+            "读长期记忆。scope=global/project：返回对应 MEMORY.md 全文（超上限时截断并附整理原则，整理后用 memory_write 写回精简版）；"
+            "scope=daily 带 date 读某天日志全文（长日志自动分页，翻页加 page）；不带 date 列近期索引（limit 控制条数）；"
+            "不传 scope 返回概览。已蒸馏日志（.distilled）仍可读。"
+            "用户提到过去工作、旧决策、项目约定而当前上下文没有时，先来这里查。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "scope": {"type": "string", "description": "global / project / daily；缺省返回概览"},
-                "date": {"type": "string", "description": "scope=daily 时的日期 YYYY-MM-DD；缺省列出最近索引"},
+                "date": {"type": "string", "description": "scope=daily 时的日期 YYYY-MM-DD；缺省列出近期索引"},
+                "page": {
+                    "type": "integer",
+                    "description": "scope=daily 且带 date 时：条目分页页码（每页 20 条），缺省第 1 页",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "scope=daily 不带 date 时：索引条数上限（默认 7，最大 90）",
+                },
             },
         },
     },
@@ -262,10 +354,14 @@ _WRITE_SCHEMA = {
     "function": {
         "name": "memory_write",
         "description": (
-            "写你的长期记忆（完成实质工作后必须调用一次 scope=daily 记录；"
-            "用户分享了项目约定/偏好时更新 scope=project；用户要求跨项目长期记住某事时 scope=global）。"
-            "scope=daily 为追加写当日日志；scope=project/global 为整体替换对应 MEMORY.md（先读后写，保持精简）。"
-            "日志只沉淀有跨会话价值的内容：完成的进展、决策、坑、约定；不写待办、瞬时信息、工具报错。"
+            "写长期记忆。scope=daily：追加当日工作日志。完成实质工作（改代码/修 bug/写文档/重构/定方案）后必须记一条；"
+            "只记进展/决策/坑/约定，禁待办、瞬时信息、报错；程序自动加「时刻|等级|摘要|」前缀，summary=一句话摘要，"
+            "level=INFO/WARNING/ERROR，content=细节正文，勿写时间戳。"
+            "新一天首条 daily 若存在未蒸馏旧日志会被拒，按返回指令蒸馏并打标后重试。"
+            "scope=project：整体替换项目 MEMORY.md（先读后写）。只记 AGENTS.md 没有的动态沉淀（坑、决策理由、易错点、用户偏好）；"
+            "AGENTS.md 静态规范（构建/测试/目录/风格/提交/EOL）禁止抄入；超上限拒绝写入（上限见助手配置，默认 3000 字符）。"
+            "scope=global：整体替换全局 MEMORY.md（先读后写）。准入极严：仅用户显式要求的跨项目规则、蒸馏筛出的最珍贵且与项目无关经验；"
+            "超上限拒绝写入（默认 4000 字符）。除用户明确要求，不存密钥。"
         ),
         "parameters": {
             "type": "object",
@@ -276,11 +372,23 @@ _WRITE_SCHEMA = {
                 },
                 "content": {
                     "type": "string",
-                    "description": "要写入的内容（daily=一条简短记录，勿写日期标题；project/global=完整的新文件内容）",
+                    "description": "daily=细节正文；project/global=完整新文件内容",
                 },
-                "date": {"type": "string", "description": "scope=daily 可选：补写某天的日期 YYYY-MM-DD，缺省今天"},
+                "date": {"type": "string", "description": "daily 补写日期 YYYY-MM-DD，缺省今天"},
+                "level": {
+                    "type": "string",
+                    "description": "daily 日志等级 INFO/WARNING/ERROR，缺省 INFO",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "daily 一句话摘要",
+                },
+                "mark_distilled": {
+                    "type": "boolean",
+                    "description": "daily 蒸馏完成打标：true 时给 date 指定日志打 .distilled 标（保留可查，蒸馏/门禁均忽略），content 可空",
+                },
             },
-            "required": ["scope", "content"],
+            "required": ["scope"],
         },
     },
 }

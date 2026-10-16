@@ -96,6 +96,9 @@ class Assistant:
     project_context_enabled: bool = True
     # 预置工具档位（控制初始注入的 schema，不影响可用性）：full=全量 / readonly=仅安全类 / minimal=bash+write+edit / search=仅搜索+中转 / none=无工具
     tool_access: str = "full"
+    # 记忆字符上限（UI 可配；<=0 时回落内置默认）
+    global_memory_max_chars: int = 4000
+    project_memory_max_chars: int = 3000
     # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
     utility_model: str = ""
     # 对用户的称呼（{{userName}} 模板变量覆盖）：空 = 跟随系统用户名
@@ -122,6 +125,8 @@ class Assistant:
             "project_notes_enabled": self.project_notes_enabled,
             "project_context_enabled": self.project_context_enabled,
             "tool_access": self.tool_access,
+            "global_memory_max_chars": self.global_memory_max_chars,
+            "project_memory_max_chars": self.project_memory_max_chars,
             "utility_model": self.utility_model,
             "user_addressing": self.user_addressing,
             "created_at": self.created_at,
@@ -151,6 +156,8 @@ class Assistant:
             project_notes_enabled=bool(data.get("project_notes_enabled", True)),
             project_context_enabled=bool(data.get("project_context_enabled", True)),
             tool_access=str(data.get("tool_access") or "full"),
+            global_memory_max_chars=int(data.get("global_memory_max_chars", 4000) or 0),
+            project_memory_max_chars=int(data.get("project_memory_max_chars", 3000) or 0),
             utility_model=str(data.get("utility_model") or ""),
             user_addressing=str(data.get("user_addressing") or ""),
             created_at=str(data.get("created_at") or ""),
@@ -1183,7 +1190,7 @@ class AssistantManager:
         if a is None:
             return ""
         pinned = self.read_pinned(aid)
-        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or '').strip()]
+        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or "").strip()]
         if not pin_lines:
             return ""
         return "# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines)
@@ -1208,29 +1215,32 @@ class AssistantManager:
             if workdir
             else "{项目根}/" + store.PROJECT_DIR_NAME + "/" + store.MEMORY_SUBDIR + "/" + aid
         )
+        limits = self.memory_max_chars(aid)
         parts: list[str] = [prompts.build_memory_system(global_file, proj_dir)]
 
         # 全局记忆
         g_text = (store.read_global_memory(aid_dir) or "").strip()
         if g_text:
-            if len(g_text) > store.GLOBAL_MEMORY_MAX_CHARS:
+            if len(g_text) > limits["global"]:
                 g_text = (
-                    g_text[: store.GLOBAL_MEMORY_MAX_CHARS]
+                    g_text[: limits["global"]]
                     + "\n... (全局记忆超限，已截断)\n\n**ACTION REQUIRED**: 全局记忆已超上限。先整理 "
                     + global_file
                     + "：合并去重、删过时内容、保持精简，然后继续用户的任务。"
                 )
             parts.append(
-                "<global_memory>\n以下是跨项目的全局记忆（用户对助手长期稳定的要求）。\n\n" + g_text + "\n</global_memory>"
+                "<global_memory>\n以下是跨项目的全局记忆（用户对助手长期稳定的要求）。\n\n"
+                + g_text
+                + "\n</global_memory>"
             )
 
         # 项目记忆
         p_text = (store.read_project_memory(workdir, aid) or "").strip() if workdir else ""
         if p_text:
             p_file = str(store.project_memory_path(workdir, aid))
-            if len(p_text) > store.PROJECT_MEMORY_MAX_CHARS:
+            if len(p_text) > limits["project"]:
                 p_text = (
-                    p_text[: store.PROJECT_MEMORY_MAX_CHARS]
+                    p_text[: limits["project"]]
                     + "\n... (项目记忆超限，已截断)\n\n**ACTION REQUIRED**: 项目记忆已超上限。先整理 "
                     + p_file
                     + "：合并去重、删过时内容、保持精简，然后继续用户的任务。"
@@ -1245,8 +1255,8 @@ class AssistantManager:
             stale = store.stale_daily(workdir, aid)
             if stale:
                 parts.append(
-                    "**ACTION REQUIRED**: 以下旧日志已超过 30 天，请先把它们按主题蒸馏进项目 MEMORY.md，然后删除旧文件："
-                    + "、".join(stale[:10])
+                    "**ACTION REQUIRED**: 以下旧日志已超过 30 天且未蒸馏，请按记忆说明书蒸馏流程处理"
+                    "（校对→并入项目 MEMORY.md→严选全局→打标 mark_distilled）：" + "、".join(stale[:10])
                 )
 
         return "\n\n".join(parts)
@@ -1263,6 +1273,17 @@ class AssistantManager:
         return {"chars": chars, "tokens_est": int(chars / 1.6)}
 
     # ── 记忆读写门面（hook / 工具 / UI 共用）──
+
+    def memory_max_chars(self, aid: str = "") -> Dict[str, int]:
+        """记忆文件字符上限：助手配置优先（<=0 回落内置默认）。"""
+        store = self._core_store()
+        a = self.get(aid) if aid else None
+        g = int(getattr(a, "global_memory_max_chars", 0) or 0) if a is not None else 0
+        p = int(getattr(a, "project_memory_max_chars", 0) or 0) if a is not None else 0
+        return {
+            "global": g if g > 0 else store.GLOBAL_MEMORY_MAX_CHARS,
+            "project": p if p > 0 else store.PROJECT_MEMORY_MAX_CHARS,
+        }
 
     def memory_paths(self, aid: str, workdir: str = "") -> Dict[str, str]:
         """该助手的记忆路径集合（UI 展示用）。"""
@@ -1286,14 +1307,43 @@ class AssistantManager:
     def write_project_memory(self, aid: str, workdir: str, content: str) -> bool:
         return self._core_store().write_project_memory(workdir, aid, content)
 
-    def append_daily(self, aid: str, workdir: str, text: str, date: str = "") -> Dict[str, Any]:
-        return self._core_store().append_daily(workdir, aid, text, date)
+    def append_daily(
+        self, aid: str, workdir: str, text: str, date: str = "", level: str = "INFO", summary: str = ""
+    ) -> Dict[str, Any]:
+        return self._core_store().append_daily(workdir, aid, text, date, level, summary)
 
     def list_daily(self, aid: str, workdir: str, limit: int = 7) -> List[Dict[str, Any]]:
         return self._core_store().list_daily(workdir, aid, limit)
 
     def read_daily(self, aid: str, workdir: str, date: str = "") -> str:
         return self._core_store().read_daily(workdir, aid, date)
+
+    def read_daily_paged(
+        self, aid: str, workdir: str, date: str = "", page: int = 1, per_page: int = 20
+    ) -> Dict[str, Any]:
+        return self._core_store().read_daily_paged(workdir, aid, date, page, per_page)
+
+    def daily_exists(self, aid: str, workdir: str, date: str = "") -> bool:
+        return self._core_store().daily_exists(workdir, aid, date)
+
+    def undistilled_daily_before(self, aid: str, workdir: str, before: str = "") -> List[str]:
+        return self._core_store().undistilled_before(workdir, aid, before)
+
+    def mark_daily_distilled(self, aid: str, workdir: str, date: str) -> Dict[str, Any]:
+        return self._core_store().mark_distilled(workdir, aid, date)
+
+    def distill_gate_block(self, aid: str, workdir: str) -> str:
+        """新日首写门禁的蒸馏指令；无未蒸馏旧日志返回空串（工具层据此放行）。"""
+        store = self._core_store()
+        prompts = self._core_prompts()
+        dates = store.undistilled_before(workdir, aid)
+        if not dates:
+            return ""
+        return prompts.build_distill_gate(
+            dates,
+            str(store.project_memory_path(workdir, aid)),
+            str(store.global_memory_path(self._assistant_dir(aid))),
+        )
 
     def clear_all_memory(self, aid: str, workdir: str = "") -> None:
         """清除该助手全部记忆（全局 MEMORY.md + 项目记忆目录）；人工提示保留。"""

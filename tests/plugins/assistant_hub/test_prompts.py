@@ -21,16 +21,29 @@ def _roles_ok(msgs):
 
 
 def test_memory_system_contains_layers_and_paths():
-    """记忆说明书：两层结构 + 实际路径 + 写入时机 + 维护规则，且不含 workbuddy 品牌词。"""
+    """说明书极简：指针 + 路径，规则全部指向工具说明。"""
     text = m.build_memory_system("/data/MEMORY.md", "/proj/.drifox/memory/build")
-    assert "# 第一层 — 全局记忆" in text
-    assert "# 第二层 — 项目记忆" in text
+    assert "memory_read" in text and "memory_write" in text
     assert "/data/MEMORY.md" in text
     assert "/proj/.drifox/memory/build" in text
-    assert "memory_write" in text and "memory_read" in text
-    assert "何时写" in text and "维护" in text
+    assert "工具说明" in text
     assert "workbuddy" not in text.lower()
-    assert "drifox" in text.lower()
+    # 极简断言：规则/蒸馏细节不在说明书
+    assert len(text) < 600
+    assert "何时写" not in text and "维护" not in text
+    assert "mark_distilled" not in text and ".distilled" not in text
+    assert "最珍贵" not in text
+
+
+def test_build_distill_gate():
+    """蒸馏门禁指令：待蒸馏日期 + 校对/严选/打标步骤齐全。"""
+    c = m.build_distill_gate(["2026-10-14", "2026-10-15"], "/proj/MEMORY.md", "/data/MEMORY.md")
+    assert "2026-10-14" in c and "2026-10-15" in c
+    assert "memory_read(scope=daily, date=2026-10-14)" in c
+    assert "memory_write(scope=daily, date=2026-10-15, mark_distilled=true)" in c
+    assert "校对" in c
+    assert "最珍贵" in c and "项目无关" in c and "宁缺勿滥" in c
+    assert "/proj/MEMORY.md" in c and "/data/MEMORY.md" in c
 
 
 def test_reflect():

@@ -2,6 +2,7 @@
 """test_memory_store.py — 记忆存储层（双层结构 + 注入视图）回归。"""
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -43,6 +44,20 @@ def test_append_daily_no_header_entry_stream(tmp_path):
     assert "修复了 X 崩溃" in body and "新增了 Y 功能" in body
     assert body.index("X 崩溃") < body.index("Y 功能")
     assert "\n\n" in body  # 条目间有空行
+
+
+def test_append_daily_prefix_and_level(tmp_path):
+    """程序自动打 loguru 风格前缀：时刻 | 等级 | 内容；非法 level 回落 INFO。"""
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 修了 X")
+    m.append_daily(wd, "build", "- 坑：Y 会崩", level="WARNING")
+    m.append_daily(wd, "build", "- 乱写的等级", level="bogus")
+    body = m.read_daily(wd, "build")
+    assert " | INFO | - 修了 X" in body
+    assert " | WARNING | - 坑：Y 会崩" in body
+    assert " | INFO | - 乱写的等级" in body
+    # 时刻格式：YYYY-MM-DD HH:MM:SS
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| INFO \| ", body)
 
 
 def test_append_daily_empty_rejected(tmp_path):
@@ -121,7 +136,7 @@ def test_daily_index_text_lists_entries(tmp_path):
     wd = str(tmp_path / "proj")
     m.append_daily(wd, "build", "- 一条", "2026-10-10")
     text = m.daily_index_text(wd, "build")
-    assert "2026-10-10" in text and "memory_read" in text
+    assert "2026-10-10" in text and "date=YYYY-MM-DD" in text
 
 
 def test_no_workdir_reads_return_empty():
@@ -129,3 +144,105 @@ def test_no_workdir_reads_return_empty():
     assert m.read_daily("", "build") == ""
     assert m.list_daily("", "build") == []
     assert m.daily_index_text("", "build") == ""
+
+
+# ── 蒸馏标记 / 门禁 / 分页 ────────────────────────────────
+
+
+def test_parse_daily_stem():
+    assert m.parse_daily_stem("2026-10-15") == ("2026-10-15", False)
+    assert m.parse_daily_stem("2026-10-15.distilled") == ("2026-10-15", True)
+    assert m.parse_daily_stem("notes") is None
+    assert m.parse_daily_stem("MEMORY") is None
+    assert m.parse_daily_stem("2026-10-15.bak") is None
+
+
+def test_mark_distilled_roundtrip(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 一条", "2026-10-15")
+    r = m.mark_distilled(wd, "build", "2026-10-15")
+    assert r["ok"]
+    d = Path(wd) / ".drifox" / "memory" / "build"
+    assert (d / "2026-10-15.md").exists() is False
+    assert (d / "2026-10-15.distilled.md").exists()
+    # 错误分支
+    assert m.mark_distilled(wd, "build", "2026-10-15")["error"] == "already"
+    assert m.mark_distilled(wd, "build", "2026-10-14")["error"] == "not_found"
+    assert m.mark_distilled(wd, "build", "../evil")["error"] == "bad_date"
+    assert m.mark_distilled("", "build", "2026-10-15")["error"] == "no_workdir"
+
+
+def test_list_daily_reports_distilled(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 甲", "2026-10-14")
+    m.append_daily(wd, "build", "- 乙", "2026-10-15")
+    m.mark_distilled(wd, "build", "2026-10-14")
+    items = m.list_daily(wd, "build", limit=10)
+    by_date = {it["date"]: it for it in items}
+    assert by_date["2026-10-14"]["distilled"] is True
+    assert by_date["2026-10-15"]["distilled"] is False
+
+
+def test_read_daily_falls_back_to_distilled(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 蒸馏后仍可查", "2026-10-14")
+    m.mark_distilled(wd, "build", "2026-10-14")
+    assert "蒸馏后仍可查" in m.read_daily(wd, "build", "2026-10-14")
+
+
+def test_read_daily_paged(tmp_path):
+    wd = str(tmp_path / "proj")
+    for i in range(25):
+        m.append_daily(wd, "build", f"- 条目{i}", "2026-10-14")
+    r = m.read_daily_paged(wd, "build", "2026-10-14", page=1)
+    assert r["ok"] and r["pages"] == 2 and r["total"] == 25
+    assert "条目0" in r["content"] and "条目19" in r["content"] and "条目20" not in r["content"]
+    r2 = m.read_daily_paged(wd, "build", "2026-10-14", page=2)
+    assert "条目24" in r2["content"] and "条目5" not in r2["content"]
+    # 越界 clamp 到最后一页；单条不分页
+    assert m.read_daily_paged(wd, "build", "2026-10-14", page=99)["page"] == 2
+    single = m.read_daily_paged(wd, "build", "2026-10-15", page=1)
+    assert not single["ok"] and single["error"] == "not_found"
+    m.append_daily(wd, "build", "- 唯一", "2026-10-15")
+    r3 = m.read_daily_paged(wd, "build", "2026-10-15")
+    assert r3["pages"] == 1 and r3["total"] == 1
+
+
+def test_read_daily_paged_marks_distilled(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 甲", "2026-10-14")
+    m.mark_distilled(wd, "build", "2026-10-14")
+    r = m.read_daily_paged(wd, "build", "2026-10-14")
+    assert r["ok"] and r["distilled"] is True
+
+
+def test_undistilled_before_and_daily_exists(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 旧", "2026-10-13")
+    m.append_daily(wd, "build", "- 中", "2026-10-14")
+    m.append_daily(wd, "build", "- 昨", "2026-10-15")
+    m.mark_distilled(wd, "build", "2026-10-13")
+    assert m.undistilled_before(wd, "build", "2026-10-16") == ["2026-10-14", "2026-10-15"]
+    assert m.undistilled_before(wd, "build", "2026-10-15") == ["2026-10-14"]
+    assert m.undistilled_before(wd, "build") == m.undistilled_before(wd, "build", m.today())
+    # 当天日志不算「之前」
+    m.append_daily(wd, "build", "- 今", "2026-10-16")
+    assert m.undistilled_before(wd, "build", "2026-10-16") == ["2026-10-14", "2026-10-15"]
+    assert m.daily_exists(wd, "build", "2026-10-16")
+    assert not m.daily_exists(wd, "build", "2026-10-12")
+
+
+def test_stale_daily_excludes_distilled(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 旧甲", "2020-01-01")
+    m.append_daily(wd, "build", "- 旧乙", "2020-02-01")
+    m.mark_distilled(wd, "build", "2020-01-01")
+    assert m.stale_daily(wd, "build", days=30) == ["2020-02-01"]
+
+
+def test_distilled_index_tag(tmp_path):
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 甲", "2026-10-14")
+    m.mark_distilled(wd, "build", "2026-10-14")
+    text = m.daily_index_text(wd, "build")
+    assert "已蒸馏" in text

@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QFrame,
@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ComboBox, SwitchButton
+from qfluentwidgets import BodyLabel, ComboBox, LineEdit, MaskDialogBase, SwitchButton
 
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
@@ -849,6 +849,136 @@ class PinnedSection(_Section):
 # ── 记忆分区 ────────────────────────────────────────────
 
 
+class MemoryLimitDialog(MaskDialogBase):
+    """记忆上限编辑弹窗：全局/项目两个数字输入，确认发 confirmed(int, int)。"""
+
+    confirmed = pyqtSignal(int, int)
+
+    _INPUT_QSS = """
+        LineEdit {{
+            background: {bg};
+            border: 1px solid {border};
+            color: {text};
+            padding: 4px 10px;
+            border-radius: 6px;
+            {font}
+        }}
+        LineEdit:focus {{ border-color: {accent}; }}
+    """
+
+    def __init__(self, global_chars: int, project_chars: int, parent=None):
+        super().__init__(parent)
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+        self.widget.setObjectName("memoryLimitDialog")
+        self.widget.setStyleSheet(
+            f"""
+            #memoryLimitDialog {{
+                background: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """
+        )
+        v = QVBoxLayout(self.widget)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(10)
+
+        title = BodyLabel("记忆上限", self.widget)
+        title.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(14)}; font-weight: 600;"
+        )
+        v.addWidget(title)
+        hint = QLabel("单文件字符上限，超限写入被拒", self.widget)
+        hint.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
+        v.addWidget(hint)
+
+        input_qss = self._INPUT_QSS.format(
+            bg=Colors.INPUT_BG_START,
+            border=Colors.INPUT_BORDER,
+            text=Colors.INPUT_TEXT,
+            accent=Colors.INFO,
+            font=f"{get_font_family_css()} {font_size_css(13)}",
+        )
+
+        def _num_row(label: str, value: int) -> LineEdit:
+            row = QHBoxLayout()
+            lab = QLabel(label, self.widget)
+            lab.setFixedWidth(72)
+            lab.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
+            row.addWidget(lab)
+            edit = LineEdit(self.widget)
+            edit.setText(str(int(value)))
+            edit.setFixedHeight(34)
+            edit.setClearButtonEnabled(True)
+            edit.setStyleSheet(input_qss)
+            row.addWidget(edit, 1)
+            v.addLayout(row)
+            return edit
+
+        self._global_edit = _num_row("全局记忆", global_chars)
+        self._project_edit = _num_row("项目记忆", project_chars)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        cancel = QPushButton("取消", self.widget)
+        cancel.setFixedHeight(32)
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent;
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}
+            }}
+            QPushButton:hover {{ background: {Colors.HOVER_BG}; border-color: {Colors.TEXT_ACCENT}; }}
+        """
+        )
+        cancel.clicked.connect(self.close)
+        confirm = QPushButton("确定", self.widget)
+        confirm.setFixedHeight(32)
+        confirm.setCursor(Qt.PointingHandCursor)
+        confirm.setDefault(True)
+        confirm.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {Colors.TEXT_ACCENT};
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Colors.TEXT_ACCENT}; }}
+        """
+        )
+        confirm.clicked.connect(self._accept)
+        btns.addWidget(cancel)
+        btns.addWidget(confirm)
+        v.addLayout(btns)
+
+        self.widget.setFixedSize(380, self.widget.sizeHint().height() + 40)
+
+    def _accept(self) -> None:
+        def _parse(edit, fallback: int) -> int:
+            try:
+                val = int(edit.text().strip())
+            except TypeError, ValueError:
+                return fallback
+            return val if 100 <= val <= 1000000 else fallback
+
+        g = _parse(self._global_edit, 4000)
+        p = _parse(self._project_edit, 3000)
+        self.confirmed.emit(g, p)
+        self.accept()
+
+
 class MemorySection(_Section):
     """记忆分区：开关 + 状态 + 全局记忆/项目记忆/工作日志查看 + 清除。
 
@@ -861,6 +991,7 @@ class MemorySection(_Section):
     viewProject = pyqtSignal()
     viewDaily = pyqtSignal()
     clearAll = pyqtSignal()
+    limitsChanged = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
         super().__init__("记忆", parent)
@@ -869,6 +1000,10 @@ class MemorySection(_Section):
         self._memory_switch.setOffText("关")
         self._memory_switch.checkedChanged.connect(self.toggleMemory.emit)
         self.set_context(self._memory_switch)
+
+        # 记忆字符上限（set_limits 回填；弹窗编辑用）
+        self._global_chars = 4000
+        self._project_chars = 3000
 
         # 状态条
         self._status = _hint("记忆状态：暂无记忆", 10)
@@ -881,6 +1016,19 @@ class MemorySection(_Section):
 
         self._wrap_v.addWidget(_hint("助手在工作后自动沉淀：全局记忆跨项目，项目记忆跟项目走。"))
 
+        # 字符上限：状态区末尾、第一条分割线上（标题样式同小节）
+        lim_row = QHBoxLayout()
+        lim_row.addWidget(_title_label("字符上限", 11))
+        self._limits_hint = _hint(f"全局 {self._global_chars} 字 · 项目 {self._project_chars} 字")
+        self._limits_hint.setWordWrap(False)
+        lim_row.addWidget(self._limits_hint)
+        lim_row.addStretch()
+        mod_btn = QPushButton("修改")
+        mod_btn.setStyleSheet(_btn_style())
+        mod_btn.clicked.connect(self._edit_limits)
+        lim_row.addWidget(mod_btn)
+        self._wrap_v.addLayout(lim_row)
+
         self._wrap_v.addWidget(_sep())
 
         # 全局记忆：标题 + 查看
@@ -892,7 +1040,7 @@ class MemorySection(_Section):
         g_btn.clicked.connect(self.viewGlobal.emit)
         g_row.addWidget(g_btn)
         self._wrap_v.addLayout(g_row)
-        self._wrap_v.addWidget(_hint("跨项目的长期偏好与要求（MEMORY.md）。"))
+        self._wrap_v.addWidget(_hint("跨项目的长期偏好与要求（MEMORY.md），超限写入被拒。"))
 
         # 项目记忆：标题 + 查看
         p_row = QHBoxLayout()
@@ -903,7 +1051,7 @@ class MemorySection(_Section):
         p_btn.clicked.connect(self.viewProject.emit)
         p_row.addWidget(p_btn)
         self._wrap_v.addLayout(p_row)
-        self._wrap_v.addWidget(_hint("当前项目的长期笔记（.drifox/memory/助手/MEMORY.md）。"))
+        self._wrap_v.addWidget(_hint("当前项目的长期笔记（.drifox/memory/助手/MEMORY.md），超限写入被拒。"))
 
         # 工作日志：标题 + 查看
         d_row = QHBoxLayout()
@@ -932,6 +1080,18 @@ class MemorySection(_Section):
     def set_memory_enabled(self, on: bool) -> None:
         self._memory_switch.setChecked(on)
         self.setEnabled_all(on)
+
+    def set_limits(self, global_chars: int, project_chars: int) -> None:
+        """回填上限并刷新显示。"""
+        self._global_chars = int(global_chars) if global_chars and int(global_chars) > 0 else 4000
+        self._project_chars = int(project_chars) if project_chars and int(project_chars) > 0 else 3000
+        self._limits_hint.setText(f"全局 {self._global_chars} 字 · 项目 {self._project_chars} 字")
+
+    def _edit_limits(self) -> None:
+        """弹上限编辑窗，确认后发 limitsChanged。"""
+        dlg = MemoryLimitDialog(self._global_chars, self._project_chars, parent=self.window())
+        dlg.confirmed.connect(self.limitsChanged.emit)
+        dlg.exec()
 
     def setEnabled_all(self, on: bool) -> None:  # noqa: N802
         """记忆开关关闭时灰置记忆内容（开关与状态条保持可见）。"""

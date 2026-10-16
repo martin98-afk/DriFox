@@ -26,6 +26,8 @@ PROJECT_DIR_NAME = ".drifox"
 MEMORY_SUBDIR = "memory"
 GLOBAL_MEMORY_FILE = "MEMORY.md"
 PROJECT_MEMORY_FILE = "MEMORY.md"
+# 已蒸馏日志后缀：YYYY-MM-DD.md → YYYY-MM-DD.distilled.md（内容保留可查，蒸馏/门禁时忽略）
+DISTILLED_SUFFIX = ".distilled"
 
 # 注入相关内容量（manager/prompts 使用）
 DAILY_LOOKBACK = 7  # 注入的近期日志条数
@@ -49,10 +51,25 @@ def _lock_for(path: Path) -> threading.Lock:
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# 工作日志条目前缀的合法等级（对齐 loguru 命名）
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
+
 
 def is_date_name(stem: str) -> bool:
     """文件名是否标准日期（YYYY-MM-DD）；同时是 date 参数的穿越防线。"""
     return bool(_DATE_RE.match(stem))
+
+
+def parse_daily_stem(stem: str) -> Optional[tuple]:
+    """日志文件 stem → (date, distilled)；非日志文件返回 None。
+
+    识别两种形态：`YYYY-MM-DD`（未蒸馏）与 `YYYY-MM-DD.distilled`（已蒸馏）。
+    """
+    if is_date_name(stem):
+        return stem, False
+    if stem.endswith(DISTILLED_SUFFIX) and is_date_name(stem[: -len(DISTILLED_SUFFIX)]):
+        return stem[: -len(DISTILLED_SUFFIX)], True
+    return None
 
 
 # ── 路径 ─────────────────────────────────────────────────
@@ -88,6 +105,11 @@ def today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def distilled_daily_path(path: Path) -> Path:
+    """未蒸馏日志路径 → 已蒸馏路径（YYYY-MM-DD.md → YYYY-MM-DD.distilled.md）。"""
+    return Path(path).parent / (Path(path).stem + DISTILLED_SUFFIX + Path(path).suffix)
+
+
 # ── 读 ───────────────────────────────────────────────────
 
 
@@ -109,13 +131,50 @@ def read_project_memory(workdir: str | Path, aid: str) -> str:
 
 
 def read_daily(workdir: str | Path, aid: str, date: str = "") -> str:
+    """读某天日志全文；未蒸馏版缺失时回落已蒸馏版（蒸馏后仍可查）。"""
     if not workdir:
         return ""
-    return read_text(daily_path(workdir, aid, date))
+    p = daily_path(workdir, aid, date)
+    text = read_text(p)
+    if not text.strip():
+        text = read_text(distilled_daily_path(p))
+    return text
+
+
+def read_daily_paged(workdir: str | Path, aid: str, date: str = "", page: int = 1, per_page: int = 20) -> Dict:
+    """单日日志条目分页读取（防长日志整块砸上下文）。
+
+    按空行切段（条目流天然边界），返回 {ok, content, page, pages, total, distilled}；
+    无日志时 {ok: False, error: "not_found"}。
+    """
+    if not workdir:
+        return {"ok": False, "error": "no_workdir"}
+    p = daily_path(workdir, aid, date)
+    raw = read_text(p)
+    distilled = False
+    if not raw.strip():
+        dp = distilled_daily_path(p)
+        raw = read_text(dp)
+        distilled = dp.exists() and bool(raw.strip())
+    if not raw.strip():
+        return {"ok": False, "error": "not_found"}
+    entries = [e.strip() for e in re.split(r"\n\s*\n", raw) if e.strip()]
+    total = len(entries)
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = min(max(int(page or 1), 1), pages)
+    start = (page - 1) * per_page
+    return {
+        "ok": True,
+        "content": "\n\n".join(entries[start : start + per_page]),
+        "page": page,
+        "pages": pages,
+        "total": total,
+        "distilled": distilled,
+    }
 
 
 def list_daily(workdir: str | Path, aid: str, limit: int = DAILY_LOOKBACK) -> List[Dict]:
-    """近期日志列表（新→旧）：[{"date", "chars"}...]。"""
+    """近期日志列表（新→旧）：[{"date", "chars", "distilled"}...]；已蒸馏仍列出。"""
     if not workdir:
         return []
     d = project_dir(workdir, aid)
@@ -123,22 +182,24 @@ def list_daily(workdir: str | Path, aid: str, limit: int = DAILY_LOOKBACK) -> Li
         return []
     out: List[Dict] = []
     for f in sorted(d.glob("*.md"), key=lambda p: p.name, reverse=True):
-        if f.name == PROJECT_MEMORY_FILE or not is_date_name(f.stem):
+        parsed = parse_daily_stem(f.stem)
+        if f.name == PROJECT_MEMORY_FILE or parsed is None:
             continue  # MEMORY.md 与用户杂项不进日志索引
+        date, distilled = parsed
         try:
             size = len(f.read_text(encoding="utf-8").strip())
         except Exception:
             continue
         if size <= 0:
             continue
-        out.append({"date": f.stem, "chars": size})
+        out.append({"date": date, "chars": size, "distilled": distilled})
         if len(out) >= max(limit, 0):
             break
     return out
 
 
 def stale_daily(workdir: str | Path, aid: str, days: int = STALE_DAILY_DAYS) -> List[str]:
-    """超过 days 天的日志日期列表（蒸馏候选，供注入侧 ACTION 提示）。"""
+    """超过 days 天且**未蒸馏**的日志日期（蒸馏候选，供注入侧 ACTION 提示）。"""
     if not workdir:
         return []
     d = project_dir(workdir, aid)
@@ -147,12 +208,65 @@ def stale_daily(workdir: str | Path, aid: str, days: int = STALE_DAILY_DAYS) -> 
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     out: List[str] = []
     for f in sorted(d.glob("*.md")):
-        if f.name == PROJECT_MEMORY_FILE or not is_date_name(f.stem):
+        parsed = parse_daily_stem(f.stem)
+        if f.name == PROJECT_MEMORY_FILE or parsed is None:
             continue  # 只认标准日期名，其余当用户杂项跳过
-        stem = f.stem
+        stem, distilled = parsed
+        if distilled:
+            continue  # 已蒸馏不再是候选
         if stem < cutoff:
             out.append(stem)
     return out
+
+
+def daily_exists(workdir: str | Path, aid: str, date: str = "") -> bool:
+    """某天日志是否已有内容（门禁判据：今天是否已写过）。"""
+    if not workdir:
+        return False
+    try:
+        p = daily_path(workdir, aid, date)
+        return p.exists() and p.stat().st_size > 0
+    except ValueError, OSError:
+        return False
+
+
+def undistilled_before(workdir: str | Path, aid: str, before: str = "") -> List[str]:
+    """before（YYYY-MM-DD，缺省今天）之前全部未蒸馏日志日期，旧→新（门禁蒸馏清单）。"""
+    if not workdir:
+        return []
+    d = project_dir(workdir, aid)
+    if not d.exists():
+        return []
+    b = before or today()
+    out: List[str] = []
+    for f in sorted(d.glob("*.md")):
+        parsed = parse_daily_stem(f.stem)
+        if f.name == PROJECT_MEMORY_FILE or parsed is None:
+            continue
+        stem, distilled = parsed
+        if not distilled and stem < b:
+            out.append(stem)
+    return out
+
+
+def mark_distilled(workdir: str | Path, aid: str, date: str) -> Dict:
+    """把 YYYY-MM-DD.md 重命名为 YYYY-MM-DD.distilled.md（保留可查，蒸馏时忽略）。"""
+    if not workdir:
+        return {"ok": False, "error": "no_workdir"}
+    if not is_date_name(date or ""):
+        return {"ok": False, "error": "bad_date"}
+    p = daily_path(workdir, aid, date)
+    with _lock_for(p):
+        target = distilled_daily_path(p)
+        if target.exists():
+            return {"ok": False, "error": "already"}
+        if not p.exists():
+            return {"ok": False, "error": "not_found"}
+        try:
+            os.replace(p, target)
+        except OSError as e:
+            return {"ok": False, "error": str(e)}
+    return {"ok": True, "date": date, "file": str(target)}
 
 
 # ── 写 ───────────────────────────────────────────────────
@@ -183,13 +297,28 @@ def write_project_memory(workdir: str | Path, aid: str, content: str) -> bool:
     return True
 
 
-def append_daily(workdir: str | Path, aid: str, text: str, date: str = "") -> Dict:
-    """追加一条到当日日志（append-only；纯条目流，日期由文件名承载，条目间空行分隔）。"""
+def append_daily(
+    workdir: str | Path, aid: str, text: str, date: str = "", level: str = "INFO", summary: str = ""
+) -> Dict:
+    """追加一条到当日日志（append-only；条目间空行分隔）。
+
+    程序给每条记录打 loguru 风格前缀：`YYYY-MM-DD HH:MM:SS | LEVEL | 摘要 | 细节`。
+    时刻与等级是精确字段，由程序生成；模型提供 summary（一句话，便于浏览）与
+    text（细节）；level 非法回落 INFO，summary 缺省时退化为三段式。
+    """
     if not workdir:
         return {"ok": False, "error": "no_workdir"}
     body = (text or "").strip()
     if not body:
         return {"ok": False, "error": "empty"}
+    lvl = str(level or "INFO").strip().upper()
+    if lvl not in _LOG_LEVELS:
+        lvl = "INFO"
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    head = f"{stamp} | {lvl} | "
+    s = (summary or "").strip()
+    if s:
+        head += f"{s.splitlines()[0].strip()} | "
     path = daily_path(workdir, aid, date)
     with _lock_for(path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +326,7 @@ def append_daily(workdir: str | Path, aid: str, text: str, date: str = "") -> Di
         with open(path, "a", encoding="utf-8") as f:
             if not is_new:
                 f.write("\n")  # 条目间空行分隔（Markdown 段落边界）
-            f.write(body + "\n")
+            f.write(head + body + "\n")
     try:
         chars = len(path.read_text(encoding="utf-8"))
     except Exception:
@@ -236,7 +365,8 @@ def daily_index_text(workdir: str | Path, aid: str, limit: int = DAILY_LOOKBACK)
     items = list_daily(workdir, aid, limit)
     if not items:
         return ""
-    lines = ["近期工作日志（需要细节时用 memory_read scope=daily date=YYYY-MM-DD 读取）："]
+    lines = ["近期工作日志（读某天全文加 date=YYYY-MM-DD，长日志自动分页、翻页加 page=N）："]
     for it in items:
-        lines.append(f"- {it['date']}（{it['chars']} 字）")
+        tag = " · 已蒸馏" if it.get("distilled") else ""
+        lines.append(f"- {it['date']}（{it['chars']} 字{tag}）")
     return "\n".join(lines)

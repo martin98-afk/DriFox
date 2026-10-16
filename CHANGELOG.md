@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.9] - 2026-10-16
+## [v0.6.9] - 2026-10-16 (重新发布 #2)
 
-自 v0.6.8 以来的变更 | 提交数：41 · 文件变更：37 · +3019/-337 | 贡献者：mading, martin98-afk
+自 v0.6.8 以来的变更（累计） | 提交数：43 · 文件变更：53 · +3893/-460 | 贡献者：dingma, mading, martin98-afk
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -42,6 +42,20 @@ All notable changes to this project will be documented in this file.
 ### 🔧 测试基建 (Testing Infrastructure)
 
 - 消息所有权与释放回归族（`73f1e007`, `ad08c0e4`, `715d4267`, `e35e6386`, `c943c560`, `3bcea826`）: messages 所有权收敛端到端 4 用例、evict hook 4 用例（默认 None/回调传参/异常隔离/端到端）、release_messages_except 权威释放入口 9 用例、B4 批 I（PID 转发/kill 判定/流式残留/TOCTOU 跳过）、Chromium 进程上限断言同步、归档导入 pending 缺口双向回归 + reasoning_content 回填断言（#21）。
+
+### ✨ 新功能 (New Features) · 重新发布 #2 追加
+
+- **记忆蒸馏门禁与日志分页** (`523afba1`, plugins/assistant_hub/core/memory/store.py · tools/memory_tools.py · core/memory/prompts.py): 新的一天首次写日志前强制先蒸馏全部未蒸馏旧日志（`undistilled_before` 出清单 → `build_distill_gate` 生成分步指令 → 拒绝写入并返回指令）；蒸馏后给日志打标（`YYYY-MM-DD.md` → `YYYY-MM-DD.distilled.md`），已打标日志保留可查、蒸馏与门禁均忽略；`memory_read(scope=daily)` 单日全文按条目分页（每页 20 条，`page` 翻页），索引 `limit` 可调（默认 7，上限 90）；日志条目由程序自动加 loguru 风格前缀「时刻 | 等级 |」（等级 INFO/WARNING/ERROR，非法回落 INFO），content 不再自带时间戳
+
+- **记忆字符上限可配与超限拦截** (`07fb8ea6`, plugins/assistant_hub/assistant_manager.py · ui/sections.py · ui/assistant_card.py · tools/memory_tools.py): 全局/项目记忆各设字符上限（默认 4000/3000，助手配置可改）；超限读取截断并附「合并去重、删过时条目、压缩表述」整理指令，超限写入直接拒绝并给整理步骤；记忆卡片新增「字符上限」行 + `MemoryLimitDialog` 弹窗编辑（100–1000000 范围校验，非法回落默认）
+
+- **提示词 XML 标签包裹与记忆说明书极简化** (`523afba1` `07fb8ea6`, plugins/system-hooks/hooks/hooks.json · inject_skills_content.py · inject_subagent_info.py · plugins/assistant_hub/hooks/inject_assistant.py · project_notes.py · core/memory/prompts.py): 四个内置 hook 契约（`<coding_contract>` / `<primary_constraints>` / `<subagent_constraints>` / `<hook_message_rules>`）与技能列表（`<enabled_skills>`）、子智能体列表（`<available_subagents>`）、助手身份（`<assistant_identity>`）、项目笔记（`<project_notes>`）统一 XML 标签包裹；记忆系统说明书由长篇说明收缩为「指针 + 路径」，使用规则归入工具 schema description
+
+- **日志条目 summary 字段** (`07fb8ea6`): daily 日志前缀扩展为「时刻 | 等级 | 摘要 | 细节」，`memory_write` 新增 `summary` 参数（一句话，便于浏览），缺省退化为原三段式
+
+### 🔧 测试基建 (Testing Infrastructure) · 重新发布 #2 追加
+
+- 蒸馏与分页回归（`523afba1` `07fb8ea6`, tests/plugins/assistant_hub/）: test_memory_store 补蒸馏打标与门禁清单用例、test_memory_tools 补分页读取/打标/门禁拦截/summary 前缀/超限拒绝对应用例、test_prompts 补说明书收缩与门禁指令断言、test_manager_ext 与 test_llm_client 同步适配
 
 ## [v0.6.8] - 2026-10-16
 
