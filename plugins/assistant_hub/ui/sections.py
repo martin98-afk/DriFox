@@ -992,6 +992,9 @@ class MemorySection(_Section):
     viewDaily = pyqtSignal()
     clearAll = pyqtSignal()
     limitsChanged = pyqtSignal(int, int)
+    restoreRequested = pyqtSignal()
+    migrateRequested = pyqtSignal(str)
+    dismissDriftRequested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__("记忆", parent)
@@ -1008,6 +1011,45 @@ class MemorySection(_Section):
         # 状态条
         self._status = _hint("记忆状态：暂无记忆", 10)
         self.body().addWidget(self._status)
+
+        # 健康行：健康摘要 + 恢复按钮（set_health 填充；无数据时隐藏）
+        health_row = QHBoxLayout()
+        health_row.setContentsMargins(0, 0, 0, 0)
+        self._health = QLabel("")
+        self._health.setWordWrap(True)
+        self._health.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        health_row.addWidget(self._health, 1)
+        restore_btn = QPushButton("恢复")
+        restore_btn.setStyleSheet(_btn_style())
+        restore_btn.setToolTip("从快照恢复记忆（每次覆盖写/清除前自动存快照）")
+        restore_btn.clicked.connect(self.restoreRequested.emit)
+        health_row.addWidget(restore_btn)
+        self._health_row = QWidget()
+        self._health_row.setLayout(health_row)
+        self._health_row.setVisible(False)
+        self.body().addWidget(self._health_row)
+
+        # 漂移提示行：检测到旧工作目录记忆时显示（迁移/忽略）
+        drift_row = QHBoxLayout()
+        drift_row.setContentsMargins(0, 0, 0, 0)
+        self._drift_label = _hint("")
+        drift_row.addWidget(self._drift_label, 1)
+        mig_btn = QPushButton("迁移到此目录")
+        mig_btn.setStyleSheet(_btn_style())
+        mig_btn.clicked.connect(lambda: self.migrateRequested.emit(self._drift_old))
+        drift_row.addWidget(mig_btn)
+        dis_btn = QPushButton("忽略")
+        dis_btn.setStyleSheet(_btn_style())
+        dis_btn.clicked.connect(lambda: self.dismissDriftRequested.emit(self._drift_old))
+        drift_row.addWidget(dis_btn)
+        self._drift_row = QWidget()
+        self._drift_row.setLayout(drift_row)
+        self._drift_row.setVisible(False)
+        self.body().addWidget(self._drift_row)
+        self._drift_old = ""
 
         self._body_wrap = QWidget()
         self._wrap_v = QVBoxLayout(self._body_wrap)
@@ -1099,6 +1141,50 @@ class MemorySection(_Section):
 
     def set_status(self, text: str) -> None:
         self._status.setText(f"记忆状态：{text}")
+
+    def set_health(self, health: Optional[Dict[str, Any]]) -> None:
+        """渲染健康摘要与漂移提示（health=None/空 → 两行隐藏）。"""
+        if not health:
+            self._health_row.setVisible(False)
+            self._drift_row.setVisible(False)
+            return
+        warn: List[str] = []
+        info: List[str] = []
+        stale = int(health.get("stale_days") or 0)
+        if stale >= 30:
+            warn.append(f"{stale} 天未蒸馏")
+        usage = health.get("usage") or {}
+        over = health.get("over_limit") or {}
+        g = usage.get("global") or [0, 0]
+        p = usage.get("project") or [0, 0]
+        if over.get("global"):
+            warn.append(f"全局 {g[0]}/{g[1]} 超限")
+        if over.get("project"):
+            warn.append(f"项目 {p[0]}/{p[1]} 超限")
+        info.append(f"上次蒸馏 {str(health.get('last_distill') or '无')}")
+        snaps = health.get("snapshot_counts") or {}
+        info.append(f"快照 {int(snaps.get('global') or 0) + int(snaps.get('project') or 0)}")
+        if warn:
+            text = "健康：⚠ " + " ｜ ".join(warn) + " ｜ " + " ｜ ".join(info)
+            color = Colors.WARNING
+        else:
+            text = "健康：正常 ｜ " + " ｜ ".join(info)
+            color = Colors.TEXT_MUTED
+        self._health.setText(text)
+        self._health.setStyleSheet(
+            f"color: {color}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        self._health_row.setVisible(True)
+        drift = health.get("drift") or {}
+        if drift.get("drifted"):
+            self._drift_old = str(drift.get("old_workdir") or "")
+            self._drift_label.setText(
+                f"检测到旧工作目录的项目记忆（{int(drift.get('old_chars') or 0)} 字）：{self._drift_old}"
+            )
+            self._drift_row.setVisible(True)
+        else:
+            self._drift_row.setVisible(False)
 
 
 # ── 经验分区 ────────────────────────────────────────────
