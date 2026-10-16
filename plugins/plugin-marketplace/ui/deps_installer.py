@@ -205,30 +205,58 @@ class DepsInstaller:
 
 
 def _platform_wheel_tags() -> List[str]:
-    """当前平台的 wheel 兼容 tag 优先级列表（前缀匹配，通用在前）。"""
+    """当前平台的 wheel 兼容 tag 优先级列表（前缀匹配，通用在前）。
+
+    平台裁剪是硬约束：候选集只允许出现「当前 OS 的 tag + 跨 OS 通用 tag」。
+    历史缺陷：无条件放入 win_{arch} 导致 Intel Mac 上 win_amd64 排第 2 位、
+    压过 macosx/manylinux，装回 Windows 原生模块（.pyd）后 import 直接炸
+    （gateway-feishu 的 pycryptodome 即此案例，Crypto.Util._cpuid_c 找不到
+    darwin .so）。
+
+    通用 tag（不随 OS 变化，任何平台都可能命中）：
+    - py3-none-any：纯 Python wheel
+    - cp{ver}-abi3：稳定 ABI wheel（跨小版本可用，如 pycryptodome 的
+      cp37-abi3-macosx_10_9_universal2）
+    其余 tag 一律按 sys.platform 分发，杜绝跨 OS 串台。
+    """
     import platform as _pf
 
     arch = _pf.machine().lower()  # amd64 / x86_64 / arm64 ...
     if arch in ("x86_64", "amd64"):
         arch64 = "amd64"
+        wheel_arch = "x86_64"
         glibc = "manylinux_2_17_x86_64.manylinux2014_x86_64"
     elif arch in ("arm64", "aarch64"):
         arch64 = "arm64"
+        wheel_arch = "aarch64"
         glibc = "manylinux_2_17_aarch64.manylinux2014_aarch64"
     else:
         arch64 = arch
+        wheel_arch = arch
         glibc = f"manylinux_{arch}"
 
     ver = "".join(str(v) for v in sys.version_info[:2])  # 3.14 -> "314"
-    return [
-        f"py3-none-any",  # 纯 Python 最优先
-        f"cp{ver}-cp{ver}",
-        f"win_{arch64}",
-        f"{glibc}",
-        f"macosx_11_0_{arch64}",
-        f"manylinux2014_{arch64.replace('amd64', 'x86_64')}",
-        f"linux_{arch64}",
+    tags = [
+        "py3-none-any",  # 纯 Python 最优先
+        f"cp{ver}-abi3",  # 稳定 ABI 次优先（跨小版本）
+        f"cp{ver}-cp{ver}",  # 精确解释器
     ]
+    if sys.platform == "win32":
+        # Windows：win_amd64 / win_arm64
+        tags.append(f"win_{arch64}")
+    elif sys.platform == "darwin":
+        # macOS：universal2 优先于单架构（PyPI 上 macosx wheel 常以 universal2
+        # 分发，如 pycryptodome cp37-abi3-macosx_10_9_universal2；仅匹配
+        # macosx_11_0_{arch} 会漏掉这类包 → 依赖装不上）
+        tags.append(f"macosx_10_9_universal2")
+        tags.append(f"macosx_11_0_{arch64}")
+        tags.append(f"macosx_10_15_{arch64}")
+    else:
+        # Linux / 其它 POSIX
+        tags.append(glibc)
+        tags.append(f"manylinux2014_{wheel_arch}")
+        tags.append(f"linux_{arch64}")
+    return tags
 
 
 def _split_spec(spec: str):
