@@ -879,7 +879,8 @@ class HookWorker(QRunnable):
         except Exception as e:
             return f"HTTP request failed: {str(e)}", False
 
-    # 相对模块函数缓存：{(config_file, function_path): Callable}
+    # 相对模块函数缓存：{(config_file, mtime_ns, function_path): Callable}
+    # 键含模块 mtime_ns：文件直接编辑后旧函数对象自动失效（不再驻留旧代码）。
     _relative_func_cache: Dict[str, Callable] = {}
 
     @classmethod
@@ -915,12 +916,6 @@ class HookWorker(QRunnable):
         Returns:
             可调用的函数对象，失败返回 None
         """
-        # 缓存键：(config_file, function_path) 确保不同 hooks.json 的同名模块不冲突
-        cache_key = f"{config_file}::{function_path}"
-        cached = HookWorker._relative_func_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
         parts = function_path.rsplit(":", 1)
         if len(parts) != 2:
             return None
@@ -937,6 +932,18 @@ class HookWorker(QRunnable):
         # 基于 hooks.json 所在目录解析
         config_dir = Path(config_file).resolve().parent
         abs_path = config_dir / py_file
+
+        # 缓存键加模块文件 mtime_ns（与 theme yaml 缓存同法）：模块文件被直接
+        # 编辑而 hooks.json 不变时，旧函数对象自动失效不驻留（原键只有
+        # (config_file, function_path)，编辑后命中的仍是旧代码的函数）。
+        try:
+            module_mtime_ns = abs_path.stat().st_mtime_ns
+        except OSError:
+            module_mtime_ns = 0  # 文件不存在/不可 stat：下方 exists 检查会拦截
+        cache_key = f"{config_file}::{module_mtime_ns}::{function_path}"
+        cached = HookWorker._relative_func_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         # ── 相对路径导入范围限制（EU-G18）──
         # 背景：相对路径是插件自带 hook 的唯一可用方式（插件模块不可能位于
@@ -972,13 +979,19 @@ class HookWorker(QRunnable):
         try:
             import importlib.util
 
-            spec = importlib.util.spec_from_file_location(
-                f"_hook_relative_{relative_dotted.replace('/', '_')}", str(abs_path)
-            )
+            # 显式 compile 绕过 SourceFileLoader 的 __pycache__ 缓存：pyc 头的
+            # mtime 校验是秒级精度，同一秒内「编辑 → 立即热重载」会命中旧字节码
+            # （实测同秒内改函数返回值仍拿旧结果）。直接读源编译最可靠，
+            # 与 plugin_tool_loader._load_module 同口径。
+            source = abs_path.read_text(encoding="utf-8")
+            module_name = f"_hook_relative_{relative_dotted.replace('/', '_')}"
+            spec = importlib.util.spec_from_file_location(module_name, str(abs_path))
             if spec is None or spec.loader is None:
                 return None
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            module.__dict__["__builtins__"] = __builtins__
+            code = compile(source, str(abs_path), "exec")
+            exec(code, module.__dict__)
             func = getattr(module, func_name, None)
             if callable(func):
                 HookWorker._relative_func_cache[cache_key] = func
@@ -1538,9 +1551,10 @@ class HookManager:
             del self._hooks[event_name]
 
         # 🛡️ 清理本 skill 的 Python hook 函数缓存：_relative_func_cache 按
-        # (config_file, function) 缓存 exec_module 后的函数对象，插件热重载
-        # （unregister → register）若不清除，执行时命中的仍是旧代码的函数——
-        # 表现为「hook 重载成功但行为不变」（模块级状态/逻辑停留旧版本）。
+        # (config_file, mtime_ns, function) 缓存 exec_module 后的函数对象，
+        # 插件热重载（unregister → register）若不清除，执行时命中的仍是旧
+        # 代码的函数——表现为「hook 重载成功但行为不变」（模块级状态/逻辑
+        # 停留旧版本）。键前缀 config_file 与新键格式兼容。
         if stale_config_files:
             stale_keys = [
                 k for k in HookWorker._relative_func_cache
