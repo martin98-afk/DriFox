@@ -5533,6 +5533,10 @@ class MessageCard(SimpleCardWidget):
             self._streaming = False
         else:
             self.stop_streaming_anim()
+        # [B4] 轮次落定清零流式采样缓冲（与 _refresh_footer_stats elapsed 分支/
+        # start_elapsed_tracking 的清零点对齐）：_stream_text_acc 是流式期间
+        # 累计的全文副本，一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。
+        self._stream_text_acc = ""
 
     def _has_active_tools(self) -> bool:
         """是否有仍在执行中的工具（已登记但未完成）。
