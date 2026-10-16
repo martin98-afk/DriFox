@@ -76,7 +76,10 @@ _ANGLE_PLATFORM = {
 
 # 与 app/utils/config.py Render 组默认值/范围保持一致
 _DEFAULT_BACKEND = "software"  # 出厂默认：软件 (WARP)，不碰显卡驱动
-_DEFAULT_RENDERER_LIMIT = 6
+# 进程上限须 ≥ 单窗口卡片配额（effective_render_quota(_MAX_RENDERED_CARDS, dpr)
+# 最大值 12，见 app/core/infra/memory_governor.py）：低于配额时 Chromium 合并
+# renderer 进程，kill 粒度失效（须配合批 I 的 PID 修复 ce9bb11d）。
+_DEFAULT_RENDERER_LIMIT = 12
 _RENDERER_LIMIT_RANGE = (1, 32)
 _DEFAULT_JS_HEAP_MB = 128
 _JS_HEAP_RANGE = (64, 1024)

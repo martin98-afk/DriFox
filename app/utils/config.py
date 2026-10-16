@@ -897,8 +897,10 @@ class Settings(QConfig):
         "auto",
         OptionsValidator(["auto", "on", "off"]),
     )
-    # Chromium renderer 进程硬上限（内存治理核心项）
-    render_renderer_process_limit = RangeConfigItem("Render", "RendererProcessLimit", 6, RangeValidator(1, 32))
+    # Chromium renderer 进程硬上限（内存治理核心项）。
+    # 默认 12：须 ≥ 单窗口卡片配额（effective_render_quota 最大值 12），低于配额
+    # 时 Chromium 合并 renderer 进程 → kill 粒度失效（配合批 I PID 修复 ce9bb11d）。
+    render_renderer_process_limit = RangeConfigItem("Render", "RendererProcessLimit", 12, RangeValidator(1, 32))
     # 单 renderer JS 堆上限（MB），防单页膨胀
     render_js_heap_mb = RangeConfigItem("Render", "JsHeapMb", 128, RangeValidator(64, 1024))
     # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）。
