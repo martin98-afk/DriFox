@@ -15,8 +15,10 @@
 """
 
 import os
+import sys
+import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from loguru import logger
 from PyQt5.QtCore import (
@@ -24,13 +26,17 @@ from PyQt5.QtCore import (
     QFileInfo,
     QMimeData,
     QModelIndex,
+    QObject,
+    QRunnable,
     QSize,
     QSortFilterProxyModel,
+    QThreadPool,
     Qt,
+    QTimer,
     QUrl,
     pyqtSignal,
 )
-from PyQt5.QtGui import QColor, QIcon, QKeyEvent, QKeySequence
+from PyQt5.QtGui import QColor, QIcon, QImage, QKeyEvent, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -44,44 +50,490 @@ from PyQt5.QtWidgets import (
 )
 
 # ══════════════════════════════════════════════════════════
-# 文件图标工具
+# 文件图标 — 后台加载 + 超时熔断
+#
+# ★ 主线程卡死根因（修复前）：data(DecorationRole) 同步调
+#   QFileIconProvider.icon()，Windows 上落到 Win32 SHGetFileInfo()。
+#   Shell 对该批文件的图标查询一次阻塞 5s 且结果不入缓存，目录首次
+#   展开 / 展开状态恢复时整批重查 —— 实测 9 个 .csv（WPS 文件关联）
+#   连续超时 45.2s，主线程整窗冻结（qt_messages 日志 9 条
+#   "SHGetFileInfo() timed out"，每条间隔精确 5s）。
+#
+# ★ 现方案（A 后台化 + C 熔断）：
+#   A. 主线程只读缓存，未命中先返占位图标 + 提交后台任务；后台线程
+#      ctypes 直调 SHGetFileInfoW 取 HICON 转 QImage（QImage 可在工作
+#      线程构造；不用 QtWinExtras —— 打包版未包含该模块），信号回主
+#      线程转 QIcon 入缓存 → dataChanged 刷新该行。
+#   C. 真实路径查询连续超时达阈值 → 熔断降级为 SHGFI_USEFILEATTRIBUTES
+#      快速模式（按扩展名查注册表，实测 <1ms，不触发文件关联 Shell
+#      扩展），冷却期后自动放行真实探测恢复。
 # ══════════════════════════════════════════════════════════
 
-_FILE_ICON_PROVIDER: Optional[QFileIconProvider] = None
-# 图标缓存：Qt 视图不缓存 DecorationRole，hover / 滚动 / 选中变化都会重绘
-# 并重新调 data()；QFileInfo 构造（stat 磁盘）+ QFileIconProvider.icon
-# （Windows Shell 调用）在冷类别文件上单次可达 2ms，重绘高频下纯浪费。
+_IS_WIN = sys.platform == "win32"
+
+# 图标缓存：path -> QIcon（主线程独占读写）
 _ICON_CACHE: Dict[str, QIcon] = {}
 _ICON_CACHE_MAX = 8192
 
+_ICON_TASK_STALE_SEC = 20.0  # 单任务超过此值未回 → 看门狗判定 Shell 病态
+_BREAKER_THRESHOLD = 3  # 连续 N 次超时 → 打开熔断
+_BREAKER_COOLDOWN_S = 60.0  # 熔断冷却时长（期间走快速模式）
+_SHELL_SLOW_SEC = 3.0  # 单次真实查询耗时超过此值记为「慢」
+
+_BREAKER_SLOW_STREAK = 0  # 连续慢计数（主线程独占）
+_BREAKER_OPEN_UNTIL = 0.0  # 熔断打开截止时刻（time.monotonic）
+
+_ICON_LOADER: Optional["_IconLoader"] = None
+_FILE_ICON_PROVIDER: Optional[QFileIconProvider] = None
+_PLACEHOLDER_FILE_ICON: Optional[QIcon] = None
+_DIR_ICON: Optional[QIcon] = None
+
+if _IS_WIN:
+    import ctypes
+    from ctypes import wintypes
+
+    class _SHFILEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("hIcon", ctypes.c_void_p),
+            ("iIcon", ctypes.c_int),
+            ("dwAttributes", wintypes.DWORD),
+            ("szDisplayName", ctypes.c_wchar * 260),
+            ("szTypeName", ctypes.c_wchar * 80),
+        ]
+
+    class _ICONINFO(ctypes.Structure):
+        _fields_ = [
+            ("fIcon", wintypes.BOOL),
+            ("xHotspot", wintypes.DWORD),
+            ("yHotspot", wintypes.DWORD),
+            ("hbmMask", ctypes.c_void_p),
+            ("hbmColor", ctypes.c_void_p),
+        ]
+
+    class _BITMAP(ctypes.Structure):
+        _fields_ = [
+            ("bmType", wintypes.LONG),
+            ("bmWidth", wintypes.LONG),
+            ("bmHeight", wintypes.LONG),
+            ("bmWidthBytes", wintypes.LONG),
+            ("bmPlanes", wintypes.WORD),
+            ("bmBitsPixel", wintypes.WORD),
+            ("bmBits", ctypes.c_void_p),
+        ]
+
+    class _BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wintypes.DWORD),
+            ("biWidth", wintypes.LONG),
+            ("biHeight", wintypes.LONG),
+            ("biPlanes", wintypes.WORD),
+            ("biBitCount", wintypes.WORD),
+            ("biCompression", wintypes.DWORD),
+            ("biSizeImage", wintypes.DWORD),
+            ("biXPelsPerMeter", wintypes.LONG),
+            ("biYPelsPerMeter", wintypes.LONG),
+            ("biClrUsed", wintypes.DWORD),
+            ("biClrImportant", wintypes.DWORD),
+        ]
+
+    _SHGFI_ICON = 0x100
+    _SHGFI_SMALLICON = 0x1
+    _SHGFI_USEFILEATTRIBUTES = 0x10
+    _FILE_ATTRIBUTE_NORMAL = 0x80
+
+    # ★ 句柄参数一律 c_void_p：64 位下 ctypes 默认 c_int 会截断句柄
+    _shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+
+    _SHGetFileInfoW = _shell32.SHGetFileInfoW
+    _SHGetFileInfoW.restype = ctypes.c_void_p
+    _SHGetFileInfoW.argtypes = [
+        ctypes.c_wchar_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_SHFILEINFOW),
+        ctypes.c_uint,
+        ctypes.c_uint,
+    ]
+
+    _DestroyIcon = _user32.DestroyIcon
+    _DestroyIcon.restype = wintypes.BOOL
+    _DestroyIcon.argtypes = [ctypes.c_void_p]
+
+    _GetIconInfo = _user32.GetIconInfo
+    _GetIconInfo.restype = wintypes.BOOL
+    _GetIconInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ICONINFO)]
+
+    _GetDC = _user32.GetDC
+    _GetDC.restype = ctypes.c_void_p
+    _GetDC.argtypes = [ctypes.c_void_p]
+
+    _ReleaseDC = _user32.ReleaseDC
+    _ReleaseDC.restype = ctypes.c_int
+    _ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    _GetObjectW = _gdi32.GetObjectW
+    _GetObjectW.restype = ctypes.c_int
+    _GetObjectW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+
+    _GetDIBits = _gdi32.GetDIBits
+    _GetDIBits.restype = ctypes.c_int
+    _GetDIBits.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.c_void_p,
+        ctypes.POINTER(_BITMAPINFOHEADER),
+        wintypes.UINT,
+    ]
+
+    _DeleteObject = _gdi32.DeleteObject
+    _DeleteObject.restype = wintypes.BOOL
+    _DeleteObject.argtypes = [ctypes.c_void_p]
+
+    def _hicon_to_qimage(hicon) -> Optional[QImage]:
+        """HICON → QImage（工作线程可安全调用；QPixmap 不行留给主线程）"""
+        info = _ICONINFO()
+        if not _GetIconInfo(hicon, ctypes.byref(info)):
+            return None
+        hbm_color = info.hbmColor
+        hbm_mask = info.hbmMask
+        if not hbm_color:
+            if hbm_mask:
+                _DeleteObject(hbm_mask)
+            return None
+        try:
+            bm = _BITMAP()
+            if not _GetObjectW(hbm_color, ctypes.sizeof(_BITMAP), ctypes.byref(bm)):
+                return None
+            width, height = int(bm.bmWidth), int(bm.bmHeight)
+            if width <= 0 or height <= 0:
+                return None
+
+            header = _BITMAPINFOHEADER()
+            header.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+            header.biWidth = width
+            header.biHeight = -height  # 负值 = top-down，与 QImage 行序一致
+            header.biPlanes = 1
+            header.biBitCount = 32
+            header.biCompression = 0  # BI_RGB
+
+            buf = ctypes.create_string_buffer(width * height * 4)
+            hdc = _GetDC(None)
+            if not hdc:
+                return None
+            try:
+                if _GetDIBits(hdc, hbm_color, 0, height, buf, ctypes.byref(header), 0) == 0:
+                    return None
+            finally:
+                _ReleaseDC(None, hdc)
+
+            # ARGB32 在小端机器上的内存布局即 GetDIBits 输出的 BGRA
+            return QImage(buf, width, height, QImage.Format_ARGB32).copy()
+        finally:
+            _DeleteObject(hbm_color)
+            if hbm_mask:
+                _DeleteObject(hbm_mask)
+
+    def _query_shell_icon(path: str, fast: bool) -> Optional[QImage]:
+        """工作线程查询文件图标；失败返回 None
+
+        fast=True 走 SHGFI_USEFILEATTRIBUTES（按扩展名查注册表，不触
+        文件关联 Shell 扩展）；False 走真实路径（可能触发 WPS 一类
+        扩展，最坏数秒）。
+        """
+        sfi = _SHFILEINFOW()
+        flags = _SHGFI_ICON | _SHGFI_SMALLICON
+        if fast:
+            flags |= _SHGFI_USEFILEATTRIBUTES
+            lookup = "x" + os.path.splitext(path)[1]
+            attrs = _FILE_ATTRIBUTE_NORMAL
+        else:
+            lookup = path
+            attrs = 0
+        ret = _SHGetFileInfoW(lookup, attrs, ctypes.byref(sfi), ctypes.sizeof(sfi), flags)
+        if not ret or not sfi.hIcon:
+            return None
+        try:
+            return _hicon_to_qimage(sfi.hIcon)
+        finally:
+            _DestroyIcon(sfi.hIcon)
+
+else:
+
+    def _query_shell_icon(path: str, fast: bool) -> Optional[QImage]:  # pragma: no cover
+        return None
+
+
+class _IconWorkerSignals(QObject):
+    """工作线程 → 主线程的结果回传（PyQt 依 receiver 亲和走 queued）"""
+
+    loaded = pyqtSignal(str, object, float, bool)  # path, QImage|None, 耗时秒, fast
+
+
+class _IconTask(QRunnable):
+    """单个文件的图标查询任务（线程池执行）
+
+    ★ 实际模式在 run() 时动态决定：提交时刻熔断尚未打开时入队的任务，
+      在真正执行时若熔断已开则改走快速模式 —— 否则大目录（数百文件）
+      的前几个任务触发熔断后，剩下几百个排队任务仍挨个真实查询。
+      跨线程读 _BREAKER_OPEN_UNTIL（float）在 CPython 下原子安全。
+    """
+
+    def __init__(self, path: str, fast: bool, signals: _IconWorkerSignals):
+        super().__init__()
+        self._path = path
+        self._fast = fast
+        self._signals = signals  # 持有引用：任务在跑期间信号对象不被 GC
+
+    def run(self):
+        t0 = time.monotonic()
+        fast = self._fast or time.monotonic() < _BREAKER_OPEN_UNTIL
+        image = None
+        try:
+            image = _query_shell_icon(self._path, fast)
+        except Exception:
+            logger.debug(f"[FileTree] 后台图标查询异常: {self._path}", exc_info=True)
+        self._signals.loaded.emit(self._path, image, time.monotonic() - t0, fast)
+
+
+class _IconLoader(QObject):
+    """图标后台加载器（模块单例，主线程亲和）
+
+    ★ 信号连接必须 bound method：receiver=loader（主线程亲和），结果槽
+      才会被 PyQt queued 回主线程执行。
+    ★ 徽报批量刷新：逐个路径回发会触发逐次全树查找（_find_node 递归），
+      大项目下把主线程又拖慢；改为累积 + 防抖合并，到期只发一次。
+    ★ 看门狗：SHGetFileInfo 若彻底挂死（后台线程无超时保护），任务永不
+      回到 _on_task_done；主线程定时器兜底把超时任务摘除并按「慢」计，
+      保证熔断在 Shell 病态时仍能推进。
+    """
+
+    icons_ready = pyqtSignal()  # 一批图标已入缓存（防抖合并后发一次）
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(2)  # 图标查询并发上限，防 Shell 拖慢整机
+        self._signals = _IconWorkerSignals(self)
+        self._signals.loaded.connect(self._on_task_done)
+        self._pending: Dict[str, float] = {}  # path -> 提交时刻（主线程独占）
+        self._stale_paths: Set[str] = set()  # 看门狗摘除过的路径（挡重复提交）
+        self._dirty = False  # 有图标变更待广播
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(120)
+        self._flush_timer.timeout.connect(self._flush_ready)
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(5000)
+        self._watchdog.timeout.connect(self._check_stale)
+        self._watchdog.start()
+
+    def can_request(self, path: str) -> bool:
+        return path not in self._pending and path not in self._stale_paths
+
+    def submit(self, path: str, fast: bool) -> None:
+        self._pending[path] = time.monotonic()
+        self._pool.start(_IconTask(path, fast, self._signals))
+
+    def _on_task_done(self, path: str, image, elapsed: float, fast: bool):
+        """任务完成（主线程槽）：计数熔断 + 转 QIcon 入缓存 + 排队广播"""
+        self._pending.pop(path, None)
+        if not fast:
+            if elapsed >= _SHELL_SLOW_SEC:
+                _note_shell_slow(elapsed)
+            else:
+                _reset_slow_streak()
+
+        icon = None
+        if image is not None and not image.isNull():
+            icon = QIcon(QPixmap.fromImage(image))
+        if icon is None or icon.isNull():
+            icon = _placeholder_file_icon()
+        _store_icon(path, icon)
+        self._dirty = True
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_ready(self):
+        if self._dirty:
+            self._dirty = False
+            self.icons_ready.emit()
+
+    def _check_stale(self):
+        """看门狗：摘除长时间未回的任务（后台线程可能已被 Shell 挂死）"""
+        now = time.monotonic()
+        stale = [p for p, t in self._pending.items() if now - t >= _ICON_TASK_STALE_SEC]
+        for p in stale:
+            self._pending.pop(p, None)
+            self._stale_paths.add(p)
+            _note_shell_slow(_ICON_TASK_STALE_SEC)
+        if stale:
+            logger.warning(f"[FileTree] 图标查询任务超时未回，摘除 {len(stale)} 个: {stale[:3]}")
+
+    def reset_breaker(self):
+        """熔断冷却到期时清空超时挡板（放行真实探测）"""
+        self._stale_paths.clear()
+
+    def shutdown(self):
+        """热重载退役：停看门狗 + 清未开始任务
+
+        ★ 不销毁 QThreadPool、不断开 loaded 信号：池子析构会同步等待在跑
+          任务结束（实测主线程冻结 >120s）；在途任务应照常落地结果，旧
+          模块若仍有存活 widget 还能继续用。
+        """
+        self._watchdog.stop()
+        self._pool.clear()
+
+
+def _get_icon_loader() -> _IconLoader:
+    """获取图标加载器（模块单例）
+
+    ★ 热重载安全：插件重载会重建本模块，旧模块失去引用后其 loader 会被
+      GC；此时若线程池任务仍在跑，``QThreadPool`` 析构会同步等待线程结束，
+      把主线程冻死（实测 >120s 无响应）。故新建实例前先把旧实例「退役」：
+      停定时器 / 清未开始任务 / 断信号，并保留强引用直到池子空闲 —— 强引用
+      挂在 QApplication 上，模块重建也丢不掉。
+    """
+    global _ICON_LOADER
+    if _ICON_LOADER is not None:
+        return _ICON_LOADER
+
+    app = QApplication.instance()
+    if app is not None:
+        old = getattr(app, "_drifox_file_tree_icon_loader", None)
+        if old is not None:
+            _retire_loader(app, old)
+
+    _ICON_LOADER = _IconLoader()
+    if app is not None:
+        try:
+            app._drifox_file_tree_icon_loader = _ICON_LOADER
+        except AttributeError:
+            pass
+    return _ICON_LOADER
+
+
+def _retire_loader(app, old) -> None:
+    """退役旧 loader：停机 + 保活到池子空闲（立即析构池子会阻塞主线程）"""
+    try:
+        old.shutdown()
+    except Exception:
+        logger.debug("[FileTree] 退役旧图标加载器失败", exc_info=True)
+    lst = getattr(app, "_drifox_file_tree_retired_loaders", None)
+    if lst is None:
+        try:
+            lst = []
+            app._drifox_file_tree_retired_loaders = lst
+        except AttributeError:
+            return
+    lst.append(old)
+    QTimer.singleShot(15000, lambda: _sweep_retired_loaders(app))
+
+
+def _sweep_retired_loaders(app) -> None:
+    """清掉池子已空闲的退役实例（此刻析构不会阻塞主线程）
+
+    仍有活跃任务的继续保活并重排下一轮；任务被 Shell 彻底挂死时实例
+    永久保活 —— 宁漏内存不冻 UI。
+    """
+    lst = getattr(app, "_drifox_file_tree_retired_loaders", None)
+    if not isinstance(lst, list):
+        return
+    busy = [o for o in lst if _pool_is_busy(o)]
+    lst[:] = busy
+    if busy:
+        QTimer.singleShot(15000, lambda: _sweep_retired_loaders(app))
+
+
+def _pool_is_busy(loader) -> bool:
+    pool = getattr(loader, "_pool", None)
+    if pool is None:
+        return False
+    try:
+        return pool.activeThreadCount() > 0
+    except RuntimeError:
+        return False  # 底层 C++ 对象已销毁
+
+
+def _note_shell_slow(elapsed: float) -> None:
+    """记录一次慢查询；连续超阈值则打开熔断（主线程调用）"""
+    global _BREAKER_SLOW_STREAK, _BREAKER_OPEN_UNTIL
+    _BREAKER_SLOW_STREAK += 1
+    if _BREAKER_SLOW_STREAK >= _BREAKER_THRESHOLD:
+        _BREAKER_SLOW_STREAK = 0
+        _BREAKER_OPEN_UNTIL = time.monotonic() + _BREAKER_COOLDOWN_S
+        _get_icon_loader().reset_breaker()
+        logger.warning(
+            f"[FileTree] Shell 图标查询连续 {_BREAKER_THRESHOLD} 次超时"
+            f"（本次 {elapsed:.1f}s），降级为按扩展名快速模式 {_BREAKER_COOLDOWN_S:.0f}s"
+        )
+
+
+def _reset_slow_streak() -> None:
+    global _BREAKER_SLOW_STREAK
+    _BREAKER_SLOW_STREAK = 0
+
+
+def _placeholder_file_icon() -> QIcon:
+    """通用文件占位图标（后台结果到达前的临时显示）"""
+    global _PLACEHOLDER_FILE_ICON
+    if _PLACEHOLDER_FILE_ICON is None:
+        _PLACEHOLDER_FILE_ICON = QApplication.style().standardIcon(QStyle.SP_FileIcon)
+    return _PLACEHOLDER_FILE_ICON
+
+
+def _store_icon(path: str, icon: QIcon) -> None:
+    if len(_ICON_CACHE) >= _ICON_CACHE_MAX:
+        _ICON_CACHE.clear()  # 简单上限保护：全清重冷一次，避免无界增长
+    _ICON_CACHE[path] = icon
+
+
+def _query_icon_sync(file_path: str) -> QIcon:
+    """非 Windows 回退：QFileIconProvider 同步查询（无 Shell 超时问题）"""
+    global _FILE_ICON_PROVIDER
+    if _FILE_ICON_PROVIDER is None:
+        _FILE_ICON_PROVIDER = QFileIconProvider()
+    icon = _FILE_ICON_PROVIDER.icon(QFileInfo(file_path))
+    if icon and not icon.isNull():
+        return icon
+    return QApplication.style().standardIcon(QStyle.SP_FileIcon)
+
 
 def _get_file_icon(file_path: str) -> QIcon:
+    """主线程取文件图标：命中缓存即返，未命中返占位并排后台任务
+
+    ★ 本函数被 data(DecorationRole) 高频调用（重绘 / hover / 滚动 /
+      选中都会来），禁止任何同步 Shell / 磁盘查询 —— 那是主线程整窗
+      冻结 45s 的直接根因。
+    """
     cached = _ICON_CACHE.get(file_path)
     if cached is not None:
         return cached
-    global _FILE_ICON_PROVIDER
-    if _FILE_ICON_PROVIDER is None:
-        _FILE_ICON_PROVIDER = QFileIconProvider()
-    info = QFileInfo(file_path)
-    icon = _FILE_ICON_PROVIDER.icon(info)
-    if icon and not icon.isNull():
-        pass
-    else:
-        icon = QApplication.style().standardIcon(QStyle.SP_FileIcon)
-    if len(_ICON_CACHE) >= _ICON_CACHE_MAX:
-        _ICON_CACHE.clear()  # 简单上限保护：全清重冷一次，避免无界增长
-    _ICON_CACHE[file_path] = icon
-    return icon
+    if not _IS_WIN:
+        icon = _query_icon_sync(file_path)
+        _store_icon(file_path, icon)
+        return icon
+    loader = _get_icon_loader()
+    if loader.can_request(file_path):
+        fast = time.monotonic() < _BREAKER_OPEN_UNTIL
+        loader.submit(file_path, fast)
+    return _placeholder_file_icon()
 
 
 def _get_dir_icon() -> QIcon:
-    global _FILE_ICON_PROVIDER
+    """目录图标（首次查询后缓存；不针对具体文件，无 Shell 卡顿风险）"""
+    global _DIR_ICON, _FILE_ICON_PROVIDER
+    if _DIR_ICON is not None:
+        return _DIR_ICON
     if _FILE_ICON_PROVIDER is None:
         _FILE_ICON_PROVIDER = QFileIconProvider()
     icon = _FILE_ICON_PROVIDER.icon(QFileIconProvider.Folder)
-    if icon and not icon.isNull():
-        return icon
-    return QApplication.style().standardIcon(QStyle.SP_DirIcon)
+    if not icon or icon.isNull():
+        icon = QApplication.style().standardIcon(QStyle.SP_DirIcon)
+    _DIR_ICON = icon
+    return icon
 
 
 # ══════════════════════════════════════════════════════════
@@ -120,6 +572,8 @@ class FileTreeModel(QAbstractItemModel):
         self._project_root: str = ""
         self._loading: set = set()  # 正在扫描/排队中的目录（normpath 归一）
         self._failed: set = set()  # 扫描失败过的目录（熔断：不再自动重试）
+        # 后台图标就绪 → 批量刷新装饰列（bound method：receiver=本模型，主线程执行）
+        _get_icon_loader().icons_ready.connect(self._on_icons_ready)
 
     # ── 公开 API（cards.py 调用） ──
 
@@ -357,6 +811,17 @@ class FileTreeModel(QAbstractItemModel):
         if role == self.COL_IS_DIR:
             return node.is_dir
         return None
+
+    def _on_icons_ready(self):
+        """一批后台图标入缓存（主线程槽，已防抖合并）
+
+        ★ 发全量 dataChanged（无效索引对）而非逐行：data() 现在为纯缓存
+          查表（微秒级），全量广播的成本落在视口可见行；逐行定位反而
+          要做全树递归查找，大项目下更慢。
+        """
+        if not self._root_entries:
+            return
+        self.dataChanged.emit(QModelIndex(), QModelIndex(), [Qt.DecorationRole])
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():
