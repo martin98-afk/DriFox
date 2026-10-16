@@ -280,21 +280,161 @@ def test_finish_streaming_clears_acc_history_path(qapp):
 
 
 def test_close_event_pending_skip_structure():
-    """源码结构断言：pending 读取在 flush 调用之前 + 循环含跳过分支。
+    """源码结构断言：pending 取自 flush 返回值，且取值在释放循环之前。
 
-    顺序不变量是本修复的核心：flush_async 主线程段第一行即清
-    _pending_save_session_id，循环处再读恒为 None → 跳过失效。
+    不变量是本修复的核心：_auto_save_current_session 内部经 _schedule_save
+    自设新 pending 后 flush_async 立即消费——「提前读 _pending_save_session_id」
+    在常态关窗（save timer 已消费旧 pending）恒为 None → 跳过失效。
+    返回值方案读的是 flush 前一行的 pending，两种关窗时序都覆盖。
     """
     src = inspect.getsource(OpenAIChatToolWindow.closeEvent)
-    read_pos = src.find("_pending_flush = getattr(")
-    flush_pos = src.find('_auto_save_current_session(flush_mode="async")')
-    assert read_pos != -1, "closeEvent 缺少 _pending_flush 捕获"
-    assert flush_pos != -1, "closeEvent 缺少 async flush 调用"
-    assert read_pos < flush_pos, "pending 读取必须先于 flush 调用（flush 会清 pending id）"
+    read_pos = src.find("_pending_flush = self._auto_save_current_session(")
+    assert read_pos != -1, "closeEvent 必须用 flush 返回值取 pending（勿提前读字段）"
+    assert (
+        src.find('getattr(getattr(self, "history_manager", None), "_pending_save_session_id", None)') == -1
+    ), "提前读 pending 字段的旧写法必须移除（常态关窗恒 None，TOCTOU 缺口）"
+    loop_pos = src.find("for _s in self.session_manager.get_all_sessions():")
+    assert loop_pos != -1 and read_pos < loop_pos, "取值必须在释放循环之前"
     # 跳过分支存在
     assert "if _pending_flush and _sid == _pending_flush:" in src
     # release 仍走 release_messages_only=True
     assert "remove_session(_sid, release_messages_only=True)" in src
+
+
+def test_auto_save_returns_flushed_id_for_async():
+    """async 模式返回值 == flush 前一刻的 pending（供关窗循环跳过）。"""
+    captured = {}
+
+    class _FakeHM:
+        def __init__(self):
+            self._pending_save_session_id = None
+            self.flushed = []
+
+        def update_session(self, idx, messages, **kwargs):
+            # 模拟 update_session → _schedule_save：保存路径内部登记新 pending
+            self._pending_save_session_id = "sess-XYZ"
+
+        def flush_async(self):
+            # 模拟 flush_async 主线程段：读走并清空 pending
+            captured["consumed"] = self._pending_save_session_id
+            self.flushed.append(self._pending_save_session_id)
+            self._pending_save_session_id = None
+
+        def flush(self):
+            pass
+
+    class _FakeSM:
+        def __init__(self, session):
+            self._session = session
+
+        def get_current_session(self):
+            return self._session
+
+    class _FakeWin:
+        """最小窗口桩：只覆盖 _auto_save_current_session 的执行路径。"""
+
+        def __init__(self, hm):
+            self._session_obj = types.SimpleNamespace(
+                session_id="sess-XYZ",
+                messages=[{"role": "user", "content": "hi"}],
+                is_temp=False,
+                system_prompt="",
+                compaction_state={},
+                compaction_cache={},
+            )
+            self.session_manager = _FakeSM(self._session_obj)
+            self.history_manager = hm
+            self._session_dirty = True
+            self._team_run_id = ""
+            self._current_session_id = "sess-XYZ"
+            self._current_project = "默认项目"
+            self._last_known_worktree = ""
+            self._current_provider_name = ""
+            self._valid_configs = {}
+
+    hm = _FakeHM()
+    win = _FakeWin(hm)
+    win._get_current_worktree_path = lambda: ""
+    win._api_usage_kwargs = lambda s: {}
+    win._get_team_members_snapshot_json = lambda: "[]"
+    win._resolve_session_project_fallback = lambda *a, **k: ""
+    win._notify_history_data_changed = lambda: None
+    hm.find_index_by_session_id = lambda sid: 0
+    hm.get_current_title = lambda idx: "t"
+
+    ret = OpenAIChatToolWindow._auto_save_current_session(win, flush_mode="async")
+    assert ret == "sess-XYZ", f"返回值必须是交给后台 flush 的 session_id: {ret!r}"
+    assert captured["consumed"] == "sess-XYZ", "flush_async 消费的 pending 必须与返回值一致"
+
+
+def test_auto_save_stale_read_gap_regression():
+    """缺口回归：方法内部新设 pending 后，「提前读字段」的旧写法拿不到值。
+
+    锁死修订动机：常态关窗时 save timer 已消费旧 pending（调用前读=None），
+    而 _auto_save_current_session 内部 update_session 又登记了新 pending 并
+    交给 flush_async——旧写法跳过失效，返回值方案命中。
+    """
+
+    class _FakeHM:
+        def __init__(self):
+            self._pending_save_session_id = None
+            self.flushed = []
+
+        def update_session(self, idx, messages, **kwargs):
+            self._pending_save_session_id = "sess-NEW"
+
+        def flush_async(self):
+            self.flushed.append(self._pending_save_session_id)
+            self._pending_save_session_id = None
+
+        def flush(self):
+            pass
+
+    class _FakeSM:
+        def __init__(self, session):
+            self._session = session
+
+        def get_current_session(self):
+            return self._session
+
+    class _FakeWin:
+        def __init__(self, hm):
+            self._session_obj = types.SimpleNamespace(
+                session_id="sess-NEW",
+                messages=[{"role": "user", "content": "hi"}],
+                is_temp=False,
+                system_prompt="",
+                compaction_state={},
+                compaction_cache={},
+            )
+            self.session_manager = _FakeSM(self._session_obj)
+            self.history_manager = hm
+            self._session_dirty = True
+            self._team_run_id = ""
+            self._current_session_id = "sess-NEW"
+            self._current_project = "默认项目"
+            self._last_known_worktree = ""
+            self._current_provider_name = ""
+            self._valid_configs = {}
+
+    hm = _FakeHM()
+    win = _FakeWin(hm)
+    win._get_current_worktree_path = lambda: ""
+    win._api_usage_kwargs = lambda s: {}
+    win._get_team_members_snapshot_json = lambda: "[]"
+    win._resolve_session_project_fallback = lambda *a, **k: ""
+    win._notify_history_data_changed = lambda: None
+    hm.find_index_by_session_id = lambda sid: 0
+    hm.get_current_title = lambda idx: "t"
+
+    # 旧写法时序：调用前读字段（save timer 已消费 → None）
+    stale_read = hm._pending_save_session_id
+    ret = OpenAIChatToolWindow._auto_save_current_session(win, flush_mode="async")
+    assert stale_read is None, "常态关窗调用前读必为 None（缺口前提）"
+    assert hm.flushed == ["sess-NEW"], "内部新设的 pending 被 flush_async 消费"
+    assert ret == "sess-NEW" and ret != stale_read, (
+        "返回值必须命中新 pending（旧写法拿不到 → 本用例防倒退）"
+    )
 
 
 def test_pending_skip_semantics(qapp):
