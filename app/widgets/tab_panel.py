@@ -1153,6 +1153,7 @@ class UIPluginRow(QFrame):
     clicked = pyqtSignal()
     positionRequested = pyqtSignal(str, str)  # (card_id, container) 右键选择插入方位
     popoutRequested = pyqtSignal(str)  # (key) 右键「弹出为独立窗口」
+    pinToggled = pyqtSignal(str)  # (plugin_name) 右键「固定到常驻区/取消固定」切换
 
     def __init__(
         self,
@@ -1170,6 +1171,7 @@ class UIPluginRow(QFrame):
         self._card_id = card_id  # 存储卡片/窗口 ID，右键菜单定位用
         self._enable_position_menu = enable_position_menu  # 独立 sidebar 项无卡片方位概念，禁用右键菜单
         self._kind = kind  # "sidebar" | "card" | "window"（决定右键菜单构成）
+        self._pin_action = None  # 菜单固定项 QAction（构建于 _build_context_menu，exec_ 返回值分发用）
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
         # 图标 tooltip：收起态只有图标时悬浮可见插件名（与 TabItem 一致）
@@ -1187,11 +1189,10 @@ class UIPluginRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("uiPluginRow")
         self.set_icon(icon)
-        # 右键菜单：card → 插入方位 + 弹出独立窗口；window → 弹出独立窗口；
-        # sidebar 无右键（无内容 widget 可弹）
-        if enable_position_menu or kind == "window":
-            self.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.customContextMenuRequested.connect(self._show_context_menu)
+        # 右键菜单：card → 插入方位 + 弹出 + 固定；window → 弹出 + 固定；
+        # sidebar → 仅固定（无内容 widget 可弹）
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         # 初始应用字体和颜色，避免在 refresh_style() 被调用前显示默认 Qt 字体
         from app.utils.utils import get_unified_font
 
@@ -1305,14 +1306,28 @@ class UIPluginRow(QFrame):
                     lambda checked=False, c=container: self.positionRequested.emit(self._card_id, c)
                 )
             menu.addSeparator()
-        menu.addAction(_make_popout_icon(), "弹出").triggered.connect(
-            lambda checked=False: self.popoutRequested.emit(self._card_id)
-        )
+        if self._kind != "sidebar":
+            menu.addAction(_make_popout_icon(), "弹出").triggered.connect(
+                lambda checked=False: self.popoutRequested.emit(self._card_id)
+            )
+            menu.addSeparator()
+        # 固定到常驻区（用户级，写 app_state；触发经 exec_ 返回值路径，见 _activate_menu_action）
+        self._pin_action = None
+        if self._plugin_name:
+            is_pinned = self._plugin_name in _get_pinned_plugins()
+            self._pin_action = menu.addAction("取消固定" if is_pinned else "固定到常驻区")
         return menu
 
     def _show_context_menu(self, pos):
-        """显示右键菜单（仅内存生效，不持久化）"""
-        self._build_context_menu().exec_(self.mapToGlobal(pos))
+        """显示右键菜单（方位/弹出仅内存生效；固定项写 app_state）"""
+        menu = self._build_context_menu()
+        self._activate_menu_action(menu.exec_(self.mapToGlobal(pos)))
+
+    def _activate_menu_action(self, action):
+        """菜单关闭后的动作分发（走 exec_ 返回值，不在 triggered 同步栈内发信号：
+        固定项的 handler 会重建行，触发源行与菜单同 parent 链，需等菜单关闭）"""
+        if action is not None and action is self._pin_action:
+            self.pinToggled.emit(self._plugin_name)
 
 
 # ── 侧边栏插件固定（pin）──
@@ -1946,6 +1961,7 @@ class TabPanel(QWidget):
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
                 row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
+            row.pinToggled.connect(self._on_ui_plugin_pin_toggled)
             self._system_plugin_layout.addWidget(row)
             self._system_plugin_buttons.append(row)
         has_system = bool(system_infos)
@@ -1983,6 +1999,7 @@ class TabPanel(QWidget):
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
                 row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
+            row.pinToggled.connect(self._on_ui_plugin_pin_toggled)
             self._custom_plugin_layout.addWidget(row)
             # 显式 show：清除 Qt 的 hidden 标志。折叠/展开态刷新时 scroll 被强制
             # 隐藏重建，未 show 的新行会被 QWidgetItem 视为空（sizeHint 贡献 0），
@@ -2290,6 +2307,18 @@ class TabPanel(QWidget):
                 registry.open_window(key)
         except Exception as e:
             logger.error(f"[TabPanel] 插件弹窗 {key} 弹出失败：{e}")
+
+    def _on_ui_plugin_pin_toggled(self, plugin_name: str):
+        """侧边栏插件行右键「固定到常驻区/取消固定」：写 app_state 后整表刷新"""
+        if not plugin_name:
+            return
+        pinned = set(_get_pinned_plugins())
+        if plugin_name in pinned:
+            pinned.discard(plugin_name)
+        else:
+            pinned.add(plugin_name)
+        _state_set(PINNED_PLUGINS_KEY, sorted(pinned))
+        self.refresh_ui_plugins()
 
     def _on_ui_plugin_position_requested(self, card_id: str, container: str):
         """按指定方位移动 UI 插件卡片（仅内存生效，不持久化）"""

@@ -573,3 +573,97 @@ class TestPluginEntryGroupResolve:
         # 固定项置顶：排在系统条目之前（标题字母序靠后也不影响）
         assert [row._card_id for row in panel._system_plugin_buttons] == ["pinned_card", "sys_card"]
         assert panel._custom_plugin_buttons == []
+
+
+class TestUIPluginRowPinMenu:
+    """UIPluginRow 右键「固定到常驻区」菜单"""
+
+    def test_card_menu_pin_action(self, panel, isolated_app_state):
+        """card 菜单：方位×4 + 分隔 + 弹出 + 分隔 + 固定；动作经 exec_ 返回值路径触发"""
+        row = UIPluginRow("测试插件", None, panel, plugin_name="test_plugin", card_id="card_x")
+        received = []
+        row.pinToggled.connect(lambda name: received.append(name))
+
+        actions = row._build_context_menu().actions()
+        assert [a.text() for a in actions if not a.isSeparator()] == [
+            "下",
+            "左",
+            "右",
+            "替换",
+            "弹出",
+            "固定到常驻区",
+        ]
+        assert row._pin_action is not None
+        # 模拟菜单关闭后的分发（_show_context_menu 内部同路径）
+        row._activate_menu_action(row._pin_action)
+        assert received == ["test_plugin"]
+
+    def test_card_menu_pin_label_when_pinned(self, panel, isolated_app_state):
+        """已固定插件：菜单项文案切换为「取消固定」"""
+        isolated_app_state.set("pinned_plugins", ["test_plugin"])
+        row = UIPluginRow("测试插件", None, panel, plugin_name="test_plugin", card_id="card_x")
+        row._build_context_menu()
+        assert row._pin_action.text() == "取消固定"
+
+    def test_window_menu_pin_action(self, panel, isolated_app_state):
+        """window 菜单：弹出 + 分隔 + 固定（无方位段）"""
+        row = UIPluginRow(
+            "窗口",
+            None,
+            panel,
+            plugin_name="win_plugin",
+            card_id="win_x",
+            enable_position_menu=False,
+            kind="window",
+        )
+        labels = [a.text() for a in row._build_context_menu().actions() if not a.isSeparator()]
+        assert labels == ["弹出", "固定到常驻区"]
+
+    def test_sidebar_menu_pin_only(self, panel, isolated_app_state):
+        """sidebar 条目放开右键：菜单仅「固定到常驻区」（无方位/弹出）"""
+        row = UIPluginRow(
+            "侧栏项",
+            None,
+            panel,
+            plugin_name="side_plugin",
+            card_id="item_x",
+            enable_position_menu=False,
+            kind="sidebar",
+        )
+        assert row.contextMenuPolicy() == Qt.CustomContextMenu
+        labels = [a.text() for a in row._build_context_menu().actions()]
+        assert labels == ["固定到常驻区"]
+
+
+class TestPluginPinFlow:
+    """固定端到端：行信号（已连接）→ app_state 落盘 → 刷新分区 → 取消固定回落"""
+
+    def test_pin_signal_flow(self, panel, isolated_app_state):
+        cards = {"custom_card": MagicMock(title="用户卡", plugin_name="custom_plugin", metadata={})}
+        custom_plugin = MagicMock(is_system=False, overridden_by="")
+        fake_pm = MagicMock()
+        fake_pm.get_plugin.return_value = custom_plugin
+        fake_registry = MagicMock()
+        fake_registry.get_floating_cards.return_value = cards
+        fake_registry.get_sidebar_items.return_value = []
+        fake_registry.get_window_infos.return_value = []
+
+        with (
+            patch(
+                "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
+            ),
+            patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+        ):
+            panel.refresh_ui_plugins()
+            assert [r._card_id for r in panel._custom_plugin_buttons] == ["custom_card"]
+
+            # 固定：行信号（已连接）→ 写 app_state → 刷新后条目进常驻区
+            panel._custom_plugin_buttons[0].pinToggled.emit("custom_plugin")
+            assert isolated_app_state.get("pinned_plugins") == ["custom_plugin"]
+            assert [r._card_id for r in panel._system_plugin_buttons] == ["custom_card"]
+            assert panel._custom_plugin_buttons == []
+
+            # 取消固定：行已重建，从新行再发
+            panel._system_plugin_buttons[0].pinToggled.emit("custom_plugin")
+            assert isolated_app_state.get("pinned_plugins") == []
+            assert [r._card_id for r in panel._custom_plugin_buttons] == ["custom_card"]
