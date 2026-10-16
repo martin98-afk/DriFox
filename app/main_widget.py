@@ -12891,8 +12891,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
             p = psutil.Process(pid)
             cmd = " ".join(p.cmdline() or [])
-            if "QtWebEngineProcess.exe" not in cmd or "--type=renderer" not in cmd:
-                return False  # PID 复用误杀防护
+            # 进程名：Windows QtWebEngineProcess.exe / mac+linux QtWebEngineProcess。
+            # ⚠️ 用 p.name() 而非 cmd 子串：cmd 可能因路径含同名字样误判，且
+            # name() 平台无关。--type=renderer 是硬判据，gpu-process / utility /
+            # crashpad 同为 QtWebEngineProcess，杀它们会让所有卡片同时黑屏。
+            proc_name = (p.name() or "").lower()
+            if not proc_name.startswith("qtwebengineprocess") or "--type=renderer" not in cmd:
+                logger.debug(f"[B4-strong] kill 拒绝非 renderer 子进程: pid={pid} name={proc_name}")
+                return False
             p.terminate()
             try:
                 p.wait(timeout=1.0)
