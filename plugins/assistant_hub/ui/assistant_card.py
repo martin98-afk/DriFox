@@ -59,6 +59,7 @@ from .sections import (
     _btn_style,
     _host_window,
 )
+from .snapshot_dialog import SnapshotDialog
 
 
 def _open_dialog(dlg) -> int:
@@ -282,6 +283,9 @@ class AssistantCardWidget(QWidget):
         self._memory.viewDaily.connect(self._on_view_daily)
         self._memory.clearAll.connect(self._on_clear_all)
         self._memory.limitsChanged.connect(self._on_memory_limits)
+        self._memory.restoreRequested.connect(self._on_restore_memory)
+        self._memory.migrateRequested.connect(self._on_migrate_memory)
+        self._memory.dismissDriftRequested.connect(self._on_dismiss_drift)
         self._inner_v.addWidget(self._memory)
 
         self._experience = ExperienceSection()
@@ -440,7 +444,7 @@ class AssistantCardWidget(QWidget):
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_limits(a.global_memory_max_chars, a.project_memory_max_chars)
             self._pinned.reload_pins(mgr.read_pinned(aid_capture))
-            self._memory.set_status(self._memory_status(aid_capture))
+            self._refresh_memory(aid_capture)
             self._experience.set_enabled(a.experience_enabled)
             self._experience.reload_categories(mgr.experience_list(aid_capture))
             self._tool_access.set_mode(a.tool_access)
@@ -459,6 +463,46 @@ class AssistantCardWidget(QWidget):
             return f"全局 {g} 字 · 项目 {p} 字 · 日志 {days} 天"
         except Exception:
             return "暂无记忆"
+
+    def _refresh_memory(self, aid: str) -> None:
+        """记忆状态 + 健康行统一刷新（状态字数 + 健康/漂移）。"""
+        self._memory.set_status(self._memory_status(aid))
+        try:
+            self._memory.set_health(self._mgr.memory_health(aid, self._mgr._current_workdir()))
+        except Exception:
+            self._memory.set_health(None)
+
+    def _on_restore_memory(self) -> None:
+        if not self._active_aid:
+            return
+        dlg = SnapshotDialog(
+            self._mgr,
+            self._active_aid,
+            self._mgr._current_workdir(),
+            parent=_host_window() or self.window(),
+        )
+        dlg.restored.connect(lambda: self._refresh_memory(self._active_aid))
+        _open_dialog(dlg)
+
+    def _on_migrate_memory(self, old_wd: str) -> None:
+        if not self._active_aid or not old_wd:
+            return
+        wd = self._mgr._current_workdir()
+        if not wd:
+            self._notify_error("当前没有设置工作目录")
+            return
+        r = self._mgr.migrate_project_memory(self._active_aid, old_wd, wd)
+        if r.get("ok"):
+            self._refresh_memory(self._active_aid)
+            self._notify(f"已迁移 {len(r.get('moved') or [])} 个记忆文件")
+        else:
+            self._notify_error(f"迁移失败: {r.get('error')}")
+
+    def _on_dismiss_drift(self, old_wd: str) -> None:
+        if not self._active_aid or not old_wd:
+            return
+        self._mgr.dismiss_workdir_drift(self._active_aid, old_wd)
+        self._refresh_memory(self._active_aid)
 
     # ══════════════════════════════════════════════════
     #  选择 / 创建 / 删除 / 主助手 / 重命名
@@ -632,7 +676,7 @@ class AssistantCardWidget(QWidget):
         a.project_memory_max_chars = int(project_chars)
         if changed:
             self._mgr.update(a)
-            self._memory.set_status(self._memory_status(self._active_aid))
+            self._refresh_memory(self._active_aid)
 
     def _reload_pinned(self, aid: str) -> None:
         """写盘后回刷置顶列表：UI 永远以盘上数据为准（增删改即时可见）。"""
@@ -725,7 +769,7 @@ class AssistantCardWidget(QWidget):
         if not ret:
             return
         self._mgr.clear_all_memory(aid, self._mgr._current_workdir())
-        self._memory.set_status(self._memory_status(aid))
+        self._refresh_memory(aid)
         self._notify("记忆已清除")
 
     # ══════════════════════════════════════════════════
