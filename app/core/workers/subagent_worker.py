@@ -2064,7 +2064,8 @@ class SubAgentManager(QObject):
         对账规则：queried 集合仅对 finished 任务标记，task_id 不在
         _finished_tasks（被 _BoundedTaskDict maxlen=200 挤出）即视为已消费
         → 移除；集合空则删除 session 键。与 _finished_tasks 同生命周期，
-        无新线程/定时器。调用点：get_finished_tasks（主要消费入口）。
+        无新线程/定时器。挂载点 get_finished_tasks 覆盖高频路径；判据与
+        get_all_active_tasks_with_details 遍历源同一字典，对两个入口都安全。
         """
         for sid in list(self._queried_tasks.keys()):
             queried = self._queried_tasks.get(sid)

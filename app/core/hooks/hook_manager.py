@@ -908,6 +908,8 @@ class HookWorker(QRunnable):
         """从相对模块路径导入函数（.module:func → <config_dir>/module.py 中的 func）
 
         缓存已导入的模块函数，避免每次 hook 触发都重复 exec_module。
+        缓存键为三元组 (config_file, mtime_ns, function_path)：模块文件 mtime
+        参与 key，文件被直接编辑后旧函数对象自动失效（详见函数体内说明）。
 
         Args:
             function_path: 函数路径，如 .evolver_hook:hook_session_start
