@@ -24026,6 +24026,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记初始化已完成（防止窗口在初始化期间关闭导致竞态条件）
         self._initialization_in_progress = False
 
+        # 🛡️ 先读 pending 再调 flush：flush_async 主线程段第一件事就是清
+        # _pending_save_session_id（history_manager flush_async），循环处再读
+        # 恒为 None。后台 flush 线程持 target 快照引用，下方释放循环必须跳过
+        # 该会话，否则置空 messages 会让后台 save_session 写到空列表（TOCTOU）。
+        _pending_flush = getattr(getattr(self, "history_manager", None), "_pending_save_session_id", None)
         try:
             # [PERF-close] 关窗保存一律后台 flush：实测主线程同步 flush
             # 全量序列化+zstd+SQL 600-700ms，是关窗卡顿主因。flush_async
@@ -24039,12 +24044,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ 泄漏修复（P0-1）：关闭窗口时释放 HistoryManager 内存缓存中的
         # 会话消息驻留（删会话/关标签不清理 → 全局单例 _history_sessions
         # 持全量消息不回落）。保留记录元数据，重开会话时 SQLite 懒加载回填。
+        # 🛡️ flush_async 后台线程仍持 target 引用：跳过其 pending 会话，
+        # 否则本循环置空 messages 会让后台 save_session 写到空列表。
         try:
             if hasattr(self, "session_manager") and self.session_manager:
                 for _s in self.session_manager.get_all_sessions():
                     _sid = getattr(_s, "session_id", None)
-                    if _sid and getattr(self, "history_manager", None):
-                        self.history_manager.remove_session(_sid, release_messages_only=True)
+                    if not _sid or not getattr(self, "history_manager", None):
+                        continue
+                    if _pending_flush and _sid == _pending_flush:
+                        continue
+                    self.history_manager.remove_session(_sid, release_messages_only=True)
         except Exception:
             pass
 
