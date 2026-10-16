@@ -1325,7 +1325,7 @@ class HistoryManager:
                 return True
         return False
 
-    def release_messages_except(self, active_session_ids: set) -> int:
+    def release_messages_except(self, active_session_ids: set, extra_skip: "set | None" = None) -> int:
         """释放非活跃会话在内存中的消息体（保留元数据，SQLite 懒加载回填）。
 
         [MEM] messages 所有权收敛（批 IV）：唯一权威释放入口。
@@ -1342,15 +1342,19 @@ class HistoryManager:
 
         Args:
             active_session_ids: 需保留消息体的 session_id 集合
+            extra_skip: 额外跳过的 session_id 集合（如 closeEvent 正在后台
+                flush 的 pending 会话——归档导入的 pending 不属任何窗口，
+                必须由此参数传入）
         Returns:
             本次释放的会话数
         """
         self._ensure_history_loaded()
+        _skip = active_session_ids | (extra_skip or set())
         pending_id = getattr(self, "_pending_save_session_id", None)
         released = 0
         for session in self._history_sessions:
             sid = session.get("session_id")
-            if not sid or sid in active_session_ids:
+            if not sid or sid in _skip:
                 continue
             if not session.get("messages"):
                 continue
