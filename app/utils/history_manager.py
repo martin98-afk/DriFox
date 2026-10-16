@@ -309,6 +309,12 @@ class _ArchiveScanTask(QRunnable):
                     self._cache[fp_str] = (mtime, info)
                 enriched.append(self._enrich_from_info(fp_str, fp_path, mtime, info))
 
+            # 阶段 3：反向对账——归档文件已删除的缓存条目清除（原实现只 add
+            # 不 remove，文件删除后条目永驻：路径→(mtime, info) 慢速累积）。
+            with self._cache_lock:
+                for stale_key in set(self._cache.keys()) - set(mtimes.keys()):
+                    self._cache.pop(stale_key, None)
+
             # 按修改时间倒序
             enriched.sort(key=lambda x: x.get("mtime", 0.0), reverse=True)
             self._signals.finished.emit(self._request_id, enriched)
