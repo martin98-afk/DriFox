@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""snapshot_dialog.py — 记忆快照恢复弹窗（浏览 / 预览 / 恢复）。
+"""snapshot_dialog.py — 记忆快照恢复浮层（浏览 / 预览 / 恢复）。
 
+继承 OverlayBase（遮罩 + 圆角卡片 + 标题栏，与查看记忆/上限编辑同款视觉）。
 恢复本身可反悔：恢复前当前版自动入快照（store.restore_snapshot 语义），
 故不设二次确认，底部以固定提示说明。
 """
@@ -8,73 +9,84 @@
 from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import (
-    QComboBox,
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QListWidget,
-    QPlainTextEdit,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QVBoxLayout
+
+from qfluentwidgets import ComboBox, SmoothScrollDelegate
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
-
-def _muted_style() -> str:
-    return (
-        f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
-        f"{get_font_family_css()} {font_size_css(10)};"
-    )
+from .overlays import OverlayBase, _dialog_btn
 
 
-class SnapshotDialog(QDialog):
+def _panel_qss() -> str:
+    """列表/预览面板同款外观：弱背景 + 细边框 + 圆角（对齐 TextViewOverlay）。"""
+    return f"""
+        QPlainTextEdit, QListWidget {{
+            background: {Colors.CARD_BG.format(alpha=120)};
+            border: 1px solid {Colors.BORDER};
+            border-radius: 8px;
+            color: {Colors.TEXT_PRIMARY};
+            {get_font_family_css()} {font_size_css(12)};
+            padding: 6px;
+        }}
+        QListWidget::item {{ padding: 6px 8px; border: none; border-radius: 6px; }}
+        QListWidget::item:selected {{ background: {Colors.HOVER_BG}; }}
+    """
+
+
+class SnapshotDialog(OverlayBase):
     """记忆快照恢复：顶部切换全局/项目，左列表右预览，一键恢复。"""
 
     restored = pyqtSignal()
 
-    def __init__(self, mgr: Any, aid: str, workdir: str = "", parent: Optional[QWidget] = None):
-        super().__init__(parent)
+    def __init__(self, mgr: Any, aid: str, workdir: str = "", parent=None):
+        super().__init__("恢复记忆快照", parent, width=660, height=470)
         self._mgr = mgr
         self._aid = aid
         self._wd = workdir or ""
-        self.setWindowTitle("恢复记忆快照")
-        self.resize(680, 460)
 
-        v = QVBoxLayout(self)
         top = QHBoxLayout()
-        self._kind = QComboBox()
-        self._kind.addItem("全局记忆", "global")
-        self._kind.addItem("项目记忆", "project")
-        if not self._wd:
-            self._kind.model().item(1).setEnabled(False)  # 无工作目录：项目侧禁用
+        self._kind = ComboBox(self._wrap)
+        self._kind.addItem("全局记忆", userData="global")
+        if self._wd:  # 无工作目录时不放项目项：项目快照随 workdir 分组，缺 workdir 无从读取
+            self._kind.addItem("项目记忆", userData="project")
         self._kind.currentIndexChanged.connect(lambda _: self._reload())
         top.addWidget(self._kind, 1)
-        v.addLayout(top)
+        self._v.addLayout(top)
 
         body = QHBoxLayout()
-        self._list = QListWidget()
-        self._list.setMinimumWidth(230)
+        body.setSpacing(8)
+        self._list = QListWidget(self._wrap)
+        self._list.setMinimumWidth(240)
         self._list.currentRowChanged.connect(self._on_row)
+        self._list.setStyleSheet(_panel_qss())
+        SmoothScrollDelegate(self._list)
         body.addWidget(self._list, 2)
-        self._preview = QPlainTextEdit()
+        self._preview = QPlainTextEdit(self._wrap)
         self._preview.setReadOnly(True)
         self._preview.setPlaceholderText("选中左侧快照预览内容")
+        self._preview.setStyleSheet(_panel_qss())
+        SmoothScrollDelegate(self._preview)
         body.addWidget(self._preview, 3)
-        v.addLayout(body, 1)
+        self._v.addLayout(body, 1)
 
         bottom = QHBoxLayout()
-        tip = QLabel("恢复前当前版本自动存为快照，可再次恢复返回")
-        tip.setStyleSheet(_muted_style())
+        tip = QLabel("恢复前当前版本自动存为快照，可再次恢复返回", self._wrap)
+        tip.setWordWrap(True)
+        tip.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
         bottom.addWidget(tip, 1)
-        self._restore_btn = QPushButton("恢复此版本")
+        self._restore_btn = _dialog_btn("恢复此版本", primary=True)
         self._restore_btn.setEnabled(False)
         self._restore_btn.clicked.connect(self._on_restore)
         bottom.addWidget(self._restore_btn)
-        v.addLayout(bottom)
+        close = _dialog_btn("关闭")
+        close.clicked.connect(self.accept)
+        bottom.addWidget(close)
+        self._v.addLayout(bottom)
 
         self._snaps: List[Dict[str, Any]] = []
         self._reload()
