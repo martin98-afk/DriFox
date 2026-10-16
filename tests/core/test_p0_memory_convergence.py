@@ -91,6 +91,7 @@ def test_reload_after_release_gets_full_messages_not_lightweight(monkeypatch, tm
     full_msg = {
         "role": "assistant",
         "content": "done",
+        "reasoning_content": "think...",
         "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "edit", "arguments": '{"path":"a.py"}'}}],
     }
 
@@ -108,6 +109,9 @@ def test_reload_after_release_gets_full_messages_not_lightweight(monkeypatch, tm
     got = hm.get_session_messages("s-tools")
     assert got == [dict(full_msg)], "必须走 get_full_messages 全量回填"
     assert "_x_idx" not in got[0], "轻量哨兵不得进入内存会话"
+    assert got[0]["reasoning_content"] == "think...", (
+        "reasoning_content 属轻量剥离字段，必须经 extras 合并回填（防倒退）"
+    )
     assert got[0]["tool_calls"][0]["function"]["arguments"] == '{"path":"a.py"}', (
         "工具参数必须完整（轻量伪造空 arguments 的历史根因回归）"
     )
@@ -188,3 +192,32 @@ def test_close_path_does_not_race_async_flush(monkeypatch, tmp_path):
     assert saved and saved[0].get("messages"), (
         f"后台 save_session 必须收到非空 messages，实际: {saved}"
     )
+
+
+def test_release_does_not_clobber_non_own_pending(monkeypatch, tmp_path):
+    """缺口回归（#21）：归档导入的 pending 不属任何窗口，must-not-clobber。
+
+    场景：归档导入/导入包把导入会话登记为 pending（不属任何窗口
+    SessionManager → 不在 own_ids），closeEvent 时序下 flush_async 已清空
+    pending 字段 → 入口 pending 守卫读不到值。双向锁定：
+    - 传 extra_skip → s-archived 保留（修复生效）
+    - 不传 extra_skip → s-archived 被置空（锁死缺口存在性，防修复被回退）
+    """
+    hm = _make_manager(monkeypatch, tmp_path)
+    hm._history_sessions = [
+        {"session_id": "s-archived", "title": "archived", "messages": _messages("arch")},
+    ]
+    # 复现 closeEvent 时序：本窗口无会话 + pending 字段已被 flush_async 消费清空
+    own_ids = set()
+    hm._pending_save_session_id = None
+
+    # 正向：传 extra_skip → 保留
+    released = hm.release_messages_except(own_ids, extra_skip={"s-archived"})
+    assert released == 0
+    assert hm._history_sessions[0]["messages"], "extra_skip 命中的会话不得被置空"
+
+    # 反向：重置消息后不传 extra_skip → 被置空（缺口存在性证明）
+    hm._history_sessions[0]["messages"] = _messages("arch")
+    released = hm.release_messages_except(own_ids)
+    assert released == 1
+    assert hm._history_sessions[0]["messages"] == [], "无 extra_skip 时缺口复现（锁死）"
