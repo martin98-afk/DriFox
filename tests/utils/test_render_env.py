@@ -59,7 +59,7 @@ def test_no_config_file_uses_software_default(tmp_path, monkeypatch):
     apply_render_env(tmp_path / "missing.config")
     assert os.environ.get("QT_OPENGL") == "angle"
     assert os.environ.get("QT_ANGLE_PLATFORM") == "warp"
-    assert "--renderer-process-limit=6" in _flags()
+    assert "--renderer-process-limit=12" in _flags()
     assert "--js-flags=--max-old-space-size=128" in _flags()
     assert "--enable-low-end-device-mode" in _flags()
     assert "--disable-smooth-scrolling" in _flags()
@@ -74,7 +74,7 @@ def test_corrupt_config_file_falls_back_to_defaults(tmp_path):
     path.write_text("{not valid json", encoding="utf-8")
     apply_render_env(path)
     assert os.environ.get("QT_ANGLE_PLATFORM") == "warp"
-    assert "--renderer-process-limit=6" in _flags()
+    assert "--renderer-process-limit=12" in _flags()
 
 
 # ══ 渲染后端档位 ══
@@ -176,7 +176,7 @@ def test_renderer_limit_clamped_to_range(tmp_path):
 
 def test_renderer_limit_invalid_type_falls_back(tmp_path):
     apply_render_env(_write_config(tmp_path, {"RendererProcessLimit": "many"}))
-    assert "--renderer-process-limit=6" in _flags()
+    assert "--renderer-process-limit=12" in _flags()
 
 
 def test_js_heap_clamped(tmp_path):
@@ -218,7 +218,7 @@ def test_extra_flags_can_override_builtin(tmp_path):
     """追加的重复 flag 排在后面（Chromium 后者覆盖前者）。"""
     apply_render_env(_write_config(tmp_path, {"ExtraChromiumFlags": "--renderer-process-limit=16"}))
     flags = _flags()
-    assert flags.index("--renderer-process-limit=6") < flags.rindex("--renderer-process-limit=16")
+    assert flags.index("--renderer-process-limit=12") < flags.rindex("--renderer-process-limit=16")
 
 
 def test_external_chromium_flags_win_setdefault(tmp_path, monkeypatch):
@@ -255,7 +255,7 @@ def test_non_windows_skips_qt_backend_env(tmp_path, monkeypatch):
 def test_compute_settings_defaults(monkeypatch):
     s = compute_settings({})
     assert s["backend"] == "software"  # 出厂默认 = 软件 (WARP)
-    assert s["renderer_process_limit"] == 6
+    assert s["renderer_process_limit"] == 12  # 须 ≥ 卡片配额最大值（effective_render_quota）
     assert s["js_heap_mb"] == 128
     assert s["low_end_device_mode"] is True
     assert s["smooth_scrolling"] is False
@@ -269,7 +269,7 @@ def test_build_chromium_flags_order():
         {
             "software_render": False,
             "webgl_enabled": False,
-            "renderer_process_limit": 6,
+            "renderer_process_limit": 12,
             "js_heap_mb": 128,
             "low_end_device_mode": True,
             "smooth_scrolling": False,
@@ -279,7 +279,7 @@ def test_build_chromium_flags_order():
         }
     )
     assert flags == (
-        "--renderer-process-limit=6"
+        "--renderer-process-limit=12"
         " --disable-software-rasterizer"
         " --disable-dev-shm-usage"
         " --disable-extensions"
