@@ -81,8 +81,9 @@ class DatabaseManager:
             # 与 session_store.py 的 cache_size=-16000 保持一致：后设连接覆盖
             # 先设值，两处必须同值。
             cursor.execute("PRAGMA cache_size=-16000")
-            # 临时存储放到内存（加速 ORDER BY/GROUP BY）
-            cursor.execute("PRAGMA temp_store=MEMORY")
+            # 临时存储显式 FILE：实测 KB 级 temp b-tree 与 MEMORY 无延迟差异；
+            # 显式 FILE 防未来无 LIMIT 的全表排序把结果集堆进内存。
+            cursor.execute("PRAGMA temp_store=FILE")
             # 启用 mmap 读取（减少系统调用）
             # 🔧 T5 内存治理：256MB(268435456) → 64MB(67108864) → 16MB(16777216)。
             # sessions.db 实测 236MB 时，256MB 上限会让整个数据文件映射进 RSS
