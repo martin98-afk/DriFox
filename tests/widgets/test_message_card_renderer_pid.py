@@ -280,23 +280,27 @@ def test_finish_streaming_clears_acc_history_path(qapp):
 
 
 def test_close_event_pending_skip_structure():
-    """源码结构断言：closeEvent 释放走 release_messages_except 权威入口。
+    """源码结构断言：closeEvent 释放走 release_messages_except 权威入口 +
+    双保护层（own_ids + extra_skip）。
 
-    [MEM] 批 IV 后：逐会话 remove_session 循环删除（其 pending 跳过逻辑由
-    release_messages_except 内部守卫覆盖）；_auto_save_current_session 的
-    async 返回值不再被 closeEvent 消费（返回值语义保留给潜在调用方）。
+    [MEM] 批 IV 修订：closeEvent 释放委托权威入口；async 返回值（本次交给
+    后台 flush 的 pending 会话）经 extra_skip 传入——归档导入的 pending 不属
+    任何窗口 SessionManager，own_ids 拦不住，必须显式传。
     """
     src = inspect.getsource(OpenAIChatToolWindow.closeEvent)
-    assert "release_messages_except(own_ids)" in src, "关窗释放必须委托权威入口"
+    assert "release_messages_except(" in src, "释放必须委托权威入口"
+    assert "extra_skip=" in src, "必须传 extra_skip（归档导入 pending 不属任何窗口）"
+    assert "_pending_flush = self._auto_save_current_session(" in src, "返回值必须捕获（extra_skip 数据源）"
     # 旧的逐会话 remove_session 释放循环必须移除（双实现并存 = 所有权未收敛）
     assert "remove_session(_sid, release_messages_only=True)" not in src, (
         "closeEvent 不得保留逐会话释放循环（所有权已收敛到 release_messages_except）"
     )
-    assert "_pending_flush" not in src, "返回值不再被消费，pending 跳过由入口内部守卫覆盖"
-    # 释放必须在 async flush 之后（flush 先行，数据安全）
+    # 释放必须在 async flush 之后（flush 先行，返回值才有意义）
     flush_pos = src.find('self._auto_save_current_session(flush_mode="async")')
-    release_pos = src.find("release_messages_except(own_ids)")
+    release_pos = src.find("release_messages_except(")
     assert flush_pos != -1 and release_pos != -1 and flush_pos < release_pos
+    # session_manager None 守卫（与委托方法同口径）
+    assert "if self.session_manager" in src
 
 
 def test_auto_save_returns_flushed_id_for_async():

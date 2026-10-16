@@ -24035,25 +24035,32 @@ class OpenAIChatToolWindow(ToolWindow):
             # 用非 daemon 线程，应用退出时解释器 shutdown join 保证写盘
             # 完成（aboutToQuit 跳过已 unregister 的最后一窗，此处是
             # 唯一保存点，数据安全由非 daemon join 兜底）。
-            # （[MEM] 批 IV：_auto_save_current_session 的 async 返回值原供
-            # 释放循环跳过 pending；现释放改走 release_messages_except，其
-            # 内部 pending 守卫天然覆盖，返回值无需在此消费。）
-            self._auto_save_current_session(flush_mode="async")
+            # 🛡️ 返回值 = 本次交给后台 flush 的 pending 会话 id（失败为 None），
+            # 经 extra_skip 传给下方释放入口。
+            _pending_flush = self._auto_save_current_session(flush_mode="async")
 
             # ★ 泄漏修复（P0-1）：关闭窗口时释放 HistoryManager 内存缓存中的
             # 会话消息驻留。保留记录元数据，重开会话时 SQLite 懒加载回填。
             # [MEM] 批 IV：委托唯一权威入口，语义收窄为「只释放非本窗口会话」。
-            # 🛡️ 数据安全保护层是 own_ids 跳过：flush_async 主线程段已清空
-            # pending 字段（其后才启动后台落盘线程），入口 pending 守卫在本
-            # 时序读不到值；pending 会话必被本窗口 SessionManager 持有 →
-            # 必在 own_ids 内 → 被跳过，后台 save_session 的 target 引用不
-            # 会被置空（竞态回归：test_close_path_does_not_race_async_flush）。
+            # 🛡️ 双保护层（own_ids + extra_skip）：
+            # - own_ids 覆盖本窗口持有的会话（flush_async 已清 pending 字段，
+            #   本窗口 pending 会话靠此层跳过）；
+            # - extra_skip 覆盖「后台 flush 正在写的非窗口会话」——归档导入/
+            #   导入包的 pending 不属任何窗口 SessionManager，own_ids 拦不住，
+            #   只能由返回值显式传入（缺口回归：
+            #   test_release_does_not_clobber_non_own_pending）。
             # （remove_session(release_messages_only=True) 只置空+打标、无
             # _mark_cache_dirty 副作用，权威入口同语义，关窗路径无缺失。）
             hm = getattr(self, "history_manager", None)
             if hm is not None and hasattr(hm, "release_messages_except"):
-                own_ids = {s.session_id for s in self.session_manager.get_all_sessions()}
-                released = hm.release_messages_except(own_ids)
+                own_ids = (
+                    {s.session_id for s in self.session_manager.get_all_sessions()}
+                    if self.session_manager
+                    else set()
+                )
+                released = hm.release_messages_except(
+                    own_ids, extra_skip={_pending_flush} if _pending_flush else None
+                )
                 if released:
                     logger.debug(f"[Memory] 关窗释放 {released} 个非本窗口会话消息")
         except Exception:
