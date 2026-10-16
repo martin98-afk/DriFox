@@ -280,25 +280,23 @@ def test_finish_streaming_clears_acc_history_path(qapp):
 
 
 def test_close_event_pending_skip_structure():
-    """源码结构断言：pending 取自 flush 返回值，且取值在释放循环之前。
+    """源码结构断言：closeEvent 释放走 release_messages_except 权威入口。
 
-    不变量是本修复的核心：_auto_save_current_session 内部经 _schedule_save
-    自设新 pending 后 flush_async 立即消费——「提前读 _pending_save_session_id」
-    在常态关窗（save timer 已消费旧 pending）恒为 None → 跳过失效。
-    返回值方案读的是 flush 前一行的 pending，两种关窗时序都覆盖。
+    [MEM] 批 IV 后：逐会话 remove_session 循环删除（其 pending 跳过逻辑由
+    release_messages_except 内部守卫覆盖）；_auto_save_current_session 的
+    async 返回值不再被 closeEvent 消费（返回值语义保留给潜在调用方）。
     """
     src = inspect.getsource(OpenAIChatToolWindow.closeEvent)
-    read_pos = src.find("_pending_flush = self._auto_save_current_session(")
-    assert read_pos != -1, "closeEvent 必须用 flush 返回值取 pending（勿提前读字段）"
-    assert (
-        src.find('getattr(getattr(self, "history_manager", None), "_pending_save_session_id", None)') == -1
-    ), "提前读 pending 字段的旧写法必须移除（常态关窗恒 None，TOCTOU 缺口）"
-    loop_pos = src.find("for _s in self.session_manager.get_all_sessions():")
-    assert loop_pos != -1 and read_pos < loop_pos, "取值必须在释放循环之前"
-    # 跳过分支存在
-    assert "if _pending_flush and _sid == _pending_flush:" in src
-    # release 仍走 release_messages_only=True
-    assert "remove_session(_sid, release_messages_only=True)" in src
+    assert "release_messages_except(own_ids)" in src, "关窗释放必须委托权威入口"
+    # 旧的逐会话 remove_session 释放循环必须移除（双实现并存 = 所有权未收敛）
+    assert "remove_session(_sid, release_messages_only=True)" not in src, (
+        "closeEvent 不得保留逐会话释放循环（所有权已收敛到 release_messages_except）"
+    )
+    assert "_pending_flush" not in src, "返回值不再被消费，pending 跳过由入口内部守卫覆盖"
+    # 释放必须在 async flush 之后（flush 先行，数据安全）
+    flush_pos = src.find('self._auto_save_current_session(flush_mode="async")')
+    release_pos = src.find("release_messages_except(own_ids)")
+    assert flush_pos != -1 and release_pos != -1 and flush_pos < release_pos
 
 
 def test_auto_save_returns_flushed_id_for_async():

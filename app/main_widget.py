@@ -24035,25 +24035,27 @@ class OpenAIChatToolWindow(ToolWindow):
             # 用非 daemon 线程，应用退出时解释器 shutdown join 保证写盘
             # 完成（aboutToQuit 跳过已 unregister 的最后一窗，此处是
             # 唯一保存点，数据安全由非 daemon join 兜底）。
-            # 🛡️ 返回值即 flush_async 将消费并交给后台线程的 session_id：
-            # 常态关窗（save timer 已消费旧 pending）下提前读
-            # _pending_save_session_id 拿不到值 → TOCTOU 窗口敞开；
-            # 返回值方案读的是 flush 前一行的 pending，无此缺口。
-            _pending_flush = self._auto_save_current_session(flush_mode="async")
+            # （[MEM] 批 IV：_auto_save_current_session 的 async 返回值原供
+            # 释放循环跳过 pending；现释放改走 release_messages_except，其
+            # 内部 pending 守卫天然覆盖，返回值无需在此消费。）
+            self._auto_save_current_session(flush_mode="async")
 
             # ★ 泄漏修复（P0-1）：关闭窗口时释放 HistoryManager 内存缓存中的
-            # 会话消息驻留（删会话/关标签不清理 → 全局单例 _history_sessions
-            # 持全量消息不回落）。保留记录元数据，重开会话时 SQLite 懒加载回填。
-            # 🛡️ flush_async 后台线程仍持 target 引用：跳过其 pending 会话，
-            # 否则本循环置空 messages 会让后台 save_session 写到空列表。
-            if hasattr(self, "session_manager") and self.session_manager:
-                for _s in self.session_manager.get_all_sessions():
-                    _sid = getattr(_s, "session_id", None)
-                    if not _sid or not getattr(self, "history_manager", None):
-                        continue
-                    if _pending_flush and _sid == _pending_flush:
-                        continue
-                    self.history_manager.remove_session(_sid, release_messages_only=True)
+            # 会话消息驻留。保留记录元数据，重开会话时 SQLite 懒加载回填。
+            # [MEM] 批 IV：委托唯一权威入口，语义收窄为「只释放非本窗口会话」。
+            # 🛡️ 数据安全保护层是 own_ids 跳过：flush_async 主线程段已清空
+            # pending 字段（其后才启动后台落盘线程），入口 pending 守卫在本
+            # 时序读不到值；pending 会话必被本窗口 SessionManager 持有 →
+            # 必在 own_ids 内 → 被跳过，后台 save_session 的 target 引用不
+            # 会被置空（竞态回归：test_close_path_does_not_race_async_flush）。
+            # （remove_session(release_messages_only=True) 只置空+打标、无
+            # _mark_cache_dirty 副作用，权威入口同语义，关窗路径无缺失。）
+            hm = getattr(self, "history_manager", None)
+            if hm is not None and hasattr(hm, "release_messages_except"):
+                own_ids = {s.session_id for s in self.session_manager.get_all_sessions()}
+                released = hm.release_messages_except(own_ids)
+                if released:
+                    logger.debug(f"[Memory] 关窗释放 {released} 个非本窗口会话消息")
         except Exception:
             pass
 
