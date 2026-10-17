@@ -236,6 +236,15 @@ def test_write_empty_content_rejected(monkeypatch, tmp_path):
     assert not r.success
 
 
+def test_write_daily_too_long_rejected(monkeypatch, tmp_path):
+    """store 侧 too_long 需转成可执行的压缩指令，而非裸错误码。"""
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.append_daily = lambda *a, **k: {"ok": False, "error": "too_long", "chars": 900, "limit": 400}
+    r = m._write_impl(_ctx("/proj"), scope="daily", content="x" * 900)
+    assert not r.success
+    assert "900/400" in r.error and "日志是索引不是报告" in r.error
+
+
 def test_write_paused_when_memory_disabled(monkeypatch, tmp_path):
     mgr = _patch(monkeypatch, tmp_path)
 

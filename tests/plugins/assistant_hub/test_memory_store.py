@@ -66,6 +66,18 @@ def test_append_daily_empty_rejected(tmp_path):
     assert not r["ok"] and r["error"] == "empty"
 
 
+def test_append_daily_too_long_rejected(tmp_path):
+    """单条正文超 400 字符拒写：日志是索引不是报告。"""
+    wd = str(tmp_path / "proj")
+    lim = m.DAILY_ENTRY_MAX_CHARS
+    assert lim == 400
+    r = m.append_daily(wd, "build", "字" * (lim + 1))
+    assert not r["ok"] and r["error"] == "too_long" and r["limit"] == lim
+    assert m.read_daily(wd, "build") == ""
+    # 恰好等于上限可写
+    assert m.append_daily(wd, "build", "字" * lim)["ok"]
+
+
 def test_daily_path_rejects_non_date(tmp_path):
     """date 参数仅接受 YYYY-MM-DD：memory_write 是 safe 工具，须防路径穿越。"""
     for bad in ["../evil", "..\\evil", "2026-10-1a", "x/y", "  "]:

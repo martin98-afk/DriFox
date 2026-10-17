@@ -16,13 +16,12 @@ from PyQt5 import sip as _sip
 from loguru import logger
 from app.core.infra import window_registry
 from PyQt5.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, pyqtSignal
-from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
+from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap, QResizeEvent
 from PyQt5.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QFrame,
     QGraphicsOpacityEffect,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QStackedWidget,
@@ -720,7 +719,7 @@ class _WorkbenchFrame(QFrame):
 
 
 class _ContentStack(QWidget):
-    """对话区覆盖层堆栈（叠放实现）：覆盖层页首次 show 后永不 hide。
+    """对话区覆盖层堆栈（叠放实现 + 方向性滑动切换）：覆盖层页首次 show 后永不 hide。
 
     为什么不用 QStackedWidget（2026-09-08 排查，见
     docs/superpowers/specs/2026-09-08-content-stack-overlay-switch-design.md）：
@@ -732,19 +731,59 @@ class _ContentStack(QWidget):
     QStackedLayout::minimumSize 取**所有页**的最大值：page0 聊天页的最小宽会
     透过 splitter 链顶住把手。本实现 minimumSizeHint 只取**当前顶层可见页**，
     语义更准；`set_min_hint_disabled` 归零逻辑保留。
+
+    布局：绝对定位（无布局管理器）。页级 push 滑动要求动画期间两页同时可见
+    且水平错位，QGridLayout 同格叠放会在每次布局激活时把子项几何拉回原位，
+    故改手动 setGeometry：resizeEvent / addWidget / 动画收尾统一归位。
     """
 
     currentChanged = pyqtSignal(int)
+
+    # 页级滑动时长：大范围整块位移取阶梯最高档（design_tokens）
+    SLIDE_MS = Animations.SLOW_MS
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._min_hint_disabled = False
         self._pages: List[QWidget] = []
         self._current = -1
-        grid = QGridLayout(self)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(0)
-        self._grid = grid
+        # ── 页级滑动状态（push 切页 / over 覆盖层内整页滑入共用）──
+        self._slide_anim: Optional[QVariantAnimation] = None
+        self._slide_old: Optional[QWidget] = None  # push=旧页 / over=垫底页
+        self._slide_new: Optional[QWidget] = None  # push=新页 / over=滑动顶层页
+        self._slide_dir = 0  # +1 新页从右侧进入（视口右移）/ -1 从左侧进入
+        self._slide_kind = ""  # "push" / "over" / "swap"，驱动 tick 位移与收尾
+        self._swap_cb: Optional[Callable[[], None]] = None  # swap 段间内容切换回调
+
+    # ── 几何管理（无布局，resizeEvent 全量同步）──
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        """容器 resize → 全部页铺满新 rect。
+
+        ★ 动画在途**不收尾**：切页后宿主的 _sync_chat_wrapper_width 会在同一
+        事件循环内改 wrapper margins，本栈随之 resize。早期版本在此直接
+        _finish_slide(interrupted=True)，等于第一帧就把动画杀掉（实测「动画
+        没了」的根因）。现在改为：更新记录的目标几何，下一页 tick 按新宽度
+        重新计算位移；动画自身节奏不变。
+        """
+        super().resizeEvent(event)
+        r = self.rect()
+        if self.slide_in_progress():
+            # 动画在途：只同步几何基准，位移由 _on_slide_tick 用新宽度接着算
+            self._sync_slide_baseline(r)
+            return
+        for w in self._pages:
+            w.setGeometry(r)
+
+    def _sync_slide_baseline(self, r) -> None:
+        """动画在途同步两页几何到新 rect（不打断动画）
+
+        _on_slide_tick 每帧都用 self.width() 重新算位移，所以把两页铺到新
+        rect 后，下一帧自然按新宽度继续滑，节奏不中断。
+        """
+        for w in (self._slide_old, self._slide_new):
+            if w is not None:
+                w.setGeometry(r)
 
     # ── QStackedWidget 兼容 API ──
 
@@ -752,7 +791,8 @@ class _ContentStack(QWidget):
         """加入堆栈。首页可见并置顶；后续页可见但在下层（被首页遮住）。"""
         idx = len(self._pages)
         self._pages.append(w)
-        self._grid.addWidget(w, 0, 0)
+        w.setParent(self)
+        w.setGeometry(self.rect())
         if idx == 0:
             w.setVisible(True)
             self._current = 0
@@ -772,13 +812,23 @@ class _ContentStack(QWidget):
     def currentWidget(self) -> Optional[QWidget]:
         return self.widget(self._current)
 
-    def setCurrentIndex(self, i: int) -> None:
+    def setCurrentIndex(self, i: int, direction: int = 0) -> None:
+        """切换当前页（长条模型：页面按 tab 顺序左右平铺，切换 = 视口在长条上滑动）。
+
+        direction：+1 视口右移（新页从右侧进入、旧页向左退出，如点对话右侧的
+        卡片 tab）、-1 视口左移（新页从左侧进入，如回最左的「对话」）、0 直接
+        切换（初始化等场景）。非 0 且系统动效开启时走双页 push 滑动；
+        动画期间页状态（_current / currentChanged）立即落定，仅旧页 hide
+        延后到滑动结束（时长 300ms，期间对话页参与布局无功能影响）。
+        """
         if i == self._current or not (0 <= i < len(self._pages)):
             return
         new = self._pages[i]
         old = self._pages[self._current] if self._current >= 0 else None
         self._current = i
-        if i == 0:
+        if direction != 0 and Animations.motion_enabled() and old is not None and old is not new:
+            self._start_slide(old, new, direction)
+        elif i == 0:
             # 回对话：show 对话页（实测 ~10ms）+ raise 盖住覆盖层。
             # ⚠️ 覆盖层页**不 hide**——保活不变式，消灭下次切换的 show 传播。
             if old is not None:
@@ -798,6 +848,169 @@ class _ContentStack(QWidget):
         i = self._pages.index(w) if w in self._pages else -1
         if i >= 0:
             self.setCurrentIndex(i)
+
+    # ── 页级滑动（push 切页 / over 覆盖层内整页滑入）──
+
+    def slide_in_progress(self) -> bool:
+        """是否有滑动动画在途（供调用方避免叠加动画）"""
+        return self._slide_anim is not None and self._slide_anim.state() == QVariantAnimation.Running
+
+    def _start_slide(self, old: QWidget, new: QWidget, direction: int) -> None:
+        """双页 push 滑动：长条模型下视口在两页间平移（旧页滑出 + 新页滑入等速）。
+
+        重入：动画在途先快进到终态（_finish_slide 幂等），再起新动画——
+        连点表现为上一次立即滑到头，紧接着滑本次。
+        """
+        if self.slide_in_progress():
+            self._finish_slide(interrupted=True)
+        self._slide_old = old
+        self._slide_new = new
+        self._slide_dir = 1 if direction > 0 else -1
+        self._slide_kind = "push"
+        r = self.rect()
+        # 两页同时可见；新页置顶，起点在进场侧整宽外（+dir 侧）
+        old.show()
+        new.show()
+        new.raise_()
+        old.setGeometry(r)
+        new.setGeometry(r.translated(r.width() * self._slide_dir, 0))
+        self._start_anim()
+
+    def slide_over(self, direction: int = 1) -> None:
+        """覆盖层内容切换的整页滑入（页 index 不变，无 swap 回调的轻量路径）:
+        当前顶层页从进场侧滑入归位，露出区透传 chatFrame 背景（不垫底）。
+
+        ⚠️ 不垫底是刻意的：垫对话页会让切换期间对话页强制可见 300ms
+        （新卡首建阻塞主线程时动画帧被饿），用户实测不可接受。
+
+        用途：切对话标签页恢复卡片等无法提供 swap 时机的事件链。
+        卡间互斥切换走 slide_swap（两段式，旧卡画面真实滑出）。
+        """
+        top = self.widget(self._current)
+        if top is None or not Animations.motion_enabled():
+            return
+        if self.slide_in_progress():
+            self._finish_slide(interrupted=True)
+        self._slide_old = None
+        self._slide_new = top
+        self._slide_dir = 1 if direction > 0 else -1
+        self._slide_kind = "over"
+        r = self.rect()
+        top.raise_()
+        top.setGeometry(r.translated(r.width() * self._slide_dir, 0))
+        self._start_anim()
+
+    def slide_swap(self, direction: int, swap) -> None:
+        """卡间互斥切换的两段式滑动（长条模型「视口滑过相邻卡片」）：
+
+        段1：顶层页带旧卡画面向出场侧整体滑出（完全出画）；
+        段间：页在画外时执行 swap()（hide 旧卡 + show 新卡，构建阻塞被画外掩蔽）；
+        段2：页瞬移到进场侧后滑入归位。
+
+        旧卡画面真实跟随滑动（区别于 slide_over 的「新卡滑入+背景露出」）。
+        swap 在动画收尾/打断时保证被执行（resizeEvent 快进等路径统一走
+        _finish_slide），杜绝「高亮已切、卡片未切」的状态漂移。
+        """
+        top = self.widget(self._current)
+        if top is None or not callable(swap):
+            swap()
+            return
+        if not Animations.motion_enabled():
+            swap()
+            return
+        if self.slide_in_progress():
+            self._finish_slide(interrupted=True)
+        self._slide_old = None
+        self._slide_new = top
+        self._slide_dir = 1 if direction > 0 else -1
+        self._slide_kind = "swap"
+        self._swap_cb = swap
+        top.raise_()
+        self._start_anim()
+
+    def _start_anim(self) -> None:
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(self.SLIDE_MS)
+        anim.setEasingCurve(Animations.EASE_ENTER)
+        anim.valueChanged.connect(self._on_slide_tick)
+        anim.finished.connect(self._finish_slide)
+        self._slide_anim = anim
+        anim.start()
+
+    def _on_slide_tick(self, t: float) -> None:
+        """每帧位移（长条模型）：
+
+        push：视口右移时旧页 0→-w（左出）、新页 +w→0（右进），反向对称；
+        over：仅顶层页从进场侧 +w→0 滑入；
+        swap 段1：顶层页 0→-d*w（旧画面向出场侧滑出，段2 由 _finish_slide 接力）。
+        """
+        old, new = self._slide_old, self._slide_new
+        if new is None:
+            return
+        w = self.width()
+        d = self._slide_dir
+        if self._slide_kind == "swap":
+            new.move(round(w * d * -t), 0)
+            return
+        new.move(round(w * d * (1.0 - t)), 0)
+        if self._slide_kind == "push" and old is not None:
+            old.move(round(w * d * -t), 0)
+
+    def _finish_slide(self, interrupted: bool = False) -> None:
+        """滑动收尾/切段（幂等，可重复调用）
+
+        swap 段1 完成（自然结束）：画外执行 swap 内容切换，页瞬移到进场侧后
+        接力段2 滑入；被打断快进（resize/新切换接管几何）时 interrupted=True：
+        仍执行 swap（保高亮/卡片状态一致）但直接归位不接段2。其余路径统一
+        归位：new（新页/顶层页）置顶归位，old 按 _current 决定 hide（_current≠0）
+        或 lower 保活（=0）。
+        """
+        anim = self._slide_anim
+        if anim is not None:
+            try:
+                anim.finished.disconnect(self._finish_slide)
+                anim.valueChanged.disconnect(self._on_slide_tick)
+            except (TypeError, RuntimeError):
+                pass
+            anim.stop()
+        self._slide_anim = None
+        old, new = self._slide_old, self._slide_new
+        if self._slide_kind == "swap" and new is not None:
+            # 段1 完成：画外切换内容（cb 内含打断守卫：意图已变则跳过切换）
+            cb = self._swap_cb
+            self._swap_cb = None
+            self._slide_kind = "over"
+            if cb is not None:
+                cb()
+            if interrupted:
+                self._settle(new, None)
+                return
+            new.setGeometry(self.rect().translated(self.width() * self._slide_dir, 0))
+            self._start_anim()
+            return
+        self._slide_kind = ""
+        self._slide_old = None
+        self._slide_new = None
+        self._slide_dir = 0
+        self._swap_cb = None
+        self._settle(new, old)
+
+    def _settle(self, new, old) -> None:
+        """统一归位：new 置顶归位；old 按 _current 决定 hide 或 lower 保活"""
+        if new is not None:
+            new.setGeometry(self.rect())
+            new.raise_()
+        if old is None:
+            return
+        old.setGeometry(self.rect())
+        if self._current == 0:
+            # 回对话：旧覆盖层页保持 visible + lower（保活不变式，被对话页遮住）
+            old.lower()
+        else:
+            # 去覆盖层：对话页 hide（省布局 + 杜绝焦点穿透）
+            old.hide()
 
     def set_min_hint_disabled(self, disabled: bool) -> None:
         """切换「最小尺寸提示归零」；幂等，切换后主动 updateGeometry 让布局重算"""
@@ -869,6 +1082,10 @@ class TabManagerWindow(FramelessWindow):
         _sm_t0 = _sm_time.perf_counter()
 
         self._windows: List = []  # List[OpenAIChatToolWindow]
+        # 最近一次顶部 tab 激活变化推断出的滑动方向（+1/-1/0）：
+        # 点击切换时按 old/new 在 titleBar 的位置差缓存，切页消费后清零；
+        # 无事件路径（关卡补位、程序切换）消费时端点兜底（开卡 +1 / 回对话 -1）
+        self._pending_slide_direction = 0
         # ── 几何防抖保存：拖拽/缩放结束后 200ms 才写盘 ──
         self._geo_save_timer = QTimer(self)
         self._geo_save_timer.setSingleShot(True)
@@ -3544,6 +3761,16 @@ class TabManagerWindow(FramelessWindow):
 
     # ── 覆盖层状态切换 ──
 
+    def _consume_slide_direction(self, fallback: int) -> int:
+        """取走缓存方向（消费即清零）：0 时用 fallback（开卡 +1 / 回对话 -1）
+
+        fallback 对应 tab 栏静态布局的两个端点：对话 tab 恒在最左，
+        无精确方向时回对话左滑、开卡右滑永远合理。
+        """
+        d = self._pending_slide_direction
+        self._pending_slide_direction = 0
+        return d if d != 0 else fallback
+
     def _on_overlay_state_changed(self, has_visible: bool):
         """系统卡片覆盖层显隐切换：QStackedWidget 页面 0←→1
 
@@ -3570,9 +3797,9 @@ class TabManagerWindow(FramelessWindow):
                     _top_c._apply_background_style()
                 except RuntimeError:
                     pass
-            self._content_stack.setCurrentIndex(1)
+            self._content_stack.setCurrentIndex(1, direction=self._consume_slide_direction(fallback=1))
         else:
-            self._content_stack.setCurrentIndex(0)
+            self._content_stack.setCurrentIndex(0, direction=self._consume_slide_direction(fallback=-1))
             # 卡片关闭 → 布局恢复：延迟到下一事件循环（等 relayout 完成）再检测。
             # growth_required=False：overlay 挤压时窗口总宽未变，不适用相对增长
             # 条件（否则窗口没变宽永远不会自动展开），此处仅按绝对空间下限判断。
@@ -3624,6 +3851,12 @@ class TabManagerWindow(FramelessWindow):
                 open_dict[card_id] = title
                 self.titleBar.add_tab(card_id, title, closable=True)
             self._set_replace_active(card_id)
+            # 覆盖层内互斥切换（页已在前台且无在途切换动画）：整页按 tab 位置差
+            # 方向滑入（助手→左侧的轨迹 tab = 从左滑出），无事件时兜底右滑。
+            # 首次从对话进覆盖层由 push 动画负责（在途检测跳过），
+            # 事件先于切页到达时 currentIndex 仍为 0，同样自然跳过。
+            if self._content_stack.currentIndex() == 1 and not self._content_stack.slide_in_progress():
+                self._content_stack.slide_over(direction=self._consume_slide_direction(fallback=1))
         else:
             if getattr(self, "_suppress_replace_close", False):
                 # 点「聊天」主动隐藏 replace 卡片：保留 open（标题栏 tab 常驻聊天项），仅取消其关闭计时
@@ -3693,6 +3926,7 @@ class TabManagerWindow(FramelessWindow):
             # 只剩常驻插件的 full 卡（或全部关闭）：高亮/状态回聊天。
             # remove_tab 移除激活 tab 时已把高亮设为剩余第一个（聊天），此处
             # 同步 _replace_active 语义并幂等设高亮（防御 tab 注册顺序变化）。
+            self._cache_slide_direction(self._replace_active.get(cur_wid), CHAT_TAB_ID)
             self._replace_active[cur_wid] = CHAT_TAB_ID
             self.titleBar.set_active_tab(CHAT_TAB_ID)
             return
@@ -3739,8 +3973,30 @@ class TabManagerWindow(FramelessWindow):
         return False
 
     def _set_replace_active(self, card_id: str) -> None:
-        self._replace_active[self._current_window_id()] = card_id
+        cur_wid = self._current_window_id()
+        # 长条模型方向：按 old/new 在 titleBar 的位置差缓存，页切换/nudge 消费
+        self._cache_slide_direction(self._replace_active.get(cur_wid), card_id)
+        self._replace_active[cur_wid] = card_id
         self.titleBar.set_active_tab(card_id or CHAT_TAB_ID)
+
+    def _cache_slide_direction(self, old_tab_id, new_tab_id) -> None:
+        """按 old/new 在 titleBar 的位置差缓存滑动方向（+1 右滑 / -1 左滑 / 0 未知）
+
+        长条模型：页面按 tab 顺序平铺，切到右边 tab = 视口右移 = 新页从右进。
+        收口在宿主自身激活方法（_set_replace_active/_show_conversation_view），
+        不依赖 titleBar 信号链；old 已删（关卡补位）或相等时存 0，
+        消费端（_consume_slide_direction）用端点兜底。
+        """
+        self._pending_slide_direction = self._direction_between(old_tab_id, new_tab_id)
+
+    def _direction_between(self, old_tab_id, new_tab_id) -> int:
+        """两 tab 的滑动方向（不落缓存）：new 在 old 右侧 +1 / 左侧 -1 / 未知 0"""
+        if not old_tab_id or not new_tab_id or old_tab_id == new_tab_id:
+            return 0
+        tabs = list(getattr(self.titleBar, "_tabs", {}).keys())
+        if old_tab_id in tabs and new_tab_id in tabs:
+            return 1 if tabs.index(new_tab_id) > tabs.index(old_tab_id) else -1
+        return 0
 
     def _is_replace_visible(self, card_id: str) -> bool:
         """replace 卡片在当前窗口是否**真实**可见（权威判定）
@@ -3900,6 +4156,46 @@ class TabManagerWindow(FramelessWindow):
             cm = CardManager.get_instance()
             wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
             cur_wid = self._current_window_id()
+
+            # 卡间互斥切换（覆盖层前台 + 动效开启）：两段式滑动——旧卡画面
+            # 整体滑出画外 → swap 闭包在画外执行互斥切换（新卡构建阻塞被掩蔽）
+            # → 新卡画面从进场侧滑入。方向现场按 old/new 位置差算（此时
+            # _set_replace_active 尚未执行，缓存不可用）。
+            if (
+                self._content_stack.currentIndex() == 1
+                and not self._content_stack.slide_in_progress()
+                and Animations.motion_enabled()
+            ):
+                direction = self._direction_between(self._replace_active.get(cur_wid), card_id) or 1
+                self._pending_slide_direction = 0
+                # 胶囊高亮与胶囊滑动立即跟随点击：卡片内容在画外切换（300ms 后才
+                # 完成），但标题栏反馈必须即时，否则胶囊要等滑动结束才跳位，观感
+                # 是「点了没反应，然后突然跳」。配合 _do_swap 里的打断守卫，
+                # 期间若用户改点「对话」，此处的高亮会被随后的逻辑纠正。
+                self._replace_active[cur_wid] = card_id
+                self.titleBar.set_active_tab(card_id)
+
+                def _do_swap(_cm=cm, _wid=wid, _cur=cur_wid, _cid=card_id):
+                    # 打断守卫：段1 期间用户意图已变（如已点「对话」）则放弃切换，
+                    # 状态以最新操作为准，杜绝「高亮已切、卡片被 cb 又开回」
+                    if getattr(self.titleBar, "_active_id", None) != _cid:
+                        return
+                    for other in list(self._replace_open.get(_cur, {}).keys()):
+                        if other != _cid:
+                            try:
+                                _cm.hide_card(other, _wid)
+                            except Exception:
+                                pass
+                    try:
+                        _cm.show_card(_cid, _wid)
+                    except Exception:
+                        pass
+                    # 高亮已在点击时同步过（见上），这里只做幂等收敛
+                    self._set_replace_active(_cid)
+
+                self._content_stack.slide_swap(direction=direction, swap=_do_swap)
+                return
+
             for other in list(self._replace_open.get(cur_wid, {}).keys()):
                 if other != card_id:
                     try:
@@ -3929,6 +4225,8 @@ class TabManagerWindow(FramelessWindow):
         # 抑制 hide_card 触发的 visible=False 事件（对话视图下隐藏 replace 卡片是预期行为，open 保留）
         self._suppress_replace_close = True
         cur_wid = self._current_window_id()
+        # 长条模型方向：回对话（tab 栏最左端），按当前激活卡位置差缓存
+        self._cache_slide_direction(self._replace_active.get(cur_wid), CHAT_TAB_ID)
         try:
             for cid in list(self._replace_open.get(cur_wid, {}).keys()):
                 try:
