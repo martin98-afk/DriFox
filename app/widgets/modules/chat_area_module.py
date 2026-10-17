@@ -51,8 +51,8 @@ class ChatAreaModule(UIModule):
         from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
         from qfluentwidgets import SingleDirectionScrollArea
 
-        # CHAT_SCROLL_STYLE 在 main_widget 模块级定义（避免循环引用）
-        from app.main_widget import CHAT_SCROLL_STYLE
+        # CHAT_SCROLL_STYLE 单一数据源在 ui_helpers（2026-09-29 断反向 import）
+        from app.widgets.ui_helpers import CHAT_SCROLL_STYLE
         from app.utils.theme_manager import theme_manager
         from app.widgets.decoration_layer import DecorationLayer
 
@@ -130,6 +130,9 @@ class ChatAreaModule(UIModule):
             _bar.rangeChanged.connect(lambda *_: host._update_scroll_to_bottom_button())
         except Exception:
             pass
+
+        # [P1 步骤6] chat_scroll_area 就绪后接 rangeChanged 事件驱动贴底
+        host._wire_scroll_range_changed()
 
         # 初始加载（延迟到首帧后，避免阻塞 setup_ui 关键路径）
         QTimer.singleShot(0, host._apply_decorations)

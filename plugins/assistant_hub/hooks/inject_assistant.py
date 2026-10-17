@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""inject_assistant.py — assistant_hub hooks（身份替换注入 + 轮次计数）
+"""inject_assistant.py — assistant_hub hooks（身份+记忆注入 + @提及）
 
-两个 hook：
-1. BuildSystemPrompt（``hook``）：激活助手时**直接输出**助手信息块
-   （人格段 persona → 记忆使用规则 → 置顶 → memory.md），
-   并把 context 里预取的智能体提示词置空防重复。经验不注入 prompt
-   （recall_experience 无参返回索引 = 渐进式披露）。
-2. Stop（``on_stop``）：主对话每轮结束计数，交给 MemoryTicker 驱动
-   记忆传送带（每 10 轮轻量链）。
+Hook 清单（hooks.json 对应）：
+1. BuildSystemPrompt（``hook``）：激活助手时输出 助手身份块 → 记忆体系块
+   （记忆说明书 + 全局记忆 + 项目记忆 + 日志索引，全部进系统提示词，
+   照抄 WorkBuddy 注入结构）；并把 context 里预取的智能体提示词置空防重复。
+2. SessionStart（``on_session_start``）：注入人工提示（pinned）到会话消息。
+   记忆内容不进会话消息（单一通道：系统提示词，写后失效缓存即可刷新）。
+3. PreUserMessage（``on_pre_user``）：@提及检测，切会话级临时助手。
+4. Stop（``on_stop``）：记录会话归属映射（供工具按会话解析记忆归属）。
 
 实现说明：
 - HookWorker 经 spec_from_file_location 独立加载本文件（无 package 上下文），
@@ -66,46 +67,21 @@ def _get_manager():
     return module.AssistantManager.get_instance()
 
 
-def _get_ticker(mgr):
-    """取 MemoryTicker 单例（失败返回 None：ticker 不可用只影响传送带，不影响注入）。"""
-    try:
-        module = _ensure_manager_module()
-        if module is None:
-            return None
-        return module.AssistantManager.get_instance().__class__ and _ticker_instance(mgr)
-    except Exception as e:
-        logger.debug(f"[assistant_hub.hooks] ticker 不可用: {e}")
-        return None
-
-
-def _ticker_instance(mgr):
-    mod = sys.modules.get(_MANAGER_MODULE_NAME)
-    if mod is None:
-        return None
-    return mod._load_core_module("memory.ticker", "memory/ticker.py").MemoryTicker.get(mgr)
-
-
-def _identity_block(aid: str) -> str:
-    """取人格块（BuildSystemPrompt 注入系统提示词用）。"""
-    mgr = _get_manager()
-    if mgr is None:
-        return ""
-    return mgr.identity_block(aid)
-
-
-def _memory_block(aid: str) -> str:
-    """取记忆块（SessionStart 注入会话消息用，不进系统提示词）。"""
-    mgr = _get_manager()
-    if mgr is None:
-        return ""
-    return mgr.memory_block(aid)
+def _resolve_aid(mgr, context: Dict[str, Any]) -> str:
+    """会话生效助手：会话级临时助手（@提及）优先，否则主助手；无则空串。"""
+    sid = str((context or {}).get("session_id") or "")
+    aid = mgr.get_session_override(sid) if sid else ""
+    if not aid:
+        aid = mgr.active_id()
+    return aid if aid and mgr.has(aid) else ""
 
 
 def hook(event: str, context: Dict[str, Any]) -> str:
-    """BuildSystemPrompt hook：激活助手时输出人格块（不含记忆）。
+    """BuildSystemPrompt hook：身份块 + 记忆体系块（均进系统提示词）。
 
-    记忆（人工提示 + 长期记忆）已迁移到 SessionStart hook 注入会话消息，
-    不再占据系统提示词空间。会话级临时助手（@提及）优先于全局 active_id。
+    记忆单一通道：说明书 + <global_memory> + <project_memory> + <daily_logs>
+    全在系统提示词里；写回后由 memory_write 失效 prompt 缓存，下轮重建。
+    会话级临时助手（@提及）优先于全局 active_id。
     """
     if (context or {}).get("current_role") != "primary":
         return ""
@@ -113,13 +89,13 @@ def hook(event: str, context: Dict[str, Any]) -> str:
         mgr = _get_manager()
         if mgr is None:
             return ""
-        sid = str((context or {}).get("session_id") or "")
-        aid = mgr.get_session_override(sid) if sid else ""
+        aid = _resolve_aid(mgr, context or {})
         if not aid:
-            aid = mgr.active_id()
-        if not aid or not mgr.has(aid):
             return ""
-        block = _identity_block(aid)
+        parts = [f"<assistant_identity>\n{mgr.identity_block(aid)}\n</assistant_identity>"]
+        workdir = str((context or {}).get("project_root") or "")
+        parts.append(mgr.memory_system_block(aid, workdir))
+        block = "\n\n".join(p for p in parts if p)
         if not block:
             return ""
         context["agent_identity_content"] = ""
@@ -130,25 +106,21 @@ def hook(event: str, context: Dict[str, Any]) -> str:
 
 
 def on_session_start(event: str, context: Dict[str, Any]) -> str:
-    """SessionStart hook：注入人工提示 + 记忆块到 session.messages。
+    """SessionStart hook：注入人工提示（pinned）到 session.messages。
 
-    由主程序 _inject_hook_to_session 包装为 role=user 的 hook 消息注入会话
-    消息列表（带 <session-start-hook> / <system-reminder> 标记），不进系统
-    提示词。会话级临时助手（@提及）override 优先（重启/清空/压缩后
-    override 仍在，按其记忆开关与记忆内容注入）；新会话首条消息 @ 场景
-    override 尚未生效（@ 在 PreUserMessage 才检测），回落主助手。
+    由主程序 _inject_hook_to_session 包装为 hook 消息注入会话消息列表
+    （带 <session-start-hook> / <system-reminder> 标记）。记忆内容不走
+    此通道（系统提示词注入，写后失效缓存刷新）；pinned 是人工要求，
+    会话启动/清空/压缩时注入一次即可。
     """
     try:
         mgr = _get_manager()
         if mgr is None:
             return ""
-        sid = str((context or {}).get("session_id") or "")
-        aid = mgr.get_session_override(sid) if sid else ""
+        aid = _resolve_aid(mgr, context or {})
         if not aid:
-            aid = mgr.active_id()
-        if not aid or not mgr.has(aid):
             return ""
-        return _memory_block(aid) or ""
+        return mgr.pinned_block(aid) or ""
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] SessionStart 处理失败: {e}")
         return ""
@@ -203,13 +175,9 @@ def on_pre_user(event: str, context: Dict[str, Any]) -> str:
 
 
 def on_stop(event: str, context: Dict[str, Any]) -> str:
-    """Stop hook：主对话每轮结束 → MemoryTicker 计数（驱动记忆传送带）。
+    """Stop hook：记录 sid→aid 归属映射（供记忆工具按会话解析助手归属）。
 
-    归属：会话级临时助手优先（override），否则主助手；每轮把
-    sid→aid 写入归属映射，供记忆传送带过滤素材，保证各助手
-    记忆互相独立。
-
-    恒返回空串（不向对话注入任何内容）。
+    归属：会话级临时助手优先（override），否则主助手。恒返回空串。
     """
     try:
         if (context or {}).get("current_role") != "primary":
@@ -218,16 +186,9 @@ def on_stop(event: str, context: Dict[str, Any]) -> str:
         if mgr is None:
             return ""
         sid = str((context or {}).get("session_id") or "")
-        aid = mgr.get_session_override(sid) if sid else ""
-        if not aid:
-            aid = mgr.active_id()
-        if not aid or not mgr.has(aid):
-            return ""
-        if sid:
+        aid = _resolve_aid(mgr, context or {})
+        if sid and aid:
             mgr.record_session_aid(sid, aid)
-        ticker = _get_ticker(mgr)
-        if ticker is not None:
-            ticker.on_turn_finished(aid)
     except Exception as e:
-        logger.debug(f"[assistant_hub.hooks] Stop 计数失败: {e}")
+        logger.debug(f"[assistant_hub.hooks] Stop 归属记录失败: {e}")
     return ""

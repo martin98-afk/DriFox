@@ -18,6 +18,9 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QTreeView
 
+# FileTreeCard 是 QWidget：构造前必须存在 QApplication（否则 qFatal 0xC0000409）
+_QAPP = QApplication.instance() or QApplication(sys.argv)
+
 _PLUGIN_UI = Path(__file__).resolve().parent.parent.parent / "plugins" / "file-tree" / "ui"
 
 
@@ -91,7 +94,8 @@ class _FakeThread:
         self.started.emit()
 
     def quit(self):
-        pass
+        # 对齐真实语义：quit → 线程事件循环退出 → finished（收尾槽置 None + pump）
+        self.finished.emit()
 
     def wait(self, ms=0):
         return True
@@ -101,15 +105,18 @@ class _FakeThread:
 
 
 class _FakeScanner:
-    def __init__(self):
+    """同步桩：目录构造时绑定、scan() 无参（对齐 _TreeScanner 新接口）"""
+
+    def __init__(self, directory=""):
+        self._directory = directory
         self.finished = _FakeSignal()
         self.error = _FakeSignal()
 
     def moveToThread(self, thread):
         pass
 
-    def scan(self, directory):
-        self.finished.emit(_scan_dir(directory))
+    def scan(self):
+        self.finished.emit(_scan_dir(self._directory))
 
 
 class TestWatcherRootProtection:
@@ -230,9 +237,12 @@ class TestCardRootChange:
             scans = []
 
             class _RecordingScanner(_FakeScanner):
-                def scan(self, directory):
+                def __init__(self, directory):
+                    super().__init__(directory)
                     scans.append(directory)
-                    super().scan(directory)
+
+                def scan(self):
+                    super().scan()
 
             monkeypatch.setattr(cards_mod, "_TreeScanner", _RecordingScanner)
             # sub 未展开（未加载），外部变更应被忽略

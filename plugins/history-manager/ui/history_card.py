@@ -655,13 +655,16 @@ class _TeamGroupCard(QFrame):
     archiveRequested = Signal(str)  # run_id
     memberSelected = Signal(dict)  # 成员 session_record
 
-    def __init__(self, group: Dict, parent=None):
+    def __init__(self, group: Dict, parent=None, is_current: bool = False):
         super().__init__(parent)
         # 兼容两种来源：set_team_groups 老格式（run_id）/ 合并条目新格式（team_run_id）
         self._run_id = group.get("run_id") or group.get("team_run_id") or ""
         self._members: List[Dict] = []
         self._members_visible = False
         self._last_time = group.get("last_time", "")
+        # 当前会话标识：本窗口正打开的会话属于该团队成员时置 True（与普通会话
+        # 行 _is_current 同语义），由渲染队列 / _sync_current_highlight 驱动。
+        self._is_current = bool(is_current)
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("teamGroupCard")
 
@@ -690,10 +693,6 @@ class _TeamGroupCard(QFrame):
         title_row.addWidget(self._arrow_label, 0)
 
         self.title_label = _ElidedLabel("", self)
-        self.title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px; background: transparent;"
-            f" {self._font_family}"
-        )
         title_row.addWidget(self.title_label, 1)
 
         # 成员/轮数小标签（胶囊样式，与分支/项目标签同款）
@@ -741,17 +740,53 @@ class _TeamGroupCard(QFrame):
         self._members_layout: Optional[QVBoxLayout] = None
 
         self._apply_style()
+        self._apply_title_style()
         self.update_group(group)
 
     # ── 样式 ──
 
     def _apply_style(self):
-        """行式样式与普通会话行对齐：透明底，hover 微底色"""
+        """行式样式与普通会话行对齐：透明底，hover 微底色
+
+        当前会话（本窗口正打开的会话属于该团队成员）时与普通会话行同步：
+        左色条 + 淡底（``_HistoryItemCard._apply_style`` 同语义），保证
+        「当前会话只有颜色标识」的规则对团队合并条目同样成立。
+        """
         Colors.refresh()
-        self.setStyleSheet(
-            "QFrame#teamGroupCard { background-color: transparent; border: none; border-radius: 4px; }"
-            f"QFrame#teamGroupCard:hover {{ background-color: {Colors.HOVER_BG}; }}"
-        )
+        if self._is_current:
+            self.setStyleSheet(
+                f"QFrame#teamGroupCard {{ background-color: {Colors.SELECTED_BG};"
+                f" border-left: 3px solid {Colors.TEXT_ACCENT}; border-radius: 4px; }}"
+                f"QFrame#teamGroupCard:hover {{ background-color: {Colors.TAB_ACTIVE_BG}; }}"
+            )
+        else:
+            self.setStyleSheet(
+                "QFrame#teamGroupCard { background-color: transparent; border: none; border-radius: 4px; }"
+                f"QFrame#teamGroupCard:hover {{ background-color: {Colors.HOVER_BG}; }}"
+            )
+
+    def _apply_title_style(self):
+        """标题样式（当前会话加粗；与普通会话行 _apply_title_style 同语义）"""
+        if self._is_current:
+            self.title_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {self._font_size}px;"
+                f" background: transparent; {self._font_family}"
+            )
+        else:
+            self.title_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px;"
+                f" background: transparent; {self._font_family}"
+            )
+
+    def set_current(self, is_current: bool) -> bool:
+        """就地切换当前会话标识，返回是否发生实质变化"""
+        is_current = bool(is_current)
+        if self._is_current == is_current:
+            return False
+        self._is_current = is_current
+        self._apply_style()
+        self._apply_title_style()
+        return True
 
     def _ensure_preview_label(self, text: str):
         """确保存在预览标签（独立一行，样式与普通会话行一致）"""
@@ -915,10 +950,7 @@ class _TeamGroupCard(QFrame):
             f"color: {Colors.TEXT_MUTED}; font-size: {self._caption_size}px; background: transparent;"
             f" {self._font_family}"
         )
-        self.title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px; background: transparent;"
-            f" {self._font_family}"
-        )
+        self._apply_title_style()  # 当前会话加粗在此维护，主题刷新不得抹掉
         self.meta_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background-color: {Colors.HOVER_BG};"
             f" border-radius: 3px; padding: 0px 4px; font-size: {self._caption_size - 1}px; {self._font_family}"
@@ -1121,27 +1153,91 @@ class HistoryCard(QWidget):
         return provider
 
     def _resolve_worktree_branch(self, worktree_path: str) -> str:
-        """从 worktree 路径解析分支名（带缓存）"""
+        """从 worktree 路径解析分支名（带缓存）
+
+        [PERF] 快路径直接读 HEAD 文件解析（零子进程，微秒级）：
+        - 主仓库：``<path>/.git/HEAD``，内容 ``ref: refs/heads/<branch>``
+        - worktree：``<path>/.git`` 是文件（``gitdir: <主仓库>/.git/worktrees/<名>``），
+          HEAD 在该 gitdir 目录下
+        旧实现每个**不同** worktree 路径都要起一次 ``git branch --show-current``
+        子进程，且发生在渲染批次（主线程）内串行执行 —— Windows + Defender 下
+        实测每个子进程 100-300ms（见 git_worktree.py 注释），首屏几十条跨
+        worktree 的会话 = 数秒冻结，是历史页初始加载卡顿的主因。
+        """
         if not worktree_path:
             return ""
         # 缓存命中
         cached = self._worktree_branch_cache.get(worktree_path)
         if cached is not None:
             return cached
-        # 调用 git 获取分支名
-        try:
-            from app.utils.git_worktree import GitWorktreeDetector
 
-            branch = GitWorktreeDetector.get_current_branch(worktree_path)
-            if branch:
-                self._worktree_branch_cache[worktree_path] = branch
-                return branch
+        branch, head_readable = self._read_head_branch(worktree_path)
+        if not branch and not head_readable:
+            # HEAD 读不到/异常路径：退回 git 子进程兜底
+            try:
+                from app.utils.git_worktree import GitWorktreeDetector
+
+                branch = GitWorktreeDetector.get_current_branch(worktree_path)
+            except Exception:
+                branch = ""
+        if not branch:
+            # detached HEAD（head_readable=True 但无分支名）或 git 也为空：
+            # 与旧 ``git branch --show-current`` 空串语义一致，用目录名显示
+            branch = os.path.basename(worktree_path.rstrip("/\\"))
+        self._worktree_branch_cache[worktree_path] = branch
+        return branch
+
+    @staticmethod
+    def _read_head_branch(path: str) -> tuple:
+        """读 ``.git/HEAD`` 解析当前分支名（零子进程）
+
+        Returns:
+            (branch, head_readable)：branch 为空表示 detached HEAD 或无法解析；
+            head_readable=False 表示 HEAD 不可读（调用方据此决定是否走 git 兜底）
+        """
+        try:
+            git_path = os.path.join(path, ".git")
+            gitdir = git_path
+            if os.path.isfile(git_path):
+                # worktree：.git 是文件，内容 ``gitdir: <路径>``（可能为相对路径）
+                with open(git_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read().strip()
+                if not content.startswith("gitdir:"):
+                    return "", False
+                gitdir = content[len("gitdir:") :].strip().rstrip("/\\")
+                if gitdir and not os.path.isabs(gitdir):
+                    gitdir = os.path.join(path, gitdir)
+            elif not os.path.isdir(git_path):
+                return "", False
+            head_path = os.path.join(gitdir, "HEAD")
+            if not os.path.isfile(head_path):
+                return "", False
+            with open(head_path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read().strip()
+            if head.startswith("ref: refs/heads/"):
+                return head[len("ref: refs/heads/") :].strip(), True
+            # detached HEAD：HEAD 可读但非分支引用
+            return "", True
         except Exception:
-            pass
-        # 兜底：用目录名作为显示
-        fallback = os.path.basename(worktree_path.rstrip("/\\"))
-        self._worktree_branch_cache[worktree_path] = fallback
-        return fallback
+            return "", False
+
+    def clear_search(self) -> bool:
+        """清空搜索过滤（外投影切换入口），返回是否原本有搜索词。
+
+        标签页切换时必须调用：HistoryCard 是单例，``_search_filter`` 挂在卡片上
+        而非窗口上。不清的话 A 页搜过的词会跨页残留，B 页列表 = B 项目会话 ∩
+        A 页搜索词，用户不知情地看到残缺列表。
+        """
+        if not self._search_filter:
+            # 过滤词已空，但仍可能有待触发的防抖定时器（输入痕迹），一并停掉
+            self._search_debounce_timer.stop()
+            return False
+        self._search_filter = ""
+        self._show_limit = self._page_size  # 与清空搜索同口径：恢复分页首屏
+        # 🛡️ 必须停掉防抖定时器：否则上一标签页敲字残留的 200ms 定时器到期后
+        # 会用已废弃的语义再刷一次列表（且此时 list 数据已换成新标签页的）。
+        self._search_debounce_timer.stop()
+        return True
 
     def set_search_filter(self, text: str):
         """设置搜索过滤文本（带防抖 200ms）"""
@@ -1415,6 +1511,13 @@ class HistoryCard(QWidget):
         if current_index is not None and 0 <= current_index < len(self._all_history):
             current = self._all_history[current_index]
         current_sid = current.get("session_id", "") if current else ""
+        # 当前会话是团队成员时，命中面是**团队合并条目**：current.["members"]
+        # 里含该成员 session_id（与页面 _locate_current_index 同语义）。
+        current_runs = set()
+        if current is not None and current.get("team_merged"):
+            run_id = current.get("team_run_id", "")
+            if run_id:
+                current_runs.add(run_id)
         changed = False
         for sid, card in self._cached_cards.items():
             should = bool(current_sid) and sid == current_sid
@@ -1423,6 +1526,12 @@ class HistoryCard(QWidget):
                 card._apply_style()
                 card._apply_title_style()
                 changed = True
+        # 🛡️ 团队合并条目同样要走高亮同步：旧实现只遍历 _cached_cards，
+        # 团队会话作为当前会话时颜色标识完全不更新（"当前会话无高亮"）。
+        for run_id, card in self._cached_team_cards.items():
+            should = run_id in current_runs
+            if getattr(card, "_is_current", False) != should:
+                changed = card.set_current(should) or changed
         return changed
 
     def set_archived_sessions(self, archived_list: List[Dict]):
@@ -1517,11 +1626,13 @@ class HistoryCard(QWidget):
 
             elif item_type == "team_group":
                 group = item[1]
+                # 队列第 4 位 = 是否当前会话（渲染层判定，不写回源 dict）
+                is_current = item[3] if len(item) > 3 else False
                 # 兼容两种来源：set_team_groups 老格式（run_id）/ 合并条目新格式（team_run_id）
                 run_id = group.get("run_id") or group.get("team_run_id") or ""
                 card = self._cached_team_cards.get(run_id)
                 if card is None:
-                    card = _TeamGroupCard(group, self)
+                    card = _TeamGroupCard(group, self, is_current=is_current)
                     card.restoreRequested.connect(self.teamRestoreRequested)
                     card.archiveRequested.connect(self.teamArchiveRequested)
                     card.memberSelected.connect(self._on_team_member_selected)
@@ -1530,6 +1641,7 @@ class HistoryCard(QWidget):
                     # 🛡️ 缓存命中：增量刷新成员列表/元信息/预览（agent_names
                     # 可能已变化，如新成员加入/成员清理），避免 UI 与实际不一致
                     card.update_group(group)
+                    card.set_current(is_current)
                 layout.insertWidget(layout.count() - 1, card)
                 card.show()
 
@@ -1726,25 +1838,22 @@ class HistoryCard(QWidget):
 
         visible_ids = set()
         active_run_ids = set()
-        current_session_widget = False
-        current_matches_search = True
 
+        # 「当前会话」不再独立成区（2026-10-15）：条目按其 last_time 留在所属
+        # 日期分组的原位，仅靠行高亮区分（左色条 + 淡底 + 标题加粗，见
+        # _HistoryItemCard._is_current / _sync_current_highlight）。
+        # 旧实现把该条目提到列表最前并加「当前会话」分组标题，再从下方分组中
+        # 剔除 → 用户新建会话后顶部恒驻一条、与下方「今天」分组重复出现，
+        # 且点击其它记录时整块内容位移。原位 + 高亮语义等价且不跳动。
+        # 保留 _current_index 仅用于标记高亮，不参与队列编排。
         if not incremental and self._current_index is not None and 0 <= self._current_index < len(self._all_history):
             current_session = self._all_history[self._current_index]
-            current_matches_search = not self._search_filter or _matches_search(
-                current_session, self._search_filter, self._pinyin_cache
-            )
-            if current_matches_search:
-                if current_session.get("team_merged"):
-                    active_run_ids.add(current_session.get("team_run_id", ""))
-                else:
-                    visible_ids.add(current_session.get("session_id", ""))
-                current_session_widget = True
-                queue.append(("header", "当前会话", 0))
-                queue.append(("session", current_session, self._current_index, True))
-                queue.append(("spacer",))
+            if current_session.get("team_merged"):
+                active_run_ids.add(current_session.get("team_run_id", ""))
+            else:
+                visible_ids.add(current_session.get("session_id", ""))
 
-        other_sessions = [(i, s) for i, s in enumerate(self._all_history) if i != self._current_index]
+        other_sessions = list(enumerate(self._all_history))
         if self._search_filter:
             other_sessions = [
                 (i, s) for i, s in other_sessions if _matches_search(s, self._search_filter, self._pinyin_cache)
@@ -1784,10 +1893,11 @@ class HistoryCard(QWidget):
         session_count = 0
         self._remaining_count = max(0, total_other - limit)
 
-        # 增量追加时列表已非空（has_items 只用于决定是否显示空态占位）
-        has_items = current_session_widget or incremental
+        # 增量追加时列表已非空（has_items 只用于决定是否显示空态占位）。
+        # 「当前会话」区移除后，条目本身已在分组队列里，has_items 由分组覆盖。
+        has_items = incremental
 
-        # ── 置顶分组（当前会话区之后、日期分组之前；不受分页限制） ──
+        # ── 置顶分组（日期分组之前；不受分页限制） ──
         if pinned_entries and not incremental:
             has_items = True
             queue.append(("header", "置顶", len(pinned_entries)))
@@ -1796,7 +1906,7 @@ class HistoryCard(QWidget):
                     continue  # 团队合并条目无置顶语义，防御跳过
                 sid = session.get("session_id", "")
                 visible_ids.add(sid)
-                queue.append(("session", session, original_index, False))
+                queue.append(("session", session, original_index, original_index == self._current_index))
             queue.append(("spacer",))
 
         for section, sessions in final_order:
@@ -1822,16 +1932,24 @@ class HistoryCard(QWidget):
             if offset == 0:
                 queue.append(("header", section, total_in_section))
             for original_index, session in to_add:
+                # 「当前会话」区移除后，高亮在此判定（普通条目与团队条目同口径）：
+                # 条目落在所属日期分组原位，靠 is_current 驱动左色条 + 加粗。
+                _is_cur = original_index == self._current_index
                 if session.get("team_merged"):
                     # 团队合并条目：按 run_id 渲染团队卡（与普通条目同位置混排）
                     run_id = session.get("team_run_id", "")
                     if run_id:
                         active_run_ids.add(run_id)
-                        queue.append(("team_group", session, original_index))
+                        # ⚠️ 不往 session dict 里写 _is_current：这些 dict 是
+                        # _all_history 的元素（数据层的轻量条目），就地打 UI 标记
+                        # 会污染源数据（_history_signature 比较、卡片 update_data
+                        # 都可能读到残留值）。当前态随队列 tuple 传递，由渲染层
+                        # 落到卡片实例。
+                        queue.append(("team_group", session, original_index, _is_cur))
                 else:
                     sid = session.get("session_id", "")
                     visible_ids.add(sid)
-                    queue.append(("session", session, original_index, False))
+                    queue.append(("session", session, original_index, _is_cur))
             session_count += offset + len(to_add)
             if offset == 0:
                 queue.append(("spacer",))

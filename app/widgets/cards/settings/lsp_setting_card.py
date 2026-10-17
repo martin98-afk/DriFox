@@ -31,6 +31,7 @@ from app.utils.config import Settings
 from app.utils.design_tokens import Colors, SwitchStyles, apply_font_size_to_widget, scale_font_size
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.elided_label import _ElidedLabel
+from app.widgets.status_dot import StatusDot
 
 # ── LSP 单行 ──────────────────────────────────────────────────────
 
@@ -69,19 +70,13 @@ class LspServerRow(CardWidget):
     def set_running(self, running: bool):
         """更新运行状态指示灯"""
         if running:
-            self._status_dot.setText("●")
-            self._status_dot.setStyleSheet(
-                f"color: #22c55e; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
-            )
+            self._status_dot.set_color("#22c55e")
             self._status_dot.setToolTip("运行中")
             # 运行中隐藏安装按钮
             if hasattr(self, "_install_btn"):
                 self._install_btn.setVisible(False)
         else:
-            self._status_dot.setText("●")
-            self._status_dot.setStyleSheet(
-                f"color: #6b7280; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
-            )
+            self._status_dot.set_color("#6b7280")
             self._status_dot.setToolTip("未启动")
             # 未运行时，若未安装则显示安装按钮
             if hasattr(self, "_install_btn"):
@@ -99,14 +94,9 @@ class LspServerRow(CardWidget):
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(8)
 
-        # 状态指示灯
-        self._status_dot = QLabel("●")
-        self._status_dot.setFixedWidth(16)
-        self._status_dot.setAlignment(Qt.AlignCenter)
+        # 状态指示灯（CSS 圆点，矢量绘制不发虚不裁切）
+        self._status_dot = StatusDot(10, color="#6b7280")
         self._status_dot.setToolTip("未启动")
-        self._status_dot.setStyleSheet(
-            f"color: #6b7280; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
-        )
         layout.addWidget(self._status_dot)
 
         # 名称

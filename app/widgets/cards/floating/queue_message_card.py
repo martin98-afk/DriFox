@@ -10,11 +10,11 @@
 - 「插入」→ insertRequested(msg_id)：立即注入当前对话流（不停 worker）；
 - 「编辑」→ 行内编辑，回车/失焦保存 emit editRequested(msg_id, new_text)，Esc 取消；
 - 「删除」→ removeRequested(msg_id)：移出队列；
-- 卡片不自管数据，set_entries 全量刷新（单一数据源在 main_widget）；
+- 卡片不自管数据，set_entries 按 msg_id 增量刷新（单一数据源在 main_widget）；
+- 高度精确跟随内容：提供 heightForWidth + heightChanged（见下方"高度契约"）；
 - 无 TTL（区别于 UndoDeleteCard）。
 
 设计说明（2026-09-12 视觉重做）
-------------------------------
 旧版用 ``REALTIME_BG`` 作底 + 1px 饱和蓝（``REALTIME_BORDER`` #2563eb）做全宽
 行分隔线。在浅色主题下 ``realtime_bg`` 与对话区底色几乎同色（lumia: #f5f5f5 vs
 #ffffff），卡片没有任何可见边界，整块区域只剩两根高饱和蓝线 —— 实测像素对比度
@@ -67,6 +67,11 @@ class QueueMessageCard(QWidget):
     insertRequested = Signal(str)  # msg_id：立即注入该条（不停 worker）
     removeRequested = Signal(str)  # msg_id：移出队列
     editRequested = Signal(str, str)  # msg_id, new_text：编辑保存
+    # 内容高度变化：容器据此重算高度（add_card 已通用接线 → _schedule_expand）。
+    # 不能只依赖卡片 Resize 事件——展开/折叠动画窗口内 Resize 会被容器守卫
+    # 丢弃（防自激），窗口过后几何不再变化 → 容器永久锁在旧高度（多条时
+    # 第 2 行起被裁切的根因）。
+    heightChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -77,6 +82,10 @@ class QueueMessageCard(QWidget):
         self.setProperty(CardContainer.FOLLOW_CONTENT_PROP, True)
         # 自定义 QWidget 子类的 QSS 背景/边框需要显式开启，否则不绘制
         self.setAttribute(Qt.WA_StyledBackground, True)
+        # 容器动画豁免：条目增删走 snap 直落终值。容器 200ms 高度动画在真实环境
+        # （流式输出挤压 BOTTOM 停靠区 + 动画中途 stop/restart）下中间态暴露为
+        # 视觉跳闪；条目变化是高频小操作，直接落位观感更稳（与 CommandCard 同款）。
+        self.setProperty(CardContainer.NO_ANIMATION_PROP, True)
         self.setVisible(False)
         self._setup_ui()
 
@@ -135,50 +144,54 @@ class QueueMessageCard(QWidget):
         self._refresh_rows_style()
 
     def _refresh_rows_style(self):
-        """条目行样式（行控件在 set_entries 时动态创建，统一在此应用）"""
+        """条目行样式（主题切换 / 字号变更时全量补刷）"""
         for row in self._rows():
-            # 去线：只用 hover 底色表达行结构（旧版全宽饱和蓝分隔线是画面最抢眼元素）
-            row.setStyleSheet(f"""
-                QWidget#queueRow {{
+            self._style_row(row)
+
+    def _style_row(self, row: QWidget):
+        """单行样式应用（新建行即时调用；复用行不重刷，避免整表 setStyleSheet 开销）"""
+        # 去线：只用 hover 底色表达行结构（旧版全宽饱和蓝分隔线是画面最抢眼元素）
+        row.setStyleSheet(f"""
+            QWidget#queueRow {{
+                background: transparent;
+                border-radius: 6px;
+            }}
+            QWidget#queueRow:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        idx = row.findChild(QLabel, "queueRowIndex")
+        if idx is not None:
+            idx.setStyleSheet(f"""
+                QLabel#queueRowIndex {{
+                    color: {Colors.TEXT_SECONDARY};
+                    {get_font_family_css()} {font_size_css(11)};
                     background: transparent;
-                    border-radius: 6px;
-                }}
-                QWidget#queueRow:hover {{
-                    background: {Colors.HOVER_BG};
                 }}
             """)
-            idx = row.findChild(QLabel, "queueRowIndex")
-            if idx is not None:
-                idx.setStyleSheet(f"""
-                    QLabel#queueRowIndex {{
-                        color: {Colors.TEXT_SECONDARY};
-                        {get_font_family_css()} {font_size_css(11)};
+        for label in row.findChildren(QLabel):
+            if label.objectName() == "queueRowText":
+                label.setStyleSheet(f"""
+                    QLabel#queueRowText {{
+                        color: {Colors.TEXT_PRIMARY};
+                        {get_font_family_css()} {font_size_css(14)};
                         background: transparent;
                     }}
                 """)
-            for label in row.findChildren(QLabel):
-                if label.objectName() == "queueRowText":
-                    label.setStyleSheet(f"""
-                        QLabel#queueRowText {{
-                            color: {Colors.TEXT_PRIMARY};
-                            {get_font_family_css()} {font_size_css(14)};
-                            background: transparent;
-                        }}
-                    """)
-            for edit in row.findChildren(QLineEdit):
-                edit.setStyleSheet(f"""
-                    QLineEdit {{
-                        background: {Colors.HOVER_BG};
-                        border: 1px solid {Colors.TAG_ACCENT};
-                        border-radius: 6px;
-                        padding: 3px 8px;
-                        {get_font_family_css()} {font_size_css(14)};
-                        color: {Colors.TEXT_PRIMARY};
-                    }}
-                    QLineEdit:focus {{
-                        border: 1px solid {Colors.TAG_ACCENT};
-                    }}
-                """)
+        for edit in row.findChildren(QLineEdit):
+            edit.setStyleSheet(f"""
+                QLineEdit {{
+                    background: {Colors.HOVER_BG};
+                    border: 1px solid {Colors.TAG_ACCENT};
+                    border-radius: 6px;
+                    padding: 3px 8px;
+                    {get_font_family_css()} {font_size_css(14)};
+                    color: {Colors.TEXT_PRIMARY};
+                }}
+                QLineEdit:focus {{
+                    border: 1px solid {Colors.TAG_ACCENT};
+                }}
+            """)
 
     def _rows(self) -> list:
         """按布局顺序返回条目行（顺序 = 发送顺序，勿用 findChildren 的任意序）"""
@@ -243,30 +256,106 @@ class QueueMessageCard(QWidget):
         self.refresh_style()
 
     # ───────────────────────────────────────────────────────────
+    # 高度契约（容器 follow_content 分支取高接口）
+    # ───────────────────────────────────────────────────────────
+
+    def _content_height(self) -> int:
+        """按当前行数直算精确卡片高度（不读 Qt 布局缓存）
+
+        布局口径（与 _setup_ui 一致）：页眉 HEADER_H + 条目区上下 margin +
+        n 行 × ROW_H + 行间距。实测 1/2/3/5 行 = 76/109/142/208，与
+        sizeHint 收敛值一致；不读 sizeHint 是刻意的——它带布局缓存，
+        set_entries 同 tick 内是残值（实测 44 vs 真值 109）。
+        """
+        n = self._list_layout.count()
+        m = self._list_layout.contentsMargins()
+        spacing = self._list_layout.spacing() * max(0, n - 1)
+        return self.HEADER_H + m.top() + m.bottom() + n * self.ROW_H + spacing
+
+    def hasHeightForWidth(self):
+        # 与 CommandCard 同款：供容器 _follow_content_natural_h 精确取高
+        return True
+
+    def heightForWidth(self, w):
+        """按行数返回卡片目标高度（容器 follow_content 分支的直接输入）"""
+        return self._content_height()
+
+    # ───────────────────────────────────────────────────────────
     # 对外 API
     # ───────────────────────────────────────────────────────────
 
     def set_entries(self, entries: list):
-        """全量重建条目列表
+        """按 msg_id 增量刷新条目列表：已有行复用不重建，只增删变化行
+
+        旧实现全量销毁重建，每次入队整卡重刷（hover 态丢失 + 视觉突变）。
+        现复用行控件：追加/移除时已有行零变化，编辑中的行不被打断。
 
         Args:
             entries: [{"id": str, "text": str}]，顺序即发送顺序
         """
-        self._editor = None
-        self._editing_id = None
-        while self._list_layout.count():
-            item = self._list_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        desired_ids = [str(e.get("id", "")) for e in entries]
+        # 编辑中的行：仍在列表则保留编辑态；被移除才拆编辑器
+        if self._editor is not None and self._editing_id not in desired_ids:
+            self._teardown_editor()
+
+        by_id: dict = {}
+        for row in self._rows():
+            by_id[row.property("msg_id") or ""] = row
+        # 全部行先摘出布局（不销毁），随后按 entries 顺序放回
+        for row in by_id.values():
+            self._list_layout.removeWidget(row)
+
         for i, entry in enumerate(entries, 1):
-            self._list_layout.addWidget(self._build_row(entry, i))
+            mid = str(entry.get("id", ""))
+            row = by_id.pop(mid, None)
+            if row is None:
+                row = self._build_row(entry, i)
+                self._style_row(row)
+            else:
+                self._update_row(row, entry, i)
+            self._list_layout.addWidget(row)
+
+        # 剩余 = 不在新列表的行，销毁
+        for row in by_id.values():
+            row.deleteLater()
+
         # 计数 pill：仅多条目时显示（单条时 "1 条" 属冗余信息）
         self._count_label.setText(f"{len(entries)} 条" if len(entries) > 1 else "")
         self._count_label.setVisible(len(entries) > 1)
-        self._refresh_rows_style()
-        # 主动触发卡片 Resize → 容器 eventFilter → _schedule_expand 收缩/展开
+        # 布局缓存失效，再主动通知容器重算：容器读 heightForWidth（按行数直算），
+        # 不读 sizeHint 缓存，故本 tick 内 emit 也拿到正确新高度。
+        self.updateGeometry()
         self.adjustSize()
+        self.heightChanged.emit()
+
+    def _update_row(self, row: QWidget, entry: dict, index: int):
+        """复用行更新序号与文本（控件不重建，视觉零变化）"""
+        row.setProperty("msg_id", str(entry.get("id", "")))
+        idx_label = row.findChild(QLabel, "queueRowIndex")
+        if idx_label is not None:
+            idx_label.setText(str(index))
+        text_label = row.findChild(QLabel, "queueRowText")
+        if text_label is not None:
+            raw_text = str(entry.get("text", ""))
+            text_label.setText(summarize_entry_text(raw_text))  # _ElidedLabel 自动同步 tooltip
+            text_label.setToolTip(raw_text)  # 覆盖摘要 tooltip，悬浮看完整原文（与 _build_row 同口径）
+
+    def _teardown_editor(self):
+        """拆除行内编辑器并还原文本 label（保留行控件，供增量复用）"""
+        if self._editor is None:
+            return
+        editor = self._editor
+        self._editor = None
+        self._editing_id = None
+        parent = editor.parentWidget()
+        if parent is not None:
+            layout = parent.layout()
+            if layout is not None:
+                layout.removeWidget(editor)
+            label = parent.findChild(QLabel, "queueRowText")
+            if label is not None:
+                label.show()
+        editor.deleteLater()
 
     def _build_row(self, entry: dict, index: int) -> QWidget:
         row = QWidget(self._list_container)
@@ -306,9 +395,7 @@ class QueueMessageCard(QWidget):
         edit_btn.setFixedSize(self.BTN_SIZE, self.BTN_SIZE)
         edit_btn.setIconSize(QSize(15, 15))
         edit_btn.setToolTip("编辑消息")
-        edit_btn.clicked.connect(
-            lambda _=False, r=row, mid=msg_id, t=raw_text: self._begin_edit(r, mid, t)
-        )
+        edit_btn.clicked.connect(lambda _=False, r=row, mid=msg_id, t=raw_text: self._begin_edit(r, mid, t))
         layout.addWidget(edit_btn)
 
         # 删除：移出队列
@@ -350,9 +437,8 @@ class QueueMessageCard(QWidget):
             return
         new_text = editor.text().strip()
         msg_id = self._editing_id or ""
-        # 先清引用再 emit：set_entries 全量重建会移除编辑器
-        self._editor = None
-        self._editing_id = None
+        # 先拆编辑器还原行（行控件会被 set_entries 复用），再 emit
+        self._teardown_editor()
         if new_text:
             self.editRequested.emit(msg_id, new_text)
         else:
@@ -363,8 +449,7 @@ class QueueMessageCard(QWidget):
         """取消编辑（Esc）：丢弃修改，还原显示"""
         if self._editor is None:
             return
-        self._editor = None
-        self._editing_id = None
+        self._teardown_editor()
         self.set_entries(self._entries_snapshot())
 
     def _entries_snapshot(self) -> list:

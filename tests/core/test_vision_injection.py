@@ -49,7 +49,7 @@ def _make_vision_worker(model: str):
     w._current_session_messages = []
     w._api_messages_cache = None
     w._api_messages_built = False
-    w._supports_vision = True
+    # P1-9 批 e：_supports_vision 手工属性已随实现退役（视觉判定改走 resolve 链）
     w._append_to_api_cache = lambda msgs: None  # stub（不引入 messages_to_api 依赖）
     w._is_gemini_model = lambda: False
     w._requires_reasoning_content = lambda: False
@@ -286,8 +286,13 @@ class TestVisionNoticeSuppression:
     def _set_caps(monkeypatch, supports_vision: bool):
         import app.core.modelmeta.model_capabilities as mc
 
+        # P1-9 批 d 后视觉判定走 resolve_model_capabilities（内部两参调 caps）
         monkeypatch.setattr(
-            mc, "get_model_capabilities", lambda name: {"supports_vision": supports_vision}
+            mc,
+            "resolve_model_capabilities",
+            lambda llm_config, provider_name="", sources=None: {
+                "supports_vision": supports_vision
+            },
         )
 
     def _build(self, monkeypatch, result_obj, model="gpt-4o", vision=True):

@@ -282,6 +282,8 @@ def test_counters_reset_independently_on_reuse(monkeypatch):
     v._render_deferred = False
     v._pending_todos = None
     v._tool_md_cache = {}  # hasattr 对裸 __new__ 实例访问未定义属性抛 RuntimeError，须预置
+    v._geom_poll_timer = MagicMock()  # [WHEEL-ARM] reset_for_reuse 会 start 轮询定时器
+    v._render_seq = 0  # reset_for_reuse 里 `_render_seq += 1` 需读旧值（裸实例读属性即触发未初始化检查）
     v._render_crash_count = 3
     v._webgl_ctx_lost_count = 2
     v._context_lost = True
@@ -292,3 +294,27 @@ def test_counters_reset_independently_on_reuse(monkeypatch):
     assert v._webgl_ctx_lost_count == 0
     assert v._context_lost is False
     discard.assert_called_once_with(v)
+
+
+def test_try_restore_reasserts_transparency_before_skeleton_load():
+    """崩溃自愈：透明重申必须先于骨架 setHtml（导航）
+
+    renderer 崩溃重置 Chromium 合成面后透明回退白底，backgroundColor 重申在
+    「下一次导航」才生效；若重申晚于 _load_skeleton 的 setHtml，此后内容渲染
+    全走 JS 注入（无导航）→ 白底固化到 viewer 重建（2026-10-17 实证）。
+    断言顺序：ensure_transparent_composition < _load_skeleton。
+    """
+    from app.widgets.message_card import CodeWebViewer
+
+    v = _make_viewer()
+    calls: list = []
+    v.ensure_transparent_composition = lambda: calls.append("transparent")  # type: ignore[method-assign]
+    v._load_skeleton = lambda: calls.append("skeleton")  # type: ignore[method-assign]
+    v._markdown_text = ""  # 跳过补渲分支
+    v._is_js_ready = True
+
+    v._try_restore_context()
+
+    assert calls == ["transparent", "skeleton"], f"重申必须先于骨架加载，实际 {calls}"
+    assert v._context_lost is False
+    v.contextRestored.emit.assert_called_once()

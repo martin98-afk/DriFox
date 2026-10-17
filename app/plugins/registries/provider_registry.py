@@ -59,6 +59,9 @@ class ProviderDef:
     icon_dir: str = ""  # 插件自带深色图标目录（绝对路径；空 → 渲染回退主程序 qrc 资源）
     icon_dir_light: str = ""  # 插件自带浅色图标目录（主题感知；空 → 回退深色/qrc）
     api_url: str = ""  # 默认 API URL
+    # 可选 API URL 预设列表（UI 下拉框候选；空 → 由 api_url 单条兜底，
+    # 取值统一走 app.utils.provider_ui_meta.get_preset_urls）
+    preset_urls: List[str] = field(default_factory=list)
     auth_type: str = "bearer"  # 认证方式：bearer / bce / none / anthropic
     default_model: str = ""  # 默认模型名（"模型名称"）
     default_params: Dict[str, Any] = field(default_factory=dict)  # 其他默认参数（温度/最大Token/思考模式…）
@@ -67,6 +70,12 @@ class ProviderDef:
     models_dev_id: str = ""  # models.dev provider id（MODELS_DEV_PROVIDER_MAP 值）
     family: str = ""  # 能力族（detect_provider_family 返回值，如 "deepseek"）
     capabilities: Dict[str, Any] = field(default_factory=dict)  # family 能力覆盖（PROVIDER_CAPABILITIES 条目）
+    # per-model 能力声明（model_id → caps dict，条目同 MODEL_CAPABILITIES）。
+    # 服务商对自家模型在自家网关下的权威声明，优先级最高（高于 models.dev）：
+    # 网关限额常与官方 API 不同（如 CodeBuddy 的 claude-opus-4.8 为 400K/131K，
+    # 与 anthropic 官方 1M/128K 各自成立）。键按 llm_config["模型名称"] 精确匹配
+    # （strip 后全等，大小写敏感与 MODEL_CAPABILITIES 一致）。
+    model_capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     extra_quota_fields: List[QuotaField] = field(default_factory=list)  # 用量查询额外字段
     # 余额查询 fetcher：签名 (config: dict) -> {"balance":float,"currency":str,"provider":str}
     #   或 {"hide":True,"provider":str,"tooltip":str|省略} | None
@@ -98,8 +107,7 @@ class ProviderDef:
     def to_default_config(self) -> Dict[str, Any]:
         """转成历史 FREE_PROVIDERS[name] 风格的默认配置 dict。
 
-        free 配置注入（config.py _ensure_default_opencode_provider）等
-        依赖此形态，保证兼容。
+        服务商编辑卡预置表单等依赖此形态，保证兼容。
         """
         cfg: Dict[str, Any] = {
             "API_URL": self.api_url,
@@ -220,9 +228,8 @@ class ProviderRegistry:
     def ensure_loaded(self) -> None:
         """确保服务商插件已加载（幂等）。
 
-        启动早期（Settings.get_instance → _ensure_default_opencode_provider）
-        先于 backend 的 warmup_providers 调用，故任何读取入口都需先走本方法
-        触发一次插件扫描；backend 的显式 warmup 也会被本标志去重。
+        启动早期任何读取入口都需先走本方法触发一次插件扫描；backend 的
+        显式 warmup 也会被本标志去重。
         早期扫描可能整体空转（Settings 启停白名单尚未由 PluginManager
         补录新插件 → load_providers 全部跳过），此时不算完成，
         复位标志允许后续调用（如 backend warmup）重试。
@@ -295,6 +302,7 @@ class ProviderRegistry:
 
     def provider_models(self) -> Dict[str, List[str]]:
         """所有服务商的模型列表（PROVIDER_MODELS 替代）"""
+        self.ensure_loaded()
         with self._lock:
             return {name: list(p.models) for name, p in self._providers.items() if p.models}
 
@@ -329,6 +337,7 @@ class ProviderRegistry:
 
     def models_dev_map(self) -> Dict[str, str]:
         """服务商 → models.dev provider id（MODELS_DEV_PROVIDER_MAP 替代）"""
+        self.ensure_loaded()
         with self._lock:
             return {name: p.models_dev_id for name, p in self._providers.items() if p.models_dev_id}
 

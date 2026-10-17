@@ -226,7 +226,7 @@ PluginConfigStore().set_values("my-plugin", {"endpoint": endpoint, "api_secret":
         "email": "your@email.com"
     },
     "homepage": "https://github.com/your/repo",
-    "license": "MIT",
+    "license": "GPL-3.0-or-later",
     "type": "user",
     "icon": {"light": "icon.svg", "dark": "icon_dark.svg"},
     "keywords": ["drifox", "my-plugin", "example"],

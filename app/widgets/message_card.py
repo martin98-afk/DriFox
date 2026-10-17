@@ -33,10 +33,10 @@ from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
 from html import escape, unescape
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import orjson as json
-import shiboken6
+import shiboken6 as sip
 from loguru import logger
 from markdown import Markdown
 from pygments import highlight
@@ -112,6 +112,7 @@ from app.utils.design_tokens import (
     get_unified_scrollbar_style,
     scale_font_size,
     scale_icon_size,
+    set_style_sheet_if_changed,
 )
 
 from app.utils.utils import get_font_family_css, get_icon
@@ -147,7 +148,6 @@ from app.widgets.card_render_core import (
     _CODE_FONT_SIZE,
     _FILE_EDIT_TOOLS_FALLBACK_TEXT,
     _MAX_CHART_PAYLOAD_B64,
-    _MarkdownBlockViewerCls,
     _PLACEHOLDER_QSS,
     _QWIDGETSIZE_MAX,
     _RESIZE_GHOST_QSS,
@@ -159,9 +159,13 @@ from app.widgets.card_render_core import (
     _STREAM_TINT_RETRY,
     STREAM_HEIGHT_ANIM_ENABLED,
     STREAM_HEIGHT_ANIM_MIN_DELTA,
+    STREAM_HEIGHT_DEBOUNCE_MS,
     STREAM_HEIGHT_TICK_MS,
+    STREAM_HEIGHT_TRACK_BOOST,
     STREAM_HEIGHT_TRACK_EPSILON,
     STREAM_HEIGHT_TRACK_FACTOR,
+    STREAM_HEIGHT_TRACK_FAR_PX,
+    STREAM_HEIGHT_TRACK_MAX_FACTOR,
     _THINK_SNAKE_SVG,
     _classify_think_tag,
     _count_think_tool_prefix,
@@ -191,6 +195,7 @@ from app.widgets.card_render_core import (
     _plugin_fence_placeholder,
     _protect_inline_svg_blocks,
     _qt_renderer_enabled,
+    _should_use_qt_renderer,
     _render_inline_tail,
     _render_markdown_to_html_cached_impl,
     _render_plugin_fence,
@@ -205,7 +210,6 @@ from app.widgets.card_render_core import (
     _unwrap_code_blocks_with_context_links,
     _update_icon_prefix,
     _wrap_code_blocks_with_copy_button_web,
-    clear_global_render_cache,
     ensure_bubble_contrast,
     format_relative_time,
     get_font_family_css,
@@ -228,10 +232,28 @@ from app.widgets.card_viewers import (
     _download_and_preview,
     _fence_assets_for_skeleton,
     _logical_height_cap,
+    _logical_height_cap_for_area,
     _show_image_preview,
+    _theme_rerender_queue,
     extract_image_data_uris,
     plan_image_attachment_sources,
 )
+
+
+def user_bubble_target_width(container_width: int) -> int:
+    """用户气泡卡片的落定目标宽度（**全链唯一口径**）。
+
+    气泡本体由 PlainTextViewer 按内容自适应收缩（``set_width_cap`` 只是上限），
+    卡片撑到 ``target`` 只是给气泡留出右侧对齐的透明区。因此这里算的是
+    「气泡最多能有多宽」，不是视觉宽度本身。
+
+    🐛 口径分裂修复（2026-10-12）：margin 曾在三处各算一份——拖拽路径用
+    ``0.25``，而落定两条路径（全量宽度同步 / 滚动同步）残留 ``0.06``。松手
+    瞬间卡片从 75% 跳回 94% → PlainTextViewer 按新宽重折行 → 高度变 →
+    ``setFixedHeight`` → 宿主锚定补偿，一整套二次收敛，即用户报告的
+    「松手后跳一下才稳定」。现收敛到本函数，调用点不得再自行算 margin。
+    """
+    return max(320, int(container_width) - max(24, int(container_width * 0.25)))
 
 
 class MessageCard(SimpleCardWidget):
@@ -257,6 +279,23 @@ class MessageCard(SimpleCardWidget):
     # / 请求等待，不计入生成秒 —— 工具循环里卡片不重建（start_elapsed_tracking
     # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
     _LIVE_GAP_CAP_S = 2.0
+
+    @property
+    def _renderer_pid(self) -> int:
+        """renderer 进程 PID（转发 viewer；B4 强回收链路读 card._renderer_pid）。
+        历史上 card 层只清零不转发，导致 _unloaded_pids 恒空、强回收从未生效。"""
+        v = self.__dict__.get("viewer")
+        if v is not None:
+            try:
+                return getattr(v, "_renderer_pid", 0) or 0
+            except RuntimeError:
+                return 0
+        return self.__dict__.get("_renderer_pid_cache", 0)
+
+    @_renderer_pid.setter
+    def _renderer_pid(self, value: int) -> None:
+        # cleanup 的「清零」语义改为缓存兜底值：viewer 已摘除后仍需可读
+        self.__dict__["_renderer_pid_cache"] = int(value or 0)
 
     def __init__(
         self,
@@ -305,9 +344,11 @@ class MessageCard(SimpleCardWidget):
         # 缺失此标志时，本轮消息在虚拟滚动回收重建后会被误判为历史而突然折叠。
         self._streaming_finished = False
         self._retrying = False  # 重试模式标志
-        # 任务列表快照（卡片底部内嵌 todo 区数据）：viewer 未创建/JS 未就绪时
-        # 暂存，viewer 就绪后补推；骨架重载后据此恢复。
-        self._todos_snapshot: Optional[list] = None
+        # 卡片底部内嵌任务看板（懒创建：首个非空任务到达时才建，挂气泡内正文下方）
+        self._todo_panel = None
+        self._todo_panel_host = None  # 面板挂载的布局容器（气泡布局）
+        self._todo_panel_todos: list = []  # 任务数据快照（重建补推用）
+        self._todo_panel_height_cache = 0  # 面板占高缓存（高度增量上报用）
         self._retry_error_type = ""  # 重试错误类型
         self._retry_attempt = 0  # 当前重试次数
         self._retry_max = 15  # 最大重试次数
@@ -318,10 +359,14 @@ class MessageCard(SimpleCardWidget):
         self._footer_bar: Optional[QWidget] = None
         self._footer_model_label: Optional[QLabel] = None
         self._footer_elapsed_label: Optional[QLabel] = None
-        self._footer_diff_stats_label: Optional[QLabel] = None  # 差异胶囊内文本
-        self._footer_diff_pill: Optional[QWidget] = None  # 差异胶囊容器（文本 + 🔍 同舱）
+        self._footer_diff_stats_label: Optional[QLabel] = None  # 差异统计首段（N 文件）
+        # 差异统计分段（N 文件 / +N / / / -N）：多段纯文本而非单个 RichText
+        # （富文本 sizeHint 与基线同纯文本不同，与左区并排会垂直错位）
+        self._footer_diff_parts: List[QLabel] = []
         # 左区成员表 [(分隔点或None, label)]：耗时 + 插件 stat，· 分隔动态管理
         self._footer_left_items: List[Tuple[Optional[QLabel], QLabel]] = []
+        # 右区成员表：模型名 + 差异统计，· 分隔动态管理
+        self._footer_right_items: List[Tuple[Optional[QLabel], QLabel]] = []
         # 插件注册的页脚信息项（footer_stat 槽位）：{stat_id: QLabel}
         self._footer_stat_labels: Dict[str, QLabel] = {}
         # 耗时实时计时器
@@ -351,6 +396,11 @@ class MessageCard(SimpleCardWidget):
         self._height_anim.setDuration(0)  # 设置为0相当于禁用插值
         self._target_viewer_height = 40
         self._last_applied_viewer_height = 40
+        # 高度语义标记：True = viewer 高度靠 JS 异步上报（CodeWebViewer），
+        # 渲染完成与高度落定是两个时刻；False = 纯 Qt 渲染器（MarkdownBlockViewer，
+        # height() 与内容同步）。由 ensure_rendered 按实际创建出的渲染器写入。
+        # 回收器量取等高占位前用它判断「此刻的高度可不可信」，不靠 isinstance 推断。
+        self._viewer_async_height = True
         # 结束态高度缓动窗口（monotonic 截止时刻；0 = 无窗口）+ 剩余可用次数。
         # 由 MessageCard.finish_streaming 打开，_update_height 用尽预算即失效。
         self._finish_height_anim_until = 0.0
@@ -374,12 +424,16 @@ class MessageCard(SimpleCardWidget):
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
-        # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick（30ms）已把"应用"
+        # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick 已把"应用"
         # 侧的节拍连续化，防抖只负责合并同一窗口内的上报，不再需要独自扛
         # 削峰 —— 拉长只会平白增加"文字已出、目标未到"的滞后。
         self._stream_height_timer = QTimer(self)
         self._stream_height_timer.setSingleShot(True)
-        self._stream_height_timer.setInterval(32)
+        # [T28/P0-2] 与 card_render_core.STREAM_HEIGHT_TICK_MS 对齐单一节拍，
+        # 消除 30/32/40 三层互质节拍的漂移叠加。
+        # [T34→P1步骤4] 演化为独立常量 STREAM_HEIGHT_DEBOUNCE_MS：追踪 tick
+        # 降频 33ms 后防抖仍保持 16ms 单帧，只降追踪拍频率、不增加上报滞后。
+        self._stream_height_timer.setInterval(STREAM_HEIGHT_DEBOUNCE_MS)
         self._stream_height_timer.timeout.connect(self._apply_debounced_height)
         self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)
@@ -551,10 +605,9 @@ class MessageCard(SimpleCardWidget):
 
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换"""
-        # 🐛 清空 LRU 渲染缓存 + 骨架 HTML 缓存，强制下次渲染使用新主题颜色。
-        # 否则 _render_markdown_to_html_cached 的 @lru_cache 会返回旧主题的 HTML
-        # （旧 pygments 代码高亮 + 旧图标路径），导致代码块颜色与背景混淆而"消失"。
-        clear_global_render_cache()
+        # [T16] 渲染缓存已按主题版本分桶（lru key 含 ThemeRefreshCoordinator
+        # 版本号），主题切换无需清空——旧版本条目永不命中，深浅来回切换
+        # 直接命中各自版本桶，无需逐卡 clear。
         # 同步全局性能缓存（图标前缀和字号），确保下次渲染使用新主题
         _update_icon_prefix()
         global _CODE_FONT_SIZE
@@ -566,28 +619,32 @@ class MessageCard(SimpleCardWidget):
         self._apply_card_style()
         # 更新头像
         if hasattr(self, "_av_label"):
-            self._av_label.setStyleSheet(self._build_avatar_style())
+            set_style_sheet_if_changed(self._av_label, self._build_avatar_style())
         # 更新标题
         if hasattr(self, "_name_label"):
             font_css = get_font_family_css()
-            self._name_label.setStyleSheet(
+            set_style_sheet_if_changed(
+                self._name_label,
                 f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
             )
         # 更新副标题
         if hasattr(self, "_subtitle_label"):
             font_css = get_font_family_css()
-            self._subtitle_label.setStyleSheet(
+            set_style_sheet_if_changed(
+                self._subtitle_label,
                 f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
             )
         # 更新时间戳
         if hasattr(self, "_ts_label"):
             if self.role == "user":
                 # 简洁气泡：无胶囊背景的弱化小字
-                self._ts_label.setStyleSheet(
+                set_style_sheet_if_changed(
+                    self._ts_label,
                     f"{get_font_family_css()} font-size: {scale_font_size(11)}px; color: {self._theme['muted']};"
                 )
             else:
-                self._ts_label.setStyleSheet(
+                set_style_sheet_if_changed(
+                    self._ts_label,
                     f"""
                     QLabel {{
                         {get_font_family_css()} font-size: {scale_font_size(11)}px;
@@ -612,8 +669,17 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
             self.viewer.refresh_theme()
         # 刷新富文本视图字体并触发重渲染（缓存已在 refresh_theme 中失效）
+        # [T6] 分帧错峰：全量重渲（单卡 40~120ms 主线程）不再逐卡 immediate
+        # 同拍执行，改置脏 + 入分帧队列（每帧最多 2 张，可见优先）；
+        # 流式卡不入队：上方 refresh_theme 已置 _needs_full_render=True，
+        # 下一次流式节拍自然全量带新主题，不丢主题态不丢正文，也不打断
+        # 流式自适应节流（_schedule_render 的边界合并窗口）。
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
-            self.viewer._refresh_viewer_font()
+            if getattr(self.viewer, "_streaming", False):
+                self.viewer._theme_render_pending = False
+            else:
+                self.viewer._theme_render_pending = True
+                _theme_rerender_queue.enqueue(self.viewer)
         # 欢迎 tab 条：文字/hover/选中底色都由 CustomTabButton 实时取 Colors token，
         # refresh_style 重算 QSS 即可；胶囊（_TabIndicator）配色每次 paint 实时读，
         # 补一次 update 触发重绘。
@@ -627,6 +693,12 @@ class MessageCard(SimpleCardWidget):
                 self._welcome_indicator_ctl.indicator.update()
             except RuntimeError:
                 self._welcome_indicator_ctl = None
+        # 内嵌任务看板：行式条目/进度条/置顶条的 QSS 在构造期固化，需随主题重放
+        if self._todo_panel is not None:
+            try:
+                self._todo_panel.refresh_style()
+            except RuntimeError:
+                self._todo_panel = None
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
@@ -691,8 +763,8 @@ class MessageCard(SimpleCardWidget):
     def _build_footer_bar(self, main: QVBoxLayout):
         """构建助手卡片底部极简元信息栏
 
-        布局：左侧纯文本（耗时 + 插件注册信息项），右侧全可点击
-        （模型胶囊 / 差异胶囊含内嵌 Review，分支+复制 hover 浮现 + 插件按钮）。
+        布局：左侧纯文本（耗时 + 插件注册信息项），右侧纯文本信息
+        （模型名 / 差异统计，· 分隔）+ 常显按钮组（审查 / 分支 / 复制 / 插件按钮）。
         token 总量与吞吐量的展示已移除，由插件经 footer_stat 槽位注入。
         """
         bar = QWidget(self)
@@ -744,39 +816,14 @@ class MessageCard(SimpleCardWidget):
             layout.addWidget(stat_l)
             self._footer_left_items.append((sep, stat_l))
 
-        # Review 图标（内嵌差异胶囊右端；点击触发 code-reviewer 子智能体）
-        # ★ 胶囊存在时常显，不与 hover 组一起隐现。
-        icon_size = scale_font_size(10)
-        review_icon = QLabel(self)
-        review_icon.setObjectName("footer_review_icon")
-        review_icon.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
-        review_icon.setFixedSize(icon_size + 4, icon_size + 4)
-        review_icon.setScaledContents(True)
-        review_icon.setStyleSheet(
-            "QLabel {"
-            " background: transparent; padding: 1px; margin: 0px;"
-            # 父级差异胶囊用 QWidget 选择器设了 1px 实线边框，类型选择器会级联到
-            # 子 QLabel；不显式清掉就会在放大镜外露出一圈方框
-            " border: none; border-radius: 3px;"
-            " }"
-            "QLabel:hover { background: rgba(128,128,128,0.18); border: none; }"
-        )
-        review_icon.setAlignment(Qt.AlignCenter)
-        review_icon.setCursor(Qt.PointingHandCursor)
-        review_icon.mousePressEvent = lambda e: self._emit_review_requested()
-        install_hover_tooltip(review_icon, "用 code-reviewer 子智能体快速审查本次修改")
-        self._footer_review_icon = review_icon
-
-        # 弹性分隔：左侧纯文本信息区 | 右侧可点击区（胶囊/按钮）
+        # 弹性分隔：左侧纯文本信息区 | 右侧信息 + 操作区
         layout.addStretch()
 
-        # 模型胶囊（可点击跳目标配置；仅显示模型名，服务商名隐藏但保留用于跳转）
+        # 右区纯文本信息（· 分隔，与左区同款；原胶囊边框已去除）
+        # 模型名（可点击跳目标配置；仅显示模型名，服务商名隐藏但保留用于跳转）
         footer_text = self._get_footer_model_text()
         model_l = QLabel(footer_text, self)
-        model_l.setStyleSheet(
-            f"{font_css} font-size: {scale_font_size(10)}px; color: {self._theme['muted']};"
-            f" border: 1px solid {Colors.BORDER}; border-radius: 8px; padding: 1px 8px;"
-        )
+        model_l.setStyleSheet(label_style)
         model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
@@ -784,41 +831,56 @@ class MessageCard(SimpleCardWidget):
         install_hover_tooltip(model_l, "点击切换到目标模型配置")
         self._footer_model_label = model_l
         layout.addWidget(model_l)
+        self._footer_right_items.append((None, model_l))
 
-        # 差异胶囊：文本（点击弹差异弹窗）+ 🔍（点击触发 Review）同舱，有 diff 才显示
-        diff_pill = QWidget(self)
-        diff_pill.setAttribute(Qt.WA_StyledBackground, True)  # 纯 QWidget 让 QSS border 生效
-        diff_pill.setStyleSheet(
-            f"QWidget {{ background: transparent; border: 1px solid {Colors.BORDER};"
-            f" border-radius: 8px; margin-left: 4px; }}"
-        )
-        dp = QHBoxLayout(diff_pill)
-        dp.setContentsMargins(8, 0, 2, 0)
-        dp.setSpacing(2)
-        diff_l = QLabel("", diff_pill)
-        diff_l.setStyleSheet(
-            f"{font_css} font-size: {scale_font_size(10)}px; color: {self._theme['muted']};"
-            f" background: transparent; border: none; padding: 1px 0px; margin: 0px;"
-        )
-        diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        diff_l.setVisible(False)
-        diff_l.setCursor(Qt.PointingHandCursor)
-        diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
-        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
-        self._footer_diff_stats_label = diff_l
-        dp.addWidget(diff_l)
-        dp.addWidget(review_icon, 0, Qt.AlignVCenter)
-        diff_pill.setVisible(False)
-        self._footer_diff_pill = diff_pill
-        layout.addWidget(diff_pill)
+        # 差异统计文本（点击弹差异弹窗），前置 · 分隔，有 diff 才显示。
+        # ⚠️ 拆成多段纯文本 label（N 文件 / +N / / / -N）而非单个 RichText：
+        # 富文本的 sizeHint 与基线同纯文本 label 不同（实测 sh 17 vs 15），
+        # 与左区标签并排会垂直错位（同 _refresh_footer_stats 的既有教训）。
+        diff_sep = QLabel("·", self)
+        diff_sep.setStyleSheet(label_style)
+        diff_sep.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        diff_sep.setVisible(False)
+        layout.addWidget(diff_sep)
+        diff_parts: List[QLabel] = []
+        for _color in (None, "#2ea043", None, "#f85149"):
+            p = QLabel("", self)
+            p.setStyleSheet(label_style if _color is None else f"{label_style} color: {_color};")
+            p.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            p.setTextFormat(Qt.PlainText)
+            p.setVisible(False)
+            p.setCursor(Qt.PointingHandCursor)
+            p.mousePressEvent = lambda e: self._emit_card_diff_requested()
+            install_hover_tooltip(p, "点击查看当条消息的文件差异详情")
+            layout.addWidget(p)
+            diff_parts.append(p)
+        self._footer_diff_stats_label = diff_parts[0]
+        self._footer_diff_add_label = diff_parts[1]
+        self._footer_diff_slash_label = diff_parts[2]
+        self._footer_diff_del_label = diff_parts[3]
+        self._footer_diff_parts = diff_parts
+        self._footer_right_items.append((diff_sep, diff_parts[0]))
 
-        # 右侧操作区：hover 浮现组（复制 / 分支 / 插件按钮）。
+        # 右侧操作区：常显操作组（审查 / 分支 / 复制 / 插件按钮）。
         # 固定尺寸占位：按钮显隐切换时 footer 尺寸不变，卡片不跳动、不重排。
         hover_btns = QWidget(self)
         self._assistant_action_btns = hover_btns
         hb = QHBoxLayout(hover_btns)
-        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setContentsMargins(6, 0, 0, 0)
         hb.setSpacing(2)
+
+        # 审查按钮：与分支/复制同排；仅在有 diff 时显示（set_diff_stats 控制），
+        # 点击触发 code-reviewer 子智能体快速审查本次修改
+        review_icon = TransparentToolButton(get_icon("Search"), self)
+        review_icon.setObjectName("footer_review_icon")
+        review_icon.setFixedSize(20, 20)
+        review_icon.clicked.connect(lambda: self._emit_review_requested())
+        review_icon.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
+        install_hover_tooltip(review_icon, delay_ms=200)
+        review_icon.setVisible(False)
+        self._footer_review_icon = review_icon
+        hb.addWidget(review_icon)
+
         for ic, tp, cb in [
             (get_icon("分支"), "从此条分支新对话", lambda: self._emit_branch_requested()),
             (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
@@ -866,7 +928,9 @@ class MessageCard(SimpleCardWidget):
         # 不会撑宽卡片）。非 hover 时容器退出布局 = 不占宽度；行高恒定改由
         # bar.setFixedHeight 保证（见下），否则 Qt 布局跳过隐藏控件的 sizeHint，
         # 行高在文本高度（≈14px）与按钮高度（20px）间跳变 → 卡片高度抖动。
-        hover_btns.setVisible(False)
+        # 常显（2026-10-10 需求）：助手卡片操作按钮不再走 hover 浮现，始终可见。
+        # user 卡片维持 hover 显隐（见 enterEvent/leaveEvent 的 role=user 分支）。
+        hover_btns.setVisible(True)
         layout.addWidget(hover_btns)
 
         # 行高下界 = 按钮高度：非 hover 时按钮容器退出布局，行高会由文本元素
@@ -946,29 +1010,29 @@ class MessageCard(SimpleCardWidget):
         if not self._footer_diff_stats_label:
             return
         if files_count == 0 and additions == 0 and deletions == 0:
-            # 无 diff：整舱隐藏（文本 + 内嵌 Review 同舱联动）
-            if self._footer_diff_pill:
-                self._footer_diff_pill.setVisible(False)
+            # 无 diff：清空差异文本（驱动 · 分隔收敛）与审查按钮
+            for p in getattr(self, "_footer_diff_parts", []):
+                p.setText("")
+                p.setVisible(False)
+            if getattr(self, "_footer_review_icon", None):
+                self._footer_review_icon.setVisible(False)
+            self._refresh_footer_separators()
             return
 
-        muted = self._theme.get("muted", "#888888")
-        html = f'<span style="color:{muted};">{files_count} 文件</span>'
+        # 逐段纯文本着色（不用 RichText，见 _build_footer_bar 处说明）
+        # 空格挂在首段尾部：分段 label 间距为 0，靠它维持「4 文件 +26/-2」排版
+        # （挂尾部可保证只有 -N 时也显示「4 文件 -2」）
+        self._footer_diff_stats_label.setText(f"{files_count} 文件 ")
+        self._footer_diff_add_label.setText(f"+{additions}" if additions > 0 else "")
+        self._footer_diff_slash_label.setText("/" if additions > 0 and deletions > 0 else "")
+        self._footer_diff_del_label.setText(f"-{deletions}" if deletions > 0 else "")
+        for p in self._footer_diff_parts:
+            p.setVisible(bool(p.text()))
 
-        add_del = []
-        if additions > 0:
-            add_del.append('<span style="color:#2ea043;">+{}</span>'.format(additions))
-        if deletions > 0:
-            add_del.append('<span style="color:#f85149;">-{}</span>'.format(deletions))
-        if add_del:
-            html += "&nbsp;" + "/".join(add_del)
-
-        self._footer_diff_stats_label.setText(html)
-        self._footer_diff_stats_label.setTextFormat(Qt.RichText)
-        self._footer_diff_stats_label.setVisible(True)
-
-        # 整舱显示（含内嵌 Review 图标）
-        if self._footer_diff_pill:
-            self._footer_diff_pill.setVisible(True)
+        # 审查按钮随 diff 出现（· 分隔联动刷新）
+        if getattr(self, "_footer_review_icon", None):
+            self._footer_review_icon.setVisible(True)
+        self._refresh_footer_separators()
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0, seen_files: set = None):
         """增量累加差异统计（工具执行时实时调用，文件级去重避免多次编辑同一文件重复计数）
@@ -1019,18 +1083,22 @@ class MessageCard(SimpleCardWidget):
             )
 
     def _refresh_footer_separators(self):
-        """左区 · 分隔点可见性：前段有可见成员且当前成员非空才显示（比 isVisible 更可靠）"""
-        try:
-            seen_visible = False
-            for sep, label in getattr(self, "_footer_left_items", []):
-                label_ok = bool(label and label.text())
-                if sep is not None:
-                    sep.setVisible(seen_visible and label_ok)
-                seen_visible = seen_visible or label_ok
-        except RuntimeError:
-            # 🛡️ 防御：footer label / separator 可能已被 C++ 侧销毁（deleteLater 排队中），
-            # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。静默忽略。
-            pass
+        """左/右区 · 分隔点可见性：前段有可见成员且当前成员非空才显示（比 isVisible 更可靠）"""
+        for items in (
+            getattr(self, "_footer_left_items", []),
+            getattr(self, "_footer_right_items", []),
+        ):
+            try:
+                seen_visible = False
+                for sep, label in items:
+                    label_ok = bool(label and label.text())
+                    if sep is not None:
+                        sep.setVisible(seen_visible and label_ok)
+                    seen_visible = seen_visible or label_ok
+            except RuntimeError:
+                # 🛡️ 防御：footer label / separator 可能已被 C++ 侧销毁（deleteLater 排队中），
+                # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。静默忽略。
+                pass
 
     def _resolve_footer_host(self):
         """沿父链查找宿主窗口（带 _window_id 的祖先），插件回调 context 用"""
@@ -2189,6 +2257,21 @@ class MessageCard(SimpleCardWidget):
         if not self.isVisible():
             self._anim_clock.restart()
             return
+        # [P2-7] 视口门控：卡片滚出 chat 视口可见范围时不空耗 update()（20fps
+        # 整卡动画在长会话里大多发生在屏幕外）。与隐藏分支同款相位语义：
+        # 时钟 restart，滚回视口后从原相位继续，无视觉跳变。
+        try:
+            top = self.window()
+            card_tl = self.mapTo(top, self.rect().topLeft())
+            viewport = self._parent.chat_scroll_area.viewport()
+            vp_tl = viewport.mapTo(top, viewport.rect().topLeft())
+            card_rect = QRect(card_tl, self.rect().size())
+            vp_rect = QRect(vp_tl, viewport.rect().size())
+            if not card_rect.intersects(vp_rect):
+                self._anim_clock.restart()
+                return
+        except RuntimeError:
+            pass
         # 系统「减少动态效果」：底部光块是纯装饰动画，直接不重绘。
         # 这是流式热路径上的逐帧绘制，关掉即省下这段开销。
         if not Animations.motion_enabled():
@@ -2549,9 +2632,9 @@ class MessageCard(SimpleCardWidget):
             self.viewer._markdown_text = markdown_text
             self.viewer._schedule_render(immediate=True)
 
-        # 任务列表随 viewer 重建补推（_pending_todos 由 viewer._on_js_ready 消费）
-        if self._todos_snapshot is not None:
-            self._push_todo_list()
+        # 任务看板是原生 Qt 控件，不随 viewer 重建；仅补推一次数据（幂等，签名未变会跳过）
+        if self._todo_panel is not None:
+            self._todo_panel.update_todos(self._todo_panel_todos or [])
 
         # 恢复正常样式
         self._apply_card_style()
@@ -2766,7 +2849,7 @@ class MessageCard(SimpleCardWidget):
     def is_user_reading_inside(self) -> bool:
         """用户是否正在卡片内部（WebEngine 侧）滚动阅读。
 
-        body / #content-placeholder / #tool-content / #todo-content 任一容器被
+        body / #content-placeholder / #tool-content 任一容器被
         用户上滚即为 True。WebEngine 内滚动不会移动 Qt 滚动条，宿主的
         ``_user_intentionally_away_from_bottom`` 对卡内阅读完全失明；外层滚底
         判定必须显式查询此状态让位，否则流式中每个高度变化都会把卡片拉回
@@ -2822,8 +2905,24 @@ class MessageCard(SimpleCardWidget):
 
     def _update_height(self, h):
         target_height = max(40, h)
+        # [T33→T36] 坞态预算上限已随坞态正文限高一并移除：正文不再限高后，
+        # 坞态生效前后高度都等于自然高度（工具区沉底只带来 ~几十 px 扰动），
+        # 「渲染抢跑 → 先胀大再压回」的竞态窗口不存在了。若回滚 T36
+        # （恢复 _STREAMING_DOCK_CSS 的 max-height），需同时恢复此处 clamp。
+        #
+        # [MEM-2] 上报值是**文档内容**高度，可远超 widget 的高度上限（物理面积
+        # 上限，见 CodeWebViewer.MAX_SURFACE_MPX）：目标值必须先按同一上限钳一次，
+        # 否则追踪 tick 的目标永远够不到（h > cap 恒成立）→ tick 永不收敛、流式
+        # 全程空转 16ms 节拍，且「追踪中」分支会吞掉之后所有上报。钳后目标 = 上限，
+        # tick 收敛即停拍。超限部分由 body 的卡内滚动承接（_apply_viewer_height
+        # 同刻把文档滚动容器上限降到同值）。
+        try:
+            target_height = min(target_height, self.viewer.body_max_height_cap())
+        except Exception:
+            pass
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
-        self._target_viewer_height = target_height
+        # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
+        # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。
         # [L3] 稳定状态下的高度才写入宽度→高度缓存
         if not self._streaming and not self._resize_preview_mode:
             self._remember_height_for_width(target_height)
@@ -2836,8 +2935,29 @@ class MessageCard(SimpleCardWidget):
         # 重启补间 → 永远走不到终点、退化成锯齿。隔离后补间独占这条通道，
         # 收尾由 _on_height_anim_state_changed 主动校正一次。
         if self._stream_height_anim_active:
-            # 只更新已知的目标值，不打断进行中的动画
-            self._target_viewer_height = target_height
+            # [B1 回缩守卫] 追踪中上报分方向处理（仅流式中）：
+            #   上调/等值（真实增长或意愿未变）→ 实时 retarget + 取消挂起收缩；
+            #   下调 → 一律进 500ms 稳定窗挂起，不实时改向。
+            # 为什么下调不能实时改 target：save/restore、reorganizeContent
+            # 等 DOM 事务存在跨帧 scrollHeight 塌缩窗口（P052 自证），塌缩
+            # 读数穿透 rAF 合并 + 80ms 防抖后到达此处；若直接改小 target，
+            # tick 朝小值滑几拍、恢复值到达再拉回 = 肉眼可见的「生长中回缩」
+            # （2026-10-09 用户报告的流式卡片诡异抖动）。
+            # ⚠️ 守卫不得覆盖 FINISH 结束态追踪（_streaming 已 False）：彼时
+            # 上报是坞态折叠动画的真实收敛值，必须实时跟随；若也挂起，
+            # _apply_pending_shrink 会因 _streaming=False 丢弃收拢，tick 收敛
+            # 在旧 target → 流式结束后卡片底部大片空白（真机截图回归）。
+            prev_target = int(getattr(self, "_target_viewer_height", 0) or 0)
+            if not self._streaming:
+                self._target_viewer_height = target_height
+                return
+            if target_height >= prev_target:
+                self._target_viewer_height = target_height
+                # 等值也是「内容意愿未变」的确认：挂起的塌缩读数实为噪声，
+                # 不取消会在 500ms 后错误落地 → 抖动残留（同日真机复测）。
+                self._cancel_pending_shrink()
+            else:
+                self._schedule_pending_shrink(target_height)
             return
 
         # 🆕 结束态高度动画进行中：reportHeight 回环（setFixedHeight → 视口变化 →
@@ -2865,6 +2985,14 @@ class MessageCard(SimpleCardWidget):
                 self._stream_height_timer.start()
             return
 
+        # [B1 噪声死区] 非流式 ±2px 以内的上报（字体度量/亚像素取整/
+        # ResizeObserver 重测抖动）直接忽略。原逻辑对 <10px 双向立即 snap，
+        # 「应用 → 重测 → 反向噪声」会形成持续振荡 = 静态卡片底边忽高忽低
+        # （2026-10-09 用户报告「卡片高度跳变」）。真实 ≤2px 变化（如图片
+        # 加载完 +1px）被忽略也无感知。
+        if abs(target_height - current_height) <= 2:
+            return
+
         # 非流式小变化（<10px）→ 立即跳转避免闪烁
         if abs(target_height - current_height) < 10:
             if self._height_anim.state() == QVariantAnimation.Running:
@@ -2885,8 +3013,40 @@ class MessageCard(SimpleCardWidget):
         # card_container 检查 NO_ANIMATION_PROP → 直接 snap 到目标高度。
         self.setProperty("noContainerAnimation", True)
         self._apply_viewer_height(target_height)
-        # 延迟清除标志，等容器 snap 完成
-        QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
+        # 延迟清除标志，等容器 snap 完成。
+        # 🐛 捕获 self 的裸 lambda 会在卡片被虚拟滚动回收销毁后仍执行 →
+        # 「wrapped C/C++ object of type MessageCard has been deleted」刷屏。
+        # 故改用绑定卡片生命周期的一次性 QTimer（见 _release_no_container_animation）。
+        self._release_no_container_animation(50)
+
+    def _release_no_container_animation(self, delay_ms: int = 50) -> None:
+        """延迟复位 ``noContainerAnimation``，定时器绑定卡片生命周期。
+
+        ⚠️ 不能用 ``QTimer.singleShot(ms, self, fn)``：三参形式（context +
+        functor）是 Qt6 / PySide6 的重载，PyQt5 只有 ``singleShot(ms, slot)``
+        与 ``singleShot(ms, Qt.TimerType, slot)``，传 self 会走 TimerType 重载并抛
+        ``TypeError: argument 2 has unexpected type 'MessageCard'``
+        （2026-10-17 实机在每个卡片的高度更新链路上刷屏）。后果不止是报错：
+        标志位永远停在 True，该容器之后所有高度变化都退化为无动画 snap。
+
+        改用 parent=self 的一次性 QTimer：卡片销毁时定时器一并析构，pending 的
+        timeout 不再派发，从根上避免「延迟窗口内 self 已释放」
+        （同 ``_schedule_stat_refresh`` / ``card_render_core._defer_emit``）。
+
+        卡片级复用同一个定时器：非流式大高度变化可能短时连续上报多次，每次新建
+        QTimer 会堆积对象；重复 start 只推迟到期，而复位动作幂等，合并语义等价。
+        """
+        timer = getattr(self, "_no_anim_release_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._reset_no_container_animation)
+            self._no_anim_release_timer = timer
+        timer.start(delay_ms)
+
+    def _reset_no_container_animation(self) -> None:
+        """清除容器无动画标志（闸门到期回调）。"""
+        self.setProperty("noContainerAnimation", False)
 
     # ── 结束态高度过渡（可关：FINISH_HEIGHT_ANIM_ENABLED）──
 
@@ -2921,7 +3081,7 @@ class MessageCard(SimpleCardWidget):
            24px 阈值 → stop + 重启，补间被打断成锯齿（"剧烈抖动"的 Qt 侧成分）。
         2. QVariantAnimation 不支持运行中改终值，新目标只能 stop+start，同样
            丢进度。追踪 tick 天然 retarget + 隔离，与流式同一套机制。
-        追踪比例换更缓的 ``FINISH_HEIGHT_TRACK_FACTOR``（0.28，约 300ms 收敛），
+        追踪比例换更缓的 ``FINISH_HEIGHT_TRACK_FACTOR``（现值 0.12，约 300ms 收敛），
         与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级收尾，丝绸不抢拍。
         """
         # 消费一次预算；预算用尽则关闭窗口
@@ -2938,7 +3098,9 @@ class MessageCard(SimpleCardWidget):
             self._finish_height_anim_active = False
             self.setProperty("noContainerAnimation", True)
             self._apply_viewer_height(end_h)
-            QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
+            # 🐛 绑定卡片生命周期的一次性 QTimer：卡片被虚拟滚动回收销毁后
+            # 定时器一并析构，不会回调到已释放的控件（PyQt5 无 context 版 singleShot）
+            self._release_no_container_animation(50)
 
     def _on_height_anim_state_changed(self, state):
         self._is_height_animating = state == QVariantAnimation.Running
@@ -2991,7 +3153,15 @@ class MessageCard(SimpleCardWidget):
                 self._apply_viewer_height(target)
                 self._stop_stream_height_track()
                 return
-            self._apply_viewer_height(int(current_height + diff * self._height_track_factor))
+            # 自适应 factor：小差值维持基线（流式 0.84 / 结束态 0.12），大差值
+            # 提速跟上大台阶；基于当前基线增量而非硬编码，保住结束态比流式更缓的
+            # "丝绸尾音"设计。
+            factor = self._height_track_factor
+            if abs(diff) > STREAM_HEIGHT_TRACK_FAR_PX:
+                # [R4-A] cap 改用常量 STREAM_HEIGHT_TRACK_MAX_FACTOR（0.90）：原先硬编码
+                # 0.85 与基线 0.84 只差 0.01，自适应提速等于失效。
+                factor = min(STREAM_HEIGHT_TRACK_MAX_FACTOR, factor + STREAM_HEIGHT_TRACK_BOOST)
+            self._apply_viewer_height(int(current_height + diff * factor))
         except RuntimeError, AttributeError:
             # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
             # 停拍防泄漏。内容重挂后会自行上报高度，走常规路径校正。
@@ -3041,25 +3211,14 @@ class MessageCard(SimpleCardWidget):
                 else:
                     self._apply_viewer_height(h)
         else:
-            # 收拢方向：小步回弹（<40px）不立即应用（流式块→完成块的 DOM
-            # 替换、滚动条出现/消失的重排噪声，立即应用会"长一下又缩回去"抖动）。
-            # 🐛 但旧实现直接丢弃会累积虚高：12 个工具依次完成，每次
-            # "运行框→折叠行"缩 ~24px 全被吞 → 累积 250px+ 底部空白；
-            # 正文增长会暂时填平看不出，纯工具执行阶段（正文静默）即暴露。
-            # 修复：改为**延迟落地**——500ms 稳定窗合并连续抖动，窗口期被
-            # 增长取消（内容填平），静止的收缩最终落地。大幅收拢（≥40px）
-            # 仍立即应用。
-            if current_height - h >= 40:
-                self._cancel_pending_shrink()
-                # [T29] 大幅收拢同样走追踪：多个工具框同时到期会一次性回落
-                # 数百 px，snap 是「掉下去」，追踪是「滑下去」。
-                if STREAM_HEIGHT_ANIM_ENABLED and Animations.motion_enabled():
-                    self._target_viewer_height = h
-                    self._begin_stream_height_track(h)
-                else:
-                    self._apply_viewer_height(h)
-            else:
-                self._schedule_pending_shrink(h)
+            # [B1 回缩守卫] 收拢方向统一 500ms 稳定窗：≥40px 的大收拢不再
+            # 立即应用。原设计假设大收拢必为真实 DOM 变化，但工具框批量折叠、
+            # 坞态归位等事务的瞬时塌缩读数同样可 >40px（save/restore 跨帧窗口
+            # 穿透 rAF + 80ms 防抖），立即应用 = 先缩后涨的「生长中回缩」。
+            # 挂起窗口内被增长取消、静止落地（_apply_pending_shrink 落地仍走
+            # 追踪滑下去，无台阶感）。代价：真实大收拢最晚延迟 500ms 落地，
+            # 用户注意力在正文增长时无感。新挂起覆盖旧挂起值（取最新收拢意愿）。
+            self._schedule_pending_shrink(h)
 
     def _schedule_pending_shrink(self, target: int):
         """挂起一次小步收拢：500ms 稳定窗后落地，窗口内被增长/finish 取消。"""
@@ -3171,16 +3330,95 @@ class MessageCard(SimpleCardWidget):
         self._smooth_height_target = target
         timer.start(self._SMOOTH_FRAME_MS)
 
-    def pin_layout_height(self, height: int) -> None:
+
+    def is_layout_height_settled(self) -> bool:
+        """卡片布局高度是否已落定（可安全用于量取等高占位）。
+
+        回收器（`main_widget._recycle_out_of_view_batches`）在卸载批次前用它取
+        真实高度做等高占位。判 False 的批次会被整批保留，等下一次回收周期。
+
+        三条高度语义各自的落定条件：
+
+        * **user 气泡**（PlainTextViewer）：同步定型，`set_text` 当拍即落定。
+          判据 = viewer 已建。
+        * **纯 Qt 渲染器**（MarkdownBlockViewer）：布局自适应，`height()` 与内容
+          同步（不经 JS），无异步落高窗口。判据 = viewer 已建且高度非零。
+        * **CodeWebViewer**：高度由 JS 异步上报（数百 ms），`_lazy_rendered`
+          置位时高度仍是起步 40 —— 这正是「滚轮乱跳」的失真来源。落定判据：
+          - 不在 resize preview（此时高度只记 `_pending_viewer_height`）
+          - 无未应用的 pending 高度
+          - 不在流式高度追踪中（每拍都在改）
+          - `_last_applied_viewer_height` 已离开起步值 40
+          - viewer 当前高度与已应用高度一致（±2px 噪声死区）
+
+        分流用 `_viewer_async_height` 显式标记（在 ensure_rendered 里按实际
+        创建出的渲染器写入），不靠 `isinstance(viewer, CodeWebViewer)` 推断：
+        探针/测试替身与将来的新渲染器都会让类型判断静默走错分支，而显式状态
+        总能一眼看出该走哪条语义。
+        """
+        if self.role == "user":
+            return self.viewer is not None
+        try:
+            viewer = self.viewer
+            if viewer is None:
+                return False
+            if not getattr(self, "_viewer_async_height", True):
+                # 纯 Qt 渲染器：height() 与内容同步
+                return int(viewer.height()) > 40 or int(self.height()) > 40
+            if getattr(self, "_resize_preview_mode", False):
+                return False
+            if getattr(self, "_pending_viewer_height", None) is not None:
+                return False
+            tick = getattr(self, "_stream_height_tick", None)
+            if tick is not None and tick.isActive():
+                return False
+            applied = int(getattr(self, "_last_applied_viewer_height", 40) or 40)
+            if applied <= 40:
+                return False
+            return abs(int(viewer.height()) - applied) <= 2
+        except RuntimeError:
+            return False
+
+    def pin_layout_height(self, height: int, content_overhead: int | None = None) -> None:
         """T42 占位守恒：把卡片钉死在起步高度（min=max），重建瞬间容器总高不变。
 
         只作起步高度，不锁死：viewer 首个真实高度上报到达时由
         ``_unpin_layout_height`` 解除。方法形式（而非调用方直接 setFixedHeight）
         是为了让「钉死」带上标记，解除路径才有据可依。
+
+        Args:
+            height: 起步高度（= 卸载时该批次留下的等高占位高度 H）。
+            content_overhead: 卸载时量出的「viewer 之外的卡片固定开销」K
+                （= 当时的 ``card.height() - card.viewer.height()``，含页脚/内边距/
+                身份行）。有它才能在解除拍算出**卡片真实**的高度增量；没它只能
+                退回「viewer 增量」口径，在重建路径上会严重高估（见
+                ``_apply_viewer_height`` 的说明）。
         """
+        # 🐛 用户卡片（PlainTextViewer）不参与钉死：PlainTextViewer 同步定型，
+        # set_text 当拍即 setFixedSize 到实测尺寸，contentHeightChanged emit 时
+        # viewer.height() 已等于上报值 → 卡片侧 _update_height 的 ±2px 噪声死区
+        # （target == current）恒命中 return，高度永远到不了 _apply_viewer_height
+        # 的 unpin 出口。T42 重建时序又是「建卡（emit 已被死区消费）→ 钉死」，
+        # 钉死后不再有任何自然上报 → 卡片永久 min=max=占位高度 H，H 与真实内容
+        # 高的任何偏差（批次均摊、卸载到重建之间的宽度变化、字体度量漂移）都被
+        # 固化成永久高度错误（长历史会话向上翻页时上方重建的用户卡片偶现异常）。
+        # 跳钉后高度由布局按 PlainTextViewer.sizeHint()（实测值）自然分配，
+        # viewer 已建立即正确；viewer 未建（兜底）→ 创建后同样走布局，均可自愈。
+        # assistant/welcome 的 CodeWebViewer 异步上报（reportHeight 在 pin 后到达，
+        # 起步 40 → 真实高的差必 > 2px）不受死区影响，钉死行为保持不变。
+        if self.role == "user":
+            v = self.viewer
+            if v is not None:
+                try:
+                    self._apply_viewer_height(int(v.height()))
+                except RuntimeError:
+                    pass
+            return
         try:
             self.setFixedHeight(max(1, int(height)))
             self._layout_height_pinned = True
+            self._pinned_height = int(height)
+            self._pinned_overhead = content_overhead
         except RuntimeError, AttributeError:
             pass
 
@@ -3222,11 +3460,38 @@ class MessageCard(SimpleCardWidget):
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
-        if height == self._last_applied_viewer_height:
+        # [MEM] 面积上限：上报高度先按「物理面积封顶」钳一次（成本 ∝ 宽×高×dpr²，
+        # 见 CodeWebViewer.MAX_SURFACE_MPX）。必须在下面所有记账/广播之前完成 ——
+        # 否则 widget 被钳短、heightChanged 仍报原值，外层聊天列表会按未钳高度做
+        # 滚动锚定补偿 → 回滚/流式时视口漂移。
+        try:
+            height = self.viewer.clamp_surface_height(height)
+        except Exception:
+            pass
+        # [MEM-2] 钳短的同时必须把「文档滚动容器上限」降到同一个值：否则内容高介于
+        # 两者之间时 body 无溢出（不可滚），被 widget 裁掉的尾部既看不见也滚不到
+        # （2026-10-11「文本内容超出可视区域造成文本遮挡」）。幂等：仅在
+        # 宽度/dpr 变化导致上限变化时才真正下发一次 JS。
+        try:
+            self.viewer.sync_body_max_height()
+        except Exception:
+            pass
+        if height == self._last_applied_viewer_height and not getattr(self, "_layout_height_pinned", False):
             return
         # 🐛 记录本次高度增量：外层聊天列表（main_widget）据此做滚动锚定补偿
         # （Qt 滚动区无 scroll anchoring，卡片高度变化时视口内容会被推走）。
-        self._last_height_delta = height - self.viewer.height()
+        #
+        # ⚠️ T42 占位重建路径必须换口径：卡片被 pin 在占位高度 H，而新建 viewer 仍
+        # 停在最小高度 40（固定高度的卡片不会把 viewer 拉伸）。此时
+        # `height - viewer.height()` 是「viewer 从 40 涨到 HF」的量（成百上千 px），
+        # 而**卡片实际**只变了 `(HF + K) - H`（K = 页脚/内边距/身份行等固定开销，
+        # 实测 144）—— 差一个数量级，外层按它 `value += delta` 会把视口凭空拽走数百 px
+        # （「滚动时动态加载卡片后滚轮到处乱飞」）。K 由卸载侧量出并随占位传递。
+        _pinned_oh = getattr(self, "_pinned_overhead", None)
+        if getattr(self, "_layout_height_pinned", False) and _pinned_oh is not None:
+            self._last_height_delta = (height + int(_pinned_oh)) - int(getattr(self, "_pinned_height", 0) or 0)
+        else:
+            self._last_height_delta = height - self.viewer.height()
         self._last_applied_viewer_height = height
         # [PERF] resize preview 期间 viewer 已 hide + setUpdatesEnabled(False)，
         # 此时 setFixedHeight 仍会触发 Qt 布局链 → QWebEngineView Chromium
@@ -3242,7 +3507,14 @@ class MessageCard(SimpleCardWidget):
         # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
         # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
         # 未滚动时强制 auto-scroll 到底部。
-        if self._streaming and hasattr(self.viewer, "page") and self.viewer.page():
+        # [F2] 高度追踪 tick 中间拍跳过 auto-scroll IPC：逐拍 setFixedHeight 的
+        # 回环里再逐拍 runJavaScript 是纯浪费（JS 侧 _dfxAppendStreamText 文本
+        # 追加时已同步卡内滚底）；落定拍（value≈target）不跳过，收敛姿态由它保底。
+        _tick_intermediate = (
+            self._stream_height_tick.isActive()
+            and abs(getattr(self, "_target_viewer_height", 0) - value) > STREAM_HEIGHT_TRACK_EPSILON
+        )
+        if self._streaming and hasattr(self.viewer, "page") and self.viewer.page() and not _tick_intermediate:
             try:
                 # 🐛 修复：同步 auto-scroll 取代 setTimeout(0)，避免渲染间隙置顶闪烁
                 # 🐛 修复：auto-scroll 成功后复位 _userScrolledWithin，
@@ -3288,11 +3560,10 @@ class MessageCard(SimpleCardWidget):
                 return
             parent_width = parent.width()
             if self.role == "user":
-                # 与 main_widget 的比例 margin 保持一致（约容器 94%，留少量对齐余量）
-                horizontal_margin = max(150, int(parent_width * 0.15))
+                # 与 main_widget 共用唯一口径（见 user_bubble_target_width 注释）
+                target_width = user_bubble_target_width(parent_width)
             else:
-                horizontal_margin = 20
-            target_width = max(320, parent_width - horizontal_margin)
+                target_width = max(320, parent_width - 20)
 
         # 性能优化：只有宽度真正变化时才更新（user/非 user 统一守卫）
         if not force and target_width == self._last_synced_width:
@@ -3453,18 +3724,14 @@ class MessageCard(SimpleCardWidget):
             pass
 
     def enterEvent(self, event):
-        # 用户气泡 / assistant 全减：hover 浮现操作按钮，保持静态简洁
+        # 仅 user 气泡走 hover 浮现；assistant 操作按钮常显（见 _assistant_action_btns 构建处）
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, True)
-        elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._assistant_action_btns.setVisible(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, False)
-        elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
-            self._assistant_action_btns.setVisible(False)
         super().leaveEvent(event)
 
     @staticmethod
@@ -3664,6 +3931,13 @@ class MessageCard(SimpleCardWidget):
         try:
             self._disconnect_viewer_signals()
             self._viewer_layout.removeWidget(viewer)
+            # 🐛 焦点摘除先于 hide()：焦点在 viewer 子树内（用户点击过正文，
+            # delegate 持有焦点）时，hide() 会触发 Qt 焦点链自动转移 + 滚动区
+            # scrollContentsBy 自动滚动（视口瞬跳，见 ui_helpers 同名注释）。
+            # 延迟导入：ui_helpers 顶层 import MessageCard，模块级反向依赖成环。
+            from app.widgets.ui_helpers import _detach_focus_from_widgets
+
+            _detach_focus_from_widgets([viewer])
             # 🛡️ 必须先 hide() 再 setParent(None)：CodeWebViewer 持有原生 HWND，
             # 可见状态下脱离父窗口树会让 Chromium 弹出独立原生窗口（白窗一闪），
             # 与 main_widget 里其它 detach 点（_clear_chat_area / ui_helpers）同一护栏。
@@ -3725,9 +3999,18 @@ class MessageCard(SimpleCardWidget):
 
             # welcome 卡片使用轻量骨架（无 echarts CDN）
             is_welcome = self.role == "welcome"
-            if not is_welcome and _qt_renderer_enabled():
+            # R2：按内容类型自动选渲染通道 —— 普通对话卡走纯 Qt 渲染器（约 3 MB/卡），
+            # 只有内容真需要 WebEngine（echarts / mermaid / 公式 / 图片 / 插件
+            # fence）才付 ~40 MB。保守原则：判定不确定 / 流式期间内容不全 →
+            # 走 WebEngine（详见 card_render_core._should_use_qt_renderer）。
+            if not is_welcome and _should_use_qt_renderer(
+                self._pending_content, streaming=bool(getattr(self, "_streaming", False))
+            ):
                 # 灰度：纯 Qt 块级渲染器（无 Chromium/JS 层）
                 self.viewer = _get_markdown_block_viewer_cls()(self)
+                # 高度语义标记：纯 Qt 渲染器同步落定，不经过 JS 异步上报
+                # （见 is_layout_height_settled 的分流依据）
+                self._viewer_async_height = False
                 self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
                 # 直连（非 .emit 转发）：Qt 绑定 receiver 生命周期，viewer 销毁自动断连
                 self.viewer.saveFileRequested.connect(self.saveFileRequested)
@@ -3742,8 +4025,6 @@ class MessageCard(SimpleCardWidget):
                 self._viewer_layout.addWidget(self.viewer)
                 self._lazy_rendered = True
                 self._render_deferred = False
-                if self._todos_snapshot is not None:
-                    self._push_todo_list()
                 if self._pending_content is not None:
                     self.set_content(self._pending_content)
                     self._pending_content = None
@@ -3762,6 +4043,10 @@ class MessageCard(SimpleCardWidget):
                 try:
                     pooled.setParent(self)
                     pooled.setUpdatesEnabled(True)
+                    # [白卡修复] 第二次跨顶层 reparent（隐藏宿主 → 本卡）已完成：
+                    # 重申透明合成，防 Windows 原生 HWND 迁移后 Chromium 透明丢失
+                    # （复用卡 HTML 区白底固化，气泡正常仅内容区变白）。
+                    pooled.ensure_transparent_composition()
                     # 🛡️ 与 detach_viewer 的 hide() 成对：显式隐藏过的 widget 不会
                     # 随父控件 show() 自动恢复可见，复用时必须显式 show()，
                     # 否则卡片区域是一片空白（viewer 存在但不可见）。
@@ -3778,6 +4063,11 @@ class MessageCard(SimpleCardWidget):
                     # （updateContent 不存在 → 静默失败 → 卡片永久空白）。
                     if not getattr(pooled, "_is_js_ready", False):
                         pooled._load_skeleton()
+                    # 🐛 池化复用 JS 全局残留：window._toolCompactMode 只在骨架首次
+                    # 就绪时同步一次，复用实例不重载骨架 → 残留上一张卡片的旧值，
+                    # reorganizeContent 等守卫按旧模式归拢工具/思考块（"切换简洁
+                    # 模式对复用卡片永不生效"）。绑定时按当前配置重同步。
+                    pooled.sync_compact_mode_to_js()
                     self.viewer = pooled
                 except Exception:
                     # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建
@@ -3788,6 +4078,9 @@ class MessageCard(SimpleCardWidget):
                     self.viewer = None
             if self.viewer is None:
                 self.viewer = CodeWebViewer(self, light=is_welcome)
+            # 高度语义标记：QWebEngine 渲染高度靠 JS 异步上报，`_lazy_rendered`
+            # 置位时高度仍是起步值
+            self._viewer_async_height = True
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not is_welcome:
                 # 标记是否为历史会话：非流式加载的历史消息自动折叠工具区
@@ -3814,10 +4107,6 @@ class MessageCard(SimpleCardWidget):
             # 创建 viewer 完成（不可见门控已放行），清除"推迟渲染"标记；
             # 若下方 set_content 因 JS 未就绪再次 deferred，由 _on_js_ready 兜底补渲。
             self._render_deferred = False
-
-            # 任务列表随 viewer 创建补推（JS 未就绪时由 _on_js_ready 兜底）
-            if self._todos_snapshot is not None:
-                self._push_todo_list()
 
             # 如果有等待渲染的内容，现在渲染
             if self._pending_content is not None:
@@ -3999,6 +4288,10 @@ class MessageCard(SimpleCardWidget):
         # [L3] 内容增长：此前的「宽度→高度」预测失效（流式期间本就不写缓存，
         # 这里兜底处理流式中途插入内容等路径）
         self._height_cache.clear()
+        # [render-diag] chunk 到达计数（停摆定位：对比 append 与各渲染分支计数）
+        _v = getattr(self, "viewer", None)
+        if _v is not None and hasattr(_v, "_rdiag_hit"):
+            _v._rdiag_hit("append_text")
         if self.role == "user" and self.viewer is None:
             self._ensure_user_viewer()
         if self.role == "assistant":
@@ -4063,6 +4356,19 @@ class MessageCard(SimpleCardWidget):
                 self.viewer._needs_full_render = True
                 self.viewer._schedule_render(immediate=immediate_render)
             self.viewer._tag_text_streaming = _tag_unclosed
+            # [P0-1] 渲染型 fence（```echarts/mermaid 等）未闭合期间唯一可见反馈：
+            # 增量注入跳过 + _render_tail_inline 直接 return + 差量不产出 → DOM
+            # 无新内容。占位只进 DOM 不进 _content_data，持久化/历史加载零残留。
+            if _fence_unclosed != getattr(self.viewer, "_fence_text_streaming", False):
+                if _fence_unclosed and not getattr(self.viewer, "_fence_note_shown", False):
+                    self.viewer._fence_note_shown = True
+                    if self.viewer._is_js_ready and self.viewer.page():
+                        self.viewer.page().runJavaScript('window._dfxStreamNote && window._dfxStreamNote.show("正在生成图表/代码块…");')
+                elif not _fence_unclosed:
+                    self.viewer._fence_note_shown = False
+                    if self.viewer._is_js_ready and self.viewer.page():
+                        self.viewer.page().runJavaScript("window._dfxStreamNote && window._dfxStreamNote.hide();")
+                self.viewer._fence_text_streaming = _fence_unclosed
             # <think> 已闭合或无 think 标签：恢复正常渲染
             self.viewer._think_text_streaming_started = False
             # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
@@ -4483,8 +4789,25 @@ class MessageCard(SimpleCardWidget):
                 # lambda 捕获动态属性判空——0ms 内 viewer 被 cleanup 置 None 时
                 # 避免 AttributeError traceback。
                 def _dock_off_and_collapse() -> None:
+                    # [#8] 历史卡守卫：历史加载（history=True）不走
+                    # stop_streaming_anim，_streaming_finished 恒 False → 整体跳过
+                    # （含窗口重开与归位派发）。历史卡坞态从未开启（池化复用时
+                    # _RESET_CONTENT_FOR_REUSE_JS 已清 streaming-dock class 与
+                    # _streamingActive），归位调用本为 JS no-op（on===wasOn），
+                    # 跳过与调用等价且省一次 IPC，不改变 HEAD 既有行为；同时
+                    # 消除 #6 窗口重开对历史卡懒渲染高度收敛的动画化波及。
+                    # S1 卡与打断卡已走 stop_streaming_anim（True），兜底归位
+                    # 路径保持生效。
+                    if not self._streaming_finished:
+                        return
                     if self.viewer is None:
                         return
+                    # [方案D] S1 兜底归位重开 FINISH 窗口：归位+折叠的高度跳变
+                    # 也走结束态缓动（追踪 tick），消除"流式平滑、兜底归位却
+                    # snap"的两段感。符号用法与 finish_streaming 主路径同款，
+                    # 只影响本兜底路径，坞态调用结构不变。
+                    self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
+                    self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
                     self.viewer._sync_streaming_dock(False, collapse_after=True)
 
                 QTimer.singleShot(0, _dock_off_and_collapse)
@@ -4757,8 +5080,6 @@ class MessageCard(SimpleCardWidget):
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     hr();
-                    // 预览文字打字机：预览文本更新后逐字补齐增量
-                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }} else {{
                     // text-only 模式下不存在块：不创建
                     if ({_text_only_js}) return;
@@ -4796,8 +5117,6 @@ class MessageCard(SimpleCardWidget):
                         if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
                     hr();
-                    // 预览文字打字机：新工具块的预览行逐字显现
-                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }}
             }})();
             """
@@ -4951,61 +5270,131 @@ class MessageCard(SimpleCardWidget):
                 }} else if (typeof reportHeight === 'function') {{
                     reportHeight();
                 }}
-                // 预览文字打字机：思考块转完成态时预览行逐字显现
-                if (typeof window._ptPlay === 'function') window._ptPlay();
             }})();
             """
             self.viewer.page().runJavaScript(js_code)
         except RuntimeError:
             pass
 
-    # ── 任务列表（卡片底部内嵌 todo 区，替代原悬浮卡片）──
+    # ── 任务看板（卡片内嵌 · 气泡内正文下方、页脚上方）──
 
     def update_todo_list(self, todos):
-        """更新卡片底部任务列表
+        """更新卡片内嵌任务看板（原生 Qt 面板，不进 WebEngine）
+
+        面板懒创建：首个非空任务到达时才建，挂进 assistant 气泡布局的末尾
+        （正文 viewer 之后、页脚之前）；空列表不建面板（无任务零高度）。
 
         Args:
             todos: [{status: pending|in_progress|completed, content: str, priority: ...}, ...]
-                   空列表 → 隐藏任务区。
+                   空列表 → 隐藏任务区（面板保留实例，只隐藏）。
         """
-        self._todos_snapshot = list(todos or [])
-        self._push_todo_list()
+        self._todo_panel_todos = list(todos or [])
+        if self.role != "assistant":
+            return
+        if not self._todo_panel_todos or self._assistant_bubble is None:
+            panel = self._todo_panel
+            if panel is not None:
+                panel.update_todos(self._todo_panel_todos)
+            return
+        panel = self._ensure_todo_panel()
+        if panel is not None:
+            panel.update_todos(self._todo_panel_todos)
 
-    def _push_todo_list(self):
-        """把 _todos_snapshot 推送到 viewer 内的 #todo-section
+    def clear_todo_list(self):
+        """清空并卸载任务看板（任务迁往新卡片时由宿主调用）
 
-        viewer 未创建（懒加载）/ JS 未就绪时仅写 viewer._pending_todos，
-        由 viewer 创建点或 _on_js_ready 兜底补推。
+        面板实例随卡片存活，此处只清空数据 + 隐藏，避免重建同一张卡片时
+        重新创建控件。面板从布局中摘除（任务看板只属于最新卡片）。
         """
-        v = self.viewer
-        if v is None:
+        self._todo_panel_todos = []
+        panel = self._todo_panel
+        if panel is None:
             return
-        # 灰度：纯 Qt viewer 走原生任务列表面板
-        # 延迟导入：未开启灰度时 _MarkdownBlockViewerCls 为 None，
-        # 此时 viewer 必然是 CodeWebViewer，跳过判断即可。
-        _qt_cls = _MarkdownBlockViewerCls
-        if _qt_cls is not None and isinstance(v, _qt_cls):
-            v.update_todo_list(self._todos_snapshot or [])
-            return
-        if not isinstance(v, CodeWebViewer):
-            return
-        v._pending_todos = self._todos_snapshot
-        if not getattr(v, "_is_js_ready", False):
-            return
+        panel.update_todos([])
+        host = self._todo_panel_host
+        if host is not None:
+            host.removeWidget(panel)
+
+    def _ensure_todo_panel(self):
+        """懒创建任务看板并挂进气泡布局末尾（正文 viewer 之后、页脚之前）"""
+        if self._todo_panel is not None:
+            host = self._todo_panel_host
+            if host is not None and host.indexOf(self._todo_panel) < 0:
+                host.addWidget(self._todo_panel)
+            return self._todo_panel
         try:
-            payload = [
-                {
-                    "status": item.get("status", "pending") if isinstance(item, dict) else "pending",
-                    "content": escape(item.get("content", "") if isinstance(item, dict) else str(item)),
-                    # 优先级：high/medium/low（来自 todowrite 工具 _normalize_todos 默认 medium）
-                    "priority": (item.get("priority", "medium") if isinstance(item, dict) else "medium") or "medium",
-                }
-                for item in (self._todos_snapshot or [])
-            ]
-            data = json.dumps(payload).decode("utf-8")
-            v.page().runJavaScript(f"window._updateTodoList && window._updateTodoList({data});")
+            from app.widgets.inline_todo_panel import InlineTodoPanel
+
+            panel = InlineTodoPanel(self._assistant_bubble)
+        except Exception as e:
+            logger.warning(f"[MessageCard] 任务看板创建失败: {e}")
+            return None
+        # 面板高度变化（折叠切换 / 任务增减）→ 重算卡片高度并上报外层锚定
+        panel.heightChanged.connect(lambda _p=panel: self._on_todo_panel_height_changed())
+        bubble_lay = self._assistant_bubble.layout()
+        if bubble_lay is not None:
+            bubble_lay.addWidget(panel)
+            self._todo_panel_host = bubble_lay
+        self._todo_panel = panel
+        return panel
+
+    def _on_todo_panel_height_changed(self):
+        """任务看板高度变化：重算卡片高度并通知外层做锚定补偿
+
+        ``_last_height_delta`` 是外层滚动锚定补偿的增量令牌（见 main_widget
+        ``_on_message_card_height_changed``）；面板显隐/折叠/任务增减都会改变
+        气泡高度，这里按面板自身占高差给出增量，让视口不因面板展开而漂移。
+        """
+        try:
+            panel = self._todo_panel
+            # [DEBUG-todo-h] 临时诊断：面板被压缩时输出几何全貌（定位后删除）
+            logger.info(
+                "[DEBUG-todo-h] panelChanged "
+                f"card.h={self.height()} card.min={self.minimumHeight()} card.max={self.maximumHeight()} "
+                f"pinned={getattr(self, '_layout_height_pinned', None)} "
+                f"viewer.h={self.viewer.height() if self.viewer else -1} "
+                f"viewer.min={self.viewer.minimumHeight() if self.viewer else -1} "
+                f"viewer.max={self.viewer.maximumHeight() if self.viewer else -1} "
+                f"panel.sizeHint={panel.sizeHint().height() if panel is not None else -1} "
+                f"panel.h={panel.height() if panel is not None else -1} "
+                f"panel.vis={panel.isVisible() if panel is not None else None} "
+                f"bubble.h={self._assistant_bubble.height() if self._assistant_bubble else -1}"
+            )
+            cur = self._todo_panel_effective_height(panel)
+            prev = getattr(self, "_todo_panel_height_cache", 0)
+            self._todo_panel_height_cache = cur
+            delta = int(cur - prev)
+            if not delta:
+                return
+            bubble = getattr(self, "_assistant_bubble", None)
+            if bubble is not None:
+                bubble.updateGeometry()
+            self.updateGeometry()
+            self._last_height_delta += delta
+            self.heightChanged.emit(self.height())
         except RuntimeError:
             pass
+
+    def _todo_panel_effective_height(self, panel) -> int:
+        """任务看板「当前实际占高」，供锚定补偿记账。
+
+        ⚠️ 必须用布局**实际占高**，不能用 ``sizeHint()``：后者是"意愿高度"，
+        在面板重建 / 折叠切换的当拍与布局落定值不同源——面板刚由 update_todos
+        重建时内部 sizeHint 缓存已刷新到新值，而 Qt 尚未重新布局，``height()``
+        仍是旧值（或反之）。两者混用会让 delta 符号与实际卡片变化相反：
+        面板在涨、delta 算出负值 → 外层按收缩处理、卡片按增长落高，中间态
+        把卡片撑成"虚高"，下一拍布局收敛再缩回（2026-10-09 真机现象：
+        卡片高度突然异常增高然后再收缩回正常）。
+
+        取两者较大值：布局未跟上的那拍，谁大取谁，保证单调、不会少记高度；
+        收敛后两者相等，退化为精确值（幂等）。
+        """
+        if panel is None or not panel.isVisible():
+            return 0
+        try:
+            return max(int(panel.sizeHint().height()), int(panel.height()))
+        except RuntimeError:
+            return 0
 
     def update_tool_streaming(
         self,
@@ -5336,6 +5725,10 @@ class MessageCard(SimpleCardWidget):
             self._streaming = False
         else:
             self.stop_streaming_anim()
+        # [B4] 轮次落定清零流式采样缓冲（与 _refresh_footer_stats elapsed 分支/
+        # start_elapsed_tracking 的清零点对齐）：_stream_text_acc 是流式期间
+        # 累计的全文副本，一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。
+        self._stream_text_acc = ""
 
     def _has_active_tools(self) -> bool:
         """是否有仍在执行中的工具（已登记但未完成）。
@@ -5434,6 +5827,12 @@ class MessageCard(SimpleCardWidget):
         self._markdown_text = None  # 大 markdown 文本
         self._last_rendered_html = None  # 大 HTML 字符串
         self._last_rendered_markdown = None  # 可能很大的 markdown
+        # 🐛 流式原文副本：update_content 逐 chunk 累加进 _stream_text_acc
+        # （约 20 KB/卡，长会话单调增长）。轮次落定有两处清零（set_meta_info
+        # 的 elapsed 分支 / finish_streaming），但卡片在落定前被回收（B4 卸载、
+        # 切会话、关标签页）时走不到那两处，必须在这里兜住。读取点
+        # _footer_stat_context 用 getattr(..., "") or "" 兜底，置 None 安全。
+        self._stream_text_acc = None
         self._rendered_code_blocks = []  # 代码块缓存
         self._pending_content = None  # 待渲染内容
         self._finished_streaming_ids.clear()  # 流式 ID 集合

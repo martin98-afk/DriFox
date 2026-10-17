@@ -103,7 +103,6 @@ PLACEHOLDER_TIPS = [
     "Ctrl+Z 撤销 / Ctrl+Shift+Z 重做",
     # ════ 快捷键 ════
     "Ctrl+Shift+N 新建对话，Ctrl+L 清空会话",
-    "Ctrl+N 新建窗口，Ctrl+Shift+G 重排分组窗口",
     "Alt+Q 收起/展开左侧边栏",
     "Alt+E 打开/关闭右侧工作台",
     # ════ 项目 ════
@@ -146,8 +145,6 @@ PLACEHOLDER_TIPS = [
     "/executing-plans 执行编码实施计划",
     # ════ 代码与工具 ════
     "代码块右上角可复制或保存文件",
-    "工具结果点击「查看差异」对比修改",
-    "工具悬浮框显示执行详情与日志",
     "撤销按钮可单独撤销编辑操作",
     "文件操作历史追溯，误改一键恢复",
     # ════ 窗口与布局 ════
@@ -717,6 +714,22 @@ class SendableTextEdit(TextEdit):
         except Exception:
             pass
 
+    def setPlainText(self, text: str) -> None:
+        """覆盖：写入前清空光标残留的 charFormat
+
+        QTextEdit.setPlainText 内部用 control cursor 执行 insertText，新文本
+        继承光标当前 charFormat。历史切换链路里光标常停在胶囊（U+FFFC）之后，
+        charFormat 残留胶囊 objectType/属性 → 整段新文本的 fragment 被污染成
+        「胶囊格式」；此后文档中只要再出现一枚真胶囊，重写版 toPlainText 的
+        展开路径（_expand_mention_objects）就会把这段文字整体折叠成
+        [[旧文件名]]——表现为切换历史输入后发送出去只剩附件路径、正文丢失
+        （2026-10-13 排障，光标在胶囊尾时 objectType 残留复现）。
+        """
+        cursor = self.textCursor()
+        cursor.setCharFormat(QTextCharFormat())
+        self.setTextCursor(cursor)
+        super().setPlainText(text)
+
     def toPlainText(self) -> str:
         """返回纯文本，inline 文件胶囊展开为 ``[[basename]]`` 形式
 
@@ -745,10 +758,15 @@ class SendableTextEdit(TextEdit):
                 frag = it.fragment()
                 if frag.isValid():
                     fmt = frag.charFormat()
-                    if fmt.objectType() == _FILE_MENTION_TYPE:
+                    # 胶囊的可靠特征是「单个 U+FFFC + object 格式」。格式污染的
+                    # 普通文本 fragment（多字符但带 objectType，见 setPlainText
+                    # 覆盖处的注释）不能当胶囊折叠，否则整段正文会被替换成
+                    # [[旧文件名]]，发送后只剩附件路径。
+                    is_single_object = frag.length() <= 2 and frag.text() == _OBJECT_REPLACEMENT
+                    if fmt.objectType() == _FILE_MENTION_TYPE and is_single_object:
                         path = fmt.stringProperty(_FILE_MENTION_PATH_PROP) or ""
                         parts.append(f"[[{os.path.basename(path)}]]")
-                    elif fmt.objectType() == _ASSISTANT_MENTION_TYPE:
+                    elif fmt.objectType() == _ASSISTANT_MENTION_TYPE and is_single_object:
                         name = fmt.stringProperty(_ASSISTANT_MENTION_NAME_PROP) or ""
                         parts.append(f"@{name}")
                     else:

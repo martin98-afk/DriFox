@@ -36,7 +36,26 @@ def _make_win(batch_count: int = 60, visible_start: int | None = None, step: int
     win._visible_batch_start = visible_start if visible_start is not None else batch_count
     win._batch_cards = [None] * batch_count
     win._batch_placeholders = {}
+    # 顶部 prepend 的锚点补偿需要读/写滚动条（同 _load_more_history_batches）
+    win._programmatic_scroll_depth = 0
+    win._scroll_max_cache = None
+    win._sync_scroll_maximum = lambda: 0
+    win.chat_container = MagicMock()
+    win.chat_container.sizeHint.return_value.height.return_value = 0
+    win.chat_scroll_area = _FakeScrollArea()
     return win
+
+
+class _FakeScrollArea:
+    """只提供 verticalScrollBar 的滚动区替身（锚点补偿读写面）。"""
+
+    def __init__(self):
+        self.bar = MagicMock()
+        self.bar.value.return_value = 0
+        self.bar.maximum.return_value = 0
+
+    def verticalScrollBar(self):
+        return self.bar
 
 
 def _instrument(win, monkeypatch):
@@ -51,6 +70,13 @@ def _instrument(win, monkeypatch):
     return calls, fired
 
 
+def _tick(fired: list) -> None:
+    """驱动一拍：优先跑 0ms 锚点回补，再跑续拍（均不进入事件循环）。"""
+    fired.sort(key=lambda item: item[0])
+    _ms, cb = fired.pop(0)
+    cb()
+
+
 def test_load_history_prepends_one_chunk_per_tick(monkeypatch):
     """每拍只 prepend 一个步长（8 批），不一次性吃掉整段历史。"""
     win = _make_win(batch_count=60, visible_start=60)
@@ -60,7 +86,7 @@ def test_load_history_prepends_one_chunk_per_tick(monkeypatch):
 
     assert calls == [(52, 8, True)], "首拍只补 8 批，且插到布局顶部"
     assert win._visible_batch_start == 52
-    assert len(fired) == 1 and fired[0][0] == 100, "续拍挂 100ms 定时器"
+    assert [ms for ms, _cb in fired] == [0, 100], "0ms 锚点回补 + 100ms 续拍"
 
 
 def test_load_history_drains_to_target_then_scrolls(monkeypatch):
@@ -70,17 +96,39 @@ def test_load_history_drains_to_target_then_scrolls(monkeypatch):
 
     win._load_history_to_index(0)
     # 手动驱动续拍（不跑事件循环）
-    for _ in range(20):
+    for _ in range(40):
         if not fired:
             break
-        _ms, cb = fired.pop(0)
-        cb()
+        _tick(fired)
 
     assert win._visible_batch_start == 0
     assert calls[-1] == ("scroll",)
     assert sum(1 for c in calls if c[0] != "scroll") == 8, "60 批 / 每拍 8 批 = 8 拍"
     chunks = [c for c in calls if c[0] != "scroll"]
     assert all(n <= 8 for _off, n, _top in chunks), "任何一拍都不超过步长"
+
+
+def test_load_history_prepend_compensates_scroll_anchor(monkeypatch):
+    """顶部 prepend 后按新增高度回补滚动值（否则视口内容整段下跳）。
+
+    探针实测：prepend 8 批而下补 value 时，视口内容整体下移 2464px。
+    """
+    win = _make_win(batch_count=60, visible_start=60)
+    _calls, fired = _instrument(win, monkeypatch)
+    bar = win.chat_scroll_area.bar
+    bar.value.return_value = 3000
+
+    # 模拟插入前后的容器高度差（8 批 × 300 + 槽间距）
+    heights = iter([10_000, 12_464, 12_464, 12_464])
+    win.chat_container.sizeHint.return_value.height.side_effect = lambda: next(heights, 12_464)
+
+    win._load_history_to_index(0)
+    _tick(fired)  # 0ms 锚点回补拍
+
+    assert bar.setValue.called, "prepend 后必须回补滚动值"
+    assert bar.setValue.call_args_list[-1][0][0] == 3000 + 2464, (
+        f"回补量必须等于新增高度，实际={bar.setValue.call_args_list}"
+    )
 
 
 def test_load_history_tail_chunk_is_clamped(monkeypatch):
@@ -171,6 +219,34 @@ def test_restore_unloaded_batch_before_scroll():
     assert rendered == [(5, 4)], "按占位所在布局位原位重建，不得追加到末尾"
     assert sb.setValue.called, "重建后必须定位到目标卡片"
     assert win._pending_scroll_to_update == 3
+
+
+def test_pending_target_restores_unloaded_batch():
+    """分批加载完成后落地时，目标批次若已被回收也必须先重建。
+
+    真机日志 `[NodePreview] Card not found after history load, index=0`：
+    `_scroll_to_pending_target` 直接调 `_locate_and_scroll_to_batch`，
+    而重建只在 `_scroll_to_batch_index` 里做过 —— 加载途中目标批次被虚拟滚动
+    回收后，两条查找路径全落空，跳最前面的消息永远失败。
+    """
+    win, sb = _make_scroll_win()
+    card = MessageCard(role="user")
+    card._message_index = 0
+    win._batch_placeholders[0] = MagicMock()
+    win.chat_layout.indexOf.return_value = 0
+    win._pending_scroll_to_index = 0
+    win._pending_scroll_to_batch = 0
+    rendered = []
+
+    def _render(batches, insert_at_top=False, batch_offset=0, anchor_layout_index=None):
+        win._batch_cards[batch_offset] = [card]
+        rendered.append((batch_offset, anchor_layout_index))
+
+    win._render_message_to_card = _render
+    win._scroll_to_pending_target()
+
+    assert rendered == [(0, 0)], "落地前必须按占位原位重建目标批次"
+    assert sb.setValue.called, "重建后必须定位到目标卡片"
 
 
 def test_scroll_skips_restore_when_cards_alive():

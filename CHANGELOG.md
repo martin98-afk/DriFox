@@ -1,7 +1,461 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [未发布]
+
+## [v0.6.9] - 2026-10-16 (重新发布 #4)
+
+自 v0.6.8 以来的变更（累计） | 提交数：64 · 文件变更：100 · +10377/-703 | 贡献者：dingma, mading, martin98-afk
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **进程级 CA 兜底，修打包环境 TLS 校验全线失败** (`0b4d717b`): 打包环境系统证书链加载失败导致所有 HTTPS 请求校验不通过（插件市场、模型 API 全挂），启动早期落进程级 CA 兜底，信任链恢复。
+
+- **顶栏 tab reduce-motion 落终值崩溃** (`8c836bcd`): reduce-motion 分支经 QVariantAnimation.setValue 落终值，在动画对象生命周期边缘触发崩溃，改走 setCurrentTime 直达终值。
+
+- **关窗释放 TOCTOU 写空窗口三重防护** (`e9b31ad8`, `0e562341`, `fd6d19f5`, `d777f1ad`): 关窗 async flush 期间 pending 会话被并发释放、归档导入 pending 缺口，均可能把会话写空。三道防线：flush 返回值判定跳过、closeEvent 接 extra_skip 双保护层、release_messages_except 支持额外跳过集。
+
+- **强回收渲染进程链路修复** (`ce9bb11d`, `f5642719`, `0fff70de`): MessageCard._renderer_pid 登记断链致强回收拿不到 PID，恢复登记；_kill_renderer 平台感知，mac/Linux terminate→kill 真正生效；finish_streaming 清零 _stream_text_acc 消除流式残留。
+
+- **进程级缓存无界驻留清理** (`0d59eff8`, `b3ad4987`, `8a785ad0`, `0afbb421`, `e0daccaa`, `71212288`, `152d6adf`): BackgroundTask 完成后回收条目；token 估算缓存键改 hash 不再持消息全文；_snap_cache LRU 有界化（上限 64）；释放非活跃会话同步清 _send_prep_cache；SubAgent queried_tasks 按 session 生命周期清理；归档元数据缓存随文件删除对账清理；hook 函数缓存键加 mtime，编辑后旧函数不驻留。
+
+- **SQLite 与渲染进程内存水位下调** (`6e4650fc`, `47d8d7a5`, `5741fa1e`, `69c9f9d8`): SQLite 页缓存 64MB→15.6MB（大库省约 29MB 真驻留）、mmap 64MB→16MB（省约 45MB RSS）；temp_store 显式 FILE 防大结果集排序占内存；Chromium 进程上限 6→12 与卡片配额对齐，kill 粒度成立。
+
+- **插件更新后 native 依赖二次初始化崩溃** (`b0d5b605`): marketplace purge 豁免 .pyd/.so 扩展模块，更新后插件不再因扩展被误删而崩。
+
+- **插件依赖 wheel 平台串台致插件静默失效** (`plugins/plugin-marketplace/ui/deps_installer.py` · `tests/plugins/test_deps_installer_wheel_tags.py`): `_platform_wheel_tags()` 无条件把 `win_{arch}` 放进候选集且只声明 `macosx_11_0_{arch}`，两个缺陷叠加：①非 Windows 平台上 win tag 仍参与排序（Intel Mac 上 `win_amd64` 排第 2 位、压过 macosx/manylinux），会把 Windows 原生模块（`.pyd`）装进 `deps/<platform>/`，darwin 上 import 直接 `OSError: Cannot load native module`；②PyPI 上 macosx wheel 主流形态是 `macosx_10_9_universal2`（pycryptodome / charset-normalizer 均如此），前缀匹配永远不中 → 依赖装不上、`deps/darwin/` 始终为空。实测故障链：gateway-feishu 的 pycryptodome 装成 win_amd64 → `lark_oapi/core/utils/decryptor.py` 顶层 `from Crypto.Cipher import AES` 炸 → 整个 `gateways/feishu.py` 模块加载失败 → feishu 从未进 `GatewayPlatformRegistry`，表现为「配置 enabled=true 但日志只有『无启用平台』、设置卡开关无效」。修复：候选集按 `sys.platform` 严格分发（win32→`win_*`、darwin→`macosx_*`、其余→`manylinux*`/`linux_*`），通用层补 `cp{ver}-abi3` 与 `macosx_10_9_universal2`。新增回归测试 23 用例覆盖 win32/linux/darwin × x86_64/arm64 六组合（断言候选集不含他平台 OS tag、universal2/abi3 恒在、真实 PyPI wheel 文件名匹配结果）；已反向验证旧代码下 16 用例失败。`tools/generate_marketplace.py --check` 一致性通过
+
+### ✨ 新功能 (New Features)
+
+- **标准 logging 接管进 loguru** (`dcbbc4e4`): 此前用 logging.getLogger() 的第三方库与插件日志一条不落盘，现统一接管进 loguru，排障信息完整可见。
+
+- **会话消息权威释放入口** (`440e3b45`, `88882e4c`, `e6612bb2`, `3cfdd57e`): HistoryManager.release_messages_except 成为消息释放唯一权威入口；SessionManager evict 回调接入权威释放；closeEvent/会话释放统一委托，语义收窄至非本窗口会话，杜绝多处各自释放的竞争。
+
+- **FileTreeModel 异步图标加载** (`47d8962f`): 文件树图标异步加载 + 超时回落，大目录展开不再卡 UI。
+
+### 📚 文档 (Documentation)
+
+- 审查收口注释修正（`a961821e`, `8edec5c2`）: render/hooks/workers 与 store/render 的审查意见落注释——两个 32 混写、缓存键三元组、prune 挂载点、mmap 分工口径、多窗口取舍、TMPDIR 依赖。
+
+### 🎨 样式改进 (Style)
+
+- B4 测试文件 ruff format 空行规范（`989f10f1`）。
+
+### 🔧 测试基建 (Testing Infrastructure)
+
+- 消息所有权与释放回归族（`73f1e007`, `ad08c0e4`, `715d4267`, `e35e6386`, `c943c560`, `3bcea826`）: messages 所有权收敛端到端 4 用例、evict hook 4 用例（默认 None/回调传参/异常隔离/端到端）、release_messages_except 权威释放入口 9 用例、B4 批 I（PID 转发/kill 判定/流式残留/TOCTOU 跳过）、Chromium 进程上限断言同步、归档导入 pending 缺口双向回归 + reasoning_content 回填断言（#21）。
+
+### ✨ 新功能 (New Features) · 重新发布 #2 追加
+
+- **记忆蒸馏门禁与日志分页** (`523afba1`, plugins/assistant_hub/core/memory/store.py · tools/memory_tools.py · core/memory/prompts.py): 新的一天首次写日志前强制先蒸馏全部未蒸馏旧日志（`undistilled_before` 出清单 → `build_distill_gate` 生成分步指令 → 拒绝写入并返回指令）；蒸馏后给日志打标（`YYYY-MM-DD.md` → `YYYY-MM-DD.distilled.md`），已打标日志保留可查、蒸馏与门禁均忽略；`memory_read(scope=daily)` 单日全文按条目分页（每页 20 条，`page` 翻页），索引 `limit` 可调（默认 7，上限 90）；日志条目由程序自动加 loguru 风格前缀「时刻 | 等级 |」（等级 INFO/WARNING/ERROR，非法回落 INFO），content 不再自带时间戳
+
+- **记忆字符上限可配与超限拦截** (`07fb8ea6`, plugins/assistant_hub/assistant_manager.py · ui/sections.py · ui/assistant_card.py · tools/memory_tools.py): 全局/项目记忆各设字符上限（默认 4000/3000，助手配置可改）；超限读取截断并附「合并去重、删过时条目、压缩表述」整理指令，超限写入直接拒绝并给整理步骤；记忆卡片新增「字符上限」行 + `MemoryLimitDialog` 弹窗编辑（100–1000000 范围校验，非法回落默认）
+
+- **提示词 XML 标签包裹与记忆说明书极简化** (`523afba1` `07fb8ea6`, plugins/system-hooks/hooks/hooks.json · inject_skills_content.py · inject_subagent_info.py · plugins/assistant_hub/hooks/inject_assistant.py · project_notes.py · core/memory/prompts.py): 四个内置 hook 契约（`<coding_contract>` / `<primary_constraints>` / `<subagent_constraints>` / `<hook_message_rules>`）与技能列表（`<enabled_skills>`）、子智能体列表（`<available_subagents>`）、助手身份（`<assistant_identity>`）、项目笔记（`<project_notes>`）统一 XML 标签包裹；记忆系统说明书由长篇说明收缩为「指针 + 路径」，使用规则归入工具 schema description
+
+- **日志条目 summary 字段** (`07fb8ea6`): daily 日志前缀扩展为「时刻 | 等级 | 摘要 | 细节」，`memory_write` 新增 `summary` 参数（一句话，便于浏览），缺省退化为原三段式
+
+### 🔧 测试基建 (Testing Infrastructure) · 重新发布 #2 追加
+
+- 蒸馏与分页回归（`523afba1` `07fb8ea6`, tests/plugins/assistant_hub/）: test_memory_store 补蒸馏打标与门禁清单用例、test_memory_tools 补分页读取/打标/门禁拦截/summary 前缀/超限拒绝对应用例、test_prompts 补说明书收缩与门禁指令断言、test_manager_ext 与 test_llm_client 同步适配
+
+### ✨ 新功能 (New Features) · 重新发布 #3 追加
+
+- **记忆快照/健康/迁移体系** (`f4c8ea42`, `5579de2c`, `d1953557`, `b15470da`, plugins/assistant_hub/): 记忆快照存储层（快照/轮换/预览/恢复）；工作目录漂移检测与记忆迁移；manager 门面统一入口，清除记忆前强制快照；memory_write 覆盖全局/项目记忆前自动快照。
+
+- **助手中心记忆健康行与恢复弹窗** (`a5865676`, `b1488e07`, `4b82111d`, plugins/assistant_hub/): 记忆区健康状态行与漂移迁移提示；快照恢复弹窗（浏览/预览/恢复）接入助手中心。
+
+- **记忆系统文档与日志查询** (`53df8e29`): 记忆系统使用文档；memory_read 日志查询支持按日期范围、等级与正则过滤。
+
+- **侧边栏插件右键固定到常驻区** (`a1492e2b`, `f1e8ab70`, `8e752208`, `43f82a50`, app/widgets/tab_panel.py · tests/widgets/test_tab_panel.py): 插件行右键「固定到常驻区/取消固定」；固定态存 app_state `pinned_plugins`，固定项置常驻区顶部并以分隔线区隔未固定项；右键菜单图标随固定状态切换；归属优先序：用户固定 > 注册 `group` > 插件归属。
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #3 追加
+
+- **插件市场更新内置插件后侧边栏条目掉进自定义区** (`fd817d1b`, app/widgets/tab_panel.py · tests/widgets/test_tab_panel.py): 内置插件更新采用影子副本（新版装用户根 `~/.drifox/plugins/<name>` 覆盖内置版），覆盖后 `is_system=False` 使侧边栏归属翻转。归属判定补消费 `overridden_by == "system"`，更新后的内置插件条目保持常驻区显示。
+
+- **快照恢复弹窗对齐 OverlayBase 视觉体系** (`6100ed99`, plugins/assistant_hub/): 遮罩卡片/主题控件/统一按钮。
+
+### 📚 文档 (Documentation) · 重新发布 #3 追加
+
+- 同步侧边栏插件固定功能与归属修复（`388925ef`）。
+
+### 🔧 测试基建 (Testing Infrastructure) · 重新发布 #3 追加
+
+- TabPanel UI 插件测试过期写法修复（菜单方法名/metadata/__init__ 签名）（`8a5df261`）。
+
+### ✨ 新功能 (New Features) · 重新发布 #4 追加
+
+- **titlebar tab 页级滑动动画与 SlideTabAnimator 抽取** (`e432bc67`, `71ca6330`, app/widgets/slide_tab_animator.py · app/widgets/workbench_panel.py · tests/widgets/test_slide_tab_animator.py): 新增 QStackedWidget + QLayout 通用两段式滑动（旧页画面滑出画外 → 画外换页+重活回调 → 新页滑入归位）；动画期间 stack 摘离布局手动摆位、收尾按原次序放回；打断安全（finish_now 仍完成换页，隐藏/关页/重建 tab 前收敛防几何残留）；titlebar tab 长条模型方向 + 卡间两段式滑出；右侧工作台页签套用同款方向滑动，点击按位置差算方向、程序化切换直落位，refresh_data 移到段间回调与新页首帧一起画外完成。回归 4 用例。
+
+- **流式高度跟踪节流与自动渲染通道选择** (`e4985cf9`, app/widgets/card_render_core.py · app/widgets/message_card.py): 流式高度跟踪参数优化，节流条件下收敛时间保持一致；按内容类型自动选择渲染通道，优化内存占用的同时保持渲染质量。
+
+- **布局高度收敛与回收行为测试族** (`2f22cf81`, tests/widgets/ · tests/debug/ · tests/perf/): MessageCard 布局高度渲染后收敛校验（修滚动/跳转高度偏差）；批回收前置「懒渲染完成 + 高度收敛」双条件；渲染通道自动选择；流式高度跟踪节流收敛；用户卡 pin 状态不锁高可自然调高；虚拟滚动回收重建高度守恒。
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #4 追加
+
+- **切页动画第一帧被杀** (`f5e311e2`, app/main_widget.py · tests/widgets/test_content_stack_slide.py): _ContentStack.resizeEvent 动画在途只同步两页几何到新 rect，不再快进收尾（根因：切页后 _sync_chat_wrapper_width 同一 tick 改 wrapper margins 触发本栈 resize，等于第一帧就把动画杀掉）；卡间切换点击瞬间同步 _replace_active 与胶囊高亮，内容仍在画外切换，胶囊不再等 300ms 滑出结束才跳位。回归 test_resize_during_slide_keeps_animating。
+
+## [v0.6.8] - 2026-10-16
+
+自 v0.6.7 以来的变更 | 提交数：3 · 文件变更：13 · +988/-45 | 贡献者：dingma
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **简洁模式流式折叠栏抖动三层修复** (`73f23c3d`, app/main_widget.py · app/widgets/card_viewers.py · app/widgets/message_card.py · tests/widgets/test_main_widget_scroll_anchor.py · tests/debug/dock_jitter_probe.py): ①跟随态贴底由 heightChanged 回调内同步贴 `_landed_bottom_value()` 改为 `QMetaObject.invokeMethod(QueuedConnection)` 排队执行（posted event 与 LayoutRequest 同队列 FIFO：布局落地→贴底→paint，用户看不到中间帧），消除「上一拍底」滞后造成的视口内容突跳-弹回循环（卡片高度增长期抖动；探针 dev 0→261→0、16 次翻转）；②内容哨兵补渲强制走全量渲染（置 `_needs_full_render` + 复位差量基线 `_stable_md_len`/`_last_rendered_markdown`）——流式中补渲原本进差量快路径被「无新内容」拦截，真机实证 18 次补渲全部无效、DOM 卡死 ~100 字符达 3 分钟（渲染管线停摆→间歇恢复→积压涌入即折叠框大幅跳动主因）；③哨兵不可见短路：V1 门控下隐藏期间渲染本就挂起，补渲只会空转（旧日志 564 次空转），改置 deferred 由 showEvent 恢复时补渲。附带渲染管线分支计数打点（render-diag，5s 汇总 all.log）与 dock-blank 虚高诊断（带 2s 冷却）。测试：test_main_widget_scroll_anchor.py harness 补绑 `_schedule_bottom_snap`/`_snap_bottom_queued` + 断言前 processEvents；复现探针 tests/debug/dock_jitter_probe.py
+
+- **HistoryManager 缓存键交错致陈旧列表返回** (`cfe63847`, app/utils/history_manager.py · app/main_widget.py · plugins/history-manager/ui/history_card.py · plugins/history-manager/ui/history_page.py · tests/utils/test_history_manager.py): `_cache_dirty` 是全局脏标志，但轻量列表缓存按 cache_key 分桶（`project` / `("merge_team", project)`）。原实现只置全局标志、由先被读到的桶在重建后复位，其余分桶长期停留在旧快照——历史页（merge_team=True）与欢迎卡片/工作区树（merge_team 缺省）交错读取时，「历史卡片看不到刚结束的会话」。改为置脏即整表作废（`_mark_cache_dirty` 清空 `_cached_lightweight`），单桶重建不复位全局标志，同时兼容外部直接置 `_cache_dirty = True` 的调用方。附带本进程写库后刷新 SQLite 变更签名：WAL 提交会推进 -wal mtime，不刷新会让下一次 `get_history_list` 的 `_reload_if_db_changed` 把自己的写入误判为「其他进程修改」，每轮对话结束后首次刷新都白跑一次全量重载（实测 1915 条约 19ms，且持 `_history_load_lock`）
+
+### ✨ 新功能 (New Features)
+
+- **子代理继承历史序列化与探针工具** (`382fa697`, app/core/workers/subagent_worker.py · tests/core/test_subagent_serialize_internal_format.py · tests/debug/dock_jitter_probe.py · tests/debug/_bisect_webengine_boot.py): ①SubAgentExecutor 发送前补 image_ref 读侧恢复（`revive_vision_image_refs`，persist 的逆操作；缺失文件降级 text 占位块不抛错，与 chat_worker 对称）——继承的主智能体历史含用户图片时，不恢复会以内部格式漏进 API content 数组（`type=image_ref` 非法，触发 400）；②chat/completions 分支同样强制过序列化单入口 `_serialize_for_api`——inherit_history 继承的历史是内部格式（assistant.content 可含 tool_result block、image_ref），裸发会被严格校验的 provider 拒绝（实测 GLM 400 code=1214 "messages[N].content[M].type类型错误"）；新增 `tests/debug/dock_jitter_probe.py`（折叠栏抖动复现探针）与 `tests/debug/_bisect_webengine_boot.py`（WebEngine 崩溃点二分定位），测试 `tests/core/test_subagent_serialize_internal_format.py`
+
+## [v0.6.7] - 2026-10-14 (重新发布 #4)
+
+自上一版本以来的变更（累计） | 提交数：65 · 文件变更：330 · +18646/-10331 | 贡献者：dingma, drifox-bot, mading
+
+### ✨ 新功能 (New Features)
+
+- **工作台挤压折叠（squeeze）与宽度记忆** (`app/widgets/tab_manager_window.py` 等): 拖拽落定触发双向 squeeze 判定；工作台压穿硬 min 自动折叠（与左栏双向对称）；挤压折叠的工作台按折叠前宽度恢复；切页 restore 兼容 saved 宽度从无到有；TabManagerWindow 增加 per-tab 卡片宽度记忆与快照处理；新增 baseline 宽度恢复（切页）与拖拽落定/压穿自动折叠回归测试 (`8c43ee51` `21550657` `3b66dfc0` `c48c70aa` `b9e6b398` `d716bf4d` `1b0d2438` `b7181cc4` `a5e1594a` `336cd2f4`)
+- **后台任务共享线程池** (`85951e77`): 实现共享 QThreadPool 处理后台任务，改善关窗性能（关页不再 waitForDone 阻塞）
+- **assistant hub 内存管理与 UI 重构** (`9aa38fe6` `fbabf382`): 重构 memory 管理与 UI 组件；新增工具计数标签刷新与卡片槽宽补偿逻辑
+- **沙箱命令显式 workdir 支持** (`32672da8`): 增强 sandbox 命令处理，安全校验支持显式工作目录
+- **模型能力按 provider 拉取与 per-model 能力** (`4962395c` `268083f0` `5c4befe0`): 集成 provider 支持增强模型能力检索；编辑器接入 provider；实现 per-model 能力并隐藏声明键
+- **history 输入处理与格式污染回归测试** (`91d35c29`)
+- **展开队列超时跳过卡死目录** (`057f7eb4`)
+- **BalanceDisplay 用主题 SVG 图标替换 emoji** (`2bd33ddc`)
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **card_viewers 滚轮事件处理优化** (`6aa9b52b`)
+- **render 提升 changelog 段落 max-height 可见性** (`0c6deb02`)
+- **assistant_hub 经验压缩分批+失败冷却** (`70e5a1f9`): 修 113 条单批超 240s 恶性超时
+- **assistant_hub 记忆分层铁律 + 压缩水位 120+增量判据** (`0506c834`): 防抄 AGENTS.md；分类名限 12 字
+- **assistant_hub memory 日志 date 参数防路径穿越** + 日志索引过滤杂项文件 (`e0d1fece`)
+- **assistant_hub 项目记忆跟随当前激活标签页窗口取 workdir** (`e95a89df`): 修多窗口串味
+- **assistant_hub daily 日志去日期标题改纯条目流** (`e5b27a9b`)
+- **models.dev 空解析结果覆盖缓存致模型费用信息消失** (`a4ed6ce7`)
+- **plugin loaders module_prefixes 统一透传** (`b93fb750`)
+- **file-tree 打开文件树整窗卡死，QThread 用法全面纠正 (v0.2.1)** (`1314de72`)
+
+### ♻️ 代码重构 (Refactoring)
+
+- **移除 OpenCode Zen 免费模型集成及关联逻辑** (`dee505ec`)
+- **render MAX_HEIGHT 调整改善渲染性能与滚动** (`f112416a`)
+- **测试重构 + 新增用例** (`8ea1fe2d` `2c465cc3`)
+
+### 🔧 其他 (Chores & Build)
+
+- marketplace 由 plugin.json 自动重新生成（[skip ci]，`1d8b49b2` `6c35fc75` `e03a892a`）
+- diagnostic-report agent 创建前基线 (`43e0a33a`)
+
+### ✨ 新功能 (New Features) · 重新发布 #2 追加
+
+- **MCP OAuth 授权体系与 token 存储** (`1344166d` `2d6cddf9` `7167deca` `d778e66f` `e6dbeb47`): 新增 `app/core/mcp_oauth/` 包（token_store / callback_server / provider / manager），实现 OAuth 2.1 授权码流程：Protected Resource Metadata 发现（RFC 9728）、Authorization Server Metadata 发现（RFC 8414）、PKCE(S256)、动态客户端注册（RFC 7591）、本地 HTTP 回调（127.0.0.1 随机端口 /callback）与 token 自动刷新。`.mcp.json` 通过 `auth: {type: "oauth", client_name, scope}` 声明，`auth` 加入 `_MCP_PERSIST_FIELDS` 保证 UI 编辑不丢；token 复用 PluginConfigStore 落 `plugin_data/<plugin>/config.json`（键名 `_mcp_oauth_<server>`）。MCPServerRow 增加「授权/解绑」双态按钮，解绑前弹确认。附带 SDK 兼容性补丁：basic 认证模式下从 body 移除 client_id（RFC 6749 §2.3.1，否则 Notion 返回 400）。文档 `docs/plugins/mcp-oauth.md`；测试 `tests/core/test_mcp_oauth.py`（36 例）+ `tests/widgets/test_mcp_row_oauth.py`
+- **MCP 调用队列与 lifespan 任务执行** (`dd5840f3`): MCPClientManager 改为按 server 分组工具 schema 供 token 估算；会话操作经调用队列串行执行，lifespan 任务独立运行，避免并发握手竞态。测试 `tests/core/test_mcp_call_task_affinity.py`
+- **MCP 插件 credential 字段** (`e6dbeb47`): 插件配置新增 `credential` 字段，用户在设置界面直接填 API key；经 PluginConfigStore 存取并在建连前注入 MCPClientManager；MCPServerRow 提供从指定 URL 取 key 的按钮
+- **StatusDot 组件** (`05ec681a`): 新增 `app/widgets/status_dot.py`，替换 MCP/LSP/question 卡片里的字符状态点
+- **diff stats 批量处理** (`22141d20`): 历史加载时批量处理差异统计，减少渲染往返；测试 `tests/widgets/test_history_load_speedup.py`
+- **聊天宽度配置项** (`879dd1ff`): LLM 设置卡新增 chat width 配置，TabManagerWindow 按配置调整布局
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #2 追加
+
+- **隐藏控件前解除焦点，修多余滚动** (`8f81f804` `0a98d67d`): 控件隐藏前先清除焦点，避免焦点控件被移除时 Qt 触发意外 scroll 行为；新增回归测试 `tests/widgets/test_delete_focus_scroll_guard.py`
+- **高度载荷解析补第六字段，修几何信号断链** (`f6fe3726`): card_viewers 高度 payload 增加第六字段（内层可滚标志），并修正 `bodyGeometryReported` 必须无条件 emit——此前新增字段时误把它替换成 `bodyInnerScrollableChanged.emit`，只发后者导致 `_body_geom_valid` 恒 False、武装态卡片内滚到边界后内外双死锁；同步扩充 ui-plugin-creator references/pitfalls.md 自检清单（窄窗口 / 明暗双态 / 悬停 tooltip / 数据加载判 key）
+- **card_viewers 滚轮事件在可内滚容器中的委派** (`7167deca` `2d6cddf9`): 内层可滚容器按 armed 状态与 overflow 条件决定是否吞掉滚轮事件
+
+### ⚡ 性能优化 (Performance) · 重新发布 #2 追加
+
+- **移除简洁模式工具/思考折叠内的预览文字打字机** (`a04d0b4c`): 删除 `_PREVIEW_TYPEWRITER_JS`（`window._pt/_ptType/_ptPlay`）、全部 `[data-dfx-preview]` 标记与 6 处渲染路径调用，工具块预览行与思考块预览文字改为渲染落地即全显。消除渲染落地后 240ms 内逐帧 rAF 文本写入与每轮全量渲染的 `querySelectorAll('[data-dfx-preview]')` 遍历；`_SKELETON_CACHE_VERSION` 46 → 47；删除对应测试 `tests/widgets/test_preview_typewriter.py` 与复现脚本 `tests/debug/preview_typewriter_repro.py`
+
+### ♻️ 代码重构 (Refactoring) · 重新发布 #2 追加
+
+- **移除 PixelPet（像素宠物）全链路** (`f50bf42e` `9ac3b28e` `f87e0d0c` `a18da0cc` `e6dbeb47`): 删除 `app/widgets/pixel_pet.py`、MainWidget 与 TabManagerWindow 的全部调用点、worktree-manager UI 集成、主题管理器与图标映射相关逻辑、`icons/pet.png` 与雪碧图生成脚本，并清理剩余测试引用
+- **GiteeAccountRow 布局与样式调整** (`68f535f5`)
+
+### 🔧 其他 (Chores & Build) · 重新发布 #2 追加
+
+- marketplace 由 plugin.json 自动重新生成（[skip ci]，`3a9262f6` `c7f246f8`）
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #3 追加
+
+- **滚轮事件链路线程安全与几何校准** (`14201f4b` `a6b6ece1` `6f69b039` `3eef164f`): UIEventBus 及关联组件加线程安全检查，阻止访问违例；UIPluginRegistry 在主线程初始化 UIEventBus 中继；CodeWebViewer 改为事件驱动的几何校准，修正 armed 态卡片内滚边界判定；新增 `tests/debug/probe_wheel_*.py` 系列真实宿主/合成事件探针与 `tests/widgets/test_welcome_card_pending_delete.py`（防待删除控件在 UI 更新中崩溃）
+
+### ✨ 新功能 (New Features) · 重新发布 #4 追加
+
+- **TLS 信任系统证书链** (`8a07b24a`): 修复企业网络/代理对 HTTPS 做 TLS 拦截（插入自签 CA）时 CodeBuddy 登录、模型列表拉取、用量查询、更新检查全链路报 `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`。新增 `app/utils/tls_trust.py` 用 truststore（pip 官方同款）把验证委托给系统信任库（macOS 钥匙串 / Windows 证书存储 / Linux 系统 CA），进程级缓存；`http_client` / `update_proxy` 接入；system-providers 插件 8 个 provider（buddy_auth / copilot_auth / codebuddy / dashscope / github_copilot / minimax / opencode / volcengine / zhipu）内联 helper 保持零主程序依赖；buddy_auth / copilot_auth 把 SSL 类报错翻译成带指引的中文。依赖新增 `truststore>=0.9.0`；测试 `tests/utils/test_tls_trust.py`（6 例）+ `tests/utils/test_update_proxy.py`
+
+## [v0.6.6] - 2026-10-13 (重新发布 #4)
+
+自上一版本以来的变更（累计） | 提交数：44 · 文件变更：109 · +10440/-1447 | 贡献者：dingma, martin98-afk, mading
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **file-tree 树状态稳定性 + 展开目录多了卡死** (`plugins/file-tree/ui/tree_widget.py`, `plugins/file-tree/ui/cards.py`, `plugins/file-tree/.drifox-plugin/plugin.json`, `marketplace.json`, `tests/widgets/test_file_tree_state_stability.py` 新增): 两类用户痛点。**① 树状态被刷没**：同根重扫改走 `refresh_root` 增量（原无条件 `set_project` → `beginResetModel` 丢弃全部展开/选中/滚动态）；路径比较归一（`normcase`+`normpath`），修 `scan_dir == project_root` 裸字符串比较导致带尾斜杠/大小写差异时根扫描被误判为子目录扫描而静默不刷新；换项目整树 reset 时按项目根缓存视图状态，A→B→A 来回切还原展开与选中；展开恢复串行推进，不依赖 `expand()` 内部触发 `fetchMore`（视图不可见/首帧布局时 Qt 会推迟该调用）。**② 展开目录多了卡死，真凶是扫描互杀**：旧实现每来扫描请求即 `_cleanup_worker()` 杀掉在跑的扫描，`QThread.quit()` 打断不了工作线程中的 `os.scandir`，`wait(3000)` 真阻塞主线程；被杀目录的 loading 标记被清后回到「已展开且 canFetchMore」状态，Qt 下一轮布局再次请求它，与扫描请求互相踩踏成自激循环（实测 6 目录触发 223 次扫描、主线程累计阻塞 25s）。改为串行队列（至多一个扫描在跑，入队即占位 loading 覆盖「排队→扫描→落地」全程）+ 请求幂等去重 + 根扫描 urgent 插队与世代作废（在途结果作废）+ 扫描失败目录熔断（`canFetchMore` 返 False，点刷新解除）。实测对照：修复前 223 次扫描 / 主线程阻塞 25162ms / 加载 0-6，修复后 7 次扫描 / 阻塞 0ms / 加载 6-6；30 目录 × 50ms 场景扫描 31 次（理想值）、零阻塞、30/30 全加载。新增 16 条回归测试（路径归一 / 同根保展开与 loaded 孙级 / 换项目切回还原 / 队列不互杀 / 幂等去重 / loading 覆盖排队窗口 / 根插队 / 世代作废 / 失败熔断），与既有 `test_file_tree_root_watch.py` 合计 28 条全通过。插件版本 file-tree 0.1.0 → 0.2.0。`d4ddba3c`
+
+- **瞬切打开面板背景丢失** (`app/widgets/tab_manager_window.py`): 瞬切打开（`animate=False`）时立即补刷主题置脏 frame，避免空 styleSheet 显示；`_refresh_theme_dirty_frames` 移除 `_theme_needs_refresh` 门控，改为可见者串不一致即刷、不可见者置脏；预览态下 workbench frame 跳过补刷（由专用内联 QSS 管理）。`65ceecd3`
+
+- **file-tree 展开状态持久化，插件热重载不再丢层级** (`plugins/file-tree/ui/cards.py`): 上一条只覆盖「实例存活期间的刷新」。插件热重载（watchfiles 监控仓库 `plugins/` 目录，任一文件变更——agent 改代码 / git 操作 / 版本号提交触碰 plugin.json——都会触发「manifest changed, reloaded all components」→ 工作台页销毁重建）仍会把展开态归零，因为展开态与 `_view_state_cache` 都是卡片实例属性，重建即归零。改为视图状态落盘 `<仓库根>/.drifox/plugins/file-tree/view_state.json`（安装态回退 `~/.drifox`，均在 gitignore 内）：`_live_expanded` 由 expand/collapse 即时增删 + 防抖 2s 落盘，销毁前（`destroyed`）同步 flush（热重载先杀旧实例，防抖 timer 等不到）；写前读盘合并，防该文件被多窗口 file-tree 卡片共享时整文件覆盖冲掉其他窗口刚写入的其他项目条目；换根时清空实时展开集；读盘失败静默（缓存无关紧要）；上限与内存缓存一致（32 项）。端到端验证：实例1 展开 6 目录（含三层深路径）→ 落盘 → 销毁 → 实例2 读盘重建，6/6 展开态完整还原；窗口 A(项目X) 与窗口 B(项目Y) 先后落盘条目并存，新实例读盘双双还原。`a6993144`
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号升级至 v0.6.6（pyproject.toml / config.py / installer.iss / README）(`2de628e7`)
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #2 追加)
+
+- **排队消息卡片多条时高度坍缩裁切** (`ed9f6c77`): `QueueMessageCard` 增加 `hasHeightForWidth`/`heightForWidth`，按行数直算高度绕开 Qt 布局缓存残值；新增 `heightChanged` 信号在 `set_entries` 末尾 emit，容器重算不再依赖易被动画守卫丢弃的 Resize 事件；补高度跟随回归测试（稳态追加 / Resize 链路中断 / 展开动画窗口内追加三种坍缩场景）。
+
+- **macOS 打包缺麦克风权限声明致录音全程静音** (`9eb96ac8`): `build.py` 新增 `_MAC_INFO_PLIST` 与 `inject_macos_info_plist`，后置写入 `NSMicrophoneUsageDescription` 并 adhoc 重签 .app，修复缺少 TCC 声明导致录音全程静音、无授权弹窗的问题；调整后置处理顺序（先精简体积再注入 plist，避免签名失效）。
+
+- **会话上下文用量估算精度** (`4d8ed7b2`): `from_api` 改三态并新增自适应校准因子；`last_api_prompt_from_usage` 改为 `Optional[bool]` 三态语义（True/False/None=未知按可用），避免老记录被误判为本地估算而丢弃权威 API `prompt_tokens`；`ChatSession` 新增 `token_calibration` / `token_calibration_model` 字段并持久化，`api_usage_dict()` 统一导出保证所有保存链透传权威用量字段不被清零；引入 `resolve_calibration` / `blend_calibration`：本地 token 估算按 API usage 反推的校准因子修正，按模型隔离，换模型即失效；用量快照 breakdown 分量与增量 delta 同步缩放，保证与总量口径一致。
+
+- **压缩清空失效与占位重建滚动抖动** (`6bdd7127`): 压缩清空守卫改用 wall-clock 时间切断点（`_post_compact_cutoff_ms`），修复 epoch 被 `_do_trigger_callback` +1 后旧 worker 延迟快照被误放行、清空被复活的问题；释放态会话不再被误判为空而跳过清空，清空结果通过 `save_cleared_session` 立即落库，避免重载后旧消息"复活"；内存治理释放消息时标记 `_messages_released`，与保存链空消息守卫同口径；批次占位记录卡片固定开销 `content_overhead`，重建时还原增量口径，修复锚定补偿导致视口跳动；`get_project_color` 改从 `app.utils.project_meta` 导入。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+
+- **history-manager 内容被浮层滚动条遮挡** (`a73d0156`): `history_page` 与 `project_selector_card` 内容布局右边距调整为 14px，防止内容被 qfluentwidgets ScrollArea 的浮层滚动条（占右缘 13px）遮挡。
+
+### 🆕 重新发布 #4 增量（自 v0.6.6 重新发布 #3 起 · 35 commits · 58 files · +6253/-901）
+
+#### ✨ 新功能 (New Features)
+
+- **左侧卡片嵌入侧边栏，与对话区解耦** (`app/widgets/tab_manager_window.py`, `app/widgets/tab_panel.py`, `docs/plugins/ui-slots.md`, `tests/widgets/test_left_card_sidebar_embed.py` 新增): `container="left"` 的全局浮动卡（历史会话 / 快捷指令等）宿主从对话区 `dockSplitter` 左停靠区迁到 `#tabFrame` 内部新建 `sidebarSplitter`，嵌在侧边栏圆角框内、TabPanel 右侧，视觉上从侧边栏长出。交互语义：卡片打开时 TabPanel 收起让位（46px 图标条）、卡片区展开（默认 300px，按插件 per-card 记忆）、`#tabFrame` 整体加宽、对话区让位；关闭反向恢复。拖主 splitter 增量只加卡片宽度、TabPanel 保持不动；拖内部分隔条两者互借宽度、frame 总宽不变。实现：`_DockSideWrapper` 新增 `expandedChanged` 信号与伙伴窗格联动（`set_partner_pane`），`_sync` 重入改置脏补跑；宿主编排显式锁死内部分配 `[tab宽, 卡片宽]`，避免 QSplitter 按比例重排把 TabPanel 摊窄（实测 46→19）。修三处：① 卡片期拖内部分隔条致侧边栏坍缩（实测 frame 被压到 60px）——根因 TabPanel 宽度自治在共享 splitter 下仍 emit `sidebarToggled`，新增 `_left_card_present` 占位期抑制开关；② 分隔条未贯穿样式（`margin: 10px 2px` → `margin: 0`）；③ 主把手拖拽门控失效——`splitterMoved` 上报的是右邻窗格索引（左把手 = 1），硬编码 `index != 0` 使拖拽会话从未开启。新增 15 条回归测试。`9c1bb1e1`
+
+- **工作区树 v2：扁平化 + 两行式会话行 + 会话置顶** (`app/widgets/tab_panel.py`, `app/widgets/workspace_tree.py`, `app/widgets/tab_manager_window.py`, `tests/widgets/test_tab_panel_tree_v2.py`, `tests/debug/probe_tree_header_geometry.py` 新增, `tests/debug/probe_tree_render.py` 新增): 去掉工作树中间层，项目直挂会话，工作树名降级为会话行副行信息位；会话行改两行式（44px：标题 / 预览·工作树名·相对时间），已打开行与历史行同构；置顶跨分组（已打开+历史排项目下最前，按 `last_time` 降序），图钉 hover 才显、置顶后常显金色；「工作区」标题行右侧 + 新建项目（复用选文件夹流程）；项目行撤掉「分支」快捷入口（管理工作树入口随工作树层一起退役）。数据链复用 `history_manager.set_session_pinned`（内存+pinned 列）。新增 v2 结构回归 6 条（扁平/副行/置顶排序/标题行/图钉写链）。`e3892681` `5cebf686`
+
+- **已打开对话页行树行化，与树内其它行同一视觉体系** (`app/widgets/tab_panel.py`, `app/widgets/workspace_tree.py`, `tests/widgets/test_tab_panel_tree_row.py`): `TabItem` 新增 `set_tree_row` 单入口（28px 行高 / 无项目图标 / 标题 12px / 内容起点 48px 与历史会话行对齐 / 关闭钮 hover 才显）；树行选中改淡靛蓝（深 22% / 浅 17%，无左指示条），hover 纯色复用 `workspace_tree` 的 HOVER_DARK/LIGHT 单一数据源；删除树行化后失去调用点的 `set_open_marker` / `set_close_persistent` / `set_indent` 与蓝点控件；流式/报错/提问的 shimmer 与状态左指示条原样保留，列表模式与紧凑态零变化。5 条回归测试。`57fefeb4`
+
+- **项目色主题感知对比度** (`app/utils/project_meta.py`, `app/widgets/square_avatar.py`, `plugins/history-manager/ui/history_page.py`, `plugins/history-manager/ui/project_selector_card.py`, `plugins/plugin-marketplace/ui/_squircle_avatar.py`, `app/main_widget.py`, `app/widgets/tab_panel.py`, `app/widgets/workspace_tree.py`, `tests/utils/test_project_meta_contrast.py` 新增): `get_project_color` 按当前主题动态调整亮度，使项目色在明暗两套主题下均满足 WCAG 对比度；引入颜色缓存避免重复计算；新增 `contrast_text_color` 依背景亮度定字色；`_SquareAvatar` / `_TabProjectIcon` / `_ProjectBadge` 等统一接入。`8ddbbdee`
+
+- **未闭合渲染围栏占位提示** (`app/widgets/card_viewers.py`, `app/widgets/message_card.py`): WebEngine 骨架 JS 新增 `window._dfxStreamNote{show,hide}`（`typeof` 只注册一次），`#content-placeholder` 末尾挂 `dfx-stream-note` 占位行；`_dfxAppendStreamText` 首行与 `updateContent` / `updateContentAppend` / `updateTailHtml` 三入口首行 hide（正文一有真实内容即撤，任何差量/全量兜底清除）；骨架 CSS 加斜体弱化 + 纯 CSS 呼吸动画（禁 JS 定时器），reduced-motion 列表同步停用；`message_card.append_text` 在 tag 翻转块后加 fence 翻转块：首现 show「正在生成图表/代码块…」、闭合 hide，占位只进 DOM 不进 `_content_data`。`7376e065`
+
+- **Qt 渲染器调度对齐 WebEngine 四级策略** (`app/widgets/card_render_core.py`, `app/widgets/markdown_block_viewer.py`): `append_chunk` 不再每 chunk 同步全量 reconcile，改按 chunk 间隔自适应档位（<200ms→150 / >500ms→500 / 其余 300）合并派发；`_schedule_render` 四级（立即 / 流式硬边界同步 / 流式软边界 100ms 合并窗 / 无边界自适应；非流式 40ms）；`_perform_update` 统一消费 lazy cb 并刷新 `_last_render_ts`；`_do_incremental_render` 与 `_perform_update` 双向 stop 防一次 chunk 双全量；`finish_streaming` 收尾停派发拍；四级间隔常量模块级导出于 `card_render_core`（与 `CodeWebViewer` 类常量同值互指）。`0319b49f`
+
+- **共享界面滚动内容层加不透明底色，走 Qt blit 快路径** (`app/utils/design_tokens.py`, `app/widgets/cards/settings/model_selector_card.py`, `app/widgets/cards/settings/system_card_frame.py`, `app/widgets/cards/settings/llm_settings_card.py`, `app/widgets/cards/floating/command_card.py`, `app/widgets/tab_panel.py`, plugins 侧 `history-manager` / `plugin-marketplace` / `share-history` / `shortcut-manager` / `system-cleaner` / `artifacts-manager` 六处卡片页, `tests/perf/test_marketplace_scroll_blit.py` 新增): 新增 `_apply_content_surface` / `_apply_content_surface_color`，滚动区内容层设实色背景（此前半透明合成使 Qt 无法走 blit 优化，滚动逐帧重绘），在 `setWidget` 后统一调用保证视觉一致。`f848de70`
+
+- **用户气泡目标宽全链统一口径** (`app/widgets/message_card.py`, `app/main_widget.py`, `tests/widgets/test_user_bubble_width_consistency.py` 新增, `tests/debug/diag_hover_jitter.py` 新增, `tests/debug/probe_hover_geometry.py` 新增): 抽出 `user_bubble_target_width()` 唯一口径。此前拖拽路径用 0.25、而滚动同步 / 批量同步 / 新增卡片三处残留 0.06（94%），两者分裂 → 松手落定瞬间气泡跳宽 → `PlainTextViewer` 重折行 → 高度变 → 二次收敛（用户报告的「松手后收敛慢 / 跳变」）。口径统一后落定与拖拽同宽，无二次重排。`ba8ad6e4`
+
+- **单行省略控件控制字符归一化** (`app/widgets/elided_label.py`, `plugins/shortcut-manager/ui/__init__.py`, `tests/widgets/test_elided_label.py`): `_ElidedLabel` 按单行渲染（行高由外部列表行钉死），而原文（会话预览、命令描述）常带 `\n` / `\t`；直接交给 QLabel 会真换行渲染，但 `QFontMetrics.elidedText` 把控制字符当**零宽**处理（实测 `"a\nb"` 比 `"a b"` 窄 7px），测量与渲染不一致 → 省略结果仍含控制字符 → 被行高截断。新增 `_to_single_line()` 渲染/测量统一走归一化（长度不变保证高亮下标对齐原文），`_full_text` 保留原文（tooltip 与 setText 回读语义不变）。`531209fd`
+
+- **share-history 卡片图标换 FluentIcons** (`plugins/share-history/ui/cards.py`, `tests/plugins/test_share_history_cards_smoke.py` 新增): emoji 图标换 FluentIcons 并更新按钮类型，补 216 行冒烟测试。`bcfddb32`
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **消息卡片悬浮滚动失效（滚轮事件黑洞）** (`app/widgets/card_viewers.py`, `tests/widgets/test_wheel_delegate_intercept.py` 新增, `tests/debug/probe_webview_wheel_sendinput.py` / `tests/debug/verify_wheel_fix_real.py` 新增): 滚轮事件的真实第一接收者是 WebEngine 内部 delegate（`RenderWidgetHostViewQtDelegateWidget`，即 focusProxy），body 有滚动空间（面积上限截断的长回复、高度收敛窗口期的瞬时溢出）时 Chromium 直接消费 wheel，`CodeWebViewer.wheelEvent()` override 永远收不到，「外层优先」两级转发规则失效（实测超限卡 8/8 全吞）；卡内滚到边界后 Blink 不向 Qt 宿主 scroll-chaining → 事件黑洞，悬浮卡片滚轮彻底无效（「经常失效」= 仅 body 无溢出、事件上抛的卡片能滚）。修法：focusProxy 就绪后幂等挂 self 为其 eventFilter（init 尾部 / `heightReported` / `showEvent` 三补装点，renderer 崩溃重建后由回报自然重装；delegate 构造期挂 parent 不发 ChildAdded，不能用 ChildAdded 安装），抢在 Chromium 之前按同一两级规则裁决：外层有余量 → 转发外层并吃掉；外层到边界 → 放行给卡内滚安全网。判定逻辑抽 `_route_wheel_to_chat_area` 唯一实现（与 `wheelEvent` 上抛路径共用，两路语义一致不双重滚动）。SendInput 实测：修复前超限卡 0/8 滚动，修复后 5/5；普通卡回归 5/5；新增 5 条回归测试（幂等挂装 / 拦截转发 / 边界放行 / 非目标放行 / 静态接线守卫）。
+
+- **消息卡内容被截断丢失（未闭合协议块里的孤围栏）** (`app/widgets/card_render_core.py`): `_extract_fenced_code` 开栏时若处于未闭合协议块（`<think>` / `<tool>` / 注册 tag）内部，那是协议块内容里的字面 fence（典型：模型思考里贴代码忘写闭合）；提取出的哨兵落在协议块内部，被后续 `_inject_think_cards` / `_inject_tool_blocks` 的协议块替换一并吞掉，`_restore_fenced_code` 找不回哨兵 → **从 fence 到文末的全部内容永久丢失**（历史会话重开同样丢失，即用户报告的「偶尔内容显示不全」根因）。修法：开栏时按前缀 `_has_unclosed_think_or_tool()` 判定，命中则放行不提取，fence 原文留在协议块内由 think/tool 卡自身处理。`de762aaf`
+
+- **真机弹窗路径 P0：`rangeChanged` 接线早于对话区创建** (`app/main_widget.py`, `app/widgets/modules/chat_area_module.py`): `__init__` 早期装配区的 `rangeChanged.connect` 早于 `_setup_ui` 对话区创建（兜底装配 / `chat_area_module.build` 两分支），真机弹窗路径必 AttributeError。抽 `_wire_scroll_range_changed()`，两分支收尾各自接线（互斥不重入）；`__init__` 仅保留 `_ensure_ab_active` / `_ensure_ab_active_until` 纯状态字段。`57ea992a`
+
+- **流式结束期盲滚底改事件驱动** (`app/main_widget.py`): `_ensure_at_bottom` 链活跃期 `rangeChanged` 即时贴底（`_ensure_ab_active` 窗口 + 2.4s 保险丝），盲重试 8 改 2；删 `_on_stream_finished` 500/1000ms 两处盲滚底（`_scroll_to_bottom_if_following`），由 `rangeChanged` 事件接管；sticky 1500ms 与 100ms 锚定保留；rangeChanged 在程序预抬 `setMaximum` 时也触发，靠 follow 守卫 + landed `setValue` 幂等兜底；回滚开关 `DRIFOX_EVENT_SCROLL=0`（默认开，关闭时重试链保持原 8 次）。`767bdb19`
+  - 后续修复：`_ensure_at_bottom` 默认参数改 None 后函数体缺 None 分派，无参重入（anchor 过期接力 `singleShot`）流入 `retries > 0` 抛 TypeError 致重试链静默中断；改为按开关分派（事件驱动 2 拍 / 回退 8 次）。`8aca88cd`
+
+- **贴底判定锚到已落地底值，消除预抬窗口误判** (`app/main_widget.py`, `tests/widgets/test_main_widget_scroll_anchor.py`): `_is_view_at_bottom` 改锚 `_landed_bottom_value`（已落地底），并从 `_sync_scroll_maximum` 调用中移出（`sizeHint` 退出每帧判定路径）。行为变化：away 判定从预抬「未来底」变「视觉底」，预抬窗口内不再误停 `_scroll_bottom_timer` / 清 `_pending_scroll_to_bottom`；析构窗口 RuntimeError 保守判贴底。同步测试基建：`_make_window` 补 landed 语义 mock。`a88072ea`
+
+- **底部锚定消除滚动白边** (`app/main_widget.py`, `app/widgets/card_viewers.py`): 引入 `_landed_bottom_value()` 精确判定布局更新后内容底部位置（替代预抬的 maximum），滚动位置与实际内容高对齐，防滚动期间视觉白边；移除 `contrast_text_color`，头像字色统一恒白保证两套主题可读；补探针用例确认无白边。`cab2c300`
+
+- **流式高度 tick 16ms→33ms，防抖指回 16ms** (`app/widgets/card_render_core.py`, `app/widgets/message_card.py`, `tests/widgets/test_streaming_smoothness_wiring.py`): `STREAM_HEIGHT_TICK_MS` 16→33（对齐 30fps 预算），新增 `STREAM_HEIGHT_DEBOUNCE_MS=16`（防抖 `setInterval` 改用 DEBOUNCE 常量保持 16ms 单帧）；`TRACK_FACTOR` 0.45→0.70、提速 cap 0.7→0.85（收敛时间不变）；同步测试守卫 `test_tick_matches_frame_budget` 至新节拍口径。`4ddcaf4d`
+
+- **typewriter 揭示链积压绝对上限** (`app/widgets/card_render_core.py`): `_twPush` 尾部加 `buf > 2000` 绝对上限，触发即 `_twFlush()` 瞬时全显并 return（flush 已 cancel rAF 清 buf，不得再走 rAF 分支重启动画链）。正常流永不命中（buf 稳态 <600），纯异常态保险（揭示链被闸门 / rAF 饥饿卡死）。`70f0e1de`
+
+- **空白流式的二级哨兵（DOM 停滞触发）** (`app/widgets/card_viewers.py`): 一级哨兵盲区（md<800、dom 200~800 缓慢增长、开头即白屏）新增二级触发：dom 停滞 ≥2s 且期间 md 增长 ≥300 且无未闭合 think/tag/fence → 清基准 + 强制补渲；排除集用 `_has_unclosed_think_or_tool`（含注册 tag）+ `_has_unclosed_chart_fence` 双判；触发即清 `_sentinel_stall_ts` 防补渲无效时每拍重入，与一级共用 3s 冷却。`cf0d1533`
+
+- **Qt 自适应渲染定时器饿死守卫** (`app/widgets/markdown_block_viewer.py`, `tests/widgets/test_markdown_block_viewer_adaptive.py`): 无边界分支无条件 `_render_timer.start()` 对激活中单发定时器重置倒计时，快速流式（chunk 间隔 < 档位）下每 chunk 重启 → 无边界内容（纯代码流 / 无句号英文段）格式化饿死至完成。对齐 WebEngine 版 `isActive()` 守卫（`card_viewers.py:5893-5895` 同构）。行为级用例：8ms 无边界流喂入中途断言 `_perform_update` 已触发（饿死版 FAILED、修复版 PASSED）。`3126f3a1`
+
+- **无窗口时历史 / 记忆管理器单例回落** (`app/widgets/tab_panel.py`, `app/widgets/card_viewers.py`, `tests/widgets/test_tab_panel_tree_v2.py`): HistoryManager / MemoryManagerCore 均为全局单例（跨窗口共享），所有窗口关完后 `_windows` 为空，若仍从窗口链取用，树会退化成「默认项目 / 0 个会话」空壳（实测复现）。读路径回落 `HistoryManager.get_instance()` / `MemoryManagerCore.get_instance()`，置顶写路径同款回落（无窗口时仍要能切置顶）。`c3f4c071`
+
+- **折叠态 TabItem 图标水平居中** (`app/widgets/tab_panel.py`, `tests/widgets/test_tab_panel_compact.py`): `_body` 以 `stretch=1` 占位，只藏子控件会把 icon 推到最左（46px 窄条下 icon 中心 18 vs 面板中线 23，与顶栏图标列错位 5px）；连 `_body` 一起藏。`36211e96`
+
+- **树形面板右边距与滚动条避让、引导线绘制顺序** (`app/widgets/workspace_tree.py`, `app/widgets/tab_panel.py`): `tree_row` 右边距改用 `_SCROLLBAR_RESERVE`，避免时间文字被浮层滚动条压住；自定义插件卡片非对称收紧右边距，与主 tab 列表滚动条位置对齐；会话行引导竖线改为 hover 背景后绘制，防被背景覆盖。`f8c11b8d`
+
+- **卡片占位期分隔条形态三连修** (`app/widgets/tab_manager_window.py`, `app/widgets/cards/card_container.py`, `app/main_widget.py`, `app/widgets/message_card.py`, `tests/widgets/test_left_card_sidebar_embed.py`, `tests/debug/repro_default_width_sequence.py` 新增, `tests/debug/repro_left_card_collapse_btn.py` 新增, `tests/debug/repro_three_pane_overflow.py` 新增): ① 占位期内拖分隔条无法退出折叠形态——TabPanel 占位期/拖拽期改形态自治（按滞回阈值切紧凑/展开 UI 但仍不 emit，防宿主把 frame 压塌），卡片关闭时尊重用户拖出的展开宽度落位，占位期与拖拽会话禁用挤压判定与自动展开恢复，折叠落定按 `tab_keep` 实际宽度决定不硬写 True；② 拖内部分隔条时面板形态不正确；③ 占位期宽度逻辑调整，保用户气泡与面板在折叠态正确显示。新增回归 `test_inner_drag_can_exit_collapsed_form`。`767fa357` `3fa73acc` `d8c01660`
+
+- **share-history / shortcut-manager 容器位调整** (`plugins/share-history/ui/__init__.py`, `plugins/shortcut-manager/ui/__init__.py`): share-history `right`→`left`（迁入新侧边栏卡片区），shortcut-manager `left`→`full`。`ba0f3d60`
+
+#### ⚡ 性能优化 (Performance)
+
+- **tail 行内渲染加增量阈值节流** (`app/widgets/card_viewers.py`): 软边界下约每 30 字全量 tail convert 的 O(n²) 降为线性——增量阈值 512 字符 + 时间旁路 1.5s（慢速流式每 1.5s 至少格式化一次）。阈值 return 路径**不写** `_tail_html_hash`（防 hash 比对把内容变化误判为未变而永久跳渲）；状态写入仅 hash 命中处与渲染完成处；`_cleanup_render_cache` 清零两个状态字段；切段边界不动，尾部格式化延迟由 finish 全量渲染兜底。`936bfbd0`
+
+- **卡片离屏时跳过流式动画** (`app/widgets/message_card.py`): `_update_anim` 在 `isVisible` 门控后追加视口门控——卡片矩形与 chat 视口矩形（经窗口坐标换算）无交集则跳过 `update()`。与隐藏分支同款相位语义：`_anim_clock.restart`，滚回视口后从原相位继续。`4274abfc`
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **删除孤儿 `_scroll_to_bottom_if_following`** (`app/main_widget.py`, `tests/widgets/test_main_widget_scroll_anchor.py`): `767bdb19` 删除两处 `singleShot` 调用点后该函数无任何存活调用，整函数与对应用例一并移除。`1654af02`
+
+- **shortcut-manager 移除卡片头部命令计数标签** (`plugins/shortcut-manager/ui/cards.py`): 移除 `_count_lb` 及其布局占位。`187a1a15`
+
+#### 📚 文档 (Docs)
+
+- **滚动注释与落地锚点 / 33ms 节拍对齐** (`app/main_widget.py`, `app/widgets/card_render_core.py`, `app/widgets/message_card.py`, `tests/widgets/test_streaming_smoothness_wiring.py`): 九项注释/docstring 与实际行为对齐（landed 换锚说明、自激回路标注 [历史] 并补现存触发源、30ms→0.12s 复用窗口、tick/Factor/Boost 演化理由、DEBOUNCE 独立常量化、`FINISH_TRACK_FACTOR` 0.28→0.12）。`3bbc0ce8`
+
+#### 🧪 测试 (Tests)
+
+- **流式渲染真机基准双通道** (`tests/perf/test_stream_render_bench.py` 新增, `tests/perf/test_stream_render_bench_web.py` 新增): Qt 灰度通道（`MarkdownBlockViewer`）与生产默认 `CodeWebViewer` 通道互补对照基准。环境守卫：offscreen / 无图形会话模块级 skip（WebEngine 原生层 0xC0000409 必崩，防误跑）；头注注明须真机桌面会话、运行前关闭 DriFox 实例；`js_ready` 等待放宽 30s（WebEngine 首次骨架注入 ~2-5s）；断言策略同款（链路可用 + 数据完整，不断言性能数值）。`beaf1014` `9f34c3aa`
+
+### ⚠️ 行为变化 (Breaking Changes) (重新发布 #5 追加)
+
+- **移除 OpenCode 免费模型自动链路（免费模型已不可用）** (`app/utils/config.py`, `app/main_widget.py`, `app/core/modelmeta/models_dev_sync.py`): OpenCode 已无法使用免费模型，整链路拆除。**①** 删启动时自动注入「opencode免费模型」服务商配置的逻辑（连同 `DefaultOpencodeInjected` 配置项与历史默认模型升级链）；**②** 删启动 3 秒后的免费模型列表异步刷新（inflight 守卫 / `_opencode_models_ready` 信号 / 延迟任务注册一并移除）；**③** 删 models.dev 同步时叠加 `-free` 免费模型与能力的整段（缓存内容版本 +1，旧缓存下次启动自动重拉清洗）。**存量用户自动清理**：新增一次性迁移 `_migrate_remove_opencode_free_provider`（注册进 `_MIGRATIONS` 启动链），按 `name=="opencode免费模型"` 精确删除自动注入的条目、清零指向它的 `SelectedModel`、清理密码模式孤儿密文；用户改名或自建的 OpenCode 配置不受影响。**保留**：OpenCode Zen / Go 服务商定义（自备 API key 仍可在「添加服务商」中使用）与网关会话头 `x-opencode-session`。测试：新增 `tests/utils/test_remove_opencode_free_provider.py`（8 用例：删除/用户配置保留/选中模型清零/孤儿密文/幂等/注册表挂载），`tests/core/test_models_dev_sync.py` 删免费模型缓存与去重用例。
+
+- **assistant_hub 记忆体系重做：照抄 WorkBuddy 双层结构，删除开放汉娜式后台压缩管线** (`plugins/assistant_hub/core/memory/store.py` 新增, `plugins/assistant_hub/tools/memory_tools.py` 新增, `plugins/assistant_hub/assistant_manager.py`, `plugins/assistant_hub/hooks/inject_assistant.py`, `plugins/assistant_hub/ui/sections.py`, `plugins/assistant_hub/ui/assistant_card.py`, `plugins/assistant_hub/ui/overlays.py`): 旧体系（compile 四段传送带 + dream 五步整理 + ticker 日批调度，openhanako 移植）产出碎片化压缩条目、延迟到日切才更新，用户评价「没什么大用」。重做为 WorkBuddy 提示词驱动的双层记忆：**全局** `<app_data>/assistant_hub/<助手>/MEMORY.md`（跨项目，4000 字符软限）+ **项目** `{项目根}/.drifox/memory/<助手>/`（`MEMORY.md` 项目笔记 3000 字符软限 + `YYYY-MM-DD.md` 每日日志 append-only），多助手目录级隔离。**注入**走 BuildSystemPrompt（单一通道）：记忆说明书（写入时机/格式/维护规则）+ `<global_memory>` + `<project_memory>` + 近期日志索引；超限截断并附 ACTION 指令逼模型先整理；>30 天日志附蒸馏 ACTION。**写入**由模型自主完成：新增 `memory_read`/`memory_write` 工具（scope=global/project/daily；绕过沙箱越界审批，进程级 per-path 锁 + 原子替换防半写），说明书常驻「完成实质工作必须写」指令。**删除**：compile/dream/ticker 三模块（1240 行）、Dream UI 区（每日自动开关/立即整理/版本恢复）、SessionStart 记忆会话消息注入（记忆不再进会话历史）、memory_write 后的 prompt 缓存失效（避免前缀抖动，新记忆靠新会话重建 + 工具随时回读）。**保留**：记忆总开关（关=不注入+写暂停，读仍可用）、人工提示 pinned（SessionStart 注入）、经验体系（recall/record 工具 + 手动反思）。热重载窗口修复：tools 组件重载按 module_prefixes 摘除 `assistant_hub_manager` 后，工具经 hooks 文件桥接重建共享实例（工具文件受 AST 安全网限制不能直写 sys.modules）。测试：新增 `test_memory_store.py`（10 用例）、`test_memory_tools.py`（9 用例），重写 `test_hooks.py`（12 用例）/`test_prompts.py`/`test_core_hot_reload.py`，删除 `test_compile.py`/`test_dream.py`/`test_ticker.py`/`test_session_store.py`，assistant_hub 全目录 150 用例通过。插件版本 0.3.0 → 0.4.0。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #5 追加)
+
+- **输入框右下角工具计数不随字体/主题切换刷新** (`app/main_widget.py`, `tests/widgets/test_tool_count_font_refresh.py` 新增): `_apply_runtime_ui_settings` 的 5b 字体补刷块漏掉 `_tool_count_label`，其 QSS 内嵌构建时的 `font-family` 与计数颜色，切换全局字体后旧 QSS 压制 `setFont`（QSS 优先级更高），右下角安全/危险计数停留旧字体，主题切换时计数颜色同理停旧值。5b 补刷块追加 `_refresh_tool_toggle_btn()`（幂等重设 QSS，颜色+字体双敏感，两条路径一次覆盖）；新增 2 条回归测试（补刷链覆盖检查 + 字族重建行为验证）。
+
+- **关闭刚对话完的对话页卡 1 秒+（标题生成任务阻塞关页）** (`app/main_widget.py`, `tests/widgets/test_close_tab_shared_pool.py` 新增): 用户报告「刚对话完就关页会卡好久」实测定位（探针分段计时）：关页同步段 1073ms，其中 `closeEvent` 的 `_gen_thread_pool.waitForDone(1000)` 占 1000.2ms（94%）。根因两层：**①** 标题生成任务（LLM HTTP 往返常 3-10s）跑在窗口私有 `QThreadPool` 上，closeEvent 主动同步等满 1 秒；**②** 池随窗口回收时 QThreadPool 析构（微测试实测）再次同步等待任务跑完，按任务剩余时长阻塞（实测 3.8s 级）。「刚对话完」= 首条消息刚触发标题生成、HTTP 未返回，关页必撞上。修法：任务改跑应用级共享池 `_get_gen_thread_pool()`（懒建单例，`maxThreadCount=2` 与原口径一致；`_gen_thread_pool` 属性名保留——插件仓 chinese-chess / git-panel / prompt-enhancer 有 `getattr(main_widget, "_gen_thread_pool")` 兼容读取），closeEvent 移除 `waitForDone`；晚归回调补 `_is_destroyed` 守卫（`_thread_safe_callback` + `_on_topic_summary_generated` 双点，防已销毁 QObject emit 抛 RuntimeError）。实测对照：关闭同步段 1073ms → 89ms，池析构等待移出关页路径；新增 7 条回归测试（AST 守卫 closeEvent 无 waitForDone / 共享池单例与线程数 / 窗口不自建池 / 晚归回调守卫），修复前 7/7 失败、修复后 7/7 通过。
+
+## [v0.6.5] - 2026-10-11 (重新发布 #4)
+
+自上一版本以来的变更（累计） | 提交数：74 · 文件变更：241 · +23987/-5173 | 贡献者：dingma, drifox-bot, mading
+
+### ⚠️ 行为变化 (Breaking Changes)
+
+- **「最大Token」不再直接作为 API 输出上限发出** (`app/constants.py`, `app/core/modelmeta/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`, `plugins/system-transports/transports/openai_chat.py`): 该配置项语义收敛为**上下文窗口**（此前一键双语义：既当窗口又直接当 `max_tokens` 发出）。新增独立配置项「最大输出」承担输出上限语义，发送链只读它。
+
+  **存量用户影响**：此前「最大Token」= 4096 之类的值会被直接当输出上限发送；现在该键不再进入请求，输出上限改由「最大输出」（用户填）→ 模型真实上限（models.dev per-model）→ 服务商 family 级 默认值 的链路决定。**若你此前依赖「最大Token」控制输出长度，请在模型配置卡「上下文」组填写「最大输出」**。未填「最大输出」时不发送 `max_tokens`，由服务端按模型默认处理（等价于放开原有限制）。
+
+- **per-model 输出上限接通，模型输出能力不再被 family 级截断** (`app/core/modelmeta/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`): 此前 61 个模型的真实输出上限被 family 级默认值（8192 / 65536）覆盖，最高折损 74%（如 space-bunny 524288、MiniMax-M3 512000、grok-4.7 500000 被压到 65536）。现在读取 models.dev 的 per-model `max_output_tokens`：发送值 = `min(用户「最大输出」, 模型真实上限)`；用户未填则用模型真实上限。全局兜底常量更名为 `ABSOLUTE_FALLBACK_CEILING`（65536），仅在插件与 family 两级都缺失时生效。
+
+- **SiliconFlow 能力族判定修正** (`app/core/modelmeta/provider_profile.py`): family 探测新增「插件声明优先」层。SiliconFlow 的默认模型为 `deepseek-ai/DeepSeek-R1` 且模型池含大量 `deepseek-ai/*`，此前被原 if 链的模型名前缀规则误判为 `deepseek` 族，套用了 DeepSeek 的能力参数（上下文窗口 / 输出上限 / 思考控制方式均不符）。现按其插件声明的 `siliconflow` 族取参。
+
+### ✨ 新功能 (New Features)
+
+- **左下角系统菜单重做 + 帮助与反馈** (`app/widgets/cards/settings/gitee_card.py`, `app/widgets/cards/global_card_controller.py`, `plugins/system-skills/skills/issue-reporter/` 新增): 侧栏 Gitee 账号行悬浮菜单按 WorkBuddy 风格重做：圆角卡片 + 柔和投影、图标菜单行（hover 圆角高亮 + 右箭头）；移除「简洁输出」「桌宠」两个快捷开关（设置卡内仍可配），保留深色模式 / 窗口置顶；「打开全部设置」更名「设置」，新增「外观」「插件设置」直跳（打开设置卡并切到对应导航页，插件页懒构建自动触发）与「帮助与反馈」（新建会话并预填 issue 提交引导 prompt 到输入框，用户确认后发送），尾部新增「检查更新」（右侧显示当前版本号，点击走 UpdateChecker 手动检查，与托盘同款）。`GlobalCardController.open_settings` 新增 `initial_tab` 参数。新增系统技能 `issue-reporter`：collect_env.py 自动收集版本/系统/最近错误日志（密钥掩码），create_issue.py 走 GitHub API 提交（读 GITHUB_TOKEN），无 token 自动降级浏览器预填页。
+
+- **流式卡片动画优化** (`635d248c`, `669d40e0`): 高度追踪自适应、结束态缓动阈值 16px、打字机 flush 后终渲染、S1 兑底重开 FINISH 窗口（含历史卡守卫）、贴底短路、差量收尾接线（默认关，env 开启）；另含直报防抖降低延迟、tick 自适应提速、auto-scroll IPC 降频。
+
+- **主题切换插件卡批量刷新** (`239ea4db`): 主题切换时插件卡片改为批量刷新，防止双渲染闪烁。
+
+- **任务看板内嵌 assistant 卡片** (`45463d9b`): 任务看板从工作台迁移至最新 assistant 卡片内嵌展示。
+
+- **项目选择卡片性能优化** (`c2dd9dfe`): project_selector_card 引入行缓存复用机制，减少重建开销，提升面板刷新效率；新增当前项目指示标签。
+
+- **设置卡功能增强与 Gitee 账号管理** (`d5819944`): 增强设置卡功能，改进 Gitee 账号管理体验。
+
+- **深色模式/窗口置顶开关简化** (`61f1d8a1`): 深色模式与窗口置顶开关隐藏标签，提升 UI 清晰度。
+
+- **新增「取消置顶」「新建会话」图标资源** (`af8293e9`)。
+
+- **tooltip 行为优化** (`af03d5cd`, `a5dc053e`): 修复子控件 hover 时 tooltip 闪烁；TabPanel 新建会话与更多按钮移除 tooltip。
+
+- **服务商模型管理 UI 重做** (`8d370e7f`, `d7377224`, `d499be97`): ProviderEditCard 与 ModelListEditorWidget 模型管理重构——`_RowSwitch` 开关组件（消除文本间距）、预设服务商支持、构造稳定性加固与错误处理完善；配置卡限宽保持 UI 一致性。
+
+- **服务商托管键与配置过滤** (`429353cf`): 新增 `PROVIDER_MANAGED_KEYS`，模型配置不再渲染/保存服务商托管键；provider picker 卡接入全局卡控制器并适配主题刷新。
+
+- **SystemCardFrame 面包屑导航** (`dcc26e7b`): 多级视图面包屑指示（祖先可点、当前不可点），样式随主题刷新；同提交含 todo 面板高度记账修复（sizeHint/height 拍差虚高）、服务商 tab 标题统一、opencode 图标深浅双版重绘。
+
+- **GitHub Copilot 认证接入** (`7cf6834f`): Copilot 认证与令牌管理实现，新增 SVG 图标，沉淀已知坑文档。
+
+- **助手消息卡操作按钮常显** (`0efec811`): 助手卡复制/分支/插件按钮不再 hover 浮现、始终可见（user 卡维持 hover 显隐）；页脚行高由 bar 托底，显隐切换不再引起卡片高度跳动。
+
+- **消息卡高度动画增强** (`cb81e711`): MessageCard 高度动画处理增强，新增待收缩取消的回归测试。
+
+- **服务商卡尺寸与 OpenCode 分组** (`aaf9168c`): 服务商卡尺寸自适应内容，OpenCode 服务商分组分类增强。
+
+- **内置市场源版本同步** (`34363fbf`): 内置插件市场源与当前版本默认值同步。
+
+- **服务商配置体验优化**（P0 批次）: 服务商列表新增搜索框（150ms 防抖，按显示名 / 服务商名 / 模型名过滤）与四组分组渲染（OAuth / Coding Plan / 本地 / API，判据全部来自插件声明）；编辑保存不再丢弃非白名单字段（未知键保留），用户清空的字段不再被旧值合并复活。
+
+- **认证方式 / URL 预设 / 能力族统一走插件声明** (`app/utils/provider_ui_meta.py` 新增): 新增取值基座（`get_auth_type` / `get_preset_urls` / `get_family`），消除 UI 层三条硬编码链与 providers 插件声明的双源漂移。修复百度千帆（`auth_type="bce"`）此前无法通过 UI 正确配置的问题；火山方舟 URL 预设对齐插件声明的 `api/coding/v3`。
+
+- **models.dev 数据按 provider 分区索引** (`app/core/modelmeta/models_dev_sync.py`, `app/core/modelmeta/model_capabilities.py`): 新增 provider 维度的嵌套能力索引（不合并），同名模型跨服务商不再串味（此前 kimi-k2.5 在 moonshotai / opencode-go 之间会走「取更支持者」的合并，导致 A 家模型被 B 家元数据抬升）。带 provider 时走精确查，未命中降级原扁平索引；老缓存（无分区键）自动降级不报错。
+
+- **配置迁移基建** (`app/utils/config.py`): 新增 `_MIGRATIONS` 注册表与 `_run_migrations`，迁移项串行执行、单项异常隔离（不中断启动，仅记日志）。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **排队消息卡切主题不跟随** (`app/main_widget.py`, `app/widgets/modules/input_card_module.py`, `tests/widgets/test_theme_refresh_covers_queue_card.py` 新增): `QueueMessageCard`（input_card_module 装配的「排队消息」卡）有 `refresh_style`，但从未被主题刷新链触达 —— 5a 颜色块与 5b 字体块（`_refresh_floating_cards_font_style`）两张手工维护的宿主浮动卡清单都漏了它，卡片样式永久停在构造时的主题值（`CARD_BG` / `CARD_BG_DIM` / 图标静态 pixmap 全在构造时写死进 QSS）。表现为浅色切深色后已打开的排队卡仍是白底白页眉。两处清单补入 `_queue_message_card`（用 `getattr(..., None)`，与 `_command_card` 等同口径，兼容懒创建），并新增回归测试用源码文本断言锁住两处清单覆盖 + 5b 路径恰好刷 1 次。
+
+- **仅流式服务商端点兼容** (`app/utils/http_client.py`, `app/core/context/history_compactor.py`, `app/core/workers/topic_summary.py`): CodeBuddy 等端点仅支持流式请求，非流式直接 400（code 11101 `Non-stream chat request is currently not supported`）。`http_client` 新增 `chat_completion_text()`：以 `stream=True` 发起、在调用方线程内聚合为完整文本返回，异常照常透传 openai 异常族供重试判定识别。会话压缩摘要与标题摘要两条非流式链路切换到该封装；插件侧 prompt-enhancer 同步切换（见 drifox-plugins2 仓库）。子智能体 worker（带 tools 聚合）暂不切换。
+
+- **折叠框内滚轮置顶回归修复** (`ab5c125c`): card_viewers 恢复 v37 误删的工具区滚动保护链（display 空窗 scrollTop 快照写回、_scrollToolContentToBottom/滚动意图监听三件套），_twFlush 纯揭示化；_SKELETON_CACHE_VERSION 39。
+
+- **时间线 Token 模式刻度修复** (`9384df01`): timeline_panel 修复 Token 模式滚动后刻度起点显示为 0 的问题。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **内存管理与 UI 组件重构** (`a74ce881`)。
+
+- **热键注册日志与 pypinyin 内存优化** (`8f2a5c53`): 优化热键注册日志输出，改进 pypinyin 延迟导入的内存管理。
+
+### ⚡ 性能优化 (Performance)
+
+- **主题刷新链路重构** (`d691472b`): 主题刷新链路重构与性能优化：隐藏弹窗门控 + showEvent 按需补刷，消息卡样式短路，全局缓存统一清理，控件级 QSS 绑定改造。
+
+### 🔧 测试基建 (Testing Infrastructure)
+
+- **全量测试卡死与耗时失控修复** (`pyproject.toml`, `tests/perf/long_run/test_long_run_scenarios.py`, `AGENTS.md`):
+  1. **默认收集排除 `tests/perf`**（`addopts` 增 `--ignore=tests/perf`）。该目录含 `test_new_tab_baseline.py`（25 轮真实窗口基准）与 `long_run/`（`DEMO_DURATION_SEC=30.0`，4 用例净等 ≈180s），进默认轮次使全量测试凭空多耗数分钟；显式 `pytest tests/perf` 仍正常收集运行。
+  2. **接入 `pytest-timeout`**（dev 依赖 + `timeout = 300` + `timeout_method = "thread"`）。此前无任何超时兜底，单进程串行跑 5500+ 用例时任何死锁（`waitSignal` 等不到信号 / `QEventLoop` 不退出 / `join()` 不返回）都会永久挂起；现超 300s 即 fail 并打 Python 栈。`thread` 法为 Windows 可用方案。
+  3. 修正 `test_long_run_scenarios.py` docstring：原称「默认 10s」与 `runner.py:39` 实际 `DEMO_DURATION_SEC = 30.0` 不符。
+  4. `AGENTS.md` / 技能 `testing-build.md` 同步收集范围（`tests/ui` + `tests/perf` 双排除）、超时策略，并补充「禁止 `uv sync --group dev`」——该命令会卸载其它依赖组的包（aiohttp/lxml/numpy 等），须用 `--all-groups`。
+
+- **provider 域回归测试批量补齐** (`75475475`, `90ff02a8`, `381a5f0b`): provider UI 元数据取值基座（`get_auth_type` / `get_preset_urls` / `get_family`）、认证方式保存回读、未知键保留与清空字段不复活、列表分组渲染、搜索防抖、picker 卡渲染与信号、双开关 payload 写入、能力徽章 tooltip、模型禁用语义与 payload 五键恒在等回归测试。
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号升级至 v0.6.5（pyproject.toml / config.py / installer.iss / README）(`b1168b74`)
+- 许可证由 MIT 切换为 GPL-3.0-or-later (`bc66eff9`, `09b7ff93`)
+- marketplace 自动再生成自 plugin.json (`db8df443`)
+### 🐛 问题修复 (Bug Fixes) (重新发布 #2 追加)
+- **历史面板项目选择列表行对齐修复** (`a36ec0ce`): `_ensure_item_signals` 末尾的 `addStretch(1)` 被逐行调用，N 个项目 = N 个弹簧夹在行间平分剩余空间，展开面板后项目行被均匀撒开（首行悬中、末行沉底）。弹簧改为列表重建完成后追加一次，并加静态回归守卫。
+
+### 🆕 重新发布 #3 增量（自 v0.6.5 重新发布 #2 起 · 35 commits · 66 files · +7210/-795）
+
+#### ⚡ 性能优化 (Performance)
+
+- **启动链路提速** (`0169bd7f`, `697bffcf`, `3fd02097`, `09f12bc6`): `chat_worker` 的 `openai` 顶层 import 延迟化，消除启动期 1.9s 同步阻塞；httpx / httpcore 延迟化再减 0.3s；models.dev 数据迁移前移出关键路径；预热阶段剔除插件工具全量注册并延后至 idle。实测窗口开启 1164.6ms（-50.3%），设置页 2127.8ms（-28.3%），总计 8210.9ms（-15.6%）。
+
+- **流式渲染三层节拍对齐** (`3df0274c`, `0a49f22c`, `afcec469`, `b1f57c8c`, `b59b0b70`, `d0073823`): 高度回环三层节拍统一对齐 40ms 消除互质漂移；差量渲染接入 roots 作用域查询，消除每拍 O(n²) 全量比较；高度直报改走防抖通道并作废 viewer 复用在途异步渲染；打字机闸门改为 FIFO 队列（此前单槽闸门在高节拍下丢内容），简洁模式不再成块蹦字；工具调用到达时冲刷残留思考批次，消除思考内容延迟刷新。骨架 bump v42→43，流式追加文本 IPC 由骨架接管，每拍省约 4KB。
+
+- **贴底抖动消除** (`43fe811a`): 流式期间贴底跟随改为差分判定 + 折叠态优先查询，滚底容差 ±1px 直接跳过，`reorganizeContent` 走 header diff 化重排。
+
+- **内存治理** (`1aa78021`): 渲染页配额按 dpr 收缩，强回收判据由单路改双路。
+
+- **主题刷新与插件发现** (`6bef51ea`, `8db21f82`, `01a2dccd`+`9f5d00f4`, `07c92898`, `5b832fdb`): tab_manager 主题串拆分并只刷顶层三容器可见区、隐藏容器按需补刷；插件发现结果持久化缓存命中即跳过全扫（合并公共函数 `a430bc41`）；gateway 会话列表改轻量加载、按需回源全量。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **高 DPI 白底消息卡根治** (`f873aadf`): 4K 屏 3840×2160 + 225% 缩放下，viewer 逻辑高度 ×2.25 超过 GPU 单纹理 8192 物理 px 上限（临界约 3640 逻辑 px），表面创建失败后回退白底 page 并固化。`card_viewers._clamp_height` 按 `8192 / dpr` 统一钳高，`message_card._update_height` 入口单点钳全链一致，`heightChanged` 发钳后值；卡片骨架 body `max-height` 由 10000px 改为 `100vh`，超长内容落卡内内滚兜底。同时 `ensure_transparent_composition()` 在池化 viewer 跨顶层 reparent（卡 → `WA_DontShowOnScreen` 宿主 → 新卡）后重申透明合成，修掉 Windows Chromium 合成上下文丢失的次因。取证脚本留档 `tests/debug/white_card_color_repro.py`。
+
+- **窗口本体底色回归** (`afdc3d6b`): 底色随主题刷新的回归，根因是 `6bef51ea` 删掉了 `#tabManagerWindow{background:CONTENT_BG}`，已回加动态 f-string（`test_tab_manager_theme_scope` 8 passed）。
+
+- **主题链防御加固** (`37035d1f`, `0c058260`, `75bb55bd`, `d7fc1cae`, `615103cc`): 主题串拆分防御构造期未创建的容器帧；全局卡刷新循环防御已销毁对象；`ThemeRefreshCoordinator` 保证随主题变更更新；分组标题在重建后可见。
+
+- **打字机内容丢失** (`411c9241`): 单槽闸门改 FIFO 队列，消除高节拍下流式文字丢内容。
+
+- **插件工具加载可自愈** (`124b99ff`): 加载失败不再永久卡死，下次请求自动重试。
+
+- **打包缺失依赖** (`012d4190`): 补 `pypinyin` 隐藏导入，修复历史拼音排序在打包版失效。
+
+- **插话撤回** (`7530199b`): 修掉取消窗口期出现双气泡、撤销后不回填输入框的问题。
+
+- **配置与同步并发** (`961d380f`): 修并发写盘竞态与上传失败丢变更。
+
+- **归档会话复活** (`cb4e6677`): gateway 归档会话补真实删除，此前删除后会复活。
+
+#### ✨ 新功能 (New Features)
+
+- **服务商管理动态刷新** (`4ae2b978`): provider 管理支持动态刷新与重建。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **插件发现合并公共函数** (`a430bc41`): 发现与合并逻辑抽公共入口，供缓存路径复用。
+
+#### 🧪 测试 (Tests)
+
+- **streaming 契约测试迁移符号路径** (`152dbdf9`): 跟随 card_render_core / card_viewers 拆分后的模块路径更新。
+
+#### 🔧 其他 (Chores & Build)
+
+- 清理临时脚本 probe 入库 (`63045d0f`)。
+
+### 🆕 重新发布 #4 增量（自 v0.6.5 重新发布 #3 起 · 2 commits · 6 files · +628/-14）
+#### ✨ 新功能 (New Features)
+- **body 滚动上限与 widget 高度上限同步** (`1d450038`, `app/widgets/card_render_core.py`, `app/widgets/card_viewers.py`, `app/widgets/message_card.py`): 内存治理（`1aa78021`）把 `QWebEngineView` 表面高度按物理面积（dpr 2.25 + 1200 逻辑宽 → ~1975px）收缩后，骨架里 body 的静态 `max-height`（7111px @dpr2.25）远大于 widget 上限。`html{overflow:hidden}` 下 body 是唯一滚动容器，于是出现死区：内容高 > widget 上限但 ≤ body max-height → body 自身不溢出（`clientHeight == scrollHeight`）→ 被裁掉的尾部不可滚达。修法：Python 每次算出上限后经 `_dfxSetBodyMaxH` 下发 CSS 变量 `--dfx-body-max-h`（值变化才写，随后按流式态与用户滚动位置决定是否贴底并重报几何）；`message_card` 高度追踪入口先按同一上限钳 `target_height`，避免「h > cap 恒成立」导致 tick 永不收敛。骨架 `_SKELETON_CACHE_VERSION` 45→46（CSS + JS 双资产变更）。
+#### 🐛 问题修复 (Bug Fixes)
+- **代码块图标前缀不跟随主题** (`1d473df4`, `app/widgets/card_render_core.py`, `app/widgets/card_viewers.py`): 浅色主题下 `get_tool_qrc_prefix()` 返回 `qrc:/icons_light`，但 `card_viewers` 顶部 `from ... import _ICON_PREFIX_CACHE` 是**按值**导入，拿到的是导入期快照；`_update_icon_prefix()` 用 `global` 重新绑定模块级变量后，旧引用永不更新。结果走线程池异步渲染路径的卡片，代码块工具栏始终带深色主题的 `qrc:/icons/导入.svg`、`复制.svg` —— 浅底上不可见。新增 `current_icon_prefix()` 作为唯一读取入口，快照侧先调 `_update_icon_prefix()` 再取当前值。
+#### 🧪 测试 (Tests)
+- **两项回归测试 + 骨架契约校验脚本** (`tests/widgets/test_body_height_cap_sync.py`, `tests/widgets/test_code_block_icon_theme.py`, `tools/check_skeleton_js.py`): 覆盖 body 上限同步（钳高、JS 下发时序、贴底条件）与图标前缀主题跟随；`check_skeleton_js.py` 用于校验骨架 JS 与缓存版本的一致性。
 
 ### ✨ 新功能 (New Features)
 - **编辑工具运行框的增删行数流式显示** (`app/core/tool_arg_lines.py`, `app/core/workers/chat_worker.py`, `app/widgets/message_card.py`, `plugins/system-tools/tools/_tool_desc.py`): write/edit/multi_edit 在参数流式接收期间显示 `+N/-M` 胶囊（复用完成框 diff 统计的 `.tool-diff-stats` 结构，运行中与完成态形态一致），取代对编辑场景没有信息量的 `(N字符)`。行数从 worker 手里的**半截 JSON 缓冲**估算：按字段取 `"field": "…"` 片段（未闭合截到缓冲末尾），转义感知计数（连续反斜杠奇数才是 `\n`），行数 = 换行转义数 + 1 对齐 diff 语义；同一 tool_call 内只增不减防正则失配抖动，完成后由真实 diff 统计接管。顺带修两处预览缺陷：progress 阶段路径字段扩展 `path/file_path/file/target`，且 path 未到达时显示「编辑文件中」而非空窗「准备中...」；`description` 与文件路径拼接时超 30 字符截断，保证路径不被单行省略裁掉。
@@ -696,6 +1150,7 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **left 卡片嵌入侧边栏右侧** (`app/widgets/tab_manager_window.py`, `tests/widgets/test_left_card_sidebar_embed.py` 新增, `tests/widgets/test_dock_repro2.py`): `container="left"` 的全局浮动卡（历史会话 / 快捷指令等）宿主从对话区 `dockSplitter` 左停靠区迁到 `#tabFrame` 内部新建的 `sidebarSplitter`，嵌在侧边栏圆角框内、TabPanel 右侧，视觉上从侧边栏长出，与对话区彻底解耦。交互语义：卡片打开时 TabPanel 自动收起让位（46px 图标条）、卡片区展开（默认 300px，按插件 per-card 记忆）、`#tabFrame` 整体加宽、对话区让位；卡片关闭时卡片区收 0、TabPanel 恢复打开前宽度、frame 缩回。拖主 splitter（tabFrame ↔ chatFrame）增量只加卡片宽度、TabPanel 保持不动；拖内部分隔条（TabPanel ↔ 卡片区）两者互借宽度、frame 总宽不变，可把 tab 列表重新拉开。实现：`_DockSideWrapper` 新增 `expandedChanged` 信号与伙伴窗格联动（`set_partner_pane`），`_sync` 重入改为置脏重跑（修卡片关闭后 wrapper 停留展开态）；宿主编排 `_on_left_card_area_toggled` / `_sync_tab_frame_cap` / 拖拽落定（`_on_splitter_manually_moved` + `_on_splitter_idle`）显式锁死内部分配 `[tab宽, 卡片宽]`，避免 QSplitter 按比例重排把 TabPanel 摊窄（实测 46→19）；`_apply_restored_panel_width` 启动补射在卡片展开期跳过。新增 10 条回归测试（结构 / 开关 / 主把手拖拽 / 内把手互借 / frame 上限）。**后续修复（同日）**：① 卡片打开期拖内部分隔条导致整个侧边栏宽度坍缩（实测 frame 被压到 60px、卡片区只剩 19px）——根因是 TabPanel.resizeEvent 的宽度自治在共享 splitter 场景下仍会 emit `sidebarToggled`，宿主随即把 frame 压到面板收起宽；新增 `TabPanel._left_card_present` 占位期抑制开关（卡片显隐时由宿主编排置位/复位），占位期面板只同步紧凑 UI、不发信号不自治。② 分隔条上下留空（未贯穿到 frame 上下内缘）——样式里的 `margin: 10px 2px` 改为 `margin: 0`。③ 主把手拖拽门控失效——`_on_splitter_manually_moved` 硬编码 `index != 0` 早退，而实测 `splitterMoved` 上报的是**右邻**窗格索引（左把手 = 1），导致拖拽会话从未开启；改为按把手位置判定（左邻须是 `_tab_frame`）。回归测试增至 15 条（新增坍缩防回归 / 主把手拖拽会话 / 分隔条贯穿样式）。
 - **更新下载代理配置（直连 / 跟随系统 / 加速前缀 / 手动代理）** (`app/utils/update_proxy.py` 新增, `app/widgets/cards/settings/update_proxy_card.py` 新增, `app/utils/config.py`, `app/utils/utils.py`, `app/update_checker.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_update_proxy.py` 新增): 设置 → 更新页新增「更新下载代理」卡，四选一模式即改即生效。**加速前缀只作用于安装包下载**——实测 8 个主流 GitHub 加速站无一真代理 `api.github.com`（返回 200 的是自家首页 HTML），检查更新始终直连；下载域实测可用（`ghfast.top` 144KB/s vs 直连 38KB/s）。四种模式各自显式指定库参数：`direct`/`prefix` 走 `trust_env=False`（httpx 的 `proxy=None` 不生效，仍会读环境变量代理）、`system` 交给库默认、`http` 转发到指定地址。前缀为自由输入框（默认 `https://ghfast.top/`），带连通性测试按钮——探 release 小资产（287B SHA256SUMS，毫秒级）并**校验响应内容形态**，拦下「加速站返回自家首页 HTML 却给 200」的假阳性；测试在后台线程发起，25s 超时（实测网络受限时 ConnectTimeout 要 21s 才落地）。校验层拒绝 `socks5://` 并说明原因（socksio / PySocks 均未安装）。不做自动故障回退：前缀失败明确报错，静默直连会让用户误以为代理生效。与 plugin-marketplace 的 `proxy.json` 各管各的，互不依赖。25 条单元测试覆盖四模式改写/参数/校验/探测文案/内容判据。
 
 - **系统级密钥存储（keyring）** (`app/utils/secret_store.py` 新增, `app/utils/config.py`, `app/core/config_sync.py`, `build.py`, `Drifox.spec`): 服务商 API Key / Gitee OAuth token / GitHub token 迁入操作系统凭证库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），app.config 落盘与云端同步不再含明文密钥（此前 API_KEY 与 GitHub token 会原样上传 Gitee 私库）。`Settings.save()` 深拷贝后剥钥（toDict 内层与内存共享引用，必须隔离）、`load()` 后回填内存（须早于 config_id hash 迁移）；config_sync 两处「磁盘读回」路径（全量重载 / Gitee token 恢复）同步回填，防跨设备同步后本机密钥丢失。降级 fail-open：keyring 未装 / 无后端 / 异常 / 开关关闭（`General/UseSystemKeyring`）→ 完全旁路，明文照旧。密钥不跨设备同步，新设备拉到配置后需重输；PyInstaller 下 keyring 后端发现走 entry points 收不齐，build.py / spec 按平台显式声明后端模块（jaraco/keyring #439/#468）。已知边界：OS 凭证库不防本机同用户进程读取；更换服务商 URL/Key 后旧凭据条目会残留在系统凭据管理器（条目名 `DriFox:provider/xxx`），可手动删除。10 条单元测试 + WinVaultKeyring 真机全链冒烟（迁移/剥钥/回填）。

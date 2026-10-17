@@ -227,11 +227,18 @@ def _load_module(plugin_name: str, path: Path, root_kind: str = ""):
         return None
     from app.plugins.loaders._ast_guard import guard_plugin_module_once
 
+    # 声明式放行：与 ui loader（ui_plugin_registry）同口径——插件在 plugin.json
+    # 声明的 module_prefixes 允许注册自有共享模块（如 assistant_hub_manager）。
+    # 历史缺口：此处漏传 → 插件工具按声明注册即被拒载，而热重载 purge 又按同一
+    # 声明摘除，摘除方与放行方不对称（tools 重载后共享模块进不了 sys.modules）。
+    from app.plugins.contracts.manifest_schema import read_manifest_module_prefixes
+
     guard = guard_plugin_module_once(
         source,
         path,
         require_register=True,
         component="PluginToolLoader",
+        allowed_sys_modules=read_manifest_module_prefixes(path.parent.parent),
         plugin_dir=path.parent.parent,
     )
     if guard.syntax_error or guard.rejected_writes:

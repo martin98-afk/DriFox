@@ -26,7 +26,7 @@ def register_ui(registry):
         plugin_name="share-history",
         card_id="share-history",
         widget_class=ShareHistoryCard,
-        container="right",
+        container="left",
         title="分享记录",
         default_visible=False,
     )

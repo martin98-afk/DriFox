@@ -10,7 +10,7 @@ BuildSystemPrompt Hook 函数 — 将用户启用的技能内容注入系统提�
 
 
 def hook(event: str, context: dict) -> str:
-    """从 context 取出预取好的技能内容
+    """从 context 取出预取好的技能内容（XML 标签包裹进系统提示词）
 
     Args:
         event: 事件名称（BuildSystemPrompt）
@@ -18,6 +18,7 @@ def hook(event: str, context: dict) -> str:
             - enabled_skills_content: str 预先格式化好的技能列表
 
     Returns:
-        预取好的技能内容字符串，或空字符串
+        <enabled_skills> 包裹的技能内容字符串，或空字符串
     """
-    return context.get("enabled_skills_content", "")
+    content = context.get("enabled_skills_content", "")
+    return f"<enabled_skills>\n{content}\n</enabled_skills>" if content else ""

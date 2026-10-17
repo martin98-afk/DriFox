@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 TabManagerWindow — Tab 管理器宿主窗口（无边框现代化窗口）
 
@@ -16,13 +16,12 @@ import shiboken6 as _sip
 from loguru import logger
 from app.core.infra import window_registry
 from PySide6.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QCloseEvent, QIcon, QPixmap
+from PySide6.QtGui import QCloseEvent, QIcon, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QFrame,
     QGraphicsOpacityEffect,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QStackedWidget,
@@ -37,16 +36,32 @@ from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 
-# ── 对话区最大宽度（px）：窗口过宽时限制对话区宽度并居中，两侧留白 ──
-# 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
-_MAX_CHAT_WIDTH = 1000
+# ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
+# 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
+# full 档返回 0 = 不限宽，对话区占满窗口。
+_CHAT_WIDTH_PRESETS = {"narrow": 820, "standard": 1000, "wide": 1200, "full": 0}
+
+
+def _current_chat_width() -> int:
+    """当前对话区限宽（px）；0 = 不限宽"""
+    try:
+        key = Settings.get_instance().ui_chat_width.value
+    except Exception:
+        key = "standard"
+    return _CHAT_WIDTH_PRESETS.get(key, _CHAT_WIDTH_PRESETS["standard"])
+
 
 # ── 覆盖层「配置类」卡片最大宽度（px）──
 # 比对话区稍宽，同样在超宽窗口下限宽居中，避免系统配置卡片无限拉伸。
-# 仅作用于配置类卡片（系统设置/服务商/Hook/MCP）；差异对比、子智能体
+# 仅作用于配置类卡片（系统设置/服务商/添加服务商/Hook/MCP）；差异对比、子智能体
 # 会话等内容型卡片不限宽，铺满对话区。
-_MAX_OVERLAY_WIDTH = _MAX_CHAT_WIDTH + 100
-_CONFIG_REPLACE_CARDS = frozenset({"settings", "provider_edit", "hook_edit", "mcp_edit"})
+# 不限宽档（full）下覆盖层同步铺满，否则跟随对话区宽度 +100。
+def _current_overlay_width() -> int:
+    chat_w = _current_chat_width()
+    return chat_w + 100 if chat_w > 0 else 0
+
+
+_CONFIG_REPLACE_CARDS = frozenset({"settings", "provider_edit", "provider_picker", "hook_edit", "mcp_edit"})
 
 # ── 标题栏 tab：内置「聊天」常驻 tab + 已知「内置替换」全局卡片 ──
 # full 容器卡片（UI 插件 full 卡 + 下列内置全局卡）打开时在标题栏 tab 区显示
@@ -56,6 +71,7 @@ KNOWN_GLOBAL_REPLACE_CARDS = frozenset(
     {
         "settings",
         "provider_edit",
+        "provider_picker",
         "hook_edit",
         "mcp_edit",
         "diff_viewer",
@@ -67,6 +83,7 @@ KNOWN_GLOBAL_REPLACE_CARDS = frozenset(
 GLOBAL_REPLACE_TITLES = {
     "settings": "系统设置",
     "provider_edit": "服务商编辑",
+    "provider_picker": "服务商",
     "hook_edit": "Hook 编辑",
     "mcp_edit": "MCP 编辑",
     "diff_viewer": "文件差异对比",
@@ -90,6 +107,15 @@ GLOBAL_REPLACE_TITLES = {
 
 # frame 宽 = 内容宽 + margins 12 + border 2
 _FRAME_PADDING_X = 14
+
+# ── 卡片态 frame↔槽位二次换算补偿（px，frame 域）──
+# 卡片打开期 #tabFrame 内多出两处未计入 _FRAME_PADDING_X 的装饰：
+#   #tabFrame QSS margin-left(4) + sidebarSplitter handle(4)。
+# 实测几何方程（卡片态）：frame 宽 = TabPanel 宽 + 卡片槽位 + 22
+# （= _FRAME_PADDING_X 14 + handle 4 + QSS margin 4）。
+# 卡片打开编排若不补偿，卡片槽每次重开被净吞 8px，连续切页时
+# 360→352→344 逐轮递减（表现为「切页往返后卡片越切越窄」）。
+_CARD_SLOT_CHROME_EXTRA = 8
 
 # ── 侧边栏折叠线（px，★ content 宽，= TabPanel.width() 口径）──
 # 展开态拖窄到该宽度以下即视为不可用 → 触发自动折叠；同时作为挤压折叠后
@@ -141,6 +167,27 @@ _TAB_PANEL_MAX_CONTENT_WIDTH = 400
 #   实际滞回区被撑到 24px content，用户拉宽 20px 仍等不到展开，手感即
 #   "明显拉宽了却还是折叠态"。
 _HYSTERESIS_WIDTH = 6
+
+# ── left 卡片区最小可用宽度（px，frame 域）──
+# 空间不足（工作台让位后仍放不下）时的卡片区保底：低于该值内容挤压不可读
+# （2026-10 反馈：窄窗口开 UI 卡片被挤成竖排细条）。
+_LEFT_CARD_MIN_VISIBLE_WIDTH = 240
+
+# ── 聊天区绝对下限（px）──
+# 「工作台让位后仍放不下卡片最小宽」的极端窄窗口下，聊天区最后的妥协线
+# （低于 _MIN_CHAT_WIDTH 但保对话基本可读）。
+_CHAT_ABSOLUTE_MIN_WIDTH = 300
+
+
+def _tab_frame_max_expanded(card_w: int = 0) -> int:
+    """#tabFrame 的最大宽度（frame 域）
+
+    卡片区未展开（card_w=0）：静态上限 = TabPanel 最大内容宽 + padding。
+    卡片区展开：上限额外叠加卡片宽，使拖主 splitter 时 frame 能被拖宽
+    （增量全部落到卡片区，TabPanel 锁定收起宽，见 _on_left_card_area_toggled）。
+    """
+    return _TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X + max(0, card_w)
+
 
 # ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
@@ -371,7 +418,14 @@ def _update_tab_icon(tab_idx: int, project: str):
                     tm._tab_panel.set_team_project(team_id, initials, color)
                     return
 
-        from app.widgets.cards.settings.project_selector_card import (
+        # 临时对话页：Tab 用固定隐身紫「临」图标（不用项目色），标题前缀由窗口标题携带
+        # 字色固定白：隐身紫是语义常量色，白字随色定义处声明，不走亮度自适应
+        # （#8B5CF6 lum 0.198 落在自适应黑字分支，紫底黑字与全站白字惯例冲突）
+        if 0 <= tab_idx < len(tm._windows) and getattr(tm._windows[tab_idx], "_is_temp_scope", False):
+            tm._tab_panel.update_tab_project(tab_idx, "临", "#8B5CF6", "#FFFFFF")
+            return
+
+        from app.utils.project_meta import (
             extract_project_initials,
             get_project_color,
         )
@@ -406,7 +460,18 @@ class _DockSideWrapper(QWidget):
     默认收起（hide + splitter 分配 0 空间）；任一子 show 时恢复记忆展开宽度；
     全 hide 时记忆当前宽度并把 splitter 大小压回 0。解决 T3 接线后无卡片时
     splitter 默认均分空间导致空白 handle 显示的视觉 bug。
+
+    ── 嵌入侧边栏模式（set_partner_pane） ──
+    当宿主把本 wrapper 挂进 #tabFrame 内部的 sidebarSplitter（左卡片贴边栏右侧）时，
+    可指定伙伴窗格（多为 TabPanel）：卡片显隐时同步收紧/恢复伙伴宽度，实现
+    「卡片打开 → tab 列表让位收窄；卡片关闭 → tab 列表恢复」。
+    未指定伙伴窗格时行为与旧版完全一致（对话区左停靠区模式）。
     """
+
+    # 卡片区展开/收起状态变化（True=有可见卡片展开，False=已收起）。
+    # 宿主（TabManagerWindow）监听：驱动 #tabFrame 整体宽度加宽/缩回、
+    # 对话区让位/回收、TabPanel 折叠态同步（防 resizeEvent 回路）。
+    expandedChanged = Signal(bool)
 
     DEFAULT_EXPANDED_WIDTH = 300  # 首展开无记忆时的默认宽度
 
@@ -432,6 +497,17 @@ class _DockSideWrapper(QWidget):
         self._splitter: Optional[QWidget] = None  # QSplitter（类型注解避免循环引用）
         self._splitter_index: int = -1
         self._expanded_width: int = 0
+        # ── 伙伴窗格联动（嵌入侧边栏模式；None = 旧行为）──
+        self._partner_pane: Optional[QWidget] = None
+        self._partner_splitter_index: int = -1
+        self._partner_saved_size: int = 0  # 卡片打开前的伙伴宽（关闭时恢复）
+        self._partner_collapsed_size: int = 0  # 卡片打开时伙伴收窄目标（0=用 min 宽）
+        # 伙伴自动收窄开关产生的 setSizes 会被 splitterMoved 视为"用户拖拽"？
+        # Qt 的编程式 setSizes 不发 splitterMoved（实测），无需额外守卫；
+        # 但本 wrapper 自身 show/hide 会触发 _sync 重入，用标志位防环。
+        self._syncing = False
+        # 重入期又有显隐请求（置脏）→ 当前轮跑完后补跑一轮，保证状态收敛
+        self._sync_dirty = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -441,10 +517,25 @@ class _DockSideWrapper(QWidget):
         stack.installEventFilter(self)
         self.hide()  # 默认收起
 
+    def set_partner_pane(self, pane: QWidget, collapsed_size: int = 0) -> None:
+        """指定伙伴窗格（嵌入侧边栏模式）：卡片打开时收窄它、关闭时恢复
+
+        Args:
+            pane: 伙伴窗格（同一 splitter 内的另一个直接子项，如 TabPanel/其 frame）
+            collapsed_size: 卡片打开时伙伴收窄到的尺寸（px）；0 = 用其 minimumWidth()
+        """
+        self._partner_pane = pane
+        self._partner_collapsed_size = int(collapsed_size)
+
     def attach_to_splitter(self, splitter: QWidget, index: int) -> None:
         """关联宿主 splitter：联动 setSizes 维持收起态"""
         self._splitter = splitter
         self._splitter_index = index
+        if self._partner_pane is not None:
+            try:
+                self._partner_splitter_index = splitter.indexOf(self._partner_pane)
+            except Exception:
+                self._partner_splitter_index = -1
         # 立即同步：默认两子均 hide → 立即压回 splitter 0 大小，
         # 避免 addWidget 后 splitter 默认均分空间导致空白 handle 显示
         self._sync()
@@ -467,43 +558,129 @@ class _DockSideWrapper(QWidget):
         return super().eventFilter(obj, ev)
 
     def _sync(self) -> None:
-        any_visible = self._child_visible_intent(self._primary) or self._child_visible_intent(self._stack)
-        if self._splitter is None or self._splitter_index < 0:
-            # 未关联 splitter 时只切自身 visibility（测试 / 单实例场景）
-            self.setVisible(any_visible)
+        # ★ 重入处理：_sync 内部会 setSizes → 触发新一轮 hide/show 事件 →
+        # 经 singleShot 回到 _sync。若直接丢弃（旧实现直接 return），在该时序下
+        # 卡片显隐的最终状态可能永远不被处理（实测关闭 left 卡片后 wrapper
+        # 停在展开态、卡片槽位不归 0）。改为置脏标记：当前跑完后若期间又有
+        # 请求，立即补跑一轮，保证最终状态一定收敛。
+        if self._syncing:
+            self._sync_dirty = True
             return
-        sizes = self._splitter.sizes()
-        idx = self._splitter_index
-        if any_visible:
-            if self.isHidden():
-                self.show()
-                # 预置展开宽度（仅槽位为 0 的全收起重开）：
-                # - primary（CardContainer）有可见卡片：用容器 dock 协议已算好
-                #   的展开目标（_last_expand_target，按插件独立记忆），wrapper
-                #   单值记忆会覆盖 per-card 记忆造成二次弹跳；splitter 对
-                #   hidden 子项的 setSizes 无效，容器展开时的预置可能被
-                #   wrapper 随后 show 冲掉，此处 show 后统一归位。
-                # - 仅 stack 侧可见：用 wrapper 自身记忆/默认宽。
-                primary_active = self._child_visible_intent(self._primary)
-                if primary_active:
-                    target = getattr(self._primary, "_last_expand_target", 0)
-                    expand_w = target if target > 0 else (self._expanded_width or self.DEFAULT_EXPANDED_WIDTH)
-                else:
-                    if self._expanded_width == 0:
-                        self._expanded_width = self.DEFAULT_EXPANDED_WIDTH
-                    expand_w = self._expanded_width
-                if idx < len(sizes) and sizes[idx] == 0:
-                    sizes[idx] = expand_w
-                    self._splitter.setSizes(sizes)
+        self._syncing = True
+        self._sync_dirty = False
+        try:
+            any_visible = self._child_visible_intent(self._primary) or self._child_visible_intent(self._stack)
+            if self._splitter is None or self._splitter_index < 0:
+                # 未关联 splitter 时只切自身 visibility（测试 / 单实例场景）
+                self.setVisible(any_visible)
+                return
+            sizes = self._splitter.sizes()
+            idx = self._splitter_index
+            if any_visible:
+                self._on_expand(sizes, idx)
+            else:
+                self._on_collapse(sizes, idx)
+        finally:
+            self._syncing = False
+        # 期间又有显隐请求 → 立即补跑（最多收敛若干轮，状态稳定后自然停止）
+        if self._sync_dirty:
+            self._sync_dirty = False
+            self._sync()
+
+    def _on_expand(self, sizes: List[int], idx: int) -> None:
+        """卡片可见：展开自身；伙伴窗格（若指定）同步收窄让位
+
+        ★ 信号时序纪律：expandedChanged(True) 必须在改内部分配之前同步发出，
+        宿主回调里先把 TabPanel 置入收起态（静默 set_collapsed，不 emit）——
+        随后本方法把伙伴收窄到 46px 时，TabPanel.resizeEvent 因 _collapsed
+        已为 True 而不再发 sidebarToggled(True)，阻断「伙伴收窄 → 宿主把
+        frame 压到收起宽 → 卡片被挤没」的回路。
+        """
+        if self.isHidden():
+            self.show()
+            # 预置展开宽度（仅槽位为 0 的全收起重开）：
+            # - primary（CardContainer）有可见卡片：用容器 dock 协议已算好
+            #   的展开目标（_last_expand_target，按插件独立记忆），wrapper
+            #   单值记忆会覆盖 per-card 记忆造成二次弹跳；splitter 对
+            #   hidden 子项的 setSizes 无效，容器展开时的预置可能被
+            #   wrapper 随后 show 冲掉，此处 show 后统一归位。
+            # - 仅 stack 侧可见：用 wrapper 自身记忆/默认宽。
+            primary_active = self._child_visible_intent(self._primary)
+            if primary_active:
+                target = getattr(self._primary, "_last_expand_target", 0)
+                expand_w = target if target > 0 else (self._expanded_width or self.DEFAULT_EXPANDED_WIDTH)
+            else:
+                if self._expanded_width == 0:
+                    self._expanded_width = self.DEFAULT_EXPANDED_WIDTH
+                expand_w = self._expanded_width
+            if idx < len(sizes) and sizes[idx] == 0:
+                self.expandedChanged.emit(True)  # 宿主先备 TabPanel 收起态
+                sizes[idx] = expand_w
+                self._shrink_partner(sizes)
+                sp = self._splitter
+                if sp is not None:
+                    sp.setSizes(sizes)
         else:
-            if not self.isHidden():
-                if idx < len(sizes):
-                    self._expanded_width = (
-                        sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
-                    )
-                    sizes[idx] = 0
-                    self._splitter.setSizes(sizes)
-                self.hide()
+            # 已展开（互斥切卡）：槽位可能与新卡片记忆不符，交由容器
+            # _apply_visible_card_dock_size 处理；此处只保证伙伴已收窄
+            if self._partner_pane is not None and idx < len(sizes) and sizes[idx] > 0:
+                before = list(sizes)
+                self._shrink_partner(sizes)
+                sp = self._splitter
+                if sizes != before and sp is not None:
+                    sp.setSizes(sizes)
+
+    def _on_collapse(self, sizes: List[int], idx: int) -> None:
+        """卡片全隐：收起自身；伙伴窗格（若指定）恢复打开前宽度
+
+        ★ 信号时序同 _on_expand：expandedChanged(False) 先发，宿主在回调里
+        把 TabPanel 置回展开态（静默），随后伙伴恢复宽度时不会误 emit。
+        """
+        if self.isHidden():
+            return
+        sp = self._splitter
+        if idx < len(sizes) and sp is not None:
+            self._expanded_width = sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
+            self.expandedChanged.emit(False)  # 宿主先备 TabPanel 展开态
+            sizes[idx] = 0
+            self._restore_partner(sizes)
+            sp.setSizes(sizes)
+        self.hide()
+
+    def _shrink_partner(self, sizes: List[int]) -> None:
+        """把伙伴窗格收窄到目标尺寸，差额转给本 wrapper 槽位"""
+        pane_idx = self._partner_splitter_index
+        if self._partner_pane is None or pane_idx < 0 or pane_idx >= len(sizes):
+            return
+        target = self._partner_collapsed_size
+        if target <= 0:
+            target = self._partner_pane.minimumWidth()
+        cur = sizes[pane_idx]
+        if cur <= target:
+            return
+        if self._partner_saved_size <= 0:
+            # 首次收窄：记忆打开前宽度（供关闭恢复）
+            self._partner_saved_size = cur
+        delta = cur - target
+        sizes[pane_idx] = target
+        if self._splitter_index < len(sizes):
+            sizes[self._splitter_index] += delta
+
+    def _restore_partner(self, sizes: List[int]) -> None:
+        """把伙伴窗格恢复到卡片打开前的宽度（从本 wrapper 槽位归还）"""
+        pane_idx = self._partner_splitter_index
+        if self._partner_pane is None or pane_idx < 0 or pane_idx >= len(sizes):
+            return
+        if self._partner_saved_size <= 0:
+            return
+        cur = sizes[pane_idx]
+        if cur >= self._partner_saved_size:
+            return
+        delta = self._partner_saved_size - cur
+        if self._splitter_index < len(sizes) and sizes[self._splitter_index] >= delta:
+            sizes[self._splitter_index] -= delta
+            sizes[pane_idx] = self._partner_saved_size
+        self._partner_saved_size = 0
 
 
 class _WorkbenchFrame(QFrame):
@@ -518,6 +695,10 @@ class _WorkbenchFrame(QFrame):
     动画期间覆写 minimumSizeHint 返回 (0,0)，从源头摘掉内容最小宽，
     窗格才能真正收到 0；动画结束立刻恢复，不影响拖拽下限。
     """
+
+    # [T30] 主题切换时不可见即置脏（_apply_theme_stylesheet 跳过重刷），
+    # 由 _refresh_theme_dirty_frames 在可见性恢复点补刷
+    _theme_needs_refresh: bool = False
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -538,7 +719,7 @@ class _WorkbenchFrame(QFrame):
 
 
 class _ContentStack(QWidget):
-    """对话区覆盖层堆栈（叠放实现）：覆盖层页首次 show 后永不 hide。
+    """对话区覆盖层堆栈（叠放实现 + 方向性滑动切换）：覆盖层页首次 show 后永不 hide。
 
     为什么不用 QStackedWidget（2026-09-08 排查，见
     docs/superpowers/specs/2026-09-08-content-stack-overlay-switch-design.md）：
@@ -550,19 +731,59 @@ class _ContentStack(QWidget):
     QStackedLayout::minimumSize 取**所有页**的最大值：page0 聊天页的最小宽会
     透过 splitter 链顶住把手。本实现 minimumSizeHint 只取**当前顶层可见页**，
     语义更准；`set_min_hint_disabled` 归零逻辑保留。
+
+    布局：绝对定位（无布局管理器）。页级 push 滑动要求动画期间两页同时可见
+    且水平错位，QGridLayout 同格叠放会在每次布局激活时把子项几何拉回原位，
+    故改手动 setGeometry：resizeEvent / addWidget / 动画收尾统一归位。
     """
 
     currentChanged = Signal(int)
+
+    # 页级滑动时长：大范围整块位移取阶梯最高档（design_tokens）
+    SLIDE_MS = Animations.SLOW_MS
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._min_hint_disabled = False
         self._pages: List[QWidget] = []
         self._current = -1
-        grid = QGridLayout(self)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(0)
-        self._grid = grid
+        # ── 页级滑动状态（push 切页 / over 覆盖层内整页滑入共用）──
+        self._slide_anim: Optional[QVariantAnimation] = None
+        self._slide_old: Optional[QWidget] = None  # push=旧页 / over=垫底页
+        self._slide_new: Optional[QWidget] = None  # push=新页 / over=滑动顶层页
+        self._slide_dir = 0  # +1 新页从右侧进入（视口右移）/ -1 从左侧进入
+        self._slide_kind = ""  # "push" / "over" / "swap"，驱动 tick 位移与收尾
+        self._swap_cb: Optional[Callable[[], None]] = None  # swap 段间内容切换回调
+
+    # ── 几何管理（无布局，resizeEvent 全量同步）──
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        """容器 resize → 全部页铺满新 rect。
+
+        ★ 动画在途**不收尾**：切页后宿主的 _sync_chat_wrapper_width 会在同一
+        事件循环内改 wrapper margins，本栈随之 resize。早期版本在此直接
+        _finish_slide(interrupted=True)，等于第一帧就把动画杀掉（实测「动画
+        没了」的根因）。现在改为：更新记录的目标几何，下一页 tick 按新宽度
+        重新计算位移；动画自身节奏不变。
+        """
+        super().resizeEvent(event)
+        r = self.rect()
+        if self.slide_in_progress():
+            # 动画在途：只同步几何基准，位移由 _on_slide_tick 用新宽度接着算
+            self._sync_slide_baseline(r)
+            return
+        for w in self._pages:
+            w.setGeometry(r)
+
+    def _sync_slide_baseline(self, r) -> None:
+        """动画在途同步两页几何到新 rect（不打断动画）
+
+        _on_slide_tick 每帧都用 self.width() 重新算位移，所以把两页铺到新
+        rect 后，下一帧自然按新宽度继续滑，节奏不中断。
+        """
+        for w in (self._slide_old, self._slide_new):
+            if w is not None:
+                w.setGeometry(r)
 
     # ── QStackedWidget 兼容 API ──
 
@@ -570,7 +791,8 @@ class _ContentStack(QWidget):
         """加入堆栈。首页可见并置顶；后续页可见但在下层（被首页遮住）。"""
         idx = len(self._pages)
         self._pages.append(w)
-        self._grid.addWidget(w, 0, 0)
+        w.setParent(self)
+        w.setGeometry(self.rect())
         if idx == 0:
             w.setVisible(True)
             self._current = 0
@@ -590,13 +812,23 @@ class _ContentStack(QWidget):
     def currentWidget(self) -> Optional[QWidget]:
         return self.widget(self._current)
 
-    def setCurrentIndex(self, i: int) -> None:
+    def setCurrentIndex(self, i: int, direction: int = 0) -> None:
+        """切换当前页（长条模型：页面按 tab 顺序左右平铺，切换 = 视口在长条上滑动）。
+
+        direction：+1 视口右移（新页从右侧进入、旧页向左退出，如点对话右侧的
+        卡片 tab）、-1 视口左移（新页从左侧进入，如回最左的「对话」）、0 直接
+        切换（初始化等场景）。非 0 且系统动效开启时走双页 push 滑动；
+        动画期间页状态（_current / currentChanged）立即落定，仅旧页 hide
+        延后到滑动结束（时长 300ms，期间对话页参与布局无功能影响）。
+        """
         if i == self._current or not (0 <= i < len(self._pages)):
             return
         new = self._pages[i]
         old = self._pages[self._current] if self._current >= 0 else None
         self._current = i
-        if i == 0:
+        if direction != 0 and Animations.motion_enabled() and old is not None and old is not new:
+            self._start_slide(old, new, direction)
+        elif i == 0:
             # 回对话：show 对话页（实测 ~10ms）+ raise 盖住覆盖层。
             # ⚠️ 覆盖层页**不 hide**——保活不变式，消灭下次切换的 show 传播。
             if old is not None:
@@ -616,6 +848,169 @@ class _ContentStack(QWidget):
         i = self._pages.index(w) if w in self._pages else -1
         if i >= 0:
             self.setCurrentIndex(i)
+
+    # ── 页级滑动（push 切页 / over 覆盖层内整页滑入）──
+
+    def slide_in_progress(self) -> bool:
+        """是否有滑动动画在途（供调用方避免叠加动画）"""
+        return self._slide_anim is not None and self._slide_anim.state() == QVariantAnimation.Running
+
+    def _start_slide(self, old: QWidget, new: QWidget, direction: int) -> None:
+        """双页 push 滑动：长条模型下视口在两页间平移（旧页滑出 + 新页滑入等速）。
+
+        重入：动画在途先快进到终态（_finish_slide 幂等），再起新动画——
+        连点表现为上一次立即滑到头，紧接着滑本次。
+        """
+        if self.slide_in_progress():
+            self._finish_slide(interrupted=True)
+        self._slide_old = old
+        self._slide_new = new
+        self._slide_dir = 1 if direction > 0 else -1
+        self._slide_kind = "push"
+        r = self.rect()
+        # 两页同时可见；新页置顶，起点在进场侧整宽外（+dir 侧）
+        old.show()
+        new.show()
+        new.raise_()
+        old.setGeometry(r)
+        new.setGeometry(r.translated(r.width() * self._slide_dir, 0))
+        self._start_anim()
+
+    def slide_over(self, direction: int = 1) -> None:
+        """覆盖层内容切换的整页滑入（页 index 不变，无 swap 回调的轻量路径）:
+        当前顶层页从进场侧滑入归位，露出区透传 chatFrame 背景（不垫底）。
+
+        ⚠️ 不垫底是刻意的：垫对话页会让切换期间对话页强制可见 300ms
+        （新卡首建阻塞主线程时动画帧被饿），用户实测不可接受。
+
+        用途：切对话标签页恢复卡片等无法提供 swap 时机的事件链。
+        卡间互斥切换走 slide_swap（两段式，旧卡画面真实滑出）。
+        """
+        top = self.widget(self._current)
+        if top is None or not Animations.motion_enabled():
+            return
+        if self.slide_in_progress():
+            self._finish_slide(interrupted=True)
+        self._slide_old = None
+        self._slide_new = top
+        self._slide_dir = 1 if direction > 0 else -1
+        self._slide_kind = "over"
+        r = self.rect()
+        top.raise_()
+        top.setGeometry(r.translated(r.width() * self._slide_dir, 0))
+        self._start_anim()
+
+    def slide_swap(self, direction: int, swap) -> None:
+        """卡间互斥切换的两段式滑动（长条模型「视口滑过相邻卡片」）：
+
+        段1：顶层页带旧卡画面向出场侧整体滑出（完全出画）；
+        段间：页在画外时执行 swap()（hide 旧卡 + show 新卡，构建阻塞被画外掩蔽）；
+        段2：页瞬移到进场侧后滑入归位。
+
+        旧卡画面真实跟随滑动（区别于 slide_over 的「新卡滑入+背景露出」）。
+        swap 在动画收尾/打断时保证被执行（resizeEvent 快进等路径统一走
+        _finish_slide），杜绝「高亮已切、卡片未切」的状态漂移。
+        """
+        top = self.widget(self._current)
+        if top is None or not callable(swap):
+            swap()
+            return
+        if not Animations.motion_enabled():
+            swap()
+            return
+        if self.slide_in_progress():
+            self._finish_slide(interrupted=True)
+        self._slide_old = None
+        self._slide_new = top
+        self._slide_dir = 1 if direction > 0 else -1
+        self._slide_kind = "swap"
+        self._swap_cb = swap
+        top.raise_()
+        self._start_anim()
+
+    def _start_anim(self) -> None:
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(self.SLIDE_MS)
+        anim.setEasingCurve(Animations.EASE_ENTER)
+        anim.valueChanged.connect(self._on_slide_tick)
+        anim.finished.connect(self._finish_slide)
+        self._slide_anim = anim
+        anim.start()
+
+    def _on_slide_tick(self, t: float) -> None:
+        """每帧位移（长条模型）：
+
+        push：视口右移时旧页 0→-w（左出）、新页 +w→0（右进），反向对称；
+        over：仅顶层页从进场侧 +w→0 滑入；
+        swap 段1：顶层页 0→-d*w（旧画面向出场侧滑出，段2 由 _finish_slide 接力）。
+        """
+        old, new = self._slide_old, self._slide_new
+        if new is None:
+            return
+        w = self.width()
+        d = self._slide_dir
+        if self._slide_kind == "swap":
+            new.move(round(w * d * -t), 0)
+            return
+        new.move(round(w * d * (1.0 - t)), 0)
+        if self._slide_kind == "push" and old is not None:
+            old.move(round(w * d * -t), 0)
+
+    def _finish_slide(self, interrupted: bool = False) -> None:
+        """滑动收尾/切段（幂等，可重复调用）
+
+        swap 段1 完成（自然结束）：画外执行 swap 内容切换，页瞬移到进场侧后
+        接力段2 滑入；被打断快进（resize/新切换接管几何）时 interrupted=True：
+        仍执行 swap（保高亮/卡片状态一致）但直接归位不接段2。其余路径统一
+        归位：new（新页/顶层页）置顶归位，old 按 _current 决定 hide（_current≠0）
+        或 lower 保活（=0）。
+        """
+        anim = self._slide_anim
+        if anim is not None:
+            try:
+                anim.finished.disconnect(self._finish_slide)
+                anim.valueChanged.disconnect(self._on_slide_tick)
+            except (TypeError, RuntimeError):
+                pass
+            anim.stop()
+        self._slide_anim = None
+        old, new = self._slide_old, self._slide_new
+        if self._slide_kind == "swap" and new is not None:
+            # 段1 完成：画外切换内容（cb 内含打断守卫：意图已变则跳过切换）
+            cb = self._swap_cb
+            self._swap_cb = None
+            self._slide_kind = "over"
+            if cb is not None:
+                cb()
+            if interrupted:
+                self._settle(new, None)
+                return
+            new.setGeometry(self.rect().translated(self.width() * self._slide_dir, 0))
+            self._start_anim()
+            return
+        self._slide_kind = ""
+        self._slide_old = None
+        self._slide_new = None
+        self._slide_dir = 0
+        self._swap_cb = None
+        self._settle(new, old)
+
+    def _settle(self, new, old) -> None:
+        """统一归位：new 置顶归位；old 按 _current 决定 hide 或 lower 保活"""
+        if new is not None:
+            new.setGeometry(self.rect())
+            new.raise_()
+        if old is None:
+            return
+        old.setGeometry(self.rect())
+        if self._current == 0:
+            # 回对话：旧覆盖层页保持 visible + lower（保活不变式，被对话页遮住）
+            old.lower()
+        else:
+            # 去覆盖层：对话页 hide（省布局 + 杜绝焦点穿透）
+            old.hide()
 
     def set_min_hint_disabled(self, disabled: bool) -> None:
         """切换「最小尺寸提示归零」；幂等，切换后主动 updateGeometry 让布局重算"""
@@ -664,8 +1059,6 @@ class TabManagerWindow(FramelessWindow):
 
     tabCountChanged = Signal(int)
     activeTabChanged = Signal(int)
-    # 聚合 AI 状态 → 全局桌宠（仅当前激活窗的状态被转发，避免多窗串扰）
-    active_ai_state_changed = Signal(str)
 
     @classmethod
     def get_instance(cls) -> Optional["TabManagerWindow"]:
@@ -707,6 +1100,10 @@ class TabManagerWindow(FramelessWindow):
         _sm_t0 = _sm_time.perf_counter()
 
         self._windows: List = []  # List[OpenAIChatToolWindow]
+        # 最近一次顶部 tab 激活变化推断出的滑动方向（+1/-1/0）：
+        # 点击切换时按 old/new 在 titleBar 的位置差缓存，切页消费后清零；
+        # 无事件路径（关卡补位、程序切换）消费时端点兜底（开卡 +1 / 回对话 -1）
+        self._pending_slide_direction = 0
         # ── 几何防抖保存：拖拽/缩放结束后 200ms 才写盘 ──
         self._geo_save_timer = QTimer(self)
         self._geo_save_timer.setSingleShot(True)
@@ -750,6 +1147,17 @@ class TabManagerWindow(FramelessWindow):
         self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
         # 拖拽首帧冻结标记：本次拖拽会话仅冻结一次，松手(device idle)后复位
         self._splitter_dragging: bool = False
+
+        # ── 侧边栏内 left 卡片区（嵌入 sidebarSplitter）──
+        # 卡片打开前的 TabPanel frame 宽（卡片关闭时恢复）与「卡片占位期间」标记
+        self._left_card_saved_panel_frame_w: int = 0
+        # 卡片打开期拖主把手：起点 tab 宽（保持不动）/ 目标 frame 宽 / 本次拖拽脏标记
+        self._left_card_tab_w_keep: int = 0
+        self._left_card_frame_target_w: int = 0
+        self._left_card_drag_dirty: bool = False
+        # 卡片打开前 TabPanel 是否处于折叠态（关闭卡片时按其恢复，避免
+        # 「折叠态 → 开插件 → 关插件」意外展开侧边栏）
+        self._left_card_prev_collapsed: bool = False
 
         self.setWindowTitle("飘狐-DriFox")
         self.setObjectName("tabManagerWindow")
@@ -851,27 +1259,6 @@ class TabManagerWindow(FramelessWindow):
         # 但保持接口一致性便于将来扩展）
         theme_manager.register_refresh_target(self)
 
-        # ── 全局桌宠（单例浮层，下沉自 MainWidget）──
-        # 多 tab 下唯一常驻：不随窗口销毁，切 tab 平滑跟随激活窗 send_btn。
-        # pet_enabled=False 时 hide 而非 destroy（保留实例，便于实时开关）。
-        from app.widgets.pixel_pet import PixelPetWidget
-
-        self.pixel_pet = PixelPetWidget(self)
-        if Settings.get_instance().pet_enabled.value:
-            self.pixel_pet.show()
-            self.pixel_pet.raise_()
-        else:
-            self.pixel_pet.hide()
-        Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
-        # 主题 / 字号刷新（取代 main 的 pet 级连接）：仅在此处完成一次。
-        # 注意：_pixel_pet 自身的 __init__ 已调用 _connect_config_signals()，
-        # 此处【不可】重复调用，否则 pet_size 信号会被连两次。
-        theme_manager.register_refresh_target(self.pixel_pet)
-        # AI 状态：pet 只连一次聚合信号（切 tab 由聚合信号改发当前窗状态）
-        self.active_ai_state_changed.connect(self.pixel_pet._on_ai_state_changed)
-        # 初始定位到右下角（首个窗口加入 + 激活后会精确对齐 send_btn）
-        self.pixel_pet.resize_handle(self.width(), self.height())
-
         # ── 右侧工作台面板（**嵌入式**：对话区右侧第三窗格，与左侧 TabPanel 对称）──
         # 放弃悬浮：QWebEngineView 是原生 HWND，悬浮面板必然与之争 z-order
         # （child 盖不住 / WA_NativeWindow 吞主窗口边缘 resize / Tool 窗口跟随延迟）。
@@ -893,7 +1280,7 @@ class TabManagerWindow(FramelessWindow):
         # 页面请求切换工作目录 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
         self.workbench_panel.workingDirChanged.connect(self._on_workbench_working_dir_changed)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
-        # 主题 / 字号刷新：与桌宠同路径注册
+        # 主题 / 字号刷新注册
         theme_manager.register_refresh_target(self.workbench_panel)
 
         # 圆角矩形容器（与 #tabFrame / #chatFrame 同款），作为 splitter 第三窗格。
@@ -1137,20 +1524,6 @@ class TabManagerWindow(FramelessWindow):
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
-    def _on_pet_enabled_changed(self, enabled: bool) -> None:
-        """桌宠显示开关实时响应（全局桌宠由 TabManager 统一管理）"""
-        pet = getattr(self, "pixel_pet", None)
-        if pet is None:
-            return
-        if enabled:
-            pet.show()
-            pet.raise_()
-            # 重新对齐当前激活窗 send_btn
-            pet.reposition_to_active_window()
-        else:
-            # hide 而非 destroy：保留实例，便于再次开启无需重建
-            pet.hide()
-
     # ── 右侧工作台（嵌入式：toggle 显隐 / 数据刷新） ──
 
     def _splitter_sizes_with_left(self, left_w: int) -> List[int]:
@@ -1249,6 +1622,7 @@ class TabManagerWindow(FramelessWindow):
             wb = max(0, min(int(w), frame.maximumWidth()))
             total = sum(sizes)
             self._splitter.setSizes([sizes[0], max(0, total - sizes[0] - wb), wb])
+            logger.debug(f"[TSW] wb瞬切 wb={wb} left={sizes[0]}->{self._splitter.sizes()[0]}")
         except Exception:
             pass
 
@@ -1336,6 +1710,8 @@ class TabManagerWindow(FramelessWindow):
         if frame is not None:
             frame.set_min_hint_disabled(False)
         self._set_windows_resize_preview_suppressed(False)
+        # [T30] 动画结束可见性恢复点：补刷隐藏期置脏的顶层容器
+        self._refresh_theme_dirty_frames()
 
     # ── 右侧工作台 hover 悬浮预览：进入/退出回调 ──
 
@@ -1415,6 +1791,8 @@ class TabManagerWindow(FramelessWindow):
                 self.set_workbench_visible(True)
             else:
                 self._wb_visible_target = None  # 回挂收起后回到"看 isVisible"，关闭态 False
+            # [T30] 预览离开可见性恢复点：补刷隐藏期置脏的顶层容器
+            self._refresh_theme_dirty_frames()
 
         self._wb_overlay.slide_out(on_done=_done)
 
@@ -1489,6 +1867,11 @@ class TabManagerWindow(FramelessWindow):
             # ★ 必须显式 show panel：panel 构造后调过 hide()，
             #   Qt 中被显式 hide 的子 widget 不会因 parent.show() 自动恢复。
             panel.set_panel_visible(True)
+            # [T30] 瞬切打开（animate=False：启动恢复 / 切窗 per-tab 恢复）不跑
+            # 动画 → 没有动画结束补刷点，frame 若在隐藏期被主题刷新置脏，会带
+            # 空 styleSheet 显示 → 无背景/边框/圆角。此处立即补刷；未置脏时
+            # 本调用为 no-op，动画路径动画结束后另有一次（同串短路，零开销）。
+            self._refresh_theme_dirty_frames()
             # ★ 不调 restore_last_tab：hide 期间 stack 当前页本就保持，
             #   重新 show 天然恢复用户上次选择的页签；首次默认第一个页签由
             #   面板 __init__ 保证。若在此恢复上次关闭时页签，会覆盖
@@ -1590,12 +1973,14 @@ class TabManagerWindow(FramelessWindow):
         force: bool = False,
         force_plugin: str = "",
     ) -> None:
-        """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
+        """从当前活跃窗口拉取数据填充工作台（产物/项目记忆）
 
         数据源均为既有单一数据源：
         - 产物：backend.file_recorder 会话级文件写入记录
-        - 任务：窗口 _latest_todos（todowrite 结果联动缓存），缺失回退 tool_executor
         - 项目：win._current_project + _current_workdir → MemoryCardContent
+
+        任务（todowrite）已迁至消息卡片内嵌看板（见 app/widgets/inline_todo_panel.py），
+        不再属于工作台数据。
 
         force=True：插件页强制重建（ui 热重载后签名未变但实现已变）。
 
@@ -1617,8 +2002,6 @@ class TabManagerWindow(FramelessWindow):
             )
         except Exception:
             pass
-        win = self.get_current_window()
-        backend = getattr(win, "backend", None) if win is not None else None
         # 当前页数据刷新：页面自拉（插件页可选协议 refresh_data()）。
         # ★ 宿主不再为具体页面推送数据（原 update_project / update_artifacts），
         #   页面自己从 context / 活跃窗口取数，面板保持零页面语义。
@@ -1626,14 +2009,6 @@ class TabManagerWindow(FramelessWindow):
             panel.refresh_current_page_data()
         except Exception:
             logger.exception("[Workbench] 当前页数据刷新失败")
-        # 任务：优先窗口缓存（todowrite 结果联动），缺失回退 tool_executor 实时读
-        todos = getattr(win, "_latest_todos", None)
-        if not todos and backend is not None and getattr(backend, "_tool_executor", None) is not None:
-            try:
-                todos = backend._tool_executor.get_todos()
-            except Exception:
-                todos = []
-        panel.update_todos(todos or [])
 
     def _deferred_workbench_refresh(self, win, saved_tab, seq: int = 0) -> None:
         """切标签后的工作台数据刷新（延迟一帧执行，见 _on_tab_selected）
@@ -1824,14 +2199,97 @@ class TabManagerWindow(FramelessWindow):
             logger.warning(f"[WorkbenchDiff] {msg}")
 
     def refresh_theme(self):
-        """ThemeManager 统一刷新入口（dispatch_refresh 调用）
-
-        全局桌宠配色随主题刷新交由 theme_manager 统一派发：
-        pet 已通过 register_refresh_target 注册，dispatch_refresh 会直接
-        调用 pet.refresh_theme() → refresh_pet() 重载 spritesheet，无需此处
-        再显式调用（避免重复刷新）。
-        """
+        """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
         self._on_theme_changed()
+
+    def _reapply_splitter_handle_styles(self):
+        """把 splitter handle 样式下沉到 QSplitterHandle 自身
+
+        [PERF] 原始实现用 ``QSplitter.setStyleSheet("...::handle...")``，会让
+        QStyleSheetStyle 对整个 splitter 子树重建 + repolish。本窗口三个
+        splitter 子树规模为 431 / 1470 / 1462，实测单次分别 332 / 319 / 313ms，
+        合计近 1 秒，而它们的样式规则只作用于 2px 的 handle 线条。
+
+        改为逐 handle ``setStyleSheet`` + ``WA_StyledBackground``：
+        作用域收窄到 handle 自身（无子控件），实测 0.3ms 总计。
+
+        handle 数量随 addWidget 变化，故本方法幂等可重复调用；样式串按当前
+        Colors 生成，主题切换时重新调用即可刷新颜色。
+        """
+        specs = (
+            (
+                getattr(self, "_splitter", None),
+                # 隐藏的拖拽缝：透明底，与两侧 frame border 形成分隔线
+                """
+                QSplitterHandle {
+                    background: transparent;
+                }
+                """,
+            ),
+            (
+                getattr(self, "_dock_splitter", None),
+                # 停靠区：6px 热区中画 2px 居中线，hover 变强调色提示可拖拽
+                f"""
+                QSplitterHandle {{
+                    background: transparent;
+                    border-left: 2px solid {Colors.BORDER};
+                    margin: 10px 2px;
+                    border-radius: 1px;
+                }}
+                QSplitterHandle:hover {{
+                    border-left: 2px solid {Colors.BORDER_ACCENT};
+                }}
+                """,
+            ),
+            (
+                getattr(self, "_sidebar_splitter", None),
+                # 侧边栏内部分隔条（TabPanel ↔ left 卡片区）：4px 热区画 2px
+                # 竖线，hover 变强调色提示可拖拽（卡片打开后此线可见、可拖动
+                # 在两窗格间互借宽度）。不接线时 QSplitterHandle 默认透明，
+                # 外观上「分割线消失」。
+                # ★ 不留上下 margin（margin: 0）：卡片打开时卡片区与侧栏同高，
+                #   分隔条应贯穿上下，与 #tabFrame 圆角内缘贴合；用 margin 收缩
+                #   会在头尾留出空白段（用户反馈「没有完全连到上下」）。
+                f"""
+                QSplitterHandle {{
+                    background: transparent;
+                    border-left: 2px solid {Colors.BORDER};
+                    margin: 0;
+                    border-radius: 1px;
+                }}
+                QSplitterHandle:hover {{
+                    border-left: 2px solid {Colors.BORDER_ACCENT};
+                }}
+                """,
+            ),
+            (
+                getattr(self, "_chat_vsplitter", None),
+                f"""
+                QSplitterHandle {{
+                    background: transparent;
+                    border-top: 2px solid {Colors.BORDER};
+                    margin: 2px 10px;
+                    border-radius: 1px;
+                }}
+                QSplitterHandle:hover {{
+                    border-top: 2px solid {Colors.BORDER_ACCENT};
+                }}
+                """,
+            ),
+        )
+        for splitter, qss in specs:
+            if splitter is None:
+                continue
+            try:
+                for idx in range(splitter.count()):
+                    handle = splitter.handle(idx)
+                    if handle is None:
+                        continue
+                    # 不设该属性时 QSplitterHandle 的 paintEvent 不绘制 QSS 背景/边框
+                    handle.setAttribute(Qt.WA_StyledBackground, True)
+                    handle.setStyleSheet(qss)
+            except RuntimeError:
+                continue  # C++ 对象已销毁
 
     def _apply_theme_stylesheet(self):
         """应用主题样式表
@@ -1845,35 +2303,51 @@ class TabManagerWindow(FramelessWindow):
         直接给 #tabPanel 设 border 看不到；用 4px handle + BORDER 颜色
         在视觉上约 1px 可见（两侧被 BORDER 着色），保留拖拽热区但视觉
         上仍接近细边框的观感。
+
+        [PERF] 本串挂在窗口上，`setStyleSheet` 会 repolish 整窗 1500+ 子控件，
+        实测 262~320ms。因此这里做**同串短路**：字号变化等场景会重复调用本方法
+        而主题色未变，串相同时直接跳过（Qt 内部对同串同样全量 repolish，
+        不会自身短路）。主题真变化时串必然不同，自然生效。
+        另注：本串无法按 #objectName 拆到各子控件上——子控件子树重叠
+        （chatFrame/chatManagerContent 各含 1400+，逐个设反而更慢，实测
+        拆分合计 1245ms vs 整窗 320ms），且窗口自身设任意非空串都是全量 cost。
+
+        [T30] 作用域拆分只拆**顶层三兄弟**（_tab_frame/_chat_frame/
+        _workbench_frame）：它们互不重叠、各自子树规模可控；更深的子树
+        重叠容器拆分实测反而更慢（1245ms 教训）。margin/radius 与 wbHidden
+        margin 留在静态窗口串——它们与主题色无关且会被 wb 属性切换路径
+        独立更新，拆走反而让该路径多一次容器串重刷。
         """
-        self.setStyleSheet(f"""
-            #tabPanel {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border-radius: 8px;
+        # [T30] 窗口串缩为静态部分（几何/透明/圆角）；主题色值仅保留一处例外：
+        # 窗口本体底色 #tabManagerWindow（无独立承载链，窗口串是唯一挂点），
+        # 其余色值全部下沉到顶层三兄弟容器（_qss_tab_frame/_qss_chat_frame/
+        # _qss_workbench_frame）的独立串上。字号变化/同主题场景串恒定 →
+        # 同串短路直接跳过整窗 repolish（0ms）；真换主题时窗口串与三个可见
+        # 容器各自重刷，隐藏者置脏由补刷点恢复。
+        # 主题色值全部下沉到顶层三兄弟容器（_qss_tab_frame/_qss_chat_frame/
+        # _qss_workbench_frame）的独立串上。字号变化/同主题场景串恒定 →
+        # 同串短路直接跳过整窗 repolish（0ms）；真换主题时仅三个可见容器
+        # 各自 repolish 自身子树，隐藏者置脏由补刷点恢复。
+        # margin/radius 留在静态串的原因：wbHidden 属性切换只改 margin（
+        # wb_hidden 路径独立成串重设窗口串即可，无需触碰色值容器串）。
+        # 只拆**顶层三兄弟**的原因：子树重叠容器（chatFrame/chatManagerContent
+        # 各含 1400+ 控件）逐个设反而更慢（拆分合计 1245ms vs 整窗 320ms，实测）。
+        qss = f"""
+            #tabManagerWindow {{
+                /* [T30-P0fix] 窗口本体底色：无独立承载链，窗口串是唯一挂点。
+                   f-string 动态色值——CONTENT_BG 变则串变，同串短路语义不受影响
+                   （字号/同主题场景色值不变，仍走短路）。
+                   ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
+                   圆角外侧三角区不会被绘制，底层透出系统默认窗口色。窗口圆角
+                   由 DWM 负责（_apply_win11_dwm_chrome）。 */
+                background: {Colors.CONTENT_BG};
             }}
             #tabFrame {{
                 /* 左侧圆角矩形容器，与右侧 #chatFrame 对称，提升呼吸感 */
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 margin: 4px 0 4px 4px;  /* 四边与窗口 4px 边距，右 0 让位 splitter handle */
             }}
-            #tabManagerWindow {{
-                background: {Colors.CONTENT_BG};
-                /* ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
-                   圆角外侧的三角区不会被绘制，底层透出系统默认窗口色 —— 表现为
-                   窗口四角隐约有一圈"系统窗口"的白边，resize 重绘时尤其明显。
-                   窗口圆角由 DWM 负责（见 _apply_win11_dwm_chrome），Qt 侧保持
-                   矩形即可；该处同时把 DWM 的边框描边设为 DWMWA_COLOR_NONE，
-                   避免窗口最外圈出现一圈随激活状态忽明忽暗的 2px 白线。 */
-            }}
-            #tabManagerContent {{
-                background: transparent;
-                border-radius: 8px;
-            }}
             #chatFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 /* 左右 margin 均 0，让位给 splitter handle：三窗格布局下
                    中间窗格两侧各有一个 4px handle，若此处保留右 4px margin，
@@ -1885,12 +2359,9 @@ class TabManagerWindow(FramelessWindow):
             #chatFrame[wbHidden="true"] {{
                 margin: 4px 4px 4px 0;
             }}
-            #workbenchFrame {{
-                /* 右侧工作台圆角矩形容器，与 #tabFrame / #chatFrame 同款 */
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
+            #tabManagerContent {{
+                background: transparent;
                 border-radius: 8px;
-                margin: 4px 4px 4px 0;  /* 右 4px 为窗口右边距，左 0 让位 handle */
             }}
             #contentArea {{
                 background: transparent;
@@ -1901,44 +2372,119 @@ class TabManagerWindow(FramelessWindow):
             #globalOverlay {{
                 /* 覆盖层页面透明：面板底由内部 CardContainer 按卡片状态自绘
                    （transparentOverlay 卡片 → 容器透明，透出 #chatFrame 半透明
-                   面板与对话区无缝衔接；普通卡片 → 容器自画 alpha=246 面板底）。
-                   此处若画实色底（旧值 CARD_BG alpha=246）会盖住对话区，导致
-                   assistant_hub 等透明卡打开时整页呈不透明面板。 */
+                   面板与对话区无缝衔接；普通卡片 → 容器自画 alpha=246 面板底）。 */
                 background: transparent;
                 border-radius: 8px;
             }}
-        """)
-        # splitter handle 区域：融入窗口背景，让两侧 frame border 自然形成分隔线
-        # 这样不会和 frame border 形成"双重线"叠加，保持 4px 拖拽热区
-        if getattr(self, "_splitter", None) is not None:
-            self._splitter.setStyleSheet("QSplitter::handle:horizontal { background: transparent; }")
-        # ── 停靠区 splitter：handle 绘制可见分隔线（明确 UI 卡片与对话区边界）──
-        # 6px 热区中画 2px 居中线（BORDER 色），hover 时变主题强调色提示可拖拽。
-        # 停靠容器折叠时自身 hide()，对应 handle 由 Qt 自动隐藏，不留缝。
-        if getattr(self, "_dock_splitter", None) is not None:
-            self._dock_splitter.setStyleSheet(f"""
-                #dockSplitter::handle:horizontal {{
-                    background: transparent;
-                    border-left: 2px solid {Colors.BORDER};
-                    margin: 10px 2px;
-                    border-radius: 1px;
-                }}
-                #dockSplitter::handle:horizontal:hover {{
-                    border-left: 2px solid {Colors.BORDER_ACCENT};
-                }}
-            """)
-        if getattr(self, "_chat_vsplitter", None) is not None:
-            self._chat_vsplitter.setStyleSheet(f"""
-                #chatVsplitter::handle:vertical {{
-                    background: transparent;
-                    border-top: 2px solid {Colors.BORDER};
-                    margin: 2px 10px;
-                    border-radius: 1px;
-                }}
-                #chatVsplitter::handle:vertical:hover {{
-                    border-top: 2px solid {Colors.BORDER_ACCENT};
-                }}
-            """)
+        """
+        if qss != self.styleSheet():
+            self.setStyleSheet(qss)
+        # [T30] 顶层三兄弟：可见者即时刷色值串并清脏；不可见者置脏跳过
+        #（repolish 留到可见性恢复点 _refresh_theme_dirty_frames）
+        # [T30-P0] getattr 防御：本方法在构造期（_setup_ui）即被调用，
+        # 此时 frame 属性可能尚未创建——未创建属正常态，跳过即可，
+        # 后续主题切换 / showEvent / 动画结束等补刷点会兜住。
+        for frame, qss_method in (
+            (getattr(self, "_tab_frame", None), self._qss_tab_frame),
+            (getattr(self, "_chat_frame", None), self._qss_chat_frame),
+            (getattr(self, "_workbench_frame", None), self._qss_workbench_frame),
+        ):
+            if frame is None:
+                continue
+            try:
+                frame_qss = qss_method()
+                if frame.isVisible():
+                    if frame_qss != frame.styleSheet():
+                        frame.setStyleSheet(frame_qss)
+                    frame._theme_needs_refresh = False
+                else:
+                    frame._theme_needs_refresh = True
+            except RuntimeError:
+                continue  # C++ 对象已销毁
+        # ── splitter handle 样式：下沉到 QSplitterHandle 自身（性能关键）──
+        # [PERF] QSplitter.setStyleSheet 会让 QStyleSheetStyle 重建并 repolish
+        # **整棵子树**（本窗口三个 splitter 分别挂 431/1470/1462 个子控件）。
+        # 实测：设 splitter 322ms/个，下沉到 handle 自身 0.1ms/个；
+        # 三者合计从 ~970ms 降到 ~0.3ms。整窗逐像素比对：
+        # _dock_splitter / _chat_vsplitter 常态与 hover 均 0/768000 差异
+        # （probe_h3_window_diff.py 结论）。
+        #
+        # 要点：
+        # - QSplitterHandle 继承 QWidget 且不设 WA_StyledBackground，不设该属性
+        #   时 QSS 背景/边框根本不画；
+        # - 选择器必须保留 `QSplitterHandle` / `QSplitterHandle:hover`
+        #   （裸属性写法与 `*:hover` 均无法触发 hover 态）；
+        # - handle 由 splitter 在 addWidget / setOrientation 时按需创建，
+        #   故需 _reapply_splitter_handle_styles 在布局变化后补刷。
+        self._reapply_splitter_handle_styles()
+
+    def _qss_tab_frame(self) -> str:
+        """#tabPanel/#tabFrame 主题色值串（[T30] 静态串拆出的色值组）"""
+        return f"""
+            #tabPanel {{
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border-radius: 8px;
+            }}
+            #tabFrame {{
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border: 1px solid {Colors.BORDER};
+            }}
+        """
+
+    def _qss_chat_frame(self) -> str:
+        """#chatFrame 主题色值串"""
+        return f"""
+            #chatFrame {{
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border: 1px solid {Colors.BORDER};
+            }}
+        """
+
+    def _qss_workbench_frame(self) -> str:
+        """#workbenchFrame 主题色值串（radius/margin 一并在此：静态串无此规则）"""
+        return f"""
+            #workbenchFrame {{
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                margin: 4px 4px 4px 0;
+            }}
+        """
+
+    def _refresh_theme_dirty_frames(self) -> None:
+        """补刷隐藏期置脏的顶层三容器（可见性恢复点：动画结束/预览离开/showEvent）
+
+        [T30] hasattr/RuntimeError 防御：容器可能已销毁（窗口关闭竞态）。
+        [T30-fix] 不再以 _theme_needs_refresh 作补刷门控：样式可能被旁路清空
+        （_wb_preview_leave 回挂时 setStyleSheet("") 不置脏），门控会漏刷 →
+        面板裸奔无背景。改为可见者无条件「串不一致就刷」，比对开销可忽略；
+        不可见者置脏留给 _apply_theme_stylesheet 快速跳过（setStyleSheet 全量
+        repolish 贵，隐藏期白刷）。
+        """
+        # [T30-P0] getattr 防御：本方法在构造期（_setup_ui）即被调用，
+        # 此时 frame 属性可能尚未创建——未创建属正常态，跳过即可，
+        # 后续主题切换 / showEvent / 动画结束等补刷点会兜住。
+        for frame, qss_method in (
+            (getattr(self, "_tab_frame", None), self._qss_tab_frame),
+            (getattr(self, "_chat_frame", None), self._qss_chat_frame),
+            (getattr(self, "_workbench_frame", None), self._qss_workbench_frame),
+        ):
+            if frame is None:
+                continue
+            # 预览态：workbench frame 摘在浮层且带专用内联串（无 margin 版），
+            # 不参与补刷，由 _wb_frame_inline_qss 负责（回挂后清串走正常补刷）
+            if frame is getattr(self, "_workbench_frame", None) and getattr(self, "_wb_in_preview", False):
+                continue
+            try:
+                if frame.isVisible():
+                    frame_qss = qss_method()
+                    if frame_qss != frame.styleSheet():
+                        frame.setStyleSheet(frame_qss)
+                    frame._theme_needs_refresh = False
+                else:
+                    frame._theme_needs_refresh = True
+            except RuntimeError:
+                continue  # C++ 对象已销毁
 
     def _apply_bg_from_theme(self):
         """主题切换入口：刷新 4 个区域背景（window/sidebar/chat_area/scene）
@@ -2123,7 +2669,27 @@ class TabManagerWindow(FramelessWindow):
         # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
         tab_frame_layout.setContentsMargins(6, 6, 6, 6)
         tab_frame_layout.setSpacing(0)
-        tab_frame_layout.addWidget(self._tab_panel)
+
+        # ── 侧边栏内部横向 splitter：TabPanel | left 卡片区 ──
+        # left 卡片（container="left"）由「对话区左停靠区」迁到此处：嵌入
+        # #tabFrame 内部右侧，视觉上像从侧边栏里长出来，与对话区彻底解耦。
+        # 拖拽语义（产品确认）：
+        # - 卡片打开：TabPanel 自动收起让位（宿主在 expandedChanged 里驱动），
+        #   卡片区展开（默认 300 / 按插件 per-card 记忆）；
+        # - 拖主 splitter（tabFrame ↔ chatFrame）：增量只加卡片区宽度，
+        #   TabPanel 锁定收起宽不动（宿主 _on_splitter_manually_moved 改写）；
+        # - 拖内部分隔条（TabPanel ↔ 卡片区）：两者互借宽度，frame 总宽不变、
+        #   对话区不动，可把 tab 列表重新拉开；
+        # - 卡片关闭：卡片区收 0 + hide，TabPanel 恢复打开前宽度，frame 缩回。
+        from PySide6.QtWidgets import QSplitter as _SidebarSplitter
+
+        self._sidebar_splitter = _SidebarSplitter(Qt.Horizontal, self._tab_frame)
+        self._sidebar_splitter.setObjectName("sidebarSplitter")
+        self._sidebar_splitter.addWidget(self._tab_panel)
+        self._sidebar_splitter.setStretchFactor(0, 0)
+        self._sidebar_splitter.setHandleWidth(4)
+        self._sidebar_splitter.setChildrenCollapsible(False)
+        tab_frame_layout.addWidget(self._sidebar_splitter)
 
         # 右侧内容区
         self._content_area = QStackedWidget(content_widget)
@@ -2250,7 +2816,7 @@ class TabManagerWindow(FramelessWindow):
         #    仅内容区（_content_stack：消息列表+输入区+覆盖层）限宽居中。
         #    wrapper 作为 _dock_splitter 的中间窗格与左右 dock 容器并列：
         #    dock 卡片展开时从 wrapper 借空间、可占满边框全宽；
-        #    wrapper 内部 content_stack 按 _MAX_CHAT_WIDTH 动态居中留白。 ──
+        #    wrapper 内部 content_stack 按当前限宽档位动态居中留白。 ──
         self._chat_wrapper = QWidget(self._chat_frame)
         self._chat_wrapper.setObjectName("chatWrapper")
         self._chat_wrapper_layout = QHBoxLayout(self._chat_wrapper)
@@ -2277,31 +2843,45 @@ class TabManagerWindow(FramelessWindow):
 
         # 堆叠卡容器（Phase G）：与单卡 CardContainer 并行挂于同侧停靠区下方。
         # LEFT/RIGHT 侧用 wrapper（QVBoxLayout）包裹 [单卡容器, 堆叠容器]，
-        # wrapper 作为 dock_splitter 直接子项——dock mode 协议依赖 CardContainer
+        # wrapper 作为宿主 splitter 直接子项——dock mode 协议依赖 CardContainer
         # 为 splitter 直接子项，故经 wrapper 承载二者（_splitter_index 兼容之）。
         from app.widgets.cards.card_stack_container import CardStackContainer
 
-        self._global_left_stack = CardStackContainer(self._chat_frame)
+        self._global_left_stack = CardStackContainer(self._tab_frame)
         self._global_left_stack.setObjectName("globalLeftStack")
 
         # 停靠区侧 wrapper：默认收起，子控件 visibility 联动 wrapper 与 splitter 大小
         # （避免无卡片时 splitter 均分空间显示空白 splitter handle）
+        # ★ left 卡片宿主已从对话区 dock_splitter 迁到侧边栏内部 sidebarSplitter：
+        #   卡片嵌在 #tabFrame 右侧、TabPanel 右侧，视觉上从侧边栏长出（产品确认形态）。
+        #   伙伴窗格联动：卡片打开时 TabPanel 收到收起宽（_COLLAPSED_PANEL_WIDTH），
+        #   卡片关闭时恢复打开前宽度。
         self._global_left_wrapper = _DockSideWrapper(
-            self._global_left_container, self._global_left_stack, self._chat_frame
+            self._global_left_container, self._global_left_stack, self._tab_frame
         )
         self._global_left_wrapper.setObjectName("globalLeftWrapper")
         self._global_left_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.LEFT)
         self._global_left_container.set_stack_sibling(self._global_left_stack)
 
-        self._dock_splitter.addWidget(self._global_left_wrapper)
+        self._sidebar_splitter.addWidget(self._global_left_wrapper)
+        self._sidebar_splitter.setStretchFactor(1, 1)  # 卡片区吸收多余宽度
+        self._sidebar_splitter.setStretchFactor(0, 0)  # TabPanel 不随宽度拉伸
+        self._global_left_wrapper.set_partner_pane(self._tab_panel, collapsed_size=_COLLAPSED_PANEL_WIDTH)
+        # wrapper 关联 splitter：联动 setSizes 维持收起态 + 伙伴窗格让位
+        _sidebar_idx = self._sidebar_splitter.indexOf(self._global_left_wrapper)
+        self._global_left_wrapper.attach_to_splitter(self._sidebar_splitter, _sidebar_idx)
+        # 卡片显隐 → 宿主编排（tabFrame 加宽/缩回、对话区让位、TabPanel 收起态）
+        self._global_left_wrapper.expandedChanged.connect(self._on_left_card_area_toggled)
+
+        # dock_splitter：left 停靠区迁走后仅剩对话列一个窗格。
+        # 保留该对象（外部按 objectName "dockSplitter" 探测 Tab 模式，见
+        # main_widget.resizeEvent / test_card_container_priority），
+        # 但不再承载左卡片区；handle 相应消失。
         self._dock_splitter.addWidget(self._chat_vsplitter)
-        self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
-        self._dock_splitter.setStretchFactor(1, 1)  # 内容区(含覆盖层)吃掉多余空间
+        self._dock_splitter.setStretchFactor(0, 1)  # 对话列吃掉全部空间
         self._dock_splitter.setHandleWidth(6)
         # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
         self._dock_splitter.setChildrenCollapsible(False)
-        # wrapper 关联 splitter：联动 setSizes 维持收起态
-        self._global_left_wrapper.attach_to_splitter(self._dock_splitter, 0)
         # ── full 容器卡片标题栏 tab（替代原 ReplaceTabBar）──
         # full 卡片（UI 插件 full 卡 + 内置全局卡）打开时在标题栏 tab 区显示
         # （带 × 关闭钮，见 _on_card_visibility_changed）。这里仅订阅显隐事件。
@@ -2372,6 +2952,7 @@ class TabManagerWindow(FramelessWindow):
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.tabSwitchSessionRequested.connect(self._on_tab_switch_session_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
+        self._tab_panel.newTempTabRequested.connect(lambda: self._on_new_tab_requested(temp_scope=True))
         self._tab_panel.sidebarToggled.connect(self._on_sidebar_toggled)
         self._tab_panel.teamCloseRequested.connect(self._on_team_close_requested)
         self._tab_panel.teamAddMemberRequested.connect(self._on_team_add_member_requested)
@@ -2379,6 +2960,8 @@ class TabManagerWindow(FramelessWindow):
         # 工作区树模式：在项目 + 工作树下新建对话页 / 打开历史会话
         self._tab_panel.newSessionInWorkspaceRequested.connect(self._on_new_session_in_workspace)
         self._tab_panel.openSessionRecordRequested.connect(self._on_open_session_record)
+        # 工作区树「工作区」标题行 + → 新建项目（选文件夹流程）
+        self._tab_panel.newProjectRequested.connect(self._on_new_project_requested)
         # Tab 增删后同步工作区树（会话归属/历史列表会变）
         self.tabCountChanged.connect(self._on_tab_count_changed_for_tree)
         # 用户手动拖拽 splitter 把手 → 折叠是用户主动，不标记挤压，
@@ -2390,6 +2973,221 @@ class TabManagerWindow(FramelessWindow):
         if _IS_MAC:
             QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
+        # 对话区限宽档位变更（设置-外观）→ 立即重算 wrapper margins，
+        # 无需等窗口 resize；同时通知已存在的消息卡按新宽度重新折行。
+        try:
+            Settings.get_instance().ui_chat_width.valueChanged.connect(self._on_chat_width_changed)
+        except Exception:
+            pass
+
+    def _on_chat_width_changed(self, *_args):
+        """限宽档位变化 → 重算对话区/覆盖层留白 + 消息卡宽度"""
+        self._sync_chat_wrapper_width()
+        # 强制所有窗口的消息卡按新容器宽度重算（full 档铺满 / 窄档收紧）。
+        # 走既有的分帧宽度同步链，30 张卡不会冻结主线程。
+        for win in self._windows:
+            try:
+                win._sync_all_cards_width()
+            except Exception:
+                pass
+
+    # ── 侧边栏内 left 卡片区：宿主编排（frame 加宽 / TabPanel 折叠态 / 对话区让位） ──
+
+    def _left_card_area_active(self) -> bool:
+        """left 卡片区当前是否已展开（wrapper 有可见意图）"""
+        wrapper = getattr(self, "_global_left_wrapper", None)
+        if wrapper is None:
+            return False
+        return _DockSideWrapper._child_visible_intent(wrapper._primary) or _DockSideWrapper._child_visible_intent(
+            wrapper._stack
+        )
+
+    def _left_card_frame_extra(self) -> int:
+        """卡片区占用的 frame 额外宽度（0 = 未展开）
+
+        取值口径与 wrapper 槽位一致（splitter sizes），无槽位时回落到记忆/默认宽。
+        """
+        wrapper = getattr(self, "_global_left_wrapper", None)
+        sp = getattr(self, "_sidebar_splitter", None)
+        if wrapper is None or sp is None:
+            return 0
+        try:
+            sizes = sp.sizes()
+            idx = sp.indexOf(wrapper)
+            if 0 <= idx < len(sizes) and sizes[idx] > 0:
+                return sizes[idx]
+        except Exception:
+            pass
+        return getattr(wrapper, "_expanded_width", 0) or 0
+
+    def _on_left_card_area_toggled(self, expanded: bool) -> None:
+        """left 卡片区展开/收起 → 编排 #tabFrame 宽度 + TabPanel 折叠态
+
+        产品语义（已确认）：
+        - 卡片打开：TabPanel 让位收窄到收起宽（46px 图标条），卡片区展开，
+          #tabFrame 整体加宽（TabPanel + 卡片），对话区被挤窄；
+        - 卡片关闭：卡片区收 0，TabPanel 恢复打开前宽度，#tabFrame 缩回，
+          对话区回收空间。
+
+        关键时序：本回调由 _DockSideWrapper 在**改内部分配之前**同步调用，
+        此处先把 TabPanel 的 _collapsed/_collapsed_by_squeeze 置好（静默，
+        不发信号），随后伙伴窗格收窄时 TabPanel.resizeEvent 不会再 emit
+        sidebarToggled → 阻断「收窄 → 宿主把 frame 压到 60px → 卡片被挤没」回路。
+        """
+        if not hasattr(self, "_tab_frame") or not hasattr(self, "_splitter"):
+            return
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None:
+            return
+        sizes = self._splitter.sizes()
+        if not sizes:
+            return
+        tab_w = sizes[0]
+
+        if expanded:
+            # 1) 记忆 TabPanel 当前宽度（关闭时恢复），并按收起态静默落位。
+            #    ★ 同时记忆打开前的折叠态：卡片打开前侧边栏本就是折叠的（用户
+            #      此前手动收起），关闭卡片后必须回到折叠态，不能无条件展开
+            #      （否则「折叠态 → 开插件 → 关插件」会意外变成展开态）。
+            self._left_card_prev_collapsed = bool(panel._collapsed)
+            if not panel._collapsed:
+                self._left_card_saved_panel_frame_w = max(
+                    tab_w, max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
+                )
+            panel._collapsed = True
+            panel._collapsed_by_squeeze = False  # 卡片让位属程序行为，非挤压
+            panel._left_card_present = True  # 占位期禁用面板宽度自治（防坍缩）
+            panel.sync_collapsed_ui()
+            # 2) frame 目标宽 = TabPanel 收起宽 + 卡片区当前槽位（首帧 0 时用记忆/默认）
+            #    ★ 槽位此刻是旧 frame 总宽下的钳制值（内层尚未加宽），不能直接
+            #      采信：容器无记忆首开 target=_DOCK_DEFAULT_W(360)，若按钳后
+            #      槽位(~300 兜底)编排 frame，容器意图永远落不了位（实测 360
+            #      被钳到 292，表现为"默认宽度没变"）。取容器意图 _last_expand_target
+            #      （与 wrapper._on_expand 落位同源）参与 max。
+            card_w = self._left_card_frame_extra()
+            if card_w <= 0:
+                card_w = _DockSideWrapper.DEFAULT_EXPANDED_WIDTH
+            _cont = getattr(self._global_left_wrapper, "_primary", None)
+            _intent_w = int(getattr(_cont, "_last_expand_target", 0) or 0)
+            card_w = max(card_w, _intent_w)
+            # ★ 空间不足让位（规则 2 同源）：窗口放不下「TabPanel 收起宽 +
+            #   卡片宽 + 聊天区最小宽」时，先瞬切收起工作台腾空间（打
+            #   _wb_collapsed_by_squeeze 标记，卡片关闭空间回收后自动重开）。
+            #   否则 _left_card_frame_target 把 frame 钳到收起宽附近，卡片区
+            #   被挤成竖条（内容不可读）。
+            try:
+                _sizes_now = self._splitter.sizes()
+                _total_now = sum(_sizes_now)
+                _wb_now = _sizes_now[2] if len(_sizes_now) >= 3 else 0
+                if _wb_now > 0 and _total_now - _wb_now - _MIN_CHAT_WIDTH < (
+                    _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X + card_w
+                ):
+                    self._collapse_workbench_by_squeeze()
+            except Exception:
+                pass
+            target = self._left_card_frame_target(card_w)
+            # ★ 槽位→frame 换算补偿（+8）：_FRAME_PADDING_X(14) 只覆盖
+            #   layout margins(12) + border(2)；卡片态下内层还有 QSS
+            #   margin-left(4) 与 splitter handle(4) 未计——不补偿时卡片槽
+            #   每次重开被压缩 8px（实测连续切页卡片槽 360→352→344 逐轮
+            #   递减，表现为「切页往返后卡片宽度越来越窄」）。
+            target += _CARD_SLOT_CHROME_EXTRA
+            # 3) 放宽 frame max（允许加宽）后落位
+            self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(), target))
+            if abs(tab_w - target) > 1:
+                self._splitter.setSizes(self._splitter_sizes_with_left(target))
+        else:
+            # 1) TabPanel 恢复打开前的状态：折叠前是收起态就回收起态，
+            #    展开态才恢复打开前的宽度（否则会意外把用户收起的侧边栏撑开）。
+            #    ★ 例外：占位期用户拖内部分隔条把面板拉开了（宽度越过展开线、
+            #      _collapsed 已被形态自治置 False），这是明确意图——此时不得
+            #      再按打开前的折叠态收回去，改为按用户拖出的实际宽度落位。
+            prev_collapsed = bool(getattr(self, "_left_card_prev_collapsed", False))
+            self._left_card_prev_collapsed = False
+            panel._left_card_present = False  # 卡片已退场：恢复面板宽度自治
+            user_widened = not panel._collapsed and prev_collapsed
+            panel._collapsed = prev_collapsed and not user_widened
+            panel._collapsed_by_squeeze = False
+            panel.sync_collapsed_ui()
+            if panel._collapsed:
+                target = panel._collapsed_min_width + _FRAME_PADDING_X
+            elif user_widened:
+                # 用户拖出的宽度即目标（下限保证不骑折叠线）
+                _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
+                cur_panel_w = 0
+                sp = getattr(self, "_sidebar_splitter", None)
+                if sp is not None:
+                    sizes_in = sp.sizes()
+                    tab_idx = sp.indexOf(panel)
+                    if 0 <= tab_idx < len(sizes_in):
+                        cur_panel_w = sizes_in[tab_idx]
+                target = max(_min_expand_w, cur_panel_w + _FRAME_PADDING_X)
+                self._saved_panel_frame_width = target
+            else:
+                target = getattr(self, "_left_card_saved_panel_frame_w", 0) or max(
+                    _EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X
+                )
+                # ★ 切页投影触发的卡片关闭：当前活跃页有独立宽度记忆
+                #   （per-tab）时以它为准——_left_card_saved_panel_frame_w 是
+                #   卡片打开那页的无卡宽，拿它落位别的页会把该页宽度打回
+                #   打开页基准（实测：A 开卡（201）→ 切到记忆 500 的 B 页，
+                #   卡片投影关闭用 201 覆盖 B 的 500）。
+                try:
+                    _cur_win = self.get_current_window()
+                    _win_mem = getattr(_cur_win, "_tab_sidebar_frame_w", None) if _cur_win is not None else None
+                    if _win_mem and int(_win_mem) > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X:
+                        target = max(_EXPANDED_MIN_FRAME_WIDTH, int(_win_mem))
+                except Exception:
+                    pass
+            # 2) 收回 frame max（回到无卡片时的静态上限）后落位
+            self._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
+            if abs(tab_w - target) > 1:
+                self._splitter.setSizes(self._splitter_sizes_with_left(target))
+            # 卡片关闭空间回收：卡片打开时挤压协调收的工作台，放得下则重开
+            # （规则 2 反向；growth_required=False：布局性恢复，窗口总宽未变）
+            if getattr(self, "_wb_collapsed_by_squeeze", False):
+                self._maybe_restore_workbench_after_squeeze(growth_required=False)
+        # 卡片区宽度变化会改 frame 上限，同步一次（拖拽增量全部给卡片）
+        self._sync_tab_frame_cap()
+
+    def _left_card_frame_target(self, card_w: int) -> int:
+        """卡片打开时的 frame 目标宽：TabPanel 收起宽 + 卡片宽（含 padding）
+
+        上限取「可见区能容纳」的最大值：窗口总宽 - 工作台宽 - 聊天区最小宽。
+        ★ 工作台让位后仍放不下理想宽时，保卡片最小可用宽
+        （_LEFT_CARD_MIN_VISIBLE_WIDTH，否则卡片区被钳到接近 0、内容挤成
+        竖条不可读），聊天区允许暂时低于理想宽但不低于绝对下限。
+        """
+        base = _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X
+        target = base + max(0, card_w)
+        try:
+            sizes = self._splitter.sizes()
+            wb_w = sizes[2] if len(sizes) >= 3 else 0
+            total = sum(sizes) if sizes else self.width()
+            free = total - wb_w
+            cap = max(base + _LEFT_CARD_MIN_VISIBLE_WIDTH, free - _MIN_CHAT_WIDTH)
+            if free - _CHAT_ABSOLUTE_MIN_WIDTH < cap:
+                cap = max(base, free - _CHAT_ABSOLUTE_MIN_WIDTH)
+            target = min(target, cap)
+        except Exception:
+            pass
+        return target
+
+    def _sync_tab_frame_cap(self) -> None:
+        """同步 #tabFrame 的 maximumWidth：卡片打开时放宽，关闭时回到静态上限
+
+        拖主 splitter 时卡片区可被拖宽，frame 上限须同步放开，否则被钳住。
+        上限 = TabPanel 最大内容宽 + 卡片当前槽位 + padding。
+        """
+        frame = getattr(self, "_tab_frame", None)
+        if frame is None:
+            return
+        if not self._left_card_area_active():
+            frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
+            return
+        card_w = self._left_card_frame_extra() or _DockSideWrapper.DEFAULT_EXPANDED_WIDTH
+        frame.setMaximumWidth(_tab_frame_max_expanded(card_w))
+
     # ── 侧边栏收起/展开（宽度平滑动画） ──
 
     def _on_sidebar_toggled(self, collapsed: bool, animate: bool = True):
@@ -2399,6 +3197,44 @@ class TabManagerWindow(FramelessWindow):
             collapsed: True=收起 False=展开
             animate: 是否走宽度动画（启动恢复配置时传 False 瞬时切换）
         """
+        # ── 卡片占位期：按钮语义 = 先收卡片，面板落到按钮请求的态 ──
+        # 占位期 panel._collapsed 是编排状态（True=面板让位给卡片），与按钮
+        # 语义（用户对面板形态的意图）混用同一状态位：点击翻转后发出的请求
+        # 与用户意图相反，且照常走宽度路径只会把 frame 压小，卡片区因未
+        # 隐藏被挤成细条残留（实测：折叠后卡片仍显示）。
+        # 收卡片必须逐卡走 registry hide（卡片的 visible 状态在容器内部，
+        # 直接 hide 容器会被 _do_expand 的 has_visible 判定 show 回来）；
+        # 卡片全部隐藏后容器状态机自行折叠 → wrapper._sync 收卡片槽 →
+        # expandedChanged(False) → _on_left_card_area_toggled(False) 按
+        # _left_card_prev_collapsed 把面板直接落位到请求态。
+        if self._left_card_area_active():
+            # 占位期面板已是 46px 窄条（编排收窄），按钮图标不分形态，
+            # 用户此时点击的唯一合理意图 = 收起一切：卡片隐藏 + 面板折叠。
+            # ★ _toggle_sidebar 在 emit 前已把 _collapsed 翻转（编排 True→False）
+            #   并落盘 False，不矫正的话卡片关闭回调的 user_widened 会误判为
+            #   True（"用户拖开了面板"），把面板展开落位而非折叠。
+            panel = getattr(self, "_tab_panel", None)
+            if panel is not None:
+                panel._collapsed = True
+                panel._collapsed_by_squeeze = False
+                from app.utils.config import Settings
+
+                Settings.get_instance().ui_sidebar_collapsed.value = True
+                panel._update_toggle_button(switch_ui=False)
+            self._left_card_prev_collapsed = True
+            try:
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+                reg = UIPluginRegistry.get_instance()
+                for cid, info in list(reg.get_floating_cards().items()):
+                    if getattr(info, "container", None) == "left":
+                        try:
+                            reg.hide_floating_card_globally(cid)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return
         sizes = self._splitter.sizes()
         total_w = sum(sizes) if sizes else self.width()
         cur_w = sizes[0] if sizes else (self._tab_frame.width() if hasattr(self, "_tab_frame") else 250)
@@ -2415,10 +3251,28 @@ class TabManagerWindow(FramelessWindow):
                 # 以下，此刻保存的"当前宽度"只剩窄条，点击展开只能恢复窄条。
                 # 此时改用常规展开宽度（固定默认 _DEFAULT_PANEL_WIDTH）作为恢复
                 # 目标，保证展开后可读；用户手动折叠时宽度正常，照常保存实际宽度。
+                # ★ saved 单调不减：窄条折叠不得降级用户此前拖出的更大意图宽
+                #   （实测 414 被压窄后折叠 → saved 被打成 201 → 切页恢复全失效）。
+                #   prev_saved 已是 frame 域，保留时不得重复 +_FRAME_PADDING_X。
                 if cur_frame_w < self._tab_panel._auto_collapse_width + _FRAME_PADDING_X:
-                    saved_w = _DEFAULT_PANEL_WIDTH
-                    cur_frame_w = max(saved_w, _EXPANDED_MIN_CONTENT_WIDTH) + _FRAME_PADDING_X
-                self._saved_panel_frame_width = cur_frame_w
+                    _prev_saved = int(getattr(self, "_saved_panel_frame_width", 0) or 0)
+                    if _prev_saved > cur_frame_w:
+                        self._saved_panel_frame_width = _prev_saved
+                    else:
+                        self._saved_panel_frame_width = max(
+                            _DEFAULT_PANEL_WIDTH, _EXPANDED_MIN_CONTENT_WIDTH
+                        ) + _FRAME_PADDING_X
+                else:
+                    self._saved_panel_frame_width = cur_frame_w
+                # 手动折叠（非挤压）：清当前活跃窗口的 per-tab 宽度记忆——
+                # 用户显式收起是意图，切页不得按旧记忆展开回拖拽宽度
+                if not self._tab_panel._collapsed_by_squeeze:
+                    _cur_win = self.get_current_window()
+                    if _cur_win is not None:
+                        _cur_win._tab_sidebar_frame_w = None
+                logger.debug(
+                    f"[TSW] 折叠存意图 cur_frame_w={sizes[0]} saved->{self._saved_panel_frame_width}"
+                )
             # 使用 _tab_panel 的收起最小宽度
             target_w = self._tab_panel._collapsed_min_width + _FRAME_PADDING_X
         else:
@@ -2536,12 +3390,31 @@ class TabManagerWindow(FramelessWindow):
             # （resize 结束检测在动画中会被 _animating 跳过）。
             if self._sidebar_anim_collapsing:
                 self._maybe_auto_expand_after_squeeze()
+            else:
+                # ★ 展开动画结束：恢复内容区重绘（finally）会触发重排，chat 区
+                #   sizeHint 恢复 → QSplitter 重排可能把左栏压穿折叠线，此时
+                #   _animating 已复位，resizeEvent 误判"用户拖窄"而自动折叠
+                #   （实测：拖宽 414 落定 1s 内被弹回图标条）。延迟两拍复检：
+                #   压窄未折 → _evaluate_squeeze_collapse 恢复宽度；
+                #   已挤压折叠 → _maybe_auto_expand 按意图宽展开（无窗口增长要求）。
+                QTimer.singleShot(150, self._post_expand_squeeze_check)
+                QTimer.singleShot(400, self._post_expand_squeeze_check)
         finally:
             # ── #31 动画结束恢复卡片 resize 预览能力 ──
             # 若本回调又同步启动了新动画（_maybe_auto_expand 走 _start_sidebar_anim
             # 重新抑制），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
             if not (self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running):
                 self._set_windows_resize_preview_suppressed(False)
+
+    def _post_expand_squeeze_check(self):
+        """展开动画收尾后的重排挤压复检（见 _on_sidebar_anim_finished 展开分支）"""
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None or getattr(panel, "_left_card_present", False) or panel._dragging_splitter:
+            return
+        if self._evaluate_squeeze_collapse():
+            return  # 真挤压：已走折叠动画
+        # 未折叠压窄（上一调用已恢复）或已挤压折叠：按意图宽展开（无增长要求）
+        self._maybe_auto_expand_after_squeeze(growth_required=False)
 
     def _evaluate_squeeze_collapse(self) -> bool:
         """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠（含双面板协调）
@@ -2569,6 +3442,12 @@ class TabManagerWindow(FramelessWindow):
         """
         panel = getattr(self, "_tab_panel", None)
         if panel is None or panel._collapsed or panel._animating:
+            return False
+        # ★ 卡片占位期：面板与卡片区共享 sidebarSplitter，宽度语义由卡片编排
+        #   独占（拖内把手 = 两窗格互借，不代表窗口挤压）。此时若照常按宽度
+        #   判定，会把用户拖窄的 tab 判成"被挤压"再弹回/折叠，破坏内拖手感。
+        #   拖拽会话中同理（松手由 _on_splitter_idle 统一落定）。
+        if getattr(panel, "_left_card_present", False) or getattr(panel, "_dragging_splitter", False):
             return False
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return False
@@ -2635,6 +3514,115 @@ class TabManagerWindow(FramelessWindow):
         self._wb_collapsed_by_squeeze = True
         self.set_workbench_visible(False, animate=False)
 
+    def _tab_switch_baseline_width(self, cur_left_w: int, collapsed: bool) -> int:
+        """切页保宽的恢复基准宽
+
+        折叠态：取即时宽（折叠宽即意图）；展开态：取用户意图宽
+        （_saved_panel_frame_width）——即时宽度可能已被其他标签页的工作台
+        挤压污染，切回后空间释放，意图宽可达。saved 缺省（从未拖拽）时
+        退化为即时宽。
+        """
+        if collapsed:
+            return cur_left_w
+        return max(cur_left_w, int(getattr(self, "_saved_panel_frame_width", 0) or 0))
+
+    def _restore_tab_frame_after_tab_switch(self, prev_left_w: int, prev_collapsed: bool) -> None:
+        """切页保宽恢复：切页后把左栏宽度/折叠态还原到切页前
+
+        背景：工作台显隐按 per-tab 记忆在 _on_tab_selected 瞬切恢复，QSplitter
+        重分配空间时窗口放不下会压窄左栏；TabPanel.resizeEvent 同步折叠
+        （_collapsed_by_squeeze 置位）后，切回释放的空间全部归对话区，左栏
+        宽度被永久污染——挤压自动展开要求窗口总宽增长 ≥_AUTO_EXPAND_GROWTH，
+        布局性释放空间不触发。此处以「切页前后左栏不变」为原则还原。
+
+        ★ 一致性守卫：prev 是切页瞬间的快照，若执行时（尤其动画 250ms 重试）
+          saved 已被中间发生的新拖拽/挤压恢复/卡片编排改写，说明切页快照
+          已过时，直接放弃（新意图优先，实测覆盖用户刚拖出的宽度）。
+        """
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None or prev_left_w <= 0:
+            return
+        # 解除切页期折叠抑制（_on_tab_selected 切页前置位，防瞬切挤压被
+        # 误判为用户拖窄；先解除，后续分支不得提前 return 跳过）
+        try:
+            panel.set_auto_collapse_suppressed(False)
+        except Exception:
+            pass
+        _snapshot = getattr(self, "_tab_switch_saved_snapshot", None)
+        if _snapshot is not None:
+            _kind, _val = _snapshot
+            if _kind == "win":
+                _win = self.get_current_window()
+                _cur = getattr(_win, "_tab_sidebar_frame_w", None) if _win is not None else None
+            else:
+                _cur = getattr(self, "_saved_panel_frame_width", None)
+            if _cur is not None and (_val is None or int(_cur) != int(_val)):
+                logger.debug(
+                    f"[TSW] restore 放弃 prev={prev_left_w} 基准已变 {_val}->{_cur} ({_kind})"
+                )
+                return  # 切页后有新的宽度编排（含 saved 从无到有）：快照过时，不覆盖
+        # ★ 卡片态守卫：left 卡片显隐是 per-tab 的，切页投影会让卡片态翻转
+        #   （如「A 开卡 → B 无卡 → 切回 A」）。目标页卡片活跃时宽度语义由
+        #   卡片编排独占（重开卡片时编排自己会把 frame 落位到卡片态宽），
+        #   restore 携的 prev 是旧页语义（含/不含卡片槽），覆盖即把卡片区
+        #   挤成残条（实测：无卡宽 201 覆盖卡片态 412）。卡片态未变（卡片
+        #   常驻，切页挤压仍需 restore 还原）或目标页无卡（宽度回归普通左栏
+        #   语义，per-tab 记忆照常恢复）时放行。
+        _snap_card = getattr(self, "_tab_switch_card_active_snapshot", None)
+        if _snap_card is not None:
+            _fn = getattr(self, "_left_card_area_active", None)
+            if callable(_fn):
+                try:
+                    _card_now = bool(_fn())
+                except Exception:
+                    _card_now = None
+                if _card_now is not None and _card_now != bool(_snap_card) and _card_now:
+                    logger.debug(
+                        f"[TSW] restore 放弃 prev={prev_left_w} 卡片态已变 {bool(_snap_card)}->{_card_now}"
+                    )
+                    return  # 目标页卡片活跃：宽度归卡片编排，不迁移旧页基准
+        if getattr(panel, "_animating", False):
+            # 切页时上一动作的宽度动画仍在跑：等动画结束再恢复（动画 200ms）
+            logger.debug(f"[TSW] restore 延迟(动画中) prev={prev_left_w}")
+            QTimer.singleShot(250, lambda: self._restore_tab_frame_after_tab_switch(prev_left_w, prev_collapsed))
+            return
+        # 卡片占位期：restore 仍执行——prev_left_w 是外层 frame 总宽（TabPanel+
+        # 卡片），恢复它按切前比例还原内层分配，不破坏卡片编排；折叠态切前被
+        # 编排锁定为折叠（prev_collapsed 一致），下方还原分支自然跳过。
+        # （原实现一刀切跳过：用户环境 left 卡片常驻 → 切页保宽永不生效。）
+        try:
+            sizes = self._splitter.sizes()
+        except Exception:
+            return
+        if not sizes:
+            return
+        if abs(sizes[0] - prev_left_w) <= 1 and bool(panel._collapsed) == prev_collapsed:
+            return  # 未被挤压：零操作
+        # 还原切前折叠态并清挤压标记（切页挤压痕迹一并抹掉，防后续
+        # _maybe_auto_expand_after_squeeze 误触发自动展开）
+        if bool(panel._collapsed) != prev_collapsed:
+            panel._collapsed = prev_collapsed
+            panel.sync_collapsed_ui()
+        panel._collapsed_by_squeeze = False
+        _before = sizes[0]
+        self._splitter.setSizes(self._splitter_sizes_with_left(prev_left_w))
+        _after = self._splitter.sizes()[0] if self._splitter.sizes() else -1
+        logger.debug(
+            f"[TSW] restore 执行 prev={prev_left_w} collapsed={prev_collapsed} {_before}->{_after}"
+        )
+        if not prev_collapsed:
+            # 展开态恢复值即意图宽：回写全局 saved + 目标窗口 per-tab 记忆
+            self._saved_panel_frame_width = prev_left_w
+            _cur_win = self.get_current_window()
+            if _cur_win is not None:
+                _cur_win._tab_sidebar_frame_w = int(prev_left_w)
+
+    def _write_tab_sidebar_memory(self, w: int) -> None:
+        """把拖拽落定的宽度写进当前活跃对话窗口的 per-tab 宽度记忆"""
+        win = self.get_current_window()
+        if win is not None:
+            win._tab_sidebar_frame_w = int(w)
+
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度（含工作台反向恢复）
 
@@ -2660,6 +3648,11 @@ class TabManagerWindow(FramelessWindow):
         if not hasattr(self, "_tab_panel"):
             return
         panel = self._tab_panel
+        # ★ 卡片占位期：面板宽度语义由卡片编排独占（见 _evaluate_squeeze_collapse
+        #   同款注释）。此时不得按"挤压恢复"逻辑自动展开面板——那会把用户拖出的
+        #   内部分配覆盖掉。
+        if getattr(panel, "_left_card_present", False):
+            return
         if not panel._collapsed:
             # 左栏已展开：只查工作台的挤压恢复（规则 2 反向，先左后右由调用序保证）
             self._maybe_restore_workbench_after_squeeze(growth_required=growth_required)
@@ -2759,6 +3752,11 @@ class TabManagerWindow(FramelessWindow):
         """按存档折叠态恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return
+        # ★ left 卡片区展开期间跳过：该状态下 TabPanel 收起、frame 加宽均为
+        #   卡片编排的主动结果，启动补射（80/200/400/700ms）若照常按存档态
+        #   落位会把卡片编排冲掉（表现为卡片打开后 TabPanel 又弹回展开态）。
+        if self._left_card_area_active():
+            return
         saved_collapsed = getattr(self, "_restored_sidebar_collapsed", False)
         frame_w = (
             (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X)
@@ -2781,6 +3779,16 @@ class TabManagerWindow(FramelessWindow):
 
     # ── 覆盖层状态切换 ──
 
+    def _consume_slide_direction(self, fallback: int) -> int:
+        """取走缓存方向（消费即清零）：0 时用 fallback（开卡 +1 / 回对话 -1）
+
+        fallback 对应 tab 栏静态布局的两个端点：对话 tab 恒在最左，
+        无精确方向时回对话左滑、开卡右滑永远合理。
+        """
+        d = self._pending_slide_direction
+        self._pending_slide_direction = 0
+        return d if d != 0 else fallback
+
     def _on_overlay_state_changed(self, has_visible: bool):
         """系统卡片覆盖层显隐切换：QStackedWidget 页面 0←→1
 
@@ -2796,9 +3804,20 @@ class TabManagerWindow(FramelessWindow):
         # 把手，覆盖层卡片无法被左右侧边栏挤压）。卡片自身下限已各自放开。
         self._content_stack.set_min_hint_disabled(has_visible)
         if has_visible:
-            self._content_stack.setCurrentIndex(1)
+            # [PERF] 承接覆盖层容器隐藏期主题刷新门控的补刷（见
+            # CardContainer.refresh_style）。覆盖层走 QStackedWidget 切页，
+            # 不触发 showEvent，故补刷挂在此处；★必须在 setCurrentIndex 之前
+            # 完成，否则会先显示旧主题背景再刷（闪一帧）。
+            _top_c = getattr(self, "_global_top_container", None)
+            if _top_c is not None and getattr(_top_c, "_theme_needs_refresh", False):
+                _top_c._theme_needs_refresh = False
+                try:
+                    _top_c._apply_background_style()
+                except RuntimeError:
+                    pass
+            self._content_stack.setCurrentIndex(1, direction=self._consume_slide_direction(fallback=1))
         else:
-            self._content_stack.setCurrentIndex(0)
+            self._content_stack.setCurrentIndex(0, direction=self._consume_slide_direction(fallback=-1))
             # 卡片关闭 → 布局恢复：延迟到下一事件循环（等 relayout 完成）再检测。
             # growth_required=False：overlay 挤压时窗口总宽未变，不适用相对增长
             # 条件（否则窗口没变宽永远不会自动展开），此处仅按绝对空间下限判断。
@@ -2850,6 +3869,12 @@ class TabManagerWindow(FramelessWindow):
                 open_dict[card_id] = title
                 self.titleBar.add_tab(card_id, title, closable=True)
             self._set_replace_active(card_id)
+            # 覆盖层内互斥切换（页已在前台且无在途切换动画）：整页按 tab 位置差
+            # 方向滑入（助手→左侧的轨迹 tab = 从左滑出），无事件时兜底右滑。
+            # 首次从对话进覆盖层由 push 动画负责（在途检测跳过），
+            # 事件先于切页到达时 currentIndex 仍为 0，同样自然跳过。
+            if self._content_stack.currentIndex() == 1 and not self._content_stack.slide_in_progress():
+                self._content_stack.slide_over(direction=self._consume_slide_direction(fallback=1))
         else:
             if getattr(self, "_suppress_replace_close", False):
                 # 点「聊天」主动隐藏 replace 卡片：保留 open（标题栏 tab 常驻聊天项），仅取消其关闭计时
@@ -2919,6 +3944,7 @@ class TabManagerWindow(FramelessWindow):
             # 只剩常驻插件的 full 卡（或全部关闭）：高亮/状态回聊天。
             # remove_tab 移除激活 tab 时已把高亮设为剩余第一个（聊天），此处
             # 同步 _replace_active 语义并幂等设高亮（防御 tab 注册顺序变化）。
+            self._cache_slide_direction(self._replace_active.get(cur_wid), CHAT_TAB_ID)
             self._replace_active[cur_wid] = CHAT_TAB_ID
             self.titleBar.set_active_tab(CHAT_TAB_ID)
             return
@@ -2965,8 +3991,30 @@ class TabManagerWindow(FramelessWindow):
         return False
 
     def _set_replace_active(self, card_id: str) -> None:
-        self._replace_active[self._current_window_id()] = card_id
+        cur_wid = self._current_window_id()
+        # 长条模型方向：按 old/new 在 titleBar 的位置差缓存，页切换/nudge 消费
+        self._cache_slide_direction(self._replace_active.get(cur_wid), card_id)
+        self._replace_active[cur_wid] = card_id
         self.titleBar.set_active_tab(card_id or CHAT_TAB_ID)
+
+    def _cache_slide_direction(self, old_tab_id, new_tab_id) -> None:
+        """按 old/new 在 titleBar 的位置差缓存滑动方向（+1 右滑 / -1 左滑 / 0 未知）
+
+        长条模型：页面按 tab 顺序平铺，切到右边 tab = 视口右移 = 新页从右进。
+        收口在宿主自身激活方法（_set_replace_active/_show_conversation_view），
+        不依赖 titleBar 信号链；old 已删（关卡补位）或相等时存 0，
+        消费端（_consume_slide_direction）用端点兜底。
+        """
+        self._pending_slide_direction = self._direction_between(old_tab_id, new_tab_id)
+
+    def _direction_between(self, old_tab_id, new_tab_id) -> int:
+        """两 tab 的滑动方向（不落缓存）：new 在 old 右侧 +1 / 左侧 -1 / 未知 0"""
+        if not old_tab_id or not new_tab_id or old_tab_id == new_tab_id:
+            return 0
+        tabs = list(getattr(self.titleBar, "_tabs", {}).keys())
+        if old_tab_id in tabs and new_tab_id in tabs:
+            return 1 if tabs.index(new_tab_id) > tabs.index(old_tab_id) else -1
+        return 0
 
     def _is_replace_visible(self, card_id: str) -> bool:
         """replace 卡片在当前窗口是否**真实**可见（权威判定）
@@ -3126,6 +4174,46 @@ class TabManagerWindow(FramelessWindow):
             cm = CardManager.get_instance()
             wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
             cur_wid = self._current_window_id()
+
+            # 卡间互斥切换（覆盖层前台 + 动效开启）：两段式滑动——旧卡画面
+            # 整体滑出画外 → swap 闭包在画外执行互斥切换（新卡构建阻塞被掩蔽）
+            # → 新卡画面从进场侧滑入。方向现场按 old/new 位置差算（此时
+            # _set_replace_active 尚未执行，缓存不可用）。
+            if (
+                self._content_stack.currentIndex() == 1
+                and not self._content_stack.slide_in_progress()
+                and Animations.motion_enabled()
+            ):
+                direction = self._direction_between(self._replace_active.get(cur_wid), card_id) or 1
+                self._pending_slide_direction = 0
+                # 胶囊高亮与胶囊滑动立即跟随点击：卡片内容在画外切换（300ms 后才
+                # 完成），但标题栏反馈必须即时，否则胶囊要等滑动结束才跳位，观感
+                # 是「点了没反应，然后突然跳」。配合 _do_swap 里的打断守卫，
+                # 期间若用户改点「对话」，此处的高亮会被随后的逻辑纠正。
+                self._replace_active[cur_wid] = card_id
+                self.titleBar.set_active_tab(card_id)
+
+                def _do_swap(_cm=cm, _wid=wid, _cur=cur_wid, _cid=card_id):
+                    # 打断守卫：段1 期间用户意图已变（如已点「对话」）则放弃切换，
+                    # 状态以最新操作为准，杜绝「高亮已切、卡片被 cb 又开回」
+                    if getattr(self.titleBar, "_active_id", None) != _cid:
+                        return
+                    for other in list(self._replace_open.get(_cur, {}).keys()):
+                        if other != _cid:
+                            try:
+                                _cm.hide_card(other, _wid)
+                            except Exception:
+                                pass
+                    try:
+                        _cm.show_card(_cid, _wid)
+                    except Exception:
+                        pass
+                    # 高亮已在点击时同步过（见上），这里只做幂等收敛
+                    self._set_replace_active(_cid)
+
+                self._content_stack.slide_swap(direction=direction, swap=_do_swap)
+                return
+
             for other in list(self._replace_open.get(cur_wid, {}).keys()):
                 if other != card_id:
                     try:
@@ -3155,6 +4243,8 @@ class TabManagerWindow(FramelessWindow):
         # 抑制 hide_card 触发的 visible=False 事件（对话视图下隐藏 replace 卡片是预期行为，open 保留）
         self._suppress_replace_close = True
         cur_wid = self._current_window_id()
+        # 长条模型方向：回对话（tab 栏最左端），按当前激活卡位置差缓存
+        self._cache_slide_direction(self._replace_active.get(cur_wid), CHAT_TAB_ID)
         try:
             for cid in list(self._replace_open.get(cur_wid, {}).keys()):
                 try:
@@ -3251,6 +4341,51 @@ class TabManagerWindow(FramelessWindow):
         """
         self._splitter_dragging = False
         panel = getattr(self, "_tab_panel", None)
+        # ── 卡片打开期拖主把手：增量全部转入卡片区（TabPanel 锁定收起宽）──
+        # 用户拖出的 frame 宽 pos 已在 _on_splitter_manually_moved 登记
+        # （_left_card_drag_extra = 超出 TabPanel 收起宽的余量）；此处把
+        # frame 收回到「TabPanel 收起宽 + 拖出余量」，新增余量即卡片槽位宽。
+        if panel is not None and self._left_card_area_active() and getattr(self, "_left_card_drag_dirty", False):
+            panel.set_dragging_splitter(False)
+            self._left_card_drag_dirty = False
+            sp = getattr(self, "_sidebar_splitter", None)
+            wrapper = getattr(self, "_global_left_wrapper", None)
+            if sp is not None and wrapper is not None:
+                tab_keep = max(
+                    self._tab_panel._collapsed_min_width,
+                    min(getattr(self, "_left_card_tab_w_keep", _COLLAPSED_PANEL_WIDTH), _TAB_PANEL_MAX_CONTENT_WIDTH),
+                )
+                # ★ 折叠态按 tab_keep 实际宽度决定，不硬写 True：用户可能已在
+                #   占位期拖内把手把 tab 拉宽（形态自治置 _collapsed=False），
+                #   此处硬写会把用户拖出的展开态压回图标条。
+                panel._collapsed = tab_keep < panel._auto_expand_width
+                panel._collapsed_by_squeeze = False
+                panel.sync_collapsed_ui()
+                # frame 目标宽：不小于「tab 保留宽 + 卡片下限」，且不挤压聊天区
+                frame_target = max(
+                    tab_keep + _FRAME_PADDING_X + 40,
+                    int(getattr(self, "_left_card_frame_target_w", 0)),
+                )
+                frame_target = self._left_card_frame_target(frame_target - tab_keep - _FRAME_PADDING_X) + (
+                    tab_keep - _COLLAPSED_PANEL_WIDTH
+                )
+                card_w = max(0, frame_target - tab_keep - _FRAME_PADDING_X)
+                self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(card_w), frame_target))
+                # ★ 显式锁死内部分配 [tab=保留宽, 卡片=card_w]：
+                #   外层 frame 宽变化会被 QSplitter 按内层窗格**比例**重排,
+                #   仅改外层会让 tab 被摊窄（实测 46→19），必须一次 setSizes 同步。
+                idx = sp.indexOf(wrapper)
+                tab_idx = sp.indexOf(panel)
+                sizes = sp.sizes()
+                if 0 <= idx < len(sizes) and 0 <= tab_idx < len(sizes):
+                    new_sizes = list(sizes)
+                    new_sizes[tab_idx] = tab_keep
+                    new_sizes[idx] = card_w
+                    sp.setSizes(new_sizes)
+                if abs(self._splitter.sizes()[0] - frame_target) > 1:
+                    self._splitter.setSizes(self._splitter_sizes_with_left(frame_target))
+            self._finish_splitter_idle()
+            return
         # ── 1+2. 拖拽落定：先解除抑制再判定，复用 _on_sidebar_toggled 的动画路径 ──
         if panel is not None and getattr(panel, "_dragging_splitter", False):
             panel.set_dragging_splitter(False)
@@ -3271,9 +4406,14 @@ class TabManagerWindow(FramelessWindow):
                     panel._collapsed = False
                     panel._update_toggle_button(switch_ui=True)
                     self._saved_panel_frame_width = cur_frame_w
+                    self._write_tab_sidebar_memory(cur_frame_w)
                     self._on_sidebar_toggled(False)
                 else:
-                    # 本来就展开：同步 UI（拖拽期可能已按阈值切过紧凑态）
+                    # 本来就展开：记录用户拖出的意图宽（切页保宽恢复基准）
+                    # + 同步 UI（拖拽期可能已按阈值切过紧凑态）
+                    self._saved_panel_frame_width = cur_frame_w
+                    self._write_tab_sidebar_memory(cur_frame_w)
+                    logger.debug(f"[TSW] 拖拽落定(已展开) left={cur_frame_w} saved->{cur_frame_w}")
                     panel.sync_collapsed_ui()
         # 规则 4：拖拽把手属用户明确意图，松手落最终折叠态（值不变不写盘）
         from app.utils.config import Settings
@@ -3286,6 +4426,10 @@ class TabManagerWindow(FramelessWindow):
         # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复
         # _content_area(setUpdatesEnabled True) 与 _set_cards_resize_preview_mode(False)。
         # _splitter_dragging 已先行复位，后续 splitterMoved 可重新冻结下一拖拽会话。
+        self._finish_splitter_idle()
+
+    def _finish_splitter_idle(self):
+        """splitter 拖拽会话收尾：动画运行则跳过，否则解冻绘制 + 复位节流"""
         if self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running:
             return
         if hasattr(self, "_content_area"):
@@ -3313,11 +4457,36 @@ class TabManagerWindow(FramelessWindow):
         启动动画，而 splitterMoved 是逐帧触发的 → 拖拽区跨阈值时反复启停
         200ms 动画，动画与拖拽同时写 setSizes 互相打断 = 抖动。
         """
-        if index != 0 or not hasattr(self, "_tab_panel"):
+        if not hasattr(self, "_tab_panel") or not hasattr(self, "_splitter"):
+            return
+        # ★ 门控按「把手位置」判定，不硬编码 index：splitterMoved 上报的 index
+        #   是**被移动把手右侧**窗格索引（实测 [tabFrame|chatFrame] 两窗格时
+        #   左把手 index=1）。旧实现写 index != 0 直接 return，导致本条路径
+        #   从未生效（拖拽会话不开启、侧栏抖动修复与本文件的卡片占位期改写全部
+        #   落空）。改为：仅当该把手左邻是 tab_frame（即左栏与聊天区之间那条）
+        #   才接管。
+        if 0 <= index - 1 < self._splitter.count() and self._splitter.widget(index - 1) is not self._tab_frame:
             return
         panel = self._tab_panel
         # 手动拖拽：清除挤压折叠标记（无论方向，尊重手动意图）
         panel._collapsed_by_squeeze = False
+        # ★ 卡片打开期的拖拽改写（产品语义：拖主把手增量只加卡片宽度，
+        #   TabPanel 保持它当时的宽度不动）。此处只登记本次拖拽的起点与目标：
+        #   - _left_card_tab_w_keep：拖拽起点 TabPanel 宽（用户此前拖内把手
+        #     拉开的宽度要保留，不能硬编码收起宽——那会把用户拉开的 tab 收回）；
+        #   - _left_card_frame_target_w：用户拖出的 frame 目标宽（= 把手位置）。
+        #   真正的落定（改 outer/inner 分配）统一在 _on_splitter_idle 执行。
+        if self._left_card_area_active():
+            if not getattr(self, "_left_card_drag_dirty", False):
+                sp = getattr(self, "_sidebar_splitter", None)
+                if sp is not None:
+                    sizes = sp.sizes()
+                    tab_idx = sp.indexOf(panel)
+                    self._left_card_tab_w_keep = sizes[tab_idx] if 0 <= tab_idx < len(sizes) else _COLLAPSED_PANEL_WIDTH
+                else:
+                    self._left_card_tab_w_keep = _COLLAPSED_PANEL_WIDTH
+            self._left_card_drag_dirty = True
+            self._left_card_frame_target_w = max(_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X, int(pos))
         # ★ 开启拖拽会话：拖拽期 resizeEvent 只跟随 UI 形态，不 emit 折叠信号
         panel.set_dragging_splitter(True)
         # ── P0 性能优化 OPT-2：拖拽首帧冻结 _content_area 重绘，防抖 timer 松手恢复 ──
@@ -3379,9 +4548,16 @@ class TabManagerWindow(FramelessWindow):
             # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
             tab_project_initials = ""
             tab_project_color = ""
-            if project:
+            tab_project_text_color = ""
+            # 临时对话页：初始标题加「临时」前缀；图标用固定隐身紫「临」（不用项目色，字色固定白）
+            if getattr(window, "_is_temp_scope", False):
+                title = f"临时 · {title}"
+                tab_project_initials = "临"
+                tab_project_color = "#8B5CF6"
+                tab_project_text_color = "#FFFFFF"
+            elif project:
                 try:
-                    from app.widgets.cards.settings.project_selector_card import (
+                    from app.utils.project_meta import (
                         extract_project_initials,
                         get_project_color,
                     )
@@ -3392,7 +4568,11 @@ class TabManagerWindow(FramelessWindow):
                     pass
 
             tab_idx = panel.add_tab(
-                title, icon=None, project_initials=tab_project_initials, project_color=tab_project_color
+                title,
+                icon=None,
+                project_initials=tab_project_initials,
+                project_color=tab_project_color,
+                project_text_color=tab_project_text_color,
             )
 
             # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
@@ -3434,7 +4614,7 @@ class TabManagerWindow(FramelessWindow):
             window._tab_title_changed_slot = _on_win_title_changed
             window.windowTitleChanged.connect(_on_win_title_changed)
 
-            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示 + 全局桌宠）
+            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
             def _on_ai_state_changed(state, _win=window):
                 if not _sip.isValid(_win):
                     return
@@ -3453,10 +4633,6 @@ class TabManagerWindow(FramelessWindow):
                 else:  # idle
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
-                # 聚合 AI 状态 → 全局桌宠：仅当前激活窗的状态被转发，
-                # 避免多 tab 下旧窗状态串扰（pet 只连一次 active_ai_state_changed）。
-                if _win is self.get_current_window():
-                    self.active_ai_state_changed.emit(state)
 
             window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)
@@ -3592,7 +4768,7 @@ class TabManagerWindow(FramelessWindow):
                 project = fallback
             if not project:
                 return ("", "")
-            from app.widgets.cards.settings.project_selector_card import (
+            from app.utils.project_meta import (
                 extract_project_initials,
                 get_project_color,
             )
@@ -3751,6 +4927,54 @@ class TabManagerWindow(FramelessWindow):
 
     def _on_tab_selected(self, index: int):
         if 0 <= index < len(self._windows):
+            # ★ 切页保宽：工作台显隐是 per-tab 记忆，切页瞬切会重分配 splitter
+            #   空间，窗口放不下时左栏被压窄且 TabPanel 同步折叠；切回后释放的
+            #   空间全归对话区，左栏宽度被永久污染（挤压自动展开要求窗口总宽
+            #   增长 ≥_AUTO_EXPAND_GROWTH，布局性释放不触发）。记录切前左栏
+            #   宽度/折叠态并抑制切页期折叠，切页完成后按「切页前后不变」恢复。
+            _prev_left_w = 0
+            _prev_collapsed = False
+            try:
+                _sizes = self._splitter.sizes()
+                _prev_left_w = _sizes[0] if _sizes else 0
+                _prev_collapsed = bool(self._tab_panel._collapsed)
+                # ★ 挤压折叠非用户意图：切页时若左栏是被挤压收起的
+                #   （_collapsed_by_squeeze），切前真实意图是展开态（意图宽即
+                #   saved），切回后应恢复展开，而非停留在挤压折叠的图标条。
+                if _prev_collapsed and getattr(self._tab_panel, "_collapsed_by_squeeze", False):
+                    _prev_collapsed = False
+                # ★ per-tab 宽度：目标窗口有独立宽度记忆时优先（每页记住自己
+                #   拖出的宽度，互不串扰）；无记忆回落到全局意图宽逻辑。
+                _win_mem = None
+                try:
+                    _win_mem = getattr(self._windows[index], "_tab_sidebar_frame_w", None)
+                except Exception:
+                    pass
+                if _win_mem and int(_win_mem) > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X:
+                    _prev_left_w = int(_win_mem)
+                    _prev_collapsed = False
+                    self._tab_switch_saved_snapshot = ("win", int(_win_mem))
+                else:
+                    # ★ 展开态以用户意图宽为恢复基准：即时宽度可能已被其他标签页
+                    #   的工作台挤压污染（切回后空间释放，意图宽仍有效且可达）。
+                    #   saved 缺省（从未拖拽）时退化为即时宽，行为不变。
+                    _prev_left_w = self._tab_switch_baseline_width(_prev_left_w, _prev_collapsed)
+                    # 快照切页时刻的意图宽：restore 执行时（含 250ms 动画重试）若
+                    # 基准已变（中间发生了新拖拽/挤压恢复/卡片编排），放弃恢复
+                    self._tab_switch_saved_snapshot = (
+                        "saved",
+                        getattr(self, "_saved_panel_frame_width", None),
+                    )
+                logger.debug(
+                    f"[TSW] 切页 idx={index} raw={_sizes[0] if _sizes else 0} collapsed={_prev_collapsed} "
+                    f"baseline={_prev_left_w} saved={self._tab_switch_saved_snapshot}"
+                )
+                self._tab_panel.set_auto_collapse_suppressed(True)
+                # ★ 卡片态快照：记录切页瞬间（目标页投影前）left 卡片区显隐。
+                #   restore 执行时与此刻不一致 → 宽度基准不可迁移（见守卫）。
+                self._tab_switch_card_active_snapshot = bool(self._left_card_area_active())
+            except Exception:
+                pass
             win = self._windows[index]
             self._content_area.setCurrentWidget(win)
             self.activeTabChanged.emit(index)
@@ -3801,14 +5025,6 @@ class TabManagerWindow(FramelessWindow):
                     win._apply_runtime_ui_settings(scope=scope, _skip_global=True)
                 except Exception:
                     pass
-            # 切换 tab 时同步全局桌宠：① 平滑重定位到激活窗 send_btn；
-            # ② 改发当前窗 AI 状态（旧窗状态不串扰，全局 pet 跟随激活窗）。
-            if getattr(self, "pixel_pet", None) is not None:
-                self.pixel_pet.reposition_to_active_window()
-                try:
-                    self.pixel_pet._on_ai_state_changed(getattr(win, "_ai_state", "idle"))
-                except Exception:
-                    pass
             # 切 tab 时工作台跟随激活窗：显隐/页签均按窗口独立记忆
             if getattr(self, "workbench_panel", None) is not None:
                 # 🆕 先读目标窗口记忆再做任何刷新/恢复（先读后写，防程序化切页
@@ -3830,6 +5046,13 @@ class TabManagerWindow(FramelessWindow):
                         0,
                         lambda w=win, sv=saved_tab, s=seq: self._deferred_workbench_refresh(w, sv, s),
                     )
+            # 切页完成：下一事件循环恢复切前左栏宽度并解除折叠抑制（等
+            # QSplitter 重分配与工作台瞬切落位稳定后统一还原）
+            if _prev_left_w > 0:
+                QTimer.singleShot(
+                    0,
+                    lambda w=_prev_left_w, c=_prev_collapsed: self._restore_tab_frame_after_tab_switch(w, c),
+                )
 
     def _on_tab_close_requested(self, index: int):
         """标签关闭按钮回调：按索引关闭单个窗口"""
@@ -4122,6 +5345,7 @@ class TabManagerWindow(FramelessWindow):
         branch: bool = False,
         branch_messages: "list | None" = None,
         branch_name: "str | None" = None,
+        temp_scope: bool = False,
     ) -> "OpenAIChatToolWindow | None":
         """统一创建新标签页并加载内容。
 
@@ -4138,6 +5362,8 @@ class TabManagerWindow(FramelessWindow):
             branch_messages: 分支内容（消息卡片级分支用）。传入时以此为分支消息，
                 不传则复制整个当前会话（tab 级分支的原行为）。
             branch_name: 分支会话标题；不传时由当前会话名 + " [分支]" 生成。
+            temp_scope: 临时对话页（页内会话不落盘、不进历史，
+                使用独立临时工作目录，关闭时删除）。
         Returns:
             新窗口实例；失败返回 None（调用方应降级为原行为）
         """
@@ -4149,6 +5375,16 @@ class TabManagerWindow(FramelessWindow):
             new = self._build_new_window(source_window, project=project)
             if new is None:
                 return None
+            # 临时对话页标记：必须在 showEvent 前设置（_sync_working_directory
+            # 首次同步时读此标记决定 workdir 指向）
+            new._is_temp_scope = temp_scope
+            # 临时对话页：窗口内部「项目 avatar + 分支 chip」容器整体隐藏
+            # （构造期已创建；首次 show 前置为不可见，后续
+            # _refresh_project_branch_style 会保持隐藏）
+            if temp_scope:
+                container = getattr(new, "_project_branch_container", None)
+                if container is not None:
+                    container.setVisible(False)
 
             if branch:
                 cur = getattr(source_window, "session_manager", None)
@@ -4191,6 +5427,9 @@ class TabManagerWindow(FramelessWindow):
         """分支窗口 — 从指定标签页创建分支"""
         if 0 <= index < len(self._windows):
             window = self._windows[index]
+            # 临时对话页做分支无意义（不落盘）：入口已隐藏，此处兑底忽略
+            if getattr(window, "_is_temp_scope", False):
+                return
             if window is not None:
                 self.spawn_tab(window, branch=True)
 
@@ -4277,6 +5516,22 @@ class TabManagerWindow(FramelessWindow):
             except Exception as e:
                 logger.warning(f"[TabManagerWindow] 切换到工作树失败: {e}")
 
+    def _on_new_project_requested(self):
+        """工作区树「工作区」标题行 + ：新建项目（选文件夹流程）
+
+        复用当前窗口的 _on_project_open_folder_btn（文件夹选择器 → 弹建项目
+        对话框 → 绑定根目录），与既有拖拽建项目同一流程、同一数据路径。
+        """
+        source = self.get_current_window()
+        if source is None:
+            return
+        opener = getattr(source, "_on_project_open_folder_btn", None)
+        if callable(opener):
+            try:
+                opener()
+            except Exception as e:
+                logger.warning(f"[TabManagerWindow] 新建项目失败: {e}")
+
     def _on_open_session_record(self, record):
         """工作区树：打开一条历史会话（新开标签页，不动当前页）
 
@@ -4330,8 +5585,12 @@ class TabManagerWindow(FramelessWindow):
         if panel is not None and getattr(panel, "current_mode", lambda: "list")() == "tree":
             self.refresh_workspace_tree()
 
-    def _on_new_tab_requested(self):
-        """新建窗口 — 走当前窗口的复制逻辑，复用后端状态"""
+    def _on_new_tab_requested(self, temp_scope: bool = False):
+        """新建窗口 — 走当前窗口的复制逻辑，复用后端状态
+
+        Args:
+            temp_scope: True 时新建临时对话页（页内会话不落盘、不进历史）。
+        """
         # 批5 5b：壳期（首窗构造中）点击 + → 排队，ready 后由
         # _mark_first_window_ready 补执行恰一次
         if not getattr(self, "_first_window_ready", True):
@@ -4340,13 +5599,14 @@ class TabManagerWindow(FramelessWindow):
         current = self.get_current_window()
         if current is not None:
             # 从当前窗口复制（保留后端上下文）并新开标签页
-            self.spawn_tab(current, new_session=True)
+            self.spawn_tab(current, new_session=True, temp_scope=temp_scope)
         else:
             # 没有当前窗口时，走基础创建逻辑
             from app.main_widget import OpenAIChatToolWindow
 
             fake_page = self._create_fake_page()
             new_window = OpenAIChatToolWindow(fake_page)
+            new_window._is_temp_scope = temp_scope
             self.add_window(new_window)
             if not self.isVisible():
                 self.show()
@@ -4618,6 +5878,8 @@ class TabManagerWindow(FramelessWindow):
         # macOS：close→show 循环后修复标题栏错位（见 _refresh_mac_fullsize_content）
         if _IS_MAC:
             self._refresh_mac_fullsize_content()
+        # [T30] 窗口重新显示可见性恢复点：补刷隐藏期置脏的顶层容器
+        self._refresh_theme_dirty_frames()
 
     def _refresh_mac_fullsize_content(self) -> None:
         """macOS：强制重算 NSWindow 的 fullSizeContentView 布局
@@ -5037,9 +6299,9 @@ class TabManagerWindow(FramelessWindow):
     def eventFilter(self, obj, event):
         """对话区 wrapper Resize → 动态调整左右 margins 实现限宽居中
 
-        窗口超宽时：wrapper 宽度 > _MAX_CHAT_WIDTH，左右各留
-        (wrapper_w - _MAX_CHAT_WIDTH)/2 的空白，chat_frame 精确居中；
-        窗口不足该宽度时 margins 归零，chat_frame 占满 wrapper。
+        窗口超宽时：wrapper 宽度 > 当前限宽档位，左右各留
+        (wrapper_w - 档位宽)/2 的空白，chat_frame 精确居中；
+        窗口不足该宽度（或档位为 full）时 margins 归零，chat_frame 占满 wrapper。
         """
         # ── 右侧工作台浮层 hover 转发 ──
         # 浮层自身 WA_Hover 触发 HoverEnter/Leave，但不开信号；
@@ -5102,9 +6364,9 @@ class TabManagerWindow(FramelessWindow):
     def _sync_chat_wrapper_width(self):
         """按当前 wrapper 宽度设置左右 margins，实现限宽居中
 
-        - 对话区（index 0）：按 _MAX_CHAT_WIDTH 限宽居中
+        - 对话区（index 0）：按当前宽度档位限宽居中；full 档不限宽，margins 归零
         - 覆盖层（index 1）：配置类卡片（系统设置/服务商/Hook/MCP）按
-          _MAX_OVERLAY_WIDTH 限宽居中；内容型卡片（diff_viewer、
+          覆盖层宽度限宽居中；内容型卡片（diff_viewer、
           子智能体会话、full 浮动卡）铺满全宽
         """
         wrapper = self._chat_wrapper
@@ -5112,9 +6374,11 @@ class TabManagerWindow(FramelessWindow):
         if w <= 0:
             return
         if self._content_stack.currentIndex() == 1:
-            pad = max(0, (w - _MAX_OVERLAY_WIDTH) // 2) if self._overlay_should_limit_width() else 0
+            overlay_w = _current_overlay_width()
+            pad = max(0, (w - overlay_w) // 2) if overlay_w and self._overlay_should_limit_width() else 0
         else:
-            pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
+            chat_w = _current_chat_width()
+            pad = max(0, (w - chat_w) // 2) if chat_w else 0
         layout = self._chat_wrapper_layout
         if layout.contentsMargins().left() != pad:
             layout.setContentsMargins(pad, 0, pad, 0)
@@ -5220,9 +6484,6 @@ class TabManagerWindow(FramelessWindow):
             self._tab_panel.update()
         if hasattr(self, "_content_area"):
             self._content_area.update()
-        # 全局桌宠跟随窗体缩放：resize 结束后精确重定位到激活窗 send_btn
-        if getattr(self, "pixel_pet", None) is not None:
-            self.pixel_pet.reposition_to_active_window()
 
         # ── 几何已收拢：解除抑制 + 按最终宽度判定"是否真被挤压" ──
         # 整个 resize 周期（含 _force_relayout 瞬变）内 TabPanel 不自动折叠，
@@ -5341,12 +6602,6 @@ class TabManagerWindow(FramelessWindow):
             PluginHostService.get_instance().stop()
         except Exception:
             pass
-        # ★ 清理全局桌宠（停止所有定时器），先于窗口关闭避免悬空引用
-        if getattr(self, "pixel_pet", None) is not None:
-            try:
-                self.pixel_pet.cleanup()
-            except Exception:
-                pass
         for w in list(self._windows):
             try:
                 w.close()

@@ -26,6 +26,24 @@ def test_delete_targets_splits_existing_and_missing(tmp_path):
     assert result["missing"] == [str(ghost)]
 
 
+def test_delete_targets_relative_resolves_against_workdir(tmp_path, monkeypatch):
+    """相对路径目标按 workdir 解析（missing 返回解析后的绝对路径）
+
+    修前：相对目标按进程 cwd 解析 → existing 永远空（快照/审批展示双失效）。
+    """
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    workdir = tmp_path / "proj"
+    sub = workdir / "subdir"
+    sub.mkdir(parents=True)
+
+    result = delete_targets("rm -rf subdir ghost.txt", workdir=workdir)
+    assert result["existing"] == [sub]
+    assert result["missing"] == [str(workdir / "ghost.txt")]
+
+
 def test_delete_targets_non_delete_command_empty(tmp_path):
     assert delete_targets("git status") == {"existing": [], "missing": []}
 

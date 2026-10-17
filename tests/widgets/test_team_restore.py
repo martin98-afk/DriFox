@@ -1853,7 +1853,6 @@ class TestTeamMergedCard:
         ]
         win.history_manager.archive_sessions_by_run_id.return_value = 2
         win._current_session_id = "s3"  # 非团队成员 → 不切换新会话
-        win.pixel_pet = MagicMock()
         win._card_manager = MagicMock()
 
         with patch("app.main_widget.InfoBar") as _mock_infobar:

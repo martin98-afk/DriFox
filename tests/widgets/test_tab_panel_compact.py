@@ -788,3 +788,23 @@ def test_d5_expanded_toggle_collapse_then_expand_keeps_choice(panel):
     assert _shown(panel._custom_plugin_scroll) is False, "折叠态尊重折叠前状态"
     panel.set_collapsed(False)
     assert _shown(panel._custom_plugin_scroll) is False, "展开后保持折叠（saved_state 恢复）"
+
+
+def test_compact_icon_horizontally_centered(panel, qtbot):
+    """折叠态：TabItem 图标水平居中（回归：_body stretch=1 未隐藏把 icon 推左 5px，
+
+    与顶栏「新建对话」行图标列错位；修复后 icon 中心应与 TabItem 中心重合）
+    """
+    panel.add_tab("会话A", project_initials="DF", project_color="#2E7D32")
+    panel.setFixedSize(46, 300)  # _COLLAPSED_PANEL_WIDTH=46 折叠窄条
+    panel.set_collapsed(True)
+    panel.show()
+    QTest.qWaitForWindowExposed(panel)
+    item = panel._items[0]
+    icon_c = item._icon_widget.mapTo(panel, item._icon_widget.rect().center()).x()
+    item_c = item.mapTo(panel, item.rect().center()).x()
+    # ±2px 容差：奇数尺寸 icon 在缩放 DPI 下的 Qt 半像素取整噪声
+    assert abs(icon_c - item_c) <= 2, f"icon 中心 x={icon_c} 偏离 TabItem 中心 x={item_c}"
+    # 往返对称：展开后 _body 恢复可见
+    panel.set_collapsed(False)
+    assert _shown(item._body) is True

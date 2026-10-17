@@ -66,6 +66,17 @@ def parse_team_members_snapshot(snap_raw: str) -> List[Dict]:
     return out
 
 
+# 「API 权威上下文占用」相关字段。保存链必须原样透传，否则历史会话加载后
+# 只剩本地估算（与真实差几倍）。None 语义 = 调用方未提供 → 保留会话现有值。
+_API_USAGE_FIELDS = (
+    "last_api_prompt_tokens",
+    "last_api_message_count",
+    "last_api_prompt_from_usage",
+    "token_calibration",
+    "token_calibration_model",
+)
+
+
 def _clean_orphan_tool_calls(messages: List[Dict]) -> List[Dict]:
     """清理消息列表中的孤立 tool_calls（没有对应 tool 结果的 tool_call）
 
@@ -298,6 +309,12 @@ class _ArchiveScanTask(QRunnable):
                     self._cache[fp_str] = (mtime, info)
                 enriched.append(self._enrich_from_info(fp_str, fp_path, mtime, info))
 
+            # 阶段 3：反向对账——归档文件已删除的缓存条目清除（原实现只 add
+            # 不 remove，文件删除后条目永驻：路径→(mtime, info) 慢速累积）。
+            with self._cache_lock:
+                for stale_key in set(self._cache.keys()) - set(mtimes.keys()):
+                    self._cache.pop(stale_key, None)
+
             # 按修改时间倒序
             enriched.sort(key=lambda x: x.get("mtime", 0.0), reverse=True)
             self._signals.finished.emit(self._request_id, enriched)
@@ -405,6 +422,12 @@ class HistoryManager:
         # key: project (None=全部) 或 ("merge_team", project)（合并模式独立键），
         # value: [list_of_lightweight_dicts]。
         # 当 _history_sessions 发生变化时置 _cache_dirty = True。
+        #
+        # 🛡️ _cache_dirty 是**全局**脏标志，但缓存按 key 分桶保存。只清一个桶
+        # 却把全局标志复位，会让其余桶在下次读取时命中陈旧快照（"历史卡片看
+        # 不到刚结束的会话"根因，2026-10-15）。故置脏时整表作废（见
+        # _mark_cache_dirty），构建单桶时只复位该桶自己的脏位（见
+        # _cached_key_dirty）。
         self._cache_dirty: bool = True
         self._cached_lightweight: Dict[object, List[Dict]] = {}
 
@@ -430,8 +453,15 @@ class HistoryManager:
         self._prewarm_history()
 
     def _mark_cache_dirty(self):
-        """标记轻量列表缓存为脏，下次 get_history_list 时重新构建"""
+        """标记轻量列表缓存为脏，下次 get_history_list 时重新构建
+
+        🛡️ 整表作废（而非只置全局标志）：缓存按 cache_key 分桶，多个读取者
+        （历史页 merge_team=True、欢迎卡片/工作区树 merge_team 缺省）交错读取。
+        只置全局标志的话，先被读到的那个桶重建后把标志复位，其余桶仍停留在
+        旧快照上，读到的桶会一直返回陈旧列表。清空整表 = 所有桶下次必重建。
+        """
         self._cache_dirty = True
+        self._cached_lightweight.clear()
 
     def _deduplicate_history_sessions(self):
         """去重历史会话列表，保持最新的一个
@@ -500,8 +530,11 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
-        last_api_prompt_tokens: int = 0,
-        last_api_message_count: int = 0,
+        last_api_prompt_tokens: Optional[int] = None,
+        last_api_message_count: Optional[int] = None,
+        last_api_prompt_from_usage: Optional[bool] = None,
+        token_calibration: Optional[float] = None,
+        token_calibration_model: Optional[str] = None,
         team_run_id: str = None,
         team_name: str = None,
         agent_name: str = None,
@@ -511,6 +544,11 @@ class HistoryManager:
         """保存会话
 
         Args:
+            last_api_prompt_tokens / last_api_message_count /
+            last_api_prompt_from_usage / token_calibration / token_calibration_model:
+                API 权威上下文占用与自适应校准因子。None（默认）= 保留会话现有值
+                ——保存链若不带这些字段绝不能清零，否则历史会话加载后只能退回
+                本地估算（与真实值差几倍）。
             team_run_id: 团队运行标识（方案 A 团队会话恢复；非团队会话留空）
                 None 表示保留现值（与 update_session 语义对齐）——当会话已
                 存在（内存/SQLite）时不覆盖其团队元数据，防止普通编辑把
@@ -558,6 +596,20 @@ class HistoryManager:
                 existing_for_pin = self.get_session_by_session_id(session_id)
             pinned = bool(existing_for_pin.get("pinned", False)) if existing_for_pin else False
 
+        # API 用量字段「None→保留现值」：高频保存路径不带这些字段时，沿用会话
+        # 现有值（旧实现默认 0，每次保存都把 API 权威值抹掉）。
+        _usage_provided = {
+            "last_api_prompt_tokens": last_api_prompt_tokens,
+            "last_api_message_count": last_api_message_count,
+            "last_api_prompt_from_usage": last_api_prompt_from_usage,
+            "token_calibration": token_calibration,
+            "token_calibration_model": token_calibration_model,
+        }
+        _existing_for_usage = None
+        if any(v is None for v in _usage_provided.values()) and session_id:
+            _existing_for_usage = self.get_session_by_session_id(session_id)
+        _usage = self._resolve_api_usage_fields(_usage_provided, _existing_for_usage)
+
         merged_messages = merge_session_messages(messages)
         session_record = self._build_session_record(
             merged_messages,
@@ -568,8 +620,7 @@ class HistoryManager:
             system_prompt=system_prompt,
             project=project,
             worktree_path=worktree_path,
-            last_api_prompt_tokens=last_api_prompt_tokens,
-            last_api_message_count=last_api_message_count,
+            **_usage,
             team_run_id=team_run_id,
             team_name=team_name,
             agent_name=agent_name,
@@ -603,6 +654,32 @@ class HistoryManager:
         if self._use_sqlite and self._session_store:
             self._schedule_save(session_record.get("session_id"))
 
+    def _resolve_api_usage_fields(self, provided: Dict, existing: Optional[Dict]) -> Dict:
+        """合并 API 用量字段：调用方未提供的（None）沿用会话现有值。
+
+        与 team_* 同范式：保存路径（尤其高频 update_session）不带这些字段时
+        必须保留现值，否则每保存一次就把 API 权威值清零（旧实现正是如此，
+        导致历史会话永远走本地重算）。
+        """
+        resolved = {}
+        for key in _API_USAGE_FIELDS:
+            value = provided.get(key, None)
+            if value is None and existing:
+                value = existing.get(key, None)
+            if key == "last_api_prompt_tokens" or key == "last_api_message_count":
+                resolved[key] = int(value or 0)
+            elif key == "token_calibration":
+                try:
+                    resolved[key] = float(value or 0)
+                except (TypeError, ValueError):
+                    resolved[key] = 0.0
+            elif key == "token_calibration_model":
+                resolved[key] = str(value or "")
+            else:
+                # last_api_prompt_from_usage：三态（True/False/None）
+                resolved[key] = None if value is None else bool(value)
+        return resolved
+
     def _build_session_record(
         self,
         merged_messages: List[Dict],
@@ -613,8 +690,11 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
-        last_api_prompt_tokens: int = 0,
-        last_api_message_count: int = 0,
+        last_api_prompt_tokens: Optional[int] = None,
+        last_api_message_count: Optional[int] = None,
+        last_api_prompt_from_usage: Optional[bool] = None,
+        token_calibration: Optional[float] = None,
+        token_calibration_model: Optional[str] = None,
         team_run_id: str = "",
         team_name: str = "",
         agent_name: str = "",
@@ -661,8 +741,12 @@ class HistoryManager:
             "user_edited_title": False,
             "worktree_path": worktree_path or "",
             "context_usage": _ctx_tokens,
-            "last_api_prompt_tokens": last_api_prompt_tokens,
-            "last_api_message_count": last_api_message_count,
+            "last_api_prompt_tokens": last_api_prompt_tokens if last_api_prompt_tokens is not None else 0,
+            "last_api_message_count": last_api_message_count if last_api_message_count is not None else 0,
+            # None → 保持 None（未知），不能落成 False
+            "last_api_prompt_from_usage": last_api_prompt_from_usage,
+            "token_calibration": token_calibration if token_calibration is not None else 0.0,
+            "token_calibration_model": token_calibration_model or "",
             # 团队元数据（方案 A 团队会话恢复基础；非团队会话保持空串）
             "team_run_id": team_run_id or "",
             "team_name": team_name or "",
@@ -868,9 +952,17 @@ class HistoryManager:
 
         # 🚀 轻量列表缓存：避免每次调用都排序+过滤+重建 dict
         # merge_team 使用独立缓存键，避免与默认列表互相污染
+        #
+        # 🛡️ 脏判定必须落到「整表作废」而非「跳过本次命中」：全局脏时清空所有
+        # 分桶再重建当前桶，保证任一读取者（历史页 / 欢迎卡片 / 工作区树）之后
+        # 读到的都是新数据。旧实现只跳过命中、由先读到的桶复位全局标志，其余
+        # 分桶长期停留在旧快照（历史卡片看不到刚结束的会话，2026-10-15 根因）。
+        # 同时兼容「外部直接置 _cache_dirty = True」的调用方。
         if not with_messages:
             cache_key = ("merge_team", project) if merge_team else project  # None 表示全部项目
-            if not self._cache_dirty and cache_key in self._cached_lightweight:
+            if self._cache_dirty:
+                self._cached_lightweight.clear()
+            elif cache_key in self._cached_lightweight:
                 return list(self._cached_lightweight[cache_key])
 
         sessions = self._history_sessions
@@ -887,7 +979,10 @@ class HistoryManager:
             else:
                 result = [self._to_lightweight_entry(s) for s in sessions]
 
-            # 缓存构建结果，下次直接返回
+            # 缓存构建结果，下次直接返回。
+            # ⚠️ 单桶重建后不复位全局 _cache_dirty：其余分桶尚未重建，复位会让
+            # 它们命中旧快照。全局标志只在整表作废（_mark_cache_dirty）时置位，
+            # 在这里由「已清空整表 + 本桶已写入」的读取路径自然消化。
             self._cached_lightweight[cache_key] = list(result)
             self._cache_dirty = False
             return result
@@ -1220,11 +1315,59 @@ class HistoryManager:
                 if release_messages_only:
                     if s.get("messages"):
                         s["messages"] = []
+                        # 🛡️ 释放态标记：_do_save / flush_async 的空消息守卫据此
+                        # 区分「内存已释放、无数据可写」与「显式清空、就是要写空」。
+                        # 由 _build_session_record 重建记录时自然清除。
+                        s["_messages_released"] = True
                 else:
                     self._history_sessions.pop(i)
                     self._mark_cache_dirty()
                 return True
         return False
+
+    def release_messages_except(self, active_session_ids: set, extra_skip: "set | None" = None) -> int:
+        """释放非活跃会话在内存中的消息体（保留元数据，SQLite 懒加载回填）。
+
+        [MEM] messages 所有权收敛（批 IV）：唯一权威释放入口。
+
+        - 调用方只需提供「活跃 session_id 集合」（通常 = SessionManager 当前持有）
+        - _history_sessions 里其余全部置空 + 打 _messages_released 标记
+        - 关窗 / 多窗口 / 跨进程场景自动覆盖，无 UI 层重复实现
+
+        守卫语义（与 remove_session(release_messages_only=True) 一致）：
+        messages 置空 + _messages_released=True；_do_save / flush_async 的
+        空消息守卫据此区分「释放态」与「显式清空」。
+        ⚠️ 本标记打在 session record dict 上，与 ChatSession._messages_released
+        实例属性完全无关（历史命名撞车，不可混用）。
+
+        Args:
+            active_session_ids: 需保留消息体的 session_id 集合
+            extra_skip: 额外跳过的 session_id 集合（如 closeEvent 正在后台
+                flush 的 pending 会话——归档导入的 pending 不属任何窗口，
+                必须由此参数传入）
+        Returns:
+            本次释放的会话数
+        """
+        self._ensure_history_loaded()
+        _skip = active_session_ids | (extra_skip or set())
+        pending_id = getattr(self, "_pending_save_session_id", None)
+        released = 0
+        for session in self._history_sessions:
+            sid = session.get("session_id")
+            if not sid or sid in _skip:
+                continue
+            if not session.get("messages"):
+                continue
+            # 🛡️ 竞态守卫：延迟保存窗口内置空 pending 会话会让 _do_save 用
+            # serialize([]) 覆盖 SQLite 完整消息。pending 会话跳过释放。
+            if pending_id and sid == pending_id:
+                continue
+            session["messages"] = []
+            session["_messages_released"] = True
+            released += 1
+        if released:
+            logger.debug(f"[Memory] release_messages_except 释放 {released} 个非活跃会话消息")
+        return released
 
     def archive_sessions_by_run_id(self, run_id: str) -> int:
         """按团队 run_id 归档该 run 下全部成员会话。
@@ -1723,6 +1866,11 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
+        last_api_prompt_tokens: Optional[int] = None,
+        last_api_message_count: Optional[int] = None,
+        last_api_prompt_from_usage: Optional[bool] = None,
+        token_calibration: Optional[float] = None,
+        token_calibration_model: Optional[str] = None,
         team_run_id: str = None,
         team_name: str = None,
         agent_name: str = None,
@@ -1733,12 +1881,26 @@ class HistoryManager:
         team_run_id/team_name/agent_name/team_members 为 None 时保留现有值
         （最小侵入，不传则不触碰团队元数据），传入非 None 才更新——避免
         update 链路把团队会话的元数据覆盖成空。
+
+        last_api_* / token_calibration* 同为「None → 保留现值」语义：update 是
+        每轮消息都跑的高频路径，不带这些字段时必须沿用，否则 API 返回的精确
+        上下文占用会在第一轮保存后即被清零。
         """
         if 0 <= index < len(self._history_sessions):
             merged_messages = merge_session_messages(messages)
             # 🛡️ 落地前清理孤立 tool_calls，保证下一轮加载时消息天然干净
             merged_messages = _clean_orphan_tool_calls(merged_messages)
             existing = self._history_sessions[index]
+            _usage = self._resolve_api_usage_fields(
+                {
+                    "last_api_prompt_tokens": last_api_prompt_tokens,
+                    "last_api_message_count": last_api_message_count,
+                    "last_api_prompt_from_usage": last_api_prompt_from_usage,
+                    "token_calibration": token_calibration,
+                    "token_calibration_model": token_calibration_model,
+                },
+                existing,
+            )
             updated = self._build_session_record(
                 merged_messages,
                 title=existing.get("title"),
@@ -1756,6 +1918,7 @@ class HistoryManager:
                 ),
                 project=project if project is not None else existing.get("project", "默认项目"),
                 worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
+                **_usage,
                 team_run_id=team_run_id if team_run_id is not None else existing.get("team_run_id", ""),
                 team_name=team_name if team_name is not None else existing.get("team_name", ""),
                 agent_name=agent_name if agent_name is not None else existing.get("agent_name", ""),
@@ -1766,6 +1929,104 @@ class HistoryManager:
             self._history_sessions.insert(0, updated)
             self._mark_cache_dirty()
             self._schedule_save(existing.get("session_id"))
+
+    def save_cleared_session(
+        self,
+        session_id: str,
+        compaction_state: Dict = None,
+        compaction_cache: Dict = None,
+        **api_usage_kwargs,
+    ) -> bool:
+        """显式清空会话后**立即**把空消息列表落库。
+
+        为什么必须独立入口（不复用 update_session + 延迟保存链）：
+
+        1. **必须允许写空**。`_do_save` / `flush_async` 有一条空消息守卫，
+           目的是拦截「内存已释放、无数据可写」的记录覆盖 DB 全量消息。
+           `update_session` 走的是延迟保存链，清空会被这条守卫吞掉 →
+           清空只在内存生效、DB 保留旧消息、任何重载都把旧消息读回
+           （`/compact --clear` 清不掉的根因）。本方法直连 session_store，
+           与守卫解耦。
+        2. **必须同步**。清空是「用户明确要求的结果状态」，延迟 1s 会出现
+           窗口期：会话被重载 → 从 SQLite 读回旧消息 → 刚清掉的消息复活。
+           这里同步写盘 + 穿透提交，写完成后再返回。
+        3. 空列表的内容指纹是 (0, 0)，与「上次落库也是空」相同时会命中
+           SessionRepository 的去重短路 —— 那正是我们要的幂等行为。
+
+        Args:
+            session_id: 目标会话 ID（必须已在 _history_sessions 中）
+            compaction_state / compaction_cache: 压缩状态，None → 保留现值
+            api_usage_kwargs: last_api_* 等 API 权威占用字段（None → 保留现值）
+
+        Returns:
+            是否写库成功（未启用 SQLite / 会话不在内存 → False）
+        """
+        if not (self._use_sqlite and self._session_store):
+            return False
+        if not session_id:
+            return False
+        index = self.find_index_by_session_id(session_id)
+        if index is None:
+            logger.warning(f"[HistoryManager] 清空会话不在内存记录中，跳过落库: {session_id[:8]}...")
+            return False
+
+        existing = self._history_sessions[index]
+        _usage = self._resolve_api_usage_fields(
+            {
+                "last_api_prompt_tokens": api_usage_kwargs.get("last_api_prompt_tokens"),
+                "last_api_message_count": api_usage_kwargs.get("last_api_message_count"),
+                "last_api_prompt_from_usage": api_usage_kwargs.get("last_api_prompt_from_usage"),
+                "token_calibration": api_usage_kwargs.get("token_calibration"),
+                "token_calibration_model": api_usage_kwargs.get("token_calibration_model"),
+            },
+            existing,
+        )
+        cleared = self._build_session_record(
+            [],
+            title=existing.get("title"),
+            session_id=session_id,
+            compaction_state=(
+                compaction_state if compaction_state is not None else existing.get("compaction_state", {})
+            ),
+            compaction_cache=(
+                compaction_cache if compaction_cache is not None else existing.get("compaction_cache", {})
+            ),
+            system_prompt=self._resolve_existing_system_prompt(existing),
+            project=existing.get("project", "默认项目"),
+            worktree_path=existing.get("worktree_path", ""),
+            **_usage,
+            team_run_id=existing.get("team_run_id", ""),
+            team_name=existing.get("team_name", ""),
+            agent_name=existing.get("agent_name", ""),
+            team_members=existing.get("team_members", ""),
+            pinned=existing.get("pinned", False),
+        )
+        self._history_sessions.pop(index)
+        self._history_sessions.insert(0, cleared)
+        self._mark_cache_dirty()
+
+        # 该会话若已有排队中的延迟保存，先作废：目标记录已被替换为清空版，
+        # 留着只会在清空写盘后再跑一次同内容（多余），且 pending 期间调用方
+        # 持有的旧消息快照有再次写回的风险。
+        if self._pending_save_session_id == session_id:
+            self._pending_save_session_id = None
+            self._save_timer = None
+
+        try:
+            ok = bool(self._session_store.save_session(cleared))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[HistoryManager] 清空会话落库失败 {session_id[:8]}: {e}")
+            return False
+        # 穿透提交：清空后立即重载必须读到空，不能停留在挂起事务里
+        try:
+            db = getattr(self._session_store, "_db", None)
+            if db is not None and getattr(db, "is_connected", False):
+                db.flush()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[HistoryManager] 清空会话穿透提交失败: {e}")
+        if ok:
+            logger.info(f"[HistoryManager] 清空会话已落库: session_id={session_id[:8]}...")
+        return ok
 
     def _schedule_save(self, session_id: str = None):
         """
@@ -1807,19 +2068,31 @@ class HistoryManager:
         logger.debug(f"[HistoryManager] 保存会话: pending_id={pending_id[:8]}...")
         for session in self._history_sessions:
             if session.get("session_id") == pending_id:
-                # 🛡️ 空消息守卫：内存记录 messages 已被释放置空
-                # （_release_inactive_session_messages / remove_session
-                # release_messages_only）时跳过写库。若照常保存会用
-                # serialize([]) 覆盖 DB 中已有完整消息的会话（preview/
-                # message_count 保留、messages 变空 → 历史会话加载后
-                # 消息列表为空且无任何报错，根因）。
-                if not session.get("messages"):
+                # 🛡️ 空消息守卫（收窄版）：只拦截「内存释放态」——记录 messages
+                # 被 _release_inactive_session_messages / remove_session(
+                # release_messages_only=True) 置空且打了 _messages_released 标记。
+                # 旧实现一刀切 `not messages` 跳过，把**显式清空**也一并吞掉
+                # （/compact --clear、auto-compact 的目标状态本来就是空列表）→
+                # 清空只在内存生效、DB 保留旧消息、任何重载都把旧消息读回
+                # （"无法清空"根因）。判据换成释放标记后两类空列表可区分：
+                # 「无数据可写」跳过，「明确要写空」照写。
+                if not session.get("messages") and session.get("_messages_released"):
                     logger.warning(f"[HistoryManager] 跳过空消息会话保存（内存已释放）: session_id={pending_id[:8]}...")
                     break
                 self._session_store.save_session(session)
                 break
 
         self._pending_save_session_id = None
+        # 🛡️ 本进程刚写库：WAL 提交会推进 -wal 的 mtime，若不刷新变更签名，
+        # 下一次 get_history_list 的 _reload_if_db_changed 会把自己的写入误判为
+        # 「其他进程修改」→ 先 flush 再从 SQLite 全量重载（实测 1915 条约 19ms，
+        # 且持 _history_load_lock），每轮对话结束后的首次刷新都白跑一次重载。
+        # 签名滞后刷新 = 只把自己造成的变更记为已对齐。
+        try:
+            if self._use_sqlite and self._session_store is not None:
+                self._db_signature_stored = self._db_signature()
+        except Exception:
+            pass
 
     def flush(self):
         """立即持久化所有待保存的会话（同步写入 SQLite）
@@ -1881,8 +2154,9 @@ class HistoryManager:
             if session.get("session_id") == pending_id:
                 target = session
                 break
-        # 空消息守卫与 _do_save 同口径：内存已释放的会话不回写（防覆盖 DB 全量消息）
-        if not target or not target.get("messages"):
+        # 空消息守卫与 _do_save 同口径（收窄版）：只拦「内存释放态」不回写，
+        # 显式清空的空列表必须照写（防覆盖 DB 全量消息 vs 明确要写空）
+        if not target or (not target.get("messages") and target.get("_messages_released")):
             return
         store = self._session_store
         db = getattr(store, "_db", None) if store is not None else None

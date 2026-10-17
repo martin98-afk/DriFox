@@ -9,6 +9,7 @@ SystemCardFrame — QFrame 基类 + 标准头部布局 + 固定边框
 """
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,7 +21,15 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import FluentIcon, PrimaryToolButton, ScrollArea, StrongBodyLabel, TransparentToolButton
 
-from app.utils.design_tokens import CardStyles, Colors, TabStyles, font_size_css, get_unified_scrollbar_style, scale_icon_size
+from app.utils.design_tokens import (
+    CardStyles,
+    Colors,
+    TabStyles,
+    font_size_css,
+    get_unified_scrollbar_style,
+    make_scroll_content_opaque,
+    scale_icon_size,
+)
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -95,6 +104,20 @@ class SystemCardFrame(QFrame):
         self.title_label.setStyleSheet(f"color: {Colors.TEXT_ACCENT};")
 
         self._header_layout.addWidget(self.icon_label)
+
+        # ── 面包屑导航（默认隐藏；有面包屑时 title_label 互斥隐藏）──
+        # 用途：卡内多级视图的方位指示 + 祖先级回退入口（服务商卡等）。
+        # 容器独立成 widget 是必要的：QHBoxLayout 无法整体显隐。
+        self._breadcrumb_widget = QWidget(self)
+        self._breadcrumb_widget.setStyleSheet("background: transparent;")
+        self._breadcrumb_layout = QHBoxLayout(self._breadcrumb_widget)
+        self._breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
+        self._breadcrumb_layout.setSpacing(4)
+        self._breadcrumb_widget.setVisible(False)
+        # 已设置的层级项（refresh_style 时按此重建，保证颜色随主题）
+        self._breadcrumb_items: list = []
+        self._header_layout.addWidget(self._breadcrumb_widget)
+
         self._header_layout.addWidget(self.title_label)
 
         # 数量统计
@@ -152,6 +175,11 @@ class SystemCardFrame(QFrame):
         self._content_layout.setSpacing(4)
 
         self.scroll_area.setWidget(self.content_widget)
+        # 内容层刷不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行：30 次 paint/步 → 4 次）。
+        # 底色取「卡片表面 CARD_BG alpha=230 叠在浮层承托底上」的预合成值，
+        # 视觉与透明时完全一致。必须在 setWidget 之后设置。
+        self._apply_content_surface()
         main_layout.addWidget(self.scroll_area, 1)
 
     @property
@@ -165,6 +193,20 @@ class SystemCardFrame(QFrame):
         # 表面规范与浮层卡同源（CardStyles.floating），alpha 沿用原本的 230。
         self.setStyleSheet(CardStyles.floating("SystemCardFrame", alpha=230))
 
+    def _apply_content_surface(self):
+        """内容层不透明实底（滚动 blit 前置条件）
+
+        卡片本体表面是 CARD_BG alpha=230（见 _apply_base_style），下层由
+        覆盖层容器承托；这里把两者预合成成等价实色，避免改实底后观感变化。
+        """
+        # fg 只取 CARD_BG 的 rgb 分量（工具内部忽略串自带 alpha，以 alpha 参数为准）
+        make_scroll_content_opaque(
+            self.content_widget,
+            fg=Colors.CARD_BG.format(alpha=255),
+            alpha=230,
+            backdrop=Colors.CONTENT_BG,
+        )
+
     def refresh_style(self):
         """刷新主题底色和边框 — 子控件样式各自独立更新，不依赖 Qt 级联
 
@@ -177,6 +219,7 @@ class SystemCardFrame(QFrame):
 
         # ── 卡片本体（背景 + 边框） ──
         self._apply_base_style()
+        self._apply_content_surface()
 
         # ── 字体/图标 ──
         self.title_label.setFont(get_unified_font(12, True))
@@ -225,6 +268,10 @@ class SystemCardFrame(QFrame):
                 padding: 0 2px 0 6px;
                 font-weight: bold;
             """)
+
+        # ── 面包屑（颜色 token 随主题重建） ──
+        if hasattr(self, "_breadcrumb_items") and self._breadcrumb_items:
+            self._apply_breadcrumb_styles()
 
         # ── 内容区子控件递归刷新（SettingCard 等子卡片） ──
         self._refresh_content_children()
@@ -359,6 +406,78 @@ class SystemCardFrame(QFrame):
         self._search_input.textChanged.connect(callback)
         self._search_container.addWidget(self._search_input)
 
+    def set_breadcrumb(self, items) -> None:
+        """设置头部面包屑导航（卡内多级视图的方位指示 + 祖先级回退入口）
+
+        Args:
+            items: [{"text": "服务商", "handler": callback},  # 有 handler 则可点
+                    {"text": "添加 OpenCode Go"}]             # 无 handler = 当前项，不可点
+                   传 None / [] → 清空并隐藏，恢复 title_label。
+                   单项（如 [{"text": "服务商"}]）也显示——纯方位指示，无可点层级。
+
+        样式全部走 Colors token，refresh_style 时重刷（主题切换跟随）。
+        """
+        # 清掉旧项
+        while self._breadcrumb_layout.count():
+            item = self._breadcrumb_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        # 分隔符用 ›，与项交替插入
+        self._breadcrumb_items = list(items or [])
+        if not self._breadcrumb_items:
+            self._breadcrumb_widget.setVisible(False)
+            self.title_label.setVisible(True)
+            return
+
+        for idx, spec in enumerate(self._breadcrumb_items):
+            if idx:
+                sep = QLabel("›", self._breadcrumb_widget)
+                sep.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; background: transparent;")
+                self._breadcrumb_layout.addWidget(sep)
+            label = StrongBodyLabel(str(spec.get("text", "")), self._breadcrumb_widget)
+            handler = spec.get("handler")
+            if callable(handler):
+                label.setCursor(Qt.PointingHandCursor)
+                label.mousePressEvent = lambda e, h=handler: h()
+            self._breadcrumb_layout.addWidget(label)
+        self._apply_breadcrumb_styles()
+        self._breadcrumb_widget.setVisible(True)
+        self.title_label.setVisible(False)
+
+    def _apply_breadcrumb_styles(self) -> None:
+        """面包屑配色（祖先项=强调色可点，当前项=正文色不可点；分隔符=弱化色）"""
+        Colors.refresh()
+        # 字号基准 = title_label 本尊：先把 title 规格化到当前档（refresh_style
+        # 同款 12pt，消除「title 构造早期取档 / 面包屑打开时取档」的 delta 漂移
+        # 差，用户实测面包屑比 title 大一点），再克隆同一 QFont 给每个项——
+        # 无论档位何时变化，面包屑与 title 逐像素恒等。QSS 串禁写 font-size
+        # （QSS 优先级高于 setFont，写了就覆盖）。
+        self.title_label.setFont(get_unified_font(12, True))
+        title_font = self.title_label.font()
+        for idx, spec in enumerate(self._breadcrumb_items):
+            # layout 中每项占 2 个槽位（除首项）：[item, sep, item, sep, ...]
+            pos = 0 if idx == 0 else idx * 2
+            item = self._breadcrumb_layout.itemAt(pos)
+            label = item.widget() if item is not None else None
+            if label is None:
+                continue
+            clickable = callable(spec.get("handler"))
+            color = Colors.TEXT_ACCENT if clickable else Colors.TEXT_PRIMARY
+            label.setFont(QFont(title_font))
+            label.setStyleSheet(
+                f"color: {color}; background: transparent; border: none;"
+            )
+        # 分隔符槽位：1, 3, 5, ...
+        for i in range(1, self._breadcrumb_layout.count(), 2):
+            item = self._breadcrumb_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; "
+                    f"{get_font_family_css()}; background: transparent; border: none;"
+                )
+
     def set_header_sticky(self, text: str):
         """在标题栏显示标签（如吸顶服务商名称），置于标题和搜索框之间
 
@@ -448,11 +567,15 @@ class SystemCardFrame(QFrame):
             btn.mousePressEvent = lambda e, h=btn_data["handler"]: h()
             self._mode_buttons_container.addWidget(btn)
 
-    def set_save_button_handler(self, handler):
+    def clear_save_button(self):
+        """清空头部额外按钮区（卡内多视图切换用：非编辑视图无保存钮）"""
         while self._extra_buttons_container.count():
             item = self._extra_buttons_container.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+    def set_save_button_handler(self, handler):
+        self.clear_save_button()
 
         btn = PrimaryToolButton(FluentIcon.SAVE, self)
         btn.setFixedSize(30, 30)

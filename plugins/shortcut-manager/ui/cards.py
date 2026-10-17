@@ -642,10 +642,6 @@ class ShortcutManagerCard(QWidget):
         tl = StrongBodyLabel("快捷键管理器", header)
         tl.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         hly.addWidget(tl)
-
-        self._count_lb = QLabel("", header)
-        self._count_lb.setStyleSheet(f"color: {_text_color(True)}; font-size: 12px; background: transparent;")
-        hly.addWidget(self._count_lb)
         hly.addStretch(1)
 
         self._search = QLineEdit(header)
@@ -691,6 +687,11 @@ class ShortcutManagerCard(QWidget):
         self._content_layout.setSpacing(6)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        from app.utils.design_tokens import make_card_content_opaque
+
+        make_card_content_opaque(self._content, 246)
         root.addWidget(self._scroll, 1)
 
         # 空状态
@@ -739,14 +740,12 @@ class ShortcutManagerCard(QWidget):
     # ── 数据加载 ──
 
     def _refresh(self):
-        self._count_lb.setText("加载中…")
         self._refresh_btn.setEnabled(False)
 
         try:
             self._all_commands = _load_all_items()
             # 保留搜索框过滤词：保存/恢复快捷键后延迟刷新时列表不重置为全量
             self._render_list(self._search.text())
-            self._count_lb.setText(f"共 {len(self._all_commands)} 个")
             # 记录本次加载对应的 UI 命令账本版本（showEvent 据此判定是否需重载）
             try:
                 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -756,7 +755,6 @@ class ShortcutManagerCard(QWidget):
                 pass
         except Exception as e:
             logger.error(f"[ShortcutManager] 加载失败: {e}")
-            self._count_lb.setText("加载失败")
         finally:
             self._refresh_btn.setEnabled(True)
 
@@ -900,7 +898,6 @@ class ShortcutManagerCard(QWidget):
             dialog.confirmed.connect(_on_confirm)
             dialog.exec()
             if not confirmed:
-                self._count_lb.setText(f"⛔ 已取消：/{cmd_name}")
                 return
 
             # ── 覆盖冲突：清空被覆盖命令的快捷键 ──
@@ -930,7 +927,6 @@ class ShortcutManagerCard(QWidget):
 
         if success:
             QTimer.singleShot(300, self._refresh)
-            self._count_lb.setText(f"✅ /{cmd_name} → {key_str}")
 
     def _save_custom_shortcut(self, cmd_name: str, description: str, shortcut: str) -> bool:
         """保存自定义快捷键：基于原始命令文件完整复制，仅修改 shortcut 字段
@@ -973,7 +969,6 @@ class ShortcutManagerCard(QWidget):
             return True
         except Exception as e:
             logger.error(f"[ShortcutManager] 保存失败: {e}")
-            self._count_lb.setText(f"❌ 保存失败: {e}")
             return False
 
     # ── 恢复系统配置 ──
@@ -987,7 +982,6 @@ class ShortcutManagerCard(QWidget):
                 save_ui_command_shortcut(cmd_name, "")
                 _cleanup_legacy_shortcut_md(cmd_name)
                 logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
-                self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
                 from app.core.commands.builtin_commands import reload_all_commands
 
                 reload_all_commands()
@@ -1002,7 +996,6 @@ class ShortcutManagerCard(QWidget):
                 if cmd_file.exists():
                     cmd_file.unlink()
                     logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
-                    self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
                     # 强制立即重载命令缓存，不依赖 watchfiles 异步热更新
                     from app.core.commands.builtin_commands import reload_all_commands
 
@@ -1011,7 +1004,6 @@ class ShortcutManagerCard(QWidget):
             QTimer.singleShot(300, self._refresh)
         except Exception as e:
             logger.error(f"[ShortcutManager] 恢复失败: {e}")
-            self._count_lb.setText(f"❌ 恢复失败: {e}")
 
     # ── 关闭 ──
 

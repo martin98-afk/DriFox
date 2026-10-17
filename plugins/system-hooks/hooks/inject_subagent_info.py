@@ -11,7 +11,7 @@ BuildSystemPrompt Hook 函数 — 为主智能体注入可用子智能体列表
 
 
 def hook(event: str, context: dict) -> str:
-    """从 context 取出预取好的子智能体列表
+    """从 context 取出预取好的子智能体列表（XML 标签包裹进系统提示词）
 
     Args:
         event: 事件名称（BuildSystemPrompt）
@@ -19,6 +19,7 @@ def hook(event: str, context: dict) -> str:
             - available_subagents_content: str 预先格式化好的子智能体列表
 
     Returns:
-        预取好的子智能体列表字符串，或空字符串
+        <available_subagents> 包裹的列表字符串，或空字符串
     """
-    return context.get("available_subagents_content", "")
+    content = context.get("available_subagents_content", "")
+    return f"<available_subagents>\n{content}\n</available_subagents>" if content else ""

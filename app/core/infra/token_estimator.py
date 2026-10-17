@@ -86,6 +86,75 @@ def _get_model_token_ratio(model: str) -> float:
     return _MODEL_TOKEN_RATIOS["default"]
 
 
+# ========== API usage 自适应校准因子 ==========
+# 背景：静态 ratio（上面全部 1.0）无法贴合各厂商真实分词器。实测本地
+# cl100k_base/快估对中文会话常比 API 返回的 prompt_tokens 高 1.5~3 倍
+# （中文模型分词更高效），而图片类又被固定 85 token 严重低估。用户看到
+# 的"圆环/卡片 token 与真实差几倍"即由此而来。
+#
+# 根治方式：拿 API 真实 usage 反校准本地估算 —— 当「上次 API 调用时的消息
+# 数 == 当前消息数」时，本地估算与 API 值覆盖的是同一份内容，二者比值即
+# 校准因子。多轮观测用 EMA 平滑，避免单轮抖动（工具集/缓存命中波动）。
+#
+# 语义：calibrated = raw_local_estimate * calibration
+#   calibration < 1 → 本地高估（中文模型常见）
+#   calibration > 1 → 本地低估（图片/特殊内容常见）
+CALIBRATION_MIN = 0.3
+CALIBRATION_MAX = 3.0
+# EMA 权重：旧值 0.6 / 新观测 0.4（单次观测不喧宾夺主，但 3 轮内收敛）
+_CALIBRATION_OLD_WEIGHT = 0.6
+
+
+def blend_calibration(old: Optional[float], observed_ratio: float) -> float:
+    """把一次新观测的 raw 比值并入校准因子（EMA + clamp）。
+
+    Args:
+        old: 已有校准因子（None / <=0 视为无历史，直接采用新观测）
+        observed_ratio: api_prompt_tokens / 本地原始估算（未校准）
+
+    Returns:
+        新的校准因子，恒在 [CALIBRATION_MIN, CALIBRATION_MAX] 内。
+    """
+    try:
+        ratio = float(observed_ratio)
+    except (TypeError, ValueError):
+        return 1.0
+    if ratio <= 0 or ratio != ratio:  # 非正 / NaN
+        return 1.0
+
+    try:
+        prev = float(old or 0.0)
+    except (TypeError, ValueError):
+        prev = 0.0
+    if prev <= 0:
+        blended = ratio
+    else:
+        blended = prev * _CALIBRATION_OLD_WEIGHT + ratio * (1.0 - _CALIBRATION_OLD_WEIGHT)
+    return max(CALIBRATION_MIN, min(CALIBRATION_MAX, blended))
+
+
+def resolve_calibration(
+    stored: Optional[float],
+    stored_model: Optional[str],
+    model: str,
+) -> float:
+    """读取会话级校准因子；模型变更（换模型即换分词器）时不予沿用。
+
+    Returns:
+        有效因子（[CALIBRATION_MIN, CALIBRATION_MAX]），无有效值时返回 1.0。
+    """
+    try:
+        value = float(stored or 0.0)
+    except (TypeError, ValueError):
+        return 1.0
+    if value <= 0:
+        return 1.0
+    # 模型不匹配 → 因子不适用（不同分词器偏差方向可能相反）
+    if (stored_model or "") and (str(stored_model) != str(model or "")):
+        return 1.0
+    return max(CALIBRATION_MIN, min(CALIBRATION_MAX, value))
+
+
 def get_model_token_ratio(model: str) -> float:
     """获取模型 token 校正系数（公开接口）"""
     return _get_model_token_ratio(model)
@@ -143,22 +212,55 @@ def _fast_estimate_tokens(text: str) -> int:
 
 
 
-@lru_cache(maxsize=1024)
 def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     """
     估算文本的 token 数量
-    
+
     Args:
         text: 要估算的文本
         model: 模型名称 (用于选择编码)
-    
+
     Returns:
         token 数量
-    
+
     Note:
-        使用 lru_cache 缓存结果，相同文本只需计算一次。
-        对于长文本或重复调用的场景效果显著。
+        🔧 缓存键改 hash：外层无缓存（同时承担空文本短路），把
+        (hash(text), len(text), model) 传给内层 lru_cache——缓存不再持有
+        消息全文引用（长消息曾致缓存峰值膨胀且阻止已压缩消息字符串被 GC）。
+        hash+len 双键防跨文本碰撞误命中；hash() 进程内一致即可（lru_cache
+        本就是进程内生命周期，不跨进程）。容量 1024 → 256（键已轻量，
+        下调无命中率损失）。
+        原文传递：lru_cache MISS 时内层需要原文重算，经 thread-local 单槽
+        寄存器获取——同线程内 estimate_tokens 非重入，MISS 必然紧跟外层
+        调用，单槽无交错风险；命中路径不读寄存器，纯缓存返回。
     """
+    if not text:
+        return 0
+    _cache_text_reg.text = text
+    return _estimate_tokens_cached(hash(text), len(text), model)
+
+
+# 内层缓存的原文寄存器：thread-local（各线程独立，无锁）
+_cache_text_reg = threading.local()
+
+
+@lru_cache(maxsize=256)
+def _estimate_tokens_cached(text_hash: int, text_len: int, model: str) -> int:
+    """内层缓存实现：键为 (hash, len, model)，不持消息全文。
+
+    仅在 MISS 时从 _cache_text_reg 取原文计算；命中时完全不触碰寄存器。
+    """
+    text = getattr(_cache_text_reg, "text", "") or ""
+    # 尝试使用 tiktoken
+    encoder = _get_encoder(_get_encoding_name(model))
+    if encoder:
+        try:
+            tokens = encoder.encode(text, disallowed_special=())
+            return len(tokens)
+        except Exception:
+            pass
+    # 降级到快速估算
+    return _fast_estimate_tokens(text)
     if not text:
         return 0
 

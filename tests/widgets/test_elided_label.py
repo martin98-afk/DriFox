@@ -92,3 +92,66 @@ class TestElidedLabelTextFormat:
         lbl.setText("<pending> 状态")  # 触发 width<=0 分支
         assert lbl.text() == "<pending> 状态"
         assert lbl.textFormat() == Qt.PlainText
+
+
+class TestElidedLabelSingleLine:
+    """单行语义回归：控制字符不得进入渲染文本（会话预览含 \\n 被行高截断）
+
+    背景：会话预览取自消息原文（含 \\n），QLabel 会真换行渲染，而行高由外部
+    钉死（会话行 44px）→ 多出的行被裁，视觉上叠字。且 QFontMetrics.elidedText
+    把 \\n 当零宽字符（测量与渲染不一致），省略后控制字符仍在。
+    """
+
+    @staticmethod
+    def _settle(lbl):
+        app = QApplication.instance()
+        for _ in range(3):
+            app.processEvents()
+
+    def test_newline_stripped_in_render_kept_in_tooltip(self):
+        """渲染文本无换行；_full_text / tooltip 保留原文（回读语义不变）"""
+        _ensure_qapp()
+        lbl = _make_label("")
+        lbl.resize(200, 20)
+        lbl.show()
+        raw = "第一行内容\n第二行内容也在这里\n第三行"
+        lbl.setText(raw)
+        self._settle(lbl)
+        lbl._update_elided()
+        self._settle(lbl)
+
+        assert "\n" not in lbl.text(), f"渲染文本不应含换行：{lbl.text()!r}"
+        assert lbl._full_text == raw, "_full_text 应保留原文（外部按原文比较）"
+        assert lbl.toolTip() == raw, "tooltip 应保留原文（多行更好读）"
+
+    def test_newline_replaced_not_removed(self):
+        """换行为替换而非删除：全文可显示时控制字符变空格"""
+        _ensure_qapp()
+        lbl = _make_label("")
+        lbl.resize(600, 20)
+        lbl.show()
+        lbl.setText("a\nb")
+        self._settle(lbl)
+        lbl._update_elided()
+        assert lbl.text() == "a b", f"应换成空格保持字符数，实际 {lbl.text()!r}"
+
+    def test_no_layout_branch_also_single_line(self):
+        """未布局（width<=0）分支同样归一化（此路径也直接喂 QLabel 渲染）"""
+        _ensure_qapp()
+        lbl = _make_label("")
+        lbl.resize(0, 0)
+        lbl.setText("x\ny")
+        assert "\n" not in lbl.text(), "width<=0 分支也不应把换行交给 QLabel"
+
+    def test_highlight_path_single_line_and_span_intact(self):
+        """高亮路径：归一化后仍能定位匹配并渲染 <span>（下标对齐）"""
+        _ensure_qapp()
+        lbl = _make_label("")
+        lbl.resize(600, 20)
+        lbl.show()
+        lbl.setText("第一行\n关键字在这里")
+        lbl.setHighlights(["关键字"], "#FF6600")
+        self._settle(lbl)
+        assert "\n" not in lbl.text(), f"高亮渲染也不应含换行：{lbl.text()!r}"
+        assert "<span" in lbl.text(), "高亮 span 应保留"
+        assert "关键字" in lbl.text(), "匹配内容应可见"

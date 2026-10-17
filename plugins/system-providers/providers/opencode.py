@@ -35,6 +35,24 @@ class OpenCodeUsageError(RuntimeError):
     """用量查询失败，异常文本即归因说明（由 UsageService 捕获后写 warning 日志）"""
 
 
+_SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
+
+
+def _system_ssl_context():
+    """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储）；不可用回退 None。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import ssl
+
+            import truststore
+
+            _SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:
+            _SSL_CONTEXT = False
+    return _SSL_CONTEXT or None
+
+
 def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """从 opencode.ai/_server 获取 OpenCode Zen/Go 套餐用量。
 
@@ -69,7 +87,7 @@ def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, An
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_system_ssl_context()) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
             raw = resp.read().decode(charset, errors="replace")
     except urllib.error.HTTPError as e:
@@ -229,7 +247,9 @@ def register(registry):
             ],
             models_dev_id="opencode",
             family="opencode",
-            capabilities=_ZEN_CAPABILITIES,
+            # Zen 是按量 API 型（非订阅）：显式声明列表分组，
+            # 避免被「有 coding_plan_fetcher → Coding Plan」自动判据误归
+            capabilities={**_ZEN_CAPABILITIES, "list_group": "API"},
             extra_quota_fields=_QUOTA_FIELDS,
             coding_plan_fetcher=_fetch_opencode_coding_plan,
         )
@@ -271,7 +291,7 @@ def register(registry):
             ],
             models_dev_id="opencode-go",
             family="opencode",
-            capabilities=_ZEN_CAPABILITIES,
+            capabilities={**_ZEN_CAPABILITIES, "list_group": "Coding Plan"},
             extra_quota_fields=_QUOTA_FIELDS,
             coding_plan_fetcher=_fetch_opencode_coding_plan,
         )

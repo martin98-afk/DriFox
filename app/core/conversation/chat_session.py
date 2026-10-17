@@ -62,11 +62,22 @@ class ChatSession:
         self.context_usage: int = 0  # 消息列表估算 token 总数，保存时计算
         self.last_api_prompt_tokens: int = 0  # 最近一次 API 返回的 prompt_tokens，作为上下文占用权威值
         self.last_api_message_count: int = 0  # 上次 API 调用时的 session.messages 长度，用于增量估算
-        self.last_api_prompt_from_usage: bool = False  # last_api_prompt_tokens 是否来自真实 API usage（非本地估算）
+        # last_api_prompt_tokens 是否来自真实 API usage（非本地估算）。
+        # 三态语义（⚠️ 不能用 bool + 默认 False，否则老记录会被误判为"本地估算"而丢弃权威值）：
+        #   True  = 来自 API usage，可直接作为权威占用值
+        #   False = 来自本地估算（口径与全量消息数不匹配，不能当权威值）
+        #   None  = 未知（老数据无此列 / 未记录）→ 按"可用"处理，与 True 同
+        self.last_api_prompt_from_usage: Optional[bool] = None
+        # API usage 自适应校准因子：真实 token = 本地原始估算 * 该值（详见
+        # token_estimator.blend_calibration）。按模型隔离，换模型即失效。
+        self.token_calibration: float = 0.0  # <=0 表示尚未校准（回退 1.0）
+        self.token_calibration_model: str = ""
         # 🛡️ 首发项目快照：用户在哪个项目下首发的对话。
         # 用于"对话进行中切换项目导致落盘错存"bug 的兜底：
         # 一旦锁定不再改变，即使后续切换项目，会话仍归属首发项目。
         self.originating_project: str = ""
+        # 临时会话标记：临时对话页内新建的会话不落盘、不进历史
+        self.is_temp: bool = False
         # [PERF T33] 发送前处理缓存版本号：消息列表内容/顺序任何变化都自增，
         # 供 ContextBudgetAllocator 的 consolidate+token 估算缓存做失效判定。
         # 缓存本身不持久化（to_dict 不输出），进程内复用。
@@ -301,7 +312,26 @@ class ChatSession:
             "last_api_prompt_tokens": self.last_api_prompt_tokens,
             "last_api_message_count": self.last_api_message_count,
             "last_api_prompt_from_usage": self.last_api_prompt_from_usage,
+            "token_calibration": self.token_calibration,
+            "token_calibration_model": self.token_calibration_model,
             "originating_project": self.originating_project,
+            "is_temp": self.is_temp,
+        }
+
+    def api_usage_dict(self) -> Dict[str, Any]:
+        """导出「API 权威上下文占用」字段，供所有保存链透传。
+
+        保存路径（history_manager.save_session / update_session）对这些字段
+        一律按「None → 保留现值」处理，因此调用方必须显式带上，否则每保存
+        一次就会把 API 返回的精确 prompt_tokens 清零 —— 历史会话加载后只能
+        退回本地估算（与真实值差几倍）。
+        """
+        return {
+            "last_api_prompt_tokens": self.last_api_prompt_tokens,
+            "last_api_message_count": self.last_api_message_count,
+            "last_api_prompt_from_usage": self.last_api_prompt_from_usage,
+            "token_calibration": self.token_calibration,
+            "token_calibration_model": self.token_calibration_model,
         }
 
     @classmethod
@@ -325,8 +355,13 @@ class ChatSession:
         session.context_usage = data.get("context_usage", 0)
         session.last_api_prompt_tokens = data.get("last_api_prompt_tokens", 0)
         session.last_api_message_count = data.get("last_api_message_count", 0)
-        session.last_api_prompt_from_usage = data.get("last_api_prompt_from_usage", False)
+        # 三态：键缺失（老记录）→ None（"未知"，按可用处理），不能用 False
+        session.last_api_prompt_from_usage = data.get("last_api_prompt_from_usage", None)
+        session.token_calibration = float(data.get("token_calibration", 0) or 0)
+        session.token_calibration_model = str(data.get("token_calibration_model", "") or "")
         session.originating_project = data.get("originating_project", "") or ""
+        # 旧记录无此字段时默认 False，兼容
+        session.is_temp = bool(data.get("is_temp", False))
         return session
 
     def set_user_edited_title(self, edited: bool = True):
@@ -343,6 +378,8 @@ class SessionManager(QObject):
         self.max_cached_sessions: int = max_cached
         self.keep_messages: int = keep_messages
         self._messages_loader: Optional[Callable[[str], Optional[List[Dict]]]] = None
+        # [MEM] 批 IV：淘汰回调（evict 时整会话被丢弃，由宿主注入全局释放钩子）
+        self._on_evict: Optional[Callable[[str], None]] = None
         self.current_index = -1
 
     # ── 消息体惰性重载（内存治理）──────────────────────────────
@@ -351,6 +388,15 @@ class SessionManager(QObject):
         self._messages_loader = loader
         for s in self.sessions:
             s._messages_loader = loader
+
+    def set_on_evict(self, hook: Callable[[str], None]) -> None:
+        """注入淘汰回调：_evict_if_needed pop 掉会话对象后以 sid 调用。
+
+        evict 是「丢弃整个 ChatSession」路径，比 _release_stale_messages 更
+        彻底；宿主（backend）借此把被淘汰会话在 HistoryManager 内存记录里的
+        消息体一并释放（所有权收敛唯一入口 release_messages_except）。
+        """
+        self._on_evict = hook
 
     def _attach_loader(self, session: ChatSession) -> None:
         session._messages_loader = self._messages_loader
@@ -371,6 +417,10 @@ class SessionManager(QObject):
         candidates.sort(key=lambda s: self._last_access.get(s.session_id, 0.0))
         for s in candidates[: len(candidates) - self.keep_messages]:
             released = s.release_messages()
+            # 防御性双写：release_messages 内部已清 _send_prep_cache，但其
+            # 「已释放/_messages 为空」早退路径清不到；cascade 投影缓存与
+            # 消息体同生命周期，这里无条件清一次兜底。
+            s._send_prep_cache = None
             if released:
                 logger.debug(f"[Memory] 释放非活跃会话消息 {s.session_id[:8]} ({released} 条)")
 
@@ -441,6 +491,13 @@ class SessionManager(QObject):
             self.sessions.pop(idx)
             self._last_access.pop(sid, None)
             removed += 1
+            # [MEM] 批 IV：evict = 丢弃整个 ChatSession（比 _release_stale_messages
+            # 更彻底），通知宿主释放该会话在 HistoryManager 内存记录中的消息体。
+            if self._on_evict:
+                try:
+                    self._on_evict(sid)
+                except Exception as e:
+                    logger.warning(f"[SessionManager] evict 回调异常 (sid={sid[:8]}): {e}")
             # 调整当前索引
             if idx <= self.current_index and self.current_index > 0:
                 self.current_index -= 1

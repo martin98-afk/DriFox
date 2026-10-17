@@ -32,6 +32,18 @@ KEEP_RECENT_ROUNDS = 3
 OFFLOAD_IDX_FIELD = "_x_idx"
 
 
+def _to_sql_bool_or_null(value: Any) -> Optional[int]:
+    """把「API 值是否来自 usage」的三态标记转成 SQLite 存储值。
+
+    True → 1，False → 0，None/缺失 → NULL（老记录语义：未知）。
+    ⚠️ 绝不能把 None 落成 0：0 表示"这是本地估算值"，会让历史会话里的
+    API 权威值被判定为不可用、退回本地重算（token 显示与真实差几倍）。
+    """
+    if value is None:
+        return None
+    return 1 if value else 0
+
+
 def merge_extras_into(messages: List[Any], extras: Dict[int, Dict[str, Any]]) -> List[Any]:
     """按 msg_idx 把 extras 字段就地合并回消息列表（repo 层共享 helper）。
 
@@ -408,6 +420,10 @@ class SessionRepository:
             "context_usage": d.get("context_usage", 0),
             "last_api_prompt_tokens": d.get("last_api_prompt_tokens", 0),
             "last_api_message_count": d.get("last_api_message_count", 0),
+            # 三态：1 / 0 / None（老行无此列 → None = 未知，按"来自 API"处理）
+            "last_api_prompt_from_usage": d.get("last_api_prompt_from_usage", None),
+            "token_calibration": d.get("token_calibration", 0),
+            "token_calibration_model": d.get("token_calibration_model", "") or "",
             # 团队元数据（方案 A 团队会话恢复基础，非团队会话为空串）
             "team_run_id": d.get("team_run_id", "") or "",
             "team_name": d.get("team_name", "") or "",
@@ -506,6 +522,10 @@ class SessionRepository:
                 "context_usage": session.get("context_usage", 0),
                 "last_api_prompt_tokens": session.get("last_api_prompt_tokens", 0),
                 "last_api_message_count": session.get("last_api_message_count", 0),
+                # None → NULL（未知），绝不能落成 0（0 = "本地估算"，会丢弃权威值）
+                "last_api_prompt_from_usage": session.get("last_api_prompt_from_usage", None),
+                "token_calibration": session.get("token_calibration", 0),
+                "token_calibration_model": session.get("token_calibration_model", "") or "",
                 # 团队元数据透传（方案 A）：非团队会话保持空串
                 "team_run_id": session.get("team_run_id", "") or "",
                 "team_name": session.get("team_name", "") or "",
@@ -525,13 +545,15 @@ class SessionRepository:
                 (session_id, title, project, messages, system_prompt,
                  compaction_state, compaction_cache, message_count, user_edited_title,
                  worktree_path, preview, context_usage,
-                 last_api_prompt_tokens, last_api_message_count,
+                 last_api_prompt_tokens, last_api_message_count, last_api_prompt_from_usage,
+                 token_calibration, token_calibration_model,
                  team_run_id, team_name, agent_name, team_members,
                  pinned,
                  first_user_msg, first_user_ts,
                  created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?,
                     ?, ?, ?, ?,
                     ?,
                     ?, ?,
@@ -553,6 +575,9 @@ class SessionRepository:
                     session_data["context_usage"],
                     session_data["last_api_prompt_tokens"],
                     session_data["last_api_message_count"],
+                    _to_sql_bool_or_null(session_data.get("last_api_prompt_from_usage")),
+                    session_data["token_calibration"],
+                    session_data["token_calibration_model"],
                     session_data["team_run_id"],
                     session_data["team_name"],
                     session_data["agent_name"],
@@ -756,6 +781,8 @@ class SessionRepository:
                 f"SELECT session_id, title, project, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
+                f"last_api_prompt_tokens, last_api_message_count, last_api_prompt_from_usage, "
+                f"token_calibration, token_calibration_model, "
                 f"team_run_id, team_name, agent_name, team_members, "
                 f"pinned "
                 f"FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
@@ -823,6 +850,13 @@ class SessionRepository:
             "updated_at": d.get("updated_at", ""),
             "worktree_path": d.get("worktree_path", "") or "",
             "context_usage": d.get("context_usage", 0),
+            # API 权威上下文占用（历史会话加载后据此显示，缺失则退回本地估算）
+            "last_api_prompt_tokens": d.get("last_api_prompt_tokens", 0) or 0,
+            "last_api_message_count": d.get("last_api_message_count", 0) or 0,
+            # 未 SELECT / 老行 → None（未知），绝不落成 False（会丢弃权威值）
+            "last_api_prompt_from_usage": d.get("last_api_prompt_from_usage", None),
+            "token_calibration": d.get("token_calibration", 0) or 0,
+            "token_calibration_model": d.get("token_calibration_model", "") or "",
             # 团队元数据（方案 A 团队会话恢复基础，非团队会话为空串）
             "team_run_id": d.get("team_run_id", "") or "",
             "team_name": d.get("team_name", "") or "",
@@ -872,6 +906,8 @@ class SessionRepository:
                 f"SELECT session_id, title, project, system_prompt, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
+                f"last_api_prompt_tokens, last_api_message_count, last_api_prompt_from_usage, "
+                f"token_calibration, token_calibration_model, "
                 f"team_run_id, team_name, agent_name, team_members, "
                 f"pinned "
                 f"FROM {self.TABLE_NAME} WHERE team_run_id = ? "

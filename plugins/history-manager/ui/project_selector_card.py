@@ -1,0 +1,707 @@
+# -*- coding: utf-8 -*-
+"""
+项目选择卡片内容（history-manager 插件自包含组件）
+
+卡片形式展示所有项目，支持选择、新建、归档。2026-10 自宿主
+``app/widgets/cards/settings/project_selector_card.py`` 迁入插件：
+UI 本体（ProjectItem / ProjectSelectorCardContent）随插件自包含；
+纯函数（缩写/配色/淡染）与方形头像保留在宿主公共层
+（``app/utils/project_meta.py`` / ``app/widgets/square_avatar.py``），
+供主窗、标签页、标题栏与本插件共同使用。
+"""
+
+import os
+from typing import Dict, Optional
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import ScrollArea, TransparentToolButton
+
+from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
+from app.utils.project_meta import _alpha_tint, extract_project_initials, get_project_color
+from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.square_avatar import _SquareAvatar
+# [PERF] 直接从源头导入 _ElidedLabel（mcp_setting_card 同样转引自 app.widgets.elided_label），
+# 避免为这一个类拉起 mcp_setting_card → mcp SDK（~715ms）整条重链
+from app.widgets.elided_label import _ElidedLabel
+from app.widgets.hover_style_guard import style_if_changed
+
+
+class ProjectItem(QWidget):
+    """单个项目项 - 卡片内项目选择列表项"""
+
+    clicked = Signal(str)
+    allClicked = Signal()  # 「全部项目」行点击（无项目名，仅表示不过滤）
+    archiveClicked = Signal(str)
+    exportClicked = Signal(str)  # 导出项目压缩包
+    openFolderClicked = Signal(str, str)  # project_name, root_dir
+    newSessionClicked = Signal(str)  # 行内「新建会话」按钮：切到该项目并新建会话
+
+    # 单行高度（无根目录）；有根目录时切换为 _DOUBLE_LINE_HEIGHT
+    _SINGLE_LINE_HEIGHT = 30
+    _DOUBLE_LINE_HEIGHT = 44
+
+    def __init__(self, name: str, is_current: bool = False, parent=None, is_all_entry: bool = False):
+        super().__init__(parent)
+        self._name = name
+        self._is_current = is_current
+        self._is_all_entry = is_all_entry  # 「全部项目」行：无元数据/无导出归档按钮/无 root dir
+        self._session_count = 0
+        self._worktree_count = 0
+        self._project_color = get_project_color(name)
+        self._root_dir = ""
+        self._check_label: Optional[QLabel] = None  # 「✓」当前项目指示（set_current 复用切换时按需创建）
+        self._menu_open = False  # 行操作菜单（更多/右键）执行中：leaveEvent 跳过复位以保持 hover
+        # QWidget 子类用 QSS background/border 必须显式声明，否则部分平台不绘制背景
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        # ★ 自身样式用 ID 选择器提特异性：滚动区祖先 styleSheet 里的
+        #   ``QScrollArea > QWidget > QWidget { background: transparent; }``
+        #   特异性 (0,0,3) 压过裸类型选择器 ``ProjectItem`` (0,0,1)，
+        #   导致行背景（静止淡染/hover 底）从未被渲染过。ID 选择器 (0,1,1) 反超。
+        self.setObjectName("projectItem")
+        self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
+        self.setCursor(Qt.PointingHandCursor)
+        self._setup_ui()
+
+    def set_current(self, is_current: bool):
+        """切换「当前项目」高亮（缓存复用路径：就地刷样式，不重建 widget）
+
+        [PERF] 面板行缓存复用配套：每次打开面板都会重刷列表（旧实现全量重建），
+        当前项目归属变化时命中行只需换样式，无需走构造路径。
+        """
+        is_current = bool(is_current)
+        if self._is_current == is_current:
+            return
+        self._is_current = is_current
+        if self._is_all_entry:
+            return  # 聚合行无高亮语义
+        # ✓ 指示标签：构造期 current 行才创建，复用切换时按需补建/显隐
+        if is_current and self._check_label is None:
+            self._check_label = QLabel("✓", self)
+            self._check_label.setStyleSheet(
+                f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;"
+            )
+            self._check_label.setAlignment(Qt.AlignVCenter)
+            self.layout().insertWidget(0, self._check_label)
+        if self._check_label is not None:
+            self._check_label.setVisible(is_current)
+        self._apply_base_style()
+        self._apply_name_style()
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        # 上下边距 0、单行 30px：紧凑布局，让项目之间视觉密度更高
+        layout.setContentsMargins(10, 0, 4, 0)
+        layout.setSpacing(6)
+
+        # 当前项目指示（放在最前，icon 之前）
+        if self._is_current:
+            self._check_label = QLabel("✓", self)
+            self._check_label.setStyleSheet(f"color: {Colors.BORDER_ACCENT}; font-size: {scale_font_size(14)}px;")
+            self._check_label.setAlignment(Qt.AlignVCenter)
+            layout.addWidget(self._check_label)
+
+        # 项目彩色方形标识（缩写字母 + 项目专属色）
+        # 使用 QPainter 绘制的 _SquareAvatar，flat design 风格
+        initials = extract_project_initials(self._name)
+        self._avatar_label = _SquareAvatar(initials, self._project_color, self)
+        layout.addWidget(self._avatar_label)
+
+        # 中间：项目名 + 根目录（垂直布局）
+        text_vbox = QVBoxLayout()
+        text_vbox.setContentsMargins(0, 0, 0, 0)
+        text_vbox.setSpacing(0)
+        text_vbox.setAlignment(Qt.AlignVCenter)
+
+        # 项目名
+        self._name_label = QLabel(self._name, self)
+        self._apply_name_style()
+        text_vbox.addWidget(self._name_label)
+
+        # 项目根目录（默认隐藏：未设置时由 set_root_dir 保持隐藏）
+        # 使用 _ElidedLabel 根据可用宽度自动省略长路径
+        self._root_dir_label = _ElidedLabel("", self)
+        self._root_dir_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._root_dir_label.hide()
+        text_vbox.addWidget(self._root_dir_label)
+
+        layout.addLayout(text_vbox, 1)
+
+        # 元数据（会话数 · 工作目录数），灰色小字
+        self._meta_label = QLabel("", self)
+        self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._meta_label.setAlignment(Qt.AlignVCenter)
+        layout.addWidget(self._meta_label)
+
+        # 行内操作按钮（默认隐藏，hover 时显示）：新建会话 + 更多（菜单含归档/导出/打开根目录）
+        self._row_btns = QWidget(self)
+        row_btns_layout = QHBoxLayout(self._row_btns)
+        row_btns_layout.setContentsMargins(0, 0, 0, 0)
+        row_btns_layout.setSpacing(0)
+        _row_btn_style = f"""
+            QToolButton {{
+                background: transparent;
+                border: none;
+                font-size: {scale_font_size(12)}px;
+            }}
+            QToolButton:hover {{
+                background: rgba(255, 255, 255, 50);
+                border-radius: 4px;
+            }}
+        """
+        self._new_session_btn = TransparentToolButton(get_icon("新会话"), self._row_btns)
+        self._new_session_btn.setFixedSize(24, 24)
+        self._new_session_btn.setStyleSheet(_row_btn_style)
+        self._new_session_btn.clicked.connect(self._emit_new_session)
+        self._new_session_btn.setToolTip("新建会话")
+        row_btns_layout.addWidget(self._new_session_btn)
+        self._more_btn = TransparentToolButton(get_icon("更多"), self._row_btns)
+        self._more_btn.setFixedSize(24, 24)
+        self._more_btn.setStyleSheet(_row_btn_style)
+        self._more_btn.clicked.connect(self._show_more_menu)
+        self._more_btn.setToolTip("更多")
+        row_btns_layout.addWidget(self._more_btn)
+        self._row_btns.hide()
+        layout.addWidget(self._row_btns)
+
+        # 静止态底色（当前项目淡染 + 左侧项目色条）
+        self._apply_base_style()
+
+    def _apply_name_style(self):
+        if self._is_current:
+            self._name_label.setStyleSheet(
+                f"color: {self._project_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
+            )
+        else:
+            # 非当前项目用同色（不压 alpha）：半透明会把项目色对底对比度打到
+            # 一半（浅色主题下 4.6:1 → 2.4:1），配色修复前功尽弃。当前项已有
+            # ✓ / 加粗 / 同色淡染底 / 左侧色条四重信号，无需再靠透明度区分。
+            self._name_label.setStyleSheet(
+                f"color: {self._project_color}; {get_font_family_css()} {font_size_css(13)};"
+            )
+
+    def _apply_base_style(self) -> None:
+        """静止态底色：当前项目常驻淡染 + 左侧项目色条（hover 态在 enterEvent 覆盖）
+
+        单行列表里「哪个是当前项目」原先只靠 ✓ + 彩色加粗字，扫视时容易被
+        相邻行淹没；补一层低饱和同色底纹 + 左侧 3px 色条后，选中项在静止态
+        也有明确块面，且与折叠头（同色条）视觉同源。
+        """
+        Colors.refresh()
+        if self._is_current:
+            tint = _alpha_tint(self._project_color, 0.10, fallback=Colors.HOVER_BG)
+            style_if_changed(
+                self,
+                f"""
+                ProjectItem#projectItem {{
+                    background: {tint};
+                    border-left: 3px solid {self._project_color};
+                    border-radius: 6px;
+                }}
+            """,
+            )
+        else:
+            style_if_changed(
+                self,
+                """
+                ProjectItem#projectItem {
+                    background: transparent;
+                    border-left: 3px solid transparent;
+                    border-radius: 6px;
+                }
+            """,
+            )
+
+    def _emit_export(self):
+        self.exportClicked.emit(self._name)
+
+    def _emit_archive(self):
+        self.archiveClicked.emit(self._name)
+
+    def _emit_new_session(self):
+        self.newSessionClicked.emit(self._name)
+
+    def _emit_open_folder(self):
+        if self._root_dir:
+            self.openFolderClicked.emit(self._name, self._root_dir)
+
+    def _build_project_menu(self) -> QMenu:
+        """构建项目操作菜单（归档 / 导出 / 打开根目录），「更多」按钮与右键共用"""
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {Colors.CARD_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        menu.addAction("归档此项目", self._emit_archive)
+        menu.addAction("导出项目压缩包", self._emit_export)
+        if self._root_dir:
+            menu.addAction("打开项目根目录", self._emit_open_folder)
+        return menu
+
+    def _show_more_menu(self) -> None:
+        """「更多」按钮点击：弹项目操作菜单（与右键菜单同构）"""
+        menu = self._build_project_menu()
+        pos = self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft())
+        self._exec_menu_keep_hover(menu, pos)
+
+    def contextMenuEvent(self, event):
+        """右键菜单：归档 / 导出项目压缩包 / 打开项目根目录（与「更多」按钮菜单同构）"""
+        if self._is_all_entry:
+            return  # 聚合行（「全部项目」）无单项目操作
+        menu = self._build_project_menu()
+        self._exec_menu_keep_hover(menu, event.globalPos())
+
+    def _exec_menu_keep_hover(self, menu: "QMenu", pos) -> None:
+        """弹出菜单并在菜单打开期间保持行 hover 态
+
+        ``menu.exec`` 阻塞期间鼠标移入菜单会触发 leaveEvent，行立即复位成
+        静止态（底色消失 + 按钮隐藏），用户回看时认不出菜单属于哪一行。
+        置 ``_menu_open`` 让 leaveEvent 跳过复位；菜单关闭后鼠标若已不在
+        行内，再统一复位。
+        """
+        self._menu_open = True
+        try:
+            menu.exec(pos)
+        finally:
+            self._menu_open = False
+        if not self.underMouse():
+            self._restore_base_style()
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            # 右键留给 contextMenuEvent 弹菜单，不触发选中
+            super().mousePressEvent(event)
+            return
+        if self._is_all_entry:
+            self.allClicked.emit()
+        else:
+            self.clicked.emit(self._name)
+        super().mousePressEvent(event)
+
+    def set_meta(self, session_count: int, worktree_count: int):
+        """设置项目元数据（仅会话数；工作目录数已隐藏以精简显示密度）"""
+        self._session_count = session_count
+        self._worktree_count = worktree_count
+        parts = []
+        if session_count > 0:
+            parts.append(f"{session_count}会话")
+        Colors.refresh()
+        self._meta_label.setText(" · ".join(parts) if parts else "")
+        self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+
+    def set_root_dir(self, root_dir: str):
+        """设置项目根目录路径（空字符串/None 则隐藏根目录行）"""
+        self._root_dir = root_dir or ""
+        if not root_dir:
+            # 切换回单行高度，与未设置根目录的项目保持紧凑
+            self._root_dir_label.hide()
+            self.setFixedHeight(self._SINGLE_LINE_HEIGHT)
+            return
+        Colors.refresh()
+        self._root_dir_label.setText(root_dir)
+        self._root_dir_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._root_dir_label.setToolTip(root_dir)  # tooltip 展示完整路径
+        self._root_dir_label.show()
+        self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
+
+    def refresh_style(self) -> None:
+        """主题/字体变更后重刷动态样式（与 _ProjectSelectorHeader.refresh_style 同链路调用）
+
+        项目色是主题感知的（深浅档明度不同），须重取：``_project_color`` 是
+        构造期缓存的实例字段，头像色块又是 QPainter 自绘，不重取会残留旧档色。
+        """
+        Colors.refresh()
+        self._project_color = get_project_color(self._name)
+        self._avatar_label.set_project(self._name, self._project_color)
+        self._apply_base_style()
+        self._apply_name_style()
+        style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        if self._root_dir:
+            style_if_changed(
+                self._root_dir_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+            )
+
+    def enterEvent(self, event):
+        # hover 仅调底色（弱反馈但跨主题可见）：非当前行用主题交互染底
+        # TAB_ACTIVE_BG（深 30% / 浅 18%，HOVER_BG 仅 8% 叠面板底肉眼难辨）；
+        # 当前行同色系明显提亮（0.10 → 0.28）。不做「名字变色加粗 + 元数据
+        # 提亮」的强反馈，左色条语义保持：当前行项目色、非当前行透明。
+        Colors.refresh()
+        if self._is_current:
+            tint = _alpha_tint(self._project_color, 0.28, fallback=Colors.TAB_ACTIVE_BG)
+            style_if_changed(
+                self,
+                f"""
+                ProjectItem#projectItem {{
+                    background: {tint};
+                    border-left: 3px solid {self._project_color};
+                    border-radius: 6px;
+                }}
+            """,
+            )
+        else:
+            style_if_changed(
+                self,
+                f"""
+                ProjectItem#projectItem {{
+                    background: {Colors.TAB_ACTIVE_BG};
+                    border-left: 3px solid transparent;
+                    border-radius: 6px;
+                }}
+            """,
+            )
+        # 聚合行（「全部项目」）不提供单项目操作：无行内按钮
+        if not self._is_all_entry:
+            self._row_btns.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        # 行操作菜单执行中跳过复位（鼠标移入菜单触发的假离开），
+        # 保持 hover 态；菜单关闭后由 _exec_menu_keep_hover 统一收尾。
+        if self._menu_open:
+            super().leaveEvent(event)
+            return
+        self._restore_base_style()
+        super().leaveEvent(event)
+
+    def _restore_base_style(self) -> None:
+        """复位到静止态（当前项目保留淡染底 + 色条，非当前项目透明）"""
+        self._apply_base_style()
+        self._apply_name_style()
+        Colors.refresh()
+        style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._row_btns.hide()
+
+
+class ProjectSelectorCardContent(QWidget):
+    """项目选择卡片内容"""
+
+    projectSelected = Signal(str)
+    newProjectCreated = Signal(str)
+    archiveProject = Signal(str)
+    exportProject = Signal(str)  # 导出项目压缩包
+    importProjectRequested = Signal()  # 导入项目压缩包（按钮触发）
+    projectFileDropped = Signal(str)  # 拖拽 .drifox_project 文件路径
+    openFolderRequested = Signal(str, str)  # project_name, root_dir
+    folderDropped = Signal(str)  # 拖拽文件夹路径
+    allProjectsSelected = Signal()  # 「全部项目」首行点击（聚合视图，无对应项目实体）
+    newSessionRequested = Signal(str)  # 项目行内「新建会话」：切到该项目并新建会话
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._projects: list = []
+        self._current_project: str = ""
+        self._meta_map: Dict[str, Dict[str, int]] = {}
+        self._root_dir_map: Dict[str, str] = {}
+        self._project_items: list = []  # 存储 ProjectItem 实例，用于过滤
+        # [PERF] 项目名 → ProjectItem 行缓存：打开面板每次都刷新列表，
+        # 旧实现全量 deleteLater+重建 26 行（130+ 次 setStyleSheet），改为命中复用
+        self._item_cache: Dict[str, ProjectItem] = {}
+        self._filter_text: str = ""
+        self._all_entry_label: str = ""  # 非空时列表首行插入该聚合行（历史插件项目选择面板用）
+        self._setup_ui()
+        # 启用拖拽
+        self.setAcceptDrops(True)
+
+    def _setup_ui(self):
+        Colors.refresh()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        # ── 项目列表滚动区域 ──
+        self._scroll_area = ScrollArea(self)
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self._scroll_area.setStyleSheet(f"""
+            QScrollArea {{
+                border: none;
+                background: transparent;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            {get_unified_scrollbar_style(8)}
+        """)
+
+        self._content_widget = QWidget()
+        self._content_widget.setStyleSheet("background: transparent;")
+        self._content_widget.setAcceptDrops(True)
+        # 内容 widget 也接受拖拽，扩大拖拽热区
+        self._content_layout = QVBoxLayout(self._content_widget)
+        # 右 margin 14：qfluentwidgets ScrollArea 的滚动条是 overlay 浮层
+        # （原生条被 SmoothScrollDelegate 强制隐藏），占右缘 13px，须留位避让
+        self._content_layout.setContentsMargins(0, 2, 14, 2)
+        # 项目行间距 2px：当前项目带常驻底纹 + 左色条后，1px 会让相邻行块面
+        # 粘在一起（淡染底贴着色条像同一块），2px 让每行边界清楚但仍紧凑
+        self._content_layout.setSpacing(2)
+
+        self._scroll_area.setWidget(self._content_widget)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        from app.utils.design_tokens import make_card_content_opaque
+
+        make_card_content_opaque(self._content_widget, 246)
+        self._scroll_area.setMinimumHeight(40)
+        # scroll_area 本身也启用拖拽（用户可能拖到空白区）
+        self._scroll_area.setAcceptDrops(True)
+        self._content_widget.setAcceptDrops(True)
+        layout.addWidget(self._scroll_area, 1)
+
+    # ── 拖拽支持（文件夹 / .drifox_project 文件） ──
+
+    def _is_drifox_project(self, path: str) -> bool:
+        return path.endswith(".drifox_project") or path.endswith(".zip")
+
+    def dragEnterEvent(self, event):
+        """判断拖入内容是否为文件夹或 .drifox_project 文件"""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if os.path.isdir(path) or self._is_drifox_project(path):
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        """拖拽移动时保持接受状态"""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if os.path.isdir(path) or self._is_drifox_project(path):
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dropEvent(self, event):
+        """放下文件夹或 .drifox_project 文件时发射信号"""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if self._is_drifox_project(path):
+                        self.projectFileDropped.emit(path)
+                        event.acceptProposedAction()
+                        return
+                    if os.path.isdir(path):
+                        self.folderDropped.emit(path)
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def closeEvent(self, event):
+        """关闭时逐层摘除拖放 OLE 注册（本卡三处均开了 acceptDrops）。
+
+        拖放热区跨 self / 内容容器 / 滚动区三层，析构后 OLE 若仍持有任一
+        drop target 会在 COM 回调里触达已释放对象 → failfast。逐层关闭并
+        容错，任一层失败不阻塞关闭。
+        """
+        for widget in (self, self._content_widget, self._scroll_area):
+            try:
+                widget.setAcceptDrops(False)
+            except (RuntimeError, AttributeError):
+                pass
+        super().closeEvent(event)
+
+    # ── 拖拽视觉反馈 ──
+    def refresh_style(self):
+        """刷新主题样式（含滚动条颜色）"""
+        Colors.refresh()
+        # 刷新滚动区域样式表（滚动条颜色随主题变化）
+        self._scroll_area.setStyleSheet(f"""
+            QScrollArea {{
+                border: none;
+                background: transparent;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            {get_unified_scrollbar_style(8)}
+        """)
+        # 强制滚动条重新应用样式（水平+垂直，确保主题切换后颜色即时生效）
+        for sb in (self._scroll_area.verticalScrollBar(), self._scroll_area.horizontalScrollBar()):
+            if sb is not None:
+                sb_style = sb.style()
+                if sb_style is not None:
+                    sb_style.unpolish(sb)
+                    sb_style.polish(sb)
+
+    # ── 公有方法 ──────────────────────────────────────
+
+    def set_projects_data(
+        self,
+        projects: list,
+        current_project: str,
+        meta_map: Dict[str, Dict[str, int]] = None,
+        root_dir_map: Dict[str, str] = None,
+        all_entry_label: str = "",
+    ):
+        """设置项目列表数据
+
+        Args:
+            projects: 项目名列表
+            current_project: 当前项目名
+            meta_map: {project: {"sessions": int, "worktrees": int}} 可选元数据
+            root_dir_map: {project: root_dir_path} 可选根目录映射
+            all_entry_label: 非空时在列表首行插入该聚合行（点击发 allProjectsSelected）
+        """
+        self._projects = list(projects)
+        self._current_project = current_project
+        self._meta_map = meta_map or {}
+        self._root_dir_map = root_dir_map or {}
+        self._all_entry_label = all_entry_label
+        self._refresh_project_list()
+        # 设置完后重新应用当前过滤
+        if self._filter_text:
+            self.set_filter(self._filter_text)
+
+    def set_filter(self, text: str):
+        """根据文本过滤项目列表，空文本/无匹配时显示全部"""
+        self._filter_text = text
+        keyword = text.strip().lower() if text.strip() else ""
+
+        for item in self._project_items:
+            if not keyword:
+                item.setVisible(True)
+            else:
+                item.setVisible(keyword in item._name.lower())
+
+    def _refresh_project_list(self):
+        """刷新项目列表（缓存复用：项目名 → ProjectItem）
+
+        [PERF] 旧实现每次全量 deleteLater + 重建全部行：26 行 = 130+ 次
+        setStyleSheet + TransparentToolButton 重建，热态实测 63-88ms，且每次
+        打开面板（展开前刷新）都重付。项目集合在两次刷新间高度稳定，改为按
+        项目名缓存复用：命中行只做 set_meta / set_root_dir / set_current
+        就地更新，仅新增/消失的项目才建/销。
+        """
+        layout = self._content_layout
+        cached_ids = {id(w) for w in self._item_cache.values()}
+        # 摘空布局：缓存行保留待复用，非缓存行（历史遗留）销毁
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None and id(w) not in cached_ids:
+                w.deleteLater()
+        self._project_items.clear()
+
+        # 清理不再出现的项目缓存行
+        wanted = set(self._projects)
+        if self._all_entry_label:
+            wanted.add("__all__")
+        for k in [k for k in self._item_cache if k not in wanted]:
+            w = self._item_cache.pop(k, None)
+            if w is not None:
+                w.deleteLater()
+
+        def _attach(w: ProjectItem, key: str, is_current: bool):
+            self._ensure_item_signals(w)
+            if key != "__all__":
+                meta = self._meta_map.get(key, {})
+                w.set_meta(session_count=meta.get("sessions", 0), worktree_count=meta.get("worktrees", 0))
+                w.set_root_dir(self._root_dir_map.get(key, ""))
+                w.set_current(is_current)
+            layout.addWidget(w)
+            w.show()
+            self._project_items.append(w)
+
+        # 聚合首行（「全部项目」）：无项目实体、无元数据、无导出/归档操作
+        if self._all_entry_label:
+            w = self._item_cache.get("__all__")
+            if w is None:
+                w = ProjectItem(self._all_entry_label, False, self, is_all_entry=True)
+                self._item_cache["__all__"] = w
+            _attach(w, "__all__", False)
+
+        # 添加项目
+        for proj_name in self._projects:
+            w = self._item_cache.get(proj_name)
+            if w is None:
+                w = ProjectItem(proj_name, proj_name == self._current_project, self)
+                self._item_cache[proj_name] = w
+            _attach(w, proj_name, proj_name == self._current_project)
+
+        # 末尾补弹簧把项目行顶到列表上部（只在重建完成后加一次；
+        # 逐行加会把行与行之间全隔上弹簧，被剩余空间平分撒开）
+        layout.addStretch(1)
+
+    def _ensure_item_signals(self, item: ProjectItem):
+        """（重）连接行信号：缓存复用行先断旧连接防重复触发"""
+        for sig, slot in (
+            (item.clicked, self._on_project_item_clicked),
+            (item.archiveClicked, self._on_archive_clicked),
+            (item.exportClicked, self._on_export_clicked),
+            (item.openFolderClicked, self._on_open_folder_clicked),
+            (item.newSessionClicked, self._on_new_session_clicked),
+        ):
+            try:
+                sig.disconnect()
+            except TypeError:
+                pass
+            sig.connect(slot)
+        try:
+            item.allClicked.disconnect()
+        except TypeError:
+            pass
+        item.allClicked.connect(self.allProjectsSelected.emit)
+
+    def _on_project_item_clicked(self, name: str):
+        """项目被点击"""
+        self.projectSelected.emit(name)
+
+    def _on_open_folder_clicked(self, project_name: str, root_dir: str):
+        """打开项目根目录按钮被点击"""
+        self.openFolderRequested.emit(project_name, root_dir)
+
+    def _on_new_session_clicked(self, project_name: str):
+        """行内「新建会话」按钮被点击（切到该项目并新建会话，由承载方实现）"""
+        self.newSessionRequested.emit(project_name)
+
+    def _on_export_clicked(self, project_name: str):
+        """导出按钮被点击"""
+        self.exportProject.emit(project_name)
+
+    def _on_archive_clicked(self, project_name: str):
+        """归档被点击（行内菜单 / 右键菜单入口）"""
+        from app.widgets.common_dialogs import ConfirmDialog
+
+        _confirmed: list[bool] = [False]
+
+        def _on_archive_confirm():
+            _confirmed[0] = True
+
+        _dialog = ConfirmDialog(
+            title="归档确认",
+            content=f"确定归档项目「{project_name}」吗？\n归档后该项目的所有会话将移动到归档区。",
+            confirm_text="归档",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        _dialog.confirmed.connect(_on_archive_confirm)
+        _dialog.exec()
+        if _confirmed[0]:
+            self.archiveProject.emit(project_name)

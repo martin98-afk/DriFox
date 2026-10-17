@@ -64,14 +64,18 @@ from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
-from app.widgets.panel_mode_popup import PanelModePopup
+from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from app.widgets.workspace_tree import (
+    _SCROLLBAR_RESERVE,
+    HOVER_DARK,
+    HOVER_LIGHT,
     KIND_PROJECT,
     KIND_SESSION,
     KIND_WIDGET,
-    KIND_WORKTREE,
     TreeNodeSpec,
     WorkspaceTree,
+    draw_tree_guide,
+    tree_content_left,
 )
 
 
@@ -98,28 +102,28 @@ def _parse_rgba(rgba_str: str) -> _QColor:
 _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
 _CACHED_INFO = _parse_rgba(Colors.INFO)
 
+# 树行化选中底色：淡靛蓝（深 22% / 浅 17%），比列表模式青蓝 35% 弱一档；
+# hover 色值复用 workspace_tree 的 HOVER_DARK / HOVER_LIGHT（树节点头同源）
+_TREE_ROW_SELECTED_DARK = _QColor(99, 102, 241, 56)
+_TREE_ROW_SELECTED_LIGHT = _QColor(99, 102, 241, 43)
+
 # ── 对话页面板显示模式 ──
 PANEL_MODE_LIST = "list"  # 列表模式（默认）：已打开对话页 + 团队框平铺
-PANEL_MODE_TREE = "tree"  # 工作区树模式：项目 → 工作树 → 会话
+PANEL_MODE_TREE = "tree"  # 工作区树模式（v2 扁平）：项目 → 会话
 
-# 树模式缩进（像素）：项目头 0 / 工作树头·团队头 8 / 已打开 Tab 14 / 会话行 42
-# 四个数值是配套的，改一个必须同步另外三个：
-#   已打开 Tab：内部左边距 8+14，项目图标 20px + 间距 6 → 文字起点 48
-#   会话行    ：左边距 6+42 → 文字起点 48（会话行不带图标，见 workspace_tree）
+# 树模式节点 indent（像素）：项目头 0 / 已打开 Tab 节点 14 / 会话行 42
+# v2 去掉了工作树中间层：项目直挂会话，内容起点由各行 margins 承担
+# （TabItem/set_tree_row 与 _SessionRow 各摆各的），indent 只供树折叠跳过
+# 逻辑判层（同层 ≤ 折叠点、更深层 > 折叠点），不驱动缩进视觉。
 _TREE_INDENT_PROJECT = 0
-_TREE_INDENT_WORKTREE = 8
 _TREE_INDENT_TAB = 14
 _TREE_INDENT_SESSION = 42
-# 单个工作树下最多渲染的历史会话条数（侧栏窄，防止一次性构建上百行）
+# 单个项目下最多渲染的非置顶历史会话条数（侧栏窄，防止一次性构建上百行；置顶不受限）
 _TREE_MAX_SESSIONS = 50
 
-# 模式选择悬浮框的选项（(mode, 主标签, 说明)）
-_PANEL_MODE_OPTIONS = (
-    (PANEL_MODE_LIST, "列表模式", "按打开顺序平铺对话页"),
-    (PANEL_MODE_TREE, "工作区树模式", "按项目 / 工作树归组"),
-)
 
 # 顶部标题文案随模式切换（列表模式=「对话页」/树模式=「工作区」）
+# 顶栏改版后暂无消费方（「新建对话」行替代标题），保留常量供模式语义参考
 _PANEL_MODE_TITLES = {
     PANEL_MODE_LIST: "对话页",
     PANEL_MODE_TREE: "工作区",
@@ -127,33 +131,51 @@ _PANEL_MODE_TITLES = {
 
 
 # 项目头像（缩写 + 稳定色）缓存：颜色由 crc32(name) 决定，与会话无关，可安全缓存。
-# ⚠️ 延迟导入 project_selector_card —— 它是设置页的重模块，模块级 import 会拖慢启动。
+# 纯函数已拆至 app/utils/project_meta.py（轻模块，无 Qt/重依赖）。
 _PROJECT_ICON_CACHE: dict = {}
 
 
 def _project_icon_data(name: str) -> tuple:
-    """返回项目头像的 (缩写, rgba 颜色)，与 TabItem 的项目 icon 同一套算法"""
-    cached = _PROJECT_ICON_CACHE.get(name)
+    """返回项目头像的 (缩写, rgba 颜色)，与 TabItem 的项目 icon 同一套算法
+
+    缓存 key 含当前主题深浅档：配色现为主题感知（浅色压亮、深色提亮），
+    不参与分桶会在切主题后残留旧档颜色。
+    """
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        is_light = bool(theme_manager.is_light_theme())
+    except Exception:
+        is_light = False
+    cache_key = (name, is_light)
+    cached = _PROJECT_ICON_CACHE.get(cache_key)
     if cached is not None:
         return cached
     try:
-        from app.widgets.cards.settings.project_selector_card import (
-            extract_project_initials,
-            get_project_color,
-        )
+        from app.utils.project_meta import extract_project_initials, get_project_color
 
         data = (extract_project_initials(name), get_project_color(name, alpha=255))
     except Exception:
         data = ("?", "rgba(128,128,128,255)")
-    _PROJECT_ICON_CACHE[name] = data
+    _PROJECT_ICON_CACHE[cache_key] = data
     return data
 
 
 def _invalidate_cached_colors():
-    """主题变更后重新解析缓存颜色，确保 paintEvent 使用最新色值"""
+    """主题变更后重新解析缓存颜色，确保 paintEvent 使用最新色值
+
+    含项目头像缓存：其颜色现为主题感知，切主题必须整体作废重算。
+    """
     global _CACHED_SELECTED_BG, _CACHED_INFO
     _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
     _CACHED_INFO = _parse_rgba(Colors.INFO)
+    _PROJECT_ICON_CACHE.clear()
+    try:
+        from app.utils.project_meta import invalidate_color_cache
+
+        invalidate_color_cache()
+    except Exception:
+        pass
 
 
 # 彩虹动画颜色列表（模块级常量，避免每次 paint 创建 10 个 QColor）
@@ -309,13 +331,20 @@ class _TabProjectIcon(QWidget):
         self._size = size
         self._initials = ""
         self._color = QColor(128, 128, 128)
+        self._text_color = QColor("#ffffff")
         self._fallback_pixmap: Optional[QPixmap] = None
         self.setFixedSize(size, size)
 
-    def set_project(self, initials: str, color_rgba: str):
-        """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）"""
+    def set_project(self, initials: str, color_rgba: str, text_color: str = ""):
+        """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）
+
+        text_color 非空时直接用作缩写字色（语义常量色如临时会话隐身紫，
+        字色随色定义处声明），空则恒白：两种主题的项目色都被 get_project_color
+        压进白字可读带（浅档白字≥5.1 / 深档白字≥3.5）。
+        """
         self._initials = initials if initials else "?"
         self._color = self._parse_rgba(color_rgba)
+        self._text_color = QColor(text_color) if text_color else QColor("#ffffff")
         self._fallback_pixmap = None  # 清除 pixmap fallback
         self.update()
 
@@ -349,13 +378,13 @@ class _TabProjectIcon(QWidget):
 
         rect = self.rect()
 
-        # ── 项目头像模式：直接画圆角矩形 + 白字 ──
+        # ── 项目头像模式：直接画圆角矩形 + 自适应字色 ──
         if self._initials:
             painter.setPen(Qt.NoPen)
             painter.setBrush(self._color)
             painter.drawRoundedRect(rect, 5, 5)
 
-            painter.setPen(Qt.white)
+            painter.setPen(self._text_color)
             font = get_unified_font()
             font.setPixelSize(scale_font_size(self._size * 14 // 24))
             font.setBold(True)
@@ -386,9 +415,14 @@ class _TabProjectIcon(QWidget):
 
 
 class TabItem(QFrame):
-    """单个 Tab 项的 UI 组件"""
+    """单个 Tab 项的 UI 组件
+
+    树模式（v2）下为两行式：标题 / 预览·时间（与历史会话行同构）；
+    列表模式下副行隐藏，仅显示标题（与改动前一致）。
+    """
 
     closeRequested = Signal()
+    pinToggleRequested = Signal()  # 图钉点击（置顶态由 TabPanel 从数据层读）
 
     def __init__(
         self, title: str, icon=None, parent=None, panel=None, project_initials: str = "", project_color: str = ""
@@ -397,6 +431,7 @@ class TabItem(QFrame):
         self._title = title
         self._project_initials = project_initials
         self._project_color = project_color
+        self._project_text_color = ""  # 语义常量色的固定字色（空=按亮度自适应）
         self._selected = False
         self._streaming = False
         self._stream_error = False
@@ -404,10 +439,9 @@ class TabItem(QFrame):
         self._hovered = False  # 鼠标悬停态
         self._team_mode = False  # 团队模式：隐藏项目 icon（项目 icon 移到团队标题处）
         self._compact = False  # 紧凑模式（侧边栏折叠态）：仅图标 + 状态指示条
-        self._indent = 0  # 树模式缩进（左侧内边距增量，像素）
-        # 树模式专属：已激活（该会话占用一个后端）标记 + 关闭按钮常显
-        self._open_marker = False
-        self._close_persistent = False
+        # 树行化（列表模式复位）：28px / 无图标 / 淡靛蓝选中 / 关闭钮 hover 才显。
+        # 单入口 set_tree_row 收敛，由 TabPanel 在树/列表两个重建点调用。
+        self._tree_row = False
         self._capsule_color = ""  # 胶囊颜色（紧凑态首字符图标用同色）
         self._compact_saved = None  # 紧凑态恢复现场（展开时逐控件配对还原）
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
@@ -417,13 +451,16 @@ class TabItem(QFrame):
         self._close_timer.setSingleShot(True)
         self._close_timer.setInterval(3000)
         self._close_timer.timeout.connect(self._cancel_close_confirm)
-        # ── paintEvent 缓存：当尺寸未变时复用 QPainterPath ──
-        self._cached_rect_key = (-1, -1)
+        # ── paintEvent 缓存：当尺寸/树行化状态未变时复用 QPainterPath ──
+        self._cached_rect_key = (-1, -1, None)
         self._cached_round_rect = None
+        # 树行化副行（预览 · 时间）与置顶态（由 TabPanel 逐帧同步）
+        self._sub_text = ""
+        self._pinned = False
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setFixedHeight(40)  # 行高分档由 _refresh_row_height 决定（团队列表态 32 / 其余 40）
+        self.setFixedHeight(40)  # 行高分档由 _refresh_row_height 决定（树行 28 / 团队列表态 32 / 其余 40）
         self.setCursor(Qt.PointingHandCursor)
 
         # 图标尺寸：跟随系统字体缩放
@@ -439,13 +476,6 @@ class TabItem(QFrame):
         self._apply_project_to_icon()
         layout.addWidget(self._icon_widget)
 
-        # ── 已激活标记（树模式）：一个会话占用一个后端，需可辨识 + 可关闭 ──
-        self._active_dot = QLabel(self)
-        self._active_dot.setFixedSize(6, 6)
-        self._active_dot.setVisible(False)
-        self._active_dot.setToolTip("已激活：占用一个后端")
-        layout.addWidget(self._active_dot)
-
         # ── 团队角色胶囊（默认隐藏）──
         self._capsule_label = QLabel(self)
         self._capsule_label.setVisible(False)
@@ -453,10 +483,45 @@ class TabItem(QFrame):
         self._capsule_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         layout.addWidget(self._capsule_label)
 
+        # 文本区（两行式主体）：标题 / 副行（树行化时显示预览·时间）
+        self._body = QWidget(self)
+        self._body.setStyleSheet("background: transparent;")
+        body_layout = QVBoxLayout(self._body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(2)
+        self._body_layout = body_layout
+
         # 标题（使用 _ElidedLabel 自动省略，保证关闭按钮始终可见）
-        self._title_label = _ElidedLabel(self._title, self)
+        self._title_label = _ElidedLabel(self._title, self._body)
+        body_layout.addWidget(self._title_label)
+
+        # 副行（树行化才显示）：预览·工作树名 | 相对时间（右对齐）
+        self._sub_row = QWidget(self._body)
+        self._sub_row.setStyleSheet("background: transparent;")
+        _sub_layout = QHBoxLayout(self._sub_row)
+        _sub_layout.setContentsMargins(0, 0, 0, 0)
+        _sub_layout.setSpacing(6)
+        self._sub_label = _ElidedLabel("", self._sub_row)
+        self._sub_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        _sub_layout.addWidget(self._sub_label, 1)
+        self._sub_time = QLabel("", self._sub_row)
+        self._sub_time.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self._sub_time.setStyleSheet("background: transparent;")
+        _sub_layout.addWidget(self._sub_time, 0)
+        self._sub_row.setVisible(False)
+        body_layout.addWidget(self._sub_row)
+        layout.addWidget(self._body, 1)
         self._apply_title_style()
-        layout.addWidget(self._title_label, 1)
+
+        # 图钉（树行化才显示）：置顶后常显，否则 hover 才显；点击切置顶
+        self._pin_btn = TransparentToolButton(self)
+        self._pin_btn.setFixedSize(20, 20)
+        self._pin_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
+        self._pin_btn.setCursor(Qt.PointingHandCursor)
+        self._pin_btn.setVisible(False)
+        self._pin_btn.setAttribute(Qt.WA_NoMousePropagation, True)
+        self._pin_btn.clicked.connect(lambda *_a: self.pinToggleRequested.emit())
+        layout.addWidget(self._pin_btn)
 
         # 关闭按钮（与主标题栏一致的 FluentIcon.CLOSE，支持内联二次确认）
         self._close_btn = TransparentToolButton(self)
@@ -478,11 +543,21 @@ class TabItem(QFrame):
         """
         from app.utils.utils import get_unified_font
 
+        # 树行化后并入 12px 体系（与历史会话行一致）；列表模式保持 13px
+        size = 12 if self._tree_row else 13
         # 直接通过 setFont 强制应用字体（避开 stylesheet 继承坑）
-        self._title_label.setFont(get_unified_font(13))
+        self._title_label.setFont(get_unified_font(size))
         # 颜色随主题刷新（字体同一行写也能 setFont，但颜色走 stylesheet 更稳）
         self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(13)}"
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(size)}"
+        )
+        self._sub_label.setFont(get_unified_font(10))
+        self._sub_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        )
+        self._sub_time.setFont(get_unified_font(10))
+        self._sub_time.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
 
     def refresh_style(self):
@@ -493,9 +568,8 @@ class TabItem(QFrame):
             self._icon_size = new_size
             self._icon_widget.setFixedSize(self._icon_size, self._icon_size)
             self._apply_project_to_icon()
+        self._refresh_tree_indent()
         self._apply_title_style()
-        # 「已激活」圆点用 INFO 色（主题感知，浅色/深色都可见）
-        self._active_dot.setStyleSheet(f"background: {Colors.INFO}; border-radius: 3px; border: none;")
         # 紧凑态团队模式：字号缩放后幂等重刷首字符图标（补充点 3）
         if self._compact and self._team_mode:
             self._apply_compact_icon()
@@ -521,17 +595,30 @@ class TabItem(QFrame):
         self._icon_widget.setToolTip(title)
 
     def _apply_project_to_icon(self):
-        """将项目信息交给 _TabProjectIcon 绘制"""
+        """将项目信息交给 _TabProjectIcon 绘制；无项目数据时隐藏色块（对齐团队框惯例）"""
         if self._project_initials and self._project_color:
-            self._icon_widget.set_project(self._project_initials, self._project_color)
+            self._icon_widget.set_project(self._project_initials, self._project_color, self._project_text_color)
+        else:
+            self._icon_widget.setVisible(False)
 
-    def set_project(self, initials: str, color_rgba: str):
-        """设置项目头像（缩写+颜色）"""
+    def set_project(self, initials: str, color_rgba: str, text_color: str = ""):
+        """设置项目头像（缩写+颜色）；initials 为空时隐藏色块图标（如临时对话页）
+
+        text_color：语义常量色的固定字色（如临时紫配白），空=按亮度自适应。
+        """
         self._project_initials = initials
         self._project_color = color_rgba
+        self._project_text_color = text_color
         self._apply_project_to_icon()
+        # 树行化：无图标形态（归属由工作树节点表达），数据照常写入但色块保持隐藏
+        if self._tree_row:
+            self._icon_widget.setVisible(False)
+            return
+        # 有项目数据：确保色块可见（隐藏仅由空数据/团队模式触发）
+        if initials and color_rgba:
+            self._icon_widget.setVisible(True)
         # 紧凑态非团队：保持图标显示（项目 icon 为折叠态唯一标识）
-        if self._compact and not self._team_mode:
+        if self._compact and not self._team_mode and initials:
             self._icon_widget.setVisible(True)
 
     def set_icon(self, icon):
@@ -540,43 +627,63 @@ class TabItem(QFrame):
         self._project_color = ""
         self._icon_widget.set_fallback_pixmap(icon)
 
-    def set_indent(self, px: int):
-        """树模式缩进：只调左侧内边距，其余三边保持不变
+    def set_tree_row(self, on: bool):
+        """树行化（v2 两行式）：单入口收敛 行高 / 图标 / 副行 / 图钉 / 关闭钮 / 字号
 
-        背景仍铺满整行（paintEvent 用 self.rect()），缩进只影响内容起点，
-        与树里其它行（工作树头 / 会话行）共用一套像素体系。
-        """
-        px = max(0, int(px))
-        if self._indent == px:
-            return
-        self._indent = px
-        lay = self.layout()
-        if lay is not None:
-            lay.setContentsMargins(8 + px, 4, 4, 4)
+        树行化后已打开对话页与树内历史会话行同构：44px 两行式（标题 /
+        预览·时间，副行文本由 set_tree_subtitle 逐帧同步）、无项目图标、
+        内容左缘缩进对齐项目名 + 左侧引导竖线、标题 12px、关闭钮 hover 才显、
+        图钉置顶后常显。
 
-    def set_open_marker(self, on: bool):
-        """树模式「已激活」标记：该对话页已占用一个后端
-
-        紧凑态（46px 窄条）不显示，退出紧凑时由 set_compact 按标记恢复。
+        ⚠️ 只由 TabPanel 在「树布局重建（True）/ 列表重建复位（False）」两个
+        点调用；与紧凑态互斥（树模式折叠时降级列表渲染）。
         """
         on = bool(on)
-        if self._open_marker == on:
+        if self._tree_row == on:
             return
-        self._open_marker = on
-        if not self._compact:
-            self._active_dot.setVisible(on)
+        self._tree_row = on
+        if on:
+            self.layout().setContentsMargins(tree_content_left(), 5, _SCROLLBAR_RESERVE, 5)
+            self._icon_widget.setVisible(False)
+            self._sub_row.setVisible(True)
+            self._close_btn.setVisible(False)  # hover 才显（enterEvent）
+            self._sync_pin()
+        else:
+            self.layout().setContentsMargins(8, 4, 4, 4)
+            # 图标恢复现行语义：团队模式 / 无项目数据 → 隐藏
+            self._icon_widget.setVisible(bool(self._project_initials and self._project_color) and not self._team_mode)
+            self._sub_row.setVisible(False)
+            self._pin_btn.setVisible(False)
+        self._apply_title_style()
+        self._refresh_row_height()
+        self.update()
 
-    def set_close_persistent(self, on: bool):
-        """树模式：关闭按钮常显（已激活会话占着后端，必须一眼看到可关）
+    def set_tree_subtitle(self, text: str, time_text: str = ""):
+        """树行化副行文本：左段（预览·工作树名，可省略）+ 右段（相对时间，右对齐）"""
+        text = str(text or "")
+        if self._sub_label.text() != text:
+            self._sub_label.setText(text)
+        time_text = str(time_text or "")
+        if self._sub_time.text() != time_text:
+            self._sub_time.setText(time_text)
+        self._sub_time.setVisible(bool(time_text))
 
-        列表模式下恒为 False（保持 hover 才显的既有行为）。
-        """
-        on = bool(on)
-        if self._close_persistent == on:
+    def set_pinned(self, pinned: bool):
+        """置顶态同步：置顶常显图钉（金色），未置顶 hover 才显"""
+        pinned = bool(pinned)
+        if self._pinned == pinned:
             return
-        self._close_persistent = on
-        if not self._compact:
-            self._close_btn.setVisible(on)
+        self._pinned = pinned
+        self._sync_pin()
+
+    def _sync_pin(self):
+        """图钉显隐与图标态同步（仅树行化下参与显示）"""
+        self._pin_btn.setIcon(get_icon("取消置顶" if self._pinned else "置顶"))
+        self._pin_btn.setToolTip("取消置顶" if self._pinned else "置顶")
+        if not self._tree_row or self._compact:
+            self._pin_btn.setVisible(False)
+            return
+        self._pin_btn.setVisible(self._pinned or self._hovered)
 
     def set_capsule(self, text: str, color: str = ""):
         """显示团队角色胶囊"""
@@ -624,19 +731,31 @@ class TabItem(QFrame):
                 self._apply_project_to_icon()
                 self._icon_widget.setVisible(True)
         else:
-            self._icon_widget.setVisible(not team_mode)
+            # 树行化：无图标形态，不因模式切换重新点亮色块
+            self._icon_widget.setVisible(not team_mode and not self._tree_row)
         # 行高分档跟随模式：团队模式（列表态）成员行 32px
         self._refresh_row_height()
         self.update()
 
     def _refresh_row_height(self):
-        """行高分档：团队模式（列表态）成员行 32px 紧凑；树模式复用 / 非团队保持 40px
+        """行高分档：树行 44px（两行式）/ 团队模式（列表态）成员行 32px / 其余 40px
 
-        树模式下团队成员同样 _team_mode=True（角色胶囊仍在），但以 panel._mode
-        判定当前渲染容器；paintEvent 缓存按 (w, h) 自适应，行高变化无需额外失效。
+        paintEvent 缓存按 (w, h, _tree_row) 自适应，行高变化无需额外失效。
         """
+        if self._tree_row:
+            self.setFixedHeight(44)
+            return
         in_list = self._panel is None or getattr(self._panel, "_mode", PANEL_MODE_LIST) != PANEL_MODE_TREE
         self.setFixedHeight(32 if (self._team_mode and in_list) else 40)
+
+    def _refresh_tree_indent(self):
+        """树行化内容左缩进随缩放档位重算（字号缩放后对齐点会变）"""
+        if not self._tree_row:
+            return
+        m = self.layout().getContentsMargins()
+        left = tree_content_left()
+        if m[0] != left:
+            self.layout().setContentsMargins(left, m[1], m[2], m[3])
 
     def _apply_compact_icon(self):
         """紧凑态团队模式：用角色胶囊首字符 + 胶囊色绘制图标（折叠态成员可区分）
@@ -676,36 +795,44 @@ class TabItem(QFrame):
                 "title_visible": not self._title_label.isHidden(),
                 "capsule_visible": not self._capsule_label.isHidden(),
                 "close_visible": not self._close_btn.isHidden(),
-                "dot_visible": not self._active_dot.isHidden(),
                 "margins": self.layout().getContentsMargins(),
             }
             # 隐藏文字类控件，仅留图标
             self._title_label.setVisible(False)
+            self._sub_row.setVisible(False)
+            # _body 以 stretch=1 占位（_setup_ui），只藏子控件会把 icon 推到
+            # 最左侧：新建对话行/插件行无 stretch，QHBoxLayout 富余空间整体
+            # 居中；TabItem 富余全被 _body 吃掉 → icon 中心 18 vs 面板中线 23
+            # （46px 窄条下偏左 5px，与顶栏图标列错位）。连 _body 一起藏。
+            self._body.setVisible(False)
             self._capsule_label.setVisible(False)
             self._close_btn.setVisible(False)
-            self._active_dot.setVisible(False)
+            self._pin_btn.setVisible(False)
             self.layout().setContentsMargins(4, 4, 4, 4)
             if self._team_mode:
                 self._apply_compact_icon()
-            else:
+            elif self._project_initials and self._project_color and not self._tree_row:
+                # 无项目数据（如临时对话页）保持色块隐藏；树行化无图标形态同样保持隐藏
                 self._icon_widget.setVisible(True)
         else:
             saved = self._compact_saved or {}
-            # 团队模式：icon 恢复隐藏；非团队：恢复原可见性
-            if self._team_mode:
+            # 团队模式 / 树行化：icon 恒隐藏；其余恢复原可见性
+            if self._team_mode or self._tree_row:
                 self._icon_widget.setVisible(False)
             else:
                 self._icon_widget.setVisible(bool(saved.get("icon_visible", True)))
             # 还原图标数据（compact 期间可能被 set_project/set_icon 更新）
             self._apply_project_to_icon()
             # 展开态按当前语义恢复（非折叠前现场）：折叠期间可能加入团队/设置胶囊，
-            # 旧现场会漏显示——标题恒显、胶囊按团队模式+文本、close 恒隐（hover 再显）
+            # 旧现场会漏显示——标题恒显、副行按树行化态、胶囊按团队模式+文本、close 恒隐（hover 再显）
+            self._body.setVisible(True)
             self._title_label.setVisible(True)
+            self._sub_row.setVisible(bool(self._tree_row))
             has_capsule_text = bool((self._capsule_label.text() or "").strip())
             self._capsule_label.setVisible(self._team_mode and has_capsule_text)
-            # 树模式语义优先于折叠前现场：常显关闭钮 / 已激活标记按当前标记恢复
-            self._close_btn.setVisible(bool(self._close_persistent))
-            self._active_dot.setVisible(bool(self._open_marker))
+            # 关闭钮恒隐待 hover（树行同样 hover 才显）
+            self._close_btn.setVisible(False)
+            self._sync_pin()
             if "margins" in saved:
                 self.layout().setContentsMargins(*saved["margins"])
             self._compact_saved = None
@@ -772,10 +899,11 @@ class TabItem(QFrame):
         self._close_btn.setToolTip("")
 
     def enterEvent(self, event):
-        # 紧凑态守卫：折叠态不弹关闭按钮，避免撑破小容器（矩阵 C3）
+        # 紧凑态守卫：折叠态不弹关闭按钮/图钉，避免撑破小容器（矩阵 C3）
         if not self._compact:
             self._close_btn.setVisible(True)
         self._hovered = True
+        self._sync_pin()
         self.update()
         super().enterEvent(event)
 
@@ -783,9 +911,14 @@ class TabItem(QFrame):
         self._hovered = False
         # 移出 Tab 时若处于关闭确认态：取消确认（防止悬停残留误删）
         self._cancel_close_confirm()
-        if not self._selected and not self._compact:
-            # 树模式常显关闭钮：移出后仍保留（已激活会话占着后端）
-            self._close_btn.setVisible(bool(self._close_persistent))
+        if self._tree_row:
+            # 树行：hover 才显、移出即隐（选中不保持；选中态由底色表达）
+            if not self._compact:
+                self._close_btn.setVisible(False)
+        elif not self._selected and not self._compact:
+            # 列表模式：未选中或紧凑态恢复隐藏
+            self._close_btn.setVisible(False)
+        self._sync_pin()
         self.update()
         super().leaveEvent(event)
 
@@ -795,29 +928,37 @@ class TabItem(QFrame):
 
         w, h = self.width(), self.height()
 
-        # ── 构建统一圆角路径（与 hover 一致，8px 圆角 + 2px 内边距） ──
-        # ★ 缓存：尺寸未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
-        _key = (w, h)
+        # ── 构建统一圆角路径（列表 8px 圆角 / 树行 6px，与节点头对齐 + 2px 内边距） ──
+        # ★ 缓存：尺寸与树行化状态未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
+        _key = (w, h, self._tree_row)
         if _key != self._cached_rect_key:
             self._cached_round_rect = _QPainterPath()
-            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
+            _radius = 6 if self._tree_row else 8
+            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, _radius, _radius)
             self._cached_rect_key = _key
         _round_rect = self._cached_round_rect
 
         # ── 选中背景（圆角矩形，视觉与 hover 统一） ──
         if self._selected:
-            painter.fillPath(_round_rect, _CACHED_SELECTED_BG)
-
-        # ── 悬停：圆角渐变背景（使用缓存颜色常量） ──
-        if self._hovered and not self._selected:
-            hover_grad = _QLinearGradient(0, 0, w, 0)
-            if isDarkTheme():
-                hover_grad.setColorAt(0.0, _HOVER_DARK_COLORS[0])
-                hover_grad.setColorAt(1.0, _HOVER_DARK_COLORS[1])
+            if self._tree_row:
+                # 树行：淡靛蓝（比列表模式青蓝 35% 弱一档），无左指示条
+                painter.fillPath(_round_rect, _TREE_ROW_SELECTED_DARK if isDarkTheme() else _TREE_ROW_SELECTED_LIGHT)
             else:
-                hover_grad.setColorAt(0.0, _HOVER_LIGHT_COLORS[0])
-                hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
-            painter.fillPath(_round_rect, hover_grad)
+                painter.fillPath(_round_rect, _CACHED_SELECTED_BG)
+
+        # ── 悬停：列表渐变 / 树行纯色（与树节点头同款） ──
+        if self._hovered and not self._selected:
+            if self._tree_row:
+                painter.fillPath(_round_rect, HOVER_DARK if isDarkTheme() else HOVER_LIGHT)
+            else:
+                hover_grad = _QLinearGradient(0, 0, w, 0)
+                if isDarkTheme():
+                    hover_grad.setColorAt(0.0, _HOVER_DARK_COLORS[0])
+                    hover_grad.setColorAt(1.0, _HOVER_DARK_COLORS[1])
+                else:
+                    hover_grad.setColorAt(0.0, _HOVER_LIGHT_COLORS[0])
+                    hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
+                painter.fillPath(_round_rect, hover_grad)
 
         # ── 流式/错误状态 ──
         _is_resizing = bool(self._panel and self._panel._is_resizing)
@@ -854,9 +995,13 @@ class TabItem(QFrame):
                 _question_color.setAlpha(max(0, min(255, alpha)))
                 _draw_left_indicator(painter, _round_rect, h, _question_color)
                 _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
-        elif self._selected:
-            # 左侧选中指示条（贴合圆角曲线）
+        elif self._selected and not self._tree_row:
+            # 左侧选中指示条（贴合圆角曲线）——树行选中由淡靛蓝底表达，无左条
             _draw_left_indicator(painter, _round_rect, h, _CACHED_INFO)
+
+        # ── 树行化：左侧从属引导竖线（最后画，不被选中底色盖住）──
+        if self._tree_row:
+            draw_tree_guide(painter, 0, h)
 
         super().paintEvent(event)
 
@@ -1008,6 +1153,7 @@ class UIPluginRow(QFrame):
     clicked = Signal()
     positionRequested = Signal(str, str)  # (card_id, container) 右键选择插入方位
     popoutRequested = Signal(str)  # (key) 右键「弹出为独立窗口」
+    pinToggled = Signal(str)  # (plugin_name) 右键「固定到常驻区/取消固定」切换
 
     def __init__(
         self,
@@ -1025,6 +1171,7 @@ class UIPluginRow(QFrame):
         self._card_id = card_id  # 存储卡片/窗口 ID，右键菜单定位用
         self._enable_position_menu = enable_position_menu  # 独立 sidebar 项无卡片方位概念，禁用右键菜单
         self._kind = kind  # "sidebar" | "card" | "window"（决定右键菜单构成）
+        self._pin_action = None  # 菜单固定项 QAction（构建于 _build_context_menu，exec_ 返回值分发用）
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
         # 图标 tooltip：收起态只有图标时悬浮可见插件名（与 TabItem 一致）
@@ -1042,11 +1189,10 @@ class UIPluginRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("uiPluginRow")
         self.set_icon(icon)
-        # 右键菜单：card → 插入方位 + 弹出独立窗口；window → 弹出独立窗口；
-        # sidebar 无右键（无内容 widget 可弹）
-        if enable_position_menu or kind == "window":
-            self.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.customContextMenuRequested.connect(self._show_context_menu)
+        # 右键菜单：card → 插入方位 + 弹出 + 固定；window → 弹出 + 固定；
+        # sidebar → 仅固定（无内容 widget 可弹）
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         # 初始应用字体和颜色，避免在 refresh_style() 被调用前显示默认 Qt 字体
         from app.utils.utils import get_unified_font
 
@@ -1160,23 +1306,77 @@ class UIPluginRow(QFrame):
                     lambda checked=False, c=container: self.positionRequested.emit(self._card_id, c)
                 )
             menu.addSeparator()
-        menu.addAction(_make_popout_icon(), "弹出").triggered.connect(
-            lambda checked=False: self.popoutRequested.emit(self._card_id)
-        )
+        if self._kind != "sidebar":
+            menu.addAction(_make_popout_icon(), "弹出").triggered.connect(
+                lambda checked=False: self.popoutRequested.emit(self._card_id)
+            )
+            menu.addSeparator()
+        # 固定到常驻区（用户级，写 app_state；触发经 exec_ 返回值路径，见 _activate_menu_action）
+        self._pin_action = None
+        if self._plugin_name:
+            is_pinned = self._plugin_name in _get_pinned_plugins()
+            self._pin_action = menu.addAction(
+                FIF.UNPIN.icon() if is_pinned else FIF.PIN.icon(),
+                "取消固定" if is_pinned else "固定到常驻区",
+            )
         return menu
 
     def _show_context_menu(self, pos):
-        """显示右键菜单（仅内存生效，不持久化）"""
-        self._build_context_menu().exec(self.mapToGlobal(pos))
+        """显示右键菜单（方位/弹出仅内存生效；固定项写 app_state）"""
+        menu = self._build_context_menu()
+        self._activate_menu_action(menu.exec(self.mapToGlobal(pos)))
+
+    def _activate_menu_action(self, action):
+        """菜单关闭后的动作分发（走 exec 返回值，不在 triggered 同步栈内发信号：
+        固定项的 handler 会重建行，触发源行与菜单同 parent 链，需等菜单关闭）"""
+        if action is not None and action is self._pin_action:
+            self.pinToggled.emit(self._plugin_name)
 
 
-def _sort_plugin_entries(entries: list) -> list:
-    """插件条目统一排序：priority 降序 → title 字母序兜底（稳定）
+# ── 侧边栏插件固定（pin）──
+# 固定状态存 app_state.json 的 pinned_plugins 键（元素为插件名），
+# 与命令卡处置顶（command_pins）同范式：固定项置常驻区最顶部。
+PINNED_PLUGINS_KEY = "pinned_plugins"
+
+
+def _get_pinned_plugins() -> set:
+    """读取固定在常驻区的插件名集合（异常/脏数据回退空集）"""
+    try:
+        pinned = _state_get(PINNED_PLUGINS_KEY, [])
+        return set(pinned) if isinstance(pinned, list) else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+# ── 侧边栏插件归属判定 ──
+def _resolve_plugin_entry_group(plugin_name: str, explicit_group: str, pm, pinned: set) -> str:
+    """侧边栏条目归属区判定：返回 "system"（常驻区）| "custom"（自定义折叠区）
+
+    优先序：用户固定（pin）> 显式注册 group > 插件归属。
+    插件归属 = is_system（仓库内置）或 overridden_by == "system"——后者是
+    「用户根同名副本覆盖内置版」（插件市场更新内置插件的影子副本策略），
+    不消费该标记时更新后的内置插件条目会从常驻区掉进自定义区。
+    """
+    if plugin_name in pinned:
+        return "system"
+    if explicit_group in ("system", "custom"):
+        return explicit_group
+    try:
+        plugin_info = pm.get_plugin(plugin_name)
+    except Exception:  # noqa: BLE001
+        plugin_info = None
+    if plugin_info is not None and (plugin_info.is_system or getattr(plugin_info, "overridden_by", "") == "system"):
+        return "system"
+    return "custom"
+
+
+def _sort_plugin_entries(entries: list, pinned: frozenset = frozenset()) -> list:
+    """插件条目统一排序：固定项置顶 → priority 降序 → title 字母序兜底（稳定）
 
     regression：refresh_ui_plugins 曾直接 `sort(key=title.lower())`
     导致 SidebarItemInfo.priority 失效（注册优先级被字母序覆盖）。
     """
-    return sorted(entries, key=lambda e: (-e[4], e[2].lower()))
+    return sorted(entries, key=lambda e: (0 if e[3] in pinned else 1, -e[4], e[2].lower()))
 
 
 class TabPanel(QWidget):
@@ -1187,6 +1387,7 @@ class TabPanel(QWidget):
     tabBranchRequested = Signal(int)  # 分支窗口 Tab 索引
     tabSwitchSessionRequested = Signal(int)  # 切换会话（跳转 Tab + 打开历史会话）Tab 索引
     newTabRequested = Signal()  # 新建 Tab
+    newTempTabRequested = Signal()  # 新建临时对话页（页内会话不落盘、不进历史）
     tabsReordered = Signal(list)  # 拖拽排序后新顺序（索引列表）
     sidebarToggled = Signal(bool)  # 侧边栏收起(true)/展开(false)
     teamCloseRequested = Signal(str)  # 关闭整个团队（传 team_id）
@@ -1194,6 +1395,7 @@ class TabPanel(QWidget):
     teamNewTaskRequested = Signal(str)  # 团队框"新建任务"按钮（传 team_id：全员新会话 + 新 run_id）
     newSessionInWorkspaceRequested = Signal(str, str)  # 工作区树：在 项目 + 工作树 下新建对话页
     openSessionRecordRequested = Signal(object)  # 工作区树：打开历史会话（轻量会话记录 dict）
+    newProjectRequested = Signal()  # 工作区树：标题行「+」新建项目（选文件夹流程）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1259,6 +1461,13 @@ class TabPanel(QWidget):
         self._auto_collapse_width: int = _EXPANDED_MIN_CONTENT_WIDTH
         self._auto_expand_width: int = _EXPANDED_MIN_CONTENT_WIDTH + _HYSTERESIS_WIDTH
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
+        # ★ left 卡片占位期抑制（嵌入 sidebarSplitter 模式）：卡片打开时 TabPanel
+        #   与卡片区共享同一 splitter，用户拖内部分隔条会让本面板宽度跨过折叠线，
+        #   若照常触发自治折叠/展开 → 宿主把整个 frame 压到 60px → 卡片区被压成
+        #   细条（实测坍缩为 19px）。该期间折叠态由宿主编排独占（卡片打开时面板
+        #   恒为收起窄条，除非用户拖内把手把它拉宽），本面板不自作主张。
+        #   由 TabManagerWindow 在卡片显隐时置位/复位。
+        self._left_card_present: bool = False
         # 窗口 resize / relayout 过渡期抑制自动折叠：几何瞬变（_force_relayout
         # 重算、最大化/还原）会把左面板瞬时压到折叠阈值以下，若 resizeEvent
         # 据此折叠会误判为"用户拖窄"。由 TabManagerWindow 在 resize 周期开始
@@ -1267,7 +1476,6 @@ class TabPanel(QWidget):
         self._auto_collapse_suppressed: bool = False
         # ── 对话页显示模式（列表 / 工作区树）──
         self._mode: str = PANEL_MODE_LIST
-        self._mode_popup = None  # 模式选择悬浮框（Qt.Popup，二次点击收起）
         self._tree_scroll: Optional[ScrollArea] = None
         self._tree_widget: Optional[WorkspaceTree] = None
         self._tree_snapshot = None  # 树节点签名，用于跳过无变化的重建
@@ -1358,6 +1566,14 @@ class TabPanel(QWidget):
         self._custom_plugin_layout = custom_plugin_layout
         self._custom_plugin_section.setStyleSheet("background: transparent;")
         self._custom_plugin_scroll.setWidget(self._custom_plugin_section)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
+        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
+        from app.utils.design_tokens import Colors, make_scroll_content_opaque
+
+        make_scroll_content_opaque(
+            self._custom_plugin_section, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
+        )
         self._custom_plugin_scroll.setVisible(False)
         card_layout.addWidget(self._custom_plugin_scroll)
 
@@ -1381,37 +1597,42 @@ class TabPanel(QWidget):
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
-        # ── 顶部：左「对话页」标题 + 右 新建/模式 纯图标按钮 ──
-        # 布局：标题左对齐占满剩余空间（stretch=1），图标按钮靠右。
-        # 收起态隐藏标题与模式按钮，只保留新建（46px 窄条容不下）。
+        # ── 顶部：「新建对话」行（复用插件行 uiPluginRow 布局惯例）+ 模式按钮 ──
+        # 行结构：icon 最前 + 文案 + 行尾三点（菜单含「新建临时对话页」）。
+        # 收起态隐藏文案与三点，只留 icon（46px 窄条容不下）。
         # ★ 分支入口已迁移到助手消息卡片页脚（用户可在任意一条消息处分支）。
         self._top_bar = QWidget(self)
         top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(8, 4, 4, 2)
-        top_layout.setSpacing(0)
+        top_layout.setContentsMargins(6, 4, 4, 2)
+        top_layout.setSpacing(4)
 
-        self._sessions_label = QLabel("对话页", self._top_bar)
-        self._sessions_label.setObjectName("sessionsLabel")
-        top_layout.addWidget(self._sessions_label, 1)
-
-        self._new_btn = TransparentToolButton(self._top_bar)
-        self._new_btn.setIcon(FIF.ADD)
-        self._new_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
-        self._new_btn.setFixedSize(24, 24)
-        self._new_btn.setCursor(Qt.PointingHandCursor)
-        self._new_btn.setToolTip("新建空白标签页")
-        self._new_btn.clicked.connect(self.newTabRequested.emit)
-        top_layout.addWidget(self._new_btn)
-
-        # 模式切换：竖向「⋯」→ 悬浮框选择「列表模式 / 工作区树模式」
-        self._mode_btn = TransparentToolButton(self._top_bar)
-        self._mode_btn.setIcon(_vertical_more_icon())
-        self._mode_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
-        self._mode_btn.setFixedSize(24, 24)
-        self._mode_btn.setCursor(Qt.PointingHandCursor)
-        self._mode_btn.setToolTip("切换对话页显示模式")
-        self._mode_btn.clicked.connect(self._on_mode_btn_clicked)
-        top_layout.addWidget(self._mode_btn)
+        self._new_chat_row = QFrame(self._top_bar)
+        self._new_chat_row.setObjectName("uiPluginRow")
+        self._new_chat_row.setCursor(Qt.PointingHandCursor)
+        new_row_layout = QHBoxLayout(self._new_chat_row)
+        new_row_layout.setContentsMargins(4, 2, 4, 2)
+        new_row_layout.setSpacing(6)
+        self._new_chat_icon = QLabel(self._new_chat_row)
+        self._new_chat_icon.setFixedSize(scale_icon_size(16), scale_icon_size(16))
+        self._new_chat_icon.setStyleSheet("background: transparent;")
+        new_row_layout.addWidget(self._new_chat_icon)
+        self._new_chat_label = _ElidedLabel("新建对话", self._new_chat_row)
+        new_row_layout.addWidget(self._new_chat_label, 1)
+        # 行尾三点：更多新建方式（临时对话页收在菜单里，不再单独占一个按钮）
+        self._new_more_btn = TransparentToolButton(self._new_chat_row)
+        self._new_more_btn.setIcon(_vertical_more_icon())
+        self._new_more_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
+        self._new_more_btn.setFixedSize(20, 20)
+        self._new_more_btn.setCursor(Qt.PointingHandCursor)
+        self._new_more_btn.clicked.connect(self._show_new_chat_menu)
+        new_row_layout.addWidget(self._new_more_btn)
+        self._new_chat_row.mousePressEvent = self._on_new_chat_row_clicked
+        top_layout.addWidget(self._new_chat_row, 1)
+        self._update_new_chat_icon()
+        # 项目统一 hover tooltip（禁用 Qt 原生样式）。只挂行级一份：
+        # filter 覆盖整行几何（含 icon/文案/三点按钮），子控件穿越不闪断；
+        # 子控件再单独挂会造成同屏双 tooltip 叠加。
+        install_hover_tooltip(self._new_chat_row, "新建对话")
 
         layout.addWidget(self._top_bar)
 
@@ -1444,6 +1665,14 @@ class TabPanel(QWidget):
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
+        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
+        from app.utils.design_tokens import Colors, make_scroll_content_opaque
+
+        make_scroll_content_opaque(
+            self._list_widget, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
+        )
         layout.addWidget(self._scroll_area, 1)
 
         # ── 中间（树模式）：工作区树 项目 → 工作树 → 会话 ──
@@ -1475,8 +1704,37 @@ class TabPanel(QWidget):
         self._tree_widget.openSessionRequested.connect(
             lambda rec: self.openSessionRecordRequested.emit(rec)
         )
+        self._tree_widget.pinSessionRequested.connect(self._on_tree_pin_session)
         self._tree_widget.expansionChanged.connect(self._on_tree_expansion_changed)
+        # 「工作区」标题行（树模式专属）：右侧「+」新建项目
+        self._tree_header = QWidget(self)
+        self._tree_header.setStyleSheet("background: transparent;")
+        _tree_header_layout = QHBoxLayout(self._tree_header)
+        _tree_header_layout.setContentsMargins(8, 2, 6, 2)
+        _tree_header_layout.setSpacing(4)
+        self._tree_header_label = QLabel("工作区", self._tree_header)
+        self._tree_header_label.setStyleSheet("background: transparent;")
+        _tree_header_layout.addWidget(self._tree_header_label)
+        _tree_header_layout.addStretch(1)
+        self._tree_new_project_btn = TransparentToolButton(self._tree_header)
+        self._tree_new_project_btn.setIcon(FIF.ADD)
+        self._tree_new_project_btn.setFixedSize(20, 20)
+        self._tree_new_project_btn.setCursor(Qt.PointingHandCursor)
+        self._tree_new_project_btn.setToolTip("新建项目（选择项目根目录）")
+        self._tree_new_project_btn.clicked.connect(lambda *_a: self.newProjectRequested.emit())
+        _tree_header_layout.addWidget(self._tree_new_project_btn)
+        layout.addWidget(self._tree_header)
+        self._refresh_tree_header_style()
+        self._tree_header.setVisible(False)
         self._tree_scroll.setWidget(self._tree_widget)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
+        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
+        from app.utils.design_tokens import Colors, make_scroll_content_opaque
+
+        make_scroll_content_opaque(
+            self._tree_widget, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
+        )
         self._tree_scroll.setVisible(False)
         layout.addWidget(self._tree_scroll, 1)
 
@@ -1533,10 +1791,18 @@ class TabPanel(QWidget):
         # 被误判成"用户把面板拖窄"。
         if self._auto_collapse_suppressed:
             return
-        # ★★ 拖拽期：只跟随 UI 形态，绝不 emit（抖动的根因，见 _dragging_splitter 注释）。
-        #   此处按同一对阈值（content 口径）即时切换紧凑/展开，保证拖拽时文字不会
-        #   在窄条里被挤压；但折叠态与宽度落定一律等松手后由宿主处理。
-        if self._dragging_splitter:
+        # ★ left 卡片占位期（卡片打开，与卡片区共享 sidebarSplitter）+
+        #   ★★ 拖拽期：只跟随 UI 形态，绝不 emit。
+        #   共同语义：折叠态与宽度落定由宿主编排（占位期）或等松手（拖拽期）
+        #   处理，此处按滞回阈值即时切换紧凑/展开形态。
+        #
+        #   占位期为何也走形态自治：卡片打开时宿主把本面板置收起态，用户拖
+        #   内部分隔条拉宽本面板是明确意图（想看 tab 列表）——若此处只按
+        #   _collapsed 同步形态（旧实现），面板永远停在图标条，表现为
+        #   「内部拉动 tab 无法退出折叠模式」（用户反馈 bug）。
+        #   但 emit 仍必须禁止：占位期 emit 会让宿主把 frame 压到面板收起宽，
+        #   卡片区被连带压成细条（坍缩）。形态自治 + 不发信号 = 两全。
+        if self._left_card_present or self._dragging_splitter:
             # ★ 滞回区正确语义：**进入方向决定保持态**，而不是各自单向判定。
             #   已折叠 → 只有越过展开线才转展开（滞回区内保持折叠）；
             #   已展开 → 只有跌破折叠线才转折叠（滞回区内保持展开）。
@@ -1605,6 +1871,9 @@ class TabPanel(QWidget):
 
         pm = PluginManager.get_instance()
 
+        # 用户固定（pin）：优先级最高，固定项置常驻区顶部（_sort_plugin_entries 消费）
+        pinned = _get_pinned_plugins()
+
         # 兼容映射：已注册独立 sidebar 项的插件 → 跳过其 container="left" 卡片派生
         sidebar_plugin_names = {info.plugin_name for info in sidebar_items}
 
@@ -1619,7 +1888,7 @@ class TabPanel(QWidget):
                 info.plugin_name,
                 info.priority,
             )
-            if info.group == "system":
+            if _resolve_plugin_entry_group(info.plugin_name, info.group, pm, pinned) == "system":
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1628,11 +1897,6 @@ class TabPanel(QWidget):
             # 合成弹窗（popout_card 生成）不出现在左侧栏，避免与源卡片重复条目
             if info.window_id.startswith("popout:"):
                 continue
-            try:
-                plugin_info = pm.get_plugin(info.plugin_name)
-                is_system = plugin_info.is_system if plugin_info else False
-            except Exception:
-                is_system = False
             entry = (
                 "window",
                 info.window_id,
@@ -1642,11 +1906,7 @@ class TabPanel(QWidget):
             )
             # group 注册参数覆盖插件归属（"system" 常驻 / "custom" 自定义 / 空跟随）
             group = getattr(info, "group", "") or ""
-            if group == "system":
-                system_infos.append(entry)
-            elif group == "custom":
-                custom_infos.append(entry)
-            elif is_system:
+            if _resolve_plugin_entry_group(info.plugin_name, group, pm, pinned) == "system":
                 system_infos.append(entry)
             else:
                 custom_infos.append(entry)
@@ -1660,10 +1920,8 @@ class TabPanel(QWidget):
                 continue
             try:
                 title = (info.title or "").strip() or card_id
-                plugin_info = pm.get_plugin(info.plugin_name)
-                is_system = plugin_info.is_system if plugin_info else False
                 entry = ("card", card_id, title, info.plugin_name, 0)
-                if is_system:
+                if _resolve_plugin_entry_group(info.plugin_name, "", pm, pinned) == "system":
                     system_infos.append(entry)
                 else:
                     custom_infos.append(entry)
@@ -1671,7 +1929,8 @@ class TabPanel(QWidget):
                 continue
         # Phase E：按 priority 降序 → title 字母序兜底（regression: 旧 sort
         # 只看 title.lower() 抹平了 priority，导致高优先级插件被字母序压在后面）
-        system_infos = _sort_plugin_entries(system_infos)
+        # 用户固定项置顶（pin > priority 降序 > title 字母序）
+        system_infos = _sort_plugin_entries(system_infos, frozenset(pinned))
         custom_infos = _sort_plugin_entries(custom_infos)
         self._plugin_infos = system_infos + custom_infos
 
@@ -1682,7 +1941,28 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._system_plugin_buttons = []
+        seen_pinned_row = False  # 已成功渲染的固定行（分隔线只插在固定行之后）
+        divider_added = False
         for kind, key, title, plugin_name, _priority in system_infos:
+            # 常驻区（固定项）↔ 未固定插件之间的分隔线；无固定项不显示。
+            # 样式对齐 _plugin_separator_2（1px DIVIDER_COLOR）。
+            if not divider_added and seen_pinned_row and plugin_name not in pinned:
+                divider = QFrame(self._system_plugin_section)
+                divider.setFrameShape(QFrame.HLine)
+                divider.setStyleSheet(
+                    f"""
+                    QFrame {{
+                        background: {Colors.DIVIDER_COLOR};
+                        border: none;
+                        min-height: 1px;
+                        max-height: 1px;
+                        margin-top: 4px;
+                        margin-bottom: 2px;
+                    }}
+                    """
+                )
+                self._system_plugin_layout.addWidget(divider)
+                divider_added = True
             # ★ T3 修复：单行构造异常不中断整体刷新（任一插件构造抛异常时
             # 跳过该插件，其余插件继续重建——否则一个"毒条目"导致整批
             # UI 插件按钮全部不显示）。
@@ -1709,8 +1989,11 @@ class TabPanel(QWidget):
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
                 row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
+            row.pinToggled.connect(self._on_ui_plugin_pin_toggled)
             self._system_plugin_layout.addWidget(row)
             self._system_plugin_buttons.append(row)
+            if plugin_name in pinned:
+                seen_pinned_row = True
         has_system = bool(system_infos)
         self._system_plugin_section.setVisible(has_system)
 
@@ -1746,6 +2029,7 @@ class TabPanel(QWidget):
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
                 row.popoutRequested.connect(lambda cid=key: self._on_ui_plugin_popout_requested(cid))
+            row.pinToggled.connect(self._on_ui_plugin_pin_toggled)
             self._custom_plugin_layout.addWidget(row)
             # 显式 show：清除 Qt 的 hidden 标志。折叠/展开态刷新时 scroll 被强制
             # 隐藏重建，未 show 的新行会被 QWidgetItem 视为空（sizeHint 贡献 0），
@@ -1919,19 +2203,19 @@ class TabPanel(QWidget):
             return
 
         if self._collapsed:
-            # 收起时隐藏标题与模式按钮，仅保留新建图标按钮（46px 窄条）
-            self._sessions_label.setVisible(False)
-            self._new_btn.setVisible(True)
-            if hasattr(self, "_mode_btn"):
-                self._mode_btn.setVisible(False)
+            # 收起时新建行只剩 icon（46px 窄条容不下文案与三点）
+            if getattr(self, "_new_chat_row", None) is not None:
+                self._new_chat_label.setVisible(False)
+                self._new_more_btn.setVisible(False)
+                self._new_chat_row.layout().setContentsMargins(4, 4, 4, 4)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
         else:
-            # 展开时恢复标题 + 新建/模式图标按钮
-            self._sessions_label.setVisible(True)
-            self._new_btn.setVisible(True)
-            if hasattr(self, "_mode_btn"):
-                self._mode_btn.setVisible(True)
+            # 展开时恢复新建行完整形态
+            if getattr(self, "_new_chat_row", None) is not None:
+                self._new_chat_label.setVisible(True)
+                self._new_more_btn.setVisible(True)
+                self._new_chat_row.layout().setContentsMargins(4, 2, 4, 2)
             # 展开时恢复 Gitee 完整显示
             self._gitee_account_row.set_show_only_avatar(False)
 
@@ -2054,6 +2338,18 @@ class TabPanel(QWidget):
         except Exception as e:
             logger.error(f"[TabPanel] 插件弹窗 {key} 弹出失败：{e}")
 
+    def _on_ui_plugin_pin_toggled(self, plugin_name: str):
+        """侧边栏插件行右键「固定到常驻区/取消固定」：写 app_state 后整表刷新"""
+        if not plugin_name:
+            return
+        pinned = set(_get_pinned_plugins())
+        if plugin_name in pinned:
+            pinned.discard(plugin_name)
+        else:
+            pinned.add(plugin_name)
+        _state_set(PINNED_PLUGINS_KEY, sorted(pinned))
+        self.refresh_ui_plugins()
+
     def _on_ui_plugin_position_requested(self, card_id: str, container: str):
         """按指定方位移动 UI 插件卡片（仅内存生效，不持久化）"""
         parent = self.parent()
@@ -2099,20 +2395,78 @@ class TabPanel(QWidget):
         # ── 顶部：「对话页」标题 + 新建/模式图标按钮随主题/字号刷新 ──
         self._refresh_top_bar_style()
 
+    def _update_new_chat_icon(self):
+        """刷新「新建对话」行图标（主题感知，浅/深色主题图标不同，需重取 pixmap）"""
+        if getattr(self, "_new_chat_icon", None) is None:
+            return
+        size = scale_icon_size(16)
+        self._new_chat_icon.setFixedSize(size, size)
+        icon = get_icon("新建会话")
+        if icon is not None and not icon.isNull():
+            self._new_chat_icon.setPixmap(icon.pixmap(size, size))
+
+    def _on_new_chat_row_clicked(self, event):
+        """「新建对话」行点击 = 普通新建对话页（三点按钮自身消费事件不冒泡）"""
+        from PySide6.QtCore import Qt as _Qt
+
+        if event.button() == _Qt.LeftButton:
+            self.newTabRequested.emit()
+
+    def _show_new_chat_menu(self):
+        """行尾三点菜单：更多新建方式 + 对话页显示模式切换
+
+        原 _mode_btn（模式切换）已并入本菜单 —— 顶栏只保留一个三点入口。
+        """
+        from PySide6.QtCore import QPoint
+
+        menu = QMenu(self._new_more_btn)
+        menu.setStyleSheet(self._tab_menu_stylesheet())
+        temp_action = menu.addAction("新建临时对话页")
+        menu.addSeparator()
+        list_action = menu.addAction("列表模式")
+        tree_action = menu.addAction("工作区树模式")
+        list_action.setCheckable(True)
+        tree_action.setCheckable(True)
+        list_action.setChecked(self._mode != PANEL_MODE_TREE)
+        tree_action.setChecked(self._mode == PANEL_MODE_TREE)
+        try:
+            action = menu.exec(self._new_more_btn.mapToGlobal(QPoint(0, self._new_more_btn.height())))
+        finally:
+            pass
+        if action == temp_action:
+            self.newTempTabRequested.emit()
+        elif action == list_action:
+            self.set_mode(PANEL_MODE_LIST)
+        elif action == tree_action:
+            self.set_mode(PANEL_MODE_TREE)
+
     def _refresh_top_bar_style(self):
-        """刷新顶部行样式：「对话页」标题（颜色/字体）+ 图标按钮（主题图标/图标尺寸）"""
-        if hasattr(self, "_sessions_label") and self._sessions_label is not None:
-            self._sessions_label.setFont(get_unified_font(12))
-            self._sessions_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}; font-weight: bold;"
+        """刷新顶部行样式：「新建对话」行（颜色/字体/图标）+ 图标按钮（主题图标/图标尺寸）"""
+        # 「新建对话」行：复用插件行样式惯例（hover 背景 + 圆角），随主题刷新
+        if getattr(self, "_new_chat_row", None) is not None:
+            self._new_chat_row.setStyleSheet(
+                f"""
+                #uiPluginRow {{
+                    background: transparent;
+                    border-radius: 5px;
+                }}
+                #uiPluginRow:hover {{
+                    background: {Colors.HOVER_BG};
+                }}
+            """
             )
+        if getattr(self, "_new_chat_label", None) is not None:
+            self._new_chat_label.setFont(get_unified_font(12))
+            self._new_chat_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
+            )
+        self._update_new_chat_icon()
         # 竖向「⋯」是旋转位图（不随主题自动变色），主题/字号变更时必须重新生成
-        if hasattr(self, "_mode_btn") and self._mode_btn is not None:
-            self._mode_btn.setIcon(_vertical_more_icon())
+        if getattr(self, "_new_more_btn", None) is not None:
+            self._new_more_btn.setIcon(_vertical_more_icon())
         _icon_px = scale_icon_size(14)
         for _btn in (
-            getattr(self, "_new_btn", None),
-            getattr(self, "_mode_btn", None),
+            getattr(self, "_new_more_btn", None),
         ):
             if _btn is not None:
                 _btn.setIconSize(QSize(_icon_px, _icon_px))
@@ -2156,17 +2510,31 @@ class TabPanel(QWidget):
             self._pending_empty_teams = set()
             self._rebuild_layout()
 
-    def add_tab(self, title: str, icon=None, project_initials: str = "", project_color: str = "") -> int:
-        """添加 Tab 项，返回其索引"""
+    def add_tab(
+        self, title: str, icon=None, project_initials: str = "", project_color: str = "", project_text_color: str = ""
+    ) -> int:
+        """添加 Tab 项，返回其索引（project_text_color：头像字色固定值，空=自适应）"""
         idx = len(self._items)
         item = TabItem(
-            title, icon, self._list_widget, panel=self, project_initials=project_initials, project_color=project_color
+            title,
+            icon,
+            self._list_widget,
+            panel=self,
+            project_initials=project_initials,
+            project_color=project_color,
         )
+        if project_text_color:
+            item._project_text_color = project_text_color
+            item._apply_project_to_icon()  # 构造时已按自适应字色绘过一次，补刷
 
         # 连接信号 — ★ 使用动态索引查找，防止删除前序 tab 后索引漂移
         # 不能用 lambda 捕获 idx，否则删除 tab 0 后 tab 1 的 lambda 中 idx 仍为 1
         item.closeRequested.connect(
             lambda _item=item: self.tabCloseRequested.emit(self._items.index(_item) if _item in self._items else -1)
+        )
+        # 图钉点击 → 置顶（同样动态查找索引）
+        item.pinToggleRequested.connect(
+            lambda _item=item: self._on_tab_pin_toggle(self._items.index(_item) if _item in self._items else -1)
         )
 
         # 连接点击事件 — ★ 同样动态查找当前索引
@@ -3004,16 +3372,13 @@ class TabPanel(QWidget):
         else:
             self._list_layout.addStretch()
 
-        # ── 列表模式复位：清掉树模式留下的缩进 / 已激活标记 / 常显关闭钮 ──
+        # ── 列表模式复位：清掉树行化留下的行高 / 图标 / 字号 / margins 状态 ──
         # 同时强制可见：树里被折叠节点跳过的成员会被 WorkspaceTree.rebuild
         # 隐藏（否则会以旧几何继续绘制形成残影），切回列表必须显式显示，
         # 否则表现为「列表空白」。
         for item in self._items:
-            item.set_indent(0)
-            item.set_open_marker(False)
-            item.set_close_persistent(False)
-            # 行高分档跟随当前渲染容器（列表团队 32 / 其余 40）
-            item._refresh_row_height()
+            # 树行化复位（含行高/图标/字号/margins）；列表模式幂等无副作用
+            item.set_tree_row(False)
             item.setVisible(True)
         for grp in self._team_groups.values():
             grp.setVisible(True)
@@ -3091,16 +3456,13 @@ class TabPanel(QWidget):
         tree_active = self._mode == PANEL_MODE_TREE and not self._collapsed
         if self._tree_scroll is not None:
             self._tree_scroll.setVisible(tree_active)
+        if self._tree_header is not None:
+            self._tree_header.setVisible(tree_active)
         if self._scroll_area is not None:
             self._scroll_area.setVisible(not tree_active)
         if self._tree_widget is not None:
             self._tree_widget.set_compact(self._collapsed)
-        # 顶部标题文案跟模式走：列表模式=「对话页」/树模式=「工作区」
-        # 折叠态下标题被收起隐藏，文字不影响视觉，但保持同步避免展开后闪现旧文案。
-        title = _PANEL_MODE_TITLES.get(self._mode, "对话页")
-        if hasattr(self, "_sessions_label") and self._sessions_label is not None:
-            if self._sessions_label.text() != title:
-                self._sessions_label.setText(title)
+        # 顶栏改版后无独立模式标题（「新建对话」行替代），标题语义由列表自身承载。
         # ⚠️ 切换容器后两侧布局都被搬空过，必须作废两边的快照缓存：
         # 否则 _rebuild_team_layout / _rebuild_tree_layout 会因签名未变直接
         # return —— 表现为「切回列表后空白」或「树模式专属状态没复位」。
@@ -3154,41 +3516,6 @@ class TabPanel(QWidget):
         except Exception:
             pass
 
-    def _on_mode_btn_clicked(self):
-        """竖向「⋯」按钮：弹出/收起模式选择悬浮框"""
-        if self._mode_popup is not None:
-            try:
-                self._mode_popup.close()
-            except Exception:
-                pass
-            self._mode_popup = None
-            return
-        popup = PanelModePopup(list(_PANEL_MODE_OPTIONS), self._mode, self)
-        popup.modeSelected.connect(self.set_mode)
-        popup.destroyed.connect(self._on_mode_popup_destroyed)
-        self._mode_popup = popup
-        popup.adjustSize()
-        width = max(popup.sizeHint().width(), 196)
-        height = popup.sizeHint().height()
-        popup.setFixedSize(width, height)
-        # 往左弹：按钮贴着面板右缘，往右弹会被窗口右边界裁掉。
-        # 用按钮的 bottomRight 做锚点，弹窗右边缘与按钮右边缘对齐。
-        anchor = self._mode_btn.mapToGlobal(self._mode_btn.rect().bottomRight())
-        gx, gy = anchor.x() - width, anchor.y()
-        host = self.window()
-        if host is not None:
-            frame = host.frameGeometry()
-            # 左侧也放不下（极窄窗口）才回落成贴左边缘
-            if gx < frame.left():
-                gx = min(frame.left() + 4, frame.right() - width - 4)
-            if gy + height > frame.bottom():
-                gy = max(frame.top() + 4, anchor.y() - height - self._mode_btn.height() - 4)
-        popup.move(gx, gy)
-        popup.show()
-
-    def _on_mode_popup_destroyed(self, *_args):
-        self._mode_popup = None
-
     def _active_list_container(self) -> QWidget:
         """当前生效的行容器（树模式 → 树 widget；否则列表 widget）
 
@@ -3233,10 +3560,13 @@ class TabPanel(QWidget):
         return ids
 
     def _collect_tree_specs(self) -> List[TreeNodeSpec]:
-        """编排工作区树节点：项目 →（团队框）→ 工作树 →（已打开 Tab / 历史会话）
+        """编排工作区树节点（v2 扁平结构）：项目 → 会话（置顶组 / 已打开 / 历史）
 
-        节点必须按「父在前、子在后且缩进递增」输出；WorkspaceTree 遇到折叠的
-        父节点会整体跳过其后续更深层节点（懒构建，不创建 widget）。
+        节点必须按「父在前、子在后」输出；WorkspaceTree 遇到折叠的父节点会
+        整体跳过其后续子节点（懒构建，不创建 widget）。
+
+        v2 变化：去掉工作树中间层（工作树名降级为会话行副行的信息位）；
+        置顶会话跨分组提到项目内最前（已打开 + 历史混排）。
         """
         specs: List[TreeNodeSpec] = []
         if self._tree_widget is None:
@@ -3244,8 +3574,11 @@ class TabPanel(QWidget):
 
         # ⚠️ 宿主可能处于「半成品」状态：TabPanel 是在 TabManagerWindow.__init__
         # 里创建的，此刻 TabManagerWindow._tab_panel 尚未赋值，而
-        # get_current_window() 会去读它 → AttributeError。整体兜住，
-        # 取不到就按「无历史数据」渲染（只剩已打开 Tab 的骨架）。
+        # get_current_window() 会去读它 → AttributeError。整体兜住。
+        # ⚠️ 数据源必须与「窗口是否存活」解耦：HistoryManager / MemoryManagerCore
+        # 均为全局单例（跨窗口共享），所有窗口关完后 _windows 为空，若此时仍从
+        # 窗口链取用，树会退化成「默认项目 / 0 个会话」空壳（实测复现）。
+        # 因此无窗口时回落到单例入口。
         try:
             host = self._resolve_tab_host()
             windows = list(getattr(host, "_windows", []) or [])
@@ -3257,9 +3590,35 @@ class TabPanel(QWidget):
         except Exception:
             host, windows, current, source = None, [], None, None
             backend = history = memory = None
+        # 回落：窗口链取不到共用服务时，直接拿全局单例（不依赖任何窗口）
+        if history is None:
+            try:
+                from app.utils.history_manager import HistoryManager
+
+                history = HistoryManager.get_instance()
+            except Exception:
+                history = None
+        if memory is None:
+            try:
+                from app.core.conversation.memory_manager import MemoryManagerCore
+
+                memory = MemoryManagerCore.get_instance()
+            except Exception:
+                memory = None
 
         open_sids = self._open_session_ids(windows)
         owners = self._tab_owners(windows)
+
+        # 已打开 Tab 的 session_id → 轻量历史记录（供副行预览/时间/置顶态复用）
+        try:
+            all_sessions = list(history.get_history_list(merge_team=True) if history is not None else [])
+        except Exception:
+            all_sessions = []
+        record_by_sid: dict = {}
+        for rec in all_sessions:
+            sid = str(rec.get("session_id") or "")
+            if sid:
+                record_by_sid[sid] = rec
 
         # ── 项目集合：历史项目 + 已打开 Tab 的项目，当前项目置顶 ──
         try:
@@ -3280,15 +3639,11 @@ class TabPanel(QWidget):
         else:
             projects.sort()
 
-        # ── 历史会话：只取非团队会话 ──
+        # ── 历史会话：只取非团队会话、非已打开 ──
         # ⚠️ 团队只在列表模式渲染（用户明确要求）：merge_team 聚合出来的团队条目
-        # 树模式整条跳过；已打开的团队成员对话页则平铺到所属工作树下，不会消失。
-        try:
-            sessions = list(history.get_history_list(merge_team=True) if history is not None else [])
-        except Exception:
-            sessions = []
+        # 树模式整条跳过；已打开的团队成员对话页则平铺到所属项目下，不会消失。
         plain_by_project: dict = {}
-        for rec in sessions:
+        for rec in all_sessions:
             proj = (rec.get("project") or "").strip() or "默认项目"
             if rec.get("team_merged"):
                 continue
@@ -3299,6 +3654,8 @@ class TabPanel(QWidget):
         for project in projects:
             plain = plain_by_project.get(project, [])
             # ── 已登记的真实 git worktree（关键文档里 added_by=git_worktree）──
+            # v2 不再建工作树节点，只用于把会话的 worktree_path 归一成
+            # 「主仓库 / 真工作树」两类，副行显示非主仓库的工作树名。
             registered: List[str] = []
             try:
                 if memory is not None:
@@ -3328,8 +3685,6 @@ class TabPanel(QWidget):
                 if p == project
             ]
             has_open = bool(opened_pairs)
-            # 含已激活对话页的工作树默认展开：占着后端的会话不能被折叠藏起来
-            open_worktrees = {wt for _i, wt, _tid in opened_pairs if wt}
             p_initials, p_color = _project_icon_data(project)
             specs.append(
                 TreeNodeSpec(
@@ -3341,14 +3696,9 @@ class TabPanel(QWidget):
                     # 项目根用项目 icon（缩写字色块），与 Tab 上的项目头像同一套视觉
                     initials=p_initials,
                     color=p_color,
-                    actions=(
-                        (
-                            "分支",
-                            "管理工作树：打开本页长期记忆并跳到「关键文档」",
-                            lambda _p=project: self._open_project_memory(_p),
-                        ),
-                    ),
-                    count=len(plain_pairs) + len(opened_pairs),
+                    # 计数 tag 已去掉（用户要求）；总数转为副行文本 + tooltip
+                    is_project=True,
+                    subtitle=f"{len(plain_pairs) + len(opened_pairs)} 个会话",
                     active_count=len(opened_pairs),
                     project=project,
                     worktree="",
@@ -3358,75 +3708,95 @@ class TabPanel(QWidget):
                 )
             )
 
-            # 工作树：主仓库("") + 会话记录里的 + 已登记的 git worktree + 已打开 Tab 的
-            # 三路来源都已经过 _resolve_worktree 归一，非真工作树 / 已删除目录不会进来。
-            worktrees = [""]
-            seen = {""}
-            for _rec, wt in plain_pairs:
-                if wt not in seen:
-                    seen.add(wt)
-                    worktrees.append(wt)
-            for wt in registered:
-                if wt not in seen:
-                    seen.add(wt)
-                    worktrees.append(wt)
-            for _i, wt, _tid in opened_pairs:
-                if wt not in seen:
-                    seen.add(wt)
-                    worktrees.append(wt)
+            # ── 置顶组（跨分组）：已打开 + 历史混排，按 last_time 降序 ──
+            wt_by_sid = {str(r.get("session_id") or ""): w for r, w in plain_pairs}
+            pinned_opened: List[tuple] = []
+            rest_opened: List[tuple] = []
+            for i, wt, tid in opened_pairs:
+                rec = record_by_sid.get(self._opened_session_id(i, windows)) or {}
+                if bool(rec.get("pinned", False)):
+                    pinned_opened.append((i, wt, tid, rec))
+                else:
+                    rest_opened.append((i, wt, tid, rec))
+            pinned_plain = [rec for rec in plain if bool(rec.get("pinned", False))]
+            rest_plain = [rec for rec in plain if not bool(rec.get("pinned", False))]
+            pinned_plain.sort(key=lambda _r: _r.get("last_time", ""), reverse=True)
+            pinned_opened.sort(key=lambda _t: _t[3].get("last_time") or "", reverse=True)
 
-            for wt in worktrees:
-                label = "主仓库" if not wt else (os.path.basename(wt.rstrip("/\\")) or wt)
-                children = [r for r, w in plain_pairs if w == wt]
-                specs.append(
-                    TreeNodeSpec(
-                        key=f"worktree:{project}|{wt}",
-                        kind=KIND_WORKTREE,
-                        title=label,
-                        indent=_TREE_INDENT_WORKTREE,
-                        icon="根目录" if not wt else "分支",
-                        count=len(children),
-                        # 该工作树下已激活的对话页（团队成员会话也平铺在这里，一并计入）
-                        active_count=len([1 for _i, w, _t in opened_pairs if w == wt]),
-                        project=project,
-                        worktree=wt,
-                        tooltip=wt or f"{project} · 主仓库",
-                        expanded_by_default=((project == cur_project and not wt) or wt in open_worktrees),
-                    )
-                )
-                # 已打开的对话页（含团队成员：树模式不渲染团队框，成员平铺到这里）
-                for i, w, _tid in opened_pairs:
-                    if w != wt:
-                        continue
-                    self._items[i].set_indent(_TREE_INDENT_TAB)
-                    specs.append(
-                        TreeNodeSpec(
-                            key=f"tab:{i}",
-                            kind=KIND_WIDGET,
-                            title="",
-                            indent=_TREE_INDENT_TAB,
-                            widget=self._items[i],
-                        )
-                    )
-                # 历史会话
-                for rec in children[:_TREE_MAX_SESSIONS]:
-                    sid = str(rec.get("session_id") or "")
-                    if not sid:
-                        continue
-                    title = (rec.get("title") or "").strip() or "未命名会话"
-                    specs.append(
-                        TreeNodeSpec(
-                            key=f"session:{sid}",
-                            kind=KIND_SESSION,
-                            title=title,
-                            indent=_TREE_INDENT_SESSION,
-                            project=project,
-                            worktree=wt,
-                            record=rec,
-                            tooltip=title,
-                        )
-                    )
+            for rec in pinned_plain:
+                specs.append(self._session_spec(project, wt_by_sid.get(str(rec.get("session_id") or ""), ""), rec))
+            for i, wt, _tid, rec in pinned_opened:
+                specs.append(self._opened_tab_spec(i, project, wt, rec))
+
+            # ── 已打开组（非置顶）──
+            for i, wt, _tid, rec in rest_opened:
+                specs.append(self._opened_tab_spec(i, project, wt, rec))
+
+            # ── 历史组（非置顶，分页上限；置顶不受限）──
+            for rec in rest_plain[:_TREE_MAX_SESSIONS]:
+                specs.append(self._session_spec(project, wt_by_sid.get(str(rec.get("session_id") or ""), ""), rec))
         return specs
+
+    @staticmethod
+    def _opened_session_id(index: int, windows) -> str:
+        """第 index 个已打开 Tab 的当前 session_id（取不到返回空串）"""
+        try:
+            win = windows[index] if index < len(windows) else None
+            sm = getattr(win, "session_manager", None)
+            sess = sm.get_current_session() if sm is not None else None
+            return str(getattr(sess, "session_id", "") or "")
+        except Exception:
+            return ""
+
+    def _session_spec(self, project: str, wt: str, rec: dict) -> TreeNodeSpec:
+        """历史会话的 TreeNodeSpec（两行式副行：预览·工作树名 | 时间右对齐）"""
+        sid = str(rec.get("session_id") or "")
+        title = (rec.get("title") or "").strip() or "未命名会话"
+        sub, when = self._session_subtitle_parts(rec, wt)
+        return TreeNodeSpec(
+            key=f"session:{sid}",
+            kind=KIND_SESSION,
+            title=title,
+            indent=_TREE_INDENT_SESSION,
+            project=project,
+            worktree=wt,
+            record=rec,
+            tooltip=title,
+            subtitle=sub,
+            subtitle_time=when,
+        )
+
+    def _opened_tab_spec(self, index: int, project: str, wt: str, rec: dict) -> TreeNodeSpec:
+        """已打开对话页的 TreeNodeSpec（两行式副行；副行数据由 TabItem 逐帧同步）"""
+        sub, when = self._session_subtitle_parts(rec, wt)
+        return TreeNodeSpec(
+            key=f"tab:{index}",
+            kind=KIND_WIDGET,
+            title="",
+            indent=_TREE_INDENT_TAB,
+            widget=self._items[index],
+            record=rec,
+            subtitle=sub,
+            subtitle_time=when,
+        )
+
+    @staticmethod
+    def _session_subtitle_parts(rec: dict, wt: str) -> tuple:
+        """会话行副行拆两段：(左段预览·工作树名, 右段相对时间)
+
+        时间必须独立成段——右对齐要求它在自己的控件里（与左段混在一条
+        省略文本里，省略长度一变时间位置就飘）。
+        """
+        from app.utils.session_preview import format_relative_time
+
+        parts: List[str] = []
+        preview = str((rec or {}).get("preview") or "").strip()
+        if preview:
+            parts.append(preview)
+        if wt:
+            parts.append(os.path.basename(wt.rstrip("/\\")) or wt)
+        when = format_relative_time(str((rec or {}).get("last_time") or ""))
+        return " · ".join(parts), when
 
     @staticmethod
     def _norm_registered(registered) -> list:
@@ -3467,40 +3837,8 @@ class TabPanel(QWidget):
 
         return wt if GitWorktreeDetector.is_valid_worktree_link(wt) else ""
 
-    def _open_project_memory(self, project: str):
-        """项目根「管理工作树」快捷入口
-
-        工作树的增删 / 切换 UI 在工作台一级「工作树」页签里
-        （``WorktreeSectionWidget`` 插在关键文档列表内），所以一键直达那里是
-        管理工作树的最短路径。
-
-        ★ 记忆功能已完全迁移到右侧工作台（WorkbenchPanel），不再打开旧的
-        独立记忆卡片。统一走 ``TabManagerWindow.open_workbench_memory("docs")``：
-        展开工作台 → 切「工作树」页签（关键文档+工作树，原记忆页 docs 子页
-        已升为一级页签）。
-
-        ⚠️ 刻意用 show 而非 toggle：本按钮语义是「打开」，点第二次不应该把它关掉。
-        「当前页」= 当前激活的对话页窗口，而不是被点击的项目行。
-        """
-        try:
-            host = self._resolve_tab_host()
-            # 优先走工作台（TabManagerWindow 层，非单个对话窗口）
-            wb_opener = getattr(host, "open_workbench_memory", None)
-            if callable(wb_opener):
-                wb_opener("docs")
-                return
-            # 兜底：老路径（对话窗口内的记忆卡片）
-            win = host.get_current_window() if hasattr(host, "get_current_window") else None
-            if win is None:
-                windows = list(getattr(host, "_windows", []) or [])
-                win = windows[-1] if windows else None
-            if win is None:
-                return
-        except Exception as exc:
-            logger.warning(f"[TabPanel] 打开长期记忆面板失败: {exc}")
-
     def _rebuild_tree_layout(self):
-        """树模式布局重建：把已打开的 Tab / 团队框 / 历史会话挂进 项目→工作树 树里
+        """树模式布局重建：把已打开的 Tab / 历史会话挂进 项目→会话 树里（v2 扁平）
 
         与 _rebuild_team_layout 平级：两者都只读 _items / _item_team，只是决定
         widget 摆进哪个容器。QLayout.addWidget 会自动 reparent，切模式无需搬运。
@@ -3508,24 +3846,72 @@ class TabPanel(QWidget):
         if self._tree_widget is None:
             return
         specs = self._collect_tree_specs()
-        # 签名快照：节点 key + 标题 + 计数，未变则跳过重建
-        snapshot = tuple((s.key, s.title, s.count) for s in specs)
+        # 签名快照：节点关键展示字段（含副行左右段/置顶），未变则跳过重建
+        snapshot = tuple((s.key, s.title, s.subtitle, s.subtitle_time, s.active_count) for s in specs)
         if getattr(self, "_tree_snapshot", None) == snapshot:
             return
         self._tree_snapshot = snapshot
         self._tree_widget.rebuild(specs)
         compact = self._collapsed
-        for item in self._items:
-            # 已激活的对话页（一个会话一个后端）在树里要可辨识 + 可关闭
-            item.set_open_marker(not compact)
-            item.set_close_persistent(not compact)
+        # 已打开行的副行/置顶态：从 spec 回填（KIND_WIDGET 的 subtitle 两段在此同步给 TabItem）
+        meta_by_key = {
+            s.key: (s.subtitle, s.subtitle_time, bool((s.record or {}).get("pinned", False)))
+            for s in specs
+            if s.kind == KIND_WIDGET
+        }
+        for i, item in enumerate(self._items):
+            # 已打开对话页树行化：44px 两行式 / 无项目图标 / 淡靛蓝选中 / hover 才显关闭钮
+            sub, when, pinned = meta_by_key.get(f"tab:{i}", ("", "", False))
+            item.set_tree_row(True)
+            item.set_tree_subtitle(sub, when)
+            item.set_pinned(pinned)
             item.set_compact(compact)
-            # 树模式成员行回 40px 分档（32 档仅列表团队态生效）
-            item._refresh_row_height()
         # ⚠️ 团队只在列表模式渲染：树模式不生成团队框节点，但框体 widget 仍在
         # _team_groups 里且上次可能入过布局 —— 不显式隐藏就会以旧几何继续绘制成残影。
         for grp in self._team_groups.values():
             grp.setVisible(False)
+
+    def _on_tree_pin_session(self, record, pinned: bool):
+        """历史会话行图钉：写置顶标记后刷新树（置顶会跨分组重排）
+
+        ⚠️ 写路径同样走「窗口链 → 全局单例」回落：无窗口时仍要能切置顶
+        （HistoryManager 是全局单例，与窗口存活无关）。
+        """
+        try:
+            sid = str((record or {}).get("session_id") or "")
+            if not sid:
+                return
+            host = self._resolve_tab_host()
+            current = host.get_current_window() if hasattr(host, "get_current_window") else None
+            history = getattr(getattr(current, "backend", None), "history_manager", None)
+            if history is None:
+                from app.utils.history_manager import HistoryManager
+
+                history = HistoryManager.get_instance()
+            if history is None:
+                return
+            history.set_session_pinned(sid, bool(pinned))
+            self.refresh_tree()
+        except Exception as e:
+            logger.warning(f"[TabPanel] 会话置顶失败: {e}")
+
+    def _on_tab_pin_toggle(self, index: int):
+        """已打开 Tab 的图钉点击：按当前态取反后写置顶"""
+        if not (0 <= index < len(self._items)):
+            return
+        sid = self._opened_session_id_current(index)
+        if not sid:
+            return
+        self._on_tree_pin_session({"session_id": sid}, not self._items[index]._pinned)
+
+    def _opened_session_id_current(self, index: int) -> str:
+        """第 index 个已打开 Tab 的 session_id（当前宿主窗口链）"""
+        try:
+            host = self._resolve_tab_host()
+            windows = list(getattr(host, "_windows", []) or [])
+            return self._opened_session_id(index, windows)
+        except Exception:
+            return ""
 
     def remove_tab(self, index: int):
         """移除指定索引的 Tab"""
@@ -3617,10 +4003,10 @@ class TabPanel(QWidget):
         if 0 <= index < len(self._items):
             self._items[index].set_title(title)
 
-    def update_tab_project(self, index: int, initials: str, color_rgba: str):
-        """更新 Tab 的项目头像（缩写+颜色，直接 QPainter 绘制）"""
+    def update_tab_project(self, index: int, initials: str, color_rgba: str, text_color: str = ""):
+        """更新 Tab 的项目头像（缩写+颜色，直接 QPainter 绘制；text_color 固定字色，空=自适应）"""
         if 0 <= index < len(self._items):
-            self._items[index].set_project(initials, color_rgba)
+            self._items[index].set_project(initials, color_rgba, text_color)
 
     def update_tab_capsule(self, index: int, text: str):
         """显示团队角色胶囊"""
@@ -3814,6 +4200,17 @@ class TabPanel(QWidget):
                         sb_style.unpolish(sb)
                         sb_style.polish(sb)
 
+    def _refresh_tree_header_style(self):
+        """「工作区」标题行样式：muted 小字（与列表「新建对话」行区分层级）"""
+        if not hasattr(self, "_tree_header_label"):
+            return
+        Colors.refresh()
+        self._tree_header_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+        )
+        self._tree_new_project_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
+
     def refresh_style(self):
         """ThemeManager 统一刷新入口：主题/字体变更后调用
 
@@ -3824,6 +4221,8 @@ class TabPanel(QWidget):
         _invalidate_cached_colors()
         # 重新应用侧边两个滚动区的滚动条 QSS（滚动条颜色随主题）
         self._reapply_scroll_styles()
+        # 「工作区」标题行样式（颜色/字号随主题与字体缩放）
+        self._refresh_tree_header_style()
         # 先全部调用 update()（异步，Qt 自动合并绘制事件），
         # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
         for item in self._items:
@@ -3850,7 +4249,11 @@ class TabPanel(QWidget):
         if not hasattr(self, "_custom_plugin_card"):
             return
         Colors.refresh()
-        margin = "3px 4px" if compact else "4px 6px"
+        # 右边距刻意收紧（非对称四值 "上 右 下 左"）：滚动条由 qfluentwidgets
+        # 自绘，其右缘距面板右缘 = 本值 + 1px(vbar 内缩) + 3px(handle 内缩)，
+        # 原 6px 右边距让滚动条悬在离右缘 10px 处、明显比主 tab 列表(4px)空旷；
+        # 左值保持 6/4 不动，维持与系统插件区行的左对齐
+        margin = "3px 2px 3px 4px" if compact else "4px 2px 4px 6px"
         self._custom_plugin_card.setStyleSheet(f"""
             #customPluginCard {{
                 background: {Colors.CARD_BG.format(alpha=25)};
@@ -4042,7 +4445,15 @@ class TabPanel(QWidget):
             switch_session_action = menu.addAction("切换会话")
             menu.addSeparator()
         new_action = menu.addAction("新建标签页")
-        if clicked_index >= 0:
+        new_temp_action = menu.addAction("新建临时对话页")
+        # 临时对话页做分支无意义：菜单不出现「分支标签页」入口
+        _host = self._resolve_tab_host()
+        _is_temp_tab = (
+            clicked_index >= 0
+            and 0 <= clicked_index < len(getattr(_host, "_windows", []) or [])
+            and getattr(_host._windows[clicked_index], "_is_temp_scope", False)
+        )
+        if clicked_index >= 0 and not _is_temp_tab:
             branch_action = menu.addAction("分支标签页")
         menu.addSeparator()
         if clicked_index >= 0:
@@ -4064,8 +4475,10 @@ class TabPanel(QWidget):
             self.tabSwitchSessionRequested.emit(clicked_index)
         elif action == new_action:
             self.newTabRequested.emit()
+        elif action == new_temp_action:
+            self.newTempTabRequested.emit()
         elif clicked_index >= 0:
             if action == close_action:
                 self.tabCloseRequested.emit(clicked_index)
-            elif action == branch_action:
+            elif branch_action is not None and action == branch_action:
                 self.tabBranchRequested.emit(clicked_index)

@@ -16,13 +16,29 @@ ruff format --check <改动文件>     # 只查改动文件
 pyright .                         # 类型检查
 
 # 测试（asyncio_mode = auto）
-pytest tests/ -x
+pytest tests/ -x                  # 全量：默认排除 tests/ui 与 tests/perf
 pytest tests/test_xxx.py -v
 pytest tests/test_xxx.py::test_name -v
-pytest tests/ -m perf             # 性能基准
-pytest tests/ -m perf_long        # ≥30s 长基准（需 QApplication）
+pytest tests/perf -v              # 性能基准（须显式指定，默认不收集）
+pytest tests/perf -m perf_long    # ≥30s 长基准（须显式指定 + QApplication）
+pytest tests/ui -m ui             # A 档全链 UI（须显式指定）
 pytest tests/ -m stress           # 稳定性
+```
 
+**收集范围与超时**（`pyproject.toml [tool.pytest.ini_options]`）：
+
+- `addopts = "--ignore=tests/ui --ignore=tests/perf"` —— 两者默认排除。`tests/perf` 含
+  `test_new_tab_baseline.py`（25 轮真实窗口基准）与 `long_run/`（30s/场景，4 用例净等
+  ≈180s），进默认轮次会让全量测试多耗数分钟。
+- 排除只作用于「未指定路径」的收集：`pytest tests/perf` / `pytest tests/perf/xxx.py`
+  仍能正常收集运行（pytest 对显式路径的 ignore 处理）。
+- `timeout = 300` + `timeout_method = "thread"`（pytest-timeout）—— 单用例超 300s
+  即 fail 并打 Python 栈。此前无兜底，任何死锁（`waitSignal` 等不到信号 /
+  `QEventLoop` 不退出 / `join()` 不返回）会永久挂起，无人值守时表现为无限等待。
+- **不要用 `uv sync --group dev`**：会卸载其它组的包（aiohttp/lxml/numpy 等）。
+  一律 `uv sync --all-groups`。
+
+```bash
 # 运行
 python main.py                    # GUI
 python cli.py --version           # CLI

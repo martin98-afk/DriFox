@@ -33,7 +33,11 @@ def _user_btn_count(card: MessageCard) -> int:
 
 
 def _assistant_btn_count(card: MessageCard) -> int:
-    """助手卡片页脚 hover 按钮组按钮数（内置分支/复制 + 插件按钮）"""
+    """助手卡片页脚按钮组按钮数（内置审查/分支/复制 + 插件按钮）
+
+    审查按钮 2026-10-14 从差异胶囊内移入按钮组，初始隐藏（有 diff 才显示），
+    但控件始终存在于布局中，findChildren 会计入。
+    """
     btns = getattr(card, "_assistant_action_btns", None)
     assert btns is not None
     return len(btns.findChildren(TransparentToolButton))
@@ -68,11 +72,11 @@ def test_user_card_skips_role_assistant(qapp):
 
 
 def test_assistant_card_skips_role_user_button(qapp):
-    """assistant 卡片：role=user 插件按钮不渲染（仅 2 内置：分支/复制）"""
+    """assistant 卡片：role=user 插件按钮不渲染（仅 3 内置：审查/分支/复制）"""
     reg = _fresh_reg()
     reg.register_footer_action("plug-a", "user-btn", tooltip="U", role="user")
     card = _make_card("assistant")
-    assert _assistant_btn_count(card) == 2
+    assert _assistant_btn_count(card) == 3
     UIPluginRegistry.get_instance().reset()
 
 
@@ -83,34 +87,34 @@ def test_both_role_renders_both_sides(qapp):
     user_card = _make_card("user")
     assert _user_btn_count(user_card) == 4  # 3 内置 + both
     assist_card = _make_card("assistant")
-    assert _assistant_btn_count(assist_card) == 3  # 分支/复制 + both
+    assert _assistant_btn_count(assist_card) == 4  # 审查/分支/复制 + both
     UIPluginRegistry.get_instance().reset()
 
 
-def test_assistant_hover_buttons_no_height_change(qapp):
-    """assistant 卡 hover 显隐按钮组：高度恒定（回归）+ 非 hover 不占宽
+def test_assistant_action_btns_always_visible(qapp):
+    """assistant 卡操作按钮常显（2026-10-10 需求）
 
-    历史 bug：_assistant_action_btns 整容器 setVisible 切换，Qt 布局跳过隐藏
-    控件的 sizeHint → 非 hover 时页脚行高塌缩到文本元素高度（空内容时塌 0，
-    实测 111px），hover 后被 20px 按钮抬高（实测 131px）→ 卡片高度跳变。
-    修复：bar 最小高度托底（按钮高度），显隐方式保持 setVisible。
+    历史 bug：容器 setVisible 切换时，Qt 布局跳过隐藏控件的 sizeHint →
+    非 hover 时页脚行高塌缩到文本元素高度（空内容时塌 0，实测 111px），
+    hover 后被 20px 按钮抬高（实测 131px）→ 卡片高度跳变。
+    修复：bar 最小高度托底（按钮高度）。
 
-    反向约束：**不得**为防高度跳变把容器改成常驻固定尺寸占位——那会让非
-    hover 时右侧白留一片按钮宽度的空白（2026-09-29 用户反馈）。
+    现需求：按钮常显，不再随 hover 显隐 → 构造后即 isVisible()，
+    且 user 卡片仍保持 hover 显隐（见 test_user_hover_buttons_no_height_change）。
     """
     card = _make_card("assistant")
     card.show()
     qapp.processEvents()
     btns = card._assistant_action_btns
-    btns.setVisible(True)
-    qapp.processEvents()
-    h_shown = card.height()
+    assert btns.isVisible(), "assistant 操作按钮应常显"
+    h_with_btns = card.height()
+    # 显式显隐切换仍不得改变卡片高度（bar 最小高度托底）
     btns.setVisible(False)
     qapp.processEvents()
     h_hidden = card.height()
-    assert h_shown == h_hidden, f"hover 显隐改变卡片高度: hidden={h_hidden} shown={h_shown}"
-    # 非 hover：容器必须退出布局（隐藏），不得占宽
-    assert not btns.isVisible(), "非 hover 时按钮容器仍可见 = 右侧出现空白占位"
+    btns.setVisible(True)
+    qapp.processEvents()
+    assert h_with_btns == h_hidden, f"按钮显隐改变卡片高度: {h_hidden} vs {h_with_btns}"
 
 
 def test_user_hover_buttons_no_height_change(qapp):

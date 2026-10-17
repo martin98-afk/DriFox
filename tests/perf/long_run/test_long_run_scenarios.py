@@ -5,8 +5,10 @@
     pytest tests/perf/long_run/test_long_run_scenarios.py -v -m perf_long
 
 行为：
-- 单场景运行时长 = 环境变量 `LONGRUN_DURATION`（秒），默认 10s（保证 <30s CI 友好）
-- Demo 模式（默认）：每场景 10s
+- 单场景运行时长 = 环境变量 `LONGRUN_DURATION`（秒），默认 30s（DEMO_DURATION_SEC，
+  见 runner.py）；本文件 4 个用例共跑 a/b/c 三轮 + 一次全场景报告，净等待 ≈180s，
+  故已由 pyproject addopts 排除出默认收集，显式 `pytest tests/perf` 才运行
+- Demo 模式（默认）：每场景 30s
 - Full 模式（LONGRUN_FULL=1）：每场景 30min
 - 全部断言保证 leak rate < 50 MB/h（宽松阈值，超出仅 warn 不 fail）
 """

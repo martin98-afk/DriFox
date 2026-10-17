@@ -146,7 +146,7 @@ def test_height_animator_releases_min_and_max(qapp):
 
 
 def test_loop_timer_respects_visibility_gate(qapp):
-    """宿主不可见时零回调（桌宠/面板隐藏后不再空转重绘）"""
+    """宿主不可见时零回调（隐藏的控件不再空转重绘）"""
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QWidget
 
@@ -196,7 +196,6 @@ _SRC = {
     "viewer": "app/widgets/markdown_block_viewer.py",
     "card": "app/widgets/cards/card_container.py",
     "stop_btn": "app/widgets/stop_button.py",
-    "pet": "app/widgets/pixel_pet.py",
     "arc": "plugins/assistant_hub/ui/arc_stack.py",
     "subagent": "app/widgets/cards/floating/sub_agent_compact_widget.py",
 }
@@ -243,29 +242,3 @@ def test_no_hardcoded_duration_regression(key):
     src = _read(key)
     bad = [m for m in re.findall(r"setDuration\(\s*(\d+)\s*\)", src) if m != "0"]
     assert not bad, f"{_SRC[key]} 仍有硬编码时长: {bad}"
-
-
-def test_pet_pauses_all_loops_on_hide():
-    """桌宠隐藏时必须暂停**全部**循环定时器（改造前只停了 _raise_timer）"""
-    src = _read("pet")
-    hide = src[src.index("def hideEvent") : src.index("def _pause_loops")]
-    assert "_pause_loops()" in hide, "hideEvent 必须调用 _pause_loops"
-    # timer 清单是类级元组，_pause_loops 遍历它
-    attrs = src[src.index("_LOOP_TIMER_ATTRS") : src.index("def _pause_loops")]
-    for name in ('"_frame_timer"', '"_sleep_timer"', '"_idle_behavior_timer"', '"_attention_timer"'):
-        assert name in attrs, f"隐藏时漏停 {name}"
-    # 显示时按当前状态恢复
-    assert "_resume_loops()" in src
-
-
-def test_pet_tracks_animations_with_cleanup():
-    """桌宠动画列表必须可回收（改造前只 append 不清理 = 稳定泄漏）"""
-    src = _read("pet")
-    assert "def _track_animation" in src
-    assert "self._track_animation(" in src
-    # 裸 append 只允许出现在 _track_animation 内部（那里是统一入口）；
-    # 其余调用点必须走 _track_animation，且它会连 finished → 摘除。
-    # 按整行匹配，避开 docstring 里对旧写法的引述。
-    code_lines = [ln.strip() for ln in src.splitlines()]
-    assert code_lines.count("self._animations.append(anim)") == 1, "调用点不得绕过 _track_animation"
-    assert "self._animations.remove(anim)" in "\n".join(code_lines), "_track_animation 必须自动摘除"

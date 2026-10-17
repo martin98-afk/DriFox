@@ -34,6 +34,10 @@ class CardContainer(QWidget):
     # 这些真实卡片的内容下限，避免窗口缩小时卡片被压扁/裁切。
     _DOCK_MIN_H = 40  # 横向停靠区（LEFT/RIGHT）最小宽（每张卡片自身 minimumWidth 仍受尊重）
     _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
+    # 横向停靠区（LEFT/RIGHT）无记忆首开的默认宽下限：首开时卡片内容常未
+    # 完成测量/异步加载，sizeHint 偏小（嵌入侧边栏的新一代面板卡尤甚），
+    # 直接信 sizeHint 会首开过窄；用户拖宽后按卡片记忆，不再走此下限。
+    _DOCK_DEFAULT_W = 360
     # 纵向停靠区（TOP/BOTTOM）首次展开时强制占对话区（vdock splitter）的
     # 最小比例，避免卡片天然尺寸过小（内容未测量 / 空卡片 / 异步加载）时
     # 容器被压成极矮细条。用户已手动拖拽调过比例（按卡片记忆 >0）后
@@ -49,6 +53,11 @@ class CardContainer(QWidget):
     # 容器动画会与这些交互产生约一个动画时长的高度延迟 / 抖动。
     # 声明后，容器高度会直接 snap 到目标值，不再走 QPropertyAnimation。
     NO_ANIMATION_PROP = "noContainerAnimation"
+
+    # 隐藏期主题刷新补刷协议标记（见 refresh_style / showEvent）。
+    # 类级默认值必需：门控读写此属性，实例首次赋值前 getattr 默认 False
+    # 会让「隐藏期置脏」判定失效（同类教训见 LLMSettingsCard._theme_needs_refresh）。
+    _theme_needs_refresh: bool = False
 
     # 卡片可通过 setProperty(FOLLOW_CONTENT_PROP, True) 声明"高度必须严格跟随内容"：
     # 即使容器处于停靠（dock）模式（高度由 QSplitter 分配、默认不随内容收缩，
@@ -226,7 +235,24 @@ class CardContainer(QWidget):
         """响应主题切换：刷新容器背景 + 边框
 
         主题切换时由 main_widget 的全局 refresh 链调用。
+
+        [PERF] 隐藏容器门控：本方法成本 ∝ 容器卡片子树规模（设置弹窗宿主
+        容器 1088 控件，实测单次 241ms）。容器隐藏时用户看不见，刷新纯属
+        白付；置 _theme_needs_refresh 后由显示路径补刷自愈。
+        仅门控隐藏态；可见态行为完全不变。
+
+        ⚠️ 补刷不能只挂 showEvent：覆盖层模式的容器由 QStackedWidget 切页
+        显隐（叠放化改造，不触发 showEvent），实际补刷点是
+        TabManagerWindow._on_overlay_state_changed。非 overlay 的 dock/普通
+        容器仍走 showEvent。
         """
+        try:
+            if not self.isVisible():
+                self._theme_needs_refresh = True
+                return
+        except RuntimeError:
+            return  # C++ 对象已销毁
+        self._theme_needs_refresh = False
         self._apply_background_style()
 
     @property
@@ -683,7 +709,9 @@ class CardContainer(QWidget):
         """
         super().showEvent(event)
         # 覆盖层模式：按当前可见卡片重判透明/面板样式（透明卡片显隐会切换容器可见性）
-        if self._overlay_mode:
+        # [PERF] 同时承接隐藏期 refresh_style 门控的补刷（置脏语义）
+        if self._overlay_mode or getattr(self, "_theme_needs_refresh", False):
+            self._theme_needs_refresh = False
             self._apply_background_style()
         # 延迟到当前 show 事件处理完成后再展开（此时布局已激活）
         # not isHidden()：容器自身隐藏期间被 setVisible(True) 的卡片
@@ -909,8 +937,9 @@ class CardContainer(QWidget):
                 if self._horizontal:
                     # 记忆优先（含拖窄场景——旧逻辑"记忆<natural 用 natural"会把
                     # 用户拖窄丢弃，tab 切换折叠重开后恢复默认）；无记忆才用自然
-                    # 尺寸；clamp 下限防细条。
-                    target = max(mem, min_floor) if mem > 0 else natural_h
+                    # 尺寸；clamp 下限防细条。无记忆时叠加默认宽下限（同纵向
+                    # ratio_floor 的对位兄底，防 sizeHint 未测量首开过窄）。
+                    target = max(mem, min_floor) if mem > 0 else max(natural_h, self._DOCK_DEFAULT_W)
                 else:
                     if mem > 0:
                         target = max(mem, ratio_floor)

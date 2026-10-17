@@ -115,7 +115,9 @@ _DEFAULT_THEME: Dict[str, Any] = {
 # 类型常量
 # ════════════════════════════════════════════════════════════
 
-_TYPE_ICONS = {"session": "💬", "project": "📦"}
+# 类型图标（矢量图标，随主题动态取色）
+_TYPE_ICONS = {"session": FluentIcon.CHAT, "project": FluentIcon.ZIP_FOLDER}
+_TYPE_ICON_FALLBACK = FluentIcon.DOCUMENT
 _TYPE_LABELS = {"session": "会话", "project": "项目"}
 
 
@@ -172,7 +174,7 @@ class _RecordItem(QFrame):
         self._copy_btn: Optional[QPushButton] = None
         self._missing_btn: Optional[QPushButton] = None
         self._download_btn: Optional[QPushButton] = None
-        self._delete_btn: Optional[QPushButton] = None
+        self._delete_btn: Optional[TransparentToolButton] = None
 
         # 下载线程/worker 引用（防止局部变量被 GC 导致线程信号丢失）
         self._download_thread: Optional[QThread] = None
@@ -205,10 +207,8 @@ class _RecordItem(QFrame):
         row1 = QHBoxLayout()
         row1.setSpacing(6)
 
-        self._icon_lb = QLabel(_TYPE_ICONS.get(rtype, "📄"))
-        self._icon_lb.setFixedWidth(24)
-        self._icon_lb.setAlignment(Qt.AlignCenter)
-        self._icon_lb.setStyleSheet("background: transparent; font-size: 14px;")
+        self._icon_lb = IconWidget(_TYPE_ICONS.get(rtype, _TYPE_ICON_FALLBACK), self)
+        self._icon_lb.setFixedSize(16, 16)
         row1.addWidget(self._icon_lb)
 
         self._title_lb = QLabel(title)
@@ -240,7 +240,7 @@ class _RecordItem(QFrame):
                 info_parts.append(f"{mc} 轮对话")
             proj = extra.get("project", "")
             if proj:
-                info_parts.append(f"📁 {proj}")
+                info_parts.append(proj)
         elif rtype == "project":
             sc = extra.get("session_count", 0)
             if sc:
@@ -263,34 +263,33 @@ class _RecordItem(QFrame):
         has_url = bool(upload_url)
 
         if has_file:
-            self._open_btn = TransparentPushButton("📂 打开")
+            self._open_btn = TransparentPushButton("打开", None, FluentIcon.FOLDER)
             self._open_btn.setFixedHeight(26)
             self._open_btn.setCursor(Qt.PointingHandCursor)
             self._open_btn.clicked.connect(lambda: self._open_file(file_path))
             row3.addWidget(self._open_btn)
         elif has_url:
-            self._download_btn = TransparentPushButton("📥 下载")
+            self._download_btn = TransparentPushButton("下载", None, FluentIcon.DOWNLOAD)
             self._download_btn.setFixedHeight(26)
             self._download_btn.setCursor(Qt.PointingHandCursor)
             self._download_btn.clicked.connect(lambda: self._download_file(upload_url))
             row3.addWidget(self._download_btn)
         else:
-            self._missing_btn = TransparentPushButton("📂 文件缺失")
+            self._missing_btn = TransparentPushButton("文件缺失", None, FluentIcon.DOCUMENT)
             self._missing_btn.setFixedHeight(26)
             self._missing_btn.setEnabled(False)
             row3.addWidget(self._missing_btn)
 
         if has_url:
-            self._copy_btn = TransparentPushButton("🔗 复制链接")
+            self._copy_btn = TransparentPushButton("复制链接", None, FluentIcon.LINK)
             self._copy_btn.setFixedHeight(26)
             self._copy_btn.setCursor(Qt.PointingHandCursor)
             self._copy_btn.clicked.connect(lambda: self._copy_link(upload_url))
             row3.addWidget(self._copy_btn)
 
         # 删除按钮
-        self._delete_btn = TransparentPushButton("🗑️")
-        self._delete_btn.setFixedHeight(26)
-        self._delete_btn.setFixedWidth(32)
+        self._delete_btn = TransparentToolButton(FluentIcon.DELETE)
+        self._delete_btn.setFixedSize(32, 26)
         self._delete_btn.setCursor(Qt.PointingHandCursor)
         self._delete_btn.setToolTip("删除此记录")
         self._delete_btn.clicked.connect(self._on_delete_clicked)
@@ -376,7 +375,7 @@ class _RecordItem(QFrame):
                     background: {t["btn_bg"]};
                     border: 1px solid {t["btn_border"]};
                     border-radius: 4px;
-                    padding: 0 10px;
+                    padding: 0 12px 0 36px;
                     color: {t["tc"]};
                     font-size: {btn_fs}px;
                     font-family: '{ff}';
@@ -393,7 +392,7 @@ class _RecordItem(QFrame):
                     background: {t["btn_bg"]};
                     border: 1px solid {t["btn_border"]};
                     border-radius: 4px;
-                    padding: 0 10px;
+                    padding: 0 12px 0 36px;
                     color: {t["tc"]};
                     font-size: {btn_fs}px;
                     font-family: '{ff}';
@@ -410,7 +409,7 @@ class _RecordItem(QFrame):
                     background: {t["card_bg_dim"]};
                     border: 1px solid transparent;
                     border-radius: 4px;
-                    padding: 0 10px;
+                    padding: 0 12px 0 36px;
                     color: {t["btn_disabled"]};
                     font-size: {btn_fs}px;
                     font-family: '{ff}';
@@ -424,7 +423,7 @@ class _RecordItem(QFrame):
                     background: {t["btn_bg"]};
                     border: 1px solid {t["btn_border"]};
                     border-radius: 4px;
-                    padding: 0 10px;
+                    padding: 0 12px 0 36px;
                     color: {t["tc"]};
                     font-size: {btn_fs}px;
                     font-family: '{ff}';
@@ -434,26 +433,22 @@ class _RecordItem(QFrame):
                 }}
             """)
 
-        # 类型图标
+        # 类型图标（FluentIcon 按当前主题动态取色，重绘即可）
         if self._icon_lb:
-            self._icon_lb.setStyleSheet(
-                f"background: transparent; font-size: {max(10, fs - 1)}px; color: {t['tc']}; font-family: '{ff}';"
-            )
+            self._icon_lb.update()
 
         # 删除按钮
         if self._delete_btn:
-            self._delete_btn.setStyleSheet(f"""
-                QPushButton {{
+            self._delete_btn.setStyleSheet("""
+                QToolButton {
                     background: transparent;
                     border: 1px solid transparent;
                     border-radius: 4px;
-                    padding: 0 4px;
-                    font-size: {btn_fs}px;
-                }}
-                QPushButton:hover {{
+                }
+                QToolButton:hover {
                     background: rgba(255,60,60,0.15);
                     border: 1px solid rgba(255,60,60,0.3);
-                }}
+                }
             """)
 
     def refresh_theme(self, theme: dict):
@@ -519,11 +514,11 @@ class _RecordItem(QFrame):
 
         # 禁用按钮，显示进度
         if self._download_btn:
-            self._download_btn.setText("⏳ 下载中…")
+            self._download_btn.setText("下载中…")
             self._download_btn.setEnabled(False)
 
         # ── QThread 方式：和 DownloadThread 同模式 ──
-        # ⚠️ 必须保存为实例变量，防止 Python GC 在线程启动前回收 worker/thread
+        # 注意：必须保存为实例变量，防止 Python GC 在线程启动前回收 worker/thread
         self._cleanup_download()
         self._download_worker = _DownloadWorker(url, str(save_path))
         self._download_thread = QThread(self)
@@ -563,7 +558,7 @@ class _RecordItem(QFrame):
         logger.warning(f"[ShareHistory] 下载失败: {err}")
         self._cleanup_download()
         if self._download_btn:
-            self._download_btn.setText("📥 重试")
+            self._download_btn.setText("重试")
             self._download_btn.setEnabled(True)
 
         parent = self.window()
@@ -763,12 +758,12 @@ class ShareHistoryCard(QWidget):
             except RuntimeError:
                 pass
 
-        # 搜索图标
-        try:
-            if getattr(self, "_search_icon", None):
-                self._search_icon.setStyleSheet(f"background: transparent; font-size: {max(fs - 2, 11)}px;")
-        except RuntimeError:
-            pass
+        # 图标载体（FluentIcon 按当前主题动态取色，重绘即可）
+        for child in self.findChildren(IconWidget):
+            try:
+                child.update()
+            except RuntimeError:
+                pass
 
         # 刷新 _RecordItem 子项
         for child in self.findChildren(_RecordItem):
@@ -825,6 +820,11 @@ class ShareHistoryCard(QWidget):
         self._content_layout.setSpacing(6)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        from app.utils.design_tokens import make_card_content_opaque
+
+        make_card_content_opaque(self._content, 246)
         root.addWidget(self._scroll, 1)
 
     def _build_header(self, root: QVBoxLayout):
@@ -881,10 +881,10 @@ class ShareHistoryCard(QWidget):
         container.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(container)
         layout.setContentsMargins(16, 6, 16, 2)
-        layout.setSpacing(0)
+        layout.setSpacing(6)
 
-        self._search_icon = QLabel("🔍")
-        self._search_icon.setStyleSheet("background: transparent; font-size: 12px;")
+        self._search_icon = IconWidget(FluentIcon.SEARCH, container)
+        self._search_icon.setFixedSize(16, 16)
         layout.addWidget(self._search_icon)
 
         self._search_input = QLineEdit(container)

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""单回合循环策略 — 助手记忆/经验整理专用（id="assistant_hub_single_turn"）。
+"""单回合循环策略 — 助手经验反思专用（id="assistant_hub_single_turn"）。
 
 背景
 ====
-assistant_hub 的记忆传送带（compile）、Dream、经验反思都是"丢一段 prompt
-进去、拿回一段纯文本"的工具型调用，本质是 **一次 API 调用**，不需要
-工具迭代、不需要 Stop hook 续命、不需要重复循环检测。
+assistant_hub 的经验反思是"丢一段 prompt 进去、拿回一段纯文本"的工具型
+调用，本质是 **一次 API 调用**，不需要工具迭代、不需要 Stop hook 续命、
+不需要重复循环检测。
 
 原先走 OpenAI 兼容直连（core/llm_client.py 的 urllib 裸请求），与主对话
 引擎完全脱钩：模型参数（思考/reasoning/温度/额外字段）、provider 适配、

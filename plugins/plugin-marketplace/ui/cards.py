@@ -2658,6 +2658,7 @@ class MarketplaceCard(QWidget):
 
         # 主题真变化时才全树 re-theme + 更新搜索框/分隔线（日常打开/切换不触发）
         if theme_changed:
+            self._apply_content_surface_color()
             self._retheme()
             try:
                 self._search_edit.setStyleSheet(
@@ -2694,6 +2695,33 @@ class MarketplaceCard(QWidget):
         "exploreCardDesc": -3,  # 探索卡片描述
         "exploreCardVer": -3,  # 探索卡片版本
     }
+
+    def _apply_content_surface_color(self):
+        """给列表内容层刷主题实底色（滚动 blit 的前置条件）
+
+        取上下文 ``colors.content_bg``，缺键回退 ``Colors.CONTENT_BG``。
+        必须用 palette（autoFillBackground）而非 QSS：QSS 背景由
+        QStyleSheetStyle 在 paintEvent 内绘制，不改写 QWidget 的 opaque
+        判定 → Qt 滚动位块传输优化仍被禁用（实测每步仍 106 次 paint）。
+        """
+        from PySide6.QtGui import QColor
+
+        try:
+            from app.utils.design_tokens import Colors
+
+            fallback = Colors.CONTENT_BG
+        except Exception:
+            fallback = "#2a2a2e"
+        theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
+        raw = theme_colors.get("content_bg") or fallback
+        color = QColor(raw)
+        if not color.isValid():
+            color = QColor(fallback)
+        color.setAlpha(255)  # 必须全不透明，否则 blit 优化失效
+        pal = self._content.palette()
+        pal.setColor(self._content.backgroundRole(), color)
+        self._content.setPalette(pal)
+        self._content.setAutoFillBackground(True)
 
     def _retheme(self):
         """刷新所有已有子控件的颜色 + 字号 + 字体（对动态创建的内容也要调）
@@ -3000,7 +3028,20 @@ class MarketplaceCard(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(_scroll_area_qss())
         self._content = _MarketListContent(self._scroll)
-        self._content.setStyleSheet("background: transparent;")
+        # ── 内容层必须"不透明实底"（滚动性能关键）──
+        # QScrollArea 滚动时走 QWidgetPrivate::scrollRect 位块传输（blit）：
+        # 已绘制区域整块搬移，只重绘新露出的一条。该优化要求滚动内容
+        # widget 自身不透明，否则 Qt 无法判断搬移后残留像素是否需与背景
+        # 合成，会回退到「全视口重绘」。
+        # 实测（150 行 / 视口 1000x577 / 原生平台）：
+        #   content 透明（background: transparent）→ 每滚动一步 106 次 paint
+        #     （视口内 6 行 × 17 控件全部重绘）、paint 耗时 p50 1.9ms；
+        #   content 不透明 → 每步 20 次 paint（仅新露出的一行）、p50 0.6ms。
+        # 注意：autoFillBackground（走 palette）才有效，setStyleSheet 设
+        # background 实测无效——QSS 背景由 QStyleSheetStyle 在 paintEvent 里
+        # 绘制，不改写 QWidget 的 opaque 判定，blit 仍被禁用。
+        # 实际底色（含 setAutoFillBackground）在 setWidget 之后由
+        # _apply_content_surface_color 统一设置。
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(12, 8, 12, 8)
         # 间距 0：行与行之间靠行自身的 1px 分隔线分隔（行上下各有 8px 内边距，
@@ -3012,6 +3053,11 @@ class MarketplaceCard(QWidget):
         # 400ms 插值 60fps + 连滚加速；自绘悬浮滚动条接管原生条（同主程序视觉）
         SmoothScrollDelegate(self._scroll)
         self._content_stack.addWidget(self._scroll)
+        # 不透明底放在 _setup_ui 末尾：QScrollArea::setWidget 会把 content
+        # reparent 到视口，随后 SmoothScrollDelegate 安装事件过滤器、
+        # addWidget 进 stack 都会再次触碰 widget 属性（实测紧跟 setWidget
+        # 设置仍会被清掉，构造结束后读回 autoFillBackground=False）。
+        self._apply_content_surface_color()
 
         self._empty_label = StrongBodyLabel("暂无可用插件", self._browse_page)
         self._empty_label.setAlignment(Qt.AlignCenter)

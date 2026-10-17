@@ -21,11 +21,11 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from loguru import logger
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
+from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QLineEdit, QWidget
 
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css
+from app.utils.utils import get_font_family_css, get_icon
 from app.widgets import MessageCard
 from app.widgets.elided_label import _ElidedLabel
 
@@ -943,6 +943,8 @@ def create_session_from_record(session_record: dict, messages: list, title: str 
     session_id = session_record.get("session_id")
     title = title or session_record.get("name") or "历史对话"
 
+    # ⚠️ API 权威上下文占用值必须透传（旧实现漏传 → 加载后 last_api_prompt_tokens
+    # 恒为 0，圆环/卡片只能退回本地重新估算，与 API 真实值差出几倍）。
     return ChatSession.from_dict(
         {
             "session_id": session_id,
@@ -951,6 +953,14 @@ def create_session_from_record(session_record: dict, messages: list, title: str 
             "topic_summary": title,
             "compaction_state": session_record.get("compaction_state", {}),
             "compaction_cache": session_record.get("compaction_cache", {}),
+            "system_prompt": session_record.get("system_prompt", "") or "",
+            "context_usage": session_record.get("context_usage", 0),
+            "last_api_prompt_tokens": session_record.get("last_api_prompt_tokens", 0),
+            "last_api_message_count": session_record.get("last_api_message_count", 0),
+            # None 表示"未知"（老记录），按来自 API 处理
+            "last_api_prompt_from_usage": session_record.get("last_api_prompt_from_usage", None),
+            "token_calibration": session_record.get("token_calibration", 0),
+            "token_calibration_model": session_record.get("token_calibration_model", "") or "",
         }
     )
 
@@ -1215,6 +1225,9 @@ def save_or_archive_session(
     save_kwargs = dict(compaction_info)
     if resolved_project is not None:
         save_kwargs["project"] = resolved_project
+    # API 权威上下文占用值随保存透传（否则一次保存即清零，加载后退回本地估算）
+    if session is not None and hasattr(session, "api_usage_dict"):
+        save_kwargs.update(session.api_usage_dict())
 
     if current_session_id is not None:
         idx = history_manager.find_index_by_session_id(current_session_id)
@@ -1807,6 +1820,37 @@ def refresh_history_card_if_visible(history_card, refresh_func=None) -> None:
         refresh_func()
 
 
+def _detach_focus_from_widgets(widgets: list) -> None:
+    """把焦点从待删 widget 子树中摘出（防 Qt 焦点链自动滚动）。
+
+    🐛 根因链（2026-10-14 探针 tests/debug/_tmp_probe_scroll_entry.py 实证）：
+    ``widget.hide()`` 时若焦点仍在被隐藏子树内，Qt 会走 ``focusNextPrevChild``
+    自动把焦点移到**下一个可聚焦控件**；若该控件位于滚动区内，Qt 随即调用
+    ``scrollContentsBy`` 把视口滚到它旁边（实测 value 8602 → 388，跳 8214px）。
+    用户可见症状：点击过某条消息卡片内的按钮（焦点遗留）后，虚拟滚动回收
+    该卡片时视口瞬跳；长会话上下滚动「动态加载后滚轮跳变、不保持原位」。
+
+    ``clearFocus()`` 让焦点退到窗口级，隐藏过程不再触发 Qt 的自动转移滚动。
+    只处理焦点确实落在待删子树内的情形，其余保持不动（不误伤输入框焦点）。
+    """
+    app = QApplication.instance()
+    if app is None:
+        return
+    try:
+        focused = app.focusWidget()
+    except RuntimeError:
+        return
+    if focused is None:
+        return
+    for widget in widgets:
+        try:
+            if widget is focused or widget.isAncestorOf(focused):
+                focused.clearFocus()
+                return
+        except RuntimeError:
+            continue
+
+
 def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanup: bool = True) -> int:
     """
     从布局中删除指定的 widgets
@@ -1825,6 +1869,10 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
     一次传入几十张卡）卡片数上千时是滚动卡顿的隐性来源。
     改为先建一次 ``id(widget)`` 索引集合，整体降为 O(n+m)。
     """
+    # 🐛 焦点摘除必须先于任何 hide()：焦点在待删子树内时 hide() 会触发
+    # Qt 焦点链自动转移 + 滚动区自动滚动（视口瞬跳，见辅助函数注释）。
+    _detach_focus_from_widgets(widgets_to_remove)
+
     deleted = 0
     # 一次性快照布局成员（removeWidget 会改变布局索引，故必须预先建索引）
     layout_member_ids = set()
@@ -2115,3 +2163,27 @@ class TitleEditWidget(QWidget):
         self._label.setText(self._full_text)
         self.setReadOnly(True)
         return False
+
+
+# ==================== 主题感知图标标签 ====================
+# 自 main_widget.py 迁出（2026-09-29 拆分步骤 3），bottom_toolbar_module 等使用
+
+
+class _ThemedIconLabel(QWidget):
+    """主题感知图标标签 — 使用 QIcon 引擎自动适配浅色/深色
+
+    替代静态 emoji/文字图标，支持主题切换时自动更新图标颜色。
+    通过 QIconEngine（_ThemeIconEngine）实现每次 paint 时按当前主题加载正确颜色。
+    """
+
+    def __init__(self, icon_name: str, size: int = 18, parent=None):
+        super().__init__(parent)
+        self._icon = get_icon(icon_name)
+        self._icon_size = size
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._icon.paint(painter, self.rect())

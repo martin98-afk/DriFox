@@ -1222,6 +1222,8 @@ class PluginInstaller:
             import importlib
             import sys
 
+            from importlib.machinery import ExtensionFileLoader
+
             safe = name.replace("-", "_").replace(":", "_")
             head = f"ui_plugin_{safe}"
             for mod_name in list(sys.modules.keys()):
@@ -1251,6 +1253,14 @@ class PluginInstaller:
             # gateway 等插件把 SDK vendor 到 deps/ 并 sys.path.insert 后以顶层名
             # import（如 lark_oapi），上述前缀匹配清不掉；模块常驻 sys.modules
             # 会持有 .pyd/.pyc 句柄，Windows 上 rmtree 失败 → 卸载残留 deps 目录。
+            #
+            # ★ native 扩展（.pyd/.so/.dylib）豁免清理：DLL 一旦加载即常驻进程，
+            #   删 sys.modules 条目不会释放文件句柄（对 rmtree 无帮助），反而导致
+            #   重载时二次初始化崩溃——PyO3 编译的扩展（cryptography._rust 等）
+            #   在同一进程内只允许初始化一次，删后 re-import 直接抛
+            #   "PyO3 modules ... may only be initialized once per interpreter process"。
+            #   实测 2026-10-16 ssh-toolkit（deps 内 vendor cryptography/paramiko）更新后
+            #   工具加载全失败。纯 Python 模块照常清理（其 .pyc 句柄才是 rmtree 障碍）。
             for base in (_drifox_dir() / "plugins", _drifox_dir() / "plugins-disabled"):
                 plugin_dir = base / name
                 if not plugin_dir.is_dir():
@@ -1264,8 +1274,11 @@ class PluginInstaller:
                     if not mod_file:
                         continue
                     try:
-                        if plugin_dir_str in str(Path(mod_file).resolve()).lower():
-                            del sys.modules[mod_name]
+                        if plugin_dir_str not in str(Path(mod_file).resolve()).lower():
+                            continue
+                        if isinstance(getattr(mod, "__loader__", None), ExtensionFileLoader):
+                            continue  # native 扩展豁免（见上方注释）
+                        del sys.modules[mod_name]
                     except (OSError, ValueError):
                         continue
             importlib.invalidate_caches()

@@ -14,7 +14,11 @@
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys
 from app.core.conversation.message_content import append_text_block
-from app.core.modelmeta.model_capabilities import get_model_capabilities, normalize_reasoning_effort
+from app.core.modelmeta.model_capabilities import (
+    get_model_capabilities,
+    normalize_reasoning_effort,
+    resolve_model_capabilities,
+)
 from app.core.modelmeta.provider_profile import get_provider_profile
 from app.core.tools.tool_arg_lines import (
     LINE_ESTIMATE_STEP,
@@ -34,6 +38,7 @@ __all__ = [
     "get_model_capabilities",
     "get_provider_profile",
     "normalize_reasoning_effort",
+    "resolve_model_capabilities",
     "provider_quota_exclude_keys",
     "should_emit_progress",
 ]

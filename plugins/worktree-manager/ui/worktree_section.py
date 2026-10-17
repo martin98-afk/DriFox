@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.git_worktree import GitWorktreeDetector
 from app.utils.utils import get_font_family_css
-from app.widgets.pixel_pet import PixelPetWidget  # ★ 用于重要操作时触发警示动画
 
 # Windows 下隐藏 cmd 窗口
 _CREATION_FLAGS = 0
@@ -376,10 +375,6 @@ class _WorktreeRow(QWidget):
 
     def _do_delete(self):
         """执行删除 worktree + 自动删除分支（后台线程串行执行，UI 不冻结）"""
-        ## 触发警示动画
-        pet = self.window().findChild(PixelPetWidget)
-        if pet:
-            pet.set_state("warning")
         # 防重入：删除期间禁用删除按钮并显示执行中，避免用户连点重复触发
         if self._del_btn:
             self._del_btn.setEnabled(False)
@@ -407,10 +402,6 @@ class _WorktreeRow(QWidget):
             )
             self._del_btn.setToolTip("删除 worktree")
         self.deleted.emit(self._wt_path)
-        # 操作完成，恢复正常状态
-        pet = self.window().findChild(PixelPetWidget)
-        if pet:
-            pet.set_state("idle")
 
     def _on_delete_failed(self, msg: str):
         """删除失败（主线程）：恢复 UI，失败信息已由后台记录日志"""
@@ -427,10 +418,6 @@ class _WorktreeRow(QWidget):
                 f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
             )
             self._del_btn.setToolTip("删除 worktree")
-        pet = self.window().findChild(PixelPetWidget)
-        if pet:
-            pet.set_state("idle")
-
     def _find_git_root(self) -> str:
         return _find_git_root_for(self._wt_path)
 
@@ -719,10 +706,6 @@ class WorktreeSectionWidget(QWidget):
         self._repopulate()
 
     def _on_create(self, branch_name: str, base_branch: str):
-        ## 触发警示动画
-        pet = self.window().findChild(PixelPetWidget)
-        if pet:
-            pet.set_state("warning")
         # 防重入：创建进行中时忽略重复点击
         if self._create_busy:
             logger.info("[Worktree] 创建进行中，忽略重复请求")
@@ -733,28 +716,23 @@ class WorktreeSectionWidget(QWidget):
         worktree_dir = os.path.join(repo_root, ".worktrees", branch_name.replace("/", "-"))
 
         worker = _WorktreeTaskWorker(_create_worktree_job, repo_root, branch_name, worktree_dir, base_branch or "HEAD")
-        worker.signals.finished.connect(lambda _r: self._on_create_finished(branch_name, worktree_dir, pet))
-        worker.signals.failed.connect(lambda msg: self._on_create_failed(branch_name, msg, pet))
+        worker.signals.finished.connect(lambda _r: self._on_create_finished(branch_name, worktree_dir))
+        worker.signals.failed.connect(lambda msg: self._on_create_failed(branch_name, msg))
         self._create_worker = worker
         _WORKTREE_POOL.start(worker)
 
-    def _on_create_finished(self, branch_name: str, worktree_dir: str, pet):
+    def _on_create_finished(self, branch_name: str, worktree_dir: str):
         """创建成功（主线程）：置位待切换路径并刷新列表"""
         self._create_busy = False
         self._create_worker = None
         self._pending_switch_path = worktree_dir
         # 清除缓存后刷新（后台），刷新完成时自动切换到新 worktree
         self._repopulate()
-        # 操作完成，恢复正常状态
-        if pet:
-            pet.set_state("idle")
 
-    def _on_create_failed(self, branch_name: str, msg: str, pet):
+    def _on_create_failed(self, branch_name: str, msg: str):
         """创建失败（主线程）：恢复状态并提示"""
         self._create_busy = False
         self._create_worker = None
-        if pet:
-            pet.set_state("idle")
         self._show_error_dialog(
             "创建失败",
             f"无法创建 worktree「{branch_name}」：\n\n{msg}\n\n💡 如果分支已存在，可先删除旧 worktree 再创建",

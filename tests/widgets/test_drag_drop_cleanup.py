@@ -50,9 +50,11 @@ def test_sendable_text_edit_close_event_disables_drops(qapp):
 
 
 def test_project_selector_card_close_event_disables_all_drops(qapp):
-    from app.widgets.cards.settings.project_selector_card import ProjectSelectorCardContent
+    from importlib import import_module
 
-    content = ProjectSelectorCardContent()
+    # 卡片本体已迁入 history-manager 插件（目录带连字符，走 import_module）
+    _card_mod = import_module("plugins.history-manager.ui.project_selector_card")
+    content = _card_mod.ProjectSelectorCardContent()
     assert content.acceptDrops() is True, "前置：卡本体接受拖放"
     assert content._content_widget.acceptDrops() is True
     assert content._scroll_area.acceptDrops() is True

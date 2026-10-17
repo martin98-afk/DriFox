@@ -108,6 +108,66 @@ def make_module_filter(include: tuple[str, ...], exclude: tuple[str, ...] = ()) 
     return _filter
 
 
+def _install_stdlib_logging_bridge() -> None:
+    """把标准 ``logging`` 的记录接管进 loguru（幂等）。
+
+    背景：本模块给 loguru 配 sink，但标准 logging 是独立体系 —— 第三方库
+    （lark_oapi / openai / httpx / aiohttp / watchfiles 等）与部分插件用
+    ``logging.getLogger(__name__)`` 输出，这些记录**一条都不落盘**。实证代价：
+    飞书 WS 建连失败时 lark SDK 的 ``connect failed, err: [SSL:
+    CERTIFICATE_VERIFY_FAILED] ...`` 完全不可见，只能靠盲猜定位（当时误判两轮）。
+
+    做法：把 root logger 的 handler 换成转发器，逐条转投 loguru。
+    - 保留 ``record.name`` 作 loguru 的 ``name`` → 命中 LOG_ROUTES 分文件路由
+      （如 ``app.tools.mcp_tools`` 仍进 mcp.log）；不命中任何前缀的第三方库
+      日志落 all.log，符合本模块「无遗漏」设计目标。
+    - 保留原始 levelname 与调用点（filename/lineno），便于溯源。
+    - ``logging`` 侧不设级别上限（level=0 / setLevel(NOTSET)），由 loguru sink
+      的 level="DEBUG" 统一过滤，避免两套阈值不一致。
+
+    幂等：重复调用只安装一次（标记挂在 root logger 上）。
+    """
+    import logging
+
+    root = logging.getLogger()
+    if getattr(root, "_drifox_loguru_bridge", False):
+        return
+
+    class _LoguruForwarder(logging.Handler):
+        """标准 logging → loguru 转发器（保留模块名/级别/调用点）。"""
+
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                # 标准级别名 → loguru 级别名（数值语义一致，用名字更直观）
+                level = record.levelname
+                if level not in ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+                    level = "INFO"
+                # 用 patch 显式把原 logger 名写进 loguru 记录的 name 字段：
+                # 这样 LOG_ROUTES 的前缀匹配（app.tools / plugins 等）对插件与
+                # 第三方库同样生效；不命中任何前缀的记录落 all.log（本模块
+                # 「无遗漏」设计目标）。若不 patch，name 会是本模块名。
+                logger.patch(lambda r: r.update(name=record.name)).opt(
+                    exception=record.exc_info
+                ).log(level, record.getMessage())
+            except Exception:
+                pass  # 日志链路自身异常绝不能影响业务
+
+    handler = _LoguruForwarder()
+    handler.setLevel(0)
+    # 替换既有 handler（basicConfig(force=True) 语义）：默认 StreamHandler 会
+    # 往 stderr 重复输出一份，且我们已全量接管，无需保留
+    root.handlers = [handler]
+    # 关键：root 保持 WARNING，**不设 0**。
+    # 原因：未显式设级别的库（urllib3 / httpcore / httpx / asyncio / aiohttp /
+    # watchfiles …）其 getEffectiveLevel() 继承 root。若 root 设 0，这些库的
+    # 有效级别变成 NOTSET → DEBUG 全放行，all.log 会被连接池噪音淹没（实测
+    # 100 条噪音全量落盘）。保持 WARNING 则维持库的原生默认（只出 WARNING+）。
+    # 需要 DEBUG 的库/插件自己 setLevel，照常生效——正是我们要收的目标
+    # （lark SDK 内部设 DEBUG、插件 setLevel 后同样透传）。
+    root.setLevel(logging.WARNING)
+    root._drifox_loguru_bridge = True  # type: ignore[attr-defined]
+
+
 def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     """配置全量日志 + 分系统日志 + 内存诊断日志。
 
@@ -116,6 +176,10 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     - ``mem_diag.log``：内存诊断（消息含 ``[MEM]``），受 ``mem_diag_enabled`` 控制。
     """
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 标准 logging 接管（第三方库/插件日志 → loguru，链路见函数注释）。
+    # 必须在加 sink 前安装：转发器只做转投，落盘由下面的 sink 决定。
+    _install_stdlib_logging_bridge()
 
     # 全量日志（兜底）
     logger.add(

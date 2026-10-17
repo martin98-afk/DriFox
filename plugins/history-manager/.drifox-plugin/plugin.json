@@ -10,7 +10,7 @@
     "name": "DriFox Team"
   },
   "homepage": "https://github.com/martin98-afk/DriFox",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "type": "system",
   "components": {
     "ui": true

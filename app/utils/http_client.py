@@ -15,6 +15,8 @@ import threading
 
 import httpx
 
+from app.utils.tls_trust import system_ssl_context
+
 # 占位值：SDK 构造 client 要求非空 api_key，剥头后该值不会出现在请求中
 _PLACEHOLDER_API_KEY = "not-needed"
 
@@ -121,8 +123,13 @@ def build_openai_client(api_key: str, base_url: str, timeout=None):
     if timeout is not None:
         kwargs["timeout"] = timeout
     if not api_key:
-        # 免 key 调用：自定义 transport 剥离 authorization 头
-        kwargs["http_client"] = httpx.Client(timeout=timeout, transport=_StripAuthTransport())
+        # 免 key 调用：自定义 transport 剥离 authorization 头；
+        # verify 传系统证书链 context（None 时 httpx 走默认 certifi 验证）
+        kwargs["http_client"] = httpx.Client(
+            timeout=timeout,
+            transport=_StripAuthTransport(),
+            verify=system_ssl_context(),
+        )
     return OpenAI(**kwargs)
 
 

@@ -28,7 +28,7 @@ from qfluentwidgets import ScrollArea, TransparentToolButton
 from app.core.commands.command_manager import CommandManager, CommandParameter, CommandType
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.utils import app_state as _app_state
-from app.utils.design_tokens import CardStyles, Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import CardStyles, Colors, font_size_css, get_unified_scrollbar_style, make_scroll_content_opaque
 from app.utils.utils import get_font_family_css, get_icon, get_local_skills, get_skill_by_name
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.elided_label import _ElidedLabel
@@ -921,6 +921,8 @@ class CommandCard(QWidget):
         # 由 _scroll_content.setFixedHeight(虚拟总高度) 撑起滚动范围。
 
         self._scroll_area.setWidget(self._scroll_content)
+        # 内容层不透明实底（启用 Qt 滚动 blit），必须在 setWidget 之后
+        self._apply_content_surface()
         # 确保 viewport 没有多余的边距/内边距（这是导致顶部空白的根本原因）
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
         layout.addWidget(self._scroll_area)
@@ -959,6 +961,15 @@ class CommandCard(QWidget):
         Colors.refresh()
         self.setStyleSheet(CardStyles.floating("CommandCard"))
 
+    def _apply_content_surface(self):
+        """主列表内容层不透明实底（滚动 blit 前置条件，视觉等价）
+
+        卡片表面是 CardStyles.floating 的 alpha=250 CARD_BG，下层为浮层承托底。
+        """
+        make_scroll_content_opaque(
+            self._scroll_content, Colors.CARD_BG.format(alpha=255), 250, Colors.CONTENT_BG
+        )
+
     def _apply_scroll_area_styles(self, scroll_area: "ScrollArea"):
         """应用列表/参数/值三个滚动区的统一样式（滚动条 + viewport）
 
@@ -987,6 +998,8 @@ class CommandCard(QWidget):
         Colors.refresh()
         # 1. CommandCard 自身
         self._apply_self_style()
+        # 1.1 主列表内容层实底同步（随主题重算）
+        self._apply_content_surface()
         # 1.4 主命令列表滚动区（滚动条颜色随主题，保持原始 8px 宽度）
         if hasattr(self, "_scroll_area") and self._scroll_area is not None:
             self._scroll_area.setStyleSheet(f"""
@@ -1073,6 +1086,9 @@ class CommandCard(QWidget):
         self._detail_params_layout.setContentsMargins(0, 0, 0, 0)
         self._detail_params_layout.setSpacing(0)
         self._detail_params_scroll.setWidget(self._detail_params_content)
+        make_scroll_content_opaque(
+            self._detail_params_content, Colors.CARD_BG.format(alpha=255), 250, Colors.CONTENT_BG
+        )
         detail_layout.addWidget(self._detail_params_scroll)
 
         # 值选择列表滚动区（--model= 展开时显示）
@@ -1089,6 +1105,9 @@ class CommandCard(QWidget):
         self._detail_value_layout.setContentsMargins(0, 0, 0, 0)
         self._detail_value_layout.setSpacing(0)
         self._detail_value_scroll.setWidget(self._detail_value_content)
+        make_scroll_content_opaque(
+            self._detail_value_content, Colors.CARD_BG.format(alpha=255), 250, Colors.CONTENT_BG
+        )
         detail_layout.addWidget(self._detail_value_scroll)
 
         # 回退：静态参数提示（命令无 parameters 时显示）

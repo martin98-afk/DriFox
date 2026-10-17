@@ -136,6 +136,10 @@ def _make_window(qapp):
         card.setFixedHeight(CARD_H)
         card._message_index = idx
         card._lazy_rendered = True
+        # 本案只验「高度守恒」，不涉「高度是否已落定」：显式声明落定（否则新增的
+        # 落定判据会把无 viewer 的桩卡判为未落定而整批保留，见
+        # tests/widgets/test_placeholder_height_settled.py）。
+        card.is_layout_height_settled = lambda: True
         layout.addWidget(card)
         batch_cards.append([card])
         message_batch.append([{"role": "assistant", "content": f"batch {idx}"}])

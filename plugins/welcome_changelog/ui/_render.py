@@ -124,7 +124,7 @@ _CHANGELOG_CSS = f"""
     max-width: 160px;
     border-right: 1px solid var(--accent-border-weak);
     overflow-y: auto;
-    max-height: 360px;
+    max-height: 440px;
 }}
 .changelog-version {{
     margin-bottom: 2px;
@@ -153,7 +153,7 @@ _CHANGELOG_CSS = f"""
     flex: 1;
     min-width: 0;
     overflow-y: auto;
-    max-height: 360px;
+    max-height: 440px;
     padding-right: 4px;
 }}
 .changelog-body h1, .changelog-body h2, .changelog-body h3 {{

@@ -93,22 +93,24 @@ def apply_provider_save(
         raise ProviderConfigCollision(new_config_id, existing_name)
 
     # ---- 写入 saved_providers ----
+    # merge 而非整体赋值：provider_info 显式含某键（含空串）→ 覆盖；未含 → 保留
+    # 既有未知键（插件新增元数据不会因用户编辑一次就丢）
     if is_new and old_config_id == new_config_id:
-        saved_providers[new_config_id] = provider_info
+        saved_providers[new_config_id] = {**saved_providers.get(new_config_id, {}), **provider_info}
         return new_config_id
 
     if is_new or not old_config_id:
-        saved_providers[new_config_id] = provider_info
+        saved_providers[new_config_id] = {**saved_providers.get(new_config_id, {}), **provider_info}
         return new_config_id
 
     if old_config_id == new_config_id:
-        saved_providers[new_config_id] = provider_info
+        saved_providers[new_config_id] = {**saved_providers.get(new_config_id, {}), **provider_info}
         return new_config_id
 
     # (URL, apikey) 变了：旧条目删掉，按新组合落新位置
     if old_config_id in saved_providers:
         del saved_providers[old_config_id]
-    saved_providers[new_config_id] = provider_info
+    saved_providers[new_config_id] = {**saved_providers.get(new_config_id, {}), **provider_info}
     return new_config_id
 
 
@@ -121,6 +123,15 @@ def apply_provider_save(
 
 
 def detect_provider_family(llm_config: Dict[str, Any]) -> str:
+    # 插件声明优先：providers 插件 ProviderDef.family 是权威来源
+    # （消除「声明层与运行时探测双源」这个最大漂移点）。
+    # 未声明 / 未注册的服务商（自定义、老配置别名）落回下方 if 链。
+    from app.utils.provider_ui_meta import get_family
+
+    declared = get_family(str(llm_config.get("provider_name", "") or ""))
+    if declared:
+        return declared
+
     api_url = str(llm_config.get("API_URL", "") or "").lower()
     model = str(llm_config.get("模型名称", "") or "").lower()
     auth = str(llm_config.get("认证方式", "") or "").lower()
@@ -206,12 +217,3 @@ def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Opti
     from app.core.infra.token_estimator import _get_model_token_ratio
 
     return _get_model_token_ratio(model or str(llm_config.get("模型名称", "gpt-4") or "gpt-4"))
-
-
-def supports_vision(llm_config: Dict[str, Any]) -> bool:
-    model = str(llm_config.get("模型名称", "") or "").lower()
-    # 只有模型名称里包含视觉相关关键词时才返回 True，不要根据整个服务商判断
-    vision_markers = ("vision", "vl", "llava", "glm-4v", "gpt-4o", "gpt-4o-mini", "claude-3")
-    if any(marker in model for marker in vision_markers):
-        return True
-    return False

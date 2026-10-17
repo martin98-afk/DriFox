@@ -39,8 +39,12 @@ except Exception:  # pragma: no cover
 
 # 每个桶（light / full）保留的空闲 viewer 上限。
 # 这是"常驻但不显示"的 Chromium 实例，直接占用内存，不宜过大；
-# 4 个足以覆盖上下滚动时的一进一出。
-MAX_IDLE_PER_BUCKET = 4
+# 2 个足以覆盖上下滚动时的一进一出（顺/逆序各一次）。
+# [MEM] 4 → 2：每桶 4 个 = 两桶共 8 个常驻 renderer（实测每个 renderer 常驻
+# 50MB 起，高分屏上还挂着页面级 JS 堆），而滚动方向的复用需求本来就只有
+# 「一进一出」两次 —— 多的那 4 个是纯内存成本。命中率下降时退化为新建实例，
+# 有 100-500ms 代价（见模块头），但只发生在快速来回滚动时。
+MAX_IDLE_PER_BUCKET = 2
 
 # 连续失败多少次后整池停用（防止在异常环境里反复做无效尝试）
 MAX_CONSECUTIVE_FAILURES = 3

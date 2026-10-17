@@ -4,7 +4,7 @@
 目标：验证用原生 Qt 控件替换 CodeWebViewer (QWebEngineView) 的视觉还原度。
 覆盖块类型：标题/段落(行内格式/链接/行内code)/列表/表格/引用/分隔线/
 代码块(Pygments 高亮+行号+复制)/think 折叠卡/<tool> 工具卡/
-「⚙ 工具与思考」折叠分区/任务列表(update_todo_list)。
+「⚙ 工具与思考」折叠分区。
 不含：ECharts(P2)、图片异步加载(P2)、diff 内嵌高亮(P2)。
 
 设计：
@@ -19,9 +19,19 @@ import hashlib
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QFile, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
+
+# [X1] 四级派发间隔：常量权威定义在 card_render_core（模块级导出）。
+# 本模块由 message_card 懒导入，彼时 card_render_core 已在 sys.modules，零额外成本。
+from app.widgets.card_render_core import (
+    ADAPTIVE_FAST_MS,
+    ADAPTIVE_SAFETY_MS,
+    ADAPTIVE_SLOW_MS,
+    SOFT_BOUNDARY_MERGE_MS,
+)
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
@@ -159,7 +169,6 @@ _BLOCK_ELEMENT_RE = re.compile(
 # 与 WebEngine 版 body.streaming-dock #tool-content 的 max-height 保持一致。
 # 原值 110（≈3-4 行）视觉上与"折叠"难区分，用户反馈误以为工具区默认收起。
 _DOCK_LOG_MAX = 220  # 工具卡区内滚限高 ≈8 行（web #tool-content max-height）
-_DOCK_TODO_H = 96  # 任务列表坞态固定高（web #todo-content height:96px）
 
 _QWIDGETSIZE_MAX = 16777215
 
@@ -1866,10 +1875,6 @@ class ToolSectionWidget(QWidget):
         self._cards_layout.setSpacing(2)
         ch.addLayout(self._cards_layout)
         ch.addStretch(1)
-        # 任务列表面板固定在卡片之后（对齐 WebEngine 版 DOM：#tool-content → #todo-panel）
-        self._panel_holder = QVBoxLayout()
-        self._panel_holder.setContentsMargins(0, 0, 0, 0)
-        cv.addLayout(self._panel_holder)
         root.addWidget(self._content_wrap)
         self.hide()
 
@@ -1896,9 +1901,6 @@ class ToolSectionWidget(QWidget):
         if b["type"] == "think":
             return ThinkCard(b["content"], b["completed"])
         return ToolCardWidget(b)
-
-    def attach_todo_panel(self, panel: QWidget) -> None:
-        self._panel_holder.addWidget(panel)
 
     # ── 坞态接口（对齐 WebEngine 版 body.streaming-dock） ──
     def enter_dock(self) -> None:
@@ -1970,97 +1972,6 @@ class ToolSectionWidget(QWidget):
             self._content_wrap.setVisible(False)
 
 
-class TodoPanel(QWidget):
-    """任务列表面板：分隔条(todo.svg 图标) + 进度 + 状态条目（对齐 WebEngine 版 .todo-item 视觉）。
-
-    列表区常驻 QScrollArea：坞态固定高 _DOCK_TODO_H 内滚（web #todo-content
-    height:96px 语义，切断工具区流式抖动向 todo 传导），非坞态无限高。
-    """
-
-    _PRI_COLORS = {"high": "#ef4444", "medium": "#f59e0b", "low": "#3b82f6"}
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 2, 0, 2)
-        root.setSpacing(2)
-        self._separator = _SeparatorRow("任务列表", self, icon_name="todo")
-        self._separator.clicked.connect(self._toggle)
-        root.addWidget(self._separator)
-        self._list_scroll = ScrollArea(self)
-        self._list_scroll.setWidgetResizable(True)
-        self._list_scroll.setFocusPolicy(Qt.NoFocus)
-        self._list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._list_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._list_scroll.setStyleSheet(
-            "QScrollArea { background:transparent; border:none; }\n" + get_unified_scrollbar_style(6)
-        )
-        self._list_wrap = QWidget()
-        self._list_wrap.setStyleSheet("background:transparent;")
-        self._list_scroll.setWidget(self._list_wrap)
-        lw = QVBoxLayout(self._list_wrap)
-        lw.setContentsMargins(6, 2, 6, 2)
-        lw.setSpacing(1)
-        self._list_layout = QVBoxLayout()
-        self._list_layout.setContentsMargins(0, 0, 0, 0)
-        self._list_layout.setSpacing(1)
-        lw.addLayout(self._list_layout)
-        lw.addStretch(1)
-        root.addWidget(self._list_scroll)
-        self._collapsed = False
-        self.hide()
-
-    def set_dock(self, active: bool) -> None:
-        """坞态任务列表固定高（对齐 web #todo-content height:96px）。"""
-        if active:
-            self._list_scroll.setFixedHeight(_DOCK_TODO_H)
-            self._list_scroll.setMaximumHeight(_DOCK_TODO_H)
-        else:
-            self._list_scroll.setMinimumHeight(0)
-            self._list_scroll.setMaximumHeight(_QWIDGETSIZE_MAX)
-
-    def update_todos(self, todos: List[Dict[str, Any]]) -> None:
-        todos = list(todos or [])
-        while self._list_layout.count():
-            item = self._list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        done = 0
-        for t in todos:
-            status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
-            raw = (t.get("content") if isinstance(t, dict) else t) or ""
-            # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（html.escape 只收 str）
-            content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-            priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
-            if status == "completed":
-                done += 1
-            self._list_layout.addWidget(QLabel(self._render_item(status, content, priority)))
-        total = len(todos)
-        self._separator.set_extra(f"{done}/{total} 已完成" if total else "")
-        self.setVisible(bool(todos))
-
-    def _render_item(self, status: str, content: str, priority: str) -> str:
-        esc = _html_mod.escape(content)
-        base_css = f"{get_font_family_css()} font-size:{scale_font_size(13)}px; background:transparent;"
-        if status == "completed":
-            return (
-                f'<div style="{base_css}"><span style="color:#3fb950;font-weight:700;">✓</span> '
-                f'<span style="color:{Colors.ASSISTANT_CARD_MUTED};text-decoration:line-through;">{esc}</span></div>'
-            )
-        if status == "in_progress":
-            warm = "#d97706" if _is_light_theme() else "#f59e0b"
-            return (
-                f'<div style="{base_css}"><span style="color:{warm};">⟳</span> <b style="color:{warm};">{esc}</b></div>'
-            )
-        pri = self._PRI_COLORS.get(priority, self._PRI_COLORS["medium"])
-        return f'<div style="{base_css}"><span style="color:{pri};">○</span> <span style="color:{Colors.ASSISTANT_CARD_TEXT};">{esc}</span></div>'
-
-    def _toggle(self) -> None:
-        self._collapsed = not self._collapsed
-        self._separator.set_collapsed(self._collapsed)
-        self._list_scroll.setVisible(not self._collapsed)
-
-
 # ── 主渲染器 ──────────────────────────────────────────────────────
 class _NullPage:
     """CodeWebViewer.page() 的 no-op 替身：吞掉所有 JS 调用（灰度兼容层）。"""
@@ -2112,8 +2023,7 @@ class MarkdownBlockViewer(QWidget):
     """纯 Qt 块级消息正文渲染器（CodeWebViewer 替换原型）。
 
     对外接口与 CodeWebViewer 对齐：append_chunk / finish_streaming /
-    refresh_theme / get_plain_text / contentHeightChanged；
-    任务列表：update_todo_list(todos)（签名同 MessageCard.update_todo_list）。
+    refresh_theme / get_plain_text / contentHeightChanged。
     """
 
     contentHeightChanged = Signal(int)
@@ -2124,12 +2034,19 @@ class MarkdownBlockViewer(QWidget):
         self._light = light
         self._md = ""
         self._streaming = True
+        # ── [X1] 四级渲染派发状态：立即 / 100ms 合并 / 自适应 150-300-500 / 非流式 40ms ──
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._perform_update)
+        self._last_render_ts = 0.0
+        self._current_adaptive_interval = 300
+        self._last_chunk_ns = 0
         self._keys: List[Tuple[str, str]] = []
         self._widgets: List[QWidget] = []
         # ── 坞态（Streaming Dock）状态 ──
         self._dock_active = False
         # ── CodeWebViewer 兼容属性（MessageCard 动态读写） ──
-        self._is_js_ready = True  # _push_todo_list 判断：Qt 渲染器始终"就绪"
+        self._is_js_ready = True  # Qt 渲染器无 JS 层，恒为就绪态
         self._tool_compact_mode = True  # 简洁模式：工具卡默认折叠（坞态仅此模式启用）
         self._needs_full_render = True
         self._stable_html = ""
@@ -2144,11 +2061,8 @@ class MarkdownBlockViewer(QWidget):
         self._vbox.setSpacing(2)
         Colors.refresh()
 
-        # 「工具与思考」区在正文之上（对齐 WebEngine 版 DOM 顺序），
-        # todo panel 挂在其内部（对齐 #todo-panel 位于 #tool-section 内）
+        # 「工具与思考」区在正文之上（对齐 WebEngine 版 DOM 顺序）
         self._tool_section = ToolSectionWidget(self)
-        self._todo_panel = TodoPanel(self)
-        self._tool_section.attach_todo_panel(self._todo_panel)
         # 正文块统一挂独立容器：坞态搬移只动 tool_section，body 追加顺序不受影响
         self._body_box = QWidget()
         self._body_box.setStyleSheet("background:transparent;")
@@ -2170,7 +2084,18 @@ class MarkdownBlockViewer(QWidget):
         if not text:
             return
         self._md += text
-        self._reconcile()
+        # [X1] chunk 间隔自适应更新派发档位 + 合并派发（不再每 chunk 同步全量）
+        now_ns = time.monotonic_ns()
+        if self._last_chunk_ns:
+            gap_ms = (now_ns - self._last_chunk_ns) / 1e6
+            if gap_ms < 200:
+                self._current_adaptive_interval = ADAPTIVE_FAST_MS
+            elif gap_ms > 500:
+                self._current_adaptive_interval = ADAPTIVE_SLOW_MS
+            else:
+                self._current_adaptive_interval = ADAPTIVE_SAFETY_MS
+        self._last_chunk_ns = now_ns
+        self._schedule_render(immediate=False)
 
     def finish_streaming(self, keep_dock: bool = False, immediate: bool = True) -> None:
         """流式结束。keep_dock=True 时保留坞态（S1：文本先于工具结果结束），
@@ -2184,14 +2109,12 @@ class MarkdownBlockViewer(QWidget):
         self._streaming = False
         if not keep_dock and self._dock_active:
             self._sync_streaming_dock(False)
+        # [X1] 收尾后挂起拍不得再触发（终态由本次 force reconcile 落定）
+        self._render_timer.stop()
         self._reconcile(force=True)
 
     def get_plain_text(self) -> str:
         return self._md
-
-    def update_todo_list(self, todos: List[Dict[str, Any]]) -> None:
-        """更新任务列表（签名同 MessageCard.update_todo_list）。空列表隐藏。"""
-        self._todo_panel.update_todos(list(todos or []))
 
     def refresh_theme(self) -> None:
         Colors.refresh()
@@ -2224,8 +2147,8 @@ class MarkdownBlockViewer(QWidget):
     def _sync_streaming_dock(self, active: bool) -> None:
         """流式活动坞（对齐 WebEngine 版 _setStreamingDock）：
 
-        简洁模式 + 流式期间：工具/思考区从顶部沉底、卡片区限高内滚、任务列表
-        固定高 → 卡片底部一块固定高度的实时日志；流式结束归位顶部并折叠。
+        简洁模式 + 流式期间：工具/思考区从顶部沉底、卡片区限高内滚 →
+        卡片底部一块固定高度的实时日志；流式结束归位顶部并折叠。
         纯 layout 搬移（同 widget remove+add），无控件重建，无闪烁。
         正文高度交给外层聊天滚动链路（流式自动滚底跟随，视口底部即日志区），
         不做 viewer 级限高——QScrollArea 尺寸协商会撑爆卡片高度（实测教训）。
@@ -2239,11 +2162,9 @@ class MarkdownBlockViewer(QWidget):
         if on:
             self._vbox.addWidget(self._tool_section)  # 沉底
             self._tool_section.enter_dock()
-            self._todo_panel.set_dock(True)
         else:
             self._vbox.insertWidget(0, self._tool_section)  # 归位顶部
             self._tool_section.exit_dock()
-            self._todo_panel.set_dock(False)
         QTimer.singleShot(0, lambda: self.contentHeightChanged.emit(self.height()))
 
     def _copy_to_clipboard(self, copy_selection: bool = False) -> None:
@@ -2259,95 +2180,229 @@ class MarkdownBlockViewer(QWidget):
         self.set_markdown(value or "")
 
     def _schedule_render(self, immediate: bool = False) -> None:
-        """兼容 MessageCard 渲染调度：消费懒回调后全量重解析。"""
-        cb = getattr(self, "_lazy_markdown_cb", None)
-        if cb is not None:
-            self._lazy_markdown_cb = None
-            self.set_markdown(cb())
-        else:
-            self._reconcile(force=immediate)
+        """[X1] 四级渲染派发（对齐 WebEngine 版 _schedule_render 同构策略）。
+
+        immediate（批量加载等）→ 立即同步；流式 + 硬边界（\\n\\n / ``` /
+        </think>）→ 立即同步；流式 + 软边界（句号）→ 100ms 合并窗；无边界
+        → 自适应间隔派发；非流式 → 40ms。cb（MessageCard 增量构建回调）
+        统一由 _perform_update 消费，本函数不再同步消费。
+        """
+        if immediate:
+            self._render_timer.stop()
+            self._perform_update()
+            return
+        if not self._streaming:
+            self._render_timer.start(40)
+            return
+        if self._has_reached_clean_boundary(self._md):
+            self._render_timer.stop()
+            self._perform_update()
+            return
+        if self._has_reached_soft_boundary(self._md):
+            # 软边界（句号）：100ms 合并窗。窗内挂起一拍（已激活且间隔更大则
+            # 收紧到合并窗）；窗外距上次渲染足够远 → 同步渲染
+            since_s = time.monotonic() - self._last_render_ts
+            if since_s < SOFT_BOUNDARY_MERGE_MS / 1000.0:
+                if self._render_timer.isActive() and self._render_timer.interval() > SOFT_BOUNDARY_MERGE_MS:
+                    self._render_timer.start(SOFT_BOUNDARY_MERGE_MS)
+                elif not self._render_timer.isActive():
+                    self._render_timer.start(SOFT_BOUNDARY_MERGE_MS)
+                return
+            self._render_timer.stop()
+            self._perform_update()
+            return
+        # 无边界：自适应间隔派发。⚠️ 必须 isActive 守卫：QTimer.start() 对激活中
+
+        # 的单发定时器重置倒计时，快速流式（chunk 间隔 < 档位）下每 chunk 重启
+
+        # → 倒计时永不到期 → 无边界内容（纯代码流/无句号英文段）格式化渲染
+
+        # 饿死至 finish（对齐 WebEngine 版 isActive 守卫）。
+
+        if not self._render_timer.isActive():
+
+            self._render_timer.start(self._current_adaptive_interval)
+
 
     def _perform_update(self) -> None:
-        """兼容 set_html_direct：按当前 markdown 全量渲染。"""
-        self.set_markdown(self._md)
+
+        """[X1] 派发落点：停增量兑底、消费 cb、刷新基准、全量 reconcile。"""
+
+        if getattr(self, "_incr_timer", None) is not None and self._incr_timer.isActive():
+
+            self._incr_timer.stop()
+
+        self._last_render_ts = time.monotonic()
+
+        cb = getattr(self, "_lazy_markdown_cb", None)
+
+        if cb is not None:
+
+            self._lazy_markdown_cb = None
+
+            self._md = cb()
+
+        self._reconcile(force=True)
+
 
     def _append_text_incremental(self, text: str) -> None:
+
         """兼容 CodeWebViewer 流式差量注入：Qt 渲染器无 DOM 注入层，
+
         用 80ms 节流的全量刷新代替（key 指纹 reconcile 只重建尾部变化块）。"""
+
         if not hasattr(self, "_incr_timer"):
+
             self._incr_timer = QTimer(self)
+
             self._incr_timer.setSingleShot(True)
+
             self._incr_timer.setInterval(80)
+
             self._incr_timer.timeout.connect(self._do_incremental_render)
+
         if not self._incr_timer.isActive():
+
             self._incr_timer.start()
 
+
     def _do_incremental_render(self) -> None:
+
+        # [X1] 双向防双全量：80ms 兑底出字前停掉派发拍，一次 chunk 只闪一次
+
+        self._render_timer.stop()
+
         cb = getattr(self, "_lazy_markdown_cb", None)
+
         if cb is not None:
+
             self._lazy_markdown_cb = None
-            self.set_markdown(cb())
+
+            self._md = cb()
+
+            self._reconcile(force=True)
+
 
     @staticmethod
+
     def _has_reached_clean_boundary(md_text: str) -> bool:
+
         """兼容 MessageCard.append_text：自然边界检测（简化复刻 CodeWebViewer 同名逻辑）。"""
+
         if not md_text:
+
             return False
+
         if md_text.endswith("\n\n"):
+
             return True
+
         stripped = md_text.rstrip()
+
         return stripped.endswith("</think>") or stripped.endswith("```")
 
+
     @staticmethod
+
     def _has_reached_soft_boundary(md_text: str) -> bool:
+
         """兼容 MessageCard.append_text：句号类软边界检测。"""
+
         stripped = (md_text or "").rstrip()
+
         return bool(stripped) and stripped[-1] in "。！？!?.；;"
 
+
     # ── 内部 ──
+
     def _reconcile(self, force: bool = False) -> None:
+
         blocks = parse_blocks(self._md)
+
         # 分区规则对齐 WebEngine 版：think + 非编辑工具进「工具与思考」折叠区；
+
         # 编辑类工具结果始终展示在正文之中（按文档位置）
+
         side_items = _slot_items(
+
             [b for b in blocks if b["type"] == "think" or (b["type"] == "tool" and not b.get("is_edit"))]
+
         )
+
         body_items = _slot_items(
+
             [
+
                 b
+
                 for b in blocks
+
                 if b["type"] in ("html", "code", "tag", "quote", "table", "hr")
+
                 or (b["type"] == "tool" and b.get("is_edit"))
+
             ]
+
         )
+
         self._widgets, self._keys = reconcile_widgets(
+
             self._body_lay, self._widgets, self._keys, body_items, self._build_block_widget, self._streaming
+
         )
+
         self._tool_section.reconcile(side_items, self._streaming)
 
+
     @staticmethod
+
     def _build_block_widget(b: Dict[str, Any]) -> QWidget:
+
         if b["type"] == "code":
+
             notice = _chart_fence_notice(b["lang"])
+
             if notice is not None:
+
                 # 图表类 fence：上方说明卡片 + 下方源码，而不是把图表源码
+
                 # 默默当成普通代码高亮（用户会以为"图表渲染成这样了"）
+
                 holder = QWidget()
+
                 lay = QVBoxLayout(holder)
+
                 lay.setContentsMargins(0, 0, 0, 0)
+
                 lay.setSpacing(6)
+
                 lay.addWidget(notice)
+
                 lay.addWidget(CodeBlockWidget(b["code"], b["lang"]))
+
                 return holder
+
             return CodeBlockWidget(b["code"], b["lang"])
+
         if b["type"] == "tool":
+
             return ToolCardWidget(b)  # 编辑类工具：结果展示在正文之中
+
         if b["type"] == "tag":
+
             return RichTextLabel(b["html"])  # 插件内联标签卡（已由渲染器生成 HTML）
+
         if b["type"] == "quote":
+
             return QuoteCard(b["html"])
+
         if b["type"] == "table":
+
             return TableBlockWidget(b["header"], b["rows"])
+
         if b["type"] == "hr":
+
             return HRSeparator()
+
         return RichTextLabel(b["html"])
+

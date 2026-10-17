@@ -76,17 +76,28 @@ class DatabaseManager:
             cursor.execute("PRAGMA journal_mode=WAL")
             # 同步模式改为 NORMAL（比 FULL 快 10-100x，仅丢失最近一次事务）
             cursor.execute("PRAGMA synchronous=NORMAL")
-            # 缓存大小提升到 64MB（默认 2MB，减少 I/O）
-            cursor.execute("PRAGMA cache_size=-65536")
-            # 临时存储放到内存（加速 ORDER BY/GROUP BY）
-            cursor.execute("PRAGMA temp_store=MEMORY")
+            # 页缓存 15.6MB（负值单位 KB，-16000 = 15.6MB）。原 64MB 的热查询
+            # 收益与 15.6MB 无感知差异，大库省约 29MB 真驻留。
+            # 与 session_store.py 的 cache_size=-16000 保持一致：后设连接覆盖
+            # 先设值，两处必须同值。
+            cursor.execute("PRAGMA cache_size=-16000")
+            # 临时存储显式 FILE：实测 KB 级 temp b-tree 与 MEMORY 无延迟差异；
+            # 显式 FILE 防未来无 LIMIT 的全表排序把结果集堆进内存。
+            # ⚠️ 已知依赖：FILE 模式写系统临时目录（TMPDIR）——目录不可写的
+            # 极端环境（只读根/沙箱白名单）会 SQLITE_ERROR 报错而非降级。
+            # 权衡：极端环境罕见，不在 connect 路径加探测 I/O；遇到时以
+            # TMPDIR/TMP 环境变量指向可写目录解决。
+            cursor.execute("PRAGMA temp_store=FILE")
             # 启用 mmap 读取（减少系统调用）
-            # 🔧 T5 内存治理：256MB(268435456) → 64MB(67108864)。
+            # 🔧 T5 内存治理：256MB(268435456) → 64MB(67108864) → 16MB(16777216)。
             # sessions.db 实测 236MB 时，256MB 上限会让整个数据文件映射进 RSS
-            # （实测独占 235.8MB，是当时进程 USS 788MB 的最大单项）。超出 64MB
-            # 的部分改走 read() + page cache（62.5MB，见 session_store 的
-            # cache_size=-64000），热数据仍有缓存，仅全表扫描类查询略增 I/O。
-            cursor.execute("PRAGMA mmap_size=67108864")
+            # （实测独占 235.8MB，是当时进程 USS 788MB 的最大单项）。
+            # 64MB→16MB：240MB 库实测 RSSΔ 58.1MB→12.8MB，全量读延迟 +16% 无感知。
+            # 分工：mmap 视图承载「随机点查」的零拷贝读（上限即最坏映射量），
+            # 超出 16MB 的部分改走 read() + 页缓存（15.6MB，见本文件上方
+            # cache_size=-16000 与 session_store.py 同值项）——双低档避免
+            # 「mmap 全量映射 + 页缓存再拷一份」的双重缓存驻留。
+            cursor.execute("PRAGMA mmap_size=16777216")
             # 外键约束
             cursor.execute("PRAGMA foreign_keys=ON")
             self._wal_mode_enabled = True

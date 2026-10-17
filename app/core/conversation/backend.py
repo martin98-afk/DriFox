@@ -620,6 +620,19 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.warning(f"[ChatBackend] 注入消息体重载器失败（沿用全量常驻）: {e}")
 
+        # [MEM] 批 IV：淘汰回调 → HistoryManager 权威释放（活跃集合 = 当前持有）。
+        # 注入必须在 _history_manager 就绪之后（:612），与 set_messages_loader 同段。
+        try:
+            _hm = self._history_manager
+            _sm = self._session_manager
+            if _hm is not None and _sm is not None and hasattr(_hm, "release_messages_except"):
+                def _on_evict(_sid: str) -> None:
+                    active = {s.session_id for s in _sm.sessions}
+                    _hm.release_messages_except(active)
+                _sm.set_on_evict(_on_evict)
+        except Exception as e:
+            logger.warning(f"[ChatBackend] 注入 evict 释放回调失败（跳过）: {e}")
+
         # 连接 hook 消息更新信号 → UI 刷新（跨线程安全）
         self._hook_messages_updated.connect(self._on_hook_messages_changed)
 
@@ -1076,9 +1089,12 @@ class ChatBackend(QObject):
         llm_config,
         api_prompt_tokens: int = 0,
         api_message_count: int = 0,
-        from_api: bool = False,
+        from_api: Optional[bool] = None,
     ) -> Dict:
-        """获取上下文使用快照"""
+        """获取上下文使用快照
+
+        from_api 三态：True=来自 API usage / False=本地估算 / None=未知（按 True）。
+        """
         if self._chat_engine:
             return self._chat_engine.get_context_usage_snapshot(
                 session,

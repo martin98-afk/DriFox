@@ -363,12 +363,15 @@ class GiteeOAuthBackend(OAuthBackend):
         except Exception as e:
             logger.warning(f"[GiteeOAuth] cfg.save() 异常: {e}")
 
-        # 第二道：直接写文件（绕过 save 的三道守卫）
+        # 第二道：直接写文件（绕过 save 的三道守卫）。
+        # 与 Settings.save() 共用进程内写盘锁，防止与主线程/其他线程的
+        # save 交错导致整文件覆盖互相踩踏或 JSON 写坏
         if not save_ok:
             try:
-                cfg.file.parent.mkdir(parents=True, exist_ok=True)
-                with open(cfg.file, "w", encoding="utf-8") as f:
-                    json.dump(cfg.toDict(), f, ensure_ascii=False, indent=2)
+                with type(cfg)._save_lock:
+                    cfg.file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(cfg.file, "w", encoding="utf-8") as f:
+                        json.dump(cfg.toDict(), f, ensure_ascii=False, indent=2)
                 logger.info("[GiteeOAuth] token 已通过直接写文件持久化")
             except Exception as e:
                 logger.error(f"[GiteeOAuth] 直接写 token 到文件失败: {e}")

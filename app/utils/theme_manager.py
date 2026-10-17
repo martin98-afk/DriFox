@@ -281,26 +281,6 @@ class ThemeManager:
         resource_path = theme_dir / filename
         return resource_path if resource_path.exists() else None
 
-    def get_theme_pet(self, theme_id: str) -> dict:
-        """获取主题的 pet 配置。"""
-        self._ensure_loaded()
-        theme = self._themes.get(theme_id) or {}
-        pet_cfg = theme.get("pet") or {}
-        image_rel = pet_cfg.get("image")
-        if not image_rel:
-            return {}
-
-        theme_dir = self.get_theme_dir(theme_id)
-        if not theme_dir:
-            return {}
-
-        image_path = theme_dir / image_rel
-        if image_path.exists():
-            return {"image": image_path, "source": "theme"}
-
-        logger.warning(f"[ThemeManager] 主题 {theme_id} 声明的 pet 不存在: {image_path}，fallback 到内嵌默认")
-        return {}
-
     # ── 浅色/深色模式检测 ──────────────────────────────
 
     # 缓存：上次检测的 theme_id 和结果
@@ -481,7 +461,7 @@ class ThemeManager:
             #   isVisible 全为 False，朴素跳过无补刷链路导致主题不更新；故要求
             #   顶层可见才跳过，与 _execute_batched_theme_refresh 的 _tab_active_win
             #   语义对齐（顶层不可见时仍全量刷新）。
-            # - 无 _theme_needs_refresh 属性的 target（PixelPetWidget 等）保守不跳过
+            # - 无 _theme_needs_refresh 属性的 target 保守不跳过
             #   ——避免隐藏期间主题更新永久丢失（无补刷链路时跳过=不可恢复）。
             try:
                 if (
@@ -557,6 +537,16 @@ class ThemeManager:
         new_data = self.get_theme(old_id)
         if new_data != old_data:
             # 当前主题被修改/删除 → 全量刷新 UI
+            # ⚠️ 同 id 内容变化必须显式推进 ThemeRefreshCoordinator 版本：
+            # dispatch_refresh → on_theme_changed → should_skip(theme_id) 因
+            # id 未变幂等短路、版本号不推进 → 消息卡 CodeWebViewer.refresh_theme
+            # 同版本直接 return（实例级 _cached_streaming_html 不失效、
+            # _needs_full_render 不置位），且 T16 lru 按版本分桶命中旧主题 HTML
+            # → 卡片 HTML 正文/代码高亮不跟随刷新。QSS 部分不走版本号会正常
+            # 刷新，形成"框架刷了、内容没刷"的错位观感。
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            ThemeRefreshCoordinator.on_theme_changed(old_id)
             self.dispatch_refresh()
 
         # 兼容旧回调（用于设置面板更新主题下拉列表等，无论当前主题是否变化都需要）

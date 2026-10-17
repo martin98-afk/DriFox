@@ -582,3 +582,13 @@ def test_overlay_limit_width_config_only(qtbot):
     sub_card.hide()
     cfg_card.setVisible(True)
     assert tm._overlay_should_limit_width() is True
+    # 添加服务商卡也属配置类（用户裁决：与系统设置卡同款限宽居中，不铺满）
+    cfg_card.hide()
+    picker_card = QWidget()
+    container._cards["provider_picker"] = picker_card
+    try:
+        picker_card.setVisible(True)
+        assert tm._overlay_should_limit_width() is True
+    finally:
+        picker_card.hide()
+        container._cards.pop("provider_picker", None)

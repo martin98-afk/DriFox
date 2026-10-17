@@ -14,6 +14,24 @@ from typing import Any, Dict, Optional
 from app.plugins.registries.provider_registry import ProviderDef, QuotaField
 
 
+_SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
+
+
+def _system_ssl_context():
+    """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储）；不可用回退 None。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import ssl
+
+            import truststore
+
+            _SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:
+            _SSL_CONTEXT = False
+    return _SSL_CONTEXT or None
+
+
 def _fetch_volcengine_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """从 console.volcengine.com 获取火山方舟套餐用量。
 
@@ -53,7 +71,7 @@ def _fetch_volcengine_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, 
 
     try:
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_system_ssl_context()) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
             raw = resp.read().decode(charset, errors="replace")
     except Exception:
@@ -122,6 +140,11 @@ def register(registry):
             name="火山方舟",
             icon="火山引擎",
             api_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+            preset_urls=[
+                # 首位与 api_url 对齐（插件声明为 coding 端点，历史 UI 硬编码只有 api/v3）
+                "https://ark.cn-beijing.volces.com/api/coding/v3",
+                "https://ark.cn-beijing.volces.com/api/v3",
+            ],
             auth_type="bearer",
             default_model="doubao-pro-32k",
             default_params={

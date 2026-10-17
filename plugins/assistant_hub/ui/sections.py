@@ -2,7 +2,7 @@
 """sections.py — 助手中心单列分区组件（对齐 openhanako AgentTab 分区结构）
 
 分区：ProfileSection（名称/模型）→ AboutSection（人格切换，只读）→
-MemorySection（记忆传送带）→ ExperienceSection（经验）。
+MemorySection（全局/项目/日志）→ ExperienceSection（经验）。
 
 视觉基调（对齐原版纸张风）：细边框卡 + 12px 圆角 + 小字 hint + 大量留白；
 去 emoji，统一 FluentIcon / 文字标签。
@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QFrame,
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ComboBox, SwitchButton
+from qfluentwidgets import BodyLabel, ComboBox, LineEdit, MaskDialogBase, SwitchButton
 
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
@@ -413,7 +413,7 @@ class ProfileSection(_Section):
         self.body().addLayout(wrap)
         self.body().addWidget(
             _hint(
-                "对话模型跟随系统配置；记忆整理模型用于记忆编译 / Dream / 经验反思，跟随全局即用当前对话模型。"
+                "对话模型跟随系统配置；记忆整理模型用于经验反思，跟随全局即用当前对话模型。"
                 "用户头像显示在消息列表中你的消息旁，每个助手独立设置。改动自动保存。"
             )
         )
@@ -849,16 +849,152 @@ class PinnedSection(_Section):
 # ── 记忆分区 ────────────────────────────────────────────
 
 
+class MemoryLimitDialog(MaskDialogBase):
+    """记忆上限编辑弹窗：全局/项目两个数字输入，确认发 confirmed(int, int)。"""
+
+    confirmed = Signal(int, int)
+
+    _INPUT_QSS = """
+        LineEdit {{
+            background: {bg};
+            border: 1px solid {border};
+            color: {text};
+            padding: 4px 10px;
+            border-radius: 6px;
+            {font}
+        }}
+        LineEdit:focus {{ border-color: {accent}; }}
+    """
+
+    def __init__(self, global_chars: int, project_chars: int, parent=None):
+        super().__init__(parent)
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+        self.widget.setObjectName("memoryLimitDialog")
+        self.widget.setStyleSheet(
+            f"""
+            #memoryLimitDialog {{
+                background: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """
+        )
+        v = QVBoxLayout(self.widget)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(10)
+
+        title = BodyLabel("记忆上限", self.widget)
+        title.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(14)}; font-weight: 600;"
+        )
+        v.addWidget(title)
+        hint = QLabel("单文件字符上限，超限写入被拒", self.widget)
+        hint.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
+        v.addWidget(hint)
+
+        input_qss = self._INPUT_QSS.format(
+            bg=Colors.INPUT_BG_START,
+            border=Colors.INPUT_BORDER,
+            text=Colors.INPUT_TEXT,
+            accent=Colors.INFO,
+            font=f"{get_font_family_css()} {font_size_css(13)}",
+        )
+
+        def _num_row(label: str, value: int) -> LineEdit:
+            row = QHBoxLayout()
+            lab = QLabel(label, self.widget)
+            lab.setFixedWidth(72)
+            lab.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
+            row.addWidget(lab)
+            edit = LineEdit(self.widget)
+            edit.setText(str(int(value)))
+            edit.setFixedHeight(34)
+            edit.setClearButtonEnabled(True)
+            edit.setStyleSheet(input_qss)
+            row.addWidget(edit, 1)
+            v.addLayout(row)
+            return edit
+
+        self._global_edit = _num_row("全局记忆", global_chars)
+        self._project_edit = _num_row("项目记忆", project_chars)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        cancel = QPushButton("取消", self.widget)
+        cancel.setFixedHeight(32)
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent;
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}
+            }}
+            QPushButton:hover {{ background: {Colors.HOVER_BG}; border-color: {Colors.TEXT_ACCENT}; }}
+        """
+        )
+        cancel.clicked.connect(self.close)
+        confirm = QPushButton("确定", self.widget)
+        confirm.setFixedHeight(32)
+        confirm.setCursor(Qt.PointingHandCursor)
+        confirm.setDefault(True)
+        confirm.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {Colors.TEXT_ACCENT};
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Colors.TEXT_ACCENT}; }}
+        """
+        )
+        confirm.clicked.connect(self._accept)
+        btns.addWidget(cancel)
+        btns.addWidget(confirm)
+        v.addLayout(btns)
+
+        self.widget.setFixedSize(380, self.widget.sizeHint().height() + 40)
+
+    def _accept(self) -> None:
+        def _parse(edit, fallback: int) -> int:
+            try:
+                val = int(edit.text().strip())
+            except TypeError, ValueError:
+                return fallback
+            return val if 100 <= val <= 1000000 else fallback
+
+        g = _parse(self._global_edit, 4000)
+        p = _parse(self._project_edit, 3000)
+        self.confirmed.emit(g, p)
+        self.accept()
+
+
 class MemorySection(_Section):
-    """记忆传送带 UI：开关 + 状态 + 当下 + Dream + 所有记忆（人工提示已独立为 PinnedSection）。"""
+    """记忆分区：开关 + 状态 + 全局记忆/项目记忆/工作日志查看 + 清除。
+
+    记忆体系照抄 WorkBuddy：全局 MEMORY.md（跨项目）+ 项目 .drifox/memory/（笔记+日志），
+    模型经 memory_read/memory_write 自主读写；UI 只做查看与清理。
+    """
 
     toggleMemory = Signal(bool)
-    toggleDreamAuto = Signal(bool)
-    viewToday = Signal()
-    dreamRun = Signal()
-    dreamRestore = Signal()
-    viewAll = Signal()
+    viewGlobal = Signal()
+    viewProject = Signal()
+    viewDaily = Signal()
     clearAll = Signal()
+    limitsChanged = Signal(int, int)
+    restoreRequested = Signal()
+    migrateRequested = Signal(str)
+    dismissDriftRequested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__("记忆", parent)
@@ -868,102 +1004,187 @@ class MemorySection(_Section):
         self._memory_switch.checkedChanged.connect(self.toggleMemory.emit)
         self.set_context(self._memory_switch)
 
+        # 记忆字符上限（set_limits 回填；弹窗编辑用）
+        self._global_chars = 4000
+        self._project_chars = 3000
+
         # 状态条
-        self._status = _hint("记忆状态：暂未编译", 10)
+        self._status = _hint("记忆状态：暂无记忆", 10)
         self.body().addWidget(self._status)
 
-        self.body().addWidget(_sep())
-        today_row = QHBoxLayout()
-        today_row.addWidget(_title_label("当下记忆", 11))
-        today_row.addStretch()
-        view_today = QPushButton("查看")
-        view_today.setStyleSheet(_btn_style())
-        view_today.clicked.connect(self.viewToday.emit)
-        today_row.addWidget(view_today)
-        self.body().addLayout(today_row)
-        self.body().addWidget(_hint("关于你的重要事项与近期动态。"))
-
-        self.body().addWidget(_sep())
-
-        # Dream：标题行右侧挂「每日自动」开关；运行状态并入按钮行右侧（空则隐藏）
-        dream_row = QHBoxLayout()
-        dream_row.addWidget(_title_label("Dream 整理", 11))
-        dream_row.addStretch()
-        auto_lbl = QLabel("每日自动")
-        auto_lbl.setStyleSheet(
+        # 健康行：健康摘要 + 恢复按钮（set_health 填充；无数据时隐藏）
+        health_row = QHBoxLayout()
+        health_row.setContentsMargins(0, 0, 0, 0)
+        self._health = QLabel("")
+        self._health.setWordWrap(True)
+        self._health.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
             f"{get_font_family_css()} {font_size_css(10)};"
         )
-        dream_row.addWidget(auto_lbl)
-        self._dream_switch = SwitchButton()
-        self._dream_switch.setOnText("开")
-        self._dream_switch.setOffText("关")
-        self._dream_switch.setChecked(False)
-        self._dream_switch.checkedChanged.connect(self.toggleDreamAuto.emit)
-        dream_row.addWidget(self._dream_switch)
-        self.body().addLayout(dream_row)
-        # 说明与操作同行：说明吃满剩余宽度，状态提示出现在按钮左侧（空则隐藏）
-        hint_row = QHBoxLayout()
-        hint_row.addWidget(_hint("去重合并重要事实与长期情况，清理过时内容。"), 1)
-        self._dream_hint = _hint("", 10)
-        self._dream_hint.setVisible(False)
-        hint_row.addWidget(self._dream_hint)
-        self._dream_btn = QPushButton("立即整理")
-        self._dream_btn.setStyleSheet(_btn_style())
-        self._dream_btn.clicked.connect(self.dreamRun.emit)
-        hint_row.addWidget(self._dream_btn)
-        restore_btn = QPushButton("恢复版本")
+        health_row.addWidget(self._health, 1)
+        restore_btn = QPushButton("恢复")
         restore_btn.setStyleSheet(_btn_style())
-        restore_btn.clicked.connect(self.dreamRestore.emit)
-        hint_row.addWidget(restore_btn)
-        self.body().addLayout(hint_row)
+        restore_btn.setToolTip("从快照恢复记忆（每次覆盖写/清除前自动存快照）")
+        restore_btn.clicked.connect(self.restoreRequested.emit)
+        health_row.addWidget(restore_btn)
+        self._health_row = QWidget()
+        self._health_row.setLayout(health_row)
+        self._health_row.setVisible(False)
+        self.body().addWidget(self._health_row)
 
-        self.body().addWidget(_sep())
+        # 漂移提示行：检测到旧工作目录记忆时显示（迁移/忽略）
+        drift_row = QHBoxLayout()
+        drift_row.setContentsMargins(0, 0, 0, 0)
+        self._drift_label = _hint("")
+        drift_row.addWidget(self._drift_label, 1)
+        mig_btn = QPushButton("迁移到此目录")
+        mig_btn.setStyleSheet(_btn_style())
+        mig_btn.clicked.connect(lambda: self.migrateRequested.emit(self._drift_old))
+        drift_row.addWidget(mig_btn)
+        dis_btn = QPushButton("忽略")
+        dis_btn.setStyleSheet(_btn_style())
+        dis_btn.clicked.connect(lambda: self.dismissDriftRequested.emit(self._drift_old))
+        drift_row.addWidget(dis_btn)
+        self._drift_row = QWidget()
+        self._drift_row.setLayout(drift_row)
+        self._drift_row.setVisible(False)
+        self.body().addWidget(self._drift_row)
+        self._drift_old = ""
 
-        # 所有记忆：标题与入口同行
-        all_row = QHBoxLayout()
-        all_row.addWidget(_title_label("所有记忆", 11))
-        all_row.addStretch()
-        view_all = QPushButton("查看")
-        view_all.setStyleSheet(_btn_style())
-        view_all.clicked.connect(self.viewAll.emit)
-        all_row.addWidget(view_all)
+        self._body_wrap = QWidget()
+        self._wrap_v = QVBoxLayout(self._body_wrap)
+        self._wrap_v.setContentsMargins(0, 0, 0, 0)
+        self._wrap_v.setSpacing(6)
+
+        self._wrap_v.addWidget(_hint("助手在工作后自动沉淀：全局记忆跨项目，项目记忆跟项目走。"))
+
+        # 字符上限：状态区末尾、第一条分割线上（标题样式同小节）
+        lim_row = QHBoxLayout()
+        lim_row.addWidget(_title_label("字符上限", 11))
+        self._limits_hint = _hint(f"全局 {self._global_chars} 字 · 项目 {self._project_chars} 字")
+        self._limits_hint.setWordWrap(False)
+        lim_row.addWidget(self._limits_hint)
+        lim_row.addStretch()
+        mod_btn = QPushButton("修改")
+        mod_btn.setStyleSheet(_btn_style())
+        mod_btn.clicked.connect(self._edit_limits)
+        lim_row.addWidget(mod_btn)
+        self._wrap_v.addLayout(lim_row)
+
+        self._wrap_v.addWidget(_sep())
+
+        # 全局记忆：标题 + 查看
+        g_row = QHBoxLayout()
+        g_row.addWidget(_title_label("全局记忆", 11))
+        g_row.addStretch()
+        g_btn = QPushButton("查看")
+        g_btn.setStyleSheet(_btn_style())
+        g_btn.clicked.connect(self.viewGlobal.emit)
+        g_row.addWidget(g_btn)
+        self._wrap_v.addLayout(g_row)
+        self._wrap_v.addWidget(_hint("跨项目的长期偏好与要求（MEMORY.md），超限写入被拒。"))
+
+        # 项目记忆：标题 + 查看
+        p_row = QHBoxLayout()
+        p_row.addWidget(_title_label("项目记忆", 11))
+        p_row.addStretch()
+        p_btn = QPushButton("查看")
+        p_btn.setStyleSheet(_btn_style())
+        p_btn.clicked.connect(self.viewProject.emit)
+        p_row.addWidget(p_btn)
+        self._wrap_v.addLayout(p_row)
+        self._wrap_v.addWidget(_hint("当前项目的长期笔记（.drifox/memory/助手/MEMORY.md），超限写入被拒。"))
+
+        # 工作日志：标题 + 查看
+        d_row = QHBoxLayout()
+        d_row.addWidget(_title_label("工作日志", 11))
+        d_row.addStretch()
+        d_btn = QPushButton("查看")
+        d_btn.setStyleSheet(_btn_style())
+        d_btn.clicked.connect(self.viewDaily.emit)
+        d_row.addWidget(d_btn)
+        self._wrap_v.addLayout(d_row)
+        self._wrap_v.addWidget(_hint("按天记录的详细工作过程（YYYY-MM-DD.md，只追加）。"))
+
+        self._wrap_v.addWidget(_sep())
+
+        # 清除记忆
+        clear_row = QHBoxLayout()
+        clear_row.addStretch()
         clear_btn = QPushButton("清除记忆")
         clear_btn.setStyleSheet(_btn_style(danger=True))
         clear_btn.clicked.connect(self.clearAll.emit)
-        all_row.addWidget(clear_btn)
-        self.body().addLayout(all_row)
+        clear_row.addWidget(clear_btn)
+        self._wrap_v.addLayout(clear_row)
+
+        self.body().addWidget(self._body_wrap)
 
     def set_memory_enabled(self, on: bool) -> None:
         self._memory_switch.setChecked(on)
         self.setEnabled_all(on)
 
-    def setEnabled_all(self, on: bool) -> None:  # noqa: N802
-        """记忆开关关闭时灰置记忆内容（开关本身保持可用）。"""
-        for i in range(1, self.body().count()):
-            item = self.body().itemAt(i)
-            w = item.widget()
-            if w is not None:
-                w.setVisible(on)
-            elif item.layout() is not None:
-                for j in range(item.layout().count()):
-                    sub = item.layout().itemAt(j)
-                    if sub.widget() is not None:
-                        sub.widget().setVisible(on)
+    def set_limits(self, global_chars: int, project_chars: int) -> None:
+        """回填上限并刷新显示。"""
+        self._global_chars = int(global_chars) if global_chars and int(global_chars) > 0 else 4000
+        self._project_chars = int(project_chars) if project_chars and int(project_chars) > 0 else 3000
+        self._limits_hint.setText(f"全局 {self._global_chars} 字 · 项目 {self._project_chars} 字")
 
-    def set_dream_auto(self, on: bool) -> None:
-        self._dream_switch.setChecked(on)
+    def _edit_limits(self) -> None:
+        """弹上限编辑窗，确认后发 limitsChanged。"""
+        dlg = MemoryLimitDialog(self._global_chars, self._project_chars, parent=self.window())
+        dlg.confirmed.connect(self.limitsChanged.emit)
+        dlg.exec()
+
+    def setEnabled_all(self, on: bool) -> None:  # noqa: N802
+        """记忆开关关闭时灰置记忆内容（开关与状态条保持可见）。"""
+        self._body_wrap.setVisible(bool(on))
 
     def set_status(self, text: str) -> None:
         self._status.setText(f"记忆状态：{text}")
 
-    def set_dream_hint(self, text: str) -> None:
-        self._dream_hint.setText(text)
-        self._dream_hint.setVisible(bool(text))
-
-    def set_dream_running(self, running: bool) -> None:
-        self._dream_btn.setEnabled(not running)
-        self._dream_btn.setText("整理中…" if running else "立即整理")
+    def set_health(self, health: Optional[Dict[str, Any]]) -> None:
+        """渲染健康摘要与漂移提示（health=None/空 → 两行隐藏）。"""
+        if not health:
+            self._health_row.setVisible(False)
+            self._drift_row.setVisible(False)
+            return
+        warn: List[str] = []
+        info: List[str] = []
+        stale = int(health.get("stale_days") or 0)
+        if stale >= 30:
+            warn.append(f"{stale} 天未蒸馏")
+        usage = health.get("usage") or {}
+        over = health.get("over_limit") or {}
+        g = usage.get("global") or [0, 0]
+        p = usage.get("project") or [0, 0]
+        if over.get("global"):
+            warn.append(f"全局 {g[0]}/{g[1]} 超限")
+        if over.get("project"):
+            warn.append(f"项目 {p[0]}/{p[1]} 超限")
+        info.append(f"上次蒸馏 {str(health.get('last_distill') or '无')}")
+        snaps = health.get("snapshot_counts") or {}
+        info.append(f"快照 {int(snaps.get('global') or 0) + int(snaps.get('project') or 0)}")
+        if warn:
+            text = "健康：⚠ " + " ｜ ".join(warn) + " ｜ " + " ｜ ".join(info)
+            color = Colors.WARNING
+        else:
+            text = "健康：正常 ｜ " + " ｜ ".join(info)
+            color = Colors.TEXT_MUTED
+        self._health.setText(text)
+        self._health.setStyleSheet(
+            f"color: {color}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        self._health_row.setVisible(True)
+        drift = health.get("drift") or {}
+        if drift.get("drifted"):
+            self._drift_old = str(drift.get("old_workdir") or "")
+            self._drift_label.setText(
+                f"检测到旧工作目录的项目记忆（{int(drift.get('old_chars') or 0)} 字）：{self._drift_old}"
+            )
+            self._drift_row.setVisible(True)
+        else:
+            self._drift_row.setVisible(False)
 
 
 # ── 经验分区 ────────────────────────────────────────────
@@ -991,7 +1212,7 @@ class ExperienceSection(_Section):
         self._wrap_v.setContentsMargins(0, 0, 0, 0)
         self._wrap_v.setSpacing(6)
         top_row = QHBoxLayout()
-        self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验；每日 Dream 后会自动反思整理。")
+        self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验；可在下方手动反思整理。")
         top_row.addWidget(self._hint, 1)
         cons_btn = QPushButton("压缩整理")
         cons_btn.setStyleSheet(_btn_style())

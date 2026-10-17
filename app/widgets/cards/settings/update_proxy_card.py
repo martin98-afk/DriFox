@@ -284,7 +284,9 @@ class UpdateProxyCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
     def _on_row_selected(self, mode: str) -> None:
         if self._syncing or mode == self._current_mode():
             return
-        self.cfg.update_proxy_mode.value = mode
+        # 必须走 cfg.set(save=True)：item.value = 赋值只改内存不落盘，
+        # 重启后代理方式回退（Settings.set 覆写后 save 默认 False，也没法靠它兜底）
+        self.cfg.set(self.cfg.update_proxy_mode, mode, save=True)
         self._refresh()
 
     def _on_addr_committed(self, mode: str) -> None:
@@ -298,13 +300,13 @@ class UpdateProxyCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         item = self.cfg.update_proxy_prefix if mode == update_proxy.MODE_PREFIX else self.cfg.update_proxy_url
         if not addr:
             # 空地址允许：运行时退化为直连（校验层只在用户填了东西时才拦）
-            item.value = ""
+            self.cfg.set(item, "", save=True)
             return
         ok, msg = update_proxy.validate(mode, addr)
         if not ok:
             self._toast_error("地址无效", msg)
             return
-        item.value = addr
+        self.cfg.set(item, addr, save=True)
 
     def _on_test(self, mode: str) -> None:
         """连通性测试：后台线程发起真实请求，严格校验响应形态"""

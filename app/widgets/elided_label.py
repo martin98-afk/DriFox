@@ -6,10 +6,27 @@ ElidedLabel - 自动根据可用宽度省略文本的 QLabel（中间省略）
 """
 
 import html
+import re
 from typing import List
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QSizePolicy
+
+# 控制字符 → 空格（单行归一化）。
+# 只处理换行/制表/回车这类**会引发换行或异常排版**的字符；不碰普通空格，
+# 也不做连续空白折叠（省略测量要跟字符数一一对应，折叠会改变长度）。
+_CONTROL_CHARS_PATTERN = re.compile(r"[\r\n\t\v\f]")
+
+
+def _to_single_line(text: str) -> str:
+    """把含控制字符的文本归一成单行（控制字符替成空格，长度不变）
+
+    长度不变是刻意约束：高亮分支要先在归一化文本上定位匹配、再回到原文切分
+    并拼 <span>，字符数对齐才能保证下标一致。
+    """
+    if not text:
+        return text
+    return _CONTROL_CHARS_PATTERN.sub(" ", text)
 
 
 class _ElidedLabel(QLabel):
@@ -17,6 +34,13 @@ class _ElidedLabel(QLabel):
 
     当有搜索高亮且匹配内容落在省略区域时，自动切换为「以匹配为中心」的智能省略，
     确保匹配内容始终可见。
+
+    ⚠️ **单行语义**：本控件按单行渲染（行高由外部会话行/列表行钉死），而原文
+    （会话预览、命令描述等）常带 ``\\n``／``\\t`` 等控制字符。若直接交给 QLabel，
+    Qt 会真换行渲染，但 :meth:`QFontMetrics.elidedText` 把控制字符当**零宽**处理
+    （实测 ``"a\\nb"`` 比 ``"a b"`` 窄 7px），测量与渲染不一致 → 省略结果仍含
+    ``\\n`` → 文本被行高截断。因此渲染/测量统一走单行归一化；``_full_text`` 保留
+    原文（tooltip 与 setText 回读语义不变）。
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -59,11 +83,13 @@ class _ElidedLabel(QLabel):
     def _update_elided(self):
         w = self.width()
         if w <= 0:
-            # 未布局：直接显示原文。无条件强制 PlainText（QLabel 同值设置短路
-            # 零开销），避免原文含 < > 时 AutoText 误判为富文本（标签被吞/渲染错乱）
+            # 未布局：直接显示原文（单行归一化）。无条件强制 PlainText（QLabel
+            # 同值设置短路零开销），避免原文含 < > 时 AutoText 误判为富文本
+            # （标签被吞/渲染错乱）
             self.setTextFormat(Qt.PlainText)
-            if self.text() != self._full_text:
-                super().setText(self._full_text)
+            single = _to_single_line(self._full_text)
+            if self.text() != single:
+                super().setText(single)
             return
 
         # 决定使用哪种省略策略
@@ -124,14 +150,19 @@ class _ElidedLabel(QLabel):
             super().setText(elided)
 
     def _plain_elide(self, width: int) -> str:
-        """标准 ElideMiddle 省略"""
+        """标准 ElideMiddle 省略（输入先单行归一化，输出即无控制字符）"""
         fm = self.fontMetrics()
-        return fm.elidedText(self._full_text, Qt.ElideMiddle, width)
+        return fm.elidedText(_to_single_line(self._full_text), Qt.ElideMiddle, width)
 
     def _elide_highlight_aware(self, width: int) -> str:
-        """高亮感知的智能省略 — 确保匹配内容始终可见"""
+        """高亮感知的智能省略 — 确保匹配内容始终可见
+
+        匹配在**归一化后**的文本上做：原文含 ``\\n`` 时，若按原文切分，拼装出的
+        省略串仍会带控制字符（渲染换行）。归一化把控制字符换成空格，字符数不变，
+        故匹配下标对原文同样成立。
+        """
         fm = self.fontMetrics()
-        text = self._full_text
+        text = _to_single_line(self._full_text)
         query = self._hl_query.lower()
 
         # 若全文可见，无需省略

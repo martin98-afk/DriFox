@@ -180,9 +180,16 @@ class TestDockMinLockUpgrade:
         assert c.minimumWidth() >= 300, f"硬约束 minimumSize 未计入: min width={c.minimumWidth()}"
 
     def test_medium_window_three_pane_dock_fits(self):
-        """中等窗口（850/900）三窗格：dock 完整可见（≥ 硬约束 300）、无溢出"""
+        """三窗格：dock 完整可见（≥ 硬约束 300）、无溢出
+
+        窗口档位按最小需求推导：无记忆首开默认宽下限 _DOCK_DEFAULT_W=360
+        （防 sizeHint 未测量首开过窄），双侧同开最小需求 = 360x2 + content
+        320 + handles 12 = 1052。历史档位 900/850 双侧放不下属物理约束
+        （主程序 left 卡已迁侧边栏、双侧 dock 同开为测试虚构场景），档位
+        相应上调，用例守的「完整可见、无溢出」契约不变。
+        """
         _app()
-        for win_w in (900, 850):
+        for win_w in (1080, 1120):
             left = CardContainer(ContainerType.LEFT)
             right = CardContainer(ContainerType.RIGHT)
             content = QWidget()

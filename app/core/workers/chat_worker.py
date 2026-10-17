@@ -23,17 +23,8 @@ except ImportError:
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-import httpcore
-import httpx
 import orjson as json
 from loguru import logger
-from openai import (
-    APIConnectionError,
-    APIError,
-    BadRequestError,
-    InternalServerError,
-    RateLimitError,
-)
 from PySide6.QtCore import QThread, Signal
 
 from app.constants import PARAM_SCHEMA
@@ -45,10 +36,51 @@ from app.plugins.contracts.stream_sink import StreamInterruptedError  # noqa: F4
 # 快速失败不重试（使用点：_make_api_call 异常分类、_handle_error 文案分支）
 _PLUGIN_CODE_ERRORS = (AttributeError, NameError, TypeError, KeyError, ImportError, NotImplementedError)
 
+# openai 异常类惰性加载（T16-B1）：模块级 from openai import 会在启动 critical 泵
+# （deferred create_new_session -> import chat_worker）同步拉起 openai 包（T2 画像
+# 实测 ~1.86s）。异常类仅在异常路径使用，首次需要时双检锁加载一次。
+_OPENAI_ERRORS: Optional[Dict[str, type]] = None
+_OPENAI_ERRORS_LOCK = threading.Lock()
+
+
+def _get_openai_errors() -> Dict[str, type]:
+    """openai 异常类惰性加载（双检锁，进程级一次）。"""
+    global _OPENAI_ERRORS
+    if _OPENAI_ERRORS is None:
+        with _OPENAI_ERRORS_LOCK:
+            if _OPENAI_ERRORS is None:
+                try:
+                    from openai import (
+                        APIConnectionError,
+                        APIError,
+                        APITimeoutError,
+                        BadRequestError,
+                        InternalServerError,
+                        RateLimitError,
+                    )
+                except ImportError as import_err:
+                    # [P2] 保留异常链：调用方拿到的报错含底层 import 失败上下文
+                    raise ImportError(f"openai SDK 导入失败: {import_err}") from import_err
+
+                _OPENAI_ERRORS = {
+                    "bad_request": BadRequestError,
+                    "rate_limit": RateLimitError,
+                    "api": APIError,
+                    "api_connection": APIConnectionError,
+                    "internal_server": InternalServerError,
+                    "timeout": APITimeoutError,
+                }
+    return _OPENAI_ERRORS
+
 from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
-from app.core.modelmeta.model_capabilities import get_model_capabilities, normalize_reasoning_effort
+from app.core.modelmeta.model_capabilities import (
+    ABSOLUTE_FALLBACK_CEILING,
+    get_caps_max_output_tokens,
+    normalize_reasoning_effort,
+    resolve_model_capabilities,
+)
 from app.core.modelmeta.provider_profile import get_provider_profile
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.core.infra.token_estimator import count_messages_tokens
@@ -252,9 +284,6 @@ class OpenAIChatWorker(QThread):
                     self._cache_tracker.set_provider_hooks(pdef.usage_semantics, pdef.usage_normalizer)
             except Exception as e:
                 logger.debug(f"[CacheTracker] 注入服务商 usage 钩子失败（回退内置解析）: {e}")
-
-        # 缓存模型是否支持视觉，用于过滤 image_url 块
-        self._supports_vision = bool(get_model_capabilities(model_name).get("supports_vision"))
 
         # ========== 性能优化：API 消息缓存 ==========
         # 向后兼容：保留 PyQt Signal，但通过 EventBus 统一发射
@@ -741,6 +770,38 @@ class OpenAIChatWorker(QThread):
         """
         backend = getattr(self.tool_executor, "_backend", None)
         hook_q = getattr(backend, "_hook_message_queue", None) if backend else None
+        # 🛡️ 取消路径收尾（2026-10-10 双气泡根因）：用户已点停止 = 一切中止。
+        # 第一轮流式自然结束后 worker 仍停留在完成路径（Stop hook 外部调用耗时），
+        # 此窗口内用户点停止 + 撤回插话时，若照旧注入续跑，已撤回的插话会被
+        # 复活出回复卡，且 finished_with_messages 把已撤回消息写回 session。
+        # 故已取消时不注入不续跑：_interject 条目 stash 回收（UI 停止链路
+        # take_recovered_interjects 统一回填输入框 + 删幽灵卡），其余条目放回
+        # 队列供下一对话消费；TeamMail 丢弃（F1 P0-2：取消上下文的邮件残留
+        # 会被下一对话 _inject_pending_hook_messages 重复消费），与
+        # _cancel_with_stop_hook 尾部排空同语义。
+        if getattr(self, "_is_cancelled", False) and hook_q is not None and not hook_q.empty():
+            leftover: List[Dict] = []
+            while True:
+                try:
+                    leftover.append(hook_q.get_nowait())
+                except queue.Empty:
+                    break
+            recovered: List[Dict] = []
+            for m in leftover:
+                if isinstance(m, dict) and m.get("_interject") is True:
+                    recovered.append(m)
+                elif isinstance(m, dict) and m.get("_hook_event") == "TeamMail":
+                    continue  # 取消上下文的 TeamMail 丢弃，防下一对话重复消费
+                else:
+                    hook_q.put(m)
+            if recovered and backend is not None:
+                try:
+                    backend.stash_recovered_interjects(recovered)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[HookManager] 取消路径回收插话失败: {e}")
+            if recovered:
+                logger.info(f"[Interject] 已取消，回收 {len(recovered)} 条未消费插话（不续跑）")
+            return False
         if hook_q is not None and not hook_q.empty():
             from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 
@@ -1690,6 +1751,10 @@ class OpenAIChatWorker(QThread):
         获取或创建复用的 HTTP 客户端。
         避免每次 API 调用都创建新的客户端。
         """
+        # [T22-B1] httpx 延迟化：顶层 import 在启动 critical 泵同步拉起 httpx
+        # （~0.3s），仅本函数与异常路径使用，函数内按需加载
+        import httpx
+
         if self._http_client is None:
             # 无 API key 时剥离 Authorization 头（免 key 匿名调用）：
             # - 本地免认证端点（auth=none，如 Ollama）服务端不校验 key
@@ -1922,17 +1987,25 @@ class OpenAIChatWorker(QThread):
         if self.tools:
             kwargs["tools"] = self._tools_to_responses(self.tools)
 
-        # 思考参数：responses 用 reasoning.effort（含 "none" 关闭）
+        # 思考参数：responses 用 reasoning.effort（含 "none" 关闭）。
+        # 声明_思考强度经 resolve 链生效：给了 values 则 normalize 校验等级
+        # （无效等级回退中位；无 values 原样返回，行为兼容）——P1-9 批 d。
         thinking_mode = self.llm_config.get("思考模式")
         if thinking_mode is True:
-            kwargs["reasoning"] = {"effort": self.llm_config.get("思考等级", "medium")}
+            _caps = resolve_model_capabilities(self.llm_config)
+            kwargs["reasoning"] = {
+                "effort": normalize_reasoning_effort(
+                    self.llm_config.get("思考等级", "medium"), _caps.get("reasoning_effort_values")
+                )
+            }
         elif thinking_mode is False:
             kwargs["reasoning"] = {"effort": "none"}
 
         # 最大输出 token（复用 chat 分支的上限保护）
-        max_tokens = self.llm_config.get("最大Token")
-        if max_tokens is not None:
-            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_tokens)
+        # P1-21：「最大输出」为唯一输出上限键；用户没填则不传，由服务端默认
+        max_output = self.llm_config.get("最大输出")
+        if max_output is not None:
+            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_output)
 
         # 会话标识
         if self.session_id:
@@ -2853,9 +2926,9 @@ class OpenAIChatWorker(QThread):
             # 保持旧工具名兜底，视觉判断不静默失效
             _provides_image = frozenset({"screenshot", "read"})
 
-        # 检查模型是否支持视觉
+        # 检查模型是否支持视觉（effective：声明_支持图像非空时以声明为准，P1-9 批 d）
         model_name = str(self.llm_config.get("模型名称", "") or "")
-        caps = get_model_capabilities(model_name)
+        caps = resolve_model_capabilities(self.llm_config)
         if not caps.get("supports_vision"):
             # 不支持视觉的模型：在已构建的 tool 消息 content 追加提示，防止模型幻觉
             _non_vision_tools = set()
@@ -3379,6 +3452,11 @@ class OpenAIChatWorker(QThread):
         2. 使用缓存的 HTTP 客户端，避免每次都创建新客户端
         3. 预构建 API 参数，避免每次都重复处理
         """
+        # [T22-B1] httpx/httpcore 延迟化：重试分类与 ReadError 捕获所需，
+        # 函数内按需加载（本函数是唯一消费点；首次调用时 openai 已由
+        # build_openai_client 拉起 httpx，此处零额外成本）
+        import httpcore
+        import httpx
         # 🛡️ 清除旧响应引用，确保 cancel() 不关闭过期连接
         with self._stream_lock:
             self._current_response = None
@@ -3495,65 +3573,70 @@ class OpenAIChatWorker(QThread):
                 finally:
                     # 🛡️ 同线程收尾：任何路径（正常/取消/异常/重试前丢弃）都关闭响应
                     self._finish_stream_response(response)
-            except BadRequestError as e:
-                error_str = str(e)
-                # 检测 tool call result 错误码 2013
-                is_tool_call_order_error = (
-                    "2013" in error_str
-                    or "tool call result does not follow tool call" in error_str.lower()
-                    or "tool_calls" in error_str.lower()
-                )
-
-                if is_tool_call_order_error and attempt < max_retries - 1 and not use_responses:
-                    # 自动修复 tool result 顺序问题
-                    logger.warning("[API] 检测到 tool call result 顺序错误 (2013)，尝试自动修复...")
-                    # 🛡️ 仅调用一次修复：api_messages 与 messages 的 tool_call_id 集合等价
-                    # （messages_to_api 是保结构转换），结果直接复用，杜绝重复扫描同一份数据
-                    fixed_messages, was_fixed = self._fix_tool_result_order(api_messages)
-
-                    if was_fixed:
-                        fixed_sanitized = self._serialize_for_api(fixed_messages).messages
-                        api_messages = fixed_sanitized
-                        # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
-                        if use_cache:
-                            self._api_messages_cache = fixed_sanitized
-                        # 同步修复源头 current_messages：fixed_messages 与 messages 同型（都是内部格式），
-                        # 直接 slice 赋值即可固化源头，避免再次调用 _fix_tool_result_order
-                        if fixed_messages is not messages:
-                            messages[:] = fixed_messages
-                        logger.warning(f"[API] 已修复消息顺序，已同步源头，重试 (attempt {attempt + 1}/{max_retries})")
-                        continue
-                    else:
-                        logger.error("[API] 无法自动修复 tool call result 顺序问题 - 可能需要查看上面的消息结构")
-
-                # 检测 Missing required arguments 错误（工具参数丢失）
-                is_missing_args_error = (
-                    "Missing required arguments" in error_str or "missing a required argument" in error_str.lower()
-                )
-
-                if is_missing_args_error and attempt < max_retries - 1 and not use_responses:
-                    logger.warning("[API] 检测到工具参数丢失错误，尝试从历史消息中恢复...")
-
-                    # 尝试从历史消息中恢复 tool_calls 的参数
-                    fixed_messages = self._try_recover_tool_arguments(api_messages)
-
-                    if fixed_messages is not None:
-                        fixed_sanitized = self._serialize_for_api(fixed_messages).messages
-                        api_messages = fixed_sanitized
-                        # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
-                        if use_cache:
-                            self._api_messages_cache = fixed_sanitized
-                        logger.warning(f"[API] 已恢复工具参数，已更新缓存，重试 (attempt {attempt + 1}/{max_retries})")
-                        continue
-                    else:
-                        logger.warning("[API] 无法恢复工具参数，保持现有消息")
-
-                # 其他 BadRequestError 继续抛出
-                if hasattr(e, "response") and e.response is not None:
-                    resp_body = getattr(e.response, "text", "") or ""
-                    logger.error(f"[API] Error response body: {resp_body[:500]}")
-                raise
             except Exception as e:
+                # [T16-B1] 原 except BadRequestError 独立子句合并至此：BadRequestError
+                # 是 APIError 子类，原结构从不流入 Exception 子句，守卫后语义等价。
+                # 2013 顺序修复 / Missing required arguments 恢复命中即 continue 重试，
+                # 不可修复走到块尾保持原 raise。
+                _OE = _get_openai_errors()
+                if isinstance(e, _OE["bad_request"]):
+                    error_str = str(e)
+                    # 检测 tool call result 错误码 2013
+                    is_tool_call_order_error = (
+                        "2013" in error_str
+                        or "tool call result does not follow tool call" in error_str.lower()
+                        or "tool_calls" in error_str.lower()
+                    )
+
+                    if is_tool_call_order_error and attempt < max_retries - 1 and not use_responses:
+                        # 自动修复 tool result 顺序问题
+                        logger.warning("[API] 检测到 tool call result 顺序错误 (2013)，尝试自动修复...")
+                        # 🛡️ 仅调用一次修复：api_messages 与 messages 的 tool_call_id 集合等价
+                        # （messages_to_api 是保结构转换），结果直接复用，杜绝重复扫描同一份数据
+                        fixed_messages, was_fixed = self._fix_tool_result_order(api_messages)
+
+                        if was_fixed:
+                            fixed_sanitized = self._serialize_for_api(fixed_messages).messages
+                            api_messages = fixed_sanitized
+                            # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
+                            if use_cache:
+                                self._api_messages_cache = fixed_sanitized
+                            # 同步修复源头 current_messages：fixed_messages 与 messages 同型（都是内部格式），
+                            # 直接 slice 赋值即可固化源头，避免再次调用 _fix_tool_result_order
+                            if fixed_messages is not messages:
+                                messages[:] = fixed_messages
+                            logger.warning(f"[API] 已修复消息顺序，已同步源头，重试 (attempt {attempt + 1}/{max_retries})")
+                            continue
+                        else:
+                            logger.error("[API] 无法自动修复 tool call result 顺序问题 - 可能需要查看上面的消息结构")
+
+                    # 检测 Missing required arguments 错误（工具参数丢失）
+                    is_missing_args_error = (
+                        "Missing required arguments" in error_str or "missing a required argument" in error_str.lower()
+                    )
+
+                    if is_missing_args_error and attempt < max_retries - 1 and not use_responses:
+                        logger.warning("[API] 检测到工具参数丢失错误，尝试从历史消息中恢复...")
+
+                        # 尝试从历史消息中恢复 tool_calls 的参数
+                        fixed_messages = self._try_recover_tool_arguments(api_messages)
+
+                        if fixed_messages is not None:
+                            fixed_sanitized = self._serialize_for_api(fixed_messages).messages
+                            api_messages = fixed_sanitized
+                            # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
+                            if use_cache:
+                                self._api_messages_cache = fixed_sanitized
+                            logger.warning(f"[API] 已恢复工具参数，已更新缓存，重试 (attempt {attempt + 1}/{max_retries})")
+                            continue
+                        else:
+                            logger.warning("[API] 无法恢复工具参数，保持现有消息")
+
+                    # 其他 BadRequestError 继续抛出
+                    if hasattr(e, "response") and e.response is not None:
+                        resp_body = getattr(e.response, "text", "") or ""
+                        logger.error(f"[API] Error response body: {resp_body[:500]}")
+                    raise
                 error_str = str(e)
                 error_type = type(e).__name__
 
@@ -3575,14 +3658,14 @@ class OpenAIChatWorker(QThread):
                 is_retryable_network = isinstance(e, (httpx.NetworkError, httpcore.NetworkError))
                 is_retryable_timeout = isinstance(e, (httpx.TimeoutException, httpcore.TimeoutException))
                 is_retryable_protocol = isinstance(e, (httpx.ProtocolError, httpcore.ProtocolError))
-                is_rate_limit = isinstance(e, RateLimitError)
+                is_rate_limit = isinstance(e, _OE["rate_limit"])
                 # 服务端过载/繁忙（如 MiniMax 的 2064、OpenAI 的 503）应重试。
                 # 除标准 "2064"/"overload" 信号外，还兜底识别两类透传消息：
                 # 1) SSE 流内错误事件：openai SDK 将其包装为通用 APIError（无 status_code
                 #    属性），但服务端文本含 5xx 状态码（如 "[503]"）
                 # 2) 队列已满等过载信号（如 MiniMax 的 "The request queue is full"）
                 _err_lower = error_str.lower()
-                is_server_overload = isinstance(e, APIError) and (
+                is_server_overload = isinstance(e, _OE["api"]) and (
                     "2064" in error_str
                     or "overload" in _err_lower
                     or re.search(r"\b(5\d{2})\b", error_str) is not None
@@ -3590,9 +3673,9 @@ class OpenAIChatWorker(QThread):
                     or "queue is full" in _err_lower
                     or "streaming response failed" in _err_lower
                 )
-                is_conn_error = isinstance(e, APIConnectionError)
+                is_conn_error = isinstance(e, _OE["api_connection"])
                 # 通用 5xx：服务端临时故障（如 MiniMax 的 999/1000、OpenAI 500）应重试
-                is_internal_server_error = isinstance(e, InternalServerError)
+                is_internal_server_error = isinstance(e, _OE["internal_server"])
 
                 should_retry = (
                     is_rate_limit
@@ -3690,6 +3773,13 @@ class OpenAIChatWorker(QThread):
         except Exception:
             return requested
 
+        # 0. 模型真实输出上限优先（models.dev per-model，带 provider 走分区精确查）：
+        #    命中即用 min(用户值, caps 上限)；用户未设（<=0）则直接用 caps 上限。
+        #    这一层接通了此前被 family 级 8192/65536 覆盖掉的 per-model 真实上限。
+        caps_max = get_caps_max_output_tokens(model, self.llm_config)
+        if caps_max is not None:
+            return caps_max if requested_int <= 0 else min(requested_int, caps_max)
+
         profile = get_provider_profile(self.llm_config)
 
         # 1. 如果用户没有设置或设置值 <= 0，使用 provider 默认值
@@ -3697,7 +3787,8 @@ class OpenAIChatWorker(QThread):
             return int(profile.get("max_output_tokens", 8192))
 
         # 2. 获取绝对上限（防止用户设置极端值）
-        absolute_limit = int(profile.get("absolute_limit", 65536))
+        #    插件声明的 absolute_limit 优先；两级都缺失时才用兜底常量
+        absolute_limit = int(profile.get("absolute_limit") or ABSOLUTE_FALLBACK_CEILING)
 
         # 3. 针对特定模型系列的软限制（仅当用户设置值超出时才生效）
         family = profile.get("family", "")
@@ -3866,6 +3957,16 @@ class OpenAIChatWorker(QThread):
             # ----- 工具调用参数累积 -----
             elif etype == "response.function_call_arguments.delta":
                 tool_calls_found = True
+                # 工具调用开始 → 思考阶段结束：先冲刷残留的思考批次。
+                # 不冲刷时，模型最后吐的一小段思考（<20 字且距上次发射 <80ms）
+                # 会卡在批次里，一直等到**流结束**（工具执行完）才发射 —— 用户
+                # 感知就是"思考内容等工具执行完才刷新"。
+                if _reasoning_batch:
+                    self._emit_with_callback(
+                        "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
+                    )
+                    _reasoning_batch = ""
+                    _reasoning_batch_time = time.time()
                 item_id = getattr(event, "item_id", "")
                 piece = getattr(event, "delta", "") or ""
                 buffer = self._tool_calls_buffer.get(item_id)
@@ -3885,6 +3986,13 @@ class OpenAIChatWorker(QThread):
                 item = getattr(event, "item", None) or {}
                 if self._responses_item_get(item, "type") == "function_call":
                     tool_calls_found = True
+                    # 思考阶段结束：冲刷残留批次（见 function_call_arguments.delta 注释）
+                    if _reasoning_batch:
+                        self._emit_with_callback(
+                            "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
+                        )
+                        _reasoning_batch = ""
+                        _reasoning_batch_time = time.time()
                     item_id = self._responses_item_get(item, "id")
                     name = self._responses_item_get(item, "name") or ""
                     if item_id and name:
@@ -4444,22 +4552,39 @@ class OpenAIChatWorker(QThread):
         return True  # 允许执行
 
     def _sandbox_verdict(self, tool_name, arguments):
-        """沙箱判定；失败放行（fail-open：安全增强不可阻断正常使用）"""
+        """沙箱判定；失败放行（fail-open：安全增强不可阻断正常使用）
+
+        显式传本执行器的 workdir：`_current_workdir()` 回退源是全局单例，
+        多窗口并发时会拿到"最后一次调用者"的 workdir（串味）。
+        """
         try:
+            from pathlib import Path
+
             from app.tools.sandbox import sandbox_check_tool
 
-            return sandbox_check_tool(tool_name, dict(arguments or {}))
+            wd = None
+            try:
+                wd = self.tool_executor.get_workdir()
+            except Exception:  # noqa: BLE001 - 取不到基准时回退内部默认
+                wd = None
+            return sandbox_check_tool(tool_name, dict(arguments or {}), workdir=Path(wd) if wd else None)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Sandbox] 检查失败放行: {e}")
             return None
 
     def _sandbox_after_approve(self, tool_name, arguments):
-        """审批通过后钩子：删除保护开启时，对删除命令做执行前快照"""
+        """审批通过后钩子：删除保护开启时，对删除命令做执行前快照
+
+        显式传 workdir（同 `_sandbox_verdict`）：相对路径目标按工作目录解析，
+        否则快照会按进程 cwd 解析而静默漏拍（2026-10-13 实测缺陷）。
+        """
         try:
             args = dict(arguments or {})
             command = str(args.get("command") or "")
             if not command:
                 return
+            from pathlib import Path
+
             from app.tools.sandbox import SandboxConfig, snapshot_paths_before_delete
 
             cfg = SandboxConfig.get_instance()
@@ -4468,7 +4593,12 @@ class OpenAIChatWorker(QThread):
             from app.utils.utils import get_app_data_dir
 
             backup_root = get_app_data_dir() / "backups" / "deleted"
-            snapshot_paths_before_delete(command, backup_root)
+            wd = None
+            try:
+                wd = self.tool_executor.get_workdir()
+            except Exception:  # noqa: BLE001 - 取不到基准时回退内部默认
+                wd = None
+            snapshot_paths_before_delete(command, backup_root, workdir=Path(wd) if wd else None)
         except Exception as e:  # noqa: BLE001 - 快照失败不阻断已批准执行
             logger.warning(f"[Sandbox] 删除保护快照异常: {e}")
 
@@ -4565,10 +4695,10 @@ class OpenAIChatWorker(QThread):
             )
         ):
             try:
-                from app.core.modelmeta.model_capabilities import get_model_capabilities
+                from app.core.modelmeta.model_capabilities import resolve_model_capabilities
 
-                _model_name = str(self.llm_config.get("模型名称", "") or "")
-                _caps = get_model_capabilities(_model_name)
+                # effective：声明_支持图像非空时以声明为准（P1-9 批 d）
+                _caps = resolve_model_capabilities(self.llm_config)
                 if _caps.get("supports_vision"):
                     result_content = str(result_content) + (
                         "\n\n[Vision Notice] 截图已自动以图片形式注入你的视觉上下文，"
@@ -4671,13 +4801,7 @@ class OpenAIChatWorker(QThread):
             )
 
     def _handle_error(self, error):
-        from openai import (
-            APIConnectionError,
-            APIError,
-            APITimeoutError,
-            BadRequestError,
-            RateLimitError,
-        )
+        _OE = _get_openai_errors()
 
         error_msg = str(error)
 
@@ -4709,7 +4833,7 @@ class OpenAIChatWorker(QThread):
             )
             return
 
-        if isinstance(error, BadRequestError):
+        if isinstance(error, _OE["bad_request"]):
             # ⚠️ Qwen/DashScope 服务端拒绝"重复工具调用"错误
             # 错误码：InternalError.Algo.InvalidParameter
             # 错误消息：Repetitive tool calls detected in the conversation history...
@@ -4766,23 +4890,23 @@ class OpenAIChatWorker(QThread):
                 )
             else:
                 self._emit_with_callback("error_occurred", self.error_occurred, f"[请求错误] {error_msg}")
-        elif isinstance(error, RateLimitError):
+        elif isinstance(error, _OE["rate_limit"]):
             self._emit_with_callback(
                 "error_occurred", self.error_occurred, f"[速率限制] 请求过于频繁，请稍后再试。详情: {error_msg}"
             )
-        elif isinstance(error, APIConnectionError):
+        elif isinstance(error, _OE["api_connection"]):
             self._emit_with_callback(
                 "error_occurred",
                 self.error_occurred,
                 f"[连接失败] 无法连接到 API 服务器，请检查网络或 API_URL 设置。详情: {error_msg}",
             )
-        elif isinstance(error, APITimeoutError):
+        elif isinstance(error, _OE["timeout"]):
             self._emit_with_callback(
                 "error_occurred",
                 self.error_occurred,
                 f"[超时] 请求超时（300秒），请检查网络或模型负载。详情: {error_msg}",
             )
-        elif isinstance(error, APIError):
+        elif isinstance(error, _OE["api"]):
             if "context length" in error_msg and "overflow" in error_msg:
                 self._emit_with_callback(
                     "error_occurred",

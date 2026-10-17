@@ -116,8 +116,10 @@ def test_experience_section_reload(qtbot=None):
     opened = []
     s.viewCategory.connect(opened.append)
     s.reload_categories([{"category": "工作流", "count": 2}, {"category": "工具使用", "count": 1}])
-    # 点击第一个分类按钮
-    s._list_area.itemAt(0).widget().click()
+    # 点击第一个分类按钮（行包装容器无 click，按钮在布局第 0 项）
+    row_wrap = s._list_area.itemAt(0).widget()
+    btn = row_wrap.layout().itemAt(0).widget()
+    btn.click()
     assert opened == ["工作流"]
 
 

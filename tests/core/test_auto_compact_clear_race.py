@@ -66,6 +66,10 @@ def _mk_guard_fake(session_messages, send_epoch, compact_epoch):
         _refresh_context_usage_indicator=lambda: None,
     )
     fake._on_messages_updated = MethodType(OpenAIChatToolWindow._on_messages_updated, fake)
+    # 守卫现调用 `self._max_message_ts_ms(...)`（静态方法，时间线判据）——
+    # SimpleNamespace 假件不继承类方法，须显式绑定（未提供 _post_compact_cutoff_ms
+    # 时 getattr 取 0 → 回退 epoch 判据，即本文件 F2 的原始语义）
+    fake._max_message_ts_ms = OpenAIChatToolWindow._max_message_ts_ms
     fake.__dict__["_session"] = session
     return fake, set_calls
 
@@ -207,7 +211,8 @@ class TestCompactClearStopsInFlightStream:
         resume_calls, resume_rec = _recorder()
         card = SimpleNamespace(
             stop_streaming_anim=lambda: None,
-            finish_streaming=lambda: None,
+            # 打断路径调用 finish_streaming(force_dock_off=True) → 桩必须收关键字参数
+            finish_streaming=lambda *a, **k: None,
         )
         executor = SimpleNamespace(_execution_error=None)
 
@@ -236,6 +241,10 @@ class TestCompactClearStopsInFlightStream:
             _check_and_process_pending=resume_rec,
             _send_epoch=3,
             _post_compact_epoch=-1,
+            # 清空回调现会立即落库（save_cleared_session）+ 取 API 占用字段。
+            # 补桩以免落入 try/except 静默吞异常（此处只验清空流程，不验落库）。
+            history_manager=SimpleNamespace(save_cleared_session=lambda *a, **k: False),
+            _api_usage_kwargs=OpenAIChatToolWindow.__dict__["_api_usage_kwargs"],
         )
         fake._on_compact_clear_finished = MethodType(OpenAIChatToolWindow._on_compact_clear_finished, fake)
         fake.__dict__.update(

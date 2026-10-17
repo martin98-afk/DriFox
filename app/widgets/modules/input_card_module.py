@@ -8,7 +8,7 @@ Phase F：原 setup_ui 底部输入区域段（计划标注 3262-3410，实际 3
 属性契约（host.setattr）：
 - _bottom_input_container _bottom_input_layout _input_card _input_card_wrapper
 - _attach_container _attach_layout _attachments _history_working_attachments
-- input_area _command_card _file_mention_card _undo_delete_card
+- input_area _command_card _file_mention_card _undo_delete_card _queue_message_card
 - _undo_delete_store _truncation_sentinel _pending_send_after_truncation _pending_send_user_text
 
 宿主依赖（host 预建，本模块只读取）：
@@ -130,8 +130,6 @@ class InputCardModule(UIModule):
         host.input_area.historyModeExited.connect(host._on_history_mode_exited)
         # 正文里的 [[basename]] 被删除 → 同步移除附件栏对应的 chip（反向同步）
         host.input_area.attachmentsRemoved.connect(host._on_attachments_removed_from_text)
-        # ★ 用户输入时通知桌宠好奇看向输入框
-        host.input_area.textChanged.connect(host._on_pet_typing)
         card_layout.addWidget(host.input_area)
 
         # 加载输入历史

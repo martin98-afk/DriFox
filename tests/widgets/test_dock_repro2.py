@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""回归：左侧浮动卡片 toggle 后 dock wrapper 必须展开
+"""回归：左侧浮动卡片 toggle 后卡片区必须展开
 
 覆盖 _DockSideWrapper isVisible() 死锁：wrapper 默认 hide 时，子控件
 primary.isVisible() 恒为 False（祖先链遮蔽），_sync 永远走收起分支，
 导致左侧 UI 插件浮动卡片无法显示。
 
-注：右侧 dock 停靠区已移除（container="right" 的卡片改道 WorkbenchPanel
-动态 tab），dockSplitter 现为 [左停靠区, 内容区] 两格。
+注：left 卡片宿主已从对话区 dock_splitter 迁到 #tabFrame 内的
+sidebarSplitter（卡片嵌在侧边栏内部右侧，2026-10-12）；dockSplitter
+保留仅供外部 objectName 探测 Tab 模式，不再承载左卡片区。
 """
 
 from PySide6.QtWidgets import QApplication, QWidget
@@ -23,17 +24,44 @@ def _toggle_left_card(tm, card_id):
     reg.toggle_floating_card(card_id)
     for _ in range(5):
         QApplication.processEvents()
-    return tm._global_left_wrapper, tm._dock_splitter
+    return tm._global_left_wrapper, tm._sidebar_splitter
+
+
+def _reset_card_orchestration(tm):
+    """跨文件单例卫生：复位 left 卡片编排留下的状态
+
+    本文件与 test_left_card_sidebar_embed.py 共用 TabManagerWindow 单例；
+    后者跑完后若残留「卡片占位」痕迹（wrapper 已 show、内部槽位非 0、
+    TabPanel 占位开关）会让本文件的初始态断言失败。此处显式复位。
+    """
+    panel = getattr(tm, "_tab_panel", None)
+    if panel is not None:
+        panel._left_card_present = False
+        panel._dragging_splitter = False
+    wrapper = getattr(tm, "_global_left_wrapper", None)
+    if wrapper is not None:
+        for cid in list(wrapper._primary._cards.keys()):
+            try:
+                wrapper._primary._cards[cid].setVisible(False)
+            except Exception:
+                pass
+        wrapper._sync()
+    for _ in range(4):
+        QApplication.processEvents()
 
 
 def test_initial_collapsed_state(qtbot):
-    """初始态（无卡片显示）：wrapper 保持收起、splitter 不给左 dock 分宽（01edd48f/37933366 行为）"""
+    """初始态（无卡片显示）：wrapper 保持收起、sidebar splitter 不给卡片区分宽"""
     tm = TabManagerWindow.create_instance()
+    _reset_card_orchestration(tm)
     for _ in range(3):
         QApplication.processEvents()
+    qtbot.wait(200)
+    QApplication.processEvents()
     assert tm._global_left_wrapper.isHidden(), "无卡片时左 wrapper 应保持收起"
-    sizes = tm._dock_splitter.sizes()
-    assert sizes[0] == 0, f"左 dock 不应分宽，实际 sizes={sizes}"
+    sizes = tm._sidebar_splitter.sizes()
+    idx = tm._sidebar_splitter.indexOf(tm._global_left_wrapper)
+    assert sizes[idx] == 0, f"卡片区不应分宽，实际 sizes={sizes}"
 
 
 def test_left_dock_expands_when_window_shown(qtbot):

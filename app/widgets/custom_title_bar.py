@@ -406,7 +406,7 @@ class CustomTabButton(QWidget):
         """从当前进度续接到目标进度（避免连续 hover 时跳变）
 
         系统「减少动态效果」时直接落终值：hover 仍要给出状态反馈（颜色变化
-        必须可见），只是去掉过渡过程；靠 ``setValue`` 走同一条 valueChanged
+        必须可见），只是去掉过渡过程；落终值仍走动画自身的 valueChanged
         通路，调用方无需感知两条路径的差异。
 
         ★ 快速路径（current≈target）也必须先 ``anim.stop()``：enter 后不足
@@ -418,7 +418,12 @@ class CustomTabButton(QWidget):
         if abs(current - target) < 0.001:
             return
         if not Animations.motion_enabled():
-            anim.setValue(target)
+            # QVariantAnimation 没有 setValue（2026-10-16 崩溃根因）：落终值
+            # 走「起止值同设 target + 推进到末尾」，valueChanged 以 target
+            # 发射一次后停在 Stopped，与动画跑完的终态一致。
+            anim.setStartValue(target)
+            anim.setEndValue(target)
+            anim.setCurrentTime(anim.duration())
             return
         anim.setStartValue(current)
         anim.setEndValue(target)

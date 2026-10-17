@@ -371,6 +371,14 @@ class TimelinePanel(QWidget):
                     vals = [max(0, recs[i].tokens) for i in order]
                     self._token_total = int(sum(vals))
                     self._slot_span = _token_slot_spans(order, vals, track_w)
+                    # 刻度偏移基准：窗口起点在全局累积 token 中的位置。
+                    # 缩放/平移后窗口内首条的全局累积不是 0，刻度左端不能
+                    # 再画 "0"（口径对齐时间刻度的 _full_t0 偏移基准）。
+                    _tok0 = (
+                        int(sum(max(0, recs[i].tokens) for i in range(order[0])))
+                        if order
+                        else 0
+                    )
                 else:
                     n = len(order)
                     self._slot_span = {i: (k / n, (k + 0.92) / n) for k, i in enumerate(order)} if n else {}
@@ -382,7 +390,7 @@ class TimelinePanel(QWidget):
                 y = TICK_H + lane_i * h
                 self._paint_lane(painter, lane, y, h, track_x, track_w, t0, t1, recs)
             if self._mode == MODE_TOKEN:
-                self._paint_token_ticks(painter, track_x, track_w)
+                self._paint_token_ticks(painter, track_x, track_w, _tok0)
             else:
                 self._paint_ticks(painter, track_x, track_w, t0, t1)
             self._paint_selection(painter)
@@ -651,22 +659,52 @@ class TimelinePanel(QWidget):
             format_duration_compact(int((t1 - base) * 1000)),
         )
 
-    def _paint_token_ticks(self, painter: QPainter, track_x: int, track_w: int) -> None:
+    def _paint_token_ticks(
+        self, painter: QPainter, track_x: int, track_w: int, tok0: int = 0
+    ) -> None:
         """Token 模式刻度：轴位置不再是时间，换画**累积 token**。
 
         ⚠️ 不能沿用时间刻度：Token 模式下 x 位置与时间不成线性（条的先后顺序
         是时间序，但宽度按 token 占比），时间刻度会对不上条带边界。改画该轴
         位置对应的累积 token 数，与条带宽度口径同源。
-        总量为 0（全部条目都无 token）时退化为百分比刻度。
+        ⚠️ tok0 = 窗口起点在全局累积 token 中的偏移：缩放/平移后窗口左端
+        不是全局第 0 条，刻度起点必须跟着走（同时间刻度的 _full_t0 基准），
+        否则滚轮无论停在哪，左端都显示 "0"、右端显示窗口内总量，误导成
+        "从头开始"。
+        窗口内累积 token 为 0（全部条目都无 token）时退化为百分比刻度。
         """
         f = self._num_font(-3)
         painter.setFont(f)
-        total = self._token_total
+        tok1 = tok0 + self._token_total
+        if tok1 > tok0:
+            for k in range(5):
+                if k in (0, 4):
+                    continue
+                gx = track_x + int(track_w * k / 4)
+                label = _tok_label(round(tok0 + (tok1 - tok0) * k / 4))
+                painter.setPen(QColor(self._pal.text_muted))
+                painter.drawText(
+                    QRect(gx - 40, 0, 80, TICK_H - 2),
+                    Qt.AlignVCenter | Qt.AlignHCenter,
+                    label,
+                )
+            painter.setPen(QColor(self._pal.text_secondary))
+            painter.drawText(
+                QRect(track_x, 0, 80, TICK_H - 2),
+                Qt.AlignVCenter | Qt.AlignLeft,
+                _tok_label(tok0),
+            )
+            painter.drawText(
+                QRect(track_x + track_w - 80, 0, 80, TICK_H - 2),
+                Qt.AlignVCenter | Qt.AlignRight,
+                f"{_tok_label(tok1)} tok",
+            )
+            return
         for k in range(5):
             if k in (0, 4):
                 continue
             gx = track_x + int(track_w * k / 4)
-            label = _tok_label(round(total * k / 4)) if total > 0 else f"{k * 25}%"
+            label = f"{k * 25}%"
             painter.setPen(QColor(self._pal.text_muted))
             painter.drawText(
                 QRect(gx - 40, 0, 80, TICK_H - 2),
@@ -677,12 +715,12 @@ class TimelinePanel(QWidget):
         painter.drawText(
             QRect(track_x, 0, 80, TICK_H - 2),
             Qt.AlignVCenter | Qt.AlignLeft,
-            _tok_label(0) if total > 0 else "0%",
+            "0%",
         )
         painter.drawText(
             QRect(track_x + track_w - 80, 0, 80, TICK_H - 2),
             Qt.AlignVCenter | Qt.AlignRight,
-            f"{_tok_label(total)} tok" if total > 0 else "100%",
+            "100%",
         )
 
     def _paint_empty(self, painter: QPainter) -> None:

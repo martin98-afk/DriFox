@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 GlobalCardController — Tab 级全局卡片控制器（单例）
 
@@ -58,6 +58,26 @@ class GlobalCardController:
         # 若不加保护，会在 _settings_popup 赋值前递归构建多张设置卡（P024：重叠显示）。
         self._settings_popup_building = False
         self._provider_edit_card = None
+        self._provider_picker_card = None
+        self._provider_picker_popup = None
+        # ── 服务商卡导航状态（卡内面包屑，单卡双视图）──
+        # "picker" = 卡片墙；"edit" = 编辑表单。同一张卡（card_id="provider_picker"）
+        # 内切换，全流程只占 1 个标题栏 tab。
+        self._provider_view: str = "picker"
+        # 进入编辑视图的来源，决定面包屑祖先项的回退目标：
+        # "picker"   → 卡内切回卡片墙
+        # "settings" → 关卡片 + open_settings("provider")
+        self._provider_origin: str = "picker"
+        # 面包屑当前项文本（「添加: xxx」/「编辑: xxx」）
+        self._provider_form_title: str = "添加服务商"
+        # ── 服务商卡导航状态（卡内面包屑，单卡双视图）──
+        # "picker" = 卡片墙；"edit" = 编辑表单。同一张卡（card_id="provider_picker"）
+        # 内切换，全流程只占 1 个标题栏 tab。
+        self._provider_view: str = "picker"
+        # 进入编辑视图的来源，决定面包屑祖先项的回退目标：
+        # "picker"   → 卡内切回卡片墙
+        # "settings" → 关卡片 + open_settings("provider")
+        self._provider_origin: str = "picker"
         self._hook_edit_card = None
         self._mcp_edit_card = None
         self._provider_edit_popup = None
@@ -83,10 +103,17 @@ class GlobalCardController:
         这些卡片 parent 挂在 TabManagerWindow 层，不在 main_widget widget
         树内，main_widget._apply_runtime_ui_settings 的 findChildren 扫不到，
         需由 TabManagerWindow._on_theme_changed 显式调用。
+
+        [PERF] 隐藏卡跳过 + 置脏：主题刷新成本 ∝ 控件子树规模
+        （设置弹窗 1087 子控件单次 ~260ms，其内部 40 个 ScrollArea 再各刷
+        一遍）。隐藏卡用户看不见，刷新纯属白付；置 _theme_needs_refresh
+        后由其自身 showEvent 补刷自愈（LLMSettingsCard 已有该链路）。
+        无补刷链路的卡（实现 _theme_needs_refresh 才是协议）保守照常刷。
         """
         for card in (
             self._settings_popup,
             self._provider_edit_card,
+            self._provider_picker_card,
             self._hook_edit_card,
             self._mcp_edit_card,
             self._diff_viewer_card,
@@ -94,11 +121,24 @@ class GlobalCardController:
             self._file_undo_card,
             self._sub_agent_session_card,
         ):
-            if card is not None and hasattr(card, "refresh_style"):
-                try:
-                    card.refresh_style()
-                except Exception as e:
-                    logger.warning(f"[GlobalCard] 卡片主题刷新失败: {e}")
+            if card is None:
+                continue
+            # [A2] hasattr 一并移入 try：已销毁 C++ 对象的属性访问会抛 RuntimeError
+            # （wrapped C/C++ object deleted），原写在 try 外会让整个刷新循环中断，
+            # 序列后续健康卡全部漏刷。RuntimeError 单独捕获跳过本卡，序列继续。
+            try:
+                if not hasattr(card, "refresh_style"):
+                    continue
+                # 仅对「有补刷链路」+ 隐藏的卡做门控，避免主题更新永久丢失
+                if hasattr(card, "_theme_needs_refresh"):
+                    if not card.isVisible():
+                        card._theme_needs_refresh = True
+                        continue
+                card.refresh_style()
+            except RuntimeError:
+                continue  # C++ 对象已销毁（本卡跳过，序列继续）
+            except Exception as e:
+                logger.warning(f"[GlobalCard] 卡片主题刷新失败: {e}")
 
     def _active_window(self):
         """当前激活的对话窗口（per-window 状态的读写目标）"""
@@ -223,10 +263,19 @@ class GlobalCardController:
             logger.warning(f"[GlobalCard] 插件设置分区重建失败: {e}")
         self._card_manager.toggle_card("settings", GLOBAL_WINDOW_ID)
 
-    def open_settings(self):
-        """打开设置卡片并确保宿主窗口前置"""
+    def open_settings(self, initial_tab: "str | None" = None):
+        """打开设置卡片并确保宿主窗口前置
+
+        Args:
+            initial_tab: 打开后切换到的导航页 tab_id（如 "appearance"/"plugins"），
+                None 保持上次停留页；未知 tab_id 由 _set_active_page 内部守卫静默忽略
+        """
         self.ensure_settings_popup()
-        self._card_manager.toggle_card("settings", GLOBAL_WINDOW_ID)
+        # 先切页再显示：已打开时切 tab 不闪；show_card 只开不关（原 toggle_card 语义
+        # 会在「设置卡已打开」时把跳转点击吞成关闭，用户被迫点两次）
+        if initial_tab:
+            self._settings_popup._set_active_page(initial_tab)
+        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
         if self._card_manager.is_card_visible("settings", GLOBAL_WINDOW_ID):
             tm = self._tab_manager
             if tm.isMinimized():
@@ -260,6 +309,7 @@ class GlobalCardController:
         self._provider_edit_card.setMinimumHeight(300)
         self._provider_edit_card.set_height_mode("content")
         self._provider_edit_popup = ProviderEditCard(parent=self._provider_edit_card)
+        # P0 回退：760 限宽系美化批自拟参数，用户否决——表单恢复铺满容器
         self._provider_edit_popup.saved.connect(
             lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
         )
@@ -274,61 +324,192 @@ class GlobalCardController:
         )
         self._global_card_container.add_card("provider_edit", self._provider_edit_card)
 
-    def _show_provider_add_card(self):
-        """显示添加服务商卡片"""
+    def _ensure_provider_picker_card(self):
+        """确保服务商卡已创建并注册（懒构建；卡内含卡片墙/编辑表单两级视图）"""
+        if self._provider_picker_card is not None:
+            return
+        from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+        from app.widgets.cards.settings.provider_picker_card import ProviderPickerCard
+
+        self._provider_picker_card = BaseSettingsCard("服务商", icon_svg="大模型", parent=self._tab_manager)
+        self._provider_picker_card.setMinimumHeight(300)
+        self._provider_picker_card.set_height_mode("content")
+        self._provider_picker_popup = ProviderPickerCard(parent=self._provider_picker_card)
+        # 点预置卡 → 带预置参数进编辑表单；点「自定义」→ 原手工表单
+        self._provider_picker_popup.providerPicked.connect(self._show_provider_preset_card)
+        self._provider_picker_popup.customPicked.connect(self._show_provider_custom_card)
+        self._provider_picker_card.content_layout.addWidget(self._provider_picker_popup)
+        self._provider_picker_card.setVisible(False)
+        # 关闭按钮（SystemCardFrame 自带 ×）直接 setVisible(False) 会绕过
+        # CardManager → 显隐事件不发布 → 标题栏 tab 残留。接 closed 走统一
+        # 关闭链（与 provider_edit/hook_edit 对称）。
+        self._provider_picker_card.closed.connect(self._on_provider_picker_card_closed)
+        mgr = self._card_manager
+        mgr.register_card(
+            GLOBAL_WINDOW_ID, ContainerType.TOP, "provider_picker", self._provider_picker_card, system_card=True
+        )
+        self._global_card_container.add_card("provider_picker", self._provider_picker_card)
+
+    def _show_provider_picker_card(self):
+        """显示服务商卡（卡片墙视图；添加服务商的统一入口）"""
+        self._ensure_provider_picker_card()
+        self._provider_view = "picker"
+        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
+        self._mount_provider_view()
+        self._card_manager.show_card("provider_picker", GLOBAL_WINDOW_ID)
+
+    def _mount_provider_view(self):
+        """把当前视图 widget 装进服务商卡内容区（卡片墙 ↔ 编辑表单互斥挂载）
+
+        卸载的 widget 不销毁：卡片墙常驻复用（懒构建一次），表单在重建时才销毁。
+        """
+        card = self._provider_picker_card
+        layout = card.content_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+        if self._provider_view == "picker":
+            wall = self._provider_picker_popup
+            # 每次进入卡片墙视图都按当前注册表重建：provider 插件热装/卸载
+            # 后注册表已变，懒构建的旧快照必须丢弃（装完插件再打开必是新内容）
+            wall.rebuild()
+            layout.addWidget(wall)
+            wall.show()
+            card.clear_save_button()
+            # 卡片墙是唯一层级：标题即可，无需面包屑
+            card.set_breadcrumb([])
+        else:
+            form = self._provider_edit_popup
+            if form is not None:
+                layout.addWidget(form)
+                form.show()
+                card.set_save_button_handler(form._on_save)
+                card.set_breadcrumb(
+                    [
+                        {"text": "服务商", "handler": self._on_provider_breadcrumb_root},
+                        {"text": self._provider_form_title},
+                    ]
+                )
+        card.updateGeometry()
+
+    def refresh_provider_wall(self):
+        """插件变更广播回调：卡片墙处于 picker 视图且已挂载显示时重建
+
+        由 main_widget._on_plugin_hot_reload 在 plugin_changed 广播时调用，
+        覆盖「卡片墙/其 tab 开着时装了 provider 插件」的场景。编辑视图或
+        卡片未构建时不动作（墙隐藏，下次打开 _mount_provider_view 会重建）。
+        """
+        if self._provider_picker_card is None or self._provider_view != "picker":
+            return
+        wall = self._provider_picker_popup
+        if wall is None or wall.isHidden():
+            return
+        wall.rebuild()
+
+    def _on_provider_breadcrumb_root(self):
+        """面包屑根节点「服务商」点击 → 按来源回退（用户裁决：按来源回退）"""
+        if self._provider_origin == "settings":
+            # 回设置卡的服务商列表页
+            self._close_edit_card("provider_picker")
+            self.open_settings("provider")
+            return
+        # 回卡片墙（同卡内切视图，丢弃表单内容——用户裁决：不弹确认）
+        self._provider_view = "picker"
+        self._mount_provider_view()
+
+    def _show_provider_preset_card(self, provider_name: str):
+        """卡片墙选中某服务商 → 带预置参数进编辑表单（只补 API_KEY）"""
+        self._enter_provider_edit_view(
+            origin="picker",
+            title=f"添加: {provider_name}" if provider_name else "添加服务商",
+            provider_name="",
+            provider_info={},
+            is_new=True,
+            preset_provider=provider_name,
+        )
+
+    def _show_provider_custom_card(self):
+        """「自定义服务商」→ 原手工表单（全参数自填）"""
+        self._enter_provider_edit_view(
+            origin="picker",
+            title="添加服务商",
+            provider_name="",
+            provider_info={},
+            is_new=True,
+            preset_provider="",
+        )
+
+    def _enter_provider_edit_view(
+        self,
+        *,
+        origin: str,
+        title: str,
+        provider_name: str,
+        provider_info: dict,
+        is_new: bool,
+        preset_provider: str = "",
+    ):
+        """进入编辑视图（同一张服务商卡内切页，不新增 tab）
+
+        Args:
+            origin: 回退来源，"picker"=卡片墙 / "settings"=设置卡服务商页
+            title: 面包屑当前项文本（「添加: xxx」/「编辑: xxx」）
+        """
         from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 
-        self._ensure_provider_edit_card()
-        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._provider_edit_card.set_title("添加服务商", icon_svg="大模型")
+        self._ensure_provider_picker_card()
+        # 旧表单销毁（每次进入都重建——现状语义，表单状态不跨次保留）
+        old = self._provider_edit_popup
+        if old is not None:
+            old.setParent(None)
+            old.deleteLater()
         self._provider_edit_popup = ProviderEditCard(
-            provider_name="", provider_info={}, is_new=True, parent=self._provider_edit_card
+            provider_name=provider_name,
+            provider_info=provider_info,
+            is_new=is_new,
+            parent=self._provider_picker_card,
+            preset_provider=preset_provider,
         )
         self._provider_edit_popup.saved.connect(
-            lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
+            lambda name, info: self._on_provider_edit_saved(name, info, is_new=is_new)
         )
         self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
-        while self._provider_edit_card.content_layout.count():
-            item = self._provider_edit_card.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
-        self._provider_edit_card.set_save_button_handler(lambda: self._provider_edit_popup._on_save())
         from app.utils.design_tokens import apply_font_size_to_widget
 
         apply_font_size_to_widget(self._provider_edit_popup, 14)
-        self._card_manager.show_card("provider_edit", GLOBAL_WINDOW_ID)
+        self._provider_origin = origin
+        self._provider_view = "edit"
+        self._provider_form_title = title
+        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
+        self._mount_provider_view()
+        self._card_manager.show_card("provider_picker", GLOBAL_WINDOW_ID)
+
+    def _show_provider_add_card(self):
+        """显示添加服务商卡片（P1-7 起先走卡片墙）"""
+        self._show_provider_picker_card()
+
+    def _on_provider_picker_card_closed(self):
+        """服务商卡（SystemCardFrame）关闭回调 → 移除 tab + 回设置面板
+
+        × 必须走统一关闭链，否则卡片自身 setVisible(False) 绕过
+        CardManager，tab 残留。
+        """
+        self._close_edit_card("provider_picker")
 
     def _show_provider_edit_card(self, config_id: str, provider_info: dict):
-        """显示编辑服务商卡片"""
-        from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
-
-        self._ensure_provider_edit_card()
-        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
+        """显示编辑服务商（同一张服务商卡的编辑视图，origin=settings）"""
         display_name = provider_info.get("name", "") or provider_info.get("provider_name", config_id)
-        self._provider_edit_card.set_title(f"编辑: {display_name}", icon_svg="大模型")
         if "provider_name" not in provider_info:
             provider_info["provider_name"] = display_name
-        self._provider_edit_popup = ProviderEditCard(
+        self._enter_provider_edit_view(
+            origin="settings",
+            title=f"编辑: {display_name}",
             provider_name=provider_info["provider_name"],
             provider_info=provider_info,
             is_new=False,
-            parent=self._provider_edit_card,
         )
-        self._provider_edit_popup.saved.connect(
-            lambda name, info: self._on_provider_edit_saved(name, info, is_new=False)
-        )
-        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
-        while self._provider_edit_card.content_layout.count():
-            item = self._provider_edit_card.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
-        self._provider_edit_card.set_save_button_handler(lambda: self._provider_edit_popup._on_save())
-        from app.utils.design_tokens import apply_font_size_to_widget
-
-        apply_font_size_to_widget(self._provider_edit_popup, 14)
-        self._card_manager.show_card("provider_edit", GLOBAL_WINDOW_ID)
 
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict, is_new: bool = False):
         """服务商编辑保存后的回调（全局配置落盘 + 广播所有窗口刷新）"""
@@ -365,8 +546,8 @@ class GlobalCardController:
             except Exception:
                 pass
 
-        # 隐藏编辑卡（同步移除 replace tab），显示设置卡
-        self._close_edit_card("provider_edit")
+        # 隐藏服务商卡（同步移除 replace tab），显示设置卡
+        self._close_edit_card("provider_picker")
 
         # 模型选择卡片数据将在下次打开时自动刷新
         for win in self._all_windows():
@@ -386,8 +567,8 @@ class GlobalCardController:
         )
 
     def _on_provider_edit_closed(self):
-        """服务商编辑关闭后的回调"""
-        self._close_edit_card("provider_edit")
+        """服务商表单取消后的回调（表单内「取消」钮 → 关整张卡回设置卡）"""
+        self._close_edit_card("provider_picker")
 
     def _on_provider_edit_card_closed(self):
         """服务商编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""

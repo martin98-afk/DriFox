@@ -111,6 +111,24 @@ def _decode_body(raw_bytes: bytes, content_encoding: str, charset: str) -> str:
     return raw_bytes.decode(charset, errors="replace")
 
 
+_SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
+
+
+def _system_ssl_context():
+    """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储）；不可用回退 None。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import ssl
+
+            import truststore
+
+            _SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:
+            _SSL_CONTEXT = False
+    return _SSL_CONTEXT or None
+
+
 def _fetch_bailian_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """从百炼控制台获取 Token Plan 个人版 7 天限额用量。
 
@@ -128,7 +146,7 @@ def _fetch_bailian_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any
     headers = {**_BAILIAN_USAGE_HEADERS, "cookie": cookie}
     try:
         req = urllib.request.Request(_BAILIAN_USAGE_API, headers=headers, data=_build_form_body(cookie, sec_token))
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_system_ssl_context()) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
             content_encoding = (resp.headers.get("content-encoding") or "").lower()
             raw = _decode_body(resp.read(), content_encoding, charset)
@@ -189,6 +207,10 @@ def register(registry):
             name="阿里云 (DashScope)",
             icon="qwen",
             api_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            preset_urls=[
+                "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                "https://llm-liz0icd5zqudfrqm.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            ],
             auth_type="bearer",
             default_model="qwen3.5-plus",
             default_params={

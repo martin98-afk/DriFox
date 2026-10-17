@@ -22,6 +22,8 @@ import re
 
 from loguru import logger
 
+from app.utils.tls_trust import system_ssl_context
+
 # 模式常量（与 config.py 的 OptionsValidator 取值一致）
 MODE_DIRECT = "direct"
 MODE_SYSTEM = "system"
@@ -85,17 +87,22 @@ def rewrite_url(url: str) -> str:
 
 def httpx_kwargs() -> dict:
     """给 httpx.AsyncClient(**kwargs)；语义与 apply_to_session 保持一致"""
+    # verify 传系统证书链 context（None 时 httpx 走默认 certifi 验证）：
+    # 企业代理 = TLS 拦截高发区，自签 CA 在系统信任库内即可通过
+    kwargs = {"verify": system_ssl_context()}
     mode = _mode()
     if mode == MODE_SYSTEM:
         # 库默认 trust_env=True，读环境变量 + 系统代理设置
-        return {}
+        return kwargs
     if mode == MODE_HTTP:
         addr = _http_addr()
         if addr:
-            return {"proxy": addr}
+            kwargs["proxy"] = addr
+            return kwargs
         # 没填地址 → 退化为直连
     # direct / prefix / http(空地址)：显式直连
-    return {"trust_env": False}
+    kwargs["trust_env"] = False
+    return kwargs
 
 
 def apply_to_session(session) -> None:

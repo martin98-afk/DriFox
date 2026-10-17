@@ -196,3 +196,54 @@ git commit -m "chore: update marketplace.json"
 **原因**：底层流式读取可能无限期阻塞（无读超时），且 daemon 线程场景 turn 内部超时自救链路可能失效。
 
 **修法**：插件执行器自建硬看门狗——QThread 主体轮询时自查运行时长，超时+缓冲仍无结果则强制 `session.cancel()` 并按 timeout 收尾。参考 cron-tasks `executor.py` 的 `hard_deadline`。根因（流式无读超时）需主程序侧修。
+
+### ❌ 服务商/工具图标显示为占位图形（FluentIcon 兜底）
+
+**症状**：`providers/icons/<icon>.svg` 文件存在，编辑卡/列表里却显示默认占位图标（四个方块拼图）；字母回退也不出现。
+
+**原因**：SVG 文件 XML 语法非法（手写/生成时 DOCTYPE 带双 URL、标签未闭合等）。Qt 的 QSvgRenderer 解析失败是**静默的**——`QIcon(path).isNull()` 为 True 后回退 qrc 兜底图标，无任何日志。
+
+**修法**：先用标准 XML 解析器对比已知正常的内置图标验证良构性（秒级定位，别先查加载链路）：
+```bash
+py -3 -c "import xml.etree.ElementTree as ET; ET.parse(r'providers/icons/Grok.svg'); print('OK')"
+```
+手写 SVG 的 DOCTYPE 必须是单 DTD URL：`<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">`。注意主程序 `provider_icons.py` 的图标 LRU 缓存键不含文件内容——修复文件后必须重启 DriFox 才生效。
+
+### ❌ 插件网络请求在打包版失败（URLError 连接超时），同机开发环境正常
+
+**症状**：纯标准库 `urllib.request.urlopen` 请求外部 API，PyInstaller 打包版里稳定超时失败（形态=直连被墙），同机系统 Python 跑同一段代码正常；系统代理（注册表 ProxyEnable=1）明明开着。
+
+**原因**：打包版运行时（Py3.14）的 urllib 默认 opener 未吃到注册表系统代理，直连被墙。环境差异在打包运行时，不在代码逻辑。
+
+**修法**：插件网络层显式构造代理 opener，两级兜底：
+```python
+def _build_opener():
+    proxies = dict(urllib.request.getproxies() or {})  # 环境变量 + 系统代理
+    if not proxies.get("https") and not proxies.get("http"):
+        import winreg  # 打包环境 getproxies 可能读不到注册表，直读兜底
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+        server, _ = winreg.QueryValueEx(key, "ProxyServer")
+        if enable and server:
+            addr = server if "://" in server else f"http://{server}"
+            proxies = {"http": addr, "https": addr}
+    return urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+```
+配套纪律：URLError 异常信息必须带 `.reason`（只打类名会把"代理没生效"误判成"网络不通"）；`HTTPError` 的 JSON body 要单独解析（OAuth2 端点用 400 状态码承载 authorization_pending 等业务状态）。参考 grok-oauth 的 `_grok_auth._build_opener`。
+
+### ❌ OAuth 类服务商「获取模型列表」按钮不显示
+
+**症状**：服务商声明了 `login_hook`（登录按钮正常），但编辑卡「模型管理」行没有「获取模型列表」按钮；`_fetch_models` 函数明明写了。
+
+**原因**：按钮显隐判据是 `capabilities.models_hook`（见 `provider_edit_card._sync_login_btn`）——照抄 anthropic-oauth 模板时漏抄了 `"models_hook": _fetch_models` 这一项。登录按钮可见（login_hook 在）反而掩盖了问题：`has_models_hook or not has_login` 中后半为 False，判定完全取决于漏掉的那个键。
+
+**修法**：capabilities 补 `"models_hook": _fetch_models`。新写 providers 插件后用 headless 实测整张卡（不依赖 DriFox 运行时）：
+```python
+# QT_QPA_PLATFORM=offscreen + sys.path 指 DriFox 根，系统 python 可跑
+from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
+card = ProviderEditCard(provider_name="", provider_info={}, is_new=True, preset_provider="Grok OAuth")
+card.show(); app.processEvents()
+assert card.fetchBtn.isVisible()
+```
+headless 下 registry 需先手动注册 ProviderDef（模拟 loader 的 icon_dir 注入），ast_guard/qfluentwidgets 在系统 python 环境均可用。

@@ -6,6 +6,7 @@
 """
 
 import os
+import time
 from typing import Dict
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -59,7 +60,11 @@ class _DirWatcher(QObject):
             self._watcher.removePath(victim)
             logger.debug(f"[DirWatcher] 超出监听上限，移除: {victim}")
 
+        t0 = time.perf_counter()
         self._watcher.addPath(path)
+        dt = (time.perf_counter() - t0) * 1000
+        if dt > 100:
+            logger.warning(f"[DirWatcher] addPath 阻塞 {dt:.0f}ms（目录可能被占用）: {path}")
         logger.debug(f"[DirWatcher] 开始监听: {path}")
 
     def remove_path(self, path: str):

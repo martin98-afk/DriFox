@@ -15,11 +15,14 @@ pyright .                              # 类型
 pytest tests/ -x                       # 全量测试（pytest-asyncio auto 模式）
 pytest tests/test_xxx.py -v            # 单文件
 pytest tests/test_xxx.py::test_name -v # 单用例
-pytest tests/ -m perf                  # 仅性能基准
+pytest tests/perf -v                   # 性能基准（默认收集已排除，须显式指定）
+pytest tests/ui -m ui                  # A 档全链 UI 测试（默认收集已排除）
 ```
 - **依赖组**：dev/build/mac-build/linux-build/gateway；Windows 用 `--all-groups`，mac 用 `build+mac-build`，Linux 用 `build+linux-build`
 - **打包**：`python build.py`（Win+Linux）；mac 额外需 `dmgbuild`+`Pillow`
-- **pytest markers**：`perf`（基准）、`stress`（稳定性）；`asyncio_mode=auto`
+- **pytest markers**：`perf`（基准）、`perf_long`（≥30s/场景长跑）、`stress`（稳定性）、`ui`（全链 UI）；`asyncio_mode=auto`
+- **默认收集排除**：`tests/ui` 与 `tests/perf` 由 `addopts` 排除（前者构建完整主窗口，后者含 25 轮基准与 ≥30s/场景长跑），须显式指定路径才运行
+- **卡死兜底**：`pytest-timeout` 全局 `timeout = 300` + `timeout_method = "thread"`（Windows 可用）。单用例超 300s 即 fail 并打 Python 栈，替代此前无限挂起
 
 ### 行尾（EOL）纪律 —— 提交前必查
 - Windows 上 `open(p, "w")` 会把 `\n` 静默转成 `\r\n`。patch 脚本一次误写 = 整文件行尾翻转 = 声明改动上千行、实质改动几十行，真实 diff 被淹没且 blame 全毁（2026-09-06 一次评审连中 3 个文件）。
@@ -41,7 +44,7 @@ pytest tests/ -m perf                  # 仅性能基准
 | `app/plugins/registries/` | 四注册表单例(adapter/loop policy/storage/serializer) |
 | `plugins/system-*` | 系统插件：tools/model_adapters/loop_policies/storages/serializers/context_tiers/budget_resolvers/hooks/skills/themes/commands/ui |
 | `~/.drifox6/plugins/` | 用户级社区插件(watchfiles 热扫描) |
-| `tests/` | 与源码按模块对齐：core/widgets/plugins/utils/perf/gateway/debug |
+| `tests/` | 与源码按模块对齐：core/widgets/plugins/utils/perf/gateway/debug；`tests/ui`（全链 UI，需显式跑）与 `tests/perf`（基准）默认不收集 |
 | `docs/` | plugins/perf/security/superpowers 四大知识库 |
 
 ## 4. 插件化硬约束
@@ -55,7 +58,9 @@ pytest tests/ -m perf                  # 仅性能基准
 
 **Gateway**：插件在 `gateways/<platform>.py` 注册 `GatewayPlatformDef`；主程序查 `GatewayPlatformRegistry.get_instance()`，零平台 if。SDK vendor 到 `<插件>/deps/`，顶层 `sys.path.insert(0,_deps)` 优先，本体函数内延迟导入（教训：dingtalk_stream 顶层导入致 gateway 包加载失败）。
 
-**UI 扩展点**（插件 `ui/__init__.py` 导出 `register_ui`）：`register_content_renderer`/`register_welcome_tab`/`register_message_factory`/`register_floating_card`/`register_sidebar_item`/`register_input_button`（icon_path 深色 + icon_light_path 浅色，主题切换自动刷新）/`register_context_menu_action`/`register_settings_card`/`register_footer_stat`（消息卡片页脚左区信息项，provider 回调 `(ctx) -> Optional[{"text","color","tooltip"}]`，卡片构建/回合落定/流式节拍时刷新）/`register_footer_action`（页脚右区 hover 按钮组，与内置分支/复制同排；`role` 参数 `"assistant"|"user"|"both"`，user/both 渲染在用户气泡底部操作行且位于内置按钮左侧）/`register_window`（插件独立弹窗：壳复用 `FramelessWindow`+`CustomTitleBar`，自动入左侧自定义插件栏点击开/关切换、右键菜单「弹出」重开；`group` 参数 `"system"|"custom"` 覆盖左侧栏分组（常驻区/自定义折叠区，默认跟随插件归属）；生命周期随应用退出 aboutToQuit / 插件卸载销毁）。回调 context 含 window_id/main_widget/card/role/model_name/round_index/message_index/elapsed/token_usage/streaming/live_text/live_gen_s（流式期间 `live_text` 为本流累计原文、`live_gen_s` 为首字至今秒数，token 估算与统计口径由 provider 定）；`unload_plugin` 幂等清理。
+**平台特定依赖**：含原生扩展的依赖必须按平台分目录落地，`deps/<platform>/`（darwin/win32/linux）优先于公共 `deps/`。装在错误平台的 `.pyd`/`.so` 会让插件 import 静默失败、进而整个 `gateways` 组件不进 registry，表现为「配置里 enabled=true 但日志无任何连接记录、设置卡开关无效」。安装器侧 `_platform_wheel_tags()` 已按 `sys.platform` 裁剪候选集并覆盖 `macosx_10_9_universal2`（回归测试 `tests/plugins/test_deps_installer_wheel_tags.py`）。
+
+**UI 扩展点**（插件 `ui/__init__.py` 导出 `register_ui`）：`register_content_renderer`/`register_welcome_tab`/`register_message_factory`/`register_floating_card`/`register_sidebar_item`/`register_input_button`（icon_path 深色 + icon_light_path 浅色，主题切换自动刷新）/`register_context_menu_action`/`register_settings_card`/`register_footer_stat`（消息卡片页脚左区信息项，provider 回调 `(ctx) -> Optional[{"text","color","tooltip"}]`，卡片构建/回合落定/流式节拍时刷新）/`register_footer_action`（页脚右区 hover 按钮组，与内置分支/复制同排；`role` 参数 `"assistant"|"user"|"both"`，user/both 渲染在用户气泡底部操作行且位于内置按钮左侧）/`register_window`（插件独立弹窗：壳复用 `FramelessWindow`+`CustomTitleBar`，自动入左侧自定义插件栏点击开/关切换、右键菜单「弹出」重开；`group` 参数 `"system"|"custom"` 覆盖左侧栏分组（常驻区/自定义折叠区，默认跟随插件归属）；条目归属优先序：用户右键「固定到常驻区」（app_state `pinned_plugins`）> 注册 group > 插件归属（含用户根同名副本覆盖内置版的 overridden_by 场景）；生命周期随应用退出 aboutToQuit / 插件卸载销毁）。回调 context 含 window_id/main_widget/card/role/model_name/round_index/message_index/elapsed/token_usage/streaming/live_text/live_gen_s（流式期间 `live_text` 为本流累计原文、`live_gen_s` 为首字至今秒数，token 估算与统计口径由 provider 定）；`unload_plugin` 幂等清理。
 
 ## 5. 代码风格
 - **格式化**：ruff（双引号）；**类型**：pyright 严格；**导入**：标准→三方→本地

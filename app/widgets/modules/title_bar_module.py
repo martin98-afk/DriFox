@@ -49,11 +49,8 @@ class TitleBarModule(UIModule):
         from app.widgets.balance_display import BalanceDisplay
         from app.widgets.coding_plan_ring import CodingPlanRing
         from app.widgets.context_usage_ring import ContextUsageRing
-        from app.widgets.cards.settings.project_selector_card import (
-            extract_project_initials,
-            get_project_color,
-            _SquareAvatar,
-        )
+        from app.utils.project_meta import extract_project_initials, get_project_color
+        from app.widgets.square_avatar import _SquareAvatar
 
         # host 弱耦合回调/属性（主程序路径解析为真实方法，测试 stub 缺失则兜底）
         _current_project = getattr(host, "_current_project", "")

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from app.utils.design_tokens import scale_font_size
 from app.utils.utils import get_font_family_css
+from app.widgets.ui_helpers import _ThemedIconLabel
 
 
 class BalanceDisplay(QWidget):
@@ -42,10 +43,8 @@ class BalanceDisplay(QWidget):
         layout.setSpacing(4)
         layout.setAlignment(Qt.AlignVCenter)
 
-        # 余额图标
-        self._icon_label = QLabel("💰", self)
-        self._icon_label.setFixedWidth(16)
-        self._icon_label.setAlignment(Qt.AlignCenter)
+        # 余额图标（主题感知 SVG，替代 emoji）
+        self._icon_label = _ThemedIconLabel("余额", 14, self)
 
         # 金额标签
         self._balance_label = QLabel("", self)
@@ -127,7 +126,6 @@ class BalanceDisplay(QWidget):
         self._current_provider = provider_name
         self._current_config_id = config_id
         self._balance_label.setText("...")
-        self._icon_label.setText("⏳")
         self.setVisible(True)
 
     def refresh(self):
@@ -138,7 +136,6 @@ class BalanceDisplay(QWidget):
         """
         if self._current_provider:
             self._balance_label.setText("...")
-            self._icon_label.setText("⏳")
 
     def show_balance_result(self, provider_name: str, config_id: str, result):
         """UsageService 广播的余额结果（主线程执行）。
@@ -149,7 +146,6 @@ class BalanceDisplay(QWidget):
         if config_id != self._current_config_id:
             return
         self._loading = False
-        self._icon_label.setText("💰")
 
         if not result or result.get("hide"):
             self.setVisible(False)

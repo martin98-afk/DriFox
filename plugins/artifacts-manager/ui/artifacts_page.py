@@ -325,6 +325,11 @@ class SystemArtifactsPage(QWidget):
         self._list_wrap = QWidget()
         self._list_wrap.setStyleSheet("background: transparent;")
         self._scroll.setWidget(self._list_wrap)
+        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
+        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
+        from app.utils.design_tokens import make_card_content_opaque
+
+        make_card_content_opaque(self._list_wrap, 246)
         self._list_layout = QVBoxLayout(self._list_wrap)
         self._list_layout.setContentsMargins(0, 0, 2, 0)
         self._list_layout.setSpacing(4)

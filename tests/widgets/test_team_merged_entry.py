@@ -246,7 +246,6 @@ class TestTeamArchiveChain:
         ]
         win.history_manager.archive_sessions_by_run_id.return_value = 2
         win._current_session_id = "s3"  # 非团队成员 → 不切换新会话
-        win.pixel_pet = MagicMock()
         win._card_manager = MagicMock()
         win._history_card = MagicMock()
         win._history_card.isVisible.return_value = True
@@ -284,7 +283,6 @@ class TestTeamArchiveChain:
         win.backend.file_recorder = MagicMock()
         win._clear_chat_area = MagicMock()
         win._show_initial_welcome = MagicMock()
-        win.pixel_pet = MagicMock()
         win._history_card = MagicMock()
         win._history_card.isVisible.return_value = True
 
@@ -310,7 +308,6 @@ class TestTeamArchiveChain:
         win = MagicMock()
         win.history_manager = MagicMock()
         win.history_manager.get_team_sessions_by_run_id.return_value = []
-        win.pixel_pet = MagicMock()
         win._card_manager = MagicMock()
         win._history_card = MagicMock()
         win._history_card.isVisible.return_value = True

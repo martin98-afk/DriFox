@@ -23,7 +23,12 @@ from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.conversation.message_content import content_to_text
-from app.core.infra.token_estimator import count_tools_tokens, per_message_tokens
+from app.core.infra.token_estimator import (
+    blend_calibration,
+    count_tools_tokens,
+    per_message_tokens,
+    resolve_calibration,
+)
 from app.core.modelmeta.provider_profile import resolve_token_ratio
 from app.tools import get_builtin_tools_schema
 
@@ -427,7 +432,11 @@ class UIEngine(BaseEngine):
             try:
                 if self._backend:
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
-                    worktree_ctx.update(self._backend.build_key_documents_context() or {})
+                    # 临时会话无项目语义：跳过关键文档注入。_current_project 继承自源窗口，
+                    # 按它查 DB 会把原项目关键文档泄进临时页（is_temp 落盘/workdir 已隔离，
+                    # 项目上下文未隔离，此处为注入侧最后防线）
+                    if not getattr(session, "is_temp", False):
+                        worktree_ctx.update(self._backend.build_key_documents_context() or {})
             except Exception:
                 pass
             # ⚠️ metadata.pop 必须在主线程（避免与 worker 线程竞态）
@@ -531,8 +540,15 @@ class UIEngine(BaseEngine):
         llm_config: Optional[Dict] = None,
         api_prompt_tokens: int = 0,
         api_message_count: int = 0,
-        from_api: bool = False,
+        from_api: Optional[bool] = None,
     ) -> Dict[str, int]:
+        """上下文用量快照。
+
+        from_api 为三态：
+            True  → api_prompt_tokens 来自 API usage，直接作为权威占用值
+            False → 来自本地估算（口径与全量消息数不匹配，不能当权威值）
+            None  → 未知（历史会话老记录），按 True 处理
+        """
         session = session or self._session_manager.get_current_session()
         llm_config = llm_config or self._get_model_config()
         if not session or not llm_config:
@@ -647,7 +663,16 @@ class UIEngine(BaseEngine):
         # 避免内部 is 身份缓存的 [msg] 临时列表构造与查找开销。
         # est_total = sum(per_message_tokens) + tools_tokens，保证与下方 breakdown 之和
         # 内部自洽（scale 等比缩放基线准确）。
-        est_total = sum(per_message_tokens(m, model, ratio) for m in approx_messages) + tools_tokens
+        est_raw = sum(per_message_tokens(m, model, ratio) for m in approx_messages) + tools_tokens
+        # 本地估算 → 真实占用：用 API usage 反推的自适应校准因子修正。
+        # 本地 cl100k_base/快估对中文会话常比真实值高 1.5~3 倍（中文模型分词更
+        # 高效），静态 ratio 表已统一为 1.0 无法覆盖各厂商差异，故按会话自适应。
+        calibration = resolve_calibration(
+            getattr(session, "token_calibration", 0),
+            getattr(session, "token_calibration_model", ""),
+            model,
+        )
+        est_total = int(est_raw * calibration)
 
         # ---- 各类型上下文占比（按角色拆分，用于 WorkBuddy 风格占比条）----
         system_tokens = per_message_tokens({"role": "system", "content": system_prompt}, model, ratio) if system_prompt else 0
@@ -686,6 +711,12 @@ class UIEngine(BaseEngine):
             {"key": "assistant", "label": "助手消息", "tokens": assistant_tokens, "color": "#fbbf24"},
             {"key": "tool", "label": "工具结果", "tokens": tool_tokens, "color": "#a78bfa"},
         ]
+        # breakdown 与 est_total 同源：分量同样按校准因子缩放，保证
+        # sum(breakdown) ≈ est_total（否则占比条与总量各说各话）。
+        if calibration != 1.0:
+            for b in breakdown:
+                b["tokens"] = int(b["tokens"] * calibration)
+
         breakdown = [b for b in breakdown if b["tokens"] > 0]
 
         # ---- 确定上下文占用量 ----
@@ -696,16 +727,31 @@ class UIEngine(BaseEngine):
         #   （count_messages_tokens），其覆盖口径（built_messages 的压缩子集）
         #   与 api_message_count（len(session.messages) 全量）不匹配，
         #   此时 delta 增量路径会导致严重低估甚至越来越小，直接跳过。
-        if api_prompt_tokens > 0 and from_api:
+        # ⚠️ from_api=None 表示"未知"（历史会话老记录未持久化该标记）→ 按可用
+        #   处理：那些值本来就是为了跨会话复用才落库的，判 False 会让它们被
+        #   丢弃、退回本地重算（与真实差几倍）。
+        if api_prompt_tokens > 0 and from_api is not False:
             current_msg_count = len(session.messages)
             if api_message_count > 0 and current_msg_count > api_message_count:
                 # 上次 API 调用后新增了消息：API 精确值 + 新增消息估算
                 # 性能优化（O-01）：per_message_tokens 累加，避免临时列表+缓存 MISS
+                # 新增部分同样按校准因子缩放，与总量口径一致。
                 new_msgs = session.messages[api_message_count:]
                 delta = sum(per_message_tokens(m, model, ratio) for m in new_msgs)
-                used_tokens = api_prompt_tokens + delta
+                used_tokens = api_prompt_tokens + int(delta * calibration)
             else:
                 used_tokens = api_prompt_tokens
+                # 同覆盖校准：消息数与上次 API 调用**完全一致**时，本地估算与 API
+                # 值覆盖的是同一份内容，二者比值才可作为校准因子（EMA 平滑后写回
+                # session，随保存落库）。消息数不等说明覆盖了不同上下文，比值无意义
+                # （此时若强行校准会把因子带偏，后续估算越算越歪）。
+                if (
+                    from_api is True
+                    and est_raw > 0
+                    and api_message_count > 0
+                    and current_msg_count == api_message_count
+                ):
+                    self._update_token_calibration(session, model, api_prompt_tokens / est_raw)
             # 按最终总量与本地估算的比例，等比缩放 breakdown 分量，
             # 保持视觉占比关系不变，总量锚定最终值。
             if est_total > 0:
@@ -747,6 +793,25 @@ class UIEngine(BaseEngine):
             "breakdown": breakdown,
             "pruned_tokens": pruned_tokens,
         }
+
+    @staticmethod
+    def _update_token_calibration(session, model: str, observed_ratio: float) -> None:
+        """用一次 API usage 观测更新会话级 token 校准因子（写回 session，随保存落库）。
+
+        只在「当前消息数 == 上次 API 调用时消息数」时调用：此时本地估算与 API
+        值覆盖同一份内容，比值才有意义（否则比的是两份不同的上下文）。
+
+        换模型即作废旧因子（分词器不同，偏差方向可能相反），重新累计。
+        """
+        try:
+            stored_model = str(getattr(session, "token_calibration_model", "") or "")
+            old = getattr(session, "token_calibration", 0) or 0
+            if stored_model and stored_model != str(model or ""):
+                old = 0.0
+            session.token_calibration = blend_calibration(old, observed_ratio)
+            session.token_calibration_model = str(model or "")
+        except Exception as e:
+            logger.debug(f"[UIEngine] token 校准因子更新失败: {e}")
 
     def _start_worker(
         self,

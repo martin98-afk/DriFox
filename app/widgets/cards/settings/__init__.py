@@ -18,7 +18,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "MemoryCardContent": ("app.widgets.cards.settings.memory_card", "MemoryCardContent"),
     "TAB_PROJECT_NOTES": ("app.widgets.cards.settings.memory_card", "TAB_PROJECT_NOTES"),
     "ModelConfigCard": ("app.widgets.cards.settings.model_config_card", "ModelConfigCard"),
-    "ProjectSelectorCardContent": ("app.widgets.cards.settings.project_selector_card", "ProjectSelectorCardContent"),
     "ProviderEditCard": ("app.widgets.cards.settings.provider_edit_card", "ProviderEditCard"),
     "ProviderListSettingCard": ("app.widgets.cards.settings.provider_setting_card", "ProviderListSettingCard"),
     "SystemCardFrame": ("app.widgets.cards.settings.system_card_frame", "SystemCardFrame"),
@@ -52,7 +51,6 @@ __all__ = [
     "SkillListSettingCard",
     "ProviderListSettingCard",
     "ProviderEditCard",
-    "ProjectSelectorCardContent",
     "GiteeCard",
     "SystemCardFrame",
 ]

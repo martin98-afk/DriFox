@@ -178,6 +178,12 @@ def _make_stub(streaming: bool, interrupted_messages=None):
     inst._is_destroyed = False
     inst._topic_summary_cancelled = False
     inst._session_dirty = True  # 发送消息时已置脏
+    # 排队消息链路（_clear_pending_message_queue → _refresh_queue_card）：
+    # 裸实例 getattr 任意属性即触发 Qt 保护 RuntimeError，必须显式给 None 短路
+    inst._pending_message_queue = []
+    inst._queue_message_card = None
+    # _schedule_initial_welcome 槽位去抖需要窗口标识与类级槽位计数
+    inst._window_id = "win_test_stub"
 
     # backend
     backend = MagicMock()

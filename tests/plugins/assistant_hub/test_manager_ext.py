@@ -159,31 +159,37 @@ def test_identity_persona_none(tmp_path):
     assert "<plan>" not in text and "<mood>" not in text
 
 
-def test_prompt_block_assembles_sections(tmp_path):
-    """prompt_block：header + 人格 + 人工提示 + 记忆段 全部组装。"""
+def test_prompt_blocks_assemble_sections(tmp_path):
+    """注入块拆分：身份块 / 人工提示块 / 记忆体系块（说明书+全局+项目）各自就位。"""
     mgr = _fresh_manager(tmp_path)
     a = mgr.create("小狐")
     mgr.write_pinned(a.id, [("pin-1", "回复保持简短")])
-    # 记忆段需要实际记忆内容（无内容时整段不注入，与 hook 行为一致）
-    mem_dir = mgr.assistant_dir(a.id) / "memory"
-    mem_dir.mkdir(parents=True)
-    (mem_dir / "longterm.md").write_text("## 长期记忆\n\n- 用户偏好简洁", encoding="utf-8")
-    block = mgr.prompt_block(a.id)
-    assert block.startswith("# 助手：小狐")
-    assert "小狐" in block  # persona 段
-    assert "人工提示" in block and "回复保持简短" in block
-    assert "记忆使用规则" in block and "用户偏好简洁" in block  # 规则+编译记忆都注入
+    mgr.write_global_memory(a.id, "- 跨项目：用户偏好简洁")
+    mgr.write_project_memory(a.id, str(tmp_path / "proj"), "- 项目：DriFox 重构中")
+
+    identity = mgr.identity_block(a.id)
+    assert identity.startswith("# 助手：小狐")
+    assert "小狐" in identity  # persona 段
+    # 身份块不含记忆
+    assert "人工提示" not in identity and "memory_system" not in identity
+
+    pinned = mgr.pinned_block(a.id)
+    assert "人工提示" in pinned and "回复保持简短" in pinned
+
+    mem = mgr.memory_system_block(a.id, str(tmp_path / "proj"))
+    assert "memory_read" in mem and "memory_write" in mem  # 指针级说明书
+    assert "<global_memory>" in mem and "用户偏好简洁" in mem
+    assert "<project_memory>" in mem and "DriFox 重构中" in mem
 
 
-def test_prompt_block_memory_off(tmp_path):
+def test_memory_system_block_memory_off(tmp_path):
     mgr = _fresh_manager(tmp_path)
     a = mgr.create("纯净狐")
     a.memory_enabled = False
     mgr.update(a)
     mgr.write_pinned(a.id, [("pin-1", "硬性要求")])
-    block = mgr.prompt_block(a.id)
-    assert "记忆使用规则" not in block
-    assert "硬性要求" in block  # 人工提示不受开关控制
+    assert mgr.memory_system_block(a.id) == ""
+    assert "硬性要求" in mgr.pinned_block(a.id)  # 人工提示不受开关控制
 
 
 def test_tool_access_for_session_override(tmp_path):

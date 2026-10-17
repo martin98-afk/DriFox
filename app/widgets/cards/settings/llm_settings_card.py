@@ -41,6 +41,7 @@ from app.utils.design_tokens import (
     font_size_css,
     get_ui_font_size,
     invalidate_font_cache,
+    make_scroll_content_opaque,
     scale_icon_size,
 )
 from app.utils.startup_manager import (
@@ -375,7 +376,6 @@ class LLMSettingsCard(SystemCardFrame):
             (
                 ("appearance", "外观", "主题风格"),
                 ("render", "渲染", FluentIcon.SPEED_HIGH),
-                # ("pet", "桌宠", "pet"),
             ),
         ),
         (
@@ -392,6 +392,10 @@ class LLMSettingsCard(SystemCardFrame):
 
     _autostart_toggling = False  # 类级防重入标志
     _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
+    # 隐藏期主题刷新补刷协议标记（见 showEvent / GlobalCardController.refresh_theme_styles）。
+    # 类级默认值必需：门控方用 hasattr 探测协议，实例属性首次赋值前 hasattr 为 False，
+    # 会导致隐藏门控失效（2026-10-10 实测 gcc 门控因此未生效，226ms 白付）。
+    _theme_needs_refresh: bool = False
     # 插件分区指纹的类级默认：`__new__` 造的桩（测试 fixture）不跑 __init__，
     # QObject 未初始化时读实例属性会抛 RuntimeError 而非 AttributeError → 必须给默认值
     _plugin_cards_sig: tuple | None = None
@@ -836,6 +840,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 界面字号、浅色模式、主题风格
         self._setup_appearance_cards()
         appearance_layout.addWidget(self.uiFontSizeCard)
+        appearance_layout.addWidget(self.uiChatWidthCard)
         appearance_layout.addWidget(self.uiLightModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
@@ -843,31 +848,6 @@ class LLMSettingsCard(SystemCardFrame):
         self._setup_font_card()
         appearance_layout.addWidget(self.llmFontCard)
         appearance_layout.addStretch(1)
-
-        # # ════ 桌宠页 ════
-        # pet_layout = self._page_layouts["pet"]
-
-        # # 桌宠显示开关
-        # self.petCard = SwitchSettingCard(
-        #     FluentIcon.HEART,
-        #     "桌宠显示",
-        #     "在主窗口上显示像素小狐桌宠",
-        #     configItem=self.cfg.pet_enabled,
-        #     parent=self,
-        # )
-        # pet_layout.addWidget(self.petCard)
-
-        # # 桌宠大小
-        # self.petSizeCard = OptionsSettingCard(
-        #     self.cfg.pet_size,
-        #     FluentIcon.ZOOM,
-        #     "桌宠大小",
-        #     "调整像素桌宠的显示尺寸",
-        #     texts=["小 (32px)", "中 (48px)", "大 (64px)"],
-        #     parent=self,
-        # )
-        # pet_layout.addWidget(self.petSizeCard)
-        # pet_layout.addStretch(1)
 
         # ════ 版本更新页 ════
         update_layout = self._page_layouts["update"]
@@ -1168,6 +1148,8 @@ class LLMSettingsCard(SystemCardFrame):
         body_layout.addStretch(1)
 
         scroll.setWidget(body)
+        # 内容层不透明实底（启用 Qt 滚动 blit），必须在 setWidget 之后
+        make_scroll_content_opaque(body, Colors.CARD_BG.format(alpha=255), 230, Colors.CONTENT_BG)
         outer.addWidget(scroll)
         # 宽度按最长项自适应（sizeHint 已含图标/文字/内边距，只补左侧指示条与外边距）
         widest = max((btn.sizeHint().width() for btn in self._nav_buttons.values()), default=150)
@@ -1199,6 +1181,8 @@ class LLMSettingsCard(SystemCardFrame):
         layout.setContentsMargins(0, 4, 6, 4)
         layout.setSpacing(6)
         page.setWidget(inner)
+        # 内容层不透明实底（启用 Qt 滚动 blit），必须在 setWidget 之后
+        make_scroll_content_opaque(inner, Colors.CARD_BG.format(alpha=255), 230, Colors.CONTENT_BG)
         return page, layout
 
     def _set_active_page(self, tab_id: str):
@@ -1424,6 +1408,14 @@ class LLMSettingsCard(SystemCardFrame):
             self.cfg,
             self,
         )
+        self.uiChatWidthCard = OptionsSettingCard(
+            self.cfg.ui_chat_width,
+            FluentIcon.LAYOUT,
+            "对话区宽度",
+            "窗口过宽时限制内容宽度并居中",
+            texts=["窄", "标准", "宽", "不限宽"],
+            parent=self,
+        )
         self.uiLightModeCard = SwitchSettingCard(
             get_icon("主题风格"),
             "浅色模式",
@@ -1571,6 +1563,9 @@ class LLMSettingsCard(SystemCardFrame):
             LLMSettingsCard._last_change_type = "font_family"
         elif sender is self.cfg.ui_font_size:
             LLMSettingsCard._last_change_type = "font_size"
+        elif sender is self.cfg.ui_chat_width:
+            # 只改对话区限宽，不涉及字体/主题缓存失效
+            LLMSettingsCard._last_change_type = "chat_width"
         else:
             LLMSettingsCard._last_change_type = None  # 未知类型，全量刷新
 
@@ -1615,6 +1610,7 @@ class LLMSettingsCard(SystemCardFrame):
         # AppearanceComboCard / FontSettingCard（SettingCard 子类，不在以上遍历范围）
         for card_name in (
             "uiFontSizeCard",
+            "uiChatWidthCard",
             "uiLightModeCard",
             "uiThemeStyleCard",
             "llmFontCard",
@@ -1787,6 +1783,12 @@ class LLMSettingsCard(SystemCardFrame):
             ).show()
 
     def showEvent(self, event):
+        # [T22] 隐藏期主题切换补刷：main_widget 5a 门控把不可见期的主题刷新
+        # 置脏跳过（0.7s 级重型卡白刷），显示时在此自愈。scope 含 font 时门控
+        # 不生效（标记恒 False），此分支空转无害。
+        if getattr(self, "_theme_needs_refresh", False):
+            self._theme_needs_refresh = False
+            self._refresh_appearance_from_config()
         if hasattr(self, "llmProviderCard"):
             self.llmProviderCard._refresh_items()
         # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，

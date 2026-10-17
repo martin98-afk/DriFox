@@ -66,6 +66,15 @@ def _make_window(**overrides):
     scroll_bar.value.return_value = 0  # 顶部
     area = MagicMock()
     area.verticalScrollBar.return_value = scroll_bar
+    # _is_view_at_bottom 走「已落地底」（_landed_bottom_value）：container.height
+    # 动态跟随 maximum、viewport 高度 0 → landed 恒等 maximum，与旧
+    # maximum - value 判定严格等价；个别测试覆写 maximum 后自动跟随。
+    landed_container = MagicMock()
+    landed_container.height.side_effect = lambda: scroll_bar.maximum()
+    area.widget.return_value = landed_container
+    landed_viewport = MagicMock()
+    landed_viewport.height.return_value = 0
+    area.viewport.return_value = landed_viewport
     win.chat_scroll_area = area
     for key, value in overrides.items():
         setattr(win, key, value)
@@ -80,13 +89,13 @@ def _make_card(lazy_rendered: bool = False):
 
 @pytest.fixture(autouse=True)
 def _reset_global_pages():
-    """隔离模块级 _global_rendered_pages 计数器"""
-    import app.main_widget as mw
+    """隔离模块级 _global_rendered_pages 计数器（所有权在 memory_governor）"""
+    from app.core.infra import memory_governor
 
-    old = getattr(mw, "_global_rendered_pages", 0)
-    mw._global_rendered_pages = 0
+    old = memory_governor._global_rendered_pages
+    memory_governor._global_rendered_pages = 0
     yield
-    mw._global_rendered_pages = old
+    memory_governor._global_rendered_pages = old
 
 
 # ─── 置底分支（_loading_session 期间批次渲染完成） ───────────────
@@ -254,16 +263,6 @@ def test_ensure_at_bottom_skipped_when_user_away():
     bar.setValue.assert_not_called()
 
 
-def test_scroll_to_bottom_if_following_guarded():
-    """延迟兜底滚底（500ms/1000ms）同样要过守卫"""
-    win = _make_window(_user_intentionally_away_from_bottom=True)
-    bar = win.chat_scroll_area.verticalScrollBar()
-    bar.maximum.return_value = 1000
-    bar.value.return_value = 0
-    win._scroll_to_bottom_if_following()
-    win._scroll_to_bottom.assert_not_called()
-
-
 # ─── 批次卸载等高占位 ───────────────────────────────────────────
 # 背景：B4 回收把卡片移出布局后容器高度瞬间塌陷，随后卡片高度再异步上报，
 # 与 _ensure_at_bottom 的 8×300ms 重试链重叠 → 长对话滚动期抖动。
@@ -418,9 +417,14 @@ class _AnchorHarness(QObject):
     _should_follow_bottom = OpenAIChatToolWindow._should_follow_bottom
     _is_view_at_bottom = OpenAIChatToolWindow._is_view_at_bottom
     _programmatic_scroll = OpenAIChatToolWindow._programmatic_scroll
+    _landed_bottom_value = OpenAIChatToolWindow._landed_bottom_value
+    # 跟随态贴底（invokeMethod 排队版，2026-10-15 折叠栏抖动修复引入）
+    _schedule_bottom_snap = OpenAIChatToolWindow._schedule_bottom_snap
+    _snap_bottom_queued = OpenAIChatToolWindow._snap_bottom_queued
     # _make_anchor_window 运行时注入的实例属性（类型声明供 pyright 收窄）
     _programmatic_scroll_depth: int
     _sync_scroll_maximum: Callable[[], int]
+    _bottom_snap_queued: bool
 
 
 def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=False, away=False):
@@ -460,7 +464,10 @@ def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=Fa
     # 末尾 stretch：否则 QVBoxLayout 会把唯一子项垂直居中，card_top 不可控
     layout.addStretch(1)
     # 显式布排：未 show 的顶层 widget 不会自动激活布局，card_top 会恒为 0
-    total_h = max(2000, card_top + card_height + 500)
+    # 底高 ≥5200：贴底动作改贴「已落地底」（_landed_bottom_value = container
+    # 高 - viewport 高），container 需足够高使 landed ≥ maximum，跟随态断言
+    # 的贴底值才能继续等于 maximum（bar 桩值 5000）。
+    total_h = max(5200, card_top + card_height + 500)
     container.resize(400, total_h)
     layout.setGeometry(QRect(0, 0, 400, total_h))
 
@@ -473,6 +480,10 @@ def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=Fa
     area = MagicMock()
     area.widget.return_value = container
     area.verticalScrollBar.return_value = bar
+    # _landed_bottom_value 需要 viewport 高度换算「已落地底」
+    viewport = MagicMock()
+    viewport.height.return_value = 200
+    area.viewport.return_value = viewport
 
     win = _AnchorHarness()
     win.chat_scroll_area = area
@@ -481,6 +492,7 @@ def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=Fa
     # T9：_is_view_at_bottom / 补偿分支依赖的程序滚动状态
     win._programmatic_scroll_depth = 0
     win._sync_scroll_maximum = MagicMock(return_value=maximum)
+    win._bottom_snap_queued = False
 
     card.heightChanged.connect(win._on_message_card_height_changed)
     return win, card, bar
@@ -510,8 +522,13 @@ def test_streaming_card_keeps_bottom_follow_when_user_at_bottom(qapp):
     win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=300, streaming=True, away=False)
     card._last_height_delta = 20
     card.heightChanged.emit(1220)
+    # [2026-10-15] 跟随态贴底改为 invokeMethod 排队（等布局落地），需派发队列
+    qapp.processEvents()
 
-    bar.setValue.assert_called_once_with(320)  # 300 + 20 == 新的 maximum
+    # [T32] 跟随态不再走「value + delta」累加，而是直接取当前上界贴底：
+    # 累加与 Qt 布局传播后的真实上界存在系统性偏差（实测恒定欠 12px），
+    # 且追踪收尾拍会清零 delta 吞掉最后一拍增量 → 视口长期离底十几 px 浮动。
+    bar.setValue.assert_called_once_with(5000)  # == maximum（贴底）
 
 
 def test_short_streaming_card_keeps_bottom_follow(qapp):
@@ -523,8 +540,10 @@ def test_short_streaming_card_keeps_bottom_follow(qapp):
     win, card, bar = _make_anchor_window(card_top=1000, card_height=200, value=300, streaming=True, away=False)
     card._last_height_delta = 30
     card.heightChanged.emit(230)
+    qapp.processEvents()  # 跟随态贴底已排队（2026-10-15）
 
-    bar.setValue.assert_called_once_with(330)  # 300 + 30
+    # [T32] 跟随态贴底（见上一用例注释）：卡片矮于视口时同样只认上界
+    bar.setValue.assert_called_once_with(5000)
 
 
 def test_card_entirely_above_viewport_compensated_even_when_user_away(qapp):
@@ -602,6 +621,14 @@ def _make_sticky_window(away=False):
     bar = _FakeScrollBar(maximum=1000, value=1000)  # 贴底起点
     area = MagicMock()
     area.verticalScrollBar.return_value = bar
+    # _landed_bottom_value 换算「已落地底」= min(maximum, 2000-200=1800)：
+    # 用例里 bar._max 最高抬到 1400，landed 恒取 maximum，断言值不变
+    landed_container = MagicMock()
+    landed_container.height.return_value = 2000
+    landed_viewport = MagicMock()
+    landed_viewport.height.return_value = 200
+    area.widget.return_value = landed_container
+    area.viewport.return_value = landed_viewport
     win.chat_scroll_area = area
     return win
 
@@ -766,8 +793,11 @@ def test_negative_delta_clamped_at_zero(qapp):
     win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=30, streaming=False, away=False)
     card._last_height_delta = -80
     card.heightChanged.emit(1120)
+    qapp.processEvents()  # 跟随态贴底已排队（2026-10-15）
 
-    bar.setValue.assert_called_once_with(0)  # max(0, 30 - 80)
+    # [T32] 跟随态贴底：负增量不再参与 value 算术（不可能为负）。
+    # 非跟随态的锚定分支仍走 max(0, value + delta)，由下方用例覆盖。
+    bar.setValue.assert_called_once_with(5000)
 
 
 # ─── T5-5: _build_node_to_batch_mapping 等价性（指纹缓存 + 单 pass） ───────────

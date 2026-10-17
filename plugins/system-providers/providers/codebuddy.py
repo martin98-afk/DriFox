@@ -161,6 +161,24 @@ def _auto_login():
     return {"api_key": api_key, "info": info + "，API Key 已回填请保存"}
 
 
+_SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
+
+
+def _system_ssl_context():
+    """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储）；不可用回退 None。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import ssl
+
+            import truststore
+
+            _SSL_CONTEXT = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:
+            _SSL_CONTEXT = False
+    return _SSL_CONTEXT or None
+
+
 def _fetch_models(config):
     """模型列表获取钩子（签名对齐 balance_fetcher）：按本配置的号拉 /v3/config。"""
     import urllib.request
@@ -172,7 +190,7 @@ def _fetch_models(config):
     req = urllib.request.Request(
         f"{_ENDPOINT}/v3/config", headers=_load_auth_module().build_headers(token)
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=30, context=_system_ssl_context()) as resp:
         cfg = json.loads(resp.read().decode())
     models = (cfg.get("data") or {}).get("models") or []
     return [x.get("id") for x in models if isinstance(x, dict) and x.get("id")]

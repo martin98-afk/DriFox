@@ -285,3 +285,33 @@ def test_sidebar_btn_hover_attribute(qtbot, container):
     qtbot.addWidget(tb)
     assert tb._sidebar_btn.testAttribute(Qt.WA_Hover) is True
     assert tb._workbench_btn.testAttribute(Qt.WA_Hover) is True
+
+
+def test_reduce_motion_hover_and_active_land_final_value(qtbot, container, monkeypatch):
+    """系统「减少动态效果」：hover / 选中直落终值，不得触碰不存在的动画 API
+
+    回归（2026-10-16 崩溃）：_start 的 reduced-motion 分支曾调用
+    QVariantAnimation 没有的 ``setValue``（正确 API 是 setStartValue /
+    setEndValue + setCurrentTime），hover 一进就 AttributeError。
+    """
+    from app.utils.design_tokens import Animations
+
+    monkeypatch.setattr(Animations, "motion_enabled", classmethod(lambda cls: False))
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb.add_tab("chat", "聊天")
+    btn = tb._tabs["chat"]
+
+    btn.set_hover(True)  # enterEvent 路径
+    assert btn._hover_t == 1.0
+    assert btn._anim_hover.state() != btn._anim_hover.Running
+
+    btn.set_hover(False)
+    assert btn._hover_t == 0.0
+
+    btn.set_active(False)
+    assert btn._active_t == 0.0
+    btn.set_active(True)
+    assert btn._active_t == 1.0
+    assert btn._anim_active.state() != btn._anim_active.Running

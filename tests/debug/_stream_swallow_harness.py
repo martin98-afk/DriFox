@@ -29,11 +29,16 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 _app = QApplication.instance() or QApplication(sys.argv)
 
-from app.widgets import message_card as mc  # noqa: E402
+from app.widgets import card_render_core as mc  # noqa: E402
+from app.widgets import card_viewers as _cv  # noqa: E402
+from app.widgets import message_card as _mcmod  # noqa: E402
 from app.widgets.message_card import CodeWebViewer, MessageCard  # noqa: E402
 
 # 桩对象不是 QObject，屏蔽 shiboken6 存活检测（源码以 shiboken6.isValid 判活）
-mc.shiboken6 = types.SimpleNamespace(isValid=lambda o: True)
+_isvalid_stub = types.SimpleNamespace(isValid=lambda o: True)
+mc.shiboken6 = _isvalid_stub
+_cv.shiboken6 = _isvalid_stub
+_mcmod.shiboken6 = _isvalid_stub
 
 
 _VOID_TAGS = {"br", "img", "hr", "input", "meta", "link", "source"}
@@ -135,7 +140,21 @@ class Dom:
         if js.startswith("updateContent("):
             rest = js[len("updateContent(") :]
             html, _ = dec.raw_decode(rest)
+            # 忠实还原真实 DOM：char-count 是**末尾追加的顶层元素**（真实代码用
+            # `html.rfind(_CHAR_COUNT_HTML)` 把它从正文里切出来单独注入）。
+            # 若留给朴素分块器，它会因工具块内部标签不平衡而被并进前一个块 →
+            # _set_last_para_incremental 的 `continue` 会跳过该块、错误地标到更靠前
+            # 的块上（假阳性）。故此处先摘出 char-count 再分块。
+            _cc_idx = html.find('<div id="char-count"')
+            if _cc_idx == -1:
+                _cc_idx = html.find("<div id='char-count'")
+            _cc = ""
+            if _cc_idx != -1:
+                _cc = html[_cc_idx:]
+                html = html[:_cc_idx]
             self.nodes = [("html", b, False, False) for b in _split_top_blocks(html)]
+            if _cc:
+                self.nodes.append(("html", _cc, False, False))
             if "setAttribute('data-incremental','true')" in js:
                 self._set_last_para_incremental()
             return
@@ -171,9 +190,24 @@ class FakePage:
             cb(None)
 
 
+class _Noop:
+    """可调用且布尔为假的兜底对象（宿主新增的私有属性/方法统一用它占位）。"""
+
+    def __call__(self, *a, **k):
+        return None
+
+    def __bool__(self):
+        return False
+
+    def __iter__(self):
+        return iter(())
+
+    def __getattr__(self, name):
+        return _Noop()
+
+
 class ViewerStub:
     """绑定 CodeWebViewer 真实渲染逻辑的桩（无 Chromium）。"""
-
     # ── 真实方法 ──
     _perform_update = CodeWebViewer._perform_update
     _render_markdown_to_html = CodeWebViewer._render_markdown_to_html
@@ -234,6 +268,15 @@ class ViewerStub:
         self._inflight_task = None  # harness 用：在途线程池任务 (seq, md)
 
     # ── 桩替换 ──
+    def __getattr__(self, name):
+        """宿主版本演进会新增实例属性/开关/方法；未知 `_` 前缀名一律返回「可调用
+        且布尔为假」的 noop，让 `if self._x:` 与 `self._y(...)` 两种用法都不崩。
+        只对下划线私有名兜底，公有名照常抛错以免掩盖真问题。
+        """
+        if name.startswith("_"):
+            return _Noop()
+        raise AttributeError(name)
+
     def page(self):
         return self._page
 
@@ -279,15 +322,17 @@ class ViewerStub:
         self._inflight_task = (seq, md)
 
     def flush_async(self):
-        """模拟线程池任务完成回调（主线程应用结果 + 续派 pending）。"""
+        """模拟线程池任务完成回调（主线程应用结果 + 续派 pending）。
+
+        注意：pending 续派由真实 ``_apply_render_result`` 的 finally 完成
+        （它会调 ``_sequence_render(pending)``，命中本桩的同名方法），故此处
+        不需要额外处理——重复派发会让同一快照渲染两次。
+        """
         if not getattr(self, "_inflight_task", None):
             return
         seq, md = self._inflight_task
         self._inflight_task = None
-        try:
-            self._apply_render_result(seq, self._render_markdown_to_html(md))
-        finally:
-            pass
+        self._apply_render_result(seq, self._render_markdown_to_html(md))
 
     def flush_timer(self):
         if self._timer_pending:

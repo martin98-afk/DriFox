@@ -16,13 +16,20 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 _PAGE = _ROOT / "plugins" / "history-manager" / "ui" / "history_page.py"
 _PLUGIN_INIT = _ROOT / "plugins" / "history-manager" / "ui" / "__init__.py"
-_CARD = _ROOT / "app" / "widgets" / "cards" / "settings" / "project_selector_card.py"
+_CARD = _ROOT / "plugins" / "history-manager" / "ui" / "project_selector_card.py"
 _MAIN = _ROOT / "app" / "main_widget.py"
 _CARDS_MODULE = _ROOT / "app" / "widgets" / "modules" / "system_cards_module.py"
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _load_card_module():
+    """导入插件自包含的项目选择卡片模块（插件目录带连字符，走 import_module）"""
+    from importlib import import_module
+
+    return import_module("plugins.history-manager.ui.project_selector_card")
 
 
 def test_floating_card_declares_min_width():
@@ -33,9 +40,9 @@ def test_floating_card_declares_min_width():
 
 
 def test_project_panel_reuses_selector_card_with_all_entry():
-    """插件面板复用宿主项目选择卡片，聚合行「全部项目」在面板首行工具条自建"""
+    """插件面板复用插件自包含的项目选择卡片，聚合行「全部项目」在面板首行工具条自建"""
     page = _read(_PAGE)
-    assert "from app.widgets.cards.settings.project_selector_card import" in page
+    assert "from .project_selector_card import" in page
     assert "ProjectSelectorCardContent(body)" in page
     assert 'ProjectItem("全部项目", False, body, is_all_entry=True)' in page
     assert "collapse_project_selector" in page
@@ -61,6 +68,19 @@ def test_host_project_icon_opens_plugin_panel():
     assert "tm.open_workbench_history()" in main
     assert "svc.open_project_selector()" in main
     assert '"project_selector": ("选择项目", self._open_project_selector_panel)' in main
+
+
+def test_close_history_panel_hides_history_floating_card():
+    """「新建会话 = 真切换」让位出口：隐藏左侧「历史会话」浮动卡
+
+    历史页签让位（``_close_history_panel``）在历史页迁为左侧浮动卡后失效
+    （工作台页签集合已无 history-manager 页，旧页签切换为 no-op）——本用例
+    锁定让位动作走 registry 公开隐藏通道；旧页签切换保留兜底。
+    """
+    main = _read(_MAIN)
+    body = main[main.index("def _close_history_panel") : main.index("def _refresh_history_page_if_active")]
+    assert 'hide_floating_card_globally("history-manager")' in body
+    assert 'set_current_tab_by_id("worktree-manager", user=True)' in body
 
 
 def test_service_exposes_project_panel_entry():
@@ -274,10 +294,7 @@ def test_panel_release_clears_both_min_and_max():
 def test_project_header_is_visually_prominent():
     """折叠头视觉强化：左侧项目色条 + 展开态/收起态可辨 + 旋转箭头动画"""
     src = _read(_PAGE)
-    header = (
-        src[src.index("class _HeaderChevron") : src.index("def _alpha_tint")]
-        + src[src.index("def _alpha_tint") : src.index("def _active_history_manager")]
-    )
+    header = src[src.index("class _HeaderChevron") : src.index("def _active_history_manager")]
     assert "border-left: 3px solid" in header  # 左侧项目色条
     assert "BORDER_ACCENT" in header  # 展开/hover 描边强调色
     assert "CARD_BG" in header or "HOVER_BG_STRONG" in header  # 更实的底色
@@ -337,6 +354,170 @@ def test_panel_crossfade_height_is_conserved_and_monotonic(qapp):
         page.hide()
         page.setParent(None)
         page.deleteLater()
+
+
+def test_project_list_stretch_added_once_not_per_row():
+    """★ 项目列表的末尾弹簧只能加一次（列表重建完成后），不能逐行加
+
+    ``_ensure_item_signals`` 被每个项目行调用（``_attach`` → 每行一次）；
+    若把 ``addStretch(1)`` 写在里面，N 个项目 = N 个弹簧夹在行与行之间，
+    剩余空间被平分 → 历史面板展开后项目行被均匀撒开（首行悬在中部、
+    末行沉底，2026-10-10 实测截图）。弹簧必须在 ``_refresh_project_list``
+    全部行挂完后加一次。
+    """
+    src = _read(_CARD)
+    ensure = src[src.index("def _ensure_item_signals") : src.index("def _on_project_item_clicked")]
+    assert "addStretch" not in ensure
+    refresh = src[src.index("def _refresh_project_list") : src.index("def _ensure_item_signals")]
+    assert refresh.count("layout.addStretch(1)") == 1
+
+
+def test_project_row_swaps_archive_btn_for_new_session_and_more():
+    """项目行右侧：旧「归档」单按钮 → 「新建会话 + 更多」按钮组（hover 浮现）
+
+    归档从行内移到「更多」菜单（与右键菜单同构），行内保留高频动作（新建会话）。
+    按钮组整体显隐：QToolButton 是行内子控件，鼠标移上按钮时父行不派发
+    leaveEvent，若按单个按钮显隐会出现「移到按钮上按钮消失」的抖动。
+    """
+    src = _read(_CARD)
+    item_cls = src[src.index("class ProjectItem") : src.index("class ProjectSelectorCardContent")]
+    setup = item_cls[item_cls.index("def _setup_ui") : item_cls.index("def _apply_name_style")]
+    assert "_archive_btn" not in item_cls, "行内归档按钮应已移除"
+    assert 'get_icon("新会话")' in setup
+    assert 'get_icon("更多")' in setup
+    assert "self._row_btns.hide()" in setup
+    # hover 显隐以按钮组为单位，且聚合行除外
+    enter = item_cls[item_cls.index("def enterEvent") : item_cls.index("def leaveEvent")]
+    assert "self._row_btns.show()" in enter
+    assert "_is_all_entry" in enter
+    leave = item_cls[item_cls.index("def leaveEvent") :]
+    assert "self._row_btns.hide()" in leave
+
+
+def test_more_menu_and_context_menu_share_builder():
+    """「更多」按钮菜单与右键菜单同构（同一个 ``_build_project_menu``）"""
+    src = _read(_CARD)
+    assert "def _build_project_menu" in src
+    builder = src[src.index("def _build_project_menu") : src.index("def _show_more_menu")]
+    for label in ("归档此项目", "导出项目压缩包", "打开项目根目录"):
+        assert label in builder, f"菜单缺少「{label}」"
+    assert "def _show_more_menu" in src
+    more = src[src.index("def _show_more_menu") : src.index("def contextMenuEvent")]
+    assert "self._build_project_menu()" in more
+    ctx = src[src.index("def contextMenuEvent") : src.index("def mousePressEvent")]
+    assert "self._build_project_menu()" in ctx
+
+
+def test_row_new_session_targets_row_project():
+    """行内「新建会话」以**行所属项目**为目标（不同于顶部按钮的跟随筛选语义）"""
+    page = _read(_PAGE)
+    assert "newSessionRequested" in page  # 插件页接线
+    card = _read(_CARD)
+    assert "newSessionRequested = Signal(str)" in card
+    assert "item.newSessionClicked" in card  # 信号在 _ensure_item_signals 里重连
+    body = page[page.index("def _on_row_new_session") : page.index("def _on_new_project_submitted")]
+    assert '_call_window("_on_project_selected", project_name)' in body
+    assert '_call_window("_create_new_session")' in body
+    # 项目选择跟随窗口新项目（折叠头/列表/勾选与新项目一致）
+    assert "self.follow_window_project()" in body
+    # 新建会话 = 真切换：隐藏历史会话卡片（与卡片 × 关闭同一 registry 通道）
+    assert "self.closed.emit()" in body
+
+
+def test_row_new_session_hides_history_card(qapp):
+    """实机：行内「新建会话」→ 切项目 + 项目选择跟随 + 历史卡让位隐藏"""
+    mod = _load_page_module()
+    page = mod.HistoryPage()
+    try:
+        calls = []
+        page._call_window = lambda name, *a: calls.append((name, a))
+        hidden = []
+        page.closed.connect(lambda: hidden.append(True))
+
+        page._on_row_new_session("项目X")
+        # 非当前项目（无活跃窗口 → current 为 None）→ 宿主切项目
+        assert ("_on_project_selected", ("项目X",)) in calls, calls
+        assert hidden == [True], "新建会话后应隐藏历史会话卡片"
+        # 项目选择跟随窗口项目（筛选记忆清为跟随）
+        assert page._get_tab_filter() == mod._PROJECT_CURRENT
+
+        # 同项目分支：目标 == 窗口当前项目 → 直接新建（不再走宿主切项目）
+        calls.clear()
+        hidden.clear()
+        import types
+
+        orig_active = mod._active_window
+        mod._active_window = lambda: types.SimpleNamespace(_current_project="项目X")
+        try:
+            page._on_row_new_session("项目X")
+            assert ("_create_new_session", ()) in calls, calls
+            assert ("_on_project_selected", ("项目X",)) not in calls, calls
+            assert hidden == [True]
+        finally:
+            mod._active_window = orig_active
+    finally:
+        page.hide()
+        page.setParent(None)
+        page.deleteLater()
+
+
+def test_top_new_session_hides_history_card(qapp):
+    """实机：顶部「新建会话」→ 新建 + 历史卡让位隐藏（与行内按钮一致）"""
+    mod = _load_page_module()
+    page = mod.HistoryPage()
+    try:
+        calls = []
+        page._call_window = lambda name, *a: calls.append((name, a))
+        hidden = []
+        page.closed.connect(lambda: hidden.append(True))
+
+        page._on_new_session_clicked()
+        assert ("_create_new_session", ()) in calls, calls
+        assert hidden == [True], "新建会话后应隐藏历史会话卡片"
+    finally:
+        page.hide()
+        page.setParent(None)
+        page.deleteLater()
+
+
+def test_project_row_buttons_real_widget(qapp):
+    """实机：两按钮存在、「更多」菜单含归档项、新建会话信号携带行所属项目名"""
+    ProjectItem = _load_card_module().ProjectItem
+
+    item = ProjectItem("回归测试项目")
+    try:
+        assert item._new_session_btn.toolTip() == "新建会话"
+        assert item._more_btn.toolTip() == "更多"
+        assert not item._row_btns.isVisible(), "静止态按钮组隐藏"
+
+        labels = [a.text() for a in item._build_project_menu().actions()]
+        assert labels == ["归档此项目", "导出项目压缩包"], f"无根目录时菜单项：{labels}"
+
+        item.set_root_dir("D:/tmp/proj")
+        labels = [a.text() for a in item._build_project_menu().actions()]
+        assert labels == ["归档此项目", "导出项目压缩包", "打开项目根目录"], f"有根目录时菜单项：{labels}"
+
+        fired = []
+        item.newSessionClicked.connect(fired.append)
+        item._emit_new_session()
+        assert fired == ["回归测试项目"], "新建会话应携带行所属项目名"
+    finally:
+        item.deleteLater()
+
+
+def test_all_entry_row_has_no_row_buttons(qapp):
+    """聚合行（「全部项目」）无单项目操作：hover 也不浮现按钮组"""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QEnterEvent
+
+    ProjectItem = _load_card_module().ProjectItem
+
+    all_item = ProjectItem("全部项目", is_all_entry=True)
+    try:
+        all_item.enterEvent(QEnterEvent(QPoint(5, 5), QPoint(5, 5), QPoint(5, 5)))
+        assert not all_item._row_btns.isVisible(), "聚合行不应浮现行内按钮"
+    finally:
+        all_item.deleteLater()
 
 
 def test_panel_takeover_from_mid_animation_does_not_jump(qapp):
