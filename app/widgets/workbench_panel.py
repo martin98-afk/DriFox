@@ -158,9 +158,11 @@ class WorkbenchPanel(QWidget):
         self._indicator_ctl = TabIndicatorController(
             tab_bar_host,
             self,
-            lambda: self._tab_buttons[self._logical_index].geometry()
-            if 0 <= self._logical_index < len(self._tab_buttons)
-            else None,
+            lambda: (
+                self._tab_buttons[self._logical_index].geometry()
+                if 0 <= self._logical_index < len(self._tab_buttons)
+                else None
+            ),
         )
 
         # ── 主体：内容栈容器（tab 条已上移至面板顶部，这里只剩 stack）──
@@ -600,7 +602,7 @@ class WorkbenchPanel(QWidget):
                 self._stack.removeWidget(widget)
                 self._stack.insertWidget(index, widget)
         self._plugin_sig = sig
-        current = self.current_tab()
+        current = self._stack.currentIndex()
         self._rebuild_tab_bar()
         if current >= self._stack.count() or current < 0:
             current = 0

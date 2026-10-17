@@ -263,7 +263,7 @@ def test_panel_has_no_todo_api(panel):
 # ── 页签胶囊指示器：滑动段1 期间必须跟随逻辑页签 ──
 
 
-def test_indicator_follows_logical_tab_during_slide(panel, monkeypatch):
+def test_indicator_follows_logical_tab_during_slide(panel, monkeypatch, qapp):
     """用户点击切页 → 胶囊滑向新页签，且不会被 hover 钉位改回旧页
 
     ★ 曾是真实回归：胶囊的 active_geometry 回调读 ``_stack.currentIndex()``，
@@ -274,8 +274,11 @@ def test_indicator_follows_logical_tab_during_slide(panel, monkeypatch):
 
     monkeypatch.setattr(Animations, "motion_enabled", classmethod(lambda cls: True))
     panel.sync_plugin_pages([_info("a", "A页", order_hint=0), _info("b", "B页", order_hint=10)])
+    qapp.processEvents()  # FlowLayout 落定，按钮拿到真实几何
     ctl = panel._indicator_ctl
+    ctl._indicator.show()  # 瞬移分支要求可见，动画分支才成立
     target = panel._tab_buttons[1].geometry()
+    assert target.width() > 0
     panel.set_current_tab(1, user=True)
     assert panel.current_tab() == 1
     assert panel._stack.currentIndex() == 0  # 段1：页面还没换
@@ -284,6 +287,7 @@ def test_indicator_follows_logical_tab_during_slide(panel, monkeypatch):
     panel._run_tab_hover_sync()
     assert ctl._anim.endValue() == target, "胶囊目标被钉回旧页签"
     assert ctl.running
+
 
 # ── 插件 UI 模块导入校验（页签来自真实插件） ──
 
