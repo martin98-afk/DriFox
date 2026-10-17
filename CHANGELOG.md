@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
-## [v0.6.9] - 2026-10-16 (重新发布 #4)
+## [v0.6.9] - 2026-10-17 (重新发布 #5)
 
-自 v0.6.8 以来的变更（累计） | 提交数：64 · 文件变更：100 · +10377/-703 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.8 以来的变更（累计） | 提交数：67 · 文件变更：105 · +10485/-720 | 贡献者：dingma, mading, martin98-afk
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -94,6 +94,18 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes) · 重新发布 #4 追加
 
 - **切页动画第一帧被杀** (`f5e311e2`, app/main_widget.py · tests/widgets/test_content_stack_slide.py): _ContentStack.resizeEvent 动画在途只同步两页几何到新 rect，不再快进收尾（根因：切页后 _sync_chat_wrapper_width 同一 tick 改 wrapper margins 触发本栈 resize，等于第一帧就把动画杀掉）；卡间切换点击瞬间同步 _replace_active 与胶囊高亮，内容仍在画外切换，胶囊不再等 300ms 滑出结束才跳位。回归 test_resize_during_slide_keeps_animating。
+
+### ✨ 新功能 (New Features) · 重新发布 #5 追加
+
+- **titlebar 页签胶囊滑动动画平滑与逻辑页签跟踪** (`a7e5e374`, app/widgets/slide_tab_animator.py · app/widgets/workbench_panel.py · tests/widgets/test_workbench_panel.py): SlideTabAnimator 两段式滑动过渡更平滑；WorkbenchPanel 改为跟踪逻辑页签索引，动画与页签增删交错时胶囊与内容对应关系不漂移。
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #5 追加
+
+- **渲染进程崩溃自愈后 HTML 区白底固化** (`9b00afb5`, app/widgets/card_viewers.py · tests/widgets/test_render_crash_queue.py): 崩溃重置 Chromium 合成面透明后，透明属性重申落在 setHtml 之后要等下一次导航才生效，而自愈恢复全走 JS 注入无导航，白底盖住气泡米色持续到 viewer 重建；`_try_restore_context` 开头先重申透明再加载骨架，导航前属性就位。回归 test_try_restore_reasserts_transparency_before_skeleton_load。
+
+### 🔧 测试基建 (Testing Infrastructure) · 重新发布 #5 追加
+
+- 页签胶囊滑动回归用例显式落定布局（`58d2b2bc`, tests/widgets/): 确保用例能稳定捕获目标钉回 bug。
 
 ## [v0.6.8] - 2026-10-16
 
