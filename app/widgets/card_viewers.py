@@ -1605,6 +1605,23 @@ class CodeWebViewer(QWebEngineView):
         # think 未闭合期间正文静默累积是设计行为（防 spinner 闪烁），不触发
         if _has_unclosed_think(self._markdown_text):
             return
+        # 🐛 无效补渲熔断（流式抖动根因）：
+        # 真机实证（2026-10-15 / 2026-10-18 all.log）：哨兵补渲**反复无效**——
+        # 16 分钟会话 564 次触发、单次会话 18 次补渲 dom 全程停在 87~120。
+        # 判据只看 #content-placeholder，而简洁模式下 think/tool 块已被
+        # reorganizeContent 归拢到 #tool-content，正文区自然「近乎空」→ 误判。
+        # 每次误判补渲 = 一次整页 innerHTML 替换 → 全部文字重排换行 + 高度跳变，
+        # 每 3s 一次，观感就是「流式期间不停抖动、文字反复换行」。
+        # 熔断：上次补渲后 dom 未见增长即计一次无效，连续 3 次判定本轮补渲
+        # 无效，不再空转（dom 真正增长时计数自动归零，新一轮流式自然恢复）。
+        _probe = getattr(self, "_sentinel_probe_dom", None)
+        if _probe is not None:
+            if dom_len <= _probe + 40:
+                self._sentinel_fail_count = getattr(self, "_sentinel_fail_count", 0) + 1
+            else:
+                self._sentinel_fail_count = 0
+        if getattr(self, "_sentinel_fail_count", 0) >= 3:
+            return
         now = time.monotonic()
         if now - getattr(self, "_sentinel_last_ts", 0.0) < 3.0:
             return
@@ -1621,6 +1638,8 @@ class CodeWebViewer(QWebEngineView):
         self._needs_full_render = True
         self._stable_md_len = 0
         self._last_rendered_markdown = ""
+        # 记录本次补渲前的 dom，下次检查据此判定补渲是否真的生效（见上方熔断）
+        self._sentinel_probe_dom = dom_len
         self._schedule_render(immediate=True)
 
     def _on_body_geometry_reported(self, scroll_height: int, scroll_top: int, client_height: int):
@@ -1829,6 +1848,13 @@ class CodeWebViewer(QWebEngineView):
         # 表现为「问候语可见、下方空白」的压扁卡片，新建会话全量重建才恢复。
         # JS 就绪后延迟主动查询一次文档高度，走 _on_height_reported 正常钳制链
         # 应用：通道正常时结果一致（emit 前 abs>2 去重）无害，通道死时这次救回。
+        # 🐛 首帧立即可见（PyQt5 版「进入立马就有」的对齐）：原实现只等 800ms
+        # 查一次，而启动期欢迎卡会被插件逐个装载反复 invalidate + 重建（实测
+        # 19 个插件 → 重建 3~6 次，叠加 600ms 启动去抖），每次重建 viewer 都
+        # 从起步 40px 重新上报 → 用户看到「先空白，过一会才刷出来」。
+        # 改为「骨架就绪即刻查一次 + 800ms 兜底再查一次」：即刻那一拍把高度
+        # 直接钉到真实文档高，首帧即完整；兜底覆盖此刻布局尚未收敛的情形。
+        self._self_heal_document_height()
         QTimer.singleShot(800, self._self_heal_document_height)
 
     def _self_heal_document_height(self):
@@ -4684,10 +4710,21 @@ class CodeWebViewer(QWebEngineView):
                     // Python 侧用它对照 _markdown_text 积压量，检测"DOM 内容丢失"
                     // （池化误清 / 渲染链路停摆 / JS 注入失败等各类根因）并自动补渲。
                     // 查询失败发 -1：Python 侧视作"未知"，哨兵不动作（旧骨架无此字段同效）。
+                    // 🐛 口径修正（流式抖动根因）：只统计 #content-placeholder 会把
+                    // 「简洁模式下 think/tool 块已被 reorganizeContent 归拢到
+                    // #tool-content」误判成内容丢失 —— 正文区近乎空是**设计行为**，
+                    // 内容实际好好地躺在工具区。哨兵据此每 3s 强制整页补渲一次
+                    // （真机实证反复无效），每次补渲 = 全量 innerHTML 替换 =
+                    // 所有文字重排换行 + 高度跳变，观感即「流式不停抖动」。
+                    // 改为「正文 + 工具区」合计：两处都空才是真白屏。
                     var _cl = -1;
                     try {{
                         var _cpL = document.getElementById('content-placeholder');
-                        if (_cpL) _cl = (_cpL.textContent || '').length;
+                        var _tcL = document.getElementById('tool-content');
+                        if (_cpL || _tcL) {{
+                            _cl = ((_cpL && _cpL.textContent) || '').length
+                                + ((_tcL && _tcL.textContent) || '').length;
+                        }}
                     }} catch (_e2) {{}}
                     // [T38] 空正文折叠：长工具循环期间正文无内容却仍占一块空白，
                     // 被误读为"白屏"。无可见文本且无实体内容（图片/公式/表格/图表/
@@ -4764,9 +4801,17 @@ class CodeWebViewer(QWebEngineView):
                         titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
                     }}
                     // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
+                    // 🐛 修复（结束态折叠被掰回）：自动展开的判据只看 DOM 里有没有
+                    // data-streaming="true" 的块，不看卡片是否**还在流式**。
+                    // 打断 / 插话 / 错误收尾（force_dock_off）后 worker 已终止，
+                    // 未完成的工具运行框永远停在 data-streaming="true" → 此后
+                    // 每次全量渲染（终结渲染、主题刷新、虚拟滚动重建）都把刚
+                    // 折叠好的工具区重新掰开 → 用户看到「结束时工具与思考没有
+                    // 收起」。判据补上 window._streamingActive：卡片已结束即
+                    // 不自动展开，让终态保持折叠（用户仍可手动点开）。
                     var _hasStreaming = document.querySelector('#tool-content [data-streaming="true"]');
                     var _tsEl = document.getElementById('tool-section');
-                    if (_hasStreaming && _tsEl && _tsEl.getAttribute('data-collapsed') === 'true') {{
+                    if (window._streamingActive && _hasStreaming && _tsEl && _tsEl.getAttribute('data-collapsed') === 'true') {{
                         // 过渡期间抑制中间态高度报告，结束后终值单报
                         _beginToolSectionTransition();
                         _tsEl.setAttribute('data-collapsed', 'false');

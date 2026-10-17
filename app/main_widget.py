@@ -8661,6 +8661,47 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ 团队实时状态同步：流式/思考/提问 → busy；空闲 → idle
             # （覆盖所有流式/思考阶段，供 team_list_members 查询路径可见）
             self._sync_team_member_runtime_status(state)
+            # 🐛 结束态兜底收尾（流式残留总闸）：
+            # 卡片结束态此前**唯一**入口是 _on_stream_finished 里的
+            # `_current_assistant_card.finish_streaming()`。该单点在以下情形会漏：
+            #   ① _current_assistant_card 已被切走（Stop hook 续命 / 插话 / 子智能体
+            #      回调中途开过新卡）→ 旧卡永远等不到 finish；
+            #   ② stream_finished 被 UIEngine 的 is_streaming 守卫吞掉；
+            #   ③ 卡片已 sip 删除。
+            # 漏掉 finish 的后果（2026-10-18 真机实证）：会话结束后卡片仍
+            # _streaming=True → 坞态不归位、工具区不折叠（"结束没变化"），
+            # 且高度追踪 tick 常转 → 卡片高度持续振荡 + 内容反复重排换行
+            # （dock-blank 每 2s 刷一次，viewer 在 1796↔1805 反复横跳）。
+            # 转到 idle = 引擎侧已确认本轮结束，此刻扫一遍仍在流式态的卡片并
+            # 强制收尾，不再依赖上述单点是否命中。
+            if state == "idle":
+                self._finalize_all_streaming_cards()
+
+    def _finalize_all_streaming_cards(self) -> None:
+        """收尾所有仍停在流式态的卡片（idle 兜底，见 _set_ai_state 注释）。
+
+        幂等：已正常收尾的卡片 `_streaming` 为 False，直接跳过。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        from app.widgets.message_card import MessageCard
+
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            w = item.widget() if item else None
+            if w is None or not isinstance(w, MessageCard):
+                continue
+            if w.role != "assistant" or not getattr(w, "_streaming", False):
+                continue
+            if _is_sip_deleted(w):
+                continue
+            try:
+                w.stop_streaming_anim()
+                # force_dock_off：引擎侧已 idle，未到达的工具结果不会再来了，
+                # keep_dock 会让坞态永久沉底（append_tool_result 兜底永不触发）。
+                w.finish_streaming(force_dock_off=True)
+            except RuntimeError:
+                pass
 
     def _sync_team_member_runtime_status(self, state: str) -> None:
         """将 AI 状态同步到团队成员 runtime 状态（仅团队成员生效，非成员静默跳过）"""
@@ -19812,7 +19853,10 @@ class OpenAIChatToolWindow(ToolWindow):
         old = self._current_assistant_card
         if old is not None and not _is_sip_deleted(old):
             old.stop_streaming_anim()
-            old.finish_streaming()
+            # 🐛 force_dock_off=True：插话消费意味着本轮已终止，此前登记的工具
+            # 结果永不到达 → keep_dock 会让坞态永久沉底、工具区永不折叠
+            # （_has_active_tools() 恒 True，append_tool_result 兜底永不触发）。
+            old.finish_streaming(force_dock_off=True)
         card = self._append_assistant_message(
             model_name=self._current_model_name,
             config_id=self._current_provider_name,
@@ -21957,6 +22001,9 @@ class OpenAIChatToolWindow(ToolWindow):
         content = f"[Skill Result] {result}" if "error" not in result else f"[Skill Error] {result.get('error')}"
         # 确保 round_index 正确
         self._current_assistant_round_index = self._get_current_user_round_index()
+        # 开新卡前收尾上一张：本路径可能在流式期间被触发，旧卡不收尾会残留
+        # 流式光带 + 坞态沉底（与 _finish_stale_assistant_card 同款防护）。
+        self._finish_stale_assistant_card()
         new_card = self._append_assistant_message(
             model_name=self._current_model_name,
             config_id=self._current_provider_name,

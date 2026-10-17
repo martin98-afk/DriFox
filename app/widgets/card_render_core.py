@@ -3420,7 +3420,19 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v47）：移除预览文字打字机（_PREVIEW_TYPEWRITER_JS：
 # window._pt/_ptType/_ptPlay + 全部 [data-dfx-preview] 标记 + 三处渲染路径调用）。
 # 预览/思考预览行改为渲染落地即全显，不再逐字。旧骨架仍带 _pt 资产与调用必须失效。
-_SKELETON_CACHE_VERSION = 47
+# _SKELETON_CACHE_VERSION +1（v48）：①_setStreamingDock 的「归位折叠」由
+# ``on===false && wasOn`` 分支（幂等 return 之后）上提到幂等 return **之前**，
+# 判据去掉 wasOn —— 打断/插话的二次收尾（force_dock_off）原本被幂等 return
+# 整段挡掉；②_updateToolSectionHeader 的自动展开补 ``window._streamingActive``
+# 判据——已结束卡片里未完成的工具运行框恒带 data-streaming="true"，会把刚
+# 折叠的工具区每次全量渲染都掰回展开。两处 JS 资产变更，必须 bump。
+# _SKELETON_CACHE_VERSION +1（v49）：reportHeight 第 5 字段（_cl，内容哨兵数据源）
+# 口径由「仅 #content-placeholder 文本」改为「#content-placeholder + #tool-content
+# 合计」。简洁模式下 think/tool 块已被 reorganizeContent 归拢到 #tool-content，
+# 正文区近乎空是设计行为，旧口径把它误判成「内容丢失」→ 哨兵每 3s 强制整页
+# 补渲（真机实证反复无效），每次补渲全量替换 innerHTML → 文字重排换行 + 高度
+# 跳变，即「流式期间频繁抖动」。骨架 JS 资产变更，必须 bump。
+_SKELETON_CACHE_VERSION = 49
 
 
 def _js_literal(value) -> str:
@@ -3938,6 +3950,25 @@ _STREAMING_DOCK_JS = """
                     var on = !!active && !!window._toolCompactMode;
                     var wasOn = document.body.classList.contains('streaming-dock');
                     window._streamingActive = !!active;
+                    // 🐛 修复（归位折叠丢失）：折叠是「终态属性」，不是「切换副作用」。
+                    // 原实现把折叠挂在 ``on===false && wasOn`` 分支上（要求本次调用
+                    // 真的把坞态关掉），而打断/插话收尾会**重复**调用
+                    // _sync_streaming_dock(False, collapse_after=True)：首次 finish
+                    // 已归位，force_dock_off 二次收尾时 wasOn=false → 折叠整段跳过
+                    // → 卡片结束态「工具区已回顶部但仍展开」，用户看到的正是
+                    // 「结束时折叠没收起」。
+                    // 且原折叠块位于下方，被 ``if (on === wasOn) return;`` 挡在
+                    // 前面 —— 第二次调用连函数体都进不去。故必须在幂等 return
+                    // **之前**处理：只要目标态是非坞态 + 简洁模式 + collapseAfter，
+                    // 就收敛到折叠，与本次是否真的切了 class 无关。
+                    if (!on && collapseAfter && (window._toolCompactMode !== false)) {
+                        var _tsC0 = document.getElementById('tool-section');
+                        if (_tsC0) {
+                            _tsC0.setAttribute('data-collapsed', 'true');
+                            var _sepC = document.getElementById('tool-separator');
+                            if (_sepC) _sepC.setAttribute('aria-expanded', 'false');
+                        }
+                    }
                     if (on === wasOn) return;
                     var ts = document.getElementById('tool-section');
                     // 切换前记录工具区高度与用户是否在底部，用于阅读位置补偿
@@ -3951,16 +3982,9 @@ _STREAMING_DOCK_JS = """
                     // [T30] 归位同帧折叠：坞态归位本会让 #tool-content 从 220px 限高
                     // 展开到自然高度（工具多时暴涨数百 px），随后 finish 流程又立刻
                     // 把它折叠回 0 —— 「先胀后缩」的往返峰是结束态剧烈抖动的主因，
-                    // 而终态本来就是折叠，中间那次全展开纯属浪费。collapseAfter=true
-                    // 时在同一同步块内连置折叠属性：两个 max-height 变化合并为一帧，
-                    // 浏览器只算一条 220px→0 的过渡曲线，自然高度峰值从不进布局。
-                    // 折叠的 transitionend 终值单报由函数尾部统一的
-                    // _beginToolSectionTransition 承接（本帧内开启抑制，无漏报窗口）。
-                    if (on === false && wasOn && collapseAfter && (window._toolCompactMode !== false) && ts) {
-                        ts.setAttribute('data-collapsed', 'true');
-                        var _sepC = document.getElementById('tool-separator');
-                        if (_sepC) _sepC.setAttribute('aria-expanded', 'false');
-                    }
+                    // 终态本来就是折叠，中间那次全展开纯属浪费。
+                    // 折叠已在上方（幂等 return 之前）统一置位，此处不再重复：
+                    // 同帧连置两次会重启一次多余的 max-height 过渡。
                     if (!on && wasOn) {
                         // 🐛 修复（坞态归位正文置顶）：坞态下正文容器限高内滚，用户
                         // 阅读位置在 #content-placeholder.scrollTop。归位移除

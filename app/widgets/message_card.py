@@ -280,6 +280,14 @@ class MessageCard(SimpleCardWidget):
     # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
     _LIVE_GAP_CAP_S = 2.0
 
+    # 流式态自愈闸门阈值（秒）：流式动画定时器在跑（_streaming=True）但正文
+    # 内容连续这么久没有新增 → 判定本轮已结束，卡片自行 finish_streaming。
+    # 取值权衡：短了会误伤「模型思考 / 长工具执行」的静默期；长了残留窗口变久。
+    # 6s 的依据：有活跃工具时闸门**不计时**（_guard_stream_end 内跳过并刷新
+    # 基准），故本阈值只覆盖「无工具、纯静默」这一真正异常的情形 —— 正常模型
+    # 在无工具待跑时不会静默 6s 不吐字（含思考也是持续出字）。
+    _STREAM_END_GUARD_S = 6.0
+
     @property
     def _renderer_pid(self) -> int:
         """renderer 进程 PID（转发 viewer；B4 强回收链路读 card._renderer_pid）。
@@ -423,6 +431,10 @@ class MessageCard(SimpleCardWidget):
         self._finish_t0 = 0.0
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
+        # 流式态自愈闸门基准（见 _guard_stream_end）：-1 = 未武装（新一轮开始时
+        # 由 start_streaming_anim 置位），避免历史卡/已结束卡误触发自愈收尾。
+        self._stream_guard_len = -1
+        self._stream_guard_ts = 0.0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
         # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick 已把"应用"
         # 侧的节拍连续化，防抖只负责合并同一窗口内的上报，不再需要独自扛
@@ -1332,6 +1344,14 @@ class MessageCard(SimpleCardWidget):
             return
         width = host.width()
         if width <= 0:
+            # 🐛 修复（首窗欢迎卡片底部空白）：布局未收敛（启动期首窗 / 隐藏页
+            # 切回补渲）时宿主宽度仍是 0，此处直接 return 后**再无重试路径**——
+            # 只有 resizeEvent 会重算，而用户不动窗口是常态。宿主高度于是永久
+            # 停在构造初始值（与真实折行行数不符），表现为卡片底部空白条；
+            # 新建会话重建卡片时布局早已收敛，故「刷新才恢复」。
+            # 宽度未就位改为预约下一拍重试（绑定卡片生命周期，卡片先销毁则
+            # 定时器随之析构，不会对悬垂控件取几何）。
+            self._schedule_welcome_tab_host_height()
             return
         try:
             h = bar.heightForWidth(width)
@@ -1340,6 +1360,29 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             self._welcome_tab_host = None
             self._welcome_tabs_bar_layout = None
+
+    def _schedule_welcome_tab_host_height(self) -> None:
+        """宽度未就位时预约一拍重算 tab 条宿主高度（见 _sync_welcome_tab_host_height）。
+
+        ⚠️ 用绑定 card 生命周期的 QTimer 而非裸 ``QTimer.singleShot``：延迟窗口内
+        卡片被销毁（会话切换 / 标签页关闭）时 singleShot 仍会回调，对已释放控件
+        取几何 → ACCESS_VIOLATION（同 _schedule_welcome_indicator_snap 的教训）。
+        """
+        if getattr(self, "_welcome_tab_host_height_timer_active", False):
+            return
+        self._welcome_tab_host_height_timer_active = True
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def _run() -> None:
+            self._welcome_tab_host_height_timer_active = False
+            try:
+                self._sync_welcome_tab_host_height()
+            finally:
+                timer.deleteLater()
+
+        timer.timeout.connect(_run)
+        timer.start(0)
 
     def _welcome_tab_active_geometry(self):
         """当前激活 tab 按钮的几何（无激活项 / 控件已销毁返回 None）"""
@@ -2233,6 +2276,10 @@ class MessageCard(SimpleCardWidget):
         # 🐛 修复"工具结果冒出又消失"：新轮流式开始时恢复 viewer 流式模式，
         # 避免 finish_streaming 后 viewer._streaming=False 导致工具结果到达时
         # append_tool_result 跳过 callback 更新，被后续 _perform_update 覆盖。
+        # 武装流式态自愈闸门：只有新一轮开始才有「内容应当继续增长」的预期，
+        # 历史卡 / 已收尾卡不参与（见 _guard_stream_end）。-1 = 未武装。
+        self._stream_guard_len = -1
+        self._stream_guard_ts = 0.0
         if self.viewer and hasattr(self.viewer, "_streaming") and not self.viewer._streaming:
             self.viewer._streaming = True
         # 修正 viewer 初始化时的 _is_history 标记（可能因 viewer 创建早于
@@ -2251,6 +2298,11 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _update_anim(self):
+        # 自愈闸门置顶：必须在所有「提前 return」的节能门控**之前**——
+        # 减少动态效果 / 不可见 / 滚出视口等分支会直接 return，闸门若在其后
+        # 就永远跑不到，残留窗口期内的卡片依旧收不了尾。
+        if self._guard_stream_end():
+            return
         # [V1] 可见性门控：隐藏 tab 不执行动画帧（避免隐藏页每 50ms 空转 update()）。
         # 暂停期间重启时钟：动画位置由累积时间 _anim_t_ms 决定，不推进即停在原位置，
         # 恢复后从原位置继续，无视觉跳变；下一拍定时器自动续跑，无需显式重启。
@@ -2320,6 +2372,58 @@ class MessageCard(SimpleCardWidget):
         else:
             band_top = self.height() - _STREAM_BAND_BOTTOM - _STREAM_BAND_H - _STREAM_BAND_REPAINT_PAD
             self.update(0, band_top, self.width(), _STREAM_BAND_H + 2 * _STREAM_BAND_REPAINT_PAD)
+
+    def _guard_stream_end(self) -> bool:
+        """流式态自愈闸门：内容长时间不再增长即自行收尾（不依赖上层回调）。
+
+        🐛 根因场景（2026-10-18 真机实证）：卡片结束态唯一入口是
+        main_widget._on_stream_finished → `_current_assistant_card.finish_streaming()`。
+        该单点漏掉时（卡片引用被切走 / stream_finished 被 UIEngine 守卫吞掉 /
+        卡片已 sip 删除），卡片**永远停在 _streaming=True**：
+          - 坞态不归位、工具区不折叠（用户看到「对话结束卡片状态没变化」）；
+          - 高度追踪 tick 常转 → viewer 高度持续振荡（实测 1796↔1805 每 2s 跳），
+            dock-blank 诊断每 2s 刷一次，直到用户手动删卡才停。
+        本闸门借流式动画定时器（20fps，流式期间本就常转，零额外成本）做
+        卡片级自愈：内容长度不再增长超过阈值即判定本轮已结束，自行走
+        finish_streaming 收尾。有活跃工具时不触发（模型在等工具结果，
+        几十秒无文本是正常态）。
+
+        Returns:
+            True = 本拍已执行收尾，调用方应立即返回（不再绘制流式光带）。
+        """
+        try:
+            viewer = getattr(self, "viewer", None)
+            md = getattr(viewer, "_markdown_text", "") if viewer is not None else ""
+            cur_len = len(md or "")
+            now = time.monotonic()
+            last_len = getattr(self, "_stream_guard_len", -1)
+            if last_len < 0:
+                # 懒武装：start_streaming_anim 置 -1 表示「新一轮待取样」，首次
+                # 运行在此记录基准，本拍只取样不判定（无基准无法比对增长量）。
+                # ⚠️ 原实现在此直接 return 而从不赋值 → _stream_guard_len 恒为
+                # -1 → 闸门永久惰性、一次都判不到（2026-10-18 修复）。
+                self._stream_guard_len = cur_len
+                self._stream_guard_ts = now
+                return False
+            if cur_len != last_len:
+                self._stream_guard_len = cur_len
+                self._stream_guard_ts = now
+                return False
+            # 工具仍在执行 → 模型在等结果，无文本是正常态
+            if self._has_active_tools():
+                self._stream_guard_ts = now
+                return False
+            if now - getattr(self, "_stream_guard_ts", now) < self._STREAM_END_GUARD_S:
+                return False
+            logger.warning(
+                f"[stream-guard] 流式态超时未收尾（{self._STREAM_END_GUARD_S:.0f}s 无新增内容）→ 卡片自愈收尾"
+            )
+            self.stop_streaming_anim()
+            self.finish_streaming(force_dock_off=True)
+            return True
+        except RuntimeError, AttributeError:
+            pass
+        return False
 
     def _apply_card_style(self, border: str = None, bg: str = None):
         # [PERF] 幂等短路：setStyleSheet 会触发 Qt 样式重新 polish + 子控件 relayout，
@@ -3456,6 +3560,21 @@ class MessageCard(SimpleCardWidget):
         if batch is not None and batch.active and not self._streaming:
             batch.submit(self, height)
             return
+        # 🐛 流式期间不得叠加分帧限幅（PyQt5 版无此问题的直接原因）：
+        # _apply_height_smooth 是为规避「Qt6 合成路径旧帧拉伸伪影」加的分帧逼近
+        # （160px/帧 × 16ms/拍，注释明写 Qt5 无此现象）。流式期间它却与高度
+        # 追踪 tick（按 0.84 比例逐拍逼近）**串成两层逼近**：追踪每拍给出的新
+        # 目标又被分帧切成 160px 序列，序列未走完就被下一拍目标刷新重启 →
+        # 高度在两层追逐中反复过冲与回落，永不落定。真机实测会话结束后 viewer
+        # 仍在 1796↔1805 反复横跳（scrollHeight 恒定 1739），即该振荡。
+        # 追踪本身已是平滑逼近，分帧只需服务「单次大跳」；追踪激活时直接落地。
+        if self._stream_height_anim_active or self._stream_height_tick.isActive():
+            self._cancel_height_smooth()
+            self._last_height_delta = height - self.viewer.height()
+            self._last_applied_viewer_height = height
+            self.viewer.setFixedHeight(height)
+            self.heightChanged.emit(height)
+            return
         self._apply_height_smooth(height)
 
     def _apply_viewer_height(self, value):
@@ -4101,6 +4220,15 @@ class MessageCard(SimpleCardWidget):
             # 置位时高度仍是起步值
             self._viewer_async_height = True
             self.viewer._lazy_markdown_cb = self._build_incremental_md
+            # 🐛 欢迎卡 viewer 流式态复位（独立的抖动源）：
+            # CodeWebViewer 新建时 _streaming 初值 True（流式设计），非 welcome
+            # 分支下方有同步逻辑，welcome 分支被 `if not is_welcome` 挡在外面
+            # → 欢迎卡的 viewer._streaming 恒 True 且永不复位。后果：
+            # content-sentinel 把它当流式卡反复扫描（真机日志 dom=0 / md=5132
+            # 正是欢迎卡），每 3s 强制整页补渲一次 → 卡片反复重排抖动；
+            # 坞态/光带等流式语义也一并被误启用。欢迎卡从无流式，恒 False。
+            if is_welcome:
+                self.viewer._streaming = False
             if not is_welcome:
                 # 标记是否为历史会话：非流式加载的历史消息自动折叠工具区
                 # 仅"从磁盘加载的历史会话"折叠；本轮对话（流式进行中或已完成）
