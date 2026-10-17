@@ -1822,6 +1822,35 @@ class CodeWebViewer(QWebEngineView):
             self._renderer_pid = self.page().renderProcessPid()
         except Exception:
             self._renderer_pid = 0
+        # 🐛 高度自愈：启动期欢迎卡片被多源调度反复 reparent（实测 _show_initial_welcome
+        # 单次启动触发 6 次 + 插件注册 invalidate 重建），Windows 下 QWebEngineView
+        # 原生 HWND 迁移后 Chromium console 通道可能不再向 Python 派发——
+        # reportHeight 的 pywebview_height 日志无人接收，高度永久停在起步 40px，
+        # 表现为「问候语可见、下方空白」的压扁卡片，新建会话全量重建才恢复。
+        # JS 就绪后延迟主动查询一次文档高度，走 _on_height_reported 正常钳制链
+        # 应用：通道正常时结果一致（emit 前 abs>2 去重）无害，通道死时这次救回。
+        QTimer.singleShot(800, self._self_heal_document_height)
+
+    def _self_heal_document_height(self):
+        """主动拉取一次文档高度并走正常上报链（console 通道失效的自愈兜底）。"""
+        if getattr(self, "_context_lost", False) or not self._is_js_ready:
+            return
+        page = self.page()
+        if page is None:
+            return
+        try:
+
+            def _cb(h):
+                if h is None:
+                    return
+                try:
+                    self._on_height_reported(int(h))
+                except RuntimeError:
+                    pass  # 已析构
+
+            page.runJavaScript("document.body ? document.body.scrollHeight : 0", 0, _cb)
+        except RuntimeError:
+            pass
 
     def _load_skeleton(self):
         # 获取系统字体

@@ -19357,6 +19357,9 @@ class OpenAIChatToolWindow(ToolWindow):
             source_message={"role": "user", "content": user_text, "_hook_event": hook_event} if hook_event else None,
         )
 
+        # Stop hook 续命窗口期发消息：先收尾上一张卡（防光带/坞态残留），见 helper
+        self._finish_stale_assistant_card()
+
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
             config_id=self._current_provider_name,
@@ -20737,6 +20740,28 @@ class OpenAIChatToolWindow(ToolWindow):
             # 时间线判据 + 时间戳缺失时的 epoch 回退共同兜住。
             self._send_epoch += 1
 
+    def _finish_stale_assistant_card(self) -> None:
+        """收尾上一张 assistant 卡片（创建新流式卡片前调用）。
+
+        场景：Stop hook 续命把 worker 生命周期拉长到「内容已显示完、worker
+        还在跑 hook」——用户在此窗口期发起新一轮时，新卡片先创建并切换
+        `_current_assistant_card`，旧 worker 迟到的 finished_with_content
+        随后到达，`_on_stream_finished` 把 finish 落到**新卡**上，旧卡永久
+        残留流式光带 + 工具区坞态沉底 + 正文限高（新建会话全量重建才恢复）。
+        日志特征：`[ConversationExecutor] _on_worker_finished ... is_match=False`。
+
+        插话路径 `_on_queued_user_injected` 已自带同款收尾；本方法补齐普通
+        发送与回调消息两条路径。已正常收尾的卡片重复调用幂等。
+        """
+        old = self._current_assistant_card
+        if old is None or _is_sip_deleted(old):
+            return
+        try:
+            old.stop_streaming_anim()
+            old.finish_streaming(force_dock_off=True)
+        except RuntimeError:
+            pass
+
     def _prepare_ui_for_callback_message(self, callback_text: str):
         """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）
 
@@ -20751,6 +20776,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 创建用户消息卡片（显示回调通知文本）
         self._append_user_message(callback_text)
+
+        # Stop hook 续命窗口期触发回调：先收尾上一张卡（防光带/坞态残留）
+        self._finish_stale_assistant_card()
 
         # 创建助手消息卡片（用于接收 LLM 的流式响应）
         assistant_card = self._append_assistant_message(
