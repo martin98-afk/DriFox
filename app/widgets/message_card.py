@@ -3460,6 +3460,25 @@ class MessageCard(SimpleCardWidget):
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
+        # 🐛 宽度漂移守卫：viewer 以旧宽度/默认宽度（构造值 100px）上报的高度
+        # 不可信——内容按错误视口宽排版，高度与真实显示宽度严重错位。此处发现
+        # viewer 宽度与卡片不一致时，先修正宽度并**丢弃本拍高度**：resize 触发
+        # Chromium 重排，新宽度下的 reportHeight 会带正确高度再来。修这条的
+        # 动机：首个窗口启动 / 隐藏页切回补渲时序下，viewer 可能以默认宽创建
+        # 且之后再无 resize/scroll 事件兜底，欢迎卡片永久压扁（缓存命中后
+        # 重建窗口才恢复）。
+        try:
+            _v = self.viewer
+            if (
+                _v is not None
+                and self.width() > 0
+                and _v.width() > 0
+                and abs(_v.width() - self.width()) > 2
+            ):
+                _v.resize(self.width(), _v.height())
+                return
+        except RuntimeError:
+            pass
         # [MEM] 面积上限：上报高度先按「物理面积封顶」钳一次（成本 ∝ 宽×高×dpr²，
         # 见 CodeWebViewer.MAX_SURFACE_MPX）。必须在下面所有记账/广播之前完成 ——
         # 否则 widget 被钳短、heightChanged 仍报原值，外层聊天列表会按未钳高度做
@@ -4104,6 +4123,19 @@ class MessageCard(SimpleCardWidget):
 
             self._viewer_layout.addWidget(self.viewer)
             self._lazy_rendered = True
+            # 🐛 宽度起步守卫：QWebEngineView 默认构造宽 100px。若此刻布局尚未
+            # 收敛（首个窗口启动 / 隐藏页切回补渲等场景，viewport 宽度还没就位），
+            # viewer 会以 100px 宽创建并加载骨架，内容按窄视口排版，高度上报与
+            # 实际显示宽度严重错位；后续若无 resize/scroll 事件兜底（启动后用户
+            # 不动窗口是常态），宽度永不修正 → 欢迎卡片永久压扁/空白，且因
+            # _welcome_card_cache 命中，重建窗口才恢复。这里在挂入布局后按卡片
+            # 自身宽度立即同步一次 viewer 宽度（卡片宽度由 _add_chat_widget 的
+            # _sync_single_card_width 已就位），保证骨架以真实视口宽加载。
+            try:
+                if self.width() > 0 and self.viewer.width() not in (self.width(), 0):
+                    self.viewer.resize(self.width(), self.viewer.height())
+            except RuntimeError:
+                pass
             # 创建 viewer 完成（不可见门控已放行），清除"推迟渲染"标记；
             # 若下方 set_content 因 JS 未就绪再次 deferred，由 _on_js_ready 兜底补渲。
             self._render_deferred = False
