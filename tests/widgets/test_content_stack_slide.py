@@ -133,8 +133,27 @@ def test_reentry_fast_forwards(qtbot, stack):
     assert p0.isVisible()
 
 
+def test_resize_during_slide_keeps_animating(qtbot, stack):
+    """动画中容器 resize 不打断动画（切页后 wrapper margins 变化会立刻触发 resize）
+
+    早期版本 resizeEvent 直接快进收尾，实测表现为「切页动画没了」。
+    正确行为：动画继续跑，位移按新宽度计算。
+    """
+    s, p0, p1 = stack
+    s.setCurrentIndex(1, direction=1)
+    assert s.slide_in_progress()
+    s.resize(360, 300)  # 模拟 _sync_chat_wrapper_width 改 margins
+    assert s.slide_in_progress()  # 关键：不能被收尾
+    s._on_slide_tick(0.5)
+    assert p1.x() == round(s.width() * 0.5)  # 按新宽度算
+    assert p0.x() == round(-s.width() * 0.5)
+    _wait_slide_done(qtbot, s)
+    assert p1.geometry() == s.rect()
+    assert p0.isHidden()
+
+
 def test_resize_during_slide_settles(qtbot, stack):
-    """动画中容器 resize：先快进收尾再统一铺满新 rect"""
+    """动画中容器 resize：动画跑完仍正确归位到新 rect"""
     s, p0, p1 = stack
     s.setCurrentIndex(1, direction=1)
     s.resize(600, 400)

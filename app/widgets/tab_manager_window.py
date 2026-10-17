@@ -758,13 +758,32 @@ class _ContentStack(QWidget):
     # ── 几何管理（无布局，resizeEvent 全量同步）──
 
     def resizeEvent(self, event: QResizeEvent) -> None:
-        """容器 resize → 全部页铺满新 rect；动画在途先快进到终态再统一归位"""
+        """容器 resize → 全部页铺满新 rect。
+
+        ★ 动画在途**不收尾**：切页后宿主的 _sync_chat_wrapper_width 会在同一
+        事件循环内改 wrapper margins，本栈随之 resize。早期版本在此直接
+        _finish_slide(interrupted=True)，等于第一帧就把动画杀掉（实测「动画
+        没了」的根因）。现在改为：更新记录的目标几何，下一页 tick 按新宽度
+        重新计算位移；动画自身节奏不变。
+        """
         super().resizeEvent(event)
-        if self._slide_anim is not None and self._slide_anim.state() == QVariantAnimation.Running:
-            self._finish_slide(interrupted=True)
         r = self.rect()
+        if self.slide_in_progress():
+            # 动画在途：只同步几何基准，位移由 _on_slide_tick 用新宽度接着算
+            self._sync_slide_baseline(r)
+            return
         for w in self._pages:
             w.setGeometry(r)
+
+    def _sync_slide_baseline(self, r) -> None:
+        """动画在途同步两页几何到新 rect（不打断动画）
+
+        _on_slide_tick 每帧都用 self.width() 重新算位移，所以把两页铺到新
+        rect 后，下一帧自然按新宽度继续滑，节奏不中断。
+        """
+        for w in (self._slide_old, self._slide_new):
+            if w is not None:
+                w.setGeometry(r)
 
     # ── QStackedWidget 兼容 API ──
 
@@ -4149,6 +4168,12 @@ class TabManagerWindow(FramelessWindow):
             ):
                 direction = self._direction_between(self._replace_active.get(cur_wid), card_id) or 1
                 self._pending_slide_direction = 0
+                # 胶囊高亮与胶囊滑动立即跟随点击：卡片内容在画外切换（300ms 后才
+                # 完成），但标题栏反馈必须即时，否则胶囊要等滑动结束才跳位，观感
+                # 是「点了没反应，然后突然跳」。配合 _do_swap 里的打断守卫，
+                # 期间若用户改点「对话」，此处的高亮会被随后的逻辑纠正。
+                self._replace_active[cur_wid] = card_id
+                self.titleBar.set_active_tab(card_id)
 
                 def _do_swap(_cm=cm, _wid=wid, _cur=cur_wid, _cid=card_id):
                     # 打断守卫：段1 期间用户意图已变（如已点「对话」）则放弃切换，
@@ -4165,6 +4190,7 @@ class TabManagerWindow(FramelessWindow):
                         _cm.show_card(_cid, _wid)
                     except Exception:
                         pass
+                    # 高亮已在点击时同步过（见上），这里只做幂等收敛
                     self._set_replace_active(_cid)
 
                 self._content_stack.slide_swap(direction=direction, swap=_do_swap)
