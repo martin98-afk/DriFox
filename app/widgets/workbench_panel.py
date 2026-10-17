@@ -40,6 +40,7 @@ from loguru import logger
 from app.widgets._workbench_helpers import _EmptyHint
 from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
 from app.widgets.flow_layout import FlowLayout
+from app.widgets.slide_tab_animator import SlideTabAnimator
 
 # ── 尺寸常量 ──
 PANEL_WIDTH_DEFAULT = 480  # 默认宽度（splitter 初始分配用）
@@ -170,6 +171,8 @@ class WorkbenchPanel(QWidget):
         # 内容栈：索引 = _page_order 顺序（全部由插件注册），卡片 tab 追加在后
         self._stack = QStackedWidget(self._bottom)
         self._bottom_layout.addWidget(self._stack, 1)
+        # 页签切换滑动（长条模型两段式，与标题栏顶栏 tab 同款体验）
+        self._slide = SlideTabAnimator(self._stack, self._bottom_layout, self)
         # 初始无任何插件页 → 先挂空态页（首帧不出现空白无提示）
         self._sync_empty_page()
 
@@ -196,9 +199,17 @@ class WorkbenchPanel(QWidget):
 
     def set_panel_visible(self, visible: bool) -> None:
         """显示/隐藏面板（用户要求：不做折叠动画，直接隐藏/显示）"""
+        if not visible:
+            # 隐藏前收敛在途滑动：不收敛会留下栈脱离布局的中间态
+            self._slide.finish_now()
         self.setVisible(bool(visible))
         if visible:
             self.raise_()
+
+    def hideEvent(self, event) -> None:
+        """被外部隐藏（宽度动画/宿主切换）时也收敛滑动，防几何脱离布局残留"""
+        self._slide.finish_now()
+        super().hideEvent(event)
 
     def remember_closed_tab(self) -> None:
         """关闭右侧边栏时记录当前页签（下次打开恢复，不强制重置为工作树）"""
@@ -279,6 +290,8 @@ class WorkbenchPanel(QWidget):
         entry = self._card_tabs.pop(card_id, None)
         if entry is None:
             return False
+        # 关页前收敛：slide 目标页可能就是被移除的这张卡
+        self._slide.finish_now()
         widget = entry["widget"]
         if self._stack.indexOf(widget) >= 0:
             self._stack.removeWidget(widget)
@@ -326,6 +339,8 @@ class WorkbenchPanel(QWidget):
             # 页签集合与标签都未变：仅重算 hover 仲裁（光标下的高亮跟随真实位置）
             self._schedule_tab_hover_sync()
             return
+        # 重建前收敛在途滑动：stack 可能已被摘离布局，且 index 会变
+        self._slide.finish_now()
         while self._tab_bar_layout.count():
             item = self._tab_bar_layout.takeAt(0)
             w = item.widget()
@@ -796,7 +811,18 @@ class WorkbenchPanel(QWidget):
         if index < 0 or index >= self._stack.count():
             index = self._stack.currentIndex()
         changed = index != self._stack.currentIndex()
-        self._stack.setCurrentIndex(index)
+        # 长条模型滑动切页：方向 = 目标页在 tab 条中的左右位置差（用户点击才动画，
+        # 程序化切换如切窗恢复直接落位不闪）。重活（refresh_data）放在段间回调，
+        # 与新页首帧一起在画外完成，滑动过程中无卡顿。
+        prev_idx = self._stack.currentIndex()
+        direction = 0
+        if user and changed:
+            direction = 1 if index > prev_idx else -1
+        switched = False
+        if direction != 0:
+            switched = self._slide.switch(index, direction, on_switched=self.refresh_current_page_data)
+        if not switched:
+            self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
         # 滑动指示器：用户点击切换时滑过去；程序性切换（切窗恢复 saved）瞬移落位
@@ -805,7 +831,7 @@ class WorkbenchPanel(QWidget):
         # 通知宿主记录（当前页签按对话窗口独立记忆，见 TabManagerWindow 回调）
         if user:
             self.current_tab_changed.emit(index)
-        if changed:
+        if changed and not switched:
             self.refresh_current_page_data()
 
     def current_tab(self) -> int:
