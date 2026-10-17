@@ -395,6 +395,11 @@ class MessageCard(SimpleCardWidget):
         self._height_anim.setDuration(0)  # 设置为0相当于禁用插值
         self._target_viewer_height = 40
         self._last_applied_viewer_height = 40
+        # 高度语义标记：True = viewer 高度靠 JS 异步上报（CodeWebViewer），
+        # 渲染完成与高度落定是两个时刻；False = 纯 Qt 渲染器（MarkdownBlockViewer，
+        # height() 与内容同步）。由 ensure_rendered 按实际创建出的渲染器写入。
+        # 回收器量取等高占位前用它判断「此刻的高度可不可信」，不靠 isinstance 推断。
+        self._viewer_async_height = True
         # 结束态高度缓动窗口（monotonic 截止时刻；0 = 无窗口）+ 剩余可用次数。
         # 由 MessageCard.finish_streaming 打开，_update_height 用尽预算即失效。
         self._finish_height_anim_until = 0.0
@@ -3007,8 +3012,40 @@ class MessageCard(SimpleCardWidget):
         # card_container 检查 NO_ANIMATION_PROP → 直接 snap 到目标高度。
         self.setProperty("noContainerAnimation", True)
         self._apply_viewer_height(target_height)
-        # 延迟清除标志，等容器 snap 完成
-        QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
+        # 延迟清除标志，等容器 snap 完成。
+        # 🐛 捕获 self 的裸 lambda 会在卡片被虚拟滚动回收销毁后仍执行 →
+        # 「wrapped C/C++ object of type MessageCard has been deleted」刷屏。
+        # 故改用绑定卡片生命周期的一次性 QTimer（见 _release_no_container_animation）。
+        self._release_no_container_animation(50)
+
+    def _release_no_container_animation(self, delay_ms: int = 50) -> None:
+        """延迟复位 ``noContainerAnimation``，定时器绑定卡片生命周期。
+
+        ⚠️ 不能用 ``QTimer.singleShot(ms, self, fn)``：三参形式（context +
+        functor）是 Qt6 / PySide6 的重载，PyQt5 只有 ``singleShot(ms, slot)``
+        与 ``singleShot(ms, Qt.TimerType, slot)``，传 self 会走 TimerType 重载并抛
+        ``TypeError: argument 2 has unexpected type 'MessageCard'``
+        （2026-10-17 实机在每个卡片的高度更新链路上刷屏）。后果不止是报错：
+        标志位永远停在 True，该容器之后所有高度变化都退化为无动画 snap。
+
+        改用 parent=self 的一次性 QTimer：卡片销毁时定时器一并析构，pending 的
+        timeout 不再派发，从根上避免「延迟窗口内 self 已释放」
+        （同 ``_schedule_stat_refresh`` / ``card_render_core._defer_emit``）。
+
+        卡片级复用同一个定时器：非流式大高度变化可能短时连续上报多次，每次新建
+        QTimer 会堆积对象；重复 start 只推迟到期，而复位动作幂等，合并语义等价。
+        """
+        timer = getattr(self, "_no_anim_release_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._reset_no_container_animation)
+            self._no_anim_release_timer = timer
+        timer.start(delay_ms)
+
+    def _reset_no_container_animation(self) -> None:
+        """清除容器无动画标志（闸门到期回调）。"""
+        self.setProperty("noContainerAnimation", False)
 
     # ── 结束态高度过渡（可关：FINISH_HEIGHT_ANIM_ENABLED）──
 
@@ -3060,7 +3097,9 @@ class MessageCard(SimpleCardWidget):
             self._finish_height_anim_active = False
             self.setProperty("noContainerAnimation", True)
             self._apply_viewer_height(end_h)
-            QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
+            # 🐛 绑定卡片生命周期的一次性 QTimer：卡片被虚拟滚动回收销毁后
+            # 定时器一并析构，不会回调到已释放的控件（PyQt5 无 context 版 singleShot）
+            self._release_no_container_animation(50)
 
     def _on_height_anim_state_changed(self, state):
         self._is_height_animating = state == QVariantAnimation.Running
@@ -3236,6 +3275,54 @@ class MessageCard(SimpleCardWidget):
                 return batch
             widget = widget.parentWidget()
         return None
+
+    def is_layout_height_settled(self) -> bool:
+        """卡片布局高度是否已落定（可安全用于量取等高占位）。
+
+        回收器（`main_widget._recycle_out_of_view_batches`）在卸载批次前用它取
+        真实高度做等高占位。判 False 的批次会被整批保留，等下一次回收周期。
+
+        三条高度语义各自的落定条件：
+
+        * **user 气泡**（PlainTextViewer）：同步定型，`set_text` 当拍即落定。
+          判据 = viewer 已建。
+        * **纯 Qt 渲染器**（MarkdownBlockViewer）：布局自适应，`height()` 与内容
+          同步（不经 JS），无异步落高窗口。判据 = viewer 已建且高度非零。
+        * **CodeWebViewer**：高度由 JS 异步上报（数百 ms），`_lazy_rendered`
+          置位时高度仍是起步 40 —— 这正是「滚轮乱跳」的失真来源。落定判据：
+          - 不在 resize preview（此时高度只记 `_pending_viewer_height`）
+          - 无未应用的 pending 高度
+          - 不在流式高度追踪中（每拍都在改）
+          - `_last_applied_viewer_height` 已离开起步值 40
+          - viewer 当前高度与已应用高度一致（±2px 噪声死区）
+
+        分流用 `_viewer_async_height` 显式标记（在 ensure_rendered 里按实际
+        创建出的渲染器写入），不靠 `isinstance(viewer, CodeWebViewer)` 推断：
+        探针/测试替身与将来的新渲染器都会让类型判断静默走错分支，而显式状态
+        总能一眼看出该走哪条语义。
+        """
+        if self.role == "user":
+            return self.viewer is not None
+        try:
+            viewer = self.viewer
+            if viewer is None:
+                return False
+            if not getattr(self, "_viewer_async_height", True):
+                # 纯 Qt 渲染器：height() 与内容同步
+                return int(viewer.height()) > 40 or int(self.height()) > 40
+            if getattr(self, "_resize_preview_mode", False):
+                return False
+            if getattr(self, "_pending_viewer_height", None) is not None:
+                return False
+            tick = getattr(self, "_stream_height_tick", None)
+            if tick is not None and tick.isActive():
+                return False
+            applied = int(getattr(self, "_last_applied_viewer_height", 40) or 40)
+            if applied <= 40:
+                return False
+            return abs(int(viewer.height()) - applied) <= 2
+        except RuntimeError:
+            return False
 
     def pin_layout_height(self, height: int, content_overhead: int | None = None) -> None:
         """T42 占位守恒：把卡片钉死在起步高度（min=max），重建瞬间容器总高不变。
@@ -3852,6 +3939,9 @@ class MessageCard(SimpleCardWidget):
             ):
                 # 灰度：纯 Qt 块级渲染器（无 Chromium/JS 层）
                 self.viewer = _get_markdown_block_viewer_cls()(self)
+                # 高度语义标记：纯 Qt 渲染器同步落定，不经过 JS 异步上报
+                # （见 is_layout_height_settled 的分流依据）
+                self._viewer_async_height = False
                 self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
                 # 直连（非 .emit 转发）：Qt 绑定 receiver 生命周期，viewer 销毁自动断连
                 self.viewer.saveFileRequested.connect(self.saveFileRequested)
@@ -3919,6 +4009,9 @@ class MessageCard(SimpleCardWidget):
                     self.viewer = None
             if self.viewer is None:
                 self.viewer = CodeWebViewer(self, light=is_welcome)
+            # 高度语义标记：QWebEngine 渲染高度靠 JS 异步上报，`_lazy_rendered`
+            # 置位时高度仍是起步值
+            self._viewer_async_height = True
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not is_welcome:
                 # 标记是否为历史会话：非流式加载的历史消息自动折叠工具区

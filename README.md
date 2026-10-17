@@ -174,7 +174,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 |---|---|---|---|
 | 全局记忆 | `<app_data>/assistant_hub/<助手>/MEMORY.md` | 默认 4000 字符 | 跨项目的稳定偏好与最珍贵经验，准入极严 |
 | 项目记忆 | `<工作目录>/.drifox/memory/<助手>/MEMORY.md` | 默认 3000 字符 | 当前项目的坑、决策与易错点，随目录走、随 git 管 |
-| 每日工作日志 | `<工作目录>/.drifox/memory/<助手>/YYYY-MM-DD.md` | append-only | 实质工作的原始沉淀，蒸馏的原料 |
+| 每日工作日志 | `<工作目录>/.drifox/memory/<助手>/YYYY-MM-DD.md` | 单条 400 字符，append-only | 实质工作的原始沉淀，蒸馏的原料 |
 
 ### 读写与注入
 

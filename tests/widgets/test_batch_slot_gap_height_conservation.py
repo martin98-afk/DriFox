@@ -116,6 +116,9 @@ def _make_window(qapp, per=2):
             card.setFixedHeight(CARD_H)
             card._message_index = idx
             card._lazy_rendered = True
+            # 本案只验「槽内间距守恒」，不涉「高度是否已落定」：显式声明落定（见
+            # tests/widgets/test_placeholder_height_settled.py 对新判据的说明）。
+            card.is_layout_height_settled = lambda: True
             layout.addWidget(card)
             cards.append(card)
         batch_cards.append(cards)

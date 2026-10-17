@@ -375,6 +375,16 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                 )
             )
             if not r.get("ok"):
+                if r.get("error") == "too_long":
+                    lim = r.get("limit") or 400
+                    return ToolResult(
+                        False,
+                        error=(
+                            f"写入被拒绝：日志正文 {r.get('chars')}/{lim} 字符超上限。"
+                            "日志是索引不是报告：只写结论、关键数字、坑与修法；过程叙述、复述需求、"
+                            "推理过程全砍。超长内容改写项目 MEMORY.md 或留在会话里。压缩后重试。"
+                        ),
+                    )
                 return ToolResult(False, error=f"写日志失败: {r.get('error')}")
             return ToolResult(True, content=f"已追加到 {r.get('date')} 工作日志（现 {r.get('chars')} 字）。")
 
@@ -449,14 +459,16 @@ _WRITE_SCHEMA = {
     "function": {
         "name": "memory_write",
         "description": (
-            "写长期记忆。scope=daily：追加当日工作日志。完成实质工作（改代码/修 bug/写文档/重构/定方案）后必须记一条；"
-            "只记进展/决策/坑/约定，禁待办、瞬时信息、报错；程序自动加「时刻|等级|摘要|」前缀，summary=一句话摘要，"
-            "level=INFO/WARNING/ERROR，content=细节正文，勿写时间戳。"
-            "新一天首条 daily 若存在未蒸馏旧日志会被拒，按返回指令蒸馏并打标后重试。"
-            "scope=project：整体替换项目 MEMORY.md（先读后写）。只记 AGENTS.md 没有的动态沉淀（坑、决策理由、易错点、用户偏好）；"
-            "AGENTS.md 静态规范（构建/测试/目录/风格/提交/EOL）禁止抄入；超上限拒绝写入（上限见助手配置，默认 3000 字符）。"
+            "写长期记忆。最简写法：一条一行，只写结论/关键数字/坑与修法，不写过程。\n"
+            "scope=daily：追加当日工作日志。**门槛高**：只有产出跨会话仍有用的结论时才记（定案、踩坑与修法、量化基线、"
+            "用户明确要求）；同一任务多轮打磨只记最终结论一次；探路、试错、中途状态、待办一律不记。"
+            "正文硬上限 400 字符，超限拒写。禁止：过程叙述、复述需求、推理链、代码/日志粘贴、"
+            "分节小标题（## 现象/## 根因）。summary=一句话结论（≤30 字），level=INFO/WARNING/ERROR。"
+            "新一天首条 daily 若存在未蒸馏旧日志会被拒，按返回指令蒸馏并打标后重试。\n"
+            "scope=project：整体替换项目 MEMORY.md（先读后写）。只记 AGENTS.md 没有的动态沉淀（坑、决策理由、易错点、用户偏好），"
+            "一条一碎片、禁散文；AGENTS.md 静态规范（构建/测试/目录/风格/提交/EOL）禁止抄入；超上限拒写（默认 3000 字符）。\n"
             "scope=global：整体替换全局 MEMORY.md（先读后写）。准入极严：仅用户显式要求的跨项目规则、蒸馏筛出的最珍贵且与项目无关经验；"
-            "超上限拒绝写入（默认 4000 字符）。除用户明确要求，不存密钥。"
+            "超上限拒写（默认 4000 字符）。除用户明确要求，不存密钥。"
         ),
         "parameters": {
             "type": "object",
@@ -467,7 +479,7 @@ _WRITE_SCHEMA = {
                 },
                 "content": {
                     "type": "string",
-                    "description": "daily=细节正文；project/global=完整新文件内容",
+                    "description": "daily=细节正文（≤400 字符，超出拒写）；project/global=完整新文件内容",
                 },
                 "date": {"type": "string", "description": "daily 补写日期 YYYY-MM-DD，缺省今天"},
                 "level": {

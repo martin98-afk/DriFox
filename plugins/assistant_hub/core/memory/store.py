@@ -43,6 +43,8 @@ DAILY_LOOKBACK = 7  # 注入的近期日志条数
 STALE_DAILY_DAYS = 30  # 超期未蒸馏阈值（天）
 GLOBAL_MEMORY_MAX_CHARS = 4000
 PROJECT_MEMORY_MAX_CHARS = 3000
+# 单条工作日志正文上限（摘要另计）。日志是索引不是报告，超限直接拒写逼模型压缩
+DAILY_ENTRY_MAX_CHARS = 400
 
 _locks: Dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -434,12 +436,20 @@ def append_daily(
     程序给每条记录打 loguru 风格前缀：`YYYY-MM-DD HH:MM:SS | LEVEL | 摘要 | 细节`。
     时刻与等级是精确字段，由程序生成；模型提供 summary（一句话，便于浏览）与
     text（细节）；level 非法回落 INFO，summary 缺省时退化为三段式。
+    正文超 DAILY_ENTRY_MAX_CHARS 直接拒写（日志是索引不是报告）。
     """
     if not workdir:
         return {"ok": False, "error": "no_workdir"}
     body = (text or "").strip()
     if not body:
         return {"ok": False, "error": "empty"}
+    if len(body) > DAILY_ENTRY_MAX_CHARS:
+        return {
+            "ok": False,
+            "error": "too_long",
+            "chars": len(body),
+            "limit": DAILY_ENTRY_MAX_CHARS,
+        }
     lvl = str(level or "INFO").strip().upper()
     if lvl not in _LOG_LEVELS:
         lvl = "INFO"

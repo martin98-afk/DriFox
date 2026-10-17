@@ -10,9 +10,11 @@
 
 ## 守卫语义
 
-`_batch_fully_rendered`：批次内所有存活卡片 `_lazy_rendered=True` 才可回收。
-- user 卡气泡模式下恒 True（PlainTextViewer 非懒渲染），不受影响；
-- 未渲染卡没有 QWebEngineView、不占渲染配额，回收零收益纯风险；
+`_batch_fully_rendered`：批次内所有存活卡片都满足
+①`_lazy_rendered=True` **且** ②高度已落定（`is_layout_height_settled()`）才可回收。
+- ① 拦「从没渲染过」的批次（没有 viewer、不占配额，回收零收益纯风险）；
+- ② 拦「刚渲染完但 viewer 高度还是起步 40px」的批次（见
+  `tests/widgets/test_placeholder_height_settled.py`）；
 - `_unload_batch`（LRU/强回收入口）与 `_recycle_out_of_view_batches`
   （视口回收器）两侧都必须守。
 """
@@ -47,23 +49,52 @@ def _make_win():
     return win
 
 
-def _card(lazy: bool) -> MessageCard:
+class _FakeViewer:
+    """CodeWebViewer 替身：只提供落定判定与占位量取需要的最小面。"""
+
+    def __init__(self, height: int):
+        self._h = height
+
+    def height(self) -> int:
+        return self._h
+
+
+def _card(lazy: bool, settled: bool = True) -> MessageCard:
+    """构造一张姿态可控的 assistant 卡。
+
+    ``settled=True``：模拟「已懒渲染且高度已落定」——viewer 存在、
+    ``_last_applied_viewer_height`` 与 viewer 高度一致。
+    ``settled=False``：模拟「刚懒渲染完但高度仍停在起步值」——viewer 已在，
+    ``_last_applied_viewer_height`` 还是 40。
+    """
     card = MessageCard(role="assistant")
     card.setFixedHeight(300)
     card._lazy_rendered = lazy
+    card._viewer_async_height = True  # 按 CodeWebViewer 语义验（异步落高）
+    if lazy:
+        if settled:
+            card.viewer = _FakeViewer(300)
+            card._last_applied_viewer_height = 300
+        else:
+            card.viewer = _FakeViewer(40)
+            card._last_applied_viewer_height = 40
     return card
 
 
 def test_batch_fully_rendered_semantics(qapp):
-    """渲染态判定：未渲染 assistant → False；已渲染 → True；非卡/死引用忽略。"""
+    """渲染态判定：未渲染 / 未落高 → False；已渲染且落定 → True。"""
     win = _make_win()
     win._is_widget_alive = lambda w: True
     rendered = _card(lazy=True)
     unrendered = _card(lazy=False)
+    stale = _card(lazy=True, settled=False)
 
     assert win._batch_fully_rendered([rendered]) is True
     assert win._batch_fully_rendered([rendered, unrendered]) is False
     assert win._batch_fully_rendered([unrendered]) is False
+    # 高度未落定同样不可回收（占位高度会失真）
+    assert win._batch_fully_rendered([stale]) is False, "高度还在起步值的批次不得回收"
+    assert win._batch_fully_rendered([rendered, stale]) is False
     # 非 MessageCard 引用（mock/其它 widget）不参与判定
     assert win._batch_fully_rendered([MagicMock(), rendered]) is True
     # 空批次：无可卸内容，按「可回收」处理（调用方自身有空批次短路）

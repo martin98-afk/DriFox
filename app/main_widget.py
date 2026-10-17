@@ -255,6 +255,22 @@ STREAM_BOTTOM_EVENT_DRIVEN = os.environ.get("DRIFOX_EVENT_SCROLL", "1") != "0"
 # 共用阈值会让胶囊在跟随边界上反复闪现/消失。
 SCROLL_JUMP_SHOW_THRESHOLD = 120
 
+# 跳转落点收敛链参数（见 MainWidget._locate_and_scroll_to_batch）。
+# 跳转目标卡片刚建/刚重建时布局尚未传播，同栈读到的 card.y() 是插入前的陈旧
+# 几何（探针实测 0，收敛后 1232）——单次 setValue 必然落错位置，用户得点两次。
+# 这里按拍重读几何补正，直到连续两拍读到同一 y 或预算耗尽。
+# 间隔取 16ms（一帧）：布局传播在 LayoutRequest 之后一帧内完成，比 0ms 定时器
+# 更接近"下一帧可用几何"的语义，也不会把收敛链拖成肉眼可见的动画。
+JUMP_SETTLE_INTERVAL_MS = 16
+# 落点收敛预算：需要等「目标卡 y」与「容器总高」双双稳定，比只等 y 稳定慢。
+# 40 拍 × 16ms ≈ 640ms，覆盖分批 prepend 完成 + 卡片逐个落高。
+JUMP_SETTLE_MAX_TRIES = 40
+# 跳转置底的「尾巴」窗口（ms）：跳转结束后再压制这么久，覆盖高度上报晚到的空档。
+# ⚠️ 这是**尾巴**不是总时长：跳转进行期间由 `_extend_jump_scroll_lock()` 每拍续期。
+# 历史教训（固定 3s 总时长）：大卡片（单条回复 3000px+、几十张）懒渲染远超 3s，
+# 锁到期时队列还没排空，排空置底照样把视口拽走 —— 「消息数高的卡片死活跳不过去」。
+JUMP_SCROLL_LOCK_TAIL_MS = 1200
+
 # 宽度同步分帧批大小：实测 sync_width 约 1.4ms/张（setMin/MaxWidth 布局失效
 # + update_height 的 runJavaScript IPC），8 张 ≈ 11ms，低于单帧预算（16ms），
 # 保证批间让出主线程后 UI 无冻结感。
@@ -1145,7 +1161,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 虚拟滚动：可见范围外前后保留多少个增量批次（缓冲区）
         # 增加缓冲区：保留 1 倍可视区域批次数量的额外卡片，减少 WebEngine 重建
         # 值越大回收越保守（减少 WebEngine 重建），值越小内存越低
-        self._virtual_scroll_buffer = 1
+        #
+        # 🐛 1 → 2：真机日志显示相邻卡片频繁「丢了要重新加载」。保留圈 = inc×buffer
+        # = 8×1 = 8 批，而卡片高度差一个数量级（一行 60px / 带工具输出 3000px+），
+        # 8 批对高卡片不足两屏，滚一格就穿过整个保留区 → 立刻卸载 → 用户看到空白
+        # 占位等重建。改 2（±16 批）后，配合 `_restore_window_batches` 的
+        # 「1.5 视口高」像素口径，滚轮邻域始终有已渲染内容。
+        # 内存代价由渲染配额（`_MAX_RENDERED_CARDS`）兜底，保留圈只是「允许保留多
+        # 少批 UI」，不等于渲染多少页 —— 未渲染的保留批次不含 WebEngine。
+        self._virtual_scroll_buffer = 2
         self._message_batch: List[List[Dict[str, Any]]] = []
         # [T5-5] 节点→batch 映射缓存：(指纹, mapping)。指纹变化自动失效，
         # 无需在各 _message_batch 变更点手动清理
@@ -1300,6 +1324,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 与 `_reset_bottom_follow`（用户点击发送 / 切会话 / 清空聊天区）两处；
         # 判定一律走 `_should_follow_bottom()`。禁止在别处直接读写这个标志。
         self._user_intentionally_away_from_bottom = False
+        # 跳转锁（monotonic 截止时刻；0 = 无锁）。点历史问题 / 时间线跳转后，
+        # 目标批次重建会进懒渲染队列，队列排空时 `_process_next_lazy_batch`
+        # 无条件 `_scroll_to_bottom(sticky_ms=900)` —— 把刚落好的视口拽回底部
+        # （「跳转后一帧看到目标，加载完又跑到底」的直接成因）。跳转本身是程序
+        # 滚动，`away` 永远置不上，所以 follow 守卫拦不住。
+        # 这里用带过期时间的显式锁压住所有「滚到最下面」请求，用户一旦真实
+        # 滚动（非程序滚动）立即释放（见 `_on_scroll_changed`）。
+        self._jump_scroll_lock_until = 0.0
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
         # 差异统计延迟队列：[（入队时会话 ID, 卡片）, ...]。历史加载时每张
@@ -1386,6 +1418,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
         self._pending_scroll_to_batch: Optional[int] = None  # 时间线节点滚动目标 batch 索引
         self._pending_scroll_to_update: Optional[int] = None  # 待更新的节点索引（用于同步高亮和进度）
+        # 跳转落点收敛链（见 _locate_and_scroll_to_batch）：目标卡引用 + 剩余拍数
+        # + 上一拍落点。目标卡销毁/会话切换时链自行终止（_jump_settle_step 内判活）。
+        self._jump_target_card = None
+        self._jump_settle_left: int = 0
+        self._jump_settle_last_geom: Optional[tuple] = None
         # 撤销删除功能：回退条目栈由 input_card_module 创建（_undo_delete_store），
         # 这里不再声明 —— 旧字段 _undo_delete_stack 是「声明为缓存栈但全仓零引用」
         # 的死代码，单步缓存 _undo_delete_cache 也已被类型化栈取代。
@@ -12080,6 +12117,16 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._is_virtual_recycling or len(self._batch_cards) == 0:
             return
+        # 🐛 跳转/历史加载期间禁止回收：`_load_history_to_index` 会把目标批次
+        # prepend 到布局顶部，而此刻视口往往仍在消息列表底部 —— 新批次连同
+        # 目标批次全落在「视口外」，回收器立刻把它们拆掉（真机日志：跳转瞬间
+        # 连着几个「回收 8 个离屏批次」→ 随后 `Card not found after history
+        # load, index=0` → 落点放弃 → 视口留在底部，用户看到「死活跳不过去」）。
+        #
+        # 判据用「加载中 + 跳转收敛链未完成」而非单纯时间窗：分批加载是
+        # 100ms/拍 的异步链，时长随目标距离变化，固定窗口不可靠。
+        if self._is_loading_history_batches or self._is_jump_in_flight():
+            return
 
         self._is_virtual_recycling = True
         try:
@@ -12394,17 +12441,45 @@ class OpenAIChatToolWindow(ToolWindow):
             return False
 
     def _batch_fully_rendered(self, cards: list) -> bool:
-        """批次内所有存活卡片是否都已完成懒渲染。
+        """批次内所有存活卡片是否都已完成懒渲染**且高度已落定**。
 
-        未渲染卡片高度只有起步值（40px 级），按它装等高占位等于把失真高度钉进
-        布局：随后滚回视口重建/补渲，卡片长高数千 px，连环滚动补偿把视口拽走
-        （「滚轮异常跳动」主因）。且未渲染卡没有 QWebEngineView、不占渲染配额，
-        回收它们零收益纯风险 —— 守卫判 False 时调用方应整批保留 UI。
+        🐛 为什么不能只看 `_lazy_rendered`：该标记在 viewer **创建完成**时就置
+        True，而 viewer 的真实高度要等 JS 渲染完异步上报（CodeWebViewer 数百 ms，
+        纯 Qt 渲染器一拍）。这段窗口里 `card.height()` 仍是起步值（40px 级）。
+
+        按这个高度装等高占位 = 把失真高度钉进布局。实测链路（探针
+        tests/debug/vscroll_placeholder_stale_height_repro.py，
+        tests/debug/verify_recycle_skips_stale_height.py）：
+
+            1. `_recycle_out_of_view_batches` 第 1 步给视口 ±8 批全部
+               ensure_rendered（`_lazy_rendered` 立刻 True，高度仍 40）
+            2. 渲染计数超配额 → 下一帧 `_recycle_lru_batches` 淘汰距视口 >2 的
+               批次 —— 正好是刚建好的 ±3~±8
+            3. 本守卫原判据通过 → 占位高度取 40/张
+            4. 用户滚回该区 → 重建 pin 到 40 → viewer 落高 800/张
+               → 视口内容整体位移数千 px（「滚轮乱跳」的直接成因）
+
+        所以判据必须包含「高度已落定」。落定条件（任一不满足即视为未落定）：
+        - 不在流式高度追踪中（`_stream_height_tick` 未激活）：追踪期间高度每拍
+          都在改，此刻量到的值下一拍就作废
+        - 不在 resize preview 中：该模式下高度只记 `_pending_viewer_height`，
+          viewer 自身高度停在旧值
+        - `_last_applied_viewer_height` 已离开起步值 40
+        - viewer 当前高度与已应用高度一致（±2px 噪声死区）
+
+        代价：刚渲染完还没落高的批次会被保留（多留几张卡一小会儿）。它们不占
+        额外内存（viewer 已建好），下一次回收周期高度落定后自然可卸。
         """
         for card in cards or []:
-            if isinstance(card, MessageCard) and self._is_widget_alive(card):
-                if not getattr(card, "_lazy_rendered", False):
-                    return False
+            if not isinstance(card, MessageCard) or not self._is_widget_alive(card):
+                continue
+            if not getattr(card, "_lazy_rendered", False):
+                return False
+            # 高度落定判定内聚在卡片侧（它才分得清 CodeWebViewer / 纯 Qt 渲染器 /
+            # user 气泡三条高度语义完全不同的路径）。
+            probe = getattr(card, "is_layout_height_settled", None)
+            if probe is None or not probe():
+                return False
         return True
 
     def _unload_batch(self, batch_idx: int) -> int:
@@ -12574,13 +12649,81 @@ class OpenAIChatToolWindow(ToolWindow):
         出现在同一次调用里，`batches=50/9 ↔ 50/14` 波动、`rendered` 单调超配额，
         全程无用户操作。
 
-        收窄后语义才自洽：只有视口真正邻域的批次保证有内容（防白屏），
-        其余保留圈的批次允许保持占位（用户滚过去时视口移动，它们进入重建窗口
-        才被唤醒），从而给 LRU 淘汰器留出可卸载的候选。
+        🐛 按**批数**算窗口注定不够：卡片高度差一个数量级（一行消息 60px，
+        带工具输出的回复 3000px+）。固定 ±4 批对矮批次是几屏缓冲、对高批次
+        不足半屏 —— 用户滚一格就穿过整个窗口，看到的正是「相邻卡片也丢了、
+        要等重新加载」。这里改为**按像素**取窗口名下界：
+
+        - 至少覆盖 1.5 个视口高（`viewport.height()`）：滚轮一格约半屏，
+          1.5 屏保证「下一屏必定已有内容」
+        - 同时不超过保留圈上限 `_virtual_buffer_batches()`（否则对拆自激 T42）
+
+        换算：从视口边缘向外累加批次高度，直到覆盖目标像素或触顶。批次高度
+        用占位/卡片实高，读不到就按 300px 估。
         """
-        # 至少 ±1：保留圈本身已很小时（退化配置），±1 与它等价，不会产生对拆
-        # （distance=1 的批次本就在保护圈内、从不会被卸载，也就无重建可触发）。
-        return max(1, self._virtual_buffer_batches() // 4)
+        limit = max(1, self._virtual_buffer_batches())
+        # ⚠️ 必须严格小于保留圈：窗口 == 保留圈会重启 T42 对拆自激
+        # （第二步卸载圈外 → 第 1.5 步重建圈内 → 圈内圈外边界每 0.5s 互殴）。
+        # 保留圈（`inc × buffer` = 8×1 = 8）留 1 批余量给淘汰器做候选。
+        limit = max(1, limit - 1)
+        try:
+            viewport_h = int(self.chat_scroll_area.viewport().height())
+        except AttributeError, RuntimeError, TypeError, ValueError:
+            return max(1, limit // 2)
+        if viewport_h <= 0:
+            return max(1, limit // 2)
+        need_px = int(viewport_h * 1.5)
+
+        vp_start, vp_end = self._resolve_viewport_range()
+        # 上方：从 vp_start 向上累加
+        span_up = 0
+        acc = 0
+        idx = vp_start - 1
+        while idx >= 0 and acc < need_px and span_up < limit:
+            acc += self._batch_height_estimate(idx)
+            span_up += 1
+            idx -= 1
+        # 下方：从 vp_end 向下累加
+        span_down = 0
+        acc = 0
+        idx = vp_end + 1
+        total = len(getattr(self, "_batch_cards", []) or [])
+        while idx < total and acc < need_px and span_down < limit:
+            acc += self._batch_height_estimate(idx)
+            span_down += 1
+            idx += 1
+
+        return max(1, min(limit, max(span_up, span_down)))
+
+    def _batch_height_estimate(self, batch_idx: int) -> int:
+        """估一批占多少像素（重建窗口换算用）：卡片实高优先，占位次之，兜底 300。"""
+        # ⚠️ 桩实例（`__new__` 未调 super().__init__）上访问 Qt/未定义属性抛的
+        # 是 RuntimeError 而非 AttributeError，两种都要吞。
+        try:
+            cards = self._batch_cards[batch_idx]
+        except (AttributeError, RuntimeError, TypeError, IndexError):
+            cards = None
+        if cards:
+            total = 0
+            for card in cards:
+                try:
+                    total += max(0, int(card.height()))
+                except RuntimeError, TypeError, ValueError:
+                    continue
+            if total > 0:
+                gap = 0
+                try:
+                    gap = self._batch_slot_gap(len(cards))
+                except AttributeError, RuntimeError, TypeError, ValueError:
+                    gap = 0
+                return total + gap
+        try:
+            ph = self._batch_placeholders.get(batch_idx)
+            if ph is not None:
+                return max(1, int(ph.height()))
+        except AttributeError, RuntimeError:
+            pass
+        return 300
 
     def _batch_is_protected(self, batch_idx: int, vp_range: Optional[tuple] = None) -> bool:
         """判断批次是否受保护（温和淘汰不碰）：
@@ -12733,6 +12876,12 @@ class OpenAIChatToolWindow(ToolWindow):
         每卸一批做滚动补偿（setValue(值 - removed_h)）防止视口跳动。
         """
         if self._is_virtual_recycling or not self._batch_cards:
+            return
+        # 🐛 跳转/历史加载期间不淘汰：此时布局是中间态（目标批次刚 prepend、
+        # 视口未移动），按视口算的「距离」会把目标批次判成最远优先淘汰 →
+        # 跳转落点必然失败（真机日志：回收 8 批 → Card not found → 留在底部）。
+        # 内存压力由 `_recycle_out_of_view_batches` 的同一守卫一起避让。
+        if self._is_loading_history_batches or self._is_jump_in_flight():
             return
         # 计数校准：每 20 次调用按实况重算一次，抹平漏记路径造成的漂移
         # （漏记方向恒为「偏低」→ 配额失效，这条校准是兜底闸门）
@@ -14169,6 +14318,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         TIME_SLICE_MS = 16
 
+        # 🐛 懒渲染每拍都续期跳转锁：大卡片（单条 3000px+、几十张）建 viewer 的
+        # 排队时长轻松超过任何固定窗口，续期才能保证「队列还在跑 → 锁还活着」。
+        self._extend_jump_scroll_lock()
+
         if not self._pending_lazy_cards:
             self._loading_session = False
             self._lazy_batch_timer_active = False
@@ -14215,10 +14368,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 批次全部渲染完成，统一更新滚动
         # 🐛 修复：用户已主动滚离底部时禁止在此强制置底——否则向上滚动
         # 到顶加载历史批次时，懒渲染完成会把视口拉回底部（滚轮自动置底回归）。
+        # ⚠️ 本处是**直写** setValue(maximum)，不经 `_do_scroll_to_bottom`，
+        # 因此必须自己过 `_should_follow_bottom()`（含跳转锁）：跳转后目标批次
+        # 的重建卡正是从这里被懒渲染，漏守卫就会把刚落好的视口拽回底部。
         if self._loading_session and self._should_follow_bottom():
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
             if not self._initial_scroll_to_bottom or self._is_view_at_bottom():
-                scroll_bar.setValue(scroll_bar.maximum())
+                with self._programmatic_scroll():
+                    scroll_bar.setValue(scroll_bar.maximum())
                 self._initial_scroll_to_bottom = True
 
         # [PERF] 继续处理下一批：80ms 间隔给 Chromium 进程喘息空间，避免批量
@@ -15418,6 +15575,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
 
+        # 🐛 先上跳转锁再走任何分支：目标批次不在已加载窗口时，本方法会转去
+        # `_load_history_to_index` 分批 prepend，最终由 `_scroll_to_pending_target`
+        # 落地。那条路径**不经过** `_locate_and_scroll_to_batch`，历史上因此从未
+        # 上锁 → 落点后懒渲染排空照样把视口拽回底部（「跳转后一帧看到目标，
+        # 加载完又跑到底」的真机主路径：长会话跳靠前的历史问题必走这里）。
+        self._lock_scroll_after_jump()
+
         # 将节点索引转换为 _message_batch 索引（与 build_node_preview_data 对齐）
         target_batch_index = self._get_batch_index_from_node_index(target_index)
         if target_batch_index < 0:
@@ -15459,8 +15623,25 @@ class OpenAIChatToolWindow(ToolWindow):
         # 每拍只补 `_incremental_visible_batch_count` 批，100ms 后再续，直到
         # 覆盖目标位置；续拍由下面的 singleShot 驱动（到位后走滚动分支返回）。
         step = max(1, int(getattr(self, "_incremental_visible_batch_count", 8) or 8))
+        # 每拍续期：分批加载是 100ms/拍 的异步链，长会话跳最前面要几十拍，
+        # 固定时长必然不够（见 _is_jump_scroll_locked 的说明）
+        self._extend_jump_scroll_lock()
         chunk_start = max(target_batch_start, self._visible_batch_start - step)
         if chunk_start < self._visible_batch_start:
+            # 🐛 顶部 prepend 必须补锚点：新批次插到 index 0 会把下方所有内容
+            # 整体下推 Σ(新高度)，而 Qt 滚动区无 scroll anchoring，value 不动
+            # = 用户眼前内容整段往下跳（探针实测 prepend 8 批下跳 2464px）。
+            # 对齐 `_load_more_history_batches` 的既有一致做法：记录插入前的
+            # 总高与 value，插入后**下一拍**按高度差回补。
+            #
+            # ⚠️ 必须延后一拍：`container.sizeHint()` / `layout.sizeHint()` 在
+            # insertWidget 之后当拍都读不到新高度（探针实测增量 0，收敛后才是
+            # 1848）——同栈读高度等于没补偿。分批路径本身有 100ms 续拍间隔，
+            # singleShot(0) 有充足余量在下一拍前完成。
+            scroll_bar = self.chat_scroll_area.verticalScrollBar()
+            previous_value = scroll_bar.value()
+            previous_height = self.chat_container.sizeHint().height()
+
             self._render_message_to_card(
                 self._message_batch[chunk_start : self._visible_batch_start],
                 insert_at_top=True,
@@ -15469,6 +15650,22 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 更新可见范围
             self._visible_batch_start = chunk_start
+
+            def _restore_prepend_anchor():
+                try:
+                    new_height = self.chat_container.sizeHint().height()
+                    delta = max(0, new_height - previous_height)
+                    # 上界可能还没传播：先校正，否则 setValue 会被钳到旧上界
+                    self._scroll_max_cache = None
+                    self._sync_scroll_maximum()
+                    if delta:
+                        # 包 _programmatic_scroll：程序补偿不得被记成用户滚离底部
+                        with self._programmatic_scroll():
+                            scroll_bar.setValue(previous_value + delta)
+                except RuntimeError:
+                    pass
+
+            QTimer.singleShot(0, _restore_prepend_anchor)
 
             # 延迟检查是否需要继续加载（使用 QTimer.singleShot 避免重复）
             QTimer.singleShot(100, lambda: self._load_history_to_index(target_batch_start))
@@ -15492,31 +15689,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if target_batch_index < 0:
             return
 
-        # 优先从 _batch_cards 查找（更可靠）
-        if 0 <= target_batch_index < len(self._batch_cards):
-            cards = self._batch_cards[target_batch_index]
-            if cards:
-                for card in cards:
-                    if self._is_widget_alive(card) and isinstance(card, MessageCard):
-                        if card.role == "user":
-                            self.chat_scroll_area.verticalScrollBar().setValue(card.y())
-                            return
-
-        # 回退：遍历布局查找
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
-                continue
-            widget = item.widget()
-            if not isinstance(widget, MessageCard):
-                continue
-            if getattr(widget, "_is_welcome", False):
-                continue
-            if widget.role == "user" and getattr(widget, "_message_index", None) == target_batch_index:
-                self.chat_scroll_area.verticalScrollBar().setValue(widget.y())
-                return
-
-        logger.warning(f"[NodePreview] Card not found after history load, index={target_index}")
+        if not self._locate_and_scroll_to_batch(target_batch_index):
+            logger.warning(f"[NodePreview] Card not found after history load, index={target_index}")
 
     def _restore_batch_ui(self, batch_idx: int) -> bool:
         """把已卸载（只留等高占位）的批次原位重建为卡片。
@@ -15550,42 +15724,196 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         return bool(self._batch_cards[batch_idx])
 
-    def _scroll_to_batch_index(self, batch_index: int, node_index: int = -1):
-        """
-        滚动到指定 batch 索引的位置。
-        优先使用 _batch_cards 查找，如果找不到再遍历布局作为回退。
-        """
-        if node_index >= 0:
-            self._pending_scroll_to_update = node_index
+    def _locate_and_scroll_to_batch(self, batch_index: int) -> bool:
+        """把视口定位到指定批次的 user 卡片顶部（全项目唯一跳转落点）。
 
-        # 🐛 目标批次已被卸载（只剩占位）时先原位重建，否则查卡片 / 查布局
-        # 两条路都落空 → 跳转静默失败（见 `_restore_batch_ui`）。
+        Args:
+            batch_index: `_message_batch` 下标。
+
+        Returns:
+            是否找到目标卡片并发起了定位。
+
+        为什么必须收敛成公共出口：三处调用点（历史问题弹窗 / 节点预览 / 分页
+        历史加载后定位）此前各自复制了一段「查 `_batch_cards` → 回退扫布局 →
+        `setValue(card.y())`」，重复的不只是代码，还有三个共同缺陷：
+
+        1. **同栈读 y 是陈旧几何**。卡片刚建/刚重建时布局尚未传播，
+           `card.y()` 还是插入前的值（探针实测 0，收敛后 1232）→ 第一次跳转
+           差出上千 px，用户必须再点一次才到对的位置。
+        2. **没有收敛复核**。卡片重建走懒渲染，之后 viewer 高度异步上报会持续
+           改变上方内容总高，落点跟着漂。单次 `setValue` 之后就没人管了。
+        3. **不做钳制**。`card.y()` 可能超过当前 `maximum`（高度还没上报完），
+           `setValue` 会被 Qt 静默钳到旧上界。
+
+        修复方式：发起定位后挂一个短收敛链（`_schedule_jump_settle`），逐拍重读
+        几何并补正，直到两次落点一致或预算耗尽。全部 `setValue` 包
+        `_programmatic_scroll`，不得被误判成用户滚离底部。
+        """
+        if not (0 <= batch_index < len(self._batch_cards)):
+            return False
+
+        # 🐛 目标批次已卸载（只剩占位）时先原位重建。历史实现只在
+        # `_scroll_to_batch_index` 里调 `_restore_batch_ui`，而
+        # `_scroll_to_pending_target`（分批加载完成后落地）直接调本方法 ——
+        # 目标批次在加载途中被虚拟滚动回收时，两条查找路径全部落空，
+        # 于是静默失败（真机日志 `[NodePreview] Card not found after history
+        # load, index=0`：跳最前面的消息永远失败）。
+        # 收进公共出口后，所有调用点自动获得重建能力。
         self._restore_batch_ui(batch_index)
 
-        # 优先从 _batch_cards 查找（更可靠，避免虚拟回收后布局遍历失效）
-        if 0 <= batch_index < len(self._batch_cards):
-            cards = self._batch_cards[batch_index]
-            if cards:
-                for card in cards:
-                    if self._is_widget_alive(card) and isinstance(card, MessageCard):
-                        # 确保是 user card
-                        if card.role == "user":
-                            self.chat_scroll_area.verticalScrollBar().setValue(card.y())
-                            return
+        card = self._find_jump_target_card(batch_index)
+        if card is None:
+            return False
 
-        # 回退：遍历布局查找（处理边界情况，如刚创建但尚未加入 _batch_cards）
+        self._jump_target_card = card
+        self._jump_settle_left = JUMP_SETTLE_MAX_TRIES
+        self._jump_settle_last_geom = None
+        # 先上锁再落点：落点本身是程序滚动，紧接着的懒渲染排空/锚定重试
+        # 都必须被压住，否则视口会被拽回底部
+        self._lock_scroll_after_jump()
+        self._apply_jump_target_now()
+        self._schedule_jump_settle()
+        return True
+
+    def _find_jump_target_card(self, batch_index: int):
+        """找出批次对应的 user 卡片（`_batch_cards` 优先，布局遍历兜底）。"""
+        cards = self._batch_cards[batch_index] if 0 <= batch_index < len(self._batch_cards) else None
+        if cards:
+            for candidate in cards:
+                if (
+                    self._is_widget_alive(candidate)
+                    and isinstance(candidate, MessageCard)
+                    and candidate.role == "user"
+                ):
+                    return candidate
+
+        # 回退：遍历布局（处理刚创建但尚未登记进 _batch_cards 的边界）
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
-                continue
-            widget = item.widget()
+            widget = item.widget() if item else None
             if not isinstance(widget, MessageCard):
                 continue
             if getattr(widget, "_is_welcome", False):
                 continue
             if widget.role == "user" and getattr(widget, "_message_index", None) == batch_index:
-                self.chat_scroll_area.verticalScrollBar().setValue(widget.y())
-                return
+                return widget
+        return None
+
+    def _apply_jump_target_now(self) -> bool:
+        """按当前几何把视口落到目标卡片顶部（收敛链与首次落点共用）。"""
+        card = getattr(self, "_jump_target_card", None)
+        if card is None or not self._is_widget_alive(card):
+            return False
+        target = self._resolve_jump_target_value(card)
+        if target is None:
+            return False
+        try:
+            sb = self.chat_scroll_area.verticalScrollBar()
+            if target == sb.value():
+                return True
+            with self._programmatic_scroll():
+                sb.setValue(target)
+            return True
+        except RuntimeError:
+            return False
+
+    def _resolve_jump_target_value(self, card) -> Optional[int]:
+        """算出本次跳转应该落到哪个滚动值（已钳制到合法上界）。
+
+        ⚠️ 用 ``card.y()``，不要用「布局项高度累加」：卡片的 ``height()`` 在
+        布局里可能被压（stretch/最小尺寸协商），与真实占位高度不一致 ——
+        探针实测同一条链里 ``height()`` 报 300 而实际 y 差只有 62，累加会算出
+        1232，真实位置只有 247。``card.y()`` 虽然要等布局传播，但它一旦有效
+        就是权威值；传播延迟由收敛链（`_jump_settle_step`）负责追平。
+
+        上界可能因卡片高度尚未上报而偏低：先按即时布局补一次
+        （`_sync_scroll_maximum`），否则 `setValue` 会被 Qt 静默钳到旧上界。
+
+        Returns:
+            合法滚动值；几何不可读（对象销毁 / 类型异常）时返回 None。
+        """
+        try:
+            self._sync_scroll_maximum()
+            raw = int(card.y())
+            upper = int(self.chat_scroll_area.verticalScrollBar().maximum())
+        except RuntimeError, TypeError, ValueError:
+            return None
+        return max(0, min(raw, upper))
+
+    def _schedule_jump_settle(self) -> None:
+        """挂下一拍收敛复核（目标卡销毁 / 会话切换即自行终止）。"""
+        if self._jump_settle_left <= 0:
+            self._jump_target_card = None
+            return
+        self._jump_settle_left -= 1
+        QTimer.singleShot(JUMP_SETTLE_INTERVAL_MS, self._jump_settle_step)
+
+    def _jump_settle_step(self) -> None:
+        """收敛拍：布局传播后重读几何，稳定即停。
+
+        🐛 停止条件不能只看「连续两拍读到同一 y」：跳转落点后布局还在传播
+        （prepend 完成、卡片逐个落高、上界扩张），`card.y()` 会在一段**中间态**
+        上停留数拍。探针实测：目标卡最终 y=247，而收敛链在 1232 上连读两拍就
+        收手 → 落点偏差近千 px。
+
+        稳定判据用「容器**实际**高度 + 目标 y」两者都没变：
+        - `card.y()`：目标自身位置
+        - `container.height()`：上方内容总高（真实几何，不是 sizeHint；
+          sizeHint 在布局未跑时是陈旧值，会被中间态骗过）
+
+        任一变化就继续补正。预算耗尽则停在最后一次落点（不会比不补正好）。
+        """
+        # 每拍续期置底压制：跳转还在收敛，锁就必须还活着（见 _is_jump_scroll_locked）
+        self._extend_jump_scroll_lock()
+        card = getattr(self, "_jump_target_card", None)
+        if card is None:
+            return
+        if not self._is_widget_alive(card):
+            self._jump_target_card = None
+            self._jump_settle_last_geom = None
+            return
+        target = self._resolve_jump_target_value(card)
+        if target is None:
+            self._jump_target_card = None
+            self._jump_settle_last_geom = None
+            return
+
+        container = self.chat_scroll_area.widget()
+        try:
+            geom = (target, int(container.height()) if container is not None else 0)
+        except RuntimeError:
+            self._jump_target_card = None
+            self._jump_settle_last_geom = None
+            return
+
+        last_geom = getattr(self, "_jump_settle_last_geom", None)
+        if geom == last_geom:
+            # 目标 y 与容器实际高度都两拍未变 → 布局已稳定，收敛完成
+            self._jump_target_card = None
+            self._jump_settle_last_geom = None
+            return
+        self._jump_settle_last_geom = geom
+
+        try:
+            with self._programmatic_scroll():
+                self.chat_scroll_area.verticalScrollBar().setValue(target)
+        except RuntimeError:
+            self._jump_target_card = None
+            self._jump_settle_last_geom = None
+            return
+        self._schedule_jump_settle()
+
+    def _scroll_to_batch_index(self, batch_index: int, node_index: int = -1):
+        """
+        滚动到指定 batch 索引的位置。
+
+        重建已卸载批次、收敛落点等全部由 `_locate_and_scroll_to_batch` 负责。
+        """
+        if node_index >= 0:
+            self._pending_scroll_to_update = node_index
+
+        if self._locate_and_scroll_to_batch(batch_index):
+            return
 
         logger.warning(f"[NodePreview] Cannot find card for batch_index={batch_index}, node_index={node_index}")
 
@@ -15819,31 +16147,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if target_batch_index < 0:
             return
 
-        # 优先从 _batch_cards 查找（更可靠，避免虚拟回收后布局遍历失效）
-        if 0 <= target_batch_index < len(self._batch_cards):
-            cards = self._batch_cards[target_batch_index]
-            if cards:
-                for card in cards:
-                    if self._is_widget_alive(card) and isinstance(card, MessageCard):
-                        if card.role == "user":
-                            self._pending_scroll_to_update = index
-                            self.chat_scroll_area.verticalScrollBar().setValue(card.y())
-                            return
-
-        # 回退：遍历布局查找（处理边界情况）
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
-                continue
-            widget = item.widget()
-            if not isinstance(widget, MessageCard):
-                continue
-            if getattr(widget, "_is_welcome", False):
-                continue
-            if widget.role == "user" and getattr(widget, "_message_index", None) == target_batch_index:
-                self._pending_scroll_to_update = index
-                self.chat_scroll_area.verticalScrollBar().setValue(widget.y())
-                return
+        self._pending_scroll_to_update = index
+        if self._locate_and_scroll_to_batch(target_batch_index):
+            return
 
         # 目标 batch 未渲染，触发加载
         self._scroll_to_target_node_index(index)
@@ -15857,6 +16163,20 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_scroll_changed(self, value):
         self._sync_node_preview_to_scroll()
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        # 跳转锁**不**在 valueChanged 里解锁。
+        #
+        # 🐛 为什么不能靠「非程序滚动 = 用户滚动」来解锁：跳转后的数百 ms 内，
+        # Qt 布局传播会持续调整 value（上界扩张后的钳制、prepend 锚点回补、
+        # 卡片落高引起的位置修正），这些变化**都不经** `_programmatic_scroll`，
+        # 会被误判成用户滚动 → 锁被立刻解掉 → 紧接着的懒渲染排空又把视口
+        # 拽回底部。这是「跳转后一帧看到目标，加载完又跑到底」反复复现的最后一环。
+        #
+        # 解锁只走显式意图（见 `_unlock_scroll_after_jump` 的调用点）：
+        #   1. 点「回到底部」胶囊 —— 最直接的「我要看最新」
+        #   2. `_reset_bottom_follow`（发送 / 切会话 / 清空聊天区）
+        # 其余情况由跳转结束 + 尾巴期到期自动失效。窗口期内用户仍可自由
+        # 上下滚动（锁只压「自动置底」，从不阻止用户移动视口），只是这段时间
+        # 内程序不会抢他的位置 —— 这正是跳转后应有的行为。
         if self._bottom_anchor_deadline > 0:
             if value < scroll_bar.maximum() and self._programmatic_scroll_depth <= 0:
                 # 程序自身的补偿落后于 maximum 不算「用户滚离」：否则终渲染期间
@@ -17815,8 +18135,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
     @pyqtSlot()
     def _snap_bottom_queued(self):
-        """跟随态贴底的延迟执行体：此时布局已传播，landed 即时准确。"""
+        """跟随态贴底的延迟执行体：此时布局已传播，landed 即时准确。
+
+        🐛 执行前必须重过 `_should_follow_bottom()`：本槽是队列化投递，
+        投递到执行之间用户可能已滚开、或跳转锁已生效。不复查就会在跳转后
+        由「目标批次重建卡的高度回调」把视口贴回底部。
+        """
         self._bottom_snap_queued = False
+        if not self._should_follow_bottom():
+            return
         try:
             sb = self.chat_scroll_area.verticalScrollBar()
             with self._programmatic_scroll():
@@ -17886,11 +18213,110 @@ class OpenAIChatToolWindow(ToolWindow):
         ⚠️ 所有自动滚底调用点都必须先过这道守卫。此前多处绕过它（见
         `_do_scroll_to_bottom` / `_ensure_at_bottom` 的修改记录），正是
         「流式输出时无法自由阅读」的根因。
+
+        🐛 跳转锁优先级最高：点历史问题跳转后，目标批次重建会进懒渲染队列，
+        排空时懒渲染链**无条件**置底，把刚落好的视口拽回底部。跳转本身是
+        程序滚动，`away` 置不上（`_on_scroll_changed` 对 `_programmatic_scroll`
+        豁免），所以必须由独立锁裁决。锁只作用「自动置底」，不影响用户手动
+        滚动与「回到底部」按钮（后者显式解锁）。
+
+        读字段而非调 `_is_jump_scroll_locked()`：本方法被大量 `__new__` 桩实例
+        复用（测试载体只挂几个方法），方法调用会 AttributeError，而字段读取
+        经 getattr 兜底天然安全。
         """
+        try:
+            until = self._jump_scroll_lock_until
+        except AttributeError, RuntimeError:
+            until = 0.0
+        if until > 0.0 and time.monotonic() < until:
+            return False
         if not self._user_intentionally_away_from_bottom:
             return True
         # 兜底：away 标志与实际位置不一致时以实际位置为准，避免标志卡死
         return self._is_view_at_bottom()
+
+    def _is_jump_in_flight(self) -> bool:
+        """跳转是否还在进行中（分批加载 + 落点收敛链未结束）。
+
+        供虚拟滚动回收器与 LRU 淘汰器避让：跳转期间的布局是**中间态**
+        （目标批次刚 prepend、视口还没移动），此时按视口判「远近」必然把
+        刚建好的目标批次判成离屏 → 拆掉 → 跳转失败。
+
+        ⚠️ 桩实例（`__new__` 未调 super().__init__）上带默认值的 getattr 也会抛
+        RuntimeError，全部包在 try 里。
+        """
+        try:
+            if self._jump_target_card is not None:
+                return True
+        except AttributeError, RuntimeError:
+            pass
+        try:
+            if self._pending_scroll_to_index is not None:
+                return True
+        except AttributeError, RuntimeError:
+            pass
+        try:
+            return self._jump_settle_left > 0
+        except AttributeError, RuntimeError:
+            return False
+
+    def _is_jump_scroll_locked(self) -> bool:
+        """跳转置底压制是否生效。
+
+        🐛 判据从「固定时间窗」改为「跳转是否仍在进行」：
+
+        - `_is_jump_in_flight()` 为真（分批加载 / 落点收敛链 / 目标卡引用未清）
+          → 锁始终有效，并在 `_jump_settle_step` 每拍续期
+        - 跳转已结束后，再保留 `JUMP_SCROLL_LOCK_TAIL_MS` 的尾巴，覆盖
+          「高度上报晚到」的空档
+
+        固定 3s 的结构性缺陷：大卡片（一份回复 3000px+，几十张卡）懒渲染
+        远超 3 秒，锁到期时队列还没排空，排空置底照样把视口拽走 —— 用户
+        「消息数高的卡片死活跳不过去」正是撞在这里。改为跟随实际工作量。
+        """
+        try:
+            until = self._jump_scroll_lock_until
+        except AttributeError, RuntimeError:
+            return False
+        if until <= 0.0:
+            return False
+        # 硬上限：异常情况下（收敛链卡死 / 目标卡永不销毁）不允许无限压制，
+        # 否则「回到底部」以外的自动跟底永久失效。超过即强制解除。
+        if time.monotonic() > until + JUMP_SCROLL_LOCK_HARD_CAP_MS / 1000.0:
+            self._jump_scroll_lock_until = 0.0
+            return False
+        if time.monotonic() < until:
+            return True
+        # 已过尾巴期但仍未结束 → 继续锁（进行中的链会持续续期）
+        return self._is_jump_in_flight()
+
+    def _extend_jump_scroll_lock(self) -> None:
+        """续期：跳转相关的每一步进展都调用，把尾巴窗口重新推满。"""
+        if getattr(self, "_jump_scroll_lock_until", 0.0) <= 0.0:
+            return
+        self._jump_scroll_lock_until = time.monotonic() + JUMP_SCROLL_LOCK_TAIL_MS / 1000.0
+
+    def _lock_scroll_after_jump(self) -> None:
+        """跳转开始时开启置底压制。
+
+        时长为 `JUMP_SCROLL_LOCK_TAIL_MS`（尾巴），由 `_extend_jump_scroll_lock`
+        在跳转期间持续续期；跳转结束后自然过期。这样压制窗口与实际工作量
+        成正比，不再假设「3 秒一定够」。
+        """
+        self._jump_scroll_lock_until = time.monotonic() + JUMP_SCROLL_LOCK_TAIL_MS / 1000.0
+        # 撤销进行中的置底请求与 sticky 锚定：它们会在窗口内反复把视口往下拉
+        self._pending_scroll_to_bottom = False
+        self._bottom_anchor_deadline = 0.0
+        try:
+            self._scroll_bottom_timer.stop()
+            self._bottom_anchor_timer.stop()
+        except AttributeError, RuntimeError:
+            pass
+        self._ensure_ab_active = False
+
+    def _unlock_scroll_after_jump(self) -> None:
+        """解除跳转置底压制（用户显式要求回到底部 / 用户真实滚动时调用）。"""
+        self._jump_scroll_lock_until = 0.0
 
     def _reset_bottom_follow(self):
         """用户明确表达「我要看最新内容」→ 恢复自动跟随。
@@ -17898,8 +18324,12 @@ class OpenAIChatToolWindow(ToolWindow):
         调用点：用户点击发送 / 会话加载 / 清空聊天区。不在这里复位的话，
         用户上滚看过历史后再发消息，新回复会因为 away 守卫而不滚底
         —— 表现为「发了消息没反应」。守卫越强，这个复位点就越不能少。
+
+        同时解除跳转置底压制：这些都是「主动要求看最新」的语义，与跳转后
+        停留阅读位置的意图相反。跳转锁只该拦「跳转后自发触发的自动置底」。
         """
         self._user_intentionally_away_from_bottom = False
+        self._unlock_scroll_after_jump()
 
     def _update_scroll_to_bottom_button(self):
         """同步「回到底部」浮动胶囊的显隐。
@@ -17923,7 +18353,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         sticky 900ms 与懒渲染批次结束的 sticky 一致，覆盖后续卡片高度上报
         把视口重新推离底部的那段窗口。
+
+        🐛 必须先解跳转锁：用户显式要求回到底部是最强的意图表达，被 3s
+        置底压制拦下会表现为「点了按钮不动」。
         """
+        self._unlock_scroll_after_jump()
         self._reset_bottom_follow()
         self._scroll_to_bottom(sticky_ms=900)
 
@@ -17969,6 +18403,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         if not self._pending_scroll_to_bottom:
+            return
+        # 🐛 执行前必须过统一守卫（含跳转锁 + away）：本方法直写 setValue，
+        # 是全项目最强的置底动作。原来只查 `_pending_scroll_to_bottom` 就动手，
+        # 导致任何一次在跳转之前排入的置底请求（发送消息 / 懒渲染排空 /
+        # 锚定接力）都会在跳转后照样执行 —— 跳转锁拦不住它，因为锁只挂在
+        # `_should_follow_bottom()` 上。这是「跳到最前面又弹回底部」的最后一环。
+        if not self._should_follow_bottom():
+            self._pending_scroll_to_bottom = False
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         # sizeHint 校正保留（滚动条 range 需反映真实内容高），但贴底 value
@@ -18072,6 +18514,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 窗口已销毁时跳过：避免 _bottom_anchor_timer 回调在 closeEvent 之后
         # 访问已释放的 chat_scroll_area 触发 RuntimeError
         if getattr(self, "_is_destroyed", False):
+            return
+        # 🐛 跳转锁期间不锚定：本方法是 sticky 置底的逐拍驱动，
+        # 无条件 setValue(landed_bottom)，跳转后会把视口逐拍往下拉。
+        # 上锁时已 stop 本 timer，这里再兜一层（timer 可能在锁生效前已 start）。
+        if self._is_jump_scroll_locked():
+            self._bottom_anchor_deadline = 0.0
             return
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
