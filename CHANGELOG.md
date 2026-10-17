@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
-## [v0.6.9] - 2026-10-16 (重新发布 #3)
+## [v0.6.9] - 2026-10-16 (重新发布 #4)
 
-自 v0.6.8 以来的变更（累计） | 提交数：59 · 文件变更：68 · +5430/-556 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.8 以来的变更（累计） | 提交数：64 · 文件变更：100 · +10377/-703 | 贡献者：dingma, mading, martin98-afk
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -82,6 +82,18 @@ All notable changes to this project will be documented in this file.
 ### 🔧 测试基建 (Testing Infrastructure) · 重新发布 #3 追加
 
 - TabPanel UI 插件测试过期写法修复（菜单方法名/metadata/__init__ 签名）（`8a5df261`）。
+
+### ✨ 新功能 (New Features) · 重新发布 #4 追加
+
+- **titlebar tab 页级滑动动画与 SlideTabAnimator 抽取** (`e432bc67`, `71ca6330`, app/widgets/slide_tab_animator.py · app/widgets/workbench_panel.py · tests/widgets/test_slide_tab_animator.py): 新增 QStackedWidget + QLayout 通用两段式滑动（旧页画面滑出画外 → 画外换页+重活回调 → 新页滑入归位）；动画期间 stack 摘离布局手动摆位、收尾按原次序放回；打断安全（finish_now 仍完成换页，隐藏/关页/重建 tab 前收敛防几何残留）；titlebar tab 长条模型方向 + 卡间两段式滑出；右侧工作台页签套用同款方向滑动，点击按位置差算方向、程序化切换直落位，refresh_data 移到段间回调与新页首帧一起画外完成。回归 4 用例。
+
+- **流式高度跟踪节流与自动渲染通道选择** (`e4985cf9`, app/widgets/card_render_core.py · app/widgets/message_card.py): 流式高度跟踪参数优化，节流条件下收敛时间保持一致；按内容类型自动选择渲染通道，优化内存占用的同时保持渲染质量。
+
+- **布局高度收敛与回收行为测试族** (`2f22cf81`, tests/widgets/ · tests/debug/ · tests/perf/): MessageCard 布局高度渲染后收敛校验（修滚动/跳转高度偏差）；批回收前置「懒渲染完成 + 高度收敛」双条件；渲染通道自动选择；流式高度跟踪节流收敛；用户卡 pin 状态不锁高可自然调高；虚拟滚动回收重建高度守恒。
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #4 追加
+
+- **切页动画第一帧被杀** (`f5e311e2`, app/main_widget.py · tests/widgets/test_content_stack_slide.py): _ContentStack.resizeEvent 动画在途只同步两页几何到新 rect，不再快进收尾（根因：切页后 _sync_chat_wrapper_width 同一 tick 改 wrapper margins 触发本栈 resize，等于第一帧就把动画杀掉）；卡间切换点击瞬间同步 _replace_active 与胶囊高亮，内容仍在画外切换，胶囊不再等 300ms 滑出结束才跳位。回归 test_resize_during_slide_keeps_animating。
 
 ## [v0.6.8] - 2026-10-16
 
