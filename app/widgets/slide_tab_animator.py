@@ -11,6 +11,14 @@ QStackedWidget 同一时刻只显示一页（hidden→visible 传播），无法
    数据刷新等重活都在画外做，阻塞被掩蔽）；
 3. 段2：stack 瞬移到进场侧，带着**新页画面**滑入归位。
 
+## 时长与曲线
+
+两段式是双份成本：两段都取 ``SLOW_MS``(300) 意味着一次切页吃掉 600ms，
+且同用 OutCubic 使每段末尾各留一段长尾，观感是「滑一半顿一下再滑一半」。
+改按方向语义：段1 用 ``EXIT_MS`` + InCubic（加速带出，离场无需减速收尾），
+段2 用 ``ENTER_MS`` + OutCubic（减速进场，让眼睛跟上新页），两段接成一次
+连续位移。
+
 ## 几何管理
 
 动画期间必须把 stack 从宿主布局里摘除并手动 ``setGeometry``/``move``：
@@ -34,8 +42,9 @@ from app.utils.design_tokens import Animations
 class SlideTabAnimator(QObject):
     """QStackedWidget 的方向性两段式滑动切页控制器（每栈一个实例）。"""
 
-    # 页级滑动时长：大范围整块位移取阶梯最高档（design_tokens）
-    SLIDE_MS = Animations.SLOW_MS
+    # 两段各自的时长：离场快（不拖沓）、进场稍长（看清新页），合计 ~390ms
+    SLIDE_OUT_MS = Animations.EXIT_MS
+    SLIDE_IN_MS = Animations.ENTER_MS
 
     def __init__(self, stack: QStackedWidget, layout: QLayout, parent: Optional[QObject] = None):
         super().__init__(parent if parent is not None else stack)
@@ -116,8 +125,13 @@ class SlideTabAnimator(QObject):
         anim = QVariantAnimation(self)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
-        anim.setDuration(self.SLIDE_MS)
-        anim.setEasingCurve(Animations.EASE_ENTER)
+        if self._phase == "in":
+            anim.setDuration(self.SLIDE_IN_MS)
+            anim.setEasingCurve(Animations.EASE_ENTER)
+        else:
+            anim.setDuration(self.SLIDE_OUT_MS)
+            # 离场用 InCubic 加速带出：OutCubic 的减速长尾落在画外，纯属白等
+            anim.setEasingCurve(Animations.EASE_IN)
         anim.valueChanged.connect(self._on_tick)
         anim.finished.connect(self._on_phase_done)
         self._anim = anim

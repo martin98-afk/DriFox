@@ -1124,6 +1124,13 @@ class CodeWebViewer(QWebEngineView):
     def _try_restore_context(self):
         """尝试恢复 WebEngine 上下文"""
         try:
+            # 🛡️ 透明重申必须先于 _load_skeleton 的 setHtml（导航）：
+            # renderer 崩溃会重置 Chromium 合成面，透明属性回退默认白底，而
+            # backgroundColor 重申在「下一次导航」才生效。若重申落在本次导航
+            # 之后（_load_skeleton 内部的保险重申即如此），此后内容渲染全部
+            # 走 JS 注入（无导航）→ 白底固化到 viewer 重建（2026-10-17 实证：
+            # 崩溃自愈后内容恢复但 HTML 区白底，9 分钟后仍白）。
+            self.ensure_transparent_composition()
             # 重新加载骨架 HTML
             self._is_js_ready = False
             self._load_skeleton()
