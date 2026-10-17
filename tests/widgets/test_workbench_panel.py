@@ -259,6 +259,32 @@ def test_panel_has_no_todo_api(panel):
     """工作台不再暴露 update_todos（宿主改推 _sync_todo_panel）"""
     assert not hasattr(panel, "update_todos")
 
+
+# ── 页签胶囊指示器：滑动段1 期间必须跟随逻辑页签 ──
+
+
+def test_indicator_follows_logical_tab_during_slide(panel, monkeypatch):
+    """用户点击切页 → 胶囊滑向新页签，且不会被 hover 钉位改回旧页
+
+    ★ 曾是真实回归：胶囊的 active_geometry 回调读 ``_stack.currentIndex()``，
+    而滑动是两段式，段1 期间 stack 仍是旧页 → 段间 hover sync 把动画目标
+    钉回旧按钮，位移归零，观感是「tab 切换的滑动动画没了」（只有页面在滑）。
+    """
+    from app.utils.design_tokens import Animations
+
+    monkeypatch.setattr(Animations, "motion_enabled", classmethod(lambda cls: True))
+    panel.sync_plugin_pages([_info("a", "A页", order_hint=0), _info("b", "B页", order_hint=10)])
+    ctl = panel._indicator_ctl
+    target = panel._tab_buttons[1].geometry()
+    panel.set_current_tab(1, user=True)
+    assert panel.current_tab() == 1
+    assert panel._stack.currentIndex() == 0  # 段1：页面还没换
+    assert ctl._anim.endValue() == target
+    # 模拟段1 期间宿主推进的一拍 hover 钉位（动画在途只应重定向目标，不得瞬移）
+    panel._run_tab_hover_sync()
+    assert ctl._anim.endValue() == target, "胶囊目标被钉回旧页签"
+    assert ctl.running
+
 # ── 插件 UI 模块导入校验（页签来自真实插件） ──
 
 

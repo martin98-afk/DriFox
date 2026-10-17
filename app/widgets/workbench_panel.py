@@ -136,6 +136,10 @@ class WorkbenchPanel(QWidget):
         # 页签记忆：None = 面板尚未打开过（首次打开默认第一个页签，之后恢复上次关闭时页签）
         self._last_tab_index: Optional[int] = None
         self._last_artifacts_sig: Optional[tuple] = None
+        # 逻辑选中页签（页签高亮 / 胶囊指示器的唯一依据）
+        # ★ 不能读 _stack.currentIndex()：滑动是两段式，段1 期间 stack 仍是旧页，
+        #   读实际页会把胶囊钉在旧位置、位移为零（用户观感「tab 切换的滑动没了」）。
+        self._logical_index: int = -1
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 8, 8)
@@ -154,8 +158,8 @@ class WorkbenchPanel(QWidget):
         self._indicator_ctl = TabIndicatorController(
             tab_bar_host,
             self,
-            lambda: self._tab_buttons[self._stack.currentIndex()].geometry()
-            if 0 <= self._stack.currentIndex() < len(self._tab_buttons)
+            lambda: self._tab_buttons[self._logical_index].geometry()
+            if 0 <= self._logical_index < len(self._tab_buttons)
             else None,
         )
 
@@ -367,7 +371,7 @@ class WorkbenchPanel(QWidget):
         # 重建后恢复选中态：历史页换挂等触发的重建不能让当前页高亮丢失
         # （按钮全部新建，默认非激活；此前仅 was_current 路径会经
         # set_current_tab 补高亮，其余场景高亮直接丢失）
-        cur = self._stack.currentIndex()
+        cur = self._logical_index
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == cur)
         # 增删 tab 后布局会平移旧 tab：光标静止时 Qt 不补发 enter/leave，需重算
@@ -417,7 +421,7 @@ class WorkbenchPanel(QWidget):
         # LayoutRequest，controller 的事件链接不到；showEvent 会调度到这里，
         # 延迟一拍后按钮几何已收敛，能正确落位。与 controller 内建事件链
         # （覆盖后续动态布局）双保险，幂等。
-        idx = self._stack.currentIndex()
+        idx = self._logical_index
         if 0 <= idx < len(self._tab_buttons):
             self._indicator_ctl.move_to(self._tab_buttons[idx].geometry(), animate=False)
 
@@ -596,7 +600,7 @@ class WorkbenchPanel(QWidget):
                 self._stack.removeWidget(widget)
                 self._stack.insertWidget(index, widget)
         self._plugin_sig = sig
-        current = self._stack.currentIndex()
+        current = self.current_tab()
         self._rebuild_tab_bar()
         if current >= self._stack.count() or current < 0:
             current = 0
@@ -807,14 +811,17 @@ class WorkbenchPanel(QWidget):
         ★ 切页后统一触发当前页 ``refresh_data()``（通用自拉，见
         ``refresh_current_page_data``）：宿主不识别页面语义，页面自己决定
         要不要重建（如产物页按数据签名跳过、历史页按子页签分流）。
+
+        ★ 「当前页」以 ``_logical_index`` 为准，不看 ``_stack.currentIndex()``：
+        滑动段1 阶段 stack 仍是旧页，读实际页会误判 changed、把胶囊目标钉回。
         """
         if index < 0 or index >= self._stack.count():
             index = self._stack.currentIndex()
-        changed = index != self._stack.currentIndex()
+        prev_idx = self._logical_index if 0 <= self._logical_index < self._stack.count() else self._stack.currentIndex()
+        changed = index != prev_idx
         # 长条模型滑动切页：方向 = 目标页在 tab 条中的左右位置差（用户点击才动画，
         # 程序化切换如切窗恢复直接落位不闪）。重活（refresh_data）放在段间回调，
         # 与新页首帧一起在画外完成，滑动过程中无卡顿。
-        prev_idx = self._stack.currentIndex()
         direction = 0
         if user and changed:
             direction = 1 if index > prev_idx else -1
@@ -823,6 +830,8 @@ class WorkbenchPanel(QWidget):
             switched = self._slide.switch(index, direction, on_switched=self.refresh_current_page_data)
         if not switched:
             self._stack.setCurrentIndex(index)
+        # 逻辑选中先于高亮/胶囊写入：两者都读它，且滑动段1 stack 仍是旧页
+        self._logical_index = index
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
         # 滑动指示器：用户点击切换时滑过去；程序性切换（切窗恢复 saved）瞬移落位
@@ -835,6 +844,9 @@ class WorkbenchPanel(QWidget):
             self.refresh_current_page_data()
 
     def current_tab(self) -> int:
+        """当前页签索引（滑动段1 期间即目标页，跟随用户点击而非 stack 实际页）"""
+        if 0 <= self._logical_index < self._stack.count():
+            return self._logical_index
         return self._stack.currentIndex()
 
     def current_tab_id(self) -> Optional[str]:
@@ -843,7 +855,7 @@ class WorkbenchPanel(QWidget):
         历史会话页等**插件页**的位置由注册序决定，宿主不应假设 index，
         一律用本方法 + ``set_current_tab_by_id`` 按 id 定位。
         """
-        return self._tab_id_at(self._stack.currentIndex())
+        return self._tab_id_at(self.current_tab())
 
     # ── 主题 ──
 
