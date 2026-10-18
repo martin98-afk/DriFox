@@ -12,7 +12,7 @@ def test_parse_review_allow():
 
 
 def test_parse_review_code_block_and_case():
-    raw = "```json\n{\"decision\": \"DENY\", \"reason\": \"删除系统目录\"}\n```"
+    raw = '```json\n{"decision": "DENY", "reason": "删除系统目录"}\n```'
     assert parse_review(raw) == {"decision": "deny", "reason": "删除系统目录"}
 
 
