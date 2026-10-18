@@ -1040,20 +1040,30 @@ class ToolExecutor:
         """
         impl = reg.impl
         bt = self._builtin_tools
-        services = {}
-        # 平台能力服务（主程序内部：精确能力接口注入，不暴露 BuiltinTools 对象）。
-        # 通用窗口级状态：任何插件工具需要窗口隔离状态时，经
-        # tool_ctx["services"]["window_state"] 按 key 存取（每窗口独立）。
-        # 示例：ws = services["window_state"]; ws["set"]("todo", [...]); ws["get"]("todo")
-        services["window_state"] = {
-            "get": self.window_state_get,
-            "set": self.window_state_set,
-            "delete": self.window_state_delete,
-        }
-        if bt is not None:
-            services["lsp"] = getattr(bt, "_lsp_tools", None)
-            services["mcp"] = getattr(bt, "_mcp_manager", None)
-            services["gitee"] = getattr(bt, "gitee_upload", None)
+
+        # 能力池：插件能力面的唯一真相（旧 services 键由池投影，见 catalog.LEGACY_MAP）
+        plugin_name = _plugin_label_from_source(reg.source)
+        try:
+            from app.plugins.capabilities.bootstrap import ensure_registered
+            from app.plugins.capabilities.registry import CapabilityRegistry
+
+            ensure_registered("tool")
+            pool = CapabilityRegistry.get_instance().build_pool(
+                surface="tool", host=self, plugin=plugin_name
+            )
+        except Exception as e:
+            logger.warning(f"[ToolExecutor] 能力池构建失败，退回空池: {e}")
+            from app.plugins.capabilities.pool import CapabilityPool
+
+            pool = CapabilityPool(
+                plugin=plugin_name,
+                surface="tool",
+                host=self,
+                declared=set(),
+                providers={},
+                ungated=set(),
+            )
+
         env = {"desktop_automation_enabled": True}
         try:
             from app.utils.config import Settings
@@ -1071,36 +1081,41 @@ class ToolExecutor:
             env["app_data_dir"] = get_app_data_dir()
         except Exception:
             pass
+
+        # 旧 services 键由能力池投影：只有一份实现（providers/tool_core.py）。
+        # 按 surface 过滤，避免把 ui-only 能力投影进工具上下文。
+        from app.plugins.capabilities.catalog import CATALOG as _CAP_CATALOG
+        from app.plugins.capabilities.catalog import LEGACY_MAP as _CAP_LEGACY
+
+        services = {}
+        for _old, _cap in _CAP_LEGACY.items():
+            _spec = _CAP_CATALOG.get(_cap)
+            if _spec is None or "tool" not in _spec.surfaces:
+                continue
+            if _cap in pool:
+                services[_old] = pool[_cap]
+
+        # 高权限旧键保持 [ServiceAudit] 语义（历史测试与日志口径不变）
+        for _svc_key in ("lsp", "mcp", "gitee"):
+            if services.get(_svc_key) is not None:
+                services[_svc_key] = _AuditedService(plugin_name, _svc_key, services[_svc_key])
+
+        # subagent 历史上走 ctx["sub_agent_manager"] 而非 services 键，单独取
+        sub_agent = pool["subagent.run"] if "subagent.run" in pool else None
+        if sub_agent is not None:
+            sub_agent = _AuditedService(plugin_name, "subagent", sub_agent)
+
         ctx = {
             "workdir": self._workdir,
             "session_id": session_id,
             "call_id": self._call_id,
-            "sub_agent_manager": self._sub_agent_manager,
+            "sub_agent_manager": sub_agent,
             "team_window_id": getattr(bt, "_team_window_id", "") if bt else "",
             "team_agent_name": getattr(bt, "_team_agent_name", "") if bt else "",
             "env": env,
             "services": services,
+            "capabilities": pool,
         }
-
-        # A3：capability 声明制——manifest 声明 "capabilities" 后按清单裁剪
-        # services 与 ctx.sub_agent_manager；未声明保持现状全量注入。
-        # window_state（窗口级 KV，无系统权限）不受管控恒保留；
-        # ctx["env"]["app_data_dir"] 恒保留。
-        declared_caps = _get_declared_capabilities(reg)
-        if declared_caps is not None:
-            services = {
-                k: v for k, v in ctx["services"].items() if k in declared_caps or k == "window_state"
-            }
-            if "subagent" not in declared_caps:
-                ctx["sub_agent_manager"] = None
-        ctx["services"] = services
-        # A3：高权限服务审计——插件实际触达（属性访问/调用）时记 [ServiceAudit]
-        _plugin_label = _plugin_label_from_source(reg.source)
-        for _svc_key in ("lsp", "mcp", "gitee"):
-            if ctx["services"].get(_svc_key) is not None:
-                ctx["services"][_svc_key] = _AuditedService(_plugin_label, _svc_key, ctx["services"][_svc_key])
-        if ctx["sub_agent_manager"] is not None:
-            ctx["sub_agent_manager"] = _AuditedService(_plugin_label, "subagent", ctx["sub_agent_manager"])
 
         # 签名检测：是否接受 tool_ctx（无法检测时尝试注入）
         try:
