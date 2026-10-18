@@ -522,3 +522,18 @@ def test_approval_summary_content_updates(isolated_cfg):
     idx = card.approval_mode_combo.findData("ai")
     card.approval_mode_combo.setCurrentIndex(idx)
     assert "AI审批" in card._approval_card.card.contentLabel.text()
+
+
+# ══════════════ 分组收纳结构 ══════════════
+
+
+def test_page_grouped_layout(isolated_cfg):
+    """首屏结构：沙箱开关 + 审核处理 + 三个分组卡，全部直属主布局"""
+    card = _make_card()
+    # 三大分组卡存在
+    for attr in ("_rules_group", "_data_group", "_net_proc_group"):
+        assert getattr(card, attr, None) is not None, f"{attr} 缺失"
+    # 名单编辑区均已挂入分组卡（父容器不再是页面本体）
+    for editor in (card._path_white, card._path_black, card._cmd_allow, card._cmd_confirm, card._net_domains):
+        assert editor.parent() is not None
+        assert editor.parent() is not card

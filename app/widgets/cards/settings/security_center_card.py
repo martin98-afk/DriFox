@@ -262,104 +262,37 @@ class SecurityCenterCard(QWidget):
         # ── 审核处理卡（处理方法/审核模型/超时/超时处理）──
         layout.addWidget(self._build_approval_card())
 
-        def _expand(icon, title, content, editor: "_ListEditorCard", tip: str = "") -> "ExpandGroupSettingCard":
-            """把名单编辑区包成折叠卡：收起一行，点击展开编辑（对齐设置页范式）"""
-            card = ExpandGroupSettingCard(icon, title, content)
-            if tip:
-                # 挂到标题行而非折叠卡本体：卡片是 QScrollArea 子类，被
-                # simple_hover_tooltip 排除在自绘气泡之外，且悬停命中的本就是标题行
-                card.card.setToolTip(tip)
-            card.addGroupWidget(editor)
-
-            from PyQt5.QtCore import QTimer
-
-            # 条目增删后内容高度变化，展开态需要重算卡片高度，否则新行被滚动区吞掉。
-            # 延迟一拍：deleteLater 的旧行 / 布局失效需先在事件循环落定，sizeHint 才准
-            def _sync_height():
-                QTimer.singleShot(0, card._adjustViewSize)
-
-            editor.on_change = _sync_height
-            return card
-
+        # 名单编辑区（挂入下方三大分组卡，不再各自折叠）
         self._path_white = _ListEditorCard(
-            "写入白名单（放行 workdir 外的写入目录；读操作不受此限制）",
+            "写入白名单（放行 workdir 外写入）",
             "whitelist",
             "如 D:\\other_proj 或 %USERPROFILE%\\docs",
-            show_title=False,
             tip="读操作不受此限制；相对路径按工作目录解析。",
         )
         self._path_black = _ListEditorCard(
-            "文件黑名单（读写均拦截，如 .env/.ssh）",
+            "文件黑名单（读写均拦截）",
             "blacklist",
             "如 D:\\secrets 或 .env",
-            show_title=False,
             tip="⚠ 文件名需完全相等：.env 不拦 .env.local，建议一并添加。",
         )
         self._cmd_allow = _ListEditorCard(
-            "命令安全 · 放行前缀（跳过审批；危险命令仍拦截）",
+            "命令放行前缀（跳过审批；危险命令仍拦截）",
             "allow_prefixes",
             "如 git status、npm run build",
-            show_title=False,
             tip="⚠ 按词边界匹配；填 git 可省常规子命令审批，但 git rm -rf . 等破坏性操作仍会确认。",
         )
         self._cmd_confirm = _ListEditorCard(
-            "命令安全 · 强制审批前缀",
+            "命令强制审批前缀",
             "confirm_prefixes",
             "如 git push",
-            show_title=False,
         )
         self._net_domains = _ListEditorCard(
-            "网络安全 · 域名黑名单",
+            "网络域名黑名单",
             "blacklist_domains",
             "如 evil.com",
-            show_title=False,
         )
 
-        self._path_white_card = _expand(
-            FIF.FOLDER_ADD if FIF else None,
-            "写入白名单",
-            "放行工作目录外的写入",
-            self._path_white,
-            tip="放行 workdir 外的写入目录；读操作不受此限制。",
-        )
-        self._path_black_card = _expand(
-            FIF.HIDE if FIF else None,
-            "文件黑名单",
-            "读写均拦截",
-            self._path_black,
-            tip="读写均拦截（如 .env/.ssh）。",
-        )
-        self._cmd_allow_card = _expand(
-            FIF.ACCEPT if FIF else None,
-            "命令安全 · 放行前缀",
-            "跳过审批，危险命令仍拦截",
-            self._cmd_allow,
-            tip="跳过审批；危险命令仍拦截（示例见输入框提示）。",
-        )
-        self._cmd_confirm_card = _expand(
-            FIF.CARE_RIGHT_SOLID if FIF else None,
-            "命令安全 · 强制审批前缀",
-            "命中即弹审批",
-            self._cmd_confirm,
-            tip="命中即弹审批（如 git push）。",
-        )
-        self._net_domains_card = _expand(
-            FIF.GLOBE if FIF else None,
-            "网络安全 · 域名黑名单",
-            "命中即弹审批",
-            self._net_domains,
-            tip="命中域名的网络命令弹审批（如 evil.com）。",
-        )
-        for w in (
-            self._path_white_card,
-            self._path_black_card,
-            self._cmd_allow_card,
-            self._cmd_confirm_card,
-            self._net_domains_card,
-        ):
-            layout.addWidget(w)
-
-        # ── 数据安全卡 ──
+        # ── 数据安全卡（开关先构造，稍后由「删除与备份」分组收纳）──
         self.delete_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "删除保护",
@@ -372,24 +305,14 @@ class SecurityCenterCard(QWidget):
         )
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
-        layout.addWidget(self.delete_switch)
 
         # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不做快照
         self._delete_exempt = _ListEditorCard(
-            "删除豁免路径（这些目录内的删除不再弹审批，也不做快照，如 tests/）",
+            "删除豁免路径",
             "delete_exempt",
             "如 tests/ 或 D:/other_proj/logs",
-            show_title=False,
-            tip="相对路径按工作目录解析。",
-        )
-        self._delete_exempt_card = _expand(
-            FIF.INFO if FIF else None,
-            "删除豁免路径",
-            "这些目录内的删除不再弹审批",
-            self._delete_exempt,
             tip="这些目录内的删除不再弹审批，也不做快照。相对路径按工作目录解析（如 tests/）。",
         )
-        layout.addWidget(self._delete_exempt_card)
 
         self.backup_dir_card = PushSettingCard(
             "打开备份目录",
@@ -400,15 +323,8 @@ class SecurityCenterCard(QWidget):
             "修改前自动备份原文件（FileRecorder）",
         )
         self.backup_dir_card.clicked.connect(lambda: self._open_backup_dir())
-        layout.addWidget(self.backup_dir_card)
 
-        # ── EU-G10：备份容量上限编辑 + 立即清理（FileRecorder 侧，不含删除快照）──
-        layout.addWidget(self._build_backup_limit_row())
-
-        # ── EU-G11：删除快照容量展示 + 打开目录 / 清空快照 ──
-        layout.addWidget(self._build_snapshot_row())
-
-        # ── EU-G12：网络外传检测开关 ──
+        # ── EU-G12：网络外传检测开关（稍后由「网络与进程」分组收纳）──
         self.net_switch = SwitchSettingCard(
             FIF.GLOBE if FIF else None,
             "网络外传检测",
@@ -417,9 +333,8 @@ class SecurityCenterCard(QWidget):
         self.net_switch.setToolTip("curl/wget 等；仅在沙箱安全开启时生效。")
         self.net_switch.setChecked(bool(self._cfg.get("network.enabled")))
         self.net_switch.checkedChanged.connect(self._on_network_toggled)
-        layout.addWidget(self.net_switch)
 
-        # ── 系统级工具卡 ──
+        # ── 系统级工具卡（同上，进分组）──
         self.sys_switch = SwitchSettingCard(
             FIF.COMMAND_PROMPT if FIF else None,
             "系统级工具豁免",
@@ -428,10 +343,11 @@ class SecurityCenterCard(QWidget):
         self.sys_switch.setToolTip("wsl/wmic/sc/reg/schtasks/diskpart/bcdedit 等绕过沙箱审批，请谨慎启用。")
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
-        layout.addWidget(self.sys_switch)
 
-        # ── EU-G9：受管进程资源配额（Job Object 三限额）──
-        layout.addWidget(self._build_job_limits_row())
+        # ── 首屏结构：开关 + 审核处理 + 三大分组 + 说明 ──
+        layout.addWidget(self._build_rules_group())
+        layout.addWidget(self._build_data_group())
+        layout.addWidget(self._build_net_proc_group())
 
         # ── 底部说明 ──
         # N1：默认值提示（沙箱与删除保护默认关闭，用户需手动开启）
@@ -452,6 +368,62 @@ class SecurityCenterCard(QWidget):
         layout.addWidget(note)
 
         layout.addStretch(1)
+
+    # ══════════════════ 分组收纳 ══════════════════
+
+    def _bind_editor_growth(self, card: "ExpandGroupSettingCard", *editors: "_ListEditorCard") -> None:
+        """名单编辑区行数变化 → 冒泡重算分组卡展开高度（延迟一拍等布局落定）"""
+        from PyQt5.QtCore import QTimer
+
+        def _sync():
+            QTimer.singleShot(0, card._adjustViewSize)
+
+        for editor in editors:
+            editor.on_change = _sync
+
+    def _build_rules_group(self) -> "ExpandGroupSettingCard":
+        """文件与命令规则：白名单/文件黑名单/命令放行/命令强制审批"""
+        card = ExpandGroupSettingCard(
+            FIF.FOLDER_ADD if FIF else None,
+            "文件与命令规则",
+            "路径白名单与黑名单 · 命令审批前缀",
+        )
+        for editor in (self._path_white, self._path_black, self._cmd_allow, self._cmd_confirm):
+            card.addGroupWidget(editor)
+        self._bind_editor_growth(card, self._path_white, self._path_black, self._cmd_allow, self._cmd_confirm)
+        self._rules_group = card
+        return card
+
+    def _build_data_group(self) -> "ExpandGroupSettingCard":
+        """删除与备份：删除保护开关 + 豁免路径 + 快照 + 自动备份 + 容量上限"""
+        card = ExpandGroupSettingCard(
+            FIF.DELETE if FIF else None,
+            "删除与备份",
+            "删除保护 · 恢复快照 · 修改前自动备份",
+        )
+        card.addGroupWidget(self.delete_switch)
+        card.addGroupWidget(self._delete_exempt)
+        card.addGroupWidget(self.backup_dir_card)
+        card.addGroupWidget(self._build_backup_limit_row())
+        card.addGroupWidget(self._build_snapshot_row())
+        self._bind_editor_growth(card, self._delete_exempt)
+        self._data_group = card
+        return card
+
+    def _build_net_proc_group(self) -> "ExpandGroupSettingCard":
+        """网络与进程：外传检测 + 域名黑名单 + 系统级工具豁免 + 进程配额"""
+        card = ExpandGroupSettingCard(
+            FIF.GLOBE if FIF else None,
+            "网络与进程",
+            "外传检测 · 域名黑名单 · 系统工具豁免 · 进程配额",
+        )
+        card.addGroupWidget(self.net_switch)
+        card.addGroupWidget(self._net_domains)
+        card.addGroupWidget(self.sys_switch)
+        card.addGroupWidget(self._build_job_limits_row())
+        self._bind_editor_growth(card, self._net_domains)
+        self._net_proc_group = card
+        return card
 
     # ══════════════════ 审核处理组 ══════════════════
 
