@@ -23,8 +23,6 @@ from typing import List, Optional
 from loguru import logger
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 
-from app.core.infra.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
-
 _REPO = "martin98-afk/DriFox"
 _CACHE_TTL = 3600  # 1h
 _MAX_RELEASES = 20
@@ -39,6 +37,30 @@ _bridge: Optional["_Bridge"] = None
 _bridge_lock = threading.Lock()
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 def _get_bridge() -> "_Bridge":
     """懒构造主线程桥接器（首次调用需在 Qt 主线程上下文内）。"""
     global _bridge
@@ -51,8 +73,11 @@ def _get_bridge() -> "_Bridge":
 def _publish_refresh() -> None:
     """主线程调用：派发刷新事件，MessageCard 订阅后对当前 mode 重渲染 body。"""
     try:
-        UIEventBus.get_instance().publish(
-            EV_WELCOME_TAB_REFRESHED,
+        ev = _caps("ui.events")
+        if ev is None:
+            return
+        ev()["publish"](
+            "welcome_tab_refreshed",
             mode_key=_MODE_KEY,
             plugin_name=_PLUGIN_NAME,
         )

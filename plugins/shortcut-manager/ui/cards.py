@@ -35,6 +35,30 @@ from loguru import logger
 _USER_CUSTOM_CMD_REL = "plugins/user-custom/commands"
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 def _safe_filename(cmd_name: str) -> str:
     """将命令名转换为安全文件名（: → __，解决 Windows 文件名非法字符问题）"""
     return cmd_name.replace(":", "__")
@@ -239,12 +263,11 @@ def _find_conflicts(shortcut: str, all_commands: list, exclude_cmd: str = "") ->
 
 def _load_all_items() -> list:
     """获取系统内建命令 + UI 插件命令列表"""
-    from app.core.commands.command_manager import CommandManager
     from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
     items = []
-    cmd_mgr = CommandManager.get_instance()
-    commands = cmd_mgr.get_all_commands()
+    reader = _caps("command.read")
+    commands = reader()["all"]() if reader else []
     ui_cmd_names = UIPluginRegistry.get_instance().get_ui_command_names()
 
     for cmd in commands:
@@ -921,9 +944,9 @@ class ShortcutManagerCard(QWidget):
         )
 
         # 所有文件写入完成，只重载一次（不依赖 watchfiles 异步热更新防抖）
-        from app.core.commands.builtin_commands import reload_all_commands
-
-        reload_all_commands()
+        _reloader = _caps("command.reload")
+        if _reloader is not None:
+            _reloader()["reload"]()
 
         if success:
             QTimer.singleShot(300, self._refresh)
@@ -982,9 +1005,9 @@ class ShortcutManagerCard(QWidget):
                 save_ui_command_shortcut(cmd_name, "")
                 _cleanup_legacy_shortcut_md(cmd_name)
                 logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
-                from app.core.commands.builtin_commands import reload_all_commands
-
-                reload_all_commands()
+                _reloader = _caps("command.reload")
+                if _reloader is not None:
+                    _reloader()["reload"]()
                 QTimer.singleShot(300, self._refresh)
                 return
             cmd_dir = _get_user_custom_cmd_dir()
@@ -997,9 +1020,9 @@ class ShortcutManagerCard(QWidget):
                     cmd_file.unlink()
                     logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
                     # 强制立即重载命令缓存，不依赖 watchfiles 异步热更新
-                    from app.core.commands.builtin_commands import reload_all_commands
-
-                    reload_all_commands()
+                    _reloader = _caps("command.reload")
+                    if _reloader is not None:
+                        _reloader()["reload"]()
                     break
             QTimer.singleShot(300, self._refresh)
         except Exception as e:

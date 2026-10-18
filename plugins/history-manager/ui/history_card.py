@@ -42,6 +42,30 @@ _PAGE_SIZE = 30  # 每页显示的会话数（含当前会话）
 _PROJECT_ALL = "__all__"  # 全部项目混合视图
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 def split_pinned_entries(entries: List[tuple], exclude_index: Optional[int] = None) -> tuple:
     """拆分置顶/非置顶条目（纯函数，供置顶分组与单测使用）
 
@@ -2380,10 +2404,10 @@ class HistoryCard(QWidget):
         """后台导入线程完成后的回调（主线程执行）"""
         if error:
             from qfluentwidgets import InfoBar, InfoBarPosition
-            from app.widgets.tab_manager_window import TabManagerWindow
 
-            # 挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
-            bar_parent = TabManagerWindow.get_instance() or self.window()
+            # 挂到宿主顶层窗口（未就绪时兜底卡片所在窗口）
+            _host = _caps("window.host")
+            bar_parent = (_host() if _host else None) or self.window()
             InfoBar.error(
                 title="导入失败",
                 content=error,

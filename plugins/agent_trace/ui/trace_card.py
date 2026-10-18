@@ -84,6 +84,30 @@ _PLUGIN_NAME = "agent_trace"
 _SCHEMA_TTL = 60.0
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 def _tool_api(kind: str = "read"):
     """工具注册表只读面 / 注入面。
 
@@ -418,8 +442,6 @@ class TraceCardWidget(QWidget):
         if getattr(self, "_events_subscribed", False):
             return
         try:
-            from app.core.infra.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
-
             weak_self = weakref.ref(self)
 
             def _on_tab_switched(payload: Dict[str, Any], _ref=weak_self) -> None:
@@ -427,7 +449,9 @@ class TraceCardWidget(QWidget):
                 if card is not None:
                     card._on_tab_switched(payload)
 
-            UIEventBus.get_instance().subscribe(EV_TAB_SWITCHED, _on_tab_switched, plugin_name=_PLUGIN_NAME)
+            ev = _caps("ui.events")
+            if ev is not None:
+                ev()["subscribe"]("tab_switched", _on_tab_switched)
             self._events_subscribed = True
         except Exception as e:
             logger.warning(f"[agent_trace] 订阅 EV_TAB_SWITCHED 失败: {e}")
