@@ -207,12 +207,51 @@ def _window_events(host: Any, ctx: Any):
 # ──────────────────── 模型 / 智能体 ────────────────────
 
 
+def _resolve_active_host(host: Any):
+    """host 为空时（无窗口的调用点）解析一个活跃主窗口。
+
+    工具/hook 类调用点没有 MainWidget，而模型配置只存在于主窗口内存态
+    （密钥模式下磁盘 app.config 是密文）。经 UIPluginRegistry 拿活跃窗口。
+    """
+    if host is not None:
+        return host
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        return getattr(reg, "_main_widget", None) or next(
+            iter(getattr(reg, "_window_main_widgets", {}).values()), None
+        )
+    except Exception:
+        return None
+
+
 def _model_config(host: Any):
-    return host._get_current_model_config
+    real = _resolve_active_host(host)
+
+    def current() -> dict:
+        if real is None:
+            return {}
+        try:
+            return real._get_current_model_config() or {}
+        except Exception:
+            return {}
+
+    return current
 
 
 def _provider_config(host: Any):
-    return host._resolve_provider_config
+    real = _resolve_active_host(host)
+
+    def resolve(provider: str = "", model: str = "") -> dict:
+        if real is None:
+            return {}
+        try:
+            return real._resolve_provider_config(provider, model) or {}
+        except Exception:
+            return {}
+
+    return resolve
 
 
 def _model_schema(host: Any):
@@ -356,6 +395,56 @@ def _session_list(host: Any):
         return out
 
     return list_sessions
+
+
+def _session_invalidate(host: Any):
+    """失效所有窗口的会话 system_prompt 缓存。
+
+    用途：切换助手 / 改身份后强制重建 system_prompt（重新触发
+    BuildSystemPrompt hooks）。插件原先自己遍历 ChatBackend._active_instances
+    和 ChatEngine._instances 摸私有类属性，这里封装成一次语义动作。
+    """
+
+    def invalidate(system_prompt_only: bool = True) -> int:
+        n = 0
+        try:
+            from app.core.conversation.backend import ChatBackend
+
+            for backend in list(getattr(ChatBackend, "_active_instances", None) or []):
+                sm = getattr(backend, "session_manager", None)
+                if sm is None:
+                    continue
+                sessions = getattr(sm, "sessions", None)
+                if isinstance(sessions, dict):
+                    items = list(sessions.values())
+                else:
+                    try:
+                        items = list(sm.get_all_sessions() or [])
+                    except Exception:
+                        items = []
+                for session in items:
+                    try:
+                        session.system_prompt = ""
+                        if hasattr(session, "_system_prompt_agent"):
+                            session._system_prompt_agent = ""
+                        n += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            from app.core.engines.ui.engine import ChatEngine
+
+            for engine in list(getattr(ChatEngine, "_instances", None) or []):
+                try:
+                    engine._invalidate_session_system_prompt_cache()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return n
+
+    return invalidate
 
 
 def _session_write(host: Any):
@@ -598,6 +687,33 @@ def _plugin_read(host: Any):
     return api
 
 
+def _tool_policy_api():
+    """工具权限策略只读面（toggles / policy / off_behavior 的判定）。"""
+
+    def api() -> dict:
+        from app.core.tools.tool_permission_controller import resolve_tool_off_policy
+        from app.utils.config import Settings
+
+        def off_policy(name: str) -> str:
+            s = Settings.get_instance()
+            toggles = dict(s.tool_toggles.value or {})
+            if toggles.get(name, True) is not False:
+                return "allow"
+            policies = dict(s.tool_permission_policy.value or {})
+            behavior = s.tool_off_behavior.value or "deny"
+            try:
+                return str(resolve_tool_off_policy(name, None, policies, behavior) or "")
+            except Exception:
+                return ""
+
+        def toggles() -> dict:
+            return dict(Settings.get_instance().tool_toggles.value or {})
+
+        return {"off_policy": off_policy, "toggles": toggles}
+
+    return api
+
+
 def _tool_read(host: Any):
     """工具注册表的只读查询面（不含注册/修改，那是 tool.inject）。"""
 
@@ -615,6 +731,8 @@ def _tool_read(host: Any):
             "is_no_offload": reg.is_no_offload,
             "is_danger": reg.get_danger,
             "is_protected": reg.is_protected,
+            # 工具权限策略（tool_search 中转前的安全判定）
+            "policy": _tool_policy_api(),
         }
 
     return api
@@ -684,6 +802,22 @@ def _team_read(host: Any):
     return api
 
 
+def _cache_purge(host: Any):
+    """清理主程序进程内 LRU 缓存（HTML 渲染 / token 估算 / grep 编译等）。"""
+
+    def purge() -> bool:
+        try:
+            from app.main_widget import _cleanup_global_lru_caches
+
+            _cleanup_global_lru_caches()
+            return True
+        except Exception as e:
+            logger.warning(f"[Capability] 清理进程内缓存失败: {e}")
+            return False
+
+    return purge
+
+
 def _host_raw(host: Any):
     return host
 
@@ -718,6 +852,7 @@ def register(registry) -> None:
     reg.register("engine.session", _engine_session, surface="ui", owner="core:ui")
     reg.register("session.read", _session_read, surface="ui", owner="core:ui")
     reg.register("session.list", _session_list, surface="ui", owner="core:ui")
+    reg.register("session.invalidate", _session_invalidate, surface="ui", owner="core:ui")
     reg.register("session.write", _session_write, surface="ui", owner="core:ui")
     # 界面
     reg.register("input.read", _input_read, surface="ui", owner="core:ui")
@@ -747,5 +882,7 @@ def register(registry) -> None:
     reg.register("plugin.log", _plugin_log, surface="ui", owner="core:ui")
     # 团队
     reg.register("team.read", _team_read, surface="ui", owner="core:ui")
+    # 进程级
+    reg.register("cache.purge", _cache_purge, surface="ui", owner="core:ui")
     # 逃生舱
     reg.register("host.raw", _host_raw, surface="ui", owner="core:ui")

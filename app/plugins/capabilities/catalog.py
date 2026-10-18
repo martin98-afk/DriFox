@@ -62,6 +62,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("session.write", _M, "消息写回当前会话（入库 + 刷 UI + 发事件）", _BOTH, ["save_messages_to_session"]),
         _spec("session.list", _M, "历史会话列表与元数据", _UI),
         _spec("session.manage", _H, "新建/切换/删除会话（破坏性）", _UI),
+        _spec(
+            "session.invalidate",
+            _M,
+            "失效所有窗口的会话 system_prompt 缓存（跨窗口副作用）",
+            _UI,
+        ),
         # ── 输入框 ──
         _spec("input.read", _M, "输入框文本与附件列表", _UI),
         _spec("input.write", _M, "写入输入框文本", _UI),
@@ -125,6 +131,8 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 基础（恒放行） ──
         _spec("plugin.log", _N, "带 plugin=<name> 前缀的 logger", _BOTH),
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),
+        # ── 进程级 ──
+        _spec("cache.purge", _L, "清理主程序进程内 LRU 缓存（内存释放）", _UI),
         # ── 逃生舱 ──
         _spec("host.raw", _H, "裸 main_widget / backend 对象引用", _UI),
     )

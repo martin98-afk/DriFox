@@ -284,14 +284,22 @@ def test_execute_deny_policy_blocked(monkeypatch):
         def get_instance():
             return _FakeSettings()
 
-    _FakeSettingsModule = _FakeSettings
+    # 注入能力池：插件经 tool.read 的 policy 面取策略（不再直连 Settings）
+    class _FakeApi(dict):
+        def __contains__(self, key):
+            return True
 
-    import sys
-    import types
+        def __getitem__(self, key):
+            if key == "policy":
+                def off_policy(name: str) -> str:
+                    if _FakeSettings.tool_toggles.value.get(name, True) is False:
+                        return _FakeSettings.tool_off_behavior.value or "deny"
+                    return "allow"
 
-    fake = types.ModuleType("app.utils.config")
-    fake.Settings = _FakeSettings
-    monkeypatch.setitem(sys.modules, "app.utils.config", fake)
+                return lambda: {"off_policy": off_policy, "toggles": lambda: {}}
+            return super().__getitem__(key)
+
+    monkeypatch.setattr(m, "_tool_api", lambda kind="read": _FakeApi())
     out = m._execute_impl(tool_ctx={"services": {}}, tool_name="bash", arguments={"command": "dir"})
     assert out.success and "禁用" in out.content
 

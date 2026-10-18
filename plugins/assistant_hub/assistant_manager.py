@@ -763,49 +763,22 @@ class AssistantManager:
     def _invalidate_session_prompt_caches() -> None:
         """清空所有窗口所有 session 的 system_prompt 缓存。
 
-        遍历 ChatBackend 活跃实例的 session manager，把每个 session 的
-        system_prompt 置空，下次 build_messages 强制重建（重新触发
-        BuildSystemPrompt hooks → 新助手身份注入）。
+        经能力池 session.invalidate：一次语义动作覆盖 ChatBackend 活跃实例与
+        ChatEngine 兜底两条路径（插件不再摸私有类属性）。
         """
         try:
-            from app.core.conversation.backend import ChatBackend
+            from app.plugins.capabilities.bootstrap import ensure_registered
+            from app.plugins.capabilities.registry import CapabilityRegistry
 
-            for backend in list(ChatBackend._active_instances):
-                sm = getattr(backend, "session_manager", None)
-                if sm is None:
-                    continue
-                sessions = getattr(sm, "sessions", None)
-                if isinstance(sessions, dict):
-                    items = sessions.values()
-                else:
-                    try:
-                        items = sm.get_all_sessions() or []
-                    except Exception:
-                        items = []
-                for session in items:
-                    try:
-                        session.system_prompt = ""
-                        if hasattr(session, "_system_prompt_agent"):
-                            session._system_prompt_agent = ""
-                    except Exception:
-                        pass
-            # 兜底：ChatBackend._active_instances 可能未暴露，走 engine 级缓存
-            try:
-                from app.core.engines.ui.engine import ChatEngine
-
-                for engine in list(getattr(ChatEngine, "_instances", []) or []):
-                    try:
-                        engine._invalidate_session_system_prompt_cache()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            ensure_registered("ui")
+            pool = CapabilityRegistry.get_instance().build_pool(
+                surface="ui", host=None, plugin="assistant_hub", declared={"session.invalidate"}
+            )
+            if "session.invalidate" in pool:
+                pool["session.invalidate"]()
         except Exception as e:
-            from loguru import logger
+            logger.warning(f"[assistant_hub] 失效 system_prompt 缓存失败: {e}")
 
-            logger.debug(f"[assistant_hub] 清空 system prompt 缓存失败: {e}")
-
-    @staticmethod
     def _invalidate_session_prompt(session_id: str) -> None:
         """只清空指定 session 的 system_prompt 缓存（会话级临时助手切换用）。
 
@@ -1127,20 +1100,24 @@ class AssistantManager:
             mw = None
         valid = getattr(mw, "_valid_configs", None) if mw is not None else None
         if not isinstance(valid, dict):
-            # 兜底 llm_saved_providers（无窗口场景）
+            # 无窗口场景：走 model.config 能力（从主程序内存态取，
+            # 不读磁盘 app.config —— 密钥模式下那里是密文/空串）
             try:
-                from app.utils.config import Settings
+                from app.plugins.capabilities.bootstrap import ensure_registered
+                from app.plugins.capabilities.registry import CapabilityRegistry
 
-                saved = Settings.get_instance().llm_saved_providers.value or {}
+                ensure_registered("ui")
+                pool = CapabilityRegistry.get_instance().build_pool(
+                    surface="ui", host=mw, plugin="assistant_hub", declared={"model.config"}
+                )
+                if "model.config" not in pool:
+                    return None
+                cfg = pool["model.config"](config_id, model_name)
             except Exception:
                 return None
-            cfg = saved.get(config_id)
             if not isinstance(cfg, dict) or not cfg:
                 return None
-            override = dict(cfg)
-            if model_name:
-                override["模型名称"] = model_name
-            return override
+            return dict(cfg)
         cfg = valid.get(config_id)
         if not isinstance(cfg, dict) or not cfg:
             return None
