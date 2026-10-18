@@ -148,16 +148,27 @@ class ApprovalReviewTask(QRunnable):
             )
 
             def create_task():
-                # 流式发起+聚合：仅流式端点非流式请求会 400（同 topic_summary）
+                # 流式发起+聚合：仅流式端点非流式请求会 400（同 topic_summary）。
+                # max_tokens 须给足：reasoning 类模型的思考消耗 token 且不进
+                # content，上限太小会导致 content 被截空（实测空响应根因）。
                 return chat_completion_text(
                     client,
                     model=self.llm_config.get("模型名称", "gpt-4o"),
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.0,
-                    max_tokens=300,
+                    max_tokens=2000,
                 )
 
             raw = create_api_call_with_retry(client, create_task, cancel_check=self.cancel_check)
+            if not raw or not raw.strip():
+                # 空响应单列：与「输出了但格式不对」区分，便于定位
+                # （典型：reasoning 模型思考占满 max_tokens / 端点异常）
+                logger.warning(
+                    "[ApprovalReview] 模型返回空响应，回落人工审批"
+                    "（reasoning 类模型可能将 max_tokens 消耗在思考上，可换非思考模型）"
+                )
+                self.callback(None, error="模型返回空响应")
+                return
             result = parse_review(raw)
             if result is None:
                 logger.warning(f"[ApprovalReview] 输出无法解析为有效判定: {raw[:200]}")
