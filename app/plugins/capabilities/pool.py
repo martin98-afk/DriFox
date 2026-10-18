@@ -157,9 +157,22 @@ class CapabilityPool(Mapping):
         return provider(self._host)
 
     def _audit(self, cap_id: str) -> None:
-        if cap_id in self._audited:
+        """记审计（去重提到 registry，跨池实例共享）。
+
+        池实例可以有多个（每个 ctx 一个、host 无关调用点共用缓存池），
+        "某插件在某 surface 用过某能力"全局只需记一行。
+        """
+        reg = self._registry
+        if reg is not None:
+            key = (self._plugin, self._surface, cap_id)
+            if key in reg._audited:
+                return
+            reg._audited.add(key)
+            self._audited.add(cap_id)
+        elif cap_id in self._audited:
             return
-        self._audited.add(cap_id)
+        else:
+            self._audited.add(cap_id)
         spec = catalog.get(cap_id)
         level = spec.level.value if spec else "unknown"
         msg = f"[CapabilityAudit] plugin={self._plugin or '(builtin)'} cap={cap_id} level={level}"
