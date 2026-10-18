@@ -337,7 +337,7 @@ class SecurityCenterCard(QWidget):
         )
         self.backup_dir_card.clicked.connect(lambda: self._open_backup_dir())
 
-        # ── EU-G12：网络外传检测开关（稍后由「网络与进程」分组收纳）──
+        # ── EU-G12：网络外传检测开关（外层）──
         self.net_switch = SwitchSettingCard(
             FIF.GLOBE if FIF else None,
             "网络外传检测",
@@ -347,7 +347,7 @@ class SecurityCenterCard(QWidget):
         self.net_switch.setChecked(bool(self._cfg.get("network.enabled")))
         self.net_switch.checkedChanged.connect(self._on_network_toggled)
 
-        # ── 系统级工具卡（同上，进分组）──
+        # ── 系统级工具豁免开关（外层）──
         self.sys_switch = SwitchSettingCard(
             FIF.COMMAND_PROMPT if FIF else None,
             "系统级工具豁免",
@@ -357,8 +357,12 @@ class SecurityCenterCard(QWidget):
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
 
-        # ── 首屏结构：重要开关外层 + 分组收纳 + 说明 ──
+        # ── 首屏结构：开关区（全部最外层）+ 折叠明细区 + 说明 ──
+        layout.addWidget(self.sandbox_switch)
         layout.addWidget(self.delete_switch)
+        layout.addWidget(self.trash_switch)
+        layout.addWidget(self.net_switch)
+        layout.addWidget(self.sys_switch)
         layout.addWidget(self._build_approval_card())
         layout.addWidget(self._build_rules_group())
         layout.addWidget(self._build_data_group())
@@ -421,13 +425,12 @@ class SecurityCenterCard(QWidget):
         return card
 
     def _build_data_group(self) -> "ExpandGroupSettingCard":
-        """删除安全：垃圾桶开关 + 豁免路径 + 恢复快照（审批开关已外提）"""
+        """删除豁免与快照：豁免路径 + 恢复快照统计（开关已全部外提）"""
         card = ExpandGroupSettingCard(
             FIF.DELETE if FIF else None,
-            "删除安全",
-            "垃圾桶 · 豁免路径 · 恢复快照",
+            "删除豁免与快照",
+            "豁免路径 · 恢复快照统计",
         )
-        card.addGroupWidget(self.trash_switch)
         card.addGroupWidget(self._delete_exempt)
         card.addGroupWidget(self._build_snapshot_row())
         self._bind_editor_growth(card, self._delete_exempt)
@@ -447,15 +450,13 @@ class SecurityCenterCard(QWidget):
         return card
 
     def _build_net_proc_group(self) -> "ExpandGroupSettingCard":
-        """网络与进程：外传检测 + 域名黑名单 + 系统级工具豁免 + 进程配额"""
+        """域名黑名单与进程配额（开关已全部外提）"""
         card = ExpandGroupSettingCard(
             FIF.GLOBE if FIF else None,
-            "网络与进程",
-            "外传检测 · 域名黑名单 · 系统工具豁免 · 进程配额",
+            "域名黑名单与进程配额",
+            "命中域名弹审批 · Job Object 三限额",
         )
-        card.addGroupWidget(self.net_switch)
         card.addGroupWidget(self._net_domains)
-        card.addGroupWidget(self.sys_switch)
         card.addGroupWidget(self._build_job_limits_row())
         self._bind_editor_growth(card, self._net_domains)
         self._net_proc_group = card

@@ -544,6 +544,15 @@ def test_delete_switch_outside_group(isolated_cfg):
     assert card.delete_switch not in card._rules_group.widgets
 
 
+def test_all_switches_outside_groups(isolated_cfg):
+    """开关类一律最外层：五个开关均不属于任何折叠组"""
+    card = _make_card()
+    groups = (card._rules_group, card._data_group, card._backup_group, card._net_proc_group)
+    for switch in (card.sandbox_switch, card.delete_switch, card.trash_switch, card.net_switch, card.sys_switch):
+        for g in groups:
+            assert switch not in g.widgets, f"{type(switch).__name__} 应在开关区，不应进折叠组 {g.titleLabel.text()}"
+
+
 def test_backup_group_separate_from_delete(isolated_cfg):
     """自动备份独立成组：备份卡在备份组，不在删除组"""
     card = _make_card()
