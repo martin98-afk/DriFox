@@ -36,6 +36,30 @@ from .assistant_avatar import RoundAvatar
 # ── 基础样式辅助 ─────────────────────────────────────
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 def _elide_lines(text: str, fm, width: int, max_lines: int = 2) -> str:
     """按像素宽度把 text 折行到 max_lines 行，超出部分末行截断加 …。
 
@@ -234,9 +258,8 @@ def _host_window():
     主 widget 的 window() → None（调用方自行兜底）。
     """
     try:
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        win = TabManagerWindow.get_instance()
+        host = _caps("window.host")
+        win = host() if host else None
         if win is not None:
             return win
     except Exception:

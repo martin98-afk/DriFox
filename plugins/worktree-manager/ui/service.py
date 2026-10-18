@@ -13,6 +13,30 @@ from typing import Any, Dict
 from loguru import logger
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 class WorktreeService:
     """工作树服务（插件注册到 UIPluginRegistry；无 Qt 对象成员，可安全单例）"""
 
@@ -114,11 +138,9 @@ class WorktreeService:
 
         # 3. 刷新右侧工作台关键文档/工作树 UI
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                tm.refresh_workbench()
+            wb = _caps("window.workbench")
+            if wb is not None:
+                wb["refresh"]()
         except Exception:
             pass
 
@@ -160,11 +182,9 @@ class WorktreeService:
         self.update_branch(mw)
 
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                tm.refresh_workbench()
+            wb = _caps("window.workbench")
+            if wb is not None:
+                wb["refresh"]()
         except Exception:
             pass
 

@@ -62,6 +62,30 @@ from .sections import (
 from .snapshot_dialog import SnapshotDialog
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 def _open_dialog(dlg) -> int:
     """统一弹窗入口：直接 exec_（对齐 plugin-marketplace 模式，零几何干预）。
 
@@ -376,12 +400,10 @@ class AssistantCardWidget(QWidget):
         except Exception as e:
             logger.warning(f"[assistant_hub] 关闭助手中心失败: {e}")
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            active = TabManagerWindow.get_instance().get_current_window()
-            if active is None:
-                raise RuntimeError("无活跃对话窗口")
-            active._insert_command_text_fallback("persona-creator")
+            writer = _caps("input.write")
+            if writer is None:
+                raise RuntimeError("无 input.write 能力")
+            writer("/persona-creator")
         except Exception as e:
             self._notify_error(f"无法跳转对话：{e}")
 
