@@ -59,6 +59,12 @@ _DANGER_SESSION_HINT = "⚠ 删除类命令不支持会话级豁免"
 # 用户明确反馈"字体太多太杂乱"，收敛为 3 项核心快捷键。
 _HINT_TEXT = "Enter 允许 · Esc 拒绝 · Ctrl+P 预览"
 
+# 倒计时徽标配色阈值（秒）：>60 中性、10~60 警告、<10 错误
+_COUNTDOWN_WARN_SEC = 60
+_COUNTDOWN_DANGER_SEC = 10
+# 倒计时刷新周期（ms）
+_COUNTDOWN_TICK_MS = 1000
+
 
 class PermissionApprovalWidget(QWidget):
     """权限审批卡：展示工具调用完整信息，回传结构化决策"""
@@ -91,6 +97,11 @@ class PermissionApprovalWidget(QWidget):
         self._lock_hint_shown = False
         # 高度通知合并标志（对齐提问卡，防布局自激循环）
         self._height_emit_pending = False
+        # 倒计时：剩余秒数（None = 不显示徽标）+ 1Hz 刷新定时器
+        self._countdown_left: Optional[int] = None
+        self._countdown_timer: QTimer | None = None
+        # AI 审核失败原因（非空时头部下方显示独立高亮行）
+        self._review_note = ""
 
         # ① 高度严格跟随内容
         self.setProperty(CardContainer.FOLLOW_CONTENT_PROP, True)
@@ -114,6 +125,7 @@ class PermissionApprovalWidget(QWidget):
         workdir: str,
         impact: dict,
         preview_payload=None,
+        review_note: str = "",
     ) -> None:
         """填充并展示一次审批请求
 
@@ -126,6 +138,7 @@ class PermissionApprovalWidget(QWidget):
             workdir: 当前工作目录
             impact: {"paths": [...], "missing": [...], "domains": [...], "writes": bool}
             preview_payload: 预览载荷（非空才显示预览按钮）
+            review_note: AI 审核失败原因（非空时头部下方显示独立高亮行）
         """
         self._tool_name = tool_name or ""
         self._arguments = dict(arguments or {})
@@ -139,6 +152,10 @@ class PermissionApprovalWidget(QWidget):
         self._impact = dict(impact or {})
         self._preview_payload = preview_payload
         self._decided = False
+        # AI 审核失败原因：回落人工时由宿主传入（extra_note），独立高亮显示
+        self._review_note = review_note or ""
+        # 每次请求都重置倒计时：宿主显式 start_countdown 后才显示徽标
+        self.stop_countdown()
         # 作用域逐次请求复位：卡片是复用单例，上次选的「当前会话」不能
         # 因为默认值未重置而顺延成下一个（可能是另一个工具）的授权范围。
         # 这是安全默认的一部分：每次审批都从最小范围（当前工具）开始。
@@ -159,9 +176,11 @@ class PermissionApprovalWidget(QWidget):
         self._tool_name = ""
         self._arguments = {}
         self._preview_payload = None
+        self._review_note = ""
         # 作用域一并复位：避免清理后残留的会话级选中被下一次请求继承
         self._remember_scope = REMEMBER_TOOL
         self._scope_btn.setText(f"{_SCOPE_LABELS[REMEMBER_TOOL]} ▾")
+        self.stop_countdown()
         self._decided = True  # 清理后不再允许 emit
         self.setVisible(False)
 
@@ -173,22 +192,89 @@ class PermissionApprovalWidget(QWidget):
         """主题/深浅切换时刷新样式（色值必须每次重新取，禁止缓存为模块常量）"""
         self._apply_card_style()
 
+    # ══════════════════ 倒计时 ══════════════════
+
+    def start_countdown(self, total_sec: int) -> None:
+        """启动右上角倒计时徽标（total_sec <= 0 时 no-op）"""
+        if total_sec <= 0:
+            return
+        self._countdown_left = int(total_sec)
+        if self._countdown_timer is None:
+            self._countdown_timer = QTimer(self)
+            self._countdown_timer.setInterval(_COUNTDOWN_TICK_MS)
+            self._countdown_timer.timeout.connect(self._tick_countdown)
+        self._render_countdown()
+        self._countdown_timer.start()
+
+    def stop_countdown(self) -> None:
+        """停止并隐藏倒计时徽标（决策/取消/清理路径统一调用）"""
+        if self._countdown_timer is not None:
+            self._countdown_timer.stop()
+        self._countdown_left = None
+        self._countdown_label.setVisible(False)
+
+    def _tick_countdown(self) -> None:
+        if self._countdown_left is None:
+            return
+        self._countdown_left -= 1
+        if self._countdown_left <= 0:
+            # 终局由宿主的超时定时器落决策，此处只负责收起显示
+            self.stop_countdown()
+            return
+        self._render_countdown()
+
+    def _render_countdown(self) -> None:
+        left = self._countdown_left
+        if left is None:
+            self._countdown_label.setVisible(False)
+            return
+        if left < _COUNTDOWN_DANGER_SEC:
+            text, level = f"⏳ {left}s 后自动拒绝", "danger"
+        elif left < _COUNTDOWN_WARN_SEC:
+            text, level = f"⏳ 还剩 {left}s", "warn"
+        else:
+            text, level = f"⏳ 还剩 {left}s", "normal"
+        self._countdown_label.setText(text)
+        self._countdown_label.setProperty("level", level)
+        self._countdown_label.setVisible(True)
+        # 属性驱动配色：样式表按 [level="..."] 匹配，避免每次重设整段 QSS
+        self._countdown_label.style().unpolish(self._countdown_label)
+        self._countdown_label.style().polish(self._countdown_label)
+
     # ══════════════════ UI 构建 ══════════════════
 
     def _setup_ui(self) -> None:
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 6, 10, 8)
-        main_layout.setSpacing(6)
+        # 外边距/行距统一走 tokens：外 12/10/12/12，行距 8（原先 10/6/10/8 + 6 偏挤）
+        main_layout.setContentsMargins(12, 10, 12, 12)
+        main_layout.setSpacing(8)
 
         main_layout.addWidget(self._build_header())
+        main_layout.addWidget(self._build_review_note())
         main_layout.addWidget(self._build_body())
         main_layout.addWidget(self._build_meta())
         main_layout.addWidget(self._build_hint())
         main_layout.addWidget(self._build_footer())
 
+    def _build_review_note(self) -> QWidget:
+        """①-AI 审核失败提示行：原因独立高亮，不与来源说明混排
+
+        实跑场景：mode=ai 静默审核失败回落人工时，用户只看到来源说明，
+        不知道背后刚发生过一次失败、更不知道为什么。原因必须单独占一行。
+        """
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._review_note_label = QLabel("")
+        self._review_note_label.setObjectName("papReviewNote")
+        self._review_note_label.setWordWrap(True)
+        self._review_note_label.setVisible(False)
+        lay.addWidget(self._review_note_label)
+        return w
+
     def _build_header(self) -> QWidget:
-        """① 头部：风险图标 + 风险文案 + 工具中文名(英文) + 来源标签 + 序号"""
+        """① 头部：风险图标 + 风险文案 + 工具中文名(英文) + 来源标签 + 倒计时徽标"""
         w = QWidget()
         lay = QHBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -208,6 +294,13 @@ class PermissionApprovalWidget(QWidget):
         lay.addWidget(self._source_label)
 
         lay.addStretch()
+
+        # 倒计时徽标（右上角）：宿主 start_countdown 后才可见
+        self._countdown_label = QLabel("")
+        self._countdown_label.setObjectName("papCountdown")
+        self._countdown_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._countdown_label.setVisible(False)
+        lay.addWidget(self._countdown_label)
 
         w.setFixedHeight(24)
         return w
@@ -348,6 +441,14 @@ class PermissionApprovalWidget(QWidget):
         self._source_desc.setText(self._source_description())
         self._impact_label.setText(self._format_impact())
 
+        # AI 审核失败原因：独立一行高亮（不与来源说明混排）
+        if self._review_note:
+            self._review_note_label.setText(f"⚠ {self._review_note}")
+            self._review_note_label.setVisible(True)
+        else:
+            self._review_note_label.setText("")
+            self._review_note_label.setVisible(False)
+
         meta_lines = [f"tool_call_id：{self._tool_call_id or '—'}", f"请求时间：{self._request_time or '—'}"]
         if self._workdir:
             meta_lines.append(f"工作目录：{self._workdir}")
@@ -457,6 +558,23 @@ class PermissionApprovalWidget(QWidget):
             f"QLabel#papSource {{ color:{risk_color}; background:{Colors.REALTIME_TAG_BG};"
             f" border-radius:{BorderRadius.XS}; padding:1px 6px; {font_size_css(10)}"
             f" {get_font_family_css()} }}"
+        )
+        # 倒计时徽标：三级配色由 dynamic property `level` 驱动（normal/warn/danger）
+        # unpolish/polish 后重新匹配，无需每次重设整段 QSS
+        self._countdown_label.setStyleSheet(
+            f"QLabel#papCountdown {{ color:{Colors.TEXT_SECONDARY}; background:transparent;"
+            f" border-radius:{BorderRadius.XS}; padding:1px 6px; {font_size_css(10)}"
+            f" {get_font_family_css()} }}"
+            f' QLabel#papCountdown[level="warn"] {{ color:{Colors.WARNING};'
+            f" background:{Colors.REALTIME_TAG_BG}; }}"
+            f' QLabel#papCountdown[level="danger"] {{ color:{Colors.REALTIME_ERROR};'
+            f" background:{Colors.REALTIME_TAG_BG}; font-weight:bold; }}"
+        )
+        # AI 审核失败提示行：警告色文字 + 同色系淡底，与来源说明（次要文字）分层
+        self._review_note_label.setStyleSheet(
+            f"QLabel#papReviewNote {{ color:{Colors.WARNING};"
+            f" background:{Colors.REALTIME_TAG_BG}; border-radius:{BorderRadius.SM};"
+            f" padding:5px 8px; {font_size_css(11)} {get_font_family_css()} }}"
         )
         self._cmd_view.setStyleSheet(
             f"QScrollArea {{ background:{Colors.CONTENT_BG}; border:1px solid {Colors.BORDER};"

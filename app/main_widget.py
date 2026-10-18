@@ -22272,9 +22272,17 @@ class OpenAIChatToolWindow(ToolWindow):
             self._start_approval_review(tool_call_id, tool_name, arguments, policy, workdir)
             return
         self._show_permission_card(tool_call_id, tool_name, arguments, workdir)
-        # 人工审批超时：timeout_sec>0 时启动（0=不超时）
-        if policy["timeout_sec"] > 0:
-            self._permission_timeout_timer.start(policy["timeout_sec"] * 1000)
+        self._start_permission_countdown(policy)
+
+    def _start_permission_countdown(self, policy: dict) -> None:
+        """人工审批超时：起终局定时器 + 卡片倒计时徽标（timeout_sec=0 两者都不起）"""
+        timeout_sec = int(policy.get("timeout_sec") or 0)
+        if timeout_sec <= 0:
+            return
+        self._permission_timeout_timer.start(timeout_sec * 1000)
+        widget = getattr(self, "_permission_floating_widget", None)
+        if widget is not None:
+            widget.start_countdown(timeout_sec)
 
     def _current_permission_workdir(self) -> str:
         """审批链 workdir 基准：与 worker 判定同源优先（多窗口防串味）"""
@@ -22308,8 +22316,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._notify_if_inactive("需要授权", f"工具 {tool_name} 等待你的确认")
 
         source, source_text = self._classify_permission_source(tool_name, arguments, workdir=workdir or None)
-        if extra_note:
-            source_text = f"{source_text}（{extra_note}）"
+        # extra_note（AI 审核失败原因）不再拼进来源文案：混排后用户看不到
+        # 「背后刚发生过一次失败」，改为独立高亮行（卡片 _build_review_note）
         risk = self._grade_permission_risk(tool_name, arguments, source)
         impact = self._build_permission_impact(tool_name, arguments, workdir=workdir or None)
 
@@ -22330,6 +22338,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "tool_call_id": tool_call_id,
                     "arguments": arguments or {},
                 },
+                review_note=extra_note,
             )
         except Exception as e:
             widget.setUpdatesEnabled(True)
@@ -22487,12 +22496,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._pending_permission_id != tool_call_id:
             return
         logger.info(f"[Permission] AI 审核失败回落人工 id={tool_call_id}: {note}")
-        self._show_permission_card(tool_call_id, tool_name, arguments, workdir, extra_note=f"AI 审核失败：{note}，请人工决策")
         from app.tools.sandbox import read_approval_policy
 
         policy = read_approval_policy()
-        if policy["timeout_sec"] > 0:
-            self._permission_timeout_timer.start(policy["timeout_sec"] * 1000)
+        self._show_permission_card(tool_call_id, tool_name, arguments, workdir, extra_note=f"AI 审核失败：{note}，请人工决策")
+        self._start_permission_countdown(policy)
 
     def _on_permission_timeout(self):
         """人工审批超时：按 approval.timeout_action 落决策 / 转 AI 审核"""
@@ -22508,6 +22516,10 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.info(f"[Permission] 审批超时 → {action} id={tool_call_id}")
         if action == "ai":
             # 卡保持弹出，人工仍可抢先生效；AI 结果回来时 id 已变则丢弃
+            # 倒计时徽标先收：终局已到，转 AI 审核期间不该继续倒数
+            widget = getattr(self, "_permission_floating_widget", None)
+            if widget is not None:
+                widget.stop_countdown()
             tool = self._pending_permission_tool or {}
             self._start_approval_review(
                 tool_call_id,
