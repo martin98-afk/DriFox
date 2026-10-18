@@ -91,6 +91,8 @@ class TraceCollector(QObject):
         self._active_session_id: str = ""
         self._bound_backend: Optional[Any] = None
         self._bound_main_widget: Optional[Any] = None
+        # 能力池（经 attach 传入；有它时信号订阅走 stream.subscribe）
+        self._caps: Optional[Any] = None
         # (消息序号, 文本长度) → token 数
         self._token_cache: Dict[tuple, int] = {}
         # ── 增量投影状态（见 _try_incremental）──
@@ -99,8 +101,37 @@ class TraceCollector(QObject):
 
     # ──────────────────── 公共 API ────────────────────
 
-    def attach(self, backend: Any, main_widget: Any) -> None:
-        """挂到指定 backend / 主窗口（幂等，backend 变化时重挂）。"""
+    @staticmethod
+    def _self_pool(main_widget: Any):
+        """未拿到 ctx 能力池时按插件名自建（仍走能力池，不绕过）。
+
+        生产路径由主程序注入 ctx["capabilities"]；这里是给"窗口已在但 ctx 还没到"
+        与测试直调 attach 的场景兜底。构建失败返回 None = 不订阅。
+        """
+        if main_widget is None:
+            return None
+        try:
+            from app.plugins.capabilities.bootstrap import ensure_registered
+            from app.plugins.capabilities.registry import CapabilityRegistry
+
+            ensure_registered("ui")
+            return CapabilityRegistry.get_instance().build_pool(
+                surface="ui",
+                host=main_widget,
+                plugin="agent_trace",
+                declared={"stream.subscribe", "window.list"},
+            )
+        except Exception as e:
+            logger.warning(f"[agent_trace] 自建能力池失败: {e}")
+            return None
+
+    def attach(self, backend: Any, main_widget: Any, capabilities: Any = None) -> None:
+        """挂到指定 backend / 主窗口（幂等，backend 变化时重挂）。
+
+        capabilities: ctx["capabilities"]（能力池）。给出时经 stream.subscribe
+        订阅全部对话流信号，不再直接 connect backend（能力池是唯一动作入口）；
+        未给出时保持旧直连行为，兼容旧调用点。
+        """
         if backend is None:
             return
         if self._bound_backend is backend:
@@ -109,47 +140,47 @@ class TraceCollector(QObject):
         self.detach()
         self._bound_backend = backend
         self._bound_main_widget = main_widget
+        if capabilities is None:
+            capabilities = self._self_pool(main_widget)
+        self._caps = capabilities
         try:
-            backend.tool_call_started.connect(self._on_tool_call_started)
-            backend.tool_result_received.connect(self._on_tool_result_received)
-            backend.stream_started.connect(self._on_stream_started)
-            backend.stream_finished.connect(self._on_stream_finished)
-            # 引擎报错：唯一能观测到「这一轮异常终止」的信号（见 _on_error_occurred）
-            if hasattr(backend, "error_occurred"):
-                backend.error_occurred.connect(self._on_error_occurred)
-            # 主程序在 hook 注入后触发的节拍信号
-            if hasattr(backend, "_hook_messages_updated"):
-                backend._hook_messages_updated.connect(self._on_messages_updated)
-            # ⚠️ 「消息已落盘」的唯一可订阅事件：worker 的 finished_with_messages
-            # （每次工具迭代落盘 / 整轮结束）经 executor 回调链转发到此信号。
-            # 不订阅它的话，工具迭代写入 session.messages 后 collector 完全感知
-            # 不到 —— 只能等下一次 tool_result_received（那时消息还没落盘）或
-            # 整轮 stream_finished，表现为「记录刷新延迟非常高」。
-            if hasattr(backend, "messages_updated"):
-                backend.messages_updated.connect(self._on_messages_updated)
-        except Exception as e:
-            logger.warning(f"[agent_trace] attach signals failed: {e}")
+            subscribe = capabilities["stream.subscribe"] if capabilities is not None else None
+        except Exception:
+            subscribe = None
+        if subscribe is not None:
+            subscribe(
+                {
+                    "tool_call_started": self._on_tool_call_started,
+                    "tool_result_received": self._on_tool_result_received,
+                    "stream_started": self._on_stream_started,
+                    "stream_finished": self._on_stream_finished,
+                    "error_occurred": self._on_error_occurred,
+                    # 主程序在 hook 注入后触发的节拍信号
+                    "_hook_messages_updated": self._on_messages_updated,
+                    # 消息已落盘的唯一可订阅事件：worker 的 finished_with_messages
+                    # （每次工具迭代落盘 / 整轮结束）经 executor 回调链转发到此信号。
+                    # 不订阅它的话，工具迭代写入 session.messages 后 collector 完全
+                    # 感知不到，表现为「记录刷新延迟非常高」。
+                    "messages_updated": self._on_messages_updated,
+                }
+            )
+        else:
+            # 能力池是唯一动作入口：拿不到 stream.subscribe 就不订阅（主程序侧已记
+            # warning）。不做直连兜底——那会让插件绕过能力池，声明形同虚设。
+            logger.warning("[agent_trace] 无 stream.subscribe 能力，轨迹实时数据将缺失")
         self._sync(emit_reset=True)
 
     def detach(self) -> None:
-        """解除所有信号连接。"""
+        """解除绑定。
+
+        信号连接由 CapabilityRegistry.release_plugin 在插件卸载时统一断开
+        （登记在 track_subscription），这里只需清引用。
+        """
         if self._bound_backend is None:
             return
-        for sig, slot in (
-            ("tool_call_started", self._on_tool_call_started),
-            ("tool_result_received", self._on_tool_result_received),
-            ("stream_started", self._on_stream_started),
-            ("stream_finished", self._on_stream_finished),
-            ("error_occurred", self._on_error_occurred),
-            ("_hook_messages_updated", self._on_messages_updated),
-            ("messages_updated", self._on_messages_updated),
-        ):
-            try:
-                getattr(self._bound_backend, sig).disconnect(slot)
-            except (TypeError, RuntimeError):
-                pass  # 未连接 / 已析构
         self._bound_backend = None
         self._bound_main_widget = None
+        self._caps = None
 
     @property
     def bound_main_widget(self) -> Optional[Any]:
@@ -1061,8 +1092,12 @@ class TraceCollectorHub(QObject):
         super().__init__(parent)
         self._collectors: Dict[str, TraceCollector] = {}
 
-    def collector_for(self, main_widget: Any) -> Optional[TraceCollector]:
-        """取（或创建）绑定该窗口的 collector；窗口/ backend 未就绪返回 None。"""
+    def collector_for(self, main_widget: Any, capabilities: Any = None) -> Optional[TraceCollector]:
+        """取（或创建）绑定该窗口的 collector；窗口/ backend 未就绪返回 None。
+
+        capabilities: 该插件的能力池（可选）。给出时 collector 经 stream.subscribe
+        订阅信号，不再直连 backend。
+        """
         if main_widget is None:
             return None
         wid = getattr(main_widget, "_window_id", "") or ""
@@ -1075,12 +1110,12 @@ class TraceCollectorHub(QObject):
         c = self._collectors.get(wid)
         if c is None:
             c = TraceCollector(self)
-            c.attach(backend, main_widget)
+            c.attach(backend, main_widget, capabilities)
             self._collectors[wid] = c
             logger.debug(f"[agent_trace] hub: 为窗口 {wid[:8]} 创建 collector")
         elif c._bound_backend is not backend:
             # 同窗口 backend 被替换 → 重挂（attach 幂等保留 timing）
-            c.attach(backend, main_widget)
+            c.attach(backend, main_widget, capabilities)
         return c
 
     def get(self, window_id: str) -> Optional[TraceCollector]:

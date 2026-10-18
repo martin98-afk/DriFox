@@ -27,6 +27,67 @@ from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 能力池：按插件名构建 / 投影 services
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _capabilities_for(plugin_name: str, win):
+    """按插件名构建能力池；不可用时返回 None。"""
+    if win is None:
+        return None
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        return CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=win, plugin=plugin_name
+        )
+    except Exception as e:
+        logger.warning(f"[UIPluginRegistry] 插件 {plugin_name} 能力池构建失败: {e}")
+        return None
+
+
+def _services_for(plugin_name: str, win) -> dict:
+    """按插件声明裁过的 services（能力池不可用时回落到窗口级全量投影）。"""
+    if win is None:
+        return {}
+    pool = _capabilities_for(plugin_name, win)
+    if pool is None:
+        return win._build_ui_services() if hasattr(win, "_build_ui_services") else {}
+    try:
+        from app.plugins.capabilities.catalog import CATALOG, LEGACY_MAP
+
+        return {
+            old: pool[cap]
+            for old, cap in LEGACY_MAP.items()
+            if CATALOG.get(cap) is not None and "ui" in CATALOG[cap].surfaces and cap in pool
+        }
+    except Exception as e:
+        logger.warning(f"[UIPluginRegistry] 插件 {plugin_name} services 投影失败: {e}")
+        return {}
+
+
+def callback_context(plugin_name: str, win, extra: dict) -> dict:
+    """回调类入口的上下文（输入按钮 / 侧栏项 / 标题栏 tab）。
+
+    与 ``_build_card_context`` 同源：按插件名构建能力池并投影 services，
+    避免这三条路径拿到未裁剪的全量服务面。
+    """
+    ctx = dict(extra or {})
+    ctx["plugin_name"] = plugin_name
+    if win is None:
+        return ctx
+    ctx["main_widget"] = win
+    ctx["window_id"] = getattr(win, "_window_id", None)
+    pool = _capabilities_for(plugin_name, win)
+    if pool is not None:
+        ctx["capabilities"] = pool
+    ctx["services"] = _services_for(plugin_name, win)
+    return ctx
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # UI 命令快捷键持久化（user-custom/shortcuts.json）
 # ═══════════════════════════════════════════════════════════════════════════
 # Why 不走 user-custom/commands/*.md 兜底：UI 插件命令名常带冒号
@@ -3974,6 +4035,24 @@ class UIPluginRegistry:
         # 卡片元信息始终注入
         ctx.setdefault("plugin_name", card_info.plugin_name)
         ctx.setdefault("card_id", card_info.card_id)
+
+        # 能力池按插件名重建：窗口级 ctx 是共享的，声明裁剪必须在知道插件身份后做。
+        # 这里是所有浮动卡/工作台页/设置卡 ctx 的唯一出口，一处覆盖全部路径。
+        _host = ctx.get("main_widget")
+        if _host is not None:
+            _pool = _capabilities_for(card_info.plugin_name, _host)
+            if _pool is not None:
+                ctx["capabilities"] = _pool
+                if "services" in ctx:
+                    from app.plugins.capabilities.catalog import CATALOG, LEGACY_MAP
+
+                    ctx["services"] = {
+                        old: _pool[cap]
+                        for old, cap in LEGACY_MAP.items()
+                        if CATALOG.get(cap) is not None
+                        and "ui" in CATALOG[cap].surfaces
+                        and cap in _pool
+                    }
 
         # 注入插件图标路径（供卡片在头部/标题等位置展示）
         try:

@@ -536,7 +536,7 @@ class TraceCardWidget(QWidget):
 
         self._unbind_collector_signals()
         self._unbind_backend_stats_signals()
-        self._collector = self._hub.collector_for(main_widget)
+        self._collector = self._hub.collector_for(main_widget, self._ctx.get("capabilities"))
         self._active_wid = wid if self._collector is not None else ""
 
         if self._collector is not None:
@@ -571,16 +571,13 @@ class TraceCardWidget(QWidget):
             return ""
         return str(getattr(session, "session_id", "") or "")
 
-    @staticmethod
-    def _active_window_ids() -> Optional[set]:
-        """当前存活的对话窗口 id 集合（非 Tab 模式返回 None = 不清理）。"""
+    def _active_window_ids(self) -> Optional[set]:
+        """当前存活的对话窗口 id 集合（能力池不可用时返回 None = 不清理）。"""
+        caps = self._ctx.get("capabilities")
+        if caps is None or "window.list" not in caps:
+            return None
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is None:
-                return None
-            return {getattr(w, "_window_id", "") for w in tm._windows}
+            return caps["window.list"]()
         except Exception:
             return None
 
