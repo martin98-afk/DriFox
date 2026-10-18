@@ -48,6 +48,13 @@ class CapabilityRegistry:
         self._legacy_entries: Dict[Tuple[str, str], CapabilityProvider] = {}
         self._declared_cache: Dict[str, tuple] = {}
         self._plugin_subs: Dict[str, List[Tuple[Any, Any]]] = {}
+        # host 无关的瞬时池缓存：(plugin, surface, declared 签名) -> pool。
+        # 工具/hook 类调用点每次现建池，若不缓存则重建的池 _audited 恒空
+        # → 审计日志每次调用都刷一行（实测 tool.read 满屏）。
+        self._hostless_pools: Dict[tuple, CapabilityPool] = {}
+        # 全局审计去重：(plugin, surface, cap_id) -> 已记过。
+        # 池实例可以有多个（每 ctx 一个），"某插件用过某能力"全局只需记一次。
+        self._audited: Set[Tuple[str, str, str]] = set()
 
     # ── 单例 ──
 
@@ -138,6 +145,29 @@ class CapabilityRegistry:
         显式传 None = 兼容期全量放行；传集合 = 按集合裁剪。
         """
         decl = self.resolve_declared(plugin) if declared is _UNSET else declared
+
+        # host 无关的调用（tool/hook/context tier：host=None 且声明显式给出）
+        # 走缓存：避免每次调用重建池导致审计日志刷屏。
+        if host is None and declared is not _UNSET:
+            sig = (
+                plugin,
+                surface,
+                None if decl is None else tuple(sorted(decl)),
+            )
+            cached = self._hostless_pools.get(sig)
+            if cached is not None:
+                return cached
+
+        pool = self._make_pool(surface, host, plugin, decl)
+        if host is None and declared is not _UNSET:
+            if len(self._hostless_pools) >= _CACHE_MAX:
+                self._hostless_pools.clear()
+            self._hostless_pools[sig] = pool
+        return pool
+
+    def _make_pool(
+        self, surface: str, host: Any, plugin: str, decl: Optional[FrozenSet[str]]
+    ) -> CapabilityPool:
         allowed, ungated = self._select(surface, decl)
         providers = {cid: self._entries[(cid, surface)].provider for cid in (allowed | ungated)}
         legacy = {

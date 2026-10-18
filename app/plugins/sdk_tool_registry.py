@@ -84,10 +84,34 @@ def tool_registry_api(
 
         ensure_registered("tool")
         pool = CapabilityRegistry.get_instance().build_pool(
-            surface="tool", host=None, plugin="", declared={cap, "state.kv", "plugin.log"}
+            surface="tool",
+            host=None,
+            plugin=_caller_plugin(module_globals),
+            declared={cap, "state.kv", "plugin.log"},
         )
         if cap not in pool:
             return None
         return pool[cap]()
     except Exception:
         return None
+
+
+def _caller_plugin(module_globals: Optional[dict]) -> str:
+    """从调用方模块的 __file__ 推断插件名（用于审计归因）。
+
+    推断不出返回空串（日志显示为 (builtin)）。
+    """
+    if not module_globals:
+        return ""
+    try:
+        from pathlib import Path
+
+        path = module_globals.get("__file__")
+        if not path:
+            return ""
+        parts = Path(path).resolve().parts
+        if "plugins" in parts:
+            return parts[parts.index("plugins") + 1]
+    except Exception:
+        pass
+    return ""
