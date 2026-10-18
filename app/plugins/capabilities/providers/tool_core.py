@@ -32,6 +32,27 @@ def register(registry) -> None:
     def _subagent(host: Any):
         return getattr(host, "_sub_agent_manager", None)
 
+    def _team_read(host: Any):
+        """团队只读面（与 ui_core 同名能力语义一致）。"""
+
+        def api() -> dict:
+            from app.core.team.team_manager import TeamManager
+
+            tm = TeamManager.get_instance()
+            return {
+                "members": tm.get_members,
+                "template": tm.get_template,
+                "run_ids": tm.get_team_run_ids,
+                "label_by_run": tm.get_team_label_by_run,
+                "member_capability": tm.get_member_capability,
+                "member_busy_status": tm.get_member_busy_status,
+                "running_tasks": tm.get_running_tasks,
+                "pending_tasks": tm.get_pending_tasks,
+                "find_member": tm.find_member,
+            }
+
+        return api
+
     def _tool_read(host: Any):
         """工具注册表只读面（与 ui_core 的同名能力语义一致）。"""
 
@@ -72,6 +93,7 @@ def register(registry) -> None:
     registry.register("state.kv", _kv, surface="tool", owner="core:tool")
     registry.register("tool.read", _tool_read, surface="tool", owner="core:tool")
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
+    registry.register("team.read", _team_read, surface="tool", owner="core:tool")
     registry.register("lsp.query", _lsp, surface="tool", owner="core:tool")
     registry.register("mcp.call", _mcp, surface="tool", owner="core:tool")
     registry.register("net.upload", _gitee, surface="tool", owner="core:tool")

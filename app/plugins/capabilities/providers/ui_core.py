@@ -317,6 +317,47 @@ def _engine_session(host: Any):
     return create
 
 
+def _session_read(host: Any):
+    """当前会话的只读快照（插件拿消息内容，不拿会话对象）。
+
+    给副本而非对象：插件无法直接 mutate 会话（改会话走 session.write / manage）。
+    """
+
+    def read() -> dict:
+        backend = getattr(host, "backend", None)
+        session = backend.get_current_session() if backend is not None else None
+        if session is None:
+            return {"session_id": "", "messages": [], "system_prompt": ""}
+        return {
+            "session_id": str(getattr(session, "session_id", "") or ""),
+            "messages": list(getattr(session, "messages", None) or []),
+            "system_prompt": str(getattr(session, "system_prompt", "") or ""),
+        }
+
+    return read
+
+
+def _session_list(host: Any):
+    """历史会话列表（只读元数据，不含完整消息）。"""
+
+    def list_sessions() -> list:
+        sm = getattr(host, "session_manager", None)
+        if sm is None:
+            return []
+        out = []
+        for s in getattr(sm, "sessions", None) or []:
+            out.append(
+                {
+                    "session_id": str(getattr(s, "session_id", "") or ""),
+                    "title": str(getattr(s, "title", "") or ""),
+                    "message_count": len(getattr(s, "messages", None) or []),
+                }
+            )
+        return out
+
+    return list_sessions
+
+
 def _session_write(host: Any):
     return host._save_messages_to_session
 
@@ -354,6 +395,91 @@ def _input_write(host: Any):
             area.setTextCursor(cursor)
 
     return write
+
+
+def _ui_dialog(host: Any):
+    """标准对话框（跟随主题，parent 由主程序解析）。
+
+    返回 dict of callable：
+    - confirm(title, content)                  -> bool
+    - prompt(title, hint, default)             -> str | None（取消返回 None）
+    - pick_file(title, start_dir, filter)      -> str | ""
+    - pick_dir(title, start_dir)               -> str | ""
+    - save_file(title, start_dir, filter)      -> str | ""
+
+    对话框是**同步模态**（exec_），因此直接返回结果；这与 UI 事件总线那类
+    异步回调不同，插件不用自己接信号。
+    """
+
+    def _parent():
+        return _resolve_tab_window() or (host.window() if host is not None else None)
+
+    def confirm(title: str, content: str = "", confirm_text: str = "确认") -> bool:
+        from app.widgets.common_dialogs import ConfirmDialog
+
+        dlg = ConfirmDialog(title, content, confirm_text=confirm_text, parent=_parent())
+        result = {"ok": False}
+        dlg.confirmed.connect(lambda: result.__setitem__("ok", True))
+        dlg.exec_()
+        return bool(result["ok"])
+
+    def prompt(title: str, hint: str = "", default_text: str = "") -> object:
+        from app.widgets.common_dialogs import SingleInputDialog
+
+        dlg = SingleInputDialog(
+            title, hint=hint, default_text=default_text, parent=_parent()
+        )
+        box = {}
+        dlg.confirmed.connect(lambda text: box.__setitem__("text", text))
+        dlg.exec_()
+        return box.get("text")
+
+    def pick_file(title: str = "选择文件", start_dir: str = "", filter: str = "") -> str:
+        from PyQt5.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(_parent(), title, start_dir, filter)
+        return str(path or "")
+
+    def pick_dir(title: str = "选择目录", start_dir: str = "") -> str:
+        from PyQt5.QtWidgets import QFileDialog
+
+        path = QFileDialog.getExistingDirectory(_parent(), title, start_dir)
+        return str(path or "")
+
+    def save_file(title: str = "保存文件", start_dir: str = "", filter: str = "") -> str:
+        from PyQt5.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getSaveFileName(_parent(), title, start_dir, filter)
+        return str(path or "")
+
+    def api() -> dict:
+        return {
+            "confirm": confirm,
+            "prompt": prompt,
+            "pick_file": pick_file,
+            "pick_dir": pick_dir,
+            "save_file": save_file,
+        }
+
+    return api
+
+
+def _ui_card_show(host: Any):
+    """显示已注册的浮动卡（与 ui.card.hide 对称）。"""
+
+    def show(card_id: str) -> bool:
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance()._show_floating_card(
+                card_id, main_widget=host if host is not None else None
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[Capability] 显示浮动卡 {card_id} 失败: {e}")
+            return False
+
+    return show
 
 
 def _ui_notify(host: Any):
@@ -533,6 +659,31 @@ def _plugin_log(host: Any, ctx: Any):
 # ──────────────────── 逃生舱 ────────────────────
 
 
+def _team_read(host: Any):
+    """团队只读面（成员表 / 模板 / 任务状态）。
+
+    只暴露只读查询；派任务、改状态等写操作不在此能力内。
+    """
+
+    def api() -> dict:
+        from app.core.team.team_manager import TeamManager
+
+        tm = TeamManager.get_instance()
+        return {
+            "members": tm.get_members,
+            "template": tm.get_template,
+            "run_ids": tm.get_team_run_ids,
+            "label_by_run": tm.get_team_label_by_run,
+            "member_capability": tm.get_member_capability,
+            "member_busy_status": tm.get_member_busy_status,
+            "running_tasks": tm.get_running_tasks,
+            "pending_tasks": tm.get_pending_tasks,
+            "find_member": tm.find_member,
+        }
+
+    return api
+
+
 def _host_raw(host: Any):
     return host
 
@@ -544,7 +695,6 @@ def register(registry) -> None:
     reg.register("window.active", _window_active, surface="ui", owner="core:ui")
     reg.register("window.host", _window_host, surface="ui", owner="core:ui")
     reg.register("window.current", _window_current, surface="ui", owner="core:ui")
-    reg.register("window.host", _window_host, surface="ui", owner="core:ui")
     reg.register("window.list", _window_list, surface="ui", owner="core:ui")
     reg.register("window.workbench", _window_workbench, surface="ui", owner="core:ui")
     reg.register("window.events", _window_events, surface="ui", owner="core:ui")
@@ -566,17 +716,21 @@ def register(registry) -> None:
     reg.register("context.compact", _context_compactor, surface="ui", owner="core:ui")
     reg.register("engine.stack", _engine_stack, surface="ui", owner="core:ui")
     reg.register("engine.session", _engine_session, surface="ui", owner="core:ui")
+    reg.register("session.read", _session_read, surface="ui", owner="core:ui")
+    reg.register("session.list", _session_list, surface="ui", owner="core:ui")
     reg.register("session.write", _session_write, surface="ui", owner="core:ui")
     # 界面
     reg.register("input.read", _input_read, surface="ui", owner="core:ui")
     reg.register("input.write", _input_write, surface="ui", owner="core:ui")
     reg.register("ui.notify", _ui_notify, surface="ui", owner="core:ui")
+    reg.register("ui.dialog", _ui_dialog, surface="ui", owner="core:ui")
+    reg.register("ui.card.show", _ui_card_show, surface="ui", owner="core:ui")
+    reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
     reg.register("ui.events", _ui_events, surface="ui", owner="core:ui")
     reg.register("command.read", _command_read, surface="ui", owner="core:ui")
     reg.register("command.reload", _command_reload, surface="ui", owner="core:ui")
     reg.register("plugin.read", _plugin_read, surface="ui", owner="core:ui")
     reg.register("plugin.control", _plugin_control, surface="ui", owner="core:ui")
-    reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
     reg.register("ui.exclusive", _ui_exclusive, surface="ui", owner="core:ui")
     reg.register(
         "ui.exclusive", _enter_exclusive, surface="ui", owner="core:ui", legacy_key="enter_exclusive_ui_mode"
@@ -591,5 +745,7 @@ def register(registry) -> None:
     # 基础
     reg.register("state.kv", _state_kv, surface="ui", owner="core:ui")
     reg.register("plugin.log", _plugin_log, surface="ui", owner="core:ui")
+    # 团队
+    reg.register("team.read", _team_read, surface="ui", owner="core:ui")
     # 逃生舱
     reg.register("host.raw", _host_raw, surface="ui", owner="core:ui")

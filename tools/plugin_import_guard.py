@@ -30,6 +30,8 @@ ALLOWED_PREFIXES = (
     # 插件生态自身的基础设施：依赖安装器、插件清单查询（marketplace / installer 类插件需要）
     "app.plugins.deps_loader",
     "app.plugins.managers.plugin_manager",
+    # 注册型扩展点：插件加载期向宿主登记（不是运行时能力，故不在能力池）
+    "app.core.sync.config_sync",
 )
 
 # 第三方依赖 / 示例 / 缓存不参与判定

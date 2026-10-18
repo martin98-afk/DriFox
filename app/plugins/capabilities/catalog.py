@@ -118,7 +118,8 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("command.read", _L, "命令列表", _UI),
         _spec("command.reload", _M, "命令热重载", _UI),
         # ── 同步 ──
-        _spec("sync.register", _H, "把插件数据接入云端同步（数据外发）", _UI),
+        # 注：云端同步内容注册是**注册型**扩展点（加载期调一次），不是运行时能力，
+        # 因此不在此登记；插件走 app.core.sync.config_sync（守卫白名单内）。
         # ── 团队 ──
         _spec("team.read", _L, "团队成员/角色/运行状态", _BOTH),
         # ── 基础（恒放行） ──
