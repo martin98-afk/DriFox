@@ -40,18 +40,57 @@ _SKIP_DIRS = {"__pycache__", "deps", "skills", "examples"}
 class Report:
     violations: Dict[str, int] = field(default_factory=dict)
     by_plugin: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    # system 插件（主程序内部契约的插件化实现）单独统计，不计入 violations
+    system_usages: Dict[str, int] = field(default_factory=dict)
 
     def add(self, plugin: str, module: str) -> None:
         self.violations[module] = self.violations.get(module, 0) + 1
         bucket = self.by_plugin.setdefault(plugin, {})
         bucket[module] = bucket.get(module, 0) + 1
 
+    def add_system(self, module: str) -> None:
+        self.system_usages[module] = self.system_usages.get(module, 0) + 1
 
-def classify(module: str) -> bool:
-    """True = 合规（或不在守卫范围）。"""
+
+# system 插件是主程序内部契约的插件化实现（如 system-storages 实现 SessionStore、
+# system-serializers 复用 message_content），天然需要访问内部类型。对它们只禁
+# 最核心的巨型模块，其余放行。
+SYSTEM_FORBIDDEN = ("app.main_widget",)
+
+
+def classify(module: str, *, is_system: bool = False) -> bool:
+    """True = 合规（或不在守卫范围）。
+
+    is_system: 插件 manifest 的 type 为 system 时用宽松口径（只禁
+    SYSTEM_FORBIDDEN），其余 app.* 放行。
+    """
     if not module.startswith("app."):
         return True
-    return any(module == p or module.startswith(p + ".") for p in ALLOWED_PREFIXES)
+    if any(module == p or module.startswith(p + ".") for p in ALLOWED_PREFIXES):
+        return True
+    if is_system:
+        return not (
+            module in SYSTEM_FORBIDDEN
+            or module.startswith(tuple(p + "." for p in SYSTEM_FORBIDDEN))
+        )
+    return False
+
+
+def plugin_type(root: Path, plugin: str) -> str:
+    """读插件 manifest 的 type 字段（缺失/解析失败视为 user，最严口径）。"""
+    import json
+
+    for sub in (".drifox-plugin", ".claude-plugin"):
+        path = root / "plugins" / plugin / sub / "plugin.json"
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return "user"
+        val = (data or {}).get("type")
+        return str(val) if isinstance(val, str) else "user"
+    return "user"
 
 
 def _iter_py(root: Path):
@@ -76,15 +115,29 @@ def _modules_of(node: ast.AST) -> List[str]:
 
 def scan(root: Path) -> Report:
     report = Report()
+    type_cache: Dict[str, str] = {}
     for path in _iter_py(root):
         plugin = path.relative_to(root / "plugins").parts[0]
+        if plugin not in type_cache:
+            type_cache[plugin] = plugin_type(root, plugin)
+        is_system = type_cache[plugin] == "system"
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
         except (SyntaxError, OSError):
             continue
         for node in ast.walk(tree):
             for mod in _modules_of(node):
-                if not classify(mod):
+                if not mod.startswith("app."):
+                    continue
+                if any(mod == p or mod.startswith(p + ".") for p in ALLOWED_PREFIXES):
+                    continue  # 合法面
+                if is_system:
+                    # system 插件：内部依赖做可见性统计；只有 SYSTEM_FORBIDDEN 算违规
+                    if classify(mod, is_system=True):
+                        report.add_system(mod)
+                    else:
+                        report.add(plugin, mod)
+                else:
                     report.add(plugin, mod)
     return report
 
@@ -98,6 +151,11 @@ def main(argv=None) -> int:
     report = scan(Path(args.root))
     if not report.violations:
         print("[plugin-import-guard] 未发现越界 import")
+        if report.system_usages:
+            print(
+                f"（system 插件另有 {sum(report.system_usages.values())} 处内部依赖，"
+                "属主程序契约实现，不计违规）"
+            )
         return 0
 
     total = sum(report.violations.values())
@@ -109,9 +167,17 @@ def main(argv=None) -> int:
     for plugin, mods in sorted(report.by_plugin.items()):
         joined = ", ".join(f"{m}({n})" for m, n in sorted(mods.items(), key=lambda kv: -kv[1]))
         print(f"  {plugin}: {joined}")
+    if report.system_usages:
+        print(
+            f"\nsystem 插件内部依赖 {sum(report.system_usages.values())} 处"
+            "（主程序契约实现，仅禁 app.main_widget）："
+        )
+        for mod, n in sorted(report.system_usages.items(), key=lambda kv: -kv[1]):
+            print(f"  {n:4d}  {mod}")
     print(
         "\n合法面：app.plugins.contracts / app.plugins.registries / "
-        "app.plugins.managers.plugin_config_store / app.plugins.sdk"
+        "app.plugins.managers.plugin_config_store / app.plugins.sdk / "
+        "app.plugins.capabilities"
     )
     return 1 if args.strict else 0
 
