@@ -174,13 +174,15 @@ class CapabilityRegistry:
 
         cached = self._declared_cache.get(plugin)
         if query_failed:
-            if cached is not None:
-                return cached[1]
-            return frozenset()
-        if cached is not None and cached[0] == (str(path), mtime):
-            return cached[1]
+            return cached[1] if cached is not None else frozenset()
 
         raw = manifest.get("capabilities")
+        # 缓存签名必须含声明内容：插件路径可能为空（测试替身 / 无固定目录来源），
+        # 只靠 (path, mtime) 会在这种情况下永久命中过期结果。
+        signature = (str(path), mtime, repr(raw), manifest.get("api_version"))
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
         if isinstance(raw, list):
             resolved: Optional[FrozenSet[str]] = catalog.expand([str(x) for x in raw])
         elif int(manifest.get("api_version") or 1) >= 2:
@@ -193,7 +195,7 @@ class CapabilityRegistry:
             logger.warning(f"[CapabilityAudit] plugin={plugin} 未声明能力清单，按旧语义全量注入")
         if len(self._declared_cache) >= _CACHE_MAX:
             self._declared_cache.clear()
-        self._declared_cache[plugin] = ((str(path), mtime), resolved)
+        self._declared_cache[plugin] = (signature, resolved)
         return resolved
 
     # ── 订阅跟踪（stream.subscribe 等需要显式释放的连接） ──
