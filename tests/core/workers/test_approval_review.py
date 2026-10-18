@@ -40,10 +40,18 @@ def test_parse_review_text_fallback_deny():
 
 
 def test_parse_review_text_fallback_never_allow():
-    """allow 语义词不做文本回退：否定前缀误判 = 误放行，坚持只认 JSON"""
-    assert parse_review("可以放行") is None
-    assert parse_review("允许执行") is None
-    assert parse_review("没问题，可以执行") is None
+    """allow 文本回退带否定词防护：否定前缀存在时绝不判 allow"""
+    assert parse_review("不能放行")["decision"] == "deny"  # 含否定 → deny 表命中
+    assert parse_review("不可同意") is None  # 否定 + 无 deny 表词 → 回落人工
+    assert parse_review("不允许执行")["decision"] == "deny"  # deny 表词优先
+
+
+def test_parse_review_text_fallback_allow():
+    """短句明确 allow 语义 → allow（否定词防护通过后）"""
+    assert parse_review(" 可以") == {"decision": "allow", "reason": "可以"}
+    assert parse_review("可以执行，常规构建操作")["decision"] == "allow"
+    assert parse_review("allow")["decision"] == "allow"
+    assert parse_review("没问题，执行吧")["decision"] == "allow"
 
 
 def test_parse_review_text_fallback_long_output_ignored():
