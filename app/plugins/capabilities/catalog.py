@@ -105,6 +105,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("stream.subscribe", _M, "订阅对话流事件（工具/流/错误/上下文/会话切换）", _UI),
         # ── 窗口 ──
         _spec("window.active", _L, "当前活跃聊天窗口", _UI),
+        _spec("window.host", _L, "宿主顶层窗口（弹窗/InfoBar 的合适 parent）", _UI),
         _spec("window.list", _L, "存活窗口 id 集合", _UI),
         _spec("window.events", _M, "订阅 tab 切换等窗口级事件", _UI),
         # ── 插件管理 ──

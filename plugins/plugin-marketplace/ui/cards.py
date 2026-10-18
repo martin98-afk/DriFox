@@ -186,6 +186,48 @@ def _ctx_font(ctx: dict) -> tuple:
 # ── 异步工作器 ──────────────────────────────────────────────
 
 
+def _card_caps():
+    """取当前活跃窗口的能力池（浮动卡自身没有 ctx，从宿主导出）。
+
+    市场卡的父链最终指向主窗口；_build_ui_capabilities 是窗口级全量池。
+    """
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        for w in QApplication.topLevelWidgets():
+            builder = getattr(w, "_build_ui_capabilities", None)
+            if callable(builder):
+                return builder()
+    except Exception:
+        pass
+    return None
+
+
+def _host_parent(widget: QWidget):
+    """弹窗 / InfoBar 的合适 parent。
+
+    原实现逐个 import TabManagerWindow 只为拿 parent。这里改为
+    沿 QWidget 父链上溯到顶层窗口：InfoBar / QMessageBox 只需要一个稳定
+    parent，不关心它是不是 Tab 管理器。
+    """
+    try:
+        win = widget.window()
+        if win is not None:
+            return win
+    except Exception:
+        pass
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        for w in QApplication.topLevelWidgets():
+            if w.isVisible():
+                return w
+    except Exception:
+        pass
+    return None
+
+
+
 class _MarketplaceWorker(QObject):
     """在后台线程执行阻塞操作，通过信号返回结果"""
 
@@ -4387,9 +4429,7 @@ class MarketplaceCard(QWidget):
             return  # 卡片已销毁
         self._status_label.setText("")
         # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         if success:
             self._refresh_row_states()
             InfoBar.success(f"{name} 安装成功", "", duration=2000, parent=bar_parent)
@@ -4450,19 +4490,13 @@ class MarketplaceCard(QWidget):
         """
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-            from app.widgets.tab_manager_window import TabManagerWindow
 
             UIPluginRegistry.get_instance().hide_floating_card_globally("plugin-marketplace")
-            win = TabManagerWindow.get_instance()
-            mw = win.get_current_window() if win is not None else None
-            if mw is None or not hasattr(mw, "input_area"):
+            # 走能力池的 input.write（不再自己找主窗口的 input_area）
+            caps = _card_caps()
+            if caps is None or "input.write" not in caps:
                 return
-            area = mw.input_area
-            area.setPlainText(self._build_git_install_prompt(plugin_name))
-            cursor = area.textCursor()
-            cursor.movePosition(cursor.End)
-            area.setTextCursor(cursor)
-            area.setFocus()
+            caps["input.write"](self._build_git_install_prompt(plugin_name))
         except Exception as e:
             logger.warning(f"[Marketplace] git 缺失引导失败（忽略）: {e}")
 
@@ -4483,9 +4517,7 @@ class MarketplaceCard(QWidget):
         elif len(err) > 120:
             msg = err[:120] + "..."
         # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         InfoBar.error(f"{name} 安装失败", msg, duration=5000, parent=bar_parent)
 
     # ── 异步更新 ────────────────────────────────────────
@@ -4538,9 +4570,7 @@ class MarketplaceCard(QWidget):
             return  # 卡片已销毁
         self._status_label.setText("")
         # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         if success:
             if not keep_disabled:
                 # 更新替换了整个插件目录：_async_update 下载前已卸载旧 UI，
@@ -4574,9 +4604,7 @@ class MarketplaceCard(QWidget):
         elif len(err) > 120:
             msg = err[:120] + "..."
         # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         InfoBar.error(f"{name} 更新失败", msg, duration=5000, parent=bar_parent)
 
     # ── 启用 / 禁用 / 卸载 ────────────────────────────────
@@ -4685,9 +4713,7 @@ class MarketplaceCard(QWidget):
         card_bg = theme_colors.get("content_bg", "#2a2a2e")
         border_c = theme_colors.get("border", "rgba(128,128,128,0.15)")
 
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         dialog = _ConfirmUninstallDialog(
             bar_parent,
             name,
@@ -4709,26 +4735,23 @@ class MarketplaceCard(QWidget):
         kind = task["kind"]
         action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
         self._status_label.setText("")
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         if success:
             # 内置插件启用：主线程补加载 UI 组件（对称 _async_disable 主线程先行卸载；
             # worker 线程 enable_plugin 已注册的元数据被主线程 unload+load 覆盖，
             # 最终 UI 处于主线程语义）。load_plugin 幂等，重复调用无副作用。
             if kind == "enable" and task.get("reload_ui"):
                 self._reload_plugin_ui_on_gui(name)
-            # 启用/禁用后刷新 tab_panel 启动器按钮：disable 后 UI 组件已卸载、
+            # 启用/禁用后刷新侧栏启动器按钮：disable 后 UI 组件已卸载、
             # floating_cards 已清空，不刷新则按钮残留点不开；enable 同理补新按钮。
-            # 与热重载路径 _update_shared_launcher（内部 refresh_ui_plugins）一致，
-            # 主线程执行安全；窗口未就绪（get_instance None）时跳过。
+            # 走 UIPluginRegistry 的公开刷新入口，不碰主窗口私有方法。
             if kind in ("enable", "disable"):
-                tm = TabManagerWindow.get_instance()
-                if tm is not None:
-                    try:
-                        tm._update_shared_launcher()
-                    except Exception as e:
-                        logger.debug(f"[Marketplace] 刷新 shared launcher 失败（忽略）: {e}")
+                try:
+                    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+                    UIPluginRegistry.get_instance().refresh_sidebar_launcher()
+                except Exception as e:
+                    logger.debug(f"[Marketplace] 刷新侧栏启动器失败（忽略）: {e}")
             self._refresh_row_states()
             InfoBar.success(f"{name} {action}成功", "", duration=2000, parent=bar_parent)
         else:
@@ -4742,9 +4765,7 @@ class MarketplaceCard(QWidget):
         self._status_label.setText(f"{action}失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._refresh_row_states()
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         InfoBar.error(f"{name} {action}失败", str(err)[:120], duration=5000, parent=bar_parent)
 
     def _refresh_row_states(self):
@@ -5365,9 +5386,7 @@ class MarketplaceCard(QWidget):
     def _show_proxy_info(self, text: str, error: bool = False):
         """InfoBar 统一挂到 tab 管理器顶层窗口（与市场其它提示一致）"""
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            parent = TabManagerWindow.get_instance() or self.window()
+            parent = _host_parent(self)
             if error:
                 InfoBar.error(text, "", duration=3000, parent=parent)
             else:
@@ -5852,9 +5871,7 @@ class MarketplaceCard(QWidget):
         counts = getattr(self, "_tag_counts", {})
         if not counts:
             return
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         dialog = _TagFilterDialog(
             bar_parent,
             counts,
@@ -5883,9 +5900,7 @@ class MarketplaceCard(QWidget):
         """
         installed, has_update, local_ver, status = self._row_state(plugin_meta)
         theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        bar_parent = TabManagerWindow.get_instance() or self.window()
+        bar_parent = _host_parent(self)
         dialog = _PluginDetailDialog(
             bar_parent,
             plugin_meta,

@@ -3548,6 +3548,22 @@ class UIPluginRegistry:
             return frozenset()
         return frozenset(decl.slot_id for decl in UI_SLOT_DECLS.values() if decl.has_plugin(self, plugin_name))
 
+    def refresh_sidebar_launcher(self) -> None:
+        """刷新侧栏插件启动器与标题栏 tab（插件启用/禁用/装卸后调用）。
+
+        公开入口，替代插件直接调 ``TabManagerWindow._update_shared_launcher()``。
+        窗口未就绪时静默跳过（与旧的 get_instance() is None 语义一致）。
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is None:
+                return
+            tm._update_shared_launcher()
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 刷新侧栏启动器失败: {e}")
+
     @_serialized
     def unload_plugin(self, plugin_name: str) -> bool:
         """卸载插件 UI，清理所有该插件的注册
