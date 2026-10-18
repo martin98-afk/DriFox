@@ -470,3 +470,55 @@ def test_open_backup_dir_reuses_cross_platform_helper(isolated_cfg):
     src = _security_card_source()
     # 只应有一处 explorer 调用（在 _open_path_in_explorer 内）
     assert src.count('["explorer"') == 1, "explorer 调用应集中在一处"
+
+
+# ══════════════ 审核处理组 ══════════════
+
+
+def test_approval_group_defaults(isolated_cfg):
+    """默认：人工审批 / 超时 120s / 超时拒绝 / 模型跟随主模型"""
+    card = _make_card()
+    assert card.approval_mode_combo.currentData() == "manual"
+    assert card.approval_timeout_spin.value() == 120
+    assert card.approval_timeout_action_combo.currentData() == "deny"
+    assert card.approval_model_combo.currentData() == ""
+
+
+def test_approval_group_writes_config(isolated_cfg):
+    card = _make_card()
+    idx = card.approval_mode_combo.findData("ai")
+    card.approval_mode_combo.setCurrentIndex(idx)
+    card.approval_timeout_spin.setValue(60)
+    idx = card.approval_timeout_action_combo.findData("allow")
+    card.approval_timeout_action_combo.setCurrentIndex(idx)
+    node = isolated_cfg.get("approval")
+    assert node["mode"] == "ai"
+    assert node["timeout_sec"] == 60
+    assert node["timeout_action"] == "allow"
+
+
+def test_approval_group_reflects_config(isolated_cfg):
+    isolated_cfg.set("approval", {"mode": "ai", "timeout_sec": 30, "timeout_action": "ai", "ai_model": ""})
+    card = _make_card()
+    assert card.approval_mode_combo.currentData() == "ai"
+    assert card.approval_timeout_spin.value() == 30
+    assert card.approval_timeout_action_combo.currentData() == "ai"
+
+
+def test_approval_ai_mode_disables_timeout_rows(isolated_cfg):
+    """AI审批模式：超时时间/超时处理禁用（无人工等待语义）"""
+    card = _make_card()
+    assert card.approval_timeout_spin.isEnabled() is True
+    idx = card.approval_mode_combo.findData("ai")
+    card.approval_mode_combo.setCurrentIndex(idx)
+    assert card.approval_timeout_spin.isEnabled() is False
+    assert card.approval_timeout_action_combo.isEnabled() is False
+
+
+def test_approval_summary_content_updates(isolated_cfg):
+    """折叠卡摘要行随配置变化"""
+    card = _make_card()
+    assert "人工审批" in card._approval_card.card.contentLabel.text()
+    idx = card.approval_mode_combo.findData("ai")
+    card.approval_mode_combo.setCurrentIndex(idx)
+    assert "AI审批" in card._approval_card.card.contentLabel.text()

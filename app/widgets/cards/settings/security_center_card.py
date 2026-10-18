@@ -14,13 +14,14 @@
 
 from loguru import logger
 
-from app.tools.sandbox import SandboxConfig
+from app.tools.sandbox import SandboxConfig, read_approval_policy
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
 try:
     from qfluentwidgets import (
         BodyLabel,
+        ComboBox,
         ExpandGroupSettingCard,
         PushSettingCard,
         SpinBox,
@@ -33,6 +34,7 @@ except ImportError:  # 兜底：qfluentwidgets 缺失时用 Qt 原生，保功�
 
     BodyLabel = PushSettingCard = ExpandGroupSettingCard = None  # type: ignore
     SpinBox = QSpinBox  # type: ignore
+    ComboBox = None  # type: ignore
     FIF = None
 
 from PyQt5.QtCore import Qt
@@ -257,6 +259,9 @@ class SecurityCenterCard(QWidget):
         self.sandbox_switch.checkedChanged.connect(self._on_sandbox_toggled)
         layout.addWidget(self.sandbox_switch)
 
+        # ── 审核处理卡（处理方法/审核模型/超时/超时处理）──
+        layout.addWidget(self._build_approval_card())
+
         def _expand(icon, title, content, editor: "_ListEditorCard", tip: str = "") -> "ExpandGroupSettingCard":
             """把名单编辑区包成折叠卡：收起一行，点击展开编辑（对齐设置页范式）"""
             card = ExpandGroupSettingCard(icon, title, content)
@@ -447,6 +452,141 @@ class SecurityCenterCard(QWidget):
         layout.addWidget(note)
 
         layout.addStretch(1)
+
+    # ══════════════════ 审核处理组 ══════════════════
+
+    def _build_approval_card(self) -> "ExpandGroupSettingCard":
+        """审核处理组合配置（一个折叠项收纳四个关联配置）"""
+        card = ExpandGroupSettingCard(FIF.CERTIFICATE if FIF else None, "审核处理", "")
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(16, 8, 16, 8)
+        lay.setSpacing(6)
+
+        # 处理方法
+        self.approval_mode_combo = ComboBox()
+        self.approval_mode_combo.addItem("人工审批", userData="manual")
+        self.approval_mode_combo.addItem("AI审批", userData="ai")
+        lay.addLayout(self._approval_row("处理方法", self.approval_mode_combo, ""))
+
+        # 审核模型（mode=ai 或 超时处理=ai 时生效）
+        self.approval_model_combo = ComboBox()
+        self.approval_model_combo.setMinimumWidth(220)
+        self._reload_approval_model_options()
+        lay.addLayout(
+            self._approval_row("审核模型", self.approval_model_combo, "AI审批与超时AI审核使用的模型；跟随主模型=当前会话模型。")
+        )
+
+        # 超时时间
+        self.approval_timeout_spin = SpinBox()
+        self.approval_timeout_spin.setRange(0, 86400)
+        self.approval_timeout_spin.setSingleStep(30)
+        self.approval_timeout_spin.setSuffix(" 秒")
+        lay.addLayout(self._approval_row("超时时间", self.approval_timeout_spin, "人工审批等待超时；0 = 不超时。"))
+
+        # 超时处理
+        self.approval_timeout_action_combo = ComboBox()
+        self.approval_timeout_action_combo.addItem("拒绝", userData="deny")
+        self.approval_timeout_action_combo.addItem("允许", userData="allow")
+        self.approval_timeout_action_combo.addItem("AI审核", userData="ai")
+        lay.addLayout(
+            self._approval_row("超时处理", self.approval_timeout_action_combo, "人工审批超时未决时的处理方式。")
+        )
+
+        card.addGroupWidget(body)
+
+        # 初值反映配置
+        policy = read_approval_policy(self._cfg)
+        self._set_combo_by_data(self.approval_mode_combo, policy["mode"])
+        self._set_combo_by_data(self.approval_timeout_action_combo, policy["timeout_action"])
+        if policy["ai_model"]:
+            self._set_combo_by_data(self.approval_model_combo, policy["ai_model"])
+        self.approval_timeout_spin.setValue(policy["timeout_sec"])
+
+        # 联动 + 写回
+        self.approval_mode_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self.approval_model_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self.approval_timeout_spin.valueChanged.connect(self._on_approval_changed)
+        self.approval_timeout_action_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self._approval_card = card
+        self._sync_approval_ui()
+        return card
+
+    @staticmethod
+    def _approval_row(label: str, editor: QWidget, tip: str) -> QHBoxLayout:
+        """审核处理组行：左标签右控件"""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = QLabel(label)
+        lbl.setObjectName("sciEntry")
+        if tip:
+            lbl.setToolTip(tip)
+            editor.setToolTip(tip)
+        row.addWidget(lbl, 1)
+        row.addWidget(editor)
+        return row
+
+    def _reload_approval_model_options(self):
+        """审核模型下拉：已保存服务商的 display_name:模型名称 + 跟随主模型"""
+        from app.utils.config import Settings
+
+        combo = self.approval_model_combo
+        current = combo.currentData()
+        combo.clear()
+        combo.addItem("跟随主模型", userData="")
+        providers = Settings.get_instance().llm_saved_providers.value or {}
+        for info in providers.values():
+            if not isinstance(info, dict):
+                continue
+            display = info.get("display_name") or info.get("provider_name") or ""
+            model = str(info.get("模型名称") or "")
+            if not display or not model:
+                continue
+            value = f"{display}:{model}"
+            combo.addItem(value, userData=value)
+        if current:
+            self._set_combo_by_data(combo, current)
+
+    @staticmethod
+    def _set_combo_by_data(combo, data):
+        idx = combo.findData(data)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _on_approval_changed(self, *_):
+        self._cfg.set(
+            "approval",
+            {
+                "mode": self.approval_mode_combo.currentData() or "manual",
+                "timeout_sec": int(self.approval_timeout_spin.value()),
+                "timeout_action": self.approval_timeout_action_combo.currentData() or "deny",
+                "ai_model": self.approval_model_combo.currentData() or "",
+            },
+        )
+        self._cfg.save()
+        self._sync_approval_ui()
+
+    def _sync_approval_ui(self):
+        """联动：AI 审批模式禁用超时两行；摘要行跟随配置"""
+        mode = self.approval_mode_combo.currentData() or "manual"
+        is_ai = mode == "ai"
+        for w in (self.approval_timeout_spin, self.approval_timeout_action_combo):
+            w.setEnabled(not is_ai)
+        self.approval_timeout_spin.setToolTip(
+            "AI审批模式下无人工等待，不适用超时。" if is_ai else "人工审批等待超时；0 = 不超时。"
+        )
+        card = getattr(self, "_approval_card", None)
+        if card is None:
+            return
+        # 摘要行在卡片头（HeaderSettingCard，SettingCard 子类提供 setContent）
+        if is_ai:
+            card.card.setContent("AI审批 · 由审核模型自动判定放行/拒绝，失败回落人工")
+        else:
+            sec = self.approval_timeout_spin.value()
+            action = self.approval_timeout_action_combo.currentData() or "deny"
+            action_label = {"deny": "拒绝", "allow": "允许", "ai": "AI审核"}[action]
+            timeout_text = "不超时" if sec <= 0 else f"超时 {sec}s 后{action_label}"
+            card.card.setContent(f"人工审批 · {timeout_text}")
 
     # ══════════════════ EU-G10 / G11 / G9：构建各控件的独立入口 ══════════════════
 
