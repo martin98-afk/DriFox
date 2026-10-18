@@ -200,9 +200,27 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | ID | level | 说明 |
 |---|---|---|
 | `stream.subscribe` | medium | 订阅对话流事件（工具调用 / 结果 / 流起止 / 错误 / 上下文更新 / 会话切换） |
-| `window.active` | low | 当前活跃聊天窗口 |
+| `window.active` | low | 当前活跃聊天窗口**对象**（要调它的方法时用这个） |
+| `window.current` | low | 当前窗口的**语义快照** dict（只读字段：backend/session_id/project/workdir） |
+| `window.host` | low | 宿主顶层窗口（弹窗 / InfoBar 的合适 parent） |
 | `window.list` | low | 存活窗口 id 集合 |
 | `window.events` | medium | 订阅 tab 切换等窗口级事件 |
+| `window.workbench` | medium | 打开 / 刷新右侧工作台页 |
+
+> **选哪个**：只想要字段 → `window.current`（拿不到窗口对象，无从摸私有状态）；
+> 需要**调窗口的方法**（如 `win._on_history_session_selected(...)`）→ `window.active`。
+> 两者混用会出 `AttributeError: 'dict' object has no attribute '_xxx'`。
+> 已有回归守卫：`tests/plugins/test_capability_window_current_guard.py`。
+
+```python
+# 语义快照：只给字段，不给对象
+snap = caps["window.current"]()
+snap["project"], snap["workdir"], snap["session_id"]
+
+# 窗口对象：需要调方法时用
+win = caps["window.active"]()
+win._on_history_session_selected(index)
+```
 
 `stream.subscribe` 支持两种形态：
 
