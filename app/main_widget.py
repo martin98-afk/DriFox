@@ -960,6 +960,8 @@ class OpenAIChatToolWindow(ToolWindow):
     skillExecutionRequested = pyqtSignal(str, dict)
     # 线程安全桥接信号：从后台线程发射，主线程槽函数自动执行
     _topic_summary_ready = pyqtSignal(object, object)
+    # AI 审核结果桥接（后台线程 → 主线程）：tool_call_id, result(dict|None), error
+    _approval_review_ready = pyqtSignal(str, object, str)
     _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
@@ -1206,6 +1208,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._gen_thread_pool = _get_gen_thread_pool()
         # 线程安全桥接：后台线程发射信号 → 主线程执行 _on_topic_summary_generated
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
+        # AI 审核结果桥接：审核任务后台线程 → 主线程落决策
+        self._approval_review_ready.connect(self._on_approval_review_ready)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
         # ★ B5：停止/关窗后台 finalize 幂等锁（防止 stop 按钮与 closeEvent 双触发双 finalize）
@@ -1413,6 +1417,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._window_active = False
         # 初始化属性
         self._pending_permission_id: Optional[str] = None
+        # 审批超时定时器（人工审批等待超时 → 按 approval.timeout_action 处理）
+        self._permission_timeout_timer = QTimer(self)
+        self._permission_timeout_timer.setSingleShot(True)
+        self._permission_timeout_timer.timeout.connect(self._on_permission_timeout)
+        # 待决审批上下文（超时转 AI 审核时复用；worker 反查不可靠）
+        self._pending_permission_tool: Optional[dict] = None
         self._question_tool_call_id: Optional[str] = None
         self._current_assistant_round_index: Optional[int] = None  # 跟踪当前应分配给 assistant 的 round_index
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
@@ -22141,6 +22151,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         tool_call_id = self._pending_permission_id
         self._pending_permission_id = None
+        self._pending_permission_tool = None
+        self._permission_timeout_timer.stop()
         self._dismiss_permission_card()
         if not tool_call_id:
             # 无待决 id：可能是重复信号/已过期，按 deny 语义处理（不静默 allow）
@@ -22186,6 +22198,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         tool_call_id = self._pending_permission_id
         self._pending_permission_id = None
+        self._pending_permission_tool = None
+        self._permission_timeout_timer.stop()
         self._dismiss_permission_card()
         if tool_call_id:
             try:
@@ -22228,6 +22242,8 @@ class OpenAIChatToolWindow(ToolWindow):
             and self._permission_floating_widget.isVisible()
         ):
             self._pending_permission_id = None
+            self._pending_permission_tool = None
+            self._permission_timeout_timer.stop()
             if getattr(self, "_permission_floating_widget", None) is not None:
                 self._permission_floating_widget.clear()
             changed = True
@@ -22240,36 +22256,53 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         if getattr(self, "_is_destroyed", False):
             return
+        from app.tools.sandbox import read_approval_policy
+
+        policy = read_approval_policy()
+        workdir = self._current_permission_workdir()
+        if policy["mode"] == "ai":
+            # AI审批：静默决策，不弹卡（失败回落人工）
+            self._start_approval_review(tool_call_id, tool_name, arguments, policy, workdir)
+            return
+        self._show_permission_card(tool_call_id, tool_name, arguments, workdir)
+        # 人工审批超时：timeout_sec>0 时启动（0=不超时）
+        if policy["timeout_sec"] > 0:
+            self._permission_timeout_timer.start(policy["timeout_sec"] * 1000)
+
+    def _current_permission_workdir(self) -> str:
+        """审批链 workdir 基准：与 worker 判定同源优先（多窗口防串味）"""
+        try:
+            wd = self.backend.tool_executor.get_workdir() if self.backend and self.backend.tool_executor else None
+            if wd:
+                return str(wd)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] workdir 读取失败: {e}")
+        try:
+            from app.tools.sandbox import _current_workdir
+
+            return str(_current_workdir())
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] workdir 回退读取失败: {e}")
+            return ""
+
+    def _show_permission_card(self, tool_call_id: str, tool_name: str, arguments: dict, workdir: str, extra_note: str = ""):
+        """弹出人工审批卡（原 _on_permission_approval_requested 主体，UI 分流后复用）"""
         self._ensure_permission_approval_widget()
         # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态。
         # ⚠ 三合一契约（勿删勿改语义）：① TabPanel 边框 question 动画
         self._set_ai_state("question")
         # 宿主自持待决 id（要求 1）：决策到达时不再从 worker 反查
         self._pending_permission_id = tool_call_id
+        # 供超时转 AI 审核复用（worker 反查不可靠）
+        self._pending_permission_tool = {"tool_name": tool_name, "arguments": dict(arguments or {}), "workdir": workdir}
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看审批
         self._set_bottom_input_visible(False)
         # 多 Tab 场景下切走窗口也能知道本窗口在等审批
         self._notify_if_inactive("需要授权", f"工具 {tool_name} 等待你的确认")
 
-        # workdir 先取：沙箱来源判定与删除目标解析都要用它做相对路径基准
-        # 优先 backend.tool_executor.get_workdir()（与 worker 侧判定同源）；
-        # 取不到时回退 _current_workdir()（全局单例，多窗口可能串味）
-        workdir = ""
-        try:
-            wd = self.backend.tool_executor.get_workdir() if self.backend and self.backend.tool_executor else None
-            if wd:
-                workdir = str(wd)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Permission] workdir 读取失败: {e}")
-        if not workdir:
-            try:
-                from app.tools.sandbox import _current_workdir
-
-                workdir = str(_current_workdir())
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"[Permission] workdir 回退读取失败: {e}")
-
         source, source_text = self._classify_permission_source(tool_name, arguments, workdir=workdir or None)
+        if extra_note:
+            source_text = f"{source_text}（{extra_note}）"
         risk = self._grade_permission_risk(tool_name, arguments, source)
         impact = self._build_permission_impact(tool_name, arguments, workdir=workdir or None)
 
@@ -22296,6 +22329,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[Permission] Approval error: {e}")
             self.backend.deny_tool_permission(tool_call_id)
             self._pending_permission_id = None
+            self._pending_permission_tool = None
             # 缺陷 1：异常分支必须同时恢复输入区与卡片层，
             # 否则构建审批卡抛异常会导致输入区永久隐藏
             self._set_bottom_input_visible(True)
@@ -22312,6 +22346,166 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🛡️ 同 _on_question_asked 的安全网：延迟重试展开容器（绕过拖拽检查）
         QTimer.singleShot(200, self._bottom_card_container._do_expand)
+
+    # ══════════════════ AI 审核 / 审批超时 ══════════════════
+
+    def _start_approval_review(self, tool_call_id: str, tool_name: str, arguments: dict, policy: dict, workdir: str):
+        """发起 AI 审核；模型不可用直接回落人工"""
+        llm_config = None
+        saved = policy.get("ai_model") or ""
+        if saved:
+            llm_config = self._resolve_subagent_model_config(saved, show_error=False)
+        if llm_config is None:
+            try:
+                llm_config = self._get_current_model_config()
+            except Exception:  # noqa: BLE001
+                llm_config = None
+        if not llm_config:
+            self._fallback_manual_after_review_fail(tool_call_id, tool_name, arguments, workdir, "未配置可用模型")
+            return
+
+        from app.core.workers.approval_review import ApprovalReviewTask
+
+        def _bridge(result, error=None):
+            if getattr(self, "_is_destroyed", False):
+                return
+            try:
+                self._approval_review_ready.emit(tool_call_id, result, error or "")
+            except RuntimeError:
+                pass
+
+        impact = self._build_permission_impact(tool_name, arguments, workdir=workdir or None)
+        task = ApprovalReviewTask(
+            tool_name=tool_name,
+            arguments=arguments,
+            workdir=workdir,
+            llm_config=llm_config,
+            callback=_bridge,
+            impact=impact,
+        )
+        self._gen_thread_pool.start(task)
+        logger.info(f"[Permission] AI 审核已发起 id={tool_call_id} tool={tool_name}")
+        self._notify_ai_review_started(tool_name)
+
+    def _notify_ai_review_started(self, tool_name: str) -> None:
+        try:
+            parent = TabManagerWindow.get_instance() or self.window()
+        except Exception:  # noqa: BLE001
+            parent = None
+        try:
+            InfoBar.info(
+                "AI 审核中",
+                f"工具 {tool_name} 正由审核模型判定，稍后自动放行或拒绝。",
+                duration=3000,
+                parent=parent,
+                position=InfoBarPosition.BOTTOM,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] AI 审核提示失败: {e}")
+
+    def _on_approval_review_ready(self, tool_call_id: str, result, error: str):
+        """AI 审核结果落点：id 未变才生效；失败回落人工弹卡"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if self._pending_permission_id != tool_call_id:
+            return  # 人工已决策 / 已取消 / 流已结束 → 丢弃
+        if error or not isinstance(result, dict) or result.get("decision") not in ("allow", "deny"):
+            logger.warning(f"[Permission] AI 审核失败 id={tool_call_id}: {error}")
+            tool = self._pending_permission_tool or {}
+            self._fallback_manual_after_review_fail(
+                tool_call_id,
+                str(tool.get("tool_name") or ""),
+                dict(tool.get("arguments") or {}),
+                str(tool.get("workdir") or ""),
+                error or "审核结果无效",
+            )
+            return
+        decision = result["decision"]
+        reason = str(result.get("reason") or "")
+        self._pending_permission_id = None
+        self._pending_permission_tool = None
+        self._permission_timeout_timer.stop()
+        self._dismiss_permission_card()
+        delivered = False
+        try:
+            delivered = bool(self.backend.decide_tool_permission(tool_call_id, decision, "", reason))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[Permission] AI 决策回传异常 id={tool_call_id}: {e}")
+        if not delivered:
+            self._notify_permission_decision_lost(tool_call_id, decision)
+        self._notify_ai_review_result(decision, reason)
+        self._restore_after_permission_close()
+
+    def _notify_ai_review_result(self, decision: str, reason: str) -> None:
+        try:
+            parent = TabManagerWindow.get_instance() or self.window()
+        except Exception:  # noqa: BLE001
+            parent = None
+        try:
+            if decision == "allow":
+                InfoBar.success(
+                    "AI 审核放行",
+                    reason or "审核模型判定可以放行。",
+                    duration=4000,
+                    parent=parent,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            else:
+                InfoBar.warning(
+                    "AI 审核拒绝",
+                    reason or "审核模型判定不予放行。",
+                    duration=5000,
+                    parent=parent,
+                    position=InfoBarPosition.BOTTOM,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] AI 审核结果提示失败: {e}")
+
+    def _fallback_manual_after_review_fail(self, tool_call_id: str, tool_name: str, arguments: dict, workdir: str, note: str):
+        """AI 审核失败兜底：回落人工审批弹卡（附失败原因）"""
+        if self._pending_permission_id != tool_call_id:
+            return
+        logger.info(f"[Permission] AI 审核失败回落人工 id={tool_call_id}: {note}")
+        self._show_permission_card(tool_call_id, tool_name, arguments, workdir, extra_note=f"AI 审核失败：{note}，请人工决策")
+        from app.tools.sandbox import read_approval_policy
+
+        policy = read_approval_policy()
+        if policy["timeout_sec"] > 0:
+            self._permission_timeout_timer.start(policy["timeout_sec"] * 1000)
+
+    def _on_permission_timeout(self):
+        """人工审批超时：按 approval.timeout_action 落决策 / 转 AI 审核"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        tool_call_id = self._pending_permission_id
+        if not tool_call_id:
+            return
+        from app.tools.sandbox import read_approval_policy
+
+        policy = read_approval_policy()
+        action = policy["timeout_action"]
+        logger.info(f"[Permission] 审批超时 → {action} id={tool_call_id}")
+        if action == "ai":
+            # 卡保持弹出，人工仍可抢先生效；AI 结果回来时 id 已变则丢弃
+            tool = self._pending_permission_tool or {}
+            self._start_approval_review(
+                tool_call_id,
+                str(tool.get("tool_name") or ""),
+                dict(tool.get("arguments") or {}),
+                policy,
+                str(tool.get("workdir") or self._current_permission_workdir()),
+            )
+            return
+        decision = action  # deny / allow
+        reason = "人工审批超时，按配置自动" + ("允许" if decision == "allow" else "拒绝")
+        self._pending_permission_id = None
+        self._pending_permission_tool = None
+        self._dismiss_permission_card()
+        try:
+            self.backend.decide_tool_permission(tool_call_id, decision, "", reason)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[Permission] 超时决策回传异常 id={tool_call_id}: {e}")
+        self._restore_after_permission_close()
 
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
