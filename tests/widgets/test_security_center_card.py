@@ -524,6 +524,56 @@ def test_approval_summary_content_updates(isolated_cfg):
     assert "AI审批" in card._approval_card.card.contentLabel.text()
 
 
+# ══════════════ 垃圾桶开关 + 外提结构 ══════════════
+
+
+def test_trash_switch_roundtrip(isolated_cfg):
+    """垃圾桶开关读写回环（delete.trash_enabled，默认关）"""
+    card = _make_card()
+    assert card.trash_switch.isChecked() is False
+    card.trash_switch.setChecked(True)
+    assert isolated_cfg.get("delete.trash_enabled") is True
+    card.trash_switch.setChecked(False)
+    assert isolated_cfg.get("delete.trash_enabled") is False
+
+
+def test_delete_switch_outside_group(isolated_cfg):
+    """重要开关外提：删除保护直属页面布局，不在任何折叠组内"""
+    card = _make_card()
+    assert card.delete_switch not in card._data_group.widgets
+    assert card.delete_switch not in card._rules_group.widgets
+
+
+def test_backup_group_separate_from_delete(isolated_cfg):
+    """自动备份独立成组：备份卡在备份组，不在删除组"""
+    card = _make_card()
+    assert getattr(card, "_backup_group", None) is not None
+    assert card.backup_dir_card in card._backup_group.widgets
+    assert card.backup_dir_card not in card._data_group.widgets
+    assert card.backup_limit_spin.parent() is not None
+
+
+def test_data_group_height_tracks_exempt_items(isolated_cfg):
+    """折叠组内添加条目后高度必须增长（回归：sizeHint 滞后致内容截断）"""
+    from PyQt5.QtTest import QTest
+
+    card = _make_card()
+    group = card._data_group
+    group.setExpand(True)
+    QTest.qWait(120)
+    s0 = group.spaceWidget.height()
+    assert s0 > 0
+    card._add_path_entry("delete_exempt", "h1")
+    card._add_path_entry("delete_exempt", "h2")
+    QTest.qWait(120)
+    s1 = group.spaceWidget.height()
+    assert s1 >= s0 + 60, f"加 2 条后高度未增长: {s0} -> {s1}"
+    card._remove_path_entry("delete_exempt", 0)
+    QTest.qWait(120)
+    s2 = group.spaceWidget.height()
+    assert s2 < s1, f"删除条目后高度未回落: {s1} -> {s2}"
+
+
 # ══════════════ 分组收纳结构 ══════════════
 
 

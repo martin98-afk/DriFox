@@ -296,15 +296,28 @@ class SecurityCenterCard(QWidget):
         self.delete_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "删除保护",
-            "删除类命令强制审批，执行前自动快照",
+            "删除类命令强制审批",
         )
         self.delete_switch.setToolTip(
-            "开启后：删除类命令强制审批，放行后执行前自动快照（可找回）。"
+            "开启后：删除类命令强制审批。放行后目标默认移入垃圾桶（垃圾桶开）或自动快照（垃圾桶关），均可找回。"
             "关闭后删除类命令不再审批；但命令黑名单（如 cacls）、网络外传、"
             "路径黑名单与手动加严的策略仍会拦截。"
         )
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
+
+        # 垃圾桶软删除开关（与审批独立；组内收纳，见 _build_data_group）
+        self.trash_switch = SwitchSettingCard(
+            FIF.DELETE if FIF else None,
+            "垃圾桶",
+            "删除内容移入垃圾桶目录（软删除，可找回）",
+        )
+        self.trash_switch.setToolTip(
+            "开启后：删除命令审批放行后，目标先移动到垃圾桶目录（backups/trash），原命令不再实际删除。\n"
+            "关闭时：维持快照模式（copy 一份到 backups/deleted 后由原命令正常删除）。"
+        )
+        self.trash_switch.setChecked(bool(self._cfg.get("delete.trash_enabled")))
+        self.trash_switch.checkedChanged.connect(self._on_trash_toggled)
 
         # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不做快照
         self._delete_exempt = _ListEditorCard(
@@ -344,9 +357,12 @@ class SecurityCenterCard(QWidget):
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
 
-        # ── 首屏结构：开关 + 审核处理 + 三大分组 + 说明 ──
+        # ── 首屏结构：重要开关外层 + 分组收纳 + 说明 ──
+        layout.addWidget(self.delete_switch)
+        layout.addWidget(self._build_approval_card())
         layout.addWidget(self._build_rules_group())
         layout.addWidget(self._build_data_group())
+        layout.addWidget(self._build_backup_group())
         layout.addWidget(self._build_net_proc_group())
 
         # ── 底部说明 ──
@@ -372,11 +388,21 @@ class SecurityCenterCard(QWidget):
     # ══════════════════ 分组收纳 ══════════════════
 
     def _bind_editor_growth(self, card: "ExpandGroupSettingCard", *editors: "_ListEditorCard") -> None:
-        """名单编辑区行数变化 → 冒泡重算分组卡展开高度（延迟一拍等布局落定）"""
+        """名单编辑区行数变化 → 冒泡重算分组卡展开高度（延迟一拍等布局落定）
+
+        ⚠ 先强制 editor 自身布局激活再逐 widget 求和（原版 _adjustViewSize 策略）：
+        viewLayout.sizeHint() 有陈旧缓存（子项变化不传播，实测恒旧值），不可用。
+        """
         from PyQt5.QtCore import QTimer
 
         def _sync():
-            QTimer.singleShot(0, card._adjustViewSize)
+            def _do():
+                for editor in editors:
+                    editor.layout().invalidate()
+                    editor.layout().activate()
+                card._adjustViewSize()
+
+            QTimer.singleShot(0, _do)
 
         for editor in editors:
             editor.on_change = _sync
@@ -395,19 +421,29 @@ class SecurityCenterCard(QWidget):
         return card
 
     def _build_data_group(self) -> "ExpandGroupSettingCard":
-        """删除与备份：删除保护开关 + 豁免路径 + 快照 + 自动备份 + 容量上限"""
+        """删除安全：垃圾桶开关 + 豁免路径 + 恢复快照（审批开关已外提）"""
         card = ExpandGroupSettingCard(
             FIF.DELETE if FIF else None,
-            "删除与备份",
-            "删除保护 · 恢复快照 · 修改前自动备份",
+            "删除安全",
+            "垃圾桶 · 豁免路径 · 恢复快照",
         )
-        card.addGroupWidget(self.delete_switch)
+        card.addGroupWidget(self.trash_switch)
         card.addGroupWidget(self._delete_exempt)
-        card.addGroupWidget(self.backup_dir_card)
-        card.addGroupWidget(self._build_backup_limit_row())
         card.addGroupWidget(self._build_snapshot_row())
         self._bind_editor_growth(card, self._delete_exempt)
         self._data_group = card
+        return card
+
+    def _build_backup_group(self) -> "ExpandGroupSettingCard":
+        """自动备份（独立于删除保护）：备份卡 + 容量上限 + 清理"""
+        card = ExpandGroupSettingCard(
+            FIF.FOLDER if FIF else None,
+            "自动备份",
+            "修改前自动备份原文件 · 容量上限与清理",
+        )
+        card.addGroupWidget(self.backup_dir_card)
+        card.addGroupWidget(self._build_backup_limit_row())
+        self._backup_group = card
         return card
 
     def _build_net_proc_group(self) -> "ExpandGroupSettingCard":
@@ -904,6 +940,11 @@ class SecurityCenterCard(QWidget):
     def _on_delete_toggled(self, checked: bool):
         self._cfg.set("delete_protection", bool(checked))
         self._cfg.save()
+
+    def _on_trash_toggled(self, checked: bool):
+        self._cfg.set("delete.trash_enabled", bool(checked))
+        self._cfg.save()
+        logger.info(f"[SecurityCenter] 垃圾桶软删除 → {checked}")
 
     def _on_sys_toggled(self, checked: bool):
         self._cfg.set("sys_tools_bypass", bool(checked))
