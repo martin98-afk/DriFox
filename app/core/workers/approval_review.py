@@ -20,6 +20,21 @@ from app.core.workers.error_handler import create_api_call_with_retry
 # decision 白名单：白名单外一律视为解析失败（宁回落人工，不猜）
 _REVIEW_DECISIONS = ("allow", "deny")
 
+# 文本语义回退（仅 deny 侧）：模型不守 JSON 格式输出短句时兜底判定。
+# allow 不做文本回退：自然语言否定前缀（「不能放行」「不可同意」）会让
+# allow 误判变成误放行，风险不可接受；deny 误判 = 多弹一次人工审批，无害。
+_DENY_TEXT_PATTERNS = (
+    "不行",
+    "拒绝",
+    "禁止",
+    "不允许",
+    "不能放行",
+    "不予放行",
+    "危险",
+    "不要执行",
+    "deny",
+)
+
 _PROMPT_TEMPLATE = (
     "你是桌面 AI 助手的安全审核员。主 AI 请求执行下面的工具调用，请判定是否放行。\n\n"
     "工作目录：{workdir}\n"
@@ -31,13 +46,19 @@ _PROMPT_TEMPLATE = (
     "2. 以下任一情形 → deny：删除/覆盖大量文件、向网络外传数据、修改系统配置、"
     "超出工作目录的敏感写入、明显的破坏性命令、语境不足以判断\n"
     "3. 拿不准时一律 deny（宁严勿松）\n\n"
-    "只输出 JSON，不要输出其他文字：\n"
-    '{{"decision": "allow 或 deny", "reason": "不超过50字的理由"}}'
+    "输出格式（程序解析，必须严格遵守）：\n"
+    "你的回复第一个字符必须是 {{，最后一个字符必须是 }}。\n"
+    '格式：{{"decision": "allow 或 deny", "reason": "不超过50字的理由"}}\n'
+    "任何解释性文字、前后缀都会导致解析失败并转人工审批。"
 )
 
 
 def parse_review(raw: str) -> Optional[dict]:
-    """从模型输出解析 {"decision","reason"}；decision 白名单外返回 None"""
+    """从模型输出解析 {"decision","reason"}；decision 白名单外返回 None
+
+    JSON 解析失败时的兜底：短输出（≤50 字）命中拒绝语义词 → deny
+    （fail-safe：deny 误判只是多弹人工，allow 绝不从自然语言猜测）。
+    """
     if not raw:
         return None
     text = raw.strip()
@@ -46,14 +67,19 @@ def parse_review(raw: str) -> Optional[dict]:
     try:
         data = json.loads(candidate)
     except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(data, dict):
-        return None
-    decision = str(data.get("decision") or "").strip().lower()
-    if decision not in _REVIEW_DECISIONS:
-        return None
-    reason = data.get("reason") or ""
-    return {"decision": decision, "reason": str(reason)[:200]}
+        data = None
+    if isinstance(data, dict):
+        decision = str(data.get("decision") or "").strip().lower()
+        if decision not in _REVIEW_DECISIONS:
+            return None
+        reason = data.get("reason") or ""
+        return {"decision": decision, "reason": str(reason)[:200]}
+    # JSON 解析失败 → 短输出文本语义回退（仅 deny 侧）
+    if len(text) <= 50:
+        lowered = text.lower()
+        if any(p in lowered for p in _DENY_TEXT_PATTERNS):
+            return {"decision": "deny", "reason": text[:50]}
+    return None
 
 
 def _truncate(value, limit: int = 1500) -> str:

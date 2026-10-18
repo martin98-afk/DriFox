@@ -26,9 +26,29 @@ def test_parse_review_surrounding_text():
 def test_parse_review_rejects_bad_decision():
     """decision 白名单外一律 None（宿主回落人工，绝不猜）"""
     assert parse_review('{"decision": "maybe", "reason": "x"}') is None
-    assert parse_review("不是 JSON") is None
     assert parse_review("") is None
     assert parse_review('{"reason": "缺 decision"}') is None
+    assert parse_review("不是 JSON") is None  # 无拒绝语义词的长/中性文本不猜测
+
+
+def test_parse_review_text_fallback_deny():
+    """模型不守 JSON 格式输出短句：拒绝语义 → deny（fail-safe 侧回退）"""
+    assert parse_review(" 不行") == {"decision": "deny", "reason": "不行"}
+    assert parse_review("拒绝执行，该命令会删除系统目录")["decision"] == "deny"
+    assert parse_review("dangerous command, deny")["decision"] == "deny"
+    assert parse_review("不能放行：超出工作目录")["decision"] == "deny"
+
+
+def test_parse_review_text_fallback_never_allow():
+    """allow 语义词不做文本回退：否定前缀误判 = 误放行，坚持只认 JSON"""
+    assert parse_review("可以放行") is None
+    assert parse_review("允许执行") is None
+    assert parse_review("没问题，可以执行") is None
+
+
+def test_parse_review_text_fallback_long_output_ignored():
+    """长文本不做语义回退（避免从大段解释里误捡关键词）"""
+    assert parse_review("分析" * 50 + "结论是拒绝") is None
 
 
 def test_parse_review_reason_truncated():
