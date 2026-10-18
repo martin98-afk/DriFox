@@ -3638,6 +3638,14 @@ class UIPluginRegistry:
         from app.core.infra.ui_event_bus import UIEventBus
 
         UIEventBus.get_instance().unsubscribe_plugin(plugin_name)
+        # 能力池订阅释放：断开 stream.subscribe / window.events 建立的连接，
+        # 防止插件卸载后回调仍引用旧模块闭包（与 UIEventBus 退订同源需求）。
+        try:
+            from app.plugins.capabilities.registry import CapabilityRegistry
+
+            CapabilityRegistry.get_instance().release_plugin(plugin_name)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 释放能力订阅失败 ({plugin_name}): {e}")
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:

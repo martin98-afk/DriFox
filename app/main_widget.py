@@ -4159,6 +4159,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "main_widget": self,
             "backend": self.backend,
             "services": self._build_ui_services(),
+            "capabilities": self._build_ui_capabilities(),
         }
 
     def _create_message_widget(self, role: str, content, timestamp=None, **kwargs):
@@ -25267,6 +25268,27 @@ class OpenAIChatToolWindow(ToolWindow):
     # ================================================================
     #  UI 插件对话服务（插件式对话引擎的服务门面）
     # ================================================================
+
+    def _build_ui_capabilities(self):
+        """构建窗口级能力池（全量；插件级裁剪由 UIPluginRegistry 按 plugin_name 重建）。
+
+        能力池是插件能力面的唯一真相（见 app/plugins/capabilities/）。窗口级 ctx
+        服务多个插件、不知道调用方身份，故这里给全量；按插件声明裁剪发生在
+        UIPluginRegistry._build_card_context / callback_context（那里有 plugin_name）。
+        """
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        try:
+            ensure_registered("ui")
+            return CapabilityRegistry.get_instance().build_pool(surface="ui", host=self, plugin="")
+        except Exception as e:
+            logger.warning(f"[MainWidget] 能力池构建失败: {e}")
+            from app.plugins.capabilities.pool import CapabilityPool
+
+            return CapabilityPool(
+                plugin="", surface="ui", host=self, declared=set(), providers={}, ungated=set()
+            )
 
     def _build_ui_services(self) -> Dict[str, Any]:
         """构建 UI 插件可调用的对话服务句柄（window 级）
