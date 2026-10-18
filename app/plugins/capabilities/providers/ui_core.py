@@ -311,12 +311,41 @@ def _tool_execute(host: Any):
 
 
 def _tool_read(host: Any):
-    def names():
+    """工具注册表的只读查询面（不含注册/修改，那是 tool.inject）。"""
+
+    def api() -> dict:
         from app.tools.registry import ToolRegistry
 
-        return ToolRegistry.get_instance().names()
+        reg = ToolRegistry.get_instance()
+        return {
+            "names": reg.names,
+            "schemas": reg.schemas,
+            "get": reg.get,
+            "has": reg.has,
+            "groups": reg.group_map,
+            "is_no_prune": reg.is_no_prune,
+            "is_no_offload": reg.is_no_offload,
+            "is_danger": reg.get_danger,
+            "is_protected": reg.is_protected,
+        }
 
-    return names
+    return api
+
+
+def _tool_inject(host: Any):
+    """向工具注册表注入 schema 过滤器（改变 LLM 可见工具集）。"""
+
+    def api() -> dict:
+        from app.tools.registry import ToolRegistry
+
+        reg = ToolRegistry.get_instance()
+        return {
+            "register_schema_filter": reg.register_schema_filter,
+            "unregister_schema_filter": reg.unregister_schema_filter,
+            "apply_schema_filters": reg.apply_schema_filters,
+        }
+
+    return api
 
 
 # ──────────────────── 基础（恒放行） ────────────────────
@@ -388,6 +417,7 @@ def register(registry) -> None:
     # 工具
     reg.register("tool.execute", _tool_execute, surface="ui", owner="core:ui")
     reg.register("tool.read", _tool_read, surface="ui", owner="core:ui")
+    reg.register("tool.inject", _tool_inject, surface="ui", owner="core:ui")
     # 基础
     reg.register("state.kv", _state_kv, surface="ui", owner="core:ui")
     reg.register("plugin.log", _plugin_log, surface="ui", owner="core:ui")

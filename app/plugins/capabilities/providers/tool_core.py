@@ -32,7 +32,46 @@ def register(registry) -> None:
     def _subagent(host: Any):
         return getattr(host, "_sub_agent_manager", None)
 
+    def _tool_read(host: Any):
+        """工具注册表只读面（与 ui_core 的同名能力语义一致）。"""
+
+        def api() -> dict:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance()
+            return {
+                "names": reg.names,
+                "list": reg.list,
+                "schemas": reg.schemas,
+                "get": reg.get,
+                "has": reg.has,
+                "groups": reg.group_map,
+                "is_no_prune": reg.is_no_prune,
+                "is_no_offload": reg.is_no_offload,
+                "is_danger": reg.get_danger,
+                "is_protected": reg.is_protected,
+            }
+
+        return api
+
+    def _tool_inject(host: Any):
+        """schema 过滤器注册面。"""
+
+        def api() -> dict:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance()
+            return {
+                "register_schema_filter": reg.register_schema_filter,
+                "unregister_schema_filter": reg.unregister_schema_filter,
+                "apply_schema_filters": reg.apply_schema_filters,
+            }
+
+        return api
+
     registry.register("state.kv", _kv, surface="tool", owner="core:tool")
+    registry.register("tool.read", _tool_read, surface="tool", owner="core:tool")
+    registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("lsp.query", _lsp, surface="tool", owner="core:tool")
     registry.register("mcp.call", _mcp, surface="tool", owner="core:tool")
     registry.register("net.upload", _gitee, surface="tool", owner="core:tool")

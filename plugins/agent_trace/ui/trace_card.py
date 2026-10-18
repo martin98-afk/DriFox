@@ -84,6 +84,106 @@ _PLUGIN_NAME = "agent_trace"
 _SCHEMA_TTL = 60.0
 
 
+def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面。
+
+    优先用本模块的 ``ToolRegistry`` 符号（若存在：插件可注入替身，测试常用），
+    否则经能力池（tool.read / tool.inject）。两者都不可用时返回 None。
+    """
+    cap = "tool.inject" if kind == "inject" else "tool.read"
+    reg = globals().get("ToolRegistry")
+    if reg is not None:
+        try:
+            inst = reg.get_instance()
+            return _registry_api(inst, kind)
+        except Exception:
+            pass
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("tool")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="tool", host=None, plugin=plugin, declared={cap, "state.kv", "plugin.log"}
+        )
+        if cap not in pool:
+            return None
+        return pool[cap]()
+    except Exception:
+        return None
+
+
+class _RegistryProxy:
+    """registry 实例的惰性只读代理（缺方法时该键返回 None）。"""
+
+    __slots__ = ("_reg", "_kind")
+
+    _READ_ATTRS = (
+        "names",
+        "list",
+        "schemas",
+        "get",
+        "has",
+        "group_map",
+        "is_no_prune",
+        "is_no_offload",
+        "get_danger",
+        "is_protected",
+    )
+    _INJECT_ATTRS = ("register_schema_filter", "unregister_schema_filter", "apply_schema_filters")
+    # 对外键名 → registry 属性名（与能力池 provider 的字典键保持一致）
+    _ALIAS = {"groups": "group_map", "is_danger": "get_danger"}
+
+    def __init__(self, reg, kind: str):
+        self._reg = reg
+        self._kind = kind
+
+    def _attrs(self):
+        return self._INJECT_ATTRS if self._kind == "inject" else self._READ_ATTRS
+
+    def __contains__(self, key: str) -> bool:
+        return self._ALIAS.get(key, key) in self._attrs()
+
+    def __getitem__(self, key: str):
+        name = self._ALIAS.get(key, key)
+        if self._kind == "inject" and name not in self._INJECT_ATTRS:
+            return None
+        if self._kind != "inject" and name not in self._READ_ATTRS:
+            return None
+        return getattr(self._reg, name, None)
+
+    def keys(self):
+        return [
+            ("register_schema_filter", "unregister_schema_filter", "apply_schema_filters")
+            if self._kind == "inject"
+            else (
+                "names",
+                "list",
+                "schemas",
+                "get",
+                "has",
+                "groups",
+                "is_no_prune",
+                "is_no_offload",
+                "is_danger",
+                "is_protected",
+            )
+        ][0]
+
+
+def _registry_api(reg, kind: str):
+    """把 registry 实例包成惰性代理（与能力池 provider 返回同构）。"""
+    return _RegistryProxy(reg, kind)
+
 class _StatusDot(QWidget):
     """状态指示点：绿=空闲/完成，金=有 in-flight，红=最近有失败。"""
 
@@ -797,9 +897,8 @@ class TraceCardWidget(QWidget):
             except Exception as e:
                 logger.debug(f"[agent_trace] services.get_tools_schema 失败: {e}")
         try:
-            from app.tools.registry import ToolRegistry
-
-            return list(ToolRegistry.get_instance().schemas())
+            api = _tool_api("read")
+            return list(api["schemas"]()) if api else []
         except Exception as e:
             logger.debug(f"[agent_trace] ToolRegistry.schemas 失败: {e}")
             return []
