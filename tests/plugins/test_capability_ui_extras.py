@@ -193,3 +193,15 @@ def test_plugin_control_watcher_and_reload(monkeypatch):
     api["suppress_watcher"]()
     api["resume_watcher"]()
     api["reload"]("some-plugin")
+
+
+def test_window_active_returns_window_object(monkeypatch):
+    """window.active 必须返回窗口对象本身（调用点要调它的方法）。
+
+    回归：history-manager 的 _active_window() 有 9 个调用点做
+    win._on_history_session_selected(...) 之类，改成语义快照会直接
+    AttributeError: 'dict' object has no attribute ...
+    """
+    win = SimpleNamespace(_window_id="w1")
+    pool = _pool({"window.active"}, monkeypatch, tm=_Tm(win))
+    assert pool["window.active"]() is win

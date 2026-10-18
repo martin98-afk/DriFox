@@ -88,6 +88,30 @@ _PANEL_BODY_PAD_TOP = 4
 _PANEL_SLIDE_IN_Y = 10
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 class _PanelHeightDriver(QObject):
     """面板外壳高度驱动器：Property(int) 逐帧 ``setFixedHeight``
 
@@ -345,14 +369,16 @@ def _active_history_manager():
 
 
 def _active_window() -> Optional[Any]:
-    """解析当前活跃聊天窗口（宿主 ``OpenAIChatToolWindow``）；不可用时 None"""
-    try:
-        from app.widgets.tab_manager_window import TabManagerWindow
+    """解析当前活跃聊天窗口（宿主 OpenAIChatToolWindow）；不可用时 None
 
-        tm = TabManagerWindow.get_instance()
-        if tm is None:
+    返回的是**窗口对象**：9 个调用点都要调它的方法（_on_history_session_selected
+    等）。只想要语义字段（project/workdir/session）时用 window.current。
+    """
+    try:
+        active = _caps("window.active")
+        if active is None:
             return None
-        return tm.get_current_window()
+        return active()
     except Exception:
         return None
 
@@ -412,11 +438,9 @@ class HistoryPage(QWidget):
         # 症状：A 页展开项目面板后切到 B 页，列表按 B 的项目刷新了，但面板高亮
         # 仍停留在 A 的项目（refresh_project_selector_data 未被调用）。
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                tm.activeTabChanged.connect(self._on_host_tab_changed)
+            ev = _caps("window.events")
+            if ev is not None:
+                ev(self._on_host_tab_changed)
         except Exception:
             logger.warning("[history-manager] 连接标签页切换信号失败（项目面板跨页同步将失效）")
 
