@@ -12,5 +12,7 @@
     "type": "user",
     "components": {
         "ui": true
-    }
+    },
+    "api_version": 2,
+    "capabilities": []
 }

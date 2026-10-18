@@ -36,7 +36,8 @@ def test_manifest_declares_capabilities():
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
     assert data.get("api_version") == 2
     caps = set(data.get("capabilities") or [])
-    assert {"stream.subscribe", "window.list", "model.schema", "state.kv"} <= caps
+    # state.kv / plugin.log 是恒放行元能力，无需在清单里声明
+    assert {"stream.subscribe", "window.list", "model.schema"} <= caps
 
 
 def test_attach_accepts_capabilities():

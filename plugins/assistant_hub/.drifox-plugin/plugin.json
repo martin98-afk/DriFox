@@ -22,5 +22,14 @@
         "tools": true,
         "skills": true,
         "loop_policies": true
-    }
+    },
+    "api_version": 2,
+    "capabilities": [
+        "model.config",
+        "session.invalidate",
+        "tool.read",
+        "tool.inject",
+        "mcp.call",
+        "engine.session"
+    ]
 }
