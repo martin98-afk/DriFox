@@ -358,16 +358,29 @@ class SecurityCenterCard(QWidget):
         self.delete_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "删除保护",
-            "删除类命令强制审批，执行前自动快照",
+            "删除类命令强制审批",
         )
         self.delete_switch.setToolTip(
-            "开启后：删除类命令强制审批，放行后执行前自动快照（可找回）。"
+            "开启后：删除类命令强制审批。放行后目标默认移入垃圾桶（垃圾桶开）或自动快照（垃圾桶关），均可找回。"
             "关闭后删除类命令不再审批；但命令黑名单（如 cacls）、网络外传、"
             "路径黑名单与手动加严的策略仍会拦截。"
         )
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
         layout.addWidget(self.delete_switch)
+
+        # 垃圾桶软删除开关（与审批独立；组内收纳，见 _build_data_group）
+        self.trash_switch = SwitchSettingCard(
+            FIF.DELETE if FIF else None,
+            "垃圾桶",
+            "删除内容移入垃圾桶目录（软删除，可找回）",
+        )
+        self.trash_switch.setToolTip(
+            "开启后：删除命令审批放行后，目标先移动到垃圾桶目录（backups/trash），原命令不再实际删除。\n"
+            "关闭时：维持快照模式（copy 一份到 backups/deleted 后由原命令正常删除）。"
+        )
+        self.trash_switch.setChecked(bool(self._cfg.get("delete.trash_enabled")))
+        self.trash_switch.checkedChanged.connect(self._on_trash_toggled)
 
         # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不做快照
         self._delete_exempt = _ListEditorCard(
@@ -427,6 +440,8 @@ class SecurityCenterCard(QWidget):
 
         # ── EU-G9：受管进程资源配额（Job Object 三限额）──
         layout.addWidget(self._build_job_limits_row())
+        # ── 垃圾桶开关入列（功能来自垃圾桶软删除）──
+        layout.addWidget(self.trash_switch)
 
         # ── 底部说明 ──
         # N1：默认值提示（沙箱与删除保护默认关闭，用户需手动开启）
@@ -447,6 +462,217 @@ class SecurityCenterCard(QWidget):
         layout.addWidget(note)
 
         layout.addStretch(1)
+
+    # ══════════════════ 分组收纳 ══════════════════
+
+    def _bind_editor_growth(self, card: "ExpandGroupSettingCard", *editors: "_ListEditorCard") -> None:
+        """名单编辑区行数变化 → 冒泡重算分组卡展开高度（延迟一拍等布局落定）
+
+        ⚠ 先强制 editor 自身布局激活再逐 widget 求和（原版 _adjustViewSize 策略）：
+        viewLayout.sizeHint() 有陈旧缓存（子项变化不传播，实测恒旧值），不可用。
+        """
+        from PySide6.QtCore import QTimer
+
+        def _sync():
+            def _do():
+                for editor in editors:
+                    editor.layout().invalidate()
+                    editor.layout().activate()
+                card._adjustViewSize()
+
+            QTimer.singleShot(0, _do)
+
+        for editor in editors:
+            editor.on_change = _sync
+
+    def _build_rules_group(self) -> "ExpandGroupSettingCard":
+        """文件与命令规则：白名单/文件黑名单/命令放行/命令强制审批"""
+        card = ExpandGroupSettingCard(
+            FIF.FOLDER_ADD if FIF else None,
+            "文件与命令规则",
+            "路径白名单与黑名单 · 命令审批前缀",
+        )
+        for editor in (self._path_white, self._path_black, self._cmd_allow, self._cmd_confirm):
+            card.addGroupWidget(editor)
+        self._bind_editor_growth(card, self._path_white, self._path_black, self._cmd_allow, self._cmd_confirm)
+        self._rules_group = card
+        return card
+
+    def _build_data_group(self) -> "ExpandGroupSettingCard":
+        """删除安全：垃圾桶开关 + 豁免路径 + 恢复快照（审批开关已外提）"""
+        card = ExpandGroupSettingCard(
+            FIF.DELETE if FIF else None,
+            "删除安全",
+            "垃圾桶 · 豁免路径 · 恢复快照",
+        )
+        card.addGroupWidget(self.trash_switch)
+        card.addGroupWidget(self._delete_exempt)
+        card.addGroupWidget(self._build_snapshot_row())
+        self._bind_editor_growth(card, self._delete_exempt)
+        self._data_group = card
+        return card
+
+    def _build_backup_group(self) -> "ExpandGroupSettingCard":
+        """自动备份（独立于删除保护）：备份卡 + 容量上限 + 清理"""
+        card = ExpandGroupSettingCard(
+            FIF.FOLDER if FIF else None,
+            "自动备份",
+            "修改前自动备份原文件 · 容量上限与清理",
+        )
+        card.addGroupWidget(self.backup_dir_card)
+        card.addGroupWidget(self._build_backup_limit_row())
+        self._backup_group = card
+        return card
+
+    def _build_net_proc_group(self) -> "ExpandGroupSettingCard":
+        """网络与进程：外传检测 + 域名黑名单 + 系统级工具豁免 + 进程配额"""
+        card = ExpandGroupSettingCard(
+            FIF.GLOBE if FIF else None,
+            "网络与进程",
+            "外传检测 · 域名黑名单 · 系统工具豁免 · 进程配额",
+        )
+        card.addGroupWidget(self.net_switch)
+        card.addGroupWidget(self._net_domains)
+        card.addGroupWidget(self.sys_switch)
+        card.addGroupWidget(self._build_job_limits_row())
+        self._bind_editor_growth(card, self._net_domains)
+        self._net_proc_group = card
+        return card
+
+    # ══════════════════ 审核处理组 ══════════════════
+
+    def _build_approval_card(self) -> "ExpandGroupSettingCard":
+        """审核处理组合配置（一个折叠项收纳四个关联配置）"""
+        card = ExpandGroupSettingCard(FIF.CERTIFICATE if FIF else None, "审核处理", "")
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(16, 8, 16, 8)
+        lay.setSpacing(6)
+
+        # 处理方法
+        self.approval_mode_combo = ComboBox()
+        self.approval_mode_combo.addItem("人工审批", userData="manual")
+        self.approval_mode_combo.addItem("AI审批", userData="ai")
+        lay.addLayout(self._approval_row("处理方法", self.approval_mode_combo, ""))
+
+        # 审核模型（mode=ai 或 超时处理=ai 时生效）
+        self.approval_model_combo = ComboBox()
+        self.approval_model_combo.setMinimumWidth(220)
+        self._reload_approval_model_options()
+        lay.addLayout(
+            self._approval_row("审核模型", self.approval_model_combo, "AI审批与超时AI审核使用的模型；跟随主模型=当前会话模型。")
+        )
+
+        # 超时时间
+        self.approval_timeout_spin = SpinBox()
+        self.approval_timeout_spin.setRange(0, 86400)
+        self.approval_timeout_spin.setSingleStep(30)
+        self.approval_timeout_spin.setSuffix(" 秒")
+        lay.addLayout(self._approval_row("超时时间", self.approval_timeout_spin, "人工审批等待超时；0 = 不超时。"))
+
+        # 超时处理
+        self.approval_timeout_action_combo = ComboBox()
+        self.approval_timeout_action_combo.addItem("拒绝", userData="deny")
+        self.approval_timeout_action_combo.addItem("允许", userData="allow")
+        self.approval_timeout_action_combo.addItem("AI审核", userData="ai")
+        lay.addLayout(
+            self._approval_row("超时处理", self.approval_timeout_action_combo, "人工审批超时未决时的处理方式。")
+        )
+
+        card.addGroupWidget(body)
+
+        # 初值反映配置
+        policy = read_approval_policy(self._cfg)
+        self._set_combo_by_data(self.approval_mode_combo, policy["mode"])
+        self._set_combo_by_data(self.approval_timeout_action_combo, policy["timeout_action"])
+        if policy["ai_model"]:
+            self._set_combo_by_data(self.approval_model_combo, policy["ai_model"])
+        self.approval_timeout_spin.setValue(policy["timeout_sec"])
+
+        # 联动 + 写回
+        self.approval_mode_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self.approval_model_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self.approval_timeout_spin.valueChanged.connect(self._on_approval_changed)
+        self.approval_timeout_action_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self._approval_card = card
+        self._sync_approval_ui()
+        return card
+
+    @staticmethod
+    def _approval_row(label: str, editor: QWidget, tip: str) -> QHBoxLayout:
+        """审核处理组行：左标签右控件"""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = QLabel(label)
+        lbl.setObjectName("sciEntry")
+        if tip:
+            lbl.setToolTip(tip)
+            editor.setToolTip(tip)
+        row.addWidget(lbl, 1)
+        row.addWidget(editor)
+        return row
+
+    def _reload_approval_model_options(self):
+        """审核模型下拉：已保存服务商的 display_name:模型名称 + 跟随主模型"""
+        from app.utils.config import Settings
+
+        combo = self.approval_model_combo
+        current = combo.currentData()
+        combo.clear()
+        combo.addItem("跟随主模型", userData="")
+        providers = Settings.get_instance().llm_saved_providers.value or {}
+        for info in providers.values():
+            if not isinstance(info, dict):
+                continue
+            display = info.get("display_name") or info.get("provider_name") or ""
+            model = str(info.get("模型名称") or "")
+            if not display or not model:
+                continue
+            value = f"{display}:{model}"
+            combo.addItem(value, userData=value)
+        if current:
+            self._set_combo_by_data(combo, current)
+
+    @staticmethod
+    def _set_combo_by_data(combo, data):
+        idx = combo.findData(data)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _on_approval_changed(self, *_):
+        self._cfg.set(
+            "approval",
+            {
+                "mode": self.approval_mode_combo.currentData() or "manual",
+                "timeout_sec": int(self.approval_timeout_spin.value()),
+                "timeout_action": self.approval_timeout_action_combo.currentData() or "deny",
+                "ai_model": self.approval_model_combo.currentData() or "",
+            },
+        )
+        self._cfg.save()
+        self._sync_approval_ui()
+
+    def _sync_approval_ui(self):
+        """联动：AI 审批模式禁用超时两行；摘要行跟随配置"""
+        mode = self.approval_mode_combo.currentData() or "manual"
+        is_ai = mode == "ai"
+        for w in (self.approval_timeout_spin, self.approval_timeout_action_combo):
+            w.setEnabled(not is_ai)
+        self.approval_timeout_spin.setToolTip(
+            "AI审批模式下无人工等待，不适用超时。" if is_ai else "人工审批等待超时；0 = 不超时。"
+        )
+        card = getattr(self, "_approval_card", None)
+        if card is None:
+            return
+        # 摘要行在卡片头（HeaderSettingCard，SettingCard 子类提供 setContent）
+        if is_ai:
+            card.card.setContent("AI审批 · 由审核模型自动判定放行/拒绝，失败回落人工")
+        else:
+            sec = self.approval_timeout_spin.value()
+            action = self.approval_timeout_action_combo.currentData() or "deny"
+            action_label = {"deny": "拒绝", "allow": "允许", "ai": "AI审核"}[action]
+            timeout_text = "不超时" if sec <= 0 else f"超时 {sec}s 后{action_label}"
+            card.card.setContent(f"人工审批 · {timeout_text}")
 
     # ══════════════════ EU-G10 / G11 / G9：构建各控件的独立入口 ══════════════════
 
@@ -792,6 +1018,11 @@ class SecurityCenterCard(QWidget):
     def _on_delete_toggled(self, checked: bool):
         self._cfg.set("delete_protection", bool(checked))
         self._cfg.save()
+
+    def _on_trash_toggled(self, checked: bool):
+        self._cfg.set("delete.trash_enabled", bool(checked))
+        self._cfg.save()
+        logger.info(f"[SecurityCenter] 垃圾桶软删除 → {checked}")
 
     def _on_sys_toggled(self, checked: bool):
         self._cfg.set("sys_tools_bypass", bool(checked))

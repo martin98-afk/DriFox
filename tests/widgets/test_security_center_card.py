@@ -4,7 +4,7 @@
 import sys
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication
 
 
 def _ensure_qapp():
@@ -470,3 +470,120 @@ def test_open_backup_dir_reuses_cross_platform_helper(isolated_cfg):
     src = _security_card_source()
     # 只应有一处 explorer 调用（在 _open_path_in_explorer 内）
     assert src.count('["explorer"') == 1, "explorer 调用应集中在一处"
+
+
+# ══════════════ 审核处理组 ══════════════
+
+
+def test_approval_group_defaults(isolated_cfg):
+    """默认：人工审批 / 超时 120s / 超时拒绝 / 模型跟随主模型"""
+    card = _make_card()
+    assert card.approval_mode_combo.currentData() == "manual"
+    assert card.approval_timeout_spin.value() == 120
+    assert card.approval_timeout_action_combo.currentData() == "deny"
+    assert card.approval_model_combo.currentData() == ""
+
+
+def test_approval_group_writes_config(isolated_cfg):
+    card = _make_card()
+    idx = card.approval_mode_combo.findData("ai")
+    card.approval_mode_combo.setCurrentIndex(idx)
+    card.approval_timeout_spin.setValue(60)
+    idx = card.approval_timeout_action_combo.findData("allow")
+    card.approval_timeout_action_combo.setCurrentIndex(idx)
+    node = isolated_cfg.get("approval")
+    assert node["mode"] == "ai"
+    assert node["timeout_sec"] == 60
+    assert node["timeout_action"] == "allow"
+
+
+def test_approval_group_reflects_config(isolated_cfg):
+    isolated_cfg.set("approval", {"mode": "ai", "timeout_sec": 30, "timeout_action": "ai", "ai_model": ""})
+    card = _make_card()
+    assert card.approval_mode_combo.currentData() == "ai"
+    assert card.approval_timeout_spin.value() == 30
+    assert card.approval_timeout_action_combo.currentData() == "ai"
+
+
+def test_approval_ai_mode_disables_timeout_rows(isolated_cfg):
+    """AI审批模式：超时时间/超时处理禁用（无人工等待语义）"""
+    card = _make_card()
+    assert card.approval_timeout_spin.isEnabled() is True
+    idx = card.approval_mode_combo.findData("ai")
+    card.approval_mode_combo.setCurrentIndex(idx)
+    assert card.approval_timeout_spin.isEnabled() is False
+    assert card.approval_timeout_action_combo.isEnabled() is False
+
+
+def test_approval_summary_content_updates(isolated_cfg):
+    """折叠卡摘要行随配置变化"""
+    card = _make_card()
+    assert "人工审批" in card._approval_card.card.contentLabel.text()
+    idx = card.approval_mode_combo.findData("ai")
+    card.approval_mode_combo.setCurrentIndex(idx)
+    assert "AI审批" in card._approval_card.card.contentLabel.text()
+
+
+# ══════════════ 垃圾桶开关 + 外提结构 ══════════════
+
+
+def test_trash_switch_roundtrip(isolated_cfg):
+    """垃圾桶开关读写回环（delete.trash_enabled，默认关）"""
+    card = _make_card()
+    assert card.trash_switch.isChecked() is False
+    card.trash_switch.setChecked(True)
+    assert isolated_cfg.get("delete.trash_enabled") is True
+    card.trash_switch.setChecked(False)
+    assert isolated_cfg.get("delete.trash_enabled") is False
+
+
+def test_delete_switch_outside_group(isolated_cfg):
+    """重要开关外提：删除保护直属页面布局，不在任何折叠组内"""
+    card = _make_card()
+    assert card.delete_switch not in card._data_group.widgets
+    assert card.delete_switch not in card._rules_group.widgets
+
+
+def test_backup_group_separate_from_delete(isolated_cfg):
+    """自动备份独立成组：备份卡在备份组，不在删除组"""
+    card = _make_card()
+    assert getattr(card, "_backup_group", None) is not None
+    assert card.backup_dir_card in card._backup_group.widgets
+    assert card.backup_dir_card not in card._data_group.widgets
+    assert card.backup_limit_spin.parent() is not None
+
+
+def test_data_group_height_tracks_exempt_items(isolated_cfg):
+    """折叠组内添加条目后高度必须增长（回归：sizeHint 滞后致内容截断）"""
+    from PyQt5.QtTest import QTest
+
+    card = _make_card()
+    group = card._data_group
+    group.setExpand(True)
+    QTest.qWait(120)
+    s0 = group.spaceWidget.height()
+    assert s0 > 0
+    card._add_path_entry("delete_exempt", "h1")
+    card._add_path_entry("delete_exempt", "h2")
+    QTest.qWait(120)
+    s1 = group.spaceWidget.height()
+    assert s1 >= s0 + 60, f"加 2 条后高度未增长: {s0} -> {s1}"
+    card._remove_path_entry("delete_exempt", 0)
+    QTest.qWait(120)
+    s2 = group.spaceWidget.height()
+    assert s2 < s1, f"删除条目后高度未回落: {s1} -> {s2}"
+
+
+# ══════════════ 分组收纳结构 ══════════════
+
+
+def test_page_grouped_layout(isolated_cfg):
+    """首屏结构：沙箱开关 + 审核处理 + 三个分组卡，全部直属主布局"""
+    card = _make_card()
+    # 三大分组卡存在
+    for attr in ("_rules_group", "_data_group", "_net_proc_group"):
+        assert getattr(card, attr, None) is not None, f"{attr} 缺失"
+    # 名单编辑区均已挂入分组卡（父容器不再是页面本体）
+    for editor in (card._path_white, card._path_black, card._cmd_allow, card._cmd_confirm, card._net_domains):
+        assert editor.parent() is not None
+        assert editor.parent() is not card

@@ -4644,10 +4644,11 @@ class OpenAIChatWorker(QThread):
             return None
 
     def _sandbox_after_approve(self, tool_name, arguments):
-        """审批通过后钩子：删除保护开启时，对删除命令做执行前快照
+        """审批通过后钩子：删除保护开启时，删除命令先经垃圾桶或快照
 
-        显式传 workdir（同 `_sandbox_verdict`）：相对路径目标按工作目录解析，
-        否则快照会按进程 cwd 解析而静默漏拍（2026-10-13 实测缺陷）。
+        垃圾桶开启（delete.trash_enabled）→ 目标 move 进 trash 目录（软删除）；
+        关闭 → 维持 copy 快照。显式传 workdir（同 `_sandbox_verdict`）：相对路径
+        目标按工作目录解析，否则快照会按进程 cwd 解析而静默漏拍（2026-10-13）。
         """
         try:
             args = dict(arguments or {})
@@ -4656,20 +4657,25 @@ class OpenAIChatWorker(QThread):
                 return
             from pathlib import Path
 
-            from app.tools.sandbox import SandboxConfig, snapshot_paths_before_delete
+            from app.tools.sandbox import SandboxConfig, snapshot_paths_before_delete, stash_delete_targets_to_trash
 
             cfg = SandboxConfig.get_instance()
             if not cfg.get("sandbox_enabled") or not cfg.get("delete_protection"):
                 return
             from app.utils.utils import get_app_data_dir
 
-            backup_root = get_app_data_dir() / "backups" / "deleted"
             wd = None
             try:
                 wd = self.tool_executor.get_workdir()
             except Exception:  # noqa: BLE001 - 取不到基准时回退内部默认
                 wd = None
-            snapshot_paths_before_delete(command, backup_root, workdir=Path(wd) if wd else None)
+            workdir = Path(wd) if wd else None
+            if cfg.get("delete.trash_enabled"):
+                trash_root = get_app_data_dir() / "backups" / "trash"
+                stash_delete_targets_to_trash(command, trash_root, workdir=workdir)
+                return
+            backup_root = get_app_data_dir() / "backups" / "deleted"
+            snapshot_paths_before_delete(command, backup_root, workdir=workdir)
         except Exception as e:  # noqa: BLE001 - 快照失败不阻断已批准执行
             logger.warning(f"[Sandbox] 删除保护快照异常: {e}")
 
