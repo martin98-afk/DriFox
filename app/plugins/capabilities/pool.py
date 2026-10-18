@@ -71,6 +71,7 @@ class CapabilityPool(Mapping):
         declared: Optional[Set[str]],
         providers: Dict[str, Any],
         ungated: Set[str],
+        legacy_providers: Optional[Dict[str, Any]] = None,
         registry: Any = None,
     ) -> None:
         self._plugin = plugin or ""
@@ -79,6 +80,7 @@ class CapabilityPool(Mapping):
         self._declared = declared
         self._providers = dict(providers)
         self._ungated = set(ungated)
+        self._legacy_providers = dict(legacy_providers or {})
         self._registry = registry
         self._values: Dict[str, Any] = {}
         self._audited: Set[str] = set()
@@ -120,6 +122,29 @@ class CapabilityPool(Mapping):
 
     def declared(self) -> Optional[Set[str]]:
         return None if self._declared is None else set(self._declared)
+
+    def legacy(self, key: str, cap_id: str) -> Any:
+        """取旧服务键的专属实现（无专属实现时回落到能力主实现）。
+
+        一个能力（授权单位）可对应多个语义不同的旧键（API 单位）：例如
+        agent.read 同时映射 get_agent_manager（取对象）与 get_agent_prompt
+        （按名取字符串）。两者用同一个 provider 会报错，故旧键可注册专属实现。
+
+        权限判定统一走 cap_id：旧键只是 API 形状，不是权限单位。
+        """
+        cache_key = f"\x00legacy::{key}"
+        if cache_key in self._values:
+            return self._values[cache_key]
+        provider = self._legacy_providers.get(key)
+        if provider is None:
+            value = self[cap_id] if cap_id in self else None
+        else:
+            if cap_id not in self._allowed():
+                raise CapabilityDenied(self._plugin, cap_id, self._declared)
+            self._audit(cap_id)
+            value = self._call(provider)
+        self._values[cache_key] = value
+        return value
 
     # ── 内部 ──
 
