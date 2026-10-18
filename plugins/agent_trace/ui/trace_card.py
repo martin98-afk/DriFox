@@ -68,6 +68,7 @@ from .trace_models import (
     with_alpha,
 )
 from .turn_list_widget import TurnListWidget
+from app.plugins.sdk import tool_registry_api
 
 TOP_BAR_H = 46
 BOTTOM_BAR_H = 30
@@ -179,9 +180,9 @@ class _RegistryProxy:
         ][0]
 
 
-def _registry_api(reg, kind: str):
-    """把 registry 实例包成惰性代理（与能力池 provider 返回同构）。"""
-    return _RegistryProxy(reg, kind)
+def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
+    return tool_registry_api(kind, module_globals=globals())
 
 
 class _StatusDot(QWidget):

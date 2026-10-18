@@ -82,6 +82,9 @@ _SYMBOLS: dict[str, tuple[str, str]] = {
     "SingleInputDialog": ("app.widgets.common_dialogs", "SingleInputDialog"),
     "ConfirmDialog": ("app.widgets.common_dialogs", "ConfirmDialog"),
     "ContainerType": ("app.widgets.cards.card_manager", "ContainerType"),
+    # ── 工具注册表访问门面（经能力池，不直连 app.tools.registry） ──
+    "tool_registry_api": ("app.plugins.sdk_tool_registry", "tool_registry_api"),
+    "RegistryProxy": ("app.plugins.sdk_tool_registry", "RegistryProxy"),
 }
 
 __all__ = sorted(_SYMBOLS)
