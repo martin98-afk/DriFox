@@ -50,6 +50,13 @@ DEFAULT_CONFIG = {
     # gateway 平台侧权限请求是否自动放行（True=保持现状；False=遵循沙箱判定，
     # 无人值守场景可能因等不到审批而失败）
     "gateway_auto_approve": True,
+    # 审核处理：审批方式/超时/超时处理/AI 审核模型（安全中心「审核处理」组）
+    "approval": {
+        "mode": "manual",  # manual 人工审批 | ai AI审批（静默决策，失败回落人工）
+        "timeout_sec": 120,  # 人工审批等待超时秒数，0=不超时
+        "timeout_action": "deny",  # deny 拒绝 | allow 允许 | ai AI审核
+        "ai_model": "",  # 审核模型 "服务商display_name:模型名"，空=跟随主模型
+    },
 }
 
 
@@ -1004,3 +1011,37 @@ def snapshot_paths_before_delete(command: str, backup_root: Union[str, Path], wo
             except Exception as e:  # noqa: BLE001 - 快照失败不阻断用户已批准的删除
                 logger.warning(f"[Sandbox] 删除前快照失败({e}): {candidate}")
     return snapshots
+
+
+# ============================================================
+# 审核处理配置（approval 节点归一化读取）
+# ============================================================
+
+APPROVAL_MODES = ("manual", "ai")
+APPROVAL_TIMEOUT_ACTIONS = ("deny", "allow", "ai")
+APPROVAL_TIMEOUT_MAX_SEC = 86400
+
+
+def read_approval_policy(cfg: Optional[SandboxConfig] = None) -> dict:
+    """读取并归一化审核处理配置（UI 与决策链共用；取值白名单 + 范围收窄）"""
+    node = (cfg or SandboxConfig.get_instance()).get("approval") or {}
+    if not isinstance(node, dict):
+        node = {}
+    mode = node.get("mode")
+    if mode not in APPROVAL_MODES:
+        mode = "manual"
+    action = node.get("timeout_action")
+    if action not in APPROVAL_TIMEOUT_ACTIONS:
+        action = "deny"
+    try:
+        timeout = int(node.get("timeout_sec") or 0)
+    except (TypeError, ValueError):
+        timeout = 0
+    timeout = max(0, min(timeout, APPROVAL_TIMEOUT_MAX_SEC))
+    model = node.get("ai_model")
+    return {
+        "mode": mode,
+        "timeout_sec": timeout,
+        "timeout_action": action,
+        "ai_model": model if isinstance(model, str) else "",
+    }
