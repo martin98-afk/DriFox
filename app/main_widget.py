@@ -22488,6 +22488,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 pass
 
         impact = self._build_permission_impact(tool_name, arguments, workdir=workdir or None)
+        # 审核上下文（用户目标 + 本轮轨迹）：从当前 worker 取，取不到为 None（prompt 退回原形态）
+        approval_context = None
+        try:
+            worker = self.backend.get_current_worker() if self.backend else None
+            if worker is not None:
+                approval_context = getattr(worker, "_approval_context", None)
+        except Exception as e:  # noqa: BLE001 - 上下文是增强项，失败不阻断审核
+            logger.debug(f"[Permission] 审核上下文读取失败: {e}")
         task = ApprovalReviewTask(
             tool_name=tool_name,
             arguments=arguments,
@@ -22496,6 +22504,7 @@ class OpenAIChatToolWindow(ToolWindow):
             callback=_bridge,
             impact=impact,
             timeout=APPROVAL_REVIEW_TIMEOUT_SEC,
+            context=approval_context,
         )
         self._gen_thread_pool.start(task)
         logger.info(f"[Permission] AI 审核已发起 id={tool_call_id} tool={tool_name}")

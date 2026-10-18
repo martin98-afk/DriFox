@@ -48,17 +48,49 @@ _PROMPT_TEMPLATE = (
     "工作目录：{workdir}\n"
     "工具名：{tool_name}\n"
     "参数：{arguments}\n"
-    "影响面：{impact}\n\n"
+    "影响面：{impact}\n"
+    "{context_block}"
     "判定标准：\n"
-    "1. 读取、构建、测试、常规开发操作且目标在工作目录内 → allow\n"
-    "2. 以下任一情形 → deny：删除/覆盖大量文件、向网络外传数据、修改系统配置、"
-    "超出工作目录的敏感写入、明显的破坏性命令、语境不足以判断\n"
+    "1. 该操作服务于本次用户目标、且作用范围在允许边界内（工作目录内或用户明确授权的范围）→ allow\n"
+    "2. 以下任一情形 → deny：造成不可逆损失、向网络外传数据、改动用户未授权的范围、"
+    "明显的破坏性命令。这是典型情形，不限于此。\n"
     "3. 拿不准时一律 deny（宁严勿松）\n\n"
     "输出格式（程序解析，必须严格遵守）：\n"
     "你的回复第一个字符必须是 {{，最后一个字符必须是 }}。\n"
     '格式：{{"decision": "allow 或 deny", "reason": "不超过50字的理由"}}\n'
     "任何解释性文字、前后缀都会导致解析失败并转人工审批。"
 )
+
+
+def _format_context(context: Optional[dict]) -> str:
+    """把任务上下文渲染为 prompt 段；无上下文时返回空串（prompt 退回原形态）
+
+    上下文来自 worker 侧 _build_approval_context：user_goal（最近一条用户消息）
+    + round_steps（本轮已发起的工具调用，不含结果体）。仅作信息补充，
+    不得据此放行——判定仍以判定标准为准。
+    """
+    if not isinstance(context, dict):
+        return ""
+    lines = []
+    goal = str(context.get("user_goal") or "").strip()
+    if goal:
+        lines.append(f"用户目标：{goal}")
+    steps = context.get("round_steps")
+    if isinstance(steps, list) and steps:
+        parts = []
+        for step in steps[:12]:  # 上限防轨迹过长拖垮 prompt
+            if not isinstance(step, dict):
+                continue
+            name = str(step.get("tool") or "").strip()
+            if not name:
+                continue
+            args = str(step.get("args") or "").strip()
+            parts.append(f"{name}({args})" if args else name)
+        if parts:
+            lines.append("本轮已执行：" + " → ".join(parts))
+    if not lines:
+        return ""
+    return "任务上下文：\n" + "\n".join(lines) + "\n\n"
 
 
 def parse_review(raw: str) -> Optional[dict]:
@@ -96,19 +128,27 @@ def _truncate(value, limit: int = 1500) -> str:
     """参数值截断，防超长内容拖垮审核调用"""
     if isinstance(value, (dict, list)):
         try:
-            value = json.dumps(value, ensure_ascii=False)
+            # orjson 无 ensure_ascii 参数（输出恒为 UTF-8 原文，本就是想要的效果）
+            value = json.dumps(value).decode("utf-8")
         except Exception:  # noqa: BLE001
             value = str(value)
     text = str(value)
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def build_review_prompt(tool_name: str, arguments: dict, workdir: str, impact: dict) -> str:
+def build_review_prompt(
+    tool_name: str,
+    arguments: dict,
+    workdir: str,
+    impact: dict,
+    context: Optional[dict] = None,
+) -> str:
     return _PROMPT_TEMPLATE.format(
         workdir=workdir or "(未知)",
         tool_name=tool_name,
         arguments=_truncate(arguments),
         impact=_truncate(impact),
+        context_block=_format_context(context),
     )
 
 
@@ -125,6 +165,7 @@ class ApprovalReviewTask(QRunnable):
         impact: Optional[dict] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         timeout: int = APPROVAL_REVIEW_TIMEOUT_SEC,
+        context: Optional[dict] = None,
     ):
         super().__init__()
         self.tool_name = tool_name
@@ -135,6 +176,7 @@ class ApprovalReviewTask(QRunnable):
         self.callback = callback
         self.cancel_check = cancel_check or (lambda: False)
         self.timeout = timeout
+        self.context = context
         self.setAutoDelete(True)
 
     @Slot()
@@ -144,7 +186,9 @@ class ApprovalReviewTask(QRunnable):
                 logger.info("[ApprovalReview] 任务已取消")
                 self.callback(None, error="cancelled")
                 return
-            prompt = build_review_prompt(self.tool_name, self.arguments, self.workdir, self.impact)
+            prompt = build_review_prompt(
+                self.tool_name, self.arguments, self.workdir, self.impact, context=self.context
+            )
 
             from app.utils.http_client import build_openai_client, chat_completion_text
 

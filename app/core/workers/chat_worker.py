@@ -252,6 +252,9 @@ class OpenAIChatWorker(QThread):
         # 拒绝理由（结构化审批回传）：deny_permission 写入、_check_permission 读取后随结果下发。
         # 属于单次审批的瞬时值，不进 ChatWorkerState（无需跨 sync 边界持久化）。
         self._permission_deny_reason = ""
+        # 待审批调用的 AI 审核上下文（_build_approval_context 写入，宿主经
+        # get_current_worker() 读取）。默认 None = 无上下文，prompt 退回原形态。
+        self._approval_context: Optional[Dict[str, Any]] = None
         # [T28 L4] _response_chunks 字符总数增量计数器：原 sum(len(c) for c in ...)
         # 在 MEM_DIAG 快照（每 100 chunk）与流式调试日志里各跑一次，长响应下
         # O(chunks) × 高频 = 可观开销。所有写路径（append/clear/恢复/重置）同步维护。
@@ -4423,6 +4426,71 @@ class OpenAIChatWorker(QThread):
         self._question_pending = {"tool_call_id": tool_call_id, "questions": questions}
         return None  # 通知 run() 等待用户回答
 
+    # 审核上下文字段上限（字符）：审批是阻塞链，prompt 越长 worker 等待越久
+    _APPROVAL_CTX_USER_LIMIT = 1000
+    _APPROVAL_CTX_ARGS_LIMIT = 200
+
+    def _build_approval_context(self, tool_name: str, tool_call_id: str) -> Optional[Dict[str, Any]]:
+        """构造 AI 审核用的任务上下文（B 档：用户目标 + 本轮轨迹摘要）
+
+        背景：审核 prompt 原先只有 tool_name/arguments/workdir，模型无从判断
+        操作与本次任务目标的关系，只能按操作类型清单枚举对照（见
+        approval_review._PROMPT_TEMPLATE）。这里补齐两样它缺的信息：
+        最近一条用户消息（目标）+ 本轮已发起的工具调用（轨迹，不含结果体）。
+
+        - 数据全部取自 worker 线程本地（_current_session_messages /
+          _current_tool_calls），不跨线程取，避免与主线程竞态。
+        - 排除当前 tool_call_id：并行路径下 _current_tool_calls 含全部待执行
+          工具，不排除会把「正在审的这个工具自己」写进轨迹，纯噪声。
+        - 取不到任何一项时返回 None，prompt 退回无上下文形态（新增信息而非
+          新增依赖，缺失不得阻断审核链）。
+        """
+        from app.core.conversation.message_content import content_to_text
+
+        user_goal = ""
+        try:
+            for msg in reversed(self._current_session_messages or []):
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    user_goal = content_to_text(msg.get("content", ""))
+                    break
+        except Exception as e:  # noqa: BLE001 - 上下文是增强项，失败不得阻断
+            logger.debug(f"[Permission] 审核上下文用户目标提取失败: {e}")
+            user_goal = ""
+
+        steps = []
+        try:
+            for tc in (self._current_tool_calls or {}).values():
+                if not isinstance(tc, dict):
+                    continue
+                if tc.get("id") == tool_call_id:
+                    continue
+                func = tc.get("function") or {}
+                name = str(func.get("name") or "")
+                if not name:
+                    continue
+                raw_args = func.get("arguments", "{}")
+                if not isinstance(raw_args, str):
+                    try:
+                        # orjson 无 ensure_ascii 参数（输出恒为 UTF-8 原文）
+                        raw_args = json.dumps(raw_args).decode("utf-8")
+                    except Exception:  # noqa: BLE001
+                        raw_args = str(raw_args)
+                if len(raw_args) > self._APPROVAL_CTX_ARGS_LIMIT:
+                    raw_args = raw_args[: self._APPROVAL_CTX_ARGS_LIMIT] + "…"
+                steps.append({"tool": name, "args": raw_args})
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] 审核上下文轨迹提取失败: {e}")
+            steps = []
+
+        if not user_goal and not steps:
+            return None
+        ctx: Dict[str, Any] = {"current_tool": tool_name}
+        if user_goal:
+            ctx["user_goal"] = user_goal[: self._APPROVAL_CTX_USER_LIMIT]
+        if steps:
+            ctx["round_steps"] = steps
+        return ctx
+
     def _check_permission(self, tool_name, arguments, tool_call_id, round_id, results):
         """
         权限检查。返回 False 表示取消/已处理（调用方应 return None），
@@ -4494,6 +4562,9 @@ class OpenAIChatWorker(QThread):
                 # 再次检查缓存（可能已被其他线程处理）
                 if self._permission_cache.is_allowed(tool_name):
                     return True
+                # 审核上下文（供 AI 审批 prompt 使用）：构造放在 emit 前、锁内，
+                # 保证宿主读到的上下文与本次请求匹配；失败不阻断（返回 None）
+                self._approval_context = self._build_approval_context(tool_name, tool_call_id)
                 self._emit_with_callback(
                     "permission_approval_requested",
                     self.permission_approval_requested,
