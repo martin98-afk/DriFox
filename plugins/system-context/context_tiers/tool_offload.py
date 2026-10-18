@@ -27,6 +27,7 @@ from typing import Any, Dict, List
 
 from app.core.context.config import cfg_int, offload_skip_tools
 from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_INGEST, TierOutcome
+from app.plugins.sdk import tool_registry_api
 
 _CHARS_PER_TOKEN = 4  # 节省字符 → token 的粗算口径（仅用于 stats 统计）
 
@@ -69,67 +70,9 @@ def _tool_api(kind: str = "read"):
         return None
 
 
-class _RegistryProxy:
-    """registry 实例的惰性只读代理（缺方法时该键返回 None）。"""
-
-    __slots__ = ("_reg", "_kind")
-
-    _READ_ATTRS = (
-        "names",
-        "list",
-        "schemas",
-        "get",
-        "has",
-        "group_map",
-        "is_no_prune",
-        "is_no_offload",
-        "get_danger",
-        "is_protected",
-    )
-    _INJECT_ATTRS = ("register_schema_filter", "unregister_schema_filter", "apply_schema_filters")
-    # 对外键名 → registry 属性名（与能力池 provider 的字典键保持一致）
-    _ALIAS = {"groups": "group_map", "is_danger": "get_danger"}
-
-    def __init__(self, reg, kind: str):
-        self._reg = reg
-        self._kind = kind
-
-    def _attrs(self):
-        return self._INJECT_ATTRS if self._kind == "inject" else self._READ_ATTRS
-
-    def __contains__(self, key: str) -> bool:
-        return self._ALIAS.get(key, key) in self._attrs()
-
-    def __getitem__(self, key: str):
-        name = self._ALIAS.get(key, key)
-        if self._kind == "inject" and name not in self._INJECT_ATTRS:
-            return None
-        if self._kind != "inject" and name not in self._READ_ATTRS:
-            return None
-        return getattr(self._reg, name, None)
-
-    def keys(self):
-        return [
-            ("register_schema_filter", "unregister_schema_filter", "apply_schema_filters")
-            if self._kind == "inject"
-            else (
-                "names",
-                "list",
-                "schemas",
-                "get",
-                "has",
-                "groups",
-                "is_no_prune",
-                "is_no_offload",
-                "is_danger",
-                "is_protected",
-            )
-        ][0]
-
-
-def _registry_api(reg, kind: str):
-    """把 registry 实例包成惰性代理（与能力池 provider 返回同构）。"""
-    return _RegistryProxy(reg, kind)
+def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
+    return tool_registry_api(kind, module_globals=globals())
 
 class ToolOffloadTier:
     id = "tool_offload"
