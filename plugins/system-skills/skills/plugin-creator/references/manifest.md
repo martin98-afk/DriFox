@@ -56,6 +56,8 @@ python tools/validate_plugins.py
 | `dependencies` | object | 无 | 插件间依赖 |
 | `icon` | object | 无 | `{"light": "icon.svg", "dark": "icon_dark.svg"}` |
 | `config_schema` | object | 无 | E1 配置契约，见下节 |
+| `api_version` | int | `1` | 插件 API 契约版本。`>= 2` 时 `capabilities` 缺失按空清单处理（从严） |
+| `capabilities` | string[] | 无 | 能力池声明，见下节 |
 
 ### `components` 子字段
 
@@ -95,6 +97,30 @@ python tools/validate_plugins.py
   "code-review": "^2.1.0"
 }
 ```
+
+---
+
+## 能力声明（capabilities + api_version）
+
+新插件一律写 `"api_version": 2` 并显式声明清单，运行时经 `ctx["capabilities"]` 取用。
+
+```json
+{
+  "api_version": 2,
+  "capabilities": ["session.read", "input.read", "ui.notify", "state.kv"]
+}
+```
+
+裁剪规则：
+
+| 状态 | 行为 |
+|---|---|
+| 有 `capabilities` | 按清单裁剪（支持 `"tool.*"` 与 `"*"`） |
+| `"capabilities": []` | 只剩 `state.kv` / `plugin.log` |
+| 无该字段且 `api_version <= 1` | 兼容期全量放行 + warning |
+| 无该字段且 `api_version >= 2` | 等同 `[]` |
+
+能力清单、代码写法、新增能力的四步流程见 [docs/plugins/capabilities.md](../../../../../docs/plugins/capabilities.md)。
 
 ---
 
