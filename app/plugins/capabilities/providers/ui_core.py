@@ -67,6 +67,26 @@ def _window_active(host: Any):
     return current
 
 
+def _window_host(host: Any):
+    """宿主顶层窗口（弹窗 / InfoBar 的合适 parent）。
+
+    插件原先自己 `from app.widgets.tab_manager_window import TabManagerWindow;
+    TabManagerWindow.get_instance() or self.window()`，只为拿一个 parent。
+    这里封装掉：优先 Tab 管理器（多窗口模式下的顶层），回退到卡片窗口。
+    """
+
+    def resolve():
+        tm = _resolve_tab_window()
+        if tm is not None:
+            return tm
+        try:
+            return host.window()
+        except Exception:
+            return None
+
+    return resolve
+
+
 def _window_list(host: Any):
     def ids():
         tm = _resolve_tab_window()
@@ -209,6 +229,38 @@ def _session_write(host: Any):
 # ──────────────────── 界面 ────────────────────
 
 
+def _input_read(host: Any):
+    """读输入框文本与附件列表。"""
+
+    def read() -> dict:
+        area = getattr(host, "input_area", None)
+        text = area.toPlainText() if area is not None else ""
+        attachments = list(getattr(host, "_attachments", None) or [])
+        return {"text": text, "attachments": attachments}
+
+    return read
+
+
+def _input_write(host: Any):
+    """写入输入框文本并聚焦（可选追加模式）。"""
+
+    def write(text: str, append: bool = False, focus: bool = True) -> None:
+        area = getattr(host, "input_area", None)
+        if area is None:
+            raise RuntimeError("输入框不可用")
+        if append:
+            area.setPlainText(area.toPlainText() + "\n" + text)
+        else:
+            area.setPlainText(text)
+        if focus:
+            area.setFocus()
+            cursor = area.textCursor()
+            cursor.movePosition(cursor.End)
+            area.setTextCursor(cursor)
+
+    return write
+
+
 def _ui_notify(host: Any):
     def notify(title: str, message: str) -> None:
         from qfluentwidgets import InfoBar, InfoBarPosition
@@ -299,6 +351,7 @@ def register(registry) -> None:
     # 对话流 / 窗口
     reg.register("stream.subscribe", _stream_subscribe, surface="ui", owner="core:ui")
     reg.register("window.active", _window_active, surface="ui", owner="core:ui")
+    reg.register("window.host", _window_host, surface="ui", owner="core:ui")
     reg.register("window.list", _window_list, surface="ui", owner="core:ui")
     reg.register("window.events", _window_events, surface="ui", owner="core:ui")
     # 模型 / 智能体
@@ -321,6 +374,8 @@ def register(registry) -> None:
     reg.register("engine.session", _engine_session, surface="ui", owner="core:ui")
     reg.register("session.write", _session_write, surface="ui", owner="core:ui")
     # 界面
+    reg.register("input.read", _input_read, surface="ui", owner="core:ui")
+    reg.register("input.write", _input_write, surface="ui", owner="core:ui")
     reg.register("ui.notify", _ui_notify, surface="ui", owner="core:ui")
     reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
     reg.register("ui.exclusive", _ui_exclusive, surface="ui", owner="core:ui")

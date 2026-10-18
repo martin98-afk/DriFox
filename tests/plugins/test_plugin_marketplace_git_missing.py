@@ -103,45 +103,22 @@ def test_is_git_missing_detects_marker():
 
 
 def test_guide_install_git_hides_card_and_fills_input(monkeypatch):
-    """git 缺失引导：隐藏市场卡 + 切回对话 + 输入框填入「本地安装git」并聚焦"""
+    """git 缺失引导：隐藏市场卡 + 通过 input.write 能力把「本地安装 git」写入输入框"""
+    from ui import cards as cards_mod
     from ui.cards import MarketplaceCard
 
-    class FakeCursor:
-        End = 1024
+    written = {}
 
-        def __init__(self):
-            self.moved = None
+    class _FakePool:
+        def __contains__(self, cap):
+            return cap == "input.write"
 
-        def movePosition(self, pos):
-            self.moved = pos
+        def __getitem__(self, cap):
+            def _write(text, append=False, focus=True):
+                written["text"] = text
+                written["focus"] = focus
 
-    class FakeInputArea:
-        def __init__(self):
-            self.text = None
-            self.focused = False
-
-        def setPlainText(self, t):
-            self.text = t
-
-        def textCursor(self):
-            return FakeCursor()
-
-        def setTextCursor(self, c):
-            self._cursor = c
-
-        def setFocus(self):
-            self.focused = True
-
-    class FakeMainWidget:
-        input_area = FakeInputArea()
-
-    class FakeWindow:
-        @classmethod
-        def get_instance(cls):
-            return cls()
-
-        def get_current_window(self):
-            return FakeMainWidget()
+            return _write
 
     class FakeUI:
         hidden = []
@@ -153,18 +130,17 @@ def test_guide_install_git_hides_card_and_fills_input(monkeypatch):
         def hide_floating_card_globally(self, cid):
             FakeUI.hidden.append(cid)
 
-    # 函数内 import 取模块属性：monkeypatch 模块级符号即可拦截
     from app.plugins.registries import ui_plugin_registry
-    from app.widgets import tab_manager_window
 
     monkeypatch.setattr(ui_plugin_registry, "UIPluginRegistry", FakeUI)
-    monkeypatch.setattr(tab_manager_window, "TabManagerWindow", FakeWindow)
+    # 能力池来自模块级辅助（原 TabManagerWindow 取窗口已删除）
+    monkeypatch.setattr(cards_mod, "_card_caps", lambda: _FakePool())
 
     card = MarketplaceCard.__new__(MarketplaceCard)
     card._guide_install_git("demo-plugin")
 
     assert FakeUI.hidden == ["plugin-marketplace"], "必须全局隐藏市场浮动卡"
-    prompt = FakeMainWidget.input_area.text
+    prompt = written.get("text") or ""
     assert "demo-plugin" in prompt, "引导语必须带上失败插件名，模型才知道要重裝哪个"
     assert "git" in prompt.lower(), "引导语必须指向安装 git"
     # 关键：必须给出本平台可执行的安装命令，而不是泛泛一句「安装 git」
@@ -172,5 +148,4 @@ def test_guide_install_git_hides_card_and_fills_input(monkeypatch):
         k in prompt for k in ("winget", "brew", "apt", "dnf", "pacman", "git-scm.com")
     ), f"引导语必须含具体安装命令，实际: {prompt}"
     assert "git --version" in prompt, "引导语必须含验证步骤"
-    assert FakeMainWidget.input_area.focused is True, "输入框必须获得焦点"
-
+    assert written.get("focus") is True, "输入框必须获得焦点"
