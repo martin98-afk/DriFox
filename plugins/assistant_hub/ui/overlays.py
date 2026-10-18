@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import MaskDialogBase, SmoothScrollDelegate
 
-from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css
+from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import get_font_family_css
 
 
 

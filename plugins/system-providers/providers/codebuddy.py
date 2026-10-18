@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 from app.plugins.registries.provider_registry import ProviderDef
-from app.utils.utils import get_app_data_dir
+from app.plugins.sdk import get_app_data_dir
 
 _ENDPOINT = "https://copilot.tencent.com"
 _CACHE_DIR = get_app_data_dir() / "codebuddy" / "cache"

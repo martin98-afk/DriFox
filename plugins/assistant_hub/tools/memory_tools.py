@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 
 _MANAGER_MODULE_NAME = "assistant_hub_manager"
 _HOOKS_PATH = Path(__file__).resolve().parent.parent / "hooks" / "inject_assistant.py"

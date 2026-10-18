@@ -14,7 +14,7 @@ import orjson
 
 from loguru import logger
 
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 from app.tools.registry import make_summarize_from_preview
 
 GROUP_SUBAGENT = "子智能体"

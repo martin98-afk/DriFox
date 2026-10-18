@@ -28,8 +28,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QLabel, QWidget
 
-from app.utils.design_tokens import Animations, Colors, Shadows
-from app.utils.motion import retarget
+from app.plugins.sdk import Animations, Colors, Shadows
+from app.plugins.sdk import retarget
 
 from .assistant_avatar import RoundAvatar, qcolor_from
 

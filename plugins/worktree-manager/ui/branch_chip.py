@@ -16,8 +16,8 @@ from loguru import logger
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy
 
-from app.utils.git_worktree import GitWorktreeDetector
-from app.utils.utils import get_icon
+from app.plugins.sdk import GitWorktreeDetector
+from app.plugins.sdk import get_icon
 
 _CREATION_FLAGS = 0
 if sys.platform == "win32":
@@ -146,8 +146,8 @@ class BranchChip(QFrame):
         self.adjustSize()
 
     def _apply_style(self) -> None:
-        from app.utils.design_tokens import Colors, font_size_css
-        from app.utils.utils import get_font_family_css
+        from app.plugins.sdk import Colors, font_size_css
+        from app.plugins.sdk import get_font_family_css
 
         Colors.refresh()
         sheet = f"""

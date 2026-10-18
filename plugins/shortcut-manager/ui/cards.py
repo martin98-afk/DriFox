@@ -41,7 +41,7 @@ def _safe_filename(cmd_name: str) -> str:
 
 
 def _get_user_custom_cmd_dir() -> Path:
-    from app.utils.utils import get_app_data_dir
+    from app.plugins.sdk import get_app_data_dir
 
     return get_app_data_dir() / _USER_CUSTOM_CMD_REL
 
@@ -59,7 +59,7 @@ def _ensure_user_custom_plugin():
     import json
 
     from app.plugins.managers.plugin_manager import PluginManager
-    from app.utils.utils import get_app_data_dir
+    from app.plugins.sdk import get_app_data_dir
 
     custom_dir = get_app_data_dir() / "plugins" / "user-custom"
     manifest_dir = custom_dir / ".drifox-plugin"
@@ -689,7 +689,7 @@ class ShortcutManagerCard(QWidget):
         self._scroll.setWidget(self._content)
         # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
         # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        from app.utils.design_tokens import make_card_content_opaque
+        from app.plugins.sdk import make_card_content_opaque
 
         make_card_content_opaque(self._content, 246)
         root.addWidget(self._scroll, 1)
@@ -880,7 +880,7 @@ class ShortcutManagerCard(QWidget):
         conflicts = _find_conflicts(key_str, self._all_commands, exclude_cmd=cmd_name)
         if conflicts:
             conflict_names = "\n".join(f"  • /{c['name']}" for c in conflicts)
-            from app.widgets.common_dialogs import ConfirmDialog
+            from app.plugins.sdk import ConfirmDialog
 
             dialog = ConfirmDialog(
                 title="快捷键冲突",

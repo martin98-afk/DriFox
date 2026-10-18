@@ -6,8 +6,8 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 from qfluentwidgets import BodyLabel, LineEdit, MaskDialogBase
 
-from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css
+from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import get_font_family_css
 
 
 class RenameDialog(MaskDialogBase):

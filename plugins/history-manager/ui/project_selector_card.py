@@ -25,13 +25,13 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import ScrollArea, TransparentToolButton
 
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
+from app.plugins.sdk import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.project_meta import _alpha_tint, extract_project_initials, get_project_color
-from app.utils.utils import get_font_family_css, get_icon
-from app.widgets.square_avatar import _SquareAvatar
-# [PERF] 直接从源头导入 _ElidedLabel（mcp_setting_card 同样转引自 app.widgets.elided_label），
+from app.plugins.sdk import get_font_family_css, get_icon
+from app.plugins.sdk import SquareAvatar as _SquareAvatar
+# [PERF] 直接从 sdk 导入 _ElidedLabel（转引自 app.widgets.elided_label），
 # 避免为这一个类拉起 mcp_setting_card → mcp SDK（~715ms）整条重链
-from app.widgets.elided_label import _ElidedLabel
+from app.plugins.sdk import ElidedLabel as _ElidedLabel
 from app.widgets.hover_style_guard import style_if_changed
 
 
@@ -461,7 +461,7 @@ class ProjectSelectorCardContent(QWidget):
         self._scroll_area.setWidget(self._content_widget)
         # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
         # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        from app.utils.design_tokens import make_card_content_opaque
+        from app.plugins.sdk import make_card_content_opaque
 
         make_card_content_opaque(self._content_widget, 246)
         self._scroll_area.setMinimumHeight(40)
@@ -687,7 +687,7 @@ class ProjectSelectorCardContent(QWidget):
 
     def _on_archive_clicked(self, project_name: str):
         """归档被点击（行内菜单 / 右键菜单入口）"""
-        from app.widgets.common_dialogs import ConfirmDialog
+        from app.plugins.sdk import ConfirmDialog
 
         _confirmed: list[bool] = [False]
 

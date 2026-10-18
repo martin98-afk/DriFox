@@ -103,7 +103,7 @@ def name_color(name: str, alpha: int = 255) -> str:
     随机化影响）。
     """
     try:
-        from app.utils.project_meta import get_project_color
+        from app.plugins.sdk import get_project_color
 
         return get_project_color(name, alpha=alpha)
     except Exception:

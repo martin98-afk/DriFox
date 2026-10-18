@@ -30,7 +30,7 @@ from app.tools.bg_manager import (
     _smart_decode,
     create_quota_job,
 )
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 
 # ============================================================
 # bash 输出压缩模块（同目录 _shell_compressor.py，下划线前缀 → loader 跳过）

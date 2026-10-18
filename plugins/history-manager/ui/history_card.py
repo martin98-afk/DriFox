@@ -33,7 +33,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from app.widgets.elided_label import _ElidedLabel
+from app.plugins.sdk import ElidedLabel as _ElidedLabel
 
 # ── 分页常量 ──
 _PAGE_SIZE = 30  # 每页显示的会话数（含当前会话）
@@ -65,8 +65,8 @@ from app.utils.design_tokens import (
     get_ui_font_size,
     scale_font_size,
 )
-from app.utils.theme_style import bind_theme_qss
-from app.utils.utils import get_font_family_css, get_icon
+from app.plugins.sdk import bind_theme_qss
+from app.plugins.sdk import get_font_family_css, get_icon
 from app.utils.session_preview import format_relative_time, get_message_preview  # noqa: F401  (get_message_preview 转引)
 
 
@@ -1175,7 +1175,7 @@ class HistoryCard(QWidget):
         if not branch and not head_readable:
             # HEAD 读不到/异常路径：退回 git 子进程兜底
             try:
-                from app.utils.git_worktree import GitWorktreeDetector
+                from app.plugins.sdk import GitWorktreeDetector
 
                 branch = GitWorktreeDetector.get_current_branch(worktree_path)
             except Exception:
@@ -2345,7 +2345,7 @@ class HistoryCard(QWidget):
 
     def _on_import_from_url(self):
         """从URL导入会话JSON"""
-        from app.widgets.common_dialogs import SingleInputDialog
+        from app.plugins.sdk import SingleInputDialog
 
         dialog = SingleInputDialog(
             title="🔗 从URL导入会话",

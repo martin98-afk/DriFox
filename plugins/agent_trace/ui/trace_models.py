@@ -440,7 +440,7 @@ def estimate_tokens_text(text: str, model: str = "gpt-4") -> int:
     global _TOKEN_ESTIMATOR
     if _TOKEN_ESTIMATOR is None:
         try:
-            from app.core.infra.token_estimator import estimate_tokens as _est
+            from app.plugins.sdk import estimate_tokens as _est
 
             _TOKEN_ESTIMATOR = _est
         except Exception:

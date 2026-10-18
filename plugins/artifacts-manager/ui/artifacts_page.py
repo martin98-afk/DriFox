@@ -32,11 +32,11 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import SmoothScrollDelegate, TransparentToolButton
 
 # 复用内置 _EmptyHint / _SectionHeader（共享模块，避免重复定义）
-from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
-from app.widgets.elided_label import _ElidedLabel
+from app.plugins.sdk import EmptyHint as _EmptyHint, SectionHeader as _SectionHeader
+from app.plugins.sdk import ElidedLabel as _ElidedLabel
 
-from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
-from app.utils.utils import get_font_family_css, get_icon
+from app.plugins.sdk import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
+from app.plugins.sdk import get_font_family_css, get_icon
 
 
 def _relative_time(created_at: str) -> str:
@@ -327,7 +327,7 @@ class SystemArtifactsPage(QWidget):
         self._scroll.setWidget(self._list_wrap)
         # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
         # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        from app.utils.design_tokens import make_card_content_opaque
+        from app.plugins.sdk import make_card_content_opaque
 
         make_card_content_opaque(self._list_wrap, 246)
         self._list_layout = QVBoxLayout(self._list_wrap)
