@@ -2696,16 +2696,7 @@ class UIPluginRegistry:
         if info is None or getattr(info, "on_click", None) is None or win is None:
             return
         try:
-            builder = getattr(win, "_build_ui_services", None)
-            info.on_click(
-                {
-                    "button_id": info.button_id,
-                    "plugin_name": info.plugin_name,
-                    "window_id": getattr(win, "_window_id", None),
-                    "main_widget": win,
-                    "services": builder() if callable(builder) else {},
-                }
-            )
+            info.on_click(callback_context(info.plugin_name, win, {"button_id": info.button_id}))
         except Exception as e:
             logger.warning(f"[UIPluginRegistry] 输入按钮 {button_id} 命令派发失败: {e}")
 
@@ -2733,14 +2724,7 @@ class UIPluginRegistry:
         if info is None or getattr(info, "on_click", None) is None or win is None:
             return
         try:
-            info.on_click(
-                {
-                    "item_id": info.item_id,
-                    "plugin_name": info.plugin_name,
-                    "window_id": getattr(win, "_window_id", None),
-                    "main_widget": win,
-                }
-            )
+            info.on_click(callback_context(info.plugin_name, win, {"item_id": info.item_id}))
         except Exception as e:
             logger.warning(f"[UIPluginRegistry] 侧边栏项 {item_id} 命令派发失败: {e}")
 
