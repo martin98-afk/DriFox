@@ -362,13 +362,14 @@ class TraceCollector(QObject):
 
         def _load() -> str:
             try:
-                from app.core.conversation.backend import get_session_storage
-
-                storage = get_session_storage()
-                fn = getattr(storage, "load_msg_extras", None)
-                if not callable(fn):
+                caps = self._caps
+                if caps is None or "session.read" not in caps:
                     return ""
-                patch = fn(session_id, [msg_idx]) or {}
+                snap = caps["session.read"]()
+                load = snap.get("extras")
+                if not callable(load):
+                    return ""
+                patch = load([msg_idx]) or {}
                 return str((patch.get(msg_idx) or {}).get("reasoning_content") or "")
             except Exception:
                 return ""
