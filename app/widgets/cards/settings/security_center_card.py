@@ -259,9 +259,6 @@ class SecurityCenterCard(QWidget):
         self.sandbox_switch.checkedChanged.connect(self._on_sandbox_toggled)
         layout.addWidget(self.sandbox_switch)
 
-        # ── 审核处理卡（处理方法/审核模型/超时/超时处理）──
-        layout.addWidget(self._build_approval_card())
-
         # 名单编辑区（挂入下方三大分组卡，不再各自折叠）
         self._path_white = _ListEditorCard(
             "写入白名单（放行 workdir 外写入）",
@@ -363,6 +360,7 @@ class SecurityCenterCard(QWidget):
         layout.addWidget(self.trash_switch)
         layout.addWidget(self.net_switch)
         layout.addWidget(self.sys_switch)
+        # ── 审核处理卡（处理方法/审核模型/超时/超时处理，全页仅此一份）──
         layout.addWidget(self._build_approval_card())
         layout.addWidget(self._build_rules_group())
         layout.addWidget(self._build_data_group())
