@@ -720,6 +720,11 @@ def sandbox_check_tool(
     command = args.get("command")
     if isinstance(command, str) and command.strip():
         verdict = check_command(command, cfg)
+        # ── 删除识别兜底升档：deep 分类器不认识的删除变体（如 .NET
+        # [IO.Directory]::Delete）在保护开启时同样强制审批；deny 优先，
+        # 豁免由下方豁免块统一判定 ──
+        if verdict != DENY and cfg.get("delete_protection") and is_delete_command(command):
+            verdict = CONFIRM
         # ── 删除保护门控（EU-G23，正解 A）──
         # `delete_protection` 关闭时，**仅取消「因删除命令而 confirm」这一层**。
         # 依据：删除类命令的 confirm 来自 CONFIRM_COMMANDS 命令名单（command_safety），
@@ -820,6 +825,13 @@ def sandbox_check_tool(
 # ============================================================
 DELETE_COMMANDS = frozenset({"rm", "del", "erase", "rd", "rmdir", "deltree", "unlink", "remove-item", "ri"})
 
+# .NET / PowerShell 侧删除 API 调用形态（词表外变体，2026-10-18 实测漏拦）：
+# [System.IO.Directory]::Delete / [IO.File]::Delete 等；方法名限定 Delete，
+# 避免误报 CreateDirectory 等同名前缀方法
+_DOTNET_DELETE_PATTERN = re.compile(
+    r"(?i)\[\s*(?:system\.)?io\.(?:directory|file)\s*\]\s*::\s*delete\b"
+)
+
 # rm/del 等常见 flag（快照时剔除）
 _DELETE_FLAGS = {"-r", "-rf", "-f", "-fr", "-d", "-rd", "-recursive", "/s", "/q", "/f"}
 
@@ -842,6 +854,17 @@ def _strip_quotes(token: str) -> str:
     if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "\"'":
         return stripped[1:-1]
     return stripped
+
+
+def _extract_quoted_paths(token: str) -> list:
+    """从 $var='path' / --arg="path" 形态 token 提取引号内路径候选
+
+    PowerShell 变量赋值后再传入删除 API 的形态（如 $p='D:/x'; ...::Delete($p)）
+    无法靠命令词定位目标，靠引号内容补候选；误报方向是多拍快照，无害。
+    """
+    if "'" not in token and '"' not in token:
+        return []
+    return [p for p in re.findall(r"[\"']([^\"']{2,})[\"']", token) if not p.startswith("-")]
 
 
 def _resolve_cmd_path(item: str, workdir: Optional[Path] = None) -> Path:
@@ -879,8 +902,10 @@ def delete_targets(command: str, workdir: Optional[Path] = None) -> dict:
             continue
         if lowered.startswith(("-", "/")) and not _looks_like_path(raw):
             continue
-        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试
+        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试；
+        # 另提取 $var='path' 赋值形态的引号内路径（.NET Delete 变体目标）
         candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
+        candidates = candidates + _extract_quoted_paths(raw)
         for item in candidates:
             item = _strip_quotes(item)
             if not item or item.lower() in DELETE_COMMANDS or item.lower() in _DELETE_FLAGS:
@@ -945,13 +970,15 @@ def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None, workdir: Op
 
 
 def is_delete_command(command: str) -> bool:
-    """是否删除类命令（含壳命令包裹形态）
+    """是否删除类命令（含壳命令包裹形态与 .NET IO Delete 调用形态）
 
     保守判定：任一 token（含引号内内容后再拆一次）命中删除命令名即算
     （git rm / powershell -c Remove-Item 均覆盖）；误报方向是「多问一次」。
     """
     if not command:
         return False
+    if _DOTNET_DELETE_PATTERN.search(command):
+        return True
     for token in _split_tokens(command):
         inner = _strip_quotes(token)
         if inner.lower() in DELETE_COMMANDS:
@@ -987,8 +1014,10 @@ def snapshot_paths_before_delete(command: str, backup_root: Union[str, Path], wo
             continue
         if lowered.startswith(("-", "/")):
             continue
-        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试
+        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试；
+        # 另提取 $var='path' 赋值形态的引号内路径（.NET Delete 变体目标）
         candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
+        candidates = candidates + _extract_quoted_paths(raw)
         for item in candidates:
             item = _strip_quotes(item)
             if not item or item.lower() in DELETE_COMMANDS or item.lower() in _DELETE_FLAGS:

@@ -96,6 +96,42 @@ def test_user_confirm_prefix_still_honored_when_protection_off():
     assert verdict == "confirm", "用户显式加严不应被开关默认值覆盖"
 
 
+# ── .NET API 形态删除（词表外变体，2026-10-18 实测漏拦）──
+
+_DOTNET_DIR_CMD = (
+    "$ErrorActionPreference='Stop'; $p='D:/work/tmp/target'; "
+    "[System.IO.Directory]::Delete($p, $true); "
+    "if (Test-Path $p) { 'STILL EXISTS' } else { 'DELETED' }"
+)
+
+
+def test_dotnet_delete_command_detected():
+    """.NET IO Delete 调用形态必须被识别为删除命令"""
+    from app.tools.sandbox import is_delete_command
+
+    assert is_delete_command(_DOTNET_DIR_CMD) is True
+    assert is_delete_command('[IO.File]::Delete("D:/x.txt")') is True
+    assert is_delete_command('powershell -c "[System.IO.Directory]::Delete($p, $true)"') is True
+    assert is_delete_command("[System.IO.Directory]::CreateDirectory('D:/x')") is False, "非 Delete 方法不误报"
+
+
+def test_dotnet_delete_gated_by_protection():
+    """.NET 形态与 rm 同口径：tp=False 放行 / tp=True 强制审批"""
+    assert sandbox_check_tool("bash", {"command": _DOTNET_DIR_CMD}, _cfg(delete_protection=False)) == "allow"
+    assert sandbox_check_tool("bash", {"command": _DOTNET_DIR_CMD}, _cfg(delete_protection=True)) == "confirm"
+
+
+def test_dotnet_delete_target_extracted(tmp_path):
+    """$var='path' 赋值形态的目标路径可被解析（供快照与豁免判定）"""
+    from app.tools.sandbox import delete_targets
+
+    target = tmp_path / "doomed"
+    target.mkdir()
+    cmd = f"$p='{target.as_posix()}'; [System.IO.Directory]::Delete($p, $true)"
+    targets = delete_targets(cmd, tmp_path)
+    assert str(target) in [str(p) for p in targets["existing"]], f"目标未提取到: {targets}"
+
+
 # ── 边界 ──
 
 
