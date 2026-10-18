@@ -101,13 +101,16 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("ui.card.hide", _L, "隐藏浮动卡", _UI, ["hide_card"]),
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
         _spec("ui.dialog", _L, "文件/目录选择、确认框、单行输入（跟随主题）", _UI),
+        _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新等）", _UI),
         # ── 对话流 ──
         _spec("stream.subscribe", _M, "订阅对话流事件（工具/流/错误/上下文/会话切换）", _UI),
         # ── 窗口 ──
         _spec("window.active", _L, "当前活跃聊天窗口", _UI),
+        _spec("window.current", _L, "当前窗口的语义快照（backend/session/project/workdir）", _UI),
         _spec("window.host", _L, "宿主顶层窗口（弹窗/InfoBar 的合适 parent）", _UI),
         _spec("window.list", _L, "存活窗口 id 集合", _UI),
         _spec("window.events", _M, "订阅 tab 切换等窗口级事件", _UI),
+        _spec("window.workbench", _M, "打开/刷新右侧工作台页", _UI),
         # ── 插件管理 ──
         _spec("plugin.read", _L, "已安装插件列表/元数据", _UI),
         _spec("plugin.control", _H, "重载/启停其他插件", _UI),

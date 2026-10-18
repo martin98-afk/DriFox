@@ -12,6 +12,22 @@ from typing import Any
 from loguru import logger
 
 
+class _BusSignal:
+    """把 UIEventBus 适配成 signal 形状，供 release_plugin 统一断开。
+
+    UIEventBus.unsubscribe 需要 (event, callback)，故登记时记住事件名。
+    """
+
+    __slots__ = ("_bus", "_event")
+
+    def __init__(self, bus, event: str):
+        self._bus = bus
+        self._event = event
+
+    def disconnect(self, slot):
+        self._bus.unsubscribe(self._event, slot)
+
+
 def _resolve_tab_window():
     """延迟解析 TabManagerWindow 单例（测试可 monkeypatch 本函数）。"""
     try:
@@ -85,6 +101,85 @@ def _window_host(host: Any):
             return None
 
     return resolve
+
+
+def _window_current(host: Any):
+    """当前窗口的**语义快照**，不是窗口对象本身。
+
+    插件原先 `tm.get_current_window()` 后再摸 `_current_session_id` /
+    `_current_project` / `_current_workdir` 私有字段。这里一次性给出这些字段
+    的语义副本：插件拿不到窗口对象，自然无从摸私有状态。
+    """
+
+    def snapshot():
+        tm = _resolve_tab_window()
+        win = tm.get_current_window() if tm is not None else None
+        if win is None:
+            return None
+        project = getattr(win, "_current_project", "") or ""
+        cache = getattr(win, "_current_workdir", None) or {}
+        workdir = cache.get(project) or ""
+        if not workdir:
+            resolver = getattr(win, "_resolve_project_workdir", None)
+            if callable(resolver):
+                try:
+                    workdir = resolver() or ""
+                except Exception:
+                    workdir = ""
+        return {
+            "window_id": getattr(win, "_window_id", ""),
+            "backend": getattr(win, "backend", None),
+            "session_id": getattr(win, "_current_session_id", ""),
+            "project": project,
+            "workdir": workdir,
+        }
+
+    return snapshot
+
+
+def _window_workbench(host: Any):
+    """打开 / 刷新右侧工作台页。"""
+
+    def open_page(key: str) -> None:
+        tm = _resolve_tab_window()
+        if tm is None:
+            return
+        fn = getattr(tm, "open_workbench_memory", None)
+        if callable(fn):
+            fn(key)
+
+    def refresh() -> None:
+        tm = _resolve_tab_window()
+        if tm is None:
+            return
+        fn = getattr(tm, "refresh_workbench", None)
+        if callable(fn):
+            fn()
+
+    return {"open": open_page, "refresh": refresh}
+
+
+def _ui_events(host: Any, ctx: Any):
+    """UI 事件总线的订阅 / 发布（订阅随插件卸载自动退订）。"""
+
+    def api() -> dict:
+        from app.core.infra.ui_event_bus import UIEventBus
+
+        bus = UIEventBus.get_instance()
+
+        def subscribe(event: str, callback):
+            bus.subscribe(event, callback, plugin_name=ctx.plugin or None)
+            # 登记到能力注册表：release_plugin 时按插件名退订。
+            # UIEventBus 按 callback 退订，故包一层适配成 signal.disconnect 形状。
+            ctx.registry.track_subscription(ctx.plugin, _BusSignal(bus, event), callback)
+            return True
+
+        def publish(event: str, **payload):
+            bus.publish(event, **payload)
+
+        return {"subscribe": subscribe, "publish": publish}
+
+    return api
 
 
 def _window_list(host: Any):
@@ -310,6 +405,73 @@ def _tool_execute(host: Any):
     return lambda: getattr(backend, "tool_executor", None) if backend else None
 
 
+def _command_read(host: Any):
+    """命令列表查询。"""
+
+    def api() -> dict:
+        from app.core.commands.command_manager import CommandManager
+
+        mgr = CommandManager.get_instance()
+        return {"all": mgr.get_all_commands}
+
+    return api
+
+
+def _command_reload(host: Any):
+    """命令热重载（改命令文件后生效）。"""
+
+    def api() -> dict:
+        def reload_all() -> None:
+            from app.core.commands.builtin_commands import reload_all_commands
+
+            reload_all_commands()
+
+        return {"reload": reload_all}
+
+    return api
+
+
+def _plugin_control(host: Any):
+    """插件启停 / 重载控制（含 watcher 抑制）。"""
+
+    def api() -> dict:
+        def suppress_watcher() -> None:
+            from app.core.services.plugin_host_service import suppress_plugin_watcher
+
+            suppress_plugin_watcher()
+
+        def resume_watcher() -> None:
+            from app.core.services.plugin_host_service import resume_plugin_watcher
+
+            resume_plugin_watcher()
+
+        def reload(name: str) -> None:
+            from app.core.services.plugin_host_service import PluginHostService
+
+            PluginHostService.get_instance().reload_plugin_targeted(name)
+
+        return {"suppress_watcher": suppress_watcher, "resume_watcher": resume_watcher,
+                "reload": reload}
+
+    return api
+
+
+def _plugin_read(host: Any):
+    """已安装插件列表 / 元数据查询。"""
+
+    def api() -> dict:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        return {
+            "get": pm.get_plugin,
+            "enabled": pm.get_enabled_plugins,
+            "is_enabled": pm.is_enabled,
+        }
+
+    return api
+
+
 def _tool_read(host: Any):
     """工具注册表的只读查询面（不含注册/修改，那是 tool.inject）。"""
 
@@ -381,7 +543,10 @@ def register(registry) -> None:
     reg.register("stream.subscribe", _stream_subscribe, surface="ui", owner="core:ui")
     reg.register("window.active", _window_active, surface="ui", owner="core:ui")
     reg.register("window.host", _window_host, surface="ui", owner="core:ui")
+    reg.register("window.current", _window_current, surface="ui", owner="core:ui")
+    reg.register("window.host", _window_host, surface="ui", owner="core:ui")
     reg.register("window.list", _window_list, surface="ui", owner="core:ui")
+    reg.register("window.workbench", _window_workbench, surface="ui", owner="core:ui")
     reg.register("window.events", _window_events, surface="ui", owner="core:ui")
     # 模型 / 智能体
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
@@ -406,6 +571,11 @@ def register(registry) -> None:
     reg.register("input.read", _input_read, surface="ui", owner="core:ui")
     reg.register("input.write", _input_write, surface="ui", owner="core:ui")
     reg.register("ui.notify", _ui_notify, surface="ui", owner="core:ui")
+    reg.register("ui.events", _ui_events, surface="ui", owner="core:ui")
+    reg.register("command.read", _command_read, surface="ui", owner="core:ui")
+    reg.register("command.reload", _command_reload, surface="ui", owner="core:ui")
+    reg.register("plugin.read", _plugin_read, surface="ui", owner="core:ui")
+    reg.register("plugin.control", _plugin_control, surface="ui", owner="core:ui")
     reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
     reg.register("ui.exclusive", _ui_exclusive, surface="ui", owner="core:ui")
     reg.register(
