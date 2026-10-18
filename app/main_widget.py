@@ -25157,145 +25157,38 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _build_ui_services(self) -> Dict[str, Any]:
-        """构建 UI 插件可调用的对话服务句柄（window 级）
+        """UI 插件服务门面 —— 由能力池按 LEGACY_MAP 投影渲染。
 
-        经 _build_ui_context 的 "services" 字段注入插件浮动卡片，
-        插件（如 autoloop）据此驱动自建的 ConversationCore 执行栈，
-        无需触碰 main_widget 内部结构。
+        键集契约见 app/plugins/contracts/engine_host.py（EngineHost Protocol）。
+        实现唯一真相在 app/plugins/capabilities/providers/；本方法只做投影，
+        不得再写服务实现（新增能力去 catalog 登记 + provider 注册）。
 
-        服务键集契约见 app/plugins/contracts/engine_host.py（EngineHost Protocol），
-        新增/删改服务必须同步该契约与 tests/plugins/test_engine_host_contract.py。
-
-        get_provider_config 是插件取「任意服务商配置」的**唯一正确入口**：密钥模式下
+        get_provider_config 是插件取「任意服务商配置」的唯一正确入口：密钥模式下
         磁盘 API_KEY 为密文/空串，插件直读 app.config 会拿到不可用的 key。
         """
-        backend = self.backend
+        from app.plugins.capabilities.registry import CapabilityRegistry
+        from app.plugins.registries.ui_plugin_registry import project_services
 
-        def _agent_prompt(name: str) -> str:
-            am = backend.agent_manager if backend else None
-            if not am:
-                return ""
-            agent = am.get_agent(name)
-            return agent.prompt if agent else ""
+        try:
+            return project_services(self._build_ui_capabilities())
+        except Exception as e:
+            logger.warning(f"[MainWidget] UI services 投影失败: {e}")
+            return {}
 
-        def _tools_schema(agent_name: str) -> List[Dict]:
-            return self._build_agent_tools_schema(agent_name)
+    def _resolve_theme_snapshot(self) -> Dict[str, Any]:
+        """主题快照（theme.read 能力的实现，与 _build_ui_context 共用）。"""
+        from app.utils.design_tokens import _get_global_font, get_ui_font_size, scale_font_size
+        from app.utils.theme_manager import theme_manager
+        from qfluentwidgets import isDarkTheme
 
-        def _set_workdir(path: str):
-            if backend and backend.tool_executor and path:
-                backend.tool_executor.set_workdir(str(path))
-
-        def _get_compactor():
-            ce = backend.chat_engine if backend else None
-            return getattr(ce, "_compactor", None) if ce else None
-
-        def _conversation_stack():
-            """对话执行栈工厂（懒加载 ConversationCore/Executor 构建面）。
-
-            EP2：插件（autoloop）经此入口取执行栈，撤销对 app.core.conversation 的
-            deep import。契约见 app/plugins/contracts/conversation_stack.py。
-            """
-            from app.core.conversation.stack_factory import ConversationStackImpl
-
-            return ConversationStackImpl()
-
-        def _create_engine_session(engine_name: str, **kwargs):
-            """EP3：创建插件对话引擎会话（最通用同步驱动原语）。
-
-            契约见 app/plugins/contracts/engine_session.py。默认 hook_policy=NONE
-            （引擎决定 hook 参与——插件循环不再被动触发全局 hooks）；
-            turn() 不预设对话流程，messages/tools/callbacks 全量透传，
-            core/executor 逃生舱公开，最大化自由度。
-            """
-            from app.core.conversation.engine_session import EngineSessionImpl
-
-            return EngineSessionImpl(
-                engine_name=engine_name,
-                get_model_config=self._get_current_model_config,
-                tool_executor=backend.tool_executor if backend else None,
-                agent_manager=backend.agent_manager if backend else None,
-                backend=backend,
-                **kwargs,
-            )
-
-        def _send_to_platform(platform: Any, chat_id: str, content: str, **kwargs):
-            """向已连接通讯平台会话发送消息（cron-tasks 等插件的通知通道）。
-
-            走 GatewayService 应用级单例，不依赖插件侧 import app.gateway
-            （其 _manager_instance 由 GatewayService 持有，插件拿不到）。
-
-            Args:
-                platform: 平台标识（Platform 枚举或 "feishu"/"dingtalk" 等 str）
-                chat_id: gateway 会话 chat_id
-                content: 消息文本
-                kwargs: timeout（秒，默认 30）
-
-            Returns:
-                SendResult（success/error 可判定）。服务未就绪时返回
-                success=False 的 SendResult，不抛异常。
-            """
-            from app.core.services.gateway_service import GatewayService
-            from app.gateway.base import SendResult
-
-            try:
-                svc = GatewayService.get_instance()
-            except Exception as e:
-                return SendResult(success=False, error=f"GatewayService 不可用: {e}")
-            return svc.send_to_platform(platform, chat_id, content, **kwargs)
-
-        def _list_platform_sessions():
-            """已知 gateway 会话列表（供插件选择投递目标）。
-
-            返回 GatewaySession 列表（含 platform/chat_id/display_name）；
-            服务未就绪时返回空列表。
-            """
-            from app.core.services.gateway_service import GatewayService
-
-            try:
-                return GatewayService.get_instance().list_platform_sessions()
-            except Exception:
-                return []
-
-        def _list_platforms():
-            """已注册通讯平台及连接状态（供插件区分「没配平台」与「配了没会话」）。
-
-            返回 list[dict]：{id, enabled, connected, available, error}；
-            服务未就绪时返回空列表。
-            """
-            from app.core.services.gateway_service import GatewayService
-
-            try:
-                return GatewayService.get_instance().list_platforms()
-            except Exception:
-                return []
-
+        theme_data = theme_manager.get_current_theme()
         return {
-            "get_model_config": self._get_current_model_config,
-            "get_provider_config": self._resolve_provider_config,
-            "get_tool_executor": lambda: backend.tool_executor if backend else None,
-            "get_agent_manager": lambda: backend.agent_manager if backend else None,
-            "get_agent_prompt": _agent_prompt,
-            "get_tools_schema": _tools_schema,
-            "set_workdir": _set_workdir,
-            "get_workdir": lambda: self._resolve_project_workdir() or "",
-            "get_compactor": _get_compactor,
-            "conversation_stack": _conversation_stack,
-            "create_engine_session": _create_engine_session,
-            "save_messages_to_session": self._save_messages_to_session,
-            "enter_exclusive_ui_mode": self.enter_exclusive_ui_mode,
-            "exit_exclusive_ui_mode": self.exit_exclusive_ui_mode,
-            "hide_card": lambda card_id: self._card_manager.hide_card(card_id, self._window_id),
-            "sync_working_directory": self._sync_working_directory,
-            "notify": lambda title, message: InfoBar.success(
-                title,
-                message,
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=5000,
-                position=InfoBarPosition.BOTTOM,
-            ),
-            "send_to_platform": _send_to_platform,
-            "list_platform_sessions": _list_platform_sessions,
-            "list_platforms": _list_platforms,
+            "theme_id": theme_manager.get_current_theme_id(),
+            "theme_name": theme_data.get("name", "") if theme_data else "",
+            "is_dark": isDarkTheme(),
+            "font_family": _get_global_font(),
+            "font_size": scale_font_size(get_ui_font_size()),
+            "colors": theme_manager.get_current_colors(),
         }
 
     def _build_agent_tools_schema(self, agent_name: str) -> List[Dict]:

@@ -49,23 +49,35 @@ def _capabilities_for(plugin_name: str, win):
 
 
 def _services_for(plugin_name: str, win) -> dict:
-    """按插件声明裁过的 services（能力池不可用时回落到窗口级全量投影）。"""
+    """按插件声明裁过的 services（能力池不可用时回落到窗口级全量投影）。
+
+    用 ``pool.legacy(key, cap_id)`` 而非 ``pool[cap_id]``：一个能力可能对应多个
+    语义不同的旧键（如 agent.read → get_agent_manager / get_agent_prompt），
+    旧键可有专属实现；权限判定仍统一走 cap_id。
+    """
     if win is None:
         return {}
     pool = _capabilities_for(plugin_name, win)
     if pool is None:
         return win._build_ui_services() if hasattr(win, "_build_ui_services") else {}
     try:
-        from app.plugins.capabilities.catalog import CATALOG, LEGACY_MAP
-
-        return {
-            old: pool[cap]
-            for old, cap in LEGACY_MAP.items()
-            if CATALOG.get(cap) is not None and "ui" in CATALOG[cap].surfaces and cap in pool
-        }
+        return project_services(pool)
     except Exception as e:
         logger.warning(f"[UIPluginRegistry] 插件 {plugin_name} services 投影失败: {e}")
         return {}
+
+
+def project_services(pool, surface: str = "ui") -> dict:
+    """把能力池投影成旧 services 字典（唯一投影实现，主程序各处共用）。"""
+    from app.plugins.capabilities.catalog import CATALOG, LEGACY_MAP
+
+    return {
+        old: pool.legacy(old, cap)
+        for old, cap in LEGACY_MAP.items()
+        if CATALOG.get(cap) is not None
+        and surface in CATALOG[cap].surfaces
+        and cap in pool
+    }
 
 
 def callback_context(plugin_name: str, win, extra: dict) -> dict:
@@ -4044,15 +4056,7 @@ class UIPluginRegistry:
             if _pool is not None:
                 ctx["capabilities"] = _pool
                 if "services" in ctx:
-                    from app.plugins.capabilities.catalog import CATALOG, LEGACY_MAP
-
-                    ctx["services"] = {
-                        old: _pool[cap]
-                        for old, cap in LEGACY_MAP.items()
-                        if CATALOG.get(cap) is not None
-                        and "ui" in CATALOG[cap].surfaces
-                        and cap in _pool
-                    }
+                    ctx["services"] = project_services(_pool)
 
         # 注入插件图标路径（供卡片在头部/标题等位置展示）
         try:

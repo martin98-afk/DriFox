@@ -41,6 +41,11 @@ class CapabilityRegistry:
 
     def __init__(self) -> None:
         self._entries: Dict[Tuple[str, str], _Entry] = {}
+        # 旧键具名变体：(legacy_key, surface) -> 有该旧键专属实现的 provider。
+        # 一个能力（授权单位）可对应多个语义不同的旧键（API 单位）：
+        # 例如 agent.read 同时映射 get_agent_manager（取对象）与 get_agent_prompt
+        # （按名取字符串），两者投影若取同一值会直接报错。
+        self._legacy_entries: Dict[Tuple[str, str], CapabilityProvider] = {}
         self._declared_cache: Dict[str, tuple] = {}
         self._plugin_subs: Dict[str, List[Tuple[Any, Any]]] = {}
 
@@ -73,10 +78,14 @@ class CapabilityRegistry:
         surface: str = "ui",
         owner: str = "core",
         experimental: bool = False,
+        legacy_key: str = "",
     ) -> None:
         """注册一个能力的 provider 实现。
 
         未在 catalog 登记的 ID 必须显式 experimental=True，否则抛 KeyError。
+
+        legacy_key: 非空时注册为该旧服务键的**专属**实现（pool.legacy() 取用），
+        不影响 pool[cap_id] 的主实现。用于一个能力对应多个语义不同的旧键的场景。
         """
         spec = catalog.get(cap_id)
         if spec is None:
@@ -84,17 +93,25 @@ class CapabilityRegistry:
                 raise KeyError(f"能力 {cap_id} 未在 catalog 登记；确需注册请传 experimental=True")
             logger.warning(f"[CapabilityExperimental] 注册未登记能力 cap={cap_id} owner={owner}")
         self._arity(provider)
+        if legacy_key:
+            self._legacy_entries[(legacy_key, surface)] = provider
+            return
         self._entries[(cap_id, surface)] = _Entry(provider, owner, experimental)
 
     def unregister(self, cap_id: str, *, surface: Optional[str] = None) -> None:
         if surface is None:
             for key in [k for k in self._entries if k[0] == cap_id]:
                 self._entries.pop(key, None)
+            for key in [k for k in self._legacy_entries if k[1] == cap_id]:
+                self._legacy_entries.pop(key, None)
             return
         self._entries.pop((cap_id, surface), None)
+        for key in [k for k in self._legacy_entries if k[1] == cap_id]:
+            self._legacy_entries.pop(key, None)
 
     def clear(self) -> None:
         self._entries.clear()
+        self._legacy_entries.clear()
         self._declared_cache.clear()
         self._plugin_subs.clear()
 
@@ -123,6 +140,11 @@ class CapabilityRegistry:
         decl = self.resolve_declared(plugin) if declared is _UNSET else declared
         allowed, ungated = self._select(surface, decl)
         providers = {cid: self._entries[(cid, surface)].provider for cid in (allowed | ungated)}
+        legacy = {
+            key[0]: provider
+            for key, provider in self._legacy_entries.items()
+            if key[1] == surface
+        }
         return CapabilityPool(
             plugin=plugin,
             surface=surface,
@@ -130,6 +152,7 @@ class CapabilityRegistry:
             declared=None if decl is None else set(decl),
             providers=providers,
             ungated=ungated,
+            legacy_providers=legacy,
             registry=self,
         )
 
