@@ -53,13 +53,13 @@ from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
 
 from loguru import logger
 
-from app.utils.design_tokens import Animations, Colors, font_size_css, get_unified_scrollbar_style
-from app.utils.project_meta import _alpha_tint, get_project_color
+from app.plugins.sdk import Animations, Colors, font_size_css, get_unified_scrollbar_style
+from app.plugins.sdk import alpha_tint as _alpha_tint, get_project_color
 from app.utils.theme_style import bind_theme_qss, replay_theme_qss
-from app.utils.utils import get_font_family_css, get_icon
-from app.widgets._workbench_helpers import _EmptyHint
+from app.plugins.sdk import get_font_family_css, get_icon
+from app.plugins.sdk import EmptyHint as _EmptyHint
 from app.widgets.custom_title_bar import CustomTabButton
-from app.widgets.square_avatar import _SquareAvatar
+from app.plugins.sdk import SquareAvatar as _SquareAvatar
 
 from .project_selector_card import ProjectItem, ProjectSelectorCardContent
 
@@ -505,7 +505,7 @@ class HistoryPage(QWidget):
         self._scroll_area.setWidget(self._content_widget)
         # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
         # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        from app.utils.design_tokens import make_card_content_opaque
+        from app.plugins.sdk import make_card_content_opaque
 
         make_card_content_opaque(self._content_widget, 246)
         self._scroll_area.hide()  # attach 前隐藏（空滚动区会闪白底）

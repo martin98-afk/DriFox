@@ -63,7 +63,7 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from app.widgets.elided_label import _ElidedLabel
+from app.plugins.sdk import ElidedLabel as _ElidedLabel
 
 from .downloads import get_downloads_fetcher
 from .installer import get_installer
@@ -96,7 +96,7 @@ def _scroll_area_qss() -> str:
     与 app.utils.design_tokens 约定一致（tab_panel/message_card 同款），
     滚动条宽度 6px 薄样式，视觉随主程序主题。
     """
-    from app.utils.design_tokens import get_unified_scrollbar_style
+    from app.plugins.sdk import get_unified_scrollbar_style
 
     return (
         "QScrollArea { background: transparent; border: none; }"
@@ -2702,7 +2702,7 @@ class MarketplaceCard(QWidget):
         from PyQt5.QtGui import QColor
 
         try:
-            from app.utils.design_tokens import Colors
+            from app.plugins.sdk import Colors
 
             fallback = Colors.CONTENT_BG
         except Exception:

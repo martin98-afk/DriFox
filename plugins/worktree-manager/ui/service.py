@@ -32,7 +32,7 @@ class WorktreeService:
         workdir = mw._current_workdir.get(mw._current_project)
         if not workdir or not os.path.isdir(str(workdir)):
             return ""
-        from app.utils.git_worktree import GitWorktreeDetector
+        from app.plugins.sdk import GitWorktreeDetector
 
         git_root = GitWorktreeDetector.detect_git(str(workdir))
         if not git_root:
@@ -73,7 +73,7 @@ class WorktreeService:
             return
         # zombie 过滤：.git 指向的 gitdir 已消失（主仓库 .git 被删/重建）的
         # worktree 不切换，避免把工作目录切进 git 已不认的目录
-        from app.utils.git_worktree import GitWorktreeDetector
+        from app.plugins.sdk import GitWorktreeDetector
 
         if not GitWorktreeDetector.is_valid_worktree_link(worktree_path):
             logger.warning(
@@ -138,7 +138,7 @@ class WorktreeService:
             # 已不在 worktree 中，无需切换
             return
 
-        from app.utils.git_worktree import GitWorktreeDetector
+        from app.plugins.sdk import GitWorktreeDetector
 
         main_repo = GitWorktreeDetector.get_main_repo_path(current_wt)
         if not main_repo or not os.path.isdir(main_repo):

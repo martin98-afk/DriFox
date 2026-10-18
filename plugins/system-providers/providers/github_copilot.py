@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from app.plugins.registries.provider_registry import ProviderDef
-from app.utils.utils import get_app_data_dir
+from app.plugins.sdk import get_app_data_dir
 
 _API_ENDPOINT = "https://api.githubcopilot.com"
 _CACHE_DIR = get_app_data_dir() / "github_copilot" / "cache"

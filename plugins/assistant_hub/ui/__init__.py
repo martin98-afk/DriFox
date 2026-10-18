@@ -277,7 +277,7 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
         return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
     try:
-        from app.utils.design_tokens import scale_font_size, scale_icon_size
+        from app.plugins.sdk import scale_font_size, scale_icon_size
 
         name_fs = scale_font_size(14)
         desc_fs = scale_font_size(11)
@@ -591,7 +591,7 @@ def _render_kv_tag_card(content: str, ctx: dict, skin: dict) -> str:
     """
     import html as _html
 
-    from app.utils.design_tokens import scale_font_size
+    from app.plugins.sdk import scale_font_size
 
     accent = skin["accent"]
     title_esc = _html.escape(skin["title"])

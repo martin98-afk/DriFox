@@ -19,7 +19,7 @@ from PyQt5.QtCore import QRectF, Qt
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
 from PyQt5.QtWidgets import QWidget
 
-from app.utils.design_tokens import Colors
+from app.plugins.sdk import Colors
 
 
 def qcolor_from(spec: str, fallback: QColor = QColor(33, 33, 38, 250)) -> QColor:
@@ -157,7 +157,7 @@ class RoundAvatar(QWidget):
             p.setPen(QColor(255, 255, 255, 230))
             pixel = int(self._size * 0.42) if len(self._text) <= 1 else int(self._size * 0.36)
             try:
-                from app.utils.utils import get_unified_font
+                from app.plugins.sdk import get_unified_font
 
                 font = get_unified_font()
                 font.setPixelSize(pixel)

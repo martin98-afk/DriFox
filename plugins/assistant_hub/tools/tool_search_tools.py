@@ -17,7 +17,7 @@ top_k 截断）；其中转执行即 CodeBuddy 的 DeferExecuteTool。
 
 import json
 
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 from app.tools.registry import ToolRegistry
 
 GROUP_TOOL_SEARCH = "工具搜索"

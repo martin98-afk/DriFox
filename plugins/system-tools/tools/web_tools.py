@@ -16,7 +16,7 @@ from loguru import logger
 
 from app.tools.registry import make_summarize_from_preview
 
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 
 GROUP_NETWORK = "网络"
 
@@ -48,7 +48,7 @@ def _ensure_migrated() -> None:
     from pathlib import Path
 
     from app.plugins.managers.plugin_config_store import PluginConfigStore
-    from app.utils.utils import get_app_data_dir
+    from app.plugins.sdk import get_app_data_dir
 
     legacy = Path(get_app_data_dir()) / "tools" / "web_search_keys.json"
     if not legacy.exists():

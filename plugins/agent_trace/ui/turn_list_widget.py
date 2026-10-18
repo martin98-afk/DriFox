@@ -1244,7 +1244,7 @@ def _fallback_scrollbar(pal: ThemePalette) -> str:
 def unified_scrollbar(width: int = 8) -> str:
     """主程序统一滚动条样式（``app.utils.design_tokens``），失败回退内联。"""
     try:
-        from app.utils.design_tokens import get_unified_scrollbar_style
+        from app.plugins.sdk import get_unified_scrollbar_style
 
         return get_unified_scrollbar_style(width)
     except Exception:

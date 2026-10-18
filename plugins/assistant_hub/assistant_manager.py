@@ -344,7 +344,7 @@ class AssistantManager:
     def _default_root(self) -> Path:
         """默认根目录：<app_data_dir>/assistant_hub"""
         try:
-            from app.utils.utils import get_app_data_dir
+            from app.plugins.sdk import get_app_data_dir
 
             app_data = get_app_data_dir()
         except Exception:
@@ -832,7 +832,7 @@ class AssistantManager:
         解析成本极低，整表清空即可。
         """
         try:
-            from app.core.infra.message_identity import clear_cache
+            from app.plugins.sdk import clear_cache
 
             clear_cache()
         except Exception as e:

@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 from app.tools.registry import make_summarize_from_preview
 
 GROUP_INTERACTION = "交互与技能"
@@ -122,7 +122,7 @@ _MANAGE_SKILL_SCHEMA = {
 
 def _agent_created_check(skill: dict) -> tuple[bool, str]:
     """双校验：技能位于用户数据技能目录 + frontmatter 标记 agent_created: true"""
-    from app.utils.utils import get_app_data_dir
+    from app.plugins.sdk import get_app_data_dir
 
     p = Path(skill.get("path", "")).resolve()
     user_base = (get_app_data_dir() / "skills").resolve()
@@ -182,7 +182,7 @@ def _skill_inventory(query: str = "", source: str = "") -> str:
 
 
 def _guide_create(name: str) -> str:
-    from app.utils.utils import get_app_data_dir
+    from app.plugins.sdk import get_app_data_dir
 
     if not name or not re.match(r"^[a-z0-9][a-z0-9-]*$", name):
         return "错误：name 必填，技能名须为小写字母/数字/中划线（如 pdf-summary）。"

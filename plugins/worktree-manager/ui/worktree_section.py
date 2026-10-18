@@ -25,9 +25,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app.utils.design_tokens import Colors, font_size_css
-from app.utils.git_worktree import GitWorktreeDetector
-from app.utils.utils import get_font_family_css
+from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import GitWorktreeDetector
+from app.plugins.sdk import get_font_family_css
 
 # Windows 下隐藏 cmd 窗口
 _CREATION_FLAGS = 0
@@ -456,7 +456,7 @@ class _AddWorktreeRow(QWidget):
         layout.addStretch()
 
     def _on_add(self):
-        from app.widgets.common_dialogs import SingleInputDialog
+        from app.plugins.sdk import SingleInputDialog
 
         # 注意：parent 必须传顶层窗口（self.window()）。
         # 如果传 self（_AddWorktreeRow，24px 高），MaskDialogBase 会把

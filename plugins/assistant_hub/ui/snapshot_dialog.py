@@ -13,8 +13,8 @@ from PyQt5.QtWidgets import QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QV
 
 from qfluentwidgets import ComboBox, SmoothScrollDelegate
 
-from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css
+from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import get_font_family_css
 
 from .overlays import OverlayBase, _dialog_btn
 

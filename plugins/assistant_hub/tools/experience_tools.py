@@ -14,7 +14,7 @@ manager 获取：只读 sys.modules["assistant_hub_manager"]，
 import sys
 from typing import Any, Dict
 
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 
 _MANAGER_MODULE_NAME = "assistant_hub_manager"
 
