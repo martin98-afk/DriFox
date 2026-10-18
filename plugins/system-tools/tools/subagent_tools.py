@@ -15,7 +15,7 @@ import orjson
 from loguru import logger
 
 from app.plugins.sdk import ToolResult
-from app.tools.registry import make_summarize_from_preview
+from app.plugins.sdk import make_summarize_from_preview
 
 GROUP_SUBAGENT = "子智能体"
 GROUP_TEAM = "团队协作"

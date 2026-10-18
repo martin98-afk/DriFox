@@ -19,7 +19,8 @@ import json
 
 from app.plugins.sdk import ToolResult
 from app.plugins.sdk import tool_registry_api
-from app.tools.registry import ToolRegistry
+# 模块级符号：测试注入点（tool_registry_api 会优先用它）
+from app.tools.registry import ToolRegistry  # noqa: E402
 
 GROUP_TOOL_SEARCH = "工具搜索"
 
