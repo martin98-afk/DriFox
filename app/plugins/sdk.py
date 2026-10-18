@@ -87,6 +87,9 @@ _SYMBOLS: dict[str, tuple[str, str]] = {
     "RegistryProxy": ("app.plugins.sdk_tool_registry", "RegistryProxy"),
     # ── 纯函数：工具摘要工厂（无依赖） ──
     "make_summarize_from_preview": ("app.tools.registry", "make_summarize_from_preview"),
+    # ── 工具危险分级（纯函数 + 常量，无宿主依赖） ──
+    "classify_tool_danger": ("app.tools.tool_classifier", "classify_tool_danger"),
+    "DANGER_SAFE": ("app.tools.tool_classifier", "DANGER_SAFE"),
 }
 
 __all__ = sorted(_SYMBOLS)

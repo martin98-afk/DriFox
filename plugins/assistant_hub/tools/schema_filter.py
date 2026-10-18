@@ -95,7 +95,7 @@ def filter_tools_schema(schemas: List[Dict[str, Any]], ctx: Dict[str, Any]) -> L
     if mode == "none":
         return []
     # readonly：仅安全类工具（registry danger 驱动；mcp__ 工具按启发式兜底）
-    from app.tools.tool_classifier import DANGER_SAFE, classify_tool_danger
+    from app.plugins.sdk import DANGER_SAFE, classify_tool_danger
 
     kept = []
     for s in schemas:
