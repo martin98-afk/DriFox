@@ -14223,24 +14223,40 @@ class OpenAIChatToolWindow(ToolWindow):
         # ⚠️ 只反批次、不反批内卡片（批内 user/assistant 保持原顺序）。
         # ⚠️ 只在「视口不在加载窗口顶部」时反序：向上翻历史（insert_at_top /
         # 用户已滚离底部）时用户正在看的是**旧**批次，方向必须保持原样。
+        #
+        # 🐛 反序必须**重排队列**，不能只「反序收集 + 去重追加」。
+        # 建卡路径 `_add_chat_widget` 每建一张卡就按**正序**把它 append 进
+        # `_pending_lazy_cards`（并顺手置 `_lazy_batch_timer_active`、挂 200ms
+        # 首拍）。等走到这里，本批所有卡早已在队列里 —— 原先「反序收集后按
+        # id 去重追加」的写法一张都加不进去（id 全命中 existing_ids），反序
+        # 整个成死代码：队列保持正序 FIFO，用户盯着的最底部几张排在 20+ 张
+        # 队尾，观感即「卡片从上面一张张慢慢浮现」。
+        # 现在把「本批新建的卡」按 batch_indices 顺序摘到队首，顺序才真正生效；
+        # 不在本批的卡（前几拍遗留）保持原相对顺序排在后面。
         batch_indices = list(range(batch_offset, min(batch_offset + len(batches), len(self._batch_cards))))
         if not insert_at_top and not self._user_intentionally_away_from_bottom:
             batch_indices.reverse()
-        pending_lazy_cards = []
+
+        fresh = []
+        fresh_ids = set()
         for batch_idx in batch_indices:
             cards = self._batch_cards[batch_idx]
             if cards:
                 for card in cards:
-                    if isinstance(card, MessageCard) and not getattr(card, "_lazy_rendered", False):
-                        pending_lazy_cards.append(card)
+                    if not isinstance(card, MessageCard) or getattr(card, "_lazy_rendered", False):
+                        continue
+                    cid = id(card)
+                    if cid in fresh_ids:
+                        continue
+                    fresh.append(card)
+                    fresh_ids.add(cid)
+
+        pending_lazy_cards = fresh
+        if fresh:
+            others = [c for c in self._pending_lazy_cards if id(c) not in fresh_ids]
+            self._pending_lazy_cards = fresh + others
 
         # 批量触发懒渲染，使用延迟加载减少卡顿
-        # 同一卡片可能已在队列中（如滚动回来触发的重新加载），需去重
-        existing_ids = {id(c) for c in self._pending_lazy_cards}
-        for card in pending_lazy_cards:
-            if id(card) not in existing_ids:
-                self._pending_lazy_cards.append(card)
-                existing_ids.add(id(card))
         if pending_lazy_cards and not self._lazy_batch_timer_active:
             self._lazy_batch_timer_active = True
             QTimer.singleShot(0, self._process_next_lazy_batch)

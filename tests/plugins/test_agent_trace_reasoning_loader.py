@@ -27,10 +27,24 @@ def test_reasoning_loader_returns_content(monkeypatch):
         storage_calls.append((sid, list(idxs)))
         return {idx: {"reasoning_content": f"think-{idx}"} for idx in idxs}
 
-    import app.core.conversation.backend as backend_mod
+    # 注入能力池：插件经 session.read 的 extras 面读（不再直连 get_session_storage）
+    class _FakePool:
+        def __contains__(self, cap):
+            return cap == "session.read"
 
-    monkeypatch.setattr(backend_mod, "get_session_storage", lambda: SimpleNamespace(load_msg_extras=load_msg_extras))
+        def __getitem__(self, cap):
+            def read():
+                return {
+                    "session_id": "sid-1",
+                    "messages": [],
+                    "system_prompt": "",
+                    "extras": lambda idxs: load_msg_extras("sid-1", idxs),
+                }
+
+            return read
+
     c = _bare_collector()
+    c._caps = _FakePool()
     loader = c._make_reasoning_loader("sid-1", 5)
     assert loader() == "think-5"
     assert storage_calls == [("sid-1", [5])]

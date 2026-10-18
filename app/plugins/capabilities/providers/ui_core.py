@@ -367,10 +367,26 @@ def _session_read(host: Any):
         session = backend.get_current_session() if backend is not None else None
         if session is None:
             return {"session_id": "", "messages": [], "system_prompt": ""}
+        session_id = str(getattr(session, "session_id", "") or "")
+
+        def load_extras(idxs: list) -> dict:
+            """按消息序号懒读 extras（reasoning 等大字段，按需加载）。"""
+            try:
+                from app.core.conversation.backend import get_session_storage
+
+                storage = get_session_storage()
+                fn = getattr(storage, "load_msg_extras", None)
+                if not callable(fn):
+                    return {}
+                return dict(fn(session_id, list(idxs)) or {})
+            except Exception:
+                return {}
+
         return {
-            "session_id": str(getattr(session, "session_id", "") or ""),
+            "session_id": session_id,
             "messages": list(getattr(session, "messages", None) or []),
             "system_prompt": str(getattr(session, "system_prompt", "") or ""),
+            "extras": load_extras,
         }
 
     return read
@@ -405,7 +421,7 @@ def _session_invalidate(host: Any):
     和 ChatEngine._instances 摸私有类属性，这里封装成一次语义动作。
     """
 
-    def invalidate(system_prompt_only: bool = True) -> int:
+    def invalidate(session_id: str = "") -> int:
         n = 0
         try:
             from app.core.conversation.backend import ChatBackend
@@ -424,6 +440,8 @@ def _session_invalidate(host: Any):
                         items = []
                 for session in items:
                     try:
+                        if session_id and str(getattr(session, "session_id", "") or "") != session_id:
+                            continue
                         session.system_prompt = ""
                         if hasattr(session, "_system_prompt_agent"):
                             session._system_prompt_agent = ""

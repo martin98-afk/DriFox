@@ -782,41 +782,23 @@ class AssistantManager:
     def _invalidate_session_prompt(session_id: str) -> None:
         """只清空指定 session 的 system_prompt 缓存（会话级临时助手切换用）。
 
-        下次 build_messages 强制重建该会话的 system prompt，重新触发
-        BuildSystemPrompt hooks → 按会话 override 注入新助手身份。
-        其他会话缓存不动，避免全局闪烁。
+        经能力池 session.invalidate(session_id)：一次语义动作，插件不再遍历
+        ChatBackend._active_instances 摸私有类属性。
         """
         if not session_id:
             return
         try:
-            from app.core.conversation.backend import ChatBackend
+            from app.plugins.capabilities.bootstrap import ensure_registered
+            from app.plugins.capabilities.registry import CapabilityRegistry
 
-            for backend in list(ChatBackend._active_instances):
-                sm = getattr(backend, "session_manager", None)
-                if sm is None:
-                    continue
-                # SessionManager.sessions 是 List[ChatSession]（历史版曾为 dict，
-                # 两种形态都兼容），按 session_id 匹配
-                sessions = getattr(sm, "sessions", None)
-                if isinstance(sessions, dict):
-                    candidates = [sessions.get(session_id)]
-                elif isinstance(sessions, (list, tuple)):
-                    candidates = [s for s in sessions if getattr(s, "session_id", "") == session_id]
-                else:
-                    continue
-                for session in candidates:
-                    if session is None:
-                        continue
-                    try:
-                        session.system_prompt = ""
-                        if hasattr(session, "_system_prompt_agent"):
-                            session._system_prompt_agent = ""
-                    except Exception:
-                        pass
+            ensure_registered("ui")
+            pool = CapabilityRegistry.get_instance().build_pool(
+                surface="ui", host=None, plugin="assistant_hub", declared={"session.invalidate"}
+            )
+            if "session.invalidate" in pool:
+                pool["session.invalidate"](session_id)
         except Exception as e:
-            from loguru import logger
-
-            logger.debug(f"[assistant_hub] 清空会话 {session_id} prompt 缓存失败: {e}")
+            logger.warning(f"[assistant_hub] 失效会话 system_prompt 失败: {e}")
 
     @staticmethod
     def _invalidate_identity_cache() -> None:

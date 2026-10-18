@@ -25,11 +25,12 @@
     },
     "api_version": 2,
     "capabilities": [
+        "engine.session",
+        "mcp.call",
         "model.config",
         "session.invalidate",
-        "tool.read",
+        "session.read",
         "tool.inject",
-        "mcp.call",
-        "engine.session"
+        "tool.read"
     ]
 }

@@ -14,9 +14,10 @@
     "type": "user",
     "api_version": 2,
     "capabilities": [
+        "model.schema",
+        "session.read",
         "stream.subscribe",
-        "window.list",
-        "model.schema"
+        "window.list"
     ],
     "components": {
         "ui": true
