@@ -35,6 +35,10 @@ _DENY_TEXT_PATTERNS = (
     "deny",
 )
 
+# allow 侧回退词表：必须同时通过否定词防护（否定前缀 + allow 词 = 误放行风险）
+_ALLOW_TEXT_PATTERNS = ("可以", "允许", "放行", "同意", "没问题", "approve", "allow")
+_NEGATION_PATTERNS = ("不能", "不可", "不要", "无法", "禁止", "拒绝", "不行", "不允许", "不宜", "不建议")
+
 _PROMPT_TEMPLATE = (
     "你是桌面 AI 助手的安全审核员。主 AI 请求执行下面的工具调用，请判定是否放行。\n\n"
     "工作目录：{workdir}\n"
@@ -74,11 +78,13 @@ def parse_review(raw: str) -> Optional[dict]:
             return None
         reason = data.get("reason") or ""
         return {"decision": decision, "reason": str(reason)[:200]}
-    # JSON 解析失败 → 短输出文本语义回退（仅 deny 侧）
+    # JSON 解析失败 → 短输出文本语义回退（deny 优先；allow 需过否定词防护）
     if len(text) <= 50:
         lowered = text.lower()
         if any(p in lowered for p in _DENY_TEXT_PATTERNS):
             return {"decision": "deny", "reason": text[:50]}
+        if any(p in lowered for p in _ALLOW_TEXT_PATTERNS) and not any(n in text for n in _NEGATION_PATTERNS):
+            return {"decision": "allow", "reason": text[:50]}
     return None
 
 
