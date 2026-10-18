@@ -22364,7 +22364,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._fallback_manual_after_review_fail(tool_call_id, tool_name, arguments, workdir, "未配置可用模型")
             return
 
-        from app.core.workers.approval_review import ApprovalReviewTask
+        from app.core.workers.approval_review import APPROVAL_REVIEW_TIMEOUT_SEC, ApprovalReviewTask
 
         def _bridge(result, error=None):
             if getattr(self, "_is_destroyed", False):
@@ -22382,6 +22382,7 @@ class OpenAIChatToolWindow(ToolWindow):
             llm_config=llm_config,
             callback=_bridge,
             impact=impact,
+            timeout=APPROVAL_REVIEW_TIMEOUT_SEC,
         )
         self._gen_thread_pool.start(task)
         logger.info(f"[Permission] AI 审核已发起 id={tool_call_id} tool={tool_name}")
@@ -22395,8 +22396,8 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             InfoBar.info(
                 "AI 审核中",
-                f"工具 {tool_name} 正由审核模型判定，稍后自动放行或拒绝。",
-                duration=3000,
+                f"工具 {tool_name} 正由审核模型判定，最长约 1 分钟；超时或失败将自动回落人工审批。",
+                duration=8000,
                 parent=parent,
                 position=InfoBarPosition.BOTTOM,
             )

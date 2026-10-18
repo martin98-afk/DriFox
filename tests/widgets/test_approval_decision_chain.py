@@ -39,3 +39,15 @@ def test_auto_decision_guards_pending_id():
     assert "def _on_approval_review_ready" in src
     assert "def _fallback_manual_after_review_fail" in src
     assert "_on_approval_review_ready" in src
+
+
+def test_review_call_bounded():
+    """审核调用必须有界：显式 SDK 超时 + 收紧重试（审批不能等 15×600s）"""
+    src = _main_widget_source()
+    assert "timeout=APPROVAL_REVIEW_TIMEOUT_SEC" in src
+    task_src = (Path(__file__).resolve().parent.parent.parent / "app" / "core" / "workers" / "approval_review.py").read_text(
+        encoding="utf-8"
+    )
+    assert "APPROVAL_REVIEW_TIMEOUT_SEC" in task_src
+    assert "timeout=self.timeout" in task_src
+    assert "max_retries=1" in task_src

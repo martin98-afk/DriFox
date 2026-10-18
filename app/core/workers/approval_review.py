@@ -20,6 +20,10 @@ from app.core.workers.error_handler import create_api_call_with_retry
 # decision 白名单：白名单外一律视为解析失败（宁回落人工，不猜）
 _REVIEW_DECISIONS = ("allow", "deny")
 
+# 审核单轮调用超时（秒）：审批链不能复用主对话的长超时——端点挂起时
+# openai SDK 默认 600s，叠加重试会让 worker 审批等待循环长时间无响应
+APPROVAL_REVIEW_TIMEOUT_SEC = 60
+
 # 文本语义回退（仅 deny 侧）：模型不守 JSON 格式输出短句时兜底判定。
 # allow 不做文本回退：自然语言否定前缀（「不能放行」「不可同意」）会让
 # allow 误判变成误放行，风险不可接受；deny 误判 = 多弹一次人工审批，无害。
@@ -120,6 +124,7 @@ class ApprovalReviewTask(QRunnable):
         callback: Callable,
         impact: Optional[dict] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        timeout: int = APPROVAL_REVIEW_TIMEOUT_SEC,
     ):
         super().__init__()
         self.tool_name = tool_name
@@ -129,6 +134,7 @@ class ApprovalReviewTask(QRunnable):
         self.llm_config = llm_config
         self.callback = callback
         self.cancel_check = cancel_check or (lambda: False)
+        self.timeout = timeout
         self.setAutoDelete(True)
 
     @pyqtSlot()
@@ -142,9 +148,11 @@ class ApprovalReviewTask(QRunnable):
 
             from app.utils.http_client import build_openai_client, chat_completion_text
 
+            # 显式短超时：openai SDK 默认 600s，端点挂起会把审批链拖死
             client = build_openai_client(
                 api_key=self.llm_config.get("API_KEY", ""),
                 base_url=self.llm_config.get("API_URL"),
+                timeout=self.timeout,
             )
 
             def create_task():
@@ -159,7 +167,15 @@ class ApprovalReviewTask(QRunnable):
                     max_tokens=2000,
                 )
 
-            raw = create_api_call_with_retry(client, create_task, cancel_check=self.cancel_check)
+            raw = create_api_call_with_retry(
+                client,
+                create_task,
+                # 审批场景收紧：单次短输出调用，失败快速回落人工，
+                # 不能继承主对话默认的 15 次 × 5s 重试节奏
+                max_retries=1,
+                retry_delay=2.0,
+                cancel_check=self.cancel_check,
+            )
             if not raw or not raw.strip():
                 # 空响应单列：与「输出了但格式不对」区分，便于定位
                 # （典型：reasoning 模型思考占满 max_tokens / 端点异常）
