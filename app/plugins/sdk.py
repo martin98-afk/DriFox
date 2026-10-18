@@ -85,6 +85,8 @@ _SYMBOLS: dict[str, tuple[str, str]] = {
     # ── 工具注册表访问门面（经能力池，不直连 app.tools.registry） ──
     "tool_registry_api": ("app.plugins.sdk_tool_registry", "tool_registry_api"),
     "RegistryProxy": ("app.plugins.sdk_tool_registry", "RegistryProxy"),
+    # ── 纯函数：工具摘要工厂（无依赖） ──
+    "make_summarize_from_preview": ("app.tools.registry", "make_summarize_from_preview"),
 }
 
 __all__ = sorted(_SYMBOLS)

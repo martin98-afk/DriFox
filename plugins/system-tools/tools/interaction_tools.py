@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from app.plugins.sdk import ToolResult
-from app.tools.registry import make_summarize_from_preview
+from app.plugins.sdk import make_summarize_from_preview
 
 GROUP_INTERACTION = "交互与技能"
 GROUP_SYSTEM = "系统与上传"

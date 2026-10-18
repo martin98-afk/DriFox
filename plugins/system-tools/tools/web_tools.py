@@ -14,7 +14,7 @@ import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
-from app.tools.registry import make_summarize_from_preview
+from app.plugins.sdk import make_summarize_from_preview
 
 from app.plugins.sdk import ToolResult
 
