@@ -25275,20 +25275,31 @@ class OpenAIChatToolWindow(ToolWindow):
         能力池是插件能力面的唯一真相（见 app/plugins/capabilities/）。窗口级 ctx
         服务多个插件、不知道调用方身份，故这里给全量；按插件声明裁剪发生在
         UIPluginRegistry._build_card_context / callback_context（那里有 plugin_name）。
+
+        每个窗口只建一次并缓存：_build_ui_context 里 services 走两次 + capabilities
+        一次，实测每次 ~5μs 且结果完全相同。provider 集合运行中不变（启动时注册），
+        因此无需失效逻辑；窗口销毁时缓存随实例回收。
         """
+        cached = getattr(self, "_cap_pool_cache", None)
+        if cached is not None:
+            return cached
         from app.plugins.capabilities.bootstrap import ensure_registered
         from app.plugins.capabilities.registry import CapabilityRegistry
 
         try:
             ensure_registered("ui")
-            return CapabilityRegistry.get_instance().build_pool(surface="ui", host=self, plugin="")
+            pool = CapabilityRegistry.get_instance().build_pool(
+                surface="ui", host=self, plugin=""
+            )
         except Exception as e:
             logger.warning(f"[MainWidget] 能力池构建失败: {e}")
             from app.plugins.capabilities.pool import CapabilityPool
 
-            return CapabilityPool(
+            pool = CapabilityPool(
                 plugin="", surface="ui", host=self, declared=set(), providers={}, ungated=set()
             )
+        self._cap_pool_cache = pool
+        return pool
 
     def _build_ui_services(self) -> Dict[str, Any]:
         """UI 插件服务门面 —— 由能力池按 LEGACY_MAP 投影渲染。
