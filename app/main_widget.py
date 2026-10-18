@@ -22387,6 +22387,46 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         if getattr(self, "_is_destroyed", False):
             return
+        from app.tools.sandbox import read_approval_policy
+        from app.tools.sandbox import read_approval_policy
+
+        policy = read_approval_policy()
+        workdir = self._current_permission_workdir()
+        if policy["mode"] == "ai":
+            # 静默 AI 审批：不弹卡。仍须登记待决 id——回调防回放守卫、
+            # 取消/流结束清理路径都依赖它，缺失会让审核结果被静默丢弃（卡死）
+            self._pending_permission_id = tool_call_id
+            self._pending_permission_tool = {
+                "tool_name": tool_name,
+                "arguments": dict(arguments or {}),
+                "workdir": workdir,
+            }
+            self._start_approval_review(tool_call_id, tool_name, arguments, policy, workdir)
+            return
+        self._show_permission_card(tool_call_id, tool_name, arguments, workdir)
+        # 人工审批超时：timeout_sec>0 时启动（0=不超时）
+        if policy["timeout_sec"] > 0:
+            self._permission_timeout_timer.start(policy["timeout_sec"] * 1000)
+
+    def _current_permission_workdir(self) -> str:
+        """审批链 workdir 基准：与 worker 判定同源优先（多窗口防串味）"""
+        try:
+            wd = self.backend.tool_executor.get_workdir() if self.backend and self.backend.tool_executor else None
+            if wd:
+                return str(wd)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] workdir 读取失败: {e}")
+        try:
+            from app.tools.sandbox import _current_workdir
+
+            return str(_current_workdir())
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] workdir 回退读取失败: {e}")
+            return ""
+
+    def _show_permission_card(self, tool_call_id: str, tool_name: str, arguments: dict, workdir: str, extra_note: str = ""):
+        """弹出人工审批卡（原 _on_permission_approval_requested 主体，UI 分流后复用）"""
+        """弹出人工审批卡（原 _on_permission_approval_requested 主体，UI 分流后复用）"""
         self._ensure_permission_approval_widget()
         # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态。
         # ⚠ 三合一契约（勿删勿改语义）：① TabPanel 边框 question 动画
@@ -22531,6 +22571,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         if self._pending_permission_id != tool_call_id:
+            logger.info(
+                f"[Permission] AI 审核结果丢弃（待决 id 已变: 现存={self._pending_permission_id}, 到达={tool_call_id}）"
+            )
             return  # 人工已决策 / 已取消 / 流已结束 → 丢弃
         if error or not isinstance(result, dict) or result.get("decision") not in ("allow", "deny"):
             logger.warning(f"[Permission] AI 审核失败 id={tool_call_id}: {error}")
@@ -22545,6 +22588,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         decision = result["decision"]
         reason = str(result.get("reason") or "")
+        logger.info(f"[Permission] AI 审核完成 id={tool_call_id} decision={decision} reason={reason}")
         self._pending_permission_id = None
         self._pending_permission_tool = None
         self._permission_timeout_timer.stop()
