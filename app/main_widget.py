@@ -22261,7 +22261,14 @@ class OpenAIChatToolWindow(ToolWindow):
         policy = read_approval_policy()
         workdir = self._current_permission_workdir()
         if policy["mode"] == "ai":
-            # AI审批：静默决策，不弹卡（失败回落人工）
+            # 静默 AI 审批：不弹卡。仍须登记待决 id——回调防回放守卫、
+            # 取消/流结束清理路径都依赖它，缺失会让审核结果被静默丢弃（卡死）
+            self._pending_permission_id = tool_call_id
+            self._pending_permission_tool = {
+                "tool_name": tool_name,
+                "arguments": dict(arguments or {}),
+                "workdir": workdir,
+            }
             self._start_approval_review(tool_call_id, tool_name, arguments, policy, workdir)
             return
         self._show_permission_card(tool_call_id, tool_name, arguments, workdir)
@@ -22409,6 +22416,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         if self._pending_permission_id != tool_call_id:
+            logger.info(
+                f"[Permission] AI 审核结果丢弃（待决 id 已变: 现存={self._pending_permission_id}, 到达={tool_call_id}）"
+            )
             return  # 人工已决策 / 已取消 / 流已结束 → 丢弃
         if error or not isinstance(result, dict) or result.get("decision") not in ("allow", "deny"):
             logger.warning(f"[Permission] AI 审核失败 id={tool_call_id}: {error}")
@@ -22423,6 +22433,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         decision = result["decision"]
         reason = str(result.get("reason") or "")
+        logger.info(f"[Permission] AI 审核完成 id={tool_call_id} decision={decision} reason={reason}")
         self._pending_permission_id = None
         self._pending_permission_tool = None
         self._permission_timeout_timer.stop()

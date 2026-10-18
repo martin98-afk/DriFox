@@ -6,6 +6,7 @@ _security_card_source 先例做源码挂点断言，防关键链路被静默移�
 """
 
 from pathlib import Path
+import re
 
 
 def _main_widget_source() -> str:
@@ -51,3 +52,14 @@ def test_review_call_bounded():
     assert "APPROVAL_REVIEW_TIMEOUT_SEC" in task_src
     assert "timeout=self.timeout" in task_src
     assert "max_retries=1" in task_src
+
+
+def test_ai_mode_registers_pending_id_before_review():
+    """mode=ai 分支必须在发起审核前登记待决 id——否则回调被防回放守卫静默丢弃（卡死根因）"""
+    src = _main_widget_source()
+    pattern = r'if policy\["mode"\] == "ai":(.*?)\n(\s+return|\s+self\._show_permission_card)'
+    m = re.search(pattern, src, re.DOTALL)
+    assert m, "mode=ai 分流分支未找到"
+    branch_body = m.group(1)
+    assert "self._pending_permission_id = tool_call_id" in branch_body
+    assert "self._pending_permission_tool = " in branch_body
