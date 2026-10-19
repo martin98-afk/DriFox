@@ -34,46 +34,13 @@ _LIST_GROUP_THRESHOLD = 100
 
 
 def _tool_api(kind: str = "read"):
-    """工具注册表只读面 / 注入面。
+    """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。
 
-    优先用本模块的 ``ToolRegistry`` 符号（若存在：插件可注入替身，测试常用），
-    否则经能力池（tool.read / tool.inject）。两者都不可用时返回 None。
+    保留模块级符号：测试经 monkeypatch 注入替身（注入点见 sdk 的
+    tool_registry_api，它会优先用模块内的 ToolRegistry / 本函数）。
     """
-    cap = "tool.inject" if kind == "inject" else "tool.read"
-    reg = globals().get("ToolRegistry")
-    if reg is not None:
-        try:
-            inst = reg.get_instance()
-            return _registry_api(inst, kind)
-        except Exception:
-            pass
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
-
-        ensure_registered("tool")
-        plugin = ""
-        try:
-            from pathlib import Path
-
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="tool", host=None, plugin=plugin, declared={cap, "state.kv", "plugin.log"}
-        )
-        if cap not in pool:
-            return None
-        return pool[cap]()
-    except Exception:
-        return None
-
-
-def _tool_api(kind: str = "read"):
-    """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
     return tool_registry_api(kind, module_globals=globals())
+
 
 def _as_str_list(v) -> list:
     """LLM 可能传单个字符串或 JSON 字符串，统一成 list[str]。"""

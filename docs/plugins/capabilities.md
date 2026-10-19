@@ -331,7 +331,37 @@ def register(registry) -> None:
 
 ---
 
-## 7. 检查工具
+## 7. 没有 ctx 的时候：caps_for
+
+后台线程、工具 impl、hook 里拿不到卡片 context，但仍要取能力。统一用 sdk 的
+`caps_for`，**不要**再自己 `ensure_registered` + `build_pool(host=None)`：
+
+```python
+from app.plugins.sdk import caps_for
+
+writer = caps_for("input.write")          # 未授权 / 未注册 → None
+if writer is not None:
+    writer("/persona-creator")
+
+# 要多个能力或想判 in，用 pool_for
+from app.plugins.sdk import pool_for
+
+pool = pool_for()
+if pool is not None and "session.read" in pool:
+    snap = pool["session.read"]()
+```
+
+**host 由宿主解析**（`app/plugins/capabilities/resolve.py`）：插件绑定的窗口
+（卡片 ctx 建立时登记）→ 活跃窗口。所以后台线程里 `window.current` /
+`session.read` / `input.read` 这类吃 host 的能力能拿到真实窗口，不再恒为 None。
+
+授权口径与 `ctx["capabilities"]` 完全相同（同一条 `resolve_declared`）：走
+`caps_for` 拿不到声明外的能力。参数可显式传 `plugin=` / `surface=`，缺省从
+调用方文件路径推断（`plugins/<name>/tools/` → tool surface）。
+
+排查用：`declared_for()` 返回该插件已解析的能力清单。
+
+## 8. 检查工具
 
 ```bash
 # 报告插件越界 import（默认只告警）

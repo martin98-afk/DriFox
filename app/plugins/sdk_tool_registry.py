@@ -78,22 +78,10 @@ def tool_registry_api(
     if registry is not None:
         return RegistryProxy(registry, kind)
 
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    from app.plugins.capabilities.resolve import caps_for
 
-        ensure_registered("tool")
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="tool",
-            host=None,
-            plugin=_caller_plugin(module_globals),
-            declared={cap, "state.kv", "plugin.log"},
-        )
-        if cap not in pool:
-            return None
-        return pool[cap]()
-    except Exception:
-        return None
+    api = caps_for(cap, plugin=_caller_plugin(module_globals), surface="tool")
+    return api() if api is not None else None
 
 
 def _caller_plugin(module_globals: Optional[dict]) -> str:

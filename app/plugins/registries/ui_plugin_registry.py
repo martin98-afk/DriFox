@@ -92,6 +92,10 @@ def callback_context(plugin_name: str, win, extra: dict) -> dict:
         return ctx
     ctx["main_widget"] = win
     ctx["window_id"] = getattr(win, "_window_id", None)
+    # 同 _build_card_context：登记插件 → 窗口绑定，供无 ctx 的后台调用解析 host
+    from app.plugins.capabilities.resolve import note_host
+
+    note_host(plugin_name, win)
     pool = _capabilities_for(plugin_name, win)
     if pool is not None:
         ctx["capabilities"] = pool
@@ -4052,6 +4056,11 @@ class UIPluginRegistry:
         # 这里是所有浮动卡/工作台页/设置卡 ctx 的唯一出口，一处覆盖全部路径。
         _host = ctx.get("main_widget")
         if _host is not None:
+            # 登记插件 → 窗口绑定：后台线程（无 ctx）经 caps_for 取能力时用它解析
+            # host，否则 window.current / session.read 这类能力在后台必然拿到空。
+            from app.plugins.capabilities.resolve import note_host
+
+            note_host(card_info.plugin_name, _host)
             _pool = _capabilities_for(card_info.plugin_name, _host)
             if _pool is not None:
                 ctx["capabilities"] = _pool
@@ -4157,6 +4166,12 @@ class UIPluginRegistry:
         self._context_providers.pop(window_id, None)
         self._window_main_widgets.pop(window_id, None)
         self._card_widget_instances.pop(window_id, None)
+        # 插件 → 窗口绑定里指向该窗口的条目一并清掉（后台线程会拿它解析 host）
+        from app.plugins.capabilities.resolve import _plugin_hosts, forget_host
+
+        for _plugin, _host in list(_plugin_hosts.items()):
+            if _host is self._main_widget or getattr(_host, "_window_id", None) == window_id:
+                forget_host(_plugin, _host)
         # per-tab 可见集合随窗口销毁清理；若被关闭的是当前投影标签，重置作用域
         self._tab_card_visibility.pop(window_id, None)
         if self._active_tab_scope == window_id:

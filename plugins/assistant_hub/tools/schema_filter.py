@@ -38,28 +38,10 @@ def _tool_api(kind: str = "read"):
             return _registry_api(inst, kind)
         except Exception:
             pass
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    from app.plugins.sdk import caps_for
 
-        ensure_registered("tool")
-        plugin = ""
-        try:
-            from pathlib import Path
-
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="tool", host=None, plugin=plugin, declared={cap, "state.kv", "plugin.log"}
-        )
-        if cap not in pool:
-            return None
-        return pool[cap]()
-    except Exception:
-        return None
+    api = caps_for(cap)
+    return api() if api is not None else None
 
 
 def _tool_api(kind: str = "read"):

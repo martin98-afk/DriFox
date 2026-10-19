@@ -90,6 +90,10 @@ _SYMBOLS: dict[str, tuple[str, str]] = {
     # ── 工具危险分级（纯函数 + 常量，无宿主依赖） ──
     "classify_tool_danger": ("app.tools.tool_classifier", "classify_tool_danger"),
     "DANGER_SAFE": ("app.tools.tool_classifier", "DANGER_SAFE"),
+    # ── 能力池解析入口（无 ctx 的后台线程 / 工具里取能力） ──
+    "caps_for": ("app.plugins.capabilities.resolve", "caps_for"),
+    "pool_for": ("app.plugins.capabilities.resolve", "pool_for"),
+    "declared_for": ("app.plugins.capabilities.resolve", "declared_for"),
 }
 
 __all__ = sorted(_SYMBOLS)

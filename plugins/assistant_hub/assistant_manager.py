@@ -42,27 +42,10 @@ from loguru import logger
 
 # 复用项目里 yaml 加载的兼容写法：safe_load + 失败兜底 {}
 def _caps(cap_id):
-    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。"""
+    from app.plugins.sdk import caps_for
 
-        ensure_registered("ui")
-        plugin = ""
-        try:
-            from pathlib import Path
-
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
-        )
-        return pool[cap_id] if cap_id in pool else None
-    except Exception:
-        return None
+    return caps_for(cap_id)
 
 
 def _safe_yaml_load(text: str) -> Dict[str, Any]:
@@ -766,16 +749,12 @@ class AssistantManager:
         经能力池 session.invalidate：一次语义动作覆盖 ChatBackend 活跃实例与
         ChatEngine 兜底两条路径（插件不再摸私有类属性）。
         """
+        invalidate = _caps("session.invalidate")
+        if invalidate is None:
+            logger.warning("[assistant_hub] 无 session.invalidate 能力，跳过缓存失效")
+            return
         try:
-            from app.plugins.capabilities.bootstrap import ensure_registered
-            from app.plugins.capabilities.registry import CapabilityRegistry
-
-            ensure_registered("ui")
-            pool = CapabilityRegistry.get_instance().build_pool(
-                surface="ui", host=None, plugin="assistant_hub", declared={"session.invalidate"}
-            )
-            if "session.invalidate" in pool:
-                pool["session.invalidate"]()
+            invalidate()
         except Exception as e:
             logger.warning(f"[assistant_hub] 失效 system_prompt 缓存失败: {e}")
 
@@ -787,16 +766,12 @@ class AssistantManager:
         """
         if not session_id:
             return
+        invalidate = _caps("session.invalidate")
+        if invalidate is None:
+            logger.warning("[assistant_hub] 无 session.invalidate 能力，跳过缓存失效")
+            return
         try:
-            from app.plugins.capabilities.bootstrap import ensure_registered
-            from app.plugins.capabilities.registry import CapabilityRegistry
-
-            ensure_registered("ui")
-            pool = CapabilityRegistry.get_instance().build_pool(
-                surface="ui", host=None, plugin="assistant_hub", declared={"session.invalidate"}
-            )
-            if "session.invalidate" in pool:
-                pool["session.invalidate"](session_id)
+            invalidate(session_id)
         except Exception as e:
             logger.warning(f"[assistant_hub] 失效会话 system_prompt 失败: {e}")
 
@@ -1084,17 +1059,11 @@ class AssistantManager:
         if not isinstance(valid, dict):
             # 无窗口场景：走 model.config 能力（从主程序内存态取，
             # 不读磁盘 app.config —— 密钥模式下那里是密文/空串）
+            get_config = _caps("model.config")
+            if get_config is None:
+                return None
             try:
-                from app.plugins.capabilities.bootstrap import ensure_registered
-                from app.plugins.capabilities.registry import CapabilityRegistry
-
-                ensure_registered("ui")
-                pool = CapabilityRegistry.get_instance().build_pool(
-                    surface="ui", host=mw, plugin="assistant_hub", declared={"model.config"}
-                )
-                if "model.config" not in pool:
-                    return None
-                cfg = pool["model.config"](config_id, model_name)
+                cfg = get_config(config_id, model_name)
             except Exception:
                 return None
             if not isinstance(cfg, dict) or not cfg:
