@@ -25,9 +25,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from app.core.context.config import cfg_int, offload_skip_tools
 from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_INGEST, TierOutcome
-from app.plugins.sdk import tool_registry_api
+from app.plugins.sdk import cfg_int, offload_skip_tools, tool_registry_api
 
 _CHARS_PER_TOKEN = 4  # 节省字符 → token 的粗算口径（仅用于 stats 统计）
 

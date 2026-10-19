@@ -55,10 +55,11 @@ from loguru import logger
 
 from app.plugins.sdk import Animations, Colors, font_size_css, get_unified_scrollbar_style
 from app.plugins.sdk import alpha_tint as _alpha_tint, get_project_color
-from app.utils.theme_style import bind_theme_qss, replay_theme_qss
+from app.plugins.sdk import bind_theme_qss
+from app.plugins.sdk import replay_theme_qss
 from app.plugins.sdk import get_font_family_css, get_icon
 from app.plugins.sdk import EmptyHint as _EmptyHint
-from app.widgets.custom_title_bar import CustomTabButton
+from app.plugins.sdk import CustomTabButton
 from app.plugins.sdk import SquareAvatar as _SquareAvatar
 
 from .project_selector_card import ProjectItem, ProjectSelectorCardContent
@@ -1154,7 +1155,7 @@ class HistoryPage(QWidget):
         import json as _json
         import os as _os
 
-        from app.utils.session_preview import get_message_preview
+        from app.plugins.sdk import get_message_preview
 
         hm = _active_history_manager()
         if hm is None:

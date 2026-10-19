@@ -82,16 +82,9 @@ def split_pinned_entries(entries: List[tuple], exclude_index: Optional[int] = No
     return pinned, rest
 
 
-from app.utils.design_tokens import (
-    Colors,
-    apply_font_size_to_widget,
-    font_size_css,
-    get_ui_font_size,
-    scale_font_size,
-)
-from app.plugins.sdk import bind_theme_qss
-from app.plugins.sdk import get_font_family_css, get_icon
-from app.utils.session_preview import format_relative_time, get_message_preview  # noqa: F401  (get_message_preview 转引)
+from app.plugins.sdk import apply_font_size_to_widget, bind_theme_qss, font_size_css
+from app.plugins.sdk import Colors, format_relative_time, get_font_family_css, get_icon, get_message_preview
+from app.plugins.sdk import get_ui_font_size, scale_font_size
 
 
 class _UrlImportThread(QThread):

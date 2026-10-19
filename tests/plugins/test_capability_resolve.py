@@ -191,6 +191,38 @@ def test_forget_host_clears_binding(reg, monkeypatch):
     assert resolve._plugin_hosts.get("demo") is None
 
 
+def test_caller_plugin_inferred_from_plugins_dir(reg, monkeypatch, tmp_path):
+    """caps_for 不传 plugin 时按调用方文件路径推断（plugins/<name>/...）。
+
+    marketplace 的 config.read 调用点就依赖这个：它在 ui/ 子目录下，同样能
+    推断出 plugin-marketplace。
+    """
+    import importlib.util
+
+    from app.plugins.capabilities import resolve
+
+    _fake_pm(monkeypatch, ["config.read"])
+    nested = tmp_path / "plugins" / "demo-market" / "ui"
+    nested.mkdir(parents=True)
+    probe = nested / "_probe.py"
+    probe.write_text(
+        "def probe():\n"
+        "    from app.plugins.sdk import caps_for\n"
+        "    return caps_for('config.read')\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location("demo_market_probe", probe)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    read = mod.probe()
+    assert read is not None, "未推断出插件名导致声明解析失败"
+    # 非敏感标量可读
+    assert read("marketplace_allowed_git_hosts", default=[]) == []
+    # 密钥类字段一律拒绝
+    assert read("api_key", default="X") == "X"
+    assert resolve.declared_for(plugin="demo-market") is not None
+
+
 def test_declared_for_reports_manifest(reg, monkeypatch):
     from app.plugins.capabilities import resolve
 

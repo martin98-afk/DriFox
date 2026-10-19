@@ -49,6 +49,9 @@ def register(registry) -> None:
                 "running_tasks": tm.get_running_tasks,
                 "pending_tasks": tm.get_pending_tasks,
                 "find_member": tm.find_member,
+                "member_run_id": tm.get_member_run_id,
+                "template_for_run": tm.get_template_for_run_id,
+                "member_agent_name": tm.get_member_agent_name,
             }
 
         return api

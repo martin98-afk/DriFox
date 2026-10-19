@@ -15,9 +15,8 @@ from collections import OrderedDict
 from hashlib import md5
 from typing import Any, Dict
 
-from app.core.context.config import cfg_ratio
-from app.core.modelmeta.model_capabilities import resolve_context_limit, resolve_max_output_tokens
-from app.plugins.sdk import count_messages_tokens
+from app.plugins.sdk import cfg_ratio, count_messages_tokens
+from app.plugins.sdk import resolve_context_limit, resolve_max_output_tokens
 from app.plugins.contracts.context_policy import BudgetResult
 
 SYSTEM_PROMPT_RESERVE_RATIO = 0.15

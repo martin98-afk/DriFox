@@ -92,15 +92,16 @@ _GITHUB_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
 def _marketplace_allowed_hosts() -> set:
-    """内置白名单 + Settings.marketplace_allowed_git_hosts 扩展（内网 git 源显式加白）。
+    """内置白名单 + 配置项 marketplace_allowed_git_hosts 扩展（内网 git 源显式加白）。
 
     本模块设计上不依赖 app 核心 Settings，故此处容错读取：不可用时仅用内置表。
     """
     hosts = set(_MARKETPLACE_ALLOWED_GIT_HOSTS)
     try:
-        from app.utils.config import Settings
+        from app.plugins.sdk import caps_for
 
-        extra = Settings.get_instance().marketplace_allowed_git_hosts.value or []
+        read = caps_for("config.read")
+        extra = read("marketplace_allowed_git_hosts") or [] if read is not None else []
         hosts |= {str(h).strip().lower() for h in extra if str(h).strip()}
     except Exception:
         pass

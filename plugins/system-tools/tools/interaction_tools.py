@@ -89,7 +89,7 @@ _SKILL_SCHEMA = {
 
 
 def _skill_impl(tool_ctx, **kwargs):
-    from app.utils.utils import load_skill
+    from app.plugins.sdk import load_skill
 
     name = kwargs.get("name", "")
     success, content, workspace = load_skill(name)
@@ -139,7 +139,7 @@ def _agent_created_check(skill: dict) -> tuple[bool, str]:
 
 
 def _skill_inventory(query: str = "", source: str = "") -> str:
-    from app.utils.utils import get_local_skills, get_app_data_dir
+    from app.plugins.sdk import get_app_data_dir, get_local_skills
 
     skills = get_local_skills()
     if not skills:
@@ -212,7 +212,7 @@ agent_created: true
 
 
 def _guide_modify(name: str) -> str:
-    from app.utils.utils import get_skill_by_name
+    from app.plugins.sdk import get_skill_by_name
 
     skill = get_skill_by_name(name or "")
     if not skill:
@@ -234,7 +234,7 @@ def _guide_modify(name: str) -> str:
 
 
 def _guide_delete(name: str) -> str:
-    from app.utils.utils import get_skill_by_name
+    from app.plugins.sdk import get_skill_by_name
 
     skill = get_skill_by_name(name or "")
     if not skill:
@@ -316,16 +316,11 @@ def _render_question_body(result, tool_name, tool_args, success):
     渲染逻辑从主程序 render_helpers._render_question_block 完整迁出，
     主程序不再包含 question 任何写死分支。
     """
-    from app.widgets.render_helpers import (
-        _get_global_font,
-        _unescape_newlines,
-        escape,
-        scale_font_size,
-    )
+    from app.plugins.sdk import global_font_family, html_escape, scale_font_size, unescape_newlines
 
     tool_args = tool_args or {}
     result_str = getattr(result, "content", "") or ""
-    _gf = _get_global_font()
+    _gf = global_font_family()
 
     # 获取问题列表（兼容新旧格式 + 字符串类型）
     questions_raw = tool_args.get("questions", [])
@@ -381,7 +376,7 @@ def _render_question_body(result, tool_name, tool_args, success):
         if not selected_labels and not custom_text and not options:
             # 无选项且无回答时，显示原始 result
             if result_str:
-                lines.append(f"  ✎ 回答: {_unescape_newlines(result_str)}")
+                lines.append(f"  ✎ 回答: {unescape_newlines(result_str)}")
         lines.append("")
 
     body_text = "\n".join(lines).rstrip()
@@ -395,9 +390,9 @@ def _render_question_body(result, tool_name, tool_args, success):
     return f"""
     <div style="background:var(--panel-soft);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:0;">
         <div style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--text-secondary);word-break:break-word;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;">
-            <span style="color:var(--accent);">?</span> <span style="color:var(--text);">question: {escape(q_preview)}</span>
+            <span style="color:var(--accent);">?</span> <span style="color:var(--text);">question: {html_escape(q_preview)}</span>
         </div>
-        <pre style="margin:0;padding:10px 12px;background:transparent;color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;">{escape(body_text)}</pre>
+        <pre style="margin:0;padding:10px 12px;background:transparent;color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;">{html_escape(body_text)}</pre>
     </div>"""
 
 
@@ -479,9 +474,9 @@ def _parse_question_result(result: str) -> dict:
     if not result:
         return {}
 
-    from app.widgets.render_helpers import _unescape_newlines
+    from app.plugins.sdk import unescape_newlines
 
-    text = _unescape_newlines(result)
+    text = unescape_newlines(result)
     answers = {}
 
     for section in re.split(r"\n---\n", text):
