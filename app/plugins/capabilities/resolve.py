@@ -22,6 +22,7 @@ host 相关能力若确实拿不到窗口，按其自身的空值语义返回（
 
 from __future__ import annotations
 
+import pathlib
 from typing import Any, FrozenSet, Optional
 
 from loguru import logger
@@ -31,26 +32,58 @@ from loguru import logger
 # 后台线程取的是最近一次交互过的窗口，与 window.current 的活跃窗口语义一致。
 _plugin_hosts: dict[str, Any] = {}
 
+# 调用方文件路径 → 解析结果缓存（文件名 / 插件名 / surface）。
+# ★ 不能用 inspect.stack()：它会为每一帧做 findsource → getmodule → realpath，
+# 每帧都是真实文件系统调用（实测深栈单次 40ms+，Qt 事件派发链里点一次卡片
+# 触发 _caps() 时吃到 2s）。sys._getframe 只取帧对象，零 I/O。
+_CALLER_CACHE: dict[str, tuple[str, str]] = {}
+_CALLER_CACHE_MAX = 512
+
+
+def _cache_caller(filename: str, plugin: str, surface: str) -> tuple[str, str]:
+    """写入调用方解析缓存（超限整体清空，条目本身无状态，清空代价可忽略）。"""
+    if len(_CALLER_CACHE) >= _CALLER_CACHE_MAX:
+        _CALLER_CACHE.clear()
+    _CALLER_CACHE[filename] = (plugin, surface)
+    return plugin, surface
+
+
+def _caller_info(skip: int) -> tuple[str, str]:
+    """调用方 (插件名, surface)；解析不出返回 ("", "ui")。
+
+    一次取帧、一次解析，同时供 _caller_plugin / caps_for 使用——两者原本
+    各调一次 inspect.stack()，同一次 caps_for 就要走两遍完整栈扫描。
+    """
+    import sys
+
+    try:
+        filename = sys._getframe(skip).f_code.co_filename
+    except ValueError, AttributeError:
+        return "", "ui"
+    hit = _CALLER_CACHE.get(filename)
+    if hit is not None:
+        return hit
+
+    parts = pathlib.PurePath(filename).parts
+    plugin = ""
+    surface = "ui"
+    if "plugins" in parts:
+        idx = parts.index("plugins") + 1
+        if idx < len(parts):
+            plugin = parts[idx]
+            # plugins/<name>/tools/ → tool surface；其余（ui/ 等）保持 ui
+            if "tools" in parts[idx + 1 :]:
+                surface = "tool"
+    return _cache_caller(filename, plugin, surface)
+
 
 def _caller_plugin(skip: int = 1) -> str:
     """调用方的插件名（``plugins/<name>/...`` 的 ``<name>``）。
 
     推断不出返回空串（池记审计时显示为 ``(builtin)``）。
+    ``skip`` 的基准是**本函数自身的帧**（0 = 本函数），与旧 inspect.stack 语义一致。
     """
-    import inspect
-    from pathlib import Path
-
-    try:
-        frame = inspect.stack()[skip]
-        path = Path(frame.filename).resolve()
-    except Exception:
-        return ""
-    parts = path.parts
-    if "plugins" in parts:
-        idx = parts.index("plugins") + 1
-        if idx < len(parts):
-            return parts[idx]
-    return ""
+    return _caller_info(max(0, skip) + 1)[0]
 
 
 def note_host(plugin: str, host: Any) -> None:
@@ -102,18 +135,17 @@ def _registry():
     return CapabilityRegistry.get_instance()
 
 
-def _surface_of(caller: str) -> str:
-    """按调用方所在目录判 surface：plugins/<name>/tools/ → tool。"""
-    import inspect
-    from pathlib import Path
+def _caller_target(plugin: str, surface: str) -> tuple[str, str]:
+    """补齐未显式传入的 (plugin, surface)：只取一次帧，不重复扫栈。
 
-    try:
-        parts = Path(inspect.stack()[2].filename).resolve().parts
-    except Exception:
-        return "ui"
-    if "plugins" in parts and "tools" in parts[parts.index("plugins") + 1 :]:
-        return "tool"
-    return "ui"
+    取帧深度 3：0=_caller_info / 1=_caller_target / 2=caps_for|pool_for /
+    3=真实调用方。**不能写 2**——那会拿到本模块自己的文件名，插件名恒为空，
+    授权退化成「兼容期全量放行」（声明裁剪静默失效）。
+    """
+    if plugin and surface:
+        return plugin, surface
+    caller_plugin, caller_surface = _caller_info(3)
+    return plugin or caller_plugin, surface or caller_surface
 
 
 def caps_for(cap_id: str, plugin: str = "", surface: str = "") -> Any:
@@ -132,8 +164,7 @@ def caps_for(cap_id: str, plugin: str = "", surface: str = "") -> Any:
     ``resolve_declared``，不会因为走本函数就拿到声明外的能力。
     """
     try:
-        plugin = plugin or _caller_plugin(skip=2)
-        surface = surface or _surface_of(plugin)
+        plugin, surface = _caller_target(plugin, surface)
         reg = _registry()
         from app.plugins.capabilities.bootstrap import ensure_registered
 
@@ -155,8 +186,7 @@ def pool_for(plugin: str = "", surface: str = "", host: Any = None) -> Optional[
     host 显式传入时优先用它；否则按插件名解析（见 :func:`caps_for`）。
     """
     try:
-        plugin = plugin or _caller_plugin(skip=2)
-        surface = surface or _surface_of(plugin)
+        plugin, surface = _caller_target(plugin, surface)
         from app.plugins.capabilities.bootstrap import ensure_registered
 
         reg = _registry()

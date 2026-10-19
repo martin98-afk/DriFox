@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import ScrollArea, TransparentToolButton
 
 from app.plugins.sdk import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
-from app.plugins.sdk import alpha_tint, get_project_color
+from app.plugins.sdk import alpha_tint as _alpha_tint, get_project_color
 from app.plugins.sdk import extract_project_initials
 from app.plugins.sdk import get_font_family_css, get_icon
 from app.plugins.sdk import SquareAvatar as _SquareAvatar
