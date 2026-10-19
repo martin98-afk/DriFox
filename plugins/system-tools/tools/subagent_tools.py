@@ -34,9 +34,10 @@ _STATUS_LABELS = {
 
 
 def _get_team_manager():
-    from app.core.team.team_manager import TeamManager
+    from app.plugins.sdk import caps_for
 
-    return TeamManager.get_instance()
+    team = caps_for("team.read")
+    return team() if team is not None else None
 
 
 def _format_capability(cap: dict) -> str:

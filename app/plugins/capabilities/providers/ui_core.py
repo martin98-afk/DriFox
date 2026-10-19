@@ -815,6 +815,9 @@ def _team_read(host: Any):
             "running_tasks": tm.get_running_tasks,
             "pending_tasks": tm.get_pending_tasks,
             "find_member": tm.find_member,
+            "member_run_id": tm.get_member_run_id,
+            "template_for_run": tm.get_template_for_run_id,
+            "member_agent_name": tm.get_member_agent_name,
         }
 
     return api
@@ -834,6 +837,40 @@ def _cache_purge(host: Any):
             return False
 
     return purge
+
+
+def _config_read(host: Any):
+    """按 key 读主程序配置项（非敏感标量）。
+
+    刻意**不**返回整个 Settings 对象：那等于把 model.config 才该给的明文密钥
+    一起交出去。按 key 取，调用方只能拿到它显式要的那一项。
+
+    密钥类字段（api_key / token 之类）一律拒绝，插件要密钥走 model.config。
+    """
+
+    _SECRET_HINTS = ("key", "token", "secret", "password", "credential")
+
+    def read(key: str, default: Any = None) -> Any:
+        if not key:
+            return default
+        lowered = key.lower()
+        if any(h in lowered for h in _SECRET_HINTS):
+            logger.warning(f"[Capability] config.read 拒绝密钥类字段: {key}")
+            return default
+        try:
+            from app.utils.config import Settings
+
+            s = Settings.get_instance()
+            item = getattr(s, key, None)
+            if item is None:
+                return default
+            value = getattr(item, "value", item)
+            return default if value is None else value
+        except Exception as e:
+            logger.debug(f"[Capability] config.read 取 {key} 失败: {e}")
+            return default
+
+    return read
 
 
 def _host_raw(host: Any):
@@ -902,5 +939,7 @@ def register(registry) -> None:
     reg.register("team.read", _team_read, surface="ui", owner="core:ui")
     # 进程级
     reg.register("cache.purge", _cache_purge, surface="ui", owner="core:ui")
+    # 配置（按 key 读非敏感标量）
+    reg.register("config.read", _config_read, surface="ui", owner="core:ui")
     # 逃生舱
     reg.register("host.raw", _host_raw, surface="ui", owner="core:ui")

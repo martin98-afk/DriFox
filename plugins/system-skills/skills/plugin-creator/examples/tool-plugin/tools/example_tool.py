@@ -14,7 +14,7 @@
 import subprocess
 
 from app.tools.registry import make_summarize_from_preview
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 
 
 # ── 1. 工具实现 ──────────────────────────────────────────

@@ -50,10 +50,12 @@ def hook(event: str, context: dict) -> str:
         return ""
 
     try:
-        from app.core.conversation.agent import create_agent_manager
-        from app.core.team.team_manager import TeamManager
+        from app.plugins.sdk import caps_for, create_agent_manager
 
-        tm = TeamManager.get_instance()
+        team = caps_for("team.read")
+        if team is None:
+            return ""
+        tm = team()
         agent_name = _find_member_agent_name(tm, window_id)
         if not agent_name:
             return ""

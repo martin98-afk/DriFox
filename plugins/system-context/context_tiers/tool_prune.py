@@ -25,10 +25,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from app.core.context.config import cfg_int, prune_skip_tools
-from app.core.context.tool_prune import prune_tool_result, resolve_tool_result_max_len
-from app.plugins.sdk import count_messages_tokens
-from app.plugins.sdk import tool_registry_api
+from app.plugins.sdk import cfg_int, count_messages_tokens, prune_skip_tools, prune_tool_result
+from app.plugins.sdk import resolve_tool_result_max_len, tool_registry_api
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
 
 _ERROR_KEEP_MULTIPLIER_DEFAULT = 4  # 错误结果保留倍数默认值（与 plugin.json default 同步）

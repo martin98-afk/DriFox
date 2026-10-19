@@ -23,7 +23,7 @@ def _ctx_provider() -> dict:
     """窗口上下文（每次调用返回最新主题 token；独立窗口的 provider 由插件提供）"""
     ctx: dict = {}
     try:
-        from app.utils.design_tokens import Colors
+        from app.plugins.sdk import Colors
 
         Colors.refresh()
         ctx["colors"] = {

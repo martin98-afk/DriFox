@@ -67,9 +67,12 @@ def hook(event: str, context: dict) -> str:
     window_id = context.get("window_id", "") or ""
 
     try:
-        from app.core.team.team_manager import TeamManager
+        from app.plugins.sdk import caps_for
 
-        tm = TeamManager.get_instance()
+        team = caps_for("team.read")
+        if team is None:
+            return ""
+        tm = team()
         # 🛡️ M1'：按成员所属 run_id 读专属模板槽（templates_by_run_id），
         # 避免多团队并存时顶层 template 单槽被后加载团队互相覆盖
         # （症状：default-team 成员被注入别的团队描述）。

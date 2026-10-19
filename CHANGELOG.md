@@ -3,8 +3,19 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
+### 🐛 问题修复 (Bug Fixes)
+
+- **宿主 api_version 门槛漏提致 9 个插件被静默拒载** (`app/plugins/version_gate.py` · `tests/core/test_api_version_contract.py`): `c76cb0cd` 给 6 个插件声明 `api_version=2`（capabilities 契约）时，漏改宿主的 `HOST_PLUGIN_API_VERSION`（仍是 1）→ VersionGate 判「高于宿主」全部拒载，**该插件任何组件都不加载**（工具/UI/hooks 全无），日志仅一行 warning 极易漏看。实测症状：`system-tools` 内置工具只剩 2 个、`assistant_hub` 等 UI 插件整体消失。修复：`HOST_PLUGIN_API_VERSION` 1 → 2。新增两道回归守卫：①`test_api_version_two_passes` 锁死宿主必须支持 2；②`test_shipped_plugins_declare_supported_api_version` 扫仓库内全部 manifest，声明值高于宿主的直接测试失败（防止再次整体拒载）。
+- **批量迁移 import 时漏改使用处** (`plugins/system-model-adapters/model_adapters/_detectors.py` · `tools/check_sdk_imports.py`): 把 `detect_provider_family` 的 import 从 `app.core.modelmeta.provider_profile` 改成 sdk 后，模块内三处使用点仍解析不到该符号（PEP 562 `__getattr__` 运行时才抛，编译期抓不到）→ `test_adapter_families.py` 6 用例 NameError。修复：`from app.plugins.sdk import detect_provider_family` 显式导入并补 `__all__`。新增 `tools/check_sdk_imports.py`：静态解析改动文件里 `from app.plugins.sdk import X`，核对 X 在 `_SYMBOLS` 中，批量改 import 时立刻抓到这类错。
+
+### ✨ 新功能 (New Features)
+
+- **sdk 稳定性分级契约** (`app/plugins/sdk.py` · `tests/plugins/test_sdk_stability_contract.py`): 收录符号分 `stable` / `provisional` 两级，`sdk_stability(name)` 可查。stable 面承诺不改签名语义，破坏前必须在 CHANGELOG 记破坏性变更；provisional 不承诺、插件别写进长期逻辑。配套测试断言每个收录符号真能 import 到（防 `_SYMBOLS` 路径写错，而那要到插件运行时才炸）+ 常用契约在 stable 面。回应「sdk 仍不自包含、主程序重构会致插件失效」的担忧：sdk 是显式契约面，直连 `app.core.xxx` 才是真不自包含。
+- **`config.read` 能力（按 key 读非敏感配置）** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py`): marketplace 三处（pip 源 / 禁用插件集 / git host 白名单）原先直连 `Settings.get_instance()`，那是能力建模缺口不是执行力问题。新能力按 key 读，密钥类字段（key/token/secret/password/credential）一律拒绝并 warning——刻意不返回整个 Settings 对象，否则等于把 `model.config` 才该给的明文密钥一起交出去。
+
 ### 🎨 优化 (Refactor)
 
+- **插件越界 import 47 → 15，剩余均为 system 插件本质依赖**（批量）: 按「无宿主运行时依赖 + 常量/枚举/dataclass/纯函数/可继承基类 + 有插件在用」三条判定，把 `render_helpers` 的 escape/global_font/diff 摘要、`design_tokens` 的字号函数、`theme_style` 的 replay、`project_meta` 的 initials、`command_safety` 四函数、`context.config` 的阈值与 skip_tools、`context.tool_prune` 两函数、`modelmeta` 的 family/context_limit、`session_preview` 的消息预览、`utils.utils` 的 skill 查询、`git_worktree` 的 `WorktreeInfo`、`custom_title_bar` 的 `CustomTabButton`、`hover_style_guard` 的 `style_if_changed`、`conversation.agent` 的 `create_agent_manager` 全部收编 sdk 并改调用点（约 30 处）。`team.read` 能力面扩 `member_run_id`/`template_for_run`/`member_agent_name`，system-hooks 两个 hook 与 subagent_tools 改走能力池。剩余 15 处为运行时单例/内部实现（plugin_host_service / memory_manager / task_state / bg_manager / session_store / theme_manager / gateway.manager 等），属 system 插件实现主程序功能的本质依赖，强行套能力反制造无意义条目。守卫的 system 宽松口径保留，但清单已从 47 缩到 15。
 - **无 ctx 取能力统一入口 `caps_for`** (`app/plugins/capabilities/resolve.py` · `app/plugins/sdk.py`): 后台线程 / 工具 impl 原先各自复制「ensure_registered + 从 `__file__` 推断插件名 + `build_pool(host=None)`」六份样板，且 `host=None` 使 `window.current` / `session.read` / `input.read` 这类吃 host 的能力在后台恒返回空。新增 `caps_for(cap_id)` / `pool_for()` / `declared_for()` 并经 sdk 暴露；host 改由宿主解析（卡片 ctx 建立时登记「插件 → 窗口」绑定，`unregister_window` 清理；无绑定退活跃窗口），surface 按调用方目录推断（`tools/` → tool）。授权仍走同一条 `resolve_declared`，无绕过声明的后门。同步改掉 6 处样板（assistant_hub 的 assistant_manager / ui/sections / ui/assistant_card / tools/schema_filter、agent_trace 的 ui/trace_card、system-cleaner 的 ui/scanner），顺带删掉两处同名函数重复定义。回归测试 `tests/plugins/test_capability_resolve.py` 9 用例（声明裁剪、host 绑定、活跃窗口回落、surface 推断、未授权返 None）；插件套件与基线一致无回归。
 - **初始窗口默认宽度 960 → 1100** (`app/widgets/tab_manager_window.py`): `_restore_geometry` 的固定默认几何改为 1100x800（高度不变、仍屏幕居中），消息区与输入区多出 140px 可用宽度；最小窗口尺寸 600x450 不变，用户仍可自行缩放。几何记忆本就移除，重启后仍恢复该默认值。
 

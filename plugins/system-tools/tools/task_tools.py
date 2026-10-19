@@ -9,7 +9,7 @@ key="todo"，每窗口独立）；无窗口上下文（测试等）回退 app.to
 import json
 from typing import Dict, List
 
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 from app.plugins.sdk import ToolResult
 from app.tools.task_state import get_todos as _module_get_todos
 from app.tools.task_state import set_todos as _module_set_todos

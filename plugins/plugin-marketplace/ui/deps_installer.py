@@ -51,11 +51,12 @@ class InstallResult:
 
 
 def get_index_url() -> str:
-    """读取 Settings 的 pip.index_url（空串回退官方源）。"""
+    """读配置项 pip_index_url（空串回退官方源）。"""
     try:
-        from app.utils.config import Settings
+        from app.plugins.sdk import caps_for
 
-        url = (Settings.get_instance().pip_index_url.value or "").strip()
+        read = caps_for("config.read")
+        url = (read("pip_index_url") or "").strip() if read is not None else ""
         if url:
             if not url.rstrip("/").endswith("/simple"):
                 url = url.rstrip("/") + "/simple"

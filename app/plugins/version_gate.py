@@ -51,7 +51,9 @@ def host_version() -> str:
 
 
 # 宿主插件 API 契约版本：manifest 可选声明 api_version，高于此值拒载
-HOST_PLUGIN_API_VERSION = 1
+# 2 = 引入 capabilities 声明契约（api_version=2 且未写 capabilities → 空清单，
+# 不再全量放行）。见 docs/plugins/capabilities.md 裁剪规则表。
+HOST_PLUGIN_API_VERSION = 2
 
 
 def check_api_version(manifest: dict, plugin_name: str = "") -> Tuple[bool, str]:

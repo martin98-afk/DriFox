@@ -51,6 +51,14 @@
 
 新插件一律写 `"api_version": 2` 并显式声明清单。存量插件（`api_version` 缺省 = 1）继续全量放行，不受影响。
 
+> **⚠️ 升 `api_version` 前先确认宿主门槛**：`app/plugins/version_gate.py` 的
+> `HOST_PLUGIN_API_VERSION` 是硬闸，插件声明值高于它会被 `VersionGate` 拒载
+> （load_blocked，**该插件的任何组件都不加载**：工具 / UI / hooks 全无），
+> 日志只有一行 `[VersionGate] 插件 'x' 插件 api_version=2 高于宿主支持的 1，拒载`。
+> 当前宿主值为 **2**（capabilities 契约自它起生效）。
+> 回归守卫：`tests/core/test_api_version_contract.py::test_shipped_plugins_declare_supported_api_version`
+> 会扫仓库内全部 manifest，声明值高于宿主的直接测试失败。
+
 ### 扁平名兼容
 
 历史 manifest 可能写 `["lsp", "mcp", "gitee", "subagent", "window_state"]`，这些会被映射到命名空间 ID（`lsp.query` / `mcp.call` / `net.upload` / `subagent.run` / `state.kv`）。
@@ -257,6 +265,25 @@ caps["stream.subscribe"]({
 
 这两个不参与声明裁剪。
 
+### 进程级 / 配置
+
+| ID | level | 说明 |
+|---|---|---|
+| `cache.purge` | low | 清理主程序进程内 LRU 缓存（HTML 渲染 / token 估算 / grep 编译） |
+| `config.read` | medium | 按 key 读主程序配置项（非敏感标量） |
+
+`config.read` 刻意**不**返回整个 `Settings` 对象——那等于把 `model.config` 才该给的
+明文密钥一起交出去。按 key 取，且密钥类字段（key / token / secret / password /
+credential）一律拒绝并记 warning：
+
+```python
+from app.plugins.sdk import caps_for
+
+read = caps_for("config.read")
+hosts = read("marketplace_allowed_git_hosts", default=[])
+assert read("api_key", default="X") == "X"  # 密钥类字段被拒，回落 default
+```
+
 ### 逃生舱
 
 | ID | level | 说明 |
@@ -306,6 +333,29 @@ def register(registry) -> None:
 判据：provider 实现里若只有一行 `return host._x`，它是**搬家不是抽象**，应合并或重设边界。
 
 反例：`workdir.write` 若只是 `return host.backend.tool_executor.set_workdir`，那插件还是要自己处理实例缓存与团队广播。正例是内部一次做完四步，插件从此不知道这些字段存在。
+
+---
+
+## 5b. sdk 是稳定契约面，不是内部实现泄露
+
+插件只能依赖 `app.plugins.sdk` 与 `ctx["capabilities"]`。直连 `app.core.xxx` /
+`app.widgets.xxx` 才是真正的不自包含——插件 import 了主程序内部模块的私有实现，
+主程序一重构插件就炸，而且没有地方能在破坏前拦住。
+
+sdk 反过来：它是显式契约面，符号分两级（`app/plugins/sdk.py::sdk_stability`）：
+
+| 级别 | 含义 | 破坏前要求 |
+|---|---|---|
+| `stable` | 主程序承诺不改签名 / 语义 | 必须在 CHANGELOG 记破坏性变更 |
+| `provisional` | 临时收录，签名可能随内部实现调整 | 不承诺，插件别写进长期逻辑 |
+
+自检：`python tools/check_sdk_imports.py` 静态核对改动文件的 sdk import 全部命中；
+`tests/plugins/test_sdk_stability_contract.py` 断言每个收录符号真能 import 到、
+且常用契约在 stable 面。
+
+**没收录怎么办**：把符号加进 `app/plugins/sdk.py` 的 `_SYMBOLS`（同时决定 stable /
+provisional），不要图省事直连内部模块。收录判定三条：无宿主运行时依赖、是常量 /
+枚举 / dataclass / 纯函数 / 可继承基类、至少一个插件在用。
 
 ---
 

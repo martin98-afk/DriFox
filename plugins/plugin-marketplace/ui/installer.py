@@ -447,12 +447,14 @@ class PluginInstaller:
 
     @staticmethod
     def _load_disabled_names() -> set:
-        """从 Settings 读取禁用插件集合（内置插件禁用判定）"""
+        """读配置项 disabled_plugins（内置插件禁用判定）"""
         try:
-            from app.utils.config import Settings
+            from app.plugins.sdk import caps_for
 
-            cfg = Settings.get_instance()
-            return set(cfg.disabled_plugins.value or [])
+            read = caps_for("config.read")
+            if read is None:
+                return set()
+            return set(read("disabled_plugins") or [])
         except Exception:
             return set()
 

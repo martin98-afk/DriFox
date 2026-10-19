@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from app.core.modelmeta.provider_profile import detect_provider_family
+from app.plugins.sdk import detect_provider_family
+
+__all__ = [
+    "detect_provider_family",
+    "detect_requires_reasoning",
+    "detect_is_gemini",
+    "detect_use_responses",
+]
 
 
 def detect_requires_reasoning(llm_config: Dict[str, Any]) -> bool:
