@@ -3,6 +3,11 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
+### 🎨 优化 (Refactor)
+
+- **无 ctx 取能力统一入口 `caps_for`** (`app/plugins/capabilities/resolve.py` · `app/plugins/sdk.py`): 后台线程 / 工具 impl 原先各自复制「ensure_registered + 从 `__file__` 推断插件名 + `build_pool(host=None)`」六份样板，且 `host=None` 使 `window.current` / `session.read` / `input.read` 这类吃 host 的能力在后台恒返回空。新增 `caps_for(cap_id)` / `pool_for()` / `declared_for()` 并经 sdk 暴露；host 改由宿主解析（卡片 ctx 建立时登记「插件 → 窗口」绑定，`unregister_window` 清理；无绑定退活跃窗口），surface 按调用方目录推断（`tools/` → tool）。授权仍走同一条 `resolve_declared`，无绕过声明的后门。同步改掉 6 处样板（assistant_hub 的 assistant_manager / ui/sections / ui/assistant_card / tools/schema_filter、agent_trace 的 ui/trace_card、system-cleaner 的 ui/scanner），顺带删掉两处同名函数重复定义。回归测试 `tests/plugins/test_capability_resolve.py` 9 用例（声明裁剪、host 绑定、活跃窗口回落、surface 推断、未授权返 None）；插件套件与基线一致无回归。
+- **初始窗口默认宽度 960 → 1100** (`app/widgets/tab_manager_window.py`): `_restore_geometry` 的固定默认几何改为 1100x800（高度不变、仍屏幕居中），消息区与输入区多出 140px 可用宽度；最小窗口尺寸 600x450 不变，用户仍可自行缩放。几何记忆本就移除，重启后仍恢复该默认值。
+
 ### ✨ 新功能 (New Features)
 
 - **安全中心「审核处理」组合配置** (`3c215234`, `ef85a63b`, `48c65c1c`, `6cbad1ea`): 新增审批方式（人工审批 / AI审批）、超时时间（0=不超时）、超时处理（拒绝 / 允许 / AI审核）与 AI 审核模型选择，收纳于单个折叠配置组。AI审批为静默决策：不弹审批卡，后台单轮调用审核模型判定放行/拒绝并 InfoBar 通知；AI 失败（模型未配置/调用异常/解析失败，decision 白名单外一律视为失败）回落人工审批弹卡。人工审批超时未决按配置自动拒绝/允许/转 AI 审核，转 AI 期间人工仍可抢先生效；所有自动决策回调校验待决 id 防回放。

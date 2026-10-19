@@ -265,15 +265,11 @@ def _release_memory_light():
     """
     # ── 1. DriFox 内部 LRU 缓存 ──
     try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+        from app.plugins.sdk import caps_for
 
-        ensure_registered("ui")
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="ui", host=None, plugin="system-cleaner", declared={"cache.purge"}
-        )
-        if "cache.purge" in pool:
-            pool["cache.purge"]()
+        purge = caps_for("cache.purge")
+        if purge is not None:
+            purge()
     except Exception:
         pass
 

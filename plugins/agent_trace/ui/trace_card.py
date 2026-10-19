@@ -86,65 +86,10 @@ _SCHEMA_TTL = 60.0
 
 
 def _caps(cap_id):
-    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。"""
+    from app.plugins.sdk import caps_for
 
-        ensure_registered("ui")
-        plugin = ""
-        try:
-            from pathlib import Path
-
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
-        )
-        return pool[cap_id] if cap_id in pool else None
-    except Exception:
-        return None
-
-
-def _tool_api(kind: str = "read"):
-    """工具注册表只读面 / 注入面。
-
-    优先用本模块的 ``ToolRegistry`` 符号（若存在：插件可注入替身，测试常用），
-    否则经能力池（tool.read / tool.inject）。两者都不可用时返回 None。
-    """
-    cap = "tool.inject" if kind == "inject" else "tool.read"
-    reg = globals().get("ToolRegistry")
-    if reg is not None:
-        try:
-            inst = reg.get_instance()
-            return _registry_api(inst, kind)
-        except Exception:
-            pass
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
-
-        ensure_registered("tool")
-        plugin = ""
-        try:
-            from pathlib import Path
-
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="tool", host=None, plugin=plugin, declared={cap, "state.kv", "plugin.log"}
-        )
-        if cap not in pool:
-            return None
-        return pool[cap]()
-    except Exception:
-        return None
+    return caps_for(cap_id)
 
 
 def _tool_api(kind: str = "read"):
