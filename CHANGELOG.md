@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
-## [v0.6.10] - 2026-10-20
+## [v0.6.10] - 2026-10-20 (重新发布 #2)
 
-自 v0.6.9 以来的变更 | 提交数：62 · 文件变更：146 · +10122/-1883 | 贡献者：dingma, drifox-bot, mading
+自 v0.6.9 以来的变更（累计） | 提交数：65 · 文件变更：149 · +10142/-1887 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -55,6 +55,12 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build)
 
 - 版本号升级至 v0.6.10（`2ebc2685`）；marketplace 清单自动重生成（`8c3b6687`）。
+
+### ✨ 新功能 (New Features)（重新发布 #2 追加）
+
+- **PyInstaller 打包漏收 app.plugins 懒加载子模块** (`b84cdb28`): sdk.py 把 `sdk_tool_registry` 等子模块以字符串引用做懒加载映射，PyInstaller 静态分析不到，onefile 产物缺模块 → agent_trace UI / assistant_hub 工具注册 / system-context tier 加载报 `No module named 'app.plugins.sdk_tool_registry'`。打包脚本补 `collect_submodules("app.plugins")` 全量收集。
+- **MCP 服务器行名称宽度自适应** (`0b2d75b0`): 设置页 MCPServerRow 名称标签由 `StrongBodyLabel` + `setFixedWidth(100)` 换为 `_ElidedLabel`：短名自然伸展、长名 260px 封顶省略号 + tooltip 显示全名，修「dingtalk-aipower 被硬截成 dingtalk-a」。
+- **subagent 委托消息自包含纪律** (`d41b82cd`): `subagent_para` 工具描述注入委托纪律（源自 WorkBuddy A2A 协议）：子智能体默认看不到主对话，description 必须写全背景/目标/约束/期望产出四要素，大段参考资料放 context 字段，含糊指代（「刚才的」「上面那个」）换成具体名称/路径/结论。
 
 ## [v0.6.9] - 2026-10-17 (重新发布 #5)
 
