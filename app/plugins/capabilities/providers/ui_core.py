@@ -120,7 +120,6 @@ def _window_current(host: Any):
         # host 必须是对话窗口（有 backend）；__global__ 容器 / popout 壳这类
         # 带 _window_id 的非窗口宿主不算，否则拿到空快照还静默回落错窗口
         win = host if (getattr(host, "_window_id", "") and hasattr(host, "backend")) else None
-        src = "host" if win is not None else "tm-fallback"
         if win is None:
             tm = _resolve_tab_window()
             win = tm.get_current_window() if tm is not None else None
@@ -136,12 +135,6 @@ def _window_current(host: Any):
                     workdir = resolver() or ""
                 except Exception:
                     workdir = ""
-        from loguru import logger
-
-        logger.debug(
-            f"[DEBUG-hcur] window.current src={src} host_id={getattr(host, '_window_id', None)} "
-            f"win={getattr(win, '_window_id', '')} project={project!r} workdir={workdir!r}"
-        )
         return {
             "window_id": getattr(win, "_window_id", ""),
             "backend": getattr(win, "backend", None),

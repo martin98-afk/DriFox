@@ -189,7 +189,7 @@ class AssistantCardWidget(QWidget):
             if pool is not None and "window.current" in pool:
                 return pool
         except Exception as e:
-            logger.debug(f"[DEBUG-hcur] ctx provider fail: {e}")
+            logger.debug(f"[assistant_hub] 实时拉能力池失败: {e}")
         return None
 
     def set_context(self, ctx: dict) -> None:
@@ -395,6 +395,10 @@ class AssistantCardWidget(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self.refresh_personas_only()
+        # 全局卡切 tab 时宿主按 per-tab 可见性做 hide/show：唤出即刷新记忆
+        # 状态行，workdir 跟随当前选中 tab（与「查看」按钮的实时语义一致）
+        if self._active_aid:
+            self._refresh_memory(self._active_aid)
 
     def _on_create_persona(self) -> None:
         """新建人格：关闭助手中心 → 跳回对话 → 输入框填入 /persona-creator。"""
