@@ -21,18 +21,22 @@ def _roles_ok(msgs):
 
 
 def test_memory_system_contains_layers_and_paths():
-    """说明书极简：指针 + 路径，规则全部指向工具说明。"""
-    text = m.build_memory_system("/data/MEMORY.md", "/proj/.drifox/memory/build")
+    """说明书对齐 WorkBuddy Layer 2/3：分层纪律 + 路径 + 上限；蒸馏留给工具门禁。"""
+    text = m.build_memory_system("/data/MEMORY.md", "/proj/.drifox/memory/build", {"global": 4000, "project": 3000})
     assert "memory_read" in text and "memory_write" in text
     assert "/data/MEMORY.md" in text
     assert "/proj/.drifox/memory/build" in text
     assert "工具说明" in text
+    # 分层纪律：global 何时写 + project/daily 结构与上限
+    assert "scope=global" in text and "4000" in text
+    assert "scope=project" in text and "3000" in text
+    assert "只追加" in text and "实质工作" in text
+    # 检索选源与角色边界
+    assert "全局记忆" in text and "角色边界" in text
+    # 品牌词不出现；蒸馏纪律零提及（由工具门禁注入）
     assert "workbuddy" not in text.lower()
-    # 极简断言：规则/蒸馏细节不在说明书
-    assert len(text) < 600
-    assert "何时写" not in text and "维护" not in text
+    assert "蒸馏" not in text
     assert "mark_distilled" not in text and ".distilled" not in text
-    assert "最珍贵" not in text
 
 
 def test_build_distill_gate():
