@@ -3,35 +3,58 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
+## [v0.6.10] - 2026-10-20
+
+自 v0.6.9 以来的变更 | 提交数：62 · 文件变更：146 · +10122/-1883 | 贡献者：dingma, drifox-bot, mading
+
+### ✨ 新功能 (New Features)
+
+- **插件能力池与能力声明契约体系** (`app/plugins/capabilities/` · `app/plugins/sdk.py`, `ce98827d`~`052db2db` 等): 全新插件能力治理层。①能力目录 43 条定义（等级/旧键映射/通配展开），契约类型（池上下文/池视图）；②裁剪视图惰性求值 + 拒绝指引 + 首次触达审计；③能力注册表：登记校验、双 surface（tool/ui）、按 manifest 声明裁剪、订阅可释放；④工具面接入能力池，旧 services 改由池投影；⑤`stream.subscribe` 能力（列表+映射双形态订阅）；⑥UI 上下文注入（window/notify/host.raw，卸载释放订阅）；⑦补 `window.current`/`window.workbench`/`ui.events`/`command.*`/`plugin.*`/`ui.dialog`/`ui.card.show`/`session.read`/`session.list`/`team.read` 能力；⑧回调类入口（输入按钮/侧栏）按插件声明裁剪能力；⑨插件 import 边界守卫（默认告警，`--strict` 供 CI），manifest 按 type 分级——system 插件只禁 `app.main_widget`；⑩能力解析与上下文管理增强、窗口快照逻辑优化、hooks 支持（`73d98f01`）。
+- **sdk 稳定性分级契约** (`app/plugins/sdk.py` · `tests/plugins/test_sdk_stability_contract.py`): 收录符号分 `stable` / `provisional` 两级，`sdk_stability(name)` 可查。stable 面承诺不改签名语义，破坏前必须在 CHANGELOG 记破坏性变更；provisional 不承诺、插件别写进长期逻辑。配套测试断言每个收录符号真能 import 到（防 `_SYMBOLS` 路径写错，而那要到插件运行时才炸）+ 常用契约在 stable 面。回应「sdk 仍不自包含、主程序重构会致插件失效」的担忧：sdk 是显式契约面，直连 `app.core.xxx` 才是真不自包含。
+- **`config.read` 能力（按 key 读非敏感配置）** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py`): marketplace 三处（pip 源 / 禁用插件集 / git host 白名单）原先直连 `Settings.get_instance()`，那是能力建模缺口不是执行力问题。新能力按 key 读，密钥类字段（key/token/secret/password/credential）一律拒绝并 warning——刻意不返回整个 Settings 对象，否则等于把 `model.config` 才该给的明文密钥一起交出去。
+- **安全中心「审核处理」组合配置** (`3c215234`, `ef85a63b`, `48c65c1c`, `6cbad1ea`): 新增审批方式（人工审批 / AI审批）、超时时间（0=不超时）、超时处理（拒绝 / 允许 / AI审核）与 AI 审核模型选择，收纳于单个折叠配置组。AI审批为静默决策：不弹审批卡，后台单轮调用审核模型判定放行/拒绝并 InfoBar 通知；AI 失败（模型未配置/调用异常/解析失败，decision 白名单外一律视为失败）回落人工审批弹卡。人工审批超时未决按配置自动拒绝/允许/转 AI 审核，转 AI 期间人工仍可抢先生效；所有自动决策回调校验待决 id 防回放。
+- **AI 审核补任务上下文** (`223410f4`): 审核模型输入加入用户目标与本轮轨迹，判定标准改为目标一致性。
+- **审批卡倒计时徽标与失败高亮** (`f53ffe28`): 审批卡加倒计时徽标与 AI 审核失败高亮行，顺带修样式 token 缺失致卡片不弹。
+
 ### 🐛 问题修复 (Bug Fixes)
 
 - **宿主 api_version 门槛漏提致 9 个插件被静默拒载** (`app/plugins/version_gate.py` · `tests/core/test_api_version_contract.py`): `c76cb0cd` 给 6 个插件声明 `api_version=2`（capabilities 契约）时，漏改宿主的 `HOST_PLUGIN_API_VERSION`（仍是 1）→ VersionGate 判「高于宿主」全部拒载，**该插件任何组件都不加载**（工具/UI/hooks 全无），日志仅一行 warning 极易漏看。实测症状：`system-tools` 内置工具只剩 2 个、`assistant_hub` 等 UI 插件整体消失。修复：`HOST_PLUGIN_API_VERSION` 1 → 2。新增两道回归守卫：①`test_api_version_two_passes` 锁死宿主必须支持 2；②`test_shipped_plugins_declare_supported_api_version` 扫仓库内全部 manifest，声明值高于宿主的直接测试失败（防止再次整体拒载）。
 - **批量迁移 import 时漏改使用处** (`plugins/system-model-adapters/model_adapters/_detectors.py` · `tools/check_sdk_imports.py`): 把 `detect_provider_family` 的 import 从 `app.core.modelmeta.provider_profile` 改成 sdk 后，模块内三处使用点仍解析不到该符号（PEP 562 `__getattr__` 运行时才抛，编译期抓不到）→ `test_adapter_families.py` 6 用例 NameError。修复：`from app.plugins.sdk import detect_provider_family` 显式导入并补 `__all__`。新增 `tools/check_sdk_imports.py`：静态解析改动文件里 `from app.plugins.sdk import X`，核对 X 在 `_SYMBOLS` 中，批量改 import 时立刻抓到这类错。
+- **AI 审批链路四连修**（`ca7f6274`~`0c71f8ff`）: ① 审核模型不吐 JSON 时短输出文本语义回退（deny 直判；allow 需过否定词防护，防「不能放行」误放行）② reasoning 模型思考耗尽 max_tokens 致 content 截空 → 上限 2000 + 空响应单列日志 ③ 审核调用加界（60s 显式超时 + 收紧重试），修端点挂起拖死审批链 ④ mode=ai 分支补登记待决 id，修审核结果被防回放守卫静默丢弃致审批永久卡死（真凶）。
+- **删除保护漏拦 .NET API 删除** (`4e483677`): `[System.IO.Directory]::Delete` 等不含命令词的调用形态绕过词表识别，整条命令被判 allow。补 .NET IO Delete 特征正则 + 保护开启时兜底升档 confirm + `$var='path'` 目标提取（审批展示与快照可定位目标）。
+- **强回收器对过期可见窗口崩溃** (`3621ee97`): 回收器增强对过期可见窗口的健壮性，防止窗口已销毁后仍按旧快照取值触发 IndexError。
+- **审计日志刷屏** (`0d09792c`): host 无关能力池加缓存 + 审计去重提升到注册表层，消除重复审计记录刷屏。
+- **历史会话切换失效** (`458c2d59`): history-manager 的 `_active_window` 误用 `window.current` 改回 `window.active`，修历史会话切不了项目。
+- **审核处理卡重复挂载** (`1a6ed3fc`): 安全中心审核处理卡重复挂载致页面出现两份，只保留开关区后一份。
 
-### ✨ 新功能 (New Features)
-
-- **sdk 稳定性分级契约** (`app/plugins/sdk.py` · `tests/plugins/test_sdk_stability_contract.py`): 收录符号分 `stable` / `provisional` 两级，`sdk_stability(name)` 可查。stable 面承诺不改签名语义，破坏前必须在 CHANGELOG 记破坏性变更；provisional 不承诺、插件别写进长期逻辑。配套测试断言每个收录符号真能 import 到（防 `_SYMBOLS` 路径写错，而那要到插件运行时才炸）+ 常用契约在 stable 面。回应「sdk 仍不自包含、主程序重构会致插件失效」的担忧：sdk 是显式契约面，直连 `app.core.xxx` 才是真不自包含。
-- **`config.read` 能力（按 key 读非敏感配置）** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py`): marketplace 三处（pip 源 / 禁用插件集 / git host 白名单）原先直连 `Settings.get_instance()`，那是能力建模缺口不是执行力问题。新能力按 key 读，密钥类字段（key/token/secret/password/credential）一律拒绝并 warning——刻意不返回整个 Settings 对象，否则等于把 `model.config` 才该给的明文密钥一起交出去。
-
-### 🎨 优化 (Refactor)
+### ♻️ 代码重构 (Refactoring)
 
 - **插件越界 import 47 → 15，剩余均为 system 插件本质依赖**（批量）: 按「无宿主运行时依赖 + 常量/枚举/dataclass/纯函数/可继承基类 + 有插件在用」三条判定，把 `render_helpers` 的 escape/global_font/diff 摘要、`design_tokens` 的字号函数、`theme_style` 的 replay、`project_meta` 的 initials、`command_safety` 四函数、`context.config` 的阈值与 skip_tools、`context.tool_prune` 两函数、`modelmeta` 的 family/context_limit、`session_preview` 的消息预览、`utils.utils` 的 skill 查询、`git_worktree` 的 `WorktreeInfo`、`custom_title_bar` 的 `CustomTabButton`、`hover_style_guard` 的 `style_if_changed`、`conversation.agent` 的 `create_agent_manager` 全部收编 sdk 并改调用点（约 30 处）。`team.read` 能力面扩 `member_run_id`/`template_for_run`/`member_agent_name`，system-hooks 两个 hook 与 subagent_tools 改走能力池。剩余 15 处为运行时单例/内部实现（plugin_host_service / memory_manager / task_state / bg_manager / session_store / theme_manager / gateway.manager 等），属 system 插件实现主程序功能的本质依赖，强行套能力反制造无意义条目。守卫的 system 宽松口径保留，但清单已从 47 缩到 15。
 - **无 ctx 取能力统一入口 `caps_for`** (`app/plugins/capabilities/resolve.py` · `app/plugins/sdk.py`): 后台线程 / 工具 impl 原先各自复制「ensure_registered + 从 `__file__` 推断插件名 + `build_pool(host=None)`」六份样板，且 `host=None` 使 `window.current` / `session.read` / `input.read` 这类吃 host 的能力在后台恒返回空。新增 `caps_for(cap_id)` / `pool_for()` / `declared_for()` 并经 sdk 暴露；host 改由宿主解析（卡片 ctx 建立时登记「插件 → 窗口」绑定，`unregister_window` 清理；无绑定退活跃窗口），surface 按调用方目录推断（`tools/` → tool）。授权仍走同一条 `resolve_declared`，无绕过声明的后门。同步改掉 6 处样板（assistant_hub 的 assistant_manager / ui/sections / ui/assistant_card / tools/schema_filter、agent_trace 的 ui/trace_card、system-cleaner 的 ui/scanner），顺带删掉两处同名函数重复定义。回归测试 `tests/plugins/test_capability_resolve.py` 9 用例（声明裁剪、host 绑定、活跃窗口回落、surface 推断、未授权返 None）；插件套件与基线一致无回归。
+- **44 个插件文件 94 处 import 迁到 `app.plugins.sdk`** (`1929e88b`): 插件对宿主内部的直连 import 批量迁移至 sdk 契约面；另将 6 处 `ToolRegistry` 直连改走 `tool.read` / `tool.inject` 能力（`6b2284d0`）。
+- **UI services 改由能力池投影** (`0b6c81ce`): UI services 实现迁入 providers，调用方一律经能力池取用。
+- **工具注册表访问门面抽到 sdk** (`fea74738` · `81596b70`): 去掉 6 份重复实现；`make_summarize_from_preview` 纯函数收进 sdk。
+- **marketplace 脱离 TabManagerWindow** (`d1532f45`): 补 `window.host` / `input.read` / `input.write` 能力，解除对主窗口类的直接依赖。
+- **插件 type 标记修正** (`c3043b40` · `c88c0ce9`): 5 个 system 插件误标 user 后回退，2 处 backend 改走 session 能力。
 - **初始窗口默认宽度 960 → 1100** (`app/widgets/tab_manager_window.py`): `_restore_geometry` 的固定默认几何改为 1100x800（高度不变、仍屏幕居中），消息区与输入区多出 140px 可用宽度；最小窗口尺寸 600x450 不变，用户仍可自行缩放。几何记忆本就移除，重启后仍恢复该默认值。
+- **`alpha_tint` 统一重命名 `_alpha_tint`** (`11d5e3fc`): 私有命名统一。
+- **安全中心页全面分组收纳** (`817153c8`): 首屏从 10+ 平铺块收敛至 6 块；名单编辑区高度变化冒泡重算分组卡展开高度（先激活子项布局再逐 widget 求和，修 sizeHint 陈旧缓存致加行后内容截断）。
+- **删除保护拆分与垃圾桶软删除** (`e5189698`): 删除保护（审批）开关外提至页面顶层（重要开关不进折叠组）；新增「垃圾桶」独立开关（`delete.trash_enabled`），开启后删除命令审批放行时目标 **move** 进 `backups/trash`（软删除可找回），关闭维持 copy 快照；自动备份从删除组拆出独立成组；「删除与备份」更名「删除安全」。
+- **移除冗余调试日志** (`33ba8e4d`): 清理调试期遗留日志，优化能力池窗口快照错误处理。
 
-### ✨ 新功能 (New Features)
+### ⚡ 性能优化 (Performance)
 
-- **安全中心「审核处理」组合配置** (`3c215234`, `ef85a63b`, `48c65c1c`, `6cbad1ea`): 新增审批方式（人工审批 / AI审批）、超时时间（0=不超时）、超时处理（拒绝 / 允许 / AI审核）与 AI 审核模型选择，收纳于单个折叠配置组。AI审批为静默决策：不弹审批卡，后台单轮调用审核模型判定放行/拒绝并 InfoBar 通知；AI 失败（模型未配置/调用异常/解析失败，decision 白名单外一律视为失败）回落人工审批弹卡。人工审批超时未决按配置自动拒绝/允许/转 AI 审核，转 AI 期间人工仍可抢先生效；所有自动决策回调校验待决 id 防回放。
+- **sdk 改 PEP 562 延迟导入** (`1f39d915`): `import sdk` 从 +420 模块降到 +36 且不触碰 Qt，插件启动 import 成本大幅下降。
+- **窗口级能力池缓存** (`cdc1b9fb`): 每窗口缓存能力池一次，context 建池从 3 次降为 1 次。
 
-### 🐛 问题修复 (Bug Fixes)
+### 📚 文档 (Documentation)
 
-- **AI 审批链路四连修**（`ca7f6274`~`0c71f8ff`）: ① 审核模型不吐 JSON 时短输出文本语义回退（deny 直判；allow 需过否定词防护，防「不能放行」误放行）② reasoning 模型思考耗尽 max_tokens 致 content 截空 → 上限 2000 + 空响应单列日志 ③ 审核调用加界（60s 显式超时 + 收紧重试），修端点挂起拖死审批链 ④ mode=ai 分支补登记待决 id，修审核结果被防回放守卫静默丢弃致审批永久卡死（真凶）。
-- **删除保护漏拦 .NET API 删除** (`4e483677`): `[System.IO.Directory]::Delete` 等不含命令词的调用形态绕过词表识别，整条命令被判 allow。补 .NET IO Delete 特征正则 + 保护开启时兜底升档 confirm + `$var='path'` 目标提取（审批展示与快照可定位目标）。
+- **记忆系统文档分层纪律与上限** (`1e750605`): 补充分层写入纪律与容量限制说明。
+- **manifest 参考补 capabilities/api_version 字段与裁剪规则** (`3630c167`)；能力池文档入库（`ab59a96d`）；插件清单与测试文档更新，新增能力声明与越界 import 自检说明（`f3120c04`）；`window.current` 与 `window.active` 选择指引含踩坑说明（`acb80150`）；安全中心审核处理配置与页面文档同步（`24a7ac4e`）。
 
-### 🎨 优化 (Refactor)
+### 🔧 其他 (Chores & Build)
 
-- **安全中心页全面分组收纳** (`817153c8`): 首屏从 10+ 平铺块收敛；名单编辑区高度变化冒泡重算分组卡展开高度（先激活子项布局再逐 widget 求和，修 sizeHint 陈旧缓存致加行后内容截断）。
-- **删除保护拆分与垃圾桶软删除** (本批): 删除保护（审批）开关外提至页面顶层（重要开关不进折叠组）；新增「垃圾桶」独立开关（`delete.trash_enabled`），开启后删除命令审批放行时目标 **move** 进 `backups/trash`（软删除可找回），关闭维持 copy 快照；自动备份从删除组拆出独立成组；「删除与备份」更名「删除安全」。
+- 版本号升级至 v0.6.10（`2ebc2685`）；marketplace 清单自动重生成（`8c3b6687`）。
 
 ## [v0.6.9] - 2026-10-17 (重新发布 #5)
 
