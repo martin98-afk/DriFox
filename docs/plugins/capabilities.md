@@ -407,7 +407,15 @@ if pool is not None and "session.read" in pool:
 
 授权口径与 `ctx["capabilities"]` 完全相同（同一条 `resolve_declared`）：走
 `caps_for` 拿不到声明外的能力。参数可显式传 `plugin=` / `surface=`，缺省从
-调用方文件路径推断（`plugins/<name>/tools/` → tool surface）。
+调用方文件路径推断（`plugins/<name>/tools/` 与 `hooks/` → tool surface，
+其余 → ui）。
+
+**hook 里的 surface 口径**：hook 跑在引擎事件上下文，无窗口，host 语义与
+tool 池（host=None）一致，因此 `hooks/` 调用点推断为 tool surface，
+`mcp.call` / `lsp.query` / `net.upload` / `subagent.run` 这类 tool-only
+能力在 hook 内可直接 `caps_for` 取到。代价：ui-only 能力（`ui.notify` /
+`input.write` 等）在 hook 内拿不到——hook 确实需要它们时显式传
+`caps_for("ui.notify", surface="ui")`。
 
 排查用：`declared_for()` 返回该插件已解析的能力清单。
 

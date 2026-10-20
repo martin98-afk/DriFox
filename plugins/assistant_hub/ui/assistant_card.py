@@ -170,6 +170,28 @@ class AssistantCardWidget(QWidget):
         except Exception as e:
             logger.warning(f"[assistant_hub] 主线程回调异常: {e}")
 
+    def set_context_provider(self, provider) -> None:
+        """宿主拉模型接口：卡片存住 provider，需要时实时拉最新上下文。
+
+        宿主 _build_card_context 会解析正确的窗口（dock 卡=归属窗口，
+        全局卡=当前选中 tab），ctx["capabilities"] 是唯一可信窗口信息来源；
+        实时调用还顺带刷新宿主 note_host 登记，不再有滞后窗口。
+        """
+        self._context_provider = provider
+
+    def _ctx_caps_pool(self):
+        """实时拉宿主 ctx 取能力池（宿主已按正确窗口绑定+裁剪，失败返回 None）。"""
+        provider = getattr(self, "_context_provider", None)
+        if not callable(provider):
+            return None
+        try:
+            pool = (provider() or {}).get("capabilities")
+            if pool is not None and "window.current" in pool:
+                return pool
+        except Exception as e:
+            logger.debug(f"[DEBUG-hcur] ctx provider fail: {e}")
+        return None
+
     def set_context(self, ctx: dict) -> None:
         """主程序注入的卡片上下文（UIPluginRegistry 创建卡片时调用）。
 
@@ -459,7 +481,7 @@ class AssistantCardWidget(QWidget):
     def _memory_status(self, aid: str) -> str:
         """记忆状态文案：累计全局 + 项目记忆 + 日志字数。"""
         try:
-            wd = self._mgr._current_workdir()
+            wd = self._mgr._current_workdir(self._ctx_caps_pool())
             g = len((self._mgr.read_global_memory(aid) or "").strip())
             p = len((self._mgr.read_project_memory(aid, wd) or "").strip()) if wd else 0
             days = len(self._mgr.list_daily(aid, wd, limit=999)) if wd else 0
@@ -473,7 +495,7 @@ class AssistantCardWidget(QWidget):
         """记忆状态 + 健康行统一刷新（状态字数 + 健康/漂移）。"""
         self._memory.set_status(self._memory_status(aid))
         try:
-            self._memory.set_health(self._mgr.memory_health(aid, self._mgr._current_workdir()))
+            self._memory.set_health(self._mgr.memory_health(aid, self._mgr._current_workdir(self._ctx_caps_pool())))
         except Exception:
             self._memory.set_health(None)
 
@@ -483,7 +505,7 @@ class AssistantCardWidget(QWidget):
         dlg = SnapshotDialog(
             self._mgr,
             self._active_aid,
-            self._mgr._current_workdir(),
+            self._mgr._current_workdir(self._ctx_caps_pool()),
             parent=_host_window() or self.window(),
         )
         dlg.restored.connect(lambda: self._refresh_memory(self._active_aid))
@@ -492,7 +514,7 @@ class AssistantCardWidget(QWidget):
     def _on_migrate_memory(self, old_wd: str) -> None:
         if not self._active_aid or not old_wd:
             return
-        wd = self._mgr._current_workdir()
+        wd = self._mgr._current_workdir(self._ctx_caps_pool())
         if not wd:
             self._notify_error("当前没有设置工作目录")
             return
@@ -732,7 +754,7 @@ class AssistantCardWidget(QWidget):
         """查看项目记忆（当前工作目录 .drifox/memory/<aid>/MEMORY.md）。"""
         if not self._active_aid:
             return
-        wd = self._mgr._current_workdir()
+        wd = self._mgr._current_workdir(self._ctx_caps_pool())
         if not wd:
             self._notify_error("当前没有设置工作目录")
             return
@@ -745,7 +767,7 @@ class AssistantCardWidget(QWidget):
         """查看工作日志（最近一天全文 + 更早日期索引）。"""
         if not self._active_aid:
             return
-        wd = self._mgr._current_workdir()
+        wd = self._mgr._current_workdir(self._ctx_caps_pool())
         if not wd:
             self._notify_error("当前没有设置工作目录")
             return
@@ -755,12 +777,8 @@ class AssistantCardWidget(QWidget):
             return
         parts = [f"# {items[0]['date']}\n{self._mgr.read_daily(self._active_aid, wd, items[0]['date']).strip()}"]
         if len(items) > 1:
-            parts.append(
-                "# 更早的日志\n" + "\n".join(f"- {it['date']}（{it['chars']} 字）" for it in items[1:])
-            )
-        _open_dialog(
-            TextViewOverlay("工作日志", "\n\n".join(parts), parent=_host_window() or self.window())
-        )
+            parts.append("# 更早的日志\n" + "\n".join(f"- {it['date']}（{it['chars']} 字）" for it in items[1:]))
+        _open_dialog(TextViewOverlay("工作日志", "\n\n".join(parts), parent=_host_window() or self.window()))
 
     def _on_clear_all(self) -> None:
         if not self._active_aid:
@@ -773,7 +791,7 @@ class AssistantCardWidget(QWidget):
         )
         if not ret:
             return
-        self._mgr.clear_all_memory(aid, self._mgr._current_workdir())
+        self._mgr.clear_all_memory(aid, self._mgr._current_workdir(self._ctx_caps_pool()))
         self._refresh_memory(aid)
         self._notify("记忆已清除")
 

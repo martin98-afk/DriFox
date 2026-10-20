@@ -1440,23 +1440,37 @@ class AssistantManager:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _current_workdir() -> str:
-        """当前激活对话窗口的工作目录（UI 查看/反思/统计等无 tool_ctx 场景用）。
+    def _current_workdir(pool=None) -> str:
+        """当前应使用的项目工作目录（UI 查看/反思/统计等无 tool_ctx 场景用）。
 
-        多窗口多项目：跟随 TabManager 当前选中标签页的窗口取 workdir。
-        不取注册表第一个窗口——多窗口选不同项目时那会看错项目记忆
-        （同 chat_worker/subagent_worker 已修过的「全局单例串味」问题）。
-        激活窗口命中即以它为准（workdir 未设置就返回空串，不回退别窗）；
-        拿不到激活窗口时才回退 UIPluginRegistry 注册表（单窗/嵌入场景）。
+        pool（宿主 ctx 能力池）优先：宿主已按卡片形态解析窗口并裁剪授权
+        （dock 卡=归属窗口，全局卡=当前选中 tab），插件只消费语义快照，
+        全程不持有窗口对象。None（后台线程）时回退全局链路：caps_for
+        （授权仍按 manifest 裁剪）→ UIPluginRegistry 注册表。
+
+        历史 bug（0.4.0）：manifest api_version=2 但 capabilities 漏声明
+        window.current → caps_for 恒 None → 每次落到注册表 fallback 取
+        「第一个注册窗口」的 workdir，多窗口下必然串味。
         """
+        if pool is not None and "window.current" in pool:
+            try:
+                snap = pool["window.current"]
+                snap = snap() if callable(snap) else snap
+                logger.debug(f"[DEBUG-hcur] ctx pool snapshot: {snap}")
+                if snap and snap.get("workdir"):
+                    return str(snap["workdir"])
+            except Exception as e:
+                logger.debug(f"[DEBUG-hcur] ctx pool path error: {e}")
         try:
+            # 无池（后台线程等）：全局链路（授权仍按 manifest 声明裁剪）。
+            # 卡片路径已由 _ctx_caps_pool() 实时刷新宿主 note_host。
             snap = _caps("window.current")
             if snap is not None:
                 snap = snap()
             if snap and snap.get("workdir"):
                 return str(snap["workdir"])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[DEBUG-hcur] current-tab path error: {e}")
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
