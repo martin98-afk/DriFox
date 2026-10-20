@@ -1456,11 +1456,10 @@ class AssistantManager:
             try:
                 snap = pool["window.current"]
                 snap = snap() if callable(snap) else snap
-                logger.debug(f"[DEBUG-hcur] ctx pool snapshot: {snap}")
                 if snap and snap.get("workdir"):
                     return str(snap["workdir"])
             except Exception as e:
-                logger.debug(f"[DEBUG-hcur] ctx pool path error: {e}")
+                logger.debug(f"[assistant_hub] 取能力池窗口快照失败，回退全局链: {e}")
         try:
             # 无池（后台线程等）：全局链路（授权仍按 manifest 声明裁剪）。
             # 卡片路径已由 _ctx_caps_pool() 实时刷新宿主 note_host。
@@ -1470,7 +1469,7 @@ class AssistantManager:
             if snap and snap.get("workdir"):
                 return str(snap["workdir"])
         except Exception as e:
-            logger.debug(f"[DEBUG-hcur] current-tab path error: {e}")
+            logger.debug(f"[assistant_hub] 全局链取窗口快照失败: {e}")
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 

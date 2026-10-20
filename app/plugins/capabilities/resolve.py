@@ -119,9 +119,6 @@ def _resolve_host(plugin: str, surface: str) -> Any:
     """
     host = _plugin_hosts.get(plugin)
     if host is not None:
-        logger.debug(
-            f"[DEBUG-hcur] _resolve_host plugin={plugin} src=note_host id={getattr(host, '_window_id', None)}"
-        )
         return host
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -131,9 +128,6 @@ def _resolve_host(plugin: str, surface: str) -> Any:
         if active is None:
             widgets = getattr(reg, "_window_main_widgets", None) or {}
             active = next(iter(widgets.values()), None)
-        logger.debug(
-            f"[DEBUG-hcur] _resolve_host plugin={plugin} src=registry-fallback id={getattr(active, '_window_id', None)}"
-        )
         return active
     except Exception:
         return None
