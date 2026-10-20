@@ -35,7 +35,6 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     PushButton,
-    StrongBodyLabel,
     SwitchButton,
     ToolButton,
     isDarkTheme,
@@ -846,8 +845,13 @@ class MCPServerRow(CardWidget):
         else:
             self._icon_label.deleteLater()
 
-        name_label = StrongBodyLabel(data.get("name", ""))
-        name_label.setFixedWidth(100)
+        # 名称：宽度自适应（短名自然伸展，长名 260px 封顶省略 + tooltip 全名）。
+        # 旧实现 setFixedWidth(100) 把长名（如 dingtalk-aipower）硬截成 dingtalk-a。
+        name_label = _ElidedLabel(data.get("name", ""))
+        name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        name_label.setMinimumWidth(100)
+        name_label.setMaximumWidth(260)
+        name_label.setStyleSheet("font-weight: 600;")
         top.addWidget(name_label)
         # 名称与操作组之间的弹性：短名后空白收拢在中间，操作控件靠右成组
         top.addStretch(1)
