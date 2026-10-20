@@ -1168,7 +1168,7 @@ class AssistantManager:
             else "{项目根}/" + store.PROJECT_DIR_NAME + "/" + store.MEMORY_SUBDIR + "/" + aid
         )
         limits = self.memory_max_chars(aid)
-        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir)]
+        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir, limits)]
 
         # 全局记忆
         g_text = (store.read_global_memory(aid_dir) or "").strip()
