@@ -102,14 +102,16 @@ python tools/validate_plugins.py
 
 ## 能力声明（capabilities + api_version）
 
-新插件一律写 `"api_version": 2` 并显式声明清单，运行时经 `ctx["capabilities"]` 取用。
+新插件一律写 `"api_version": 2` 并显式声明清单，运行时经 `ctx["capabilities"]` 取用；无 ctx 的场景（模块级初始化等）统一走 `from app.plugins.sdk import caps_for`，不要直连主程序内部模块。
 
 ```json
 {
   "api_version": 2,
-  "capabilities": ["session.read", "input.read", "ui.notify", "state.kv"]
+  "capabilities": ["session.read", "input.read", "ui.notify", "state.kv", "config.read"]
 }
 ```
+
+**宿主门槛硬闸**：manifest 声明值高于 `app/plugins/version_gate.py` 的 `HOST_PLUGIN_API_VERSION`（当前 **2**）→ 整个插件拒载（load_blocked，工具/UI/hooks 全不加载），日志一行 `[VersionGate] 插件 'x' api_version=N 高于宿主支持的 M，拒载`。回归守卫 `tests/core/test_api_version_contract.py` 扫全仓 manifest，声明超标即测试失败。宿主升版前别抢先声明更高值。
 
 裁剪规则：
 
@@ -120,7 +122,7 @@ python tools/validate_plugins.py
 | 无该字段且 `api_version <= 1` | 兼容期全量放行 + warning |
 | 无该字段且 `api_version >= 2` | 等同 `[]` |
 
-能力清单、代码写法、新增能力的四步流程见 [docs/plugins/capabilities.md](../../../../../docs/plugins/capabilities.md)。
+能力清单（含 `config.read`：按 key 读主程序非敏感配置，密钥类字段拒读回落 default）、SDK 稳定性分级契约（`app/plugins/sdk.py` 是唯一稳定契约面，符号分 stable / provisional 两级；越界 import 自检 `python tools/check_sdk_imports.py`）、新增能力的四步流程见 [docs/plugins/capabilities.md](../../../../../docs/plugins/capabilities.md)。
 
 ---
 

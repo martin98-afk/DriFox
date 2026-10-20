@@ -93,6 +93,18 @@ python -m py_compile plugins/<name>/hooks/<name>_hook.py
 
 > 注意：py_compile 会在同目录生成 `__pycache__/`，提交插件前删掉它。
 
+### SDK 越界 import 自检（在 DriFox 主仓库内）
+
+插件只准依赖 `app.plugins.sdk` 与 `ctx["capabilities"]`，直连 `app.core.*` / `app.widgets.*` 属越界（主程序一重构插件就炸）：
+
+```bash
+# DriFox 主仓库根目录执行，静态核对改动文件 import 的符号是否都在 sdk 契约面
+python tools/check_sdk_imports.py
+# [sdk-import-check] OK（80 个 sdk 符号，改动文件全部命中）
+```
+
+用户级插件（`~/.drifox/plugins/`）不在主仓库 git 改动范围内，可临时复制进仓库再查。
+
 ---
 
 ## 4. 技能包自检脚本
