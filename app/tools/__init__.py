@@ -313,7 +313,15 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id:
             logger.warning(f"[BuiltinTools] 读取动态描述构造器失败: {e}")
 
     # 动态生成 subagent_para 工具描述
-    subagent_para_desc = "批量分发子智能体任务(并行执行)。调完后不可等——继续调其他工具或结束本轮。完成后系统发[后台任务状态]，届时用subagent_status查。"
+    # 委托消息自包含纪律（源自 WorkBuddy A2A 协议）：子智能体默认看不到主对话，
+    # 委托方必须在 description 里写全背景/目标/约束/期望产出，否则任务必然跑偏。
+    subagent_para_desc = (
+        "批量分发子智能体任务(并行执行)。调完后不可等——继续调其他工具或结束本轮。"
+        "完成后系统发[后台任务状态]，届时用subagent_status查。"
+        "\n\n委托消息自包含：子智能体默认看不到你们当前的对话。description 必须写全"
+        "背景、目标、约束、期望产出四要素；大段参考资料放 context 字段；"
+        "含糊指代（「刚才的」「上面那个」）换成具体名称/路径/结论。"
+    )
     if subagent_names:
         subagent_para_desc += "\n\n可用子智能体见系统提示 ## Available Subagents。"
 
