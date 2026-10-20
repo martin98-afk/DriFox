@@ -4,7 +4,7 @@
 覆盖三件事：
 1. 授权仍按 manifest 声明裁剪（不因为走 caps_for 就拿到声明外的能力）
 2. host 解析：插件绑定窗口 > 活跃窗口（后台线程不再恒 host=None）
-3. surface 推断：plugins/<name>/tools/ 下的调用走 tool surface
+3. surface 推断：plugins/<name>/tools/ 与 hooks/ 下的调用走 tool surface
 """
 
 from __future__ import annotations
@@ -118,6 +118,62 @@ def test_host_binding_used_for_host_bound_capability(reg, fake_tm, monkeypatch):
     assert read()["text"] == "来自绑定窗口"
 
 
+def test_window_current_prefers_host_over_active(reg, fake_tm, monkeypatch):
+    """window.current 必须回答 host 窗口快照；tm 选中窗口仅作无 host 时的兜底。
+
+    回归：浮动卡开在窗口 A，用户切到标签 B——记忆/工作台页面曾读到 B 窗口
+    的项目（旧 provider 无视 host，恒取 tm.get_current_window）。
+    """
+    from app.plugins.capabilities import resolve
+
+    _fake_pm(monkeypatch, ["window.current"])
+    win_a = _fake_window(workdir="/proj-a", session_id="s-a")
+    win_b = _fake_window(workdir="/proj-b", session_id="s-b")
+    fake_tm(SimpleNamespace(get_current_window=lambda: win_b))
+    resolve.note_host("demo", win_a)
+
+    snap = resolve.caps_for("window.current", plugin="demo")()
+    assert snap is not None
+    assert snap["workdir"] == "/proj-a"
+    assert snap["session_id"] == "s-a"
+
+
+def test_window_current_ignores_non_window_host(reg, fake_tm, monkeypatch):
+    """host 是带 _window_id 但无 backend 的容器假窗口（如 __global__ 容器）时，
+    必须视为无效回退 tm 当前选中——只看 _window_id 会拿到空快照串错窗口。
+    """
+    from app.plugins.capabilities import resolve
+
+    _fake_pm(monkeypatch, ["window.current"])
+    fake_container = SimpleNamespace(_window_id="__global__")  # 无 backend
+    real_win = _fake_window(workdir="/current-tab")
+    fake_tm(SimpleNamespace(get_current_window=lambda: real_win))
+
+    pool = resolve.pool_for(surface="ui", host=fake_container, plugin="demo")
+    snap = pool["window.current"]()
+    assert snap is not None
+    assert snap["workdir"] == "/current-tab"
+
+
+def test_pool_for_explicit_host_wins(reg, fake_tm, monkeypatch):
+    """pool_for 显式 host 优先于全局解析链：卡片实例归属窗口语义。
+
+    多窗口各一份卡片实例时，卡片必须按实例归属取 window.current，
+    而非 note_host 最后登记窗口（全局单值与多实例归属天然错配）。
+    """
+    from app.plugins.capabilities import resolve
+
+    _fake_pm(monkeypatch, ["window.current"])
+    win_a = _fake_window(workdir="/proj-a", session_id="s-a")
+    fake_tm(SimpleNamespace(get_current_window=lambda: _fake_window(workdir="/proj-b")))
+
+    pool = resolve.pool_for(host=win_a)
+    assert pool is not None and "window.current" in pool
+    snap = pool["window.current"]()
+    assert snap["workdir"] == "/proj-a"
+    assert snap["session_id"] == "s-a"
+
+
 def test_host_falls_back_to_active_window(reg, fake_tm, monkeypatch):
     """无绑定时退到活跃窗口 —— 原来 host=None 时这里必然拿到空。"""
     from app.plugins.capabilities import resolve
@@ -166,6 +222,48 @@ def test_surface_inferred_from_tools_dir(reg, monkeypatch, tmp_path):
     assert api is not None and "names" in api
 
 
+def test_surface_inferred_from_hooks_dir(reg, monkeypatch, tmp_path):
+    """hooks/ 下的调用推断为 tool surface：tool-only 能力在 hook 内可用。"""
+    import importlib.util
+
+    _fake_pm(monkeypatch, ["tool.read"])
+    hooks_dir = tmp_path / "plugins" / "demo" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    probe = hooks_dir / "_caps_probe.py"
+    probe.write_text(
+        "def probe(plugin='demo'):\n"
+        "    from app.plugins.sdk import caps_for\n"
+        "    api = caps_for('tool.read', plugin=plugin)\n"
+        "    return api() if api is not None else None\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location("demo_caps_hooks_probe", probe)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    api = mod.probe(plugin="demo")
+    assert api is not None and "names" in api
+
+
+def test_hooks_dir_ui_only_capability_denied(reg, monkeypatch, tmp_path):
+    """hooks/ 推断为 tool surface 后，ui-only 能力拿不到（语义边界固化）。"""
+    import importlib.util
+
+    _fake_pm(monkeypatch, ["ui.notify", "tool.read"])
+    hooks_dir = tmp_path / "plugins" / "demo" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    probe = hooks_dir / "_caps_probe.py"
+    probe.write_text(
+        "def probe(plugin='demo'):\n"
+        "    from app.plugins.sdk import caps_for\n"
+        "    return caps_for('ui.notify', plugin=plugin)\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location("demo_caps_hooks_ui_probe", probe)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.probe(plugin="demo") is None
+
+
 def test_pool_for_returns_view(reg, fake_tm, monkeypatch):
     from app.plugins.capabilities import resolve
 
@@ -206,9 +304,7 @@ def test_caller_plugin_inferred_from_plugins_dir(reg, monkeypatch, tmp_path):
     nested.mkdir(parents=True)
     probe = nested / "_probe.py"
     probe.write_text(
-        "def probe():\n"
-        "    from app.plugins.sdk import caps_for\n"
-        "    return caps_for('config.read')\n",
+        "def probe():\n    from app.plugins.sdk import caps_for\n    return caps_for('config.read')\n",
         encoding="utf-8",
     )
     spec = importlib.util.spec_from_file_location("demo_market_probe", probe)

@@ -71,8 +71,12 @@ def _caller_info(skip: int) -> tuple[str, str]:
         idx = parts.index("plugins") + 1
         if idx < len(parts):
             plugin = parts[idx]
-            # plugins/<name>/tools/ → tool surface；其余（ui/ 等）保持 ui
-            if "tools" in parts[idx + 1 :]:
+            # plugins/<name>/tools/ 或 hooks/ → tool surface。
+            # hook 跑在引擎事件上下文，无窗口，host 语义与 tool 池（host=None）
+            # 一致，tool-only 能力（mcp.call 等）由此在 hook 内可用。
+            # 代价：ui-only 能力（ui.notify 等）在 hook 内拿不到，需显式传 surface="ui"。
+            rest = parts[idx + 1 :]
+            if "tools" in rest or "hooks" in rest:
                 surface = "tool"
     return _cache_caller(filename, plugin, surface)
 
@@ -110,10 +114,14 @@ def _resolve_host(plugin: str, surface: str) -> Any:
     """按插件名解析 host：绑定窗口 → 活跃窗口 → surface 默认 host。
 
     tool surface 没有窗口概念（host = ToolExecutor），直接返回 None，
-    由 tool_core 的 provider 自行从单例解析。
+    由 tool_core 的 provider 自行从单例解析。hooks/ 调用点同样推断为
+    tool surface（见 _caller_info），同走 host=None。
     """
     host = _plugin_hosts.get(plugin)
     if host is not None:
+        logger.debug(
+            f"[DEBUG-hcur] _resolve_host plugin={plugin} src=note_host id={getattr(host, '_window_id', None)}"
+        )
         return host
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -123,6 +131,9 @@ def _resolve_host(plugin: str, surface: str) -> Any:
         if active is None:
             widgets = getattr(reg, "_window_main_widgets", None) or {}
             active = next(iter(widgets.values()), None)
+        logger.debug(
+            f"[DEBUG-hcur] _resolve_host plugin={plugin} src=registry-fallback id={getattr(active, '_window_id', None)}"
+        )
         return active
     except Exception:
         return None

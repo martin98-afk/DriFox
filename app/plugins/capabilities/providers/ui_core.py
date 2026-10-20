@@ -109,11 +109,21 @@ def _window_current(host: Any):
     插件原先 `tm.get_current_window()` 后再摸 `_current_session_id` /
     `_current_project` / `_current_workdir` 私有字段。这里一次性给出这些字段
     的语义副本：插件拿不到窗口对象，自然无从摸私有状态。
+
+    **host 优先**：浮动卡 / 工作台页等调用点的 host 就是其宿主窗口；多窗口
+    多项目下 TabManager 选中标签可能与卡片宿主不同，此处必须回答「宿主窗口」
+    的快照（这是 window.current 与 window.active 的语义分界），host 无效
+    （None / 非窗口）才退到当前选中窗口。
     """
 
     def snapshot():
-        tm = _resolve_tab_window()
-        win = tm.get_current_window() if tm is not None else None
+        # host 必须是对话窗口（有 backend）；__global__ 容器 / popout 壳这类
+        # 带 _window_id 的非窗口宿主不算，否则拿到空快照还静默回落错窗口
+        win = host if (getattr(host, "_window_id", "") and hasattr(host, "backend")) else None
+        src = "host" if win is not None else "tm-fallback"
+        if win is None:
+            tm = _resolve_tab_window()
+            win = tm.get_current_window() if tm is not None else None
         if win is None:
             return None
         project = getattr(win, "_current_project", "") or ""
@@ -126,6 +136,12 @@ def _window_current(host: Any):
                     workdir = resolver() or ""
                 except Exception:
                     workdir = ""
+        from loguru import logger
+
+        logger.debug(
+            f"[DEBUG-hcur] window.current src={src} host_id={getattr(host, '_window_id', None)} "
+            f"win={getattr(win, '_window_id', '')} project={project!r} workdir={workdir!r}"
+        )
         return {
             "window_id": getattr(win, "_window_id", ""),
             "backend": getattr(win, "backend", None),
@@ -219,9 +235,7 @@ def _resolve_active_host(host: Any):
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         reg = UIPluginRegistry.get_instance()
-        return getattr(reg, "_main_widget", None) or next(
-            iter(getattr(reg, "_window_main_widgets", {}).values()), None
-        )
+        return getattr(reg, "_main_widget", None) or next(iter(getattr(reg, "_window_main_widgets", {}).values()), None)
     except Exception:
         return None
 
@@ -533,9 +547,7 @@ def _ui_dialog(host: Any):
     def prompt(title: str, hint: str = "", default_text: str = "") -> object:
         from app.widgets.common_dialogs import SingleInputDialog
 
-        dlg = SingleInputDialog(
-            title, hint=hint, default_text=default_text, parent=_parent()
-        )
+        dlg = SingleInputDialog(title, hint=hint, default_text=default_text, parent=_parent())
         box = {}
         dlg.confirmed.connect(lambda text: box.__setitem__("text", text))
         dlg.exec_()
@@ -578,9 +590,7 @@ def _ui_card_show(host: Any):
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            UIPluginRegistry.get_instance()._show_floating_card(
-                card_id, main_widget=host if host is not None else None
-            )
+            UIPluginRegistry.get_instance()._show_floating_card(card_id, main_widget=host if host is not None else None)
             return True
         except Exception as e:
             logger.warning(f"[Capability] 显示浮动卡 {card_id} 失败: {e}")
@@ -683,8 +693,7 @@ def _plugin_control(host: Any):
 
             PluginHostService.get_instance().reload_plugin_targeted(name)
 
-        return {"suppress_watcher": suppress_watcher, "resume_watcher": resume_watcher,
-                "reload": reload}
+        return {"suppress_watcher": suppress_watcher, "resume_watcher": resume_watcher, "reload": reload}
 
     return api
 
@@ -922,12 +931,8 @@ def register(registry) -> None:
     reg.register("plugin.read", _plugin_read, surface="ui", owner="core:ui")
     reg.register("plugin.control", _plugin_control, surface="ui", owner="core:ui")
     reg.register("ui.exclusive", _ui_exclusive, surface="ui", owner="core:ui")
-    reg.register(
-        "ui.exclusive", _enter_exclusive, surface="ui", owner="core:ui", legacy_key="enter_exclusive_ui_mode"
-    )
-    reg.register(
-        "ui.exclusive", _exit_exclusive, surface="ui", owner="core:ui", legacy_key="exit_exclusive_ui_mode"
-    )
+    reg.register("ui.exclusive", _enter_exclusive, surface="ui", owner="core:ui", legacy_key="enter_exclusive_ui_mode")
+    reg.register("ui.exclusive", _exit_exclusive, surface="ui", owner="core:ui", legacy_key="exit_exclusive_ui_mode")
     # 工具
     reg.register("tool.execute", _tool_execute, surface="ui", owner="core:ui")
     reg.register("tool.read", _tool_read, surface="ui", owner="core:ui")
