@@ -12303,6 +12303,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 只有占位失败的高度才需要下面的滚动值补偿
             above_removed_height = 0
             for batch_idx in range(0, active_start):
+                # 🛡️ 过期窗口防御：active_start 由视口/fallback 推算，截断等场景
+                # 下可能超出收缩后的 _batch_cards；前两处循环（懒渲染/原位重建）
+                # 均有 len 守卫，本循环此前漏保 → IndexError。列表只会前缀收缩，
+                # 首个越界即终止。
+                if batch_idx >= len(self._batch_cards):
+                    break
                 if self._batch_cards[batch_idx] is not None:
                     cards = self._batch_cards[batch_idx]
                     # 如果批次包含当前流式输出的助手卡片，跳过整个批次
@@ -12359,6 +12365,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # ── 收集下方（未来方向）需要回收的卡片 ──
             below_widgets = []
             for batch_idx in range(active_end, len(self._batch_cards)):
+                # 🛡️ 同上：range 上界在创建时求值，防执行中列表被收缩后越界
+                if batch_idx >= len(self._batch_cards):
+                    break
                 if self._batch_cards[batch_idx] is not None:
                     cards = self._batch_cards[batch_idx]
                     if cards and self._current_assistant_card in cards:
@@ -13873,6 +13882,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ==================== Batch 结构同步 ====================
 
+    def _clamp_visible_batch_window(self) -> None:
+        """把可见批次窗口夹回 _batch_cards 界内（批量结构收缩后调用）。
+
+        🐛 截断/删除 round/重新分组只同步 _message_batch 与 _batch_cards，
+        _visible_batch_start/end 残留旧大值。回收器在几何不可用时退回该窗口
+        （_resolve_viewport_range 的 fallback），推出越界 active_start →
+        above 回收循环 IndexError（2026-10-20 真机：流式期间每 500ms 崩一次，
+        几何可用的拍不崩故呈间歇性）。
+        """
+        n = len(self._batch_cards)
+        if n == 0:
+            self._visible_batch_start = 0
+            self._visible_batch_end = 0
+            return
+        if self._visible_batch_start >= n:
+            self._visible_batch_start = n - 1
+        if self._visible_batch_end > n:
+            self._visible_batch_end = n
+
     def _sync_batch_structures(self):
         """
         同步 _message_batch 与 session.messages 的当前状态。
@@ -13894,6 +13922,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
         elif new_len < len(self._batch_cards):
             self._batch_cards = self._batch_cards[:new_len]
+        # 🛡️ 结构收缩后窗口可能残留旧大值，夹回界内（见 helper 注释）
+        self._clamp_visible_batch_window()
 
     def _register_new_cards_into_batches(self) -> None:
         """把 chat_layout 中尚未登记进 _batch_cards 的卡片补齐登记。
@@ -13992,6 +14022,8 @@ class OpenAIChatToolWindow(ToolWindow):
             card._message_index = batch_idx
 
         self._batch_cards = new_batch_cards
+        # 🛡️ 重建后批次数变化，窗口夹回界内（见 _clamp_visible_batch_window）
+        self._clamp_visible_batch_window()
         # [T36 P2] 公共重建出口：卡片集合与顺序已变 → 作废节点定位缓存。
         # 一处覆盖 _delete_user_round / _remove_interject_ghost_card / 截断三条路径。
         self._bump_layout_epoch()
@@ -16379,6 +16411,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
         elif new_len < len(self._batch_cards):
             self._batch_cards = self._batch_cards[:new_len]
+        # 🛡️ 截断后窗口残留旧大值会把回收器 fallback 推出界，夹回
+        self._clamp_visible_batch_window()
         # 重建 user 前缀和缓存
         self._build_user_prefix_cache()
 
