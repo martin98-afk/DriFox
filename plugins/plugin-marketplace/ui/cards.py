@@ -587,10 +587,16 @@ class _PluginDetailDialog(MaskDialogBase):
         self._local_version = local_version
         # "enabled"/"disabled"/"system"/"builtin_enabled"/"builtin_disabled"/""
         self._status = status
-        # 平台兼容检查（platforms 缺省 = 兼容，存量插件零影响）
-        from app.plugins.deps_loader import check_platform
+        # 平台 + 宿主版本兼容（均缺省 = 兼容，存量插件零影响）
+        from app.plugins.deps_loader import check_host_compat, check_platform
 
-        self._plat_ok, self._plat_reason = check_platform(plugin_meta)
+        # 平台与版本各自保留原始判定：详情弹窗要分别展示「支持平台」与「需要 DriFox」
+        self._plat_ok_platform, self._platform_reason = check_platform(plugin_meta)
+        self._plat_ok, self._plat_reason = self._plat_ok_platform, self._platform_reason
+        self._ver_ok, self._ver_reason = check_host_compat(plugin_meta)
+        if not self._ver_ok:
+            self._plat_ok = False
+            self._plat_reason = self._ver_reason
         self._init_ui(tc, tcs, ff, fs, accent_bg, card_bg, border_c)
 
     def _init_ui(self, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
@@ -750,17 +756,37 @@ class _PluginDetailDialog(MaskDialogBase):
             base_rows.append((FluentIcon.PEOPLE, "作者", author_val))
         elif author:
             base_rows.append((FluentIcon.PEOPLE, "作者", _field_value(str(author))))
+        # 宿主版本要求（未声明不显示，老插件零噪音）
+        min_host = self._meta.get("min_host_version")
+        if min_host:
+            from app.plugins.deps_loader import host_version_string
+
+            if self._ver_ok:
+                base_rows.append(
+                    (FluentIcon.IOT, "需要 DriFox", _field_value(f"v{min_host} 及以上"))
+                )
+            else:
+                need = _field_value(f"v{min_host} 及以上")
+                need.setStyleSheet(
+                    f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
+                )
+                base_rows.append((FluentIcon.IOT, "需要 DriFox", need))
+                cur = _field_value(f"当前 v{host_version_string()}，请先升级 DriFox")
+                cur.setStyleSheet(
+                    f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
+                )
+                base_rows.append((FluentIcon.SYNC, "当前版本过低", cur))
         # 平台兼容（platforms 缺省不显示，全平台插件零噪音）
         platforms = self._meta.get("platforms")
         if isinstance(platforms, list) and platforms:
             plat_names = {"windows": "Windows", "linux": "Linux", "darwin": "macOS"}
-            if self._plat_ok:
+            if self._plat_ok_platform:
                 base_rows.append(
                     (FluentIcon.IOT, "支持平台", _chips([plat_names.get(p, p) for p in platforms]))
                 )
             else:
                 plat_text = " / ".join(plat_names.get(p, p) for p in platforms)
-                bad = _field_value(f"{plat_text}（{self._plat_reason}）")
+                bad = _field_value(f"{plat_text}（{self._platform_reason}）")
                 bad.setStyleSheet(
                     f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
                 )
@@ -832,9 +858,10 @@ class _PluginDetailDialog(MaskDialogBase):
         btn_layout.setSpacing(10)
 
         # 主操作：按状态给出（已安装且无更新 → 禁用态「已安装」；
-        # 平台不兼容 → 禁用态「当前平台不支持」）
+        # 平台不兼容 → 「当前平台不支持」；宿主版本过低 → 「版本过低」）
         if not self._plat_ok:
-            main_text, main_fn = "当前平台不支持", None
+            main_text = "版本过低" if not self._ver_ok else "当前平台不支持"
+            main_fn = None
         elif self._has_update:
             main_text, main_fn = "更新", self._on_update
         elif self._installed:
@@ -1385,10 +1412,16 @@ class _PluginRow(QFrame):
         self._tc = tc or _text_color()
         self._tcs = tcs or _text_color(secondary=True)
         self._tags = self._compute_tags(plugin_meta)
-        # 平台兼容（platforms 缺省 = 兼容）：未安装且不兼容 → 安装按钮置灰
-        from app.plugins.deps_loader import check_platform
+        # 平台 + 宿主版本兼容（均缺省 = 兼容）：任一不满足 → 安装/更新按钮置灰
+        from app.plugins.deps_loader import check_host_compat, check_platform
 
-        self._plat_ok, self._plat_reason = check_platform(plugin_meta)
+        self._plat_ok_platform, self._platform_reason = check_platform(plugin_meta)
+        self._plat_ok, self._plat_reason = self._plat_ok_platform, self._platform_reason
+        self._ver_ok, self._ver_reason = check_host_compat(plugin_meta)
+        # 合并成单一闸口：_plat_ok 保留原名（下游多处引用），语义扩为「可安装」
+        if not self._ver_ok:
+            self._plat_ok = False
+            self._plat_reason = self._ver_reason
         # 本地路径单次解析并缓存：图标/目录按钮复用（避免每行多轮磁盘扫描）
         self._local_path = self._resolve_local_path()
         self._setup_ui()
@@ -1693,6 +1726,14 @@ class _PluginRow(QFrame):
             self._btn.setEnabled(False)
             self._btn.setStyleSheet(self._original_btn_style)
             self._btn.setVisible(True)
+        elif not self._plat_ok:
+            # 平台 / 宿主版本不兼容：置灰并说明原因（详情弹窗可见完整对比）
+            # 必须先于 _has_update 判断——不兼容时的「更新」同样不该放行
+            self._btn.setText(self._blocked_text())
+            self._btn.setEnabled(False)
+            self._btn.setToolTip(self._blocked_reason())
+            self._btn.setStyleSheet(self._outline_btn_style("#9E9E9E"))
+            self._btn.setVisible(True)
         elif self._has_update:
             self._btn.setText("更新")
             self._btn.setEnabled(True)
@@ -1706,13 +1747,6 @@ class _PluginRow(QFrame):
         elif self._installed:
             # 已安装且无更新：主按钮隐藏（左侧详情按钮已可查看完整信息）
             self._btn.setVisible(False)
-        elif not self._plat_ok:
-            # 未安装且平台不兼容：置灰「不支持此平台」（详情弹窗可见原因）
-            self._btn.setText("不支持此平台")
-            self._btn.setEnabled(False)
-            self._btn.setToolTip(self._plat_reason)
-            self._btn.setStyleSheet(self._outline_btn_style("#9E9E9E"))
-            self._btn.setVisible(True)
         else:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
@@ -1722,6 +1756,16 @@ class _PluginRow(QFrame):
         self._update_manage_buttons()
 
     # ── 管理按钮（启用/禁用/卸载，行内直接操作） ─────────────
+
+    def _blocked_text(self) -> str:
+        """不可安装时按钮文案：区分「版本过低」与「平台不支持」。"""
+        return "版本过低" if not getattr(self, "_ver_ok", True) else "不支持此平台"
+
+    def _blocked_reason(self) -> str:
+        """不可安装的完整原因（按钮 tooltip / 详情弹窗用）。"""
+        if not getattr(self, "_ver_ok", True):
+            return self._ver_reason
+        return self._plat_reason
 
     def _outline_btn_style(self, color: str) -> str:
         """描边按钮样式（安装/启用/禁用/卸载统一）：同色边框+彩色文字，hover 浅色底"""
