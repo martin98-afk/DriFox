@@ -13,7 +13,7 @@ import stat
 import sys
 import traceback
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -49,16 +49,47 @@ def _drifox_dir() -> Path:
 
 # ── 缓存类型定义 ──────────────────────────────────────────
 
-CACHE_DEFS: List[Tuple[str, str, str, str, bool]] = [
-    ("backups", "📁", "备份文件", "backups", True),
-    ("logs", "📝", "日志文件", "logs", False),
-    ("cache", "🗃️", "应用缓存", "cache", True),
-    ("screenshots", "📸", "截图文件", "screenshots", False),
-    ("archived", "📦", "归档会话", "archived", False),
-    ("share_sessions", "📤", "分享会话文件", "share/sessions", False),
+
+class CleanerItem(NamedTuple):
+    """可清理项定义"""
+
+    cid: str
+    icon: str  # icons.py 里的 SVG 图标键（线性风格，替代 emoji）
+    label: str
+    rel_path: str
+    dir_mode: bool  # 保留兼容：旧版二选一统计模式，现已统一递归，不再分支
+    default_checked: bool = True
+    tip: str = ""
+
+
+CACHE_DEFS: List[CleanerItem] = [
+    # 备份顶层两类：edits=编辑类（可安全清），deletes=删除类（误删恢复手段，默认保留）
+    CleanerItem(
+        "edits",
+        "copy",
+        "编辑类备份",
+        "backups/edits",
+        True,
+        True,
+        "AI 修改文件前的自动备份，可用于回滚；清掉后旧编辑无法撤销",
+    ),
+    CleanerItem(
+        "deletes",
+        "trash",
+        "删除类备份",
+        "backups/deletes",
+        True,
+        False,
+        "AI 删除文件前的自动备份（垃圾箱），误删后唯一恢复手段，建议保留",
+    ),
+    CleanerItem("logs", "file", "日志文件", "logs", False, False, "运行日志，排查问题时有用"),
+    CleanerItem("cache", "database", "应用缓存", "cache", True, True, "可重建的离线缓存"),
+    CleanerItem("screenshots", "camera", "截图文件", "screenshots", False, False),
+    CleanerItem("archived", "archive", "归档会话", "archived", False, False),
+    CleanerItem("share_sessions", "upload", "分享会话文件", "share/sessions", False, False),
     # 工具执行结果缓存:app/core/tool_result_persister.py 写入
     # {app_data_dir}/projects/{session_id}/tool-results/,属于可重建的离线缓存。
-    ("projects", "🔧", "工具缓存结果", "projects", True),
+    CleanerItem("projects", "wrench", "工具缓存结果", "projects", True, True),
 ]
 
 
@@ -167,9 +198,9 @@ def _delete_cache(path: Path, dir_mode: bool):
                     _rmtree_force(entry)
                 else:
                     entry.unlink()
-            except (OSError, PermissionError):
+            except OSError, PermissionError:
                 pass
-    except (OSError, PermissionError):
+    except OSError, PermissionError:
         pass
 
 
@@ -307,7 +338,7 @@ def _release_memory_light():
 def _release_memory_deep():
     """第二阶段：全代 GC + 工作集归还 OS + 清理 WebEngine 子进程（高危原生操作）。
 
-    ⚠️ 调用前必须让主线程事件循环排干在途回调（见 cards._on_memory_release 的
+    注意：调用前必须让主线程事件循环排干在途回调（见 cards._on_memory_release 的
     分拍设计）：本阶段的 gc.collect(2) 可能连带析构 Python 独占的 QObject，
     与 Chromium 后台线程正在派发的回调相撞会 access violation。
 
@@ -323,7 +354,7 @@ def _release_memory_deep():
     collected = gc.collect(2)
 
     # ── 6. 激进工作集归还 OS ──
-    # 🐛 崩溃修复（2026-09-11）：删除原步骤 6a 的 HeapCompact(GetProcessHeap(), 0)。
+    # 崩溃修复（2026-09-11）：删除原步骤 6a 的 HeapCompact(GetProcessHeap(), 0)。
     # 该调用在 UI 线程遍历并压缩进程默认堆，与 Chromium 十几个后台线程
     # （IO/GPU/worker/audio）的堆分配/释放直接竞态，是崩溃日志 crash_*.log 中
     # scanner.py:328 处 4 次 access violation 的直接崩点；且它只合并空闲块、
@@ -352,7 +383,7 @@ def _release_memory_deep():
 def _release_memory():
     """兼容入口：不分拍一次性执行两阶段（轻清理 → 深度释放）。
 
-    ⚠️ 推荐走 cards._on_memory_release 的分拍调用（light → 事件循环排干 → deep），
+    推荐走 cards._on_memory_release 的分拍调用（light → 事件循环排干 → deep），
     单拍同步执行时全代 GC 与 Chromium 在途回调撞车的概率显著更高。
 
     Returns:
@@ -390,11 +421,11 @@ class _ScanWorker(QObject):
     def run(self):
         try:
             sizes: Dict[str, int] = {}
-            for cid, _icon, _label, rel_path, dir_mode in CACHE_DEFS:
+            for item in CACHE_DEFS:
                 if self._cancelled:
                     return
-                full = self._drifox_dir / rel_path
-                sizes[cid] = _calc_dir_size(full, dir_mode)
+                full = self._drifox_dir / item.rel_path
+                sizes[item.cid] = _calc_dir_size(full, item.dir_mode)
             if self._cancelled:
                 return
             self.finished.emit(sizes)
@@ -412,7 +443,7 @@ class _CleanWorker(QObject):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, drifox_dir: Path, targets: List[Tuple[str, str, str, str, bool]]):
+    def __init__(self, drifox_dir: Path, targets: List[CleanerItem]):
         super().__init__()
         self._drifox_dir = drifox_dir
         self._targets = targets
@@ -420,13 +451,13 @@ class _CleanWorker(QObject):
     def run(self):
         try:
             freed: Dict[str, int] = {}
-            for cid, _icon, label, rel_path, dir_mode in self._targets:
-                self.progress.emit(label)
-                full = self._drifox_dir / rel_path
-                before = _calc_dir_size(full, dir_mode)
-                _delete_cache(full, dir_mode)
-                after = _calc_dir_size(full, dir_mode)
-                freed[cid] = before - after
+            for item in self._targets:
+                self.progress.emit(item.label)
+                full = self._drifox_dir / item.rel_path
+                before = _calc_dir_size(full, item.dir_mode)
+                _delete_cache(full, item.dir_mode)
+                after = _calc_dir_size(full, item.dir_mode)
+                freed[item.cid] = before - after
             self.finished.emit(freed)
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")

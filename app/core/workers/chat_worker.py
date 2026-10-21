@@ -4618,8 +4618,6 @@ class OpenAIChatWorker(QThread):
                 )
                 return True  # 已处理，继续（但不会执行工具）
 
-            self._sandbox_after_approve(tool_name, arguments)
-
         return True  # 允许执行
 
     def _sandbox_verdict(self, tool_name, arguments):
@@ -4643,44 +4641,59 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[Sandbox] 检查失败放行: {e}")
             return None
 
-    def _sandbox_after_approve(self, tool_name, arguments):
-        """审批通过后钩子：删除保护开启时，删除命令先经垃圾桶或快照
+    def _backup_delete_targets(self, arguments):
+        """删除类命令执行前，垃圾桶开启时把目标移入垃圾箱（软删除，可找回）
 
-        垃圾桶开启（delete.trash_enabled）→ 目标 move 进 trash 目录（软删除）；
-        关闭 → 维持 copy 快照。显式传 workdir（同 `_sandbox_verdict`）：相对路径
-        目标按工作目录解析，否则快照会按进程 cwd 解析而静默漏拍（2026-10-13）。
+        保留与否只由垃圾桶开关（delete.trash_enabled）控制：
+        开 → 目标 move 进垃圾箱目录，原命令不再实际删除；关 → 不保留，删除即真删。
+        与沙箱/删除审批开关无关（2026-10-21 修复：原为审批通过后钩子，且被
+        sandbox_enabled && delete_protection 双门绑死——垃圾桶开了但删除保护
+        没开时永不生效，即「垃圾箱不工作」的根因）。
+
+        挂在 `_execute_tool`：只有真正会执行的命令才会到这里（deny 已拒、
+        审批被拒均不进），不会对未执行的命令产生垃圾箱残留。
+        显式传 workdir（同 `_sandbox_verdict`）：相对路径目标按工作目录解析，
+        否则按进程 cwd 解析会静默漏移（2026-10-13 同款问题）。
         """
         try:
-            args = dict(arguments or {})
-            command = str(args.get("command") or "")
+            command = str(dict(arguments or {}).get("command") or "")
             if not command:
                 return
             from pathlib import Path
 
-            from app.tools.sandbox import SandboxConfig, snapshot_paths_before_delete, stash_delete_targets_to_trash
+            from app.tools.sandbox import (
+                SandboxConfig,
+                delete_exempt,
+                is_delete_command,
+                stash_delete_targets_to_trash,
+            )
 
-            cfg = SandboxConfig.get_instance()
-            if not cfg.get("sandbox_enabled") or not cfg.get("delete_protection"):
+            if not is_delete_command(command):
                 return
-            from app.utils.utils import get_app_data_dir
-
+            cfg = SandboxConfig.get_instance()
+            if not cfg.get("delete.trash_enabled"):
+                return
             wd = None
             try:
                 wd = self.tool_executor.get_workdir()
             except Exception:  # noqa: BLE001 - 取不到基准时回退内部默认
                 wd = None
             workdir = Path(wd) if wd else None
-            if cfg.get("delete.trash_enabled"):
-                trash_root = get_app_data_dir() / "backups" / "trash"
-                stash_delete_targets_to_trash(command, trash_root, workdir=workdir)
+            # 删除豁免路径内的目标不保留（豁免语义 = 完全不干预，与审批口径一致）
+            if delete_exempt(command, cfg, workdir=workdir):
                 return
-            backup_root = get_app_data_dir() / "backups" / "deleted"
-            snapshot_paths_before_delete(command, backup_root, workdir=workdir)
-        except Exception as e:  # noqa: BLE001 - 快照失败不阻断已批准执行
-            logger.warning(f"[Sandbox] 删除保护快照异常: {e}")
+            from app.utils.utils import get_app_data_dir
+
+            trash_root = get_app_data_dir() / "backups" / "deletes"
+            stash_delete_targets_to_trash(command, trash_root, workdir=workdir)
+        except Exception as e:  # noqa: BLE001 - 垃圾箱失败不阻断执行
+            logger.warning(f"[Sandbox] 删除垃圾箱异常: {e}")
 
     def _execute_tool(self, tool_name, arguments, tool_call_id):
         """执行单个工具调用。"""
+        # 删除类命令执行前一律备份（独立于沙箱/删除保护开关，见方法 docstring）
+        self._backup_delete_targets(arguments)
+
         from app.plugins.contracts.hook_policy import PreToolUseEvent
 
         is_team = _check_team_member(getattr(self.tool_executor, "_backend", None))

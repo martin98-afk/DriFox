@@ -70,16 +70,27 @@ def test_tools_in_returns_empty_on_registry_failure(monkeypatch):
     assert sandbox._tools_in("文件写入") == frozenset()
 
 
-# ── 审批通过后的删除保护钩子（_sandbox_after_approve 不依赖 self）──
+# ── 删除垃圾箱钩子（_backup_delete_targets：只看垃圾桶开关，与沙箱/删除审批无关）──
 
 
-def _call_after_approve(tool_name, arguments):
+def _call_backup(tool_name, arguments):
     from app.core.workers.chat_worker import OpenAIChatWorker
 
-    return OpenAIChatWorker._sandbox_after_approve(object(), tool_name, arguments)
+    return OpenAIChatWorker._backup_delete_targets(object(), arguments)
 
 
-def test_after_approve_snapshots_delete_target(tmp_path, monkeypatch):
+def _make_cfg(tmp_path, trash_enabled, sandbox=False, delete_approval=False):
+    SandboxConfig.reset_instance()
+    cfg = SandboxConfig(config_path=str(tmp_path / "sandbox_config.json"))
+    SandboxConfig._instance = cfg
+    cfg.set("sandbox_enabled", sandbox)
+    cfg.set("delete_protection", delete_approval)
+    cfg.set("delete.trash_enabled", trash_enabled)
+    return cfg
+
+
+def test_backup_moves_target_when_trash_enabled(tmp_path, monkeypatch):
+    """垃圾桶开启：删除目标 move 进垃圾箱（与沙箱/删除审批开关无关）"""
     from app.utils import utils as utils_mod
 
     victim = tmp_path / "gone.txt"
@@ -87,20 +98,19 @@ def test_after_approve_snapshots_delete_target(tmp_path, monkeypatch):
     data_dir = tmp_path / "appdata"
     monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: data_dir)
 
-    SandboxConfig.reset_instance()
-    cfg = SandboxConfig(config_path=str(tmp_path / "sandbox_config.json"))
-    SandboxConfig._instance = cfg
+    cfg = _make_cfg(tmp_path, trash_enabled=True)
     try:
-        cfg.set("sandbox_enabled", True)
-        cfg.set("delete_protection", True)
-        _call_after_approve("bash", {"command": f"rm {victim}"})
-        snapped = list((data_dir / "backups" / "deleted").rglob("*gone.txt"))
-        assert snapped and snapped[0].read_text(encoding="utf-8") == "precious"
+        _call_backup("bash", {"command": f"rm {victim}"})
+        stashed = list((data_dir / "backups" / "deletes").rglob("*gone.txt"))
+        assert stashed and stashed[0].read_text(encoding="utf-8") == "precious"
+        assert not victim.exists(), "原文件应已移入垃圾箱（软删除）"
     finally:
         SandboxConfig.reset_instance()
+    assert cfg is not None
 
 
-def test_after_approve_no_snapshot_when_disabled(tmp_path, monkeypatch):
+def test_backup_noop_when_trash_disabled(tmp_path, monkeypatch):
+    """垃圾桶关闭：不保留，删除即真删（不产生垃圾箱目录）"""
     from app.utils import utils as utils_mod
 
     victim = tmp_path / "gone.txt"
@@ -108,21 +118,42 @@ def test_after_approve_no_snapshot_when_disabled(tmp_path, monkeypatch):
     data_dir = tmp_path / "appdata"
     monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: data_dir)
 
-    SandboxConfig.reset_instance()
-    cfg = SandboxConfig(config_path=str(tmp_path / "sandbox_config.json"))
-    SandboxConfig._instance = cfg
+    _make_cfg(tmp_path, trash_enabled=False, sandbox=True, delete_approval=True)
     try:
-        cfg.set("delete_protection", False)
-        _call_after_approve("bash", {"command": f"rm {victim}"})
-        assert not (data_dir / "backups" / "deleted").exists()
+        _call_backup("bash", {"command": f"rm {victim}"})
+        assert not (data_dir / "backups" / "deletes").exists()
+        assert victim.exists(), "垃圾桶关闭时钩子不移动文件"
     finally:
         SandboxConfig.reset_instance()
 
 
-def test_after_approve_ignores_non_command_tools(tmp_path, monkeypatch):
+def test_backup_ignores_exempt_paths(tmp_path, monkeypatch):
+    """删除豁免路径内的目标不进垃圾箱（豁免 = 完全不干预）"""
     from app.utils import utils as utils_mod
 
     data_dir = tmp_path / "appdata"
     monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: data_dir)
-    _call_after_approve("write", {"path": str(tmp_path / "x.txt"), "content": "rm -rf /"})
-    assert not (data_dir / "backups" / "deleted").exists()
+
+    cfg = _make_cfg(tmp_path, trash_enabled=True)
+    cfg.set("delete.exempt_paths", ["logs/"])
+    try:
+        victim = tmp_path / "proj" / "logs" / "a.log"
+        victim.parent.mkdir(parents=True)
+        victim.write_text("x", encoding="utf-8")
+        _call_backup("bash", {"command": "rm logs/a.log"})
+        assert not list((data_dir / "backups" / "deletes").rglob("*a.log")), "豁免路径不应进垃圾箱"
+    finally:
+        SandboxConfig.reset_instance()
+
+
+def test_backup_ignores_non_command_tools(tmp_path, monkeypatch):
+    from app.utils import utils as utils_mod
+
+    data_dir = tmp_path / "appdata"
+    monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: data_dir)
+    _make_cfg(tmp_path, trash_enabled=True)
+    try:
+        _call_backup("write", {"path": str(tmp_path / "x.txt"), "content": "rm -rf /"})
+        assert not (data_dir / "backups" / "deletes").exists()
+    finally:
+        SandboxConfig.reset_instance()

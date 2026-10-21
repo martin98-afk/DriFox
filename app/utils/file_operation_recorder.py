@@ -46,7 +46,8 @@ class FileOperationRecorder:
     def __init__(self, session_store: Optional[SessionStore] = None):
         self._session_store = session_store or SessionStore.get_instance()
         from app.utils.utils import get_app_data_dir
-        self._backup_base_dir = get_app_data_dir() / "backups"
+        # 编辑类备份根目录（顶层两类：edits=编辑类，deletes=删除类，2026-10-21 起）
+        self._backup_base_dir = get_app_data_dir() / "backups" / "edits"
 
     def is_tracked_operation(self, tool_name: str) -> bool:
         """判断是否为需要记录的操作（registry 分组驱动）"""
@@ -362,7 +363,7 @@ def enforce_backup_limit(backup_base_dir, limit_mb: float, exclude_names: tuple 
     - `limit_mb <= 0` 表示**不限制，不做任何清理**（语义变更说明见下）
     - `limit_mb > 0`：超出上限时按 mtime 从旧到新删到上限内
     - `exclude_names`：顶层子目录名命中该元组的项整体跳过（用于分治配额，
-      例如 FileRecorder 备份清理时排除 `deleted/` 删除快照目录）
+      例如编辑类备份清理时排除删除类备份目录）
 
     返回被删文件路径列表。模块级独立函数：设置页手动触发 / 启动期触发均可调用。
 
@@ -418,14 +419,16 @@ def cleanup_backups_partitioned(backups_dir, limit_mb: float) -> dict:
     """分治清理两类备份（启动期与 UI「立即清理」共用同一入口）
 
     两类备份**分治配额**，不可改回统算：
-    - FileRecorder 备份（每次编辑一条，高频产物）：配额 = limit_mb，排除 deleted/
-    - 删除保护快照（用户误删后唯一恢复手段）：配额 = max(100, limit_mb // 4)
+    - 编辑类备份（每次编辑一条，高频产物）：配额 = limit_mb，排除 deletes/
+      （2026-10-21 起目录顶层分两类，本函数兼容旧布局：直接扫 backups_dir
+      顶层但排除 deletes/，旧 session_id 目录与新 edits/ 都能被清到）
+    - 删除类备份（用户误删后唯一恢复手段）：配额 = max(100, limit_mb // 4)
       下限 100MB 是保底，避免总配额很小时快照被挤成 0
 
     共享一个 FIFO 配额会让日常编辑把快照挤干净 —— 安全功能静默失效，不可接受。
 
     Args:
-        backups_dir: 备份根目录（其下 `deleted/` 为删除快照）
+        backups_dir: 备份根目录（其下 `deletes/` 为删除类备份）
         limit_mb: 总配额；<= 0 表示不限（两个分支都不清理）
 
     Returns:
@@ -435,8 +438,8 @@ def cleanup_backups_partitioned(backups_dir, limit_mb: float) -> dict:
     limit = int(float(limit_mb or 0))
     # 快照配额派生规则：总配额 1/4，下限 100MB
     snapshot_limit = max(100, limit // 4) if limit > 0 else 0
-    removed_files = enforce_backup_limit(base, limit, exclude_names=("deleted",))
-    removed_snaps = enforce_backup_limit(base / "deleted", snapshot_limit)
+    removed_files = enforce_backup_limit(base, limit, exclude_names=("deletes", "deleted", "trash"))
+    removed_snaps = enforce_backup_limit(base / "deletes", snapshot_limit)
     return {
         "file_backups_removed": removed_files,
         "snapshots_removed": removed_snaps,

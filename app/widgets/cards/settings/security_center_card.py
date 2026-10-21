@@ -4,7 +4,7 @@
 
 布局（对齐 WorkBuddy 截图）：
 - 沙箱安全卡：总开关 + 文件安全/命令安全/网络安全三个名单编辑区
-- 数据安全卡：删除保护开关 + 备份入口（容量上限展示）
+- 数据安全卡：删除审批开关 + 垃圾桶 + 备份入口（容量上限展示）
 - 系统级工具卡：豁免开关
 - 底部说明：能力边界（应用层拦截，非 OS 级沙箱）
 
@@ -251,7 +251,8 @@ class SecurityCenterCard(QWidget):
             "命令与文件操作经检查",
         )
         self.sandbox_switch.setToolTip(
-            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。网络外传检测、删除保护快照与进程配额均依赖本开关。"
+            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。网络外传检测与进程配额均依赖本开关；"
+            "删除文件是否保留与开关无关，只看垃圾桶开关。"
         )
         self.sandbox_switch.setChecked(bool(self._cfg.get("sandbox_enabled")))
         self.sandbox_switch.checkedChanged.connect(self._on_sandbox_toggled)
@@ -357,13 +358,13 @@ class SecurityCenterCard(QWidget):
         # ── 数据安全卡 ──
         self.delete_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
-            "删除保护",
+            "删除审批",
             "删除类命令强制审批",
         )
         self.delete_switch.setToolTip(
-            "开启后：删除类命令强制审批。放行后目标默认移入垃圾桶（垃圾桶开）或自动快照（垃圾桶关），均可找回。"
-            "关闭后删除类命令不再审批；但命令黑名单（如 cacls）、网络外传、"
-            "路径黑名单与手动加严的策略仍会拦截。"
+            "开启后：删除类命令强制审批（放行/拒绝由你决定）。关闭后删除类命令不再审批；"
+            "是否保留被删文件只看下方「垃圾桶」开关。"
+            "命令黑名单（如 cacls）、网络外传、路径黑名单与手动加严的策略仍会拦截。"
         )
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
@@ -373,39 +374,39 @@ class SecurityCenterCard(QWidget):
         self.trash_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "垃圾桶",
-            "删除内容移入垃圾桶目录（软删除，可找回）",
+            "删除内容移入垃圾箱目录（软删除，可找回）",
         )
         self.trash_switch.setToolTip(
-            "开启后：删除命令审批放行后，目标先移动到垃圾桶目录（backups/trash），原命令不再实际删除。\n"
-            "关闭时：维持快照模式（copy 一份到 backups/deleted 后由原命令正常删除）。"
+            "开启后：删除命令执行前，目标先移动到垃圾箱目录（backups/deletes），原命令不再实际删除。\n"
+            "关闭时：不保留，删除即真删（原命令正常删除目标）。"
         )
         self.trash_switch.setChecked(bool(self._cfg.get("delete.trash_enabled")))
         self.trash_switch.checkedChanged.connect(self._on_trash_toggled)
 
-        # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不做快照
+        # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不进垃圾箱
         self._delete_exempt = _ListEditorCard(
             "删除豁免路径（这些目录内的删除不再弹审批，也不做快照，如 tests/）",
             "delete_exempt",
             "如 tests/ 或 D:/other_proj/logs",
             show_title=False,
-            tip="相对路径按工作目录解析。",
+            tip="这些目录内的删除不再弹审批，也不进垃圾箱。相对路径按工作目录解析（如 tests/）。",
         )
         self._delete_exempt_card = _expand(
             FIF.INFO if FIF else None,
             "删除豁免路径",
             "这些目录内的删除不再弹审批",
             self._delete_exempt,
-            tip="这些目录内的删除不再弹审批，也不做快照。相对路径按工作目录解析（如 tests/）。",
+            tip="这些目录内的删除不再弹审批，也不进垃圾箱。相对路径按工作目录解析（如 tests/）。",
         )
         layout.addWidget(self._delete_exempt_card)
 
         self.backup_dir_card = PushSettingCard(
             "打开备份目录",
             FIF.FOLDER if FIF else None,
-            "自动备份",
+            "编辑类备份",
             # C2：不含具体数值 —— 数值由下方 SpinBox 与 hint 承载，
             # 避免同屏两处显示同一配置但一处是构造期快照（改值后不一致）
-            "修改前自动备份原文件（FileRecorder）",
+            "修改前自动备份原文件（backups/edits）",
         )
         self.backup_dir_card.clicked.connect(lambda: self._open_backup_dir())
         layout.addWidget(self.backup_dir_card)
@@ -444,11 +445,11 @@ class SecurityCenterCard(QWidget):
         layout.addWidget(self.trash_switch)
 
         # ── 底部说明 ──
-        # N1：默认值提示（沙箱与删除保护默认关闭，用户需手动开启）
+        # N1：默认值提示（沙箱与删除审批默认关闭，用户需手动开启）
         # MCP / upload_file 说明：三类不受本页约束的操作，避免虚假安全感
         _note_text = (
             "说明：应用层拦截，非 OS 级沙箱隔离。\n"
-            "沙箱安全与删除保护默认关闭，需手动开启后才会拦截；"
+            "沙箱安全与删除审批默认关闭，需手动开启后才会拦截；"
             "读操作除黑名单外不受路径约束，白名单与 workdir 边界仅约束写入。\n"
             "MCP 工具与 upload_file / webfetch 不受本页约束。"
         )
@@ -499,11 +500,11 @@ class SecurityCenterCard(QWidget):
         return card
 
     def _build_data_group(self) -> "ExpandGroupSettingCard":
-        """删除安全：垃圾桶开关 + 豁免路径 + 恢复快照（审批开关已外提）"""
+        """删除豁免与备份：豁免路径 + 删除类备份统计（开关已全部外提）"""
         card = ExpandGroupSettingCard(
             FIF.DELETE if FIF else None,
-            "删除安全",
-            "垃圾桶 · 豁免路径 · 恢复快照",
+            "删除豁免与备份",
+            "豁免路径 · 删除类备份统计",
         )
         card.addGroupWidget(self.trash_switch)
         card.addGroupWidget(self._delete_exempt)
@@ -513,10 +514,10 @@ class SecurityCenterCard(QWidget):
         return card
 
     def _build_backup_group(self) -> "ExpandGroupSettingCard":
-        """自动备份（独立于删除保护）：备份卡 + 容量上限 + 清理"""
+        """编辑类备份（独立于删除类备份）：备份卡 + 容量上限 + 清理"""
         card = ExpandGroupSettingCard(
             FIF.FOLDER if FIF else None,
-            "自动备份",
+            "编辑类备份",
             "修改前自动备份原文件 · 容量上限与清理",
         )
         card.addGroupWidget(self.backup_dir_card)
@@ -729,7 +730,7 @@ class SecurityCenterCard(QWidget):
         return w
 
     def _build_snapshot_row(self) -> QWidget:
-        """删除快照：容量展示 + 打开目录 / 清空（清空需二次确认）"""
+        """删除类备份：容量展示 + 打开目录 / 清空（清空需二次确认）"""
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(16, 4, 16, 4)
@@ -737,10 +738,10 @@ class SecurityCenterCard(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(8)
-        label = QLabel("删除保护快照")
+        label = QLabel("删除类备份（垃圾箱）")
         label.setObjectName("sciTitle")
         label.setToolTip(
-            "快照是误删文件后的恢复手段，清空后不可找回。"
+            "AI 删除文件前自动移入/快照到此目录，是误删后的恢复手段，清空后不可找回。"
             "独立配额 = 备份上限的 1/4（下限 100 MB），不受「清理备份文件」影响。"
         )
         head.addWidget(label, 1)
@@ -906,7 +907,7 @@ class SecurityCenterCard(QWidget):
         """返回 (文件数, 总字节)；目录不存在返回 (0, 0)"""
         from app.utils.utils import get_app_data_dir
 
-        d = get_app_data_dir() / "backups" / "deleted"
+        d = get_app_data_dir() / "backups" / "deletes"
         if not d.exists():
             return (0, 0)
         files = [f for f in d.rglob("*") if f.is_file()]
@@ -921,15 +922,15 @@ class SecurityCenterCard(QWidget):
     def _refresh_snapshot_stats(self) -> None:
         count, size = self._deleted_dir_stats()
         mb = size / 1024 / 1024
-        self.snapshot_label.setText(f"已有 {count} 项快照，占用 {mb:.1f} MB，可用于恢复误删。")
+        self.snapshot_label.setText(f"已有 {count} 项删除备份，占用 {mb:.1f} MB，可用于恢复误删。")
         self.snapshot_clear_btn.setEnabled(count > 0)
-        self.snapshot_clear_btn.setToolTip("" if count > 0 else "当前没有快照")
+        self.snapshot_clear_btn.setToolTip("" if count > 0 else "当前没有删除备份")
 
     def _open_snapshot_dir(self):
         self._open_path_in_explorer(self._snapshot_dir())
 
     def _on_clear_snapshots(self):
-        """清空删除快照（破坏性操作，需二次确认）"""
+        """清空删除类备份（破坏性操作，需二次确认）"""
         count, _ = self._deleted_dir_stats()
         if count <= 0:
             return
@@ -937,8 +938,8 @@ class SecurityCenterCard(QWidget):
             from app.widgets.common_dialogs import ConfirmDialog
 
             dialog = ConfirmDialog(
-                title="清空删除快照",
-                content=f"将永久删除 {count} 项删除快照，清空后无法找回。确认继续？",
+                title="清空删除类备份",
+                content=f"将永久删除 {count} 项删除备份，清空后无法找回。确认继续？",
                 parent=self.window(),
             )
             if not dialog.exec():
@@ -952,7 +953,7 @@ class SecurityCenterCard(QWidget):
             d = self._snapshot_dir()
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
-            logger.info(f"[SecurityCenter] 已清空删除快照（{count} 项）")
+            logger.info(f"[SecurityCenter] 已清空删除类备份（{count} 项）")
             self._refresh_snapshot_stats()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[SecurityCenter] 清空快照失败: {e}")
@@ -961,7 +962,7 @@ class SecurityCenterCard(QWidget):
     def _snapshot_dir():
         from app.utils.utils import get_app_data_dir
 
-        return get_app_data_dir() / "backups" / "deleted"
+        return get_app_data_dir() / "backups" / "deletes"
 
     @staticmethod
     def _open_path_in_explorer(path) -> None:
@@ -1034,7 +1035,7 @@ class SecurityCenterCard(QWidget):
         self._cfg.save()
 
     def _open_backup_dir(self):
-        """打开备份根目录（复用跨平台实现，避免两套 explorer 调用漂移）"""
+        """打开编辑类备份目录（复用跨平台实现，避免两套 explorer 调用漂移）"""
         from app.utils.utils import get_app_data_dir
 
-        self._open_path_in_explorer(get_app_data_dir() / "backups")
+        self._open_path_in_explorer(get_app_data_dir() / "backups" / "edits")

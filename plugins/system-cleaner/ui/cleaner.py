@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import BodyLabel, MaskDialogBase, TransparentPushButton, isDarkTheme
 
+from .icons import svg_pixmap
 from .scanner import _format_size
 
 
@@ -29,13 +30,14 @@ class _CacheItemRow(QWidget):
 
     toggled = Signal()
 
-    def __init__(self, cache_id: str, icon: str, label: str, parent=None):
+    def __init__(self, cache_id: str, icon: str, label: str, parent=None, tip: str = "", default_checked: bool = True):
         super().__init__(parent)
         self._cache_id = cache_id
         self._icon = icon
         self._label = label
+        self._tip = tip
         self._size_bytes = 0
-        self._checked = True
+        self._checked = default_checked
         self._font_family = ""
         self._font_size = 0
         self._accent_color = "#62a0ea"
@@ -57,21 +59,28 @@ class _CacheItemRow(QWidget):
         self._update_styles()
 
     def _setup_ui(self):
-        self.setStyleSheet("background: transparent;")
+        # WA_StyledBackground：让 QSS background 在普通 QWidget 上生效（hover 高亮需要）
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setObjectName("cacheRow")
+        self._apply_row_bg()
+        if self._tip:
+            self.setToolTip(self._tip)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 4, 12, 4)
         layout.setSpacing(10)
 
         self._checkbox = QCheckBox(self)
-        self._checkbox.setChecked(True)
+        self._checkbox.setChecked(self._checked)
         self._checkbox.setFixedSize(18, 18)
         self._checkbox.stateChanged.connect(self._on_toggled)
         self._update_checkbox_style()
         layout.addWidget(self._checkbox)
 
-        self._icon_label = QLabel(self._icon, self)
-        self._icon_label.setFixedWidth(20)
-        self._icon_label.setStyleSheet("background: transparent; font-size: 15px;")
+        self._icon_label = QLabel(self)
+        self._icon_label.setFixedSize(20, 20)
+        self._icon_label.setAlignment(Qt.AlignCenter)
+        self._icon_label.setStyleSheet("background: transparent;")
+        self._render_icon()
         layout.addWidget(self._icon_label)
 
         _tc_init = "rgba(255,255,255,0.88)" if self._is_dark else "rgba(0,0,0,0.88)"
@@ -90,6 +99,23 @@ class _CacheItemRow(QWidget):
 
         self.setCursor(Qt.PointingHandCursor)
 
+    def _apply_row_bg(self):
+        hover = "rgba(255,255,255,0.05)" if self._is_dark else "rgba(0,0,0,0.04)"
+        self.setStyleSheet(
+            f"QWidget#cacheRow {{ background: transparent; border-radius: 6px; }}"
+            f"QWidget#cacheRow:hover {{ background: {hover}; }}"
+        )
+
+    def _render_icon(self):
+        """按主题渲染 SVG 线性图标（未勾选时随行文字一起降透明度）"""
+        if not hasattr(self, "_icon_label"):
+            return
+        opacity = 1.0 if self._checkbox.isChecked() else 0.35
+        base = 0.72 if self._is_dark else 0.60
+        alpha = base * opacity
+        color = f"rgba(255,255,255,{alpha:.2f})" if self._is_dark else f"rgba(0,0,0,{alpha:.2f})"
+        self._icon_label.setPixmap(svg_pixmap(self._icon, color, size=16, dpr=self.devicePixelRatioF()))
+
     def _update_styles(self):
         ff = self._font_family
         fs = self._font_size
@@ -107,7 +133,8 @@ class _CacheItemRow(QWidget):
             tcs = f"rgba(0,0,0,{0.45 * opacity})"
 
         font_qss = f"font-family: '{ff}';" if ff else ""
-        self._icon_label.setStyleSheet(f"background: transparent; font-size: {max(12, fs + 1)}px;")
+        self._render_icon()
+        self._apply_row_bg()
         self._name_label.setStyleSheet(
             f"color: {tc}; background: transparent; font-size: {max(13, fs - 1)}px; {font_qss}"
         )
