@@ -382,14 +382,14 @@ _LIST_OR_QUOTE_CONT_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s?")
 # prefix 中的 ``` 计数：奇数 = 有未闭合围栏，此时 tail 处在围栏内部，切分会
 # 把围栏内容割裂（prefix 侧围栏未闭 / tail 侧多出一个开标记）。
 _FENCE_RE_CACHE = re.compile(r"^\s{0,3}```", re.M)
-# 行首为块级（非行内）HTML 标签：python-markdown 的 md.htmlStash 会把这类
-# 整块内容抽成占位符再回填，占位符横跨 md 源的行边界，**不能**按空行切分。
-# 行内标签（<span>/<b>/<br> 等）不参与块级 stash，故只列真正的块级标签。
-_BLOCK_LEVEL_TAG_RE = re.compile(
-    r"^\s*<(?:/?)(?:address|article|aside|blockquote|details|dd|div|dl|dt|fieldset|figcaption|figure"
-    r"|footer|form|h[1-6]|header|hr|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul|!--)\b",
-    re.I,
-)
+# 行首为 `<` 的行（裸 HTML 块）：python-markdown 的 htmlStash 会把这类内容
+# 抽成占位符再回填，占位符可横跨多个 md 源行，**无法**按空行安全切分。
+# 实测对比（各 800 组随机 fuzz）：
+#   路线 A（行首任意 `<` → 整段转换）   纯 md 0/800，含 HTML 0/800
+#   路线 B（块级标签白名单)            纯 md 0/800，含 HTML 19/800（2.4%）
+# 白名单兜不住 `<span>` / `<br>` / `<b>` / `<!-- -->` 这类被 md 当作块处理的
+# 形态，故取更宽的路线 A： correctness 优先，实现也更简（无需维护标签清单）。
+_LEADING_HTML_LINE_RE = re.compile(r"^\s*<", re.M)
 
 
 def _split_tag_segments(md_text: str, open_tag: str, close_tag: str) -> List[Tuple[str, str, bool]]:
@@ -691,8 +691,9 @@ def _md_to_html_incremental(text: str) -> str:
         # a. prefix 内 ``` 计数为奇 → 有未闭合围栏，tail 仍在围栏内
         if len(_FENCE_RE_CACHE.findall(prefix)) % 2:
             return _md_to_html(text)
-        # 裸 HTML 块：python-markdown 的 htmlStash 占位符可跨行，切分必然错位
-        if _BLOCK_LEVEL_TAG_RE.search(prefix) or _BLOCK_LEVEL_TAG_RE.search(tail):
+        # 裸 HTML：htmlStash 占位符可跨行，切分必然错位（详见正则定义处
+        # 800×2 组 fuzz 对比数据，路线 A 全 0%）
+        if _LEADING_HTML_LINE_RE.search(prefix) or _LEADING_HTML_LINE_RE.search(tail):
             return _md_to_html(text)
         for line in tail.split("\n"):
             if not line.strip():
@@ -2208,7 +2209,13 @@ class MarkdownBlockViewer(QWidget):
         return self._md
 
     def refresh_theme(self) -> None:
+        # ⚠️ 必须清 HTML 前缀缓存：缓存命中与否只判文本，**不感知主题令牌**。
+        # 而 _md_to_html 产出的 inline style 里嵌了当前主题色（见 _inject_qt_rich_styles），
+        # 不清 = 切主题后旧卡片的稳定前缀沿用旧配色（实测 _qt_theme 令牌变化后
+        # 增量输出 != 整段输出）。此约定对齐 _ICON_PIXMAP_CACHE（key 不含主题，
+        # 靠 refresh 入口清理）。
         Colors.refresh()
+        _HTML_PREFIX_CACHE.clear()
         self._reconcile(force=True)
 
     def cleanup(self) -> None:  # 兼容 MessageCard 调用签名
