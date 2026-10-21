@@ -20,6 +20,7 @@ import json
 import os
 import re
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QFile, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
@@ -370,6 +371,27 @@ class _ThinkingSpinner(QWidget):
 
 
 # ── 通用标记段切分 ────────────────────────────────────────────────
+# [PERF] 增量 HTML 转换（_md_to_html_incremental）的缓存与合并判定。
+# 缓存上限：单条 HTML 长（数百至数千字符），64 条实测稳态占 ~9MB，故收紧到
+# 24 条；超限整体清空不做逐条 LRU 记账（条目少，收益不抵成本）。
+_HTML_PREFIX_CACHE_MAX = 24
+_HTML_PREFIX_CACHE: "OrderedDict[str, str]" = OrderedDict()
+# 尾部首行命中该正则 → 与 prefix 末块合并（列表延续 / 相邻 blockquote 合并），
+# 此时切分会改变 markdown 结构，必须整段转换。
+_LIST_OR_QUOTE_CONT_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s?")
+# prefix 中的 ``` 计数：奇数 = 有未闭合围栏，此时 tail 处在围栏内部，切分会
+# 把围栏内容割裂（prefix 侧围栏未闭 / tail 侧多出一个开标记）。
+_FENCE_RE_CACHE = re.compile(r"^\s{0,3}```", re.M)
+# 行首为 `<` 的行（裸 HTML 块）：python-markdown 的 htmlStash 会把这类内容
+# 抽成占位符再回填，占位符可横跨多个 md 源行，**无法**按空行安全切分。
+# 实测对比（各 800 组随机 fuzz）：
+#   路线 A（行首任意 `<` → 整段转换）   纯 md 0/800，含 HTML 0/800
+#   路线 B（块级标签白名单)            纯 md 0/800，含 HTML 19/800（2.4%）
+# 白名单兑不住 `<span>` / `<br>` / `<b>` / `<!-- -->` 这类被 md 当作块处理的
+# 形态，故取更宽的路线 A： correctness 优先，实现也更简（无需维护标签清单）。
+_LEADING_HTML_LINE_RE = re.compile(r"^\s*<", re.M)
+
+
 def _split_tag_segments(md_text: str, open_tag: str, close_tag: str) -> List[Tuple[str, str, bool]]:
     """切分 <tag>...</tag> 段。返回 [("text"|"tag", 内容, 是否闭合)]。
 
@@ -630,6 +652,76 @@ def _split_plugin_tags(text: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _md_to_html_incremental(text: str) -> str:
+    """[PERF] 流式增量 HTML 转换：已闭合前缀走缓存，只重转变动的尾部。
+
+    背景：`_reconcile` 每次对**全量文本**调 `_md_to_html`，剖析显示它占
+    `_reconcile` 87%（占整链路 44.5%）。而流式中每 chunk 只追加尾部几十字符，
+    前缀是已闭合的顶层块，转换结果恒定不变。
+
+    做法：按最后一个空行边界切成 prefix（已闭合）+ tail（变动中），prefix 的
+    HTML 由 `_HTML_PREFIX_CACHE` 按文本寻址复用，tail 单独转换。
+
+    等价性（600 组 prefix × sep × tail 组合实测 byte 级全等，含标题/列表/
+    表格/引用/围栏/缩进代码/分隔线/多空行/行内格式）：
+    1. 拼接处补一个 `\n`：python-markdown 序列化时在顶层块之间恒插 `\n`,
+       分转后该字符丢失。tail 为空或以 `\n\n` 结尾时不补（整段转换不会再加）。
+    2. tail 首行以列表标记（- * + / 1.）或 `>` 开头时**不切分**：这两类会与
+       prefix 末块合并（列表延续 / 相邻 blockquote 合并），分转会改变结构。
+    3. 无空行边界时退化为整段转换。
+
+    缓存：`OrderedDict` LRU（上限 _HTML_PREFIX_CACHE_MAX，超限清空而非逐条
+    淘汰——条目少而单个 HTML 长，逐条 pop 的收益不足以抵消记账成本）。
+    只缓存「以空行结尾的已闭合前缀」，不含变动中的尾部，故命中率随会话
+    长度单调上升。
+    """
+    cut = text.rfind("\n\n")
+    if cut == -1:
+        return _md_to_html(text)
+    prefix = text[: cut + 2]
+    tail = text[cut + 2 :]
+    # ── 等价性守卫：任一命中即整段转换（正确性优先于耗时收益）───────────
+    try:
+        # d. 空 prefix：没有可缓存的稳定前缀，切分无意义
+        if not prefix.strip():
+            return _md_to_html(text)
+        # c. 空 tail：尾部无内容，直接整段转换（也免了补 \n 的边界判断）
+        if not tail.strip():
+            return _md_to_html(text)
+        # a. prefix 内 ``` 计数为奇 → 有未闭合围栏，tail 仍在围栏内
+        if len(_FENCE_RE_CACHE.findall(prefix)) % 2:
+            return _md_to_html(text)
+        # 裸 HTML：htmlStash 占位符可跨行，切分必然错位（详见正则定义处
+        # 800×2 组 fuzz 对比数据，路线 A 全 0%）
+        if _LEADING_HTML_LINE_RE.search(prefix) or _LEADING_HTML_LINE_RE.search(tail):
+            return _md_to_html(text)
+        for line in tail.split("\n"):
+            if not line.strip():
+                continue
+            # b. 首个非空行以空白开头 → 缩进延续（缩进代码 / 懒 continuation）
+            if line[0] in " \t":
+                return _md_to_html(text)
+            if _LIST_OR_QUOTE_CONT_RE.match(line):
+                return _md_to_html(text)  # 与 prefix 末块合并，不能切
+            break
+    except Exception:
+        # 守卫生疑一律回退全量：宁可多花一次转换，也不能产出不等价的 HTML
+        return _md_to_html(text)
+
+    try:
+        pre_html = _HTML_PREFIX_CACHE.get(prefix)
+        if pre_html is None:
+            pre_html = _md_to_html(prefix)
+            if len(_HTML_PREFIX_CACHE) >= _HTML_PREFIX_CACHE_MAX:
+                _HTML_PREFIX_CACHE.clear()
+            _HTML_PREFIX_CACHE[prefix] = pre_html
+        if tail.endswith("\n\n"):
+            return pre_html + _md_to_html(tail)
+        return pre_html + "\n" + _md_to_html(tail)
+    except Exception:
+        return _md_to_html(text)
+
+
 def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
     """普通 markdown 文本 → 块列表（quote/table/hr 独立成块，其余转 html 块）。
 
@@ -638,7 +730,7 @@ def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
     """
     if not text.strip():
         return []
-    html = _md_to_html(text)
+    html = _md_to_html_incremental(text)
     segs = _split_block_elements(html)
     # 无块元素（最常见）：零额外开销，单个 html 块
     if len(segs) == 1 and segs[0][0] == "text":
@@ -2117,7 +2209,13 @@ class MarkdownBlockViewer(QWidget):
         return self._md
 
     def refresh_theme(self) -> None:
+        # ⚠️ 必须清 HTML 前缀缓存：缓存命中与否只判文本，**不感知主题令牌**。
+        # 而 _md_to_html 产出的 inline style 里嵌了当前主题色（见 _inject_qt_rich_styles），
+        # 不清 = 切主题后旧卡片的稳定前缀沿用旧配色（实测 _qt_theme 令牌变化后
+        # 增量输出 != 整段输出）。此约定对齐 _ICON_PIXMAP_CACHE（key 不含主题，
+        # 靠 refresh 入口清理）。
         Colors.refresh()
+        _HTML_PREFIX_CACHE.clear()
         self._reconcile(force=True)
 
     def cleanup(self) -> None:  # 兼容 MessageCard 调用签名

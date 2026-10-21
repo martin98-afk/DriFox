@@ -64,12 +64,20 @@ class _StubWorker:
 
 @pytest.fixture()
 def patched_profile(monkeypatch):
-    """替换 chat_worker 模块内的 get_provider_profile 引用，隔离全局 registry"""
+    """替换 chat_worker 模块内的 resolve_extra_headers 引用，隔离全局 registry"""
 
     def _install(profile):
-        monkeypatch.setattr(
-            "app.core.workers.chat_worker.get_provider_profile", lambda cfg: profile
-        )
+        def _resolve(cfg, session_id=""):
+            headers = {}
+            extra = profile.get("extra_headers")
+            if isinstance(extra, dict):
+                for name, value in extra.items():
+                    headers[str(name)] = str(value)
+            if session_id and profile.get("session_header"):
+                headers[str(profile["session_header"])] = session_id
+            return headers
+
+        monkeypatch.setattr("app.core.workers.chat_worker.resolve_extra_headers", _resolve)
         return _StubWorker
 
     return _install
@@ -125,9 +133,9 @@ def test_undeclared_provider_no_header(patched_profile):
 def test_profile_exception_safe(monkeypatch):
     """profile 解析拖异常 → 返回 None 不影响请求构建"""
 
-    def _boom(cfg):
+    def _boom(cfg, session_id=""):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("app.core.workers.chat_worker.get_provider_profile", _boom)
+    monkeypatch.setattr("app.core.workers.chat_worker.resolve_extra_headers", _boom)
     stub = _StubWorker({"API_URL": "https://opencode.ai/zen/go/v1"}, "sess-abc")
     assert stub._provider_extra_headers() is None
