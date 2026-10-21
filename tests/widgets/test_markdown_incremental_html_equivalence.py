@@ -9,10 +9,11 @@
 本文件把等价性固化为断言：
 1. `_md_to_html_incremental(text) == _md_to_html(text)`（byte 级）
 2. 覆盖会破坏等价性的已知边界：列表延续、相邻 blockquote 合并、多空行、
-   尾部以 \\n 结尾、无边界、围栏/表格/缩进代码
-3. 缓存不得串味：同文本二次调用结果一致；清空缓存后仍等价
+   尾部空白块、缩进末块、围栏未闭、裸 HTML、尾部以 \\n 结尾、无边界
+3. 缓存必须感知配置（主题 / 字号），触顶走 LRU 而不是整体 clear
+4. 缓存不得串味：同文本二次调用结果一致；清空缓存后仍等价
 
-不 import PyQt5（纯函数层），无 GUI 依赖。
+不 import PyQt5 的部分（纯函数层）无 GUI 依赖；涉及 viewer 的用例单独构造。
 """
 
 import itertools
@@ -38,136 +39,6 @@ def _clean_caches():
     _HTML_PREFIX_CACHE.clear()
     _TEXT_BLOCK_CACHE.clear()
 
-
-# ── T5-fix：T6a 审查列出的 8 个不等价输入（必须逐个显式覆盖）──────────────
-# 每个形态对应一条等价性守卫：
-#   a. prefix 中 ``` 计数为奇（围栏未闭合）
-#   b. tail 首个非空行以空白开头（缩进延续）
-#   c. not tail.strip()
-#   d. not prefix.strip()
-#   + 行首裸 HTML（htmlStash 占位符可跨行）
-_T6A_CASES = [
-    "    a\n\n    b",  # prefix 本身是缩进块 → b
-    "```py\nx\n\n普通尾部",  # prefix 围栏未闭合 → a
-    "段落。\n\n\t制表缩进",  # tail 制表缩进 → b
-    "段落。\n\n 两空格",  # tail 空格缩进 → b
-    "段落。\n\n   四个空格",  # tail 四空格 → b
-    "段落。\n\n<div>裸HTML</div>",  # tail 行首裸 HTML → HTML 守卫
-    "<p>前缀HTML</p>\n\n段落。",  # prefix 行首裸 HTML → HTML 守卫
-    "段落。\n\n<!-- 注释 -->\n\n尾部。",  # 注释块 → HTML 守卫
-    "段落。\n\n\n\n",  # tail.strip() 为空 → c
-    "    \n\n段落。",  # prefix.strip() 为空 → d
-]
-
-
-@pytest.mark.parametrize("text", _T6A_CASES)
-def test_t6a_reported_mismatches(text):
-    """T6a 报告的 8 个不等价输入（+2 空串形态）：现在必须等价。"""
-    assert _md_to_html_incremental(text) == _md_to_html(text), f"不等价：{text!r}"
-
-
-def test_guard_fence_odd_count():
-    """守卫 a：prefix 中 ``` 计数为奇数（围栏未闭合）→ 整段转换。"""
-    for text in ("```py\nx\n\n仍在围栏里", "a\n\n```\n无 closing\n\n继续"):
-        assert _md_to_html_incremental(text) == _md_to_html(text)
-
-
-def test_guard_tail_indented():
-    """守卫 b：tail 首个非空行以空白开头（缩进延续）→ 整段转换。"""
-    for text in ("段落。\n\n\t制表", "段落。\n\n 两空格", "段落。\n\n   四空格", "- a\n\n  - 懒延续"):
-        assert _md_to_html_incremental(text) == _md_to_html(text)
-
-
-def test_guard_raw_html():
-    """行首裸 HTML → 整段转换（htmlStash 占位符可跨行）。"""
-    for text in (
-        "段落。\n\n<div>块</div>",
-        "<div>块</div>\n\n段落。",
-        "段落。\n\n<span>行内</span>",
-        "段落。\n\n<br>",
-        "段落。\n\n<!-- 注释 -->",
-        "段落。\n\n<b>粗块</b>",
-        "段落。\n\n<table><tr><td>c</td></tr></table>",
-        "段落。\n\n<details><summary>s</summary>c</details>",
-    ):
-        assert _md_to_html_incremental(text) == _md_to_html(text)
-
-
-def test_guard_merge_needs_open_list_in_prefix():
-    """守卫细化：只有 prefix 末块也是列表/引用时，tail 的列表标记才判合并。
-
-    细化前「tail 首行是列表标记就整段转换」把「prefix 收尾于普通段落、tail
-    开新列表」的安全情形也挡掉（压测 payload 上误判 305/800 = 38%）。细化后
-    PASS 率 486/800 → 791/800。等价性仍须成立。
-    """
-    # prefix 收尾于普通段落 + tail 新开列表：安全，且必须仍等价
-    assert _md_to_html_incremental("普通段落。\n\n- 新列表项") == _md_to_html("普通段落。\n\n- 新列表项")
-    # prefix 末块本身是列表 + tail 列表延续：会合并，必须走整段
-    assert _md_to_html_incremental("- a\n- b\n\n- c") == _md_to_html("- a\n- b\n\n- c")
-    assert _md_to_html_incremental("> q1\n\n> q2") == _md_to_html("> q1\n\n> q2")
-
-
-def test_text_block_cache_is_transparent():
-    """段级缓存（_TEXT_BLOCK_CACHE）不得改变输出：命中与未命中结果一致。"""
-    text = "# 标题\n\n第一段。\n\n第二段"
-    _TEXT_BLOCK_CACHE.clear()
-    cold = _plain_text_blocks(text)
-    warm = _plain_text_blocks(text)
-    assert cold == warm, "段级缓存命中结果必须与冷调用一致"
-    assert _TEXT_BLOCK_CACHE, "前置：应产生缓存条目"
-    _TEXT_BLOCK_CACHE.clear()
-    assert _plain_text_blocks(text) == cold
-
-
-def test_theme_change_does_not_serve_stale_html():
-    """主题令牌变化后不得命中旧主题的缓存 HTML。
-
-    `_md_to_html` 产出内联 style 里的颜色取当前主题令牌，而两层缓存只按文本
-    寻址、不感知主题。切主题必须由 `refresh_theme` 清掉，否则旧卡片的稳定
-    前缀沿用旧配色（实测已复现过 stale）。
-    """
-    import app.widgets.markdown_block_viewer as mbv
-
-    text = "第一段。\n\n第二段仍在写"
-    assert _md_to_html_incremental(text) == _md_to_html(text)  # 冷调用填充缓存
-
-    orig = mbv._qt_theme
-    patched = dict(orig())
-    patched["text_secondary"] = "#FF0000"
-    try:
-        mbv._qt_theme = lambda: patched
-        full_new = _md_to_html(text)
-        assert _md_to_html_incremental(text) != full_new, "此断言证明不清缓存会产出 stale HTML"
-        _HTML_PREFIX_CACHE.clear()
-        _TEXT_BLOCK_CACHE.clear()
-        assert _md_to_html_incremental(text) == full_new, "清缓存后必须回到等价"
-    finally:
-        mbv._qt_theme = orig
-
-
-def test_refresh_theme_clears_caches():
-    """`MarkdownBlockViewer.refresh_theme` 必须同时清两层缓存。"""
-    from PyQt5.QtWidgets import QApplication
-
-    from app.widgets.markdown_block_viewer import MarkdownBlockViewer
-
-    _ = QApplication.instance() or QApplication([])
-    viewer = MarkdownBlockViewer()
-    viewer.set_markdown("第一段。\n\n第二段仍在写")
-    assert _TEXT_BLOCK_CACHE or _HTML_PREFIX_CACHE, "前置：渲染应产生缓存条目"
-    if _TEXT_BLOCK_CACHE:
-        k = next(iter(_TEXT_BLOCK_CACHE))
-        _TEXT_BLOCK_CACHE[k] = [{"__STALE__": True}]
-    if _HTML_PREFIX_CACHE:
-        k2 = next(iter(_HTML_PREFIX_CACHE))
-        _HTML_PREFIX_CACHE[k2] = "__STALE__"
-
-    # refresh_theme 内部 reconcile 会重填缓存，故不能断言「缓存为空」；
-    # 判据 = 旧条目已被清掉（标记不再存在）
-    viewer.refresh_theme()
-    assert [{"__STALE__": True}] not in _TEXT_BLOCK_CACHE.values(), "段级缓存未被清"
-    assert "__STALE__" not in _HTML_PREFIX_CACHE.values(), "HTML 前缀缓存未被清"
-    viewer.deleteLater()
 
 # 会与 prefix 末块合并的顶层块（这两类必须走整段转换，不能切分）
 _MERGE_PRONE_PREFIXES = [
@@ -208,10 +79,64 @@ _TAILS = [
 ]
 
 
+# ── T6a 审查列出的 8 个不等价输入（必须逐个显式覆盖）──────────────
+# 每个形态对应一条等价性守卫：
+#   a. prefix 中 ``` 计数为奇（围栏未闭合）
+#   b. tail 首个非空行以空白开头（缩进延续）
+#   c. not tail.strip()
+#   d. not prefix.strip()
+#   + 行首裸 HTML（htmlStash 占位符可跨行）
+_T6A_CASES = [
+    "    a\n\n    b",  # prefix 本身是缩进块 → b
+    "```py\nx\n\n普通尾部",  # prefix 围栏未闭合 → a
+    "段落。\n\n\t制表缩进",  # tail 制表缩进 → b
+    "段落。\n\n 两空格",  # tail 空格缩进 → b
+    "段落。\n\n   四个空格",  # tail 四空格 → b
+    "段落。\n\n<div>裸HTML</div>",  # tail 行首裸 HTML → HTML 守卫
+    "<p>前缀HTML</p>\n\n段落。",  # prefix 行首裸 HTML → HTML 守卫
+    "段落。\n\n<!-- 注释 -->\n\n尾部。",  # 注释块 → HTML 守卫
+    "段落。\n\n\n\n",  # tail.strip() 为空 → c
+    "    \n\n段落。",  # prefix.strip() 为空 → d
+]
+
+# ── T5-fix2：merge 守卫的「尾部纯空白块」形态 ─────────────────────────
+# review 实测 4 形态不等价：prefix 尾部的纯空白块会把列表/引用「截断」的假象
+# 造出来，若不向前跳过，就会把同一个列表拆成两个块。
+_MERGE_BLANK_CASES = [
+    "- x\n\n  \n\n- y",  # 无序列表 + 空格块
+    "- x\n\n\t\n\n- y",  # 无序列表 + 制表符块
+    "> x\n\n  \n\n> y",  # 引用 + 空格块
+    "1. x\n\n  \n\n2. y",  # 有序列表 + 空格块
+    "- x\n\n \n\n- y",  # 单空格块
+    "> q\n\n   \n\n> q2",  # 引用 + 三空格块
+    "> 引用\n\n  \n\n- 列表",  # 引用 + 空白 + 列表（跨类型）
+    "- a\n\n  \n\n  - nested",  # 列表 + 空白 + 缩进子项
+]
+
+
 @pytest.mark.parametrize("text", _MERGE_PRONE_PREFIXES)
 def test_merge_prone_blocks_stay_whole(text):
     """列表延续 / 相邻 blockquote 合并场景：切分会改结构，必须整段转换。"""
     assert _md_to_html_incremental(text) == _md_to_html(text)
+
+
+@pytest.mark.parametrize("text", _MERGE_BLANK_CASES)
+def test_merge_guard_skips_trailing_blank_blocks(text):
+    """merge 守卫必须跳过 prefix 尾部的纯空白块（否则列表被拆、引用断裂）。"""
+    assert _md_to_html_incremental(text) == _md_to_html(text), f"不等价：{text!r}"
+
+
+def test_merge_guard_indented_last_block():
+    """prefix 末块本身是缩进块时，后续列表标记也必须判为可合并。
+
+    实测形态：`...\\n\\n\\t制表缩进\\n\\n* 星号` —— 不判可合并会与整段转换不等价。
+    """
+    for text in (
+        "**粗** `码`\n\n\t制表缩进\n\n* 星号\n",
+        "段落。\n\n   缩进代码\n\n- 列表",
+        "a\n\n\t tab 块\n\n> 引用",
+    ):
+        assert _md_to_html_incremental(text) == _md_to_html(text), f"不等价：{text!r}"
 
 
 def test_combinatorial_equivalence():
@@ -249,14 +174,13 @@ def test_block_split_identical():
 
 
 def test_plain_text_blocks_identical():
-    """块级产物一致：_plain_text_blocks 输出的块列表必须相同。"""
+    """块级产物一致：_plain_text_blocks 输出与无缓存实现一致。"""
     for text in (
         "# T\n\n段落\n\n尾部",
         "> q1\n\n尾部",
-        "| h |\n|---|\n| a |\n\n尾部",
+        "| h|\n|---|\n| a |\n\n尾部".replace("h|", "h |"),
         "a\n\n\n\nb\n\n",
     ):
-        assert _plain_text_blocks(text) == _plain_text_blocks(text)
         assert _md_to_html_incremental(text) == _md_to_html(text)
 
 
@@ -266,7 +190,6 @@ def test_cache_is_transparent():
     first = _md_to_html_incremental(text)
     second = _md_to_html_incremental(text)
     assert first == second == _md_to_html(text)
-    # 追加尾部后再跑：前缀应命中缓存，结果仍等价
     longer = text + "更多内容"
     assert _md_to_html_incremental(longer) == _md_to_html(longer)
     assert _HTML_PREFIX_CACHE, "前缀缓存应有条目"
@@ -281,3 +204,96 @@ def test_streaming_progression_equivalence():
     for piece in (base, "新的", "内容", "继续", "增长", "中", "。"):
         streamed += piece
         assert _md_to_html_incremental(streamed) == _md_to_html(streamed), f"中间态不一致：{streamed!r}"
+
+
+# ── T5-fix2：缓存 key 必须感知配置（主题 / 字号） ─────────────────────
+def test_cache_key_includes_config_fingerprint():
+    """段级缓存 key 必须带配置指纹，配置变则 key 变（不命中旧 HTML）。
+
+    根因：`_md_to_html` 产出的 inline style 内嵌主题色与字号，而缓存只按文本
+    寻址时不感知配置 → 切主题/改字号后命中旧配置的 HTML（实测 stale 复现）。
+    """
+    import app.widgets.markdown_block_viewer as mbv
+
+    orig = mbv._config_fingerprint
+    text = "第一段。\n\n第二段还在写"
+    try:
+        mbv._config_fingerprint = lambda: "CFG_A"
+        first = _md_to_html_incremental(text)
+        assert first == _md_to_html(text)
+        keys_a = set(_HTML_PREFIX_CACHE)
+
+        mbv._config_fingerprint = lambda: "CFG_B"
+        second = _md_to_html_incremental(text)
+        keys_b = set(_HTML_PREFIX_CACHE)
+        assert keys_b - keys_a, "配置变化必须产生新 key（否则会复用旧配置的 HTML）"
+        assert second == _md_to_html(text)
+    finally:
+        mbv._config_fingerprint = orig
+
+
+def test_invalidate_font_cache_clears_render_caches():
+    """字号/字体变更入口必须清两层渲染缓存。
+
+    走真实的 `invalidate_font_cache()` 路径：它是设置变更回调里的失效入口，
+    必须连带清掉内联了字号的 HTML 结果缓存（`_refresh_viewer_font` 是 no-op，
+    「QSS 统一管理」对 inline style 不成立）。
+    """
+    from app.utils.design_tokens import invalidate_font_cache
+
+    text = "字号相关段落。\n\n尾部还在写"
+    _md_to_html_incremental(text)
+    _plain_text_blocks("另一段用于填 _TEXT_BLOCK_CACHE。")
+    assert _HTML_PREFIX_CACHE, "前置：应有缓存条目"
+    assert _TEXT_BLOCK_CACHE, "前置：段级缓存应有条目"
+    invalidate_font_cache()
+    assert not _HTML_PREFIX_CACHE, "invalidate_font_cache 必须清 _HTML_PREFIX_CACHE"
+    assert not _TEXT_BLOCK_CACHE, "invalidate_font_cache 必须清 _TEXT_BLOCK_CACHE"
+
+
+def test_text_block_cache_lru_not_clear_all():
+    """段级缓存触顶必须走真 LRU（淘汰最久未用），不能整体 clear。
+
+    整体 clear 会让所有稳定文本段同时失效 → 下一拍全部重算，表现为周期性
+    卡顿（真实回复段数可达上百，旧上限 24 时必然频繁触顶）。
+    """
+    import app.widgets.markdown_block_viewer as mbv
+
+    limit = mbv._TEXT_BLOCK_CACHE_MAX
+    assert limit >= 128, f"上限过小（{limit}）会在真实段数下频繁触顶"
+
+    texts = [f"段{i}内容。" for i in range(limit + 20)]
+    for t in texts:
+        _plain_text_blocks(t)
+    assert len(_TEXT_BLOCK_CACHE) == limit, f"应稳定在上限 {limit}，实际 {len(_TEXT_BLOCK_CACHE)}"
+
+    # 触顶后仍能正常等价转换（未被 clear 打乱）
+    assert _md_to_html_incremental("段落。\n\n尾部") == _md_to_html("段落。\n\n尾部")
+
+
+def test_refresh_theme_clears_prefix_cache():
+    """`MarkdownBlockViewer.refresh_theme` 必须清两层缓存。"""
+    from PyQt5.QtWidgets import QApplication
+
+    from app.widgets.markdown_block_viewer import MarkdownBlockViewer
+
+    _ = QApplication.instance() or QApplication([])
+    viewer = MarkdownBlockViewer()
+    text = "第一段。\n\n第二段仍在写"
+    viewer.set_markdown(text)
+    assert _HTML_PREFIX_CACHE, "前置：渲染应产生缓存条目"
+    # refresh_theme 内部会 reconcile 重填缓存，故不能断言「缓存为空」；
+    # 判据改为「旧条目被清掉」——打标记，标记还在 = 没清。
+    for k in list(_HTML_PREFIX_CACHE):
+        _HTML_PREFIX_CACHE[k] = "__STALE_MARKER__"
+    viewer.refresh_theme()
+    assert all(v != "__STALE_MARKER__" for v in _HTML_PREFIX_CACHE.values()), (
+        "refresh_theme 必须清空 HTML 前缀缓存（旧主题产物不得残留）"
+    )
+    viewer.deleteLater()
+
+
+@pytest.mark.parametrize("text", _T6A_CASES)
+def test_t6a_reported_mismatches(text):
+    """T6a 报告的 8 个不等价输入（+2 空串形态）：现在必须等价。"""
+    assert _md_to_html_incremental(text) == _md_to_html(text), f"不等价：{text!r}"

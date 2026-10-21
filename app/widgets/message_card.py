@@ -968,6 +968,7 @@ class MessageCard(SimpleCardWidget):
         if elapsed is not None:
             # 轮次结束，清掉流式采样缓冲
             self._stream_text_acc = ""
+            self._stream_text_cursor = 0  # [T4-5] 增量采样游标同步复位
             self._stream_gen_s = 0.0
             self._stream_last_text_t = None
             # 插件信息项按落定态刷新（token_usage 透传给 provider 自行取舍）
@@ -1132,7 +1133,19 @@ class MessageCard(SimpleCardWidget):
             # 流式实时采样：只给「本流累计原文」+「首字至今秒数」，token 估算与
             # 吞吐量口径交给 provider（插件侧走 tiktoken/cl100k，中文约 1.2
             # token/字）。主程序不再用 chars÷4 粗估（中文低估约 4~5 倍）。
-            ctx["live_text"] = getattr(self, "_stream_text_acc", "") or ""
+            acc = getattr(self, "_stream_text_acc", "") or ""
+            ctx["live_text"] = acc
+            # [T4-5] 增量片段：仅「上次采样以来新增」的部分。provider 用它做
+            # 增量编码，避免每拍对整段（可达数万字）重新 tiktoken —— 耗时随流式
+            # 长度线性增长。live_text 保留原语义，未消费 delta 的 provider 无感。
+            cursor = getattr(self, "_stream_text_cursor", 0) or 0
+            if cursor <= len(acc):
+                ctx["live_text_delta"] = acc[cursor:]
+                self._stream_text_cursor = len(acc)
+            else:
+                # 累计串被重置（新一轮 / 清空）→ 本拍退化为全量，并复位游标
+                ctx["live_text_delta"] = acc
+                self._stream_text_cursor = len(acc)
             # 生成秒 = 累计出字时间（已排除工具执行 / 长等待段）
             ctx["live_gen_s"] = max(0.0, float(getattr(self, "_stream_gen_s", 0.0) or 0.0))
         return ctx
@@ -1207,6 +1220,7 @@ class MessageCard(SimpleCardWidget):
         self._elapsed_start_time = time.time()
         # 流式采样状态：update_content 累计原文与出字时间，首个内容 chunk 记时刻
         self._stream_text_acc = ""
+        self._stream_text_cursor = 0  # [T4-5] 增量采样游标（配合 live_text_delta）
         self._stream_gen_s = 0.0
         self._stream_last_text_t = None
         self._stream_first_text_t = None
@@ -5668,6 +5682,7 @@ class MessageCard(SimpleCardWidget):
         # start_elapsed_tracking 的清零点对齐）：_stream_text_acc 是流式期间
         # 累计的全文副本，一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。
         self._stream_text_acc = ""
+        self._stream_text_cursor = 0  # [T4-5] 增量采样游标同步复位
 
     def _has_active_tools(self) -> bool:
         """是否有仍在执行中的工具（已登记但未完成）。

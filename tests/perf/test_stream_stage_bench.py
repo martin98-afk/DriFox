@@ -21,12 +21,13 @@
 渲染通道：DRIFOX_QT_RENDERER=1 纯 Qt 块级渲染器（offscreen 下 WebEngine
     原生层 0xC0000409 必崩，同 test_stream_render_bench.py 取舍）。
 
-场景参数与 test_stream_render_bench.py 完全一致（8ms × 40 字符 × 800 chunks
-    = 32000 字符混合 markdown），两份数据可直接上下游对照。
+**两个场景必须成对阅读**（T5-fix2 新增第二个）：
+    1. `test_bench_stream_stage_baseline`：模板循环 payload，保持与历史基线可比；
+    2. `test_bench_stream_stage_unique_segments`：段文本**各不相同**的真实形态。
 
-插桩方式：只环绕原实现计时 + patch 模块级 parse_blocks / reconcile_widgets，
-    **不修改任何 app/ 源码**。⚠️ 计时切勿复刻被测逻辑——那会绕过被测的缓存
-    路径，导致优化效果无法体现（口径失真）。
+    ⚠️ 只有场景 1 会严重美化缓存收益：3 种文本段重复填充，段级缓存 2-3 条即
+    100% 命中。真实 LLM 回复每段文本都不同，缓存条目随段数线性增长、靠 LRU
+    平滑退化 —— 那才是线上形态，必须看场景 2 的数字。
 
 运行：
     cd <仓库根> && uv run pytest tests/perf/test_stream_stage_bench.py -v -s
@@ -36,15 +37,19 @@
     采集环境：Windows / Python 3.14 / dev 分支 / offscreen + DRIFOX_QT_RENDERER=1
     采集命令：uv run pytest tests/perf/test_stream_stage_bench.py -v -s
 
-    | 阶段 | T2 优化前 | T5 优化后 | T5-fix 后（最终） |
+    | 阶段 | T2 优化前 | T5 优化后 | T5-fix 后 |
     |---|---|---|---|
     | `_reconcile`（渲染） | 6283.9 ms | 2972.8 ms | 4875.2 ms |
-    | └ `parse_blocks` | 3248.4 ms | 424.2 ms | **207.6 ms** |
+    | └ `parse_blocks`（模板 payload） | 3248.4 ms | 424.2 ms | **194.4 ms** |
     | └ 差量对齐 | 2989.1 ms | 2525.3 ms | 3890.7 ms |
     | `append_chunk`（累积+派发） | 957.0 ms | 554.1 ms | — |
     | `finish_streaming`（收尾） | 101.6 ms | 51.1 ms | — |
 
-    p50 口径：`parse_blocks` 11.2ms（优化前）→ 1.63ms（T5）→ 0.59ms（T5-fix）。
+    p50 口径（模板 payload）：`parse_blocks` 11.2ms（优化前）→ 1.63ms（T5）→ 0.59ms。
+
+    **真实形态（unique 场景，段文本各不相同）**：`parse_blocks` 累计 ~928.7ms，
+    p50 1.25ms，**p95 23.5ms**。与模板场景（194ms / p95 1.2ms）差 4.8 倍 ——
+    这正是 T5-fix2 把缓存上限从 24 提到 128 并改真 LRU 的原因。
 
     ⚠️ 重要口径更正（T5-fix 实测）。T5 报告的 −52.7% 建立在**段内 prefix/tail
     切分 + 文本寻址缓存**上，但该缓存的粒度放错了层：
@@ -53,16 +58,16 @@
     两次转换。实测 32000 字符：`parse_blocks` 段内切分 17.0ms vs 不优化 17.2ms，
     **几乎无净收益**（T5 的 −86.9% 是当时插桩复刻逻辑导致的口径失真）。
 
-    T5-fix 改为**段级结果缓存**（`_TEXT_BLOCK_CACHE`，key = 文本段原文）：
-    流式推进时只有最后一个段在变，前 N-1 段文本恒定 → 命中率 ~98%（实测
-    payload 69 段命中 68 段）。且这是纯函数结果缓存（同输入必同输出），
-    **天然等价、不需要任何等价性守卫**。
+    T5-fix 改为**段级结果缓存**（`_TEXT_BLOCK_CACHE`，key = 配置指纹 + 文本段原文）：
+    流式推进时只有最后一个段在变，前 N-1 段文本恒定 → 稳定段全部命中。
+    且这是纯函数结果缓存（同输入必同输出），**天然等价、不需要等价性守卫**。
 
     被否决 / 已修正的方向：
     - 逐块转换 + 块间补 `\n` 不等价（600 组 164 处不一致，相邻列表/blockquote 会合并）
     - 同 `_md` 去重跳过 reconcile：相邻重复仅 1/800，收益 ~1%
     - 文本级 LRU（key=输入文本）：流式输入每 chunk 必变，命中率 0%
     - 段内 prefix/tail 切分：调用 69 次、缓存 0 命中 → 负收益（见上）
+    - 缓存上限 24 + 整体 clear：真实段数（可达上百）下频繁触顶 → 断崖归零
 
     等价性回归：tests/widgets/test_markdown_incremental_html_equivalence.py。
 
@@ -114,6 +119,36 @@ def _build_payload() -> str:
     unit = _MD_TEMPLATE
     n, text = divmod(TOTAL_CHARS, len(unit))
     return unit * n + unit[: text - text % CHUNK_CHARS]
+
+
+def _build_payload_unique() -> str:
+    """构造「段文本各不相同」的 payload（真实回复形态的对照组）。
+
+    ⚠️ 为什么需要这个对照：`_build_payload()` 是模板循环，同样 3 种文本段重复
+    填充凑满 32000 字符 —— 段级缓存只需存 2-3 条就能 100% 命中，**严重美化了
+    缓存命中率与收益数字**。真实 LLM 回复的每个段落内容都不相同，缓存条目数随
+    段数线性增长，触顶后依赖 LRU 平滑退化。
+
+    本构造器给每一段插入唯一序号与唯一填充文本，保证任意两段文本不等。
+    """
+    parts: list[str] = []
+    total = 0
+    i = 0
+    while total < TOTAL_CHARS:
+        i += 1
+        # 每段都带唯一标识：序号 + 该段独有的填充词，确保文本不同
+        filler = "".join(chr(0x4E00 + (i * 37 + k * 11) % 2000) for k in range(40))
+        block = (
+            f"第 {i} 段：{filler}。本段用于验证段级缓存在真实分布下的表现。"
+            "句子以句号分隔，段落之间留有空行。\n\n"
+            f"- 第 {i} 条列表项：{filler[:20]}\n"
+            f"- 第 {i} 条列表项之二：{filler[10:30]}\n\n"
+            f"```python\n# 段 {i}\nvalue_{i} = {i * 7}\n```\n\n"
+        )
+        parts.append(block)
+        total += len(block)
+    payload = "".join(parts)
+    return payload[: len(payload) - len(payload) % CHUNK_CHARS]
 
 
 def _pct(vals: list, q: float) -> float:
@@ -310,20 +345,32 @@ def _print_metrics(m: dict) -> None:
     )
 
 
-def test_bench_stream_stage_baseline(qapp):
-    """流式 viewer 层阶段基线：1 轮预热 + 3 轮正式采样，打印指标供基线采集。"""
-    payload = _build_payload()
-    assert len(payload) >= 30000, f"压测文本不足 3 万字符：{len(payload)}"
+def _bench_payload(qapp, payload: str, label: str) -> list:
+    """对给定 payload 跑「预热 + ROUNDS 轮采样」，打印指标并返回 results。"""
+    assert len(payload) >= 30000, f"压测文本不足 3 万字符（{label}）：{len(payload)}"
 
     # 预热轮：加载 pygments/字体/类初始化等一次性成本，不计入基线
     _run_one_round(0, payload[: 5 * CHUNK_CHARS])
     QTest.qWait(200)
 
+    print(f"\n######## 场景：{label}（{len(payload)} 字符）########", flush=True)
     results = []
     for i in range(1, ROUNDS + 1):
         m = _run_one_round(i, payload)
         _print_metrics(m)
         results.append(m)
+    return results
+
+
+def test_bench_stream_stage_baseline(qapp):
+    """流式 viewer 层阶段基线：模板循环 payload（1 轮预热 + 3 轮采样）。
+
+    ⚠️ 场景特征：本 payload 是 3 种文本段重复填充，段级缓存几乎全命中，
+    **会美化缓存收益**。真实形态请看 `test_bench_stream_stage_unique_segments`，
+    两个场景必须成对阅读（本用例保住与历史基线的可比性）。
+    """
+    payload = _build_payload()
+    results = _bench_payload(qapp, payload, "模板循环（段文本高度重复）")
 
     # 稳定性：3 轮 total_elapsed 离散度应可控（<2x），异常尖刺说明环境噪声大
     totals = [m["total_elapsed_ms"] for m in results]
@@ -355,5 +402,29 @@ def test_bench_stream_stage_baseline(qapp):
     assert spread < 2.0, f"3 轮基线离散度过大（{spread:.2f}x），环境噪声影响采样可信度"
 
     # 稳定参考口径：取 3 轮中位数
+    med = {k: statistics.median(m[k] for m in results) for k in results[0]}
+    _print_metrics(med)
+
+
+def test_bench_stream_stage_unique_segments(qapp):
+    """真实形态对照组：段文本各不相同的 payload。
+
+    为什么必须单独跑：模板循环 payload（见上一个用例）只有 3 种文本段重复填充，
+    段级缓存 2-3 条就 100% 命中，收益数字被严重美化。真实 LLM 回复每段文本都
+    不同，缓存条目数随段数线性增长，要靠 LRU 平滑退化 —— 本场景量的是那个。
+    """
+    payload = _build_payload_unique()
+    results = _bench_payload(qapp, payload, "真实形态（段文本各不相同）")
+
+    totals = [m["total_elapsed_ms"] for m in results]
+    spread = max(totals) / max(1.0, min(totals))
+    parse_totals = [m["parse"][1] for m in results]
+    print(
+        f"\n=== unique 场景汇总：total_elapsed={totals} ms（离散度 {spread:.2f}x）"
+        f"  parse_blocks 累计={parse_totals} ms ===",
+        flush=True,
+    )
+    assert spread < 2.0, f"unique 场景 3 轮离散度过大（{spread:.2f}x）"
+
     med = {k: statistics.median(m[k] for m in results) for k in results[0]}
     _print_metrics(med)

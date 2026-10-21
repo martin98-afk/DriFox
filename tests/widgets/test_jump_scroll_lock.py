@@ -38,21 +38,9 @@ import pytest
 from PyQt5.QtCore import QObject
 
 from app.main_widget import (
+    JUMP_SCROLL_LOCK_HARD_CAP_MS,
     JUMP_SCROLL_LOCK_TAIL_MS,
     OpenAIChatToolWindow,
-)
-
-# ⚠️ 已知产品缺陷（不在本文件修复范围，已上报）：
-# `app/main_widget.py::_is_jump_scroll_locked` 引用了 **未定义** 的
-# `JUMP_SCROLL_LOCK_HARD_CAP_MS`（仅 JUMP_SCROLL_LOCK_TAIL_MS 有定义），
-# 导致 `_is_jump_scroll_locked()` 抛 NameError → 跳转锁判定不可用。
-# 凡直接调用该方法的用例必然失败，标记为 xfail（非 strict）：缺陷未修则
-# xfailed（不污染回归基线），缺陷修复后 XPASS 提示可摘掉标记。
-_LOCKED_UNUSABLE = pytest.mark.xfail(
-    raises=NameError,
-    reason="产品缺陷：main_widget.py 未定义 JUMP_SCROLL_LOCK_HARD_CAP_MS，"
-    "_is_jump_scroll_locked() 抛 NameError（已上报，待专员修复）",
-    strict=False,
 )
 
 
@@ -139,18 +127,20 @@ def test_reset_bottom_follow_unlocks_jump_lock(qapp):
     """发消息 / 切会话 / 清空 = 明确要看最新内容 → 必须解除跳转锁。"""
     h, _sb = _harness(away=False)
     h._lock_scroll_after_jump()
-    # 只走字段读取路径（_is_jump_scroll_locked 受 NameError 缺陷影响）
     assert h._should_follow_bottom() is False
 
     h._reset_bottom_follow()
 
-    assert h._jump_scroll_lock_until == 0.0, "锁必须被清"
+    assert h._is_jump_scroll_locked() is False
     assert h._should_follow_bottom() is True
 
 
-@_LOCKED_UNUSABLE
 def test_lock_is_reported_by_locked_predicate(qapp):
-    """`_is_jump_scroll_locked()` 在上锁期内必须为真（受产品缺陷阻塞）。"""
+    """`_is_jump_scroll_locked()` 在上锁期内必须为真。
+
+    该判定曾因 `JUMP_SCROLL_LOCK_HARD_CAP_MS` 未定义而抛 NameError（已在
+    main_widget 补定义修复），本用例即该缺陷的回归保护。
+    """
     h, _sb = _harness(away=False)
     h._lock_scroll_after_jump()
     assert h._is_jump_scroll_locked() is True
@@ -231,7 +221,6 @@ class _UnloadedJumpHarness:
     _get_batch_index_from_node_index = lambda self, i: i  # noqa: E731
 
 
-@_LOCKED_UNUSABLE
 def test_scroll_to_target_node_index_locks_before_loading(qapp):
     """目标批次未加载时也必须上锁（否则只加载路径不受保护）。
 
@@ -264,10 +253,7 @@ def test_scroll_to_target_node_index_locks_before_loading(qapp):
 
 
 def test_scroll_to_target_node_index_no_lock_without_session(qapp):
-    """无会话时直接返回，不该留下悬挂的锁。
-
-    走字段读取判据（不调 _is_jump_scroll_locked，避开产品 NameError 缺陷）。
-    """
+    """无会话时直接返回，不该留下悬挂的锁。"""
     h = _UnloadedJumpHarness()
     h.session_manager = MagicMock()
     h.session_manager.get_current_session.return_value = None
@@ -275,7 +261,7 @@ def test_scroll_to_target_node_index_no_lock_without_session(qapp):
 
     h._scroll_to_target_node_index(3)
 
-    assert h._jump_scroll_lock_until == 0.0
+    assert h._is_jump_scroll_locked() is False
 
 
 if __name__ == "__main__":
