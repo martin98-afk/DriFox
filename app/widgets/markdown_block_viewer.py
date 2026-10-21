@@ -406,12 +406,17 @@ def _cache_get(cache: "OrderedDict[str, Any]", key: str) -> Any:
 
 
 def _config_fingerprint() -> str:
-    """影响 HTML 产出的配置指纹（主题 id + 字号档位）。
+    """影响 HTML 产出的配置指纹（主题 id + 字号档位 key）。
+
+    ⚠️ 字号必须用 `get_ui_font_size_key()`（返回档位 key '-5'~'10'，能唯一区分
+    16 个档位），不能用 `get_ui_font_size()`：后者返回的是**未缩放的 base**，
+    而 `FONT_SIZE_OPTIONS` 里全部 16 个档位的 base 都是 14 → 指纹去重后只剩
+    一个值，字号维度完全空转（进指纹无意义）。
 
     取不到时返回固定串（退化为纯文本寻址），不抛错。
     """
     try:
-        from app.utils.design_tokens import _DEFAULT_FONT_SIZE_KEY, get_ui_font_size
+        from app.utils.design_tokens import get_ui_font_size_key
 
         theme_id = ""
         try:
@@ -420,7 +425,7 @@ def _config_fingerprint() -> str:
             theme_id = theme_manager.get_current_theme_id() or ""
         except Exception:
             pass
-        return f"{theme_id}|{get_ui_font_size()}|{_DEFAULT_FONT_SIZE_KEY}"
+        return f"{theme_id}|{get_ui_font_size_key()}"
     except Exception:
         return "default"
 
