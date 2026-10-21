@@ -188,6 +188,48 @@ def get_provider_profile(llm_config: Dict[str, Any]) -> Dict[str, Any]:
     return profile
 
 
+def resolve_extra_headers(
+    llm_config: Optional[Dict[str, Any]] = None,
+    session_id: str = "",
+) -> Dict[str, str]:
+    """解析服务商插件声明的请求头（capabilities），两通道合并：
+
+    - extra_headers：静态自定义头 dict（伪装 UA / X-Product 等），声明即注入，
+      不依赖会话；同名键覆盖 openai SDK 默认头（如 User-Agent）。
+      值为 callable 时按当前 llm_config 求值（如 CodeBuddy 按各配置的
+      refresh_token 换 access_token）。
+    - session_header：网关会话标识头名，值=传入的 session_id。OpenCode Zen/Go
+      等网关要求每个 LLM 请求携带稳定会话标识（2026-09 起缺失报 400
+      MissingSessionID）。
+
+    头名/头值均由 providers 插件按 family 声明，本函数只做通用求值。
+    所有发 LLM 请求的执行层（chat_worker / subagent_worker / 摘要 / 审批审核）
+    统一走此入口，避免各链路自行实现导致漂移。
+
+    Returns:
+        头 dict；无声明或无值时返回空 dict。
+    """
+    llm_config = llm_config or {}
+    headers: Dict[str, str] = {}
+    try:
+        profile = get_provider_profile(llm_config)
+    except Exception:
+        return headers
+    extra = profile.get("extra_headers")
+    if isinstance(extra, dict):
+        for name, value in extra.items():
+            if value is None:
+                continue
+            # 可调用值 = 动态头：按当前请求的 llm_config 取值
+            # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）
+            headers[str(name)] = str(value(llm_config)) if callable(value) else str(value)
+    if session_id:
+        header = profile.get("session_header")
+        if header:
+            headers[str(header)] = session_id
+    return headers
+
+
 def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Optional[str] = None) -> float:
     """解析本地 token 估算的模型校正系数（除数）。
 

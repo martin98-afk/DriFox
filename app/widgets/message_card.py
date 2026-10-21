@@ -2259,6 +2259,9 @@ class MessageCard(SimpleCardWidget):
         # [P2-7] 视口门控：卡片滚出 chat 视口可见范围时不空耗 update()（20fps
         # 整卡动画在长会话里大多发生在屏幕外）。与隐藏分支同款相位语义：
         # 时钟 restart，滚回视口后从原相位继续，无视觉跳变。
+        # AttributeError：无 parent 或 parent 无 chat_scroll_area（独立窗口 /
+        # 测试构造 / 预览卡）时拿不到视口，与 RuntimeError 同按「无法判定」
+        # 兜底继续走动画——否则异常被 Qt 事件循环捕获，整链路判 CALL ERROR。
         try:
             top = self.window()
             card_tl = self.mapTo(top, self.rect().topLeft())
@@ -2269,7 +2272,7 @@ class MessageCard(SimpleCardWidget):
             if not card_rect.intersects(vp_rect):
                 self._anim_clock.restart()
                 return
-        except RuntimeError:
+        except (RuntimeError, AttributeError):
             pass
         # 系统「减少动态效果」：底部光块是纯装饰动画，直接不重绘。
         # 这是流式热路径上的逐帧绘制，关掉即省下这段开销。

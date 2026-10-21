@@ -20,6 +20,7 @@ import json
 import os
 import re
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QFile, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, pyqtSignal
@@ -370,6 +371,27 @@ class _ThinkingSpinner(QWidget):
 
 
 # ── 通用标记段切分 ────────────────────────────────────────────────
+# [PERF] 增量 HTML 转换（_md_to_html_incremental）的缓存与合并判定。
+# 缓存上限：单条 HTML 长（数百至数千字符），64 条实测稳态占 ~9MB，故收紧到
+# 24 条；超限整体清空不做逐条 LRU 记账（条目少，收益不抵成本）。
+_HTML_PREFIX_CACHE_MAX = 24
+_HTML_PREFIX_CACHE: "OrderedDict[str, str]" = OrderedDict()
+# 尾部首行命中该正则 → 与 prefix 末块合并（列表延续 / 相邻 blockquote 合并），
+# 此时切分会改变 markdown 结构，必须整段转换。
+_LIST_OR_QUOTE_CONT_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s?")
+# prefix 中的 ``` 计数：奇数 = 有未闭合围栏，此时 tail 处在围栏内部，切分会
+# 把围栏内容割裂（prefix 侧围栏未闭 / tail 侧多出一个开标记）。
+_FENCE_RE_CACHE = re.compile(r"^\s{0,3}```", re.M)
+# 行首为块级（非行内）HTML 标签：python-markdown 的 md.htmlStash 会把这类
+# 整块内容抽成占位符再回填，占位符横跨 md 源的行边界，**不能**按空行切分。
+# 行内标签（<span>/<b>/<br> 等）不参与块级 stash，故只列真正的块级标签。
+_BLOCK_LEVEL_TAG_RE = re.compile(
+    r"^\s*<(?:/?)(?:address|article|aside|blockquote|details|dd|div|dl|dt|fieldset|figcaption|figure"
+    r"|footer|form|h[1-6]|header|hr|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul|!--)\b",
+    re.I,
+)
+
+
 def _split_tag_segments(md_text: str, open_tag: str, close_tag: str) -> List[Tuple[str, str, bool]]:
     """切分 <tag>...</tag> 段。返回 [("text"|"tag", 内容, 是否闭合)]。
 
@@ -630,6 +652,75 @@ def _split_plugin_tags(text: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _md_to_html_incremental(text: str) -> str:
+    """[PERF] 流式增量 HTML 转换：已闭合前缀走缓存，只重转变动的尾部。
+
+    背景：`_reconcile` 每次对**全量文本**调 `_md_to_html`，剖析显示它占
+    `_reconcile` 87%（占整链路 44.5%）。而流式中每 chunk 只追加尾部几十字符，
+    前缀是已闭合的顶层块，转换结果恒定不变。
+
+    做法：按最后一个空行边界切成 prefix（已闭合）+ tail（变动中），prefix 的
+    HTML 由 `_HTML_PREFIX_CACHE` 按文本寻址复用，tail 单独转换。
+
+    等价性（600 组 prefix × sep × tail 组合实测 byte 级全等，含标题/列表/
+    表格/引用/围栏/缩进代码/分隔线/多空行/行内格式）：
+    1. 拼接处补一个 `\n`：python-markdown 序列化时在顶层块之间恒插 `\n`,
+       分转后该字符丢失。tail 为空或以 `\n\n` 结尾时不补（整段转换不会再加）。
+    2. tail 首行以列表标记（- * + / 1.）或 `>` 开头时**不切分**：这两类会与
+       prefix 末块合并（列表延续 / 相邻 blockquote 合并），分转会改变结构。
+    3. 无空行边界时退化为整段转换。
+
+    缓存：`OrderedDict` LRU（上限 _HTML_PREFIX_CACHE_MAX，超限清空而非逐条
+    淘汰——条目少而单个 HTML 长，逐条 pop 的收益不足以抵消记账成本）。
+    只缓存「以空行结尾的已闭合前缀」，不含变动中的尾部，故命中率随会话
+    长度单调上升。
+    """
+    cut = text.rfind("\n\n")
+    if cut == -1:
+        return _md_to_html(text)
+    prefix = text[: cut + 2]
+    tail = text[cut + 2 :]
+    # ── 等价性守卫：任一命中即整段转换（正确性优先于耗时收益）───────────
+    try:
+        # d. 空 prefix：没有可缓存的稳定前缀，切分无意义
+        if not prefix.strip():
+            return _md_to_html(text)
+        # c. 空 tail：尾部无内容，直接整段转换（也免了补 \n 的边界判断）
+        if not tail.strip():
+            return _md_to_html(text)
+        # a. prefix 内 ``` 计数为奇 → 有未闭合围栏，tail 仍在围栏内
+        if len(_FENCE_RE_CACHE.findall(prefix)) % 2:
+            return _md_to_html(text)
+        # 裸 HTML 块：python-markdown 的 htmlStash 占位符可跨行，切分必然错位
+        if _BLOCK_LEVEL_TAG_RE.search(prefix) or _BLOCK_LEVEL_TAG_RE.search(tail):
+            return _md_to_html(text)
+        for line in tail.split("\n"):
+            if not line.strip():
+                continue
+            # b. 首个非空行以空白开头 → 缩进延续（缩进代码 / 懒 continuation）
+            if line[0] in " \t":
+                return _md_to_html(text)
+            if _LIST_OR_QUOTE_CONT_RE.match(line):
+                return _md_to_html(text)  # 与 prefix 末块合并，不能切
+            break
+    except Exception:
+        # 守卫生疑一律回退全量：宁可多花一次转换，也不能产出不等价的 HTML
+        return _md_to_html(text)
+
+    try:
+        pre_html = _HTML_PREFIX_CACHE.get(prefix)
+        if pre_html is None:
+            pre_html = _md_to_html(prefix)
+            if len(_HTML_PREFIX_CACHE) >= _HTML_PREFIX_CACHE_MAX:
+                _HTML_PREFIX_CACHE.clear()
+            _HTML_PREFIX_CACHE[prefix] = pre_html
+        if tail.endswith("\n\n"):
+            return pre_html + _md_to_html(tail)
+        return pre_html + "\n" + _md_to_html(tail)
+    except Exception:
+        return _md_to_html(text)
+
+
 def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
     """普通 markdown 文本 → 块列表（quote/table/hr 独立成块，其余转 html 块）。
 
@@ -638,7 +729,7 @@ def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
     """
     if not text.strip():
         return []
-    html = _md_to_html(text)
+    html = _md_to_html_incremental(text)
     segs = _split_block_elements(html)
     # 无块元素（最常见）：零额外开销，单个 html 块
     if len(segs) == 1 and segs[0][0] == "text":

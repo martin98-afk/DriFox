@@ -81,7 +81,7 @@ from app.core.modelmeta.model_capabilities import (
     normalize_reasoning_effort,
     resolve_model_capabilities,
 )
-from app.core.modelmeta.provider_profile import get_provider_profile
+from app.core.modelmeta.provider_profile import get_provider_profile, resolve_extra_headers
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.core.infra.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
@@ -3271,35 +3271,20 @@ class OpenAIChatWorker(QThread):
             return None
 
     def _provider_extra_headers(self) -> Optional[Dict[str, str]]:
-        """服务商插件声明的能力头（capabilities），两通道合并：
+        """服务商插件声明的能力头（capabilities）——通用解析见
+        ``provider_profile.resolve_extra_headers``（chat_worker / subagent_worker
+        等所有发 LLM 请求的执行层共用，避免多份实现漂移）。
 
-        - extra_headers：静态自定义头 dict（伪装 UA / X-Product 等），声明即注入，
-          不依赖会话；同名键覆盖 openai SDK 默认头（如 User-Agent）。
-        - session_header：网关会话标识头名，值=当前会话 ID。OpenCode Zen/Go
-          等网关要求每个 LLM 请求携带稳定会话标识（2026-09 起缺失报 400
-          MissingSessionID）。
+        两通道合并：静态伪装头（extra_headers）+ 网关会话头（session_header，
+        值=当前会话 ID，OpenCode Zen/Go 等网关缺失时报 400 MissingSessionID）。
 
-        头名/头值均由 providers 插件按 family 声明，主程序只做通用注入，
-        不感知具体服务商。
+        头解析失败不得拖垮请求构建（注册表未就绪 / 插件抛错）→ 降级为无头。
         """
         try:
-            profile = get_provider_profile(self.llm_config or {})
+            headers = resolve_extra_headers(self.llm_config or {}, self.session_id)
         except Exception as e:
             logger.debug(f"[ChatWorker] 能力头解析失败: {e}")
             return None
-        headers: Dict[str, str] = {}
-        extra = profile.get("extra_headers")
-        if isinstance(extra, dict):
-            for name, value in extra.items():
-                if value is None:
-                    continue
-                # 可调用值 = 动态头：按当前请求的 llm_config 取值
-                # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）
-                headers[str(name)] = str(value(self.llm_config or {})) if callable(value) else str(value)
-        if self.session_id:
-            header = profile.get("session_header")
-            if header:
-                headers[str(header)] = self.session_id
         return headers or None
 
     def _adapter_flags(self):

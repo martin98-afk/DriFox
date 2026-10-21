@@ -100,10 +100,23 @@ import types  # noqa: E402
 if "app.utils.design_tokens" not in sys.modules or not hasattr(
     sys.modules.get("app.utils.design_tokens"), "_ft_stubbed"
 ):
-    stub = types.ModuleType("app.utils.design_tokens")
-    stub._ft_stubbed = True
-    stub.get_unified_scrollbar_style = lambda width=6: f"QScrollBar:vertical {{ width: {width}px; }}"
-    sys.modules["app.utils.design_tokens"] = stub
+    # ⚠️ 必须以真实模块为蓝本浅拷贝，**不能**用空壳 ModuleType 替换：
+    # 空壳会让后续所有 `from app.utils.design_tokens import X` 命中半成品，
+    # 报 ImportError(cannot import name 'X' ... (unknown location))，连累
+    # 同目录按文件名排序在后的 30+ 个测试模块收集失败（收集期即污染，
+    # 且原先从不恢复）。这里只覆盖目标函数，其余属性全部透传。
+    import importlib as _importlib
+
+    try:
+        _real = _importlib.import_module("app.utils.design_tokens")
+    except Exception:  # pragma: no cover - 极早期环境问题
+        _real = None
+    if _real is not None:
+        stub = types.ModuleType("app.utils.design_tokens")
+        stub.__dict__.update(_real.__dict__)
+        stub._ft_stubbed = True
+        stub.get_unified_scrollbar_style = lambda width=6: f"QScrollBar:vertical {{ width: {width}px; }}"
+        sys.modules["app.utils.design_tokens"] = stub
 
 
 def _make_ctx(**overrides):
