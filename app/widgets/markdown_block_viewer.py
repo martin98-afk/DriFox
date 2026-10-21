@@ -376,9 +376,33 @@ class _ThinkingSpinner(QWidget):
 # 24 条；超限整体清空不做逐条 LRU 记账（条目少，收益不抵成本）。
 _HTML_PREFIX_CACHE_MAX = 24
 _HTML_PREFIX_CACHE: "OrderedDict[str, str]" = OrderedDict()
-# 尾部首行命中该正则 → 与 prefix 末块合并（列表延续 / 相邻 blockquote 合并），
-# 此时切分会改变 markdown 结构，必须整段转换。
+# [PERF] 段级块列表缓存（_plain_text_blocks）：key = 文本段原文，value = 块列表。
+# 上限同 _HTML_PREFIX_CACHE，超限整体清空。
+_TEXT_BLOCK_CACHE_MAX = 24
+_TEXT_BLOCK_CACHE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 _LIST_OR_QUOTE_CONT_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s?")
+
+
+def _last_top_block_opens_mergeable(prefix: str) -> bool:
+    """prefix 的最后一个顶层块是否「仍在展开」的列表 / 引用。
+
+    只在这为真、且 tail 首行也是列表/引用标记时，两者才真会合并 —— 此时
+    切分必然破坏结构，才需要整段转换。
+
+    细化前是「tail 首行是列表标记就整段转换」，把「prefix 收尾于普通段落、
+    tail 开一个新列表」这种**完全安全**的情形也一并挡掉了。压测 payload 上
+    该误判占 305/800（38%），是守卫收紧后收益退化的主因。
+    """
+    body = prefix.rstrip("\n")
+    if not body.strip():
+        return False
+    cut = body.rfind("\n\n")
+    last = body[cut + 2 :] if cut != -1 else body
+    for line in last.split("\n"):
+        if not line.strip():
+            continue
+        return bool(_LIST_OR_QUOTE_CONT_RE.match(line))
+    return False
 # prefix 中的 ``` 计数：奇数 = 有未闭合围栏，此时 tail 处在围栏内部，切分会
 # 把围栏内容割裂（prefix 侧围栏未闭 / tail 侧多出一个开标记）。
 _FENCE_RE_CACHE = re.compile(r"^\s{0,3}```", re.M)
@@ -701,7 +725,7 @@ def _md_to_html_incremental(text: str) -> str:
             # b. 首个非空行以空白开头 → 缩进延续（缩进代码 / 懒 continuation）
             if line[0] in " \t":
                 return _md_to_html(text)
-            if _LIST_OR_QUOTE_CONT_RE.match(line):
+            if _LIST_OR_QUOTE_CONT_RE.match(line) and _last_top_block_opens_mergeable(prefix):
                 return _md_to_html(text)  # 与 prefix 末块合并，不能切
             break
     except Exception:
@@ -727,7 +751,30 @@ def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
 
     先整段转 HTML 再切：块元素正则匹配的是 HTML 标签。切出的 quote/table
     片段本身已是 HTML（无需二次转换），text 片段原样回传。
+
+    [PERF] 段级结果缓存：`parse_blocks` 会把全文按 think/tool/fence 切成 N 个
+    文本段，每段各调本函数一次。流式推进时**只有最后一个段在变**，前 N-1 个
+    段文本恒定 —— 按段文本寻址缓存即可命中（实测 payload 上 69 段 → 命中 68 段）。
+    这是纯函数结果缓存（同输入必同输出），**天然等价、无需任何等价性守卫**。
+
+    ⚠️ 缓存必须落在本层而非段内再切 prefix/tail：段内切分会被调用 69 次、
+    每次的 prefix 都是新文本 → 缓存 0 命中、每段做两次转换，比不优化还慢
+    （实测 32000 字符：段内切分 17.0ms vs 不优化 17.2ms，几乎无差）。
     """
+    if not text.strip():
+        return []
+    cached = _TEXT_BLOCK_CACHE.get(text)
+    if cached is not None:
+        return [dict(b) for b in cached]
+    blocks = _plain_text_blocks_uncached(text)
+    if len(_TEXT_BLOCK_CACHE) >= _TEXT_BLOCK_CACHE_MAX:
+        _TEXT_BLOCK_CACHE.clear()
+    _TEXT_BLOCK_CACHE[text] = [dict(b) for b in blocks]
+    return blocks
+
+
+def _plain_text_blocks_uncached(text: str) -> List[Dict[str, Any]]:
+    """_plain_text_blocks 的无缓存实现（缓存逻辑见上）。"""
     if not text.strip():
         return []
     html = _md_to_html_incremental(text)
@@ -2216,6 +2263,7 @@ class MarkdownBlockViewer(QWidget):
         # 靠 refresh 入口清理）。
         Colors.refresh()
         _HTML_PREFIX_CACHE.clear()
+        _TEXT_BLOCK_CACHE.clear()
         self._reconcile(force=True)
 
     def cleanup(self) -> None:  # 兼容 MessageCard 调用签名

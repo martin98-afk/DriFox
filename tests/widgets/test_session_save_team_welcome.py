@@ -1,0 +1,475 @@
+# -*- coding: utf-8 -*-
+"""回归测试：会话保存链路 + 团队会话 + 欢迎卡片过滤
+
+== 修复背景（2026-08-04）==
+排查"会话保存逻辑 + 团队会话 + 欢迎卡片"整体发现 4 个问题：
+
+1. 欢迎卡片未过滤团队会话：_get_or_create_welcome_card 用
+   get_history_list(project)（无 merge_team），团队会话（team_run_id 非空）
+   逐条混入推荐列表，与历史面板 merge_team=True 语义不一致。
+   → 修复：构造推荐列表前过滤 team_run_id 非空的条目。
+
+2. _switch_to_session_by_id（欢迎卡片点会话/跨窗口切换）：
+   - 保存顺序颠倒：先 _save_current_session_to_history() 再 stop_streaming()，
+     保存的是旧消息（缺最后 partial 回复）
+   - stop_streaming() 返回值丢弃 → 中断消息（partial）永久丢失
+   - 未 _set_ai_state("idle") → TabPanel 边框停留在 streaming 动画
+   → 修复：先 stop 并应用中断消息，再保存；补 _set_ai_state("idle")。
+
+3. _switch_to_session_by_id 无 F4 团队标记同步：加载团队会话后
+   _team_run_id / _team_name / _team_agent_name 未恢复 → 后续保存
+   team_kwargs 守卫失效 → 团队会话被当普通会话保存，元数据被清空。
+   → 修复：提取 _sync_team_markers_from_record 公共方法，两个加载路径共用。
+
+4. _load_session_from_record 打断流式时 partial 丢失：
+   _on_stop_clicked() 是异步两阶段（cancel + deferred finalize），
+   deferred finalize 在 _session_switched 哨兵置位后才执行 →
+   _on_finalize_complete 因哨兵丢弃中断消息。
+   → 修复：_on_stop_clicked() 后同步 finalize_stop() 并应用中断消息，
+     再 auto_save（幂等：_finalize_worker 单次消费，deferred 再跑无害）。
+
+== 测试策略 ==
+- AST 静态检查：保证关键修复点存在（过滤 / 顺序 / 团队标记同步）
+- 行为测试：stub 窗口验证欢迎卡片过滤团队会话
+"""
+
+import ast
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_SRC_PATH = _REPO_ROOT / "app" / "main_widget.py"
+
+
+def _load_module_ast() -> ast.Module:
+    return ast.parse(_SRC_PATH.read_text(encoding="utf-8"), filename=str(_SRC_PATH))
+
+
+def _get_class(tree: ast.Module, class_name: str) -> ast.ClassDef:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return node
+    raise AssertionError(f"未找到类 {class_name}")
+
+
+def _get_method(cls: ast.ClassDef, name: str) -> ast.FunctionDef:
+    for node in cls.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"未找到方法 {cls.name}.{name}")
+
+
+def _source_contains(method: ast.FunctionDef, text: str) -> bool:
+    return text in ast.unparse(method)
+
+
+def _calls_with_arg(method: ast.FunctionDef, attr: str, arg: str) -> bool:
+    """方法体内是否出现 self.<attr>("<arg>") 形式的调用（节点级匹配）"""
+    for sub in ast.walk(method):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        if not (isinstance(func, ast.Attribute) and func.attr == attr):
+            continue
+        if sub.args and isinstance(sub.args[0], ast.Constant) and sub.args[0].value == arg:
+            return True
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════
+# 1. 欢迎卡片过滤团队会话
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestWelcomeCardTeamFilter:
+    """欢迎卡片推荐列表必须过滤团队会话"""
+
+    def test_get_or_create_welcome_card_filters_team(self):
+        """欢迎卡片推荐列表构造路径必须过滤 team_run_id（_collect_welcome_sessions）"""
+        tree = _load_module_ast()
+        cls = _get_class(tree, "OpenAIChatToolWindow")
+        # 过滤逻辑已抽取到 _collect_welcome_sessions（_get_or_create_welcome_card
+        # 与 _refresh_welcome_card_data 软更新共用同一数据口径）
+        collector = _get_method(cls, "_collect_welcome_sessions")
+        assert _source_contains(collector, "team_run_id"), (
+            "_collect_welcome_sessions 必须过滤 team_run_id 非空的团队会话，否则团队会话逐条混入欢迎卡片推荐列表。"
+        )
+        # 过滤必须发生在 recent_sessions 构造之前
+        src = ast.unparse(collector)
+        filter_pos = src.find("team_run_id")
+        recent_pos = src.find("recent_sessions = []")
+        assert filter_pos != -1 and recent_pos != -1
+        assert filter_pos < recent_pos, "团队会话过滤必须在 recent_sessions 构造之前"
+        # 构建与软更新两条路径都必须走该 helper，防止绕过过滤
+        method = _get_method(cls, "_get_or_create_welcome_card")
+        assert _source_contains(method, "_collect_welcome_sessions"), (
+            "_get_or_create_welcome_card 必须经 _collect_welcome_sessions 收集推荐列表。"
+        )
+        refresher = _get_method(cls, "_refresh_welcome_card_data")
+        assert _source_contains(refresher, "_collect_welcome_sessions"), (
+            "_refresh_welcome_card_data 必须经 _collect_welcome_sessions 收集推荐列表。"
+        )
+
+    def test_switch_to_session_syncs_team_markers(self):
+        """_switch_to_session_by_id 加载会话后必须同步团队标记（F4）"""
+        tree = _load_module_ast()
+        cls = _get_class(tree, "OpenAIChatToolWindow")
+        method = _get_method(cls, "_switch_to_session_by_id")
+        assert _source_contains(method, "_sync_team_markers_from_record"), (
+            "_switch_to_session_by_id 缺少 F4 团队标记同步，加载团队会话后"
+            "_team_run_id 未恢复 → 后续保存把团队会话当普通会话，元数据被清空。"
+        )
+
+    def test_switch_to_session_stops_before_save(self):
+        """_switch_to_session_by_id 必须先停止流式（应用中断消息）再保存"""
+        tree = _load_module_ast()
+        cls = _get_class(tree, "OpenAIChatToolWindow")
+        method = _get_method(cls, "_switch_to_session_by_id")
+        assert _source_contains(method, "interrupted = self.backend.stop_streaming()"), (
+            "_switch_to_session_by_id 必须接收 stop_streaming() 返回值（中断消息），否则切换会话时被打断的回复丢失。"
+        )
+        assert _source_contains(method, "self._apply_interrupted_messages_to_session(interrupted)"), (
+            "_switch_to_session_by_id 必须把中断消息应用回 session。"
+        )
+        assert _calls_with_arg(method, "_set_ai_state", "idle"), (
+            "_switch_to_session_by_id 必须 _set_ai_state('idle')，否则 TabPanel 边框停留在 streaming 动画。"
+        )
+        # 顺序：stop_streaming 在 _save_current_session_to_history 之前
+        src = ast.unparse(method)
+        stop_pos = src.find("self.backend.stop_streaming()")
+        save_pos = src.find("self._save_current_session_to_history()")
+        assert stop_pos != -1 and save_pos != -1
+        assert stop_pos < save_pos, "必须先停止流式（应用中断消息）再保存，否则保存的是缺 partial 的旧消息。"
+
+    def test_sync_team_markers_method_exists(self):
+        """_sync_team_markers_from_record 公共方法存在"""
+        tree = _load_module_ast()
+        cls = _get_class(tree, "OpenAIChatToolWindow")
+        method = _get_method(cls, "_sync_team_markers_from_record")
+        assert method is not None, "缺少 _sync_team_markers_from_record 公共方法"
+
+
+class TestLoadSessionFromRecordInterrupt:
+    """_load_session_from_record 打断流式必须同步应用中断消息"""
+
+    def test_sync_finalize_after_stop_clicked(self):
+        """_on_stop_clicked() 后必须同步 finalize_stop 应用中断消息"""
+        tree = _load_module_ast()
+        cls = _get_class(tree, "OpenAIChatToolWindow")
+        method = _get_method(cls, "_load_session_from_record")
+        assert _source_contains(method, "self.backend.finalize_stop()"), (
+            "_load_session_from_record 打断流式时必须同步 finalize_stop() 拿中断消息，"
+            "否则 deferred finalize 被 _session_switched 哨兵拦截 → partial 丢失。"
+        )
+        # 顺序：同步 finalize 在 _session_switched = True 之前
+        src = ast.unparse(method)
+        fin_pos = src.find("self.backend.finalize_stop()")
+        sentinel_pos = src.find("self._session_switched = True")
+        assert fin_pos != -1 and sentinel_pos != -1
+        assert fin_pos < sentinel_pos, "同步 finalize 必须在哨兵置位之前"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2. 行为测试
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestWelcomeCardBehavior:
+    """行为验证：欢迎卡片推荐列表过滤团队会话"""
+
+    @patch("PyQt5.sip.isdeleted", return_value=False)
+    def test_recent_sessions_exclude_team(self, _mock_isdeleted):
+        """recent_sessions 不应包含 team_run_id 非空的会话"""
+        from app.main_widget import OpenAIChatToolWindow
+
+        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        inst._window_id = "win_test"
+        inst._welcome_card_cache = {}
+        inst._current_project = "默认项目"
+        inst._current_agent = "default"
+        inst.backend = MagicMock()
+        agent = MagicMock()
+        agent.name = "测试Agent"
+        agent.description = "desc"
+        inst.backend.get_agent.return_value = agent
+
+        # 3 条普通 + 3 条团队会话（团队会话 last_time 更新 → 若未过滤会占位）
+        inst.history_manager = MagicMock()
+        inst.history_manager.get_history_list.return_value = [
+            {
+                "session_id": "t1",
+                "title": "团队1",
+                "last_time": "2026-08-04 12:00",
+                "message_count": 50,
+                "team_run_id": "run1",
+            },
+            {
+                "session_id": "t2",
+                "title": "团队2",
+                "last_time": "2026-08-04 11:00",
+                "message_count": 40,
+                "team_run_id": "run2",
+            },
+            {
+                "session_id": "t3",
+                "title": "团队3",
+                "last_time": "2026-08-04 10:00",
+                "message_count": 30,
+                "team_run_id": "run3",
+            },
+            {"session_id": "n1", "title": "普通1", "last_time": "2026-08-04 09:00", "message_count": 10},
+            {"session_id": "n2", "title": "普通2", "last_time": "2026-08-04 08:00", "message_count": 5},
+        ]
+
+        from app.widgets.message_card import create_welcome_card
+        from unittest.mock import patch as _patch
+
+        # stub create_welcome_card 捕获传入的 recent_sessions
+        captured = {}
+
+        def _fake_create_welcome_card(parent, agent_name, agent_desc, recent, top, **kwargs):
+            captured["recent"] = recent
+            captured["top"] = top
+            card = MagicMock()
+            card._is_welcome = True
+            return card
+
+        with _patch("app.main_widget.create_welcome_card", side_effect=_fake_create_welcome_card):
+            inst._get_or_create_welcome_card()
+
+        assert captured["recent"], "应构造 recent_sessions"
+        recent_ids = [s["session_id"] for s in captured["recent"]]
+        assert "t1" not in recent_ids and "t2" not in recent_ids and "t3" not in recent_ids, (
+            f"欢迎卡片 recent_sessions 不应包含团队会话: {recent_ids}"
+        )
+        assert recent_ids == ["n1", "n2"], f"普通会话应保留（按时间排序）: {recent_ids}"
+        top_ids = [s["session_id"] for s in captured["top"]]
+        assert "t1" not in top_ids, f"欢迎卡片 top_by_count 不应包含团队会话: {top_ids}"
+        assert "n1" in top_ids, "普通会话应进入 top_by_count"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 3. 团队解散空白会话守卫（_save_current_session_to_history）
+# ═══════════════════════════════════════════════════════════════
+class TestTeamDisbandBlankSessionGuard:
+    """团队解散/离开时，仅含 SessionStart hook 消息的空白会话不得落库。
+
+    背景（2026-08-17）：团队批量创建窗口时 create_session 触发 SessionStart
+    hook 注入团队指引（role=user 但带 _hook_event）。若团队在首次真实对话前
+    被解散/离开（_team_run_id 已清空），后台 finalize 链
+    （_launch_background_finalize）强制 _session_dirty=True 后走
+    _save_current_session_to_history 保存——旧实现仅检查 saved_messages 非空
+    + _session_dirty，会把"仅含 hook 消息的空白会话"落库成普通类型记录
+    （历史面板出现大量空白普通会话，实测一次团队运行产生 5 条）。
+    修复：与 _auto_save_current_session 同口径增加 has_user_message 守卫，
+    TeamMail 视为真实用户问题（邮件触发的对话应保存），其余 hook 消息不算。
+    """
+
+    def test_save_has_user_message_guard(self):
+        """_save_current_session_to_history 必须含 has_user_message 守卫"""
+        tree = _load_module_ast()
+        cls = _get_class(tree, "OpenAIChatToolWindow")
+        method = _get_method(cls, "_save_current_session_to_history")
+        src = ast.unparse(method)
+        assert "_hook_event" in src, (
+            "_save_current_session_to_history 必须按 _hook_event 过滤 hook 消息，"
+            "否则团队解散时仅含 SessionStart 指引的空白会话会被落库。"
+        )
+        assert "'TeamMail'" in src or '"TeamMail"' in src, (
+            "守卫必须放行 TeamMail 消息（团队邮件触发的对话应正常保存）。"
+        )
+        # 守卫必须在 _session_dirty 检查之前（先判定有没有真实用户消息）
+        guard_pos = src.find("_hook_event")
+        dirty_pos = src.find("self._session_dirty")
+        assert guard_pos != -1 and dirty_pos != -1, "守卫与脏标记检查均需存在"
+        assert guard_pos < dirty_pos, (
+            "has_user_message 守卫必须在 _session_dirty 检查之前——否则后台finalize 强制置脏后，空白会话仍会被保存。"
+        )
+
+    def test_blank_hook_only_session_not_saved(self):
+        """仅 SessionStart hook 消息 + 强制置脏 → 不调用 history_manager 保存"""
+        from app.main_widget import OpenAIChatToolWindow
+
+        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        session = MagicMock()
+        session.messages = [
+            {"role": "user", "content": "<session-start-hook>团队指引", "_hook_event": "SessionStart"},
+        ]
+        inst.session_manager = MagicMock()
+        inst.session_manager.get_current_session.return_value = session
+        inst.history_manager = MagicMock()
+        inst._session_dirty = True  # 模拟后台 finalize 强制置脏
+        inst._current_session_id = "blank_1"
+        inst._current_project = "默认项目"
+        inst._team_run_id = ""  # 团队已解散，标记已清空
+        inst._team_name = ""
+        inst._team_agent_name = ""
+
+        inst._save_current_session_to_history()
+
+        inst.history_manager.save_session.assert_not_called()
+        inst.history_manager.update_session.assert_not_called()
+
+    def test_team_mail_session_saved(self):
+        """TeamMail 消息（团队邮件触发的对话）→ 正常保存"""
+        from app.main_widget import OpenAIChatToolWindow
+
+        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        session = MagicMock()
+        session.messages = [
+            {"role": "user", "content": "📨 **来自 [build@win_1] 的任务邮件：**", "_hook_event": "TeamMail"},
+            {"role": "assistant", "content": "收到，开始处理"},
+        ]
+        session.system_prompt = ""
+        session.topic_summary = "任务"
+        inst.session_manager = MagicMock()
+        inst.session_manager.get_current_session.return_value = session
+        inst.history_manager = MagicMock()
+        inst.history_manager.find_index_by_session_id.return_value = None
+        inst._session_dirty = True
+        inst._current_session_id = "mail_1"
+        inst._current_project = "默认项目"
+        inst._team_run_id = "run_1"
+        inst._team_name = "t"
+        inst._team_agent_name = "build"
+        inst._get_team_members_snapshot_json = lambda: ""
+        inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
+        inst._get_current_worktree_path = lambda: ""
+        inst._history_card = None
+        inst._refresh_history_page_if_active = None
+        inst._update_node_preview = MagicMock()
+
+        inst._save_current_session_to_history()
+
+        inst.history_manager.save_session.assert_called_once()
+
+    def test_real_user_message_saved(self):
+        """真实用户消息（无 _hook_event）→ 正常保存"""
+        from app.main_widget import OpenAIChatToolWindow
+
+        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        session = MagicMock()
+        session.messages = [
+            {"role": "user", "content": "帮我分析这段代码"},
+            {"role": "assistant", "content": "好的"},
+        ]
+        session.system_prompt = ""
+        session.topic_summary = "分析"
+        inst.session_manager = MagicMock()
+        inst.session_manager.get_current_session.return_value = session
+        inst.history_manager = MagicMock()
+        inst.history_manager.find_index_by_session_id.return_value = None
+        inst._session_dirty = True
+        inst._current_session_id = "real_1"
+        inst._current_project = "默认项目"
+        inst._team_run_id = ""
+        inst._team_name = ""
+        inst._team_agent_name = ""
+        inst._get_team_members_snapshot_json = lambda: ""
+        inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
+        inst._get_current_worktree_path = lambda: ""
+        inst._history_card = None
+        inst._refresh_history_page_if_active = None
+        inst._update_node_preview = MagicMock()
+
+        inst._save_current_session_to_history()
+
+        inst.history_manager.save_session.assert_called_once()
+
+    def test_save_current_session_carries_team_members_snapshot(self):
+        """M1-r：高频保存路径（_save_current_session_to_history）必须携带
+        team_members 快照。
+
+        背景（2026-08-17）：_save_current_session_to_history 的 team_kwargs
+        此前缺 team_members（仅 _auto_save_current_session 有）——团队会话
+        运行中每轮消息走高频保存，历史合并条目 _merge_team_lightweight 的快照
+        成员并入依赖会话记录里的 team_members；缺失时没对话过的成员
+        （无自身会话、仅靠快照找回）在历史面板不显示。
+        """
+        from app.main_widget import OpenAIChatToolWindow
+
+        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        session = MagicMock()
+        session.messages = [
+            {"role": "user", "content": "任务", "_hook_event": "TeamMail"},
+            {"role": "assistant", "content": "收到"},
+        ]
+        session.system_prompt = ""
+        session.topic_summary = "任务"
+        inst.session_manager = MagicMock()
+        inst.session_manager.get_current_session.return_value = session
+        inst.history_manager = MagicMock()
+        inst.history_manager.find_index_by_session_id.return_value = None
+        inst._session_dirty = True
+        inst._current_session_id = "mail_2"
+        inst._current_project = "默认项目"
+        inst._team_run_id = "run_2"
+        inst._team_name = "team"
+        inst._team_agent_name = "build"
+        inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
+        inst._get_current_worktree_path = lambda: ""
+        inst._history_card = None
+        inst._refresh_history_page_if_active = None
+        inst._update_node_preview = MagicMock()
+        # 模拟快照生成：含本团队全部成员（含没对话的 review）
+        inst._get_team_members_snapshot_json = lambda: (
+            '[{"agent_name": "build", "window_id": "win_1"}, {"agent_name": "review", "window_id": "win_2"}]'
+        )
+
+        inst._save_current_session_to_history()
+
+        inst.history_manager.save_session.assert_called_once()
+        _, kwargs = inst.history_manager.save_session.call_args
+        assert kwargs.get("team_members") == (
+            '[{"agent_name": "build", "window_id": "win_1"}, {"agent_name": "review", "window_id": "win_2"}]'
+        ), f"高频保存必须携带 team_members 快照，实际 {kwargs.get('team_members')!r}"
+
+    def test_auto_save_carries_team_members_snapshot(self):
+        """M1-r：_auto_save_current_session 落库路径（关闭窗口/退出）同样携带
+        按 run_id 过滤后的 team_members 快照（对照基线，防止回归）。
+
+        验证 _auto_save_current_session 在团队模式下调用
+        _get_team_members_snapshot_json() 并透传给 history_manager。
+        """
+        from app.main_widget import OpenAIChatToolWindow
+
+        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        session = MagicMock()
+        session.messages = [
+            {"role": "user", "content": "真实问题"},
+        ]
+        session.system_prompt = ""
+        inst.session_manager = MagicMock()
+        inst.session_manager.get_current_session.return_value = session
+        inst.history_manager = MagicMock()
+        inst.history_manager.find_index_by_session_id.return_value = 0
+        inst._session_dirty = True
+        inst._current_session_id = "auto_1"
+        inst._current_project = "默认项目"
+        inst._team_run_id = "run_3"
+        inst._team_name = "team"
+        inst._team_agent_name = "plan"
+        inst._get_team_members_snapshot_json = lambda: '[{"agent_name": "plan", "window_id": "win_1"}]'
+        inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
+        inst._get_current_worktree_path = lambda: ""
+        inst._history_card = None
+        inst._refresh_history_page_if_active = None
+        inst._update_node_preview = MagicMock()
+        # PyQt 子类用 __new__ 构造时访问普通属性触发 super 检查，用 __dict__ 注入
+        inst.__dict__["_current_provider_name"] = ""
+        inst.__dict__["_valid_configs"] = {}
+
+        inst._auto_save_current_session()
+
+        inst.history_manager.update_session.assert_called_once()
+        _, kwargs = inst.history_manager.update_session.call_args
+        assert kwargs.get("team_members") == '[{"agent_name": "plan", "window_id": "win_1"}]', (
+            f"_auto_save 必须携带 team_members 快照，实际 {kwargs.get('team_members')!r}"
+        )
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

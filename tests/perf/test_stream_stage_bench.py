@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
-"""流式 token → 卡片刷新：viewer 层阶段耗时分解基准（T2 基线，T5 优化对照）。
+"""流式 token → 卡片刷新：viewer 层阶段耗时分解基准（T2 基线，T5/T5-fix 对照）。
 
 定位与既有基准的关系：
     - `test_stream_render_bench.py` 测 **MessageCard.append_text 全链路**
       （含 _content_data 合并 / think·tag·fence 守卫 / viewer 增量 /
       _schedule_render / reconcile / finish）。它此前因 MessageCard 无 parent
       时 `_update_anim` 读 `self._parent.chat_scroll_area` 抛 AttributeError，
-      被 Qt 事件循环捕获判 CALL ERROR；T5 已在该处补 AttributeError 防御，
-      该文件现已恢复正常。
+      被 Qt 事件循环捕获判 CALL ERROR；T5 改为 getattr 判空后恢复正常。
     - `test_stream_render_bench_web.py` 测 WebEngine 真机通道，需桌面会话。
 
 本文件取中间层：**MarkdownBlockViewer 单卡的流式刷新路径**，把一次
 "token 推送 → 卡片刷新" 拆成可归因的阶段：
 
     append_chunk      累积 md + 自适应档位 + 派发决策（_schedule_render）
-    boundary_dispatch 派发决策命中分支（clean/soft/adaptive）→ 真正触发渲染的时机
+    boundary_dispatch 派发决策命中分支（clean/soft/adaptive）→ 触发渲染的时机
     render            软/硬边界或兑底时的 _perform_update → _reconcile(force=True)
     reconcile_inner   _reconcile 内部：parse_blocks 解析 vs reconcile_widgets 差量对齐
     finish            finish_streaming 收尾全量 reconcile
@@ -33,36 +32,39 @@
     cd <仓库根> && uv run pytest tests/perf/test_stream_stage_bench.py -v -s
     （tests/perf 被 addopts 默认排除，必须显式指定本文件路径）
 
-基线（T2 · 修复前 / T5 · 优化后对照）
+基线演进
     采集环境：Windows / Python 3.14 / dev 分支 / offscreen + DRIFOX_QT_RENDERER=1
     采集命令：uv run pytest tests/perf/test_stream_stage_bench.py -v -s
 
-    | 阶段 | 优化前 3 轮累计 | 优化后 3 轮累计 | 降幅 | 优化后 p50 / p95 |
-    |---|---|---|---|---|
-    | `_reconcile`（渲染） | 6283.9 ms | 2972.8 ms | **−52.7%** | 10.7 / 18.6 ms |
-    | └ `parse_blocks` | 3248.4 ms | 424.2 ms | **−86.9%** | 1.63 / 3.47 ms |
-    | └ 差量对齐 | 2989.1 ms | 2525.3 ms | −15.5% | 3.4 / 15.9 ms |
-    | `append_chunk`（累积+派发） | 957.0 ms | 554.1 ms | −42.1% | 0.014 / 0.035 ms |
-    | `finish_streaming`（收尾） | 101.6 ms | 51.1 ms | −49.7% | — |
+    | 阶段 | T2 优化前 | T5 优化后 | T5-fix 后（最终） |
+    |---|---|---|---|
+    | `_reconcile`（渲染） | 6283.9 ms | 2972.8 ms | 4875.2 ms |
+    | └ `parse_blocks` | 3248.4 ms | 424.2 ms | **207.6 ms** |
+    | └ 差量对齐 | 2989.1 ms | 2525.3 ms | 3890.7 ms |
+    | `append_chunk`（累积+派发） | 957.0 ms | 554.1 ms | — |
+    | `finish_streaming`（收尾） | 101.6 ms | 51.1 ms | — |
 
-    派发分支命中（单轮）：clean=14（自然边界立即渲染）、soft=8（句号 100ms 合并窗）、
-    adaptive=778（无边界走 150-300-500ms 自适应拍）。
+    p50 口径：`parse_blocks` 11.2ms（优化前）→ 1.63ms（T5）→ 0.59ms（T5-fix）。
 
-    T5 优化结论：
-    1. **瓶颈在渲染侧 `_reconcile`**，优化前占已测量耗时 85.5%；其 87% 又是
-       `parse_blocks`，而 `parse_blocks` 的 94% 是 `_md_to_html`
-       （python-markdown 全量转换）——整链路 ~70% 集中在一次纯函数调用上。
-    2. `append_chunk` 入口从来不是瓶颈（p50 13µs）。
-    3. 生效的优化是 `_md_to_html_incremental`（见 markdown_block_viewer）：
-       按最后一个空行边界切成「已闭合前缀（按文本寻址缓存）+ 变动尾部
-       （单独转换）」，单次转换量从全量降到尾部几十字符。
-    4. 被否决的方向（实测不可行，勿重复尝试）：
-       - 逐块转换 + 块间补 `\n`：markdown 序列化在顶层块间恒插 `\n`，且会把
-         空行分隔的相邻列表 / 相邻 blockquote 合并，600 组组合下 164 处不一致。
-       - 同 `_md` 去重跳过 reconcile：相邻重复仅 1/800，收益 ~1%。
-       - 文本级 LRU 缓存（key=输入文本）：流式输入每 chunk 必变，命中率 0%。
-    5. 等价性由 `tests/widgets/test_markdown_incremental_html_equivalence.py`
-       固化（含 600 组组合 + 缓存透明性 + 流式中间态）。
+    ⚠️ 重要口径更正（T5-fix 实测）。T5 报告的 −52.7% 建立在**段内 prefix/tail
+    切分 + 文本寻址缓存**上，但该缓存的粒度放错了层：
+    `parse_blocks` 会把全文按 think/tool/fence 切成 N 个文本段，**每段各调一次**
+    `_plain_text_blocks` → 段内切分的 prefix 每段都不同 → 缓存 0 命中、每段做
+    两次转换。实测 32000 字符：`parse_blocks` 段内切分 17.0ms vs 不优化 17.2ms，
+    **几乎无净收益**（T5 的 −86.9% 是当时插桩复刻逻辑导致的口径失真）。
+
+    T5-fix 改为**段级结果缓存**（`_TEXT_BLOCK_CACHE`，key = 文本段原文）：
+    流式推进时只有最后一个段在变，前 N-1 段文本恒定 → 命中率 ~98%（实测
+    payload 69 段命中 68 段）。且这是纯函数结果缓存（同输入必同输出），
+    **天然等价、不需要任何等价性守卫**。
+
+    被否决 / 已修正的方向：
+    - 逐块转换 + 块间补 `\n` 不等价（600 组 164 处不一致，相邻列表/blockquote 会合并）
+    - 同 `_md` 去重跳过 reconcile：相邻重复仅 1/800，收益 ~1%
+    - 文本级 LRU（key=输入文本）：流式输入每 chunk 必变，命中率 0%
+    - 段内 prefix/tail 切分：调用 69 次、缓存 0 命中 → 负收益（见上）
+
+    等价性回归：tests/widgets/test_markdown_incremental_html_equivalence.py。
 
     ⚠️ 基线随机器与负载漂移 ±20%，跨机对比无意义；只在同一台机器做前后对比。
 """
@@ -179,7 +181,7 @@ def _run_one_round(round_idx: int, payload: str) -> dict:
     def timed_reconcile(force=False):
         # 渲染阶段（一次全量/差量刷新）落地在 _reconcile。
         # ⚠️ 只环绕调用 _orig_reconcile：复刻其逻辑会绕过被测的缓存路径，
-        # 使优化效果无法体现在数字上（口径失真）。
+        # 使优化效果无法体现在数字上（T5 的口径失真即源于此）。
         t0 = time.perf_counter()
         _orig_reconcile(force)
         render_cost.append((time.perf_counter() - t0) * 1000)
