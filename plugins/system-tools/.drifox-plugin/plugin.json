@@ -14,7 +14,8 @@
   "type": "system",
   "api_version": 2,
   "capabilities": [
-    "team.read"
+    "team.read",
+    "team.send"
   ],
   "components": {
     "tools": true

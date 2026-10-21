@@ -254,7 +254,8 @@ caps["stream.subscribe"]({
 | `command.read` | low | 命令列表 |
 | `command.reload` | medium | 命令热重载 |
 | `sync.register` | **high** | 把插件数据接入云端同步（数据外发） |
-| `team.read` | low | 团队成员 / 角色 / 运行状态 |
+| `team.read` | low | 团队成员 / 角色 / 运行状态（只读门面，写操作不可见） |
+| `team.send` | medium | 向团队成员派发任务邮件（写对方邮箱） |
 
 ### 基础（恒放行）
 
@@ -323,6 +324,23 @@ def register(registry) -> None:
 ```
 
 单参 `(host)` 或双参 `(host, ctx)`（`ctx` 提供 `plugin` / `surface` / `registry`），按参数个数自动分派。
+
+**宿主单例的只读面用 facet 声明**，别在两个 surface 各手写一份字典
+（`app/plugins/capabilities/facets.py`）：
+
+```python
+FACETS["mycap.read"] = FacetSpec(
+    target="app.core.foo.manager:FooManager",   # 模块路径:类名，取 get_instance()
+    methods=("get_a", "get_b"),                 # 白名单即能力边界
+)
+
+
+def _mycap_read(host: Any):
+    return build_facet("mycap.read")            # 返回 () -> ReadOnlyFacade
+```
+
+白名单外的属性访问得到 `AttributeError`（写操作天然隔离）；`tests/plugins/test_capability_provider_contract.py`
+遍历 `FACETS` 断言每个名字在目标类上真实存在，typo 在 CI 就炸——手写字典做不到这一点。
 
 **3. 单测**（`tests/plugins/test_capability_*.py`）
 

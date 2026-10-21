@@ -25,7 +25,16 @@ _MEANINGLESS_DESC_PATTERN = re.compile(r"^由\s*\d+\s*个活跃窗口保存")
 
 
 def _find_member_agent_name(tm, window_id: str) -> str:
-    """根据窗口 ID 查找当前成员的角色名（agent_name）。"""
+    """根据窗口 ID 查找当前成员的角色名（agent_name）。
+
+    优先走宿主 API；getattr 回退保证老测试 mock 未实现该方法时仍可用。
+    """
+    getter = getattr(tm, "get_member_agent_name", None)
+    if callable(getter):
+        try:
+            return getter(window_id) or ""
+        except Exception:
+            pass
     try:
         members = tm.get_members()
         for m in members:

@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **能力面改声明式 + 补 `TeamManager.get_member_agent_name`** (`app/plugins/capabilities/facets.py` · `app/core/team/team_manager.py` · `providers/tool_core.py` · `providers/ui_core.py` · `plugins/system-tools/tools/subagent_tools.py`): `f06fb272` 往 `team.read` 加了 `member_agent_name` 契约但从未实现该方法，而 provider 用一次性构造的 `{别名: 宿主方法}` 字典——单个 typo 让整个能力在取用瞬间抛 `AttributeError`：system-hooks 两个 SessionStart 注入 hook 自 10-19 起静默空转（异常被 `except` 吞掉），`team_list_members` 直接报 `Execution error`。更深一层是同批迁移把 `subagent_tools` 的 TeamManager 对象换成能力池，却没注意 provider 返回 dict（`'dict' object has no attribute 'get_members'`）。现改为 ①`facets.py` 用 `FacetSpec(target, methods)` 声明白名单，两个 surface 共用一份清单，`ReadOnlyFacade` 保证名单外（尤其写操作）访问抛 `AttributeError`；②补 `get_member_agent_name`（口径同 `get_member_run_id`：先读 `team_members` 快照，回退活跃 members）；③派单独立为 `team.send`（medium，`send_task` 单方法），与只读面分权，system-tools manifest 补声明；④`tests/plugins/test_capability_provider_contract.py` 遍历 `FACETS` 断言白名单方法在目标类真实存在、门面不泄漏写操作，typo 在 CI 就炸。团队相关用例由基线 26 failed 收敛到 11（余下 5 项为 `TestHistorySessionRestoreRegistersTeamMember` 与 `TestDeriveCapability` 的既有失败，与本次无关）。
+
 ## [v0.6.10] - 2026-10-20 (重新发布 #3)
 
 自 v0.6.9 以来的变更（累计） | 提交数：68 · 文件变更：168 · +10823/-2159 | 贡献者：dingma, drifox-bot, mading

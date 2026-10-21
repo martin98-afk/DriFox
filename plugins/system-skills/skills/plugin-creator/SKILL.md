@@ -129,6 +129,14 @@ your-plugin/
 4. drifox-dev 未加载 → 停，先加载再继续
 5. 新建/修改对象不明 → 停，用 question 问清再动手
 6. `validate_plugins.py` 未通过 → 禁止提 PR
+7. 想用的 manifest 字段 / registry 方法在 references 清单里找不到 → 停，它不存在。如实告知并给最接近的真实形态，禁止编造或从其他生态移植
+8. 验证没跑或跑不了 → 停，如实报告「未验证」+ 缺什么、怎么补；禁止把「没报错」当「验证通过」
+
+### 能力边界（清单之外不存在，别造）
+
+- manifest 顶层字段全集 = references/manifest.md 字段总表。`commands` / `agents` / `hooks` / `skills` / `mcpServers` / `permissions` / `manifest_version` 等是 Claude Code 等其他生态的键，DriFox 没有它们；组件一律 `components: {flag: true}` + 目录约定。
+- `register(registry)` 契约、字段名、返回形态以 references/components.md 各组件模板为准；模板之外的方法签名、辅助函数不存在。
+- 需要的能力在 capabilities 清单里没有 → 该能力不存在或未开放，报告用户，不造 workaround。
 
 ## 5. 验证
 
