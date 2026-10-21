@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""删除保护：删除命令识别 + 存在路径快照 + 非删除命令不动作"""
-from app.tools.sandbox import is_delete_command, snapshot_paths_before_delete
+"""删除审批：删除命令识别 + 垃圾箱 move 行为 + 相对路径 workdir 基准回归"""
+from app.tools.sandbox import is_delete_command, stash_delete_targets_to_trash
 
 
 def test_is_delete_command():
@@ -12,46 +12,11 @@ def test_is_delete_command():
     assert not is_delete_command("mkdir build")
 
 
-def test_snapshot_existing_paths(tmp_path):
-    target = tmp_path / "keep.txt"
-    target.write_text("data", encoding="utf-8")
-    backup_root = tmp_path / "snapshots"
-    copied = snapshot_paths_before_delete(f"rm {target}", backup_root)
-    assert len(copied) == 1
-    assert copied[0].read_text(encoding="utf-8") == "data"
+# ── 相对路径基准（2026-10-13 实测缺陷回归，原快照链路等价迁移到垃圾箱 move）──
 
 
-def test_snapshot_skips_missing_paths(tmp_path):
-    backup_root = tmp_path / "snapshots"
-    copied = snapshot_paths_before_delete(f"rm {tmp_path / 'ghost.txt'}", backup_root)
-    assert copied == []
-
-
-def test_snapshot_ignores_flags(tmp_path):
-    target = tmp_path / "a.txt"
-    target.write_text("x", encoding="utf-8")
-    copied = snapshot_paths_before_delete(f"rm -rf {target}", tmp_path / "snap")
-    assert len(copied) == 1
-
-
-def test_snapshot_non_delete_command_noop(tmp_path):
-    assert snapshot_paths_before_delete("git status", tmp_path / "snap") == []
-
-
-def test_snapshot_directory(tmp_path):
-    src = tmp_path / "tree"
-    (src / "sub").mkdir(parents=True)
-    (src / "sub" / "f.txt").write_text("deep", encoding="utf-8")
-    copied = snapshot_paths_before_delete(f"rm -rf {src}", tmp_path / "snap")
-    assert len(copied) == 1
-    assert (copied[0] / "sub" / "f.txt").read_text(encoding="utf-8") == "deep"
-
-
-# ── 相对路径基准（2026-10-13 实测缺陷回归）──
-
-
-def test_snapshot_relative_target_resolves_against_workdir(tmp_path, monkeypatch):
-    """相对路径目标按 workdir 解析（修前按进程 cwd → exists() False → 静默漏拍）
+def test_stash_relative_target_resolves_against_workdir(tmp_path, monkeypatch):
+    """相对路径目标按 workdir 解析（修前按进程 cwd → exists() False → 静默漏移）
 
     用 monkeypatch 把进程 cwd 设到别处，确保命中的只可能是显式 workdir。
     """
@@ -64,12 +29,14 @@ def test_snapshot_relative_target_resolves_against_workdir(tmp_path, monkeypatch
     sub.mkdir(parents=True)
     (sub / "a.txt").write_text("data", encoding="utf-8")
 
-    copied = snapshot_paths_before_delete("rm -rf subdir", tmp_path / "snap", workdir=workdir)
-    assert len(copied) == 1, "相对目标必须按 workdir 解析，否则静默漏拍"
-    assert (copied[0] / "a.txt").read_text(encoding="utf-8") == "data"
+    trash_root = tmp_path / "deletes"
+    moved = stash_delete_targets_to_trash("rm -rf subdir", trash_root, workdir=workdir)
+    assert len(moved) == 1, "相对目标必须按 workdir 解析，否则静默漏移"
+    assert (moved[0] / "a.txt").read_text(encoding="utf-8") == "data"
+    assert not sub.exists(), "原目录应已移入垃圾箱"
 
 
-def test_snapshot_relative_target_without_workdir_falls_back(tmp_path, monkeypatch):
+def test_stash_relative_target_without_workdir_falls_back(tmp_path, monkeypatch):
     """未传 workdir 回退 `_current_workdir()`（向后兼容，不崩）"""
     from app.tools import sandbox as sb
 
@@ -77,5 +44,15 @@ def test_snapshot_relative_target_without_workdir_falls_back(tmp_path, monkeypat
     sub.mkdir()
     (sub / "a.txt").write_text("data", encoding="utf-8")
     monkeypatch.setattr(sb, "_current_workdir", lambda: tmp_path)
-    copied = snapshot_paths_before_delete("rm -rf subdir", tmp_path / "snap")
-    assert len(copied) == 1
+    moved = stash_delete_targets_to_trash("rm -rf subdir", tmp_path / "deletes")
+    assert len(moved) == 1
+
+
+def test_stash_missing_target_only_noop(tmp_path):
+    """命令里只写了不存在的目标时不动任何文件"""
+    workdir = tmp_path / "proj"
+    workdir.mkdir()
+    moved = stash_delete_targets_to_trash(
+        f"rm {workdir / 'ghost.txt'}", tmp_path / "deletes", workdir=workdir
+    )
+    assert moved == []

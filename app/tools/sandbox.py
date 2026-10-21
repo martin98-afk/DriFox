@@ -6,8 +6,7 @@
 - SandboxConfig：sandbox_config.json 的加载/保存/单例（点路径 get/set）
 - check_path / check_command / check_network：三分法判定，返回 "allow"|"confirm"|"deny"
 - sandbox_check_tool：工具名 + 参数 → 判定（worker 层唯一入口）
-- snapshot_paths_before_delete：删除类命令执行前快照
-- snapshot_paths_before_delete：删除类命令执行前快照
+- stash_delete_targets_to_trash：垃圾桶开启时，删除类命令执行前把目标移入垃圾箱
 
 本模块不弹 UI、不做 OS 级隔离；审批呈现由 chat_worker 既有弹窗链负责。
 设计文档：docs/superpowers/specs/2026-09-18-sandbox-l1-security-center-design.md
@@ -873,7 +872,7 @@ def _resolve_cmd_path(item: str, workdir: Optional[Path] = None) -> Path:
     ⚠ 相对路径的基准是 **workdir**（bash 进程 cwd = workdir，terminal_tools
     chdir 到该目录），不是进程 cwd。实测踩坑：`rm -rf subdir`（workdir 下确有
     subdir）在快照时按进程 cwd 解析 → 目标不存在 → **静默漏拍快照**，
-    删除保护失效而不报错。delete_targets / snapshot_paths_before_delete /
+    删除保护失效而不报错。delete_targets / stash_delete_targets_to_trash /
     delete_exempt 及写目标判定全部走本函数，不得各自展开。
     """
     p = Path(os.path.expandvars(item)).expanduser()
@@ -991,66 +990,10 @@ def is_delete_command(command: str) -> bool:
     return False
 
 
-def snapshot_paths_before_delete(command: str, backup_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
-    """删除命令执行前，把命令中「存在」的路径快照到 backup_root，返回快照路径列表
-
-    只在审批放行后调用；非删除命令返回 []。快照失败不阻断（用户已批准删除）。
-
-    ⚠ workdir 基准（2026-10-13 实测缺陷修复）：相对路径目标必须按 workdir 解析。
-    修前 `rm -rf subdir`（workdir 下确有 subdir）按进程 cwd 解析 → exists() False
-    → **静默漏拍**，用户以为有快照实际无。调用方应从 tool_executor.get_workdir()
-    显式传入；未传回退 `_current_workdir()`（多窗口时会串味，见该函数注释）。
-    """
-    if not is_delete_command(command):
-        return []
-    backup_root = Path(backup_root)
-    snapshots: list = []
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    seen: set = set()
-    for token in _split_tokens(command):
-        raw = _strip_quotes(token)
-        lowered = raw.lower()
-        if lowered in _DELETE_FLAGS or lowered in DELETE_COMMANDS:
-            continue
-        if lowered.startswith(("-", "/")):
-            continue
-        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试；
-        # 另提取 $var='path' 赋值形态的引号内路径（.NET Delete 变体目标）
-        candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
-        candidates = candidates + _extract_quoted_paths(raw)
-        for item in candidates:
-            item = _strip_quotes(item)
-            if not item or item.lower() in DELETE_COMMANDS or item.lower() in _DELETE_FLAGS:
-                continue
-            if item.startswith(("-", "/")):
-                continue
-            candidate = _resolve_cmd_path(item, workdir)
-            if not candidate.exists() or str(candidate) in seen:
-                continue
-            seen.add(str(candidate))
-            try:
-                target = backup_root / f"{stamp}_{candidate.name}"
-                if candidate.is_dir():
-                    shutil.copytree(candidate, target, dirs_exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(candidate, target)
-                snapshots.append(target)
-                logger.info(f"[Sandbox] 删除前已快照: {candidate} -> {target}")
-            except Exception as e:  # noqa: BLE001 - 快照失败不阻断用户已批准的删除
-                logger.warning(f"[Sandbox] 删除前快照失败({e}): {candidate}")
-    return snapshots
-
-
-# ============================================================
-# 垃圾桶软删除（trash_enabled 开启时替代 copy 快照）
-# ============================================================
-
-
 def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
-    """垃圾桶模式：把删除命令的目标**移动**到垃圾桶目录（软删除，可找回）
+    """垃圾桶模式：把删除命令的目标**移动**到垃圾箱目录（软删除，可找回）
 
-    与快照（copy）的区别：move 让原路径消失，原命令随后对目标执行时目标已不在
+    move 让原路径消失，原命令随后对目标执行时目标已不在
     （rm -f 静默成功）。单个目标移动失败不阻断（该目标由原命令正常删除）。
     """
     if not is_delete_command(command):

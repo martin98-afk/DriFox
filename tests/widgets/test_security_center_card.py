@@ -246,7 +246,7 @@ def test_deleted_snapshot_stats_counts(isolated_cfg, data_dir):
     """造 tmp 目录 + 文件 → (N, bytes)"""
     from app.widgets.cards.settings.security_center_card import SecurityCenterCard
 
-    d = data_dir / "backups" / "deleted"
+    d = data_dir / "backups" / "deletes"
     d.mkdir(parents=True)
     (d / "20260921_120000_a.txt").write_bytes(b"x" * 100)
     (d / "20260921_120001_b.txt").write_bytes(b"y" * 250)
@@ -259,7 +259,7 @@ def test_deleted_snapshot_stats_recurses(isolated_cfg, data_dir):
     """目录型快照（copytree 产物）应递归统计"""
     from app.widgets.cards.settings.security_center_card import SecurityCenterCard
 
-    sub = data_dir / "backups" / "deleted" / "20260921_120000_dir" / "inner"
+    sub = data_dir / "backups" / "deletes" / "20260921_120000_dir" / "inner"
     sub.mkdir(parents=True)
     (sub / "f.txt").write_bytes(b"z" * 10)
     count, size = SecurityCenterCard._deleted_dir_stats()
@@ -268,7 +268,7 @@ def test_deleted_snapshot_stats_recurses(isolated_cfg, data_dir):
 
 
 def test_snapshot_label_shows_stats(isolated_cfg, data_dir):
-    d = data_dir / "backups" / "deleted"
+    d = data_dir / "backups" / "deletes"
     d.mkdir(parents=True)
     (d / "a.txt").write_bytes(b"x" * 1024)
     card = _make_card()
@@ -281,12 +281,12 @@ def test_snapshot_label_shows_stats(isolated_cfg, data_dir):
 def test_snapshot_clear_btn_disabled_when_empty(isolated_cfg, data_dir):
     card = _make_card()
     assert card.snapshot_clear_btn.isEnabled() is False
-    assert "没有快照" in card.snapshot_clear_btn.toolTip()
+    assert "没有删除备份" in card.snapshot_clear_btn.toolTip()
 
 
 def test_snapshot_clear_requires_confirmation(isolated_cfg, data_dir, monkeypatch):
     """清空必须走二次确认：用户取消 → 文件保留"""
-    d = data_dir / "backups" / "deleted"
+    d = data_dir / "backups" / "deletes"
     d.mkdir(parents=True)
     target = d / "keep.txt"
     target.write_bytes(b"important")
@@ -310,7 +310,7 @@ def test_snapshot_clear_requires_confirmation(isolated_cfg, data_dir, monkeypatc
 
 def test_snapshot_clear_removes_when_confirmed(isolated_cfg, data_dir, monkeypatch):
     """确认后清空"""
-    d = data_dir / "backups" / "deleted"
+    d = data_dir / "backups" / "deletes"
     d.mkdir(parents=True)
     (d / "gone.txt").write_bytes(b"x")
 
@@ -419,9 +419,9 @@ def test_n3_relative_path_semantics_documented(isolated_cfg):
 
 
 def test_n4_delete_exempt_mentions_no_snapshot(isolated_cfg):
-    """N4：删除豁免需说明"也不做快照" """
+    """N4：删除豁免需说明"也不进垃圾箱" """
     src = _security_card_source()
-    assert "不再弹审批，也不做快照" in src
+    assert "不再弹审批，也不进垃圾箱" in src
 
 
 def test_n5_job_quota_scope_documented(isolated_cfg):
@@ -453,7 +453,7 @@ def test_note_mentions_mcp_and_upload_scope(isolated_cfg):
 def test_c2_backup_card_has_no_stale_number(isolated_cfg):
     """C2：备份卡文案不得含构造期数值快照（避免同屏两处数字不一致）"""
     src = _security_card_source()
-    assert '修改前自动备份原文件（FileRecorder）",' in src, "应改为不含数值的静态描述"
+    assert '修改前自动备份原文件（backups/edits）",' in src, "应改为不含数值的静态描述"
     assert "FileRecorder），上限 {" not in src, "构造期 f-string 数值快照应已移除"
 
 

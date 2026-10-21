@@ -22123,7 +22123,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if verdict in ("confirm", "deny"):
                 return "sandbox", "⚠ 安全中心拦截"
             if command and is_delete_command(command):
-                return "delete", "🗑 删除保护"
+                return "delete", "🗑 删除审批"
         except Exception as e:  # noqa: BLE001 - 判定失败回落策略来源
             logger.debug(f"[Permission] 来源判定失败({tool_name}): {e}")
         return "policy", "🔒 工具权限策略"

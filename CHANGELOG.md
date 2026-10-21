@@ -3,6 +3,12 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
+### ✨ 新功能 (New Features)
+
+- **垃圾桶软删除解耦 + 备份目录分类** (`app/core/workers/chat_worker.py` · `app/tools/sandbox.py` · `app/utils/file_operation_recorder.py` · `app/widgets/cards/settings/security_center_card.py` · `plugins/system-cleaner/`): ①垃圾箱行为修复：原备份逻辑挂在审批通过后钩子且被 `sandbox_enabled && delete_protection` 双门绑死——垃圾桶开了但删除保护没开时永不生效（「垃圾箱不工作」根因）。现挂在 `_execute_tool`（只有真正执行的命令才进），保留与否只看「垃圾桶」开关（`delete.trash_enabled`）：开 → 删除目标 move 进 `backups/deletes`（软删除可找回）；关 → 不保留，删除即真删；与沙箱/删除审批开关无关，删除豁免路径不进垃圾箱。②「删除保护」开关更名「删除审批」（职责只管审批，文案与 main_widget 风险来源标签同步）；copy 快照模式随解耦移除（`snapshot_paths_before_delete` 删除）。③备份目录顶层分类：`backups/edits/<session_id>/`（编辑类）+ `backups/deletes/`（删除类），旧 `deleted/`、`trash/` 不再写入；备份容量分治清理同步适配（旧目录排除在编辑类配额外）。④system-cleaner「备份文件」清理项拆为「编辑类备份」（默认勾选）与「删除类备份」（默认不勾选，误删恢复手段建议保留）。⑤插件视觉去 emoji：全部图标改内嵌 SVG 线性风格（QtSvg 渲染，主题色自适应），按钮/状态文案纯文字化，缓存行加 hover 高亮与圆角。
+
+### 🐛 问题修复 (Bug Fixes)
+
 ## [v0.6.10] - 2026-10-20 (重新发布 #2)
 
 自 v0.6.9 以来的变更（累计） | 提交数：65 · 文件变更：149 · +10142/-1887 | 贡献者：dingma, drifox-bot, mading
