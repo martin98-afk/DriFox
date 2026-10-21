@@ -251,6 +251,63 @@ def test_invalidate_font_cache_clears_render_caches():
     assert not _TEXT_BLOCK_CACHE, "invalidate_font_cache 必须清 _TEXT_BLOCK_CACHE"
 
 
+def test_config_fingerprint_tracks_font_size():
+    """指纹必须随字号档位变化（**直接调本体，不 patch**）。
+
+    ⚠️ 这条用例的存在本身就是防「测试盲区」：此前用
+    `get_ui_font_size()`（返回未缩放的 base，16 个档位全是 14）算指纹，
+    去重后只剩 1 个值 → 字号维度完全空转；而当时的用例把 `_config_fingerprint`
+    patch 掉了，恰好测不到这个盲区（双重失效）。
+
+    所以这里必须调真实函数，并走真实的配置写入 + 缓存失效链路。
+    """
+    import app.widgets.markdown_block_viewer as mbv
+    from app.utils.config import Settings
+    from app.utils.design_tokens import invalidate_font_cache
+
+    cfg = Settings.get_instance()
+    orig_key = cfg.ui_font_size.value
+    try:
+        cfg.ui_font_size.value = "0"
+        invalidate_font_cache()
+        fp_0 = mbv._config_fingerprint()
+
+        cfg.ui_font_size.value = "10"
+        invalidate_font_cache()
+        fp_10 = mbv._config_fingerprint()
+
+        assert fp_0 != fp_10, f"字号档位变化必须改变指纹（实际都是 {fp_0!r}）"
+    finally:
+        cfg.ui_font_size.value = orig_key
+        invalidate_font_cache()
+
+
+def test_config_fingerprint_distinguishes_all_font_size_keys():
+    """遍历全部 16 个字号档位：指纹去重后必须 = 16（一档一值）。
+
+    这是 review 的复现方法：若某维度空转，去重数会小于档位数。
+    """
+    import app.widgets.markdown_block_viewer as mbv
+    from app.utils.config import Settings
+    from app.utils.design_tokens import FONT_SIZE_OPTIONS, invalidate_font_cache
+
+    cfg = Settings.get_instance()
+    orig_key = cfg.ui_font_size.value
+    fingerprints = []
+    try:
+        for key in FONT_SIZE_OPTIONS:
+            cfg.ui_font_size.value = key
+            invalidate_font_cache()
+            fingerprints.append(mbv._config_fingerprint())
+    finally:
+        cfg.ui_font_size.value = orig_key
+        invalidate_font_cache()
+
+    assert len(set(fingerprints)) == len(FONT_SIZE_OPTIONS), (
+        f"指纹区分度不足：{len(set(fingerprints))}/{len(FONT_SIZE_OPTIONS)}（字号维度空转？）"
+    )
+
+
 def test_text_block_cache_lru_not_clear_all():
     """段级缓存触顶必须走真 LRU（淘汰最久未用），不能整体 clear。
 
