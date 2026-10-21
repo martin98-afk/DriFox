@@ -276,6 +276,15 @@ JUMP_SETTLE_MAX_TRIES = 40
 # 锁到期时队列还没排空，排空置底照样把视口拽走 —— 「消息数高的卡片死活跳不过去」。
 JUMP_SCROLL_LOCK_TAIL_MS = 1200
 
+# 跳转锁的**硬上限**（ms）：从最后一次续期算起，压制总时长不得超过此值。
+# 用途：异常情况下（落点收敛链卡死 / 目标卡引用永不释放）不允许无限压制，
+# 否则「回到底部」以外的自动跟底会永久失效。
+# 取值 10s = 尾巴期(1.2s) 的 8 倍多：正常跳转链（分批加载 + 懒渲染排空）实测
+# 远低于此，撞上限即说明确实异常。
+# ⚠️ 该常量原先**只被引用未定义**（重构时漏写），导致 `_is_jump_scroll_locked()`
+# 无条件抛 NameError、跳转锁判定整体失效 —— 补定义修复。
+JUMP_SCROLL_LOCK_HARD_CAP_MS = 10000
+
 # 宽度同步分帧批大小：实测 sync_width 约 1.4ms/张（setMin/MaxWidth 布局失效
 # + update_height 的 runJavaScript IPC），8 张 ≈ 11ms，低于单帧预算（16ms），
 # 保证批间让出主线程后 UI 无冻结感。
@@ -968,6 +977,8 @@ class OpenAIChatToolWindow(ToolWindow):
     # AI 审核结果桥接（后台线程 → 主线程）：tool_call_id, result(dict|None), error
     _approval_review_ready = Signal(str, object, str)
     _interrupt_complete = Signal(object)  # 中断完成后主线程回调
+    # [T4-4] diff 统计后台计算结果回主线程：tool_call_id, stats(dict|None)
+    _diff_stats_ready = Signal(str, object)
     userInterventionRequested = Signal(dict)
     executionResultProduced = Signal(str)
     toolStartUiSyncRequested = Signal(str, str, object, str)
@@ -1217,6 +1228,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._approval_review_ready.connect(self._on_approval_review_ready)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
+        # [T4-4] diff 统计后台计算完成 → 主线程校验卡片存活后落数字
+        self._diff_stats_ready.connect(self._on_diff_stats_ready)
         # ★ B5：停止/关窗后台 finalize 幂等锁（防止 stop 按钮与 closeEvent 双触发双 finalize）
         self._bg_finalize_lock = threading.Lock()
         self._bg_finalize_started = False
@@ -10772,7 +10785,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 欢迎卡片 tab 条显式适配：CustomTabButton 的文字样式由
             # _apply_label_color 写死 font-size，apply_font_size_to_widget 的
             # setFont 覆盖不到，这里按当前 delta 重设（首次构建同路径）。
-            for _card in self.findChildren(MessageCard):
+            # [T4-2] 复用已扫好的 _message_cards，避免再跑一次全树 findChildren
+            # （字体切换热路径上整树扫描实测数十 ms）。
+            # ⚠️ 仅 is_font_family 可复用：该分支下 _message_cards 由 _all_widgets
+            # 过滤得到、非空；scope="font_size" 时它是空列表，必须回落全树扫描。
+            _welcome_cards = _message_cards if is_font_family else self.findChildren(MessageCard)
+            for _card in _welcome_cards:
                 if getattr(_card, "role", None) == "welcome" and hasattr(_card, "_apply_welcome_tabs_font"):
                     try:
                         _card._apply_welcome_tabs_font()
@@ -15184,7 +15202,18 @@ class OpenAIChatToolWindow(ToolWindow):
             # _finalize_worker 单次消费，deferred 再跑拿到空列表无害），
             # 确保下方 _auto_save_current_session 保存的是完整会话。
             try:
-                interrupted = self.backend.finalize_stop() if self.backend.chat_engine else []
+                # [T4-1] 主线程热路径：切会话不能有秒级同步等待。给 finalize_stop
+                # 传 400ms 总预算（历史默认 3000+1000 会让切历史会话卡 ~4s）。
+                # 拿不到中断消息也无害——deferred finalize 仍会兜底，且下方
+                # _auto_save_current_session 保存的也不会比旧行为更差。
+                from PyQt5.QtCore import QElapsedTimer as _QET
+
+                _t0 = _QET()
+                _t0.start()
+                interrupted = self.backend.finalize_stop(timeout_ms=400) if self.backend.chat_engine else []
+                _ms = _t0.elapsed()
+                if _ms >= 50:
+                    logger.info(f"[Perf][SwitchSession] finalize_stop 同步耗时 {_ms}ms（预算 400ms）")
                 if interrupted:
                     self._apply_interrupted_messages_to_session(interrupted)
                     self._session_dirty = True
@@ -21015,8 +21044,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._scroll_to_bottom()
 
         # 字段驱动：任何工具结果携带 diff 时实时更新差异统计（插件声明，主程序不写死工具名）
+        # [T4-4] 改走后台线程：>200KB 文件的 edit 工具完成后，同步版
+        # （get_operations_for_preview 读文件 + difflib）会让主线程单次阻塞
+        # 远超一帧预算。语义不变：仍是单 call 增量。
         if diff_val:
-            self._update_card_diff_stats_for_call(tool_call_id)
+            self._schedule_card_diff_stats_for_call(tool_call_id)
 
     def _find_latest_assistant_card(self) -> Optional[MessageCard]:
         for i in range(self.chat_layout.count() - 1, -1, -1):
@@ -21299,6 +21331,94 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
         except Exception as e:
             logger.warning(f"[DiffStats] 增量更新统计失败: {e}")
+
+    def _schedule_card_diff_stats_for_call(self, tool_call_id: str, card=None) -> None:
+        """[T4-4] 后台线程算单个工具完成的 diff 统计，避免主线程阻塞。
+
+        背景：`get_operations_for_preview` + `compute_diff_stats` 要读备份文件与
+        当前文件再跑 difflib，>200KB 文件上会突破单帧预算（16ms），流式工具
+        回填时表现为一次可见卡顿。
+
+        ⚠️ 刻意**不**复用 `_enqueue_card_diff_stats`（批量时间片队列）：那是整轮
+        覆盖语义 + 懒渲染推迟消费，会把页脚数字推迟到懒渲染排空后，单 call 的
+        实时增量语义丢失。本方法保留「每完成一个 call 就更新一次」的语义，
+        只把**计算**挪到后台线程，主线程只做卡片存活校验 + 落数字。
+
+        防线程堆积：同一 tool_call_id 有未完成的计算时直接跳过新任务（标记在
+        计算完成时清除），长任务连续跑工具不会攒出一堆线程。
+        """
+        if card is None:
+            card = getattr(self, "_current_assistant_card", None)
+        if not card or card.role != "assistant":
+            return
+        if not self.backend.file_recorder:
+            return
+        try:
+            session = self.session_manager.get_current_session()
+        except Exception:
+            return
+        if not session:
+            return
+        session_id = session.session_id
+
+        pending = getattr(self, "_pending_diff_call_ids", None)
+        if pending is None:
+            pending = set()
+            self._pending_diff_call_ids = pending
+        if tool_call_id in pending:
+            return  # 上一次还没算完，跳过（防线程堆积）
+        pending.add(tool_call_id)
+
+        recorder = self.backend.file_recorder
+
+        def _worker():
+            stats = None
+            try:
+                from app.widgets.ui_helpers import compute_diff_stats
+
+                ops = recorder.get_operations_for_preview(session_id, tool_call_id)
+                if ops:
+                    stats = compute_diff_stats(ops)
+                    # 本次涉及的文件路径用于页脚去重（同步版同款）
+                    stats["_seen_files"] = {op.get("file_path", "") for op in ops if op.get("file_path")}
+            except Exception as e:
+                logger.warning(f"[DiffStats] 后台计算差异统计失败: {e}")
+                stats = None
+            # 跨线程信号回主线程（daemon 线程无事件循环，与 _interrupt_complete 同款）
+            try:
+                self._diff_stats_ready.emit(tool_call_id, stats)
+            except RuntimeError:
+                # 窗口已销毁：清标记避免泄漏
+                pending.discard(tool_call_id)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_diff_stats_ready(self, tool_call_id: str, stats) -> None:
+        """[T4-4] 主线程槽：校验卡片仍然存活后才落 diff 数字。"""
+        pending = getattr(self, "_pending_diff_call_ids", None)
+        if pending is not None:
+            pending.discard(tool_call_id)
+        if not stats:
+            return
+        if not (stats.get("files") or stats.get("additions") or stats.get("deletions")):
+            return
+        card = getattr(self, "_current_assistant_card", None)
+        if not card or card.role != "assistant":
+            return
+        try:
+            # 卡片存活校验：sip 包装对象被 C++ 侧销毁后访问会 RuntimeError
+            # （shiboken6 无 isdeleted，isValid=False 即 C++ 侧已销毁）
+            if sip.isValid(card):
+                card.add_diff_stats(
+                    files_count=stats.get("files", 0),
+                    additions=stats.get("additions", 0),
+                    deletions=stats.get("deletions", 0),
+                    seen_files=stats.get("_seen_files") or set(),
+                )
+        except RuntimeError:
+            pass
+        except Exception as e:
+            logger.warning(f"[DiffStats] 应用后台统计失败: {e}")
 
     def _update_card_diff_stats(self, card=None):
         """计算助手卡片的文件修改统计并更新到页脚

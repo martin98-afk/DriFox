@@ -37,7 +37,11 @@ from unittest.mock import MagicMock
 import pytest
 from PySide6.QtCore import QObject
 
-from app.main_widget import JUMP_SCROLL_LOCK_MS, OpenAIChatToolWindow
+from app.main_widget import (
+    JUMP_SCROLL_LOCK_HARD_CAP_MS,
+    JUMP_SCROLL_LOCK_TAIL_MS,
+    OpenAIChatToolWindow,
+)
 
 
 class _LockHarness(QObject):
@@ -123,6 +127,17 @@ def test_reset_bottom_follow_unlocks_jump_lock(qapp):
 
     assert h._is_jump_scroll_locked() is False
     assert h._should_follow_bottom() is True
+
+
+def test_lock_is_reported_by_locked_predicate(qapp):
+    """`_is_jump_scroll_locked()` 在上锁期内必须为真。
+
+    该判定曾因 `JUMP_SCROLL_LOCK_HARD_CAP_MS` 未定义而抛 NameError（已在
+    main_widget 补定义修复），本用例即该缺陷的回归保护。
+    """
+    h, _sb = _harness(away=False)
+    h._lock_scroll_after_jump()
+    assert h._is_jump_scroll_locked() is True
 
 
 def test_unlock_restores_follow(qapp):

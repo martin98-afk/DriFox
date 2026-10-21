@@ -37,6 +37,46 @@ def _plugin_icons_dir() -> str:
     return str(here.parent / "icons")
 
 
+# ── [T4-5] 流式 token 累加器 ────────────────────────────────────────
+# 宿主每拍只给增量片段，这里累加得到「本流累计 token」。
+# key = (round_index, message_index)：同一轮同一条消息一个累加槽。
+# 自愈：gen_s 回退（新一轮开始，宿主复位为 0）时自动重置，无需宿主通知。
+# 上限保护：条目超 _STREAM_ACC_MAX 整体清空（极端多轮会话）。
+_STREAM_TOKEN_ACC: dict = {}
+_STREAM_ACC_MAX = 256
+
+
+def _acc_key(ctx) -> tuple:
+    return (ctx.get("round_index"), ctx.get("message_index"))
+
+
+def _stream_token_acc(ctx) -> int:
+    return _STREAM_TOKEN_ACC.get(_acc_key(ctx), (0.0, 0))[1]
+
+
+def _reset_stream_token_acc(ctx) -> None:
+    _STREAM_TOKEN_ACC.pop(_acc_key(ctx), None)
+
+
+def _accum_stream_tokens(ctx, delta: str, gen_s: float) -> int:
+    """累加增量片段的 token 数，返回本流累计 token。
+
+    gen_s 比上次小 = 新一轮（宿主已复位 live_gen_s）→ 丢弃旧累加值。
+    """
+    from .trace_models import estimate_tokens_text
+
+    key = _acc_key(ctx)
+    last_gen, total = _STREAM_TOKEN_ACC.get(key, (0.0, 0))
+    if gen_s < last_gen:
+        total = 0  # 新一轮
+    if delta:
+        total += estimate_tokens_text(delta)
+    if len(_STREAM_TOKEN_ACC) >= _STREAM_ACC_MAX:
+        _STREAM_TOKEN_ACC.clear()
+    _STREAM_TOKEN_ACC[key] = (gen_s, total)
+    return total
+
+
 def _footer_avg_throughput(ctx) -> dict | None:
     """页脚信息项回调：流式期间显示本条回复的实时吞吐量，回合落定后显示会话平均。
 
@@ -62,11 +102,20 @@ def _footer_avg_throughput(ctx) -> dict | None:
         from .trace_models import estimate_tokens_text
 
         if bool(ctx.get("streaming")):
-            text = ctx.get("live_text") or ""
+            # [T4-5] 增量编码：host 每拍只给「上次采样以来的新增片段」
+            # (live_text_delta)，这里累加增量 token，避免每拍对整段
+            # （可达数万字）重新 tiktoken —— 耗时随流式长度线性增长。
+            # live_text 保留原语义，未消费 delta 的宿主版本自动回落全量。
+            delta = ctx.get("live_text_delta")
+            if delta is None:
+                delta = ctx.get("live_text") or ""  # 兼容：老宿主无 delta
+                _reset_stream_token_acc(ctx)
             gen_s = float(ctx.get("live_gen_s") or 0.0)
-            if not text or gen_s < 0.3:
+            if not delta and not _stream_token_acc(ctx):
                 return None
-            tokens = estimate_tokens_text(text)
+            if gen_s < 0.3:
+                return None
+            tokens = _accum_stream_tokens(ctx, delta, gen_s)
             if tokens <= 0:
                 return None
             tps = tokens / gen_s

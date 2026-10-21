@@ -368,11 +368,17 @@ class ConversationExecutor:
                 # 保存 worker 引用供 finalize_stop() 使用
                 self._finalize_worker = worker
 
-    def finalize_stop(self) -> List[Dict]:
+    def finalize_stop(self, timeout_ms: Optional[int] = None) -> List[Dict]:
         """完成停止流程（阻塞操作）
 
         在 cancel_worker() 调用后执行，等待 worker 线程结束并收集结果。
         此方法是阻塞的，应在 UI 更新后（或在后台线程中）调用。
+
+        Args:
+            timeout_ms: 等待 worker 退出的**总预算**（ms）。None = 用默认
+                （3000 + 1000 兜底），适合后台/关闭场景；主线程热路径
+                （如切会话）应传 300~500，避免同步等待拖死 UI
+                （实测切历史会话时主线程阻塞可达 4s）。
 
         线程安全：_stop_lock 防止多线程（daemon 线程 + closeEvent）同时
         调用 finalize_stop 导致 worker 双重重释放。
@@ -389,13 +395,24 @@ class ConversationExecutor:
         if not worker:
             return interrupted
 
-        # 等待 worker 线程结束（最多等 3 秒）
+        # 总预算拆分：主等 timeout_ms 的 ~75%，余下留给 interruption 兜底。
+        # 缺省（None）保持历史行为 3000 + 1000，不改变既有语义。
+        if timeout_ms is None:
+            wait_ms, tail_ms = 3000, 1000
+        else:
+            timeout_ms = max(0, int(timeout_ms))
+            wait_ms = int(timeout_ms * 0.75)
+            tail_ms = max(0, timeout_ms - wait_ms)
+
+        # 等待 worker 线程结束
         if worker.isRunning():
-            if not worker.wait(3000):
-                logger.warning("[ConversationExecutor] Worker did not finish within 3s, requesting interruption")
+            if not worker.wait(wait_ms):
+                logger.warning(
+                    f"[ConversationExecutor] Worker did not finish within {wait_ms}ms, requesting interruption"
+                )
                 worker.quit()
                 worker.requestInterruption()
-                if not worker.wait(1000):
+                if tail_ms and not worker.wait(tail_ms):
                     # 🛡️ 安全停止：不调用 QThread.terminate()
                     # terminate() 会强制杀死 OS 线程，如果 Worker 恰好持有 GIL 或分配内存，
                     # 会导致 Python 解释器状态损坏 → 段错误闪退。

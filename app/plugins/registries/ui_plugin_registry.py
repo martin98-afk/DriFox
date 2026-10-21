@@ -638,9 +638,14 @@ class FooterStatInfo:
         stat_id: 信息项唯一 ID
         provider: 取值回调，签名 (context: dict) -> Optional[dict]。
             context 含 window_id / main_widget / role / model_name / elapsed /
-            token_usage / streaming / live_text / live_gen_s 等（见
-            MessageCard._footer_stat_context）；返回 None 表示本条消息不显示，
+            token_usage / streaming / live_text / live_gen_s / live_text_delta 等
+            （见 MessageCard._footer_stat_context）；返回 None 表示本条消息不显示，
             返回 {"text": str, "color": str(可选), "tooltip": str(可选)} 表示显示。
+
+            streaming=True 时新增 ``live_text_delta``：**上次采样以来的新增片段**
+            （``live_text`` 仍是本流累计原文，语义不变）。需要按拍算吞吐/token 的
+            provider 应消费 delta 做增量累加，避免每拍对整段（可达数万字）重新
+            编码 —— 耗时随流式长度线性增长。老 provider 不消费 delta 也完全兼容。
         priority: 优先级（同 stat_id 时高者覆盖低者；显示顺序同值按注册序）
         metadata: 附加元数据
     """

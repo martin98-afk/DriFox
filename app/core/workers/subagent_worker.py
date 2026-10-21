@@ -619,8 +619,10 @@ class SubAgentExecutor(QThread):
             # 再 extend hook_messages（role="user" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
             current_messages.extend(tool_results)
             current_messages.extend(hook_messages)
-            QCoreApplication.processEvents()
-            time.sleep(0.2)
+            # [T4-3] 已删除 `QCoreApplication.processEvents()` 与 `time.sleep(0.2)`：
+            # 本循环运行在子智能体的 QThread 子线程里，子线程没有 Qt 事件循环，
+            # processEvents() 是纯空转；sleep 只阻塞子线程自己，对主线程无任何
+            # 让出效果，却让每轮工具循环多花 200ms。勿回加。
 
         # 【修复】将 reasoning_content 以 <think> 标签嵌入结果文本，
         # 前端 _inject_think_cards 会自动渲染为可折叠思考块
@@ -1543,7 +1545,8 @@ class SubAgentExecutor(QThread):
             self._tool_call_count += 1
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
             self._add_log("tool_call", tool_name, {"args": arguments})
-            QCoreApplication.processEvents()
+            # [T4-3] 已删除 `QCoreApplication.processEvents()`：子线程无 Qt 事件
+            # 循环，该调用是纯空转。勿回加。
 
             # 工具执行也算活跃（避免 stall 检测器误杀）
             self._last_activity_time = time.time()
@@ -1579,7 +1582,8 @@ class SubAgentExecutor(QThread):
 
             self.tool_result_received.emit(self.task_id, tool_name, result_content, success)
             self._add_log("tool_result", tool_name, {"result": result_content, "success": success})
-            QCoreApplication.processEvents()
+            # [T4-3] 已删除 `QCoreApplication.processEvents()`：子线程无 Qt 事件
+            # 循环，该调用是纯空转。勿回加。
 
             # 消费 PreToolUse 队列（role="user" 消息），放入 hook_messages 而非 tool_results
             pretool_msgs = self._drain_pretool_queue()

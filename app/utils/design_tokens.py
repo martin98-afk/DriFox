@@ -24,12 +24,26 @@ _cached_font_size_base: int = 14
 
 
 def invalidate_font_cache() -> None:
-    """字体/字号缓存失效（在设置变更回调中调用）"""
+    """字体/字号缓存失效（在设置变更回调中调用）
+
+    同时清掉 markdown 渲染器的两层 HTML 结果缓存：它们的产出内联了字号与
+    字体（font-size / font-family 写在 style 属性里，不是 QSS），只清本模块的
+    字体缓存不会让已缓存的 HTML 失效。约定与 `_ICON_PIXMAP_CACHE` 一致：
+    缓存 key 不含配置时，由配置变更入口负责清理。
+    """
     global _cached_font_family, _cached_font_size_key, _cached_font_size_delta, _cached_font_size_base
     _cached_font_family = None
     _cached_font_size_key = None
     _cached_font_size_delta = 0
     _cached_font_size_base = 14
+    try:
+        from app.widgets.markdown_block_viewer import _HTML_PREFIX_CACHE, _TEXT_BLOCK_CACHE
+
+        _HTML_PREFIX_CACHE.clear()
+        _TEXT_BLOCK_CACHE.clear()
+    except Exception:
+        # 渲染器尚未导入（早期启动）或环境无 Qt：静默跳过，不影响字体缓存语义
+        pass
 
 
 def _get_global_font() -> str:

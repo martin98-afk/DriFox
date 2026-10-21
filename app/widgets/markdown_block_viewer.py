@@ -372,13 +372,109 @@ class _ThinkingSpinner(QWidget):
 
 # ── 通用标记段切分 ────────────────────────────────────────────────
 # [PERF] 增量 HTML 转换（_md_to_html_incremental）的缓存与合并判定。
-# 缓存上限：单条 HTML 长（数百至数千字符），64 条实测稳态占 ~9MB，故收紧到
-# 24 条；超限整体清空不做逐条 LRU 记账（条目少，收益不抵成本）。
-_HTML_PREFIX_CACHE_MAX = 24
+# 上限：单条 HTML 长数百至数千字符，128 条普通段仅几十 KB，内存可控。
+# ⚠️ 上限必须显著大于真实回复的段数：一条长回复可切出上百段，上限过小会频繁
+# 触顶；触顶后用真 LRU 淘汰最久未用项（move_to_end + popitem(last=False)），
+# 平滑退化而不是整体 clear（clear 会让所有稳定段同时失效 → 周期性全量重算）。
+_HTML_PREFIX_CACHE_MAX = 128
 _HTML_PREFIX_CACHE: "OrderedDict[str, str]" = OrderedDict()
-# 尾部首行命中该正则 → 与 prefix 末块合并（列表延续 / 相邻 blockquote 合并），
-# 此时切分会改变 markdown 结构，必须整段转换。
+# [PERF] 段级块列表缓存（_plain_text_blocks）：key = 配置指纹 + 文本段原文，
+# value = 块列表。上限/LRU 策略同上。
+_TEXT_BLOCK_CACHE_MAX = 128
+_TEXT_BLOCK_CACHE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 _LIST_OR_QUOTE_CONT_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s?")
+
+
+def _cache_put(cache: "OrderedDict[str, Any]", key: str, value: Any, max_size: int) -> None:
+    """写入缓存并按 LRU 淘汰最久未用项。
+
+    为什么不用整体 clear：真实回复的段数可达上百，一旦触顶就全清会让所有稳定
+    文本段同时失效，下一拍全部重算 → 表现为周期性卡顿（断崖式归零）。
+    """
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > max_size:
+        cache.popitem(last=False)
+
+
+def _cache_get(cache: "OrderedDict[str, Any]", key: str) -> Any:
+    """读缓存并刷新 LRU 位置。"""
+    value = cache.get(key)
+    if value is not None:
+        cache.move_to_end(key)
+    return value
+
+
+def _config_fingerprint() -> str:
+    """影响 HTML 产出的配置指纹（主题 id + 字号档位）。
+
+    取不到时返回固定串（退化为纯文本寻址），不抛错。
+    """
+    try:
+        from app.utils.design_tokens import _DEFAULT_FONT_SIZE_KEY, get_ui_font_size
+
+        theme_id = ""
+        try:
+            from app.utils.theme_manager import theme_manager
+
+            theme_id = theme_manager.get_current_theme_id() or ""
+        except Exception:
+            pass
+        return f"{theme_id}|{get_ui_font_size()}|{_DEFAULT_FONT_SIZE_KEY}"
+    except Exception:
+        return "default"
+
+
+def _text_block_cache_key(text: str) -> str:
+    """段级缓存的 key：配置指纹 + 段原文。
+
+    ⚠️ 必须带配置指纹：`_md_to_html` 产出的 inline style 内嵌**当前主题色**与
+    **当前字号**，而缓存只按文本寻址时不感知这些配置 → 切主题 / 改字号后会
+    命中旧配置的 HTML（实测 b1==b2 stale 复现）。带上指纹即可根治任何漏掉的
+    刷新入口（配置一变 key 就变）。
+    """
+    return f"{_config_fingerprint()}\x00{text}"
+
+
+def _last_top_block_opens_mergeable(prefix: str) -> bool:
+    """prefix 的最后一个顶层块是否「仍在展开」的列表 / 引用。
+
+    只在这为真、且 tail 首行也是列表/引用标记时，两者才真会合并 —— 此时
+    切分必然破坏结构，才需要整段转换。
+
+    细化前是「tail 首行是列表标记就整段转换」，把「prefix 收尾于普通段落、
+    tail 开一个新列表」这种**完全安全**的情形也一并挡掉了。压测 payload 上
+    该误判占 305/800（38%），是守卫收紧后收益退化的主因。
+
+    ⚠️ 两处容易漏判的形态（review + fuzz 实测不等价）：
+    1. 尾部纯空白块要向前跳过：`- x\\n\\n  \\n\\n- y` 里最后一个「顶层块」是
+       只有空格的空白块，它不会截断上面的列表 —— 不跳过就会误判为「末块不是
+       列表」而错误切分，把同一个列表拆成两个。
+    2. 末块自身是缩进块（缩进代码 / 懒 continuation）时也要判可合并：后续
+       列表标记行会被 python-markdown 归到同一次块解析里。
+    """
+    body = prefix.rstrip("\n")
+    if not body.strip():
+        return False
+    # 反复剥离尾部纯空白块：每轮取最后一个顶层块，若它是空白就砍掉它继续看上一层
+    while True:
+        cut = body.rfind("\n\n")
+        last = body[cut + 2 :] if cut != -1 else body
+        if last.strip():
+            break
+        if cut == -1:
+            return False  # 全是空白
+        body = body[:cut]
+        if not body.strip():
+            return False
+    for line in last.split("\n"):
+        if not line.strip():
+            continue
+        if line[0] in " \t":
+            # 末块本身是缩进块：后续列表标记会被归到同一次块解析
+            return True
+        return bool(_LIST_OR_QUOTE_CONT_RE.match(line))
+    return False
 # prefix 中的 ``` 计数：奇数 = 有未闭合围栏，此时 tail 处在围栏内部，切分会
 # 把围栏内容割裂（prefix 侧围栏未闭 / tail 侧多出一个开标记）。
 _FENCE_RE_CACHE = re.compile(r"^\s{0,3}```", re.M)
@@ -709,12 +805,12 @@ def _md_to_html_incremental(text: str) -> str:
         return _md_to_html(text)
 
     try:
-        pre_html = _HTML_PREFIX_CACHE.get(prefix)
+        # prefix 缓存也带配置指纹：其 HTML 同样内嵌主题色与字号
+        pkey = _text_block_cache_key(prefix)
+        pre_html = _cache_get(_HTML_PREFIX_CACHE, pkey)
         if pre_html is None:
             pre_html = _md_to_html(prefix)
-            if len(_HTML_PREFIX_CACHE) >= _HTML_PREFIX_CACHE_MAX:
-                _HTML_PREFIX_CACHE.clear()
-            _HTML_PREFIX_CACHE[prefix] = pre_html
+            _cache_put(_HTML_PREFIX_CACHE, pkey, pre_html, _HTML_PREFIX_CACHE_MAX)
         if tail.endswith("\n\n"):
             return pre_html + _md_to_html(tail)
         return pre_html + "\n" + _md_to_html(tail)
@@ -728,6 +824,19 @@ def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
     先整段转 HTML 再切：块元素正则匹配的是 HTML 标签。切出的 quote/table
     片段本身已是 HTML（无需二次转换），text 片段原样回传。
     """
+    if not text.strip():
+        return []
+    key = _text_block_cache_key(text)
+    cached = _cache_get(_TEXT_BLOCK_CACHE, key)
+    if cached is not None:
+        return [dict(b) for b in cached]
+    blocks = _plain_text_blocks_uncached(text)
+    _cache_put(_TEXT_BLOCK_CACHE, key, [dict(b) for b in blocks], _TEXT_BLOCK_CACHE_MAX)
+    return blocks
+
+
+def _plain_text_blocks_uncached(text: str) -> List[Dict[str, Any]]:
+    """_plain_text_blocks 的无缓存实现（缓存逻辑见上）。"""
     if not text.strip():
         return []
     html = _md_to_html_incremental(text)
