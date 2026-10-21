@@ -9,7 +9,8 @@ import html
 import re
 from typing import List
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtWidgets import QLabel, QSizePolicy
 
 # 控制字符 → 空格（单行归一化）。
@@ -61,6 +62,18 @@ class _ElidedLabel(QLabel):
         self._hl_color = ""
         self.setToolTip(self._full_text)
         self._update_elided()
+
+    def sizeHint(self):
+        """sizeHint 返回**完整文本**宽度（受 maximumWidth 封顶），而非当前显示文本宽度。
+
+        若不重写，省略发生后 QLabel.sizeHint() 会缩水到省略文本宽度，布局据此
+        收窄本控件 → 永远凑不出足够宽度 → 省略态锁死（棘轮），即使容器后来
+        有充足空间也不恢复。以完整文本宽度作为 sizeHint 后：布局优先给足空间，
+        只有容器真不够时才省略（兜底），放宽后 resizeEvent 自动恢复。
+        """
+        fm = QFontMetrics(self.font())
+        w = fm.horizontalAdvance(_to_single_line(self._full_text)) + 2  # +2 抗锯齿边缘余量，防压线误省略
+        return QSize(min(w, self.maximumWidth()), super().sizeHint().height())
 
     def setHighlights(self, queries: List[str], color: str):
         """设置多关键字搜索高亮：每个匹配部分都用 <span> 高亮
