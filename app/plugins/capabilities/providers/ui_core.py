@@ -800,29 +800,12 @@ def _plugin_log(host: Any, ctx: Any):
 def _team_read(host: Any):
     """团队只读面（成员表 / 模板 / 任务状态）。
 
-    只暴露只读查询；派任务、改状态等写操作不在此能力内。
+    暴露方法清单声明在 ``app.plugins.capabilities.facets``，两个 surface 共用。
+    派任务、改状态等写操作不在白名单内，插件访问会得到 AttributeError。
     """
+    from app.plugins.capabilities.facets import build_facet
 
-    def api() -> dict:
-        from app.core.team.team_manager import TeamManager
-
-        tm = TeamManager.get_instance()
-        return {
-            "members": tm.get_members,
-            "template": tm.get_template,
-            "run_ids": tm.get_team_run_ids,
-            "label_by_run": tm.get_team_label_by_run,
-            "member_capability": tm.get_member_capability,
-            "member_busy_status": tm.get_member_busy_status,
-            "running_tasks": tm.get_running_tasks,
-            "pending_tasks": tm.get_pending_tasks,
-            "find_member": tm.find_member,
-            "member_run_id": tm.get_member_run_id,
-            "template_for_run": tm.get_template_for_run_id,
-            "member_agent_name": tm.get_member_agent_name,
-        }
-
-    return api
+    return build_facet("team.read")
 
 
 def _cache_purge(host: Any):

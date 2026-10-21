@@ -545,6 +545,29 @@ class TeamManager:
                 return member["run_id"]
         return ""
 
+    def get_member_agent_name(
+        self,
+        window_id: str,
+        team_name: str = DEFAULT_TEAM,
+    ) -> str:
+        """按窗口 ID 取该成员分领的角色名（agent_name）。
+
+        与 get_member_run_id 同口径：优先取顶层 `team_members` 快照
+        （_cleanup_stale_members 不清理），其次回退活跃 `members`。
+        非成员返回空串。
+        """
+        if not window_id:
+            return ""
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            snap = (data.get("team_members") or {}).get(window_id)
+            if isinstance(snap, dict) and snap.get("agent_name"):
+                return str(snap["agent_name"])
+            member = (data.get("members") or {}).get(window_id)
+            if isinstance(member, dict) and member.get("agent_name"):
+                return str(member["agent_name"])
+        return ""
+
     def get_member_by_agent(self, agent_name: str, team_name: str = DEFAULT_TEAM) -> Optional[Dict[str, Any]]:
         """通过智能体名查找成员（唯一匹配时返回；多个匹配返回第一个活跃的）"""
         members = self.get_members(team_name)

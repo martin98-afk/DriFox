@@ -33,28 +33,16 @@ def register(registry) -> None:
         return getattr(host, "_sub_agent_manager", None)
 
     def _team_read(host: Any):
-        """团队只读面（与 ui_core 同名能力语义一致）。"""
+        """团队只读面（与 ui_core 同名能力语义一致，声明见 capabilities.facets）。"""
+        from app.plugins.capabilities.facets import build_facet
 
-        def api() -> dict:
-            from app.core.team.team_manager import TeamManager
+        return build_facet("team.read")
 
-            tm = TeamManager.get_instance()
-            return {
-                "members": tm.get_members,
-                "template": tm.get_template,
-                "run_ids": tm.get_team_run_ids,
-                "label_by_run": tm.get_team_label_by_run,
-                "member_capability": tm.get_member_capability,
-                "member_busy_status": tm.get_member_busy_status,
-                "running_tasks": tm.get_running_tasks,
-                "pending_tasks": tm.get_pending_tasks,
-                "find_member": tm.find_member,
-                "member_run_id": tm.get_member_run_id,
-                "template_for_run": tm.get_template_for_run_id,
-                "member_agent_name": tm.get_member_agent_name,
-            }
+    def _team_send(host: Any):
+        """团队写面：派发任务邮件（声明见 capabilities.facets）。"""
+        from app.plugins.capabilities.facets import build_facet
 
-        return api
+        return build_facet("team.send")
 
     def _tool_policy_api():
         """工具权限策略只读面（与 ui_core 同构）。"""
@@ -124,6 +112,7 @@ def register(registry) -> None:
     registry.register("tool.read", _tool_read, surface="tool", owner="core:tool")
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("team.read", _team_read, surface="tool", owner="core:tool")
+    registry.register("team.send", _team_send, surface="tool", owner="core:tool")
     registry.register("lsp.query", _lsp, surface="tool", owner="core:tool")
     registry.register("mcp.call", _mcp, surface="tool", owner="core:tool")
     registry.register("net.upload", _gitee, surface="tool", owner="core:tool")

@@ -92,6 +92,11 @@ _ASSISTANT_MENTION_TYPE = QTextFormat.UserObject + 2
 _ASSISTANT_MENTION_NAME_PROP = QTextFormat.UserProperty + 2
 _ASSISTANT_MENTION_COLOR_PROP = QTextFormat.UserProperty + 3
 
+# 输入框滚动条显示阈值：原生滚动条真实滚动余量（maximum - pageStep）
+# 需超过该值才显示 Fluent 竖条。取一个行高量级，用于滤掉 QSS 上下
+# padding（8+4）造成的恒定 2px 噪声（空输入框原生 range 恒为 2）。
+_SCROLLBAR_MIN_MARGIN = 12
+
 # ======== 输入框 placeholder 定时轮播 tips ========
 PLACEHOLDER_TIPS = [
     # ════ 基本输入 ════
@@ -280,17 +285,22 @@ class SendableTextEdit(TextEdit):
 
         self._setup_glow_effect()
         self._apply_input_style()
-        # Fluent 美化滚动条强制隐藏：
+        # Fluent 美化滚动条按需显隐：
         # qfluentwidgets TextEdit 基类自带 SmoothScrollDelegate，会在输入框右缘
-        # 挂一条 12px 的 Fluent 竖条（SmoothScrollBar）。构造期 viewport 未定型时
-        # 原生滚动条 range 短暂 >0，会把竖条误 show；高度自适应把它压回 range=0
-        # 后，某些时序下这条竖条收不起来 → 空/单行输入框右侧出现"假滚轮"。
-        # 原生滚动条已由 QSS width:0 隐形，这里把 delegate 的 Fluent 条永久关闭。
+        # 挂一条 12px 的 Fluent 竖条（SmoothScrollBar）。它自带的判据是
+        # `maximum() > 0`，但 QTextEdit 的 QSS 上下 padding（8+4）让原生竖条
+        # range 恒为 2（viewport 34 vs 文档 32）→ 该判据永远为真，空输入框
+        # 也会显示一条假滚轮（67efafc8 曾用永久 setForceHidden(True) 治它）。
+        # 永久隐藏的代价是内容超出 maxHeight 后**没有任何可见滚动条**
+        # （用户实测「输入框滚轮显示不出来」，2026-10-21）。改为按真实滚动
+        # 余量收放（见 _needs_input_scrollbar），两个场景同时成立。
         try:
-            self.scrollDelegate.vScrollBar.setForceHidden(True)
-            self.scrollDelegate.hScrollBar.setForceHidden(True)
-            self.scrollDelegate.vScrollBar.hide()
-            self.scrollDelegate.hScrollBar.hide()
+            self.scrollDelegate.vScrollBar.rangeChanged.connect(self._on_fluent_vbar_range_changed)
+            self.scrollDelegate.hScrollBar.setForceHidden(True)  # 输入框永不横滚
+            # 连接前的构造期（__initWidget 里 setVisible(max>0)）可能已把竖条
+            # 误 show 出来且此后再无 rangeChanged 落在它身上 → 空输入框假滚条。
+            # 这里按真实判据立即校正一次，把滞留态收掉。
+            self._on_fluent_vbar_range_changed(None)
         except AttributeError:
             # qfluentwidgets 版本差异：无 delegate 时无需处理
             pass
@@ -407,6 +417,46 @@ class SendableTextEdit(TextEdit):
         """初始化完成后重置标志，允许高度调整"""
         self._initializing = False
         self._adjust_height_to_content()
+
+    def _on_fluent_vbar_range_changed(self, rng=None):
+        """按真实滚动余量收放 Fluent 竖条（rangeChanged 与内容变化时都调）。
+
+        不能直接用 `maximum() > 0`：QTextEdit 的 QSS 上下 padding
+        （8+4）让原生竖条 range 恒为 2（viewport 34 vs 文档 32），
+        SmoothScrollBar 自带的 `setVisible(max>0)` 因此永远为真，
+        空输入框也会显示一条假滚轮（67efafc8 的原始诉求）。
+
+        真实判据取「已被 maxHeight 压住 + 文档仍超高」：此时内容确实
+        滚不动，才需要可见滚动条；其余状态（未达上限、内容收缩）一律收起。
+        """
+        try:
+            bar = self.scrollDelegate.vScrollBar
+        except AttributeError:
+            return
+        if self._needs_input_scrollbar():
+            bar.setVisible(True)
+        else:
+            bar.hide()
+
+    def _needs_input_scrollbar(self) -> bool:
+        """输入框是否真的需要竖直滚动条。
+
+        判据直接读原生滚动条的**真实滚动余量**（maximum - pageStep），
+        而不是「高度是否已达上限」：高度没推到 300 但内容已超长
+        （初始化标志未清、拖拽期跳过重算、文档高度未算出的分支）时，
+        上限判据会误判为不需要滚动，滚动条照样不显示。
+
+        QSS 上下 padding（8+4）让原生 range 恒为 2（viewport 34 vs 文档 32），
+        因此阈值不能取 `maximum() > 0`（那正是 SmoothScrollBar 自带的判据，
+        永远为真、空输入框也显示假滚轮）。取「余量超过一个行高」：
+        既排除 2px 的 padding 噪声，又能覆盖任何内容真的超出视口的情形。
+        """
+        try:
+            vsb = self.verticalScrollBar()
+            return (vsb.maximum() - vsb.pageStep()) > _SCROLLBAR_MIN_MARGIN
+        except Exception:
+            # 探测失败时保守收起（不制造假滚条）
+            return False
 
     def _rotate_placeholder_tip(self):
         """定时随机切换 placeholder tips (QTimer 15s 触发 random.choice)"""
@@ -1641,6 +1691,10 @@ class SendableTextEdit(TextEdit):
                 # 发送按钮位置由 resizeEvent → _position_send_button 同步到位
             finally:
                 self._adjusting_height = False
+        # 高度未变也要刷：内容变长/变短但高度已在上限（或已在下限）时，
+        # `height() != new_height` 分支不执行，而滚动余量已经跨过阈值
+        # （粘贴长文本、删除整段都走这条）→ 放在分支外，每次都按真实余量校正。
+        self._on_fluent_vbar_range_changed()
 
     def toggle_send_button(self, enable: bool):
         """切换发送/停止模式（enable=True=发送模式, enable=False=停止模式）"""

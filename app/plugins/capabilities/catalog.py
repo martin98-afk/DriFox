@@ -128,6 +128,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # 因此不在此登记；插件走 app.core.sync.config_sync（守卫白名单内）。
         # ── 团队 ──
         _spec("team.read", _L, "团队成员/角色/运行状态", _BOTH),
+        _spec("team.send", _M, "向团队成员派发任务邮件（写对方邮箱）", _TOOL),
         # ── 基础（恒放行） ──
         _spec("plugin.log", _N, "带 plugin=<name> 前缀的 logger", _BOTH),
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),
