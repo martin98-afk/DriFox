@@ -9,9 +9,9 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
-## [v0.6.10] - 2026-10-20 (重新发布 #2)
+## [v0.6.10] - 2026-10-20 (重新发布 #3)
 
-自 v0.6.9 以来的变更（累计） | 提交数：65 · 文件变更：149 · +10142/-1887 | 贡献者：dingma, drifox-bot, mading
+自 v0.6.9 以来的变更（累计） | 提交数：68 · 文件变更：168 · +10823/-2159 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -67,6 +67,15 @@ All notable changes to this project will be documented in this file.
 - **PyInstaller 打包漏收 app.plugins 懒加载子模块** (`b84cdb28`): sdk.py 把 `sdk_tool_registry` 等子模块以字符串引用做懒加载映射，PyInstaller 静态分析不到，onefile 产物缺模块 → agent_trace UI / assistant_hub 工具注册 / system-context tier 加载报 `No module named 'app.plugins.sdk_tool_registry'`。打包脚本补 `collect_submodules("app.plugins")` 全量收集。
 - **MCP 服务器行名称宽度自适应** (`0b2d75b0`): 设置页 MCPServerRow 名称标签由 `StrongBodyLabel` + `setFixedWidth(100)` 换为 `_ElidedLabel`：短名自然伸展、长名 260px 封顶省略号 + tooltip 显示全名，修「dingtalk-aipower 被硬截成 dingtalk-a」。
 - **subagent 委托消息自包含纪律** (`d41b82cd`): `subagent_para` 工具描述注入委托纪律（源自 WorkBuddy A2A 协议）：子智能体默认看不到主对话，description 必须写全背景/目标/约束/期望产出四要素，大段参考资料放 context 字段，含糊指代（「刚才的」「上面那个」）换成具体名称/路径/结论。
+
+### ✨ 新功能 (New Features)（重新发布 #3 追加）
+
+- **system-cleaner 图标 SVG 化与缓存项 tooltip** (`76387264`): 缓存清理项图标改内嵌 SVG 线性风格（QtSvg 渲染、主题色自适应），缓存行加 hover 高亮与 tooltip 引导；缓存项定义重构为带默认勾选态与提示文案的数据结构，扫描器同步适配；清理器删除项移入垃圾箱目录（配合垃圾桶软删除），豁免路径处理增强并有测试覆盖。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #3 追加）
+
+- **侧栏折叠态切页横跳** (`bf24e421`): 折叠态是全局单份却被多个编排方互相改写——切页把 per-tab 宽度记忆强制展开（B 折叠后切回有记忆的 A 被静默拉开，relayout 压窄再触发折叠动画，来回切反复横跳）；restore 把含卡片槽的总宽灌给无卡页（A 开卡片 ↔ B 折叠来回切状态翻转）；启动补射用启动快照覆盖 0.7s 内的新折叠。收敛为全局折叠态语义：切页/补射不得改折叠态，per-tab 只记宽度且折叠态下不应用，restore 卡片守卫双向。回归 6 用例入 `tests/widgets/test_sidebar_tab_switch_width.py`。
+- **`_ElidedLabel` 省略棘轮** (`cb976428`): 标签被省略后 `sizeHint()` 缩水到省略文本宽 → 布局按最小宽度兜底 → 永久省略不可自愈。重写 `sizeHint` 返回完整文本宽（封顶 max），布局优先给足、不够才省略、放宽后自恢复。
 
 ## [v0.6.9] - 2026-10-17 (重新发布 #5)
 
