@@ -11,9 +11,9 @@ All notable changes to this project will be documented in this file.
 
 - **能力面改声明式 + 补 `TeamManager.get_member_agent_name`** (`app/plugins/capabilities/facets.py` · `app/core/team/team_manager.py` · `providers/tool_core.py` · `providers/ui_core.py` · `plugins/system-tools/tools/subagent_tools.py`): `f06fb272` 往 `team.read` 加了 `member_agent_name` 契约但从未实现该方法，而 provider 用一次性构造的 `{别名: 宿主方法}` 字典——单个 typo 让整个能力在取用瞬间抛 `AttributeError`：system-hooks 两个 SessionStart 注入 hook 自 10-19 起静默空转（异常被 `except` 吞掉），`team_list_members` 直接报 `Execution error`。更深一层是同批迁移把 `subagent_tools` 的 TeamManager 对象换成能力池，却没注意 provider 返回 dict（`'dict' object has no attribute 'get_members'`）。现改为 ①`facets.py` 用 `FacetSpec(target, methods)` 声明白名单，两个 surface 共用一份清单，`ReadOnlyFacade` 保证名单外（尤其写操作）访问抛 `AttributeError`；②补 `get_member_agent_name`（口径同 `get_member_run_id`：先读 `team_members` 快照，回退活跃 members）；③派单独立为 `team.send`（medium，`send_task` 单方法），与只读面分权，system-tools manifest 补声明；④`tests/plugins/test_capability_provider_contract.py` 遍历 `FACETS` 断言白名单方法在目标类真实存在、门面不泄漏写操作，typo 在 CI 就炸。团队相关用例由基线 26 failed 收敛到 11（余下 5 项为 `TestHistorySessionRestoreRegistersTeamMember` 与 `TestDeriveCapability` 的既有失败，与本次无关）。
 
-## [v0.6.10] - 2026-10-20 (重新发布 #5)
+## [v0.6.10] - 2026-10-20 (重新发布 #6)
 
-自 v0.6.9 以来的变更（累计） | 提交数：76 · 文件变更：216 · +13403/-2385 | 贡献者：dingma, drifox-bot, mading
+自 v0.6.9 以来的变更（累计） | 提交数：77 · 文件变更：218 · +13468/-2388 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -99,6 +99,10 @@ All notable changes to this project will be documented in this file.
 
 - 新增 `tests/core/test_subagent_stream_aggregation.py`（235 行）覆盖 subagent 流式聚合；`tests/widgets/test_markdown_incremental_html_equivalence.py` 扩充等价性用例；`tests/perf/test_stream_stage_bench.py` 补齐基线/唯一段场景对比。
 - 新增 macOS 顶置窗口与 WorkbenchPanel 回归用例（`13f76c45`），同时移除 3 个已过时的测试文件（`3ed90616`）。
+
+### ✨ 新功能 (New Features)（重新发布 #6 追加）
+
+- **配置指纹准确跟踪字号键** (`2bd6d6df`, `app/widgets/markdown_block_viewer.py` · `tests/widgets/test_markdown_incremental_html_equivalence.py`): 配置指纹计算纳入字号相关键，字号变更能被指纹正确识别（此前改字号不产生新指纹，增量渲染缓存按旧指纹继续命中，字号改动不生效）。
 
 ## [v0.6.9] - 2026-10-17 (重新发布 #5)
 
