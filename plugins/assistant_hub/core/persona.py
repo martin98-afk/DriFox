@@ -309,7 +309,7 @@ class PersonaRegistry:
 def _persona_data_dir() -> Path:
     """<app_data>/assistant_hub（与 AssistantManager.root 一致的探测逻辑）。"""
     try:
-        from app.utils.utils import get_app_data_dir
+        from app.plugins.sdk import get_app_data_dir
 
         return Path(get_app_data_dir()) / "assistant_hub"
     except Exception:

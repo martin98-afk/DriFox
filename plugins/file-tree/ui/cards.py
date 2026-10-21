@@ -682,7 +682,7 @@ class FileTreeCard(QWidget):
         tc_hex = self._colors["text"].name()
         accent_hex = self._colors["accent"].name()
         try:
-            from app.utils.design_tokens import get_unified_scrollbar_style
+            from app.plugins.sdk import get_unified_scrollbar_style
 
             scrollbar_style = get_unified_scrollbar_style()
         except Exception:
@@ -1550,7 +1550,7 @@ class FileTreeCard(QWidget):
     def _in_horizontal_dock(self) -> bool:
         """是否停靠在左/右横向停靠区（容器沿宽度轴折叠）"""
         try:
-            from app.widgets.cards.card_manager import ContainerType
+            from app.plugins.sdk import ContainerType
 
             ct = getattr(self.parent(), "container_type", None)
             return ct in (ContainerType.LEFT, ContainerType.RIGHT)

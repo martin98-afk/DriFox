@@ -19,9 +19,34 @@ import sys
 from typing import Any, Dict, List
 
 from loguru import logger
+from app.plugins.sdk import tool_registry_api
 
 _MANAGER_MODULE_NAME = "assistant_hub_manager"
 
+
+def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面。
+
+    优先用本模块的 ``ToolRegistry`` 符号（若存在：插件可注入替身，测试常用），
+    否则经能力池（tool.read / tool.inject）。两者都不可用时返回 None。
+    """
+    cap = "tool.inject" if kind == "inject" else "tool.read"
+    reg = globals().get("ToolRegistry")
+    if reg is not None:
+        try:
+            inst = reg.get_instance()
+            return _registry_api(inst, kind)
+        except Exception:
+            pass
+    from app.plugins.sdk import caps_for
+
+    api = caps_for(cap)
+    return api() if api is not None else None
+
+
+def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
+    return tool_registry_api(kind, module_globals=globals())
 
 def _get_manager():
     mod = sys.modules.get(_MANAGER_MODULE_NAME)
@@ -52,7 +77,7 @@ def filter_tools_schema(schemas: List[Dict[str, Any]], ctx: Dict[str, Any]) -> L
     if mode == "none":
         return []
     # readonly：仅安全类工具（registry danger 驱动；mcp__ 工具按启发式兜底）
-    from app.tools.tool_classifier import DANGER_SAFE, classify_tool_danger
+    from app.plugins.sdk import DANGER_SAFE, classify_tool_danger
 
     kept = []
     for s in schemas:
@@ -65,9 +90,12 @@ def filter_tools_schema(schemas: List[Dict[str, Any]], ctx: Dict[str, Any]) -> L
 def register(registry):
     """工具插件化注册入口（PluginToolLoader 调用）：注册 schema 过滤器。"""
     try:
-        from app.tools.registry import ToolRegistry
+        api = _tool_api("inject")
 
-        ToolRegistry.get_instance().register_schema_filter("assistant_hub", filter_tools_schema)
+        if api is None:
+            logger.warning("[assistant_hub] 无 tool.inject 能力，schema 过滤器未注册")
+            return
+        api["register_schema_filter"]("assistant_hub", filter_tools_schema)
         logger.debug("[assistant_hub] schema 过滤器已注册")
     except Exception as e:
         logger.warning(f"[assistant_hub] schema 过滤器注册失败: {e}")

@@ -16,7 +16,7 @@ from __future__ import annotations
 from html import escape
 from typing import Any, Dict
 
-from app.utils.design_tokens import scale_font_size
+from app.plugins.sdk import scale_font_size
 
 from . import _fetcher
 

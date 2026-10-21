@@ -14,8 +14,8 @@ import orjson
 
 from loguru import logger
 
-from app.tools.result import ToolResult
-from app.tools.registry import make_summarize_from_preview
+from app.plugins.sdk import ToolResult
+from app.plugins.sdk import make_summarize_from_preview
 
 GROUP_SUBAGENT = "子智能体"
 GROUP_TEAM = "团队协作"
@@ -34,9 +34,19 @@ _STATUS_LABELS = {
 
 
 def _get_team_manager():
-    from app.core.team.team_manager import TeamManager
+    """团队只读面（成员表 / 模板 / 运行状态）。"""
+    from app.plugins.sdk import caps_for
 
-    return TeamManager.get_instance()
+    team = caps_for("team.read")
+    return team() if team is not None else None
+
+
+def _get_team_sender():
+    """团队写面（仅派发任务邮件）。"""
+    from app.plugins.sdk import caps_for
+
+    sender = caps_for("team.send")
+    return sender() if sender is not None else None
 
 
 def _format_capability(cap: dict) -> str:
@@ -274,7 +284,11 @@ def _team_send_message(tool_ctx, to_agent: str, message: str) -> ToolResult:
         # 跨团队判定失败不影响正常发件（兜底：仅放行不报）
         pass
 
-    mail_id = tm.send_task(
+    sender = _get_team_sender()
+    if sender is None:
+        return ToolResult(False, error="团队派单能力不可用（缺少 team.send 能力声明）")
+
+    mail_id = sender.send_task(
         from_window=window_id,
         from_agent=from_agent,
         to_identifier=to_agent,

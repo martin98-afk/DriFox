@@ -38,6 +38,31 @@ DriFox 使用 **watchfiles** 实现插件热更新：
 ④ 用 /plugin-marketplace 查看插件状态（已安装/启用/禁用）
 ```
 
+### 验证分级（三级都过才算验证，缺级 = 未验证）
+
+| 级 | 手段 | 它只证明 |
+|----|------|---------|
+| ① 语法级 | `python -m py_compile`（见 §3） | 能编译，仅此而已 |
+| ② 契约级 | `validate_plugins.py` + `check_sdk_imports.py`（见 §2/§3） | 结构与 import 在契约面内 |
+| ③ 行为级 | 真实触发一次（上面 ③ 的对应方式） | 组件按真实触发路径工作 |
+
+每次编辑后从 ① 重跑；②③ 只在 ① 过了之后才有意义。验证器跑不了（无 clone、环境缺失）→ 如实报告「未验证」并列出补救步骤；把静态检查通过当完整验证是造假。
+
+### 伪成功信号（这些 ≠ 验证通过）
+
+| 你看到的 | 它证明了 | 它不证明 |
+|----------|---------|---------|
+| 文件写入成功 | 磁盘上有内容 | 插件能被加载 |
+| 热更新日志出现 | watcher 扫到了文件 | 注册成功、工具可调用 |
+| `py_compile` 通过 | 语法合法 | `register(registry)` 契约正确、SDK 符号真实存在 |
+| JSON Schema 校验过 | manifest 字段合法 | 行为正确、能力池够用 |
+| UI 卡片渲染出来 | 加载链通 | 交互事件、卸载清理正常 |
+| 调用没报错 | 调用链没抛异常 | 结果正确（ToolResult 必须 `to_dict()`，`str()` 只给前端对象地址） |
+
+### 测试隔离
+
+别拿用户真实 `~/.drifox/plugins/` 当测试夹具：会污染能力缓存、会话存储与日志。先在临时副本（临时目录或 drifox-plugins clone，见 §2）验证，通过后再装回真实目录。
+
 ---
 
 ## 2. 完整验证（发布前必做）
@@ -92,6 +117,18 @@ python -m py_compile plugins/<name>/hooks/<name>_hook.py
 ```
 
 > 注意：py_compile 会在同目录生成 `__pycache__/`，提交插件前删掉它。
+
+### SDK 越界 import 自检（在 DriFox 主仓库内）
+
+插件只准依赖 `app.plugins.sdk` 与 `ctx["capabilities"]`，直连 `app.core.*` / `app.widgets.*` 属越界（主程序一重构插件就炸）：
+
+```bash
+# DriFox 主仓库根目录执行，静态核对改动文件 import 的符号是否都在 sdk 契约面
+python tools/check_sdk_imports.py
+# [sdk-import-check] OK（80 个 sdk 符号，改动文件全部命中）
+```
+
+用户级插件（`~/.drifox/plugins/`）不在主仓库 git 改动范围内，可临时复制进仓库再查。
 
 ---
 

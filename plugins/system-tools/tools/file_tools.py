@@ -22,7 +22,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Dict, Optional
 
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 
 # ========== 共享路径工具（同目录 _path_utils.py，下划线前缀 → loader 跳过） ==========
 _path_utils_module = None
@@ -916,20 +916,20 @@ def _render_edit_diff_body(result, tool_name, tool_args, success):
     import os
 
 
-    from app.widgets.render_helpers import (
-        _get_global_font,
-        _render_diff_preview,
-        _summarize_diff,
-        escape,
+    from app.plugins.sdk import (
+        global_font_family,
         get_font_family_css,
+        html_escape,
+        render_diff_preview,
         scale_font_size,
+        summarize_diff,
     )
 
     diff = getattr(result, "diff", None) or ""
     if not diff:
         return None  # 无 diff → 回退默认
-    diff_summary = _summarize_diff(diff)
-    diff_body = _render_diff_preview(diff)
+    diff_summary = summarize_diff(diff)
+    diff_body = render_diff_preview(diff)
     diff_files = diff_summary["files"]
     file_label = diff_files[0] if diff_files else "文件变更"
     file_label = os.path.basename(file_label) if file_label else "文件变更"
@@ -937,7 +937,7 @@ def _render_edit_diff_body(result, tool_name, tool_args, success):
         file_label = f"{file_label} 等 {len(diff_files)} 个文件"
     added = diff_summary["added"]
     deleted = diff_summary["deleted"]
-    _gf = _get_global_font()
+    _gf = global_font_family()
 
     # 失败/部分失败信息：diff 存在时主程序只渲染 diff，result 文本（错误详情）
     # 会被丢弃 → 这里检测 success=False 或 content 含失败关键词，输出提示块。
@@ -951,13 +951,13 @@ def _render_edit_diff_body(result, tool_name, tool_args, success):
             f'border:1px solid rgba(248,81,73,0.35);border-radius:6px;'
             f'color:#f85149;font-family:\'{_gf}\',Consolas,monospace;'
             f'font-size:{scale_font_size(12)}px;line-height:1.5;white-space:pre-wrap;'
-            f'word-break:break-all;">{escape(content)}</div>'
+            f'word-break:break-all;">{html_escape(content)}</div>'
         )
 
     return f"""
     <div class="tool-diff-inline">
         <div class="tool-diff-inline__header" style="{get_font_family_css()}">
-            <span class="tool-diff-inline__file" title="{escape(file_label)}">{escape(file_label)}</span>
+            <span class="tool-diff-inline__file" title="{html_escape(file_label)}">{html_escape(file_label)}</span>
             <span class="tool-diff-inline__summary">
                 <span class="tool-diff-inline__add" style="color: #56d364;">+{added}</span>
                 <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>

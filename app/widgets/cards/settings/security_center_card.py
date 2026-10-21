@@ -4,7 +4,7 @@
 
 布局（对齐 WorkBuddy 截图）：
 - 沙箱安全卡：总开关 + 文件安全/命令安全/网络安全三个名单编辑区
-- 数据安全卡：删除保护开关 + 备份入口（容量上限展示）
+- 数据安全卡：删除审批开关 + 垃圾桶 + 备份入口（容量上限展示）
 - 系统级工具卡：豁免开关
 - 底部说明：能力边界（应用层拦截，非 OS 级沙箱）
 
@@ -14,13 +14,14 @@
 
 from loguru import logger
 
-from app.tools.sandbox import SandboxConfig
+from app.tools.sandbox import SandboxConfig, read_approval_policy
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
 try:
     from qfluentwidgets import (
         BodyLabel,
+        ComboBox,
         ExpandGroupSettingCard,
         PushSettingCard,
         SpinBox,
@@ -33,6 +34,7 @@ except ImportError:  # 兜底：qfluentwidgets 缺失时用 Qt 原生，保功�
 
     BodyLabel = PushSettingCard = ExpandGroupSettingCard = None  # type: ignore
     SpinBox = QSpinBox  # type: ignore
+    ComboBox = None  # type: ignore
     FIF = None
 
 from PyQt5.QtCore import Qt
@@ -251,159 +253,89 @@ class SecurityCenterCard(QWidget):
             "命令与文件操作经检查",
         )
         self.sandbox_switch.setToolTip(
-            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。网络外传检测、删除保护快照与进程配额均依赖本开关。"
+            "AI 执行命令与文件操作经沙箱检查；关闭后恢复无拦截行为。网络外传检测与进程配额均依赖本开关；"
+            "删除文件是否保留与开关无关，只看垃圾桶开关。"
         )
         self.sandbox_switch.setChecked(bool(self._cfg.get("sandbox_enabled")))
         self.sandbox_switch.checkedChanged.connect(self._on_sandbox_toggled)
         layout.addWidget(self.sandbox_switch)
 
-        def _expand(icon, title, content, editor: "_ListEditorCard", tip: str = "") -> "ExpandGroupSettingCard":
-            """把名单编辑区包成折叠卡：收起一行，点击展开编辑（对齐设置页范式）"""
-            card = ExpandGroupSettingCard(icon, title, content)
-            if tip:
-                # 挂到标题行而非折叠卡本体：卡片是 QScrollArea 子类，被
-                # simple_hover_tooltip 排除在自绘气泡之外，且悬停命中的本就是标题行
-                card.card.setToolTip(tip)
-            card.addGroupWidget(editor)
-
-            from PyQt5.QtCore import QTimer
-
-            # 条目增删后内容高度变化，展开态需要重算卡片高度，否则新行被滚动区吞掉。
-            # 延迟一拍：deleteLater 的旧行 / 布局失效需先在事件循环落定，sizeHint 才准
-            def _sync_height():
-                QTimer.singleShot(0, card._adjustViewSize)
-
-            editor.on_change = _sync_height
-            return card
-
+        # 名单编辑区（挂入下方三大分组卡，不再各自折叠）
         self._path_white = _ListEditorCard(
-            "写入白名单（放行 workdir 外的写入目录；读操作不受此限制）",
+            "写入白名单（放行 workdir 外写入）",
             "whitelist",
             "如 D:\\other_proj 或 %USERPROFILE%\\docs",
-            show_title=False,
             tip="读操作不受此限制；相对路径按工作目录解析。",
         )
         self._path_black = _ListEditorCard(
-            "文件黑名单（读写均拦截，如 .env/.ssh）",
+            "文件黑名单（读写均拦截）",
             "blacklist",
             "如 D:\\secrets 或 .env",
-            show_title=False,
             tip="⚠ 文件名需完全相等：.env 不拦 .env.local，建议一并添加。",
         )
         self._cmd_allow = _ListEditorCard(
-            "命令安全 · 放行前缀（跳过审批；危险命令仍拦截）",
+            "命令放行前缀（跳过审批；危险命令仍拦截）",
             "allow_prefixes",
             "如 git status、npm run build",
-            show_title=False,
             tip="⚠ 按词边界匹配；填 git 可省常规子命令审批，但 git rm -rf . 等破坏性操作仍会确认。",
         )
         self._cmd_confirm = _ListEditorCard(
-            "命令安全 · 强制审批前缀",
+            "命令强制审批前缀",
             "confirm_prefixes",
             "如 git push",
-            show_title=False,
         )
         self._net_domains = _ListEditorCard(
-            "网络安全 · 域名黑名单",
+            "网络域名黑名单",
             "blacklist_domains",
             "如 evil.com",
-            show_title=False,
         )
 
-        self._path_white_card = _expand(
-            FIF.FOLDER_ADD if FIF else None,
-            "写入白名单",
-            "放行工作目录外的写入",
-            self._path_white,
-            tip="放行 workdir 外的写入目录；读操作不受此限制。",
-        )
-        self._path_black_card = _expand(
-            FIF.HIDE if FIF else None,
-            "文件黑名单",
-            "读写均拦截",
-            self._path_black,
-            tip="读写均拦截（如 .env/.ssh）。",
-        )
-        self._cmd_allow_card = _expand(
-            FIF.ACCEPT if FIF else None,
-            "命令安全 · 放行前缀",
-            "跳过审批，危险命令仍拦截",
-            self._cmd_allow,
-            tip="跳过审批；危险命令仍拦截（示例见输入框提示）。",
-        )
-        self._cmd_confirm_card = _expand(
-            FIF.CARE_RIGHT_SOLID if FIF else None,
-            "命令安全 · 强制审批前缀",
-            "命中即弹审批",
-            self._cmd_confirm,
-            tip="命中即弹审批（如 git push）。",
-        )
-        self._net_domains_card = _expand(
-            FIF.GLOBE if FIF else None,
-            "网络安全 · 域名黑名单",
-            "命中即弹审批",
-            self._net_domains,
-            tip="命中域名的网络命令弹审批（如 evil.com）。",
-        )
-        for w in (
-            self._path_white_card,
-            self._path_black_card,
-            self._cmd_allow_card,
-            self._cmd_confirm_card,
-            self._net_domains_card,
-        ):
-            layout.addWidget(w)
-
-        # ── 数据安全卡 ──
+        # ── 数据安全卡（开关先构造，稍后由「删除与备份」分组收纳）──
         self.delete_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
-            "删除保护",
-            "删除类命令强制审批，执行前自动快照",
+            "删除审批",
+            "删除类命令强制审批",
         )
         self.delete_switch.setToolTip(
-            "开启后：删除类命令强制审批，放行后执行前自动快照（可找回）。"
-            "关闭后删除类命令不再审批；但命令黑名单（如 cacls）、网络外传、"
-            "路径黑名单与手动加严的策略仍会拦截。"
+            "开启后：删除类命令强制审批（放行/拒绝由你决定）。关闭后删除类命令不再审批；"
+            "是否保留被删文件只看下方「垃圾桶」开关。"
+            "命令黑名单（如 cacls）、网络外传、路径黑名单与手动加严的策略仍会拦截。"
         )
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
-        layout.addWidget(self.delete_switch)
+
+        # 垃圾桶软删除开关（与审批独立；组内收纳，见 _build_data_group）
+        self.trash_switch = SwitchSettingCard(
+            FIF.DELETE if FIF else None,
+            "垃圾桶",
+            "删除内容移入垃圾箱目录（软删除，可找回）",
+        )
+        self.trash_switch.setToolTip(
+            "开启后：删除命令执行前，目标先移动到垃圾箱目录（backups/deletes），原命令不再实际删除。\n"
+            "关闭时：不保留，删除即真删（原命令正常删除目标）。"
+        )
+        self.trash_switch.setChecked(bool(self._cfg.get("delete.trash_enabled")))
+        self.trash_switch.checkedChanged.connect(self._on_trash_toggled)
 
         # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不做快照
         self._delete_exempt = _ListEditorCard(
-            "删除豁免路径（这些目录内的删除不再弹审批，也不做快照，如 tests/）",
+            "删除豁免路径",
             "delete_exempt",
             "如 tests/ 或 D:/other_proj/logs",
-            show_title=False,
-            tip="相对路径按工作目录解析。",
+            tip="这些目录内的删除不再弹审批，也不进垃圾箱。相对路径按工作目录解析（如 tests/）。",
         )
-        self._delete_exempt_card = _expand(
-            FIF.INFO if FIF else None,
-            "删除豁免路径",
-            "这些目录内的删除不再弹审批",
-            self._delete_exempt,
-            tip="这些目录内的删除不再弹审批，也不做快照。相对路径按工作目录解析（如 tests/）。",
-        )
-        layout.addWidget(self._delete_exempt_card)
 
         self.backup_dir_card = PushSettingCard(
             "打开备份目录",
             FIF.FOLDER if FIF else None,
-            "自动备份",
+            "编辑类备份",
             # C2：不含具体数值 —— 数值由下方 SpinBox 与 hint 承载，
             # 避免同屏两处显示同一配置但一处是构造期快照（改值后不一致）
-            "修改前自动备份原文件（FileRecorder）",
+            "修改前自动备份原文件（backups/edits）",
         )
         self.backup_dir_card.clicked.connect(lambda: self._open_backup_dir())
-        layout.addWidget(self.backup_dir_card)
 
-        # ── EU-G10：备份容量上限编辑 + 立即清理（FileRecorder 侧，不含删除快照）──
-        layout.addWidget(self._build_backup_limit_row())
-
-        # ── EU-G11：删除快照容量展示 + 打开目录 / 清空快照 ──
-        layout.addWidget(self._build_snapshot_row())
-
-        # ── EU-G12：网络外传检测开关 ──
+        # ── EU-G12：网络外传检测开关（外层）──
         self.net_switch = SwitchSettingCard(
             FIF.GLOBE if FIF else None,
             "网络外传检测",
@@ -412,9 +344,8 @@ class SecurityCenterCard(QWidget):
         self.net_switch.setToolTip("curl/wget 等；仅在沙箱安全开启时生效。")
         self.net_switch.setChecked(bool(self._cfg.get("network.enabled")))
         self.net_switch.checkedChanged.connect(self._on_network_toggled)
-        layout.addWidget(self.net_switch)
 
-        # ── 系统级工具卡 ──
+        # ── 系统级工具豁免开关（外层）──
         self.sys_switch = SwitchSettingCard(
             FIF.COMMAND_PROMPT if FIF else None,
             "系统级工具豁免",
@@ -423,17 +354,26 @@ class SecurityCenterCard(QWidget):
         self.sys_switch.setToolTip("wsl/wmic/sc/reg/schtasks/diskpart/bcdedit 等绕过沙箱审批，请谨慎启用。")
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
-        layout.addWidget(self.sys_switch)
 
-        # ── EU-G9：受管进程资源配额（Job Object 三限额）──
-        layout.addWidget(self._build_job_limits_row())
+        # ── 首屏结构：开关区（全部最外层）+ 折叠明细区 + 说明 ──
+        layout.addWidget(self.sandbox_switch)
+        layout.addWidget(self.delete_switch)
+        layout.addWidget(self.trash_switch)
+        layout.addWidget(self.net_switch)
+        layout.addWidget(self.sys_switch)
+        # ── 审核处理卡（处理方法/审核模型/超时/超时处理，全页仅此一份）──
+        layout.addWidget(self._build_approval_card())
+        layout.addWidget(self._build_rules_group())
+        layout.addWidget(self._build_data_group())
+        layout.addWidget(self._build_backup_group())
+        layout.addWidget(self._build_net_proc_group())
 
         # ── 底部说明 ──
-        # N1：默认值提示（沙箱与删除保护默认关闭，用户需手动开启）
+        # N1：默认值提示（沙箱与删除审批默认关闭，用户需手动开启）
         # MCP / upload_file 说明：三类不受本页约束的操作，避免虚假安全感
         _note_text = (
             "说明：应用层拦截，非 OS 级沙箱隔离。\n"
-            "沙箱安全与删除保护默认关闭，需手动开启后才会拦截；"
+            "沙箱安全与删除审批默认关闭，需手动开启后才会拦截；"
             "读操作除黑名单外不受路径约束，白名单与 workdir 边界仅约束写入。\n"
             "MCP 工具与 upload_file / webfetch 不受本页约束。"
         )
@@ -447,6 +387,214 @@ class SecurityCenterCard(QWidget):
         layout.addWidget(note)
 
         layout.addStretch(1)
+
+    # ══════════════════ 分组收纳 ══════════════════
+
+    def _bind_editor_growth(self, card: "ExpandGroupSettingCard", *editors: "_ListEditorCard") -> None:
+        """名单编辑区行数变化 → 冒泡重算分组卡展开高度（延迟一拍等布局落定）
+
+        ⚠ 先强制 editor 自身布局激活再逐 widget 求和（原版 _adjustViewSize 策略）：
+        viewLayout.sizeHint() 有陈旧缓存（子项变化不传播，实测恒旧值），不可用。
+        """
+        from PyQt5.QtCore import QTimer
+
+        def _sync():
+            def _do():
+                for editor in editors:
+                    editor.layout().invalidate()
+                    editor.layout().activate()
+                card._adjustViewSize()
+
+            QTimer.singleShot(0, _do)
+
+        for editor in editors:
+            editor.on_change = _sync
+
+    def _build_rules_group(self) -> "ExpandGroupSettingCard":
+        """文件与命令规则：白名单/文件黑名单/命令放行/命令强制审批"""
+        card = ExpandGroupSettingCard(
+            FIF.FOLDER_ADD if FIF else None,
+            "文件与命令规则",
+            "路径白名单与黑名单 · 命令审批前缀",
+        )
+        for editor in (self._path_white, self._path_black, self._cmd_allow, self._cmd_confirm):
+            card.addGroupWidget(editor)
+        self._bind_editor_growth(card, self._path_white, self._path_black, self._cmd_allow, self._cmd_confirm)
+        self._rules_group = card
+        return card
+
+    def _build_data_group(self) -> "ExpandGroupSettingCard":
+        """删除豁免与备份：豁免路径 + 删除类备份统计（开关已全部外提）"""
+        card = ExpandGroupSettingCard(
+            FIF.DELETE if FIF else None,
+            "删除豁免与备份",
+            "豁免路径 · 删除类备份统计",
+        )
+        card.addGroupWidget(self._delete_exempt)
+        card.addGroupWidget(self._build_snapshot_row())
+        self._bind_editor_growth(card, self._delete_exempt)
+        self._data_group = card
+        return card
+
+    def _build_backup_group(self) -> "ExpandGroupSettingCard":
+        """编辑类备份（独立于删除类备份）：备份卡 + 容量上限 + 清理"""
+        card = ExpandGroupSettingCard(
+            FIF.FOLDER if FIF else None,
+            "编辑类备份",
+            "修改前自动备份原文件 · 容量上限与清理",
+        )
+        card.addGroupWidget(self.backup_dir_card)
+        card.addGroupWidget(self._build_backup_limit_row())
+        self._backup_group = card
+        return card
+
+    def _build_net_proc_group(self) -> "ExpandGroupSettingCard":
+        """域名黑名单与进程配额（开关已全部外提）"""
+        card = ExpandGroupSettingCard(
+            FIF.GLOBE if FIF else None,
+            "域名黑名单与进程配额",
+            "命中域名弹审批 · Job Object 三限额",
+        )
+        card.addGroupWidget(self._net_domains)
+        card.addGroupWidget(self._build_job_limits_row())
+        self._bind_editor_growth(card, self._net_domains)
+        self._net_proc_group = card
+        return card
+
+    # ══════════════════ 审核处理组 ══════════════════
+
+    def _build_approval_card(self) -> "ExpandGroupSettingCard":
+        """审核处理组合配置（一个折叠项收纳四个关联配置）"""
+        card = ExpandGroupSettingCard(FIF.CERTIFICATE if FIF else None, "审核处理", "")
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(16, 8, 16, 8)
+        lay.setSpacing(6)
+
+        # 处理方法
+        self.approval_mode_combo = ComboBox()
+        self.approval_mode_combo.addItem("人工审批", userData="manual")
+        self.approval_mode_combo.addItem("AI审批", userData="ai")
+        lay.addLayout(self._approval_row("处理方法", self.approval_mode_combo, ""))
+
+        # 审核模型（mode=ai 或 超时处理=ai 时生效）
+        self.approval_model_combo = ComboBox()
+        self.approval_model_combo.setMinimumWidth(220)
+        self._reload_approval_model_options()
+        lay.addLayout(
+            self._approval_row("审核模型", self.approval_model_combo, "AI审批与超时AI审核使用的模型；跟随主模型=当前会话模型。")
+        )
+
+        # 超时时间
+        self.approval_timeout_spin = SpinBox()
+        self.approval_timeout_spin.setRange(0, 86400)
+        self.approval_timeout_spin.setSingleStep(30)
+        self.approval_timeout_spin.setSuffix(" 秒")
+        lay.addLayout(self._approval_row("超时时间", self.approval_timeout_spin, "人工审批等待超时；0 = 不超时。"))
+
+        # 超时处理
+        self.approval_timeout_action_combo = ComboBox()
+        self.approval_timeout_action_combo.addItem("拒绝", userData="deny")
+        self.approval_timeout_action_combo.addItem("允许", userData="allow")
+        self.approval_timeout_action_combo.addItem("AI审核", userData="ai")
+        lay.addLayout(
+            self._approval_row("超时处理", self.approval_timeout_action_combo, "人工审批超时未决时的处理方式。")
+        )
+
+        card.addGroupWidget(body)
+
+        # 初值反映配置
+        policy = read_approval_policy(self._cfg)
+        self._set_combo_by_data(self.approval_mode_combo, policy["mode"])
+        self._set_combo_by_data(self.approval_timeout_action_combo, policy["timeout_action"])
+        if policy["ai_model"]:
+            self._set_combo_by_data(self.approval_model_combo, policy["ai_model"])
+        self.approval_timeout_spin.setValue(policy["timeout_sec"])
+
+        # 联动 + 写回
+        self.approval_mode_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self.approval_model_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self.approval_timeout_spin.valueChanged.connect(self._on_approval_changed)
+        self.approval_timeout_action_combo.currentIndexChanged.connect(self._on_approval_changed)
+        self._approval_card = card
+        self._sync_approval_ui()
+        return card
+
+    @staticmethod
+    def _approval_row(label: str, editor: QWidget, tip: str) -> QHBoxLayout:
+        """审核处理组行：左标签右控件"""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = QLabel(label)
+        lbl.setObjectName("sciEntry")
+        if tip:
+            lbl.setToolTip(tip)
+            editor.setToolTip(tip)
+        row.addWidget(lbl, 1)
+        row.addWidget(editor)
+        return row
+
+    def _reload_approval_model_options(self):
+        """审核模型下拉：已保存服务商的 display_name:模型名称 + 跟随主模型"""
+        from app.utils.config import Settings
+
+        combo = self.approval_model_combo
+        current = combo.currentData()
+        combo.clear()
+        combo.addItem("跟随主模型", userData="")
+        providers = Settings.get_instance().llm_saved_providers.value or {}
+        for info in providers.values():
+            if not isinstance(info, dict):
+                continue
+            display = info.get("display_name") or info.get("provider_name") or ""
+            model = str(info.get("模型名称") or "")
+            if not display or not model:
+                continue
+            value = f"{display}:{model}"
+            combo.addItem(value, userData=value)
+        if current:
+            self._set_combo_by_data(combo, current)
+
+    @staticmethod
+    def _set_combo_by_data(combo, data):
+        idx = combo.findData(data)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _on_approval_changed(self, *_):
+        self._cfg.set(
+            "approval",
+            {
+                "mode": self.approval_mode_combo.currentData() or "manual",
+                "timeout_sec": int(self.approval_timeout_spin.value()),
+                "timeout_action": self.approval_timeout_action_combo.currentData() or "deny",
+                "ai_model": self.approval_model_combo.currentData() or "",
+            },
+        )
+        self._cfg.save()
+        self._sync_approval_ui()
+
+    def _sync_approval_ui(self):
+        """联动：AI 审批模式禁用超时两行；摘要行跟随配置"""
+        mode = self.approval_mode_combo.currentData() or "manual"
+        is_ai = mode == "ai"
+        for w in (self.approval_timeout_spin, self.approval_timeout_action_combo):
+            w.setEnabled(not is_ai)
+        self.approval_timeout_spin.setToolTip(
+            "AI审批模式下无人工等待，不适用超时。" if is_ai else "人工审批等待超时；0 = 不超时。"
+        )
+        card = getattr(self, "_approval_card", None)
+        if card is None:
+            return
+        # 摘要行在卡片头（HeaderSettingCard，SettingCard 子类提供 setContent）
+        if is_ai:
+            card.card.setContent("AI审批 · 由审核模型自动判定放行/拒绝，失败回落人工")
+        else:
+            sec = self.approval_timeout_spin.value()
+            action = self.approval_timeout_action_combo.currentData() or "deny"
+            action_label = {"deny": "拒绝", "allow": "允许", "ai": "AI审核"}[action]
+            timeout_text = "不超时" if sec <= 0 else f"超时 {sec}s 后{action_label}"
+            card.card.setContent(f"人工审批 · {timeout_text}")
 
     # ══════════════════ EU-G10 / G11 / G9：构建各控件的独立入口 ══════════════════
 
@@ -503,7 +651,7 @@ class SecurityCenterCard(QWidget):
         return w
 
     def _build_snapshot_row(self) -> QWidget:
-        """删除快照：容量展示 + 打开目录 / 清空（清空需二次确认）"""
+        """删除类备份：容量展示 + 打开目录 / 清空（清空需二次确认）"""
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(16, 4, 16, 4)
@@ -511,10 +659,10 @@ class SecurityCenterCard(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(8)
-        label = QLabel("删除保护快照")
+        label = QLabel("删除类备份（垃圾箱）")
         label.setObjectName("sciTitle")
         label.setToolTip(
-            "快照是误删文件后的恢复手段，清空后不可找回。"
+            "AI 删除文件前自动移入/快照到此目录，是误删后的恢复手段，清空后不可找回。"
             "独立配额 = 备份上限的 1/4（下限 100 MB），不受「清理备份文件」影响。"
         )
         head.addWidget(label, 1)
@@ -680,7 +828,7 @@ class SecurityCenterCard(QWidget):
         """返回 (文件数, 总字节)；目录不存在返回 (0, 0)"""
         from app.utils.utils import get_app_data_dir
 
-        d = get_app_data_dir() / "backups" / "deleted"
+        d = get_app_data_dir() / "backups" / "deletes"
         if not d.exists():
             return (0, 0)
         files = [f for f in d.rglob("*") if f.is_file()]
@@ -695,15 +843,15 @@ class SecurityCenterCard(QWidget):
     def _refresh_snapshot_stats(self) -> None:
         count, size = self._deleted_dir_stats()
         mb = size / 1024 / 1024
-        self.snapshot_label.setText(f"已有 {count} 项快照，占用 {mb:.1f} MB，可用于恢复误删。")
+        self.snapshot_label.setText(f"已有 {count} 项删除备份，占用 {mb:.1f} MB，可用于恢复误删。")
         self.snapshot_clear_btn.setEnabled(count > 0)
-        self.snapshot_clear_btn.setToolTip("" if count > 0 else "当前没有快照")
+        self.snapshot_clear_btn.setToolTip("" if count > 0 else "当前没有删除备份")
 
     def _open_snapshot_dir(self):
         self._open_path_in_explorer(self._snapshot_dir())
 
     def _on_clear_snapshots(self):
-        """清空删除快照（破坏性操作，需二次确认）"""
+        """清空删除类备份（破坏性操作，需二次确认）"""
         count, _ = self._deleted_dir_stats()
         if count <= 0:
             return
@@ -711,8 +859,8 @@ class SecurityCenterCard(QWidget):
             from app.widgets.common_dialogs import ConfirmDialog
 
             dialog = ConfirmDialog(
-                title="清空删除快照",
-                content=f"将永久删除 {count} 项删除快照，清空后无法找回。确认继续？",
+                title="清空删除类备份",
+                content=f"将永久删除 {count} 项删除备份，清空后无法找回。确认继续？",
                 parent=self.window(),
             )
             if not dialog.exec_():
@@ -726,7 +874,7 @@ class SecurityCenterCard(QWidget):
             d = self._snapshot_dir()
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
-            logger.info(f"[SecurityCenter] 已清空删除快照（{count} 项）")
+            logger.info(f"[SecurityCenter] 已清空删除类备份（{count} 项）")
             self._refresh_snapshot_stats()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[SecurityCenter] 清空快照失败: {e}")
@@ -735,7 +883,7 @@ class SecurityCenterCard(QWidget):
     def _snapshot_dir():
         from app.utils.utils import get_app_data_dir
 
-        return get_app_data_dir() / "backups" / "deleted"
+        return get_app_data_dir() / "backups" / "deletes"
 
     @staticmethod
     def _open_path_in_explorer(path) -> None:
@@ -793,6 +941,11 @@ class SecurityCenterCard(QWidget):
         self._cfg.set("delete_protection", bool(checked))
         self._cfg.save()
 
+    def _on_trash_toggled(self, checked: bool):
+        self._cfg.set("delete.trash_enabled", bool(checked))
+        self._cfg.save()
+        logger.info(f"[SecurityCenter] 垃圾桶软删除 → {checked}")
+
     def _on_sys_toggled(self, checked: bool):
         self._cfg.set("sys_tools_bypass", bool(checked))
         self._cfg.save()
@@ -803,7 +956,7 @@ class SecurityCenterCard(QWidget):
         self._cfg.save()
 
     def _open_backup_dir(self):
-        """打开备份根目录（复用跨平台实现，避免两套 explorer 调用漂移）"""
+        """打开编辑类备份目录（复用跨平台实现，避免两套 explorer 调用漂移）"""
         from app.utils.utils import get_app_data_dir
 
-        self._open_path_in_explorer(get_app_data_dir() / "backups")
+        self._open_path_in_explorer(get_app_data_dir() / "backups" / "edits")

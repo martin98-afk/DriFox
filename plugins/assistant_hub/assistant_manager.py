@@ -41,6 +41,13 @@ from loguru import logger
 
 
 # 复用项目里 yaml 加载的兼容写法：safe_load + 失败兜底 {}
+def _caps(cap_id):
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。"""
+    from app.plugins.sdk import caps_for
+
+    return caps_for(cap_id)
+
+
 def _safe_yaml_load(text: str) -> Dict[str, Any]:
     try:
         loaded = yaml.safe_load(text)
@@ -344,7 +351,7 @@ class AssistantManager:
     def _default_root(self) -> Path:
         """默认根目录：<app_data_dir>/assistant_hub"""
         try:
-            from app.utils.utils import get_app_data_dir
+            from app.plugins.sdk import get_app_data_dir
 
             app_data = get_app_data_dir()
         except Exception:
@@ -739,87 +746,34 @@ class AssistantManager:
     def _invalidate_session_prompt_caches() -> None:
         """清空所有窗口所有 session 的 system_prompt 缓存。
 
-        遍历 ChatBackend 活跃实例的 session manager，把每个 session 的
-        system_prompt 置空，下次 build_messages 强制重建（重新触发
-        BuildSystemPrompt hooks → 新助手身份注入）。
+        经能力池 session.invalidate：一次语义动作覆盖 ChatBackend 活跃实例与
+        ChatEngine 兜底两条路径（插件不再摸私有类属性）。
         """
+        invalidate = _caps("session.invalidate")
+        if invalidate is None:
+            logger.warning("[assistant_hub] 无 session.invalidate 能力，跳过缓存失效")
+            return
         try:
-            from app.core.conversation.backend import ChatBackend
-
-            for backend in list(ChatBackend._active_instances):
-                sm = getattr(backend, "session_manager", None)
-                if sm is None:
-                    continue
-                sessions = getattr(sm, "sessions", None)
-                if isinstance(sessions, dict):
-                    items = sessions.values()
-                else:
-                    try:
-                        items = sm.get_all_sessions() or []
-                    except Exception:
-                        items = []
-                for session in items:
-                    try:
-                        session.system_prompt = ""
-                        if hasattr(session, "_system_prompt_agent"):
-                            session._system_prompt_agent = ""
-                    except Exception:
-                        pass
-            # 兜底：ChatBackend._active_instances 可能未暴露，走 engine 级缓存
-            try:
-                from app.core.engines.ui.engine import ChatEngine
-
-                for engine in list(getattr(ChatEngine, "_instances", []) or []):
-                    try:
-                        engine._invalidate_session_system_prompt_cache()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            invalidate()
         except Exception as e:
-            from loguru import logger
+            logger.warning(f"[assistant_hub] 失效 system_prompt 缓存失败: {e}")
 
-            logger.debug(f"[assistant_hub] 清空 system prompt 缓存失败: {e}")
-
-    @staticmethod
     def _invalidate_session_prompt(session_id: str) -> None:
         """只清空指定 session 的 system_prompt 缓存（会话级临时助手切换用）。
 
-        下次 build_messages 强制重建该会话的 system prompt，重新触发
-        BuildSystemPrompt hooks → 按会话 override 注入新助手身份。
-        其他会话缓存不动，避免全局闪烁。
+        经能力池 session.invalidate(session_id)：一次语义动作，插件不再遍历
+        ChatBackend._active_instances 摸私有类属性。
         """
         if not session_id:
             return
+        invalidate = _caps("session.invalidate")
+        if invalidate is None:
+            logger.warning("[assistant_hub] 无 session.invalidate 能力，跳过缓存失效")
+            return
         try:
-            from app.core.conversation.backend import ChatBackend
-
-            for backend in list(ChatBackend._active_instances):
-                sm = getattr(backend, "session_manager", None)
-                if sm is None:
-                    continue
-                # SessionManager.sessions 是 List[ChatSession]（历史版曾为 dict，
-                # 两种形态都兼容），按 session_id 匹配
-                sessions = getattr(sm, "sessions", None)
-                if isinstance(sessions, dict):
-                    candidates = [sessions.get(session_id)]
-                elif isinstance(sessions, (list, tuple)):
-                    candidates = [s for s in sessions if getattr(s, "session_id", "") == session_id]
-                else:
-                    continue
-                for session in candidates:
-                    if session is None:
-                        continue
-                    try:
-                        session.system_prompt = ""
-                        if hasattr(session, "_system_prompt_agent"):
-                            session._system_prompt_agent = ""
-                    except Exception:
-                        pass
+            invalidate(session_id)
         except Exception as e:
-            from loguru import logger
-
-            logger.debug(f"[assistant_hub] 清空会话 {session_id} prompt 缓存失败: {e}")
+            logger.warning(f"[assistant_hub] 失效会话 system_prompt 失败: {e}")
 
     @staticmethod
     def _invalidate_identity_cache() -> None:
@@ -832,7 +786,7 @@ class AssistantManager:
         解析成本极低，整表清空即可。
         """
         try:
-            from app.core.infra.message_identity import clear_cache
+            from app.plugins.sdk import clear_cache
 
             clear_cache()
         except Exception as e:
@@ -1103,20 +1057,18 @@ class AssistantManager:
             mw = None
         valid = getattr(mw, "_valid_configs", None) if mw is not None else None
         if not isinstance(valid, dict):
-            # 兜底 llm_saved_providers（无窗口场景）
+            # 无窗口场景：走 model.config 能力（从主程序内存态取，
+            # 不读磁盘 app.config —— 密钥模式下那里是密文/空串）
+            get_config = _caps("model.config")
+            if get_config is None:
+                return None
             try:
-                from app.utils.config import Settings
-
-                saved = Settings.get_instance().llm_saved_providers.value or {}
+                cfg = get_config(config_id, model_name)
             except Exception:
                 return None
-            cfg = saved.get(config_id)
             if not isinstance(cfg, dict) or not cfg:
                 return None
-            override = dict(cfg)
-            if model_name:
-                override["模型名称"] = model_name
-            return override
+            return dict(cfg)
         cfg = valid.get(config_id)
         if not isinstance(cfg, dict) or not cfg:
             return None
@@ -1216,7 +1168,7 @@ class AssistantManager:
             else "{项目根}/" + store.PROJECT_DIR_NAME + "/" + store.MEMORY_SUBDIR + "/" + aid
         )
         limits = self.memory_max_chars(aid)
-        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir)]
+        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir, limits)]
 
         # 全局记忆
         g_text = (store.read_global_memory(aid_dir) or "").strip()
@@ -1488,28 +1440,36 @@ class AssistantManager:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _current_workdir() -> str:
-        """当前激活对话窗口的工作目录（UI 查看/反思/统计等无 tool_ctx 场景用）。
+    def _current_workdir(pool=None) -> str:
+        """当前应使用的项目工作目录（UI 查看/反思/统计等无 tool_ctx 场景用）。
 
-        多窗口多项目：跟随 TabManager 当前选中标签页的窗口取 workdir。
-        不取注册表第一个窗口——多窗口选不同项目时那会看错项目记忆
-        （同 chat_worker/subagent_worker 已修过的「全局单例串味」问题）。
-        激活窗口命中即以它为准（workdir 未设置就返回空串，不回退别窗）；
-        拿不到激活窗口时才回退 UIPluginRegistry 注册表（单窗/嵌入场景）。
+        pool（宿主 ctx 能力池）优先：宿主已按卡片形态解析窗口并裁剪授权
+        （dock 卡=归属窗口，全局卡=当前选中 tab），插件只消费语义快照，
+        全程不持有窗口对象。None（后台线程）时回退全局链路：caps_for
+        （授权仍按 manifest 裁剪）→ UIPluginRegistry 注册表。
+
+        历史 bug（0.4.0）：manifest api_version=2 但 capabilities 漏声明
+        window.current → caps_for 恒 None → 每次落到注册表 fallback 取
+        「第一个注册窗口」的 workdir，多窗口下必然串味。
         """
+        if pool is not None and "window.current" in pool:
+            try:
+                snap = pool["window.current"]
+                snap = snap() if callable(snap) else snap
+                if snap and snap.get("workdir"):
+                    return str(snap["workdir"])
+            except Exception as e:
+                logger.debug(f"[assistant_hub] 取能力池窗口快照失败，回退全局链: {e}")
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                w = tm.get_current_window()
-                if w is not None and not getattr(w, "_is_destroyed", False):
-                    backend = getattr(w, "backend", None)
-                    te = getattr(backend, "tool_executor", None)
-                    if te is not None:
-                        return str(te.get_workdir() or "")
-        except Exception:
-            pass
+            # 无池（后台线程等）：全局链路（授权仍按 manifest 声明裁剪）。
+            # 卡片路径已由 _ctx_caps_pool() 实时刷新宿主 note_host。
+            snap = _caps("window.current")
+            if snap is not None:
+                snap = snap()
+            if snap and snap.get("workdir"):
+                return str(snap["workdir"])
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 全局链取窗口快照失败: {e}")
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 

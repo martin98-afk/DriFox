@@ -81,7 +81,7 @@ from app.core.modelmeta.model_capabilities import (
     normalize_reasoning_effort,
     resolve_model_capabilities,
 )
-from app.core.modelmeta.provider_profile import get_provider_profile
+from app.core.modelmeta.provider_profile import get_provider_profile, resolve_extra_headers
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.core.infra.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
@@ -252,6 +252,9 @@ class OpenAIChatWorker(QThread):
         # 拒绝理由（结构化审批回传）：deny_permission 写入、_check_permission 读取后随结果下发。
         # 属于单次审批的瞬时值，不进 ChatWorkerState（无需跨 sync 边界持久化）。
         self._permission_deny_reason = ""
+        # 待审批调用的 AI 审核上下文（_build_approval_context 写入，宿主经
+        # get_current_worker() 读取）。默认 None = 无上下文，prompt 退回原形态。
+        self._approval_context: Optional[Dict[str, Any]] = None
         # [T28 L4] _response_chunks 字符总数增量计数器：原 sum(len(c) for c in ...)
         # 在 MEM_DIAG 快照（每 100 chunk）与流式调试日志里各跑一次，长响应下
         # O(chunks) × 高频 = 可观开销。所有写路径（append/clear/恢复/重置）同步维护。
@@ -3268,35 +3271,20 @@ class OpenAIChatWorker(QThread):
             return None
 
     def _provider_extra_headers(self) -> Optional[Dict[str, str]]:
-        """服务商插件声明的能力头（capabilities），两通道合并：
+        """服务商插件声明的能力头（capabilities）——通用解析见
+        ``provider_profile.resolve_extra_headers``（chat_worker / subagent_worker
+        等所有发 LLM 请求的执行层共用，避免多份实现漂移）。
 
-        - extra_headers：静态自定义头 dict（伪装 UA / X-Product 等），声明即注入，
-          不依赖会话；同名键覆盖 openai SDK 默认头（如 User-Agent）。
-        - session_header：网关会话标识头名，值=当前会话 ID。OpenCode Zen/Go
-          等网关要求每个 LLM 请求携带稳定会话标识（2026-09 起缺失报 400
-          MissingSessionID）。
+        两通道合并：静态伪装头（extra_headers）+ 网关会话头（session_header，
+        值=当前会话 ID，OpenCode Zen/Go 等网关缺失时报 400 MissingSessionID）。
 
-        头名/头值均由 providers 插件按 family 声明，主程序只做通用注入，
-        不感知具体服务商。
+        头解析失败不得拖垮请求构建（注册表未就绪 / 插件抛错）→ 降级为无头。
         """
         try:
-            profile = get_provider_profile(self.llm_config or {})
+            headers = resolve_extra_headers(self.llm_config or {}, self.session_id)
         except Exception as e:
             logger.debug(f"[ChatWorker] 能力头解析失败: {e}")
             return None
-        headers: Dict[str, str] = {}
-        extra = profile.get("extra_headers")
-        if isinstance(extra, dict):
-            for name, value in extra.items():
-                if value is None:
-                    continue
-                # 可调用值 = 动态头：按当前请求的 llm_config 取值
-                # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）
-                headers[str(name)] = str(value(self.llm_config or {})) if callable(value) else str(value)
-        if self.session_id:
-            header = profile.get("session_header")
-            if header:
-                headers[str(header)] = self.session_id
         return headers or None
 
     def _adapter_flags(self):
@@ -4423,6 +4411,71 @@ class OpenAIChatWorker(QThread):
         self._question_pending = {"tool_call_id": tool_call_id, "questions": questions}
         return None  # 通知 run() 等待用户回答
 
+    # 审核上下文字段上限（字符）：审批是阻塞链，prompt 越长 worker 等待越久
+    _APPROVAL_CTX_USER_LIMIT = 1000
+    _APPROVAL_CTX_ARGS_LIMIT = 200
+
+    def _build_approval_context(self, tool_name: str, tool_call_id: str) -> Optional[Dict[str, Any]]:
+        """构造 AI 审核用的任务上下文（B 档：用户目标 + 本轮轨迹摘要）
+
+        背景：审核 prompt 原先只有 tool_name/arguments/workdir，模型无从判断
+        操作与本次任务目标的关系，只能按操作类型清单枚举对照（见
+        approval_review._PROMPT_TEMPLATE）。这里补齐两样它缺的信息：
+        最近一条用户消息（目标）+ 本轮已发起的工具调用（轨迹，不含结果体）。
+
+        - 数据全部取自 worker 线程本地（_current_session_messages /
+          _current_tool_calls），不跨线程取，避免与主线程竞态。
+        - 排除当前 tool_call_id：并行路径下 _current_tool_calls 含全部待执行
+          工具，不排除会把「正在审的这个工具自己」写进轨迹，纯噪声。
+        - 取不到任何一项时返回 None，prompt 退回无上下文形态（新增信息而非
+          新增依赖，缺失不得阻断审核链）。
+        """
+        from app.core.conversation.message_content import content_to_text
+
+        user_goal = ""
+        try:
+            for msg in reversed(self._current_session_messages or []):
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    user_goal = content_to_text(msg.get("content", ""))
+                    break
+        except Exception as e:  # noqa: BLE001 - 上下文是增强项，失败不得阻断
+            logger.debug(f"[Permission] 审核上下文用户目标提取失败: {e}")
+            user_goal = ""
+
+        steps = []
+        try:
+            for tc in (self._current_tool_calls or {}).values():
+                if not isinstance(tc, dict):
+                    continue
+                if tc.get("id") == tool_call_id:
+                    continue
+                func = tc.get("function") or {}
+                name = str(func.get("name") or "")
+                if not name:
+                    continue
+                raw_args = func.get("arguments", "{}")
+                if not isinstance(raw_args, str):
+                    try:
+                        # orjson 无 ensure_ascii 参数（输出恒为 UTF-8 原文）
+                        raw_args = json.dumps(raw_args).decode("utf-8")
+                    except Exception:  # noqa: BLE001
+                        raw_args = str(raw_args)
+                if len(raw_args) > self._APPROVAL_CTX_ARGS_LIMIT:
+                    raw_args = raw_args[: self._APPROVAL_CTX_ARGS_LIMIT] + "…"
+                steps.append({"tool": name, "args": raw_args})
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] 审核上下文轨迹提取失败: {e}")
+            steps = []
+
+        if not user_goal and not steps:
+            return None
+        ctx: Dict[str, Any] = {"current_tool": tool_name}
+        if user_goal:
+            ctx["user_goal"] = user_goal[: self._APPROVAL_CTX_USER_LIMIT]
+        if steps:
+            ctx["round_steps"] = steps
+        return ctx
+
     def _check_permission(self, tool_name, arguments, tool_call_id, round_id, results):
         """
         权限检查。返回 False 表示取消/已处理（调用方应 return None），
@@ -4494,6 +4547,9 @@ class OpenAIChatWorker(QThread):
                 # 再次检查缓存（可能已被其他线程处理）
                 if self._permission_cache.is_allowed(tool_name):
                     return True
+                # 审核上下文（供 AI 审批 prompt 使用）：构造放在 emit 前、锁内，
+                # 保证宿主读到的上下文与本次请求匹配；失败不阻断（返回 None）
+                self._approval_context = self._build_approval_context(tool_name, tool_call_id)
                 self._emit_with_callback(
                     "permission_approval_requested",
                     self.permission_approval_requested,
@@ -4547,8 +4603,6 @@ class OpenAIChatWorker(QThread):
                 )
                 return True  # 已处理，继续（但不会执行工具）
 
-            self._sandbox_after_approve(tool_name, arguments)
-
         return True  # 允许执行
 
     def _sandbox_verdict(self, tool_name, arguments):
@@ -4572,38 +4626,59 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[Sandbox] 检查失败放行: {e}")
             return None
 
-    def _sandbox_after_approve(self, tool_name, arguments):
-        """审批通过后钩子：删除保护开启时，对删除命令做执行前快照
+    def _backup_delete_targets(self, arguments):
+        """删除类命令执行前，垃圾桶开启时把目标移入垃圾箱（软删除，可找回）
 
+        保留与否只由垃圾桶开关（delete.trash_enabled）控制：
+        开 → 目标 move 进垃圾箱目录，原命令不再实际删除；关 → 不保留，删除即真删。
+        与沙箱/删除审批开关无关（2026-10-21 修复：原为审批通过后钩子，且被
+        sandbox_enabled && delete_protection 双门绑死——垃圾桶开了但删除保护
+        没开时永不生效，即「垃圾箱不工作」的根因）。
+
+        挂在 `_execute_tool`：只有真正会执行的命令才会到这里（deny 已拒、
+        审批被拒均不进），不会对未执行的命令产生垃圾箱残留。
         显式传 workdir（同 `_sandbox_verdict`）：相对路径目标按工作目录解析，
-        否则快照会按进程 cwd 解析而静默漏拍（2026-10-13 实测缺陷）。
+        否则按进程 cwd 解析会静默漏移（2026-10-13 同款问题）。
         """
         try:
-            args = dict(arguments or {})
-            command = str(args.get("command") or "")
+            command = str(dict(arguments or {}).get("command") or "")
             if not command:
                 return
             from pathlib import Path
 
-            from app.tools.sandbox import SandboxConfig, snapshot_paths_before_delete
+            from app.tools.sandbox import (
+                SandboxConfig,
+                delete_exempt,
+                is_delete_command,
+                stash_delete_targets_to_trash,
+            )
 
-            cfg = SandboxConfig.get_instance()
-            if not cfg.get("sandbox_enabled") or not cfg.get("delete_protection"):
+            if not is_delete_command(command):
                 return
-            from app.utils.utils import get_app_data_dir
-
-            backup_root = get_app_data_dir() / "backups" / "deleted"
+            cfg = SandboxConfig.get_instance()
+            if not cfg.get("delete.trash_enabled"):
+                return
             wd = None
             try:
                 wd = self.tool_executor.get_workdir()
             except Exception:  # noqa: BLE001 - 取不到基准时回退内部默认
                 wd = None
-            snapshot_paths_before_delete(command, backup_root, workdir=Path(wd) if wd else None)
-        except Exception as e:  # noqa: BLE001 - 快照失败不阻断已批准执行
-            logger.warning(f"[Sandbox] 删除保护快照异常: {e}")
+            workdir = Path(wd) if wd else None
+            # 删除豁免路径内的目标不保留（豁免语义 = 完全不干预，与审批口径一致）
+            if delete_exempt(command, cfg, workdir=workdir):
+                return
+            from app.utils.utils import get_app_data_dir
+
+            trash_root = get_app_data_dir() / "backups" / "deletes"
+            stash_delete_targets_to_trash(command, trash_root, workdir=workdir)
+        except Exception as e:  # noqa: BLE001 - 垃圾箱失败不阻断执行
+            logger.warning(f"[Sandbox] 删除垃圾箱异常: {e}")
 
     def _execute_tool(self, tool_name, arguments, tool_call_id):
         """执行单个工具调用。"""
+        # 删除类命令执行前一律备份（独立于沙箱/删除保护开关，见方法 docstring）
+        self._backup_delete_targets(arguments)
+
         from app.plugins.contracts.hook_policy import PreToolUseEvent
 
         is_team = _check_team_member(getattr(self.tool_executor, "_backend", None))

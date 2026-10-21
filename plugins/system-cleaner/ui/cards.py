@@ -31,6 +31,7 @@ from qfluentwidgets import (
 from loguru import logger
 
 from .cleaner import _CacheItemRow, _styled_cleaner_confirm, _styled_cleaner_info
+from .icons import svg_pixmap
 from .scanner import (
     CACHE_DEFS,
     _CleanWorker,
@@ -116,6 +117,7 @@ class SystemCleanerCard(QWidget):
         self._ctx_font_size = 0
         self._ctx_accent = "#62a0ea"
         self._ctx_danger = "#e34c4c"
+        self._ctx_is_dark = isDarkTheme()
 
         self._setup_ui()
         self._apply_fallback_theme()
@@ -179,6 +181,7 @@ class SystemCleanerCard(QWidget):
         is_dark = ctx.get("is_dark", True)
         self._ctx_accent = accent
         self._ctx_danger = danger
+        self._ctx_is_dark = is_dark
         self._ctx_theme_colors = colors
 
         self._cached_tc = _ctx_text_color(ctx)
@@ -272,7 +275,7 @@ class SystemCleanerCard(QWidget):
             pass
         try:
             if hasattr(self, "_mem_icon"):
-                self._mem_icon.setStyleSheet(f"background: transparent; font-size: {max(12, fs + 1)}px;")
+                self._render_mem_icon()
         except RuntimeError:
             pass
         try:
@@ -357,6 +360,13 @@ class SystemCleanerCard(QWidget):
 
     # ── UI 构建 ──
 
+    def _render_mem_icon(self):
+        """内存区 SVG 图标：跟随主题/强调色重渲染"""
+        if not hasattr(self, "_mem_icon"):
+            return
+        color = self._ctx_accent
+        self._mem_icon.setPixmap(svg_pixmap("activity", color, size=16, dpr=self.devicePixelRatioF()))
+
     def _setup_ui(self):
         self.setMinimumHeight(0)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -401,7 +411,7 @@ class SystemCleanerCard(QWidget):
         self._scroll.setWidget(self._content)
         # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
         # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        from app.utils.design_tokens import make_card_content_opaque
+        from app.plugins.sdk import make_card_content_opaque
 
         make_card_content_opaque(self._content, 246)
         SmoothScrollDelegate(self._scroll)  # 平滑滚动（与主程序同款引擎）
@@ -464,8 +474,11 @@ class SystemCleanerCard(QWidget):
         mem_layout.setContentsMargins(14, 8, 6, 8)
         mem_layout.setSpacing(8)
 
-        self._mem_icon = QLabel("📊", mem_bg)
-        self._mem_icon.setStyleSheet("background: transparent; font-size: 15px;")
+        self._mem_icon = QLabel(mem_bg)
+        self._mem_icon.setFixedSize(20, 20)
+        self._mem_icon.setAlignment(Qt.AlignCenter)
+        self._mem_icon.setStyleSheet("background: transparent;")
+        self._render_mem_icon()
         mem_layout.addWidget(self._mem_icon)
 
         self._mem_label = QLabel("DriFox 进程内存", mem_bg)
@@ -478,7 +491,7 @@ class SystemCleanerCard(QWidget):
         self._mem_value.setStyleSheet("color: #62a0ea; background: transparent; font-size: 14px; font-weight: 600;")
         mem_layout.addWidget(self._mem_value)
 
-        self._mem_release_btn = TransparentPushButton("⚡ 释放内存", mem_bg)
+        self._mem_release_btn = TransparentPushButton("释放内存", mem_bg)
         self._mem_release_btn.setCursor(Qt.PointingHandCursor)
         btn_fs = max(10, fs - 2)
         self._mem_release_btn.setFixedSize(max(160, btn_fs * 6 + 20), 32)
@@ -498,7 +511,7 @@ class SystemCleanerCard(QWidget):
         layout.setSpacing(0)
 
         _init_tcs = "rgba(255,255,255,0.35)" if isDarkTheme() else "rgba(0,0,0,0.35)"
-        self._section_title_lb = QLabel("—— 可清理缓存 ——", container)
+        self._section_title_lb = QLabel("可清理项", container)
         self._section_title_lb.setStyleSheet(
             f"color: {_init_tcs}; background: transparent; "
             "font-size: 11px; letter-spacing: 2px; padding: 12px 16px 4px;"
@@ -510,7 +523,7 @@ class SystemCleanerCard(QWidget):
         btn_layout = QHBoxLayout(btn_container)
         btn_layout.setContentsMargins(16, 4, 16, 4)
 
-        self._clean_cache_btn = TransparentPushButton("🗑️ 一键清理选中缓存", btn_container)
+        self._clean_cache_btn = TransparentPushButton("一键清理选中缓存", btn_container)
         self._clean_cache_btn.setCursor(Qt.PointingHandCursor)
         self._clean_cache_btn.setMinimumHeight(42)
         self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(self._ctx_accent, fs, isDarkTheme()))
@@ -519,10 +532,12 @@ class SystemCleanerCard(QWidget):
 
         layout.addWidget(btn_container)
 
-        for cid, icon, label, _rel_path, _dir_mode in CACHE_DEFS:
-            row = _CacheItemRow(cid, icon, label, container)
+        for item in CACHE_DEFS:
+            row = _CacheItemRow(
+                item.cid, item.icon, item.label, container, tip=item.tip, default_checked=item.default_checked
+            )
             row.toggled.connect(self._on_row_toggled)
-            self._cache_rows[cid] = row
+            self._cache_rows[item.cid] = row
             layout.addWidget(row)
 
         self._content_layout.addWidget(container)
@@ -542,7 +557,7 @@ class SystemCleanerCard(QWidget):
 
         layout.addStretch(1)
 
-        self._count_lb = QLabel("共 5 项", container)
+        self._count_lb = QLabel(f"共 {len(CACHE_DEFS)} 项", container)
         self._count_lb.setStyleSheet(f"color: {_tcs}; background: transparent; font-size: 11px;")
         layout.addWidget(self._count_lb)
 
@@ -588,12 +603,12 @@ class SystemCleanerCard(QWidget):
     def _on_row_toggled(self):
         self._update_cache_button()
 
-    # ── ⚡ 内存释放 ──
+    # ── 内存释放 ──
 
     def _on_memory_release(self):
         """深度释放进程内存并归还给操作系统。
 
-        🐛 分拍执行（2026-09-11）：整个释放链含全代 GC、工作集修剪、终止 WebEngine
+        分拍执行（2026-09-11）：整个释放链含全代 GC、工作集修剪、终止 WebEngine
         子进程等高危原生操作。原先同步塞在鼠标事件里，「GC 连带析构 QObject」「堆
         修剪遍历」会与 Chromium 后台线程在途回调（console 上报等）撞在同一拍，是
         crash_*.log 中 scanner.py:317/328 处 9 次 access violation 闪退的根因
@@ -606,7 +621,7 @@ class SystemCleanerCard(QWidget):
 
         self._is_releasing_mem = True
         self._mem_release_btn.setEnabled(False)
-        self._mem_release_btn.setText("⚡ 释放中…")
+        self._mem_release_btn.setText("释放中…")
         self._set_status("深度清理内存 + WebEngine 进程中…")
 
         mem_before = _get_process_memory()
@@ -631,7 +646,7 @@ class SystemCleanerCard(QWidget):
                 parts.append(f"回收 {collected} 对象")
             if killed_procs:
                 parts.append(f"结束 {killed_procs} 个 WebEngine 进程")
-            self._mem_release_btn.setText(f"✅ {' · '.join(parts) if parts else '清理完成'}")
+            self._mem_release_btn.setText(f"{' · '.join(parts) if parts else '清理完成'}")
 
             self._refresh_memory()
             self._mem_release_btn.setEnabled(True)
@@ -644,7 +659,7 @@ class SystemCleanerCard(QWidget):
 
     def _reset_mem_release_btn(self):
         if not self._is_releasing_mem:
-            self._mem_release_btn.setText("⚡ 释放内存")
+            self._mem_release_btn.setText("释放内存")
 
     # ── 内存 ──
 
@@ -726,10 +741,10 @@ class SystemCleanerCard(QWidget):
 
         selected = []
         total_size = 0
-        for cid, _icon, _label, rel_path, dir_mode in CACHE_DEFS:
-            row = self._cache_rows.get(cid)
+        for item in CACHE_DEFS:
+            row = self._cache_rows.get(item.cid)
             if row and row.is_checked() and row.get_size() > 0:
-                selected.append((cid, _icon, _label, rel_path, dir_mode))
+                selected.append(item)
                 total_size += row.get_size()
 
         if not selected:
@@ -740,7 +755,7 @@ class SystemCleanerCard(QWidget):
             _styled_cleaner_info(self.window(), "清理缓存", "选中项已为空，无需清理。", color_source=self)
             return
 
-        names = "、".join(label for _, _, label, _, _ in selected)
+        names = "、".join(item.label for item in selected)
         reply = _styled_cleaner_confirm(
             self.window(),
             "确认清理缓存",
@@ -761,7 +776,7 @@ class SystemCleanerCard(QWidget):
 
         self._is_cleaning = True
         self._clean_cache_btn.setEnabled(False)
-        self._clean_cache_btn.setText("🗑️ 清理中…")
+        self._clean_cache_btn.setText("清理中…")
         self._set_status("清理缓存中…")
         self._refresh_btn.setEnabled(False)
 
@@ -792,12 +807,12 @@ class SystemCleanerCard(QWidget):
         self._refresh_btn.setEnabled(True)
 
         total_freed = sum(freed.values())
-        self._clean_cache_btn.setText(f"✅ 清理完成，释放 {_format_size(total_freed)}")
+        self._clean_cache_btn.setText(f"清理完成，释放 {_format_size(total_freed)}")
         self._set_status("")
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         self._last_clean_time = now
-        self._last_clean_lb.setText(f"📝 上次清理: {now}")
+        self._last_clean_lb.setText(f"上次清理: {now}")
 
         self._async_scan(force=True)
         self._refresh_memory()
@@ -811,7 +826,7 @@ class SystemCleanerCard(QWidget):
     def _on_clean_error(self, err: str):
         self._is_cleaning = False
         self._clean_cache_btn.setEnabled(True)
-        self._clean_cache_btn.setText("🗑️ 一键清理选中缓存")
+        self._clean_cache_btn.setText("一键清理选中缓存")
         self._refresh_btn.setEnabled(True)
         self._set_status("清理出错")
         logger.error(f"[SystemCleaner] 清理失败: {err}")
@@ -825,10 +840,10 @@ class SystemCleanerCard(QWidget):
         total_size = sum(row.get_contribution() for row in self._cache_rows.values())
 
         if total_size > 0:
-            self._clean_cache_btn.setText(f"🗑️ 一键清理选中缓存 (共 {_format_size(total_size)})")
+            self._clean_cache_btn.setText(f"一键清理选中缓存 (共 {_format_size(total_size)})")
             self._clean_cache_btn.setEnabled(True)
         else:
-            self._clean_cache_btn.setText("🗑️ 一键清理选中缓存")
+            self._clean_cache_btn.setText("一键清理选中缓存")
             self._clean_cache_btn.setEnabled(False)
 
     def _set_status(self, text: str):

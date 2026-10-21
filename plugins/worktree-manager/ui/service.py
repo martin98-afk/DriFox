@@ -13,6 +13,30 @@ from typing import Any, Dict
 from loguru import logger
 
 
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
+
 class WorktreeService:
     """工作树服务（插件注册到 UIPluginRegistry；无 Qt 对象成员，可安全单例）"""
 
@@ -32,7 +56,7 @@ class WorktreeService:
         workdir = mw._current_workdir.get(mw._current_project)
         if not workdir or not os.path.isdir(str(workdir)):
             return ""
-        from app.utils.git_worktree import GitWorktreeDetector
+        from app.plugins.sdk import GitWorktreeDetector
 
         git_root = GitWorktreeDetector.detect_git(str(workdir))
         if not git_root:
@@ -73,7 +97,7 @@ class WorktreeService:
             return
         # zombie 过滤：.git 指向的 gitdir 已消失（主仓库 .git 被删/重建）的
         # worktree 不切换，避免把工作目录切进 git 已不认的目录
-        from app.utils.git_worktree import GitWorktreeDetector
+        from app.plugins.sdk import GitWorktreeDetector
 
         if not GitWorktreeDetector.is_valid_worktree_link(worktree_path):
             logger.warning(
@@ -114,11 +138,9 @@ class WorktreeService:
 
         # 3. 刷新右侧工作台关键文档/工作树 UI
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                tm.refresh_workbench()
+            wb = _caps("window.workbench")
+            if wb is not None:
+                wb["refresh"]()
         except Exception:
             pass
 
@@ -138,7 +160,7 @@ class WorktreeService:
             # 已不在 worktree 中，无需切换
             return
 
-        from app.utils.git_worktree import GitWorktreeDetector
+        from app.plugins.sdk import GitWorktreeDetector
 
         main_repo = GitWorktreeDetector.get_main_repo_path(current_wt)
         if not main_repo or not os.path.isdir(main_repo):
@@ -160,11 +182,9 @@ class WorktreeService:
         self.update_branch(mw)
 
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                tm.refresh_workbench()
+            wb = _caps("window.workbench")
+            if wb is not None:
+                wb["refresh"]()
         except Exception:
             pass
 

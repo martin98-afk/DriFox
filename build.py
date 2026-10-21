@@ -176,6 +176,10 @@ _hidden_imports = [
     # app.core 全量子模块：PEP 562 懒加载（__getattr__ + importlib.import_module 动态字符串导入），
     # PyInstaller 静态分析无法发现。collect_submodules 一次性收集，后续新增懒加载模块也自动覆盖。
     *collect_submodules("app.core"),
+    # app.plugins 全量子模块：sdk.py 懒加载映射（如 sdk_tool_registry）为字符串引用，
+    # PyInstaller 分析不到，漏打会导致 agent_trace UI / assistant_hub 工具注册 /
+    # system-context tier 加载失败（No module named 'app.plugins.sdk_tool_registry'）
+    *collect_submodules("app.plugins"),
     # gateway adapter 模块（也是 importlib.import_module 动态加载）
     "app.gateway.adapters.wecom",
     "app.gateway.adapters.dingtalk",

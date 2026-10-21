@@ -96,6 +96,45 @@ def check_platform(manifest: dict) -> Tuple[bool, str]:
     return False, f"插件仅支持 [{declared}]，当前平台 {current_platform_key()} 不兼容"
 
 
+def check_host_compat(manifest: dict) -> Tuple[bool, str]:
+    """检查插件的 min_host_version 是否满足当前宿主（市场端可读版本判定）。
+
+    与 ``check_platform`` 并列、同一返回形状，供插件市场据此把「安装 / 更新」
+    按钮置灰。版本比较复用 ``app.plugins.version_gate.parse_semver``，与宿主
+    加载门禁用的是同一套解析规则（避免「市场说能装、装完被门禁拦掉」）。
+
+    与 ``check_host_version`` 的区别是**不写日志**：市场一次渲染要判定全部
+    插件，走带 warning 的门禁函数会刷出上百行 [VersionGate] 噪音。
+
+    Returns:
+        (兼容?, 原因文案)。未声明 min_host_version → 恒兼容（向后兼容）。
+    """
+    from app.plugins.version_gate import host_version, parse_semver
+
+    required = (manifest or {}).get("min_host_version")
+    if not required:
+        return True, ""
+    need = parse_semver(str(required))
+    if need is None:
+        return False, f"插件的版本要求格式非法（{required}），无法判断兼容性"
+    cur = parse_semver(host_version())
+    if cur is None:
+        return True, ""  # 宿主版本读不到：放行，不误伤
+    if cur >= need:
+        return True, ""
+    return False, (
+        f"需要 DriFox v{need[0]}.{need[1]}.{need[2]} 或更高版本，"
+        f"当前 v{cur[0]}.{cur[1]}.{cur[2]}"
+    )
+
+
+def host_version_string() -> str:
+    """当前宿主版本（去 v 前缀）；读不到返回 "0.0.0"。"""
+    from app.plugins.version_gate import host_version
+
+    return host_version()
+
+
 def resolve_pip_deps(manifest: dict, platform_key: Optional[str] = None) -> List[str]:
     """合并 dependencies.pip 的 default 与指定平台列表（去重、保序）。
 

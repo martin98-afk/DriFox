@@ -68,7 +68,8 @@ from .trace_models import (
     time_bounds,
     with_alpha,
 )
-from .turn_list_widget import TurnListWidget
+from .turn_list_widget import TurnListWidget
+from app.plugins.sdk import tool_registry_api
 
 TOP_BAR_H = 46
 BOTTOM_BAR_H = 30
@@ -83,6 +84,17 @@ _PLUGIN_NAME = "agent_trace"
 # tools schema 拉取节流（秒）— 每次都拉会把 AgentManager 拉起来，卡 UI
 _SCHEMA_TTL = 60.0
 
+
+def _caps(cap_id):
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。"""
+    from app.plugins.sdk import caps_for
+
+    return caps_for(cap_id)
+
+
+def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
+    return tool_registry_api(kind, module_globals=globals())
 
 class _StatusDot(QWidget):
     """状态指示点：绿=空闲/完成，金=有 in-flight，红=最近有失败。"""
@@ -317,7 +329,6 @@ class TraceCardWidget(QWidget):
         if getattr(self, "_events_subscribed", False):
             return
         try:
-            from app.core.infra.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
 
             weak_self = weakref.ref(self)
 
@@ -326,7 +337,9 @@ class TraceCardWidget(QWidget):
                 if card is not None:
                     card._on_tab_switched(payload)
 
-            UIEventBus.get_instance().subscribe(EV_TAB_SWITCHED, _on_tab_switched, plugin_name=_PLUGIN_NAME)
+            ev = _caps("ui.events")
+            if ev is not None:
+                ev()["subscribe"]("tab_switched", _on_tab_switched)
             self._events_subscribed = True
         except Exception as e:
             logger.warning(f"[agent_trace] 订阅 EV_TAB_SWITCHED 失败: {e}")
@@ -536,7 +549,7 @@ class TraceCardWidget(QWidget):
 
         self._unbind_collector_signals()
         self._unbind_backend_stats_signals()
-        self._collector = self._hub.collector_for(main_widget)
+        self._collector = self._hub.collector_for(main_widget, self._ctx.get("capabilities"))
         self._active_wid = wid if self._collector is not None else ""
 
         if self._collector is not None:
@@ -571,16 +584,13 @@ class TraceCardWidget(QWidget):
             return ""
         return str(getattr(session, "session_id", "") or "")
 
-    @staticmethod
-    def _active_window_ids() -> Optional[set]:
-        """当前存活的对话窗口 id 集合（非 Tab 模式返回 None = 不清理）。"""
+    def _active_window_ids(self) -> Optional[set]:
+        """当前存活的对话窗口 id 集合（能力池不可用时返回 None = 不清理）。"""
+        caps = self._ctx.get("capabilities")
+        if caps is None or "window.list" not in caps:
+            return None
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is None:
-                return None
-            return {getattr(w, "_window_id", "") for w in tm._windows}
+            return caps["window.list"]()
         except Exception:
             return None
 
@@ -800,9 +810,8 @@ class TraceCardWidget(QWidget):
             except Exception as e:
                 logger.debug(f"[agent_trace] services.get_tools_schema 失败: {e}")
         try:
-            from app.tools.registry import ToolRegistry
-
-            return list(ToolRegistry.get_instance().schemas())
+            api = _tool_api("read")
+            return list(api["schemas"]()) if api else []
         except Exception as e:
             logger.debug(f"[agent_trace] ToolRegistry.schemas 失败: {e}")
             return []

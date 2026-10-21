@@ -41,11 +41,35 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from app.utils.design_tokens import Colors, font_size_css
-from app.utils.git_worktree import GitWorktreeDetector
-from app.utils.utils import get_font_family_css, get_icon
+from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import GitWorktreeDetector
+from app.plugins.sdk import get_font_family_css, get_icon
 from .worktree_section import WorktreeSectionWidget
-from app.widgets.common_dialogs import SingleInputDialog
+from app.plugins.sdk import SingleInputDialog
+
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
+
 
 class DocDropListWidget(ListWidget):
     """支持拖拽文件的列表控件"""
@@ -294,7 +318,7 @@ class KeyDocumentItemWidget(QWidget):
         # 检测 git worktree（仅当是文件夹且被标记为根目录时才检测）
         self._repo_info = None
         if self._is_folder and self._is_working_dir:
-            from app.utils.git_worktree import GitWorktreeDetector
+            from app.plugins.sdk import GitWorktreeDetector
 
             self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
 
@@ -512,13 +536,12 @@ class SystemWorktreePage(QWidget):
         project = ""
         workdir: Optional[str] = None
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            win = tm.get_current_window() if tm is not None else None
-            if win is not None:
-                project = getattr(win, "_current_project", "") or ""
-                workdir = (getattr(win, "_current_workdir", None) or {}).get(project)
+            snap = _caps("window.current")
+            if snap is not None:
+                snap = snap()
+            if snap:
+                project = snap.get("project") or ""
+                workdir = snap.get("workdir")
         except Exception:
             pass
         self.set_project(project, workdir)
@@ -738,9 +761,8 @@ class SystemWorktreePage(QWidget):
             from qfluentwidgets import InfoBar
 
             # 挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            bar_parent = TabManagerWindow.get_instance() or self.window()
+            _host = _caps("window.host")
+            bar_parent = (_host() if _host else None) or self.window()
             InfoBar.warning(
                 title="URL 格式不正确", content="请输入有效的网页链接（如 https://example.com）", parent=bar_parent
             )

@@ -40,7 +40,8 @@ def capture_client(monkeypatch):
 
     def _fake_create(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(choices=[], usage=None)
+        # 流式发起：返回可迭代的空流（本测试只断言序列化结果，不关心响应内容）
+        return iter([])
 
     client = MagicMock()
     client.chat.completions.create.side_effect = _fake_create

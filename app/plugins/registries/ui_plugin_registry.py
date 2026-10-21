@@ -27,6 +27,83 @@ from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 能力池：按插件名构建 / 投影 services
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _capabilities_for(plugin_name: str, win):
+    """按插件名构建能力池；不可用时返回 None。"""
+    if win is None:
+        return None
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        return CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=win, plugin=plugin_name
+        )
+    except Exception as e:
+        logger.warning(f"[UIPluginRegistry] 插件 {plugin_name} 能力池构建失败: {e}")
+        return None
+
+
+def _services_for(plugin_name: str, win) -> dict:
+    """按插件声明裁过的 services（能力池不可用时回落到窗口级全量投影）。
+
+    用 ``pool.legacy(key, cap_id)`` 而非 ``pool[cap_id]``：一个能力可能对应多个
+    语义不同的旧键（如 agent.read → get_agent_manager / get_agent_prompt），
+    旧键可有专属实现；权限判定仍统一走 cap_id。
+    """
+    if win is None:
+        return {}
+    pool = _capabilities_for(plugin_name, win)
+    if pool is None:
+        return win._build_ui_services() if hasattr(win, "_build_ui_services") else {}
+    try:
+        return project_services(pool)
+    except Exception as e:
+        logger.warning(f"[UIPluginRegistry] 插件 {plugin_name} services 投影失败: {e}")
+        return {}
+
+
+def project_services(pool, surface: str = "ui") -> dict:
+    """把能力池投影成旧 services 字典（唯一投影实现，主程序各处共用）。"""
+    from app.plugins.capabilities.catalog import CATALOG, LEGACY_MAP
+
+    return {
+        old: pool.legacy(old, cap)
+        for old, cap in LEGACY_MAP.items()
+        if CATALOG.get(cap) is not None
+        and surface in CATALOG[cap].surfaces
+        and cap in pool
+    }
+
+
+def callback_context(plugin_name: str, win, extra: dict) -> dict:
+    """回调类入口的上下文（输入按钮 / 侧栏项 / 标题栏 tab）。
+
+    与 ``_build_card_context`` 同源：按插件名构建能力池并投影 services，
+    避免这三条路径拿到未裁剪的全量服务面。
+    """
+    ctx = dict(extra or {})
+    ctx["plugin_name"] = plugin_name
+    if win is None:
+        return ctx
+    ctx["main_widget"] = win
+    ctx["window_id"] = getattr(win, "_window_id", None)
+    # 同 _build_card_context：登记插件 → 窗口绑定，供无 ctx 的后台调用解析 host
+    from app.plugins.capabilities.resolve import note_host
+
+    note_host(plugin_name, win)
+    pool = _capabilities_for(plugin_name, win)
+    if pool is not None:
+        ctx["capabilities"] = pool
+    ctx["services"] = _services_for(plugin_name, win)
+    return ctx
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # UI 命令快捷键持久化（user-custom/shortcuts.json）
 # ═══════════════════════════════════════════════════════════════════════════
 # Why 不走 user-custom/commands/*.md 兜底：UI 插件命令名常带冒号
@@ -561,9 +638,14 @@ class FooterStatInfo:
         stat_id: 信息项唯一 ID
         provider: 取值回调，签名 (context: dict) -> Optional[dict]。
             context 含 window_id / main_widget / role / model_name / elapsed /
-            token_usage / streaming / live_text / live_gen_s 等（见
-            MessageCard._footer_stat_context）；返回 None 表示本条消息不显示，
+            token_usage / streaming / live_text / live_gen_s / live_text_delta 等
+            （见 MessageCard._footer_stat_context）；返回 None 表示本条消息不显示，
             返回 {"text": str, "color": str(可选), "tooltip": str(可选)} 表示显示。
+
+            streaming=True 时新增 ``live_text_delta``：**上次采样以来的新增片段**
+            （``live_text`` 仍是本流累计原文，语义不变）。需要按拍算吞吐/token 的
+            provider 应消费 delta 做增量累加，避免每拍对整段（可达数万字）重新
+            编码 —— 耗时随流式长度线性增长。老 provider 不消费 delta 也完全兼容。
         priority: 优先级（同 stat_id 时高者覆盖低者；显示顺序同值按注册序）
         metadata: 附加元数据
     """
@@ -2623,16 +2705,7 @@ class UIPluginRegistry:
         if info is None or getattr(info, "on_click", None) is None or win is None:
             return
         try:
-            builder = getattr(win, "_build_ui_services", None)
-            info.on_click(
-                {
-                    "button_id": info.button_id,
-                    "plugin_name": info.plugin_name,
-                    "window_id": getattr(win, "_window_id", None),
-                    "main_widget": win,
-                    "services": builder() if callable(builder) else {},
-                }
-            )
+            info.on_click(callback_context(info.plugin_name, win, {"button_id": info.button_id}))
         except Exception as e:
             logger.warning(f"[UIPluginRegistry] 输入按钮 {button_id} 命令派发失败: {e}")
 
@@ -2660,14 +2733,7 @@ class UIPluginRegistry:
         if info is None or getattr(info, "on_click", None) is None or win is None:
             return
         try:
-            info.on_click(
-                {
-                    "item_id": info.item_id,
-                    "plugin_name": info.plugin_name,
-                    "window_id": getattr(win, "_window_id", None),
-                    "main_widget": win,
-                }
-            )
+            info.on_click(callback_context(info.plugin_name, win, {"item_id": info.item_id}))
         except Exception as e:
             logger.warning(f"[UIPluginRegistry] 侧边栏项 {item_id} 命令派发失败: {e}")
 
@@ -3491,6 +3557,22 @@ class UIPluginRegistry:
             return frozenset()
         return frozenset(decl.slot_id for decl in UI_SLOT_DECLS.values() if decl.has_plugin(self, plugin_name))
 
+    def refresh_sidebar_launcher(self) -> None:
+        """刷新侧栏插件启动器与标题栏 tab（插件启用/禁用/装卸后调用）。
+
+        公开入口，替代插件直接调 ``TabManagerWindow._update_shared_launcher()``。
+        窗口未就绪时静默跳过（与旧的 get_instance() is None 语义一致）。
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is None:
+                return
+            tm._update_shared_launcher()
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 刷新侧栏启动器失败: {e}")
+
     @_serialized
     def unload_plugin(self, plugin_name: str) -> bool:
         """卸载插件 UI，清理所有该插件的注册
@@ -3638,6 +3720,14 @@ class UIPluginRegistry:
         from app.core.infra.ui_event_bus import UIEventBus
 
         UIEventBus.get_instance().unsubscribe_plugin(plugin_name)
+        # 能力池订阅释放：断开 stream.subscribe / window.events 建立的连接，
+        # 防止插件卸载后回调仍引用旧模块闭包（与 UIEventBus 退订同源需求）。
+        try:
+            from app.plugins.capabilities.registry import CapabilityRegistry
+
+            CapabilityRegistry.get_instance().release_plugin(plugin_name)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 释放能力订阅失败 ({plugin_name}): {e}")
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
@@ -3967,6 +4057,21 @@ class UIPluginRegistry:
         ctx.setdefault("plugin_name", card_info.plugin_name)
         ctx.setdefault("card_id", card_info.card_id)
 
+        # 能力池按插件名重建：窗口级 ctx 是共享的，声明裁剪必须在知道插件身份后做。
+        # 这里是所有浮动卡/工作台页/设置卡 ctx 的唯一出口，一处覆盖全部路径。
+        _host = ctx.get("main_widget")
+        if _host is not None:
+            # 登记插件 → 窗口绑定：后台线程（无 ctx）经 caps_for 取能力时用它解析
+            # host，否则 window.current / session.read 这类能力在后台必然拿到空。
+            from app.plugins.capabilities.resolve import note_host
+
+            note_host(card_info.plugin_name, _host)
+            _pool = _capabilities_for(card_info.plugin_name, _host)
+            if _pool is not None:
+                ctx["capabilities"] = _pool
+                if "services" in ctx:
+                    ctx["services"] = project_services(_pool)
+
         # 注入插件图标路径（供卡片在头部/标题等位置展示）
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -4066,6 +4171,12 @@ class UIPluginRegistry:
         self._context_providers.pop(window_id, None)
         self._window_main_widgets.pop(window_id, None)
         self._card_widget_instances.pop(window_id, None)
+        # 插件 → 窗口绑定里指向该窗口的条目一并清掉（后台线程会拿它解析 host）
+        from app.plugins.capabilities.resolve import _plugin_hosts, forget_host
+
+        for _plugin, _host in list(_plugin_hosts.items()):
+            if _host is self._main_widget or getattr(_host, "_window_id", None) == window_id:
+                forget_host(_plugin, _host)
         # per-tab 可见集合随窗口销毁清理；若被关闭的是当前投影标签，重置作用域
         self._tab_card_visibility.pop(window_id, None)
         if self._active_tab_scope == window_id:

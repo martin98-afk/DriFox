@@ -61,6 +61,17 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 - 用 `python -c "import json; json.load(open('.drifox-plugin/plugin.json'))"` 测 JSON
 - 重启 DriFox
 
+### ❌ 插件配置 enabled 但组件全无（工具/UI/hooks 一个都不加载）
+
+**症状**：设置里插件已启用，日志却只有一行拒载记录，所有组件静默消失。
+
+**原因**：manifest `api_version` 高于宿主门槛 `HOST_PLUGIN_API_VERSION`（`app/plugins/version_gate.py`，当前 2）。`VersionGate` 在加载前硬拦，任何组件都不进 registry。
+
+**修法**：
+- 日志特征：`[VersionGate] 插件 'x' api_version=3 高于宿主支持的 2，拒载`
+- 把 `api_version` 降到 ≤ 宿主当前值；宿主升版前不要抢先声明更高版本
+- 仓库级守卫：`tests/core/test_api_version_contract.py` 会扫全部 manifest，超标直接测试失败
+
 ### ❌ 工具注册被拒（registry 拒绝加载）
 
 **症状**：`tools/*.py` 写完不生效，日志报注册失败。

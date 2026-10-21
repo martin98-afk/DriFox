@@ -25,7 +25,16 @@ _MEANINGLESS_DESC_PATTERN = re.compile(r"^由\s*\d+\s*个活跃窗口保存")
 
 
 def _find_member_agent_name(tm, window_id: str) -> str:
-    """根据窗口 ID 查找当前成员的角色名（agent_name）。"""
+    """根据窗口 ID 查找当前成员的角色名（agent_name）。
+
+    优先走宿主 API；getattr 回退保证老测试 mock 未实现该方法时仍可用。
+    """
+    getter = getattr(tm, "get_member_agent_name", None)
+    if callable(getter):
+        try:
+            return getter(window_id) or ""
+        except Exception:
+            pass
     try:
         members = tm.get_members()
         for m in members:
@@ -67,9 +76,12 @@ def hook(event: str, context: dict) -> str:
     window_id = context.get("window_id", "") or ""
 
     try:
-        from app.core.team.team_manager import TeamManager
+        from app.plugins.sdk import caps_for
 
-        tm = TeamManager.get_instance()
+        team = caps_for("team.read")
+        if team is None:
+            return ""
+        tm = team()
         # 🛡️ M1'：按成员所属 run_id 读专属模板槽（templates_by_run_id），
         # 避免多团队并存时顶层 template 单槽被后加载团队互相覆盖
         # （症状：default-team 成员被注入别的团队描述）。

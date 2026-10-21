@@ -32,11 +32,35 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import SmoothScrollDelegate, TransparentToolButton
 
 # 复用内置 _EmptyHint / _SectionHeader（共享模块，避免重复定义）
-from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
-from app.widgets.elided_label import _ElidedLabel
+from app.plugins.sdk import EmptyHint as _EmptyHint, SectionHeader as _SectionHeader
+from app.plugins.sdk import ElidedLabel as _ElidedLabel
 
-from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
-from app.utils.utils import get_font_family_css, get_icon
+from app.plugins.sdk import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
+from app.plugins.sdk import get_font_family_css, get_icon
+
+
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
 
 
 def _relative_time(created_at: str) -> str:
@@ -327,7 +351,7 @@ class SystemArtifactsPage(QWidget):
         self._scroll.setWidget(self._list_wrap)
         # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
         # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        from app.utils.design_tokens import make_card_content_opaque
+        from app.plugins.sdk import make_card_content_opaque
 
         make_card_content_opaque(self._list_wrap, 246)
         self._list_layout = QVBoxLayout(self._list_wrap)
@@ -361,12 +385,11 @@ class SystemArtifactsPage(QWidget):
         取不到才回退 context。
         """
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            win = tm.get_current_window() if tm is not None else None
-            if win is not None and getattr(win, "backend", None) is not None:
-                return win.backend, getattr(win, "_current_session_id", None)
+            snap = _caps("window.current")
+            if snap is not None:
+                snap = snap()
+            if snap and snap.get("backend") is not None:
+                return snap["backend"], snap.get("session_id")
         except Exception:
             pass
         return self._context.get("backend"), self._context.get("session_id")

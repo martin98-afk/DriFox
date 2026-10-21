@@ -23,8 +23,8 @@ from typing import Optional, Tuple
 
 from loguru import logger
 
-from app.tools.result import ToolResult
-from app.utils.git_worktree import GitWorktreeDetector, WorktreeInfo
+from app.plugins.sdk import ToolResult
+from app.plugins.sdk import GitWorktreeDetector, WorktreeInfo
 
 # Windows 下隐藏 cmd 窗口（对齐 worktree_section._CREATION_FLAGS）
 _CREATION_FLAGS = 0

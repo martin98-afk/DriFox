@@ -112,3 +112,75 @@ class TestInferAction:
             staticmethod(lambda: type("PM", (), {"has_plugin": staticmethod(lambda n: False)})()),
         )
         assert svc._infer_plugin_changed_action("gone") == "uninstalled"
+
+
+class TestFormatToolChangesSchema:
+    """注入 hook 的 schema 获取：本地工具必须注入完整 schema，禁止误标 MCP 工具
+
+    回归背景：hook 经 caps_for 走 manifest 声明裁剪，system-hooks 一旦漏声明
+    tool.read，所有 tools_added 的 schema 都查不到，全部退化成「MCP 工具」回退文案。
+    """
+
+    @pytest.fixture()
+    def hook_module(self):
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[2] / "plugins" / "system-hooks" / "hooks" / "format_tool_changes.py"
+        spec = importlib.util.spec_from_file_location("format_tool_changes_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    @pytest.fixture()
+    def real_manifest_plugin_manager(self):
+        """PluginManager 返回 system-hooks 的真实 manifest（模拟生产声明裁剪路径）"""
+        import json
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        import app.plugins.managers.plugin_manager as pm_mod
+
+        manifest_path = (
+            Path(__file__).resolve().parents[2] / "plugins" / "system-hooks" / ".drifox-plugin" / "plugin.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        fake_info = SimpleNamespace(manifest=manifest, path=str(manifest_path.parents[1]))
+        real_get = pm_mod.PluginManager.get_instance
+        pm_mod.PluginManager.get_instance = staticmethod(
+            lambda: SimpleNamespace(get_plugin=lambda name: fake_info if name == "system-hooks" else None)
+        )
+        yield manifest
+        pm_mod.PluginManager.get_instance = staticmethod(real_get)
+
+    def test_local_tool_injects_full_schema_not_mcp_fallback(
+        self, monkeypatch, hook_module, real_manifest_plugin_manager
+    ):
+        """manifest 声明了 tool.read 时，新增本地工具必须带完整 schema 注入"""
+        from app.tools.registry import ToolRegistry
+
+        tr = ToolRegistry.get_instance()
+        probe = "___test_probe_local_tool"
+        schema = {
+            "type": "function",
+            "function": {
+                "name": probe,
+                "description": "回归探针",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        assert tr.register(name=probe, schema=schema, impl=lambda: None, danger="safe", source="plugin:test")
+        try:
+            # manifest 必须声明 tool.read（否则 hook 拿不到注册表，全部误标 MCP）
+            assert "tool.read" in real_manifest_plugin_manager.get("capabilities", []), (
+                "system-hooks manifest 必须声明 tool.read，否则工具变更注入全部误标为 MCP 工具"
+            )
+            out = hook_module.hook(
+                "PluginChanged",
+                {"action": "enabled", "plugin_name": "some-plugin", "diff": {"tools_added": [probe]}},
+            )
+            assert probe in out
+            assert "完整 schema" in out
+            assert "MCP 工具" not in out
+        finally:
+            tr.unregister(probe)

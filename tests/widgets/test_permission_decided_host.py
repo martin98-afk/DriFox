@@ -68,10 +68,18 @@ class _FakeWidget:
         self.cleared = 0
         self._hidden = False
         self.shown = False
+        self.countdown_started = []
+        self.countdown_stopped = 0
 
     def clear(self):
         self.cleared += 1
         self._hidden = True
+
+    def start_countdown(self, sec):
+        self.countdown_started.append(sec)
+
+    def stop_countdown(self):
+        self.countdown_stopped += 1
 
     def isVisible(self):
         return not self._hidden
@@ -84,6 +92,21 @@ class _FakeWidget:
         self._hidden = False
 
 
+class _FakeTimer:
+    """假 QTimer：记录 start/stop（真实 QTimer 在 __new__ 桩上会触发
+    PyQt「super-class __init__ never called」RuntimeError）"""
+
+    def __init__(self):
+        self.started = []
+        self.stopped = 0
+
+    def start(self, *a):
+        self.started.append(a)
+
+    def stop(self):
+        self.stopped += 1
+
+
 def _make_host(*, delivered=True, raise_exc=False):
     """构造只带被测方法所需属性的宿主（不跑 __init__）"""
     from app.main_widget import OpenAIChatToolWindow
@@ -94,6 +117,8 @@ def _make_host(*, delivered=True, raise_exc=False):
     host.backend = _FakeBackend(delivered=delivered, raise_exc=raise_exc)
     host._card_manager = _FakeCardManager()
     host._pending_permission_id = None
+    host._pending_permission_tool = None
+    host._permission_timeout_timer = _FakeTimer()
     host._permission_floating_widget = None
     host._question_floating_widget = None
     host._question_tool_call_id = None
@@ -348,8 +373,9 @@ def test_impact_delete_paths(monkeypatch):
     monkeypatch.setattr(sandbox_mod, "is_delete_command", lambda c: True)
     monkeypatch.setattr(
         sandbox_mod,
+        # delete_targets 签名是 (command, workdir)：相对路径按 workdir 解析
         "delete_targets",
-        lambda c: {"existing": [Path("D:/a"), Path("D:/b")], "missing": ["D:/c"]},
+        lambda c, wd=None: {"existing": [Path("D:/a"), Path("D:/b")], "missing": ["D:/c"]},
     )
     host = _make_host()
     impact = host._build_permission_impact("bash", {"command": "rm D:/a D:/b D:/c"})
@@ -459,10 +485,16 @@ def test_no_text_label_parsing_in_main_widget():
 
 
 def test_ai_state_question_contract_kept():
-    """三合一契约：_set_ai_state("question") 必须保留（Tab 动画 + 并行会话计数）"""
+    """三合一契约：_set_ai_state("question") 必须保留（Tab 动画 + 并行会话计数）
+
+    弹卡主体已抽到 `_show_permission_card`（人工/AI 回落复用），故断言入口
+    与弹卡函数两处源码——只断言入口会在重构后假红（该句不在入口里）。
+    """
     import inspect
 
     from app.main_widget import OpenAIChatToolWindow
 
-    src = inspect.getsource(OpenAIChatToolWindow._on_permission_approval_requested)
-    assert '_set_ai_state("question")' in src
+    entry_src = inspect.getsource(OpenAIChatToolWindow._on_permission_approval_requested)
+    assert "self._show_permission_card(" in entry_src  # 人工分支必须走弹卡
+    card_src = inspect.getsource(OpenAIChatToolWindow._show_permission_card)
+    assert '_set_ai_state("question")' in card_src

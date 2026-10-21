@@ -6,8 +6,7 @@
 - SandboxConfig：sandbox_config.json 的加载/保存/单例（点路径 get/set）
 - check_path / check_command / check_network：三分法判定，返回 "allow"|"confirm"|"deny"
 - sandbox_check_tool：工具名 + 参数 → 判定（worker 层唯一入口）
-- snapshot_paths_before_delete：删除类命令执行前快照
-- snapshot_paths_before_delete：删除类命令执行前快照
+- stash_delete_targets_to_trash：垃圾桶开启时，删除类命令执行前把目标移入垃圾箱
 
 本模块不弹 UI、不做 OS 级隔离；审批呈现由 chat_worker 既有弹窗链负责。
 设计文档：docs/superpowers/specs/2026-09-18-sandbox-l1-security-center-design.md
@@ -43,13 +42,20 @@ DEFAULT_CONFIG = {
     "network": {"enabled": True, "blacklist_domains": []},
     "sys_tools_bypass": False,
     "delete_protection": False,
-    "delete": {"exempt_paths": []},
+    "delete": {"exempt_paths": [], "trash_enabled": False},
     "job_limits": {"memory_mb": 2048, "active_process": 64, "cpu_time_ms": 0},
     # 0 = 不限（不自动清理），>0 = 启动期与手动清理的上限
     "backup_limit_mb": 3000,
     # gateway 平台侧权限请求是否自动放行（True=保持现状；False=遵循沙箱判定，
     # 无人值守场景可能因等不到审批而失败）
     "gateway_auto_approve": True,
+    # 审核处理：审批方式/超时/超时处理/AI 审核模型（安全中心「审核处理」组）
+    "approval": {
+        "mode": "manual",  # manual 人工审批 | ai AI审批（静默决策，失败回落人工）
+        "timeout_sec": 120,  # 人工审批等待超时秒数，0=不超时
+        "timeout_action": "deny",  # deny 拒绝 | allow 允许 | ai AI审核
+        "ai_model": "",  # 审核模型 "服务商display_name:模型名"，空=跟随主模型
+    },
 }
 
 
@@ -713,6 +719,11 @@ def sandbox_check_tool(
     command = args.get("command")
     if isinstance(command, str) and command.strip():
         verdict = check_command(command, cfg)
+        # ── 删除识别兜底升档：deep 分类器不认识的删除变体（如 .NET
+        # [IO.Directory]::Delete）在保护开启时同样强制审批；deny 优先，
+        # 豁免由下方豁免块统一判定 ──
+        if verdict != DENY and cfg.get("delete_protection") and is_delete_command(command):
+            verdict = CONFIRM
         # ── 删除保护门控（EU-G23，正解 A）──
         # `delete_protection` 关闭时，**仅取消「因删除命令而 confirm」这一层**。
         # 依据：删除类命令的 confirm 来自 CONFIRM_COMMANDS 命令名单（command_safety），
@@ -813,6 +824,13 @@ def sandbox_check_tool(
 # ============================================================
 DELETE_COMMANDS = frozenset({"rm", "del", "erase", "rd", "rmdir", "deltree", "unlink", "remove-item", "ri"})
 
+# .NET / PowerShell 侧删除 API 调用形态（词表外变体，2026-10-18 实测漏拦）：
+# [System.IO.Directory]::Delete / [IO.File]::Delete 等；方法名限定 Delete，
+# 避免误报 CreateDirectory 等同名前缀方法
+_DOTNET_DELETE_PATTERN = re.compile(
+    r"(?i)\[\s*(?:system\.)?io\.(?:directory|file)\s*\]\s*::\s*delete\b"
+)
+
 # rm/del 等常见 flag（快照时剔除）
 _DELETE_FLAGS = {"-r", "-rf", "-f", "-fr", "-d", "-rd", "-recursive", "/s", "/q", "/f"}
 
@@ -837,13 +855,24 @@ def _strip_quotes(token: str) -> str:
     return stripped
 
 
+def _extract_quoted_paths(token: str) -> list:
+    """从 $var='path' / --arg="path" 形态 token 提取引号内路径候选
+
+    PowerShell 变量赋值后再传入删除 API 的形态（如 $p='D:/x'; ...::Delete($p)）
+    无法靠命令词定位目标，靠引号内容补候选；误报方向是多拍快照，无害。
+    """
+    if "'" not in token and '"' not in token:
+        return []
+    return [p for p in re.findall(r"[\"']([^\"']{2,})[\"']", token) if not p.startswith("-")]
+
+
 def _resolve_cmd_path(item: str, workdir: Optional[Path] = None) -> Path:
     """命令内路径解析：expandvars/expanduser 后，相对路径按 workdir 补齐
 
     ⚠ 相对路径的基准是 **workdir**（bash 进程 cwd = workdir，terminal_tools
     chdir 到该目录），不是进程 cwd。实测踩坑：`rm -rf subdir`（workdir 下确有
     subdir）在快照时按进程 cwd 解析 → 目标不存在 → **静默漏拍快照**，
-    删除保护失效而不报错。delete_targets / snapshot_paths_before_delete /
+    删除保护失效而不报错。delete_targets / stash_delete_targets_to_trash /
     delete_exempt 及写目标判定全部走本函数，不得各自展开。
     """
     p = Path(os.path.expandvars(item)).expanduser()
@@ -872,8 +901,10 @@ def delete_targets(command: str, workdir: Optional[Path] = None) -> dict:
             continue
         if lowered.startswith(("-", "/")) and not _looks_like_path(raw):
             continue
-        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试
+        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试；
+        # 另提取 $var='path' 赋值形态的引号内路径（.NET Delete 变体目标）
         candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
+        candidates = candidates + _extract_quoted_paths(raw)
         for item in candidates:
             item = _strip_quotes(item)
             if not item or item.lower() in DELETE_COMMANDS or item.lower() in _DELETE_FLAGS:
@@ -938,13 +969,15 @@ def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None, workdir: Op
 
 
 def is_delete_command(command: str) -> bool:
-    """是否删除类命令（含壳命令包裹形态）
+    """是否删除类命令（含壳命令包裹形态与 .NET IO Delete 调用形态）
 
     保守判定：任一 token（含引号内内容后再拆一次）命中删除命令名即算
     （git rm / powershell -c Remove-Item 均覆盖）；误报方向是「多问一次」。
     """
     if not command:
         return False
+    if _DOTNET_DELETE_PATTERN.search(command):
+        return True
     for token in _split_tokens(command):
         inner = _strip_quotes(token)
         if inner.lower() in DELETE_COMMANDS:
@@ -957,50 +990,65 @@ def is_delete_command(command: str) -> bool:
     return False
 
 
-def snapshot_paths_before_delete(command: str, backup_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
-    """删除命令执行前，把命令中「存在」的路径快照到 backup_root，返回快照路径列表
+def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
+    """垃圾桶模式：把删除命令的目标**移动**到垃圾箱目录（软删除，可找回）
 
-    只在审批放行后调用；非删除命令返回 []。快照失败不阻断（用户已批准删除）。
-
-    ⚠ workdir 基准（2026-10-13 实测缺陷修复）：相对路径目标必须按 workdir 解析。
-    修前 `rm -rf subdir`（workdir 下确有 subdir）按进程 cwd 解析 → exists() False
-    → **静默漏拍**，用户以为有快照实际无。调用方应从 tool_executor.get_workdir()
-    显式传入；未传回退 `_current_workdir()`（多窗口时会串味，见该函数注释）。
+    move 让原路径消失，原命令随后对目标执行时目标已不在
+    （rm -f 静默成功）。单个目标移动失败不阻断（该目标由原命令正常删除）。
     """
     if not is_delete_command(command):
         return []
-    backup_root = Path(backup_root)
-    snapshots: list = []
+    targets = delete_targets(command, workdir)
+    if not targets["existing"]:
+        return []
+    trash_root = Path(trash_root)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    seen: set = set()
-    for token in _split_tokens(command):
-        raw = _strip_quotes(token)
-        lowered = raw.lower()
-        if lowered in _DELETE_FLAGS or lowered in DELETE_COMMANDS:
-            continue
-        if lowered.startswith(("-", "/")):
-            continue
-        # 引号内多词（如 powershell -c "Remove-Item x"）逐个试
-        candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
-        for item in candidates:
-            item = _strip_quotes(item)
-            if not item or item.lower() in DELETE_COMMANDS or item.lower() in _DELETE_FLAGS:
-                continue
-            if item.startswith(("-", "/")):
-                continue
-            candidate = _resolve_cmd_path(item, workdir)
-            if not candidate.exists() or str(candidate) in seen:
-                continue
-            seen.add(str(candidate))
-            try:
-                target = backup_root / f"{stamp}_{candidate.name}"
-                if candidate.is_dir():
-                    shutil.copytree(candidate, target, dirs_exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(candidate, target)
-                snapshots.append(target)
-                logger.info(f"[Sandbox] 删除前已快照: {candidate} -> {target}")
-            except Exception as e:  # noqa: BLE001 - 快照失败不阻断用户已批准的删除
-                logger.warning(f"[Sandbox] 删除前快照失败({e}): {candidate}")
-    return snapshots
+    moved: list = []
+    for target in targets["existing"]:
+        try:
+            trash_root.mkdir(parents=True, exist_ok=True)
+            dest = trash_root / f"{stamp}_{target.name}"
+            n = 1
+            while dest.exists():
+                dest = trash_root / f"{stamp}_{target.stem}_{n}{target.suffix}"
+                n += 1
+            shutil.move(str(target), str(dest))
+            moved.append(dest)
+            logger.info(f"[Sandbox] 删除目标已移入垃圾桶: {target} -> {dest}")
+        except Exception as e:  # noqa: BLE001 - 移动失败不阻断用户已批准的删除
+            logger.warning(f"[Sandbox] 移入垃圾桶失败({e}): {target}")
+    return moved
+
+
+# ============================================================
+# 审核处理配置（approval 节点归一化读取）
+# ============================================================
+
+APPROVAL_MODES = ("manual", "ai")
+APPROVAL_TIMEOUT_ACTIONS = ("deny", "allow", "ai")
+APPROVAL_TIMEOUT_MAX_SEC = 86400
+
+
+def read_approval_policy(cfg: Optional[SandboxConfig] = None) -> dict:
+    """读取并归一化审核处理配置（UI 与决策链共用；取值白名单 + 范围收窄）"""
+    node = (cfg or SandboxConfig.get_instance()).get("approval") or {}
+    if not isinstance(node, dict):
+        node = {}
+    mode = node.get("mode")
+    if mode not in APPROVAL_MODES:
+        mode = "manual"
+    action = node.get("timeout_action")
+    if action not in APPROVAL_TIMEOUT_ACTIONS:
+        action = "deny"
+    try:
+        timeout = int(node.get("timeout_sec") or 0)
+    except (TypeError, ValueError):
+        timeout = 0
+    timeout = max(0, min(timeout, APPROVAL_TIMEOUT_MAX_SEC))
+    model = node.get("ai_model")
+    return {
+        "mode": mode,
+        "timeout_sec": timeout,
+        "timeout_action": action,
+        "ai_model": model if isinstance(model, str) else "",
+    }

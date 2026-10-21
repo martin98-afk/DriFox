@@ -271,6 +271,15 @@ JUMP_SETTLE_MAX_TRIES = 40
 # 锁到期时队列还没排空，排空置底照样把视口拽走 —— 「消息数高的卡片死活跳不过去」。
 JUMP_SCROLL_LOCK_TAIL_MS = 1200
 
+# 跳转锁的**硬上限**（ms）：从最后一次续期算起，压制总时长不得超过此值。
+# 用途：异常情况下（落点收敛链卡死 / 目标卡引用永不释放）不允许无限压制，
+# 否则「回到底部」以外的自动跟底会永久失效。
+# 取值 10s = 尾巴期(1.2s) 的 8 倍多：正常跳转链（分批加载 + 懒渲染排空）实测
+# 远低于此，撞上限即说明确实异常。
+# ⚠️ 该常量原先**只被引用未定义**（重构时漏写），导致 `_is_jump_scroll_locked()`
+# 无条件抛 NameError、跳转锁判定整体失效 —— 补定义修复。
+JUMP_SCROLL_LOCK_HARD_CAP_MS = 10000
+
 # 宽度同步分帧批大小：实测 sync_width 约 1.4ms/张（setMin/MaxWidth 布局失效
 # + update_height 的 runJavaScript IPC），8 张 ≈ 11ms，低于单帧预算（16ms），
 # 保证批间让出主线程后 UI 无冻结感。
@@ -960,7 +969,11 @@ class OpenAIChatToolWindow(ToolWindow):
     skillExecutionRequested = pyqtSignal(str, dict)
     # 线程安全桥接信号：从后台线程发射，主线程槽函数自动执行
     _topic_summary_ready = pyqtSignal(object, object)
+    # AI 审核结果桥接（后台线程 → 主线程）：tool_call_id, result(dict|None), error
+    _approval_review_ready = pyqtSignal(str, object, str)
     _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
+    # [T4-4] diff 统计后台计算结果回主线程：tool_call_id, stats(dict|None)
+    _diff_stats_ready = pyqtSignal(str, object)
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
@@ -1206,8 +1219,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._gen_thread_pool = _get_gen_thread_pool()
         # 线程安全桥接：后台线程发射信号 → 主线程执行 _on_topic_summary_generated
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
+        # AI 审核结果桥接：审核任务后台线程 → 主线程落决策
+        self._approval_review_ready.connect(self._on_approval_review_ready)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
+        # [T4-4] diff 统计后台计算完成 → 主线程校验卡片存活后落数字
+        self._diff_stats_ready.connect(self._on_diff_stats_ready)
         # ★ B5：停止/关窗后台 finalize 幂等锁（防止 stop 按钮与 closeEvent 双触发双 finalize）
         self._bg_finalize_lock = threading.Lock()
         self._bg_finalize_started = False
@@ -1413,6 +1430,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._window_active = False
         # 初始化属性
         self._pending_permission_id: Optional[str] = None
+        # 审批超时定时器（人工审批等待超时 → 按 approval.timeout_action 处理）
+        self._permission_timeout_timer = QTimer(self)
+        self._permission_timeout_timer.setSingleShot(True)
+        self._permission_timeout_timer.timeout.connect(self._on_permission_timeout)
+        # 待决审批上下文（超时转 AI 审核时复用；worker 反查不可靠）
+        self._pending_permission_tool: Optional[dict] = None
         self._question_tool_call_id: Optional[str] = None
         self._current_assistant_round_index: Optional[int] = None  # 跟踪当前应分配给 assistant 的 round_index
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
@@ -4144,6 +4167,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "main_widget": self,
             "backend": self.backend,
             "services": self._build_ui_services(),
+            "capabilities": self._build_ui_capabilities(),
         }
 
     def _create_message_widget(self, role: str, content, timestamp=None, **kwargs):
@@ -10713,7 +10737,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 欢迎卡片 tab 条显式适配：CustomTabButton 的文字样式由
             # _apply_label_color 写死 font-size，apply_font_size_to_widget 的
             # setFont 覆盖不到，这里按当前 delta 重设（首次构建同路径）。
-            for _card in self.findChildren(MessageCard):
+            # [T4-2] 复用已扫好的 _message_cards，避免再跑一次全树 findChildren
+            # （字体切换热路径上整树扫描实测数十 ms）。
+            # ⚠️ 仅 is_font_family 可复用：该分支下 _message_cards 由 _all_widgets
+            # 过滤得到、非空；scope="font_size" 时它是空列表，必须回落全树扫描。
+            _welcome_cards = _message_cards if is_font_family else self.findChildren(MessageCard)
+            for _card in _welcome_cards:
                 if getattr(_card, "role", None) == "welcome" and hasattr(_card, "_apply_welcome_tabs_font"):
                     try:
                         _card._apply_welcome_tabs_font()
@@ -12228,6 +12257,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 只有占位失败的高度才需要下面的滚动值补偿
             above_removed_height = 0
             for batch_idx in range(0, active_start):
+                # 🛡️ 过期窗口防御：active_start 由视口/fallback 推算，截断等场景
+                # 下可能超出收缩后的 _batch_cards；前两处循环（懒渲染/原位重建）
+                # 均有 len 守卫，本循环此前漏保 → IndexError。列表只会前缀收缩，
+                # 首个越界即终止。
+                if batch_idx >= len(self._batch_cards):
+                    break
                 if self._batch_cards[batch_idx] is not None:
                     cards = self._batch_cards[batch_idx]
                     # 如果批次包含当前流式输出的助手卡片，跳过整个批次
@@ -12284,6 +12319,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # ── 收集下方（未来方向）需要回收的卡片 ──
             below_widgets = []
             for batch_idx in range(active_end, len(self._batch_cards)):
+                # 🛡️ 同上：range 上界在创建时求值，防执行中列表被收缩后越界
+                if batch_idx >= len(self._batch_cards):
+                    break
                 if self._batch_cards[batch_idx] is not None:
                     cards = self._batch_cards[batch_idx]
                     if cards and self._current_assistant_card in cards:
@@ -13798,6 +13836,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ==================== Batch 结构同步 ====================
 
+    def _clamp_visible_batch_window(self) -> None:
+        """把可见批次窗口夹回 _batch_cards 界内（批量结构收缩后调用）。
+
+        🐛 截断/删除 round/重新分组只同步 _message_batch 与 _batch_cards，
+        _visible_batch_start/end 残留旧大值。回收器在几何不可用时退回该窗口
+        （_resolve_viewport_range 的 fallback），推出越界 active_start →
+        above 回收循环 IndexError（2026-10-20 真机：流式期间每 500ms 崩一次，
+        几何可用的拍不崩故呈间歇性）。
+        """
+        n = len(self._batch_cards)
+        if n == 0:
+            self._visible_batch_start = 0
+            self._visible_batch_end = 0
+            return
+        if self._visible_batch_start >= n:
+            self._visible_batch_start = n - 1
+        if self._visible_batch_end > n:
+            self._visible_batch_end = n
+
     def _sync_batch_structures(self):
         """
         同步 _message_batch 与 session.messages 的当前状态。
@@ -13819,6 +13876,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
         elif new_len < len(self._batch_cards):
             self._batch_cards = self._batch_cards[:new_len]
+        # 🛡️ 结构收缩后窗口可能残留旧大值，夹回界内（见 helper 注释）
+        self._clamp_visible_batch_window()
 
     def _register_new_cards_into_batches(self) -> None:
         """把 chat_layout 中尚未登记进 _batch_cards 的卡片补齐登记。
@@ -13917,6 +13976,8 @@ class OpenAIChatToolWindow(ToolWindow):
             card._message_index = batch_idx
 
         self._batch_cards = new_batch_cards
+        # 🛡️ 重建后批次数变化，窗口夹回界内（见 _clamp_visible_batch_window）
+        self._clamp_visible_batch_window()
         # [T36 P2] 公共重建出口：卡片集合与顺序已变 → 作废节点定位缓存。
         # 一处覆盖 _delete_user_round / _remove_interject_ghost_card / 截断三条路径。
         self._bump_layout_epoch()
@@ -14212,24 +14273,40 @@ class OpenAIChatToolWindow(ToolWindow):
         # ⚠️ 只反批次、不反批内卡片（批内 user/assistant 保持原顺序）。
         # ⚠️ 只在「视口不在加载窗口顶部」时反序：向上翻历史（insert_at_top /
         # 用户已滚离底部）时用户正在看的是**旧**批次，方向必须保持原样。
+        #
+        # 🐛 反序必须**重排队列**，不能只「反序收集 + 去重追加」。
+        # 建卡路径 `_add_chat_widget` 每建一张卡就按**正序**把它 append 进
+        # `_pending_lazy_cards`（并顺手置 `_lazy_batch_timer_active`、挂 200ms
+        # 首拍）。等走到这里，本批所有卡早已在队列里 —— 原先「反序收集后按
+        # id 去重追加」的写法一张都加不进去（id 全命中 existing_ids），反序
+        # 整个成死代码：队列保持正序 FIFO，用户盯着的最底部几张排在 20+ 张
+        # 队尾，观感即「卡片从上面一张张慢慢浮现」。
+        # 现在把「本批新建的卡」按 batch_indices 顺序摘到队首，顺序才真正生效；
+        # 不在本批的卡（前几拍遗留）保持原相对顺序排在后面。
         batch_indices = list(range(batch_offset, min(batch_offset + len(batches), len(self._batch_cards))))
         if not insert_at_top and not self._user_intentionally_away_from_bottom:
             batch_indices.reverse()
-        pending_lazy_cards = []
+
+        fresh = []
+        fresh_ids = set()
         for batch_idx in batch_indices:
             cards = self._batch_cards[batch_idx]
             if cards:
                 for card in cards:
-                    if isinstance(card, MessageCard) and not getattr(card, "_lazy_rendered", False):
-                        pending_lazy_cards.append(card)
+                    if not isinstance(card, MessageCard) or getattr(card, "_lazy_rendered", False):
+                        continue
+                    cid = id(card)
+                    if cid in fresh_ids:
+                        continue
+                    fresh.append(card)
+                    fresh_ids.add(cid)
+
+        pending_lazy_cards = fresh
+        if fresh:
+            others = [c for c in self._pending_lazy_cards if id(c) not in fresh_ids]
+            self._pending_lazy_cards = fresh + others
 
         # 批量触发懒渲染，使用延迟加载减少卡顿
-        # 同一卡片可能已在队列中（如滚动回来触发的重新加载），需去重
-        existing_ids = {id(c) for c in self._pending_lazy_cards}
-        for card in pending_lazy_cards:
-            if id(card) not in existing_ids:
-                self._pending_lazy_cards.append(card)
-                existing_ids.add(id(card))
         if pending_lazy_cards and not self._lazy_batch_timer_active:
             self._lazy_batch_timer_active = True
             QTimer.singleShot(0, self._process_next_lazy_batch)
@@ -15061,7 +15138,18 @@ class OpenAIChatToolWindow(ToolWindow):
             # _finalize_worker 单次消费，deferred 再跑拿到空列表无害），
             # 确保下方 _auto_save_current_session 保存的是完整会话。
             try:
-                interrupted = self.backend.finalize_stop() if self.backend.chat_engine else []
+                # [T4-1] 主线程热路径：切会话不能有秒级同步等待。给 finalize_stop
+                # 传 400ms 总预算（历史默认 3000+1000 会让切历史会话卡 ~4s）。
+                # 拿不到中断消息也无害——deferred finalize 仍会兜底，且下方
+                # _auto_save_current_session 保存的也不会比旧行为更差。
+                from PyQt5.QtCore import QElapsedTimer as _QET
+
+                _t0 = _QET()
+                _t0.start()
+                interrupted = self.backend.finalize_stop(timeout_ms=400) if self.backend.chat_engine else []
+                _ms = _t0.elapsed()
+                if _ms >= 50:
+                    logger.info(f"[Perf][SwitchSession] finalize_stop 同步耗时 {_ms}ms（预算 400ms）")
                 if interrupted:
                     self._apply_interrupted_messages_to_session(interrupted)
                     self._session_dirty = True
@@ -16288,6 +16376,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
         elif new_len < len(self._batch_cards):
             self._batch_cards = self._batch_cards[:new_len]
+        # 🛡️ 截断后窗口残留旧大值会把回收器 fallback 推出界，夹回
+        self._clamp_visible_batch_window()
         # 重建 user 前缀和缓存
         self._build_user_prefix_cache()
 
@@ -20830,8 +20920,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._scroll_to_bottom()
 
         # 字段驱动：任何工具结果携带 diff 时实时更新差异统计（插件声明，主程序不写死工具名）
+        # [T4-4] 改走后台线程：>200KB 文件的 edit 工具完成后，同步版
+        # （get_operations_for_preview 读文件 + difflib）会让主线程单次阻塞
+        # 远超一帧预算。语义不变：仍是单 call 增量。
         if diff_val:
-            self._update_card_diff_stats_for_call(tool_call_id)
+            self._schedule_card_diff_stats_for_call(tool_call_id)
 
     def _find_latest_assistant_card(self) -> Optional[MessageCard]:
         for i in range(self.chat_layout.count() - 1, -1, -1):
@@ -21104,6 +21197,93 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
         except Exception as e:
             logger.warning(f"[DiffStats] 增量更新统计失败: {e}")
+
+    def _schedule_card_diff_stats_for_call(self, tool_call_id: str, card=None) -> None:
+        """[T4-4] 后台线程算单个工具完成的 diff 统计，避免主线程阻塞。
+
+        背景：`get_operations_for_preview` + `compute_diff_stats` 要读备份文件与
+        当前文件再跑 difflib，>200KB 文件上会突破单帧预算（16ms），流式工具
+        回填时表现为一次可见卡顿。
+
+        ⚠️ 刻意**不**复用 `_enqueue_card_diff_stats`（批量时间片队列）：那是整轮
+        覆盖语义 + 懒渲染推迟消费，会把页脚数字推迟到懒渲染排空后，单 call 的
+        实时增量语义丢失。本方法保留「每完成一个 call 就更新一次」的语义，
+        只把**计算**挪到后台线程，主线程只做卡片存活校验 + 落数字。
+
+        防线程堆积：同一 tool_call_id 有未完成的计算时直接跳过新任务（标记在
+        计算完成时清除），长任务连续跑工具不会攒出一堆线程。
+        """
+        if card is None:
+            card = getattr(self, "_current_assistant_card", None)
+        if not card or card.role != "assistant":
+            return
+        if not self.backend.file_recorder:
+            return
+        try:
+            session = self.session_manager.get_current_session()
+        except Exception:
+            return
+        if not session:
+            return
+        session_id = session.session_id
+
+        pending = getattr(self, "_pending_diff_call_ids", None)
+        if pending is None:
+            pending = set()
+            self._pending_diff_call_ids = pending
+        if tool_call_id in pending:
+            return  # 上一次还没算完，跳过（防线程堆积）
+        pending.add(tool_call_id)
+
+        recorder = self.backend.file_recorder
+
+        def _worker():
+            stats = None
+            try:
+                from app.widgets.ui_helpers import compute_diff_stats
+
+                ops = recorder.get_operations_for_preview(session_id, tool_call_id)
+                if ops:
+                    stats = compute_diff_stats(ops)
+                    # 本次涉及的文件路径用于页脚去重（同步版同款）
+                    stats["_seen_files"] = {op.get("file_path", "") for op in ops if op.get("file_path")}
+            except Exception as e:
+                logger.warning(f"[DiffStats] 后台计算差异统计失败: {e}")
+                stats = None
+            # 跨线程信号回主线程（daemon 线程无事件循环，与 _interrupt_complete 同款）
+            try:
+                self._diff_stats_ready.emit(tool_call_id, stats)
+            except RuntimeError:
+                # 窗口已销毁：清标记避免泄漏
+                pending.discard(tool_call_id)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_diff_stats_ready(self, tool_call_id: str, stats) -> None:
+        """[T4-4] 主线程槽：校验卡片仍然存活后才落 diff 数字。"""
+        pending = getattr(self, "_pending_diff_call_ids", None)
+        if pending is not None:
+            pending.discard(tool_call_id)
+        if not stats:
+            return
+        if not (stats.get("files") or stats.get("additions") or stats.get("deletions")):
+            return
+        card = getattr(self, "_current_assistant_card", None)
+        if not card or card.role != "assistant":
+            return
+        try:
+            # 卡片存活校验：sip 包装对象被 C++ 侧销毁后访问会 RuntimeError
+            if not sip.isdeleted(card):
+                card.add_diff_stats(
+                    files_count=stats.get("files", 0),
+                    additions=stats.get("additions", 0),
+                    deletions=stats.get("deletions", 0),
+                    seen_files=stats.get("_seen_files") or set(),
+                )
+        except RuntimeError:
+            pass
+        except Exception as e:
+            logger.warning(f"[DiffStats] 应用后台统计失败: {e}")
 
     def _update_card_diff_stats(self, card=None):
         """计算助手卡片的文件修改统计并更新到页脚
@@ -22062,7 +22242,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if verdict in ("confirm", "deny"):
                 return "sandbox", "⚠ 安全中心拦截"
             if command and is_delete_command(command):
-                return "delete", "🗑 删除保护"
+                return "delete", "🗑 删除审批"
         except Exception as e:  # noqa: BLE001 - 判定失败回落策略来源
             logger.debug(f"[Permission] 来源判定失败({tool_name}): {e}")
         return "policy", "🔒 工具权限策略"
@@ -22141,6 +22321,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         tool_call_id = self._pending_permission_id
         self._pending_permission_id = None
+        self._pending_permission_tool = None
+        self._permission_timeout_timer.stop()
         self._dismiss_permission_card()
         if not tool_call_id:
             # 无待决 id：可能是重复信号/已过期，按 deny 语义处理（不静默 allow）
@@ -22186,6 +22368,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         tool_call_id = self._pending_permission_id
         self._pending_permission_id = None
+        self._pending_permission_tool = None
+        self._permission_timeout_timer.stop()
         self._dismiss_permission_card()
         if tool_call_id:
             try:
@@ -22228,6 +22412,8 @@ class OpenAIChatToolWindow(ToolWindow):
             and self._permission_floating_widget.isVisible()
         ):
             self._pending_permission_id = None
+            self._pending_permission_tool = None
+            self._permission_timeout_timer.stop()
             if getattr(self, "_permission_floating_widget", None) is not None:
                 self._permission_floating_widget.clear()
             changed = True
@@ -22240,36 +22426,68 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         if getattr(self, "_is_destroyed", False):
             return
+        from app.tools.sandbox import read_approval_policy
+
+        policy = read_approval_policy()
+        workdir = self._current_permission_workdir()
+        if policy["mode"] == "ai":
+            # 静默 AI 审批：不弹卡。仍须登记待决 id——回调防回放守卫、
+            # 取消/流结束清理路径都依赖它，缺失会让审核结果被静默丢弃（卡死）
+            self._pending_permission_id = tool_call_id
+            self._pending_permission_tool = {
+                "tool_name": tool_name,
+                "arguments": dict(arguments or {}),
+                "workdir": workdir,
+            }
+            self._start_approval_review(tool_call_id, tool_name, arguments, policy, workdir)
+            return
+        self._show_permission_card(tool_call_id, tool_name, arguments, workdir)
+        self._start_permission_countdown(policy)
+
+    def _start_permission_countdown(self, policy: dict) -> None:
+        """人工审批超时：起终局定时器 + 卡片倒计时徽标（timeout_sec=0 两者都不起）"""
+        timeout_sec = int(policy.get("timeout_sec") or 0)
+        if timeout_sec <= 0:
+            return
+        self._permission_timeout_timer.start(timeout_sec * 1000)
+        widget = getattr(self, "_permission_floating_widget", None)
+        if widget is not None:
+            widget.start_countdown(timeout_sec)
+
+    def _current_permission_workdir(self) -> str:
+        """审批链 workdir 基准：与 worker 判定同源优先（多窗口防串味）"""
+        try:
+            wd = self.backend.tool_executor.get_workdir() if self.backend and self.backend.tool_executor else None
+            if wd:
+                return str(wd)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] workdir 读取失败: {e}")
+        try:
+            from app.tools.sandbox import _current_workdir
+
+            return str(_current_workdir())
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] workdir 回退读取失败: {e}")
+            return ""
+
+    def _show_permission_card(self, tool_call_id: str, tool_name: str, arguments: dict, workdir: str, extra_note: str = ""):
+        """弹出人工审批卡（原 _on_permission_approval_requested 主体，UI 分流后复用）"""
         self._ensure_permission_approval_widget()
         # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态。
         # ⚠ 三合一契约（勿删勿改语义）：① TabPanel 边框 question 动画
         self._set_ai_state("question")
         # 宿主自持待决 id（要求 1）：决策到达时不再从 worker 反查
         self._pending_permission_id = tool_call_id
+        # 供超时转 AI 审核复用（worker 反查不可靠）
+        self._pending_permission_tool = {"tool_name": tool_name, "arguments": dict(arguments or {}), "workdir": workdir}
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看审批
         self._set_bottom_input_visible(False)
         # 多 Tab 场景下切走窗口也能知道本窗口在等审批
         self._notify_if_inactive("需要授权", f"工具 {tool_name} 等待你的确认")
 
-        # workdir 先取：沙箱来源判定与删除目标解析都要用它做相对路径基准
-        # 优先 backend.tool_executor.get_workdir()（与 worker 侧判定同源）；
-        # 取不到时回退 _current_workdir()（全局单例，多窗口可能串味）
-        workdir = ""
-        try:
-            wd = self.backend.tool_executor.get_workdir() if self.backend and self.backend.tool_executor else None
-            if wd:
-                workdir = str(wd)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Permission] workdir 读取失败: {e}")
-        if not workdir:
-            try:
-                from app.tools.sandbox import _current_workdir
-
-                workdir = str(_current_workdir())
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"[Permission] workdir 回退读取失败: {e}")
-
         source, source_text = self._classify_permission_source(tool_name, arguments, workdir=workdir or None)
+        # extra_note（AI 审核失败原因）不再拼进来源文案：混排后用户看不到
+        # 「背后刚发生过一次失败」，改为独立高亮行（卡片 _build_review_note）
         risk = self._grade_permission_risk(tool_name, arguments, source)
         impact = self._build_permission_impact(tool_name, arguments, workdir=workdir or None)
 
@@ -22290,12 +22508,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     "tool_call_id": tool_call_id,
                     "arguments": arguments or {},
                 },
+                review_note=extra_note,
             )
         except Exception as e:
             widget.setUpdatesEnabled(True)
             logger.error(f"[Permission] Approval error: {e}")
             self.backend.deny_tool_permission(tool_call_id)
             self._pending_permission_id = None
+            self._pending_permission_tool = None
             # 缺陷 1：异常分支必须同时恢复输入区与卡片层，
             # 否则构建审批卡抛异常会导致输入区永久隐藏
             self._set_bottom_input_visible(True)
@@ -22312,6 +22532,183 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🛡️ 同 _on_question_asked 的安全网：延迟重试展开容器（绕过拖拽检查）
         QTimer.singleShot(200, self._bottom_card_container._do_expand)
+
+    # ══════════════════ AI 审核 / 审批超时 ══════════════════
+
+    def _start_approval_review(self, tool_call_id: str, tool_name: str, arguments: dict, policy: dict, workdir: str):
+        """发起 AI 审核；模型不可用直接回落人工"""
+        llm_config = None
+        saved = policy.get("ai_model") or ""
+        if saved:
+            llm_config = self._resolve_subagent_model_config(saved, show_error=False)
+        if llm_config is None:
+            try:
+                llm_config = self._get_current_model_config()
+            except Exception:  # noqa: BLE001
+                llm_config = None
+        if not llm_config:
+            self._fallback_manual_after_review_fail(tool_call_id, tool_name, arguments, workdir, "未配置可用模型")
+            return
+
+        from app.core.workers.approval_review import APPROVAL_REVIEW_TIMEOUT_SEC, ApprovalReviewTask
+
+        def _bridge(result, error=None):
+            if getattr(self, "_is_destroyed", False):
+                return
+            try:
+                self._approval_review_ready.emit(tool_call_id, result, error or "")
+            except RuntimeError:
+                pass
+
+        impact = self._build_permission_impact(tool_name, arguments, workdir=workdir or None)
+        # 审核上下文（用户目标 + 本轮轨迹）：从当前 worker 取，取不到为 None（prompt 退回原形态）
+        approval_context = None
+        try:
+            worker = self.backend.get_current_worker() if self.backend else None
+            if worker is not None:
+                approval_context = getattr(worker, "_approval_context", None)
+        except Exception as e:  # noqa: BLE001 - 上下文是增强项，失败不阻断审核
+            logger.debug(f"[Permission] 审核上下文读取失败: {e}")
+        task = ApprovalReviewTask(
+            tool_name=tool_name,
+            arguments=arguments,
+            workdir=workdir,
+            llm_config=llm_config,
+            callback=_bridge,
+            impact=impact,
+            timeout=APPROVAL_REVIEW_TIMEOUT_SEC,
+            context=approval_context,
+        )
+        self._gen_thread_pool.start(task)
+        logger.info(f"[Permission] AI 审核已发起 id={tool_call_id} tool={tool_name}")
+        self._notify_ai_review_started(tool_name)
+
+    def _notify_ai_review_started(self, tool_name: str) -> None:
+        try:
+            parent = TabManagerWindow.get_instance() or self.window()
+        except Exception:  # noqa: BLE001
+            parent = None
+        try:
+            InfoBar.info(
+                "AI 审核中",
+                f"工具 {tool_name} 正由审核模型判定，最长约 1 分钟；超时或失败将自动回落人工审批。",
+                duration=8000,
+                parent=parent,
+                position=InfoBarPosition.BOTTOM,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] AI 审核提示失败: {e}")
+
+    def _on_approval_review_ready(self, tool_call_id: str, result, error: str):
+        """AI 审核结果落点：id 未变才生效；失败回落人工弹卡"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if self._pending_permission_id != tool_call_id:
+            logger.info(
+                f"[Permission] AI 审核结果丢弃（待决 id 已变: 现存={self._pending_permission_id}, 到达={tool_call_id}）"
+            )
+            return  # 人工已决策 / 已取消 / 流已结束 → 丢弃
+        if error or not isinstance(result, dict) or result.get("decision") not in ("allow", "deny"):
+            logger.warning(f"[Permission] AI 审核失败 id={tool_call_id}: {error}")
+            tool = self._pending_permission_tool or {}
+            self._fallback_manual_after_review_fail(
+                tool_call_id,
+                str(tool.get("tool_name") or ""),
+                dict(tool.get("arguments") or {}),
+                str(tool.get("workdir") or ""),
+                error or "审核结果无效",
+            )
+            return
+        decision = result["decision"]
+        reason = str(result.get("reason") or "")
+        logger.info(f"[Permission] AI 审核完成 id={tool_call_id} decision={decision} reason={reason}")
+        self._pending_permission_id = None
+        self._pending_permission_tool = None
+        self._permission_timeout_timer.stop()
+        self._dismiss_permission_card()
+        delivered = False
+        try:
+            delivered = bool(self.backend.decide_tool_permission(tool_call_id, decision, "", reason))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[Permission] AI 决策回传异常 id={tool_call_id}: {e}")
+        if not delivered:
+            self._notify_permission_decision_lost(tool_call_id, decision)
+        self._notify_ai_review_result(decision, reason)
+        self._restore_after_permission_close()
+
+    def _notify_ai_review_result(self, decision: str, reason: str) -> None:
+        try:
+            parent = TabManagerWindow.get_instance() or self.window()
+        except Exception:  # noqa: BLE001
+            parent = None
+        try:
+            if decision == "allow":
+                InfoBar.success(
+                    "AI 审核放行",
+                    reason or "审核模型判定可以放行。",
+                    duration=4000,
+                    parent=parent,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            else:
+                InfoBar.warning(
+                    "AI 审核拒绝",
+                    reason or "审核模型判定不予放行。",
+                    duration=5000,
+                    parent=parent,
+                    position=InfoBarPosition.BOTTOM,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Permission] AI 审核结果提示失败: {e}")
+
+    def _fallback_manual_after_review_fail(self, tool_call_id: str, tool_name: str, arguments: dict, workdir: str, note: str):
+        """AI 审核失败兜底：回落人工审批弹卡（附失败原因）"""
+        if self._pending_permission_id != tool_call_id:
+            return
+        logger.info(f"[Permission] AI 审核失败回落人工 id={tool_call_id}: {note}")
+        from app.tools.sandbox import read_approval_policy
+
+        policy = read_approval_policy()
+        self._show_permission_card(tool_call_id, tool_name, arguments, workdir, extra_note=f"AI 审核失败：{note}，请人工决策")
+        self._start_permission_countdown(policy)
+
+    def _on_permission_timeout(self):
+        """人工审批超时：按 approval.timeout_action 落决策 / 转 AI 审核"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        tool_call_id = self._pending_permission_id
+        if not tool_call_id:
+            return
+        from app.tools.sandbox import read_approval_policy
+
+        policy = read_approval_policy()
+        action = policy["timeout_action"]
+        logger.info(f"[Permission] 审批超时 → {action} id={tool_call_id}")
+        if action == "ai":
+            # 卡保持弹出，人工仍可抢先生效；AI 结果回来时 id 已变则丢弃
+            # 倒计时徽标先收：终局已到，转 AI 审核期间不该继续倒数
+            widget = getattr(self, "_permission_floating_widget", None)
+            if widget is not None:
+                widget.stop_countdown()
+            tool = self._pending_permission_tool or {}
+            self._start_approval_review(
+                tool_call_id,
+                str(tool.get("tool_name") or ""),
+                dict(tool.get("arguments") or {}),
+                policy,
+                str(tool.get("workdir") or self._current_permission_workdir()),
+            )
+            return
+        decision = action  # deny / allow
+        reason = "人工审批超时，按配置自动" + ("允许" if decision == "allow" else "拒绝")
+        self._pending_permission_id = None
+        self._pending_permission_tool = None
+        self._dismiss_permission_card()
+        try:
+            self.backend.decide_tool_permission(tool_call_id, decision, "", reason)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[Permission] 超时决策回传异常 id={tool_call_id}: {e}")
+        self._restore_after_permission_close()
 
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
@@ -24907,146 +25304,71 @@ class OpenAIChatToolWindow(ToolWindow):
     #  UI 插件对话服务（插件式对话引擎的服务门面）
     # ================================================================
 
+    def _build_ui_capabilities(self):
+        """构建窗口级能力池（全量；插件级裁剪由 UIPluginRegistry 按 plugin_name 重建）。
+
+        能力池是插件能力面的唯一真相（见 app/plugins/capabilities/）。窗口级 ctx
+        服务多个插件、不知道调用方身份，故这里给全量；按插件声明裁剪发生在
+        UIPluginRegistry._build_card_context / callback_context（那里有 plugin_name）。
+
+        每个窗口只建一次并缓存：_build_ui_context 里 services 走两次 + capabilities
+        一次，实测每次 ~5μs 且结果完全相同。provider 集合运行中不变（启动时注册），
+        因此无需失效逻辑；窗口销毁时缓存随实例回收。
+        """
+        cached = getattr(self, "_cap_pool_cache", None)
+        if cached is not None:
+            return cached
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        try:
+            ensure_registered("ui")
+            pool = CapabilityRegistry.get_instance().build_pool(
+                surface="ui", host=self, plugin=""
+            )
+        except Exception as e:
+            logger.warning(f"[MainWidget] 能力池构建失败: {e}")
+            from app.plugins.capabilities.pool import CapabilityPool
+
+            pool = CapabilityPool(
+                plugin="", surface="ui", host=self, declared=set(), providers={}, ungated=set()
+            )
+        self._cap_pool_cache = pool
+        return pool
+
     def _build_ui_services(self) -> Dict[str, Any]:
-        """构建 UI 插件可调用的对话服务句柄（window 级）
+        """UI 插件服务门面 —— 由能力池按 LEGACY_MAP 投影渲染。
 
-        经 _build_ui_context 的 "services" 字段注入插件浮动卡片，
-        插件（如 autoloop）据此驱动自建的 ConversationCore 执行栈，
-        无需触碰 main_widget 内部结构。
+        键集契约见 app/plugins/contracts/engine_host.py（EngineHost Protocol）。
+        实现唯一真相在 app/plugins/capabilities/providers/；本方法只做投影，
+        不得再写服务实现（新增能力去 catalog 登记 + provider 注册）。
 
-        服务键集契约见 app/plugins/contracts/engine_host.py（EngineHost Protocol），
-        新增/删改服务必须同步该契约与 tests/plugins/test_engine_host_contract.py。
-
-        get_provider_config 是插件取「任意服务商配置」的**唯一正确入口**：密钥模式下
+        get_provider_config 是插件取「任意服务商配置」的唯一正确入口：密钥模式下
         磁盘 API_KEY 为密文/空串，插件直读 app.config 会拿到不可用的 key。
         """
-        backend = self.backend
+        from app.plugins.capabilities.registry import CapabilityRegistry
+        from app.plugins.registries.ui_plugin_registry import project_services
 
-        def _agent_prompt(name: str) -> str:
-            am = backend.agent_manager if backend else None
-            if not am:
-                return ""
-            agent = am.get_agent(name)
-            return agent.prompt if agent else ""
+        try:
+            return project_services(self._build_ui_capabilities())
+        except Exception as e:
+            logger.warning(f"[MainWidget] UI services 投影失败: {e}")
+            return {}
 
-        def _tools_schema(agent_name: str) -> List[Dict]:
-            return self._build_agent_tools_schema(agent_name)
+    def _resolve_theme_snapshot(self) -> Dict[str, Any]:
+        """主题快照（theme.read 能力的实现，与 _build_ui_context 共用）。"""
+        from app.utils.design_tokens import _get_global_font, get_ui_font_size, scale_font_size
+        from app.utils.theme_manager import theme_manager
+        from qfluentwidgets import isDarkTheme
 
-        def _set_workdir(path: str):
-            if backend and backend.tool_executor and path:
-                backend.tool_executor.set_workdir(str(path))
-
-        def _get_compactor():
-            ce = backend.chat_engine if backend else None
-            return getattr(ce, "_compactor", None) if ce else None
-
-        def _conversation_stack():
-            """对话执行栈工厂（懒加载 ConversationCore/Executor 构建面）。
-
-            EP2：插件（autoloop）经此入口取执行栈，撤销对 app.core.conversation 的
-            deep import。契约见 app/plugins/contracts/conversation_stack.py。
-            """
-            from app.core.conversation.stack_factory import ConversationStackImpl
-
-            return ConversationStackImpl()
-
-        def _create_engine_session(engine_name: str, **kwargs):
-            """EP3：创建插件对话引擎会话（最通用同步驱动原语）。
-
-            契约见 app/plugins/contracts/engine_session.py。默认 hook_policy=NONE
-            （引擎决定 hook 参与——插件循环不再被动触发全局 hooks）；
-            turn() 不预设对话流程，messages/tools/callbacks 全量透传，
-            core/executor 逃生舱公开，最大化自由度。
-            """
-            from app.core.conversation.engine_session import EngineSessionImpl
-
-            return EngineSessionImpl(
-                engine_name=engine_name,
-                get_model_config=self._get_current_model_config,
-                tool_executor=backend.tool_executor if backend else None,
-                agent_manager=backend.agent_manager if backend else None,
-                backend=backend,
-                **kwargs,
-            )
-
-        def _send_to_platform(platform: Any, chat_id: str, content: str, **kwargs):
-            """向已连接通讯平台会话发送消息（cron-tasks 等插件的通知通道）。
-
-            走 GatewayService 应用级单例，不依赖插件侧 import app.gateway
-            （其 _manager_instance 由 GatewayService 持有，插件拿不到）。
-
-            Args:
-                platform: 平台标识（Platform 枚举或 "feishu"/"dingtalk" 等 str）
-                chat_id: gateway 会话 chat_id
-                content: 消息文本
-                kwargs: timeout（秒，默认 30）
-
-            Returns:
-                SendResult（success/error 可判定）。服务未就绪时返回
-                success=False 的 SendResult，不抛异常。
-            """
-            from app.core.services.gateway_service import GatewayService
-            from app.gateway.base import SendResult
-
-            try:
-                svc = GatewayService.get_instance()
-            except Exception as e:
-                return SendResult(success=False, error=f"GatewayService 不可用: {e}")
-            return svc.send_to_platform(platform, chat_id, content, **kwargs)
-
-        def _list_platform_sessions():
-            """已知 gateway 会话列表（供插件选择投递目标）。
-
-            返回 GatewaySession 列表（含 platform/chat_id/display_name）；
-            服务未就绪时返回空列表。
-            """
-            from app.core.services.gateway_service import GatewayService
-
-            try:
-                return GatewayService.get_instance().list_platform_sessions()
-            except Exception:
-                return []
-
-        def _list_platforms():
-            """已注册通讯平台及连接状态（供插件区分「没配平台」与「配了没会话」）。
-
-            返回 list[dict]：{id, enabled, connected, available, error}；
-            服务未就绪时返回空列表。
-            """
-            from app.core.services.gateway_service import GatewayService
-
-            try:
-                return GatewayService.get_instance().list_platforms()
-            except Exception:
-                return []
-
+        theme_data = theme_manager.get_current_theme()
         return {
-            "get_model_config": self._get_current_model_config,
-            "get_provider_config": self._resolve_provider_config,
-            "get_tool_executor": lambda: backend.tool_executor if backend else None,
-            "get_agent_manager": lambda: backend.agent_manager if backend else None,
-            "get_agent_prompt": _agent_prompt,
-            "get_tools_schema": _tools_schema,
-            "set_workdir": _set_workdir,
-            "get_workdir": lambda: self._resolve_project_workdir() or "",
-            "get_compactor": _get_compactor,
-            "conversation_stack": _conversation_stack,
-            "create_engine_session": _create_engine_session,
-            "save_messages_to_session": self._save_messages_to_session,
-            "enter_exclusive_ui_mode": self.enter_exclusive_ui_mode,
-            "exit_exclusive_ui_mode": self.exit_exclusive_ui_mode,
-            "hide_card": lambda card_id: self._card_manager.hide_card(card_id, self._window_id),
-            "sync_working_directory": self._sync_working_directory,
-            "notify": lambda title, message: InfoBar.success(
-                title,
-                message,
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=5000,
-                position=InfoBarPosition.BOTTOM,
-            ),
-            "send_to_platform": _send_to_platform,
-            "list_platform_sessions": _list_platform_sessions,
-            "list_platforms": _list_platforms,
+            "theme_id": theme_manager.get_current_theme_id(),
+            "theme_name": theme_data.get("name", "") if theme_data else "",
+            "is_dark": isDarkTheme(),
+            "font_family": _get_global_font(),
+            "font_size": scale_font_size(get_ui_font_size()),
+            "colors": theme_manager.get_current_colors(),
         }
 
     def _build_agent_tools_schema(self, agent_name: str) -> List[Dict]:

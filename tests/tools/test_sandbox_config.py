@@ -40,5 +40,5 @@ def test_default_config_has_no_extra_top_keys():
     assert set(DEFAULT_CONFIG) == {
         "sandbox_enabled", "path", "command", "network",
         "sys_tools_bypass", "delete_protection", "delete", "job_limits", "backup_limit_mb",
-        "gateway_auto_approve",
+        "gateway_auto_approve", "approval",
     }

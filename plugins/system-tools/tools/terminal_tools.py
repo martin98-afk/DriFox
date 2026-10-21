@@ -23,14 +23,14 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from app.tools.command_safety import classify_command, needs_shell, run_safe, run_with_shell
+from app.plugins.sdk import classify_command, needs_shell, run_safe, run_with_shell
 from app.tools.bg_manager import (
     BackgroundTaskManager,
     _prepare_windows_encoding,
     _smart_decode,
     create_quota_job,
 )
-from app.tools.result import ToolResult
+from app.plugins.sdk import ToolResult
 
 # ============================================================
 # bash 输出压缩模块（同目录 _shell_compressor.py，下划线前缀 → loader 跳过）
@@ -146,10 +146,10 @@ def _fix_findstr_pipe(command: str) -> str:
     parts = pattern.split("|")
 
     # cmd.exe 中双引号内 " 需要写成 "" ，重建 /c:"..." 时做转义
-    def _cmd_escape(s: str) -> str:
+    def _cmd_html_escape(s: str) -> str:
         return s.replace('"', '""')
 
-    rebuilt = prefix.rstrip() + " " + " ".join(f'/c:"{_cmd_escape(p)}"' for p in parts) + suffix
+    rebuilt = prefix.rstrip() + " " + " ".join(f'/c:"{_cmd_html_escape(p)}"' for p in parts) + suffix
     logger.debug(f"[Bash] findstr pipe fix: {command[:80]}... → {rebuilt[:80]}...")
     return rebuilt
 
@@ -680,17 +680,13 @@ _BG_LIST_SCHEMA = {
 
 def _render_bash_body(result, tool_name, tool_args, success):
     """bash 完成框渲染闭包：终端风格（命令头 + 输出体，从主程序 render_helpers 迁出）"""
-    from app.widgets.render_helpers import (
-        _get_global_font,
-        escape,
-        scale_font_size,
-    )
+    from app.plugins.sdk import global_font_family, html_escape, scale_font_size
 
-    _gf = _get_global_font()
+    _gf = global_font_family()
     raw = getattr(result, "content", "") or ""
     tool_args = tool_args or {}
     cmd = tool_args.get("command", "")
-    cmd_display = escape(cmd[:120]) if cmd else "(no command)"
+    cmd_display = html_escape(cmd[:120]) if cmd else "(no command)"
     # 配色一律走主程序暴露的主题令牌（--panel-soft / --text / --border ...），
     # 不写死颜色、也不往主程序塞工具专属 CSS —— 换主题自动跟随。
     return f"""
@@ -698,24 +694,20 @@ def _render_bash_body(result, tool_name, tool_args, success):
         <div style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--text-secondary);word-break:break-word;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;">
             <span style="color:var(--text-muted);">$</span> <span style="color:var(--text);">{cmd_display}</span>
         </div>
-        <pre style="margin:0;padding:10px 12px;background:transparent;color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;">{escape(raw)}</pre>
+        <pre style="margin:0;padding:10px 12px;background:transparent;color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;">{html_escape(raw)}</pre>
     </div>"""
 
 
 def _render_bg_body(result, tool_name, tool_args, success):
     """bg_start/bg_stop/bg_logs 完成框渲染闭包：终端风格（任务标识头 + 状态体）"""
-    from app.widgets.render_helpers import (
-        _get_global_font,
-        escape,
-        scale_font_size,
-    )
+    from app.plugins.sdk import global_font_family, html_escape, scale_font_size
 
-    _gf = _get_global_font()
+    _gf = global_font_family()
     raw = getattr(result, "content", "") or ""
     tool_args = tool_args or {}
     if tool_name == "bg_start":
         cmd = tool_args.get("command", "")
-        header = f"bg_start command={escape(cmd[:120])}" if cmd else "bg_start"
+        header = f"bg_start command={html_escape(cmd[:120])}" if cmd else "bg_start"
     elif tool_name == "bg_stop":
         task_id = tool_args.get("task_id", "")
         header = f"bg_stop task_id={task_id}" if task_id else "bg_stop"
@@ -728,9 +720,9 @@ def _render_bg_body(result, tool_name, tool_args, success):
     return f"""
     <div style="background:var(--panel-soft);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:0;">
         <div style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--text-secondary);word-break:break-word;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;">
-            <span style="color:var(--text-muted);">$</span> <span style="color:var(--text);">{escape(header)}</span>
+            <span style="color:var(--text-muted);">$</span> <span style="color:var(--text);">{html_escape(header)}</span>
         </div>
-        <pre style="margin:0;padding:10px 12px;background:transparent;color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;">{escape(raw)}</pre>
+        <pre style="margin:0;padding:10px 12px;background:transparent;color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;">{html_escape(raw)}</pre>
     </div>"""
 
 

@@ -105,6 +105,18 @@ def test_profile_aggregates_extra_headers(fresh_provider_registry):
 from app.core.workers.chat_worker import OpenAIChatWorker as ChatWorker  # noqa: E402
 
 
+def _headers_from_profile(profile: dict, session_id: str = "") -> dict:
+    """按 profile 复现 resolve_extra_headers 的合并语义（测试 stub 用）。"""
+    headers: dict = {}
+    extra = profile.get("extra_headers")
+    if isinstance(extra, dict):
+        for name, value in extra.items():
+            headers[str(name)] = str(value) if callable(value) is False else str(value({}))
+    if session_id and profile.get("session_header"):
+        headers[str(profile["session_header"])] = session_id
+    return headers
+
+
 class _StubWorker:
     """只挂被测方法的轻量 stub（绕开 QThread 实例化）"""
 
@@ -117,11 +129,12 @@ class _StubWorker:
 
 @pytest.fixture()
 def patched_profile(monkeypatch):
-    """替换 chat_worker 模块内的 get_provider_profile 引用，隔离全局 registry"""
+    """替换 provider_profile 模块内的 resolve_extra_headers 引用，隔离全局 registry"""
 
     def _install(profile):
         monkeypatch.setattr(
-            "app.core.workers.chat_worker.get_provider_profile", lambda cfg: profile
+            "app.core.workers.chat_worker.resolve_extra_headers",
+            lambda cfg, session_id="": _headers_from_profile(profile, session_id),
         )
         return _StubWorker
 

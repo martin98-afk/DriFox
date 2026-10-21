@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 import orjson
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
@@ -24,8 +24,7 @@ from app.core.modelmeta.model_capabilities import (
     resolve_max_output_tokens,
     resolve_model_capabilities,
 )
-from app.core.conversation.message_content import extract_reasoning_delta
-from app.core.modelmeta.provider_profile import get_provider_profile
+from app.core.modelmeta.provider_profile import get_provider_profile, resolve_extra_headers
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.tools.result import ToolResult
@@ -620,8 +619,10 @@ class SubAgentExecutor(QThread):
             # 再 extend hook_messages（role="user" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
             current_messages.extend(tool_results)
             current_messages.extend(hook_messages)
-            QCoreApplication.processEvents()
-            time.sleep(0.2)
+            # [T4-3] 已删除 `QCoreApplication.processEvents()` 与 `time.sleep(0.2)`：
+            # 本循环运行在子智能体的 QThread 子线程里，子线程没有 Qt 事件循环，
+            # processEvents() 是纯空转；sleep 只阻塞子线程自己，对主线程无任何
+            # 让出效果，却让每轮工具循环多花 200ms。勿回加。
 
         # 【修复】将 reasoning_content 以 <think> 标签嵌入结果文本，
         # 前端 _inject_think_cards 会自动渲染为可折叠思考块
@@ -977,7 +978,7 @@ class SubAgentExecutor(QThread):
 
 
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
-        """调用 LLM API（非流式，子智能体后台执行无需流式输出）"""
+        """调用 LLM API（流式发起 + 聚合，子智能体后台执行无需逐字渲染）"""
         # 使用传入的 llm_config 或回退到 self.llm_config
         config = llm_config if llm_config is not None else self.llm_config
         # 防御：确保 config 是 dict（传递给子智能体的配置可能被意外覆盖为字符串）
@@ -1099,6 +1100,19 @@ class SubAgentExecutor(QThread):
         if extra_body:
             req_kwargs["extra_body"] = extra_body
 
+        # 服务商插件声明的请求头（伪装 UA / X-Product / 动态 access_token）必须注入，
+        # 否则仅流式端点（CodeBuddy）在身份校验阶段即被拒。与 chat_worker 同源走
+        # provider_profile.resolve_extra_headers，避免两份实现漂移。
+        provider_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
+        if provider_headers:
+            req_kwargs["extra_headers"] = provider_headers
+
+        # 固定流式发起：部分服务商端点（如 CodeBuddy）非流式请求直接 400
+        # （code 11101 "Non-stream chat request is currently not supported"），
+        # 且该错误确定性不可重试。子智能体在后台执行、无需逐字渲染，故流式
+        # 发起后在 _aggregate_stream 内聚合为完整结果（含 tool_calls / reasoning）。
+        req_kwargs["stream"] = True
+
         from app.utils.http_client import build_openai_client
 
         client = build_openai_client(
@@ -1123,54 +1137,112 @@ class SubAgentExecutor(QThread):
         def create_completion():
             return client.chat.completions.create(**req_kwargs, tools=tools)
 
-        response = create_api_call_with_retry(
+        stream = create_api_call_with_retry(
             client,
             create_completion,
             cancel_check=lambda: self._is_cancelled,
         )
 
-        # 防御性检查：某些模型可能返回空 choices
-        if not response.choices:
-            logger.warning("[SubAgentWorker] API 返回空 choices，跳过工具执行")
-            return "", [], ""
+        return self._aggregate_stream(stream)
 
-        # 非流式：直接读取响应
-        message = response.choices[0].message
-        response_content = self._filter_thinking_content(message.content or "")
-        reasoning_content = extract_reasoning_delta(message)
+    def _aggregate_stream(self, stream) -> tuple:
+        """聚合 chat/completions 流式响应 → (content, tool_calls, reasoning)。
 
-        # 提取工具调用
-        tool_calls_found = []
-        if message.tool_calls:
-            for tc in message.tool_calls:
-                tool_calls_found.append(
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,  # 已是 JSON 字符串
-                        },
-                    }
-                )
+        与 `http_client.chat_completion_text` 的区别：该函数只聚合 content，
+        子智能体循环依赖工具调用（以及 DeepSeek 系的 reasoning_content），
+        故在此单独实现并按内部 tool_calls 结构还原。
 
-        # 追踪 token 用量
-        try:
-            usage = response.usage
+        tool_calls 分片规则（OpenAI SDK）：首片带 id + name（arguments 可能为空），
+        后续片仅 index + arguments 增量。按 index 聚合后一次性输出完整参数串，
+        与上游非流式 message.tool_calls 的形状一致。
+
+        usage：部分模型只在流末尾独立 chunk 携带（choices 为空列表），单独记账。
+
+        取消：迭代中检测到 _is_cancelled 即中断，抛 CancelledError 由上层收尾。
+        """
+        content_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        # index -> {"id","name","args"}（保序，按 index 而非 id 聚合：部分网关
+        # 只在首片给 id，后续片 id 为空）
+        tool_buffers: Dict[int, Dict[str, str]] = {}
+
+        for chunk in stream:
+            if self._is_cancelled:
+                logger.info("[SubAgentWorker] 流式聚合被取消")
+                raise RuntimeError("cancelled")
+
+            choices = getattr(chunk, "choices", None) or []
+            usage = getattr(chunk, "usage", None)
+            if not choices:
+                if usage:
+                    self._record_usage(usage)
+                continue
+
+            choice = choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta is not None:
+                piece = getattr(delta, "content", None)
+                if piece:
+                    content_parts.append(piece)
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    tc_index = getattr(tc, "index", None)
+                    index = int(tc_index) if isinstance(tc_index, int) else -1
+                    if index == -1:
+                        index = len(tool_buffers)
+                    buf = tool_buffers.setdefault(index, {"id": "", "name": "", "args": ""})
+                    tc_id = getattr(tc, "id", "") or ""
+                    if tc_id:
+                        buf["id"] = tc_id
+                    func = getattr(tc, "function", None)
+                    if func is not None:
+                        name = getattr(func, "name", "") or ""
+                        if name:
+                            buf["name"] = name
+                        args = getattr(func, "arguments", "") or ""
+                        if args:
+                            buf["args"] += args
+
             if usage:
-                pt = getattr(usage, "prompt_tokens", 0) or 0
-                ct = getattr(usage, "completion_tokens", 0) or 0
-                tt = getattr(usage, "total_tokens", 0) or 0
-                self._total_prompt_tokens += pt
-                self._total_completion_tokens += ct
-                self._total_tokens += tt
-                if tt > self._peak_total_tokens:
-                    self._peak_total_tokens = tt
-                self.token_usage_updated.emit(self.task_id, pt, ct, tt)
-        except Exception:
-            pass
+                self._record_usage(usage)
+
+        response_content = self._filter_thinking_content("".join(content_parts))
+        reasoning_content = "".join(reasoning_parts)
+
+        tool_calls_found = []
+        for buf in tool_buffers.values():
+            if not buf["name"]:
+                continue
+            tool_calls_found.append(
+                {
+                    "id": buf["id"] or f"subagent_{len(tool_calls_found)}",
+                    "type": "function",
+                    "function": {"name": buf["name"], "arguments": buf["args"]},
+                }
+            )
+
+        if not content_parts and not tool_calls_found:
+            logger.warning("[SubAgentWorker] 流式响应未产出内容或工具调用")
 
         return response_content, tool_calls_found, reasoning_content
+
+    def _record_usage(self, usage) -> None:
+        """流式 usage chunk → token 用量记账与信号发射（chunk / 非流式两路共用）。"""
+        try:
+            pt = getattr(usage, "prompt_tokens", 0) or 0
+            ct = getattr(usage, "completion_tokens", 0) or 0
+            tt = getattr(usage, "total_tokens", 0) or 0
+            self._total_prompt_tokens += pt
+            self._total_completion_tokens += ct
+            self._total_tokens += tt
+            if tt > self._peak_total_tokens:
+                self._peak_total_tokens = tt
+            self.token_usage_updated.emit(self.task_id, pt, ct, tt)
+        except Exception:
+            pass
 
     # ========== Responses API（GPT-5.x 系列）==========
 
@@ -1218,6 +1290,11 @@ class SubAgentExecutor(QThread):
             "input": input_items,
             "stream": False,
         }
+        # 服务商请求头（伪装身份 / 动态 token / 会话标识）：与 chat/completions
+        # 分支同源走 resolve_extra_headers，勿在两分支重复实现
+        provider_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
+        if provider_headers:
+            kwargs["extra_headers"] = provider_headers
         if instructions:
             kwargs["instructions"] = instructions
         if tools:
@@ -1468,7 +1545,8 @@ class SubAgentExecutor(QThread):
             self._tool_call_count += 1
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
             self._add_log("tool_call", tool_name, {"args": arguments})
-            QCoreApplication.processEvents()
+            # [T4-3] 已删除 `QCoreApplication.processEvents()`：子线程无 Qt 事件
+            # 循环，该调用是纯空转。勿回加。
 
             # 工具执行也算活跃（避免 stall 检测器误杀）
             self._last_activity_time = time.time()
@@ -1504,7 +1582,8 @@ class SubAgentExecutor(QThread):
 
             self.tool_result_received.emit(self.task_id, tool_name, result_content, success)
             self._add_log("tool_result", tool_name, {"result": result_content, "success": success})
-            QCoreApplication.processEvents()
+            # [T4-3] 已删除 `QCoreApplication.processEvents()`：子线程无 Qt 事件
+            # 循环，该调用是纯空转。勿回加。
 
             # 消费 PreToolUse 队列（role="user" 消息），放入 hook_messages 而非 tool_results
             pretool_msgs = self._drain_pretool_queue()

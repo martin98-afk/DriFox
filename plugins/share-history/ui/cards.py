@@ -822,7 +822,7 @@ class ShareHistoryCard(QWidget):
         self._scroll.setWidget(self._content)
         # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
         # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        from app.utils.design_tokens import make_card_content_opaque
+        from app.plugins.sdk import make_card_content_opaque
 
         make_card_content_opaque(self._content, 246)
         root.addWidget(self._scroll, 1)

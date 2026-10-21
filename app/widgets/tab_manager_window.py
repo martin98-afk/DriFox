@@ -3496,6 +3496,20 @@ class TabManagerWindow(FramelessWindow):
         self._wb_collapsed_by_squeeze = True
         self.set_workbench_visible(False, animate=False)
 
+    @staticmethod
+    def _tab_switch_win_memory_baseline(prev_left_w: int, prev_collapsed: bool, win_mem) -> tuple | None:
+        """per-tab 宽度记忆基准（全局折叠态语义）
+
+        返回 (left_w, collapsed, snapshot) 或 None（无有效记忆，走 saved 基准）。
+        展开态：应用记忆宽（每页记住自己拖出的宽度）；
+        折叠态：保持折叠与折叠宽——记忆宽留给下次展开，切页不静默展开。
+        """
+        if win_mem and int(win_mem) > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X:
+            if prev_collapsed:
+                return int(prev_left_w), True, ("win", int(win_mem))
+            return int(win_mem), False, ("win", int(win_mem))
+        return None
+
     def _tab_switch_baseline_width(self, cur_left_w: int, collapsed: bool) -> int:
         """切页保宽的恢复基准宽
 
@@ -3558,11 +3572,14 @@ class TabManagerWindow(FramelessWindow):
                     _card_now = bool(_fn())
                 except Exception:
                     _card_now = None
-                if _card_now is not None and _card_now != bool(_snap_card) and _card_now:
+                if _card_now is not None and _card_now != bool(_snap_card):
                     logger.debug(
                         f"[TSW] restore 放弃 prev={prev_left_w} 卡片态已变 {bool(_snap_card)}->{_card_now}"
                     )
-                    return  # 目标页卡片活跃：宽度归卡片编排，不迁移旧页基准
+                    return  # 卡片态翻转（开→关同样放弃）：宽度归卡片编排落位，
+                    # 旧页基准含卡片槽总宽，迁到无卡页会把 TabPanel 拉到卡片态宽
+                    # （实测：A 开卡 460 切到 B，restore 把无卡的 B 拉到 460，
+                    # resizeEvent 自动展开 → 全局折叠态被翻转 → 来回切横跳）
         if getattr(panel, "_animating", False):
             # 切页时上一动作的宽度动画仍在跑：等动画结束再恢复（动画 200ms）
             logger.debug(f"[TSW] restore 延迟(动画中) prev={prev_left_w}")
@@ -3722,7 +3739,9 @@ class TabManagerWindow(FramelessWindow):
             return
         from app.utils.config import Settings
 
-        self._restored_sidebar_collapsed = bool(Settings.get_instance().ui_sidebar_collapsed.value)
+        # 实时读 cfg：补射窗口（80~700ms）内用户已折叠/展开的，跟随最新意图
+        # 落位，不得用启动快照覆盖（旧实现读启动快照，启动后 0.7s 内的折叠
+        # 被静默翻回，探针 WATCH 栈实锤）。
         self._apply_restored_panel_width()
         for delay in (80, 200, 400, 700):
             QTimer.singleShot(delay, self._apply_restored_panel_width)
@@ -3734,12 +3753,16 @@ class TabManagerWindow(FramelessWindow):
         """按存档折叠态恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return
+        from app.utils.config import Settings
+
         # ★ left 卡片区展开期间跳过：该状态下 TabPanel 收起、frame 加宽均为
         #   卡片编排的主动结果，启动补射（80/200/400/700ms）若照常按存档态
         #   落位会把卡片编排冲掉（表现为卡片打开后 TabPanel 又弹回展开态）。
         if self._left_card_area_active():
             return
-        saved_collapsed = getattr(self, "_restored_sidebar_collapsed", False)
+        # 实时读 cfg：补射跟随用户最新折叠意图（启动后用户已操作的，
+        # 按最新值落位；不用启动快照——它会把 0.7s 内的新操作静默翻回）
+        saved_collapsed = bool(Settings.get_instance().ui_sidebar_collapsed.value)
         frame_w = (
             (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X)
             if saved_collapsed
@@ -4927,15 +4950,18 @@ class TabManagerWindow(FramelessWindow):
                     _prev_collapsed = False
                 # ★ per-tab 宽度：目标窗口有独立宽度记忆时优先（每页记住自己
                 #   拖出的宽度，互不串扰）；无记忆回落到全局意图宽逻辑。
+                #   ★ 全局折叠态语义：折叠是窗口级状态，切页不得改变它——
+                #   折叠态下即使目标页有宽度记忆也不得静默展开（旧实现强制
+                #   _prev_collapsed=False，B 折叠后切回有记忆的 A 被静默拉开，
+                #   随后 relayout 压窄触发 resizeEvent 折叠动画，来回切反复横跳）。
                 _win_mem = None
                 try:
                     _win_mem = getattr(self._windows[index], "_tab_sidebar_frame_w", None)
                 except Exception:
                     pass
-                if _win_mem and int(_win_mem) > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X:
-                    _prev_left_w = int(_win_mem)
-                    _prev_collapsed = False
-                    self._tab_switch_saved_snapshot = ("win", int(_win_mem))
+                _mem_base = self._tab_switch_win_memory_baseline(_prev_left_w, _prev_collapsed, _win_mem)
+                if _mem_base is not None:
+                    _prev_left_w, _prev_collapsed, self._tab_switch_saved_snapshot = _mem_base
                 else:
                     # ★ 展开态以用户意图宽为恢复基准：即时宽度可能已被其他标签页
                     #   的工作台挤压污染（切回后空间释放，意图宽仍有效且可达）。
@@ -5805,14 +5831,14 @@ class TabManagerWindow(FramelessWindow):
         """
 
     def _restore_geometry(self):
-        """固定默认窗口几何：960x800，屏幕居中，确保不超出屏幕"""
+        """固定默认窗口几何：1100x800，屏幕居中，确保不超出屏幕"""
         screen = QApplication.primaryScreen()
         screen_rect = screen.availableGeometry() if screen else None
         if not screen_rect:
-            self.resize(960, 800)
+            self.resize(1100, 800)
             return
 
-        w, h = 960, 800
+        w, h = 1100, 800
         self._suppress_drag_detection = True
         self.setGeometry(
             screen_rect.x() + (screen_rect.width() - w) // 2,

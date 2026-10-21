@@ -13,7 +13,7 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.6.9-brightgreen)
+![Version](https://img.shields.io/badge/version-0.6.10-brightgreen)
 
 </div>
 
@@ -58,7 +58,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 **插件系统** — 28 个内置插件（18 个系统组件插件 + 10 个功能插件）。插件可贡献：工具、命令、智能体、技能、主题、Hook、MCP、模型适配器、存储引擎、网关平台、UI 组件（浮动卡片 / 内容渲染器 / 消息工厂 / 独立窗口 / 设置卡 / 侧栏入口 / 输入区按钮）。官方市场一键安装，watchfiles 热更新，即改即生效。
 
-**安全** — API Key 三档保存：系统钥匙串（本机绑定）/ 密码加密（密文随配置云同步，换机输同一密码即可解出）/ 明文；OAuth token 走系统凭证库。安全中心提供命令解壳判定、路径白黑名单、网络外传检测、删除保护（强制审批 + 自动快照）、进程资源配额，全部可视化配置；企业网络的 TLS 拦截场景自动委托系统信任链校验。
+**安全** — API Key 三档保存：系统钥匙串（本机绑定）/ 密码加密（密文随配置云同步，换机输同一密码即可解出）/ 明文；OAuth token 走系统凭证库。安全中心提供命令解壳判定、路径白黑名单、网络外传检测、删除审批（删除类命令强制审批）、垃圾桶软删除（删除文件自动移入垃圾箱，误删可找回）、进程资源配额，全部可视化配置；企业网络的 TLS 拦截场景自动委托系统信任链校验。审批策略可配（审核处理）：人工审批（可设超时与超时处理：拒绝 / 允许 / AI 审核）或 AI 审批（由所选审核模型自动判定放行 / 拒绝，失败回落人工审批）。
 
 **界面与交互** — 无边框窗口 + 自定义标题栏，系统托盘常驻，全局热键（`ALT+Z`，可自定义）全局唤起 / 隐藏；工作台挤压折叠（拖拽落定智能让位、压穿自动折叠、按原宽恢复、per-tab 宽度记忆）；消息卡片支持审查（diff 统计）/ 分支 / 复制 / 内嵌待办与计划卡；ECharts 交互图表、词云生成、Markdown / HTML / 图片原生渲染；17 套主题、深浅自动适配。
 
@@ -70,7 +70,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 ## 与 Claude Code / DeepSeek Harness 的核心差异
 
-> **比较时点**：2026-08-17（竞品列）；DriFox 列已更新至 v0.6.9。
+> **比较时点**：2026-08-17（竞品列）；DriFox 列已更新至 v0.6.10。
 > Claude Code Agent Teams 为 **research preview / experimental**（需 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 启用）。
 > DeepSeek Harness 为 **developer preview**（2026-08-13 发布）。
 
@@ -92,7 +92,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 | **多模型后端** | ✅ **原生 OpenAI 兼容**：DeepSeek / 智谱 / DashScope / 千帆 / 火山方舟 / MiniMax / SiliconFlow / Gemini / GitHub Copilot / CodeBuddy / OpenCode Zen / OpenCode Go 共 12 家内置 + 自定义端点 | ⚠️ 需 proxy（claude-code-proxy / claude-code-openai-wrapper / Bifrost gateway） | ✅ plugin-based，可接入任意 LLM 适配器 |
 | **开源协议** | GPL-3.0-or-later | 闭源（商业） | MIT |
 | **技术栈** | Python 3.14+ / PyQt5 | TypeScript / Node | TypeScript + Cordis 插件框架 |
-| **开发成熟度** | v0.6.9（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
+| **开发成熟度** | v0.6.10（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
 
 ### DriFox 真正独有的四件事
 
@@ -273,7 +273,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.6.9 架构                        │
+│                    DriFox v0.6.10 架构                       │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      标签页宿主 / 消息卡片 / 工作台 / 输入区                │
 │             标题栏 + 侧栏 / 设置面板 / 浮动卡片 / 系统托盘     │

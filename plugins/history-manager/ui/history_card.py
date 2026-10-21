@@ -33,13 +33,37 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from app.widgets.elided_label import _ElidedLabel
+from app.plugins.sdk import ElidedLabel as _ElidedLabel
 
 # ── 分页常量 ──
 _PAGE_SIZE = 30  # 每页显示的会话数（含当前会话）
 
 # 项目过滤器哨兵值（HistoryPage 项目切换器语义）
 _PROJECT_ALL = "__all__"  # 全部项目混合视图
+
+
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
 
 
 def split_pinned_entries(entries: List[tuple], exclude_index: Optional[int] = None) -> tuple:
@@ -58,16 +82,9 @@ def split_pinned_entries(entries: List[tuple], exclude_index: Optional[int] = No
     return pinned, rest
 
 
-from app.utils.design_tokens import (
-    Colors,
-    apply_font_size_to_widget,
-    font_size_css,
-    get_ui_font_size,
-    scale_font_size,
-)
-from app.utils.theme_style import bind_theme_qss
-from app.utils.utils import get_font_family_css, get_icon
-from app.utils.session_preview import format_relative_time, get_message_preview  # noqa: F401  (get_message_preview 转引)
+from app.plugins.sdk import apply_font_size_to_widget, bind_theme_qss, font_size_css
+from app.plugins.sdk import Colors, format_relative_time, get_font_family_css, get_icon, get_message_preview
+from app.plugins.sdk import get_ui_font_size, scale_font_size
 
 
 class _UrlImportThread(QThread):
@@ -1175,7 +1192,7 @@ class HistoryCard(QWidget):
         if not branch and not head_readable:
             # HEAD 读不到/异常路径：退回 git 子进程兜底
             try:
-                from app.utils.git_worktree import GitWorktreeDetector
+                from app.plugins.sdk import GitWorktreeDetector
 
                 branch = GitWorktreeDetector.get_current_branch(worktree_path)
             except Exception:
@@ -2345,7 +2362,7 @@ class HistoryCard(QWidget):
 
     def _on_import_from_url(self):
         """从URL导入会话JSON"""
-        from app.widgets.common_dialogs import SingleInputDialog
+        from app.plugins.sdk import SingleInputDialog
 
         dialog = SingleInputDialog(
             title="🔗 从URL导入会话",
@@ -2380,10 +2397,9 @@ class HistoryCard(QWidget):
         """后台导入线程完成后的回调（主线程执行）"""
         if error:
             from qfluentwidgets import InfoBar, InfoBarPosition
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            # 挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
-            bar_parent = TabManagerWindow.get_instance() or self.window()
+            # 挂到宿主顶层窗口（未就绪时兜底卡片所在窗口）
+            _host = _caps("window.host")
+            bar_parent = (_host() if _host else None) or self.window()
             InfoBar.error(
                 title="导入失败",
                 content=error,

@@ -34,13 +34,41 @@ def _msg(user_text: str) -> list:
 # ── 记忆系统说明书（BuildSystemPrompt 注入，照抄 WorkBuddy 结构）────
 
 
-def build_memory_system(global_file: str, project_dir: str) -> str:
-    """生成记忆体系指针（极简）：只报结构位置，全部规则见工具 schema description。"""
+def build_memory_system(global_file: str, project_dir: str, limits: Dict[str, int] | None = None) -> str:
+    """生成记忆体系说明书（对齐 WorkBuddy memory_system fragment 的 Layer 2/3 纪律）。
+
+    只写分层结构与读写纪律：各层范围、何时写、写什么、检索选源、角色边界。
+    操作语义（参数、截断拒写）归工具 schema；蒸馏完全由门禁指令注入，此处零提及。
+    """
+    g_limit = (limits or {}).get("global", 4000)
+    p_limit = (limits or {}).get("project", 3000)
     return (
-        "IMPORTANT: 你拥有跨会话长期记忆。读写用 memory_read / memory_write，"
-        "全部使用规则（写入时机、内容纪律、超限处理、蒸馏）见工具说明。\n"
+        "IMPORTANT: 你拥有跨会话长期记忆，分两层，各自有不同的范围与写入纪律。\n"
+        "读写用 memory_read / memory_write；操作语义（参数、超限拒写）见工具说明。\n"
         f"全局记忆文件：{global_file}\n"
-        f"项目记忆目录：{project_dir}"
+        f"项目记忆目录：{project_dir}\n"
+        "\n"
+        "# 用户级全局记忆（scope=global）\n"
+        f"文件：{global_file} | 范围：全部项目 | 上限 {g_limit} 字符\n"
+        "仅当用户明确要求长期记住、且内容不绑定具体项目时才写入；用于必须逐字遵守的强制规则。\n"
+        "整体替换、先读后写，条目碎片化，保持精简。\n"
+        "\n"
+        "# 项目级工作记忆（scope=project / daily）\n"
+        f"目录：{project_dir} | 范围：仅当前项目\n"
+        "- YYYY-MM-DD.md — 每日工作日志。只追加，永不覆盖。\n"
+        f"- MEMORY.md — 沉淀后的长期项目笔记，上限 {p_limit} 字符，整体更新。\n"
+        "今天的日志不存在时，先创建目录与日期文件再写。\n"
+        "\n"
+        "何时写：完成实质工作后立即记录。实质工作包括：修复 bug、改动或新建功能、\n"
+        "重构或架构调整、选定技术方案；用户交代项目约定或偏好时，同时更新项目 MEMORY.md。\n"
+        "不写过程性信息（搜索结果、临时路径、工具报错）——只留跨会话仍有价值的结论。\n"
+        "\n"
+        "怎么读：按需选源，不必全读。\n"
+        "- 本项目过去的工作 → 近期日志（新→旧）与项目 MEMORY.md\n"
+        "- 跨项目事项或位置不明 → 全局记忆\n"
+        "- 与历史无关 → 跳过，不读记忆文件\n"
+        "\n"
+        "角色边界：记忆只是补充，不替代正常回复、最终答案或用户要的交付物。"
     )
 
 

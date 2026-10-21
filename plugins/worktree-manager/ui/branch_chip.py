@@ -16,12 +16,36 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QRunnable, Qt, pyqtSignal
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy
 
-from app.utils.git_worktree import GitWorktreeDetector
-from app.utils.utils import get_icon
+from app.plugins.sdk import GitWorktreeDetector
+from app.plugins.sdk import get_icon
 
 _CREATION_FLAGS = 0
 if sys.platform == "win32":
     _CREATION_FLAGS = subprocess.CREATE_NO_WINDOW
+
+
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
 
 
 class BranchDetectSignals(QObject):
@@ -146,8 +170,8 @@ class BranchChip(QFrame):
         self.adjustSize()
 
     def _apply_style(self) -> None:
-        from app.utils.design_tokens import Colors, font_size_css
-        from app.utils.utils import get_font_family_css
+        from app.plugins.sdk import Colors, font_size_css
+        from app.plugins.sdk import get_font_family_css
 
         Colors.refresh()
         sheet = f"""
@@ -202,10 +226,8 @@ class BranchChip(QFrame):
         """点击打开工作台工作树页（原 main_widget._on_branch_label_clicked 迁入）。"""
         event.accept()
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None and hasattr(tm, "open_workbench_memory"):
-                tm.open_workbench_memory("docs")
+            wb = _caps("window.workbench")
+            if wb is not None:
+                wb["open"]("docs")
         except Exception:
             logger.exception("[BranchChip] 打开工作树页失败")

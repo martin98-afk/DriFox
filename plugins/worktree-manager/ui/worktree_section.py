@@ -25,14 +25,38 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app.utils.design_tokens import Colors, font_size_css
-from app.utils.git_worktree import GitWorktreeDetector
-from app.utils.utils import get_font_family_css
+from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import GitWorktreeDetector
+from app.plugins.sdk import get_font_family_css
 
 # Windows 下隐藏 cmd 窗口
 _CREATION_FLAGS = 0
 if sys.platform == "win32":
     _CREATION_FLAGS = subprocess.CREATE_NO_WINDOW
+
+
+def _caps(cap_id):
+    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("ui")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
+        )
+        return pool[cap_id] if cap_id in pool else None
+    except Exception:
+        return None
 
 
 class _WorktreeTaskSignals(QObject):
@@ -456,7 +480,7 @@ class _AddWorktreeRow(QWidget):
         layout.addStretch()
 
     def _on_add(self):
-        from app.widgets.common_dialogs import SingleInputDialog
+        from app.plugins.sdk import SingleInputDialog
 
         # 注意：parent 必须传顶层窗口（self.window()）。
         # 如果传 self（_AddWorktreeRow，24px 高），MaskDialogBase 会把
@@ -510,9 +534,9 @@ class WorktreeSectionWidget(QWidget):
         self._setup_ui()
         # 主题自刷：已迁移出 app/widgets，main_widget 不再 isinstance 遍历刷新，改订 UIEventBus
         try:
-            from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
-
-            UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, self.refresh_style, plugin_name="worktree-manager")
+            ev = _caps("ui.events")
+            if ev is not None:
+                ev()["subscribe"]("theme_changed", self.refresh_style)
         except Exception:
             pass
 

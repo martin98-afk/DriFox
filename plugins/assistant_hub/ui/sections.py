@@ -27,13 +27,20 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import BodyLabel, ComboBox, LineEdit, MaskDialogBase, SwitchButton
 
-from app.utils.design_tokens import Colors, font_size_css, scale_font_size
-from app.utils.utils import get_font_family_css
+from app.plugins.sdk import Colors, font_size_css, scale_font_size
+from app.plugins.sdk import get_font_family_css
 
 
 from .assistant_avatar import RoundAvatar
 
 # ── 基础样式辅助 ─────────────────────────────────────
+
+
+def _caps(cap_id):
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。"""
+    from app.plugins.sdk import caps_for
+
+    return caps_for(cap_id)
 
 
 def _elide_lines(text: str, fm, width: int, max_lines: int = 2) -> str:
@@ -234,9 +241,8 @@ def _host_window():
     主 widget 的 window() → None（调用方自行兜底）。
     """
     try:
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        win = TabManagerWindow.get_instance()
+        host = _caps("window.host")
+        win = host() if host else None
         if win is not None:
             return win
     except Exception:

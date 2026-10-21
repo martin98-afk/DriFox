@@ -19,7 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 def _find_member_agent_name(tm, window_id: str) -> str:
-    """根据窗口 ID 查找当前成员的角色名（agent_name）。"""
+    """根据窗口 ID 查找当前成员的角色名（agent_name）。
+
+    优先走宿主 API；getattr 回退保证老测试 mock 未实现该方法时仍可用。
+    """
+    getter = getattr(tm, "get_member_agent_name", None)
+    if callable(getter):
+        try:
+            return getter(window_id) or ""
+        except Exception:
+            pass
     try:
         members = tm.get_members()
         for m in members:
@@ -50,10 +59,12 @@ def hook(event: str, context: dict) -> str:
         return ""
 
     try:
-        from app.core.conversation.agent import create_agent_manager
-        from app.core.team.team_manager import TeamManager
+        from app.plugins.sdk import caps_for, create_agent_manager
 
-        tm = TeamManager.get_instance()
+        team = caps_for("team.read")
+        if team is None:
+            return ""
+        tm = team()
         agent_name = _find_member_agent_name(tm, window_id)
         if not agent_name:
             return ""

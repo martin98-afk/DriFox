@@ -23,8 +23,8 @@ from typing import Optional, Tuple
 
 import orjson as json
 
-from app.tools.result import ToolResult
-from app.tools.registry import make_summarize_from_preview
+from app.plugins.sdk import ToolResult
+from app.plugins.sdk import make_summarize_from_preview
 
 # ========== 共享路径工具（同目录 _path_utils.py，下划线前缀 → loader 跳过） ==========
 _path_utils_module = None

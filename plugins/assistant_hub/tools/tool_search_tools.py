@@ -17,8 +17,10 @@ top_k 截断）；其中转执行即 CodeBuddy 的 DeferExecuteTool。
 
 import json
 
-from app.tools.result import ToolResult
-from app.tools.registry import ToolRegistry
+from app.plugins.sdk import ToolResult
+from app.plugins.sdk import tool_registry_api
+# 模块级符号：测试注入点（tool_registry_api 会优先用它）
+from app.tools.registry import ToolRegistry  # noqa: E402
 
 GROUP_TOOL_SEARCH = "工具搜索"
 
@@ -29,6 +31,15 @@ _SELF_NAME = "tool_search"
 # mode=list 名录：单条描述截断长度 / 总数超阈值降级为分组概览
 _LIST_DESC_MAX = 80
 _LIST_GROUP_THRESHOLD = 100
+
+
+def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。
+
+    保留模块级符号：测试经 monkeypatch 注入替身（注入点见 sdk 的
+    tool_registry_api，它会优先用模块内的 ToolRegistry / 本函数）。
+    """
+    return tool_registry_api(kind, module_globals=globals())
 
 
 def _as_str_list(v) -> list:
@@ -95,7 +106,8 @@ def _best_score(fields: list, queries: list) -> int:
 def _search_registry(queries: list) -> list:
     """搜索 registry 工具，返回 [(score, schema)] 按 score 降序。"""
     scored = []
-    for r in ToolRegistry.get_instance().list():
+    _api = _tool_api("read")
+    for r in (_api["list"]() if _api else []):
         if r.name in (_SELF_NAME, "tool_execute"):
             continue
         fields = [
@@ -163,7 +175,10 @@ def _mcp_server_of(name: str) -> str:
 
 def _list_impl(services: dict) -> str:
     """mode=list：列出全部可用工具名录（分组 + 名称 + 一句话描述，不含参数）。"""
-    entries = [r for r in ToolRegistry.get_instance().list() if r.name not in (_SELF_NAME, "tool_execute")]
+    _api = _tool_api("read")
+    entries = [
+        r for r in (_api["list"]() if _api else []) if r.name not in (_SELF_NAME, "tool_execute")
+    ]
     mcp_schemas: list = []
     mcp = services.get("mcp") if isinstance(services, dict) else None
     if mcp is not None:
@@ -318,16 +333,10 @@ def _execute_impl(tool_ctx=None, **kw):
 
     # 安全网：用户在权限卡片显式关掉的工具（toggles=False 且 deny 策略），中转也拒绝
     try:
-        from app.core.tools.tool_permission_controller import resolve_tool_off_policy
-        from app.utils.config import Settings
-
-        settings = Settings.get_instance()
-        toggles = dict(settings.tool_toggles.value or {})
-        if toggles.get(name, True) is False:
-            policies = dict(settings.tool_permission_policy.value or {})
-            behavior = settings.tool_off_behavior.value or "deny"
-            if resolve_tool_off_policy(name, None, policies, behavior) == "deny":
-                return ToolResult(True, content=f"工具 {name} 已被用户禁用（deny 策略），不能中转执行。")
+        api = _tool_api("read")
+        policy = api["policy"]() if api is not None and "policy" in api else None
+        if policy is not None and policy["off_policy"](name) == "deny":
+            return ToolResult(True, content=f"工具 {name} 已被用户禁用（deny 策略），不能中转执行。")
     except Exception:
         pass  # 检查失败不阻塞执行（与执行层兜底口径一致）
 

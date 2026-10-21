@@ -18,6 +18,7 @@ plugin_manager / mcp_tools），含：
 """
 
 import json
+from app.plugins.sdk import tool_registry_api
 
 _ACTION_NAMES = {
     "installed": "插件已安装",
@@ -32,6 +33,10 @@ _AVAILABLE_NOTE = "已加入当前请求的工具列表，本轮起可直接调�
 _REMOVED_NOTE = "已从工具列表移除，后续请求不可用，请勿再调用（如需同类能力请说明缺口，不要重试）"
 
 
+def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
+    return tool_registry_api(kind, module_globals=globals())
+
 def _get_full_schema(name: str) -> dict:
     """取单个工具的完整 tool calling schema（与 API 请求同构）
 
@@ -39,9 +44,8 @@ def _get_full_schema(name: str) -> dict:
     查不到（MCP 工具 mcp__ 前缀不在 registry / 已被覆盖移除）返回 {}。
     """
     try:
-        from app.tools.registry import ToolRegistry
-
-        reg = ToolRegistry.get_instance().get(name)
+        api = _tool_api("read")
+        reg = api["get"](name) if api else None
         if reg is None:
             return {}
         return reg.schema or {}

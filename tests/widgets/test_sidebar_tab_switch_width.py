@@ -32,6 +32,9 @@ class _StubSplitter:
     def sizes(self):
         return list(self._sizes)
 
+    def count(self):
+        return len(self._sizes)
+
     def setSizes(self, sizes):
         self._sizes = list(sizes)
 
@@ -45,6 +48,7 @@ class _StubPanel:
         self._animating = False
         self._left_card_present = False
         self._auto_collapse_suppressed = False
+        self._collapsed_min_width = 46  # 收起态窄宽（_COLLAPSED_PANEL_WIDTH）
         self.sync_calls = 0
 
     def sync_collapsed_ui(self):
@@ -283,16 +287,21 @@ def test_restore_runs_when_card_state_unchanged_inactive(qapp):
     assert win._splitter.sizes()[0] == 414
 
 
-def test_restore_runs_when_card_becomes_inactive(qapp):
-    """切页后卡片从活跃→不活跃（A 卡 → B 无卡）：目标页宽度回归普通左栏语义
+def test_restore_aborts_when_card_becomes_inactive(qapp):
+    """切页后卡片从活跃→不活跃（A 卡 → B 无卡）：宽度归卡片关闭编排
 
-    卡片已关的页面宽度就是普通左栏宽，per-tab 记忆/基线恢复照常生效。
+    旧行为（已修）：restore 把含卡片槽的 frame 总宽（如 460）灌给无卡页，
+    TabPanel 被拉宽 → resizeEvent 自动展开 → 全局折叠态被翻转（横跳源头）。
+    新语义：双向翻转都放弃；无卡页宽度由卡片关闭编排落位（其内部已按
+    当前活跃页 win_mem 回落，见 _on_left_card_area_toggled else 分支）。
     """
-    win = _StubWindow([160, 1040, 0])
+    win = _StubWindow([60, 1036, 0])
+    win._tab_panel._collapsed = True
     win._left_card_area_active = lambda: False
     win._tab_switch_card_active_snapshot = True  # 切页时卡片活跃，执行时已关
-    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
-    assert win._splitter.sizes()[0] == 414
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 460, True)  # prev 含卡片槽
+    assert win._splitter.sizes()[0] == 60  # 不被拉到 460
+    assert win._tab_panel._collapsed is True
 
 
 def test_restore_runs_without_card_snapshot(qapp):
@@ -344,3 +353,69 @@ def test_frame_target_chat_absolute_floor(qapp):
     # 聊天区不低于绝对下限
     assert 500 - target >= _CHAT_ABSOLUTE_MIN_WIDTH - 1
     assert target - _BASE_FRAME_W < _MIN_CHAT_WIDTH  # 确属妥协路径
+
+
+# ── 全局折叠态语义（2026-10-21 修复：切页折叠状态横跳）──
+# 现象：B 折叠 → 切回有宽度记忆的 A 被静默展开 → relayout 压窄触发折叠动画，
+# 来回切反复横跳；A 开卡片 ↔ B 折叠来回切，状态一会展开一会折叠。
+# 根因：折叠态是全局单份，却被多个携带不同语义 prev 的编排方（per-tab 记忆
+# 分支 / restore / 卡片开合编排 / 启动补射）互相改写。
+
+
+def test_win_memory_keeps_collapsed_on_switch(qapp):
+    """折叠态切到有宽度记忆的 tab：保持折叠，不静默展开（快照仍记 win 基准）"""
+    left, collapsed, snap = TabManagerWindow._tab_switch_win_memory_baseline(60, True, 414)
+    assert (left, collapsed) == (60, True)
+    assert snap == ("win", 414)
+
+
+def test_win_memory_expands_from_expanded(qapp):
+    """展开态切到有记忆的 tab：应用记忆宽（切页保宽语义不变）"""
+    left, collapsed, snap = TabManagerWindow._tab_switch_win_memory_baseline(201, False, 414)
+    assert (left, collapsed) == (414, False)
+    assert snap == ("win", 414)
+
+
+def test_win_memory_none_when_invalid(qapp):
+    """无记忆或记忆未超折叠宽：返回 None，走 saved 基准"""
+    assert TabManagerWindow._tab_switch_win_memory_baseline(201, False, None) is None
+    assert TabManagerWindow._tab_switch_win_memory_baseline(201, False, 60) is None
+
+
+def test_restore_aborts_when_card_deactivates(qapp):
+    """卡片态翻转（开→关）：宽度归卡片编排，restore 不迁移卡片槽总宽
+
+    旧实现只在「目标页卡片活跃」方向放弃；切出卡片页方向放行，把含卡片
+    槽的 frame 总宽（460）灌给无卡页 → TabPanel 被拉宽 → resizeEvent 自动
+    展开 → 全局折叠态被翻转。
+    """
+    win = _StubWindow([60, 1036, 0])
+    win._tab_panel._collapsed = True
+    win._tab_switch_card_active_snapshot = True  # 切页前 A 页卡片活跃
+    win._left_card_area_active = lambda: False  # 执行时卡片已投影关闭
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 460, True)  # prev 含卡片槽
+    assert win._splitter.sizes()[0] == 60  # 不被拉到 460
+    assert win._tab_panel._collapsed is True
+
+
+def test_restore_replay_reads_live_cfg(qapp, monkeypatch):
+    """启动补射跟随实时 cfg：启动后用户已折叠的，补射不得按启动快照翻回"""
+
+    class _CfgItem:
+        value = True
+
+    class _Cfg:
+        ui_sidebar_collapsed = _CfgItem
+
+    class _Settings:
+        @staticmethod
+        def get_instance():
+            return _Cfg
+
+    monkeypatch.setattr("app.utils.config.Settings", _Settings)
+    win = _StubWindow([201, 999, 0])
+    win._tab_panel._collapsed = True  # 用户启动后已手动折叠
+    win._left_card_area_active = lambda: False
+    TabManagerWindow._apply_restored_panel_width(win)
+    assert win._splitter.sizes()[0] == _BASE_FRAME_W  # 落位折叠宽
+    assert win._tab_panel._collapsed is True  # 不被翻回展开
