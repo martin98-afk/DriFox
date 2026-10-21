@@ -11,9 +11,9 @@ All notable changes to this project will be documented in this file.
 
 - **能力面改声明式 + 补 `TeamManager.get_member_agent_name`** (`app/plugins/capabilities/facets.py` · `app/core/team/team_manager.py` · `providers/tool_core.py` · `providers/ui_core.py` · `plugins/system-tools/tools/subagent_tools.py`): `f06fb272` 往 `team.read` 加了 `member_agent_name` 契约但从未实现该方法，而 provider 用一次性构造的 `{别名: 宿主方法}` 字典——单个 typo 让整个能力在取用瞬间抛 `AttributeError`：system-hooks 两个 SessionStart 注入 hook 自 10-19 起静默空转（异常被 `except` 吞掉），`team_list_members` 直接报 `Execution error`。更深一层是同批迁移把 `subagent_tools` 的 TeamManager 对象换成能力池，却没注意 provider 返回 dict（`'dict' object has no attribute 'get_members'`）。现改为 ①`facets.py` 用 `FacetSpec(target, methods)` 声明白名单，两个 surface 共用一份清单，`ReadOnlyFacade` 保证名单外（尤其写操作）访问抛 `AttributeError`；②补 `get_member_agent_name`（口径同 `get_member_run_id`：先读 `team_members` 快照，回退活跃 members）；③派单独立为 `team.send`（medium，`send_task` 单方法），与只读面分权，system-tools manifest 补声明；④`tests/plugins/test_capability_provider_contract.py` 遍历 `FACETS` 断言白名单方法在目标类真实存在、门面不泄漏写操作，typo 在 CI 就炸。团队相关用例由基线 26 failed 收敛到 11（余下 5 项为 `TestHistorySessionRestoreRegistersTeamMember` 与 `TestDeriveCapability` 的既有失败，与本次无关）。
 
-## [v0.6.10] - 2026-10-20 (重新发布 #3)
+## [v0.6.10] - 2026-10-20 (重新发布 #4)
 
-自 v0.6.9 以来的变更（累计） | 提交数：68 · 文件变更：168 · +10823/-2159 | 贡献者：dingma, drifox-bot, mading
+自 v0.6.9 以来的变更（累计） | 提交数：71 · 文件变更：197 · +11714/-2275 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -78,6 +78,16 @@ All notable changes to this project will be documented in this file.
 
 - **侧栏折叠态切页横跳** (`bf24e421`): 折叠态是全局单份却被多个编排方互相改写——切页把 per-tab 宽度记忆强制展开（B 折叠后切回有记忆的 A 被静默拉开，relayout 压窄再触发折叠动画，来回切反复横跳）；restore 把含卡片槽的总宽灌给无卡页（A 开卡片 ↔ B 折叠来回切状态翻转）；启动补射用启动快照覆盖 0.7s 内的新折叠。收敛为全局折叠态语义：切页/补射不得改折叠态，per-tab 只记宽度且折叠态下不应用，restore 卡片守卫双向。回归 6 用例入 `tests/widgets/test_sidebar_tab_switch_width.py`。
 - **`_ElidedLabel` 省略棘轮** (`cb976428`): 标签被省略后 `sizeHint()` 缩水到省略文本宽 → 布局按最小宽度兜底 → 永久省略不可自愈。重写 `sizeHint` 返回完整文本宽（封顶 max），布局优先给足、不够才省略、放宽后自恢复。
+
+### ✨ 新功能 (New Features)（重新发布 #4 追加）
+
+- **能力 facet 声明式重构 + `team.send` 分权** (`9ec0aa11`): 宿主能力 provider 从一次性 `{别名: 方法}` 字典改为声明式 `capabilities/facets.py`——`FacetSpec(target, methods)` 白名单 + `ReadOnlyFacade` 统一代理，tool/ui 两 surface 共用一份清单，杜绝单点 typo 让整个能力面炸 `AttributeError`；契约测试 `tests/plugins/test_capability_provider_contract.py` 遍历清单断言方法在目标类真实存在、门面不泄漏写操作，typo 在 CI 即炸。团队派单写操作独立为 `team.send` 能力（medium），与 `team.read` 只读面分权，system-tools manifest 同步补声明。
+- **插件宿主兼容性检查** (`fac29453`): `deps_loader` 增加宿主版本兼容判定，marketplace 插件卡片展示版本要求、不满足时明确标示，不兼容插件不再静默安装后运行时才炸。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #4 追加）
+
+- **输入框滚动条假滚轮/无滚动条两难** (`9ec0aa11`): QTextEdit QSS 上下 padding 让原生竖条 range 恒为 2，Fluent delegate 的 `maximum()>0` 判据永远为真 → 空输入框常驻假滚轮（此前用永久 setForceHidden 治标，代价是内容超高后完全没有可见滚动条）。改为按真实滚动余量（`maximum - pageStep ≥ 12`）收放竖条，构造期滞留误 show 态立即校正一次。
+- **模型选择器卡成本显示** (`4921f5cb`): 成本金额限定小数位并对齐，长串小数不再撑破布局；顺带移除 `format_tool_changes` 旧实现残留文件，补回归测试。
 
 ## [v0.6.9] - 2026-10-17 (重新发布 #5)
 
