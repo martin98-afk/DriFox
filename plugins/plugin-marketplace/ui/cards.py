@@ -2592,10 +2592,13 @@ class MarketplaceCard(QWidget):
         self._worker_gen: int = 0  # worker 代次标记：递增，旧 worker 迟到信号按 gen 丢弃
         self._market_status_labels: dict = {}  # 市场名 → 状态徽标 QLabel（「市场」页）
         self._initial_render_timer: Optional["QTimer"] = None  # 首屏 300ms 合并窗口
+        self._preheat_done: bool = False  # （保留字段，兼容外部探测）预热机制已回退
         self._flush_timer: Optional["QTimer"] = None  # 市场渲染合并 timer（self 子对象，销毁自动取消）
         self._reveal_timer: Optional["QTimer"] = None  # 渲染完成延迟显示 timer（防压缩帧）
         self._load_timer: Optional["QTimer"] = None  # show_card 延迟加载 timer（同上）
+        _t0 = time.perf_counter()
         self._setup_ui()
+        logger.debug(f"[DEBUG-mp] ctor _setup_ui {(time.perf_counter() - _t0) * 1000:.0f}ms")
         # 宽度上限：比对话气泡区（约 1000px）宽一点点（1080）即可，不铺满覆盖层全宽。
         # 容器（CardContainer overlay）已设 AlignHCenter，卡片在此宽度内水平居中。
         # 覆盖层圆角面板由主程序容器绘制且铺满，此处仅约束卡片自身内容宽度。
@@ -2617,6 +2620,7 @@ class MarketplaceCard(QWidget):
         2. 再后台逐市场拉取远程，每到一个市场增量刷新
         """
         self.setVisible(True)
+        _t_show = time.perf_counter()
         self._apply_latest_theme()
         self._apply_plugin_icon()
         # 默认回到精选探索页（每次打开市场都从探索模式进入，商店首页语义）
@@ -2627,6 +2631,7 @@ class MarketplaceCard(QWidget):
         self._search_edit.clear()
         self._search_debounce.stop()
         # 延迟 50ms 启动加载，避免阻塞 show 过程（self 子 timer，销毁自动取消）
+        logger.debug(f"[DEBUG-mp] show_card sync {(time.perf_counter() - _t_show) * 1000:.0f}ms")
         if self._load_timer is None:
             from PySide6.QtCore import QTimer
 
@@ -2634,8 +2639,10 @@ class MarketplaceCard(QWidget):
             self._load_timer.setSingleShot(True)
             self._load_timer.timeout.connect(self._start_load)
         self._load_timer.start(50)
-        # 兜底：已有合并数据但上次因不可见未渲染 → 立即补渲染
-        if self._plugin_data and self._initial_view_done and not self._render_pending:
+        # 兜底：仅当不可见期间有市场数据到达未渲染（_render_pending）时补渲染。
+        # 数据未变的重复打开零渲染零补行（历版无条件渲染 → 每开自动补
+        # 15 行×2 轮，滚动撞上补行即卡 1-3s）。
+        if self._initial_view_done and self._render_pending:
             self._schedule_render()
 
     def _start_load(self):
@@ -2643,9 +2650,14 @@ class MarketplaceCard(QWidget):
 
         本地视图延迟 300ms 渲染：若首个市场在此窗口内到达（缓存命中/快速源），
         直接渲染合并数据，跳过本地独立渲染（避免两次全量重建）。
+
+        注：曾试验预热线程后台化扫描，真机实测收益仅 100-250ms（主线程
+        自扫同量级）却引入预热线程偶发卡死 → 加载态假死 5s+ 的风险，
+        已回退为主线程同步渲染（_render_initial_view 300ms 后执行）。
         """
         if not self._alive():
             return  # 卡片已销毁
+        _t0 = time.perf_counter()
         self._async_refresh()
         if self._initial_render_timer is None:
             from PySide6.QtCore import QTimer
@@ -2654,6 +2666,7 @@ class MarketplaceCard(QWidget):
             self._initial_render_timer.setSingleShot(True)
             self._initial_render_timer.timeout.connect(self._render_initial_view)
         self._initial_render_timer.start(300)
+        logger.debug(f"[DEBUG-mp] _start_load total {(time.perf_counter() - _t0) * 1000:.0f}ms")
 
     def _render_initial_view(self):
         """首屏渲染（仅首次执行一次）：有市场数据渲染合并结果，否则渲染本地"""
@@ -2739,7 +2752,11 @@ class MarketplaceCard(QWidget):
             self._last_font_size = font_size
 
         # ── 字体（通过 QFont 级联，使用系统字体大小） ──
-        if font_family:
+        # 仅字体 key 真变化时应用：QWidget.setFont 会向全树传播 fontChange
+        # 并失效布局，卡片数千控件下每次打开都白付一次全树重排（实测打开
+        # 卡顿主源之一）。theme_key 已含 (tc, tcs, font_family, font_size)，
+        # 未变化即字体未变化，直接跳过。
+        if font_family and theme_changed:
             self.setFont(QFont(font_family, font_size if font_size else 14))
 
         # 主题真变化时才全树 re-theme + 更新搜索框/分隔线（日常打开/切换不触发）
@@ -3341,13 +3358,20 @@ class MarketplaceCard(QWidget):
         market_name = market_data.get("_marketplace") or market_data.get("name", "")
         plugins = market_data.get("plugins", []) or []
         # 合并：移除该市场旧数据，追加新数据（同名插件按市场覆盖）
-        merged = [p for p in self._plugin_data if p.get("_marketplace") != market_name]
+        old = self._plugin_data
+        merged = [p for p in old if p.get("_marketplace") != market_name]
         merged.extend(plugins)
         self._plugin_data = merged  # 数据始终合并，不因不可见丢失
         # 同步刷新「市场」页该源状态徽标
         self._refresh_market_status_label(market_name)
+        # 内容未变化（重复打开时缓存命中的重复到达）：只存引用不渲染。
+        # 否则每开一次都触发全量 reconcile + 自动补行（每开 +15 行、
+        # 滚动撞上补行即卡 1-3s 的直接来源）。
+        if old and self._row_map and self._plugins_same(old, merged):
+            return
         if not self.isVisible():
-            return  # 仅跳过本次渲染（数据已在 _plugin_data）
+            self._render_pending = True  # 不可见期间数据变化：打开时由 show_card 兜底渲染
+            return
         self._schedule_render()
 
     def _on_market_fetched(self, market_data: dict, gen: int):
@@ -3442,7 +3466,7 @@ class MarketplaceCard(QWidget):
 
     # ── 渲染 ──
 
-    _RENDER_BATCH = 30
+    _RENDER_BATCH = 15  # 首批同步渲染行数：单行构造 ~13ms，30 行一帧 400ms 是打开掉帧主力，减半打散
     _MAX_CONCURRENT_TASKS = 3  # 任务并发上限：不同插件任务并行，超过则 FIFO 等待
 
     def _render_plugins(self, plugins: list):
@@ -3455,6 +3479,7 @@ class MarketplaceCard(QWidget):
         """
         query = self._search_edit.text().strip().lower()
         filter_mode = self._current_filter
+        _dbg_t0 = time.perf_counter()
 
         # 缓存 tags（避免重复计算）
         for p in plugins:
@@ -3466,20 +3491,30 @@ class MarketplaceCard(QWidget):
         self._installed_set = set(inst_map)
         self._version_map = inst_map
         self._status_map = get_installer().get_status_map()
+        _dbg_scan_ms = (time.perf_counter() - _dbg_t0) * 1000
 
         # 数据内容变化 → 更新全量数据 + 重建 tag 栏 / 来源栏 / 精选探索页
         data_changed = not self._all_plugins or not self._plugins_same(self._all_plugins, plugins)
         if data_changed:
             self._all_plugins = plugins
+            _t_tag = time.perf_counter()
             self._rebuild_tag_bar()
             self._rebuild_source_bar()
+            _t_src = time.perf_counter()
             self._rebuild_explore()
+            _t_exp = time.perf_counter()
             # 重建 tag/source 栏会重新 setVisible(True)，精选模式下需按模式校正
             self._apply_browse_mode(self._current_filter)
+            logger.debug(
+                f"[DEBUG-mp] rebuild tag+src={(_t_src - _t_tag) * 1000:.0f}ms"
+                f" explore={(_t_exp - _t_src) * 1000:.0f}ms"
+            )
+        _dbg_rebuild_ms = (time.perf_counter() - _dbg_t0) * 1000
 
         # 「已安装」视图：并入市场列表外的本地插件（系统/禁用/手动安装）
         # 任何筛选下都并入，由 _plugin_matches 按 filter_mode 过滤（uninstalled 会剔除已装）
         view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        _dbg_extras_ms = (time.perf_counter() - _dbg_t0) * 1000
 
         # 社区插件（无 downloads 字段）→ 后台实时查询下载量（缓存 + 防抖）
         self._schedule_downloads_fetch(view_plugins)
@@ -3487,6 +3522,11 @@ class MarketplaceCard(QWidget):
         # 计算匹配列表（搜索 + tag + 筛选）并排序
         matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(matched)
+        logger.debug(
+            f"[DEBUG-mp] render_plugins scan={_dbg_scan_ms:.0f} rebuild={_dbg_rebuild_ms - _dbg_scan_ms:.0f}"
+            f" extras={_dbg_extras_ms - _dbg_rebuild_ms:.0f} match={((time.perf_counter() - _dbg_t0) * 1000 - _dbg_extras_ms):.0f}"
+            f" rows_cached={len(self._row_map)}"
+        )
 
         # 数据未变化且匹配顺序未变化（排序/数据顺序没变）→ 复用已有行，
         # 不重建不闪烁：仅刷新安装状态、匹配与计数（_reconcile_rows 与渲染同范式）
@@ -3525,10 +3565,14 @@ class MarketplaceCard(QWidget):
 
     @staticmethod
     def _plugins_same(old: list, new: list) -> bool:
-        """判断两次拉取的市场数据是否内容相同（name/version/desc/downloads 逐项比较）
+        """判断两次拉取的市场数据是否内容相同（name/version/description 逐项比较）
 
         拉取总是新建 dict/list（json 反序列化），引用必然不同；
         内容相同时可复用已有行（不重建、不闪烁），并跳过 tag 栏/角标重建。
+
+        downloads 不参与比较：服务端下载量统计频繁抖动，纳入判定会导致
+        每次网络到达都全量重建（tag/来源/探索页 rebuild 数百 ms 单帧卡顿），
+        下载量显示滞后到下次真实变化完全可接受。
         """
         if old is new:
             return True
@@ -3539,7 +3583,6 @@ class MarketplaceCard(QWidget):
                 a.get("name") != b.get("name")
                 or a.get("version") != b.get("version")
                 or a.get("description") != b.get("description")
-                or a.get("downloads") != b.get("downloads")
             ):
                 return False
         return True

@@ -86,7 +86,15 @@ _DEFAULT_SOURCES = [
 # ── C1：市场源白名单 ──────────────────────────────
 
 # 允许的 git 托管 host（url 类型源）；Settings.marketplace_allowed_git_hosts 可追加
-_MARKETPLACE_ALLOWED_GIT_HOSTS = {"github.com", "gitlab.com", "gitee.com", "bitbucket.org", "gitcode.com"}
+# raw.githubusercontent.com：GitHub 官方静态文件域（内置双源即此形态），非交互式 git host
+_MARKETPLACE_ALLOWED_GIT_HOSTS = {
+    "github.com",
+    "raw.githubusercontent.com",
+    "gitlab.com",
+    "gitee.com",
+    "bitbucket.org",
+    "gitcode.com",
+}
 # github 类型源的 repo 形态：owner/name
 _GITHUB_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 

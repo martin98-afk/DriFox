@@ -296,7 +296,25 @@ class PluginInstaller:
 
     # ── 批量状态查询 ──────────────────────────────────────
 
-    _INST_MAP_TTL = 3.0  # 秒：渲染/筛选频繁调用时避免重复扫描磁盘
+    _INST_MAP_TTL = 30.0  # 秒：渲染/筛选频繁调用时避免重复扫描磁盘。
+    # 30s：打开市场/搜索/筛选高频命中；目录变更路径（安装/更新/卸载/启停）
+    # 均已调用 invalidate_installed_cache() 主动失效，外部手动改目录的感知
+    # 延迟上限 30s（或点「刷新」强制）。
+
+    def cache_fresh(self) -> bool:
+        """两个批量缓存（installed/status）是否都在 TTL 内
+
+        供市场卡决定是否需要起后台预热线程：缓存新鲜时主线程渲染直接命中，
+        零扫描零线程。
+        """
+        now = time.time()
+        with self._cache_lock:
+            return (
+                self._inst_map_cache is not None
+                and self._status_map_cache is not None
+                and now - self._inst_map_ts < self._INST_MAP_TTL
+                and now - self._status_map_ts < self._INST_MAP_TTL
+            )
 
     def get_installed_map(self, use_cache: bool = True) -> dict:
         """批量扫描已安装插件，返回 {插件名: 版本号或 None}
