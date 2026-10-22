@@ -637,3 +637,104 @@ def get_marketplace_manager() -> MarketplaceSourceManager:
     if _instance is None:
         _instance = MarketplaceSourceManager()
     return _instance
+
+
+# ── 自动更新（E1 config_schema 声明开关，此处直读存储；纯逻辑可脱离 UI 调用） ──
+
+_PLUGIN_NAME = "plugin-marketplace"
+_AUTO_UPDATE_KEY = "auto_update_enabled"
+
+
+def _plugin_config_path():
+    """E1 插件配置存储路径（与 PluginConfigStore._path 一致）
+
+    零主程序依赖：复用本模块 _drifox_dir()（dev=仓库根/.drifox，打包=~/.drifox），
+    与 PluginConfigStore 的 get_app_data_dir() 同源。
+    """
+    return _drifox_dir() / "plugin_data" / _PLUGIN_NAME / "config.json"
+
+
+def get_auto_update_enabled() -> bool:
+    """读取「自动更新插件」开关（E1 设置卡写入；文件/键缺失视为关）"""
+    try:
+        import json as _json
+
+        p = _plugin_config_path()
+        if not p.is_file():
+            return False
+        data = _json.loads(p.read_text(encoding="utf-8"))
+        return bool(data.get(_AUTO_UPDATE_KEY, False))
+    except Exception:
+        return False
+
+
+def run_auto_update_check(progress=None, execute: bool = True) -> Dict[str, Any]:
+    """后台检查插件更新（纯逻辑，供 worker 线程调用）
+
+    流程：拉取市场（缓存优先）→ 对已安装插件逐个 check_update →
+    execute=True 时对有更新者串行执行 installer.update（下载+替换，
+    失败保留旧版）；execute=False 仅检查（侧栏计数场景，不动文件）。
+
+    Args:
+        progress: 可选回调 progress(phase, detail)（phase: fetch/check/update/done）
+        execute: 是否自动执行更新（False = 仅检查）
+
+    Returns:
+        {"updated": [插件名], "failed": [(插件名, 错误)], "checked": n,
+         "pending": n, "pending_names": [插件名]}
+    """
+    import time as _time
+
+    # 延迟导入：installer → data → 本模块成环，顶层 import 会炸
+    from .installer import get_installer
+
+    def _report(phase, detail=""):
+        if progress is not None:
+            try:
+                progress(phase, detail)
+            except Exception:
+                pass
+
+    mgr = get_marketplace_manager()
+    _report("fetch", "拉取市场数据")
+    # force=True：更新检查的意义就是拿最新版本；force=False 会读到最长 1h
+    # 的本地旧缓存（实测：推送新版本后 tick 半小时仍报"无待更新"）。
+    all_plugins, _markets, _errors = mgr.fetch_all(force=True)
+
+    inst = get_installer()
+    inst_map = inst.get_installed_map()
+    pending = []
+    _report("check", f"比对 {len(all_plugins)} 个插件版本")
+    for meta in all_plugins:
+        try:
+            has_update, _local, remote = inst.check_update(meta)
+            if has_update:
+                pending.append((meta, remote))
+        except Exception:
+            continue
+
+    updated: List[str] = []
+    failed: List[Tuple[str, str]] = []
+    if execute:
+        for i, (meta, remote) in enumerate(pending, 1):
+            name = meta.get("name", "?")
+            _report("update", f"({i}/{len(pending)}) {name} → v{remote}")
+            try:
+                ok = inst.update(meta)
+                (updated if ok else failed).extend(
+                    [name] if ok else [(name, "update 返回失败")]
+                )
+            except Exception as e:
+                failed.append((name, str(e)))
+            _time.sleep(0.3)  # 串行节流：连续替换目录留出文件句柄释放窗口
+
+    phase = "done" if execute else "check"
+    _report(phase, f"待更新 {len(pending)} 个" + (f"，已更新 {len(updated)} 个" if execute else ""))
+    return {
+        "updated": updated,
+        "failed": failed,
+        "checked": len(all_plugins),
+        "pending": len(pending),
+        "pending_names": [m.get("name", "?") for m, _r in pending],
+        "fetch_ok": bool(all_plugins),
+    }
