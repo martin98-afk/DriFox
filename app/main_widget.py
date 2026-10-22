@@ -21043,6 +21043,16 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_stream_finished(self, response: str):
         if getattr(self, "_is_destroyed", False):
             return
+        # 🐛 诊断（结束态残留定位）：卡片结束态唯一正路在此调用 finish_streaming。
+        # 若 card 为 None / 已删除 / 不是流式那张，结束态就会漏，只能靠卡片
+        # 自愈闸门 6s 兜底。打出判据确认漏在哪一跳。定位后移除。
+        _c = getattr(self, "_current_assistant_card", None)
+        logger.warning(
+            "[finish-diag] _on_stream_finished: "
+            f"card={'None' if _c is None else ('deleted' if _is_sip_deleted(_c) else 'alive')}"
+            f" card_streaming={getattr(_c, '_streaming', None) if _c is not None else None}"
+            f" layout_count={self.chat_layout.count()}"
+        )
         self._is_streaming = False
         self._toggle_send_stop(False)
         self._set_ai_state("idle")
