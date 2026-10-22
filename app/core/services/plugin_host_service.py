@@ -984,9 +984,15 @@ class PluginHostService(QObject):
         由 main_widget 在 UI 插件全部装载完成后调用；窗口内累积的变更
         由 _watch_loop 既有逻辑合并为一次兑底重载，不丢变更。
         """
-        if self._watcher_baseline_until > 0.0:
-            self._watcher_baseline_until = min(self._watcher_baseline_until, time.time() + 2.0)
+        now = time.time()
+        if self._watcher_baseline_until > now:
+            self._watcher_baseline_until = min(self._watcher_baseline_until, now + 2.0)
             logger.debug("[PluginHost] watcher 启动基线期收口（2s 缓冲后恢复即时热更新）")
+        elif self._watcher_baseline_until:
+            # 过期残留时间戳直接清零：收口只收缩不置零的话，残留的过期正数
+            # 会让后续每个新窗口的收口调用都误打本日志，看起来像热更新
+            # 被反复重启/插件被重载（实际无任何行为）
+            self._watcher_baseline_until = 0.0
 
     def _stop_plugin_watcher(self):
         """backend 关闭时递减 watcher 引用计数；归零时停止 watchfiles 线程。

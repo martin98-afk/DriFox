@@ -2743,7 +2743,7 @@ class MarketplaceCard(QWidget):
             return
         self._initial_view_done = True
         if self._plugin_data:
-            self._render_plugins(self._plugin_data)
+            self._render_plugins(self._plugin_data, auto_fill=False)
         else:
             self._render_local_installed()
 
@@ -2760,7 +2760,7 @@ class MarketplaceCard(QWidget):
         self._status_map = inst.get_status_map()
         self._all_plugins = []
         self._plugin_data = []
-        self._render_plugins(self._plugin_data)
+        self._render_plugins(self._plugin_data, auto_fill=False)
 
     def _apply_plugin_icon(self):
         """从上下文获取插件图标并更新头部图标"""
@@ -3444,6 +3444,19 @@ class MarketplaceCard(QWidget):
         # 滚动撞上补行即卡 1-3s 的直接来源）。
         if old and self._row_map and self._plugins_same(old, merged):
             return
+        if old and self._row_map:
+            # 诊断：内容判定为变化时打出首个差异字段（历版疑似 downloads
+            # 抖动已剔除，若仍频繁到达说明有其他字段在变，需进一步定位）
+            for a, b in zip(old, merged):
+                if a.get("name") != b.get("name"):
+                    logger.debug(f"[DEBUG-mp] merge diff name: {a.get('name')!r} vs {b.get('name')!r}")
+                    break
+                if a.get("version") != b.get("version"):
+                    logger.debug(f"[DEBUG-mp] merge diff version {a.get('name')}: {a.get('version')} vs {b.get('version')}")
+                    break
+                if a.get("description") != b.get("description"):
+                    logger.debug(f"[DEBUG-mp] merge diff desc {a.get('name')}")
+                    break
         if not self.isVisible():
             self._render_pending = True  # 不可见期间数据变化：打开时由 show_card 兜底渲染
             return
@@ -3495,7 +3508,7 @@ class MarketplaceCard(QWidget):
             return  # 不可见仅合并不渲染（数据已入 _plugin_data，下次显示自动渲染）
         if not self._initial_view_done:
             return  # 首屏由 _render_initial_view 渲染（合并本地/远程窗口）
-        self._render_plugins(self._plugin_data)
+        self._render_plugins(self._plugin_data, auto_fill=False)
 
     def _on_market_failed(self, failed: list, gen: int):
         """部分市场源拉取失败：仅更新源标记（绝不触碰 _plugin_data/_row_map）"""
@@ -3544,9 +3557,11 @@ class MarketplaceCard(QWidget):
     _RENDER_BATCH = 15  # 首批同步渲染行数：单行构造 ~13ms，30 行一帧 400ms 是打开掉帧主力，减半打散
     _MAX_CONCURRENT_TASKS = 3  # 任务并发上限：不同插件任务并行，超过则 FIFO 等待
 
-    def _render_plugins(self, plugins: list):
+    def _render_plugins(self, plugins: list, auto_fill: bool = True):
         """渲染插件列表：匹配才渲染 + 分段加载
 
+        - auto_fill=False（数据到达/重复渲染路径）：reconcile 补行只补首批内
+          缺失，不自动渐进加载；搜索/筛选/排序路径保持默认 True
         - 条件（搜索 + 激活 tag + 筛选模式 + 排序）变化 → 计算匹配列表
         - 同步渲染前 _RENDER_BATCH 个匹配行 + 「加载更多」按钮（手动点击分批）
         - 不匹配的行不创建 widget（插件多时省内存）
@@ -3608,7 +3623,7 @@ class MarketplaceCard(QWidget):
         if not data_changed and self._row_map and self._same_order(matched):
             self._all_plugins = plugins  # 内容相同，但同步引用（与 _plugin_data 对齐）
             self._matched = matched
-            self._reconcile_rows()
+            self._reconcile_rows(auto_fill=auto_fill)
             self._refresh_filter_counts()
             return
 
@@ -3736,7 +3751,7 @@ class MarketplaceCard(QWidget):
                 p["downloads"] = count
                 changed = True
         if changed:
-            self._render_plugins(getattr(self, "_all_plugins", []) or [])
+            self._render_plugins(getattr(self, "_all_plugins", []) or [], auto_fill=False)
 
     def _cleanup_dl_fetch_worker(self):
         """安全清理下载量查询 worker/thread（复用 _orphan_worker_thread 剥离模式）
@@ -3950,24 +3965,36 @@ class MarketplaceCard(QWidget):
         elif mode == "downloads":
             matched.sort(key=lambda p: p.get("downloads", 0), reverse=True)
 
-    def _render_next_batch(self):
+    def _render_next_batch(self, auto_fill: bool = True):
         """渲染下一批缺失的匹配行（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
 
         不依赖 _rendered_count 连续索引：搜索/筛选复用行后，_row_map 的行集合
         与 _matched 前部可能不一致（旧行 ≠ 新匹配列表前 N 个）。若按「已渲染
         计数」续渲染 _matched[start:end]，匹配列表前部新出现的插件会永远
         缺行 → 搜索不全。改为按 _matched 顺序补齐「尚无 widget 的插件」。
+
+        auto_fill=False（数据到达/重复渲染路径）：只补首批 _RENDER_BATCH
+        规模内的缺失，不自动渐进加载——历版每次开关市场自动 +15 行、
+        滚动撞上补行卡 1-3s 的直接来源；超出首批的行等用户点「加载更多」。
         """
         missing = [p for p in self._matched if p.get("name", "") not in self._row_map]
         if not missing:
             self._all_loaded = True
             self._remove_load_more_button()
             return
+        if not auto_fill:
+            first_batch = {p.get("name", "") for p in self._matched[: self._RENDER_BATCH]}
+            missing = [p for p in missing if p.get("name", "") in first_batch]
+            if not missing:
+                return
         batch = missing[: self._RENDER_BATCH]
         self._render_rows(batch)
         self._rendered_count = len(self._row_map)
-        if self._rendered_count < len(self._matched):
-            self._set_load_more_button(len(self._matched) - self._rendered_count)
+        # 剩余数按 matched 维度算（row_map 总数含非匹配行/本地 extras，
+        # 用它判定会提前收「加载更多」按钮 → 部分匹配插件永不渲染）
+        remaining = len(missing) - len(batch)
+        if remaining > 0:
+            self._set_load_more_button(remaining)
         else:
             self._all_loaded = True
             self._remove_load_more_button()
@@ -4282,14 +4309,17 @@ class MarketplaceCard(QWidget):
 
     def _filter_plugins(self):
         """搜索过滤（复用已有行，不重建 widget）"""
-        self._reconcile_rows()
+        self._reconcile_rows(auto_fill=True)
 
-    def _reconcile_rows(self):
+    def _reconcile_rows(self, auto_fill: bool = True):
         """按当前匹配列表协调已渲染行：显隐 + 高亮 + 补行（不重建已有行）
 
         与 _refresh_row_states 同范式；匹配顺序保持行创建顺序（暂不重排，
         排序轻微不一致可接受）。原实现走 _render_plugins 全量重建，
         行数多时每次搜索都销毁/重建首屏。
+
+        auto_fill 透传 _render_next_batch：搜索路径 True（补齐全部匹配），
+        数据到达/重复渲染路径 False（不自动渐进加载）。
         """
         query = self._search_edit.text().strip().lower()
         filter_mode = self._current_filter
@@ -4310,9 +4340,8 @@ class MarketplaceCard(QWidget):
             row.setVisible(self._plugin_matches(row._meta, query, filter_mode))
             row.update_search_highlight(query)
 
-        # 补齐缺失行（无条件调用：_render_next_batch 按 _matched 顺序补
-        # 尚无 widget 的插件 + 维护按钮/计数；匹配为空时内部收尾）
-        self._render_next_batch()
+        # 补齐缺失行（auto_fill：搜索路径补齐全部匹配；数据路径只补首批内）
+        self._render_next_batch(auto_fill=auto_fill)
         # 行显隐变化 → 内容高度变化 → 手动同步（widgetResizable=False 下
         # QScrollArea 不再自动收缩；不同步会残留旧高度 → 底部大段空白）
         self._sync_content_size()
