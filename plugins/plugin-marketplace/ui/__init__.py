@@ -4,7 +4,7 @@
 import threading
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 
 def register_ui(registry):
@@ -37,7 +37,7 @@ _auto_busy = False
 class _AutoUpdateBridge(QObject):
     """worker 线程 → 主线程完成通知（跨线程只能走 signal）"""
 
-    finished = pyqtSignal(int, int, str, int, int)  # (updated, failed, summary, pending, checked)
+    finished = Signal(int, int, str, int, int)  # (updated, failed, summary, pending, checked)
 
 
 def _ensure_auto_update_timer():

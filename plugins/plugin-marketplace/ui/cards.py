@@ -346,7 +346,7 @@ def notify_auto_update_done(updated: int, failed: int, summary: str):
     if updated <= 0 and failed <= 0:
         return
     try:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         card = None
         for w in QApplication.topLevelWidgets():
@@ -5919,7 +5919,7 @@ class MarketplaceCard(QWidget):
         if queued:
             self._status_label.setText(f"已加入更新队列：{queued} 个插件")
             self._status_label.setStyleSheet(
-                f"color: #FFA726; font-size: 12px; background: transparent;"
+                "color: #FFA726; font-size: 12px; background: transparent;"
             )
         else:
             self._status_label.setText("没有待更新的插件")
