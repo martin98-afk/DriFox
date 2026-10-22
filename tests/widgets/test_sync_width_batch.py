@@ -12,6 +12,7 @@
 
 本文件验证分帧链的调度行为与竞态语义（不依赖真实 WebEngine）。
 """
+
 import os
 import sys
 from unittest.mock import MagicMock, patch
@@ -19,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QRect, QTimer
 from PySide6.QtWidgets import QApplication  # noqa: F401
 
 from app.main_widget import OpenAIChatToolWindow, _SYNC_WIDTH_BATCH
@@ -27,7 +28,10 @@ from app.widgets.message_card import MessageCard
 
 
 def _make_window(n_cards: int) -> tuple:
-    """构造 _sync_all_cards_width 可运行的最小实例 + n 张 user 卡。"""
+    """构造 _sync_all_cards_width 可运行的最小实例 + n 张 user 卡。
+
+    卡片 offscreen 未布局，geometry 全 0 → 全部落在视口±buffer 内（分类为视口内段）。
+    """
     win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     # ⚠️ PyQt 对象未经 __init__ 时 getattr 会抛 RuntimeError，必须显式预置
     win._is_destroyed = False
@@ -40,6 +44,8 @@ def _make_window(n_cards: int) -> tuple:
 
     scroll_area = MagicMock()
     scroll_area.viewport.return_value.width.return_value = 800
+    scroll_area.viewport.return_value.rect.return_value = QRect(0, 0, 800, 900)
+    scroll_area.verticalScrollBar.return_value.value.return_value = 0
     win.chat_scroll_area = scroll_area
 
     cards = [MessageCard(role="user") for _ in range(n_cards)]
