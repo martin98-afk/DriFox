@@ -15257,7 +15257,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 传 400ms 总预算（历史默认 3000+1000 会让切历史会话卡 ~4s）。
                 # 拿不到中断消息也无害——deferred finalize 仍会兜底，且下方
                 # _auto_save_current_session 保存的也不会比旧行为更差。
-                from PyQt5.QtCore import QElapsedTimer as _QET
+                from PySide6.QtCore import QElapsedTimer as _QET
 
                 _t0 = _QET()
                 _t0.start()

@@ -87,8 +87,8 @@ os.environ.setdefault("DRIFOX_DATA_DIR", os.path.join(os.path.dirname(__file__),
 import pytest  # noqa: E402
 
 # Qt 属性必须在 QApplication 创建前设置（与 main.py / 既有 perf 基准对齐）
-from PyQt5.QtCore import QCoreApplication, Qt, QTimer  # noqa: E402
-from PyQt5.QtTest import QTest  # noqa: E402
+from PySide6.QtCore import QCoreApplication, Qt, QTimer  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 
 QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
