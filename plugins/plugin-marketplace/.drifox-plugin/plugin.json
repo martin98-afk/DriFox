@@ -18,5 +18,17 @@
     ],
     "components": {
         "ui": true
+    },
+    "config_schema": {
+        "title": "插件市场",
+        "fields": [
+            {
+                "key": "auto_update_enabled",
+                "label": "自动更新插件",
+                "type": "bool",
+                "default": false,
+                "description": "应用运行期间后台定时检查插件更新并自动安装（默认关闭；打开插件市场也会即时检查）"
+            }
+        ]
     }
 }

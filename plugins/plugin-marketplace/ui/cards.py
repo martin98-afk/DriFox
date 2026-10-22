@@ -305,6 +305,73 @@ class _MarketFetchWorker(QObject):
 # ── 路径解析 ──────────────────────────────────────────────
 
 
+def _sync_sidebar_title_count(n: int):
+    """侧栏/标题栏条目同步待更新计数：覆盖注册 floating card（title 带 (N)）
+
+    纯插件方案：SidebarItemInfo 无 badge 通道，行 widget 实例也在宿主内，
+    改用 title 文本计数（副作用：标题栏 tab 文案同步带计数，语义一致）。
+    title 未变化时不重复注册（避免无谓的侧栏全量重建）。
+    供卡片渲染与后台定时检查两路调用（后台路径让计数不依赖打开过市场）。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        info = reg.get_floating_cards().get("plugin-marketplace")
+        if info is None:
+            return
+        new_title = f"插件市场 ({n})" if n > 0 else "插件市场"
+        if info.title == new_title:
+            return
+        reg.register_floating_card(
+            plugin_name="plugin-marketplace",
+            card_id="plugin-marketplace",
+            widget_class=MarketplaceCard,
+            container="full",
+            title=new_title,
+            default_visible=False,
+        )
+        reg.refresh_sidebar_launcher()
+    except Exception as e:
+        logger.debug(f"[Marketplace] 侧栏计数刷新失败: {e}")
+
+
+def notify_auto_update_done(updated: int, failed: int, summary: str):
+    """后台更新检查完成的主线程通知：卡片可见则刷新；有实质结果才弹 InfoBar
+
+    无待更新/未执行更新（pending=0 或开关关闭仅检查）不打扰——侧栏计数
+    已表达状态；只有「自动更新了 N 个」或「有失败」才值得弹窗。
+    """
+    logger.info(f"[Marketplace] 更新检查完成: {summary}")
+    if updated <= 0 and failed <= 0:
+        return
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        card = None
+        for w in QApplication.topLevelWidgets():
+            card = w.findChild(MarketplaceCard)
+            if card is not None:
+                break
+        if card is not None and card._alive():
+            card._async_refresh()
+            try:
+                from qfluentwidgets import InfoBar, InfoBarPosition
+
+                parent = _host_parent(card)
+                InfoBar.success(
+                    "插件自动更新",
+                    summary,
+                    duration=6000,
+                    parent=parent,
+                    position=InfoBarPosition.TOP_RIGHT,
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"[Marketplace] 自动更新通知 UI 失败: {e}")
+
+
 def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
@@ -3046,6 +3113,14 @@ class MarketplaceCard(QWidget):
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         filter_layout.addWidget(self._sort_combo)
 
+        # 一键更新：有待更新插件时显示（计数由 _update_update_badge 维护）
+        self._update_all_btn = TransparentPushButton("一键更新", filter_row)
+        self._update_all_btn.setObjectName("updateAllBtn")
+        self._update_all_btn.setFixedHeight(33)
+        self._update_all_btn.clicked.connect(self._on_update_all)
+        self._update_all_btn.setVisible(False)
+        filter_layout.addWidget(self._update_all_btn)
+
         browse_root.addWidget(filter_row)
 
         # ── 市场来源过滤栏（横向滚动，数据加载后构建）──
@@ -5778,13 +5853,14 @@ class MarketplaceCard(QWidget):
             self._render_plugins(self._plugin_data)
 
     def _update_update_badge(self):
-        """统计可更新插件数，更新「待更新」tab 右上角 InfoBadge"""
+        """统计可更新插件数，更新「待更新」tab 右上角 InfoBadge + 一键更新按钮 + 侧栏计数"""
         if self._updates_badge is None:
             return
-        n = 0
+        pending_names: list = []
         for p in self._all_plugins or []:
             if p.get("name") in self._installed_set and self._has_update(p, True):
-                n += 1
+                pending_names.append(p)
+        n = len(pending_names)
         try:
             if n > 0:
                 self._updates_badge.setText(str(n))
@@ -5793,6 +5869,31 @@ class MarketplaceCard(QWidget):
                 self._updates_badge.setVisible(False)
         except RuntimeError:
             pass
+        # 一键更新按钮：有待更新才显示
+        try:
+            self._update_all_btn.setVisible(n > 0)
+            self._update_all_btn.setText(f"一键更新 ({n})")
+        except RuntimeError:
+            pass
+        _sync_sidebar_title_count(n)
+
+    def _on_update_all(self):
+        """一键全部更新：把当前全部待更新插件逐个入队（队列串行+并发上限）"""
+        if not self._all_plugins:
+            return
+        queued = 0
+        for p in self._all_plugins:
+            name = p.get("name", "")
+            if name in self._installed_set and self._has_update(p, True):
+                self._async_update(p)
+                queued += 1
+        if queued:
+            self._status_label.setText(f"已加入更新队列：{queued} 个插件")
+            self._status_label.setStyleSheet(
+                f"color: #FFA726; font-size: 12px; background: transparent;"
+            )
+        else:
+            self._status_label.setText("没有待更新的插件")
 
     # ── Tag 过滤 ──
 
