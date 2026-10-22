@@ -6,8 +6,8 @@ import sys
 
 faulthandler.enable(all_threads=True)
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 app = QApplication(sys.argv)
@@ -41,7 +41,7 @@ def done() -> None:
 
 QTimer.singleShot(2500, done)
 QTimer.singleShot(20000, app.quit)
-app.exec_()
+app.exec()
 print("quit ok", flush=True)
 sys.stdout.flush()
 import os

@@ -6,8 +6,8 @@ import sys
 
 faulthandler.enable(all_threads=True)
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 app = QApplication(sys.argv)
@@ -48,7 +48,7 @@ def step1() -> None:
 
 def step2() -> None:
     card.append_tool_result(
-        tool_name="search", result="检索结果：DriFox 是 PyQt5 桌面应用。", tool_call_id="tool_1"
+        tool_name="search", result="检索结果：DriFox 是 PySide6 桌面应用。", tool_call_id="tool_1"
     )
     print("tool result ok", flush=True)
     QTimer.singleShot(800, step3)
@@ -97,7 +97,7 @@ def done() -> None:
 
 QTimer.singleShot(2500, step1)
 QTimer.singleShot(60000, app.quit)
-app.exec_()
+app.exec()
 print("quit ok", flush=True)
 sys.stdout.flush()
 import os

@@ -4,7 +4,7 @@
 import sys
 
 import pytest
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 
 def _ensure_qapp():
@@ -300,7 +300,7 @@ def test_snapshot_clear_requires_confirmation(isolated_cfg, data_dir, monkeypatc
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-        def exec_(self):
+        def exec(self):
             return 0  # 用户取消
 
     monkeypatch.setattr(cd, "ConfirmDialog", _FakeDialog)
@@ -321,7 +321,7 @@ def test_snapshot_clear_removes_when_confirmed(isolated_cfg, data_dir, monkeypat
         def __init__(self, **kwargs):
             pass
 
-        def exec_(self):
+        def exec(self):
             return 1  # 确认
 
     monkeypatch.setattr(cd, "ConfirmDialog", _FakeDialog)
@@ -339,7 +339,7 @@ def test_snapshot_clear_noop_when_empty(isolated_cfg, data_dir, monkeypatch):
         def __init__(self, **kwargs):
             shown.append(True)
 
-        def exec_(self):
+        def exec(self):
             return 1
 
     monkeypatch.setattr(cd, "ConfirmDialog", _FakeDialog)
@@ -555,7 +555,7 @@ def test_backup_group_separate_from_delete(isolated_cfg):
 
 def test_data_group_height_tracks_exempt_items(isolated_cfg):
     """折叠组内添加条目后高度必须增长（回归：sizeHint 滞后致内容截断）"""
-    from PyQt5.QtTest import QTest
+    from PySide6.QtTest import QTest
 
     card = _make_card()
     group = card._data_group

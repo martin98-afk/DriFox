@@ -8,9 +8,9 @@
 
 from typing import Dict
 
-from PyQt5.QtCore import QByteArray, Qt
-from PyQt5.QtGui import QPainter, QPixmap
-from PyQt5.QtSvg import QSvgRenderer
+from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 
 # 24x24 viewBox 线性图标 path 集（fill=none + stroke 风格）
 _ICONS: Dict[str, str] = {

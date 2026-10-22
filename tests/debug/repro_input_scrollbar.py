@@ -9,7 +9,7 @@ import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 app = QApplication.instance() or QApplication(sys.argv)
 
@@ -45,8 +45,8 @@ assert vsb.maximum() > 2, "内容应真的可滚"
 
 # 滚轮向下：原生 scrollbar 值应增加
 before = vsb.value()
-from PyQt5.QtCore import QPoint, QPointF, Qt  # noqa: E402
-from PyQt5.QtGui import QWheelEvent  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
+from PySide6.QtGui import QWheelEvent  # noqa: E402
 
 ev = QWheelEvent(
     QPointF(100, 100),
