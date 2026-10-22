@@ -11,9 +11,9 @@ All notable changes to this project will be documented in this file.
 
 - **能力面改声明式 + 补 `TeamManager.get_member_agent_name`** (`app/plugins/capabilities/facets.py` · `app/core/team/team_manager.py` · `providers/tool_core.py` · `providers/ui_core.py` · `plugins/system-tools/tools/subagent_tools.py`): `f06fb272` 往 `team.read` 加了 `member_agent_name` 契约但从未实现该方法，而 provider 用一次性构造的 `{别名: 宿主方法}` 字典——单个 typo 让整个能力在取用瞬间抛 `AttributeError`：system-hooks 两个 SessionStart 注入 hook 自 10-19 起静默空转（异常被 `except` 吞掉），`team_list_members` 直接报 `Execution error`。更深一层是同批迁移把 `subagent_tools` 的 TeamManager 对象换成能力池，却没注意 provider 返回 dict（`'dict' object has no attribute 'get_members'`）。现改为 ①`facets.py` 用 `FacetSpec(target, methods)` 声明白名单，两个 surface 共用一份清单，`ReadOnlyFacade` 保证名单外（尤其写操作）访问抛 `AttributeError`；②补 `get_member_agent_name`（口径同 `get_member_run_id`：先读 `team_members` 快照，回退活跃 members）；③派单独立为 `team.send`（medium，`send_task` 单方法），与只读面分权，system-tools manifest 补声明；④`tests/plugins/test_capability_provider_contract.py` 遍历 `FACETS` 断言白名单方法在目标类真实存在、门面不泄漏写操作，typo 在 CI 就炸。团队相关用例由基线 26 failed 收敛到 11（余下 5 项为 `TestHistorySessionRestoreRegistersTeamMember` 与 `TestDeriveCapability` 的既有失败，与本次无关）。
 
-## [v0.6.10] - 2026-10-20 (重新发布 #6)
+## [v0.6.10] - 2026-10-20 (重新发布 #8)
 
-自 v0.6.9 以来的变更（累计） | 提交数：77 · 文件变更：218 · +13468/-2388 | 贡献者：dingma, drifox-bot, mading
+自 v0.6.9 以来的变更（累计） | 提交数：81 · 文件变更：227 · +14002/-2471 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -103,6 +103,22 @@ All notable changes to this project will be documented in this file.
 ### ✨ 新功能 (New Features)（重新发布 #6 追加）
 
 - **配置指纹准确跟踪字号键** (`2bd6d6df`, `app/widgets/markdown_block_viewer.py` · `tests/widgets/test_markdown_incremental_html_equivalence.py`): 配置指纹计算纳入字号相关键，字号变更能被指纹正确识别（此前改字号不产生新指纹，增量渲染缓存按旧指纹继续命中，字号改动不生效）。
+
+### ✨ 新功能 (New Features)（重新发布 #7 追加）
+
+- **插件市场自动更新** (`23bb1465`, `plugins/plugin-marketplace/`): E1 config_schema 声明「自动更新插件」开关（默认关），应用运行期后台定时检查并自动安装更新（失败保留旧版），打开市场即时补查一次；`run_auto_update_check` 纯逻辑可脱离 UI 调用（侧栏待更新计数场景 `execute=False` 仅比对不动文件）；更新检查强制拉取最新市场数据（绕开 1h 本地缓存，修「推送新版本后半小时仍报无待更新」）。
+
+### ⚡ 性能优化 (Performance)（重新发布 #7 追加）
+
+- **市场卡打开卡顿治理** (`089d8a29`, `f3e835d9`, `plugins/plugin-marketplace/ui/cards.py` · `installer.py` · `marketplace_manager.py`): ①重复打开零渲染：内容未变化（缓存命中重复到达）只存引用不 reconcile，历版每开自动补 15 行×2 轮、滚动撞上补行即卡 1-3s；②`auto_fill=False` 收口数据到达路径：reconcile 只补首批 `_RENDER_BATCH=15` 规模内缺失，超出等「加载更多」，首批同步渲染行数减半打散掉帧；③setFont 仅在字体真变化时应用（`QWidget.setFont` 全树 fontChange 传播是打开卡顿主源之一）；④安装映射 30s TTL 缓存 + merge 差异字段诊断日志；⑤预热线程后台化试验实测收益仅 100-250ms 且引入加载态假死风险，回退主线程同步渲染。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #7 追加）
+
+- **watcher 基线期收口日志误报** (`f3e835d9`, `app/core/services/plugin_host_service.py`): `finish_watcher_baseline` 收口只收缩截止时间戳不置零，残留的过期正数让每个新窗口初始化都误打「基线期收口」日志——看起来像每次新建 tab 都在重启热更新/重载插件，实际无任何行为。现仅在基线期未过期时收口，过期残留直接清零。
+
+### ⚡ 性能优化 (Performance)（重新发布 #8 追加）
+
+- **长会话窗口 resize 适配提速** (`f39133a8`, `app/main_widget.py`): 长列表松手后内容适配秒级的根治。①恢复链只恢复视口±400px 内卡片，离屏卡保持占位态（不再逐批 show+reflow 争抢 Chromium renderer），滚动接近时由 `_restore_card_now` 即时恢复（滚动条件同步去掉 `_restore_queue` 非空前置——收口后离屏占位卡的唯一恢复通道）；②宽度同步队列按视口内段优先重排，越过边界即流水线启动恢复链，视口内容就位不再等全量分帧同步跑完（省数百 ms）；③收口兑底扫描 `_release_leftover_preview_placeholders` 同步只复位视口内占位卡（范围不同步收窄则离屏优化被整体架空）。宽度同步仍全量分帧（防最小宽锁死容器的死锁修复保持不动）。
 
 ## [v0.6.9] - 2026-10-17 (重新发布 #5)
 

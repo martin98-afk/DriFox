@@ -300,6 +300,73 @@ class _MarketFetchWorker(QObject):
 # ── 路径解析 ──────────────────────────────────────────────
 
 
+def _sync_sidebar_title_count(n: int):
+    """侧栏/标题栏条目同步待更新计数：覆盖注册 floating card（title 带 (N)）
+
+    纯插件方案：SidebarItemInfo 无 badge 通道，行 widget 实例也在宿主内，
+    改用 title 文本计数（副作用：标题栏 tab 文案同步带计数，语义一致）。
+    title 未变化时不重复注册（避免无谓的侧栏全量重建）。
+    供卡片渲染与后台定时检查两路调用（后台路径让计数不依赖打开过市场）。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        info = reg.get_floating_cards().get("plugin-marketplace")
+        if info is None:
+            return
+        new_title = f"插件市场 ({n})" if n > 0 else "插件市场"
+        if info.title == new_title:
+            return
+        reg.register_floating_card(
+            plugin_name="plugin-marketplace",
+            card_id="plugin-marketplace",
+            widget_class=MarketplaceCard,
+            container="full",
+            title=new_title,
+            default_visible=False,
+        )
+        reg.refresh_sidebar_launcher()
+    except Exception as e:
+        logger.debug(f"[Marketplace] 侧栏计数刷新失败: {e}")
+
+
+def notify_auto_update_done(updated: int, failed: int, summary: str):
+    """后台更新检查完成的主线程通知：卡片可见则刷新；有实质结果才弹 InfoBar
+
+    无待更新/未执行更新（pending=0 或开关关闭仅检查）不打扰——侧栏计数
+    已表达状态；只有「自动更新了 N 个」或「有失败」才值得弹窗。
+    """
+    logger.info(f"[Marketplace] 更新检查完成: {summary}")
+    if updated <= 0 and failed <= 0:
+        return
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        card = None
+        for w in QApplication.topLevelWidgets():
+            card = w.findChild(MarketplaceCard)
+            if card is not None:
+                break
+        if card is not None and card._alive():
+            card._async_refresh()
+            try:
+                from qfluentwidgets import InfoBar, InfoBarPosition
+
+                parent = _host_parent(card)
+                InfoBar.success(
+                    "插件自动更新",
+                    summary,
+                    duration=6000,
+                    parent=parent,
+                    position=InfoBarPosition.TOP_RIGHT,
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"[Marketplace] 自动更新通知 UI 失败: {e}")
+
+
 def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
@@ -2587,10 +2654,13 @@ class MarketplaceCard(QWidget):
         self._worker_gen: int = 0  # worker 代次标记：递增，旧 worker 迟到信号按 gen 丢弃
         self._market_status_labels: dict = {}  # 市场名 → 状态徽标 QLabel（「市场」页）
         self._initial_render_timer: Optional["QTimer"] = None  # 首屏 300ms 合并窗口
+        self._preheat_done: bool = False  # （保留字段，兼容外部探测）预热机制已回退
         self._flush_timer: Optional["QTimer"] = None  # 市场渲染合并 timer（self 子对象，销毁自动取消）
         self._reveal_timer: Optional["QTimer"] = None  # 渲染完成延迟显示 timer（防压缩帧）
         self._load_timer: Optional["QTimer"] = None  # show_card 延迟加载 timer（同上）
+        _t0 = time.perf_counter()
         self._setup_ui()
+        logger.debug(f"[DEBUG-mp] ctor _setup_ui {(time.perf_counter() - _t0) * 1000:.0f}ms")
         # 宽度上限：比对话气泡区（约 1000px）宽一点点（1080）即可，不铺满覆盖层全宽。
         # 容器（CardContainer overlay）已设 AlignHCenter，卡片在此宽度内水平居中。
         # 覆盖层圆角面板由主程序容器绘制且铺满，此处仅约束卡片自身内容宽度。
@@ -2612,6 +2682,7 @@ class MarketplaceCard(QWidget):
         2. 再后台逐市场拉取远程，每到一个市场增量刷新
         """
         self.setVisible(True)
+        _t_show = time.perf_counter()
         self._apply_latest_theme()
         self._apply_plugin_icon()
         # 默认回到精选探索页（每次打开市场都从探索模式进入，商店首页语义）
@@ -2622,6 +2693,7 @@ class MarketplaceCard(QWidget):
         self._search_edit.clear()
         self._search_debounce.stop()
         # 延迟 50ms 启动加载，避免阻塞 show 过程（self 子 timer，销毁自动取消）
+        logger.debug(f"[DEBUG-mp] show_card sync {(time.perf_counter() - _t_show) * 1000:.0f}ms")
         if self._load_timer is None:
             from PyQt5.QtCore import QTimer
 
@@ -2629,8 +2701,10 @@ class MarketplaceCard(QWidget):
             self._load_timer.setSingleShot(True)
             self._load_timer.timeout.connect(self._start_load)
         self._load_timer.start(50)
-        # 兜底：已有合并数据但上次因不可见未渲染 → 立即补渲染
-        if self._plugin_data and self._initial_view_done and not self._render_pending:
+        # 兜底：仅当不可见期间有市场数据到达未渲染（_render_pending）时补渲染。
+        # 数据未变的重复打开零渲染零补行（历版无条件渲染 → 每开自动补
+        # 15 行×2 轮，滚动撞上补行即卡 1-3s）。
+        if self._initial_view_done and self._render_pending:
             self._schedule_render()
 
     def _start_load(self):
@@ -2638,9 +2712,14 @@ class MarketplaceCard(QWidget):
 
         本地视图延迟 300ms 渲染：若首个市场在此窗口内到达（缓存命中/快速源），
         直接渲染合并数据，跳过本地独立渲染（避免两次全量重建）。
+
+        注：曾试验预热线程后台化扫描，真机实测收益仅 100-250ms（主线程
+        自扫同量级）却引入预热线程偶发卡死 → 加载态假死 5s+ 的风险，
+        已回退为主线程同步渲染（_render_initial_view 300ms 后执行）。
         """
         if not self._alive():
             return  # 卡片已销毁
+        _t0 = time.perf_counter()
         self._async_refresh()
         if self._initial_render_timer is None:
             from PyQt5.QtCore import QTimer
@@ -2649,6 +2728,7 @@ class MarketplaceCard(QWidget):
             self._initial_render_timer.setSingleShot(True)
             self._initial_render_timer.timeout.connect(self._render_initial_view)
         self._initial_render_timer.start(300)
+        logger.debug(f"[DEBUG-mp] _start_load total {(time.perf_counter() - _t0) * 1000:.0f}ms")
 
     def _render_initial_view(self):
         """首屏渲染（仅首次执行一次）：有市场数据渲染合并结果，否则渲染本地"""
@@ -2658,7 +2738,7 @@ class MarketplaceCard(QWidget):
             return
         self._initial_view_done = True
         if self._plugin_data:
-            self._render_plugins(self._plugin_data)
+            self._render_plugins(self._plugin_data, auto_fill=False)
         else:
             self._render_local_installed()
 
@@ -2675,7 +2755,7 @@ class MarketplaceCard(QWidget):
         self._status_map = inst.get_status_map()
         self._all_plugins = []
         self._plugin_data = []
-        self._render_plugins(self._plugin_data)
+        self._render_plugins(self._plugin_data, auto_fill=False)
 
     def _apply_plugin_icon(self):
         """从上下文获取插件图标并更新头部图标"""
@@ -2734,7 +2814,11 @@ class MarketplaceCard(QWidget):
             self._last_font_size = font_size
 
         # ── 字体（通过 QFont 级联，使用系统字体大小） ──
-        if font_family:
+        # 仅字体 key 真变化时应用：QWidget.setFont 会向全树传播 fontChange
+        # 并失效布局，卡片数千控件下每次打开都白付一次全树重排（实测打开
+        # 卡顿主源之一）。theme_key 已含 (tc, tcs, font_family, font_size)，
+        # 未变化即字体未变化，直接跳过。
+        if font_family and theme_changed:
             self.setFont(QFont(font_family, font_size if font_size else 14))
 
         # 主题真变化时才全树 re-theme + 更新搜索框/分隔线（日常打开/切换不触发）
@@ -3023,6 +3107,14 @@ class MarketplaceCard(QWidget):
         self._sync_sort_combo_metrics()
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         filter_layout.addWidget(self._sort_combo)
+
+        # 一键更新：有待更新插件时显示（计数由 _update_update_badge 维护）
+        self._update_all_btn = TransparentPushButton("一键更新", filter_row)
+        self._update_all_btn.setObjectName("updateAllBtn")
+        self._update_all_btn.setFixedHeight(33)
+        self._update_all_btn.clicked.connect(self._on_update_all)
+        self._update_all_btn.setVisible(False)
+        filter_layout.addWidget(self._update_all_btn)
 
         browse_root.addWidget(filter_row)
 
@@ -3336,13 +3428,33 @@ class MarketplaceCard(QWidget):
         market_name = market_data.get("_marketplace") or market_data.get("name", "")
         plugins = market_data.get("plugins", []) or []
         # 合并：移除该市场旧数据，追加新数据（同名插件按市场覆盖）
-        merged = [p for p in self._plugin_data if p.get("_marketplace") != market_name]
+        old = self._plugin_data
+        merged = [p for p in old if p.get("_marketplace") != market_name]
         merged.extend(plugins)
         self._plugin_data = merged  # 数据始终合并，不因不可见丢失
         # 同步刷新「市场」页该源状态徽标
         self._refresh_market_status_label(market_name)
+        # 内容未变化（重复打开时缓存命中的重复到达）：只存引用不渲染。
+        # 否则每开一次都触发全量 reconcile + 自动补行（每开 +15 行、
+        # 滚动撞上补行即卡 1-3s 的直接来源）。
+        if old and self._row_map and self._plugins_same(old, merged):
+            return
+        if old and self._row_map:
+            # 诊断：内容判定为变化时打出首个差异字段（历版疑似 downloads
+            # 抖动已剔除，若仍频繁到达说明有其他字段在变，需进一步定位）
+            for a, b in zip(old, merged):
+                if a.get("name") != b.get("name"):
+                    logger.debug(f"[DEBUG-mp] merge diff name: {a.get('name')!r} vs {b.get('name')!r}")
+                    break
+                if a.get("version") != b.get("version"):
+                    logger.debug(f"[DEBUG-mp] merge diff version {a.get('name')}: {a.get('version')} vs {b.get('version')}")
+                    break
+                if a.get("description") != b.get("description"):
+                    logger.debug(f"[DEBUG-mp] merge diff desc {a.get('name')}")
+                    break
         if not self.isVisible():
-            return  # 仅跳过本次渲染（数据已在 _plugin_data）
+            self._render_pending = True  # 不可见期间数据变化：打开时由 show_card 兜底渲染
+            return
         self._schedule_render()
 
     def _on_market_fetched(self, market_data: dict, gen: int):
@@ -3391,7 +3503,7 @@ class MarketplaceCard(QWidget):
             return  # 不可见仅合并不渲染（数据已入 _plugin_data，下次显示自动渲染）
         if not self._initial_view_done:
             return  # 首屏由 _render_initial_view 渲染（合并本地/远程窗口）
-        self._render_plugins(self._plugin_data)
+        self._render_plugins(self._plugin_data, auto_fill=False)
 
     def _on_market_failed(self, failed: list, gen: int):
         """部分市场源拉取失败：仅更新源标记（绝不触碰 _plugin_data/_row_map）"""
@@ -3437,12 +3549,14 @@ class MarketplaceCard(QWidget):
 
     # ── 渲染 ──
 
-    _RENDER_BATCH = 30
+    _RENDER_BATCH = 15  # 首批同步渲染行数：单行构造 ~13ms，30 行一帧 400ms 是打开掉帧主力，减半打散
     _MAX_CONCURRENT_TASKS = 3  # 任务并发上限：不同插件任务并行，超过则 FIFO 等待
 
-    def _render_plugins(self, plugins: list):
+    def _render_plugins(self, plugins: list, auto_fill: bool = True):
         """渲染插件列表：匹配才渲染 + 分段加载
 
+        - auto_fill=False（数据到达/重复渲染路径）：reconcile 补行只补首批内
+          缺失，不自动渐进加载；搜索/筛选/排序路径保持默认 True
         - 条件（搜索 + 激活 tag + 筛选模式 + 排序）变化 → 计算匹配列表
         - 同步渲染前 _RENDER_BATCH 个匹配行 + 「加载更多」按钮（手动点击分批）
         - 不匹配的行不创建 widget（插件多时省内存）
@@ -3450,6 +3564,7 @@ class MarketplaceCard(QWidget):
         """
         query = self._search_edit.text().strip().lower()
         filter_mode = self._current_filter
+        _dbg_t0 = time.perf_counter()
 
         # 缓存 tags（避免重复计算）
         for p in plugins:
@@ -3461,20 +3576,30 @@ class MarketplaceCard(QWidget):
         self._installed_set = set(inst_map)
         self._version_map = inst_map
         self._status_map = get_installer().get_status_map()
+        _dbg_scan_ms = (time.perf_counter() - _dbg_t0) * 1000
 
         # 数据内容变化 → 更新全量数据 + 重建 tag 栏 / 来源栏 / 精选探索页
         data_changed = not self._all_plugins or not self._plugins_same(self._all_plugins, plugins)
         if data_changed:
             self._all_plugins = plugins
+            _t_tag = time.perf_counter()
             self._rebuild_tag_bar()
             self._rebuild_source_bar()
+            _t_src = time.perf_counter()
             self._rebuild_explore()
+            _t_exp = time.perf_counter()
             # 重建 tag/source 栏会重新 setVisible(True)，精选模式下需按模式校正
             self._apply_browse_mode(self._current_filter)
+            logger.debug(
+                f"[DEBUG-mp] rebuild tag+src={(_t_src - _t_tag) * 1000:.0f}ms"
+                f" explore={(_t_exp - _t_src) * 1000:.0f}ms"
+            )
+        _dbg_rebuild_ms = (time.perf_counter() - _dbg_t0) * 1000
 
         # 「已安装」视图：并入市场列表外的本地插件（系统/禁用/手动安装）
         # 任何筛选下都并入，由 _plugin_matches 按 filter_mode 过滤（uninstalled 会剔除已装）
         view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        _dbg_extras_ms = (time.perf_counter() - _dbg_t0) * 1000
 
         # 社区插件（无 downloads 字段）→ 后台实时查询下载量（缓存 + 防抖）
         self._schedule_downloads_fetch(view_plugins)
@@ -3482,13 +3607,18 @@ class MarketplaceCard(QWidget):
         # 计算匹配列表（搜索 + tag + 筛选）并排序
         matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(matched)
+        logger.debug(
+            f"[DEBUG-mp] render_plugins scan={_dbg_scan_ms:.0f} rebuild={_dbg_rebuild_ms - _dbg_scan_ms:.0f}"
+            f" extras={_dbg_extras_ms - _dbg_rebuild_ms:.0f} match={((time.perf_counter() - _dbg_t0) * 1000 - _dbg_extras_ms):.0f}"
+            f" rows_cached={len(self._row_map)}"
+        )
 
         # 数据未变化且匹配顺序未变化（排序/数据顺序没变）→ 复用已有行，
         # 不重建不闪烁：仅刷新安装状态、匹配与计数（_reconcile_rows 与渲染同范式）
         if not data_changed and self._row_map and self._same_order(matched):
             self._all_plugins = plugins  # 内容相同，但同步引用（与 _plugin_data 对齐）
             self._matched = matched
-            self._reconcile_rows()
+            self._reconcile_rows(auto_fill=auto_fill)
             self._refresh_filter_counts()
             return
 
@@ -3520,10 +3650,14 @@ class MarketplaceCard(QWidget):
 
     @staticmethod
     def _plugins_same(old: list, new: list) -> bool:
-        """判断两次拉取的市场数据是否内容相同（name/version/desc/downloads 逐项比较）
+        """判断两次拉取的市场数据是否内容相同（name/version/description 逐项比较）
 
         拉取总是新建 dict/list（json 反序列化），引用必然不同；
         内容相同时可复用已有行（不重建、不闪烁），并跳过 tag 栏/角标重建。
+
+        downloads 不参与比较：服务端下载量统计频繁抖动，纳入判定会导致
+        每次网络到达都全量重建（tag/来源/探索页 rebuild 数百 ms 单帧卡顿），
+        下载量显示滞后到下次真实变化完全可接受。
         """
         if old is new:
             return True
@@ -3534,7 +3668,6 @@ class MarketplaceCard(QWidget):
                 a.get("name") != b.get("name")
                 or a.get("version") != b.get("version")
                 or a.get("description") != b.get("description")
-                or a.get("downloads") != b.get("downloads")
             ):
                 return False
         return True
@@ -3609,7 +3742,7 @@ class MarketplaceCard(QWidget):
                 p["downloads"] = count
                 changed = True
         if changed:
-            self._render_plugins(getattr(self, "_all_plugins", []) or [])
+            self._render_plugins(getattr(self, "_all_plugins", []) or [], auto_fill=False)
 
     def _cleanup_dl_fetch_worker(self):
         """安全清理下载量查询 worker/thread（复用 _orphan_worker_thread 剥离模式）
@@ -3823,24 +3956,36 @@ class MarketplaceCard(QWidget):
         elif mode == "downloads":
             matched.sort(key=lambda p: p.get("downloads", 0), reverse=True)
 
-    def _render_next_batch(self):
+    def _render_next_batch(self, auto_fill: bool = True):
         """渲染下一批缺失的匹配行（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
 
         不依赖 _rendered_count 连续索引：搜索/筛选复用行后，_row_map 的行集合
         与 _matched 前部可能不一致（旧行 ≠ 新匹配列表前 N 个）。若按「已渲染
         计数」续渲染 _matched[start:end]，匹配列表前部新出现的插件会永远
         缺行 → 搜索不全。改为按 _matched 顺序补齐「尚无 widget 的插件」。
+
+        auto_fill=False（数据到达/重复渲染路径）：只补首批 _RENDER_BATCH
+        规模内的缺失，不自动渐进加载——历版每次开关市场自动 +15 行、
+        滚动撞上补行卡 1-3s 的直接来源；超出首批的行等用户点「加载更多」。
         """
         missing = [p for p in self._matched if p.get("name", "") not in self._row_map]
         if not missing:
             self._all_loaded = True
             self._remove_load_more_button()
             return
+        if not auto_fill:
+            first_batch = {p.get("name", "") for p in self._matched[: self._RENDER_BATCH]}
+            missing = [p for p in missing if p.get("name", "") in first_batch]
+            if not missing:
+                return
         batch = missing[: self._RENDER_BATCH]
         self._render_rows(batch)
         self._rendered_count = len(self._row_map)
-        if self._rendered_count < len(self._matched):
-            self._set_load_more_button(len(self._matched) - self._rendered_count)
+        # 剩余数按 matched 维度算（row_map 总数含非匹配行/本地 extras，
+        # 用它判定会提前收「加载更多」按钮 → 部分匹配插件永不渲染）
+        remaining = len(missing) - len(batch)
+        if remaining > 0:
+            self._set_load_more_button(remaining)
         else:
             self._all_loaded = True
             self._remove_load_more_button()
@@ -4155,14 +4300,17 @@ class MarketplaceCard(QWidget):
 
     def _filter_plugins(self):
         """搜索过滤（复用已有行，不重建 widget）"""
-        self._reconcile_rows()
+        self._reconcile_rows(auto_fill=True)
 
-    def _reconcile_rows(self):
+    def _reconcile_rows(self, auto_fill: bool = True):
         """按当前匹配列表协调已渲染行：显隐 + 高亮 + 补行（不重建已有行）
 
         与 _refresh_row_states 同范式；匹配顺序保持行创建顺序（暂不重排，
         排序轻微不一致可接受）。原实现走 _render_plugins 全量重建，
         行数多时每次搜索都销毁/重建首屏。
+
+        auto_fill 透传 _render_next_batch：搜索路径 True（补齐全部匹配），
+        数据到达/重复渲染路径 False（不自动渐进加载）。
         """
         query = self._search_edit.text().strip().lower()
         filter_mode = self._current_filter
@@ -4183,9 +4331,8 @@ class MarketplaceCard(QWidget):
             row.setVisible(self._plugin_matches(row._meta, query, filter_mode))
             row.update_search_highlight(query)
 
-        # 补齐缺失行（无条件调用：_render_next_batch 按 _matched 顺序补
-        # 尚无 widget 的插件 + 维护按钮/计数；匹配为空时内部收尾）
-        self._render_next_batch()
+        # 补齐缺失行（auto_fill：搜索路径补齐全部匹配；数据路径只补首批内）
+        self._render_next_batch(auto_fill=auto_fill)
         # 行显隐变化 → 内容高度变化 → 手动同步（widgetResizable=False 下
         # QScrollArea 不再自动收缩；不同步会残留旧高度 → 底部大段空白）
         self._sync_content_size()
@@ -5711,13 +5858,14 @@ class MarketplaceCard(QWidget):
             self._render_plugins(self._plugin_data)
 
     def _update_update_badge(self):
-        """统计可更新插件数，更新「待更新」tab 右上角 InfoBadge"""
+        """统计可更新插件数，更新「待更新」tab 右上角 InfoBadge + 一键更新按钮 + 侧栏计数"""
         if self._updates_badge is None:
             return
-        n = 0
+        pending_names: list = []
         for p in self._all_plugins or []:
             if p.get("name") in self._installed_set and self._has_update(p, True):
-                n += 1
+                pending_names.append(p)
+        n = len(pending_names)
         try:
             if n > 0:
                 self._updates_badge.setText(str(n))
@@ -5726,6 +5874,31 @@ class MarketplaceCard(QWidget):
                 self._updates_badge.setVisible(False)
         except RuntimeError:
             pass
+        # 一键更新按钮：有待更新才显示
+        try:
+            self._update_all_btn.setVisible(n > 0)
+            self._update_all_btn.setText(f"一键更新 ({n})")
+        except RuntimeError:
+            pass
+        _sync_sidebar_title_count(n)
+
+    def _on_update_all(self):
+        """一键全部更新：把当前全部待更新插件逐个入队（队列串行+并发上限）"""
+        if not self._all_plugins:
+            return
+        queued = 0
+        for p in self._all_plugins:
+            name = p.get("name", "")
+            if name in self._installed_set and self._has_update(p, True):
+                self._async_update(p)
+                queued += 1
+        if queued:
+            self._status_label.setText(f"已加入更新队列：{queued} 个插件")
+            self._status_label.setStyleSheet(
+                f"color: #FFA726; font-size: 12px; background: transparent;"
+            )
+        else:
+            self._status_label.setText("没有待更新的插件")
 
     # ── Tag 过滤 ──
 
