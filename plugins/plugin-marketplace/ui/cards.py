@@ -192,7 +192,7 @@ def _card_caps():
     市场卡的父链最终指向主窗口；_build_ui_capabilities 是窗口级全量池。
     """
     try:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         for w in QApplication.topLevelWidgets():
             builder = getattr(w, "_build_ui_capabilities", None)
@@ -217,7 +217,7 @@ def _host_parent(widget: QWidget):
     except Exception:
         pass
     try:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         for w in QApplication.topLevelWidgets():
             if w.isVisible():

@@ -509,7 +509,7 @@ def _ui_dialog(host: Any):
         dlg = ConfirmDialog(title, content, confirm_text=confirm_text, parent=_parent())
         result = {"ok": False}
         dlg.confirmed.connect(lambda: result.__setitem__("ok", True))
-        dlg.exec_()
+        dlg.exec()
         return bool(result["ok"])
 
     def prompt(title: str, hint: str = "", default_text: str = "") -> object:
@@ -520,23 +520,23 @@ def _ui_dialog(host: Any):
         )
         box = {}
         dlg.confirmed.connect(lambda text: box.__setitem__("text", text))
-        dlg.exec_()
+        dlg.exec()
         return box.get("text")
 
     def pick_file(title: str = "选择文件", start_dir: str = "", filter: str = "") -> str:
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         path, _ = QFileDialog.getOpenFileName(_parent(), title, start_dir, filter)
         return str(path or "")
 
     def pick_dir(title: str = "选择目录", start_dir: str = "") -> str:
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         path = QFileDialog.getExistingDirectory(_parent(), title, start_dir)
         return str(path or "")
 
     def save_file(title: str = "保存文件", start_dir: str = "", filter: str = "") -> str:
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         path, _ = QFileDialog.getSaveFileName(_parent(), title, start_dir, filter)
         return str(path or "")
