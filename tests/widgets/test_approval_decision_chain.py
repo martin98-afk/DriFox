@@ -16,7 +16,7 @@ def _main_widget_source() -> str:
 
 def test_ai_review_signal_bridged():
     src = _main_widget_source()
-    assert "_approval_review_ready = pyqtSignal(str, object, str)" in src
+    assert "_approval_review_ready = Signal(str, object, str)" in src
     assert "_approval_review_ready.connect(self._on_approval_review_ready)" in src
 
 

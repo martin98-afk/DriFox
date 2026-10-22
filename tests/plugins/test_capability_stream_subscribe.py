@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """stream.subscribe：订阅 backend 信号 / 返回已绑定名单 / release_plugin 断开。"""
 import pytest
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 
 class _Backend(QObject):
-    stream_started = pyqtSignal()
-    stream_finished = pyqtSignal(str)
-    tool_call_started = pyqtSignal(str, str, dict)
+    stream_started = Signal()
+    stream_finished = Signal(str)
+    tool_call_started = Signal(str, str, dict)
 
 
 class _Host:
