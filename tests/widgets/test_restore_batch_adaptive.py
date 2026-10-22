@@ -91,7 +91,12 @@ def _orchestrator_current(monkeypatch):
 
 
 def test_visible_cards_go_through_queue_not_restored_at_once(qapp, monkeypatch):
-    """视口内卡片必须进队列分批恢复，不能在 _begin_restore_chain 里一次性恢复。"""
+    """视口内卡片必须进队列分批恢复，离屏卡保持占位不进队列。
+
+    [#resize-long-list] 恢复链只处理视口±400px 内卡片：离屏卡不恢复
+    （不与视口内卡争抢 Chromium reflow），等滚动接近时由
+    `_restore_card_now` 即时恢复。
+    """
     from PyQt5.QtCore import QTimer
 
     cards = [_StubCard(i * 150) for i in range(12)]
@@ -103,15 +108,16 @@ def test_visible_cards_go_through_queue_not_restored_at_once(qapp, monkeypatch):
 
     win._begin_restore_chain(0)
 
-    # 全部 12 张都进队列（视口 900 + 上下 400 缓冲 → 9 张视口内）
-    assert len(win._restore_queue) == 12
+    # 视口 900 + 上下 400 缓冲 → 9 张视口内进队列；3 张离屏保持占位
     assert win._restore_visible_count == 9
-    # 首批只恢复 _RESTORE_BATCH_INIT 张，其余仍在 preview 占位
+    assert len(win._restore_queue) == 9
     restored = [c for c in cards if c.preview_calls]
-    assert len(restored) == min(_RESTORE_BATCH_INIT, len(cards))
+    assert len(restored) == min(_RESTORE_BATCH_INIT, len(win._restore_queue))
     assert all(c.preview_calls == [False] for c in restored)
-    # 未恢复的卡片保持占位态（等后续批次）
-    assert all(c._resize_preview_mode for c in cards[len(restored) :])
+    # 未恢复的卡片保持占位态（视口内的等后续批次，离屏的等滚动即时恢复）
+    assert all(c._resize_preview_mode for c in cards if c not in restored)
+    # 离屏段不存在：间隔恒为视口内节奏（由 _restore_visible_count == len(queue) 保证）
+    assert win._restore_visible_count == len(win._restore_queue)
 
 
 def test_batch_size_shrinks_when_slow(qapp, monkeypatch):
