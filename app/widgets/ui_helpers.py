@@ -848,6 +848,33 @@ def find_last_assistant_card(chat_layout) -> Any:
     return None
 
 
+def find_last_streaming_assistant_card(chat_layout) -> Any:
+    """找到布局中最后一张仍在流式态的活 assistant 卡片。
+
+    结束信号的收尾目标语义是「正在流式的那张卡」。登记引用
+    （_current_assistant_card）在流式中可能因卡片回收/重建失效
+    （sip-deleted wrapper 仍被 Python 属性持有），此时按状态回退查找。
+    sip-deleted 的卡在 isinstance/getattr 阶段抛 RuntimeError，直接跳过。
+    """
+    for i in range(chat_layout.count() - 1, -1, -1):
+        item = chat_layout.itemAt(i)
+        if not item or not item.widget():
+            continue
+        widget = item.widget()
+        try:
+            if not isinstance(widget, MessageCard):
+                continue
+            if getattr(widget, "_is_welcome", False):
+                continue
+            if widget.role != "assistant":
+                continue
+            if getattr(widget, "_streaming", False):
+                return widget
+        except RuntimeError:
+            continue
+    return None
+
+
 def count_user_cards_in_layout(chat_layout) -> int:
     """
     计算布局中的用户消息卡片数量（不包括欢迎卡片）

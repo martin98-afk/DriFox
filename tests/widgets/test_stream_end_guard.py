@@ -1,137 +1,75 @@
 # -*- coding: utf-8 -*-
-"""回归：流式态自愈闸门 —— 内容长时间不增长时卡片必须自行收尾
+"""回归：结束收尾目标解析 —— 引用失效时按状态回退找流式卡
 
-缺陷（2026-10-18 真机实证，ui.log / all.log）：
-```
-01:01:52  worker finished
-01:01:53  render-diag md=5396            ← 最后一次渲染，本轮内容到此为止
-01:01:56 ↓ dock-blank 此后每 2s 刷一次，viewer 在 1796↔1805 反复横跳
-01:02:16  用户手动删除该轮，抖动才停止
-```
+历史（2026-10-18 → 2026-10-23 演进）：
+- 2026-10-18 真机实证结束态残留（卡片永远停在 _streaming=True），当时以
+  6s 自愈闸门 _guard_stream_end 兜底。
+- 2026-10-23 发现闸门在思考期误触发（reasoning 静默累积不进 _markdown_text，
+  思考 >6s 即被误判死流，每 6s 强制终态渲染 = 卡片高度突变再恢复），闸门
+  已移除；真根因改为「finish 到达时 _current_assistant_card 已 deleted
+  （流式中卡片被回收/重建，引用未转移）→ 收尾整体跳过」。
+- 修复：_on_stream_finished 引用失效时按状态回退
+  （find_last_streaming_assistant_card），收尾目标语义 = 「正在流式的那张
+  卡」，与 Python 侧持着哪个引用无关。配套 cleanup 哨兵定位删除者。
 
-卡片结束态唯一入口是 `main_widget._on_stream_finished` →
-`_current_assistant_card.finish_streaming()`。该单点漏掉时（引用被切走 /
-stream_finished 被 UIEngine 的 is_streaming 守卫吞掉 / 卡片已 sip 删除），
-卡片**永远停在 _streaming=True**：
-  - 坞态不归位、工具区不折叠（用户感知「对话结束卡片状态没变化」）；
-  - 高度追踪 tick 常转 → viewer 高度持续振荡、内容反复重排换行。
-
-修复：`MessageCard._guard_stream_end()` 借流式动画定时器做卡片级自愈
-（20fps 定时器流式期间本就常转，零额外成本）。
-
-本用例用 stub viewer，不依赖 WebEngine。
+本文件测回退查找语义（QVBoxLayout + 真实 MessageCard，不依赖 WebEngine）。
 """
 
-import time
-from unittest.mock import MagicMock
+import pytest
 
-from app.widgets.message_card import MessageCard  # noqa: E402
-
-
-def _make_streaming_card(md_len: int = 100, active_tools: bool = False):
-    card = MessageCard.__new__(MessageCard)
-    card.role = "assistant"
-    card._streaming = True
-    viewer = MagicMock()
-    viewer._markdown_text = "x" * md_len
-    card.viewer = viewer
-    card._has_active_tools = lambda: active_tools
-    card._stream_guard_len = md_len
-    card._stream_guard_ts = time.monotonic()
-    card.stop_streaming_anim = MagicMock()
-    card.finish_streaming = MagicMock()
-    # _guard_stream_end 借用 _update_anim 的定时器节拍；本用例直接调用闸门，
-    # 但保留 _anim_clock 桩以免牵连 _update_anim 的其余分支。
-    card._anim_clock = MagicMock()
-    card._anim_clock.restart.return_value = 0.0
-    return card, viewer
+from app.widgets.message_card import MessageCard
+from app.widgets.ui_helpers import find_last_streaming_assistant_card
 
 
-# ─── 1. 内容停止增长超过阈值 → 必须自愈收尾 ────────────────────
+def _make_card(role: str, streaming: bool) -> MessageCard:
+    card = MessageCard(role=role)
+    card._streaming = streaming
+    return card
 
 
-def test_stale_stream_self_finalizes():
-    """内容不再增长且逾越阈值 → 自行 finish_streaming（force_dock_off）"""
-    card, _v = _make_streaming_card()
-    card._stream_guard_ts = time.monotonic() - (card._STREAM_END_GUARD_S + 1.0)
-    card._guard_stream_end()
-    card.stop_streaming_anim.assert_called_once()
-    card.finish_streaming.assert_called_once_with(force_dock_off=True)
+@pytest.fixture
+def layout(qapp):
+    from PySide6.QtWidgets import QVBoxLayout
+
+    lay = QVBoxLayout()
+    yield lay
 
 
-# ─── 2. 正常流式不得误触发 ──────────────────────────────────────
+def _add(layout, card):
+    layout.addWidget(card)
 
 
-def test_growing_content_never_self_finalizes():
-    """内容还在增长 → 只刷新基准，绝不收尾（误触发会打断正常对话）"""
-    card, viewer = _make_streaming_card(md_len=100)
-    card._stream_guard_ts = time.monotonic() - 999.0  # 即便基准极旧
-    viewer._markdown_text = "x" * 500  # 内容变了
-    card._guard_stream_end()
-    card.finish_streaming.assert_not_called()
-    assert card._stream_guard_len == 500  # 基准已刷新
+def test_fallback_finds_last_streaming_card(layout):
+    """多张卡中取最后一张流式卡（新列表重建后真正在流式的那张）。"""
+    _add(layout, _make_card("assistant", streaming=False))
+    _add(layout, _make_card("user", streaming=False))
+    target = _make_card("assistant", streaming=True)
+    _add(layout, target)
+    assert find_last_streaming_assistant_card(layout) is target
 
 
-def test_before_threshold_never_self_finalizes():
-    """未逾越阈值 → 不收尾（模型短暂静默是正常态）"""
-    card, _v = _make_streaming_card()
-    card._stream_guard_ts = time.monotonic() - 1.0
-    card._guard_stream_end()
-    card.finish_streaming.assert_not_called()
+def test_fallback_returns_none_when_all_settled(layout):
+    """全部已收尾 → None（_on_stream_finished 侧不收尾，行为与旧逻辑一致）。"""
+    _add(layout, _make_card("assistant", streaming=False))
+    _add(layout, _make_card("user", streaming=False))
+    assert find_last_streaming_assistant_card(layout) is None
 
 
-def test_active_tools_suppress_guard():
-    """仍有工具在执行 → 不收尾（模型在等工具结果，几十秒无文本是正常态）"""
-    card, _v = _make_streaming_card(active_tools=True)
-    card._stream_guard_ts = time.monotonic() - 999.0
-    card._guard_stream_end()
-    card.finish_streaming.assert_not_called()
+def test_fallback_ignores_user_and_welcome_cards(layout):
+    """user 卡与欢迎卡不参与回退（哪怕带 _streaming=True 脏状态）。"""
+    _add(layout, _make_card("welcome", streaming=True))
+    _add(layout, _make_card("user", streaming=True))
+    assert find_last_streaming_assistant_card(layout) is None
 
 
-def test_reasoning_growth_suppress_guard():
-    """思考流（reasoning）增长 → 不收尾（2026-10-23「思考中高度突变」回归）。
-
-    🐛 根因：reasoning chunk 走 append_reasoning 静默累积，不进 _markdown_text
-    → 推理模型思考 >6s（常态）期间旧口径 cur_len 恒定且无活跃工具 → 闸门每
-    6s 误触发 finish_streaming 强制终态渲染 → 卡片高度突然重排（变高）→ 下一
-    个思考 chunk 又拉回流式（恢复）。真机日志 40s 内误触发 3 次。
-    """
-    card, viewer = _make_streaming_card(md_len=100)
-    card._reasoning_total_len = 2000  # 思考已在静默累积
-    card._stream_guard_ts = time.monotonic() - 999.0
-    card._reasoning_total_len = 2600  # 思考流又涨了 600，md 仍不变
-    card._guard_stream_end()
-    card.finish_streaming.assert_not_called()
-    assert card._stream_guard_len == 100 + 2600  # 口径 = md + reasoning，基准已刷新
+def test_fallback_picks_latest_among_multiple_streaming(layout):
+    """多张流式卡并存（插话场景）时取最后一张（最新一轮）。"""
+    _add(layout, _make_card("assistant", streaming=True))
+    target = _make_card("assistant", streaming=True)
+    _add(layout, target)
+    assert find_last_streaming_assistant_card(layout) is target
 
 
-# ─── 3. 未武装不得参与（历史卡 / 已收尾卡）────────────────────
-
-
-def test_unarmed_guard_is_inert():
-    """_stream_guard_len < 0（未武装）→ 闸门惰性，绝不收尾"""
-    card, _v = _make_streaming_card()
-    card._stream_guard_len = -1
-    card._stream_guard_ts = time.monotonic() - 999.0
-    card._guard_stream_end()
-    card.finish_streaming.assert_not_called()
-
-
-# ─── 4. 懒武装：待取样态必须记录基准，不得永久惰性 ────────────────
-
-
-def test_pending_arms_on_first_run():
-    """_stream_guard_len=-1（新一轮待取样）首次运行必须记录基准
-
-    🐛 回归：原实现见到 -1 直接 return 且从不赋值 → 恒为 -1 → 闸门永
-    远判不到增长，自愈从不触发（真机日志零条 stream-guard）。
-    """
-    card, _v = _make_streaming_card(md_len=100)
-    card._stream_guard_len = -1
-    card._guard_stream_end()
-    assert card._stream_guard_len == 100, "首次运行必须懒武装，记录当前内容长度为基准"
-    card.finish_streaming.assert_not_called()  # 本拍只取样，不判定
-    # 第二拍：内容未增长且逾越阈值 → 必须收尾（证明武装后闸门真的能跑）
-    card._stream_guard_ts = time.monotonic() - (card._STREAM_END_GUARD_S + 1.0)
-    card._guard_stream_end()
-    card.finish_streaming.assert_called_once_with(force_dock_off=True)
+def test_fallback_empty_layout(layout):
+    """空布局 → None。"""
+    assert find_last_streaming_assistant_card(layout) is None

@@ -280,13 +280,10 @@ class MessageCard(SimpleCardWidget):
     # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
     _LIVE_GAP_CAP_S = 2.0
 
-    # 流式态自愈闸门阈值（秒）：流式动画定时器在跑（_streaming=True）但正文
-    # 内容连续这么久没有新增 → 判定本轮已结束，卡片自行 finish_streaming。
-    # 取值权衡：短了会误伤「模型思考 / 长工具执行」的静默期；长了残留窗口变久。
-    # 6s 的依据：有活跃工具时闸门**不计时**（_guard_stream_end 内跳过并刷新
-    # 基准），故本阈值只覆盖「无工具、纯静默」这一真正异常的情形 —— 正常模型
-    # 在无工具待跑时不会静默 6s 不吐字（含思考也是持续出字）。
-    _STREAM_END_GUARD_S = 6.0
+    # （自愈闸门 _STREAM_END_GUARD_S / _guard_stream_end 已移除，2026-10-23：
+    # 阈值式兜底无法区分「思考静默」与「真死流」，思考期误触发致高度突变；
+    # 改由 finish 链路按状态找卡收尾 + cleanup 哨兵定位删除者，见
+    # main_widget._on_stream_finished / MessageCard.cleanup。）
 
     @property
     def _renderer_pid(self) -> int:
@@ -431,10 +428,6 @@ class MessageCard(SimpleCardWidget):
         self._finish_t0 = 0.0
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
-        # 流式态自愈闸门基准（见 _guard_stream_end）：-1 = 未武装（新一轮开始时
-        # 由 start_streaming_anim 置位），避免历史卡/已结束卡误触发自愈收尾。
-        self._stream_guard_len = -1
-        self._stream_guard_ts = 0.0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
         # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick 已把"应用"
         # 侧的节拍连续化，防抖只负责合并同一窗口内的上报，不再需要独自扛
@@ -2290,10 +2283,6 @@ class MessageCard(SimpleCardWidget):
         # 🐛 修复"工具结果冒出又消失"：新轮流式开始时恢复 viewer 流式模式，
         # 避免 finish_streaming 后 viewer._streaming=False 导致工具结果到达时
         # append_tool_result 跳过 callback 更新，被后续 _perform_update 覆盖。
-        # 武装流式态自愈闸门：只有新一轮开始才有「内容应当继续增长」的预期，
-        # 历史卡 / 已收尾卡不参与（见 _guard_stream_end）。-1 = 未武装。
-        self._stream_guard_len = -1
-        self._stream_guard_ts = 0.0
         if self.viewer and hasattr(self.viewer, "_streaming") and not self.viewer._streaming:
             self.viewer._streaming = True
         # 修正 viewer 初始化时的 _is_history 标记（可能因 viewer 创建早于
@@ -2312,11 +2301,8 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _update_anim(self):
-        # 自愈闸门置顶：必须在所有「提前 return」的节能门控**之前**——
-        # 减少动态效果 / 不可见 / 滚出视口等分支会直接 return，闸门若在其后
-        # 就永远跑不到，残留窗口期内的卡片依旧收不了尾。
-        if self._guard_stream_end():
-            return
+        # （自愈闸门已移除：阈值兜底无法区分思考静默与真死流；结束收尾改由
+        # finish 链路按状态找卡，见 main_widget._on_stream_finished。）
         # [V1] 可见性门控：隐藏 tab 不执行动画帧（避免隐藏页每 50ms 空转 update()）。
         # 暂停期间重启时钟：动画位置由累积时间 _anim_t_ms 决定，不推进即停在原位置，
         # 恢复后从原位置继续，无视觉跳变；下一拍定时器自动续跑，无需显式重启。
@@ -2394,66 +2380,6 @@ class MessageCard(SimpleCardWidget):
         else:
             band_top = self.height() - _STREAM_BAND_BOTTOM - _STREAM_BAND_H - _STREAM_BAND_REPAINT_PAD
             self.update(0, band_top, self.width(), _STREAM_BAND_H + 2 * _STREAM_BAND_REPAINT_PAD)
-
-    def _guard_stream_end(self) -> bool:
-        """流式态自愈闸门：内容长时间不再增长即自行收尾（不依赖上层回调）。
-
-        🐛 根因场景（2026-10-18 真机实证）：卡片结束态唯一入口是
-        main_widget._on_stream_finished → `_current_assistant_card.finish_streaming()`。
-        该单点漏掉时（卡片引用被切走 / stream_finished 被 UIEngine 守卫吞掉 /
-        卡片已 sip 删除），卡片**永远停在 _streaming=True**：
-          - 坞态不归位、工具区不折叠（用户看到「对话结束卡片状态没变化」）；
-          - 高度追踪 tick 常转 → viewer 高度持续振荡（实测 1796↔1805 每 2s 跳），
-            dock-blank 诊断每 2s 刷一次，直到用户手动删卡才停。
-        本闸门借流式动画定时器（20fps，流式期间本就常转，零额外成本）做
-        卡片级自愈：内容长度不再增长超过阈值即判定本轮已结束，自行走
-        finish_streaming 收尾。有活跃工具时不触发（模型在等工具结果，
-        几十秒无文本是正常态）。
-
-        Returns:
-            True = 本拍已执行收尾，调用方应立即返回（不再绘制流式光带）。
-        """
-        try:
-            viewer = getattr(self, "viewer", None)
-            md = getattr(viewer, "_markdown_text", "") if viewer is not None else ""
-            # 🐛 口径必须含思考流（2026-10-23 「思考中高度突变」根因）：reasoning
-            # chunk 走 append_reasoning 静默累积（写 _content_data + _reasoning_total_len），
-            # **不进 _markdown_text**。旧口径只看 md → 推理模型思考 >6s（常态）期间
-            # cur_len 恒定且无活跃工具豁免 → 闸门每 6s 误触发一次 finish_streaming
-            # 强制终态渲染 → 卡片高度突然重排（变高）→ 下一个思考 chunk 又拉回
-            # 流式布局（恢复）。真机日志：40s 内误触发 3 次（每 6s 一次）。
-            # 加上 reasoning 计数后，「模型还在吐 token」的任何证据都能续命闸门；
-            # 真死流（无任何增长且无活跃工具）仍会被正确兜住。
-            cur_len = len(md or "") + int(getattr(self, "_reasoning_total_len", 0) or 0)
-            now = time.monotonic()
-            last_len = getattr(self, "_stream_guard_len", -1)
-            if last_len < 0:
-                # 懒武装：start_streaming_anim 置 -1 表示「新一轮待取样」，首次
-                # 运行在此记录基准，本拍只取样不判定（无基准无法比对增长量）。
-                # ⚠️ 原实现在此直接 return 而从不赋值 → _stream_guard_len 恒为
-                # -1 → 闸门永久惰性、一次都判不到（2026-10-18 修复）。
-                self._stream_guard_len = cur_len
-                self._stream_guard_ts = now
-                return False
-            if cur_len != last_len:
-                self._stream_guard_len = cur_len
-                self._stream_guard_ts = now
-                return False
-            # 工具仍在执行 → 模型在等结果，无文本是正常态
-            if self._has_active_tools():
-                self._stream_guard_ts = now
-                return False
-            if now - getattr(self, "_stream_guard_ts", now) < self._STREAM_END_GUARD_S:
-                return False
-            logger.warning(
-                f"[stream-guard] 流式态超时未收尾（{self._STREAM_END_GUARD_S:.0f}s 无新增内容）→ 卡片自愈收尾"
-            )
-            self.stop_streaming_anim()
-            self.finish_streaming(force_dock_off=True)
-            return True
-        except (RuntimeError, AttributeError):
-            pass
-        return False
 
     def _apply_card_style(self, border: str = None, bg: str = None):
         # [PERF] 幂等短路：setStyleSheet 会触发 Qt 样式重新 polish + 子控件 relayout，
@@ -6009,6 +5935,20 @@ class MessageCard(SimpleCardWidget):
         清理 MessageCard 持有的资源，防止内存泄漏。
         应该在删除卡片前调用，或者在 closeEvent 中自动调用。
         """
+        # 🛡️ 流式卡删除哨兵（2026-10-23）：cleanup 是所有删除路径的统一入口
+        # （回收/重建/切会话/关窗）。流式中的卡被 cleanup 说明删除方可能没先
+        # 收尾 —— 这正是「finish 到达时 _current_assistant_card 已 deleted、
+        # 结束态漏收尾」的源头。打 WARNING 带调用栈，定位删除者。
+        if getattr(self, "_streaming", False):
+            try:
+                import traceback
+
+                logger.warning(
+                    "[cleanup-sentinel] 流式中的卡片被 cleanup（删除方可能未先收尾），调用栈：\n"
+                    + "".join(traceback.format_stack(limit=8)[:-1])
+                )
+            except Exception:
+                pass
         # 停止所有定时器
         timers_to_stop = [
             self._anim_timer,

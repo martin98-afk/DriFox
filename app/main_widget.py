@@ -212,6 +212,7 @@ from app.widgets.ui_helpers import (
     create_assistant_card_widget,
     delete_widgets_from_layout,
     find_user_round_index,
+    find_last_streaming_assistant_card,
     get_first_file_operation,
     init_after_loading_session,
     init_new_session_after_archive,
@@ -21203,14 +21204,34 @@ class OpenAIChatToolWindow(ToolWindow):
         # 缺陷 3：流结束仍有待输入浮动卡残留时一并收起（幂等）
         self._dismiss_pending_overlay_cards()
 
+        # 🐛 结束收尾目标解析（2026-10-23 根因修复，替代自愈闸门）：
+        # 旧逻辑只在 `_current_assistant_card` 存活时收尾。真机实证 finish 到达时
+        # 该引用可能已 deleted（流式中卡片被回收/重建，引用未转移）→ 收尾整体
+        # 跳过 → 新列表里的流式卡永远停在 _streaming=True（坞态不归位、光带常
+        # 亮），此前只能靠 6s 自愈闸门兜底（闸门已因思考期误触发移除）。
+        # 现在引用失效时按状态找卡：布局里最后一张仍在流式的活卡就是该收尾的卡。
+        # 这不是兜底而是修正目标语义——结束信号的目标是「正在流式的那张卡」。
+        # 解析提前：下方模型名写入/耗时/收尾统一作用于结果。
+        _finish_card = getattr(self, "_current_assistant_card", None)
+        if _finish_card is None or _is_sip_deleted(_finish_card):
+            _finish_card = find_last_streaming_assistant_card(self.chat_layout)
+            if _finish_card is not None:
+                logger.warning(
+                    "[finish-diag] _current_assistant_card 失效，按状态回退收尾: "
+                    f"fallback card streaming={getattr(_finish_card, '_streaming', None)}"
+                )
+        if _finish_card is not None and _finish_card is not self._current_assistant_card:
+            # 回退目标与登记引用不一致（引用被切走）：同步修正引用。
+            self._current_assistant_card = _finish_card
+
         # 写入模型名称/服务商到卡片和 session 消息
-        if self._current_assistant_card:
+        if _finish_card is not None and not _is_sip_deleted(_finish_card):
             current_model_name = getattr(self, "_current_model_name", "") or ""
             if current_model_name:
                 provider_display = self._valid_configs.get(self._current_provider_name, {}).get(
                     "display_name", self._current_provider_name
                 )
-                self._current_assistant_card.set_model_name(
+                _finish_card.set_model_name(
                     current_model_name,
                     provider_name=provider_display,
                     config_id=self._current_provider_name,
@@ -21234,10 +21255,12 @@ class OpenAIChatToolWindow(ToolWindow):
             elapsed = time.time() - self._response_start_time
         self._response_start_time = None
 
-        if self._current_assistant_card and not _is_sip_deleted(self._current_assistant_card):
+        # 🐛 结束收尾目标解析已提前到模型名写入之前（见上），此处直接作用于
+        # 解析结果：引用失效时已按状态回退找到真正在流式的那张卡。
+        if _finish_card is not None and not _is_sip_deleted(_finish_card):
             if elapsed is not None:
-                self._current_assistant_card.set_meta_info(elapsed=elapsed)
-            self._current_assistant_card.finish_streaming()
+                _finish_card.set_meta_info(elapsed=elapsed)
+            _finish_card.finish_streaming()
 
         # 🛡️ 流式完成后显式滚底：finish_streaming 触发的最后一次全量渲染
         # 替换 DOM 后，contentHeightChanged 可能因高度不变而不触发，或
