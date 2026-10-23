@@ -1021,6 +1021,41 @@ def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], wo
 
 
 # ============================================================
+# 垃圾桶软删除（trash_enabled 开启时替代 copy 快照）
+# ============================================================
+
+
+def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
+    """垃圾桶模式：把删除命令的目标**移动**到垃圾桶目录（软删除，可找回）
+
+    与快照（copy）的区别：move 让原路径消失，原命令随后对目标执行时目标已不在
+    （rm -f 静默成功）。单个目标移动失败不阻断（该目标由原命令正常删除）。
+    """
+    if not is_delete_command(command):
+        return []
+    targets = delete_targets(command, workdir)
+    if not targets["existing"]:
+        return []
+    trash_root = Path(trash_root)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    moved: list = []
+    for target in targets["existing"]:
+        try:
+            trash_root.mkdir(parents=True, exist_ok=True)
+            dest = trash_root / f"{stamp}_{target.name}"
+            n = 1
+            while dest.exists():
+                dest = trash_root / f"{stamp}_{target.stem}_{n}{target.suffix}"
+                n += 1
+            shutil.move(str(target), str(dest))
+            moved.append(dest)
+            logger.info(f"[Sandbox] 删除目标已移入垃圾桶: {target} -> {dest}")
+        except Exception as e:  # noqa: BLE001 - 移动失败不阻断用户已批准的删除
+            logger.warning(f"[Sandbox] 移入垃圾桶失败({e}): {target}")
+    return moved
+
+
+# ============================================================
 # 审核处理配置（approval 节点归一化读取）
 # ============================================================
 
