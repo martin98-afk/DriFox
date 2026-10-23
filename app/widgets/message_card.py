@@ -3287,7 +3287,22 @@ class MessageCard(SimpleCardWidget):
                 # [R4-A] cap 改用常量 STREAM_HEIGHT_TRACK_MAX_FACTOR（0.90）：原先硬编码
                 # 0.85 与基线 0.84 只差 0.01，自适应提速等于失效。
                 factor = min(STREAM_HEIGHT_TRACK_MAX_FACTOR, factor + STREAM_HEIGHT_TRACK_BOOST)
-            self._apply_viewer_height(int(current_height + diff * factor))
+            # 🐛 步长限幅（2026-10-23 拉伸黑条根因）：比例逼近的第一拍就是
+            # diff×0.84 的大跳（流式 burst 涨 400px → 一拍跳 350px）→ Chromium
+            # 新帧未到时 Qt 把旧帧纹理拉伸填满新几何 → 文字竖向拉长的黑条一闪
+            # （Qt6 合成路径特有，Qt5 无；2026-09-13 逐帧校准的视觉阈值 =
+            # _SMOOTH_STEP_PX 160px/帧）。fb6aae2e 为修「分帧与追踪两层逼近互
+            # 撕振荡」让追踪直接落地，把本伪影放了出来。正解是单一逼近器 +
+            # 步长限幅：clamp 在 tick 内部完成，不引入第二个 timer，单调逼近
+            # 无振荡；160px/拍 @ tick 周期 ≈ 万 px/s，远快于流式内容增速，
+            # 「台阶摊成连续生长」的设计意图不变。结束态丝绸尾音（0.12×小差值）
+            # 远小于 160 不受影响；大差值提速（0.90）恰是伪影来源，被 clamp 正确。
+            step = diff * factor
+            if step > self._SMOOTH_STEP_PX:
+                step = float(self._SMOOTH_STEP_PX)
+            elif step < -self._SMOOTH_STEP_PX:
+                step = -float(self._SMOOTH_STEP_PX)
+            self._apply_viewer_height(int(current_height + step))
         except (RuntimeError, AttributeError):
             # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
             # 停拍防泄漏。内容重挂后会自行上报高度，走常规路径校正。
