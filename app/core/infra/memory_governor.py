@@ -23,9 +23,12 @@ def _is_sip_deleted(obj) -> bool:
     destroyed 信号在 C++ 对象真正销毁时触发，此时 Python 侧的 self 仍存在但
     C++ 包装已失效，访问 self 的任何 Qt 属性都会抛 RuntimeError。
     用于 destroyed 回调 / 清理路径的入口守卫，静默返回 False 兜底。
+
+    🐛 2026-10-24 修正：原实现 ``return sip.isValid(obj)`` 语义写反（活对象
+    返回 True），已抄正为 ``not isValid``。
     """
     try:
-        return sip.isValid(obj)
+        return not sip.isValid(obj)
     except Exception:
         return False
 

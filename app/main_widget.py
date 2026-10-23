@@ -25758,17 +25758,8 @@ def _is_plugin_override(module_id: str) -> bool:
         return False
 
 
-def _is_sip_deleted(obj) -> bool:
-    """判断 PyQt 对象是否已被 C++ 侧销毁（防御 wrapped C/C++ object has been deleted）。
-
-    destroyed 信号在 C++ 对象真正销毁时触发，此时 Python 侧的 self 仍存在但
-    C++ 包装已失效，访问 self 的任何 Qt 属性都会抛 RuntimeError。
-    用于 destroyed 回调 / 清理路径的入口守卫，静默返回 False 兜底。
-    """
-    try:
-        return not sip.isValid(obj)
-    except Exception:
-        return False
+# （2026-10-24 清理：此处曾重复定义 _is_sip_deleted 且与本文件后部定义语义
+#   相互矛盾，Python 后定义覆盖先定义 —— 见文件后部唯一保留的正确实现。）
 
 
 # GC 钩子（T9）：模块级防抖标志，150ms 内多次触发只执行一次。
@@ -25905,14 +25896,20 @@ def _compact_process_heap_after_cleanup():
 
 
 def _is_sip_deleted(obj) -> bool:
-    """判断 PyQt 对象是否已被 C++ 侧销毁（防御 wrapped C/C++ object has been deleted）。
+    """判断 Qt 对象是否已被 C++ 侧销毁（防御 wrapped C/C++ object has been deleted）。
 
     destroyed 信号在 C++ 对象真正销毁时触发，此时 Python 侧的 self 仍存在但
     C++ 包装已失效，访问 self 的任何 Qt 属性都会抛 RuntimeError。
     用于 destroyed 回调 / 清理路径的入口守卫，静默返回 False 兜底。
+
+    🐛 2026-10-24 重大修复：本文件曾**重复定义两次**，且生效的后者写反
+    （``return sip.isValid(obj)``）—— 活对象被判 deleted、deleted 对象反而
+    放行。全文件 22 个调用点长期在反转语义下运行：finish 收尾永远跳过活卡
+    （「结束态残留」数月不愈的真根因）、finish-diag 打点把活卡标成 deleted
+    误导诊断（fb6aae2e 因此误建自愈闸门）。已删除重复定义并修正语义。
     """
     try:
-        return sip.isValid(obj)
+        return not sip.isValid(obj)
     except Exception:
         return False
 
