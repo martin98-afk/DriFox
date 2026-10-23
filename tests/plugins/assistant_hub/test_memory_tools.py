@@ -19,6 +19,13 @@ m = importlib.util.module_from_spec(spec)
 sys.modules.setdefault("test_memory_tools_mod", m)
 spec.loader.exec_module(m)
 
+# store.py 仅取收缩阈值常量，保证假 manager 与真实现判定一致
+_STORE_MOD = _ROOT / "plugins" / "assistant_hub" / "core" / "memory" / "store.py"
+_spec2 = importlib.util.spec_from_file_location("test_memory_tools_store", str(_STORE_MOD))
+store = importlib.util.module_from_spec(_spec2)
+sys.modules.setdefault("test_memory_tools_store", store)
+_spec2.loader.exec_module(store)
+
 
 class _Assistant:
     memory_enabled = True
@@ -147,6 +154,50 @@ class _Mgr:
         if wd:
             out["project"] = str(self._tmp / "proj" / "MEMORY.md")
         return out
+
+    # ── 乐观锁 / append（模拟 store 语义：内容变化 → 指纹变化）──
+    @staticmethod
+    def _fp(text):
+        return f"f{len(text)}"
+
+    def memory_fingerprint(self, aid, kind, workdir=""):
+        src = self._g.get(aid, "") if kind == "global" else self._p.get((aid, workdir), "")
+        return self._fp(src)
+
+    def append_memory(self, aid, kind, text, workdir=""):
+        if kind == "global":
+            cur = self._g.get(aid, "")
+            self._g[aid] = (cur.rstrip() + "\n" + text.strip()) if cur.strip() else text.strip()
+            return {"ok": True, "chars": len(self._g[aid])}
+        if kind == "project" and workdir:
+            key = (aid, workdir)
+            cur = self._p.get(key, "")
+            self._p[key] = (cur.rstrip() + "\n" + text.strip()) if cur.strip() else text.strip()
+            return {"ok": True, "chars": len(self._p[key])}
+        return {"ok": False, "error": "bad_kind"}
+
+    def write_memory_guarded(self, aid, kind, content, base="", consolidate=False, snapshot=None, workdir=""):
+        key = aid if kind == "global" else (aid, workdir)
+        bag = self._g if kind == "global" else self._p
+        cur = bag.get(key, "")
+        cur_chars = len(cur.strip())
+        fp = self._fp(cur)
+        if base and base != fp:
+            return {"ok": False, "error": "conflict", "cur_base": fp}
+        new_chars = len(content.strip())
+        if (
+            not consolidate
+            and cur_chars >= store.SHRINK_CHECK_MIN_CHARS
+            and new_chars < cur_chars * store.SHRINK_RATIO
+        ):
+            return {"ok": False, "error": "shrink", "old_chars": cur_chars, "new_chars": new_chars}
+        if snapshot is not None:
+            try:
+                snapshot()
+            except Exception:
+                pass
+        bag[key] = content
+        return {"ok": True, "chars": new_chars}
 
     def query_daily(
         self,
@@ -483,3 +534,59 @@ def test_write_project_snapshots_before_write(monkeypatch, tmp_path):
     r = m._write_impl(_ctx("/proj"), scope="project", content="新项目记忆")
     assert r.success
     assert ("build", "project") in mgr.snapshots
+
+
+# ── mode=append / 乐观锁 / 收缩确认 ──────────────────────────
+def test_write_mode_append_global(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    r = m._write_impl(_ctx("/proj"), scope="global", content="规则 A", mode="append")
+    assert r.success and "追加" in r.content
+    r2 = m._write_impl(_ctx("/proj"), scope="global", content="规则 B", mode="append")
+    assert r2.success
+    r3 = m._read_impl(_ctx("/proj"), scope="global")
+    assert "规则 A" in r3.content and "规则 B" in r3.content
+    # 原有内容未被覆盖（append 语义：两条都在）
+    assert r3.content.index("规则 A") < r3.content.index("规则 B")
+
+
+def test_write_append_over_limit_rejected(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.write_global_memory("build", "x" * 3990)
+    r = m._write_impl(_ctx("/proj"), scope="global", content="y" * 20, mode="append")
+    assert not r.success and "超上限" in r.error
+
+
+def test_write_replace_conflict(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    r0 = m._read_impl(_ctx("/proj"), scope="global")
+    base0 = r0.content.rsplit("(base: ", 1)[1].rstrip(")")
+    m._write_impl(_ctx("/proj"), scope="global", content="v1")
+    # 仍带旧 base 写 → 冲突，错误里给当前 base
+    r = m._write_impl(_ctx("/proj"), scope="global", content="v2", base=base0)
+    assert not r.success
+    assert "版本冲突" in r.error and "当前 base:" in r.error
+
+
+def test_write_replace_shrink_requires_consolidate(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    m._write_impl(_ctx("/proj"), scope="global", content="- 条目若干内容填充\n" * 40)
+    r = m._write_impl(_ctx("/proj"), scope="global", content="短条目")
+    assert not r.success
+    assert "consolidate=true" in r.error and "mode=append" in r.error
+    r2 = m._write_impl(_ctx("/proj"), scope="global", content="精简版", consolidate=True)
+    assert r2.success
+
+
+def test_write_shrink_allowed_when_small_file(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    m._write_impl(_ctx("/proj"), scope="global", content="x" * 150)
+    r = m._write_impl(_ctx("/proj"), scope="global", content="y")
+    assert r.success  # 现有低于阈值不做收缩检查
+
+
+def test_read_global_returns_base(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    r = m._read_impl(_ctx("/proj"), scope="global")
+    assert "(base: " in r.content
+    r2 = m._read_impl(_ctx("/proj"), scope="project")
+    assert "(base: " in r2.content
