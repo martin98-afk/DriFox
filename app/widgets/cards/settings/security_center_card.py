@@ -260,57 +260,34 @@ class SecurityCenterCard(QWidget):
         self.sandbox_switch.checkedChanged.connect(self._on_sandbox_toggled)
         layout.addWidget(self.sandbox_switch)
 
-        def _expand(icon, title, content, editor: "_ListEditorCard", tip: str = "") -> "ExpandGroupSettingCard":
-            """把名单编辑区包成折叠卡：收起一行，点击展开编辑（对齐设置页范式）"""
-            card = ExpandGroupSettingCard(icon, title, content)
-            if tip:
-                # 挂到标题行而非折叠卡本体：卡片是 QScrollArea 子类，被
-                # simple_hover_tooltip 排除在自绘气泡之外，且悬停命中的本就是标题行
-                card.card.setToolTip(tip)
-            card.addGroupWidget(editor)
-
-            from PySide6.QtCore import QTimer
-
-            # 条目增删后内容高度变化，展开态需要重算卡片高度，否则新行被滚动区吞掉。
-            # 延迟一拍：deleteLater 的旧行 / 布局失效需先在事件循环落定，sizeHint 才准
-            def _sync_height():
-                QTimer.singleShot(0, card._adjustViewSize)
-
-            editor.on_change = _sync_height
-            return card
-
+        # 名单编辑区（挂入下方三大分组卡，不再各自折叠）
         self._path_white = _ListEditorCard(
-            "写入白名单（放行 workdir 外的写入目录；读操作不受此限制）",
+            "写入白名单（放行 workdir 外写入）",
             "whitelist",
             "如 D:\\other_proj 或 %USERPROFILE%\\docs",
-            show_title=False,
             tip="读操作不受此限制；相对路径按工作目录解析。",
         )
         self._path_black = _ListEditorCard(
-            "文件黑名单（读写均拦截，如 .env/.ssh）",
+            "文件黑名单（读写均拦截）",
             "blacklist",
             "如 D:\\secrets 或 .env",
-            show_title=False,
             tip="⚠ 文件名需完全相等：.env 不拦 .env.local，建议一并添加。",
         )
         self._cmd_allow = _ListEditorCard(
-            "命令安全 · 放行前缀（跳过审批；危险命令仍拦截）",
+            "命令放行前缀（跳过审批；危险命令仍拦截）",
             "allow_prefixes",
             "如 git status、npm run build",
-            show_title=False,
             tip="⚠ 按词边界匹配；填 git 可省常规子命令审批，但 git rm -rf . 等破坏性操作仍会确认。",
         )
         self._cmd_confirm = _ListEditorCard(
-            "命令安全 · 强制审批前缀",
+            "命令强制审批前缀",
             "confirm_prefixes",
             "如 git push",
-            show_title=False,
         )
         self._net_domains = _ListEditorCard(
-            "网络安全 · 域名黑名单",
+            "网络域名黑名单",
             "blacklist_domains",
             "如 evil.com",
-            show_title=False,
         )
 
         # 名单编辑区以裸 editor 挂入下方分组卡（分组自身即折叠层，不再各自套折叠卡）
@@ -328,9 +305,8 @@ class SecurityCenterCard(QWidget):
         )
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
-        layout.addWidget(self.delete_switch)
 
-        # 垃圾桶软删除开关（与审批独立；组内收纳，见 _build_data_group）
+        # 垃圾桶软删除开关（与审批独立；外层收纳，挂载见下方首屏结构）
         self.trash_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "垃圾桶",
@@ -345,10 +321,9 @@ class SecurityCenterCard(QWidget):
 
         # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不进垃圾箱
         self._delete_exempt = _ListEditorCard(
-            "删除豁免路径（这些目录内的删除不再弹审批，也不做快照，如 tests/）",
+            "删除豁免路径",
             "delete_exempt",
             "如 tests/ 或 D:/other_proj/logs",
-            show_title=False,
             tip="这些目录内的删除不再弹审批，也不进垃圾箱。相对路径按工作目录解析（如 tests/）。",
         )
         # 删除豁免以裸 editor 挂入「删除豁免与备份」分组（分组自身即折叠层）
@@ -372,9 +347,8 @@ class SecurityCenterCard(QWidget):
         self.net_switch.setToolTip("curl/wget 等；仅在沙箱安全开启时生效。")
         self.net_switch.setChecked(bool(self._cfg.get("network.enabled")))
         self.net_switch.checkedChanged.connect(self._on_network_toggled)
-        layout.addWidget(self.net_switch)
 
-        # ── 系统级工具卡 ──
+        # ── 系统级工具豁免开关（外层）──
         self.sys_switch = SwitchSettingCard(
             FIF.COMMAND_PROMPT if FIF else None,
             "系统级工具豁免",
@@ -385,7 +359,11 @@ class SecurityCenterCard(QWidget):
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
 
         # ── 首屏结构：开关区（全部最外层）+ 折叠明细区 + 说明 ──
-        # 审核处理卡（处理方法 / 审核模型 / 超时 / 超时处理，全页仅此一份）
+        layout.addWidget(self.delete_switch)
+        layout.addWidget(self.trash_switch)
+        layout.addWidget(self.net_switch)
+        layout.addWidget(self.sys_switch)
+        # ── 审核处理卡（处理方法/审核模型/超时/超时处理，全页仅此一份）──
         layout.addWidget(self._build_approval_card())
         layout.addWidget(self._build_rules_group())
         layout.addWidget(self._build_data_group())
@@ -457,9 +435,7 @@ class SecurityCenterCard(QWidget):
             "删除豁免与备份",
             "豁免路径 · 删除类备份统计",
         )
-        card.addGroupWidget(self.trash_switch)
-        # 挂裸 editor 而非 _expand 折叠卡：分组本身就是折叠层，再套一层要用户点两次，
-        # 且内层收起时高度不涨，外层分组的条目增删高度联动会失效
+        # 开关（删除审批 / 垃圾桶）已全部外提，组内只留明细，避免同一个开关出现两处
         card.addGroupWidget(self._delete_exempt)
         card.addGroupWidget(self._build_snapshot_row())
         self._bind_editor_growth(card, self._delete_exempt)
@@ -479,15 +455,13 @@ class SecurityCenterCard(QWidget):
         return card
 
     def _build_net_proc_group(self) -> "ExpandGroupSettingCard":
-        """网络与进程：外传检测 + 域名黑名单 + 系统级工具豁免 + 进程配额"""
+        """域名黑名单与进程配额（开关已全部外提）"""
         card = ExpandGroupSettingCard(
             FIF.GLOBE if FIF else None,
-            "网络与进程",
-            "外传检测 · 域名黑名单 · 系统工具豁免 · 进程配额",
+            "域名黑名单与进程配额",
+            "命中域名弹审批 · Job Object 三限额",
         )
-        card.addGroupWidget(self.net_switch)
         card.addGroupWidget(self._net_domains)
-        card.addGroupWidget(self.sys_switch)
         card.addGroupWidget(self._build_job_limits_row())
         self._bind_editor_growth(card, self._net_domains)
         self._net_proc_group = card
