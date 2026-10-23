@@ -3432,7 +3432,17 @@ _SKELETON_CACHE_MAX = 48
 # 正文区近乎空是设计行为，旧口径把它误判成「内容丢失」→ 哨兵每 3s 强制整页
 # 补渲（真机实证反复无效），每次补渲全量替换 innerHTML → 文字重排换行 + 高度
 # 跳变，即「流式期间频繁抖动」。骨架 JS 资产变更，必须 bump。
-_SKELETON_CACHE_VERSION = 49
+# _SKELETON_CACHE_VERSION +1（v50）：骨架 CSS 删除 `* { scrollbar-width: thin;
+# scrollbar-color }`（原 Firefox 兼容遗留）。QtWebEngine 6.9 = Chromium 130 ≥ 121
+# 实现标准滚动条属性，规范规定设置了 scrollbar-width/color 的元素其
+# ::-webkit-scrollbar 系列样式全部失效 → 6px 自定义常驻滚动条被替换为 UA thin
+# （实测 10px）+ Windows 自动隐藏（overlay 化）→ 内容可用宽度反复横跳（文字
+# 换行抖动）+ 最右文字被滚动条盖住。Qt5（Chromium 83）不认识标准属性故无此问题。
+# CSS 资产变更，必须 bump。
+# _SKELETON_CACHE_VERSION +1（v52）：移除 v51 的 [DEBUG-sb2] 临时诊断 JS；真正的
+# 抖动根因不在 CSS/JS，而在 Python 侧 _apply_viewer_height 宽度守卫每拍与布局
+# 互撕（详见 message_card.py 守卫注释）。骨架 JS 资产变更，必须 bump。
+_SKELETON_CACHE_VERSION = 52
 
 
 def _js_literal(value) -> str:

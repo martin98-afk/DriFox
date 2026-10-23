@@ -2012,11 +2012,6 @@ class CodeWebViewer(QWebEngineView):
                 ::-webkit-scrollbar-corner {
                     background: transparent;
                 }
-                /* Firefox 滚动条 */
-                * {
-                    scrollbar-width: thin;
-                    scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
-                }
             """
         else:
             # 深色模式滚动条 — 保留原有的精致深色风格
@@ -2046,11 +2041,6 @@ class CodeWebViewer(QWebEngineView):
                 }
                 ::-webkit-scrollbar-corner {
                     background: #1a1f2e;
-                }
-                /* Firefox 滚动条 */
-                * {
-                    scrollbar-width: thin;
-                    scrollbar-color: #3a3f50 #1a1f2e;
                 }
             """
         _is_light_diff = _is_light

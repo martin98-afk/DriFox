@@ -3608,17 +3608,40 @@ class MessageCard(SimpleCardWidget):
         # 动机：首个窗口启动 / 隐藏页切回补渲时序下，viewer 可能以默认宽创建
         # 且之后再无 resize/scroll 事件兜底，欢迎卡片永久压扁（缓存命中后
         # 重建窗口才恢复）。
+        # 🐛 一次性修正（2026-10-23 流式抖动根因）：viewer 布局在气泡内，其宽度
+        # 由布局决定 = 卡片宽 − 外边距（卡片 843 − main 8 − bubble 24 = 811），
+        # **不等于卡片宽是常态**。旧判据 abs(viewer−card)>2 恒真 → 每拍高度上报
+        # 都把 viewer 强制拉宽到卡片全宽（右侧溢出气泡被裁）→ 下一拍布局又把它
+        # 排回布局宽 → 每拍互撕，视口 811↔843 振荡，全文反复重排（流式「文字
+        # 抖动 + 右侧文字超出可视区」的直接来源）。改为同一卡片宽度下只修正
+        # 一次：修正后布局接管（布局宽才是权威），不再插手；卡片宽度真变化时
+        # （sync_width）标记重置，允许按新宽度再修一次。原「永久压扁」场景只需
+        # 一次修正即可触发 reflow + 正确高度上报。
         try:
             _v = self.viewer
+            _card_w = self.width()
             if (
                 _v is not None
-                and self.width() > 0
+                and _card_w > 0
                 and _v.width() > 0
-                and abs(_v.width() - self.width()) > 2
+                and abs(_v.width() - _card_w) > 2
+                and getattr(self, "_width_guard_card_w", 0) != _card_w
             ):
-                _v.resize(self.width(), _v.height())
+                _v_w = _v.width()
+                _v_h = _v.height()
+                _v.resize(_card_w, _v_h)
+                self._width_guard_card_w = _card_w
+                try:
+                    logger.warning(
+                        f"[宽度守卫] viewer {_v_w} 修正到卡片宽 {_card_w}（一次性，"
+                        f"布局接管后不再干预）"
+                    )
+                except Exception:
+                    pass
                 return
-        except RuntimeError:
+        except (RuntimeError, AttributeError):
+            # AttributeError：viewer 为测试 stub/异构实现缺 width()，守卫整体跳过，
+            # 高度走后续正常路径（2026-10-23 修复 test_stream_height_noise_guard 既有失败）
             pass
         # [MEM] 面积上限：上报高度先按「物理面积封顶」钳一次（成本 ∝ 宽×高×dpr²，
         # 见 CodeWebViewer.MAX_SURFACE_MPX）。必须在下面所有记账/广播之前完成 ——
