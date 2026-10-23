@@ -82,7 +82,6 @@ def build_distill_gate(dates: List[str], project_file: str, global_file: str) ->
     """
     date_list = "、".join(dates)
     reads = "\n".join(f"   memory_read(scope=daily, date={d})" for d in dates)
-    marks = "\n".join(f"   memory_write(scope=daily, date={d}, mark_distilled=true)" for d in dates)
     return f"""本次写入被暂时拒绝：今天的第一条日志之前，必须先蒸馏所有未蒸馏的旧日志。
 
 待蒸馏日志：{date_list}
@@ -102,8 +101,8 @@ def build_distill_gate(dates: List[str], project_file: str, global_file: str) ->
    （memory_write scope=global 整体更新）。两个条件缺一不可：珍贵但不独特的不进、
    珍贵但属于本项目特有的不进；没有合格条目就不改全局记忆，宁缺勿滥。
 
-5. 给已蒸馏日志打标（保留可查，之后蒸馏/门禁均忽略）：
-{marks}
+5. 全部蒸馏完成后，一条命令给所有未蒸馏日志打标（保留可查，之后蒸馏/门禁均忽略）：
+   memory_write(scope=daily, mark_distilled=true)
 
 6. 全部完成后，重试刚才的日志写入。"""
 

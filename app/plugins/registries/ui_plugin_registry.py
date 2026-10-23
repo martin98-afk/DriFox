@@ -849,7 +849,7 @@ class UIPluginRegistry:
         # 多实现并存（system + 多个插件 override），胜者 = max(priority)
         self._ui_modules: Dict[str, list] = {}
         # 主程序内置区域（宿主在窗口装配时也可再声明，幂等）
-        from app.plugins.contracts.ui_slots import LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
+        from app.plugins.contracts.ui_slots import BADGE, LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
 
         for rid, kind, desc in [
             ("sidebar", LIST_ITEM, "左侧边栏插件项"),
@@ -857,6 +857,7 @@ class UIPluginRegistry:
             ("menu:message_card", MENU, "消息卡片右键菜单"),
             ("menu:tab", MENU, "Tab 标签右键菜单"),
             ("menu:input_area", MENU, "输入框右键菜单"),
+            ("workbench:tab", BADGE, "工作台页签徽标（metadata.tab_id 定位页签，payload=文本）"),
             ("settings:plugins", PANEL, "设置面板插件分区"),
             ("settings:llm", PANEL, "设置面板大模型分区插件卡"),
             ("settings:common", PANEL, "设置面板通用分区插件卡"),
@@ -2408,6 +2409,12 @@ class UIPluginRegistry:
             payload=payload,
             metadata=metadata or {},
         )
+        # 徽标类区域实时通知消费方重挂（WorkbenchPanel 订阅重挂页签徽标）。
+        # publish 在调用方线程同步分发——插件注册发生在主线程加载期，约定成立。
+        if region_id == "workbench:tab":
+            from app.core.infra.ui_event_bus import EV_WORKBENCH_BADGES_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(EV_WORKBENCH_BADGES_CHANGED)
 
     def get_region_entries(self, region_id: str) -> list:
         """获取区域条目（priority 降序 → 注册序；未声明区域返回空列表）"""
@@ -3702,13 +3709,22 @@ class UIPluginRegistry:
         # 清理服务槽
         self._services = {k: v for k, v in self._services.items() if v[0] != plugin_name}
         # 清理通用区域条目（Phase E）；settings: 分区中 auto_config_card 条目保留（同上）
+        removed_badge = False
         for region in self._regions.values():
-            region["entries"] = {
+            kept = {
                 k: v
                 for k, v in region["entries"].items()
                 if v.plugin_name != plugin_name
                 or (getattr(v.payload, "metadata", None) or {}).get("auto_config_card")
             }
+            if region["entries"] is not None and len(kept) != len(region["entries"]) and region.get("kind") == "badge":
+                removed_badge = True
+            region["entries"] = kept
+        if removed_badge:
+            # 徽标区域有条目被清 → 通知 WorkbenchPanel 重挂（主线程，卸载流程在主线程）
+            from app.core.infra.ui_event_bus import EV_WORKBENCH_BADGES_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(EV_WORKBENCH_BADGES_CHANGED)
         # 清理 UI 模块槽（Phase F）：仅移除该 plugin 的实现，其余保留
         for module_id, impls in list(self._ui_modules.items()):
             kept = [s for s in impls if s[0] != plugin_name]

@@ -40,11 +40,12 @@ def test_memory_system_contains_layers_and_paths():
 
 
 def test_build_distill_gate():
-    """蒸馏门禁指令：待蒸馏日期 + 校对/严选/打标步骤齐全。"""
+    """蒸馏门禁指令：待蒸馏日期 + 校对/严选/打标步骤齐全；打标为单条全量命令（date 已从写面移除）"""
     c = m.build_distill_gate(["2026-10-14", "2026-10-15"], "/proj/MEMORY.md", "/data/MEMORY.md")
     assert "2026-10-14" in c and "2026-10-15" in c
     assert "memory_read(scope=daily, date=2026-10-14)" in c
-    assert "memory_write(scope=daily, date=2026-10-15, mark_distilled=true)" in c
+    assert "memory_write(scope=daily, mark_distilled=true)" in c
+    assert "date=2026-10-15, mark_distilled" not in c, "打标不再逐日传 date"
     assert "校对" in c
     assert "最珍贵" in c and "项目无关" in c and "宁缺勿滥" in c
     assert "/proj/MEMORY.md" in c and "/data/MEMORY.md" in c
