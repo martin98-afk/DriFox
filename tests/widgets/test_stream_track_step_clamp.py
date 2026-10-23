@@ -79,3 +79,26 @@ def test_small_step_unaffected(card):
     card._target_viewer_height = 1050  # diff=50 → 0.84×50=42 < 160
     card._stream_height_tick_step()
     assert card.viewer.height() == 1042
+
+
+def test_nonstream_big_jump_framed(qapp):
+    """非流式大变化（终渲染收敛/旧卡重渲）也限幅：一次 ≤160px。
+
+    根因同黑条：_update_height 非流式末段此前一次性落地无上限，虚拟滚动
+    重建重渲一次跳数百 px → Qt6 旧帧拉伸。现走 _apply_height_smooth 分帧。
+    """
+    from app.widgets.message_card import MessageCard as MC
+
+    card = MC(role="assistant")
+    card.resize(843, 200)
+    card._streaming = False
+    card.viewer = _StubViewer(height=500)
+    card._last_applied_viewer_height = 500
+    try:
+        card._update_height(1000)
+        # 第一拍：500 + 160 = 660（旧实现一次性 1000 → 拉伸黑条）
+        assert card.viewer.height() == 660
+        assert card.property("noContainerAnimation") is True
+    finally:
+        card._cancel_height_smooth()
+        card.deleteLater()

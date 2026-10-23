@@ -3072,12 +3072,17 @@ class MessageCard(SimpleCardWidget):
             self._start_finish_height_anim(current_height, target_height)
             return
 
-        # 非流式大高度变化（折叠/展开）：一次性设 viewer 最终高度，
-        # 但跳过容器的 200ms maximumHeight 动画，避免 AlignBottom 布局中
+        # 非流式大高度变化（折叠/展开 / 终渲染收敛 / 旧卡滚回视口重渲）：
+        # 跳过容器的 200ms maximumHeight 动画，避免 AlignBottom 布局中
         # 卡片位置因容器动画与 viewer 高度变化不同步而"闪现"。
         # card_container 检查 NO_ANIMATION_PROP → 直接 snap 到目标高度。
+        # 🐛 步长限幅（2026-10-24 黑条残留）：此前一次性落地无上限，虚拟滚动
+        # 重建重渲 / 折叠展开一次跳数百 px → Qt6 合成路径旧帧拉伸（黑条）。
+        # 改走 _apply_height_smooth：≤160px 当拍直接落（行为不变），>160px
+        # 限幅分帧（每帧 ≤160px，视觉阈值下）；noContainerAnimation 仍按
+        # 原节奏 50ms 后清除，分帧（16ms/帧）在清除前完成，语义不变。
         self.setProperty("noContainerAnimation", True)
-        self._apply_viewer_height(target_height)
+        self._apply_height_smooth(target_height)
         # 延迟清除标志，等容器 snap 完成。
         # 🐛 捕获 self 的裸 lambda 会在卡片被虚拟滚动回收销毁后仍执行 →
         # 「wrapped C/C++ object of type MessageCard has been deleted」刷屏。
