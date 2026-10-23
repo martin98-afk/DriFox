@@ -14,8 +14,19 @@ LIST_ITEM = "list_item"      # 列表条目区域（侧边栏/会话列表）
 TOOLBAR_BUTTON = "toolbar_button"  # 工具栏按钮区域（region_id 约定 "toolbar:<name>"）
 PANEL = "panel"              # 面板容器区域（设置面板/卡片容器）
 CONTENT = "content"          # 内容渲染区域（HTML 片段/widget 工厂）
+BADGE = "badge"              # 徽标区域（页签/标题旁小圆标，region_id 约定 "badge:<target>"）
 
-VALID_REGION_KINDS = frozenset({MENU, LIST_ITEM, TOOLBAR_BUTTON, PANEL, CONTENT})
+VALID_REGION_KINDS = frozenset({MENU, LIST_ITEM, TOOLBAR_BUTTON, PANEL, CONTENT, BADGE})
+
+
+# BADGE 区域条目约定（region_id="workbench:tab" 挂到工作台页签）：
+# - metadata["tab_id"]: 必填，徽标挂到哪个页签（对应 register_workbench_tab 的 page_id）
+# - payload 三形态：
+#     str            → 文本徽标（空串 = 移除）
+#     QWidget        → 任意自定义 widget 直接挂载（文字右侧、关闭钮左侧）
+#     Callable       → 无参工厂，主线程调用返回 QWidget（延迟构造）
+# - metadata["tooltip"]: 可选悬停提示（仅文本徽标生效）
+# 同 tab 多条目时 priority 最高者生效。
 
 
 @dataclass(frozen=True)

@@ -378,6 +378,11 @@ class CustomTabButton(QWidget):
         # 鼠标事件穿透到父 widget，使整卡点击触发切换
         self._label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(self._label)
+        # 徽标（页签旁小圆标）：默认隐藏，set_badge 非空文本时显示。
+        # 插件经 slot region "workbench:tab" 挂载（WorkbenchPanel._apply_badges）。
+        self._badge_label: Optional[QLabel] = None
+        self._badge_text = ""
+        self._custom_widget: Optional[QWidget] = None
         self._close_btn: Optional[QPushButton] = None
         if closable:
             self._close_btn = QPushButton("×", self)
@@ -532,12 +537,76 @@ class CustomTabButton(QWidget):
             painter.setBrush(c)
             painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
 
+    def set_badge(self, text: str, tooltip: str = "") -> None:
+        """设置页签文本徽标（插件 slot region 挂载；text 空串隐藏）
+
+        徽标固定在文字右侧、关闭钮左侧，随主题色刷新（refresh_style 统一设样式）。
+        与 set_widget 互斥：设置文本徽标时清掉已挂的自定义 widget。
+        """
+        self._drop_custom_widget()
+        if self._badge_label is None:
+            self._badge_label = QLabel(self)
+            self._badge_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._badge_label.setVisible(False)
+            layout = self.layout()
+            # 插入到关闭钮之前（有 × 时徽标在文字与 × 之间）
+            idx = layout.indexOf(self._close_btn) if self._close_btn is not None else layout.count()
+            layout.insertWidget(idx, self._badge_label)
+        text = str(text or "").strip()
+        self._badge_text = text
+        if text:
+            # 超长截断：徽标是圆点性质的小元素，超过 3 字符会挤爆页签
+            self._badge_label.setText(text if len(text) <= 3 else "…")
+            self._badge_label.setToolTip(tooltip or "")
+            self._badge_label.setVisible(True)
+        else:
+            self._badge_label.setVisible(False)
+        self._apply_badge_style()
+
+    def set_widget(self, widget: Optional[QWidget]) -> None:
+        """挂载任意自定义 widget 到文字右侧（关闭钮左侧）；None = 移除。
+
+        与文本徽标互斥（挂 widget 时清文本徽标）。所有权归按钮：替换/清空时
+        deleteLater 旧 widget；按钮销毁时随父子链销毁。点击事件默认由自定义
+        widget 自行处理（不穿透）——需要整卡点击切换的插件自行设置
+        ``WA_TransparentForMouseEvents``。
+        """
+        self._drop_custom_widget()
+        self._badge_text = ""
+        if self._badge_label is not None:
+            self._badge_label.setVisible(False)
+        if widget is None:
+            return
+        widget.setParent(self)
+        widget.setVisible(True)
+        layout = self.layout()
+        idx = layout.indexOf(self._close_btn) if self._close_btn is not None else layout.count()
+        layout.insertWidget(idx, widget)
+        self._custom_widget = widget
+
+    def _drop_custom_widget(self) -> None:
+        w = getattr(self, "_custom_widget", None)
+        if w is not None:
+            w.setParent(None)
+            w.deleteLater()
+            self._custom_widget = None
+
+    def _apply_badge_style(self) -> None:
+        if self._badge_label is None:
+            return
+        self._badge_label.setStyleSheet(
+            f"QLabel {{ color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+            " border-radius: 6px; font-size: 9px; font-weight: 600;"
+            " padding: 0 4px; min-height: 12px; }"
+        )
+
     def refresh_style(self):
         """按当前主题 token 刷新（Colors.refresh() 由调用方负责）
 
         不重置动画进度——主题切换时保持当前 hover/active 视觉状态。
         """
         self._apply_label_color()
+        self._apply_badge_style()
         if self._close_btn is not None:
             self._close_btn.setStyleSheet(
                 f"QPushButton {{ color: {Colors.TEXT_MUTED}; background: transparent;"

@@ -385,7 +385,15 @@ def undistilled_before(workdir: str | Path, aid: str, before: str = "") -> List[
 
 
 def mark_distilled(workdir: str | Path, aid: str, date: str) -> Dict:
-    """把 YYYY-MM-DD.md 重命名为 YYYY-MM-DD.distilled.md（保留可查，蒸馏时忽略）。"""
+    """把 YYYY-MM-DD.md 归档为 YYYY-MM-DD.distilled.md（保留可查，蒸馏时忽略）。
+
+    归档档已存在但 .md 还有残留条目（蒸馏打标之后又有追加，典型是跨天会话
+    的尾部条目落回了旧日期文件）时：把残留条目并入归档尾部再删 .md，幂等
+    收敛。此前直接返回 already，而蒸馏门禁只认「未蒸馏文件是否存在」——
+    打标说已完成、门禁说没完成，两条状态互相锁死（实测发生过）。
+    Returns:
+        merged: 并入的残留条目数（首次归档为 0）。
+    """
     if not workdir:
         return {"ok": False, "error": "no_workdir"}
     if not is_date_name(date or ""):
@@ -394,14 +402,29 @@ def mark_distilled(workdir: str | Path, aid: str, date: str) -> Dict:
     with _lock_for(p):
         target = distilled_daily_path(p)
         if target.exists():
-            return {"ok": False, "error": "already"}
+            residue = read_text(p)
+            if not residue.strip():
+                # 空残留（如抖动重试留下的空壳）：直接删掉收敛
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+                return {"ok": True, "date": date, "file": str(target), "merged": 0}
+            base = read_text(target).rstrip("\n")
+            merged = len(parse_daily_entries(residue))
+            _atomic_write(target, base + "\n\n" + residue.strip("\n") + "\n")
+            try:
+                p.unlink()
+            except OSError as e:
+                return {"ok": False, "error": str(e)}
+            return {"ok": True, "date": date, "file": str(target), "merged": merged}
         if not p.exists():
             return {"ok": False, "error": "not_found"}
         try:
             os.replace(p, target)
         except OSError as e:
             return {"ok": False, "error": str(e)}
-    return {"ok": True, "date": date, "file": str(target)}
+    return {"ok": True, "date": date, "file": str(target), "merged": 0}
 
 
 # ── 写 ───────────────────────────────────────────────────
@@ -483,10 +506,23 @@ def write_memory_guarded(
     """
     body = (content or "").rstrip()
     with _lock_for(path):
+        # 读不可信防护：文件存在但连 stat 都失败（网盘同步/杀毒占用/权限抖动）时
+        # fingerprint 会回落 "empty" 哨兵——若放行，base="empty" 的「首写」语义
+        # 会直接覆盖一个临时读不到的真实文件。fail-closed：拒写。
+        exists = path.exists()
         cur_fp = memory_fingerprint(path)
+        if exists and cur_fp == "empty":
+            return {"ok": False, "error": "unreadable"}
         if base and base != cur_fp:
             return {"ok": False, "error": "conflict", "cur_base": cur_fp}
-        old_text = read_text(path).strip()
+        if exists:
+            try:
+                old_text = path.read_text(encoding="utf-8").strip()
+            except (OSError, ValueError):
+                # 内容读不到：shrink 检查会拿空串失效，同样拒写
+                return {"ok": False, "error": "unreadable"}
+        else:
+            old_text = ""
         new_chars = len(body.strip())
         if (
             not consolidate
@@ -517,6 +553,8 @@ def append_daily(
     时刻与等级是精确字段，由程序生成；模型提供 summary（一句话，便于浏览）与
     text（细节）；level 非法回落 INFO，summary 缺省时退化为三段式。
     正文超 DAILY_ENTRY_MAX_CHARS 直接拒写（日志是索引不是报告）。
+    date 参数留给库调用方（工具层对模型侧恒传空 = 系统当日）：日志归属日期
+    必须由时钟决定，不允许写入方指定历史日期，否则条目时间戳与文件归属错位。
     """
     if not workdir:
         return {"ok": False, "error": "no_workdir"}

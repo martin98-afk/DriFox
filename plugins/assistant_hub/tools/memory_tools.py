@@ -294,7 +294,6 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
 
     scope = str(kw.get("scope") or "").strip().lower()
     content = str(kw.get("content") or "").strip()
-    date = str(kw.get("date") or "").strip()
     is_mark = scope == "daily" and bool(kw.get("mark_distilled"))
     if not content and not is_mark:
         return ToolResult(False, error="content 不能为空")
@@ -393,35 +392,59 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                             "若只是想记一条，改用 mode=append。"
                         ),
                     )
+                if err == "unreadable":
+                    return ToolResult(
+                        False,
+                        error=(
+                            f"{label}记忆文件此刻不可读（可能被网盘同步、杀毒扫描或其他程序占用）。"
+                            "为防误覆盖已拒绝写入，请稍后重试；反复出现请检查文件占用状态。"
+                        ),
+                    )
                 return ToolResult(False, error=f"写记忆失败: {err}")
             return ToolResult(True, content=f"已更新{label}记忆 MEMORY.md（{r.get('chars')} 字）。")
 
         if scope == "daily":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法写工作日志。")
-            # 打蒸馏标：给 date 指定的日志重命名为 .distilled（保留可查，蒸馏/门禁均忽略）
+            # 打蒸馏标：把全部未蒸馏日志归档为 .distilled（保留可查，蒸馏/门禁均忽略）。
+            # 全量语义：门禁流程本就是「全部蒸馏完才放行」，逐日打标是机械循环；
+            # 一条命令收敛，date 参数因此从工具面彻底移除（写日期一律时钟决定）。
             if kw.get("mark_distilled"):
-                if not date:
-                    return ToolResult(False, error="mark_distilled=true 时必须给 date=YYYY-MM-DD")
-                r = _retry(lambda: mgr.mark_daily_distilled(aid, wd, date))
-                if not r.get("ok"):
-                    hint = {"not_found": f"{date} 无未打标日志", "already": f"{date} 已打过标"}.get(
-                        str(r.get("error")), str(r.get("error"))
-                    )
-                    return ToolResult(False, error=f"打标失败: {hint}")
-                return ToolResult(True, content=f"已给 {date} 日志打蒸馏标（保留可查，后续蒸馏/门禁均忽略）。")
-            # 新日门禁：目标是今天、今天还没写过、且存在未蒸馏旧日志 → 拒绝并返回蒸馏指令
-            today = datetime.now().strftime("%Y-%m-%d")
-            if (date or today) == today:
                 try:
-                    gate = mgr.distill_gate_block(aid, wd) if not mgr.daily_exists(aid, wd, today) else ""
+                    dates = mgr.undistilled_daily_before(aid, wd)
+                except Exception as e:
+                    return ToolResult(False, error=f"查询未蒸馏日志失败: {e}")
+                if not dates:
+                    return ToolResult(True, content="当前没有未打标日志。")
+                done, merged_total, failures = [], 0, []
+                for d in dates:
+                    r = _retry(lambda d=d: mgr.mark_daily_distilled(aid, wd, d))
+                    if not r.get("ok"):
+                        failures.append(f"{d}: {r.get('error')}")
+                        continue
+                    done.append(d)
+                    merged_total += int(r.get("merged") or 0)
+                if failures and not done:
+                    return ToolResult(False, error="打标失败: " + "; ".join(failures))
+                msg = f"已给 {len(done)} 天日志打蒸馏标（{', '.join(done)}，保留可查）。"
+                if merged_total:
+                    msg += f" 归档后又有追加的残留条目 {merged_total} 条已并入归档。"
+                if failures:
+                    msg += " 失败: " + "; ".join(failures)
+                return ToolResult(True, content=msg)
+            # 新日门禁：今天还没写过、且存在未蒸馏旧日志 → 拒绝并返回蒸馏指令
+            today = datetime.now().strftime("%Y-%m-%d")
+            if not mgr.daily_exists(aid, wd, today):
+                try:
+                    gate = mgr.distill_gate_block(aid, wd)
                 except Exception:
                     gate = ""  # 门禁查询异常不阻断正常写入
                 if gate:
                     return ToolResult(False, error=gate)
+            # 追加恒写系统当日日志：日期由时钟决定（date 参数已从工具面移除）
             r = _retry(
                 lambda: mgr.append_daily(
-                    aid, wd, content, date, str(kw.get("level") or "INFO"), str(kw.get("summary") or "")
+                    aid, wd, content, "", str(kw.get("level") or "INFO"), str(kw.get("summary") or "")
                 )
             )
             if not r.get("ok"):
@@ -547,7 +570,6 @@ _WRITE_SCHEMA = {
                     "type": "boolean",
                     "description": "整体替换时新内容比现有缩水超 60% 必须为 true（确认是有意整理而非误写）",
                 },
-                "date": {"type": "string", "description": "daily 补写日期 YYYY-MM-DD，缺省今天"},
                 "level": {
                     "type": "string",
                     "description": "daily 日志等级 INFO/WARNING/ERROR，缺省 INFO",

@@ -12,6 +12,7 @@ from typing import Any
 from loguru import logger
 
 from app.plugins.capabilities.providers import model_meta
+from app.plugins.capabilities.providers.ui_bridge import _ui_control
 
 
 class _BusSignal:
@@ -902,6 +903,7 @@ def register(registry) -> None:
     reg.register("input.read", _input_read, surface="ui", owner="core:ui")
     reg.register("input.write", _input_write, surface="ui", owner="core:ui")
     reg.register("ui.notify", _ui_notify, surface="ui", owner="core:ui")
+    reg.register("ui.control", _ui_control, surface="ui", owner="core:ui")
     reg.register("ui.dialog", _ui_dialog, surface="ui", owner="core:ui")
     reg.register("ui.card.show", _ui_card_show, surface="ui", owner="core:ui")
     reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
