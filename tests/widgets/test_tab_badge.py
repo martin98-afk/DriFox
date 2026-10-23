@@ -5,7 +5,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 
 @pytest.fixture(scope="module")
@@ -58,14 +58,14 @@ class TestTabBadge:
         btn = _make_button(_qapp)
         btn.set_badge("7")
         btn.refresh_style()
-        assert btn._badge_label.property("styleSheet")
+        assert btn._badge_label.styleSheet()
         assert btn._badge_text == "7"
 
 
 class TestTabCustomWidget:
     def test_set_widget_mounts_and_clears_text_badge(self, _qapp):
         """挂自定义 widget 时清文本徽标（互斥）"""
-        from PyQt5.QtWidgets import QLabel
+        from PySide6.QtWidgets import QLabel
 
         btn = _make_button(_qapp)
         btn.set_badge("3")
@@ -77,7 +77,7 @@ class TestTabCustomWidget:
         assert not btn._badge_label.isVisible()
 
     def test_set_widget_replaces_old_with_delete_later(self, _qapp):
-        from PyQt5.QtWidgets import QLabel
+        from PySide6.QtWidgets import QLabel
 
         btn = _make_button(_qapp)
         w1, w2 = QLabel("a"), QLabel("b")
@@ -87,7 +87,7 @@ class TestTabCustomWidget:
         assert w1.parent() is None, "旧 widget 已摘除，等 deleteLater 销毁"
 
     def test_set_widget_none_clears(self, _qapp):
-        from PyQt5.QtWidgets import QLabel
+        from PySide6.QtWidgets import QLabel
 
         btn = _make_button(_qapp)
         btn.set_widget(QLabel("x"))
@@ -96,7 +96,7 @@ class TestTabCustomWidget:
 
     def test_set_badge_drops_custom_widget(self, _qapp):
         """文本徽标反向互斥：清掉自定义 widget"""
-        from PyQt5.QtWidgets import QLabel
+        from PySide6.QtWidgets import QLabel
 
         btn = _make_button(_qapp)
         btn.set_widget(QLabel("x"))
@@ -106,7 +106,7 @@ class TestTabCustomWidget:
 
     def test_apply_badges_dispatches_three_payload_forms(self, _qapp, monkeypatch):
         """面板消费侧 payload 三形态分派：str/QWidget/工厂；工厂按条目幂等"""
-        from PyQt5.QtWidgets import QLabel
+        from PySide6.QtWidgets import QLabel
 
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         from app.widgets.custom_title_bar import CustomTabButton

@@ -605,12 +605,15 @@ class CustomTabButton(QWidget):
     def _apply_badge_style(self) -> None:
         """徽标样式随主题 token 刷新（无徽标时跳过）"""
         lbl = self._badge_label
-        if lbl is None or not lbl.isVisible():
+        # 判据用「有徽标文本」而非 isVisible()：父控件未显示时 isVisible() 恒
+        # False，构造期/面板隐藏期的样式会整段漏设（徽标首次显示时无样式）
+        if lbl is None or not self._badge_text:
             return
         from app.utils.design_tokens import Colors
 
+        # 徽标是「提示性小圆标」：底色用 SYSTEM_ACCENT，文字用其上的反色
         lbl.setStyleSheet(
-            f"QLabel {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.ACCENT_BG};"
+            f"QLabel {{ color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.SYSTEM_ACCENT};"
             " border: none; border-radius: 7px; padding: 0 4px;"
             f" {font_size_css(11)}; font-weight: 600; }}"
         )
