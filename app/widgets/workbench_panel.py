@@ -165,7 +165,7 @@ class WorkbenchPanel(QWidget):
             ),
         )
         # 页签徽标（插件 slot region "workbench:tab"）：订阅总线事件刷新。
-        # 插件 register_slot_entry 到该 region 后 publish（见 ui_plugin_registry）。
+        # 插件 register_slot_entry 后 publish（见 ui_plugin_registry）。
         # 回调在 publish 调用方线程执行——插件注册发生在主线程加载期，约定成立；
         # 面板销毁后经探活降级（_on_badges_changed），destroyed 时退订防悬挂。
         from app.core.infra.ui_event_bus import EV_WORKBENCH_BADGES_CHANGED, UIEventBus
@@ -173,6 +173,12 @@ class WorkbenchPanel(QWidget):
         self._badges_cb = self._on_badges_changed
         UIEventBus.get_instance().subscribe(EV_WORKBENCH_BADGES_CHANGED, self._badges_cb)
         self.destroyed.connect(self._unsubscribe_badges)
+        # 页签集合变化（插件热加载/卸载）：重跑 reconcile，页签免重启即时生效
+        from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED
+
+        self._tabs_cb = self._on_tabs_changed
+        UIEventBus.get_instance().subscribe(EV_WORKBENCH_TABS_CHANGED, self._tabs_cb)
+        self.destroyed.connect(self._unsubscribe_tabs)
 
         # ── 主体：内容栈容器（tab 条已上移至面板顶部，这里只剩 stack）──
         self._bottom = QWidget(self)
@@ -454,6 +460,21 @@ class WorkbenchPanel(QWidget):
         from app.core.infra.ui_event_bus import EV_WORKBENCH_BADGES_CHANGED, UIEventBus
 
         UIEventBus.get_instance().unsubscribe(EV_WORKBENCH_BADGES_CHANGED, self._badges_cb)
+
+    def _on_tabs_changed(self, _payload: Dict[str, Any]) -> None:
+        """bus 回调：插件页签注册/卸载 → 重跑 reconcile（sip 探活防面板已销毁）"""
+        try:
+            self._tab_buttons  # noqa: B018 - 访问即探活，已销毁抛 RuntimeError
+        except RuntimeError:
+            return
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        self.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs())
+
+    def _unsubscribe_tabs(self) -> None:
+        from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED, UIEventBus
+
+        UIEventBus.get_instance().unsubscribe(EV_WORKBENCH_TABS_CHANGED, self._tabs_cb)
 
     def _delayed_hover_resync(self) -> None:
         """重建后布局落定再仲裁一次 hover（sip 探活防面板已销毁）"""

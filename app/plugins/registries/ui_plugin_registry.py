@@ -1821,14 +1821,24 @@ class UIPluginRegistry:
         self._workbench_tabs[page_id] = info
         # 联动命令：与浮动卡一致，页面注册即获得直达命令
         self._register_command_for_workbench_tab(info)
+        # 通知工作台面板 reconcile（热加载新插件页时无需重启即可见；
+        # 启动期面板尚未创建，publish 无人订阅，装配时自会 sync）
+        from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED, UIEventBus
+
+        UIEventBus.get_instance().publish(EV_WORKBENCH_TABS_CHANGED)
 
     def unregister_workbench_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部工作台页签（插件卸载时调用）"""
-        for page_id in [pid for pid, v in self._workbench_tabs.items() if v.plugin_name == plugin_name]:
+        removed = [pid for pid, v in self._workbench_tabs.items() if v.plugin_name == plugin_name]
+        for page_id in removed:
             del self._workbench_tabs[page_id]
             cmd_name = self._workbench_tab_command_names.pop(page_id, None)
             if cmd_name is not None:
                 self.unregister_ui_command(cmd_name)
+        if removed:
+            from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(EV_WORKBENCH_TABS_CHANGED)
 
     def get_workbench_tabs(self) -> List[WorkbenchTabInfo]:
         """获取全部工作台页签（按注册序返回）"""
