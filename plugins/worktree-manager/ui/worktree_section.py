@@ -95,6 +95,18 @@ _WORKTREE_POOL = QThreadPool()
 _WORKTREE_POOL.setMaxThreadCount(1)
 
 
+def _invalidate_repo_cache(folder: str) -> None:
+    """删除 worktree 后失效 GitWorktreeDetector 的相关缓存
+
+    `_info_cache` 只是最外层；`_worktrees_cache` / `_branch_cache` 各有
+    30s TTL，不清会拿回删除前的列表（表现为已删的 worktree 仍在行里，
+    页面高度也按陈旧条数算，行间凭空多出空白）。
+    """
+    GitWorktreeDetector._info_cache.pop(folder, None)
+    GitWorktreeDetector._worktrees_cache.clear()
+    GitWorktreeDetector._branch_cache.clear()
+
+
 def _find_git_root_for(wt_path: str) -> str:
     """后台线程：查找 worktree 所在 git 仓库根目录（rev-parse 移出主线程）"""
     if os.path.isdir(wt_path):
@@ -208,7 +220,9 @@ def _fetch_repo_info_job(folder: str):
         except Exception:
             pass
         # 2) 重新获取（prune 后 git 记录已清理）
+        # worktrees_cache 有 30s TTL，不清会拿回 prune 之前的陈旧列表
         GitWorktreeDetector._info_cache.pop(folder, None)
+        GitWorktreeDetector._worktrees_cache.clear()
         info = GitWorktreeDetector.get_repo_info(folder)
     return info, missing_paths
 
@@ -587,7 +601,7 @@ class WorktreeSectionWidget(QWidget):
 
         如果重新获取失败（_repo_info 为 None），仍要清空旧行避免残留。
         """
-        GitWorktreeDetector._info_cache.pop(self._original_folder, None)
+        _invalidate_repo_cache(self._original_folder)
         worker = _WorktreeTaskWorker(_fetch_repo_info_job, self._original_folder)
         worker.signals.finished.connect(self._on_repo_info_loaded)
         worker.signals.failed.connect(self._on_repo_info_load_failed)
@@ -661,11 +675,20 @@ class WorktreeSectionWidget(QWidget):
             pass
 
     def _clear_rows(self):
-        """清空所有 worktree 行 + 新建行（供 _populate_rows 和 _repopulate 共用）"""
+        """清空所有 worktree 行 + 新建行（供 _populate_rows 和 _repopulate 共用）
+
+        deleteLater 只排队不销毁：不先 hide，旧行在 DeferredDelete 执行前
+        仍 isVisible 且停在原位，与新行几何重叠，出现一帧叠影。
+        不调 setParent(None)：那会把所有权交回 Python，局部引用出作用域时
+        立即析构 C++ 对象，与已排队的 deleteLater 撞车。
+        """
         while self._rows_layout.count():
             item = self._rows_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w is None:
+                continue
+            w.hide()
+            w.deleteLater()
 
     def _populate_rows(self):
         """重新构建 worktree 行列表（纯渲染，git 查询在后台完成）
@@ -681,7 +704,6 @@ class WorktreeSectionWidget(QWidget):
         normalized_wd = os.path.normpath(current_wd)
 
         # ====== 渲染 ======
-        visible_count = 0
         for wt in self._repo_info.worktrees:
             if not os.path.isdir(wt.path):
                 continue  # prune 失败等边缘情况
@@ -699,7 +721,6 @@ class WorktreeSectionWidget(QWidget):
             row.switched.connect(self._on_switch)
             row.deleted.connect(self._on_deleted)
             self._rows_layout.addWidget(row)
-            visible_count += 1
 
         add = _AddWorktreeRow(
             self._repo_info.root,
@@ -710,9 +731,23 @@ class WorktreeSectionWidget(QWidget):
         add.createRequested.connect(self._on_create)
         self._rows_layout.addWidget(add)
 
-        wt_count = visible_count or 1
-        height = wt_count * 24 + 24 + 4
-        self.sizeChanged.emit(height)
+        self.sizeChanged.emit(self.content_height())
+
+    def content_height(self) -> int:
+        """本组件需要的高度（各行固定高之和 + 上下 margins）
+
+        单一事实源：调用方一律用它，不再各自套 `n*24+24+4` 公式。
+        页面的 setItemWidget 高度、sizeChanged 都从这里取，口径不一致时
+        多余高度会被 QVBoxLayout 均摊到行间，表现为行与行之间凭空多出空白。
+
+        用 `minimumHeight()`（行都 setFixedHeight(24)）而非
+        `_rows_layout.sizeHint()`：后者在行刚加入、事件循环还没跑时返回 0，
+        emit 出去会把 item 压成只剩 margins；也不要用 sizeHint()，它取的是
+        QWidget 默认值（18/17），不是 setFixedHeight 后的实际行高。
+        """
+        m = self.layout().contentsMargins()
+        total = sum(self._rows_layout.itemAt(i).widget().minimumHeight() for i in range(self._rows_layout.count()))
+        return total + m.top() + m.bottom()
 
     def _on_switch(self, worktree_path: str):
         """切换 worktree"""
