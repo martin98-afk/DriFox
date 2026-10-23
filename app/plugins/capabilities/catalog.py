@@ -57,6 +57,18 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _BOTH,
             ["get_model_config", "get_provider_config"],
         ),
+        _spec(
+            "provider.list",
+            _L,
+            "已配置服务商清单（id/名称/模型数，不含密钥与 URL）",
+            _BOTH,
+        ),
+        _spec(
+            "model.enumerate",
+            _L,
+            "指定服务商的可选模型列表（含视觉/思考能力标记）",
+            _BOTH,
+        ),
         # ── 会话 ──
         _spec("session.read", _M, "当前 session_id 与消息列表", _BOTH),
         _spec("session.write", _M, "消息写回当前会话（入库 + 刷 UI + 发事件）", _BOTH, ["save_messages_to_session"]),

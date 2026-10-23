@@ -11,6 +11,8 @@ from typing import Any
 
 from loguru import logger
 
+from app.plugins.capabilities.providers import model_meta
+
 
 class _BusSignal:
     """把 UIEventBus 适配成 signal 形状，供 release_plugin 统一断开。
@@ -877,6 +879,8 @@ def register(registry) -> None:
     reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
     reg.register("model.metadata", _model_metadata, surface="ui", owner="core:ui")
+    reg.register("provider.list", model_meta.provider_list, surface="ui", owner="core:ui")
+    reg.register("model.enumerate", model_meta.model_enumerate, surface="ui", owner="core:ui")
     reg.register("agent.read", _agent_manager, surface="ui", owner="core:ui")
     reg.register("agent.read", _agent_prompt, surface="ui", owner="core:ui", legacy_key="get_agent_prompt")
     # 工作目录
