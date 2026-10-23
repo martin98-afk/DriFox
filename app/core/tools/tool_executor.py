@@ -1093,7 +1093,10 @@ class ToolExecutor:
             if _spec is None or "tool" not in _spec.surfaces:
                 continue
             if _cap in pool:
-                services[_old] = pool[_cap]
+                # 用 pool.legacy 而非 pool[_cap]：一个能力可对应多个语义不同的
+                # 旧键（如 agent.read → get_agent_manager / get_agent_prompt），
+                # 直接取主实现会让两个键拿到同一个值。
+                services[_old] = pool.legacy(_old, _cap)
 
         # 高权限旧键保持 [ServiceAudit] 语义（历史测试与日志口径不变）
         for _svc_key in ("lsp", "mcp", "gitee"):
