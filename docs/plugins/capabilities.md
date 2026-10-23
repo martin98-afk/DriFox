@@ -123,8 +123,47 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | `model.metadata` | low | 当前模型的 provider / 名称 / 上下文长度 |
 | `model.schema` | low | 指定 agent 视角的工具 schema |
 | `model.config` | **high** | 完整模型配置，**含已解密明文 API key** |
+| `provider.list` | low | 已配置服务商清单（id / 名称 / 模型数，**不含密钥与 URL**） |
+| `model.enumerate` | low | 指定服务商的可选模型列表（含视觉 / 思考能力标记） |
+
+### 服务商
+
+| ID | level | 说明 |
+|---|---|---|
+| `provider.list` | low | 已配置服务商清单（见上，与模型组同一能力） |
 
 > `model.config` 是插件取任意服务商配置的唯一正确入口。密钥模式下磁盘 `app.config` 里的 API_KEY 是密文或空串，插件自行 `json.load` 会拿到不可用的 key（表现为 401）。
+
+### 模型下拉怎么选（示例）
+
+渲染「选服务商 / 选模型」下拉**不要**自己 `json.load(~/.drifox/app.config)`，
+走这两个能力：
+
+```python
+caps = ctx["capabilities"]
+
+providers = caps["provider.list"]()          # [{"id","provider_name","display_name",
+                                             #   "is_current","model_count","models_dev_id"}]
+models = caps["model.enumerate"]("MiniMax")  # [{"name","is_current","supports_vision",
+                                             #   "supports_thinking","context_limit","note"}]
+
+# 取到完整配置（含明文 key）再走 model.config —— 枚举结果里没有密钥
+cfg = caps.legacy("get_provider_config", "model.config")(
+    providers[0]["id"], models[0]["name"]
+)
+```
+
+要点：
+
+- **两级而非扁平**：`provider.list` 带 `model_count`，调用方先判断要不要展开。
+  一步返回全量会在「大服务商 × 多模型」场景拼出上万组合。
+- **不带 `API_KEY` / `API_URL`**。URL 看着无害，配合社工手法能把插件流量引到
+  别处；需要完整配置走 `model.config`。
+- **`supports_vision` 走「声明\_支持图像」优先**。第三方网关的额度与能力跟官方
+  API 各自成立，用户在模型参数卡的显式声明不被 models.dev 推断值反向覆盖。
+- **未知服务商返回空列表**，不静默串到别的服务商。
+- **tool surface 也可用**：`provider.list` / `model.enumerate` 在 ui 与 tool
+  双 surface 注册，工具里挑模型（如图片转发给视觉模型）不需要改 manifest surface。
 
 ### 会话
 

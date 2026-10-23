@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.plugins.capabilities.providers import model_meta
+
 
 def register(registry) -> None:
     def _kv(host: Any):
@@ -275,6 +277,8 @@ def register(registry) -> None:
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
     registry.register("context.compact", _context_compactor, surface="tool", owner="core:tool")
     registry.register("tool.execute", _tool_execute, surface="tool", owner="core:tool")
+    registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
+    registry.register("model.enumerate", model_meta.model_enumerate, surface="tool", owner="core:tool")
     registry.register("tool.read", _tool_read, surface="tool", owner="core:tool")
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("team.read", _team_read, surface="tool", owner="core:tool")
