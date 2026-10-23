@@ -348,6 +348,9 @@ class MessageCard(SimpleCardWidget):
         # 是前者工具区保持展开，后者折叠（避免长会话加载时信息过载）。
         # 缺失此标志时，本轮消息在虚拟滚动回收重建后会被误判为历史而突然折叠。
         self._streaming_finished = False
+        # 幂等收尾标记：本轮流式是否已 finish_streaming（入口守卫用，
+        # start_streaming_anim 开新一轮时重置，防「扫尾兜底 + 正路」双收竞态）
+        self._finish_streamed_for_round = False
         self._retrying = False  # 重试模式标志
         # 卡片底部内嵌任务看板（懒创建：首个非空任务到达时才建，挂气泡内正文下方）
         self._todo_panel = None
@@ -2280,6 +2283,8 @@ class MessageCard(SimpleCardWidget):
         # 新一轮开始：清除上一轮的"已完成流式"标记，使本轮重新按流式语义
         # 走展开路径（同 _is_history 的修正，见下方）。
         self._streaming_finished = False
+        # 幂等收尾标记重置：新一轮允许重新 finish_streaming（见其入口守卫）
+        self._finish_streamed_for_round = False
         # 🐛 修复"工具结果冒出又消失"：新轮流式开始时恢复 viewer 流式模式，
         # 避免 finish_streaming 后 viewer._streaming=False 导致工具结果到达时
         # append_tool_result 跳过 callback 更新，被后续 _perform_update 覆盖。
@@ -5843,6 +5848,40 @@ class MessageCard(SimpleCardWidget):
             immediate: 透传给 viewer.finish_streaming（T11）。批量加载路径传
                 False，避免 N 卡同帧全量重渲；交互路径保持默认 True。
         """
+        # 🐛 幂等守卫（2026-10-24「结束态正文全丢」）：_set_ai_state("idle") 的
+        # 扫尾兜底（_finalize_all_streaming_cards，force_dock_off=True）与本函数
+        # 的正路调用（_on_stream_finished 末尾）会对同一张卡连收两次。第二遍
+        # viewer.finish_streaming 会递增 _render_seq 使第一遍终渲染作废，且
+        # MessageCard 层 _cleanup_render_cache 已把 _markdown_text 清空 → 重派的
+        # 终渲染拿到空文本 → 正文全丢（结束态只剩「工具与思考」摘要行）。
+        # 语义反转修复前反向守卫下只有兜底层活着（正路永远跳过），双收竞态从未
+        # 暴露；_is_sip_deleted 修正后两层都会执行，此处收敛为只收一次。
+        # history=True（历史会话加载收尾）的卡从未 start_streaming_anim，
+        # _streaming 恒 False，必须放行。
+        # ⚠️ 判据用轮次标记（_finish_streamed_for_round）而非 _streaming：
+        # 打断路径是 stop_streaming_anim（已置 _streaming=False）之后再 finish
+        # 强制归位，用 _streaming 会误杀全部打断归位；轮次标记只拦「同轮流式
+        # 已收过尾」的重复调用，start_streaming_anim 开新一轮时重置。
+        # ⚠️ 判据必须用轮次标记而非 _streaming：打断路径是 stop_streaming_anim
+        # （已置 _streaming=False）之后再 finish（强制归位），用 _streaming 会
+        # 误杀全部打断归位；轮次标记只拦「同轮流式已收过尾」的重复调用。
+        # history=True（历史会话加载收尾）从未 start_streaming_anim，必须放行。
+        if not history and getattr(self, "_finish_streamed_for_round", False):
+            return
+        self._finish_streamed_for_round = True
+        # [finish-diag2] 入口打点（临时）：不受后续分支影响，含 viewer 状态。
+        # 上一轮日志 fallback 命中却零探针输出 → 嫌疑为 viewer None 时整段
+        # 归位被跳过，此打点用于证实/排除。
+        try:
+            logger.warning(
+                f"[finish-diag2] card finish ENTRY: viewer={'None' if self.viewer is None else 'set'} "
+                f"has_active_tools={self._has_active_tools()} history={history} "
+                f"force_dock_off={force_dock_off} "
+                f"order={list(self._tool_call_order.keys())[:6]} "
+                f"finished_n={len(self._finished_streaming_ids)}"
+            )
+        except Exception:
+            pass
         try:
             # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
             # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。
@@ -5866,6 +5905,11 @@ class MessageCard(SimpleCardWidget):
                 self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 _keep_dock = self._has_active_tools() and not (history or force_dock_off)
+                # [finish-diag2] viewer 收尾派发打点（临时）
+                try:
+                    logger.warning(f"[finish-diag2] card finish: keep_dock={_keep_dock} → viewer")
+                except Exception:
+                    pass
                 self.viewer.finish_streaming(keep_dock=_keep_dock, immediate=immediate)
                 if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()

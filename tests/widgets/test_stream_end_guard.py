@@ -73,3 +73,63 @@ def test_fallback_picks_latest_among_multiple_streaming(layout):
 def test_fallback_empty_layout(layout):
     """空布局 → None。"""
     assert find_last_streaming_assistant_card(layout) is None
+
+
+# ── finish_streaming 幂等守卫（「结束态正文全丢」回归）──────────────
+# 根因：_set_ai_state("idle") 扫尾兜底与 _on_stream_finished 正路对同一张卡
+# 连收两次；第二遍递增 _render_seq 作废第一遍终渲染 + 二次清空 _markdown_text
+# → 正文全丢。守卫用轮次标记（_finish_streamed_for_round）：只拦同轮重复
+# finish，打断路径（stop 后 finish 强制归位）与历史加载不受影响。
+
+
+class _RecordViewer:
+    """记录 finish_streaming 调用的最小 stub。"""
+
+    def __init__(self):
+        self.finish_calls = []
+
+    def finish_streaming(self, keep_dock=False, immediate=True):
+        self.finish_calls.append((keep_dock, immediate))
+
+
+def _fresh_card(qapp) -> MessageCard:
+    card = MessageCard(role="assistant")
+    card.viewer = _RecordViewer()
+    return card
+
+
+def test_double_finish_finalizes_once(qapp):
+    """同轮第二次 finish 被拦（兜底 + 正路双收 → 只收一次，正文不再被清）。"""
+    card = _fresh_card(qapp)
+    card.start_streaming_anim()
+    card.finish_streaming(force_dock_off=True)  # 兜底层先收
+    n_after_first = len(card.viewer.finish_calls)
+    card.finish_streaming()  # 正路第二遍
+    assert len(card.viewer.finish_calls) == n_after_first == 1
+
+
+def test_interruption_stop_then_finish_still_finalizes(qapp):
+    """打断路径 stop → finish(force_dock_off) 必须照常归位（不被幂等误杀）。"""
+    card = _fresh_card(qapp)
+    card.start_streaming_anim()
+    card.stop_streaming_anim()  # 打断：_streaming 已置 False
+    card.finish_streaming(force_dock_off=True)
+    assert len(card.viewer.finish_calls) == 1
+
+
+def test_new_round_rearms_finish(qapp):
+    """start_streaming_anim 开新一轮 → 幂等标记重置，可重新 finish。"""
+    card = _fresh_card(qapp)
+    card.start_streaming_anim()
+    card.finish_streaming()
+    card.start_streaming_anim()  # 新一轮
+    card.finish_streaming()
+    assert len(card.viewer.finish_calls) == 2
+
+
+def test_history_finish_bypasses_guard(qapp):
+    """history=True（历史加载收尾）恒放行。"""
+    card = _fresh_card(qapp)
+    card.finish_streaming(history=True)
+    card.finish_streaming(history=True)
+    assert len(card.viewer.finish_calls) == 2
