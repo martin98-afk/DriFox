@@ -21220,6 +21220,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     "[finish-diag] _current_assistant_card 失效，按状态回退收尾: "
                     f"fallback card streaming={getattr(_finish_card, '_streaming', None)}"
                 )
+            else:
+                # [finish-diag2] 回退也找不到活流式卡：流式卡已死或在其它窗口，
+                # 本轮收尾跳过（可见卡片若残留，此日志是唯一线索）。
+                logger.warning(
+                    "[finish-diag2] 回退未找到活流式卡，本轮收尾跳过 "
+                    f"(layout_count={self.chat_layout.count()})"
+                )
         if _finish_card is not None and _finish_card is not self._current_assistant_card:
             # 回退目标与登记引用不一致（引用被切走）：同步修正引用。
             self._current_assistant_card = _finish_card
@@ -21261,6 +21268,13 @@ class OpenAIChatToolWindow(ToolWindow):
             if elapsed is not None:
                 _finish_card.set_meta_info(elapsed=elapsed)
             _finish_card.finish_streaming()
+        elif _finish_card is not None:
+            # [finish-diag2] fallback 拿到的卡仍被判 deleted：本条出现即说明
+            # 查找函数的活性判定与收尾段判定不一致（2026-10-24 实证的静默丢失）。
+            logger.warning(
+                "[finish-diag2] fallback 卡仍 sip-deleted，收尾二次跳过 "
+                f"(layout_count={self.chat_layout.count()})"
+            )
 
         # 🛡️ 流式完成后显式滚底：finish_streaming 触发的最后一次全量渲染
         # 替换 DOM 后，contentHeightChanged 可能因高度不变而不触发，或

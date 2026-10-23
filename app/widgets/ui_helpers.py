@@ -849,19 +849,28 @@ def find_last_assistant_card(chat_layout) -> Any:
 
 
 def find_last_streaming_assistant_card(chat_layout) -> Any:
-    """找到布局中最后一张仍在流式态的活 assistant 卡片。
+    """找到布局中最后一张仍在流式态的**活** assistant 卡片。
 
     结束信号的收尾目标语义是「正在流式的那张卡」。登记引用
     （_current_assistant_card）在流式中可能因卡片回收/重建失效
     （sip-deleted wrapper 仍被 Python 属性持有），此时按状态回退查找。
-    sip-deleted 的卡在 isinstance/getattr 阶段抛 RuntimeError，直接跳过。
+
+    🐛 活性判定必须用 shiboken isValid（2026-10-24 真机日志）：PySide6 对
+    已析构 wrapper 读 **Python 侧实例属性**（_streaming/role）**不抛
+    RuntimeError**，getattr 防御拦不住 —— 布局里挂着已删卡的 item 时，
+    回退会捡回空壳并让收尾段被 _is_sip_deleted 再次拦下（finish_streaming
+    静默丢失，finish-diag2 ENTRY 零输出的根因）。
     """
+    from shiboken6 import isValid
+
     for i in range(chat_layout.count() - 1, -1, -1):
         item = chat_layout.itemAt(i)
         if not item or not item.widget():
             continue
         widget = item.widget()
         try:
+            if not isValid(widget):
+                continue
             if not isinstance(widget, MessageCard):
                 continue
             if getattr(widget, "_is_welcome", False):
