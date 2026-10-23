@@ -559,6 +559,21 @@ def test_approval_card_built_once(isolated_cfg):
     assert src.count("layout.addWidget(self._build_approval_card())") == 1, "审核处理卡只允许挂载一次"
 
 
+def test_approval_card_built_once(isolated_cfg):
+    """审核处理卡全页仅一份（回归：两次 _build_approval_card 致页面出现两份）"""
+    card = _make_card()
+    # 构建方法只产出一份实例：属性指向的卡与组内一致
+    assert card._approval_card is not None
+    # 审核处理不在任何开关/名单容器里重复（approval 控件只绑一份信号源）
+    import app.widgets.cards.settings.security_center_card as mod
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent.parent / "app" / "widgets" / "cards" / "settings" / "security_center_card.py").read_text(
+        encoding="utf-8"
+    )
+    assert src.count("layout.addWidget(self._build_approval_card())") == 1, "审核处理卡只允许挂载一次"
+
+
 def test_backup_group_separate_from_delete(isolated_cfg):
     """自动备份独立成组：备份卡在备份组，不在删除组"""
     card = _make_card()
