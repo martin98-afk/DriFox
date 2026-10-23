@@ -1,7 +1,124 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [未发布]
+## [v0.6.10] - 2026-10-20 (pyside6 分支同步)
+
+### ✨ 新功能 (New Features)
+
+- **垃圾桶软删除解耦 + 备份目录分类** (`app/core/workers/chat_worker.py` · `app/tools/sandbox.py` · `app/utils/file_operation_recorder.py` · `app/widgets/cards/settings/security_center_card.py` · `plugins/system-cleaner/`): ①垃圾箱行为修复：原备份逻辑挂在审批通过后钩子且被 `sandbox_enabled && delete_protection` 双门绑死——垃圾桶开了但删除保护没开时永不生效（「垃圾箱不工作」根因）。现挂在 `_execute_tool`（只有真正执行的命令才进），保留与否只看「垃圾桶」开关（`delete.trash_enabled`）：开 → 删除目标 move 进 `backups/deletes`（软删除可找回）；关 → 不保留，删除即真删；与沙箱/删除审批开关无关，删除豁免路径不进垃圾箱。②「删除保护」开关更名「删除审批」（职责只管审批，文案与 main_widget 风险来源标签同步）；copy 快照模式随解耦移除（`snapshot_paths_before_delete` 删除）。③备份目录顶层分类：`backups/edits/<session_id>/`（编辑类）+ `backups/deletes/`（删除类），旧 `deleted/`、`trash/` 不再写入；备份容量分治清理同步适配（旧目录排除在编辑类配额外）。④system-cleaner「备份文件」清理项拆为「编辑类备份」（默认勾选）与「删除类备份」（默认不勾选，误删恢复手段建议保留）。⑤插件视觉去 emoji：全部图标改内嵌 SVG 线性风格（QtSvg 渲染，主题色自适应），按钮/状态文案纯文字化，缓存行加 hover 高亮与圆角。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **能力面改声明式 + 补 `TeamManager.get_member_agent_name`** (`app/plugins/capabilities/facets.py` · `app/core/team/team_manager.py` · `providers/tool_core.py` · `providers/ui_core.py` · `plugins/system-tools/tools/subagent_tools.py`): `f06fb272` 往 `team.read` 加了 `member_agent_name` 契约但从未实现该方法，而 provider 用一次性构造的 `{别名: 宿主方法}` 字典——单个 typo 让整个能力在取用瞬间抛 `AttributeError`：system-hooks 两个 SessionStart 注入 hook 自 10-19 起静默空转（异常被 `except` 吞掉），`team_list_members` 直接报 `Execution error`。更深一层是同批迁移把 `subagent_tools` 的 TeamManager 对象换成能力池，却没注意 provider 返回 dict（`'dict' object has no attribute 'get_members'`）。现改为 ①`facets.py` 用 `FacetSpec(target, methods)` 声明白名单，两个 surface 共用一份清单，`ReadOnlyFacade` 保证名单外（尤其写操作）访问抛 `AttributeError`；②补 `get_member_agent_name`（口径同 `get_member_run_id`：先读 `team_members` 快照，回退活跃 members）；③派单独立为 `team.send`（medium，`send_task` 单方法），与只读面分权，system-tools manifest 补声明；④`tests/plugins/test_capability_provider_contract.py` 遍历 `FACETS` 断言白名单方法在目标类真实存在、门面不泄漏写操作，typo 在 CI 就炸。团队相关用例由基线 26 failed 收敛到 11（余下 5 项为 `TestHistorySessionRestoreRegistersTeamMember` 与 `TestDeriveCapability` 的既有失败，与本次无关）。
+
+## [v0.6.10] - 2026-10-20 (重新发布 #8)
+
+自 v0.6.9 以来的变更（累计） | 提交数：81 · 文件变更：227 · +14002/-2471 | 贡献者：dingma, drifox-bot, mading
+
+### ✨ 新功能 (New Features)
+
+- **插件能力池与能力声明契约体系** (`app/plugins/capabilities/` · `app/plugins/sdk.py`, `ce98827d`~`052db2db` 等): 全新插件能力治理层。①能力目录 43 条定义（等级/旧键映射/通配展开），契约类型（池上下文/池视图）；②裁剪视图惰性求值 + 拒绝指引 + 首次触达审计；③能力注册表：登记校验、双 surface（tool/ui）、按 manifest 声明裁剪、订阅可释放；④工具面接入能力池，旧 services 改由池投影；⑤`stream.subscribe` 能力（列表+映射双形态订阅）；⑥UI 上下文注入（window/notify/host.raw，卸载释放订阅）；⑦补 `window.current`/`window.workbench`/`ui.events`/`command.*`/`plugin.*`/`ui.dialog`/`ui.card.show`/`session.read`/`session.list`/`team.read` 能力；⑧回调类入口（输入按钮/侧栏）按插件声明裁剪能力；⑨插件 import 边界守卫（默认告警，`--strict` 供 CI），manifest 按 type 分级——system 插件只禁 `app.main_widget`；⑩能力解析与上下文管理增强、窗口快照逻辑优化、hooks 支持（`73d98f01`）。
+- **sdk 稳定性分级契约** (`app/plugins/sdk.py` · `tests/plugins/test_sdk_stability_contract.py`): 收录符号分 `stable` / `provisional` 两级，`sdk_stability(name)` 可查。stable 面承诺不改签名语义，破坏前必须在 CHANGELOG 记破坏性变更；provisional 不承诺、插件别写进长期逻辑。配套测试断言每个收录符号真能 import 到（防 `_SYMBOLS` 路径写错，而那要到插件运行时才炸）+ 常用契约在 stable 面。回应「sdk 仍不自包含、主程序重构会致插件失效」的担忧：sdk 是显式契约面，直连 `app.core.xxx` 才是真不自包含。
+- **`config.read` 能力（按 key 读非敏感配置）** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py`): marketplace 三处（pip 源 / 禁用插件集 / git host 白名单）原先直连 `Settings.get_instance()`，那是能力建模缺口不是执行力问题。新能力按 key 读，密钥类字段（key/token/secret/password/credential）一律拒绝并 warning——刻意不返回整个 Settings 对象，否则等于把 `model.config` 才该给的明文密钥一起交出去。
+- **安全中心「审核处理」组合配置** (`3c215234`, `ef85a63b`, `48c65c1c`, `6cbad1ea`): 新增审批方式（人工审批 / AI审批）、超时时间（0=不超时）、超时处理（拒绝 / 允许 / AI审核）与 AI 审核模型选择，收纳于单个折叠配置组。AI审批为静默决策：不弹审批卡，后台单轮调用审核模型判定放行/拒绝并 InfoBar 通知；AI 失败（模型未配置/调用异常/解析失败，decision 白名单外一律视为失败）回落人工审批弹卡。人工审批超时未决按配置自动拒绝/允许/转 AI 审核，转 AI 期间人工仍可抢先生效；所有自动决策回调校验待决 id 防回放。
+- **AI 审核补任务上下文** (`223410f4`): 审核模型输入加入用户目标与本轮轨迹，判定标准改为目标一致性。
+- **审批卡倒计时徽标与失败高亮** (`f53ffe28`): 审批卡加倒计时徽标与 AI 审核失败高亮行，顺带修样式 token 缺失致卡片不弹。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **宿主 api_version 门槛漏提致 9 个插件被静默拒载** (`app/plugins/version_gate.py` · `tests/core/test_api_version_contract.py`): `c76cb0cd` 给 6 个插件声明 `api_version=2`（capabilities 契约）时，漏改宿主的 `HOST_PLUGIN_API_VERSION`（仍是 1）→ VersionGate 判「高于宿主」全部拒载，**该插件任何组件都不加载**（工具/UI/hooks 全无），日志仅一行 warning 极易漏看。实测症状：`system-tools` 内置工具只剩 2 个、`assistant_hub` 等 UI 插件整体消失。修复：`HOST_PLUGIN_API_VERSION` 1 → 2。新增两道回归守卫：①`test_api_version_two_passes` 锁死宿主必须支持 2；②`test_shipped_plugins_declare_supported_api_version` 扫仓库内全部 manifest，声明值高于宿主的直接测试失败（防止再次整体拒载）。
+- **批量迁移 import 时漏改使用处** (`plugins/system-model-adapters/model_adapters/_detectors.py` · `tools/check_sdk_imports.py`): 把 `detect_provider_family` 的 import 从 `app.core.modelmeta.provider_profile` 改成 sdk 后，模块内三处使用点仍解析不到该符号（PEP 562 `__getattr__` 运行时才抛，编译期抓不到）→ `test_adapter_families.py` 6 用例 NameError。修复：`from app.plugins.sdk import detect_provider_family` 显式导入并补 `__all__`。新增 `tools/check_sdk_imports.py`：静态解析改动文件里 `from app.plugins.sdk import X`，核对 X 在 `_SYMBOLS` 中，批量改 import 时立刻抓到这类错。
+- **AI 审批链路四连修**（`ca7f6274`~`0c71f8ff`）: ① 审核模型不吐 JSON 时短输出文本语义回退（deny 直判；allow 需过否定词防护，防「不能放行」误放行）② reasoning 模型思考耗尽 max_tokens 致 content 截空 → 上限 2000 + 空响应单列日志 ③ 审核调用加界（60s 显式超时 + 收紧重试），修端点挂起拖死审批链 ④ mode=ai 分支补登记待决 id，修审核结果被防回放守卫静默丢弃致审批永久卡死（真凶）。
+- **删除保护漏拦 .NET API 删除** (`4e483677`): `[System.IO.Directory]::Delete` 等不含命令词的调用形态绕过词表识别，整条命令被判 allow。补 .NET IO Delete 特征正则 + 保护开启时兜底升档 confirm + `$var='path'` 目标提取（审批展示与快照可定位目标）。
+- **强回收器对过期可见窗口崩溃** (`3621ee97`): 回收器增强对过期可见窗口的健壮性，防止窗口已销毁后仍按旧快照取值触发 IndexError。
+- **审计日志刷屏** (`0d09792c`): host 无关能力池加缓存 + 审计去重提升到注册表层，消除重复审计记录刷屏。
+- **历史会话切换失效** (`458c2d59`): history-manager 的 `_active_window` 误用 `window.current` 改回 `window.active`，修历史会话切不了项目。
+- **审核处理卡重复挂载** (`1a6ed3fc`): 安全中心审核处理卡重复挂载致页面出现两份，只保留开关区后一份。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **插件越界 import 47 → 15，剩余均为 system 插件本质依赖**（批量）: 按「无宿主运行时依赖 + 常量/枚举/dataclass/纯函数/可继承基类 + 有插件在用」三条判定，把 `render_helpers` 的 escape/global_font/diff 摘要、`design_tokens` 的字号函数、`theme_style` 的 replay、`project_meta` 的 initials、`command_safety` 四函数、`context.config` 的阈值与 skip_tools、`context.tool_prune` 两函数、`modelmeta` 的 family/context_limit、`session_preview` 的消息预览、`utils.utils` 的 skill 查询、`git_worktree` 的 `WorktreeInfo`、`custom_title_bar` 的 `CustomTabButton`、`hover_style_guard` 的 `style_if_changed`、`conversation.agent` 的 `create_agent_manager` 全部收编 sdk 并改调用点（约 30 处）。`team.read` 能力面扩 `member_run_id`/`template_for_run`/`member_agent_name`，system-hooks 两个 hook 与 subagent_tools 改走能力池。剩余 15 处为运行时单例/内部实现（plugin_host_service / memory_manager / task_state / bg_manager / session_store / theme_manager / gateway.manager 等），属 system 插件实现主程序功能的本质依赖，强行套能力反制造无意义条目。守卫的 system 宽松口径保留，但清单已从 47 缩到 15。
+- **无 ctx 取能力统一入口 `caps_for`** (`app/plugins/capabilities/resolve.py` · `app/plugins/sdk.py`): 后台线程 / 工具 impl 原先各自复制「ensure_registered + 从 `__file__` 推断插件名 + `build_pool(host=None)`」六份样板，且 `host=None` 使 `window.current` / `session.read` / `input.read` 这类吃 host 的能力在后台恒返回空。新增 `caps_for(cap_id)` / `pool_for()` / `declared_for()` 并经 sdk 暴露；host 改由宿主解析（卡片 ctx 建立时登记「插件 → 窗口」绑定，`unregister_window` 清理；无绑定退活跃窗口），surface 按调用方目录推断（`tools/` → tool）。授权仍走同一条 `resolve_declared`，无绕过声明的后门。同步改掉 6 处样板（assistant_hub 的 assistant_manager / ui/sections / ui/assistant_card / tools/schema_filter、agent_trace 的 ui/trace_card、system-cleaner 的 ui/scanner），顺带删掉两处同名函数重复定义。回归测试 `tests/plugins/test_capability_resolve.py` 9 用例（声明裁剪、host 绑定、活跃窗口回落、surface 推断、未授权返 None）；插件套件与基线一致无回归。
+- **44 个插件文件 94 处 import 迁到 `app.plugins.sdk`** (`1929e88b`): 插件对宿主内部的直连 import 批量迁移至 sdk 契约面；另将 6 处 `ToolRegistry` 直连改走 `tool.read` / `tool.inject` 能力（`6b2284d0`）。
+- **UI services 改由能力池投影** (`0b6c81ce`): UI services 实现迁入 providers，调用方一律经能力池取用。
+- **工具注册表访问门面抽到 sdk** (`fea74738` · `81596b70`): 去掉 6 份重复实现；`make_summarize_from_preview` 纯函数收进 sdk。
+- **marketplace 脱离 TabManagerWindow** (`d1532f45`): 补 `window.host` / `input.read` / `input.write` 能力，解除对主窗口类的直接依赖。
+- **插件 type 标记修正** (`c3043b40` · `c88c0ce9`): 5 个 system 插件误标 user 后回退，2 处 backend 改走 session 能力。
+- **初始窗口默认宽度 960 → 1100** (`app/widgets/tab_manager_window.py`): `_restore_geometry` 的固定默认几何改为 1100x800（高度不变、仍屏幕居中），消息区与输入区多出 140px 可用宽度；最小窗口尺寸 600x450 不变，用户仍可自行缩放。几何记忆本就移除，重启后仍恢复该默认值。
+- **`alpha_tint` 统一重命名 `_alpha_tint`** (`11d5e3fc`): 私有命名统一。
+- **安全中心页全面分组收纳** (`817153c8`): 首屏从 10+ 平铺块收敛至 6 块；名单编辑区高度变化冒泡重算分组卡展开高度（先激活子项布局再逐 widget 求和，修 sizeHint 陈旧缓存致加行后内容截断）。
+- **删除保护拆分与垃圾桶软删除** (`e5189698`): 删除保护（审批）开关外提至页面顶层（重要开关不进折叠组）；新增「垃圾桶」独立开关（`delete.trash_enabled`），开启后删除命令审批放行时目标 **move** 进 `backups/trash`（软删除可找回），关闭维持 copy 快照；自动备份从删除组拆出独立成组；「删除与备份」更名「删除安全」。
+- **移除冗余调试日志** (`33ba8e4d`): 清理调试期遗留日志，优化能力池窗口快照错误处理。
+
+### ⚡ 性能优化 (Performance)
+
+- **sdk 改 PEP 562 延迟导入** (`1f39d915`): `import sdk` 从 +420 模块降到 +36 且不触碰 Qt，插件启动 import 成本大幅下降。
+- **窗口级能力池缓存** (`cdc1b9fb`): 每窗口缓存能力池一次，context 建池从 3 次降为 1 次。
+
+### 📚 文档 (Documentation)
+
+- **记忆系统文档分层纪律与上限** (`1e750605`): 补充分层写入纪律与容量限制说明。
+- **manifest 参考补 capabilities/api_version 字段与裁剪规则** (`3630c167`)；能力池文档入库（`ab59a96d`）；插件清单与测试文档更新，新增能力声明与越界 import 自检说明（`f3120c04`）；`window.current` 与 `window.active` 选择指引含踩坑说明（`acb80150`）；安全中心审核处理配置与页面文档同步（`24a7ac4e`）。
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号升级至 v0.6.10（`2ebc2685`）；marketplace 清单自动重生成（`8c3b6687`）。
+
+### ✨ 新功能 (New Features)（重新发布 #2 追加）
+
+- **PyInstaller 打包漏收 app.plugins 懒加载子模块** (`b84cdb28`): sdk.py 把 `sdk_tool_registry` 等子模块以字符串引用做懒加载映射，PyInstaller 静态分析不到，onefile 产物缺模块 → agent_trace UI / assistant_hub 工具注册 / system-context tier 加载报 `No module named 'app.plugins.sdk_tool_registry'`。打包脚本补 `collect_submodules("app.plugins")` 全量收集。
+- **MCP 服务器行名称宽度自适应** (`0b2d75b0`): 设置页 MCPServerRow 名称标签由 `StrongBodyLabel` + `setFixedWidth(100)` 换为 `_ElidedLabel`：短名自然伸展、长名 260px 封顶省略号 + tooltip 显示全名，修「dingtalk-aipower 被硬截成 dingtalk-a」。
+- **subagent 委托消息自包含纪律** (`d41b82cd`): `subagent_para` 工具描述注入委托纪律（源自 WorkBuddy A2A 协议）：子智能体默认看不到主对话，description 必须写全背景/目标/约束/期望产出四要素，大段参考资料放 context 字段，含糊指代（「刚才的」「上面那个」）换成具体名称/路径/结论。
+
+### ✨ 新功能 (New Features)（重新发布 #3 追加）
+
+- **system-cleaner 图标 SVG 化与缓存项 tooltip** (`76387264`): 缓存清理项图标改内嵌 SVG 线性风格（QtSvg 渲染、主题色自适应），缓存行加 hover 高亮与 tooltip 引导；缓存项定义重构为带默认勾选态与提示文案的数据结构，扫描器同步适配；清理器删除项移入垃圾箱目录（配合垃圾桶软删除），豁免路径处理增强并有测试覆盖。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #3 追加）
+
+- **侧栏折叠态切页横跳** (`bf24e421`): 折叠态是全局单份却被多个编排方互相改写——切页把 per-tab 宽度记忆强制展开（B 折叠后切回有记忆的 A 被静默拉开，relayout 压窄再触发折叠动画，来回切反复横跳）；restore 把含卡片槽的总宽灌给无卡页（A 开卡片 ↔ B 折叠来回切状态翻转）；启动补射用启动快照覆盖 0.7s 内的新折叠。收敛为全局折叠态语义：切页/补射不得改折叠态，per-tab 只记宽度且折叠态下不应用，restore 卡片守卫双向。回归 6 用例入 `tests/widgets/test_sidebar_tab_switch_width.py`。
+- **`_ElidedLabel` 省略棘轮** (`cb976428`): 标签被省略后 `sizeHint()` 缩水到省略文本宽 → 布局按最小宽度兜底 → 永久省略不可自愈。重写 `sizeHint` 返回完整文本宽（封顶 max），布局优先给足、不够才省略、放宽后自恢复。
+
+### ✨ 新功能 (New Features)（重新发布 #4 追加）
+
+- **能力 facet 声明式重构 + `team.send` 分权** (`9ec0aa11`): 宿主能力 provider 从一次性 `{别名: 方法}` 字典改为声明式 `capabilities/facets.py`——`FacetSpec(target, methods)` 白名单 + `ReadOnlyFacade` 统一代理，tool/ui 两 surface 共用一份清单，杜绝单点 typo 让整个能力面炸 `AttributeError`；契约测试 `tests/plugins/test_capability_provider_contract.py` 遍历清单断言方法在目标类真实存在、门面不泄漏写操作，typo 在 CI 即炸。团队派单写操作独立为 `team.send` 能力（medium），与 `team.read` 只读面分权，system-tools manifest 同步补声明。
+- **插件宿主兼容性检查** (`fac29453`): `deps_loader` 增加宿主版本兼容判定，marketplace 插件卡片展示版本要求、不满足时明确标示，不兼容插件不再静默安装后运行时才炸。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #4 追加）
+
+- **输入框滚动条假滚轮/无滚动条两难** (`9ec0aa11`): QTextEdit QSS 上下 padding 让原生竖条 range 恒为 2，Fluent delegate 的 `maximum()>0` 判据永远为真 → 空输入框常驻假滚轮（此前用永久 setForceHidden 治标，代价是内容超高后完全没有可见滚动条）。改为按真实滚动余量（`maximum - pageStep ≥ 12`）收放竖条，构造期滞留误 show 态立即校正一次。
+- **模型选择器卡成本显示** (`4921f5cb`): 成本金额限定小数位并对齐，长串小数不再撑破布局；顺带移除 `format_tool_changes` 旧实现残留文件，补回归测试。
+
+### ✨ 新功能 (New Features)（重新发布 #5 追加）
+
+- **subagent.run 能力开放给 system-tools** (`66092d01`, `plugins/system-tools/.drifox-plugin/plugin.json`): manifest 补声明 `subagent.run`，插件无需改代码即可派发子智能体任务。
+- **流式增量采样与 token 累计** (`9ab7754a`, `app/core/conversation/executor.py` · `app/core/workers/subagent_worker.py` · `app/main_widget.py` · `app/plugins/registries/ui_plugin_registry.py` · `app/widgets/markdown_block_viewer.py` · `app/widgets/message_card.py` · `plugins/agent_trace/ui/__init__.py`): ①回合结束复位流式文本游标，支撑增量采样；②新增 `live_text_delta`，只回传距上次采样的新增文本，token 估算不再重复扫全量累计文本；③新增 token 累计机制跟踪流式期间总产出，新回合自动归零；④`agent_trace` 统计卡与性能测试改用增量口径，基线/唯一段场景对比更准。
+- **流式增强与 subagent 聚合改进** (`4a870150`, `app/core/modelmeta/provider_profile.py` · `app/core/workers/chat_worker.py` · `app/core/workers/subagent_worker.py` · `app/widgets/markdown_block_viewer.py` · `app/widgets/message_card.py`): provider profile 扩展、chat/subagent worker 流式路径改造、markdown 块查看器增量渲染支持。
+
+### 🔄 测试与回归 (Tests & Regression)（重新发布 #5 追加）
+
+- 新增 `tests/core/test_subagent_stream_aggregation.py`（235 行）覆盖 subagent 流式聚合；`tests/widgets/test_markdown_incremental_html_equivalence.py` 扩充等价性用例；`tests/perf/test_stream_stage_bench.py` 补齐基线/唯一段场景对比。
+- 新增 macOS 顶置窗口与 WorkbenchPanel 回归用例（`13f76c45`），同时移除 3 个已过时的测试文件（`3ed90616`）。
+
+### ✨ 新功能 (New Features)（重新发布 #6 追加）
+
+- **配置指纹准确跟踪字号键** (`2bd6d6df`, `app/widgets/markdown_block_viewer.py` · `tests/widgets/test_markdown_incremental_html_equivalence.py`): 配置指纹计算纳入字号相关键，字号变更能被指纹正确识别（此前改字号不产生新指纹，增量渲染缓存按旧指纹继续命中，字号改动不生效）。
+
+### ✨ 新功能 (New Features)（重新发布 #7 追加）
+
+- **插件市场自动更新** (`23bb1465`, `plugins/plugin-marketplace/`): E1 config_schema 声明「自动更新插件」开关（默认关），应用运行期后台定时检查并自动安装更新（失败保留旧版），打开市场即时补查一次；`run_auto_update_check` 纯逻辑可脱离 UI 调用（侧栏待更新计数场景 `execute=False` 仅比对不动文件）；更新检查强制拉取最新市场数据（绕开 1h 本地缓存，修「推送新版本后半小时仍报无待更新」）。
+
+### ⚡ 性能优化 (Performance)（重新发布 #7 追加）
+
+- **市场卡打开卡顿治理** (`089d8a29`, `f3e835d9`, `plugins/plugin-marketplace/ui/cards.py` · `installer.py` · `marketplace_manager.py`): ①重复打开零渲染：内容未变化（缓存命中重复到达）只存引用不 reconcile，历版每开自动补 15 行×2 轮、滚动撞上补行即卡 1-3s；②`auto_fill=False` 收口数据到达路径：reconcile 只补首批 `_RENDER_BATCH=15` 规模内缺失，超出等「加载更多」，首批同步渲染行数减半打散掉帧；③setFont 仅在字体真变化时应用（`QWidget.setFont` 全树 fontChange 传播是打开卡顿主源之一）；④安装映射 30s TTL 缓存 + merge 差异字段诊断日志；⑤预热线程后台化试验实测收益仅 100-250ms 且引入加载态假死风险，回退主线程同步渲染。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #7 追加）
+
+- **watcher 基线期收口日志误报** (`f3e835d9`, `app/core/services/plugin_host_service.py`): `finish_watcher_baseline` 收口只收缩截止时间戳不置零，残留的过期正数让每个新窗口初始化都误打「基线期收口」日志——看起来像每次新建 tab 都在重启热更新/重载插件，实际无任何行为。现仅在基线期未过期时收口，过期残留直接清零。
+
+### ⚡ 性能优化 (Performance)（重新发布 #8 追加）
+
+- **长会话窗口 resize 适配提速** (`f39133a8`, `app/main_widget.py`): 长列表松手后内容适配秒级的根治。①恢复链只恢复视口±400px 内卡片，离屏卡保持占位态（不再逐批 show+reflow 争抢 Chromium renderer），滚动接近时由 `_restore_card_now` 即时恢复（滚动条件同步去掉 `_restore_queue` 非空前置——收口后离屏占位卡的唯一恢复通道）；②宽度同步队列按视口内段优先重排，越过边界即流水线启动恢复链，视口内容就位不再等全量分帧同步跑完（省数百 ms）；③收口兑底扫描 `_release_leftover_preview_placeholders` 同步只复位视口内占位卡（范围不同步收窄则离屏优化被整体架空）。宽度同步仍全量分帧（防最小宽锁死容器的死锁修复保持不动）。
 
 ## [v0.6.9] - 2026-10-16 (重新发布 #4)
 
