@@ -3,7 +3,8 @@
 
 照抄 WorkBuddy 的记忆读写角色（它用通用 Edit 工具，DriFox 因沙箱收口为专用工具）：
 - memory_read：读全局记忆 / 项目记忆 / 项目日志（按日期）。无参返回概览。
-- memory_write：写全局记忆 / 项目记忆（整体更新）/ 当日日志（追加）。
+- memory_write：写全局记忆 / 项目记忆（mode=append 末尾追加；整体替换带
+  乐观锁 base + 收缩确认 consolidate + 锁内快照）/ 当日日志（追加）。
 
 路径来源：tool_ctx["workdir"]（会话工作目录）与 manager 助手目录；
 不经沙箱（工具自身就是记忆边界的实现者）。
@@ -171,7 +172,8 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
                     + f"\n...（截断：全文 {len(text)} 字符超上限 {lim}。处理原则：合并去重、删过时条目、压缩表述，"
                     "再用 memory_write(scope=global) 整体写回精简版。）"
                 )
-            return ToolResult(True, content=text or "（全局记忆为空）")
+            fp = mgr.memory_fingerprint(aid, "global")
+            return ToolResult(True, content=((text or "（全局记忆为空）") + f"\n(base: {fp})"))
         if scope == "project":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法读取项目记忆。")
@@ -183,7 +185,8 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
                     + f"\n...（截断：全文 {len(text)} 字符超上限 {lim}。处理原则：合并去重、删过时条目、压缩表述，"
                     "再用 memory_write(scope=project) 整体写回精简版。）"
                 )
-            return ToolResult(True, content=text or "（项目记忆为空）")
+            fp = mgr.memory_fingerprint(aid, "project", wd)
+            return ToolResult(True, content=((text or "（项目记忆为空）") + f"\n(base: {fp})"))
         if scope == "daily":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法读取项目日志。")
@@ -308,43 +311,90 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
         raise last  # type: ignore[misc]
 
     try:
-        if scope == "global":
-            lim = mgr.memory_max_chars(aid)["global"]
-            if len(content) > lim:
-                return ToolResult(
-                    False,
-                    error=(
-                        f"写入被拒绝：全局记忆超上限（{len(content)}/{lim} 字符）。"
-                        "处理原则：先 memory_read(scope=global) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
-                    ),
-                )
-            # 写前快照：保住即将被覆盖的旧版；快照失败不阻断写入
-            try:
-                mgr.snapshot_memory(aid, "global")
-            except Exception:
-                pass
-            _retry(lambda: mgr.write_global_memory(aid, content))
-            return ToolResult(True, content="已更新全局记忆 MEMORY.md。")
-
-        if scope == "project":
-            if not wd:
+        if scope in ("global", "project"):
+            if scope == "project" and not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法写项目记忆。")
-            lim = mgr.memory_max_chars(aid)["project"]
+            lim = mgr.memory_max_chars(aid)[scope]
+            label = "全局" if scope == "global" else "项目"
+            mode = str(kw.get("mode") or "replace").strip().lower()
+            if mode not in ("replace", "append"):
+                return ToolResult(False, error="mode 必须是 replace（整体替换）/ append（末尾追加）")
+            if mode == "append":
+                # 末尾追加：不覆盖任何已有行；超限预检（追加后总量）
+                cur_text = str(
+                    (mgr.read_global_memory(aid) or "")
+                    if scope == "global"
+                    else (mgr.read_project_memory(aid, wd) or "")
+                ).strip()
+                new_total = len(cur_text) + len(content) + (1 if cur_text else 0)
+                if new_total > lim:
+                    return ToolResult(
+                        False,
+                        error=(
+                            f"追加被拒绝：追加后 {new_total}/{lim} 字符超上限。"
+                            f"先 memory_read(scope={scope}) 读全文，合并去重后用整体替换（mode 缺省）写回精简版。"
+                        ),
+                    )
+                r = _retry(lambda: mgr.append_memory(aid, scope, content, workdir=wd))
+                if not r.get("ok"):
+                    return ToolResult(False, error=f"追加失败: {r.get('error')}")
+                return ToolResult(True, content=f"已追加到{label}记忆（现 {r.get('chars')} 字）。已有内容不受影响。")
+            # ── 整体替换：超限预检 → 乐观锁 + 收缩确认 → 锁内快照落盘 ──
             if len(content) > lim:
                 return ToolResult(
                     False,
                     error=(
-                        f"写入被拒绝：项目记忆超上限（{len(content)}/{lim} 字符）。"
-                        "处理原则：先 memory_read(scope=project) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
+                        f"写入被拒绝：{label}记忆超上限（{len(content)}/{lim} 字符）。"
+                        f"处理原则：先 memory_read(scope={scope}) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
                     ),
                 )
-            # 写前快照：保住即将被覆盖的旧版；快照失败不阻断写入
-            try:
-                mgr.snapshot_memory(aid, "project", wd)
-            except Exception:
-                pass
-            _retry(lambda: mgr.write_project_memory(aid, wd, content))
-            return ToolResult(True, content="已更新项目记忆 MEMORY.md。")
+            base = str(kw.get("base") or "").strip()
+            consolidate = bool(kw.get("consolidate"))
+            if scope == "global":
+                r = _retry(
+                    lambda: mgr.write_memory_guarded(
+                        aid,
+                        "global",
+                        content,
+                        base=base,
+                        consolidate=consolidate,
+                        snapshot=lambda: mgr.snapshot_memory(aid, "global"),
+                    )
+                )
+            else:
+                r = _retry(
+                    lambda: mgr.write_memory_guarded(
+                        aid,
+                        "project",
+                        content,
+                        base=base,
+                        consolidate=consolidate,
+                        snapshot=lambda: mgr.snapshot_memory(aid, "project", wd),
+                        workdir=wd,
+                    )
+                )
+            if not r.get("ok", False):
+                err = str(r.get("error"))
+                if err == "conflict":
+                    return ToolResult(
+                        False,
+                        error=(
+                            f"版本冲突：{label}记忆已被其他会话修改（当前 base: {r.get('cur_base')}）。"
+                            f"先 memory_read(scope={scope}) 读最新全文（返回末尾带新 base），"
+                            "基于新版本重做修改后带新 base 再写。"
+                        ),
+                    )
+                if err == "shrink":
+                    return ToolResult(
+                        False,
+                        error=(
+                            f"写入被拒绝：新内容 {r.get('new_chars')} 字符比现有 {r.get('old_chars')} 字符缩水超 60%。"
+                            "若是有意整理（合并/删过时条目）带 consolidate=true 重试；"
+                            "若只是想记一条，改用 mode=append。"
+                        ),
+                    )
+                return ToolResult(False, error=f"写记忆失败: {err}")
+            return ToolResult(True, content=f"已更新{label}记忆 MEMORY.md（{r.get('chars')} 字）。")
 
         if scope == "daily":
             if not wd:
@@ -465,9 +515,13 @@ _WRITE_SCHEMA = {
             "正文硬上限 400 字符，超限拒写。禁止：过程叙述、复述需求、推理链、代码/日志粘贴、"
             "分节小标题（## 现象/## 根因）。summary=一句话结论（≤30 字），level=INFO/WARNING/ERROR。"
             "新一天首条 daily 若存在未蒸馏旧日志会被拒，按返回指令蒸馏并打标后重试。\n"
-            "scope=project：整体替换项目 MEMORY.md（先读后写）。只记 AGENTS.md 没有的动态沉淀（坑、决策理由、易错点、用户偏好），"
+            "scope=project：项目 MEMORY.md。记一条增量内容用 mode=append（末尾追加，不碰已有行）；"
+            "整体替换（mode 缺省）必须先读后写，带 memory_read 返回末尾的 base 做版本校验，"
+            "新内容比现有缩水超 60% 需 consolidate=true 确认是有意整理。"
+            "只记 AGENTS.md 没有的动态沉淀（坑、决策理由、易错点、用户偏好），"
             "一条一碎片、禁散文；AGENTS.md 静态规范（构建/测试/目录/风格/提交/EOL）禁止抄入；超上限拒写（默认 3000 字符）。\n"
-            "scope=global：整体替换全局 MEMORY.md（先读后写）。准入极严：仅用户显式要求的跨项目规则、蒸馏筛出的最珍贵且与项目无关经验；"
+            "scope=global：全局 MEMORY.md。记一条用 mode=append；整体替换规则同 project（先读拿 base，大幅精简带 consolidate）。"
+            "准入极严：仅用户显式要求的跨项目规则、蒸馏筛出的最珍贵且与项目无关经验；"
             "超上限拒写（默认 4000 字符）。除用户明确要求，不存密钥。"
         ),
         "parameters": {
@@ -475,11 +529,23 @@ _WRITE_SCHEMA = {
             "properties": {
                 "scope": {
                     "type": "string",
-                    "description": "daily（日志追加）/ project（项目 MEMORY.md 整体更新）/ global（全局 MEMORY.md 整体更新）",
+                    "description": "daily（日志追加）/ project（项目 MEMORY.md）/ global（全局 MEMORY.md）",
                 },
                 "content": {
                     "type": "string",
-                    "description": "daily=细节正文（≤400 字符，超出拒写）；project/global=完整新文件内容",
+                    "description": "daily=细节正文（≤400 字符，超出拒写）；project/global=完整新文件内容（replace）或一条新内容（append）",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "scope=global/project 时：replace（缺省，整体替换）/ append（末尾追加一条，高频记一条用这个，不会覆盖已有内容）",
+                },
+                "base": {
+                    "type": "string",
+                    "description": "整体替换的乐观锁：memory_read 返回末尾 (base: ...) 的值；磁盘版本与它不一致时拒写（防多会话覆盖）",
+                },
+                "consolidate": {
+                    "type": "boolean",
+                    "description": "整体替换时新内容比现有缩水超 60% 必须为 true（确认是有意整理而非误写）",
                 },
                 "date": {"type": "string", "description": "daily 补写日期 YYYY-MM-DD，缺省今天"},
                 "level": {

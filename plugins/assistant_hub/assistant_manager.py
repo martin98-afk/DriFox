@@ -1259,6 +1259,46 @@ class AssistantManager:
     def write_project_memory(self, aid: str, workdir: str, content: str) -> bool:
         return self._core_store().write_project_memory(workdir, aid, content)
 
+    def memory_fingerprint(self, aid: str, kind: str, workdir: str = "") -> str:
+        """记忆文件版本指纹（memory_read 返回、memory_write base 校验用）。"""
+        store = self._core_store()
+        if kind == "global":
+            return store.memory_fingerprint(store.global_memory_path(self._assistant_dir(aid)))
+        if kind == "project" and workdir:
+            return store.memory_fingerprint(store.project_memory_path(workdir, aid))
+        return ""
+
+    def append_memory(self, aid: str, kind: str, text: str, workdir: str = "") -> Dict[str, Any]:
+        """向全局/项目 MEMORY.md 末尾追加一块（不覆盖已有行）。"""
+        store = self._core_store()
+        if kind == "global":
+            return store.append_memory_file(store.global_memory_path(self._assistant_dir(aid)), text)
+        if kind == "project" and workdir:
+            return store.append_memory_file(store.project_memory_path(workdir, aid), text)
+        return {"ok": False, "error": "bad_kind"}
+
+    def write_memory_guarded(
+        self,
+        aid: str,
+        kind: str,
+        content: str,
+        base: str = "",
+        consolidate: bool = False,
+        snapshot=None,
+        workdir: str = "",
+    ) -> Dict[str, Any]:
+        """带护栏的整体替换（乐观锁 + 收缩确认 + 锁内快照）。"""
+        store = self._core_store()
+        if kind == "global":
+            return store.write_memory_guarded(
+                store.global_memory_path(self._assistant_dir(aid)), content, base, consolidate, snapshot
+            )
+        if kind == "project" and workdir:
+            return store.write_memory_guarded(
+                store.project_memory_path(workdir, aid), content, base, consolidate, snapshot
+            )
+        return {"ok": False, "error": "bad_kind"}
+
     def append_daily(
         self, aid: str, workdir: str, text: str, date: str = "", level: str = "INFO", summary: str = ""
     ) -> Dict[str, Any]:

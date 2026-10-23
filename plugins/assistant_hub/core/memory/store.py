@@ -45,6 +45,10 @@ GLOBAL_MEMORY_MAX_CHARS = 4000
 PROJECT_MEMORY_MAX_CHARS = 3000
 # 单条工作日志正文上限（摘要另计）。日志是索引不是报告，超限直接拒写逼模型压缩
 DAILY_ENTRY_MAX_CHARS = 400
+# 整体替换收缩检查：现有内容达到 SHRINK_CHECK_MIN_CHARS 且新内容 < 现有*SHRINK_RATIO
+# 视为大幅精简，需模型显式 consolidate=true（防「记一条覆盖全部」事故，2026-10-23）
+SHRINK_CHECK_MIN_CHARS = 200
+SHRINK_RATIO = 0.4
 
 _locks: Dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -426,6 +430,82 @@ def write_project_memory(workdir: str | Path, aid: str, content: str) -> bool:
     with _lock_for(path):
         _atomic_write(path, (content or "").rstrip() + "\n")
     return True
+
+
+def memory_fingerprint(path: Path) -> str:
+    """记忆文件版本指纹（乐观锁 base）：mtime_ns + 字符数；文件缺失返回 empty。
+
+    memory_read 返回给模型，整体替换时带回校验：不一致 = 磁盘已被别处改过。
+    """
+    try:
+        st = Path(path).stat()
+        return f"m{st.st_mtime_ns}c{st.st_size}"
+    except OSError:
+        return "empty"
+
+
+def append_memory_file(path: Path, text: str) -> Dict:
+    """向 MEMORY.md 末尾追加一块内容（不碰已有行；高频「记一条」的低风险通道）。
+
+    组装新增换行一律用 \n，交由 _atomic_write 的 write_text 按 os.linesep
+    翻译，与既有文件的 CRLF 现状保持一致；已有内容原样保留。
+    返回 {ok, chars}（写后总字符）或 {ok: False, error}。
+    """
+    body = (text or "").strip()
+    if not body:
+        return {"ok": False, "error": "empty"}
+    with _lock_for(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = read_text(path)
+        new = (old.rstrip("\r\n") + "\n" + body + "\n") if old.strip() else (body + "\n")
+        _atomic_write(path, new)
+        try:
+            chars = len(path.read_text(encoding="utf-8").strip())
+        except Exception:
+            chars = 0
+    return {"ok": True, "chars": chars}
+
+
+def write_memory_guarded(
+    path: Path,
+    content: str,
+    base: str = "",
+    consolidate: bool = False,
+    snapshot=None,
+) -> Dict:
+    """带护栏的整体替换：乐观锁 + 收缩确认 + 快照，全部在锁内完成。
+
+    base 非空且与磁盘指纹不一致 → conflict（模型基于陈旧上下文，禁止覆盖）。
+    现有内容达 SHRINK_CHECK_MIN_CHARS 且新内容 < 现有*SHRINK_RATIO 且未显式
+    consolidate → shrink（防拼接不全的「记一条覆盖全部」）。
+    校验全过才调 snapshot 回调（异常吞掉，不阻断写入）再原子落盘。
+    返回 {ok: True, chars} 或 {ok: False, error, ...细节}。
+    """
+    body = (content or "").rstrip()
+    with _lock_for(path):
+        cur_fp = memory_fingerprint(path)
+        if base and base != cur_fp:
+            return {"ok": False, "error": "conflict", "cur_base": cur_fp}
+        old_text = read_text(path).strip()
+        new_chars = len(body.strip())
+        if (
+            not consolidate
+            and len(old_text) >= SHRINK_CHECK_MIN_CHARS
+            and new_chars < len(old_text) * SHRINK_RATIO
+        ):
+            return {
+                "ok": False,
+                "error": "shrink",
+                "old_chars": len(old_text),
+                "new_chars": new_chars,
+            }
+        if snapshot is not None:
+            try:
+                snapshot()
+            except Exception:
+                pass  # 快照失败不阻断写入（与既有语义一致）
+        _atomic_write(path, body + "\n")
+    return {"ok": True, "chars": new_chars}
 
 
 def append_daily(

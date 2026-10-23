@@ -489,3 +489,79 @@ def test_query_daily_empty_and_no_hit(tmp_path):
     m.append_daily(wd, "build", "- 有内容", "2026-10-15")
     r = m.query_daily(wd, "build", search="不存在的词")
     assert r["ok"] and r["matched"] == 0 and r["content"] == "" and r["total"] == 1
+
+
+# ── 指纹 / append_memory_file / write_memory_guarded ─────────
+
+
+def test_memory_fingerprint_empty_and_changes_on_write(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    assert m.memory_fingerprint(p) == "empty"
+    m.write_global_memory(tmp_path, "内容甲")
+    fp1 = m.memory_fingerprint(p)
+    assert fp1 != "empty"
+    m.write_global_memory(tmp_path, "内容乙更长一些")
+    assert m.memory_fingerprint(p) != fp1
+    # 内容不变指纹不变
+    assert m.memory_fingerprint(p) == m.memory_fingerprint(p)
+
+
+def test_append_memory_file_basic(tmp_path):
+    aid = tmp_path / "hub"
+    aid.mkdir()
+    m.write_global_memory(aid, "- 第一条")
+    r = m.append_memory_file(m.global_memory_path(aid), "- 第二条")
+    assert r["ok"]
+    text = m.read_global_memory(aid)
+    assert "- 第一条" in text and "- 第二条" in text
+    assert text.index("- 第一条") < text.index("- 第二条")
+
+
+def test_append_memory_file_keeps_crlf(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    p.write_bytes("- 第一条\r\n- 第二条\r\n".encode("utf-8"))
+    r = m.append_memory_file(p, "- 第三条")
+    assert r["ok"]
+    raw = p.read_bytes()
+    # 无双 CR（\r\r\n），原两行 CRLF 保留，新行也是 CRLF
+    assert b"\r\r\n" not in raw
+    assert raw.count(b"\r\n") == 3
+    assert raw.endswith("\r\n".encode("utf-8"))
+
+
+def test_append_memory_file_empty_rejected(tmp_path):
+    r = m.append_memory_file(tmp_path / "MEMORY.md", "   ")
+    assert r["ok"] is False and r["error"] == "empty"
+
+
+def test_write_memory_guarded_conflict(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    m.write_global_memory(tmp_path, "v1")
+    fp1 = m.memory_fingerprint(p)
+    m.write_global_memory(tmp_path, "v2 外部改动")
+    r = m.write_memory_guarded(p, "v3", base=fp1)
+    assert r["ok"] is False and r["error"] == "conflict" and r.get("cur_base")
+    # 带当前 base 放行
+    fp2 = m.memory_fingerprint(p)
+    r2 = m.write_memory_guarded(p, "v3", base=fp2)
+    assert r2["ok"] and "v3" in m.read_global_memory(tmp_path)
+
+
+def test_write_memory_guarded_shrink_gate(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    old = "\n".join(f"- 条目{i}一些内容填充字符" for i in range(40))
+    assert len(old) > m.SHRINK_CHECK_MIN_CHARS
+    m.write_global_memory(tmp_path, old)
+    snaps = []
+    r = m.write_memory_guarded(p, "短", snapshot=lambda: snaps.append(1))
+    assert r["ok"] is False and r["error"] == "shrink" and r["old_chars"] > r["new_chars"]
+    assert not snaps  # 拒绝时不产生快照
+    r2 = m.write_memory_guarded(p, "短", consolidate=True, snapshot=lambda: snaps.append(1))
+    assert r2["ok"] and len(snaps) == 1  # 放行时锁内恰好快照一次
+
+
+def test_write_memory_guarded_small_file_no_shrink_check(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    m.write_global_memory(tmp_path, "x" * 150)  # 低于阈值
+    r = m.write_memory_guarded(p, "y")
+    assert r["ok"]
