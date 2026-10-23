@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 """工具 surface 的能力 provider（host = ToolExecutor）。
 
-只注册工具插件实际需要的面：窗口级 KV、LSP、MCP、Gitee、子智能体。
+覆盖 catalog 里标 ``_BOTH`` 的能力面。工具调用点没有 MainWidget（host 是
+ToolExecutor），因此与 ui_core 的同名能力**不能直接复用 provider**：两者的
+host 形状不同，数据源解析路径也不同。本模块按 ToolExecutor / BuiltinTools
+实际持有的引用逐条实现，语义与 ui_core 对齐。
+
+已覆盖：窗口级 KV、LSP、MCP、Gitee、子智能体、团队读写、工具读写与注入、
+模型元数据 / schema / 配置、会话读写、agent 读取、工作目录、上下文压缩、
+插件 logger。
 """
 
 from __future__ import annotations
@@ -33,6 +40,152 @@ def register(registry) -> None:
 
     def _subagent(host: Any):
         return getattr(host, "_sub_agent_manager", None)
+
+    def _backend(host: Any):
+        """ToolExecutor → ChatBackend（host 自身持引用，无则 None）。"""
+        return getattr(host, "_backend", None)
+
+    def _builtin(host: Any):
+        return getattr(host, "_builtin_tools", None)
+
+    def _model_metadata(host: Any):
+        """当前模型元数据（与 ui_core 同口径：provider / model）。"""
+
+        def metadata() -> dict:
+            getter = getattr(_builtin(host), "_get_llm_config", None)
+            if not callable(getter):
+                return {"provider": "", "model": ""}
+            try:
+                cfg = getter() or {}
+            except Exception:
+                return {"provider": "", "model": ""}
+            return {
+                "provider": cfg.get("provider_name") or cfg.get("provider") or "",
+                "model": cfg.get("\u6a21\u578b\u540d\u79f0") or cfg.get("model") or "",
+            }
+
+        return metadata
+
+    def _model_config(host: Any):
+        """当前模型完整配置（含已解密明文 API key）。
+
+        密钥模式下磁盘 app.config 是密文/空串，唯一可用来源是主程序装配给
+        BuiltinTools 的 getter（backend.initialize 时注入，见
+        ChatBackend._deferred_create_tool_executor）。
+        """
+
+        def current() -> dict:
+            getter = getattr(_builtin(host), "_get_llm_config", None)
+            if not callable(getter):
+                return {}
+            try:
+                return getter() or {}
+            except Exception:
+                return {}
+
+        return current
+
+    def _model_schema(host: Any):
+        """指定 agent 视角的工具 schema（含 deny 过滤，与 ui_core 同口径）。"""
+
+        def schema(agent_name: str = "") -> list:
+            am = getattr(_builtin(host), "_agent_manager", None)
+            agent = am.get_agent(agent_name) if (am and agent_name) else None
+            agent_perms = agent.permission if agent else {}
+            denied = {name for name, val in agent_perms.items() if val in ("deny", False)}
+            try:
+                from app.tools import get_builtin_tools_schema
+
+                all_tools = get_builtin_tools_schema(agent_manager=am, builtin_tools=_builtin(host))
+            except Exception:
+                return []
+            return [t for t in all_tools if t.get("function", {}).get("name", "") not in denied]
+
+        return schema
+
+    def _agent_read(host: Any):
+        """agent 管理器（与 ui_core 同口径：返回裸 manager 对象）。
+
+        按名取提示词走 legacy 键 get_agent_prompt（语义不同的 API 单位，
+        不能与主实现共用同一个返回值）。
+        """
+        return getattr(_builtin(host), "_agent_manager", None)
+
+    def _agent_prompt(host: Any):
+        """get_agent_prompt 旧键的专属实现（按名取提示词）。"""
+
+        def prompt(name: str) -> str:
+            am = _agent_read(host)
+            agent = am.get_agent(name) if am else None
+            return agent.prompt if agent else ""
+
+        return prompt
+
+    def _session_read(host: Any):
+        """当前会话只读快照（拿副本，不拿会话对象）。"""
+
+        def read() -> dict:
+            backend = _backend(host)
+            session = backend.get_current_session() if backend is not None else None
+            if session is None:
+                return {"session_id": "", "messages": [], "system_prompt": ""}
+            return {
+                "session_id": str(getattr(session, "session_id", "") or ""),
+                "messages": list(getattr(session, "messages", None) or []),
+                "system_prompt": str(getattr(session, "system_prompt", "") or ""),
+            }
+
+        return read
+
+    def _session_write(host: Any):
+        """消息写回当前会话。
+
+        工具侧没有 MainWidget._save_messages_to_session（那是 UI 侧封装），
+        改为委托 ChatBackend 暴露的同名入口；缺失时返回 0 表示未写入。
+        """
+
+        def write(messages, task_prompt: str = "") -> int:
+            backend = _backend(host)
+            fn = getattr(backend, "save_messages_to_session", None) if backend is not None else None
+            if not callable(fn):
+                return 0
+            try:
+                fn(messages, task_prompt=task_prompt)
+                return len(messages)
+            except Exception:
+                return 0
+
+        return write
+
+    def _workdir_read(host: Any):
+        """当前工作目录。
+
+        直读 ``_workdir`` 而非 ``host.get_workdir()``：后者在未经
+        ``set_workdir`` 显式设置时返回 None（启动路径不算用户选择），
+        而工具侧要的是执行器当前实际工作目录，恒为字符串。
+        """
+        return lambda: getattr(host, "_workdir", None) or ""
+
+    def _context_compactor(host: Any):
+        """上下文压缩器（与 ui_core 同路径：backend → chat_engine → _compactor）。"""
+        backend = _backend(host)
+        ce = getattr(backend, "chat_engine", None) if backend else None
+        return getattr(ce, "_compactor", None) if ce else None
+
+    def _plugin_log(host: Any, ctx: Any):
+        """带 plugin=<name> 前缀的 logger（与 ui_core 同实现）。"""
+        from loguru import logger
+
+        return logger.bind(plugin=ctx.plugin or "(builtin)")
+
+    def _tool_execute(host: Any):
+        """工具执行入口（与 ui_core 同口径：backend.tool_executor）。
+
+        工具侧 host 本身就是 ToolExecutor，返回自身即可：工具内再调工具
+        时走同一条 _execute_registered_tool 路径（会再建一次池，递归深度
+        由调用方控制）。
+        """
+        return host
 
     def _team_read(host: Any):
         """团队只读面（与 ui_core 同名能力语义一致，声明见 capabilities.facets）。"""
@@ -113,6 +266,19 @@ def register(registry) -> None:
     registry.register("state.kv", _kv, surface="tool", owner="core:tool")
     registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
     registry.register("model.enumerate", model_meta.model_enumerate, surface="tool", owner="core:tool")
+    registry.register("plugin.log", _plugin_log, surface="tool", owner="core:tool")
+    registry.register("model.metadata", _model_metadata, surface="tool", owner="core:tool")
+    registry.register("model.schema", _model_schema, surface="tool", owner="core:tool")
+    registry.register("model.config", _model_config, surface="tool", owner="core:tool")
+    registry.register("agent.read", _agent_read, surface="tool", owner="core:tool")
+    registry.register(
+        "agent.read", _agent_prompt, surface="tool", owner="core:tool", legacy_key="get_agent_prompt"
+    )
+    registry.register("session.read", _session_read, surface="tool", owner="core:tool")
+    registry.register("session.write", _session_write, surface="tool", owner="core:tool")
+    registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
+    registry.register("context.compact", _context_compactor, surface="tool", owner="core:tool")
+    registry.register("tool.execute", _tool_execute, surface="tool", owner="core:tool")
     registry.register("tool.read", _tool_read, surface="tool", owner="core:tool")
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("team.read", _team_read, surface="tool", owner="core:tool")
