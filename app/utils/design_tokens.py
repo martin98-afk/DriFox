@@ -1553,3 +1553,11 @@ def make_scroll_content_opaque(content, fg: str, alpha: int, backdrop: str) -> b
         return True
     except RuntimeError:
         return False  # widget 已销毁
+
+
+# 模块导入期无条件装 SpinBox 尺寸补丁：不依赖任何主题刷新路径先跑过。
+# 补丁本身幂等（_spinbox_qf_patched 守卫），重复调用无副作用。
+try:
+    _ensure_qfluentwidgets_spinbox_patch()
+except Exception:  # noqa: BLE001 - qfluentwidgets 缺失时整个补丁无意义
+    pass
