@@ -389,7 +389,7 @@ class _KeyCapturePopup(QWidget):
             self.key_captured.emit("")
             self.close()
             return
-        seq = QKeySequence(int(mods) | key)
+        seq = QKeySequence(mods.value | key)  # PySide6: KeyboardModifier 非 int 子类，取 .value
         self.key_captured.emit(seq.toString(QKeySequence.NativeText))
         self.close()
 
