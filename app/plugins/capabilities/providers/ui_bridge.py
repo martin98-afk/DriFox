@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """ui.control —— 受控 UI 操控（双 surface，跨线程安全）。
 
+**当前状态：已从 catalog 与双 surface 注册面摘除（能力不可用），实现留档。**
+保留原因：fire-and-forget 投递机制与离线测试全部验证通过；真实 DriFox 环境
+中动作提交后在主线程未执行且无失败日志（根因未定位，疑似与工具并行子
+QThread 环境下的信号投递有关）。重新启用步骤：catalog 加回 ui.control spec、
+ui_core/tool_core 各加一行注册、恢复本模块 docstring 描述。
+
 背景：UI 操控能力（input.write / ui.notify / window.*）此前全部只开 ui
 surface，原因是工具执行在工作线程，直接摸 QWidget 违反「UI 只在主线程动」
 铁律。本模块把「操控」收敛成一组**白名单动作**，内部经 Qt 信号把调用投递
@@ -58,7 +64,7 @@ class _Dispatcher:
         finally:
             box["done"].set()
 
-    def call(self, fn: Callable[[], Any], timeout: float = _DISPATCH_TIMEOUT_S) -> Any:
+    def call(self, fn: Callable[[], Any], timeout: float = _DISPATCH_TIMEOUT_S, wait: bool = True) -> Any:
         from PyQt5.QtCore import QThread
         from PyQt5.QtWidgets import QApplication
 
@@ -69,6 +75,8 @@ class _Dispatcher:
             return fn()
         box: Dict[str, Any] = {"done": threading.Event()}
         self._host._exec.emit(fn, box)  # type: ignore[attr-defined]
+        if not wait:
+            return None  # fire-and-forget：结果由 _run_on_main 写入 box，无人等待
         if not box["done"].wait(timeout):
             raise TimeoutError(f"ui.control 主线程投递超时（{timeout}s），主线程可能被阻塞")
         if "error" in box:
@@ -89,9 +97,34 @@ def _dispatcher() -> _Dispatcher:
     return _DISPATCHER
 
 
-def _dispatch(fn: Callable[[], Any]) -> Any:
-    """主线程直调，工作线程投递（同一实现服务双 surface）。"""
-    return _dispatcher().call(fn)
+def _dispatch(fn: Callable[[], Any], wait: bool = True) -> Any:
+    """主线程直调，工作线程投递（同一实现服务双 surface）。
+
+    wait=False 为 fire-and-forget：投递即返回，动作结果只记日志。
+    写操作（切页签/写输入框/通知）必须用它——它们会触发页面刷新等主线程
+    重活，可能去拿工具循环正持有的会话/引擎锁；同步等待会与 worker 互相
+    卡死（实测：worker Event.wait 等主线程，主线程 fn 抢锁等 worker，
+    UI 冻结到超时，模型重试再冻结）。
+    """
+    return _dispatcher().call(fn, wait=wait)
+
+
+#: 写操作的统一返回：动作已提交主线程，成败看日志（或用 snapshot 二次确认）
+_SUBMITTED: Dict[str, Any] = {"submitted": True}
+
+
+def _fire(action: str, fn: Callable[[], Any]) -> Dict[str, Any]:
+    """投递写动作到主线程（不等待），完成/失败记日志。"""
+
+    def _run_logged() -> None:
+        try:
+            fn()
+            logger.info(f"[ui.control] {action} 已在主线程执行")
+        except Exception as e:  # noqa: BLE001 - 异步动作失败只能记日志
+            logger.warning(f"[ui.control] {action} 执行失败: {e}")
+
+    _dispatch(_run_logged, wait=False)
+    return dict(_SUBMITTED)
 
 
 # ── 窗口/组件解析（全部在主线程执行） ──
@@ -157,14 +190,29 @@ def _action_snapshot() -> Dict[str, Any]:
 
 
 def _action_switch_tab(page_id: str) -> bool:
-    """切换工作台页签（不可见时自动展开工作台）。"""
+    """切工作台页签。走轻量路径：面板可见时直接 set_current_tab_by_id（与用户
+    手点页签同一条路，只刷新目标页数据）。
+
+    ★ 不走 open_workbench_tab 的完整路径（可见时它每次都 refresh_workbench →
+    sync_plugin_pages）：后者的「残缺 context 自愈」在任一插件页 context 缺
+    backend 且宿主可提供时会全量销毁重建所有插件页（worktree 跑 git 子进程、
+    file-tree 扫盘、history 读库），主线程秒级阻塞 → 「Python 未响应」。
+    仅在面板不可见（展开必经一次 reconcile，属正常成本）或页签不存在
+    （可能需 reconcile 补挂新页）时退回完整路径一次。
+    """
     tm = _resolve_tab_window()
     if tm is None:
         return False
+    panel = getattr(tm, "workbench_panel", None)
+    if panel is None:
+        return False
+    page_id = str(page_id)
+    if panel.is_panel_visible() and panel.set_current_tab_by_id(page_id, user=True):
+        return True
     opener = getattr(tm, "open_workbench_tab", None)
     if not callable(opener):
         return False
-    return bool(opener(str(page_id)))
+    return bool(opener(page_id))
 
 
 def _action_run_command(text: str) -> Optional[Dict[str, Any]]:
@@ -219,11 +267,19 @@ def _ui_control(host: Any):
 
     host 参数按 provider 签名约定保留（ui surface 传 MainWidget，tool surface
     传 ToolExecutor），实现统一走解析 + 线程投递，不依赖 host 类型。
+
+    线程语义：
+    - snapshot：同步等结果（只读宿主属性，无锁风险）
+    - switch_tab / set_input / notify：fire-and-forget，立即返回
+      ``{"submitted": True}``；动作在主线程异步完成，成败记主程序日志
+      （写动作会触发页面刷新，可能拿 worker 正持有的锁，同步等待会死锁）
     """
     return {
         "snapshot": lambda: _dispatch(_action_snapshot),
-        "switch_tab": lambda page_id: _dispatch(lambda: _action_switch_tab(page_id)),
-        "run_command": lambda text: _dispatch(lambda: _action_run_command(text)),
-        "notify": lambda title, message: _dispatch(lambda: _action_notify(title, message)),
-        "set_input": lambda text, append=False: _dispatch(lambda: _action_set_input(text, append)),
+        "switch_tab": lambda page_id: _fire("switch_tab", lambda: _action_switch_tab(page_id)),
+        "run_command": lambda text: _fire("run_command", lambda: _action_run_command(text)),
+        "notify": lambda title, message: _fire("notify", lambda: _action_notify(title, message)),
+        "set_input": lambda text, append=False: _fire(
+            "set_input", lambda: _action_set_input(text, append)
+        ),
     }

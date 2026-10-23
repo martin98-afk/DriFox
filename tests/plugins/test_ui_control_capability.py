@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-"""ui.control 能力 + workbench:tab 徽标 region 离线单测（不依赖 Qt 环境）。
+"""workbench:tab 徽标 region 离线单测（不依赖 Qt 环境）。
 
-覆盖：
-1. catalog 声明：ui.control 存在、双 surface
-2. 双 surface 注册 + pool 取用 + 动作白名单形状
-3. 无 GUI 环境优雅降级（RuntimeError，不崩）
-4. workbench:tab region：BADGE kind、挂载/覆盖/排序、bus 事件发布
+ui.control 能力已摘除（providers/ui_bridge.py 留档，见其模块 docstring），
+本文件保留徽标 region 的契约测试：
+1. workbench:tab region：BADGE kind、挂载/覆盖/排序、bus 事件发布
 """
 
 import pytest
@@ -31,55 +29,6 @@ def _pool(surface, declared):
 
     ensure_registered(surface)
     return CapabilityRegistry.get_instance().build_pool(surface=surface, host=object(), plugin="demo", declared=declared)
-
-
-# ── catalog 声明 ──
-
-
-def test_catalog_declares_ui_control_both_surfaces():
-    spec = CATALOG["ui.control"]
-    assert spec.surfaces == frozenset({"ui", "tool"})
-
-
-def test_ui_control_registered_on_both_surfaces():
-    from app.plugins.capabilities.registry import CapabilityRegistry
-
-    for surface in ("ui", "tool"):
-        CapabilityRegistry.reset_instance()
-        bootstrap.reset_bootstrap()
-        _pool(surface, {"ui.control"})
-        assert CapabilityRegistry.get_instance().has("ui.control", surface=surface)
-
-
-def test_ui_control_action_whitelist_shape():
-    pool = _pool("tool", {"ui.control"})
-    actions = pool["ui.control"]
-    assert set(actions.keys()) == {"snapshot", "switch_tab", "run_command", "notify", "set_input"}
-    assert all(callable(a) for a in actions.values())
-
-
-def test_ui_control_no_gui_raises_runtime_error(monkeypatch):
-    """headless / 测试环境无 QApplication → 动作抛 RuntimeError（可降级，不崩）"""
-    from PyQt5.QtWidgets import QApplication
-
-    monkeypatch.setattr(QApplication, "instance", staticmethod(lambda: None))
-    import app.plugins.capabilities.providers.ui_bridge as bridge
-
-    monkeypatch.setattr(bridge, "_DISPATCHER", None)
-    pool = _pool("tool", {"ui.control"})
-    with pytest.raises(RuntimeError, match="无 GUI 环境"):
-        pool["ui.control"]["snapshot"]()
-
-
-def test_ui_control_snapshot_fields_shape(monkeypatch):
-    """主线程直调路径：动作在无窗口时返回 has_ui=False 的全 None 快照"""
-    import app.plugins.capabilities.providers.ui_bridge as bridge
-
-    monkeypatch.setattr(bridge, "_resolve_widget", lambda: None)
-    monkeypatch.setattr(bridge, "_resolve_tab_window", lambda: None)
-    snap = bridge._action_snapshot()
-    assert snap["has_ui"] is False
-    assert snap["input_text"] is None and snap["workbench_tab"] is None
 
 
 # ── workbench:tab 徽标 region ──

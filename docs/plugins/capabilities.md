@@ -237,21 +237,11 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | ID | level | 说明 |
 |---|---|---|
 | `ui.notify` | low | 弹 InfoBar 通知 |
-| `ui.control` | high | 受控 UI 操控（**双 surface**：ui/tool 都可用）。动作白名单：`snapshot()` 界面语义快照 / `switch_tab(page_id)` 切工作台页 / `run_command(text)` 触发命令 / `notify(title, message)` / `set_input(text, append=False)`。工作线程调用自动投递主线程并同步等结果（超时 5s 抛 `TimeoutError`）；无 GUI 环境抛 `RuntimeError`，调用方按「暂无界面」降级 |
 | `ui.card.show` | low | 显示浮动卡 |
 | `ui.card.hide` | low | 隐藏浮动卡 |
 | `ui.exclusive` | medium | 独占 UI 模式 |
 | `ui.dialog` | low | 文件 / 目录选择、确认框、单行输入（跟随主题） |
 
-`ui.control` 用法（工具面操控界面走这个能力，拿不到 widget 引用）：
-
-```python
-ctl = caps["ui.control"]
-snap = ctl["snapshot"]()          # 当前页签 / 会话 / 项目 / 工作目录 / 输入框文本
-ctl["switch_tab"]("git-panel")    # 切工作台页签（不可见时自动展开）
-ctl["notify"]("完成", "构建通过")   # InfoBar 通知
-ctl["set_input"]("帮我看看", append=True)
-```
 
 页签徽标（任意元素挂到工作台页签，走 slot region 而非能力池）：
 

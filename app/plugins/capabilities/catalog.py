@@ -115,7 +115,6 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("net.upload", _H, "Gitee 上传（数据外发）", _TOOL, ["gitee"]),
         # ── 界面 ──
         _spec("ui.notify", _L, "弹 InfoBar 通知", _UI, ["notify"]),
-        _spec("ui.control", _H, "受控 UI 操控（界面快照/切工作台页/触发命令/通知/写输入框，跨线程安全）", _BOTH),
         _spec("ui.card.show", _L, "显示浮动卡", _UI),
         _spec("ui.card.hide", _L, "隐藏浮动卡", _UI, ["hide_card"]),
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
