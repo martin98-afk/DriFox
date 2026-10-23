@@ -88,6 +88,23 @@ def test_active_tools_suppress_guard():
     card.finish_streaming.assert_not_called()
 
 
+def test_reasoning_growth_suppress_guard():
+    """思考流（reasoning）增长 → 不收尾（2026-10-23「思考中高度突变」回归）。
+
+    🐛 根因：reasoning chunk 走 append_reasoning 静默累积，不进 _markdown_text
+    → 推理模型思考 >6s（常态）期间旧口径 cur_len 恒定且无活跃工具 → 闸门每
+    6s 误触发 finish_streaming 强制终态渲染 → 卡片高度突然重排（变高）→ 下一
+    个思考 chunk 又拉回流式（恢复）。真机日志 40s 内误触发 3 次。
+    """
+    card, viewer = _make_streaming_card(md_len=100)
+    card._reasoning_total_len = 2000  # 思考已在静默累积
+    card._stream_guard_ts = time.monotonic() - 999.0
+    card._reasoning_total_len = 2600  # 思考流又涨了 600，md 仍不变
+    card._guard_stream_end()
+    card.finish_streaming.assert_not_called()
+    assert card._stream_guard_len == 100 + 2600  # 口径 = md + reasoning，基准已刷新
+
+
 # ─── 3. 未武装不得参与（历史卡 / 已收尾卡）────────────────────
 
 

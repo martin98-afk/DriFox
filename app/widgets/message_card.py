@@ -2416,7 +2416,15 @@ class MessageCard(SimpleCardWidget):
         try:
             viewer = getattr(self, "viewer", None)
             md = getattr(viewer, "_markdown_text", "") if viewer is not None else ""
-            cur_len = len(md or "")
+            # 🐛 口径必须含思考流（2026-10-23 「思考中高度突变」根因）：reasoning
+            # chunk 走 append_reasoning 静默累积（写 _content_data + _reasoning_total_len），
+            # **不进 _markdown_text**。旧口径只看 md → 推理模型思考 >6s（常态）期间
+            # cur_len 恒定且无活跃工具豁免 → 闸门每 6s 误触发一次 finish_streaming
+            # 强制终态渲染 → 卡片高度突然重排（变高）→ 下一个思考 chunk 又拉回
+            # 流式布局（恢复）。真机日志：40s 内误触发 3 次（每 6s 一次）。
+            # 加上 reasoning 计数后，「模型还在吐 token」的任何证据都能续命闸门；
+            # 真死流（无任何增长且无活跃工具）仍会被正确兜住。
+            cur_len = len(md or "") + int(getattr(self, "_reasoning_total_len", 0) or 0)
             now = time.monotonic()
             last_len = getattr(self, "_stream_guard_len", -1)
             if last_len < 0:
