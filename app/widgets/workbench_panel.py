@@ -201,6 +201,11 @@ class WorkbenchPanel(QWidget):
         self.set_current_tab(0)
         self.refresh_style()
         self._subscribe_project_changed()
+        # 页签徽标（插件 slot region "workbench:tab"）：订阅总线事件刷新。
+        # 插件 register_slot_entry 后 publish（见 ui_plugin_registry）。
+        # 回调在 publish 调用方线程执行——插件注册发生在主线程加载期，约定成立；
+        # 面板销毁后经探活降级（_on_badges_changed），destroyed 时退订防悬挂。
+        self._subscribe_workbench_bus()
 
     # ── 显隐（直接 show/hide，无折叠动画） ──
 
@@ -381,6 +386,96 @@ class WorkbenchPanel(QWidget):
         self._schedule_tab_hover_sync()
         # 布局重排在下一帧：0ms 仲裁可能拿旧 geometry 漏判，60ms 后补一次兜底
         QTimer.singleShot(60, self._delayed_hover_resync)
+        # 页签按钮全部新建 → 插件挂的徽标必须重挂（徽标活在按钮实例上）
+        self._apply_badges()
+
+    # ── 页签徽标（插件 slot region "workbench:tab"）──
+
+    def _apply_badges(self) -> None:
+        """从注册表读徽标条目挂到页签按钮上（幂等，可重复调用）
+
+        条目约定见 ui_slots.BADGE：metadata["tab_id"] 定位页签，payload 三形态
+        （str 文本 / QWidget 实例 / 无参工厂），同 tab 多条目时 priority 最高者
+        生效（get_region_entries 已按序）。无条目的页签显式清空——徽标撤销后
+        必须消失，不能留在旧按钮上。
+        """
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        registry = UIPluginRegistry.get_instance()
+        top: Dict[str, Any] = {}
+        for entry in registry.get_region_entries("workbench:tab"):
+            tab_id = str((entry.metadata or {}).get("tab_id") or "")
+            if tab_id and tab_id not in top:
+                top[tab_id] = entry
+        for btn in self._tab_buttons:
+            entry = top.get(btn.tab_id)
+            if entry is None:
+                if btn._badge_text or getattr(btn, "_custom_widget", None) is not None:
+                    btn.set_badge("")
+                    btn._custom_source = None
+                continue
+            meta = entry.metadata or {}
+            payload = entry.payload
+            if isinstance(payload, QWidget):
+                if getattr(btn, "_custom_widget", None) is payload:
+                    continue  # 同一实例已挂，不重复挂载
+                btn._custom_source = entry
+                btn.set_widget(payload)
+            elif callable(payload) and not isinstance(payload, str):
+                if getattr(btn, "_custom_source", None) is entry:
+                    continue  # 同一条目的工厂不重复调用
+                try:
+                    widget = payload()
+                except Exception as e:  # noqa: BLE001 - 工厂异常不炸整个页签条
+                    logger.warning(f"[WorkbenchBadge] 徽标工厂失败 entry={entry.entry_id}: {e}")
+                    continue
+                if not isinstance(widget, QWidget):
+                    logger.warning(f"[WorkbenchBadge] 工厂未返回 QWidget entry={entry.entry_id}")
+                    continue
+                btn._custom_source = entry
+                btn.set_widget(widget)
+            else:
+                btn._custom_source = None
+                btn.set_badge(str(payload or ""), str(meta.get("tooltip") or ""))
+
+    def _on_badges_changed(self, _payload: Dict[str, Any]) -> None:
+        """bus 回调：徽标条目变化 → 重挂（探活防面板已销毁）"""
+        try:
+            self._tab_buttons  # noqa: B018 - 访问即探活，已销毁抛 RuntimeError
+        except RuntimeError:
+            return
+        self._apply_badges()
+
+    def _subscribe_workbench_bus(self) -> None:
+        """订阅徽标 / 页签集合两类总线事件
+
+        退订要点同 _subscribe_project_changed：bound method 每次取值都是新对象，
+        必须先存局部变量再同时用于 subscribe 与 unsubscribe。
+        """
+        try:
+            from app.core.infra.ui_event_bus import (
+                EV_WORKBENCH_BADGES_CHANGED,
+                EV_WORKBENCH_TABS_CHANGED,
+                UIEventBus,
+            )
+
+            bus = UIEventBus.get_instance()
+            h_badges = self._on_badges_changed
+            bus.subscribe(EV_WORKBENCH_BADGES_CHANGED, h_badges)
+            self.destroyed.connect(lambda: bus.unsubscribe(EV_WORKBENCH_BADGES_CHANGED, h_badges))
+            h_tabs = self._on_tabs_changed
+            bus.subscribe(EV_WORKBENCH_TABS_CHANGED, h_tabs)
+            self.destroyed.connect(lambda: bus.unsubscribe(EV_WORKBENCH_TABS_CHANGED, h_tabs))
+        except Exception as e:
+            logger.warning(f"[WorkbenchPanel] 工作台总线订阅失败: {e}")
+
+    def _on_tabs_changed(self, _payload: Dict[str, Any]) -> None:
+        """bus 回调：页签集合变化（插件热加载/卸载）→ reconcile"""
+        try:
+            self._tab_buttons  # noqa: B018
+        except RuntimeError:
+            return
+        self.sync_plugin_pages()
 
     def _delayed_hover_resync(self) -> None:
         """重建后布局落定再仲裁一次 hover（sip 探活防面板已销毁）"""

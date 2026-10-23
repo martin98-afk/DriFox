@@ -14,13 +14,14 @@
 
 from loguru import logger
 
-from app.tools.sandbox import SandboxConfig
+from app.tools.sandbox import SandboxConfig, read_approval_policy
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
 try:
     from qfluentwidgets import (
         BodyLabel,
+        ComboBox,
         ExpandGroupSettingCard,
         PushSettingCard,
         SpinBox,
@@ -33,6 +34,7 @@ except ImportError:  # 兜底：qfluentwidgets 缺失时用 Qt 原生，保功�
 
     BodyLabel = PushSettingCard = ExpandGroupSettingCard = None  # type: ignore
     SpinBox = QSpinBox  # type: ignore
+    ComboBox = None  # type: ignore
     FIF = None
 
 from PySide6.QtCore import Qt
@@ -311,49 +313,7 @@ class SecurityCenterCard(QWidget):
             show_title=False,
         )
 
-        self._path_white_card = _expand(
-            FIF.FOLDER_ADD if FIF else None,
-            "写入白名单",
-            "放行工作目录外的写入",
-            self._path_white,
-            tip="放行 workdir 外的写入目录；读操作不受此限制。",
-        )
-        self._path_black_card = _expand(
-            FIF.HIDE if FIF else None,
-            "文件黑名单",
-            "读写均拦截",
-            self._path_black,
-            tip="读写均拦截（如 .env/.ssh）。",
-        )
-        self._cmd_allow_card = _expand(
-            FIF.ACCEPT if FIF else None,
-            "命令安全 · 放行前缀",
-            "跳过审批，危险命令仍拦截",
-            self._cmd_allow,
-            tip="跳过审批；危险命令仍拦截（示例见输入框提示）。",
-        )
-        self._cmd_confirm_card = _expand(
-            FIF.CARE_RIGHT_SOLID if FIF else None,
-            "命令安全 · 强制审批前缀",
-            "命中即弹审批",
-            self._cmd_confirm,
-            tip="命中即弹审批（如 git push）。",
-        )
-        self._net_domains_card = _expand(
-            FIF.GLOBE if FIF else None,
-            "网络安全 · 域名黑名单",
-            "命中即弹审批",
-            self._net_domains,
-            tip="命中域名的网络命令弹审批（如 evil.com）。",
-        )
-        for w in (
-            self._path_white_card,
-            self._path_black_card,
-            self._cmd_allow_card,
-            self._cmd_confirm_card,
-            self._net_domains_card,
-        ):
-            layout.addWidget(w)
+        # 名单编辑区以裸 editor 挂入下方分组卡（分组自身即折叠层，不再各自套折叠卡）
 
         # ── 数据安全卡 ──
         self.delete_switch = SwitchSettingCard(
@@ -391,15 +351,7 @@ class SecurityCenterCard(QWidget):
             show_title=False,
             tip="这些目录内的删除不再弹审批，也不进垃圾箱。相对路径按工作目录解析（如 tests/）。",
         )
-        self._delete_exempt_card = _expand(
-            FIF.INFO if FIF else None,
-            "删除豁免路径",
-            "这些目录内的删除不再弹审批",
-            self._delete_exempt,
-            tip="这些目录内的删除不再弹审批，也不进垃圾箱。相对路径按工作目录解析（如 tests/）。",
-        )
-        layout.addWidget(self._delete_exempt_card)
-
+        # 删除豁免以裸 editor 挂入「删除豁免与备份」分组（分组自身即折叠层）
         self.backup_dir_card = PushSettingCard(
             "打开备份目录",
             FIF.FOLDER if FIF else None,
@@ -409,13 +361,7 @@ class SecurityCenterCard(QWidget):
             "修改前自动备份原文件（backups/edits）",
         )
         self.backup_dir_card.clicked.connect(lambda: self._open_backup_dir())
-        layout.addWidget(self.backup_dir_card)
-
-        # ── EU-G10：备份容量上限编辑 + 立即清理（FileRecorder 侧，不含删除快照）──
-        layout.addWidget(self._build_backup_limit_row())
-
-        # ── EU-G11：删除快照容量展示 + 打开目录 / 清空快照 ──
-        layout.addWidget(self._build_snapshot_row())
+        # 备份卡不再散装挂载（由「编辑类备份」分组收纳）
 
         # ── EU-G12：网络外传检测开关 ──
         self.net_switch = SwitchSettingCard(
@@ -437,12 +383,14 @@ class SecurityCenterCard(QWidget):
         self.sys_switch.setToolTip("wsl/wmic/sc/reg/schtasks/diskpart/bcdedit 等绕过沙箱审批，请谨慎启用。")
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
-        layout.addWidget(self.sys_switch)
 
-        # ── EU-G9：受管进程资源配额（Job Object 三限额）──
-        layout.addWidget(self._build_job_limits_row())
-        # ── 垃圾桶开关入列（功能来自垃圾桶软删除）──
-        layout.addWidget(self.trash_switch)
+        # ── 首屏结构：开关区（全部最外层）+ 折叠明细区 + 说明 ──
+        # 审核处理卡（处理方法 / 审核模型 / 超时 / 超时处理，全页仅此一份）
+        layout.addWidget(self._build_approval_card())
+        layout.addWidget(self._build_rules_group())
+        layout.addWidget(self._build_data_group())
+        layout.addWidget(self._build_backup_group())
+        layout.addWidget(self._build_net_proc_group())
 
         # ── 底部说明 ──
         # N1：默认值提示（沙箱与删除审批默认关闭，用户需手动开启）
@@ -471,6 +419,9 @@ class SecurityCenterCard(QWidget):
 
         ⚠ 先强制 editor 自身布局激活再逐 widget 求和（原版 _adjustViewSize 策略）：
         viewLayout.sizeHint() 有陈旧缓存（子项变化不传播，实测恒旧值），不可用。
+
+        editors 一律传裸 ``_ListEditorCard``（不传 _expand 出来的折叠卡）：折叠卡
+        自身收起时高度不涨，外层分组的条目增删高度联动会失效。
         """
         from PySide6.QtCore import QTimer
 
@@ -507,6 +458,8 @@ class SecurityCenterCard(QWidget):
             "豁免路径 · 删除类备份统计",
         )
         card.addGroupWidget(self.trash_switch)
+        # 挂裸 editor 而非 _expand 折叠卡：分组本身就是折叠层，再套一层要用户点两次，
+        # 且内层收起时高度不涨，外层分组的条目增删高度联动会失效
         card.addGroupWidget(self._delete_exempt)
         card.addGroupWidget(self._build_snapshot_row())
         self._bind_editor_growth(card, self._delete_exempt)
