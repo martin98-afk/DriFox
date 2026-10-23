@@ -48,10 +48,10 @@ class _Dispatcher:
     """
 
     def __init__(self) -> None:
-        from PyQt5.QtCore import QObject, pyqtSignal
+        from PySide6.QtCore import QObject, Signal
 
         class _SignalHost(QObject):
-            _exec = pyqtSignal(object, object)  # (fn, box)
+            _exec = Signal(object, object)  # (fn, box)
 
         self._host = _SignalHost()
         self._host._exec.connect(self._run_on_main)  # type: ignore[attr-defined]
@@ -65,8 +65,8 @@ class _Dispatcher:
             box["done"].set()
 
     def call(self, fn: Callable[[], Any], timeout: float = _DISPATCH_TIMEOUT_S, wait: bool = True) -> Any:
-        from PyQt5.QtCore import QThread
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QApplication
 
         app = QApplication.instance()
         if app is None:
@@ -87,7 +87,7 @@ class _Dispatcher:
 def _dispatcher() -> _Dispatcher:
     global _DISPATCHER
     if _DISPATCHER is None:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         if QApplication.instance() is None:
             raise RuntimeError("无 GUI 环境（QApplication 未创建），ui.control 不可用")
