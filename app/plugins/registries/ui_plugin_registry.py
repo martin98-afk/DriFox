@@ -3679,17 +3679,20 @@ class UIPluginRegistry:
                             was_visible = cm.is_card_visible(cid, win_id)
                         except (RuntimeError, AttributeError):
                             was_visible = False
-                    self._remove_widget_from_container(win_id, cid, widget)
-                    # CardManager 侧同步注销：unload 只清了 UIPluginRegistry 的
-                    # _card_widget_instances，_window_data 里该 card_id 的
-                    # cards/containers/system_cards/压制关系残留 → 重装同名插件时
-                    # register_card 打「已注册，将被覆盖」warning 且旧容器映射干扰
-                    # 新卡容器判定（审计 #3 P2-1）。
+                    # CardManager 侧同步注销（审计 #3 P2-1 + #19 问题 3）：
+                    # unload 只清了 UIPluginRegistry 的 _card_widget_instances，
+                    # _window_data 里该 card_id 的 cards/containers/system_cards/
+                    # 压制关系/dock 列表残留 → 重装同名插件时 register_card 打
+                    # 「已注册，将被覆盖」warning 且旧容器映射干扰新卡容器判定。
+                    # 必须早于 _remove_widget_from_container：后者已 pop
+                    # containers[card_id]，晚一步调会取不到 container_type 而
+                    # 跳过 visible_cards 复位分支。
                     if cm is not None:
                         try:
                             cm.unregister_card(cid, win_id)
                         except (RuntimeError, AttributeError):
                             pass
+                    self._remove_widget_from_container(win_id, cid, widget)
                     # 显式销毁旧实例：_remove_widget_from_container 仅 UI 清理不触发删除，
                     # 不 deleteLater 会残留旧模块闭包/信号槽引用（Qt 父对象引用链）
                     try:
