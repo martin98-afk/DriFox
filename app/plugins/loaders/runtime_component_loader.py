@@ -792,17 +792,37 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     五类运行时组件（model_adapters / loop_policies / storages / serializers / gateways / engines）
     的默认实现现已迁入系统插件（plugins/system-model-adapters/model_adapters/ 等（拆分前为 plugins/system/），
     serializers,gateways}/），不再需要 builtin 层兜底。registry 完全由插件目录扫描结果填充。
+
+    [PERF 2026-10-24] loader 复用模块级持久实例（原实现每次 ``_make_X_loader()``
+    造临时实例）：临时实例与 ``ensure_*_watcher`` 的持久实例各持一份 _occupied /
+    _sources / _source_kind 状态，同一 registry 被两套 loader 交替 scan，热重载时
+    互相看不见对方占用的 item id（跨根覆盖判定失真），且多造 11 个 loader 对象。
     """
+    global _adapters_loader, _loop_loader, _hook_loader, _storage_loader
+    global _serializer_loader, _transport_loader, _stream_sink_loader, _gateway_loader
+    global _engine_loader, _context_tier_loader, _budget_resolver_loader
+
     result: Dict[str, Set[str]] = {}
-    result["model_adapters"] = _make_adapters_loader().scan_roots()
-    result["loop_policies"] = _make_loop_loader().scan_roots()
-    result["hook_policies"] = _make_hook_loader().scan_roots()
-    result["storages"] = _make_storage_loader().scan_roots()
-    result["serializers"] = _make_serializer_loader().scan_roots()
-    result["transports"] = _make_transport_loader().scan_roots()
-    result["stream_sinks"] = _make_stream_sink_loader().scan_roots()
-    result["gateways"] = _make_gateway_loader().scan_roots()
-    result["engines"] = _make_engine_loader().scan_roots()
-    result["context_tiers"] = _make_context_tier_loader().scan_roots()
-    result["budget_resolvers"] = _make_budget_resolver_loader().scan_roots()
+    _adapters_loader = _adapters_loader or _make_adapters_loader()
+    result["model_adapters"] = _adapters_loader.scan_roots()
+    _loop_loader = _loop_loader or _make_loop_loader()
+    result["loop_policies"] = _loop_loader.scan_roots()
+    _hook_loader = _hook_loader or _make_hook_loader()
+    result["hook_policies"] = _hook_loader.scan_roots()
+    _storage_loader = _storage_loader or _make_storage_loader()
+    result["storages"] = _storage_loader.scan_roots()
+    _serializer_loader = _serializer_loader or _make_serializer_loader()
+    result["serializers"] = _serializer_loader.scan_roots()
+    _transport_loader = _transport_loader or _make_transport_loader()
+    result["transports"] = _transport_loader.scan_roots()
+    _stream_sink_loader = _stream_sink_loader or _make_stream_sink_loader()
+    result["stream_sinks"] = _stream_sink_loader.scan_roots()
+    _gateway_loader = _gateway_loader or _make_gateway_loader()
+    result["gateways"] = _gateway_loader.scan_roots()
+    _engine_loader = _engine_loader or _make_engine_loader()
+    result["engines"] = _engine_loader.scan_roots()
+    _context_tier_loader = _context_tier_loader or _make_context_tier_loader()
+    result["context_tiers"] = _context_tier_loader.scan_roots()
+    _budget_resolver_loader = _budget_resolver_loader or _make_budget_resolver_loader()
+    result["budget_resolvers"] = _budget_resolver_loader.scan_roots()
     return result
