@@ -566,6 +566,7 @@ def register_all_commands():
                 "name": ag["name"],
                 "description": ag.get("description", ""),
                 "prompt_text": ag.get("prompt_text", ""),
+                "source": ag.get("source", ""),
             }
         )
     _save_cache(cache_key, serialized_commands, serialized_agents)
@@ -649,6 +650,7 @@ def reload_all_commands():
                 "name": ag["name"],
                 "description": ag.get("description", ""),
                 "prompt_text": ag.get("prompt_text", ""),
+                "source": ag.get("source", ""),
             }
         )
     _save_cache(cache_key, serialized_commands, serialized_agents)
@@ -852,6 +854,7 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
     for md_file in cmd_files:
         cmd = _load_command_file(md_file)
         if cmd:
+            source = _plugin_name_of_md(md_file)
             cmd_mgr.register(
                 name=cmd["name"],
                 command_type=_parse_command_type(cmd["type"]),
@@ -861,8 +864,10 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
                 parameters=cmd.get("parameters", []),
                 shortcut=cmd.get("shortcut", ""),
                 prompt_sections=cmd.get("prompt_sections", {}),
-                source=_plugin_name_of_md(md_file),
+                source=source,
             )
+            # source 注入元数据 dict：缓存序列化从 dict 取值，不注入则落盘恒空
+            cmd["source"] = source
             commands.append(cmd)
     return commands
 
@@ -1005,7 +1010,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
                 description=description,
                 prompt_text=enhanced_body,
                 parameters=agent_params,
-                source="",
+                source=_plugin_name_of_md(md_file),
             )
             logger.debug(
                 f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
@@ -1016,6 +1021,9 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
                     "name": md_file.stem,
                     "description": description,
                     "prompt_text": enhanced_body,
+                    # source 必须随行进缓存：否则重启走缓存路径后 agent 命令
+                    # source 恒空，unregister_source("plugin:x") 清不到它们
+                    "source": _plugin_name_of_md(md_file),
                 }
             )
 

@@ -194,46 +194,86 @@ def test_plugin_name_of_md_other_returns_empty():
 
 
 def test_cache_roundtrip_preserves_source(tmp_path, monkeypatch):
+    """缓存 roundtrip 必须经生产序列化路径保留 source（#25 问题 2 重写）。
+
+    旧版本用例自造 serialized list，绕开了 _register_builtin_agents_as_commands
+    → _save_cache 的真实链路，正是「序列化漏 source」漏网的原因。本用例改为：
+    临时插件 agents/*.md → _register_builtin_agents_as_commands（生产注册+返回
+    元数据）→ _save_cache（生产序列化）→ _try_load_cache → _register_from_cached_*，
+    全链路断言 source 存活。
+    """
     from app.core.commands import builtin_commands as bc
-    from app.core.commands.command_manager import CommandManager, CommandType
+    from app.core.commands.command_manager import CommandManager
 
     monkeypatch.setattr(bc, "_get_cache_file", lambda: tmp_path / "commands_cache.json")
-    monkeypatch.setattr(bc, "_CACHE_VERSION", 6)
 
-    serialized = [
-        {
-            "name": "cached_cmd",
-            "type": "command",
-            "description": "d",
-            "argument_hint": "",
-            "prompt_text": "",
-            "parameters": [],
-            "shortcut": "",
-            "prompt_sections": {},
-            "source": "plugin:cached",
-        }
-    ]
-    serialized_agents = [
-        {"name": "cached_agent", "description": "a", "prompt_text": "p", "source": "plugin:cached"},
-    ]
+    # 临时插件：commands + agents 各一个 .md（plugin 名从路径推导 source）
+    pdir = tmp_path / "roundtrip-plugin"
+    (pdir / "commands").mkdir(parents=True)
+    (pdir / "agents").mkdir(parents=True)
+    (pdir / "commands" / "rt_cmd.md").write_text(
+        "---\ndescription: roundtrip cmd\ntype: prompt\n---\nbody\n", encoding="utf-8"
+    )
+    (pdir / "agents" / "rt_agent.md").write_text(
+        "---\ndescription: roundtrip agent\n---\nagent body\n", encoding="utf-8"
+    )
 
-    bc._save_cache("testkey", serialized, serialized_agents)
-
-    # 读回
-    data = json.loads((tmp_path / "commands_cache.json").read_text(encoding="utf-8"))
-    assert data["version"] == 6
-    assert data["commands"][0]["source"] == "plugin:cached"
-    assert data["agents"][0]["source"] == "plugin:cached"
-
-    loaded = bc._try_load_cache("testkey")
-    assert loaded is not None
+    # 生产注册路径：patch 文件源到临时插件目录
+    monkeypatch.setattr(bc, "_get_command_sources", lambda: [pdir / "commands" / "rt_cmd.md"])
+    monkeypatch.setattr(bc, "_get_agent_files", lambda: [pdir / "agents" / "rt_agent.md"])
 
     mgr = CommandManager()
-    n1 = bc._register_from_cached_commands(mgr, loaded["commands"])
-    n2 = bc._register_from_cached_agents(mgr, loaded["agents"])
+    commands = bc._load_commands_from_plugins(mgr)
+    agents = bc._register_builtin_agents_as_commands(mgr)
+    assert len(commands) == 1 and len(agents) == 1
+
+    # 注册态 source 已正确（生产注册路径）
+    assert mgr.get_command("rt_cmd").source == "plugin:roundtrip-plugin"
+    assert mgr.get_command("rt_agent").source == "plugin:roundtrip-plugin"
+
+    # 生产序列化路径（register_all_commands 同款两段）→ 落盘 → 读回
+    serialized_commands = [
+        {
+            "name": c["name"],
+            "type": c["type"],
+            "description": c.get("description", ""),
+            "argument_hint": c.get("argument_hint", ""),
+            "prompt_text": c.get("prompt_text", ""),
+            "parameters": bc._serialize_params(c.get("parameters", [])),
+            "shortcut": c.get("shortcut", ""),
+            "prompt_sections": c.get("prompt_sections", {}),
+            "source": c.get("source", ""),
+        }
+        for c in commands
+    ]
+    serialized_agents = [
+        {
+            "name": a["name"],
+            "description": a.get("description", ""),
+            "prompt_text": a.get("prompt_text", ""),
+            "source": a.get("source", ""),
+        }
+        for a in agents
+    ]
+    bc._save_cache("rt-key", serialized_commands, serialized_agents)
+
+    loaded = bc._try_load_cache("rt-key")
+    assert loaded is not None
+    # 落盘数据本身须含 source（#25 问题 1 的直接断言点）
+    assert loaded["commands"][0]["source"] == "plugin:roundtrip-plugin"
+    assert loaded["agents"][0]["source"] == "plugin:roundtrip-plugin"
+
+    # 读回重注册（模拟重启走缓存）
+    mgr2 = CommandManager()
+    n1 = bc._register_from_cached_commands(mgr2, loaded["commands"])
+    n2 = bc._register_from_cached_agents(mgr2, loaded["agents"])
     assert (n1, n2) == (1, 1)
-    assert mgr.get_command("cached_cmd").source == "plugin:cached"
-    assert mgr.get_command("cached_agent").source == "plugin:cached"
+    assert mgr2.get_command("rt_cmd").source == "plugin:roundtrip-plugin"
+    assert mgr2.get_command("rt_agent").source == "plugin:roundtrip-plugin"
+    # 按源清理对缓存回灌的条目生效（问题 1 的「按源清理失效」回归点）
+    assert mgr2.unregister_source("plugin:roundtrip-plugin") == ["rt_cmd", "rt_agent"]
+    assert not mgr2.has_command("rt_cmd")
+    assert not mgr2.has_command("rt_agent")
 
 
 def test_cache_version_bumped_to_6():
