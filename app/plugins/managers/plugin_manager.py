@@ -649,11 +649,12 @@ class PluginManager:
         return get_app_data_dir() / "cache" / "plugin_discovery.json"
 
     def _discovery_signature(self) -> tuple:
-        """目录签名（_plugins_dir_signature）+ manifest 元数据。
+        """目录签名（_plugins_dir_signature，已含 manifest 元数据）。
 
-        _plugins_dir_signature 已合并 _manifest_meta()，此处直接相加即可。
+        #29 问题 2：此前重复追加 _manifest_meta()，多一轮全插件 manifest stat
+        （_plugins_dir_signature 末尾已合并同一元数据）。
         """
-        return self._plugins_dir_signature() + self._manifest_meta()
+        return self._plugins_dir_signature()
 
     def _discovery_cache_key(self) -> list:
         """缓存键四元组：schema 版本 + 宿主版本 + 插件 API 契约版本 + 目录/清单签名。"""
