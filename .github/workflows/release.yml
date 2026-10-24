@@ -134,7 +134,9 @@ jobs:
       - name: Inject build_variant
         shell: bash
         run: |
-          sed -i "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          # BSD sed(macOS) 不支持无后缀 -i，必须 -i.bak；GNU/BSD 双兼容
+          sed -i.bak "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          rm -f app/utils/config.py.bak
           grep -n "build_variant = " app/utils/config.py || echo "  (本分支无 build_variant 字段，更新器按 pyqt5 兜底)"
 
       # ── PyInstaller ──
@@ -252,7 +254,9 @@ jobs:
       - name: Inject build_variant
         shell: bash
         run: |
-          sed -i "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          # BSD sed(macOS) 不支持无后缀 -i，必须 -i.bak；GNU/BSD 双兼容
+          sed -i.bak "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          rm -f app/utils/config.py.bak
           grep -n "build_variant = " app/utils/config.py || echo "  (无 build_variant 字段，按 pyqt5 兜底)"
 
       # ── PyInstaller ──
@@ -428,7 +432,9 @@ jobs:
       - name: Inject build_variant
         shell: bash
         run: |
-          sed -i "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          # BSD sed(macOS) 不支持无后缀 -i，必须 -i.bak；GNU/BSD 双兼容
+          sed -i.bak "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          rm -f app/utils/config.py.bak
           grep -n "build_variant = " app/utils/config.py || echo "  (无 build_variant 字段，按 pyqt5 兜底)"
 
       # ── PyInstaller ──
