@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.plugins.capabilities.providers import model_meta
+from app.plugins.capabilities.providers import model_meta, process_core
 
 
 def register(registry) -> None:
@@ -287,3 +287,4 @@ def register(registry) -> None:
     registry.register("mcp.call", _mcp, surface="tool", owner="core:tool")
     registry.register("net.upload", _gitee, surface="tool", owner="core:tool")
     registry.register("subagent.run", _subagent, surface="tool", owner="core:tool")
+    registry.register("process.start", process_core.process_start, surface="tool", owner="core:tool")
