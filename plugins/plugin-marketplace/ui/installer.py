@@ -1474,10 +1474,23 @@ class PluginInstaller:
 
     def uninstall(self, name: str) -> bool:
         """卸载插件（删除本地目录）"""
+        # 先回收该插件通过 process.start 启动的后台进程：进程可执行文件可能
+        # 在插件目录内，先杀防文件占用/残留孤儿
+        self._kill_plugin_processes(name)
         if not self.remove(name):
             return False
         logger.info(f"[Installer] Uninstalled plugin {name}")
         return True
+
+    @staticmethod
+    def _kill_plugin_processes(name: str) -> None:
+        """回收插件名下的 process.start 后台进程（幂等，失败不阻断卸载/禁用）。"""
+        try:
+            from app.plugins.capabilities.process_registry import ProcessRegistry
+
+            ProcessRegistry.get_instance().kill_plugin(name)
+        except Exception as e:
+            logger.warning(f"[Installer] 回收插件后台进程({name})失败: {e}")
 
     # ── 启用 / 禁用 ──────────────────────────────────────
 
@@ -1492,6 +1505,8 @@ class PluginInstaller:
         src = self._plugins_dir / name
         if src.exists():
             # 用户插件：move 到 plugins-disabled
+            # 先回收该插件的后台进程（防禁用后残留孤儿进程）
+            self._kill_plugin_processes(name)
             # 清理模块缓存（UI 注册表卸载由主线程先行完成，此处不碰 GUI）
             self._purge_plugin_module_cache(name)
             # 抑制 backend watcher：避免移动期间 watcher 抢跑 import 插件的 deps

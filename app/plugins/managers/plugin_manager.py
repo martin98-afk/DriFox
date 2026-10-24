@@ -1061,6 +1061,13 @@ class PluginManager:
         if name in self._NON_DISABLEABLE:
             logger.warning(f"[PluginManager] 拒绝禁用核心插件: {name}")
             return
+        # 回收该插件通过 process.start 启动的后台进程（防禁用后残留孤儿进程）
+        try:
+            from app.plugins.capabilities.process_registry import ProcessRegistry
+
+            ProcessRegistry.get_instance().kill_plugin(name)
+        except Exception as e:
+            logger.warning(f"[PluginManager] 回收插件后台进程失败: {e}")
         enabled = self._get_enabled_set()
         state_changed = False
         if name in enabled:

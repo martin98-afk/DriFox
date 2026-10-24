@@ -1,6 +1,12 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.11] - 2026-10-24 (pyside6)
+
+### ✨ 新功能 (New Features)
+
+- **`process.start` 管控闭环：进程台账 + 僵尸进程防治** (`app/plugins/capabilities/process_registry.py` 新增 · `providers/process_core.py` · `managers/plugin_manager.py` · `plugins/plugin-marketplace/ui/installer.py` · `docs/plugins/capabilities.md`): 替代早期「独立于宿主生命周期」语义（僵尸进程根源）。①进程台账 `ProcessRegistry`：每进程入专属 kill-on-close Job，宿主退出/崩溃/被杀由内核自动树杀，插件进程存活期 ≤ 宿主存活期；②插件禁用/卸载回收：`plugin_manager.disable_plugin` 与 installer `uninstall`/`disable`（用户插件 move 前杀，防目录文件占用）挂接 `kill_plugin` 树杀名下进程；③首启确认：每插件会话内首次启动弹窗（插件名+命令，ConfirmDialog 经 ui_bridge 跨线程投递，120s 超时按拒绝），拒绝入会话记忆防骚扰重试，headless/测试跳过；④限额防滥用：单插件 8 / 全局 32，超限拒绝；⑤env 白名单：子进程只继承 PATH/TEMP 等系统必要项 + 插件显式增量（`ENV_WHITELIST`），宿主密钥不再泄漏给插件进程。测试 `tests/plugins/test_capability_process_start.py` 扩展至限额/白名单/树杀/确认/禁用挂接 15 例。
+
 ## [v0.6.10] - 2026-10-20 (pyside6 分支同步)
 
 ### ✨ 新功能 (New Features)

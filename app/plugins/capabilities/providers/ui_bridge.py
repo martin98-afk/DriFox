@@ -97,7 +97,7 @@ def _dispatcher() -> _Dispatcher:
     return _DISPATCHER
 
 
-def _dispatch(fn: Callable[[], Any], wait: bool = True) -> Any:
+def _dispatch(fn: Callable[[], Any], wait: bool = True, timeout: float = _DISPATCH_TIMEOUT_S) -> Any:
     """主线程直调，工作线程投递（同一实现服务双 surface）。
 
     wait=False 为 fire-and-forget：投递即返回，动作结果只记日志。
@@ -105,8 +105,11 @@ def _dispatch(fn: Callable[[], Any], wait: bool = True) -> Any:
     重活，可能去拿工具循环正持有的会话/引擎锁；同步等待会与 worker 互相
     卡死（实测：worker Event.wait 等主线程，主线程 fn 抢锁等 worker，
     UI 冻结到超时，模型重试再冻结）。
+
+    timeout 仅在 wait=True 且工作线程调用时生效（主线程直调不受限）；
+    需要用户长时间交互的场景（如 process.start 首启确认框）传更大的值。
     """
-    return _dispatcher().call(fn, wait=wait)
+    return _dispatcher().call(fn, wait=wait, timeout=timeout)
 
 
 #: 写操作的统一返回：动作已提交主线程，成败看日志（或用 snapshot 二次确认）
