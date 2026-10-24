@@ -177,7 +177,7 @@ class TestSystemPluginTools:
             "question",
             "skill",
             "manage_skill",
-            "mcp_list_servers",
+            "mcp_manage",
             "upload_file",
         }
         assert expected <= names, f"缺失: {expected - names}"

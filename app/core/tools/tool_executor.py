@@ -831,7 +831,7 @@ class ToolExecutor:
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
 
         # 🛡️ 防御性补全 mcp__ 前缀：LLM 偶尔可能漏掉前缀
-        # （如从 mcp_list_servers 返回的裸名、训练数据记忆的短名等），
+        # （如从 mcp_manage 返回的裸名、训练数据记忆的短名等），
         # 走完恢复后仍统一为可识别的完整名。
         tool_name = self._try_recover_mcp_prefix(tool_name) or tool_name
 
@@ -1181,7 +1181,7 @@ class ToolExecutor:
         """
         防御性补全 MCP 工具名的 ``mcp__`` 前缀。
 
-        LLM 偶尔会漏掉前缀（例如从 ``mcp_list_servers`` 拿到的裸名、
+        LLM 偶尔会漏掉前缀（例如从 ``mcp_manage`` 拿到的裸名、
         历史对话记忆的短名）。在路由前尝试从已知 MCP 工具表中唯一性匹配，
         命中就补回完整名；无法唯一确定（如多个 server 同名）则返回 None，
         让调用走原来的失败路径，避免猜测。

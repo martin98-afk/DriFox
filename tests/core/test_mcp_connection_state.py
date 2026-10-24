@@ -40,6 +40,7 @@ def mgr():
     m._lock = threading.Lock()
     m._loop = None
     m._thread = None
+    m._ephemeral = set()  # 临时开启集合（生产由 __init__ 初始化）
     return m
 
 

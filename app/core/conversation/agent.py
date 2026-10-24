@@ -191,7 +191,8 @@ class PermissionResolver:
         "websearch": "allow",
         "todoread": "allow",
         "todowrite": "allow",
-        "mcp_list_servers": "allow",
+        "mcp_manage": "allow",
+        "mcp_list_servers": "allow",  # 旧工具名（历史 agent 配置仍指向它，registry alias 兼容）
         "mcp": "allow",  # MCP 工具前缀匹配
     }
 
