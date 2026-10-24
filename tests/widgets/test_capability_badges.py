@@ -163,9 +163,10 @@ def test_format_cost_number_stays_in_model_selector_card():
     from app.widgets.cards.settings import model_selector_card as msc
 
     assert hasattr(msc, "_format_cost_number"), "成本格式化函数必须留在原模块"
-    # 最多两位小数：3.0 → 3；0.11952 → 0.12；0.60 → 0.6
+    # 最多三位小数：3.0 → 3；0.11952 → 0.12；0.41831 → 0.418；0.60 → 0.6
     assert msc._format_cost_number(3.0) == "3"
     assert msc._format_cost_number(0.11952) == "0.12"
+    assert msc._format_cost_number(0.41831) == "0.418"
     assert msc._format_cost_number(0.60) == "0.6"
     assert msc._format_cost_number(None) == ""
 
