@@ -16,7 +16,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from PySide6.QtWidgets import QApplication
+try:  # 双栈兼容：dev 分支是 PyQt5，pyside6 分支是 PySide6
+    from PySide6.QtWidgets import QApplication
+except ImportError:  # pragma: no cover - 仅 PyQt5 环境
+    from PyQt5.QtWidgets import QApplication
 
 
 @pytest.fixture(scope="module", autouse=True)
