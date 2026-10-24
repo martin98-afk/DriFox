@@ -3618,6 +3618,11 @@ class UIPluginRegistry:
         ):
             # 确无任何注册：返回 False（幂等）。
             return False
+        # 丢弃本插件的待恢复条目：卸载前可见的浮动卡会被下方记入
+        # _pending_card_restore（供热重载 load_plugin 恢复），但**删除路径**
+        # （卸载后不再 load）没有消费方——残留条目会让重装同名插件时错误
+        # 恢复一个已删除的卡片视图。此处与 load_plugin 入口的清理对称。
+        self._pending_card_restore = [e for e in self._pending_card_restore if e[0] != plugin_name]
         # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
         try:
             import sys as _sys
