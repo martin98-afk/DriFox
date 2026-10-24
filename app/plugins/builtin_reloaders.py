@@ -16,7 +16,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.core.commands.builtin_commands import reload_agent_commands, reload_all_commands
+from app.core.commands.builtin_commands import reload_agent_commands, reload_plugin_commands
 from app.plugins.kernel import KNOWN_COMPONENTS, ComponentReloaderRegistry, ReloadContext
 from app.utils.utils import invalidate_skills_cache
 
@@ -72,8 +72,14 @@ def _reload_hooks(ctx: ReloadContext) -> Any:
 
 
 def _reload_commands(ctx: ReloadContext) -> Any:
-    """commands 分支：增删均走全量 reload_all_commands（与删除路径现状对齐）"""
-    reload_all_commands()
+    """commands 分支：按插件 source 精准重载（替代全表重建）
+
+    原先改任一插件都走 reload_all_commands：清空全表 → 全量重解析 → 全窗口
+    重建 QShortcut（~2500ms 级主线程阻塞）。现按 ctx.plugin_name 只摘该
+    source 的条目并重扫它的命令文件；插件目录已删除时天然只清不注册，
+    删除路径无需特判。
+    """
+    reload_plugin_commands(ctx.plugin_name)
     return True
 
 
