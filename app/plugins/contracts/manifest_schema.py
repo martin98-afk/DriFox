@@ -25,6 +25,7 @@ SPEC: Dict[str, tuple] = {
     "dependencies": ((dict,), None),
     "config_schema": ((dict,), None),
     "module_prefixes": ((list,), None),
+    "capabilities": ((list,), None),  # 能力清单：类型不符按未声明处理（兼容期语义）
 }
 
 

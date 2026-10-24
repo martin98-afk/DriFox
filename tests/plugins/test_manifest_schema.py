@@ -44,3 +44,37 @@ def test_missing_name_falls_back_to_dirname():
     out2, warnings2 = validate_manifest({"name": "  "}, fallback_name="dir-plug")
     assert out2["name"] == "dir-plug"
     assert len(warnings2) == 1
+
+
+def test_capabilities_type_mismatch_falls_back():
+    """capabilities 非数组 → 类型不符 warning + 丢弃（按未声明=兼容期处理）。"""
+    out, warnings = validate_manifest({"name": "plug-d", "capabilities": "model.config"})
+    assert "capabilities" not in out
+    assert any("capabilities" in w for w in warnings)
+    # 合法数组保留且无 warning
+    out2, warnings2 = validate_manifest(
+        {"name": "plug-d", "capabilities": ["model.config", "ui.notify"]}
+    )
+    assert out2["capabilities"] == ["model.config", "ui.notify"]
+    assert warnings2 == []
+
+
+def test_load_manifest_file_warns_unknown_capability(tmp_path):
+    """契约2b：_load_manifest_file 对未知能力 ID 出加载期 warning。"""
+    import json
+
+    from app.plugins.managers.plugin_manager import _load_manifest_file
+
+    d = tmp_path / "myplug" / ".drifox-plugin"
+    d.mkdir(parents=True)
+    (d / "plugin.json").write_text(
+        json.dumps(
+            {"name": "myplug", "api_version": 2, "capabilities": ["session.Read", "model.config"]}
+        ),
+        encoding="utf-8",
+    )
+    manifest, warnings = _load_manifest_file(d / "plugin.json")
+    assert manifest is not None
+    assert any("session.Read" in w and "CapabilityManifest" in w for w in warnings)
+    # 合法 ID 不产生能力类 warning
+    assert not any("model.config" in w for w in warnings)

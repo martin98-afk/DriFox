@@ -239,6 +239,7 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `ui.notify` | low | 弹 InfoBar 通知 |
 | `ui.card.show` | low | 显示浮动卡 |
 | `ui.card.hide` | low | 隐藏浮动卡 |
+| `ui.artifacts.show` | medium | 向消息卡片成果栏推送成果条目（image/video/html/text/file 五类分控件；`show(items, target="latest", call_id="")`，返回投递条目数；`ToolResult.artifacts` 字段是工具插件的免声明通道） |
 | `ui.exclusive` | medium | 独占 UI 模式 |
 | `ui.dialog` | low | 文件 / 目录选择、确认框、单行输入（跟随主题） |
 
@@ -465,7 +466,7 @@ provisional），不要图省事直连内部模块。收录判定三条：无宿
 按消息提示在 `plugin.json` 的 `capabilities` 里加 ID 后重载插件。
 
 **声明了但拿不到**
-检查 `api_version`：若为 2 且 `capabilities` 写错字（如 `session.Read`），展开后是未知 ID，不匹配任何 provider。用 `caps.names()` 打印实际放行的清单对照。
+检查加载期日志：typo（如 `session.Read`）、已删除能力或不存在的组通配会在插件加载时直接产出 `[CapabilityManifest] 未知能力 ID` warning（manifest_warnings，随 PluginInfo 可见），无需等运行期。也可用 `caps.names()` 打印实际放行的清单对照。
 
 **兼容期怎么退出**
 把插件的 `api_version` 提到 2 并补清单。宿主侧将来若想把默认版本从 1 提到 2，只需改一处默认值，无需逐插件改。
@@ -527,6 +528,16 @@ python tools/plugin_import_guard.py
 
 # CI：有违规即失败
 python tools/plugin_import_guard.py --strict
+
+# 审计差集报告：实际使用 vs 声明（兼容期插件给出建议清单）
+python tools/capability_report.py
+python tools/capability_report.py --since 2026-10-23   # 只看指定日期后，排除升级前历史
+python tools/capability_report.py --json              # 机器可读
 ```
+
+报告四类差集：兼容期插件的建议声明清单（实际使用 - 恒放行项，可直接照抄进
+plugin.json）、已声明但从未使用（可从清单删）、用到声明外能力（异常，出现
+即说明存在绕过路径）、本地未安装但日志有使用的孤儿。日志跨插件升级前后时
+务必加 `--since`：兼容期（全量放行）时期的使用记录会污染差集判定。
 
 合法面：`app.plugins.contracts` / `app.plugins.registries` / `app.plugins.managers.plugin_config_store` / `app.plugins.sdk` / `app.plugins.capabilities` / `app.plugins.deps_loader` / `app.plugins.managers.plugin_manager`。

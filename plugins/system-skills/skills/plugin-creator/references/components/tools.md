@@ -121,6 +121,23 @@ def _impl(tool_ctx, **kwargs):
 - 纯逻辑工具（文件/网络/桌面）：impl 用标准库/第三方库独立实现，不依赖主程序
 - 平台工具：通过 `tool_ctx["services"]` 调用平台能力，不直接访问主程序内部
 
+### 成果栏（ToolResult.artifacts，免声明）
+
+工具产出文件/媒体 → 消息卡片成果栏：`ToolResult` 带 `artifacts` 字段即自动挂栏
+（无需声明 `ui.artifacts.show`；成果归属产生它的那一轮，新卡不继承）：
+
+```python
+return ToolResult(True, content="已导出", artifacts=[
+    {"path": "out/report.png"},                          # kind 缺省按扩展名推断
+    {"path": "out/demo.mp4", "kind": "video", "caption": "演示"},
+])
+```
+
+条目形状：`{path, kind?, name?, width?, height?, size?, caption?, meta?}`；
+kind ∈ image/video/html/text/file；空列表隐藏成果区。只有异步任务晚于轮次
+结束、需要回填发起轮次原卡时，才显式声明 `ui.artifacts.show` 并调
+`show(items, target="call", call_id=tool_ctx["call_id"])`。
+
 ### 图标自包含
 
 `tools/icons/*.svg`（深色）+ `tools/icons_light/*.svg`（浅色），渲染按主题加载（缺浅色版回退深色/qrc）。

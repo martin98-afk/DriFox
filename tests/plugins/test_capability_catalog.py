@@ -8,7 +8,7 @@ import pytest
 def test_catalog_size_and_ids():
     from app.plugins.capabilities import catalog
 
-    assert len(catalog.CATALOG) == 53
+    assert len(catalog.CATALOG) == 54
     for cid, spec in catalog.CATALOG.items():
         assert spec.id == cid
         assert re.fullmatch(r"[a-z]+(\.[a-z][a-z_]*)+", cid), cid
@@ -103,3 +103,22 @@ def test_get_unknown_returns_none():
 
     assert catalog.get("nope.nope") is None
     assert catalog.get("session.read").group == "session"
+
+
+def test_unknown_declared_flags_typos_and_stale_ids():
+    """加载期语义校验：typo / 已删除能力 / 不存在的组通配被挑出。"""
+    from app.plugins.capabilities import catalog
+
+    # 正常 ID + 别名 + 通配 + 组通配全部放行
+    assert catalog.unknown_declared(["model.config", "lsp", "*", "ui.*"]) == []
+    # typo 与已删除能力（ui.control 已从 catalog 移除）
+    assert catalog.unknown_declared(["session.Read", "ui.control"]) == [
+        "session.Read",
+        "ui.control",
+    ]
+    # 不存在的组
+    assert catalog.unknown_declared(["badgroup.*"]) == ["badgroup.*"]
+    # 非法类型 / 空值安全
+    assert catalog.unknown_declared(None) == []
+    assert catalog.unknown_declared("model.config") == []
+    assert catalog.unknown_declared([]) == []
