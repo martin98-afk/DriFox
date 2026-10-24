@@ -234,6 +234,14 @@ def main():
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
 
+    # 🛡️ InfoBar 系统级守卫：死壳清洗 + notify 主线程投递桥预热。
+    # 只在 GUI 分支装（qfluentwidgets 仅 GUI 需要）；CLI 不加载。
+    # 背景：后台线程直弹 InfoBar 被析构后 manager 列表留死壳，新 InfoBar
+    # 弹出时 _pos 遍历死壳崩溃（2026-10-24，详见 app/utils/info_bar_guard.py）。
+    from app.utils.info_bar_guard import install_guard as _install_info_bar_guard
+
+    _install_info_bar_guard()
+
     # [A1] openai 资源预导入前移：QApp 就绪即启动预热线程（原在首窗构建后的
     # _deferred_startup，预热完成点被首窗构建推迟 2-3s）。预热线程单线程顺序导入
     # 不触发 Python 3.14 import 锁死锁；后续 worker 线程若等待 openai 模块锁为单向等待、无环。
