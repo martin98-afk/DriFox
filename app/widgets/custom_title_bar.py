@@ -1144,6 +1144,12 @@ class CustomTitleBar(TitleBarBase):
         _win = self.window()
         if _win is not None and _win.isMaximized():
             return super().mouseMoveEvent(e)
+        # ★ SC_MOVE 模态循环进行中的重入 move（每次鼠标移动都会派发到此处）
+        # 属预期行为：静默忽略。此前未短路，每条重入都打到 _start_system_move
+        # 的 warning → 拖拽全程数百条同步日志 IO 打在模态循环热路径上，
+        # 窗口跟随滞后卡顿（2026-10-24 日志 3ms 内 9 条实证）。
+        if _system_move_active:
+            return
         self._start_system_move(e.globalPos())
 
     def _start_system_move(self, global_pos) -> None:

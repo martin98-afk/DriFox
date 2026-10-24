@@ -1497,9 +1497,11 @@ class PluginHostService(QObject):
             # 3. 命令
             if comps.get("commands") and not result["commands"]:
                 try:
-                    from app.core.commands.builtin_commands import reload_all_commands
+                    # #25 问题 3：新装插件高频路径改按 source 精准重载，
+                    # 不再全表重建 + 全窗口快捷键重建（~2500ms 级）
+                    from app.core.commands.builtin_commands import reload_plugin_commands
 
-                    reload_all_commands()
+                    reload_plugin_commands(plugin_name)
                     result["commands"] = True
                 except (ImportError, Exception) as e:
                     logger.error(f"[PluginHost] Failed to reload commands: {e}")

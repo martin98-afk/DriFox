@@ -7,11 +7,13 @@ provider 是纯函数，不持有窗口引用（host 由 build_pool 传入）。
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from loguru import logger
 
 from app.plugins.capabilities.providers import model_meta, process_core
+from app.utils.info_bar_guard import post_to_main
 
 
 class _BusSignal:
@@ -598,13 +600,23 @@ def _ui_notify(host: Any):
     def notify(title: str, message: str) -> None:
         from qfluentwidgets import InfoBar, InfoBarPosition
 
-        InfoBar.success(
-            title,
-            message,
-            parent=_resolve_tab_window() or host.window(),
-            duration=5000,
-            position=InfoBarPosition.BOTTOM,
-        )
+        def _show() -> None:
+            InfoBar.success(
+                title,
+                message,
+                parent=_resolve_tab_window() or host.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+        if threading.current_thread() is threading.main_thread():
+            _show()
+            return
+        # 后台线程（cron-tasks 等后台任务通道）：InfoBar 的构造/show/manager
+        # 注册必须落主线程，跨线程创建会在 manager 列表留死壳（详见
+        # info_bar_guard 模块注释，2026-10-24 崩溃根因）
+        if not post_to_main(_show):
+            logger.warning("[Capability] notify 丢弃：QApplication 未就绪，无法投递主线程")
 
     return notify
 

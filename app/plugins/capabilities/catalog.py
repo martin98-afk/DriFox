@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, FrozenSet, Iterable, Optional, Set
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set
 
 from app.plugins.contracts.capabilities import CapabilityLevel, CapabilitySpec
 
@@ -212,3 +212,29 @@ def expand(ids: Iterable[str]) -> FrozenSet[str]:
         else:
             out.add(token)
     return frozenset(out)
+
+
+def unknown_declared(raw: object) -> List[str]:
+    """manifest capabilities 声明里的未知项（加载期语义校验用）。
+
+    expand 对未知 ID 静默保留、池构建时不匹配任何 provider，插件侧表现为
+    拿不到能力却看不到原因（typo 如 ``session.Read`` 最典型）。本函数把
+    这类声明在加载期挑出来，由 PluginManager 记入 manifest_warnings。
+
+    判定口径与 expand 严格一致：``*`` 合法；``group.*`` 检查 group 存在；
+    其余 token 过 ALIASES 后必须命中 CATALOG。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for item in raw:
+        token = str(item).strip()
+        if not token or token == "*":
+            continue
+        token = ALIASES.get(token, token)
+        if token.endswith(".*"):
+            if token[:-2] not in groups():
+                out.append(token)
+        elif token not in CATALOG:
+            out.append(token)
+    return out

@@ -92,6 +92,45 @@ class TestSetAuthorized:
         assert "浏览器" in row._auth_btn.setToolTip.call_args[0][0]
 
 
+class TestAuthAliasWarning:
+    """插件填第三方 client_name 绕过白名单时，按钮提示必须明示风险。
+
+    背景：Figma 的远程 MCP 只按 client_name 白名单放行动态注册（实测仅
+    Claude Code / Codex / opencode / Claude Desktop 通过，DriFox 与 VS Code
+    均 403）。figma 插件的 .mcp.json 因此填了 Claude Code。用户点按钮前
+    必须知道这不是 DriFox 的真实身份。
+    """
+
+    def test_default_name_has_no_warning(self):
+        row = _make_row({"name": "n", "auth": {"type": "oauth", "client_name": "DriFox"}})
+        row._auth_btn = MagicMock()
+
+        row.set_authorized(False)
+
+        tip = row._auth_btn.setToolTip.call_args[0][0]
+        assert "白名单" not in tip
+
+    def test_missing_client_name_has_no_warning(self):
+        row = _make_row({"name": "n", "auth": {"type": "oauth"}})
+        row._auth_btn = MagicMock()
+
+        row.set_authorized(False)
+
+        assert "白名单" not in row._auth_btn.setToolTip.call_args[0][0]
+
+    def test_alias_name_warns(self):
+        row = _make_row({"name": "figma", "auth": {"type": "oauth", "client_name": "Claude Code"}})
+        row._auth_btn = MagicMock()
+
+        row.set_authorized(False)
+
+        tip = row._auth_btn.setToolTip.call_args[0][0]
+        assert "Claude Code" in tip
+        assert "白名单" in tip
+        # 保留原有基础提示，不是替换
+        assert "浏览器" in tip
+
+
 class TestAuthClickDispatch:
     """授权按钮双态分发：未授权点 → authorizeRequested，已授权点 → unbindRequested"""
 

@@ -3605,6 +3605,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 command_type=CommandType.FUNCTION,
                 description=description,
                 argument_hint="",
+                source="",
             )
 
     def _open_workbench_history(self):
@@ -3721,6 +3722,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     PluginHostService.get_instance().finish_watcher_baseline()
                 except Exception as e:
                     logger.debug(f"[MainWidget] watcher 基线期收口失败（不影响启动）: {e}")
+
+                # 自动设置卡回放：PluginManager 扫描期只登记 schema（不能 import
+                # UI 链，否则把 Qt/qfluentwidgets 级联拖进 initialize 同步段），
+                # 此处 UI 栈已就绪，统一注册（幂等；失败项留 pending 待下次）
+                try:
+                    from app.plugins.managers.plugin_manager import PluginManager
+
+                    PluginManager.get_instance().replay_config_cards()
+                except Exception as e:
+                    logger.warning(f"[MainWidget] 插件设置卡回放失败: {e}")
 
                 # [修复 2026-09-14] UI 插件装载完成后按最终注册表强制刷新欢迎卡。
                 # 背景：启动去抖合并渲染（_schedule_initial_welcome 600ms 尾触）
@@ -15287,10 +15298,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 刷新 UI 插件命令卡片缓存（插件可能注册了新命令）
         try:
-            from app.core.commands.command_manager import CommandManager
+            # #25 问题 4：原 CommandManager.reload_all_commands 是 AttributeError
+            # （CommandManager 无此方法，模块级函数在 builtin_commands），被 except
+            # 静默吞掉——保守对齐原意图改调模块级函数
+            from app.core.commands.builtin_commands import reload_all_commands
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            CommandManager.get_instance().reload_all_commands()
+            reload_all_commands()
             UIPluginRegistry.get_instance().re_register_all_commands()
         except Exception:
             pass
