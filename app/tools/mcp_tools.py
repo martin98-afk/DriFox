@@ -1722,19 +1722,39 @@ class MCPClientManager:
         logger.info(f"[MCP] '{name}' 临时开启已关闭")
         return True, ""
 
+    def _configured_servers(self) -> List[dict]:
+        """配置侧的 MCP 服务器全集（含从未建连的）。
+
+        get_status 只反映内存连接表，而 enabled=false 的服务器在 _connect_all
+        里被直接跳过、永不建连，于是它们在整个状态面（mcp_manage list、设置卡）
+        上完全不可见——用户配了 12 个 HTTP MCP，工具却回答"没有任何 MCP 服务器
+        配置"。配置来源必须由调用方合并进来，才能表达"配置全集 + 运行时状态"。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            return list(pm.get_mcp_servers()) if pm.is_initialized() else []
+        except Exception as e:
+            logger.debug(f"[MCP] 读取配置侧服务器列表失败: {e}")
+            return []
+
     def get_status(self) -> List[Dict]:
         # 注意：返回的 tools 必须带 mcp__{server}__ 前缀，与 get_tool_schemas() 保持一致，
         # 避免 LLM 从 mcp_manage 看到裸名后误用导致调用失败。
         #
-        # 这里返回注册表中的**全部** server（含 CONNECTING / FAILED / DISABLED），
-        # 旧实现只返回连接成功的条目，导致 UI 永远读不到"启动中"和"失败"两种状态。
+        # 返回分两段：连接表里的条目（含 CONNECTING / FAILED / DISABLED，旧实现
+        # 只返回成功的，UI 读不到"启动中"和"失败"）+ 配置里有但从未建连的占位
+        # 条目（DISABLED）。只有这样才能表达"这个服务器存在，只是没开"。
         status = []
+        seen: set = set()
         with self._busy_lock:
             busy_names = set(self._busy_names)
         with self._lock:
             items = list(self._connections.items())
             ephemeral = set(self._ephemeral)
         for name, conn in items:
+            seen.add(name)
             busy = name in busy_names or conn.state == MCPState.CONNECTING
             status.append(
                 {
@@ -1748,6 +1768,25 @@ class MCPClientManager:
                     "busy": busy,
                     "tool_count": len(conn.tools),
                     "tools": [f"{self.TOOL_PREFIX}{name}__{t.name}" for t in conn.tools],
+                }
+            )
+        # 配置有、连接表无 → 从未建连（多为 enabled=false 被 _connect_all 跳过）
+        for cfg in self._configured_servers():
+            name = cfg.get("name", "")
+            if not name or name in seen:
+                continue
+            status.append(
+                {
+                    "name": name,
+                    "type": cfg.get("type", "stdio"),
+                    "enabled": cfg.get("enabled", True),
+                    "ephemeral": False,
+                    "connected": False,
+                    "state": MCPState.DISABLED,
+                    "error": "",
+                    "busy": False,
+                    "tool_count": 0,
+                    "tools": [],
                 }
             )
         return status

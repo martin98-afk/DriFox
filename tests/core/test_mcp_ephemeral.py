@@ -37,6 +37,8 @@ def mgr():
     m._loop = None
     m._thread = None
     m._ephemeral = set()
+    # get_status 会合并配置侧全集；固定为空以隔离本机真实 .mcp.json
+    m._configured_servers = lambda: []
 
     # fixture 不启动后台事件循环：_run_async 直接在同线程跑协程
     def _run_async(coro, timeout=60):
