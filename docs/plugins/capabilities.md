@@ -328,12 +328,23 @@ caps["stream.subscribe"]({
 |---|---|---|
 | `cache.purge` | low | 清理主程序进程内 LRU 缓存（HTML 渲染 / token 估算 / grep 编译） |
 | `config.read` | medium | 按 key 读主程序配置项（非敏感标量） |
-| `process.start` | **high** | 启动后台进程（argv 数组、无 shell；独立于宿主生命周期） |
+| `process.start` | **high** | 启动后台进程（argv 数组、无 shell；宿主退出即全杀） |
 
-`process.start` 启动的进程**不进任何 kill 组**——宿主退出它也活着，这是语义的一部分
-（插件拉起本地服务，如 LLM 网关）。只收 argv 数组（字符串直接 TypeError，杜绝 shell
-注入面）；`env` 是增量，与宿主环境合并后传入；stdout/stderr 丢弃。要输出回传与审批
-的一次性命令走工具插件的 command 工具，别用这个：
+`process.start` 启动的进程**绑定宿主存续期**（2026-10 定稿）：每个进程入专属
+kill-on-close Job（Windows），宿主退出 / 崩溃 / 被杀时内核自动树杀，不会残留
+孤儿进程；插件被禁用或卸载时，主程序立即回收该插件名下全部进程（禁用/卸载前
+杀，防插件目录文件占用）。管控面：
+
+- **首启确认**：每插件会话内首次启动弹窗（展示插件名与命令），用户同意后本
+  会话内不再询问；拒绝后本会话内该插件一律拒绝（防骚扰式重试），重启主程序
+  可重置授权。无 GUI（headless/测试）跳过确认；
+- **限额**：单插件最多 8 个后台进程，全局最多 32 个，超限直接拒绝；
+- **env 白名单**：子进程只继承宿主环境的白名单子集（PATH/TEMP/系统路径等，
+  见 `process_registry.ENV_WHITELIST`）+ 插件 `env` 参数显式增量；宿主密钥类
+  环境变量（API key 等）不泄漏给插件启动的进程。
+
+只收 argv 数组（字符串直接 TypeError，杜绝 shell 注入面）；stdout/stderr 丢弃。
+要输出回传与审批的一次性命令走工具插件的 command 工具，别用这个：
 
 ```python
 from app.plugins.sdk import caps_for
