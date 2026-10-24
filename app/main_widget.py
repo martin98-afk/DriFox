@@ -11892,12 +11892,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # True，于是加载完成的强制滚底被守卫拦下 → 新会话停在历史中间而不是底部。
         self._reset_bottom_follow()
         self._initial_scroll_to_bottom = False  # 重置滚底标记，让首次懒渲染强制滚底
-        # [DEBUG-sc6f] 加载入口侦察：窗口范围与入队规模
-        logger.debug(
-            f"[DEBUG-sc6f] load_batch initial={initial} "
-            f"window=[{self._visible_batch_start},{self._visible_batch_end}) "
-            f"batches={len(visible_batches)} cards_in_lazy_queue={len(self._pending_lazy_cards)}"
-        )
         try:
             self._render_message_to_card(
                 visible_batches,
@@ -14539,15 +14533,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 但用户已主动滚离底部时跳过——否则向上滚动加载历史批次
             # 完成后会把视口强制拉回底部（滚轮自动置底回归）。
             if self._initial_scroll_to_bottom and not self._user_intentionally_away_from_bottom:
-                # [DEBUG-sc6f] 排空 sticky 侦察
-                logger.debug("[DEBUG-sc6f] drained -> sticky900 start")
                 self._scroll_to_bottom(sticky_ms=900)
-            else:
-                # [DEBUG-sc6f] 排空未启 sticky 的原因
-                logger.debug(
-                    f"[DEBUG-sc6f] drained -> sticky SKIP "
-                    f"initial={self._initial_scroll_to_bottom} away={self._user_intentionally_away_from_bottom}"
-                )
 
     def _get_current_user_round_index(self) -> int:
         """获取当前 user message 应该是第几个 user（从 0 开始）
@@ -16364,15 +16350,6 @@ class OpenAIChatToolWindow(ToolWindow):
         elif not self._loading_session and self._programmatic_scroll_depth <= 0:
             # 只有「非程序滚动导致的离底」才算用户意图。程序置底/补偿落点落后
             # 不在此列，否则 away 一旦误置便无人复位（value 不再变化 → 无信号）。
-            # [DEBUG-sc6f] away 置位侦察：谁把跟底链杀死的（try 兜测试桩未初始化）
-            try:
-                logger.debug(
-                    f"[DEBUG-sc6f] away SET value={value} max={scroll_bar.maximum()} "
-                    f"loading={self._loading_session} "
-                    f"hist_loading={getattr(self, '_is_loading_history_batches', '?')}"
-                )
-            except RuntimeError:
-                pass
             self._user_intentionally_away_from_bottom = True
             # [T29 B1] 用户已明确滚离 → 取消挂起的程序置底请求。否则「点击发送 /
             # 切会话」排入的 _scroll_bottom_timer（50ms）仍会在用户上滚后触发
@@ -18593,15 +18570,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 锚定接力）都会在跳转后照样执行 —— 跳转锁拦不住它，因为锁只挂在
         # `_should_follow_bottom()` 上。这是「跳到最前面又弹回底部」的最后一环。
         if not self._should_follow_bottom():
-            # [DEBUG-sc6f] 最强置底动作被守卫拦：记录拦截原因（try 兜测试桩）
-            try:
-                _lock = time.monotonic() < getattr(self, "_jump_scroll_lock_until", 0.0)
-                logger.debug(
-                    f"[DEBUG-sc6f] do_scroll BLOCKED lock={_lock} "
-                    f"away={self._user_intentionally_away_from_bottom} at_bottom={self._is_view_at_bottom()}"
-                )
-            except RuntimeError:
-                pass
             self._pending_scroll_to_bottom = False
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
@@ -18672,8 +18640,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._ensure_ab_active = False
         else:
             # 已贴底：无高度变化要追，关窗减少 rangeChanged 空转
-            # [DEBUG-sc6f] 事件窗提前关闭：后续 rangeChanged 不再贴底
-            logger.debug(f"[DEBUG-sc6f] ensure_chain CLOSE value={scroll_bar.value()} landed={self._landed_bottom_value()}")
             self._ensure_ab_active = False
 
     def _wire_scroll_range_changed(self):
@@ -18723,10 +18689,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 追平 → 「加载历史会话偶尔停在消息列表中间」。到期接力与非
             # sticky 路径（_do_scroll_to_bottom else 分支）同款的
             # _ensure_at_bottom 兜底窗口；away 守卫保证不打扰用户主动阅读。
-            # [DEBUG-sc6f] sticky 到期接力侦察
-            logger.debug(
-                f"[DEBUG-sc6f] anchor expiry -> ensure(8) away={self._user_intentionally_away_from_bottom}"
-            )
             QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
