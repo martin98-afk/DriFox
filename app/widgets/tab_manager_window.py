@@ -6618,7 +6618,7 @@ class TabManagerWindow(FramelessWindow):
 
             get_lsp_manager().shutdown()
         except Exception as e:
-            logger.debug(f"[TabManager] cleanup LspManager.shutdown 失败: {e}")
+            logger.warning(f"[TabManager] cleanup LspManager.shutdown 失败: {e}")
         try:
             from app.gateway.manager import get_platform_manager
 
@@ -6626,19 +6626,19 @@ class TabManagerWindow(FramelessWindow):
             if mgr is not None:
                 mgr.shutdown()
         except Exception as e:
-            logger.debug(f"[TabManager] cleanup PlatformManager.shutdown 失败: {e}")
+            logger.warning(f"[TabManager] cleanup PlatformManager.shutdown 失败: {e}")
         try:
             from app.gateway import stop_llm_api_service
 
             stop_llm_api_service()
         except Exception as e:
-            logger.debug(f"[TabManager] cleanup stop_llm_api_service 失败: {e}")
+            logger.warning(f"[TabManager] cleanup stop_llm_api_service 失败: {e}")
         try:
             from app.core.sync.config_sync import ConfigSyncService
 
             ConfigSyncService.get_instance().disable()
         except Exception as e:
-            logger.debug(f"[TabManager] cleanup ConfigSyncService.disable 失败: {e}")
+            logger.warning(f"[TabManager] cleanup ConfigSyncService.disable 失败: {e}")
         for w in list(self._windows):
             try:
                 w.close()
