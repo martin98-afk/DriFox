@@ -338,12 +338,12 @@ plugins/<功能插件>/        # 10 个内置功能插件
 |------|------|
 | **文件** | read, write, edit, multi_edit, grep, list, glob, scan_repo, stage_files |
 | **终端** | bash, bg_start, bg_stop, bg_logs, bg_list |
-| **交互 / 技能 / MCP** | question, skill, manage_skill, mcp_list_servers, upload_file |
+| **交互 / 技能 / MCP** | question, skill, manage_skill, mcp_manage, upload_file |
 | **子智能体 / 团队** | subagent_para, subagent_status, team_send_message, team_list_members |
 | **诊断** | get_diagnostics, lsp |
 | **任务** | todowrite, todoread |
 | **网络** | websearch, webfetch |
-| **MCP** | `mcp__server__tool`（连接 MCP Server 后自动出现）|
+| **MCP** | `mcp__server__tool`（常驻开启的 MCP Server 自动注入）；`mcp_manage`（列出全部服务器含已关闭的 / 临时开启 / 关闭临时开启）|
 
 > 另有插件贡献的工具（助手中心记忆 / 经验库、worktree 管理等）随已装插件并入工具池。
 > **websearch API key 配置**：环境变量 `TAVILY_API_KEY`（Tavily）或 `TINYFISH_API_KEY`（TinyFish，Tavily 不可用时回退）；两者均未设置时返回「搜索失败：无可用搜索引擎」。

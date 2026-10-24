@@ -55,7 +55,7 @@ def cfg_bool(key: str, default: bool) -> bool:
 # 不进 config_schema —— 工具名单属实现细节，不该让用户手填。
 _FALLBACK_PRUNE_SKIP = frozenset({"question", "skill", "todoread"})
 _FALLBACK_OFFLOAD_SKIP = frozenset(
-    {"question", "todowrite", "todoread", "manage_skill", "mcp_list_servers", "skill"}
+    {"question", "todowrite", "todoread", "manage_skill", "mcp_manage", "skill"}
 )
 
 
