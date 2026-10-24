@@ -146,6 +146,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),
         # ── 进程级 ──
         _spec("cache.purge", _L, "清理主程序进程内 LRU 缓存（内存释放）", _UI),
+        _spec("process.start", _H, "启动后台进程（argv 数组、无 shell；独立于宿主生命周期）", _BOTH),
         # ── 配置（按 key 读非敏感标量，不给整个 Settings 对象） ──
         _spec(
             "config.read",

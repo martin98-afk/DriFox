@@ -328,6 +328,21 @@ caps["stream.subscribe"]({
 |---|---|---|
 | `cache.purge` | low | 清理主程序进程内 LRU 缓存（HTML 渲染 / token 估算 / grep 编译） |
 | `config.read` | medium | 按 key 读主程序配置项（非敏感标量） |
+| `process.start` | **high** | 启动后台进程（argv 数组、无 shell；独立于宿主生命周期） |
+
+`process.start` 启动的进程**不进任何 kill 组**——宿主退出它也活着，这是语义的一部分
+（插件拉起本地服务，如 LLM 网关）。只收 argv 数组（字符串直接 TypeError，杜绝 shell
+注入面）；`env` 是增量，与宿主环境合并后传入；stdout/stderr 丢弃。要输出回传与审批
+的一次性命令走工具插件的 command 工具，别用这个：
+
+```python
+from app.plugins.sdk import caps_for
+
+start = caps_for("process.start")
+info = start(["magpie", "web", "--no-open"],
+             env={"MAGPIE_WEB_KEY": "some-key"}, name="magpie-web")
+# info == {"pid": 12345, "name": "magpie-web"}
+```
 
 `config.read` 刻意**不**返回整个 `Settings` 对象——那等于把 `model.config` 才该给的
 明文密钥一起交出去。按 key 取，且密钥类字段（key / token / secret / password /

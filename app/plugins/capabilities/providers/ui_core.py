@@ -11,7 +11,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.plugins.capabilities.providers import model_meta
+from app.plugins.capabilities.providers import model_meta, process_core
 
 
 class _BusSignal:
@@ -924,6 +924,7 @@ def register(registry) -> None:
     reg.register("team.read", _team_read, surface="ui", owner="core:ui")
     # 进程级
     reg.register("cache.purge", _cache_purge, surface="ui", owner="core:ui")
+    reg.register("process.start", process_core.process_start, surface="ui", owner="core:ui")
     # 配置（按 key 读非敏感标量）
     reg.register("config.read", _config_read, surface="ui", owner="core:ui")
     # 逃生舱
