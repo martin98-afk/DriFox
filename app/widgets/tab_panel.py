@@ -9,6 +9,7 @@ TabPanel — Tab 管理器左侧面板
 import hashlib
 import math as _math
 import os
+import re
 
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
 from typing import Dict, List, Optional
@@ -84,8 +85,20 @@ def _stable_text_hue(text: str) -> int:
     return int(hashlib.md5(text.encode("utf-8")).hexdigest(), 16) % 360
 
 
+# hsl 串（角色胶囊色 ``hsl(204, 65%, 50%)``）：QSS 认，QColor(str) 不认，
+# 必须自己换算成 fromHsl 的 0-359 / 0-255 / 0-255 整数口径。
+_HSL_RE = re.compile(r"hsla?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%", re.IGNORECASE)
+
+
 def _parse_rgba(rgba_str: str) -> _QColor:
-    """将 'rgba(r,g,b,a)' 字符串解析为 QColor，缓存结果"""
+    """将 'rgba(r,g,b,a)' / 'hsl(h, s%, l%)' / '#rgb' 字符串解析为 QColor
+
+    ⚠️ hsl 必须显式换算：``QColor("hsl(...)").isValid()`` 恒 False，直接交给
+    QColor 会退成黑色；QSS 能解析 hsl 而 QPainter 不能，这是两套解析器。
+    之前缺这条分支，折叠态团队角色块全部退成灰色兜底（128,128,128）。
+    """
+    if not isinstance(rgba_str, str):
+        return _QColor(128, 128, 128)
     try:
         if rgba_str.startswith("rgba("):
             parts = rgba_str.strip("rgba() ").split(",")
@@ -93,6 +106,13 @@ def _parse_rgba(rgba_str: str) -> _QColor:
             a_raw = parts[3].strip()
             a = int(float(a_raw) * 255) if float(a_raw) <= 1 else int(a_raw)
             return _QColor(r, g, b, a)
+        if rgba_str.lstrip().lower().startswith("hsl"):
+            m = _HSL_RE.match(rgba_str.strip())
+            if m:
+                h = int(round(float(m.group(1)))) % 360
+                s = int(round(float(m.group(2)) * 255 / 100))
+                light = int(round(float(m.group(3)) * 255 / 100))
+                return _QColor.fromHsl(h, max(0, min(255, s)), max(0, min(255, light)))
     except Exception:
         pass
     return _QColor(rgba_str)
@@ -333,7 +353,48 @@ class _TabProjectIcon(QWidget):
         self._color = QColor(128, 128, 128)
         self._text_color = QColor("#ffffff")
         self._fallback_pixmap: Optional[QPixmap] = None
+        # 状态环（仅折叠态团队成员用）："" 无环 / streaming / question / error
+        self._ring_state = ""
+        self._ring_phase = 0.0
+        # 环位预留：折叠态团队成员恒为 True（无环时方块同样内缩），
+        # 保证状态切换时方块尺寸不跳
+        self._ring_reserved = False
         self.setFixedSize(size, size)
+
+    _RING_INSET = 3  # 方块四周内缩量（给 2px 环 + 1px 间隙让位）
+
+    def set_status_ring(self, state: str, phase: float = 0.0, reserve: bool = False) -> None:
+        """设置/清除方块外侧状态环（折叠态 26px 方块无法用整行流光表达运行态）
+
+        state："" 清除 / streaming / question / error。
+        reserve：为 True 时方块恒内缩 3px 给环留位（无环状态下也内缩），
+        避免状态来去时方块尺寸抳跳。环与方块之间留 1px 间隙——环颜色常常
+        与角色色同色系，贴着方块边缘画会被方块自身颜色吃掉（实测蓝底蓝环
+        完全分不出）。
+        """
+        state = state if state in ("streaming", "question", "error") else ""
+        if self._ring_state == state and abs(self._ring_phase - phase) < 1e-6 and self._ring_reserved == reserve:
+            return
+        self._ring_state = state
+        self._ring_phase = phase
+        self._ring_reserved = reserve
+        self.update()
+
+    def _ring_color(self) -> QColor:
+        """按状态 + 相位算环色：streaming 彩虹轮回 / question 橙黄，两者 alpha 呼吸；
+        error 恒亮红（三者中唯一需要一眼确定的事实，不参与呼吸）"""
+        if self._ring_state == "error":
+            return _QColor(_CACHED_ERROR_RED)
+        alpha = max(150, min(255, int(196 + _math.sin(_math.radians(self._ring_phase)) * 59)))
+        if self._ring_state == "question":
+            c = _QColor(245, 158, 11)
+        else:
+            idx = int((self._ring_phase / 360) * _RAINBOW_N) % _RAINBOW_N
+            base = _RAINBOW_COLORS[idx]
+            # 环压在角色色块上，同色系靠亮度拉开层次
+            c = _QColor(min(255, base.red() + 55), min(255, base.green() + 55), min(255, base.blue() + 55))
+        c.setAlpha(alpha)
+        return c
 
     def set_project(self, initials: str, color_rgba: str, text_color: str = ""):
         """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）
@@ -356,20 +417,15 @@ class _TabProjectIcon(QWidget):
 
     @staticmethod
     def _parse_rgba(rgba_str: str) -> QColor:
-        """解析 'rgba(r,g,b,a)' 字符串为 QColor，与 _SquareAvatar 一致"""
-        if rgba_str.startswith("#"):
-            return QColor(rgba_str)
-        try:
-            import re
+        """解析 'rgba(r,g,b,a)' / 'hsl(h, s%, l%)' / '#hex' 为 QColor
 
-            m = re.match(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)", rgba_str)
-            if m:
-                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                a = int(m.group(4)) if m.group(4) else 255
-                return QColor(r, g, b, a)
-        except Exception:
-            pass
-        return QColor(128, 128, 128)
+        ⚠️ 复用模块级 _parse_rgba：它包含 hsl 分支。此前这里只认 rgba()/#，
+        角色胶囊色是 ``hsl(204, 65%, 50%)`` 形式，全部退成灰色兜底
+        （折叠态团队方块一律灰 = 无法分辨成员的直接原因）。
+        """
+        if isinstance(rgba_str, str) and rgba_str.startswith("#"):
+            return QColor(rgba_str)
+        return _parse_rgba(rgba_str)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -380,16 +436,23 @@ class _TabProjectIcon(QWidget):
 
         # ── 项目头像模式：直接画圆角矩形 + 自适应字色 ──
         if self._initials:
+            block = (
+                rect.adjusted(self._RING_INSET, self._RING_INSET, -self._RING_INSET, -self._RING_INSET)
+                if self._ring_reserved
+                else rect
+            )
+            radius = 4 if self._ring_reserved else 5
             painter.setPen(Qt.NoPen)
             painter.setBrush(self._color)
-            painter.drawRoundedRect(rect, 5, 5)
+            painter.drawRoundedRect(block, radius, radius)
 
             painter.setPen(self._text_color)
             font = get_unified_font()
-            font.setPixelSize(scale_font_size(self._size * 14 // 24))
+            font.setPixelSize(scale_font_size(block.height() * 14 // 24))
             font.setBold(True)
             painter.setFont(font)
-            painter.drawText(rect, Qt.AlignCenter, self._initials)
+            painter.drawText(block, Qt.AlignCenter, self._initials)
+            self._paint_status_ring(painter, rect)
             return
 
         # ── 兜底：画 QPixmap ──
@@ -412,6 +475,17 @@ class _TabProjectIcon(QWidget):
                 p = pix.pixmap(rect.size().toSize())
                 if p and not p.isNull():
                     painter.drawPixmap(rect, p, p.rect())
+
+    def _paint_status_ring(self, painter, rect) -> None:
+        """方形外侧状态环：2px 描边，内缩 1px；与内缩后的方块自然留 1px 间隙"""
+        if not self._ring_state:
+            return
+        painter.setBrush(Qt.NoBrush)
+        pen = QPen(self._ring_color())
+        pen.setWidth(2)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 5, 5)
 
 
 class TabItem(QFrame):
@@ -582,11 +656,13 @@ class TabItem(QFrame):
     def set_streaming(self, streaming: bool, error: bool = False):
         self._streaming = streaming
         self._stream_error = error
+        self._sync_compact_ring()
         self.update()
 
     def set_question(self, question: bool):
         """设置"提问等待回答"态：仅点亮橙色脉动指示条"""
         self._question = question
+        self._sync_compact_ring()
         self.update()
 
     def set_title(self, title: str):
@@ -733,6 +809,7 @@ class TabItem(QFrame):
         else:
             # 树行化：无图标形态，不因模式切换重新点亮色块
             self._icon_widget.setVisible(not team_mode and not self._tree_row)
+        self._sync_compact_ring()
         # 行高分档跟随模式：团队模式（列表态）成员行 32px
         self._refresh_row_height()
         self.update()
@@ -761,17 +838,46 @@ class TabItem(QFrame):
         """紧凑态团队模式：用角色胶囊首字符 + 胶囊色绘制图标（折叠态成员可区分）
 
         胶囊为空（异常时序）时回退标题首字，避免裸 "?" 无法区分成员。
+        非中文字符统一大写（leader→L / coder→C）：26px 方块里小写字母
+        只剩 x-height，视觉上明显偏小偏轻。
         """
         text = (self._capsule_label.text() or "").strip()
         if not text:
             text = (self._title or "").strip()
-        ch = text[0] if text else "?"
+        ch = text[0].upper() if text else "?"
         color = self._capsule_color or ""
         if not color and text:
             h = _stable_text_hue(text)
             color = f"hsl({h}, 65%, 50%)"
         self._icon_widget.set_project(ch, color)
         self._icon_widget.setVisible(True)
+        self._sync_compact_ring()
+
+    def _sync_compact_ring(self) -> None:
+        """折叠态团队成员块状态环（紧凑 + 团队模式才启用）
+
+        折叠窄条只剩 26px 方块，整行流光在这个尺寸下糊成一片、看不清运行态。
+        改用方块外侧 2px 环编码：流式彩虹轮回 + 呼吸 / 待答橙黄呼吸 /
+        报错红色常亮。非紧凑或非团队模式一律清环（项目 icon 不带运行态）。
+
+        环位恒预留（reserve=True）：无状态时方块也内缩，状态来去不抳尺寸。
+        相位在 _on_anim_tick 中逐帧推进（与本方法同源，不另设定时器）。
+        """
+        if not (self._compact and self._team_mode):
+            self._icon_widget.set_status_ring("")
+            return
+        state, phase = self._compact_ring_spec()
+        self._icon_widget.set_status_ring(state, phase, reserve=True)
+
+    def _compact_ring_spec(self):
+        """返回 (state, phase)，供 set_status_ring 与动画帧共用"""
+        if self._stream_error:
+            return "error", 0.0
+        if self._streaming:
+            return "streaming", float(getattr(self._panel, "_anim_phase", 0.0) if self._panel else 0.0)
+        if self._question:
+            return "question", float(getattr(self._panel, "_question_phase", 0.0) if self._panel else 0.0)
+        return "", 0.0
 
     def set_compact(self, compact: bool):
         """切换紧凑模式（侧边栏折叠态）：仅保留图标 + 状态指示条
@@ -836,6 +942,7 @@ class TabItem(QFrame):
             if "margins" in saved:
                 self.layout().setContentsMargins(*saved["margins"])
             self._compact_saved = None
+            self._sync_compact_ring()
         self.update()
 
     def clear_capsule(self):
@@ -962,6 +1069,9 @@ class TabItem(QFrame):
 
         # ── 流式/错误状态 ──
         _is_resizing = bool(self._panel and self._panel._is_resizing)
+        # 折叠态团队成员块：26px 方块上整行流光只会糊成一片，状态改由方块内圈
+        # 状态环表达（见 _sync_compact_ring）。此处只保留选中时的左侧指示条。
+        _compact_member = self._compact and self._team_mode
         if self._streaming or self._stream_error:
             # 共用扫描相位：流式彩虹循环 / 报错红色循环
             phase = self._panel._anim_phase if self._panel else 0
@@ -971,19 +1081,22 @@ class TabItem(QFrame):
                 _err_color = _QColor(_CACHED_ERROR_RED)
                 if self._selected:
                     _draw_left_indicator(painter, _round_rect, h, _err_color)
-                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_ERROR_COLORS, _is_resizing)
+                if not _compact_member:
+                    _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_ERROR_COLORS, _is_resizing)
             else:
                 # 流式：内部彩虹流光（选中时叠加彩色循环指示条，相位驱动颜色循环）
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
                 if self._selected:
                     _draw_left_indicator(painter, _round_rect, h, _RAINBOW_COLORS[idx])
-                _draw_shimmer(painter, _round_rect, w, phase, _shimmer_rainbow_colors(idx), _is_resizing)
+                if not _compact_member:
+                    _draw_shimmer(painter, _round_rect, w, phase, _shimmer_rainbow_colors(idx), _is_resizing)
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
             phase = self._panel._question_phase if self._panel else 0
             # 内部橙黄流光脉冲（选中时叠加橙黄指示条，与流式同款流光动效）
             if not self._selected:
-                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
+                if not _compact_member:
+                    _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
             else:
                 # resize 期间跳过 sin 计算取固定亮度
                 if _is_resizing:
@@ -994,7 +1107,8 @@ class TabItem(QFrame):
                 _question_color = _QColor(245, 158, 11)
                 _question_color.setAlpha(max(0, min(255, alpha)))
                 _draw_left_indicator(painter, _round_rect, h, _question_color)
-                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
+                if not _compact_member:
+                    _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
         elif self._selected and not self._tree_row:
             # 左侧选中指示条（贴合圆角曲线）——树行选中由淡靛蓝底表达，无左条
             _draw_left_indicator(painter, _round_rect, h, _CACHED_INFO)
@@ -3195,9 +3309,24 @@ class TabPanel(QWidget):
                 # 占位容器折叠态整体隐藏：窄条不放按钮区（C3），也避免 68px 空白
                 btn_area.setVisible(False)
             header.setToolTip(team_name)
+            # 折叠态：团队框边距从 (6,4,6,4) 收紧到 (1,3,1,3)。46px 窄条下
+            # 6+6 侧边距 + 列表 2+2 已吃掉 16px，成员块只能挤在 34px 里且整体
+            # 偏右 3px（实测块中心 x=21 vs 面板中线 x=23）；收紧后右侧与顶栏
+            # 图标列对齐。展开态零影响。
+            gp = grp.layout()
+            if gp is not None:
+                grp._team_margins_orig = gp.getContentsMargins()
+                gp.setContentsMargins(1, 3, 1, 3)
+                gp.setSpacing(2)
             # 折叠态增强窄条视觉边界：背景加深（P2-1 方案 B，仅折叠态）
             self._apply_team_group_style(grp, bg_alpha=70)
         else:
+            orig = getattr(grp, "_team_margins_orig", None)
+            if orig is not None:
+                gp = grp.layout()
+                if gp is not None:
+                    gp.setContentsMargins(*orig)
+                grp._team_margins_orig = None
             if name_label is not None:
                 name_label.setVisible(True)
             if arrow is not None:
@@ -4128,6 +4257,10 @@ class TabPanel(QWidget):
             # 跳过不可见标签（多标签横向滚动时大部分 item 已滚出视口）：
             # update() 对不可见控件只是排队一次无效重绘。
             if item.isVisible() and (item._streaming or item._stream_error or item._question):
+                # 折叠态团队成员块的环相位同样逐帧推进（环在 icon 内绘制，
+                # 仅置 phase 不主动 update：下方 item.update() 会带出重绘）
+                if item._compact and item._team_mode:
+                    item._icon_widget.set_status_ring(*item._compact_ring_spec(), reserve=True)
                 item.update()
 
     def _reapply_scroll_styles(self):
