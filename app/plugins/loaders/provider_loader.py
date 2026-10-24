@@ -494,12 +494,39 @@ class ProviderWatcher:
         return {n for n in self._registry.names() if self._registry.get(n).source == source}
 
     def _root_of_plugin(self, plugin_name: str) -> Optional[Path]:
-        """从 root_tracker 反推某插件名所属扫描根（磁盘目录可能已删除）"""
+        """反推某插件名所属扫描根（磁盘目录可能已删除）。
+
+        ⚠️ 不能用「set 遍历取首个命中」：`_plugin_provider_names` 返回 set，迭代顺序
+        随字符串 hash 种子变化，跨根覆盖下约 96.6% 概率拿到低等级根 → removed_rank
+        偏小 → 卸载高等级版本后低等级版本无法恢复（与 tools 侧同构缺陷，#28）。
+
+        方案 M1（与 plugin_tool_loader._root_of_plugin 一致）：优先委托
+        PluginManager 权威归属；不可用时回落「取 rank 最高的根」。
+        """
+        # 1) 权威来源：PluginManager 记录的插件归属（info.path 的父目录即扫描根）
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                info = pm.get_plugin(plugin_name)
+                if info is not None and getattr(info, "plugin_type", "") == _ROOT_KIND_USER:
+                    return Path(info.path).parent
+        except Exception as e:
+            logger.debug(f"[ProviderLoader] _root_of_plugin 查询 PluginManager 失败，回落 tracker: {e}")
+
+        # 2) 回落：在 tracker 记录的所有根里取 rank 最高者（不是首个）
+        best_root: Optional[Path] = None
+        best_rank = -1
         for name in self._plugin_provider_names(plugin_name):
             r = self._root_tracker.get(name)
-            if r is not None:
-                return Path(r)
-        return None
+            if r is None:
+                continue
+            rank = _ROOT_KIND_PRIORITY.get(_root_kind(r), 0)
+            if rank > best_rank:
+                best_rank = rank
+                best_root = Path(r)
+        return best_root
 
     def _restore_lower_roots(self, removed_rank: int) -> None:
         """跨根覆盖恢复：重扫比目标根更低等级的所有根（被覆盖方），补注册被覆盖服务商"""

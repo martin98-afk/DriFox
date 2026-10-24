@@ -587,12 +587,42 @@ class PluginToolWatcher:
                     # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
 
     def _root_of_plugin(self, plugin_name: str) -> Optional[Path]:
-        """从 root_tracker 反推某插件名所属扫描根（磁盘目录可能已删除）"""
+        """反推某插件名所属扫描根（磁盘目录可能已删除）。
+
+        ⚠️ 不能用「set 遍历取首个命中」：`_loaded[plugin_name]` 是 set，其迭代顺序
+        随字符串 hash 种子变化。跨根覆盖场景下被覆盖工具的 root_tracker 条目已被
+        高等级根改写，但同一插件可能同时留有 system 根注册的工具（未被覆盖的那些），
+        取首个命中约 96.6% 概率拿到 system 根 → removed_rank=0 → 无更低根可恢复
+        → 卸载 user 版本后 system 版本永久丢失（#16 实测复现）。
+
+        方案 M1：优先委托 PluginManager 权威覆盖关系（它按目录扫描，唯一事实源）；
+        pm 不可用时回落「取 rank 最高的根」而非首个。
+        """
+        # 1) 权威来源：PluginManager 记录的插件归属（info.path 的父目录即扫描根）
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                info = pm.get_plugin(plugin_name)
+                # plugin_type 由扫描时的 base_dir 决定（system 根 / user 根）
+                if info is not None and getattr(info, "plugin_type", "") == _ROOT_KIND_USER:
+                    return Path(info.path).parent
+        except Exception as e:
+            logger.debug(f"[PluginToolLoader] _root_of_plugin 查询 PluginManager 失败，回落 tracker: {e}")
+
+        # 2) 回落：在 tracker 记录的所有根里取 rank 最高者（不是首个）
+        best_root: Optional[Path] = None
+        best_rank = -1
         for name in self._loaded.get(plugin_name, set()):
             r = self._root_tracker.get(name)
-            if r is not None:
-                return Path(r)
-        return None
+            if r is None:
+                continue
+            rank = _ROOT_KIND_PRIORITY.get(_root_kind(r), 0)
+            if rank > best_rank:
+                best_rank = rank
+                best_root = Path(r)
+        return best_root
 
     def _restore_lower_roots(self, removed_rank: int) -> None:
         """跨根覆盖恢复：重扫比目标根更低等级的所有根（被覆盖方），补注册被覆盖工具
