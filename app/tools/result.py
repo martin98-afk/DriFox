@@ -5,7 +5,8 @@ class ToolResult:
     def __init__(self, success: bool, content: Any = None, error: Optional[str] = None,
                  diff: Optional[str] = None, anchors: Optional[str] = None,
                  echarts: Optional[str] = None, image_data: Optional[dict] = None,
-                 todos: Optional[list] = None, data: Optional[dict] = None):
+                 todos: Optional[list] = None, data: Optional[dict] = None,
+                 artifacts: Optional[list] = None):
         self.success = success
         self.content = content
         self.error = error
@@ -15,6 +16,7 @@ class ToolResult:
         self.image_data = image_data  # 图片数据: {"mime": str, "data": str(base64)}
         self.todos = todos  # 待办列表（工具插件 todowrite/todoread 回传，UI 卡片联动读取）
         self.data = data    # 结构化回传通道（通用）：设置卡动作按钮等 UI 编排消费
+        self.artifacts = artifacts  # 成果条目列表（工具产出的文件/媒体，卡片成果栏数据源）
 
     def to_dict(self) -> dict:
         d = {"success": self.success}
@@ -34,6 +36,8 @@ class ToolResult:
             d["todos"] = self.todos
         if self.data:
             d["data"] = self.data
+        if self.artifacts:
+            d["artifacts"] = self.artifacts
         return d
 
     def __str__(self):

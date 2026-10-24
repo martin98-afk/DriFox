@@ -1064,22 +1064,6 @@ class TabManagerWindow(FramelessWindow):
     def get_instance(cls) -> Optional["TabManagerWindow"]:
         return cls._instance
 
-    # ── [FLASH_DEBUG] 闪烁定位插桩：确认后删除 ──
-    def showEvent(self, event):
-        import traceback
-        logger.warning("[FLASH_DEBUG] TabManagerWindow SHOW")
-        stack = "".join(traceback.format_stack(limit=6)[:-1])
-        logger.warning(f"[FLASH_DEBUG] show stack:\n{stack}")
-        super().showEvent(event)
-
-    def hideEvent(self, event):
-        import traceback
-        logger.warning("[FLASH_DEBUG] TabManagerWindow HIDE")
-        stack = "".join(traceback.format_stack(limit=6)[:-1])
-        logger.warning(f"[FLASH_DEBUG] hide stack:\n{stack}")
-        super().hideEvent(event)
-    # ── [FLASH_DEBUG] 结束 ──
-
     @classmethod
     def create_instance(cls, parent=None) -> "TabManagerWindow":
         if cls._instance is None:
@@ -1091,8 +1075,6 @@ class TabManagerWindow(FramelessWindow):
         if TabManagerWindow._instance is not None:
             raise RuntimeError("TabManagerWindow 是单例，请使用 get_instance() 获取")
         TabManagerWindow._instance = self
-        # [FLASH_DEBUG] 销毁追踪
-        self.destroyed.connect(lambda *_: logger.warning("[FLASH_DEBUG] TabManagerWindow DESTROYED"))
 
         # 启动分段打点（DEBUG）：定位 __init__ 内部耗时段（TrayManager 单例等）
         import time as _sm_time
@@ -6628,6 +6610,35 @@ class TabManagerWindow(FramelessWindow):
             PluginHostService.get_instance().stop()
         except Exception:
             pass
+        # ★ 关闭清理缺口（审计 #3 P1-1）：LSP 子进程 / gateway 事件循环 /
+        #   LLM API 服务 / Gitee 同步线程原先全凭 daemon 兜底，退出瞬间端口与
+        #   线程未有序关闭。四者均幂等，未启动时为 no-op。
+        try:
+            from app.core.lsp.lsp_manager import get_lsp_manager
+
+            get_lsp_manager().shutdown()
+        except Exception as e:
+            logger.warning(f"[TabManager] cleanup LspManager.shutdown 失败: {e}")
+        try:
+            from app.gateway.manager import get_platform_manager
+
+            mgr = get_platform_manager()
+            if mgr is not None:
+                mgr.shutdown()
+        except Exception as e:
+            logger.warning(f"[TabManager] cleanup PlatformManager.shutdown 失败: {e}")
+        try:
+            from app.gateway import stop_llm_api_service
+
+            stop_llm_api_service()
+        except Exception as e:
+            logger.warning(f"[TabManager] cleanup stop_llm_api_service 失败: {e}")
+        try:
+            from app.core.sync.config_sync import ConfigSyncService
+
+            ConfigSyncService.get_instance().disable()
+        except Exception as e:
+            logger.warning(f"[TabManager] cleanup ConfigSyncService.disable 失败: {e}")
         for w in list(self._windows):
             try:
                 w.close()

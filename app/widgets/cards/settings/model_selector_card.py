@@ -37,16 +37,16 @@ from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 
 
 def _format_cost_number(value) -> str:
-    """格式化成本数值：最多两位小数（0.11952 → 0.12，3.0 → 3），非数字原样字符串。
+    """格式化成本数值：最多三位小数（0.41831 → 0.418，0.11952 → 0.12，3.0 → 3），非数字原样字符串。
 
-    模型卡片价格列等宽对齐，两位小数后宽度一致；`:.2f` 再去尾零，
-    避免 3.00 / 0.60 这类拖尾 0 撑宽列（用户实测 models.dev 长尾精度
-    如 0.11952/0.41831 挤爆价格列，2026-10-21）。
+    `:.3f` 再去尾零，避免 3.000 / 0.600 这类拖尾 0 撑宽列
+    （用户实测 models.dev 长尾精度如 0.11952/0.41831 挤爆价格列，2026-10-21；
+    2026-10-24 应用户要求放宽到最多三位小数）。
     """
     if value is None:
         return ""
     if isinstance(value, (int, float)):
-        text = f"{value:.2f}".rstrip("0").rstrip(".")
+        text = f"{value:.3f}".rstrip("0").rstrip(".")
         return text or "0"
     return str(value)
 

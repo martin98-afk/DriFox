@@ -357,6 +357,12 @@ class MessageCard(SimpleCardWidget):
         self._todo_panel_host = None  # 面板挂载的布局容器（气泡布局）
         self._todo_panel_todos: list = []  # 任务数据快照（重建补推用）
         self._todo_panel_height_cache = 0  # 面板占高缓存（高度增量上报用）
+        # 卡片内嵌成果栏（懒创建，挂在任务看板之后；语义与任务看板的差异见
+        # update_artifact_list docstring——不迁卡，成果属于产生它的那一轮）
+        self._artifact_panel = None
+        self._artifact_panel_host = None
+        self._artifact_panel_items: list = []
+        self._artifact_panel_height_cache = 0
         self._retry_error_type = ""  # 重试错误类型
         self._retry_attempt = 0  # 当前重试次数
         self._retry_max = 15  # 最大重试次数
@@ -707,6 +713,12 @@ class MessageCard(SimpleCardWidget):
                 self._todo_panel.refresh_style()
             except RuntimeError:
                 self._todo_panel = None
+        # 内嵌成果栏：条目 QSS 同样构造期固化
+        if self._artifact_panel is not None:
+            try:
+                self._artifact_panel.refresh_style()
+            except RuntimeError:
+                self._artifact_panel = None
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
@@ -2700,6 +2712,9 @@ class MessageCard(SimpleCardWidget):
         # 任务看板是原生 Qt 控件，不随 viewer 重建；仅补推一次数据（幂等，签名未变会跳过）
         if self._todo_panel is not None:
             self._todo_panel.update_todos(self._todo_panel_todos or [])
+        # 成果栏同理补推（幂等）
+        if self._artifact_panel is not None:
+            self._artifact_panel.update_artifacts(self._artifact_panel_items or [])
 
         # 恢复正常样式
         self._apply_card_style()
@@ -5553,6 +5568,94 @@ class MessageCard(SimpleCardWidget):
         取两者较大值：布局未跟上的那拍，谁大取谁，保证单调、不会少记高度；
         收敛后两者相等，退化为精确值（幂等）。
         """
+        if panel is None or not panel.isVisible():
+            return 0
+        try:
+            return max(int(panel.sizeHint().height()), int(panel.height()))
+        except RuntimeError:
+            return 0
+
+    # ── 卡片内嵌成果栏（三件套，契约同任务看板；关键差异见 update_artifact_list）──
+
+    def update_artifact_list(self, items):
+        """更新卡片内嵌成果栏（原生 Qt 面板，不进 WebEngine）
+
+        与任务看板的语义差异——**不迁卡**：任务列表是"当前状态"，每轮工具轮次
+        都会迁到最新卡（宿主 ``_sync_todo_panel`` 卸旧卡挂新卡）；成果属于产生
+        它的那一轮，新卡不继承旧卡的成果，宿主侧不调用 ``clear_artifact_list``。
+        本方法自身幂等：同签名重复推送由面板签名比对挡掉。
+
+        Args:
+            items: [{path, kind?, name?, width?, height?, size?, caption?, meta?}, ...]
+                   kind 缺省按扩展名推断；空列表 → 隐藏成果区。
+        """
+        self._artifact_panel_items = list(items or [])
+        if self.role != "assistant":
+            return
+        if not self._artifact_panel_items or self._assistant_bubble is None:
+            panel = self._artifact_panel
+            if panel is not None:
+                panel.update_artifacts(self._artifact_panel_items)
+            return
+        panel = self._ensure_artifact_panel()
+        if panel is not None:
+            panel.update_artifacts(self._artifact_panel_items)
+
+    def _ensure_artifact_panel(self):
+        """懒创建成果栏并挂进气泡布局末尾（任务看板之后、页脚之前）"""
+        if self._artifact_panel is not None:
+            host = self._artifact_panel_host
+            if host is not None and host.indexOf(self._artifact_panel) < 0:
+                host.addWidget(self._artifact_panel)
+            return self._artifact_panel
+        try:
+            from app.widgets.inline_artifact_panel import InlineArtifactPanel
+
+            panel = InlineArtifactPanel(self._assistant_bubble)
+        except Exception as e:
+            logger.warning(f"[MessageCard] 成果栏创建失败: {e}")
+            return None
+        # 高度变化 → 重算卡片高度并上报外层锚定补偿（硬要求，P025/P027 教训）
+        panel.heightChanged.connect(lambda _p=panel: self._on_artifact_panel_height_changed())
+        # 图片单击 → 内置预览（与正文图片同一通道）
+        try:
+            panel.previewImageRequested.connect(self._on_preview_image)
+        except (RuntimeError, AttributeError):
+            pass
+        bubble_lay = self._assistant_bubble.layout()
+        if bubble_lay is not None:
+            # 挂载顺序：viewer → 任务看板 → 成果栏。任务在前（先看进度，再看产出）
+            bubble_lay.addWidget(panel)
+            self._artifact_panel_host = bubble_lay
+        self._artifact_panel = panel
+        return panel
+
+    def _on_artifact_panel_height_changed(self):
+        """成果栏高度变化：重算卡片高度并通知外层做锚定补偿
+
+        记账口径与 ``_on_todo_panel_height_changed`` 完全一致（含
+        ``_todo_panel_effective_height`` 注释里记录的 sizeHint 与实际占高
+        不同源问题，2026-10-09 真机现象）——两套缓存分开记，互不干扰。
+        """
+        try:
+            panel = self._artifact_panel
+            cur = self._artifact_panel_effective_height(panel)
+            prev = getattr(self, "_artifact_panel_height_cache", 0)
+            self._artifact_panel_height_cache = cur
+            delta = int(cur - prev)
+            if not delta:
+                return
+            bubble = getattr(self, "_assistant_bubble", None)
+            if bubble is not None:
+                bubble.updateGeometry()
+            self.updateGeometry()
+            self._last_height_delta += delta
+            self.heightChanged.emit(self.height())
+        except RuntimeError:
+            pass
+
+    def _artifact_panel_effective_height(self, panel) -> int:
+        """成果栏「当前实际占高」，口径同 ``_todo_panel_effective_height``（取大值）"""
         if panel is None or not panel.isVisible():
             return 0
         try:

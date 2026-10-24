@@ -41,6 +41,30 @@ def register(registry) -> None:
     def _subagent(host: Any):
         return getattr(host, "_sub_agent_manager", None)
 
+    def _artifacts_show(host: Any):
+        """tool surface 的成果推送：host 是 ToolExecutor，无窗口引用。
+
+        经 UIPluginRegistry 解析活跃 MainWidget 后复用 ui_core 同名实现；
+        取不到窗口返回恒 0 的空实现（后台工具无窗口是正常状态，非错误）。
+        工具插件的常规通道是 ``ToolResult.artifacts`` 字段（自动挂成果栏），
+        本能力用于异步任务完成后显式回填原卡（target="call"）。
+        """
+        real = None
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            reg = UIPluginRegistry.get_instance()
+            real = getattr(reg, "_main_widget", None) or next(
+                iter(getattr(reg, "_window_main_widgets", {}).values()), None
+            )
+        except Exception:  # noqa: BLE001 - 无窗口场景返回空实现
+            real = None
+        if real is None:
+            return lambda items, target="latest", call_id="": 0
+        from app.plugins.capabilities.providers.ui_core import _ui_artifacts_show
+
+        return _ui_artifacts_show(real)
+
     def _backend(host: Any):
         """ToolExecutor → ChatBackend（host 自身持引用，无则 None）。"""
         return getattr(host, "_backend", None)
@@ -264,8 +288,6 @@ def register(registry) -> None:
         return api
 
     registry.register("state.kv", _kv, surface="tool", owner="core:tool")
-    registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
-    registry.register("model.enumerate", model_meta.model_enumerate, surface="tool", owner="core:tool")
     registry.register("plugin.log", _plugin_log, surface="tool", owner="core:tool")
     registry.register("model.metadata", _model_metadata, surface="tool", owner="core:tool")
     registry.register("model.schema", _model_schema, surface="tool", owner="core:tool")
@@ -279,6 +301,8 @@ def register(registry) -> None:
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
     registry.register("context.compact", _context_compactor, surface="tool", owner="core:tool")
     registry.register("tool.execute", _tool_execute, surface="tool", owner="core:tool")
+    registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
+    registry.register("model.enumerate", model_meta.model_enumerate, surface="tool", owner="core:tool")
     registry.register("tool.read", _tool_read, surface="tool", owner="core:tool")
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("team.read", _team_read, surface="tool", owner="core:tool")
@@ -288,3 +312,4 @@ def register(registry) -> None:
     registry.register("net.upload", _gitee, surface="tool", owner="core:tool")
     registry.register("subagent.run", _subagent, surface="tool", owner="core:tool")
     registry.register("process.start", process_core.process_start, surface="tool", owner="core:tool")
+    registry.register("ui.artifacts.show", _artifacts_show, surface="tool", owner="core:tool")
