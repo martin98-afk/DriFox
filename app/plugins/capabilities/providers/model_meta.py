@@ -187,5 +187,5 @@ def _model_caps(model: str, provider_name: str) -> Dict[str, Any]:
 def _as_int_or_none(value: Any) -> Optional[int]:
     try:
         return int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
