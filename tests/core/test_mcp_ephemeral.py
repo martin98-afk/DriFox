@@ -37,6 +37,8 @@ def mgr():
     m._loop = None
     m._thread = None
     m._ephemeral = set()
+    # get_status 会合并配置侧全集；固定为空以隔离本机真实 .mcp.json
+    m._configured_servers = lambda: []
 
     # fixture 不启动后台事件循环：_run_async 直接在同线程跑协程
     def _run_async(coro, timeout=60):
@@ -105,6 +107,33 @@ class TestEphemeralNotInjected:
         names = [s["function"]["name"] for s in mgr.get_tool_schemas()]
         assert names == ["mcp__resident__a"]
 
+    def test_ephemeral_included_when_requested(self, mgr):
+        """include_ephemeral=True：tool_search 搜索面必须能找回临时开启的工具
+
+        临时开启的定义不进常驻列表（省 token），上下文压缩后搜索是找回
+        schema 的唯一入口——搜不到等于白开。
+        """
+        mgr._connections = {
+            "resident": _conn("resident", enabled=True, tools=[_FakeTool("a")]),
+            "temp": _conn("temp", enabled=False, tools=[_FakeTool("b")]),
+        }
+        mgr._ephemeral = {"temp"}
+
+        by_server = mgr.get_tool_schemas_by_server(include_ephemeral=True)
+        assert set(by_server) == {"resident", "temp"}
+
+        names = [s["function"]["name"] for s in mgr.get_tool_schemas(include_ephemeral=True)]
+        assert names == ["mcp__resident__a", "mcp__temp__b"]
+
+    def test_ephemeral_flag_alone_does_not_admit_server(self, mgr):
+        """不在 _ephemeral 里的关闭态服务器：include_ephemeral=True 也不放行"""
+        mgr._connections = {
+            "off": _conn("off", enabled=False, tools=[_FakeTool("x")]),
+        }
+        mgr._ephemeral = set()
+
+        assert mgr.get_tool_schemas_by_server(include_ephemeral=True) == {}
+
 
 class TestEnableEphemeral:
     def test_enable_returns_tool_schemas(self, mgr, patch_pm):
@@ -133,6 +162,31 @@ class TestEnableEphemeral:
         assert ok is False
         assert "常驻" in str(err)
         assert mgr.ephemeral_names() == set()
+
+    def test_repeated_enable_reuses_live_connection(self, mgr, patch_pm):
+        """已临时开启且连接正常的服务器再次 enable：复用连接，不得断开重连
+
+        重连代价大（stdio 杀子进程重建 / http 重新握手），重复 enable 是
+        模型的常见动作（忘了开过又开一次），必须幂等复用。
+        """
+        patch_pm([{"name": "temp", "enabled": False, "command": "x", "args": []}])
+        live = _conn("temp", enabled=False, tools=[_FakeTool("q")])
+        mgr._connections["temp"] = live
+        mgr._ephemeral = {"temp"}
+
+        reconnects = []
+
+        def _must_not_connect(name, config):
+            reconnects.append(name)
+            return False, "不应重连"
+
+        mgr._connect_single = _must_not_connect
+
+        ok, payload = mgr.enable_ephemeral("temp")
+
+        assert ok is True
+        assert reconnects == [], "已连接的服务器重复 enable 必须复用连接"
+        assert [s["function"]["name"] for s in payload] == ["mcp__temp__q"]
 
     def test_enable_unknown_server_reports_list_hint(self, mgr, patch_pm):
         patch_pm([{"name": "other", "enabled": False}])

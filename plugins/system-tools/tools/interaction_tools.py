@@ -346,25 +346,28 @@ def _mcp_render_list(status: list) -> str:
 
 
 def _mcp_render_enabled(name: str, schemas: list) -> str:
-    """把临时开启返回的工具 schema 渲染成模型可直接使用的定义"""
+    """临时开启成功 → 只渲染工具名录（名 + 一句话描述），不含参数。
+
+    为什么不渲染完整 schema：一台服务器的全部工具参数动辄数万字符，灌
+    一次就吃掉大块上下文，而模型当轮通常只用一两个工具。参数详情让模型
+    用 tool_search 的 tool_names 按需查（tool_search 的搜索面已含临时
+    开启的服务器），用时才查、查了就调。
+    """
     if not schemas:
         return f"MCP 服务器 '{name}' 已临时开启，但未发现任何工具。"
     lines = [
         f"MCP 服务器 '{name}' 已临时开启，共 {len(schemas)} 个工具。",
-        "它们的定义**不在**常驻工具列表里，必须用 tool_execute(tool_name=工具名, arguments=参数对象) 调用。",
-        "调用完请立即 mcp_manage(action=\"disable\", name=\"%s\") 回收，避免子进程空转。" % name,
+        "它们的定义**不在**常驻工具列表里，调用须用 tool_execute(tool_name=工具名, arguments=参数对象)。",
+        f"参数详情用 tool_search(tool_names=[\"工具名\"]) 按需查询；用完请 mcp_manage(action=\"disable\", name=\"{name}\") 回收。",
+        "",
     ]
     for schema in schemas:
         fn = schema.get("function", {}) or {}
-        lines.append("")
-        lines.append(f"## {fn.get('name', '?')}")
-        lines.append((fn.get("description") or "（无描述）").strip())
-        params = fn.get("parameters")
-        if params:
-            lines.append("Parameters:")
-            lines.append("```json")
-            lines.append(json.dumps(params, ensure_ascii=False, indent=2))
-            lines.append("```")
+        desc_lines = (fn.get("description") or "（无描述）").strip().splitlines()
+        desc = desc_lines[0].strip() if desc_lines else "（无描述）"
+        if len(desc) > 100:
+            desc = desc[:100] + "…"
+        lines.append(f"- {fn.get('name', '?')}：{desc}")
     return "\n".join(lines)
 
 
@@ -689,7 +692,7 @@ def register(registry):
     )
     registry.register(
         "mcp_manage", _MCP_MANAGE_SCHEMA, impl=_mcp_manage_impl,
-        danger="safe", icon="工具", cn_name="MCP管理",
+        danger="safe", icon="工具", cn_name="管理MCP",
         group=GROUP_INTERACTION, description="管理MCP服务器：列出/临时开启/关闭",
         aliases=["mcp_list_servers", "McpListServers", "McpManage", "mcp_list"],
         preview=_preview_mcp_manage,

@@ -125,12 +125,20 @@ def _search_registry(queries: list) -> list:
 
 
 def _search_mcp(services: dict, queries: list) -> list:
-    """搜索 MCP 工具 schema（services["mcp"] 不可用时静默为空）。"""
+    """搜索 MCP 工具 schema（services["mcp"] 不可用时静默为空）。
+
+    含临时开启（ephemeral）的服务器：它们的定义不进常驻列表（省 token），
+    若上下文压缩后 schema 丢失，搜索是模型找回定义的唯一入口——搜不到
+    等于白开。旧宿主无 include_ephemeral 参数时回退原行为。
+    """
     mcp = services.get("mcp") if isinstance(services, dict) else None
     if mcp is None:
         return []
     try:
-        schemas = mcp.get_tool_schemas() or []
+        try:
+            schemas = mcp.get_tool_schemas(include_ephemeral=True) or []
+        except TypeError:
+            schemas = mcp.get_tool_schemas() or []
     except Exception:
         return []
     scored = []
@@ -183,7 +191,11 @@ def _list_impl(services: dict) -> str:
     mcp = services.get("mcp") if isinstance(services, dict) else None
     if mcp is not None:
         try:
-            mcp_schemas = [s for s in (mcp.get_tool_schemas() or []) if _fname(s)]
+            try:
+                schemas = mcp.get_tool_schemas(include_ephemeral=True) or []
+            except TypeError:
+                schemas = mcp.get_tool_schemas() or []
+            mcp_schemas = [s for s in schemas if _fname(s)]
         except Exception:
             mcp_schemas = []
     total = len(entries) + len(mcp_schemas)
