@@ -766,13 +766,24 @@ class MCPServerRow(CardWidget):
             return
         if authorized:
             self._auth_btn.setText("解绑")
-            self._auth_btn.setToolTip("清除已保存的授权凭证并断开连接，下次连接需重新授权")
+            self._auth_btn.setToolTip(self._auth_tooltip("清除已保存的授权凭证并断开连接，下次连接需重新授权"))
             self._auth_btn.setStyleSheet(_auth_btn_qss("unbind"))
         else:
             self._auth_btn.setText("授权")
-            self._auth_btn.setToolTip("点击后在浏览器完成 OAuth 授权")
+            self._auth_btn.setToolTip(self._auth_tooltip("点击后在浏览器完成 OAuth 授权"))
             self._auth_btn.setStyleSheet(_auth_btn_qss("authorize"))
         self._auth_btn.setEnabled(True)
+
+    def _auth_tooltip(self, base: str) -> str:
+        """按钮提示：注册名不是 DriFox 时追加风险说明。
+
+        少数授权服务器（如 Figma）只放行其官方目录客户端的注册名，插件会
+        填第三方名字绕过。那不是 DriFox 的真实身份，必须让用户在点按钮前看见。
+        """
+        alias = str((self._server_data.get("auth") or {}).get("client_name") or "")
+        if not alias or alias == "DriFox":
+            return base
+        return f"{base}\n\n注意：本 server 以「{alias}」身份注册（非 DriFox），属绕过服务方客户端白名单，风险自担。"
 
     def _set_auth_busy(self, busy: bool):
         """解绑进行中：按钮显示进行中文案并禁用，防止重复点击。无授权按钮时忽略。"""

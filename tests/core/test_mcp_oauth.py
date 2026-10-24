@@ -17,6 +17,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -389,6 +390,95 @@ class TestProviderFactory:
         assert f.revoke("p", "s") is True
         assert store._read_blob() == {}
         assert f.has_token("p", "s") is False
+
+
+class TestAuthorizationDrive:
+    """授权驱动请求与失败原因回归。
+
+    figma / context7 只接受 POST：用裸 GET 驱动时服务端回 405，SDK 静默收尾，
+    最终只剩一句「授权未完成」。这里锁定两件事：
+    1. 驱动请求必须是带 JSON-RPC initialize body 的 POST
+    2. 首请求非 401/403 时必须报出真实状态码，不能退化成「授权未完成」
+    """
+
+    def test_probe_request_is_post_initialize(self):
+        from app.core.mcp_oauth.provider import _build_probe_request
+
+        req = _build_probe_request("https://mcp.figma.com/mcp")
+
+        assert req.method == "POST"
+        assert req.headers["content-type"] == "application/json"
+        assert "text/event-stream" in req.headers["accept"]
+        body = json.loads(req.content)
+        assert body["method"] == "initialize"
+        assert body["params"]["protocolVersion"]
+        assert body["params"]["clientInfo"]["name"] == "DriFox"
+
+    def test_reject_status_passes_401_and_403(self):
+        from app.core.mcp_oauth.provider import _reject_unexpected_status
+
+        assert _reject_unexpected_status(MagicMock(status_code=401)) is None
+        assert _reject_unexpected_status(MagicMock(status_code=403)) is None
+
+    def test_reject_status_reports_real_code(self):
+        """405 是 figma 裸 GET 时的真实状态码，必须原样出现在原因里。"""
+        from app.core.mcp_oauth.provider import _reject_unexpected_status
+
+        reason = _reject_unexpected_status(MagicMock(status_code=405))
+        assert reason and "405" in reason
+
+        reason_200 = _reject_unexpected_status(MagicMock(status_code=200))
+        assert reason_200 and "200" in reason_200
+
+    def test_authorize_reports_non_401_status(self, isolated_data_dir, monkeypatch):
+        """端到端：服务端回 405 时 session.error 必须写明 405。"""
+        provider_mod = __import__("app.core.mcp_oauth.provider", fromlist=["provider"])
+
+        class _FakeProvider:
+            class _Ctx:
+                server_url = "https://only-post.example/mcp"
+
+            def __init__(self):
+                from mcp.shared.auth import OAuthClientMetadata
+
+                self.context = _FakeProvider._Ctx()
+                self.context.client_metadata = OAuthClientMetadata(
+                    redirect_uris=["http://127.0.0.1:1/callback"],
+                    client_name="DriFox",
+                    grant_types=["authorization_code", "refresh_token"],
+                    response_types=["code"],
+                )
+
+            def async_auth_flow(self, request):
+                async def _flow():
+                    yield request
+
+                return _flow()
+
+        monkeypatch.setattr(provider_mod.McpOAuthProviderFactory, "get_provider", lambda self, *a, **k: _FakeProvider())
+
+        class _FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def send(self, request):
+                return MagicMock(status_code=405, request=request)
+
+        import httpx
+
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+        f = McpOAuthProviderFactory(auth_timeout=0.1)
+        session = f.authorize("p", "s", "https://only-post.example/mcp")
+
+        assert session.status == "error"
+        assert "405" in (session.error or ""), f"错误应写明真实状态码，实际: {session.error}"
 
 
 class TestManagerSingleton:
