@@ -239,6 +239,7 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `ui.notify` | low | 弹 InfoBar 通知 |
 | `ui.card.show` | low | 显示浮动卡 |
 | `ui.card.hide` | low | 隐藏浮动卡 |
+| `ui.artifacts.show` | medium | 向消息卡片成果栏推送成果条目（image/video/html/text/file 五类分控件；`show(items, target="latest", call_id="")`，返回投递条目数；`ToolResult.artifacts` 字段是工具插件的免声明通道） |
 | `ui.exclusive` | medium | 独占 UI 模式 |
 | `ui.dialog` | low | 文件 / 目录选择、确认框、单行输入（跟随主题） |
 

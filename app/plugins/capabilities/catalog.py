@@ -120,6 +120,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
         _spec("ui.dialog", _L, "文件/目录选择、确认框、单行输入（跟随主题）", _UI),
         _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新等）", _UI),
+        _spec(
+            "ui.artifacts.show",
+            _M,
+            "向消息卡片成果栏推送成果条目（图片/视频/HTML/文本/文件，跨窗口副作用）",
+            _BOTH,
+        ),
         # ── 对话流 ──
         _spec("stream.subscribe", _M, "订阅对话流事件（工具/流/错误/上下文/会话切换）", _UI),
         # ── 窗口 ──

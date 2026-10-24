@@ -20981,6 +20981,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if todos:
             self._latest_todos = todos
             self._sync_todo_panel(todos)
+        # 字段驱动：工具结果携带 artifacts 字段 → 挂成果栏（与 todos 同构入口）
+        # 语义差异：成果不迁卡（见 _sync_artifact_panel docstring）
+        artifacts = result.get("artifacts") if isinstance(result, dict) else getattr(result, "artifacts", None)
+        if artifacts:
+            self._sync_artifact_panel(artifacts)
         # 工作台浮层联动：文件写入类工具完成后重拉产物列表
         try:
             if not todos and (
@@ -24258,6 +24263,32 @@ class OpenAIChatToolWindow(ToolWindow):
             self._todo_panel_card = card
         try:
             card.update_todo_list(todos)
+        except RuntimeError:
+            pass
+
+    def _sync_artifact_panel(self, artifacts) -> None:
+        """把成果条目挂到 assistant 卡片的成果栏
+
+        ★ 与 ``_sync_todo_panel`` 的关键语义差异——**不迁卡**：任务列表是
+        "当前状态"，每轮工具都迁到最新卡（旧卡 ``clear_todo_list()``）；成果属于
+        产生它的那一轮，之后的新卡不继承旧卡的成果。所以这里**不卸载旧卡**，
+        只把条目追加到目标卡（面板内同路径去重）。后续维护者不要照抄 todos 的
+        迁移语义——那会让旧图串到新对话轮次里。
+
+        目标卡优先 ``call_id`` 定位（异步任务晚于轮次结束回填原卡），否则最新卡。
+
+        Args:
+            artifacts: 成果条目列表（ToolResult.artifacts / 能力 ui.artifacts.show）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not artifacts:
+            return
+        card = self._current_assistant_card or self._find_latest_assistant_card()
+        if card is None or not self._is_widget_alive(card):
+            return
+        try:
+            card.update_artifact_list(list(artifacts))
         except RuntimeError:
             pass
 
