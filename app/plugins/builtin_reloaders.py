@@ -408,19 +408,23 @@ def _reload_context_policies(ctx: ReloadContext) -> Any:
     plugin:<name> source 清理，两类条目同 source）。
     """
     from app.plugins.loaders.runtime_component_loader import (
-        _make_budget_resolver_loader,
+        _persistent_loader,
         ensure_context_watcher,
     )
 
     watcher = ensure_context_watcher()
     if watcher is None:
         return False
+    # 用模块级持久 loader（_persistent_loader）而非 _make_budget_resolver_loader()
+    # 临时实例：临时实例的 _occupied/_sources 是空的，unload/reload 时看不见
+    # warmup 那一轮注册占用的 item id → 精准卸载漏项、跨根覆盖判定失真。
+    budget_loader = _persistent_loader("budget_resolvers")
     if ctx.plugin is None:
         watcher.unload_plugin(ctx.plugin_name)
-        _make_budget_resolver_loader().unload_plugin(ctx.plugin_name)
+        budget_loader.unload_plugin(ctx.plugin_name)
     else:
         watcher.reload_plugin(ctx.plugin_name)
-        _make_budget_resolver_loader().reload_plugin(ctx.plugin_name)
+        budget_loader.reload_plugin(ctx.plugin_name)
     return True
 
 
