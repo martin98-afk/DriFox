@@ -114,7 +114,11 @@ _MCP_TYPE_GROUPS = [
 
 
 def _auth_btn_qss(kind: str) -> str:
-    """授权按钮双态样式：authorize = 主题色实心（主操作）；unbind = 红字描边（危险操作）。"""
+    """授权按钮双态样式：authorize = 主题色实心（主操作）；unbind / cancel = 红字描边（危险操作）。
+
+    cancel 复用 unbind 配色：「中止授权」与「解绑」同为销毁性动作，
+    用同一红色语义让用户不把它当成主操作误点。
+    """
     if kind == "authorize":
         return (
             f"PushButton {{ background-color: {Colors.TEXT_ACCENT}; color: {Colors.BUTTON_TEXT_ON_ACCENT};"
@@ -720,6 +724,8 @@ class MCPServerRow(CardWidget):
     enabledChanged = Signal(str, bool)
     authorizeRequested = Signal(str)
     unbindRequested = Signal(str)
+    # 用户在授权等待中点击「中止」：请求终止等待浏览器回调
+    cancelAuthorizeRequested = Signal(str)
     # 用户在凭据行保存了 Key：参数为 server name。列表卡接到后热重连。
     credentialSaved = Signal(str)
 
@@ -728,6 +734,8 @@ class MCPServerRow(CardWidget):
         self._name = server_data.get("name", "")
         self._server_data = server_data
         self._authorized = False
+        # 是否正处于「等待浏览器授权」态（此时按钮显示「中止」）
+        self._authorizing = False
         self._setup_ui(server_data)
 
     def set_enabled(self, enabled: bool):
@@ -753,6 +761,7 @@ class MCPServerRow(CardWidget):
     def set_authorized(self, authorized: bool):
         """切换授权按钮双态：未授权 → 「授权」，已授权 → 「解绑」（均可点）。无授权按钮时忽略。"""
         self._authorized = authorized
+        self._authorizing = False
         if self._auth_btn is None:
             return
         if authorized:
@@ -766,17 +775,46 @@ class MCPServerRow(CardWidget):
         self._auth_btn.setEnabled(True)
 
     def _set_auth_busy(self, busy: bool):
-        """授权/解绑进行中：按钮显示进行中文案并禁用，防止重复点击。无授权按钮时忽略。"""
+        """解绑进行中：按钮显示进行中文案并禁用，防止重复点击。无授权按钮时忽略。"""
         if self._auth_btn is None:
             return
-        self._auth_btn.setText("授权中" if busy else ("解绑" if self._authorized else "授权"))
+        self._auth_btn.setText("解绑中" if busy else ("解绑" if self._authorized else "授权"))
         # busy 时保留当前态样式，disabled 伪态负责置灰；恢复时按当前授权态重设
         self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
         self._auth_btn.setEnabled(not busy)
 
+    def _set_authorizing(self, active: bool):
+        """授权等待中：按钮变「中止」且保持可点，点击即取消等待。
+
+        文案只取两字：按钮原为固定宽度，三字「授权中」在放大字号下会被裁切
+        （用户实测截图）；两字在任意档位都放得下。取消请求发出后置灰，
+        避免重复点击刷屏。
+        """
+        if self._auth_btn is None:
+            return
+        if active:
+            self._authorizing = True
+            self._auth_btn.setText("中止")
+            self._auth_btn.setToolTip("正在等待浏览器授权，点击中止（不必等超时）")
+            self._auth_btn.setStyleSheet(_auth_btn_qss("cancel"))
+            self._auth_btn.setEnabled(True)
+        else:
+            self._authorizing = False
+            self.set_authorized(self._authorized)
+
+    def _on_cancel_requested(self):
+        """用户点了「中止」：置灰按钮并发出取消请求（等后台线程收尾后恢复双态）"""
+        if self._auth_btn is None or not self._authorizing:
+            return
+        self._auth_btn.setEnabled(False)
+        self._auth_btn.setToolTip("正在中止授权...")
+        self.cancelAuthorizeRequested.emit(self._name)
+
     def _on_auth_clicked(self):
-        """授权按钮双态分发：未授权 → 发起授权；已授权 → 请求解绑"""
-        if self._authorized:
+        """授权按钮三态分发：等待中 → 中止；已授权 → 请求解绑；未授权 → 发起授权"""
+        if self._authorizing:
+            self._on_cancel_requested()
+        elif self._authorized:
             self.unbindRequested.emit(self._name)
         else:
             self.authorizeRequested.emit(self._name)
@@ -814,7 +852,10 @@ class MCPServerRow(CardWidget):
         )
         self._status_dot.set_color(_disabled_dot_color())
         if self._auth_btn is not None and self._auth_btn.isEnabled():
-            self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
+            if self._authorizing:
+                self._auth_btn.setStyleSheet(_auth_btn_qss("cancel"))
+            else:
+                self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
 
     def _setup_ui(self, data: dict):
         # 两行布局：第一行 = 图标 + 名称 + (弹性) + 授权按钮 + 开关 + 编辑/删除（操作组靠右）；
@@ -898,7 +939,10 @@ class MCPServerRow(CardWidget):
         self._auth_btn = None
         if (data.get("auth") or {}).get("type") == "oauth":
             self._auth_btn = PushButton("授权")
-            self._auth_btn.setFixedSize(64, Sizes.TOOL_BUTTON_SZ.height())
+            # 只固定高度：宽度按 sizeHint 自适应（最低 64），字号调大 / 文案变长时
+            # 不会被裁字（旧实现 setFixedSize(64) 在 16px 字号下切掉「授权中」两侧）。
+            self._auth_btn.setMinimumWidth(64)
+            self._auth_btn.setFixedHeight(Sizes.TOOL_BUTTON_SZ.height())
             self._auth_btn.clicked.connect(self._on_auth_clicked)
             self.set_authorized(self._has_oauth_token(data))
 
@@ -1065,7 +1109,7 @@ class MCPListSettingCard(ExpandSettingCard):
     # 内部信号（从后台线程桥接到主线程 UI 更新）
     _hotConnectResult = Signal(str, bool, str)
     _tokenCountReady = Signal(str, dict)
-    _authorizeDone = Signal(str, bool, str)
+    _authorizeDone = Signal(str, bool, str, bool)  # name, ok, error, cancelled
     _unbindDone = Signal(str, bool, str)
 
     def __init__(self, icon, title: str, content: str = None, parent=None):
@@ -1197,22 +1241,43 @@ class MCPListSettingCard(ExpandSettingCard):
 
         row = self._server_rows.get(name)
         if row is not None:
-            row._set_auth_busy(True)
+            # 等待浏览器授权时按钮变「中止」且保持可点，用户可随时退出不必等 300s 超时
+            row._set_authorizing(True)
 
         def _work():
             from app.core.mcp_oauth import McpOAuthManager
 
+            _cancelled = False
             try:
                 session = McpOAuthManager.get_instance().authorize(plugin, name, server_cfg.get("url", ""), auth)
                 ok = session.status == "done"
                 msg = session.error or ""
+                _cancelled = session.status == "cancelled"
             except Exception as e:  # pragma: no cover - 授权链路兜底
                 ok, msg = False, str(e)
-            self._authorizeDone.emit(name, ok, msg)
+            self._authorizeDone.emit(name, ok, msg, _cancelled)
 
         threading.Thread(target=_work, name=f"mcp-oauth-{name}", daemon=True).start()
 
-    def _on_authorize_done(self, name: str, ok: bool, error: str):
+    def _on_cancel_authorize(self, name: str):
+        """中止进行中的授权（主线程）：只发取消标记，不阻塞界面。
+
+        回调 server 的关闭与线程收尾由授权线程完成，完成后经 _authorizeDone 回到主线程恢复按钮态。
+        """
+        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), None)
+        src = str((server_cfg or {}).get("_source", ""))
+        plugin = Path(src).parent.name if src.endswith(".json") else ""
+        if not plugin:
+            return
+
+        from app.core.mcp_oauth import McpOAuthManager
+
+        try:
+            McpOAuthManager.get_instance().cancel(plugin, name)
+        except Exception as e:  # pragma: no cover - 兜底：会话已收尾时取消失败不影响 UI
+            logger.warning(f"[MCP] 中止授权失败 {name}: {e}")
+
+    def _on_authorize_done(self, name: str, ok: bool, error: str, cancelled: bool = False):
         """授权完成回调（主线程）：更新按钮态 + 提示 + 触发热连接"""
         row = self._server_rows.get(name)
         if row is not None:
@@ -1230,6 +1295,15 @@ class MCPListSettingCard(ExpandSettingCard):
             cfg = next((s for s in self._get_servers() if s.get("name", "") == name), None)
             if cfg:
                 self._hot_connect(name, cfg, force=True)
+        elif cancelled:
+            # 主动中止不是失败，不用错误色：安静提示即可，按钮已回「授权」
+            InfoBar.info(
+                "已中止授权",
+                f"「{name}」的授权已中止，可随时重新发起。",
+                parent=self.window(),
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
         else:
             InfoBar.error(
                 "授权失败",
@@ -1644,6 +1718,7 @@ class MCPListSettingCard(ExpandSettingCard):
                     row.enabledChanged.connect(self._on_enabled_changed)
                     row.authorizeRequested.connect(self._on_authorize_server)
                     row.unbindRequested.connect(self._on_unbind_server)
+                    row.cancelAuthorizeRequested.connect(self._on_cancel_authorize)
                     row.credentialSaved.connect(self._on_credential_saved)
                     self._server_rows[server_data.get("name", "")] = row
                     self.viewLayout.addWidget(row)

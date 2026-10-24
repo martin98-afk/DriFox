@@ -43,6 +43,7 @@ def _make_row(data: dict):
     row._server_data = data
     row._auth_btn = None
     row._authorized = False
+    row._authorizing = False
     row._current_state = "disabled"
     return row
 
@@ -342,3 +343,91 @@ class TestWiringInSource:
                     assert "authorize(" in body
                     # authorize 调用必须位于线程目标函数内，而非方法体直接调用
                     assert "def _work" in body
+
+
+# ═══════════════════════════════════════════════════
+# 中止授权（不必等 300s 超时）
+# ═══════════════════════════════════════════════════
+
+
+class TestCancelAuthorize:
+    """授权等待期间按钮必须是「中止」且可点，点后发出取消请求"""
+
+    def test_authorizing_shows_cancel_and_stays_clickable(self):
+        row = _make_row({"name": "n"})
+        row._auth_btn = MagicMock()
+
+        row._set_authorizing(True)
+
+        assert row._auth_btn.setText.call_args[0][0] == "中止"
+        assert row._auth_btn.setEnabled.call_args[0][0] is True
+        assert row._authorizing is True
+
+    def test_cancel_click_emits_cancel_signal(self):
+        from app.widgets.cards.settings.mcp_setting_card import MCPServerRow
+
+        row = _make_row({"name": "n"})
+        row._auth_btn = MagicMock()
+        row._authorizing = True
+        row.cancelAuthorizeRequested = MagicMock()
+        row.authorizeRequested = MagicMock()
+
+        MCPServerRow._on_auth_clicked(row)
+
+        row.cancelAuthorizeRequested.emit.assert_called_once_with("n")
+        row.authorizeRequested.emit.assert_not_called()
+
+    def test_end_authorizing_restores_two_state(self):
+        """取消返回后恢复双态：未授权 → 「授权」，且 _authorizing 复位"""
+        row = _make_row({"name": "n"})
+        row._auth_btn = MagicMock()
+        row._set_authorizing(True)
+
+        row._set_authorizing(False)
+
+        assert row._authorizing is False
+        assert row._auth_btn.setText.call_args[0][0] == "授权"
+
+    def test_cancelled_result_shows_info_not_error(self):
+        card = _make_card()
+        card._server_rows["notion"] = MagicMock()
+
+        with patch("app.widgets.cards.settings.mcp_setting_card.InfoBar") as bar:
+            card._on_authorize_done("notion", False, "授权已中止", True)
+
+        bar.info.assert_called_once()
+        bar.error.assert_not_called()
+        card._hot_connect.assert_not_called()
+
+
+class TestCallbackCancelSemantics:
+    """回调 server 的取消语义：唤醒等待方且不覆盖已到达的结果"""
+
+    def test_cancel_wakes_waiter_and_marks_flag(self):
+        from app.core.mcp_oauth.callback_server import CallbackServer
+
+        server = CallbackServer()
+        assert server.wait(0.05).code is None  # 先确认未就绪时确实等到超时
+
+        server.cancel()
+        result = server.wait(0.05)  # 取消后立即返回，不再等满 timeout
+        assert result.cancelled is True
+        assert result.code is None
+
+    def test_cancel_does_not_override_received_code(self):
+        from app.core.mcp_oauth.callback_server import CallbackServer
+
+        server = CallbackServer()
+        server.result.code = "the-code"
+        server.cancel()
+
+        assert server.result.cancelled is False
+        assert server.result.code == "the-code"
+
+    def test_factory_cancel_only_for_pending_session(self):
+        from app.core.mcp_oauth.provider import McpOAuthProviderFactory
+
+        factory = McpOAuthProviderFactory()
+        # 无会话 → 无事可取消
+        assert factory.cancel("plug", "srv") is False
+

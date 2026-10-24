@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import FluentIcon, InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
 
 from app.core.infra import window_registry
+from app.gateway.auth.base import CANCEL_MESSAGE
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -264,6 +265,8 @@ class GiteeAccountRow(QFrame):
 
         self.cfg = Settings.get_instance()
         self._binding = False
+        # 绑定中止信号：与 GiteeCard 同一语义，用户点「中止授权」时置位
+        self._bind_cancel: threading.Event | None = None
         self._bound_owner = ""
         self._bound_repo = ""
         self._compact = False  # 是否紧凑模式（收起时垂直堆叠）
@@ -430,6 +433,10 @@ class GiteeAccountRow(QFrame):
 
         self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
+        # 浮层操作按钮同步进行中态：绑定等待时变「中止授权」可点
+        # 必须 shiboken isValid 硬判：wrapper 已析构时读 Python 侧属性不抛异常
+        if self._popup is not None and sip.isValid(self._popup):
+            self._popup._refresh_account_state()
 
     def _apply_style(self):
         self.setStyleSheet("""
@@ -474,20 +481,27 @@ class GiteeAccountRow(QFrame):
 
     def _start_oauth(self, repo_private: bool):
         self._binding = True
+        self._bind_cancel = threading.Event()
         self._refresh_ui()
         worker = threading.Thread(
             target=self._do_oauth,
-            args=(repo_private,),
+            args=(repo_private, self._bind_cancel),
             daemon=True,
         )
         worker.start()
 
-    def _do_oauth(self, repo_private: bool):
+    def _abort_binding(self):
+        """中止进行中的绑定：置位取消信号，后台线程 0.5s 内退出等待"""
+        if self._bind_cancel is not None:
+            self._bind_cancel.set()
+            self._bind_cancel = None
+
+    def _do_oauth(self, repo_private: bool, cancel_event=None):
         try:
             from app.gateway.auth import get_oauth_backend
 
             success, message = get_oauth_backend("gitee").bind(
-                repo_private=repo_private,
+                repo_private=repo_private, cancel_event=cancel_event
             )
             self.oauthResult.emit(success, message)
         except Exception as error:
@@ -496,6 +510,7 @@ class GiteeAccountRow(QFrame):
 
     def _on_oauth_result(self, success: bool, message: str):
         self._binding = False
+        self._bind_cancel = None
         if success:
             from app.gateway.utils.gitee_uploader import GiteeUploader
 
@@ -512,6 +527,16 @@ class GiteeAccountRow(QFrame):
             return
 
         self._refresh_ui()
+        if message == CANCEL_MESSAGE:
+            # 主动中止不是失败：安静提示，不用错误色
+            InfoBar.info(
+                title="已中止授权",
+                content="绑定已中止，可随时重新发起。",
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.window(),
+            )
+            return
         InfoBar.error(
             title="绑定失败",
             content=message,
@@ -599,10 +624,10 @@ class GiteeAccountRow(QFrame):
             self._popup = None
 
     def _toggle_popup(self):
-        """点击整块区域切换浮动卡片显示状态"""
-        if self._binding:
-            return
+        """点击整块区域切换浮动卡片显示状态
 
+        绑定等待中仍允许打开：浮层主操作此时是「中止授权」，是退出等待的唯一入口。
+        """
         # 防抖：Qt.Popup 被点击外部关闭的瞬间，⚙ 按钮的 click 才到达；
         # 此时 _popup 已被置 None，不拦住就会「关闭后立刻重开」（表现为点切换失效）
         if time.monotonic() - self._popup_closed_at < 0.3:
@@ -932,6 +957,24 @@ class _GiteeMorePopup(QWidget):
         repo = str(self._cfg.gitee_user_repo.value or "")
         avatar_size = scale_font_size(34)
 
+        if self._account_row is not None and getattr(self._account_row, "_binding", False):
+            # 绑定等待中：主操作变「中止授权」，用户可随时退出而不必等超时
+            self._popup_action_btn.setText("中止授权")
+            self._popup_action_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: {Colors.ERROR};
+                    background: transparent;
+                    border: 1px solid {Colors.ERROR};
+                    border-radius: 6px;
+                    padding: 4px 20px;
+                    {get_font_family_css()} {font_size_css(12)};
+                }}
+                QPushButton:hover {{
+                    background: rgba(250, 81, 81, 0.10);
+                }}
+            """)
+            return
+
         if is_bound and owner:
             self._popup_avatar.set_avatar(owner)
             self._popup_avatar.set_size(avatar_size)
@@ -980,7 +1023,11 @@ class _GiteeMorePopup(QWidget):
             self._account_row._open_repository()
 
     def _on_action_clicked(self):
-        """点击浮动卡片中的绑定/解绑按钮"""
+        """点击浮动卡片中的绑定/中止/解绑按钮"""
+        if self._account_row is not None and self._account_row._binding:
+            self._account_row._abort_binding()
+            self.close()
+            return
         if self._cfg.gitee_bound.value:
             self._account_row._on_unbind()
         else:
@@ -1150,6 +1197,8 @@ class GiteeCard(SettingCard):
         )
         self.cfg = Settings.get_instance()
         self._binding = False
+        # 绑定中止信号：用户点「中止」时置位，授权流程 0.5s 内退出等待
+        self._bind_cancel: threading.Event | None = None
         self._bound_owner = ""
         self._bound_repo = ""
         self.oauthResult.connect(self._on_oauth_result)
@@ -1416,6 +1465,9 @@ class GiteeCard(SettingCard):
             webbrowser.open(f"https://gitee.com/{self._bound_owner}/{self._bound_repo}")
 
     def _on_bind_clicked(self):
+        if self._binding:
+            self._abort_binding()
+            return
         if self.cfg.gitee_bound.value:
             self._on_unbind()
         else:
@@ -1440,17 +1492,32 @@ class GiteeCard(SettingCard):
 
     def _start_oauth(self, repo_private: bool):
         self._binding = True
-        self._bind_btn.setText("授权中…")
-        self._bind_btn.setEnabled(False)
+        self._bind_cancel = threading.Event()
+        # 按钮变「中止」且保持可点：关掉授权页后不必干等 120s 超时
+        self._bind_btn.setText("中止")
+        self._bind_btn.setEnabled(True)
+        self._bind_btn.setToolTip("正在等待浏览器授权，点击中止")
 
-        t = threading.Thread(target=self._do_oauth, args=(repo_private,), daemon=True)
+        t = threading.Thread(
+            target=self._do_oauth, args=(repo_private, self._bind_cancel), daemon=True
+        )
         t.start()
 
-    def _do_oauth(self, repo_private: bool):
+    def _abort_binding(self):
+        """中止进行中的绑定：置取消信号，后台线程 0.5s 内退出等待"""
+        if self._bind_cancel is not None:
+            self._bind_cancel.set()
+            self._bind_cancel = None
+        self._bind_btn.setEnabled(False)
+        self._bind_btn.setToolTip("正在中止授权...")
+
+    def _do_oauth(self, repo_private: bool, cancel_event=None):
         try:
             from app.gateway.auth import get_oauth_backend
 
-            success, msg = get_oauth_backend("gitee").bind(repo_private=repo_private)
+            success, msg = get_oauth_backend("gitee").bind(
+                repo_private=repo_private, cancel_event=cancel_event
+            )
             self.oauthResult.emit(success, msg)
         except Exception as e:
             logger.error(f"[GiteeCard] OAuth 异常: {e}")
@@ -1458,7 +1525,9 @@ class GiteeCard(SettingCard):
 
     def _on_oauth_result(self, success: bool, msg: str):
         self._binding = False
+        self._bind_cancel = None
         self._bind_btn.setEnabled(True)
+        self._bind_btn.setToolTip("")
 
         if success:
             from app.gateway.utils.gitee_uploader import GiteeUploader
@@ -1476,6 +1545,16 @@ class GiteeCard(SettingCard):
             )
         else:
             self._bind_btn.setText("绑定")
+            if msg == CANCEL_MESSAGE:
+                # 主动中止不是失败：安静提示，不用错误色
+                InfoBar.info(
+                    title="已中止授权",
+                    content="绑定已中止，可随时重新发起。",
+                    position=InfoBarPosition.TOP_RIGHT,
+                    duration=3000,
+                    parent=self.window(),
+                )
+                return
             InfoBar.error(
                 title="绑定失败",
                 content=msg,
