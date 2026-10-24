@@ -2658,6 +2658,9 @@ class MarketplaceCard(QWidget):
         self._flush_timer: Optional["QTimer"] = None  # 市场渲染合并 timer（self 子对象，销毁自动取消）
         self._reveal_timer: Optional["QTimer"] = None  # 渲染完成延迟显示 timer（防压缩帧）
         self._load_timer: Optional["QTimer"] = None  # show_card 延迟加载 timer（同上）
+        self._ever_shown: bool = False  # 是否已显示过：首次显示重置到精选，之后保留浏览位置
+        self._pending_scroll: int = 0  # 行重建待恢复的滚动位置（0=无）
+        self._scroll_guard: int = 0  # 滚动恢复补批链次数上限防死循环
         _t0 = time.perf_counter()
         self._setup_ui()
         logger.debug(f"[DEBUG-mp] ctor _setup_ui {(time.perf_counter() - _t0) * 1000:.0f}ms")
@@ -2685,10 +2688,12 @@ class MarketplaceCard(QWidget):
         _t_show = time.perf_counter()
         self._apply_latest_theme()
         self._apply_plugin_icon()
-        # 默认回到精选探索页（每次打开市场都从探索模式进入，商店首页语义）
-        self._filter_bar.setCurrentItem("featured")
-        self._current_filter = "featured"
-        self._apply_browse_mode("featured")
+        # 首次打开进精选探索页（商店首页语义）；之后保留上次浏览的 tab 与位置
+        if not self._ever_shown:
+            self._ever_shown = True
+            self._filter_bar.setCurrentItem("featured")
+            self._current_filter = "featured"
+            self._apply_browse_mode("featured")
         # 清除旧搜索状态、防抖定时器
         self._search_edit.clear()
         self._search_debounce.stop()
@@ -3625,6 +3630,9 @@ class MarketplaceCard(QWidget):
         self._matched = matched
 
         # 重建渲染：清空 + 渲染首批 + 加载更多按钮
+        # 行重建清空内容会让滚动归零：记录当前位置，reveal 完成后恢复（刷新不跳顶）
+        self._pending_scroll = self._scroll.verticalScrollBar().value()
+        self._scroll_guard = 0
         self._clear_plugin_list()
         self._rendered_count = 0
         self._all_loaded = False
@@ -4177,8 +4185,30 @@ class MarketplaceCard(QWidget):
             # 旧值/异常值，不清除会让 QScrollArea 在窗口 resize 等时机
             # 用错误高度撑开 content → 列表底部大段空白
             self._content.updateGeometry()
+            # 行重建后的滚动位置恢复（_render_plugins 设置 _pending_scroll）
+            if self._pending_scroll > 0:
+                self._restore_pending_scroll()
         except RuntimeError:
             pass  # 卡片已销毁
+
+    def _restore_pending_scroll(self):
+        """行重建后恢复滚动位置（刷新/数据变化导致的重建不跳顶）
+
+        重建只渲染首批 _RENDER_BATCH 行：原位置超出已渲染内容高度时补渲染
+        下一批（行先隐藏、由 _schedule_reveal 统一显示，避免压缩帧），下轮
+        _reveal_rows 后再次检查，链式直到高度覆盖原位置或渲染完
+        （_scroll_guard 限次防意外死循环）。
+        """
+        saved = self._pending_scroll
+        sb = self._scroll.verticalScrollBar()
+        if saved > sb.maximum() and not self._all_loaded:
+            self._scroll_guard += 1
+            if self._scroll_guard <= 12:  # 12 批 = 180 行上限
+                self._render_next_batch(auto_fill=True)
+                return  # 等下轮 reveal 后继续判断
+        self._scroll_guard = 0
+        self._pending_scroll = 0
+        sb.setValue(min(saved, sb.maximum()))
 
     def _layout_need_height(self, width: int) -> int:
         """列表容器「需要多高」——以 QVBoxLayout 自己的 heightForWidth 为准
