@@ -93,6 +93,7 @@ class CommandDefinition:
     parameters: List[CommandParameter] = field(default_factory=list)  # 可交互参数列表
     shortcut: str = ""           # 快捷键，如 "Ctrl+Shift+B"
     prompt_sections: Dict[str, str] = field(default_factory=dict)  # 参数→提示词分段映射（按需加载）
+    source: str = ""              # 归属来源：""=主程序内置；"plugin:<name>"=插件提供（按来源精准卸载用）
 
     def to_display_dict(self) -> Dict[str, str]:
         """返回供 CommandCard 显示用的字典"""
@@ -159,6 +160,7 @@ class CommandManager:
         parameters: Optional[List[CommandParameter]] = None,
         shortcut: str = "",
         prompt_sections: Optional[Dict[str, str]] = None,
+        source: str = "",
     ):
         """注册一个内置命令
 
@@ -171,6 +173,8 @@ class CommandManager:
             parameters: 可交互参数列表（用于 detail 模式参数补全）
             shortcut: 快捷键，如 "Ctrl+Shift+B"
             prompt_sections: 参数→提示词分段映射（用于按需加载，如 {"--create=": "提示词模板", "common": "通用提示词"}）
+            source: 归属来源（""=内置，"plugin:<name>"=插件提供）。同名覆盖时
+                **不**沿用旧值——热重载场景旧 source 会让新条目查不到归属。
 
         同名命令覆盖时：若新旧类型相同且新注册缺少参数/提示词，则保留旧定义中的对应字段。
         这确保用户通过 ShortcutManager 分配自定义快捷键时不会丢失原始的 parameters/argument_hint。
@@ -197,11 +201,43 @@ class CommandManager:
             parameters=parameters or [],
             shortcut=shortcut,
             prompt_sections=prompt_sections or {},
+            source=source,
         )
 
     def unregister(self, name: str):
         """取消注册一个命令（移除该名称下的所有类型）"""
         self._commands.pop(name, None)
+
+    def names_by_source(self, source: str) -> List[str]:
+        """返回指定 source 注册的全部命令名（按名称去重，稳定顺序）
+
+        用于插件热重载的精准清理：只摘该来源的条目，不动同名其他来源的
+        （如插件命令与内置命令同名时，删插件不应顺手删掉内置那条）。
+        """
+        names: List[str] = []
+        for name, entries in self._commands.items():
+            if any(cmd.source == source for cmd in entries.values()):
+                names.append(name)
+        return names
+
+    def unregister_source(self, source: str) -> List[str]:
+        """取消注册某个 source 的全部命令，返回被移除的命令名列表。
+
+        只删该 source 的类型条目：同名命令还有其他来源时保留剩余条目
+        （整个 name 下无条目时才删 name 键）。
+        """
+        removed: List[str] = []
+        for name in self.names_by_source(source):
+            entries = self._commands.get(name)
+            if entries is None:
+                continue
+            kept = {t: cmd for t, cmd in entries.items() if cmd.source != source}
+            if kept:
+                self._commands[name] = kept
+            else:
+                self._commands.pop(name, None)
+            removed.append(name)
+        return removed
 
     def has_command(self, name: str) -> bool:
         """检查命令是否已注册（任一类型）"""
