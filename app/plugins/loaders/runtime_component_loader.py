@@ -582,6 +582,15 @@ _stream_sink_loader: Optional[RuntimeComponentLoader] = None
 _engine_loader: Optional[RuntimeComponentLoader] = None
 _context_tier_loader: Optional[RuntimeComponentLoader] = None
 _budget_resolver_loader: Optional[RuntimeComponentLoader] = None
+# warmup 幂等守卫：4 个调用点（插件宿主延迟队列 + 三处冷启动防御）都会进来，
+# 首轮之后是 11 次全量 scan_roots 的纯浪费（实测每轮 ~460ms）。
+# 锁内置位、锁外执行——scan_roots 自带 _scan_lock，持本锁调用会与
+# ensure_*_watcher 的 _watchers_lock 形成嵌套（watcher 内也调 scan_roots）。
+# 戳记 = 本次实际使用的 11 个 loader 的 id 元组，而非裸布尔：registry 单例被
+# 替换时会重建 loader（见 _persistent_loader），id 变化即重扫；裸布尔会让换
+# registry 后的调用永远返回 {}，测试里 monkeypatch get_instance 直接拿空表。
+_warmup_stamp: Optional[tuple] = None
+_warmup_once_lock = threading.Lock()
 _adapters_watcher: Optional[_RuntimeWatcher] = None
 _loop_watcher: Optional[_RuntimeWatcher] = None
 _hook_watcher: Optional[_RuntimeWatcher] = None
@@ -659,6 +668,91 @@ def _make_budget_resolver_loader() -> RuntimeComponentLoader:
     from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
 
     return RuntimeComponentLoader("budget_resolvers", ContextPolicyRegistry.get_instance())
+
+
+# 组件 → (寄存器模块:类, loader 全局名, 造 loader 函数名)。用于持久 loader 的 registry
+# 身份校验：loader 构造时把 registry 实例固定绑定（self._registry），一旦单例被替换
+# （测试 monkeypatch get_instance / 极端场景重建单例），旧 loader 会把扫描结果写进
+# 废弃实例，新单例永远为空 —— 首版 Commit 1 就踩了这个（test_worker_cold_start 4 例
+# 全挂）。此处按 comp_dir 反查当前单例 identity，不一致即丢弃重建。
+# maker 名必须显式写出：comp_dir 与函数名并不同名
+# （model_adapters → _make_adapters_loader，gateways → _make_gateway_loader）。
+_LOADER_SPECS: Dict[str, Tuple[str, str, str]] = {
+    "model_adapters": (
+        "app.plugins.registries.model_adapter_registry:ModelAdapterRegistry",
+        "_adapters_loader",
+        "_make_adapters_loader",
+    ),
+    "loop_policies": (
+        "app.plugins.registries.loop_policy_registry:LoopPolicyRegistry",
+        "_loop_loader",
+        "_make_loop_loader",
+    ),
+    "hook_policies": (
+        "app.plugins.registries.hook_policy_registry:HookPolicyRegistry",
+        "_hook_loader",
+        "_make_hook_loader",
+    ),
+    "storages": (
+        "app.plugins.registries.storage_registry:StorageRegistry",
+        "_storage_loader",
+        "_make_storage_loader",
+    ),
+    "serializers": (
+        "app.plugins.registries.serializer_registry:SerializerRegistry",
+        "_serializer_loader",
+        "_make_serializer_loader",
+    ),
+    "transports": (
+        "app.plugins.registries.transport_registry:TransportRegistry",
+        "_transport_loader",
+        "_make_transport_loader",
+    ),
+    "stream_sinks": (
+        "app.plugins.registries.stream_sink_registry:StreamSinkRegistry",
+        "_stream_sink_loader",
+        "_make_stream_sink_loader",
+    ),
+    "gateways": (
+        "app.plugins.registries.gateway_platform_registry:GatewayPlatformRegistry",
+        "_gateway_loader",
+        "_make_gateway_loader",
+    ),
+    "engines": (
+        "app.plugins.registries.engine_registry:EngineRegistry",
+        "_engine_loader",
+        "_make_engine_loader",
+    ),
+    "context_tiers": (
+        "app.plugins.registries.context_policy_registry:ContextPolicyRegistry",
+        "_context_tier_loader",
+        "_make_context_tier_loader",
+    ),
+    "budget_resolvers": (
+        "app.plugins.registries.context_policy_registry:ContextPolicyRegistry",
+        "_budget_resolver_loader",
+        "_make_budget_resolver_loader",
+    ),
+}
+
+
+def _persistent_loader(comp_dir: str) -> "RuntimeComponentLoader":
+    """取（或惰性造）某组件的模块级持久 loader，registry 单例被替换时自动重建。
+
+    与 ``_make_X_loader() or 缓存`` 的差别仅在「registry identity 变了就丢弃旧 loader」：
+    旧 loader 的 _occupied/_sources 记录属于废弃 registry，继续复用会让新单例扫出空表。
+    """
+    import importlib
+
+    module_path, attr, maker_name = _LOADER_SPECS[comp_dir]
+    mod_name, _, cls_name = module_path.partition(":")
+    current = getattr(importlib.import_module(mod_name), cls_name).get_instance()
+    existing = globals().get(attr)
+    if existing is not None and existing._registry is current:
+        return existing
+    loader = globals()[maker_name]()
+    globals()[attr] = loader
+    return loader
 
 
 def ensure_model_adapter_watcher() -> Optional[_RuntimeWatcher]:
@@ -798,31 +892,20 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     _sources / _source_kind 状态，同一 registry 被两套 loader 交替 scan，热重载时
     互相看不见对方占用的 item id（跨根覆盖判定失真），且多造 11 个 loader 对象。
     """
-    global _adapters_loader, _loop_loader, _hook_loader, _storage_loader
-    global _serializer_loader, _transport_loader, _stream_sink_loader, _gateway_loader
-    global _engine_loader, _context_tier_loader, _budget_resolver_loader
+    global _warmup_stamp
 
+    # 先取 11 个持久 loader（registry 单例被替换时会重建，见 _persistent_loader），
+    # 再以它们的 id 元组做幂等判定：戳记一致 → 本轮无新 loader → 纯重复轮次，跳过。
+    loaders = {comp: _persistent_loader(comp) for comp in _LOADER_SPECS}
+    stamp = tuple(id(loaders[comp]) for comp in _LOADER_SPECS)
+    with _warmup_once_lock:
+        if _warmup_stamp == stamp:
+            return {}
+        _warmup_stamp = stamp
+
+    # 锁外执行：scan_roots 持自身 _scan_lock，本锁内调用会与 ensure_*_watcher 的
+    # _watchers_lock 嵌套（watcher 内亦调 scan_roots）。
     result: Dict[str, Set[str]] = {}
-    _adapters_loader = _adapters_loader or _make_adapters_loader()
-    result["model_adapters"] = _adapters_loader.scan_roots()
-    _loop_loader = _loop_loader or _make_loop_loader()
-    result["loop_policies"] = _loop_loader.scan_roots()
-    _hook_loader = _hook_loader or _make_hook_loader()
-    result["hook_policies"] = _hook_loader.scan_roots()
-    _storage_loader = _storage_loader or _make_storage_loader()
-    result["storages"] = _storage_loader.scan_roots()
-    _serializer_loader = _serializer_loader or _make_serializer_loader()
-    result["serializers"] = _serializer_loader.scan_roots()
-    _transport_loader = _transport_loader or _make_transport_loader()
-    result["transports"] = _transport_loader.scan_roots()
-    _stream_sink_loader = _stream_sink_loader or _make_stream_sink_loader()
-    result["stream_sinks"] = _stream_sink_loader.scan_roots()
-    _gateway_loader = _gateway_loader or _make_gateway_loader()
-    result["gateways"] = _gateway_loader.scan_roots()
-    _engine_loader = _engine_loader or _make_engine_loader()
-    result["engines"] = _engine_loader.scan_roots()
-    _context_tier_loader = _context_tier_loader or _make_context_tier_loader()
-    result["context_tiers"] = _context_tier_loader.scan_roots()
-    _budget_resolver_loader = _budget_resolver_loader or _make_budget_resolver_loader()
-    result["budget_resolvers"] = _budget_resolver_loader.scan_roots()
+    for comp, loader in loaders.items():
+        result[comp] = loader.scan_roots()
     return result
