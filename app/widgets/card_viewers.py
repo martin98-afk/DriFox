@@ -6745,7 +6745,17 @@ class CodeWebViewer(QWebEngineView):
             # immediate=True）或流式结束（finish_streaming）兜底——两者必有，
             # 正确性不受影响。_needs_full_render 场景（思考闭合首拍等）不降载，
             # 保持全量对齐基线。
-            if self._streaming and not self._needs_full_render and self._has_active_tool_dom():
+            # 🐛 降载前提：tail 可行内化。tail 含 <think>/<tool> 协议标签时
+            # _render_inline_tail 双保险返回空串（防内容泄漏），降载分支空转
+            # → DOM 停摆 + markdown 积压 → 内容哨兵（T37）3s 周期强制全量补渲
+            # = 周期性闪烁 + 流式停滞（2026-10-24 真机复测「还是闪烁」根因：
+            # append_tool_result 把闭合 <tool> 块写入 markdown 后，tail 永含
+            # 标签，降载永空转）。此时必须让位全量：save/restore 渲染工具卡
+            # + 基线推进，后续拍恢复差量/降载。
+            _tail_probe = self._markdown_text[self._stable_md_len :]
+            if self._streaming and not self._needs_full_render and self._has_active_tool_dom() and not any(
+                _t in _tail_probe for _t in ("<think>", "</think>", "<tool>", "</tool>")
+            ):
                 self._rdiag_hit("tail_inline")
                 self._render_tail_inline()
                 self._refresh_viewer_font_css()
