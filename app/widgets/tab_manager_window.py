@@ -6610,6 +6610,35 @@ class TabManagerWindow(FramelessWindow):
             PluginHostService.get_instance().stop()
         except Exception:
             pass
+        # ★ 关闭清理缺口（审计 #3 P1-1）：LSP 子进程 / gateway 事件循环 /
+        #   LLM API 服务 / Gitee 同步线程原先全凭 daemon 兜底，退出瞬间端口与
+        #   线程未有序关闭。四者均幂等，未启动时为 no-op。
+        try:
+            from app.core.lsp.lsp_manager import get_lsp_manager
+
+            get_lsp_manager().shutdown()
+        except Exception as e:
+            logger.debug(f"[TabManager] cleanup LspManager.shutdown 失败: {e}")
+        try:
+            from app.gateway.manager import get_platform_manager
+
+            mgr = get_platform_manager()
+            if mgr is not None:
+                mgr.shutdown()
+        except Exception as e:
+            logger.debug(f"[TabManager] cleanup PlatformManager.shutdown 失败: {e}")
+        try:
+            from app.gateway import stop_llm_api_service
+
+            stop_llm_api_service()
+        except Exception as e:
+            logger.debug(f"[TabManager] cleanup stop_llm_api_service 失败: {e}")
+        try:
+            from app.core.sync.config_sync import ConfigSyncService
+
+            ConfigSyncService.get_instance().disable()
+        except Exception as e:
+            logger.debug(f"[TabManager] cleanup ConfigSyncService.disable 失败: {e}")
         for w in list(self._windows):
             try:
                 w.close()
