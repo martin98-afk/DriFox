@@ -43,7 +43,7 @@ DriFox 使用 **watchfiles** 实现插件热更新：
 | 级 | 手段 | 它只证明 |
 |----|------|---------|
 | ① 语法级 | `python -m py_compile`（见 §3） | 能编译，仅此而已 |
-| ② 契约级 | `validate_plugins.py` + `check_sdk_imports.py`（见 §2/§3） | 结构与 import 在契约面内 |
+| ② 契约级 | `validate_plugins.py` + `check_sdk_imports.py` + `capability_report.py`（见 §2/§3） | 结构与 import 在契约面内，能力声明与实际使用一致 |
 | ③ 行为级 | 真实触发一次（上面 ③ 的对应方式） | 组件按真实触发路径工作 |
 
 每次编辑后从 ① 重跑；②③ 只在 ① 过了之后才有意义。验证器跑不了（无 clone、环境缺失）→ 如实报告「未验证」并列出补救步骤；把静态检查通过当完整验证是造假。
@@ -80,6 +80,10 @@ cd /tmp/dfp
 # 第三步：在仓库中跑验证
 python tools/validate_plugins.py
 python tools/generate_marketplace.py
+
+# 能力差集审计（在 DriFox 主仓库根目录跑，读本机日志，与 clone 无关）：
+# 兼容期升级的插件加 --since 排除全量放行时期的历史使用污染
+python tools/capability_report.py --since <开发起始日>
 
 # 第四步：确认全部 OK 后，清掉暂存
 rm -rf /tmp/dfp
