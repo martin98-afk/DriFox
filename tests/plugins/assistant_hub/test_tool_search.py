@@ -17,8 +17,10 @@ spec.loader.exec_module(m)
 class _FakeMcp:
     def __init__(self, schemas):
         self._schemas = schemas
+        self.calls = []
 
-    def get_tool_schemas(self):
+    def get_tool_schemas(self, include_ephemeral=False):
+        self.calls.append(include_ephemeral)
         return self._schemas
 
 
@@ -102,6 +104,9 @@ def test_mcp_tools_searchable(monkeypatch):
     mcp = _FakeMcp([_schema("mcp__time__current_time", "获取当前时间", {"type": "object"})])
     out = m._search_impl(tool_ctx={"services": {"mcp": mcp}}, queries=["时间", "time"])
     assert "## mcp__time__current_time" in out.content
+    # 搜索面必须请求含临时开启的 schema：否则上下文压缩后模型
+    # 找不回临时开启服务器的工具定义，等于白开
+    assert mcp.calls and mcp.calls[0] is True
 
 
 def test_self_excluded(monkeypatch):

@@ -1493,10 +1493,20 @@ class MCPClientManager:
 
     # ── 工具 Schema ──────────────────────────────────
 
-    def get_tool_schemas(self) -> List[Dict]:
-        """获取所有 MCP 工具的 OpenAI function calling schema"""
+    def get_tool_schemas(self, include_ephemeral: bool = False) -> List[Dict]:
+        """获取所有 MCP 工具的 OpenAI function calling schema
+
+        include_ephemeral=False（默认）：只含常驻开启的服务器——常驻注入与
+        token 估算必须用它，临时开启是纯内存态，进常驻列表就丢掉「零 token
+        占用」的结构性保证。
+        include_ephemeral=True：额外含临时开启（_ephemeral）的服务器。仅供
+        tool_search 搜索面使用：临时开启后若上下文被压缩，模型必须能重新
+        找回工具定义，否则那台服务器等于白开。
+        """
         schemas = []
-        for server_schemas in self.get_tool_schemas_by_server().values():
+        for server_schemas in self.get_tool_schemas_by_server(
+            include_ephemeral=include_ephemeral
+        ).values():
             schemas.extend(server_schemas)
         return schemas
 
@@ -1520,17 +1530,21 @@ class MCPClientManager:
             )
         return schemas
 
-    def get_tool_schemas_by_server(self) -> Dict[str, List[Dict]]:
+    def get_tool_schemas_by_server(self, include_ephemeral: bool = False) -> Dict[str, List[Dict]]:
         """按服务器分组获取 MCP 工具的 OpenAI function calling schema（设置卡逐行 token 估算用）
 
-        只含 config.enabled 为真的服务器：临时开启（_ephemeral）的 config 仍是
-        关闭态，天然不进常驻工具列表，这是「省 token」的结构性保证。
+        默认只含 config.enabled 为真的服务器：临时开启（_ephemeral）的 config
+        仍是关闭态，天然不进常驻工具列表，这是「省 token」的结构性保证。
+        include_ephemeral=True 时把临时开启的也纳入（tool_search 搜索面用）。
         """
         by_server: Dict[str, List[Dict]] = {}
         with self._lock:
             items = list(self._connections.items())
+            ephemeral = set(self._ephemeral) if include_ephemeral else set()
         for server_name, conn in items:
-            if not conn.session or not conn.enabled:
+            if not conn.session:
+                continue
+            if not conn.enabled and server_name not in ephemeral:
                 continue
             by_server.setdefault(server_name, []).extend(self._schemas_of(conn))
         return by_server
