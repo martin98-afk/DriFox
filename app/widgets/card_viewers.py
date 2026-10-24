@@ -6732,6 +6732,28 @@ class CodeWebViewer(QWebEngineView):
                     self._render_tail_inline()
                 return
 
+            # 🐛 修复（简洁模式工具活动期正文闪烁+流式中断）：差量快路径被
+            # _has_active_tool_dom() 让位后，原实现每拍都提交全量渲染，每次落地
+            # 都是 save/restore + updateContent 整页替换 #content-placeholder——
+            # 长消息 HTML 大（数千字 md → 数百 KB），WebEngine 同步解析重排期间
+            # 渲染树为空 → 正文肉眼可见"消失再出现"，同时打字机缓冲被反复重置，
+            # 流式逐字揭示中断（成段蹦字/停滞）。
+            # 工具运行期（pending 非空，markdown 不含该工具结果块）正文更新降载：
+            # _render_tail_inline 保证内容跟上（差量基线 _stable_md_len 不动，
+            # 闭合段出现时 updateContentAppend 删行内节点按完整格式重建，替换
+            # 语义闭环无重复），全量渲染延迟到工具结果落地（append_tool_result
+            # immediate=True）或流式结束（finish_streaming）兜底——两者必有，
+            # 正确性不受影响。_needs_full_render 场景（思考闭合首拍等）不降载，
+            # 保持全量对齐基线。
+            if self._streaming and not self._needs_full_render and self._has_active_tool_dom():
+                self._rdiag_hit("tail_inline")
+                self._render_tail_inline()
+                self._refresh_viewer_font_css()
+                # 行内渲染过的内容视为已可见：防止安全定时器空转重复触发
+                self._last_rendered_markdown = self._markdown_text
+                self._rdiag_hit("tool_active_inline_only")
+                return
+
             # 🐛 修复（大段正文流式期间纯文本滞留）：差量快路径被 _needs_full_render
             # （初始 True，首次全量渲染应用成功才置 False）或 _has_active_tool_dom()
             # 让位时，流式正文只能依赖全量线程池渲染。大段正文渲染耗时长，期间新
