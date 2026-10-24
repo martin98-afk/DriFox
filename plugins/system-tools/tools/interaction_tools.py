@@ -692,7 +692,7 @@ def register(registry):
     )
     registry.register(
         "mcp_manage", _MCP_MANAGE_SCHEMA, impl=_mcp_manage_impl,
-        danger="safe", icon="工具", cn_name="MCP管理",
+        danger="safe", icon="工具", cn_name="管理MCP",
         group=GROUP_INTERACTION, description="管理MCP服务器：列出/临时开启/关闭",
         aliases=["mcp_list_servers", "McpListServers", "McpManage", "mcp_list"],
         preview=_preview_mcp_manage,
