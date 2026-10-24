@@ -688,6 +688,10 @@ class PluginToolWatcher:
                 if tool_names:
                     unload_plugin_tools(plugin_name, tool_names, self._registry, root_tracker=self._root_tracker)
                 self._loaded.pop(plugin_name, None)
+                # 摘除旧模块引用（#19 问题 4）：reload 路径同样会换模块，不 purge
+                # 则旧模块对象滞留 sys.modules。必须在下方重注册**之前**执行，
+                # 否则会把刚加载的新模块一并清掉。
+                _purge_tool_modules(plugin_name)
                 # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
                 self._restore_lower_roots(removed_rank)
                 # 重注册该插件当前模块（enabled 过滤与 load_plugin_tools 一致）

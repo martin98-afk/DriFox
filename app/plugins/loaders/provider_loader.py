@@ -548,6 +548,9 @@ class ProviderWatcher:
                 for n in names:
                     self._root_tracker.pop(n, None)
                 logger.info(f"[ProviderWatcher] 重载前注销插件服务商: {sorted(names)} ({plugin_name})")
+            # 摘除旧模块引用（#19 问题 4）：必须在下方重注册**之前**执行，
+            # 否则会把刚加载的新模块一并清掉。
+            _purge_provider_modules(plugin_name)
             # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
             self._restore_lower_roots(removed_rank)
             # 重注册该插件当前模块（enabled 过滤与 load_providers 一致）
