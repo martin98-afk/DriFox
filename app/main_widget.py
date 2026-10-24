@@ -3723,6 +3723,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception as e:
                     logger.debug(f"[MainWidget] watcher 基线期收口失败（不影响启动）: {e}")
 
+                # 自动设置卡回放：PluginManager 扫描期只登记 schema（不能 import
+                # UI 链，否则把 Qt/qfluentwidgets 级联拖进 initialize 同步段），
+                # 此处 UI 栈已就绪，统一注册（幂等；失败项留 pending 待下次）
+                try:
+                    from app.plugins.managers.plugin_manager import PluginManager
+
+                    PluginManager.get_instance().replay_config_cards()
+                except Exception as e:
+                    logger.warning(f"[MainWidget] 插件设置卡回放失败: {e}")
+
                 # [修复 2026-09-14] UI 插件装载完成后按最终注册表强制刷新欢迎卡。
                 # 背景：启动去抖合并渲染（_schedule_initial_welcome 600ms 尾触）
                 # 可能发生在部分 welcome_tab 插件注册之前，而后续注册路径的

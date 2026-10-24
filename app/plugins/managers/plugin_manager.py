@@ -368,6 +368,13 @@ class PluginManager:
         self._disabled_components_cache: Optional[frozenset] = None
         # 插件目录签名缓存（rescan 短路用，None = 尚未扫描过）
         self._last_scan_signature: Optional[tuple] = None
+        # [PERF 2026-10-24] 待回放的自动设置卡：扫描期只登记 schema，不 import UI 链。
+        # 原实现 _register_config_schema 在扫描循环里直接 import
+        # app.plugins.registries.ui_plugin_registry + app.widgets.cards.settings.
+        # plugin_config_card（Qt/qfluentwidgets 级联），把 UI 依赖拖进
+        # PluginManager.initialize 的同步段（实测 ~166ms）。改为登记 + 由
+        # main_widget._after_plugins_loaded 调 replay_config_cards() 统一回放。
+        self._pending_config_cards: Dict[str, Any] = {}
 
     @classmethod
     def get_instance(cls) -> "PluginManager":
@@ -1508,20 +1515,56 @@ class PluginManager:
             logger.warning(f"[PluginManager] config_schema 注册失败({plugin_name}): {e}")
             return
 
-        # 自动设置卡（可选，挂 Phase D 扩展点）
+        # 自动设置卡：扫描期只登记，不 import UI 链（见 __init__ 的 _pending_config_cards
+        # 注释）。真正的 UIPluginRegistry.register_settings_card 由 replay_config_cards()
+        # 在 main_widget._after_plugins_loaded 统一回放（UI 栈已就绪、插件卡分区构建前）。
+        # getattr 兜底：测试常用 PluginManager.__new__ 绕过 __init__（本方法不依赖实例状态）
+        pending = getattr(self, "_pending_config_cards", None)
+        if pending is None:
+            pending = self._pending_config_cards = {}
+        pending[plugin_name] = config_schema
+
+    def replay_config_cards(self) -> int:
+        """回放待注册的自动设置卡（UI 栈就绪后调用，幂等），返回成功注册数。
+
+        与 ``_register_config_schema`` 的分工：扫描期只登记 schema（零 UI import），
+        本方法才真正 import 卡类并注册。两步分离把 Qt/qfluentwidgets 级联从
+        ``PluginManager.initialize`` 同步段摘出去（实测 ~166ms）。
+
+        幂等：重复调用对同名 card_id 是覆盖注册（UIPluginRegistry 内部语义），
+        但成功后即从 pending 摘除，正常情况下二次调用直接返回 0。
+        """
+        pending = getattr(self, "_pending_config_cards", None)
+        if not pending:
+            return 0
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
             from app.widgets.cards.settings.plugin_config_card import make_card_class
+        except ImportError as e:
+            # UI 栈不可用（headless/纯后端进程）：保留 pending，等真正需要时再回放
+            logger.debug(f"[PluginManager] 设置卡回放跳过（UI 栈不可用）: {e}")
+            return 0
 
-            UIPluginRegistry.get_instance().register_settings_card(
-                plugin_name,
-                f"{plugin_name}-config",
-                config_schema.title,
-                make_card_class(plugin_name),
-                metadata={"auto_config_card": True},
-            )
-        except Exception as e:
-            logger.warning(f"[PluginManager] config_schema 设置卡注册失败({plugin_name}): {e}")
+        registry = UIPluginRegistry.get_instance()
+        count = 0
+        for plugin_name, config_schema in list(pending.items()):
+            try:
+                registry.register_settings_card(
+                    plugin_name,
+                    f"{plugin_name}-config",
+                    config_schema.title,
+                    make_card_class(plugin_name),
+                    metadata={"auto_config_card": True},
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"[PluginManager] config_schema 设置卡注册失败({plugin_name}): {e}")
+                continue
+            # 仅在注册成功后摘除：失败保留 pending，下次 replay 重试
+            pending.pop(plugin_name, None)
+        if count:
+            logger.debug(f"[PluginManager] 设置卡回放 {count} 张")
+        return count
 
     def _unregister_config_schema(self, plugin_name: str) -> None:
         """E1：插件移除/Schema 删除时清理 config_schema 注册 + 自动设置卡。
@@ -1530,6 +1573,11 @@ class PluginManager:
         已改为保留 auto_config_card——ui 组件热重载（unload→load）不能误杀
         rescan 刚注册的卡，清理收敛到本函数单一入口。
         """
+        # 待回放队列必须先摘：否则「注册 → 卸载 → replay」会把已删插件的卡复活
+        # （僵尸卡，扫描期失败后 pending 残留同样会这样）
+        pending = getattr(self, "_pending_config_cards", None)
+        if pending is not None:
+            pending.pop(plugin_name, None)
         try:
             from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 

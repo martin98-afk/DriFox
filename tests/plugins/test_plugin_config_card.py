@@ -167,6 +167,10 @@ def test_plugin_manager_registers_config_schema(tmp_path, monkeypatch):
     try:
         assert reg.get("plug-cfg") is not None
         ui = UIPluginRegistry.get_instance()
+        # 扫描期只登记 pending（零 UI import），replay 后才真正建卡
+        assert "plug-cfg-config" not in [c.card_id for c in ui.get_settings_cards()]
+        assert "plug-cfg" in pm._pending_config_cards
+        pm.replay_config_cards()
         cards = [c.card_id for c in ui.get_settings_cards()]
         assert "plug-cfg-config" in cards
     finally:
