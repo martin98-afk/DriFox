@@ -77,7 +77,7 @@ class FunctionCommandHandlers:
 # 解析结果缓存（避免每次启动重解析 60+ .md 文件）
 # ============================================================
 
-_CACHE_VERSION = 5
+_CACHE_VERSION = 6
 _cache_disabled = False  # 调试用，设为 True 跳过缓存
 
 
@@ -240,6 +240,7 @@ def _register_from_cached_commands(cmd_mgr: CommandManager, cached_commands: lis
             parameters=_deserialize_params(cmd.get("parameters", [])),
             shortcut=cmd.get("shortcut", ""),
             prompt_sections=cmd.get("prompt_sections", {}),
+            source=cmd.get("source", ""),
         )
         count += 1
     return count
@@ -263,6 +264,7 @@ def _register_from_cached_agents(cmd_mgr: CommandManager, cached_agents: list) -
             description=ag.get("description", ""),
             prompt_text=ag.get("prompt_text", ""),
             parameters=agent_params,
+            source=ag.get("source", ""),
         )
         count += 1
     return count
@@ -554,6 +556,7 @@ def register_all_commands():
                 "parameters": _serialize_params(cmd.get("parameters", [])),
                 "shortcut": cmd.get("shortcut", ""),
                 "prompt_sections": cmd.get("prompt_sections", {}),
+                "source": cmd.get("source", ""),
             }
         )
     serialized_agents = []
@@ -636,6 +639,7 @@ def reload_all_commands():
                 "parameters": _serialize_params(cmd.get("parameters", [])),
                 "shortcut": cmd.get("shortcut", ""),
                 "prompt_sections": cmd.get("prompt_sections", {}),
+                "source": cmd.get("source", ""),
             }
         )
     serialized_agents = []
@@ -742,10 +746,78 @@ def reload_agent_commands() -> int:
     return len(agents)
 
 
+def reload_plugin_commands(plugin_name: str) -> int:
+    """只重载指定插件的命令（不清空其他插件的命令）。
+
+    替代热重载链里的 ``reload_all_commands``：原先改任一插件都会清空全表再
+    全量重注册 + 全窗口重建 QShortcut（~2500ms 级主线程阻塞），本方法按
+    source 精准摘除该插件的条目后只重扫它的命令文件。
+
+    插件目录已删除时天然只清不注册（``get_command_files_for_plugin`` 返回空），
+    无需调用方特判删除路径。
+
+    Returns:
+        该插件重新注册的命令数。
+    """
+    cmd_mgr = CommandManager.get_instance()
+    source = f"plugin:{plugin_name}"
+
+    # 1. 只摘该 source 的条目（同名其他来源保留）
+    removed = cmd_mgr.unregister_source(source)
+    if removed:
+        logger.info(f"[BuiltinCommands] 精准卸载插件命令 {sorted(removed)} ({plugin_name})")
+
+    # 2. 只扫该插件的命令文件重注册
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    pm = PluginManager.get_instance()
+    cmd_files = pm.get_command_files_for_plugin(plugin_name) if pm.is_initialized() else []
+    count = 0
+    for md_file in cmd_files:
+        cmd = _load_command_file(md_file)
+        if cmd:
+            cmd_mgr.register(
+                name=cmd["name"],
+                command_type=_parse_command_type(cmd["type"]),
+                description=cmd["description"],
+                argument_hint=cmd["argument_hint"],
+                prompt_text=cmd["prompt_text"],
+                parameters=cmd.get("parameters", []),
+                shortcut=cmd.get("shortcut", ""),
+                prompt_sections=cmd.get("prompt_sections", {}),
+                source=source,
+            )
+            count += 1
+
+    # 3. 局部重载也需同步快捷键（该插件命令的 shortcut 增删）
+    _rebind_command_shortcuts()
+
+    logger.info(f"[BuiltinCommands] 精准重载插件命令: {plugin_name} → {count} 条")
+    return count
+
+
 # ============================================================
 # PluginManager 集成
 # ============================================================
 
+
+def _plugin_name_of_md(md_path) -> str:
+    """从命令/智能体 .md 路径推导插件 source。
+
+    路径结构：<root>/<plugin>/commands/<name>.md 或 <root>/<plugin>/agents/<name>.md
+    → 返回 ``plugin:<plugin>``；其余（主程序内置等）返回 ""。
+
+    用于热重载的精准清理：只有 source 能告诉 CommandManager「这条命令归谁」。
+    """
+    try:
+        parts = Path(md_path).parts
+    except Exception:
+        return ""
+    if len(parts) < 3:
+        return ""
+    if parts[-2] in ("commands", "agents"):
+        return f"plugin:{parts[-3]}"
+    return ""
 
 def _get_command_sources() -> list:
     """获取命令文件源列表"""
@@ -789,6 +861,7 @@ def _load_commands_from_plugins(cmd_mgr: CommandManager) -> list:
                 parameters=cmd.get("parameters", []),
                 shortcut=cmd.get("shortcut", ""),
                 prompt_sections=cmd.get("prompt_sections", {}),
+                source=_plugin_name_of_md(md_file),
             )
             commands.append(cmd)
     return commands
@@ -932,6 +1005,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
                 description=description,
                 prompt_text=enhanced_body,
                 parameters=agent_params,
+                source="",
             )
             logger.debug(
                 f"[BuiltinCommands] Registered agent command: /{md_file.stem}"

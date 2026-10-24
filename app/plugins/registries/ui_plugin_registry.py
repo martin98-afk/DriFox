@@ -2558,6 +2558,7 @@ class UIPluginRegistry:
                 description=description,
                 argument_hint="",
                 shortcut=saved_shortcut,
+                source=f"plugin:{spec[2]}" if spec[2] else "",
             )
         self._ui_applied_names.add(name)
         self._ui_command_names.add(name)

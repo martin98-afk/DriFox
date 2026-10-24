@@ -1679,6 +1679,35 @@ class PluginManager:
 
         return result
 
+    def get_command_files_for_plugin(self, plugin_name: str) -> List[Path]:
+        """只获取指定插件的命令文件（精准重载用，不走全量遍历）。
+
+        与 get_command_files 的区别：不遍历全部已启用插件、不做跨插件同名去重
+        —— 同名去重需要全局视野，而精准重载的场景是「只重新注册这一个插件的
+        命令」，跨插件优先级由调用方（CommandManager.unregister_source + 重注册）
+        按注册顺序自然维持。
+
+        ``plugin_name == "user-custom"`` 时返回用户自定义命令目录（与
+        get_command_files 的特殊处理对齐，该目录无 manifest 也在扫）。
+        """
+        result: List[Path] = []
+
+        if plugin_name == "user-custom":
+            from app.utils.utils import get_app_data_dir
+
+            cmd_dir = get_app_data_dir() / "plugins" / "user-custom" / "commands"
+            if cmd_dir.exists():
+                result.extend(sorted(cmd_dir.glob("*.md")))
+            return result
+
+        plugin = self._plugins.get(plugin_name)
+        if plugin is None or not plugin.has_component("commands"):
+            return result
+        cmd_dir = plugin.path / "commands"
+        if cmd_dir.exists():
+            result.extend(sorted(cmd_dir.glob("*.md")))
+        return result
+
     def get_agent_files(self) -> List[Path]:
         """获取所有插件的智能体文件"""
         return self._get_md_files("agents")

@@ -3605,6 +3605,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 command_type=CommandType.FUNCTION,
                 description=description,
                 argument_hint="",
+                source="",
             )
 
     def _open_workbench_history(self):
