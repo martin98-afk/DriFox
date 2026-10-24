@@ -171,6 +171,15 @@ def _load_manifest_file(manifest_path: Path):
     manifest, schema_warnings = validate_manifest(
         manifest, source=manifest_path.parent.parent.name, fallback_name=manifest_path.parent.parent.name
     )
+    # 契约2b：capabilities 声明语义校验。未知 ID 在 expand 时被静默保留、
+    # 运行期表现为"拿不到能力却看不到原因"，这里在加载期挑出来进
+    # manifest_warnings（两条扫描路径都会 warning + 存 PluginInfo）。
+    from app.plugins.capabilities.catalog import unknown_declared
+
+    for bad in unknown_declared(manifest.get("capabilities")):
+        schema_warnings.append(
+            f"[CapabilityManifest] 未知能力 ID {bad!r}（catalog 无此项，运行期不可用，检查拼写或改用组通配）"
+        )
     return manifest, schema_warnings
 
 
