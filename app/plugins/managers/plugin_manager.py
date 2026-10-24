@@ -593,26 +593,19 @@ class PluginManager:
             except OSError:
                 root_mtime = 0
             sig.append((str(root_path), True, root_mtime, tuple(entries)))
-        return tuple(sig)
+        return tuple(sig) + self._manifest_meta()
 
-    # ============================================================
-    # 插件发现持久化缓存（[T26/H2]：命中跳过全量插件扫描）
-    # ============================================================
+    def _manifest_meta(self) -> tuple:
+        """每个 manifest 的 (path, size, mtime_ns) 元组（两路 manifest 路径）。
 
-    def _discovery_cache_path(self) -> Path:
-        """发现缓存落盘路径：<data_dir>/cache/plugin_discovery.json"""
-        from app.utils.utils import get_app_data_dir
+        目录签名只覆盖插件目录级变化（新增/删除/目录 mtime）；manifest 文件**内容**
+        编辑（version/api_version/config_schema 等）不改变父目录 mtime（NTFS 父目录
+        mtime 陷阱：只有直接子项的增删才会刷新父目录 mtime），故 rescan 签名必须
+        合并本元数据才能感知 manifest 内容变更。
 
-        return get_app_data_dir() / "cache" / "plugin_discovery.json"
-
-    def _discovery_signature(self) -> tuple:
-        """目录签名（_plugins_dir_signature）+ 每个 manifest 的 (size, mtime_ns)。
-
-        目录签名只覆盖插件目录级变化（新增/删除/目录 mtime）；manifest 文件内容
-        编辑（version/api_version 等）不改变父目录 mtime（NTFS 父目录 mtime 陷阱），
-        追加 manifest 元数据保证内容级失效。
+        历史缺陷：_plugins_dir_signature 曾不含本项，导致改插件 manifest 后 rescan
+        返回空 diff、agents/commands 等组件变更被吞（#17 修复）。
         """
-        base = self._plugins_dir_signature()
         manifest_meta: list = []
         roots = [self._SYSTEM_PLUGIN_DIR]
         if self._app_data_dir:
@@ -636,7 +629,24 @@ class PluginManager:
                     except OSError:
                         continue
                     manifest_meta.append((str(mf), st.st_size, st.st_mtime_ns))
-        return base + (tuple(manifest_meta),)
+        return (tuple(manifest_meta),)
+
+    # ============================================================
+    # 插件发现持久化缓存（[T26/H2]：命中跳过全量插件扫描）
+    # ============================================================
+
+    def _discovery_cache_path(self) -> Path:
+        """发现缓存落盘路径：<data_dir>/cache/plugin_discovery.json"""
+        from app.utils.utils import get_app_data_dir
+
+        return get_app_data_dir() / "cache" / "plugin_discovery.json"
+
+    def _discovery_signature(self) -> tuple:
+        """目录签名（_plugins_dir_signature）+ manifest 元数据。
+
+        _plugins_dir_signature 已合并 _manifest_meta()，此处直接相加即可。
+        """
+        return self._plugins_dir_signature() + self._manifest_meta()
 
     def _discovery_cache_key(self) -> list:
         """缓存键四元组：schema 版本 + 宿主版本 + 插件 API 契约版本 + 目录/清单签名。"""

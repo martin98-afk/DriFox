@@ -100,6 +100,12 @@ def _spy_info_log(monkeypatch):
     return msgs
 
 
+def _spy_debug_log(monkeypatch):
+    msgs = []
+    monkeypatch.setattr(pm_mod.logger, "debug", lambda m, *a, **k: msgs.append(str(m)))
+    return msgs
+
+
 def test_cache_hit_skips_full_scan_and_replays_side_effects(tmp_path, monkeypatch):
     """场景 1：二次 initialize 零全扫 + 副作用重放 + from cache 日志。"""
     env = _Env(tmp_path)
@@ -193,3 +199,44 @@ def test_hot_scan_invalidates_and_rescan_shortcut_preserved(tmp_path, monkeypatc
     result = pm.rescan()
     assert result == {"added": [], "removed": [], "changed": []}, "签名未变 rescan 应短路"
     assert not env.cache_file.exists(), "短路路径不回写缓存"
+
+
+def test_plugins_dir_signature_detects_manifest_content_change(tmp_path, monkeypatch):
+    """场景 5（#17）：_plugins_dir_signature 合并 manifest 元数据。
+
+    只改 manifest 内容（version）而不触碰目录结构：NTFS 父目录 mtime 陷阱下
+    根目录 mtime 不变，纯目录签名会判「无变化」→ rescan 短路返回空 diff →
+    agents/commands 等组件变更被吞。合并 _manifest_meta 后签名必须感知，
+    rescan 不再短路（会走全量重扫取到新 manifest）。
+    """
+    env = _Env(tmp_path)
+    plugin_dir = _make_plugin(env.system, "sys-a")
+
+    pm = _make_pm(env, monkeypatch)
+    with patch.object(pm, "_restore_enabled_from_settings", return_value=None):
+        pm.initialize(env.data)
+
+    sig_before = pm._plugins_dir_signature()
+    assert pm.rescan() == {"added": [], "removed": [], "changed": []}, "无变更时仍应短路"
+
+    # 改 manifest 内容 + utime 改 mtime；目录结构与根 mtime 均不变
+    mf = plugin_dir / ".drifox-plugin" / "plugin.json"
+    mf.write_text(
+        json.dumps({"name": "sys-a", "version": "9.9.9"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.utime(mf, ns=(10**18, 10**18 + 5))
+
+    # 1) 签名必须感知 manifest 内容变更（不再被判为「无变化」）
+    sig_after = pm._plugins_dir_signature()
+    assert sig_before != sig_after, "_plugins_dir_signature 必须含 manifest 元数据"
+
+    # 2) rescan 不得短路：签名变了必须走全量重扫（旧实现在此处短路返回空 diff，
+    #    上层拿不到任何信号 → agents/commands 变更被吞）
+    logs = _spy_info_log(monkeypatch)
+    shortcut_logs = _spy_debug_log(monkeypatch)
+    pm.rescan()
+    assert not any("签名未变" in m for m in shortcut_logs), (
+        "manifest 内容变更后 rescan 不得短路（旧实现正是走此分支吞掉变更）"
+    )
+    assert any("Rescan done" in m for m in logs), "rescan 应完成全量重扫"
