@@ -132,10 +132,20 @@ _MODELS = [
 ]
 
 
-def _auto_login():
-    """自动登录钩子（编辑卡后台线程调用）：弹浏览器授权，回填长效 refresh_token。"""
+def _auto_login(cancel_event=None):
+    """自动登录钩子（编辑卡后台线程调用）：弹浏览器授权，回填长效 refresh_token。
+
+    Args:
+        cancel_event: 可选 threading.Event。用户点「中止」时置位，登录立即退出
+            而非干等到超时（旧签名无参调用仍兼容）。
+    """
     ba = _load_auth_module()
-    result = ba.login(timeout_sec=280)
+    try:
+        result = ba.login(timeout_sec=280, cancel_event=cancel_event)
+    except Exception as e:
+        if type(e).__name__ == "LoginCancelled":
+            raise RuntimeError("登录已中止") from e
+        raise
     access_token = result["access_token"]
     refresh_token = result.get("refresh_token", "")
     account = result.get("account") or {}

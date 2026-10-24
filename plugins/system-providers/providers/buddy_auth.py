@@ -39,6 +39,23 @@ CODE_ACCOUNT_NOT_READY = 12151
 CODE_ALREADY_CLAIMED = 10001
 CODE_ALREADY_CLAIMED_ALT = 1001
 
+
+class LoginCancelled(Exception):
+    """用户在 DriFox 界面主动中止了登录（区别于超时与服务端报错）。"""
+
+
+def _sleep_or_cancel(seconds: float, cancel_event: Any) -> None:
+    """可中断睡眠：cancel_event 置位后立即抛 LoginCancelled。
+
+    用 wait() 而不是 sleep()：中止后能马上退出轮询循环，
+    否则一个 poll_interval 内点了中止也得等完这一轮。
+    """
+    if cancel_event is None:
+        time.sleep(seconds)
+        return
+    if cancel_event.wait(seconds):
+        raise LoginCancelled("登录已中止")
+
 AUTH_STATE_PATH = "/v2/plugin/auth/state"
 AUTH_TOKEN_PATH = "/v2/plugin/auth/token"
 LOGIN_ACCOUNT_PATH = "/v2/plugin/login/account"
@@ -136,11 +153,16 @@ def login(
     timeout_sec: float = LOGIN_TIMEOUT,
     poll_interval: float = LOGIN_POLL_INTERVAL,
     open_browser: bool = True,
+    cancel_event: Any = None,
 ) -> Dict[str, Any]:
     """轮询式登录：弹浏览器授权后本地轮询换取凭据（不起本地端口）。
 
+    Args:
+        cancel_event: 可选 threading.Event。置位后立即抛 LoginCancelled，
+            不必等到 timeout_sec（用户关掉授权页时 UI 能马上退出等待）。
+
     返回 {"access_token", "refresh_token", "expires_in", "account"}；
-    超时抛 TimeoutError，state 异常抛 RuntimeError。
+    超时抛 TimeoutError，state 异常抛 RuntimeError，中止抛 LoginCancelled。
     """
     state_payload = _request("POST", f"{AUTH_STATE_PATH}?platform={PLATFORM}", body={})
     state_data = _payload_data(state_payload)
@@ -155,9 +177,11 @@ def login(
     access_token = refresh_token = ""
     token: Dict[str, Any] = {}
     while time.monotonic() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise LoginCancelled("登录已中止")
         payload = _request("GET", f"{AUTH_TOKEN_PATH}?state={state}")
         if payload.get("code") == CODE_TOKEN_NOT_READY:
-            time.sleep(poll_interval)
+            _sleep_or_cancel(poll_interval, cancel_event)
             continue
         token = _payload_data(payload)
         # 真机实测（2026-09）：字段为驼峰 accessToken/refreshToken（非蛇形）；
@@ -166,7 +190,7 @@ def login(
         refresh_token = token.get("refreshToken") or token.get("refresh_token", "")
         if access_token:
             break
-        time.sleep(poll_interval)
+        _sleep_or_cancel(poll_interval, cancel_event)
     if not access_token:
         raise TimeoutError("登录超时：未在限时内取到 token")
 
@@ -174,11 +198,13 @@ def login(
     # 否则网关 401（失败只影响展示信息）
     account: Dict[str, Any] = {}
     while time.monotonic() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise LoginCancelled("登录已中止")
         payload = _request(
             "GET", f"{LOGIN_ACCOUNT_PATH}?state={state}", access_token=access_token
         )
         if payload.get("code") == CODE_ACCOUNT_NOT_READY:
-            time.sleep(poll_interval)
+            _sleep_or_cancel(poll_interval, cancel_event)
             continue
         account = _payload_data(payload)
         break

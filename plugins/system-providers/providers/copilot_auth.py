@@ -47,6 +47,19 @@ SLOW_DOWN_EXTRA = 5.0
 _SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
 
 
+class LoginCancelled(Exception):
+    """用户在 DriFox 界面主动中止了登录（区别于超时与服务端报错）。"""
+
+
+def _sleep_or_cancel(seconds: float, cancel_event: Any) -> None:
+    """可中断睡眠：cancel_event 置位后立即抛 LoginCancelled。"""
+    if cancel_event is None:
+        time.sleep(seconds)
+        return
+    if cancel_event.wait(seconds):
+        raise LoginCancelled("登录已中止")
+
+
 def _system_ssl_context():
     """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储，纯标准库环境也可运行）；
     truststore 不可用时回退 None（走默认验证）。"""
@@ -122,11 +135,18 @@ def _wrap_net_error(exc: Exception) -> RuntimeError:
     return RuntimeError(f"GitHub 连接失败（{exc.__class__.__name__}）：请检查网络/代理是否能访问 github.com")
 
 
-def poll_access_token(device_code: str, timeout_sec: float = LOGIN_TIMEOUT) -> str:
-    """轮询换取 GitHub access token（gho_）；用户取消/超时抛 TimeoutError。"""
+def poll_access_token(device_code: str, timeout_sec: float = LOGIN_TIMEOUT, cancel_event: Any = None) -> str:
+    """轮询换取 GitHub access token（gho_）；用户取消/超时抛 TimeoutError。
+
+    Args:
+        cancel_event: 可选 threading.Event。置位后立即抛 LoginCancelled，
+            不必等满 timeout_sec（关掉授权页后 UI 能马上退出等待）。
+    """
     deadline = time.time() + timeout_sec
     interval = LOGIN_POLL_INTERVAL
     while time.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise LoginCancelled("登录已中止")
         payload = _post_form(
             f"{GITHUB_ENDPOINT}{TOKEN_PATH}",
             {
@@ -137,11 +157,11 @@ def poll_access_token(device_code: str, timeout_sec: float = LOGIN_TIMEOUT) -> s
         )
         err = payload.get("error", "")
         if err == "authorization_pending":
-            time.sleep(interval)
+            _sleep_or_cancel(interval, cancel_event)
             continue
         if err == "slow_down":
             interval += SLOW_DOWN_EXTRA
-            time.sleep(interval)
+            _sleep_or_cancel(interval, cancel_event)
             continue
         if err:
             raise RuntimeError(f"GitHub 授权失败: {payload.get('error_description') or err}")
@@ -180,13 +200,15 @@ def fetch_copilot_token(github_token: str, timeout: float = DEFAULT_TIMEOUT) -> 
     return data
 
 
-def login(timeout_sec: float = LOGIN_TIMEOUT, open_browser: bool = True) -> Dict[str, Any]:
+def login(
+    timeout_sec: float = LOGIN_TIMEOUT, open_browser: bool = True, cancel_event: Any = None
+) -> Dict[str, Any]:
     """完整 Device Flow 登录：打开授权页 + 复制 user_code 到剪贴板 + 轮询。
 
     优先打开 verification_uri_complete（URL 内嵌 user_code，页面自动填好，
     用户只需点 Continue）；剪贴板作兑底（编码带 BOM，修复 clip.exe 无 BOM
     时静默失败的坑）。返回 {"github_token", "user_code", "verification_uri"}；
-    超时抛 TimeoutError。
+    超时抛 TimeoutError，用户中止抛 LoginCancelled。
     """
     flow = start_device_flow()
     user_code = flow.get("user_code", "")
@@ -198,7 +220,7 @@ def login(timeout_sec: float = LOGIN_TIMEOUT, open_browser: bool = True) -> Dict
     if open_browser:
         webbrowser.open(verification_uri_complete)
     _copy_to_clipboard(user_code)
-    github_token = poll_access_token(flow.get("device_code", ""), timeout_sec=timeout_sec)
+    github_token = poll_access_token(flow.get("device_code", ""), timeout_sec=timeout_sec, cancel_event=cancel_event)
     return {"github_token": github_token, "user_code": user_code, "verification_uri": verification_uri_complete}
 
 

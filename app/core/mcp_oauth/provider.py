@@ -245,9 +245,24 @@ class McpOAuthProviderFactory:
 
         if session.status == "done":
             logger.info(f"[MCP-OAuth] {key} 授权成功")
+        elif session.status == "cancelled":
+            logger.info(f"[MCP-OAuth] {key} 授权已中止")
         else:
             logger.warning(f"[MCP-OAuth] {key} 授权失败: {session.error}")
         return session
+
+    def cancel(self, plugin_name: str, server_name: str) -> bool:
+        """中止该 server 进行中的授权。返回是否真的中止了一个等待中的会话。
+
+        UI 线程可调：只置取消标记 + 唤醒等待方，关 server 与线程收尾由授权线程
+        自己的 finally 完成，不会阻塞界面。
+        """
+        key = self.make_key(plugin_name, server_name)
+        session = self._sessions.get(key)
+        if session is None or session.status != "pending" or session._callback is None:
+            return False
+        session._callback.cancel()
+        return True
 
     def _run_authorization(
         self,
@@ -274,6 +289,10 @@ class McpOAuthProviderFactory:
 
         async def callback_handler() -> tuple[str, Optional[str]]:
             result = callback.wait(self._auth_timeout)
+            if result.cancelled:
+                session.status = "cancelled"
+                session.error = "授权已中止"
+                return "", None
             if result.error:
                 session.status = "error"
                 session.error = result.error_description or result.error

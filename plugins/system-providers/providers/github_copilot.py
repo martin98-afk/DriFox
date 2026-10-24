@@ -103,16 +103,23 @@ _EXTRA_HEADERS = {
 }
 
 
-def _auto_login():
-    """登录钩子（编辑卡后台线程调用）：Device Flow 授权，回填长效 gho token。"""
+def _auto_login(cancel_event=None):
+    """登录钩子（编辑卡后台线程调用）：Device Flow 授权，回填长效 gho token。
+
+    Args:
+        cancel_event: 可选 threading.Event。用户点「中止」时置位，轮询立即退出
+            而非干等到超时（旧签名无参调用仍兼容）。
+    """
     from loguru import logger
 
     ca = _load_auth_module()
     logger.info("[GitHub Copilot] 发起 Device Flow 登录（请求 github.com/login/device_code）")
     try:
-        result = ca.login(timeout_sec=280)
+        result = ca.login(timeout_sec=280, cancel_event=cancel_event)
     except Exception as e:
         logger.warning(f"[GitHub Copilot] 登录失败: {e}")
+        if type(e).__name__ == "LoginCancelled":
+            raise RuntimeError("登录已中止") from e
         raise
     github_token = result["github_token"]
     logger.info("[GitHub Copilot] 授权成功，预热短效 Copilot token")

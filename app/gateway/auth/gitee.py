@@ -179,8 +179,11 @@ class GiteeOAuthBackend(OAuthBackend):
 
         Args:
             repo_private (bool): 上传仓库是否私有，默认 True
+            cancel_event (threading.Event): 用户中止信号，置位即退出等待
         """
         from app.utils.config import Settings
+
+        cancel_event = options.get("cancel_event")
 
         cfg = Settings.get_instance()
         client_id = cfg.gitee_oauth_client_id.value
@@ -199,7 +202,7 @@ class GiteeOAuthBackend(OAuthBackend):
         )
 
         # 2. 执行通用授权码流程（阻塞，起回调服务器 → 开浏览器 → 等授权 → 换 token）
-        token_data, err = run_authorization_code_flow(app_cfg)
+        token_data, err = run_authorization_code_flow(app_cfg, cancel_event=cancel_event)
         if token_data is None:
             return False, err
 
