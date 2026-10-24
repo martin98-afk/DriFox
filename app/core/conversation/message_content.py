@@ -1229,8 +1229,11 @@ def _resolve_serializer():
             from app.plugins.loaders import runtime_component_loader as _rcl
 
             _rcl._persistent_loader("serializers").scan_roots()
-        except Exception:
-            pass
+        except Exception as e:
+            # 收窄后 warmup 内部日志不再覆盖此处，失败静默难排查
+            from loguru import logger
+
+            logger.debug(f"[message_content] serializers 补扫失败: {e}")
     return registry.resolve()
 
 

@@ -43,8 +43,9 @@ def get_session_storage():
             from app.plugins.loaders import runtime_component_loader as _rcl
 
             _rcl._persistent_loader("storages").scan_roots()
-        except Exception:
-            pass
+        except Exception as e:
+            # 收窄后 warmup 内部日志不再覆盖此处，失败静默会退化成 noop 引擎难排查
+            logger.debug(f"[ChatBackend] storages 补扫失败: {e}")
     return registry.get_active()
 
 
