@@ -312,6 +312,29 @@ def _run_register(
     return names
 
 
+def _purge_provider_modules(plugin_name: str) -> int:
+    """从 sys.modules 摘除该插件的服务商模块（卸载后调用，防旧代码滞留）。
+
+    _load_module 以 ``_plugin_provider_<plugin>_<stem>`` 命名并常驻
+    sys.modules；不清理则旧模块对象（含模块级单例/import 的依赖）在进程内
+    滞留。与 builtin_reloaders._purge_gateway_plugin_modules 同构。
+    """
+    prefix = f"_plugin_provider_{plugin_name}"
+    removed = [
+        m
+        for m in list(sys.modules.keys())
+        if m == prefix or m.startswith(prefix + "_") or m.startswith(prefix + ".")
+    ]
+    for m in removed:
+        sys.modules.pop(m, None)
+    if removed:
+        import importlib
+
+        importlib.invalidate_caches()
+        logger.debug(f"[ProviderLoader] 已清理服务商模块 {len(removed)} 个: {plugin_name}")
+    return len(removed)
+
+
 def load_providers(
     registry: Optional[ProviderRegistry] = None,
     plugin_roots: Optional[List[Path]] = None,
@@ -456,6 +479,9 @@ class ProviderWatcher:
                 for n in names:
                     self._root_tracker.pop(n, None)
                 logger.info(f"[ProviderWatcher] 注销插件服务商: {sorted(names)} ({plugin_name})")
+            # 摘除该插件的服务商模块引用（与 tool loader 对齐）：不清理则旧模块
+            # 对象及其模块级单例在进程内滞留，重装时命中旧缓存。
+            _purge_provider_modules(plugin_name)
             # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
             self._restore_lower_roots(removed_rank)
 

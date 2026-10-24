@@ -440,6 +440,30 @@ def load_plugin_tools(
     return loaded
 
 
+def _purge_tool_modules(plugin_name: str) -> int:
+    """从 sys.modules 摘除该插件工具模块（卸载/重载后调用，防旧代码滞留）。
+
+    _load_module 以 ``_plugin_tool_<plugin>_<stem>`` 命名并常驻 sys.modules；
+    不清理则旧模块对象（及其 import 的依赖、模块级单例）在进程内滞留，
+    表现为「卸载后旧工具实现仍可被引用 / 热更新代码不生效」。
+    与 builtin_reloaders._purge_gateway_plugin_modules 同构。
+    """
+    prefix = f"_plugin_tool_{plugin_name}"
+    removed = [
+        m
+        for m in list(sys.modules.keys())
+        if m == prefix or m.startswith(prefix + "_") or m.startswith(prefix + ".")
+    ]
+    for m in removed:
+        sys.modules.pop(m, None)
+    if removed:
+        import importlib
+
+        importlib.invalidate_caches()
+        logger.debug(f"[PluginToolLoader] 已清理工具模块 {len(removed)} 个: {plugin_name}")
+    return len(removed)
+
+
 def unload_plugin_tools(
     plugin_name: str,
     tool_names: Set[str],
@@ -613,6 +637,10 @@ class PluginToolWatcher:
                 if tool_names:
                     unload_plugin_tools(plugin_name, tool_names, self._registry, root_tracker=self._root_tracker)
                 self._loaded.pop(plugin_name, None)
+                # 摘除该插件的工具模块引用：_load_module 常驻 sys.modules，
+                # 不清理则旧模块对象（含模块级单例/依赖）在进程内滞留，
+                # 卸载后旧代码仍可能被引用、重装时命中旧缓存。
+                _purge_tool_modules(plugin_name)
                 # 跨根覆盖恢复：仅重扫比被删根更低等级的根（被覆盖方）
                 self._restore_lower_roots(removed_rank)
 
