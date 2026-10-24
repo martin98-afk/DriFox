@@ -12,6 +12,10 @@ on:
         description: "PyQt5 变体取码的 ref（分支名 / tag / commit SHA）"
         required: false
         default: dev
+      pyside6_ref:
+        description: "PySide6 变体取码的 ref（分支名 / tag / commit SHA）"
+        required: false
+        default: pyside6
 
 permissions:
   contents: write                   # 创建 Release 必需
@@ -20,7 +24,7 @@ jobs:
   # ════════════════════════════════════════════════
   # Job 0: Lint & Import Check（构建前置检查）
   #         在所有构建之前运行，失败则跳过后续耗时 job
-  #         两个变体各查一遍：pyqt5 那格跑的是 dev 分支代码，坏在这里就省下 3 个平台 job
+  #         两个变体各查一遍：pyqt5 格跑 dev 分支代码，pyside6 格跑 pyside6 分支代码，坏在这里就省下 3 个平台 job
   # ════════════════════════════════════════════════
   check:
     name: Lint & Import Check (${{ matrix.variant.id }})
@@ -32,7 +36,7 @@ jobs:
           - id: pyqt5
             ref: ${{ inputs.pyqt5_ref || 'dev' }}
           - id: pyside6
-            ref: ${{ inputs.tag || github.ref_name }}
+            ref: ${{ inputs.pyside6_ref || 'pyside6' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +79,9 @@ jobs:
   # 硬约束：一个 git tag 只能指向一个 commit，两套代码不能靠「两个分支各打同名 tag」发布
   # （tag 名全局唯一，第二次推送会指向同一 commit）。解法是把代码 ref 提到 matrix 维度，
   # 每格显式 checkout 各自分支，产物统一由 release job 挂到同一个 Release。
+  # 取码纪律：tag 打在 dev 上（标准发版姿势）——pyqt5 格 = tag 精确版本，
+  # pyside6 格 = pyside6 分支 HEAD（手动触发可用 pyside6_ref 覆盖）。
+  # 因此发版前必须先在 pyside6 分支追平 dev 补丁，否则 pyside6 包会落后于 tag。
   # 命名沿用单边后缀：pyqt5 无后缀（存量用户按 Drifox-Windows-Setup-<tag>.exe 找包），
   # pyside6 带 -pyside6 后缀。
   build-windows:
@@ -90,7 +97,7 @@ jobs:
             suffix: ''
             file_suffix: ''
           - id: pyside6
-            ref: ${{ inputs.tag || github.ref_name }}
+            ref: ${{ inputs.pyside6_ref || 'pyside6' }}
             suffix: pyside6
             file_suffix: '-pyside6'
 
@@ -210,7 +217,7 @@ jobs:
             suffix: ''
             file_suffix: ''
           - id: pyside6
-            ref: ${{ inputs.tag || github.ref_name }}
+            ref: ${{ inputs.pyside6_ref || 'pyside6' }}
             suffix: pyside6
             file_suffix: '-pyside6'
 
@@ -377,7 +384,7 @@ jobs:
             suffix: ''
             file_suffix: ''
           - id: pyside6
-            ref: ${{ inputs.tag || github.ref_name }}
+            ref: ${{ inputs.pyside6_ref || 'pyside6' }}
             suffix: pyside6
             file_suffix: '-pyside6'
 
