@@ -384,16 +384,56 @@ class ProviderWatcher:
         self._roots = roots if roots is not None else _PLUGIN_ROOTS
         self._root_tracker: Dict[str, Path] = {}
         self._scan_lock = threading.Lock()
+        # 快路径三条规定所需状态：
+        # - _scanned_once：本 watcher 是否至少完整扫过一次（封死「外部直接
+        #   load_providers 注册 + watcher 无记忆」失配窗口）
+        # - _last_py_files：上次全扫时的磁盘 providers/*.py 三元组集
+        self._scanned_once = False
+        self._last_py_files: set = set()
+
+    def _py_files(self) -> set:
+        """磁盘 providers/*.py 三元组集：(root_kind, plugin_name, py.name)。
+
+        用文件级而非插件名集合：删单个 .py 不改插件名集合（旧实现因此漏判）；
+        也不用 item 级：ProviderDef.name 与文件名无关（opencode.py 一文件可注册
+        多个服务商）。root_kind 参与三元组，避免不同根的同名文件互相抵消。
+        """
+        files: set = set()
+        for root in self._roots:
+            kind = _root_kind(root)
+            for pname, py in _iter_provider_modules(Path(root)):
+                files.add((kind, pname, py.name))
+        return files
 
     def _align_needed(self) -> bool:
-        """启用状态对齐重扫是否有真实差异（无差异可跳过全量卸载+重注册）。
+        """快路径判定：是否需要全量重扫。三条规定（#18 修复删文件后服务商残留）。
 
-        启动链 _do_deferred 会调 scan_now，但 warmup_providers 已按相同
-        过滤规则注册过，全量卸载+重注册是纯浪费（实测 11 个服务商
-        clear+register 往返 ~130ms）。以注册表实际内容为准做对比
-        （与 scan_now 卸载语义一致，规避 watcher 记忆失真）。
+        历史缺陷：旧实现只对比「磁盘插件名集合 vs registry.provider_sources()」,
+        删单个 providers/*.py 不改插件名集合 → 判无差异 → 跳过全扫 → 服务商
+        永久残留（存量失败 test_scan_now_removes_provider_deleted_after_warmup）。
+
+        规定：
+        1. ``_scanned_once`` 为 False 恒返回 True——启动链 warmup_providers()
+           直接注册不经本 watcher，此时 registry 有内容而 watcher 无记忆，
+           任何对比都会误判「无差异」。首扫必须放行。
+        2. py 文件级对比（见 _py_files），不用插件名集合、不用 item 级。
+        3. 文件级无差异后再核对启用态（enabled/component/load_blocked 过滤后的
+           磁盘插件名 vs registry 来源名）。
+
+        任何异常保守返回 True 回退全扫。
+
+        ⚠️ 判定内严禁调 ProviderRegistry.names()/all()——它们触发 ensure_loaded
+        → warmup_providers → load_providers，在持 _scan_lock 的判定内会拉起
+        不持锁的并行加载路径（竞态）。只允许 provider_sources()。
         """
         try:
+            # 规定 1：未完整扫过一次 → 恒放行
+            if not self._scanned_once:
+                return True
+            # 规定 2：文件级对比（删/增 .py 均可感知）
+            if self._py_files() != self._last_py_files:
+                return True
+            # 规定 3：启用态对比
             disk: set = set()
             for root in self._roots:
                 for pname, _py in _iter_provider_modules(Path(root)):
@@ -415,12 +455,16 @@ class ProviderWatcher:
         """全量重扫：先注销注册表中全部插件来源服务商，再全量重新注册（幂等）。
 
         ⚡️ 对齐快路径：注册表实际注册集与磁盘期望注册集一致时直接返回
-        （零卸载零重注册），见 _align_needed。
+        （零卸载零重注册），见 _align_needed。快路径三条规定含
+        ``_scanned_once`` 守卫与 py 文件级对比，删单个 providers/*.py 不再漏判
+        （#18 修复 test_scan_now_removes_provider_deleted_after_warmup）。
 
         卸载以注册表实际内容为准（而非 watcher 自身的加载记忆）：
         启动链 warmup_providers() 直接注册不经 watcher，且重扫时同名保护
         会拒绝重复注册使记忆失真（永远为空），按记忆卸载会漏清已删除
         文件对应的服务商（残留 bug 回归点，见 tests/core/test_provider_watcher.py）。
+
+        全扫末尾记录磁盘 py 快照并置 ``_scanned_once``（快照以磁盘真实状态为准）。
         """
         with self._scan_lock:
             if not self._align_needed():
@@ -439,6 +483,10 @@ class ProviderWatcher:
                 )
             except Exception as e:
                 logger.warning(f"[ProviderWatcher] 全量重扫失败: {e}")
+            # 3) 记录磁盘快照并置位：快照必须以**磁盘真实状态**为准而非注册结果
+            #    （部分注册失败时注册表 ≠ 磁盘，用注册结果会漏判后续变更）
+            self._last_py_files = self._py_files()
+            self._scanned_once = True
 
     def _plugin_provider_names(self, plugin_name: str) -> Set[str]:
         """按注册表实际内容反查某插件注册的服务商名（对齐 scan_now 的"以注册表为准"）"""
