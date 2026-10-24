@@ -736,6 +736,14 @@ _LOADER_SPECS: Dict[str, Tuple[str, str, str]] = {
 }
 
 
+# _persistent_loader 的 check-then-act 互斥锁（#29 问题 1）：
+# 无锁时两线程并发可各自构造 loader 实例，后写者覆盖前写者 → 前一实例的
+# _sources/_occupied_by_source 账本分裂（确定性复现过）。锁只包 check-then-act
+# 段，不含调用方拿到 loader 后的 scan_roots——后者有自己的 _scan_lock，
+# 嵌套进本锁会引入锁序问题。
+_persistent_loader_lock = threading.Lock()
+
+
 def _persistent_loader(comp_dir: str) -> "RuntimeComponentLoader":
     """取（或惰性造）某组件的模块级持久 loader，registry 单例被替换时自动重建。
 
@@ -747,12 +755,13 @@ def _persistent_loader(comp_dir: str) -> "RuntimeComponentLoader":
     module_path, attr, maker_name = _LOADER_SPECS[comp_dir]
     mod_name, _, cls_name = module_path.partition(":")
     current = getattr(importlib.import_module(mod_name), cls_name).get_instance()
-    existing = globals().get(attr)
-    if existing is not None and existing._registry is current:
-        return existing
-    loader = globals()[maker_name]()
-    globals()[attr] = loader
-    return loader
+    with _persistent_loader_lock:
+        existing = globals().get(attr)
+        if existing is not None and existing._registry is current:
+            return existing
+        loader = globals()[maker_name]()
+        globals()[attr] = loader
+        return loader
 
 
 def ensure_model_adapter_watcher() -> Optional[_RuntimeWatcher]:
@@ -891,6 +900,10 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     造临时实例）：临时实例与 ``ensure_*_watcher`` 的持久实例各持一份 _occupied /
     _sources / _source_kind 状态，同一 registry 被两套 loader 交替 scan，热重载时
     互相看不见对方占用的 item id（跨根覆盖判定失真），且多造 11 个 loader 对象。
+
+    ⚠️ 并发语义：多线程同时进入时由 _persistent_loader_lock 串行化构造，但
+    返回空 dict 不代表未加载——可能是其他线程已完成本轮扫描（调用方不应以
+    返回值判定组件是否就绪，需查询对应 registry）。
     """
     global _warmup_stamp
 
