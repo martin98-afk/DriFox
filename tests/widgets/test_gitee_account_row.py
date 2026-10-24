@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tab 模式 Gitee 账户快捷栏测试"""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from PyQt5.QtCore import QObject, pyqtSignal
@@ -113,7 +113,8 @@ def test_start_oauth_disables_button_and_starts_worker(row_factory):
 
     assert row._binding is True
     assert row._settings_btn.isEnabled() is False
-    thread_cls.assert_called_once_with(target=row._do_oauth, args=(True,), daemon=True)
+    # 第二个参数是中止信号（threading.Event），新增后同样必须传给工作线程
+    thread_cls.assert_called_once_with(target=row._do_oauth, args=(True, ANY), daemon=True)
     thread_cls.return_value.start.assert_called_once_with()
 
 
