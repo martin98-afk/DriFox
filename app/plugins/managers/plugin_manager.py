@@ -171,6 +171,15 @@ def _load_manifest_file(manifest_path: Path):
     manifest, schema_warnings = validate_manifest(
         manifest, source=manifest_path.parent.parent.name, fallback_name=manifest_path.parent.parent.name
     )
+    # 契约2b：capabilities 声明语义校验。未知 ID 在 expand 时被静默保留、
+    # 运行期表现为"拿不到能力却看不到原因"，这里在加载期挑出来进
+    # manifest_warnings（两条扫描路径都会 warning + 存 PluginInfo）。
+    from app.plugins.capabilities.catalog import unknown_declared
+
+    for bad in unknown_declared(manifest.get("capabilities")):
+        schema_warnings.append(
+            f"[CapabilityManifest] 未知能力 ID {bad!r}（catalog 无此项，运行期不可用，检查拼写或改用组通配）"
+        )
     return manifest, schema_warnings
 
 
@@ -359,6 +368,13 @@ class PluginManager:
         self._disabled_components_cache: Optional[frozenset] = None
         # 插件目录签名缓存（rescan 短路用，None = 尚未扫描过）
         self._last_scan_signature: Optional[tuple] = None
+        # [PERF 2026-10-24] 待回放的自动设置卡：扫描期只登记 schema，不 import UI 链。
+        # 原实现 _register_config_schema 在扫描循环里直接 import
+        # app.plugins.registries.ui_plugin_registry + app.widgets.cards.settings.
+        # plugin_config_card（Qt/qfluentwidgets 级联），把 UI 依赖拖进
+        # PluginManager.initialize 的同步段（实测 ~166ms）。改为登记 + 由
+        # main_widget._after_plugins_loaded 调 replay_config_cards() 统一回放。
+        self._pending_config_cards: Dict[str, Any] = {}
 
     @classmethod
     def get_instance(cls) -> "PluginManager":
@@ -584,26 +600,19 @@ class PluginManager:
             except OSError:
                 root_mtime = 0
             sig.append((str(root_path), True, root_mtime, tuple(entries)))
-        return tuple(sig)
+        return tuple(sig) + self._manifest_meta()
 
-    # ============================================================
-    # 插件发现持久化缓存（[T26/H2]：命中跳过全量插件扫描）
-    # ============================================================
+    def _manifest_meta(self) -> tuple:
+        """每个 manifest 的 (path, size, mtime_ns) 元组（两路 manifest 路径）。
 
-    def _discovery_cache_path(self) -> Path:
-        """发现缓存落盘路径：<data_dir>/cache/plugin_discovery.json"""
-        from app.utils.utils import get_app_data_dir
+        目录签名只覆盖插件目录级变化（新增/删除/目录 mtime）；manifest 文件**内容**
+        编辑（version/api_version/config_schema 等）不改变父目录 mtime（NTFS 父目录
+        mtime 陷阱：只有直接子项的增删才会刷新父目录 mtime），故 rescan 签名必须
+        合并本元数据才能感知 manifest 内容变更。
 
-        return get_app_data_dir() / "cache" / "plugin_discovery.json"
-
-    def _discovery_signature(self) -> tuple:
-        """目录签名（_plugins_dir_signature）+ 每个 manifest 的 (size, mtime_ns)。
-
-        目录签名只覆盖插件目录级变化（新增/删除/目录 mtime）；manifest 文件内容
-        编辑（version/api_version 等）不改变父目录 mtime（NTFS 父目录 mtime 陷阱），
-        追加 manifest 元数据保证内容级失效。
+        历史缺陷：_plugins_dir_signature 曾不含本项，导致改插件 manifest 后 rescan
+        返回空 diff、agents/commands 等组件变更被吞（#17 修复）。
         """
-        base = self._plugins_dir_signature()
         manifest_meta: list = []
         roots = [self._SYSTEM_PLUGIN_DIR]
         if self._app_data_dir:
@@ -627,7 +636,25 @@ class PluginManager:
                     except OSError:
                         continue
                     manifest_meta.append((str(mf), st.st_size, st.st_mtime_ns))
-        return base + (tuple(manifest_meta),)
+        return (tuple(manifest_meta),)
+
+    # ============================================================
+    # 插件发现持久化缓存（[T26/H2]：命中跳过全量插件扫描）
+    # ============================================================
+
+    def _discovery_cache_path(self) -> Path:
+        """发现缓存落盘路径：<data_dir>/cache/plugin_discovery.json"""
+        from app.utils.utils import get_app_data_dir
+
+        return get_app_data_dir() / "cache" / "plugin_discovery.json"
+
+    def _discovery_signature(self) -> tuple:
+        """目录签名（_plugins_dir_signature，已含 manifest 元数据）。
+
+        #29 问题 2：此前重复追加 _manifest_meta()，多一轮全插件 manifest stat
+        （_plugins_dir_signature 末尾已合并同一元数据）。
+        """
+        return self._plugins_dir_signature()
 
     def _discovery_cache_key(self) -> list:
         """缓存键四元组：schema 版本 + 宿主版本 + 插件 API 契约版本 + 目录/清单签名。"""
@@ -1496,20 +1523,56 @@ class PluginManager:
             logger.warning(f"[PluginManager] config_schema 注册失败({plugin_name}): {e}")
             return
 
-        # 自动设置卡（可选，挂 Phase D 扩展点）
+        # 自动设置卡：扫描期只登记，不 import UI 链（见 __init__ 的 _pending_config_cards
+        # 注释）。真正的 UIPluginRegistry.register_settings_card 由 replay_config_cards()
+        # 在 main_widget._after_plugins_loaded 统一回放（UI 栈已就绪、插件卡分区构建前）。
+        # getattr 兼底：测试常用 PluginManager.__new__ 绕过 __init__（本方法不依赖实例状态）
+        pending = getattr(self, "_pending_config_cards", None)
+        if pending is None:
+            pending = self._pending_config_cards = {}
+        pending[plugin_name] = config_schema
+
+    def replay_config_cards(self) -> int:
+        """回放待注册的自动设置卡（UI 栈就绪后调用，幂等），返回成功注册数。
+
+        与 ``_register_config_schema`` 的分工：扫描期只登记 schema（零 UI import），
+        本方法才真正 import 卡类并注册。两步分离把 Qt/qfluentwidgets 级联从
+        ``PluginManager.initialize`` 同步段摘出去（实测 ~166ms）。
+
+        幂等：重复调用对同名 card_id 是覆盖注册（UIPluginRegistry 内部语义），
+        但成功后即从 pending 摘除，正常情况下二次调用直接返回 0。
+        """
+        pending = getattr(self, "_pending_config_cards", None)
+        if not pending:
+            return 0
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
             from app.widgets.cards.settings.plugin_config_card import make_card_class
+        except ImportError as e:
+            # UI 栈不可用（headless/纯后端进程）：保留 pending，等真正需要时再回放
+            logger.debug(f"[PluginManager] 设置卡回放跳过（UI 栈不可用）: {e}")
+            return 0
 
-            UIPluginRegistry.get_instance().register_settings_card(
-                plugin_name,
-                f"{plugin_name}-config",
-                config_schema.title,
-                make_card_class(plugin_name),
-                metadata={"auto_config_card": True},
-            )
-        except Exception as e:
-            logger.warning(f"[PluginManager] config_schema 设置卡注册失败({plugin_name}): {e}")
+        registry = UIPluginRegistry.get_instance()
+        count = 0
+        for plugin_name, config_schema in list(pending.items()):
+            try:
+                registry.register_settings_card(
+                    plugin_name,
+                    f"{plugin_name}-config",
+                    config_schema.title,
+                    make_card_class(plugin_name),
+                    metadata={"auto_config_card": True},
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"[PluginManager] config_schema 设置卡注册失败({plugin_name}): {e}")
+                continue
+            # 仅在注册成功后摘除：失败保留 pending，下次 replay 重试
+            pending.pop(plugin_name, None)
+        if count:
+            logger.debug(f"[PluginManager] 设置卡回放 {count} 张")
+        return count
 
     def _unregister_config_schema(self, plugin_name: str) -> None:
         """E1：插件移除/Schema 删除时清理 config_schema 注册 + 自动设置卡。
@@ -1518,6 +1581,11 @@ class PluginManager:
         已改为保留 auto_config_card——ui 组件热重载（unload→load）不能误杀
         rescan 刚注册的卡，清理收敛到本函数单一入口。
         """
+        # 待回放队列必须先摘：否则「注册 → 卸载 → replay」会把已删插件的卡复活
+        # （僵尸卡，扫描期失败后 pending 残留同样会这样）
+        pending = getattr(self, "_pending_config_cards", None)
+        if pending is not None:
+            pending.pop(plugin_name, None)
         try:
             from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 
@@ -1675,6 +1743,35 @@ class PluginManager:
                     name_order[md_file.stem] = len(result)
                     result.append(md_file)
 
+        return result
+
+    def get_command_files_for_plugin(self, plugin_name: str) -> List[Path]:
+        """只获取指定插件的命令文件（精准重载用，不走全量遍历）。
+
+        与 get_command_files 的区别：不遍历全部已启用插件、不做跨插件同名去重
+        —— 同名去重需要全局视野，而精准重载的场景是「只重新注册这一个插件的
+        命令」，跨插件优先级由调用方（CommandManager.unregister_source + 重注册）
+        按注册顺序自然维持。
+
+        ``plugin_name == "user-custom"`` 时返回用户自定义命令目录（与
+        get_command_files 的特殊处理对齐，该目录无 manifest 也在扫）。
+        """
+        result: List[Path] = []
+
+        if plugin_name == "user-custom":
+            from app.utils.utils import get_app_data_dir
+
+            cmd_dir = get_app_data_dir() / "plugins" / "user-custom" / "commands"
+            if cmd_dir.exists():
+                result.extend(sorted(cmd_dir.glob("*.md")))
+            return result
+
+        plugin = self._plugins.get(plugin_name)
+        if plugin is None or not plugin.has_component("commands"):
+            return result
+        cmd_dir = plugin.path / "commands"
+        if cmd_dir.exists():
+            result.extend(sorted(cmd_dir.glob("*.md")))
         return result
 
     def get_agent_files(self) -> List[Path]:

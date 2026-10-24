@@ -3623,6 +3623,11 @@ class UIPluginRegistry:
         ):
             # 确无任何注册：返回 False（幂等）。
             return False
+        # 丢弃本插件的待恢复条目：卸载前可见的浮动卡会被下方记入
+        # _pending_card_restore（供热重载 load_plugin 恢复），但**删除路径**
+        # （卸载后不再 load）没有消费方——残留条目会让重装同名插件时错误
+        # 恢复一个已删除的卡片视图。此处与 load_plugin 入口的清理对称。
+        self._pending_card_restore = [e for e in self._pending_card_restore if e[0] != plugin_name]
         # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
         try:
             import sys as _sys
@@ -3678,6 +3683,19 @@ class UIPluginRegistry:
                             was_visible = cm.is_card_visible(cid, win_id)
                         except (RuntimeError, AttributeError):
                             was_visible = False
+                    # CardManager 侧同步注销（审计 #3 P2-1 + #19 问题 3）：
+                    # unload 只清了 UIPluginRegistry 的 _card_widget_instances，
+                    # _window_data 里该 card_id 的 cards/containers/system_cards/
+                    # 压制关系/dock 列表残留 → 重装同名插件时 register_card 打
+                    # 「已注册，将被覆盖」warning 且旧容器映射干扰新卡容器判定。
+                    # 必须早于 _remove_widget_from_container：后者已 pop
+                    # containers[card_id]，晚一步调会取不到 container_type 而
+                    # 跳过 visible_cards 复位分支。
+                    if cm is not None:
+                        try:
+                            cm.unregister_card(cid, win_id)
+                        except (RuntimeError, AttributeError):
+                            pass
                     self._remove_widget_from_container(win_id, cid, widget)
                     # 显式销毁旧实例：_remove_widget_from_container 仅 UI 清理不触发删除，
                     # 不 deleteLater 会残留旧模块闭包/信号槽引用（Qt 父对象引用链）

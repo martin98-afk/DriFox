@@ -37,11 +37,15 @@ def get_session_storage():
     registry = StorageRegistry.get_instance()
     if not registry.engines:
         try:
-            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+            # [PERF 2026-10-24] 只补扫 storages，不再全量 warmup：本函数唯一消费者是
+            # 会话存储引擎，全量 warmup 会连带扫 10 类无关组件；且 preheat.py:39 的
+            # 进程级预热早于 plugin_host 延迟队列，那里失败时这里必须能独立补齐。
+            from app.plugins.loaders import runtime_component_loader as _rcl
 
-            warmup_runtime_components()
-        except Exception:
-            pass
+            _rcl._persistent_loader("storages").scan_roots()
+        except Exception as e:
+            # 收窄后 warmup 内部日志不再覆盖此处，失败静默会退化成 noop 引擎难排查
+            logger.debug(f"[ChatBackend] storages 补扫失败: {e}")
     return registry.get_active()
 
 

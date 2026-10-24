@@ -88,6 +88,45 @@ class TestScanRemovesDeletedProvider:
         assert reg.get("Alpha") is None, f"已删除插件的服务商应被注销，残留: {reg.names()}"
         assert reg.get("Beta") is not None
 
+    def test_align_needed_detects_deleted_module_after_watcher_scan(self, tmp_path):
+        """#18：watcher 已扫过（_scanned_once=True）后删单个 .py，快路径不得漏判。
+
+        旧实现只对比「磁盘插件名集合 vs registry 来源名」——删单个 providers/*.py
+        不改插件名集合 → _align_needed 判无差异 → scan_now 跳过全扫 → 服务商残留。
+        新实现加 py 文件级对比后应放行全扫并清掉残留。
+        """
+        _make_provider(tmp_path, "Alpha")
+        _make_provider(tmp_path, "Beta")
+        reg = ProviderRegistry()
+        watcher = _make_watcher(tmp_path, reg)
+
+        # 首次扫描：置位 _scanned_once + 记录 py 快照
+        watcher.scan_now()
+        assert watcher._scanned_once is True
+        assert len(watcher._last_py_files) == 2
+
+        # 删单个 .py（插件名集合不变，仍是 {watcher-provider-test}）
+        (tmp_path / _TEST_PLUGIN / "providers" / "Alpha.py").unlink()
+
+        # 快路径必须放行（文件级对比检测到差异）
+        assert watcher._align_needed() is True, "删单个 .py 后快路径不得判无差异"
+
+        # 全扫后残留被清
+        watcher.scan_now()
+        assert reg.get("Alpha") is None, f"已删文件的服务商应被注销，残留: {reg.names()}"
+        assert reg.get("Beta") is not None
+
+    def test_align_needed_false_when_no_change(self, tmp_path):
+        """对照：扫过后无任何变更 → 快路径判无差异（优化不失效）。"""
+        _make_provider(tmp_path, "Alpha")
+        reg = ProviderRegistry()
+        watcher = _make_watcher(tmp_path, reg)
+
+        watcher.scan_now()
+        assert watcher._scanned_once is True
+        # 无变更（registry 已由首扫对齐）
+        assert watcher._align_needed() is False, "无变更时快路径应判无差异"
+
     def test_scan_now_idempotent_no_residue(self, tmp_path):
         """重扫幂等：多次 scan_now 不重复注册、不误删现存服务商。"""
         _make_provider(tmp_path, "Alpha")

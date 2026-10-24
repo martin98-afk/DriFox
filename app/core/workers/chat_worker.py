@@ -3316,9 +3316,10 @@ class OpenAIChatWorker(QThread):
         try:
             if registry.adapters():
                 return None
-            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+            # [PERF 2026-10-24] 只补扫 model_adapters（原 warmup 全量 11 类，本处仅需适配器）
+            from app.plugins.loaders import runtime_component_loader as _rcl
 
-            warmup_runtime_components()
+            _rcl._persistent_loader("model_adapters").scan_roots()
         except Exception as e:
             logger.warning(f"[ChatWorker] 冷启动 ModelAdapter 加载失败: {e}")
             return None

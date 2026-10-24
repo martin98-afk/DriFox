@@ -312,6 +312,29 @@ def _run_register(
     return names
 
 
+def _purge_provider_modules(plugin_name: str) -> int:
+    """从 sys.modules 摘除该插件的服务商模块（卸载后调用，防旧代码滞留）。
+
+    _load_module 以 ``_plugin_provider_<plugin>_<stem>`` 命名并常驻
+    sys.modules；不清理则旧模块对象（含模块级单例/import 的依赖）在进程内
+    滞留。与 builtin_reloaders._purge_gateway_plugin_modules 同构。
+    """
+    prefix = f"_plugin_provider_{plugin_name}"
+    removed = [
+        m
+        for m in list(sys.modules.keys())
+        if m == prefix or m.startswith(prefix + "_") or m.startswith(prefix + ".")
+    ]
+    for m in removed:
+        sys.modules.pop(m, None)
+    if removed:
+        import importlib
+
+        importlib.invalidate_caches()
+        logger.debug(f"[ProviderLoader] 已清理服务商模块 {len(removed)} 个: {plugin_name}")
+    return len(removed)
+
+
 def load_providers(
     registry: Optional[ProviderRegistry] = None,
     plugin_roots: Optional[List[Path]] = None,
@@ -361,16 +384,56 @@ class ProviderWatcher:
         self._roots = roots if roots is not None else _PLUGIN_ROOTS
         self._root_tracker: Dict[str, Path] = {}
         self._scan_lock = threading.Lock()
+        # 快路径三条规定所需状态：
+        # - _scanned_once：本 watcher 是否至少完整扫过一次（封死「外部直接
+        #   load_providers 注册 + watcher 无记忆」失配窗口）
+        # - _last_py_files：上次全扫时的磁盘 providers/*.py 三元组集
+        self._scanned_once = False
+        self._last_py_files: set = set()
+
+    def _py_files(self) -> set:
+        """磁盘 providers/*.py 三元组集：(root_kind, plugin_name, py.name)。
+
+        用文件级而非插件名集合：删单个 .py 不改插件名集合（旧实现因此漏判）；
+        也不用 item 级：ProviderDef.name 与文件名无关（opencode.py 一文件可注册
+        多个服务商）。root_kind 参与三元组，避免不同根的同名文件互相抵消。
+        """
+        files: set = set()
+        for root in self._roots:
+            kind = _root_kind(root)
+            for pname, py in _iter_provider_modules(Path(root)):
+                files.add((kind, pname, py.name))
+        return files
 
     def _align_needed(self) -> bool:
-        """启用状态对齐重扫是否有真实差异（无差异可跳过全量卸载+重注册）。
+        """快路径判定：是否需要全量重扫。三条规定（#18 修复删文件后服务商残留）。
 
-        启动链 _do_deferred 会调 scan_now，但 warmup_providers 已按相同
-        过滤规则注册过，全量卸载+重注册是纯浪费（实测 11 个服务商
-        clear+register 往返 ~130ms）。以注册表实际内容为准做对比
-        （与 scan_now 卸载语义一致，规避 watcher 记忆失真）。
+        历史缺陷：旧实现只对比「磁盘插件名集合 vs registry.provider_sources()」,
+        删单个 providers/*.py 不改插件名集合 → 判无差异 → 跳过全扫 → 服务商
+        永久残留（存量失败 test_scan_now_removes_provider_deleted_after_warmup）。
+
+        规定：
+        1. ``_scanned_once`` 为 False 恒返回 True——启动链 warmup_providers()
+           直接注册不经本 watcher，此时 registry 有内容而 watcher 无记忆，
+           任何对比都会误判「无差异」。首扫必须放行。
+        2. py 文件级对比（见 _py_files），不用插件名集合、不用 item 级。
+        3. 文件级无差异后再核对启用态（enabled/component/load_blocked 过滤后的
+           磁盘插件名 vs registry 来源名）。
+
+        任何异常保守返回 True 回退全扫。
+
+        ⚠️ 判定内严禁调 ProviderRegistry.names()/all()——它们触发 ensure_loaded
+        → warmup_providers → load_providers，在持 _scan_lock 的判定内会拉起
+        不持锁的并行加载路径（竞态）。只允许 provider_sources()。
         """
         try:
+            # 规定 1：未完整扫过一次 → 恒放行
+            if not self._scanned_once:
+                return True
+            # 规定 2：文件级对比（删/增 .py 均可感知）
+            if self._py_files() != self._last_py_files:
+                return True
+            # 规定 3：启用态对比
             disk: set = set()
             for root in self._roots:
                 for pname, _py in _iter_provider_modules(Path(root)):
@@ -392,12 +455,16 @@ class ProviderWatcher:
         """全量重扫：先注销注册表中全部插件来源服务商，再全量重新注册（幂等）。
 
         ⚡️ 对齐快路径：注册表实际注册集与磁盘期望注册集一致时直接返回
-        （零卸载零重注册），见 _align_needed。
+        （零卸载零重注册），见 _align_needed。快路径三条规定含
+        ``_scanned_once`` 守卫与 py 文件级对比，删单个 providers/*.py 不再漏判
+        （#18 修复 test_scan_now_removes_provider_deleted_after_warmup）。
 
         卸载以注册表实际内容为准（而非 watcher 自身的加载记忆）：
         启动链 warmup_providers() 直接注册不经 watcher，且重扫时同名保护
         会拒绝重复注册使记忆失真（永远为空），按记忆卸载会漏清已删除
         文件对应的服务商（残留 bug 回归点，见 tests/core/test_provider_watcher.py）。
+
+        全扫末尾记录磁盘 py 快照并置 ``_scanned_once``（快照以磁盘真实状态为准）。
         """
         with self._scan_lock:
             if not self._align_needed():
@@ -416,6 +483,10 @@ class ProviderWatcher:
                 )
             except Exception as e:
                 logger.warning(f"[ProviderWatcher] 全量重扫失败: {e}")
+            # 3) 记录磁盘快照并置位：快照必须以**磁盘真实状态**为准而非注册结果
+            #    （部分注册失败时注册表 ≠ 磁盘，用注册结果会漏判后续变更）
+            self._last_py_files = self._py_files()
+            self._scanned_once = True
 
     def _plugin_provider_names(self, plugin_name: str) -> Set[str]:
         """按注册表实际内容反查某插件注册的服务商名（对齐 scan_now 的"以注册表为准"）"""
@@ -423,12 +494,39 @@ class ProviderWatcher:
         return {n for n in self._registry.names() if self._registry.get(n).source == source}
 
     def _root_of_plugin(self, plugin_name: str) -> Optional[Path]:
-        """从 root_tracker 反推某插件名所属扫描根（磁盘目录可能已删除）"""
+        """反推某插件名所属扫描根（磁盘目录可能已删除）。
+
+        ⚠️ 不能用「set 遍历取首个命中」：`_plugin_provider_names` 返回 set，迭代顺序
+        随字符串 hash 种子变化，跨根覆盖下约 96.6% 概率拿到低等级根 → removed_rank
+        偏小 → 卸载高等级版本后低等级版本无法恢复（与 tools 侧同构缺陷，#28）。
+
+        方案 M1（与 plugin_tool_loader._root_of_plugin 一致）：优先委托
+        PluginManager 权威归属；不可用时回落「取 rank 最高的根」。
+        """
+        # 1) 权威来源：PluginManager 记录的插件归属（info.path 的父目录即扫描根）
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                info = pm.get_plugin(plugin_name)
+                if info is not None and getattr(info, "plugin_type", "") == _ROOT_KIND_USER:
+                    return Path(info.path).parent
+        except Exception as e:
+            logger.debug(f"[ProviderLoader] _root_of_plugin 查询 PluginManager 失败，回落 tracker: {e}")
+
+        # 2) 回落：在 tracker 记录的所有根里取 rank 最高者（不是首个）
+        best_root: Optional[Path] = None
+        best_rank = -1
         for name in self._plugin_provider_names(plugin_name):
             r = self._root_tracker.get(name)
-            if r is not None:
-                return Path(r)
-        return None
+            if r is None:
+                continue
+            rank = _ROOT_KIND_PRIORITY.get(_root_kind(r), 0)
+            if rank > best_rank:
+                best_rank = rank
+                best_root = Path(r)
+        return best_root
 
     def _restore_lower_roots(self, removed_rank: int) -> None:
         """跨根覆盖恢复：重扫比目标根更低等级的所有根（被覆盖方），补注册被覆盖服务商"""
@@ -456,6 +554,9 @@ class ProviderWatcher:
                 for n in names:
                     self._root_tracker.pop(n, None)
                 logger.info(f"[ProviderWatcher] 注销插件服务商: {sorted(names)} ({plugin_name})")
+            # 摘除该插件的服务商模块引用（与 tool loader 对齐）：不清理则旧模块
+            # 对象及其模块级单例在进程内滞留，重装时命中旧缓存。
+            _purge_provider_modules(plugin_name)
             # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
             self._restore_lower_roots(removed_rank)
 
@@ -474,6 +575,9 @@ class ProviderWatcher:
                 for n in names:
                     self._root_tracker.pop(n, None)
                 logger.info(f"[ProviderWatcher] 重载前注销插件服务商: {sorted(names)} ({plugin_name})")
+            # 摘除旧模块引用（#19 问题 4）：必须在下方重注册**之前**执行，
+            # 否则会把刚加载的新模块一并清掉。
+            _purge_provider_modules(plugin_name)
             # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
             self._restore_lower_roots(removed_rank)
             # 重注册该插件当前模块（enabled 过滤与 load_providers 一致）
