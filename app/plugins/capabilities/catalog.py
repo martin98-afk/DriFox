@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, FrozenSet, Iterable, Optional, Set
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set
 
 from app.plugins.contracts.capabilities import CapabilityLevel, CapabilitySpec
 
@@ -56,6 +56,18 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "完整模型配置（含已解密明文 API key）",
             _BOTH,
             ["get_model_config", "get_provider_config"],
+        ),
+        _spec(
+            "provider.list",
+            _L,
+            "已配置服务商清单（id/名称/模型数，不含密钥与 URL）",
+            _BOTH,
+        ),
+        _spec(
+            "model.enumerate",
+            _L,
+            "指定服务商的可选模型列表（含视觉/思考能力标记）",
+            _BOTH,
         ),
         # ── 会话 ──
         _spec("session.read", _M, "当前 session_id 与消息列表", _BOTH),
@@ -108,6 +120,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
         _spec("ui.dialog", _L, "文件/目录选择、确认框、单行输入（跟随主题）", _UI),
         _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新等）", _UI),
+        _spec(
+            "ui.artifacts.show",
+            _M,
+            "向消息卡片成果栏推送成果条目（图片/视频/HTML/文本/文件，跨窗口副作用）",
+            _BOTH,
+        ),
         # ── 对话流 ──
         _spec("stream.subscribe", _M, "订阅对话流事件（工具/流/错误/上下文/会话切换）", _UI),
         # ── 窗口 ──
@@ -134,6 +152,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),
         # ── 进程级 ──
         _spec("cache.purge", _L, "清理主程序进程内 LRU 缓存（内存释放）", _UI),
+        _spec("process.start", _H, "启动后台进程（argv 数组、无 shell；独立于宿主生命周期）", _BOTH),
         # ── 配置（按 key 读非敏感标量，不给整个 Settings 对象） ──
         _spec(
             "config.read",
@@ -199,3 +218,29 @@ def expand(ids: Iterable[str]) -> FrozenSet[str]:
         else:
             out.add(token)
     return frozenset(out)
+
+
+def unknown_declared(raw: object) -> List[str]:
+    """manifest capabilities 声明里的未知项（加载期语义校验用）。
+
+    expand 对未知 ID 静默保留、池构建时不匹配任何 provider，插件侧表现为
+    拿不到能力却看不到原因（typo 如 ``session.Read`` 最典型）。本函数把
+    这类声明在加载期挑出来，由 PluginManager 记入 manifest_warnings。
+
+    判定口径与 expand 严格一致：``*`` 合法；``group.*`` 检查 group 存在；
+    其余 token 过 ALIASES 后必须命中 CATALOG。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for item in raw:
+        token = str(item).strip()
+        if not token or token == "*":
+            continue
+        token = ALIASES.get(token, token)
+        if token.endswith(".*"):
+            if token[:-2] not in groups():
+                out.append(token)
+        elif token not in CATALOG:
+            out.append(token)
+    return out

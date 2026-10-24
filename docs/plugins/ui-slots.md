@@ -283,6 +283,25 @@ def register_ui(registry):
 
 单个订阅回调抛异常不影响其他订阅者（记 warning 日志）。
 
+### 自建外部资源必须实现 unload_ui
+
+`unload_plugin` 只清理注册表条目、UIEventBus 订阅与能力池订阅，**不触碰插件自建的
+外部资源**。凡插件持有 `QTimer`、`threading.Thread` / `QThread`、`subprocess.Popen`、
+socket / HTTP 长连接等，必须在 `ui/__init__.py` 导出 `unload_ui(registry)` 回调释放：
+
+```python
+def unload_ui(registry):
+    # 热重载路径（unload → load）中旧模块仍在 sys.modules，可访问模块级单例
+    if _timer is not None:
+        _timer.stop()
+    if _worker is not None:
+        _worker.quit()
+        _worker.wait(2000)
+```
+
+未实现时这些资源在卸载/热重载后继续存活（实测：`QTimer.isActive()` 仍为 True），
+进程内累积多套调度器，最终卡死只能重启。`unload_ui` 抛异常不影响注册表清理。
+
 ### 主题色刷新（界面残留旧主题的根治）
 
 宿主已自动派发：浮动卡（含隐藏卡、其他窗口）与工作台插件页在主题切换时会收到

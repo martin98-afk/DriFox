@@ -19,6 +19,13 @@ m = importlib.util.module_from_spec(spec)
 sys.modules.setdefault("test_memory_tools_mod", m)
 spec.loader.exec_module(m)
 
+# store.py 仅取收缩阈值常量，保证假 manager 与真实现判定一致
+_STORE_MOD = _ROOT / "plugins" / "assistant_hub" / "core" / "memory" / "store.py"
+_spec2 = importlib.util.spec_from_file_location("test_memory_tools_store", str(_STORE_MOD))
+store = importlib.util.module_from_spec(_spec2)
+sys.modules.setdefault("test_memory_tools_store", store)
+_spec2.loader.exec_module(store)
+
 
 class _Assistant:
     memory_enabled = True
@@ -148,6 +155,50 @@ class _Mgr:
             out["project"] = str(self._tmp / "proj" / "MEMORY.md")
         return out
 
+    # ── 乐观锁 / append（模拟 store 语义：内容变化 → 指纹变化）──
+    @staticmethod
+    def _fp(text):
+        return f"f{len(text)}"
+
+    def memory_fingerprint(self, aid, kind, workdir=""):
+        src = self._g.get(aid, "") if kind == "global" else self._p.get((aid, workdir), "")
+        return self._fp(src)
+
+    def append_memory(self, aid, kind, text, workdir=""):
+        if kind == "global":
+            cur = self._g.get(aid, "")
+            self._g[aid] = (cur.rstrip() + "\n" + text.strip()) if cur.strip() else text.strip()
+            return {"ok": True, "chars": len(self._g[aid])}
+        if kind == "project" and workdir:
+            key = (aid, workdir)
+            cur = self._p.get(key, "")
+            self._p[key] = (cur.rstrip() + "\n" + text.strip()) if cur.strip() else text.strip()
+            return {"ok": True, "chars": len(self._p[key])}
+        return {"ok": False, "error": "bad_kind"}
+
+    def write_memory_guarded(self, aid, kind, content, base="", consolidate=False, snapshot=None, workdir=""):
+        key = aid if kind == "global" else (aid, workdir)
+        bag = self._g if kind == "global" else self._p
+        cur = bag.get(key, "")
+        cur_chars = len(cur.strip())
+        fp = self._fp(cur)
+        if base and base != fp:
+            return {"ok": False, "error": "conflict", "cur_base": fp}
+        new_chars = len(content.strip())
+        if (
+            not consolidate
+            and cur_chars >= store.SHRINK_CHECK_MIN_CHARS
+            and new_chars < cur_chars * store.SHRINK_RATIO
+        ):
+            return {"ok": False, "error": "shrink", "old_chars": cur_chars, "new_chars": new_chars}
+        if snapshot is not None:
+            try:
+                snapshot()
+            except Exception:
+                pass
+        bag[key] = content
+        return {"ok": True, "chars": new_chars}
+
     def query_daily(
         self,
         aid,
@@ -260,8 +311,9 @@ def test_write_paused_when_memory_disabled(monkeypatch, tmp_path):
 
 
 def test_read_overview_no_scope(monkeypatch, tmp_path):
-    _patch(monkeypatch, tmp_path)
-    m._write_impl(_ctx("/proj"), scope="daily", content="- x", date="2026-10-13")
+    mgr = _patch(monkeypatch, tmp_path)
+    # 直塞假数据造历史日志（写路径恒落今日，不能再用 date 参数造数）
+    mgr._d[(mgr.active_id(), "/proj", "2026-10-13")] = ["- x"]
     r = m._read_impl(_ctx("/proj"))
     assert "全局记忆" in r.content and "项目记忆" in r.content and "2026-10-13" in r.content
 
@@ -297,13 +349,23 @@ def test_gate_passes_once_day_started(monkeypatch, tmp_path):
     mgr = _patch(monkeypatch, tmp_path)
     mgr.gate_text = "【蒸馏指令】"
     today = mgr._today()
-    # 隔天补录（显式 date=过去）：不走门禁
-    m._write_impl(_ctx("/proj"), scope="daily", content="- 补录", date="2020-01-01")
-    assert mgr.gate_calls == 0
+    # 模型传的 date 在写路径无效：恒写当日 → 补录同样触发门禁、落在今天文件
+    r0 = m._write_impl(_ctx("/proj"), scope="daily", content="- 补录", date="2020-01-01")
+    assert not r0.success and mgr.gate_calls == 1
+    assert "2020-01-01" not in {k[2] for k in mgr._d}
     # 当天已写过一条后，第二条不再拦截
     mgr._d[(mgr.active_id(), "/proj", today)] = ["- 首条"]
     r = m._write_impl(_ctx("/proj"), scope="daily", content="- 第二条")
-    assert r.success and mgr.gate_calls == 0
+    assert r.success and mgr.gate_calls == 1
+def test_write_daily_ignores_model_date(monkeypatch, tmp_path):
+    """回归：追加恒写系统当日日志，模型传的历史 date 无效（含门禁放行场景）"""
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.gate_text = ""  # 无未蒸馏旧日志，门禁放行
+    today = mgr._today()
+    r = m._write_impl(_ctx("/proj"), scope="daily", content="- 一条", date="2020-01-01")
+    assert r.success and today in r.content
+    keys = [k[2] for k in mgr._d]
+    assert keys == [today], f"应落在当日文件 {today}，实际 {keys}"
 
 
 def test_gate_query_failure_does_not_block(monkeypatch, tmp_path):
@@ -322,17 +384,44 @@ def test_gate_query_failure_does_not_block(monkeypatch, tmp_path):
 
 def test_mark_distilled_flow(monkeypatch, tmp_path):
     mgr = _patch(monkeypatch, tmp_path)
-    today = mgr._today()
-    m._write_impl(_ctx("/proj"), scope="daily", content="- 甲")
-    # 缺 date 拒绝；content 允许为空
+    aid = mgr.active_id()
+    # 无 content 且非打标 → 拒绝
+    r = m._write_impl(_ctx("/proj"), scope="daily", content="   ")
+    assert not r.success
+    # 无未蒸馏日志：打标为空操作
+    r0 = m._write_impl(_ctx("/proj"), scope="daily", mark_distilled=True)
+    assert r0.success and "没有未打标" in r0.content
+    # 旧日志 → 全量打标；打标后不再出现在未蒸馏清单（全量语义=今天之前，与门禁对齐）
+    mgr._d[(aid, "/proj", "2026-10-20")] = ["- 旧条目"]
+    r2 = m._write_impl(_ctx("/proj"), scope="daily", mark_distilled=True)
+    assert r2.success and "打蒸馏标" in r2.content and "2026-10-20" in r2.content
+    assert (aid, "/proj", "2026-10-20") in mgr._distilled
+    r3 = m._write_impl(_ctx("/proj"), scope="daily", mark_distilled=True)
+    assert r3.success and "没有未打标" in r3.content
+
+def test_mark_distilled_reports_merged(monkeypatch, tmp_path):
+    """store 收敛残留条目时（merged>0），返回消息须告知模型"""
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr._d[(mgr.active_id(), "/proj", "2026-10-20")] = ["- 甲"]
+    def _fake_mark(aid, wd, date):
+        return {"ok": True, "date": date, "file": "x", "merged": 2}
+    mgr.mark_daily_distilled = _fake_mark
     r = m._write_impl(_ctx("/proj"), scope="daily", mark_distilled=True)
-    assert not r.success and "date" in (r.error or "")
-    r2 = m._write_impl(_ctx("/proj"), scope="daily", date=today, mark_distilled=True)
-    assert r2.success and "打蒸馏标" in r2.content
-    # 重复打标失败
-    r3 = m._write_impl(_ctx("/proj"), scope="daily", date=today, mark_distilled=True)
-    assert not r3.success and "已打" in (r3.error or "")
-    assert (mgr.active_id(), "/proj", today) in mgr._distilled
+    assert r.success and "2" in r.content and "并入" in r.content
+
+def test_mark_distilled_partial_failure(monkeypatch, tmp_path):
+    """多日打标部分失败：成功的照常报告，失败列在尾部"""
+    mgr = _patch(monkeypatch, tmp_path)
+    aid = mgr.active_id()
+    mgr._d[(aid, "/proj", "2026-10-20")] = ["- a"]
+    mgr._d[(aid, "/proj", "2026-10-21")] = ["- b"]
+    def _flaky(aid, wd, date):
+        if date == "2026-10-21":
+            return {"ok": False, "error": "boom"}
+        return {"ok": True, "date": date, "file": "x", "merged": 0}
+    mgr.mark_daily_distilled = _flaky
+    r = m._write_impl(_ctx("/proj"), scope="daily", mark_distilled=True)
+    assert r.success and "2026-10-20" in r.content and "boom" in r.content
 
 
 # ── 读取分页 / 索引 limit ─────────────────────────────────
@@ -366,8 +455,10 @@ def test_write_daily_level_passthrough(monkeypatch, tmp_path):
 
 def test_read_daily_index_limit(monkeypatch, tmp_path):
     mgr = _patch(monkeypatch, tmp_path)
+    # 直塞三日假数据（写路径恒落今日，造历史数据走 _d）
+    aid = mgr.active_id()
     for d in ["2026-10-01", "2026-10-02", "2026-10-03"]:
-        m._write_impl(_ctx("/proj"), scope="daily", content=f"- {d}", date=d)
+        mgr._d[(aid, "/proj", d)] = [f"- {d}"]
     r = m._read_impl(_ctx("/proj"), scope="daily", limit=2)
     assert "2026-10-03" in r.content and "2026-10-02" in r.content and "2026-10-01" not in r.content
 
@@ -384,7 +475,7 @@ def test_read_daily_query_level(monkeypatch, tmp_path):
     assert q is not None and q["levels"] == ["WARNING", "ERROR"] and q["from_date"] == "" and q["to_date"] == ""
     # 不带过滤参数不走查询（近期索引）
     mgr.last_query = None
-    m._write_impl(_ctx("/proj"), scope="daily", content="- 有条目", date="2026-10-01")
+    mgr._d[(mgr.active_id(), "/proj", "2026-10-01")] = ["- 有条目"]
     r2 = m._read_impl(_ctx("/proj"), scope="daily")
     assert mgr.last_query is None and "近期工作日志" in r2.content and "2026-10-01" in r2.content
 
@@ -483,3 +574,59 @@ def test_write_project_snapshots_before_write(monkeypatch, tmp_path):
     r = m._write_impl(_ctx("/proj"), scope="project", content="新项目记忆")
     assert r.success
     assert ("build", "project") in mgr.snapshots
+
+
+# ── mode=append / 乐观锁 / 收缩确认 ──────────────────────────
+def test_write_mode_append_global(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    r = m._write_impl(_ctx("/proj"), scope="global", content="规则 A", mode="append")
+    assert r.success and "追加" in r.content
+    r2 = m._write_impl(_ctx("/proj"), scope="global", content="规则 B", mode="append")
+    assert r2.success
+    r3 = m._read_impl(_ctx("/proj"), scope="global")
+    assert "规则 A" in r3.content and "规则 B" in r3.content
+    # 原有内容未被覆盖（append 语义：两条都在）
+    assert r3.content.index("规则 A") < r3.content.index("规则 B")
+
+
+def test_write_append_over_limit_rejected(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.write_global_memory("build", "x" * 3990)
+    r = m._write_impl(_ctx("/proj"), scope="global", content="y" * 20, mode="append")
+    assert not r.success and "超上限" in r.error
+
+
+def test_write_replace_conflict(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    r0 = m._read_impl(_ctx("/proj"), scope="global")
+    base0 = r0.content.rsplit("(base: ", 1)[1].rstrip(")")
+    m._write_impl(_ctx("/proj"), scope="global", content="v1")
+    # 仍带旧 base 写 → 冲突，错误里给当前 base
+    r = m._write_impl(_ctx("/proj"), scope="global", content="v2", base=base0)
+    assert not r.success
+    assert "版本冲突" in r.error and "当前 base:" in r.error
+
+
+def test_write_replace_shrink_requires_consolidate(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    m._write_impl(_ctx("/proj"), scope="global", content="- 条目若干内容填充\n" * 40)
+    r = m._write_impl(_ctx("/proj"), scope="global", content="短条目")
+    assert not r.success
+    assert "consolidate=true" in r.error and "mode=append" in r.error
+    r2 = m._write_impl(_ctx("/proj"), scope="global", content="精简版", consolidate=True)
+    assert r2.success
+
+
+def test_write_shrink_allowed_when_small_file(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    m._write_impl(_ctx("/proj"), scope="global", content="x" * 150)
+    r = m._write_impl(_ctx("/proj"), scope="global", content="y")
+    assert r.success  # 现有低于阈值不做收缩检查
+
+
+def test_read_global_returns_base(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    r = m._read_impl(_ctx("/proj"), scope="global")
+    assert "(base: " in r.content
+    r2 = m._read_impl(_ctx("/proj"), scope="project")
+    assert "(base: " in r2.content

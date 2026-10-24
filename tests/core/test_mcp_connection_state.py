@@ -40,6 +40,11 @@ def mgr():
     m._lock = threading.Lock()
     m._loop = None
     m._thread = None
+    m._ephemeral = set()  # 临时开启集合（生产由 __init__ 初始化）
+    # 配置侧服务器来源：get_status 会合并进来（含从未建连的）。
+    # 这里固定为空，避免测试依赖本机真实的插件 MCP 配置——否则装了
+    # 任何 MCP 插件的机器上都会多出一批占位条目，断言无谓失败。
+    m._configured_servers = lambda: []
     return m
 
 
@@ -134,6 +139,31 @@ class TestStatusReporting:
         mgr._connections = {"srv": conn}
 
         assert mgr.get_status()[0]["connected"] is False
+
+    def test_config_only_servers_are_reported(self, mgr):
+        """配置里有但从未建连的服务器必须出现在 get_status 里
+
+        回归：enabled=false 的服务器在 _connect_all 被跳过、永不建连，
+        以前 get_status 只看连接表，于是 mcp_manage list 对它们完全盲目——
+        用户配了 11 个 HTTP MCP，工具却说"没有任何 MCP 服务器配置"。
+        """
+        mgr._configured_servers = lambda: [
+            {"name": "http-a", "type": "http", "enabled": False},
+            {"name": "http-b", "type": "http", "enabled": False},
+            {"name": "live", "type": "stdio", "enabled": True},
+        ]
+        mgr._connections = {"live": _make_conn("live", MCPState.CONNECTED)}
+
+        status = {s["name"]: s for s in mgr.get_status()}
+
+        assert set(status) == {"http-a", "http-b", "live"}
+        # 配置侧占位：存在但未启动，不得伪装成已连接
+        assert status["http-a"]["state"] == MCPState.DISABLED
+        assert status["http-a"]["connected"] is False
+        assert status["http-a"]["type"] == "http"
+        assert status["http-a"]["tools"] == []
+        # 连接表已有条目优先，不被配置侧覆盖
+        assert status["live"]["state"] == MCPState.CONNECTED
 
 
 # ═══════════════════════════════════════════════════════════

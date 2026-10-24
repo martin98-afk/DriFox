@@ -123,8 +123,47 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | `model.metadata` | low | 当前模型的 provider / 名称 / 上下文长度 |
 | `model.schema` | low | 指定 agent 视角的工具 schema |
 | `model.config` | **high** | 完整模型配置，**含已解密明文 API key** |
+| `provider.list` | low | 已配置服务商清单（id / 名称 / 模型数，**不含密钥与 URL**） |
+| `model.enumerate` | low | 指定服务商的可选模型列表（含视觉 / 思考能力标记） |
+
+### 服务商
+
+| ID | level | 说明 |
+|---|---|---|
+| `provider.list` | low | 已配置服务商清单（见上，与模型组同一能力） |
 
 > `model.config` 是插件取任意服务商配置的唯一正确入口。密钥模式下磁盘 `app.config` 里的 API_KEY 是密文或空串，插件自行 `json.load` 会拿到不可用的 key（表现为 401）。
+
+### 模型下拉怎么选（示例）
+
+渲染「选服务商 / 选模型」下拉**不要**自己 `json.load(~/.drifox/app.config)`，
+走这两个能力：
+
+```python
+caps = ctx["capabilities"]
+
+providers = caps["provider.list"]()          # [{"id","provider_name","display_name",
+                                             #   "is_current","model_count","models_dev_id"}]
+models = caps["model.enumerate"]("MiniMax")  # [{"name","is_current","supports_vision",
+                                             #   "supports_thinking","context_limit","note"}]
+
+# 取到完整配置（含明文 key）再走 model.config —— 枚举结果里没有密钥
+cfg = caps.legacy("get_provider_config", "model.config")(
+    providers[0]["id"], models[0]["name"]
+)
+```
+
+要点：
+
+- **两级而非扁平**：`provider.list` 带 `model_count`，调用方先判断要不要展开。
+  一步返回全量会在「大服务商 × 多模型」场景拼出上万组合。
+- **不带 `API_KEY` / `API_URL`**。URL 看着无害，配合社工手法能把插件流量引到
+  别处；需要完整配置走 `model.config`。
+- **`supports_vision` 走「声明\_支持图像」优先**。第三方网关的额度与能力跟官方
+  API 各自成立，用户在模型参数卡的显式声明不被 models.dev 推断值反向覆盖。
+- **未知服务商返回空列表**，不静默串到别的服务商。
+- **tool surface 也可用**：`provider.list` / `model.enumerate` 在 ui 与 tool
+  双 surface 注册，工具里挑模型（如图片转发给视觉模型）不需要改 manifest surface。
 
 ### 会话
 
@@ -200,8 +239,26 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | `ui.notify` | low | 弹 InfoBar 通知 |
 | `ui.card.show` | low | 显示浮动卡 |
 | `ui.card.hide` | low | 隐藏浮动卡 |
+| `ui.artifacts.show` | medium | 向消息卡片成果栏推送成果条目（image/video/html/text/file 五类分控件；`show(items, target="latest", call_id="")`，返回投递条目数；`ToolResult.artifacts` 字段是工具插件的免声明通道） |
 | `ui.exclusive` | medium | 独占 UI 模式 |
 | `ui.dialog` | low | 文件 / 目录选择、确认框、单行输入（跟随主题） |
+
+
+页签徽标（任意元素挂到工作台页签，走 slot region 而非能力池）：
+
+```python
+# 宿主已声明 region "workbench:tab"（kind=badge），插件挂载条目：
+UIPluginRegistry.get_instance().register_slot_entry(
+    "workbench:tab",
+    "my-badge",                       # entry_id：region 内唯一
+    "my-plugin",
+    priority=0,
+    payload="3",                      # 三形态：str 文本 / QWidget 实例 / 无参工厂
+    metadata={"tab_id": "git-panel", "tooltip": "3 条未读"},
+)
+# tab_id 必填 = register_workbench_tab 的 page_id；同 tab 多条目 priority 高者生效；
+# 插件卸载时条目自动清理并通知面板重挂
+```
 
 ### 对话流 / 窗口
 
@@ -272,6 +329,32 @@ caps["stream.subscribe"]({
 |---|---|---|
 | `cache.purge` | low | 清理主程序进程内 LRU 缓存（HTML 渲染 / token 估算 / grep 编译） |
 | `config.read` | medium | 按 key 读主程序配置项（非敏感标量） |
+| `process.start` | **high** | 启动后台进程（argv 数组、无 shell；宿主退出即全杀） |
+
+`process.start` 启动的进程**绑定宿主存续期**（2026-10 定稿）：每个进程入专属
+kill-on-close Job（Windows），宿主退出 / 崩溃 / 被杀时内核自动树杀，不会残留
+孤儿进程；插件被禁用或卸载时，主程序立即回收该插件名下全部进程（禁用/卸载前
+杀，防插件目录文件占用）。管控面：
+
+- **首启确认**：每插件会话内首次启动弹窗（展示插件名与命令），用户同意后本
+  会话内不再询问；拒绝后本会话内该插件一律拒绝（防骚扰式重试），重启主程序
+  可重置授权。无 GUI（headless/测试）跳过确认；
+- **限额**：单插件最多 8 个后台进程，全局最多 32 个，超限直接拒绝；
+- **env 白名单**：子进程只继承宿主环境的白名单子集（PATH/TEMP/系统路径等，
+  见 `process_registry.ENV_WHITELIST`）+ 插件 `env` 参数显式增量；宿主密钥类
+  环境变量（API key 等）不泄漏给插件启动的进程。
+
+只收 argv 数组（字符串直接 TypeError，杜绝 shell 注入面）；stdout/stderr 丢弃。
+要输出回传与审批的一次性命令走工具插件的 command 工具，别用这个：
+
+```python
+from app.plugins.sdk import caps_for
+
+start = caps_for("process.start")
+info = start(["magpie", "web", "--no-open"],
+             env={"MAGPIE_WEB_KEY": "some-key"}, name="magpie-web")
+# info == {"pid": 12345, "name": "magpie-web"}
+```
 
 `config.read` 刻意**不**返回整个 `Settings` 对象——那等于把 `model.config` 才该给的
 明文密钥一起交出去。按 key 取，且密钥类字段（key / token / secret / password /
@@ -383,7 +466,7 @@ provisional），不要图省事直连内部模块。收录判定三条：无宿
 按消息提示在 `plugin.json` 的 `capabilities` 里加 ID 后重载插件。
 
 **声明了但拿不到**
-检查 `api_version`：若为 2 且 `capabilities` 写错字（如 `session.Read`），展开后是未知 ID，不匹配任何 provider。用 `caps.names()` 打印实际放行的清单对照。
+检查加载期日志：typo（如 `session.Read`）、已删除能力或不存在的组通配会在插件加载时直接产出 `[CapabilityManifest] 未知能力 ID` warning（manifest_warnings，随 PluginInfo 可见），无需等运行期。也可用 `caps.names()` 打印实际放行的清单对照。
 
 **兼容期怎么退出**
 把插件的 `api_version` 提到 2 并补清单。宿主侧将来若想把默认版本从 1 提到 2，只需改一处默认值，无需逐插件改。
@@ -445,6 +528,16 @@ python tools/plugin_import_guard.py
 
 # CI：有违规即失败
 python tools/plugin_import_guard.py --strict
+
+# 审计差集报告：实际使用 vs 声明（兼容期插件给出建议清单）
+python tools/capability_report.py
+python tools/capability_report.py --since 2026-10-23   # 只看指定日期后，排除升级前历史
+python tools/capability_report.py --json              # 机器可读
 ```
+
+报告四类差集：兼容期插件的建议声明清单（实际使用 - 恒放行项，可直接照抄进
+plugin.json）、已声明但从未使用（可从清单删）、用到声明外能力（异常，出现
+即说明存在绕过路径）、本地未安装但日志有使用的孤儿。日志跨插件升级前后时
+务必加 `--since`：兼容期（全量放行）时期的使用记录会污染差集判定。
 
 合法面：`app.plugins.contracts` / `app.plugins.registries` / `app.plugins.managers.plugin_config_store` / `app.plugins.sdk` / `app.plugins.capabilities` / `app.plugins.deps_loader` / `app.plugins.managers.plugin_manager`。

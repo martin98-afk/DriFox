@@ -71,6 +71,17 @@ class McpOAuthManager:
     def get_session(self, plugin_name: str, server_name: str) -> Optional[OAuthSession]:
         return self._factory.get_session(plugin_name, server_name)
 
+    def cancel(self, plugin_name: str, server_name: str) -> bool:
+        """中止进行中的授权（UI 线程可调，立即返回）。
+
+        只置取消标记并唤醒等待方，回调 server 的关闭与线程收尾由授权线程完成，
+        因此不会阻塞界面。返回是否真的中止了一个等待中的会话。
+        """
+        ok = self._factory.cancel(plugin_name, server_name)
+        if ok:
+            logger.info(f"[MCP-OAuth] {plugin_name}/{server_name} 授权中止请求已接受")
+        return ok
+
     def has_token(self, plugin_name: str, server_name: str) -> bool:
         return self._factory.has_token(plugin_name, server_name)
 

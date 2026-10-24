@@ -45,6 +45,10 @@ GLOBAL_MEMORY_MAX_CHARS = 4000
 PROJECT_MEMORY_MAX_CHARS = 3000
 # 单条工作日志正文上限（摘要另计）。日志是索引不是报告，超限直接拒写逼模型压缩
 DAILY_ENTRY_MAX_CHARS = 400
+# 整体替换收缩检查：现有内容达到 SHRINK_CHECK_MIN_CHARS 且新内容 < 现有*SHRINK_RATIO
+# 视为大幅精简，需模型显式 consolidate=true（防「记一条覆盖全部」事故，2026-10-23）
+SHRINK_CHECK_MIN_CHARS = 200
+SHRINK_RATIO = 0.4
 
 _locks: Dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -381,7 +385,15 @@ def undistilled_before(workdir: str | Path, aid: str, before: str = "") -> List[
 
 
 def mark_distilled(workdir: str | Path, aid: str, date: str) -> Dict:
-    """把 YYYY-MM-DD.md 重命名为 YYYY-MM-DD.distilled.md（保留可查，蒸馏时忽略）。"""
+    """把 YYYY-MM-DD.md 归档为 YYYY-MM-DD.distilled.md（保留可查，蒸馏时忽略）。
+
+    归档档已存在但 .md 还有残留条目（蒸馏打标之后又有追加，典型是跨天会话
+    的尾部条目落回了旧日期文件）时：把残留条目并入归档尾部再删 .md，幂等
+    收敛。此前直接返回 already，而蒸馏门禁只认「未蒸馏文件是否存在」——
+    打标说已完成、门禁说没完成，两条状态互相锁死（实测发生过）。
+    Returns:
+        merged: 并入的残留条目数（首次归档为 0）。
+    """
     if not workdir:
         return {"ok": False, "error": "no_workdir"}
     if not is_date_name(date or ""):
@@ -390,14 +402,29 @@ def mark_distilled(workdir: str | Path, aid: str, date: str) -> Dict:
     with _lock_for(p):
         target = distilled_daily_path(p)
         if target.exists():
-            return {"ok": False, "error": "already"}
+            residue = read_text(p)
+            if not residue.strip():
+                # 空残留（如抖动重试留下的空壳）：直接删掉收敛
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+                return {"ok": True, "date": date, "file": str(target), "merged": 0}
+            base = read_text(target).rstrip("\n")
+            merged = len(parse_daily_entries(residue))
+            _atomic_write(target, base + "\n\n" + residue.strip("\n") + "\n")
+            try:
+                p.unlink()
+            except OSError as e:
+                return {"ok": False, "error": str(e)}
+            return {"ok": True, "date": date, "file": str(target), "merged": merged}
         if not p.exists():
             return {"ok": False, "error": "not_found"}
         try:
             os.replace(p, target)
         except OSError as e:
             return {"ok": False, "error": str(e)}
-    return {"ok": True, "date": date, "file": str(target)}
+    return {"ok": True, "date": date, "file": str(target), "merged": 0}
 
 
 # ── 写 ───────────────────────────────────────────────────
@@ -428,6 +455,95 @@ def write_project_memory(workdir: str | Path, aid: str, content: str) -> bool:
     return True
 
 
+def memory_fingerprint(path: Path) -> str:
+    """记忆文件版本指纹（乐观锁 base）：mtime_ns + 字符数；文件缺失返回 empty。
+
+    memory_read 返回给模型，整体替换时带回校验：不一致 = 磁盘已被别处改过。
+    """
+    try:
+        st = Path(path).stat()
+        return f"m{st.st_mtime_ns}c{st.st_size}"
+    except OSError:
+        return "empty"
+
+
+def append_memory_file(path: Path, text: str) -> Dict:
+    """向 MEMORY.md 末尾追加一块内容（不碰已有行；高频「记一条」的低风险通道）。
+
+    组装新增换行一律用 \n，交由 _atomic_write 的 write_text 按 os.linesep
+    翻译，与既有文件的 CRLF 现状保持一致；已有内容原样保留。
+    返回 {ok, chars}（写后总字符）或 {ok: False, error}。
+    """
+    body = (text or "").strip()
+    if not body:
+        return {"ok": False, "error": "empty"}
+    with _lock_for(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = read_text(path)
+        new = (old.rstrip("\r\n") + "\n" + body + "\n") if old.strip() else (body + "\n")
+        _atomic_write(path, new)
+        try:
+            chars = len(path.read_text(encoding="utf-8").strip())
+        except Exception:
+            chars = 0
+    return {"ok": True, "chars": chars}
+
+
+def write_memory_guarded(
+    path: Path,
+    content: str,
+    base: str = "",
+    consolidate: bool = False,
+    snapshot=None,
+) -> Dict:
+    """带护栏的整体替换：乐观锁 + 收缩确认 + 快照，全部在锁内完成。
+
+    base 非空且与磁盘指纹不一致 → conflict（模型基于陈旧上下文，禁止覆盖）。
+    现有内容达 SHRINK_CHECK_MIN_CHARS 且新内容 < 现有*SHRINK_RATIO 且未显式
+    consolidate → shrink（防拼接不全的「记一条覆盖全部」）。
+    校验全过才调 snapshot 回调（异常吞掉，不阻断写入）再原子落盘。
+    返回 {ok: True, chars} 或 {ok: False, error, ...细节}。
+    """
+    body = (content or "").rstrip()
+    with _lock_for(path):
+        # 读不可信防护：文件存在但连 stat 都失败（网盘同步/杀毒占用/权限抖动）时
+        # fingerprint 会回落 "empty" 哨兵——若放行，base="empty" 的「首写」语义
+        # 会直接覆盖一个临时读不到的真实文件。fail-closed：拒写。
+        exists = path.exists()
+        cur_fp = memory_fingerprint(path)
+        if exists and cur_fp == "empty":
+            return {"ok": False, "error": "unreadable"}
+        if base and base != cur_fp:
+            return {"ok": False, "error": "conflict", "cur_base": cur_fp}
+        if exists:
+            try:
+                old_text = path.read_text(encoding="utf-8").strip()
+            except (OSError, ValueError):
+                # 内容读不到：shrink 检查会拿空串失效，同样拒写
+                return {"ok": False, "error": "unreadable"}
+        else:
+            old_text = ""
+        new_chars = len(body.strip())
+        if (
+            not consolidate
+            and len(old_text) >= SHRINK_CHECK_MIN_CHARS
+            and new_chars < len(old_text) * SHRINK_RATIO
+        ):
+            return {
+                "ok": False,
+                "error": "shrink",
+                "old_chars": len(old_text),
+                "new_chars": new_chars,
+            }
+        if snapshot is not None:
+            try:
+                snapshot()
+            except Exception:
+                pass  # 快照失败不阻断写入（与既有语义一致）
+        _atomic_write(path, body + "\n")
+    return {"ok": True, "chars": new_chars}
+
+
 def append_daily(
     workdir: str | Path, aid: str, text: str, date: str = "", level: str = "INFO", summary: str = ""
 ) -> Dict:
@@ -437,6 +553,8 @@ def append_daily(
     时刻与等级是精确字段，由程序生成；模型提供 summary（一句话，便于浏览）与
     text（细节）；level 非法回落 INFO，summary 缺省时退化为三段式。
     正文超 DAILY_ENTRY_MAX_CHARS 直接拒写（日志是索引不是报告）。
+    date 参数留给库调用方（工具层对模型侧恒传空 = 系统当日）：日志归属日期
+    必须由时钟决定，不允许写入方指定历史日期，否则条目时间戳与文件归属错位。
     """
     if not workdir:
         return {"ok": False, "error": "no_workdir"}

@@ -14,6 +14,7 @@ Server Metadata 发现、PKCE、RFC 7591 动态客户端注册、401 重授权�
 from __future__ import annotations
 
 import asyncio
+import json
 import webbrowser
 from dataclasses import dataclass, field
 from typing import Optional
@@ -27,6 +28,56 @@ from app.core.mcp_oauth.token_store import PluginMcpTokenStore
 
 # 授权等待上限（秒）。超时后关闭回调 server 并报错。
 DEFAULT_AUTH_TIMEOUT = 300.0
+
+# 驱动 OAuth 流程的首请求：一个真实的最小 MCP initialize 请求。
+# SDK 只在 401/403 响应上才进入授权流程，因此这个请求必须让服务端有机会
+# 判定「未授权」。裸 GET 会被只接受 POST 的服务回 405（figma、context7），
+# flow 静默收尾，最终只剩一句「授权未完成」。
+_INITIALIZE_METHOD = "initialize"
+
+
+def _build_probe_request(server_url: str):
+    """构造驱动 OAuth 流程的首请求（POST JSON-RPC initialize）。"""
+    import httpx
+    from mcp.types import LATEST_PROTOCOL_VERSION
+
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": _INITIALIZE_METHOD,
+            "params": {
+                "protocolVersion": LATEST_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "DriFox", "version": "1.0"},
+            },
+        }
+    ).encode("utf-8")
+    return httpx.Request(
+        "POST",
+        server_url,
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "mcp-protocol-version": LATEST_PROTOCOL_VERSION,
+        },
+    )
+
+
+def _reject_unexpected_status(response) -> Optional[str]:
+    """首请求没回 401/403 时给出可读原因；正常则返回 None。
+
+    SDK 的授权入口只对 401（完整授权）和 403（insufficient_scope 升级）生效。
+    其它状态码下 SDK 会静默收尾，调用方只能看到「授权未完成」，真实原因
+    （服务端不认 GET、端点写错、服务端该路径需要别的前缀等）被彻底吞掉。
+    """
+    status = response.status_code
+    if status in (401, 403):
+        return None
+    if status == 200:
+        return "服务端对该请求直接返回 200，未要求授权（可能不需要 OAuth，或 url 指向了非 MCP 端点）"
+    return f"首请求返回 HTTP {status}，服务端未按 MCP 规范要求授权（应按需 401）"
 
 
 @dataclass
@@ -93,6 +144,13 @@ class McpOAuthProviderFactory:
         )
         self._patch_token_auth(provider)
         self._providers[key] = provider
+        if client_name and client_name != "DriFox":
+            # 少数授权服务器（如 Figma）只按 client_name 白名单放行动态注册，
+            # 插件配置里会填第三方客户端名绕过。它不是 DriFox 的真实身份，
+            # 必须在日志与设置卡上明示，避免误以为是官方支持。
+            logger.warning(
+                f"[MCP-OAuth] {key} 以「{client_name}」身份注册（非 DriFox），属绕过授权服务器白名单，风险由使用者自担"
+            )
         logger.info(f"[MCP-OAuth] {key} provider 已创建")
         return provider
 
@@ -187,9 +245,24 @@ class McpOAuthProviderFactory:
 
         if session.status == "done":
             logger.info(f"[MCP-OAuth] {key} 授权成功")
+        elif session.status == "cancelled":
+            logger.info(f"[MCP-OAuth] {key} 授权已中止")
         else:
             logger.warning(f"[MCP-OAuth] {key} 授权失败: {session.error}")
         return session
+
+    def cancel(self, plugin_name: str, server_name: str) -> bool:
+        """中止该 server 进行中的授权。返回是否真的中止了一个等待中的会话。
+
+        UI 线程可调：只置取消标记 + 唤醒等待方，关 server 与线程收尾由授权线程
+        自己的 finally 完成，不会阻塞界面。
+        """
+        key = self.make_key(plugin_name, server_name)
+        session = self._sessions.get(key)
+        if session is None or session.status != "pending" or session._callback is None:
+            return False
+        session._callback.cancel()
+        return True
 
     def _run_authorization(
         self,
@@ -216,6 +289,10 @@ class McpOAuthProviderFactory:
 
         async def callback_handler() -> tuple[str, Optional[str]]:
             result = callback.wait(self._auth_timeout)
+            if result.cancelled:
+                session.status = "cancelled"
+                session.error = "授权已中止"
+                return "", None
             if result.error:
                 session.status = "error"
                 session.error = result.error_description or result.error
@@ -237,20 +314,56 @@ class McpOAuthProviderFactory:
             httpx.Request，调用方负责发出去并把 Response asend 回去。discovery /
             DCR / token 交换都以 yield 形式出现，若像早期版本那样一律回 401，
             discovery 阶段就会抛 OAuthFlowError。因此这里必须真实发送。
+
+            首请求必须是服务端会回 401 的真实 MCP 请求（POST initialize）。
+            SDK 只在收到 401 时才进入 OAuth 流程，裸 GET 会被 figma /
+            context7 这类只接受 POST 的服务回 405，flow 静默收尾、authorize
+            最终只剩一句「授权未完成」，掩盖真实原因。
             """
             import httpx
 
+            server_url = str(provider.context.server_url)
             async with httpx.AsyncClient(timeout=30) as client:
-                request = httpx.Request("GET", provider.context.server_url)
-                flow = provider.async_auth_flow(request)
+                flow = provider.async_auth_flow(_build_probe_request(server_url))
+                checked = False
                 try:
                     pending = await flow.__anext__()
                     while True:
                         response = await client.send(pending)
+                        # 只校验发往 server_url 的首个请求。SDK 在 token 可刷新时
+                        # 会先 yield refresh 请求，那不是授权入口，不能按同一口径判。
+                        if not checked and str(pending.url).split("?")[0] == server_url.split("?")[0]:
+                            checked = True
+                            # 已存在有效 token 时 SDK 会直接带 Authorization 发出，
+                            # 服务端回 200 属正常（不必重新授权），不能当成异常。
+                            if response.status_code == 200 and "authorization" in pending.headers:
+                                session.status = "done"
+                                logger.info(f"[MCP-OAuth] {session.key} 已有有效 token，无需重新授权")
+                                return
+                            reason = _reject_unexpected_status(response)
+                            if reason:
+                                session.status = "error"
+                                session.error = reason
+                                logger.warning(f"[MCP-OAuth] {session.key} 首请求未要求授权：{reason}")
+                                return
                         pending = await flow.asend(response)
                 except StopAsyncIteration:
                     # 流程正常收尾（最后一次 yield 是带上 token 的重试请求）。
-                    pass
+                    # 若全程没走到浏览器授权，说明服务端从未要求授权，不能只报「授权未完成」。
+                    if not opened["url"] and session.status == "pending":
+                        session.status = "error"
+                        session.error = "服务端未要求授权（未返回 401），请确认该地址是 MCP 端点且需要 OAuth"
+                except Exception as e:
+                    # SDK 抛的 OAuthFlowError / OAuthRegistrationError 带真实原因
+                    # （如注册端点 403），必须落进 session，否则只剩笼统的「授权未完成」。
+                    # 回调层已给出更精确原因时（如「未收到授权码」）不覆盖。
+                    if session.status == "pending":
+                        session.status = "error"
+                        session.error = f"{type(e).__name__}: {e}"
+                    logger.warning(f"[MCP-OAuth] {session.key} 授权流程异常: {type(e).__name__}: {e}")
+                finally:
+                    # 提前 return / 抛异常时显式收尾 generator，避免悬挂的 async generator 警告。
+                    await flow.aclose()
 
         asyncio.run(drive())
         return opened["url"]

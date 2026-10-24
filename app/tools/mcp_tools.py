@@ -635,6 +635,14 @@ class MCPClientManager:
         # 按 name 加锁：同一 server 只允许一个进行中的连接/断开操作
         self._busy_names: set = set()
         self._busy_lock = threading.Lock()
+
+        # 临时开启的服务器名（模型按需 mcp_manage(action="enable") 建立，
+        # 用完 action="disable" 回收）。纯内存态：进程重启即清空，
+        # 所以「重启后不会自动重连」是结构性保证，不依赖额外开关。
+        # 语义：不进 get_tool_schemas_by_server() 的注入列表（config 仍为
+        # enabled=false），但连接本身可用 tool_execute 中转调用；
+        # _connect_all / disconnect_missing 的孤儿清理必须豁免它。
+        self._ephemeral: set = set()
         # 全局 connect_all 去重：多窗口同时启动时只允许一次全量连接
         self._connect_all_running = False
         # 全量连接正在占用的服务器名（登记进 _busy_names，
@@ -1099,9 +1107,19 @@ class MCPClientManager:
             enabled_servers.append(server_cfg)
             enabled_names.add(name)
 
-        # 1) 断开已不在目标列表中的连接（配置被删除或被禁用）
+        # 已被配置层打开（enabled=true）的服务器不再算临时：用户已把它转为常驻
         with self._lock:
-            stale = [n for n, c in self._connections.items() if n not in enabled_names and c.session]
+            self._ephemeral -= enabled_names
+
+        # 1) 断开已不在目标列表中的连接（配置被删除或被禁用）
+        #    豁免临时开启的服务器：它们的 config.enabled 恒为 false，
+        #    按配置名单判定会被当孤儿杀掉（全量连接/多窗口刷新時踩掉）。
+        with self._lock:
+            stale = [
+                n
+                for n, c in self._connections.items()
+                if n not in enabled_names and c.session and n not in self._ephemeral
+            ]
         for name in stale:
             try:
                 await self._disconnect_single(name)
@@ -1323,6 +1341,10 @@ class MCPClientManager:
         conn.set_state(MCPState.CONNECTED)
         with self._lock:
             self._connected = True
+            # 配置层本就开启（用户从 UI 打开了开关）→ 归常驻，不再算临时。
+            # 漏这步会让 set_status 把它渲染成「临时开启」，误导模型去 disable。
+            if config.get("enabled", True):
+                self._ephemeral.discard(name)
         logger.info(f"[MCP] 已连接服务器 '{name}'，发现 {len(conn.tools)} 个工具")
         return True, ""
 
@@ -1359,6 +1381,11 @@ class MCPClientManager:
                         on_done(name)
                     except Exception as e:
                         logger.warning(f"[MCP] on_done 回调异常: {e}")
+
+        # 手动关闭的服务器不再算临时（防残留幽灵状态：连接已断但 _ephemeral 里还留着，
+        # 会让 list 把它渲染成「临时开启」并让孤儿清理跳过它）
+        with self._lock:
+            self._ephemeral.discard(name)
 
         threading.Thread(target=_worker, name="mcp-hot-disconnect", daemon=True).start()
 
@@ -1443,6 +1470,9 @@ class MCPClientManager:
             if not keep_record:
                 self._connections.clear()
             self._connected = False
+            # 全局断开也是临时开启的终结：清空集合，避免残留名字让后续
+            # disconnect_missing 跳过不存在的连接 / list 渲染出错状态
+            self._ephemeral.clear()
 
     def disconnect_missing(self, valid_names: set) -> None:
         """断开所有不在 valid_names 中的已注册连接
@@ -1451,7 +1481,10 @@ class MCPClientManager:
         对应的子进程不会自动退出，需要显式断开，否则残留进程继续运行。
         """
         with self._lock:
-            orphans = [n for n in self._connections if n not in valid_names]
+            # 豁免临时开启项：它们不在 enabled 名单里，但用户/模型正在用
+            orphans = [
+                n for n in self._connections if n not in valid_names and n not in self._ephemeral
+            ]
         if not orphans:
             return
         logger.info(f"[MCP] 热重载检测到 {len(orphans)} 个已失效连接，准备断开: {orphans}")
@@ -1460,28 +1493,32 @@ class MCPClientManager:
 
     # ── 工具 Schema ──────────────────────────────────
 
-    def get_tool_schemas(self) -> List[Dict]:
-        """获取所有 MCP 工具的 OpenAI function calling schema"""
+    def get_tool_schemas(self, include_ephemeral: bool = False) -> List[Dict]:
+        """获取所有 MCP 工具的 OpenAI function calling schema
+
+        include_ephemeral=False（默认）：只含常驻开启的服务器——常驻注入与
+        token 估算必须用它，临时开启是纯内存态，进常驻列表就丢掉「零 token
+        占用」的结构性保证。
+        include_ephemeral=True：额外含临时开启（_ephemeral）的服务器。仅供
+        tool_search 搜索面使用：临时开启后若上下文被压缩，模型必须能重新
+        找回工具定义，否则那台服务器等于白开。
+        """
         schemas = []
-        for server_schemas in self.get_tool_schemas_by_server().values():
+        for server_schemas in self.get_tool_schemas_by_server(
+            include_ephemeral=include_ephemeral
+        ).values():
             schemas.extend(server_schemas)
         return schemas
 
-    def get_tool_schemas_by_server(self) -> Dict[str, List[Dict]]:
-        """按服务器分组获取 MCP 工具的 OpenAI function calling schema（设置卡逐行 token 估算用）"""
-        by_server: Dict[str, List[Dict]] = {}
-        with self._lock:
-            items = list(self._connections.items())
-        for server_name, conn in items:
-            if not conn.session or not conn.enabled:
-                continue
-            schemas = by_server.setdefault(server_name, [])
-            for tool in conn.tools:
-                prefixed_name = f"{self.TOOL_PREFIX}{server_name}__{tool.name}"
-                schema = {
+    def _schemas_of(self, conn: MCPServerConnection) -> List[Dict]:
+        """单个连接的工具 schema 列表（不做 enabled 过滤，由调用方决定）"""
+        schemas = []
+        for tool in conn.tools:
+            schemas.append(
+                {
                     "type": "function",
                     "function": {
-                        "name": prefixed_name,
+                        "name": f"{self.TOOL_PREFIX}{conn.name}__{tool.name}",
                         "description": tool.description or f"MCP tool: {tool.name}",
                         "parameters": tool.inputSchema
                         or {
@@ -1490,7 +1527,26 @@ class MCPClientManager:
                         },
                     },
                 }
-                schemas.append(schema)
+            )
+        return schemas
+
+    def get_tool_schemas_by_server(self, include_ephemeral: bool = False) -> Dict[str, List[Dict]]:
+        """按服务器分组获取 MCP 工具的 OpenAI function calling schema（设置卡逐行 token 估算用）
+
+        默认只含 config.enabled 为真的服务器：临时开启（_ephemeral）的 config
+        仍是关闭态，天然不进常驻工具列表，这是「省 token」的结构性保证。
+        include_ephemeral=True 时把临时开启的也纳入（tool_search 搜索面用）。
+        """
+        by_server: Dict[str, List[Dict]] = {}
+        with self._lock:
+            items = list(self._connections.items())
+            ephemeral = set(self._ephemeral) if include_ephemeral else set()
+        for server_name, conn in items:
+            if not conn.session:
+                continue
+            if not conn.enabled and server_name not in ephemeral:
+                continue
+            by_server.setdefault(server_name, []).extend(self._schemas_of(conn))
         return by_server
 
     # ── 工具调用 ──────────────────────────────────────
@@ -1572,30 +1628,179 @@ class MCPClientManager:
         with self._lock:
             return self._connected
 
+    # ── 临时开启（模型按需启用，用完显式关闭）────────────
+
+    def ephemeral_names(self) -> set:
+        """当前处于临时开启状态的服务器名集合"""
+        with self._lock:
+            return set(self._ephemeral)
+
+    def enable_ephemeral(self, name: str) -> Tuple[bool, object]:
+        """临时开启一个已配置但关闭的服务器（阻塞到连上或失败）
+
+        与 UI 开关的区别：**不写 config.enabled**，只在内存连接表里建立连接，
+        并登记进 _ephemeral。因此：
+        - get_tool_schemas_by_server() 仍跳过它，常驻工具列表零占用；
+        - _connect_all / disconnect_missing 的孤儿清理显式豁免它。
+
+        Returns:
+            (True, schemas)：schemas 为该服务器全部工具定义（供模型经
+                tool_execute 中转调用）；
+            (False, error)：失败原因（字符串）。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            servers = pm.get_mcp_servers() if pm.is_initialized() else []
+        except Exception as e:
+            return False, f"读取 MCP 配置失败: {e}"
+        config = next((s for s in servers if s.get("name") == name), None)
+        if config is None:
+            return False, f"未找到名为 '{name}' 的 MCP 服务器配置（用 action=\"list\" 查看可用服务器名）"
+
+        already_enabled = bool(config.get("enabled", True))
+        with self._lock:
+            conn = self._connections.get(name)
+            connected = conn is not None and conn.session is not None and conn.state == MCPState.CONNECTED
+            tools = list(conn.tools) if conn is not None else []
+        if connected:
+            if already_enabled:
+                return False, (
+                    f"'{name}' 已是常驻开启状态，它的工具已在当前工具列表中，直接调用即可（无需临时开启）。"
+                )
+            with self._lock:
+                self._ephemeral.add(name)
+            with self._lock:
+                conn = self._connections.get(name)
+                return True, self._schemas_of(conn) if conn is not None else []
+
+        with self._busy_lock:
+            if name in self._busy_names:
+                return False, f"'{name}' 正在连接/断开中，请稍后重试"
+            self._busy_names.add(name)
+        # 先登记临时态：连接期间若其它入口触发 _connect_all / disconnect_missing，
+        # 孤儿清理需能识别它是「正在被临时开启」而不是待清理的残留。
+        with self._lock:
+            self._ephemeral.add(name)
+        try:
+            try:
+                success, error = self._run_async(self._connect_single(name, config), timeout=None)
+            except Exception as e:
+                success, error = False, str(e)
+            if not success:
+                with self._lock:
+                    self._ephemeral.discard(name)
+                msg = error or "连接失败"
+                if "need_confirm" in msg:
+                    return False, (
+                        f"MCP 服务器 '{name}' 来自用户级插件，首次启动需你在"
+                        f"「设置 → MCP 连接器」中确认放行一次，之后模型即可临时开启。"
+                    )
+                return False, msg
+            # 配置层本就开启的服务器：救活后归常驻，不留在临时集合里
+            if already_enabled:
+                with self._lock:
+                    self._ephemeral.discard(name)
+            with self._lock:
+                conn = self._connections.get(name)
+                schemas = self._schemas_of(conn) if conn is not None else []
+            logger.info(f"[MCP] '{name}' 临时开启成功，{len(schemas)} 个工具待中转调用")
+            return True, schemas
+        finally:
+            with self._busy_lock:
+                self._busy_names.discard(name)
+
+    def disable_ephemeral(self, name: str) -> Tuple[bool, str]:
+        """关闭模型临时开启的服务器（常驻开启的不受影响，防止误关用户配置）"""
+        with self._lock:
+            if name not in self._ephemeral:
+                return False, (
+                    f"'{name}' 不是临时开启的服务器，本工具不能关闭它。"
+                    f"如需关闭常驻服务器，请用户在「设置 → MCP 连接器」中操作。"
+                )
+        with self._busy_lock:
+            if name in self._busy_names:
+                return False, f"'{name}' 正在连接/断开中，请稍后重试"
+            self._busy_names.add(name)
+        try:
+            self._run_async(self._disconnect_single(name, keep_record=True), timeout=None)
+        except Exception as e:
+            logger.error(f"[MCP] 临时关闭 '{name}' 失败: {e}")
+            return False, f"断开失败: {e}"
+        finally:
+            with self._busy_lock:
+                self._busy_names.discard(name)
+            with self._lock:
+                self._ephemeral.discard(name)
+        logger.info(f"[MCP] '{name}' 临时开启已关闭")
+        return True, ""
+
+    def _configured_servers(self) -> List[dict]:
+        """配置侧的 MCP 服务器全集（含从未建连的）。
+
+        get_status 只反映内存连接表，而 enabled=false 的服务器在 _connect_all
+        里被直接跳过、永不建连，于是它们在整个状态面（mcp_manage list、设置卡）
+        上完全不可见——用户配了 12 个 HTTP MCP，工具却回答"没有任何 MCP 服务器
+        配置"。配置来源必须由调用方合并进来，才能表达"配置全集 + 运行时状态"。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            return list(pm.get_mcp_servers()) if pm.is_initialized() else []
+        except Exception as e:
+            logger.debug(f"[MCP] 读取配置侧服务器列表失败: {e}")
+            return []
+
     def get_status(self) -> List[Dict]:
         # 注意：返回的 tools 必须带 mcp__{server}__ 前缀，与 get_tool_schemas() 保持一致，
-        # 避免 LLM 从 mcp_list_servers 看到裸名后误用导致调用失败。
+        # 避免 LLM 从 mcp_manage 看到裸名后误用导致调用失败。
         #
-        # 这里返回注册表中的**全部** server（含 CONNECTING / FAILED / DISABLED），
-        # 旧实现只返回连接成功的条目，导致 UI 永远读不到"启动中"和"失败"两种状态。
+        # 返回分两段：连接表里的条目（含 CONNECTING / FAILED / DISABLED，旧实现
+        # 只返回成功的，UI 读不到"启动中"和"失败"）+ 配置里有但从未建连的占位
+        # 条目（DISABLED）。只有这样才能表达"这个服务器存在，只是没开"。
         status = []
+        seen: set = set()
         with self._busy_lock:
             busy_names = set(self._busy_names)
         with self._lock:
             items = list(self._connections.items())
+            ephemeral = set(self._ephemeral)
         for name, conn in items:
+            seen.add(name)
             busy = name in busy_names or conn.state == MCPState.CONNECTING
             status.append(
                 {
                     "name": name,
                     "type": conn.server_type,
                     "enabled": conn.enabled,
+                    "ephemeral": name in ephemeral,
                     "connected": conn.session is not None and conn.state == MCPState.CONNECTED,
                     "state": MCPState.CONNECTING if busy and conn.state != MCPState.CONNECTED else conn.state,
                     "error": conn.last_error,
                     "busy": busy,
                     "tool_count": len(conn.tools),
                     "tools": [f"{self.TOOL_PREFIX}{name}__{t.name}" for t in conn.tools],
+                }
+            )
+        # 配置有、连接表无 → 从未建连（多为 enabled=false 被 _connect_all 跳过）
+        for cfg in self._configured_servers():
+            name = cfg.get("name", "")
+            if not name or name in seen:
+                continue
+            status.append(
+                {
+                    "name": name,
+                    "type": cfg.get("type", "stdio"),
+                    "enabled": cfg.get("enabled", True),
+                    "ephemeral": False,
+                    "connected": False,
+                    "state": MCPState.DISABLED,
+                    "error": "",
+                    "busy": False,
+                    "tool_count": 0,
+                    "tools": [],
                 }
             )
         return status

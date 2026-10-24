@@ -49,12 +49,16 @@ _ERROR_HTML = """<!doctype html>
 
 @dataclass
 class CallbackResult:
-    """一次回调的结果。code 为 None 表示未收到授权码。"""
+    """一次回调的结果。code 为 None 表示未收到授权码。
+
+    cancelled=True 表示用户在 DriFox 界面主动中止（区别于超时与授权服务器报错）。
+    """
 
     code: Optional[str] = None
     state: Optional[str] = None
     error: Optional[str] = None
     error_description: Optional[str] = None
+    cancelled: bool = False
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
@@ -146,6 +150,18 @@ class CallbackServer:
         if not self._event.wait(timeout=timeout):
             logger.warning(f"[MCP-OAuth] 等待回调超时（{timeout}秒）")
         return self.result
+
+    def cancel(self) -> None:
+        """中止等待：标记取消并立即唤醒等待方。幂等，且不覆盖已到达的回调结果。
+
+        只置标记不关 server —— 关闭动作由授权线程的 finally 负责，
+        这样 UI 线程调用本方法不会阻塞（shutdown + join 最长 2 秒）。
+        """
+        if self.result.code or self.result.error:
+            return
+        self.result.cancelled = True
+        self._event.set()
+        logger.info("[MCP-OAuth] 授权已被用户中止")
 
     def close(self) -> None:
         """关闭 server 并回收线程。幂等。"""

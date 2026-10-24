@@ -292,6 +292,17 @@ class CardManager:
         win_data["shown_callbacks"].pop(card_id, None)
         win_data["hidden_callbacks"].pop(card_id, None)
         win_data["card_meta"].pop(card_id, None)
+        # dock 容器多卡列表清理：原由 hide_card 负责，但插件卸载路径下
+        # unregister_card 早于 hide_card 执行（_remove_widget_from_container
+        # 已 pop containers[card_id]，晚一步调 unregister_card 会因取不到
+        # container_type 而跳过 visible_cards 复位），故此处必须自清 dock 列表
+        # （#19 问题 3：否则 dock_visible_cards / dock_active_cards 残留）。
+        for _ct in list(win_data.get("dock_visible_cards", {})):
+            dock_list = win_data["dock_visible_cards"].get(_ct, [])
+            if card_id in dock_list:
+                dock_list.remove(card_id)
+            if win_data.get("dock_active_cards", {}).get(_ct) == card_id:
+                win_data["dock_active_cards"][_ct] = dock_list[-1] if dock_list else None
         for _ct, _mv in win_data.get("multi_visible", {}).items():
             if card_id in _mv:
                 _mv.remove(card_id)

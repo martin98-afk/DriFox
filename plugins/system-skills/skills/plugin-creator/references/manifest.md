@@ -122,6 +122,83 @@ python tools/validate_plugins.py
 | 无该字段且 `api_version <= 1` | 兼容期全量放行 + warning |
 | 无该字段且 `api_version >= 2` | 等同 `[]` |
 
+⚠ **静默失效陷阱**：`api_version >= 2` 但漏写某项能力 → 该能力直接消失，无
+报错、无 warning（只有「未声明则全量放行」那一条 warning 会消失）。**每次往
+manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 排查手法：
+`plugins.log` 搜 `[CapabilityAudit] plugin=<name>`，看是「全量注入」还是按清单。
+
+**加载期校验**：声明了 CATALOG 不存在的 ID（typo、已删除能力）→ 插件加载即产
+`[CapabilityManifest] 未知能力 ID` warning（manifest_warnings，随 PluginInfo
+可见），不必等运行期撞 `CapabilityDenied`。
+
+**差集审计**（在 DriFox 主仓库跑，读本机日志）：`python tools/capability_report.py`
+（`--since 日期` 排除兼容期全量放行时期的历史使用污染，`--json` 机器可读）报
+四类差集：兼容期插件的建议声明清单（可直接照抄进 manifest）/ 已声明但从未用
+（可从清单删）/ 用到声明外能力（异常 = 存在绕过路径）/ 孤儿插件。升
+`api_version: 2` 前跑一次校准清单。
+
+### 能力目录全集
+
+唯一真相是主程序 `app/plugins/capabilities/catalog.py`（`CATALOG`）。快照
+（新增能力以主程序为准，本表可能滞后）：
+
+| 能力 ID | 说明 | surfaces |
+|---|---|---|
+| `model.metadata` | 当前模型 provider/名称/上下文/能力元数据 | ui, tool |
+| `model.schema` | 指定 agent 视角的工具 schema | ui, tool |
+| `model.config` | **完整模型配置（含已解密明文 API key）** | ui, tool |
+| `provider.list` / `model.enumerate` | 服务商清单（**不含密钥与 URL**）/ 服务商可选模型列表（含视觉/思考标记） | ui, tool |
+| `session.read` / `session.write` | 会话读写（write 写库 + 刷 UI + 发事件） | ui, tool |
+| `session.list` / `session.manage` / `session.invalidate` | 会话列表 / 新建切换删除 / 失效 system_prompt 缓存 | ui |
+| `input.read` | 输入框文本与附件列表 | **ui** |
+| `input.write` | 写入输入框文本 | **ui** |
+| `agent.read` | agent 列表/提示词/管理器 | ui, tool |
+| `subagent.run` | 派生子智能体 | tool |
+| `workdir.read` / `workdir.write` | 工作目录读 / 切换 | ui（read 含 tool） |
+| `theme.read` | 主题 id/名称/配色/字体/字号 | ui |
+| `context.compact` | 上下文压缩器 | ui, tool |
+| `tool.read` / `tool.execute` | 工具元信息 / 执行任意工具 | ui, tool |
+| `tool.inject` | 向 LLM 注入工具（改变模型可见行为） | **ui** |
+| `engine.session` / `engine.stack` | 创建引擎会话（消耗 token）/ 执行栈工厂 | ui |
+| `platform.send` / `platform.read` | 通讯平台收发 | ui |
+| `mcp.call` / `lsp.query` / `net.upload` | MCP 调用 / LSP 查询 / Gitee 上传 | tool |
+| `ui.notify` `ui.card.show` `ui.card.hide` | 弹 InfoBar / 显示浮动卡 / 隐藏浮动卡 | ui |
+| `ui.artifacts.show` | 向消息卡片成果栏推成果条目（image/video/html/text/file）；工具侧常规通道是 `ToolResult.artifacts` 免声明字段 | ui, tool |
+| `ui.exclusive` `ui.dialog` `ui.events` | 独占 UI 模式 / 文件与确认对话框 / UI 事件总线 | ui |
+| `stream.subscribe` | 订阅对话流事件（工具/流/错误/上下文/会话切换） | ui |
+| `window.active` `window.current` `window.host` | 活跃窗口 / 窗口语义快照 / 宿主顶层窗口 | ui |
+| `window.list` `window.events` `window.workbench` | 窗口 id 集 / tab 切换事件 / 右侧工作台页 | ui |
+| `plugin.read` / `plugin.control` | 已安装插件列表 / 重载启停其他插件 | ui |
+| `command.read` / `command.reload` | 命令列表 / 命令热重载 | ui |
+| `team.read` / `team.send` | 团队成员与运行状态 / 派发任务邮件（send 仅 tool） | ui, tool / **tool** |
+| `cache.purge` | 清理主程序进程内 LRU 缓存 | ui |
+| `process.start` | 启动后台进程（argv 数组、无 shell，独立于宿主生命周期） | ui, tool |
+| `config.read` | 按 key 读主程序配置项（**不含密钥**，密钥走 `model.config`） | ui |
+| `host.raw` | 裸 `main_widget` / `backend` 对象引用（逃生舱） | ui |
+| `plugin.log` / `state.kv` | 带前缀的 logger / 窗口级 KV（**恒放行，无需声明**） | - |
+
+支持 `"tool.*"` 与 `"*"` 通配；`state.kv`、`plugin.log` 是 UNGATED，不声明也有。
+
+### 取能力的两条路
+
+| 场景 | 入口 |
+|---|---|
+| 有 `ctx`（浮动卡 / 工作台页 / 输入按钮回调） | `ctx["capabilities"][cap_id]`，或 `ctx["services"][legacy_key]` |
+| **无 ctx（独立弹窗 / 后台线程 / 模块级）** | `from app.plugins.sdk import caps_for; caps_for(cap_id)` |
+
+⚠ **独立弹窗（`register_window`）拿不到 `ctx["services"]`**：`PluginWindow` 只
+注入 `context_provider`，不注入 `services` / `capabilities`。弹窗内一律走
+`caps_for(cap_id)`（host 由宿主解析：插件绑定窗口 → 活跃窗口）。实测
+`caps_for("input.write")` 在弹窗内可取到。
+
+⚠ `legacy_key` 只覆盖部分能力（见 catalog 的 `LEGACY_MAP`）。`input.write`、
+`theme.read`、`ui.dialog` 等**没有 legacy 键**，`ctx["services"]` 里查不到，
+必须走 `capabilities` 或 `caps_for`。
+
+⚠ 依赖 host 的能力（`input.*`、`session.*`、`window.*`）在无窗口上下文里会
+失败（如 `theme.read` 报 `'NoneType' object has no attribute ...`）。取到
+`None` 要有兜底，不能假设一定可用。
+
 能力清单（含 `config.read`：按 key 读主程序非敏感配置，密钥类字段拒读回落 default）、SDK 稳定性分级契约（`app/plugins/sdk.py` 是唯一稳定契约面，符号分 stable / provisional 两级；越界 import 自检 `python tools/check_sdk_imports.py`）、新增能力的四步流程见 [docs/plugins/capabilities.md](../../../../../docs/plugins/capabilities.md)。
 
 ---

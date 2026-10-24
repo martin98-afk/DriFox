@@ -3605,6 +3605,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 command_type=CommandType.FUNCTION,
                 description=description,
                 argument_hint="",
+                source="",
             )
 
     def _open_workbench_history(self):
@@ -3721,6 +3722,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     PluginHostService.get_instance().finish_watcher_baseline()
                 except Exception as e:
                     logger.debug(f"[MainWidget] watcher 基线期收口失败（不影响启动）: {e}")
+
+                # 自动设置卡回放：PluginManager 扫描期只登记 schema（不能 import
+                # UI 链，否则把 Qt/qfluentwidgets 级联拖进 initialize 同步段），
+                # 此处 UI 栈已就绪，统一注册（幂等；失败项留 pending 待下次）
+                try:
+                    from app.plugins.managers.plugin_manager import PluginManager
+
+                    PluginManager.get_instance().replay_config_cards()
+                except Exception as e:
+                    logger.warning(f"[MainWidget] 插件设置卡回放失败: {e}")
 
                 # [修复 2026-09-14] UI 插件装载完成后按最终注册表强制刷新欢迎卡。
                 # 背景：启动去抖合并渲染（_schedule_initial_welcome 600ms 尾触）
@@ -15287,10 +15298,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 刷新 UI 插件命令卡片缓存（插件可能注册了新命令）
         try:
-            from app.core.commands.command_manager import CommandManager
+            # #25 问题 4：原 CommandManager.reload_all_commands 是 AttributeError
+            # （CommandManager 无此方法，模块级函数在 builtin_commands），被 except
+            # 静默吞掉——保守对齐原意图改调模块级函数
+            from app.core.commands.builtin_commands import reload_all_commands
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            CommandManager.get_instance().reload_all_commands()
+            reload_all_commands()
             UIPluginRegistry.get_instance().re_register_all_commands()
         except Exception:
             pass
@@ -18433,7 +18447,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _extend_jump_scroll_lock(self) -> None:
         """续期：跳转相关的每一步进展都调用，把尾巴窗口重新推满。"""
-        if getattr(self, "_jump_scroll_lock_until", 0.0) <= 0.0:
+        try:
+            until = self._jump_scroll_lock_until
+        except AttributeError, RuntimeError:
+            # 属性未装配（测试桩）或 wrapper 已析构：无从续期，视为锁未开
+            return
+        if until <= 0.0:
             return
         self._jump_scroll_lock_until = time.monotonic() + JUMP_SCROLL_LOCK_TAIL_MS / 1000.0
 
@@ -20924,6 +20943,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if todos:
             self._latest_todos = todos
             self._sync_todo_panel(todos)
+        # 字段驱动：工具结果携带 artifacts 字段 → 挂成果栏（与 todos 同构入口）
+        # 语义差异：成果不迁卡（见 _sync_artifact_panel docstring）
+        artifacts = result.get("artifacts") if isinstance(result, dict) else getattr(result, "artifacts", None)
+        if artifacts:
+            self._sync_artifact_panel(artifacts)
         # 工作台浮层联动：文件写入类工具完成后重拉产物列表
         try:
             if not todos and (
@@ -24201,6 +24225,32 @@ class OpenAIChatToolWindow(ToolWindow):
             self._todo_panel_card = card
         try:
             card.update_todo_list(todos)
+        except RuntimeError:
+            pass
+
+    def _sync_artifact_panel(self, artifacts) -> None:
+        """把成果条目挂到 assistant 卡片的成果栏
+
+        ★ 与 ``_sync_todo_panel`` 的关键语义差异——**不迁卡**：任务列表是
+        "当前状态"，每轮工具都迁到最新卡（旧卡 ``clear_todo_list()``）；成果属于
+        产生它的那一轮，之后的新卡不继承旧卡的成果。所以这里**不卸载旧卡**，
+        只把条目追加到目标卡（面板内同路径去重）。后续维护者不要照抄 todos 的
+        迁移语义——那会让旧图串到新对话轮次里。
+
+        目标卡优先 ``call_id`` 定位（异步任务晚于轮次结束回填原卡），否则最新卡。
+
+        Args:
+            artifacts: 成果条目列表（ToolResult.artifacts / 能力 ui.artifacts.show）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not artifacts:
+            return
+        card = self._current_assistant_card or self._find_latest_assistant_card()
+        if card is None or not self._is_widget_alive(card):
+            return
+        try:
+            card.update_artifact_list(list(artifacts))
         except RuntimeError:
             pass
 

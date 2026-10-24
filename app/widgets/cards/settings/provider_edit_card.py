@@ -184,6 +184,12 @@ class ProviderEditCard(QWidget):
         # 手动刷新的状态元数据（ts/status），保存时随 payload 落盘供列表行状态点用
         self._fetch_meta: dict = {}
         self._auto_config_name = ""
+        # 登录世代号：点「中止」或重新登录时自增，旧线程回来时据此丢弃结果。
+        # 另配 threading.Event 传给 login_hook（声明支持的钩子用它提前退出轮询）；
+        # 不支持参数的旧钩子退回「世代号丢弃结果」语义，同样不必等超时。
+        self._login_generation = 0
+        self._login_running = False
+        self._login_cancel: threading.Event | None = None
         # 收集 SearchableEditableComboBox 引用用于刷新
         self._searchable_combos = []
         self._init_ui()
@@ -711,13 +717,25 @@ class ProviderEditCard(QWidget):
         self._open_help_url(name)
 
     def _on_auto_login(self):
-        """登录：后台执行 capabilities["login_hook"]，成功后回填 API Key 输入框"""
+        """登录按钮三态分发：登录中 → 中止；否则发起登录"""
+        if self._login_running:
+            self._abort_login()
+            return
         provider = self.nameCombo.currentText() if self.is_new else self.provider_name
         p = ProviderRegistry.get_instance().get(provider)
         hook = p.capabilities.get("login_hook") if p else None
         if hook is None:
             return
-        self.loginBtn.setEnabled(False)
+        self._login_generation += 1
+        gen = self._login_generation
+        self._login_running = True
+        # 每次登录一个新 Event：旧线程持有旧 Event，不会误接新的取消
+        cancel_event = threading.Event()
+        self._login_cancel = cancel_event
+        # 按钮保持可点，文案改「中止」：不等超时也能退出（用户实测痛点：
+        # 关了授权页就只能干等 5 分钟）。两字文案不会像「授权中」那样被截字。
+        self.loginBtn.setText("中止")
+        self.loginBtn.setToolTip("正在等待浏览器授权，点击中止")
         from qfluentwidgets import InfoBar
         from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -725,7 +743,8 @@ class ProviderEditCard(QWidget):
         # 提示文案可由服务商声明（如 Copilot：告知 user_code 在剪贴板，
         # 避免「浏览器开了但不知道填什么」的断片——用户实测踩过）
         hint = (
-            str(p.capabilities.get("login_hint", "") or "") or "已打开浏览器等待授权，完成后自动回填（最长等待 5 分钟）"
+            str(p.capabilities.get("login_hint", "") or "")
+            or "已打开浏览器等待授权，完成后自动回填（可点「中止」退出，最长等待 5 分钟）"
         )
         InfoBar.info(
             "登录",
@@ -734,14 +753,70 @@ class ProviderEditCard(QWidget):
             duration=10000,
             position=InfoBarPosition.BOTTOM,
         )
-        threading.Thread(target=self._do_login_thread, args=(hook,), daemon=True).start()
+        threading.Thread(target=self._do_login_thread, args=(hook, gen, cancel_event), daemon=True).start()
 
-    def _do_login_thread(self, hook):
-        """后台执行 login_hook（可长阻塞：轮询浏览器授权结果）"""
+    def _abort_login(self):
+        """中止登录：置位取消信号 + 世代号自增，按钮立即回到「登录」"""
+        self._login_generation += 1
+        self._login_running = False
+        if self._login_cancel is not None:
+            self._login_cancel.set()
+            self._login_cancel = None
+        self._reset_login_btn()
+        from qfluentwidgets import InfoBar
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        parent = TabManagerWindow.get_instance() or self.window()
+        InfoBar.info(
+            "已中止登录",
+            "登录已中止，可随时重新发起。",
+            parent=parent,
+            duration=3000,
+            position=InfoBarPosition.BOTTOM,
+        )
+
+    def _reset_login_btn(self):
+        """登录按钮恢复成默认「登录」可点态"""
+        self._login_running = False
+        self._login_cancel = None
+        self.loginBtn.setText("登录")
+        self.loginBtn.setToolTip("")
+        self.loginBtn.setEnabled(True)
+
+    @staticmethod
+    def _hook_accepts_cancel(hook) -> bool:
+        """login_hook 是否接受 cancel_event 关键字参数
+
+        必须用签名检查而不是 try/except TypeError：hook 内部的网络代码完全可能
+        自己抛 TypeError，那种情况下按「不支持参数」兜底重跑一次会二次发起授权。
+        """
+        import inspect
+
         try:
-            result = hook()
+            params = inspect.signature(hook).parameters
+        except (TypeError, ValueError):
+            return False
+        if "cancel_event" in params:
+            return True
+        return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    def _do_login_thread(self, hook, gen: int = 0, cancel_event: threading.Event | None = None):
+        """后台执行 login_hook（可长阻塞：轮询浏览器授权结果）
+
+        gen 与当前世代号不符说明用户已中止或重新发起，结果直接丢弃。
+        cancel_event 传给声明支持的钩子（CodeBuddy / Copilot），让它们的轮询
+        立即退出；不支持该参数的旧钩子按无参调用。
+        """
+        try:
+            if self._hook_accepts_cancel(hook):
+                result = hook(cancel_event=cancel_event)
+            else:
+                result = hook()
         except Exception as e:  # noqa: BLE001 —— 失败原因需透传到 UI
-            self.loginFailed.emit(str(e))
+            if gen == self._login_generation:
+                self.loginFailed.emit(str(e))
+            return
+        if gen != self._login_generation:
             return
         if not result or not result.get("api_key"):
             self.loginFailed.emit("登录结果为空")
@@ -750,7 +825,7 @@ class ProviderEditCard(QWidget):
 
     def _on_login_success(self, api_key: str, info: str):
         """登录成功（主线程）：回填 API Key 输入框，保存时走原生加密链"""
-        self.loginBtn.setEnabled(True)
+        self._reset_login_btn()
         self.apiKeyEdit.setText(api_key)
         from qfluentwidgets import InfoBar
         from app.widgets.tab_manager_window import TabManagerWindow
@@ -766,7 +841,7 @@ class ProviderEditCard(QWidget):
 
     def _on_login_failed(self, reason: str):
         """登录失败（主线程）"""
-        self.loginBtn.setEnabled(True)
+        self._reset_login_btn()
         from qfluentwidgets import InfoBar
         from app.widgets.tab_manager_window import TabManagerWindow
 

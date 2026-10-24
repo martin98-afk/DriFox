@@ -2,7 +2,7 @@
 """
 系统工具插件 — 交互、技能与系统（平台服务）
 
-question / skill / manage_skill / mcp_list_servers / upload_file：
+question / skill / manage_skill / mcp_manage / upload_file：
 用户提问 UI、技能库、MCP 客户端、Gitee 上传是平台能力，
 impl 通过 tool_ctx["services"] 调用，工具层逻辑（参数/结果）在插件内。
 
@@ -270,21 +270,132 @@ def _manage_skill_impl(tool_ctx, **kwargs):
     return ToolResult(False, error=f"未知 action: {action}（支持 list/create/modify/delete）")
 
 
-_MCP_LIST_SCHEMA = {
+_MCP_MANAGE_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "mcp_list_servers",
-        "description": "列出MCP服务器连接状态和可用工具。tools字段含``mcp__{server}__``前缀，调用时用完整名，勿去前缀。",
-        "parameters": {"type": "object", "properties": {}},
+        "name": "mcp_manage",
+        "description": (
+            "管理 MCP 服务器。action=\"list\"（默认）列出全部服务器（含已关闭的）与连接状态；"
+            "action=\"enable\" 临时开启一台已关闭的服务器，返回它的工具定义（名字+描述+参数 schema），"
+            "随后用 tool_execute(tool_name=\"mcp__服务__工具\", arguments=...) 中转调用；"
+            "action=\"disable\" 关闭临时开启的服务器。"
+            "\n\n省 token 纪律：只有常驻开启的服务器会把工具注入工具列表；临时的不会。"
+            "所以临时开启的服务器用完必须调 action=\"disable\" 回收（不会自动超时关闭）。"
+            "\n\n能临时开启的仅限配置里已存在但被关闭的服务器；不存在的新服务器需要用户在设置里添加。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "enable", "disable"],
+                    "description": "list=列出全部（默认）；enable=临时开启；disable=关闭临时开启的",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "服务器名（enable / disable 必填，取 list 返回里的 name）",
+                },
+            },
+        },
     },
 }
 
+# 与 app/tools/mcp_tools.py 的 MCPState 常量一致；插件侧用字面量，
+# 避免顶层导入主程序内部模块（plugins 加载到 app 重依赖是历史坑）。
+_MCP_STATE_CN = {
+    "connecting": "启动中",
+    "connected": "已连接",
+    "failed": "连接失败",
+    "disabled": "已关闭",
+}
 
-def _mcp_list_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("mcp")
+
+def _mcp_render_list(status: list) -> str:
+    """把 get_status() 的结构渲染成模型可读文本（避免裸 dict 白烧 token）"""
+    if not status:
+        return (
+            "没有任何 MCP 服务器配置。需要新增请让用户在「设置 → MCP 连接器」中配置。"
+        )
+    lines = [f"MCP 服务器共 {len(status)} 个："]
+    for item in status:
+        name = item.get("name", "?")
+        if item.get("ephemeral"):
+            tag = "临时开启"
+        elif item.get("enabled"):
+            tag = "常驻开启"
+        else:
+            tag = "关闭"
+        state = _MCP_STATE_CN.get(item.get("state", ""), item.get("state", ""))
+        tools = item.get("tools") or []
+        line = f"- {name}（{tag}·{state}，{len(tools)} 个工具）"
+        if tag == "关闭":
+            line += f" → 可临时开启：action=\"enable\", name=\"{name}\""
+        elif item.get("ephemeral"):
+            line += f" → 用完请关闭：action=\"disable\", name=\"{name}\""
+        lines.append(line)
+        if item.get("error"):
+            lines.append(f"    错误：{item['error']}")
+        if tools:
+            lines.append(f"    工具：{', '.join(tools)}")
+    lines.append("")
+    lines.append(
+        "说明：只有「常驻开启」的服务器工具在常驻工具列表里，可直接调用；"
+        "「临时开启」的工具需经 tool_execute(tool_name=..., arguments={...}) 中转调用。"
+    )
+    return "\n".join(lines)
+
+
+def _mcp_render_enabled(name: str, schemas: list) -> str:
+    """临时开启成功 → 只渲染工具名录（名 + 一句话描述），不含参数。
+
+    为什么不渲染完整 schema：一台服务器的全部工具参数动辄数万字符，灌
+    一次就吃掉大块上下文，而模型当轮通常只用一两个工具。参数详情让模型
+    用 tool_search 的 tool_names 按需查（tool_search 的搜索面已含临时
+    开启的服务器），用时才查、查了就调。
+    """
+    if not schemas:
+        return f"MCP 服务器 '{name}' 已临时开启，但未发现任何工具。"
+    lines = [
+        f"MCP 服务器 '{name}' 已临时开启，共 {len(schemas)} 个工具。",
+        "它们的定义**不在**常驻工具列表里，调用须用 tool_execute(tool_name=工具名, arguments=参数对象)。",
+        f"参数详情用 tool_search(tool_names=[\"工具名\"]) 按需查询；用完请 mcp_manage(action=\"disable\", name=\"{name}\") 回收。",
+        "",
+    ]
+    for schema in schemas:
+        fn = schema.get("function", {}) or {}
+        desc_lines = (fn.get("description") or "（无描述）").strip().splitlines()
+        desc = desc_lines[0].strip() if desc_lines else "（无描述）"
+        if len(desc) > 100:
+            desc = desc[:100] + "…"
+        lines.append(f"- {fn.get('name', '?')}：{desc}")
+    return "\n".join(lines)
+
+
+def _mcp_manage_impl(tool_ctx, **kwargs):
+    service = (tool_ctx or {}).get("services", {}).get("mcp")
     if service is None:
         return ToolResult(False, error="MCP 服务不可用")
-    return ToolResult(True, content=service.get_status())
+    action = (kwargs.get("action") or "list").lower()
+    name = (kwargs.get("name") or "").strip()
+
+    if action == "list":
+        return ToolResult(True, content=_mcp_render_list(service.get_status()))
+
+    if action not in ("enable", "disable"):
+        return ToolResult(False, error=f"未知 action: {action}（支持 list/enable/disable）")
+    if not name:
+        return ToolResult(False, error=f"action=\"{action}\" 需要提供 name（服务器名）")
+
+    if action == "enable":
+        ok, payload = service.enable_ephemeral(name)
+        if not ok:
+            return ToolResult(False, error=str(payload))
+        return ToolResult(True, content=_mcp_render_enabled(name, payload or []))
+
+    ok, error = service.disable_ephemeral(name)
+    if not ok:
+        return ToolResult(False, error=error)
+    return ToolResult(True, content=f"MCP 服务器 '{name}' 的临时开启已关闭，子进程已回收。")
 
 
 _UPLOAD_FILE_SCHEMA = {
@@ -527,8 +638,14 @@ def _preview_manage_skill(tool_args: dict) -> str:
     return f"{cn}: {name}" if name else cn
 
 
-def _preview_mcp_list_servers(tool_args: dict) -> str:
-    return "列出 MCP 服务器"
+def _preview_mcp_manage(tool_args: dict) -> str:
+    tool_args = tool_args or {}
+    action = (tool_args.get("action") or "list").lower()
+    name = tool_args.get("name", "")
+    cn = {"list": "查看 MCP 服务器", "enable": "临时开启 MCP", "disable": "关闭临时 MCP"}.get(
+        action, action
+    )
+    return f"{cn}: {name}" if name else cn
 
 
 def _summarize_question(tool_name, tool_args, tool_content):
@@ -574,12 +691,12 @@ def register(registry):
         metadata={"no_offload": True},  # 服务器列表小且结构化，落盘无收益
     )
     registry.register(
-        "mcp_list_servers", _MCP_LIST_SCHEMA, impl=_mcp_list_impl,
-        danger="safe", icon="工具", cn_name="MCP列表",
-        group=GROUP_INTERACTION, description="列出MCP服务器",
-        aliases=["McpListServers", "mcp_list_servers"],
-        preview=_preview_mcp_list_servers,
-        summarize=make_summarize_from_preview(_preview_mcp_list_servers),
+        "mcp_manage", _MCP_MANAGE_SCHEMA, impl=_mcp_manage_impl,
+        danger="safe", icon="工具", cn_name="管理MCP",
+        group=GROUP_INTERACTION, description="管理MCP服务器：列出/临时开启/关闭",
+        aliases=["mcp_list_servers", "McpListServers", "McpManage", "mcp_list"],
+        preview=_preview_mcp_manage,
+        summarize=make_summarize_from_preview(_preview_mcp_manage),
         metadata={"no_offload": True},  # 服务器列表小且结构化，落盘无收益
     )
     registry.register(

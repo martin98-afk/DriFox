@@ -146,13 +146,26 @@ def stop_callback_server(server: Optional[_CallbackHTTPServer]):
 
 # ── 通用授权码流程 ────────────────────────────────────────
 
+# 用户主动中止时返回的错误文案（UI 据此区分「中止」与「失败」）
+CANCEL_MESSAGE = "授权已中止"
 
-def run_authorization_code_flow(app: OAuthAppConfig, timeout: int = 120) -> Tuple[Optional[dict], str]:
+
+def run_authorization_code_flow(
+    app: OAuthAppConfig,
+    timeout: int = 120,
+    cancel_event: Optional[threading.Event] = None,
+) -> Tuple[Optional[dict], str]:
     """
     执行标准 OAuth2 Authorization Code 流程（阻塞）。
 
     步骤：起回调服务器 → 打开浏览器 → 等待授权码 → 换取 access_token。
     平台无关；平台特有的后续动作（拉用户信息、建仓库等）由调用方完成。
+
+    Args:
+        app: 平台 OAuth 应用配置
+        timeout: 等待授权码上限（秒）
+        cancel_event: 外部中止信号。置位后 0.5s 内退出等待，不再空等到超时
+            （用户关掉授权页后不必干等整段超时）。
 
     Returns:
         (token_data, err_msg)：成功时 token_data 为 token 端点返回的 JSON dict、
@@ -182,6 +195,9 @@ def run_authorization_code_flow(app: OAuthAppConfig, timeout: int = 120) -> Tupl
         wait_event = threading.Event()
         elapsed = 0.0
         while elapsed < timeout:
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("[OAuth] 授权已被用户中止")
+                return None, CANCEL_MESSAGE
             if server.auth_code:
                 break
             if server.auth_error:

@@ -178,11 +178,32 @@ def test_mark_distilled_roundtrip(tmp_path):
     d = Path(wd) / ".drifox" / "memory" / "build"
     assert (d / "2026-10-15.md").exists() is False
     assert (d / "2026-10-15.distilled.md").exists()
-    # 错误分支
-    assert m.mark_distilled(wd, "build", "2026-10-15")["error"] == "already"
+    # 重复打标：幂等收敛（归档已在、无残留 → merged=0，不再报 already）
+    r2 = m.mark_distilled(wd, "build", "2026-10-15")
+    assert r2["ok"] and r2["merged"] == 0
     assert m.mark_distilled(wd, "build", "2026-10-14")["error"] == "not_found"
     assert m.mark_distilled(wd, "build", "../evil")["error"] == "bad_date"
     assert m.mark_distilled("", "build", "2026-10-15")["error"] == "no_workdir"
+
+
+def test_mark_distilled_merges_residue(tmp_path):
+    """打标后又追加（跨天尾部条目落回旧日期文件）→ 再次打标把残留并入归档。
+
+    回归：此前 already / 未蒸馏文件存在两条状态互相锁死，蒸馏门禁永远放行不了。
+    """
+    wd = str(tmp_path / "proj")
+    m.append_daily(wd, "build", "- 早条", "2026-10-15")
+    assert m.mark_distilled(wd, "build", "2026-10-15")["ok"]
+    m.append_daily(wd, "build", "- 残留条目", "2026-10-15")
+    d = Path(wd) / ".drifox" / "memory" / "build"
+    assert (d / "2026-10-15.md").exists() and (d / "2026-10-15.distilled.md").exists()
+    r = m.mark_distilled(wd, "build", "2026-10-15")
+    assert r["ok"] and r["merged"] == 1
+    assert not (d / "2026-10-15.md").exists()
+    text = (d / "2026-10-15.distilled.md").read_text(encoding="utf-8")
+    assert "早条" in text and "残留条目" in text
+    # 门禁视角：未蒸馏文件已不存在
+    assert m.undistilled_before(wd, "build", "2026-10-16") == []
 
 
 def test_list_daily_reports_distilled(tmp_path):
@@ -407,7 +428,7 @@ def test_parse_daily_entries_prefix_and_plain(tmp_path):
     e = ents[0]
     assert e["level"] == "WARNING" and e["summary"] == "修了 X"
     assert "正文第一行 | 含竖线" in e["body"] and "正文第二行" in e["body"]
-    assert re.match(r"^2026-10-16 \d{2}:\d{2}:\d{2}$", e["ts"])
+    assert re.match(rf"^{m.today()} \d{{2}}:\d{{2}}:\d{{2}}$", e["ts"]), "条目时间戳=实际写入时刻（与文件归属日期无关）"
     # 无前缀条目：字段留空，raw 保留原文
     ents2 = m.parse_daily_entries("- 手写条目\n第二行")
     assert ents2[0]["ts"] == "" and ents2[0]["level"] == "" and ents2[0]["raw"] == "- 手写条目\n第二行"
@@ -489,3 +510,105 @@ def test_query_daily_empty_and_no_hit(tmp_path):
     m.append_daily(wd, "build", "- 有内容", "2026-10-15")
     r = m.query_daily(wd, "build", search="不存在的词")
     assert r["ok"] and r["matched"] == 0 and r["content"] == "" and r["total"] == 1
+
+
+# ── 指纹 / append_memory_file / write_memory_guarded ─────────
+
+
+def test_memory_fingerprint_empty_and_changes_on_write(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    assert m.memory_fingerprint(p) == "empty"
+    m.write_global_memory(tmp_path, "内容甲")
+    fp1 = m.memory_fingerprint(p)
+    assert fp1 != "empty"
+    m.write_global_memory(tmp_path, "内容乙更长一些")
+    assert m.memory_fingerprint(p) != fp1
+    # 内容不变指纹不变
+    assert m.memory_fingerprint(p) == m.memory_fingerprint(p)
+
+
+def test_append_memory_file_basic(tmp_path):
+    aid = tmp_path / "hub"
+    aid.mkdir()
+    m.write_global_memory(aid, "- 第一条")
+    r = m.append_memory_file(m.global_memory_path(aid), "- 第二条")
+    assert r["ok"]
+    text = m.read_global_memory(aid)
+    assert "- 第一条" in text and "- 第二条" in text
+    assert text.index("- 第一条") < text.index("- 第二条")
+
+
+def test_append_memory_file_keeps_crlf(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    p.write_bytes("- 第一条\r\n- 第二条\r\n".encode("utf-8"))
+    r = m.append_memory_file(p, "- 第三条")
+    assert r["ok"]
+    raw = p.read_bytes()
+    # 无双 CR（\r\r\n），原两行 CRLF 保留，新行也是 CRLF
+    assert b"\r\r\n" not in raw
+    assert raw.count(b"\r\n") == 3
+    assert raw.endswith("\r\n".encode("utf-8"))
+
+
+def test_append_memory_file_empty_rejected(tmp_path):
+    r = m.append_memory_file(tmp_path / "MEMORY.md", "   ")
+    assert r["ok"] is False and r["error"] == "empty"
+
+
+def test_write_memory_guarded_conflict(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    m.write_global_memory(tmp_path, "v1")
+    fp1 = m.memory_fingerprint(p)
+    m.write_global_memory(tmp_path, "v2 外部改动")
+    r = m.write_memory_guarded(p, "v3", base=fp1)
+    assert r["ok"] is False and r["error"] == "conflict" and r.get("cur_base")
+    # 带当前 base 放行
+    fp2 = m.memory_fingerprint(p)
+    r2 = m.write_memory_guarded(p, "v3", base=fp2)
+    assert r2["ok"] and "v3" in m.read_global_memory(tmp_path)
+
+
+def test_write_memory_guarded_unreadable_stat(tmp_path, monkeypatch):
+    """文件存在但 stat 失败（fingerprint 回落 empty）→ 拒写，base="empty" 不得误当首写"""
+    p = tmp_path / "MEMORY.md"
+    m.write_global_memory(tmp_path, "真实沉淀内容" * 20)
+    monkeypatch.setattr(m, "memory_fingerprint", lambda path: "empty")
+    r = m.write_memory_guarded(p, "覆盖内容", base="empty")
+    assert r["ok"] is False and r["error"] == "unreadable"
+    assert "真实沉淀内容" in p.read_text(encoding="utf-8"), "文件未被覆盖"
+
+
+def test_write_memory_guarded_unreadable_content(tmp_path, monkeypatch):
+    """文件存在、指纹正常、但内容读不到（被占用/编码异常）→ 拒写，shrink 保护不失效"""
+
+    def _boom(path, *a, **k):
+        raise OSError("文件被占用")
+
+    p = tmp_path / "MEMORY.md"
+    m.write_global_memory(tmp_path, "真实沉淀内容" * 20)
+    fp = m.memory_fingerprint(p)
+    monkeypatch.setattr(m.Path, "read_text", _boom)
+    r = m.write_memory_guarded(p, "覆盖内容", base=fp)
+    assert r["ok"] is False and r["error"] == "unreadable"
+    monkeypatch.undo()
+    assert "真实沉淀内容" in p.read_text(encoding="utf-8"), "文件未被覆盖"
+
+
+def test_write_memory_guarded_shrink_gate(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    old = "\n".join(f"- 条目{i}一些内容填充字符" for i in range(40))
+    assert len(old) > m.SHRINK_CHECK_MIN_CHARS
+    m.write_global_memory(tmp_path, old)
+    snaps = []
+    r = m.write_memory_guarded(p, "短", snapshot=lambda: snaps.append(1))
+    assert r["ok"] is False and r["error"] == "shrink" and r["old_chars"] > r["new_chars"]
+    assert not snaps  # 拒绝时不产生快照
+    r2 = m.write_memory_guarded(p, "短", consolidate=True, snapshot=lambda: snaps.append(1))
+    assert r2["ok"] and len(snaps) == 1  # 放行时锁内恰好快照一次
+
+
+def test_write_memory_guarded_small_file_no_shrink_check(tmp_path):
+    p = tmp_path / "MEMORY.md"
+    m.write_global_memory(tmp_path, "x" * 150)  # 低于阈值
+    r = m.write_memory_guarded(p, "y")
+    assert r["ok"]

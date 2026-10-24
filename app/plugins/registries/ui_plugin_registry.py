@@ -849,7 +849,7 @@ class UIPluginRegistry:
         # 多实现并存（system + 多个插件 override），胜者 = max(priority)
         self._ui_modules: Dict[str, list] = {}
         # 主程序内置区域（宿主在窗口装配时也可再声明，幂等）
-        from app.plugins.contracts.ui_slots import LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
+        from app.plugins.contracts.ui_slots import BADGE, LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
 
         for rid, kind, desc in [
             ("sidebar", LIST_ITEM, "左侧边栏插件项"),
@@ -857,6 +857,7 @@ class UIPluginRegistry:
             ("menu:message_card", MENU, "消息卡片右键菜单"),
             ("menu:tab", MENU, "Tab 标签右键菜单"),
             ("menu:input_area", MENU, "输入框右键菜单"),
+            ("workbench:tab", BADGE, "工作台页签徽标（metadata.tab_id 定位页签，payload=文本）"),
             ("settings:plugins", PANEL, "设置面板插件分区"),
             ("settings:llm", PANEL, "设置面板大模型分区插件卡"),
             ("settings:common", PANEL, "设置面板通用分区插件卡"),
@@ -1820,14 +1821,24 @@ class UIPluginRegistry:
         self._workbench_tabs[page_id] = info
         # 联动命令：与浮动卡一致，页面注册即获得直达命令
         self._register_command_for_workbench_tab(info)
+        # 通知工作台面板 reconcile（热加载新插件页时无需重启即可见；
+        # 启动期面板尚未创建，publish 无人订阅，装配时自会 sync）
+        from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED, UIEventBus
+
+        UIEventBus.get_instance().publish(EV_WORKBENCH_TABS_CHANGED)
 
     def unregister_workbench_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部工作台页签（插件卸载时调用）"""
-        for page_id in [pid for pid, v in self._workbench_tabs.items() if v.plugin_name == plugin_name]:
+        removed = [pid for pid, v in self._workbench_tabs.items() if v.plugin_name == plugin_name]
+        for page_id in removed:
             del self._workbench_tabs[page_id]
             cmd_name = self._workbench_tab_command_names.pop(page_id, None)
             if cmd_name is not None:
                 self.unregister_ui_command(cmd_name)
+        if removed:
+            from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(EV_WORKBENCH_TABS_CHANGED)
 
     def get_workbench_tabs(self) -> List[WorkbenchTabInfo]:
         """获取全部工作台页签（按注册序返回）"""
@@ -2408,6 +2419,12 @@ class UIPluginRegistry:
             payload=payload,
             metadata=metadata or {},
         )
+        # 徽标类区域实时通知消费方重挂（WorkbenchPanel 订阅重挂页签徽标）。
+        # publish 在调用方线程同步分发——插件注册发生在主线程加载期，约定成立。
+        if region_id == "workbench:tab":
+            from app.core.infra.ui_event_bus import EV_WORKBENCH_BADGES_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(EV_WORKBENCH_BADGES_CHANGED)
 
     def get_region_entries(self, region_id: str) -> list:
         """获取区域条目（priority 降序 → 注册序；未声明区域返回空列表）"""
@@ -2541,6 +2558,7 @@ class UIPluginRegistry:
                 description=description,
                 argument_hint="",
                 shortcut=saved_shortcut,
+                source=f"plugin:{spec[2]}" if spec[2] else "",
             )
         self._ui_applied_names.add(name)
         self._ui_command_names.add(name)
@@ -3601,6 +3619,11 @@ class UIPluginRegistry:
         ):
             # 确无任何注册：返回 False（幂等）。
             return False
+        # 丢弃本插件的待恢复条目：卸载前可见的浮动卡会被下方记入
+        # _pending_card_restore（供热重载 load_plugin 恢复），但**删除路径**
+        # （卸载后不再 load）没有消费方——残留条目会让重装同名插件时错误
+        # 恢复一个已删除的卡片视图。此处与 load_plugin 入口的清理对称。
+        self._pending_card_restore = [e for e in self._pending_card_restore if e[0] != plugin_name]
         # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
         try:
             import sys as _sys
@@ -3656,6 +3679,19 @@ class UIPluginRegistry:
                             was_visible = cm.is_card_visible(cid, win_id)
                         except (RuntimeError, AttributeError):
                             was_visible = False
+                    # CardManager 侧同步注销（审计 #3 P2-1 + #19 问题 3）：
+                    # unload 只清了 UIPluginRegistry 的 _card_widget_instances，
+                    # _window_data 里该 card_id 的 cards/containers/system_cards/
+                    # 压制关系/dock 列表残留 → 重装同名插件时 register_card 打
+                    # 「已注册，将被覆盖」warning 且旧容器映射干扰新卡容器判定。
+                    # 必须早于 _remove_widget_from_container：后者已 pop
+                    # containers[card_id]，晚一步调会取不到 container_type 而
+                    # 跳过 visible_cards 复位分支。
+                    if cm is not None:
+                        try:
+                            cm.unregister_card(cid, win_id)
+                        except (RuntimeError, AttributeError):
+                            pass
                     self._remove_widget_from_container(win_id, cid, widget)
                     # 显式销毁旧实例：_remove_widget_from_container 仅 UI 清理不触发删除，
                     # 不 deleteLater 会残留旧模块闭包/信号槽引用（Qt 父对象引用链）
@@ -3702,13 +3738,22 @@ class UIPluginRegistry:
         # 清理服务槽
         self._services = {k: v for k, v in self._services.items() if v[0] != plugin_name}
         # 清理通用区域条目（Phase E）；settings: 分区中 auto_config_card 条目保留（同上）
+        removed_badge = False
         for region in self._regions.values():
-            region["entries"] = {
+            kept = {
                 k: v
                 for k, v in region["entries"].items()
                 if v.plugin_name != plugin_name
                 or (getattr(v.payload, "metadata", None) or {}).get("auto_config_card")
             }
+            if region["entries"] is not None and len(kept) != len(region["entries"]) and region.get("kind") == "badge":
+                removed_badge = True
+            region["entries"] = kept
+        if removed_badge:
+            # 徽标区域有条目被清 → 通知 WorkbenchPanel 重挂（主线程，卸载流程在主线程）
+            from app.core.infra.ui_event_bus import EV_WORKBENCH_BADGES_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(EV_WORKBENCH_BADGES_CHANGED)
         # 清理 UI 模块槽（Phase F）：仅移除该 plugin 的实现，其余保留
         for module_id, impls in list(self._ui_modules.items()):
             kept = [s for s in impls if s[0] != plugin_name]

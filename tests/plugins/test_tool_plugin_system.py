@@ -177,7 +177,7 @@ class TestSystemPluginTools:
             "question",
             "skill",
             "manage_skill",
-            "mcp_list_servers",
+            "mcp_manage",
             "upload_file",
         }
         assert expected <= names, f"缺失: {expected - names}"
@@ -656,6 +656,161 @@ def register(registry):
         r = reg.get("read")
         assert r is not None and r.source == "plugin:system-tools", f"禁用后 system 应恢复，实际: {r.source if r else None}"
         cfg.enabled_plugins.value = old
+
+
+class TestRootOfPluginRank:
+    """#28 回归：_root_of_plugin 的 rank 取值不能用「set 遍历首个命中」。
+
+    真实触发条件（#16 实测 + 本次探针确认）：**同名插件**同时存在于 system 与
+    user 两个根，且 user 版本只覆盖 system 的部分工具。此时
+    `_loaded[plugin_name]` 里混着两类 tracker 条目：
+      - 被 user 覆盖的工具 → root_tracker 指向 user 根
+      - user 未提供的工具（仍由 system 注册）→ root_tracker 指向 system 根
+    set 迭代顺序随字符串 hash 种子变化，取首个命中约 96.6% 概率拿到 system 根
+    → removed_rank=0 → `_restore_lower_roots(0)` 无更低根 → unload user 版本后
+    system 版本工具全部永久丢失。
+
+    修复（M1）：优先委托 PluginManager 权威归属（plugin_type == "user" 时取
+    info.path.parent）；pm 不可用时回落「取 rank 最高的根」而非首个。
+    """
+
+    SAME = "same-name-plug"
+
+    @pytest.fixture(autouse=True)
+    def _enable(self):
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = list(cfg.enabled_plugins.value or [])
+        try:
+            # 必须在 enabled 白名单里：_is_plugin_enabled 在 enabled 非空时按
+            # 白名单过滤（不在名单 → 工具不注册，system 版本会静默缺失）
+            cfg.enabled_plugins.value = list(set(saved + [self.SAME]))
+            yield
+        finally:
+            cfg.enabled_plugins.value = saved
+
+    @staticmethod
+    def _write_plugins(tmp_path: Path):
+        """同名插件在两个根各一份：system 3 工具，user 只覆盖其中 1 个。
+
+        user 少给 alpha/beta → 这两个工具的 tracker 条目仍指向 system 根，
+        与 read（指向 user 根）混在同一个 set 里 —— 正是 #28 的触发条件。
+        """
+        system_root = tmp_path / "sys_root"
+        user_root = tmp_path / "plugins"  # 必须等于 <app_data>/plugins 才是 user 级
+        sys_plug = system_root / "same-name-plug"
+        usr_plug = user_root / "same-name-plug"
+        for d in (sys_plug / "tools", usr_plug / "tools"):
+            d.mkdir(parents=True, exist_ok=True)
+
+        (sys_plug / "tools" / "t.py").write_text(
+            '''
+def register(registry):
+    for n in ("read", "alpha", "beta"):
+        registry.register(
+            n,
+            {"type": "function", "function": {"name": n}},
+            impl=lambda n=n, **kw: "SYS-" + n,
+            danger="safe",
+            cn_name="系统-" + n,
+        )
+''',
+            encoding="utf-8",
+        )
+        (usr_plug / "tools" / "t.py").write_text(
+            '''
+def register(registry):
+    registry.register(
+        "read",
+        {"type": "function", "function": {"name": "read"}},
+        impl=lambda **kw: "USER-READ",
+        danger="safe",
+        cn_name="用户-read",
+    )
+''',
+            encoding="utf-8",
+        )
+        return system_root, user_root
+
+    def test_root_of_plugin_reports_user_rank_for_partial_override(self, tmp_path, monkeypatch):
+        """_root_of_plugin 对「部分覆盖」的 user 同名插件必须返回 user 根（rank 1）"""
+        monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
+        system_root, user_root = self._write_plugins(tmp_path)
+
+        from app.plugins.loaders.plugin_tool_loader import (
+            _ROOT_KIND_PRIORITY,
+            _root_kind,
+            PluginToolWatcher,
+        )
+
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+        watcher.scan_now()
+
+        # 前置：tracker 里该插件名下同时有两个根的条目（bug 的触发条件成立）
+        sys_entries = [n for n, r in watcher._root_tracker.items() if "sys_root" in str(r)]
+        usr_entries = [n for n, r in watcher._root_tracker.items() if str(r).endswith("plugins")]
+        assert sys_entries, "前置：应有工具仍由 system 根提供（部分覆盖）"
+        assert usr_entries, "前置：应有工具被 user 根覆盖"
+
+        root = watcher._root_of_plugin(self.SAME)
+        assert root is not None, "_root_of_plugin 不应返回 None"
+        rank = _ROOT_KIND_PRIORITY.get(_root_kind(root), 0)
+        assert rank == _ROOT_KIND_PRIORITY["user"], f"必须返回 user 根（rank 1），实际 root={root} rank={rank}"
+
+    def test_unloading_partial_override_restores_all_system_tools(self, tmp_path, monkeypatch):
+        """卸载 user 版本后，system 版本的全部工具必须恢复（#16 验收标准）"""
+        import shutil
+
+        monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
+        system_root, user_root = self._write_plugins(tmp_path)
+
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
+
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+        watcher.scan_now()
+        assert reg.get("read").cn_name == "用户-read", "前置：user 覆盖 read 应生效"
+        assert reg.get("alpha").cn_name == "系统-alpha", "前置：alpha 由 system 提供"
+
+        shutil.rmtree(user_root / self.SAME, ignore_errors=True)
+        watcher.unload_plugin(self.SAME)
+
+        for n in ("read", "alpha", "beta"):
+            r = reg.get(n)
+            assert r is not None, f"{n} 不应丢失（system 版本必须恢复）"
+            assert r.source == f"plugin:{self.SAME}", f"{n} 应回到 plugin:{self.SAME}，实际 {r.source}"
+            assert r.cn_name == f"系统-{n}", f"{n} 应恢复 system 版 cn_name，实际 {r.cn_name}"
+
+    def test_root_of_plugin_fallback_picks_highest_rank(self, tmp_path, monkeypatch):
+        """回落路径（pm 不可用）也必须取 rank 最高的根，而不是首个命中"""
+        monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
+        system_root, user_root = self._write_plugins(tmp_path)
+
+        import app.plugins.managers.plugin_manager as pmod
+        from app.plugins.loaders.plugin_tool_loader import (
+            _ROOT_KIND_PRIORITY,
+            _root_kind,
+            PluginToolWatcher,
+        )
+
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+        watcher.scan_now()
+
+        # 让 pm 不可用（模拟未初始化/异常），强制走 tracker 回落分支
+        class _DeadPM:
+            @staticmethod
+            def get_instance():
+                raise RuntimeError("pm unavailable in test")
+
+        monkeypatch.setattr(pmod, "PluginManager", type("PM", (), {"get_instance": staticmethod(_DeadPM.get_instance)}))
+
+        root = watcher._root_of_plugin(self.SAME)
+        assert root is not None
+        rank = _ROOT_KIND_PRIORITY.get(_root_kind(root), 0)
+        assert rank == _ROOT_KIND_PRIORITY["user"], f"回落也必须取 rank 最高根，实际 root={root} rank={rank}"
 
 
 class TestSourceLabelRender:

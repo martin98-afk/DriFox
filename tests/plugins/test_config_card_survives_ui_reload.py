@@ -70,7 +70,7 @@ def test_register_schema_missing_clears_history(reg):
     from app.plugins.managers.plugin_manager import PluginManager
     from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 
-    pm = PluginManager.__new__(PluginManager)  # _register_config_schema 不依赖实例状态
+    pm = PluginManager.__new__(PluginManager)  # 不依赖实例状态（pending 用 getattr 兜底）
     manifest_with = {
         "title": "t",
         "config_schema": {"title": "t", "fields": [{"key": "k", "label": "l", "type": "text"}]},
@@ -79,9 +79,62 @@ def test_register_schema_missing_clears_history(reg):
     assert schema is not None
 
     pm._register_config_schema(PLUGIN, manifest_with)
+    # 扫描期只登记不建卡（UI 链后置，见 replay_config_cards）：先确认 pending 有
+    assert PLUGIN in pm._pending_config_cards
+    assert f"{PLUGIN}-config" not in _card_ids(reg)
+    # UI 就绪后回放 → 卡出现
+    pm.replay_config_cards()
     assert f"{PLUGIN}-config" in _card_ids(reg)
     assert PluginConfigRegistry.get_instance().get(PLUGIN) is not None
 
     pm._register_config_schema(PLUGIN, {"title": "t"})  # schema 已删除
     assert f"{PLUGIN}-config" not in _card_ids(reg)
     assert PluginConfigRegistry.get_instance().get(PLUGIN) is None
+
+
+def _new_pm():
+    """绕过 __init__ 的裸实例（_register_config_schema 状态全走 getattr 兜底）"""
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    return PluginManager.__new__(PluginManager)
+
+
+def _manifest_with_schema() -> dict:
+    return {
+        "title": "t",
+        "config_schema": {"title": "t", "fields": [{"key": "k", "label": "l", "type": "text"}]},
+    }
+
+
+def test_register_schema_defers_card_until_replay(reg):
+    """扫描期只登记 pending，不建卡；replay 后才出现在注册表。"""
+    pm = _new_pm()
+    pm._register_config_schema(PLUGIN, _manifest_with_schema())
+
+    # 登记了 schema（registry 立刻可用，配置读写不依赖 UI）
+    from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+    assert PluginConfigRegistry.get_instance().get(PLUGIN) is not None
+    # 但卡还没注册（扫描期零 UI import）
+    assert f"{PLUGIN}-config" not in _card_ids(reg)
+    assert PLUGIN in pm._pending_config_cards
+
+    assert pm.replay_config_cards() >= 1
+    assert f"{PLUGIN}-config" in _card_ids(reg)
+    # 回放后摘除，二次回放幂等
+    assert PLUGIN not in pm._pending_config_cards
+    assert pm.replay_config_cards() == 0
+
+
+def test_unregister_clears_pending_so_replay_cannot_revive_card(reg):
+    """僵尸卡回归：登记 pending 后 unregister，再 replay 不得让卡复活。"""
+    pm = _new_pm()
+    pm._register_config_schema(PLUGIN, _manifest_with_schema())
+    assert PLUGIN in pm._pending_config_cards
+
+    # 模拟「注册后插件被卸载 / schema 被删」
+    pm._unregister_config_schema(PLUGIN)
+    assert PLUGIN not in pm._pending_config_cards
+
+    pm.replay_config_cards()  # 不得复活
+    assert f"{PLUGIN}-config" not in _card_ids(reg)

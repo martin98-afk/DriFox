@@ -7,9 +7,13 @@ provider 是纯函数，不持有窗口引用（host 由 build_pool 传入）。
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from loguru import logger
+
+from app.plugins.capabilities.providers import model_meta, process_core
+from app.utils.info_bar_guard import post_to_main
 
 
 class _BusSignal:
@@ -596,15 +600,79 @@ def _ui_notify(host: Any):
     def notify(title: str, message: str) -> None:
         from qfluentwidgets import InfoBar, InfoBarPosition
 
-        InfoBar.success(
-            title,
-            message,
-            parent=_resolve_tab_window() or host.window(),
-            duration=5000,
-            position=InfoBarPosition.BOTTOM,
-        )
+        def _show() -> None:
+            InfoBar.success(
+                title,
+                message,
+                parent=_resolve_tab_window() or host.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+        if threading.current_thread() is threading.main_thread():
+            _show()
+            return
+        # 后台线程（cron-tasks 等后台任务通道）：InfoBar 的构造/show/manager
+        # 注册必须落主线程，跨线程创建会在 manager 列表留死壳（详见
+        # info_bar_guard 模块注释，2026-10-24 崩溃根因）
+        if not post_to_main(_show):
+            logger.warning("[Capability] notify 丢弃：QApplication 未就绪，无法投递主线程")
 
     return notify
+
+
+def _ui_artifacts_show(host: Any):
+    """向当前窗口最新 assistant 卡片的成果栏推送成果条目。
+
+    返回 ``show(items, target="latest", call_id="") -> int``：
+    返回投递的条目数；未找到目标卡片返回 0。线程安全——后台线程调用经
+    ``post_to_main`` 投递主线程执行（面板/QWidget 只能主线程碰）。
+
+    target="call" 时按 ``call_id`` 经宿主 ``_tool_card_map`` 定位发起轮次的卡片，
+    供异步任务（生成完成晚于轮次结束）回填原卡。
+    """
+
+    def show(items, target: str = "latest", call_id: str = "") -> int:
+        try:
+            payload = [dict(x) for x in (items or []) if isinstance(x, dict)]
+        except (TypeError, ValueError):
+            return 0
+        if not payload:
+            return 0
+
+        def _apply() -> int:
+            card = None
+            if target == "call" and call_id:
+                card = (getattr(host, "_tool_card_map", None) or {}).get(call_id)
+            if card is None:
+                card = getattr(host, "_current_assistant_card", None)
+                if card is None:
+                    finder = getattr(host, "_find_latest_assistant_card", None)
+                    card = finder() if callable(finder) else None
+            if card is None:
+                logger.warning("[Capability] artifacts.show 未找到目标卡片，丢弃")
+                return 0
+            updater = getattr(card, "update_artifact_list", None)
+            if not callable(updater):
+                return 0
+            try:
+                updater(payload)
+            except RuntimeError:
+                # deleted wrapper：卡片已销毁，静默丢弃（P029 教训）
+                logger.warning("[Capability] artifacts.show 目标卡片已销毁")
+                return 0
+            return len(payload)
+
+        if threading.current_thread() is threading.main_thread():
+            # 主线程直跑：返回实际挂载数（未找到卡片 → 0，契约可测）
+            return _apply()
+        if not post_to_main(_apply):
+            logger.warning("[Capability] artifacts.show 丢弃：QApplication 未就绪")
+            return 0
+        # 后台投递：真实结果在主线程落地，返回预期条目数（失败场景见日志）
+        return len(payload)
+
+    return show
 
 
 def _ui_card_hide(host: Any):
@@ -877,6 +945,8 @@ def register(registry) -> None:
     reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
     reg.register("model.metadata", _model_metadata, surface="ui", owner="core:ui")
+    reg.register("provider.list", model_meta.provider_list, surface="ui", owner="core:ui")
+    reg.register("model.enumerate", model_meta.model_enumerate, surface="ui", owner="core:ui")
     reg.register("agent.read", _agent_manager, surface="ui", owner="core:ui")
     reg.register("agent.read", _agent_prompt, surface="ui", owner="core:ui", legacy_key="get_agent_prompt")
     # 工作目录
@@ -901,6 +971,7 @@ def register(registry) -> None:
     reg.register("ui.dialog", _ui_dialog, surface="ui", owner="core:ui")
     reg.register("ui.card.show", _ui_card_show, surface="ui", owner="core:ui")
     reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
+    reg.register("ui.artifacts.show", _ui_artifacts_show, surface="ui", owner="core:ui")
     reg.register("ui.events", _ui_events, surface="ui", owner="core:ui")
     reg.register("command.read", _command_read, surface="ui", owner="core:ui")
     reg.register("command.reload", _command_reload, surface="ui", owner="core:ui")
@@ -920,6 +991,7 @@ def register(registry) -> None:
     reg.register("team.read", _team_read, surface="ui", owner="core:ui")
     # 进程级
     reg.register("cache.purge", _cache_purge, surface="ui", owner="core:ui")
+    reg.register("process.start", process_core.process_start, surface="ui", owner="core:ui")
     # 配置（按 key 读非敏感标量）
     reg.register("config.read", _config_read, surface="ui", owner="core:ui")
     # 逃生舱

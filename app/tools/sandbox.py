@@ -834,6 +834,11 @@ _DOTNET_DELETE_PATTERN = re.compile(
 # rm/del 等常见 flag（快照时剔除）
 _DELETE_FLAGS = {"-r", "-rf", "-f", "-fr", "-d", "-rd", "-recursive", "/s", "/q", "/f"}
 
+# shell 连接符：token 命中即视为「上一条命令结束」，删除命令的参数到此为止。
+# 2026-10-24 事故：原实现不切边界，把 `cd <工作目录> && find ... -exec rm ...`
+# 里的工作目录当成删除目标整个 move 进垃圾箱。
+_SHELL_SEPARATORS = frozenset({"&&", ";", "|", "||", "&", "|&", ";;"})
+
 
 # 命令分词：shlex.split(posix=True) 会吞掉 Windows 反斜杠
 # （C:\\tmp\\a.txt → C:tmpa.txt）导致快照路径失真，故用正则分词：
@@ -882,8 +887,126 @@ def _resolve_cmd_path(item: str, workdir: Optional[Path] = None) -> Path:
     return p
 
 
+def _find_delete_command_spans(command: str) -> list:
+    """定位命令中每个删除命令名 token 的位置，返回 [(起始token索引, [(子token索引...)], ...)]
+
+    返回结构：每个删除动词一条记录 ``(动词 token 索引, 其参数 token 索引列表)``。
+    ``arg_idxs`` 为 ``-1`` 表示「参数在动词 token 自身内部」——壳命令包裹形态
+    （``powershell -c "Remove-Item -Recurse x"``）里整条子命令是一个 token，
+    参数不在后续 token 中，由 ``_delete_arg_tokens`` 就地拆解。
+
+    参数边界按 shell 连接符切分：``&&``、``;``、``|``、``||``、``&`` 之后属于
+    下一条命令，不属于本删除命令；遇到即停。这条边界是 2026-10-24 事故的直接教训：
+    原实现把命令里**全部** token 都当删除目标，导致
+    ``cd D:/work/proj && find . -exec rm ...`` 里的 ``D:/work/proj`` 被当作删除目标
+    整个 move 进垃圾箱（工作目录消失）。
+
+    ⚠ 分词器不切分紧贴路径的连接符（``rm a.txt; cd x`` 里 ``a.txt;`` 是单个
+    token），故取参数前先剥掉 token 首尾的连接符——否则 ``;`` 之后那条命令的
+    路径会漏进本命令的参数列表（2026-10-24 回归用例实测）。
+    """
+    tokens = _split_tokens(command or "")
+    spans: list = []
+    for idx, token in enumerate(tokens):
+        inner = _strip_quotes(token)
+        lowered = inner.lower()
+        # 引号内可能是完整子命令（powershell -c "Remove-Item x"），逐子词再判一次
+        is_delete = lowered in DELETE_COMMANDS
+        wrapped = False
+        if not is_delete:
+            for sub in inner.split():
+                head = sub.lower().replace("\\", "/").split("/")[-1]
+                if head in DELETE_COMMANDS:
+                    is_delete = True
+                    wrapped = True
+                    break
+        if not is_delete:
+            continue
+        if wrapped:
+            # 参数在 token 内部，由 _delete_arg_tokens 就地拆
+            spans.append((idx, [-1]))
+            continue
+        arg_idxs: list = []
+        for j in range(idx + 1, len(tokens)):
+            raw_next = tokens[j]
+            if _strip_quotes(raw_next) in _SHELL_SEPARATORS:
+                break
+            # 紧贴路径的连接符（a.txt; / b.txt&&）→ 本 token 是最后一个参数，到此为止
+            if _has_trailing_separator(raw_next):
+                arg_idxs.append(j)
+                break
+            arg_idxs.append(j)
+        spans.append((idx, arg_idxs))
+    return spans
+
+
+def _has_trailing_separator(token: str) -> bool:
+    """token 是否以 shell 连接符结尾（如 ``a.txt;``、``b.txt&&``）"""
+    for sep in (";;", "&&", "||", "|&", ";", "|", "&"):
+        if token.endswith(sep):
+            return True
+    return False
+
+
+def _strip_separators(token: str) -> str:
+    """剥掉 token 首尾的 shell 连接符（保留引号内内容原样）"""
+    out = token
+    changed = True
+    while changed:
+        changed = False
+        for sep in (";;", "&&", "||", "|&", ";", "|", "&"):
+            if out.startswith(sep):
+                out = out[len(sep) :]
+                changed = True
+            if out.endswith(sep):
+                out = out[: -len(sep)]
+                changed = True
+    return out
+
+
+def _delete_arg_tokens(command: str) -> list:
+    """取出所有删除命令的参数 token（不含动词本身、不含后续命令）
+
+    命令里没有可定位的删除动词（如仅靠 .NET Delete 模式命中的形态）时，
+    退化为「除 shell 分隔符外全部 token」——.NET 形态的目标藏在变量/括号里，
+    只能靠全局候选兜底。
+
+    壳命令包裹形态（``powershell -c "Remove-Item -Recurse x"``）里参数与动词
+    同在一个 token，此处就地按空白拆开、丢掉动词本身，其余作为参数返回。
+
+    每个 token 先剥掉首尾连接符（``a.txt;`` → ``a.txt``），否则带分号的路径
+    解析出来会是个不存在的怪路径。
+    """
+    tokens = _split_tokens(command or "")
+    spans = _find_delete_command_spans(command)
+    if spans:
+        picked: list = []
+        seen_idx: set = set()
+        for verb_idx, arg_idxs in spans:
+            if arg_idxs == [-1]:
+                # 参数在动词 token 内部：拆出子词，剔除删除动词名
+                inner = _strip_quotes(tokens[verb_idx])
+                for sub in inner.split():
+                    head = sub.lower().replace("\\", "/").split("/")[-1]
+                    if head in DELETE_COMMANDS:
+                        continue
+                    picked.append(sub)
+                continue
+            for j in arg_idxs:
+                if j not in seen_idx:
+                    seen_idx.add(j)
+                    picked.append(tokens[j])
+        return [_strip_separators(t) for t in picked if _strip_separators(t)]
+    return [
+        t for t in tokens if _strip_quotes(t) not in _SHELL_SEPARATORS and _strip_separators(t)
+    ]
+
+
 def delete_targets(command: str, workdir: Optional[Path] = None) -> dict:
     """解析删除命令的目标路径（供审批展示与豁免判定共用）
+
+    只取**删除命令自身的参数**作为候选（见 ``_delete_arg_tokens``）：命令里的
+    ``cd <目录>`` 前缀、管道前一端的路径、``&&`` 之后的其他命令参数都不再被当目标。
 
     Returns:
         {"existing": [Path, ...], "missing": [str, ...]}——
@@ -894,7 +1017,7 @@ def delete_targets(command: str, workdir: Optional[Path] = None) -> dict:
     if not is_delete_command(command):
         return result
     seen: set = set()
-    for token in _split_tokens(command):
+    for token in _delete_arg_tokens(command):
         raw = _strip_quotes(token)
         lowered = raw.lower()
         if lowered in _DELETE_FLAGS or lowered in DELETE_COMMANDS:
@@ -990,6 +1113,23 @@ def is_delete_command(command: str) -> bool:
     return False
 
 
+def _is_workdir_or_ancestor(target: Path, workdir: Optional[Path] = None) -> bool:
+    """target 是否就是工作目录本身，或工作目录的祖先目录
+
+    只拦「向上」的方向：``rm -rf subdir``（subdir 在 workdir 内）必须继续正常工作。
+    工作目录取显式实参，缺省回退 ``_current_workdir()``。
+    """
+    try:
+        base = workdir if workdir is not None else _current_workdir()
+        if not base:
+            return False
+        norm_target = _norm(target)
+        norm_base = _norm(base)
+        return _under(norm_base, norm_target)
+    except (OSError, ValueError):
+        return False
+
+
 def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
     """垃圾桶模式：把删除命令的目标**移动**到垃圾箱目录（软删除，可找回）
 
@@ -1005,6 +1145,12 @@ def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], wo
     stamp = time.strftime("%Y%m%d_%H%M%S")
     moved: list = []
     for target in targets["existing"]:
+        # 硬保险：工作目录本身（或其祖先）绝不 move。误判代价不对等——
+        # 该进垃圾箱的没进，只是少一层保护；工作目录被 move 走，整个仓库
+        # 从磁盘消失、所有后续命令报错（2026-10-24 实测连丢三次）。
+        if _is_workdir_or_ancestor(target, workdir):
+            logger.warning(f"[Sandbox] 拒绝把工作目录移入垃圾桶: {target}")
+            continue
         try:
             trash_root.mkdir(parents=True, exist_ok=True)
             dest = trash_root / f"{stamp}_{target.name}"
