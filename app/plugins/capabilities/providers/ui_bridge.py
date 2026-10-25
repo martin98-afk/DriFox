@@ -112,6 +112,19 @@ def _dispatch(fn: Callable[[], Any], wait: bool = True, timeout: float = _DISPAT
     return _dispatcher().call(fn, wait=wait, timeout=timeout)
 
 
+def preheat_main_thread_dispatcher() -> None:
+    """在调用线程（应为主线程）预建 _Dispatcher 单例。
+
+    _SignalHost(QObject) 的构造线程决定其初始线程亲和：若单例由插件后台
+    线程首次触发 _dispatch 时才建，QObject 会先在工作线程构造再 moveToThread，
+    该组合在 PyQt5/CPython 3.14 下破坏 Qt 内部同步状态——实测 process.start
+    首启确认框模态循环内堆损坏崩溃（ntdll ACCESS_VIOLATION，VEH 栈钉死
+    _ask，magpie 0.5.2/0.5.3 复现）。宿主启动期（capability provider 注册，
+    主线程）调用本函数即可消除该窗口；对已建单例幂等。
+    """
+    _dispatcher()
+
+
 #: 写操作的统一返回：动作已提交主线程，成败看日志（或用 snapshot 二次确认）
 _SUBMITTED: Dict[str, Any] = {"submitted": True}
 

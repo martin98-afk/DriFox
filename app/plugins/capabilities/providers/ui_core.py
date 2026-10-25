@@ -992,6 +992,14 @@ def register(registry) -> None:
     # 进程级
     reg.register("cache.purge", _cache_purge, surface="ui", owner="core:ui")
     reg.register("process.start", process_core.process_start, surface="ui", owner="core:ui")
+    # process.start 首启确认框从插件后台线程走 _dispatch：_Dispatcher 单例必须
+    # 在此（主线程）预热，否则由后台线程首建 QObject 再 moveToThread 会损坏
+    # Qt 同步状态（实测确认框模态循环内堆崩溃，magpie 0.5.2/0.5.3）。
+    # QApplication 未建（极端启动序）时静默跳过——_confirm_dialog 内还有兜底预热。
+    try:
+        process_core.preheat_main_thread_dispatcher()
+    except RuntimeError:
+        pass
     # 配置（按 key 读非敏感标量）
     reg.register("config.read", _config_read, surface="ui", owner="core:ui")
     # 逃生舱

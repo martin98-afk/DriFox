@@ -144,6 +144,24 @@ def test_tab_callback_deadlock_selfheal(qtbot):
     UIPluginRegistry.get_instance().reset()
 
 
+def test_dispatcher_preheat_main_thread_affinity(qtbot):
+    """preheat 在主线程预建 _Dispatcher：单例亲和主线程（防后台线程首建损坏）"""
+    from PyQt5.QtCore import QThread
+    from PyQt5.QtWidgets import QApplication
+
+    from app.plugins.capabilities.providers import ui_bridge
+
+    _ensure_qapp()
+    ui_bridge._DISPATCHER = None  # 强制重建以验证首建亲和
+    ui_bridge.preheat_main_thread_dispatcher()
+    d = ui_bridge._DISPATCHER
+    assert d is not None
+    assert d._host.thread() is QApplication.instance().thread()
+    # 幂等：二次预热不换实例
+    ui_bridge.preheat_main_thread_dispatcher()
+    assert ui_bridge._DISPATCHER is d
+
+
 def test_tab_callback_normal_ignore_kept(qtbot):
     """真可见时点击维持「再点不关闭」直觉（死锁自愈不改变正常语义）"""
     from types import SimpleNamespace
