@@ -496,10 +496,62 @@ def _input_read(host: Any):
 
 
 def _input_write(host: Any):
-    """写入输入框文本并聚焦（可选追加模式）。"""
+    """写入输入框文本并聚焦（可选追加模式）。
+
+    Tab 模式下 host 可能解析为 TabManagerWindow（full 卡等覆盖场景），输入区
+    在活跃对话窗口上：先降级解析真实输入框；写入后强制切回对话视图——
+    写入语义是「让用户看到并发送」，停留在覆盖页写入不可见（magpie「让 AI
+    帮我装」实测盲写）。
+    """
+
+    def _resolve_area():
+        area = getattr(host, "input_area", None)
+        if area is not None:
+            return area
+        # Tab 模式：host 是 TabManagerWindow → 活跃对话窗口
+        try:
+            wins = getattr(host, "_windows", None) or []
+            panel = getattr(host, "_tab_panel", None)
+            idx = getattr(panel, "_active_index", 0) if panel is not None else 0
+            if 0 <= idx < len(wins):
+                area = getattr(wins[idx], "input_area", None)
+                if area is not None:
+                    return area
+        except Exception:
+            pass
+        # registry 兜底：任一已登记对话窗口
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            for w in (getattr(UIPluginRegistry.get_instance(), "_window_main_widgets", {}) or {}).values():
+                area = getattr(w, "input_area", None)
+                if area is not None:
+                    return area
+        except Exception:
+            pass
+        return None
+
+    def _back_to_chat(owner):
+        # 写入即回对话视图：full 卡覆盖时不切回，用户看不到写入结果。
+        # 优先宿主正规入口（含 stack 切页），退化到 titleBar 高亮复位。
+        show_conv = getattr(owner, "_show_conversation_view", None)
+        if callable(show_conv):
+            try:
+                show_conv()
+                return
+            except Exception:
+                pass
+        try:
+            from app.widgets.tab_manager_window import CHAT_TAB_ID
+
+            set_active = getattr(getattr(owner, "titleBar", None), "set_active_tab", None)
+            if callable(set_active):
+                set_active(CHAT_TAB_ID, animate=False)
+        except Exception:
+            pass
 
     def write(text: str, append: bool = False, focus: bool = True) -> None:
-        area = getattr(host, "input_area", None)
+        area = _resolve_area()
         if area is None:
             raise RuntimeError("输入框不可用")
         if append:
@@ -511,7 +563,7 @@ def _input_write(host: Any):
             cursor = area.textCursor()
             cursor.movePosition(cursor.End)
             area.setTextCursor(cursor)
-
+        _back_to_chat(host)
     return write
 
 
