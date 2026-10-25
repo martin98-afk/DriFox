@@ -216,6 +216,35 @@ def test_stash_explicit_workdir_outside_target_still_moves(tmp_path):
     assert not outside.exists()
 
 
+def test_stash_refuses_drive_root(tmp_path):
+    """盘符根绝不 move：跨盘 move = copytree + rmtree（2026-10-25 把盘根搬残）"""
+    import sys
+    from pathlib import Path
+
+    root = Path("C:/") if sys.platform == "win32" else Path("/")
+    moved = stash_delete_targets_to_trash(f"rm -rf {root.as_posix()}", tmp_path / "trash")
+
+    assert moved == [], "盘符根不允许被移入垃圾桶"
+    assert root.exists()
+
+
+def test_stash_refuses_system_root_dir(tmp_path):
+    """盘根一级系统目录（C:/Windows 等）同样拒绝（与 workdir 无关，按目标本身判定）"""
+    import sys
+    from pathlib import Path
+
+    if sys.platform != "win32":
+        pytest.skip("系统目录清单为 Windows 语义")
+    win = Path("C:/Windows")
+    if not win.exists():
+        pytest.skip("测试机无 C:\\Windows")
+
+    moved = stash_delete_targets_to_trash("rm -rf C:/Windows", tmp_path / "trash")
+
+    assert moved == []
+    assert win.is_dir()
+
+
 # ── 守卫函数本身 ──
 
 

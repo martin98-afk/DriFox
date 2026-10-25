@@ -303,6 +303,17 @@ def check_command(command: str, cfg: Optional[SandboxConfig] = None) -> Verdict:
     return ALLOW
 
 
+def _sys_tool_bypassed(command: str, cfg: SandboxConfig) -> bool:
+    """命令是否落在系统级工具豁免内（开关开 + 首 token 属 SYS_LEVEL_TOOLS）
+
+    独立成函数供 `sandbox_check_tool` 的删除升档判定复用：豁免语义是
+    「该命令族由系统自身管理，沙箱不再二次升级判定」，升档必须让位于它。
+    """
+    if not cfg.get("sys_tools_bypass") or not command:
+        return False
+    return _first_token(command.strip()) in SYS_LEVEL_TOOLS
+
+
 # ============================================================
 # 网络外传（弱防护）
 # ============================================================
@@ -334,6 +345,27 @@ _NET_UPLOAD_FLAGS = (
     "-t",
     "--post-file",
     "--body",
+)
+# 网络能力的判据（2026-10-25 重写）
+# ⚠ 旧实现用 `token in command.lower()` 判断「是不是网络命令」，导致
+#   `nc` 命中 `encode`/`function`、`irm` 命中任意含该子串的词；且「带 URL 就
+#   confirm」不看命令本身是否有网络能力 —— `git commit -m 'fix https://x'`
+#   与 `echo 'see https://docs.python.org'` 一律弹审批，误报率不可接受。
+# 现改为三条判据（任一成立才算网络命令）：
+#   ① 段首 token（按 | ; && 切段）恰为已知网络工具
+#   ② git 的远程子命令（clone/fetch/pull/push/ls-remote...）
+#   ③ 命令文本出现网络 API 调用（requests./urllib/httpx/Invoke-WebRequest...）
+# 非网络命令里的 URL 只当普通文本，不再触发审批。
+_GIT_NET_SUBCOMMANDS = frozenset(
+    {"clone", "fetch", "pull", "push", "ls-remote", "remote", "submodule", "archive"}
+)
+_NET_API_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\brequests\.(?:get|post|put|patch|delete|request|Session)\b"
+    r"|\burllib\b|\bhttpx\b|\baiohttp\b|\bhttp\.client\b"
+    r"|invoke-webrequest|invoke-restmethod|\biwr\b|\birm\b"
+    r"|downloadstring|uploadstring|downloadfile|webclient|httpclient"
+    r")"
 )
 _URL_PATTERN = re.compile(r"https?://[^\s\"']+")
 # 裸域名（无 scheme）：仅在网络工具的**位置参数**上匹配，避免全局正则误报
@@ -403,9 +435,35 @@ def _extract_bare_domains(command: str) -> list:
         # 已有 scheme 的交给 _URL_PATTERN，这里只看裸形态
         if "://" in token:
             continue
+        # scp/rsync 形态 user@host:/path：域名在 @ 与 : 之间
+        # （旧实现整 token 不匹配 _BARE_DOMAIN_RE，导致黑名单对 scp 完全失效）
+        if "@" in token:
+            host = token.split("@", 1)[1].split(":", 1)[0]
+            if _BARE_DOMAIN_RE.match(host):
+                domains.append(host)
+                continue
         if _BARE_DOMAIN_RE.match(token):
             domains.append(token)
     return domains
+
+
+def _is_net_capable(command: str) -> bool:
+    """命令是否具备网络能力（决定「带 URL 是否过审批」与域名黑名单是否生效）
+
+    段首 token 精确匹配（不做子串包含，避免 `nc` 命中 `encode`），
+    外加 git 远程子命令与网络 API 调用特征。
+    """
+    if not command:
+        return False
+    for seg in _split_segments(command):
+        token = _first_token(seg)
+        if token in _NET_TOOL_TOKENS:
+            return True
+        if token == "git":
+            parts = seg.strip().split()
+            if len(parts) > 1 and parts[1].lower() in _GIT_NET_SUBCOMMANDS:
+                return True
+    return bool(_NET_API_PATTERN.search(command))
 
 
 def check_network(command: str, cfg: Optional[SandboxConfig] = None) -> Optional[Verdict]:
@@ -416,14 +474,15 @@ def check_network(command: str, cfg: Optional[SandboxConfig] = None) -> Optional
     if not command:
         return None
 
-    lowered = command.lower()
-    has_net_tool = any(token in lowered for token in _NET_TOOL_TOKENS)
-    urls = _URL_PATTERN.findall(command)
-    bare_domains = _extract_bare_domains(command) if has_net_tool else []
-    if not has_net_tool and not urls and not bare_domains:
+    # 非网络命令：URL 只是文本（如 commit message 里的链接），不做任何判定
+    if not _is_net_capable(command):
         return None
 
-    # 域名黑名单（后缀匹配）：带 scheme 的 URL + 裸域名统一比对
+    lowered = " " + command.lower()
+    urls = _URL_PATTERN.findall(command)
+    bare_domains = _extract_bare_domains(command)
+
+    # 域名黑名单（后缀匹配）：带 scheme 的 URL + 裸域名 + scp 形态统一比对
     hosts = [re.sub(r"^https?://", "", url).split("/")[0].split(":")[0].lower() for url in urls]
     hosts += [d.split("/")[0].split(":")[0].lower() for d in bare_domains]
     for host in hosts:
@@ -433,7 +492,7 @@ def check_network(command: str, cfg: Optional[SandboxConfig] = None) -> Optional
                 return CONFIRM
 
     # 上传/POST 体形态
-    if has_net_tool and any(f" {flag}" in lowered for flag in _NET_UPLOAD_FLAGS):
+    if any(f" {flag}" in lowered for flag in _NET_UPLOAD_FLAGS):
         return CONFIRM
     # 带 URL 的网络命令一律过一道审批（弱防护定位）
     if urls:
@@ -722,8 +781,28 @@ def sandbox_check_tool(
         # ── 删除识别兜底升档：deep 分类器不认识的删除变体（如 .NET
         # [IO.Directory]::Delete）在保护开启时同样强制审批；deny 优先，
         # 豁免由下方豁免块统一判定 ──
-        if verdict != DENY and cfg.get("delete_protection") and is_delete_command(command):
+        # ⚠ 系统级工具豁免（sys_tools_bypass）命中的命令不得在此升档：
+        # `check_command` 已按豁免放行，若此处无条件升回 CONFIRM，豁免对
+        # `wsl rm -rf /mnt/c/x` 这类「豁免工具 + 删除参数」组合完全失效，
+        # 与开关文案「这些命令绕过沙箱审批」矛盾（2026-10-25 实测复现）。
+        if (
+            verdict != DENY
+            and cfg.get("delete_protection")
+            and is_delete_command(command)
+            and not _sys_tool_bypassed(command, cfg)
+        ):
             verdict = CONFIRM
+        # ── 盘符根/系统目录硬拒（2026-10-25 事故）──
+        # 删除目标为盘符根（C:\）或盘根一级系统目录（C:\Windows 等）时无合法
+        # 删除场景，垃圾桶也不得收（跨盘 move = 先整盘拷贝再整盘删除）；
+        # deny 优先于后续豁免与黑名单判定。
+        if (
+            cfg.get("delete_protection")
+            and verdict == CONFIRM
+            and is_delete_command(command)
+            and any(_is_protected_root(t) for t in delete_targets(command, workdir)["existing"])
+        ):
+            verdict = DENY
         # ── 删除保护门控（EU-G23，正解 A）──
         # `delete_protection` 关闭时，**仅取消「因删除命令而 confirm」这一层**。
         # 依据：删除类命令的 confirm 来自 CONFIRM_COMMANDS 命令名单（command_safety），
@@ -1064,6 +1143,11 @@ def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None, workdir: Op
     那会让相对条目在"目标是绝对路径且 workdir 不同"时全部失效
     （如豁免 `tests/` + `rm /abs/work/tests/x` 曾被判不豁免）。
     另：相对条目必须按 **workdir** 解析（不是进程 cwd），`%VAR%` 需先 expandvars 再判绝对。
+
+    ⚠ 黑名单优先于豁免（2026-10-25）：目标同时落在 `path.blacklist` 内时不豁免。
+    此前豁免无条件先于黑名单判定，同一路径既在黑名单又在豁免时黑名单被静默吞掉
+    （`rm D:/secrets/x` → allow），用户在黑名单里划的禁区可从豁免绕开。
+    现在语义分层：豁免只能豁免「workdir 边界」这一层，不能豁免「用户显式拉黑的路径」。
     """
     cfg = cfg or SandboxConfig.get_instance()
     exempt = [str(p) for p in (cfg.get("delete.exempt_paths") or [])]
@@ -1074,8 +1158,12 @@ def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None, workdir: Op
     if not candidates:
         return False
     workdir = workdir if workdir is not None else _current_workdir()
+    blacklist: list = list(cfg.get("path.blacklist") or [])
     for target in candidates:
         norm_target = _norm(target)
+        # 黑名单优先：落在用户显式拉黑路径内的目标不允许被豁免放行
+        if blacklist and _match_blacklist(norm_target, blacklist):
+            return False
         matched = False
         for item in exempt:
             if os.path.isabs(os.path.expandvars(item)):
@@ -1130,6 +1218,33 @@ def _is_workdir_or_ancestor(target: Path, workdir: Optional[Path] = None) -> boo
         return False
 
 
+# 盘根一级的系统关键目录名（normcase 后小写比较）。这些目录的删除没有
+# 合法场景：无论垃圾桶还是原命令，对它们的任何写操作都是灾难。
+_PROTECTED_ROOT_NAMES = frozenset(
+    {"windows", "system32", "program files", "program files (x86)", "programdata", "users"}
+)
+
+
+def _is_protected_root(target: Path) -> bool:
+    """target 是否为盘符根（C:\\）或盘根一级系统目录（C:\\Windows 等）
+
+    2026-10-25 事故：验证脚本把 C:\ 喷给 stash，垃圾桶无防护直接
+    shutil.move('C:\\', ...)，跨盘 move = copytree + rmtree —— 先花了
+    33 分钟把 C 盘可读文件全部拷进垃圾桶，再反过来删 C 盘能删的一切。
+    这类目标永不进垃圾桶，判定层也应直接 deny。
+    """
+    try:
+        p = Path(target)
+        if p.anchor and Path(p.anchor) == p:
+            return True
+        parent = p.parent
+        if parent.anchor and Path(parent.anchor) == parent and p.name.lower() in _PROTECTED_ROOT_NAMES:
+            return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
     """垃圾桶模式：把删除命令的目标**移动**到垃圾箱目录（软删除，可找回）
 
@@ -1150,6 +1265,11 @@ def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], wo
         # 从磁盘消失、所有后续命令报错（2026-10-24 实测连丢三次）。
         if _is_workdir_or_ancestor(target, workdir):
             logger.warning(f"[Sandbox] 拒绝把工作目录移入垃圾桶: {target}")
+            continue
+        # 盘符根/系统目录同样绝不 move（跨盘 move = copytree + rmtree，
+        # 2026-10-25 实测把 C:\ 搬残）；保护与 workdir 无关，按目标本身判定。
+        if _is_protected_root(target):
+            logger.warning(f"[Sandbox] 拒绝把盘符根/系统目录移入垃圾桶: {target}")
             continue
         try:
             trash_root.mkdir(parents=True, exist_ok=True)
