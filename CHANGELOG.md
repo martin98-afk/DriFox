@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.11] - 2026-10-25 (重新发布 #3)
+## [v0.6.11] - 2026-10-25 (重新发布 #4)
 
-自 v0.6.10 以来的变更 | 提交数：62 · 文件变更：132 · +12576/-1855 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.10 以来的变更 | 提交数：63 · 文件变更：136 · +12797/-1864 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -69,6 +69,10 @@ All notable changes to this project will be documented in this file.
 - **MCP 列表名称/分组标题与输入框胶囊图标不随主题切换** (`app/widgets/cards/settings/mcp_setting_card.py` · `app/widgets/bottom_input_area.py` · `tests/widgets/test_theme_refresh_mcp_and_mention_icon.py` 新增): 三处「构造期求值后永不更新」的配色缺陷。①`MCPServerRow` 名称 QLabel 只设了 `font-weight: 600`，没设 color —— 它是纯 QLabel 而非 qfw 的 `FluentLabelBase` 子类，拿不到 `FluentLabelBase { color }` 主题 QSS，只能吃 palette 默认黑字，深色主题下服务器名几乎隐形；现构造期与 `refresh_style` 均显式写 `Colors.TEXT_PRIMARY`。②分组标题（「本地进程 · stdio」等）内联 QSS 由 `isDarkTheme()` 分支生成，`MCPListSettingCard.refresh_style` 只刷了行内描述，从没重设标题，切主题后仍留浅色 `#F0F0F0` 白横条压深底；现缓存 `_group_headers` 并在主题刷新时重设，`_refresh` 重建列表时同步清空引用。③`FileMentionObject._icon_cache` 缓存的是 `FluentIcon.icon()` 返回值，该调用当刻就按主题解析成具体 SVG（`X_black.svg` / `X_white.svg`），缓存后主题切换恒返旧色。改用 `qicon()`（包 `FluentIconEngine`，每次绘制按当前主题重取路径）。对照实测：`icon()` 在深浅两态像素 RGB 和恒为 0（黑，深底隐形），`qicon()` 为 0 → 765（黑→白）。新增回归 7 例。
 
 - **删除判定拆两级：垃圾桶误搬与审批漏判** (`93542700` · `app/tools/sandbox.py` · `app/core/workers/chat_worker.py` · `tests/tools/test_delete_command_position.py` 新增): 安全中心此前两份判定共用同一份 `is_delete_command`，参数位出现的 `rm`/`del` 被当成删除命令，随后把其后所有存在的路径 `move` 进垃圾箱。实测误搬：`git rm -r --cached app`（只脱离索引，整个 `app` 被搬）、`git commit -m "fix: rm cache"`（提交信息里的词，`app` 被搬）、`grep -rn "rm" src/ tests/`（搜索词，`tests/` 被搬）、`ls rm build` / `pip install del build`（参数，`build` 被搬）。收窄判定后又发现审批层跟着漏判（26 条真删除命令中 15 条不再触发审批）。现按消费方误判代价拆成两级：①`is_delete_command`（审批层，宽松）覆盖命令位动词、`.NET IO Delete`、`find -delete`、解释器删除（`python -c shutil.rmtree` / `node -e fs.rmSync`）、`eval`/`iex` 载荷、`for ... do`、`git clean -fdx`、`shred`/`srm`/`truncate -s 0`、`Path().unlink()`；②`is_trash_delete_command`（垃圾桶层，严格）只认命令位动词且目标可静态解析，变量/占位目标不搬、glob 展开成实际路径后搬。连带修复：`delete_protection` 门控改查命令位 span，不再把 `command_safety` 独立判定的 confirm 一并降级（`git clean -fdx` / `git push --force` 在开关关闭时曾被静默放行）；新增 `_explode_separators` 修 `rm a.txt&&rm b.txt` 连接符紧贴路径导致两个目标全部丢失；新增垃圾桶自包含保护（含垃圾桶目录的目录拒绝搬入，`shutil` 会走 copytree+rmtree 退化路径）。验证：审批层 52 条真删除形态漏判 0，垃圾桶层 32 条只读命令误搬 0、7 条真删除漏搬 0；新增回归 153 例。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #4 追加）
+
+- **mcp-oauth：授权假成功与 handler 泄漏导致的 state mismatch 连环失败** (`7fc652f4`): 根因链：callback_handler 在 token 交换前置 done 掩盖交换失败（Apify invalid_client 仍报授权成功）；`_run_authorization` patch 的 redirect/callback handler 从不恢复，泄漏给连接流程的 SDK OAuth；CallbackServer event/result 残留旧回调，泄漏 handler 的 wait() 秒回过期 state，State parameter mismatch 必现。修复：done 只在 drive() 流程真正收尾时置位；handler patch 前保存、finally 恢复；close() 清 result/event。另：`token_endpoint_auth_method` 可经 `.mcp.json` auth 段声明（Apify DCR 不回显该字段致 token 交换缺 secret 报 invalid_client，声明 none 绕开）。测试 `tests/core/test_mcp_oauth.py` 扩展覆盖。
 
 ## [v0.6.11] - 2026-10-24 (pyside6)
 
