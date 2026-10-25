@@ -45,6 +45,7 @@ class _Mgr:
         self.last_summary = ""
         self.last_query: Optional[Dict[str, Any]] = None  # 最近一次 query_daily 的参数（查询模式透传测试）
         self.snapshots = []  # (aid, kind) — 写前快照调用记录
+        self.sections: list = []  # 全局记忆分区定义（空 = 自由格式）
         self._tmp = tmp_path
 
     def _today(self):
@@ -145,6 +146,13 @@ class _Mgr:
     def memory_max_chars(self, aid=""):
         return {"global": 4000, "project": 3000}
 
+    # 分区门面（schema 空 = 自由格式，与真 manager 一致）
+    def memory_sections(self, aid):
+        return self.sections
+
+    def validate_global_memory(self, aid, content):
+        return store.validate_global_sections(content, self.memory_sections(aid))
+
     def snapshot_memory(self, aid, kind, workdir=""):
         self.snapshots.append((aid, kind))
         return {"ok": True, "file": "snap.md"}
@@ -164,9 +172,12 @@ class _Mgr:
         src = self._g.get(aid, "") if kind == "global" else self._p.get((aid, workdir), "")
         return self._fp(src)
 
-    def append_memory(self, aid, kind, text, workdir=""):
+    def append_memory(self, aid, kind, text, workdir="", section=""):
         if kind == "global":
             cur = self._g.get(aid, "")
+            if section:
+                self._g[aid] = store.insert_into_section(cur, section, text.strip())
+                return {"ok": True, "chars": len(self._g[aid])}
             self._g[aid] = (cur.rstrip() + "\n" + text.strip()) if cur.strip() else text.strip()
             return {"ok": True, "chars": len(self._g[aid])}
         if kind == "project" and workdir:
@@ -630,3 +641,78 @@ def test_read_global_returns_base(monkeypatch, tmp_path):
     assert "(base: " in r.content
     r2 = m._read_impl(_ctx("/proj"), scope="project")
     assert "(base: " in r2.content
+
+# ── 全局记忆分区：memory_write 强制归属 ─────────────────────
+
+_SECTIONS = [
+    {"name": "工程方法论", "hint": "跨项目通用的做法"},
+    {"name": "用户偏好", "hint": "表达方式与禁止事项"},
+]
+
+
+def test_write_append_requires_section_when_schema_defined(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.sections = _SECTIONS
+    r = m._write_impl(_ctx("/proj"), scope="global", content="- 一条规则", mode="append")
+    assert not r.success
+    assert "必须带 section" in r.error
+    assert "工程方法论" in r.error and "用户偏好" in r.error
+
+
+def test_write_append_rejects_unknown_section(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.sections = _SECTIONS
+    r = m._write_impl(_ctx("/proj"), scope="global", content="- 一条规则", mode="append", section="杂项")
+    assert not r.success and "不在清单内" in r.error
+
+
+def test_write_append_lands_in_section(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.sections = _SECTIONS
+    mgr.write_global_memory("build", "## 工程方法论\n- 旧条目\n\n## 用户偏好\n- 旧偏好\n")
+    r = m._write_impl(_ctx("/proj"), scope="global", content="- 新条目", mode="append", section="工程方法论")
+    assert r.success and "工程方法论" in r.content
+    text = mgr._g["build"]
+    assert text.index("- 旧条目") < text.index("- 新条目") < text.index("## 用户偏好")
+
+
+def test_write_replace_rejects_unknown_title(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.sections = _SECTIONS
+    r = m._write_impl(_ctx("/proj"), scope="global", content="## 工程方法论\n- A\n\n## 缓存策略\n- B\n")
+    assert not r.success
+    assert "清单外标题" in r.error and "缓存策略" in r.error
+    assert "dry_run=true" in r.error
+
+
+def test_write_replace_accepts_wellformed(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.sections = _SECTIONS
+    r = m._write_impl(_ctx("/proj"), scope="global", content="## 工程方法论\n- A\n\n## 用户偏好\n- B\n")
+    assert r.success, r.error
+
+
+def test_write_dry_run_does_not_persist(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.sections = _SECTIONS
+    mgr.write_global_memory("build", "## 工程方法论\n- 旧\n")
+    r = m._write_impl(_ctx("/proj"), scope="global", content="## 工程方法论\n- 新\n", dry_run=True)
+    assert r.success and "dry_run" in r.content
+    assert "- 旧" in mgr._g["build"] and "- 新" not in mgr._g["build"]
+    assert mgr.snapshots == []
+
+
+def test_write_dry_run_still_reports_invalid(monkeypatch, tmp_path):
+    mgr = _patch(monkeypatch, tmp_path)
+    mgr.sections = _SECTIONS
+    r = m._write_impl(_ctx("/proj"), scope="global", content="## 乱写\n- X\n", dry_run=True)
+    assert not r.success and "乱写" in r.error
+
+
+def test_write_freeform_when_schema_empty(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    # 空 schema：自由格式，append 不需 section、replace 不做标题校验
+    r = m._write_impl(_ctx("/proj"), scope="global", content="随便一段", mode="append")
+    assert r.success
+    r2 = m._write_impl(_ctx("/proj"), scope="global", content="## 任意标题\n- X\n")
+    assert r2.success

@@ -23038,6 +23038,26 @@ class OpenAIChatToolWindow(ToolWindow):
         if not user_messages:
             logger.warning("[Topic Summary] No user messages found, skipping")
             return
+
+        # 短输入守卫：首条用户输入 ≤10 字时无总结价值，直接用原文当标题，
+        # 不再起 LLM 任务（>10 字才走总结）。提取逻辑与 TopicSummaryTask
+        # _fallback_user_question 对齐（多模态取 text 段、跳过未打标任务邮件）。
+        first_text = ""
+        for m in user_messages:
+            content = m.get("content", "")
+            if isinstance(content, list):
+                texts = [item.get("text", "") for item in content if item.get("type") == "text"]
+                content = "\n".join(texts)
+            content = str(content).strip()
+            if not content or content.startswith("📨 **来自"):
+                continue
+            first_text = content
+            break
+        if first_text and len(first_text) <= 10:
+            logger.info(f"[Topic Summary] 首条输入仅{len(first_text)}字，直接用作标题")
+            self._on_topic_summary_generated(first_text)
+            return
+
         previous_summary = ""
         if self._current_session_id is not None:
             idx = self.history_manager.find_index_by_session_id(self._current_session_id)

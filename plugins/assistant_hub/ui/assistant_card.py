@@ -312,6 +312,8 @@ class AssistantCardWidget(QWidget):
         self._memory.viewDaily.connect(self._on_view_daily)
         self._memory.clearAll.connect(self._on_clear_all)
         self._memory.limitsChanged.connect(self._on_memory_limits)
+        self._memory.sectionsChanged.connect(self._on_memory_sections_changed)
+        self._memory.seedSectionsRequested.connect(self._on_memory_seed_sections)
         self._memory.restoreRequested.connect(self._on_restore_memory)
         self._memory.migrateRequested.connect(self._on_migrate_memory)
         self._memory.dismissDriftRequested.connect(self._on_dismiss_drift)
@@ -322,7 +324,6 @@ class AssistantCardWidget(QWidget):
         self._experience.viewCategory.connect(self._on_view_experience)
         self._experience.deleteCategoryRequested.connect(self._on_experience_delete)
         self._experience.consolidateRequested.connect(self._on_experience_consolidate)
-        self._experience.reflectRequested.connect(self._on_reflect)
         self._inner_v.addWidget(self._experience)
 
         self._inner_v.addStretch(1)
@@ -474,6 +475,7 @@ class AssistantCardWidget(QWidget):
             self._project.set_context_enabled(a.project_context_enabled)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_limits(a.global_memory_max_chars, a.project_memory_max_chars)
+            self._memory.set_sections(mgr.memory_sections(aid_capture))
             self._pinned.reload_pins(mgr.read_pinned(aid_capture))
             self._refresh_memory(aid_capture)
             self._experience.set_enabled(a.experience_enabled)
@@ -483,15 +485,19 @@ class AssistantCardWidget(QWidget):
         QTimer.singleShot(0, _do_bind)
 
     def _memory_status(self, aid: str) -> str:
-        """记忆状态文案：累计全局 + 项目记忆 + 日志字数。"""
+        """记忆用量摘要：上限内联（全局 1469/4000），不含健康段（后者单独给）。"""
         try:
             wd = self._mgr._current_workdir(self._ctx_caps_pool())
+            lims = self._mgr.memory_max_chars(aid)
             g = len((self._mgr.read_global_memory(aid) or "").strip())
             p = len((self._mgr.read_project_memory(aid, wd) or "").strip()) if wd else 0
             days = len(self._mgr.list_daily(aid, wd, limit=999)) if wd else 0
             if not g and not p and not days:
                 return "暂无记忆"
-            return f"全局 {g} 字 · 项目 {p} 字 · 日志 {days} 天"
+            parts = [f"全局 {g}/{lims['global']}", f"项目 {p}/{lims['project']}"]
+            if days:
+                parts.append(f"日志 {days} 天")
+            return " · ".join(parts)
         except Exception:
             return "暂无记忆"
 
@@ -697,6 +703,30 @@ class AssistantCardWidget(QWidget):
         self._mgr._invalidate_session_prompt_caches()
         self._memory.setEnabled_all(bool(on))
 
+    def _on_memory_seed_sections(self) -> None:
+        """恢复默认分区（用户把分区全删光后的重来入口）。"""
+        if not self._active_aid:
+            return
+        default = self._mgr.default_memory_sections()
+        self._memory.set_sections(default)
+        self._on_memory_sections_changed(default)
+
+    def _on_memory_sections_changed(self, sections: list) -> None:
+        """分区定义变更：落盘（改名时同步改写 MEMORY.md 旧标题）+ 刷新状态。"""
+        if not self._active_aid:
+            return
+        aid = self._active_aid
+        r = self._mgr.set_memory_sections(aid, sections)
+        if not r.get("ok"):
+            self._notify_error(f"分区保存失败：{r.get('error')}")
+            self._memory.set_sections(self._mgr.memory_sections(aid))
+            return
+        renamed = r.get("renamed") or []
+        if renamed:
+            self._notify(f"分区已更新，全局记忆标题同步改名：{'、'.join(renamed)}")
+        else:
+            self._notify(f"分区已更新（{r.get('count', 0)} 个）")
+
     def _on_memory_limits(self, global_chars: int, project_chars: int) -> None:
         """记忆字符上限变更：存助手配置（工具拦截/注入截断即时生效）。"""
         a = self._mgr.get(self._active_aid)
@@ -869,63 +899,34 @@ class AssistantCardWidget(QWidget):
         self._experience.reload_categories(self._mgr.experience_list(aid))
         self._notify(f"经验分类「{category}」已删除")
 
-    def _on_reflect(self) -> None:
-        if not self._active_aid:
-            return
-        aid = self._active_aid
-        self._notify("反思进行中…")
-
-        def _worker():
-            r = self._mgr.experience_reflect(aid)
-            parts = [f"反思完成：新增 {r.get('added', 0)} 条经验" if r.get("added") else "反思完成：暂无新经验"]
-            for c in r.get("consolidated") or []:
-                if c.get("changed"):
-                    parts.append(f"全库已压缩 {c.get('before')}→{c.get('after')} 条")
-            msg = "；".join(parts) + (
-                f" {('(' + r.get('error', '') + ')') if r.get('error') and not r.get('added') else ''}"
-            )
-
-            def _done():
-                self._notify(msg)
-                if r.get("added") or r.get("consolidated"):
-                    self._experience.reload_categories(self._mgr.experience_list(aid))
-
-            # daemon 线程 → 走信号投递（QTimer.singleShot 在这里永不触发）
-            self._main_thread_call.emit(_done)
-
-        threading.Thread(target=_worker, daemon=True).start()
+    # 压缩整理提示词：交给对话里的模型执行（读全库→合并去重→重新归类）。
+    # 走对话而非后台 LLM 调用，用户可看到过程、可中断、可追加要求。
+    _CONSOLIDATE_PROMPT = (
+        "请整理我的经验库，步骤：\n"
+        "1. 用 recall_experience 读完全部分类与条目\n"
+        "2. 语义相近的合并成一条、重复的只留一条、过时或被新实践推翻的删掉\n"
+        "3. 分类要少而稳定：优先沿用现有分类，相近分类合并，确有必要才新建（≤8 字）\n"
+        "4. 每条仍是一句碎片：对象+动作+关键细节，具体可执行，禁空泛表述\n"
+        "5. 整理完告诉我合并/删除/新建了哪些，以及现在每个分类各多少条"
+    )
 
     def _on_experience_consolidate(self) -> None:
-        """手动全库压缩：确认 → 后台线程跑 LLM 合并 → 刷新列表。"""
+        """压缩整理：关闭助手中心 → 把整理提示词写进对话输入框。"""
         if not self._active_aid:
             return
-        aid = self._active_aid
-        ret = _confirm_dialog(
-            _host_window() or self.window(),
-            "压缩经验库",
-            "压缩全部经验？\nLLM 将跨分类语义合并去重 + 重新归类，旧文件备份到 experience.bak。",
-        )
-        if not ret:
-            return
-        self._notify("压缩进行中…")
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        def _worker():
-            r = self._mgr.experience_consolidate(aid)
-            if r.get("changed"):
-                msg = f"已压缩 {r.get('before')}→{r.get('after')} 条"
-                msg += "（内容无变化）" if r.get("before") == r.get("after") else ""
-            elif r.get("reason") == "too_few":
-                msg = "经验条目过少，无需压缩"
-            else:
-                msg = f"压缩失败 {('(' + str(r.get('error') or r.get('reason', '')) + ')')}"
-
-            def _done():
-                self._notify(msg)
-                self._experience.reload_categories(self._mgr.experience_list(aid))
-
-            self._main_thread_call.emit(_done)
-
-        threading.Thread(target=_worker, daemon=True).start()
+            UIPluginRegistry.get_instance().hide_floating_card_globally(CARD_ID)
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 关闭助手中心失败: {e}")
+        try:
+            writer = _caps("input.write")
+            if writer is None:
+                raise RuntimeError("无 input.write 能力")
+            writer(self._CONSOLIDATE_PROMPT)
+        except Exception as e:
+            self._notify_error(f"无法填入提示词：{e}")
 
     # ══════════════════════════════════════════════════
     #  通知 / 宿主契约

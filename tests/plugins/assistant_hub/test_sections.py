@@ -116,11 +116,30 @@ def test_experience_section_reload(qtbot=None):
     opened = []
     s.viewCategory.connect(opened.append)
     s.reload_categories([{"category": "工作流", "count": 2}, {"category": "工具使用", "count": 1}])
-    # 点击第一个分类按钮（行包装容器无 click，按钮在布局第 0 项）
-    row_wrap = s._list_area.itemAt(0).widget()
-    btn = row_wrap.layout().itemAt(0).widget()
-    btn.click()
+    # 分类以卡片流呈现（与记忆分区同一载体）；点击卡片触发查看
+    assert s._chips_row.count() == 2
+    chip = s._chips_row.itemAt(0).widget()
+    assert isinstance(chip, sections._SectionChip)
+    assert chip._name.text() == "工作流"
+    chip.clicked.emit()
     assert opened == ["工作流"]
+
+
+def test_experience_section_delete_signal(qtbot=None):
+    s = sections.ExperienceSection()
+    got = []
+    s.deleteCategoryRequested.connect(got.append)
+    s.reload_categories([{"category": "工作流", "count": 2}])
+    chip = s._chips_row.itemAt(0).widget()
+    chip.deleteRequested.emit()
+    assert got == ["工作流"]
+
+
+def test_experience_section_empty_state(qtbot=None):
+    s = sections.ExperienceSection()
+    s.reload_categories([])
+    assert s._chips_row.count() == 0
+    assert s._empty.isVisible() or not s._empty.isHidden()
 
 
 def test_experience_section_toggle_hides_body(qtbot=None):
@@ -130,6 +149,26 @@ def test_experience_section_toggle_hides_body(qtbot=None):
     assert s._body_wrap.isHidden()
     s.set_enabled(True)
     assert not s._body_wrap.isHidden()
+
+
+def test_experience_section_has_no_reflect_button(qtbot=None):
+    """反思整理已移除：经验整理统一走对话提示词（压缩整理 → input.write）。"""
+    from PyQt5.QtWidgets import QPushButton
+
+    s = sections.ExperienceSection()
+    texts = [b.text() for b in s.findChildren(QPushButton)]
+    assert "反思整理" not in texts
+    assert "压缩整理" in texts
+    # 对应信号也必须一并去掉，否则残留接线会引用不存在的方法
+    assert not hasattr(s, "reflectRequested")
+
+
+def test_experience_consolidate_emits_once(qtbot=None):
+    s = sections.ExperienceSection()
+    hits = []
+    s.consolidateRequested.connect(lambda: hits.append(1))
+    s.consolidateRequested.emit()
+    assert hits == [1]
 
 
 def test_text_view_overlay_readonly(qtbot=None):

@@ -28,6 +28,8 @@
         "engine.session",
         "mcp.call",
         "model.config",
+        "input.read",
+        "input.write",
         "session.invalidate",
         "session.read",
         "tool.inject",
