@@ -103,22 +103,20 @@ def test_is_git_missing_detects_marker():
 
 
 def test_guide_install_git_hides_card_and_fills_input(monkeypatch):
-    """git 缺失引导：隐藏市场卡 + 通过 input.write 能力把「本地安装 git」写入输入框"""
-    from ui import cards as cards_mod
+    """git 缺失引导：隐藏市场卡 + 通过 input.write 能力把「本地安装 git」写入输入框
+
+    能力取用走 ``caps_for``（按 manifest 声明裁剪 + 插件绑定窗口解析 host）。
+    早前实现从 ``QApplication.topLevelWidgets()`` 找 ``_build_ui_capabilities``，
+    Tab 模式下 MainWidget 已被 reparent 成 TabManagerWindow 子 widget，永远取
+    不到池 → 引导静默失效（本测试不再提供该回退，直接断言 caps_for 路径）。
+    """
     from ui.cards import MarketplaceCard
 
     written = {}
 
-    class _FakePool:
-        def __contains__(self, cap):
-            return cap == "input.write"
-
-        def __getitem__(self, cap):
-            def _write(text, append=False, focus=True):
-                written["text"] = text
-                written["focus"] = focus
-
-            return _write
+    def _fake_writer(text, append=False, focus=True):
+        written["text"] = text
+        written["focus"] = focus
 
     class FakeUI:
         hidden = []
@@ -131,10 +129,14 @@ def test_guide_install_git_hides_card_and_fills_input(monkeypatch):
             FakeUI.hidden.append(cid)
 
     from app.plugins.registries import ui_plugin_registry
+    import app.plugins.sdk as sdk
 
     monkeypatch.setattr(ui_plugin_registry, "UIPluginRegistry", FakeUI)
-    # 能力池来自模块级辅助（原 TabManagerWindow 取窗口已删除）
-    monkeypatch.setattr(cards_mod, "_card_caps", lambda: _FakePool())
+    monkeypatch.setattr(
+        sdk,
+        "caps_for",
+        lambda cap, plugin="", surface="": _fake_writer if cap == "input.write" else None,
+    )
 
     card = MarketplaceCard.__new__(MarketplaceCard)
     card._guide_install_git("demo-plugin")
@@ -149,3 +151,25 @@ def test_guide_install_git_hides_card_and_fills_input(monkeypatch):
     ), f"引导语必须含具体安装命令，实际: {prompt}"
     assert "git --version" in prompt, "引导语必须含验证步骤"
     assert written.get("focus") is True, "输入框必须获得焦点"
+
+
+def test_guide_install_git_without_capability_does_not_raise(monkeypatch):
+    """拿不到 input.write（能力未声明/池未就绪）时只记日志，不抛、不误写"""
+    from ui.cards import MarketplaceCard
+    import app.plugins.sdk as sdk
+
+    class FakeUI:
+        @classmethod
+        def get_instance(cls):
+            return cls()
+
+        def hide_floating_card_globally(self, cid):
+            pass
+
+    from app.plugins.registries import ui_plugin_registry
+
+    monkeypatch.setattr(ui_plugin_registry, "UIPluginRegistry", FakeUI)
+    monkeypatch.setattr(sdk, "caps_for", lambda *a, **k: None)
+
+    card = MarketplaceCard.__new__(MarketplaceCard)
+    card._guide_install_git("demo-plugin")  # 不抛即通过

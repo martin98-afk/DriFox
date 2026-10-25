@@ -496,10 +496,79 @@ def _input_read(host: Any):
 
 
 def _input_write(host: Any):
-    """写入输入框文本并聚焦（可选追加模式）。"""
+    """写入输入框文本并聚焦（可选追加模式）。
+
+    Tab 模式下 host 可能解析为 TabManagerWindow（full 卡等覆盖场景），输入区
+    在活跃对话窗口上：先降级解析真实输入框；写入后强制切回对话视图——
+    写入语义是「让用户看到并发送」，停留在覆盖页写入不可见（magpie「让 AI
+    帮我装」实测盲写）。
+    """
+
+    def _resolve_area():
+        area = getattr(host, "input_area", None)
+        if area is not None:
+            return area
+        # Tab 模式：host 是 TabManagerWindow → 活跃对话窗口
+        try:
+            wins = getattr(host, "_windows", None) or []
+            panel = getattr(host, "_tab_panel", None)
+            idx = getattr(panel, "_active_index", 0) if panel is not None else 0
+            if 0 <= idx < len(wins):
+                area = getattr(wins[idx], "input_area", None)
+                if area is not None:
+                    return area
+        except Exception:
+            pass
+        # registry 兜底：任一已登记对话窗口
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            for w in (getattr(UIPluginRegistry.get_instance(), "_window_main_widgets", {}) or {}).values():
+                area = getattr(w, "input_area", None)
+                if area is not None:
+                    return area
+        except Exception:
+            pass
+        return None
+
+    def _back_to_chat():
+        # 写入即回对话视图：full 卡覆盖时不切回，用户看不到写入结果。
+        # host 常是 MainWidget（窗口级能力池 / 浮动卡宿主），覆盖页却由
+        # TabManagerWindow 托管，MainWidget 上没有回对话入口 → 候选依次为
+        # host 自身与全局 Tab 管理器；正规入口（含 stack 切页 + 隐藏 replace 卡）
+        # 优先，退化到 titleBar 高亮复位（titleBar / _title_bar 两种属性名）。
+        owners = []
+        for owner in (host, _resolve_tab_window()):
+            if owner is not None and all(owner is not o for o in owners):
+                owners.append(owner)
+        for owner in owners:
+            try:
+                show_conv = getattr(owner, "_show_conversation_view", None)
+            except Exception:
+                continue
+            if callable(show_conv):
+                try:
+                    show_conv()
+                    return
+                except Exception:
+                    pass
+        for owner in owners:
+            try:
+                title_bar = getattr(owner, "titleBar", None) or getattr(owner, "_title_bar", None)
+            except Exception:
+                continue
+            set_active = getattr(title_bar, "set_active_tab", None)
+            if callable(set_active):
+                try:
+                    from app.widgets.tab_manager_window import CHAT_TAB_ID
+
+                    set_active(CHAT_TAB_ID, animate=False)
+                    return
+                except Exception:
+                    pass
 
     def write(text: str, append: bool = False, focus: bool = True) -> None:
-        area = getattr(host, "input_area", None)
+        area = _resolve_area()
         if area is None:
             raise RuntimeError("输入框不可用")
         if append:
@@ -508,10 +577,12 @@ def _input_write(host: Any):
             area.setPlainText(text)
         if focus:
             area.setFocus()
-            cursor = area.textCursor()
-            cursor.movePosition(cursor.End)
-            area.setTextCursor(cursor)
+            from PySide6.QtGui import QTextCursor
 
+            cursor = area.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            area.setTextCursor(cursor)
+        _back_to_chat()
     return write
 
 
