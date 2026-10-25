@@ -456,12 +456,17 @@ class _CommandRow(QFrame):
         self._setup_ui()
 
     def _scope_badge(self) -> tuple:
-        """返回 (徽标文字, tooltip)；无快捷键或无作用域差异时返回空串不显示"""
+        """返回 (徽标文字, tooltip)
+
+        只标注**例外**：全局热键能在应用外触发，属于稀缺能力，值得标出来；
+        「应用内」是所有普通命令的默认行为，逐行标注等于噪声（一屏十几条
+        「应用内」反而看不出哪条特殊）。默认项的说明走 tooltip。
+        """
         if not self._shortcut:
             return "", ""
         if self._cmd_name in _GLOBAL_SCOPE_COMMANDS:
             return "全局", "全局热键：DriFox 在后台或失焦时也能触发（系统级注册）"
-        return "应用内", "应用内快捷键：仅当 DriFox 窗口有焦点时生效"
+        return "", "应用内快捷键：仅当 DriFox 窗口有焦点时生效"
 
     def _setup_ui(self):
         self.setObjectName("cmdRow")

@@ -853,8 +853,9 @@ class MCPServerRow(CardWidget):
         self._status_dot.setToolTip(tip)
 
     def refresh_style(self):
-        """主题变更时刷新描述/token 颜色 + 状态灯 + 授权按钮双态配色"""
+        """主题变更时刷新名称/描述/token 颜色 + 状态灯 + 授权按钮双态配色"""
         Colors.refresh()
+        self._name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;")
         self._desc_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
         )
@@ -903,7 +904,10 @@ class MCPServerRow(CardWidget):
         name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         name_label.setMinimumWidth(100)
         name_label.setMaximumWidth(260)
-        name_label.setStyleSheet("font-weight: 600;")
+        # 显式取主题文字色：纯 QLabel 不匹配 qfw 的 FluentLabelBase QSS，默认色
+        # 是 palette 黑字，深色主题下等于隐形（用户实测「MCP 名称没随主题切换」）。
+        name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;")
+        self._name_label = name_label
         top.addWidget(name_label)
         # 名称与操作组之间的弹性：短名后空白收拢在中间，操作控件靠右成组
         top.addStretch(1)
@@ -1142,6 +1146,8 @@ class MCPListSettingCard(ExpandSettingCard):
         self._global_switch_pending = False
         # 行引用（用于开关操作时直接更新，避免全量刷新）
         self._server_rows: Dict[str, "MCPServerRow"] = {}
+        # 分组标题引用（主题切换时重设内联 QSS，深底浅字跟着变）
+        self._group_headers: list = []
         # 自触发抑制：本卡片的开关操作不触发 watchfiles 热重载回刷。
         # 用「过期时间戳」而非布尔：全局开关写入的是 settings（不触发插件热重载），
         # 若用布尔标记会永久停在 True，导致此后所有热重载刷新被吞掉（计数更新、列表不更新）。
@@ -1694,6 +1700,8 @@ class MCPListSettingCard(ExpandSettingCard):
         was_expanded = self.isExpand
         # 清除旧的行引用
         self._server_rows.clear()
+        # 分组标题随列表重建，旧引用必然失效
+        self._group_headers.clear()
         # 停止状态轮询（重建列表期间避免操作已销毁的 widget）
         self._status_timer.stop()
 
@@ -1721,6 +1729,7 @@ class MCPListSettingCard(ExpandSettingCard):
             def _render_group(title: str, group_servers: list):
                 header = QLabel(title, self.view)
                 header.setStyleSheet(_group_header_style())
+                self._group_headers.append(header)
                 self.viewLayout.addWidget(header)
                 for server_data in group_servers:
                     row = MCPServerRow(server_data, self.view)
@@ -1795,8 +1804,18 @@ class MCPListSettingCard(ExpandSettingCard):
         super().hideEvent(event)
 
     def refresh_style(self):
-        """主题变更时刷新所有行的命令描述颜色"""
+        """主题变更时刷新分组标题 + 所有行的名称/描述颜色
+
+        分组标题是 QLabel + 内联 QSS（深底浅字由 isDarkTheme 决定），
+        不刷新会停留在旧主题的底色上（用户实测「MCP 名称没随主题切换」
+        里最扎眼的那条浅色横条）。
+        """
         Colors.refresh()
+        for header in self._group_headers:
+            try:
+                header.setStyleSheet(_group_header_style())
+            except RuntimeError:
+                pass  # 已被销毁
         for row in self._server_rows.values():
             if row is not None and hasattr(row, "refresh_style"):
                 try:
