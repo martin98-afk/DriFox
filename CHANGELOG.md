@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.11] - 2026-10-25 (重新发布 #3)
+## [v0.6.11] - 2026-10-25 (重新发布 #4)
 
-自 v0.6.10 以来的变更 | 提交数：62 · 文件变更：132 · +12576/-1855 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.10 以来的变更 | 提交数：67 · 文件变更：161 · +15635/-2039 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -69,6 +69,17 @@ All notable changes to this project will be documented in this file.
 - **MCP 列表名称/分组标题与输入框胶囊图标不随主题切换** (`app/widgets/cards/settings/mcp_setting_card.py` · `app/widgets/bottom_input_area.py` · `tests/widgets/test_theme_refresh_mcp_and_mention_icon.py` 新增): 三处「构造期求值后永不更新」的配色缺陷。①`MCPServerRow` 名称 QLabel 只设了 `font-weight: 600`，没设 color —— 它是纯 QLabel 而非 qfw 的 `FluentLabelBase` 子类，拿不到 `FluentLabelBase { color }` 主题 QSS，只能吃 palette 默认黑字，深色主题下服务器名几乎隐形；现构造期与 `refresh_style` 均显式写 `Colors.TEXT_PRIMARY`。②分组标题（「本地进程 · stdio」等）内联 QSS 由 `isDarkTheme()` 分支生成，`MCPListSettingCard.refresh_style` 只刷了行内描述，从没重设标题，切主题后仍留浅色 `#F0F0F0` 白横条压深底；现缓存 `_group_headers` 并在主题刷新时重设，`_refresh` 重建列表时同步清空引用。③`FileMentionObject._icon_cache` 缓存的是 `FluentIcon.icon()` 返回值，该调用当刻就按主题解析成具体 SVG（`X_black.svg` / `X_white.svg`），缓存后主题切换恒返旧色。改用 `qicon()`（包 `FluentIconEngine`，每次绘制按当前主题重取路径）。对照实测：`icon()` 在深浅两态像素 RGB 和恒为 0（黑，深底隐形），`qicon()` 为 0 → 765（黑→白）。新增回归 7 例。
 
 - **删除判定拆两级：垃圾桶误搬与审批漏判** (`93542700` · `app/tools/sandbox.py` · `app/core/workers/chat_worker.py` · `tests/tools/test_delete_command_position.py` 新增): 安全中心此前两份判定共用同一份 `is_delete_command`，参数位出现的 `rm`/`del` 被当成删除命令，随后把其后所有存在的路径 `move` 进垃圾箱。实测误搬：`git rm -r --cached app`（只脱离索引，整个 `app` 被搬）、`git commit -m "fix: rm cache"`（提交信息里的词，`app` 被搬）、`grep -rn "rm" src/ tests/`（搜索词，`tests/` 被搬）、`ls rm build` / `pip install del build`（参数，`build` 被搬）。收窄判定后又发现审批层跟着漏判（26 条真删除命令中 15 条不再触发审批）。现按消费方误判代价拆成两级：①`is_delete_command`（审批层，宽松）覆盖命令位动词、`.NET IO Delete`、`find -delete`、解释器删除（`python -c shutil.rmtree` / `node -e fs.rmSync`）、`eval`/`iex` 载荷、`for ... do`、`git clean -fdx`、`shred`/`srm`/`truncate -s 0`、`Path().unlink()`；②`is_trash_delete_command`（垃圾桶层，严格）只认命令位动词且目标可静态解析，变量/占位目标不搬、glob 展开成实际路径后搬。连带修复：`delete_protection` 门控改查命令位 span，不再把 `command_safety` 独立判定的 confirm 一并降级（`git clean -fdx` / `git push --force` 在开关关闭时曾被静默放行）；新增 `_explode_separators` 修 `rm a.txt&&rm b.txt` 连接符紧贴路径导致两个目标全部丢失；新增垃圾桶自包含保护（含垃圾桶目录的目录拒绝搬入，`shutil` 会走 copytree+rmtree 退化路径）。验证：审批层 52 条真删除形态漏判 0，垃圾桶层 32 条只读命令误搬 0、7 条真删除漏搬 0；新增回归 153 例。
+
+### ✨ 新功能 (New Features)（重新发布 #4 追加）
+
+- **文件预览功能（图片 + 文本文件）** (`3ece4a8e`): 新增预览页，支持图片与文本文件两类。按扩展名与内容双重判定文件类型；大文件优雅降级（文本/图片预览设上限）；图片预览支持缩放与平移；文本文件提供带行号与语法高亮的代码视图。附单元测试回归覆盖。
+- **文件树编辑能力与快捷键管理增强** (`c82fe938`): ①`FileTreeModel` 启用 `ItemIsEditable`，支持 F2 与右键菜单重命名；`RenameDelegate` 编辑器背景不透明化，防文字重叠。②快捷键冲突检测改大小写不敏感，新增冲突命令名收集函数。③UI 命令合并逻辑：`components.commands` 与 `components.ui` 双声明时防重复注册命令。④新增快捷键冲突与 UI 命令合并回归测试，及悬浮层探测工具（交互后无幽灵窗口）。
+- **MCP 列表与输入框图标主题适配** (`18964ad8`): MCP 列表与输入框图标的主题切换处理更新，深浅色一致性。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #4 追加）
+
+- **agents 细项/组件级停用集全链路生效** (`892463b9`): ①`AgentManager` 加载链消费 D9/D10 禁用集：`_load_agents_from_dir` 注册点细项过滤（md/yaml）、`_load_agents_from_plugins` 与 `reload_plugin_agents` 组件级检查，重启后仍生效。②细项开关改精准增删：`set_agent_item_enabled`（file_cache 零 parse 登记）+ `set_agent_command_enabled` 单条命令增删 + `CommandManager.unregister_typed`，替代每次开关全量 reload+命令重建。③命令侧补细项过滤：实时解析与缓存命中两条路径均按 `_is_item_enabled` 复核，停用智能体的 /命令不再注册/复活。④设置卡细项开启时组件级停用则连带开启组件，消除「开了没反应」。⑤token 统计与 prompt 注入同源（`_plugin_agents` 过滤后），按启用数计算。回归：`tests/core/test_agent_item_toggle.py`（14 例）。
+- **FileMentionObject 图标主题一致性** (`30096b2e`): 文件提及对象图标处理更新，保证主题切换下显示一致。
 
 ## [v0.6.10] - 2026-10-20 (重新发布 #8)
 
