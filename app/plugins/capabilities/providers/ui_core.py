@@ -997,7 +997,9 @@ def register(registry) -> None:
     # Qt 同步状态（实测确认框模态循环内堆崩溃，magpie 0.5.2/0.5.3）。
     # QApplication 未建（极端启动序）时静默跳过——_confirm_dialog 内还有兜底预热。
     try:
-        process_core.preheat_main_thread_dispatcher()
+        from app.plugins.capabilities.providers.ui_bridge import preheat_main_thread_dispatcher
+
+        preheat_main_thread_dispatcher()
     except RuntimeError:
         pass
     # 配置（按 key 读非敏感标量）
