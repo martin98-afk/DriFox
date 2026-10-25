@@ -14,8 +14,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from PyQt5.QtGui import QColor, QImage
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import QApplication
 
 # QWidget 构造前必须存在 QApplication
 _QAPP = QApplication.instance() or QApplication(sys.argv)
@@ -265,7 +265,7 @@ class TestImageView:
         view.resize(w, h)
         img = QImage(img_w, img_h, QImage.Format_RGB32)
         img.fill(QColor("#3366cc"))
-        from PyQt5.QtGui import QPixmap
+        from PySide6.QtGui import QPixmap
 
         view.set_pixmap(QPixmap.fromImage(img))
         return view

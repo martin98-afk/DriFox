@@ -137,6 +137,18 @@ def _make_colors_from_context(ctx: dict) -> dict:
     }
 
 
+def _menu_icon(icon: FluentIcon, color: QColor) -> QIcon:
+    """按主题文字色给菜单图标着色（菜单项用 icon 代替 emoji）
+
+    FluentIcon 资源是 SVG，``icon(theme=..., color=...)`` 才会重新着色；
+    裸 ``icon()`` 取的是固定黑/白版，在亮底或暗底菜单里会看不清。
+    """
+    try:
+        return icon.icon(color=color)
+    except Exception:
+        return icon.icon()
+
+
 # ══════════════════════════════════════════════════════════
 # 主题对话框辅助
 # ══════════════════════════════════════════════════════════
@@ -1442,73 +1454,81 @@ class FileTreeCard(QWidget):
             is_dir = True
             parent_path = self._project_root
 
+        # 菜单图标按主题文字色着色（裸 icon() 是固定黑白版，暗底/亮底会看不清）
+        icon_color = tc
+
+        def _act(icon: FluentIcon, text: str):
+            action = menu.addAction(_menu_icon(icon, icon_color), text)
+            return action
+
+        # 系统操作置顶：打开类动作是右键最高频入口，不再埋到菜单底部
+        if item_path:
+            if not is_dir:
+                _act(FluentIcon.APPLICATION, "用默认程序打开").triggered.connect(
+                    lambda: self._open_file(item_path)
+                )
+            _act(
+                FluentIcon.FOLDER,
+                "在资源管理器中打开" if is_dir else "打开所在文件夹",
+            ).triggered.connect(lambda: self._open_in_explorer(item_path))
+            if not is_dir and detect_kind(item_path):
+                _act(FluentIcon.VIEW, "预览").triggered.connect(lambda: self._open_preview(item_path))
+            menu.addSeparator()
+
         # 信息类
         if item_path:
-            action_copy_path = menu.addAction("📋 复制路径")
-            action_copy_path.triggered.connect(lambda: self._copy_to_clipboard(item_path))
+            _act(FluentIcon.LINK, "复制路径").triggered.connect(lambda: self._copy_to_clipboard(item_path))
 
         if item_name:
-            action_copy_name = menu.addAction("📋 复制文件名")
-            action_copy_name.triggered.connect(lambda: self._copy_to_clipboard(item_name))
+            _act(FluentIcon.LABEL, "复制文件名").triggered.connect(lambda: self._copy_to_clipboard(item_name))
 
         if item_path:
             menu.addSeparator()
 
         # 剪贴板操作
         has_selection = bool(self._tree_view.selected_source_paths())
-        action_cut = menu.addAction("✂️  剪切")
+        action_cut = _act(FluentIcon.CUT, "剪切")
         action_cut.setEnabled(has_selection)
         action_cut.triggered.connect(self.cut_to_clipboard)
 
-        action_copy = menu.addAction("📄 复制")
+        action_copy = _act(FluentIcon.COPY, "复制")
         action_copy.setEnabled(has_selection)
         action_copy.triggered.connect(self.copy_to_clipboard)
 
-        action_paste = menu.addAction("📌 粘贴")
-        action_paste.setEnabled(bool(self._clipboard))
-        action_paste.triggered.connect(self.paste_from_clipboard)
+        # 粘贴：剪贴板空时不显示（禁用态只添噪音，用户无内容可贴时也不需要入口）
+        if self._clipboard:
+            _act(FluentIcon.PASTE, "粘贴").triggered.connect(self.paste_from_clipboard)
 
         menu.addSeparator()
 
         # 编辑操作
         if item_path:
-            action_rename = menu.addAction("✏️  重命名")
-            action_rename.triggered.connect(lambda: self._tree_view.start_rename_at_index(src_idx))
+            _act(FluentIcon.EDIT, "重命名").triggered.connect(
+                lambda: self._tree_view.start_rename_at_index(src_idx)
+            )
 
-            action_delete = menu.addAction("🗑️  删除")
-            action_delete.triggered.connect(lambda: self._on_delete_requested([item_path]))
+            _act(FluentIcon.DELETE, "删除").triggered.connect(
+                lambda: self._on_delete_requested([item_path])
+            )
 
         menu.addSeparator()
 
         # 新建（在目录内操作）
-        action_new_file = menu.addAction("📄 新建文件...")
-        action_new_file.triggered.connect(lambda: self._create_new_file(parent_path))
+        _act(FluentIcon.DOCUMENT, "新建文件...").triggered.connect(
+            lambda: self._create_new_file(parent_path)
+        )
 
-        action_new_dir = menu.addAction("📁 新建文件夹...")
-        action_new_dir.triggered.connect(lambda: self._create_new_dir(parent_path))
+        _act(FluentIcon.FOLDER_ADD, "新建文件夹...").triggered.connect(
+            lambda: self._create_new_dir(parent_path)
+        )
 
         menu.addSeparator()
 
         # 刷新
         if item_path and is_dir:
-            action_refresh = menu.addAction("🔄 刷新")
-            action_refresh.triggered.connect(lambda: self._refresh_dir_in_model(item_path))
-
-        menu.addSeparator()
-
-        # 系统操作
-        if item_path:
-            if is_dir:
-                action_explorer = menu.addAction("📂 在资源管理器中打开")
-                action_explorer.triggered.connect(lambda: self._open_in_explorer(item_path))
-            else:
-                action_explorer = menu.addAction("📂 打开所在文件夹")
-                action_explorer.triggered.connect(lambda: self._open_in_explorer(item_path))
-                if detect_kind(item_path):
-                    action_preview = menu.addAction("👁  预览")
-                    action_preview.triggered.connect(lambda: self._open_preview(item_path))
-                action_open = menu.addAction("📄 用默认程序打开")
-                action_open.triggered.connect(lambda: self._open_file(item_path))
+            _act(FluentIcon.SYNC, "刷新").triggered.connect(
+                lambda: self._refresh_dir_in_model(item_path)
+            )
 
         menu.exec(global_pos)
 

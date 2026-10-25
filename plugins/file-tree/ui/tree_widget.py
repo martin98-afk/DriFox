@@ -827,7 +827,11 @@ class FileTreeModel(QAbstractItemModel):
         if not index.isValid():
             return Qt.ItemIsDropEnabled
         node: _FileNode = index.internalPointer()
-        flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled
+        # ★ ItemIsEditable 必须给：QAbstractItemView.edit() 在 flags 缺此项时
+        # 直接返回 False（不改任何可见状态、不报错），F2 / 右键「重命名」全部
+        # 静默失效。视图 editTriggers 设为 NoEditTriggers 只是禁「自动」触发，
+        # 不拦显式 edit()。
+        flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled | Qt.ItemIsEditable
         if node.is_dir:
             flags |= Qt.ItemIsDropEnabled
         return flags
@@ -1047,10 +1051,20 @@ class RenameDelegate(QStyledItemDelegate):
         tc = self._colors.get("text", QColor(255, 255, 255))
         ff = self._colors.get("font_family", "Microsoft YaHei")
         fs = self._colors.get("font_size", 14)
+        is_dark = self._colors.get("is_dark", True)
+
+        # ★ 背景必须不透明：编辑器只「覆盖」在 item 之上，item 自己仍会绘制
+        # 名称文字。半透明底（旧值 rgba(255,255,255,0.08)）会让两层文字叠加
+        # 成重影，长文件名时尤其明显。
+        # ★ 也不能用 card_bg 当基色：插件 ctx 的 colors 字典没有 card_bg 键
+        # （主题只给 border/text_primary/text_secondary/accent），fallback 恒为
+        # 深色 QColor(33,33,38)，浅色主题下会变成深底配深字。按 is_dark 直接定：
+        # 深色取略亮的深灰，浅色取纯白。
+        editor_bg = QColor(45, 45, 52) if is_dark else QColor(255, 255, 255)
 
         editor.setStyleSheet(
             f"QLineEdit {{"
-            f"  background: rgba(255,255,255,0.08);"
+            f"  background-color: {editor_bg.name()};"
             f"  border: 2px solid {accent.name()};"
             f"  border-radius: 3px;"
             f"  padding: 2px 6px;"

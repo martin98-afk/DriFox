@@ -4384,6 +4384,25 @@ class OpenAIChatToolWindow(ToolWindow):
         cache: list = OpenAIChatToolWindow._window_shortcut_cache.setdefault(win_id, [])
 
         cmd_mgr = CommandManager.get_instance()
+        # 同键序列冲突预检：同一窗口内多条命令共用同一快捷键时，Qt 的
+        # QShortcutMap 判定 ambiguous，只发 activatedAmbiguously（无人监听 →
+        # 表现是按键完全无反应且无任何报错）。这里在建 QShortcut 前先统计，
+        # 冲突则明确告警并列出全部占用者，避免用户面对「按了没反应」无从下手。
+        _key_owners: Dict[str, list] = {}
+        for entries in cmd_mgr._commands.values():
+            for cmd_def in entries.values():
+                if not cmd_def.shortcut:
+                    continue
+                _key_owners.setdefault(cmd_def.shortcut.lower(), []).append(cmd_def.name)
+        _conflict_keys: set = set()
+        for _key, _names in _key_owners.items():
+            if len(_names) > 1:
+                _conflict_keys.add(_key)
+                logger.warning(
+                    f"[Shortcut] 快捷键冲突 '{_key}' 被 {len(_names)} 条命令共用: "
+                    f"{sorted(_names)} —— 该键将完全不触发，请在快捷键管理器中改绑"
+                )
+
         for entries in cmd_mgr._commands.values():
             for cmd_type, cmd_def in entries.items():
                 if not cmd_def.shortcut:
@@ -4413,7 +4432,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     except Exception:
                         logger.warning(f"[Shortcut] '{n}' 处理异常", exc_info=True)
 
+                def _on_ambiguous(k=key_seq, n=name):
+                    # 兜底诊断：预检之外仍出现的 ambiguous（如其他组件注册了同键
+                    # QShortcut）也留痕，不然现象就是「按键毫无反应」。
+                    logger.warning(
+                        f"[Shortcut] 快捷键 '{k}' 命中多条绑定（命令 /{n} 未能触发）—— "
+                        f"请在快捷键管理器中为冲突命令改绑不同按键"
+                    )
+
                 qs.activated.connect(_on_shortcut)
+                qs.activatedAmbiguously.connect(_on_ambiguous)
                 cache.append(qs)
 
     def _command_has_params(self, name: str) -> bool:

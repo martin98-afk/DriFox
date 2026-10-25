@@ -102,6 +102,18 @@ parameters:
 | `$PLUGIN_DIR` | 插件根目录的绝对路径 |
 | `$PROJECT_ROOT` | 当前工作项目根目录 |
 
+### 与 UI 入口共存（重要）
+
+插件同时声明 `components.commands` 与 `components.ui`，且 UI 入口的 id 与命令名相同时，
+宿主会把两者**合并成一条命令**（复用短名 `/<name>`，不产生 `/<plugin>:<name>` 双行）。
+
+- 快捷键只存一份：`<app_data>/plugins/user-custom/shortcuts.json`，键 = 命令名原样
+- md 的 `shortcut` frontmatter 仅在 `shortcuts.json` 无对应键时作为初始值
+- 用户给旧版 namespaced 名（`<plugin>:<name>`）设过的键会在启动时自动迁到短名，不会丢
+
+命令名里的冒号（如 `quick-screenshot:quick-screenshot`）意味着「与别的插件/内置命令撞名后
+被动加前缀」，此时它的短名版本另有其主，两者是**不同命令**，不要去重。
+
 ### 参考
 
 - 完整规范：[docs/commands.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/commands.md)

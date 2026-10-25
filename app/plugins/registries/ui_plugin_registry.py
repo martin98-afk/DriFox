@@ -2596,9 +2596,30 @@ class UIPluginRegistry:
             return
         cmd_mgr = CommandManager.get_instance()
         # 让位分支：同名外部命令存在且本入口声明不抢占（浮动卡/输入按钮等）。
-        # 同源 md 命令（source=plugin:<owner>）的快捷键同步已由
-        # ``_skip_duplicate_ui_command`` 在登记阶段处理，此处不重复。
+        # 同源特例：该外部命令正是**本插件自己的 commands/*.md**（source=plugin:<owner>）
+        # 时，两者是同一动作的两种入口（md 提供描述与稳健 handler，UI 入口提供
+        # 上下文）。此处不接管 handler（卸载 UI 组件后命令仍需由 commands 组件
+        # 维持），只把用户快捷键同步过去，并在 _ui_command_names 里登记——这样
+        # 快捷键管理器把该名按 UI 命令处理，键写入 shortcuts.json（而不是再抄一份
+        # md 到 user-custom 造成双写）。
         if cmd_mgr.has_command(name) and name not in self._ui_applied_names and not override_external:
+            existing_cmd = cmd_mgr.get_command(name)
+            if existing_cmd is not None and owner and existing_cmd.source == f"plugin:{owner}":
+                self._ui_command_names.add(name)
+                synced = self._resolve_ui_command_shortcut(name, owner, cmd_mgr)
+                if synced and existing_cmd.shortcut != synced:
+                    cmd_mgr.register(
+                        name=name,
+                        command_type=existing_cmd.type,
+                        description=existing_cmd.description or description,
+                        argument_hint=existing_cmd.argument_hint,
+                        prompt_text=existing_cmd.prompt_text,
+                        parameters=existing_cmd.parameters,
+                        shortcut=synced,
+                        prompt_sections=existing_cmd.prompt_sections,
+                        source=existing_cmd.source,
+                    )
+                    self._rebind_shortcuts_if_alive(name)
             return
         # handler 始终刷新：命令可能被 register_all_commands 清空后由本账本重建，
         # 且热重载后闭包指向新实例
@@ -2625,9 +2646,24 @@ class UIPluginRegistry:
         """注销单条 UI 命令（账本 + CommandManager + 处理器三处同步）
 
         仅删除「本账本确已接管」的命令；外部同名命令（曾被让位）不动。
+        让位但同源（插件的 md 命令）的场景须摘掉 ``_ui_command_names`` 标记：
+        否则卸载 UI 组件后该 md 命令仍被当成 UI 命令，快捷键会被写进
+        shortcuts.json 而非 md，重启后与本插件 md 的 frontmatter 打架。
         """
-        self._ui_commands.pop(name, None)
+        spec = self._ui_commands.pop(name, None)
         if name not in self._ui_applied_names:
+            # 让位分支只登记了 _ui_command_names，未接管命令本体
+            if spec is not None and name in self._ui_command_names:
+                try:
+                    from app.core.commands.command_manager import CommandManager
+
+                    existing = CommandManager.get_instance().get_command(name)
+                    owner = spec[2] if len(spec) > 2 else ""
+                    if existing is not None and owner and existing.source == f"plugin:{owner}":
+                        self._ui_command_names.discard(name)
+                        self._ui_commands_version += 1
+                except Exception:
+                    pass
             return
         self._ui_commands_version += 1
         self._ui_applied_names.discard(name)
@@ -2642,17 +2678,7 @@ class UIPluginRegistry:
             pass
         # 注销带快捷键的 UI 命令后重建 QShortcut，清掉幽灵绑定（环境守卫同 _apply_ui_command）
         if load_ui_command_shortcuts().get(name, ""):
-            try:
-                from PySide6.QtWidgets import QApplication
-
-                from app.core.infra import window_registry
-
-                if QApplication.instance() is not None and window_registry.alive_window_instances():
-                    from app.core.commands.builtin_commands import _rebind_command_shortcuts
-
-                    _rebind_command_shortcuts()
-            except Exception:
-                pass
+            self._rebind_shortcuts_if_alive(name)
 
     def unregister_ui_commands(self, owner: str) -> None:
         """按归属插件批量注销其全部 UI 命令（含浮动卡 / 工作台页 / 工作区页）"""

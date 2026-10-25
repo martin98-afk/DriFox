@@ -32,6 +32,7 @@
         "session.read",
         "tool.inject",
         "tool.read",
+        "window.host",
         "window.current"
     ]
 }
