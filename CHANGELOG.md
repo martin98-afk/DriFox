@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.11] - 2026-10-24
+## [v0.6.11] - 2026-10-24 (重新发布 #2)
 
-自 v0.6.10 以来的变更 | 提交数：51 · 文件变更：106 · +10167/-1624 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.10 以来的变更 | 提交数：61 · 文件变更：129 · +11616/-1794 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -48,6 +48,21 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build)
 
 - **清理滚动侦察打点、中文名归一、版本号提前** (多处): 移除 `main_widget` 滚动行为调试日志（sc6f 侦察遗留）；`mcp_manage` 中文名改「管理MCP」（原「MCP管理」在工具栏按组排序时落到末位）；`current_version` 提前至 `v0.6.11`。
+
+### ✨ 新功能 (New Features)（重新发布 #2 追加）
+
+- **安全中心功能增强** (`b5768e0b`): 状态条显示沙箱与文件/命令/删除/网络各层生效状态；快照统计后台线程化（大目录 rglob 不再冻死设置面板构建）；开关 tooltip 与分组布局重理；新增盘根删除拒绝与黑名单优先于豁免的回归测试。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #2 追加）
+
+- **capabilities 能力池五连修** (`f5456518` · `0ba2c69a` · `79ed1650` · `8005075e`): ①`process.start` 首启确认框堆崩溃（_Dispatcher 单例由插件后台线程首建破坏 Qt 同步状态致模态循环 ACCESS_VIOLATION；注册期主线程预热 + _confirm_dialog 兕底幂等）；②ui 注册期预热改引 `ui_bridge.preheat`（原 process_core 无该属性，AttributeError 未被接住致 UI 能力整面瘫痪）；③`input.write` Tab 模式降级解析真实输入框 + 写入后强制回对话视图；④回对话入口改 TabManagerWindow 双候选解析，市场卡弃用 `_card_caps` 改走 `sdk.caps_for` 并声明 `input.write`。
+- **流式协议段渲染两连修** (`20016fb1` · `936b899f`): 未闭合 tool 协议段不再渲染占位框/容错卡（空 id 无清理路径致运行框与破碎卡常驻底部，改静默丢弃）；恢复接收中占位运行指示并按指纹去重，防同名同参工具完成后重复累积。
+- **浮动卡 show_card 显隐契约兜底 + tab 死锁自愈** (`601010a8`): 容器统一藏卡后漏实现 `show_card()` 的卡永远 isHidden 致容器折叠；三路径补 `isHidden` 兑底补显，tab 回调死锁态清假状态重 show。
+- **插件市场保留浏览状态** (`5f00b6f2`): 仅首次打开进精选 tab，列表刷新重建后恢复滚动位置不跳顶。
+
+### ♻️ 代码重构 (Refactoring)（重新发布 #2 追加）
+
+- **移除状态条配额常亮文案** (`b8632225`): 删 `_status_quota` QLabel/QSS/填充逻辑与对应测试，配额说明保留在各开关 tooltip。
 
 ## [v0.6.10] - 2026-10-20 (重新发布 #8)
 
