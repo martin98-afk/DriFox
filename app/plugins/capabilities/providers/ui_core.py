@@ -531,24 +531,41 @@ def _input_write(host: Any):
             pass
         return None
 
-    def _back_to_chat(owner):
+    def _back_to_chat():
         # 写入即回对话视图：full 卡覆盖时不切回，用户看不到写入结果。
-        # 优先宿主正规入口（含 stack 切页），退化到 titleBar 高亮复位。
-        show_conv = getattr(owner, "_show_conversation_view", None)
-        if callable(show_conv):
+        # host 常是 MainWidget（窗口级能力池 / 浮动卡宿主），覆盖页却由
+        # TabManagerWindow 托管，MainWidget 上没有回对话入口 → 候选依次为
+        # host 自身与全局 Tab 管理器；正规入口（含 stack 切页 + 隐藏 replace 卡）
+        # 优先，退化到 titleBar 高亮复位（titleBar / _title_bar 两种属性名）。
+        owners = []
+        for owner in (host, _resolve_tab_window()):
+            if owner is not None and all(owner is not o for o in owners):
+                owners.append(owner)
+        for owner in owners:
             try:
-                show_conv()
-                return
+                show_conv = getattr(owner, "_show_conversation_view", None)
             except Exception:
-                pass
-        try:
-            from app.widgets.tab_manager_window import CHAT_TAB_ID
-
-            set_active = getattr(getattr(owner, "titleBar", None), "set_active_tab", None)
+                continue
+            if callable(show_conv):
+                try:
+                    show_conv()
+                    return
+                except Exception:
+                    pass
+        for owner in owners:
+            try:
+                title_bar = getattr(owner, "titleBar", None) or getattr(owner, "_title_bar", None)
+            except Exception:
+                continue
+            set_active = getattr(title_bar, "set_active_tab", None)
             if callable(set_active):
-                set_active(CHAT_TAB_ID, animate=False)
-        except Exception:
-            pass
+                try:
+                    from app.widgets.tab_manager_window import CHAT_TAB_ID
+
+                    set_active(CHAT_TAB_ID, animate=False)
+                    return
+                except Exception:
+                    pass
 
     def write(text: str, append: bool = False, focus: bool = True) -> None:
         area = _resolve_area()
@@ -563,7 +580,7 @@ def _input_write(host: Any):
             cursor = area.textCursor()
             cursor.movePosition(cursor.End)
             area.setTextCursor(cursor)
-        _back_to_chat(host)
+        _back_to_chat()
     return write
 
 
