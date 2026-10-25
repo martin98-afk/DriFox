@@ -164,10 +164,16 @@ class CallbackServer:
         logger.info("[MCP-OAuth] 授权已被用户中止")
 
     def close(self) -> None:
-        """关闭 server 并回收线程。幂等。"""
+        """关闭 server 并回收线程。幂等。
+
+        同时清空回调结果与 event：一次性实例，旧回调（code/state）残留
+        会误导复用方读出过期 state（apify state mismatch 事故根因之一）。
+        """
         httpd, thread = self._httpd, self._thread
         self._httpd = None
         self._thread = None
+        self.result = CallbackResult()
+        self._event.clear()
         if httpd is not None:
             try:
                 httpd.shutdown()
