@@ -272,6 +272,8 @@ def test_snapshot_label_shows_stats(isolated_cfg, data_dir):
     d.mkdir(parents=True)
     (d / "a.txt").write_bytes(b"x" * 1024)
     card = _make_card()
+    # 统计已改后台线程（2026-10-25 卡死事故），测试直接同步回填避免 race
+    card._on_snapshot_stats_ready(*card._deleted_dir_stats())
     text = card.snapshot_label.text()
     assert "1 项" in text
     assert "MB" in text
@@ -280,6 +282,7 @@ def test_snapshot_label_shows_stats(isolated_cfg, data_dir):
 
 def test_snapshot_clear_btn_disabled_when_empty(isolated_cfg, data_dir):
     card = _make_card()
+    card._on_snapshot_stats_ready(*card._deleted_dir_stats())
     assert card.snapshot_clear_btn.isEnabled() is False
     assert "没有删除备份" in card.snapshot_clear_btn.toolTip()
 
@@ -292,6 +295,7 @@ def test_snapshot_clear_requires_confirmation(isolated_cfg, data_dir, monkeypatc
     target.write_bytes(b"important")
 
     card = _make_card()
+    card._on_snapshot_stats_ready(*card._deleted_dir_stats())
     assert card.snapshot_clear_btn.isEnabled() is True
 
     import app.widgets.common_dialogs as cd
@@ -315,6 +319,7 @@ def test_snapshot_clear_removes_when_confirmed(isolated_cfg, data_dir, monkeypat
     (d / "gone.txt").write_bytes(b"x")
 
     card = _make_card()
+    card._on_snapshot_stats_ready(*card._deleted_dir_stats())
     import app.widgets.common_dialogs as cd
 
     class _FakeDialog:
@@ -425,9 +430,16 @@ def test_n4_delete_exempt_mentions_no_snapshot(isolated_cfg):
 
 
 def test_n5_job_quota_scope_documented(isolated_cfg):
-    """N5：进程配额需说明仅约束 Bash 与后台命令"""
+    """N5：进程配额需说明作用范围与内存口径
+
+    2026-10-25 加强：除了「仅约束 bash/后台命令」，还须说明
+    ① 不受沙箱总开关影响（实测确认它始终生效）
+    ② 内存上限按单进程计，不是进程树总和（用户最容易误解的一点）
+    """
     src = _security_card_source()
-    assert "仅约束 Bash 与后台命令" in src
+    assert "仅约束 bash、后台命令与持久 shell" in src
+    assert "不受沙箱开关影响，始终生效" in src
+    assert "内存上限按单个进程计，不是进程树总和" in src
 
 
 def test_n6_snapshot_quota_rule_documented(isolated_cfg):
@@ -437,10 +449,15 @@ def test_n6_snapshot_quota_rule_documented(isolated_cfg):
     assert "不受「清理备份文件」影响" in src
 
 
-def test_n7_backup_restart_hint(isolated_cfg):
-    """N7：备份上限需提示"改动后需重启才自动清理，可点立即清理" """
+def test_n7_backup_cleanup_timing_documented(isolated_cfg):
+    """N7：备份上限需说明清理时机
+
+    2026-10-25 修正：旧文案「改动上限后需重启才生效」容易读成「上限值需要重启」，
+    实际是「清理动作」只在启动期与手动触发，上限值本身即时落盘。
+    """
     src = _security_card_source()
-    assert "改动上限后需重启才生效" in src
+    assert "下次启动或点「清理备份文件」时按从旧到新清理" in src
+    assert "改动上限不影响已产生的备份" in src
 
 
 def test_note_mentions_mcp_and_upload_scope(isolated_cfg):
@@ -453,8 +470,19 @@ def test_note_mentions_mcp_and_upload_scope(isolated_cfg):
 def test_c2_backup_card_has_no_stale_number(isolated_cfg):
     """C2：备份卡文案不得含构造期数值快照（避免同屏两处数字不一致）"""
     src = _security_card_source()
-    assert '修改前自动备份原文件（backups/edits）",' in src, "应改为不含数值的静态描述"
+    assert '"原文件备份位置（backups/edits）",' in src, "应改为不含数值的静态描述"
     assert "FileRecorder），上限 {" not in src, "构造期 f-string 数值快照应已移除"
+
+
+def test_c2_backup_card_no_duplicate_title(isolated_cfg):
+    """C2+：备份组内不得重复组头标题
+
+    旧实现组头叫「编辑类备份」、组内第一行也叫「编辑类备份」，同屏两遍纯噪声。
+    """
+    card = _make_card()
+    group_title = card._backup_group.titleLabel.text()
+    row_title = card.backup_dir_card.titleLabel.text()
+    assert row_title != group_title, f"组头与行标题重复：{group_title}"
 
 
 def test_cross_platform_open_dir_branches(isolated_cfg):
@@ -547,7 +575,14 @@ def test_delete_switch_outside_group(isolated_cfg):
 def test_all_switches_outside_groups(isolated_cfg):
     """开关类一律最外层：五个开关均不属于任何折叠组"""
     card = _make_card()
-    groups = (card._rules_group, card._data_group, card._backup_group, card._net_proc_group)
+    groups = (
+        card._files_group,
+        card._command_group,
+        card._delete_group,
+        card._net_group,
+        card._quota_group,
+        card._backup_group,
+    )
     for switch in (card.sandbox_switch, card.delete_switch, card.trash_switch, card.net_switch, card.sys_switch):
         for g in groups:
             assert switch not in g.widgets, f"{type(switch).__name__} 应在开关区，不应进折叠组 {g.titleLabel.text()}"
@@ -602,12 +637,79 @@ def test_data_group_height_tracks_exempt_items(isolated_cfg):
 
 
 def test_page_grouped_layout(isolated_cfg):
-    """首屏结构：沙箱开关 + 审核处理 + 三个分组卡，全部直属主布局"""
+    """首屏结构：状态条 + 开关 + 审核处理 + 六个按作用域划分的分组卡"""
     card = _make_card()
-    # 三大分组卡存在
-    for attr in ("_rules_group", "_data_group", "_net_proc_group"):
+    for attr in (
+        "_files_group",
+        "_command_group",
+        "_delete_group",
+        "_net_group",
+        "_quota_group",
+        "_backup_group",
+    ):
         assert getattr(card, attr, None) is not None, f"{attr} 缺失"
     # 名单编辑区均已挂入分组卡（父容器不再是页面本体）
     for editor in (card._path_white, card._path_black, card._cmd_allow, card._cmd_confirm, card._net_domains):
         assert editor.parent() is not None
         assert editor.parent() is not card
+
+
+def test_domain_blacklist_and_quota_are_separate_groups(isolated_cfg):
+    """域名黑名单与进程配额必须分属不同分组
+
+    旧实现把两者拼在「域名黑名单与进程配额」一组，一个管网络一个管资源，
+    毫无关系却同组，是用户反馈"眼花缭乱"的主要来源。
+    """
+    card = _make_card()
+    assert card._net_domains not in card._quota_group.widgets
+    assert any(w is card._net_domains for w in card._net_group.widgets)
+    assert card.job_spins["memory_mb"].parent() is not None
+    assert card.job_spins["memory_mb"] not in card._net_group.widgets
+
+
+def test_path_rules_and_command_rules_separate(isolated_cfg):
+    """路径规则与命令规则分属两组（两种匹配语义，不能同组）"""
+    card = _make_card()
+    assert card._path_white not in card._command_group.widgets
+    assert card._cmd_allow not in card._files_group.widgets
+    assert any(w is card._path_white for w in card._files_group.widgets)
+    assert any(w is card._cmd_allow for w in card._command_group.widgets)
+
+
+# ══════════════ 生效状态条 ══════════════
+
+
+def test_status_row_tracks_sandbox_master_switch(isolated_cfg):
+    """总开关关闭 → 标题变「已关闭」，文件/命令/删除/网络四层全变 ✗
+
+    这是本页最大的认知陷阱：4 个开关在总开关关闭时全部无效，
+    旧 UI 把这个依赖藏在 tooltip 里，用户配完名单发现不生效无处可查。
+    """
+    card = _make_card()
+    assert "已开启" in card._status_title.text()
+    assert card._status_chips["files"].text().endswith("✓")
+
+    card.sandbox_switch.setChecked(False)
+    assert "已关闭" in card._status_title.text()
+    for key in ("files", "command", "delete", "network"):
+        assert card._status_chips[key].text().endswith("✗"), key
+    assert "需先开启" in card._status_chips["files"].toolTip()
+
+
+def test_status_row_tracks_layer_switch(isolated_cfg):
+    """总开关开着但层开关关闭 → 该层单独显示 ✗，其余层不受影响"""
+    card = _make_card()
+    isolated_cfg.set("delete_protection", True)
+    isolated_cfg.set("network.enabled", True)
+    card.delete_switch.setChecked(False)
+    assert card._status_chips["delete"].text().endswith("✗")
+    assert card._status_chips["files"].text().endswith("✓")
+    card.delete_switch.setChecked(True)
+    assert card._status_chips["delete"].text().endswith("✓")
+
+
+def test_status_row_mentions_quota_independence(isolated_cfg):
+    """配额不受总开关影响，必须在状态条上明说"""
+    card = _make_card()
+    assert "始终生效" in card._status_quota.text()
+    assert "不受" in card._status_quota.toolTip()

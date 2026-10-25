@@ -52,6 +52,16 @@ def test_delete_command_variants_gated():
         assert sandbox_check_tool("bash", {"command": cmd}, _cfg(delete_protection=True)) == "confirm", cmd
 
 
+def test_delete_drive_root_denied_when_protection_on():
+    """tp=True + `rm C:/` → deny（盘符根删除无合法场景；2026-10-25 整盘搬移事故）"""
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("盘符根语义仅 Windows")
+    verdict = sandbox_check_tool("bash", {"command": "rm -rf C:/"}, _cfg(delete_protection=True))
+    assert verdict == "deny", "盘符根删除必须直接拒绝，不进审批更不进垃圾桶"
+
+
 # ── 独立防护层不受影响（防"关开关就全放行"）──
 
 
@@ -94,6 +104,30 @@ def test_user_confirm_prefix_still_honored_when_protection_off():
         _cfg(delete_protection=False, confirm_prefixes=["rm"]),
     )
     assert verdict == "confirm", "用户显式加严不应被开关默认值覆盖"
+
+
+def test_sys_tools_bypass_survives_delete_upscale():
+    """系统级工具豁免命中的删除命令不得被「删除识别兜底升档」覆盖
+
+    回归（2026-10-25）：`check_command` 已按 sys_tools_bypass 放行，
+    `sandbox_check_tool` 的删除兜底原先无条件升回 CONFIRM，
+    导致 `wsl rm -rf /mnt/c/x` 豁免失效，与开关文案「这些命令绕过沙箱审批」矛盾。
+    """
+    cfg = _cfg(delete_protection=True)
+    cfg.set("sys_tools_bypass", True)
+    for cmd in ("wsl rm -rf /mnt/c/x", "reg delete HKLM\\X /f", "diskpart"):
+        assert sandbox_check_tool("bash", {"command": cmd}, cfg) == "allow", cmd
+
+    cfg.set("sys_tools_bypass", False)
+    for cmd in ("wsl rm -rf /mnt/c/x", "reg delete HKLM\\X /f", "diskpart"):
+        assert sandbox_check_tool("bash", {"command": cmd}, cfg) == "confirm", cmd
+
+
+def test_sys_tools_bypass_does_not_cover_block_commands():
+    """系统级工具豁免不能放开 block 命令（deny 是安全底线）"""
+    cfg = _cfg(delete_protection=True)
+    cfg.set("sys_tools_bypass", True)
+    assert sandbox_check_tool("bash", {"command": "cacls C:\\ /g user:F"}, cfg) == "deny"
 
 
 # ── .NET API 形态删除（词表外变体，2026-10-18 实测漏拦）──
