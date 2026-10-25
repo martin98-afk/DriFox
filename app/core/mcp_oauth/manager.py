@@ -50,6 +50,7 @@ class McpOAuthManager:
             server_url,
             client_name=auth_cfg.get("client_name") or "DriFox",
             scope=auth_cfg.get("scope") or "",
+            token_auth_method=auth_cfg.get("token_endpoint_auth_method") or "",
         )
 
     def drop_provider(self, plugin_name: str, server_name: str) -> None:
@@ -66,6 +67,7 @@ class McpOAuthManager:
             server_url,
             client_name=auth_cfg.get("client_name") or "DriFox",
             scope=auth_cfg.get("scope") or "",
+            token_auth_method=auth_cfg.get("token_endpoint_auth_method") or "",
         )
 
     def get_session(self, plugin_name: str, server_name: str) -> Optional[OAuthSession]:

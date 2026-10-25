@@ -115,17 +115,32 @@ class McpOAuthProviderFactory:
         server_url: str,
         client_name: str = "DriFox",
         scope: str = "",
+        token_auth_method: str = "",
     ) -> OAuthClientProvider:
         """取得（或新建）该 server 的 provider 实例。
 
         新建时 redirect_uri 用一个占位端口无法确定的值，真正的端口在首次
         授权时由 callback server 决定。SDK 只在 401 走完整授权流程时才会
         用到 redirect_uris，因此首次连接前可以是占位值。
+
+        Args:
+            token_auth_method: DCR 时显式声明的 token_endpoint_auth_method
+                （如 "none"）。某些授权服务器（如 Apify）对未声明该字段的
+                client 会生成 secret，但 DCR 响应不回显该字段，SDK 解析为
+                None 后 token 交换不带 secret，服务端报 invalid_client
+                "Invalid secret"。声明 "none" 后服务端不再要求 secret。
         """
         key = self.make_key(plugin_name, server_name)
         cached = self._providers.get(key)
         if cached is not None:
-            return cached
+            meta = cached.context.client_metadata
+            current = getattr(meta, "token_endpoint_auth_method", None) or ""
+            if current == (token_auth_method or ""):
+                return cached
+            # 配置里的 auth 方法变了：丢弃旧 provider 强制重建（client_info
+            # 在 storage 持久化不受影响，但 DCR 需要用新声明重跑）。
+            logger.info(f"[MCP-OAuth] {key} token_endpoint_auth_method 变更（{current or '未声明'} -> {token_auth_method or '未声明'}），重建 provider")
+            self._providers.pop(key, None)
 
         storage = PluginMcpTokenStore(plugin_name, server_name)
         metadata = OAuthClientMetadata(
@@ -136,6 +151,7 @@ class McpOAuthProviderFactory:
             scope=scope or None,
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],
+            token_endpoint_auth_method=token_auth_method or None,
         )
         provider = OAuthClientProvider(
             server_url=server_url,
@@ -197,6 +213,7 @@ class McpOAuthProviderFactory:
         server_url: str,
         client_name: str = "DriFox",
         scope: str = "",
+        token_auth_method: str = "",
     ) -> OAuthSession:
         """驱动一次完整授权（同步接口，UI 线程可调）。
 
@@ -224,7 +241,7 @@ class McpOAuthProviderFactory:
             logger.error(f"[MCP-OAuth] {key} 回调 server 启动失败: {e}")
             return session
 
-        provider = self.get_provider(plugin_name, server_name, server_url, client_name, scope)
+        provider = self.get_provider(plugin_name, server_name, server_url, client_name, scope, token_auth_method)
         # 把占位 redirect_uri 改写成实际端口，DCR 注册时才会提交正确地址。
         # 重新构造 metadata 而非原地赋值：OAuthClientMetadata 未开
         # validate_assignment，原地赋裸字符串会让后续序列化报 pydantic 警告。
@@ -301,8 +318,20 @@ class McpOAuthProviderFactory:
                 session.status = "error"
                 session.error = "未收到授权码"
                 return "", None
-            session.status = "done"
+            # 不在这里置 done：token 交换可能仍失败（如 Apify invalid_client）。
+            # done 只能由 drive() 在流程真正收尾时置位，否则失败被假报成成功。
             return result.code, result.state
+
+        # 保存原 handler（必须在 patch 前），授权结束后恢复。provider 实例被
+        # 工厂缓存、连接流程复用同一实例：若残留本流程的 closure，连接时
+        # SDK 的 OAuth 会拿到已关闭 CallbackServer 的旧回调，必然
+        # State parameter mismatch（apify 2026-10-25 事故根因之一）。
+        saved_redirect = getattr(provider.context, "redirect_handler", None)
+        saved_callback = getattr(provider.context, "callback_handler", None)
+
+        def restore_handlers() -> None:
+            provider.context.redirect_handler = saved_redirect  # type: ignore[union-attr]
+            provider.context.callback_handler = saved_callback  # type: ignore[union-attr]
 
         provider.context.redirect_handler = redirect_handler  # type: ignore[union-attr]
         provider.context.callback_handler = callback_handler  # type: ignore[union-attr]
@@ -349,10 +378,16 @@ class McpOAuthProviderFactory:
                         pending = await flow.asend(response)
                 except StopAsyncIteration:
                     # 流程正常收尾（最后一次 yield 是带上 token 的重试请求）。
-                    # 若全程没走到浏览器授权，说明服务端从未要求授权，不能只报「授权未完成」。
-                    if not opened["url"] and session.status == "pending":
-                        session.status = "error"
-                        session.error = "服务端未要求授权（未返回 401），请确认该地址是 MCP 端点且需要 OAuth"
+                    if session.status == "pending":
+                        if opened["url"]:
+                            # 走完浏览器授权且 token 交换成功，此刻才算真成功。
+                            # 日志由 authorize() 尾部统一打，这里只置状态。
+                            session.status = "done"
+                        else:
+                            # 全程没走到浏览器授权，说明服务端从未要求授权，
+                            # 不能只报「授权未完成」。
+                            session.status = "error"
+                            session.error = "服务端未要求授权（未返回 401），请确认该地址是 MCP 端点且需要 OAuth"
                 except Exception as e:
                     # SDK 抛的 OAuthFlowError / OAuthRegistrationError 带真实原因
                     # （如注册端点 403），必须落进 session，否则只剩笼统的「授权未完成」。
@@ -365,7 +400,10 @@ class McpOAuthProviderFactory:
                     # 提前 return / 抛异常时显式收尾 generator，避免悬挂的 async generator 警告。
                     await flow.aclose()
 
-        asyncio.run(drive())
+        try:
+            asyncio.run(drive())
+        finally:
+            restore_handlers()
         return opened["url"]
 
     # ── 状态查询与登出 ─────────────────────────────────
