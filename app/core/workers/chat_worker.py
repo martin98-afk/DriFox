@@ -4650,11 +4650,14 @@ class OpenAIChatWorker(QThread):
             from app.tools.sandbox import (
                 SandboxConfig,
                 delete_exempt,
-                is_delete_command,
+                is_trash_delete_command,
                 stash_delete_targets_to_trash,
             )
 
-            if not is_delete_command(command):
+            # 用严格判据（垃圾桶口径）而非审批宽松判据：宽松判据把
+            # find -delete / git clean -fdx / 解释器删除 都算作删除命令，
+            # 但那些命令的目标无法静态定位，进垃圾桶只会搬错东西。
+            if not is_trash_delete_command(command):
                 return
             cfg = SandboxConfig.get_instance()
             if not cfg.get("delete.trash_enabled"):
