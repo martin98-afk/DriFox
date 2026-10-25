@@ -1168,7 +1168,8 @@ class AssistantManager:
             else "{项目根}/" + store.PROJECT_DIR_NAME + "/" + store.MEMORY_SUBDIR + "/" + aid
         )
         limits = self.memory_max_chars(aid)
-        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir, limits)]
+        sections = store.load_sections(aid_dir)
+        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir, limits, sections)]
 
         # 全局记忆
         g_text = (store.read_global_memory(aid_dir) or "").strip()
@@ -1268,14 +1269,67 @@ class AssistantManager:
             return store.memory_fingerprint(store.project_memory_path(workdir, aid))
         return ""
 
-    def append_memory(self, aid: str, kind: str, text: str, workdir: str = "") -> Dict[str, Any]:
-        """向全局/项目 MEMORY.md 末尾追加一块（不覆盖已有行）。"""
+    def append_memory(self, aid: str, kind: str, text: str, workdir: str = "", section: str = "") -> Dict[str, Any]:
+        """向全局/项目 MEMORY.md 追加一块（不覆盖已有行）。
+
+        section 仅对 global 有意义：插入该分区块末尾（块不存在则新建）。
+        """
         store = self._core_store()
         if kind == "global":
-            return store.append_memory_file(store.global_memory_path(self._assistant_dir(aid)), text)
+            return store.append_memory_file(store.global_memory_path(self._assistant_dir(aid)), text, section)
         if kind == "project" and workdir:
             return store.append_memory_file(store.project_memory_path(workdir, aid), text)
         return {"ok": False, "error": "bad_kind"}
+
+    # ── 全局记忆分区（用户可编辑 schema）──
+
+    def memory_sections(self, aid: str) -> List[Dict[str, str]]:
+        """读分区定义；文件缺失时落盘默认分区（首次打开即为可用骨架）。
+
+        用户手动清空全部区（文件仍在）返回 []＝自由格式，不会被重新塞回默认值。
+        """
+        return self._core_store().ensure_default_sections(self._assistant_dir(aid))
+
+    def set_memory_sections(self, aid: str, sections: List[Dict[str, str]]) -> Dict[str, Any]:
+        """写分区定义；改名时同步改写 MEMORY.md 里的旧标题（避免制造孤儿）。
+
+        改名识别：按列表位置对比新旧（UI 编辑只改 name/hint，不重排）。
+        删除分区**不**动文件：孤儿标题保留，下次蒸馏重分配（用户决策 2026-10-25）。
+        """
+        store = self._core_store()
+        aid_dir = self._assistant_dir(aid)
+        old = store.load_sections(aid_dir)
+        r = store.save_sections(aid_dir, sections)
+        if not r.get("ok"):
+            return r
+        new = store.load_sections(aid_dir)
+        g_path = store.global_memory_path(aid_dir)
+        text = store.read_text(g_path)
+        renamed = []
+        if text.strip():
+            for i, old_item in enumerate(old):
+                if i >= len(new):
+                    break
+                old_name, new_name = old_item.get("name"), new.get(i, {}).get("name")
+                if old_name and new_name and old_name != new_name:
+                    text = store.rename_section_title(text, str(old_name), str(new_name))
+                    renamed.append(f"{old_name}→{new_name}")
+            if renamed:
+                store.write_global_memory(aid_dir, text)
+        return {"ok": True, "count": len(new), "renamed": renamed}
+
+    def memory_sections_block(self, aid: str) -> str:
+        """分区清单 prompt 文本（蒸馏/说明书共用）；无分区返回空串。"""
+        return self._core_store().sections_prompt_text(self.memory_sections(aid))
+
+    def default_memory_sections(self) -> List[Dict[str, str]]:
+        """默认分区（UI 恢复默认用的唯一定义源）。"""
+        return self._core_store().default_sections()
+
+
+    def validate_global_memory(self, aid: str, content: str) -> Dict[str, Any]:
+        """校验候选全局记忆是否符合分区 schema（空 schema 恒通过）。"""
+        return self._core_store().validate_global_sections(content, self.memory_sections(aid))
 
     def write_memory_guarded(
         self,
@@ -1351,6 +1405,7 @@ class AssistantManager:
             dates,
             str(store.project_memory_path(workdir, aid)),
             str(store.global_memory_path(self._assistant_dir(aid))),
+            self.memory_sections(aid),
         )
 
     # ── 快照 / 健康（用户侧恢复与状态，模型工具面不含）──

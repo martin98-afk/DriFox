@@ -278,6 +278,54 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
         return ToolResult(False, error=f"读取记忆失败: {e}")
 
 
+# ── 全局记忆分区校验诊断（写失败时回传给模型的结构化说明）──
+
+
+def _section_diag_text(diag: dict, mode: str = "replace") -> str:
+    """把 validate_global_sections 的诊断结构渲染成模型可照着改的文本。"""
+    names = diag.get("sections") or []
+    lines = ["写入被拒绝：全局记忆结构与分区不符。"]
+    if diag.get("reason"):
+        lines.append(f"原因：{diag['reason']}")
+    lines.append(f"可用分区（逐字照抄，禁自建）：{'、'.join(names)}")
+    unknown = diag.get("unknown_titles") or []
+    if unknown:
+        lines.append("清单外标题（需重分配或删除其条目）：")
+        for u in unknown:
+            lines.append(f"  ## {u.get('title')}（{u.get('count')} 条）")
+            for p in u.get("preview") or []:
+                lines.append(f"    {p}")
+    hb = diag.get("header_in_block") or []
+    if hb:
+        lines.append("分区块内的 # 小节（改为 - 条目或并入上级）：")
+        for h in hb:
+            lines.append(f"  第 {h.get('line_no')} 行「{h.get('line')}」（位于 ## {h.get('section')}）")
+    if diag.get("preamble_bullets"):
+        lines.append(f"分区外总述区有 {diag['preamble_bullets']} 条 - 条目：必须搬进某个分区或删除。")
+    if diag.get("empty_entries"):
+        lines.append("全文没有任何 - 条目：内容必须写成条目，不能是散文。")
+    counts = diag.get("counts") or {}
+    if counts:
+        lines.append("当前分区计数：" + "、".join(f"{k} {v}" for k, v in counts.items()))
+    if diag.get("skeleton"):
+        lines.append("兜底骨架（照填也能通过）：")
+        lines.append(diag["skeleton"].rstrip())
+    lines.append(
+        "改完用 mode=replace 重交；仍不确定可先 dry_run=true 只校验。"
+        "任何条目都归不进分区时，删掉它即可通过校验（不要自建分区）。"
+    )
+    return "\n".join(lines)
+
+
+def _counts_text(diag: dict) -> str:
+    parsed = diag.get("parsed") or {}
+    counts: dict = {}
+    for blk in parsed.get("blocks") or []:
+        n = sum(1 for ln in blk.get("lines") or [] if ln.strip().startswith("- "))
+        counts[blk.get("name")] = n
+    return "、".join(f"{k} {v}" for k, v in counts.items()) or "（空）"
+
+
 # ── memory_write ─────────────────────────────────────────
 
 
@@ -318,6 +366,44 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
             mode = str(kw.get("mode") or "replace").strip().lower()
             if mode not in ("replace", "append"):
                 return ToolResult(False, error="mode 必须是 replace（整体替换）/ append（末尾追加）")
+            # 全局记忆分区：schema 非空时强制归属（空 = 自由格式，全部跳过）
+            sections = mgr.memory_sections(aid) if scope == "global" else []
+            section = str(kw.get("section") or "").strip()
+            dry_run = bool(kw.get("dry_run")) and scope == "global" and mode == "replace"
+            if sections:
+                names = [str(s.get("name") or "") for s in sections]
+                if mode == "append":
+                    if not section:
+                        return ToolResult(
+                            False,
+                            error=(
+                                "追加被拒绝：全局记忆已定义分区，append 必须带 section。"
+                                f"可用分区：{'、'.join(names)}。"
+                                "按内容性质选最匹配的一个；归属不了的条目不要写。"
+                            ),
+                        )
+                    if section not in names:
+                        return ToolResult(
+                            False,
+                            error=(
+                                f"追加被拒绝：分区「{section}」不在清单内。"
+                                f"可用分区：{'、'.join(names)}。"
+                                "禁自建分区，选一个最匹配的；都没有合适的就别写这条。"
+                            ),
+                        )
+                else:
+                    v = mgr.validate_global_memory(aid, content)
+                    if not v.get("ok"):
+                        return ToolResult(
+                            False,
+                            error=_section_diag_text(v, mode="replace"),
+                        )
+                    if dry_run:
+                        counts = _counts_text(v)
+                        return ToolResult(
+                            True,
+                            content=f"分区校验通过（dry_run，未落盘）。各分区条目数：{counts}。去掉 dry_run 真写即可。",
+                        )
             if mode == "append":
                 # 末尾追加：不覆盖任何已有行；超限预检（追加后总量）
                 cur_text = str(
@@ -334,10 +420,11 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                             f"先 memory_read(scope={scope}) 读全文，合并去重后用整体替换（mode 缺省）写回精简版。"
                         ),
                     )
-                r = _retry(lambda: mgr.append_memory(aid, scope, content, workdir=wd))
+                r = _retry(lambda: mgr.append_memory(aid, scope, content, workdir=wd, section=section))
                 if not r.get("ok"):
                     return ToolResult(False, error=f"追加失败: {r.get('error')}")
-                return ToolResult(True, content=f"已追加到{label}记忆（现 {r.get('chars')} 字）。已有内容不受影响。")
+                where = f"「{section}」分区" if section else ""
+                return ToolResult(True, content=f"已追加到{label}记忆{where}（现 {r.get('chars')} 字）。已有内容不受影响。")
             # ── 整体替换：超限预检 → 乐观锁 + 收缩确认 → 锁内快照落盘 ──
             if len(content) > lim:
                 return ToolResult(
@@ -546,6 +633,9 @@ _WRITE_SCHEMA = {
             "scope=global：全局 MEMORY.md。记一条用 mode=append；整体替换规则同 project（先读拿 base，大幅精简带 consolidate）。"
             "准入极严：仅用户显式要求的跨项目规则、蒸馏筛出的最珍贵且与项目无关经验；"
             "超上限拒写（默认 4000 字符）。除用户明确要求，不存密钥。"
+            "若已定义记忆分区（系统提示列了分区清单）：append 必须带 section，整体替换必须按 ## 分区名 组织，"
+            "出现清单外标题/分区块内 # 小节/分区外 - 条目会被拒写并返回诊断；"
+            "不确定能否通过时先 dry_run=true 只校验不落盘。"
         ),
         "parameters": {
             "type": "object",
@@ -561,6 +651,14 @@ _WRITE_SCHEMA = {
                 "mode": {
                     "type": "string",
                     "description": "scope=global/project 时：replace（缺省，整体替换）/ append（末尾追加一条，高频记一条用这个，不会覆盖已有内容）",
+                },
+                "section": {
+                    "type": "string",
+                    "description": "scope=global 且 mode=append 时必填（已定义分区时）：目标分区名，逐字照抄系统提示的分区清单；内容插到该分区块末尾",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "只跑校验不落盘（不写快照、不校验乐观锁）：scope=global 且 mode=replace 时用于预检分区合规，通过后再真写",
                 },
                 "base": {
                     "type": "string",
