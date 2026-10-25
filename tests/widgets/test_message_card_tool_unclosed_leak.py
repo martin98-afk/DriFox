@@ -18,11 +18,12 @@
 
 修复
 ----
-- 2026-10-25 起：未闭合段不再产出任何块（流式占位框/终态容错卡），统一静默丢弃。
-  此前按到达程度渲染：流式 → 运行中占位框（tool-streaming-block，tool_call_id
-  为空串）、终态 → 容错解析完成卡；两者无清理路径，常驻「工具与思考」区底部与
-  真实完成块并存（截图级残留）。丢弃同样防源码泄漏；真实工具反馈由 worker
-  结构化事件 → JS 注入链路负责，不依赖 md 占位。
+- 2026-10-25 二次修订（运行指示回归）：流式未闭合段恢复渲染「接收中」占位框
+  （glm 中转把工具调用以协议文本嵌在 content 里，worker 解析下发前它是唯一
+  运行指示）；残段指纹（name+args）命中已完成工具集合（suppress 参数）则丢弃
+  （防照抄重复）；无 tool_call_id 的闭合协议段任何状态都不渲染卡（防重复/累积）；
+  终态一律丢弃不转容错卡。
+- 2026-10-25 首修：未闭合段不产出任何块（后因运行指示空窗二次修订）。
 - 2026-09-05 版修复：渲染占位框/容错卡 + 容错解析范围截断到下一个 <tool>
   开标签（审查 I-1：防嵌套/后续块字段混入本块容错解析吞正文）。
 - 孤立 `</tool>`（无 `<tool>` 开头）：清理，对齐 `_inject_think_cards`
@@ -74,14 +75,45 @@ def _convert(md: str) -> str:
     return mi.convert(md)
 
 
-# ── 未闭合块：不产出任何块（残留修复），字段文本不得裸泄 ──
+# ── 未闭合块：流式渲染占位框（运行指示），字段文本不得裸泄 ──
 def test_unclosed_tool_block_no_leak_streaming():
     out = _inject_tool_blocks("正文。\n\n" + TOOL_MD_TRUNC, False, compact=True)
-    assert "tool-streaming-block" not in out, f"流式未闭合段不得产出占位框（残留）: {out[:300]!r}"
+    assert "tool-streaming-block" in out, f"流式未闭合块应渲染运行中占位框（运行指示）: {out[:300]!r}"
     _assert_no_leak("inject输出", _convert(out))
 
 
-# ── 未闭合块：终态同样不产出容错卡，不裸泄 ──
+# ── 未闭合块：指纹命中已完成工具 → 占位被抑制（防照抄重复）──
+def test_unclosed_block_suppressed_by_fingerprint():
+    from app.widgets.card_render_core import _tool_fingerprint
+
+    suppress = frozenset({_tool_fingerprint("bash", {"description": "查类定义", "command": "findstr /n \"class X\" w.py"})})
+    out = _inject_tool_blocks("正文。\n\n" + TOOL_MD_TRUNC, False, compact=True, suppress=suppress)
+    assert "tool-streaming-block" not in out, f"指纹命中应丢弃占位: {out[:300]!r}"
+    assert "正文。" in out
+
+
+# ── 无 tool_call_id 的闭合协议段：任何状态都不渲染卡（防重复/累积）──
+def test_closed_protocol_block_without_id_dropped():
+    md = '正文。\n\n<tool>\nname: bash\nargs: {"command": "ls"}\nresult: file_a\nsuccess: true\n</tool>'
+    for completed in (False, True):
+        out = _inject_tool_blocks(md, completed, compact=True)
+        assert "cm-collapsible" not in out and "tool-streaming-block" not in out, (
+            f"completed={completed} 无 id 闭合段不得渲染卡: {out[:300]!r}"
+        )
+        assert "正文。" in out, f"completed={completed} 前置正文不得被吞"
+
+
+# ── 带 tool_call_id 的闭合块：正常渲染（真实工具结果通道不受影响）──
+def test_closed_protocol_block_with_id_still_renders():
+    md = (
+        "正文。\n\n<tool>\nname: bash\nargs: {\"command\": \"ls\"}\n"
+        "result: file_a\nsuccess: true\ntool_call_id: call_x1\n</tool>"
+    )
+    out = _inject_tool_blocks(md, True, compact=True)
+    assert "cm-collapsible" in out, f"带 id 闭合块应渲染工具卡: {out[:300]!r}"
+
+
+# ── 未闭合块：终态不产出容错卡，不裸泄 ──
 def test_unclosed_tool_block_no_leak_final():
     out = _inject_tool_blocks("正文。\n\n" + TOOL_MD_TRUNC, True, compact=True)
     # 残段静默丢弃：无裸 <tool> 标签、无容错卡、无结构化裸文本
@@ -99,7 +131,10 @@ def test_orphan_close_tag_removed():
 
 # ── 完整块：不受修复影响，正常抽出渲染 ──
 def test_closed_tool_block_still_renders_card():
-    md = '正文。\n\n<tool>\nname: bash\nargs: {"command": "ls"}\nresult: file_a\nsuccess: True\n</tool>'
+    md = (
+        '正文。\n\n<tool>\nname: bash\nargs: {"command": "ls"}\n'
+        "result: file_a\nsuccess: True\ntool_call_id: call_x1\n</tool>"
+    )
     out = _inject_tool_blocks(md, True, compact=True)
     assert "<tool>" not in out, f"完整块应被抽出: {out!r}"
     assert "cm-collapsible" in out or "tool" in out.lower(), f"完整块应渲染工具卡: {out[:300]!r}"
@@ -157,7 +192,8 @@ def test_fence_guard_tool_block_after_fence_still_extracted():
     """fence 之后的真 tool 块（fence 外）仍正常抽出，不受 fence 保护误伤。"""
     md = (
         "```python\ncode = 1\n```\n\n"
-        '<tool>\nname: bash\nargs: {"command": "ls"}\nresult: file_a\nsuccess: True\n</tool>'
+        '<tool>\nname: bash\nargs: {"command": "ls"}\n'
+        "result: file_a\nsuccess: true\ntool_call_id: call_x1\n</tool>"
     )
     out = _fence_guard_pipeline(md, True)
     assert "<tool>" not in out, f"fence 外完整块应被抽出: {out[:400]!r}"

@@ -4515,7 +4515,16 @@ class MessageCard(SimpleCardWidget):
             # 插件注册 tag（<mood> 等）与渲染型 fence（```echarts 等）未闭合同样
             # 跳过增量注入：生肉进 DOM 后会被全量渲染的卡片/图表替换 →
             # "文字/代码先流式出现又消失"
-            if self._streaming and not _think_unclosed and not _tag_unclosed and not _fence_unclosed:
+            # 🆕 未闭合 <tool> 协议段（glm 等中转把工具调用以协议文本嵌在 content
+            # 里流式返回）同策略跳过增量注入：生肉闪现与 think 同症。
+            _tool_unclosed = last_text.count("<tool>") > last_text.count("</tool>")
+            if (
+                self._streaming
+                and not _think_unclosed
+                and not _tag_unclosed
+                and not _fence_unclosed
+                and not _tool_unclosed
+            ):
                 self.viewer._append_text_incremental(text)
             if _think_unclosed:
                 if not self.viewer._think_text_streaming_started:
@@ -4535,6 +4544,14 @@ class MessageCard(SimpleCardWidget):
                 self.viewer._needs_full_render = True
                 self.viewer._schedule_render(immediate=immediate_render)
             self.viewer._tag_text_streaming = _tag_unclosed
+            # 🆕 协议段（未闭合 <tool>）状态翻转（首现/闭合）时强制全量渲染一次：
+            # 「接收中...」占位框（运行指示）只能由全量管线的 _inject_tool_blocks
+            # 产出；首现即渲（模型开始输出工具调用），闭合翻转也走全量（协议段
+            # 无 id 被丢弃，占位随之消失，无需等下一个边界）。
+            if _tool_unclosed != getattr(self.viewer, "_tool_text_streaming", False):
+                self.viewer._needs_full_render = True
+                self.viewer._schedule_render(immediate=immediate_render)
+            self.viewer._tool_text_streaming = _tool_unclosed
             # [P0-1] 渲染型 fence（```echarts/mermaid 等）未闭合期间唯一可见反馈：
             # 增量注入跳过 + _render_tail_inline 直接 return + 差量不产出 → DOM
             # 无新内容。占位只进 DOM 不进 _content_data，持久化/历史加载零残留。
@@ -4658,6 +4675,18 @@ class MessageCard(SimpleCardWidget):
             cache = getattr(self.viewer, "_tool_md_cache", None)
             if cache is not None:
                 cache[tool_call_id] = single_md
+        # 协议段指纹登记（2026-10-25）：工具完成后，模型正文照抄的未闭合协议段
+        # （同名同参）在流式渲染中被抑制，防「接收中」占位与真实完成块重复并存
+        try:
+            from app.widgets.card_render_core import _tool_fingerprint
+
+            if self.viewer:
+                fps = getattr(self.viewer, "_finished_tool_fingerprints", None)
+                if fps is None:
+                    fps = self.viewer._finished_tool_fingerprints = set()
+                fps.add(_tool_fingerprint(tool_name, arguments or {}))
+        except Exception:
+            pass
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:

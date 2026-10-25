@@ -6207,7 +6207,12 @@ class CodeWebViewer(QWebEngineView):
         # 流式结束非流式渲染有保护又变回代码块，形态跳变）
         _fences, safe_md = _extract_fenced_code(safe_md)
         processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=self._tool_compact_mode)
-        processed_md = _inject_tool_blocks(processed_md, self._streaming is False, compact=self._tool_compact_mode)
+        processed_md = _inject_tool_blocks(
+            processed_md,
+            self._streaming is False,
+            compact=self._tool_compact_mode,
+            suppress=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
+        )
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
         processed_md = _inject_tag_cards(processed_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _restore_fenced_code(processed_md, _fences)
@@ -6575,7 +6580,11 @@ class CodeWebViewer(QWebEngineView):
                 if _needs_save_restore:
                     _gen = self._tool_dom_dirty_gen
                     _js_code = self._build_save_and_restore_js(
-                        html_content, getattr(self, "_restore_finished_ids", set())
+                        html_content,
+                        getattr(self, "_restore_finished_ids", set()),
+                        # 终态渲染：协议段占位框（空 id streaming 块）不 restore，
+                        # markdown 已不含它（_inject_tool_blocks 终态分支丢弃）
+                        drop_empty_streaming=True,
                     )
                     _ser_ms = (time.perf_counter() - _t_ser) * 1000
                     _render_ms = (_t_ser - _t_enter) * 1000
@@ -6914,6 +6923,9 @@ class CodeWebViewer(QWebEngineView):
             "icon_prefix": current_icon_prefix(),
             "heavy_caps": _HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
             "code_font_size": _CODE_FONT_SIZE,
+            # 协议段指纹去重（frozenset 快照，worker 线程只读安全）：
+            # 流式渲染时未闭合协议段指纹命中已完成后不渲染占位框（防与真实完成块重复）
+            "tool_fingerprints": frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
         }
 
     def invalidate_inflight_render(self) -> None:
@@ -7141,7 +7153,9 @@ class CodeWebViewer(QWebEngineView):
         except RuntimeError:
             pass
 
-    def _build_save_and_restore_js(self, html_content: str, finished_ids: set = None) -> str:
+    def _build_save_and_restore_js(
+        self, html_content: str, finished_ids: set = None, drop_empty_streaming: bool = True
+    ) -> str:
         """生成"保存工具块 → 重写内容 → 还原工具块"的 JS 模板（流式/非流式共享）
 
         为什么需要这个三步流程？
@@ -7181,6 +7195,14 @@ class CodeWebViewer(QWebEngineView):
         """
         _target_id = self._tool_target_id
         _finished_js = json.dumps(list(finished_ids or set())).decode("utf-8")
+        # 空 id 且 streaming 的块（协议段占位框）一律不 restore：它是 markdown 渲染
+        # 产物（_inject_tool_blocks 流式分支），本轮 HTML 含它时 updateContent 会重建
+        # （无需 restore 存活）；本轮 HTML 不含它时（指纹抑制/终态丢弃）restore 放回
+        # 就是「接收中框残留」（2026-10-25 截图 bug）。真实流式运行框 id 非空，不受影响。
+        _drop_empty_js = "true" if drop_empty_streaming else "false"
+        _drop_empty_line = (
+            f"if({_drop_empty_js} && !b.id && b.streaming==='true'){{return;}}"
+        )
         return (
             "(function(){"
             # 🆕 Bug B 方案 E：save 阶段把流式工具块的 data-order 暂存到 window，
@@ -7253,7 +7275,9 @@ class CodeWebViewer(QWebEngineView):
             f"var _finishedSet={_finished_js};"
             f"if(_saved.length){{_tc=document.getElementById('{_target_id}');if(_tc){{"
             "_saved.forEach(function(b){"
-            # 🐛 修复（工具块被吞·restore 判据根治）：restore 条件由「未完成
+            # 终态丢弃空 id 流式块（协议段占位），见上方 _drop_empty_js 注释
+            + _drop_empty_line
+            + # 🐛 修复（工具块被吞·restore 判据根治）：restore 条件由「未完成
             # （!isFinished）且 DOM 无同 id 块」改为「**DOM 无同 id 块**」。
             # 旧判据默认「已完成块的 markdown 一定会重建」，把「是否恢复」与「HTML
             # 是否真的含该块」解耦——任何一次全量渲染的 HTML 缺块（在途旧快照落地、
