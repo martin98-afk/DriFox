@@ -451,10 +451,6 @@ class SecurityCenterCard(QWidget):
             self._status_chips[key] = chip
             self._status_layout.addWidget(chip)
         lay.addLayout(self._status_layout)
-        # 配额不受总开关影响，单独用常亮文案表达，不做成 chip 以免误读为可控层
-        self._status_quota = QLabel("")
-        self._status_quota.setObjectName("sciStatusQuota")
-        lay.addWidget(self._status_quota)
         lay.addStretch(1)
 
         w.setStyleSheet(self._status_qss())
@@ -474,12 +470,6 @@ class SecurityCenterCard(QWidget):
                 background: transparent;
                 {font_size_css(12)}
                 font-weight: bold;
-                {get_font_family_css()}
-            }}
-            QLabel#sciStatusQuota {{
-                color: {Colors.TEXT_MUTED};
-                background: transparent;
-                {font_size_css(11)}
                 {get_font_family_css()}
             }}
             QLabel#sciChip {{
@@ -525,13 +515,6 @@ class SecurityCenterCard(QWidget):
             chip.setToolTip(
                 self._status_tip(key, sandbox_on, layers[key])
             )
-        limit = self._int_cfg("backup_limit_mb")
-        self._status_quota.setText("配额始终生效" if limit >= 0 else "")
-        self._status_quota.setToolTip(
-            "进程内存/进程数上限不受上方任何开关影响；"
-            "仅约束 bash、bg_start 与持久 shell 会话。"
-        )
-
     def _status_tip(self, key: str, sandbox_on: bool, own_on: bool) -> str:
         """状态条 chip 的悬停解释（说明为何无效）"""
         names = {"files": "文件规则", "command": "命令规则", "delete": "删除审批", "network": "网络外传"}
