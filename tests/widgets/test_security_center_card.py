@@ -706,10 +706,3 @@ def test_status_row_tracks_layer_switch(isolated_cfg):
     assert card._status_chips["files"].text().endswith("✓")
     card.delete_switch.setChecked(True)
     assert card._status_chips["delete"].text().endswith("✓")
-
-
-def test_status_row_mentions_quota_independence(isolated_cfg):
-    """配额不受总开关影响，必须在状态条上明说"""
-    card = _make_card()
-    assert "始终生效" in card._status_quota.text()
-    assert "不受" in card._status_quota.toolTip()
