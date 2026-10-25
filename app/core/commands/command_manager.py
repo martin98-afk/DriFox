@@ -208,6 +208,23 @@ class CommandManager:
         """取消注册一个命令（移除该名称下的所有类型）"""
         self._commands.pop(name, None)
 
+    def unregister_typed(self, name: str, command_type) -> bool:
+        """取消注册指定名称+类型的命令（同名其他类型/来源保留）
+
+        细项级停用智能体时精准摘 /agent 命令用：unregister 粒度太粗，
+        会连同名其他类型的命令一起删。
+
+        Returns:
+            是否确有该类型条目被移除
+        """
+        entries = self._commands.get(name)
+        if entries is None:
+            return False
+        removed = entries.pop(command_type, None) is not None
+        if not entries:
+            self._commands.pop(name, None)
+        return removed
+
     def names_by_source(self, source: str) -> List[str]:
         """返回指定 source 注册的全部命令名（按名称去重，稳定顺序）
 
