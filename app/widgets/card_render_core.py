@@ -2192,6 +2192,46 @@ def _last_para_break_outside_fence(md: str) -> int:
     return last
 
 
+def _last_closed_proto_tag_end(md: str) -> int:
+    """最后一个**已闭合**协议标签（``</tool>`` / ``</think>``）结束之后的偏移（无 → -1）。
+
+    用途：差量基线推进点下限。协议块内部空行（工具 result/args 文本几乎必含）
+    不得成为推进点，否则 tail 从块中间开始、永带闭合标签残片。
+    """
+    best = -1
+    for _tag in ("</tool>", "</think>"):
+        _p = md.rfind(_tag)
+        if _p != -1:
+            _e = _p + len(_tag)
+            if _e > best:
+                best = _e
+    return best
+
+
+def _compute_stream_stable_len(md: str) -> int:
+    """全量渲染落地后的差量基线推进点（`_stable_md_len` 的新值）。
+
+    = max(最后段落边界(代码 fence 外), 最后闭合协议标签结束)。
+
+    🐛 为什么必须钳协议块边界（2026-10-25「长回复流式反复闪烁 + 更新失效」）：
+    旧实现只取 `_last_para_break_outside_fence`，工具 result 内部空行被当段落
+    边界 → stable 切进 ``<tool>`` 块中间 → tail = md[stable:] 永带 ``</tool>``
+    残片 → `_perform_update` 降载分支（tail 含协议标签让位全量）每次都让位 →
+    每次工具完成 ~300ms 内连发第二次 save/restore 整页替换（闪烁 + 打字机
+    中断，观感即「流式更新失效 + 反复闪」）。钳到闭合标签后 tail 起点必在
+    完整协议块之外，每工具完成仅保留设计内的 1 次全量。
+
+    含未闭合协议块时返回 0（语义 = 不推进；调用点原守卫
+    `_has_unclosed_think_or_tool` 的兜底等价，收敛到纯函数内聚）。
+    """
+    if _has_unclosed_think_or_tool(md):
+        return 0
+    _last_break = _last_para_break_outside_fence(md)
+    _candidate = _last_break + 2 if _last_break != -1 else 0
+    _proto_end = _last_closed_proto_tag_end(md)
+    return _proto_end if _proto_end > _candidate else _candidate
+
+
 # ── 方案 D：data-order 统一排序 ──────────────────────────────────
 # 根因（Bug B 复发的第三条路径）：JS 直接注入 #tool-content 的工具块
 # （_inject_tool_streaming_html 流式块 / append_tool_result 完成块 /
@@ -2855,32 +2895,22 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
             # 字段文本裸露为正文（截图级症状：name: bash args: {...} result: ...）。
             # 未闭合来源：模型在正文中输出协议格式文本（讨论工具调用机制时
             # 模仿上下文格式，流式中 </tool> 未到达）、max_tokens 截断、停止生成。
-            # 按到达程度渲染：流式中间态 → 运行中占位框（与 JS 注入运行框视觉
-            # 一致，闭合后自然过渡为工具卡）；非流式终态（截断/停止）→ 容错
-            # 解析已有字段渲染完成态卡。fence 内示例由 _extract_fenced_code
-            # 保护，不进入本分支。
-            # 🐛 防御（审查 I-1，吞正文）：容错解析范围截断到下一个 <tool>
-            # 开标签（嵌套/后续块的字段不得混入本块）；剩余段递归走同一
-            # 渲染逻辑（每轮至少消费一个开标签，无死循环风险）。
+            # 🐛 修复（运行框/完成框残留，2026-10-25 截图）：未闭合段此前按到达
+            # 程度渲染——流式渲染「接收中...」占位框、终态容错解析成完成卡。产物
+            # data-tool-call-id 为空串，finish_tool_streaming / append_tool_result
+            # 的按 id 清理永远匹配不到 → 流式期间常驻「工具与思考」区底部与真实
+            # 完成块并存，结束后再留一张破碎容错卡（block_key 一变又多一份）。
+            # 协议残段无实质内容，统一静默丢弃（丢弃同样防源码泄漏）；真实工具的
+            # 运行/完成反馈由 worker 结构化事件 → JS 注入链路负责，不依赖 md 占位。
+            # fence 内示例由 _extract_fenced_code 保护，不进入本分支。
+            # 🐛 防御（审查 I-1，吞正文）：范围截断到下一个 <tool> 开标签（嵌套/
+            # 后续块不得混入）；剩余段递归走同一逻辑（每轮至少消费一个开标签，
+            # 无死循环风险）。
             content = md_text[start_idx + len("<tool>") :]
             _next_open = content.find("<tool>")
             _rest = ""
             if _next_open != -1:
                 _rest = content[_next_open:]
-                content = content[:_next_open]
-            if completed:
-                if content.strip():
-                    parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
-            elif content.strip():
-                _name_m = _TOOL_NAME_PATTERN.search(content)
-                parts.append(
-                    _render_tool_streaming_block(
-                        tool_call_id="",
-                        tool_name=_name_m.group(1).strip() if _name_m else "",
-                        preview="接收中...",
-                        completed=False,
-                    )
-                )
             if _rest:
                 parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps))
             break
