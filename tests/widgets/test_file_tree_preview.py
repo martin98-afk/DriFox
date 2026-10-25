@@ -73,7 +73,9 @@ class TestDetectKind:
         p.write_text("x", encoding="utf-8")
         assert detect_kind(str(p)) == "text"
 
-    @pytest.mark.parametrize("name", ["a.exe", "b.pdf", "c.mp4", "d.bin"])
+    # 注意不要把 pdf 列入：PySide6 的 QImageReader 自带 pdf 插件（Qt6 新增），
+    # detect_kind 按 Qt 实际能力判定，会正确返回 image（PyQt5 版不支持）。
+    @pytest.mark.parametrize("name", ["a.exe", "c.mp4", "d.bin"])
     def test_unsupported(self, tmp_path, name):
         p = tmp_path / name
         p.write_bytes(b"x")
