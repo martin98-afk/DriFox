@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.11] - 2026-10-25 (重新发布 #4)
+## [v0.6.11] - 2026-10-25 (重新发布 #5)
 
-自 v0.6.10 以来的变更 | 提交数：67 · 文件变更：161 · +15635/-2039 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.10 以来的变更 | 提交数：68 · 文件变更：165 · +15856/-2048 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -80,6 +80,10 @@ All notable changes to this project will be documented in this file.
 
 - **agents 细项/组件级停用集全链路生效** (`892463b9`): ①`AgentManager` 加载链消费 D9/D10 禁用集：`_load_agents_from_dir` 注册点细项过滤（md/yaml）、`_load_agents_from_plugins` 与 `reload_plugin_agents` 组件级检查，重启后仍生效。②细项开关改精准增删：`set_agent_item_enabled`（file_cache 零 parse 登记）+ `set_agent_command_enabled` 单条命令增删 + `CommandManager.unregister_typed`，替代每次开关全量 reload+命令重建。③命令侧补细项过滤：实时解析与缓存命中两条路径均按 `_is_item_enabled` 复核，停用智能体的 /命令不再注册/复活。④设置卡细项开启时组件级停用则连带开启组件，消除「开了没反应」。⑤token 统计与 prompt 注入同源（`_plugin_agents` 过滤后），按启用数计算。回归：`tests/core/test_agent_item_toggle.py`（14 例）。
 - **FileMentionObject 图标主题一致性** (`30096b2e`): 文件提及对象图标处理更新，保证主题切换下显示一致。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #5 追加）
+
+- **mcp-oauth：授权假成功与 handler 泄漏导致的 state mismatch 连环失败** (`7fc652f4`): 根因链：callback_handler 在 token 交换前置 done 掩盖交换失败（Apify invalid_client 仍报授权成功）；`_run_authorization` patch 的 redirect/callback handler 从不恢复，泄漏给连接流程的 SDK OAuth；CallbackServer event/result 残留旧回调，泄漏 handler 的 wait() 秒回过期 state，State parameter mismatch 必现。修复：done 只在 drive() 流程真正收尾时置位；handler patch 前保存、finally 恢复；close() 清 result/event。另：`token_endpoint_auth_method` 可经 `.mcp.json` auth 段声明（Apify DCR 不回显该字段致 token 交换缺 secret 报 invalid_client，声明 none 绕开）。测试 `tests/core/test_mcp_oauth.py` 扩展覆盖。
 
 ## [v0.6.10] - 2026-10-20 (重新发布 #8)
 
