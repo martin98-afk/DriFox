@@ -1167,6 +1167,16 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             pm = self._pm()
             if pm.is_item_enabled(plugin_name, component, item_id) == enabled:
                 return  # 幂等
+            # 组件整类停用时打开细项 → 连带开启组件。用户点了开关就是想用；
+            # 否则这次开启要等组件手动打开后才生效，表现为「开了没反应」。
+            if enabled and not pm.is_component_enabled(plugin_name, component):
+                pm.set_component_enabled(plugin_name, component, True)
+                self._component_off -= 1
+                section = self._pool.get(plugin_name)
+                if section is not None:
+                    row = section.component_row(component)
+                    if row is not None:
+                        row.set_checked_silent(True)
             pm.set_item_enabled(plugin_name, component, item_id, enabled)
             self._sig = self._signature()
             self._refresh_summary_text()
