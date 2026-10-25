@@ -480,7 +480,11 @@ def test_c2_backup_card_no_duplicate_title(isolated_cfg):
     旧实现组头叫「编辑类备份」、组内第一行也叫「编辑类备份」，同屏两遍纯噪声。
     """
     card = _make_card()
-    group_title = card._backup_group.titleLabel.text()
+    # qfluentwidgets 的 ExpandGroupSettingCard 标题属性名随绑定变化：
+    # PyQt5 版直接暴露 titleLabel，PySide6 版挂在 .card（HeaderSettingCard）下
+    group = card._backup_group
+    header = getattr(group, "card", group)
+    group_title = header.titleLabel.text()
     row_title = card.backup_dir_card.titleLabel.text()
     assert row_title != group_title, f"组头与行标题重复：{group_title}"
 
@@ -585,7 +589,7 @@ def test_all_switches_outside_groups(isolated_cfg):
     )
     for switch in (card.sandbox_switch, card.delete_switch, card.trash_switch, card.net_switch, card.sys_switch):
         for g in groups:
-            assert switch not in g.widgets, f"{type(switch).__name__} 应在开关区，不应进折叠组 {g.titleLabel.text()}"
+            assert switch not in g.widgets, f"{type(switch).__name__} 应在开关区，不应进折叠组 {type(g).__name__}#{groups.index(g)}"
 
 
 def test_approval_card_built_once(isolated_cfg):
