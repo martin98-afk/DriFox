@@ -2874,7 +2874,14 @@ class FileMentionObject(QPyTextObject):
 
     @classmethod
     def _icon_for(cls, path: str):
-        """按扩展名取图标（复用 AttachmentChip 的映射），失败返回 None"""
+        """按扩展名取图标（复用 AttachmentChip 的映射），失败返回 None
+
+        必须用 ``qicon()`` 而非 ``icon()``：后者在调用当刻就按当前主题解析成
+        具体 SVG 资源（``IMAGE_EXPORT_black.svg`` / ``_white.svg``），缓存下来
+        后主题切换永远返回旧色 —— 深底黑图标等于隐形（用户实测「输入框胶囊
+        里的图标不随主题切换」）。``qicon()`` 包一层 FluentIconEngine，每次
+        paint/pixmap 都按当时主题重新取路径，缓存恒有效。
+        """
         try:
             icon_enum = AttachmentChip._get_file_icon(path)
         except Exception:  # noqa: BLE001
@@ -2882,7 +2889,7 @@ class FileMentionObject(QPyTextObject):
         key = str(icon_enum)
         if key not in cls._icon_cache:
             try:
-                cls._icon_cache[key] = icon_enum.icon()
+                cls._icon_cache[key] = icon_enum.qicon()
             except Exception:  # noqa: BLE001
                 cls._icon_cache[key] = None
         return cls._icon_cache[key]
