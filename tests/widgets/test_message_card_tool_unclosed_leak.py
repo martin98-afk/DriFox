@@ -18,11 +18,13 @@
 
 修复
 ----
-- 未闭合块按到达程度渲染：流式中间态 → 运行中占位框（tool-streaming-block，
-  与 JS 注入运行框视觉一致）；非流式终态（截断/停止）→ 容错解析已有字段
-  渲染完成卡。不再让标签进 DOM 结构。
-- 容错解析范围截断到下一个 <tool> 开标签，剩余段递归处理（审查 I-1：
-  防嵌套/后续块字段混入本块容错解析吞正文）。
+- 2026-10-25 起：未闭合段不再产出任何块（流式占位框/终态容错卡），统一静默丢弃。
+  此前按到达程度渲染：流式 → 运行中占位框（tool-streaming-block，tool_call_id
+  为空串）、终态 → 容错解析完成卡；两者无清理路径，常驻「工具与思考」区底部与
+  真实完成块并存（截图级残留）。丢弃同样防源码泄漏；真实工具反馈由 worker
+  结构化事件 → JS 注入链路负责，不依赖 md 占位。
+- 2026-09-05 版修复：渲染占位框/容错卡 + 容错解析范围截断到下一个 <tool>
+  开标签（审查 I-1：防嵌套/后续块字段混入本块容错解析吞正文）。
 - 孤立 `</tool>`（无 `<tool>` 开头）：清理，对齐 `_inject_think_cards`
   对孤立 `</think>` 的防御。
 - `_render_markdown_to_html` 同步版流式分支补 fence 保护（对齐 worker
@@ -72,18 +74,19 @@ def _convert(md: str) -> str:
     return mi.convert(md)
 
 
-# ── 未闭合块：流式态渲染运行中占位框，字段文本不得裸泄 ──
+# ── 未闭合块：不产出任何块（残留修复），字段文本不得裸泄 ──
 def test_unclosed_tool_block_no_leak_streaming():
     out = _inject_tool_blocks("正文。\n\n" + TOOL_MD_TRUNC, False, compact=True)
-    assert "tool-streaming-block" in out, f"流式未闭合块应渲染运行中占位框: {out[:300]!r}"
+    assert "tool-streaming-block" not in out, f"流式未闭合段不得产出占位框（残留）: {out[:300]!r}"
     _assert_no_leak("inject输出", _convert(out))
 
 
-# ── 未闭合块：非流式终态（截断/停止）容错解析渲染完成卡，不裸泄 ──
+# ── 未闭合块：终态同样不产出容错卡，不裸泄 ──
 def test_unclosed_tool_block_no_leak_final():
     out = _inject_tool_blocks("正文。\n\n" + TOOL_MD_TRUNC, True, compact=True)
-    # 容错解析渲染完成态工具卡（无裸 <tool> 标签、无结构化裸文本）
+    # 残段静默丢弃：无裸 <tool> 标签、无容错卡、无结构化裸文本
     assert "<tool>" not in out, f"未闭合块不得残留裸 <tool> 标签: {out[:300]!r}"
+    assert "cm-collapsible" not in out, f"未闭合段不得产出容错完成卡（残留）: {out[:300]!r}"
     _assert_no_leak("inject输出(非流式)", _convert(out))
 
 
@@ -115,13 +118,12 @@ def test_render_stable_segment_no_leak():
     _assert_no_leak("stable_segment(完整块)", html)
 
 
-# ── 审查 I-1：未闭合段内嵌套/后续 <tool> 开标签不得混入本块容错解析 ──
+# ── 审查 I-1：未闭合段内嵌套/后续 <tool> 开标签各自独立处理，不混入 ──
 def test_unclosed_block_truncates_at_next_open_tag():
     md = "<tool>\nname: bash\nresult: 半截\n\n<tool>\nname: read\nresult: y"
     out = _inject_tool_blocks(md, True, compact=True)
-    # 两个块各自独立渲染（第二个块字段不混入第一个块）
-    assert out.count("data-tool-name") == 2, f"应产出两张容错卡: {out[:400]!r}"
-    assert 'data-tool-name="bash"' in out and 'data-tool-name="read"' in out, f"块名应各自识别: {out[:400]!r}"
+    # 两个残段各自静默丢弃（第二个块字段不混入第一个块的容错解析——修复后无容错卡）
+    assert out.count("data-tool-name") == 0, f"残段不得产出容错卡: {out[:400]!r}"
     assert out.count("<tool>") == 0, f"不得残留裸标签: {out[:400]!r}"
     _assert_no_leak("inject输出(嵌套)", _convert(out))
 

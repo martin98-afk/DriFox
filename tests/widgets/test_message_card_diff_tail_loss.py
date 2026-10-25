@@ -175,8 +175,15 @@ def test_full_render_marks_unclosed_tail_paragraph_incremental():
     # 图表/公式容器必须排除：remove() 会销毁已渲染 canvas/SVG，chart vault 不覆盖 append 路径
     assert "echarts-container" in src, "图表/公式容器不得打 data-incremental（会销毁已渲染 canvas）"
     assert "data-incremental" in src, "全量渲染后应给未闭合段末尾节点补打增量标记"
-    # stable 推进必须到最后段落边界，而非 md 末尾（否则打标删除会丢内容）
-    assert 'rfind("\\n\\n")' in src, "全量渲染后 stable 必须推进到最后一个 \\n\n 之后"
+    # stable 推进必须到最后段落边界，而非 md 末尾（否则打标删除会丢内容）。
+    # 2026-10-25 推进逻辑抽到 card_render_core._compute_stream_stable_len
+    # （段界 + 协议块边界钳制，防工具 result 空行切进 <tool> 内部致降载恒让位
+    # → 每工具完成连发两次整页替换闪烁），调用点只保留函数调用。
+    assert "_compute_stream_stable_len" in src, "stable 推进必须走 _compute_stream_stable_len（段界+协议块钳制）"
+    from app.widgets.card_render_core import _compute_stream_stable_len as _stable_fn
+
+    _impl = inspect.getsource(_stable_fn)
+    assert "_last_para_break_outside_fence" in _impl, "推进语义必须仍含最后段落边界（打标末段归属 tail 区的前提）"
 
 
 def _simulate_stream_dom(chunks, fixed=True):

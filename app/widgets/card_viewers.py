@@ -108,6 +108,7 @@ from app.widgets.card_render_core import (
     _accent_rgba,
     _defer_emit,
     _dispatch_render_done,
+    _compute_stream_stable_len,
     _extract_closed_segments,
     _extract_fenced_code,
     _extract_formulas,
@@ -7004,8 +7005,11 @@ class CodeWebViewer(QWebEngineView):
                 _md_r = self._last_rendered_markdown
                 # fence 感知：推进点不落在未闭合 fence 内部（否则后续差量切片
                 # 起点在 fence 内，内部代码行被当普通段产出 → 图表源码生肉流入）
-                _last_break = _last_para_break_outside_fence(_md_r)
-                self._stable_md_len = _last_break + 2 if _last_break != -1 else 0
+                # 🐛 协议块感知（2026-10-25）：推进点还不得落在 <tool>/<think>
+                # 内部——工具 result 空行被当段界会让 tail 永带 </tool> 残片，
+                # 降载分支每次让位 → 每工具完成连发两次 save/restore 整页替换
+                # （反复闪烁 + 打字机中断）。见 _compute_stream_stable_len。
+                self._stable_md_len = _compute_stream_stable_len(_md_r)
             # 🐛 修复（思考框/工具框重复）：md 含未闭合块时基线**不推进**（防残段
             # 泄漏到正文），但 DOM 里已渲染出该块（think-streaming / 工具框）。
             # 若让后续走差量追加，会把已渲染的段再渲染一遍 → 同一段重复出现。
