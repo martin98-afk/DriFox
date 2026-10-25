@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.11] - 2026-10-24 (重新发布 #2)
+## [v0.6.11] - 2026-10-25 (重新发布 #3)
 
-自 v0.6.10 以来的变更 | 提交数：61 · 文件变更：129 · +11616/-1794 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.10 以来的变更 | 提交数：62 · 文件变更：132 · +12576/-1855 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -63,6 +63,10 @@ All notable changes to this project will be documented in this file.
 ### ♻️ 代码重构 (Refactoring)（重新发布 #2 追加）
 
 - **移除状态条配额常亮文案** (`b8632225`): 删 `_status_quota` QLabel/QSS/填充逻辑与对应测试，配额说明保留在各开关 tooltip。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #3 追加）
+
+- **删除判定拆两级：垃圾桶误搬与审批漏判** (`93542700` · `app/tools/sandbox.py` · `app/core/workers/chat_worker.py` · `tests/tools/test_delete_command_position.py` 新增): 安全中心此前两份判定共用同一份 `is_delete_command`，参数位出现的 `rm`/`del` 被当成删除命令，随后把其后所有存在的路径 `move` 进垃圾箱。实测误搬：`git rm -r --cached app`（只脱离索引，整个 `app` 被搬）、`git commit -m "fix: rm cache"`（提交信息里的词，`app` 被搬）、`grep -rn "rm" src/ tests/`（搜索词，`tests/` 被搬）、`ls rm build` / `pip install del build`（参数，`build` 被搬）。收窄判定后又发现审批层跟着漏判（26 条真删除命令中 15 条不再触发审批）。现按消费方误判代价拆成两级：①`is_delete_command`（审批层，宽松）覆盖命令位动词、`.NET IO Delete`、`find -delete`、解释器删除（`python -c shutil.rmtree` / `node -e fs.rmSync`）、`eval`/`iex` 载荷、`for ... do`、`git clean -fdx`、`shred`/`srm`/`truncate -s 0`、`Path().unlink()`；②`is_trash_delete_command`（垃圾桶层，严格）只认命令位动词且目标可静态解析，变量/占位目标不搬、glob 展开成实际路径后搬。连带修复：`delete_protection` 门控改查命令位 span，不再把 `command_safety` 独立判定的 confirm 一并降级（`git clean -fdx` / `git push --force` 在开关关闭时曾被静默放行）；新增 `_explode_separators` 修 `rm a.txt&&rm b.txt` 连接符紧贴路径导致两个目标全部丢失；新增垃圾桶自包含保护（含垃圾桶目录的目录拒绝搬入，`shutil` 会走 copytree+rmtree 退化路径）。验证：审批层 52 条真删除形态漏判 0，垃圾桶层 32 条只读命令误搬 0、7 条真删除漏搬 0；新增回归 153 例。
 
 ## [v0.6.10] - 2026-10-20 (重新发布 #8)
 
