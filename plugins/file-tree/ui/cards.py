@@ -51,6 +51,7 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from .preview import FilePreviewPage, detect_kind
 from .scanner import _DirEntry, _TreeScanner
 from .tree_widget import (
     FileTreeFilterProxy,
@@ -64,6 +65,11 @@ from .watcher import _DirWatcher
 
 # 恢复队列队首目录等待扫描的超时秒数（超时跳过，防单个异常目录堵死整队）
 _EXPAND_WAIT_TIMEOUT_S = 3.0
+
+# _stack 页索引
+_PAGE_TREE = 0
+_PAGE_PLACEHOLDER = 1
+_PAGE_PREVIEW = 2
 
 
 def _same_path(a: str, b: str) -> bool:
@@ -306,6 +312,7 @@ class FileTreeCard(QWidget):
         self._scan_gen: int = 0  # 树世代：换根时 +1，在途扫描的旧世代回调作废
         self._colors: dict = {}
         self._project_root: str = ""
+        self._scrollbar_qss: str = ""  # 主题滚动条样式（预览页文本视图复用）
         self._current_scan_target: str = ""  # 当前扫描目标目录
         # 当前在途扫描的派发上下文 (gen, key, scan_dir, on_done)。串行队列保证
         # 同一时刻至多一个在途扫描，回调经主线程槽读取无需加锁。
@@ -385,9 +392,12 @@ class FileTreeCard(QWidget):
         SmoothScrollDelegate(self._tree_view)
 
         # 占位页面（QStackedWidget 切换，避免子控件无布局时左上角残留）
-        self._stack = QStackedWidget(self._scroll_area)
+        # ★ 外层 stack：0=树区（含 ScrollArea）/ 1=居中占位页 / 2=文件预览页。
+        # 预览页不能放进 ScrollArea：图片自绘缩放与文本自身滚动都会被外层
+        # 滚动拦截，且预览页需要自己填满高度。
+        self._stack = QStackedWidget(self)
         self._stack.setObjectName("file-tree-stack")
-        self._stack.addWidget(self._tree_view)  # index 0: 文件树视图
+        self._stack.addWidget(self._scroll_area)  # index 0: 文件树视图
 
         self._placeholder = QLabel("正在加载文件树...")
         self._placeholder.setAlignment(Qt.AlignCenter)
@@ -397,12 +407,16 @@ class FileTreeCard(QWidget):
         _ph_layout.setAlignment(Qt.AlignCenter)
         _ph_layout.addWidget(self._placeholder)
         self._stack.addWidget(self._ph_page)  # index 1: 居中占位页
+
+        self._preview_page = FilePreviewPage(self)
+        self._preview_page.back_requested.connect(self._close_preview)
+        self._stack.addWidget(self._preview_page)  # index 2: 文件预览页
         # 初始显示占位页，等待扫描完成
         self._stack.setCurrentIndex(1)
 
-        self._scroll_area.setWidget(self._stack)
+        self._scroll_area.setWidget(self._tree_view)
         self._vbox.addWidget(self._top_bar)
-        self._vbox.addWidget(self._scroll_area, 1)
+        self._vbox.addWidget(self._stack, 1)
 
     def _setup_model(self):
         """创建 Model → Proxy → View 链路"""
@@ -430,7 +444,7 @@ class FileTreeCard(QWidget):
         self._tree_view.delete_requested.connect(self._on_delete_requested)
         self._tree_view.move_requested.connect(self._on_move_requested)
         self._tree_view.copy_requested.connect(self._on_copy_drop_requested)
-        self._tree_view.double_clicked_file.connect(self._open_file)
+        self._tree_view.double_clicked_file.connect(self._on_file_activated)
         self._tree_view.enter_expand_requested.connect(self._on_enter_expand)
         self._tree_view.context_menu_requested.connect(self._on_context_menu)
         self._tree_view.clipboard_copy.connect(self.copy_to_clipboard)
@@ -680,13 +694,13 @@ class FileTreeCard(QWidget):
         hover_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.06)"
 
         tc_hex = self._colors["text"].name()
-        accent_hex = self._colors["accent"].name()
         try:
             from app.plugins.sdk import get_unified_scrollbar_style
 
             scrollbar_style = get_unified_scrollbar_style()
         except Exception:
             scrollbar_style = ""
+        self._scrollbar_qss = scrollbar_style
 
         title_style = (
             f"color: {tc}; background: transparent; "
@@ -695,8 +709,16 @@ class FileTreeCard(QWidget):
         top_bar_style = (
             f"#file-tree-top-bar {{"
             f"  background: transparent;"
-            f"  border-bottom: 1px solid {border_c.name() + hex(border_c.alpha())[2:].zfill(2)};"
+            # ★ QSS/QColor 的 8 位 hex 是 #AARRGGBB（实测 #ffffff1e → rgb(255,255,30)），
+            # 直接 name()+alpha 拼接会把 alpha 写进蓝通道 → 分隔线变黄/洋红亮线。
+            # 主题 border 本身不透明（如 #bcc7d6），压到 ~35% 才不抢眼。
+            f"  border-bottom: 1px solid "
+            f"rgba({border_c.red()},{border_c.green()},{border_c.blue()},90);"
             f"}}"
+        )
+        accent_tint = (
+            f"rgba({self._colors['accent'].red()},{self._colors['accent'].green()},"
+            f"{self._colors['accent'].blue()},64)"
         )
         tree_style = (
             f"#file-tree-widget {{"
@@ -704,7 +726,7 @@ class FileTreeCard(QWidget):
             f"  color: {tc_hex}; font-size: {font_size}px;"
             f"}}"
             f"#file-tree-widget::item:selected {{"
-            f"  background: {accent_hex}40; color: {tc_hex};"
+            f"  background: {accent_tint}; color: {tc_hex};"
             f"}}"
             f"#file-tree-widget::item:hover {{"
             f"  background: {hover_bg};"
@@ -742,6 +764,12 @@ class FileTreeCard(QWidget):
 
         # 通知 delegate 更新主题色
         self._rename_delegate.set_colors(self._colors)
+        self._preview_page.set_colors(
+            self._colors,
+            font_family=font_family,
+            font_size=font_size,
+            scrollbar_qss=scrollbar_style,
+        )
 
     # ── 异步加载 ──
 
@@ -913,11 +941,15 @@ class FileTreeCard(QWidget):
             cached = self._view_state_cache.get(os.path.normcase(os.path.normpath(scan_dir)))
             if cached:
                 self._restore_view_state(cached)
+        if self._stack.currentIndex() == _PAGE_PREVIEW:
+            return  # 预览态不抢页面（换项目时保留当前阅读内容）
         self._stack.setCurrentIndex(0 if entries else 1)
         if not entries:
             self._placeholder.setText("项目目录为空")
 
     def _show_error(self, message: str):
+        if self._stack.currentIndex() == _PAGE_PREVIEW:
+            return  # 预览态不抢页面
         self._placeholder.setText(f"⚠️ {message}")
         self._stack.setCurrentIndex(1)
 
@@ -997,6 +1029,8 @@ class FileTreeCard(QWidget):
     def _on_watcher_reload(self, entries: List[_DirEntry], dir_path: str):
         if _same_path(dir_path, self._project_root):
             self._source_model.refresh_root(entries)
+            if self._stack.currentIndex() == _PAGE_PREVIEW:
+                return  # 预览态不抢页面
             if entries:
                 self._stack.setCurrentIndex(0)
             else:
@@ -1470,6 +1504,9 @@ class FileTreeCard(QWidget):
             else:
                 action_explorer = menu.addAction("📂 打开所在文件夹")
                 action_explorer.triggered.connect(lambda: self._open_in_explorer(item_path))
+                if detect_kind(item_path):
+                    action_preview = menu.addAction("👁  预览")
+                    action_preview.triggered.connect(lambda: self._open_preview(item_path))
                 action_open = menu.addAction("📄 用默认程序打开")
                 action_open.triggered.connect(lambda: self._open_file(item_path))
 
@@ -1478,6 +1515,11 @@ class FileTreeCard(QWidget):
     # ── 刷新与关闭 ──
 
     def _on_refresh(self):
+        # 预览态：刷新当前预览文件（文件被外部改动可即时看），不动目录树
+        if self._stack.currentIndex() == _PAGE_PREVIEW:
+            if not self._preview_page.reload_current():
+                self._close_preview()
+            return
         # 增量刷新不重建节点，已展开目录的监听保持有效，只补缺失项
         self._rebuild_watcher_paths()
         self._async_load_tree()
@@ -1544,6 +1586,37 @@ class FileTreeCard(QWidget):
                 subprocess.Popen(["xdg-open", path])
         except Exception as e:
             logger.error(f"[FileTree] 打开文件失败: {e}")
+
+    # ── 预览 ──
+
+    def _open_preview(self, path: str) -> None:
+        """卡片内预览（双击 / 右键菜单入口）；不支持的类型回退到默认程序"""
+        if not path or not os.path.isfile(path):
+            self._show_error(f"文件不存在: {path}")
+            return
+        if not detect_kind(path):
+            self._open_file(path)
+            return
+        self._preview_page.set_colors(
+            self._colors,
+            font_family=self._colors.get("font_family", ""),
+            font_size=self._colors.get("font_size", 0),
+            scrollbar_qss=self._scrollbar_qss,
+        )
+        self._preview_page.load(path)
+        self._stack.setCurrentIndex(_PAGE_PREVIEW)
+
+    def _close_preview(self) -> None:
+        """返回文件树（树页未销毁，展开 / 选中 / 滚动原样保留）"""
+        self._stack.setCurrentIndex(_PAGE_TREE if self._source_model.rowCount(QModelIndex()) else _PAGE_PLACEHOLDER)
+        self._tree_view.setFocus()
+
+    def _on_file_activated(self, path: str) -> None:
+        """双击分流：可预览类型进预览，其余仍交系统默认程序"""
+        if detect_kind(path):
+            self._open_preview(path)
+        else:
+            self._open_file(path)
 
     # ── 比例尺寸（按停靠方位自适应） ──
 
