@@ -235,7 +235,7 @@ def _upsert_frontmatter_shortcut(content: str, shortcut: str) -> str:
     return "---\n" + "\n".join(new_fm) + "\n---\n" + "\n".join(body_lines)
 
 
-# ── 快捷键冲突检测 ──
+# ── 冲突 / 作用域判定 ──
 
 
 def _find_conflicts(shortcut: str, all_commands: list, exclude_cmd: str = "") -> list:
@@ -250,12 +250,43 @@ def _find_conflicts(shortcut: str, all_commands: list, exclude_cmd: str = "") ->
         冲突的命令 dict 列表
     """
     conflicts = []
+    key = shortcut.lower()
     for cmd in all_commands:
         if cmd["name"] == exclude_cmd:
             continue
-        if cmd.get("shortcut", "") and cmd["shortcut"] == shortcut:
+        if cmd.get("shortcut", "") and cmd["shortcut"].lower() == key:
             conflicts.append(cmd)
     return conflicts
+
+
+def _collect_conflict_names(all_commands: list) -> set:
+    """返回被多条命令共用的快捷键 → 涉及的全部命令名（用于列表标红）
+
+    Qt 的 QShortcutMap 对同窗口同键序列判 ambiguous，只发
+    activatedAmbiguously，命令一律不触发。列表里必须让用户看见，
+    否则现象只有「按了没反应」。
+    """
+    by_key: dict = {}
+    for cmd in all_commands:
+        key = (cmd.get("shortcut") or "").lower()
+        if key:
+            by_key.setdefault(key, []).append(cmd["name"])
+    names: set = set()
+    for key, owners in by_key.items():
+        if len(owners) > 1:
+            names.update(owners)
+    return names
+
+
+# 全局热键命令（进程外也生效，走 Win32 RegisterHotKey）。
+# 与 app/tray_manager.py 的 TrayManager._setup_global_hotkey（唯一读取 toggle-window）
+# 保持一致；将来若支持更多全局热键命令，两边同步扩这张表。
+_GLOBAL_SCOPE_COMMANDS = frozenset({"toggle-window"})
+
+
+def _is_single_key(shortcut: str) -> bool:
+    """是否无修饰键的单键快捷键（如 "Q"）"""
+    return bool(shortcut) and "+" not in shortcut.strip()
 
 
 # ── 数据加载 ──────────────────────────────────────────────
@@ -412,6 +443,7 @@ class _CommandRow(QFrame):
         is_plugin: bool,
         font_size: int,
         parent=None,
+        is_conflict: bool = False,
     ):
         super().__init__(parent)
         self._cmd_name = cmd_name
@@ -420,7 +452,16 @@ class _CommandRow(QFrame):
         self._is_customized = is_customized
         self._is_plugin = is_plugin
         self._font_size = font_size
+        self._is_conflict = is_conflict
         self._setup_ui()
+
+    def _scope_badge(self) -> tuple:
+        """返回 (徽标文字, tooltip)；无快捷键或无作用域差异时返回空串不显示"""
+        if not self._shortcut:
+            return "", ""
+        if self._cmd_name in _GLOBAL_SCOPE_COMMANDS:
+            return "全局", "全局热键：DriFox 在后台或失焦时也能触发（系统级注册）"
+        return "应用内", "应用内快捷键：仅当 DriFox 窗口有焦点时生效"
 
     def _setup_ui(self):
         self.setObjectName("cmdRow")
@@ -455,16 +496,39 @@ class _CommandRow(QFrame):
 
         hly.addStretch(1)
 
+        # 作用域徽标：全局热键在应用外也生效，应用内快捷键只在 DriFox 有焦点时生效。
+        # 不标注会让用户误以为所有键都能全局呼出。
+        scope_text, scope_tooltip = self._scope_badge()
+        if scope_text:
+            scope_lb = QLabel(scope_text, self)
+            scope_lb.setObjectName("cmdRowScope")
+            scope_lb.setStyleSheet(
+                f"color: {_text_color(True)}; font-size: 11px;"
+                f" background: rgba(128,128,128,0.08); border-radius: 4px; padding: 1px 6px;"
+            )
+            scope_lb.setToolTip(scope_tooltip)
+            hly.addWidget(scope_lb)
+
         # 快捷键
         if self._shortcut:
             keys = self._shortcut.replace("+", "  +  ")
             shortcut_lb = QLabel(keys, self)
             shortcut_lb.setObjectName("cmdRowShortcut")
-            shortcut_lb.setStyleSheet(
-                f"color: {_text_color()}; font-size: 12px;"
-                f" background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.12);"
-                f" border-radius: 6px; padding: 2px 10px;"
-            )
+            if self._is_conflict:
+                # 打标记阻止 _retheme 覆盖配色（它按正则重写所有 QLabel 的 color）
+                shortcut_lb.setProperty("keepStyle", True)
+                shortcut_lb.setStyleSheet(
+                    "color: #e05252; font-size: 12px;"
+                    " background: rgba(224,82,82,0.10); border: 1px solid rgba(224,82,82,0.45);"
+                    " border-radius: 6px; padding: 2px 10px;"
+                )
+                shortcut_lb.setToolTip("快捷键冲突：多条命令共用同一按键，全部不会触发")
+            else:
+                shortcut_lb.setStyleSheet(
+                    f"color: {_text_color()}; font-size: 12px;"
+                    f" background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.12);"
+                    f" border-radius: 6px; padding: 2px 10px;"
+                )
         else:
             shortcut_lb = QLabel("—", self)
             shortcut_lb.setObjectName("cmdRowShortcut")
@@ -501,16 +565,27 @@ class _CommandRow(QFrame):
             desc_lb.setWordWrap(True)
             vly.addWidget(desc_lb)
 
-    def update_shortcut(self, shortcut: str, is_customized: bool):
+    def update_shortcut(self, shortcut: str, is_customized: bool, is_conflict: bool = False):
         self._shortcut = shortcut
         self._is_customized = is_customized
+        self._is_conflict = is_conflict
         if shortcut:
             self._shortcut_lb.setText(shortcut.replace("+", "  +  "))
-            self._shortcut_lb.setStyleSheet(
-                f"color: {_text_color()}; font-size: 12px;"
-                f" background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.12);"
-                f" border-radius: 6px; padding: 2px 10px;"
-            )
+            if is_conflict:
+                self._shortcut_lb.setProperty("keepStyle", True)
+                self._shortcut_lb.setStyleSheet(
+                    "color: #e05252; font-size: 12px;"
+                    " background: rgba(224,82,82,0.10); border: 1px solid rgba(224,82,82,0.45);"
+                    " border-radius: 6px; padding: 2px 10px;"
+                )
+                self._shortcut_lb.setToolTip("快捷键冲突：多条命令共用同一按键，全部不会触发")
+            else:
+                self._shortcut_lb.setProperty("keepStyle", False)
+                self._shortcut_lb.setStyleSheet(
+                    f"color: {_text_color()}; font-size: 12px;"
+                    f" background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.12);"
+                    f" border-radius: 6px; padding: 2px 10px;"
+                )
         else:
             self._shortcut_lb.setText("—")
             self._shortcut_lb.setStyleSheet(
@@ -616,6 +691,9 @@ class ShortcutManagerCard(QWidget):
 
         for child in self.findChildren(QLabel):
             try:
+                # 冲突高亮等语义配色不能被主题配色覆写（否则标红失效）
+                if child.property("keepStyle"):
+                    continue
                 offset = self._CMD_ROW_SIZE_OFFSETS.get(child.objectName(), 0)
                 target_fs = max(8, fs + offset) if fs > 0 else 14 + offset
 
@@ -797,6 +875,7 @@ class ShortcutManagerCard(QWidget):
 
         customized = self._get_customized_names()
         fs = getattr(self, "_cached_font_size", 14)
+        conflict_names = _collect_conflict_names(self._all_commands)
 
         filtered = self._all_commands
         if filter_text:
@@ -820,6 +899,7 @@ class ShortcutManagerCard(QWidget):
                 is_plugin=is_plugin,
                 font_size=fs,
                 parent=self._content,
+                is_conflict=name in conflict_names,
             )
             row.edit_clicked.connect(self._on_edit)
             row.restore_clicked.connect(self._on_restore)
@@ -899,6 +979,36 @@ class ShortcutManagerCard(QWidget):
         if cmd_info is None:
             return
 
+        # ── 单键快捷键警告 ──
+        # 无修饰键的键（如 Q）会被本窗口内所有焦点区域争用：输入框里打字通常
+        # 被 QLineEdit 的 ShortcutOverride 吃掉，但在消息区/卡片/侧栏按一下就会
+        # 直接触发命令（截图遮罩、打开面板等），很容易被当成误触。
+        if _is_single_key(key_str):
+            from app.plugins.sdk import ConfirmDialog
+
+            dlg = ConfirmDialog(
+                title="单键快捷键",
+                content=(
+                    f"「{key_str}」没有修饰键。\n\n"
+                    f"它只在 DriFox 窗口有焦点时生效，但在消息区、卡片、侧栏等非输入区域"
+                    f"按一下就会直接触发 /{cmd_name}，容易误触。\n\n"
+                    f"推荐改为 Ctrl/Alt + 字母的组合键。仍要使用「{key_str}」吗？"
+                ),
+                confirm_text="仍要使用",
+                cancel_text="重新设置",
+                parent=self.window(),
+            )
+            single_ok = False
+
+            def _on_single_confirm():
+                nonlocal single_ok
+                single_ok = True
+
+            dlg.confirmed.connect(_on_single_confirm)
+            dlg.exec_()
+            if not single_ok:
+                return
+
         # ── 快捷键冲突检测 ──
         conflicts = _find_conflicts(key_str, self._all_commands, exclude_cmd=cmd_name)
         if conflicts:
@@ -907,7 +1017,11 @@ class ShortcutManagerCard(QWidget):
 
             dialog = ConfirmDialog(
                 title="快捷键冲突",
-                content=(f"快捷键「{key_str}」已被以下命令占用：\n{conflict_names}\n\n仍要分配给 /{cmd_name} 吗？"),
+                content=(
+                    f"快捷键「{key_str}」已被以下命令占用：\n{conflict_names}\n\n"
+                    f"同一按键绑多条命令时 Qt 判定为歧义，两条都不会触发。\n"
+                    f"仍要分配给 /{cmd_name} 吗？（将清空对方的绑定）"
+                ),
                 confirm_text="覆盖",
                 cancel_text="取消",
                 parent=self.window(),
