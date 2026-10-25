@@ -810,11 +810,15 @@ def sandbox_check_tool(
         # ⚠ 以下三层**不受影响**，必须继续拦截：
         #   ① deny（cacls 等 block 命令）② check_network（外传）③ G31 黑名单
         #   ④ 用户 confirm_prefixes 显式加严（如手动加了 `rm`）—— 用户显式意图优先
+        #   ⑤ **其他判据给出的 confirm**（如 command_safety 的 git clean -fdx /
+        #      git push --force）—— 门控只针对「删除动词」这一层，不得把别人
+        #      独立判定出的 confirm 一并降级（2026-10-25 实测：宽松判据接入后
+        #      `git clean -fdx` 被误降为 allow，破坏性操作在开关关闭时静默执行）。
         # 降级为 ALLOW 后仍会走下方 check_network，故外传层不会因此漏判。
         if (
             verdict == CONFIRM
             and not cfg.get("delete_protection")
-            and is_delete_command(command)
+            and bool(_find_delete_command_spans(command))
             and not _matches_any_prefix(command, cfg.get("command.confirm_prefixes"))
         ):
             verdict = ALLOW
@@ -918,6 +922,43 @@ _DELETE_FLAGS = {"-r", "-rf", "-f", "-fr", "-d", "-rd", "-recursive", "/s", "/q"
 # 里的工作目录当成删除目标整个 move 进垃圾箱。
 _SHELL_SEPARATORS = frozenset({"&&", ";", "|", "||", "&", "|&", ";;"})
 
+# ── 命令位判定（2026-10-25 误搬事故）──
+# 背景：删除目标提取原先「逐 token 全扫」，只要任一 token 是 rm/del/ri 就当成
+# 删除命令，其后所有 token 全当删除目标。实测误搬（目标真实存在即被 move）：
+#   git rm -r --cached app          → 只脱离索引，整个 app 被搬进垃圾桶
+#   git commit -m "fix: rm cache"   → commit message 里的 rm，app 被搬
+#   grep -rn "rm" src/ tests/       → 引号里的 rm，tests/ 被搬
+#   ls rm build / pip install del   → 参数位的动词，build 被搬
+# 结论：**只有命令位（段首 / 包装器载荷 / find -exec 之后）的删除动词才算数**，
+# 引号内容只有作为壳命令载荷时才当代码看。
+#
+# 命令位包装器：段首命中时真实命令在其后（跳过 flag 与取值）
+_COMMAND_PREFIX_WRAPPERS = frozenset(
+    {
+        "sudo", "doas", "env", "command", "builtin", "exec", "nohup",
+        "xargs", "busybox", "wsl", "start", "runas",
+        "cmd", "powershell", "pwsh", "bash", "sh", "zsh", "dash", "fish",
+        # 字符串求值器：载荷本身就是命令（eval "rm -rf x" / iex "Remove-Item x"）
+        "eval", "iex", "invoke-expression",
+    }
+)
+# for/while/until 循环头：其后的 do 之后是命令位
+_LOOP_KEYWORDS = frozenset({"for", "while", "until"})
+_LOOP_BODY_KEYWORDS = frozenset({"do", "then"})
+# 包装器的「取值型」flag（其后紧跟的值不是命令）。
+# ⚠ 不得加入 -c/-e/-o/-p 等载荷 flag：那些 flag 之后紧邻的就是载荷本身。
+_WRAPPER_VALUE_FLAGS = frozenset(
+    {"-u", "--user", "-g", "--group", "-n", "--max-args", "-i", "--replace", "-p", "--max-procs", "-s", "--signal"}
+)
+# find 的内嵌命令动作 flag：其后第一个非 flag token 是命令
+_FIND_EXEC_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# find -exec 的命令终止符（既不是参数也不该被搬）
+_FIND_EXEC_TERMINATORS = frozenset({"{}", "+", ";", "\\;"})
+# 不落盘的删除 flag：命令只改索引/只预演，磁盘文件不动，垃圾桶绝不该动它
+_NO_DISK_DELETE_FLAGS = frozenset({"--cached", "--dry-run"})
+# 解壳递归深度上限（sudo bash -c ... 嵌套）
+_MAX_UNWRAP_DEPTH = 4
+
 
 # 命令分词：shlex.split(posix=True) 会吞掉 Windows 反斜杠
 # （C:\\tmp\\a.txt → C:tmpa.txt）导致快照路径失真，故用正则分词：
@@ -930,6 +971,58 @@ def _split_tokens(command: str) -> list:
     if not command:
         return []
     return _TOKEN_PATTERN.findall(command)
+
+
+# shell 连接符（按长度降序，保证 && 先于 & 匹配）
+_EXPLODE_SEPS = (";;", "&&", "||", "|&", ";", "|", "&")
+
+
+def _explode_separators(tokens: list) -> list:
+    """把紧贴路径的连接符拆成独立 token（``a.txt&&rm`` → ``a.txt`` / ``&&`` / ``rm``）
+
+    分词器按空白切，``rm a.txt&&rm b.txt`` 里 ``a.txt&&rm`` 是单个 token，
+    导致两个后果（2026-10-25 实测）：
+    - 前一个 ``rm`` 的参数解析成 ``a.txt&&rm`` → ``a.txt`` 既不进 existing 也不进
+      missing，**目标静默丢失**；
+    - 后一个 ``rm`` 根本不在命令位，``b.txt`` 也丢。
+
+    引号内整段保留（引号里的 ``;``/``&&`` 是数据不是分隔符）。
+    ``&`` 后紧跟数字 / ``-`` / ``>`` 时是 fd 复制（``2>&1`` / ``>&-`` / ``&>f``），
+    不拆。
+    """
+    out: list = []
+    for tok in tokens:
+        stripped = tok.strip()
+        if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "\"'":
+            out.append(tok)
+            continue
+        buf = ""
+        i = 0
+        n = len(stripped)
+        while i < n:
+            matched = ""
+            for sep in _EXPLODE_SEPS:
+                if stripped.startswith(sep, i):
+                    matched = sep
+                    break
+            if matched:
+                nxt = stripped[i + len(matched)] if i + len(matched) < n else ""
+                # & 的 fd 复制/重定向形态不拆
+                if matched == "&" and (nxt.isdigit() or nxt in ("-", ">")):
+                    buf += matched
+                    i += 1
+                    continue
+                if buf:
+                    out.append(buf)
+                    buf = ""
+                out.append(matched)
+                i += len(matched)
+                continue
+            buf += stripped[i]
+            i += 1
+        if buf:
+            out.append(buf)
+    return out
 
 
 def _strip_quotes(token: str) -> str:
@@ -966,13 +1059,159 @@ def _resolve_cmd_path(item: str, workdir: Optional[Path] = None) -> Path:
     return p
 
 
-def _find_delete_command_spans(command: str) -> list:
-    """定位命令中每个删除命令名 token 的位置，返回 [(起始token索引, [(子token索引...)], ...)]
+def _head_of(token: str) -> str:
+    """token 归一化成命令名：去引号、去路径前缀、去 .exe、小写"""
+    name = _strip_quotes(token).lower().replace("\\", "/").split("/")[-1]
+    return name[:-4] if name.endswith(".exe") else name
 
-    返回结构：每个删除动词一条记录 ``(动词 token 索引, 其参数 token 索引列表)``。
+
+def _skip_wrapper_flags(tokens: list, start: int) -> Optional[int]:
+    """从 start 起跳过 flag（含取值）与环境变量赋值，返回其后第一个 token 索引
+
+    只跳「包装器自身的选项」，跳到第一个非 flag token 即停 —— 那个 token
+    才是真实命令（``sudo -u root rm -rf x`` 里的 ``rm``）。
+
+    flag 判定含 Windows 形态 ``/c`` / ``/k``（cmd 用斜杠），但 ``/tmp/x`` 这类
+    形似路径的 token 不算 flag（``_looks_like_path`` 判据）。
+    """
+    n = len(tokens)
+    i = start
+    while i < n:
+        inner = _strip_quotes(tokens[i])
+        low = inner.lower()
+        if not low:
+            i += 1
+            continue
+        if low in _SHELL_SEPARATORS:
+            return None
+        # env 形态的前置赋值（env FOO=bar rm x）：不是命令
+        if "=" in low and not low.startswith(("-", "/")) and "\\" not in low and "/" not in low:
+            i += 1
+            continue
+        is_flag = low.startswith("-") or (low.startswith("/") and not _looks_like_path(inner))
+        if is_flag:
+            i += 2 if low in _WRAPPER_VALUE_FLAGS else 1
+            continue
+        return i
+    return None
+
+
+# git 全局选项（其后跟一个值），用于定位子命令位置
+_GIT_GLOBAL_VALUE_FLAGS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
+_GIT_HEADS = frozenset({"git", "git.exe"})
+
+
+def _command_positions(tokens: list) -> set:
+    """返回段内处于「命令位」的 token 索引集合
+
+    命令位的定义：段首、shell 连接符之后、命令位包装器之后（sudo/xargs/
+    cmd -c/powershell -c/... 的第一个非 flag token）、find 的 -exec 之后、
+    ``git`` 的子命令位（``git rm`` 的 ``rm``）。
+
+    这条判定是 2026-10-25 误搬事故的修法核心：**参数位出现的 rm/del 不算
+    删除命令**。若不做区分，下面这些只读命令都会把后面的路径搬进垃圾桶：
+    ``grep -rn "rm" src/ tests/``、``ls rm build``、``uv pip install del build``、
+    ``git diff rm app``、``git commit -m "fix: rm cache"``。
+    """
+    positions: set = set()
+    expect = True  # 下一个非 flag token 应处于命令位
+    i = 0
+    n = len(tokens)
+    while i < n:
+        raw = tokens[i]
+        inner = _strip_quotes(raw)
+        low = inner.lower()
+        if not low:
+            i += 1
+            continue
+        if low in _SHELL_SEPARATORS:
+            expect = True
+            i += 1
+            continue
+        # find -exec/-execdir/-ok：其后第一个非 flag、非终止符 token 是命令
+        if low in _FIND_EXEC_FLAGS:
+            j = i + 1
+            while j < n:
+                cand = _strip_separators(_strip_quotes(tokens[j]))
+                if cand and cand.lower() not in _FIND_EXEC_TERMINATORS and not cand.startswith("-"):
+                    i = j
+                    expect = True
+                    break
+                j += 1
+            else:
+                i += 1
+                expect = False
+            continue
+        if expect:
+            head = _head_of(low)
+            if head in _LOOP_KEYWORDS or low in _LOOP_BODY_KEYWORDS:
+                # for f in *.txt; do rm "$f"; done —— do/then 后是命令位
+                i += 1
+                expect = True
+                continue
+            if head in _COMMAND_PREFIX_WRAPPERS:
+                j = _skip_wrapper_flags(tokens, i + 1)
+                if j is not None:
+                    # j 本身可能是包装器（sudo bash -c ...），回到循环再判一次
+                    i = j
+                    expect = True
+                    continue
+                i += 1
+                expect = False
+                continue
+            if head in _GIT_HEADS:
+                # git 的子命令位也是命令位（`git rm` 的 rm 真删工作区文件）；
+                # 跳过全局选项（-C <path> / -c k=v / --git-dir=...）后定位子命令
+                j = i + 1
+                while j < n:
+                    cand = _strip_quotes(tokens[j])
+                    if cand in _GIT_GLOBAL_VALUE_FLAGS:
+                        j += 2
+                        continue
+                    if cand.startswith("-"):
+                        j += 1
+                        continue
+                    break
+                if j < n and _strip_quotes(tokens[j]).lower() not in _SHELL_SEPARATORS:
+                    positions.add(i)  # git 自身也是命令位
+                    positions.add(j)
+                    i = j + 1
+                    expect = False
+                    continue
+                i += 1
+                expect = False
+                continue
+            positions.add(i)
+            expect = False
+        # 紧贴路径的连接符（`a.txt;` / `b.txt&&`）→ 本 token 是最后一段参数
+        if _has_trailing_separator(raw):
+            expect = True
+        i += 1
+    return positions
+
+
+def _payload_inner_has_delete(token: str) -> bool:
+    """引号包裹的壳载荷内部是否存在命令位删除动词
+
+    仅用于「已经是命令位的壳载荷 token」这一种形态 —— 引号出现在普通参数位
+    （``grep "rm -rf" app/``）时整段根本不是命令位，不会走到这里。
+    """
+    inner = _strip_quotes(token)
+    inner_tokens = _split_tokens(inner)
+    if len(inner_tokens) < 2:
+        return False
+    for idx in _command_positions(inner_tokens):
+        if _head_of(inner_tokens[idx]) in DELETE_COMMANDS:
+            return True
+    return False
+
+
+def _find_delete_command_spans(command: str, _depth: int = 0) -> list:
+    """定位命令中每个**命令位**删除动词，返回 [(动词 token 索引, 参数 token 索引列表)]
+
     ``arg_idxs`` 为 ``-1`` 表示「参数在动词 token 自身内部」——壳命令包裹形态
     （``powershell -c "Remove-Item -Recurse x"``）里整条子命令是一个 token，
-    参数不在后续 token 中，由 ``_delete_arg_tokens`` 就地拆解。
+    参数不在后续 token 中，由 ``_delete_arg_tokens`` 递归拆解。
 
     参数边界按 shell 连接符切分：``&&``、``;``、``|``、``||``、``&`` 之后属于
     下一条命令，不属于本删除命令；遇到即停。这条边界是 2026-10-24 事故的直接教训：
@@ -981,41 +1220,41 @@ def _find_delete_command_spans(command: str) -> list:
     整个 move 进垃圾箱（工作目录消失）。
 
     ⚠ 分词器不切分紧贴路径的连接符（``rm a.txt; cd x`` 里 ``a.txt;`` 是单个
-    token），故取参数前先剥掉 token 首尾的连接符——否则 ``;`` 之后那条命令的
-    路径会漏进本命令的参数列表（2026-10-24 回归用例实测）。
+    token），故解析前先跑 `_explode_separators` 把连接符拆成独立 token。
+    不拆的后果是双重的（2026-10-25 实测）：``rm a.txt&&rm b.txt`` 里前一个
+    参数解析成 ``a.txt&&rm``（目标丢失）、后一个 ``rm`` 不在命令位（``b.txt``
+    也丢），两个待搬目标全部漏掉。
+
+    ⚠ 只认命令位（见 ``_command_positions``）。2026-10-25 实测的误搬集合全部
+    来自「参数位也认」：``git rm --cached app``（只脱离索引）、
+    ``git commit -m "fix: rm cache"``（提交信息）、``grep -rn "rm" src/ tests/``
+    （搜索词）、``ls rm build``（参数）。删除动词出现在参数位时不是删除命令。
+
+    ⚠ ``--cached`` / ``--dry-run`` 的 span 整条丢弃：命令只改索引或只预演，
+    磁盘文件不动，垃圾桶绝不能搬。
     """
-    tokens = _split_tokens(command or "")
+    tokens = _explode_separators(_split_tokens(command or ""))
     spans: list = []
-    for idx, token in enumerate(tokens):
-        inner = _strip_quotes(token)
-        lowered = inner.lower()
-        # 引号内可能是完整子命令（powershell -c "Remove-Item x"），逐子词再判一次
-        is_delete = lowered in DELETE_COMMANDS
-        wrapped = False
-        if not is_delete:
-            for sub in inner.split():
-                head = sub.lower().replace("\\", "/").split("/")[-1]
-                if head in DELETE_COMMANDS:
-                    is_delete = True
-                    wrapped = True
+    for idx in sorted(_command_positions(tokens)):
+        head = _head_of(tokens[idx])
+        if head in DELETE_COMMANDS:
+            arg_idxs: list = []
+            for j in range(idx + 1, len(tokens)):
+                raw_next = tokens[j]
+                if _strip_quotes(raw_next) in _SHELL_SEPARATORS:
                     break
-        if not is_delete:
-            continue
-        if wrapped:
-            # 参数在 token 内部，由 _delete_arg_tokens 就地拆
-            spans.append((idx, [-1]))
-            continue
-        arg_idxs: list = []
-        for j in range(idx + 1, len(tokens)):
-            raw_next = tokens[j]
-            if _strip_quotes(raw_next) in _SHELL_SEPARATORS:
-                break
-            # 紧贴路径的连接符（a.txt; / b.txt&&）→ 本 token 是最后一个参数，到此为止
-            if _has_trailing_separator(raw_next):
+                # 紧贴路径的连接符（a.txt; / b.txt&&）→ 本 token 是最后一个参数，到此为止
+                if _has_trailing_separator(raw_next):
+                    arg_idxs.append(j)
+                    break
                 arg_idxs.append(j)
-                break
-            arg_idxs.append(j)
-        spans.append((idx, arg_idxs))
+            # 不落盘的删除（git rm --cached / --dry-run）：候选保留供展示与豁免
+            # 判定，但垃圾桶层（stash_delete_targets_to_trash）绝不搬它们
+            spans.append((idx, arg_idxs))
+            continue
+        # 命令位的壳载荷（powershell -c "Remove-Item x"）：内部再按命令位判一次
+        if _depth < _MAX_UNWRAP_DEPTH and _payload_inner_has_delete(tokens[idx]):
+            spans.append((idx, [-1]))
     return spans
 
 
@@ -1043,20 +1282,48 @@ def _strip_separators(token: str) -> str:
     return out
 
 
+def _dotnet_delete_segments(command: str) -> list:
+    """含 .NET IO Delete 调用的语句段，以及它**之前**的变量赋值段
+
+    目标常以 ``$p='D:/x'`` 先赋值、再传给 ``::Delete($p)``，赋值语句在 Delete
+    语句之前，所以必须向前纳入 —— 但只纳入形如「变量赋值」的段（段内无空格前
+    的 token 含 ``=``），否则 ``cd "D:/work" && …::Delete($p)`` 里的工作目录会
+    被当目标。Delete 之后的语句一律不取：``…::Delete($p); Get-ChildItem D:/work``
+    的 ``D:/work`` 与删除无关。
+    """
+    segments = _split_segments(command or "")
+    last = -1
+    for idx, seg in enumerate(segments):
+        if _DOTNET_DELETE_PATTERN.search(seg):
+            last = idx
+    if last < 0:
+        return []
+    picked: list = []
+    for seg in segments[: last + 1]:
+        if _DOTNET_DELETE_PATTERN.search(seg):
+            picked.append(seg)
+            continue
+        head = seg.strip().split(maxsplit=1)[0] if seg.strip() else ""
+        if "=" in head and not head.startswith(("-", "/")):
+            picked.append(seg)
+    return picked
+
+
 def _delete_arg_tokens(command: str) -> list:
     """取出所有删除命令的参数 token（不含动词本身、不含后续命令）
-
-    命令里没有可定位的删除动词（如仅靠 .NET Delete 模式命中的形态）时，
-    退化为「除 shell 分隔符外全部 token」——.NET 形态的目标藏在变量/括号里，
-    只能靠全局候选兜底。
 
     壳命令包裹形态（``powershell -c "Remove-Item -Recurse x"``）里参数与动词
     同在一个 token，此处就地按空白拆开、丢掉动词本身，其余作为参数返回。
 
     每个 token 先剥掉首尾连接符（``a.txt;`` → ``a.txt``），否则带分号的路径
     解析出来会是个不存在的怪路径。
+
+    ⚠ 无命令位 span 时**只在 .NET Delete 形态下退化为引号路径候选**，且限定在
+    含 Delete 调用的那条语句内。旧实现在任何「找不到动词」的情况都返回全命令
+    的 token，等于把无关路径也当删除目标 —— ``powershell -c "[IO.File]::Delete($p);
+    Get-ChildItem D:/work"`` 会连 ``D:/work`` 一起搬。
     """
-    tokens = _split_tokens(command or "")
+    tokens = _explode_separators(_split_tokens(command or ""))
     spans = _find_delete_command_spans(command)
     if spans:
         picked: list = []
@@ -1076,16 +1343,24 @@ def _delete_arg_tokens(command: str) -> list:
                     seen_idx.add(j)
                     picked.append(tokens[j])
         return [_strip_separators(t) for t in picked if _strip_separators(t)]
-    return [
-        t for t in tokens if _strip_quotes(t) not in _SHELL_SEPARATORS and _strip_separators(t)
-    ]
+    # .NET 形态：目标藏在 $var / 括号里，只能取该语句内的引号路径
+    picked = []
+    for seg in _dotnet_delete_segments(command):
+        for tok in _split_tokens(seg):
+            picked.extend(_extract_quoted_paths(tok))
+    return picked
 
 
 def delete_targets(command: str, workdir: Optional[Path] = None) -> dict:
-    """解析删除命令的目标路径（供审批展示与豁免判定共用）
+    """解析删除命令的目标路径（供审批展示与垃圾桶共用）
 
     只取**删除命令自身的参数**作为候选（见 ``_delete_arg_tokens``）：命令里的
     ``cd <目录>`` 前缀、管道前一端的路径、``&&`` 之后的其他命令参数都不再被当目标。
+
+    ⚠ 前置判定用 `is_trash_delete_command`（严格）：目标解析不出来时返回空，
+    垃圾桶就不会搬任何东西。这里若用宽松判据，``find -delete`` 这类无法静态
+    定位目标的命令会走到「找不到目标」分支，而旧实现的兜底会把命令里所有
+    存在的 token 当目标 —— 正是误搬的来源。
 
     Returns:
         {"existing": [Path, ...], "missing": [str, ...]}——
@@ -1093,7 +1368,10 @@ def delete_targets(command: str, workdir: Optional[Path] = None) -> dict:
         （两者均为**按 workdir 解析后**的绝对路径；相对目标不再按进程 cwd 失真）
     """
     result: dict = {"existing": [], "missing": []}
-    if not is_delete_command(command):
+    # 严格判据（命令位动词）→ 走常规解析；
+    # .NET 形态（目标藏在变量里）单独解析：它的目标**不供垃圾桶搬**（stash 用
+    # is_trash_delete_command 拒绝），但审批展示与盘根硬拒仍需知道目标是谁。
+    if not is_trash_delete_command(command) and not _DOTNET_DELETE_PATTERN.search(command):
         return result
     seen: set = set()
     for token in _delete_arg_tokens(command):
@@ -1107,7 +1385,11 @@ def delete_targets(command: str, workdir: Optional[Path] = None) -> dict:
         # 另提取 $var='path' 赋值形态的引号内路径（.NET Delete 变体目标）
         candidates = _split_tokens(raw) if " " in raw.strip() else [raw]
         candidates = candidates + _extract_quoted_paths(raw)
-        for item in candidates:
+        # glob 展开：`rm *.pyc` 要搬的是匹配到的那几个文件，不是字面量 `*.pyc`
+        expanded: list = []
+        for cand in candidates:
+            expanded.extend(_expand_glob_target(_strip_quotes(cand), workdir))
+        for item in expanded:
             item = _strip_quotes(item)
             if not item or item.lower() in DELETE_COMMANDS or item.lower() in _DELETE_FLAGS:
                 continue
@@ -1180,25 +1462,210 @@ def delete_exempt(command: str, cfg: Optional[SandboxConfig] = None, workdir: Op
 
 
 def is_delete_command(command: str) -> bool:
-    """是否删除类命令（含壳命令包裹形态与 .NET IO Delete 调用形态）
+    """是否删除类命令 —— **审批层判据（宽松）**
 
-    保守判定：任一 token（含引号内内容后再拆一次）命中删除命令名即算
-    （git rm / powershell -c Remove-Item 均覆盖）；误报方向是「多问一次」。
+    用途：审批升档（`sandbox_check_tool` 的删除保护门控）、审批卡来源与风险
+    档位、UI 展示。这里**宁可多认**：多认一次只是多弹一次审批，漏认则是真删除
+    静默执行。
+
+    覆盖：
+    - 命令位删除动词（``rm`` / ``del`` / ``Remove-Item`` / ``git rm`` / 壳载荷）
+    - .NET IO Delete 调用形态
+    - ``find -delete`` / ``find -exec rm``
+    - 解释器内删除（``python -c "shutil.rmtree(...)"`` / ``node -e "fs.rmSync"``）
+    - 其他真删工具（``shred`` / ``srm`` / ``truncate -s 0`` / ``git clean -fdx``）
+
+    ⚠ 与之对应的是 `is_trash_delete_command`（严格判据，供垃圾桶用）。两者
+    不可合并：垃圾桶误判 = 把无关文件搬走（2026-10-25 实测多起事故）；审批
+    误判 = 多问一次。方向相反，共用一份判定必有一端出错。
     """
     if not command:
         return False
+    if _find_delete_command_spans(command):
+        return True
     if _DOTNET_DELETE_PATTERN.search(command):
         return True
-    for token in _split_tokens(command):
-        inner = _strip_quotes(token)
-        if inner.lower() in DELETE_COMMANDS:
+    return _has_soft_delete_signal(command)
+
+
+# find 的 -delete 动作（无删除动词，但真删文件）
+_FIND_DELETE_FLAG = "-delete"
+# 解释器载荷内删除特征：命中即视为删除命令（无法静态解析变量，只能按特征）
+# ⚠ 全部按**小写**比较（调用方已 lowered）。node 侧不写 "fs.rm"：
+#   `require('fs').rmSync(...)` 里模块名与方法名被 `).` 隔开，只有
+#   `.rmsync(` / `.rmdirsync(` 这种**方法调用形态**才命得中（实测漏判两次）。
+_INTERPRETER_DELETE_TOKENS = (
+    "shutil.rmtree",
+    "os.remove",
+    "os.unlink",
+    "os.rmdir",
+    "path.unlink",
+    ".unlink(",
+    "fs.rmsync",
+    "fs.rm(",
+    "fs.rmdir",
+    "fs.unlinksync",
+    ").rmsync(",
+    ").rmdirsync(",
+    ").unlinksync(",
+    "rimraf",
+    "remove-item",
+    "ri ",
+)
+# 其他真删磁盘文件的命令（词表外，但破坏不可逆）
+_EXTRA_DELETE_HEADS = frozenset({"shred", "srm", "wipe", "erase"})
+# 条件删除型 git 子命令（需配合破坏性 flag，见 _has_soft_delete_signal）
+_GIT_CLEAN_SUBCOMMAND = "clean"
+
+
+def _has_soft_delete_signal(command: str) -> bool:
+    """宽松删除信号：处理「没有删除动词但确实删文件」的形态
+
+    只供审批层使用（`is_delete_command`）。垃圾桶不采样本函数 —— 这些形态
+    目标藏在 glob / 变量 / 管道里，无法安全定位要搬什么，硬搬只会误伤。
+    """
+    lowered = command.lower()
+    tokens = _split_tokens(command)
+    # find -delete
+    if any(_strip_quotes(t).lower() == _FIND_DELETE_FLAG for t in tokens):
+        return True
+    # 解释器/脚本载荷内的删除调用
+    if _interpreter_payload_like(command) and any(tok in lowered for tok in _INTERPRETER_DELETE_TOKENS):
+        return True
+    # 其他真删工具（段首才认，避免 `grep shred` 误报）
+    for idx in _command_positions(tokens):
+        head = _head_of(tokens[idx])
+        if head in _EXTRA_DELETE_HEADS:
             return True
-        # 引号内可能是完整子命令（powershell -c "Remove-Item x"）
-        for sub in inner.split():
-            head = sub.lower().replace("\\", "/").split("/")[-1]
-            if head in DELETE_COMMANDS:
+    # git clean -f/-x/-d 会真删未跟踪文件
+    if _git_clean_forced(tokens):
+        return True
+    # truncate 截断为 0 字节等价删除内容
+    if _truncate_zeroed(tokens):
+        return True
+    return False
+
+
+def _interpreter_payload_like(command: str) -> bool:
+    """命令是否在调用解释器（python -c / node -e / powershell -c …）"""
+    tokens = _split_tokens(command)
+    if not tokens:
+        return False
+    head = _head_of(tokens[0])
+    return head in _COMMAND_PREFIX_WRAPPERS or head in ("python", "python3", "node", "ruby", "perl")
+
+
+def _git_clean_forced(tokens: list) -> bool:
+    """``git clean`` 是否带强制/实际删除 flag（-f/-x/-d 任一，-n 只预演）"""
+    for idx in _command_positions(tokens):
+        if _head_of(tokens[idx]) != _GIT_CLEAN_SUBCOMMAND:
+            continue
+        rest = [_strip_quotes(t).lower() for t in tokens[idx + 1 :]]
+        if "-n" in rest or "--dry-run" in rest:
+            return False
+        if any(t in ("-f", "--force", "-x", "-d") or (t.startswith("-") and not t.startswith("--") and set("fxd") & set(t)) for t in rest):
+            return True
+    return False
+
+
+def _truncate_zeroed(tokens: list) -> bool:
+    """``truncate -s 0 f`` 把文件截成空 = 内容销毁"""
+    for idx in _command_positions(tokens):
+        if _head_of(tokens[idx]) != "truncate":
+            continue
+        rest = [_strip_quotes(t).lower() for t in tokens[idx + 1 :]]
+        for pos, tok in enumerate(rest):
+            if tok == "-s" and pos + 1 < len(rest) and rest[pos + 1] in ("0", "0b", "0k"):
+                return True
+            if tok.startswith("-s") and len(tok) > 2 and tok[2:] in ("0", "0b", "0k"):
                 return True
     return False
+
+
+def is_trash_delete_command(command: str) -> bool:
+    """是否**垃圾桶可安全处理**的删除命令 —— 严格判据
+
+    与 `is_delete_command`（审批宽松判据）的分工：
+
+    | | 误判为删除 | 漏判 |
+    |---|---|---|
+    | 审批层（宽松） | 多弹一次审批，无害 | 真删除静默执行，危险 |
+    | 垃圾桶（严格） | **把无关文件搬走**，危险 | 少一层保护，无害 |
+
+    所以垃圾桶只认「命令位删除动词 + 目标**可静态解析**」的形态：
+    - 不采样 `find -delete` / `git clean -fdx` / 解释器删除 —— 目标藏在 glob、
+      变量、管道里，`delete_targets` 解析出来的是错误路径，硬搬就是误伤
+    - 不采样 .NET Delete —— 目标是 `$p` 变量
+    - 带变量的目标（`rm "$f"`）同样不搬：`$f` 展开后是什么这里算不出来
+
+    注意：`eval "rm -rf build"` 这类**目标仍是字面量**的形态可以搬 —— 判据落在
+    目标是否可解析，而不是命令是否用了求值器。
+    """
+    if not command:
+        return False
+    if not _find_delete_command_spans(command):
+        return False
+    return not _has_unresolvable_target(command)
+
+
+# 目标 token 里的变量/占位特征：出现即无法静态定位（展开结果依赖运行时）
+_UNRESOLVABLE_TARGET_CHARS = ("$", "%")
+# glob 通配特征：可展开成实际路径，垃圾桶能安全处理
+_GLOB_TARGET_CHARS = ("*", "?", "[", "]")
+_UNRESOLVABLE_TARGET_TOKENS = frozenset({"{}", "+", ";", "\\;"})
+
+
+def _has_unresolvable_target(command: str) -> bool:
+    """删除命令是否存在**无法静态解析**的目标（变量 / 占位符）
+
+    有则垃圾桶不敢搬：搬 ``$f`` 会去搬一个字面名为 ``$f`` 的路径（不存在），
+    展开结果与这里算的不同，搬错比不搬更糟。
+
+    注意 glob（``rm *.pyc``）**不算**不可解析：可以用 `glob` 展开成真实路径，
+    垃圾桶照常能搬（见 `delete_targets` 的 glob 分支）。若把 glob 也排除，
+    ``rm -rf *.log`` 这类高频清理就完全失去保护。
+    """
+    tokens = _explode_separators(_split_tokens(command or ""))
+    for verb_idx, arg_idxs in _find_delete_command_spans(command):
+        if arg_idxs == [-1]:
+            # 壳载荷：内部再判一次
+            if _has_unresolvable_target(_strip_quotes(tokens[verb_idx])):
+                return True
+            continue
+        for j in arg_idxs:
+            raw = _strip_quotes(tokens[j])
+            if not raw:
+                continue
+            if raw in _UNRESOLVABLE_TARGET_TOKENS:
+                return True
+            if raw.lower() in _DELETE_FLAGS or raw.startswith(("-", "/")):
+                continue
+            if any(ch in raw for ch in _UNRESOLVABLE_TARGET_CHARS):
+                return True
+    return False
+
+
+def _expand_glob_target(item: str, workdir: Optional[Path]) -> list:
+    """展开 glob 目标为实际路径（`*.pyc` → 逐个匹配文件）
+
+    非 glob 目标原样返回（交给 `_resolve_cmd_path` 解析）。glob 用 `Path.glob`
+    在 workdir 下展开，展开失败/无匹配返回空列表（不搬任何东西，fail-safe）。
+    """
+    if not any(ch in item for ch in _GLOB_TARGET_CHARS):
+        return [item]
+    base = workdir if workdir is not None else _current_workdir()
+    if not base:
+        return []
+    try:
+        pattern = item.replace("\\", "/")
+        # 绝对 glob（D:/x/*.log）与相对 glob 分别处理
+        if Path(pattern).is_absolute():
+            root = Path(Path(pattern).anchor)
+            rel = pattern[len(str(root)) :].lstrip("/")
+            return [str(p) for p in root.glob(rel)]
+        return [str(p) for p in Path(base).glob(pattern)]
+    except (OSError, ValueError):
+        return []
 
 
 def _is_workdir_or_ancestor(target: Path, workdir: Optional[Path] = None) -> bool:
@@ -1228,7 +1695,7 @@ _PROTECTED_ROOT_NAMES = frozenset(
 def _is_protected_root(target: Path) -> bool:
     """target 是否为盘符根（C:\\）或盘根一级系统目录（C:\\Windows 等）
 
-    2026-10-25 事故：验证脚本把 C:\ 喷给 stash，垃圾桶无防护直接
+    2026-10-25 事故：验证脚本把 C:\\ 喷给 stash，垃圾桶无防护直接
     shutil.move('C:\\', ...)，跨盘 move = copytree + rmtree —— 先花了
     33 分钟把 C 盘可读文件全部拷进垃圾桶，再反过来删 C 盘能删的一切。
     这类目标永不进垃圾桶，判定层也应直接 deny。
@@ -1245,13 +1712,43 @@ def _is_protected_root(target: Path) -> bool:
     return False
 
 
+def _contains_trash(target: Path, trash_root: Path) -> bool:
+    """target 是否包含垃圾桶目录（trash_root 位于 target 之内或就是它）
+
+    2026-10-25 补：move 一个包含垃圾桶的目录 = 把它搬进它自己内部，
+    shutil 会走 copytree + rmtree 的退化路径（跨盘或目标已在源内），
+    轻则报错留半份副本，重则递归膨胀。垃圾桶永不该收自己的容器。
+    """
+    try:
+        norm_target = _norm(target)
+        norm_trash = _norm(trash_root)
+        return _under(norm_trash, norm_target)
+    except (OSError, ValueError):
+        return False
+
+
+def _command_skips_disk(command: str) -> bool:
+    """命令是否只改索引/只预演（git rm --cached、各种 --dry-run）
+
+    这类命令不删除磁盘文件，垃圾桶搬走目标反而让用户的文件凭空消失
+    （2026-10-25 实测：`git rm -r --cached app` 把整个 app 目录搬进垃圾桶）。
+    """
+    for token in _split_tokens(command or ""):
+        if _strip_quotes(token).lower() in _NO_DISK_DELETE_FLAGS:
+            return True
+    return False
+
+
 def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], workdir: Optional[Path] = None) -> list:
     """垃圾桶模式：把删除命令的目标**移动**到垃圾箱目录（软删除，可找回）
 
     move 让原路径消失，原命令随后对目标执行时目标已不在
     （rm -f 静默成功）。单个目标移动失败不阻断（该目标由原命令正常删除）。
     """
-    if not is_delete_command(command):
+    if not is_trash_delete_command(command):
+        return []
+    # 只改索引/只预演的命令不碰磁盘（--cached / --dry-run）
+    if _command_skips_disk(command):
         return []
     targets = delete_targets(command, workdir)
     if not targets["existing"]:
@@ -1270,6 +1767,10 @@ def stash_delete_targets_to_trash(command: str, trash_root: Union[str, Path], wo
         # 2026-10-25 实测把 C:\ 搬残）；保护与 workdir 无关，按目标本身判定。
         if _is_protected_root(target):
             logger.warning(f"[Sandbox] 拒绝把盘符根/系统目录移入垃圾桶: {target}")
+            continue
+        # 含垃圾桶自身的目录同样拒绝（否则等于把它搬进它自己内部）
+        if _contains_trash(target, trash_root):
+            logger.warning(f"[Sandbox] 拒绝把包含垃圾桶的目录移入垃圾桶: {target}")
             continue
         try:
             trash_root.mkdir(parents=True, exist_ok=True)
