@@ -2868,8 +2868,45 @@ def _extract_by_regex_fallback(content: str) -> dict:
     return args
 
 
-def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = False, heavy_caps=None) -> str:
-    """注入工具块HTML，类似think块"""
+def _tool_fingerprint(name: str, args: dict) -> str:
+    """工具调用指纹：sha1(name + 规范化 args)。用于协议段与真实已完成工具对账去重。"""
+    try:
+        # orjson：option=OPT_SORT_KEYS，返回 bytes（非标准库 json 签名）
+        payload = str(name or "") + "\x00" + json.dumps(
+            args or {}, default=str, option=json.OPT_SORT_KEYS
+        ).decode("utf-8")
+    except Exception:
+        return ""
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _protocol_block_fingerprint(content: str) -> str:
+    """协议残段指纹：从容错解析 name/args 后算指纹；解析不出 name 返回空串。"""
+    _name_m = _TOOL_NAME_PATTERN.search(content)
+    if not _name_m:
+        return ""
+    name = _name_m.group(1).strip()
+    args = {}
+    _am = re.search(r"^args:\s*(\{.*)$", content, re.MULTILINE)
+    if _am:
+        args = _extract_args_by_regex(_am.group(1))
+    return _tool_fingerprint(name, args)
+
+
+def _inject_tool_blocks(
+    md_text: str,
+    completed: bool = True,
+    compact: bool = False,
+    heavy_caps=None,
+    suppress: frozenset = None,
+) -> str:
+    """注入工具块HTML，类似think块
+
+    Args:
+        suppress: 已完成工具指纹集合（_tool_fingerprint 产物）。未闭合协议段
+            指纹命中时静默丢弃（模型对已完成调用的照抄，渲染出来只会与真实
+            完成块重复）。仅流式渲染路径传入。
+    """
     if not md_text:
         return md_text
 
@@ -2887,21 +2924,25 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
         if end_idx != -1:
             content = md_text[start_idx + len("<tool>") : end_idx]
-            parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
+            # 🐛 协议段防重复（2026-10-25）：无 tool_call_id 字段的闭合块 = 模型
+            # 正文照抄的协议文本（真实工具结果由 worker 写入 markdown，必带 id）。
+            # 渲染成卡会与真实完成块内容重复，且空 id 使去重/清理判据失效、
+            # 每次全量渲染累积一张（probe4 实证终态 3 块）。一律丢弃。
+            if _TOOL_ID_PATTERN.search(content):
+                parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
             i = end_idx + len("</tool>")
         else:
             # 🐛 修复（工具源码泄漏）：未闭合块此前原样保留 → md.convert 把
             # <tool> 当未知 HTML 元素（标签本身不可见），内部 name:/args:/result:
             # 字段文本裸露为正文（截图级症状：name: bash args: {...} result: ...）。
-            # 未闭合来源：模型在正文中输出协议格式文本（讨论工具调用机制时
-            # 模仿上下文格式，流式中 </tool> 未到达）、max_tokens 截断、停止生成。
-            # 🐛 修复（运行框/完成框残留，2026-10-25 截图）：未闭合段此前按到达
-            # 程度渲染——流式渲染「接收中...」占位框、终态容错解析成完成卡。产物
-            # data-tool-call-id 为空串，finish_tool_streaming / append_tool_result
-            # 的按 id 清理永远匹配不到 → 流式期间常驻「工具与思考」区底部与真实
-            # 完成块并存，结束后再留一张破碎容错卡（block_key 一变又多一份）。
-            # 协议残段无实质内容，统一静默丢弃（丢弃同样防源码泄漏）；真实工具的
-            # 运行/完成反馈由 worker 结构化事件 → JS 注入链路负责，不依赖 md 占位。
+            # 未闭合来源：模型在正文中输出协议格式文本（glm 等中转把工具调用以
+            # 协议文本嵌在 content 里流式返回）、max_tokens 截断、停止生成。
+            # 🐛 流式中间态渲染「接收中...」占位框：worker 在中转解析下发
+            # tool_calls 之前不发任何工具信号，此占位是「模型正在调用工具」的
+            # 唯一运行指示（2026-10-25 用户实测：删除后运行期完全无框）。
+            # 残段指纹命中 suppress（同名同参工具已完成）→ 是模型对已完成调用
+            # 的照抄，静默丢弃防与真实完成块重复。终态一律丢弃：流式结束不留
+            # 残段卡（旧设计的终态容错卡正是「完成框残留」的来源）。
             # fence 内示例由 _extract_fenced_code 保护，不进入本分支。
             # 🐛 防御（审查 I-1，吞正文）：范围截断到下一个 <tool> 开标签（嵌套/
             # 后续块不得混入）；剩余段递归走同一逻辑（每轮至少消费一个开标签，
@@ -2911,8 +2952,20 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
             _rest = ""
             if _next_open != -1:
                 _rest = content[_next_open:]
+            if not completed and content.strip():
+                _fp = _protocol_block_fingerprint(content)
+                if not (suppress and _fp and _fp in suppress):
+                    _name_m = _TOOL_NAME_PATTERN.search(content)
+                    parts.append(
+                        _render_tool_streaming_block(
+                            tool_call_id="",
+                            tool_name=_name_m.group(1).strip() if _name_m else "",
+                            preview="接收中...",
+                            completed=False,
+                        )
+                    )
             if _rest:
-                parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps))
+                parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps, suppress))
             break
     return "".join(parts)
 
@@ -3289,7 +3342,9 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, False, compact=compact)
+    processed_md = _inject_tool_blocks(
+        processed_md, False, compact=compact, suppress=snapshot.get("tool_fingerprints")
+    )
     processed_md = _inject_hook_blocks(processed_md, False)
     processed_md = _inject_tag_cards(processed_md, False, compact=compact)
     processed_md = _restore_fenced_code(processed_md, _fences)

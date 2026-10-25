@@ -435,10 +435,15 @@ def test_render_stable_segment_code_block_with_protocol_tags_renders_as_code():
 
 
 def test_render_full_pipeline_code_block_with_tool_tag_no_card():
-    """全量渲染管线同样受保护：正文含 <tool> 正常渲染卡片，代码内 <tool> 不渲染。"""
+    """全量渲染管线：正文真实 <tool>（带 id）正常渲染卡片，代码内 <tool> 不渲染。
+
+    2026-10-25 起：无 tool_call_id 的闭合协议段（模型正文照抄）不渲染卡，
+    真实块必须带 id（worker 写入格式）。
+    """
     md = (
         "<tool>\n"
         '{"name": "real_tool"}\n'
+        "tool_call_id: call_real_1\n"
         "</tool>\n"
         "\n"
         "真实工具调用。\n"
