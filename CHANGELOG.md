@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.11] - 2026-10-25 (重新发布 #5)
+## [v0.6.11] - 2026-10-25 (重新发布 #6)
 
-自 v0.6.10 以来的变更 | 提交数：68 · 文件变更：165 · +15856/-2048 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.10 以来的变更 | 提交数：69 · 文件变更：179 · +17600/-2260 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -84,6 +84,10 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes)（重新发布 #5 追加）
 
 - **mcp-oauth：授权假成功与 handler 泄漏导致的 state mismatch 连环失败** (`7fc652f4`): 根因链：callback_handler 在 token 交换前置 done 掩盖交换失败（Apify invalid_client 仍报授权成功）；`_run_authorization` patch 的 redirect/callback handler 从不恢复，泄漏给连接流程的 SDK OAuth；CallbackServer event/result 残留旧回调，泄漏 handler 的 wait() 秒回过期 state，State parameter mismatch 必现。修复：done 只在 drive() 流程真正收尾时置位；handler patch 前保存、finally 恢复；close() 清 result/event。另：`token_endpoint_auth_method` 可经 `.mcp.json` auth 段声明（Apify DCR 不回显该字段致 token 交换缺 secret 报 invalid_client，声明 none 绕开）。测试 `tests/core/test_mcp_oauth.py` 扩展覆盖。
+
+### ♻️ 代码重构 (Refactoring)（重新发布 #6 追加）
+
+- **assistant_hub 记忆体系重构：全局记忆分区 + 写入纪律分层** (`afc57e95` · `plugins/assistant_hub/core/memory/store.py` · `core/memory/prompts.py` · `tools/memory_tools.py` · `ui/sections.py` · `ui/assistant_card.py` · `assistant_manager.py` · `app/main_widget.py` · `tests/plugins/assistant_hub/test_memory_sections.py` 新增 274 例): ①全局记忆支持自定义分区：`memory_sections.json` 持久化（空 schema = 自由格式），`store` 侧补齐 `load_sections`/`save_sections`/`default_sections`/`ensure_default_sections`/`sections_prompt_text`/`section_skeleton`/`parse_section_blocks`/`validate_global_sections`/`insert_into_section`/`rename_section_title` 一组原语；`memory_write(scope=global)` 按分区校验（append 必带 section、replace 校验 `##` 标题齐全、dry_run 只校验不落盘），全删条目留 `##` 头视为合法、不锁死门禁；分区改名同步标题，删分区留孤儿条目下次重分配。②全局记忆写入纪律写进系统提示：明确「该进四类 / 不该进三类 + 边界判据（工具坑 vs 业务规则）」，换项目不成立的内容一律下沉项目记忆，纠正此前项目架构与业务规则误写进全局记忆的错层。③记忆分区 UI：分区名+用途可编辑、未定义分区时提示「用默认分区」播种；经验区去掉孤立的 `reflectRequested` 与反思按钮，整理统一走对话提示词。④`app/main_widget.py` 话题总结加短输入守卫：首条用户输入 ≤10 字直接用原文当标题，不再起 LLM 任务（>10 字才总结），提取逻辑与 `TopicSummaryTask._fallback_user_question` 对齐（多模态取 text 段、跳过未打标任务邮件）。⑤plugin.json 补 `input.read` / `input.write` 能力声明。
 
 ## [v0.6.10] - 2026-10-20 (重新发布 #8)
 
