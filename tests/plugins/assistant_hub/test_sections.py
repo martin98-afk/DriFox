@@ -153,7 +153,7 @@ def test_experience_section_toggle_hides_body(qtbot=None):
 
 def test_experience_section_has_no_reflect_button(qtbot=None):
     """反思整理已移除：经验整理统一走对话提示词（压缩整理 → input.write）。"""
-    from PyQt5.QtWidgets import QPushButton
+    from PySide6.QtWidgets import QPushButton
 
     s = sections.ExperienceSection()
     texts = [b.text() for b in s.findChildren(QPushButton)]

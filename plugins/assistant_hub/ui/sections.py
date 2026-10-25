@@ -248,7 +248,7 @@ class _RowItem(QFrame):
     `hide_tail` 让尾部操作默认隐形、悬停才出现（删除这类危险操作不该常驻抢眼）。
     """
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, title: str, desc: str = "", primary: bool = True, parent=None):
         super().__init__(parent)
@@ -332,8 +332,8 @@ class _SectionChip(QFrame):
     默认隐藏（悬停可见），不与名称抢位。介绍容忍 3 行（多行输入），超长靠 tooltip 补全。
     """
 
-    clicked = pyqtSignal()
-    deleteRequested = pyqtSignal()
+    clicked = Signal()
+    deleteRequested = Signal()
 
     W = 168
     H = 104
@@ -415,7 +415,7 @@ class _SectionChip(QFrame):
 class _NewSectionChip(QFrame):
     """「新增分区」卡：虚线边框 + 加号，与分区卡同尺寸排在同一行。"""
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -466,7 +466,7 @@ class _MetaBar(QLabel):
     摘要文本由调用方组装（记忆区唯一知道数据来源的地方在 assistant_card）。
     """
 
-    limitClicked = pyqtSignal()
+    limitClicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1274,7 +1274,7 @@ class SectionEditDialog(MaskDialogBase):
     介绍不是装饰文字：它会被注入蒸馏指令，指导模型整理时往这个分区关注什么内容。
     """
 
-    confirmed = pyqtSignal(str, str)
+    confirmed = Signal(str, str)
 
     _INPUT_QSS = MemoryLimitDialog._INPUT_QSS
 
@@ -1728,7 +1728,6 @@ class ExperienceSection(_Section):
     viewCategory = Signal(str)
     deleteCategoryRequested = Signal(str)
     consolidateRequested = Signal()
-    reflectRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__("经验", parent)
