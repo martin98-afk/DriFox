@@ -4,11 +4,9 @@ import math
 import os
 import random
 import re
-import tempfile
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
@@ -65,7 +63,7 @@ from qfluentwidgets import (
 from app.widgets.stop_button import SendStopButton
 
 from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token
-from app.utils.utils import get_font_family_css
+from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.widgets.simple_hover_tooltip import (
     get_hover_filter,
     install_hover_tooltip,
@@ -1946,7 +1944,10 @@ class SendableTextEdit(TextEdit):
                     # QPixmap（未走系统 CF_DIB 转换）；外部进程截图则为 QImage。
                     img = img.toImage()
                 if isinstance(img, QImage) and not img.isNull():
-                    tmp_dir = Path(tempfile.gettempdir()) / "drifox_paste"
+                    # 落 <app_data>/screenshots/paste/：收进数据目录便于统一查看与清理。
+                    # resolve() 必要：开发环境 get_app_data_dir() 返回相对路径 .drifox，
+                    # 附件路径会写进消息与 DB，必须绝对化才不受 cwd 变化影响。
+                    tmp_dir = (get_app_data_dir() / "screenshots" / "paste").resolve()
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     # 可读命名：原为 paste_<uuid8>.png，显示为附件名时是一串无意义
                     # 的十六进制。改为「截图_月日_时分秒.png」，同秒内追加序号防覆盖。
