@@ -4158,6 +4158,7 @@ _TYPEWRITER_JS = """
                     last: 0,          // 上一帧时间戳
                     enabled: true,    // 总开关（灰度/降级用）
                     CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
+                    NORMAL_FRAME_MS: 33,  // 正常帧间隔基准（30fps）：不超过此值则 clamp 行为不变（打字机动效保留）
                     BURST_LEN: 400,   // 超过该积压视为突发，加速揭示
                     GATE_MIN_BUF: 3,  // DOM 替换闸门：缓冲不高于此值即执行（跳变量上限）
                     GATE_STILL_MS: 60,      // 静默窗：距最近一次 push 超此毫秒即认为"间隙"，可执行替换
@@ -4209,8 +4210,21 @@ _TYPEWRITER_JS = """
                     st.raf = 0;
                     if (!st.buf) return;
                     var now = (typeof ts === 'number' && ts > 0) ? ts : performance.now();
-                    var dt = Math.max(1, Math.min(200, now - st.last));
+                    var _raw = Math.max(1, now - st.last);
                     st.last = now;
+                    // 🐛 掉帧自适应追赶（2026-10-26）：原逻辑把 dt 硬 clamp 到 200ms，
+                    // 主线程繁忙（每轮 42 个 MCP schema 拼装 + hook + 工具执行 + 哨兵
+                    // 全量补渲）导致帧间隔拉到 300ms+ 时，每帧揭示量仍按 200ms 算 ——
+                    // 指数追赶速度低于积压增长速度，形成「主线程忙 → rAF 饿 → dom 停滞
+                    // → 哨兵补渲 → 主线程更忙」的自我强化循环（真机实证：08:58~08:59
+                    // 每分钟稳定 4~5 次 content-sentinel，dom 每 2s 仅涨 2~6 字符而
+                    // md 同期涨 600~1900）。
+                    // 改按实际经过时间补偿：帧间隔 <= NORMAL_FRAME_MS 时 dt 取原 clamp
+                    // 值（打字机动效不变）；超出部分说明欠账，按真实时长计入，每帧一次
+                    // 补足欠账量。积压仍会在 CATCHUP_MS 内排空，用户观感是"追平"而非
+                    // 瞬时全显。2000 字符的 _twFlush 上限保留作最终保险。
+                    var _over = Math.max(0, _raw - st.NORMAL_FRAME_MS);
+                    var dt = Math.max(1, Math.min(200, _raw)) + _over;
                     // 揭示时间常数：闸门挂起中（等替换）时缩短，尽快把积压放完
                     // ——跳变量 = 执行替换时的剩余缓冲，加速直接压低它
                     var _tau = st.CATCHUP_MS;

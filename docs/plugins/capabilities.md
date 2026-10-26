@@ -314,6 +314,16 @@ caps["stream.subscribe"]({
 | `team.read` | low | 团队成员 / 角色 / 运行状态（只读门面，写操作不可见） |
 | `team.send` | medium | 向团队成员派发任务邮件（写对方邮箱） |
 
+### 存储
+
+| ID | level | 说明 |
+|---|---|---|
+| `storage.data_dir` | low | 插件持久化数据根目录 `<app_data>`（插件自拼 `plugin_data/<name>/` 自用） |
+
+只给根目录：CapabilityPool 的 provider 全局共享、调用不传插件名，per-plugin
+目录隔离没有现成机制。目录约定与 E1 配置契约（`plugin_data/<name>/config.json`）
+一致。
+
 ### 基础（恒放行）
 
 | ID | level | 说明 |

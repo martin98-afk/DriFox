@@ -795,6 +795,9 @@ class CodeWebViewer(QWebEngineView):
         self._sentinel_stall_ts: float = 0.0
         self._sentinel_stall_dom: int = -1
         self._sentinel_stall_md: int = 0
+        # [P2] 连续无效计数：补渲后 dom 未恢复即 +1，恢复即归零。>=2 时升级
+        # warning（疑似内容真丢失，非主线程积压）。见 _content_sentinel_check。
+        self._sentinel_ineffective: int = 0
         # [B2] 工具 DOM 脏标记代际：每次置 True 时递增，JS 回调清除时与捕获值比较，
         # 防止"旧渲染回调误清新注入的 dirty"（新注入已递增代际 → 旧回调放弃清除）。
         self._tool_dom_dirty_gen: int = 0
@@ -1525,8 +1528,13 @@ class CodeWebViewer(QWebEngineView):
         # ── 二级触发（P0-2）：dom 停滞检测 ──
         # 一级只覆盖 md≥800 且 dom<200 的重度白屏；盲区是 md<800、dom 200~800
         # 缓慢增长、开头即白屏。渲染链停摆的指纹是「md 在涨、dom 不动」：
-        # dom 停滞 ≥2s（约 4-8 个渲染节拍周期，区分「慢」与「停」）且期间
-        # md 增长 ≥300（数个 chunk 正常增长量，排除模型天然空闲）→ 强制补渲。
+        # dom 停滞 ≥4s 且期间 md 增长 ≥1500 → 强制补渲。
+        # 阈值沿革（2026-10-26）：原 2s / 300 字符。打字机掉帧自适应（见
+        # card_render_core._twStep）上线前，主线程繁忙会把 dom 增长压到每 2s
+        # 仅 2~6 字符，而正常爬升同期也有 100~300 字符量级 → 哨兵退化成
+        # 「积压探测器」而非「内容丢失探测器」，每分钟稳定误触 4~5 次且补渲
+        # 本身加重主线程负担（自我强化循环）。放宽窗口至 4s、积压阈值提至
+        # 1500：正常流式爬升不再误触，真停摆（4 秒纹丝不动 + 大量积压）仍兜。
         # 与一级只排除 think 不同：二级无 dom<200 门槛，tag/fence 静默累积
         # 场景下 dom 停滞是设计行为，须用含注册 tag 的完整排除集双判。
         _page_l2 = self.page()
@@ -1538,10 +1546,12 @@ class CodeWebViewer(QWebEngineView):
             self._sentinel_stall_ts = now_l2
             self._sentinel_stall_dom = dom
             self._sentinel_stall_md = md_len_l2
+            # [P2] dom 恢复增长 → 补渲已见效，连续无效计数归零
+            self._sentinel_ineffective = 0
         elif (
             self._sentinel_stall_ts
-            and now_l2 - self._sentinel_stall_ts >= 2.0
-            and md_len_l2 - self._sentinel_stall_md >= 300
+            and now_l2 - self._sentinel_stall_ts >= 4.0
+            and md_len_l2 - self._sentinel_stall_md >= 1500
             and not _has_unclosed_think_or_tool(self._markdown_text)
             and not _has_unclosed_chart_fence(self._markdown_text)
         ):
@@ -1562,9 +1572,20 @@ class CodeWebViewer(QWebEngineView):
             if now_l2 - getattr(self, "_sentinel_last_ts", 0.0) < 3.0:
                 return
             self._sentinel_last_ts = now_l2
-            logger.warning(
-                f"[content-sentinel-L2] dom 停滞 {dom} 但 md 增长 {md_len_l2 - self._sentinel_stall_md} 字符 → 强制补渲"
+            # [P2] 连续无效检测（2026-10-26）：补渲后若 dom 在下一次触发前仍未
+            # 恢复到停滞基准之上，说明补渲没解决问题（内容真丢失），累计到 2 次
+            # 即升级回 warning 防掩盖故障。正常情况（掉帧自适应追赶生效）dom
+            # 持续增长，永远走不到 warning 分支。
+            _ineffective_now = dom <= self._sentinel_stall_dom
+            self._sentinel_ineffective = self._sentinel_ineffective + 1 if _ineffective_now else 0
+            _l2_msg = (
+                f"[content-sentinel-L2] dom 停滞 {dom} 但 md 增长 "
+                f"{md_len_l2 - self._sentinel_stall_md} 字符 → 强制补渲"
             )
+            if self._sentinel_ineffective >= 2:
+                logger.warning(f"{_l2_msg} (连续 {self._sentinel_ineffective} 次无效，疑似内容真丢失)")
+            else:
+                logger.info(_l2_msg)
             self._render_deferred = False
             # 🐛 补渲必须强制走全量（2026-10-15 复现会话实证：哨兵 18 次补渲全部
             # 无效，dom 全程 87~120、md 积压 3456）：流式中 _perform_update 的差量

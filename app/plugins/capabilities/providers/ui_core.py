@@ -999,6 +999,17 @@ def _host_raw(host: Any):
     return host
 
 
+def _storage_data_dir(host: Any):
+    """插件持久化数据根目录（<app_data>，与 tool_core 同实现）。
+
+    只给根目录不给插件专属目录：provider 全局共享、_call 不传插件名，
+    per-plugin 隔离没有现成机制。插件自拼 plugin_data/<name>/。
+    """
+    from app.utils.utils import get_app_data_dir
+
+    return get_app_data_dir()
+
+
 def register(registry) -> None:
     reg = registry
     # 对话流 / 窗口
@@ -1024,6 +1035,8 @@ def register(registry) -> None:
     reg.register(
         "workdir.write", _sync_working_directory, surface="ui", owner="core:ui", legacy_key="sync_working_directory"
     )
+    # 存储
+    reg.register("storage.data_dir", _storage_data_dir, surface="ui", owner="core:ui")
     # 上下文 / 引擎
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
     reg.register("context.compact", _context_compactor, surface="ui", owner="core:ui")

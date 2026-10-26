@@ -147,6 +147,8 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 团队 ──
         _spec("team.read", _L, "团队成员/角色/运行状态", _BOTH),
         _spec("team.send", _M, "向团队成员派发任务邮件（写对方邮箱）", _TOOL),
+        # ── 存储 ──
+        _spec("storage.data_dir", _L, "插件持久化数据根目录（插件自拼 plugin_data/<name>/）", _BOTH),
         # ── 基础（恒放行） ──
         _spec("plugin.log", _N, "带 plugin=<name> 前缀的 logger", _BOTH),
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),

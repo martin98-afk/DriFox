@@ -619,6 +619,11 @@ class Settings(QConfig):
 
     # 版本信息
     current_version = "v0.6.11"
+    # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
+    # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
+    # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。
+    # 注意：这是构建期注入的类属性，不是用户配置项，勿手改——改错会拉到跨 Qt 绑定的包。
+    build_variant = "pyqt5"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
     # 进入时崩溃通知：检测到上次崩溃 dump 后是否弹 InfoBar 提示用户。
