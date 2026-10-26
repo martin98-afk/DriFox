@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation
-from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap, QPen, QTransform
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap, QPen, QTransform
 from PyQt5.QtGui import (
     QColor as _QColor,
 )
@@ -196,22 +196,6 @@ def _invalidate_cached_colors():
         pass
 
 
-# 彩虹动画颜色列表（模块级常量，避免每次 paint 创建 10 个 QColor）
-# 状态环的色相轮转基线：按索引取色后仍要按主题重算 S/L（见 _ring_color）
-_RAINBOW_COLORS = [
-    _QColor("#60D4FF"),
-    _QColor("#40C8FF"),
-    _QColor("#4DA6FF"),
-    _QColor("#8B7BFF"),
-    _QColor("#C084FC"),
-    _QColor("#F472B6"),
-    _QColor("#FB7185"),
-    _QColor("#F59E0B"),
-    _QColor("#34D399"),
-    _QColor("#22D3EE"),
-]
-_RAINBOW_N = len(_RAINBOW_COLORS)
-
 # 团队 leader 角色名：团队框内默认置顶
 _LEADER_AGENT = "leader"
 
@@ -221,6 +205,33 @@ _HOVER_LIGHT_COLORS = (_QColor(99, 102, 241, 22), _QColor(139, 92, 246, 12))
 
 # 错误态红条颜色
 _CACHED_ERROR_RED = _QColor(220, 50, 50)
+
+# 流式环基色（深色主题直接用，浅色主题 darker 一档）。青蓝与绿/蓝/橙/紫等常见
+# 项目色都能拉开色系，保证 3px 环压在方块外侧仍然清晰。
+_STREAM_RING_COLOR = "#3DDCFF"
+
+# 亮块角速度调制幅度（度）：叠加在匀速相位上形成「快—慢—快」节奏。
+# 26° 时快慢比约 1.6:1，肉感明显但不顿挫。
+_RING_RHYTHM_DEG = 26.0
+
+
+def _ring_head_angle(phase: float) -> float:
+    """亮块所在角度（度）：匀速相位 + sin 调制
+
+    纯函数（不碰 UI），便于单测锁定节奏形态；paintEvent 与动画帧共用同一公式。
+    用 sin(2·phase)：一圈内两次加速/减速，比单次调制更有呼吸感。
+    """
+    return phase + _RING_RHYTHM_DEG * _math.sin(_math.radians(phase) * 2.0)
+
+
+def _stream_ring_hue(phase: float) -> float:
+    """亮头色相（度）：随**位置**绕环一周走完整光谱
+
+    锚定在位置而非时间：亮块转到哪，那里就是那一种颜色，一圈 360° 走完彩虹。
+    这样旋转时彩虹跟着走（用户要的「旋转保留彩虹」），但同一个位置的颜色恒定，
+    不会像随时间变色那样闪烁。取互补起步（青 185°）与方块常见的绿/蓝/橙/紫都拉开。
+    """
+    return (185.0 + phase) % 360.0
 
 
 # ── 绘制原语（模块级）──────────────────────────────────────────────
@@ -292,18 +303,16 @@ class _TabProjectIcon(QWidget):
         self.update()
 
     def _ring_color(self) -> QColor:
-        """按状态 + 相位算环色：streaming 彩虹色相轮转 / question 橙黄，两者 alpha 呼吸；
-        error 恒亮红（三者中唯一需要一眼确定的事实，不参与呼吸）
+        """按状态取环色：streaming 恒主题青蓝 / question 橙黄 / error 红
 
-        沿用团队块策略（用户定案）：环色与方块项目色**不同色系**——方块就是项目
-        色，同色系 2px 细线会被方块吃掉（实测绿方块配绿环完全看不出环）。
+        色相全程不循环：色相轮转只在「颜色本身是信息」时才有意义，而这里颜色
+        只表示「正在运行」，变色反而让多 tab 并发时各自乱变、认不出是同一状态。
+        运动信息交给亮块旋转（见 _paint_status_ring）。
 
-        但**不能直接复用 _RAINBOW_COLORS**：那是给整行流光用的高亮色表（还额外
-        提亮 55），2px 细线在浅色主题的侧栏底/选中底上会淡到接近不可见。这里改
-        按主题定 S/L、只让色相随相位轮转，浅色主题压暗、深色主题提亮。
+        环色与方块项目色必须**不同色系**：方块就是项目色，同色系细线会被吃掉
+        （实测绿方块配绿环完全看不出环）。青蓝与绿/蓝/橙/紫都能拉开。
 
-        streaming 靠色相轮转 + alpha 呼吸表达「在转」，不画 dash 缺口：26px 尺度
-        上 3/4 环的缺口只会读成「断线边框」而非「在转」。
+        streaming / question 的 alpha 随相位呼吸。
         """
         if self._ring_state == "error":
             return _QColor(_CACHED_ERROR_RED)
@@ -312,11 +321,10 @@ class _TabProjectIcon(QWidget):
             c = _QColor(245, 158, 11)
         else:
             dark = isDarkTheme()
-            c = _QColor.fromHslF(
-                (self._ring_phase % 360) / 360.0,
-                0.80 if dark else 0.72,
-                0.68 if dark else 0.44,
-            )
+            c = _QColor(_STREAM_RING_COLOR)
+            if not dark:
+                # 浅色主题压暗：亮青在 #fafafc 侧栏底与浅蓝选中底上会淡到看不见
+                c = c.darker(180)
         c.setAlpha(alpha)
         return c
 
@@ -400,22 +408,23 @@ class _TabProjectIcon(QWidget):
     def _paint_status_ring(self, painter, rect) -> None:
         """方块外侧状态环（折叠/展开同一套）
 
-        3px 圆角方环，内缩 1px、圆角 5px，与内缩 3px 的方块同心并留 1px 空隙。
-        线宽从 2px 提到 3px：2px 在 26px 外框上太细，扫视时几乎读不到（实测）。
+        3px 圆角方环，与内缩方块同心并留 1px 空隙。线宽 3px：2px 在 26px 外框上
+        太细，扫视几乎读不到（实测）。
 
-        三态靠**色彩与呼吸**区分：
-        - streaming：彩虹色相轮转 + alpha 呼吸（团队块既有动效，用户定案）
-        - question：橙黄，alpha 与环径双呼吸（慢，3s 一周期）
-        - error：红，常亮无呼吸（报错是需一眼确认的事实，不该持续吵）
+        三态靠**运动形态与配色**区分，色相全程不变：
+        - streaming：一个亮块沿环旋转（锥形渐变亮头 + 拖尾），角速度按 sin 调制
+          形成「快—慢—快」节奏。亮块恒为主题青蓝，与任意项目色拉开系；多 tab
+          并发时不会各自乱变色相。
+        - question：橙黄整环，alpha + 环径双呼吸（慢，3s 一周期）
+        - error：红整环常亮（报错是需一眼确认的事实，不该持续吵）
 
-        ⚠️ 不要给 streaming 画 dash 缺口：26px 尺度上 3/4 环的缺口只会读成
-        「断线边框」，不读成「在转」。也不用项目色派生环色：方块就是项目色，
-        同色系细线会被方块吃掉。
+        ⚠️ 不用项目色派生环色：方块就是项目色，同色系细线会被吃掉。
+        ⚠️ 不用 dash 缺口模拟旋转：26px 尺度上静止的缺口读成「断线边框」。
         """
         if not self._ring_state:
             return
         painter.setBrush(Qt.NoBrush)
-        pen = QPen(self._ring_color())
+        pen = QPen()
         pen.setWidth(3)
         pen.setJoinStyle(Qt.RoundJoin)
 
@@ -424,9 +433,59 @@ class _TabProjectIcon(QWidget):
             # 环径 ±0.5px 呼吸：单靠 alpha 在浅色主题上对比度变化不明显
             inset = 1.5 + _math.sin(_math.radians(self._ring_phase)) * 0.5
         ring = QRectF(rect).adjusted(inset, inset, -inset, -inset)
+
+        if self._ring_state == "streaming":
+            # 慢底：整环极淡同色，避免亮块转到背面时环「消失」
+            base = _QColor(_STREAM_RING_COLOR)
+            base.setAlpha(56 if isDarkTheme() else 46)
+            pen.setColor(base)
+            painter.setPen(pen)
+            painter.drawRoundedRect(ring, 5, 5)
+
+            # 亮块 = 沿路径的拖尾。不用 QConicalGradient：26px 圆角路径上 Qt 会把
+            # 锥形渐变量化成肉眼可见的分段色块，实测像贴了几块补丁。也不用
+            # drawArc：那是外接椭圆，与圆角方环形状不符。
+            # 做法：把路径按百分比离散成点列，沿点列取段绘制，每段独立 alpha。
+            path = _QPainterPath()
+            path.addRoundedRect(ring, 5, 5)
+            # 按弧长均匀取点（pointAtPercent 按参数百分比，圆角处会疏密不均，
+            # 26px 上表现为拖尾有锯齿）
+            total_len = path.length()
+            samples = 240
+            pts = [path.pointAtPercent(path.percentAtLength(total_len * i / samples)) for i in range(samples)]
+            # 角度 = 匀速相位 + sin 调制 → 视觉上快慢交替（一圈约 1.8s）
+            head_deg = _ring_head_angle(self._ring_phase)
+            head_idx = int(round(((head_deg % 360.0) / 360.0) * samples)) % samples
+            seg_total = 20
+            tail_samples = int(samples * 0.62 / seg_total)
+            # 彩虹沿**拖尾位置**铺开（色相随 k 递增），不随相位变化：旋转时整条
+            # 彩虹跟着走，颜色本身不闪。色相跨度 150° 覆盖青→蓝→紫→粉，相邻段
+            # 差约 8°，在 3px 线上平滑过渡不成色带。
+            hue0 = _stream_ring_hue(self._ring_phase)
+            dark = isDarkTheme()
+            for k in range(seg_total):
+                fade = 1.0 - k / seg_total
+                hue = (hue0 + k * 7.5) % 360.0
+                # 黄绿区（60~180°）在 HSL 里天然最亮，深色主题下会发白显脏：
+                # 按色相压一档明度，让整条拖尾的视觉重量均匀
+                light = 0.80 if dark else 0.55
+                if 45.0 <= hue <= 190.0:
+                    light -= 0.14 if dark else 0.08
+                c = _QColor.fromHslF(hue / 360.0, 0.92, light)
+                c.setAlpha(int(255 * fade**1.2))
+                seg_pen = QPen(c)
+                seg_pen.setWidth(3)
+                seg_pen.setCapStyle(Qt.RoundCap if k == 0 else Qt.FlatCap)
+                painter.setPen(seg_pen)
+                poly = [
+                    pts[(head_idx - k * tail_samples - m) % samples] for m in range(tail_samples + 1)
+                ]
+                painter.drawPolyline(*poly)
+            return
+
+        pen.setColor(self._ring_color())
         painter.setPen(pen)
         painter.drawRoundedRect(ring, 5, 5)
-
 
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件

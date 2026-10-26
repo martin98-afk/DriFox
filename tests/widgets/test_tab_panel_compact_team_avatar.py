@@ -184,17 +184,40 @@ class TestCompactStatusRing:
         # 浅色主题（测试默认）: 侧栏底 ~250，环必须显著更暗
         assert gray < 190, f"浅色主题下环过亮，会被底色淹没: gray={gray}"
 
-    def test_streaming_ring_hue_rotates_with_phase(self):
-        """流式环色随相位轮转（沿用团队块动效：色相轮回即「在转」信号）"""
+    def test_streaming_ring_hue_is_constant(self):
+        """流式环色相恒定（不再 RGB 循环）：运动信息全部交给亮块旋转
+
+        色相轮转只在「颜色本身是信息」时有意义；这里颜色只表示「正在运行」，
+        变色会让多 tab 并发时各自乱变、认不出是同一状态。
+        """
         from app.widgets.tab_panel import _TabProjectIcon
 
         icon = _TabProjectIcon(size=26)
         icon.set_project("DF", "rgba(46, 125, 50, 255)")
         icon.set_status_ring("streaming", 0.0)
-        c0 = icon._ring_color().hue()
+        h0 = icon._ring_color().hue()
         icon.set_status_ring("streaming", 180.0)
-        c180 = icon._ring_color().hue()
-        assert c0 != c180, "相位推进必须改变色相"
+        assert icon._ring_color().hue() == h0, "色相不得随相位变化"
+
+    def test_streaming_ring_head_rotates_with_phase(self):
+        """亮块位置随相位绕环旋转（运动的唯一载体）"""
+        from app.widgets.tab_panel import _ring_head_angle
+
+        assert _ring_head_angle(0.0) != _ring_head_angle(90.0)
+        assert _ring_head_angle(0.0) != _ring_head_angle(180.0)
+
+    def test_streaming_ring_has_rhythm(self):
+        """角速度按 sin 调制出快慢节奏（不是匀速转圈）
+
+        判据：相邻等相位步长的角度增量不等。匀速时每步增量相同。
+        """
+        from app.widgets.tab_panel import _ring_head_angle
+
+        step = 10.0
+        deltas = [
+            (_ring_head_angle(p + step) - _ring_head_angle(p)) for p in range(0, 360, 45)
+        ]
+        assert max(deltas) - min(deltas) > 3.0, f"角速度应有明显快慢差异: {deltas}"
 
     def test_streaming_ring_contrasts_with_block_color(self):
         """环色与方块色不同色系（红方块配绿环等），不糊成一片
