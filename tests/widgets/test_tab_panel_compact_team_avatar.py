@@ -10,7 +10,8 @@
 from unittest.mock import patch
 
 import pytest
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import QRectF, Qt
+from PyQt5.QtGui import QColor, QPixmap
 
 from app.widgets.tab_panel import TabPanel, _parse_rgba
 
@@ -292,11 +293,74 @@ class TestCompactStatusRing:
         assert icon.width() - 2 * icon._block_inset == item._icon_size
 
     def test_compact_box_team_fits_row(self, panel):
-        """团队模式列表态行高 32px：外框不得超出行高（否则被裁）"""
+        """折叠团队行：行高包住外框 + 上下 margin，icon 垂直居中（与 hover 底对齐）
+
+        回归（2026-10-26）：行高曾写死 32，大字档（+10）下外框 34 装不进内容区
+        24，布局把 icon 挤离行中心 → hover 底 (2,2,w-4,h-4) 与方块错位。
+        """
         panel.set_collapsed(True)
         item = _team_member(panel, "coder")
-        assert item.height() == 32
-        assert item._icon_widget.height() <= 32
+        box = item._icon_widget.height()
+        assert item.height() == max(32, box + 8)
+        assert item._icon_widget.height() <= item.height()
+        # icon 垂直居中：中心与行中心一致（错位的直接判据）
+        item.layout().activate()
+        cy_icon = item._icon_widget.geometry().center().y()
+        assert abs(cy_icon - item.height() / 2) <= 1
+
+    def test_compact_row_height_follows_font_delta(self, panel):
+        """大字档（+10）下折叠团队行高跟随外框放大且 icon 居中（默认档外的缩放路径）"""
+        from app.utils import design_tokens
+
+        with patch.object(design_tokens, "_cached_font_size_delta", 10), patch.object(
+            design_tokens, "_cached_font_size_key", "10"
+        ):
+            item = _team_member(panel, "coder")
+            panel.set_collapsed(True)
+            box = item._icon_widget.height()
+            assert box == 24 + 10, f"大字档外框应为 34，实际 {box}"
+            assert item.height() >= box + 8
+            item.layout().activate()
+            cy_icon = item._icon_widget.geometry().center().y()
+            assert abs(cy_icon - item.height() / 2) <= 1
+
+    def test_expanded_team_row_paints_capsule_ring(self, panel, monkeypatch):
+        """展开团队行 streaming：状态环画在角色胶囊外沿（行层承担，icon 已隐藏）"""
+        import app.widgets.tab_panel as tp
+
+        item = _team_member(panel, "leader")
+        idx = panel._items.index(item)
+        panel.update_tab_streaming(idx, True)
+        assert item._icon_widget.isHidden(), "前提：团队模式展开态 icon 隐藏，环必须换载体"
+        calls = []
+        orig = tp._paint_status_ring_on
+
+        def spy(*a, **k):
+            calls.append((a, k))
+            return orig(*a, **k)
+
+        monkeypatch.setattr(tp, "_paint_status_ring_on", spy)
+        pm = QPixmap(item.size())
+        pm.fill(Qt.white)
+        item.render(pm)
+        assert calls, f"streaming 态行绘制必须产出胶囊环 (spec={item._ring_spec()})"
+        state0 = calls[0][0][2] if len(calls[0][0]) > 2 else calls[0][1].get("state")
+        assert state0 == "streaming"
+        gr = item._capsule_label.geometry()
+        ring_rect = calls[0][0][1]
+        assert QRectF(ring_rect).center() == QRectF(gr).center(), "环与胶囊同心"
+
+    def test_expanded_team_row_idle_no_ring(self, panel, monkeypatch):
+        """展开团队行无状态：不画环（paint 原语零调用）"""
+        import app.widgets.tab_panel as tp
+
+        item = _team_member(panel, "coder")
+        calls = []
+        monkeypatch.setattr(tp, "_paint_status_ring_on", lambda *a, **k: calls.append(a))
+        pm = QPixmap(item.size())
+        pm.fill(Qt.white)
+        item.render(pm)
+        assert not calls
 
     def test_tooltip_carries_state_in_compact(self, panel):
         """折叠态 icon tooltip 带上状态文案（环只表达类别，细节靠 hover）"""
