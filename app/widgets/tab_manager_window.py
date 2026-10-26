@@ -3310,7 +3310,14 @@ class TabManagerWindow(FramelessWindow):
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_animating(True)
         self._sidebar_anim_collapsing = collapsing
-        self._sidebar_anim_ui_switched = False
+        # ── 收起方向：整段动画不再中途切紧凑 ──
+        # 旧实现在宽度掉到"收起宽+滞回"时就把整行切紧凑：外框放大 + margins
+        # 归零 + 居中对齐一次生效，icon 中心从展开位(约 28)跳到紧凑位(23)，
+        # 而宽度还在继续变小 → 视觉上 icon 先往右跑、再跟着宽度往左回。
+        # 现在 `_sidebar_anim_ui_switched` 收起侧恒为 False（跨阈值不切），
+        # 形态切换统一放到动画真正结束后（_on_sidebar_anim_finished）执行：
+        # 此时宽度已落定，切换只剩一次、且不带位移方向反转。
+        self._sidebar_anim_ui_switched = True if collapsing else False
         anim.stop()
         # ★ 系统「减少动态效果」：直接落位并走同一条收尾路径 —— 收拾动画
         # 结束标志 / 解除 TabPanel 抑制 / 恢复 resize 预览都靠它。
@@ -3330,21 +3337,23 @@ class TabManagerWindow(FramelessWindow):
         # ★ 必须三值：缺工作台窗格会被 QSplitter 压到 0/最小宽度（见 helper 注释）
         self._splitter.setSizes(self._splitter_sizes_with_left(w))
 
-        # 跨阈值切换 UI：收起途中宽度降到"收起态宽度 + 余量"时切紧凑；
-        # 展开途中宽度升到展开线（= 折叠线 + 滞回区）时切完整。
+        # 跨阈值切换 UI：展开途中宽度升到展开线（= 折叠线 + 滞回区）时切完整。
         # ★ 坐标系：本方法 w 是 **frame 宽**（直接喂给 setSizes），而
         #   panel._auto_expand_width 是 **content 宽** → 展开侧必须加 padding
-        #   换算；收起侧同理（用 content 量再折算回 frame）。
-        # 收起侧阈值不再写死 100：动画起点是收起宽(60)，旧值会让 UI 在动画
-        # 已过大半时才切紧凑，收尾段闪一帧完整布局。展开侧与 resizeEvent 的
-        # 展开线同源，避免"动画已切完整但 resizeEvent 判定仍算折叠"的双标。
-        _collapse_ui_w = _COLLAPSED_PANEL_WIDTH + _HYSTERESIS_WIDTH + _FRAME_PADDING_X
+        #   换算。展开侧与 resizeEvent 的展开线同源，避免"动画已切完整但
+        #   resizeEvent 判定仍算折叠"的双标。
+        #
+        # ★★ 收起方向不再有跨阈值切换（_collapse_ui_w 已废弃保留注释说明）：
+        #   动画途中切紧凑会让 icon 中心从展开位(约 28)跳到紧凑位(23)，而宽度
+        #   仍在变小 → icon 先随切形态右移、再随宽度左移，出现"先右后左"的
+        #   折返。收起形态一律等动画结束（_on_sidebar_anim_finished）执行一次。
+        #   （曾把收起阈值写死 100：UI 在动画过大半时才切，收尾段闪一帧完整
+        #   布局；直接前移到动画中段同样错，方向反了。）
         _expand_ui_w = self._tab_panel._auto_expand_width + _FRAME_PADDING_X
         if not self._sidebar_anim_ui_switched:
-            if self._sidebar_anim_collapsing and w <= _collapse_ui_w:
-                self._sidebar_anim_ui_switched = True
-                self._tab_panel.sync_collapsed_ui()
-            elif not self._sidebar_anim_collapsing and w >= _expand_ui_w:
+            # 仅展开方向保留跨阈值提前切（文字早于宽度就位，避免窄条挤字）；
+            # 收起方向已置 switched=True，整段动画维持展开形态，切换留给收尾。
+            if not self._sidebar_anim_collapsing and w >= _expand_ui_w:
                 self._sidebar_anim_ui_switched = True
                 self._tab_panel.sync_collapsed_ui()
 
