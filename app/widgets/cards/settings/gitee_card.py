@@ -83,6 +83,42 @@ def _avatar_palette(base: QColor) -> tuple:
     return c, QColor(c).darker(122)
 
 
+def _avatar_cache_path(owner: str):
+    """头像磁盘缓存路径：按 owner 命名，进程间复用（头像变化低频）"""
+    from app.utils.utils import get_app_data_dir
+
+    return get_app_data_dir() / "cache" / f"gitee_avatar_{owner}.png"
+
+
+def _fetch_avatar_bytes() -> bytes | None:
+    """后台线程用：token → avatar_url → 下载图片字节；失败返回 None（不抛）
+
+    全程 requests 同步调用（get_bound_info 内部可能触发 token 刷新，网络超时 15s），
+    绝不能进主线程。账户行与设置卡共用，避免两套拉取逻辑漂移。
+    """
+    try:
+        from app.gateway.auth import get_oauth_backend
+        from app.gateway.auth.gitee import fetch_user_avatar_url
+
+        info = get_oauth_backend("gitee").get_bound_info()
+        if not info:
+            return None
+        url, err = fetch_user_avatar_url(info["token"])
+        if not url:
+            logger.warning(f"[GiteeAvatar] 拉取头像 URL 失败: {err}")
+            return None
+        import requests as _requests
+
+        resp = _requests.get(url, timeout=10)
+        if resp.status_code != 200 or not resp.content:
+            logger.warning(f"[GiteeAvatar] 下载头像失败: HTTP {resp.status_code}")
+            return None
+        return resp.content
+    except Exception as e:
+        logger.warning(f"[GiteeAvatar] 加载真实头像异常: {e}")
+        return None
+
+
 class _AvatarCircleWidget(QWidget):
     """使用 QPainter 绘制的圆形头像 — DPI 感知
 
@@ -546,53 +582,26 @@ class GiteeAccountRow(QFrame):
 
     # ── 真实头像拉取（绑定态：API 拿 avatar_url → 下载 → 圆形渲染） ──
 
-    @staticmethod
-    def _avatar_cache_path(owner: str):
-        """头像磁盘缓存路径：按 owner 命名，进程间复用（头像变化低频）"""
-        from app.utils.utils import get_app_data_dir
-
-        return get_app_data_dir() / "cache" / f"gitee_avatar_{owner}.png"
-
     def _load_avatar_async(self, owner: str):
         """异步加载真实头像：缓存命中先即时显示，再后台拉新（不阻塞 UI）"""
         if self._avatar_fetching or (owner == self._avatar_owner_loaded and self._avatar.has_image()):
             return
-        cache = self._avatar_cache_path(owner)
+        cache = _avatar_cache_path(owner)
         if cache.exists():
             pm = QPixmap(str(cache))
             if not pm.isNull():
                 self._avatar.set_image(pm)
                 self._avatar_owner_loaded = owner
-        worker = threading.Thread(target=self._fetch_avatar_worker, args=(owner,), daemon=True)
+        worker = threading.Thread(target=self._fetch_avatar_worker, daemon=True)
         self._avatar_fetching = True
         worker.start()
 
-    def _fetch_avatar_worker(self, owner: str):
-        """后台线程：token → avatar_url → 下载图片字节 → 信号回主线程
-
-        全程 requests 同步调用（get_bound_info 内部可能触发 token 刷新，网络
-        超时 15s），绝不能进主线程；QPixmap 构造在主线程槽完成。
-        """
+    def _fetch_avatar_worker(self):
+        """后台线程：拉取图片字节 → 信号回主线程（QPixmap 只能在主线程构造）"""
         try:
-            from app.gateway.auth import get_oauth_backend
-            from app.gateway.auth.gitee import fetch_user_avatar_url
-
-            info = get_oauth_backend("gitee").get_bound_info()
-            if not info:
-                return
-            url, err = fetch_user_avatar_url(info["token"])
-            if not url:
-                logger.warning(f"[GiteeAccountRow] 拉取头像 URL 失败: {err}")
-                return
-            import requests as _requests
-
-            resp = _requests.get(url, timeout=10)
-            if resp.status_code != 200 or not resp.content:
-                logger.warning(f"[GiteeAccountRow] 下载头像失败: HTTP {resp.status_code}")
-                return
-            self._avatarFetched.emit(resp.content)
-        except Exception as e:
-            logger.warning(f"[GiteeAccountRow] 加载真实头像异常: {e}")
+            data = _fetch_avatar_bytes()
+            if data:
+                self._avatarFetched.emit(data)
         finally:
             self._avatar_fetching = False
 
@@ -607,7 +616,7 @@ class GiteeAccountRow(QFrame):
         if self._popup is not None and sip.isValid(self._popup):
             self._popup._popup_avatar.set_image(pm)
         try:
-            cache = self._avatar_cache_path(self._bound_owner)
+            cache = _avatar_cache_path(self._bound_owner)
             cache.parent.mkdir(parents=True, exist_ok=True)
             pm.save(str(cache), "PNG")
         except Exception as e:
@@ -998,7 +1007,7 @@ class _GiteeMorePopup(QWidget):
         info_layout.setSpacing(10)
 
         self._popup_avatar = _AvatarCircleWidget("?", self._info_widget)
-        self._popup_avatar.set_size(scale_font_size(34))
+        self._popup_avatar.set_size(scale_font_size(44))
         # 鼠标事件穿透，由 _info_widget 统一处理点击
         self._popup_avatar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         info_layout.addWidget(self._popup_avatar)
@@ -1135,7 +1144,7 @@ class _GiteeMorePopup(QWidget):
         is_bound = bool(self._cfg.gitee_bound.value)
         owner = str(self._cfg.gitee_user_owner.value or "")
         repo = str(self._cfg.gitee_user_repo.value or "")
-        avatar_size = scale_font_size(34)
+        avatar_size = scale_font_size(44)
 
         if self._account_row is not None and getattr(self._account_row, "_binding", False):
             # 绑定等待中：主操作变「中止授权」，用户可随时退出而不必等超时
@@ -1372,6 +1381,8 @@ class GiteeCard(SettingCard):
     """Gitee 账号绑定 — SettingCard 子类，布局与其他设置卡片一致"""
 
     oauthResult = pyqtSignal(bool, str)
+    # 真实头像下载完成（后台线程发、主线程槽收→QPixmap 只能在主线程构造）
+    _avatarFetched = pyqtSignal(bytes)
 
     def __init__(self, parent=None):
         super().__init__(
@@ -1386,6 +1397,9 @@ class GiteeCard(SettingCard):
         self._bind_cancel: threading.Event | None = None
         self._bound_owner = ""
         self._bound_repo = ""
+        self._avatar_fetching = False  # 头像下载防重入（主线程读写，无竞争）
+        self._avatar_owner_loaded = ""  # 已成功拉到真实头像的 owner（进程内去重）
+        self._avatarFetched.connect(self._on_avatar_fetched)
         self.oauthResult.connect(self._on_oauth_result)
 
         self._setup_right()
@@ -1481,6 +1495,7 @@ class GiteeCard(SettingCard):
             self._avatar.set_avatar(owner)
             self._avatar.set_size(avatar_size)
             self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
+            self._load_avatar_async(owner)
             self._bind_btn.setText("解绑")
             self._bind_btn.setCursor(Qt.PointingHandCursor)
             self._bind_btn.setStyleSheet(
@@ -1496,6 +1511,7 @@ class GiteeCard(SettingCard):
         else:
             self._bound_owner = ""
             self._bound_repo = ""
+            self._avatar.set_image(None)
             self._avatar.set_avatar("?")
             self._avatar.set_size(avatar_size)
             self._avatar.setToolTip("未绑定")
@@ -1512,6 +1528,46 @@ class GiteeCard(SettingCard):
                 f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
             )
             self._sync_dot.hide()
+
+    # ── 真实头像拉取（与 GiteeAccountRow 共用模块级 helpers） ──
+
+    def _load_avatar_async(self, owner: str):
+        """缓存命中先即时显示，再后台拉新（不阻塞 UI，与账户行语义一致）"""
+        if self._avatar_fetching or (owner == self._avatar_owner_loaded and self._avatar.has_image()):
+            return
+        cache = _avatar_cache_path(owner)
+        if cache.exists():
+            pm = QPixmap(str(cache))
+            if not pm.isNull():
+                self._avatar.set_image(pm)
+                self._avatar_owner_loaded = owner
+        self._avatar_fetching = True
+        threading.Thread(target=self._fetch_avatar_worker, daemon=True).start()
+
+    def _fetch_avatar_worker(self):
+        """后台线程：拉取图片字节 → 信号回主线程（QPixmap 只能在主线程构造）"""
+        try:
+            data = _fetch_avatar_bytes()
+            if data:
+                self._avatarFetched.emit(data)
+        finally:
+            self._avatar_fetching = False
+
+    def _on_avatar_fetched(self, data: bytes):
+        """主线程槽：字节 → QPixmap → 头像渲染 + 写磁盘缓存"""
+        pm = QPixmap()
+        if not pm.loadFromData(data):
+            return
+        if not self._bound_owner:
+            return
+        self._avatar.set_image(pm)
+        self._avatar_owner_loaded = self._bound_owner
+        try:
+            cache = _avatar_cache_path(self._bound_owner)
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            pm.save(str(cache), "PNG")
+        except Exception as e:
+            logger.warning(f"[GiteeCard] 头像缓存写盘失败: {e}")
 
     def _auto_enable_sync(self):
         """如果已绑定且同步未启动，自动 enable（重启恢复场景）"""
