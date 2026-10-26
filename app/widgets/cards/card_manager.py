@@ -496,9 +496,32 @@ class CardManager:
             multi.remove(card_id)
             self._hand_over_stack_top(win_data, container_type, card_id, multi)
             if card_id in win_data["system_cards"]:
-                if not any(self.is_card_visible(sc, window_id) for sc in win_data["system_cards"]):
-                    win_data["suppressed_by_system"] = False
+                if self._release_system_suppression(window_id):
+                    self._refresh_stackable_layers(window_id)
             return
+
+        # hide_card 的语义是「让这张卡消失」，不能按栈顶记账是否匹配来决定要不要隐藏：
+        # 记账会被同容器其他层的重算改写（历史 bug：提问卡提交后永久关不掉，
+        # 因为 L2 状态层刷新把栈顶单值抢走，此后每次 hide_card 都早退，
+        # 表现为「点提交/忽略均无反应」，而答案其实已送达、正文照常输出）。
+        # 记账只在确实属于本卡时交接出去，不动别的卡的占位。
+        try:
+            if hasattr(card_widget, "hide_card"):
+                card_widget.hide_card()
+            else:
+                card_widget.setVisible(False)
+        except RuntimeError:
+            self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
+            return
+
+        self._hand_over_stack_top(win_data, container_type, card_id, [])
+        # Phase G：dock 容器多卡——从可见列表移除；active 若指向本卡则指向列表尾
+        if container_type in DOCK_CONTAINER_TYPES:
+            dock_list = win_data.get("dock_visible_cards", {}).get(container_type, [])
+            if card_id in dock_list:
+                dock_list.remove(card_id)
+            if win_data.get("dock_active_cards", {}).get(container_type) == card_id:
+                win_data["dock_active_cards"][container_type] = dock_list[-1] if dock_list else None
 
         # hide_card 的语义是「让这张卡消失」，不能按栈顶记账是否匹配来决定要不要隐藏：
         # 记账会被同容器其他层的重算改写（历史 bug：提问卡提交后永久关不掉，
@@ -525,9 +548,8 @@ class CardManager:
 
         # 如果隐藏的是系统卡片，检查是否还有系统卡片可见，没有则解除压制
         if card_id in win_data["system_cards"]:
-            has_visible_system = any(self.is_card_visible(sc_id, window_id) for sc_id in win_data["system_cards"])
-            if not has_visible_system:
-                win_data["suppressed_by_system"] = False
+            if self._release_system_suppression(window_id):
+                self._refresh_stackable_layers(window_id)
 
         # 触发回调
         if card_id in win_data["hidden_callbacks"]:
@@ -721,6 +743,37 @@ class CardManager:
         if not win_data:
             return False
         return bool(win_data.get("card_meta", {}).get(card_id, {}).get("stackable"))
+
+    def _release_system_suppression(self, window_id: str) -> bool:
+        """尝试解除系统卡压制：无其他可见系统卡时清标记
+
+        Returns:
+            True = 本次调用真的解除了压制（调用方应重算状态层）；
+            False = 仍有系统卡可见，或压制标记本就未置位，无需重算。
+        """
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return False
+        has_visible_system = any(self.is_card_visible(sc_id, window_id) for sc_id in win_data["system_cards"])
+        if has_visible_system or not win_data.get("suppressed_by_system", False):
+            return False
+        win_data["suppressed_by_system"] = False
+        return True
+
+    def _refresh_stackable_layers(self, window_id: str) -> None:
+        """解除系统卡压制后，重算本窗口所有 stackable 层的可见集
+
+        机制化恢复：系统模态卡显示期间被压制的 L2 状态卡（排队/撤销/子智能体）
+        在压制解除时按谓词回到可见集，不依赖任何调用方"记得调 refresh_layer"
+        （toggle 关闭路径收不到宿主 closed 信号，宿主恢复调用覆盖不到——
+        排队卡随模型选择卡开关而消失的根因）。
+        """
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return
+        layers = {m["layer"] for m in win_data.get("card_meta", {}).values() if m["stackable"]}
+        for layer in layers:
+            self.refresh_layer(window_id, layer)
 
     def refresh_layer(self, window_id: str, layer: str) -> None:
         """重算某层可见集：内容 = 谓词为真的卡片，按 order_hint 排序
