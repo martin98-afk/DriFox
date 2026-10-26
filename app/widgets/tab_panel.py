@@ -234,6 +234,116 @@ def _stream_ring_hue(phase: float) -> float:
     return (185.0 + phase) % 360.0
 
 
+def _status_ring_color(state: str, phase: float) -> QColor:
+    """按状态取环色：streaming 恒主题青蓝 / question 橙黄 / error 红（icon 与胶囊共用）
+
+    色相全程不循环：色相轮转只在「颜色本身是信息」时才有意义，而这里颜色
+    只表示「正在运行」，变色反而让多 tab 并发时各自乱变、认不出是同一状态。
+    运动信息交给亮块旋转（见 _paint_status_ring_on）。
+
+    环色与色块主色必须**不同色系**：色块就是项目色/角色色，同色系细线会被吃掉
+    （实测绿方块配绿环完全看不出环）。青蓝与绿/蓝/橙/紫都能拉开。
+
+    streaming / question 的 alpha 随相位呼吸。
+    """
+    if state == "error":
+        return _QColor(_CACHED_ERROR_RED)
+    alpha = max(150, min(255, int(196 + _math.sin(_math.radians(phase)) * 59)))
+    if state == "question":
+        c = _QColor(245, 158, 11)
+    else:
+        dark = isDarkTheme()
+        c = _QColor(_STREAM_RING_COLOR)
+        if not dark:
+            # 浅色主题压暗：亮青在 #fafafc 侧栏底与浅蓝选中底上会淡到看不见
+            c = c.darker(180)
+    c.setAlpha(alpha)
+    return c
+
+
+def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float = 5.0) -> None:
+    """状态环绘制原语：icon 方块（_TabProjectIcon）与团队角色胶囊（TabItem 行层）共用
+
+    3px 圆角方环，与被环统的色块同心并留 1px 空隙。线宽 3px：2px 在 26px 外框上
+    太细，扫视几乎读不到（实测）。
+
+    三态靠**运动形态与配色**区分，色相全程不变：
+    - streaming：一个亮块沿环旋转（锥形渐变亮头 + 拖尾），角速度按 sin 调制
+      形成「快—慢—快」节奏。亮块恒为主题青蓝，与任意项目色拉开系；多 tab
+      并发时不会各自乱变色相。
+    - question：橙黄整环，alpha + 环径双呼吸（慢，3s 一周期）
+    - error：红整环常亮（报错是需一眼确认的事实，不该持续吵）
+
+    ⚠️ 不用主色派生环色：色块就是项目/角色色，同色系细线会被吃掉。
+    ⚠️ 不用 dash 缺口模拟旋转：26px 尺度上静止的缺口读成「断线边框」。
+    """
+    if not state:
+        return
+    painter.setBrush(Qt.NoBrush)
+    pen = QPen()
+    pen.setWidth(3)
+    pen.setJoinStyle(Qt.RoundJoin)
+
+    inset = 1.5
+    if state == "question":
+        # 环径 ±0.5px 呼吸：单靠 alpha 在浅色主题上对比度变化不明显
+        inset = 1.5 + _math.sin(_math.radians(phase)) * 0.5
+    ring = QRectF(rect).adjusted(inset, inset, -inset, -inset)
+
+    if state == "streaming":
+        # 慢底：整环极淡同色，避免亮块转到背面时环「消失」
+        base = _QColor(_STREAM_RING_COLOR)
+        base.setAlpha(56 if isDarkTheme() else 46)
+        pen.setColor(base)
+        painter.setPen(pen)
+        painter.drawRoundedRect(ring, radius, radius)
+
+        # 亮块 = 沿路径的拖尾。不用 QConicalGradient：26px 圆角路径上 Qt 会把
+        # 锥形渐变量化成肉眼可见的分段色块，实测像贴了几块补丁。也不用
+        # drawArc：那是外接椭圆，与圆角方环形状不符。
+        # 做法：把路径按百分比离散成点列，沿点列取段绘制，每段独立 alpha。
+        path = _QPainterPath()
+        path.addRoundedRect(ring, radius, radius)
+        # 按弧长均匀取点（pointAtPercent 按参数百分比，圆角处会疏密不均，
+        # 26px 上表现为拖尾有锯齿）
+        total_len = path.length()
+        samples = 240
+        pts = [path.pointAtPercent(path.percentAtLength(total_len * i / samples)) for i in range(samples)]
+        # 角度 = 匀速相位 + sin 调制 → 视觉上快慢交替（一圈约 1.8s）
+        head_deg = _ring_head_angle(phase)
+        head_idx = int(round(((head_deg % 360.0) / 360.0) * samples)) % samples
+        seg_total = 20
+        tail_samples = int(samples * 0.62 / seg_total)
+        # 彩虹沿**拖尾位置**铺开（色相随 k 递增），不随相位变化：旋转时整条
+        # 彩虹跟着走，颜色本身不闪。色相跨度 150° 覆盖青→蓝→紫→粉，相邻段
+        # 差约 8°，在 3px 线上平滑过渡不成色带。
+        hue0 = _stream_ring_hue(phase)
+        dark = isDarkTheme()
+        for k in range(seg_total):
+            fade = 1.0 - k / seg_total
+            hue = (hue0 + k * 7.5) % 360.0
+            # 黄绿区（60~180°）在 HSL 里天然最亮，深色主题下会发白显脏：
+            # 按色相压一档明度，让整条拖尾的视觉重量均匀
+            light = 0.80 if dark else 0.55
+            if 45.0 <= hue <= 190.0:
+                light -= 0.14 if dark else 0.08
+            c = _QColor.fromHslF(hue / 360.0, 0.92, light)
+            c.setAlpha(int(255 * fade**1.2))
+            seg_pen = QPen(c)
+            seg_pen.setWidth(3)
+            seg_pen.setCapStyle(Qt.RoundCap if k == 0 else Qt.FlatCap)
+            painter.setPen(seg_pen)
+            poly = [
+                pts[(head_idx - k * tail_samples - m) % samples] for m in range(tail_samples + 1)
+            ]
+            painter.drawPolyline(*poly)
+        return
+
+    pen.setColor(_status_ring_color(state, phase))
+    painter.setPen(pen)
+    painter.drawRoundedRect(ring, radius, radius)
+
+
 # ── 绘制原语（模块级）──────────────────────────────────────────────
 def _vertical_more_icon() -> QIcon:
     """竖向「⋯」图标：把主题感知的「更多」图标旋转 90°
@@ -303,30 +413,8 @@ class _TabProjectIcon(QWidget):
         self.update()
 
     def _ring_color(self) -> QColor:
-        """按状态取环色：streaming 恒主题青蓝 / question 橙黄 / error 红
-
-        色相全程不循环：色相轮转只在「颜色本身是信息」时才有意义，而这里颜色
-        只表示「正在运行」，变色反而让多 tab 并发时各自乱变、认不出是同一状态。
-        运动信息交给亮块旋转（见 _paint_status_ring）。
-
-        环色与方块项目色必须**不同色系**：方块就是项目色，同色系细线会被吃掉
-        （实测绿方块配绿环完全看不出环）。青蓝与绿/蓝/橙/紫都能拉开。
-
-        streaming / question 的 alpha 随相位呼吸。
-        """
-        if self._ring_state == "error":
-            return _QColor(_CACHED_ERROR_RED)
-        alpha = max(150, min(255, int(196 + _math.sin(_math.radians(self._ring_phase)) * 59)))
-        if self._ring_state == "question":
-            c = _QColor(245, 158, 11)
-        else:
-            dark = isDarkTheme()
-            c = _QColor(_STREAM_RING_COLOR)
-            if not dark:
-                # 浅色主题压暗：亮青在 #fafafc 侧栏底与浅蓝选中底上会淡到看不见
-                c = c.darker(180)
-        c.setAlpha(alpha)
-        return c
+        """按状态取环色（实现见模块级 _status_ring_color）"""
+        return _status_ring_color(self._ring_state, self._ring_phase)
 
     def set_project(self, initials: str, color_rgba: str, text_color: str = ""):
         """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）
@@ -406,86 +494,10 @@ class _TabProjectIcon(QWidget):
                     painter.drawPixmap(rect, p, p.rect())
 
     def _paint_status_ring(self, painter, rect) -> None:
-        """方块外侧状态环（折叠/展开同一套）
-
-        3px 圆角方环，与内缩方块同心并留 1px 空隙。线宽 3px：2px 在 26px 外框上
-        太细，扫视几乎读不到（实测）。
-
-        三态靠**运动形态与配色**区分，色相全程不变：
-        - streaming：一个亮块沿环旋转（锥形渐变亮头 + 拖尾），角速度按 sin 调制
-          形成「快—慢—快」节奏。亮块恒为主题青蓝，与任意项目色拉开系；多 tab
-          并发时不会各自乱变色相。
-        - question：橙黄整环，alpha + 环径双呼吸（慢，3s 一周期）
-        - error：红整环常亮（报错是需一眼确认的事实，不该持续吵）
-
-        ⚠️ 不用项目色派生环色：方块就是项目色，同色系细线会被吃掉。
-        ⚠️ 不用 dash 缺口模拟旋转：26px 尺度上静止的缺口读成「断线边框」。
-        """
+        """方块外侧状态环（折叠/展开同一套），绘制原语见模块级 _paint_status_ring_on"""
         if not self._ring_state:
             return
-        painter.setBrush(Qt.NoBrush)
-        pen = QPen()
-        pen.setWidth(3)
-        pen.setJoinStyle(Qt.RoundJoin)
-
-        inset = 1.5
-        if self._ring_state == "question":
-            # 环径 ±0.5px 呼吸：单靠 alpha 在浅色主题上对比度变化不明显
-            inset = 1.5 + _math.sin(_math.radians(self._ring_phase)) * 0.5
-        ring = QRectF(rect).adjusted(inset, inset, -inset, -inset)
-
-        if self._ring_state == "streaming":
-            # 慢底：整环极淡同色，避免亮块转到背面时环「消失」
-            base = _QColor(_STREAM_RING_COLOR)
-            base.setAlpha(56 if isDarkTheme() else 46)
-            pen.setColor(base)
-            painter.setPen(pen)
-            painter.drawRoundedRect(ring, 5, 5)
-
-            # 亮块 = 沿路径的拖尾。不用 QConicalGradient：26px 圆角路径上 Qt 会把
-            # 锥形渐变量化成肉眼可见的分段色块，实测像贴了几块补丁。也不用
-            # drawArc：那是外接椭圆，与圆角方环形状不符。
-            # 做法：把路径按百分比离散成点列，沿点列取段绘制，每段独立 alpha。
-            path = _QPainterPath()
-            path.addRoundedRect(ring, 5, 5)
-            # 按弧长均匀取点（pointAtPercent 按参数百分比，圆角处会疏密不均，
-            # 26px 上表现为拖尾有锯齿）
-            total_len = path.length()
-            samples = 240
-            pts = [path.pointAtPercent(path.percentAtLength(total_len * i / samples)) for i in range(samples)]
-            # 角度 = 匀速相位 + sin 调制 → 视觉上快慢交替（一圈约 1.8s）
-            head_deg = _ring_head_angle(self._ring_phase)
-            head_idx = int(round(((head_deg % 360.0) / 360.0) * samples)) % samples
-            seg_total = 20
-            tail_samples = int(samples * 0.62 / seg_total)
-            # 彩虹沿**拖尾位置**铺开（色相随 k 递增），不随相位变化：旋转时整条
-            # 彩虹跟着走，颜色本身不闪。色相跨度 150° 覆盖青→蓝→紫→粉，相邻段
-            # 差约 8°，在 3px 线上平滑过渡不成色带。
-            hue0 = _stream_ring_hue(self._ring_phase)
-            dark = isDarkTheme()
-            for k in range(seg_total):
-                fade = 1.0 - k / seg_total
-                hue = (hue0 + k * 7.5) % 360.0
-                # 黄绿区（60~180°）在 HSL 里天然最亮，深色主题下会发白显脏：
-                # 按色相压一档明度，让整条拖尾的视觉重量均匀
-                light = 0.80 if dark else 0.55
-                if 45.0 <= hue <= 190.0:
-                    light -= 0.14 if dark else 0.08
-                c = _QColor.fromHslF(hue / 360.0, 0.92, light)
-                c.setAlpha(int(255 * fade**1.2))
-                seg_pen = QPen(c)
-                seg_pen.setWidth(3)
-                seg_pen.setCapStyle(Qt.RoundCap if k == 0 else Qt.FlatCap)
-                painter.setPen(seg_pen)
-                poly = [
-                    pts[(head_idx - k * tail_samples - m) % samples] for m in range(tail_samples + 1)
-                ]
-                painter.drawPolyline(*poly)
-            return
-
-        pen.setColor(self._ring_color())
-        painter.setPen(pen)
-        painter.drawRoundedRect(ring, 5, 5)
+        _paint_status_ring_on(painter, rect, self._ring_state, self._ring_phase, radius=5)
 
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件
@@ -843,11 +855,20 @@ class TabItem(QFrame):
         """行高分档：树行 44px（两行式）/ 团队模式（列表态）成员行 32px / 其余 40px
 
         paintEvent 缓存按 (w, h, _tree_row) 自适应，行高变化无需额外失效。
+
+        折叠态下限跟随缩放：icon 外框 scale_icon_size(24/26) 随字号档放大（+10 档
+        外框 34/36），行高若仍写死 32/40，内容区（高 - margin 4×2）装不下外框，
+        布局把 icon 挤离行中心 → hover 底 (2,2,w-4,h-4) 与方块错位（实测）。故折叠
+        行高取「分档基线与框+8margin 的较大者」，展开态 icon 隐藏/有富余不受益于此。
         """
         if self._tree_row:
             self.setFixedHeight(44)
             return
         in_list = self._panel is None or getattr(self._panel, "_mode", PANEL_MODE_LIST) != PANEL_MODE_TREE
+        if self._compact:
+            box = scale_icon_size(self._ICON_BOX_TEAM if self._team_mode else self._ICON_BOX)
+            self.setFixedHeight(max(32 if self._team_mode else 40, box + 8))
+            return
         self.setFixedHeight(32 if (self._team_mode and in_list) else 40)
 
     def _refresh_tree_indent(self):
@@ -958,6 +979,8 @@ class TabItem(QFrame):
             # 紧凑态图标外框放大（方块恒定 20px + 外侧 2px 环 + 1px 间隙）。
             # 只放大容器不放大方块：状态来去时方块几何与缩写字号零变化。
             self._apply_compact_icon_box(True)
+            # 行高下限跟随外框缩放（否则框装不下、icon 被挤离行中心与 hover 底错位）
+            self._refresh_row_height()
             if self._team_mode:
                 self._apply_compact_icon()
             elif self._project_initials and self._project_color and not self._tree_row:
@@ -987,6 +1010,7 @@ class TabItem(QFrame):
             if "margins" in saved:
                 self.layout().setContentsMargins(*saved["margins"])
             self._compact_saved = None
+            self._refresh_row_height()
             self._sync_compact_ring()
             self._sync_icon_tooltip()
         self.update()
@@ -1120,6 +1144,18 @@ class TabItem(QFrame):
         #      是侧栏最显眼的视觉脏点，用户明确要求去掉；
         #   ③ 状态集中于 icon 一个锚点，扫视成本最低，且与选中底色互不干扰。
         # 选中态完全由圆角底色表达（见上方 fillPath）。
+
+        # ── 团队模式（列表态展开）：状态环画在角色胶囊外沿 ──
+        # 环唯一载体 _icon_widget 在团队模式下隐藏（胶囊是唯一角色标识），环改由
+        # 行层承担：以胶囊 geometry 外扩 3px 定位，内缘 1.5px 被后画的胶囊盖住，
+        # 可见环带宽约 1.5px 且不占布局——有环无环胶囊几何零跳变。
+        # 相位现取现用（_ring_spec 读 panel 帧相位），_on_anim_tick 的 item.update()
+        # 已覆盖重绘驱动，无需额外定时器。
+        if self._team_mode and not self._compact and not self._capsule_label.isHidden():
+            state, phase = self._ring_spec()
+            if state and (self._capsule_label.text() or "").strip():
+                gr = self._capsule_label.geometry()
+                _paint_status_ring_on(painter, gr.adjusted(-3, -3, 3, 3), state, phase, radius=6)
 
         # ── 树行化：左侧从属引导竖线（最后画，不被选中底色盖住）──
         if self._tree_row:
