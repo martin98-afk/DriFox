@@ -10,8 +10,7 @@
 from unittest.mock import patch
 
 import pytest
-from PyQt5.QtCore import QRectF, Qt
-from PyQt5.QtGui import QColor, QPixmap
+from PyQt5.QtGui import QColor
 
 from app.widgets.tab_panel import TabPanel, _parse_rgba
 
@@ -324,43 +323,37 @@ class TestCompactStatusRing:
             cy_icon = item._icon_widget.geometry().center().y()
             assert abs(cy_icon - item.height() / 2) <= 1
 
-    def test_expanded_team_row_paints_capsule_ring(self, panel, monkeypatch):
-        """展开团队行 streaming：状态环画在角色胶囊外沿（行层承担，icon 已隐藏）"""
-        import app.widgets.tab_panel as tp
+    def test_expanded_team_row_paints_capsule_ring(self, panel):
+        """展开团队行 streaming：胶囊环决策产出「胶囊外扩 3px + streaming」
 
+        不走离屏 render：跨文件测试环境下 QWidget.render 触发 access violation
+        （实测，见 2026-10-26 会话），改测绘制决策纯方法，环绘制本体由
+        _TabProjectIcon 路径的既有测试覆盖（同一 _paint_status_ring_on）。
+        """
         item = _team_member(panel, "leader")
         idx = panel._items.index(item)
         panel.update_tab_streaming(idx, True)
         assert item._icon_widget.isHidden(), "前提：团队模式展开态 icon 隐藏，环必须换载体"
-        calls = []
-        orig = tp._paint_status_ring_on
-
-        def spy(*a, **k):
-            calls.append((a, k))
-            return orig(*a, **k)
-
-        monkeypatch.setattr(tp, "_paint_status_ring_on", spy)
-        pm = QPixmap(item.size())
-        pm.fill(Qt.white)
-        item.render(pm)
-        assert calls, f"streaming 态行绘制必须产出胶囊环 (spec={item._ring_spec()})"
-        state0 = calls[0][0][2] if len(calls[0][0]) > 2 else calls[0][1].get("state")
-        assert state0 == "streaming"
+        spec = item._capsule_ring_spec()
+        assert spec is not None, "streaming 态必须产出胶囊环绘制决策"
+        rect, state, _phase = spec
+        assert state == "streaming"
         gr = item._capsule_label.geometry()
-        ring_rect = calls[0][0][1]
-        assert QRectF(ring_rect).center() == QRectF(gr).center(), "环与胶囊同心"
+        assert rect.center() == gr.center(), "环与胶囊同心"
+        assert rect.width() == gr.width() + 6 and rect.height() == gr.height() + 6, "环外扩 3px"
 
-    def test_expanded_team_row_idle_no_ring(self, panel, monkeypatch):
-        """展开团队行无状态：不画环（paint 原语零调用）"""
-        import app.widgets.tab_panel as tp
-
+    def test_expanded_team_row_idle_no_ring(self, panel):
+        """展开团队行无状态：不产出环绘制决策"""
         item = _team_member(panel, "coder")
-        calls = []
-        monkeypatch.setattr(tp, "_paint_status_ring_on", lambda *a, **k: calls.append(a))
-        pm = QPixmap(item.size())
-        pm.fill(Qt.white)
-        item.render(pm)
-        assert not calls
+        assert item._capsule_ring_spec() is None
+
+    def test_capsule_ring_suppressed_in_compact(self, panel):
+        """折叠态不产出胶囊环决策（环由 icon 外框承担，行层不重复画）"""
+        panel.set_collapsed(True)
+        item = _team_member(panel, "coder")
+        idx = panel._items.index(item)
+        panel.update_tab_streaming(idx, True)
+        assert item._capsule_ring_spec() is None
 
     def test_tooltip_carries_state_in_compact(self, panel):
         """折叠态 icon tooltip 带上状态文案（环只表达类别，细节靠 hover）"""

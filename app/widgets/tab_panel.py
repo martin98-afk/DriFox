@@ -975,7 +975,13 @@ class TabItem(QFrame):
             self._capsule_label.setVisible(False)
             self._close_btn.setVisible(False)
             self._pin_btn.setVisible(False)
-            self.layout().setContentsMargins(4, 4, 4, 4)
+            # 折叠态左右 margin 归零 + icon 水平居中（替代对称 margin 4+4）：
+            # 大字档下 icon 外框随 scale_icon_size 放大（+10 档 34px），若左右各留
+            # 4px，TabItem 最小宽 42 叠加团队框 margins+边框后超出 46 窄条 → 团队
+            # 框右缘被裁 5px（实测）。归零后行最小宽=外框宽，团队框装得下；居中对
+            # 齐使 icon 中心恒在面板中线（23），不再依赖 margin 对称。
+            self.layout().setContentsMargins(0, 4, 0, 4)
+            self.layout().setAlignment(self._icon_widget, Qt.AlignHCenter)
             # 紧凑态图标外框放大（方块恒定 20px + 外侧 2px 环 + 1px 间隙）。
             # 只放大容器不放大方块：状态来去时方块几何与缩写字号零变化。
             self._apply_compact_icon_box(True)
@@ -1009,6 +1015,8 @@ class TabItem(QFrame):
             self._sync_pin()
             if "margins" in saved:
                 self.layout().setContentsMargins(*saved["margins"])
+            # 清除折叠态的水平居中对齐（icon 回归布局默认位置，否则展开态挤压 _body）
+            self.layout().setAlignment(self._icon_widget, Qt.Alignment())
             self._compact_saved = None
             self._refresh_row_height()
             self._sync_compact_ring()
@@ -1151,17 +1159,29 @@ class TabItem(QFrame):
         # 可见环带宽约 1.5px 且不占布局——有环无环胶囊几何零跳变。
         # 相位现取现用（_ring_spec 读 panel 帧相位），_on_anim_tick 的 item.update()
         # 已覆盖重绘驱动，无需额外定时器。
-        if self._team_mode and not self._compact and not self._capsule_label.isHidden():
-            state, phase = self._ring_spec()
-            if state and (self._capsule_label.text() or "").strip():
-                gr = self._capsule_label.geometry()
-                _paint_status_ring_on(painter, gr.adjusted(-3, -3, 3, 3), state, phase, radius=6)
+        capsule_ring = self._capsule_ring_spec()
+        if capsule_ring is not None:
+            rect, state, phase = capsule_ring
+            _paint_status_ring_on(painter, rect, state, phase, radius=6)
 
         # ── 树行化：左侧从属引导竖线（最后画，不被选中底色盖住）──
         if self._tree_row:
             draw_tree_guide(painter, 0, h)
 
         super().paintEvent(event)
+
+    def _capsule_ring_spec(self):
+        """展开团队行胶囊环绘制决策：返回 (环 rect, state, phase) 或 None
+
+        抽成纯决策方法便于单测（离屏 render 在跨文件测试环境下不稳，实测
+        access violation，见 tests/widgets 崩溃基线），paintEvent 只消费结果。
+        """
+        if not (self._team_mode and not self._compact and not self._capsule_label.isHidden()):
+            return None
+        state, phase = self._ring_spec()
+        if not state or not (self._capsule_label.text() or "").strip():
+            return None
+        return self._capsule_label.geometry().adjusted(-3, -3, 3, 3), state, phase
 
 
 # ── 插入方位菜单图标：2x2 方块，黑=卡片显示位置，白=空白区域 ──

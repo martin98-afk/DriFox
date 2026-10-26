@@ -93,6 +93,18 @@ def fetch_user_login(access_token: str) -> Tuple[Optional[str], str]:
     return owner, ""
 
 
+def fetch_user_avatar_url(access_token: str) -> Tuple[Optional[str], str]:
+    """获取当前用户头像 URL（/api/v5/user 的 avatar_url 字段）。Returns: (url|None, err_msg)"""
+    resp = requests.get(GITEE_USER_URL, params={"access_token": access_token}, timeout=10)
+    if resp.status_code != 200:
+        return None, f"获取用户信息失败：{parse_error(resp)}"
+
+    url = resp.json().get("avatar_url")
+    if not isinstance(url, str) or not url:
+        return None, "获取用户信息失败：avatar_url 字段无效"
+    return url, ""
+
+
 def ensure_repo(token: str, owner: str, repo: str, private: bool) -> Tuple[bool, str]:
     """确保仓库存在，不存在则创建，并保证可见性与要求一致"""
     # 先检查仓库是否存在
