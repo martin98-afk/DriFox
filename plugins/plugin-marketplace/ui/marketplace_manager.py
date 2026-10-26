@@ -61,26 +61,48 @@ def _drifox_dir() -> Path:
 
 # ── 默认市场源 ─────────────────────────────────────────────
 
-_DEFAULT_SOURCES = [
-    {
-        "name": "drifox-official",
-        "source": {
-            "source": "url",
-            "url": "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/pyside6/marketplace.json",
+def _official_plugin_branch() -> str:
+    """官方插件库分支按构建变体选择：pyqt5 → main，pyside6 → pyside6。
+
+    变体读 config.build_variant（CI 构建期注入的类属性，非用户配置），
+    经能力池 config.read 读取（本插件 manifest 已声明该能力）；pyside6 分支
+    取不到时按 pyside6 兜底（避免把 pyqt5 插件装进 PySide6 版本）。两分支的
+    清单内容各自对齐：main 清单全部 ref=main，pyside6 清单全部 ref=pyside6。
+    """
+    try:
+        from app.plugins.sdk import caps_for
+
+        read = caps_for("config.read")
+        variant = str(read("build_variant") or "").strip().lower() if read else ""
+    except Exception:
+        variant = ""
+    return "main" if variant == "pyqt5" else "pyside6"
+
+
+def _default_sources() -> List[Dict[str, Any]]:
+    """默认源每次调用时求值：分支随当前进程构建变体动态选，
+    不在模块 import 时定死（能力池未就绪时会误选）。"""
+    branch = _official_plugin_branch()
+    return [
+        {
+            "name": "drifox-official",
+            "source": {
+                "source": "url",
+                "url": f"https://raw.githubusercontent.com/martin98-afk/drifox-plugins/{branch}/marketplace.json",
+            },
+            "auto_update": True,
+            "builtin": True,
         },
-        "auto_update": True,
-        "builtin": True,
-    },
-    {
-        "name": "drifox-system",
-        "source": {
-            "source": "url",
-            "url": "https://raw.githubusercontent.com/martin98-afk/DriFox/master/marketplace.json",
+        {
+            "name": "drifox-system",
+            "source": {
+                "source": "url",
+                "url": "https://raw.githubusercontent.com/martin98-afk/DriFox/master/marketplace.json",
+            },
+            "auto_update": True,
+            "builtin": True,
         },
-        "auto_update": True,
-        "builtin": True,
-    },
-]
+    ]
 
 
 # ── C1：市场源白名单 ──────────────────────────────
@@ -250,7 +272,7 @@ class MarketplaceSourceManager:
         """
         if not self._sources_file.exists():
             self._sources_file.write_text(
-                json.dumps(_DEFAULT_SOURCES, ensure_ascii=False, indent=2),
+                json.dumps(_default_sources(), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             return
@@ -263,10 +285,11 @@ class MarketplaceSourceManager:
         if not isinstance(existing, list):
             logger.warning("[Marketplace] 市场源配置格式异常，跳过默认源合并")
             return
+        defaults = _default_sources()
         existing_names = {s.get("name") for s in existing if isinstance(s, dict)}
-        missing = [d for d in _DEFAULT_SOURCES if d.get("name") not in existing_names]
+        missing = [d for d in defaults if d.get("name") not in existing_names]
         # 存量 builtin 源跟随版本更新（仅覆盖 source 字段）
-        default_by_name = {d.get("name"): d for d in _DEFAULT_SOURCES if d.get("builtin")}
+        default_by_name = {d.get("name"): d for d in defaults if d.get("builtin")}
         updated_names: List[str] = []
         for entry in existing:
             if not isinstance(entry, dict):
@@ -360,7 +383,7 @@ class MarketplaceSourceManager:
         try:
             sources = json.loads(self._sources_file.read_text(encoding="utf-8-sig"))
         except Exception:
-            return list(_DEFAULT_SOURCES)
+            return _default_sources()
         # C1 存量容忍：既有非法条目仅告警不阻断/不删除（强校验只管新增/修改）
         for entry in sources or []:
             if isinstance(entry, dict) and entry.get("source") is not None:

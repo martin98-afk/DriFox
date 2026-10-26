@@ -13,6 +13,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 PLUGIN_MARKETPLACE = ROOT / "plugins" / "plugin-marketplace"
 if str(PLUGIN_MARKETPLACE) not in sys.path:
@@ -108,7 +110,7 @@ def test_idempotent_when_already_current(tmp_path):
             "auto_update": True,
             "builtin": True,
         },
-        *mm._DEFAULT_SOURCES[1:],
+        *mm._default_sources()[1:],
     ]
     mgr._sources_file.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
     before = mgr._sources_file.read_text(encoding="utf-8-sig")
@@ -126,4 +128,60 @@ def test_missing_file_writes_all_defaults(tmp_path):
 
     sources = _read_sources(mgr)
     assert _url_of(sources, "drifox-official") == OFFICIAL_DEFAULT_URL
-    assert len(sources) == len(mm._DEFAULT_SOURCES)
+    assert len(sources) == len(mm._default_sources())
+
+
+def test_official_branch_follows_build_variant(tmp_path, monkeypatch):
+    """官方清单分支随 build_variant：pyqt5 → main，pyside6 → pyside6。
+
+    直接 monkeypatch _official_plugin_branch（分支解析细节由
+    test_official_plugin_branch_mapping 覆盖），只验证 _default_sources
+    的分支拼接与存量同步行为。
+    """
+    for want_branch in ("main", "pyside6"):
+        monkeypatch.setattr(mm, "_official_plugin_branch", lambda wb=want_branch: wb)
+        sources = mm._default_sources()
+        url = _url_of(sources, "drifox-official")
+        assert f"/drifox-plugins/{want_branch}/marketplace.json" in url
+        # 存量锁死另一分支 URL 的用户也会被同步到当前变体分支
+        stale_branch = "main" if want_branch == "pyside6" else "pyside6"
+        mgr = _make_mgr(tmp_path / want_branch)
+        stale = [
+            {
+                "name": "drifox-official",
+                "source": {
+                    "source": "url",
+                    "url": f"https://raw.githubusercontent.com/martin98-afk/drifox-plugins/{stale_branch}/marketplace.json",
+                },
+                "auto_update": True,
+                "builtin": True,
+            },
+        ]
+        mgr._sources_file.write_text(json.dumps(stale, ensure_ascii=False, indent=2), encoding="utf-8")
+        mgr._ensure_defaults()
+        assert f"/drifox-plugins/{want_branch}/marketplace.json" in _url_of(_read_sources(mgr), "drifox-official")
+
+
+def test_official_plugin_branch_mapping(monkeypatch):
+    """真实映射链路：caps_for("config.read")("build_variant") → 分支名；
+    无该键 / read 不可用 / 抛异常一律兜底 main（与 _pick_asset 口径一致）。"""
+    try:
+        import app.plugins.sdk as sdk
+    except Exception as e:  # pragma: no cover - 环境缺 app 包时跳过
+        pytest.skip(f"app.plugins.sdk 不可导入: {e}")
+
+    fake = {"build_variant": "pyside6"}
+    monkeypatch.setattr(
+        sdk, "caps_for", lambda cap: (lambda key: fake.get(key)) if cap == "config.read" else None
+    )
+    assert mm._official_plugin_branch() == "pyside6"
+
+    fake.clear()  # 无 build_variant 键 → 兜底 main
+    assert mm._official_plugin_branch() == "main"
+
+    monkeypatch.setattr(
+        sdk,
+        "caps_for",
+        lambda cap: (_ for _ in ()).throw(RuntimeError("capability pool unavailable")),
+    )
+    assert mm._official_plugin_branch() == "main"
