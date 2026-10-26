@@ -14165,8 +14165,25 @@ class OpenAIChatToolWindow(ToolWindow):
         if not unassigned:
             return
 
-        # 构建 _message_batch 中每个 batch 的分配状态：
-        # 已有 _batch_cards 引用且非 None 的 batch 表示已被占用
+        # 构建 _message_batch 中每个 batch 的分配状态。
+        # ⚠️「已占用」有两种形态，缺一不可：
+        #   1. `_batch_cards[idx]` 非空且含存活卡 —— 正常已渲染批次
+        #   2. `_batch_cards[idx] is None` 但留有批次占位 —— **B9 卸载**
+        #      （虚拟滚动回收：数据留在 _message_batch，UI 拆成等高占位）
+        #
+        # 第 2 条是「卡片与对应问题错配」的根因。卸载批次在 _batch_cards 里是
+        # None，只按第 1 条判占用就等于把它当成「可认领的空位」，新消息的卡片
+        # 会挂到历史批次下标上，连锁三处错：
+        #   - `_refresh_all_cards_round_index` 按 batch_idx 回写 `_round_index`
+        #     → 删除 / 撤回 / 分支 / 卡片差异全部打到历史轮次
+        #   - 重建侧（第 1.5 步 / `_restore_placeholders_in_viewport` /
+        #     `_restore_batch_ui`）的 `_batch_cards[idx] is not None` 守卫
+        #     永久跳过该批 → 占位永不摘除，历史回答位置一片空白
+        #   - `_viewport_batch_range` 同一个 idx 映射到占位与新卡两个布局项
+        try:
+            placeholders = self._batch_placeholders
+        except (AttributeError, RuntimeError):
+            placeholders = {}
         assigned_batch_indices = set()
         for batch_idx, cards in enumerate(self._batch_cards):
             if cards is not None and len(cards) > 0:
@@ -14175,14 +14192,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     if self._is_widget_alive(c):
                         assigned_batch_indices.add(batch_idx)
                         break
+            elif batch_idx in placeholders:
+                assigned_batch_indices.add(batch_idx)
 
         # 对每个未分配的卡片，按角色从后向前在 _message_batch 中找到
-        # 未被占用的同角色 batch
+        # 未被占用的同角色 batch。
+        # 🛡️ 只在**尾部连续未占用段**里找：遇到占用位立即停止，不得跨过它去
+        # 认领更早的空位。新消息恒属尾部新增批次，历史下标（无论已渲染、已
+        # 卸载，还是尚未渲染）都不该是新卡的归属；跨过占用位继续向前的唯一
+        # 结果就是把新卡挂到别的轮次上。
         for widget in unassigned:
             target_batch_idx = -1
             for batch_idx in range(len(self._message_batch) - 1, -1, -1):
                 if batch_idx in assigned_batch_indices:
-                    continue
+                    break
                 batch = self._message_batch[batch_idx]
                 if not batch:
                     continue
@@ -14309,14 +14332,40 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 已经渲染过，卡片已经存在，不需要重新创建
                 # 但是需要确保已经添加到布局（如果是滚动回来加载更多）
                 cards = self._batch_cards[global_batch_index]
+                # 🛡️ 自愈 A：批次已有卡片却还挂着占位 = 矛盾态（占位永不摘除会让
+                # 该位置多出一块等高空白，且 `_viewport_batch_range` 把它算成同一下标
+                # 的第二个映射项）。摘掉占位，本批走「卡片已存在」分支即可。
+                try:
+                    stale_ph = self._batch_placeholders.pop(global_batch_index, None)
+                except (AttributeError, RuntimeError):
+                    stale_ph = None
+                if stale_ph is not None:
+                    try:
+                        self._batch_placeholder_overhead.pop(global_batch_index, None)
+                    except AttributeError, RuntimeError:
+                        pass
+                    self._remove_placeholder_widget(stale_ph)
+                    logger.debug(f"[virtual-scroll] 批次 {global_batch_index} 残留占位已摘除（已有卡片）")
                 if cards and insert_index is not None:
                     for card in cards:
-                        if self._is_widget_alive(card):
-                            if role == "user":
-                                self.chat_layout.insertWidget(insert_index, card, 0, Qt.AlignRight)
-                            else:
-                                self.chat_layout.insertWidget(insert_index, card)
-                            insert_index += 1
+                        if not self._is_widget_alive(card):
+                            continue
+                        # 🛡️ 自愈 B：卡片自称的下标与本批次不符 = 错配残留（历史版本
+                        # 认领逻辑把新卡挂到历史批次上）。此时把卡搬到本批位置等于把
+                        # 别的轮次内容挪到这条问题下面 —— 宁可不插，等卡片归属被
+                        # `_refresh_all_cards_round_index` 等权威路径修正。
+                        owner = getattr(card, "_message_index", None)
+                        if owner is not None and owner != global_batch_index:
+                            logger.warning(
+                                f"[virtual-scroll] 批次 {global_batch_index} 的卡片下标 "
+                                f"={owner} 与本批不符，跳过重插（防串到别的问题下）"
+                            )
+                            continue
+                        if role == "user":
+                            self.chat_layout.insertWidget(insert_index, card, 0, Qt.AlignRight)
+                        else:
+                            self.chat_layout.insertWidget(insert_index, card)
+                        insert_index += 1
                 continue
 
             # 需要重新创建
@@ -16533,6 +16582,22 @@ class OpenAIChatToolWindow(ToolWindow):
             self._batch_cards.extend([None] * (new_len - len(self._batch_cards)))
         elif new_len < len(self._batch_cards):
             self._batch_cards = self._batch_cards[:new_len]
+        # 🛡️ 越界占位必须一并摘除：截断只移除尾部，生存批次的占位仍然有效，
+        # 但 idx >= new_len 的占位已无对应数据 —— 留着只会在
+        # `_viewport_batch_range` 里制造幽灵批次映射（同一 idx 既无卡也无数据，
+        # 却仍被算进可视区间，进而把回收范围算错）。
+        try:
+            stale_placeholders = [i for i in self._batch_placeholders if i >= new_len]
+        except (AttributeError, RuntimeError):
+            stale_placeholders = []
+        for batch_idx in stale_placeholders:
+            widget = self._batch_placeholders.pop(batch_idx, None)
+            try:
+                self._batch_placeholder_overhead.pop(batch_idx, None)
+            except AttributeError, RuntimeError:
+                pass
+            if widget is not None:
+                self._remove_placeholder_widget(widget)
         # 🛡️ 截断后窗口残留旧大值会把回收器 fallback 推出界，夹回
         self._clamp_visible_batch_window()
         # 重建 user 前缀和缓存
