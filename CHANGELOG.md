@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.11] - 2026-10-25 (重新发布 #6)
+## [v0.6.11] - 2026-10-26 (重新发布 #7)
 
-自 v0.6.10 以来的变更 | 提交数：69 · 文件变更：179 · +17600/-2260 | 贡献者：dingma, mading, martin98-afk
+自 v0.6.10 以来的变更 | 提交数：71 · 文件变更：193 · +18241/-2315 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -88,6 +88,18 @@ All notable changes to this project will be documented in this file.
 ### ♻️ 代码重构 (Refactoring)（重新发布 #6 追加）
 
 - **assistant_hub 记忆体系重构：全局记忆分区 + 写入纪律分层** (`afc57e95` · `plugins/assistant_hub/core/memory/store.py` · `core/memory/prompts.py` · `tools/memory_tools.py` · `ui/sections.py` · `ui/assistant_card.py` · `assistant_manager.py` · `app/main_widget.py` · `tests/plugins/assistant_hub/test_memory_sections.py` 新增 274 例): ①全局记忆支持自定义分区：`memory_sections.json` 持久化（空 schema = 自由格式），`store` 侧补齐 `load_sections`/`save_sections`/`default_sections`/`ensure_default_sections`/`sections_prompt_text`/`section_skeleton`/`parse_section_blocks`/`validate_global_sections`/`insert_into_section`/`rename_section_title` 一组原语；`memory_write(scope=global)` 按分区校验（append 必带 section、replace 校验 `##` 标题齐全、dry_run 只校验不落盘），全删条目留 `##` 头视为合法、不锁死门禁；分区改名同步标题，删分区留孤儿条目下次重分配。②全局记忆写入纪律写进系统提示：明确「该进四类 / 不该进三类 + 边界判据（工具坑 vs 业务规则）」，换项目不成立的内容一律下沉项目记忆，纠正此前项目架构与业务规则误写进全局记忆的错层。③记忆分区 UI：分区名+用途可编辑、未定义分区时提示「用默认分区」播种；经验区去掉孤立的 `reflectRequested` 与反思按钮，整理统一走对话提示词。④`app/main_widget.py` 话题总结加短输入守卫：首条用户输入 ≤10 字直接用原文当标题，不再起 LLM 任务（>10 字才总结），提取逻辑与 `TopicSummaryTask._fallback_user_question` 对齐（多模态取 text 段、跳过未打标任务邮件）。⑤plugin.json 补 `input.read` / `input.write` 能力声明。
+### ✨ 新功能 (New Features)（重新发布 #7 追加）
+
+- **更新器按构建变体选包 + 官方插件库分支随变体切换** (`6fd48f18` · `app/update_checker.py` · `app/utils/config.py` · `plugins/plugin-marketplace/ui/marketplace_manager.py` · `tests/utils/test_update_checker_pick_asset.py` 新增 · `tests/plugins/test_marketplace_default_sources_sync.py`): ①`UpdateChecker._pick_asset(assets, system)` 按 `build_variant` 过滤 Release 资产：PyQt5 版取无后缀包、PySide6 版取 `-pyside6` 后缀包，变体无命中时退回本平台第一个包（旧 Release 只有无后缀包，不让更新链断掉）。此前「取第一个 exe」依赖 assets 顺序，而 republish 重传会打乱顺序 —— 曾致 PyQt5 版装成 PySide6 包，跨绑定覆盖安装后 `_internal` 内 Qt5/Qt6 动态库混杂，启动即崩。②`app/utils/config.py` 增 `build_variant` 类属性（CI 构建期由 release.yml `sed` 注入，非用户配置，默认 `pyqt5`）。③官方插件库默认源改为按变体动态选分支：`pyqt5 → main`、`pyside6 → pyside6`，经能力池 `config.read` 读取（取不到按 pyqt5 兜底，与 `_pick_asset` 同口径）；`_default_sources()` 改为每次调用求值而非 import 期定死（能力池未就绪时会误选 main），builtin 源启动时自动同步存量 URL。④新能力 `storage.data_dir`（tool/ui 双面）：插件持久化数据根目录，只给根不给插件专属目录（provider 全局共享、`_call` 不传插件名，per-plugin 隔离无现成机制），插件自拼 `plugin_data/<name>/`。测试：`test_update_checker_pick_asset.py` 新增 69 行覆盖变体命中/兜底/跨平台，`test_marketplace_default_sources_sync.py` 增 62 行覆盖动态分支与存量同步。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #7 追加）
+
+- **虚拟滚动卸载批次被当作空位认领，导致卡片与其对应问题错配** (`59761ab8` · `app/main_widget.py` · `tests/widgets/test_new_card_index_skips_unloaded_batch.py` 新增 5 例): `_batch_cards[idx] is None` 有两种语义 —— 「从未渲染」与「B9 已卸载（数据留在 `_message_batch`，UI 拆成等高占位）」。`_fix_new_card_message_index` 只把「非空且含存活卡」判为已占用，于是卸载批次被当成可认领的空位，新消息的卡片挂到**历史批次下标**上，连锁三处错：①`_refresh_all_cards_round_index` 按 `batch_idx` 回写 `_round_index` → 删除 / 撤回 / 分支 / 卡片差异全部打到历史轮次；②重建侧（第 1.5 步 / `_restore_placeholders_in_viewport` / `_restore_batch_ui`）的 `_batch_cards[idx] is not None` 守卫永久跳过该批 → 占位永不摘除，历史回答位置一片空白；③`_viewport_batch_range` 同一 idx 映射到占位与新卡两个布局项，跳转落点错位。修法三层：**①** 占用判据补 `idx in _batch_placeholders`，认领搜索的 `continue` 改 `break`（只在尾部连续未占用段内找，不跨过占用位抢更早的历史空位）；**②** `_render_message_to_card` 的 cache-hit 分支自愈 —— 批次已有卡却还挂占位时摘掉残留占位，卡片 `_message_index` 与本批不符时跳过重插（防把别的轮次内容挪到这条问题下）；**③** `_truncate_session_from_user_round` 裁剪 `_batch_cards` 后摘除 `idx >= new_len` 的越界占位与 K 表项（避免 `_viewport_batch_range` 制造幽灵批次映射）。
+- **流式打字机掉帧自适应 + 内容哨兵阈值放宽，解开「主线程忙 → rAF 饿 → dom 停滞 → 哨兵补渲」自我强化循环** (`6fd48f18` · `app/widgets/card_render_core.py` · `app/widgets/card_viewers.py`): ①`_twStep` 原把帧间隔 `dt` 硬 clamp 到 200ms，主线程繁忙（每轮 42 个 MCP schema 拼装 + hook + 工具执行 + 哨兵全量补渲）导致帧间隔拉到 300ms+ 时，每帧揭示量仍按 200ms 算 —— 指数追赶速度低于积压增长速度。改为按实际经过时间补偿：帧间隔 ≤ `NORMAL_FRAME_MS`（33ms）时 `dt` 取原 clamp 值（打字机动效不变），超出部分说明欠账，按真实时长计入每帧一次补足；`CATCHUP_MS` 内仍会排空，观感是「追平」而非瞬时全显，2000 字符 `_twFlush` 上限保留作最终保险。②内容哨兵 L2 阈值沿革：原 2s / 300 字符在掉帧场景下退化成「积压探测器」而非「内容丢失探测器」（真机实证每分钟稳定误触 4~5 次，补渲本身加重主线程负担），放宽至 **dom 停滞 ≥4s 且期间 md 增长 ≥1500**；新增连续无效检测 `_sentinel_ineffective`（补渲后 dom 未恢复即 +1，恢复归零，累计 ≥2 升级 warning 防掩盖真内容丢失）。
+
+### 🔧 其他 (Chores & Build)（重新发布 #7 追加）
+
+- **release.yml 临时收成单变体：本版只发 PyQt5** (`.github/workflows/release.yml`): 更新器已改为按 `build_variant` 选包，PySide6 包需在 `pyside6` 分支同步同一套更新逻辑后才能安全发布，故 `v0.6.11` 重新发布**只出 PyQt5 包**。`check` / `build-windows` / `build-macos` / `build-linux` 四处 matrix 均收成单变体；`release` job 的 `release-assets/pyside6` 目录与 `files` 列表保留（缺文件不报错），v0.6.12 恢复双变体只需把四处 matrix 的第二项加回来。Release body 的变体说明改为按产物目录是否非空动态生成，避免正文承诺「同时提供两套构建」而实际只有一个包。
 
 ## [v0.6.10] - 2026-10-20 (重新发布 #8)
 

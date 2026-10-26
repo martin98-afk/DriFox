@@ -35,8 +35,7 @@ jobs:
         variant:
           - id: pyqt5
             ref: ${{ inputs.pyqt5_ref || 'dev' }}
-          - id: pyside6
-            ref: ${{ inputs.pyside6_ref || 'pyside6' }}
+          # v0.6.11 只发 PyQt5（见 build-windows 上方临时状态说明）
 
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +74,12 @@ jobs:
   # Job 1: Windows (PyInstaller + Inno Setup)
   # ════════════════════════════════════════════════
   #
+  # ⚠️ 临时状态（v0.6.11 重新发布）：更新器已改为按 build_variant 选包，PySide6 包
+  # 需在 pyside6 分支同步同一套更新逻辑后才能安全发布，本版**只发 PyQt5**。
+  # check / build-windows / build-macos / build-linux 四处 matrix 均已收成单变体；
+  # release job 的 pyside6 目录与 files 列表保留（缺文件不报错），v0.6.12 恢复双变体时
+  # 只需把四处 matrix 的第二项加回来。
+  #
   # ── variant 维度：一次运行同时产出 PyQt5 与 PySide6 两套包 ──
   # 硬约束：一个 git tag 只能指向一个 commit，两套代码不能靠「两个分支各打同名 tag」发布
   # （tag 名全局唯一，第二次推送会指向同一 commit）。解法是把代码 ref 提到 matrix 维度，
@@ -96,10 +101,7 @@ jobs:
             ref: ${{ inputs.pyqt5_ref || 'dev' }}
             suffix: ''
             file_suffix: ''
-          - id: pyside6
-            ref: ${{ inputs.pyside6_ref || 'pyside6' }}
-            suffix: pyside6
-            file_suffix: '-pyside6'
+          # v0.6.11 只发 PyQt5（见上方临时状态说明）
 
     steps:
       - uses: actions/checkout@v4
@@ -218,10 +220,7 @@ jobs:
             ref: ${{ inputs.pyqt5_ref || 'dev' }}
             suffix: ''
             file_suffix: ''
-          - id: pyside6
-            ref: ${{ inputs.pyside6_ref || 'pyside6' }}
-            suffix: pyside6
-            file_suffix: '-pyside6'
+          # v0.6.11 只发 PyQt5（见 build-windows 上方临时状态说明）
 
     steps:
       - uses: actions/checkout@v4
@@ -387,10 +386,7 @@ jobs:
             ref: ${{ inputs.pyqt5_ref || 'dev' }}
             suffix: ''
             file_suffix: ''
-          - id: pyside6
-            ref: ${{ inputs.pyside6_ref || 'pyside6' }}
-            suffix: pyside6
-            file_suffix: '-pyside6'
+          # v0.6.11 只发 PyQt5（见 build-windows 上方临时状态说明）
 
     steps:
       - uses: actions/checkout@v4
@@ -551,16 +547,24 @@ jobs:
       - name: Annotate variants in release body
         shell: bash
         run: |
-          # 同一 Release 挂两套安装包，说明写进 body，避免用户选错包。
+          # Release body 的变体说明必须与实际产物一致：v0.6.11 只发 PyQt5，
+          # 若照抄「同时提供两套构建」会让用户找不到 -pyside6 包。
+          # 判据用产物目录是否非空，不靠版本号硬编码 —— 双变体恢复后自动切回。
           # 用 printf 而非 heredoc：heredoc 正文必须顶格，会击穿 YAML block scalar 的缩进。
-          printf '%s\n' '' '---' '' '**本版本同时提供两套构建：**' '' \
-            '| 包名 | 内核 | 适用 |' \
-            '|---|---|---|' \
-            '| 无后缀 | PyQt5 / Qt5 | 存量用户，与旧版同一安装目录 |' \
-            '| `-pyside6` 后缀 | PySide6 / Qt6 | 新装机或需 Qt6 能力的用户 |' \
-            '' \
-            '> 两套包不互通：软件内自动更新只会选与自己构建变体一致的包。' \
-            >> release_body.txt
+          if [ -n "$(ls -A release-assets/pyside6 2>/dev/null)" ]; then
+            printf '%s\n' '' '---' '' '**本版本同时提供两套构建：**' '' \
+              '| 包名 | 内核 | 适用 |' \
+              '|---|---|---|' \
+              '| 无后缀 | PyQt5 / Qt5 | 存量用户，与旧版同一安装目录 |' \
+              '| `-pyside6` 后缀 | PySide6 / Qt6 | 新装机或需 Qt6 能力的用户 |' \
+              '' \
+              '> 两套包不互通：软件内自动更新只会选与自己构建变体一致的包。' \
+              >> release_body.txt
+          else
+            printf '%s\n' '' '---' '' '**本版本仅提供 PyQt5 构建（无后缀包）。**' '' \
+              '> PySide6 构建将在下个版本恢复发布。' \
+              >> release_body.txt
+          fi
           tail -n 14 release_body.txt
 
       - name: Create / Update Release
