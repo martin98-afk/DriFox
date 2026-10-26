@@ -53,6 +53,11 @@ def row_factory(qtbot):
                 "app.core.sync.config_sync.ConfigSyncService.get_instance",
                 return_value=sync_service,
             ),
+            # 头像拉取是后台真线程：测试内必须断网（否则真请求 gitee）
+            patch(
+                "app.gateway.auth.gitee.fetch_user_avatar_url",
+                return_value=(None, "test-skip"),
+            ),
         ):
             row = GiteeAccountRow()
         qtbot.addWidget(row)
@@ -197,11 +202,18 @@ def test_bound_render_does_not_start_remote_sync(qtbot):
             return_value=sync_service,
         ),
         patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch(
+            "app.gateway.auth.gitee.fetch_user_avatar_url",
+            return_value=(None, "test-skip"),
+        ),
     ):
         row = GiteeAccountRow()
 
     qtbot.addWidget(row)
-    backend.get_bound_info.assert_not_called()
+    # 头像拉取（后台 daemon 线程）是绑定态渲染的预期轻量副作用，会调
+    # get_bound_info；等线程消费完再断言，避免竞态。核心守卫不变：
+    # 远程同步（ConfigSync.enable）不得由渲染路径启动。
+    qtbot.waitUntil(lambda: backend.get_bound_info.called, timeout=3000)
     sync_service.enable.assert_not_called()
 
 
