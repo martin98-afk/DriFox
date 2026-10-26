@@ -15,7 +15,7 @@ import re
 from typing import Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation
+from PyQt5.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap, QPen, QTransform
 from PyQt5.QtGui import (
     QColor as _QColor,
@@ -120,7 +120,6 @@ def _parse_rgba(rgba_str: str) -> _QColor:
 
 # 预解析常用颜色（首次导入时计算一次，后续通过 _invalidate_cached_colors() 刷新）
 _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
-_CACHED_INFO = _parse_rgba(Colors.INFO)
 
 # 树行化选中底色：淡靛蓝（深 22% / 浅 17%），比列表模式青蓝 35% 弱一档；
 # hover 色值复用 workspace_tree 的 HOVER_DARK / HOVER_LIGHT（树节点头同源）
@@ -186,9 +185,8 @@ def _invalidate_cached_colors():
 
     含项目头像缓存：其颜色现为主题感知，切主题必须整体作废重算。
     """
-    global _CACHED_SELECTED_BG, _CACHED_INFO
+    global _CACHED_SELECTED_BG
     _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
-    _CACHED_INFO = _parse_rgba(Colors.INFO)
     _PROJECT_ICON_CACHE.clear()
     try:
         from app.utils.project_meta import invalidate_color_cache
@@ -199,6 +197,7 @@ def _invalidate_cached_colors():
 
 
 # 彩虹动画颜色列表（模块级常量，避免每次 paint 创建 10 个 QColor）
+# 状态环的色相轮转基线：按索引取色后仍要按主题重算 S/L（见 _ring_color）
 _RAINBOW_COLORS = [
     _QColor("#60D4FF"),
     _QColor("#40C8FF"),
@@ -223,102 +222,8 @@ _HOVER_LIGHT_COLORS = (_QColor(99, 102, 241, 22), _QColor(139, 92, 246, 12))
 # 错误态红条颜色
 _CACHED_ERROR_RED = _QColor(220, 50, 50)
 
-# 报错红色流光渐层颜色常量（避免 paintEvent 中反复创建 5 个 QColor）
-_SHIMMER_ERROR_COLORS = (
-    _QColor(255, 255, 255, 0),
-    _QColor(220, 80, 60, 80),
-    _QColor(235, 110, 80, 140),
-    _QColor(220, 80, 60, 80),
-    _QColor(255, 255, 255, 0),
-)
-
-# 提问橙黄流光渐层颜色常量（避免 paintEvent 中反复创建 5 个 QColor）
-_SHIMMER_QUESTION_COLORS = (
-    _QColor(255, 255, 255, 0),
-    _QColor(245, 170, 60, 80),
-    _QColor(250, 200, 110, 140),
-    _QColor(245, 170, 60, 80),
-    _QColor(255, 255, 255, 0),
-)
-
-# 彩虹流光渐层缓存：key = 彩虹索引 → 5 段渐层色元组（主体色随相位循环）
-_SHIMMER_RAINBOW_CACHE: dict = {}
-
-
-def _shimmer_rainbow_colors(idx: int):
-    """按彩虹索引生成 5 段流光渐层（透明→彩虹色→亮白→彩虹色→透明），带缓存
-
-    流式流光随 _anim_phase 推进切换彩虹色，形成"彩色循环"的来回流光。
-    """
-    cached = _SHIMMER_RAINBOW_CACHE.get(idx)
-    if cached is not None:
-        return cached
-    base = _RAINBOW_COLORS[idx]
-    r, g, b = base.red(), base.green(), base.blue()
-    colors = (
-        _QColor(255, 255, 255, 0),
-        _QColor(r, g, b, 55),
-        _QColor(min(255, r + 60), min(255, g + 60), min(255, b + 60), 100),
-        _QColor(r, g, b, 55),
-        _QColor(255, 255, 255, 0),
-    )
-    _SHIMMER_RAINBOW_CACHE[idx] = colors
-    return colors
-
 
 # ── 绘制原语（模块级）──────────────────────────────────────────────
-# [PERF] 这两个函数原先定义在 paintEvent 内部，每帧都要新建 2 个闭包对象
-# （函数 + cell）。标签动画以 15fps 持续运行，流式期间每个可见 streaming tab
-# 每帧一次 paint —— 闭包与画笔的重复创建是纯浪费。提为模块级函数后，
-# 画笔与渐变对象也得以复用（GUI 单线程，跨 paint 复用 QPen/QGradient 安全）。
-_SHIMMER_STOPS = (0.0, 0.3, 0.5, 0.7, 1.0)
-_INDICATOR_PEN = _QPen()
-_INDICATOR_PEN.setWidth(3)
-_INDICATOR_PEN.setCapStyle(Qt.RoundCap)
-_SHIMMER_GRAD = _QLinearGradient(0, 0, 0, 0)
-
-
-def _draw_left_indicator(painter, round_rect, h: int, color) -> None:
-    """左侧指示条：用 3px 粗笔沿圆角路径描边，clip 到左 5px 显示。
-
-    沿圆角路径描边自然呈现贴合圆角的曲线（与 hover 背景同一路径）。
-    """
-    painter.save()
-    painter.setClipRect(0, 0, 5, h)
-    _INDICATOR_PEN.setColor(color)
-    painter.setPen(_INDICATOR_PEN)
-    # ⚠️ 必须显式清掉画刷：QPainter.drawPath 同时具备「描边 + 填充」两种语义，
-    # 若调用方此前做过 setBrush(...)，这里会把整个圆角矩形再填充一遍，
-    # 覆盖刚画好的背景与流光。当前背景绘制走 fillPath（不修改 painter 的
-    # brush 属性），此行是防御性保险，成本可忽略。
-    painter.setBrush(Qt.NoBrush)
-    painter.drawPath(round_rect)
-    painter.restore()
-
-
-def _draw_shimmer(painter, round_rect, w: int, phase: float, colors, is_resizing: bool = False) -> None:
-    """整条标签内部的来回脉冲流光。
-
-    sin 相位 → 光斑从 -20% 扫到 120% 再折回：内部来回移动的流光脉冲。
-    colors 为 5 段渐层色（透明→主体→透明）；流式传彩虹色循环，报错传红色渐层。
-
-    [PERF] 原实现用 ``setClipPath + fillRect(整个标签矩形)``：设置路径裁剪会
-    让 Qt 走非矩形裁剪路径（生成裁剪 mask），且填充区域是外接矩形而非圆角内部。
-    改为直接 ``fillPath(round_rect)``，省掉 clip 的 save/restore 与多余填充面积。
-    """
-    if is_resizing:
-        return  # resize 期间跳过昂贵渐层
-    sweep = _math.sin(_math.radians(phase))
-    sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
-    # 光斑中心在标签上从 -20% 扫到 120%
-    shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
-    _SHIMMER_GRAD.setStart(shimmer_center - 80, 0)
-    _SHIMMER_GRAD.setFinalStop(shimmer_center + 80, 0)
-    for stop, color in zip(_SHIMMER_STOPS, colors):
-        _SHIMMER_GRAD.setColorAt(stop, color)
-    painter.fillPath(round_rect, _SHIMMER_GRAD)
-
-
 def _vertical_more_icon() -> QIcon:
     """竖向「⋯」图标：把主题感知的「更多」图标旋转 90°
 
@@ -353,46 +258,65 @@ class _TabProjectIcon(QWidget):
         self._color = QColor(128, 128, 128)
         self._text_color = QColor("#ffffff")
         self._fallback_pixmap: Optional[QPixmap] = None
-        # 状态环（仅折叠态团队成员用）："" 无环 / streaming / question / error
+        # 状态环（折叠窄条项目/团队方块用）："" 无环 / streaming / question / error
         self._ring_state = ""
         self._ring_phase = 0.0
-        # 环位预留：折叠态团队成员恒为 True（无环时方块同样内缩），
-        # 保证状态切换时方块尺寸不跳
-        self._ring_reserved = False
+        # 方块内缩量：紧凑态 3px（给外侧 2px 环 + 1px 间隙让位），展开态 0
+        self._block_inset = 0
         self.setFixedSize(size, size)
 
-    _RING_INSET = 3  # 方块四周内缩量（给 2px 环 + 1px 间隙让位）
+    def set_block_inset(self, inset: int) -> None:
+        """设置方块内缩量（紧凑态 3px：给外侧 2px 环 + 1px 间隙让位）
 
-    def set_status_ring(self, state: str, phase: float = 0.0, reserve: bool = False) -> None:
-        """设置/清除方块外侧状态环（折叠态 26px 方块无法用整行流光表达运行态）
+        ⚠️ 内缩改的是**方块**而非容器：容器在紧凑态放大到 26px，方块恒 20px，
+        因此状态来去时方块几何与缩写字号完全不变（零跳变），也不会像
+        「有态内缩 / 无态恢复」那样每次切换抖 6px。
+        """
+        inset = max(0, int(inset))
+        if self._block_inset == inset:
+            return
+        self._block_inset = inset
+        self.update()
 
-        state："" 清除 / streaming / question / error。
-        reserve：为 True 时方块恒内缩 3px 给环留位（无环状态下也内缩），
-        避免状态来去时方块尺寸抳跳。环与方块之间留 1px 间隙——环颜色常常
-        与角色色同色系，贴着方块边缘画会被方块自身颜色吃掉（实测蓝底蓝环
-        完全分不出）。
+    def set_status_ring(self, state: str, phase: float = 0.0) -> None:
+        """设置/清除方块外侧状态环（折叠窄条 20px 方块无法用整行流光表达运行态）
+
+        state："" 清除 / streaming / question / error。相位驱动流式弧旋转与
+        待答呼吸，由 TabPanel 的动画定时器逐帧推进。
         """
         state = state if state in ("streaming", "question", "error") else ""
-        if self._ring_state == state and abs(self._ring_phase - phase) < 1e-6 and self._ring_reserved == reserve:
+        if self._ring_state == state and abs(self._ring_phase - phase) < 1e-6:
             return
         self._ring_state = state
         self._ring_phase = phase
-        self._ring_reserved = reserve
         self.update()
 
     def _ring_color(self) -> QColor:
-        """按状态 + 相位算环色：streaming 彩虹轮回 / question 橙黄，两者 alpha 呼吸；
-        error 恒亮红（三者中唯一需要一眼确定的事实，不参与呼吸）"""
+        """按状态 + 相位算环色：streaming 彩虹色相轮转 / question 橙黄，两者 alpha 呼吸；
+        error 恒亮红（三者中唯一需要一眼确定的事实，不参与呼吸）
+
+        沿用团队块策略（用户定案）：环色与方块项目色**不同色系**——方块就是项目
+        色，同色系 2px 细线会被方块吃掉（实测绿方块配绿环完全看不出环）。
+
+        但**不能直接复用 _RAINBOW_COLORS**：那是给整行流光用的高亮色表（还额外
+        提亮 55），2px 细线在浅色主题的侧栏底/选中底上会淡到接近不可见。这里改
+        按主题定 S/L、只让色相随相位轮转，浅色主题压暗、深色主题提亮。
+
+        streaming 靠色相轮转 + alpha 呼吸表达「在转」，不画 dash 缺口：26px 尺度
+        上 3/4 环的缺口只会读成「断线边框」而非「在转」。
+        """
         if self._ring_state == "error":
             return _QColor(_CACHED_ERROR_RED)
         alpha = max(150, min(255, int(196 + _math.sin(_math.radians(self._ring_phase)) * 59)))
         if self._ring_state == "question":
             c = _QColor(245, 158, 11)
         else:
-            idx = int((self._ring_phase / 360) * _RAINBOW_N) % _RAINBOW_N
-            base = _RAINBOW_COLORS[idx]
-            # 环压在角色色块上，同色系靠亮度拉开层次
-            c = _QColor(min(255, base.red() + 55), min(255, base.green() + 55), min(255, base.blue() + 55))
+            dark = isDarkTheme()
+            c = _QColor.fromHslF(
+                (self._ring_phase % 360) / 360.0,
+                0.80 if dark else 0.72,
+                0.68 if dark else 0.44,
+            )
         c.setAlpha(alpha)
         return c
 
@@ -436,12 +360,9 @@ class _TabProjectIcon(QWidget):
 
         # ── 项目头像模式：直接画圆角矩形 + 自适应字色 ──
         if self._initials:
-            block = (
-                rect.adjusted(self._RING_INSET, self._RING_INSET, -self._RING_INSET, -self._RING_INSET)
-                if self._ring_reserved
-                else rect
-            )
-            radius = 4 if self._ring_reserved else 5
+            inset = self._block_inset
+            block = rect.adjusted(inset, inset, -inset, -inset) if inset else rect
+            radius = 4 if inset else 5
             painter.setPen(Qt.NoPen)
             painter.setBrush(self._color)
             painter.drawRoundedRect(block, radius, radius)
@@ -477,15 +398,34 @@ class _TabProjectIcon(QWidget):
                     painter.drawPixmap(rect, p, p.rect())
 
     def _paint_status_ring(self, painter, rect) -> None:
-        """方形外侧状态环：2px 描边，内缩 1px；与内缩后的方块自然留 1px 间隙"""
+        """方块外侧状态环（折叠/展开同一套）
+
+        3px 圆角方环，内缩 1px、圆角 5px，与内缩 3px 的方块同心并留 1px 空隙。
+        线宽从 2px 提到 3px：2px 在 26px 外框上太细，扫视时几乎读不到（实测）。
+
+        三态靠**色彩与呼吸**区分：
+        - streaming：彩虹色相轮转 + alpha 呼吸（团队块既有动效，用户定案）
+        - question：橙黄，alpha 与环径双呼吸（慢，3s 一周期）
+        - error：红，常亮无呼吸（报错是需一眼确认的事实，不该持续吵）
+
+        ⚠️ 不要给 streaming 画 dash 缺口：26px 尺度上 3/4 环的缺口只会读成
+        「断线边框」，不读成「在转」。也不用项目色派生环色：方块就是项目色，
+        同色系细线会被方块吃掉。
+        """
         if not self._ring_state:
             return
         painter.setBrush(Qt.NoBrush)
         pen = QPen(self._ring_color())
-        pen.setWidth(2)
+        pen.setWidth(3)
         pen.setJoinStyle(Qt.RoundJoin)
+
+        inset = 1.5
+        if self._ring_state == "question":
+            # 环径 ±0.5px 呼吸：单靠 alpha 在浅色主题上对比度变化不明显
+            inset = 1.5 + _math.sin(_math.radians(self._ring_phase)) * 0.5
+        ring = QRectF(rect).adjusted(inset, inset, -inset, -inset)
         painter.setPen(pen)
-        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 5, 5)
+        painter.drawRoundedRect(ring, 5, 5)
 
 
 class TabItem(QFrame):
@@ -549,6 +489,8 @@ class TabItem(QFrame):
         self._icon_widget.setToolTip(self._title)
         self._apply_project_to_icon()
         layout.addWidget(self._icon_widget)
+        # 外框恒留状态环位（折叠/展开都画环），方块尺寸由 block_inset 恒定
+        self._apply_compact_icon_box(False)
 
         # ── 团队角色胶囊（默认隐藏）──
         self._capsule_label = QLabel(self)
@@ -641,6 +583,7 @@ class TabItem(QFrame):
         if new_size != self._icon_size:
             self._icon_size = new_size
             self._icon_widget.setFixedSize(self._icon_size, self._icon_size)
+            self._apply_compact_icon_box(self._compact)
             self._apply_project_to_icon()
         self._refresh_tree_indent()
         self._apply_title_style()
@@ -657,18 +600,39 @@ class TabItem(QFrame):
         self._streaming = streaming
         self._stream_error = error
         self._sync_compact_ring()
+        self._sync_icon_tooltip()
         self.update()
 
     def set_question(self, question: bool):
         """设置"提问等待回答"态：仅点亮橙色脉动指示条"""
         self._question = question
         self._sync_compact_ring()
+        self._sync_icon_tooltip()
         self.update()
 
     def set_title(self, title: str):
         self._title = title
         self._title_label.setText(title)
-        self._icon_widget.setToolTip(title)
+        self._sync_icon_tooltip()
+
+    def _sync_icon_tooltip(self) -> None:
+        """折叠态 icon tooltip = 标题 + 状态文案（hover 即确认状态，零视觉成本）
+
+        折叠窄条只有方块可见，标题不可见；环只表达「有事在发生」，
+        具体是流式/待答/报错靠 tooltip 补全。展开态标题本身就可见，不重复。
+        """
+        if not self._compact:
+            self._icon_widget.setToolTip(self._title)
+            return
+        if self._stream_error:
+            state = "上次运行出错"
+        elif self._streaming:
+            state = "正在生成…"
+        elif self._question:
+            state = "等待你的回答"
+        else:
+            state = ""
+        self._icon_widget.setToolTip(f"{self._title}\n{state}" if state else self._title)
 
     def _apply_project_to_icon(self):
         """将项目信息交给 _TabProjectIcon 绘制；无项目数据时隐藏色块（对齐团队框惯例）"""
@@ -806,6 +770,8 @@ class TabItem(QFrame):
             else:
                 self._apply_project_to_icon()
                 self._icon_widget.setVisible(True)
+            # 团队/非团队行高不同（32 / 40），紧凑态外框随之换档
+            self._apply_compact_icon_box(True)
         else:
             # 树行化：无图标形态，不因模式切换重新点亮色块
             self._icon_widget.setVisible(not team_mode and not self._tree_row)
@@ -834,6 +800,25 @@ class TabItem(QFrame):
         if m[0] != left:
             self.layout().setContentsMargins(left, m[1], m[2], m[3])
 
+    _ICON_BOX = 26  # 图标外框（方块 20px + 外环 3px + 间隙 1px）
+    _ICON_BOX_TEAM = 24  # 团队模式列表态成员行仅 32px 高，外框收一档
+
+    def _apply_compact_icon_box(self, compact: bool) -> None:
+        """图标容器给状态环留位：容器放大、方块尺寸恒定
+
+        只改容器尺寸与方块内缩，**不改方块尺寸**：方块恒 20px、缩写字恒 11px，
+        状态来去零几何跳变。若改成「有态内缩、无态恢复」，每次切换方块会在
+        20↔14px 之间抖 6px，多 tab 列表里会看到方块集体抽一下。
+
+        折叠/展开同一套外框（环在两种形态下都绘制）：普通 tab 行 40px → 26px；
+        团队模式（列表态）成员行 32px → 24px。两档下方块恒 20px，缩写字同号。
+        """
+        _ = compact  # 两种形态同档：环始终绘制，外框不再随折叠切换
+        box = scale_icon_size(self._ICON_BOX_TEAM if self._team_mode else self._ICON_BOX)
+        if self._icon_widget.width() != box:
+            self._icon_widget.setFixedSize(box, box)
+        self._icon_widget.set_block_inset(max(0, (box - self._icon_size) // 2))
+
     def _apply_compact_icon(self):
         """紧凑态团队模式：用角色胶囊首字符 + 胶囊色绘制图标（折叠态成员可区分）
 
@@ -854,22 +839,18 @@ class TabItem(QFrame):
         self._sync_compact_ring()
 
     def _sync_compact_ring(self) -> None:
-        """折叠态团队成员块状态环（紧凑 + 团队模式才启用）
+        """图标状态环（折叠/展开都启用，项目 icon 与团队角色块共用同一套）
 
-        折叠窄条只剩 26px 方块，整行流光在这个尺寸下糊成一片、看不清运行态。
-        改用方块外侧 2px 环编码：流式彩虹轮回 + 呼吸 / 待答橙黄呼吸 /
-        报错红色常亮。非紧凑或非团队模式一律清环（项目 icon 不带运行态）。
+        状态只集中在 icon 一个锚点：折叠窄条下整行流光糊成一片，展开态左侧那条
+        随相位变色的粗边与选中底色打架。两种形态统一用 icon 外侧环表达——
+        流式彩虹色相轮转 + 呼吸 / 待答橙黄双呼吸 / 报错红色常亮。
 
-        环位恒预留（reserve=True）：无状态时方块也内缩，状态来去不抳尺寸。
         相位在 _on_anim_tick 中逐帧推进（与本方法同源，不另设定时器）。
         """
-        if not (self._compact and self._team_mode):
-            self._icon_widget.set_status_ring("")
-            return
-        state, phase = self._compact_ring_spec()
-        self._icon_widget.set_status_ring(state, phase, reserve=True)
+        state, phase = self._ring_spec()
+        self._icon_widget.set_status_ring(state, phase)
 
-    def _compact_ring_spec(self):
+    def _ring_spec(self):
         """返回 (state, phase)，供 set_status_ring 与动画帧共用"""
         if self._stream_error:
             return "error", 0.0
@@ -915,12 +896,17 @@ class TabItem(QFrame):
             self._close_btn.setVisible(False)
             self._pin_btn.setVisible(False)
             self.layout().setContentsMargins(4, 4, 4, 4)
+            # 紧凑态图标外框放大（方块恒定 20px + 外侧 2px 环 + 1px 间隙）。
+            # 只放大容器不放大方块：状态来去时方块几何与缩写字号零变化。
+            self._apply_compact_icon_box(True)
             if self._team_mode:
                 self._apply_compact_icon()
             elif self._project_initials and self._project_color and not self._tree_row:
                 # 无项目数据（如临时对话页）保持色块隐藏；树行化无图标形态同样保持隐藏
                 self._icon_widget.setVisible(True)
+            self._sync_icon_tooltip()
         else:
+            self._apply_compact_icon_box(False)
             saved = self._compact_saved or {}
             # 团队模式 / 树行化：icon 恒隐藏；其余恢复原可见性
             if self._team_mode or self._tree_row:
@@ -943,6 +929,7 @@ class TabItem(QFrame):
                 self.layout().setContentsMargins(*saved["margins"])
             self._compact_saved = None
             self._sync_compact_ring()
+            self._sync_icon_tooltip()
         self.update()
 
     def clear_capsule(self):
@@ -1067,51 +1054,13 @@ class TabItem(QFrame):
                     hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
                 painter.fillPath(_round_rect, hover_grad)
 
-        # ── 流式/错误状态 ──
-        _is_resizing = bool(self._panel and self._panel._is_resizing)
-        # 折叠态团队成员块：26px 方块上整行流光只会糊成一片，状态改由方块内圈
-        # 状态环表达（见 _sync_compact_ring）。此处只保留选中时的左侧指示条。
-        _compact_member = self._compact and self._team_mode
-        if self._streaming or self._stream_error:
-            # 共用扫描相位：流式彩虹循环 / 报错红色循环
-            phase = self._panel._anim_phase if self._panel else 0
-            # 左侧指示条只在选中时显示；未选中的状态仅保留内部流光脉冲
-            if self._stream_error:
-                # 报错：内部红色流光脉冲（选中时叠加红色指示条）
-                _err_color = _QColor(_CACHED_ERROR_RED)
-                if self._selected:
-                    _draw_left_indicator(painter, _round_rect, h, _err_color)
-                if not _compact_member:
-                    _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_ERROR_COLORS, _is_resizing)
-            else:
-                # 流式：内部彩虹流光（选中时叠加彩色循环指示条，相位驱动颜色循环）
-                idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
-                if self._selected:
-                    _draw_left_indicator(painter, _round_rect, h, _RAINBOW_COLORS[idx])
-                if not _compact_member:
-                    _draw_shimmer(painter, _round_rect, w, phase, _shimmer_rainbow_colors(idx), _is_resizing)
-        elif self._question:
-            # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
-            phase = self._panel._question_phase if self._panel else 0
-            # 内部橙黄流光脉冲（选中时叠加橙黄指示条，与流式同款流光动效）
-            if not self._selected:
-                if not _compact_member:
-                    _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
-            else:
-                # resize 期间跳过 sin 计算取固定亮度
-                if _is_resizing:
-                    alpha = 150
-                else:
-                    # 动画帧速 +8°/帧 ≈ 3s 一周期；亮度在 ~80~220 间脉动
-                    alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
-                _question_color = _QColor(245, 158, 11)
-                _question_color.setAlpha(max(0, min(255, alpha)))
-                _draw_left_indicator(painter, _round_rect, h, _question_color)
-                if not _compact_member:
-                    _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
-        elif self._selected and not self._tree_row:
-            # 左侧选中指示条（贴合圆角曲线）——树行选中由淡靛蓝底表达，无左条
-            _draw_left_indicator(painter, _round_rect, h, _CACHED_INFO)
+        # ── 状态表达：只由 icon 外侧状态环承担 ──
+        # 整行流光与左侧指示条全部移除：
+        #   ① 折叠窄条下流光只会糊成一片；
+        #   ② 左侧那条 3px 粗边（选中蓝条 / 随相位变色的状态条）在圆角处外凸，
+        #      是侧栏最显眼的视觉脏点，用户明确要求去掉；
+        #   ③ 状态集中于 icon 一个锚点，扫视成本最低，且与选中底色互不干扰。
+        # 选中态完全由圆角底色表达（见上方 fillPath）。
 
         # ── 树行化：左侧从属引导竖线（最后画，不被选中底色盖住）──
         if self._tree_row:
@@ -4257,10 +4206,9 @@ class TabPanel(QWidget):
             # 跳过不可见标签（多标签横向滚动时大部分 item 已滚出视口）：
             # update() 对不可见控件只是排队一次无效重绘。
             if item.isVisible() and (item._streaming or item._stream_error or item._question):
-                # 折叠态团队成员块的环相位同样逐帧推进（环在 icon 内绘制，
+                # 图标状态环的相位逐帧推进（环在 icon 内绘制，
                 # 仅置 phase 不主动 update：下方 item.update() 会带出重绘）
-                if item._compact and item._team_mode:
-                    item._icon_widget.set_status_ring(*item._compact_ring_spec(), reserve=True)
+                item._icon_widget.set_status_ring(*item._ring_spec())
                 item.update()
 
     def _reapply_scroll_styles(self):
