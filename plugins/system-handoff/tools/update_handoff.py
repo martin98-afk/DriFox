@@ -48,9 +48,8 @@ _UPDATE_HANDOFF_SCHEMA = {
                 "switch": {
                     "type": "boolean",
                     "description": (
-                        "写完这份交接后是否立即开一个新会话继续。"
-                        "任务到了可交接的边界（一段工作收尾、要换阶段）时设为 true；"
-                        "只是想暂存进度、本轮还会继续干活时不要传。"
+                        "写完是否立即开新会话继续，默认为 true：写完就切，新会话读交接接着干。"
+                        "仅当本轮还要继续干活、只想暂存进度时传 false。"
                     ),
                 },
             },
@@ -127,7 +126,8 @@ def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
     steps = (
         ("session.interrupt", {}),
         ("session.new", {}),
-        ("session.send", {"text": _CONTINUE_PROMPT, "ephemeral": True}),
+        # 自动继续是用户可见的一条新消息，走默认（显示气泡、入会话、可回查）
+        ("session.send", {"text": _CONTINUE_PROMPT}),
     )
     for cap_id, kwargs in steps:
         fn = caps_for(cap_id)
@@ -139,7 +139,7 @@ def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
             return
 
 
-def _update_handoff_impl(content: str = "", switch: bool = False, tool_ctx: Optional[Dict] = None) -> ToolResult:
+def _update_handoff_impl(content: str = "", switch: bool = True, tool_ctx: Optional[Dict] = None) -> ToolResult:
     """写入/覆盖当前会话的交接文档
 
     Args:

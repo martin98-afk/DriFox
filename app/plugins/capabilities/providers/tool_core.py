@@ -220,7 +220,7 @@ def register(registry) -> None:
         def new_session() -> bool:
             return queue.enqueue(wid, "new", {})
 
-        def send(text: str, *, ephemeral: bool = True) -> bool:
+        def send(text: str, *, ephemeral: bool = False) -> bool:
             return queue.enqueue(wid, "send", {"text": str(text or ""), "ephemeral": bool(ephemeral)})
 
         return {"interrupt": interrupt, "new": new_session, "send": send}

@@ -97,8 +97,9 @@ def test_trigger_enqueues_when_over_threshold(monkeypatch):
         "caps_for",
         lambda cap: kv if cap == "state.kv" else (lambda *a, **kw: sent.append((a, kw))),
     )
-    assert mod.hook("PostToolUse", {"token_count": 90, "token_limit": 100}) == ""
-    assert len(sent) == 1
+    out = mod.hook("PostToolUse", {"token_count": 90, "token_limit": 100})
+    assert "上下文交接" in out          # 提示直接进上下文，模型下一轮就能看到
+    assert len(sent) == 1               # 队列里仍留一条兜底
     assert "handoff_active" in kv.data
 
 

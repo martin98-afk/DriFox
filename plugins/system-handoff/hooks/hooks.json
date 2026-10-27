@@ -33,7 +33,7 @@
           {
             "type": "python",
             "function": ".auto_compact_trigger:hook?threshold=0.60",
-            "add_output_to_context": false,
+            "add_output_to_context": true,
             "statusMessage": "上下文交接:",
             "id": "system_handoff_auto_compact"
           }

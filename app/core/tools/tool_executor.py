@@ -566,6 +566,33 @@ class ToolExecutor:
             trigger_async=False,
         )
 
+        # ====== PostToolUse 纯文本输出直接入队（不依赖 HookManager 完成回调）======
+        # 回调 `_on_finished_callback` 在多窗口/多 HookManager 实例下可能设在别的
+        # 实例上，hook 明明返回了文本却无人接（实测全天日志 0 条 "queued for worker"）。
+        # 这里按 add_to_context 语义自己入队：纯文本注入上下文，JSON 交给下方
+        # replaceContent 约定处理，不重复注入。
+        try:
+            from app.core.conversation.backend import _format_hook_output
+
+            _queue = getattr(self._backend, "_hook_message_queue", None)
+            for _r in results or ():
+                if not _r.success or not _r.output:
+                    continue
+                _text = _r.output.strip()
+                if not _text or _text.startswith("{"):
+                    continue
+                if _queue is not None:
+                    _queue.put(
+                        {
+                            "role": "user",
+                            "content": _format_hook_output("PostToolUse", _text, _r.status_message),
+                            "_hook_event": "PostToolUse",
+                        }
+                    )
+                    self._backend._hook_messages_updated.emit()
+        except Exception:
+            pass
+
         # ====== PostToolUse hook 替换工具结果内容（hookSpecificOutput 约定）======
         # 适用场景：hook 需要对工具结果做脱敏/过滤/加密，再给大模型。
         #
