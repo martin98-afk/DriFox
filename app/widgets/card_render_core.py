@@ -3382,6 +3382,25 @@ def _dispatch_render_done(seq: int, fut, wself) -> None:
         pass  # viewer C++ 对象已销毁（sip deleted），丢弃
 
 
+def _dispatch_final_render_done(seq: int, fut, wself, md_len: int = 0) -> None:
+    """[PERF-final-async] 终渲染通道的 Future 完成回调（worker 线程执行）。
+
+    与 _dispatch_render_done 同构，额外透传提交时的 md 长度供落地打点
+    （cleanup 会清 _markdown_text，回调时读不到原长度）。
+    """
+    try:
+        html = fut.result()
+    except Exception as _e:
+        html = None
+    viewer = wself()
+    if viewer is None:
+        return  # viewer 已被回收，丢弃结果
+    try:
+        viewer.renderDone.emit(seq, html)  # seq<0，_on_render_done_signal 分流终渲染
+    except RuntimeError:
+        pass  # viewer C++ 对象已销毁（sip deleted），丢弃
+
+
 # ── Skeleton 全局缓存：_load_skeleton 返回的 HTML 字符串（~54KB）在
 # 多张卡片间共享，避免每张卡片独立构造大段 CSS/JS 模板。
 # 缓存键：(is_light, theme_fingerprint, font_family, ...)

@@ -475,19 +475,24 @@ class ConversationExecutor:
         safe_connect("retry_resolved", "retry_resolved")
         safe_connect("context_updated", "context_updated")
 
-    def stop(self) -> List[Dict]:
+    def stop(self, timeout_ms: Optional[int] = None) -> List[Dict]:
         """停止当前 Worker，返回中断的消息（同步方式，可能阻塞 UI 线程）
 
         内部使用两阶段停止：
         1. cancel_worker() - 非阻塞操作
-        2. finalize_stop() - 阻塞操作（wait + 获取消息 + 清理）
+        2. finalize_stop(timeout_ms) - 阻塞操作（wait + 获取消息 + 清理）
+
+        Args:
+            timeout_ms: 等待 worker 退出的总预算（ms），None = 默认 3000+1000。
+                UI 主线程路径（切会话/点停止）应传 300~500，避免同步等待拖死 UI
+                （实测切历史会话时主线程阻塞可达 4s）。
 
         如果需要在 UI 线程中快速响应，建议分别调用：
           executor.cancel_worker()        # 立即返回
           QTimer.singleShot(0, lambda: ... executor.finalize_stop())
         """
         self.cancel_worker()
-        return self.finalize_stop()
+        return self.finalize_stop(timeout_ms=timeout_ms)
 
     def cleanup(self):
         """清理当前 Worker（B6: 超时转后台延迟清理，不阻塞线程安全收尾）"""

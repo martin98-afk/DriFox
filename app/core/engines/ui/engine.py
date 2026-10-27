@@ -606,6 +606,32 @@ class UIEngine(BaseEngine):
         # 本地估算校正系数（除数）：服务商能力 > app.config 覆盖 > 模型名兜底
         ratio = resolve_token_ratio(llm_config, model)
 
+        # [PERF] 快照级缓存：键含消息版本/模型/权威值/系统提示，命中即返回拷贝。
+        # 背景：下方 project_for_ui（全量消息过 8 层 tier）+ 逐条 token 估算 +
+        # breakdown 重算全部在主线程；消费方 _refresh_context_usage_indicator
+        # 每轮落定/每工具结果后都调（500ms 节流只限频不限量），长会话线性劣化。
+        # session._messages_version 由 set_messages/append 等写入口 bump，
+        # 键不匹配即失效，无 TTL 也正确；校准因子 EMA 写回属副作用，同版本
+        # 重复调用跳过无碍（同一观测不二次并入）。
+        _cache_key = (
+            id(session),
+            getattr(session, "_messages_version", 0),
+            model,
+            api_prompt_tokens,
+            from_api,
+            len(session.messages),
+            hash(system_prompt),
+        )
+        _cached = getattr(self, "_ctx_usage_cache", None)
+        if _cached and _cached.get("key") == _cache_key and _cached.get("value") is not None:
+            _snap = _cached["value"]
+            # 浅重建：防消费方（ring.set_usage）原地修改缓存内的 breakdown/compaction
+            return {
+                **_snap,
+                "compaction": dict(_snap.get("compaction", {}) or {}),
+                "breakdown": [dict(b) for b in (_snap.get("breakdown") or [])],
+            }
+
         # S2: 上下文投影（ui stage）— 与 send stage 共用同一 cascade，
         # 保证「UI 估算 = 实际发送量」是结构性一致，不再手工重复截断。
         # ui stage 禁止副作用（不落盘、不调 LLM），且 tier 只产出新列表、
@@ -783,7 +809,7 @@ class UIEngine(BaseEngine):
                     compacted_tokens = int(used_tokens * summarized_count / total_count * 0.3)
                     normal_tokens = used_tokens - compacted_tokens
 
-        return {
+        snapshot = {
             "used_tokens": used_tokens,
             "budget_tokens": budget_tokens,
             "percent": percent,
@@ -793,6 +819,8 @@ class UIEngine(BaseEngine):
             "breakdown": breakdown,
             "pruned_tokens": pruned_tokens,
         }
+        self._ctx_usage_cache = {"key": _cache_key, "value": snapshot}
+        return snapshot
 
     @staticmethod
     def _update_token_calibration(session, model: str, observed_ratio: float) -> None:
@@ -941,7 +969,22 @@ class UIEngine(BaseEngine):
 
     def _on_error(self, error: str):
         # 错误路径也触发 PostAssistantMessage（让 hook 能感知失败）
-        self._trigger_post_assistant_message(error, is_error=True)
+        # [PERF] 移出主线程：error_occurred 从 worker 经 QueuedConnection 回主线程，
+        # 此处 trigger_async=False 会在主线程同步执行全部匹配 hook——n==1 的
+        # COMMAND hook 是主线程 subprocess（默认超时 30s），PROMPT/PYTHON 注入型
+        # 同样主线程，UI 冻结无上界。保持 trigger_async=False 语义（F1 W1-C1：
+        # 异步会让 command hook 输出注入 LLM 上下文，污染对话），只把执行线程
+        # 挪到 daemon 线程：hook_manager 本就支持多线程 trigger_event
+        # （chat_worker/PreSendWorker 同款先例），hook 输出仍在返回值中、不消费。
+        import threading
+
+        threading.Thread(
+            target=self._trigger_post_assistant_message,
+            args=(error,),
+            kwargs={"is_error": True},
+            daemon=True,
+            name="post-assistant-error-hook",
+        ).start()
         self._emit("error", error)
 
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):

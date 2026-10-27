@@ -9,6 +9,7 @@
 - 增量更新
 """
 
+import copy
 import os
 import re
 import shutil
@@ -416,6 +417,11 @@ class HistoryManager:
         # 后台预热线程与主线程首次访问可能并发进入 _ensure_history_loaded，
         # 必须串行化防止双重加载/读到半初始化 _history_sessions。
         self._history_load_lock = threading.Lock()
+        # [PERF] 异步写盘串行化：_save_write_lock 保证同一时刻只有一个后台线程
+        # 在写 SQLite；_save_seq 递增序号用于丢弃已被更新请求超越的陈旧快照
+        # （防抖 timer 到期与 flush 交叉时，旧快照后完成会覆盖新内容）。
+        self._save_write_lock = threading.Lock()
+        self._save_seq = 0
 
         # === 轻量列表缓存 ===
         # get_history_list() 的结果缓存，避免每次调用都排序+过滤+重建 dict。
@@ -2050,8 +2056,22 @@ class HistoryManager:
         if self._save_timer is None:
             self._save_timer = QTimer.singleShot(self._save_delay_ms, self._do_save)
 
-    def _do_save(self):
-        """延迟保存会话到 SQLite"""
+    def _do_save(self, synchronous: bool = False):
+        """延迟保存会话到 SQLite
+
+        [PERF] 默认异步：主线程只解析 pending 并捕获待保存快照引用，
+        serialize+zstd+写盘全部转后台线程（原实现在主线程 QTimer 回调里同步
+        save_session，全量 blob 序列化 50KB~500KB，大会话每轮落定必卡一拍）。
+        SessionStore 每线程独立连接，flush_async / 后台 finalize 已有同款先例。
+
+        Args:
+            synchronous: True 时保持主线程同步写（flush() 语义：退出/关键保存点
+                必须写完成再返回，防 daemon 线程随进程退出被杀丢数据）。
+
+        竞态说明：捕获后主线程仍可能 update_session 同一记录（pop+insert 新
+        dict），后台写的是捕获时快照——该更新会再次 _schedule_save 排新一轮
+        防抖写盘，最终一致（最后一次写盘必为最新快照）。
+        """
         self._save_timer = None
 
         if not (self._use_sqlite and self._session_store):
@@ -2065,29 +2085,78 @@ class HistoryManager:
             self._pending_save_session_id = None
             return
 
-        logger.debug(f"[HistoryManager] 保存会话: pending_id={pending_id[:8]}...")
+        # 主线程捕获待保存快照引用（列表遍历不与后台写盘并发）
+        target = None
         for session in self._history_sessions:
             if session.get("session_id") == pending_id:
-                # 🛡️ 空消息守卫（收窄版）：只拦截「内存释放态」——记录 messages
-                # 被 _release_inactive_session_messages / remove_session(
-                # release_messages_only=True) 置空且打了 _messages_released 标记。
-                # 旧实现一刀切 `not messages` 跳过，把**显式清空**也一并吞掉
-                # （/compact --clear、auto-compact 的目标状态本来就是空列表）→
-                # 清空只在内存生效、DB 保留旧消息、任何重载都把旧消息读回
-                # （"无法清空"根因）。判据换成释放标记后两类空列表可区分：
-                # 「无数据可写」跳过，「明确要写空」照写。
-                if not session.get("messages") and session.get("_messages_released"):
-                    logger.warning(f"[HistoryManager] 跳过空消息会话保存（内存已释放）: session_id={pending_id[:8]}...")
-                    break
-                self._session_store.save_session(session)
+                target = session
                 break
-
         self._pending_save_session_id = None
-        # 🛡️ 本进程刚写库：WAL 提交会推进 -wal 的 mtime，若不刷新变更签名，
-        # 下一次 get_history_list 的 _reload_if_db_changed 会把自己的写入误判为
-        # 「其他进程修改」→ 先 flush 再从 SQLite 全量重载（实测 1915 条约 19ms，
-        # 且持 _history_load_lock），每轮对话结束后的首次刷新都白跑一次重载。
-        # 签名滞后刷新 = 只把自己造成的变更记为已对齐。
+        if target is None:
+            logger.debug(f"[HistoryManager] 待保存会话不在列表中: {pending_id[:8]}...")
+            return
+
+        # 🛡️ 空消息守卫（收窄版）：只拦截「内存释放态」——记录 messages
+        # 被 _release_inactive_session_messages / remove_session(
+        # release_messages_only=True) 置空且打了 _messages_released 标记。
+        # 旧实现一刀切 `not messages` 跳过，把**显式清空**也一并吞掉
+        # （/compact --clear、auto-compact 的目标状态本来就是空列表）→
+        # 清空只在内存生效、DB 保留旧消息、任何重载都把旧消息读回
+        # （"无法清空"根因）。判据换成释放标记后两类空列表可区分：
+        # 「无数据可写」跳过，「明确要写空」照写。
+        if not target.get("messages") and target.get("_messages_released"):
+            logger.warning(f"[HistoryManager] 跳过空消息会话保存（内存已释放）: session_id={pending_id[:8]}...")
+            return
+
+        store = self._session_store
+
+        # 🛡️ 快照隔离：save_session 会**就地修改**入参 messages
+        # （_persist_vision_image_blocks 把 data:image 块替换成 image_ref，
+        # _backfill_offload_light_messages 往消息上回填字段），后台线程若直接
+        # 持有 session 本体，就会与主线程（UI/agent_trace 正在读同一份
+        # session.messages）并发读写同一批 dict。
+        # deepcopy 只复制 dict/list 骨架：str/bytes/int 是原子类型，大体积
+        # base64 载荷按引用共享不复制。实测 300 条/585KB 会话约 1.5ms，
+        # 相比被替代的同步 serialize+zstd+写盘（大会话 700ms+）可忽略。
+        snapshot = dict(target)
+        snapshot["messages"] = copy.deepcopy(target.get("messages") or [])
+
+        # 🛡️ 写盘序号：多次保存可能并发（防抖 timer 到期与 flush 交叉），
+        # 后台线程完成顺序无保证，旧快照后完成会把新内容覆盖回旧内容
+        # （会话末尾几条消息丢失）。序号 + 轮次锁保证「最后一次写盘 = 最新快照」。
+        self._save_seq += 1
+        seq = self._save_seq
+
+        if synchronous:
+            with self._save_write_lock:
+                store.save_session(snapshot)
+            self._refresh_db_signature()
+            return
+
+        logger.debug(f"[HistoryManager] 后台保存会话: {pending_id[:8]}...")
+
+        def _write():
+            with self._save_write_lock:
+                # 持锁后复核：若期间已有更晚的保存请求入队，本次快照已陈旧，
+                # 直接放弃写盘（更晚那次必然在本次之后拿到锁并写入更新内容）。
+                if seq < self._save_seq:
+                    return
+                try:
+                    store.save_session(snapshot)
+                except Exception as e:
+                    logger.warning(f"[HistoryManager] 后台保存会话失败: {e}")
+                    return
+            # 🛡️ 本进程刚写库：WAL 提交会推进 -wal 的 mtime，若不刷新变更签名，
+            # 下一次 get_history_list 的 _reload_if_db_changed 会把自己的写入误判为
+            # 「其他进程修改」→ 先 flush 再从 SQLite 全量重载（实测 1915 条约 19ms，
+            # 且持 _history_load_lock），每轮对话结束后的首次刷新都白跑一次重载。
+            # 签名滞后刷新 = 只把自己造成的变更记为已对齐（后台读 mtime 同样有效）。
+            self._refresh_db_signature()
+
+        threading.Thread(target=_write, daemon=True, name="history-save").start()
+
+    def _refresh_db_signature(self):
+        """写库后刷新变更签名（原 _do_save 尾部逻辑抽出，同步/后台路径共用）"""
         try:
             if self._use_sqlite and self._session_store is not None:
                 self._db_signature_stored = self._db_signature()
@@ -2105,7 +2174,9 @@ class HistoryManager:
         （main_widget.py 退出/保存点）行为不变。
         """
         if self._save_timer is not None or self._pending_save_session_id:
-            self._do_save()
+            # synchronous=True：退出/关键保存点必须写完成再返回（daemon 后台写
+            # 线程会随进程退出被杀，不能用于本语义）
+            self._do_save(synchronous=True)
         # 穿透到 db 层：同步提交 SQLite 挂起事务（攒批窗口内的写立即落盘）
         # 🛡️ P4-C1-Y1（devil-advocate 复核）：flush 失败透传 error 日志
         # （退出链经本方法最终落 db.close()，由 close 的失败保留逻辑兜底）。
@@ -2137,9 +2208,10 @@ class HistoryManager:
         多活写盘的几百 ms，用户无感。
 
         竞态说明：
-        - 捕获后主线程仍可能 update_session 同一记录（pop+insert 新 dict），
-          后台写的是捕获时的快照引用——关窗路径窗口已 _is_destroyed，
-          消息不再变更，安全；其他路径调用方自行保证时序。
+        - 捕获后主线程仍可能 update_session 同一记录（pop+insert 新 dict）。
+          与 _do_save 一致，这里深拷贝一份快照进线程：save_session 内部会
+          **就地修改** messages（vision 落盘替换块、offload 字段回填），
+          共享 session 本体等于让后台线程改 UI 正在读的数据。
         - _save_timer 已排队回调触发 _do_save 时读 pending_id=None 早退，
           不会与后台线程双写。
         """
@@ -2160,12 +2232,18 @@ class HistoryManager:
             return
         store = self._session_store
         db = getattr(store, "_db", None) if store is not None else None
+        snapshot = dict(target)
+        snapshot["messages"] = copy.deepcopy(target.get("messages") or [])
 
         def _bg_flush():
             try:
-                store.save_session(target)
-                if db is not None and getattr(db, "is_connected", False):
-                    db.flush()
+                # 持写锁串行化：这是关窗/退出前的最后保存点，不参与 seq 跳过
+                # （即便期间有更晚的快照入队，本线程非 daemon 保证一定写完，
+                # 且它深拷贝的就是当前最新状态）。
+                with self._save_write_lock:
+                    store.save_session(snapshot)
+                    if db is not None and getattr(db, "is_connected", False):
+                        db.flush()
             except Exception as e:
                 logger.error(f"[HistoryManager] flush_async 后台保存失败: {e}")
 

@@ -954,15 +954,20 @@ class ChatBackend(QObject):
         self._subagent_model_resolver = resolver
 
     # ========== 插件系统初始化 ==========
-    def stop_streaming(self):
+    def stop_streaming(self, timeout_ms: Optional[int] = None):
         """停止流式输出（同步方式，可能阻塞 UI 线程）
 
         Stop hook 已移至 chat_worker 退出循环前触发，此处不再重复触发。
-        执行流程：cancel_worker() → finalize_stop()（阻塞等待 worker 线程结束，
-        worker return 前会同步触发 Stop hook）。
+        执行流程：cancel_worker() → finalize_stop(timeout_ms)（阻塞等待 worker
+        线程结束，worker return 前会同步触发 Stop hook）。
+
+        Args:
+            timeout_ms: 等待 worker 退出的总预算（ms）。None = 默认 3000+1000，
+                适合后台/关闭场景；**UI 主线程路径必须传 300~500**，
+                避免 Stop hook（command 类型默认超时 30s）拖死界面。
         """
         if self._chat_engine:
-            return self._chat_engine.stop()
+            return self._chat_engine.stop(timeout_ms=timeout_ms)
 
     def cancel_streaming(self):
         """非阻塞取消流式输出
@@ -1259,12 +1264,16 @@ class ChatBackend(QObject):
             "project_name": self._current_project or (os.path.basename(project_root) if project_root else ""),
         }
 
-        # Worktree / git 分支信息（project_root 为空时 GitWorktreeDetector.get_repo_info 会返回 None）
+        # Worktree / git 分支信息
+        # [PERF] 用 stale-while-revalidate 版本：本方法在 PreUserMessage 每条消息
+        # 前于主线程触发，get_repo_info 在 TTL(30s) 过期后会同步跑 5+N 个 git
+        # 子进程（Windows+Defender 下每个 100-300ms），直接卡 UI。改用只读缓存
+        # + 过期后台刷新（与 SessionStart 路径 _build_session_context 同款语义）。
         try:
             from app.utils.git_worktree import GitWorktreeDetector
 
             if project_root:
-                repo_info = GitWorktreeDetector.get_repo_info(project_root)
+                repo_info = GitWorktreeDetector.get_repo_info_stale_while_revalidate(project_root)
                 if repo_info and repo_info.worktrees:
                     ctx["worktree"] = {
                         "repo_name": os.path.basename(repo_info.root),

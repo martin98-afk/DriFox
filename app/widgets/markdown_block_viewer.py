@@ -2509,7 +2509,9 @@ class MarkdownBlockViewer(QWidget):
 
             return True
 
-        stripped = md_text.rstrip()
+        # [PERF] avoid full-copy rstrip on every stream tick: skip rstrip when tail is not whitespace
+
+        stripped = md_text.rstrip() if md_text and md_text[-1] in " \t\r\n" else md_text
 
         return stripped.endswith("</think>") or stripped.endswith("```")
 
@@ -2520,9 +2522,17 @@ class MarkdownBlockViewer(QWidget):
 
         """兼容 MessageCard.append_text：句号类软边界检测。"""
 
-        stripped = (md_text or "").rstrip()
+        # [PERF] avoid full-copy rstrip: walk back over trailing whitespace (usually 0-2 steps)
 
-        return bool(stripped) and stripped[-1] in "。！？!?.；;"
+        s = md_text or ""
+
+        i = len(s) - 1
+
+        while i >= 0 and s[i] in " \t\r\n":
+
+            i -= 1
+
+        return i >= 0 and s[i] in "。！？!?.；;"
 
 
     # ── 内部 ──

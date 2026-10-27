@@ -12,6 +12,7 @@ Git Worktree 检测和管理工具
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -114,6 +115,9 @@ class GitWorktreeDetector:
     # git root 对固定 workdir 极稳定（git init/重建仓库才变），长 TTL 减少
     # 关窗/保存路径的冷启动子进程（Windows + Defender 下每个 git 进程 100-300ms）
     _DETECT_CACHE_TTL = 300.0
+    # [PERF] stale-while-revalidate：后台刷新去重集合与锁（主线程永不跑 git 子进程）
+    _refreshing: set = set()
+    _refresh_lock = threading.Lock()
 
     @staticmethod
     def _is_git_available() -> bool:
@@ -395,6 +399,56 @@ class GitWorktreeDetector:
         )
         GitWorktreeDetector._cache_set(GitWorktreeDetector._info_cache, path, info)
         return info
+
+    @staticmethod
+    def get_repo_info_stale_while_revalidate(path: str) -> Optional["GitRepoInfo"]:
+        """主线程安全版 get_repo_info：命中缓存（忽略 TTL）立即返回，过期后台刷新。
+
+        背景：get_repo_info 缓存过期时会同步跑 5+N 个 git 子进程（detect_git /
+        is_worktree ×2 / branch / worktree list + N 个 rev-list，Windows+Defender
+        下每个 100-300ms），而 PreUserMessage 每条消息在主线程触发一次上下文构建
+        （backend._build_worktree_context_dict）——间隔超 TTL 的首条消息必然卡 UI。
+
+        本方法主线程永不执行 git 子进程：
+        - 缓存有任何值（含过期）→ 立即返回旧值；过期则起 daemon 线程刷新
+        - 无缓存 → 返回 None，同时起后台线程预热（下次调用命中）
+
+        30s 陈旧窗口对「分支名 / 工作树列表」这类展示型上下文可接受
+        （SessionStart 路径 _build_session_context 的 _cache_get 同款语义）。
+        缓存失效仍是主动的：worktree-manager 增删工作树时 _invalidate_info_cache。
+        """
+        if not path:
+            return None
+        entry = GitWorktreeDetector._info_cache.get(path)
+        info = entry[0] if entry else None
+        if info is None:
+            # 无缓存（首次访问或历史缓存为 None 哨兵）：后台预热，本次拿不到就给 None
+            GitWorktreeDetector._spawn_info_refresh(path)
+            return None
+        import time as _time
+
+        if _time.monotonic() - entry[1] >= GitWorktreeDetector._CACHE_TTL:
+            GitWorktreeDetector._spawn_info_refresh(path)
+        return info
+
+    @staticmethod
+    def _spawn_info_refresh(path: str):
+        """后台线程刷新 repo info（同 path 去重：已有刷新在跑则跳过）"""
+        with GitWorktreeDetector._refresh_lock:
+            if path in GitWorktreeDetector._refreshing:
+                return
+            GitWorktreeDetector._refreshing.add(path)
+
+        def _run():
+            try:
+                GitWorktreeDetector.get_repo_info(path)
+            except Exception:
+                pass
+            finally:
+                with GitWorktreeDetector._refresh_lock:
+                    GitWorktreeDetector._refreshing.discard(path)
+
+        threading.Thread(target=_run, daemon=True, name="git-info-refresh").start()
 
     @staticmethod
     def get_main_repo_path(worktree_path: str) -> Optional[str]:
