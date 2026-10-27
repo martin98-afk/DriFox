@@ -140,6 +140,7 @@ from app.widgets.card_render_core import (
     _sanitize_incomplete_markdown,
     _skeleton_cache,
     _tail_before_unclosed_block,
+    _text_has_protocol_tag,
     _unwrap_code_blocks_with_context_links,
     _update_icon_prefix,
     _wrap_code_blocks_with_copy_button_web,
@@ -6042,11 +6043,13 @@ class CodeWebViewer(QWebEngineView):
         if not self.isVisible():
             return
         try:
-            # 防御：过滤掉可能出现在正文 chunk 中的 <think> / </think> 标签
-            # （防止增量显示标签，全量渲染会正确处理）
-            text_clean = text.replace("<think>", "").replace("</think>", "")
-            if not text_clean:
+            # chunk 级协议标签守卫：含 think/tool/插件注册 tag（开或闭）的 chunk
+            # 一律不做纯文本注入。`append_text` 的守卫只看「累积后是否未闭合」，
+            # 闭合瞬间那一批（如 `取舍…\n</plan>`）会放行 → 内容以正文闪现，
+            # 下一次全量渲染把它变成折叠卡后又消失（碎片级泄漏）。
+            if _text_has_protocol_tag(text):
                 return
+            text_clean = text
             # 内存优化：超长 chunk 截断增量推送，避免单次 JS 调用传输过大数据
             # 全量渲染最终会提供完整格式化后的内容
             if len(text_clean) > 2000:

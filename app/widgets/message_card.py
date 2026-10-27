@@ -207,6 +207,7 @@ from app.widgets.card_render_core import (
     _restore_fenced_code,
     _sanitize_incomplete_markdown,
     _tail_before_unclosed_block,
+    _text_has_protocol_tag,
     _unwrap_code_blocks_with_context_links,
     _update_icon_prefix,
     _wrap_code_blocks_with_copy_button_web,
