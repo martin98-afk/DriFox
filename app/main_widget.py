@@ -974,6 +974,10 @@ class OpenAIChatToolWindow(ToolWindow):
     _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
     # [T4-4] diff 统计后台计算结果回主线程：tool_call_id, stats(dict|None)
     _diff_stats_ready = pyqtSignal(str, object)
+    # [PERF] 落定路径整轮 diff 统计后台计算结果回主线程：card, stats(dict|None)
+    _round_diff_stats_ready = pyqtSignal(object, object)
+    # [PERF] 图片附件后台编码完成回主线程：上下文打包 dict（含 user_content）
+    _deferred_send_ready = pyqtSignal(object)
     userInterventionRequested = pyqtSignal(dict)
     executionResultProduced = pyqtSignal(str)
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
@@ -1225,6 +1229,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._interrupt_complete.connect(self._on_finalize_complete)
         # [T4-4] diff 统计后台计算完成 → 主线程校验卡片存活后落数字
         self._diff_stats_ready.connect(self._on_diff_stats_ready)
+        self._round_diff_stats_ready.connect(self._on_round_diff_stats_ready)
+        self._deferred_send_ready.connect(self._on_deferred_send_ready)
         # ★ B5：停止/关窗后台 finalize 幂等锁（防止 stop 按钮与 closeEvent 双触发双 finalize）
         self._bg_finalize_lock = threading.Lock()
         self._bg_finalize_started = False
@@ -2973,9 +2979,9 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             logger.exception("Failed to auto-save current session before creating a branched session")
 
-        # 停止当前对话并清理
+        # 停止当前对话并清理（UI 主线程：短超时预算，防 Stop hook 拖死界面）
         if self._is_streaming and self.backend.chat_engine:
-            self.backend.stop_streaming()
+            self.backend.stop_streaming(timeout_ms=500)
             self._is_streaming = False
             self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
             self._toggle_send_stop(False)
@@ -6972,7 +6978,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 已停止，活跃工具结果不再到达，keep_dock 会永久保留坞态。
                 self._current_assistant_card.finish_streaming(force_dock_off=True)
             try:
-                interrupted = self.backend.stop_streaming()
+                interrupted = self.backend.stop_streaming(timeout_ms=500)
                 if interrupted:
                     self._apply_interrupted_messages_to_session(interrupted)
             except Exception as e:
@@ -7097,7 +7103,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 # 清空语义下中断消息无需回写 session（即将整体清空），
                 # 旧 worker 延迟快照由下方 _post_compact_guard 拦截
-                self.backend.stop_streaming()
+                self.backend.stop_streaming(timeout_ms=500)
             except Exception as e:
                 logger.warning(f"[MainWidget] 压缩清空前停止流式失败: {e}")
             # 停流后收尾团队邮件（对齐 _create_new_session 的成熟写法），
@@ -11414,7 +11420,7 @@ class OpenAIChatToolWindow(ToolWindow):
             #    永不触发 → _set_ai_state("idle") 永不执行 → TabPanel 边框动画
             #    停留在 streaming（"正在对话"模式不消失）。
             try:
-                interrupted = self.backend.stop_streaming()
+                interrupted = self.backend.stop_streaming(timeout_ms=500)
                 if interrupted:
                     self._apply_interrupted_messages_to_session(interrupted)
                     # 中断消息已应用到 session，确保后续 _auto_save_current_session 不跳过
@@ -15657,6 +15663,19 @@ class OpenAIChatToolWindow(ToolWindow):
         if not hasattr(self, "node_preview") or _is_sip_deleted(self.node_preview):
             return
 
+        # [PERF] 版本守卫：一轮落定链（save 尾部 / _do_post_stream_cleanup /
+        # 引擎错误路径）会对本方法触发 2~3 次，每次都全量遍历 session.messages
+        # 重建节点。消息版本未变 = 内容未变 = 预览必然相同，直接跳过。
+        # 版本由 session 写入口（set_messages/append 等）bump，切换会话后
+        # 新 session 的 version 可能相同，键里带上 session id。
+        _ver_key = (
+            getattr(session, "session_id", ""),
+            getattr(session, "_messages_version", 0),
+        )
+        if getattr(self, "_last_node_preview_ver", None) == _ver_key:
+            return
+        self._last_node_preview_ver = _ver_key
+
         # 使用辅助函数构建 node preview 数据
         node_data = build_node_preview_from_session(session, content_to_text, max_len=30)
 
@@ -18994,7 +19013,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 因 is_streaming=False 忽略 stream_finished，idle 永不触发）。
             self._set_ai_state("idle")
             try:
-                interrupted = self.backend.stop_streaming()
+                # [PERF] UI 主线程热路径：短超时预算。executor 注释自证实测主线程
+                # 阻塞可达 4s（默认 3000+1000），Stop hook（command 类型默认 30s）
+                # 跑完前 wait 一直卡。500ms 内未退出转 requestInterruption+延迟清理。
+                interrupted = self.backend.stop_streaming(timeout_ms=500)
                 if interrupted:
                     self._apply_interrupted_messages_to_session(interrupted)
                     self._session_dirty = True
@@ -19637,75 +19659,163 @@ class OpenAIChatToolWindow(ToolWindow):
             if session and self.backend.tool_executor:
                 self.backend.set_session_context(session.session_id)
 
-            # 图片附件 base64 编码（在 UI 已渲染后执行，用户感知不到）
-            _user_content = None
+            # [PERF] 图片 base64 编码（读文件+base64/压缩/降采样，5MB≈30ms/张）
+            # 移后台线程：多张大图时主线程卡一段（原实现有意推迟到 UI 渲染后
+            # 仅为降低感知，未消除阻塞）。编码是纯数据转换（QImage 为非 QObject
+            # 值类，非 GUI 线程可用），完成经信号回主线程继续发送（daemon 线程
+            # 无事件循环，不能在 worker 里 QTimer.singleShot，同 _diff_stats_ready
+            # 的既有模式）。无图片时直接同步收尾，路径行为不变。
             if _image_paths:
-                _user_content = self._encode_image_attachments_to_multimodal(
-                    user_text=user_text,
-                    image_paths=_image_paths,
-                    model_name=_model_name,
-                )
-            # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
-            engine_kwargs = {}
-            if _user_content is not None:
-                engine_kwargs["_user_content"] = _user_content
-            # hook_event 透传给引擎：消息写入 session.messages 时带 _hook_event 标记
-            # （None 时不写入，保持历史行为不变）
-            if hook_event:
-                engine_kwargs["_hook_event"] = hook_event
-            # 图片附件路径透传给引擎：session 消息打 _image_attachments 标记，
-            # 恢复会话时渲染缩略图预览条（此前漏传导致历史加载不显示图片预览）
-            if _image_paths:
-                engine_kwargs["_image_attachments"] = list(_image_paths)
-            # 原始输入元数据透传：session 消息打 _input_attachments/_raw_input_text 标记，
-            # 撤回（撤销到这里）时依此保真回填附件 chips 与占位符正文
-            if _input_attachments:
-                engine_kwargs["_input_attachments"] = list(_input_attachments)
-            if _raw_input_text:
-                engine_kwargs["_raw_input_text"] = _raw_input_text
-            # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
-            # add_user_message 修改 session.messages。即使后续被 / 命令拦截
-            # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
-            self._session_dirty = True
-            if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
-                self._is_streaming = False
-                self._toggle_send_stop(False)
-                assistant_card.deleteLater()
-                # 🆕 补清引用：deleteLater 是延迟删除（下一轮事件循环 C++ 对象才销毁），
-                # 若不置 None，期间 _refresh_context_usage_indicator 等仍会取到
-                # _current_assistant_card 并访问已删除 QLabel → RuntimeError。
-                # 与 L13885-13886 规范写法对齐。
-                self._current_assistant_card = None
+                _ctx = {
+                    "user_text": user_text,
+                    "hook_event": hook_event,
+                    "image_paths": list(_image_paths),
+                    "input_attachments": list(_input_attachments) if _input_attachments else None,
+                    "raw_input_text": _raw_input_text,
+                    "session_id": session.session_id if session else None,
+                    "assistant_card": assistant_card,
+                }
+
+                def _encode_worker():
+                    try:
+                        _uc = self._encode_image_attachments_to_multimodal(
+                            user_text=user_text,
+                            image_paths=_image_paths,
+                            model_name=_model_name,
+                        )
+                    except Exception:
+                        logger.exception("[ImageAttach] 后台编码图片附件失败")
+                        _uc = None
+                    self._deferred_send_ready.emit({**_ctx, "user_content": _uc})
+
+                threading.Thread(target=_encode_worker, daemon=True, name="image-encode").start()
                 return
-
-            # 同步 batch 结构：_message_batch 已包含新 user batch
-            self._sync_batch_structures()
-            # 给新创建的用户卡片设置正确的 _message_index（_append_user_message 中未设置）
-            self._fix_new_card_message_index(user_text=user_text)
-            # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
-            self._advance_visible_batch_window()
-            self._register_new_cards_into_batches()
-
-            # 🆕 发送纪元 +1：新一轮 worker 已启动。压缩守卫（_post_compact_guard）
-            # 依赖 epoch 判定"清空后新 worker"，其结果不得被当作旧快照丢弃
-            # （团队成员自动压缩后回复不可见 bug 修复核心点之一）
-            self._send_epoch += 1
-
-            # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
-            if session:
-                # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
-                # → mail-only 会话也能触发标题生成（之前被误伤跳过）
-                user_msg_count = sum(
-                    1
-                    for m in session.messages
-                    if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
-                )
-                if user_msg_count == 1:
-                    self._maybe_generate_topic_summary()
-            # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
-            self._update_history_questions_badge()
+            self._finish_deferred_send(
+                user_text=user_text,
+                hook_event=hook_event,
+                image_paths=None,
+                input_attachments=_input_attachments,
+                raw_input_text=_raw_input_text,
+                session=session,
+                assistant_card=assistant_card,
+                user_content=None,
+            )
 
         QTimer.singleShot(0, _do_deferred_send)
+
+    def _on_deferred_send_ready(self, ctx: dict):
+        """[PERF] 图片后台编码完成，回主线程继续发送"""
+        self._finish_deferred_send(
+            user_text=ctx.get("user_text") or "",
+            hook_event=ctx.get("hook_event"),
+            image_paths=ctx.get("image_paths"),
+            input_attachments=ctx.get("input_attachments"),
+            raw_input_text=ctx.get("raw_input_text"),
+            session=None,  # 下方按 session_id 重新解析（编码期间可能已切会话）
+            assistant_card=ctx.get("assistant_card"),
+            user_content=ctx.get("user_content"),
+            expect_session_id=ctx.get("session_id"),
+        )
+
+    def _finish_deferred_send(
+        self,
+        user_text: str,
+        hook_event: Optional[str],
+        image_paths: Optional[list],
+        input_attachments: Optional[list],
+        raw_input_text: Optional[str],
+        session,
+        assistant_card,
+        user_content,
+        expect_session_id: Optional[str] = None,
+    ):
+        """_do_deferred_send 的发送收尾段（编码完成后主线程执行）
+
+        expect_session_id 非空时（图片异步编码路径）校验当前会话未切换：
+        编码期间用户切会话则放弃发送并回滚 UI，防把旧会话的图发进新会话。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+
+        if expect_session_id is not None:
+            session = self.session_manager.get_current_session() if self.session_manager else None
+            cur_sid = session.session_id if session else None
+            if cur_sid != expect_session_id:
+                logger.warning("[ImageAttach] 编码期间会话已切换，放弃本次发送并回滚 UI")
+                self._is_streaming = False
+                self._toggle_send_stop(False)
+                if assistant_card is not None:
+                    try:
+                        assistant_card.deleteLater()
+                    except RuntimeError:
+                        pass
+                    self._current_assistant_card = None
+                return
+            # 编码期间间隔较长，重设 tool_executor 的 session 上下文（同步路径
+            # 在 _do_deferred_send 开头已设；此处对齐该行为）
+            if session and self.backend.tool_executor:
+                self.backend.set_session_context(session.session_id)
+
+        # 图片附件路径透传给引擎：session 消息打 _image_attachments 标记，
+        # 恢复会话时渲染缩略图预览条（此前漏传导致历史加载不显示图片预览）
+        engine_kwargs = {}
+        if user_content is not None:
+            engine_kwargs["_user_content"] = user_content
+        # hook_event 透传给引擎：消息写入 session.messages 时带 _hook_event 标记
+        # （None 时不写入，保持历史行为不变）
+        if hook_event:
+            engine_kwargs["_hook_event"] = hook_event
+        if image_paths:
+            engine_kwargs["_image_attachments"] = list(image_paths)
+        # 原始输入元数据透传：session 消息打 _input_attachments/_raw_input_text 标记，
+        # 撤回（撤销到这里）时依此保真回填附件 chips 与占位符正文
+        if input_attachments:
+            engine_kwargs["_input_attachments"] = list(input_attachments)
+        if raw_input_text:
+            engine_kwargs["_raw_input_text"] = raw_input_text
+        # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
+        # add_user_message 修改 session.messages。即使后续被 / 命令拦截
+        # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
+        self._session_dirty = True
+        if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
+            self._is_streaming = False
+            self._toggle_send_stop(False)
+            assistant_card.deleteLater()
+            # 🆕 补清引用：deleteLater 是延迟删除（下一轮事件循环 C++ 对象才销毁），
+            # 若不置 None，期间 _refresh_context_usage_indicator 等仍会取到
+            # _current_assistant_card 并访问已删除 QLabel → RuntimeError。
+            # 与 L13885-13886 规范写法对齐。
+            self._current_assistant_card = None
+            return
+
+        # 同步 batch 结构：_message_batch 已包含新 user batch
+        self._sync_batch_structures()
+        # 给新创建的用户卡片设置正确的 _message_index（_append_user_message 中未设置）
+        self._fix_new_card_message_index(user_text=user_text)
+        # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+        self._advance_visible_batch_window()
+        self._register_new_cards_into_batches()
+
+        # 🆕 发送纪元 +1：新一轮 worker 已启动。压缩守卫（_post_compact_guard）
+        # 依赖 epoch 判定"清空后新 worker"，其结果不得被当作旧快照丢弃
+        # （团队成员自动压缩后回复不可见 bug 修复核心点之一）
+        self._send_epoch += 1
+
+        # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
+        if session is None:
+            session = self.session_manager.get_current_session()
+        if session:
+            # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
+            # → mail-only 会话也能触发标题生成（之前被误伤跳过）
+            user_msg_count = sum(
+                1
+                for m in session.messages
+                if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+            )
+            if user_msg_count == 1:
+                self._maybe_generate_topic_summary()
+        # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
+        self._update_history_questions_badge()
 
     # ── 繁忙时发送：插话 / 排队 ──────────────────────────────────────
 
@@ -21314,8 +21424,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self.history_manager:
             self._save_current_session_to_history()
-            # 🛡️ 立即落盘，确保数据写入 SQLite
-            self.history_manager.flush()
+            # 🛡️ 尽快落盘。[PERF] flush()→flush_async()：flush 是主线程同步
+            # serialize+zstd+fsync（大会话 700ms+，flush_async 注释自证），且本路径
+            # 在 _on_stream_finished 已 save 过一次（脏标记挡掉重复 save，但 flush
+            # 照跑）。改异步后写盘转后台线程，崩溃丢失窗口与原 1s 防抖同级；
+            # 退出路径仍由 aboutToQuit 的同步 flush 兜底。
+            self.history_manager.flush_async()
             # 流式完成后同步 batch 结构，确保 _message_batch 包含完整的 assistant batch
             self._sync_batch_structures()
             # 修复：同步可见范围，避免回收机制误删当前轮次的卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
@@ -21349,8 +21463,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 对话完成后刷新余额显示
         self._refresh_balance()
 
-        # 更新当前助手卡片差异统计
-        self._update_card_diff_stats()
+        # 更新当前助手卡片差异统计（[PERF] 后台线程计算，主线程只落数字）
+        self._update_card_diff_stats(background=True)
 
     def _update_card_diff_stats_for_call(self, tool_call_id: str, card=None):
         """单个工具完成后增量更新卡片差异统计（直接用 call_id 查 file_recorder，不依赖 session.messages）
@@ -21478,11 +21592,17 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[DiffStats] 应用后台统计失败: {e}")
 
-    def _update_card_diff_stats(self, card=None):
+    def _update_card_diff_stats(self, card=None, background: bool = False):
         """计算助手卡片的文件修改统计并更新到页脚
 
         Args:
             card: 可选，指定要更新的卡片；不传则使用 _current_assistant_card
+            background: True 时把 collect+compute 挪到 daemon 线程，结果经
+                _round_diff_stats_ready 信号回主线程落数字。落定收尾路径
+                （_do_post_stream_cleanup）必须传 True：collect_operations_for_round
+                要读备份文件+当前文件再跑 difflib，>200KB 文件上会突破单帧预算
+                （同 _schedule_card_diff_stats_for_call 注释自证）。批量时间片
+                队列路径保持同步（自身已有 16ms 预算切片）。
         """
         if card is None:
             card = getattr(self, "_current_assistant_card", None)
@@ -21501,16 +21621,63 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         try:
+            call_ids = self._get_tool_call_ids_in_round(round_index)
+            if not call_ids:
+                return
+        except Exception as e:
+            logger.warning(f"[DiffStats] 收集 call_ids 失败: {e}")
+            return
+
+        if not background:
+            self._apply_round_diff_stats_sync(card, session.session_id, call_ids)
+            return
+
+        # ---- 后台路径：防同卡堆积 → daemon 线程 → 信号回主线程 ----
+        pending = getattr(self, "_pending_round_diff_cards", None)
+        if pending is None:
+            pending = set()
+            self._pending_round_diff_cards = pending
+        card_key = id(card)
+        if card_key in pending:
+            return  # 上一次还没算完，跳过（防线程堆积）
+        pending.add(card_key)
+        recorder = self.backend.file_recorder
+        session_id = session.session_id
+
+        def _worker():
+            stats = None
+            try:
+                from app.widgets.ui_helpers import (
+                    collect_operations_for_round,
+                    compute_diff_stats,
+                )
+
+                operations = collect_operations_for_round(recorder, session_id, call_ids)
+                if operations:
+                    stats = compute_diff_stats(operations)
+            except Exception as e:
+                logger.warning(f"[DiffStats] 后台整轮统计失败: {e}")
+                stats = None
+            try:
+                self._round_diff_stats_ready.emit(card, stats)
+            except RuntimeError:
+                # 窗口已销毁：跨线程信号投递失败，槽不会执行，此处兜底清标记
+                # （正常路径**必须**留到槽里清——worker 里清会在主线程槽执行前
+                # 就把标记摘掉，同一张卡的第二次请求又能起一个新线程，
+                # 防堆积机制形同虚设）
+                pending.discard(card_key)
+
+        threading.Thread(target=_worker, daemon=True, name="round-diff-stats").start()
+
+    def _apply_round_diff_stats_sync(self, card, session_id: str, call_ids):
+        """同步计算并落地整轮 diff 统计（原 _update_card_diff_stats 主体）"""
+        try:
             from app.widgets.ui_helpers import (
                 collect_operations_for_round,
                 compute_diff_stats,
             )
 
-            call_ids = self._get_tool_call_ids_in_round(round_index)
-            if not call_ids:
-                return
-
-            operations = collect_operations_for_round(self.backend.file_recorder, session.session_id, call_ids)
+            operations = collect_operations_for_round(self.backend.file_recorder, session_id, call_ids)
             if not operations:
                 return
 
@@ -21523,6 +21690,28 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
         except Exception as e:
             logger.warning(f"[DiffStats] 计算差异统计失败: {e}")
+
+    def _on_round_diff_stats_ready(self, card, stats) -> None:
+        """[PERF] 后台整轮 diff 统计落地：校验卡片存活后覆盖式设置（原语义）"""
+        pending = getattr(self, "_pending_round_diff_cards", None)
+        if pending is not None:
+            pending.discard(id(card))
+        if not stats:
+            return
+        if not (stats.get("files") or stats.get("additions") or stats.get("deletions")):
+            return
+        try:
+            if sip.isdeleted(card):
+                return
+            card.set_diff_stats(
+                files_count=stats["files"],
+                additions=stats["additions"],
+                deletions=stats["deletions"],
+            )
+        except RuntimeError:
+            pass
+        except Exception as e:
+            logger.warning(f"[DiffStats] 应用后台整轮统计失败: {e}")
 
     # 差异统计批量消费：单时间片预算（毫秒）。每张卡要读备份文件 + 当前文件
     # + difflib，单卡实测受文件大小影响，取与懒渲染同级的 16ms 预算。
@@ -24670,6 +24859,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._auto_save_current_session()
             except Exception:
                 pass
+        # [PERF-log] enqueue=True 的 loguru sink：退出前冲后台写盘队列，
+        # 防尾部日志（含崩溃前最后几行）随进程退出丢失。放在保存循环之后，保存过程日志也能冲盘。
+        try:
+            from loguru import logger as _logger
+
+            _logger.complete()
+        except Exception:
+            pass
 
     def _get_team_members_snapshot_json(self) -> str:
         """获取团队成员快照 JSON 字符串（供会话落库，F3 第 2 层）。

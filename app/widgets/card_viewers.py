@@ -107,6 +107,7 @@ from app.widgets.card_render_core import (
     _accent_rgba,
     _defer_emit,
     _dispatch_render_done,
+    _dispatch_final_render_done,
     _extract_closed_segments,
     _extract_fenced_code,
     _extract_formulas,
@@ -812,6 +813,14 @@ class CodeWebViewer(QWebEngineView):
         self._render_seq: int = 0
         self._render_inflight: bool = False
         self._render_pending: Optional[tuple] = None
+        # [PERF-final-async] 终渲染独立通道：负向递减序号（与 _render_seq 正向递增
+        # 区分，renderDone 信号里按符号分流）。_cleanup_render_cache 不推进它——
+        # cleanup 的 _render_seq += 1 本意是杀流式在途任务，若终渲染复用 _render_seq，
+        # 提交后立刻被 cleanup 判过期 → 终渲染永不落地（卡片停在流式形态）。
+        # 作废时机与 _render_seq 同步：卡片复用重置/主题切换/新 _sequence_render/
+        # finish_streaming/销毁，各处 _final_render_seq -= 1。
+        self._final_render_seq: int = 0
+        self._final_render_inflight: bool = False
         # [render-diag] 渲染管线分支计数（停摆定位用临时打点，5s 汇总进 all.log）
         from collections import Counter as _Counter
 
@@ -1395,6 +1404,9 @@ class CodeWebViewer(QWebEngineView):
         self._render_seq += 1
         self._render_inflight = False
         self._render_pending = None
+        # [PERF-final-async] 同步作废在途终渲染（复用后旧终态不得落到新卡片）
+        self._final_render_seq -= 1
+        self._final_render_inflight = False
         # [T6] 复用前摘出主题补渲队列：复用后本 viewer 已属新卡片，残留的
         # 旧主题补渲会打到新内容上（或空转打断新卡的流式节拍）
         _theme_rerender_queue.discard(self)
@@ -5843,10 +5855,15 @@ class CodeWebViewer(QWebEngineView):
         """
         if not md_text:
             return False
-        # 段落结束（双换行）：用原文本检测，因 rstrip 会移除尾部换行
+        # 段落结束（双换行）：O(1) 后缀检测
         if md_text.endswith("\n\n"):
             return True
-        # think 块 / 代码块闭合：用 rstrip 处理尾部空白
+        # think 块 / 代码块闭合：rstrip 后判尾部。
+        # ⚠️ 不要改成尾部锚定正则（曾试过 `</think>[\s]*$|```[\s]*$`）：
+        # re 无法跳到串尾，多分支尾部匹配是全串逐位回溯，实测比 rstrip 慢 3x；
+        # 而 CPython 的 str.rstrip() 在无可剥离字符时**返回同一对象**
+        # （'abc'.rstrip() is 'abc' → True），流式正文绝大多数帧尾部无空白，
+        # 原写法本就是零拷贝。
         stripped = md_text.rstrip()
         return stripped.endswith("</think>") or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
 
@@ -5864,8 +5881,14 @@ class CodeWebViewer(QWebEngineView):
         """
         if not md_text:
             return False
-        stripped = md_text.rstrip()
-        return bool(stripped) and stripped[-1] in _SENTENCE_END_CHARS
+        # [PERF] 从尾向前跳空白，不做 rstrip 全量拷贝（流式每拍调用）。
+        # ⚠️ 必须用 str.isspace() 而非手写 " \t\r\n"：无参 rstrip 剥离的是
+        # Unicode 空白全集（\x0b/\x0c/\xa0/\u3000 等），手写 4 字符会漏判
+        # → 正文以「。」+全角空格结尾时不触发增量渲染，退化成等 300ms 定时器。
+        i = len(md_text) - 1
+        while i >= 0 and md_text[i].isspace():
+            i -= 1
+        return i >= 0 and md_text[i] in _SENTENCE_END_CHARS
 
     def append_chunk(self, text: str):
         if not text:
@@ -6298,6 +6321,9 @@ class CodeWebViewer(QWebEngineView):
         # [B3] 主题变化：递增渲染序号使在途线程池任务过期（旧主题 HTML 丢弃），
         # 强制后续 _schedule_render 以新主题重新提交渲染。
         self._render_seq += 1
+        # [PERF-final-async] 同步作废在途终渲染（旧主题终态不得落地）
+        self._final_render_seq -= 1
+        self._final_render_inflight = False
         # [B1] 主题变化：差量 HTML 缓存失效（旧主题高亮/图标颜色），强制全量重渲染
         self._needs_full_render = True
         self._stable_html = ""
@@ -6474,13 +6500,21 @@ class CodeWebViewer(QWebEngineView):
                     self._sequence_render(self._markdown_text, self._tool_compact_mode)
                     return
                 else:
-                    # ⚠️ 结束态（_final_render_pending）必须保持同步：
-                    # MessageCard.finish_streaming 在 viewer.finish_streaming() 之后
-                    # 立即调用 _cleanup_render_cache()，而它会 `self._render_seq += 1`
-                    # （本意是让在途流式渲染过期）。异步提交的结果回来时 seq 已变，
-                    # 被 _apply_render_result 判定过期直接丢弃 → 最终渲染永远不落地
-                    # （卡片停在流式形态、高度不收敛）。要保持结束态异步就必须把
-                    # cleanup 推迟到渲染落地之后，属另一处改造。
+                    # ⚠️ 结束态同步约束已解除（[PERF-final-async]）：
+                    # 原因：MessageCard.finish_streaming 在 viewer.finish_streaming()
+                    # 之后立即调 _cleanup_render_cache()，它 `self._render_seq += 1`
+                    # （本意杀在途流式任务）会把复用 _render_seq 的终渲染判过期。
+                    # 现解法：长内容终渲染走独立 _final_render_seq 通道
+                    # （cleanup 不推进它），流式在途任务照常被 cleanup 杀掉，
+                    # 终渲染结果经 renderDone 负序号分流照常落地。主线程不再承担
+                    # md.convert+Pygments 的 20-120ms；短内容渲染成本低于线程池
+                    # 往返，保持同步。
+                    if len(self._markdown_text) > self._ASYNC_HISTORY_RENDER_MIN_CHARS:
+                        self._last_rendered_markdown = self._markdown_text
+                        self._height_report_pending = True
+                        self._final_render_pending = False
+                        self._sequence_final_render(self._markdown_text)
+                        return
                     html_content = self._render_markdown_to_html(self._markdown_text)
                 self._final_render_pending = False
                 self._last_rendered_markdown = self._markdown_text
@@ -6839,6 +6873,9 @@ class CodeWebViewer(QWebEngineView):
         """
         if self._render_inflight:
             self._render_seq += 1
+            # [PERF-final-async] 新序列渲染提交，作废在途终渲染
+            self._final_render_seq -= 1
+            self._final_render_inflight = False
             self._render_pending = None
 
     def _sequence_render(self, md: str, compact: bool):
@@ -6848,6 +6885,9 @@ class CodeWebViewer(QWebEngineView):
         - 防抖：在途任务未完成时，新请求只覆盖 _render_pending；完成后续派最新
         """
         self._render_seq += 1
+        # [PERF-final-async] 新序列渲染提交，作废在途终渲染
+        self._final_render_seq -= 1
+        self._final_render_inflight = False
         seq = self._render_seq
         if self._render_inflight:
             # 在途：只记录最新 pending，完成回调后统一续派
@@ -6865,10 +6905,94 @@ class CodeWebViewer(QWebEngineView):
         wself = weakref.ref(self)
         fut.add_done_callback(lambda f, s=seq, w=wself: _dispatch_render_done(s, f, w))
 
+    def _sequence_final_render(self, md: str):
+        """[PERF-final-async] 终渲染异步通道：提交线程池，结果经独立序号落地。
+
+        与 _sequence_render 的区别：
+        - 序号走 _final_render_seq（负向递减），_cleanup_render_cache 不推进它——
+          cleanup 的 _render_seq += 1 只杀流式在途任务，终渲染结果照常落地；
+        - 无防抖积压：终渲染一次提交一次落地，期间新提交直接作废旧序号；
+        - 回调 _apply_final_render_result 复刻同步终渲染的应用段
+          （入图检测 + save/restore 或裸 updateContent）。
+
+        Args:
+            md: 提交渲染的 markdown 快照（cleanup 清 _markdown_text 后仍可渲染）
+        """
+        self._final_render_seq -= 1
+        seq = self._final_render_seq
+        self._final_render_inflight = True
+        snapshot = self._collect_render_snapshot(md, compact=self._tool_compact_mode)
+        try:
+            fut = _RENDER_POOL.submit(_render_markdown_to_html_worker, snapshot)
+        except RuntimeError:
+            # 线程池已关闭（进程退出）：降级同步渲染 + 立即应用
+            self._final_render_inflight = False
+            self._apply_final_render_result(seq, self._render_markdown_to_html(md), len(md or ""))
+            return
+        wself = weakref.ref(self)
+        _md_len = len(md or "")
+        fut.add_done_callback(lambda f, s=seq, w=wself, n=_md_len: _dispatch_final_render_done(s, f, w, n))
+
+    def _apply_final_render_result(self, seq: int, html, md_len: int = 0):
+        """[PERF-final-async] 终渲染异步结果落地（复刻同步终渲染的应用段）。
+
+        与 _apply_render_result 的差异：不做差量基线推进（cleanup 已清稳定区，
+        终态不再走差量）；应用后不持有 _last_rendered_html（与同步路径一致，
+        HTML 已交付 DOM，避免常驻双份）。
+        """
+        if seq != self._final_render_seq:
+            # 已被新提交作废（复用/主题切换/新一轮渲染/销毁）
+            self._rdiag_hit("final_seq_drop")
+            return
+        self._final_render_inflight = False
+        if html is None:
+            return
+        if sip.isdeleted(self) or not self.page():
+            return
+        self._final_render_pending = False
+        # [T24] 终态全量产物入图检测（只置不清）
+        self._mark_has_charts(html)
+        # save/restore 判定与同步路径一致（字段 cleanup 不清）：工具 DOM 被 JS
+        # 增量注入或存在待 restore 完成块时需 save/restore 保护，否则裸更新。
+        _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
+        _kind = "finish" if getattr(self, "_finish_t0", 0.0) > 0.0 else "history"
+        _t_ser = time.perf_counter()
+        if _needs_save_restore:
+            _gen = self._tool_dom_dirty_gen
+            _js_code = self._build_save_and_restore_js(
+                html,
+                getattr(self, "_restore_finished_ids", set()),
+                drop_empty_streaming=True,
+            )
+            _ser_ms = (time.perf_counter() - _t_ser) * 1000
+            if FINISH_TIMING_ENABLED or _ser_ms >= 8:
+                logger.info(
+                    f"[finish-render] kind={_kind} path=save_restore async "
+                    f"md={md_len} html={len(html)} dumps={_ser_ms:.1f}ms"
+                )
+            self.page().runJavaScript(_js_code, lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g))
+        else:
+            _payload = json.dumps(html).decode("utf-8")
+            _ser_ms = (time.perf_counter() - _t_ser) * 1000
+            if FINISH_TIMING_ENABLED or _ser_ms >= 8:
+                logger.info(
+                    f"[finish-render] kind={_kind} path=bare async "
+                    f"md={md_len} html={len(html)} dumps={_ser_ms:.1f}ms"
+                )
+            self.page().runJavaScript(
+                f"updateContent({_payload});",
+                lambda _result: None,
+            )
+        self._last_rendered_html = None
+
     def _on_render_done_signal(self, seq: int, html):
         """主线程槽：接收 worker 线程池渲染完成信号（renderDone.emit 跨线程投递）"""
         try:
-            self._apply_render_result(seq, html)
+            if seq < 0:
+                # [PERF-final-async] 终渲染独立通道（_final_render_seq 负向递减）
+                self._apply_final_render_result(seq, html)
+            else:
+                self._apply_render_result(seq, html)
         except RuntimeError:
             pass
 
@@ -7331,6 +7455,10 @@ class CodeWebViewer(QWebEngineView):
         # [B3] 流式结束：递增渲染序号使在途线程池任务过期（避免旧流式 HTML
         # 晚到覆盖最终非流式渲染结果）；pending 积压清空。
         self._render_seq += 1
+        # [PERF-final-async] 同步作废上一轮可能在途的终渲染（防御：正常时序下
+        # 此处不会有在途终渲染）
+        self._final_render_seq -= 1
+        self._final_render_inflight = False
         self._render_pending = None
         # [B2] 流式结束：重置工具 DOM 脏标记。随后 _schedule_render 走非流式分支，
         # 该分支依据 _tool_dom_dirty/_restore_finished_ids 决定 save/restore 或裸更新；
@@ -7482,6 +7610,10 @@ class CodeWebViewer(QWebEngineView):
         # [B3] 清空渲染缓存：递增序号使在途线程池任务过期（避免旧内容被应用）
         self._render_seq += 1
         self._render_pending = None
+        # [PERF-final-async] 注意：此处**有意不**推进 _final_render_seq——
+        # MessageCard.finish_streaming 紧接本方法调用，若在此作废终渲染，
+        # 异步终渲染永不落地（卡片停在流式形态）。_final_render_seq 的作废点
+        # 在卡片复用重置/主题切换/新 _sequence_render/销毁处，与本序号同步推进。
         # [B1] 清空差量缓存：强制下次全量渲染（流式结束后的最终态）
         self._needs_full_render = True
         self._stable_html = ""
@@ -8548,6 +8680,9 @@ class CodeWebViewer(QWebEngineView):
         # [B3] 视口销毁：递增渲染序号使在途线程池任务过期（weakref 判活兜底下，
         # 序号守卫提供第二道防线，防止旧任务结果应用到已释放的 DOM）。
         self._render_seq += 1
+        # [PERF-final-async] 同步作废在途终渲染
+        self._final_render_seq -= 1
+        self._final_render_inflight = False
         self._render_pending = None
         self._render_inflight = False
 

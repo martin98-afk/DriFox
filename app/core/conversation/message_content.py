@@ -132,8 +132,11 @@ def _set_consolidate_cache(cache_key: tuple, list_len: int, result: list, tail_f
 VALID_MESSAGE_ROLES = {"system", "user", "assistant", "tool"}
 
 # 渲染敏感标记（按长度降序排列，避免部分匹配）
+# ⚠️ 表内**不得出现空串**：空分支会被 join 成正则 `|</think>|...` 的首个
+# empty alternative，re.sub 在每个字符位置都能匹配成功并执行一次替换，
+# 实测 185KB 普通文本从 1.2ms 涨到 40.6ms（33x），而 make_tool_result_block
+# 在主线程对每条工具结果调用它 → 大输出工具（bash/read）每次完成都卡一拍。
 _SENSITIVE_MARKERS = [
-    "",
     "</think>",
     "</tool>",
     "<tool>",
