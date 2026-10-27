@@ -567,13 +567,21 @@ class PluginManager:
     # 运行时重扫
     # ============================================================
 
-    def _plugins_dir_signature(self) -> tuple:
+    def _plugins_dir_signature(self, include_mtime: bool = True) -> tuple:
         """插件目录级签名：各插件根的存在性 + 其下每个插件目录名与 mtime_ns
 
         用于 rescan 短路：签名未变 = 目录层面的新增/删除状态与上次扫描一致
         （rescan 语义本就只追踪目录级别变化，不追踪插件内部文件变更），可跳过
         数十个插件目录的全量重扫。实测全量重扫约 680ms/次，而启动期 ConfigSync
         的 3s 兜底与热重载合并路径都会调用 rescan。
+
+        include_mtime=False（rescan 短路专用）：剔除目录 mtime 成分，只保留
+        存在性 + 目录名单 + manifest 元数据。目录内部文件增删/覆盖会刷父目录
+        mtime（如 ConfigSync 云端恢复 user-custom 解压覆盖），但 rescan 的
+        diff 只比 manifest，扫完注定空 diff（实测 67 插件全扫空转）；组件级
+        文件变更由各组件 watcher 热重载链负责，与 rescan 职责不重叠。
+        目录改名/增删由名单捕获，manifest 内容变更由 _manifest_meta 捕获，
+        弱签名对 rescan 结果严格等价。
         """
         sig: list = []
         roots = [self._SYSTEM_PLUGIN_DIR]
@@ -591,13 +599,19 @@ class PluginManager:
                 children = []
             entries = []
             for name in children:
+                if not include_mtime:
+                    entries.append((name, 0))
+                    continue
                 try:
                     entries.append((name, (root_path / name).stat().st_mtime_ns))
                 except OSError:
                     entries.append((name, -1))
-            try:
-                root_mtime = root_path.stat().st_mtime_ns
-            except OSError:
+            if include_mtime:
+                try:
+                    root_mtime = root_path.stat().st_mtime_ns
+                except OSError:
+                    root_mtime = 0
+            else:
                 root_mtime = 0
             sig.append((str(root_path), True, root_mtime, tuple(entries)))
         return tuple(sig) + self._manifest_meta()
@@ -863,8 +877,10 @@ class PluginManager:
             return {"added": [], "removed": [], "changed": []}
 
         # 目录签名短路：目录层面无变化时直接返回空 diff（与全量重扫结果等价，
-        # 但省掉三次 _scan_plugins 的全目录遍历与 manifest 解析）
-        sig = self._plugins_dir_signature()
+        # 但省掉三次 _scan_plugins 的全目录遍历与 manifest 解析）。
+        # 用弱签名（不含目录 mtime）：内部文件变更不改变 added/removed/changed
+        # 结果（diff 只比 manifest），避免解压覆盖类触碰打穿短路空转全扫。
+        sig = self._plugins_dir_signature(include_mtime=False)
         if not force and self._plugins and sig == getattr(self, "_last_scan_signature", None):
             logger.debug("[PluginManager] 插件目录签名未变，rescan 短路（跳过全量重扫）")
             return {"added": [], "removed": [], "changed": []}

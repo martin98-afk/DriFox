@@ -4046,6 +4046,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if plugin.has_component("ui"):
                 plugin_dirs.append((plugin.name, plugin.path))
         logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")
+        # 欢迎卡挂起：分帧装载期每个带 welcome_tab 的插件都会 invalidate+reschedule，
+        # 实测启动期欢迎卡整卡重建 6 次（每次 _clear_chat_area+WebView 重建）。
+        # hold 期间 _show_initial_welcome 只记 pending，装载完成后统一渲染一次。
+        if plugin_dirs:
+            self._welcome_build_hold = True
         self._load_ui_plugins_step(plugin_dirs, 0, 0, on_done)
 
     def _load_ui_plugins_step(self, plugin_dirs, idx: int, loaded: int, on_done=None, frame_spent: float = 0.0):
@@ -4058,6 +4063,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if idx >= len(plugin_dirs):
             if loaded > 0:
                 logger.info(f"[MainWidget] Loaded {loaded}/{len(plugin_dirs)} UI plugins")
+            self._release_welcome_build_hold()
             if on_done:
                 on_done()
             return
@@ -11664,6 +11670,15 @@ class OpenAIChatToolWindow(ToolWindow):
         → _add_chat_widget(None) 抛 TypeError → 整个槽位回调中断 → 欢迎卡片
         永久消失（invalidate 已删旧卡）。此处捕获后回退到历史卡片，避免空白窗口。
         """
+        # UI 插件装载期挂起：只记 pending，装载完成后 _release_welcome_build_hold
+        # 统一补渲染（带全量 welcome_tab）。启动期 6 连发重建在此收口为 2 次
+        # （首渲染 + 装载完成后一次）。
+        if getattr(self, "_welcome_build_hold", False):
+            self._welcome_hold_pending = True
+            logger.debug(
+                f"[OpenAIChatToolWindow] _show_initial_welcome: UI 插件装载期挂起（wid={self._window_id}）"
+            )
+            return
         try:
             self._clear_chat_area(delete_widgets=False)
             welcome_card = self._get_or_create_welcome_card()
@@ -11698,6 +11713,16 @@ class OpenAIChatToolWindow(ToolWindow):
     _WELCOME_STARTUP_MERGE_S = 20.0
     _WELCOME_STARTUP_DEBOUNCE_MS = 600
     _welcome_first_schedule_at = None  # 类级：首次 welcome 调度时刻（启动窗口基准）
+    # UI 插件分帧装载期挂起欢迎卡重建（_load_all_ui_plugins 置位，装载完释放）
+    _welcome_build_hold = False
+    _welcome_hold_pending = False
+
+    def _release_welcome_build_hold(self):
+        """UI 插件装载完成后释放欢迎卡挂起，补渲染一次带全量 tab 的欢迎卡"""
+        self._welcome_build_hold = False
+        if getattr(self, "_welcome_hold_pending", False):
+            self._welcome_hold_pending = False
+            self._schedule_initial_welcome()
 
     def _schedule_initial_welcome(self):
         """QTimer 交错调度欢迎卡片渲染（C2：并发会话创建不卡 UI）
@@ -24628,8 +24653,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 启动时 workdir 延迟 2s 才同步，同步前渲染会拿到空/兜底路径（显示
         # "未检测到 git 项目"或旧项目信息）；同步完成后重渲染自动恢复为正确项目。
         # 仅重渲染 body（markdown），不重建 QWebEngineView（省 100-500ms 主线程）。
+        # 同值短路：启动期本方法被多个时机调用（实测 350ms 内两次同值），重跑
+        # _update_branch（git 探测）+ _publish_project_changed（插件联动刷新）
+        # 纯属重复；项目+workdir 均未变时直接返回。
+        target_wd = workdir or None
+        sync_key = (project, target_wd)
+        if getattr(self, "_last_synced_wd_key", None) == sync_key:
+            return
+        self._last_synced_wd_key = sync_key
+
         prev_wd = self.backend.tool_executor.get_workdir()
-        self.backend.tool_executor.set_workdir(workdir or None)
+        self.backend.tool_executor.set_workdir(target_wd)
         new_wd = self.backend.tool_executor.get_workdir()
         if new_wd != prev_wd:
             self._rerender_welcome_card()

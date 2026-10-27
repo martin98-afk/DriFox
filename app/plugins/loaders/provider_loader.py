@@ -488,6 +488,21 @@ class ProviderWatcher:
             self._last_py_files = self._py_files()
             self._scanned_once = True
 
+    def adopt_existing_state(self) -> None:
+        """收编启动链 warmup_providers() 已注册的现状，避免首扫全量重建。
+
+        warmup 直接注册不经本 watcher；若不收编，首扫 _scanned_once=False 恒放行，
+        注册表全部插件来源被卸载后原样重注册一遍（实测 16 服务商 ×2）。
+        收编后首扫走正常对比：py 快照一致 + 启用态一致 → 跳过；warmup 部分失败
+        （注册表缺项）由规定 3 启用态对比兜底触发重建，不留残漏。
+        """
+        with self._scan_lock:
+            if not self._registry.provider_sources():
+                return
+            self._last_py_files = self._py_files()
+            self._scanned_once = True
+            logger.debug("[ProviderWatcher] 已收编 warmup 注册现状，首扫走快路径对比")
+
     def _plugin_provider_names(self, plugin_name: str) -> Set[str]:
         """按注册表实际内容反查某插件注册的服务商名（对齐 scan_now 的"以注册表为准"）"""
         source = f"plugin:{plugin_name}"
@@ -627,6 +642,8 @@ def ensure_provider_watcher() -> Optional[ProviderWatcher]:
         try:
             _provider_watcher = ProviderWatcher()
             _provider_watcher.start()
+            # 收编启动链 warmup 已注册的服务商现状，首扫不再全量卸载重注册
+            _provider_watcher.adopt_existing_state()
             logger.info("[ProviderWatcher] 服务商插件热重载 watcher 已启动")
         except Exception as e:
             logger.warning(f"[ProviderWatcher] watcher 启动失败: {e}")
