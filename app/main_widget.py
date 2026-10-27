@@ -6955,7 +6955,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.finish_streaming(force_dock_off=True)
         try:
-            interrupted = self.backend.stop_streaming(timeout_ms=500)
+            # 停流预算要足够：500ms 对卡在 API 读上的 worker 不够，
+            # 没停住就切会话 → 旧 worker 继续 emit，把新会话写成旧内容
+            # （新会话里冒出旧任务的工具卡片就是这个原因）
+            interrupted = self.backend.stop_streaming(timeout_ms=3000)
             if interrupted:
                 self._apply_interrupted_messages_to_session(interrupted)
         except Exception as e:  # noqa: BLE001
@@ -21257,7 +21260,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             handlers = {
                 "interrupt": lambda p: self._stop_stream_for_actions(),
-                "new": lambda p: self._create_new_session(close_history=True),
+                "new": self._handle_action_new,
                 "send": lambda p: self._on_send_clicked(
                     str(p.get("text") or ""),
                     preserve_input=True,
@@ -21269,6 +21272,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.info(f"[ActionQueue] 已执行动作 {done} 个")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[ActionQueue] 动作队列执行失败: {e}")
+
+    def _handle_action_new(self, payload: dict):
+        """动作队列的新建会话：worker 必须先真正停下
+
+        没停住就切会话，旧 worker 会继续把内容写进新会话（工具卡片、流式文本
+        全出在新会话里）。这里抛异常中止整条队列，宁可本轮不交接。
+        """
+        if self._worker_actually_busy():
+            raise RuntimeError("worker 未停止，放弃切换会话")
+        self._create_new_session(close_history=True)
 
     def _do_post_stream_cleanup(self):
         """流式完成后延迟执行的清理和同步操作（不阻塞 UI 渲染流程）"""

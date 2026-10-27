@@ -26,6 +26,14 @@ _CONTINUE_PROMPT = (
     "如果交接里没有可执行的任务，直接说明情况并停下等我指示。"
 )
 
+
+def _continue_prompt(source_title: str) -> str:
+    """自动继续文案：带上原会话标题，新会话里一眼看出在接哪段活"""
+    title = (source_title or "").strip()
+    if not title or title == "新对话":
+        return _CONTINUE_PROMPT
+    return f"继续完成「{title}」会话的交接任务。\n" + _CONTINUE_PROMPT
+
 _UPDATE_HANDOFF_SCHEMA = {
     "type": "function",
     "function": {
@@ -107,6 +115,17 @@ def _dump_front(meta: Dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _source_session_title() -> str:
+    """当前（源）会话的标题，拿不到返回空串"""
+    read = caps_for("session.read")
+    if read is None:
+        return ""
+    try:
+        return str((read() or {}).get("name") or "")
+    except Exception:
+        return ""
+
+
 def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
     """登记待注入内容 + 入队三连（停流 → 新建 → 发继续指令）"""
     pending = {
@@ -126,8 +145,8 @@ def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
     steps = (
         ("session.interrupt", {}),
         ("session.new", {}),
-        # 自动继续是用户可见的一条新消息，走默认（显示气泡、入会话、可回查）
-        ("session.send", {"text": _CONTINUE_PROMPT}),
+        # 自动继续是用户可见的一条新消息，带上原会话标题方便回溯
+        ("session.send", {"text": _continue_prompt(_source_session_title())}),
     )
     for cap_id, kwargs in steps:
         fn = caps_for(cap_id)
