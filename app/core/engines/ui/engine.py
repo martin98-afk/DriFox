@@ -413,6 +413,9 @@ class UIEngine(BaseEngine):
         # ---- 提取 hook_event 标记（团队任务邮件等），写入 session 消息时打标 ----
         hook_event = kwargs.pop("_hook_event", None)
 
+        # ---- 提取 ephemeral 标记（交接自动继续等系统触发：不写 session、不渲染气泡）----
+        _ephemeral = bool(kwargs.pop("_ephemeral", False))
+
         # ---- 主线程准备 context（无 I/O，纯数据组装） ----
         _window_workdir = (
             self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
@@ -477,6 +480,7 @@ class UIEngine(BaseEngine):
             image_attachments=_image_attachments,
             input_attachments=_input_attachments,
             raw_input_text=_raw_input_text,
+            ephemeral=_ephemeral,
         )
         worker.start()
 
@@ -1035,6 +1039,7 @@ class _PreSendWorker(QThread):
         image_attachments: list | None = None,
         input_attachments: list | None = None,
         raw_input_text: str | None = None,
+        ephemeral: bool = False,
     ):
         super().__init__()
         self._hook_mgr = hook_mgr
@@ -1054,6 +1059,7 @@ class _PreSendWorker(QThread):
         self._image_attachments = image_attachments
         self._input_attachments = input_attachments
         self._raw_input_text = raw_input_text
+        self._ephemeral = ephemeral
 
         # 结果
         self._messages: list = []
@@ -1124,7 +1130,9 @@ class _PreSendWorker(QThread):
                 _add_kwargs["_input_attachments"] = self._input_attachments
             if self._raw_input_text:
                 _add_kwargs["_raw_input_text"] = self._raw_input_text
-            session.add_user_message(content=self._content_to_store, **_add_kwargs)
+            if not self._ephemeral:
+                # 交接自动继续等系统触发：消息只进本轮请求，不写 session（不渲染、不进历史）
+                session.add_user_message(content=self._content_to_store, **_add_kwargs)
 
         # ---- 4. PostUserMessage hooks ----
         _trigger_and_inject("PostUserMessage", self._post_user_ctx, session)
@@ -1135,6 +1143,9 @@ class _PreSendWorker(QThread):
             self._llm_config,
             current_agent=self._current_agent,
         )
+        if self._ephemeral and self._user_text:
+            # session 里没有这条消息（未写盘），但本轮请求需要一条 user 消息驱动生成
+            self._messages.append({"role": "user", "content": self._user_text})
 
         # ---- 6. 获取 tool schema ----
         session_id = str(getattr(self._session, "session_id", "") or "")

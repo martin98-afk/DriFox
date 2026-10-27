@@ -566,10 +566,6 @@ class ToolExecutor:
             trigger_async=False,
         )
 
-        # ====== 检查 PostToolUse hook 结果，触发 auto-compact ======
-        self._check_auto_compact(results)
-        # ============================================================
-
         # ====== PostToolUse hook 替换工具结果内容（hookSpecificOutput 约定）======
         # 适用场景：hook 需要对工具结果做脱敏/过滤/加密，再给大模型。
         #
@@ -618,31 +614,6 @@ class ToolExecutor:
                         "防止 result.content 与队列消息双重注入"
                     )
         # ============================================================
-
-    def _check_auto_compact(self, results: list) -> None:
-        """检查 PostToolUse hook 结果中是否有 auto-compact 触发信号
-
-        hook 函数的返回值（JSON）格式：
-            {"auto_compact": true, "ratio": 0.85}
-
-        Args:
-            results: trigger_event 返回的 HookExecutionResult 列表
-        """
-        if not results or not self._backend:
-            return
-
-        for r in results:
-            if not r.success or not r.output:
-                continue
-            try:
-                data = _json.loads(r.output)
-                if isinstance(data, dict) and data.get("auto_compact"):
-                    ratio = float(data.get("ratio", 0.0))
-                    # 交给后端处理（带冷却）
-                    self._backend.request_auto_compact(ratio)
-                    return  # 只触发一次
-            except (_json.JSONDecodeError, ValueError, TypeError):
-                pass
 
     # ========== 自动 LSP 诊断（文件编辑后） ==========
 

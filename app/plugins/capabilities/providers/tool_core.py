@@ -181,6 +181,39 @@ def register(registry) -> None:
 
         return write
 
+    def _session_control(host: Any):
+        """会话控制三件套（入队语义；host 是 ToolExecutor）。
+
+        工具 impl 跑在 worker 线程，直接停流会杀掉自己所在的 worker，
+        所以只入队，由 main_widget 在本轮结束时 drain。
+        window_id 从 backend 精确取，拿不到一律拒绝入队（防多窗口串窗）。
+        """
+        from app.core.conversation.action_queue import get_action_queue
+
+        backend = _backend(host)
+        wid = str(getattr(backend, "_window_id", "") or getattr(host, "_window_id", "") or "")
+        queue = get_action_queue()
+
+        def interrupt() -> bool:
+            return queue.enqueue(wid, "interrupt", {})
+
+        def new_session() -> bool:
+            return queue.enqueue(wid, "new", {})
+
+        def send(text: str, *, ephemeral: bool = True) -> bool:
+            return queue.enqueue(wid, "send", {"text": str(text or ""), "ephemeral": bool(ephemeral)})
+
+        return {"interrupt": interrupt, "new": new_session, "send": send}
+
+    def _session_interrupt(host: Any):
+        return _session_control(host)["interrupt"]
+
+    def _session_new(host: Any):
+        return _session_control(host)["new"]
+
+    def _session_send(host: Any):
+        return _session_control(host)["send"]
+
     def _workdir_read(host: Any):
         """当前工作目录。
 
@@ -309,6 +342,9 @@ def register(registry) -> None:
     )
     registry.register("session.read", _session_read, surface="tool", owner="core:tool")
     registry.register("session.write", _session_write, surface="tool", owner="core:tool")
+    registry.register("session.interrupt", _session_interrupt, surface="tool", owner="core:tool")
+    registry.register("session.new", _session_new, surface="tool", owner="core:tool")
+    registry.register("session.send", _session_send, surface="tool", owner="core:tool")
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
     registry.register("storage.data_dir", _storage_data_dir, surface="tool", owner="core:tool")
     registry.register("context.compact", _context_compactor, surface="tool", owner="core:tool")

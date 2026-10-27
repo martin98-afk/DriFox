@@ -1,6 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [未发布]
+### ♻️ 代码重构
+- **会话交接改为插件实现** (`system-handoff`): 交接全链路（阈值检测、补写触发、文档读写、切会话编排、注入）迁入 `plugins/system-handoff`；主程序新增 `session.interrupt` / `session.new` / `session.send` 三个能力，走窗口级动作队列，本轮结束按序执行；删除 `app/core/context/handoff.py`、`_on_auto_compact_requested` 与 backend 交接信号链。自动继续改走 ephemeral 通道，不再伪造用户消息。
 ## [v0.6.12] - 2026-10-27
 
 自 v0.6.11 以来的变更 | 提交数：18 · 文件变更：80 · +4303/-1192 | 贡献者：dingma, mading

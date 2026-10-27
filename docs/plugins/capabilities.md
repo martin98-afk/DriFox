@@ -173,6 +173,11 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `session.write` | medium | 消息写回当前会话（入库 + 刷 UI + 发事件） |
 | `session.list` | medium | 历史会话列表与元数据 |
 | `session.manage` | **high** | 新建 / 切换 / 删除会话（破坏性） |
+| `session.interrupt` | medium | 停止当前流式输出（入队，本轮结束后执行） |
+| `session.new` | medium | 新建会话（入队，停流后执行） |
+| `session.send` | medium | 发消息驱动一轮对话（入队；`ephemeral` 不写会话、不渲染气泡） |
+
+> `session.interrupt` / `session.new` / `session.send` 是**入队语义**：插件在工具执行期调用只登记动作，主程序在本轮结束（`stream_finished`）后按登记顺序执行。原因：工具跑在 worker 线程，同步停流会杀掉自己所在的 worker。队列按 `window_id` 隔离，拿不到 id 一律拒绝（写操作回退「活跃窗口」会在多窗口同时交接时串窗）。
 
 ### 输入框
 

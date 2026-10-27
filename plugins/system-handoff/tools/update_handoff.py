@@ -1,31 +1,30 @@
 # -*- coding: utf-8 -*-
-"""
-系统工具插件 — 会话交接文档（handoff）
+"""系统插件 — 会话交接工具（update_handoff）
 
-上下文接近上限时，主智能体在关键节点把当前工作状态写成一份交接文档，
-落盘到 `<project_root>/.drifox/handoff/<session_id>.md`（无工作目录时回退
-`<app_data_dir>/handoff/`）。下一个新会话由 SessionStart hook 读取并注入，
-实现「换会话不断档」。
+写交接文档到 `<project_root>/.drifox/handoff/<session_id>.md`（无工作目录回退
+`<app_data_dir>/handoff/`），`switch=true` 时把「停流 → 新建会话 → 发继续指令」
+三步登记到主程序的动作队列——工具跑在 worker 线程，同步停流会杀掉自己所在的
+worker，只有入队才是安全时序。
 
-frontmatter 由本工具生成与维护，只存四项元数据：
-- session_id / project_root / created_at / updated_at / injected_into
-`injected_into` 记录已注入过的新会话 ID（保留最近 5 个），避免布尔 consumed
-在「新会话未落库被丢弃」时把交接误标为已消费。
-
-只依赖 tool_ctx（workdir / session_id / env.app_data_dir），不 import 主程序模块。
+只依赖 tool_ctx（workdir / session_id）与能力池，不 import 主程序内部模块。
 """
 
-import json
 import time
 from pathlib import Path
 from typing import Dict, Optional
 
-from app.plugins.sdk import ToolResult
+from app.plugins.sdk import ToolResult, caps_for
 
 GROUP_CONTEXT = "上下文与记忆"
 
 _FRONT_KEYS = ("session_id", "project_root", "created_at", "updated_at", "injected_into")
 _MAX_INJECTED = 5
+
+_CONTINUE_PROMPT = (
+    "根据交接文档继续未完成的工作。"
+    "从「剩余任务与下一步」的第一项开始执行，不要重做「已完成」里的内容，不要复述交接。"
+    "如果交接里没有可执行的任务，直接说明情况并停下等我指示。"
+)
 
 _UPDATE_HANDOFF_SCHEMA = {
     "type": "function",
@@ -73,6 +72,8 @@ def _handoff_dir(tool_ctx: Dict) -> Path:
 
 def _parse_front(text: str):
     """解析 frontmatter（值统一按 JSON 解析，失败则保留原字符串）"""
+    import json
+
     if not text.startswith("---\n"):
         return {}, text
     end = text.find("\n---\n", 4)
@@ -96,6 +97,8 @@ def _parse_front(text: str):
 
 def _dump_front(meta: Dict) -> str:
     """序列化 frontmatter（值统一 JSON 编码，避免路径含冒号时解析歧义）"""
+    import json
+
     lines = ["---"]
     for key in _FRONT_KEYS:
         if key not in meta:
@@ -105,12 +108,43 @@ def _dump_front(meta: Dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
+    """登记待注入内容 + 入队三连（停流 → 新建 → 发继续指令）"""
+    pending = {
+        "path": str(path),
+        "content": body,
+        "source_session_id": str((tool_ctx or {}).get("session_id") or ""),
+        "ts": time.time(),
+    }
+    kv = caps_for("state.kv")
+    if kv:
+        try:
+            kv["set"]("handoff_pending", pending)
+            kv["set"]("handoff_active", {"ts": pending["ts"]})
+        except Exception:
+            pass
+
+    steps = (
+        ("session.interrupt", {}),
+        ("session.new", {}),
+        ("session.send", {"text": _CONTINUE_PROMPT, "ephemeral": True}),
+    )
+    for cap_id, kwargs in steps:
+        fn = caps_for(cap_id)
+        if fn is None:
+            return
+        try:
+            fn(**kwargs)
+        except Exception:
+            return
+
+
 def _update_handoff_impl(content: str = "", switch: bool = False, tool_ctx: Optional[Dict] = None) -> ToolResult:
     """写入/覆盖当前会话的交接文档
 
     Args:
         content: 交接文档正文（Markdown，六节结构）
-        switch: 写完是否请求切新会话（经 ToolResult.data 回传主程序）
+        switch: 写完是否请求切新会话（登记到动作队列）
         tool_ctx: 工具执行上下文（workdir / session_id / env）
 
     Returns:
@@ -155,6 +189,9 @@ def _update_handoff_impl(content: str = "", switch: bool = False, tool_ctx: Opti
             f.write("\n")
     except Exception as e:
         return ToolResult(False, error=f"交接文档写入失败: {e}")
+
+    if switch:
+        _arm_handoff(ctx, path, text)
 
     return ToolResult(
         True,
