@@ -13,7 +13,14 @@
   "license": "GPL-3.0-or-later",
   "type": "system",
   "api_version": 2,
-  "capabilities": ["session.interrupt", "session.new", "session.send", "state.kv"],
+  "capabilities": [
+    "session.interrupt",
+    "session.new",
+    "session.send",
+    "session.read",
+    "state.kv",
+    "storage.data_dir"
+  ],
   "components": {
     "tools": true,
     "hooks": true

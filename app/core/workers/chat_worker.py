@@ -2014,6 +2014,8 @@ class OpenAIChatWorker(QThread):
             self.full_response = ""
             self._prev_stophook_response = None
             self._reasoning_content = ""
+            # 工具的「本轮收尾」请求（update_handoff switch=true 的 handoff_switch 标记）
+            self._end_turn_requested = False
             # 开始新对话时，清理所有中间状态
             self._clear_pending_response_state()
             # 🛡️ 防御性清理：移除可能来自上次取消/中断的 orphaned tool_calls
@@ -2455,6 +2457,21 @@ class OpenAIChatWorker(QThread):
                     current_session_messages,
                     extra_context={"assistant_response": _asst_text},
                 )
+
+                # ====== 工具要求本轮立即收尾（交接写完即换会话）======
+                # 对齐轮数上限分支的四行式信号序列自然结束本轮（不走 cancel 路径，
+                # 动作队列的 new 才能通过 worker 已停的检查）。工具结果已并入
+                # current_session_messages，落库与渲染都不受影响。
+                # 有意不触发 Stop hook：hook 注入消息会再续命一轮，与「写完即切走」相反。
+                if getattr(self, "_end_turn_requested", False):
+                    logger.info("[Handoff] 工具要求本轮收尾（交接已登记），不再发起下一轮 API 调用")
+                    self._emit_with_callback(
+                        "finished_with_messages", self.finished_with_messages, current_session_messages
+                    )
+                    final_response = self.full_response
+                    self._clear_pending_response_state()
+                    self._emit_with_callback("finished_with_content", self.finished_with_content, final_response)
+                    return
 
                 # ========== 视觉模型注入：截图/read图片 → base64 图片 ==========
                 vision_injected = self._try_inject_vision_content(
@@ -4673,6 +4690,14 @@ class OpenAIChatWorker(QThread):
 
         result_content = str(result) if result else ""
         success = bool(getattr(result, "success", True)) if result else False
+        # 工具显式要求本轮收尾（插件通用契约 ToolResult.end_turn）：模型常会在此类
+        # 工具返回后继续调工具/继续输出，本轮不结束 → 需要本轮结束才生效的后续动作
+        # （交接的动作队列：停流→新建→发继续指令）永远等不到 drain。
+        try:
+            if getattr(result, "end_turn", False):
+                self._end_turn_requested = True
+        except Exception:
+            pass
         return result, result_content, success
 
     @staticmethod
