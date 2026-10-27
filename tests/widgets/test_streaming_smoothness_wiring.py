@@ -78,15 +78,26 @@ class TestTypewriterQueue:
             assert fn in src_text, f"缺少打字机队列入口 {fn}"
 
     def test_incremental_append_goes_through_queue(self, src_text: str):
-        """_append_text_incremental 必须把文本交给队列，而非直接整块追加"""
+        """增量追加必须把文本交给队列，而非直接整块追加
+
+        [PERF] 每 chunk 载荷已拆到 `_stream_append_call_js`（静态注册随骨架注入，
+        单次 IPC 8.1KB → 0.2KB），断言分两处：方法体负责调用构造器，构造器负责
+        把文本交给队列。
+        """
         body = _func_body(src_text, "def _append_text_incremental(self, text: str):")
-        assert "window._dfxAppendStreamText" in body, "追加逻辑必须注册为可复用函数供队列按帧调用"
-        assert "window._twPush" in body, "流式文本必须推入打字机揭示队列（否则仍是整块蹦字）"
+        assert "_stream_append_call_js" in body, "每 chunk 载荷必须走最小调用包构造器"
+        call = _func_body(src_text, "def _stream_append_call_js(text_json: str) -> str:")
+        assert "window._dfxAppendStreamText" in call, "追加逻辑必须复用骨架注册的 _dfxAppendStreamText"
+        assert "window._twPush" in call, "流式文本必须推入打字机揭示队列（否则仍是整块蹦字）"
 
     def test_reveal_does_not_explode_text_nodes(self, src_text: str):
-        """帧级揭示必须合并文本节点（否则 2000 字回复产出 600+ Text 节点 → 内存膨胀）"""
-        body = _func_body(src_text, "def _append_text_incremental(self, text: str):")
-        assert "_appendTextMerged" in body, "追加文本必须走合并函数（appendData），不能每次新建 Text 节点"
+        """帧级揭示必须合并文本节点（否则 2000 字回复产出 600+ Text 节点 → 内存膨胀）
+
+        [PERF] 揭示实现已随骨架注入（`_STREAM_APPEND_HELPERS_JS`），断言改为校验
+        该常量含合并函数且确实被拼进骨架模板。
+        """
+        assert "_appendTextMerged" in src_text, "追加文本必须走合并函数（appendData），不能每次新建 Text 节点"
+        assert "{_STREAM_APPEND_HELPERS_JS}" in src_text, "静态追加 helper 必须注入骨架（否则首次追加无实现）"
 
     def test_reveal_throttles_height_report(self, src_text: str):
         """揭示每帧调用，高度上报必须节流（否则 reportHeight→setFixedHeight 回环频率翻数倍）"""
