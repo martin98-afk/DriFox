@@ -15,7 +15,12 @@ import logging
 from collections import defaultdict, deque
 from typing import Callable, Deque, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+try:  # 项目日志统一走 loguru；标准 logging 无 InterceptHandler，输出会进黑洞
+    from loguru import logger
+except Exception:  # pragma: no cover - loguru 缺失时退回标准 logging
+    import logging
+
+    logger = logging.getLogger(__name__)
 
 # 同一队列中最多保留一次的动作（重复登记无意义且会重复停流/重复建会话）
 _DEDUP = frozenset({"interrupt", "new"})
@@ -45,14 +50,14 @@ class WindowActionQueue:
             logger.warning("[ActionQueue] 拒绝入队：window_id 为空")
             return False
         if self._draining.get(wid):
-            logger.info("[ActionQueue] 拒绝入队：窗口 %s 正在执行动作", wid)
+            logger.info(f"[ActionQueue] 拒绝入队：窗口 {wid} 正在执行动作")
             return False
         queue = self._queues[wid]
         if action in _DEDUP and any(item["action"] == action for item in queue):
             return False
         if action in _DISCARD_SEND and any(item["action"] == "send" for item in queue):
             self._queues[wid] = queue = deque(item for item in queue if item["action"] != "send")
-            logger.info("[ActionQueue] %s 入队：丢弃旧会话排队的 send", action)
+            logger.info(f"[ActionQueue] {action} 入队：丢弃旧会话排队的 send")
         queue.append({"action": action, "payload": dict(payload or {})})
         return True
 
@@ -81,14 +86,14 @@ class WindowActionQueue:
                 action, payload = item["action"], item["payload"]
                 handler = handlers.get(action)
                 if handler is None:
-                    logger.warning("[ActionQueue] 无处理器，中止：%s", action)
+                    logger.warning(f"[ActionQueue] 无处理器，中止：{action}")
                     queue.clear()
                     break
                 try:
                     handler(payload)
                     done += 1
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("[ActionQueue] 动作 %s 执行失败，中止后续：%s", action, e)
+                    logger.warning(f"[ActionQueue] 动作 {action} 执行失败，中止后续：{e}")
                     queue.clear()
                     break
         finally:

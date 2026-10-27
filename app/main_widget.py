@@ -21258,6 +21258,12 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             from app.core.conversation.action_queue import get_action_queue
 
+            wid = str(getattr(self, "_window_id", "") or "")
+            queue = get_action_queue()
+            pending = [item["action"] for item in queue.peek(wid)]
+            if not pending:
+                return
+            logger.info(f"[ActionQueue] drain 开始 wid={wid} actions={pending}")
             handlers = {
                 "interrupt": lambda p: self._stop_stream_for_actions(),
                 "new": self._handle_action_new,
@@ -21267,9 +21273,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     ephemeral=bool(p.get("ephemeral", True)),
                 ),
             }
-            done = get_action_queue().drain(str(getattr(self, "_window_id", "") or ""), handlers)
-            if done:
-                logger.info(f"[ActionQueue] 已执行动作 {done} 个")
+            done = queue.drain(wid, handlers)
+            logger.info(f"[ActionQueue] drain 结束 已执行 {done}/{len(pending)} 个")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[ActionQueue] 动作队列执行失败: {e}")
 
@@ -21279,6 +21284,10 @@ class OpenAIChatToolWindow(ToolWindow):
         没停住就切会话，旧 worker 会继续把内容写进新会话（工具卡片、流式文本
         全出在新会话里）。这里抛异常中止整条队列，宁可本轮不交接。
         """
+        if self._worker_actually_busy():
+            # 收尾阶段 engine 标志可能滞后于 worker 真实退出：先同步停一次再复核。
+            # 漏了这一步会误判「worker 未停止」直接中止队列 → 交接静默不换会话。
+            self._stop_stream_for_actions()
         if self._worker_actually_busy():
             raise RuntimeError("worker 未停止，放弃切换会话")
         self._create_new_session(close_history=True)
