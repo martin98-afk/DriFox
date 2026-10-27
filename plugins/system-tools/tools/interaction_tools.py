@@ -415,10 +415,11 @@ _UPLOAD_FILE_SCHEMA = {
 
 
 def _upload_file_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("gitee")
-    if service is None:
-        return ToolResult(False, error="上传服务不可用")
-    return service(local_path=kwargs.get("local_path", ""))
+    # 经能力池取上传能力（manifest 声明裁剪 + 审计），不走 services 旧键
+    upload = (tool_ctx or {}).get("capabilities", {}).get("net.upload")
+    if upload is None:
+        return ToolResult(False, error="上传服务不可用（net.upload 能力未授权或未注册）")
+    return upload(local_path=kwargs.get("local_path", ""))
 
 
 def _render_question_body(result, tool_name, tool_args, success):

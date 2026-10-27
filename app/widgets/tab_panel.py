@@ -235,21 +235,23 @@ def _stream_ring_hue(phase: float) -> float:
 
 
 def _status_ring_color(state: str, phase: float) -> QColor:
-    """按状态取环色：streaming 恒主题青蓝 / question 橙黄 / error 红（icon 与胶囊共用）
+    """按状态取环色：streaming 恒主题青蓝 / question 橙黄慢闪 / error 红色快闪
 
     色相全程不循环：色相轮转只在「颜色本身是信息」时才有意义，而这里颜色
     只表示「正在运行」，变色反而让多 tab 并发时各自乱变、认不出是同一状态。
-    运动信息交给亮块旋转（见 _paint_status_ring_on）。
+    流式的运动信息交给亮块旋转（见 _paint_status_ring_on）。
 
     环色与色块主色必须**不同色系**：色块就是项目色/角色色，同色系细线会被吃掉
     （实测绿方块配绿环完全看不出环）。青蓝与绿/蓝/橙/紫都能拉开。
 
-    streaming / question 的 alpha 随相位呼吸。
+    error / question 的 alpha 随相位闪烁（0.5+0.5·sin 归一化映射 40~255）：
+    暗相位接近熄灭、亮相位全亮。呼吸式小幅摆动不够——icon 与环同色系时
+    常亮/轻呼吸都会被吃掉，只有明暗突变仍可辨认。相位冻结在 0（减少动态
+    效果）时落在中点亮度，静态可见不闪。
     """
     if state == "error":
-        return _QColor(_CACHED_ERROR_RED)
-    alpha = max(150, min(255, int(196 + _math.sin(_math.radians(phase)) * 59)))
-    if state == "question":
+        c = _QColor(_CACHED_ERROR_RED)
+    elif state == "question":
         c = _QColor(245, 158, 11)
     else:
         dark = isDarkTheme()
@@ -257,7 +259,9 @@ def _status_ring_color(state: str, phase: float) -> QColor:
         if not dark:
             # 浅色主题压暗：亮青在 #fafafc 侧栏底与浅蓝选中底上会淡到看不见
             c = c.darker(180)
-    c.setAlpha(alpha)
+        return c
+    t = 0.5 + 0.5 * _math.sin(_math.radians(phase))
+    c.setAlpha(int(40 + t * 215))
     return c
 
 
@@ -271,8 +275,10 @@ def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float
     - streaming：一个亮块沿环旋转（锥形渐变亮头 + 拖尾），角速度按 sin 调制
       形成「快—慢—快」节奏。亮块恒为主题青蓝，与任意项目色拉开系；多 tab
       并发时不会各自乱变色相。
-    - question：橙黄整环，alpha + 环径双呼吸（慢，3s 一周期）
-    - error：红整环常亮（报错是需一眼确认的事实，不该持续吵）
+    - question：橙黄整环慢闪（3s 一周期）+ 环径 ±0.5px 呼吸：单靠 alpha 在
+      浅色主题上对比度变化不明显，环径同相位叠加
+    - error：红整环快闪（1.5s 一周期，暗相位接近熄灭）。icon 与环同色系时
+      常亮会被吃掉，明暗突变仍可辨认（原常亮方案已废，2026-10-27）
 
     ⚠️ 不用主色派生环色：色块就是项目/角色色，同色系细线会被吃掉。
     ⚠️ 不用 dash 缺口模拟旋转：26px 尺度上静止的缺口读成「断线边框」。
@@ -923,9 +929,8 @@ class TabItem(QFrame):
 
         状态只集中在 icon 一个锚点：折叠窄条下整行流光糊成一片，展开态左侧那条
         随相位变色的粗边与选中底色打架。两种形态统一用 icon 外侧环表达——
-        流式彩虹色相轮转 + 呼吸 / 待答橙黄双呼吸 / 报错红色常亮。
-
-        相位在 _on_anim_tick 中逐帧推进（与本方法同源，不另设定时器）。
+        流式彩虹旋转 / 待答橙黄慢闪 / 报错红色快闪。相位在 _on_anim_tick
+        中逐帧推进（与本方法同源，不另设定时器）。
         """
         state, phase = self._ring_spec()
         self._icon_widget.set_status_ring(state, phase)
@@ -933,7 +938,8 @@ class TabItem(QFrame):
     def _ring_spec(self):
         """返回 (state, phase)，供 set_status_ring 与动画帧共用"""
         if self._stream_error:
-            return "error", 0.0
+            # 报错快闪烁动 _anim_phase（1.5s 一周期），比 question 慢闪快一倍以区分状态
+            return "error", float(getattr(self._panel, "_anim_phase", 0.0) if self._panel else 0.0)
         if self._streaming:
             return "streaming", float(getattr(self._panel, "_anim_phase", 0.0) if self._panel else 0.0)
         if self._question:
@@ -4231,7 +4237,7 @@ class TabPanel(QWidget):
         elif not streaming and old_streaming:
             self._streaming_count = max(0, self._streaming_count - 1)
         if error and not old_error:
-            # 报错同样驱动动画（红色流光脉冲）
+            # 报错同样驱动动画（红色快闪的相位源）
             self._error_count += 1
             self._ensure_anim_timer()
         elif not error and old_error:

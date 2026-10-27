@@ -91,6 +91,25 @@ def mock_settings_unbound():
 
 
 @pytest.fixture
+def mock_settings_unbound_empty():
+    """未绑定且共享仓库配置全空（未配置态；本机真实 app.config 可能带共享仓库值，
+    不可依赖环境，未配置用例必须显式 mock）"""
+    with patch("app.utils.config.Settings.get_instance") as mock_get:
+        cfg = MagicMock()
+        cfg.gitee_bound.value = False
+        cfg.gitee_user_token.value = ""
+        cfg.gitee_user_owner.value = ""
+        cfg.gitee_user_repo.value = ""
+        cfg.gitee_token.value = ""
+        cfg.gitee_owner.value = ""
+        cfg.gitee_repo.value = ""
+        cfg.gitee_path.value = "drifox"
+        cfg.gitee_branch.value = "master"
+        mock_get.return_value = cfg
+        yield cfg
+
+
+@pytest.fixture
 def temp_file(tmp_path):
     """临时测试文件"""
     f = tmp_path / "test_image.png"
@@ -444,3 +463,53 @@ class TestConvenienceFunctions:
             url, err = upload_to_gitee(temp_file)
             assert url == "https://dl"
             mock_uf.assert_called_once_with(temp_file)
+
+
+# =============================================================================
+# 8. download_file 测试（raw 直链下载，与 upload_file 对称）
+# =============================================================================
+
+
+class TestDownloadFile:
+    def test_not_configured(self, uploader, mock_settings_unbound_empty):
+        local, err = uploader.download_file("drifox/foo.png", "out.png")
+        assert local is None
+        assert "未配置" in err
+
+    def test_blank_remote_path(self, uploader, mock_settings_bound):
+        local, err = uploader.download_file("   ", "out.png")
+        assert local is None
+        assert "remote_path" in err
+
+    def test_blank_local_path(self, uploader, mock_settings_bound):
+        local, err = uploader.download_file("drifox/foo.png", "")
+        assert local is None
+        assert "local_path" in err
+
+    def test_success_writes_file_and_token_in_url(self, uploader, mock_settings_bound, tmp_path):
+        target = tmp_path / "sub" / "out.png"
+        resp = MagicMock(status_code=200, content=b"png-bytes")
+        with patch("app.gateway.utils.gitee_uploader.requests.get", return_value=resp) as mock_get:
+            local, err = uploader.download_file("drifox/foo.png", str(target))
+        assert err is None
+        assert local == str(target)
+        assert target.read_bytes() == b"png-bytes"
+        # raw 直链 + 私有仓库可见的 token 参数
+        called_url = mock_get.call_args[0][0]
+        assert "/raw/master/drifox/foo.png" in called_url
+        assert "access_token=user_token_bound" in called_url
+
+    def test_http_error(self, uploader, mock_settings_bound, tmp_path):
+        resp = MagicMock(status_code=404, content=b"")
+        with patch("app.gateway.utils.gitee_uploader.requests.get", return_value=resp):
+            local, err = uploader.download_file("drifox/missing.png", str(tmp_path / "x.png"))
+        assert local is None
+        assert "404" in err
+
+    def test_timeout(self, uploader, mock_settings_bound, tmp_path):
+        import requests as _rq
+
+        with patch("app.gateway.utils.gitee_uploader.requests.get", side_effect=_rq.exceptions.Timeout()):
+            local, err = uploader.download_file("drifox/foo.png", str(tmp_path / "x.png"))
+        assert local is None
+        assert "超时" in err
