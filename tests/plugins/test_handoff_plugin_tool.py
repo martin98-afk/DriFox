@@ -78,3 +78,27 @@ def test_missing_session_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "caps_for", _Caps())
     res = mod._update_handoff_impl("## 任务目标\nX", switch=True, tool_ctx={"workdir": str(tmp_path)})
     assert res.success is False
+
+
+def test_send_text_carries_source_title(tmp_path, monkeypatch):
+    mod = _load_tool()
+
+    class _Caps2(_Caps):
+        def __call__(self, cap_id):
+            if cap_id == "session.read":
+                return lambda: {"name": "修复登录 bug"}
+            return super().__call__(cap_id)
+
+    caps = _Caps2()
+    monkeypatch.setattr(mod, "caps_for", caps)
+    sent = []
+    orig = caps.__call__
+
+    def _call(cap_id):
+        if cap_id == "session.send":
+            return lambda **kw: sent.append(kw.get("text", ""))
+        return orig(cap_id)
+
+    monkeypatch.setattr(mod, "caps_for", _call)
+    mod._update_handoff_impl("## 任务目标\\nX", switch=True, tool_ctx={"workdir": str(tmp_path), "session_id": "s1"})
+    assert sent and "继续完成「修复登录 bug」会话的交接任务" in sent[0]

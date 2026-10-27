@@ -377,7 +377,7 @@ def _session_read(host: Any):
         backend = getattr(host, "backend", None)
         session = backend.get_current_session() if backend is not None else None
         if session is None:
-            return {"session_id": "", "messages": [], "system_prompt": ""}
+            return {"session_id": "", "name": "", "messages": [], "system_prompt": ""}
         session_id = str(getattr(session, "session_id", "") or "")
 
         def load_extras(idxs: list) -> dict:
@@ -395,6 +395,7 @@ def _session_read(host: Any):
 
         return {
             "session_id": session_id,
+            "name": str(getattr(session, "name", "") or ""),
             "messages": list(getattr(session, "messages", None) or []),
             "system_prompt": str(getattr(session, "system_prompt", "") or ""),
             "extras": load_extras,
