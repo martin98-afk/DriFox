@@ -2,11 +2,10 @@
 All notable changes to this project will be documented in this file.
 
 ## [未发布]
-### ♻️ 代码重构
-- **会话交接改为插件实现** (`system-handoff`): 交接全链路（阈值检测、补写触发、文档读写、切会话编排、注入）迁入 `plugins/system-handoff`；主程序新增 `session.interrupt` / `session.new` / `session.send` 三个能力，走窗口级动作队列，本轮结束按序执行；删除 `app/core/context/handoff.py`、`_on_auto_compact_requested` 与 backend 交接信号链。自动继续改走 ephemeral 通道，不再伪造用户消息。
-## [v0.6.12] - 2026-10-27
 
-自 v0.6.11 以来的变更 | 提交数：18 · 文件变更：80 · +4303/-1192 | 贡献者：dingma, mading
+## [v0.6.12] - 2026-10-27 (重新发布 #2)
+
+自 v0.6.11 以来的变更 | 提交数：25 · 文件变更：123 · +6251/-2179 | 贡献者：dingma, mading, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -37,6 +36,23 @@ All notable changes to this project will be documented in this file.
 ### 🔄 其他变更 (Other Changes)
 
 - **测试** (`074a3409`): mock 用户头像拉取，防止测试期网络调用。
+
+### ✨ 新功能 (New Features)（重新发布 #2 追加）
+
+- **会话交接工具 `update_handoff`** (`a1dbb028`): 会话内可直接撰写交接文档，配合窗口级动作队列编排切会话。
+- **动作队列与工具宿主兼容性增强** (`83ad79fd`): `tool_core` provider 宿主兼容性修正，设置卡与全局卡控制器适配，新增 `test_capability_tool_host_compat.py`。
+- **交接机制与会话管理增强** (`4d801fa6`): `auto_compact_trigger` 补写触发与 `inject_handoff` 注入细节增强。
+- **继续提示附带源会话标题** (`7ca792a7`): 会话接续提示带上来源会话标题。
+- **动作队列打断时丢弃待发送** (`270cd41a`): 中断或有新动作入队时丢弃 pending 发送，防重复投递；补自定义输入开关与流式 diff 渲染判据测试。
+- **动作队列接入 loguru** (`c7c0aec9`): 统一日志框架，细化队列日志。
+
+### ♻️ 代码重构 (Refactoring)（重新发布 #2 追加）
+
+- **会话交接改为插件实现** (`system-handoff` · `a1dbb028`): 交接全链路（阈值检测、补写触发、文档读写、切会话编排、注入）迁入 `plugins/system-handoff`；主程序新增 `session.interrupt` / `session.new` / `session.send` 能力，走窗口级动作队列，本轮结束按序执行；删除 `app/core/context/handoff.py`、`_on_auto_compact_requested` 与 backend 交接信号链，自动继续改走 ephemeral 通道，不再伪造用户消息。
+
+### 🔧 其他 (Chores & Build)（重新发布 #2 追加）
+
+- **marketplace 自动再生成** (`f43b40fd`): 按 plugin.json 重新生成 [skip ci]。
 
 ## [v0.6.11] - 2026-10-26 (重新发布 #7)
 
