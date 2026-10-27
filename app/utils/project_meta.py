@@ -35,8 +35,6 @@ _DARK_TARGET_CONTRAST = 3.2  # 图形元素（色块）：WCAG AA 3:1，留 0.2 
 #   深色档 cap 到 _DARK_CAP_LUM → 白字 ≥3.5:1（粗体大字，饱和彩底观感可读）
 _DARK_CAP_LUM = 0.25
 
-_RGBA_RE = re.compile(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
-_HEX_COLOR_RE = re.compile(r"#([0-9a-fA-F]{6})")
 
 
 def extract_project_initials(name: str) -> str:
@@ -147,19 +145,6 @@ def _is_light_theme() -> bool:
         return False
 
 
-def _parse_rgb(color: str) -> tuple[int, int, int] | None:
-    """解析 "rgba(r, g, b, a)" / "#RRGGBB" 为 (r, g, b)，失败返回 None"""
-    if not color:
-        return None
-    text = color.strip()
-    m = _RGBA_RE.match(text)
-    if m:
-        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    m = _HEX_COLOR_RE.match(text)
-    if m:
-        h = m.group(1)
-        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-    return None
 
 
 # 配色结果缓存：key = (项目名, alpha, 是否浅色主题)

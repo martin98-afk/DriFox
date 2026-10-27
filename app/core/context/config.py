@@ -41,11 +41,6 @@ def cfg_float(key: str, default: float) -> float:
         return default
 
 
-def cfg_bool(key: str, default: bool) -> bool:
-    val = cfg(key, default)
-    if isinstance(val, bool):
-        return val
-    return str(val).lower() in ("1", "true", "yes", "on")
 
 
 # 免裁剪名单：唯一权威来源是工具注册时的 metadata 声明

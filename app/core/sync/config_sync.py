@@ -1784,10 +1784,6 @@ class ConfigSyncService(QObject):
         except Exception:
             return None
 
-    def _get_remote_sha(self, client: Optional[httpx.Client] = None) -> Optional[str]:
-        """查询远端 app.config 文件的 sha（兼容旧调用方）"""
-        return self._get_remote_file_sha(REMOTE_PATH, client)
-
     def _do_download(self) -> bool:
         """从远端下载配置和 user-custom 插件，覆盖本地（SHA 未变则跳过）"""
         # 准备读取用 token（不刷新，避免旋转本地 RT）

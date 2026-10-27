@@ -702,43 +702,6 @@ def _get_tool_icon(tool_name: str, tool_args: dict = None) -> str:
     return _get_tool_icon_name(tool_name, tool_args)
 
 
-def _extract_screenshot_image_path(result: str) -> str:
-    """从 screenshot 工具结果字符串中提取截图文件绝对路径
-
-    result 格式类似 Python dict str():
-        {'path': 'D:/...png', 'absolute_path': 'D:/...png', ...}
-    """
-    if not result:
-        return ""
-
-    # 策略1: ast.literal_eval 解析 Python dict 字面量
-    try:
-        import ast
-
-        data = ast.literal_eval(result)
-        if isinstance(data, dict):
-            path = data.get("absolute_path") or data.get("path") or ""
-            if path and os.path.isfile(path):
-                return path
-    except (ValueError, SyntaxError, MemoryError):
-        pass
-
-    # 策略2: 正则提取 'absolute_path': '...' 或 'path': '...'
-    for key in ("absolute_path", "path"):
-        m = re.search(r"""['"]""" + key + r"""['"]\s*:\s*['"]([^'"]+\.png)['"]""", result)
-        if m:
-            path = m.group(1)
-            if os.path.isfile(path):
-                return path
-
-    # 策略3: 直接匹配 .png 的绝对路径
-    m = re.search(r"""['"]([A-Za-z]:[^'"]+\.png)['"]""", result)
-    if m:
-        path = m.group(1)
-        if os.path.isfile(path):
-            return path
-
-    return ""
 
 
 # 参数展示型工具（render_mode="inline"）→ 紧凑单行卡片（无折叠、无 body、无工具结果）
@@ -1171,13 +1134,6 @@ def render_tool_block(
 </div>"""
 
 
-def format_timestamp(ts: str) -> str:
-    """格式化时间戳"""
-    if not ts:
-        return ""
-    if len(ts) > 5:
-        return ts[-5:]
-    return ts
 
 
 def invalidate_render_caches():

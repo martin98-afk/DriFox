@@ -111,21 +111,6 @@ class ThemeRefreshCoordinator:
     #  背景缓存（LRU 淘汰，防止内存泄漏）
     # ══════════════════════════════════════════════════════════════
 
-    @classmethod
-    def get_bg_cache_key(cls, image_path: str | None, opacity: float) -> str:
-        """生成背景图片缓存键。
-
-        Args:
-            image_path: 图片路径，None 表示无背景
-            opacity:   透明度值 (0.0 ~ 1.0)
-
-        Returns:
-            格式为 "path:opacity" 的缓存键字符串
-        """
-        return f"{image_path or '__none__'}:{opacity:.{_BG_OPACITY_PRECISION}f}"
-
-
-
     # ══════════════════════════════════════════════════════════════
     #  计时工具
     # ══════════════════════════════════════════════════════════════
