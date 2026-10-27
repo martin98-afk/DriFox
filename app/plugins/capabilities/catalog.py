@@ -80,6 +80,9 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "失效所有窗口的会话 system_prompt 缓存（跨窗口副作用）",
             _UI,
         ),
+        _spec("session.interrupt", _M, "停止当前流式输出（入队，本轮结束后执行）", _BOTH),
+        _spec("session.new", _M, "新建会话（入队，停流后执行）", _BOTH),
+        _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染）", _BOTH),
         # ── 输入框 ──
         _spec("input.read", _M, "输入框文本与附件列表", _UI),
         _spec("input.write", _M, "写入输入框文本", _UI),

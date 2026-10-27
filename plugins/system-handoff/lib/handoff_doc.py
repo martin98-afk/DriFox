@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""
-会话交接文档（handoff）读写与新鲜度判定 —— 主程序侧唯一实现。
+"""会话交接文档读写与新鲜度判定 —— 插件侧独立实现。
 
-文件契约与插件 `plugins/system-tools/tools/handoff_tools.py` 的写盘端一致：
-`<project_root>/.drifox/handoff/<session_id>.md`，frontmatter 只含
+文件契约：`<project_root>/.drifox/handoff/<session_id>.md`（无工作目录时回退
+`<app_data_dir>/handoff/`），frontmatter 只含
 session_id / project_root / created_at / updated_at / injected_into。
-插件不能 import 主程序内部模块，因此解析/序列化逻辑两边各有一份，格式契约靠本注释约束。
+
+插件不能 import 主程序内部模块，因此解析/序列化逻辑独立存在；格式契约由本
+注释约束，改动 frontmatter 字段必须同步工具端与注入端。
 
 新鲜度不使用布尔 consumed：新会话若只有 system 消息、用户没说话就被丢弃（不落库），
 布尔标记会把交接永久标成已消费。改为 `injected_into` 记录已注入的 session_id 列表。
@@ -23,6 +24,8 @@ MAX_INJECTED = 5
 FRESH_MAX_MESSAGES = 10
 FRESH_MAX_TOKENS = 3000
 _CHARS_PER_TOKEN = 4
+# 文档年龄上限：超过则一律补写。防止几小时前的旧交接被当成「仍覆盖当前进度」直接切会话
+FRESH_MAX_AGE_MS = 15 * 60 * 1000
 
 
 def handoff_dir(project_root: str = "", app_data_dir: Optional[Path] = None) -> Path:
@@ -128,11 +131,14 @@ def is_fresh(meta: Dict[str, Any], messages: Optional[List[Dict[str, Any]]]) -> 
     """交接是否仍然覆盖当前进度
 
     判据：updated_at 之后的新增消息条数 ≤ FRESH_MAX_MESSAGES，
-    且这些消息的字符量 ≤ FRESH_MAX_TOKENS * 4。
+    且这些消息的字符量 ≤ FRESH_MAX_TOKENS * 4；
+    且文档本身不超过 FRESH_MAX_AGE_MS（否则旧交接会覆盖当前进度）。
     时间戳缺失的消息按「旧消息」处理，不计入新增。
     """
     cutoff = updated_at_ms(meta)
     if cutoff <= 0:
+        return False
+    if time.time() * 1000 - cutoff > FRESH_MAX_AGE_MS:
         return False
     newer = []
     for msg in messages or []:

@@ -30,6 +30,8 @@ from qfluentwidgets import (
 
 from typing import Dict
 
+from loguru import logger
+
 from app.tools.tool_name_mapper import ToolNameMapper
 from app.utils.design_tokens import (
     ButtonStyles,
@@ -1132,6 +1134,11 @@ class HookListSettingCard(ExpandSettingCard):
     def _refresh(self, reload=True):
         """刷新 hook 列表"""
         was_expanded = self.isExpand
+        logger.debug(
+            f"[HOOKDBG] _refresh enter: reload={reload} was_expanded={was_expanded} "
+            f"visible={self.isVisible()} cardH={self.card.height()} fixedH={self.height()} "
+            f"oldVH={self.viewLayout.sizeHint().height()} nOld={self.viewLayout.count()}"
+        )
         if reload:
             self._load_hooks()
 
@@ -1163,6 +1170,30 @@ class HookListSettingCard(ExpandSettingCard):
             h = self.viewLayout.sizeHint().height()
             if h > 0:
                 self.setFixedHeight(self.card.height() + h)
+        logger.debug(
+            f"[HOOKDBG] _refresh exit: was_expanded={was_expanded} newVH={self.viewLayout.sizeHint().height()} "
+            f"fixedH={self.height()} minH={self.minimumHeight()} maxH={self.maximumHeight()} "
+            f"nNew={self.viewLayout.count()} visible={self.isVisible()}"
+        )
+
+    def toggleExpand(self):
+        """打点包装：定位列表消失时用户手动收起/展开的时序"""
+        logger.debug(
+            f"[HOOKDBG] toggleExpand: isExpand={self.isExpand} cardH={self.height()} "
+            f"vh={self.viewLayout.sizeHint().height()} nItems={self.viewLayout.count()}"
+        )
+        super().toggleExpand()
+
+    def setExpand(self, isExpand: bool):
+        """打点包装：捕获程序化展开（含 _expand_page_cards 兜底）"""
+        import traceback
+
+        origin = "".join(traceback.format_stack(limit=5)[:-1])
+        logger.debug(
+            f"[HOOKDBG] setExpand({isExpand}): cur={self.isExpand} cardH={self.height()} "
+            f"vh={self.viewLayout.sizeHint().height()} nItems={self.viewLayout.count()}\n{origin}"
+        )
+        super().setExpand(isExpand)
 
     def _load_hooks(self):
         """从 HookManager 加载分组后的 hooks"""

@@ -951,7 +951,7 @@ class OpenAIChatWorker(QThread):
             }
 
             # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息
-            # 让 hook（如 context_auto_compact）能检测当前 token 占比
+            # 让 hook（如 system-handoff 的 auto_compact_trigger）能检测当前 token 占比
             # 与圆环同源（engine 快照口径），保证 hook 触发占比与显示一致
             if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
                 token_count, token_limit = self._hook_context_usage(backend)
@@ -1015,11 +1015,6 @@ class OpenAIChatWorker(QThread):
                 except ImportError:
                     pass
 
-            # 检查 auto-compact 触发信号（context_auto_compact hook 的输出）
-            # 将 results 中 JSON 的 auto_compact 信号转发给 backend
-            if event_name == "PreAssistantMessage":
-                self._check_results_auto_compact(results, backend)
-
             return block_reason
 
         except Exception as e:
@@ -1034,30 +1029,6 @@ class OpenAIChatWorker(QThread):
             backend,
             llm_config=getattr(self, "llm_config", None),
         )
-
-    def _check_results_auto_compact(self, results: list, backend) -> None:
-        """检查 hook 结果中是否有 auto-compact 触发信号
-
-        从各 hook 返回的 JSON 解析 auto_compact 字段，
-        有信号则调用 backend.request_auto_compact。
-
-        Args:
-            results: trigger_event 返回的 HookExecutionResult 列表
-            backend: ChatBackend 实例
-        """
-        if not results:
-            return
-        for r in results:
-            if not r.success or not r.output:
-                continue
-            try:
-                data = json.loads(r.output)
-                if isinstance(data, dict) and data.get("auto_compact"):
-                    ratio = float(data.get("ratio", 0.0))
-                    backend.request_auto_compact(ratio)
-                    return  # 只触发一次
-            except json.JSONDecodeError, ValueError, TypeError:
-                pass
 
     @staticmethod
     def _extract_block_reason(output: str) -> Optional[str]:

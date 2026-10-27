@@ -480,6 +480,42 @@ def _session_write(host: Any):
     return host._save_messages_to_session
 
 
+def _session_control(host: Any):
+    """会话控制三件套（入队语义，不直接操作 UI）。
+
+    调用方可能在 worker 线程（工具 impl），所以只往窗口队列里塞动作，
+    真正执行由 main_widget 在本轮结束时 drain。window_id 只做精确匹配，
+    拿不到就拒绝——写操作回退「活跃窗口」会在多窗口同时交接时串窗。
+    """
+    from app.core.conversation.action_queue import get_action_queue
+
+    wid = str(getattr(host, "_window_id", "") or "")
+    queue = get_action_queue()
+
+    def interrupt() -> bool:
+        return queue.enqueue(wid, "interrupt", {})
+
+    def new_session() -> bool:
+        return queue.enqueue(wid, "new", {})
+
+    def send(text: str, *, ephemeral: bool = True) -> bool:
+        return queue.enqueue(wid, "send", {"text": str(text or ""), "ephemeral": bool(ephemeral)})
+
+    return {"interrupt": interrupt, "new": new_session, "send": send}
+
+
+def _session_interrupt(host: Any):
+    return _session_control(host)["interrupt"]
+
+
+def _session_new(host: Any):
+    return _session_control(host)["new"]
+
+
+def _session_send(host: Any):
+    return _session_control(host)["send"]
+
+
 # ──────────────────── 界面 ────────────────────
 
 
@@ -1048,6 +1084,9 @@ def register(registry) -> None:
     reg.register("session.list", _session_list, surface="ui", owner="core:ui")
     reg.register("session.invalidate", _session_invalidate, surface="ui", owner="core:ui")
     reg.register("session.write", _session_write, surface="ui", owner="core:ui")
+    reg.register("session.interrupt", _session_interrupt, surface="ui", owner="core:ui")
+    reg.register("session.new", _session_new, surface="ui", owner="core:ui")
+    reg.register("session.send", _session_send, surface="ui", owner="core:ui")
     # 界面
     reg.register("input.read", _input_read, surface="ui", owner="core:ui")
     reg.register("input.write", _input_write, surface="ui", owner="core:ui")

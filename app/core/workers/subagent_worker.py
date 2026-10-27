@@ -895,7 +895,7 @@ class SubAgentExecutor(QThread):
                 return
 
             # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息
-            # 让 hook（如 context_auto_compact）能检测当前 token 占比
+            # 让 hook（如 system-handoff 的 auto_compact_trigger）能检测当前 token 占比
             if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
                 try:
                     from app.core.infra.token_estimator import count_messages_tokens as _count
