@@ -26,10 +26,18 @@ def hook(event: str, context: dict) -> str:
 
     kv = caps_for("state.kv")
     if not kv:
+        try:
+            from loguru import logger
+
+            logger.warning("[handoff] SessionStart 取不到 state.kv，无法注入交接")
+        except Exception:
+            pass
         return ""
     try:
         pending = kv["get"]("handoff_pending") or {}
     except Exception:
+        return ""
+    if not pending:
         return ""
     if not pending:
         return ""
@@ -50,6 +58,13 @@ def hook(event: str, context: dict) -> str:
     content = str(pending.get("content") or "").strip()
     if not content:
         return ""
+
+    try:
+        from loguru import logger
+
+        logger.info(f"[handoff] SessionStart 注入交接文档 ({len(content)} 字)")
+    except Exception:
+        pass
 
     source = str(pending.get("source_session_id") or "").strip()
     tail = f"\n\n（源会话 ID：{source}，可在历史面板回查原始对话）" if source else ""

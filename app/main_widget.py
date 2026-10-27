@@ -6941,7 +6941,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         含团队邮件收尾与停止冷却，与手动停止路径保持一致。
         """
-        if not getattr(self, "_is_streaming", False) or not self.backend.chat_engine:
+        if not self.backend.chat_engine:
+            return
+        # 用 worker 真实状态而不是 UI 标志：_is_streaming 可能已复位但 worker 仍在跑
+        # （日志出现 current_worker=None 的失联场景），漏停会让后续 new/send 撞上繁忙，
+        # 结果是新会话只留下一张不会更新的空卡片
+        if not (getattr(self, "_is_streaming", False) or self._worker_actually_busy()):
             return
         self._is_streaming = False
         self._set_ai_state("idle")
@@ -19547,6 +19552,13 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning("[Session] ephemeral 发送撞上繁忙 worker，放弃本次自动继续")
             self._is_streaming = False
             self._toggle_send_stop(False)
+            # 已经建好的空回复卡必须摘掉，否则界面上留一张永远停在等待态的空卡
+            if assistant_card is not None:
+                try:
+                    assistant_card.deleteLater()
+                except RuntimeError:
+                    pass
+                self._current_assistant_card = None
             return
 
         if expect_session_id is not None:
@@ -25290,6 +25302,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🛡️ 记录手动停止时刻（F1 P1-3）：停止后 1s 冷却期内不自动拉起 pending 邮件
         self._last_stop_time = time.monotonic()
+
+        # 🛡️ 停止即放弃本轮后续动作：插件登记的队列（停流/新建/发消息）若留着，
+        # 下次 drain 会让「已停止」的会话又自己跑起来，与用户意图相反
+        try:
+            from app.core.conversation.action_queue import get_action_queue
+
+            get_action_queue().clear(str(getattr(self, "_window_id", "") or ""))
+        except Exception:
+            pass
 
         # ===== 第一阶段：非阻塞取消 + 立即更新 UI =====
         # 先取消 worker（仅设置标志 + 断开信号，不阻塞）
