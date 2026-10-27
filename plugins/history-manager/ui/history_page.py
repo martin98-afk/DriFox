@@ -447,6 +447,9 @@ class HistoryPage(QWidget):
 
         self._search_input = QLineEdit(self)
         self._search_input.setPlaceholderText("🔍 搜索会话...")
+        # 清空按钮：有文本且获焦时显示（Fusion 的 SP_LineEditClearButton 图标，
+        # 亮/暗主题均可见；QSS 只覆盖外观，不影响子按钮布局）
+        self._search_input.setClearButtonEnabled(True)
         self._search_input.setFixedHeight(30)
         self._search_input.setMinimumWidth(80)  # 项目全名较长时的兜底
         self._apply_search_style()
@@ -607,6 +610,7 @@ class HistoryPage(QWidget):
 
         self._project_new_edit = QLineEdit(body)
         self._project_new_edit.setPlaceholderText("搜索/新建项目...")
+        self._project_new_edit.setClearButtonEnabled(True)  # 一键清空过滤词
         self._project_new_edit.setFixedHeight(24)
         self._project_new_edit.setMinimumWidth(60)
         # ★ 面板默认收起（构造期建好但不可见）→ 宿主 refresh_style 派发时若只刷
