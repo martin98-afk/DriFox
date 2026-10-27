@@ -524,6 +524,8 @@ class SubAgentExecutor(QThread):
         response_content = ""
         current_reasoning = ""  # DeepSeek V4 thinking mode
         iteration_count = 0
+        # 工具「本轮收尾」请求（ToolResult.end_turn），每次任务重置
+        self._end_turn_requested = False
         # LoopPolicy：轮数上限（per-agent steps 优先，激活策略兜底，默认 30）
         round_limit = self._resolve_round_limit()
 
@@ -619,6 +621,13 @@ class SubAgentExecutor(QThread):
             # 再 extend hook_messages（role="user" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
             current_messages.extend(tool_results)
             current_messages.extend(hook_messages)
+
+            # 工具请求本轮收尾（ToolResult.end_turn）：不再发起下一轮 API 调用
+            if getattr(self, "_end_turn_requested", False):
+                self._add_log("progress", "工具要求本轮收尾，提前结束子智能体循环")
+                if current_reasoning:
+                    return f"<think>{current_reasoning}</think>\n\n{response_content}"
+                return response_content
             # [T4-3] 已删除 `QCoreApplication.processEvents()` 与 `time.sleep(0.2)`：
             # 本循环运行在子智能体的 QThread 子线程里，子线程没有 Qt 事件循环，
             # processEvents() 是纯空转；sleep 只阻塞子线程自己，对主线程无任何
@@ -1602,6 +1611,10 @@ class SubAgentExecutor(QThread):
                 "diff": getattr(result, "diff", None) if result else None,
                 "anchors": getattr(result, "anchors", None) if result else None,
             }
+            # 工具请求本轮收尾（插件通用契约 ToolResult.end_turn）：子智能体本轮
+            # 不再发起下一轮 API 调用，直接拿已产出的文本收工。
+            if getattr(result, "end_turn", False):
+                self._end_turn_requested = True
             # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
             serialized = self._serialize_for_api([raw_result]).messages
             tool_results.append(serialized[0] if serialized else raw_result)

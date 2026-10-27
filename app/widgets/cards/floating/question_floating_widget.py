@@ -409,6 +409,8 @@ class _CustomInputCard(QWidget):
         self._label_text = "输入自己的答案"
         self._desc_text = self.PLACEHOLDER
         self._adjusting_height = False
+        # 程序化写入文本（恢复草稿）期间禁止 textChanged 触发自动激活
+        self._setting_content = False
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(44)
         self._setup_ui()
@@ -479,6 +481,9 @@ class _CustomInputCard(QWidget):
         self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._text_edit.textChanged.connect(self._on_text_changed)
         self._text_edit.installEventFilter(self)  # 监听 Resize/Show，等布局完成后再算高度
+        # QAbstractScrollArea 的鼠标事件走 viewport，不会作为 _text_edit 自身事件
+        # 到达 eventFilter；点击输入框内部需靠 viewport 才能感知（选中语义见 eventFilter）
+        self._text_edit.viewport().installEventFilter(self)
         # QSS color 对 QTextEdit 常不生效，用 QPalette 兜底；色值走主题 token（浅色主题下不能硬编码白字）
         pal = self._text_edit.palette()
         pal.setColor(QPalette.Text, QColor(Colors.TEXT_PRIMARY))
@@ -489,23 +494,36 @@ class _CustomInputCard(QWidget):
         self._apply_style()
 
     def eventFilter(self, obj, event):
-        """监听 _text_edit 的 Show 和 Resize 事件：布局完成后才计算高度
+        """监听 _text_edit 的 Show/Resize（高度）与 viewport 点击（选中）
 
-        必须延迟到下一轮事件循环（QTimer.singleShot(0, ...)），
+        高度必须延迟到下一轮事件循环（QTimer.singleShot(0, ...)），
         因为 Resize 事件触发时 viewport().width() 还没更新好。
+
+        选中语义：**点击输入框或打字**才算选用自定义答案，**聚焦不算**。
+        聚焦可能由自动聚焦（窗口首帧、切回前台）产生，若视为选中，多选下
+        用户刚取消的勾选会被下一次 FocusIn 默默复活，表现为“取消不掉”。
+        viewport 独立取鼠标事件：QAbstractScrollArea 的鼠标事件走 viewport，
+        不会作为 _text_edit 自身事件到达这里。
         """
         if obj is self._text_edit:
-            if event.type() == QEvent.FocusIn:
-                # 输入框常驻后，聚焦即视为选中自定义输入（单选下取消其他选项）
+            if event.type() in (QEvent.Resize, QEvent.Show):
+                QTimer.singleShot(0, self._adjust_height_to_content)
+        elif obj is self._text_edit.viewport():
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 if not self._active:
                     self.set_active(True)
                     self.activated.emit()
-            elif event.type() in (QEvent.Resize, QEvent.Show):
-                QTimer.singleShot(0, self._adjust_height_to_content)
         return super().eventFilter(obj, event)
 
     def _on_text_changed(self):
         self._text_value = self._text_edit.toPlainText()
+        if not self._active and not self._setting_content:
+            # 打字即视为选用自定义答案（键盘路径，无需点击）。
+            # 多选取消勾选后焦点可能仍留在输入框内（取消时刻意不夺焦，避免
+            # 键盘焦点悬空）；此时继续打字重新激活，避免出现“文字变了但未勾选、
+            # 且不计入答案”的隐性状态。_setting_content 用于放过恢复草稿的写入。
+            self.set_active(True)
+            self.activated.emit()
         if self._active:
             QTimer.singleShot(0, self._adjust_height_to_content)
 
@@ -587,7 +605,11 @@ class _CustomInputCard(QWidget):
     def set_content(self, text: str):
         """恢复已保存的文本内容"""
         self._text_value = text
-        self._text_edit.setPlainText(text)
+        self._setting_content = True
+        try:
+            self._text_edit.setPlainText(text)
+        finally:
+            self._setting_content = False
 
     def _apply_style(self):
         Colors.refresh()
@@ -644,10 +666,16 @@ class _CustomInputCard(QWidget):
             # 点击卡片任意位置 → 激活自定义输入。
             # 不能只靠 FocusIn：焦点可能已在本输入框（如选选项后焦点未离开），
             # setFocus 是 no-op 不产生 FocusIn，会导致图标点了没反应。
-            if not self._active:
-                self.set_active(True)
-                self.activated.emit()
-            self._text_edit.setFocus()
+            if self._active and self._multiple:
+                # 多选：再次点击卡片（输入框以外区域）取消选择。
+                # 单选不在此取消——单选取消由点其它选项完成（互斥语义）。
+                # 取消分支刻意不调 setFocus：否则 FocusIn 立刻把激活态复活。
+                self.set_active(False)
+            else:
+                if not self._active:
+                    self.set_active(True)
+                    self.activated.emit()
+                self._text_edit.setFocus()
         super().mousePressEvent(e)
 
 

@@ -128,6 +128,7 @@ from app.widgets.card_render_core import (
     _js_literal,
     _last_para_break_outside_fence,
     _mmd_theme_vars_js,
+    _registered_tag_names_safe,
     _render_inline_tail,
     _render_markdown_to_html_cached,
     _render_markdown_to_html_worker,
@@ -160,6 +161,28 @@ _BODY_GEOM_READ_JS = (
     "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
     "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()"
 )
+
+
+def _seg_has_protocol_block(seg: str) -> bool:
+    """差量段是否含流式协议块（think / tool / 插件注册 tag）。
+
+    含协议块的段不走差量追加：这些块的 DOM 由 JS 增量注入 / restore 维护，
+    差量再渲染一份会出现重复框（历史回归族）。判定保守：注册表拿不到时
+    按「含协议块」处理，宁可多走一次全量。
+    """
+    if not seg:
+        return False
+    if "<think>" in seg or "<tool>" in seg:
+        return True
+    if "<" not in seg:
+        return False
+    try:
+        for tag in _registered_tag_names_safe():
+            if f"<{tag}>" in seg:
+                return True
+    except Exception:  # noqa: BLE001
+        return True
+    return False
 
 
 def _parse_height_payload(payload: str):
@@ -6681,8 +6704,21 @@ class CodeWebViewer(QWebEngineView):
                 self._stable_html = ""
                 self._stable_md_len = 0
                 self._needs_full_render = True
-            if self._streaming and not self._needs_full_render and not self._has_active_tool_dom():
+            if self._streaming and self._needs_full_render:
+                self._rdiag_hit("full_needs_full")
+            elif self._streaming and self._has_pending_tool_dom():
+                self._rdiag_hit("full_tool_pending")
+            if self._streaming and not self._needs_full_render and not self._has_pending_tool_dom():
                 stable_len, segs = _extract_closed_segments(self._markdown_text[self._stable_md_len :])
+                # 含协议块的闭合段（think / tool / 插件注册 tag）仍让位全量：
+                # 这些块的 DOM 由 JS 增量注入维护，差量双写会出现重复框。
+                # 纯文本段占流式输出绝对多数，让位代价可忽略。
+                if segs and any(_seg_has_protocol_block(seg) for seg in segs):
+                    self._refresh_viewer_font_css()
+                    self._last_rendered_markdown = self._markdown_text
+                    self._rdiag_hit("full_protocol_seg")
+                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                    return
                 # 🐛 修复（流式重复/残留 —— 「同一张卡里出现两份 PLAN/两条工具框」根因）：
                 # 基线停在 0 但本消息**已经全量渲染过**（DOM 已含 md[0:len(_last_rendered
                 # _markdown)] 的产物）。此时首个 \n\n 一到，segs 会把 md[0:...] 的闭合段
@@ -6752,6 +6788,7 @@ class CodeWebViewer(QWebEngineView):
                 # _perform_update 也会被此分支拦截，思考块/闭合段永远滞留
                 # （或仅靠流式结束才一次性显示）。
                 if self._has_reached_clean_boundary(self._markdown_text):
+                    self._rdiag_hit("full_no_seg")
                     self._refresh_viewer_font_css()
                     self._sequence_render(self._markdown_text, self._tool_compact_mode)
                 else:
@@ -6815,7 +6852,6 @@ class CodeWebViewer(QWebEngineView):
             # 主线程不再同步执行 md.convert（20-80ms 阻塞消除），
             # 渲染参数以快照形式传引用（md 不复制）。
             self._last_rendered_markdown = self._markdown_text
-            self._rdiag_hit("full_submit")
             self._sequence_render(self._markdown_text, self._tool_compact_mode)
 
         except RuntimeError:
@@ -6898,6 +6934,22 @@ class CodeWebViewer(QWebEngineView):
                 self._tool_dom_dirty = False
         except Exception:
             pass
+
+    def _has_pending_tool_dom(self) -> bool:
+        """流式差量是否必须让位全量。
+
+        只统计「JS 注入但尚未落进 markdown 的工具块」（运行框 / 参数预览框）：
+        它们不在 markdown 中，整页 updateContent 会抹掉，必须走 save/restore。
+
+        已完成工具（``_restore_finished_ids`` 非空）**不阻断差量**：这些块已由
+        ``_build_incremental_md`` 写入 markdown，差量路径只追加新闭合段、不动
+        已有 DOM，无需 restore 保护。此前把它计入阻断条件，导致「本轮只要调过
+        一次工具，后续每条正文都整页 updateContent」——长回复表现为成片闪现、
+        白屏重排、打字机缓冲被 _twReset 反复丢弃（无打字机观感）。
+        """
+        if self._tool_dom_dirty:
+            return True
+        return bool(getattr(self, "_injected_pending_tools", None))
 
     def _has_active_tool_dom(self) -> bool:
         """B1: 是否有活跃工具 DOM（JS 注入的工具块 / 待 restore 的完成块）。

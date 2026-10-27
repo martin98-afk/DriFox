@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 # 同一队列中最多保留一次的动作（重复登记无意义且会重复停流/重复建会话）
 _DEDUP = frozenset({"interrupt", "new"})
 
+# 入队这两个动作时丢弃队列中尚未执行的 send：它们属于旧会话。
+# 典型场景：auto_compact 先入队补写提示 send(ephemeral)，模型随后入队
+# interrupt/new/send(继续指令)。两条 send 都执行时，第一条的 worker 先启动，
+# 第二条撞上 "Already streaming" 回滚 UI（_is_streaming=False + 按钮切回发送态），
+# 而真实 worker 仍在跑 → 按钮中止不了对话。
+_DISCARD_SEND = frozenset({"interrupt", "new"})
+
 
 class WindowActionQueue:
     """按 window_id 隔离的动作队列"""
@@ -43,6 +50,9 @@ class WindowActionQueue:
         queue = self._queues[wid]
         if action in _DEDUP and any(item["action"] == action for item in queue):
             return False
+        if action in _DISCARD_SEND and any(item["action"] == "send" for item in queue):
+            self._queues[wid] = queue = deque(item for item in queue if item["action"] != "send")
+            logger.info("[ActionQueue] %s 入队：丢弃旧会话排队的 send", action)
         queue.append({"action": action, "payload": dict(payload or {})})
         return True
 

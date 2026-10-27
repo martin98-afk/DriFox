@@ -9,6 +9,7 @@ worker，只有入队才是安全时序。
 只依赖 tool_ctx（workdir / session_id）与能力池，不 import 主程序内部模块。
 """
 
+import json
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -27,10 +28,31 @@ _CONTINUE_PROMPT = (
 )
 
 
-def _continue_prompt(source_title: str) -> str:
-    """自动继续文案：带上原会话标题，新会话里一眼看出在接哪段活"""
+def _goal_headline(body: str) -> str:
+    """从交接正文「## 任务目标」取首行（会话标题未生成时的动态回退）"""
+    lines = [ln.strip() for ln in (body or "").splitlines()]
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("## 任务目标"))
+    except StopIteration:
+        return ""
+    for ln in lines[start + 1 :]:
+        if ln.startswith("## "):
+            return ""
+        if ln:
+            return ln[:40]
+    return ""
+
+
+def _continue_prompt(source_title: str, body: str = "") -> str:
+    """自动继续文案：带上原会话标题，新会话里一眼看出在接哪段活
+
+    标题还没生成（"新对话"）时回退到交接正文的任务目标首行——会话名常是占位，
+    直接用它反而看不出接的是哪段活。
+    """
     title = (source_title or "").strip()
     if not title or title == "新对话":
+        title = _goal_headline(body)
+    if not title:
         return _CONTINUE_PROMPT
     return f"继续完成「{title}」会话的交接任务。\n" + _CONTINUE_PROMPT
 
@@ -57,6 +79,7 @@ _UPDATE_HANDOFF_SCHEMA = {
                     "type": "boolean",
                     "description": (
                         "写完是否立即开新会话继续，默认为 true：写完就切，新会话读交接接着干。"
+                        "switch=true 时本轮在本次工具调用后立即收尾，不会继续调工具。"
                         "仅当本轮还要继续干活、只想暂存进度时传 false。"
                     ),
                 },
@@ -79,8 +102,6 @@ def _handoff_dir(tool_ctx: Dict) -> Path:
 
 def _parse_front(text: str):
     """解析 frontmatter（值统一按 JSON 解析，失败则保留原字符串）"""
-    import json
-
     if not text.startswith("---\n"):
         return {}, text
     end = text.find("\n---\n", 4)
@@ -104,8 +125,6 @@ def _parse_front(text: str):
 
 def _dump_front(meta: Dict) -> str:
     """序列化 frontmatter（值统一 JSON 编码，避免路径含冒号时解析歧义）"""
-    import json
-
     lines = ["---"]
     for key in _FRONT_KEYS:
         if key not in meta:
@@ -126,18 +145,40 @@ def _source_session_title() -> str:
         return ""
 
 
+def _pending_path(tool_ctx: Dict) -> Optional[Path]:
+    """待注入交接的落盘位置（<app_data>/plugin_data/system-handoff/pending.json）
+
+    不再走 state.kv：SessionStart hook 在窗口创建期解析不到 host（backend 的
+    tool_executor 还没建），窗口级 KV 取不到 → 交接注入静默失败。文件通道与
+    host 无关，注入端用同一个 storage.data_dir 能力拼路径。
+    """
+    env_dir = ((tool_ctx or {}).get("env") or {}).get("app_data_dir")
+    if not env_dir:
+        return None
+    return Path(env_dir) / "plugin_data" / "system-handoff" / "pending.json"
+
+
 def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
-    """登记待注入内容 + 入队三连（停流 → 新建 → 发继续指令）"""
+    """登记待注入内容（落盘）+ 入队三连（停流 → 新建 → 发继续指令）"""
     pending = {
         "path": str(path),
         "content": body,
         "source_session_id": str((tool_ctx or {}).get("session_id") or ""),
         "ts": time.time(),
     }
+    pending_file = _pending_path(tool_ctx)
+    if pending_file is not None:
+        try:
+            pending_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(pending_file, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(pending, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    # handoff_active 只做防重入（auto_compact_trigger 消费），与注入通道无关
     kv = caps_for("state.kv")
     if kv:
         try:
-            kv["set"]("handoff_pending", pending)
             kv["set"]("handoff_active", {"ts": pending["ts"]})
         except Exception:
             pass
@@ -146,7 +187,7 @@ def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
         ("session.interrupt", {}),
         ("session.new", {}),
         # 自动继续是用户可见的一条新消息，带上原会话标题方便回溯
-        ("session.send", {"text": _continue_prompt(_source_session_title())}),
+        ("session.send", {"text": _continue_prompt(_source_session_title(), body)}),
     )
     for cap_id, kwargs in steps:
         fn = caps_for(cap_id)
@@ -215,8 +256,10 @@ def _update_handoff_impl(content: str = "", switch: bool = True, tool_ctx: Optio
     return ToolResult(
         True,
         content=f"交接文档已更新：{path}（{len(text)} 字）"
-        + ("；本轮结束后将开新会话继续" if switch else ""),
-        data={"handoff_switch": True, "handoff_path": str(path)} if switch else None,
+        + ("；本轮立即收尾，随后开新会话继续" if switch else ""),
+        # end_turn：插件通用契约，写完交接当轮就收尾，不让模型继续调工具
+        end_turn=bool(switch),
+        data={"handoff_path": str(path)} if switch else None,
     )
 
 
