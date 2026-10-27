@@ -11911,6 +11911,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # UI 插件装载期挂起：只记 pending，装载完成后 _release_welcome_build_hold
         # 统一补渲染（带全量 welcome_tab）。启动期 6 连发重建在此收口为 2 次
         # （首渲染 + 装载完成后一次）。
+        # 🛡️ 覆盖守卫：欢迎卡的渲染槽位是延迟调度的，可能晚于新会话里的第一轮对话
+        # （handoff 自动继续用 QTimer(0) 发消息，welcome 走 0/50/100ms 槽位）。
+        # 若此刻已在流式或会话已有对话消息，_clear_chat_area 会把刚渲染的消息卡片
+        # 从布局摘掉，表现为「停在欢迎页但状态在对话」（2026-10-27 handoff 复现）。
+        if getattr(self, "_is_streaming", False):
+            logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 流式中跳过（wid={self._window_id}）")
+            return
+        _cur = self.session_manager.get_current_session() if getattr(self, "session_manager", None) else None
+        if _cur is not None and any(
+            m.get("role") in ("user", "assistant") for m in (getattr(_cur, "messages", None) or [])
+        ):
+            logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 会话已有消息，跳过（wid={self._window_id}）")
+            return
         if getattr(self, "_welcome_build_hold", False):
             self._welcome_hold_pending = True
             logger.debug(
