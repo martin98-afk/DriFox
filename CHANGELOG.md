@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
+### 🐛 问题修复 (Bug Fixes)
+
+- **流式思考/人格块闭合瞬间内容泄漏到正文**: `append_text` 的协议块守卫只判「累积后是否未闭合」，`</think>`/`</plan>` 所在那批被放行；增量注入又只清 `<think>` 标签，该批文本以纯文本进 DOM，下一次全量渲染再折叠成卡片（正文闪现碎片后消失）。`_append_text_incremental` 增加 chunk 级 `_text_has_protocol_tag` 守卫。
+
 ## [v0.6.12] - 2026-10-27 (重新发布 #2)
 
 自 v0.6.11 以来的变更 | 提交数：25 · 文件变更：123 · +6251/-2179 | 贡献者：dingma, mading, drifox-bot

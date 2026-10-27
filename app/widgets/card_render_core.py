@@ -1928,6 +1928,35 @@ _PARTIAL_TAG_TAIL_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]{0,11}$")
 _PARTIAL_TAG_TAIL_WINDOW = 24
 
 
+def _text_has_protocol_tag(text: str) -> bool:
+    """chunk 是否含协议块标签（think / tool / 插件注册 tag，开或闭）。
+
+    用途：`CodeWebViewer._append_text_incremental` 的 chunk 级守卫。
+    `MessageCard.append_text` 的守卫只看「累积后的 text block 是否**未闭合**」，
+    闭合瞬间那一批（如 `取舍…\\n</plan>`）会被放行；而增量注入只清理
+    `<think>`，于是这批文本以纯文本进 DOM，下一次全量渲染又把它变成折叠卡
+    → 视觉上"思考/人格块内容在正文闪现后消失"（碎片级泄漏）。
+    含标签的 chunk 一律不做纯文本注入，交全量/差量渲染处理；口径与
+    `_render_inline_tail`（含 think 标签即返回空）一致。
+    """
+    if not text:
+        return False
+    # chunk 边界切开标签（尾部半截 `<pl` / `</pl`）：与 _has_unclosed_registered_tag
+    # 同口径宽松拦截——残段注入正文同样是碎片泄漏，误拦代价只是该批延迟一拍渲染。
+    if _PARTIAL_TAG_TAIL_RE.search(text[-_PARTIAL_TAG_TAIL_WINDOW:]):
+        return True
+    if "<" not in text:
+        return False
+    lowered = text.lower()
+    for tag in ("think", "tool"):
+        if f"<{tag}>" in lowered or f"</{tag}>" in lowered:
+            return True
+    for tag in _registered_tag_names_safe():
+        if f"<{tag}>" in lowered or f"</{tag}>" in lowered:
+            return True
+    return False
+
+
 def _is_render_fence_lang(lang: str) -> bool:
     """lang 是否会渲染成卡片/图表（内置集合 + 插件 fence 渲染器注册表）。"""
     if not lang:
