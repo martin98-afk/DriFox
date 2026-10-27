@@ -79,12 +79,12 @@ from PyQt5.QtWidgets import (
     QMenu,
     QSizePolicy,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     MaskDialogBase,
-    TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
@@ -253,6 +253,35 @@ def user_bubble_target_width(container_width: int) -> int:
     「松手后跳一下才稳定」。现收敛到本函数，调用点不得再自行算 margin。
     """
     return max(320, int(container_width) - max(24, int(container_width * 0.25)))
+
+
+class LiteIconButton(QToolButton):
+    """卡片内图标按钮（取代 qfluentwidgets TransparentToolButton）。
+
+    [PERF] 内存：FluentStyleSheet.BUTTON.apply 会给每个按钮 setStyleSheet(7829 字符)，
+    实测「创建→销毁」循环每按钮泄漏约 165KB（Qt 侧按 widget 缓存的 QSS 样式，
+    600 轮线性无平台，禁用该 apply 后泄漏归零）。本类 QSS 约 200 字符，
+    视觉逐项对齐 TransparentToolButton：透明底、5px 圆角、hover/pressed 极淡背景。
+    """
+
+    _QSS = (
+        "QToolButton{background:transparent;border:none;border-radius:5px;margin:0;padding:0;}"
+        "QToolButton:hover{background:rgba(127,127,127,0.07);}"
+        "QToolButton:pressed{background:rgba(127,127,127,0.11);}"
+        "QToolButton:disabled{background:transparent;}"
+    )
+
+    def __init__(self, icon=None, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setIconSize(QSize(16, 16))
+        self.setStyleSheet(self._QSS)
+        if icon is not None:
+            try:
+                if not icon.isNull():
+                    self.setIcon(icon)
+            except Exception:
+                pass
 
 
 class MessageCard(SimpleCardWidget):
@@ -882,7 +911,7 @@ class MessageCard(SimpleCardWidget):
 
         # 审查按钮：与分支/复制同排；仅在有 diff 时显示（set_diff_stats 控制），
         # 点击触发 code-reviewer 子智能体快速审查本次修改
-        review_icon = TransparentToolButton(get_icon("Search"), self)
+        review_icon = LiteIconButton(get_icon("Search"), self)
         review_icon.setObjectName("footer_review_icon")
         review_icon.setFixedSize(20, 20)
         review_icon.clicked.connect(lambda: self._emit_review_requested())
@@ -896,7 +925,7 @@ class MessageCard(SimpleCardWidget):
             (get_icon("分支"), "从此条分支新对话", lambda: self._emit_branch_requested()),
             (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
         ]:
-            b = TransparentToolButton(ic, self)
+            b = LiteIconButton(ic, self)
             b.setToolTip(tp)
             b.clicked.connect(cb)
             b.setFixedSize(20, 20)  # 弱化处理：比原顶部按钮 32px 更小
@@ -926,7 +955,7 @@ class MessageCard(SimpleCardWidget):
                 except Exception:
                     is_light = False
                 path = info.icon_light_path if (is_light and info.icon_light_path) else info.icon_path
-                b = TransparentToolButton(QIcon(str(path)) if path else QIcon(), self)
+                b = LiteIconButton(QIcon(str(path)) if path else QIcon(), self)
                 if info.tooltip:
                     b.setToolTip(info.tooltip)
                     install_hover_tooltip(b, delay_ms=200)
@@ -1929,7 +1958,7 @@ class MessageCard(SimpleCardWidget):
         else:
             specs = []
         for ic, tp, cb in specs:
-            b = TransparentToolButton(ic, self)
+            b = LiteIconButton(ic, self)
             b.setToolTip(tp)
             b.clicked.connect(cb)
             b.setFixedSize(32, 32)
@@ -2037,7 +2066,7 @@ class MessageCard(SimpleCardWidget):
                 path = (
                     info.icon_light_path if (is_light and info.icon_light_path) else info.icon_path
                 )
-                b = TransparentToolButton(QIcon(str(path)) if path else QIcon(), self)
+                b = LiteIconButton(QIcon(str(path)) if path else QIcon(), self)
                 if info.tooltip:
                     b.setToolTip(info.tooltip)
                     install_hover_tooltip(b, delay_ms=200)
@@ -2053,7 +2082,7 @@ class MessageCard(SimpleCardWidget):
             (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
             (get_icon("删除"), "删除", self.deleteRequested.emit),
         ]:
-            b = TransparentToolButton(ic, self)
+            b = LiteIconButton(ic, self)
             b.setToolTip(tp)
             b.clicked.connect(cb)
             b.setFixedSize(26, 26)  # 弱化处理：比助手卡 32px 更小
