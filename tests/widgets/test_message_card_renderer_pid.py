@@ -251,13 +251,15 @@ def test_kill_renderer_no_such_process(fake_psutil):
 
 
 def test_finish_streaming_clears_stream_text_acc(qapp):
-    """finish_streaming 落定后 _stream_text_acc == ""（流式全文副本不残留）。"""
+    """finish_streaming 落定后流式原文缓冲必须清空（parts + acc 均不残留）。"""
     _ensure_qapp()
     card = MessageCard(role="assistant")
     try:
+        card._stream_text_parts = ["x" * 1024]
         card._stream_text_acc = "x" * 1024
         card.finish_streaming()
-        assert card._stream_text_acc == ""
+        assert not card._stream_text_acc, "acc 未清空"
+        assert not card._stream_text_parts, "parts 未清空"
     finally:
         card.deleteLater()
 
@@ -267,9 +269,11 @@ def test_finish_streaming_clears_acc_history_path(qapp):
     _ensure_qapp()
     card = MessageCard(role="assistant")
     try:
+        card._stream_text_parts = ["y" * 512]
         card._stream_text_acc = "y" * 512
         card.finish_streaming(history=True)
-        assert card._stream_text_acc == ""
+        assert not card._stream_text_acc, "acc 未清空"
+        assert not card._stream_text_parts, "parts 未清空"
     finally:
         card.deleteLater()
 

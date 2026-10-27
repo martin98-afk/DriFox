@@ -36,11 +36,11 @@ def run(cards: int, switch_sessions: int, switches: int) -> dict:
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
 
-    from app.core.webengine_profile import init_shared_web_profile
+    from app.core.infra.webengine_profile import init_shared_web_profile
 
     init_shared_web_profile(parent=app)
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
     from app.widgets.message_card import MessageCard
 
     backend = ChatBackend(window_id="bench-longrun")

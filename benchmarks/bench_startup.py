@@ -222,7 +222,7 @@ def run_inner() -> dict:
     # [PERF] 复刻 main.py DeferredStartup：初始化共享 WebEngine Profile
     # （懒加载 batch 渲染欢迎卡片 CodeWebViewer 依赖它，缺失会 qFatal）
     try:
-        from app.core.webengine_profile import init_shared_web_profile
+        from app.core.infra.webengine_profile import init_shared_web_profile
 
         init_shared_web_profile(parent=app)
     except Exception:

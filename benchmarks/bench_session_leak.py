@@ -45,7 +45,7 @@ def run(rounds: int, msgs_per_round: int) -> dict:
 
     app = QApplication(sys.argv)
 
-    from app.core.backend import ChatBackend
+    from app.core.conversation.backend import ChatBackend
 
     backend = ChatBackend(window_id="bench-sessleak")
     backend.initialize(get_model_config=make_model_config, workdir=str(tmp))
