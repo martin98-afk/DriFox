@@ -480,6 +480,172 @@ class TestAuthorizationDrive:
         assert session.status == "error"
         assert "405" in (session.error or ""), f"错误应写明真实状态码，实际: {session.error}"
 
+    # ── 回归：apify state mismatch 事故（2026-10-25）──────────
+    # 根因链：callback_handler 提前置 done 掩盖 token 交换失败 +
+    # patch 的 handler 不恢复泄漏给连接流程 + CallbackServer 残留旧回调。
+
+    @staticmethod
+    def _make_flow_provider(token_exchange_error: Exception | None = None):
+        """构造可驱动完整授权码流程的假 provider。
+
+        flow 序列：首请求(401) → 调 redirect_handler 打开浏览器 →
+        调 callback_handler 拿 (code, state) → yield token 请求 →
+        可选抛 token_exchange_error → 正常收尾。
+        """
+        from mcp.shared.auth import OAuthClientMetadata
+
+        class _Ctx:
+            server_url = "https://apify.example/mcp"
+
+        class _FakeProvider:
+            def __init__(self):
+                self.context = _Ctx()
+                self.context.client_metadata = OAuthClientMetadata(
+                    redirect_uris=["http://127.0.0.1:1/callback"],
+                    client_name="DriFox",
+                    grant_types=["authorization_code", "refresh_token"],
+                    response_types=["code"],
+                )
+
+            def async_auth_flow(self, request):
+                ctx = self.context
+
+                async def _flow():
+                    yield request  # 首请求，调用方回 401
+
+                    await ctx.redirect_handler("https://apify.example/authorize?state=xyz")
+                    code, state = await ctx.callback_handler()
+
+                    token_req = MagicMock(name="token_request")
+                    token_req.url = "https://apify.example/token"
+                    yield token_req  # token 交换请求
+
+                    if token_exchange_error is not None:
+                        raise token_exchange_error
+
+                return _flow()
+
+        return _FakeProvider()
+
+    def test_token_exchange_failure_reports_error(self, isolated_data_dir, monkeypatch):
+        """token 交换失败（如 Apify invalid_client）必须报 error，不能假报「授权成功」。
+
+        走真实 CallbackServer：webbrowser.open 被顶替为「向回调 server 发
+        授权回调请求」，模拟浏览器跳回，让 flow 拿到 code 后进入 token 交换。
+        """
+        from mcp.client.auth.exceptions import OAuthTokenError
+
+        provider_mod = __import__("app.core.mcp_oauth.provider", fromlist=["provider"])
+        fake = self._make_flow_provider(token_exchange_error=OAuthTokenError("Token exchange failed (401): invalid_client"))
+
+        monkeypatch.setattr(provider_mod.McpOAuthProviderFactory, "get_provider", lambda self, *a, **k: fake)
+
+        # 记录 authorize 内部创建的回调 server 地址
+        cb_mod = __import__("app.core.mcp_oauth.callback_server", fromlist=["callback_server"])
+        holder: dict = {}
+        orig_start = cb_mod.CallbackServer.start
+
+        def _patched_start(self):
+            uri = orig_start(self)
+            holder["uri"] = uri
+            return uri
+
+        monkeypatch.setattr(cb_mod.CallbackServer, "start", _patched_start)
+
+        # 顶替 webbrowser.open：模拟浏览器完成授权后跳回回调 server
+        import urllib.request
+
+        import app.core.mcp_oauth.provider as prov
+
+        def _fake_browser_open(url, *a, **k):
+            callback_url = holder["uri"] + "?code=real-code&state=any"
+            with urllib.request.urlopen(callback_url, timeout=5):
+                pass
+            return True
+
+        monkeypatch.setattr(prov.webbrowser, "open", _fake_browser_open)
+
+        class _FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def send(self, request):
+                status = 401 if str(request.url).startswith("https://apify.example/mcp") else 200
+                return MagicMock(status_code=status, request=request)
+
+        import httpx
+
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+        f = McpOAuthProviderFactory(auth_timeout=10)
+        session = f.authorize("p", "s", "https://apify.example/mcp")
+
+        assert session.status == "error", f"token 交换失败必须报 error，实际: {session.status}"
+        assert "OAuthTokenError" in (session.error or ""), f"错误须含真实原因，实际: {session.error}"
+
+    def test_authorize_restores_context_handlers(self, isolated_data_dir, monkeypatch):
+        """authorize 结束后 provider.context 的 handler 必须恢复原值。
+
+        泄漏的 redirect/callback handler 会让连接流程的 SDK OAuth
+        读到已关闭 CallbackServer 的残留回调，复现 apify state mismatch。
+        """
+        provider_mod = __import__("app.core.mcp_oauth.provider", fromlist=["provider"])
+        fake = self._make_flow_provider()
+
+        async def _sentinel_redirect(url):
+            pass
+
+        async def _sentinel_callback():
+            return "", None
+
+        fake.context.redirect_handler = _sentinel_redirect
+        fake.context.callback_handler = _sentinel_callback
+
+        monkeypatch.setattr(provider_mod.McpOAuthProviderFactory, "get_provider", lambda self, *a, **k: fake)
+
+        class _FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def send(self, request):
+                return MagicMock(status_code=401, request=request)
+
+        import httpx
+
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+        f = McpOAuthProviderFactory(auth_timeout=0.5)
+        f.authorize("p", "s", "https://apify.example/mcp")
+
+        assert fake.context.redirect_handler is _sentinel_redirect, "redirect_handler 被残留 patch"
+        assert fake.context.callback_handler is _sentinel_callback, "callback_handler 被残留 patch"
+
+    def test_callback_server_close_clears_state(self):
+        """close 后必须清掉 result 与 event，残留旧回调会误导复用方。"""
+        cb = CallbackServer()
+        cb.start()
+        cb.result.code = "old-code"
+        cb.result.state = "old-state"
+        cb._event.set()
+
+        cb.close()
+
+        assert cb.result.code is None
+        assert cb.result.state is None
+        assert not cb._event.is_set()
+
 
 class TestManagerSingleton:
     def test_singleton(self):

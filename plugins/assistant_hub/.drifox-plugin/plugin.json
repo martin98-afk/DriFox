@@ -28,10 +28,15 @@
         "engine.session",
         "mcp.call",
         "model.config",
+        "input.read",
+        "input.write",
+        "net.avatar",
         "session.invalidate",
         "session.read",
+        "sync.register",
         "tool.inject",
         "tool.read",
+        "window.host",
         "window.current"
     ]
 }

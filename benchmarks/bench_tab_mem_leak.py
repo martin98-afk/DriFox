@@ -137,7 +137,7 @@ def run(rounds: int, tabs_per_round: int, keep: int, track_objects: bool, object
 
     app.setStyle("Fusion")
     app.setApplicationName("Drifox")
-    from app.core.webengine_profile import init_shared_web_profile
+    from app.core.infra.webengine_profile import init_shared_web_profile
 
     init_shared_web_profile(parent=app)
     # 规避 HeapCompact access violation（T1 实测在测试环境偶发崩溃）

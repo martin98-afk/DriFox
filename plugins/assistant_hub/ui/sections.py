@@ -21,7 +21,9 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QLayout,
+    QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -229,6 +231,281 @@ class _Section(QFrame):
     def body(self) -> QVBoxLayout:
         return self._v
 
+    def _on_chips_host_resized(self) -> None:
+        """容器宽度变化后重算卡片流行高（子类实现）。"""
+        return
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._on_chips_host_resized()
+
+
+class _RowItem(QFrame):
+    """整行可点的列表条目：标题 + 灰色说明 + 尾部操作。
+
+    层级靠 `primary` 区分：primary（分组行：全局记忆 / 记忆分区 / 项目记忆）标题
+    字号大一档、颜色实；子行（分区条目）标题缩进且字号小一档，视觉从属。
+    `hide_tail` 让尾部操作默认隐形、悬停才出现（删除这类危险操作不该常驻抢眼）。
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, title: str, desc: str = "", primary: bool = True, parent=None):
+        super().__init__(parent)
+        self.setObjectName("hubRowItem")
+        self.setCursor(Qt.PointingHandCursor)
+        self._primary = bool(primary)
+        v = QHBoxLayout(self)
+        v.setContentsMargins(8 if primary else 24, 5, 8, 5)
+        v.setSpacing(8)
+        self._title = _title_label(title, 11 if primary else 10)
+        if not primary:
+            self._title.setStyleSheet(
+                f"color: {Colors.TEXT_SECONDARY}; background: transparent; border: none;"
+                f"{get_font_family_css()} {font_size_css(10)};"
+            )
+        v.addWidget(self._title)
+        self._desc = _hint(desc, 10)
+        self._desc.setWordWrap(False)
+        v.addWidget(self._desc, 1)
+        self._tail = QHBoxLayout()
+        self._tail.setContentsMargins(0, 0, 0, 0)
+        self._tail.setSpacing(6)
+        v.addLayout(self._tail)
+        self._tail_widgets: List[QWidget] = []
+        self._hide_tail = False
+        self._apply_style(False)
+
+    def add_tail(self, w: QWidget) -> None:
+        self._tail.addWidget(w)
+        self._tail_widgets.append(w)
+        if self._hide_tail:
+            w.setVisible(False)
+
+    def hide_tail_until_hover(self) -> None:
+        """尾部操作默认隐藏，鼠标进入行内才显示。"""
+        self._hide_tail = True
+        for w in self._tail_widgets:
+            w.setVisible(False)
+
+    def set_desc(self, text: str) -> None:
+        self._desc.setText(text)
+        self._desc.setVisible(bool(text))
+
+    def _apply_style(self, hover: bool) -> None:
+        bg = Colors.HOVER_BG if hover else "transparent"
+        self.setStyleSheet(
+            f"""
+            QFrame#hubRowItem {{
+                background: {bg};
+                border: none;
+                border-radius: 6px;
+            }}
+            QFrame#hubRowItem QLabel {{ background: transparent; border: none; }}
+        """
+        )
+
+    def enterEvent(self, e) -> None:  # noqa: N802
+        self._apply_style(True)
+        if self._hide_tail:
+            for w in self._tail_widgets:
+                w.setVisible(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:  # noqa: N802
+        self._apply_style(False)
+        if self._hide_tail:
+            for w in self._tail_widgets:
+                w.setVisible(False)
+        super().leaveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton and self.rect().contains(e.pos()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+
+class _SectionChip(QFrame):
+    """记忆分区卡：名称 + 介绍（这段介绍即蒸馏时指导模型关注什么）。
+
+    视觉对齐人格卡：圆角边框、hover 高亮边框、点击进编辑。删除按钮在卡片右上角，
+    默认隐藏（悬停可见），不与名称抢位。介绍容忍 3 行（多行输入），超长靠 tooltip 补全。
+    """
+
+    clicked = pyqtSignal()
+    deleteRequested = pyqtSignal()
+
+    W = 168
+    H = 104
+    INTRO_LINES = 3
+
+    def __init__(self, name: str, intro: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("sectionChip")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(self.W, self.H)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 10, 10)
+        v.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(4)
+        self._name = QLabel(name)
+        self._name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(11)}; font-weight: 600;"
+        )
+        head.addWidget(self._name, 1)
+        self._del = _del_btn(12)
+        self._del.setFixedSize(20, 20)
+        self._del.setToolTip("删除该分区（记忆内容保留，下次蒸馏时重分配）")
+        self._del.setStyleSheet(_btn_style(danger=True, icon_only=True))
+        self._del.setVisible(False)
+        self._del.clicked.connect(self.deleteRequested.emit)
+        head.addWidget(self._del, 0, Qt.AlignTop)
+        v.addLayout(head)
+
+        # 介绍：按像素折 3 行（多行输入可能带换行，_elide_lines 只折行不认 \n，先压平）
+        self._intro = QLabel()
+        self._intro.setWordWrap(False)
+        fm = QFont(self._intro.font())
+        fm.setPixelSize(scale_font_size(9))
+        metrics = QFontMetrics(fm)
+        flat = " ".join(str(intro or "").split())
+        self._intro.setText(_elide_lines(flat, metrics, self.W - 26, self.INTRO_LINES))
+        self._intro.setFixedHeight(metrics.lineSpacing() * self.INTRO_LINES)
+        self._intro.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self._intro.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(9)};"
+        )
+        v.addWidget(self._intro)
+        v.addStretch()
+        self.setToolTip(intro or name)
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        self.setStyleSheet(
+            f"""
+            QFrame#sectionChip {{
+                background: transparent;
+                border: 1.5px solid {Colors.BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#sectionChip:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
+            QFrame#sectionChip QLabel {{ background: transparent; border: none; }}
+        """
+        )
+
+    def enterEvent(self, e) -> None:  # noqa: N802
+        self._del.setVisible(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:  # noqa: N802
+        self._del.setVisible(False)
+        super().leaveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton and self.rect().contains(e.pos()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+
+class _NewSectionChip(QFrame):
+    """「新增分区」卡：虚线边框 + 加号，与分区卡同尺寸排在同一行。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("sectionChip")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(_SectionChip.W, _SectionChip.H)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(2)
+        v.setAlignment(Qt.AlignHCenter)
+        plus = QLabel("+")
+        plus.setAlignment(Qt.AlignCenter)
+        plus.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(22)};"
+        )
+        v.addWidget(plus, 0, Qt.AlignHCenter)
+        lbl = QLabel("新增分区")
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)}; font-weight: 600;"
+        )
+        v.addWidget(lbl)
+        self.setStyleSheet(
+            f"""
+            QFrame#sectionChip {{
+                background: transparent;
+                border: 1.5px dashed {Colors.BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#sectionChip:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
+            QFrame#sectionChip QLabel {{ background: transparent; border: none; }}
+        """
+        )
+
+    def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton and self.rect().contains(e.pos()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+
+class _MetaBar(QLabel):
+    """记忆元信息：单行灰字摘要，点击可调上限。
+
+    追求「一眼扫过、不占注意力」：用量上限健康合并成一行，上限直接内联在用量里
+    （全局 1469/4000），不额外占一段。健康异常时整行转琥珀色并带 ⚠。
+    摘要文本由调用方组装（记忆区唯一知道数据来源的地方在 assistant_card）。
+    """
+
+    limitClicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("hubMetaBar")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("点击修改字符上限")
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setWordWrap(False)
+        self._usage = ""
+        self._health = ""
+        self._warn = False
+        self._refresh()
+
+    def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton:
+            self.limitClicked.emit()
+        super().mouseReleaseEvent(e)
+
+    def _refresh(self) -> None:
+        parts = [p for p in (self._usage, self._health) if p]
+        if self._health and self._warn:
+            parts[-1] = "⚠ " + self._health
+        self.setText(" · ".join(parts) or "—")
+        color = Colors.WARNING if self._warn else Colors.TEXT_MUTED
+        self.setStyleSheet(
+            f"color: {color}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+
+    def set_usage(self, text: str) -> None:
+        """用量摘要，如「全局 1469/4000 · 项目 2999/3000 · 日志 6 天」。"""
+        self._usage = str(text or "")
+        self._refresh()
+
+    def set_health(self, text: str, warn: bool = False) -> None:
+        self._health = str(text or "")
+        self._warn = bool(warn)
+        self._refresh()
+
 
 # ── 名称 / 模型分区 ──────────────────────────────────────
 
@@ -294,6 +571,11 @@ class _CenterFlowLayout(QLayout):
         self._do_layout(rect, test_only=False)
 
     def sizeHint(self) -> QSize:  # noqa: N802
+        """单块最大尺寸，高度交给 heightForWidth。
+
+        不能用「按块累加」：四块并排会被算成四块总高（实测 452 而实际行高 104），
+        外层滚动区据此留出巨量空白。
+        """
         return self.minimumSize()
 
     def minimumSize(self) -> QSize:  # noqa: N802
@@ -336,7 +618,8 @@ class _CenterFlowLayout(QLayout):
             line_w += add_w
             line_h = max(line_h, ih)
         flush_line()
-        return (y - self._spacing) - rect.y() + m.bottom()
+        # 最后一行之后不加行间距：总高 = 已消耗 y - 起始 y - 末尾多加的 spacing
+        return max(0, (y - self._spacing) - rect.y()) + m.bottom()
 
 
 # ── 名称 / 模型分区 ──────────────────────────────────────
@@ -985,6 +1268,157 @@ class MemoryLimitDialog(MaskDialogBase):
         self.accept()
 
 
+class SectionEditDialog(MaskDialogBase):
+    """记忆分区编辑弹窗：名称 + 介绍，确认发 confirmed(name, intro)。
+
+    介绍不是装饰文字：它会被注入蒸馏指令，指导模型整理时往这个分区关注什么内容。
+    """
+
+    confirmed = pyqtSignal(str, str)
+
+    _INPUT_QSS = MemoryLimitDialog._INPUT_QSS
+
+    def __init__(self, name: str = "", hint: str = "", title: str = "新增分区", parent=None):
+        super().__init__(parent)
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+        self.widget.setObjectName("sectionEditDialog")
+        self.widget.setStyleSheet(
+            f"""
+            #sectionEditDialog {{
+                background: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """
+        )
+        v = QVBoxLayout(self.widget)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(10)
+
+        head = BodyLabel(title, self.widget)
+        head.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(14)}; font-weight: 600;"
+        )
+        v.addWidget(head)
+
+        input_qss = self._INPUT_QSS.format(
+            bg=Colors.INPUT_BG_START,
+            border=Colors.INPUT_BORDER,
+            text=Colors.INPUT_TEXT,
+            accent=Colors.INFO,
+            font=f"{get_font_family_css()} {font_size_css(13)}",
+        )
+
+        def _field(label: str, value: str, placeholder: str) -> LineEdit:
+            lab = QLabel(label, self.widget)
+            lab.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
+            v.addWidget(lab)
+            edit = LineEdit(self.widget)
+            edit.setText(value)
+            edit.setPlaceholderText(placeholder)
+            edit.setFixedHeight(34)
+            edit.setStyleSheet(input_qss)
+            v.addWidget(edit)
+            return edit
+
+        self._name_edit = _field("分区名", name, "如：工程方法论")
+
+        # 介绍：多行输入（这段会注入蒸馏指令，需要能写长）
+        intro_lab = QLabel("介绍", self.widget)
+        intro_lab.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}"
+        )
+        v.addWidget(intro_lab)
+        self._hint_edit = QPlainTextEdit(self.widget)
+        self._hint_edit.setPlainText(hint)
+        self._hint_edit.setPlaceholderText(
+            "这段会作为蒸馏指令读给模型，指导它整理时关注什么。\n"
+            "建议写：该收什么内容；明确不收什么（防止相邻分区互相混入）。"
+        )
+        self._hint_edit.setFixedHeight(96)
+        self._hint_edit.setStyleSheet(
+            f"""
+            QPlainTextEdit {{
+                background: {Colors.INPUT_BG_START};
+                border: 1px solid {Colors.INPUT_BORDER};
+                border-radius: 6px;
+                color: {Colors.INPUT_TEXT};
+                padding: 6px 8px;
+                {get_font_family_css()} {font_size_css(12)}
+            }}
+            QPlainTextEdit:focus {{ border-color: {Colors.INFO}; }}
+        """
+        )
+        v.addWidget(self._hint_edit)
+
+        err = QLabel("", self.widget)
+        err.setWordWrap(True)
+        err.setVisible(False)
+        err.setStyleSheet(f"color: {Colors.ERROR}; {get_font_family_css()} {font_size_css(11)}")
+        self._err = err
+        v.addWidget(err)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        cancel = QPushButton("取消", self.widget)
+        cancel.setFixedHeight(32)
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent;
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}
+            }}
+            QPushButton:hover {{ background: {Colors.HOVER_BG}; border-color: {Colors.TEXT_ACCENT}; }}
+        """
+        )
+        cancel.clicked.connect(self.close)
+        confirm = QPushButton("确定", self.widget)
+        confirm.setFixedHeight(32)
+        confirm.setCursor(Qt.PointingHandCursor)
+        confirm.setDefault(True)
+        confirm.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {Colors.TEXT_ACCENT};
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Colors.TEXT_ACCENT}; }}
+        """
+        )
+        confirm.clicked.connect(self._accept)
+        btns.addWidget(cancel)
+        btns.addWidget(confirm)
+        v.addLayout(btns)
+
+        self.widget.setFixedSize(460, self.widget.sizeHint().height() + 40)
+
+    def _accept(self) -> None:
+        name = self._name_edit.text().strip()
+        if not name:
+            self._err.setText("分区名不能为空")
+            self._err.setVisible(True)
+            return
+        if "\n" in name or name.startswith("#"):
+            self._err.setText("分区名不能含换行，也不能以 # 开头")
+            self._err.setVisible(True)
+            return
+        self.confirmed.emit(name, self._hint_edit.toPlainText().strip())
+        self.accept()
+
+
 class MemorySection(_Section):
     """记忆分区：开关 + 状态 + 全局记忆/项目记忆/工作日志查看 + 清除。
 
@@ -1001,6 +1435,8 @@ class MemorySection(_Section):
     restoreRequested = pyqtSignal()
     migrateRequested = pyqtSignal(str)
     dismissDriftRequested = pyqtSignal(str)
+    sectionsChanged = pyqtSignal(list)
+    seedSectionsRequested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("记忆", parent)
@@ -1013,30 +1449,13 @@ class MemorySection(_Section):
         # 记忆字符上限（set_limits 回填；弹窗编辑用）
         self._global_chars = 4000
         self._project_chars = 3000
+        self._sections: List[Dict[str, str]] = []
 
-        # 状态条
-        self._status = _hint("记忆状态：暂无记忆", 10)
-        self.body().addWidget(self._status)
-
-        # 健康行：健康摘要 + 恢复按钮（set_health 填充；无数据时隐藏）
-        health_row = QHBoxLayout()
-        health_row.setContentsMargins(0, 0, 0, 0)
-        self._health = QLabel("")
-        self._health.setWordWrap(True)
-        self._health.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
-            f"{get_font_family_css()} {font_size_css(10)};"
-        )
-        health_row.addWidget(self._health, 1)
-        restore_btn = QPushButton("恢复")
-        restore_btn.setStyleSheet(_btn_style())
-        restore_btn.setToolTip("从快照恢复记忆（每次覆盖写/清除前自动存快照）")
-        restore_btn.clicked.connect(self.restoreRequested.emit)
-        health_row.addWidget(restore_btn)
-        self._health_row = QWidget()
-        self._health_row.setLayout(health_row)
-        self._health_row.setVisible(False)
-        self.body().addWidget(self._health_row)
+        # ── 顶部元信息：单行灰字摘要，点它改上限 ──
+        self._meta = _MetaBar()
+        self._meta.limitClicked.connect(self._edit_limits)
+        self.body().addWidget(self._meta)
+        self.body().addWidget(_sep())
 
         # 漂移提示行：检测到旧工作目录记忆时显示（迁移/忽略）
         drift_row = QHBoxLayout()
@@ -1060,62 +1479,68 @@ class MemorySection(_Section):
         self._body_wrap = QWidget()
         self._wrap_v = QVBoxLayout(self._body_wrap)
         self._wrap_v.setContentsMargins(0, 0, 0, 0)
-        self._wrap_v.setSpacing(6)
+        self._wrap_v.setSpacing(2)
 
-        self._wrap_v.addWidget(_hint("助手在工作后自动沉淀：全局记忆跨项目，项目记忆跟项目走。"))
+        # ── 全局记忆组：标题行 + 可点的分区行 ──
+        self._global_row = _RowItem("全局记忆", "跨项目 MEMORY.md")
+        self._global_row.clicked.connect(self.viewGlobal.emit)
+        self._restore_btn = QPushButton("恢复")
+        self._restore_btn.setStyleSheet(_btn_style())
+        self._restore_btn.setToolTip("从快照恢复记忆（每次覆盖写/清除前自动存快照）")
+        self._restore_btn.clicked.connect(self.restoreRequested.emit)
+        self._restore_btn.setVisible(False)
+        self._global_row.add_tail(self._restore_btn)
+        self._wrap_v.addWidget(self._global_row)
 
-        # 字符上限：状态区末尾、第一条分割线上（标题样式同小节）
-        lim_row = QHBoxLayout()
-        lim_row.addWidget(_title_label("字符上限", 11))
-        self._limits_hint = _hint(f"全局 {self._global_chars} 字 · 项目 {self._project_chars} 字")
-        self._limits_hint.setWordWrap(False)
-        lim_row.addWidget(self._limits_hint)
-        lim_row.addStretch()
-        mod_btn = QPushButton("修改")
-        mod_btn.setStyleSheet(_btn_style())
-        mod_btn.clicked.connect(self._edit_limits)
-        lim_row.addWidget(mod_btn)
-        self._wrap_v.addLayout(lim_row)
+        # 记忆分区：标题行 + 卡片流（紧贴全局记忆，卡片在标题行下面）
+        self._sec_head = _RowItem("记忆分区", "指导蒸馏时按区归类")
+        self._sec_head.clicked.connect(self._on_add_section)
+        self._wrap_v.addWidget(self._sec_head)
 
+        self._chips_host = QWidget()
+        self._chips_host.setStyleSheet("background: transparent;")
+        # 流式布局的高度依赖宽度：容器必须让布局走 heightForWidth，
+        # 否则 sizeHint 用最小块尺寸拼出的值（远大于实际行高）会挤压外层。
+        sp = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        sp.setHeightForWidth(True)
+        self._chips_host.setSizePolicy(sp)
+        self._chips_row = _CenterFlowLayout(self._chips_host)
+        self._chips_row.setSpacing(10)
+        self._wrap_v.addWidget(self._chips_host)
+
+        # 空分区提示：只在用户把分区全删光时出现（默认已落盘，不再显示初始化引导）
+        self._sections_empty_row = QWidget()
+        _se = QHBoxLayout(self._sections_empty_row)
+        _se.setContentsMargins(8, 2, 0, 2)
+        _se.addWidget(_hint("未定义分区，全局记忆为自由格式。"))
+        init_btn = QPushButton("用默认分区")
+        init_btn.setStyleSheet(_btn_style())
+        init_btn.clicked.connect(self._on_seed_sections)
+        _se.addWidget(init_btn)
+        _se.addStretch()
+        self._sections_empty_row.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._wrap_v.addWidget(self._sections_empty_row)
+        self._sections_empty_row.hide()  # 靠 hide() 让布局项失效；setVisible 在未显示窗口时不生效
+
+        # ── 项目记忆组：全局与项目之间必须有分隔线 ──
+        self._wrap_v.addSpacing(4)
         self._wrap_v.addWidget(_sep())
+        self._wrap_v.addSpacing(4)
 
-        # 全局记忆：标题 + 查看
-        g_row = QHBoxLayout()
-        g_row.addWidget(_title_label("全局记忆", 11))
-        g_row.addStretch()
-        g_btn = QPushButton("查看")
-        g_btn.setStyleSheet(_btn_style())
-        g_btn.clicked.connect(self.viewGlobal.emit)
-        g_row.addWidget(g_btn)
-        self._wrap_v.addLayout(g_row)
-        self._wrap_v.addWidget(_hint("跨项目的长期偏好与要求（MEMORY.md），超限写入被拒。"))
+        self._project_row = _RowItem("项目记忆", "本项目 .drifox/memory")
+        self._project_row.clicked.connect(self.viewProject.emit)
+        self._wrap_v.addWidget(self._project_row)
 
-        # 项目记忆：标题 + 查看
-        p_row = QHBoxLayout()
-        p_row.addWidget(_title_label("项目记忆", 11))
-        p_row.addStretch()
-        p_btn = QPushButton("查看")
-        p_btn.setStyleSheet(_btn_style())
-        p_btn.clicked.connect(self.viewProject.emit)
-        p_row.addWidget(p_btn)
-        self._wrap_v.addLayout(p_row)
-        self._wrap_v.addWidget(_hint("当前项目的长期笔记（.drifox/memory/助手/MEMORY.md），超限写入被拒。"))
+        self._daily_row = _RowItem("工作日志", "按天记录的详细过程")
+        self._daily_row.clicked.connect(self.viewDaily.emit)
+        self._wrap_v.addWidget(self._daily_row)
 
-        # 工作日志：标题 + 查看
-        d_row = QHBoxLayout()
-        d_row.addWidget(_title_label("工作日志", 11))
-        d_row.addStretch()
-        d_btn = QPushButton("查看")
-        d_btn.setStyleSheet(_btn_style())
-        d_btn.clicked.connect(self.viewDaily.emit)
-        d_row.addWidget(d_btn)
-        self._wrap_v.addLayout(d_row)
-        self._wrap_v.addWidget(_hint("按天记录的详细工作过程（YYYY-MM-DD.md，只追加）。"))
-
+        self._wrap_v.addSpacing(4)
         self._wrap_v.addWidget(_sep())
 
         # 清除记忆
         clear_row = QHBoxLayout()
+        clear_row.setContentsMargins(0, 4, 0, 0)
         clear_row.addStretch()
         clear_btn = QPushButton("清除记忆")
         clear_btn.setStyleSheet(_btn_style(danger=True))
@@ -1130,10 +1555,9 @@ class MemorySection(_Section):
         self.setEnabled_all(on)
 
     def set_limits(self, global_chars: int, project_chars: int) -> None:
-        """回填上限并刷新显示。"""
+        """回填上限（元信息摘要由 card 侧 set_status 统一刷新）。"""
         self._global_chars = int(global_chars) if global_chars and int(global_chars) > 0 else 4000
         self._project_chars = int(project_chars) if project_chars and int(project_chars) > 0 else 3000
-        self._limits_hint.setText(f"全局 {self._global_chars} 字 · 项目 {self._project_chars} 字")
 
     def _edit_limits(self) -> None:
         """弹上限编辑窗，确认后发 limitsChanged。"""
@@ -1146,12 +1570,113 @@ class MemorySection(_Section):
         self._body_wrap.setVisible(bool(on))
 
     def set_status(self, text: str) -> None:
-        self._status.setText(f"记忆状态：{text}")
+        self._meta.set_usage(text)
+
+    # ── 记忆分区（全局记忆归类骨架）──
+
+    def set_sections(self, sections: List[Dict[str, str]]) -> None:
+        """重建分区卡片流。空列表 → 显示「未定义分区」提示（用户手动删光时才出现）。
+
+        卡片介绍用 detail（完整归类说明）：这段文字就是蒸馏时指导模型关注什么的内容，
+        不是给人看的短标签。短 hint 仅作卡片无 detail 时的兜底。
+        """
+        self._sections = [dict(s) for s in (sections or [])]
+        while self._chips_row.count():
+            item = self._chips_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._sections_empty_row.setHidden(bool(self._sections))
+        if self._sections:
+            # 隐藏项的 geometry 会滞留旧值（实测 480px），配合外层 adjustSize 会撑出空白
+            self._sections_empty_row.setFixedHeight(0)
+        else:
+            self._sections_empty_row.setMinimumHeight(0)
+            self._sections_empty_row.setMaximumHeight(16777215)
+        for idx, sec in enumerate(self._sections):
+            name = str(sec.get("name") or "")
+            intro = str(sec.get("detail") or sec.get("hint") or "")
+            chip = _SectionChip(name, intro)
+            chip.clicked.connect(lambda i=idx: self._edit_section(i))
+            chip.deleteRequested.connect(lambda i=idx: self._delete_section(i))
+            self._chips_row.addWidget(chip)
+        new_chip = _NewSectionChip()
+        new_chip.clicked.connect(self._on_add_section)
+        self._chips_row.addWidget(new_chip)
+        self._sec_head.set_desc("" if not self._sections else f"{len(self._sections)} 个 · 指导蒸馏关注点")
+        # 显隐切换后布局项高度会滞留旧值（实测 empty_row 隐藏后仍占 480px），
+        # invalidate 强制父链重算；notify 让外层滚动区同步收缩。
+        self._wrap_v.invalidate()
+        self._chips_row.invalidate()
+        self._sync_chips_height()
+
+    def _sync_chips_height(self) -> None:
+        """按当前宽度重算卡片流行高并钉住容器高度。
+
+        流式布局的 sizeHint 是单块尺寸，实际行高只能靠 heightForWidth；
+        不钉高度会让外层按单块 hint 预留空间，卡片行被压扁或留白。
+        """
+        w = self._chips_host.width()
+        if w <= 1:
+            w = max(1, self._chips_host.sizeHint().width())
+        rows_h = self._chips_row.heightForWidth(w)
+        if rows_h > 0 and rows_h != self._chips_host.height():
+            # 不用 setFixedHeight：那会把高度锁死，后续宽度变化时 heightForWidth
+            # 算出的新行高无法生效（一开始宽度为 0，被钉成单行后永远只显一行）。
+            self._chips_host.setMinimumHeight(rows_h)
+            self._chips_host.setMaximumHeight(rows_h)
+            self._chips_host.updateGeometry()
+
+    def _on_chips_host_resized(self) -> None:
+        self._sync_chips_height()
+
+    def _commit_sections(self, sections: List[Dict[str, str]]) -> None:
+        self.set_sections(sections)
+        self.sectionsChanged.emit([dict(s) for s in sections])
+
+    def _on_add_section(self) -> None:
+        dlg = SectionEditDialog(title="新增分区", parent=self.window())
+        dlg.confirmed.connect(
+            lambda n, h: self._commit_sections([*(self._sections), {"name": n, "hint": h, "detail": h}])
+        )
+        dlg.exec()
+
+    def _edit_section(self, idx: int) -> None:
+        if not (0 <= idx < len(self._sections)):
+            return
+        cur = self._sections[idx]
+        cur_detail = str(cur.get("detail") or cur.get("hint") or "")
+        dlg = SectionEditDialog(str(cur.get("name") or ""), cur_detail, "编辑分区", self.window())
+        dlg.confirmed.connect(lambda n, h, i=idx: self._replace_section(i, n, h))
+        dlg.exec()
+
+    def _replace_section(self, idx: int, name: str, hint: str) -> None:
+        names = {str(s.get("name") or "") for i, s in enumerate(self._sections) if i != idx}
+        if name in names:
+            self._sec_head.set_desc(f"分区「{name}」已存在")
+            return
+        items = [dict(s) for s in self._sections]
+        # 弹窗输入的是完整归类说明：detail 存全文，hint 取首句做行内短标签
+        short = hint.split("。", 1)[0].strip() or hint
+        items[idx] = {"name": name, "hint": short, "detail": hint}
+        self._commit_sections(items)
+
+    def _delete_section(self, idx: int) -> None:
+        if not (0 <= idx < len(self._sections)):
+            return
+        items = [dict(s) for s in self._sections]
+        items.pop(idx)
+        self._commit_sections(items)
+
+    def _on_seed_sections(self) -> None:
+        """恢复默认分区：UI 不持有默认值，发信号让 card 取 store 的唯一定义。"""
+        self.seedSectionsRequested.emit()
 
     def set_health(self, health: Optional[Dict[str, Any]]) -> None:
-        """渲染健康摘要与漂移提示（health=None/空 → 两行隐藏）。"""
+        """渲染健康摘要与漂移提示（health=None/空 → 元信息条只显示用量）。"""
         if not health:
-            self._health_row.setVisible(False)
+            self._meta.set_health("")
+            self._restore_btn.setVisible(False)
             self._drift_row.setVisible(False)
             return
         warn: List[str] = []
@@ -1169,19 +1694,15 @@ class MemorySection(_Section):
             warn.append(f"项目 {p[0]}/{p[1]} 超限")
         info.append(f"上次蒸馏 {str(health.get('last_distill') or '无')}")
         snaps = health.get("snapshot_counts") or {}
-        info.append(f"快照 {int(snaps.get('global') or 0) + int(snaps.get('project') or 0)}")
+        snap_n = int(snaps.get("global") or 0) + int(snaps.get("project") or 0)
         if warn:
-            text = "健康：⚠ " + " ｜ ".join(warn) + " ｜ " + " ｜ ".join(info)
-            color = Colors.WARNING
+            text = "⚠ " + " · ".join(warn)
         else:
-            text = "健康：正常 ｜ " + " ｜ ".join(info)
-            color = Colors.TEXT_MUTED
-        self._health.setText(text)
-        self._health.setStyleSheet(
-            f"color: {color}; background: transparent; border: none;"
-            f"{get_font_family_css()} {font_size_css(10)};"
-        )
-        self._health_row.setVisible(True)
+            text = f"正常 · {info[0]}"
+        self._meta.set_health(text, warn=bool(warn))
+        # 恢复按钮：有快照才有意义
+        self._restore_btn.setVisible(snap_n > 0)
+        self._restore_btn.setToolTip(f"从快照恢复记忆（共 {snap_n} 份；每次覆盖写/清除前自动存）")
         drift = health.get("drift") or {}
         if drift.get("drifted"):
             self._drift_old = str(drift.get("old_workdir") or "")
@@ -1197,13 +1718,16 @@ class MemorySection(_Section):
 
 
 class ExperienceSection(_Section):
-    """经验：开关 + 分类列表（查看/删除）+ 反思按钮。"""
+    """经验：开关 + 分类卡片（查看/删除）+ 压缩整理（走对话提示词）。
+
+    分类展示与记忆分区共用卡片形态（_SectionChip）：同一插件内同类信息用同一种载体，
+    避免一处卡片一处列表的视觉割裂。
+    """
 
     toggleExperience = pyqtSignal(bool)
     viewCategory = pyqtSignal(str)
     deleteCategoryRequested = pyqtSignal(str)
     consolidateRequested = pyqtSignal()
-    reflectRequested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("经验", parent)
@@ -1218,20 +1742,26 @@ class ExperienceSection(_Section):
         self._wrap_v.setContentsMargins(0, 0, 0, 0)
         self._wrap_v.setSpacing(6)
         top_row = QHBoxLayout()
-        self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验；可在下方手动反思整理。")
+        self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验。")
         top_row.addWidget(self._hint, 1)
         cons_btn = QPushButton("压缩整理")
         cons_btn.setStyleSheet(_btn_style())
-        cons_btn.setToolTip("全库压缩：LLM 跨分类语义合并去重 + 重新归类，旧文件备份到 experience.bak")
+        cons_btn.setToolTip("向对话输入整理提示词：由模型读全库、合并去重、重新归类")
         cons_btn.clicked.connect(self.consolidateRequested.emit)
         top_row.addWidget(cons_btn)
-        reflect_btn = QPushButton("反思整理")
-        reflect_btn.setStyleSheet(_btn_style())
-        reflect_btn.clicked.connect(self.reflectRequested.emit)
-        top_row.addWidget(reflect_btn)
         self._wrap_v.addLayout(top_row)
-        self._list_area = QVBoxLayout()
-        self._wrap_v.addLayout(self._list_area)
+
+        self._chips_host = QWidget()
+        self._chips_host.setStyleSheet("background: transparent;")
+        sp = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        sp.setHeightForWidth(True)
+        self._chips_host.setSizePolicy(sp)
+        self._chips_row = _CenterFlowLayout(self._chips_host)
+        self._chips_row.setSpacing(10)
+        self._wrap_v.addWidget(self._chips_host)
+
+        self._empty = _hint("（暂无经验分类）")
+        self._wrap_v.addWidget(self._empty)
         self.body().addWidget(self._body_wrap)
 
     def set_enabled(self, on: bool) -> None:
@@ -1242,34 +1772,33 @@ class ExperienceSection(_Section):
             self._hint.setText("已启用：助手可在对话中自主回忆/记录经验（recall/record_experience 工具）。")
 
     def reload_categories(self, docs: List[Dict[str, Any]]) -> None:
-        while self._list_area.count():
-            item = self._list_area.takeAt(0)
-            # 行必须包在 widget 容器里：直接 addLayout 的行 takeAt 后
-            # 拿不到 widget，旧按钮不销毁 → 新旧行叠加文字重叠
+        while self._chips_row.count():
+            item = self._chips_row.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        if not docs:
-            empty = _hint("（暂无经验分类）")
-            self._list_area.addWidget(empty)
-            return
+        self._empty.setVisible(not docs)
         for doc in docs:
-            row_wrap = QWidget()
-            row_wrap.setStyleSheet("background: transparent;")
-            row = QHBoxLayout(row_wrap)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
-            btn = QPushButton(f"{doc['category']}（{doc['count']} 条）")
-            btn.setStyleSheet(_btn_style(align_left=True))
-            btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.viewCategory.emit(cat))
-            row.addWidget(btn, 1)
-            del_btn = _del_btn(14)
-            del_btn.setFixedSize(30, 28)
-            del_btn.setToolTip("删除该分类及其全部经验条目")
-            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
-            del_btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.deleteCategoryRequested.emit(cat))
-            row.addWidget(del_btn)
-            self._list_area.addWidget(row_wrap)
+            cat = str(doc.get("category") or "")
+            chip = _SectionChip(cat, f"{int(doc.get('count') or 0)} 条经验 · 点击查看与编辑")
+            chip.clicked.connect(lambda c=cat: self.viewCategory.emit(c))
+            chip.deleteRequested.connect(lambda c=cat: self.deleteCategoryRequested.emit(c))
+            self._chips_row.addWidget(chip)
+        self._sync_chips_height()
+
+    def _sync_chips_height(self) -> None:
+        """按当前宽度钉住卡片流行高（同记忆分区，理由见 MemorySection._sync_chips_height）。"""
+        w = self._chips_host.width()
+        if w <= 1:
+            w = max(1, self._chips_host.sizeHint().width())
+        rows_h = self._chips_row.heightForWidth(w)
+        if rows_h > 0 and rows_h != self._chips_host.height():
+            self._chips_host.setMinimumHeight(rows_h)
+            self._chips_host.setMaximumHeight(rows_h)
+            self._chips_host.updateGeometry()
+
+    def _on_chips_host_resized(self) -> None:
+        self._sync_chips_height()
 
 
 # ── 预置工具分区 ────────────────────────────────────────

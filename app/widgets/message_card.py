@@ -79,12 +79,12 @@ from PyQt5.QtWidgets import (
     QMenu,
     QSizePolicy,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     MaskDialogBase,
-    TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
@@ -253,6 +253,35 @@ def user_bubble_target_width(container_width: int) -> int:
     「松手后跳一下才稳定」。现收敛到本函数，调用点不得再自行算 margin。
     """
     return max(320, int(container_width) - max(24, int(container_width * 0.25)))
+
+
+class LiteIconButton(QToolButton):
+    """卡片内图标按钮（取代 qfluentwidgets TransparentToolButton）。
+
+    [PERF] 内存：FluentStyleSheet.BUTTON.apply 会给每个按钮 setStyleSheet(7829 字符)，
+    实测「创建→销毁」循环每按钮泄漏约 165KB（Qt 侧按 widget 缓存的 QSS 样式，
+    600 轮线性无平台，禁用该 apply 后泄漏归零）。本类 QSS 约 200 字符，
+    视觉逐项对齐 TransparentToolButton：透明底、5px 圆角、hover/pressed 极淡背景。
+    """
+
+    _QSS = (
+        "QToolButton{background:transparent;border:none;border-radius:5px;margin:0;padding:0;}"
+        "QToolButton:hover{background:rgba(127,127,127,0.07);}"
+        "QToolButton:pressed{background:rgba(127,127,127,0.11);}"
+        "QToolButton:disabled{background:transparent;}"
+    )
+
+    def __init__(self, icon=None, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setIconSize(QSize(16, 16))
+        self.setStyleSheet(self._QSS)
+        if icon is not None:
+            try:
+                if not icon.isNull():
+                    self.setIcon(icon)
+            except Exception:
+                pass
 
 
 class MessageCard(SimpleCardWidget):
@@ -882,7 +911,7 @@ class MessageCard(SimpleCardWidget):
 
         # 审查按钮：与分支/复制同排；仅在有 diff 时显示（set_diff_stats 控制），
         # 点击触发 code-reviewer 子智能体快速审查本次修改
-        review_icon = TransparentToolButton(get_icon("Search"), self)
+        review_icon = LiteIconButton(get_icon("Search"), self)
         review_icon.setObjectName("footer_review_icon")
         review_icon.setFixedSize(20, 20)
         review_icon.clicked.connect(lambda: self._emit_review_requested())
@@ -896,7 +925,7 @@ class MessageCard(SimpleCardWidget):
             (get_icon("分支"), "从此条分支新对话", lambda: self._emit_branch_requested()),
             (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
         ]:
-            b = TransparentToolButton(ic, self)
+            b = LiteIconButton(ic, self)
             b.setToolTip(tp)
             b.clicked.connect(cb)
             b.setFixedSize(20, 20)  # 弱化处理：比原顶部按钮 32px 更小
@@ -926,7 +955,7 @@ class MessageCard(SimpleCardWidget):
                 except Exception:
                     is_light = False
                 path = info.icon_light_path if (is_light and info.icon_light_path) else info.icon_path
-                b = TransparentToolButton(QIcon(str(path)) if path else QIcon(), self)
+                b = LiteIconButton(QIcon(str(path)) if path else QIcon(), self)
                 if info.tooltip:
                     b.setToolTip(info.tooltip)
                     install_hover_tooltip(b, delay_ms=200)
@@ -979,8 +1008,7 @@ class MessageCard(SimpleCardWidget):
         # 否则平均分支拿不到落定值会把 stat 藏掉，与 1s tick 的实时值交替 → 闪烁。
         if elapsed is not None:
             # 轮次结束，清掉流式采样缓冲
-            self._stream_text_acc = ""
-            self._stream_text_cursor = 0  # [T4-5] 增量采样游标同步复位
+            self._stream_text_clear()
             self._stream_gen_s = 0.0
             self._stream_last_text_t = None
             # 插件信息项按落定态刷新（token_usage 透传给 provider 自行取舍）
@@ -1145,7 +1173,10 @@ class MessageCard(SimpleCardWidget):
             # 流式实时采样：只给「本流累计原文」+「首字至今秒数」，token 估算与
             # 吞吐量口径交给 provider（插件侧走 tiktoken/cl100k，中文约 1.2
             # token/字）。主程序不再用 chars÷4 粗估（中文低估约 4~5 倍）。
-            acc = getattr(self, "_stream_text_acc", "") or ""
+            #
+            # [PERF] 固化拼接（写入侧只 append 片段，见 update_content）：
+            # 只有这里（200ms 一拍）才把新增片段 join 进累计串，避免每批 O(n)。
+            acc = self._stream_text_snapshot()
             ctx["live_text"] = acc
             # [T4-5] 增量片段：仅「上次采样以来新增」的部分。provider 用它做
             # 增量编码，避免每拍对整段（可达数万字）重新 tiktoken —— 耗时随流式
@@ -1161,6 +1192,27 @@ class MessageCard(SimpleCardWidget):
             # 生成秒 = 累计出字时间（已排除工具执行 / 长等待段）
             ctx["live_gen_s"] = max(0.0, float(getattr(self, "_stream_gen_s", 0.0) or 0.0))
         return ctx
+
+    def _stream_text_snapshot(self) -> str:
+        """返回本流累计原文（惰性固化）。
+
+        [PERF] 写入侧（update_content，流式每批）只 append 到 _stream_text_parts；
+        本方法在读取时（_footer_stat_context 每 200ms 一拍）才 join 一次。
+        旧实现每批做 `acc = acc + txt`，因读取方持有引用使 CPython 的原地
+        realloc 失效 → O(n²)，实测 390KB 回复 516ms 全落在流式主线程。
+
+        固化策略：把待固化片段 join 进缓存串后清空 pending，O(新增) 而非 O(总量)。
+        """
+        parts = getattr(self, "_stream_text_parts", None)
+        if parts is None:
+            # 兼容旧路径 / cleanup 后置 None 的情形
+            return getattr(self, "_stream_text_acc", "") or ""
+        if parts:
+            merged = "".join(parts)
+            parts.clear()
+            prev = getattr(self, "_stream_text_acc", None)
+            self._stream_text_acc = (prev or "") + merged
+        return getattr(self, "_stream_text_acc", "") or ""
 
     def _refresh_footer_stats(
         self, streaming: bool = False, elapsed: float = None, token_usage: dict = None
@@ -1223,6 +1275,16 @@ class MessageCard(SimpleCardWidget):
         except Exception as e:
             logger.warning(f"[MessageCard] footer_action {getattr(info, 'action_id', '?')} 回调失败: {e}")
 
+    def _stream_text_clear(self):
+        """清空流式原文缓冲（三处清零点共用：start / 落定 / cleanup）。
+
+        [PERF] 字段见 update_content 注释：原文改存「待固化片段 + 已固化累计串」，
+        读取时（_stream_text_snapshot）才把片段合并进累计串，避免每批 O(n) 全量拷贝。
+        getattr 兜底：未走 start_elapsed_tracking 的裸实例（测试桩）也安全。
+        """
+        self._stream_text_parts = []
+        self._stream_text_acc = None
+
     def start_elapsed_tracking(self):
         """开始实时计时（流式输出时调用）"""
         if self.role != "assistant":
@@ -1231,7 +1293,14 @@ class MessageCard(SimpleCardWidget):
             return
         self._elapsed_start_time = time.time()
         # 流式采样状态：update_content 累计原文与出字时间，首个内容 chunk 记时刻
-        self._stream_text_acc = ""
+        # [PERF] 原文改为「片段列表 + 字符数」：旧实现每批执行
+        #   self._stream_text_acc = (旧值) + txt
+        # 这是 O(n) 全量拷贝；而 _footer_stat_context 每 200ms 读一次并持有引用
+        # → CPython 的 INPLACE_ADD 原地优化失效，长回复退化为 O(n²)
+        # （实测 390KB 回复 516ms 全在流式主线程上）。
+        # 现改为只 append 片段（O(1)），读取时（200ms 一拍）才固化拼接。
+        self._stream_text_parts: List[str] = []
+        self._stream_text_acc: Optional[str] = None  # 已固化累计串；None = 空
         self._stream_text_cursor = 0  # [T4-5] 增量采样游标（配合 live_text_delta）
         self._stream_gen_s = 0.0
         self._stream_last_text_t = None
@@ -1889,7 +1958,7 @@ class MessageCard(SimpleCardWidget):
         else:
             specs = []
         for ic, tp, cb in specs:
-            b = TransparentToolButton(ic, self)
+            b = LiteIconButton(ic, self)
             b.setToolTip(tp)
             b.clicked.connect(cb)
             b.setFixedSize(32, 32)
@@ -1997,7 +2066,7 @@ class MessageCard(SimpleCardWidget):
                 path = (
                     info.icon_light_path if (is_light and info.icon_light_path) else info.icon_path
                 )
-                b = TransparentToolButton(QIcon(str(path)) if path else QIcon(), self)
+                b = LiteIconButton(QIcon(str(path)) if path else QIcon(), self)
                 if info.tooltip:
                     b.setToolTip(info.tooltip)
                     install_hover_tooltip(b, delay_ms=200)
@@ -2013,7 +2082,7 @@ class MessageCard(SimpleCardWidget):
             (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
             (get_icon("删除"), "删除", self.deleteRequested.emit),
         ]:
-            b = TransparentToolButton(ic, self)
+            b = LiteIconButton(ic, self)
             b.setToolTip(tp)
             b.clicked.connect(cb)
             b.setFixedSize(26, 26)  # 弱化处理：比助手卡 32px 更小
@@ -3765,7 +3834,12 @@ class MessageCard(SimpleCardWidget):
         # 流式吞吐采样：累计输出原文，并**逐段累加出字时间**（不是首字至今）
         if self.role == "assistant" and isinstance(txt, str) and txt:
             now = time.time()
-            self._stream_text_acc = (getattr(self, "_stream_text_acc", "") or "") + txt
+            # [PERF] 只 append 片段（O(1)）；固化拼接推迟到 _footer_stat_context
+            # 读取时（200ms 一拍），彻底避开每批 O(n) 全量拷贝。
+            # ⚠️ 不得动 _stream_text_acc：它存「已固化」累计串，parts 存「待固化」
+            # 增量；_stream_text_snapshot 把 parts 合并进 acc，置 None 即丢历史
+            # （实测会造成 live_text 只剩最后一段、token 统计失真）。
+            self._stream_text_parts.append(txt)
             prev = getattr(self, "_stream_last_text_t", None)
             if prev is None:
                 # 首个非空 chunk：仅记时刻（供 TTFT 语义），生成秒从 0 起算
@@ -4304,7 +4378,21 @@ class MessageCard(SimpleCardWidget):
             # 插件注册 tag（<mood> 等）与渲染型 fence（```echarts 等）未闭合同样
             # 跳过增量注入：生肉进 DOM 后会被全量渲染的卡片/图表替换 →
             # "文字/代码先流式出现又消失"
-            if self._streaming and not _think_unclosed and not _tag_unclosed and not _fence_unclosed:
+            # 🆕 未闭合 <tool> 协议段（glm 等中转把工具调用以协议文本嵌在 content
+            # 里流式返回）同策略跳过增量注入：生肉闪现与 think 同症。
+            # [PERF] 先做 C 级子串包含判断再 count：count 是两遍 O(n) 全扫，
+            # 而绝大多数批次正文里根本没有协议标签（实测 390KB 两遍 count
+            # 0.39ms → 加 in 短路后 0.08ms，流式每批都跑）。
+            _tool_unclosed = (
+                False if "<tool" not in last_text else last_text.count("<tool>") > last_text.count("</tool>")
+            )
+            if (
+                self._streaming
+                and not _think_unclosed
+                and not _tag_unclosed
+                and not _fence_unclosed
+                and not _tool_unclosed
+            ):
                 self.viewer._append_text_incremental(text)
             if _think_unclosed:
                 if not self.viewer._think_text_streaming_started:
@@ -4324,6 +4412,14 @@ class MessageCard(SimpleCardWidget):
                 self.viewer._needs_full_render = True
                 self.viewer._schedule_render(immediate=immediate_render)
             self.viewer._tag_text_streaming = _tag_unclosed
+            # 🆕 协议段（未闭合 <tool>）状态翻转（首现/闭合）时强制全量渲染一次：
+            # 「接收中...」占位框（运行指示）只能由全量管线的 _inject_tool_blocks
+            # 产出；首现即渲（模型开始输出工具调用），闭合翻转也走全量（协议段
+            # 无 id 被丢弃，占位随之消失，无需等下一个边界）。
+            if _tool_unclosed != getattr(self.viewer, "_tool_text_streaming", False):
+                self.viewer._needs_full_render = True
+                self.viewer._schedule_render(immediate=immediate_render)
+            self.viewer._tool_text_streaming = _tool_unclosed
             # [P0-1] 渲染型 fence（```echarts/mermaid 等）未闭合期间唯一可见反馈：
             # 增量注入跳过 + _render_tail_inline 直接 return + 差量不产出 → DOM
             # 无新内容。占位只进 DOM 不进 _content_data，持久化/历史加载零残留。
@@ -4447,6 +4543,18 @@ class MessageCard(SimpleCardWidget):
             cache = getattr(self.viewer, "_tool_md_cache", None)
             if cache is not None:
                 cache[tool_call_id] = single_md
+        # 协议段指纹登记（2026-10-25）：工具完成后，模型正文照抄的未闭合协议段
+        # （同名同参）在流式渲染中被抑制，防「接收中」占位与真实完成块重复并存
+        try:
+            from app.widgets.card_render_core import _tool_fingerprint
+
+            if self.viewer:
+                fps = getattr(self.viewer, "_finished_tool_fingerprints", None)
+                if fps is None:
+                    fps = self.viewer._finished_tool_fingerprints = set()
+                fps.add(_tool_fingerprint(tool_name, arguments or {}))
+        except Exception:
+            pass
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
@@ -5782,9 +5890,9 @@ class MessageCard(SimpleCardWidget):
         else:
             self.stop_streaming_anim()
         # [B4] 轮次落定清零流式采样缓冲（与 _refresh_footer_stats elapsed 分支/
-        # start_elapsed_tracking 的清零点对齐）：_stream_text_acc 是流式期间
-        # 累计的全文副本，一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。
-        self._stream_text_acc = ""
+        # start_elapsed_tracking 的清零点对齐）：原文缓冲是流式期间累计的全文副本，
+        # 一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。
+        self._stream_text_clear()
         self._stream_text_cursor = 0  # [T4-5] 增量采样游标同步复位
 
     def _has_active_tools(self) -> bool:
@@ -5883,11 +5991,12 @@ class MessageCard(SimpleCardWidget):
         self._markdown_text = None  # 大 markdown 文本
         self._last_rendered_html = None  # 大 HTML 字符串
         self._last_rendered_markdown = None  # 可能很大的 markdown
-        # 🐛 流式原文副本：update_content 逐 chunk 累加进 _stream_text_acc
-        # （约 20 KB/卡，长会话单调增长）。轮次落定有两处清零（set_meta_info
+        # 🐛 流式原文副本：update_content 逐批 append 进 _stream_text_parts
+        # （长会话单调增长）。轮次落定有两处清零（set_meta_info
         # 的 elapsed 分支 / finish_streaming），但卡片在落定前被回收（B4 卸载、
         # 切会话、关标签页）时走不到那两处，必须在这里兜住。读取点
         # _footer_stat_context 用 getattr(..., "") or "" 兜底，置 None 安全。
+        self._stream_text_parts = None
         self._stream_text_acc = None
         self._rendered_code_blocks = []  # 代码块缓存
         self._pending_content = None  # 待渲染内容

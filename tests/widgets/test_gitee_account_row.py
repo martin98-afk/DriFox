@@ -53,6 +53,11 @@ def row_factory(qtbot):
                 "app.core.sync.config_sync.ConfigSyncService.get_instance",
                 return_value=sync_service,
             ),
+            # 头像拉取是后台真线程：测试内必须断网（否则真请求 gitee）
+            patch(
+                "app.gateway.auth.gitee.fetch_user_avatar_url",
+                return_value=(None, "test-skip"),
+            ),
         ):
             row = GiteeAccountRow()
         qtbot.addWidget(row)
@@ -197,11 +202,18 @@ def test_bound_render_does_not_start_remote_sync(qtbot):
             return_value=sync_service,
         ),
         patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch(
+            "app.gateway.auth.gitee.fetch_user_avatar_url",
+            return_value=(None, "test-skip"),
+        ),
     ):
         row = GiteeAccountRow()
 
     qtbot.addWidget(row)
-    backend.get_bound_info.assert_not_called()
+    # 头像拉取（后台 daemon 线程）是绑定态渲染的预期轻量副作用，会调
+    # get_bound_info；等线程消费完再断言，避免竞态。核心守卫不变：
+    # 远程同步（ConfigSync.enable）不得由渲染路径启动。
+    qtbot.waitUntil(lambda: backend.get_bound_info.called, timeout=3000)
     sync_service.enable.assert_not_called()
 
 
@@ -469,3 +481,43 @@ def test_gitee_card_button_refreshes_on_clear_binding_path(gitee_card_factory):
     assert card._bind_btn.text() == "绑定"
     assert card._bound_owner == ""
     assert card._avatar.toolTip() == "未绑定"
+
+
+# ══════════════════════════════════════════════════════════
+# 头像配色（渐变 + 降饱和，2026-10-26 视觉优化）
+# ══════════════════════════════════════════════════════════
+
+
+class TestAvatarPalette:
+    def test_gradient_end_darker_than_start(self):
+        """渐变深端必须比亮端暗（darker(122) ≈ 深 18%），球面感的前提"""
+        from PyQt5.QtGui import QColor
+
+        from app.widgets.cards.settings.gitee_card import _avatar_palette
+
+        c1, c2 = _avatar_palette(QColor("#e67e22"))
+        v1 = c1.lightness()
+        v2 = c2.lightness()
+        assert v2 < v1, f"深端 lightness {v2} 应小于亮端 {v1}"
+
+    def test_saturation_reduced(self):
+        """降饱和 28%：高饱和色表在浅色卡上扎眼，压后柔和"""
+        from PyQt5.QtGui import QColor
+
+        from app.widgets.cards.settings.gitee_card import _avatar_palette
+
+        base = QColor("#e74c3c")
+        c1, _c2 = _avatar_palette(base)
+        # QColor RGB↔HSL 浮点往返有损，不比精确值，比语义：明显降饱和 + 色相不变
+        assert c1.saturationF() < base.saturationF()
+        assert c1.saturationF() > base.saturationF() * 0.6, "降过头会发灰失去辨识度"
+        assert c1.hue() == base.hue(), "色相不得变（辨识度来自色相）"
+
+    def test_gray_input_keeps_valid(self):
+        """灰阶输入（h=-1）不走降饱和分支，输出仍为有效色"""
+        from PyQt5.QtGui import QColor
+
+        from app.widgets.cards.settings.gitee_card import _avatar_palette
+
+        c1, c2 = _avatar_palette(QColor("#808080"))
+        assert c1.isValid() and c2.isValid()

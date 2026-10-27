@@ -8,7 +8,7 @@
 注意：不使用 ABC 以避免与 PyQt5 QObject 的元类冲突。
 各引擎通过重写方法提供实现，不实现时抛出 NotImplementedError。
 """
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 class BaseEngine:
@@ -63,9 +63,14 @@ class BaseEngine:
             return self._conversation_executor.finalize_stop()
         return []
 
-    def stop(self) -> List[Dict]:
-        """停止当前执行，返回被中断的消息列表（同步方式，可能阻塞）"""
-        return self._conversation_executor.stop()
+    def stop(self, timeout_ms: Optional[int] = None) -> List[Dict]:
+        """停止当前执行，返回被中断的消息列表（同步方式，可能阻塞）
+
+        Args:
+            timeout_ms: 等待 worker 退出的总预算（ms），None = 默认 3000+1000。
+                UI 主线程路径应传 300~500（见 ConversationExecutor.finalize_stop）。
+        """
+        return self._conversation_executor.stop(timeout_ms=timeout_ms)
 
     def cleanup(self):
         """清理执行器资源"""

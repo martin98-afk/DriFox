@@ -297,6 +297,205 @@ class TestProjectSwitchRestoresState:
             QApplication.processEvents()
 
 
+def _is_emoji(ch: str) -> bool:
+    """是否 emoji 字符（取 Unicode emoji 实际码位区间，不含中日韩文字）"""
+    cp = ord(ch)
+    return (
+        0x1F300 <= cp <= 0x1FAFF  # 各类 emoji 图形
+        or 0x2600 <= cp <= 0x27BF  # 杂项符号 + Dingbats（✂️ 等）
+        or 0xFE0F == cp  # 变体选择符（emoji presentation）
+        or 0x2190 <= cp <= 0x21FF  # 箭头（部分被当 emoji 用）
+    )
+
+
+class TestRenameEntrypoints:
+    """重命名可编辑性回归：flags 缺 ItemIsEditable 会让 F2 / 右键菜单静默失效
+
+    根因：``QAbstractItemView.edit()`` 在 index.flags() 不含 ``ItemIsEditable``
+    时直接返回 False —— 不改任何可见状态、不打日志，表现为「点重命名没反应」。
+    视图的 ``editTriggers = NoEditTriggers`` 只禁「双击等自动触发」，不拦显式
+    ``edit()`` 调用，因此修复点在 model.flags 而非视图。
+    """
+
+    def test_node_flags_include_editable(self, tmp_path, monkeypatch):
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "a.txt").write_text("x")
+
+        card = _make_card(root, monkeypatch)
+        try:
+            card._async_load_tree()
+            node = card._source_model.find_node(str(root / "a.txt"))
+            assert node is not None
+            src_idx = card._source_model._index_for_node(node)
+            flags = card._source_model.flags(src_idx)
+            assert flags & tree_widget_mod.Qt.ItemIsEditable, "flags 必须含 ItemIsEditable"
+            # 目录同样可重命名
+            dir_idx = card._source_model._index_for_node(card._source_model.find_node(str(root)))
+            if dir_idx.isValid():
+                assert card._source_model.flags(dir_idx) & tree_widget_mod.Qt.ItemIsEditable
+        finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+    def test_start_rename_opens_editor(self, tmp_path, monkeypatch):
+        """右键菜单 / F2 走 start_rename_at_index → 编辑器必须真正打开"""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "a.txt").write_text("x")
+
+        card = _make_card(root, monkeypatch)
+        try:
+            card._async_load_tree()
+            node = card._source_model.find_node(str(root / "a.txt"))
+            src_idx = card._source_model._index_for_node(node)
+            card._tree_view.start_rename_at_index(src_idx)
+            QApplication.processEvents()
+            assert card._tree_view.state() == card._tree_view.EditingState, "编辑器未打开"
+        finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+    def test_editor_background_is_opaque(self, tmp_path, monkeypatch):
+        """编辑器底色必须不透明，否则下层 item 文字透出成重影
+
+        回归：旧值 ``rgba(255,255,255,0.08)`` 半透明，编辑器只「覆盖」在 item
+        之上而 item 仍绘制自己的名称文字 → 两层文字叠加。长文件名时最明显。
+        """
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "a_very_long_file_name_for_overlap.png").write_text("x")
+
+        for is_dark in (True, False):
+            card = _make_card(root, monkeypatch)
+            try:
+                card._colors = {
+                    "accent": tree_widget_mod.QColor("#62a0ea"),
+                    "text": tree_widget_mod.QColor("#ffffff" if is_dark else "#0f172a"),
+                    "font_family": "Microsoft YaHei",
+                    "font_size": 14,
+                    "is_dark": is_dark,
+                }
+                card._rename_delegate.set_colors(card._colors)
+                card._async_load_tree()
+                node = card._source_model.find_node(str(root / "a_very_long_file_name_for_overlap.png"))
+                src_idx = card._source_model._index_for_node(node)
+
+                editor = card._rename_delegate.createEditor(card._tree_view, None, src_idx)
+                try:
+                    qss = editor.styleSheet()
+                    assert "background-color" in qss, "编辑器必须用 background-color 显式指定底色"
+                    assert "rgba" not in qss.split("background-color")[1].split(";")[0], (
+                        "编辑器底色不得半透明（会导致下层文字透出重影）"
+                    )
+                finally:
+                    editor.deleteLater()
+            finally:
+                card._cleanup_worker()
+                card.deleteLater()
+                QApplication.processEvents()
+
+    def test_rename_commits_to_disk_and_model(self, tmp_path, monkeypatch):
+        """编辑器提交 → 文件真实改名 + 模型节点路径同步"""
+        root = tmp_path / "proj"
+        root.mkdir()
+        old = root / "a.txt"
+        old.write_text("x")
+
+        card = _make_card(root, monkeypatch)
+        try:
+            card._async_load_tree()
+            card._on_rename_file(str(old), "b.txt")
+            assert not old.exists()
+            assert (root / "b.txt").exists()
+            assert card._source_model.find_node(str(old)) is None
+            assert card._source_model.find_node(str(root / "b.txt")) is not None
+        finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+
+class TestContextMenu:
+    """右键菜单结构：图标非空 + 剪贴板空时无「粘贴」项"""
+
+    def _capture(self, card, path, monkeypatch):
+        from PyQt5.QtCore import QPoint
+        from PyQt5.QtWidgets import QMenu
+
+        captured = {}
+
+        def fake_exec(self, *args, **kwargs):
+            rows = []
+            for act in self.actions():
+                if act.isSeparator():
+                    rows.append(None)
+                    continue
+                rows.append(
+                    {
+                        "text": act.text(),
+                        "has_icon": not act.icon().pixmap(16, 16).isNull(),
+                        "enabled": act.isEnabled(),
+                    }
+                )
+            captured["rows"] = rows
+            return None
+
+        monkeypatch.setattr(QMenu, "exec_", fake_exec)
+        node = card._source_model.find_node(path)
+        if node is None:
+            card._on_context_menu(card._proxy_model.index(-1, -1), QPoint(0, 0))
+        else:
+            idx = card._proxy_model.mapFromSource(card._source_model._index_for_node(node))
+            card._on_context_menu(idx, QPoint(0, 0))
+        return captured["rows"]
+
+    def test_all_items_have_icon_and_no_emoji(self, tmp_path, monkeypatch):
+        root = tmp_path / "proj"
+        root.mkdir()
+        target = root / "a.txt"
+        target.write_text("x")
+
+        card = _make_card(root, monkeypatch)
+        try:
+            card._async_load_tree()
+            rows = self._capture(card, str(target), monkeypatch)
+            items = [r for r in rows if r is not None]
+            assert items, "菜单为空"
+            for item in items:
+                assert item["has_icon"], f"菜单项缺图标: {item['text']}"
+                # emoji 全部换 icon：文本里不应再有 emoji 字符
+                # （范围取 emoji 实际区块；中文 U+4E00-9FFF 不在其中）
+                assert not any(_is_emoji(ch) for ch in item["text"]), f"仍含 emoji: {item['text']}"
+        finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+    def test_paste_hidden_when_clipboard_empty(self, tmp_path, monkeypatch):
+        root = tmp_path / "proj"
+        root.mkdir()
+        target = root / "a.txt"
+        target.write_text("x")
+
+        card = _make_card(root, monkeypatch)
+        try:
+            card._async_load_tree()
+            card._clipboard = []
+            texts = [r["text"] for r in self._capture(card, str(target), monkeypatch) if r]
+            assert "粘贴" not in texts, "剪贴板空时不应显示粘贴项"
+
+            card._clipboard = [(str(target), False)]
+            texts = [r["text"] for r in self._capture(card, str(target), monkeypatch) if r]
+            assert "粘贴" in texts, "剪贴板有内容时必须显示粘贴项"
+        finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+
 class TestScanQueueNoMutualKill:
     """扫描串行队列：不互杀（用户痛点回归：展开目录多了卡死）
 

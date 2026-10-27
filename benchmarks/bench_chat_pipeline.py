@@ -41,12 +41,12 @@ def run(rounds: int, chunks: int, render: bool = True) -> dict:
     app = QApplication(sys.argv)
 
     # CodeWebViewer 依赖共享 WebEngine Profile（同 main.py DeferredStartup）
-    from app.core.webengine_profile import init_shared_web_profile
+    from app.core.infra.webengine_profile import init_shared_web_profile
 
     init_shared_web_profile(parent=app)
 
-    from app.core.backend import ChatBackend
-    from app.core.message_content import messages_to_api
+    from app.core.conversation.backend import ChatBackend
+    from app.core.conversation.message_content import messages_to_api
     from app.widgets.message_card import MessageCard
 
     backend = ChatBackend(window_id="bench-chatpipe")
@@ -68,6 +68,7 @@ def run(rounds: int, chunks: int, render: bool = True) -> dict:
     warm_session.add_user_message("warmup")
     warm_card = MessageCard(role="assistant")
     if render:
+        warm_card.start_elapsed_tracking()
         warm_card.update_content(chunk_text)
         warm_card.set_content(chunk_text * 3)
     warm_session.add_assistant_message(chunk_text * 3, model_name="bench-mock-model")
@@ -91,6 +92,7 @@ def run(rounds: int, chunks: int, render: bool = True) -> dict:
         # 助手卡片：流式 K 块（render=False 对照组：只建卡不走渲染管线）
         card = MessageCard(role="assistant")
         if render:
+            card.start_elapsed_tracking()
             for _ in range(chunks):
                 card.update_content(chunk_text)
         full = chunk_text * chunks

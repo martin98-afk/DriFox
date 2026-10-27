@@ -12,7 +12,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.plugins.capabilities.providers import model_meta, process_core
+from app.plugins.capabilities.providers import model_meta, net_sync, process_core
 from app.utils.info_bar_guard import post_to_main
 
 
@@ -496,10 +496,79 @@ def _input_read(host: Any):
 
 
 def _input_write(host: Any):
-    """写入输入框文本并聚焦（可选追加模式）。"""
+    """写入输入框文本并聚焦（可选追加模式）。
+
+    Tab 模式下 host 可能解析为 TabManagerWindow（full 卡等覆盖场景），输入区
+    在活跃对话窗口上：先降级解析真实输入框；写入后强制切回对话视图——
+    写入语义是「让用户看到并发送」，停留在覆盖页写入不可见（magpie「让 AI
+    帮我装」实测盲写）。
+    """
+
+    def _resolve_area():
+        area = getattr(host, "input_area", None)
+        if area is not None:
+            return area
+        # Tab 模式：host 是 TabManagerWindow → 活跃对话窗口
+        try:
+            wins = getattr(host, "_windows", None) or []
+            panel = getattr(host, "_tab_panel", None)
+            idx = getattr(panel, "_active_index", 0) if panel is not None else 0
+            if 0 <= idx < len(wins):
+                area = getattr(wins[idx], "input_area", None)
+                if area is not None:
+                    return area
+        except Exception:
+            pass
+        # registry 兜底：任一已登记对话窗口
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            for w in (getattr(UIPluginRegistry.get_instance(), "_window_main_widgets", {}) or {}).values():
+                area = getattr(w, "input_area", None)
+                if area is not None:
+                    return area
+        except Exception:
+            pass
+        return None
+
+    def _back_to_chat():
+        # 写入即回对话视图：full 卡覆盖时不切回，用户看不到写入结果。
+        # host 常是 MainWidget（窗口级能力池 / 浮动卡宿主），覆盖页却由
+        # TabManagerWindow 托管，MainWidget 上没有回对话入口 → 候选依次为
+        # host 自身与全局 Tab 管理器；正规入口（含 stack 切页 + 隐藏 replace 卡）
+        # 优先，退化到 titleBar 高亮复位（titleBar / _title_bar 两种属性名）。
+        owners = []
+        for owner in (host, _resolve_tab_window()):
+            if owner is not None and all(owner is not o for o in owners):
+                owners.append(owner)
+        for owner in owners:
+            try:
+                show_conv = getattr(owner, "_show_conversation_view", None)
+            except Exception:
+                continue
+            if callable(show_conv):
+                try:
+                    show_conv()
+                    return
+                except Exception:
+                    pass
+        for owner in owners:
+            try:
+                title_bar = getattr(owner, "titleBar", None) or getattr(owner, "_title_bar", None)
+            except Exception:
+                continue
+            set_active = getattr(title_bar, "set_active_tab", None)
+            if callable(set_active):
+                try:
+                    from app.widgets.tab_manager_window import CHAT_TAB_ID
+
+                    set_active(CHAT_TAB_ID, animate=False)
+                    return
+                except Exception:
+                    pass
 
     def write(text: str, append: bool = False, focus: bool = True) -> None:
-        area = getattr(host, "input_area", None)
+        area = _resolve_area()
         if area is None:
             raise RuntimeError("输入框不可用")
         if append:
@@ -511,7 +580,7 @@ def _input_write(host: Any):
             cursor = area.textCursor()
             cursor.movePosition(cursor.End)
             area.setTextCursor(cursor)
-
+        _back_to_chat()
     return write
 
 
@@ -930,6 +999,17 @@ def _host_raw(host: Any):
     return host
 
 
+def _storage_data_dir(host: Any):
+    """插件持久化数据根目录（<app_data>，与 tool_core 同实现）。
+
+    只给根目录不给插件专属目录：provider 全局共享、_call 不传插件名，
+    per-plugin 隔离没有现成机制。插件自拼 plugin_data/<name>/。
+    """
+    from app.utils.utils import get_app_data_dir
+
+    return get_app_data_dir()
+
+
 def register(registry) -> None:
     reg = registry
     # 对话流 / 窗口
@@ -955,6 +1035,8 @@ def register(registry) -> None:
     reg.register(
         "workdir.write", _sync_working_directory, surface="ui", owner="core:ui", legacy_key="sync_working_directory"
     )
+    # 存储
+    reg.register("storage.data_dir", _storage_data_dir, surface="ui", owner="core:ui")
     # 上下文 / 引擎
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
     reg.register("context.compact", _context_compactor, surface="ui", owner="core:ui")
@@ -992,7 +1074,21 @@ def register(registry) -> None:
     # 进程级
     reg.register("cache.purge", _cache_purge, surface="ui", owner="core:ui")
     reg.register("process.start", process_core.process_start, surface="ui", owner="core:ui")
+    # process.start 首启确认框从插件后台线程走 _dispatch：_Dispatcher 单例必须
+    # 在此（主线程）预热，否则由后台线程首建 QObject 再 moveToThread 会损坏
+    # Qt 同步状态（实测确认框模态循环内堆崩溃，magpie 0.5.2/0.5.3）。
+    # QApplication 未建（极端启动序）时静默跳过——_confirm_dialog 内还有兜底预热。
+    try:
+        from app.plugins.capabilities.providers.ui_bridge import preheat_main_thread_dispatcher
+
+        preheat_main_thread_dispatcher()
+    except RuntimeError:
+        pass
     # 配置（按 key 读非敏感标量）
     reg.register("config.read", _config_read, surface="ui", owner="core:ui")
+    # 网络 / 云同步（host 无关实现，与 tool_core 共用 net_sync）
+    reg.register("net.avatar", net_sync.net_avatar, surface="ui", owner="core:net")
+    reg.register("net.download", net_sync.net_download, surface="ui", owner="core:net")
+    reg.register("sync.register", net_sync.sync_register, surface="ui", owner="core:net")
     # 逃生舱
     reg.register("host.raw", _host_raw, surface="ui", owner="core:ui")

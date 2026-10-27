@@ -1799,6 +1799,19 @@ class PluginHostService(QObject):
             logger.debug(f"[PluginHost] {plugin_name}:{component}:{item_id} 读取期过滤，无需重载")
             return {component: True}
 
+        # agents 细项：精准增删单个智能体 + 单条命令，不走全量 reload
+        # （全量路径每次开关要重登记整个插件的智能体 + 重建全部 agent 命令，
+        # 日志 40+ 行；细项只影响一个条目）
+        if component == "agents" and self._agent_manager is not None:
+            ok = self._agent_manager.set_agent_item_enabled(plugin_name, item_id, enabled)
+            try:
+                from app.core.commands.builtin_commands import set_agent_command_enabled
+
+                set_agent_command_enabled(item_id, plugin_name, enabled)
+            except Exception as e:
+                logger.error(f"[PluginHost] agent 命令增删失败 {plugin_name}:{item_id}: {e}")
+            return {component: ok}
+
         # 注册期过滤：重载该插件的这一类组件（内部会重新走一遍细项过滤）
         return self._reload_single_plugin(plugin_name, component)
 

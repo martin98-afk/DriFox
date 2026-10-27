@@ -237,6 +237,10 @@ class ChatBackend(QObject):
     # Auto-compact 请求（由 tool_executor 在 PostToolUse hook 中检测阈值触发）
     auto_compact_requested = pyqtSignal(float)  # ratio
 
+    # 交接文档注入完成（参数：新会话 session_id）。主窗口据此自动发「继续」指令。
+    # 只在 handoff 切会话路径发射；用户手动新建会话不会触发。
+    handoff_injected = pyqtSignal(str)
+
     # SubAgentManager 延迟创建完成信号（[审查 #8r Bug D] 窗口在 __init__ 时
     # sub_agent_manager 尚为 None 跳过信号连接，创建完成后据此补连）
     sub_agent_ready = pyqtSignal()
@@ -294,6 +298,12 @@ class ChatBackend(QObject):
         # Auto-compact 防重复触发时间戳
         self._last_auto_compact_time = 0.0
 
+        # 待注入的交接文档（仅 handoff 切会话路径置位）：
+        # {"path": str, "content": str, "source_session_id": str}
+        # 由 main_widget 在切会话前调用 set_pending_handoff 设置，
+        # trigger_session_event 注入后清空。None = 本次新建会话不注入交接。
+        self._pending_handoff: Optional[Dict[str, Any]] = None
+
         # ★ T3 修复：注册为活跃实例（插件热更新 plugin_changed 广播目标）。
         # cleanup() 中移除，避免已关闭窗口的 backend 被广播（防泄漏）。
         ChatBackend._active_instances.add(self)
@@ -338,6 +348,16 @@ class ChatBackend(QObject):
 
         logger.info(f"[ChatBackend] Auto-compact 触发 (ratio={ratio:.1%})")
         self.auto_compact_requested.emit(ratio)
+
+    def set_pending_handoff(self, payload: Optional[Dict[str, Any]]):
+        """设置/清除待注入的交接文档（handoff 切会话专用）
+
+        Args:
+            payload: {"path": str, "content": str, "source_session_id": str}；
+                     None 表示清除。只在 main_widget 的 handoff 切会话路径调用，
+                     用户手动新建会话不设置，因此不会注入。
+        """
+        self._pending_handoff = dict(payload) if payload else None
 
     @property
     def chat_engine(self) -> ChatEngine:
@@ -954,15 +974,20 @@ class ChatBackend(QObject):
         self._subagent_model_resolver = resolver
 
     # ========== 插件系统初始化 ==========
-    def stop_streaming(self):
+    def stop_streaming(self, timeout_ms: Optional[int] = None):
         """停止流式输出（同步方式，可能阻塞 UI 线程）
 
         Stop hook 已移至 chat_worker 退出循环前触发，此处不再重复触发。
-        执行流程：cancel_worker() → finalize_stop()（阻塞等待 worker 线程结束，
-        worker return 前会同步触发 Stop hook）。
+        执行流程：cancel_worker() → finalize_stop(timeout_ms)（阻塞等待 worker
+        线程结束，worker return 前会同步触发 Stop hook）。
+
+        Args:
+            timeout_ms: 等待 worker 退出的总预算（ms）。None = 默认 3000+1000，
+                适合后台/关闭场景；**UI 主线程路径必须传 300~500**，
+                避免 Stop hook（command 类型默认超时 30s）拖死界面。
         """
         if self._chat_engine:
-            return self._chat_engine.stop()
+            return self._chat_engine.stop(timeout_ms=timeout_ms)
 
     def cancel_streaming(self):
         """非阻塞取消流式输出
@@ -1259,12 +1284,16 @@ class ChatBackend(QObject):
             "project_name": self._current_project or (os.path.basename(project_root) if project_root else ""),
         }
 
-        # Worktree / git 分支信息（project_root 为空时 GitWorktreeDetector.get_repo_info 会返回 None）
+        # Worktree / git 分支信息
+        # [PERF] 用 stale-while-revalidate 版本：本方法在 PreUserMessage 每条消息
+        # 前于主线程触发，get_repo_info 在 TTL(30s) 过期后会同步跑 5+N 个 git
+        # 子进程（Windows+Defender 下每个 100-300ms），直接卡 UI。改用只读缓存
+        # + 过期后台刷新（与 SessionStart 路径 _build_session_context 同款语义）。
         try:
             from app.utils.git_worktree import GitWorktreeDetector
 
             if project_root:
-                repo_info = GitWorktreeDetector.get_repo_info(project_root)
+                repo_info = GitWorktreeDetector.get_repo_info_stale_while_revalidate(project_root)
                 if repo_info and repo_info.worktrees:
                     ctx["worktree"] = {
                         "repo_name": os.path.basename(repo_info.root),
@@ -1297,6 +1326,11 @@ class ChatBackend(QObject):
             "state": state,
             "project_name": self._current_project or (os.path.basename(project_root) if project_root else ""),
         }
+
+        # 交接文档：仅 handoff 切会话路径置位（见 set_pending_handoff）。
+        # 用 dict 拷贝，避免 hook 侧修改污染 pending 原对象。
+        if self._pending_handoff:
+            ctx["handoff"] = dict(self._pending_handoff)
 
         # 团队模式：让 SessionStart hook 也能按 #team_member matcher 精确触发
         # （与 chat_worker._trigger_worker_hook 注入的 is_team_member 字段对齐）
@@ -1423,6 +1457,9 @@ class ChatBackend(QObject):
                     _inject_hook_to_session(session, "SessionStart", r.output, r.status_message)
             self._hook_messages_updated.emit()
 
+        # 交接注入收尾（与 trigger_session_event 共用）：create_session 内联触发
+        # SessionStart，不走 trigger_session_event，必须单独调用。
+        self._finalize_pending_handoff(session)
         return session
 
     def trigger_session_event(self, state: str, extra_context: dict = None):
@@ -1455,6 +1492,31 @@ class ChatBackend(QObject):
                 if r.success and r.output:
                     _inject_hook_to_session(session, "SessionStart", r.output, r.status_message)
             self._hook_messages_updated.emit()
+
+        # 交接注入收尾：注入型 python hook 在 trigger_event 内同步执行，到这里
+        # 交接内容已进 session.messages。用户手动新建会话时 pending 为空，整段跳过。
+        self._finalize_pending_handoff(session)
+
+    def _finalize_pending_handoff(self, session) -> None:
+        """交接注入收尾：清空 pending、记 injected_into、发信号
+
+        create_session 与 trigger_session_event 两条 SessionStart 触发路径
+        都必须调用本方法（前者是内联触发，不复用后者）。
+        """
+        pending = self._pending_handoff
+        if not pending:
+            return
+        self._pending_handoff = None
+        if session is None:
+            return
+        sid = session.session_id
+        try:
+            from app.core.context.handoff import mark_injected
+
+            mark_injected(Path(str(pending.get("path") or "")), sid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ChatBackend] 交接消费标记写入失败: {e}")
+        self.handoff_injected.emit(sid)
 
     def get_current_session(self) -> Optional[ChatSession]:
         """获取当前会话"""

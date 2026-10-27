@@ -658,13 +658,6 @@ class ModelListEditorWidget(QWidget):
         if header is not None:
             header.setVisible(self.listWidget.count() > 0)
 
-    def _notify_skipped(self, count: int):
-        """提示被跳过的重复项数量（信息展示在提示行，不弹窗打断）"""
-        self.hint_label.setText(
-            f"<span style='color:{_DUP_COLOR};'>跳过 {count} 个重复项</span>"
-            "  ·  Enter 或点添加 新增 · Delete 删除 · Ctrl+V 粘贴"
-        )
-
     # ── 编辑操作 ───────────────────────────────────────────
 
     def keyPressEvent(self, event):

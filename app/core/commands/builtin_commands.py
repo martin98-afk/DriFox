@@ -248,6 +248,11 @@ def _register_from_cached_commands(cmd_mgr: CommandManager, cached_commands: lis
 
 def _register_from_cached_agents(cmd_mgr: CommandManager, cached_agents: list) -> int:
     """从缓存数据注册智能体命令，返回注册数"""
+    # D10 细项过滤：缓存条目是「注册时刻」的快照，细项停用不 touch 文件、
+    # 不 bump 缓存版本 → 重启缓存命中会把已停用的 /agent 命令复活。
+    # 注册前按缓存自带的 source 复核禁用集（与实时解析路径对齐）。
+    from app.plugins.loaders.runtime_component_loader import _is_item_enabled
+
     agent_params = [
         CommandParameter("--subagent", "启动子智能体任务（触发 detail 模式）", required=False),
         CommandParameter("--with-context", "传递当前会话历史给子智能体", required=False),
@@ -258,13 +263,21 @@ def _register_from_cached_agents(cmd_mgr: CommandManager, cached_agents: list) -
     ]
     count = 0
     for ag in cached_agents:
+        source = ag.get("source", "")
+        if source.startswith("plugin:"):
+            try:
+                if not _is_item_enabled(source[len("plugin:") :], "agents", ag["name"]):
+                    logger.debug(f"[BuiltinCommands] Skip disabled agent command from cache: /{ag['name']}")
+                    continue
+            except Exception as e:
+                logger.warning(f"[BuiltinCommands] 缓存注册细项检查失败，默认注册 /{ag['name']}: {e}")
         cmd_mgr.register(
             name=ag["name"],
             command_type=CommandType.AGENT,
             description=ag.get("description", ""),
             prompt_text=ag.get("prompt_text", ""),
             parameters=agent_params,
-            source=ag.get("source", ""),
+            source=source,
         )
         count += 1
     return count
@@ -748,6 +761,44 @@ def reload_agent_commands() -> int:
     return len(agents)
 
 
+def set_agent_command_enabled(agent_name: str, plugin_name: str, enabled: bool) -> bool:
+    """细项开关后精准增删单个 agent 命令（替代全量 reload_agent_commands）
+
+    全量重建要重注册全部智能体命令并重建全窗口快捷键（37 行 DEBUG 日志 + 24ms）；
+    细项开关只影响一条，走单条路径。
+
+    Args:
+        agent_name: 智能体名（md 文件 stem，即命令名）
+        plugin_name: 来源插件名（细项 key 前缀）
+        enabled: True=启用（单条注册），False=停用（单条摘除）
+
+    Returns:
+        是否成功处理
+    """
+    cmd_mgr = CommandManager.get_instance()
+    if not enabled:
+        removed = cmd_mgr.unregister_typed(agent_name, CommandType.AGENT)
+        logger.debug(f"[BuiltinCommands] Unregistered agent command: /{agent_name}")
+        return removed
+
+    # 启用方向：细项状态复核（组件级停用时明确拒绝，不靠调用方保证）
+    try:
+        from app.plugins.loaders.runtime_component_loader import _is_item_enabled
+
+        if not _is_item_enabled(plugin_name, "agents", agent_name):
+            logger.debug(f"[BuiltinCommands] /{agent_name} 细项仍处停用态，跳过注册")
+            return False
+    except Exception as e:
+        logger.warning(f"[BuiltinCommands] 细项启停检查失败，默认注册 /{agent_name}: {e}")
+
+    for md_file in _get_agent_files():
+        if md_file.stem != agent_name:
+            continue
+        return _register_one_agent_command(cmd_mgr, md_file) is not None
+    logger.warning(f"[BuiltinCommands] 启用 /{agent_name} 失败：未在插件 agents 目录找到对应文件")
+    return False
+
+
 def reload_plugin_commands(plugin_name: str) -> int:
     """只重载指定插件的命令（不清空其他插件的命令）。
 
@@ -947,6 +998,84 @@ def _generate_tool_restriction_text(meta: dict) -> str:
     return ("\n".join(lines) + "\n\n") if lines else ""
 
 
+def _register_one_agent_command(cmd_mgr: CommandManager, md_file) -> Optional[dict]:
+    """注册单个智能体命令文件（供全量枚举与细项级精准启用复用）
+
+    Returns:
+        注册元数据 dict（供缓存）；跳过/失败返回 None
+    """
+    try:
+        content = md_file.read_text(encoding="utf-8")
+        if not content.startswith("---"):
+            return None
+
+        # 按行分割 frontmatter，只认「行首的 ---」
+        lines = content.splitlines()
+        if len(lines) < 2 or lines[0].strip() != "---":
+            return None
+        close_idx = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                close_idx = i
+                break
+        if close_idx is None:
+            return None
+
+        frontmatter = "\n".join(lines[1:close_idx])
+        body = "\n".join(lines[close_idx + 1 :]).strip()
+
+        try:
+            meta = yaml.safe_load(frontmatter)
+        except Exception as e:
+            logger.warning(f"[BuiltinCommands] YAML parse failed for {md_file}: {e}")
+            return None
+        if not meta:
+            return None
+
+        description = meta.get("description", "")
+
+        # 有工具限制时，在提示词第一行追加限制说明
+        restriction_text = _generate_tool_restriction_text(meta)
+        enhanced_body = restriction_text + body if restriction_text else body
+
+        cmd_mgr.register(
+            name=md_file.stem,
+            command_type=CommandType.AGENT,
+            description=description,
+            prompt_text=enhanced_body,
+            parameters=agent_params_shared(),
+            source=_plugin_name_of_md(md_file),
+        )
+        logger.debug(
+            f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
+            f"{' (with tool restrictions)' if restriction_text else ''}"
+        )
+        return {
+            "name": md_file.stem,
+            "description": description,
+            "prompt_text": enhanced_body,
+            # source 必须随行进缓存：否则重启走缓存路径后 agent 命令
+            # source 恒空，unregister_source("plugin:x") 清不到它们
+            "source": _plugin_name_of_md(md_file),
+        }
+
+    except Exception as e:
+        logger.warning(f"[BuiltinCommands] Failed to register agent command from {md_file}: {e}")
+        return None
+
+
+def agent_params_shared() -> list:
+    """所有智能体命令共享的参数定义（单条注册与全量枚举共用）"""
+    return [
+        CommandParameter("--subagent", "启动子智能体任务（触发 detail 模式）", required=False),
+        CommandParameter("--with-context", "传递当前会话历史给子智能体", required=False),
+        CommandParameter(
+            "--model=", "覆盖模型/服务商，支持: 模型名 / 服务商名 / 服务商:模型名", param_type="value", required=False
+        ),
+        CommandParameter("<task-desc>", "子智能体任务描述", param_type="positional", required=False),
+    ]
+
+
 def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
     """加载智能体命令：优先 PluginManager 路径，回退到 app/agents/
 
@@ -960,75 +1089,22 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
         return registered
 
     # 所有智能体命令共享的参数定义
-    agent_params = [
-        CommandParameter("--subagent", "启动子智能体任务（触发 detail 模式）", required=False),
-        CommandParameter("--with-context", "传递当前会话历史给子智能体", required=False),
-        CommandParameter(
-            "--model=", "覆盖模型/服务商，支持: 模型名 / 服务商名 / 服务商:模型名", param_type="value", required=False
-        ),
-        CommandParameter("<task-desc>", "子智能体任务描述", param_type="positional", required=False),
-    ]
+    # D10 细项过滤：被单独停用的智能体不注册命令（与 AgentManager 注册期
+    # 过滤对齐），否则 /agent-name 还能调起已停用的智能体
+    from app.plugins.loaders.runtime_component_loader import _is_item_enabled
 
     for md_file in agent_files:
-        try:
-            content = md_file.read_text(encoding="utf-8")
-            if not content.startswith("---"):
-                continue
-
-            # 按行分割 frontmatter，只认「行首的 ---」
-            lines = content.splitlines()
-            if len(lines) < 2 or lines[0].strip() != "---":
-                continue
-            close_idx = None
-            for i in range(1, len(lines)):
-                if lines[i].strip() == "---":
-                    close_idx = i
-                    break
-            if close_idx is None:
-                continue
-
-            frontmatter = "\n".join(lines[1:close_idx])
-            body = "\n".join(lines[close_idx + 1 :]).strip()
-
+        source = _plugin_name_of_md(md_file)
+        if source.startswith("plugin:"):
             try:
-                meta = yaml.safe_load(frontmatter)
+                if not _is_item_enabled(source[len("plugin:") :], "agents", md_file.stem):
+                    logger.debug(f"[BuiltinCommands] Skip disabled agent command: /{md_file.stem}")
+                    continue
             except Exception as e:
-                logger.warning(f"[BuiltinCommands] YAML parse failed for {md_file}: {e}")
-                continue
-            if not meta:
-                continue
-
-            description = meta.get("description", "")
-
-            # 有工具限制时，在提示词第一行追加限制说明
-            restriction_text = _generate_tool_restriction_text(meta)
-            enhanced_body = restriction_text + body if restriction_text else body
-
-            cmd_mgr.register(
-                name=md_file.stem,
-                command_type=CommandType.AGENT,
-                description=description,
-                prompt_text=enhanced_body,
-                parameters=agent_params,
-                source=_plugin_name_of_md(md_file),
-            )
-            logger.debug(
-                f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
-                f"{' (with tool restrictions)' if restriction_text else ''}"
-            )
-            registered.append(
-                {
-                    "name": md_file.stem,
-                    "description": description,
-                    "prompt_text": enhanced_body,
-                    # source 必须随行进缓存：否则重启走缓存路径后 agent 命令
-                    # source 恒空，unregister_source("plugin:x") 清不到它们
-                    "source": _plugin_name_of_md(md_file),
-                }
-            )
-
-        except Exception as e:
-            logger.error(f"[BuiltinCommands] Failed to load agent {md_file}: {e}")
+                logger.warning(f"[BuiltinCommands] 细项启停检查失败，默认注册 /{md_file.stem}: {e}")
+        meta = _register_one_agent_command(cmd_mgr, md_file)
+        if meta:
+            registered.append(meta)
 
     return registered
 

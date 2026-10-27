@@ -182,14 +182,18 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     _install_stdlib_logging_bridge()
 
     # 全量日志（兜底）
+    # enqueue=True：写盘转 loguru 内部后台线程，调用线程只格式化入队。
+    # 背景：主线程槽内高频 logger.info（工具结果/流式节拍）同步写 all.log，
+    # DEBUG 全量 + 10MB 轮转下每条都摊文件 IO，累积成可感卡顿。
     logger.add(
         log_dir / "all.log",
         rotation="10 MB",
         level="DEBUG",
         format=LOG_FORMAT,
+        enqueue=True,
     )
 
-    # 分系统日志
+    # 分系统日志（enqueue=True 同 all.log：主线程高频写不再同步落盘）
     for file_name, include, exclude in LOG_ROUTES:
         logger.add(
             log_dir / file_name,
@@ -198,6 +202,7 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
             level="DEBUG",
             format=LOG_FORMAT,
             filter=make_module_filter(include, exclude),
+            enqueue=True,
         )
 
     # 单独的内存诊断日志文件
@@ -208,4 +213,5 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
             level="DEBUG",
             format=LOG_FORMAT,
             filter=lambda r: "[MEM]" in r["message"],
+            enqueue=True,
         )

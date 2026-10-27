@@ -24,6 +24,35 @@ from app.tools.tool_name_mapper import ToolNameMapper
 _agent_file_cache: Dict[str, Dict[str, tuple]] = {}
 
 
+def _plugin_agent_item_enabled(plugin_name: str, agent_name: str) -> bool:
+    """D10 细项级停用检查：agents 组件下单个智能体被停用时跳过注册
+
+    与 runtime_component_loader._is_item_enabled 同源策略：pm 已初始化走 pm
+    （带进程内缓存），否则直接读 Settings（导入期可用）。检查失败一律默认
+    加载——宁可多加载，也不要静默吞掉插件功能。
+
+    背景：tools 的细项过滤在注册期由 _RegistryProxy 完成，而 agents 走本模块
+    直接解析注册，此前完全没消费禁用集——被停用的智能体仍注入 prompt，
+    设置卡 token 统计也因此只能按全量算。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            if not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_item_enabled(plugin_name, "agents", agent_name)
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        disabled = set(cfg.disabled_plugin_components.value or [])
+        return f"{plugin_name}:agents:{agent_name}" not in disabled
+    except Exception as e:
+        logger.warning(f"[AgentManager] 细项启停检查失败，默认加载 {plugin_name}:{agent_name}: {e}")
+        return True
+
+
 def _subagent_forbidden_tools() -> set:
     """子智能体调用时禁止使用的工具集合（registry 派生，不硬编码工具名）。
 
@@ -381,6 +410,10 @@ class AgentManager:
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
+                    # D9：agents 组件被整类停用的插件不加载其智能体
+                    # （运行时 toggle 靠卸载生效，这里兜住重启后的场景）
+                    if not pm.is_component_enabled(plugin.name, "agents"):
+                        continue
                     agent_dir = plugin.path / "agents"
                     if agent_dir.exists():
                         self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
@@ -427,6 +460,12 @@ class AgentManager:
             self._hidden_agents.pop(agent_name, None)
         self._plugin_agents[plugin_name] = set()
 
+        # D9：agents 组件整类停用时只卸载、不重载（移除逻辑必须在检查前，
+        # 否则「开启→关闭」循环后旧智能体残留注册）
+        if not pm.is_component_enabled(plugin_name, "agents"):
+            logger.info(f"[AgentManager] agents 组件已停用，跳过重载: {plugin_name}")
+            return 0
+
         # 2. 重载该插件的 hooks
         if self._hook_manager is not None:
             self._unload_plugin_hooks_for_plugin(plugin)
@@ -442,6 +481,45 @@ class AgentManager:
             f"count={count}, total_visible={len(self._agents)}"
         )
         return count
+
+    def set_agent_item_enabled(self, plugin_name: str, agent_name: str, enabled: bool) -> bool:
+        """细项开关的精准增删（D10 热生效，替代全量 reload）
+
+        全量 reload_plugin_agents 每次开关都要重登记整个插件的智能体并连带
+        hooks/命令全量重建（日志 40+ 行）；细项开关只影响一个条目，走精准路径。
+
+        Args:
+            plugin_name: 来源插件名
+            agent_name: 智能体名（md 文件 stem，与细项 key 一致）
+            enabled: True=启用（登记回内存），False=停用（从内存摘除）
+
+        Returns:
+            True 表示内存态已按请求更新；False 表示启用方向回退重载后仍未注册
+        """
+        if not enabled:
+            self._agents.pop(agent_name, None)
+            self._hidden_agents.pop(agent_name, None)
+            self._plugin_agents.get(plugin_name, set()).discard(agent_name)
+            logger.info(f"[AgentManager] Agent item disabled: {agent_name} (plugin={plugin_name})")
+            return True
+
+        # 启用方向：优先从文件级 mtime 缓存取解析好的对象登记回（零 parse）。
+        # 缓存与注册无关：组件停用期间 reload 只卸载注册、不清 _agent_file_cache，
+        # 所以「总关→单开」也能从这里拿到对象。
+        cached = _agent_file_cache.get(plugin_name, {})
+        agent = next((e[1] for e in cached.values() if e[1] is not None and e[1].name == agent_name), None)
+        if agent is not None:
+            target_dict = self._hidden_agents if agent.is_hidden() else self._agents
+            # 同名占用防御：对齐加载语义（先到先得），不覆盖其他来源的同名智能体
+            if agent_name not in target_dict:
+                target_dict[agent_name] = agent
+                self._plugin_agents.setdefault(plugin_name, set()).add(agent_name)
+            logger.info(f"[AgentManager] Agent item enabled: {agent_name} (plugin={plugin_name})")
+            return True
+
+        # 缓存未命中（新文件/从未来过）：回退全量 reload
+        self.reload_plugin_agents(plugin_name)
+        return agent_name in self._plugin_agents.get(plugin_name, set())
 
     def reload_plugin_hooks(self, plugin_name: str) -> bool:
         """只重载指定插件的 hooks，不涉及智能体（hooks-only 增量重载）
@@ -599,6 +677,11 @@ class AgentManager:
                             f"[AgentManager] Skip duplicate agent: {agent.name} (already loaded, source={md_file})"
                         )
                         continue
+                    # D10 细项级停用：设置卡里单独关掉的智能体不注册（不进
+                    # _plugin_agents / _agents，也就不注入 prompt、不计 token）
+                    if source_plugin and not _plugin_agent_item_enabled(source_plugin, agent.name):
+                        logger.debug(f"[AgentManager] Skip disabled agent item: {agent.name} (plugin={source_plugin})")
+                        continue
                     if source_plugin:
                         self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)
                     target_dict[agent.name] = agent
@@ -627,6 +710,10 @@ class AgentManager:
                         logger.debug(
                             f"[AgentManager] Skip duplicate agent: {agent.name} (already loaded, source={yaml_file})"
                         )
+                        continue
+                    # D10 细项级停用：同 md 分支
+                    if source_plugin and not _plugin_agent_item_enabled(source_plugin, agent.name):
+                        logger.debug(f"[AgentManager] Skip disabled agent item: {agent.name} (plugin={source_plugin})")
                         continue
                     if source_plugin:
                         self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)

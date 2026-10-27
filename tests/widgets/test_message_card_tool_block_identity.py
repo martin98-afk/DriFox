@@ -26,8 +26,9 @@
 2. `reorganizeContent`：新增 `_currentToolBlockKeys` 集合，过期清理分支
    同时认 data-block-key（有 id 用 id，无 id 用 bk）；排序 getPos 已有
    data-block-key 分支，无需改动。
-3. `_render_tool_streaming_block` 无 id 块补 data-order 兜底由调用方
-   （_inject_tool_blocks 未闭合分支）之外路径负责，此处只保证有序可比。
+3. `_render_tool_streaming_block` 无 id 块补 data-order 兜底由调用方之外路径负责，
+   此处只保证有序可比。（2026-10-25 后 _inject_tool_blocks 未闭合分支已不再产出
+   占位块，本文件保留 _render_tool_streaming_block 自身的身份契约测试。）
 
 测试分两层（与 tests 既有风格一致）：
   A. Python 产物断言：空 id 块必须带可区分的 data-block-key
@@ -98,14 +99,22 @@ class TestStreamingBlockHasIdentity:
             "有 id 的块不应额外合成 block_key（避免与完成态 markdown 块身份重复）"
         )
 
-    def test_unclosed_injection_produces_identifiable_blocks(self):
-        """_inject_tool_blocks 未闭合分支产出的占位块必须可被清理判据识别。"""
+    def test_unclosed_injection_produces_identifiable_block(self):
+        """_inject_tool_blocks 未闭合分支（无 suppress）产出占位块，身份可被清理判据识别。"""
         out = _inject_tool_blocks(_UNCLOSED_NO_ID, completed=False, compact=True)
         tags = _streaming_blocks(out)
-        assert len(tags) == 1, f"应产出 1 个占位块，实际 {len(tags)}"
+        assert len(tags) == 1, f"应产出 1 个占位块（运行指示），实际 {len(tags)}"
         tag = tags[0]
         has_identity = bool(_attr(tag, "data-tool-call-id")) or bool(_attr(tag, "data-block-key"))
         assert has_identity, "占位块必须有 id 或 block_key 之一，否则 reorganizeContent 清理判据失效"
+
+    def test_unclosed_injection_suppressed_by_fingerprint(self):
+        """suppress 命中（同名同参工具已完成）→ 占位不产出（防照抄重复）。"""
+        from app.widgets.card_render_core import _tool_fingerprint
+
+        suppress = frozenset({_tool_fingerprint("read_file", {"path": "app/main.py"})})
+        out = _inject_tool_blocks(_UNCLOSED_NO_ID, completed=False, compact=True, suppress=suppress)
+        assert len(_streaming_blocks(out)) == 0, f"指纹命中应丢弃占位: {out[:300]!r}"
 
     def test_completed_unclosed_block_has_block_key(self):
         """完成态空 id 块（render_tool_block）必须带 block_key 供清理。"""

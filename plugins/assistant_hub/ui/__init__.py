@@ -192,7 +192,8 @@ def _identity_avatar(ctx: dict) -> str:
         if not aid:
             return ""
         if str((ctx or {}).get("role") or "") == "user":
-            user_avatar = mgr.user_avatar_path(aid)
+            # 显示链：自设头像 → gitee 账户头像回落（只读本地缓存，不触发网络）
+            user_avatar = mgr.display_user_avatar_path(aid)
             return str(user_avatar) if user_avatar else ""
         path = mgr.assistant_avatar_path(aid)
         return str(path) if path else ""
@@ -440,25 +441,33 @@ def _register_welcome_tab() -> None:
 def _register_sync_provider() -> None:
     """注册 Gitee 同步内容：助手信息 + 记忆跨设备同步。
 
-    与 ConfigSyncService 的 register_sync_content_provider 对接：
+    经能力池 ``sync.register`` 能力注册（按 manifest 声明授权裁剪），
+    不再直接 import app.core.sync.config_sync：
     - 本地目录 = AssistantManager.root（<app_data>/assistant_hub）
     - 远端路径 = drifox/ext/assistant_hub.zip
     - 绑定 Gitee 后自动上传/下载；目录变更 watch 到自动上传。
     """
     try:
-        from app.core.sync.config_sync import register_sync_content_provider
+        from app.plugins.sdk import caps_for
 
         from assistant_hub_manager import AssistantManager
 
         mgr = AssistantManager.get_instance()
-        register_sync_content_provider(
+        register = caps_for("sync.register", surface="ui")
+        if register is None:
+            logger.warning("[assistant_hub] sync.register 能力不可用（未声明或未注册），跳过云同步注册")
+            return
+        ok = register(
             provider_id="assistant_hub",
             label="助手信息与记忆",
             local_dir=str(mgr.root),
             remote_path="drifox/ext/assistant_hub.zip",
             enabled=True,
         )
-        logger.info(f"[assistant_hub] 已注册 Gitee 同步内容: {mgr.root}")
+        if ok:
+            logger.info(f"[assistant_hub] 已注册 Gitee 同步内容: {mgr.root}")
+        else:
+            logger.warning("[assistant_hub] 注册 Gitee 同步内容失败（能力调用返回 False）")
     except Exception as e:
         logger.warning(f"[assistant_hub] 注册 Gitee 同步内容失败: {e}")
 
@@ -737,6 +746,21 @@ def register_ui(registry) -> None:
 
     # ── Gitee 同步内容：助手信息 + 记忆 ──
     _register_sync_provider()
+
+    # ── gitee 头像预热：后台拉缓存（默认用户头像回落用，经 net.avatar 能力）──
+    def _preheat_gitee_avatar() -> None:
+        try:
+            from app.plugins.sdk import caps_for
+
+            avatar = caps_for("net.avatar", surface="ui")
+            if avatar and callable(avatar.get("fetch")):
+                avatar["fetch"]()
+        except Exception as e:
+            logger.debug(f"[assistant_hub] gitee 头像预热失败: {e}")
+
+    import threading as _threading
+
+    _threading.Thread(target=_preheat_gitee_avatar, daemon=True, name="ah-gitee-avatar-preheat").start()
 
     # ── @ 卡片智能体区（mention provider，选中后会话级临时切换）──
     _register_mention_provider()

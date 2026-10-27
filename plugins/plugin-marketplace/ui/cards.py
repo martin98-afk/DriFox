@@ -186,23 +186,6 @@ def _ctx_font(ctx: dict) -> tuple:
 # ── 异步工作器 ──────────────────────────────────────────────
 
 
-def _card_caps():
-    """取当前活跃窗口的能力池（浮动卡自身没有 ctx，从宿主导出）。
-
-    市场卡的父链最终指向主窗口；_build_ui_capabilities 是窗口级全量池。
-    """
-    try:
-        from PyQt5.QtWidgets import QApplication
-
-        for w in QApplication.topLevelWidgets():
-            builder = getattr(w, "_build_ui_capabilities", None)
-            if callable(builder):
-                return builder()
-    except Exception:
-        pass
-    return None
-
-
 def _host_parent(widget: QWidget):
     """弹窗 / InfoBar 的合适 parent。
 
@@ -4708,16 +4691,24 @@ class MarketplaceCard(QWidget):
 
         installer.last_error 为 GitNotFoundError 文案时由 _on_install_done 触发。
         全程 try/except 兜底：引导失败（如窗口未就绪）不影响安装失败的正常提示。
+
+        能力走 ``caps_for``（按 manifest 声明裁剪 + 按插件绑定的窗口解析 host）：
+        早前从 ``QApplication.topLevelWidgets()`` 找 ``_build_ui_capabilities``，
+        Tab 模式下 MainWidget 已被 reparent 成 TabManagerWindow 的子 widget，
+        不在顶层列表里 → 永远取不到池、引导静默失效。
         """
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             UIPluginRegistry.get_instance().hide_floating_card_globally("plugin-marketplace")
-            # 走能力池的 input.write（不再自己找主窗口的 input_area）
-            caps = _card_caps()
-            if caps is None or "input.write" not in caps:
+            from app.plugins.sdk import caps_for
+
+            writer = caps_for("input.write")
+            if writer is None:
+                logger.warning("[Marketplace] 无 input.write 能力，git 缺失引导跳过")
                 return
-            caps["input.write"](self._build_git_install_prompt(plugin_name))
+            # 写入即回对话视图（input.write 内保证），用户能直接看到并发送
+            writer(self._build_git_install_prompt(plugin_name))
         except Exception as e:
             logger.warning(f"[Marketplace] git 缺失引导失败（忽略）: {e}")
 

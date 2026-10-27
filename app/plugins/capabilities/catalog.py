@@ -113,6 +113,14 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("mcp.call", _H, "MCP 工具调用", _TOOL, ["mcp"]),
         _spec("lsp.query", _M, "LSP 查询", _TOOL, ["lsp"]),
         _spec("net.upload", _H, "Gitee 上传（数据外发）", _TOOL, ["gitee"]),
+        _spec("net.download", _M, "从 Gitee 绑定仓库下载文件到本地路径", _BOTH),
+        _spec(
+            "net.avatar",
+            _L,
+            "Gitee 账户头像（fetch 确保已缓存并返回路径，须后台线程；cached_path 纯本地查，主线程安全）",
+            _UI,
+        ),
+
         # ── 界面 ──
         _spec("ui.notify", _L, "弹 InfoBar 通知", _UI, ["notify"]),
         _spec("ui.card.show", _L, "显示浮动卡", _UI),
@@ -142,11 +150,17 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("command.read", _L, "命令列表", _UI),
         _spec("command.reload", _M, "命令热重载", _UI),
         # ── 同步 ──
-        # 注：云端同步内容注册是**注册型**扩展点（加载期调一次），不是运行时能力，
-        # 因此不在此登记；插件走 app.core.sync.config_sync（守卫白名单内）。
+        _spec(
+            "sync.register",
+            _H,
+            "注册本地目录进入云同步监控（目录内容将打包备份到云端，数据外发）",
+            _UI,
+        ),
         # ── 团队 ──
         _spec("team.read", _L, "团队成员/角色/运行状态", _BOTH),
         _spec("team.send", _M, "向团队成员派发任务邮件（写对方邮箱）", _TOOL),
+        # ── 存储 ──
+        _spec("storage.data_dir", _L, "插件持久化数据根目录（插件自拼 plugin_data/<name>/）", _BOTH),
         # ── 基础（恒放行） ──
         _spec("plugin.log", _N, "带 plugin=<name> 前缀的 logger", _BOTH),
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),

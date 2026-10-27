@@ -12,8 +12,8 @@ import threading
 import time
 import webbrowser
 from loguru import logger
-from PyQt5.QtCore import Qt, QSize, pyqtSignal, QPoint, QRectF, QTimer
-from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
+from PyQt5.QtCore import Qt, QSize, pyqtSignal, QPoint, QPointF, QRectF, QTimer
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -49,10 +49,80 @@ _AVATAR_COLORS = [
     "#34495e",
 ]
 
+# QEvent 枚举值：PyQt5 未暴露这两个名字（QEvent.DevicePixelRatioChange 访问即
+# AttributeError），Qt5 的数值固定，直接写常量。用于 DPR 变化时使头像缩放缓存失效。
+_EV_DEVICE_PIXEL_RATIO_CHANGE = 154  # QEvent::DevicePixelRatioChange (Qt 5.9+)
+_EV_SCREEN_CHANGE_INTERNAL = 175  # QEvent::ScreenChangeInternal
+
 
 def _color_for_name(name: str) -> str:
     idx = int(hashlib.md5(name.encode()).hexdigest(), 16) % len(_AVATAR_COLORS)
     return _AVATAR_COLORS[idx]
+
+
+def _avatar_font(size: int) -> QFont:
+    """头像字母字体：系统 UI 无衬线 + 像素档随头像尺寸
+
+    不用 get_unified_font（楷体）：楷体字形斜倾且 em 框偏移，单字母在圆内
+    视觉上偏斜偏心（用户实测 D 不在圆心）。缩写头像（GitHub/Teams 风）惯例
+    用无衬线粗体。显式字体族链：QFont() 默认族在某些机器解析到缺拉丁字形的
+    字体（实测 M/m 渲染成方块），Segoe UI/YaHei 链保证字形齐全。
+    """
+    f = QFont()
+    f.setFamilies(["Segoe UI", "Microsoft YaHei UI", "Helvetica", "Arial"])
+    f.setPixelSize(max(9, int(size * 0.65)))
+    f.setBold(True)
+    return f
+
+
+def _avatar_palette(base: QColor) -> tuple:
+    """头像配色：降饱和基色 + 对角渐变深端色
+
+    12 色表本身高饱和，纯色填充在浅色卡片上很扎眼（用户反馈「难看」）；
+    统一压饱和 28%，深端 darker(122) 约深 18%，立体感交给渐变而非色相差。
+    """
+    c = QColor(base)
+    h, s, l, _a = c.getHslF()
+    if h >= 0:  # 灰阶（h=-1）无饱和度可降
+        c.setHslF(h, s * 0.72, l)
+    return c, QColor(c).darker(122)
+
+
+def _avatar_cache_path(owner: str):
+    """头像磁盘缓存路径：按 owner 命名，进程间复用（头像变化低频）"""
+    from app.utils.utils import get_app_data_dir
+
+    return get_app_data_dir() / "cache" / f"gitee_avatar_{owner}.png"
+
+
+def _fetch_avatar_bytes() -> bytes | None:
+    """后台线程用：token → avatar_url → 下载图片字节；失败返回 None（不抛）
+
+    全程 requests 同步调用（get_bound_info 内部可能触发 token 刷新，网络超时 15s），
+    绝不能进主线程。账户行与设置卡共用，避免两套拉取逻辑漂移。
+    """
+    try:
+        from app.gateway.auth import get_oauth_backend
+        from app.gateway.auth.gitee import fetch_user_avatar_url
+
+        info = get_oauth_backend("gitee").get_bound_info()
+        if not info:
+            return None
+        url, err = fetch_user_avatar_url(info["token"])
+        if not url:
+            logger.warning(f"[GiteeAvatar] 拉取头像 URL 失败: {err}")
+            return None
+        import requests as _requests
+
+        # 显式 UA：foruda CDN 对空 UA / 爬虫默认 UA 偶发返回降级图，带 UA 稳定给 512px
+        resp = _requests.get(url, timeout=10, headers={"User-Agent": "DriFox/1.0"})
+        if resp.status_code != 200 or not resp.content:
+            logger.warning(f"[GiteeAvatar] 下载头像失败: HTTP {resp.status_code}")
+            return None
+        return resp.content
+    except Exception as e:
+        logger.warning(f"[GiteeAvatar] 加载真实头像异常: {e}")
+        return None
 
 
 class _AvatarCircleWidget(QWidget):
@@ -71,8 +141,29 @@ class _AvatarCircleWidget(QWidget):
         self._bg_color = QColor(_color_for_name(text))
         self._size = 28
         self._invalid = False  # 绑定失效警示（红边 + 红点角标）
+        self._image: QPixmap | None = None  # 真实头像原图（未缩放）；None 回退字母渐变球
+        # 缩放结果缓存：键为 (逻辑边长, dpr)。高分屏下每帧重采样 512→58 物理像素
+        # 约 0.1ms，卡片刷新/悬浮动画期间会被反复触发，缓存掉。
+        self._scaled_cache: QPixmap | None = None
+        self._scaled_key: tuple | None = None
         self.setFixedSize(self._size, self._size)
         self.setCursor(Qt.PointingHandCursor)
+
+    def set_image(self, pixmap: "QPixmap | None"):
+        """设置真实头像图（圆形裁剪渲染）；None 清除回退字母渐变球"""
+        if self._image is None and pixmap is None:
+            return
+        self._image = pixmap
+        self._scaled_cache = None
+        self._scaled_key = None
+        self.update()
+
+    def image(self) -> "QPixmap | None":
+        """当前真实头像图（未拉到时 None，调用方自行回退字母球）"""
+        return self._image
+
+    def has_image(self) -> bool:
+        return self._image is not None and not self._image.isNull()
 
     def set_avatar(self, text: str):
         """更新头像文字和背景色"""
@@ -94,6 +185,46 @@ class _AvatarCircleWidget(QWidget):
         self.setFixedSize(size, size)
         self.update()
 
+    def _scaled_for(self, ellipse_rect: QRectF, device) -> QPixmap:
+        """按物理像素预缩放头像（带 dpr），结果按 (边长, dpr) 缓存
+
+        为什么缩到「物理」而不是「逻辑」：paintEvent 的 QPainter 已带 DPR 变换
+        （逻辑 1 单位 = 物理 dpr 像素）。若把 pixmap 缩到逻辑尺寸再交给它绘制，
+        等于 512 → 26 → 放大回 58 物理像素，先砍掉 ~82% 再插值，高分屏上头像发糊。
+        缩到物理尺寸并 setDevicePixelRatio(dpr)，绘制时是 1:1 映射，细节全留
+        （实测 2.25x 屏 Laplacian 方差 17 → 123）。dpr=1 时两者等价，无副作用。
+        """
+        dpr = float(device.devicePixelRatioF()) if device is not None else 1.0
+        if dpr <= 0:
+            dpr = 1.0
+        side = max(1, int(round(ellipse_rect.width())))
+        key = (side, round(dpr, 3))
+        if self._scaled_cache is not None and self._scaled_key == key:
+            return self._scaled_cache
+
+        src = QPixmap(self._image)
+        src.setDevicePixelRatio(1.0)  # 源按物理像素计，勿让它自带 dpr 参与换算
+        px = max(1, int(round(ellipse_rect.width() * dpr)))
+        out = src.scaled(px, px, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        out.setDevicePixelRatio(dpr)
+        self._scaled_cache = out
+        self._scaled_key = key
+        return out
+
+    def event(self, event):
+        """跨屏拖动 / 系统缩放变更 → DPR 变化，缩放缓存失效
+
+        不监听会使窗口移到不同缩放比的显示器后继续使用旧 dpr 的位图（发糊或过大）。
+
+        用数值而不用 QEvent.DevicePixelRatioChange：PyQt5 未暴露这两个枚举
+        （访问即 AttributeError，event() 里抛异常会刷爆日志），Qt5 的数值如下。
+        """
+        et = int(event.type())
+        if et in (_EV_DEVICE_PIXEL_RATIO_CHANGE, _EV_SCREEN_CHANGE_INTERNAL):
+            self._scaled_cache = None
+            self._scaled_key = None
+        return super().event(event)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -104,15 +235,70 @@ class _AvatarCircleWidget(QWidget):
 
         # 圆形裁剪区域（留 1px 内边距避免抗锯齿溢出）
         ellipse_rect = QRectF(1, 1, size - 2, size - 2)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self._bg_color)
-        painter.drawEllipse(ellipse_rect)
 
-        # 居中白色文字
-        painter.setPen(QColor("#ffffff"))
-        font = get_unified_font(int(size * 0.42), bold=True)
-        painter.setFont(font)
-        painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, self._text)
+        if self.has_image():
+            # 真实头像：cover 缩放 + 圆形裁剪，同字母球一致的描边与失效警示
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            clip = QPainterPath()
+            clip.addEllipse(ellipse_rect)
+            painter.setClipPath(clip)
+            dpr = painter.device().devicePixelRatioF() if painter.device() else 1.0
+            scaled = self._scaled_for(ellipse_rect, painter.device() or self)
+            # source rect 必须按物理像素给：pixmap 带 dpr 时 Qt 直读物理源矩形，
+            # 传逻辑坐标（26×26）会被当成 26 个物理像素，只取到原图左上角一小块
+            # 再放大铺满整圆 —— 即「只有左上角一点点」。
+            pw = max(1, int(round(ellipse_rect.width() * (dpr or 1.0))))
+            ph = max(1, int(round(ellipse_rect.height() * (dpr or 1.0))))
+            sx = (scaled.width() - pw) / 2.0
+            sy = (scaled.height() - ph) / 2.0
+            painter.drawPixmap(
+                QPointF(ellipse_rect.left(), ellipse_rect.top()),
+                scaled,
+                QRectF(sx, sy, pw, ph),
+            )
+            painter.setClipping(False)
+            painter.setPen(QPen(QColor(0, 0, 0, 30), 1.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(ellipse_rect.adjusted(0.5, 0.5, -0.5, -0.5))
+        else:
+            # 字母渐变球（无真实头像时的回退）
+            # 对角渐变填充（左上亮 → 右下深）：纯色圆在卡片上扁平扎眼，渐变给球面感
+            c1, c2 = _avatar_palette(self._bg_color)
+            grad = QLinearGradient(ellipse_rect.topLeft(), ellipse_rect.bottomRight())
+            grad.setColorAt(0.0, c1)
+            grad.setColorAt(1.0, c2)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(grad)
+            painter.drawEllipse(ellipse_rect)
+
+            # 顶部柔高光：上半圆内白→透明垂直渐变，clip 在圆内（球面受光的点睛笔）
+            painter.save()
+            circle = QPainterPath()
+            circle.addEllipse(ellipse_rect)
+            painter.setClipPath(circle)
+            hl = QLinearGradient(0, ellipse_rect.top(), 0, ellipse_rect.center().y())
+            hl.setColorAt(0.0, QColor(255, 255, 255, 72))
+            hl.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.setBrush(hl)
+            painter.drawRect(ellipse_rect)
+            painter.restore()
+
+            # 1px 半透明深色内描边：浅色卡上让头像有清晰边界（无描边时亮色圆糊进底色）
+            painter.setPen(QPen(QColor(0, 0, 0, 30), 1.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(ellipse_rect.adjusted(0.5, 0.5, -0.5, -0.5))
+
+            # 居中白色文字（96% 不透明度）：按字形 ink rect 居中——AlignCenter 按字体
+            # em 框对齐，大写字母会偏高偏心；boundingRect 给实际笔画范围，视觉正中
+            painter.setPen(QColor(255, 255, 255, 245))
+            font = _avatar_font(size)
+            painter.setFont(font)
+            br = QFontMetrics(font).boundingRect(self._text)
+            baseline = QPointF(
+                (size - br.width()) / 2.0 - br.x(),
+                (size - br.height()) / 2.0 - br.y(),
+            )
+            painter.drawText(baseline, self._text)
 
         # 绑定失效警示：红色圆环边框 + 右上角红点角标
         if self._invalid:
@@ -257,6 +443,8 @@ class GiteeAccountRow(QFrame):
     """Tab 模式底部的紧凑 Gitee 账户快捷栏。"""
 
     oauthResult = pyqtSignal(bool, str)
+    # 真实头像下载完成（图片字节，后台线程发、主线程槽收→QPixmap 只能在主线程构造）
+    _avatarFetched = pyqtSignal(bytes)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -271,10 +459,14 @@ class GiteeAccountRow(QFrame):
         self._bound_repo = ""
         self._compact = False  # 是否紧凑模式（收起时垂直堆叠）
         self._invalid = False  # 绑定是否已失效（token 失效，需重新绑定）
+        self._avatar_only = False  # 仅头像形态（侧边栏折叠态）
 
         from app.core.sync.config_sync import ConfigSyncService
 
         self._sync_svc = ConfigSyncService.get_instance()
+        self._avatar_fetching = False  # 头像下载防重入（主线程读写，无竞争）
+        self._avatar_owner_loaded = ""  # 已成功拉到真实头像的 owner（进程内去重）
+        self._avatarFetched.connect(self._on_avatar_fetched)
         self._setup_ui()
         self._connect_config_signals()
         self._connect_sync_signals()
@@ -286,7 +478,7 @@ class GiteeAccountRow(QFrame):
         layout.setContentsMargins(8, 6, 4, 6)
         layout.setSpacing(7)
 
-        avatar_size = scale_font_size(22)
+        avatar_size = self._desired_avatar_size()
         self._avatar = _AvatarCircleWidget("?", self)
         self._avatar.set_size(avatar_size)
         layout.addWidget(self._avatar)
@@ -409,6 +601,7 @@ class GiteeAccountRow(QFrame):
             # 绑定已失效：红色警示，明显区别于「从未绑定」（失效信号优先于 cfg 绑定态）
             self._bound_owner = ""
             self._bound_repo = ""
+            self._avatar.set_image(None)
             self._avatar.set_avatar(owner or "?")
             self._avatar.set_invalid(True)
             self._avatar.setToolTip("绑定已失效，点击重新绑定")
@@ -422,9 +615,11 @@ class GiteeAccountRow(QFrame):
             self._avatar.setToolTip(f"{owner}/{repo} · 点击打开仓库")
             self._name_label.setText(owner)
             self._name_label.setToolTip(f"{owner}/{repo} · 点击管理")
+            self._load_avatar_async(owner)
         else:
             self._bound_owner = ""
             self._bound_repo = ""
+            self._avatar.set_image(None)
             self._avatar.set_avatar("?")
             self._avatar.set_invalid(False)
             self._avatar.setToolTip("未绑定")
@@ -437,6 +632,48 @@ class GiteeAccountRow(QFrame):
         # 必须 shiboken isValid 硬判：wrapper 已析构时读 Python 侧属性不抛异常
         if self._popup is not None and sip.isValid(self._popup):
             self._popup._refresh_account_state()
+
+    # ── 真实头像拉取（绑定态：API 拿 avatar_url → 下载 → 圆形渲染） ──
+
+    def _load_avatar_async(self, owner: str):
+        """异步加载真实头像：缓存命中先即时显示，再后台拉新（不阻塞 UI）"""
+        if self._avatar_fetching or (owner == self._avatar_owner_loaded and self._avatar.has_image()):
+            return
+        cache = _avatar_cache_path(owner)
+        if cache.exists():
+            pm = QPixmap(str(cache))
+            if not pm.isNull():
+                self._avatar.set_image(pm)
+                self._avatar_owner_loaded = owner
+        worker = threading.Thread(target=self._fetch_avatar_worker, daemon=True)
+        self._avatar_fetching = True
+        worker.start()
+
+    def _fetch_avatar_worker(self):
+        """后台线程：拉取图片字节 → 信号回主线程（QPixmap 只能在主线程构造）"""
+        try:
+            data = _fetch_avatar_bytes()
+            if data:
+                self._avatarFetched.emit(data)
+        finally:
+            self._avatar_fetching = False
+
+    def _on_avatar_fetched(self, data: bytes):
+        """主线程槽：字节 → QPixmap → 圆形渲染 + 写磁盘缓存"""
+        pm = QPixmap()
+        if not pm.loadFromData(data):
+            return
+        self._avatar.set_image(pm)
+        self._avatar_owner_loaded = self._bound_owner
+        # 弹窗大头像同步（可能未创建）
+        if self._popup is not None and sip.isValid(self._popup):
+            self._popup._popup_avatar.set_image(pm)
+        try:
+            cache = _avatar_cache_path(self._bound_owner)
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            pm.save(str(cache), "PNG")
+        except Exception as e:
+            logger.warning(f"[GiteeAccountRow] 头像缓存写盘失败: {e}")
 
     def _apply_style(self):
         self.setStyleSheet("""
@@ -603,12 +840,26 @@ class GiteeAccountRow(QFrame):
 
     def set_show_only_avatar(self, avatar_only: bool):
         """收起侧边栏时仅显示头像，隐藏文字和图标按钮"""
+        self._avatar_only = avatar_only
         self._settings_btn.setVisible(not avatar_only)
         self._name_label.setVisible(not avatar_only)
+        # 仅头像形态左右 margin 对称（5px）：46px 窄条下头像放大后不贴边、水平居中
+        self.layout().setContentsMargins(5, 6, 5, 6) if avatar_only else self.layout().setContentsMargins(
+            8, 6, 4, 6
+        )
+        self._avatar.set_size(self._desired_avatar_size())
+
+    def _desired_avatar_size(self) -> int:
+        """头像尺寸：展开态跟随字号档放大；折叠窄条 clamp 到 36（46 - 对称 margin 10）
+
+        真实头像可读性高，展开基准从 26 提到 32（用户要求）。
+        """
+        base = scale_font_size(32)
+        return min(base, 36) if self._avatar_only else base
 
     def refresh_style(self):
         """主题或字号变化后重建头像、尺寸和样式。"""
-        self._avatar.set_size(scale_font_size(22))
+        self._avatar.set_size(self._desired_avatar_size())
         btn_size = scale_font_size(20)
         self._settings_btn.setFixedSize(btn_size, btn_size)
         self._settings_btn.setIconSize(QSize(scale_font_size(13), scale_font_size(13)))
@@ -809,7 +1060,7 @@ class _GiteeMorePopup(QWidget):
         info_layout.setSpacing(10)
 
         self._popup_avatar = _AvatarCircleWidget("?", self._info_widget)
-        self._popup_avatar.set_size(scale_font_size(34))
+        self._popup_avatar.set_size(scale_font_size(44))
         # 鼠标事件穿透，由 _info_widget 统一处理点击
         self._popup_avatar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         info_layout.addWidget(self._popup_avatar)
@@ -946,7 +1197,7 @@ class _GiteeMorePopup(QWidget):
         is_bound = bool(self._cfg.gitee_bound.value)
         owner = str(self._cfg.gitee_user_owner.value or "")
         repo = str(self._cfg.gitee_user_repo.value or "")
-        avatar_size = scale_font_size(34)
+        avatar_size = scale_font_size(44)
 
         if self._account_row is not None and getattr(self._account_row, "_binding", False):
             # 绑定等待中：主操作变「中止授权」，用户可随时退出而不必等超时
@@ -969,6 +1220,10 @@ class _GiteeMorePopup(QWidget):
         if is_bound and owner:
             self._popup_avatar.set_avatar(owner)
             self._popup_avatar.set_size(avatar_size)
+            # 真实头像同步：popup 点击时才创建，多数情况下行头像已加载完
+            # （缓存命中即时有图 / 下载晚到由 account_row._on_avatar_fetched 补推）
+            row_avatar = self._account_row._avatar.image() if self._account_row else None
+            self._popup_avatar.set_image(row_avatar if (row_avatar and not row_avatar.isNull()) else None)
             hint = f"点击打开 {owner}/{repo}"
             self._info_widget.setToolTip(hint)
             self._popup_name.setText(owner)
@@ -988,6 +1243,7 @@ class _GiteeMorePopup(QWidget):
                 }}
             """)
         else:
+            self._popup_avatar.set_image(None)
             self._popup_avatar.set_avatar("?")
             self._popup_avatar.set_size(avatar_size)
             self._popup_avatar.setToolTip("未绑定")
@@ -1178,6 +1434,8 @@ class GiteeCard(SettingCard):
     """Gitee 账号绑定 — SettingCard 子类，布局与其他设置卡片一致"""
 
     oauthResult = pyqtSignal(bool, str)
+    # 真实头像下载完成（后台线程发、主线程槽收→QPixmap 只能在主线程构造）
+    _avatarFetched = pyqtSignal(bytes)
 
     def __init__(self, parent=None):
         super().__init__(
@@ -1192,6 +1450,9 @@ class GiteeCard(SettingCard):
         self._bind_cancel: threading.Event | None = None
         self._bound_owner = ""
         self._bound_repo = ""
+        self._avatar_fetching = False  # 头像下载防重入（主线程读写，无竞争）
+        self._avatar_owner_loaded = ""  # 已成功拉到真实头像的 owner（进程内去重）
+        self._avatarFetched.connect(self._on_avatar_fetched)
         self.oauthResult.connect(self._on_oauth_result)
 
         self._setup_right()
@@ -1287,6 +1548,7 @@ class GiteeCard(SettingCard):
             self._avatar.set_avatar(owner)
             self._avatar.set_size(avatar_size)
             self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
+            self._load_avatar_async(owner)
             self._bind_btn.setText("解绑")
             self._bind_btn.setCursor(Qt.PointingHandCursor)
             self._bind_btn.setStyleSheet(
@@ -1302,6 +1564,7 @@ class GiteeCard(SettingCard):
         else:
             self._bound_owner = ""
             self._bound_repo = ""
+            self._avatar.set_image(None)
             self._avatar.set_avatar("?")
             self._avatar.set_size(avatar_size)
             self._avatar.setToolTip("未绑定")
@@ -1318,6 +1581,46 @@ class GiteeCard(SettingCard):
                 f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
             )
             self._sync_dot.hide()
+
+    # ── 真实头像拉取（与 GiteeAccountRow 共用模块级 helpers） ──
+
+    def _load_avatar_async(self, owner: str):
+        """缓存命中先即时显示，再后台拉新（不阻塞 UI，与账户行语义一致）"""
+        if self._avatar_fetching or (owner == self._avatar_owner_loaded and self._avatar.has_image()):
+            return
+        cache = _avatar_cache_path(owner)
+        if cache.exists():
+            pm = QPixmap(str(cache))
+            if not pm.isNull():
+                self._avatar.set_image(pm)
+                self._avatar_owner_loaded = owner
+        self._avatar_fetching = True
+        threading.Thread(target=self._fetch_avatar_worker, daemon=True).start()
+
+    def _fetch_avatar_worker(self):
+        """后台线程：拉取图片字节 → 信号回主线程（QPixmap 只能在主线程构造）"""
+        try:
+            data = _fetch_avatar_bytes()
+            if data:
+                self._avatarFetched.emit(data)
+        finally:
+            self._avatar_fetching = False
+
+    def _on_avatar_fetched(self, data: bytes):
+        """主线程槽：字节 → QPixmap → 头像渲染 + 写磁盘缓存"""
+        pm = QPixmap()
+        if not pm.loadFromData(data):
+            return
+        if not self._bound_owner:
+            return
+        self._avatar.set_image(pm)
+        self._avatar_owner_loaded = self._bound_owner
+        try:
+            cache = _avatar_cache_path(self._bound_owner)
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            pm.save(str(cache), "PNG")
+        except Exception as e:
+            logger.warning(f"[GiteeCard] 头像缓存写盘失败: {e}")
 
     def _auto_enable_sync(self):
         """如果已绑定且同步未启动，自动 enable（重启恢复场景）"""

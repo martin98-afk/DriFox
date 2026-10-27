@@ -1862,7 +1862,20 @@ def _registered_tag_names_safe() -> List[str]:
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        return list(UIPluginRegistry.get_instance().get_registered_tag_names())
+        reg = UIPluginRegistry.get_instance()
+        # [PERF] 结果缓存：本函数在流式**每一批**被调
+        # （_has_unclosed_registered_tag），每次执行 import 协议（实测 90µs）
+        # + get_instance()（20µs），390KB 回复累计白烧数秒。
+        # 失效判据用「注册表实例 id + 标签键元组」：标签表只在插件加载/卸载时
+        # 变，键元组比较是 O(标签数)（通常 0~3 个），远低于重建成本。
+        global _REGISTERED_TAG_CACHE
+        keys = tuple(reg._tag_renderers.keys()) if hasattr(reg, "_tag_renderers") else ()
+        sig = (id(reg), keys)
+        if _REGISTERED_TAG_CACHE is not None and _REGISTERED_TAG_CACHE[0] == sig:
+            return _REGISTERED_TAG_CACHE[1]
+        names = list(keys)
+        _REGISTERED_TAG_CACHE = (sig, names)
+        return names
     except Exception:
         return []
 
@@ -1877,8 +1890,13 @@ def _has_unclosed_registered_tag(text: str) -> bool:
         return False
     # chunk 边界可能把 <mood> 切成半截（尾部 "<mo"）：rfind 找不到 open 会误判
     # 已闭合 → 放行生肉。宽松拦（误拦代价只是该 chunk 延迟一次渲染）。
-    if _PARTIAL_TAG_TAIL_RE.search(text):
+    # [PERF] 尾锚定正则只搜尾部窗口（见 _PARTIAL_TAG_TAIL_WINDOW 注释）。
+    if _PARTIAL_TAG_TAIL_RE.search(text[-_PARTIAL_TAG_TAIL_WINDOW:]):
         return True
+    # [PERF] 无 '<' 即无任何协议标签，早退（流式纯文本绝大多数批次走这里）：
+    # 下面的 rfind 对每个标签各扫 O(n)，无标签时纯属浪费。
+    if "<" not in text:
+        return False
     for tag in _registered_tag_names_safe():
         last_open = text.rfind(f"<{tag}>")
         if last_open == -1:
@@ -1896,9 +1914,18 @@ def _has_unclosed_registered_tag(text: str) -> bool:
 _CHART_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*(\w+)")
 _CHART_FENCE_LANGS = frozenset({"echarts", "mermaid", "html", "widget", "svg"})
 # chunk 边界切开标记的半截尾巴：行尾 1-3 个反引号/波浪（可能正在写 fence 开标记）
+# ⚠️ 本正则**禁止**直接对全文 search：`(?:^|\n)...$` 这类前缀分支 + 尾锚定，
+# expression model 无法跳到串尾，只能从头逐位尝试，实测 390KB 文本 7.4ms/次；
+# 而 _has_unclosed_chart_fence 在流式**每一批**都调它（22222 批 × 量级递增
+# ≈ 数十秒主线程）。匹配只能命中串尾（$ 锚定），故只对尾部窗口匹配即严格等价。
+# 窗口长度推导：换行(1) + 缩进(3) + 标记(3) + 标识(15) = 22，取 32 留余量。
 _PARTIAL_FENCE_TAIL_RE = re.compile(r"(?:^|\n)[ \t]{0,3}[`~]{1,3}[a-zA-Z0-9]{0,15}$")
-# chunk 边界切开标签的半截尾巴：行尾 <xx（可能正在写 <mood> 等协议标签）
+_PARTIAL_FENCE_TAIL_WINDOW = 32
+# chunk 边界切开尾巴：行尾 <xx（可能正在写 <mood> 等协议标签）
+# 同 _PARTIAL_FENCE_TAIL_RE：尾锚定正则全量 search 是 O(n) 逐位尝试，只搜尾部窗口。
+# 窗口推导：最长匹配 `</` + 1 字母 + 11 字符 = 14，取 24 留余量。
 _PARTIAL_TAG_TAIL_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]{0,11}$")
+_PARTIAL_TAG_TAIL_WINDOW = 24
 
 
 def _is_render_fence_lang(lang: str) -> bool:
@@ -2095,14 +2122,24 @@ def _has_unclosed_chart_fence(text: str) -> bool:
     """
     # chunk 边界可能把 fence 开标记切成半截（尾部 "```e" 或 "``"）：状态机
     # 匹配不到完整 lang 会误判闭合 → 放行生肉。宽松拦，代价同上。
-    if _PARTIAL_FENCE_TAIL_RE.search(text):
+    # [PERF] 只搜尾部窗口（见 _PARTIAL_FENCE_TAIL_WINDOW 注释）：该正则尾锚定，
+    # 命中位置必在串尾，全量 search 与窗口 search 语义严格等价，但前者是 O(n)
+    # 逐位回溯（390KB 7.4ms/次），后者 O(1)。
+    if _PARTIAL_FENCE_TAIL_RE.search(text[-_PARTIAL_FENCE_TAIL_WINDOW:]):
         return True
     if "```" not in text and "~~~" not in text:
         return False
     inside = False
     chart = False
     marker = ""
-    for line in text.split("\n"):
+    # [PERF] 状态机只关心行首标记，用 find 跳跃扫描而非 split("\n") 全量切分
+    # （后者在流式每批都执行，按文本长度线性分配）+ 逐行 strip 拷贝。
+    pos = 0
+    n = len(text)
+    while pos <= n:
+        nl = text.find("\n", pos)
+        line_end = n if nl == -1 else nl
+        line = text[pos:line_end]
         stripped = line.strip()
         if not inside:
             m = _CHART_FENCE_OPEN_RE.match(stripped)
@@ -2117,6 +2154,9 @@ def _has_unclosed_chart_fence(text: str) -> bool:
         elif marker and stripped.startswith(marker):
             inside = False
             chart = False
+        if nl == -1:
+            break
+        pos = nl + 1
     return inside and chart
 
 
@@ -2190,6 +2230,46 @@ def _last_para_break_outside_fence(md: str) -> int:
             continue
         i += 1
     return last
+
+
+def _last_closed_proto_tag_end(md: str) -> int:
+    """最后一个**已闭合**协议标签（``</tool>`` / ``</think>``）结束之后的偏移（无 → -1）。
+
+    用途：差量基线推进点下限。协议块内部空行（工具 result/args 文本几乎必含）
+    不得成为推进点，否则 tail 从块中间开始、永带闭合标签残片。
+    """
+    best = -1
+    for _tag in ("</tool>", "</think>"):
+        _p = md.rfind(_tag)
+        if _p != -1:
+            _e = _p + len(_tag)
+            if _e > best:
+                best = _e
+    return best
+
+
+def _compute_stream_stable_len(md: str) -> int:
+    """全量渲染落地后的差量基线推进点（`_stable_md_len` 的新值）。
+
+    = max(最后段落边界(代码 fence 外), 最后闭合协议标签结束)。
+
+    🐛 为什么必须钳协议块边界（2026-10-25「长回复流式反复闪烁 + 更新失效」）：
+    旧实现只取 `_last_para_break_outside_fence`，工具 result 内部空行被当段落
+    边界 → stable 切进 ``<tool>`` 块中间 → tail = md[stable:] 永带 ``</tool>``
+    残片 → `_perform_update` 降载分支（tail 含协议标签让位全量）每次都让位 →
+    每次工具完成 ~300ms 内连发第二次 save/restore 整页替换（闪烁 + 打字机
+    中断，观感即「流式更新失效 + 反复闪」）。钳到闭合标签后 tail 起点必在
+    完整协议块之外，每工具完成仅保留设计内的 1 次全量。
+
+    含未闭合协议块时返回 0（语义 = 不推进；调用点原守卫
+    `_has_unclosed_think_or_tool` 的兜底等价，收敛到纯函数内聚）。
+    """
+    if _has_unclosed_think_or_tool(md):
+        return 0
+    _last_break = _last_para_break_outside_fence(md)
+    _candidate = _last_break + 2 if _last_break != -1 else 0
+    _proto_end = _last_closed_proto_tag_end(md)
+    return _proto_end if _proto_end > _candidate else _candidate
 
 
 # ── 方案 D：data-order 统一排序 ──────────────────────────────────
@@ -2828,8 +2908,45 @@ def _extract_by_regex_fallback(content: str) -> dict:
     return args
 
 
-def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = False, heavy_caps=None) -> str:
-    """注入工具块HTML，类似think块"""
+def _tool_fingerprint(name: str, args: dict) -> str:
+    """工具调用指纹：sha1(name + 规范化 args)。用于协议段与真实已完成工具对账去重。"""
+    try:
+        # orjson：option=OPT_SORT_KEYS，返回 bytes（非标准库 json 签名）
+        payload = str(name or "") + "\x00" + json.dumps(
+            args or {}, default=str, option=json.OPT_SORT_KEYS
+        ).decode("utf-8")
+    except Exception:
+        return ""
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _protocol_block_fingerprint(content: str) -> str:
+    """协议残段指纹：从容错解析 name/args 后算指纹；解析不出 name 返回空串。"""
+    _name_m = _TOOL_NAME_PATTERN.search(content)
+    if not _name_m:
+        return ""
+    name = _name_m.group(1).strip()
+    args = {}
+    _am = re.search(r"^args:\s*(\{.*)$", content, re.MULTILINE)
+    if _am:
+        args = _extract_args_by_regex(_am.group(1))
+    return _tool_fingerprint(name, args)
+
+
+def _inject_tool_blocks(
+    md_text: str,
+    completed: bool = True,
+    compact: bool = False,
+    heavy_caps=None,
+    suppress: frozenset = None,
+) -> str:
+    """注入工具块HTML，类似think块
+
+    Args:
+        suppress: 已完成工具指纹集合（_tool_fingerprint 产物）。未闭合协议段
+            指纹命中时静默丢弃（模型对已完成调用的照抄，渲染出来只会与真实
+            完成块重复）。仅流式渲染路径传入。
+    """
     if not md_text:
         return md_text
 
@@ -2847,42 +2964,48 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
         if end_idx != -1:
             content = md_text[start_idx + len("<tool>") : end_idx]
-            parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
+            # 🐛 协议段防重复（2026-10-25）：无 tool_call_id 字段的闭合块 = 模型
+            # 正文照抄的协议文本（真实工具结果由 worker 写入 markdown，必带 id）。
+            # 渲染成卡会与真实完成块内容重复，且空 id 使去重/清理判据失效、
+            # 每次全量渲染累积一张（probe4 实证终态 3 块）。一律丢弃。
+            if _TOOL_ID_PATTERN.search(content):
+                parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
             i = end_idx + len("</tool>")
         else:
             # 🐛 修复（工具源码泄漏）：未闭合块此前原样保留 → md.convert 把
             # <tool> 当未知 HTML 元素（标签本身不可见），内部 name:/args:/result:
             # 字段文本裸露为正文（截图级症状：name: bash args: {...} result: ...）。
-            # 未闭合来源：模型在正文中输出协议格式文本（讨论工具调用机制时
-            # 模仿上下文格式，流式中 </tool> 未到达）、max_tokens 截断、停止生成。
-            # 按到达程度渲染：流式中间态 → 运行中占位框（与 JS 注入运行框视觉
-            # 一致，闭合后自然过渡为工具卡）；非流式终态（截断/停止）→ 容错
-            # 解析已有字段渲染完成态卡。fence 内示例由 _extract_fenced_code
-            # 保护，不进入本分支。
-            # 🐛 防御（审查 I-1，吞正文）：容错解析范围截断到下一个 <tool>
-            # 开标签（嵌套/后续块的字段不得混入本块）；剩余段递归走同一
-            # 渲染逻辑（每轮至少消费一个开标签，无死循环风险）。
+            # 未闭合来源：模型在正文中输出协议格式文本（glm 等中转把工具调用以
+            # 协议文本嵌在 content 里流式返回）、max_tokens 截断、停止生成。
+            # 🐛 流式中间态渲染「接收中...」占位框：worker 在中转解析下发
+            # tool_calls 之前不发任何工具信号，此占位是「模型正在调用工具」的
+            # 唯一运行指示（2026-10-25 用户实测：删除后运行期完全无框）。
+            # 残段指纹命中 suppress（同名同参工具已完成）→ 是模型对已完成调用
+            # 的照抄，静默丢弃防与真实完成块重复。终态一律丢弃：流式结束不留
+            # 残段卡（旧设计的终态容错卡正是「完成框残留」的来源）。
+            # fence 内示例由 _extract_fenced_code 保护，不进入本分支。
+            # 🐛 防御（审查 I-1，吞正文）：范围截断到下一个 <tool> 开标签（嵌套/
+            # 后续块不得混入）；剩余段递归走同一逻辑（每轮至少消费一个开标签，
+            # 无死循环风险）。
             content = md_text[start_idx + len("<tool>") :]
             _next_open = content.find("<tool>")
             _rest = ""
             if _next_open != -1:
                 _rest = content[_next_open:]
-                content = content[:_next_open]
-            if completed:
-                if content.strip():
-                    parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
-            elif content.strip():
-                _name_m = _TOOL_NAME_PATTERN.search(content)
-                parts.append(
-                    _render_tool_streaming_block(
-                        tool_call_id="",
-                        tool_name=_name_m.group(1).strip() if _name_m else "",
-                        preview="接收中...",
-                        completed=False,
+            if not completed and content.strip():
+                _fp = _protocol_block_fingerprint(content)
+                if not (suppress and _fp and _fp in suppress):
+                    _name_m = _TOOL_NAME_PATTERN.search(content)
+                    parts.append(
+                        _render_tool_streaming_block(
+                            tool_call_id="",
+                            tool_name=_name_m.group(1).strip() if _name_m else "",
+                            preview="接收中...",
+                            completed=False,
+                        )
                     )
-                )
             if _rest:
-                parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps))
+                parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps, suppress))
             break
     return "".join(parts)
 
@@ -3259,7 +3382,9 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, False, compact=compact)
+    processed_md = _inject_tool_blocks(
+        processed_md, False, compact=compact, suppress=snapshot.get("tool_fingerprints")
+    )
     processed_md = _inject_hook_blocks(processed_md, False)
     processed_md = _inject_tag_cards(processed_md, False, compact=compact)
     processed_md = _restore_fenced_code(processed_md, _fences)
@@ -3293,6 +3418,25 @@ def _dispatch_render_done(seq: int, fut, wself) -> None:
         return  # viewer 已被回收，丢弃结果
     try:
         viewer.renderDone.emit(seq, html)
+    except RuntimeError:
+        pass  # viewer C++ 对象已销毁（sip deleted），丢弃
+
+
+def _dispatch_final_render_done(seq: int, fut, wself, md_len: int = 0) -> None:
+    """[PERF-final-async] 终渲染通道的 Future 完成回调（worker 线程执行）。
+
+    与 _dispatch_render_done 同构，额外透传提交时的 md 长度供落地打点
+    （cleanup 会清 _markdown_text，回调时读不到原长度）。
+    """
+    try:
+        html = fut.result()
+    except Exception as _e:
+        html = None
+    viewer = wself()
+    if viewer is None:
+        return  # viewer 已被回收，丢弃结果
+    try:
+        viewer.renderDone.emit(seq, html)  # seq<0，_on_render_done_signal 分流终渲染
     except RuntimeError:
         pass  # viewer C++ 对象已销毁（sip deleted），丢弃
 
@@ -3617,6 +3761,10 @@ def _tail_before_unclosed_block(md: str) -> str:
 # 观感是"正在蹦字的片段先换行出现在最下面，全量渲染时又跳回正文合并"。
 # 因此闭合段**只**按 \n\n 硬边界切，段落完整性优先于 stable 推进。
 _SENTENCE_END_CHARS = frozenset("。！？；…!?;")
+
+# [PERF] _registered_tag_names_safe 的模块级缓存：(signature, names)。
+# 签名 = (注册表实例 id, 标签键元组)；只在标签表变化时重建（见该函数注释）。
+_REGISTERED_TAG_CACHE: Optional[tuple] = None
 
 
 def _extract_closed_segments(md: str):
@@ -4073,6 +4221,7 @@ _TYPEWRITER_JS = """
                     last: 0,          // 上一帧时间戳
                     enabled: true,    // 总开关（灰度/降级用）
                     CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
+                    NORMAL_FRAME_MS: 33,  // 正常帧间隔基准（30fps）：不超过此值则 clamp 行为不变（打字机动效保留）
                     BURST_LEN: 400,   // 超过该积压视为突发，加速揭示
                     GATE_MIN_BUF: 3,  // DOM 替换闸门：缓冲不高于此值即执行（跳变量上限）
                     GATE_STILL_MS: 60,      // 静默窗：距最近一次 push 超此毫秒即认为"间隙"，可执行替换
@@ -4124,8 +4273,21 @@ _TYPEWRITER_JS = """
                     st.raf = 0;
                     if (!st.buf) return;
                     var now = (typeof ts === 'number' && ts > 0) ? ts : performance.now();
-                    var dt = Math.max(1, Math.min(200, now - st.last));
+                    var _raw = Math.max(1, now - st.last);
                     st.last = now;
+                    // 🐛 掉帧自适应追赶（2026-10-26）：原逻辑把 dt 硬 clamp 到 200ms，
+                    // 主线程繁忙（每轮 42 个 MCP schema 拼装 + hook + 工具执行 + 哨兵
+                    // 全量补渲）导致帧间隔拉到 300ms+ 时，每帧揭示量仍按 200ms 算 ——
+                    // 指数追赶速度低于积压增长速度，形成「主线程忙 → rAF 饿 → dom 停滞
+                    // → 哨兵补渲 → 主线程更忙」的自我强化循环（真机实证：08:58~08:59
+                    // 每分钟稳定 4~5 次 content-sentinel，dom 每 2s 仅涨 2~6 字符而
+                    // md 同期涨 600~1900）。
+                    // 改按实际经过时间补偿：帧间隔 <= NORMAL_FRAME_MS 时 dt 取原 clamp
+                    // 值（打字机动效不变）；超出部分说明欠账，按真实时长计入，每帧一次
+                    // 补足欠账量。积压仍会在 CATCHUP_MS 内排空，用户观感是"追平"而非
+                    // 瞬时全显。2000 字符的 _twFlush 上限保留作最终保险。
+                    var _over = Math.max(0, _raw - st.NORMAL_FRAME_MS);
+                    var dt = Math.max(1, Math.min(200, _raw)) + _over;
                     // 揭示时间常数：闸门挂起中（等替换）时缩短，尽快把积压放完
                     // ——跳变量 = 执行替换时的剩余缓冲，加速直接压低它
                     var _tau = st.CATCHUP_MS;

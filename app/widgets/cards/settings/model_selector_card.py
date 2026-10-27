@@ -82,20 +82,8 @@ _MAX_ITEMS = 10  # 最多显示 item 数
 # 成本金额：完整显示三项价格（不可裁剪）。等宽字体 + 名称等宽对齐实现起点一致，
 # 金额自身不设窄固定宽（Minimum 自适应），保证 in/out/cache · $/M 全部可见。
 _COST_MONO_FAMILY = "'Consolas', 'Segoe UI Mono', 'monospace'"
-# 滚动区域高度计算
-_MIN_SCROLL_HEIGHT = _MIN_ITEMS * _ITEM_HEIGHT  # 最小高度：约 102px
-_MAX_SCROLL_HEIGHT = _MAX_ITEMS * _ITEM_HEIGHT + _HEADER_HEIGHT  # 最大高度：约 274px
 
 
-def _calculate_scroll_height(total_items: int) -> int:
-    """根据 item 总数计算滚动区域高度"""
-    if total_items <= _MIN_ITEMS:
-        return _MIN_SCROLL_HEIGHT
-    elif total_items >= _MAX_ITEMS:
-        return _MAX_SCROLL_HEIGHT
-    else:
-        ratio = (total_items - _MIN_ITEMS) / (_MAX_ITEMS - _MIN_ITEMS)
-        return int(_MIN_SCROLL_HEIGHT + ratio * (_MAX_SCROLL_HEIGHT - _MIN_SCROLL_HEIGHT))
 
 
 class ProviderHeader(QWidget):

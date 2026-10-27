@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.plugins.capabilities.providers import model_meta, process_core
+from app.plugins.capabilities.providers import model_meta, net_sync, process_core
 
 
 def register(registry) -> None:
@@ -190,6 +190,17 @@ def register(registry) -> None:
         """
         return lambda: getattr(host, "_workdir", None) or ""
 
+    def _storage_data_dir(host: Any):
+        """插件持久化数据根目录（<app_data>）。
+
+        只给根目录不给插件专属目录：CapabilityPool 的 provider 是全局
+        共享的，构建时虽知插件名但 _call 不传，per-plugin 隔离没有现成
+        机制。插件自拼 plugin_data/<name>/（与 E1 配置契约同目录约定）。
+        """
+        from app.utils.utils import get_app_data_dir
+
+        return get_app_data_dir()
+
     def _context_compactor(host: Any):
         """上下文压缩器（与 ui_core 同路径：backend → chat_engine → _compactor）。"""
         backend = _backend(host)
@@ -299,6 +310,7 @@ def register(registry) -> None:
     registry.register("session.read", _session_read, surface="tool", owner="core:tool")
     registry.register("session.write", _session_write, surface="tool", owner="core:tool")
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
+    registry.register("storage.data_dir", _storage_data_dir, surface="tool", owner="core:tool")
     registry.register("context.compact", _context_compactor, surface="tool", owner="core:tool")
     registry.register("tool.execute", _tool_execute, surface="tool", owner="core:tool")
     registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
@@ -310,6 +322,7 @@ def register(registry) -> None:
     registry.register("lsp.query", _lsp, surface="tool", owner="core:tool")
     registry.register("mcp.call", _mcp, surface="tool", owner="core:tool")
     registry.register("net.upload", _gitee, surface="tool", owner="core:tool")
+    registry.register("net.download", net_sync.net_download, surface="tool", owner="core:net")
     registry.register("subagent.run", _subagent, surface="tool", owner="core:tool")
     registry.register("process.start", process_core.process_start, surface="tool", owner="core:tool")
     registry.register("ui.artifacts.show", _artifacts_show, surface="tool", owner="core:tool")

@@ -3,6 +3,7 @@
 
 布局（每助手一套）：
   全局记忆  <app_data>/assistant_hub/<aid>/MEMORY.md        跨项目；模型可读写
+  记忆分区  <app_data>/assistant_hub/<aid>/memory_sections.json  全局记忆的分区定义
   项目记忆  {workdir}/.drifox/memory/<aid>/
             ├── YYYY-MM-DD.md   每日工作日志（append-only）
             └── MEMORY.md       项目长期笔记
@@ -35,6 +36,29 @@ DISTILLED_SUFFIX = ".distilled"
 SNAPSHOT_DIR_NAME = "memory_snapshots"
 SNAPSHOT_KEEP = 10
 WORKDIR_STATE_FILE = "workdir_state.json"
+# 全局记忆分区定义（用户可编辑；空 schema = 自由格式，行为与改造前一致）
+MEMORY_SECTIONS_FILE = "memory_sections.json"
+# 默认分区：按「内容成因」划分，不看主题词。分三类是为了让归属判定只剩三选一：
+# 我总结出的方法 / 工具自身的固有行为 / 用户亲口说的要求。
+# 上限守住 4 个：分区一多分类就不确定，与本功能「严格归属」的前提冲突。
+# hint 会被 UI 单行显示，主句控制在 12 字内；完整规则用 detail（悬停提示 + 注入 prompt）。
+DEFAULT_SECTIONS = (
+    {
+        "name": "工程方法论",
+        "hint": "做事顺序与验证方法",
+        "detail": "做事的顺序、验证与判定方法、质量纪律。写「怎么判断改对了」，不写具体工具行为",
+    },
+    {
+        "name": "工具与环境",
+        "hint": "工具平台的客观坑",
+        "detail": "工具/平台/框架/命令的客观坑与修法，谁用都会撞上。写工具自身行为，不写本项目业务规则",
+    },
+    {
+        "name": "用户偏好",
+        "hint": "用户的长期要求",
+        "detail": "用户亲口提的长期要求、表达习惯、明确禁止事项。与具体项目无关的都放这里",
+    },
+)
 
 _SNAP_NAME_RE = re.compile(r"^\d{8}-\d{6}\.md$")
 
@@ -95,6 +119,11 @@ def global_memory_path(aid_dir: Path) -> Path:
     return Path(aid_dir) / GLOBAL_MEMORY_FILE
 
 
+def sections_path(aid_dir: Path) -> Path:
+    """全局记忆分区定义路径（<助手目录>/memory_sections.json）。"""
+    return Path(aid_dir) / MEMORY_SECTIONS_FILE
+
+
 def project_dir(workdir: str | Path, aid: str) -> Path:
     """项目记忆目录（{workdir}/.drifox/memory/<aid>）。"""
     return Path(workdir) / PROJECT_DIR_NAME / MEMORY_SUBDIR / aid
@@ -137,6 +166,261 @@ def read_text(path: Path) -> str:
 
 def read_global_memory(aid_dir: Path) -> str:
     return read_text(global_memory_path(aid_dir))
+
+
+# ── 全局记忆分区（用户可编辑 schema；空 = 自由格式）────────────
+#
+# 文件结构约定（分区非空时才强制）：
+#   [可选总述]            顶部一段，允许文字，禁 "- " 条目行
+#   ## 分区名             独占一行，名必须 ∈ schema
+#   - 条目                块内只允许 "- " 条目，禁 "#" 开头行
+# 分区名的歧义防线：只认行首正好 "## " 的标题行，条目内容里的 ## 因带 "- " 前缀天然不冲突。
+
+
+def load_sections(aid_dir: Path) -> List[Dict[str, str]]:
+    """读分区定义：[{"name","hint"}]；文件缺失/损坏返回 []（= 自由格式）。"""
+    raw = read_text(sections_path(aid_dir))
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    items = data.get("sections") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    out: List[Dict[str, str]] = []
+    seen: set = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        # 分区名会被拼进 "## " 标题，含换行/井号会破坏解析结构
+        if "\n" in name or "\r" in name or name.startswith("#"):
+            continue
+        seen.add(name)
+        out.append(
+            {
+                "name": name,
+                "hint": str(it.get("hint") or "").strip(),
+                "detail": str(it.get("detail") or "").strip(),
+            }
+        )
+    return out
+
+
+def save_sections(aid_dir: Path, sections: List[Dict[str, str]]) -> Dict:
+    """写分区定义（原子替换）。返回 {ok} 或 {ok: False, error}。"""
+    clean: List[Dict[str, str]] = []
+    seen: set = set()
+    for it in sections or []:
+        name = str((it or {}).get("name") or "").strip()
+        if not name:
+            continue
+        if "\n" in name or "\r" in name or name.startswith("#"):
+            return {"ok": False, "error": f"非法分区名: {name!r}"}
+        if name in seen:
+            return {"ok": False, "error": f"分区名重复: {name}"}
+        seen.add(name)
+        clean.append(
+            {
+                "name": name,
+                "hint": str((it or {}).get("hint") or "").strip(),
+                "detail": str((it or {}).get("detail") or "").strip(),
+            }
+        )
+    p = sections_path(aid_dir)
+    with _lock_for(p):
+        _atomic_write(p, json.dumps({"version": 1, "sections": clean}, ensure_ascii=False, indent=2) + "\n")
+    return {"ok": True, "count": len(clean)}
+
+
+def section_names(sections: List[Dict[str, str]]) -> List[str]:
+    return [str(s.get("name") or "") for s in (sections or []) if (s.get("name") or "").strip()]
+
+
+def default_sections() -> List[Dict[str, str]]:
+    """默认分区副本（深拷贝，防调用方改到常量）。"""
+    return [dict(s) for s in DEFAULT_SECTIONS]
+
+
+def ensure_default_sections(aid_dir: Path) -> List[Dict[str, str]]:
+    """读分区定义；文件**不存在**时落盘默认分区并返回它。
+
+    与 load_sections 的区别：load 的 [] 同时表示「文件缺失」和「用户清空了所有分区」。
+    本函数只在文件缺失时初始化 —— 用户手动删光所有分区（文件仍在、sections 为空数组）
+    是要自由格式，不能被重新塞回默认值（否则删不掉）。
+    """
+    p = sections_path(aid_dir)
+    if p.exists():
+        return load_sections(aid_dir)
+    sections = default_sections()
+    save_sections(aid_dir, sections)
+    return sections
+
+
+def sections_prompt_text(sections: List[Dict[str, str]]) -> str:
+    """分区清单的 prompt 文本（注入说明书/蒸馏指令共用）；空 schema 返回空串。
+
+    优先用 detail（完整归类规则），无则回落 hint：模型需能判边界，不能只有短标签。
+    """
+    lines = []
+    for s in sections or []:
+        name = s.get("name")
+        text = str(s.get("detail") or s.get("hint") or "").strip()
+        lines.append(f"- {name}：{text}" if text else f"- {name}")
+    return "\n".join(lines)
+
+
+def section_skeleton(sections: List[Dict[str, str]]) -> str:
+    """分区骨架（校验失败时回传，模型照填也能通过）。"""
+    return "\n\n".join(f"## {s.get('name')}\n- " for s in (sections or []) if (s.get("name") or "").strip())
+
+
+def parse_section_blocks(text: str) -> Dict:
+    """把 MEMORY.md 原文按 "## " 切块。
+
+    Returns:
+        {"preamble": str, "blocks": [{"name","lines"}], "block_headers": [{"section","line"}]}
+        blocks[].lines 只含非空行（分区内是条目流，空行不承载信息）。
+        block_headers 记录块内出现的 "#" 开头行（小节标题，`##`/`###`/`#` 都算违规）。
+    """
+    preamble_lines: List[str] = []
+    blocks: List[Dict] = []
+    block_headers: List[Dict] = []
+    cur: Optional[Dict] = None
+    for idx, line in enumerate((text or "").splitlines(), start=1):
+        stripped = line.rstrip()
+        if stripped.startswith("## "):
+            cur = {"name": stripped[3:].strip(), "lines": [], "start": idx}
+            blocks.append(cur)
+            continue
+        if cur is None:
+            preamble_lines.append(stripped)
+            continue
+        if stripped.startswith("#"):
+            block_headers.append({"section": cur["name"], "line": stripped.strip(), "line_no": idx})
+            continue
+        if stripped.strip():
+            cur["lines"].append(stripped)
+    return {"preamble": "\n".join(preamble_lines).strip(), "blocks": blocks, "block_headers": block_headers}
+
+
+def validate_global_sections(text: str, sections: List[Dict[str, str]]) -> Dict:
+    """校验全局记忆是否符合分区 schema。
+
+    空 schema 直接通过（自由格式）。校验通过返回 {"ok": True, "parsed": ...}；
+    失败返回 {"ok": False, "error": "section_invalid", 诊断字段...}，诊断里带
+    skeleton 与逐条 preview，模型无需回读全文即可修。
+    """
+    parsed = parse_section_blocks(text)
+    if not sections:
+        return {"ok": True, "parsed": parsed}
+    names = section_names(sections)
+    valid = set(names)
+    diag: Dict = {"ok": False, "error": "section_invalid", "sections": names}
+
+    unknown: List[Dict] = []
+    for blk in parsed["blocks"]:
+        if blk["name"] in valid:
+            continue
+        bullets = [ln.strip() for ln in blk["lines"] if ln.strip().startswith("- ")]
+        unknown.append(
+            {
+                "title": blk["name"],
+                "count": len(bullets),
+                "preview": [b[:80] for b in bullets[:5]],
+            }
+        )
+
+    preamble_bullets = [ln.strip() for ln in parsed["preamble"].splitlines() if ln.strip().startswith("- ")]
+
+    counts = {n: 0 for n in names}
+    for blk in parsed["blocks"]:
+        if blk["name"] in valid:
+            counts[blk["name"]] += sum(1 for ln in blk["lines"] if ln.strip().startswith("- "))
+
+    total_bullets = sum(counts.values()) + sum(int(u["count"]) for u in unknown)
+
+    if unknown:
+        diag["reason"] = "存在清单外的 ## 标题（孤儿分区）"
+        diag["unknown_titles"] = unknown
+    if parsed["block_headers"]:
+        diag.setdefault("reason", "分区块内出现 # 开头行")
+        diag["header_in_block"] = parsed["block_headers"]
+    if preamble_bullets:
+        diag.setdefault("reason", "总述区出现 - 条目行")
+        diag["preamble_bullets"] = len(preamble_bullets)
+    raw = (text or "").strip()
+    has_block = bool(parsed["blocks"])
+    if raw and total_bullets == 0 and not has_block:
+        # 纯散文团：既无分区标题也无条目，结构无法校验（全删条目但保留 ## 头是合法兜底出口）
+        diag.setdefault("reason", "全文没有任何 - 条目")
+        diag["empty_entries"] = True
+
+    if diag.get("reason"):
+        diag["counts"] = counts
+        diag["skeleton"] = section_skeleton(sections)
+        diag["hint"] = (
+            "按当前分区清单重排：每条内容必须落在某个 ## 分区下并以 - 开头；"
+            "孤儿标题下的条目重新分配到最匹配的分区，归属不了的直接删除；"
+            "块内 # 小节改为 - 条目或并入上级；总述区不放 - 条目。"
+        )
+        return diag
+    return {"ok": True, "parsed": parsed}
+
+
+def insert_into_section(text: str, section: str, body: str) -> str:
+    """把一条内容插入指定分区块末尾；块不存在则按 schema 外顺序追加到文件末尾。
+
+    只保证落进正确分区，不重排既有内容（最小改动，保持人在看文件时的熟悉顺序）。
+    未给 section 或 schema 为空时退化为末尾追加。
+    """
+    entry = (body or "").strip()
+    if not entry:
+        return text or ""
+    lines = (text or "").rstrip("\n").splitlines()
+    if not section:
+        lines += ["", entry]
+        return "\n".join(lines) + "\n"
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.rstrip().startswith("## ") and ln.rstrip()[3:].strip() == section:
+            start = i
+            break
+    if start is None:
+        lines += ["", f"## {section}", entry]
+        return "\n".join(lines) + "\n"
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].rstrip().startswith("## "):
+            end = j
+            break
+    insert_at = end
+    for j in range(end - 1, start, -1):
+        if lines[j].strip():
+            insert_at = j + 1
+            break
+    else:
+        insert_at = start + 1
+    lines.insert(insert_at, entry)
+    return "\n".join(lines) + "\n"
+
+
+def rename_section_title(text: str, old: str, new: str) -> str:
+    """把文件里的 "## 旧名" 改名为 "## 新名"（分区改名时同步，避免制造孤儿）。"""
+    if not text or not old or not new or old == new:
+        return text
+    out = []
+    for ln in text.splitlines():
+        s = ln.rstrip()
+        if s.startswith("## ") and s[3:].strip() == old:
+            out.append(f"## {new}")
+        else:
+            out.append(ln)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
 def read_project_memory(workdir: str | Path, aid: str) -> str:
@@ -467,11 +751,13 @@ def memory_fingerprint(path: Path) -> str:
         return "empty"
 
 
-def append_memory_file(path: Path, text: str) -> Dict:
-    """向 MEMORY.md 末尾追加一块内容（不碰已有行；高频「记一条」的低风险通道）。
+def append_memory_file(path: Path, text: str, section: str = "") -> Dict:
+    """向 MEMORY.md 追加一块内容（不碰已有行；高频「记一条」的低风险通道）。
 
+    section 非空时插入到对应 "## 分区" 块末尾（块不存在则在文件末尾新建该块），
+    空则退化为文件末尾追加。已有内容原样保留。
     组装新增换行一律用 \n，交由 _atomic_write 的 write_text 按 os.linesep
-    翻译，与既有文件的 CRLF 现状保持一致；已有内容原样保留。
+    翻译，与既有文件的 CRLF 现状保持一致。
     返回 {ok, chars}（写后总字符）或 {ok: False, error}。
     """
     body = (text or "").strip()
@@ -480,7 +766,10 @@ def append_memory_file(path: Path, text: str) -> Dict:
     with _lock_for(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         old = read_text(path)
-        new = (old.rstrip("\r\n") + "\n" + body + "\n") if old.strip() else (body + "\n")
+        if section:
+            new = insert_into_section(old, section, body)
+        else:
+            new = (old.rstrip("\r\n") + "\n" + body + "\n") if old.strip() else (body + "\n")
         _atomic_write(path, new)
         try:
             chars = len(path.read_text(encoding="utf-8").strip())

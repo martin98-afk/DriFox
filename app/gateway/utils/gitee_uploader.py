@@ -292,6 +292,49 @@ class GiteeUploader(QObject):
             logger.error(f"[GiteeUploader] 上传异常: {e}", exc_info=True)
             return None, str(e)
 
+    def download_file(self, remote_path: str, local_path: str) -> Tuple[Optional[str], Optional[str]]:
+        """下载仓库文件到本地（与 upload_file 对称；raw 直链，不走 contents API）
+
+        Args:
+            remote_path: 仓库内路径（相对仓库根，如 "drifox/foo.png"）
+            local_path: 本地目标文件路径（父目录自动创建）
+
+        Returns:
+            (local_path_str, error)：成功返回本地路径，失败返回 (None, 错误描述)
+        """
+        if not self._ensure_config():
+            return None, "Gitee 未配置 (缺少 token/owner/repo)"
+        remote_path = (remote_path or "").strip().lstrip("/")
+        if not remote_path:
+            return None, "remote_path 为空"
+        if not local_path:
+            return None, "local_path 为空"
+
+        try:
+            url = self.DOWNLOAD_URL.format(
+                owner=self._owner, repo=self._repo, branch=self._branch, path=remote_path
+            )
+            # 私有仓库 raw 直链需要 token；公开仓库带 token 亦无副作用
+            if self._token:
+                url = f"{url}?access_token={self._token}"
+            resp = requests.get(url, timeout=30, headers={"User-Agent": "DriFox/1.0"})
+            if resp.status_code != 200:
+                return None, f"下载失败: HTTP {resp.status_code}"
+            if not resp.content:
+                return None, "下载失败: 响应为空"
+            target = Path(local_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(resp.content)
+            logger.info(f"[GiteeUploader] 下载成功: {remote_path} → {target}")
+            return str(target), None
+        except requests.exceptions.Timeout:
+            return None, "下载超时 (30s)"
+        except requests.exceptions.ConnectionError:
+            return None, "网络连接失败"
+        except Exception as e:
+            logger.error(f"[GiteeUploader] 下载异常: {e}", exc_info=True)
+            return None, str(e)
+
 
 # 便捷函数
 def get_gitee_uploader() -> GiteeUploader:

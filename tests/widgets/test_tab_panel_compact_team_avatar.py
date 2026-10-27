@@ -139,55 +139,253 @@ class TestCompactStatusRing:
         panel.update_tab_streaming(idx, False)
         assert item._icon_widget._ring_state == ""
 
-    def test_ring_cleared_on_expand(self, panel):
-        """展开态回到项目/胶囊语义，不带状态环"""
+    def test_ring_kept_on_expand(self, panel):
+        """展开态保留状态环（环是唯一状态表达，不随折叠切换）"""
         panel.set_collapsed(True)
         item = _team_member(panel, "coder")
         panel.update_tab_streaming(panel._items.index(item), True)
         panel.set_collapsed(False)
-        assert item._icon_widget._ring_state == ""
+        assert item._icon_widget._ring_state == "streaming"
 
-    def test_non_team_tab_never_has_ring(self, panel):
-        """非团队 Tab（项目 icon 语义）不画状态环"""
+    def test_non_team_tab_also_has_ring(self, panel):
+        """非团队 Tab（项目 icon 语义）折叠态同样画状态环
+
+        折叠窄条下项目 icon 是唯一可见元素，整行流光已在这个宽度下失效，
+        运行态只能靠环表达——项目 tab 与团队角色块共用同一套。
+        """
         panel.set_collapsed(True)
         idx = panel.add_tab("普通会话", project_initials="DF", project_color="#2E7D32")
         panel.update_tab_streaming(idx, True)
-        assert panel._items[idx]._icon_widget._ring_state == ""
+        assert panel._items[idx]._icon_widget._ring_state == "streaming"
+
+    def test_ring_kept_when_expanded(self, panel):
+        """展开态保留状态环（整行流光已移除，环是唯一状态表达）"""
+        panel.set_collapsed(True)
+        idx = panel.add_tab("普通会话", project_initials="DF", project_color="#2E7D32")
+        panel.update_tab_streaming(idx, True)
+        panel.set_collapsed(False)
+        assert panel._items[idx]._icon_widget._ring_state == "streaming"
+
+    def test_streaming_ring_visible_in_both_themes(self):
+        """流式环在两种主题下都必须可见：环色与侧栏底有足够亮度差
+
+        反例（实测）：直接复用 _RAINBOW_COLORS 再提亮 55，浅色主题下环色 lum
+        逼近 0.9，2px 细线在 #fafafc 底上淡到看不见。故环色按主题定 L。
+        """
+        from PyQt5.QtGui import qGray
+
+        from app.widgets.tab_panel import _TabProjectIcon
+
+        icon = _TabProjectIcon(size=26)
+        icon.set_project("DF", "rgba(46, 125, 50, 255)")
+        icon.set_status_ring("streaming", 0.0)
+        c = icon._ring_color()
+        gray = qGray(c.rgb())
+        # 浅色主题（测试默认）: 侧栏底 ~250，环必须显著更暗
+        assert gray < 190, f"浅色主题下环过亮，会被底色淹没: gray={gray}"
+
+    def test_streaming_ring_hue_is_constant(self):
+        """流式环色相恒定（不再 RGB 循环）：运动信息全部交给亮块旋转
+
+        色相轮转只在「颜色本身是信息」时有意义；这里颜色只表示「正在运行」，
+        变色会让多 tab 并发时各自乱变、认不出是同一状态。
+        """
+        from app.widgets.tab_panel import _TabProjectIcon
+
+        icon = _TabProjectIcon(size=26)
+        icon.set_project("DF", "rgba(46, 125, 50, 255)")
+        icon.set_status_ring("streaming", 0.0)
+        h0 = icon._ring_color().hue()
+        icon.set_status_ring("streaming", 180.0)
+        assert icon._ring_color().hue() == h0, "色相不得随相位变化"
+
+    def test_streaming_ring_head_rotates_with_phase(self):
+        """亮块位置随相位绕环旋转（运动的唯一载体）"""
+        from app.widgets.tab_panel import _ring_head_angle
+
+        assert _ring_head_angle(0.0) != _ring_head_angle(90.0)
+        assert _ring_head_angle(0.0) != _ring_head_angle(180.0)
+
+    def test_streaming_ring_has_rhythm(self):
+        """角速度按 sin 调制出快慢节奏（不是匀速转圈）
+
+        判据：相邻等相位步长的角度增量不等。匀速时每步增量相同。
+        """
+        from app.widgets.tab_panel import _ring_head_angle
+
+        step = 10.0
+        deltas = [
+            (_ring_head_angle(p + step) - _ring_head_angle(p)) for p in range(0, 360, 45)
+        ]
+        assert max(deltas) - min(deltas) > 3.0, f"角速度应有明显快慢差异: {deltas}"
+
+    def test_streaming_ring_contrasts_with_block_color(self):
+        """环色与方块色不同色系（红方块配绿环等），不糊成一片
+
+        方块就是项目色，环若取同色系高亮版，2px 细线会被方块吃掉。
+        """
+        from app.widgets.tab_panel import _TabProjectIcon
+
+        # 绿方块 + 相位 0（红环）：色相差异必须显著
+        icon = _TabProjectIcon(size=26)
+        icon.set_project("DF", "rgba(46, 125, 50, 255)")
+        icon.set_status_ring("streaming", 0.0)
+        ring_h = icon._ring_color().hslHue()
+        block_h = icon._color.hslHue()
+        diff = min(abs(ring_h - block_h), 360 - abs(ring_h - block_h))
+        assert diff > 30, f"环与方块色相太近，会糊成一片: ring={ring_h} block={block_h}"
 
     def test_ring_color_breathing_streaming(self, panel):
-        """streaming 环 alpha 随相位呼吸（不同相位亮度不同）"""
+        """question 环 alpha 随相位呼吸（不同相位亮度不同）"""
         panel.set_collapsed(True)
         item = _team_member(panel, "coder")
         icon = item._icon_widget
-        icon.set_status_ring("streaming", 90.0, reserve=True)
+        icon.set_status_ring("question", 90.0)
         a90 = icon._ring_color().alpha()
-        icon.set_status_ring("streaming", 270.0, reserve=True)
+        icon.set_status_ring("question", 270.0)
         a270 = icon._ring_color().alpha()
         assert a90 != a270
         assert all(0 <= a <= 255 for a in (a90, a270))
 
-    def test_error_ring_constant(self):
-        """error 环恒亮，不参与呼吸（报错是需一眼确认的事实）"""
+    def test_error_ring_blinks(self):
+        """error 环随相位闪烁（暗相位接近熄灭）：icon 与环同色系时常亮会被吃掉"""
         from app.widgets.tab_panel import _TabProjectIcon
 
         icon = _TabProjectIcon(size=26)
-        icon.set_status_ring("error", 90.0, reserve=True)
-        a90 = icon._ring_color().alpha()
-        icon.set_status_ring("error", 270.0, reserve=True)
-        assert icon._ring_color().alpha() == a90
+        icon.set_status_ring("error", 90.0)
+        a_bright = icon._ring_color().alpha()
+        icon.set_status_ring("error", 270.0)
+        a_dark = icon._ring_color().alpha()
+        assert a_bright != a_dark
+        # 闪烁幅度必须显著（呼吸式小摆动在同色 icon 旁仍看不出）
+        assert a_bright - a_dark > 150, f"闪烁幅度不足: bright={a_bright} dark={a_dark}"
 
-    def test_ring_reserved_keeps_block_size_stable(self, panel, qtbot):
-        """环位恒预留：状态来去时方块几何不变（不抽搐）"""
+    def test_ring_alpha_visible_at_phase_zero(self):
+        """减少动态效果时相位冻结在 0：环必须仍可见（中点亮度），不能停在暗相位"""
+        from app.widgets.tab_panel import _TabProjectIcon
+
+        icon = _TabProjectIcon(size=26)
+        for state in ("error", "question"):
+            icon.set_status_ring(state, 0.0)
+            a = icon._ring_color().alpha()
+            assert a >= 120, f"{state} 在 phase=0 时过暗，静态下状态不可见: alpha={a}"
+
+    def test_block_size_stable_across_status(self, panel, qtbot):
+        """方块几何与缩写字号与状态无关（不抽搐）
+
+        实现方式：容器紧凑态放大到 26px 给环让位，方块恒 20px（内缩 3px），
+        状态来去只改绘制，不改几何。
+        """
         panel.setFixedWidth(46)
         panel.show()
         panel.set_collapsed(True)
         item = _team_member(panel, "coder")
         qtbot.wait(30)
-        size_idle = item._icon_widget.size()
+        icon = item._icon_widget
+        box_idle, inset_idle = icon.size(), icon._block_inset
         panel.update_tab_streaming(panel._items.index(item), True)
         qtbot.wait(30)
-        assert item._icon_widget.size() == size_idle
-        assert item._icon_widget._ring_reserved is True
+        assert icon.size() == box_idle
+        assert icon._block_inset == inset_idle
+        # 方块恒 = 容器 - 2 * 内缩，故方块尺寸也不变
+        assert icon.width() - 2 * icon._block_inset == box_idle.width() - 2 * inset_idle
+
+    def test_icon_box_always_reserves_ring(self, panel):
+        """外框恒留环位（折叠/展开同档），方块尺寸由内缩守恒"""
+        panel.set_collapsed(True)
+        item = _team_member(panel, "coder")
+        icon = item._icon_widget
+        compact_box, compact_inset = icon.width(), icon._block_inset
+        assert compact_box > item._icon_size
+        panel.set_collapsed(False)
+        # 展开态外框不退回到 icon 尺寸（环仍要画）
+        assert icon.width() == compact_box
+        assert icon._block_inset == compact_inset
+        # 方块 = 外框 - 2*内缩，两种形态同一值
+        assert icon.width() - 2 * icon._block_inset == item._icon_size
+
+    def test_compact_box_team_fits_row(self, panel):
+        """折叠团队行：行高包住外框 + 上下 margin，icon 垂直居中（与 hover 底对齐）
+
+        回归（2026-10-26）：行高曾写死 32，大字档（+10）下外框 34 装不进内容区
+        24，布局把 icon 挤离行中心 → hover 底 (2,2,w-4,h-4) 与方块错位。
+        """
+        panel.set_collapsed(True)
+        item = _team_member(panel, "coder")
+        box = item._icon_widget.height()
+        assert item.height() == max(32, box + 8)
+        assert item._icon_widget.height() <= item.height()
+        # icon 垂直居中：中心与行中心一致（错位的直接判据）
+        item.layout().activate()
+        cy_icon = item._icon_widget.geometry().center().y()
+        assert abs(cy_icon - item.height() / 2) <= 1
+
+    def test_compact_row_height_follows_font_delta(self, panel):
+        """大字档（+10）下折叠团队行高跟随外框放大且 icon 居中（默认档外的缩放路径）"""
+        from app.utils import design_tokens
+
+        with patch.object(design_tokens, "_cached_font_size_delta", 10), patch.object(
+            design_tokens, "_cached_font_size_key", "10"
+        ):
+            item = _team_member(panel, "coder")
+            panel.set_collapsed(True)
+            box = item._icon_widget.height()
+            assert box == 24 + 10, f"大字档外框应为 34，实际 {box}"
+            assert item.height() >= box + 8
+            item.layout().activate()
+            cy_icon = item._icon_widget.geometry().center().y()
+            assert abs(cy_icon - item.height() / 2) <= 1
+
+    def test_expanded_team_row_paints_capsule_ring(self, panel):
+        """展开团队行 streaming：胶囊环决策产出「胶囊外扩 3px + streaming」
+
+        不走离屏 render：跨文件测试环境下 QWidget.render 触发 access violation
+        （实测，见 2026-10-26 会话），改测绘制决策纯方法，环绘制本体由
+        _TabProjectIcon 路径的既有测试覆盖（同一 _paint_status_ring_on）。
+        """
+        item = _team_member(panel, "leader")
+        idx = panel._items.index(item)
+        panel.update_tab_streaming(idx, True)
+        assert item._icon_widget.isHidden(), "前提：团队模式展开态 icon 隐藏，环必须换载体"
+        spec = item._capsule_ring_spec()
+        assert spec is not None, "streaming 态必须产出胶囊环绘制决策"
+        rect, state, _phase = spec
+        assert state == "streaming"
+        gr = item._capsule_label.geometry()
+        assert rect.center() == gr.center(), "环与胶囊同心"
+        assert rect.width() == gr.width() + 6 and rect.height() == gr.height() + 6, "环外扩 3px"
+
+    def test_expanded_team_row_idle_no_ring(self, panel):
+        """展开团队行无状态：不产出环绘制决策"""
+        item = _team_member(panel, "coder")
+        assert item._capsule_ring_spec() is None
+
+    def test_capsule_ring_suppressed_in_compact(self, panel):
+        """折叠态不产出胶囊环决策（环由 icon 外框承担，行层不重复画）"""
+        panel.set_collapsed(True)
+        item = _team_member(panel, "coder")
+        idx = panel._items.index(item)
+        panel.update_tab_streaming(idx, True)
+        assert item._capsule_ring_spec() is None
+
+    def test_tooltip_carries_state_in_compact(self, panel):
+        """折叠态 icon tooltip 带上状态文案（环只表达类别，细节靠 hover）"""
+        panel.set_collapsed(True)
+        item = _team_member(panel, "coder")
+        idx = panel._items.index(item)
+        panel.update_tab_streaming(idx, True)
+        assert "正在生成" in item._icon_widget.toolTip()
+        panel.update_tab_streaming(idx, False)
+        panel.update_tab_question(idx, True)
+        assert "等待你的回答" in item._icon_widget.toolTip()
+
+    def test_tooltip_plain_when_expanded(self, panel):
+        """展开态 tooltip 只留标题（不重复状态，标题本身可见）"""
+        panel.set_collapsed(True)
+        item = _team_member(panel, "coder")
+        panel.update_tab_streaming(panel._items.index(item), True)
+        panel.set_collapsed(False)
+        assert item._icon_widget.toolTip() == item._title
 
 
 # ══════════════════════════════════════════════════════════

@@ -85,20 +85,23 @@ def test_blacklist_empty_no_change():
     assert verdict == "allow", "未配置黑名单时不得改变行为"
 
 
-# ── 顺序：豁免优先于黑名单 ──
+# ── 顺序：黑名单优先于豁免 ──
 
 
-def test_exempt_takes_precedence_over_blacklist():
-    """同时配 delete.exempt_paths 与 path.blacklist → 豁免路径内删除仍 allow
+def test_blacklist_takes_precedence_over_exempt():
+    """同时配 delete.exempt_paths 与 path.blacklist → 删除仍为 confirm
 
-    顺序设计：delete_exempt 判定在黑名单检查之前（用户显式豁免优先）。
+    顺序设计（2026-10-25 变更）：豁免只能豁免「workdir 边界」这一层，
+    不能豁免「用户显式拉黑的路径」。变更前豁免无条件先于黑名单判定，
+    同一路径既在黑名单又在豁免时黑名单被静默吞掉（`rm D:/secrets/x` → allow），
+    用户划的禁区可从豁免绕开，且 UI 无任何冲突提示。
     ⚠ EU-G23 起需显式开启 delete_protection，否则删除类命令先被门控降级为
-    allow，测不到"豁免优先于黑名单"这一层。
+    allow，测不到"黑名单优先于豁免"这一层。
     """
     cfg = _cfg(blacklist=[SECRET], exempt=[SECRET])
     cfg.set("delete_protection", True)
     verdict = sandbox_check_tool("bash", {"command": f"rm {SECRET}/old.txt"}, cfg)
-    assert verdict == "allow", "显式豁免应优先于黑名单"
+    assert verdict == "confirm", "黑名单路径内的删除不应被豁免放行"
 
 
 def test_blacklist_still_applies_outside_exempt():

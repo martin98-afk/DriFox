@@ -417,16 +417,20 @@ def load_plugin_tools(
     loaded: Dict[str, Set[str]] = {}
     if root_tracker is None:
         root_tracker = {}  # tool_name -> 来源根（跨根优先级）
+    # 禁用类跳过改为函数级收集、末尾各汇总一条：同一插件的 N 个工具模块
+    # 逐条打 INFO（实测 self-evolver×7 / ssh-toolkit×4）纯噪音
+    disabled_skipped: set = set()
+    component_skipped: set = set()
 
     for root in roots:
         for plugin_name, py_path in _iter_tool_modules(Path(root)):
             # P0-1：安全边界——插件被 Settings 禁用后其工具不再注册
             if not _is_plugin_enabled(plugin_name):
-                logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
+                disabled_skipped.add(plugin_name)
                 continue
             # D9：组件级禁用——tools 子项被关后不再注册
             if not _is_component_enabled(plugin_name):
-                logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
+                component_skipped.add(plugin_name)
                 continue
             # P1/P2：版本/平台门禁——load_blocked 插件不加载其工具
             if _is_plugin_load_blocked(plugin_name):
@@ -437,6 +441,10 @@ def load_plugin_tools(
                 loaded.setdefault(plugin_name, set()).update(new_tools)
             except Exception as e:
                 logger.warning(f"[PluginToolLoader] 插件 {plugin_name} register 失败: {e}")
+    if disabled_skipped:
+        logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {', '.join(sorted(disabled_skipped))}")
+    if component_skipped:
+        logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {', '.join(sorted(component_skipped))}")
     return loaded
 
 

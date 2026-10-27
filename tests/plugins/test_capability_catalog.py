@@ -8,7 +8,7 @@ import pytest
 def test_catalog_size_and_ids():
     from app.plugins.capabilities import catalog
 
-    assert len(catalog.CATALOG) == 54
+    assert len(catalog.CATALOG) == 58
     for cid, spec in catalog.CATALOG.items():
         assert spec.id == cid
         assert re.fullmatch(r"[a-z]+(\.[a-z][a-z_]*)+", cid), cid
@@ -41,6 +41,7 @@ def test_high_level_set_is_stable():
         "platform.send",
         "mcp.call",
         "net.upload",
+        "sync.register",
         "plugin.control",
         "host.raw",
         "process.start",

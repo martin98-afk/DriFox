@@ -14,7 +14,8 @@
     "type": "system",
     "api_version": 2,
     "capabilities": [
-        "config.read"
+        "config.read",
+        "input.write"
     ],
     "components": {
         "ui": true

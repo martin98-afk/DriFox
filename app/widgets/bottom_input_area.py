@@ -4,11 +4,9 @@ import math
 import os
 import random
 import re
-import tempfile
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtCore import (
@@ -64,7 +62,7 @@ from qfluentwidgets import (
 from app.widgets.stop_button import SendStopButton
 
 from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token
-from app.utils.utils import get_font_family_css
+from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.widgets.simple_hover_tooltip import (
     get_hover_filter,
     install_hover_tooltip,
@@ -1945,7 +1943,10 @@ class SendableTextEdit(TextEdit):
                     # QPixmap（未走系统 CF_DIB 转换）；外部进程截图则为 QImage。
                     img = img.toImage()
                 if isinstance(img, QImage) and not img.isNull():
-                    tmp_dir = Path(tempfile.gettempdir()) / "drifox_paste"
+                    # 落 <app_data>/screenshots/paste/：收进数据目录便于统一查看与清理。
+                    # resolve() 必要：开发环境 get_app_data_dir() 返回相对路径 .drifox，
+                    # 附件路径会写进消息与 DB，必须绝对化才不受 cwd 变化影响。
+                    tmp_dir = (get_app_data_dir() / "screenshots" / "paste").resolve()
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     # 可读命名：原为 paste_<uuid8>.png，显示为附件名时是一串无意义
                     # 的十六进制。改为「截图_月日_时分秒.png」，同秒内追加序号防覆盖。
@@ -2871,7 +2872,14 @@ class FileMentionObject(QObject, QTextObjectInterface):
 
     @classmethod
     def _icon_for(cls, path: str):
-        """按扩展名取图标（复用 AttachmentChip 的映射），失败返回 None"""
+        """按扩展名取图标（复用 AttachmentChip 的映射），失败返回 None
+
+        必须用 ``qicon()`` 而非 ``icon()``：后者在调用当刻就按当前主题解析成
+        具体 SVG 资源（``IMAGE_EXPORT_black.svg`` / ``_white.svg``），缓存下来
+        后主题切换永远返回旧色 —— 深底黑图标等于隐形（用户实测「输入框胶囊
+        里的图标不随主题切换」）。``qicon()`` 包一层 FluentIconEngine，每次
+        paint/pixmap 都按当时主题重新取路径，缓存恒有效。
+        """
         try:
             icon_enum = AttachmentChip._get_file_icon(path)
         except Exception:  # noqa: BLE001
@@ -2879,7 +2887,7 @@ class FileMentionObject(QObject, QTextObjectInterface):
         key = str(icon_enum)
         if key not in cls._icon_cache:
             try:
-                cls._icon_cache[key] = icon_enum.icon()
+                cls._icon_cache[key] = icon_enum.qicon()
             except Exception:  # noqa: BLE001
                 cls._icon_cache[key] = None
         return cls._icon_cache[key]
