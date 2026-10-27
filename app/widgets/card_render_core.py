@@ -1862,7 +1862,20 @@ def _registered_tag_names_safe() -> List[str]:
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        return list(UIPluginRegistry.get_instance().get_registered_tag_names())
+        reg = UIPluginRegistry.get_instance()
+        # [PERF] 结果缓存：本函数在流式**每一批**被调
+        # （_has_unclosed_registered_tag），每次执行 import 协议（实测 90µs）
+        # + get_instance()（20µs），390KB 回复累计白烧数秒。
+        # 失效判据用「注册表实例 id + 标签键元组」：标签表只在插件加载/卸载时
+        # 变，键元组比较是 O(标签数)（通常 0~3 个），远低于重建成本。
+        global _REGISTERED_TAG_CACHE
+        keys = tuple(reg._tag_renderers.keys()) if hasattr(reg, "_tag_renderers") else ()
+        sig = (id(reg), keys)
+        if _REGISTERED_TAG_CACHE is not None and _REGISTERED_TAG_CACHE[0] == sig:
+            return _REGISTERED_TAG_CACHE[1]
+        names = list(keys)
+        _REGISTERED_TAG_CACHE = (sig, names)
+        return names
     except Exception:
         return []
 
@@ -1877,8 +1890,13 @@ def _has_unclosed_registered_tag(text: str) -> bool:
         return False
     # chunk 边界可能把 <mood> 切成半截（尾部 "<mo"）：rfind 找不到 open 会误判
     # 已闭合 → 放行生肉。宽松拦（误拦代价只是该 chunk 延迟一次渲染）。
-    if _PARTIAL_TAG_TAIL_RE.search(text):
+    # [PERF] 尾锚定正则只搜尾部窗口（见 _PARTIAL_TAG_TAIL_WINDOW 注释）。
+    if _PARTIAL_TAG_TAIL_RE.search(text[-_PARTIAL_TAG_TAIL_WINDOW:]):
         return True
+    # [PERF] 无 '<' 即无任何协议标签，早退（流式纯文本绝大多数批次走这里）：
+    # 下面的 rfind 对每个标签各扫 O(n)，无标签时纯属浪费。
+    if "<" not in text:
+        return False
     for tag in _registered_tag_names_safe():
         last_open = text.rfind(f"<{tag}>")
         if last_open == -1:
@@ -1896,9 +1914,18 @@ def _has_unclosed_registered_tag(text: str) -> bool:
 _CHART_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*(\w+)")
 _CHART_FENCE_LANGS = frozenset({"echarts", "mermaid", "html", "widget", "svg"})
 # chunk 边界切开标记的半截尾巴：行尾 1-3 个反引号/波浪（可能正在写 fence 开标记）
+# ⚠️ 本正则**禁止**直接对全文 search：`(?:^|\n)...$` 这类前缀分支 + 尾锚定，
+# expression model 无法跳到串尾，只能从头逐位尝试，实测 390KB 文本 7.4ms/次；
+# 而 _has_unclosed_chart_fence 在流式**每一批**都调它（22222 批 × 量级递增
+# ≈ 数十秒主线程）。匹配只能命中串尾（$ 锚定），故只对尾部窗口匹配即严格等价。
+# 窗口长度推导：换行(1) + 缩进(3) + 标记(3) + 标识(15) = 22，取 32 留余量。
 _PARTIAL_FENCE_TAIL_RE = re.compile(r"(?:^|\n)[ \t]{0,3}[`~]{1,3}[a-zA-Z0-9]{0,15}$")
-# chunk 边界切开标签的半截尾巴：行尾 <xx（可能正在写 <mood> 等协议标签）
+_PARTIAL_FENCE_TAIL_WINDOW = 32
+# chunk 边界切开尾巴：行尾 <xx（可能正在写 <mood> 等协议标签）
+# 同 _PARTIAL_FENCE_TAIL_RE：尾锚定正则全量 search 是 O(n) 逐位尝试，只搜尾部窗口。
+# 窗口推导：最长匹配 `</` + 1 字母 + 11 字符 = 14，取 24 留余量。
 _PARTIAL_TAG_TAIL_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]{0,11}$")
+_PARTIAL_TAG_TAIL_WINDOW = 24
 
 
 def _is_render_fence_lang(lang: str) -> bool:
@@ -2095,14 +2122,24 @@ def _has_unclosed_chart_fence(text: str) -> bool:
     """
     # chunk 边界可能把 fence 开标记切成半截（尾部 "```e" 或 "``"）：状态机
     # 匹配不到完整 lang 会误判闭合 → 放行生肉。宽松拦，代价同上。
-    if _PARTIAL_FENCE_TAIL_RE.search(text):
+    # [PERF] 只搜尾部窗口（见 _PARTIAL_FENCE_TAIL_WINDOW 注释）：该正则尾锚定，
+    # 命中位置必在串尾，全量 search 与窗口 search 语义严格等价，但前者是 O(n)
+    # 逐位回溯（390KB 7.4ms/次），后者 O(1)。
+    if _PARTIAL_FENCE_TAIL_RE.search(text[-_PARTIAL_FENCE_TAIL_WINDOW:]):
         return True
     if "```" not in text and "~~~" not in text:
         return False
     inside = False
     chart = False
     marker = ""
-    for line in text.split("\n"):
+    # [PERF] 状态机只关心行首标记，用 find 跳跃扫描而非 split("\n") 全量切分
+    # （后者在流式每批都执行，按文本长度线性分配）+ 逐行 strip 拷贝。
+    pos = 0
+    n = len(text)
+    while pos <= n:
+        nl = text.find("\n", pos)
+        line_end = n if nl == -1 else nl
+        line = text[pos:line_end]
         stripped = line.strip()
         if not inside:
             m = _CHART_FENCE_OPEN_RE.match(stripped)
@@ -2117,6 +2154,9 @@ def _has_unclosed_chart_fence(text: str) -> bool:
         elif marker and stripped.startswith(marker):
             inside = False
             chart = False
+        if nl == -1:
+            break
+        pos = nl + 1
     return inside and chart
 
 
@@ -3721,6 +3761,10 @@ def _tail_before_unclosed_block(md: str) -> str:
 # 观感是"正在蹦字的片段先换行出现在最下面，全量渲染时又跳回正文合并"。
 # 因此闭合段**只**按 \n\n 硬边界切，段落完整性优先于 stable 推进。
 _SENTENCE_END_CHARS = frozenset("。！？；…!?;")
+
+# [PERF] _registered_tag_names_safe 的模块级缓存：(signature, names)。
+# 签名 = (注册表实例 id, 标签键元组)；只在标签表变化时重建（见该函数注释）。
+_REGISTERED_TAG_CACHE: Optional[tuple] = None
 
 
 def _extract_closed_segments(md: str):

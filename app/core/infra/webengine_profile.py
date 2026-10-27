@@ -11,7 +11,7 @@
   （见 main.py 的 QTWEBENGINE_CHROMIUM_FLAGS 设置）。
 
 [PERF] 消息卡片通过本地 setHtml 渲染，无 HTTP 请求/cookie/localStorage 持久化需求。
-改用内存缓存 + NoPersistentCookies，避免磁盘 I/O 和 Chromium 维护缓存索引的内存开销。
+带 parent 构造的 profile 是 off-the-record 的，HTTP 缓存天然在内存，不做磁盘缓存初始化。
 """
 
 import os
@@ -40,14 +40,12 @@ def init_shared_web_profile(parent: Optional[QObject] = None) -> QWebEngineProfi
     # 使用匿名 profile（OTR）；所有卡片共享此单例 profile，复用 Chromium
     # renderer 进程池。
     #
-    # HTTP 缓存由内存改为磁盘：正文里的 http(s) 远程图片在长会话里会随滚动、
-    # 重渲染、卡片懒加载反复下载，内存缓存进程退出即丢（重启后整屏图重下）。
-    # 磁盘缓存让跨会话命中，配上限避免无限膨胀。正文是本地 setHtml 无 cookie
-    # 需求，持久化策略仍为 NoPersistentCookies。
+    # [PERF] 磁盘 HTTP 缓存在 OTR profile 上并不生效（Chromium 不落盘，实测缓存
+    # 目录常年 0 文件），而 setHttpCacheMaximumSize 会同步初始化缓存后端，在启动
+    # 路径实测 1.1~1.3s。远程图片仍由进程内内存缓存覆盖（同会话滚动/重渲染命中）。
     profile = QWebEngineProfile(parent)
-    profile.setHttpCacheType(QWebEngineProfile.DiskHttpCache)
     profile.setPersistentCookiesPolicy(QWebEngineProfile.NoPersistentCookies)
-    _apply_cache_limits(profile)
+    _apply_storage_path(profile)
 
     _shared_profile = profile
     return profile
@@ -81,23 +79,13 @@ def _resolve_cache_dir() -> str:
         return ""
 
 
-# HTTP 磁盘缓存上限：200MB。远程图片是唯一实质使用者，超限由 Chromium LRU 淘汰。
-_HTTP_CACHE_MAX_BYTES = 200 * 1024 * 1024
-
-
-def _apply_cache_limits(profile: "QWebEngineProfile") -> None:
-    """设置缓存目录与容量上限（Qt 版本不支持时静默跳过）。"""
+def _apply_storage_path(profile: "QWebEngineProfile") -> None:
+    """固定持久化存储目录（localStorage/IndexedDB 落点，实测 5ms，不碰 HTTP 缓存后端）。"""
     cache_dir = _resolve_cache_dir()
     if cache_dir:
         try:
             os.makedirs(cache_dir, exist_ok=True)
             profile.setPersistentStoragePath(cache_dir)
-        except Exception:
-            pass
-    setter = getattr(profile, "setHttpCacheMaximumSize", None)
-    if callable(setter):
-        try:
-            setter(_HTTP_CACHE_MAX_BYTES)
         except Exception:
             pass
 

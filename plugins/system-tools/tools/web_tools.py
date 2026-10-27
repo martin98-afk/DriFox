@@ -7,11 +7,8 @@ API key 优先读环境变量，未设置时使用插件内置默认值（主程
 """
 
 import re
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-import html2text
-import httpx
-from bs4 import BeautifulSoup
 from loguru import logger
 
 from app.plugins.sdk import make_summarize_from_preview
@@ -20,13 +17,22 @@ from app.plugins.sdk import ToolResult
 
 GROUP_NETWORK = "网络"
 
+# [PERF] 重型依赖仅在真正抓取网页时导入：启动路径要 import 每个插件工具模块
+# 构建 schema/权限表，httpx+bs4 顶层导入占 ~570ms（profiler 实测）。
+if TYPE_CHECKING:
+    import html2text
+    import httpx
+    from bs4 import BeautifulSoup
+
 _NEWLINE_PATTERN = re.compile(r"\n{3,}")
 
 # 共享 httpx 客户端（连接池复用）
-_http_client: Optional[httpx.Client] = None
+_http_client: "Optional[httpx.Client]" = None
 
 
-def _get_client() -> httpx.Client:
+def _get_client() -> "httpx.Client":
+    import httpx
+
     global _http_client
     if _http_client is None:
         _http_client = httpx.Client(
@@ -193,6 +199,10 @@ def _webfetch_impl(tool_ctx, **kwargs):
     max_chars = int(kwargs.get("max_chars") or 26000)
     if not url:
         return ToolResult(False, error="url 不能为空")
+    import html2text
+    import httpx
+    from bs4 import BeautifulSoup
+
     try:
         response = _get_client().get(url)
         response.raise_for_status()

@@ -41,16 +41,25 @@ def _make_streamed_card(qapp, monkeypatch, chunks: int = 5, size: int = 200):
 
 
 def test_cleanup_releases_stream_text_acc(qapp, monkeypatch):
-    """cleanup() 后 `_stream_text_acc` 必须不再持有流式原文副本。"""
+    """cleanup() 后流式原文缓冲（parts + acc）必须不再持有副本。
+
+    [PERF 改造后] 原文分两段存：``_stream_text_parts``（待固化片段，流式每批
+    append）与 ``_stream_text_acc``（已固化累计串，``_stream_text_snapshot``
+    读取时合并）。cleanup() 必须把两者都释放。
+    """
     card = _make_streamed_card(qapp, monkeypatch)
-    before = card._stream_text_acc
-    assert len(before) == 1000, f"前置条件不成立：缓冲未累积到预期长度（{len(before)}）"
+    parts = getattr(card, "_stream_text_parts", None)
+    acc = getattr(card, "_stream_text_acc", None)
+    total = sum(len(p) for p in (parts or [])) + len(acc or "")
+    assert total == 1000, f"前置条件不成立：缓冲未累积到预期长度（{total}）"
 
     card.cleanup()
 
     # 置 None 或空串都算释放（不锁定具体实现，只锁定「不再持有内容」）
-    after = getattr(card, "_stream_text_acc", None)
-    assert not after, f"cleanup() 未释放 _stream_text_acc，仍残留 {len(after or '')} 字符"
+    after_acc = getattr(card, "_stream_text_acc", None)
+    after_parts = getattr(card, "_stream_text_parts", None)
+    assert not after_acc, f"cleanup() 未释放 _stream_text_acc，仍残留 {len(after_acc or '')} 字符"
+    assert not after_parts, f"cleanup() 未释放 _stream_text_parts，仍残留 {len(after_parts or [])} 片段"
 
 
 def test_cleanup_safe_when_never_streamed(qapp):
