@@ -1028,12 +1028,6 @@ class ProviderEditCard(QWidget):
         （插件/旧代码）仍有引用，调用无副作用。
         """
 
-    def _sync_editor_to_combo(self):
-        """（已废弃）旧的「编辑器 → 下拉」单向同步。
-
-        波8 起只有一份数据源（编辑器），不存在双源漂移，故无需同步。
-        """
-
     def _on_save(self):
         """保存。
 

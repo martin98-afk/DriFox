@@ -573,32 +573,6 @@ class OpenAIChatWorker(QThread):
         phases["other"] = round(max(0.0, total - spent), 1)
         return phases
 
-    def _sync_state(self):
-        """
-        将当前实例属性值同步回 self._state。
-        调用时机：cancel(), cleanup(), _clear_pending_response_state()
-        """
-        s = self._state
-        s.response.full_response = self.full_response
-        s.is_cancelled = self._is_cancelled
-        s.permission.pending_question = self._question_pending
-        s.permission.pending_answer = self._pending_answer
-        s.permission.pending_permission = self._permission_pending
-        s.permission.permission_approved = self._permission_approved
-        s.tool_call.current_calls = self._current_tool_calls
-        s.tool_call.calls_buffer = self._tool_calls_buffer
-        s.tool_call.index_to_id = self._tool_calls_index_to_id
-        s.response.reasoning_content = self._reasoning_content
-        s.http.client = self._http_client
-        s.tool_call.execution_cancelled = self._tool_execution_cancelled
-        s.tool_call.waiting_params = self._waiting_tool_params
-        s.session.current_messages = self._current_session_messages
-        s.session.last_usage = self._last_usage
-        s.session.accumulated_tokens = self._accumulated_tokens
-        # 同步 API 缓存，确保 _sync_state_from_state 不会用旧值覆盖
-        s.api_cache.cache = self._api_messages_cache
-        s.api_cache.built = self._api_messages_built
-
     def _serialize_for_api(self, messages: List[Dict[str, Any]], supports_vision: bool = True):
         """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
 
