@@ -1720,6 +1720,7 @@ class MCPListSettingCard(ExpandSettingCard):
             )
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
+            empty_label.show()
         else:
             # 按传输类型分组渲染（stdio / http / sse），对齐 Hook 卡按事件分组的呈现方式
             buckets: Dict[str, list] = {}
@@ -1731,6 +1732,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 header.setStyleSheet(_group_header_style())
                 self._group_headers.append(header)
                 self.viewLayout.addWidget(header)
+                header.show()
                 for server_data in group_servers:
                     row = MCPServerRow(server_data, self.view)
                     row.removeRequested.connect(self._on_remove_server)
@@ -1742,6 +1744,7 @@ class MCPListSettingCard(ExpandSettingCard):
                     row.credentialSaved.connect(self._on_credential_saved)
                     self._server_rows[server_data.get("name", "")] = row
                     self.viewLayout.addWidget(row)
+                    row.show()  # 可见 parent 下新建 widget 不 show 会被布局 isEmpty 跳过 → sizeHint=0 → 卡片高度塌成 header
 
             # 已知类型按固定顺序渲染，剩余未知类型兜底追加（防御 .mcp.json 写了别的 type）
             for type_key, title in _MCP_TYPE_GROUPS:

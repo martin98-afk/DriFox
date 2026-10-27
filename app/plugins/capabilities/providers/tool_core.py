@@ -20,10 +20,22 @@ from app.plugins.capabilities.providers import model_meta, net_sync, process_cor
 
 def register(registry) -> None:
     def _kv(host: Any):
+        """窗口级 KV。
+
+        host 有两种形态：工具 impl 里是 ToolExecutor（自身带 window_state_*），
+        hook 里是 MainWidget（方法在它的 backend.tool_executor 上）。两种都要认，
+        否则 hook 侧调 state.kv 会直接 AttributeError → 插件静默跳过。
+        """
+        target = host
+        if not hasattr(target, "window_state_get"):
+            backend = _backend(host)
+            target = getattr(backend, "tool_executor", None) if backend is not None else None
+        if target is None or not hasattr(target, "window_state_get"):
+            return None
         return {
-            "get": host.window_state_get,
-            "set": host.window_state_set,
-            "delete": host.window_state_delete,
+            "get": target.window_state_get,
+            "set": target.window_state_set,
+            "delete": target.window_state_delete,
         }
 
     def _lsp(host: Any):
@@ -66,8 +78,16 @@ def register(registry) -> None:
         return _ui_artifacts_show(real)
 
     def _backend(host: Any):
-        """ToolExecutor → ChatBackend（host 自身持引用，无则 None）。"""
-        return getattr(host, "_backend", None)
+        """→ ChatBackend。
+
+        ToolExecutor 自身持 `_backend`；MainWidget（hook 侧 host）则用 `backend` 属性。
+        两种形态都要认，否则 hook 里取不到 backend → session.* 能力全部失效。
+        """
+        backend = getattr(host, "_backend", None)
+        if backend is not None:
+            return backend
+        candidate = getattr(host, "backend", None)
+        return candidate if hasattr(candidate, "get_current_session") else None
 
     def _builtin(host: Any):
         return getattr(host, "_builtin_tools", None)
