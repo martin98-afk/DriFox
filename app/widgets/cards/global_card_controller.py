@@ -626,11 +626,6 @@ class GlobalCardController:
         self._ensure_hook_edit_card()
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
-        _hl = self._settings_popup.hookListCard if self._settings_popup is not None else None
-        logger.debug(
-            f"[HOOKDBG] show_edit_card: before hide settings, hlCardH={_hl.height() if _hl else '?'} "
-            f"hlVisible={_hl.isVisible() if _hl else '?'}"
-        )
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
         self._hook_edit_card.set_title("编辑 Hook", icon_svg="hooks")
         hm = None
@@ -655,10 +650,6 @@ class GlobalCardController:
         if self._settings_popup is None:
             return
         hook_card = self._settings_popup.hookListCard
-        logger.debug(
-            f"[HOOKDBG] on_edit_saved: hlCardH={hook_card.height()} hlVisible={hook_card.isVisible()} "
-            f"settingsVisible={self._settings_popup.isVisible()} hmSet={hook_card._hook_manager is not None}"
-        )
         original = self._hook_edit_popup.get_original_data()
         hook_id = original.get("id", "") if original else ""
         hm = hook_card._hook_manager
@@ -682,7 +673,6 @@ class GlobalCardController:
             hm.edit_hook_by_id(hook_id, values)
             hm.reload_global_hooks(str(hook_card._hooks_config_file))
             hook_card._refresh(reload=True)
-            logger.debug(f"[HOOKDBG] on_edit_saved: edit path done, hlCardH={hook_card.height()}")
         elif hm:
             add_kwargs = dict(
                 event=values["event"],

@@ -1809,15 +1809,6 @@ class LLMSettingsCard(SystemCardFrame):
             card = getattr(self, card_name, None)
             if card is not None:
                 card.refresh_components()
-        _hl = getattr(self, "hookListCard", None)
-        if _hl is not None:
-            from loguru import logger
-
-            logger.debug(
-                f"[HOOKDBG] settings showEvent: tab={self._current_tab} hlCardH={_hl.height()} "
-                f"hlExpand={_hl.isExpand} hlVH={_hl.viewLayout.sizeHint().height()} "
-                f"hlItems={_hl.viewLayout.count()} hlVisible={_hl.isVisible()}"
-            )
         super().showEvent(event)
 
     def _prefetch_pages(self):

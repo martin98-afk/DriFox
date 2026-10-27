@@ -1279,8 +1279,8 @@ class ChatBackend(QObject):
             "project_name": self._current_project or (os.path.basename(project_root) if project_root else ""),
         }
 
-        # 交接文档：由 system-handoff 插件的 inject_handoff hook 从窗口级
-        # state.kv 自行读取，主程序不再预取注入内容。
+        # 插件自定义注入内容由各自 hook 从窗口级 state.kv 等通道自行读取，
+        # 主程序只提供 project_root / state 这类通用上下文。
 
         # 团队模式：让 SessionStart hook 也能按 #team_member matcher 精确触发
         # （与 chat_worker._trigger_worker_hook 注入的 is_team_member 字段对齐）

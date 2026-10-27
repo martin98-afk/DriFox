@@ -30,8 +30,6 @@ from qfluentwidgets import (
 
 from typing import Dict
 
-from loguru import logger
-
 from app.tools.tool_name_mapper import ToolNameMapper
 from app.utils.design_tokens import (
     ButtonStyles,
@@ -1134,11 +1132,6 @@ class HookListSettingCard(ExpandSettingCard):
     def _refresh(self, reload=True):
         """刷新 hook 列表"""
         was_expanded = self.isExpand
-        logger.debug(
-            f"[HOOKDBG] _refresh enter: reload={reload} was_expanded={was_expanded} "
-            f"visible={self.isVisible()} cardH={self.card.height()} fixedH={self.height()} "
-            f"oldVH={self.viewLayout.sizeHint().height()} nOld={self.viewLayout.count()}"
-        )
         if reload:
             self._load_hooks()
 
@@ -1170,30 +1163,6 @@ class HookListSettingCard(ExpandSettingCard):
             h = self.viewLayout.sizeHint().height()
             if h > 0:
                 self.setFixedHeight(self.card.height() + h)
-        logger.debug(
-            f"[HOOKDBG] _refresh exit: was_expanded={was_expanded} newVH={self.viewLayout.sizeHint().height()} "
-            f"fixedH={self.height()} minH={self.minimumHeight()} maxH={self.maximumHeight()} "
-            f"nNew={self.viewLayout.count()} visible={self.isVisible()}"
-        )
-
-    def toggleExpand(self):
-        """打点包装：定位列表消失时用户手动收起/展开的时序"""
-        logger.debug(
-            f"[HOOKDBG] toggleExpand: isExpand={self.isExpand} cardH={self.height()} "
-            f"vh={self.viewLayout.sizeHint().height()} nItems={self.viewLayout.count()}"
-        )
-        super().toggleExpand()
-
-    def setExpand(self, isExpand: bool):
-        """打点包装：捕获程序化展开（含 _expand_page_cards 兜底）"""
-        import traceback
-
-        origin = "".join(traceback.format_stack(limit=5)[:-1])
-        logger.debug(
-            f"[HOOKDBG] setExpand({isExpand}): cur={self.isExpand} cardH={self.height()} "
-            f"vh={self.viewLayout.sizeHint().height()} nItems={self.viewLayout.count()}\n{origin}"
-        )
-        super().setExpand(isExpand)
 
     def _load_hooks(self):
         """从 HookManager 加载分组后的 hooks"""
@@ -1219,6 +1188,7 @@ class HookListSettingCard(ExpandSettingCard):
             )
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
+            empty_label.show()
             return
 
         # 按事件顺序渲染
@@ -1242,6 +1212,7 @@ class HookListSettingCard(ExpandSettingCard):
                 f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
             )
             self.viewLayout.addWidget(header)
+            header.show()
 
             # Hook 条目
             for hook_data in event_hooks:
@@ -1251,6 +1222,7 @@ class HookListSettingCard(ExpandSettingCard):
                 item.edited.connect(lambda hid: self._edit_hook_by_id(hid))
                 item.toggled.connect(lambda hid, enabled: self._toggle_hook_by_id(hid, enabled))
                 self.viewLayout.addWidget(item)
+                item.show()  # 可见 parent 下新建的 widget 不 show 会被布局 isEmpty 跳过 → sizeHint=0 → 卡片高度塌成 header
                 self._hook_items[hook_id] = item
 
     def _edit_hook_by_id(self, hook_id: str):

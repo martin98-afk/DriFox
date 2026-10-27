@@ -6954,12 +6954,12 @@ class OpenAIChatToolWindow(ToolWindow):
             if interrupted:
                 self._apply_interrupted_messages_to_session(interrupted)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Handoff] 切会话前停流失败: {e}")
+            logger.warning(f"[ActionQueue] 停流失败: {e}")
         self._last_stop_time = time.monotonic()
         try:
             self._sync_team_mail_on_stop()
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Handoff] 切会话前收尾团队邮件失败: {e}")
+            logger.warning(f"[ActionQueue] 收尾团队邮件失败: {e}")
 
     def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):
         """--clear 模式下，compaction 子智能体完成后的清空回调
@@ -11584,7 +11584,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 覆盖守卫：欢迎卡的渲染槽位是延迟调度的，可能晚于新会话里的第一轮对话
         # （handoff 自动继续用 QTimer(0) 发消息，welcome 走 0/50/100ms 槽位）。
         # 若此刻已在流式或会话已有对话消息，_clear_chat_area 会把刚渲染的消息卡片
-        # 从布局摘掉，表现为「停在欢迎页但状态在对话」（2026-10-27 handoff 复现）。
+        # 从布局摘掉，表现为「停在欢迎页但状态在对话」（2026-10-27 自动继续路径复现）。
         if getattr(self, "_is_streaming", False):
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 流式中跳过（wid={self._window_id}）")
             return
@@ -19411,11 +19411,16 @@ class OpenAIChatToolWindow(ToolWindow):
             self._clear_attachments()
         # 视觉模型时图片以 multimodal 注入：卡片同步预览 + session 消息打标记（恢复会话可回显）
         # hook_event 透传：TeamMail 等系统注入消息的身份按消息源解析（显示成员名而非用户名）
-        self._append_user_message(
+        user_card = self._append_user_message(
             user_text,
+            scroll=not ephemeral,
             image_attachments=_image_paths or None,
             source_message={"role": "user", "content": user_text, "_hook_event": hook_event} if hook_event else None,
         )
+        if ephemeral:
+            # 交接自动继续：卡片占位保持 batch 结构一致，但用户不可见
+            # （session 里也没有这条消息，切走再切回重建时自然消失）
+            user_card.setVisible(False)
 
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
@@ -19468,6 +19473,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "raw_input_text": _raw_input_text,
                     "session_id": session.session_id if session else None,
                     "assistant_card": assistant_card,
+                    "ephemeral": ephemeral,
                 }
 
                 def _encode_worker():
@@ -19493,6 +19499,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 session=session,
                 assistant_card=assistant_card,
                 user_content=None,
+                ephemeral=ephemeral,
             )
 
         QTimer.singleShot(0, _do_deferred_send)
@@ -19509,6 +19516,7 @@ class OpenAIChatToolWindow(ToolWindow):
             assistant_card=ctx.get("assistant_card"),
             user_content=ctx.get("user_content"),
             expect_session_id=ctx.get("session_id"),
+            ephemeral=bool(ctx.get("ephemeral")),
         )
 
     def _finish_deferred_send(
@@ -19522,13 +19530,23 @@ class OpenAIChatToolWindow(ToolWindow):
         assistant_card,
         user_content,
         expect_session_id: Optional[str] = None,
+        ephemeral: bool = False,
     ):
         """_do_deferred_send 的发送收尾段（编码完成后主线程执行）
 
         expect_session_id 非空时（图片异步编码路径）校验当前会话未切换：
         编码期间用户切会话则放弃发送并回滚 UI，防把旧会话的图发进新会话。
+        ephemeral=True 时消息只进本轮请求，不写 session、不渲染气泡。
         """
         if getattr(self, "_is_destroyed", False):
+            return
+
+        # ephemeral（自动继续）不进排队队列：撞上繁忙说明时序异常，
+        # 放弃本轮，避免退化成一条会渲染的真实用户消息
+        if ephemeral and self._worker_actually_busy():
+            logger.warning("[Session] ephemeral 发送撞上繁忙 worker，放弃本次自动继续")
+            self._is_streaming = False
+            self._toggle_send_stop(False)
             return
 
         if expect_session_id is not None:
@@ -19567,9 +19585,16 @@ class OpenAIChatToolWindow(ToolWindow):
             engine_kwargs["_input_attachments"] = list(input_attachments)
         if raw_input_text:
             engine_kwargs["_raw_input_text"] = raw_input_text
-        # 交接自动继续：消息不写 session（不渲染气泡、不进历史），只进本轮请求
+        # 系统驱动的 ephemeral 消息：不进排队、不渲染气泡、只进本轮请求
         if ephemeral:
             engine_kwargs["_ephemeral"] = True
+            # 只有 ephemeral 消息的会话也允许落库（否则切走再回来对话消失）
+            cur = self.session_manager.get_current_session() if self.session_manager else None
+            if cur is not None:
+                try:
+                    cur.metadata["_ephemeral_session"] = True
+                except Exception:
+                    pass
         # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
         # add_user_message 修改 session.messages。即使后续被 / 命令拦截
         # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
@@ -21204,12 +21229,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._focus_input_if_active()
 
-        # 交接插件登记的动作（停流/新建/发消息）：本轮真正结束，主线程按序执行。
+        # 插件登记的动作（停流/新建/发消息）：本轮真正结束，主线程按序执行。
         # 放最后：drain 里新建会话会清空待发队列，避免旧会话的消息续发到新会话。
-        self._drain_handoff_actions()
+        self._drain_action_queue()
 
-    def _drain_handoff_actions(self):
-        """执行交接插件登记的动作队列（停流 → 新建 → 发消息）
+    def _drain_action_queue(self):
+        """执行插件登记的动作队列（停流 → 新建 → 发消息）
 
         插件在工具执行期只能入队：同步停流会杀掉正在执行该工具的 worker。
         到这里本轮已真正结束，按登记顺序执行是安全时机。
@@ -21220,7 +21245,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             handlers = {
                 "interrupt": lambda p: self._stop_stream_for_actions(),
-                "new": self._handle_action_new_session,
+                "new": lambda p: self._create_new_session(close_history=True),
                 "send": lambda p: self._on_send_clicked(
                     str(p.get("text") or ""),
                     preserve_input=True,
@@ -21229,23 +21254,9 @@ class OpenAIChatToolWindow(ToolWindow):
             }
             done = get_action_queue().drain(str(getattr(self, "_window_id", "") or ""), handlers)
             if done:
-                logger.info(f"[Handoff] 已执行交接动作 {done} 个")
+                logger.info(f"[ActionQueue] 已执行动作 {done} 个")
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Handoff] 动作队列执行失败: {e}")
-
-    def _handle_action_new_session(self, payload: dict):
-        """动作队列的新建会话：建完给新会话打交接标记
-
-        自动继续走 ephemeral 不产生用户消息，落库守卫（has_user_message）
-        靠这个标记放行，否则新会话会被当成空会话不落库。
-        """
-        self._create_new_session(close_history=True)
-        session = self.session_manager.get_current_session() if self.session_manager else None
-        if session is not None:
-            try:
-                session.metadata["_handoff_session"] = True
-            except Exception:
-                pass
+            logger.warning(f"[ActionQueue] 动作队列执行失败: {e}")
 
     def _do_post_stream_cleanup(self):
         """流式完成后延迟执行的清理和同步操作（不阻塞 UI 渲染流程）"""
@@ -21743,8 +21754,8 @@ class OpenAIChatToolWindow(ToolWindow):
             msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
             for msg in saved_messages
         )
-        # 交接新会话没有用户消息（自动继续走 ephemeral），按会话标记放行
-        if not has_user_message and not (getattr(session, "metadata", None) or {}).get("_handoff_session"):
+        # 只有 ephemeral 消息的会话（系统驱动）也放行
+        if not has_user_message and not (getattr(session, "metadata", None) or {}).get("_ephemeral_session"):
             return
 
         # 🛡️ 跳过无变更保存：自上次保存后会话没有新消息/修改，
@@ -24749,8 +24760,8 @@ class OpenAIChatToolWindow(ToolWindow):
             msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
             for msg in session.messages
         )
-        # 交接新会话没有用户消息（自动继续走 ephemeral），按会话标记放行
-        if not has_user_message and not (getattr(session, "metadata", None) or {}).get("_handoff_session"):
+        # 只有 ephemeral 消息的会话（系统驱动）也放行
+        if not has_user_message and not (getattr(session, "metadata", None) or {}).get("_ephemeral_session"):
             return None
 
         # 🛡️ 跳过无变更保存：自上次保存后会话没有被修改，
