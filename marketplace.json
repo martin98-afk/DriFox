@@ -294,6 +294,31 @@
             }
         },
         {
+            "name": "system-handoff",
+            "description": "会话交接：上下文接近上限时把工作状态写成交接文档，切新会话继续，不断档",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-handoff",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true,
+                "hooks": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
             "name": "system-hook-policies",
             "description": "DriFox 内置 Hook 触发策略：all / none / tool_only / subagent_default / team_member",
             "version": "1.0.0",
