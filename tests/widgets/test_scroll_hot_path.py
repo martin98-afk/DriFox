@@ -12,10 +12,6 @@
    视口的卡片跑 `sync_width`（1.4ms/张）。常驻视口内的卡片在上一拍已同步，
    重复同步是纯浪费；集合每拍整体替换，离开视口后再滚入会重新同步。
 
-3. **a（布局纪元缓存）**：`_sync_node_preview_to_scroll` 里「节点 → 用户卡引用」
-   的定位结果只依赖布局结构，按 `_layout_epoch` 缓存；`y()`/`height()` 每拍实时
-   重读。四个递增挂点：`_add_chat_widget` / `_recycle_out_of_view_batches` /
-   `_clear_chat_area` / 撤回截断（`_truncate_session_from_user_round`）。
 
 测试策略：不实例化完整窗口；TTL/失效用 `__new__` + MagicMock 行为测；
 可视集与 epoch 用真实组件或源码静态断言（布局链依赖过多，行为测成本高）。
@@ -165,65 +161,14 @@ def test_visible_set_skips_already_visible_cards(qapp):
     assert len(calls) == 2, "离开视口后再次滚入必须重新同步（保证宽度正确）"
 
 
-# ─── 改动 a：布局纪元 ────────────────────────────────────────────────
-
-
-def test_layout_epoch_bumped_at_four_hooks():
-    """四个挂点都必须递增布局纪元（源码静态断言：布局链依赖过多，行为测成本高）"""
-    src = SRC_PATH.read_text(encoding="utf-8")
-
-    # _bump_layout_epoch 自身存在且两条动作齐全
-    start = src.find("def _bump_layout_epoch(self) -> None:")
-    assert start != -1, "缺少 _bump_layout_epoch 定义"
-    body_end = src.find("\n    def ", start + 1)
-    body = src[start:body_end]
-    assert "_layout_epoch += 1" in body, "递增 _layout_epoch"
-    assert "_node_user_cards_cache = None" in body, "作废节点定位缓存"
-
-    # 四个挂点：增卡 / 回收 / 清空 / 撤回截断
-    hooks = [
-        ("def _add_chat_widget(", "_bump_layout_epoch()", "新增卡片"),
-        ("def _recycle_out_of_view_batches(", "_bump_layout_epoch()", "批次回收"),
-        ("def _clear_chat_area(", "_bump_layout_epoch()", "清空聊天区"),
-        ("def _truncate_session_from_user_round(", "_bump_layout_epoch()", "撤回截断"),
-    ]
-    for defn, call, label in hooks:
-        fstart = src.find(defn)
-        assert fstart != -1, f"未找到 {label} 入口 {defn}"
-        fend = src.find("\n    def ", fstart + 1)
-        assert call in src[fstart:fend], f"{label}（{defn}）缺少 {call}"
-
-
-def test_node_cache_rebuilt_on_epoch_change():
-    """纪元变化 → 节点定位缓存作废重建；纪元不变 → 复用（不重扫 _batch_cards）"""
-    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
-    win._layout_epoch = 7
-    win._node_user_cards_cache = None
-    assert win._node_user_cards_cache is None
-
-    win._bump_layout_epoch()
-    assert win._layout_epoch == 8
-
-    # 复现缓存判定语义（与 _sync_node_preview_to_scroll 内一致）
-    win._node_user_cards_cache = (win._layout_epoch, [("located",)])
-    cache = win._node_user_cards_cache
-    assert cache is not None and cache[0] == win._layout_epoch, "同期应命中"
-
-    win._bump_layout_epoch()
-    cache = win._node_user_cards_cache
-    assert cache is None, "纪元递增必须同时清空缓存（否则复用陈旧卡引用）"
-
-
 # ─── T36 P1：会话切换后新卡宽度必同步（id 复用防串） ─────────────────
 
 
-def test_take_chat_widgets_resets_visible_set_and_bumps_epoch():
-    """会话切换出口必须同时作废纪元 + 清空可视集（T36 P1 的两条动作）"""
+def test_take_chat_widgets_resets_visible_set():
+    """会话切换出口必须清空可视集（T36 P1 的动作）"""
     win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     win._current_assistant_card = None
     win._displayed_session_id = None
-    win._layout_epoch = 5
-    win._node_user_cards_cache = (5, [("stale",)])
     win._last_visible_card_ids = {111, 222}  # 旧会话残留 id
 
     from PyQt5.QtWidgets import QVBoxLayout
@@ -233,8 +178,6 @@ def test_take_chat_widgets_resets_visible_set_and_bumps_epoch():
 
     win._take_chat_widgets()
 
-    assert win._layout_epoch == 6, "_take_chat_widgets 必须递增布局纪元"
-    assert win._node_user_cards_cache is None, "必须作废节点定位缓存"
     assert win._last_visible_card_ids == set(), (
         "必须清空可视集：否则新卡复用旧卡堆地址（id 相同）会被误判'已同步'而永久跳过宽度同步"
     )

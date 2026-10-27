@@ -1262,7 +1262,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 分支检测信号/缓存已随工作树插件化迁入 plugins/worktree-manager（BranchChip per-window 状态）
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
-        self._last_visible_user_pair_index = -1
         # [PERF] 滚底定时器：24ms → 50ms，减少冗余布局重算
         # 50ms 已足够覆盖最快的内容到达速度（约 30 chars/80ms 批处理）
         self._scroll_bottom_timer = QTimer(self)
@@ -1300,7 +1299,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_anchor_timer.setSingleShot(True)
         self._bottom_anchor_timer.setInterval(100)
         self._bottom_anchor_timer.timeout.connect(self._maintain_bottom_anchor)
-        self._suppress_scroll_sync_count = 0  # 加载历史时抑制滚动同步的计数器
         # 「程序性滚动」深度：>0 表示当前 setValue 由程序发起（滚底 / 高度锚定补偿 /
         # 滚动上界校正），不是用户意图。`_on_scroll_changed` 据此豁免 away 置位 ——
         # 否则终渲染那几百毫秒里「补偿落点 < 真实 maximum」会被记成用户上滚，
@@ -1409,11 +1407,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 常驻视口内的卡片（读取历史时占大多数）无需每拍重跑 sync_width
         # （1.4ms/张：setMin/MaxWidth 布局失效 + runJavaScript IPC）。
         self._last_visible_card_ids: set = set()
-        # [T23 改动3] 布局纪元 + 时间线用户卡引用缓存：`_sync_node_preview_to_scroll`
-        # 每拍都要定位「节点索引 → 用户卡片」，旧实现每拍全量扫 _batch_cards
-        # （O(节点 × 批内卡)）。纪元不变时复用卡引用，只重读 y()/height()。
-        self._layout_epoch = 0
-        self._node_user_cards_cache = None
         # [T28 L3] 强回收空闲兜底：_maybe_strong_recycle 原仅事件驱动（流式 chunk /
         # 流式结束 / 温和层尾部 / 滚动链），用户空闲（不滚动不流式）时即便子进程
         # RSS 已超阈值也不回收，只能等下一次交互。45s 低频兜底（自身幂等：队列空/
@@ -1451,7 +1444,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_assistant_round_index: Optional[int] = None  # 跟踪当前应分配给 assistant 的 round_index
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
         self._pending_scroll_to_batch: Optional[int] = None  # 时间线节点滚动目标 batch 索引
-        self._pending_scroll_to_update: Optional[int] = None  # 待更新的节点索引（用于同步高亮和进度）
         # 跳转落点收敛链（见 _locate_and_scroll_to_batch）：目标卡引用 + 剩余拍数
         # + 上一拍落点。目标卡销毁/会话切换时链自行终止（_jump_settle_step 内判活）。
         self._jump_target_card = None
@@ -9849,16 +9841,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except RuntimeError:
             pass
 
-    def _bump_layout_epoch(self) -> None:
-        """递增布局纪元并作废节点定位缓存（T23 改动3）。
-
-        任何改变「节点 → 用户卡引用」结构的操作（增卡 / 回收 / 撤回截断 /
-        清空 / 会话重载）都必须调用，`_sync_node_preview_to_scroll` 据此判定
-        缓存是否可复用。
-        """
-        self._layout_epoch += 1
-        self._node_user_cards_cache = None
-
     def _sync_visible_cards_on_scroll(self):
         """滚动时更新新进入可见区域的卡片
 
@@ -11580,8 +11562,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._refresh_context_usage_indicator()
             # 恢复缓存卡片后，多次滚动确保在底部
             self._scroll_to_bottom(sticky_ms=900)
-            # 滚动完成后同步时间线节点到最后一个
-            QTimer.singleShot(100, self._sync_node_preview_to_last)
             # 🐛 修复（产物区刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
             self._push_workbench_updates(refresh_artifacts=True)
             # 任务看板归属最新卡片：缓存卡片重建后面板需重新挂载
@@ -11959,9 +11939,8 @@ class OpenAIChatToolWindow(ToolWindow):
         finally:
             self._suspend_auto_scroll = False
 
-        # 节点预览和滚动同步在懒渲染完成后处理
+        # 节点预览在懒渲染完成后处理（时间线 widget 已不显示，仅维持数据）
         self._update_node_preview()
-        QTimer.singleShot(100, self._sync_node_preview_to_last)
         self._refresh_context_usage_indicator()
         # gc.collect(1)：仅扫年轻代（微秒级）。全代 collect 会 stop-the-world 20~80ms，
         # 是切会话/翻历史顿挫的根因（与 chat_worker MEM_DIAG 先例同源）
@@ -11993,7 +11972,6 @@ class OpenAIChatToolWindow(ToolWindow):
             insert_at_top=True,
             batch_offset=new_start,
         )
-        self._sync_node_preview_to_scroll()
 
         def restore_anchor():
             try:
@@ -12513,7 +12491,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 if recycled_count > 0:
                     # [T23 改动3] 批次回收 = 卡片离场，节点定位结构变化
-                    self._bump_layout_epoch()
                     # [T23 改动2] 剔除已回收卡的 id：id() 是内存地址，卡片销毁后
                     # 新卡可能复用同一地址，残留集合会让新卡被误判「已在视口」
                     # 而永久跳过宽度同步（表现为宽度不跟随窗口）。
@@ -12711,7 +12688,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ B9：只置 _batch_cards=None（卸载 UI），保留 _message_batch 数据
         self._batch_cards[batch_idx] = None
         # [T23 改动3] UI 卸载 = 卡片离场，节点定位结构变化
-        self._bump_layout_epoch()
         # [T23 改动2] 剔除已卸载卡的 id（防 id() 地址复用误判「已在视口」）
         self._last_visible_card_ids -= {id(c) for c in alive_cards}
         # 只减已渲染的卡数（_rendered_card_count 语义 = 已渲染未卸载）
@@ -13509,7 +13485,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_assistant_card = None
         self._displayed_session_id = None
         # [T23 改动3] 清空聊天区 = 全部卡片离场，布局纪元递增
-        self._bump_layout_epoch()
         # [T23 改动2] 同步重置可视集：卡片已全部销毁，id() 是内存地址，
         # 新卡可能复用旧地址 → 残留集合会让新卡被误判为「已在视口」跳过同步。
         self._last_visible_card_ids = set()
@@ -13605,7 +13580,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # _sync_visible_cards_on_scroll 会误判「已在视口、宽度已同步」而永久
         # 跳过宽度同步；同时旧卡的 id 残留在集合里也会让后续高亮/同步错位。
         # 此处作废布局纪元 + 清空可视集，让新会话的卡片重新跑一轮判定。
-        self._bump_layout_epoch()
         self._last_visible_card_ids = set()
         return widgets
 
@@ -14101,7 +14075,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._clamp_visible_batch_window()
         # [T36 P2] 公共重建出口：卡片集合与顺序已变 → 作废节点定位缓存。
         # 一处覆盖 _delete_user_round / _remove_interject_ghost_card / 截断三条路径。
-        self._bump_layout_epoch()
         logger.debug(
             f"[Delete] _rebuild_batch_cards_from_layout: {len(alive_cards)} alive cards → {new_len} batch slots"
         )
@@ -14797,7 +14770,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_current_assistant_card_ref()
         self._update_node_preview()
         self._refresh_context_usage_indicator()
-        self._sync_node_preview_to_scroll()
 
     def _on_clear_shortcut(self):
         if getattr(self, "_is_destroyed", False):
@@ -14820,8 +14792,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def _add_chat_widget(self, widget: QWidget, insert_index: Optional[int] = None):
         if getattr(self, "_is_destroyed", False):
             return
-        # [T23 改动3] 布局纪元递增（新增卡片改变节点定位结构）
-        self._bump_layout_epoch()
         if insert_index is None:
             add_message_to_layout(widget, self.chat_layout, is_widget_alive)
         else:
@@ -15680,163 +15650,8 @@ class OpenAIChatToolWindow(ToolWindow):
         node_data = build_node_preview_from_session(session, content_to_text, max_len=30)
 
         self.node_preview.update_nodes(node_data)
-        self._sync_node_preview_to_scroll()
         # 同步更新历史问题徽章
         self._update_history_questions_badge()
-
-    def _sync_node_preview_to_scroll(self):
-        """根据当前滚动位置同步时间线节点的高亮和进度条
-        新逻辑：进度条显示节点与节点之间的进度，和实际卡片高度绑定
-        """
-        # 加载历史时抑制滚动同步
-        if self._suppress_scroll_sync_count > 0:
-            self._suppress_scroll_sync_count -= 1
-            return
-
-        if not hasattr(self, "chat_scroll_area") or not hasattr(self, "node_preview"):
-            return
-
-        session = self.session_manager.get_current_session()
-        if not session:
-            return
-
-        total_nodes = len(self.node_preview._nodes) if hasattr(self.node_preview, "_nodes") else 0
-        if total_nodes == 0:
-            self._last_visible_user_pair_index = -1
-            self.node_preview.set_visible_node(-1)
-            self.node_preview.set_progress_position(-1)
-            return
-
-        # 如果有待更新的目标索引（点击跳转中），直接使用它
-        if self._pending_scroll_to_update is not None:
-            highlighted_index = self._pending_scroll_to_update
-            self._pending_scroll_to_update = None
-            highlighted_index = max(0, min(highlighted_index, total_nodes - 1))
-            self.node_preview.set_progress_position(highlighted_index)
-            if highlighted_index != self._last_visible_user_pair_index:
-                self._last_visible_user_pair_index = highlighted_index
-                self.node_preview.set_visible_node(highlighted_index)
-            return
-
-        scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        visible_top = scroll_bar.value()
-
-        # 使用节点-批次映射（与 build_node_preview_data 对齐），只遍历有节点的 user batch
-        node_to_batch = self._build_node_to_batch_mapping()
-
-        # [T23 改动3] 布局纪元缓存：节点 → 用户卡**引用**的定位结果只依赖布局结构
-        # （批次数组与批内卡片构成），不依赖高度。纪元不变时复用卡引用，避免每拍
-        # 全量扫 _batch_cards（O(节点 × 批内卡)）；y()/height() 是布局结果，仍每拍重读。
-        cache = self._node_user_cards_cache
-        if cache is not None and cache[0] == self._layout_epoch:
-            located = cache[1]
-        else:
-            located = []
-            for node_idx, batch_idx in enumerate(node_to_batch):
-                if node_idx >= total_nodes:
-                    break
-
-                # 尝试从 batch_cards 中找到对应的卡片
-                cards = self._batch_cards[batch_idx] if batch_idx < len(self._batch_cards) else None
-                if cards:
-                    for card in cards:
-                        if sip.isdeleted(card):
-                            continue
-                        if isinstance(card, MessageCard) and card.role == "user":
-                            located.append((node_idx, card))
-                            break
-            self._node_user_cards_cache = (self._layout_epoch, located)
-
-        # 每拍实时重读几何（卡片高度随懒渲染/折叠持续变化，不能随引用一起缓存）
-        user_card_info = []
-        for node_idx, card in located:
-            if sip.isdeleted(card):
-                continue
-            user_card_info.append(
-                {
-                    "index": node_idx,
-                    "y": card.y(),
-                    "bottom": card.y() + card.height(),
-                }
-            )
-
-        # 如果没有找到任何已渲染卡片，fallback到估算
-        if not user_card_info and scroll_bar.maximum() > 0:
-            scroll_ratio = visible_top / scroll_bar.maximum()
-            highlighted_index = int(round(scroll_ratio * (total_nodes - 1)))
-            progress_position = highlighted_index
-        else:
-            # 找到当前可视区域所在的节点区间
-            # 找出当前可视top落在哪个区间 [user_i, user_{i+1}]
-            current_segment_index = -1
-            for i in range(len(user_card_info)):
-                if i < len(user_card_info) - 1:
-                    # 当前区间是从这个user卡片开始，到下一个user卡片之前
-                    # 包含这个user问题和它对应的所有大模型回答卡片
-                    segment_end_y = user_card_info[i + 1]["y"]
-
-                    if visible_top < segment_end_y:
-                        current_segment_index = i
-                        break
-                else:
-                    # 最后一个节点，一直到最后
-                    current_segment_index = i
-                    break
-
-            # 计算进度
-            if current_segment_index >= 0:
-                start_node_index = user_card_info[current_segment_index]["index"]
-                start_y = user_card_info[current_segment_index]["y"]
-
-                if current_segment_index < len(user_card_info) - 1:
-                    end_y = user_card_info[current_segment_index + 1]["y"]
-                else:
-                    # 最后一个区间，使用最后一个卡片的bottom作为终点
-                    if len(user_card_info) > 0:
-                        last_item = user_card_info[-1]
-                        end_y = last_item["bottom"] + 500  # 增加一点余量
-                    else:
-                        end_y = start_y
-
-                # 计算在当前区间的比例
-                if end_y > start_y:
-                    segment_progress = (visible_top - start_y) / (end_y - start_y)
-                else:
-                    segment_progress = 0
-
-                # 转换到节点坐标
-                progress_position = start_node_index + segment_progress
-                visible_node_index = start_node_index
-            else:
-                # 都没找到，fallback
-                progress_position = 0
-                visible_node_index = 0
-                highlighted_index = 0
-
-            highlighted_index = visible_node_index
-
-        # 确保在有效范围内
-        progress_position = max(0, min(progress_position, total_nodes - 1))
-        highlighted_index = max(0, min(highlighted_index, total_nodes - 1))
-
-        # 更新进度条和高亮节点
-        self.node_preview.set_progress_position(progress_position)
-        if highlighted_index != self._last_visible_user_pair_index:
-            self._last_visible_user_pair_index = highlighted_index
-            self.node_preview.set_visible_node(highlighted_index)
-
-    def _sync_node_preview_to_last(self):
-        """滚动完成后同步到最后一个节点"""
-        if not hasattr(self, "node_preview"):
-            return
-
-        # 直接使用 node_preview 的节点数（与 build_node_preview_data 保持一致）
-        node_count = len(self.node_preview._nodes) if hasattr(self.node_preview, "_nodes") else 0
-        if node_count > 0:
-            last_index = node_count - 1
-            self.node_preview.set_visible_node(last_index)
-            self.node_preview.set_progress_position(last_index)
-            self._last_visible_user_pair_index = last_index
 
     def _scroll_to_target_node_index(self, target_index: int):
         """
@@ -15953,8 +15768,6 @@ class OpenAIChatToolWindow(ToolWindow):
         target_batch_index = self._pending_scroll_to_batch
         self._pending_scroll_to_index = None
         self._pending_scroll_to_batch = None
-
-        self._pending_scroll_to_update = target_index
 
         # 如果 target_batch_index 未提供，从 _message_batch 查找
         if target_batch_index is None:
@@ -16183,9 +15996,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         重建已卸载批次、收敛落点等全部由 `_locate_and_scroll_to_batch` 负责。
         """
-        if node_index >= 0:
-            self._pending_scroll_to_update = node_index
-
         if self._locate_and_scroll_to_batch(batch_index):
             return
 
@@ -16421,7 +16231,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if target_batch_index < 0:
             return
 
-        self._pending_scroll_to_update = index
         if self._locate_and_scroll_to_batch(target_batch_index):
             return
 
@@ -16435,7 +16244,6 @@ class OpenAIChatToolWindow(ToolWindow):
         #     card._scroll_position_changed(value)
 
     def _on_scroll_changed(self, value):
-        self._sync_node_preview_to_scroll()
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         # 跳转锁**不**在 valueChanged 里解锁。
         #
@@ -16552,7 +16360,6 @@ class OpenAIChatToolWindow(ToolWindow):
         session.set_messages(canonical_messages[:cutoff_index], preserve_compaction=False)
         self._session_dirty = True  # 🛡️ 截断修改了消息列表，脏标记兜底
         # [T23 改动3] 截断 = 尾部卡片离场，节点定位结构变化
-        self._bump_layout_epoch()
 
         # === 4. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
@@ -18732,9 +18539,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 即使anchor到期，也再延迟多次检查，防止多批懒渲染卡片撑开高度导致没到底
             # [P1 步骤6] 盲重试 8 改 2，剩余高度变化由 rangeChanged 事件即时贴底
             QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=2))
-        # 加载完成后抑制滚动同步，避免节点跑到渲染的卡片数量位置
-        self._suppress_scroll_sync_count = 0
-
+        
     def _ensure_at_bottom(self, retries: int = None):
         """确保滚动条在底部，用于懒渲染卡片高度变化后的二次修正
 
@@ -18820,7 +18625,6 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
-            self._suppress_scroll_sync_count = 0
             # 🐛 anchor 到期 ≠ 卡片高度稳定：WebEngine 高度异步上报可能晚于
             # sticky 窗口（大会话/慢机器常态），视口随后被顶离底部且无人再
             # 追平 → 「加载历史会话偶尔停在消息列表中间」。到期接力与非
@@ -21058,8 +20862,6 @@ class OpenAIChatToolWindow(ToolWindow):
             )  # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
             self._advance_visible_batch_window()
             self._register_new_cards_into_batches()
-            # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
-            self._sync_node_preview_to_last()
             # 🆕 发送纪元 +1（**不再解除压缩守卫**）。
             # 本回调路径不走 _on_send_clicked，因此必须自己推进 epoch；但旧实现
             # 顺手把 _post_compact_guard 置 False 是错的：一旦守卫被关，旧 worker
@@ -21456,9 +21258,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 对话完成后更新缓存统计显示
         self._refresh_cache_stats()
 
-        # ⚠️ 时间线节点在流式完成时不会更新 - 修复
         self._update_node_preview()
-        self._sync_node_preview_to_last()
 
         # 对话完成后刷新余额显示
         self._refresh_balance()
@@ -22356,9 +22156,7 @@ class OpenAIChatToolWindow(ToolWindow):
         current_title = self.title_edit.text() if self.title_edit else "对话"
         self._notify_if_inactive(f"{current_title} - 错误", error[:100])
 
-        # ⚠️ 时间线节点在引擎错误时不会更新 - 修复
         self._update_node_preview()
-        self._sync_node_preview_to_last()
 
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
         """API 重试状态通知 - 更新卡片边框和状态栏，并切到 error 状态"""
@@ -25717,9 +25515,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._response_start_time = None
         self._stop_elapsed = None
 
-        # ⚠️ 时间线节点在停止流式后不会更新 - 修复
         self._update_node_preview()
-        self._sync_node_preview_to_last()
 
         # 繁忙时插话：停止时未消费的插话消息回填输入框，不丢失
         try:

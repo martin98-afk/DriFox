@@ -7627,6 +7627,15 @@ class CodeWebViewer(QWebEngineView):
         # 不再清除 _lazy_markdown_cb——主题切换 / 卡片复用需要按需从
         # MessageCard._content_data 重新生成 markdown，避免 2 份等价文本常驻。
         # 真正释放卡片时才由 cleanup() 统一置 None。
+        # [PERF+正确性] 清空已完成工具指纹集合：
+        # - 语义上它表示「**本轮**已完成的工具」，只用于流式渲染抑制模型照抄的
+        #   未闭合协议残段（_inject_tool_blocks 的 completed=False 分支）。
+        #   一轮结束后残段已由终渲染消费完毕，跨轮残留会让下一轮同名同参的
+        #   真实工具调用被误判成「照抄」而静默丢弃（工具块凭空消失）。
+        # - 内存上它只有 append 没有 remove（唯一入口在
+        #   MessageCard.append_tool_result），长会话累积无上限。
+        if hasattr(self, "_finished_tool_fingerprints"):
+            self._finished_tool_fingerprints = set()
 
     @staticmethod
     def clear_global_cache():

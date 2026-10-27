@@ -43,8 +43,7 @@ def _make_window(qapp):
     win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     for key, value in {
         "_is_destroyed": False,
-        "_layout_epoch": 0,
-        "_pending_lazy_cards": [],
+            "_pending_lazy_cards": [],
         "_lazy_batch_timer_active": False,
         "_virtual_scroll_buffer": 1,
         "_incremental_visible_batch_count": 8,

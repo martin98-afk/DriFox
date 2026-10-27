@@ -45,7 +45,6 @@ def _make_win(**overrides):
     win._programmatic_scroll_depth = 0
     win._bottom_anchor_deadline = 0.0
     win._bottom_anchor_timer = MagicMock()
-    win._sync_node_preview_to_scroll = MagicMock()
     win._virtual_scroll_timer = MagicMock()
     win._scroll_sync_timer = MagicMock()
     win._load_more_history_batches = MagicMock()

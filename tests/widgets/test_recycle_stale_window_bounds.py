@@ -58,7 +58,6 @@ def _make_win(n_batches: int = 5):
     win._install_batch_placeholder = MagicMock(return_value=True)
     win._try_detach_card_viewer = lambda card: False
     win._render_message_to_card = MagicMock()
-    win._bump_layout_epoch = MagicMock()
     win.chat_layout = MagicMock()
     win.chat_layout.indexOf.return_value = 0
     return win

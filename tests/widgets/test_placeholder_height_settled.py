@@ -55,7 +55,6 @@ def _make_win():
     win._rendered_card_count = 0
     win._unloaded_pids = []
     win._current_assistant_card = None
-    win._bump_layout_epoch = MagicMock()
     win._decr_rendered_count = MagicMock()
     win._register_unloaded_pid = MagicMock()
     win._try_detach_card_viewer = lambda card: False
