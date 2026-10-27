@@ -888,6 +888,25 @@ class AssistantManager:
                 return p
         return None
 
+    def display_user_avatar_path(self, aid: str) -> Optional[Path]:
+        """用户头像显示链：自设头像 → gitee 账户头像（仅显示回落，不写入设置）→ None。
+
+        gitee 回落只读本地缓存（能力池 net.avatar 的 cached_path，主线程安全）；
+        缓存未命中时由 UI 层触发后台拉取，拉到后新消息/下次显示生效。
+        """
+        own = self.user_avatar_path(aid)
+        if own:
+            return own
+        try:
+            from app.plugins.sdk import caps_for
+
+            avatar = caps_for("net.avatar", surface="ui")
+            p = avatar["cached_path"]() if avatar and callable(avatar.get("cached_path")) else None
+            return Path(p) if p else None
+        except Exception as e:
+            logger.debug(f"[assistant_hub] gitee 头像回落读取失败: {e}")
+            return None
+
     def save_user_avatar_from_bytes(self, aid: str, data: bytes, ext: str) -> Optional[Path]:
         """保存用户头像（预置库复制与本地上传统一走 bytes 落盘，不引用源路径）。"""
         ext = ext.lower().lstrip(".")

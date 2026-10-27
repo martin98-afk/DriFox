@@ -469,7 +469,11 @@ class AssistantCardWidget(QWidget):
         def _do_bind() -> None:
             mgr = self._mgr
             self._profile.bind(a.name or a.id, a.user_addressing or mgr.user_name(), a.utility_model or "")
-            self._profile.set_user_avatar(mgr.user_avatar_path(aid_capture), a.user_addressing or mgr.user_name())
+            shown = mgr.display_user_avatar_path(aid_capture)
+            self._profile.set_user_avatar(shown, a.user_addressing or mgr.user_name())
+            # 自设与 gitee 缓存均未命中：后台拉取，完成后回主线程刷新回落显示
+            if shown is None:
+                self._fetch_gitee_avatar_async(aid_capture)
             self._about.set_persona(a.yuan)
             self._project.set_notes(a.project_notes_enabled)
             self._project.set_context_enabled(a.project_context_enabled)
@@ -629,6 +633,30 @@ class AssistantCardWidget(QWidget):
     #  用户头像（消息身份行显示）
     # ══════════════════════════════════════════════════
 
+    def _fetch_gitee_avatar_async(self, aid: str) -> None:
+        """后台拉取 gitee 头像（经 net.avatar 能力），完成后回主线程刷新回落显示。"""
+
+        def _worker() -> None:
+            try:
+                from app.plugins.sdk import caps_for
+
+                avatar = caps_for("net.avatar", surface="ui")
+                p = avatar["fetch"]() if avatar else None
+                if p:
+                    self._main_thread_call.emit(
+                        lambda: self._refresh_gitee_avatar_fallback(aid, str(p))
+                    )
+            except Exception as e:
+                logger.debug(f"[assistant_hub] gitee 头像后台拉取失败: {e}")
+
+        threading.Thread(target=_worker, daemon=True, name="ah-gitee-avatar").start()
+
+    def _refresh_gitee_avatar_fallback(self, aid: str, path: str) -> None:
+        """主线程：gitee 头像就绪，仍选中该助手且无自设头像时刷新回落显示。"""
+        a = self._mgr.get(aid)
+        if a and aid == self._active_aid and not self._mgr.user_avatar_path(aid):
+            self._profile.set_user_avatar(path, a.user_addressing or self._mgr.user_name())
+
     def _on_user_avatar_picked(self, data: bytes, ext: str) -> None:
         """用户头像选中（预置库复制 / 本地上传统一走 bytes 落盘）。"""
         a = self._mgr.get(self._active_aid)
@@ -645,7 +673,10 @@ class AssistantCardWidget(QWidget):
         if not a:
             return
         self._mgr.clear_user_avatar(a.id)
-        self._profile.set_user_avatar(None, a.user_addressing or self._mgr.user_name())
+        # 恢复默认 = 落回显示链回落（gitee 账户头像 → 色块首字母）
+        self._profile.set_user_avatar(
+            self._mgr.display_user_avatar_path(a.id), a.user_addressing or self._mgr.user_name()
+        )
         self._clear_identity_cache()
         self._notify("已恢复默认用户头像，下一条消息生效")
 

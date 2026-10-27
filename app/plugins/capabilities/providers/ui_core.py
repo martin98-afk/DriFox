@@ -12,7 +12,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.plugins.capabilities.providers import model_meta, process_core
+from app.plugins.capabilities.providers import model_meta, net_sync, process_core
 from app.utils.info_bar_guard import post_to_main
 
 
@@ -1078,5 +1078,9 @@ def register(registry) -> None:
     reg.register("process.start", process_core.process_start, surface="ui", owner="core:ui")
     # 配置（按 key 读非敏感标量）
     reg.register("config.read", _config_read, surface="ui", owner="core:ui")
+    # 网络 / 云同步（host 无关实现，与 tool_core 共用 net_sync）
+    reg.register("net.avatar", net_sync.net_avatar, surface="ui", owner="core:net")
+    reg.register("net.download", net_sync.net_download, surface="ui", owner="core:net")
+    reg.register("sync.register", net_sync.sync_register, surface="ui", owner="core:net")
     # 逃生舱
     reg.register("host.raw", _host_raw, surface="ui", owner="core:ui")

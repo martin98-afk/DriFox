@@ -247,15 +247,28 @@ class TestCompactStatusRing:
         assert a90 != a270
         assert all(0 <= a <= 255 for a in (a90, a270))
 
-    def test_error_ring_constant(self):
-        """error 环恒亮，不参与呼吸（报错是需一眼确认的事实）"""
+    def test_error_ring_blinks(self):
+        """error 环随相位闪烁（暗相位接近熄灭）：icon 与环同色系时常亮会被吃掉"""
         from app.widgets.tab_panel import _TabProjectIcon
 
         icon = _TabProjectIcon(size=26)
         icon.set_status_ring("error", 90.0)
-        a90 = icon._ring_color().alpha()
+        a_bright = icon._ring_color().alpha()
         icon.set_status_ring("error", 270.0)
-        assert icon._ring_color().alpha() == a90
+        a_dark = icon._ring_color().alpha()
+        assert a_bright != a_dark
+        # 闪烁幅度必须显著（呼吸式小摆动在同色 icon 旁仍看不出）
+        assert a_bright - a_dark > 150, f"闪烁幅度不足: bright={a_bright} dark={a_dark}"
+
+    def test_ring_alpha_visible_at_phase_zero(self):
+        """减少动态效果时相位冻结在 0：环必须仍可见（中点亮度），不能停在暗相位"""
+        from app.widgets.tab_panel import _TabProjectIcon
+
+        icon = _TabProjectIcon(size=26)
+        for state in ("error", "question"):
+            icon.set_status_ring(state, 0.0)
+            a = icon._ring_color().alpha()
+            assert a >= 120, f"{state} 在 phase=0 时过暗，静态下状态不可见: alpha={a}"
 
     def test_block_size_stable_across_status(self, panel, qtbot):
         """方块几何与缩写字号与状态无关（不抽搐）

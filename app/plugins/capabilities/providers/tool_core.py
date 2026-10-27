@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.plugins.capabilities.providers import model_meta, process_core
+from app.plugins.capabilities.providers import model_meta, net_sync, process_core
 
 
 def register(registry) -> None:
@@ -322,6 +322,7 @@ def register(registry) -> None:
     registry.register("lsp.query", _lsp, surface="tool", owner="core:tool")
     registry.register("mcp.call", _mcp, surface="tool", owner="core:tool")
     registry.register("net.upload", _gitee, surface="tool", owner="core:tool")
+    registry.register("net.download", net_sync.net_download, surface="tool", owner="core:net")
     registry.register("subagent.run", _subagent, surface="tool", owner="core:tool")
     registry.register("process.start", process_core.process_start, surface="tool", owner="core:tool")
     registry.register("ui.artifacts.show", _artifacts_show, surface="tool", owner="core:tool")
