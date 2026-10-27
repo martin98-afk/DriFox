@@ -39,7 +39,6 @@ def _make_win():
     win._rendered_card_count = 0
     win._unloaded_pids = []
     win._current_assistant_card = None
-    win._bump_layout_epoch = MagicMock()
     win._decr_rendered_count = MagicMock()
     win._register_unloaded_pid = MagicMock()
     win._try_detach_card_viewer = lambda card: False
@@ -114,8 +113,7 @@ def test_unload_batch_skips_unrendered_batch(qapp):
     assert removed == 0
     assert win._batch_cards[0] == [card], "未渲染批次必须保留 UI 引用"
     win._install_batch_placeholder.assert_not_called()
-    win._bump_layout_epoch.assert_not_called()
-
+    
 
 def test_unload_batch_still_unloads_rendered_batch(qapp):
     """已渲染批次行为不变：正常卸载、置 None、装等高占位。"""

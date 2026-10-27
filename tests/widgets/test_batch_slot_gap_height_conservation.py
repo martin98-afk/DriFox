@@ -63,8 +63,6 @@ def _make_window(qapp, per=2):
         "_last_visible_card_ids": set(),
         "_restore_queue": [],
         "_current_assistant_card": None,
-        "_layout_epoch": 0,
-        "_node_user_cards_cache": None,
         "_rendered_card_count": 0,
         "_recycle_lru_call_count": 0,
         "_incremental_visible_batch_count": 8,
@@ -76,7 +74,6 @@ def _make_window(qapp, per=2):
         "_lazy_batch_timer_active": False,
         "_history_load_threshold": 48,
         "_initial_scroll_to_bottom": True,
-        "_suppress_scroll_sync_count": 0,
         "_visible_batch_start": 0,
         "_visible_batch_end": BATCH,
     }.items():

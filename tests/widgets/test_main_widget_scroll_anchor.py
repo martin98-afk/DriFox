@@ -51,7 +51,6 @@ def _make_window(**overrides):
     win._user_intentionally_away_from_bottom = False
     win._scroll_to_bottom = MagicMock()
     # _on_scroll_changed 依赖（滚动同步/定时器/历史加载）
-    win._sync_node_preview_to_scroll = MagicMock()
     win._bottom_anchor_deadline = 0.0
     win._bottom_anchor_timer = MagicMock()
     win._virtual_scroll_timer = MagicMock()
@@ -611,7 +610,6 @@ def _make_sticky_window(away=False):
     win._bottom_anchor_deadline = 0.0
     win._bottom_anchor_timer = MagicMock()
     win._scroll_bottom_timer = MagicMock()
-    win._suppress_scroll_sync_count = 0
     win._user_intentionally_away_from_bottom = away
     # T9：置底链路会调真实 _sync_scroll_maximum / _programmatic_scroll（访问
     # _scroll_max_cache / _programmatic_scroll_depth），裸 __new__ 实例属性访问

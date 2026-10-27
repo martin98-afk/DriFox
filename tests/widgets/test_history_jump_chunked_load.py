@@ -189,7 +189,6 @@ def _make_scroll_win():
     win = _make_win(batch_count=6, visible_start=0)
     win._is_virtual_recycling = False
     win._is_widget_alive = lambda w: True
-    win._pending_scroll_to_update = None
     win.chat_layout = MagicMock()
     win.chat_layout.count.return_value = 0
     win.chat_layout.itemAt.return_value = None
@@ -218,7 +217,6 @@ def test_restore_unloaded_batch_before_scroll():
 
     assert rendered == [(5, 4)], "按占位所在布局位原位重建，不得追加到末尾"
     assert sb.setValue.called, "重建后必须定位到目标卡片"
-    assert win._pending_scroll_to_update == 3
 
 
 def test_pending_target_restores_unloaded_batch():
