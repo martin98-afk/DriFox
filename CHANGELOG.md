@@ -2,6 +2,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [未发布]
+### ✨ 新功能 (New Features)
+- **OS 级沙箱（macOS Seatbelt）**: 安全中心新增「OS 级沙箱（macOS）」开关与档位（挡写入 / 挡写入+禁网）。开启后 agent 命令（bash 工具与后台任务）经 `sandbox-exec` 包装执行，工作区与系统临时目录外写入、可选联网在内核层被拒；与应用层沙箱审批正交（审批决定要不要问，OS 沙箱决定进程实际能碰什么）。非 macOS 平台自动直通。新增回归测试 `tests/core/test_os_sandbox.py`。
 
 ## [v0.6.12] - 2026-10-27 (重新发布 #8)
 

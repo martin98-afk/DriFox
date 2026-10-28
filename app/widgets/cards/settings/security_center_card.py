@@ -375,6 +375,21 @@ class SecurityCenterCard(QWidget):
         self.sys_switch.setChecked(bool(self._cfg.get("sys_tools_bypass")))
         self.sys_switch.checkedChanged.connect(self._on_sys_toggled)
 
+        # ── OS 级沙箱开关（macOS Seatbelt；独立于上方沙箱总开关，非 darwin 平台自动无效）──
+        self.os_sandbox_switch = SwitchSettingCard(
+            FIF.TILES if FIF else None,
+            "OS 级沙箱（macOS）",
+            "命令进程包进 sandbox-exec，内核层拦截越界",
+        )
+        self.os_sandbox_switch.setToolTip(
+            "开启后 agent 命令在 macOS Seatbelt 沙箱内执行：工作区与系统临时目录外禁止写入，"
+            "可选禁网。与上方「沙箱安全」审批层正交：审批层决定要不要问你，本层决定进程实际能碰什么。\n"
+            "仅 macOS 生效（sandbox-exec）；Windows/Linux 下开启无效果。\n"
+            "档位：挡写入 = 工作区+/tmp 外禁写、放行网络；挡写入+禁网 = 再拦全部网络。"
+        )
+        self.os_sandbox_switch.setChecked(bool(self._cfg.get("os_sandbox.enabled")))
+        self.os_sandbox_switch.checkedChanged.connect(self._on_os_sandbox_toggled)
+
         # ── 首屏结构：生效状态 + 开关区（全部最外层）+ 折叠明细区 + 说明 ──
         layout.addWidget(self._build_status_row())
         layout.addWidget(self.sandbox_switch)
@@ -382,6 +397,7 @@ class SecurityCenterCard(QWidget):
         layout.addWidget(self.trash_switch)
         layout.addWidget(self.net_switch)
         layout.addWidget(self.sys_switch)
+        layout.addWidget(self.os_sandbox_switch)
         # ── 审核处理卡（处理方法/审核模型/超时/超时处理，全页仅此一份）──
         layout.addWidget(self._build_approval_card())
         # 折叠明细区按「作用对象」分组，不再把无关配置拼进同一组
@@ -390,16 +406,17 @@ class SecurityCenterCard(QWidget):
         layout.addWidget(self._build_delete_group())
         layout.addWidget(self._build_network_group())
         layout.addWidget(self._build_quota_group())
+        layout.addWidget(self._build_os_group())
         layout.addWidget(self._build_backup_group())
 
         # ── 底部说明 ──
         # N1：默认值提示（沙箱与删除审批默认关闭，用户需手动开启）
         # MCP / upload_file 说明：三类不受本页约束的操作，避免虚假安全感
         _note_text = (
-            "说明：应用层拦截，非 OS 级沙箱隔离。\n"
+            "说明：沙箱安全为应用层拦截；「OS 级沙箱（macOS）」为内核层隔离（Seatbelt），仅 macOS 生效。\n"
             "沙箱安全与删除审批默认关闭，需手动开启后才会拦截；"
             "读操作除黑名单外不受路径约束，白名单与 workdir 边界仅约束写入。\n"
-            "进程配额与垃圾桶不受沙箱开关影响，始终按各自设置生效。\n"
+            "进程配额、垃圾桶与 OS 级沙箱不受沙箱开关影响，按各自设置生效。\n"
             "MCP 工具与 upload_file / webfetch 不受本页约束。"
         )
         note = BodyLabel(_note_text) if BodyLabel else QLabel(_note_text)
@@ -608,6 +625,35 @@ class SecurityCenterCard(QWidget):
         )
         card.addGroupWidget(self._build_job_limits_row())
         self._quota_group = card
+        return card
+
+    def _build_os_group(self) -> "ExpandGroupSettingCard":
+        """OS 级沙箱：档位选择（macOS Seatbelt；开关在上方外层）"""
+        card = ExpandGroupSettingCard(
+            FIF.TILES if FIF else None,
+            "OS 级沙箱（macOS）",
+            "内核层拦截越界写入/联网 · 仅 macOS 生效",
+        )
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(16, 8, 16, 8)
+        lay.setSpacing(6)
+
+        self.os_level_combo = ComboBox()
+        self.os_level_combo.addItem("挡写入（工作区+/tmp 外禁写，放行网络）", userData="write")
+        self.os_level_combo.addItem("挡写入+禁网（跑不可信脚本用）", userData="write+net")
+        tip = (
+            "挡写入：git push / pip install 等正常用，但改工作区与临时目录外的文件会被内核拒绝。\n"
+            "挡写入+禁网：再拦全部网络（DNS 也不可用），适合跑不可信脚本。\n"
+            "需同时开启上方「OS 级沙箱（macOS）」开关。"
+        )
+        self.os_level_combo.setToolTip(tip)
+        lay.addLayout(self._approval_row("档位", self.os_level_combo, tip))
+        card.addGroupWidget(body)
+
+        self._set_combo_by_data(self.os_level_combo, str(self._cfg.get("os_sandbox.level") or "write"))
+        self.os_level_combo.currentIndexChanged.connect(self._on_os_level_changed)
+        self._os_group = card
         return card
 
     def _build_backup_group(self) -> "ExpandGroupSettingCard":
@@ -1152,6 +1198,17 @@ class SecurityCenterCard(QWidget):
         self._cfg.set("network.enabled", bool(checked))
         self._cfg.save()
         self._refresh_status()
+
+    def _on_os_sandbox_toggled(self, checked: bool):
+        self._cfg.set("os_sandbox.enabled", bool(checked))
+        self._cfg.save()
+        logger.warning(f"[SecurityCenter] OS 级沙箱 → {checked}")
+
+    def _on_os_level_changed(self, *_):
+        level = self.os_level_combo.currentData() or "write"
+        self._cfg.set("os_sandbox.level", level)
+        self._cfg.save()
+        logger.info(f"[SecurityCenter] OS 级沙箱档位 → {level}")
 
     def _open_backup_dir(self):
         """打开编辑类备份目录（复用跨平台实现，避免两套 explorer 调用漂移）"""

@@ -7,8 +7,10 @@
 - check_path / check_command / check_network：三分法判定，返回 "allow"|"confirm"|"deny"
 - sandbox_check_tool：工具名 + 参数 → 判定（worker 层唯一入口）
 - stash_delete_targets_to_trash：垃圾桶开启时，删除类命令执行前把目标移入垃圾箱
+- OS 级沙箱（macOS Seatbelt）：build/wrap 把命令包进 sandbox-exec，内核层兑底
 
-本模块不弹 UI、不做 OS 级隔离；审批呈现由 chat_worker 既有弹窗链负责。
+本模块不弹 UI；审批呈现由 chat_worker 既有弹窗链负责。
+L1 三分法负责「要不要拦截/审批」，OS 级沙箱负责「放行进程实际能碰什么」，两层正交。
 设计文档：docs/superpowers/specs/2026-09-18-sandbox-l1-security-center-design.md
 """
 
@@ -20,6 +22,8 @@ import os
 import re
 import shlex
 import shutil
+import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Union
@@ -41,6 +45,10 @@ DEFAULT_CONFIG = {
     "command": {"allow_prefixes": [], "confirm_prefixes": []},
     "network": {"enabled": True, "blacklist_domains": []},
     "sys_tools_bypass": False,
+    # OS 级沙箱（macOS Seatbelt/sandbox-exec；非 darwin 平台自动直通）。
+    # enabled 默认 False：新机制完善期不默认开启（与 sandbox_enabled 同理，跨平台默认行为一致）；
+    # level: "write"=工作区+/tmp 外禁写（放行网络）| "write+net"=禁写且禁网
+    "os_sandbox": {"enabled": False, "level": "write"},
     "delete_protection": False,
     "delete": {"exempt_paths": [], "trash_enabled": False},
     "job_limits": {"memory_mb": 2048, "active_process": 64, "cpu_time_ms": 0},
@@ -1819,3 +1827,109 @@ def read_approval_policy(cfg: Optional[SandboxConfig] = None) -> dict:
         "timeout_action": action,
         "ai_model": model if isinstance(model, str) else "",
     }
+
+
+# ============================================================
+# OS 级沙箱（macOS Seatbelt / sandbox-exec）
+# ============================================================
+# L1 三分法（本文件上半部）是执行前软判定；进程放行后无内核围栏。
+# 本节把 agent 命令包进 sandbox-exec：白名单外的写入与（可选）网络在内核层被拒。
+# 仅 darwin 生效；sandbox-exec 缺失 / 未启用 / 包装异常一律原样直通，绝不阻断执行。
+
+_SEATBELT_BIN = "/usr/bin/sandbox-exec"
+# SBPL 里 deny 过滤器的 require-not 排除区：系统临时/缓存与设备文件。
+# /private/var/folders 是 macOS per-user 临时区（Python 缓存、剪贴板服务等依赖它）。
+_OS_SB_BASE_WRITABLE = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders", "/dev")
+_os_sb_profile_cache: dict = {}  # (workdir_real, level) -> profile 文件路径
+
+
+def os_sandbox_active() -> bool:
+    """OS 级沙箱是否生效：darwin + 已启用 + sandbox-exec 存在"""
+    if sys.platform != "darwin":
+        return False
+    try:
+        if not bool(SandboxConfig.get_instance().get("os_sandbox.enabled")):
+            return False
+    except Exception:  # noqa: BLE001 - 配置异常视为关闭
+        return False
+    return Path(_SEATBELT_BIN).exists()
+
+
+def _seatbelt_profile_text(workdir: Path, allow_network: bool) -> str:
+    """生成 SBPL profile（deny default + 白名单 allow 模式）。
+
+    ⚠ 实测（macOS 26.6）两个坑，改 profile 结构前先看：
+    1. allow default + (deny file-write* (require-not ...)) 结构：并列多个
+       require-not 或内嵌 or 时行为不定；且该结构下写 /dev/null 一律被拒
+       （devfs vnode 在 deny 过滤器的 require-not/or 里不按 /dev 路径匹配）。
+       deny default + allow 白名单模式则全部正常。
+    2. workdir 同时放行原始与 resolve() 形态（/tmp → /private/tmp symlink）。
+
+    白名单：workdir、系统临时区（/tmp、/private/tmp、/var/folders，
+    覆盖 Python tempfile/pip 缓存）、/dev（/dev/null、urandom 必需）。
+    mach-lookup/ipc 全放：本层目标是挡误操作（乱写/乱网），非硬隔离。
+    """
+    workdir_raw = str(workdir)
+    workdir_real = str(workdir.resolve())
+    write_paths = [workdir_raw, workdir_real, "/tmp", "/private/tmp", "/var/folders", "/private/var/folders", "/dev"]
+    write_rule = " ".join(f'(subpath "{p}")' for p in dict.fromkeys(write_paths))
+    lines = [
+        "(version 1)",
+        "(deny default)",
+        "(allow file-read*)",
+        f"(allow file-write* {write_rule})",
+        "(allow process-exec)",
+        "(allow process-fork)",
+        "(allow sysctl-read)",
+        "(allow sysctl-write)",
+        "(allow mach-lookup)",
+        "(allow ipc-posix*)",
+        "(allow iokit-get-properties)",
+    ]
+    if allow_network:
+        lines.append("(allow network*)")
+    # write+net 档：deny default 下网络默认已禁，无需额外 deny
+    return "\n".join(lines) + "\n"
+
+
+def _ensure_profile_file(workdir: Path, level: str) -> Path:
+    """按 (工作区真实路径, 档位) 进程级缓存 profile 文件，temp 下落盘"""
+    import hashlib
+
+    workdir_real = workdir.resolve()
+    key = (str(workdir_real), level)
+    cached = _os_sb_profile_cache.get(key)
+    if cached and Path(cached).exists():
+        return Path(cached)
+    text = _seatbelt_profile_text(workdir, allow_network=(level != "write+net"))
+    digest = hashlib.md5(key[0].encode() + level.encode()).hexdigest()[:12]
+    profile_path = Path(tempfile.gettempdir()) / f"drifox-os-sbx-{digest}.sb"
+    profile_path.write_text(text, encoding="utf-8")
+    _os_sb_profile_cache[key] = str(profile_path)
+    return profile_path
+
+
+def wrap_os_sandbox(command: str, cwd: Optional[Union[str, Path]] = None, use_shell: bool = False) -> str:
+    """把命令包装进 sandbox-exec；未启用/非 darwin/异常时原样返回。
+
+    use_shell 与调用方分流一致：run_safe 传 False（argv 直执行），run_with_shell 传 True。
+    Path A：sandbox-exec -f profile <argv...>（shlex.quote 重组，不引入 shell 解释）
+    Path B：sandbox-exec -f profile /bin/bash -c <command>（quote 防二次解释）
+    """
+    if not os_sandbox_active() or not command.strip():
+        return command
+    try:
+        cfg = SandboxConfig.get_instance()
+        level = str(cfg.get("os_sandbox.level") or "write")
+        if level not in ("write", "write+net"):
+            level = "write"
+        workdir = Path(cwd).expanduser().resolve() if cwd else Path.cwd()
+        profile = _ensure_profile_file(workdir, level)
+        prefix = [_SEATBELT_BIN, "-f", str(profile)]
+        if use_shell:
+            return " ".join(shlex.quote(p) for p in prefix) + f" /bin/bash -c {shlex.quote(command)}"
+        argv = shlex.split(command)
+        return " ".join(shlex.quote(p) for p in [*prefix, *argv])
+    except Exception as e:  # noqa: BLE001 - 包装失败绝不阻断命令执行
+        logger.warning(f"[OS sandbox] 包装失败，直通执行: {e}")
+        return command
