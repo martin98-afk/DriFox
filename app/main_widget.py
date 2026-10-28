@@ -18575,12 +18575,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(300, lambda: self._ensure_at_bottom(retries - 1))
             elif self._bottom_anchor_deadline > time.monotonic():
                 QTimer.singleShot(300, self._ensure_at_bottom)
-            else:
-                # 重试耗尽：关事件驱动窗口（下次链启动重新开启）
-                self._ensure_ab_active = False
-        else:
-            # 已贴底：无高度变化要追，关窗减少 rangeChanged 空转
-            self._ensure_ab_active = False
+        # 🐛 本方法**不再关闭** `_ensure_ab_active`（原有两处关闭：`else` 分支的
+        # 「已贴底即关窗」，以及重试耗尽分支）。它们都基于「贴底/重试用尽 =
+        # 收敛结束」这个错误假设：历史会话的卡片高度由 WebEngine 异步上报，
+        # 持续数秒、每张一次，任何一次重试恰好贴底或重试用尽都只是**中间态**。
+        # 窗口一关，`_on_scroll_range_changed` 首行就 return，剩余落高无人贴底
+        # → 长会话停在消息列表中间（用户报障：加载历史经常卡在中间而非置底）。
+        #
+        # 确定性复现（tests/debug 同款桩，真实实现驱动）：
+        #   15 张卡 5.3s 陆续落高 → baseline 停在 gap=10800px
+        #   24 张卡 8.5s 陆续落高 → baseline 停在 gap=14000px
+        #
+        # 关窗入口因此只剩跳转锁（`_lock_scroll_after_jump`）：它表达「用户正在
+        # 看别处的历史问题，别抢视口」，与落高进度无关。开窗由本方法负责，
+        # 保险丝时长由 `_on_scroll_range_changed` 按真实落高续期。
 
     def _wire_scroll_range_changed(self):
         """[P0 修复] rangeChanged 事件驱动贴底接线：必须在 chat_scroll_area 创建后调用。
@@ -18603,9 +18611,19 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         if not self._ensure_ab_active:
             return
-        if time.monotonic() > self._ensure_ab_active_until:
-            self._ensure_ab_active = False
-            return
+        now = time.monotonic()
+        # 🐛 原此处是 `if now > _ensure_ab_active_until: _ensure_ab_active = False; return`：
+        # 保险丝一到期就**永久关窗**，之后本方法首行吞掉所有剩余落高事件。
+        # 但本事件本身就是「还有内容在落高」的直接证据 —— rangeChanged 只在
+        # 内容高度真的变化时触发。历史会话的高度由 WebEngine 异步上报，一张一次、
+        # 持续数秒（确定性复现：24 张卡 8.5s，旧实现停在 gap=14000px），任何固定
+        # 时长都覆盖不了。
+        #
+        # 所以到期不再丢弃事件：命中即续期，窗口长度跟随真实工作量。落高停止后
+        # 不再有事件，无人续期，保险丝自然过期 —— 那才是「本轮收敛结束」的时刻。
+        # 关窗的唯一入口因此是跳转锁（`_lock_scroll_after_jump`），它表达的是
+        # 「用户正在看别处的历史问题，别抢视口」，与落高无关。
+        self._ensure_ab_active_until = now + 2.4
         if self._should_follow_bottom():
             with self._programmatic_scroll():
                 self.chat_scroll_area.verticalScrollBar().setValue(self._landed_bottom_value())
