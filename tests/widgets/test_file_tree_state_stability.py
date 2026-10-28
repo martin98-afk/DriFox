@@ -422,62 +422,28 @@ class TestContextMenu:
     """右键菜单结构：图标非空 + 剪贴板空时无「粘贴」项"""
 
     def _capture(self, card, path, monkeypatch):
-        from unittest.mock import MagicMock
-
         from PySide6.QtCore import QPoint
-        from PySide6.QtGui import QIcon
+        from PySide6.QtWidgets import QMenu
 
         captured = {}
 
-        class _FakeMenu:
-            """替代 cards 模块的 QMenu。
+        def fake_exec(self, *args, **kwargs):
+            rows = []
+            for act in self.actions():
+                if act.isSeparator():
+                    rows.append(None)
+                    continue
+                rows.append(
+                    {
+                        "text": act.text(),
+                        "has_icon": not act.icon().pixmap(16, 16).isNull(),
+                        "enabled": act.isEnabled(),
+                    }
+                )
+            captured["rows"] = rows
+            return None
 
-            PySide6 的 ``QMenu.exec`` 是 C++ 静态重载（类型属性 setattr 拦不住，
-            实际调用仍走原生实现），只能替换模块引用。
-            """
-
-            def __init__(self, *args, **kwargs):
-                self._actions = []
-
-            def setStyleSheet(self, *args, **kwargs):
-                return None
-
-            def addAction(self, *args):
-                text = args[-1]
-                icon = args[0] if args and isinstance(args[0], QIcon) else QIcon()
-                act = MagicMock()
-                act.text.return_value = text
-                act.icon.return_value = icon
-                act.isSeparator.return_value = False
-                act.isEnabled.return_value = True
-                self._actions.append(act)
-                return act
-
-            def addSeparator(self):
-                sep = MagicMock()
-                sep.isSeparator.return_value = True
-                self._actions.append(sep)
-
-            def actions(self):
-                return list(self._actions)
-
-            def exec(self, *args, **kwargs):
-                rows = []
-                for act in self._actions:
-                    if act.isSeparator():
-                        rows.append(None)
-                        continue
-                    rows.append(
-                        {
-                            "text": act.text(),
-                            "has_icon": not act.icon().pixmap(16, 16).isNull(),
-                            "enabled": act.isEnabled(),
-                        }
-                    )
-                captured["rows"] = rows
-                return None
-
-        monkeypatch.setattr(cards_mod, "QMenu", _FakeMenu)
+        monkeypatch.setattr(QMenu, "exec_", fake_exec)
         node = card._source_model.find_node(path)
         if node is None:
             card._on_context_menu(card._proxy_model.index(-1, -1), QPoint(0, 0))

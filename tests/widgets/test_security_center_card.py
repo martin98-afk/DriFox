@@ -304,7 +304,7 @@ def test_snapshot_clear_requires_confirmation(isolated_cfg, data_dir, monkeypatc
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-        def exec(self):
+        def exec_(self):
             return 0  # 用户取消
 
     monkeypatch.setattr(cd, "ConfirmDialog", _FakeDialog)
@@ -326,7 +326,7 @@ def test_snapshot_clear_removes_when_confirmed(isolated_cfg, data_dir, monkeypat
         def __init__(self, **kwargs):
             pass
 
-        def exec(self):
+        def exec_(self):
             return 1  # 确认
 
     monkeypatch.setattr(cd, "ConfirmDialog", _FakeDialog)
@@ -344,7 +344,7 @@ def test_snapshot_clear_noop_when_empty(isolated_cfg, data_dir, monkeypatch):
         def __init__(self, **kwargs):
             shown.append(True)
 
-        def exec(self):
+        def exec_(self):
             return 1
 
     monkeypatch.setattr(cd, "ConfirmDialog", _FakeDialog)
@@ -480,11 +480,7 @@ def test_c2_backup_card_no_duplicate_title(isolated_cfg):
     旧实现组头叫「编辑类备份」、组内第一行也叫「编辑类备份」，同屏两遍纯噪声。
     """
     card = _make_card()
-    # qfluentwidgets 的 ExpandGroupSettingCard 标题属性名随绑定变化：
-    # PyQt5 版直接暴露 titleLabel，PySide6 版挂在 .card（HeaderSettingCard）下
-    group = card._backup_group
-    header = getattr(group, "card", group)
-    group_title = header.titleLabel.text()
+    group_title = card._backup_group.titleLabel.text()
     row_title = card.backup_dir_card.titleLabel.text()
     assert row_title != group_title, f"组头与行标题重复：{group_title}"
 
@@ -589,7 +585,7 @@ def test_all_switches_outside_groups(isolated_cfg):
     )
     for switch in (card.sandbox_switch, card.delete_switch, card.trash_switch, card.net_switch, card.sys_switch):
         for g in groups:
-            assert switch not in g.widgets, f"{type(switch).__name__} 应在开关区，不应进折叠组 {type(g).__name__}#{groups.index(g)}"
+            assert switch not in g.widgets, f"{type(switch).__name__} 应在开关区，不应进折叠组 {g.titleLabel.text()}"
 
 
 def test_approval_card_built_once(isolated_cfg):
@@ -604,6 +600,9 @@ def test_approval_card_built_once(isolated_cfg):
     src = (Path(__file__).resolve().parent.parent.parent / "app" / "widgets" / "cards" / "settings" / "security_center_card.py").read_text(
         encoding="utf-8"
     )
+    assert src.count("layout.addWidget(self._build_approval_card())") == 1, "审核处理卡只允许挂载一次"
+
+
 def test_backup_group_separate_from_delete(isolated_cfg):
     """自动备份独立成组：备份卡在备份组，不在删除组"""
     card = _make_card()

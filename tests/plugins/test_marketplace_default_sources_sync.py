@@ -3,8 +3,7 @@
 
 背景：默认源 URL 随主程序线调整（pyside6 线切 drifox-plugins/pyside6 分支）后，
 旧版 _ensure_defaults 只按 name 追加缺失 builtin 源、不覆盖已有条目，存量用户的
-sources.json 永远锁死旧 main URL，市场清单/图标/安装全部走错分支。
-
+sources.json 永远锁死旧 URL，市场清单/图标/安装全部走错分支。
 四用例：存量旧 URL 同步更新、用户自定义源不动、已是新值幂等不重写、
 文件不存在写入全部默认源。全程 tmp_path，零网络。
 """
@@ -31,7 +30,7 @@ from pm_ui_sync import marketplace_manager as mm  # noqa: E402
 
 MarketplaceSourceManager = mm.MarketplaceSourceManager
 
-# 官方源默认 URL（当前版本应指向 pyside6 分支）
+# 官方源默认 URL（当前版本应指向 main 分支）
 OFFICIAL_DEFAULT_URL = "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/pyside6/marketplace.json"
 
 
@@ -59,20 +58,18 @@ def _url_of(sources: list, name: str) -> str:
 
 
 def test_stale_builtin_source_synced_to_default(tmp_path):
-    """存量 sources.json 里 builtin 源锁死旧 main URL → 启动即同步为当前默认。"""
+    """存量 sources.json 里 builtin 源锁死旧 URL → 启动即同步为当前默认。"""
     mgr = _make_mgr(tmp_path)
     legacy = [
         {
             "name": "drifox-official",
-            "source": {"source": "url", "url": "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/main/marketplace.json"},
+            "source": {"source": "url", "url": "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/pyside6/marketplace.json"},
             "auto_update": True,
             "builtin": True,
         },
     ]
     mgr._sources_file.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
-
     mgr._ensure_defaults()
-
     sources = _read_sources(mgr)
     assert _url_of(sources, "drifox-official") == OFFICIAL_DEFAULT_URL
     assert sources[0]["name"] == "drifox-official"  # 顺序保留
@@ -90,9 +87,7 @@ def test_user_custom_source_untouched(tmp_path):
         },
     ]
     mgr._sources_file.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
-
     mgr._ensure_defaults()
-
     sources = _read_sources(mgr)
     assert _url_of(sources, "drifox-official") == "https://example.com/my-own-market.json"
     names = [s["name"] for s in sources]
@@ -114,18 +109,14 @@ def test_idempotent_when_already_current(tmp_path):
     ]
     mgr._sources_file.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
     before = mgr._sources_file.read_text(encoding="utf-8-sig")
-
     mgr._ensure_defaults()
-
     assert mgr._sources_file.read_text(encoding="utf-8-sig") == before
 
 
 def test_missing_file_writes_all_defaults(tmp_path):
-    """文件不存在 → 写入全部默认源（含 pyside6 官方源）。"""
+    """文件不存在 → 写入全部默认源。"""
     mgr = _make_mgr(tmp_path)
-
     mgr._ensure_defaults()
-
     sources = _read_sources(mgr)
     assert _url_of(sources, "drifox-official") == OFFICIAL_DEFAULT_URL
     assert len(sources) == len(mm._default_sources())
