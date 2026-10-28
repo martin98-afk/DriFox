@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.6.12] - 2026-10-27 (重新发布 #4)
 
-自 v0.6.11 以来的变更 | 提交数：37 · 文件变更：144 · +9540/-2305 | 贡献者：dingma, mading, drifox-bot
+自 v0.6.11 以来的变更 | 提交数：38 · 文件变更：145 · +9572/-2305 | 贡献者：dingma, mading, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -78,9 +78,10 @@ All notable changes to this project will be documented in this file.
 
 - **事件驱动窗口已贴底时不再误关** (`1db3fa93`): 防止 event-driven 窗口在已处于底部时触发关闭。
 
-### ✨ 新功能 (New Features)（重新发布 #5 追加）
+### ✨ 新功能 (New Features)（重新发布 #6 追加）
 
 - **CodeBuddy 专家任务按形态识别 + 对话重试与 SSE 容错** (`411af1e8`): `_is_expert_task` 由依赖 task_code 命名改为按形态判定（jump_url 含 expertId / 文案点到专家名 / 文案含「对话」），新上线同类活动任务无需改码即自动接管；`Expert_lighthouse`、`Expert_team_use_3` 两类明确排除走别处路径。buddy_auth 的 `chat_once` 增加失败重试一次（同轮连发两次取有效结果），并容错 SSE 末尾 requestId 时序差异与 JSON 序列化空格（用 `"id"\s*:\s*"` 正则解析）。新增 `tests/plugins/test_codebuddy_daily_tasks.py`（115 行）。
+- **CodeBuddy stale done marker 清理** (`368a2d11`): 任务进度里的过期 done 标记会被自动清理，避免已完成状态被陈旧标记卡住。
 
 ## [v0.6.11] - 2026-10-26 (重新发布 #7)
 
