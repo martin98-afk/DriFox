@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -45,6 +45,7 @@ from loguru import logger
 
 from app.plugins.managers.plugin_config_store import PluginConfigStore
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 
 
 class _PlainEdit(TextEdit):
@@ -125,11 +126,13 @@ class _FieldRow(QWidget):
         layout.addWidget(control, 1)
 
 
-class PluginConfigCard(ExpandSettingCard):
+class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
     """schema 驱动的折叠式插件配置卡（无 schema 时渲染为空，不报错）。
 
-    继承 ExpandSettingCard 复用标题/折叠/header 样式；通过 viewLayout
-    把行添加到内部 view；bool 字段挂到 header 右侧作为 SwitchButton。
+    高度交给 DynamicHeightExpandCardMixin：基类用「spaceWidget 等高占位 + 滚条动画」
+    做折叠，而本卡内容有多行字段与说明行，sizeHint 在展开瞬间不准，直接套基类
+    会有「展开后底部一大段空白」。Mixin 停用占位、改走高度动画 + 收敛校正，
+    既保留折叠动画也不留空白。
     """
 
     def __init__(self, plugin_name: str, parent=None):
@@ -248,30 +251,14 @@ class PluginConfigCard(ExpandSettingCard):
         hint.setWordWrap(True)
         self.viewLayout.addWidget(_FieldRow("", hint, self.view))
 
-    # ── 展开几何（基类 spaceWidget 占位问题，同插件侧自绘卡处理） ──
+    # ── 内容高度变化后触发重算（字段行/说明行已一次性建好，保留入口供回显后调用） ──
 
-    def _adjustViewSize(self):
-        """内容高度直切，不靠 spaceWidget 占位。
-
-        qfluentwidgets 基类展开时把 spaceWidget 设成内容等高，展开高度 =
-        内容 + 等高空白，表现为卡片底部一大段空白（内容越多空白越大）。
-        归零后按内容实际高度定格；代价是失去基类的滚动折叠动画。
-        """
+    def _resync_height(self) -> None:
+        """内容尺寸变了（如回显后长文本换行数变化）后重新定格高度。"""
         try:
-            self.spaceWidget.setFixedHeight(0)
-        except Exception:  # noqa: BLE001 — 旧版 qfluentwidgets 无该成员
-            pass
-        h = self.viewLayout.sizeHint().height()
-        self.setFixedHeight(self.card.height() + (h if self.isExpand else 0))
-
-    def setExpand(self, isExpand: bool):  # noqa: N802 - 与基类同名
-        if self.isExpand == isExpand:
-            return
-        self.isExpand = isExpand
-        self.setProperty("isExpand", isExpand)
-        self.setStyle(QApplication.style())
-        self.card.expandButton.setExpand(isExpand)
-        self._adjustViewSize()
+            self._adjust_view_size()
+        except Exception as e:  # noqa: BLE001 — 高度校正失败不影响交互
+            logger.debug(f"[PluginConfigCard] 高度同步跳过: {e}")
 
     def _resolve_plugin_icon(self):
         """读取插件自身 icon（按当前主题取 light/dark），失败回退 None。
