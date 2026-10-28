@@ -10,7 +10,7 @@
 from unittest.mock import patch
 
 import pytest
-from PyQt5.QtGui import QColor
+from PySide6.QtGui import QColor
 
 from app.widgets.tab_panel import TabPanel, _parse_rgba
 
@@ -172,7 +172,7 @@ class TestCompactStatusRing:
         反例（实测）：直接复用 _RAINBOW_COLORS 再提亮 55，浅色主题下环色 lum
         逼近 0.9，2px 细线在 #fafafc 底上淡到看不见。故环色按主题定 L。
         """
-        from PyQt5.QtGui import qGray
+        from PySide6.QtGui import qGray
 
         from app.widgets.tab_panel import _TabProjectIcon
 

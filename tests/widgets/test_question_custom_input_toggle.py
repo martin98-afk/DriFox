@@ -28,14 +28,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from PyQt5.QtCore import QEvent, QEventLoop, QPointF, Qt, QTimer
-from PyQt5.QtGui import QMouseEvent
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QEventLoop, QPointF, Qt, QTimer
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication
 
 # 与 tests/widgets 现有用例一致：offscreen 下先声明共享 GL 上下文并预热 QWebEngine。
 Qt.AA_ShareOpenGLContexts = Qt.AA_ShareOpenGLContexts
 try:
-    from PyQt5.QtWebEngineWidgets import (  # noqa: F401
+    from PySide6.QtWebEngineWidgets import (  # noqa: F401
         QWebEnginePage,
         QWebEngineSettings,
         QWebEngineView,

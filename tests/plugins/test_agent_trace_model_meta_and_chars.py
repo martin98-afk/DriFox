@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("PyQt5.QtCore")
+pytest.importorskip("PySide6.QtCore")
 
 from plugins.agent_trace.ui.trace_collector import TraceCollector  # noqa: E402
 from plugins.agent_trace.ui.trace_models import EntryKind  # noqa: E402

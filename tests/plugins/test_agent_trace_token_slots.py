@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("PyQt5.QtWidgets")
+pytest.importorskip("PySide6.QtWidgets")
 
 _ROOT = Path(__file__).resolve().parents[2]
 _UI_DIR = _ROOT / "plugins" / "agent_trace" / "ui"

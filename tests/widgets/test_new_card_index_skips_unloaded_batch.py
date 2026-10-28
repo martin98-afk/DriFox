@@ -29,7 +29,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from PyQt5.QtWidgets import QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
 
 from app.main_widget import OpenAIChatToolWindow
 from app.widgets.message_card import MessageCard

@@ -120,7 +120,7 @@ class TestSharedPool:
 
 class TestLateCallbackGuard:
     @pytest.mark.skipif(
-        not pytest.importorskip("PyQt5", reason="需要 PyQt5"),
+        not pytest.importorskip("PySide6", reason="需要 PyQt5"),
         reason="需要 PyQt5",
     )
     def test_on_topic_summary_generated_destroyed_guard(self):

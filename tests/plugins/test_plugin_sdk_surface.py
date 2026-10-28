@@ -90,7 +90,7 @@ def test_sdk_import_is_lazy_no_qt():
     code = (
         "import sys; n0=len(sys.modules); import app.plugins.sdk; "
         "added=len(sys.modules)-n0; "
-        "qt=any('PyQt5.QtWidgets' in m for m in sys.modules); "
+        "qt=any('PySide6.QtWidgets' in m for m in sys.modules); "
         "qf=any('qfluentwidgets' in m for m in sys.modules); "
         "print(added, qt, qf); "
         "assert not qt and not qf, f'sdk 顶层拉起了 Qt: {qt}/{qf}'; "
@@ -109,7 +109,7 @@ def test_sdk_pure_symbol_does_not_pull_qt():
 
     code = (
         "import sys; from app.plugins.sdk import estimate_tokens; "
-        "assert not any('PyQt5.QtWidgets' in m for m in sys.modules), 'estimate_tokens 拉起了 Qt'"
+        "assert not any('PySide6.QtWidgets' in m for m in sys.modules), 'estimate_tokens 拉起了 Qt'"
     )
     r = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8", errors="ignore"

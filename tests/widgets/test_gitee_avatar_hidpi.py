@@ -18,11 +18,11 @@
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("PySide6")
 
-from PyQt5.QtCore import QRectF, Qt  # noqa: E402
-from PyQt5.QtGui import QColor, QImage, QPixmap  # noqa: E402
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QRectF, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPixmap  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.widgets.cards.settings.gitee_card import _AvatarCircleWidget  # noqa: E402
 

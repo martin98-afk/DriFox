@@ -491,7 +491,7 @@ def test_gitee_card_button_refreshes_on_clear_binding_path(gitee_card_factory):
 class TestAvatarPalette:
     def test_gradient_end_darker_than_start(self):
         """渐变深端必须比亮端暗（darker(122) ≈ 深 18%），球面感的前提"""
-        from PyQt5.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         from app.widgets.cards.settings.gitee_card import _avatar_palette
 
@@ -502,7 +502,7 @@ class TestAvatarPalette:
 
     def test_saturation_reduced(self):
         """降饱和 28%：高饱和色表在浅色卡上扎眼，压后柔和"""
-        from PyQt5.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         from app.widgets.cards.settings.gitee_card import _avatar_palette
 
@@ -515,7 +515,7 @@ class TestAvatarPalette:
 
     def test_gray_input_keeps_valid(self):
         """灰阶输入（h=-1）不走降饱和分支，输出仍为有效色"""
-        from PyQt5.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         from app.widgets.cards.settings.gitee_card import _avatar_palette
 

@@ -12,7 +12,7 @@ icon 先往右跑、再跟着宽度往左回（折返感）。
 from unittest.mock import patch
 
 import pytest
-from PyQt5.QtCore import QObject
+from PySide6.QtCore import QObject
 
 from app.widgets.tab_manager_window import (
     _COLLAPSED_PANEL_WIDTH,

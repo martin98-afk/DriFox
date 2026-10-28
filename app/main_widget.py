@@ -307,24 +307,6 @@ _RESTORE_BATCH_SLOW_MS = 20  # 本批慢于此 → 下一批缩容
 _RESTORE_INTERVAL_VISIBLE_MS = 16  # 视口内未恢复完：让出一帧
 _RESTORE_INTERVAL_OFFSCREEN_MS = 30  # 已进入离屏段：沿用旧节奏
 
-# ── 交接（handoff）—— 上下文接近上限时的跨会话交接 ──
-# 补写轮指令：要求主智能体一次性落盘交接文档，不做其它动作。
-_HANDOFF_PROMPT = (
-    "请更新当前会话的交接文档。只调用一次 update_handoff 工具，"
-    "不要执行其他工具，也不要把交接内容当普通回复贴出来，写完回一句「交接已更新」即可。\n\n"
-    "文档六节：## 任务目标 / ## 已完成 / ## 关键上下文 / ## 未决问题 / "
-    "## 剩余任务与下一步 / ## 用户偏好与约束。\n"
-    "「已完成」每条带文件路径或函数名；「剩余任务与下一步」写成下一任可直接执行的步骤。"
-)
-# 自动继续指令：新会话拿到交接后自动开跑。限定起点与边界，防跑偏。
-_HANDOFF_CONTINUE_PROMPT = (
-    "根据交接文档继续未完成的工作。"
-    "从「剩余任务与下一步」的第一项开始执行，不要重做「已完成」里的内容，不要复述交接。"
-    "如果交接里没有可执行的任务，直接说明情况并停下等我指示。"
-)
-# 补写轮超时（毫秒）：超过则放弃等待，回退现有 compaction 兜底。
-_HANDOFF_TIMEOUT_MS = 90_000
-
 
 class _ProjectUrlImportThread(QThread):
     """后台线程：从 URL 下载 .drifox_project 项目压缩包，避免 UI 冻结。
@@ -998,6 +980,10 @@ class OpenAIChatToolWindow(ToolWindow):
     _interrupt_complete = Signal(object)  # 中断完成后主线程回调
     # [T4-4] diff 统计后台计算结果回主线程：tool_call_id, stats(dict|None)
     _diff_stats_ready = Signal(str, object)
+    # [PERF] 落定路径整轮 diff 统计后台计算结果回主线程：card, stats(dict|None)
+    _round_diff_stats_ready = Signal(object, object)
+    # [PERF] 图片附件后台编码完成回主线程：上下文打包 dict（含 user_content）
+    _deferred_send_ready = Signal(object)
     userInterventionRequested = Signal(dict)
     executionResultProduced = Signal(str)
     toolStartUiSyncRequested = Signal(str, str, object, str)
@@ -1177,11 +1163,6 @@ class OpenAIChatToolWindow(ToolWindow):
         PluginHostService.get_instance().plugin_changed.connect(self._on_plugin_hot_reload)
         # 注册工具热重载风险通知监听（进程级一次）
         self._register_tool_reload_notice()
-        # 连接自动上下文压缩信号（PostToolUse hook 检测到阈值时触发）
-        self.backend.auto_compact_requested.connect(self._on_auto_compact_requested)
-        # 交接（handoff）：注入完成信号 → 新会话自动继续；流结束信号 → 补写轮收尾
-        self.backend.handoff_injected.connect(self._on_handoff_injected)
-        self.backend.stream_finished.connect(self._on_handoff_stream_finished)
         self.backend._current_project = self._current_project
         # 同步项目到 tool_executor，确保 BuiltinTools 使用正确项目名
         if self.backend.tool_executor:
@@ -1252,6 +1233,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._interrupt_complete.connect(self._on_finalize_complete)
         # [T4-4] diff 统计后台计算完成 → 主线程校验卡片存活后落数字
         self._diff_stats_ready.connect(self._on_diff_stats_ready)
+        self._round_diff_stats_ready.connect(self._on_round_diff_stats_ready)
+        self._deferred_send_ready.connect(self._on_deferred_send_ready)
         # ★ B5：停止/关窗后台 finalize 幂等锁（防止 stop 按钮与 closeEvent 双触发双 finalize）
         self._bg_finalize_lock = threading.Lock()
         self._bg_finalize_started = False
@@ -1283,7 +1266,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 分支检测信号/缓存已随工作树插件化迁入 plugins/worktree-manager（BranchChip per-window 状态）
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
-        self._last_visible_user_pair_index = -1
         # [PERF] 滚底定时器：24ms → 50ms，减少冗余布局重算
         # 50ms 已足够覆盖最快的内容到达速度（约 30 chars/80ms 批处理）
         self._scroll_bottom_timer = QTimer(self)
@@ -1321,7 +1303,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_anchor_timer.setSingleShot(True)
         self._bottom_anchor_timer.setInterval(100)
         self._bottom_anchor_timer.timeout.connect(self._maintain_bottom_anchor)
-        self._suppress_scroll_sync_count = 0  # 加载历史时抑制滚动同步的计数器
         # 「程序性滚动」深度：>0 表示当前 setValue 由程序发起（滚底 / 高度锚定补偿 /
         # 滚动上界校正），不是用户意图。`_on_scroll_changed` 据此豁免 away 置位 ——
         # 否则终渲染那几百毫秒里「补偿落点 < 真实 maximum」会被记成用户上滚，
@@ -1362,13 +1343,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 在触发 SessionStart hook 前置 True，让 _on_messages_updated 能识别出这是
         # 合法的新会话 hook 输出而非旧 worker 的过期回调，避免被 _session_switched 误拦截。
         self._pending_session_hook = False
-        # 交接（handoff）状态：补写轮进行中 / 开始时刻 / 目标会话 ID / 切会话后自动继续
-        self._handoff_in_progress = False
-        self._handoff_started_ms = 0
-        self._handoff_target_sid = ""
-        self._handoff_auto_continue = False
-        # 模型通过 update_handoff(switch=true) 主动请求切会话：本轮结束时执行
-        self._handoff_switch_requested = False
+        # 动作队列执行中标记（窗口级，防重入）
+        self._actions_draining = False
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         # 用户主动滚上去标记。置/复位只在 `_on_scroll_changed`（用户真实滚动）
@@ -1437,11 +1413,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 常驻视口内的卡片（读取历史时占大多数）无需每拍重跑 sync_width
         # （1.4ms/张：setMin/MaxWidth 布局失效 + runJavaScript IPC）。
         self._last_visible_card_ids: set = set()
-        # [T23 改动3] 布局纪元 + 时间线用户卡引用缓存：`_sync_node_preview_to_scroll`
-        # 每拍都要定位「节点索引 → 用户卡片」，旧实现每拍全量扫 _batch_cards
-        # （O(节点 × 批内卡)）。纪元不变时复用卡引用，只重读 y()/height()。
-        self._layout_epoch = 0
-        self._node_user_cards_cache = None
         # [T28 L3] 强回收空闲兜底：_maybe_strong_recycle 原仅事件驱动（流式 chunk /
         # 流式结束 / 温和层尾部 / 滚动链），用户空闲（不滚动不流式）时即便子进程
         # RSS 已超阈值也不回收，只能等下一次交互。45s 低频兜底（自身幂等：队列空/
@@ -1479,7 +1450,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_assistant_round_index: Optional[int] = None  # 跟踪当前应分配给 assistant 的 round_index
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
         self._pending_scroll_to_batch: Optional[int] = None  # 时间线节点滚动目标 batch 索引
-        self._pending_scroll_to_update: Optional[int] = None  # 待更新的节点索引（用于同步高亮和进度）
         # 跳转落点收敛链（见 _locate_and_scroll_to_batch）：目标卡引用 + 剩余拍数
         # + 上一拍落点。目标卡销毁/会话切换时链自行终止（_jump_settle_step 内判活）。
         self._jump_target_card = None
@@ -3007,9 +2977,9 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             logger.exception("Failed to auto-save current session before creating a branched session")
 
-        # 停止当前对话并清理
+        # 停止当前对话并清理（UI 主线程：短超时预算，防 Stop hook 拖死界面）
         if self._is_streaming and self.backend.chat_engine:
-            self.backend.stop_streaming()
+            self.backend.stop_streaming(timeout_ms=500)
             self._is_streaming = False
             self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
             self._toggle_send_stop(False)
@@ -6973,270 +6943,38 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[MainWidget] 压缩后重启团队邮件处理失败: {e}")
 
-    def _on_auto_compact_requested(self, ratio: float):
-        """自动上下文压缩请求处理
+    def _stop_stream_for_actions(self):
+        """动作队列的停流处理：否则 _create_new_session 会走 spawn_tab 另开标签页
 
-        当 PreAssistantMessage hook 检测到上下文使用比例超过阈值时，
-        由 backend.auto_compact_requested 信号触发。
-
-        流程：
-        1. 停止当前流式输出（与手动 /compact --clear 行为一致）
-        2. 保存中断消息到 session（partial 消息不丢失）
-        3. 触发上下文压缩子智能体
-
-        防重入：若上一次自动压缩尚未完成，跳过本次触发。
+        含团队邮件收尾与停止冷却，与手动停止路径保持一致。
         """
-        # 防重入：上一次自动压缩未完成时跳过
-        if self._auto_compact_in_progress:
-            logger.info(f"[MainWidget] 自动压缩已在执行中，跳过本次触发 (ratio={ratio:.1%})")
+        if not self.backend.chat_engine:
             return
-
-        logger.info(f"[MainWidget] 自动上下文压缩触发 (ratio={ratio:.1%})")
-
-        # 先停止当前流式输出，确保会话状态稳定
-        # 与手动 /compact --clear 一致：停止后再压缩，避免竞态条件：
-        #  - Worker 的 _on_messages_updated 不会在清空后覆盖 session
-        #  - UI 不会被 _display_current_session 重建后丢失流式卡片引用
-        if self._is_streaming and self.backend.chat_engine:
-            self._is_streaming = False
-            self._set_ai_state("idle")
-            self._toggle_send_stop(False)
-            if self._current_assistant_card:
-                self._current_assistant_card.stop_streaming_anim()
-                # 🐛 打断路径强制归位（同 _on_stop_clicked）：压缩触发后 worker
-                # 已停止，活跃工具结果不再到达，keep_dock 会永久保留坞态。
-                self._current_assistant_card.finish_streaming(force_dock_off=True)
-            try:
-                interrupted = self.backend.stop_streaming()
-                if interrupted:
-                    self._apply_interrupted_messages_to_session(interrupted)
-            except Exception as e:
-                logger.warning(f"[MainWidget] 自动压缩停止流式失败: {e}")
-            # 🛡️ F4a：记录停止时刻（F1 P1-3）。自动压缩停流不走 _on_stop_clicked，
-            # _last_stop_time 不更新 → 1s 停止冷却失效，pending 邮件可能立即被
-            # watcher/rearm 拉起重发，撞上稍后的压缩清空（竞态源头之一）
-            self._last_stop_time = time.monotonic()
-            # 🛡️ F4b：停流后收尾团队邮件（对齐 _create_new_session 的成熟写法）。
-            # 取消路径下 _on_stream_finished 永不触发 → 不收尾会导致
-            # _team_processing 卡 True、正在处理的邮件卡 running，
-            # 后续团队邮件全部被 _team_processing 守卫拦下（死锁）
-            try:
-                self._sync_team_mail_on_stop()
-            except Exception as e:
-                logger.warning(f"[MainWidget] 自动压缩收尾团队邮件失败: {e}")
-
-        self._auto_compact_in_progress = True
-        disabled_reason = self._handoff_disabled_reason()
-        if disabled_reason:
-            # 团队窗口 / 临时对话页 / 子智能体任务进行中：交接首版不覆盖，走原压缩
-            logger.info(f"[Handoff] 跳过交接（{disabled_reason}），回退 compaction")
-            QTimer.singleShot(0, lambda: self._trigger_context_compaction(clear_after=True))
-        else:
-            QTimer.singleShot(0, self._begin_handoff_cycle)
-
-    # ========== 交接（handoff） ==========
-
-    def _handoff_disabled_reason(self) -> str:
-        """交接禁用原因（空串 = 可用）
-
-        团队窗口的邮件状态机、临时对话页的不落库语义、子智能体并发，
-        与「自动切会话 + 自动开跑」叠加会出竞态，首版一律回退原 compaction。
-        """
-        session = self.session_manager.get_current_session() if self.session_manager else None
-        if session is None:
-            return "no-session"
-        if getattr(session, "is_temp", False):
-            return "temp-session"
-        try:
-            from app.core.team.team_manager import check_team_member
-
-            if check_team_member(self.backend):
-                return "team-window"
-        except Exception:
-            pass
-        try:
-            sub = self.backend.sub_agent_manager
-            if sub and getattr(sub, "_running_tasks", None):
-                return "subagent-running"
-        except Exception:
-            pass
-        return ""
-
-    def _handoff_doc_for_session(self, session):
-        """读取指定会话的交接文档；不存在/格式坏返回 None"""
-        if session is None:
-            return None
-        from app.core.context.handoff import handoff_path, load
-
-        workdir = ""
-        try:
-            workdir = self.backend.tool_executor.get_workdir() if self.backend.tool_executor else ""
-        except Exception:
-            workdir = ""
-        app_data = None
-        try:
-            from app.utils.utils import get_app_data_dir
-
-            app_data = get_app_data_dir()
-        except Exception:
-            app_data = None
-        return load(handoff_path(workdir or "", session.session_id, app_data))
-
-    def _begin_handoff_cycle(self):
-        """阈值触发后的交接入口：交接新鲜则直接切会话，否则让主智能体补写一轮"""
-        session = self.session_manager.get_current_session() if self.session_manager else None
-        if session is None or not session.messages:
-            self._auto_compact_in_progress = False
-            self._safe_resume_team_mail_after_compact()
+        # 用 worker 真实状态而不是 UI 标志：_is_streaming 可能已复位但 worker 仍在跑
+        # （日志出现 current_worker=None 的失联场景），漏停会让后续 new/send 撞上繁忙，
+        # 结果是新会话只留下一张不会更新的空卡片
+        if not (getattr(self, "_is_streaming", False) or self._worker_actually_busy()):
             return
-
-        doc = self._handoff_doc_for_session(session)
-        if doc:
-            from app.core.context.handoff import is_fresh
-
-            if is_fresh(doc["meta"], session.messages):
-                logger.info("[Handoff] 交接仍覆盖当前进度，直接切新会话")
-                self._start_handoff_new_session(doc)
-                return
-
-        logger.info("[Handoff] 交接过期或不存在，触发主智能体补写一轮")
-        self._handoff_in_progress = True
-        self._handoff_started_ms = int(time.time() * 1000)
-        self._handoff_target_sid = session.session_id
-        QTimer.singleShot(_HANDOFF_TIMEOUT_MS, self._on_handoff_timeout)
+        self._is_streaming = False
+        self._set_ai_state("idle")
+        self._toggle_send_stop(False)
+        if self._current_assistant_card and not _is_sip_deleted(self._current_assistant_card):
+            self._current_assistant_card.stop_streaming_anim()
+            self._current_assistant_card.finish_streaming(force_dock_off=True)
         try:
-            self._on_send_clicked(_HANDOFF_PROMPT, preserve_input=True)
+            # 停流预算要足够：500ms 对卡在 API 读上的 worker 不够，
+            # 没停住就切会话 → 旧 worker 继续 emit，把新会话写成旧内容
+            # （新会话里冒出旧任务的工具卡片就是这个原因）
+            interrupted = self.backend.stop_streaming(timeout_ms=3000)
+            if interrupted:
+                self._apply_interrupted_messages_to_session(interrupted)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Handoff] 补写轮启动异常，回退 compaction: {e}")
-            self._handoff_in_progress = False
-            self._auto_compact_in_progress = False
-            self._trigger_context_compaction(clear_after=True)
-            return
-        if not self._is_streaming:
-            # 未进入流式：模型未配置 / 无 API_KEY / 命令拦截等
-            logger.warning("[Handoff] 补写轮未能启动，回退 compaction")
-            self._handoff_in_progress = False
-            self._auto_compact_in_progress = False
-            self._trigger_context_compaction(clear_after=True)
-
-    def _on_handoff_timeout(self):
-        """补写轮超时兜底（取消路径不发射 stream_finished 时也能收尾）"""
-        if not getattr(self, "_handoff_in_progress", False):
-            return
-        logger.warning("[Handoff] 补写轮超时，回退 compaction")
-        self._handoff_in_progress = False
-        self._auto_compact_in_progress = False
-        if not self._handoff_still_current():
-            return
-        self._trigger_context_compaction(clear_after=True)
-
-    def _handoff_still_current(self) -> bool:
-        """补写轮发起时的会话是否仍是当前会话
-
-        补写期间用户切走会话时，兜底 compaction 会误处理新当前会话（旧会话
-        上下文才是超限的那个），所以两条收尾路径都要先过这道门。
-        """
-        sid = getattr(self, "_handoff_target_sid", "")
-        cur = self.session_manager.get_current_session() if self.session_manager else None
-        if cur is None or not sid or cur.session_id != sid:
-            logger.info("[Handoff] 补写期间已切会话，放弃本轮交接（不碰当前会话）")
-            return False
-        return True
-
-    def _on_handoff_stream_finished(self, response: str):
-        """补写轮流结束：交接文件有更新则切会话，否则回退 compaction
-
-        由 backend.stream_finished 信号驱动。该信号经 _wrap_trace_callback 包装，
-        在 _on_stream_finished 之后发射，此时 _is_streaming 已复位。
-        """
-        if not getattr(self, "_handoff_in_progress", False):
-            # 模型主动请求切换（update_handoff switch=true）：与补写轮互斥
-            if getattr(self, "_handoff_switch_requested", False):
-                self._on_handoff_switch_dispatch()
-            return
-        self._handoff_in_progress = False
-
-        # 补写期间用户已切走会话：本轮放弃，且不碰当前会话（超限的是旧会话）
-        if not self._handoff_still_current():
-            self._auto_compact_in_progress = False
-            return
-
-        session = self.session_manager.get_current_session()
-        doc = self._handoff_doc_for_session(session)
-        updated = False
-        if doc is not None:
-            from app.core.context.handoff import updated_at_ms
-
-            # updated_at 是秒级，补写开始是毫秒级：留 1s 容差防同秒误判
-            updated = updated_at_ms(doc["meta"]) >= self._handoff_started_ms - 1000
-        if updated:
-            logger.info("[Handoff] 补写完成，切新会话")
-            self._start_handoff_new_session(doc)
-        else:
-            logger.warning("[Handoff] 补写轮未落盘（模型可能未调用 update_handoff），回退 compaction")
-            self._auto_compact_in_progress = False
-            self._trigger_context_compaction(clear_after=True)
-
-    def _on_handoff_switch_dispatch(self):
-        """模型通过 update_handoff(switch=true) 请求在本轮结束后切会话"""
-        self._handoff_switch_requested = False
-        if getattr(self, "_is_destroyed", False):
-            return
-        reason = self._handoff_disabled_reason()
-        if reason:
-            logger.info(f"[Handoff] 请求切会话被跳过（{reason}），交接文档已落盘不切")
-            return
-        session = self.session_manager.get_current_session() if self.session_manager else None
-        doc = self._handoff_doc_for_session(session)
-        if doc is None:
-            logger.warning("[Handoff] 请求切会话但交接文件不可读，忽略")
-            return
-        logger.info("[Handoff] 模型请求切会话，执行交接")
-        self._start_handoff_new_session(doc)
-
-    def _start_handoff_new_session(self, doc):
-        """把交接交给新会话，并标记注入后自动继续"""
-        self._handoff_in_progress = False
-        self._auto_compact_in_progress = False
-        meta = doc.get("meta") or {}
+            logger.warning(f"[ActionQueue] 停流失败: {e}")
+        self._last_stop_time = time.monotonic()
         try:
-            self.backend.set_pending_handoff(
-                {
-                    "path": str(doc.get("path") or ""),
-                    "content": doc.get("body") or "",
-                    "source_session_id": str(meta.get("session_id") or ""),
-                }
-            )
-            self._handoff_auto_continue = True
-            self._create_new_session(close_history=True)
+            self._sync_team_mail_on_stop()
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Handoff] 切新会话失败，回退 compaction: {e}")
-            try:
-                self.backend.set_pending_handoff(None)
-            except Exception:
-                pass
-            self._handoff_auto_continue = False
-            self._trigger_context_compaction(clear_after=True)
-
-    def _on_handoff_injected(self, session_id: str):
-        """交接注入完成：延迟一拍自动发「继续」指令"""
-        if not getattr(self, "_handoff_auto_continue", False):
-            return
-        self._handoff_auto_continue = False
-        logger.info(f"[Handoff] 交接已注入新会话 {session_id[:8]}，自动继续")
-        QTimer.singleShot(0, self._auto_continue_after_handoff)
-
-    def _auto_continue_after_handoff(self):
-        """新会话自动开跑"""
-        if getattr(self, "_is_destroyed", False):
-            return
-        try:
-            self._on_send_clicked(_HANDOFF_CONTINUE_PROMPT, preserve_input=True)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Handoff] 自动继续发送异常: {e}")
-            return
-        if not self._is_streaming:
-            logger.warning("[Handoff] 自动继续未能启动（模型未配置或无 API_KEY）")
+            logger.warning(f"[ActionQueue] 收尾团队邮件失败: {e}")
 
     def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):
         """--clear 模式下，compaction 子智能体完成后的清空回调
@@ -7329,7 +7067,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 否则 set_messages([]) + _display_current_session() 会销毁在途流式
         # 卡片（_current_assistant_card 失效）→ 后台 worker 继续产出但 UI
         # 永远看不到（"只有自动发送的提示、看不到大模型流式卡片"根因）。
-        # 停流写法与 _on_auto_compact_requested 保持一致。
+        # 停流写法与手动停止路径保持一致。
         if self._is_streaming and self.backend.chat_engine:
             logger.info(f"[DEBUG-cc] 压缩清空前停止在途流式 (task={task_id[:8]}, sid={session_id[:8]})")
             self._is_streaming = False
@@ -7342,7 +7080,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 # 清空语义下中断消息无需回写 session（即将整体清空），
                 # 旧 worker 延迟快照由下方 _post_compact_guard 拦截
-                self.backend.stop_streaming()
+                self.backend.stop_streaming(timeout_ms=500)
             except Exception as e:
                 logger.warning(f"[MainWidget] 压缩清空前停止流式失败: {e}")
             # 停流后收尾团队邮件（对齐 _create_new_session 的成熟写法），
@@ -10129,16 +9867,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except RuntimeError:
             pass
 
-    def _bump_layout_epoch(self) -> None:
-        """递增布局纪元并作废节点定位缓存（T23 改动3）。
-
-        任何改变「节点 → 用户卡引用」结构的操作（增卡 / 回收 / 撤回截断 /
-        清空 / 会话重载）都必须调用，`_sync_node_preview_to_scroll` 据此判定
-        缓存是否可复用。
-        """
-        self._layout_epoch += 1
-        self._node_user_cards_cache = None
-
     def _sync_visible_cards_on_scroll(self):
         """滚动时更新新进入可见区域的卡片
 
@@ -11693,14 +11421,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming and self.backend.chat_engine:
             # 🐛 修复（切换项目/新建会话打断对话）：
             # 1) stop_streaming 返回的中断消息（partial 回复快照）必须应用回 session，
-            #    否则被打断的会话缺最后部分回复（对齐 _on_auto_compact_requested /
+            #    否则被打断的会话缺最后部分回复（对齐 _stop_stream_for_actions /
             #    _on_stop_clicked 的成熟写法）。
             # 2) 主动复位 AI 状态为 idle：stop 后 worker 的 stream_finished 会被
             #    _on_worker_finished 因 is_streaming=False 忽略，_on_stream_finished
             #    永不触发 → _set_ai_state("idle") 永不执行 → TabPanel 边框动画
             #    停留在 streaming（"正在对话"模式不消失）。
             try:
-                interrupted = self.backend.stop_streaming()
+                interrupted = self.backend.stop_streaming(timeout_ms=500)
                 if interrupted:
                     self._apply_interrupted_messages_to_session(interrupted)
                     # 中断消息已应用到 session，确保后续 _auto_save_current_session 不跳过
@@ -11860,8 +11588,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._refresh_context_usage_indicator()
             # 恢复缓存卡片后，多次滚动确保在底部
             self._scroll_to_bottom(sticky_ms=900)
-            # 滚动完成后同步时间线节点到最后一个
-            QTimer.singleShot(100, self._sync_node_preview_to_last)
             # 🐛 修复（产物区刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
             self._push_workbench_updates(refresh_artifacts=True)
             # 任务看板归属最新卡片：缓存卡片重建后面板需重新挂载
@@ -11914,7 +11640,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 覆盖守卫：欢迎卡的渲染槽位是延迟调度的，可能晚于新会话里的第一轮对话
         # （handoff 自动继续用 QTimer(0) 发消息，welcome 走 0/50/100ms 槽位）。
         # 若此刻已在流式或会话已有对话消息，_clear_chat_area 会把刚渲染的消息卡片
-        # 从布局摘掉，表现为「停在欢迎页但状态在对话」（2026-10-27 handoff 复现）。
+        # 从布局摘掉，表现为「停在欢迎页但状态在对话」（2026-10-27 自动继续路径复现）。
         if getattr(self, "_is_streaming", False):
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 流式中跳过（wid={self._window_id}）")
             return
@@ -12252,9 +11978,8 @@ class OpenAIChatToolWindow(ToolWindow):
         finally:
             self._suspend_auto_scroll = False
 
-        # 节点预览和滚动同步在懒渲染完成后处理
+        # 节点预览在懒渲染完成后处理（时间线 widget 已不显示，仅维持数据）
         self._update_node_preview()
-        QTimer.singleShot(100, self._sync_node_preview_to_last)
         self._refresh_context_usage_indicator()
         # gc.collect(1)：仅扫年轻代（微秒级）。全代 collect 会 stop-the-world 20~80ms，
         # 是切会话/翻历史顿挫的根因（与 chat_worker MEM_DIAG 先例同源）
@@ -12286,7 +12011,6 @@ class OpenAIChatToolWindow(ToolWindow):
             insert_at_top=True,
             batch_offset=new_start,
         )
-        self._sync_node_preview_to_scroll()
 
         def restore_anchor():
             try:
@@ -12822,7 +12546,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 if recycled_count > 0:
                     # [T23 改动3] 批次回收 = 卡片离场，节点定位结构变化
-                    self._bump_layout_epoch()
                     # [T23 改动2] 剔除已回收卡的 id：id() 是内存地址，卡片销毁后
                     # 新卡可能复用同一地址，残留集合会让新卡被误判「已在视口」
                     # 而永久跳过宽度同步（表现为宽度不跟随窗口）。
@@ -13020,7 +12743,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ B9：只置 _batch_cards=None（卸载 UI），保留 _message_batch 数据
         self._batch_cards[batch_idx] = None
         # [T23 改动3] UI 卸载 = 卡片离场，节点定位结构变化
-        self._bump_layout_epoch()
         # [T23 改动2] 剔除已卸载卡的 id（防 id() 地址复用误判「已在视口」）
         self._last_visible_card_ids -= {id(c) for c in alive_cards}
         # 只减已渲染的卡数（_rendered_card_count 语义 = 已渲染未卸载）
@@ -13818,7 +13540,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_assistant_card = None
         self._displayed_session_id = None
         # [T23 改动3] 清空聊天区 = 全部卡片离场，布局纪元递增
-        self._bump_layout_epoch()
         # [T23 改动2] 同步重置可视集：卡片已全部销毁，id() 是内存地址，
         # 新卡可能复用旧地址 → 残留集合会让新卡被误判为「已在视口」跳过同步。
         self._last_visible_card_ids = set()
@@ -13914,7 +13635,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # _sync_visible_cards_on_scroll 会误判「已在视口、宽度已同步」而永久
         # 跳过宽度同步；同时旧卡的 id 残留在集合里也会让后续高亮/同步错位。
         # 此处作废布局纪元 + 清空可视集，让新会话的卡片重新跑一轮判定。
-        self._bump_layout_epoch()
         self._last_visible_card_ids = set()
         return widgets
 
@@ -14410,7 +14130,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._clamp_visible_batch_window()
         # [T36 P2] 公共重建出口：卡片集合与顺序已变 → 作废节点定位缓存。
         # 一处覆盖 _delete_user_round / _remove_interject_ghost_card / 截断三条路径。
-        self._bump_layout_epoch()
         logger.debug(
             f"[Delete] _rebuild_batch_cards_from_layout: {len(alive_cards)} alive cards → {new_len} batch slots"
         )
@@ -15106,7 +14825,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_current_assistant_card_ref()
         self._update_node_preview()
         self._refresh_context_usage_indicator()
-        self._sync_node_preview_to_scroll()
 
     def _on_clear_shortcut(self):
         if getattr(self, "_is_destroyed", False):
@@ -15129,8 +14847,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def _add_chat_widget(self, widget: QWidget, insert_index: Optional[int] = None):
         if getattr(self, "_is_destroyed", False):
             return
-        # [T23 改动3] 布局纪元递增（新增卡片改变节点定位结构）
-        self._bump_layout_epoch()
         if insert_index is None:
             add_message_to_layout(widget, self.chat_layout, is_widget_alive)
         else:
@@ -15972,167 +15688,25 @@ class OpenAIChatToolWindow(ToolWindow):
         if not hasattr(self, "node_preview") or _is_sip_deleted(self.node_preview):
             return
 
+        # [PERF] 版本守卫：一轮落定链（save 尾部 / _do_post_stream_cleanup /
+        # 引擎错误路径）会对本方法触发 2~3 次，每次都全量遍历 session.messages
+        # 重建节点。消息版本未变 = 内容未变 = 预览必然相同，直接跳过。
+        # 版本由 session 写入口（set_messages/append 等）bump，切换会话后
+        # 新 session 的 version 可能相同，键里带上 session id。
+        _ver_key = (
+            getattr(session, "session_id", ""),
+            getattr(session, "_messages_version", 0),
+        )
+        if getattr(self, "_last_node_preview_ver", None) == _ver_key:
+            return
+        self._last_node_preview_ver = _ver_key
+
         # 使用辅助函数构建 node preview 数据
         node_data = build_node_preview_from_session(session, content_to_text, max_len=30)
 
         self.node_preview.update_nodes(node_data)
-        self._sync_node_preview_to_scroll()
         # 同步更新历史问题徽章
         self._update_history_questions_badge()
-
-    def _sync_node_preview_to_scroll(self):
-        """根据当前滚动位置同步时间线节点的高亮和进度条
-        新逻辑：进度条显示节点与节点之间的进度，和实际卡片高度绑定
-        """
-        # 加载历史时抑制滚动同步
-        if self._suppress_scroll_sync_count > 0:
-            self._suppress_scroll_sync_count -= 1
-            return
-
-        if not hasattr(self, "chat_scroll_area") or not hasattr(self, "node_preview"):
-            return
-
-        session = self.session_manager.get_current_session()
-        if not session:
-            return
-
-        total_nodes = len(self.node_preview._nodes) if hasattr(self.node_preview, "_nodes") else 0
-        if total_nodes == 0:
-            self._last_visible_user_pair_index = -1
-            self.node_preview.set_visible_node(-1)
-            self.node_preview.set_progress_position(-1)
-            return
-
-        # 如果有待更新的目标索引（点击跳转中），直接使用它
-        if self._pending_scroll_to_update is not None:
-            highlighted_index = self._pending_scroll_to_update
-            self._pending_scroll_to_update = None
-            highlighted_index = max(0, min(highlighted_index, total_nodes - 1))
-            self.node_preview.set_progress_position(highlighted_index)
-            if highlighted_index != self._last_visible_user_pair_index:
-                self._last_visible_user_pair_index = highlighted_index
-                self.node_preview.set_visible_node(highlighted_index)
-            return
-
-        scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        visible_top = scroll_bar.value()
-
-        # 使用节点-批次映射（与 build_node_preview_data 对齐），只遍历有节点的 user batch
-        node_to_batch = self._build_node_to_batch_mapping()
-
-        # [T23 改动3] 布局纪元缓存：节点 → 用户卡**引用**的定位结果只依赖布局结构
-        # （批次数组与批内卡片构成），不依赖高度。纪元不变时复用卡引用，避免每拍
-        # 全量扫 _batch_cards（O(节点 × 批内卡)）；y()/height() 是布局结果，仍每拍重读。
-        cache = self._node_user_cards_cache
-        if cache is not None and cache[0] == self._layout_epoch:
-            located = cache[1]
-        else:
-            located = []
-            for node_idx, batch_idx in enumerate(node_to_batch):
-                if node_idx >= total_nodes:
-                    break
-
-                # 尝试从 batch_cards 中找到对应的卡片
-                cards = self._batch_cards[batch_idx] if batch_idx < len(self._batch_cards) else None
-                if cards:
-                    for card in cards:
-                        if not sip.isValid(card):
-                            continue
-                        if isinstance(card, MessageCard) and card.role == "user":
-                            located.append((node_idx, card))
-                            break
-            self._node_user_cards_cache = (self._layout_epoch, located)
-
-        # 每拍实时重读几何（卡片高度随懒渲染/折叠持续变化，不能随引用一起缓存）
-        user_card_info = []
-        for node_idx, card in located:
-            if not sip.isValid(card):
-                continue
-            user_card_info.append(
-                {
-                    "index": node_idx,
-                    "y": card.y(),
-                    "bottom": card.y() + card.height(),
-                }
-            )
-
-        # 如果没有找到任何已渲染卡片，fallback到估算
-        if not user_card_info and scroll_bar.maximum() > 0:
-            scroll_ratio = visible_top / scroll_bar.maximum()
-            highlighted_index = int(round(scroll_ratio * (total_nodes - 1)))
-            progress_position = highlighted_index
-        else:
-            # 找到当前可视区域所在的节点区间
-            # 找出当前可视top落在哪个区间 [user_i, user_{i+1}]
-            current_segment_index = -1
-            for i in range(len(user_card_info)):
-                if i < len(user_card_info) - 1:
-                    # 当前区间是从这个user卡片开始，到下一个user卡片之前
-                    # 包含这个user问题和它对应的所有大模型回答卡片
-                    segment_end_y = user_card_info[i + 1]["y"]
-
-                    if visible_top < segment_end_y:
-                        current_segment_index = i
-                        break
-                else:
-                    # 最后一个节点，一直到最后
-                    current_segment_index = i
-                    break
-
-            # 计算进度
-            if current_segment_index >= 0:
-                start_node_index = user_card_info[current_segment_index]["index"]
-                start_y = user_card_info[current_segment_index]["y"]
-
-                if current_segment_index < len(user_card_info) - 1:
-                    end_y = user_card_info[current_segment_index + 1]["y"]
-                else:
-                    # 最后一个区间，使用最后一个卡片的bottom作为终点
-                    if len(user_card_info) > 0:
-                        last_item = user_card_info[-1]
-                        end_y = last_item["bottom"] + 500  # 增加一点余量
-                    else:
-                        end_y = start_y
-
-                # 计算在当前区间的比例
-                if end_y > start_y:
-                    segment_progress = (visible_top - start_y) / (end_y - start_y)
-                else:
-                    segment_progress = 0
-
-                # 转换到节点坐标
-                progress_position = start_node_index + segment_progress
-                visible_node_index = start_node_index
-            else:
-                # 都没找到，fallback
-                progress_position = 0
-                visible_node_index = 0
-                highlighted_index = 0
-
-            highlighted_index = visible_node_index
-
-        # 确保在有效范围内
-        progress_position = max(0, min(progress_position, total_nodes - 1))
-        highlighted_index = max(0, min(highlighted_index, total_nodes - 1))
-
-        # 更新进度条和高亮节点
-        self.node_preview.set_progress_position(progress_position)
-        if highlighted_index != self._last_visible_user_pair_index:
-            self._last_visible_user_pair_index = highlighted_index
-            self.node_preview.set_visible_node(highlighted_index)
-
-    def _sync_node_preview_to_last(self):
-        """滚动完成后同步到最后一个节点"""
-        if not hasattr(self, "node_preview"):
-            return
-
-        # 直接使用 node_preview 的节点数（与 build_node_preview_data 保持一致）
-        node_count = len(self.node_preview._nodes) if hasattr(self.node_preview, "_nodes") else 0
-        if node_count > 0:
-            last_index = node_count - 1
-            self.node_preview.set_visible_node(last_index)
-            self.node_preview.set_progress_position(last_index)
-            self._last_visible_user_pair_index = last_index
 
     def _scroll_to_target_node_index(self, target_index: int):
         """
@@ -16249,8 +15823,6 @@ class OpenAIChatToolWindow(ToolWindow):
         target_batch_index = self._pending_scroll_to_batch
         self._pending_scroll_to_index = None
         self._pending_scroll_to_batch = None
-
-        self._pending_scroll_to_update = target_index
 
         # 如果 target_batch_index 未提供，从 _message_batch 查找
         if target_batch_index is None:
@@ -16479,9 +16051,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         重建已卸载批次、收敛落点等全部由 `_locate_and_scroll_to_batch` 负责。
         """
-        if node_index >= 0:
-            self._pending_scroll_to_update = node_index
-
         if self._locate_and_scroll_to_batch(batch_index):
             return
 
@@ -16717,7 +16286,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if target_batch_index < 0:
             return
 
-        self._pending_scroll_to_update = index
         if self._locate_and_scroll_to_batch(target_batch_index):
             return
 
@@ -16731,7 +16299,6 @@ class OpenAIChatToolWindow(ToolWindow):
         #     card._scroll_position_changed(value)
 
     def _on_scroll_changed(self, value):
-        self._sync_node_preview_to_scroll()
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         # 跳转锁**不**在 valueChanged 里解锁。
         #
@@ -16848,7 +16415,6 @@ class OpenAIChatToolWindow(ToolWindow):
         session.set_messages(canonical_messages[:cutoff_index], preserve_compaction=False)
         self._session_dirty = True  # 🛡️ 截断修改了消息列表，脏标记兜底
         # [T23 改动3] 截断 = 尾部卡片离场，节点定位结构变化
-        self._bump_layout_epoch()
 
         # === 4. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
@@ -19034,9 +18600,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 即使anchor到期，也再延迟多次检查，防止多批懒渲染卡片撑开高度导致没到底
             # [P1 步骤6] 盲重试 8 改 2，剩余高度变化由 rangeChanged 事件即时贴底
             QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=2))
-        # 加载完成后抑制滚动同步，避免节点跑到渲染的卡片数量位置
-        self._suppress_scroll_sync_count = 0
-
+        
     def _ensure_at_bottom(self, retries: int = None):
         """确保滚动条在底部，用于懒渲染卡片高度变化后的二次修正
 
@@ -19122,7 +18686,6 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
-            self._suppress_scroll_sync_count = 0
             # 🐛 anchor 到期 ≠ 卡片高度稳定：WebEngine 高度异步上报可能晚于
             # sticky 窗口（大会话/慢机器常态），视口随后被顶离底部且无人再
             # 追平 → 「加载历史会话偶尔停在消息列表中间」。到期接力与非
@@ -19309,13 +18872,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保存的是旧消息（缺最后 partial 回复），且 stop 后 _on_finalize_complete
         # 会被下方 _session_switched 哨兵拦截，中断消息永久丢失。
         if self._is_streaming and self.backend.chat_engine:
-            # 与 _create_new_session / _on_auto_compact_requested 对齐：
+            # 与 _create_new_session / _stop_stream_for_actions 对齐：
             # 接收 stop_streaming 返回值应用回 session + 复位 AI 状态（否则
             # TabPanel 边框停留在 streaming 动画，stop 后 _on_worker_finished
             # 因 is_streaming=False 忽略 stream_finished，idle 永不触发）。
             self._set_ai_state("idle")
             try:
-                interrupted = self.backend.stop_streaming()
+                # [PERF] UI 主线程热路径：短超时预算。executor 注释自证实测主线程
+                # 阻塞可达 4s（默认 3000+1000），Stop hook（command 类型默认 30s）
+                # 跑完前 wait 一直卡。500ms 内未退出转 requestInterruption+延迟清理。
+                interrupted = self.backend.stop_streaming(timeout_ms=500)
                 if interrupted:
                     self._apply_interrupted_messages_to_session(interrupted)
                     self._session_dirty = True
@@ -19673,12 +19239,19 @@ class OpenAIChatToolWindow(ToolWindow):
         self._on_send_clicked(inverse=True)
 
     def _on_send_clicked(
-        self, user_text: str = "", hook_event: Optional[str] = None, preserve_input: bool = False, inverse: bool = False
+        self,
+        user_text: str = "",
+        hook_event: Optional[str] = None,
+        preserve_input: bool = False,
+        inverse: bool = False,
+        ephemeral: bool = False,
     ):
         """发送消息（用户主动发送 / 系统自动发送共用）。
 
         preserve_input=True：系统自动发送（如团队任务邮件 _process_team_task），
         不清空用户输入框/附件、不记录输入历史——用户正在编辑的内容必须原样保留。
+        ephemeral=True：交接自动继续等系统触发——消息只进本轮请求，不写 session、
+        不渲染气泡、不进历史。
         """
         if getattr(self, "_is_destroyed", False):
             return
@@ -19690,8 +19263,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._session_switched = False
         # 🛡️ 压缩守卫同步清零：新对话轮次开始，旧 worker 快照已无意义
         self._post_compact_guard = False
-        # 交接切换请求同样按轮次失效：上一轮异常中断留下的置位不能污染新轮
-        self._handoff_switch_requested = False
         # 🐛 用户主动发消息 = 明确表达「我要看最新内容」，必须恢复底部跟随。
         # 否则：用户上滚看过历史后再发消息，新回复会被 away 守卫拦住不滚底，
         # 表现为「发了消息没反应」。守卫越强，这个复位点就越不能少。
@@ -19918,11 +19489,16 @@ class OpenAIChatToolWindow(ToolWindow):
             self._clear_attachments()
         # 视觉模型时图片以 multimodal 注入：卡片同步预览 + session 消息打标记（恢复会话可回显）
         # hook_event 透传：TeamMail 等系统注入消息的身份按消息源解析（显示成员名而非用户名）
-        self._append_user_message(
+        user_card = self._append_user_message(
             user_text,
+            scroll=not ephemeral,
             image_attachments=_image_paths or None,
             source_message={"role": "user", "content": user_text, "_hook_event": hook_event} if hook_event else None,
         )
+        if ephemeral:
+            # 交接自动继续：卡片占位保持 batch 结构一致，但用户不可见
+            # （session 里也没有这条消息，切走再切回重建时自然消失）
+            user_card.setVisible(False)
 
         # Stop hook 续命窗口期发消息：先收尾上一张卡（防光带/坞态残留），见 helper
         self._finish_stale_assistant_card()
@@ -19963,75 +19539,193 @@ class OpenAIChatToolWindow(ToolWindow):
             if session and self.backend.tool_executor:
                 self.backend.set_session_context(session.session_id)
 
-            # 图片附件 base64 编码（在 UI 已渲染后执行，用户感知不到）
-            _user_content = None
+            # [PERF] 图片 base64 编码（读文件+base64/压缩/降采样，5MB≈30ms/张）
+            # 移后台线程：多张大图时主线程卡一段（原实现有意推迟到 UI 渲染后
+            # 仅为降低感知，未消除阻塞）。编码是纯数据转换（QImage 为非 QObject
+            # 值类，非 GUI 线程可用），完成经信号回主线程继续发送（daemon 线程
+            # 无事件循环，不能在 worker 里 QTimer.singleShot，同 _diff_stats_ready
+            # 的既有模式）。无图片时直接同步收尾，路径行为不变。
             if _image_paths:
-                _user_content = self._encode_image_attachments_to_multimodal(
-                    user_text=user_text,
-                    image_paths=_image_paths,
-                    model_name=_model_name,
-                )
-            # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
-            engine_kwargs = {}
-            if _user_content is not None:
-                engine_kwargs["_user_content"] = _user_content
-            # hook_event 透传给引擎：消息写入 session.messages 时带 _hook_event 标记
-            # （None 时不写入，保持历史行为不变）
-            if hook_event:
-                engine_kwargs["_hook_event"] = hook_event
-            # 图片附件路径透传给引擎：session 消息打 _image_attachments 标记，
-            # 恢复会话时渲染缩略图预览条（此前漏传导致历史加载不显示图片预览）
-            if _image_paths:
-                engine_kwargs["_image_attachments"] = list(_image_paths)
-            # 原始输入元数据透传：session 消息打 _input_attachments/_raw_input_text 标记，
-            # 撤回（撤销到这里）时依此保真回填附件 chips 与占位符正文
-            if _input_attachments:
-                engine_kwargs["_input_attachments"] = list(_input_attachments)
-            if _raw_input_text:
-                engine_kwargs["_raw_input_text"] = _raw_input_text
-            # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
-            # add_user_message 修改 session.messages。即使后续被 / 命令拦截
-            # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
-            self._session_dirty = True
-            if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
-                self._is_streaming = False
-                self._toggle_send_stop(False)
-                assistant_card.deleteLater()
-                # 🆕 补清引用：deleteLater 是延迟删除（下一轮事件循环 C++ 对象才销毁），
-                # 若不置 None，期间 _refresh_context_usage_indicator 等仍会取到
-                # _current_assistant_card 并访问已删除 QLabel → RuntimeError。
-                # 与 L13885-13886 规范写法对齐。
-                self._current_assistant_card = None
+                _ctx = {
+                    "user_text": user_text,
+                    "hook_event": hook_event,
+                    "image_paths": list(_image_paths),
+                    "input_attachments": list(_input_attachments) if _input_attachments else None,
+                    "raw_input_text": _raw_input_text,
+                    "session_id": session.session_id if session else None,
+                    "assistant_card": assistant_card,
+                    "ephemeral": ephemeral,
+                }
+
+                def _encode_worker():
+                    try:
+                        _uc = self._encode_image_attachments_to_multimodal(
+                            user_text=user_text,
+                            image_paths=_image_paths,
+                            model_name=_model_name,
+                        )
+                    except Exception:
+                        logger.exception("[ImageAttach] 后台编码图片附件失败")
+                        _uc = None
+                    self._deferred_send_ready.emit({**_ctx, "user_content": _uc})
+
+                threading.Thread(target=_encode_worker, daemon=True, name="image-encode").start()
                 return
-
-            # 同步 batch 结构：_message_batch 已包含新 user batch
-            self._sync_batch_structures()
-            # 给新创建的用户卡片设置正确的 _message_index（_append_user_message 中未设置）
-            self._fix_new_card_message_index(user_text=user_text)
-            # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
-            self._advance_visible_batch_window()
-            self._register_new_cards_into_batches()
-
-            # 🆕 发送纪元 +1：新一轮 worker 已启动。压缩守卫（_post_compact_guard）
-            # 依赖 epoch 判定"清空后新 worker"，其结果不得被当作旧快照丢弃
-            # （团队成员自动压缩后回复不可见 bug 修复核心点之一）
-            self._send_epoch += 1
-
-            # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
-            if session:
-                # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
-                # → mail-only 会话也能触发标题生成（之前被误伤跳过）
-                user_msg_count = sum(
-                    1
-                    for m in session.messages
-                    if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
-                )
-                if user_msg_count == 1:
-                    self._maybe_generate_topic_summary()
-            # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
-            self._update_history_questions_badge()
+            self._finish_deferred_send(
+                user_text=user_text,
+                hook_event=hook_event,
+                image_paths=None,
+                input_attachments=_input_attachments,
+                raw_input_text=_raw_input_text,
+                session=session,
+                assistant_card=assistant_card,
+                user_content=None,
+                ephemeral=ephemeral,
+            )
 
         QTimer.singleShot(0, _do_deferred_send)
+
+    def _on_deferred_send_ready(self, ctx: dict):
+        """[PERF] 图片后台编码完成，回主线程继续发送"""
+        self._finish_deferred_send(
+            user_text=ctx.get("user_text") or "",
+            hook_event=ctx.get("hook_event"),
+            image_paths=ctx.get("image_paths"),
+            input_attachments=ctx.get("input_attachments"),
+            raw_input_text=ctx.get("raw_input_text"),
+            session=None,  # 下方按 session_id 重新解析（编码期间可能已切会话）
+            assistant_card=ctx.get("assistant_card"),
+            user_content=ctx.get("user_content"),
+            expect_session_id=ctx.get("session_id"),
+            ephemeral=bool(ctx.get("ephemeral")),
+        )
+
+    def _finish_deferred_send(
+        self,
+        user_text: str,
+        hook_event: Optional[str],
+        image_paths: Optional[list],
+        input_attachments: Optional[list],
+        raw_input_text: Optional[str],
+        session,
+        assistant_card,
+        user_content,
+        expect_session_id: Optional[str] = None,
+        ephemeral: bool = False,
+    ):
+        """_do_deferred_send 的发送收尾段（编码完成后主线程执行）
+
+        expect_session_id 非空时（图片异步编码路径）校验当前会话未切换：
+        编码期间用户切会话则放弃发送并回滚 UI，防把旧会话的图发进新会话。
+        ephemeral=True 时消息只进本轮请求，不写 session、不渲染气泡。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+
+        # ephemeral（自动继续）不进排队队列：撞上繁忙说明时序异常，
+        # 放弃本轮，避免退化成一条会渲染的真实用户消息
+        if ephemeral and self._worker_actually_busy():
+            logger.warning("[Session] ephemeral 发送撞上繁忙 worker，放弃本次自动继续")
+            self._is_streaming = False
+            self._toggle_send_stop(False)
+            # 已经建好的空回复卡必须摘掉，否则界面上留一张永远停在等待态的空卡
+            if assistant_card is not None:
+                try:
+                    assistant_card.deleteLater()
+                except RuntimeError:
+                    pass
+                self._current_assistant_card = None
+            return
+
+        if expect_session_id is not None:
+            session = self.session_manager.get_current_session() if self.session_manager else None
+            cur_sid = session.session_id if session else None
+            if cur_sid != expect_session_id:
+                logger.warning("[ImageAttach] 编码期间会话已切换，放弃本次发送并回滚 UI")
+                self._is_streaming = False
+                self._toggle_send_stop(False)
+                if assistant_card is not None:
+                    try:
+                        assistant_card.deleteLater()
+                    except RuntimeError:
+                        pass
+                    self._current_assistant_card = None
+                return
+            # 编码期间间隔较长，重设 tool_executor 的 session 上下文（同步路径
+            # 在 _do_deferred_send 开头已设；此处对齐该行为）
+            if session and self.backend.tool_executor:
+                self.backend.set_session_context(session.session_id)
+
+        # 图片附件路径透传给引擎：session 消息打 _image_attachments 标记，
+        # 恢复会话时渲染缩略图预览条（此前漏传导致历史加载不显示图片预览）
+        engine_kwargs = {}
+        if user_content is not None:
+            engine_kwargs["_user_content"] = user_content
+        # hook_event 透传给引擎：消息写入 session.messages 时带 _hook_event 标记
+        # （None 时不写入，保持历史行为不变）
+        if hook_event:
+            engine_kwargs["_hook_event"] = hook_event
+        if image_paths:
+            engine_kwargs["_image_attachments"] = list(image_paths)
+        # 原始输入元数据透传：session 消息打 _input_attachments/_raw_input_text 标记，
+        # 撤回（撤销到这里）时依此保真回填附件 chips 与占位符正文
+        if input_attachments:
+            engine_kwargs["_input_attachments"] = list(input_attachments)
+        if raw_input_text:
+            engine_kwargs["_raw_input_text"] = raw_input_text
+        # 系统驱动的 ephemeral 消息：不进排队、不渲染气泡、只进本轮请求
+        if ephemeral:
+            engine_kwargs["_ephemeral"] = True
+            # 只有 ephemeral 消息的会话也允许落库（否则切走再回来对话消失）
+            cur = self.session_manager.get_current_session() if self.session_manager else None
+            if cur is not None:
+                try:
+                    cur.metadata["_ephemeral_session"] = True
+                except Exception:
+                    pass
+        # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
+        # add_user_message 修改 session.messages。即使后续被 / 命令拦截
+        # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
+        self._session_dirty = True
+        if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
+            self._is_streaming = False
+            self._toggle_send_stop(False)
+            assistant_card.deleteLater()
+            # 🆕 补清引用：deleteLater 是延迟删除（下一轮事件循环 C++ 对象才销毁），
+            # 若不置 None，期间 _refresh_context_usage_indicator 等仍会取到
+            # _current_assistant_card 并访问已删除 QLabel → RuntimeError。
+            # 与 L13885-13886 规范写法对齐。
+            self._current_assistant_card = None
+            return
+
+        # 同步 batch 结构：_message_batch 已包含新 user batch
+        self._sync_batch_structures()
+        # 给新创建的用户卡片设置正确的 _message_index（_append_user_message 中未设置）
+        self._fix_new_card_message_index(user_text=user_text)
+        # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+        self._advance_visible_batch_window()
+        self._register_new_cards_into_batches()
+
+        # 🆕 发送纪元 +1：新一轮 worker 已启动。压缩守卫（_post_compact_guard）
+        # 依赖 epoch 判定"清空后新 worker"，其结果不得被当作旧快照丢弃
+        # （团队成员自动压缩后回复不可见 bug 修复核心点之一）
+        self._send_epoch += 1
+
+        # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
+        if session is None:
+            session = self.session_manager.get_current_session()
+        if session:
+            # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
+            # → mail-only 会话也能触发标题生成（之前被误伤跳过）
+            user_msg_count = sum(
+                1
+                for m in session.messages
+                if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+            )
+            if user_msg_count == 1:
+                self._maybe_generate_topic_summary()
+        # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
+        self._update_history_questions_badge()
 
     # ── 繁忙时发送：插话 / 排队 ──────────────────────────────────────
 
@@ -21295,8 +20989,6 @@ class OpenAIChatToolWindow(ToolWindow):
             )  # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
             self._advance_visible_batch_window()
             self._register_new_cards_into_batches()
-            # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
-            self._sync_node_preview_to_last()
             # 🆕 发送纪元 +1（**不再解除压缩守卫**）。
             # 本回调路径不走 _on_send_clicked，因此必须自己推进 epoch；但旧实现
             # 顺手把 _post_compact_guard 置 False 是错的：一旦守卫被关，旧 worker
@@ -21389,14 +21081,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if tool_call_id in self._processed_tool_result_ids:
             return
         self._processed_tool_result_ids.add(tool_call_id)
-        # 交接切换请求：update_handoff(switch=true) 置位，本轮结束时开新会话
-        try:
-            _result_data = result.get("data") if isinstance(result, dict) else getattr(result, "data", None)
-            if isinstance(_result_data, dict) and _result_data.get("handoff_switch"):
-                self._handoff_switch_requested = True
-                logger.info("[Handoff] 模型请求在本轮结束后开新会话")
-        except Exception:
-            pass
 
         # 实时刷新缓存统计：工具结果到达时本轮 LLM usage 必已记录，
         # 环形图无需等整轮对话结束才更新（不及时 Bug 修复）
@@ -21725,6 +21409,54 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._focus_input_if_active()
 
+        # 插件登记的动作（停流/新建/发消息）：本轮真正结束，主线程按序执行。
+        # 放最后：drain 里新建会话会清空待发队列，避免旧会话的消息续发到新会话。
+        self._drain_action_queue()
+
+    def _drain_action_queue(self):
+        """执行插件登记的动作队列（停流 → 新建 → 发消息）
+
+        插件在工具执行期只能入队：同步停流会杀掉正在执行该工具的 worker。
+        到这里本轮已真正结束，按登记顺序执行是安全时机。
+        window_id 只做精确匹配，拿不到就不执行（防多窗口串窗）。
+        """
+        try:
+            from app.core.conversation.action_queue import get_action_queue
+
+            wid = str(getattr(self, "_window_id", "") or "")
+            queue = get_action_queue()
+            pending = [item["action"] for item in queue.peek(wid)]
+            if not pending:
+                return
+            logger.info(f"[ActionQueue] drain 开始 wid={wid} actions={pending}")
+            handlers = {
+                "interrupt": lambda p: self._stop_stream_for_actions(),
+                "new": self._handle_action_new,
+                "send": lambda p: self._on_send_clicked(
+                    str(p.get("text") or ""),
+                    preserve_input=True,
+                    ephemeral=bool(p.get("ephemeral", True)),
+                ),
+            }
+            done = queue.drain(wid, handlers)
+            logger.info(f"[ActionQueue] drain 结束 已执行 {done}/{len(pending)} 个")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ActionQueue] 动作队列执行失败: {e}")
+
+    def _handle_action_new(self, payload: dict):
+        """动作队列的新建会话：worker 必须先真正停下
+
+        没停住就切会话，旧 worker 会继续把内容写进新会话（工具卡片、流式文本
+        全出在新会话里）。这里抛异常中止整条队列，宁可本轮不交接。
+        """
+        if self._worker_actually_busy():
+            # 收尾阶段 engine 标志可能滞后于 worker 真实退出：先同步停一次再复核。
+            # 漏了这一步会误判「worker 未停止」直接中止队列 → 交接静默不换会话。
+            self._stop_stream_for_actions()
+        if self._worker_actually_busy():
+            raise RuntimeError("worker 未停止，放弃切换会话")
+        self._create_new_session(close_history=True)
+
     def _do_post_stream_cleanup(self):
         """流式完成后延迟执行的清理和同步操作（不阻塞 UI 渲染流程）"""
         if getattr(self, "_is_destroyed", False):
@@ -21740,8 +21472,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self.history_manager:
             self._save_current_session_to_history()
-            # 🛡️ 立即落盘，确保数据写入 SQLite
-            self.history_manager.flush()
+            # 🛡️ 尽快落盘。[PERF] flush()→flush_async()：flush 是主线程同步
+            # serialize+zstd+fsync（大会话 700ms+，flush_async 注释自证），且本路径
+            # 在 _on_stream_finished 已 save 过一次（脏标记挡掉重复 save，但 flush
+            # 照跑）。改异步后写盘转后台线程，崩溃丢失窗口与原 1s 防抖同级；
+            # 退出路径仍由 aboutToQuit 的同步 flush 兜底。
+            self.history_manager.flush_async()
             # 流式完成后同步 batch 结构，确保 _message_batch 包含完整的 assistant batch
             self._sync_batch_structures()
             # 修复：同步可见范围，避免回收机制误删当前轮次的卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
@@ -21768,15 +21504,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 对话完成后更新缓存统计显示
         self._refresh_cache_stats()
 
-        # ⚠️ 时间线节点在流式完成时不会更新 - 修复
         self._update_node_preview()
-        self._sync_node_preview_to_last()
 
         # 对话完成后刷新余额显示
         self._refresh_balance()
 
-        # 更新当前助手卡片差异统计
-        self._update_card_diff_stats()
+        # 更新当前助手卡片差异统计（[PERF] 后台线程计算，主线程只落数字）
+        self._update_card_diff_stats(background=True)
 
     def _update_card_diff_stats_for_call(self, tool_call_id: str, card=None):
         """单个工具完成后增量更新卡片差异统计（直接用 call_id 查 file_recorder，不依赖 session.messages）
@@ -21905,11 +21639,17 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[DiffStats] 应用后台统计失败: {e}")
 
-    def _update_card_diff_stats(self, card=None):
+    def _update_card_diff_stats(self, card=None, background: bool = False):
         """计算助手卡片的文件修改统计并更新到页脚
 
         Args:
             card: 可选，指定要更新的卡片；不传则使用 _current_assistant_card
+            background: True 时把 collect+compute 挪到 daemon 线程，结果经
+                _round_diff_stats_ready 信号回主线程落数字。落定收尾路径
+                （_do_post_stream_cleanup）必须传 True：collect_operations_for_round
+                要读备份文件+当前文件再跑 difflib，>200KB 文件上会突破单帧预算
+                （同 _schedule_card_diff_stats_for_call 注释自证）。批量时间片
+                队列路径保持同步（自身已有 16ms 预算切片）。
         """
         if card is None:
             card = getattr(self, "_current_assistant_card", None)
@@ -21928,16 +21668,63 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         try:
+            call_ids = self._get_tool_call_ids_in_round(round_index)
+            if not call_ids:
+                return
+        except Exception as e:
+            logger.warning(f"[DiffStats] 收集 call_ids 失败: {e}")
+            return
+
+        if not background:
+            self._apply_round_diff_stats_sync(card, session.session_id, call_ids)
+            return
+
+        # ---- 后台路径：防同卡堆积 → daemon 线程 → 信号回主线程 ----
+        pending = getattr(self, "_pending_round_diff_cards", None)
+        if pending is None:
+            pending = set()
+            self._pending_round_diff_cards = pending
+        card_key = id(card)
+        if card_key in pending:
+            return  # 上一次还没算完，跳过（防线程堆积）
+        pending.add(card_key)
+        recorder = self.backend.file_recorder
+        session_id = session.session_id
+
+        def _worker():
+            stats = None
+            try:
+                from app.widgets.ui_helpers import (
+                    collect_operations_for_round,
+                    compute_diff_stats,
+                )
+
+                operations = collect_operations_for_round(recorder, session_id, call_ids)
+                if operations:
+                    stats = compute_diff_stats(operations)
+            except Exception as e:
+                logger.warning(f"[DiffStats] 后台整轮统计失败: {e}")
+                stats = None
+            try:
+                self._round_diff_stats_ready.emit(card, stats)
+            except RuntimeError:
+                # 窗口已销毁：跨线程信号投递失败，槽不会执行，此处兜底清标记
+                # （正常路径**必须**留到槽里清——worker 里清会在主线程槽执行前
+                # 就把标记摘掉，同一张卡的第二次请求又能起一个新线程，
+                # 防堆积机制形同虚设）
+                pending.discard(card_key)
+
+        threading.Thread(target=_worker, daemon=True, name="round-diff-stats").start()
+
+    def _apply_round_diff_stats_sync(self, card, session_id: str, call_ids):
+        """同步计算并落地整轮 diff 统计（原 _update_card_diff_stats 主体）"""
+        try:
             from app.widgets.ui_helpers import (
                 collect_operations_for_round,
                 compute_diff_stats,
             )
 
-            call_ids = self._get_tool_call_ids_in_round(round_index)
-            if not call_ids:
-                return
-
-            operations = collect_operations_for_round(self.backend.file_recorder, session.session_id, call_ids)
+            operations = collect_operations_for_round(self.backend.file_recorder, session_id, call_ids)
             if not operations:
                 return
 
@@ -21950,6 +21737,28 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
         except Exception as e:
             logger.warning(f"[DiffStats] 计算差异统计失败: {e}")
+
+    def _on_round_diff_stats_ready(self, card, stats) -> None:
+        """[PERF] 后台整轮 diff 统计落地：校验卡片存活后覆盖式设置（原语义）"""
+        pending = getattr(self, "_pending_round_diff_cards", None)
+        if pending is not None:
+            pending.discard(id(card))
+        if not stats:
+            return
+        if not (stats.get("files") or stats.get("additions") or stats.get("deletions")):
+            return
+        try:
+            if shiboken6.isValid(card):
+                return
+            card.set_diff_stats(
+                files_count=stats["files"],
+                additions=stats["additions"],
+                deletions=stats["deletions"],
+            )
+        except RuntimeError:
+            pass
+        except Exception as e:
+            logger.warning(f"[DiffStats] 应用后台整轮统计失败: {e}")
 
     # 差异统计批量消费：单时间片预算（毫秒）。每张卡要读备份文件 + 当前文件
     # + difflib，单卡实测受文件大小影响，取与懒渲染同级的 16ms 预算。
@@ -22145,7 +21954,8 @@ class OpenAIChatToolWindow(ToolWindow):
             msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
             for msg in saved_messages
         )
-        if not has_user_message:
+        # 只有 ephemeral 消息的会话（系统驱动）也放行
+        if not has_user_message and not (getattr(session, "metadata", None) or {}).get("_ephemeral_session"):
             return
 
         # 🛡️ 跳过无变更保存：自上次保存后会话没有新消息/修改，
@@ -22594,9 +22404,7 @@ class OpenAIChatToolWindow(ToolWindow):
         current_title = self.title_edit.text() if self.title_edit else "对话"
         self._notify_if_inactive(f"{current_title} - 错误", error[:100])
 
-        # ⚠️ 时间线节点在引擎错误时不会更新 - 修复
         self._update_node_preview()
-        self._sync_node_preview_to_last()
 
     def _on_retry_status(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
         """API 重试状态通知 - 更新卡片边框和状态栏，并切到 error 状态"""
@@ -25111,6 +24919,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._auto_save_current_session()
             except Exception:
                 pass
+        # [PERF-log] enqueue=True 的 loguru sink：退出前冲后台写盘队列，
+        # 防尾部日志（含崩溃前最后几行）随进程退出丢失。放在保存循环之后，保存过程日志也能冲盘。
+        try:
+            from loguru import logger as _logger
+
+            _logger.complete()
+        except Exception:
+            pass
 
     def _get_team_members_snapshot_json(self) -> str:
         """获取团队成员快照 JSON 字符串（供会话落库，F3 第 2 层）。
@@ -25158,7 +24974,8 @@ class OpenAIChatToolWindow(ToolWindow):
             msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
             for msg in session.messages
         )
-        if not has_user_message:
+        # 只有 ephemeral 消息的会话（系统驱动）也放行
+        if not has_user_message and not (getattr(session, "metadata", None) or {}).get("_ephemeral_session"):
             return None
 
         # 🛡️ 跳过无变更保存：自上次保存后会话没有被修改，
@@ -25480,10 +25297,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "backend") and self.backend:
             # 🔧 内存泄漏修复：先断开信号连接，防止闭包持有窗口引用
             # （plugin_changed 已上移 PluginHostService——服务信号断开见下方）
-            for signal_pair in (
-                ("auto_compact_requested", "_on_auto_compact_requested"),
-                ("sub_agent_ready", "_on_sub_agent_ready"),
-            ):
+            for signal_pair in (("sub_agent_ready", "_on_sub_agent_ready"),):
                 try:
                     sig = getattr(self.backend, signal_pair[0], None)
                     slot = getattr(self, signal_pair[1], None)
@@ -25690,6 +25504,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🛡️ 记录手动停止时刻（F1 P1-3）：停止后 1s 冷却期内不自动拉起 pending 邮件
         self._last_stop_time = time.monotonic()
+
+        # 🛡️ 停止即放弃本轮后续动作：插件登记的队列（停流/新建/发消息）若留着，
+        # 下次 drain 会让「已停止」的会话又自己跑起来，与用户意图相反
+        try:
+            from app.core.conversation.action_queue import get_action_queue
+
+            get_action_queue().clear(str(getattr(self, "_window_id", "") or ""))
+        except Exception:
+            pass
 
         # ===== 第一阶段：非阻塞取消 + 立即更新 UI =====
         # 先取消 worker（仅设置标志 + 断开信号，不阻塞）
@@ -25961,9 +25784,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._response_start_time = None
         self._stop_elapsed = None
 
-        # ⚠️ 时间线节点在停止流式后不会更新 - 修复
         self._update_node_preview()
-        self._sync_node_preview_to_last()
 
         # 繁忙时插话：停止时未消费的插话消息回填输入框，不丢失
         try:

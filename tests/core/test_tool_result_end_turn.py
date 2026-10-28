@@ -13,14 +13,14 @@
 from types import SimpleNamespace
 
 import pytest
-from PyQt5.QtCore import QObject
+from PySide6.QtCore import QObject
 
 
 def _make_worker(result_obj):
     """最小可用 worker：__new__ 绕过 __init__，仅注入 _execute_tool 依赖的状态。"""
     worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
     w = worker_cls.__new__(worker_cls)
-    QObject.__init__(w)  # 不补 QObject 初始化时 pyqtSignal 描述器会报父类未初始化
+    QObject.__init__(w)  # 不补 QObject 初始化时 Signal 描述器会报父类未初始化
     w._backup_delete_targets = lambda arguments: None
     w._should_run_hook = lambda ev: True
     w._is_cancelled = False
