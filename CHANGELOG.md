@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file.
 
 ## [未发布]
+### 🐛 问题修复 (Bug Fixes)
+- **多设备云同步不再互相覆盖** (`app/core/sync/merge.py` 新增): 同步从「整包后写者胜」改为以 base 版本为基准的三方合并。远端被其他设备改动时先合并再上传，删除「sha 冲突后重新拉取 SHA 覆盖」的自毁逻辑；冲突文件主名保留本机版本，对方版本落 `conflicts/<单元>/<时间戳>-<设备>/`（业务目录之外，插件扫描不到）并归档到远端 `drifox/conflicts/`，两台机器都能找回。下载不再整目录替换并删除本地旧内容，改为文件级合并 + 本地快照留档（`backups/sync/`，保留 5 份）。
+- **无变化不再触发上传** (`app/core/sync/fingerprint.py` 新增): 引入内容指纹（目录清单摘要 + git blob sha，与 Gitee 返回的 sha 同算法）与确定性打包（固定 mtime/顺序/压缩参数）。内容未变时零网络请求跳过；provider 不再搭车 app.config 全量重推（改配置开关不再触发 assistant_hub 等 1MB+ 数据上传）。ZIP 打包排除 `__pycache__`/`.DS_Store`/`*.pyc`/`*.log` 等运行时产物。
+- **app.config 合并细化到集合元素级**: `LLM.SavedProviders` / `MCP.Servers` / `Tools.Toggles` / `Plugin.EnabledPlugins` 等 dict/list 型配置按元素三方合并，双机各自新增的 provider、MCP 服务、插件条目都保留，不再整块冲突丢一边。API Key 本机权威（本地已有值永不被云端密文覆盖，本地为空时才接收云端）；Gitee token 继续本机独立。配置项层禁用删除传播：老版本客户端重写 app.config 丢掉新版本 ConfigItem 时，不会再把「缺失」当成用户删除同步到所有设备导致新配置项集体消失。
+- **运行期云端变更轮询**: 新增 5 分钟轮询（单轮 2 次目录列表请求），远端有更新且本地无未同步改动时自动合并下载，不再只能靠下次启动整包覆盖收敛。
 
 ## [v0.6.12] - 2026-10-27 (重新发布 #7)
 
