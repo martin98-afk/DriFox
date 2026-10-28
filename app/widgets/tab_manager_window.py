@@ -828,20 +828,32 @@ class _ContentStack(QWidget):
         self._current = i
         if direction != 0 and Animations.motion_enabled() and old is not None and old is not new:
             self._start_slide(old, new, direction)
-        elif i == 0:
+        else:
+            # 直切分支同样必须先快进在途动画（over/swap 收尾 _settle 会把旧顶层页
+            # raise 归位，若放任其在直切之后收尾，覆盖层页会被顶到对话页之上——
+            # 对话页被空覆盖层遮住，表现为「切回对话后整个对话区空白，切走再切回
+            # 才恢复」）。_start_slide 自带重入快进，只有本分支此前裸奔。
+            if self.slide_in_progress():
+                self._finish_slide(interrupted=True)
             # 回对话：show 对话页（实测 ~10ms）+ raise 盖住覆盖层。
             # ⚠️ 覆盖层页**不 hide**——保活不变式，消灭下次切换的 show 传播。
-            if old is not None:
-                old.lower()
-            new.show()
-            new.raise_()
-        else:
-            # 去覆盖层：覆盖层 raise 到顶；对话页 hide（实测 ~11ms，
-            # 省布局 + 杜绝焦点穿透到被遮的对话区）
-            new.show()
-            new.raise_()
-            if old is not None:
-                old.hide()
+            # ⚠️ show 前先归位几何：动画在途期 resize 只同步动画参与页
+            # （_sync_slide_baseline），hide 态的对话页会停留在旧尺寸，
+            # 直接 show 会以旧几何上屏（右侧漏出一条旧宽度的空白）。
+            if i == 0:
+                if old is not None:
+                    old.lower()
+                new.setGeometry(self.rect())
+                new.show()
+                new.raise_()
+            else:
+                # 去覆盖层：覆盖层 raise 到顶；对话页 hide（实测 ~11ms，
+                # 省布局 + 杜绝焦点穿透到被遮的对话区）
+                new.setGeometry(self.rect())
+                new.show()
+                new.raise_()
+                if old is not None:
+                    old.hide()
         self.currentChanged.emit(i)
 
     def setCurrentWidget(self, w: QWidget) -> None:
