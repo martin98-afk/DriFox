@@ -26,9 +26,11 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
+    CaptionLabel,
     ComboBox,
     ExpandSettingCard,
     FluentIcon,
+    HyperlinkButton,
     IndeterminateProgressBar,
     LineEdit,
     PasswordLineEdit,
@@ -104,7 +106,11 @@ class SelectComboRow(QWidget):
 
 
 class _FieldRow(QWidget):
-    """字段行：左侧 label，右侧输入控件。"""
+    """字段行：左侧定宽 label，右侧控件撑满剩余宽度。
+
+    控件不固定宽度也不右对齐：长值（AppSecret / WebSocket 地址 / 包名）
+    在窄窗口下保持完整可见，各行左边缘也对齐。
+    """
 
     def __init__(self, label_text: str, control: QWidget, parent=None):
         super().__init__(parent)
@@ -116,7 +122,7 @@ class _FieldRow(QWidget):
         self._label.setObjectName("fieldLabel")
         self._label.setMinimumWidth(120)
         layout.addWidget(self._label, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        layout.addWidget(control, 1, Qt.AlignRight)
+        layout.addWidget(control, 1)
 
 
 class PluginConfigCard(ExpandSettingCard):
@@ -167,7 +173,7 @@ class PluginConfigCard(ExpandSettingCard):
                 combo.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
                 row = _FieldRow(f.label, combo, self.view)
                 self._rows[f.key] = combo
-                self.viewLayout.addWidget(row)
+                self._add_field_row(f, row)
             elif f.type == "number":
                 spin = SpinBox(self.view)
                 spin.setRange(f.min if f.min is not None else 0, f.max if f.max is not None else 2147483647)
@@ -175,19 +181,19 @@ class PluginConfigCard(ExpandSettingCard):
                 spin.valueChanged.connect(lambda *_a, _k=f.key: self._on_field_changed(_k))
                 row = _FieldRow(f.label, spin, self.view)
                 self._rows[f.key] = spin
-                self.viewLayout.addWidget(row)
+                self._add_field_row(f, row)
             elif f.type == "link":
-                # 外链按钮：可点击超链接（系统浏览器打开），无存储值不参与回显
+                # 外链按钮：HyperlinkButton（主题色 + 链接图标），点击用系统浏览器打开。
+                # 按钮自身是居中对齐文本，撑满整行会飘到右边，用 stretch 尾巴把它钉在左侧
                 link_text = f.placeholder or f.url
-                link_label = BodyLabel(
-                    f"<a href=\"{f.url}\">{link_text} ↗</a>", self.view
-                )
-                from app.utils.design_tokens import Colors
-
-                link_label.setStyleSheet(f"QLabel {{ color: {Colors.TEXT_ACCENT}; }}")
-                link_label.setOpenExternalLinks(True)
-                row = _FieldRow(f.label, link_label, self.view)
-                self.viewLayout.addWidget(row)
+                link = HyperlinkButton(f.url, link_text, self.view, FluentIcon.LINK)
+                holder = QWidget(self.view)
+                holder_layout = QHBoxLayout(holder)
+                holder_layout.setContentsMargins(0, 0, 0, 0)
+                holder_layout.addWidget(link)
+                holder_layout.addStretch(1)
+                row = _FieldRow(f.label, holder, self.view)
+                self._add_field_row(f, row)
             elif f.type == "action":
                 # 动作按钮：点击弹窗执行声明式工具编排（通用机制，见 ToolActionDialog），
                 # 无存储值不参与保存/回显
@@ -197,8 +203,14 @@ class PluginConfigCard(ExpandSettingCard):
                         _card.view, _p, _f.label, _f.action, config_card=_card
                     )
                 )
-                row = _FieldRow(f.label, btn, self.view)
-                self.viewLayout.addWidget(row)
+                # 按钮不自撑满（撑满后文字居中、显得像主操作按钮），包一层靠左
+                holder = QWidget(self.view)
+                holder_layout = QHBoxLayout(holder)
+                holder_layout.setContentsMargins(0, 0, 0, 0)
+                holder_layout.addWidget(btn)
+                holder_layout.addStretch(1)
+                row = _FieldRow(f.label, holder, self.view)
+                self._add_field_row(f, row)
             elif f.type == "textarea":
                 edit = _PlainEdit(self.view)
                 if f.placeholder:
@@ -207,7 +219,7 @@ class PluginConfigCard(ExpandSettingCard):
                 edit.editingFinished.connect(lambda _k=f.key: self._on_field_changed(_k))
                 row = _FieldRow(f.label, edit, self.view)
                 self._rows[f.key] = edit
-                self.viewLayout.addWidget(row)
+                self._add_field_row(f, row)
             else:
                 edit = PasswordLineEdit() if f.type == "password" else LineEdit()
                 edit.setClearButtonEnabled(True)
@@ -216,9 +228,26 @@ class PluginConfigCard(ExpandSettingCard):
                 row = _FieldRow(f.label, edit, self.view)
                 self._rows[f.key] = edit
                 edit.editingFinished.connect(lambda _k=f.key: self._on_field_changed(_k))
-                self.viewLayout.addWidget(row)
+                self._add_field_row(f, row)
 
         self._echo()
+
+    def _add_field_row(self, f, row: QWidget) -> None:
+        """添加字段行；schema 带 description 时补一行小号说明（与控件列对齐）。
+
+        说明文字用 CaptionLabel 而不自设颜色：设计令牌的 TEXT_SECONDARY 是
+        深色主题值（白色半透明），浅色主题下写了就等于隐形；CaptionLabel 自带
+        随主题变化的次要文字样式。
+        """
+        self.viewLayout.addWidget(row)
+        if not f.description:
+            return
+        hint = CaptionLabel(f.description, self.view)
+        hint.setWordWrap(True)
+        # QLabel 的 contentsMargins 不影响它在布局里的位置，用 indent 做左缩进，
+        # 与控件列（label 120 + spacing 12）对齐，读起来是注解而不是新字段
+        hint.setIndent(132)
+        self.viewLayout.addWidget(hint)
 
     def _resolve_plugin_icon(self):
         """读取插件自身 icon（按当前主题取 light/dark），失败回退 None。
