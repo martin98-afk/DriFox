@@ -99,9 +99,7 @@ def _unraisable_hook(unraisable):
 
 def _threading_excepthook_hook(args):
     thread_name = args.thread.name if args.thread is not None else "?"
-    _hook_logger.error(
-        f"[ThreadUnhandledException] {args.exc_type.__name__}: {args.exc_value} in thread {thread_name}"
-    )
+    _hook_logger.error(f"[ThreadUnhandledException] {args.exc_type.__name__}: {args.exc_value} in thread {thread_name}")
     _hook_logger.error("".join(_exc_tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
 
 
@@ -191,7 +189,7 @@ def main():
             logger.debug(msg)
         _sm_seg = _now
 
-    if _qt_pp: 
+    if _qt_pp:
         logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
 
     # ========== 必须在创建 QApplication 之前设置 Qt 属性 ==========
@@ -293,7 +291,24 @@ def main():
 
             setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
         except Exception:
-            pass
+            # 日志系统自身失败不能拖垮启动，但绝不能静默：2026-10-28 出现
+            # POSIX semaphore 耗尽（Errno 28），setup_logging 抛出后被这里的
+            # pass 吞掉 → 应用照常运行但零日志，事后完全无证据可查。
+            # 落 stderr（打包版由 bootloader 转发）+ 数据目录留痕。
+            import traceback
+
+            _tb = traceback.format_exc()
+            sys.stderr.write(f"[EarlyForensics] setup_logging 失败:\n{_tb}\n")
+            sys.stderr.flush()
+            try:
+                from app.utils.utils import get_app_data_dir
+
+                _diag = get_app_data_dir() / "logs" / "logging_setup_failed.log"
+                _diag.parent.mkdir(parents=True, exist_ok=True)
+                with open(_diag, "a", encoding="utf-8") as _df:
+                    _df.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n{_tb}")
+            except Exception:
+                pass
         try:
             from app.core.infra.crash_handler import install_crash_handler
             from app.utils.utils import get_app_data_dir
@@ -359,7 +374,9 @@ def main():
             _bk_t0 = _time.perf_counter()
             _bk_thread = threading.Thread(target=_cleanup_backups, daemon=True)
             _bk_thread.start()
-            logger.debug(f"[DeferredStartup] 备份清理已派发后台线程（派发耗时 {(_time.perf_counter() - _bk_t0) * 1000:.1f}ms）")
+            logger.debug(
+                f"[DeferredStartup] 备份清理已派发后台线程（派发耗时 {(_time.perf_counter() - _bk_t0) * 1000:.1f}ms）"
+            )
         except Exception:
             logger.exception("[DeferredStartup] 启动备份清理线程失败")
         _mark("backup_limit_cleanup(dispatch)")
@@ -396,7 +413,6 @@ def main():
                 prewarm_markdown_block_viewer()
         except Exception:
             logger.exception("[DeferredStartup] prewarm_markdown_block_viewer 失败")
-
 
         # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
         # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
@@ -501,6 +517,7 @@ def main():
         win = _show_window_state["window"]
         if win is None:
             _show_window_state["wanted"] = True
+
             # [T36 P5] pending 超时兜底：首窗构造异常（如渲染环境崩溃）时，
             # 二次启动请求会一直挂在 wanted 上被静默丢弃 → 用户双击图标无反应。
             # 30s 后仍未就绪则清 wanted + 告警（对应 T24 R2 的"窗口期"上限）。
@@ -790,4 +807,18 @@ def main():
 
 
 if __name__ == "__main__":
+    # PyInstaller 打包后 sys.executable 是 app 二进制本身，multiprocessing 拉起
+    # 的辅助子进程（resource_tracker / spawn worker）不再由 python 解释器执行 ——
+    # bootloader 不认 `-c`，会把它当「正常启动」重跑整个应用。而 loguru 每个
+    # enqueue=True sink 都会创建 SimpleQueue/Event/Lock，首次调用即拉起
+    # resource_tracker → 子进程重跑 app → 它又建 sink 又拉 tracker → 无限自激。
+    # 实测（2026-10-28 打包版）：每 1-2s 派生一个主实例，17 分钟累计 221 个 PID。
+    #
+    # PyInstaller 的 pyi_rth_multiprocessing 已把本函数换成分流实现：命中
+    # `-c "from multiprocessing.resource_tracker import main"` 时只 exec 那段代码
+    # 然后 sys.exit()，不再进入 main()。源码运行时它是 no-op（先判 sys.frozen）。
+    # 位置必须在 __main__ 块内、main() 之前：rthook 在解释器启动时已完成替换。
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     main()
