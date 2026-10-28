@@ -43,7 +43,7 @@ def fresh_service():
         svc = GatewayService.__new__(GatewayService)
         from PySide6.QtCore import QObject
 
-        QObject.__init__(svc)
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         svc._manager = None
         svc._engine = None
         svc._tool_executor = None

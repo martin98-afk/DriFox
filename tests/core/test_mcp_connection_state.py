@@ -16,6 +16,7 @@
 
 import asyncio
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -62,37 +63,45 @@ def _make_conn(name, state=MCPState.CONNECTED, config=None):
 
 
 class TestResolvePluginPaths:
-    _SOURCE = "D:/work/DriFox/.drifox6/plugins/browser/.mcp.json"
+    """占位符展开依赖 _source 所在目录真实存在，故用 tmp_path 构造，
+    不写死仓库路径（pyside6 分支数据目录是 .drifox6，不一定存在同构目录）。"""
 
-    def test_expands_root_placeholder(self):
+    @pytest.fixture
+    def source(self, tmp_path):
+        plugin_dir = tmp_path / "browser"
+        plugin_dir.mkdir()
+        return str(plugin_dir / ".mcp.json")
+
+    def test_expands_root_placeholder(self, source):
         cfg = {
             "command": "py",
             "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/mcp/server.py"],
             "env": {},
             "url": "",
             "headers": {},
-            "_source": self._SOURCE,
+            "_source": source,
         }
         out = _resolve_plugin_paths(cfg)
-        assert out["args"][1] == "D:/work/DriFox/.drifox6/plugins/browser/mcp/server.py"
+        assert out["args"][1] == Path(source).parent.as_posix() + "/mcp/server.py"
 
-    def test_expands_data_placeholder(self):
-        cfg = {"args": [], "env": {"X": "${CLAUDE_PLUGIN_ROOT}/data"}, "_source": self._SOURCE}
+    def test_expands_data_placeholder(self, source):
+        cfg = {"args": [], "env": {"X": "${CLAUDE_PLUGIN_ROOT}/data"}, "_source": source}
         out = _resolve_plugin_paths(cfg)
-        assert out["env"]["X"] == "D:/work/DriFox/.drifox6/plugins/browser/data"
+        assert out["env"]["X"] == Path(source).parent.as_posix() + "/data"
 
-    def test_idempotent_on_already_expanded(self):
-        cfg = {"args": ["D:/work/DriFox/.drifox6/plugins/browser/mcp/server.py"], "_source": self._SOURCE}
+    def test_idempotent_on_already_expanded(self, source):
+        expanded = Path(source).parent.as_posix() + "/mcp/server.py"
+        cfg = {"args": [expanded], "_source": source}
         # 已展开的绝对值不应被二次改变
-        assert _resolve_plugin_paths(cfg)["args"] == cfg["args"]
+        assert _resolve_plugin_paths(cfg)["args"] == [expanded]
 
     def test_no_source_is_passthrough(self):
         cfg = {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"]}
         # 无 _source 时原样返回，不影响普通配置
         assert _resolve_plugin_paths(cfg) is cfg
 
-    def test_does_not_mutate_original(self):
-        cfg = {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"], "_source": self._SOURCE}
+    def test_does_not_mutate_original(self, source):
+        cfg = {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"], "_source": source}
         _resolve_plugin_paths(cfg)
         assert cfg["args"][0] == "${CLAUDE_PLUGIN_ROOT}/mcp/server.py"
 

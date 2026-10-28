@@ -12,7 +12,7 @@ from app.core.services.plugin_host_service import PluginHostService
 def _make_host():
     """构造脱离单例/生命周期约束的 PluginHostService 实例（纯插件分派测试用）"""
     svc = PluginHostService.__new__(PluginHostService)
-    QObject.__init__(svc)
+    # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
     svc._agent_manager = None
     return svc
 

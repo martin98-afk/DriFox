@@ -19,7 +19,7 @@ from PySide6.QtCore import QObject
 
 def _make_host():
     svc = PluginHostService.__new__(PluginHostService)
-    QObject.__init__(svc)
+    # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
     svc._agent_manager = None
     return svc
 

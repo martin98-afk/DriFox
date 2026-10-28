@@ -26,7 +26,7 @@ from app.core.services.plugin_host_service import PluginHostService
 
 def _make_host() -> PluginHostService:
     svc = PluginHostService.__new__(PluginHostService)
-    QObject.__init__(svc)
+    # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
     svc._agent_manager = None
     # [T31] __new__ 绕过 __init__，补延迟队列/LSP 幂等标志
     import threading

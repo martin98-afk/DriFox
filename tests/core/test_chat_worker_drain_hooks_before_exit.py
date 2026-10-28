@@ -21,7 +21,7 @@ def _make_worker(policy):
     """构造最小可用 worker：__new__ 绕过 __init__，仅注入本方法依赖的状态。"""
     worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
     w = worker_cls.__new__(worker_cls)
-    QObject.__init__(w)  # 补 QObject 初始化，否则访问 Signal 描述器报 super-class __init__ 未调用
+    # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
     w.tool_executor = SimpleNamespace(_backend=SimpleNamespace(_hook_message_queue=queue.Queue()))
     w._loop_policy_obj = policy
     w.llm_config = {}  # __new__ 绕过 __init__，max_rounds 预检需要
@@ -195,7 +195,7 @@ def test_missing_backend_takes_finish_path():
     """tool_executor/backend/队列缺失 → 完成路径不炸（防御风格一致）"""
     worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
     w = worker_cls.__new__(worker_cls)
-    QObject.__init__(w)
+    # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
     w.tool_executor = SimpleNamespace(_backend=None)
     w._loop_policy_obj = _DefaultLikePolicy()
     w._inject_calls = []

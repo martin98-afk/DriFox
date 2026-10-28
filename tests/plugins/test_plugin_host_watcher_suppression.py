@@ -133,7 +133,7 @@ class TestDedupStamp:
         from PySide6.QtCore import QObject
 
         svc = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc)
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         cache: dict = {}
         svc._watcher_dedup_cache = cache
 
@@ -151,7 +151,7 @@ class TestDedupStamp:
         from PySide6.QtCore import QObject
 
         svc = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc)
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         svc._watcher_dedup_cache = {}
         # 空插件名 / sentinel / 非 dict / 空缓存对象 全部静默 no-op
         svc._stamp_watcher_dedup_for("", {"ui": True})
@@ -162,7 +162,7 @@ class TestDedupStamp:
         assert list(svc._watcher_dedup_cache.keys()) == [("plug-a", "ui")]
         # 实例完全无缓存属性（真实 __init__ 前）→ getattr 默认 None → no-op 不抛
         svc2 = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc2)
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         svc2._stamp_watcher_dedup_for("plug-a", {"ui": True})
 
 
@@ -275,7 +275,7 @@ class TestCrossPluginBatchEmit:
         monkeypatch.setattr(_wf, "watch", _fake_watch)
 
         svc = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc)
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         # 拦截真实重载槽：只收集 emit，不触发 rescan/子系统重载
         received: list = []
         monkeypatch.setattr(svc, "_on_hot_reload_requested", lambda p, c: received.append((p, c)))

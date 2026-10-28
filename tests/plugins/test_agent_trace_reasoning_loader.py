@@ -13,7 +13,7 @@ def _bare_collector():
     """构造最小实例：QObject 必须走 ``__init__``，否则访问方法会报
     ``super-class __init__() of type TraceCollector was never called``。
     但 ``__init__`` 本身需要 PyQt5 应用对象 + 不会引入 plugin 副作用——
-    实际上只要 ``QObject.__init__(self, None)`` 走完即可（PyQt5 父级为 None
+    # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
     时不依赖 qapp）；init 体里也只读 self 默认属性，不依赖环境。直接实例化
     最简洁。
     """

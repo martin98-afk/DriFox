@@ -35,7 +35,7 @@ def test_new_component_type_end_to_end(monkeypatch, tmp_path):
 
         # 3) 路径识别链：服务 _identify_all_components_from_changes 用 kernel 常量
         svc = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc)
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
 
         # tmp_path 在 Windows 上需小写与服务内 os.path 比较语义一致
         plugin_prefixes = {str(tmp_path).lower(): "e2e-plugin"}

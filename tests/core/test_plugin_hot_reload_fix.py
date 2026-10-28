@@ -140,7 +140,7 @@ class TestHotReloadNewPluginFallback:
         pm._initialized = True
 
         svc = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc)  # 手动初始化 Qt 基类，绕过单例拦截
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         # __new__ 实例无 Qt 信号，mock 掉 emit（断言只关心重载分发路径）
         svc.plugin_changed = MagicMock()
         return svc, pm
@@ -216,7 +216,7 @@ class TestDedupCacheCleanupOnRemove:
 
     def _make_backend_with_dedup(self):
         svc = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc)  # 手动初始化 Qt 基类，绕过单例拦截
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         # 模拟 watcher 闭包挂载的去重缓存（_start_plugin_watcher 中设置）
         svc._watcher_dedup_cache = {
             ("victim", ""): 100.0,
@@ -255,7 +255,7 @@ class TestDedupCacheCleanupOnRemove:
         pm._plugins.clear()
 
         svc = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc)  # 手动初始化 Qt 基类，绕过单例拦截
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         svc._watcher_dedup_cache = {
             ("gone-a", ""): 100.0,
             ("gone-b", "ui"): 200.0,
@@ -290,7 +290,7 @@ class TestPluginChangedBroadcast:
     def _make_service_with_spy(self):
         """构造服务实例并连接 plugin_changed 记录器"""
         svc = PluginHostService.__new__(PluginHostService)
-        QObject.__init__(svc)  # 手动初始化 Qt 基类，绕过单例拦截
+        # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（isn't a direct base class）
         received = []
 
         class _FakeSignal:
