@@ -1,6 +1,80 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [未发布]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **流式思考/人格块闭合瞬间内容泄漏到正文**: `append_text` 的协议块守卫只判「累积后是否未闭合」，`</think>`/`</plan>` 所在那批被放行；增量注入又只清 `<think>` 标签，该批文本以纯文本进 DOM，下一次全量渲染再折叠成卡片（正文闪现碎片后消失）。`_append_text_incremental` 增加 chunk 级 `_text_has_protocol_tag` 守卫。
+
+## [v0.6.12] - 2026-10-27 (重新发布 #2)
+
+自 v0.6.11 以来的变更 | 提交数：25 · 文件变更：123 · +6251/-2179 | 贡献者：dingma, mading, drifox-bot
+
+### ✨ 新功能 (New Features)
+
+- **会话接力机制（session handoff）** (`00ec3a68`): 实现会话上下文无缝交接，会话切换/接续时上下文平滑转移。
+- **流式期间跳过欢迎消息渲染** (`7bbb5029`): 新增安全防护，流式输出中或会话已有消息时不再渲染欢迎消息，避免闪现与状态错乱。
+- **`net.avatar` / `net.download` 能力 + `sync.register` 云同步注册** (`5d41046c`): 能力池新增网络头像与下载能力；新增 sync.register 供插件注册云同步。
+- **搜索输入框清空按钮** (`b0f0ad9b`): 各搜索输入框增加一键清空，提升输入体验。
+- **系统卡抑制释放与状态层自动刷新** (`26055f3b`): 系统卡抑制策略支持释放，状态层自动刷新。
+- **Gitee 账号头像异步拉取与缓存** (`e6482bf0`): 头像获取改异步 + 缓存，避免阻塞 UI。
+- **标签页状态环颜色与绘制逻辑** (`b086efc7`): tab 项新增状态环颜色渲染。
+- **高 DPI 头像渲染回归测试 + 侧栏折叠动画状态保持** (`9afc16ab`): `_AvatarCircleWidget` 高 DPI 渲染回归测试；侧栏折叠动画完成前保持 UI 状态。
+
+### ⚡ 性能优化 (Performance)
+
+- **TransparentToolButton → LiteIconButton** (`f250264b`): 替换按钮组件降低内存占用，统一按钮样式。
+- **多组件内存与缓存策略优化** (`2fb3bb2b`): 多个组件的内存占用与缓存策略优化。
+- **移除无用 layout epoch 与滚动同步变量** (`107eea41`): 清理无效状态减少布局开销。
+- **异步处理与整体性能优化** (`71d29a1e`): 关键路径改异步处理。
+- **插件加载与状态管理增强** (`d293b676`): 插件加载性能与稳定性提升。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **移除废弃函数，优化代码结构** (`6a7c95a6`): 清理 deprecated 代码提升可维护性。
+- **头像渲染与胶囊环判定逻辑增强** (`38a5a9c4`): TabItem 头像渲染逻辑与胶囊环决策优化。
+- **流光环恒定色相与运动表现** (`f45255da`): streaming 环颜色保持恒定色相，运动表现更自然。
+- **TabPanel 图标状态与紧凑模式 tooltip** (`caff096e`): 紧凑模式下图标状态与 tooltip 逻辑更新。
+
+### 🔄 其他变更 (Other Changes)
+
+- **测试** (`074a3409`): mock 用户头像拉取，防止测试期网络调用。
+
+### ✨ 新功能 (New Features)（重新发布 #2 追加）
+
+- **会话交接工具 `update_handoff`** (`a1dbb028`): 会话内可直接撰写交接文档，配合窗口级动作队列编排切会话。
+- **动作队列与工具宿主兼容性增强** (`83ad79fd`): `tool_core` provider 宿主兼容性修正，设置卡与全局卡控制器适配，新增 `test_capability_tool_host_compat.py`。
+- **交接机制与会话管理增强** (`4d801fa6`): `auto_compact_trigger` 补写触发与 `inject_handoff` 注入细节增强。
+- **继续提示附带源会话标题** (`7ca792a7`): 会话接续提示带上来源会话标题。
+- **动作队列打断时丢弃待发送** (`270cd41a`): 中断或有新动作入队时丢弃 pending 发送，防重复投递；补自定义输入开关与流式 diff 渲染判据测试。
+- **动作队列接入 loguru** (`c7c0aec9`): 统一日志框架，细化队列日志。
+
+### ♻️ 代码重构 (Refactoring)（重新发布 #2 追加）
+
+- **会话交接改为插件实现** (`system-handoff` · `a1dbb028`): 交接全链路（阈值检测、补写触发、文档读写、切会话编排、注入）迁入 `plugins/system-handoff`；主程序新增 `session.interrupt` / `session.new` / `session.send` 能力，走窗口级动作队列，本轮结束按序执行；删除 `app/core/context/handoff.py`、`_on_auto_compact_requested` 与 backend 交接信号链，自动继续改走 ephemeral 通道，不再伪造用户消息。
+
+### 🔧 其他 (Chores & Build)（重新发布 #2 追加）
+
+- **marketplace 自动再生成** (`f43b40fd`): 按 plugin.json 重新生成 [skip ci]。
+
+## [v0.6.12] - 2026-10-28 (pyside6 追平 dev)
+
+同步 dev `8fd2dab3` 之前的 35 个提交（应用 30 个，4 个纯文档提交并入本条记录），含 session handoff 机制、action queue、流式增量注入优化与协议 tag 守卫。
+
+### 🔧 PySide6 适配与修复
+
+- **QEvent 枚举改用 Qt6 取值** (`app/widgets/cards/settings/gitee_card.py`): dev 侧硬编码 `DevicePixelRatioChange=154` / `ScreenChangeInternal=175` 是 Qt5 编号，Qt6 下为 222 / 216，硬编码永不命中 → 改 `int(QEvent.Type.XXX)` 取值。
+- **`drawPolyline(*poly)` 改 `QPolygonF(poly)`** (`app/widgets/tab_panel.py`): PySide6 只接受单个 QPolygonF/QPointF 序列，PyQt5 的变参展开会 `TypeError: takes exactly one argument`（状态环绘制每帧触发）。
+- **`openSessionRequested` 信号直连改 lambda 转发** (`app/widgets/tab_panel.py`): QVariantMap(dict) → PyObject(object) 签名不兼容，直连会静默失连。
+- **合并带入的 PyQt5 代码归一** (24 文件): 导入、`pyqtSignal`、`pytest.importorskip("PyQt5")` 等改 PySide6；`sip.isdeleted` → `not shiboken6.isValid`。
+- **骨架缓存版本号 52 → 53**: dev 49 / pyside6 52 各自演进，取更大值强制刷新，避免旧骨架命中新内容。
+- **保留 pyside6 专属适配**: `shiboken6 as sip`、`_DialogVisibilityBridge`（避开 shiboken eventFilter 崩溃）、QWebEngineCore 拆分导入、`.drifox6` 数据目录、插件市场兜底分支 pyside6。
+
+### ✅ 验证
+
+关键模块导入冒烟通过；`tests/core` 106 failed / 1924 passed 与既有基线一致；本次新增用例（action_queue、handoff 插件、能力池、卡片抑制恢复、gitee 头像 HiDPI、tab_panel 折叠团队头像）全绿；`tests/widgets` 新用例除 dev 侧既有失败外无回归。
+
 ## [v0.6.11] - 2026-10-25 (重新发布 #4)
 
 自 v0.6.10 以来的变更 | 提交数：63 · 文件变更：136 · +12797/-1864 | 贡献者：dingma, mading, martin98-afk
