@@ -1168,7 +1168,30 @@ def chat_once(
 
     返回 {"ok": bool, "conversation_id": str, "request_id": str, "error": str}。
     requestId 必须是服务端返回的真实 id，自造 UUID 不计数。
+
+    偶发失败时重试一次：同一专家连续两次结果会不同（流式首包时序差异），
+    单次失败不足以判定任务不可做。
     """
+    last: Dict[str, Any] = {}
+    for attempt in range(2):
+        result = _chat_once_attempt(access_token, uid, prompt, model_id, expert_id, timeout)
+        if result.get("ok"):
+            return result
+        last = result
+        if attempt == 0:
+            time.sleep(2.0)
+    return last
+
+
+def _chat_once_attempt(
+    access_token: str,
+    uid: str,
+    prompt: str,
+    model_id: str,
+    expert_id: str,
+    timeout: float,
+) -> Dict[str, Any]:
+    """chat_once 的单次尝试（拆出便于重试）。"""
     import re
     import urllib.error
     import urllib.request
@@ -1206,6 +1229,8 @@ def chat_once(
         headers=headers,
     )
     id_re = re.compile(r"^(cmb-)?[0-9a-f]{32}$")
+    # 冒号两侧允许空白：不同序列化路径下 "id":"x" 与 "id": "x" 都会出现
+    id_pattern = re.compile(rb'"id"\s*:\s*"([^"]+)"')
     buf = b""
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_system_ssl_context()) as resp:
@@ -1214,7 +1239,7 @@ def chat_once(
                 if not chunk:
                     break
                 buf += chunk
-                for match in re.finditer(rb'"id":"([^"]+)"', buf):
+                for match in id_pattern.finditer(buf):
                     cand = match.group(1).decode("utf-8", "replace")
                     if id_re.match(cand):
                         return {"ok": True, "conversation_id": conv, "request_id": cand, "error": ""}
@@ -1225,7 +1250,13 @@ def chat_once(
         return {"ok": False, "conversation_id": conv, "request_id": "", "error": f"HTTP {exc.code}: {detail}"}
     except Exception as exc:  # 网络中断/超时都不该让整个每日流程崩
         return {"ok": False, "conversation_id": conv, "request_id": "", "error": str(exc)}
-    return {"ok": False, "conversation_id": conv, "request_id": "", "error": "SSE 未返回 requestId"}
+    sample = buf[:200].decode("utf-8", "replace") if buf else "(空流)"
+    return {
+        "ok": False,
+        "conversation_id": conv,
+        "request_id": "",
+        "error": f"SSE 未返回 requestId，首段={sample!r}",
+    }
 
 
 def _uuid_token() -> str:

@@ -571,8 +571,39 @@ def _run_desktop_chain(ba, at: str, uid: str, nickname: str, tasks: dict, done: 
     return acted
 
 
+# 已在专属分支里实现、不能被通用专家形态识别重复接管的任务 code。
+# _EXCLUDED_* 是「长得像专家任务但判据不同」的两类：轻量云要 mode=LOCAL 变体，
+# 专家团按 expert_type=team 批量走另一条路。
+_EXPERT_HANDLED_ELSEWHERE = frozenset({"Expert_lighthouse", "Expert_team_use_3"})
+
+
+def _is_expert_task(task: dict) -> bool:
+    """按任务**形态**判定是否为「召唤某个指定专家并完成一次对话」类任务。
+
+    不依赖 task_code 命名：上游的活动任务 code 是随活动起的（今天叫
+    expert_use_maidehao，明天可能叫别的），认命名必然漏。判据是三件套齐全：
+    ① jump_url 里有 expertId；② 文案里点了专家名（「」）；③ 文案含「召唤/对话」。
+
+    这样新上线的同类活动任务无需改代码即可自动接管；真出意外时
+    _resolve_expert 定位不到真实条目会跳过并告警，不会误做其它任务。
+    """
+    code = str(task.get("task_code") or "")
+    if code in _EXPERT_HANDLED_ELSEWHERE:
+        return False
+    eid, name = _expert_hint(task)
+    if not eid or not name:
+        return False
+    text = str(task.get("task_desc") or "") + str(task.get("title") or "")
+    return "召唤" in text or "对话" in text
+
+
 def _expert_hint(task: dict) -> tuple:
-    """从任务里取 (expert_id, expert_name)：jump_url 的 expertId + 「」里的专家名。"""
+    """从任务里取 (expert_id, task_name)：jump_url 的 expertId + 「」里的任务用名。
+
+    注意 task_name 是**任务标题里的叫法**，与市场里的真实专家名不一定相同
+    （实测：「直播电商教练」的真实名是「播旺旺」、「抖音策略师」是「斗音音」、
+    「中国电商运营专家」是「卖得好」）。所以它只能当搜索词，绝不能当匹配键。
+    """
     import re
 
     url = str(task.get("jump_url") or "")
@@ -585,6 +616,37 @@ def _expert_hint(task: dict) -> tuple:
             name = match.group(1)
             break
     return eid, name
+
+
+def _resolve_expert(ba, at: str, uid: str, task: dict, pool: list) -> dict:
+    """定位任务对应的真实专家条目：id 命中优先，其次用任务名当关键词搜再按 id 取。
+
+    返回市场原始条目（含真实 name/version/categories，服务端计分依赖这些字段）；
+    定位不到返回空表 —— 绝不本地伪造条目，伪造的上报会 200 但不计分。
+    """
+    eid, task_name = _expert_hint(task)
+    if eid:
+        for item in pool:
+            if str(item.get("expert_id") or "") == eid:
+                return item
+    # 任务名只是搜索词：搜到结果后仍按 expert_id 认人，不按名字字符串比
+    if eid and task_name:
+        try:
+            hits = ba.market_expert_list(at, uid, "agent", keyword=task_name)
+        except Exception:
+            hits = []
+        for item in hits:
+            if str(item.get("expert_id") or "") == eid:
+                return item
+    return {}
+
+
+def _task_confirmed(ba, at: str, uid: str, code: str) -> bool:
+    """回读服务端进度确认任务真的推进了（上报 200 不等于计分）。"""
+    task = _task_map(ba, at, uid).get(code) or {}
+    if not task:
+        return False
+    return str(task.get("status") or "") == "completed" or not _needs_action(task)
 
 
 def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dict) -> list:
@@ -650,8 +712,12 @@ def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dic
             )
             try:
                 if int(ba.report_desktop_events(at, uid, nickname, events).get("code", -1)) == 0:
-                    done["skill_1"] = True
-                    acted.append("skill_1")
+                    time.sleep(_CLAIM_SETTLE_SEC)
+                    if _task_confirmed(ba, at, uid, "skill_1"):
+                        done["skill_1"] = True
+                        acted.append("skill_1")
+                    else:
+                        logger.warning("[CodeBuddy] skill_1 上报成功但进度未推进，稍后重试")
             except Exception as e:
                 logger.warning(f"[CodeBuddy] skill_1 上报异常: {e}")
 
@@ -662,8 +728,12 @@ def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dic
             time.sleep(_REPORT_GAP)
             r = ba.report_activity(at, uid, 1, model_id="glm-5.2", model_name="GLM-5.2")
             if r.get("ok"):
-                done["Model_chat_GLM5.2"] = True
-                acted.append("Model_chat_GLM5.2")
+                time.sleep(_CLAIM_SETTLE_SEC)
+                if _task_confirmed(ba, at, uid, "Model_chat_GLM5.2"):
+                    done["Model_chat_GLM5.2"] = True
+                    acted.append("Model_chat_GLM5.2")
+                else:
+                    logger.warning("[CodeBuddy] Model_chat_GLM5.2 上报成功但进度未推进")
 
     # expert_5 / Expert_team_use_3：逐个真实专家（召唤链 + 真实对话 + 使用事件）
     expert_jobs = (
@@ -698,17 +768,19 @@ def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dic
             if ok < need:
                 time.sleep(_EXPERT_GAP)
         if ok >= need:
-            done[code] = True
-            acted.append(code)
+            time.sleep(_CLAIM_SETTLE_SEC)
+            if _task_confirmed(ba, at, uid, code):
+                done[code] = True
+                acted.append(code)
+            else:
+                logger.warning(f"[CodeBuddy] {code} 上报成功但进度未推进（{ok}/{need}）")
 
     # 指定专家任务（expert_use_* / WorkBuddy_Valorant）：jump_url 带 expertId，
     # 或缺 id 时按标题专家名走服务端 keyword 搜索（实测「无畏契约拼豆专家」可搜到）。
     named_jobs = [
         (code, task)
         for code, task in tasks.items()
-        if (code.startswith("expert_use") or code == "WorkBuddy_Valorant")
-        and _needs_action(task)
-        and not done.get(code)
+        if _needs_action(task) and not done.get(code) and _is_expert_task(task)
     ]
     if named_jobs:
         pool: list = []
@@ -721,37 +793,24 @@ def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dic
                 except Exception as e:
                     logger.warning(f"[CodeBuddy] 专家市场列表失败: {e}")
                 pool_loaded = True
-            expert = None
-            if eid:
-                expert = next((e for e in pool if str(e.get("expert_id") or "") == eid), None)
-            if expert is None and name:
-                expert = next(
-                    (e for e in pool if str(e.get("display_name_zh") or "") == name), None
+            expert = _resolve_expert(ba, at, uid, task, pool)
+            if not expert:
+                logger.warning(
+                    f"[CodeBuddy] {code} 未定位到真实专家条目（{name or '无 hint'}），"
+                    "本轮跳过（不伪造条目，否则上报 200 也不计分）"
                 )
-                if expert is None:
-                    try:
-                        hits = ba.market_expert_list(at, uid, "agent", keyword=name)
-                    except Exception:
-                        hits = []
-                    expert = next((e for e in hits if str(e.get("display_name_zh") or "") == name), None)
-            if expert is None and eid:
-                expert = {
-                    "expert_id": eid,
-                    "expert_type": "agent",
-                    "display_name_zh": name or code,
-                    "profession_zh": name or code,
-                    "version": "1.0.0",
-                    "categories": [],
-                }
-            if expert is None:
-                logger.info(f"[CodeBuddy] {code} 未定位到专家（{name or '无 hint'}），跳过")
                 continue
             try:
                 ba.report_desktop_events(at, uid, nickname, ba.desktop_expert_summon_sequence(expert))
                 time.sleep(1.0)
                 if chat_and_report(expert_id=str(expert.get("expert_id") or ""), expert=expert):
-                    done[code] = True
-                    acted.append(code)
+                    # 上报 200 只是事件收下了：回读进度才算数，否则当天会被 done 挡住不重试
+                    time.sleep(_CLAIM_SETTLE_SEC)
+                    if _task_confirmed(ba, at, uid, code):
+                        done[code] = True
+                        acted.append(code)
+                    else:
+                        logger.warning(f"[CodeBuddy] {code} 上报成功但进度未推进，稍后重试")
             except Exception as e:
                 logger.warning(f"[CodeBuddy] {code} 专家链异常: {e}")
             time.sleep(_EXPERT_GAP)
@@ -773,8 +832,12 @@ def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dic
             ba.report_desktop_events(at, uid, nickname, ba.desktop_expert_summon_sequence(lh))
             time.sleep(1.0)
             if chat_and_report(expert_id=_LIGHTHOUSE_EXPERT_ID, expert=lh, lighthouse=True):
-                done["Expert_lighthouse"] = True
-                acted.append("Expert_lighthouse")
+                time.sleep(_CLAIM_SETTLE_SEC)
+                if _task_confirmed(ba, at, uid, "Expert_lighthouse"):
+                    done["Expert_lighthouse"] = True
+                    acted.append("Expert_lighthouse")
+                else:
+                    logger.warning("[CodeBuddy] Expert_lighthouse 上报成功但进度未推进")
         except Exception as e:
             logger.warning(f"[CodeBuddy] Expert_lighthouse 异常: {e}")
 
@@ -793,8 +856,12 @@ def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dic
                     ok += 1
                 time.sleep(4)
             if ok >= need:
-                done["black_cat"] = True
-                acted.append("black_cat")
+                time.sleep(_CLAIM_SETTLE_SEC)
+                if _task_confirmed(ba, at, uid, "black_cat"):
+                    done["black_cat"] = True
+                    acted.append("black_cat")
+                else:
+                    logger.warning("[CodeBuddy] black_cat 上报成功但进度未推进")
 
     return acted
 
