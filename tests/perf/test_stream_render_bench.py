@@ -38,11 +38,39 @@ import os
 import statistics
 import time
 
-# 必须早于 QApplication 与任何 app.* 导入（pytest 收集期即执行）
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["DRIFOX_QT_RENDERER"] = "1"
-
 import pytest  # noqa: E402
+
+# ── 平台/渲染通道环境变量（module autouse fixture，见下）──
+# [T22] 原实现在**收集期**直接写 os.environ：收集期赋值会泄漏到同 session 后续
+# 收集的所有测试文件（pytest 先收集全部再执行），offscreen 泄漏会让依赖真实
+# 平台的文件崩在原生层 → 整轮必崩。改为 module 级 autouse fixture：进入本模块
+# 时设置、离开时还原。
+#
+# 两个变量都能安全挪进 fixture 的原因：本文件的 app.widgets 导入是**延迟导入**
+# （见 _run_one_round 内的 `from app.widgets.message_card import MessageCard`），
+# 不在模块顶层，因此 fixture 内赋值仍早于任何 app.* 导入，DRIFOX_QT_RENDERER
+# 的渲染通道选择不受影响（验证：跑本文件确认输出仍有 _reconcile 指标，即仍走
+# 纯 Qt 渲染器而非静默切到 WebEngine）。
+_ENV_VARS = {
+    "QT_QPA_PLATFORM": "offscreen",
+    "DRIFOX_QT_RENDERER": "1",
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _bench_render_env():
+    """设置并在模块结束时还原平台/渲染通道环境变量（避免泄漏到后续收集的文件）。"""
+    saved = {k: os.environ.get(k) for k in _ENV_VARS}
+    for k, v in _ENV_VARS.items():
+        os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 # Qt 属性必须在 QApplication 创建前设置（与 main.py / test_new_tab_baseline 对齐）
 from PyQt5.QtCore import QCoreApplication, Qt, QTimer  # noqa: E402

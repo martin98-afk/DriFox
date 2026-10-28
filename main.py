@@ -247,16 +247,10 @@ def main():
 
     _install_wheel_guard(app)
 
-    # [A1] openai 资源预导入前移：QApp 就绪即启动预热线程（原在首窗构建后的
-    # _deferred_startup，预热完成点被首窗构建推迟 2-3s）。预热线程单线程顺序导入
-    # 不触发 Python 3.14 import 锁死锁；后续 worker 线程若等待 openai 模块锁为单向等待、无环。
-    try:
-        from app.utils.http_client import preload_openai_resources_async
-
-        preload_openai_resources_async()
-        logger.debug("[Startup] openai resources 子模块预导入已转后台线程（前移）")
-    except Exception:
-        logger.exception("[Startup] openai resources 预导入失败（非致命）")
+    # [T24] openai 资源预导入**不**在此处启动：预热线程会与主线程随后的
+    # main_widget 级联 import 争 Python import 锁，实测拖慢主线程 26%
+    # （首窗就绪 1948ms → 1433ms）。现推迟到首窗就绪之后启动，见 _show_popup
+    # 内 singleShot(0) 处。预热仅影响首次 LLM 调用快慢，晚启动无正确性代价。
 
     # ========== 延迟启动的非关键 I/O 操作 ==========
     # 以下操作不阻塞首帧渲染，放到一次性定时器中执行
@@ -493,6 +487,7 @@ def main():
 
     # ========== 单实例检查 ==========
     from app.core.infra.single_instance import SingleInstanceGuard
+    from app.utils._startup_probe import dump as _probe_dump, mark as _probe
     from app.utils.config import Settings
 
     # [T24 R2] 二次启动 show 请求的接入口必须在拿到单实例锁后**立即**注册。
@@ -541,6 +536,7 @@ def main():
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
 
+    _probe("p1a.before_setTheme")
     try:
         from app.utils.theme_manager import theme_manager
 
@@ -550,6 +546,7 @@ def main():
             setTheme(Theme.DARK)
     except Exception:
         setTheme(Theme.DARK)
+    _probe("p1b.after_setTheme")
 
     # 获取全局字体配置
     from app.utils.config import Settings
@@ -562,6 +559,7 @@ def main():
             font_family = Settings.get_instance().canvas_font_selected.value
         except Exception:
             font_family = "Segoe UI"
+    _probe("p1c.after_font_config")
 
     # 注意：不在这里设置 QToolTip/ToolTip 样式，
     # 由 Colors.refresh() 在主题加载后用主题色统一设置。
@@ -685,6 +683,21 @@ def main():
         tm.add_window(chat_window)
         tm.remove_boot_placeholder()
         tm._mark_first_window_ready()
+        _probe_dump()
+        # [T24] openai 资源预导入推迟到此处（原在 QApp 就绪处）：预热线程的
+        # 串行 import 与主线程 main_widget 级联 import 争 Python import 锁，
+        # 实测拖慢主线程 26%。singleShot(0) 保证不阻塞首帧后的第一次交互；
+        # 预热失败不得阻塞启动。
+        def _preload_openai_resources():
+            try:
+                from app.utils.http_client import preload_openai_resources_async
+
+                preload_openai_resources_async()
+                logger.debug("[Startup] openai resources 子模块预导入已转后台线程（首窗就绪后）")
+            except Exception:
+                logger.exception("[Startup] openai resources 预导入失败（非致命）")
+
+        QTimer.singleShot(0, _preload_openai_resources)
         # [T24 R2] 窗口就绪 → 登记到共享状态；若 import 窗口期已有二次启动请求
         # （_on_show_requested 记了 pending），此处立即补激活，不再静默丢失。
         _show_window_state["window"] = tm

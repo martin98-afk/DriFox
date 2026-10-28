@@ -372,7 +372,7 @@ class _ThinkingSpinner(QWidget):
 
 # ── 通用标记段切分 ────────────────────────────────────────────────
 # [PERF] 增量 HTML 转换（_md_to_html_incremental）的缓存与合并判定。
-# 上限：单条 HTML 长数百至数千字符，128 条普通段仅几十 KB，内存可控。
+# 上限：单条 HTML 长数百至数千字符，按 128 条 × 1-4 KB/条 计约数百 KB，内存可控。
 # ⚠️ 上限必须显著大于真实回复的段数：一条长回复可切出上百段，上限过小会频繁
 # 触顶；触顶后用真 LRU 淘汰最久未用项（move_to_end + popitem(last=False)），
 # 平滑退化而不是整体 clear（clear 会让所有稳定段同时失效 → 周期性全量重算）。
@@ -380,7 +380,7 @@ _HTML_PREFIX_CACHE_MAX = 128
 _HTML_PREFIX_CACHE: "OrderedDict[str, str]" = OrderedDict()
 # [PERF] 段级块列表缓存（_plain_text_blocks）：key = 配置指纹 + 文本段原文，
 # value = 块列表。上限/LRU 策略同上。
-_TEXT_BLOCK_CACHE_MAX = 128
+_TEXT_BLOCK_CACHE_MAX = 512
 _TEXT_BLOCK_CACHE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 _LIST_OR_QUOTE_CONT_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s?")
 
@@ -771,8 +771,8 @@ def _md_to_html_incremental(text: str) -> str:
        prefix 末块合并（列表延续 / 相邻 blockquote 合并），分转会改变结构。
     3. 无空行边界时退化为整段转换。
 
-    缓存：`OrderedDict` LRU（上限 _HTML_PREFIX_CACHE_MAX，超限清空而非逐条
-    淘汰——条目少而单个 HTML 长，逐条 pop 的收益不足以抵消记账成本）。
+    缓存：`OrderedDict` LRU（上限 _HTML_PREFIX_CACHE_MAX，逾顶走真 LRU 淘汰
+    ——popitem(last=False) 逐条丢弃最久未用项，与 _cache_put 实际行为对齐）。
     只缓存「以空行结尾的已闭合前缀」，不含变动中的尾部，故命中率随会话
     长度单调上升。
     """

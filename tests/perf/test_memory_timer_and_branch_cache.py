@@ -22,7 +22,9 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SRC = REPO_ROOT / "app" / "main_widget.py"
+# [T22] 扫描目标已从 main_widget.py 迁至 app/utils/git_worktree.py：
+# 分支缓存随工作树插件化迁出主窗口（见 5f2cfcec），现由 GitWorktreeDetector 持有。
+SRC = REPO_ROOT / "app" / "utils" / "git_worktree.py"
 
 
 @pytest.fixture(scope="module")
@@ -31,12 +33,28 @@ def src_text() -> str:
 
 
 def test_static_branch_cache_present(src_text: str):
-    """静态扫描：确认 _branch_cache 仍存在于主窗口源码（按路径缓存 git branch）。"""
-    assert "self._branch_cache" in src_text
+    """静态扫描：确认 _branch_cache 仍存在于 git worktree 源码（按路径缓存 git branch）。"""
+    assert "_branch_cache" in src_text
 
 
 def test_perf_branch_cache_has_eviction_and_cap(src_text: str):
-    """修复后回归保护：_branch_cache 设有淘汰（pop 调用）以及上限常量
-    （名称形如 `_MAX_BRANCH*`），防止后续重构误删性能修复。"""
-    assert re.search(r"_branch_cache\.pop\b", src_text) is not None
-    assert re.search(r"_MAX_BRANCH\w*\s*=", src_text) is not None
+    """回归保护：_branch_cache 必须是有界缓存。
+
+    历史变迁（考古结论，`git log -S` 定位）：
+    - 0bb59798 在 main_widget.py 引入 `_MAX_BRANCH_CACHE = 64` 条目上限 +
+      `pop` 淘汰，本测试即为此固化；
+    - 5f2cfcec 随工作树插件化把分支缓存迁出主窗口，最终落到
+      app/utils/git_worktree.py（GitWorktreeDetector）；
+    - 迁移后**条目上限被有意替换为 TTL 有界**（`_CACHE_TTL = 30.0`，
+      `git_worktree.py:141-151` 的 `_cache_get` 按 monotonic 时间戳判过期，
+      另有 :430 处同类清理）。当前唯一的有界保证是 TTL，不再有 `_MAX_BRANCH*`
+      条目上限，也不再有按插入顺序的 `pop` 淘汰。
+
+    因此本断言改为校验 TTL 常量存在——这既贴合当前实现，又保留了
+    「缓存必须有界」这一原始回归意图。
+    """
+    assert re.search(r"_CACHE_TTL\s*=", src_text) is not None, (
+        "_branch_cache 的唯一有界保证 _CACHE_TTL 缺失：历史变迁为 "
+        "0bb59798 引入 _MAX_BRANCH_CACHE 条目上限 + pop 淘汰 → 5f2cfcec 迁至 "
+        "git_worktree.py 后改为 TTL 有界（条目上限与顺序 pop 均已移除）"
+    )

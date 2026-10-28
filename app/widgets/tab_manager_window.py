@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
 
 from qframelesswindow import FramelessWindow
 
+from app.utils._startup_probe import mark as _probe
 from app.utils.config import Settings
 from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
@@ -1200,8 +1201,10 @@ class TabManagerWindow(FramelessWindow):
         self._tab_switch_queue: list = []
         self._tab_switch_timer: Optional[QTimer] = None
 
+        _probe("p4.setup_ui.start")
         self._setup_ui()
         self._setup_signals()
+        _probe("p4.setup_ui.end")
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
         # ── 应用级服务启动已挪至 main.py（壳显示后、首窗构造前）──
@@ -1238,7 +1241,9 @@ class TabManagerWindow(FramelessWindow):
         get_global_card_controller()
 
         # 刷新 Tab 面板内嵌的 UI 插件列表
+        _probe("p4.refresh_ui_plugins.start")
         self._tab_panel.refresh_ui_plugins()
+        _probe("p4.refresh_ui_plugins.end")
         # 注册到 TrayManager
         _sm_t2 = _sm_time.perf_counter()
         logger.debug(f"[TabManager] __init__ API 会话/全局卡段耗时 {(_sm_t2 - _sm_t1) * 1000:.0f}ms")

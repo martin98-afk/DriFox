@@ -51,6 +51,7 @@ from app.plugins.kernel import KNOWN_COMPONENTS
 
 # 插件平台声明与 deps 统一加载（设计：docs/superpowers/specs/2026-08-27-plugin-platform-deps-design.md）
 from app.plugins.deps_loader import check_platform, ensure_deps_on_path
+from app.utils._startup_probe import mark as _probe
 
 # 插件名合法字符：首字符必须为字母或数字，后续允许字母数字与 _ . -
 # 严禁路径分隔符与 `..`（plugin_name 会参与配置存储路径拼接，见 plugin_config_store）
@@ -58,6 +59,15 @@ _PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 # [T26/H2] 插件发现缓存 schema 版本：缓存结构变化时递增（整体失效）
 _DISCOVERY_CACHE_SCHEMA_VERSION = 1
+
+# [T25] config_schema 解析结果缓存：key = (plugin_name, manifest_mtime_ns, size)，
+# value = parse_config_schema() 的返回值（None 也缓存，表示"无合法 schema"）。
+# parse_config_schema 只依赖 manifest 内容，而每次扫描/热重载都会对所有插件重跑
+# 一遍（72 插件 × 每次），按 manifest mtime+size 缓存可跳过重复解析。
+# 口径与 agent.py 的 _agent_file_cache 一致（mtime 寻址，非内容哈希）。
+# 失效：_unregister_config_schema（所有插件移除/schema 删除路径的公共下沉点）
+# 统一 pop；mtime/size 变化自然 miss，无需额外失效逻辑。
+_CONFIG_SCHEMA_CACHE: Dict[tuple, Any] = {}
 
 
 def _normalize_plugin_name(raw: object, fallback: str) -> Optional[str]:
@@ -403,7 +413,10 @@ class PluginManager:
         # [T26/H2] 插件发现缓存命中 → 跳过三连全扫（热态 -0.8~2.5s）。
         # 命中路径复用 _merge_discovered 合并语义 + 重放幂等副作用
         # （ensure_deps_on_path / _register_config_schema）；异常回退全扫。
-        if self._try_load_from_discovery_cache():
+        _probe("p3.cache_probe_start")
+        hit = self._try_load_from_discovery_cache()
+        _probe(f"p3.cache_probe_end(hit={hit})")
+        if hit:
             self._initialized = True
             self._restore_enabled_from_settings()
             try:
@@ -779,10 +792,12 @@ class PluginManager:
             )
             self._plugins = new_plugins
             # 副作用重放（幂等）：deps 注入仅门禁通过插件（G3 对齐）；config_schema 注册
+            _probe("p2.replay.start")
             for p in self._plugins.values():
                 if not p.load_blocked:
                     ensure_deps_on_path(p.path)
-                self._register_config_schema(p.name, p.manifest)
+                self._register_config_schema(p.name, p.manifest, self._manifest_file_for(p.path))
+            _probe("p2.replay.end")
             logger.info(
                 f"[PluginManager] 插件发现命中缓存 from cache: {len(self._plugins)} 个插件（跳过全扫）"
             )
@@ -1410,7 +1425,7 @@ class PluginManager:
                     ensure_deps_on_path(item)
 
                 # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
-                self._register_config_schema(plugin_name, manifest)
+                self._register_config_schema(plugin_name, manifest, manifest_path)
 
                 discovered.append(
                     PluginInfo(
@@ -1490,7 +1505,7 @@ class PluginManager:
                 ensure_deps_on_path(plugin_dir)
 
             # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
-            self._register_config_schema(plugin_name, manifest)
+            self._register_config_schema(plugin_name, manifest, manifest_path)
 
             info = PluginInfo(
                 name=plugin_name,
@@ -1512,18 +1527,61 @@ class PluginManager:
             logger.error(f"[PluginManager] Failed to rescan plugin at {plugin_dir}: {e}")
             return None
 
-    def _register_config_schema(self, plugin_name: str, manifest: dict) -> None:
+    @staticmethod
+    def _manifest_file_for(plugin_dir: Path) -> Optional[Path]:
+        """定位插件目录下的 manifest 文件（两路：.drifox-plugin / .claude-plugin）。
+
+        [T25] 为 config_schema 缓存提供 mtime/size 寻址材料。与 _scan_one_plugin_dir
+        （:1453-1458）的探测顺序保持一致，避免两处行为分叉。
+        """
+        for candidate in (
+            plugin_dir / ".drifox-plugin" / "plugin.json",
+            plugin_dir / ".claude-plugin" / "plugin.json",
+        ):
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _config_schema_cache_key(
+        self, plugin_name: str, manifest_path: Optional[Path]
+    ) -> Optional[tuple]:
+        """config_schema 缓存 key；manifest_path 为空时返回 None（调用方按 miss 处理）。
+
+        取不到路径时不猜、不用 name 兜底：同一插件名在不同根（system/user/claude）
+        可能对应不同目录，用 name 做 key 会跨根串味。宁可不缓存也不缓存错。
+        """
+        if manifest_path is None:
+            return None
+        try:
+            st = manifest_path.stat()
+        except OSError:
+            return None
+        return (plugin_name, st.st_mtime_ns, st.st_size)
+
+    def _register_config_schema(
+        self, plugin_name: str, manifest: dict, manifest_path: Optional[Path] = None
+    ) -> None:
         """E1：解析 plugin.json config_schema 并注册到 PluginConfigRegistry + 自动设置卡。
 
         幂等：同名插件重复注册由 PluginConfigRegistry 与 UIPluginRegistry 内部
         覆盖（PluginManager 全量扫描天然幂等；热重载 rescan 同样无害）。
         任一异常均降级为 warning，不影响插件本体的扫描加载。
         """
-        # 解析阶段：非法 schema 走 parse_config_schema 内部 warning 兜底
-        from app.plugins.contracts.plugin_config import parse_config_schema
+        # 解析阶段：非法 schema 走 parse_config_schema 内部 warning 兜底。
+        # [T25] 结果只依赖 manifest 内容，按 manifest mtime+size 缓存解析结果：
+        # 命中则跳过 parse（72 插件 × 每次扫描/热重载都重跑一遍）；miss 才解析并回写。
+        # ⚠️ 只缓存 parse 结果，注册动作（PluginConfigRegistry.register /
+        # _pending_config_cards 登记）仍每次执行——注册表语义不变。
+        cache_key = self._config_schema_cache_key(plugin_name, manifest_path)
+        if cache_key is not None and cache_key in _CONFIG_SCHEMA_CACHE:
+            config_schema = _CONFIG_SCHEMA_CACHE[cache_key]
+        else:
+            from app.plugins.contracts.plugin_config import parse_config_schema
 
-        raw_schema = manifest.get("config_schema")
-        config_schema = parse_config_schema(plugin_name, raw_schema)
+            raw_schema = manifest.get("config_schema")
+            config_schema = parse_config_schema(plugin_name, raw_schema)
+            if cache_key is not None:
+                _CONFIG_SCHEMA_CACHE[cache_key] = config_schema
         if config_schema is None:
             # manifest 已无合法 schema：显式清掉历史注册（含自动设置卡），避免残留旧卡。
             # unload_plugin 已改为保留 auto_config_card，清理只能走这里（manifest 层职责）。
@@ -1597,6 +1655,12 @@ class PluginManager:
         已改为保留 auto_config_card——ui 组件热重载（unload→load）不能误杀
         rescan 刚注册的卡，清理收敛到本函数单一入口。
         """
+        # [T25] 清掉本插件所有 config_schema 解析缓存条目（key 含 mtime，可能多条）。
+        # 放在本函数而非各移除点：_unregister_config_schema 是「插件移除 / schema 删除」
+        # 两条路径的公共下沉点（rescan removed、manifest gone、schema 置空）。
+        if _CONFIG_SCHEMA_CACHE:
+            for _k in [k for k in _CONFIG_SCHEMA_CACHE if k[0] == plugin_name]:
+                _CONFIG_SCHEMA_CACHE.pop(_k, None)
         # 待回放队列必须先摘：否则「注册 → 卸载 → replay」会把已删插件的卡复活
         # （僵尸卡，扫描期失败后 pending 残留同样会这样）
         pending = getattr(self, "_pending_config_cards", None)

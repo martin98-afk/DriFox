@@ -349,6 +349,38 @@ def _bench_payload(qapp, payload: str, label: str) -> list:
     """对给定 payload 跑「预热 + ROUNDS 轮采样」，打印指标并返回 results。"""
     assert len(payload) >= 30000, f"压测文本不足 3 万字符（{label}）：{len(payload)}"
 
+    # 段数检查（T8 P2 防线）：段数取 _plain_text_blocks 的真实调用次数 ——
+    # 数 \n\n 不可靠（fence 内空行不是段边界，会高估）。
+    # 段数 > 缓存上限是 unique 场景的**测量目标**（LRU 颠簸下的耗时），
+    # 故只 WARN 不 assert；但段数必须 > 3，否则说明 payload 退化成了单段
+    # 模板、缓存收益被无限放大，场景失去意义。
+    import app.widgets.markdown_block_viewer as mbv
+    from app.widgets.markdown_block_viewer import parse_blocks
+
+    _orig_ptb = mbv._plain_text_blocks
+    _seg_calls = {"n": 0}
+
+    def _counting_ptb(text):
+        _seg_calls["n"] += 1
+        return _orig_ptb(text)
+
+    mbv._plain_text_blocks = _counting_ptb
+    try:
+        parse_blocks(payload)
+        seg_n = _seg_calls["n"]
+    finally:
+        mbv._plain_text_blocks = _orig_ptb
+
+    limit = mbv._TEXT_BLOCK_CACHE_MAX
+    if seg_n > limit:
+        print(
+            f"[WARN] 段数={seg_n} > _TEXT_BLOCK_CACHE_MAX={limit}：本场景必然触发 LRU 淘汰，"
+            f"缓存命中率会下降（unique 场景的测量目标，非失败）",
+            flush=True,
+        )
+    print(f"[SEG] {label}: 段数={seg_n}, 缓存上限={limit}", flush=True)
+    assert seg_n > 3, f"payload 段数退化（{seg_n}）：unique 场景未真正生效"
+
     # 预热轮：加载 pygments/字体/类初始化等一次性成本，不计入基线
     _run_one_round(0, payload[: 5 * CHUNK_CHARS])
     QTest.qWait(200)

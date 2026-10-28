@@ -382,41 +382,84 @@ class AgentManager:
         self._system_prompt_cache: Dict[tuple, str] = {}
         self._load_agents()
 
-    def _load_agents(self, force: bool = False):
-        """加载智能体：插件路径优先，后备路径兜底
-
-        Args:
-            force: 为 True 时强制重新加载 hooks（reload_agents 时调用）
-        """
-        # 1. 从所有已启用插件加载（PluginManager 已初始化时）
-        self._load_agents_from_plugins()
+    def _load_agents(self):
+        """加载智能体与插件 hooks：插件路径优先，后备路径兜底"""
+        # 1. 单次遍历所有已启用插件，同时加载智能体与 hooks（PluginManager 已初始化时）
+        self._load_agents_and_hooks_from_plugins()
 
         # 2. 从后备目录加载（兼容旧配置）
         if self.agents_dir and self.agents_dir.exists():
             self._load_agents_from_dir(self.agents_dir)
 
-        # 3. 加载 hooks
-        if self._hook_manager is not None:
-            # 3a. 插件 hooks 目录（顶层 hooks/）
-            self._load_plugin_hooks()
+        # 3. [已移除] 旧技能 hooks 加载路径，hooks 全部来自插件 hooks/
 
-            # 3b. [已移除] 旧技能 hooks 加载路径，hooks 全部来自插件 hooks/
+    def _load_agents_and_hooks_from_plugins(self):
+        """单次遍历已启用插件，同时加载智能体与 hooks。
 
-    def _load_agents_from_plugins(self):
-        """从所有已启用插件加载智能体（跟踪每个智能体的来源插件）"""
+        原实现是 `_load_agents_from_plugins` 与 `_load_plugin_hooks` 各自完整
+        遍历一遍启用插件（两次遍历、两次 PluginManager 查询）。两者语义互不
+        耦合（agents 按 agents 目录寻址，hooks 用 skill_name=plugin.name 独立
+        寻址），故合并为单次遍历。
+
+        ⚠️ agents 与 hooks 各自独立 try：原实现下任一方抛异常不影响另一方，
+        合并后必须保持该隔离（否则 agents 目录解析失败会连带吞掉全部 hooks）。
+        """
         try:
             from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
-                    # D9：agents 组件被整类停用的插件不加载其智能体
-                    # （运行时 toggle 靠卸载生效，这里兜住重启后的场景）
-                    if not pm.is_component_enabled(plugin.name, "agents"):
-                        continue
-                    agent_dir = plugin.path / "agents"
-                    if agent_dir.exists():
-                        self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
+                    self._load_one_plugin_agents(pm, plugin)
+                    self._load_one_plugin_hooks(pm, plugin)
+        except (ImportError, Exception):
+            pass
+
+    def _load_one_plugin_agents(self, pm, plugin) -> None:
+        """加载单个插件的 agents（组件启用判定详见 D9 注释）"""
+        try:
+            # D9：agents 组件被整类停用的插件不加载其智能体
+            # （运行时 toggle 靠卸载生效，这里兜住重启后的场景）
+            if not pm.is_component_enabled(plugin.name, "agents"):
+                return
+            agent_dir = plugin.path / "agents"
+            if agent_dir.exists():
+                self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
+        except (ImportError, Exception):
+            pass
+
+    def _load_one_plugin_hooks(self, pm, plugin) -> None:
+        """加载单个插件的 hooks（无 hook_manager 时静默跳过）"""
+        if self._hook_manager is None:
+            return
+        try:
+            # D9：hooks 组件被整类停用的插件不注册其 hooks
+            if not pm.is_component_enabled(plugin.name, "hooks"):
+                return
+            hooks_dir = plugin.path / "hooks"
+            if not hooks_dir.exists() or not hooks_dir.is_dir():
+                return
+            # 使用插件名作为 skill_name，确保每个插件的 hooks 独立可寻址
+            # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
+            self._hook_manager.load_hooks_from_directory_flat(
+                hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
+            )
+        except (ImportError, Exception):
+            pass
+
+    def _load_agents_from_plugins(self):
+        """从所有已启用插件加载智能体（跟踪每个智能体的来源插件）
+
+        保留入口：增量重载路径与既有测试直接调用本方法。
+        _load_agents 走单次遍历版 `_load_agents_and_hooks_from_plugins`。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for plugin in pm.get_enabled_plugins():
+                    self._load_one_plugin_agents(pm, plugin)
         except (ImportError, Exception):
             pass
 
@@ -425,11 +468,12 @@ class AgentManager:
         self._agents.clear()
         self._hidden_agents.clear()
 
-        # 先注销所有插件级 hooks，再重新加载（force=True 确保全量刷新）
+        # 先注销所有插件级 hooks，再重新加载（全量刷新靠上方 clear() + 本处注销，
+        # 而非 _load_agents 的入参：新的加载总会重新走一遍启用插件遍历）
         if self._hook_manager is not None:
             self._unload_plugin_hooks()
 
-        self._load_agents(force=True)
+        self._load_agents()
         logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, {len(self._hidden_agents)} hidden")
 
     def reload_plugin_agents(self, plugin_name: str) -> int:
@@ -613,24 +657,18 @@ class AgentManager:
         logger.info(f"[AgentManager] Cleaned up artifacts for removed plugin: {plugin_name}")
 
     def _load_plugin_hooks(self):
-        """加载插件顶层 hooks/ 目录中的 hooks（使用插件名作为 skill key）"""
+        """加载插件顶层 hooks/ 目录中的 hooks（使用插件名作为 skill key）
+
+        保留入口：只加载 hooks 的场景。_load_agents 走单次遍历版
+        `_load_agents_and_hooks_from_plugins`，插件只遍历一次。
+        """
         try:
             from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
-                    # D9：hooks 组件被整类停用的插件不注册其 hooks
-                    if not pm.is_component_enabled(plugin.name, "hooks"):
-                        continue
-                    hooks_dir = plugin.path / "hooks"
-                    if not hooks_dir.exists() or not hooks_dir.is_dir():
-                        continue
-                    # 使用插件名作为 skill_name，确保每个插件的 hooks 独立可寻址
-                    # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
-                    self._hook_manager.load_hooks_from_directory_flat(
-                        hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
-                    )
+                    self._load_one_plugin_hooks(pm, plugin)
         except (ImportError, Exception):
             pass
 
