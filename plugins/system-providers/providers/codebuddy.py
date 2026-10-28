@@ -938,6 +938,32 @@ def _run_growth_side(ba, at: str, uid: str, done: dict) -> dict:
     return result
 
 
+_DONE_KEEP_ALWAYS = frozenset({"report_daily", "adopt", "gift"})
+
+
+def _heal_stale_done(ba, at: str, uid: str, done: dict, tasks: dict) -> list:
+    """清掉「本地标着 done 但服务端仍未完成」的脏标记。
+
+    必要性：早期实现只要上报返回 200 就写 done，而服务端存在「200 但静默不计分」
+    的形态，于是任务永久卡在 0/1 且当天不再重试（实测三个专家任务即此因）。
+    现在 done 写入前都会回读进度，但历史脏标记会跨轮残留，故每轮开头自愈一次。
+
+    只清行为类标记（claim_/report_daily/adopt/gift 有各自的幂等语义，不清）。
+    """
+    stale = []
+    for code in list(done):
+        if code.startswith("claim_") or code in _DONE_KEEP_ALWAYS:
+            continue
+        task = tasks.get(code)
+        if task is None:
+            continue
+        if _needs_action(task):
+            stale.append(code)
+    for code in stale:
+        done.pop(code, None)
+    return stale
+
+
 def _run_daily_tasks(ba, at: str, uid: str, nickname: str, entry: dict) -> None:
     """单号每日维护：活跃 → 领养 → accept → 行为链 → 领奖 → 成长侧收益。
 
@@ -990,6 +1016,12 @@ def _run_daily_tasks(ba, at: str, uid: str, nickname: str, entry: dict) -> None:
 
     # 3) 任务清单 + accept（领养后前置才满足）
     tasks = _task_map(ba, at, uid)
+    try:
+        healed = _heal_stale_done(ba, at, uid, done, tasks)
+        if healed:
+            logger.info(f"[CodeBuddy] 清理脏完成标记（服务端未完成）: {', '.join(healed)}")
+    except Exception as e:
+        logger.warning(f"[CodeBuddy] 脏标记自愈异常: {e}")
     try:
         pending = [c for c, t in tasks.items() if str(t.get("accept_status") or "") == "not_accepted"]
         if pending:
