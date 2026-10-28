@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -238,16 +238,40 @@ class PluginConfigCard(ExpandSettingCard):
         说明文字用 CaptionLabel 而不自设颜色：设计令牌的 TEXT_SECONDARY 是
         深色主题值（白色半透明），浅色主题下写了就等于隐形；CaptionLabel 自带
         随主题变化的次要文字样式。
+        说明行也走 _FieldRow（空 label 占位），对齐由布局保证：label 列宽度随
+        字段名长短浮动，固定 indent 对不齐控件左边缘。
         """
         self.viewLayout.addWidget(row)
         if not f.description:
             return
         hint = CaptionLabel(f.description, self.view)
         hint.setWordWrap(True)
-        # QLabel 的 contentsMargins 不影响它在布局里的位置，用 indent 做左缩进，
-        # 与控件列（label 120 + spacing 12）对齐，读起来是注解而不是新字段
-        hint.setIndent(132)
-        self.viewLayout.addWidget(hint)
+        self.viewLayout.addWidget(_FieldRow("", hint, self.view))
+
+    # ── 展开几何（基类 spaceWidget 占位问题，同插件侧自绘卡处理） ──
+
+    def _adjustViewSize(self):
+        """内容高度直切，不靠 spaceWidget 占位。
+
+        qfluentwidgets 基类展开时把 spaceWidget 设成内容等高，展开高度 =
+        内容 + 等高空白，表现为卡片底部一大段空白（内容越多空白越大）。
+        归零后按内容实际高度定格；代价是失去基类的滚动折叠动画。
+        """
+        try:
+            self.spaceWidget.setFixedHeight(0)
+        except Exception:  # noqa: BLE001 — 旧版 qfluentwidgets 无该成员
+            pass
+        h = self.viewLayout.sizeHint().height()
+        self.setFixedHeight(self.card.height() + (h if self.isExpand else 0))
+
+    def setExpand(self, isExpand: bool):  # noqa: N802 - 与基类同名
+        if self.isExpand == isExpand:
+            return
+        self.isExpand = isExpand
+        self.setProperty("isExpand", isExpand)
+        self.setStyle(QApplication.style())
+        self.card.expandButton.setExpand(isExpand)
+        self._adjustViewSize()
 
     def _resolve_plugin_icon(self):
         """读取插件自身 icon（按当前主题取 light/dark），失败回退 None。
