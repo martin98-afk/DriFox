@@ -427,6 +427,9 @@ _CLAIM_SETTLE_SEC = 3.0  # 行为事件后等上游异步计分落定的时间�
 
 # 专家使用类任务的单次真实对话提示（越短越省积分；判据只认请求落库）
 _CHAT_PROMPT = "1+1等于几？直接回答。"
+# 真实对话用免费额度模型（fast-model 计费）；glm-5.2 的两处是任务判据要求，勿改
+_CHAT_MODEL = "hy3"
+
 
 
 def _save_entry(entry: dict) -> None:
@@ -595,7 +598,7 @@ def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dic
     acted: list = []
     ms = int(time.time() * 1000)
 
-    def chat_and_report(expert_id: str = "", model_id: str = "fast-model", mode: str = "craft",
+    def chat_and_report(expert_id: str = "", model_id: str = _CHAT_MODEL, mode: str = "craft",
                         expert: dict | None = None, lighthouse: bool = False) -> bool:
         """真实对话 → 事件链 → 使用事件；返回是否全部上报成功。"""
         res = ba.chat_once(at, uid, _CHAT_PROMPT, model_id=model_id, expert_id=expert_id)
@@ -622,7 +625,7 @@ def _run_chat_tasks(ba, at: str, uid: str, nickname: str, tasks: dict, done: dic
 
     # skill_1：真实对话 + skill_info（对话 finishReason 改 tool_calls 语义）
     if _needs_action(tasks.get("skill_1")) and not done.get("skill_1"):
-        res = ba.chat_once(at, uid, _CHAT_PROMPT)
+        res = ba.chat_once(at, uid, _CHAT_PROMPT, model_id=_CHAT_MODEL)
         if res.get("ok"):
             conv, req = res["conversation_id"], res["request_id"]
             msg = "msg-" + req[-8:]
