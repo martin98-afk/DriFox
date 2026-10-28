@@ -1588,8 +1588,19 @@ class ConfigSyncService(QObject):
                 method = "POST"
 
             if resp.status_code in (200, 201):
+                new_sha = self._extract_sha(resp)
+                # 上传结果自校验：Gitee 返回的 content.sha 是文件内容的 git blob sha，
+                # 应当等于本地待上传字节的 blob sha。不等说明远端落地内容不是我们
+                # 发的内容（并发覆盖 / 服务端异常），留证据但不判失败，避免误判导致
+                # 脏标记回滚后无限重传。
+                expected = fp.git_blob_sha(content)
+                if new_sha and new_sha != expected:
+                    logger.error(
+                        f"[ConfigSync] {tag} 上传后远端 sha 与本地内容不一致 "
+                        f"({new_sha[:8]} != {expected[:8]})，请检查是否有并发写入"
+                    )
                 logger.info(f"[ConfigSync] {tag} 上传成功 ({method})")
-                return True, self._extract_sha(resp)
+                return True, new_sha
 
             err_msg = self._parse_error(resp)
             if resp.status_code in (401, 403):
@@ -2066,6 +2077,7 @@ class ConfigSyncService(QObject):
         remote_manifest = self._apply_dir_merge(unit, local_dir, content, provider.provider_id)
         if remote_manifest is None:
             return False
+        self._flush_conflict_archive()
         if sha:
             self._set_cached_remote_sha(unit, sha)
         # base 内容指纹取「远端那份内容」，本地独有改动保持未上传态
@@ -2456,6 +2468,8 @@ class ConfigSyncService(QObject):
         remote_manifest = self._apply_dir_merge("user-custom", self._user_custom_path, content, "")
         if remote_manifest is None:
             return False
+        # 下载路径也会产生冲突（本地改过 + 云端也改过），同样要把对方版本归档到远端
+        self._flush_conflict_archive()
         if sha:
             self._set_cached_remote_sha("user-custom", sha)
         self._content_hashes["user-custom"] = fp.manifest_digest(remote_manifest)
