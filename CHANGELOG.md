@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
-## [v0.6.12] - 2026-10-27 (重新发布 #3)
+## [v0.6.12] - 2026-10-27 (重新发布 #4)
 
-自 v0.6.11 以来的变更 | 提交数：35 · 文件变更：139 · +8945/-2255 | 贡献者：dingma, mading, drifox-bot
+自 v0.6.11 以来的变更 | 提交数：36 · 文件变更：141 · +9286/-2264 | 贡献者：dingma, mading, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -73,6 +73,10 @@ All notable changes to this project will be documented in this file.
 ### 📚 文档 (Documentation)（重新发布 #3 追加）
 
 - **plugin-creator 补设置卡规范与外部服务连通性测试范式** (`8136a1c6`)。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #4 追加）
+
+- **事件驱动窗口已贴底时不再误关** (`1db3fa93`): 防止 event-driven 窗口在已处于底部时触发关闭。
 
 ## [v0.6.11] - 2026-10-26 (重新发布 #7)
 
