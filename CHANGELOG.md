@@ -3,17 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
-### ✨ 新功能 (New Features)
+## [v0.6.12] - 2026-10-27 (重新发布 #3)
 
-- **CodeBuddy 每日成长任务自动化** (`plugins/system-providers/providers/{codebuddy,buddy_auth}.py`): 签到之外补齐活跃上报、成长任务（accept/行为链/领奖）、连登兑换与抽奖、猫猫旅行、领养（+300）、新手礼包。协议逆向自 workbuddy2api-panel 并用本机真机逐条验证：报活跃走 `billing/v2/report`（事件数组，`userId` 缺则静默丢弃）、领奖必须走 Web 域 `workbuddy.cn/activity/growth/tasks/<code>/claim` 且带 `x-client-platform: web`（CLI 域同名路径恒 400，是领奖长期失败的根因）、桌面端任务靠 `workbuddy-desktop` 指纹事件链点亮、专家类任务必须用市场真实 id + 真实对话的服务端 `requestId`。任务顺序有硬依赖：活跃上报解锁 `first_buddy` → 领养后才允许 accept 其余任务。幂等靠任务进度判定，已达标/已领即跳过；`DRIFOX_CODEBUDDY_TASKS=0` 可整体关闭。守护线程每轮执行，失败分段兜底不影响签到。
-
-### 🐛 问题修复 (Bug Fixes)
-
-- **流式思考/人格块闭合瞬间内容泄漏到正文**: `append_text` 的协议块守卫只判「累积后是否未闭合」，`</think>`/`</plan>` 所在那批被放行；增量注入又只清 `<think>` 标签，该批文本以纯文本进 DOM，下一次全量渲染再折叠成卡片（正文闪现碎片后消失）。`_append_text_incremental` 增加 chunk 级 `_text_has_protocol_tag` 守卫。
-
-## [v0.6.12] - 2026-10-27 (重新发布 #2)
-
-自 v0.6.11 以来的变更 | 提交数：25 · 文件变更：123 · +6251/-2179 | 贡献者：dingma, mading, drifox-bot
+自 v0.6.11 以来的变更 | 提交数：35 · 文件变更：139 · +8945/-2255 | 贡献者：dingma, mading, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -61,6 +53,26 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build)（重新发布 #2 追加）
 
 - **marketplace 自动再生成** (`f43b40fd`): 按 plugin.json 重新生成 [skip ci]。
+
+### ✨ 新功能 (New Features)（重新发布 #3 追加）
+
+- **CodeBuddy 每日成长任务自动化** (`6f75d525`、`e246cd6a`): 签到之外补齐活跃上报、成长任务（accept/行为链/领奖）、连登兑换与抽奖、猫猫旅行、领养（+300）、新手礼包。协议逆向自 workbuddy2api-panel 并用本机真机逐条验证：报活跃走 `billing/v2/report`（事件数组，`userId` 缺则静默丢弃）、领奖必须走 Web 域 `workbuddy.cn/activity/growth/tasks/<code>/claim` 且带 `x-client-platform: web`（CLI 域同名路径恒 400，是领奖长期失败的根因）、桌面端任务靠 `workbuddy-desktop` 指纹事件链点亮、专家类任务必须用市场真实 id + 真实对话的服务端 `requestId`。任务顺序有硬依赖：活跃上报解锁 `first_buddy` → 领养后才允许 accept 其余任务。幂等靠任务进度判定，已达标/已领即跳过；`DRIFOX_CODEBUDDY_TASKS=0` 可整体关闭。守护线程每轮执行，失败分段兜底不影响签到。附协议层请求与编排状态机测试；真实对话切换免费额度模型。
+- **全局禁用 SpinBox 滚轮改值** (`6396a3b6`、`39884a54`): 全局禁用 SpinBox 滚轮误改值，main.py 启动时装滚轮守卫。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #3 追加）
+
+- **流式思考/人格块闭合瞬间内容泄漏到正文** (`8fd2dab3`): `append_text` 的协议块守卫只判「累积后是否未闭合」，`</think>`/`</plan>` 所在那批被放行；增量注入又只清 `<think>` 标签，该批文本以纯文本进 DOM，下一次全量渲染再折叠成卡片（正文闪现碎片后消失）。`_append_text_incremental` 增加 chunk 级 `_text_has_protocol_tag` 守卫。
+- **自动卡恢复折叠动画** (`4b9e1ba4`): 改用 DynamicHeightExpandCardMixin。
+- **E1 自动卡说明行对齐控件列 + 去掉展开后底部空白** (`6197614c`)。
+
+### ♻️ 代码重构 (Refactoring)（重新发布 #3 追加）
+
+- **通知设置并入通用设置布局** (`27e66945`)。
+- **E1 自动配置卡字段行撑满 + 外链换 HyperlinkButton + 补字段说明** (`b79833aa`)。
+
+### 📚 文档 (Documentation)（重新发布 #3 追加）
+
+- **plugin-creator 补设置卡规范与外部服务连通性测试范式** (`8136a1c6`)。
 
 ## [v0.6.11] - 2026-10-26 (重新发布 #7)
 
