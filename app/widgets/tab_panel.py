@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal, Property, QPropertyAnimation
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap, QPen, QTransform
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap, QPen, QPolygonF, QTransform
 from PySide6.QtGui import (
     QColor as _QColor,
 )
@@ -342,7 +342,9 @@ def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float
             poly = [
                 pts[(head_idx - k * tail_samples - m) % samples] for m in range(tail_samples + 1)
             ]
-            painter.drawPolyline(*poly)
+            # PySide6 的 drawPolyline 只接受单个 QPolygonF/QPointF 序列，
+            # 不支持 PyQt5 的变参展开（*poly 会报 takes exactly one argument）
+            painter.drawPolyline(QPolygonF(poly))
         return
 
     pen.setColor(_status_ring_color(state, phase))

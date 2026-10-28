@@ -164,7 +164,8 @@ def test_official_branch_follows_build_variant(tmp_path, monkeypatch):
 
 def test_official_plugin_branch_mapping(monkeypatch):
     """真实映射链路：caps_for("config.read")("build_variant") → 分支名；
-    无该键 / read 不可用 / 抛异常一律兜底 main（与 _pick_asset 口径一致）。"""
+    无该键 / read 不可用 / 抛异常一律兜底 pyside6（本分支 config.build_variant
+    缺省即 pyside6；兜底到 main 会把 PyQt5 插件装进 PySide6 版本）。"""
     try:
         import app.plugins.sdk as sdk
     except Exception as e:  # pragma: no cover - 环境缺 app 包时跳过
@@ -176,12 +177,12 @@ def test_official_plugin_branch_mapping(monkeypatch):
     )
     assert mm._official_plugin_branch() == "pyside6"
 
-    fake.clear()  # 无 build_variant 键 → 兜底 main
-    assert mm._official_plugin_branch() == "main"
+    fake.clear()  # 无 build_variant 键 → 兜底 pyside6
+    assert mm._official_plugin_branch() == "pyside6"
 
     monkeypatch.setattr(
         sdk,
         "caps_for",
         lambda cap: (_ for _ in ()).throw(RuntimeError("capability pool unavailable")),
     )
-    assert mm._official_plugin_branch() == "main"
+    assert mm._official_plugin_branch() == "pyside6"
