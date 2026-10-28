@@ -2,15 +2,10 @@
 All notable changes to this project will be documented in this file.
 
 ## [未发布]
-### 🐛 问题修复 (Bug Fixes)
-- **多设备云同步不再互相覆盖** (`app/core/sync/merge.py` 新增): 同步从「整包后写者胜」改为以 base 版本为基准的三方合并。远端被其他设备改动时先合并再上传，删除「sha 冲突后重新拉取 SHA 覆盖」的自毁逻辑；冲突文件主名保留本机版本，对方版本落 `conflicts/<单元>/<时间戳>-<设备>/`（业务目录之外，插件扫描不到）并归档到远端 `drifox/conflicts/`，两台机器都能找回。下载不再整目录替换并删除本地旧内容，改为文件级合并 + 本地快照留档（`backups/sync/`，保留 5 份）。
-- **无变化不再触发上传** (`app/core/sync/fingerprint.py` 新增): 引入内容指纹（目录清单摘要 + git blob sha，与 Gitee 返回的 sha 同算法）与确定性打包（固定 mtime/顺序/压缩参数）。内容未变时零网络请求跳过；provider 不再搭车 app.config 全量重推（改配置开关不再触发 assistant_hub 等 1MB+ 数据上传）。ZIP 打包排除 `__pycache__`/`.DS_Store`/`*.pyc`/`*.log` 等运行时产物。
-- **app.config 合并细化到集合元素级**: `LLM.SavedProviders` / `MCP.Servers` / `Tools.Toggles` / `Plugin.EnabledPlugins` 等 dict/list 型配置按元素三方合并，双机各自新增的 provider、MCP 服务、插件条目都保留，不再整块冲突丢一边。API Key 本机权威（本地已有值永不被云端密文覆盖，本地为空时才接收云端）；Gitee token 继续本机独立。配置项层禁用删除传播：老版本客户端重写 app.config 丢掉新版本 ConfigItem 时，不会再把「缺失」当成用户删除同步到所有设备导致新配置项集体消失。
-- **运行期云端变更轮询**: 新增 5 分钟轮询（单轮 2 次目录列表请求），远端有更新且本地无未同步改动时自动合并下载，不再只能靠下次启动整包覆盖收敛。
 
-## [v0.6.12] - 2026-10-27 (重新发布 #7)
+## [v0.6.12] - 2026-10-27 (重新发布 #8)
 
-自 v0.6.11 以来的变更 | 提交数：47 · 文件变更：127 · +10125/-2692 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+自 v0.6.11 以来的变更 | 提交数：49 · 文件变更：135 · +13072/-3113 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -92,6 +87,21 @@ All notable changes to this project will be documented in this file.
 
 - **打包版无限自我复制（窗口疯狂弹出）** (`a542509a`): PyInstaller 打包后 `sys.executable` 是 app 二进制，bootloader 不认 `-c`；multiprocessing 拉起的 `resource_tracker` 子进程被当成「正常启动」重跑整个应用。loguru 每个 `enqueue=True` sink 首次创建 `SimpleQueue/Event/Lock` 即拉起 tracker → 子进程重跑 app → 它又建 sink 又拉 tracker，形成 app → tracker(app) → tracker(app) 无限自激。实测 17 分钟累计 221 个 PID、42 个日志分片。修法：`main.py` 的 `__main__` 块内、`main()` 之前调 `multiprocessing.freeze_support()` —— PyInstaller 的 `pyi_rth_multiprocessing` 已把该函数换成分流实现，命中 `-c "from multiprocessing.resource_tracker import main"` 时只 `exec` 那段代码再 `sys.exit()`，源码运行时为 no-op。
 - **日志安装失败静默吞掉导致零日志** (`a542509a`): POSIX semaphore 耗尽（`Errno 28`）时首个 `logger.add(enqueue=True)` 抛错，被 `main.py` 的 `except Exception: pass` 吞掉，11 个 sink 全部没装 —— 应用照常运行但零日志、事后无任何证据。三处修：①`setup_logging` 改为逐 sink 独立安装，单个失败不连带其余；②`enqueue=True` 不可用时自动降级为同步写入（`enqueue=False` 只用线程锁，不受 semaphore 配额影响），实测耗尽环境下 10 个 sink 全部降级成功、日志正常落盘；③`main.py` 的异常分支落 stderr + 写 `logs/logging_setup_failed.log`，不再静默。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #8 追加）
+
+- **多设备云同步不再互相覆盖** (`app/core/sync/merge.py` 新增): 同步从「整包后写者胜」改为以 base 版本为基准的三方合并。远端被其他设备改动时先合并再上传，删除「sha 冲突后重新拉取 SHA 覆盖」的自毁逻辑；冲突文件主名保留本机版本，对方版本落 `conflicts/<单元>/<时间戳>-<设备>/`（业务目录之外，插件扫描不到）并归档到远端 `drifox/conflicts/`，两台机器都能找回。下载不再整目录替换并删除本地旧内容，改为文件级合并 + 本地快照留档（`backups/sync/`，保留 5 份）。
+- **无变化不再触发上传** (`app/core/sync/fingerprint.py` 新增): 引入内容指纹（目录清单摘要 + git blob sha，与 Gitee 返回的 sha 同算法）与确定性打包（固定 mtime/顺序/压缩参数）。内容未变时零网络请求跳过；provider 不再搭车 app.config 全量重推（改配置开关不再触发 assistant_hub 等 1MB+ 数据上传）。ZIP 打包排除 `__pycache__`/`.DS_Store`/`*.pyc`/`*.log` 等运行时产物。
+- **app.config 合并细化到集合元素级**: `LLM.SavedProviders` / `MCP.Servers` / `Tools.Toggles` / `Plugin.EnabledPlugins` 等 dict/list 型配置按元素三方合并，双机各自新增的 provider、MCP 服务、插件条目都保留，不再整块冲突丢一边。API Key 本机权威（本地已有值永不被云端密文覆盖，本地为空时才接收云端）；Gitee token 继续本机独立。配置项层禁用删除传播：老版本客户端重写 app.config 丢掉新版本 ConfigItem 时，不会再把「缺失」当成用户删除同步到所有设备导致新配置项集体消失。
+- **运行期云端变更轮询**: 新增 5 分钟轮询（单轮 2 次目录列表请求），远端有更新且本地无未同步改动时自动合并下载，不再只能靠下次启动整包覆盖收敛。
+- **上传结果自校验** (`5013c981`): Gitee 返回的 `content.sha` 是本机待上传字节的 git blob sha，上传成功后立即比对；不一致说明远端落地内容不是我们发的那份（并发写入 / 服务端异常），打 error 留证据但不判失败，避免脏标记回滚后无限重传。
+- **冲突归档补齐下载路径** (`5013c981`): `_flush_conflict_archive()` 补到两个下载入口，本地与云端同时改过时对方版本同样归档到远端 `drifox/conflicts/`，不再只有上传侧能找回。
+- **流式跟底被非用户滚动永久锁死** (`cff5e5ed`): 旧判据把 Qt 自发的 `valueChanged`（切回标签页重算上界、分栏/宽度重排、卡片收缩钳制）记成「用户滚离底部」，而 away 标志复位依赖下一次「valueChanged 且贴底」，后台标签页里这事件可能再也不来（症状：切回标签页停在旧位置，须手动滚到底）。改为置位必须有 600ms 内真实输入证据（滚轮 / 拖滑块 / 点页槽 / 键盘翻页），贴底一律复位。卡内（WebEngine）同源问题同批修复：`document.body` 与 `#content-placeholder` / `#tool-content` 的 scroll 监听只在 900ms 内有过 wheel/touch/key 才置位，Chromium 几何变化引起的 scroll 不再误锁跟随。
+
+### 🔧 测试基建 (Testing Infrastructure)（重新发布 #8 追加）
+
+- **多设备云同步仿真** (`tools/sync_sim.py`、`tools/fake_gitee.py`、`5013c981`): 本地假 Gitee contents API（GET 单文件/目录、PUT 带 sha 冲突返 409、POST 已存在返 400，数据落 JSON 跨进程共享，请求全量记录），client 侧走真实 httpx 与真实文件系统，覆盖单测 mock 不到的 base64 往返、409 冲突处理与「内容未变时零写请求」断言。
+- **同步与滚动的回归测试** (`cff5e5ed`): 新增 `tests/core/test_config_sync_merge.py`（内容指纹、目录三方合并、冲突归档）与 `tests/widgets/test_scroll_away_user_input.py`（只有真实输入能置 away）；`test_config_sync.py`、`test_main_widget_scroll_anchor.py`、`test_stream_finish_bottom_follow.py`、`test_message_card_streaming_dock.py` 同步对齐新判据。
 
 ## [v0.6.11] - 2026-10-26 (重新发布 #7)
 
