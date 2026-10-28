@@ -279,7 +279,7 @@ def main():
 
     viewer.loadFinished.connect(lambda ok: (ok and QTimer.singleShot(800, on_ready)))
     QTimer.singleShot(30000, app.quit)  # 兜底超时
-    app.exec()
+    app.exec_()
     print("done")
 
 

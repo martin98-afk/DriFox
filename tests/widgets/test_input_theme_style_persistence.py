@@ -12,6 +12,7 @@ qfw styleSheetManager（LINE_EDIT 源）。历史上 DriFox 用裸 setStyleSheet
 修复：_apply_input_style / _apply_agent_combo_style 改走 qfw 官方
 setCustomStyleSheet 通道，自定义 QSS 并入 styleSheetManager 组合源，
 主题切换重设时自动携带，不再被顶掉。
+（同步自 pyside6 分支 74a0d290）
 """
 
 import pytest

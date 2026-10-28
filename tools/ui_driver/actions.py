@@ -36,7 +36,7 @@ def wait_signal(signal: Any, timeout_ms: int = 10000) -> bool:
 
     signal.connect(_on_fire)
     QTimer.singleShot(timeout_ms, loop.quit)
-    loop.exec()
+    loop.exec_()
     try:
         signal.disconnect(_on_fire)
     except TypeError:
@@ -61,7 +61,7 @@ def wait_until(predicate: Callable[[], bool], timeout_ms: int = 10000, interval_
     timer.timeout.connect(_tick)
     timer.start()
     QTimer.singleShot(timeout_ms, loop.quit)
-    loop.exec()
+    loop.exec_()
     timer.stop()
     return state["ok"]
 
@@ -70,7 +70,7 @@ def wait_idle(ms: int = 300) -> None:
     """让主线程事件循环消化一段时间（渲染/防抖落定的驱动侧标准等待）。"""
     loop = QEventLoop()
     QTimer.singleShot(max(0, ms), loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def click(w: QWidget) -> bool:

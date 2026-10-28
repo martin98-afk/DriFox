@@ -24,8 +24,8 @@ from typing import Dict, List, Optional
 
 import orjson as json
 from loguru import logger
-from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QDialog, QHBoxLayout
 

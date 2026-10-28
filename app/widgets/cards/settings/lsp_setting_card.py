@@ -488,7 +488,7 @@ class LspListSettingCard(ExpandSettingCard):
                 _cmd = f'"{_python}" -m pip {pkg}'
 
         # 确认对话框（使用 qfluentwidgets.Dialog，自动应用 Fluent 主题色，
-        # 避免 PySide6 原生 QMessageBox 在深色主题下显示为系统默认全黑窗口）
+        # 避免 PyQt5 原生 QMessageBox 在深色主题下显示为系统默认全黑窗口）
         w = Dialog(
             f"安装 LSP 服务器 — {server_name}",
             f"即将在终端中执行以下安装命令：\n\n    {_cmd}\n\n安装完成后请点击「刷新」按钮重新连接。\n\n是否继续？",
@@ -498,7 +498,7 @@ class LspListSettingCard(ExpandSettingCard):
         w.cancelButton.setText("取消")
         w.setContentCopyable(True)  # 安装命令可选中复制
 
-        if not w.exec():
+        if not w.exec_():
             return
 
         import os

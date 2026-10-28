@@ -5,7 +5,7 @@
 - 不直接实例化 OpenAIChatToolWindow（依赖过多，会崩溃）
 - 使用 AST 静态检查验证类结构和关键方法签名
 - 使用 importlib + __new__ + MagicMock 验证 __init__ 不抛异常
-- 使用 pytest.importorskip / @pytest.mark.skipif 处理 PySide6/QApplication 不可用情况
+- 使用 pytest.importorskip / @pytest.mark.skipif 处理 PyQt5/QApplication 不可用情况
 """
 
 import ast
@@ -628,7 +628,7 @@ class TestMethodSourceLogic:
         assert "_suspend_auto_scroll" in func_src, "_load_message_batch 应控制自动滚动"
 
     def test_safe_duplicate_window_has_error_handling(self):
-        """_safe_duplicate_window 用 try/BaseException 兜底防止 PySide6 崩溃"""
+        """_safe_duplicate_window 用 try/BaseException 兜底防止 PyQt5 崩溃"""
         cls = _get_target_class()
         method = _get_method(cls, "_safe_duplicate_window")
         assert method is not None
@@ -694,9 +694,9 @@ class TestMockedInit:
     def test_init_does_not_crash_with_full_mocks(self):
         """验证直接调用 OpenAIChatToolWindow() 不抛出业务逻辑异常。
 
-        注意：由于 __init__ 依赖大量 PySide6 C++ 对象，完整 mock 成本极高。
-        这里退化为 smoke test：只验证调用不抛出非 PySide6 异常。
-        PySide6 C++ 层检测到 __new__ 绕过 __init__ 时的 RuntimeError 被接受。
+        注意：由于 __init__ 依赖大量 PyQt5 C++ 对象，完整 mock 成本极高。
+        这里退化为 smoke test：只验证调用不抛出非 PyQt5 异常。
+        PyQt5 C++ 层检测到 __new__ 绕过 __init__ 时的 RuntimeError 被接受。
         """
         from app.main_widget import OpenAIChatToolWindow
 
@@ -706,8 +706,8 @@ class TestMockedInit:
         try:
             OpenAIChatToolWindow(fake_homepage)
         except RuntimeError:
-            # PySide6 C++ 层检测到 __init__ 未正确调用（__new__ 绕过）。
-            # 这是 PySide6 内部机制，与 OpenAIChatToolWindow 逻辑无关。
+            # PyQt5 C++ 层检测到 __init__ 未正确调用（__new__ 绕过）。
+            # 这是 PyQt5 内部机制，与 OpenAIChatToolWindow 逻辑无关。
             pass
 
     def test_instances_list_is_a_class_variable(self):

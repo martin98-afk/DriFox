@@ -12,7 +12,6 @@ from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional
 
 import shiboken6 as _sip
-
 from loguru import logger
 from app.core.infra import window_registry
 from PySide6.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, Signal
@@ -2276,7 +2275,7 @@ class TabManagerWindow(FramelessWindow):
     def _apply_theme_stylesheet(self):
         """应用主题样式表
 
-        使用 #objectName 选择器而非类选择器。PySide6 中 Python QWidget 子类的
+        使用 #objectName 选择器而非类选择器。PyQt5 中 Python QWidget 子类的
         metaObject().className() 统一返回 'QWidget'，类选择器（如
         'TabManagerWindow {...}'）无法匹配，导致样式失效。
 
@@ -4592,7 +4591,7 @@ class TabManagerWindow(FramelessWindow):
             # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
             # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
             def _on_win_title_changed(_new_title, _win=window):
-                if not _sip.isValid(_win):
+                if _shiboken6.isValid(_win):
                     return
                 cur_idx = self._window_to_index.get(id(_win), -1)
                 if cur_idx < 0 or cur_idx >= len(self._windows):
@@ -4630,7 +4629,7 @@ class TabManagerWindow(FramelessWindow):
 
             # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
             def _on_ai_state_changed(state, _win=window):
-                if not _sip.isValid(_win):
+                if _shiboken6.isValid(_win):
                     return
                 cur_idx = self._window_to_index.get(id(_win), -1)
                 if cur_idx < 0 or cur_idx >= len(self._windows):
@@ -5304,7 +5303,7 @@ class TabManagerWindow(FramelessWindow):
         import shiboken6 as sip
 
         try:
-            if not sip.isValid(source_window) or not sip.isValid(getattr(source_window, "homepage", None)):
+            if shiboken6.isValid(source_window) or shiboken6.isValid(getattr(source_window, "homepage", None)):
                 return None
         except Exception:
             return None

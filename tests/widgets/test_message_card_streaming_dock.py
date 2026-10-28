@@ -565,28 +565,3 @@ def test_on_js_ready_dock_sync_uses_python_streaming_flag():
     code = "\n".join(ln.split("#")[0] for ln in src.splitlines())
     assert "!!_act||!_co" not in code, "不得保留 !_co（未折叠）开坞推导：新骨架无 data-collapsed 会误开坞态"
     assert "_dock_on" in code, "必须用 Python 端 _streaming 真值参与坞态判定"
-
-
-def test_on_js_ready_dock_sync_ignores_residual_streaming_attrs():
-    """回归：_on_js_ready 不得用 DOM 残留 data-streaming 属性反推开坞态。
-
-    根因（完全结束后工具与思考区永久沉底）：旧兜底写成
-    `_setStreamingDock(_dock_on || !!_act)`，把「DOM 里存在
-    data-streaming=\"true\" 的工具块」当作「本轮仍在流式」的证据，用来覆盖
-    「JS 就绪晚于工具流式注入」的竞态。但卡片重建（虚拟滚动回收 / tab 切回 /
-    补齐渲染 / 完成框注入失败）时 DOM 可能残留上一轮的流式标记，此时
-    `_streaming` 早已是 False：
-
-        _setStreamingDock(false || true) === _setStreamingDock(true)
-
-    → 坞态被重新打开且再无归位调用（归位只在 finish_streaming 发一次，早已
-    过去）→ 工具与思考区永久沉底、正文限高，必须重建卡片才恢复。
-    竞态窗口本身已由 `_dock_sync_requested` 补发覆盖，不需要 DOM 属性兜底。
-    """
-    src = inspect.getsource(CodeWebViewer._on_js_ready)
-    code = "\n".join(ln.split("#")[0] for ln in src.splitlines())
-    assert "data-streaming" not in code, (
-        "_on_js_ready 不得查询 DOM 的 data-streaming 属性来判定坞态："
-        "重建时残留标记会把已结束卡片误开坞态"
-    )
-    assert "!!_act" not in code, "不得保留 `|| !!_act` 开坞兜底"

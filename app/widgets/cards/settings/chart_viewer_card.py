@@ -26,8 +26,9 @@ import sys
 from typing import List
 
 from loguru import logger
-from PySide6.QtCore import QBuffer, QIODevice, Qt, QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtCore import QBuffer, QIODevice, Qt, QUrl, Signal
+# (removed empty import from PySide6.QtWebEngineWidgets)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QDialog, QVBoxLayout
 

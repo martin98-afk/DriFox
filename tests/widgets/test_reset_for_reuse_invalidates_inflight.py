@@ -21,7 +21,7 @@ QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 _APP = QApplication.instance() or QApplication(sys.argv)
 
 try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView# noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 except Exception:
     pass
 

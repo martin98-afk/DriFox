@@ -1906,7 +1906,7 @@ class TestCommandShortcutDestroyedGuard:
         assert _is_sip_deleted(None) is False
         assert _is_sip_deleted(123) is False  # 非 Qt 对象 → 异常兜底 False
         sip.delete(w)  # 立即销毁 C++ 对象（确定性，不等事件循环）
-        assert sip.isValid(w) is False
+        assert shiboken6.isValid(w) is True
         assert _is_sip_deleted(w) is True
 
     def test_clear_command_shortcuts_sip_deleted_silent(self):

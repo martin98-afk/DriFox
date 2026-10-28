@@ -16,7 +16,7 @@ os.environ["DRIFOX_NO_CODEBUDDY_REFRESH"] = "1"
 
 # ⚠️ 同理必须模块级（早于任何 Settings 单例构造）：把测试进程的 app_data_dir
 # 隔离到仓库内 .drifox-test/（已被 /.drifox*/ gitignore 覆盖），杜绝测试写入
-# 真实用户配置 .drifox/app.config（D3 实证污染过 Tools/OffBehavior 等键）。
+# 真实用户配置 .drifox6/app.config（D3 实证污染过 Tools/OffBehavior 等键）。
 # setdefault：外部显式指定 DRIFOX_DATA_DIR 时尊重外部值。
 os.environ.setdefault(
     "DRIFOX_DATA_DIR", str(Path(__file__).resolve().parent.parent / ".drifox-test")
@@ -85,37 +85,9 @@ def _ensure_context_tiers_loaded():
         pass
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _no_runtime_watcher_threads():
-    """禁用 rt-watcher-* 后台热重载线程（session 级，进程内不还原）。
-
-    背景：backend._create_engines 等路径会 ensure_*_watcher() 拉起 11 个
-    rt-watcher-* 守护线程，轮询插件目录并在**后台线程**调 reload_plugin/
-    unload_plugin——测试进程里组件文件无真实变更时也可能因基线竞态触发
-    全量重载，非主线程 import UI 模块直接 qFatal abort
-    （Fatal Python error: Aborted，Thread [rt-watcher-engines]，2026-10-02
-    tests/plugins 全量 39% 处稳定复现）。
-    测试环境只需要 scan_roots 静态扫描，不需要热重载；掐掉 start() 保留
-    ensure_* 内的 scan_now 语义。生产 main.py 不经过本 conftest，不受影响。
-    """
-    try:
-        from app.plugins.loaders.runtime_component_loader import _RuntimeWatcher
-
-        _orig_start = _RuntimeWatcher.start
-
-        def _no_start(self):
-            pass
-
-        _RuntimeWatcher.start = _no_start
-        yield
-        _RuntimeWatcher.start = _orig_start
-    except Exception:
-        yield
-
-
 @pytest.fixture(scope="session")
 def qapp(_setup_qt_attributes):
-    """PySide6 QApplication 单例（Phase F：UIModule 测试需要 Qt 事件循环）"""
+    """PyQt5 QApplication 单例（Phase F：UIModule 测试需要 Qt 事件循环）"""
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])

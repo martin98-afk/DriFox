@@ -488,7 +488,7 @@ _FENCE_RE_CACHE = re.compile(r"^\s{0,3}```", re.M)
 # 实测对比（各 800 组随机 fuzz）：
 #   路线 A（行首任意 `<` → 整段转换）   纯 md 0/800，含 HTML 0/800
 #   路线 B（块级标签白名单)            纯 md 0/800，含 HTML 19/800（2.4%）
-# 白名单兑不住 `<span>` / `<br>` / `<b>` / `<!-- -->` 这类被 md 当作块处理的
+# 白名单兜不住 `<span>` / `<br>` / `<b>` / `<!-- -->` 这类被 md 当作块处理的
 # 形态，故取更宽的路线 A： correctness 优先，实现也更简（无需维护标签清单）。
 _LEADING_HTML_LINE_RE = re.compile(r"^\s*<", re.M)
 
@@ -802,7 +802,7 @@ def _md_to_html_incremental(text: str) -> str:
             # b. 首个非空行以空白开头 → 缩进延续（缩进代码 / 懒 continuation）
             if line[0] in " \t":
                 return _md_to_html(text)
-            if _LIST_OR_QUOTE_CONT_RE.match(line):
+            if _LIST_OR_QUOTE_CONT_RE.match(line) and _last_top_block_opens_mergeable(prefix):
                 return _md_to_html(text)  # 与 prefix 末块合并，不能切
             break
     except Exception:
@@ -828,6 +828,15 @@ def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
 
     先整段转 HTML 再切：块元素正则匹配的是 HTML 标签。切出的 quote/table
     片段本身已是 HTML（无需二次转换），text 片段原样回传。
+
+    [PERF] 段级结果缓存：`parse_blocks` 会把全文按 think/tool/fence 切成 N 个
+    文本段，每段各调本函数一次。流式推进时**只有最后一个段在变**，前 N-1 个
+    段文本恒定 —— 按段文本寻址缓存即可命中（实测 payload 上 69 段 → 命中 68 段）。
+    这是纯函数结果缓存（同输入必同输出），**天然等价、无需任何等价性守卫**。
+
+    ⚠️ 缓存必须落在本层而非段内再切 prefix/tail：段内切分会被调用 69 次、
+    每次的 prefix 都是新文本 → 缓存 0 命中、每段做两次转换，比不优化还慢
+    （实测 32000 字符：段内切分 17.0ms vs 不优化 17.2ms，几乎无差）。
     """
     if not text.strip():
         return []
@@ -2330,6 +2339,7 @@ class MarkdownBlockViewer(QWidget):
         # 靠 refresh 入口清理）。
         Colors.refresh()
         _HTML_PREFIX_CACHE.clear()
+        _TEXT_BLOCK_CACHE.clear()
         self._reconcile(force=True)
 
     def cleanup(self) -> None:  # 兼容 MessageCard 调用签名

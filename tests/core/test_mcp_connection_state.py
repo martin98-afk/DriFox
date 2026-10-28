@@ -41,6 +41,10 @@ def mgr():
     m._loop = None
     m._thread = None
     m._ephemeral = set()  # 临时开启集合（生产由 __init__ 初始化）
+    # 配置侧服务器来源：get_status 会合并进来（含从未建连的）。
+    # 这里固定为空，避免测试依赖本机真实的插件 MCP 配置——否则装了
+    # 任何 MCP 插件的机器上都会多出一批占位条目，断言无谓失败。
+    m._configured_servers = lambda: []
     return m
 
 
@@ -58,41 +62,27 @@ def _make_conn(name, state=MCPState.CONNECTED, config=None):
 
 
 class TestResolvePluginPaths:
-    """兜底解析：从 _source 反推 plugin_root 并展开占位符。
+    _SOURCE = "D:/work/DriFox/.drifox6/plugins/browser/.mcp.json"
 
-    被测函数要求 _source 的父目录真实存在，故用 tmp_path 自建插件根，
-    不依赖本机数据目录下是否装过某个插件（原先写死仓库内绝对路径就是这个坑）。
-    """
-
-    @staticmethod
-    def _plugin_root(tmp_path):
-        root = tmp_path / "plugins" / "browser"
-        root.mkdir(parents=True)
-        return root
-
-    def test_expands_root_placeholder(self, tmp_path):
-        root = self._plugin_root(tmp_path)
+    def test_expands_root_placeholder(self):
         cfg = {
             "command": "py",
             "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/mcp/server.py"],
             "env": {},
             "url": "",
             "headers": {},
-            "_source": str(root / ".mcp.json"),
+            "_source": self._SOURCE,
         }
         out = _resolve_plugin_paths(cfg)
-        assert out["args"][1] == f"{root.as_posix()}/mcp/server.py"
+        assert out["args"][1] == "D:/work/DriFox/.drifox6/plugins/browser/mcp/server.py"
 
-    def test_expands_data_placeholder(self, tmp_path):
-        root = self._plugin_root(tmp_path)
-        cfg = {"args": [], "env": {"X": "${CLAUDE_PLUGIN_ROOT}/data"}, "_source": str(root / ".mcp.json")}
+    def test_expands_data_placeholder(self):
+        cfg = {"args": [], "env": {"X": "${CLAUDE_PLUGIN_ROOT}/data"}, "_source": self._SOURCE}
         out = _resolve_plugin_paths(cfg)
-        assert out["env"]["X"] == f"{root.as_posix()}/data"
+        assert out["env"]["X"] == "D:/work/DriFox/.drifox6/plugins/browser/data"
 
-    def test_idempotent_on_already_expanded(self, tmp_path):
-        root = self._plugin_root(tmp_path)
-        expanded = f"{root.as_posix()}/mcp/server.py"
-        cfg = {"args": [expanded], "_source": str(root / ".mcp.json")}
+    def test_idempotent_on_already_expanded(self):
+        cfg = {"args": ["D:/work/DriFox/.drifox6/plugins/browser/mcp/server.py"], "_source": self._SOURCE}
         # 已展开的绝对值不应被二次改变
         assert _resolve_plugin_paths(cfg)["args"] == cfg["args"]
 
@@ -101,9 +91,8 @@ class TestResolvePluginPaths:
         # 无 _source 时原样返回，不影响普通配置
         assert _resolve_plugin_paths(cfg) is cfg
 
-    def test_does_not_mutate_original(self, tmp_path):
-        root = self._plugin_root(tmp_path)
-        cfg = {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"], "_source": str(root / ".mcp.json")}
+    def test_does_not_mutate_original(self):
+        cfg = {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"], "_source": self._SOURCE}
         _resolve_plugin_paths(cfg)
         assert cfg["args"][0] == "${CLAUDE_PLUGIN_ROOT}/mcp/server.py"
 
@@ -150,6 +139,31 @@ class TestStatusReporting:
         mgr._connections = {"srv": conn}
 
         assert mgr.get_status()[0]["connected"] is False
+
+    def test_config_only_servers_are_reported(self, mgr):
+        """配置里有但从未建连的服务器必须出现在 get_status 里
+
+        回归：enabled=false 的服务器在 _connect_all 被跳过、永不建连，
+        以前 get_status 只看连接表，于是 mcp_manage list 对它们完全盲目——
+        用户配了 11 个 HTTP MCP，工具却说"没有任何 MCP 服务器配置"。
+        """
+        mgr._configured_servers = lambda: [
+            {"name": "http-a", "type": "http", "enabled": False},
+            {"name": "http-b", "type": "http", "enabled": False},
+            {"name": "live", "type": "stdio", "enabled": True},
+        ]
+        mgr._connections = {"live": _make_conn("live", MCPState.CONNECTED)}
+
+        status = {s["name"]: s for s in mgr.get_status()}
+
+        assert set(status) == {"http-a", "http-b", "live"}
+        # 配置侧占位：存在但未启动，不得伪装成已连接
+        assert status["http-a"]["state"] == MCPState.DISABLED
+        assert status["http-a"]["connected"] is False
+        assert status["http-a"]["type"] == "http"
+        assert status["http-a"]["tools"] == []
+        # 连接表已有条目优先，不被配置侧覆盖
+        assert status["live"]["state"] == MCPState.CONNECTED
 
 
 # ═══════════════════════════════════════════════════════════

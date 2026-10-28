@@ -197,7 +197,7 @@ class TrayManager(QObject):
         QSystemTrayIcon 析构时若系统仍持有通知图标注册，Windows Shell 会向
         已销毁的宿主窗口投递 tray 消息 → 回调触达已释放对象（COM failfast）。
         显式 hide() 让 Shell 注销图标，再 deleteLater 交给事件循环回收；
-        各步独立容错，已删除对象（sip.isdeleted）直接跳过。
+        各步独立容错，已删除对象（shiboken6.isValid）直接跳过。
         """
         icon = self._tray_icon
         if icon is None:
@@ -205,9 +205,9 @@ class TrayManager(QObject):
         try:
             import shiboken6 as sip
 
-            # sip.isValid 只接受 Qt 绑定对象；拿到的不是（替身/异常态）
+            # shiboken6.isValid 只接受 sip 包装对象；拿到的不是（替身/异常态）
             # 时抛 TypeError，此处一并归入「不可用」处理。
-            if not sip.isValid(icon):
+            if shiboken6.isValid(icon):
                 self._tray_icon = None
                 return
         except (ImportError, TypeError):

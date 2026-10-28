@@ -14,7 +14,6 @@ import os
 from typing import Dict, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -30,7 +29,7 @@ from app.plugins.sdk import alpha_tint as _alpha_tint, get_project_color
 from app.plugins.sdk import extract_project_initials
 from app.plugins.sdk import get_font_family_css, get_icon
 from app.plugins.sdk import SquareAvatar as _SquareAvatar
-# [PERF] 直接从 sdk 导入 _ElidedLabel（转引自 app.widgets.elided_label），
+# [PERF] 直接从源头导入 _ElidedLabel（mcp_setting_card 同样转引自 app.widgets.elided_label），
 # 避免为这一个类拉起 mcp_setting_card → mcp SDK（~715ms）整条重链
 from app.plugins.sdk import ElidedLabel as _ElidedLabel
 from app.plugins.sdk import style_if_changed
@@ -703,6 +702,6 @@ class ProjectSelectorCardContent(QWidget):
             parent=self.window(),
         )
         _dialog.confirmed.connect(_on_archive_confirm)
-        _dialog.exec()
+        _dialog.exec_()
         if _confirmed[0]:
             self.archiveProject.emit(project_name)

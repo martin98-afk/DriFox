@@ -39,7 +39,7 @@ def test_env_unset_behavior_unchanged(monkeypatch, env_set):
     from app.utils.utils import get_app_data_dir
 
     monkeypatch.delenv("DRIFOX_DATA_DIR", raising=False)
-    # 开发环境（非 frozen）下行为：相对 .drifox6（PySide6 版数据目录隔离，见 APP_DATA_DIR_NAME）
+    # 开发环境（非 frozen）下历史行为：相对 .drifox6
     assert not Path(str(get_app_data_dir())).is_absolute() or sys_frozen_like()
     assert default_config_path().endswith(os.path.join(".drifox6", "app.config")) or sys_frozen_like()
 

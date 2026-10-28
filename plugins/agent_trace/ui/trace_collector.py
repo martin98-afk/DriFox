@@ -157,7 +157,7 @@ class TraceCollector(QObject):
                     "error_occurred": self._on_error_occurred,
                     # 主程序在 hook 注入后触发的节拍信号
                     "_hook_messages_updated": self._on_messages_updated,
-                    # ⚠️ 「消息已落盘」的唯一可订阅事件：worker 的 finished_with_messages
+                    # 消息已落盘的唯一可订阅事件：worker 的 finished_with_messages
                     # （每次工具迭代落盘 / 整轮结束）经 executor 回调链转发到此信号。
                     # 不订阅它的话，工具迭代写入 session.messages 后 collector 完全
                     # 感知不到，表现为「记录刷新延迟非常高」。

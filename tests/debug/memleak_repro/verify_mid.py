@@ -77,7 +77,7 @@ def _pump(app, ms: int = 80) -> None:
     from PySide6.QtCore import QEventLoop, QTimer  # type: ignore
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
     app.processEvents()
 
 

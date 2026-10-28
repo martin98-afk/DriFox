@@ -308,7 +308,7 @@ class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         dialog = SecretUnlockDialog(can_remember=SecretStore().available, parent=self.window())
         dialog.unlocked.connect(_on_unlocked)
         dialog.forgotPassword.connect(self._on_forgot_password)
-        dialog.exec()
+        dialog.exec_()
         return result["ok"]
 
     def _prompt_setup_password(self, require_old: bool) -> tuple[str, str]:
@@ -321,7 +321,7 @@ class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
         dialog = SecretPasswordSetupDialog(has_old=require_old, parent=self.window())
         dialog.confirmed.connect(_on_confirmed)
-        dialog.exec()
+        dialog.exec_()
         return holder["old"], holder["new"]
 
     def _on_set_password(self):
@@ -359,7 +359,7 @@ class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._do_reset_locked_secrets)
-        dialog.exec()
+        dialog.exec_()
 
     def _do_reset_locked_secrets(self):
         self.cfg.reset_locked_secrets()

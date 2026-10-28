@@ -50,6 +50,6 @@ def after_leave():
 
 QTimer.singleShot(400, after_enter)
 QTimer.singleShot(1400, after_leave)
-app.exec()
+app.exec_()
 tm.close()
 app.processEvents()

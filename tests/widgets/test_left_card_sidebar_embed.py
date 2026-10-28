@@ -44,7 +44,7 @@ _TM = None  # 模块级持有，防 GC 后 Qt C++ 对象悬垂
 def _pump(ms: int = 30):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def _flush_resize():

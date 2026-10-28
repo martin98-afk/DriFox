@@ -56,7 +56,7 @@ def _app():
 def _pump(ms: int):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 class _FakeCard(QWidget):

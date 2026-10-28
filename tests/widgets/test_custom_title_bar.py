@@ -3,7 +3,6 @@
 import sys
 
 import pytest
-from PySide6.QtCore import QAbstractAnimation
 from PySide6.QtWidgets import QWidget
 
 from app.widgets.custom_title_bar import CustomTitleBar
@@ -136,7 +135,7 @@ def test_tab_active_animates_progress(qtbot, container):
 
     tb.set_active_tab("usage")
     assert btn._active is True  # 状态立即翻转
-    assert btn._anim_active.state() == QAbstractAnimation.Running  # 进度走动画
+    assert btn._anim_active.state() == btn._anim_active.Running  # 进度走动画
 
     # 动画结束后进度收拢到 1
     btn._anim_active.stop()
@@ -161,7 +160,7 @@ def test_set_active_heals_stuck_progress(qtbot, container):
     btn._active_t = 0.4
 
     tb.set_active_tab("chat")  # 意图未变，但进度没到位 → 必须重启
-    assert btn._anim_active.state() == QAbstractAnimation.Running
+    assert btn._anim_active.state() == btn._anim_active.Running
 
 
 def test_set_active_is_noop_when_settled(qtbot, container):
@@ -178,7 +177,7 @@ def test_set_active_is_noop_when_settled(qtbot, container):
     btn._anim_active.stop()
     btn._active_t = 1.0
     tb.set_active_tab("chat")
-    assert btn._anim_active.state() != QAbstractAnimation.Running
+    assert btn._anim_active.state() != btn._anim_active.Running
 
 
 def test_sync_tab_hover_picks_the_tab_under_cursor(qtbot, container, monkeypatch):
@@ -315,3 +314,49 @@ def test_reduce_motion_hover_and_active_land_final_value(qtbot, container, monke
     btn.set_active(True)
     assert btn._active_t == 1.0
     assert btn._anim_active.state() != btn._anim_active.Running
+
+# ── 拖拽：SC_MOVE 模态循环重入短路 ──
+
+
+def _make_left_button_move_event():
+    """构造按住左键的 move 事件（标题栏中部）"""
+    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    return QMouseEvent(
+        QEvent.MouseMove, QPoint(100, 19), QPoint(1100, 600),
+        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier,
+    )
+
+
+def test_mouse_move_noop_while_system_move_active(qtbot, container, monkeypatch):
+    """SC_MOVE 模态循环中的重入 move 必须静默短路，不得再次发起移动
+
+    根因（2026-10-24）：SendMessageW 模态循环期间每次鼠标移动都会重入
+    mouseMoveEvent → _start_system_move，守卫每条 warning → 拖拽热路径上
+    数百条同步日志 IO → 窗口跟随卡顿（日志 3ms 内 9 条实证）。
+    """
+    from app.widgets import custom_title_bar as ctb
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    monkeypatch.setattr(ctb, "_system_move_active", True)
+    calls = []
+    monkeypatch.setattr(tb, "_start_system_move", lambda gp: calls.append(gp))
+
+    tb.mouseMoveEvent(_make_left_button_move_event())
+    assert calls == []
+
+
+def test_mouse_move_starts_system_move_when_idle(qtbot, container, monkeypatch):
+    """非拖拽中的按住左键 move 正常发起系统移动"""
+    from app.widgets import custom_title_bar as ctb
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    monkeypatch.setattr(ctb, "_system_move_active", False)
+    calls = []
+    monkeypatch.setattr(tb, "_start_system_move", lambda gp: calls.append(gp))
+
+    tb.mouseMoveEvent(_make_left_button_move_event())
+    assert len(calls) == 1

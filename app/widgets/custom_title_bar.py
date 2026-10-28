@@ -369,12 +369,6 @@ class CustomTabButton(QWidget):
         layout.setContentsMargins(11, 0, 4 if closable else 11, 0)
         layout.setSpacing(2)
         self._icon_label: Optional[QLabel] = None
-        # 徽标（页签旁小圆标）：默认隐藏，set_badge 非空文本时显示。
-        # 插件经 slot region "workbench:tab" 挂载（WorkbenchPanel._apply_badges）。
-        self._badge_label: Optional[QLabel] = None
-        self._badge_text = ""
-        self._custom_widget: Optional[QWidget] = None
-        self._custom_source: Optional[object] = None
         if icon_path:
             self._icon_label = QLabel(self)
             self._icon_label.setPixmap(QIcon(icon_path).pixmap(14, 14))
@@ -384,6 +378,11 @@ class CustomTabButton(QWidget):
         # 鼠标事件穿透到父 widget，使整卡点击触发切换
         self._label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(self._label)
+        # 徽标（页签旁小圆标）：默认隐藏，set_badge 非空文本时显示。
+        # 插件经 slot region "workbench:tab" 挂载（WorkbenchPanel._apply_badges）。
+        self._badge_label: Optional[QLabel] = None
+        self._badge_text = ""
+        self._custom_widget: Optional[QWidget] = None
         self._close_btn: Optional[QPushButton] = None
         if closable:
             self._close_btn = QPushButton("×", self)
@@ -561,8 +560,6 @@ class CustomTabButton(QWidget):
             self._badge_label.setToolTip(tooltip or "")
             self._badge_label.setVisible(True)
         else:
-            self._badge_label.setText("")
-            self._badge_label.setToolTip("")
             self._badge_label.setVisible(False)
         self._apply_badge_style()
 
@@ -581,44 +578,27 @@ class CustomTabButton(QWidget):
         if widget is None:
             return
         widget.setParent(self)
+        widget.setVisible(True)
         layout = self.layout()
         idx = layout.indexOf(self._close_btn) if self._close_btn is not None else layout.count()
         layout.insertWidget(idx, widget)
-        widget.setVisible(True)
         self._custom_widget = widget
 
     def _drop_custom_widget(self) -> None:
-        """移除并销毁已挂的自定义 widget（换挂 / 清空 / 挂文本徽标时调用）"""
-        w = self._custom_widget
-        self._custom_widget = None
-        if w is None:
-            return
-        try:
-            layout = self.layout()
-            if layout is not None:
-                layout.removeWidget(w)
+        w = getattr(self, "_custom_widget", None)
+        if w is not None:
             w.setParent(None)
             w.deleteLater()
-        except Exception:  # noqa: BLE001 - 徽标清理失败不影响页签主体
-            pass
+            self._custom_widget = None
 
     def _apply_badge_style(self) -> None:
-        """徽标样式随主题 token 刷新（无徽标时跳过）"""
-        lbl = self._badge_label
-        # 判据用「有徽标文本」而非 isVisible()：父控件未显示时 isVisible() 恒
-        # False，构造期/面板隐藏期的样式会整段漏设（徽标首次显示时无样式）
-        if lbl is None or not self._badge_text:
+        if self._badge_label is None:
             return
-        from app.utils.design_tokens import Colors
-
-        # 徽标是「提示性小圆标」：底色用 SYSTEM_ACCENT，文字用其上的反色
-        lbl.setStyleSheet(
-            f"QLabel {{ color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.SYSTEM_ACCENT};"
-            " border: none; border-radius: 7px; padding: 0 4px;"
-            f" {font_size_css(11)}; font-weight: 600; }}"
+        self._badge_label.setStyleSheet(
+            f"QLabel {{ color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+            " border-radius: 6px; font-size: 9px; font-weight: 600;"
+            " padding: 0 4px; min-height: 12px; }"
         )
-        lbl.setFixedHeight(14)
-        lbl.adjustSize()
 
     def refresh_style(self):
         """按当前主题 token 刷新（Colors.refresh() 由调用方负责）
@@ -1164,6 +1144,12 @@ class CustomTitleBar(TitleBarBase):
         _win = self.window()
         if _win is not None and _win.isMaximized():
             return super().mouseMoveEvent(e)
+        # ★ SC_MOVE 模态循环进行中的重入 move（每次鼠标移动都会派发到此处）
+        # 属预期行为：静默忽略。此前未短路，每条重入都打到 _start_system_move
+        # 的 warning → 拖拽全程数百条同步日志 IO 打在模态循环热路径上，
+        # 窗口跟随滞后卡顿（2026-10-24 日志 3ms 内 9 条实证）。
+        if _system_move_active:
+            return
         self._start_system_move(e.globalPos())
 
     def _start_system_move(self, global_pos) -> None:

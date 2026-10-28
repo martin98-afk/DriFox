@@ -20,11 +20,6 @@
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
-; 两个构建变体（PyQt5 / PySide6）故意共用同一 AppId 与 DefaultDirName：
-; 一台机器只装一套绑定，同变体升级走覆盖安装（配置与数据在 %APPDATA%，不受影响）。
-; 跳变体安装（拿 -pyside6 包覆盖 PyQt5 版）会把两套 Qt 目录叠在同一 _internal 下，
-; 启动即崩——所以软件内更新由 update_checker._pick_asset 按 build_variant 选包拦住，
-; 手动下载请先卸载另一个变体。
 AppId={{9F1BD92B-9BD5-4952-BA03-D7EA4C7B2434}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}

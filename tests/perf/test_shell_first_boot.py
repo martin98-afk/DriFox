@@ -13,7 +13,7 @@ pytest.importorskip("PySide6.QtWidgets")
 def _drain(ms):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 @pytest.fixture(scope="module")

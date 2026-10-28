@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""[DEBUG-memleak] DriFox PySide6 内存泄漏复现 harness
+"""[DEBUG-memleak] DriFox PyQt5 内存泄漏复现 harness
 
 目的：在不依赖 LLM/网络的前提下，构造 DriFox 长时间运行的典型操作路径
       （发消息 / 切会话 / 加载插件），稳定复现 RSS 单调增长与对象计数不收敛。
@@ -116,7 +116,7 @@ def _pump_qt(app, ms: int = 60) -> None:
     from PySide6.QtCore import QEventLoop, QTimer  # type: ignore
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
     app.processEvents()
 
 
@@ -300,7 +300,7 @@ def scenario_plugin(app, rounds: int) -> List[Dict[str, Any]]:
 
 def scenario_signal(app, rounds: int) -> List[Dict[str, Any]]:
     """最小复现：source 持有 sink 引用，rounds 后只删 sink 列表但因 source 还活着
-    → sink 因信号连接被 source 持有无法释放（PySide6 强引用）。
+    → sink 因信号连接被 source 持有无法释放（PyQt5 强引用）。
     """
     from PySide6.QtCore import QObject, Signal  # type: ignore
 
@@ -467,7 +467,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="DriFox PySide6 内存泄漏复现 harness")
+    p = argparse.ArgumentParser(description="DriFox PyQt5 内存泄漏复现 harness")
     p.add_argument(
         "--scenario",
         default="all",

@@ -23,7 +23,7 @@ stage 仅 ingest：落盘按既有决策继续改存储（省内存与磁盘带�
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List
 
 from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_INGEST, TierOutcome
 from app.plugins.sdk import cfg_int, offload_skip_tools, tool_registry_api
@@ -32,9 +32,46 @@ _CHARS_PER_TOKEN = 4  # 节省字符 → token 的粗算口径（仅用于 stats
 
 
 def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面。
+
+    优先用本模块的 ``ToolRegistry`` 符号（若存在：插件可注入替身，测试常用），
+    否则经能力池（tool.read / tool.inject）。两者都不可用时返回 None。
+    """
+    cap = "tool.inject" if kind == "inject" else "tool.read"
+    reg = globals().get("ToolRegistry")
+    if reg is not None:
+        try:
+            inst = reg.get_instance()
+            return _registry_api(inst, kind)
+        except Exception:
+            pass
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("tool")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="tool", host=None, plugin=plugin, declared={cap, "state.kv", "plugin.log"}
+        )
+        if cap not in pool:
+            return None
+        return pool[cap]()
+    except Exception:
+        return None
+
+
+def _tool_api(kind: str = "read"):
     """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
     return tool_registry_api(kind, module_globals=globals())
-
 
 class ToolOffloadTier:
     id = "tool_offload"
@@ -71,11 +108,9 @@ class ToolOffloadTier:
         single = cfg_int("single_result_threshold", 50_000)
         total = cfg_int("message_total_threshold", 200_000)
         skip = offload_skip_tools()
-        # 逐消息判定用的注册表只读面在循环外取一次，避免每条消息重建能力池
-        api = _tool_api("read")
         acc = 0
         for r in view.messages:
-            if self._skip(r.get("name", ""), skip, api):
+            if self._skip(r.get("name", ""), skip):
                 continue
             c = r.get("content", "")
             if not isinstance(c, str):
@@ -101,14 +136,13 @@ class ToolOffloadTier:
         )
 
     @staticmethod
-    def _skip(name: str, skip: frozenset = frozenset(), api: Any = None) -> bool:
-        """免落盘判定：工具自声明（metadata["no_offload"]）∪ 插件配置名单。
-
-        api 为注册表只读面，由调用方在循环外取一次传入。
-        """
+    def _skip(name: str, skip: frozenset = frozenset()) -> bool:
+        """免落盘判定：工具自声明（metadata["no_offload"]）∪ 插件配置名单。"""
         if not name:
             return False
         try:
+            api = _tool_api("read")
+
             if api and api["is_no_offload"](name):
                 return True
         except Exception:

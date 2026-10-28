@@ -127,8 +127,12 @@ def _confirm_dialog(plugin: str, argv: list[str], cwd: str) -> bool:
         logger.warning("[process.start] 无 GUI 环境，跳过首启确认（headless/测试语义）")
         return True
     try:
-        from app.plugins.capabilities.providers.ui_bridge import _dispatch
+        from app.plugins.capabilities.providers.ui_bridge import _dispatch, preheat_main_thread_dispatcher
         from app.widgets.common_dialogs import ConfirmDialog
+
+        # ★ 预热兜底（幂等）：启动期 ui_core 注册已在主线程预热 _Dispatcher；
+        # 若单例仍未建（异常路径），此处以调用线程兜底建——至少保证单例存在。
+        preheat_main_thread_dispatcher()
 
         def _ask() -> bool:
             box = {"ok": False}

@@ -372,6 +372,12 @@ class CardManager:
             try:
                 if hasattr(card_widget, "show_card"):
                     card_widget.show_card()
+                    # ★ 契约兜底：容器 add_card 统一 setVisible(False) 藏卡，
+                    # 实现 show_card() 的卡由卡片自管可见性——沿用旧弹窗语义
+                    # 只做业务激活的卡会永远 isHidden，容器判定无可见卡而折叠
+                    # （magpie 0.5.2 实测根因）。补显对正确实现幂等无害。
+                    if hasattr(card_widget, "isHidden") and card_widget.isHidden():
+                        card_widget.setVisible(True)
                 else:
                     card_widget.setVisible(True)
             except RuntimeError:
@@ -443,6 +449,12 @@ class CardManager:
             # 调用卡片的 show_card 方法（由卡片自己管理计时器）
             if hasattr(card_widget, "show_card"):
                 card_widget.show_card()
+                # ★ 契约兜底：容器 add_card 统一 setVisible(False) 藏卡，实现
+                # show_card() 的卡由卡片自管可见性——沿用旧弹窗语义只做业务
+                # 激活的卡会永远 isHidden，容器判定无可见卡而折叠回对话区
+                # （magpie 0.5.2 实测根因）。补显对正确实现幂等无害。
+                if hasattr(card_widget, "isHidden") and card_widget.isHidden():
+                    card_widget.setVisible(True)
             else:
                 card_widget.setVisible(True)
         except RuntimeError:
@@ -867,6 +879,10 @@ class CardManager:
             if visible:
                 if hasattr(card_widget, "show_card"):
                     card_widget.show_card()
+                    # ★ 契约兜底：同 show_card 主路径——自管显隐契约漏实现的
+                    # 卡在此补显（对正确实现幂等无害）。
+                    if hasattr(card_widget, "isHidden") and card_widget.isHidden():
+                        card_widget.setVisible(True)
                 else:
                     card_widget.setVisible(True)
             elif hasattr(card_widget, "hide_card"):

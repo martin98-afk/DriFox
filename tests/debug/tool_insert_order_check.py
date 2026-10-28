@@ -134,7 +134,7 @@ def main() -> None:
     card.ensure_rendered()
     QTimer.singleShot(300, wait_js)
     QTimer.singleShot(30000, app.quit)
-    app.exec()
+    app.exec_()
 
 
 if __name__ == "__main__":

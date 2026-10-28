@@ -15,8 +15,8 @@
 import sys
 from unittest.mock import patch
 
-from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction
+from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QApplication
 
 from app.widgets.message_card import CodeWebViewer

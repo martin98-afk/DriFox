@@ -25,9 +25,8 @@ EV_PROJECT_CHANGED = "project_changed"  # payload: project, workdir, window_id
 # 工作台页签徽标条目已变化（插件 register_slot_entry 到 "workbench:tab" region 后
 # 由注册表发布，WorkbenchPanel 订阅并重挂徽标）。payload: 无（消费方全量重读 region）
 EV_WORKBENCH_BADGES_CHANGED = "workbench.badges_changed"
-# 工作台页签集合已变化（插件 register/unregister_workbench_tab 后由注册表发布，
-# WorkbenchPanel 订阅并重跑 reconcile —— 热加载新插件页免重启即时可见）。
-# payload: 无（消费方全量重读注册表）
+# 工作台页签集合已变化（register_workbench_tab 后发布，WorkbenchPanel 订阅并
+# 重跑 sync_plugin_pages reconcile——热加载新插件页时无需重启即可见）。payload: 无
 EV_WORKBENCH_TABS_CHANGED = "workbench.tabs_changed"
 # 项目 / 工作目录已变更（MainWidget._sync_working_directory 收尾处发布，按
 # (project, workdir) 去重）。UI 插件实现可选协议 on_project_changed 即接收：

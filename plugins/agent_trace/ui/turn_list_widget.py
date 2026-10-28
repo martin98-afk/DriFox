@@ -1136,7 +1136,7 @@ class TurnListWidget(QWidget):
         act_turn = menu.addAction(f"只看 Turn {rec.turn_no}") if rec.turn_no > 0 else None
         act_err = menu.addAction("只看失败") if rec.is_error else None
 
-        chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
+        chosen = menu.exec_(self._list.viewport().mapToGlobal(pos))
         if chosen is None:
             return
         if act_branch is not None and chosen is act_branch:

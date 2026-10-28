@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-"""编译 qrc 资源（PySide6 用 pyside6-rcc 命令行；PyQt5 的 pyrcc_main 无 PySide6 等效内嵌 API）。
+"""用 PyQt5 自带的 pyrcc_main 编译 qrc（pyrcc5 console script 在本环境缺失）。
+
 用法: python tools/compile_qrc.py
 """
+
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
+
+from PyQt5 import pyrcc_main
 
 PAIRS = [
     ("icons/icons.qrc", "app/utils/icons_rc.py"),
@@ -15,19 +18,21 @@ PAIRS = [
 
 
 def compile_qrc(qrc: str, out: str) -> int:
-    """调 pyside6-rcc 编译单个 qrc → _rc.py"""
+    """调 pyrcc_main.main()，执行后恢复 sys.argv（pyrcc_main 会读它并 sys.exit）"""
     root = Path(__file__).resolve().parent.parent
-    cmd = [sys.executable, "-m", "PySide6.scripts.pyside_tool", "rcc", str(root / qrc), "-o", str(root / out)]
+    argv = sys.argv
+    sys.argv = ["pyrcc5", str(root / qrc), "-o", str(root / out)]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True)
-    except FileNotFoundError:
-        print(f"[qrc] 未找到 pyside6-rcc（PySide6 未安装？）: {qrc}")
-        return 1
-    if r.returncode:
-        print(f"[qrc] 失败 {qrc}: exit {r.returncode}\n{r.stderr[:500]}")
-        return r.returncode
-    print(f"[qrc] {qrc} -> {out}")
-    return 0
+        pyrcc_main.main()
+        print(f"[qrc] {qrc} -> {out}")
+        return 0
+    except SystemExit as e:
+        code = int(e.code or 0)
+        if code:
+            print(f"[qrc] 失败 {qrc}: exit {code}")
+        return code
+    finally:
+        sys.argv = argv
 
 
 if __name__ == "__main__":

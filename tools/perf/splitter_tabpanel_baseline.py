@@ -56,7 +56,7 @@ _DEFAULT_PANEL_WIDTH = 187
 _EXPANDED_MIN_FRAME_WIDTH = 200
 COLLAPSE_BUDGET_MS = 16.7  # 60FPS 单帧预算
 
-# PySide6 下 QEvent.type() 返回 int，无 .name；手动映射关键事件类型名
+# PyQt5 下 QEvent.type() 返回 int，无 .name；手动映射关键事件类型名
 _QEVENT_NAMES = {
     1: "Timer", 12: "Paint", 13: "Move", 14: "Resize", 17: "Show",
     26: "WindowStateChange", 43: "MetaCall", 67: "PolishRequest",

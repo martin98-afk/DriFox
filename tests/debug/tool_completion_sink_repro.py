@@ -141,7 +141,7 @@ def main() -> None:
 
     QTimer.singleShot(200, start)
     QTimer.singleShot(45000, app.quit)
-    app.exec()
+    app.exec_()
 
 
 if __name__ == "__main__":

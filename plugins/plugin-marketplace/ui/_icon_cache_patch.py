@@ -86,7 +86,7 @@ def _apply_icon_cache_patch() -> bool:
             if renderer is None:
                 renderer = QSvgRenderer(icon)
                 _renderers[key] = renderer
-            # 物理像素尺寸必须 int（PySide6 严格类型，float 会抛 TypeError）
+            # 物理像素尺寸必须 int（PyQt5 严格类型，float 会抛 TypeError）
             pw = max(1, round(w * dpr))
             ph = max(1, round(h * dpr))
             pix = QPixmap(pw, ph)

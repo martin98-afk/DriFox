@@ -1347,7 +1347,7 @@ class MCPListSettingCard(ExpandSettingCard):
             parent=self.window(),
         )
         dialog.confirmed.connect(_on_confirm)
-        dialog.exec()
+        dialog.exec_()
         if not _confirmed[0]:
             return
 
@@ -1867,7 +1867,7 @@ class MCPListSettingCard(ExpandSettingCard):
             parent=self.window(),
         )
         dialog.confirmed.connect(_on_confirm)
-        dialog.exec()
+        dialog.exec_()
         if _confirmed[0]:
             self._do_remove(name)
 

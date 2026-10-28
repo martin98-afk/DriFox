@@ -748,7 +748,7 @@ class SystemWorktreePage(QWidget):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._on_url_confirmed)
-        dialog.exec()
+        dialog.exec_()
 
     def _on_url_confirmed(self, url: str):
         """URL 确认后的处理"""
@@ -980,8 +980,7 @@ class SystemWorktreePage(QWidget):
             if has_active_wd and not inserted_worktree and widget._repo_info:
                 inserted_worktree = True
                 self._original_folder_for_worktree = file_path
-                wt_item = QListWidgetItem()
-                wt_item.setSizeHint(self._get_worktree_section_size(widget._repo_info))
+                # 先建 widget，高度问它要（单一事实源；自算公式会与真实行数脱钩）
                 wt_widget = WorktreeSectionWidget(
                     widget._repo_info,
                     file_path,
@@ -989,6 +988,8 @@ class SystemWorktreePage(QWidget):
                     current_workdir=actual_wd,
                     project=self._current_project,
                 )
+                wt_item = QListWidgetItem()
+                wt_item.setSizeHint(QSize(0, wt_widget.content_height()))
                 wt_widget.sizeChanged.connect(
                     lambda h, item=wt_item: (
                         item.setSizeHint(QSize(0, h)),
@@ -1007,15 +1008,6 @@ class SystemWorktreePage(QWidget):
         if hasattr(self, "_docs_count_label"):
             count = len(docs)
             self._docs_count_label.setText(f"({count})" if count > 0 else "")
-
-    def _get_worktree_section_size(self, repo_info):
-        """计算 worktree 树状组件的高度"""
-        from PySide6.QtCore import QSize
-
-        # 宽度随列表自适应，不设定固定宽度避免溢出
-        wt_count = len(repo_info.worktrees) if repo_info.worktrees else 1
-        height = wt_count * 24 + 24 + 4
-        return QSize(0, height)
 
     def _get_doc_item_size(self):
         from PySide6.QtCore import QSize

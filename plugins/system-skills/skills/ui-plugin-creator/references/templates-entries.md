@@ -82,7 +82,7 @@ def _on_clicked(context: Dict[str, Any]) -> None:
     main_widget = context.get("main_widget")
     _close_stale()  # 单实例防护：旧窗口存活先关（见 §9.4）
     try:
-        # 延迟 import PySide6/qfluentwidgets/子模块 —— 注册期不加载 UI 依赖
+        # 延迟 import PyQt5/qfluentwidgets/子模块 —— 注册期不加载 UI 依赖
         ...
     except Exception as e:  # noqa: BLE001 — 全流程兜底，不留残留窗口
         logger.error(f"[{PLUGIN_NAME}] 动作失败: {e}")

@@ -208,7 +208,7 @@ def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
     开发环境: 当前目录/.drifox6
-    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox6
     """
     if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
@@ -289,7 +289,7 @@ class PluginInstaller:
     # PluginInstaller.__new__ 手赋属性的构造方式（不执行 __init__）。
     _cache_lock = threading.Lock()
 
-    # GitHub 仓库归档缓存根目录（__init__ 赋值为 .drifox/cache/repo_archives）。
+    # GitHub 仓库归档缓存根目录（__init__ 赋值为 .drifox6/cache/repo_archives）。
     # 类级默认 None = 未启用归档通道（走 git）。测试用 __new__ 手构实例时
     # 不赋值即自动离线，绝不发起外网请求；生产实例由 __init__ 显式开启。
     _archive_cache_dir: Optional[Path] = None
@@ -619,7 +619,7 @@ class PluginInstaller:
         if not target.exists() and disabled_dir is not None and (disabled_dir / name).exists():
             target = disabled_dir / name
         elif not target.exists():
-            # 内置插件更新：一律装用户根（.drifox/plugins/<name>），经 user>system
+            # 内置插件更新：一律装用户根（.drifox6/plugins/<name>），经 user>system
             # 加载优先级覆盖内置版本；不原地改写主仓 plugins/。卸载影子副本即回退内置版。
             pass
         remote_ver = plugin_meta.get("version", "0.0.0")

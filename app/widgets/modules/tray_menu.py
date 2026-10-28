@@ -24,7 +24,8 @@
 from typing import Callable
 
 from PySide6.QtCore import QModelIndex, QSize, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
 from qfluentwidgets import Action, FluentIconBase, SystemTrayMenu, isDarkTheme
 from qfluentwidgets.components.widgets.menu import ShortcutMenuItemDelegate
@@ -188,5 +189,5 @@ class TrayContextMenu(SystemTrayMenu):
         for action in self.menuActions():
             hint = action.property(HINT_PROPERTY)
             if hint:
-                width = max(width, metrics.horizontalAdvance(hint))
+                width = max(width, metrics.width(hint))
         return width

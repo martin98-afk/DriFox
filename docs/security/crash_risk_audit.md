@@ -63,7 +63,7 @@ EngineSession 只把 `finished / error / messages_updated` 换成线程安全的
 **其余 key 原样透传插件传入的回调**。
 
 真实调用方是插件 daemon 线程，例如：
-- `.drifox6/plugins/cron-tasks/crontasks_core/executor.py:100-115`（`threading.Thread(daemon=True, name="cron-turn")`）
+- `.drifox/plugins/cron-tasks/crontasks_core/executor.py:100-115`（`threading.Thread(daemon=True, name="cron-turn")`）
 - `plugins/assistant_hub/core/memory/ticker.py:80`
 
 **崩溃条件**：任何插件往这些 key 传一个会操作 QWidget / Qt 对象的回调 →
@@ -148,7 +148,7 @@ event dispatcher，是标准的跨线程 C++ 竞争。条件触发（需非 GUI 
   `QtWebEngineWidgets`（顺序错误会导致启动即崩）—— 正确。
 - **跨线程触碰 WebEngine**：46 处 `runJavaScript` 全在 GUI 线程；`_RENDER_POOL` worker 只做纯 Python
   Markdown 渲染，不碰 Qt；`init_shared_web_profile` 仅启动期主线程调用。
-- **runJavaScript 回调悬垂**：关键路径已有 `weakref` + `except RuntimeError` + `sip.isdeleted()` 保护。
+- **runJavaScript 回调悬垂**：关键路径已有 `weakref` + `except RuntimeError` + `shiboken6.isValid()` 保护。
 - **跨线程 QPixmap / QPainter**：worker 侧只用 `QImage.fromData`（QImage 允许非 GUI 线程），未发现违规。
 - **`moveToThread`**：`app/` 内 0 处；QThread 子类的线程归属未见经典错误用法。
 - **WebEngine 缓存配额**：`_skeleton_cache` LRU 上限 48，`_MAX_PAYLOAD_B64` 8MB，均有配额。

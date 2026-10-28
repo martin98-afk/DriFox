@@ -17,9 +17,9 @@ import types
 
 import pytest
 import shiboken6 as sip
+from PySide6.QtGui import QShortcut
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMainWindow
-from PySide6.QtGui import QShortcut
 from PySide6.QtTest import QTest
 
 from app.core.infra import window_registry as window_registry_mod
@@ -93,7 +93,7 @@ def _live_marked_shortcuts(win) -> list:
     out = []
     for qs in win.findChildren(QShortcut):
         try:
-            if not sip.isValid(qs):
+            if shiboken6.isValid(qs):
                 continue
             if qs.property(marker):
                 out.append(qs)

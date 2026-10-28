@@ -36,7 +36,7 @@ def drain(n_rounds=5):
     for _ in range(n_rounds):
         loop = QEventLoop()
         QTimer.singleShot(10, loop.quit)
-        loop.exec()
+        loop.exec_()
 
 
 def switch_tab(tm, index):

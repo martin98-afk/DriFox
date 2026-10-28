@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Phase 1/2: Investigate Qt destruction order behavior.
 
-We need to understand when _cleanup is actually called in PySide6.
+We need to understand when _cleanup is actually called in PyQt5.
 """
 
 import pytest

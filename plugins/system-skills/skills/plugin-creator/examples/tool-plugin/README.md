@@ -32,9 +32,9 @@ tool-plugin/
 
 ## 如何使用
 
-1. 复制本目录到 `~/.drifox6/plugins/tool-plugin-example/`
+1. 复制本目录到 `~/.drifox/plugins/tool-plugin-example/`
 2. 全局搜索 `[改名]` / `[必改]` 标记，改工具名、danger 等级、icon
 3. 重启或等 watchfiles 热更新（1-3 秒），用 `/plugin-marketplace` 确认加载状态
 4. 改成你自己的实现逻辑
 
-> Qt 绑定说明：本示例无 Qt 依赖。工具层若需 Qt（如图标处理），DriFox 当前使用 **PySide6**（2026-09 实测仓库现状，以动手时 `grep "from PySide6" app/` 结果为准）。
+> Qt 绑定说明：本示例无 Qt 依赖。工具层若需 Qt（如图标处理），DriFox 当前使用 **PyQt5**（2026-09 实测仓库现状，以动手时 `grep "from PyQt5" app/` 结果为准）。

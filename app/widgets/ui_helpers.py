@@ -25,7 +25,7 @@ from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QLineEdit, QWidget
 
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.utils import get_icon
 from app.widgets import MessageCard
 from app.widgets.elided_label import _ElidedLabel
 
@@ -303,7 +303,7 @@ def _get_model_btn_style():
 def _get_model_btn_text_style():
     """获取模型按钮文字样式（响应主题）"""
     Colors.refresh()
-    return f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)} font-weight: bold; background: transparent;"
+    return f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} font-weight: bold; background: transparent;"
 
 
 # 兼容旧引用
@@ -359,7 +359,7 @@ def is_widget_alive(widget: Optional[object]) -> bool:
     try:
         import shiboken6 as sip
 
-        return sip.isValid(widget)
+        return not shiboken6.isValid(widget)
     except Exception:
         return True
 

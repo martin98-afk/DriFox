@@ -531,4 +531,4 @@ if __name__ == "__main__":  # 预览入口
     stack.set_primary("a")
     w.resize(560, 240)
     w.show()
-    sys.exit(app.exec())
+    sys.exit(app.exec_())

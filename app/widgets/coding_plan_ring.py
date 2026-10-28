@@ -182,7 +182,7 @@ class _PlanProgressBar(QWidget):
 
         pct_text = f"{self._percent}%"
         fm = QFontMetrics(font)
-        text_w = fm.horizontalAdvance(pct_text)
+        text_w = fm.width(pct_text)
         text_x = w - text_w - 6  # 距右边缘 6px
         text_y = int((h + fm.ascent()) / 2) - 1
 

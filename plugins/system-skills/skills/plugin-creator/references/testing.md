@@ -61,7 +61,7 @@ DriFox 使用 **watchfiles** 实现插件热更新：
 
 ### 测试隔离
 
-别拿用户真实 `~/.drifox6/plugins/` 当测试夹具：会污染能力缓存、会话存储与日志。先在临时副本（临时目录或 drifox-plugins clone，见 §2）验证，通过后再装回真实目录。
+别拿用户真实 `~/.drifox/plugins/` 当测试夹具：会污染能力缓存、会话存储与日志。先在临时副本（临时目录或 drifox-plugins clone，见 §2）验证，通过后再装回真实目录。
 
 ---
 
@@ -74,7 +74,7 @@ clone 官方市场仓库，把你的插件放进去跑验证（四步）：
 git clone https://github.com/martin98-afk/drifox-plugins.git /tmp/dfp
 
 # 第二步：把你的插件复制到仓库中
-cp -r ~/.drifox6/plugins/<name> /tmp/dfp/plugins/<name>
+cp -r ~/.drifox/plugins/<name> /tmp/dfp/plugins/<name>
 cd /tmp/dfp
 
 # 第三步：在仓库中跑验证
@@ -111,10 +111,10 @@ rm -rf /tmp/dfp
 ## 3. Python 语法检查
 
 ```bash
-# 检查本地开发中的插件（在 ~/.drifox6/plugins/ 下）
-python -m py_compile ~/.drifox6/plugins/<name>/hooks/<name>_hook.py
-python -m py_compile ~/.drifox6/plugins/<name>/ui/__init__.py
-python -m py_compile ~/.drifox6/plugins/<name>/tools/*.py
+# 检查本地开发中的插件（在 ~/.drifox/plugins/ 下）
+python -m py_compile ~/.drifox/plugins/<name>/hooks/<name>_hook.py
+python -m py_compile ~/.drifox/plugins/<name>/ui/__init__.py
+python -m py_compile ~/.drifox/plugins/<name>/tools/*.py
 
 # 或在 drifox-plugins 仓库 clone 中检查
 python -m py_compile plugins/<name>/hooks/<name>_hook.py
@@ -132,7 +132,7 @@ python tools/check_sdk_imports.py
 # [sdk-import-check] OK（80 个 sdk 符号，改动文件全部命中）
 ```
 
-用户级插件（`~/.drifox6/plugins/`）不在主仓库 git 改动范围内，可临时复制进仓库再查。
+用户级插件（`~/.drifox/plugins/`）不在主仓库 git 改动范围内，可临时复制进仓库再查。
 
 ---
 

@@ -10,7 +10,7 @@
 5. 人工提示（pinned.md，SessionStart 注入会话消息）
 6. 记忆体系（照抄 WorkBuddy 双层结构 · 每助手独立）：
    - 全局记忆  <aid_dir>/MEMORY.md（跨项目）
-   - 项目记忆  {workdir}/.drifox/memory/<aid>/（MEMORY.md + YYYY-MM-DD.md 日志）
+   - 项目记忆  {workdir}/.drifox6/memory/<aid>/（MEMORY.md + YYYY-MM-DD.md 日志）
    - 注入走 BuildSystemPrompt（记忆说明书 + 全局 + 项目 + 日志索引）
    - 写入走 memory_read / memory_write 专用工具（模型自主写，无后台管线）
 

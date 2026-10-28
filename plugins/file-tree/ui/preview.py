@@ -9,7 +9,7 @@
 
 设计约束（闭包）：
 - 不导入 app.core / app.widgets 内部的任何模块（与 cards.py / tree_widget.py 同规则）
-- 纯 PySide6 + qfluentwidgets，文件读写走 stdlib
+- 纯 PyQt5 + qfluentwidgets，文件读写走 stdlib
 """
 
 import os

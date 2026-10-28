@@ -6,7 +6,7 @@ T9-pre 固化：把 T1 基线的真实 GUI 测量方法固化为可复现回归�
 
 测量语义（与 T1 一致）
 --------------------
-- 每轮 = 独立子进程 + 干净 .drifox6：进程态 / 内存 / 数据目录均为全新，
+- 每轮 = 独立子进程 + 干净 .drifox：进程态 / 内存 / 数据目录均为全新，
   避免上一轮泄漏对象污染下一轮基线（T1 的 3 轮独立进程语义）。
 - 每轮流程：启动 → 记录基线 RSS → 开 N tab（计时）→ 记录峰值 → 逐个关闭
   → 强制 GC → 记录关闭后 RSS → UI 响应 → 用量请求计数。
@@ -26,7 +26,7 @@ uv run python scripts/perf_regression.py --single-shot -o perf_single.json
 # 与优化前基线对比（--baseline 指向基线 JSON）
 uv run python scripts/perf_regression.py --baseline perf_baseline.json
 
-# 关闭数据目录隔离（不备份/恢复 .drifox6，自检演示用，会污染用户数据！）
+# 关闭数据目录隔离（不备份/恢复 .drifox，自检演示用，会污染用户数据！）
 uv run python scripts/perf_regression.py --no-isolate
 
 输出
@@ -40,7 +40,7 @@ JSON: {"meta": {...}, "rounds": [每轮数据...], "summary": 聚合指标}
 
 环境
 ----
-- Python 3.14+ / PySide6 / psutil（必需）/ pympler（可选，未用）
+- Python 3.14+ / PyQt5 / psutil（必需）/ pympler（可选，未用）
 - 不修改任何被测代码；数据目录 .drifox6 自动备份并在结束后恢复
 
 注意
@@ -73,14 +73,15 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 # ── 与 main.py 一致：QApplication 创建前设置 Qt 属性 + 导入 WebEngine ──
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QWidget
 
 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings# noqa: F401
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+
 # ── 用量请求计数探针（运行时 patch，仅本次进程生效）──
 _FETCH_CALLS: list[dict] = []
 
@@ -382,13 +383,13 @@ def _run_single_shot(args: argparse.Namespace) -> int:
         mw._compact_process_heap_after_cleanup = lambda: None
 
     QTimer.singleShot(0, _phase_startup)
-    app.exec()  # 事件循环结束后返回（_finish 已 app.quit）
+    app.exec_()  # 事件循环结束后返回（_finish 已 app.quit）
     return 0
 
 
-# ── 数据目录隔离：备份/恢复 .drifox6，避免污染用户数据 ──
+# ── 数据目录隔离：备份/恢复 .drifox，避免污染用户数据 ──
 _DATA_DIR = os.path.join(PROJECT_ROOT, ".drifox6")
-_BACKUP_DIR = os.path.join(PROJECT_ROOT, ".drifox6.perfregression.bak")
+_BACKUP_DIR = os.path.join(PROJECT_ROOT, ".drifox.perfregression.bak")
 
 
 def _backup_data_dir():
@@ -414,7 +415,7 @@ def _reset_data_dir():
 def _restore_data_dir():
     """测量结束后恢复用户原始 .drifox6"""
     _reset_data_dir()
-    print("[isolate] 已恢复 .drifox6（测量数据已隔离）", flush=True)
+    print("[isolate] 已恢复 .drifox（测量数据已隔离）", flush=True)
 
 
 def _load_json(path: str) -> dict:
@@ -587,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rounds", type=int, default=2, help="测量轮数（默认 2，每轮独立子进程+干净数据目录）")
     parser.add_argument("--output", "-o", default="perf_regression_result.json", help="聚合结果 JSON 路径")
     parser.add_argument("--baseline", type=str, default=None, help="优化前基线 JSON 路径（存在则输出对比表）")
-    parser.add_argument("--no-isolate", action="store_true", help="不备份/恢复 .drifox6（会污染用户数据，仅自检用）")
+    parser.add_argument("--no-isolate", action="store_true", help="不备份/恢复 .drifox（会污染用户数据，仅自检用）")
     parser.add_argument("--keep-heapcompact", action="store_true", help="不 patch HeapCompact（默认 patch 规避崩溃）")
     parser.add_argument("--timeout", type=int, default=180, help="单轮测量超时秒数（默认 180）")
     parser.add_argument("--single-shot", action="store_true", help="内部模式：仅跑一轮测量（供主控子进程调用）")

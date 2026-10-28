@@ -110,10 +110,6 @@ class PluginHostService(QObject):
         self._agent_manager = AgentManager.get_instance(None, self._host_hook_manager)
 
         self._hot_reload_requested.connect(self._on_hot_reload_requested)
-        # 连接收敛标志：PySide6 无 PyQt5 的 receivers(SignalInstance) 写法，
-        # _start_plugin_watcher 以此判定是否已连（测试夹具 __new__ 绕过 __init__
-        # 时无此属性，用 getattr 默认 False 补连）
-        self._hot_reload_wired = True
 
         # 生命周期标志（原 backend 引用计数体系随寄生一起废除——服务与 app 同寿）
         # [T31] 延迟队列 + LSP 幂等兜底（LspManager.initialize 的守卫在传入
@@ -591,14 +587,11 @@ class PluginHostService(QObject):
         logger.info(f"[PluginHost] 启动插件文件变更监听: {watch_paths}")
 
         # 连接收敛（守卫式）：信号连接只建一次——__init__（:112）已连则跳过，
-        # watcher 重启反复进入本方法不会叠加连接（重复 connect 同一 bound
-        # method 不去重，emit 一次执行 N 次）。PySide6 的 receivers() 仅收
-        # 字符串签名（PyQt5 收 SignalInstance 的写法直接 TypeError），改用
-        # 实例标志位；夹具用 __new__ 绕过 __init__ 的场景由 getattr 默认
-        # False 由此建立唯一连接。
-        if not getattr(self, "_hot_reload_wired", False):
+        # watcher 重启反复进入本方法不会叠加连接（PyQt 重复 connect 同一 bound
+        # method 不去重，emit 一次执行 N 次）。receivers==0 的场景（如测试夹具
+        # 用 __new__ 绕过 __init__）由此建立唯一连接。
+        if self.receivers(self._hot_reload_requested) == 0:
             self._hot_reload_requested.connect(self._on_hot_reload_requested)
-            self._hot_reload_wired = True
 
         # 预计算插件路径 → 插件名映射（用于快速定位变更文件所属插件）
         plugin_prefixes = self._build_plugin_path_index()
@@ -1400,7 +1393,7 @@ class PluginHostService(QObject):
         """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）
 
         修 #2 timer：改用 QTimer.singleShot 静态方法，不持有 QTimer 实例
-        （PySide6 下即便 stop+deleteLater 仍残留 +1 QTimer，singleShot 零实例）。
+        （PyQt5 下即便 stop+deleteLater 仍残留 +1 QTimer，singleShot 零实例）。
         用 _reload_pending 守卫保留"风暴期合并"语义：多次调用只在首个 300ms 后触发一次。
         """
         if getattr(self, "_reload_pending", False):
@@ -1504,9 +1497,11 @@ class PluginHostService(QObject):
             # 3. 命令
             if comps.get("commands") and not result["commands"]:
                 try:
-                    from app.core.commands.builtin_commands import reload_all_commands
+                    # #25 问题 3：新装插件高频路径改按 source 精准重载，
+                    # 不再全表重建 + 全窗口快捷键重建（~2500ms 级）
+                    from app.core.commands.builtin_commands import reload_plugin_commands
 
-                    reload_all_commands()
+                    reload_plugin_commands(plugin_name)
                     result["commands"] = True
                 except (ImportError, Exception) as e:
                     logger.error(f"[PluginHost] Failed to reload commands: {e}")

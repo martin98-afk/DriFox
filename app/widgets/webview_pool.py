@@ -203,7 +203,7 @@ class WebViewPool:
             return False
         if sip is not None:
             try:
-                if not sip.isValid(widget):
+                if shiboken6.isValid(widget):
                     return False
             except Exception:
                 return False

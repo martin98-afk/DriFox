@@ -123,7 +123,7 @@ def _live_seq_shortcuts(win: QWidget, seq: str) -> int:
     count = 0
     for qs in _window_cache(win):
         try:
-            if not sip.isValid(qs):
+            if shiboken6.isValid(qs):
                 continue
             if qs.key()[0] == target:
                 count += 1

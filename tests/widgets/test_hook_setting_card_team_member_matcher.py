@@ -17,7 +17,7 @@ import sys
 from PySide6.QtCore import Qt
 Qt.AA_ShareOpenGLContexts
 try:
-    from PySide6.QtWebEngineCore import QWebEnginePage# noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEnginePage  # noqa: F401
 except Exception:
     pass
 

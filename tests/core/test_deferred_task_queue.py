@@ -23,7 +23,7 @@ from app.core.infra.deferred_task_queue import DeferredTaskQueue
 def _drain(ms):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def test_order_constraint_with_out_of_order_registration(qapp):

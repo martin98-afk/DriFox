@@ -475,7 +475,7 @@ def _run_oneshot(backend, args):
         sys.exit(1)
 
     # 等待完成
-    event_loop.exec()
+    event_loop.exec_()
 
 
 def _run_repl(backend, args):
@@ -591,12 +591,12 @@ def _run_doctor():
     print(f"平台:     {platform.system()} {platform.release()}")
     print(f"架构:     {platform.machine()}")
 
-    # 检查 PySide6
+    # 检查 PyQt5
     try:
         from PySide6.QtCore import QT_VERSION_STR
-        print(f"PySide6:    {QT_VERSION_STR} ✓")
+        print(f"PyQt5:    {QT_VERSION_STR} ✓")
     except ImportError:
-        print("PySide6:    ✗ 未安装")
+        print("PyQt5:    ✗ 未安装")
 
     # 检查关键依赖
     deps = [

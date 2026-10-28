@@ -1,6 +1,6 @@
 # 可复用控件 — 图表组件
 
-> 来自 `context-usage-stats` 等项目提炼的 PySide6 `QPainter` 自绘图表。
+> 来自 `context-usage-stats` 等项目提炼的 PyQt5 `QPainter` 自绘图表。
 > 索引和设计原则见 `widgets.md`。
 > 默认配色 `_default_chart_colors()` 见 `widgets-theme.md §3`。
 
@@ -866,13 +866,13 @@ def leaveEvent(self, event):
 - **`QToolTip.showText(event.globalPos(), text, self)`**：第三个参数 `self` 将 tooltip 关联到当前 widget，widget 隐藏/销毁时 tooltip 自动消失
 - **`leaveEvent` 必须重置 `_hovered_index = -1`**：否则鼠标离开后高亮仍停留在最后一个悬停位置
 - **`super().mouseMoveEvent(event)`**：必须在末尾调用，确保 Qt 事件链完整
-- **导入路径**：`QToolTip` 从 `PySide6.QtWidgets` 导入，可在方法体内局部 import 避免顶层依赖
+- **导入路径**：`QToolTip` 从 `PyQt5.QtWidgets` 导入，可在方法体内局部 import 避免顶层依赖
 
 ## 七、依赖关系
 
 ```
 widgets-charts.md
-├─ 依赖 PySide6.QtCore / QtGui / QtWidgets（含 QToolTip）
+├─ 依赖 PyQt5.QtCore / QtGui / QtWidgets（含 QToolTip）
 ├─ 依赖 qfluentwidgets（仅 _ProjectBarWidget 间接通过 paintEvent）
 ├─ 依赖 widgets-utils.md: _format_number
 └─ 依赖 widgets-theme.md: _default_chart_colors()

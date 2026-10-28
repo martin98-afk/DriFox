@@ -132,7 +132,7 @@ def test_fetch_hook_config_uses_declared_auth(registry, card, monkeypatch):
     c.fetchSuccess.connect(loop.quit)
     c.fetchFailed.connect(loop.quit)
     QTimer.singleShot(3000, loop.quit)
-    loop.exec()
+    loop.exec_()
 
     assert "config" in captured, "hook 未被调用"
     assert captured["config"]["认证方式"] == "bce", "hook_config 必须带插件声明的认证方式"

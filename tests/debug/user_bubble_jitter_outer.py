@@ -121,7 +121,7 @@ def run(app, text: str, cap: int, vw: int, vh: int) -> dict:
     t.setInterval(SAMPLE_MS)
     t.timeout.connect(tick)
     t.start()
-    loop.exec()
+    loop.exec_()
     t.stop()
 
     def flips(states, key):

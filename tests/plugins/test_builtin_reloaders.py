@@ -194,21 +194,26 @@ def test_delete_lsp_path_removes_plugin_servers(monkeypatch):
     assert ok is True  # removed > 0
 
 
-def test_delete_commands_path_reloads_all_commands(monkeypatch):
-    """commands 删除分支：调 reload_all_commands（与 reload 路径一致）。"""
-    all_calls: list[int] = []
+def test_commands_reload_uses_precise_plugin_reload(monkeypatch):
+    """commands 增删分支均走 reload_plugin_commands（方案 A：按 source 精准重载）。
 
-    # builtin_reloaders 在模块顶部已 import reload_all_commands — 直接 patch 模块属性
+    删除路径（plugin=None）同样只传插件名——插件目录已不存在时
+    get_command_files_for_plugin 返回空，天然只清不注册，无需特判。
+    """
+    precise_calls: list[str] = []
+
     monkeypatch.setattr(
         builtin_reloaders,
-        "reload_all_commands",
-        lambda: all_calls.append(1),
+        "reload_plugin_commands",
+        lambda name: precise_calls.append(name) or 0,
     )
+    # 全量入口已从本模块 import 中移除（commands reloader 不再触碰全表重建）
+    assert not hasattr(builtin_reloaders, "reload_all_commands")
 
     reg = _make_reg()
     ok = reg.reload(ReloadContext("p5", plugin=None, component="commands", is_new_plugin=False))
 
-    assert all_calls == [1]
+    assert precise_calls == ["p5"]
     assert ok is True
 
 

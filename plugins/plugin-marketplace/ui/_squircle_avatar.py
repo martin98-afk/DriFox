@@ -11,7 +11,7 @@
 闭包约束（来自 plugin-manager 注释）：
 - 不导入 app.core 或 app.widgets
 - 不导入 app.utils.utils（避免与 Settings 单例耦合）
-- 仅依赖 PySide6 + stdlib
+- 仅依赖 PyQt5 + stdlib
 
 配色与宿主同源：色彩算法与 ``app.utils.project_meta.get_project_color`` 保持
 一致（含主题感知明度）。为避免模块级耦合，走**函数内延迟导入 + 本地回退**：
@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 from PySide6.QtCore import Qt, QUrl, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PySide6.QtSvgWidgets import QSvgWidget
+from PySide6.QtSvg import QSvgWidget
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import isDarkTheme
 

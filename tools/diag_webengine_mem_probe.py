@@ -279,7 +279,7 @@ def main():
             pass
     _pump(1.0)
     QTimer.singleShot(200, app.quit)
-    app.exec()
+    app.exec_()
 
 
 if __name__ == "__main__":

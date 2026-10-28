@@ -48,7 +48,7 @@ def _load_mods():
 def _drain_events(ms: int):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 # ── scanner 层 ──

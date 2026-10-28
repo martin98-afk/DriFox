@@ -26,7 +26,7 @@ from app.widgets.cards.card_container import CardContainer, ContainerType  # noq
 def _pump(ms=300):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def _card(min_w, min_h):

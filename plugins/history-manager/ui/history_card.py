@@ -2348,7 +2348,7 @@ class HistoryCard(QWidget):
             dialog = ImportOptionDialog(parent=self.window())
             dialog.fileImportRequested.connect(self._on_import_from_file)
             dialog.urlImportRequested.connect(self._on_import_from_url)
-            dialog.exec()
+            dialog.exec_()
 
         return handle_import
 
@@ -2374,7 +2374,7 @@ class HistoryCard(QWidget):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._on_url_import_confirmed)
-        dialog.exec()
+        dialog.exec_()
 
     def _on_url_import_confirmed(self, url: str):
         """URL确认后的导入处理（请求在后台线程执行，不阻塞 UI）"""
@@ -2397,7 +2397,6 @@ class HistoryCard(QWidget):
         """后台导入线程完成后的回调（主线程执行）"""
         if error:
             from qfluentwidgets import InfoBar, InfoBarPosition
-
             # 挂到宿主顶层窗口（未就绪时兜底卡片所在窗口）
             _host = _caps("window.host")
             bar_parent = (_host() if _host else None) or self.window()

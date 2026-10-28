@@ -184,7 +184,7 @@ class ToolExecutor:
             # 如果对象已删除，尝试访问 sip 会有异常
             import shiboken6 as sip
 
-            if not sip.isValid(self._builtin_tools):
+            if shiboken6.isValid(self._builtin_tools):
                 return False
         except Exception:
             pass

@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 import orjson
 import orjson as json
 from loguru import logger
-from PySide6.QtCore import QCoreApplication, QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
@@ -1946,36 +1946,6 @@ class SubAgentManager(QObject):
         else:
             signal.connect(callback, connection_type)
 
-    def _dispatch_executor_finished(self, task_id: str, result: str):
-        """executor finished_with_result → 外部 on_finished 回调（queued 回主线程后执行）"""
-        executor = self._running_tasks.get(task_id)
-        cb = getattr(executor, "_cb_finished", None) if executor else None
-        if cb:
-            try:
-                cb(task_id, result)
-            except Exception as e:
-                logger.error(f"[SubAgentManager] on_finished 回调异常: task={task_id[:8]}: {e}", exc_info=True)
-
-    def _dispatch_executor_error(self, task_id: str, error: str):
-        """executor error_occurred → 外部 on_error 回调（queued 回主线程后执行）"""
-        executor = self._running_tasks.get(task_id)
-        cb = getattr(executor, "_cb_error", None) if executor else None
-        if cb:
-            try:
-                cb(task_id, error)
-            except Exception as e:
-                logger.error(f"[SubAgentManager] on_error 回调异常: task={task_id[:8]}: {e}", exc_info=True)
-
-    def _dispatch_executor_progress(self, task_id: str, message: str):
-        """executor progress_updated → 外部 on_progress 回调（queued 回主线程后执行）"""
-        executor = self._running_tasks.get(task_id)
-        cb = getattr(executor, "_cb_progress", None) if executor else None
-        if cb:
-            try:
-                cb(task_id, message)
-            except Exception as e:
-                logger.error(f"[SubAgentManager] on_progress 回调异常: task={task_id[:8]}: {e}", exc_info=True)
-
     def execute_task(
         self,
         task_id: str,
@@ -2113,20 +2083,12 @@ class SubAgentManager(QObject):
             if executor_ref is not None:
                 executor_ref["executor"] = executor
 
-            # ⚠️ 外部回调不能直接 connect（lambda/closure 的 receiver 归属 sender=executor，
-            # 而 executor 在 ChatWorker 子线程创建 → queued 投到无事件循环的线程 → 永不执行）。
-            # 统一存到 executor 上，由 Manager 的 bound method（receiver=主线程）分发。
-            # connection_type 透传给 dispatch 连接：DirectConnection 时回调立即在 emit 线程执行
-            #（同步等待型调用方语义不变）。
-            executor._cb_finished = on_finished
-            executor._cb_error = on_error
-            executor._cb_progress = on_progress
             if on_finished:
-                self._connect_cb(executor.finished_with_result, self._dispatch_executor_finished, connection_type)
+                self._connect_cb(executor.finished_with_result, on_finished, connection_type)
             if on_error:
-                self._connect_cb(executor.error_occurred, self._dispatch_executor_error, connection_type)
+                self._connect_cb(executor.error_occurred, on_error, connection_type)
             if on_progress:
-                self._connect_cb(executor.progress_updated, self._dispatch_executor_progress, connection_type)
+                self._connect_cb(executor.progress_updated, on_progress, connection_type)
 
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)

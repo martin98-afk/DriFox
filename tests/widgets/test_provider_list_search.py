@@ -98,7 +98,7 @@ def qtbot_wait(timer, timeout_ms: int = 600):
     loop = QEventLoop()
     timer.timeout.connect(loop.quit)
     QTimer.singleShot(timeout_ms, loop.quit)
-    loop.exec()
+    loop.exec_()
     # 让 timeout 槽（含 Qt 队列投递）跑完
     QApplication.processEvents()
     assert not timer.isActive(), "定时器未在超时前停表"

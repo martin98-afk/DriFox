@@ -2,7 +2,7 @@
 """基准测试公共工具
 
 所有基准脚本共用：
-- 数据隔离：开发环境 get_app_data_dir() = cwd/.drifox6（含 sessions.db），
+- 数据隔离：开发环境 get_app_data_dir() = cwd/.drifox（含 sessions.db），
   基准运行前 chdir 到独立临时目录，避免污染真实用户数据。
 - 采样：psutil RSS + tracemalloc
 - 分析：线性回归斜率、Top-N 大对象

@@ -97,7 +97,7 @@ class ResizeOrchestrator:
         if sip is None:
             return
         for store in (self._dirty, self._paused):
-            for key in [k for k, w in store.items() if not sip.isValid(w)]:
+            for key in [k for k, w in store.items() if shiboken6.isValid(w)]:
                 store.pop(key, None)
 
     def mark_paused(self, widget: Any) -> None:

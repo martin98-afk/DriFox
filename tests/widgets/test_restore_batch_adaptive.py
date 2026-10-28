@@ -97,7 +97,7 @@ def test_visible_cards_go_through_queue_not_restored_at_once(qapp, monkeypatch):
     （不与视口内卡争抢 Chromium reflow），等滚动接近时由
     `_restore_card_now` 即时恢复。
     """
-    from PySide6.QtCore import QRect, QTimer
+    from PySide6.QtCore import QTimer
 
     cards = [_StubCard(i * 150) for i in range(12)]
     win = _make_window(cards)

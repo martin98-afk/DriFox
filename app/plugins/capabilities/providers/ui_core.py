@@ -646,7 +646,7 @@ def _ui_dialog(host: Any):
         dlg = ConfirmDialog(title, content, confirm_text=confirm_text, parent=_parent())
         result = {"ok": False}
         dlg.confirmed.connect(lambda: result.__setitem__("ok", True))
-        dlg.exec()
+        dlg.exec_()
         return bool(result["ok"])
 
     def prompt(title: str, hint: str = "", default_text: str = "") -> object:
@@ -655,7 +655,7 @@ def _ui_dialog(host: Any):
         dlg = SingleInputDialog(title, hint=hint, default_text=default_text, parent=_parent())
         box = {}
         dlg.confirmed.connect(lambda text: box.__setitem__("text", text))
-        dlg.exec()
+        dlg.exec_()
         return box.get("text")
 
     def pick_file(title: str = "选择文件", start_dir: str = "", filter: str = "") -> str:
@@ -1116,6 +1116,16 @@ def register(registry) -> None:
     # 进程级
     reg.register("cache.purge", _cache_purge, surface="ui", owner="core:ui")
     reg.register("process.start", process_core.process_start, surface="ui", owner="core:ui")
+    # process.start 首启确认框从插件后台线程走 _dispatch：_Dispatcher 单例必须
+    # 在此（主线程）预热，否则由后台线程首建 QObject 再 moveToThread 会损坏
+    # Qt 同步状态（实测确认框模态循环内堆崩溃，magpie 0.5.2/0.5.3）。
+    # QApplication 未建（极端启动序）时静默跳过——_confirm_dialog 内还有兜底预热。
+    try:
+        from app.plugins.capabilities.providers.ui_bridge import preheat_main_thread_dispatcher
+
+        preheat_main_thread_dispatcher()
+    except RuntimeError:
+        pass
     # 配置（按 key 读非敏感标量）
     reg.register("config.read", _config_read, surface="ui", owner="core:ui")
     # 网络 / 云同步（host 无关实现，与 tool_core 共用 net_sync）

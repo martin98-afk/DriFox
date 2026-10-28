@@ -27,7 +27,6 @@ import time as _time
 from typing import Set
 
 from PySide6.QtCore import QObject, QThread
-import shiboken6
 
 # ── 全局隐藏 QObject ──────────────────────────────────
 # 所有 QThread 的 parent 被重定向到此对象，生命周期 = 应用进程。
@@ -112,13 +111,17 @@ def install_guard() -> None:
     install_guard._patched = _safe_init  # type: ignore[attr-defined]
 
     # ── 族① 根治：退出期 PyQt 不得销毁仍被引用的 C++ 对象 ──
-    # PyQt5 默认在解释器 shutdown 阶段 delete 所有仍被 Python 拥有的
+    # 默认开启时，解释器 shutdown 阶段 PyQt 会 delete 所有仍被 Python 拥有的
     # QObject：anchor 级联 delete children（含 finalize 超时被放生、仍在运行
     # 的 worker）→ "QThread: Destroyed while thread is still running" qFatal
-    # → 0xC0000409 闪退，需 sip.setdestroyonexit(False) 关闭。
-    # PySide6/shiboken6 无全局等效 API（实测默认行为不触发该闪退形态），
-    # 无需处理；保留本说明防回归误判。需要落盘/收尾的资源都走
-    # atexit/closeEvent 显式路径，不依赖析构。
+    # → 0xC0000409 闪退。关闭后这些对象直接泄漏到进程死亡，由内核回收；
+    # 需要落盘/收尾的资源都走 atexit/closeEvent 显式路径，不依赖析构。
+    try:
+        import shiboken6 as _sip_mod
+
+        _sip_mod.setdestroyonexit(False)
+    except Exception:  # noqa: BLE001
+        pass
 
     # ── 退出期清理注册（幂等，模块级标志防重复注册）──
     global _atexit_registered
@@ -141,11 +144,13 @@ _atexit_registered = False
 def _cpp_alive(obj: QObject) -> bool:
     """探测底层 C++ 对象是否仍存活。
 
-    isinstance 只校验 Python 包装器的类型，不校验 shiboken 内部的 C++ 指针；
+    isinstance 只校验 Python 包装器的类型，不校验 sip 内部的 C++ 指针；
     包装器可以完全合法，而它指向的对象已经被 Qt 在主线程删掉了。
     """
     try:
-        return shiboken6.isValid(obj)
+        import shiboken6 as _sip
+
+        return not _shiboken6.isValid(obj)
     except Exception:
         return False
 
@@ -164,8 +169,8 @@ def _scan_stuck_threads() -> None:
         # ★ 本函数跑在纯 Python 线程里，下面的 isRunning() 要穿透到 C++ 对象；
         #   而 _running_threads 持强引用防的是 Python GC，挡不住主线程把 C++ 对象
         #   析构。两条路径必踩空：① snapshot 拷完之后、调用之前主线程销毁该线程；
-        #   ② 销毁未触发 destroyed 回调，条目永久滞留 → 每轮扫描稳定抛 RuntimeError。
-        #   故：探活先行 + 调用兜底，失效条目就地剔除。
+        #   ② 销毁未触发 destroyed 回调，条目永久滞留 → 每轮扫描稳定抛 RuntimeError，
+        #   看门狗线程整个死掉。故：探活先行 + 调用兑底，失效条目就地剔除。
         if not _cpp_alive(thread):
             with _watchdog_lock:
                 _running_threads.discard(thread)

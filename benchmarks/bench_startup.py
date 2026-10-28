@@ -229,7 +229,7 @@ def run_inner() -> dict:
         logger.exception("[BENCH] init_shared_web_profile 失败")
 
     QTimer.singleShot(1000, _stage1)
-    app.exec()
+    app.exec_()
 
     # 清理（走 backend cleanup 释放路径）
     try:

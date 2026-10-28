@@ -476,7 +476,7 @@ def _styled_cleaner_confirm(
         no_text=no_text,
         default_yes=default_yes,
     )
-    dialog.exec()
+    dialog.exec_()
     return dialog._result
 
 
@@ -513,4 +513,4 @@ def _styled_cleaner_info(parent: QWidget, title: str, text: str, *, color_source
         card_bg=card_bg,
         border_c=border_c,
     )
-    dialog.exec()
+    dialog.exec_()

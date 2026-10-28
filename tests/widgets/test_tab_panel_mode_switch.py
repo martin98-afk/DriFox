@@ -19,11 +19,11 @@ def panel(qtbot):
 
 @pytest.fixture
 def dialog_factory():
-    """屏蔽开发期提醒弹窗（InfoDialog.exec）以免阻塞测试。
+    """屏蔽开发期提醒弹窗（InfoDialog.exec_）以免阻塞测试。
 
     返回 (factory, instances)：
     - factory：patch 后的 InfoDialog 类，断言调用次数/参数
-    - instances：list，记录历次返回的 dialog mock；exec.called 表示「真正弹出过」
+    - instances：list，记录历次返回的 dialog mock；exec_.called 表示「真正弹出过」
     """
     instances: list = []
 
@@ -55,7 +55,7 @@ def test_switch_to_tree_mode_shows_tree(panel, dialog_factory):
     assert _shown(panel._tree_scroll, panel) is True
     assert _shown(panel._scroll_area, panel) is False
     assert factory.call_count == 1, "切到工作区树模式应触发一次开发期提醒弹窗"
-    assert len(instances) == 1 and instances[0].exec.called, "弹窗应被 exec() 弹出"
+    assert len(instances) == 1 and instances[0].exec_.called, "弹窗应被 exec_() 弹出"
 
 
 def test_switch_back_to_list_mode_shows_list(panel, dialog_factory):

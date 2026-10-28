@@ -17,7 +17,7 @@ from PySide6.QtCore import QObject, QEvent, Qt
 from PySide6.QtWidgets import (QApplication, QLabel, QScrollArea, QVBoxLayout,
                              QWidget)
 
-from PySide6.QtWebEngineWidgets import QWebEngineView# noqa: E402
+from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
 app = QApplication([])
 user32 = ctypes.windll.user32

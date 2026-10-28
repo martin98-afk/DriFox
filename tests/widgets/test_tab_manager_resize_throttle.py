@@ -141,10 +141,10 @@ class TestWindowsResizeBlockingNotification:
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
 
-        # 让 _sip.isValid(win) 返回 False（默认会被 MagicMock 拦截返回 truthy）
+        # 让 _shiboken6.isValid(win) 返回 False（默认会被 MagicMock 拦截返回 truthy）
         import app.widgets.tab_manager_window as tm_module
 
-        monkeypatch.setattr(tm_module._sip, "isValid", lambda w: True)
+        monkeypatch.setattr(tm_module._sip, "isdeleted", lambda w: False)
 
         # 准备两个 mock 窗口：跟踪 _set_external_resize_blocking 调用
         win1 = MagicMock()
@@ -169,10 +169,10 @@ class TestWindowsResizeBlockingNotification:
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
 
-        # 让 _sip.isValid(win) 返回 False（否则 MagicMock 返回 truthy → 跳过）
+        # 让 _shiboken6.isValid(win) 返回 False（否则 MagicMock 返回 truthy → 跳过）
         import app.widgets.tab_manager_window as tm_module
 
-        monkeypatch.setattr(tm_module._sip, "isValid", lambda w: True)
+        monkeypatch.setattr(tm_module._sip, "isdeleted", lambda w: False)
 
         # mock 嵌入窗口
         win = MagicMock()

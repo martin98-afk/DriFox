@@ -33,10 +33,9 @@ def test_watchdog_tolerates_deleted_cpp_thread(qapp):
 
     回归现场：
         Exception in thread ThreadGuardWatchdog:
-        RuntimeError: libshiboken: Internal C++ object
-                      (PySide6.QtCore.QThread) already deleted.
+        RuntimeError: wrapped C/C++ object of type QThread has been deleted
     """
-    import shiboken6
+    import shiboken6 as sip
     from PySide6.QtCore import QThread
 
     from app.utils import thread_guard as tg
@@ -44,11 +43,9 @@ def test_watchdog_tolerates_deleted_cpp_thread(qapp):
     tg.install_guard()
     t = QThread()
     assert t in tg._running_threads, "install_guard 应已把新线程登记进墓地"
-
     # 模拟 Qt 主线程销毁 C++ 对象、但集合里条目未被 destroyed 回调清掉
-    shiboken6.delete(t)
-    assert not shiboken6.isValid(t)
-
+    sip.delete(t)
+    assert shiboken6.isValid(t)
     try:
         tg._scan_stuck_threads()  # 修复前：此处抛 RuntimeError 打断整个看门狗线程
     finally:

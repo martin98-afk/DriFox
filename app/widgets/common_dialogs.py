@@ -34,7 +34,7 @@ class ConfirmDialog(MaskDialogBase):
         )
         dialog.confirmed.connect(lambda: ...)
         dialog.cancelled.connect(lambda: ...)
-        dialog.exec()
+        dialog.exec_()
     """
 
     confirmed = Signal()
@@ -222,7 +222,7 @@ class SingleInputDialog(MaskDialogBase):
             parent=parent,
         )
         dialog.confirmed.connect(handler)
-        dialog.exec()
+        dialog.exec_()
     """
 
     # 通用信号
@@ -566,7 +566,7 @@ class ChoiceDialog(MaskDialogBase):
             parent=self.window(),
         )
         dialog.chosen.connect(lambda key: ...)   # key 为选项标识
-        dialog.exec()
+        dialog.exec_()
     """
 
     chosen = Signal(str)

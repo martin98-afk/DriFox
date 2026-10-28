@@ -1542,7 +1542,7 @@ class PluginManager:
         # 自动设置卡：扫描期只登记，不 import UI 链（见 __init__ 的 _pending_config_cards
         # 注释）。真正的 UIPluginRegistry.register_settings_card 由 replay_config_cards()
         # 在 main_widget._after_plugins_loaded 统一回放（UI 栈已就绪、插件卡分区构建前）。
-        # getattr 兼底：测试常用 PluginManager.__new__ 绕过 __init__（本方法不依赖实例状态）
+        # getattr 兜底：测试常用 PluginManager.__new__ 绕过 __init__（本方法不依赖实例状态）
         pending = getattr(self, "_pending_config_cards", None)
         if pending is None:
             pending = self._pending_config_cards = {}

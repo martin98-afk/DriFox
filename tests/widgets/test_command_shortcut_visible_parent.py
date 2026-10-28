@@ -12,10 +12,10 @@
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QShortcut
 from PySide6.QtWidgets import QWidget, QStackedWidget, QApplication
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QShortcut
 
 
 def _make_hierarchy():

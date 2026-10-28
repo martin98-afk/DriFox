@@ -79,7 +79,7 @@ def run_trial(app, text: str, cap: int) -> dict:
     t.setInterval(SAMPLE_MS)
     t.timeout.connect(tick)
     t.start()
-    loop.exec()
+    loop.exec_()
     t.stop()
 
     sb_flips = sum(

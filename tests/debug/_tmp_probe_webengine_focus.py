@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget  #
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 app = QApplication.instance() or QApplication([])
 
-from PySide6.QtWebEngineWidgets import QWebEngineView# noqa: E402
+from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
 
 def p(*a):
@@ -123,4 +123,4 @@ def on_load(ok):
 viewers[0].loadFinished.connect(on_load)
 
 QTimer.singleShot(8000, lambda: (p("timeout"), sys.stdout.flush(), os._exit(2)))
-app.exec()
+app.exec_()

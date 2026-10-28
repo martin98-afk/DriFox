@@ -1089,7 +1089,7 @@ class ProviderEditCard(QWidget):
             )
             confirmed = {}
             dialog.confirmed.connect(lambda: confirmed.update(yes=True))
-            dialog.exec()
+            dialog.exec_()
             if not confirmed.get("yes"):
                 return
 

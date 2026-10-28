@@ -1179,7 +1179,7 @@ class OpenAIChatWorker(QThread):
 
             # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
             # 注意：从 ThreadPoolExecutor 线程访问 Signal 时，
-            # 某些 PySide6 版本可能返回 None，所以需要保护性发射。
+            # 某些 PyQt5 版本可能返回 None，所以需要保护性发射。
             if signal is not None:
                 try:
                     signal.emit(*args)

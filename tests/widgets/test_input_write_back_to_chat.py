@@ -3,11 +3,8 @@
 
 场景（2026-10-25 magpie「让 AI 帮我装」实测）：Tab 模式 full 卡覆盖对话区时
 caps_for 解析的 host 是 TabManagerWindow——其上无 input_area（输入区在活跃
-对话窗口），旧实现直接 raise「输入框不可用」；即便写入成功，用户停留在覆盖页
-也看不到写入结果。
-
-第二个场景（插件市场 git 缺失引导）：host 是 MainWidget（有 input_area，
-但回对话入口在 TabManagerWindow 上），只查 host 等于不切页。
+对话窗口），旧实现直接 raise「输入框不可用」；即便写入成功，用户停留在覆盖
+页也看不到写入结果。
 """
 import sys
 

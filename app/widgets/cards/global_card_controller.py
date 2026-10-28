@@ -529,7 +529,7 @@ class GlobalCardController:
                 confirm_text="知道了",
                 parent=self._tab_manager,
             )
-            _dialog.exec()
+            _dialog.exec_()
             return
 
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)

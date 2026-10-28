@@ -42,6 +42,7 @@ from markdown import Markdown
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtCore import (
     QByteArray,
     QEasingCurve,
@@ -70,7 +71,6 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -310,11 +310,6 @@ class MessageCard(SimpleCardWidget):
     # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
     _LIVE_GAP_CAP_S = 2.0
 
-    # （自愈闸门 _STREAM_END_GUARD_S / _guard_stream_end 已移除，2026-10-23：
-    # 阈值式兜底无法区分「思考静默」与「真死流」，思考期误触发致高度突变；
-    # 改由 finish 链路按状态找卡收尾 + cleanup 哨兵定位删除者，见
-    # main_widget._on_stream_finished / MessageCard.cleanup。）
-
     @property
     def _renderer_pid(self) -> int:
         """renderer 进程 PID（转发 viewer；B4 强回收链路读 card._renderer_pid）。
@@ -378,9 +373,6 @@ class MessageCard(SimpleCardWidget):
         # 是前者工具区保持展开，后者折叠（避免长会话加载时信息过载）。
         # 缺失此标志时，本轮消息在虚拟滚动回收重建后会被误判为历史而突然折叠。
         self._streaming_finished = False
-        # 幂等收尾标记：本轮流式是否已 finish_streaming（入口守卫用，
-        # start_streaming_anim 开新一轮时重置，防「扫尾兜底 + 正路」双收竞态）
-        self._finish_streamed_for_round = False
         self._retrying = False  # 重试模式标志
         # 卡片底部内嵌任务看板（懒创建：首个非空任务到达时才建，挂气泡内正文下方）
         self._todo_panel = None
@@ -1436,14 +1428,6 @@ class MessageCard(SimpleCardWidget):
             return
         width = host.width()
         if width <= 0:
-            # 🐛 修复（首窗欢迎卡片底部空白）：布局未收敛（启动期首窗 / 隐藏页
-            # 切回补渲）时宿主宽度仍是 0，此处直接 return 后**再无重试路径**——
-            # 只有 resizeEvent 会重算，而用户不动窗口是常态。宿主高度于是永久
-            # 停在构造初始值（与真实折行行数不符），表现为卡片底部空白条；
-            # 新建会话重建卡片时布局早已收敛，故「刷新才恢复」。
-            # 宽度未就位改为预约下一拍重试（绑定卡片生命周期，卡片先销毁则
-            # 定时器随之析构，不会对悬垂控件取几何）。
-            self._schedule_welcome_tab_host_height()
             return
         try:
             h = bar.heightForWidth(width)
@@ -1452,29 +1436,6 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             self._welcome_tab_host = None
             self._welcome_tabs_bar_layout = None
-
-    def _schedule_welcome_tab_host_height(self) -> None:
-        """宽度未就位时预约一拍重算 tab 条宿主高度（见 _sync_welcome_tab_host_height）。
-
-        ⚠️ 用绑定 card 生命周期的 QTimer 而非裸 ``QTimer.singleShot``：延迟窗口内
-        卡片被销毁（会话切换 / 标签页关闭）时 singleShot 仍会回调，对已释放控件
-        取几何 → ACCESS_VIOLATION（同 _schedule_welcome_indicator_snap 的教训）。
-        """
-        if getattr(self, "_welcome_tab_host_height_timer_active", False):
-            return
-        self._welcome_tab_host_height_timer_active = True
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-
-        def _run() -> None:
-            self._welcome_tab_host_height_timer_active = False
-            try:
-                self._sync_welcome_tab_host_height()
-            finally:
-                timer.deleteLater()
-
-        timer.timeout.connect(_run)
-        timer.start(0)
 
     def _welcome_tab_active_geometry(self):
         """当前激活 tab 按钮的几何（无激活项 / 控件已销毁返回 None）"""
@@ -2200,7 +2161,7 @@ class MessageCard(SimpleCardWidget):
             pixmap.loadFromData(QByteArray.fromBase64(data_uri.split("base64,", 1)[-1].encode("ascii")))
         if pixmap.isNull():
             return
-        _ImagePreviewDialog(pixmap, parent=self.window()).exec()
+        _ImagePreviewDialog(pixmap, parent=self.window()).exec_()
 
     def _ensure_user_viewer(self) -> None:
         """懒创建用户气泡 PlainTextViewer（修 #2）。
@@ -2365,8 +2326,6 @@ class MessageCard(SimpleCardWidget):
         # 新一轮开始：清除上一轮的"已完成流式"标记，使本轮重新按流式语义
         # 走展开路径（同 _is_history 的修正，见下方）。
         self._streaming_finished = False
-        # 幂等收尾标记重置：新一轮允许重新 finish_streaming（见其入口守卫）
-        self._finish_streamed_for_round = False
         # 🐛 修复"工具结果冒出又消失"：新轮流式开始时恢复 viewer 流式模式，
         # 避免 finish_streaming 后 viewer._streaming=False 导致工具结果到达时
         # append_tool_result 跳过 callback 更新，被后续 _perform_update 覆盖。
@@ -2388,8 +2347,6 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _update_anim(self):
-        # （自愈闸门已移除：阈值兜底无法区分思考静默与真死流；结束收尾改由
-        # finish 链路按状态找卡，见 main_widget._on_stream_finished。）
         # [V1] 可见性门控：隐藏 tab 不执行动画帧（避免隐藏页每 50ms 空转 update()）。
         # 暂停期间重启时钟：动画位置由累积时间 _anim_t_ms 决定，不推进即停在原位置，
         # 恢复后从原位置继续，无视觉跳变；下一拍定时器自动续跑，无需显式重启。
@@ -3157,17 +3114,12 @@ class MessageCard(SimpleCardWidget):
             self._start_finish_height_anim(current_height, target_height)
             return
 
-        # 非流式大高度变化（折叠/展开 / 终渲染收敛 / 旧卡滚回视口重渲）：
-        # 跳过容器的 200ms maximumHeight 动画，避免 AlignBottom 布局中
+        # 非流式大高度变化（折叠/展开）：一次性设 viewer 最终高度，
+        # 但跳过容器的 200ms maximumHeight 动画，避免 AlignBottom 布局中
         # 卡片位置因容器动画与 viewer 高度变化不同步而"闪现"。
         # card_container 检查 NO_ANIMATION_PROP → 直接 snap 到目标高度。
-        # 🐛 步长限幅（2026-10-24 黑条残留）：此前一次性落地无上限，虚拟滚动
-        # 重建重渲 / 折叠展开一次跳数百 px → Qt6 合成路径旧帧拉伸（黑条）。
-        # 改走 _apply_height_smooth：≤160px 当拍直接落（行为不变），>160px
-        # 限幅分帧（每帧 ≤160px，视觉阈值下）；noContainerAnimation 仍按
-        # 原节奏 50ms 后清除，分帧（16ms/帧）在清除前完成，语义不变。
         self.setProperty("noContainerAnimation", True)
-        self._apply_height_smooth(target_height)
+        self._apply_viewer_height(target_height)
         # 延迟清除标志，等容器 snap 完成。
         # 🐛 捕获 self 的裸 lambda 会在卡片被虚拟滚动回收销毁后仍执行 →
         # 「wrapped C/C++ object of type MessageCard has been deleted」刷屏。
@@ -3316,23 +3268,8 @@ class MessageCard(SimpleCardWidget):
                 # [R4-A] cap 改用常量 STREAM_HEIGHT_TRACK_MAX_FACTOR（0.90）：原先硬编码
                 # 0.85 与基线 0.84 只差 0.01，自适应提速等于失效。
                 factor = min(STREAM_HEIGHT_TRACK_MAX_FACTOR, factor + STREAM_HEIGHT_TRACK_BOOST)
-            # 🐛 步长限幅（2026-10-23 拉伸黑条根因）：比例逼近的第一拍就是
-            # diff×0.84 的大跳（流式 burst 涨 400px → 一拍跳 350px）→ Chromium
-            # 新帧未到时 Qt 把旧帧纹理拉伸填满新几何 → 文字竖向拉长的黑条一闪
-            # （Qt6 合成路径特有，Qt5 无；2026-09-13 逐帧校准的视觉阈值 =
-            # _SMOOTH_STEP_PX 160px/帧）。fb6aae2e 为修「分帧与追踪两层逼近互
-            # 撕振荡」让追踪直接落地，把本伪影放了出来。正解是单一逼近器 +
-            # 步长限幅：clamp 在 tick 内部完成，不引入第二个 timer，单调逼近
-            # 无振荡；160px/拍 @ tick 周期 ≈ 万 px/s，远快于流式内容增速，
-            # 「台阶摊成连续生长」的设计意图不变。结束态丝绸尾音（0.12×小差值）
-            # 远小于 160 不受影响；大差值提速（0.90）恰是伪影来源，被 clamp 正确。
-            step = diff * factor
-            if step > self._SMOOTH_STEP_PX:
-                step = float(self._SMOOTH_STEP_PX)
-            elif step < -self._SMOOTH_STEP_PX:
-                step = -float(self._SMOOTH_STEP_PX)
-            self._apply_viewer_height(int(current_height + step))
-        except (RuntimeError, AttributeError):
+            self._apply_viewer_height(int(current_height + diff * factor))
+        except RuntimeError, AttributeError:
             # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
             # 停拍防泄漏。内容重挂后会自行上报高度，走常规路径校正。
             self._stop_stream_height_track()
@@ -3447,60 +3384,6 @@ class MessageCard(SimpleCardWidget):
             widget = widget.parentWidget()
         return None
 
-    # ── viewer 高度限幅分帧（WebEngine 旧帧拉伸伪影规避）──
-    # 高度一次大跳（流式 burst / 首帧撑开）时，Qt 侧在 Chromium 新帧到达前把
-    # 旧帧纹理拉伸填满新几何 → 文字瞬间竖向拉长一闪（Qt6 合成路径特有，Qt5 无；
-    # 2026-09-13 最小复现 + ffmpeg 逐帧证实：行厚放大 ~3.7 倍、持续约 130ms）。
-    # 把单帧几何跳变限幅分帧后，每次拉伸比例压到视觉阈值以下。
-    _SMOOTH_STEP_PX = 160
-    _SMOOTH_FRAME_MS = 16
-
-    def _cancel_height_smooth(self) -> None:
-        """停掉未完成的分帧高度序列（viewer 归还/销毁前调用）。"""
-        timer = getattr(self, "_smooth_height_timer", None)
-        if timer is not None:
-            timer.stop()
-        self._smooth_height_target = None
-
-    def _apply_height_smooth(self, target: int) -> None:
-        """流式直跳路径的限幅分帧：每帧最多逼近 _SMOOTH_STEP_PX。
-
-        新目标到来时以最新值为准继续逼近（自然追赶，不堆积序列）。
-        每步同步维护 _last_height_delta / _last_applied_viewer_height，
-        外层滚动补偿与去重语义与直接 set 路径保持一致。
-        """
-        cur = self.viewer.height()
-        if abs(target - cur) <= self._SMOOTH_STEP_PX:
-            self._cancel_height_smooth()
-            self._last_height_delta = target - cur
-            self._last_applied_viewer_height = target
-            self.viewer.setFixedHeight(target)
-            self.heightChanged.emit(target)
-            return
-        step = self._SMOOTH_STEP_PX if target > cur else -self._SMOOTH_STEP_PX
-        nxt = cur + step
-        if (nxt > target) if step > 0 else (nxt < target):
-            nxt = target
-        self._last_height_delta = nxt - cur
-        self._last_applied_viewer_height = nxt
-        self.viewer.setFixedHeight(nxt)
-        self.heightChanged.emit(nxt)
-        timer = getattr(self, "_smooth_height_timer", None)
-        if timer is None:
-            timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(
-                lambda: (
-                    self._apply_height_smooth(self._smooth_height_target)
-                    if self._smooth_height_target is not None
-                    else None
-                )
-            )
-            self._smooth_height_timer = timer
-        self._smooth_height_target = target
-        timer.start(self._SMOOTH_FRAME_MS)
-
-
     def is_layout_height_settled(self) -> bool:
         """卡片布局高度是否已落定（可安全用于量取等高占位）。
 
@@ -3589,7 +3472,7 @@ class MessageCard(SimpleCardWidget):
             self._layout_height_pinned = True
             self._pinned_height = int(height)
             self._pinned_overhead = content_overhead
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
 
     def _unpin_layout_height(self) -> None:
@@ -3626,67 +3509,11 @@ class MessageCard(SimpleCardWidget):
         if batch is not None and batch.active and not self._streaming:
             batch.submit(self, height)
             return
-        # 🐛 流式期间不得叠加分帧限幅（PyQt5 版无此问题的直接原因）：
-        # _apply_height_smooth 是为规避「Qt6 合成路径旧帧拉伸伪影」加的分帧逼近
-        # （160px/帧 × 16ms/拍，注释明写 Qt5 无此现象）。流式期间它却与高度
-        # 追踪 tick（按 0.84 比例逐拍逼近）**串成两层逼近**：追踪每拍给出的新
-        # 目标又被分帧切成 160px 序列，序列未走完就被下一拍目标刷新重启 →
-        # 高度在两层追逐中反复过冲与回落，永不落定。真机实测会话结束后 viewer
-        # 仍在 1796↔1805 反复横跳（scrollHeight 恒定 1739），即该振荡。
-        # 追踪本身已是平滑逼近，分帧只需服务「单次大跳」；追踪激活时直接落地。
-        if self._stream_height_anim_active or self._stream_height_tick.isActive():
-            self._cancel_height_smooth()
-            self._last_height_delta = height - self.viewer.height()
-            self._last_applied_viewer_height = height
-            self.viewer.setFixedHeight(height)
-            self.heightChanged.emit(height)
-            return
-        self._apply_height_smooth(height)
+        self.viewer.setFixedHeight(height)
+        self.heightChanged.emit(height)
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
-        # 🐛 宽度漂移守卫：viewer 以旧宽度/默认宽度（构造值 100px）上报的高度
-        # 不可信——内容按错误视口宽排版，高度与真实显示宽度严重错位。此处发现
-        # viewer 宽度与卡片不一致时，先修正宽度并**丢弃本拍高度**：resize 触发
-        # Chromium 重排，新宽度下的 reportHeight 会带正确高度再来。修这条的
-        # 动机：首个窗口启动 / 隐藏页切回补渲时序下，viewer 可能以默认宽创建
-        # 且之后再无 resize/scroll 事件兜底，欢迎卡片永久压扁（缓存命中后
-        # 重建窗口才恢复）。
-        # 🐛 一次性修正（2026-10-23 流式抖动根因）：viewer 布局在气泡内，其宽度
-        # 由布局决定 = 卡片宽 − 外边距（卡片 843 − main 8 − bubble 24 = 811），
-        # **不等于卡片宽是常态**。旧判据 abs(viewer−card)>2 恒真 → 每拍高度上报
-        # 都把 viewer 强制拉宽到卡片全宽（右侧溢出气泡被裁）→ 下一拍布局又把它
-        # 排回布局宽 → 每拍互撕，视口 811↔843 振荡，全文反复重排（流式「文字
-        # 抖动 + 右侧文字超出可视区」的直接来源）。改为同一卡片宽度下只修正
-        # 一次：修正后布局接管（布局宽才是权威），不再插手；卡片宽度真变化时
-        # （sync_width）标记重置，允许按新宽度再修一次。原「永久压扁」场景只需
-        # 一次修正即可触发 reflow + 正确高度上报。
-        try:
-            _v = self.viewer
-            _card_w = self.width()
-            if (
-                _v is not None
-                and _card_w > 0
-                and _v.width() > 0
-                and abs(_v.width() - _card_w) > 2
-                and getattr(self, "_width_guard_card_w", 0) != _card_w
-            ):
-                _v_w = _v.width()
-                _v_h = _v.height()
-                _v.resize(_card_w, _v_h)
-                self._width_guard_card_w = _card_w
-                try:
-                    logger.warning(
-                        f"[宽度守卫] viewer {_v_w} 修正到卡片宽 {_card_w}（一次性，"
-                        f"布局接管后不再干预）"
-                    )
-                except Exception:
-                    pass
-                return
-        except (RuntimeError, AttributeError):
-            # AttributeError：viewer 为测试 stub/异构实现缺 width()，守卫整体跳过，
-            # 高度走后续正常路径（2026-10-23 修复 test_stream_height_noise_guard 既有失败）
-            pass
         # [MEM] 面积上限：上报高度先按「物理面积封顶」钳一次（成本 ∝ 宽×高×dpr²，
         # 见 CodeWebViewer.MAX_SURFACE_MPX）。必须在下面所有记账/广播之前完成 ——
         # 否则 widget 被钳短、heightChanged 仍报原值，外层聊天列表会按未钳高度做
@@ -4154,8 +3981,6 @@ class MessageCard(SimpleCardWidget):
         # 流式输出中的卡片不可摘：摘掉会中断正在进行的渲染与高度回传
         if self._streaming:
             return False
-        # 未完成的分帧高度序列必须停掉，避免把归还池中的 viewer 高度拉走
-        self._cancel_height_smooth()
 
         from app.widgets.webview_pool import WebViewPool
 
@@ -4189,19 +4014,6 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             pass
         return False
-
-    def set_viewer_suspended(self, suspended: bool) -> None:
-        """转发离屏冻结请求给正文 viewer（Qt 6.5+ LifecycleState）。
-
-        - user 卡无 viewer / viewer 未创建：跳过；
-        - welcome 卡：JS 交互复杂（tab 切换/渲染编排），不参与冻结；
-        - MarkdownBlockViewer（纯 Qt 灰度渲染器）：无 renderer，天然 no-op。
-        """
-        if suspended and getattr(self, "_is_welcome", False):
-            return
-        viewer = self.viewer
-        if viewer is not None and isinstance(viewer, CodeWebViewer):
-            viewer.set_page_suspended(suspended)
 
     def ensure_rendered(self, delay_ms: int = 0):
         """如果还没渲染，懒加载创建QWebViewer并渲染内容
@@ -4314,15 +4126,6 @@ class MessageCard(SimpleCardWidget):
             # 置位时高度仍是起步值
             self._viewer_async_height = True
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            # 🐛 欢迎卡 viewer 流式态复位（独立的抖动源）：
-            # CodeWebViewer 新建时 _streaming 初值 True（流式设计），非 welcome
-            # 分支下方有同步逻辑，welcome 分支被 `if not is_welcome` 挡在外面
-            # → 欢迎卡的 viewer._streaming 恒 True 且永不复位。后果：
-            # content-sentinel 把它当流式卡反复扫描（真机日志 dom=0 / md=5132
-            # 正是欢迎卡），每 3s 强制整页补渲一次 → 卡片反复重排抖动；
-            # 坞态/光带等流式语义也一并被误启用。欢迎卡从无流式，恒 False。
-            if is_welcome:
-                self.viewer._streaming = False
             if not is_welcome:
                 # 标记是否为历史会话：非流式加载的历史消息自动折叠工具区
                 # 仅"从磁盘加载的历史会话"折叠；本轮对话（流式进行中或已完成）
@@ -4345,19 +4148,6 @@ class MessageCard(SimpleCardWidget):
 
             self._viewer_layout.addWidget(self.viewer)
             self._lazy_rendered = True
-            # 🐛 宽度起步守卫：QWebEngineView 默认构造宽 100px。若此刻布局尚未
-            # 收敛（首个窗口启动 / 隐藏页切回补渲等场景，viewport 宽度还没就位），
-            # viewer 会以 100px 宽创建并加载骨架，内容按窄视口排版，高度上报与
-            # 实际显示宽度严重错位；后续若无 resize/scroll 事件兜底（启动后用户
-            # 不动窗口是常态），宽度永不修正 → 欢迎卡片永久压扁/空白，且因
-            # _welcome_card_cache 命中，重建窗口才恢复。这里在挂入布局后按卡片
-            # 自身宽度立即同步一次 viewer 宽度（卡片宽度由 _add_chat_widget 的
-            # _sync_single_card_width 已就位），保证骨架以真实视口宽加载。
-            try:
-                if self.width() > 0 and self.viewer.width() not in (self.width(), 0):
-                    self.viewer.resize(self.width(), self.viewer.height())
-            except RuntimeError:
-                pass
             # 创建 viewer 完成（不可见门控已放行），清除"推迟渲染"标记；
             # 若下方 set_content 因 JS 未就绪再次 deferred，由 _on_js_ready 兜底补渲。
             self._render_deferred = False
@@ -6065,40 +5855,6 @@ class MessageCard(SimpleCardWidget):
             immediate: 透传给 viewer.finish_streaming（T11）。批量加载路径传
                 False，避免 N 卡同帧全量重渲；交互路径保持默认 True。
         """
-        # 🐛 幂等守卫（2026-10-24「结束态正文全丢」）：_set_ai_state("idle") 的
-        # 扫尾兜底（_finalize_all_streaming_cards，force_dock_off=True）与本函数
-        # 的正路调用（_on_stream_finished 末尾）会对同一张卡连收两次。第二遍
-        # viewer.finish_streaming 会递增 _render_seq 使第一遍终渲染作废，且
-        # MessageCard 层 _cleanup_render_cache 已把 _markdown_text 清空 → 重派的
-        # 终渲染拿到空文本 → 正文全丢（结束态只剩「工具与思考」摘要行）。
-        # 语义反转修复前反向守卫下只有兜底层活着（正路永远跳过），双收竞态从未
-        # 暴露；_is_sip_deleted 修正后两层都会执行，此处收敛为只收一次。
-        # history=True（历史会话加载收尾）的卡从未 start_streaming_anim，
-        # _streaming 恒 False，必须放行。
-        # ⚠️ 判据用轮次标记（_finish_streamed_for_round）而非 _streaming：
-        # 打断路径是 stop_streaming_anim（已置 _streaming=False）之后再 finish
-        # 强制归位，用 _streaming 会误杀全部打断归位；轮次标记只拦「同轮流式
-        # 已收过尾」的重复调用，start_streaming_anim 开新一轮时重置。
-        # ⚠️ 判据必须用轮次标记而非 _streaming：打断路径是 stop_streaming_anim
-        # （已置 _streaming=False）之后再 finish（强制归位），用 _streaming 会
-        # 误杀全部打断归位；轮次标记只拦「同轮流式已收过尾」的重复调用。
-        # history=True（历史会话加载收尾）从未 start_streaming_anim，必须放行。
-        if not history and getattr(self, "_finish_streamed_for_round", False):
-            return
-        self._finish_streamed_for_round = True
-        # [finish-diag2] 入口打点（临时）：不受后续分支影响，含 viewer 状态。
-        # 上一轮日志 fallback 命中却零探针输出 → 嫌疑为 viewer None 时整段
-        # 归位被跳过，此打点用于证实/排除。
-        try:
-            logger.warning(
-                f"[finish-diag2] card finish ENTRY: viewer={'None' if self.viewer is None else 'set'} "
-                f"has_active_tools={self._has_active_tools()} history={history} "
-                f"force_dock_off={force_dock_off} "
-                f"order={list(self._tool_call_order.keys())[:6]} "
-                f"finished_n={len(self._finished_streaming_ids)}"
-            )
-        except Exception:
-            pass
         try:
             # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
             # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。
@@ -6122,11 +5878,6 @@ class MessageCard(SimpleCardWidget):
                 self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 _keep_dock = self._has_active_tools() and not (history or force_dock_off)
-                # [finish-diag2] viewer 收尾派发打点（临时）
-                try:
-                    logger.warning(f"[finish-diag2] card finish: keep_dock={_keep_dock} → viewer")
-                except Exception:
-                    pass
                 self.viewer.finish_streaming(keep_dock=_keep_dock, immediate=immediate)
                 if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()
@@ -6183,7 +5934,6 @@ class MessageCard(SimpleCardWidget):
             self.saveFileRequested,
             self.lazyRenderCompleted,
             self.modelLabelClicked,
-            self.saveChartPngRequested,
         ]
         for sig in signals:
             try:
@@ -6196,20 +5946,6 @@ class MessageCard(SimpleCardWidget):
         清理 MessageCard 持有的资源，防止内存泄漏。
         应该在删除卡片前调用，或者在 closeEvent 中自动调用。
         """
-        # 🛡️ 流式卡删除哨兵（2026-10-23）：cleanup 是所有删除路径的统一入口
-        # （回收/重建/切会话/关窗）。流式中的卡被 cleanup 说明删除方可能没先
-        # 收尾 —— 这正是「finish 到达时 _current_assistant_card 已 deleted、
-        # 结束态漏收尾」的源头。打 WARNING 带调用栈，定位删除者。
-        if getattr(self, "_streaming", False):
-            try:
-                import traceback
-
-                logger.warning(
-                    "[cleanup-sentinel] 流式中的卡片被 cleanup（删除方可能未先收尾），调用栈：\n"
-                    + "".join(traceback.format_stack(limit=8)[:-1])
-                )
-            except Exception:
-                pass
         # 停止所有定时器
         timers_to_stop = [
             self._anim_timer,

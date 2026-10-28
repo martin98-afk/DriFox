@@ -754,7 +754,7 @@ class ProfileSection(_Section):
         dlg = UserAvatarDialog(parent=_host_window() or self.window())
         dlg.picked.connect(self.userAvatarPicked)
         dlg.cleared.connect(self.userAvatarCleared)
-        dlg.exec()
+        dlg.exec_()
 
     def _schedule_autosave(self, *_a) -> None:
         if self._suspend_autosave:
@@ -1422,7 +1422,7 @@ class SectionEditDialog(MaskDialogBase):
 class MemorySection(_Section):
     """记忆分区：开关 + 状态 + 全局记忆/项目记忆/工作日志查看 + 清除。
 
-    记忆体系照抄 WorkBuddy：全局 MEMORY.md（跨项目）+ 项目 .drifox/memory/（笔记+日志），
+    记忆体系照抄 WorkBuddy：全局 MEMORY.md（跨项目）+ 项目 .drifox6/memory/（笔记+日志），
     模型经 memory_read/memory_write 自主读写；UI 只做查看与清理。
     """
 
@@ -1527,7 +1527,7 @@ class MemorySection(_Section):
         self._wrap_v.addWidget(_sep())
         self._wrap_v.addSpacing(4)
 
-        self._project_row = _RowItem("项目记忆", "本项目 .drifox/memory")
+        self._project_row = _RowItem("项目记忆", "本项目 .drifox6/memory")
         self._project_row.clicked.connect(self.viewProject.emit)
         self._wrap_v.addWidget(self._project_row)
 

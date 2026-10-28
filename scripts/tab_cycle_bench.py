@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             open_tab, close_tab, cleanup = _make_qt_callbacks()
         except ImportError:
-            print("警告: 未找到 PySide6，回退到 --no-qt 模式（仅测框架开销）")
+            print("警告: 未找到 PyQt5，回退到 --no-qt 模式（仅测框架开销）")
             args.no_qt = True
 
     bench = TabCycleBench(

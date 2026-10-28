@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu")
 
 # WebEngine 必须在 QApplication 创建前导入（共享 OpenGL 上下文要求）
-from PySide6 import QtWebEngineWidgets  # noqa: E402,F401
+from PyQt5 import QtWebEngineWidgets  # noqa: E402,F401
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget

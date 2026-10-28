@@ -24,9 +24,9 @@ from .sampler import Sample, env_full_mode, start_tracemalloc, stop_tracemalloc
 
 
 def _build_session_manager():
-    """构造 SessionManager（PySide6 QApplication 必须已建）。
+    """构造 SessionManager（PyQt5 QApplication 必须已建）。
 
-    延迟 import：避免在 conftest 建 QApplication 之前触发 PySide6 import。
+    延迟 import：避免在 conftest 建 QApplication 之前触发 PyQt5 import。
     """
     from app.core.conversation.chat_session import SessionManager
 
@@ -49,7 +49,7 @@ def _build_dummy_stream_chunks(n: int = 20) -> List[str]:
 def _wire_stream_sink(stream_chunk_signal, on_chunk: Callable[[str], None]) -> None:
     """挂载 stream_chunk 信号槽（直接 connect，避免 Qt 事件循环依赖）。
 
-    PySide6 在同一线程内 emit → connect 的 Lambda 是同步执行的，可立即拿到 chunk。
+    PyQt5 在同一线程内 emit → connect 的 Lambda 是同步执行的，可立即拿到 chunk。
     """
     stream_chunk_signal.connect(on_chunk)
 

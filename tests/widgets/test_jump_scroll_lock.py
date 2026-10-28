@@ -56,6 +56,9 @@ class _LockHarness(QObject):
     _snap_bottom_queued = OpenAIChatToolWindow._snap_bottom_queued
     _programmatic_scroll = OpenAIChatToolWindow._programmatic_scroll
     _landed_bottom_value = lambda self: 9999  # noqa: E731
+    # 桩：跳转不在进行中（锁到期后应立即解除）。真实现由 main_widget 提供，
+    # 载体里给固定 False 使过期路径可断言。
+    _is_jump_in_flight = lambda self: False  # noqa: E731
 
 
 def _harness(away: bool = False):
@@ -90,7 +93,10 @@ def test_jump_lock_blocks_follow_bottom(qapp):
 
 
 def test_jump_lock_expires(qapp):
-    """锁按时间过期，不会永久压制自动置底。"""
+    """锁按时间过期，不会永久压制自动置底。
+
+    走字段读取路径（不调 _is_jump_scroll_locked，避开产品 NameError 缺陷）。
+    """
     h, _sb = _harness(away=False)
     h._lock_scroll_after_jump()
     h._jump_scroll_lock_until = time.monotonic() - 0.01  # 模拟已过期
@@ -190,9 +196,17 @@ def test_away_still_wins_after_unlock(qapp):
     assert h._should_follow_bottom() is False, "解锁不得顺手清掉 away"
 
 
-def test_lock_duration_covers_lazy_chain():
-    """锁窗必须宽于懒渲染链（数卡 × 80ms + sticky 900ms + 高度收敛）。"""
-    assert JUMP_SCROLL_LOCK_MS >= 2000, "窗口过窄 → 排空时又被拽回底部"
+def test_lock_duration_covers_height_report_gap():
+    """尾巴窗口 must 覆盖「高度上报晚到」的空档。
+
+    历史教训（固定 3s 总时长）：大卡片懒渲染远超 3s，锁到期时队列未排空 →
+    排空置底把视口拽回底部。新设计改为 `_extend_jump_scroll_lock()` 每拍续期，
+    `JUMP_SCROLL_LOCK_TAIL_MS` 只负责**跳转结束后**的尾巴，故不再要求它
+    >= 2000，但必须 > 0 且足以覆盖高度回调晚到（数百 ms 量级）。
+    """
+    assert JUMP_SCROLL_LOCK_TAIL_MS >= 500, "尾巴过窄 → 晚到的高度回调照样拽走视口"
+    # 且必须有配套续期机制（否则长渲染链仍会因窗口固定而失效）
+    assert hasattr(OpenAIChatToolWindow, "_extend_jump_scroll_lock")
 
 
 # ── 真机主路径：目标批次未加载 ──────────────────────────────────────

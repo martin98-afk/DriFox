@@ -58,7 +58,7 @@ def _caller_info(skip: int) -> tuple[str, str]:
 
     try:
         filename = sys._getframe(skip).f_code.co_filename
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return "", "ui"
     hit = _CALLER_CACHE.get(filename)
     if hit is not None:

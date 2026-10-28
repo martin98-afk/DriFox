@@ -26,12 +26,13 @@
 
 import sys
 
+from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 try:
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
+    from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
     from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 except Exception:
     pass

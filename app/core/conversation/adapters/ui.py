@@ -12,7 +12,7 @@ class UIConversationAdapter(QObject):
     """UI 对话适配器 — Qt 信号转发
 
     使用组合（而非多继承）持有 BaseConversationAdapter，
-    避免 PySide6 的 QObject 与普通 Python 类的 MRO 冲突。
+    避免 PyQt5 的 QObject 与普通 Python 类的 MRO 冲突。
     """
 
     # Qt 信号

@@ -75,7 +75,7 @@ def _open_dialog(dlg) -> int:
     ⚠ 不要对 MaskDialog 做 setGeometry / widget.move：MaskDialogBase 的
     _hBox 布局是卡片位置的权威，手动干预会与布局互相覆盖导致卡片漂移。
     """
-    return dlg.exec()
+    return dlg.exec_()
 
 
 def _confirm_dialog(parent, title: str, text: str) -> bool:
@@ -816,7 +816,7 @@ class AssistantCardWidget(QWidget):
         _open_dialog(TextViewOverlay(title, text.strip() or "（暂无全局记忆）", parent=_host_window() or self.window()))
 
     def _on_view_project(self) -> None:
-        """查看项目记忆（当前工作目录 .drifox/memory/<aid>/MEMORY.md）。"""
+        """查看项目记忆（当前工作目录 .drifox6/memory/<aid>/MEMORY.md）。"""
         if not self._active_aid:
             return
         wd = self._mgr._current_workdir(self._ctx_caps_pool())

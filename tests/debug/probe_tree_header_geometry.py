@@ -59,4 +59,4 @@ def dump():
 
 
 QTimer.singleShot(0, dump)
-app.exec()
+app.exec_()

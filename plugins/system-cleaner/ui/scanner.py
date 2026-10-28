@@ -25,7 +25,7 @@ def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
     开发环境: 当前目录/.drifox6
-    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox6
     """
     if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):

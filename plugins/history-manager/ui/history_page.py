@@ -35,9 +35,9 @@ from PySide6.QtCore import (
     QObject,
     QParallelAnimationGroup,
     QPropertyAnimation,
-    Property,
     Qt,
     QTimer,
+    Property,
     Signal,
 )
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
@@ -382,8 +382,6 @@ def _active_window() -> Optional[Any]:
         return active()
     except Exception:
         return None
-
-
 class HistoryPage(QWidget):
     """历史会话页（一级页签）：历史会话 / 归档 子页签 + 列表上方搜索框"""
 

@@ -507,7 +507,7 @@ class _AddWorktreeRow(QWidget):
             cancel_text="取消",
             parent=self.window(),
         )
-        if not dialog.exec():
+        if not dialog.exec_():
             return
 
         branch = dialog.input.text().strip()
@@ -832,4 +832,4 @@ class WorktreeSectionWidget(QWidget):
         ok.clicked.connect(dlg.accept)
         bl.addWidget(ok)
         vl.addLayout(bl)
-        dlg.exec()
+        dlg.exec_()

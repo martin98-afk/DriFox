@@ -110,7 +110,7 @@ def test_close_button_hidden_by_default(qapp):
 def test_close_button_visible_on_header_hover(qapp):
     """鼠标进入 header 区域 → 关闭按钮 setVisible(True)；leave → setVisible(False)
 
-    注：PySide6 中 isVisible() 受祖先链可见性影响，测试用 mock 跟踪 setVisible 调用。
+    注：PyQt5 中 isVisible() 受祖先链可见性影响，测试用 mock 跟踪 setVisible 调用。
     """
     from app.widgets.tab_panel import TabPanel
 

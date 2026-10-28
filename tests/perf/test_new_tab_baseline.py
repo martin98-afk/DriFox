@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 # ── Qt 属性必须在 QApplication 创建前设置（与 main.py 对齐）──────────────────
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtCore import Qt, QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -41,8 +42,7 @@ QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
 # QtWebEngine 类必须在 QCoreApplication 实例化前导入（main.py 同款约束）
-from PySide6.QtWebEngineWidgets import QWebEngineView# noqa: E402,F401
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402, F401
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 N_ROUNDS = 25  # 基线重复次数（P25/中位数/最大值；25 轮使 P25 运行间偏差 <5%）
@@ -53,7 +53,7 @@ def _drain(ms: int) -> None:
     """驱动事件循环 ms 毫秒，让 QTimer/singleShot 回调落地"""
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 class FakePage(QWidget):

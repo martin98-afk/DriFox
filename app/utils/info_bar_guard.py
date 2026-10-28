@@ -21,18 +21,14 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
-import shiboken6
+import shiboken6 as sip
 from qfluentwidgets.components.widgets.info_bar import InfoBarManager
 
 
 def _cpp_alive(bar) -> bool:
-    """C++ 对象存活判定（wrapper 可能是已析构的空壳）
-
-    ⚠ PySide6 没有 sip.isdeleted，活性判定必须用 shiboken6.isValid 硬判；
-    isValid 对已析构 wrapper 抛/返回 False，绝不能靠属性访问探测（静默空壳）。
-    """
+    """C++ 对象存活判定（wrapper 可能是已析构的空壳）"""
     try:
-        return shiboken6.isValid(bar)
+        return not shiboken6.isValid(bar)
     except Exception:  # noqa: BLE001
         return False
 
@@ -71,7 +67,7 @@ class _MainDispatcher(QObject):
 
     def __init__(self):
         super().__init__()
-        # 必须连 bound method：connect 到裸函数/lambda 时旧版 Qt 判定无接收者
+        # 必须连 bound method：connect 到裸函数/lambda 时 PyQt 判定无接收者
         # 对象，跨线程 emit 会退化为发射线程直调，桥就白搭了
         self._arrived.connect(self._run)
 

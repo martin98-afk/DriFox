@@ -19,6 +19,7 @@ import pytest
 
 from PySide6.QtWidgets import QApplication
 
+
 def _ensure_qapp():
     return QApplication.instance() or QApplication(sys.argv)
 

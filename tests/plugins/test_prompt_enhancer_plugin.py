@@ -15,8 +15,6 @@ from app.plugins.managers.plugin_config_store import PluginConfigStore
 
 PLUGIN_SRC = Path.home() / ".drifox6" / "plugins" / "prompt-enhancer"
 PLUGIN_NAME = "prompt-enhancer"
-# 被测插件只装在用户数据目录（仓库无源码），未安装时整模块跳过而非报错
-pytestmark = pytest.mark.skipif(not PLUGIN_SRC.exists(), reason=f"prompt-enhancer 未安装：{PLUGIN_SRC}")
 
 pytestmark = pytest.mark.skipif(
     not PLUGIN_SRC.is_dir(), reason=f"未安装 prompt-enhancer 插件: {PLUGIN_SRC}"

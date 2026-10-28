@@ -32,7 +32,7 @@ _RENDER_SETTINGS = apply_render_env(default_config_path())
 # QtWebEngineWidgets 必须先于 QApplication 创建（S2 注意点 1）；
 # 此处 import 即满足「先于 app 构建链中的 QApplication」时序
 from PySide6.QtWidgets import QApplication  # noqa: E402
-from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401, E402
+from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401,E402
 
 pytest_plugins = ["pytestqt"]
 

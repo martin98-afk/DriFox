@@ -420,7 +420,7 @@ class _KeyCapturePopup(QWidget):
             self.key_captured.emit("")
             self.close()
             return
-        seq = QKeySequence(mods.value | key)  # PySide6: KeyboardModifier 非 int 子类，取 .value
+        seq = QKeySequence(int(mods) | key)
         self.key_captured.emit(seq.toString(QKeySequence.NativeText))
         self.close()
 
@@ -1038,7 +1038,7 @@ class ShortcutManagerCard(QWidget):
                 confirmed = True
 
             dialog.confirmed.connect(_on_confirm)
-            dialog.exec()
+            dialog.exec_()
             if not confirmed:
                 return
 

@@ -1759,12 +1759,38 @@ class UIPluginRegistry:
                 return
             try:
                 if card_manager.is_card_visible(card_id, window_id):
-                    return
+                    # ★ 死锁自愈：状态层可见但视觉不可见（TOP 覆盖层容器折叠/
+                    # 切页断链，webview 类卡片首显时实测）时，「已可见忽略」
+                    # 会永久锁死入口——先清假状态再走 show，一次点击完成自愈
+                    # + 显示；真可见则维持「再点不关闭」直觉。
+                    if self._card_state_visually_broken(card_manager, mw, window_id, card_id):
+                        card_manager.hide_card(card_id, window_id)
+                    else:
+                        return
             except Exception:
                 pass
             self._show_floating_card(card_id, main_widget=mw)
 
         return _on_tab_click
+
+    @staticmethod
+    def _card_state_visually_broken(card_manager, mw, window_id: str, card_id: str) -> bool:
+        """状态层可见但视觉不可见（真死锁）判定，仅覆盖 TOP 容器卡。
+
+        死锁 = CardManager.visible_cards 已置位，但 TOP 覆盖层容器本身不可见
+        （容器折叠或 stack 未切页）。非 TOP 卡（dock/共存）无法用 top 容器
+        判定，一律按正常处理（维持忽略语义）。
+        """
+        try:
+            from app.widgets.cards.card_manager import ContainerType
+
+            win_data = card_manager._window_data.get(window_id, {})
+            if win_data.get("containers", {}).get(card_id) != ContainerType.TOP:
+                return False
+            cont = getattr(mw, "_top_card_container", None)
+            return cont is not None and not cont.isVisible()
+        except Exception:
+            return False
 
     def unregister_titlebar_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部常驻 tab（插件卸载时调用）"""
@@ -1823,16 +1849,9 @@ class UIPluginRegistry:
         self._register_command_for_workbench_tab(info)
         # 通知工作台面板 reconcile（热加载新插件页时无需重启即可见；
         # 启动期面板尚未创建，publish 无人订阅，装配时自会 sync）
-        self._publish_workbench_tabs_changed()
+        from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED, UIEventBus
 
-    def _publish_workbench_tabs_changed(self) -> None:
-        """页签集合变化通知（WorkbenchPanel 订阅重跑 reconcile）"""
-        try:
-            from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED, UIEventBus
-
-            UIEventBus.get_instance().publish(EV_WORKBENCH_TABS_CHANGED)
-        except Exception:  # noqa: BLE001 - 通知失败不影响注册本身
-            pass
+        UIEventBus.get_instance().publish(EV_WORKBENCH_TABS_CHANGED)
 
     def unregister_workbench_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部工作台页签（插件卸载时调用）"""
@@ -1843,7 +1862,9 @@ class UIPluginRegistry:
             if cmd_name is not None:
                 self.unregister_ui_command(cmd_name)
         if removed:
-            self._publish_workbench_tabs_changed()
+            from app.core.infra.ui_event_bus import EV_WORKBENCH_TABS_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(EV_WORKBENCH_TABS_CHANGED)
 
     def get_workbench_tabs(self) -> List[WorkbenchTabInfo]:
         """获取全部工作台页签（按注册序返回）"""
@@ -3951,12 +3972,12 @@ class UIPluginRegistry:
             try:
                 # 🛡️ 窗口 C++ 对象已析构（窗口关闭与插件热重载竞态）时，其缓存的
                 # 欢迎卡片必然已随父容器被 Qt 递归删除，而 Python 引用仍悬垂。
-                # sip.isdeleted() 对「ownership 在 C++ 侧」的 widget 返回 False，
+                # shiboken6.isValid() 对「ownership 在 C++ 侧」的 widget 返回 False，
                 # 只有显式检查宿主窗口本身才能拦下（否则 hide() → access violation）。
                 try:
                     import shiboken6 as sip
 
-                    if not sip.isValid(mw):
+                    if shiboken6.isValid(mw):
                         skipped_no_method += 1
                         continue
                 except Exception:

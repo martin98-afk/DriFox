@@ -279,7 +279,7 @@ def _styled_message_box(
             self.widget.setMaximumSize(620, 720)
 
     dialog = _Dialog(parent_widget)
-    dialog.exec()
+    dialog.exec_()
     return dialog._result
 
 
@@ -1530,7 +1530,7 @@ class FileTreeCard(QWidget):
                 lambda: self._refresh_dir_in_model(item_path)
             )
 
-        menu.exec(global_pos)
+        menu.exec_(global_pos)
 
     # ── 刷新与关闭 ──
 

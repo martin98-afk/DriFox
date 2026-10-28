@@ -16,17 +16,8 @@
 from loguru import logger
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import (
-    QHBoxLayout,
-    QInputDialog,
-    QLabel,
-    QPushButton,
-    QScrollArea,
-    QShortcut,
-    QSizePolicy,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtGui import QShortcut
+from PySide6.QtWidgets import (QHBoxLayout, QInputDialog, QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from qfluentwidgets import Action, CheckableMenu, MenuAnimationType
 
@@ -723,7 +714,7 @@ class PermissionApprovalWidget(QWidget):
 
         ⚠ 选中回传必须走 `Action.triggered` 信号：`CheckableMenu`/`RoundMenu`
         覆写了 `exec`/`exec_`，它们是**非阻塞 show + 信号驱动**且恒返回 None，
-        没有原生 `QMenu.exec()` 的"返回被触发 action"语义。靠返回值判断选中项
+        没有原生 `QMenu.exec_()` 的"返回被触发 action"语义。靠返回值判断选中项
         会静默失效（三个作用域全部点了没反应，作用域恒为 tool）。
         """
         menu = CheckableMenu(parent=self)
@@ -771,7 +762,7 @@ class PermissionApprovalWidget(QWidget):
         选作用域时看不到自己要批的是什么，而向上弹只占用消息区空白高度。
         """
         menu = self._build_remember_menu()
-        menu.exec(
+        menu.exec_(
             self._scope_btn.mapToGlobal(self._scope_btn.rect().topLeft()),
             aniType=MenuAnimationType.PULL_UP,
         )

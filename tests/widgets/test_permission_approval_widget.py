@@ -434,8 +434,8 @@ def test_click_menu_item_updates_scope(qapp):
     """回归：真实点击菜单项必须更新作用域并回传所选值
 
     事故链路：CheckableMenu/RoundMenu 覆写了 exec_，非阻塞且恒返回 None，
-    没有原生 QMenu.exec() 的"返回被触发 action"语义。原实现用
-    `chosen = menu.exec(...)` 的返回值判断选中项，三个分支永远不命中，
+    没有原生 QMenu.exec_() 的"返回被触发 action"语义。原实现用
+    `chosen = menu.exec_(...)` 的返回值判断选中项，三个分支永远不命中，
     导致「当前工具/当前轮次/当前会话」全部点了没反应、作用域恒为 tool。
     本用例走真实鼠标点击（不经 _set_scope 直调），锁死该回归。
 

@@ -25,8 +25,8 @@ from loguru import logger
 def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致，开发环境解析为绝对路径）
 
-    开发环境: 仓库根/.drifox6（基于 __file__ 定位，脱离可变 cwd）
-    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    开发环境: 仓库根/.drifox（基于 __file__ 定位，脱离可变 cwd）
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox6
 
     注意：相对路径 Path(".drifox6") 会在每次文件操作时按当前 cwd 解析；

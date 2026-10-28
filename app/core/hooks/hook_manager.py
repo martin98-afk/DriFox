@@ -2093,7 +2093,7 @@ class HookManager:
             # 处理 Qt 事件 5ms，保持 UI 响应
             loop = QEventLoop()
             QTimer.singleShot(check_interval, loop.quit)
-            loop.exec()
+            loop.exec_()
             elapsed += check_interval
 
     @staticmethod

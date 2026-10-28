@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
-"""流式 token → 卡片刷新：viewer 层阶段耗时分解基准（T2 基线，T5 优化对照）。
+"""流式 token → 卡片刷新：viewer 层阶段耗时分解基准（T2 基线，T5/T5-fix 对照）。
 
 定位与既有基准的关系：
     - `test_stream_render_bench.py` 测 **MessageCard.append_text 全链路**
       （含 _content_data 合并 / think·tag·fence 守卫 / viewer 增量 /
       _schedule_render / reconcile / finish）。它此前因 MessageCard 无 parent
       时 `_update_anim` 读 `self._parent.chat_scroll_area` 抛 AttributeError，
-      被 Qt 事件循环捕获判 CALL ERROR；T5 已在该处补 AttributeError 防御，
-      该文件现已恢复正常。
+      被 Qt 事件循环捕获判 CALL ERROR；T5 改为 getattr 判空后恢复正常。
     - `test_stream_render_bench_web.py` 测 WebEngine 真机通道，需桌面会话。
 
 本文件取中间层：**MarkdownBlockViewer 单卡的流式刷新路径**，把一次
 "token 推送 → 卡片刷新" 拆成可归因的阶段：
 
     append_chunk      累积 md + 自适应档位 + 派发决策（_schedule_render）
-    boundary_dispatch 派发决策命中分支（clean/soft/adaptive）→ 真正触发渲染的时机
+    boundary_dispatch 派发决策命中分支（clean/soft/adaptive）→ 触发渲染的时机
     render            软/硬边界或兑底时的 _perform_update → _reconcile(force=True)
     reconcile_inner   _reconcile 内部：parse_blocks 解析 vs reconcile_widgets 差量对齐
     finish            finish_streaming 收尾全量 reconcile
@@ -34,7 +33,7 @@
     cd <仓库根> && uv run pytest tests/perf/test_stream_stage_bench.py -v -s
     （tests/perf 被 addopts 默认排除，必须显式指定本文件路径）
 
-基线（T2 · 修复前 / T5 · 优化后对照）
+基线演进
     采集环境：Windows / Python 3.14 / dev 分支 / offscreen + DRIFOX_QT_RENDERER=1
     采集命令：uv run pytest tests/perf/test_stream_stage_bench.py -v -s
 
@@ -217,7 +216,7 @@ def _run_one_round(round_idx: int, payload: str) -> dict:
     def timed_reconcile(force=False):
         # 渲染阶段（一次全量/差量刷新）落地在 _reconcile。
         # ⚠️ 只环绕调用 _orig_reconcile：复刻其逻辑会绕过被测的缓存路径，
-        # 使优化效果无法体现在数字上（口径失真）。
+        # 使优化效果无法体现在数字上（T5 的口径失真即源于此）。
         t0 = time.perf_counter()
         _orig_reconcile(force)
         render_cost.append((time.perf_counter() - t0) * 1000)

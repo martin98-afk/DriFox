@@ -34,8 +34,7 @@ from loguru import logger
 
 
 def _drifox_dir() -> Path:
-    """获取应用数据目录（复制自 app.utils.utils.get_app_data_dir，避免把拖 Qt 的
-    utils 模块拉进分享链路；目录名字面量须与 APP_DATA_DIR_NAME 保持一致）"""
+    """获取应用数据目录"""
     import sys as _sys
 
     if not hasattr(_sys, "_MEIPASS") and not getattr(_sys, "frozen", False):

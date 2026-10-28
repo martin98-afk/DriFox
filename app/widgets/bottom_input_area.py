@@ -39,18 +39,9 @@ from PySide6.QtGui import (
     QTextCursor,
     QTextFormat,
     QTextObjectInterface,
-    QShortcut,
-    QPyTextObject,
 )
-from PySide6.QtWidgets import (
-    QApplication,
-    QFrame,
-    QGraphicsDropShadowEffect,
-    QHBoxLayout,
-    QLabel,
-    QSizePolicy,
-    QWidget,
-)
+from PySide6.QtGui import QShortcut
+from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QSizePolicy, QWidget)
 from qfluentwidgets import (
     ComboBox,
     FluentIcon,
@@ -417,7 +408,7 @@ class SendableTextEdit(TextEdit):
         self._adjust_height_to_content()
 
     def _on_fluent_vbar_range_changed(self, rng=None):
-        """按真实滚动余量收放 Fluent 竖条（rangeChanged 与内容变化时都调）。
+        """按真实滚动余量收放 Fluent 竖条。
 
         不能直接用 `maximum() > 0`：QTextEdit 的 QSS 上下 padding
         （8+4）让原生竖条 range 恒为 2（viewport 34 vs 文档 32），
@@ -2062,7 +2053,7 @@ class SendableTextEdit(TextEdit):
                     return False
                 loop = QEventLoop()
                 _QTimer.singleShot(int(min(0.05, remaining) * 1000), loop.quit)
-                loop.exec()
+                loop.exec_()
         finally:
             self._waiting_image_saves = False
 
@@ -2348,7 +2339,7 @@ class SendableTextEdit(TextEdit):
                 builder(menu)
             except Exception:
                 pass
-        menu.exec(event.globalPos())
+        menu.exec_(event.globalPos())
 
     def closeEvent(self, event):
         """关闭时摘除拖放 OLE 注册，避免析构后 drop target 回调 COM failfast。"""
@@ -2780,15 +2771,13 @@ class AttachmentChip(QFrame):
         self._apply_style()
 
 
-class FileMentionObject(QPyTextObject):
+class FileMentionObject(QObject, QTextObjectInterface):
     """输入框正文中的 inline 文件引用胶囊（圆角背景 + 类型图标 + 文件名）
 
-    ⚠️ 必须继承 ``QPyTextObject``（PySide 为 Python 实现 QTextObjectInterface
-    提供的桥接基类）。不能按 PyQt5 写法多继承
-    ``(QObject, QTextObjectInterface)``：在 PySide6 下 registerHandler 不报错，
-    但 intrinsicSize / drawObject 永远不会被文档布局回调，胶囊整个画不出来
-    （PySide6 6.11 实测）。QPyTextObject 本身即 QObject 子类，
-    满足 registerHandler 对 component 的 QObject 要求。
+    ⚠️ 必须同时继承 QObject：``QTextDocument.documentLayout().registerHandler()``
+    的签名要求 component 是 QObject，纯 QTextObjectInterface 会被拒绝
+    （TypeError: argument 2 has unexpected type）。
+    继承顺序必须是 (QObject, QTextObjectInterface)，反了会导致 MRO 冲突。
 
 
     为什么不用字面 ``[[basename]]``（旧实现）:
@@ -2896,7 +2885,7 @@ class FileMentionObject(QPyTextObject):
         return cls._icon_cache[key]
 
 
-class AssistantMentionObject(QPyTextObject):
+class AssistantMentionObject(QObject, QTextObjectInterface):
     """输入框正文中的 inline 助手提及胶囊（@ 智能体角色）
 
     与 FileMentionObject 同款机制：文档里占一个字符（U+FFFC），

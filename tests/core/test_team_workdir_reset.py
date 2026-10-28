@@ -126,7 +126,7 @@ class TestTeamWorkdirResetOnLoad:
                 captured["on_confirm"] = cb
 
             d.confirmed.connect = _connect
-            d.exec = lambda: captured["on_confirm"]()
+            d.exec_ = lambda: captured["on_confirm"]()
             return d
 
         with (

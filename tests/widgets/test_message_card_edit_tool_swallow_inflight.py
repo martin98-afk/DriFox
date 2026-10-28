@@ -26,6 +26,7 @@ import json
 import re
 import sys
 
+from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
@@ -36,11 +37,8 @@ QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 _APP = QApplication.instance() or QApplication(sys.argv)
 
 try:
-    from PySide6.QtWebEngineWidgets import (  # noqa: F401
-        QWebEnginePage,
-        QWebEngineSettings,
-        QWebEngineView,
-    )
+    from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 except Exception:
     pass
 
@@ -182,7 +180,7 @@ def _viewer_cls():
 def _make_card(monkeypatch):
     _ensure_qapp()
     monkeypatch.setattr(mc, "_edit_tools", lambda: frozenset({"edit", "write", "multi_edit"}))
-    monkeypatch.setattr(mc.shiboken6, "isValid", lambda o: True)
+    monkeypatch.setattr(mc.sip, "isdeleted", lambda o: False)
     card = MessageCard(role="assistant")
     card._lazy_rendered = True
     card.viewer = _viewer_cls()()

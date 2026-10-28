@@ -186,7 +186,7 @@ def main():
 
     viewer.loadFinished.connect(lambda ok: ok and QTimer.singleShot(700, on_ready))
     QTimer.singleShot(30000, app.quit)
-    app.exec()
+    app.exec_()
     print("done")
 
 

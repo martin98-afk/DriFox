@@ -370,7 +370,7 @@ class TestTempTabVisual:
     def test_cancel_menu_on_temp_tab_emits_nothing(self, panel):
         """review M1：temp 页右键后 ESC 取消（exec_ 返回 None），不得误发任何请求
 
-        根因：branch_action 预初始化为 None，menu.exec() 取消时也返回 None，
+        根因：branch_action 预初始化为 None，menu.exec_() 取消时也返回 None，
         旧代码 None == None 为 True → 误发 tabBranchRequested。
         """
         panel.add_tab("临时 · 新对话")

@@ -1292,7 +1292,7 @@ class HookListSettingCard(ExpandSettingCard):
             parent=self.window(),
         )
         dialog.confirmed.connect(_on_confirm)
-        dialog.exec()
+        dialog.exec_()
         if not _confirmed[0]:
             return
 

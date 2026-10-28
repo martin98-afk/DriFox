@@ -196,4 +196,4 @@ if card0.viewer is not None:
     after_load()
 else:
     QTimer.singleShot(2000, after_load)
-    app.exec()
+    app.exec_()

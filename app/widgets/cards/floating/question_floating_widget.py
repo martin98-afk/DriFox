@@ -10,16 +10,9 @@ from functools import partial
 
 from loguru import logger
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPalette, QShortcut
-from PySide6.QtWidgets import (
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QSizePolicy,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtGui import QColor, QKeySequence, QPalette
+from PySide6.QtGui import QShortcut
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QSizePolicy, QTextEdit, QVBoxLayout, QWidget)
 
 from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import CardStyles, Colors, font_size_css

@@ -1,3 +1,4 @@
+from PySide6.QtWebEngineCore import QWebEnginePage
 # -*- coding: utf-8 -*-
 """
 LLM Chatter 主入口
@@ -157,11 +158,11 @@ def main():
 
     # ========== 环境清理：避免与已安装 Drifox.app 的 Qt 冲突 ==========
     # macOS 上如果通过 Login Items 启动了已打包的 Drifox.app，其启动脚本可能
-    # 将 QT_PLUGIN_PATH 设置为 App bundle 内 PySide6 的 plugin 路径。该路径
-    # 指向的 QtCore 与开发环境 .venv 中的 PySide6 QtCore 不是同一份二进制，
+    # 将 QT_PLUGIN_PATH 设置为 App bundle 内 PyQt5 的 plugin 路径。该路径
+    # 指向的 QtCore 与开发环境 .venv 中的 PyQt5 QtCore 不是同一份二进制，
     # 导致在 QApplication 创建时加载两套 Qt 框架 → 类重复注册 → 最终触发
     # CoreFoundation __CFDataValidateRange 断言失败（SIGABRT）。
-    # 开发环境下 PySide6 会自动感知自身 plugin 路径，无需外部 QT_PLUGIN_PATH。
+    # 开发环境下 PyQt5 会自动感知自身 plugin 路径，无需外部 QT_PLUGIN_PATH。
     _qt_pp = os.environ.pop("QT_PLUGIN_PATH", "")
 
     from loguru import logger
@@ -198,8 +199,8 @@ def main():
 
     # DPI 缩放设置
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    # 迁移注记（PySide6/Qt6）：高 DPI 永远启用，AA_EnableHighDpiScaling /
-    # AA_UseHighDpiPixmaps 已无效果（设置会触发弃用警告），仅保留 rounding policy。
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     # OpenGL 走 ANGLE(D3D11)：绕开 Intel OpenGL ICD 缺陷路径（见文件顶部说明）。
     # 必须在 QApplication 与 WebEngine 导入之前设置。
     # 由 RenderBackend 推导（见 render_env.compute_settings）：hardware / software
@@ -221,8 +222,7 @@ def main():
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
     # 否则后续模块（如 message_card.py）中延迟导入会导致：
     #   ImportError: QtWebEngineWidgets must be imported before a QCoreApplication instance is created
-    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings  # noqa: F401
 
     # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
@@ -505,8 +505,7 @@ def main():
             return
         _activate_window(win)
 
-    # 锁名带 6 后缀：与 PyQt5 版（Drifox）分开，两版可同时开、互不误判为对方在运行
-    _guard = SingleInstanceGuard("Drifox6")
+    _guard = SingleInstanceGuard("Drifox")
     # 开关关闭时不取锁，允许多实例并行（改动重启生效）
     if Settings.get_instance().enable_single_instance.value and not _guard.try_lock():
         _guard.request_show_window()
@@ -779,7 +778,7 @@ def main():
             logger.warning(f"[ui-test-server] 启动失败（跳过）: {exc}")
     # ── UI 测试服务接线结束 ──
 
-    sys.exit(app.exec())
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":

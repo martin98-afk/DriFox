@@ -54,7 +54,7 @@ samples: list = []
 def drain(ms: int) -> None:
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def probe(viewer, label: str) -> None:

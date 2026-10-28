@@ -2,7 +2,7 @@
 """模型/服务商枚举能力的共享实现（供 ui 与 tool 双 surface 注册同一份 provider）。
 
 背景：插件里渲染「选服务商 / 选模型」下拉此前没有合规通道，四个插件各自
-json.load(~/.drifox/app.config) 的 LLM.SavedProviders 抄同一份样板（git-panel /
+json.load(~/.drifox6/app.config) 的 LLM.SavedProviders 抄同一份样板（git-panel /
 prompt-enhancer / chinese-chess / ip-switcher）。这里把它收成能力，让插件
 不再自写路径判定与 JSON 结构假设。
 
@@ -187,5 +187,5 @@ def _model_caps(model: str, provider_name: str) -> Dict[str, Any]:
 def _as_int_or_none(value: Any) -> Optional[int]:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None

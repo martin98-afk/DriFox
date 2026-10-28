@@ -18,7 +18,7 @@
 
 import pytest
 
-pytest.importorskip("PySide6")
+pytest.importorskip("PyQt5")
 
 from PySide6.QtCore import QRectF, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPixmap  # noqa: E402

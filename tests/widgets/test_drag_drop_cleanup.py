@@ -141,7 +141,7 @@ def test_tray_manager_cleanup_hides_icon():
 
 
 def test_tray_manager_cleanup_swallows_deleted_icon():
-    """已销毁（not sip.isValid）的图标：跳过操作，置空且不抛。"""
+    """已销毁（shiboken6.isValid）的图标：跳过操作，置空且不抛。"""
     import shiboken6 as sip
 
     from app.tray_manager import TrayManager
@@ -150,13 +150,12 @@ def test_tray_manager_cleanup_swallows_deleted_icon():
     icon = MagicMock()
     tm._tray_icon = icon
 
-    # PySide6/shiboken 语义：isValid(obj) False = C++ 对象已删除
-    _orig_isvalid = sip.isValid
-    sip.isValid = lambda obj: False
+    _orig_isdeleted = shiboken6.isValid
+    shiboken6.isValid = lambda obj: True
     try:
         tm.cleanup()
     finally:
-        sip.isValid = _orig_isvalid
+        shiboken6.isValid = _orig_isdeleted
 
     icon.hide.assert_not_called()
     assert tm._tray_icon is None

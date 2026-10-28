@@ -218,7 +218,7 @@ class TestSignalChain:
 
         expand_events = []
         png_events = []
-        # PySide6 信号是非数据描述符，实例属性赋值可安全遮蔽（仅测试期，对象不外泄）
+        # PyQt5 信号是非数据描述符，实例属性赋值可安全遮蔽（仅测试期，对象不外泄）
         page.chartExpandRequested = _FakeSig(expand_events)  # type: ignore[assignment]
         page.saveChartPngRequested = _FakeSig(png_events)  # type: ignore[assignment]
         return page, expand_events, png_events

@@ -28,8 +28,7 @@ from . import _icon_cache_patch as _icon_patch
 _icon_patch._apply_icon_cache_patch()
 
 import shiboken6 as sip
-
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, QThread, Qt, Signal
+from PySide6.QtCore import QObject, QRect, QSize, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
@@ -212,28 +211,23 @@ def _host_parent(widget: QWidget):
 
 
 class _MarketplaceWorker(QObject):
-    """在后台线程执行阻塞操作，通过信号返回结果
+    """在后台线程执行阻塞操作，通过信号返回结果"""
 
-    PySide6 迁移注记：queued 槽内 sender() 在对象生命周期竞争下可能返回 None，
-    故 task 上下文直接作为信号参数传递（随事件拷贝，不依赖 sender）。
-    """
+    finished = Signal(object)
+    error = Signal(str)
 
-    finished = Signal(object, object)  # (result, task)
-    error = Signal(str, object)  # (err, task)
-
-    def __init__(self, fn, task=None, *args, **kwargs):
+    def __init__(self, fn, *args, **kwargs):
         super().__init__()
         self._fn = fn
-        self._task = task
         self._args = args
         self._kwargs = kwargs
 
     def run(self):
         try:
             result = self._fn(*self._args, **self._kwargs)
-            self.finished.emit(result, self._task)
+            self.finished.emit(result)
         except Exception as e:
-            self.error.emit(f"{e}\n{traceback.format_exc()}", self._task)
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
 
 
 class _MarketFetchWorker(QObject):
@@ -359,7 +353,7 @@ def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
     开发环境: 当前目录/.drifox6
-    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox6
     """
     if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
@@ -2338,7 +2332,7 @@ class _ExploreCard(QFrame):
 
     def eventFilter(self, obj, event):
         try:
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
+            if event.type() == event.MouseButtonRelease and event.button() == Qt.LeftButton:
                 if obj is not self._btn:
                     self.detailRequested.emit(self._meta)
                     return True
@@ -3706,17 +3700,13 @@ class MarketplaceCard(QWidget):
         self._dl_worker.moveToThread(self._dl_fetch_thread)
         self._dl_fetch_thread.started.connect(self._dl_worker.run)
         self._dl_worker.finished.connect(self._on_downloads_fetched)
-        self._dl_worker.error.connect(self._on_dl_fetch_error)
+        self._dl_worker.error.connect(lambda e: self._on_downloads_fetched(None))
         self._dl_worker.finished.connect(self._dl_fetch_thread.quit)
         self._dl_worker.error.connect(self._dl_fetch_thread.quit)
         self._dl_worker.finished.connect(self._dl_worker.deleteLater)
         self._dl_worker.error.connect(self._dl_worker.deleteLater)
         self._dl_fetch_thread.finished.connect(self._dl_fetch_thread.deleteLater)
         self._dl_fetch_thread.start()
-
-    def _on_dl_fetch_error(self, _err: str, _task=None):
-        """下载列表拉取失败：以 None 结果进入主线程处理（信号桥）"""
-        self._on_downloads_fetched(None)
 
     def _on_downloads_fetched(self, result):
         """查询完成：回填 downloads；有新增值则重渲染"""
@@ -4478,13 +4468,12 @@ class MarketplaceCard(QWidget):
         # 任务真正开始时行再确认 busy（排队期间可能被其他操作刷新）
         self._set_row_busy(name, task["busy_text"])
 
-        worker = _MarketplaceWorker(task["fn"], task=task)
+        worker = _MarketplaceWorker(task["fn"])
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        # task 随信号参数传递（queued 事件拷贝），槽必定拿到完整任务上下文
-        worker.finished.connect(self._on_task_done_sig)
-        worker.error.connect(self._on_task_error_sig)
+        worker.finished.connect(lambda ok, t=task: self._on_task_done(t, bool(ok)))
+        worker.error.connect(lambda e, t=task: self._on_task_error(t, e))
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -4495,16 +4484,6 @@ class MarketplaceCard(QWidget):
         self._worker = worker  # 兼容字段：最近启动的 worker
         self._worker_thread = thread  # 兼容字段：最近启动的线程
         thread.start()
-
-    def _on_task_done_sig(self, result, task):
-        """信号桥：task 随信号参数传入，主线程执行完成处理"""
-        if task is not None:
-            self._on_task_done(task, bool(result))
-
-    def _on_task_error_sig(self, err: str, task):
-        """信号桥：错误分支（同上，主线程执行）"""
-        if task is not None:
-            self._on_task_error(task, err)
 
     def _on_task_done(self, task: dict, success: bool):
         """任务完成：从活跃表移除 + 分发完成处理 + 启动下一个可运行任务"""
@@ -4957,7 +4936,7 @@ class MarketplaceCard(QWidget):
             card_bg=card_bg,
             border_c=border_c,
         )
-        return dialog.exec() == 1
+        return dialog.exec_() == 1
 
     def _on_manage_done(self, task: dict, success: bool):
         """启用/禁用/卸载完成"""
@@ -5036,17 +5015,13 @@ class MarketplaceCard(QWidget):
         self._rs_worker.moveToThread(self._rs_fetch_thread)
         self._rs_fetch_thread.started.connect(self._rs_worker.run)
         self._rs_worker.finished.connect(self._on_row_states_scanned)
-        self._rs_worker.error.connect(self._on_rs_scan_error)
+        self._rs_worker.error.connect(lambda e: self._on_row_states_scanned(None))
         self._rs_worker.finished.connect(self._rs_fetch_thread.quit)
         self._rs_worker.error.connect(self._rs_fetch_thread.quit)
         self._rs_worker.finished.connect(self._rs_worker.deleteLater)
         self._rs_worker.error.connect(self._rs_worker.deleteLater)
         self._rs_fetch_thread.finished.connect(self._rs_fetch_thread.deleteLater)
         self._rs_fetch_thread.start()
-
-    def _on_rs_scan_error(self, _err: str, _task=None):
-        """行状态扫描失败：以 None 结果进入主线程处理（信号桥）"""
-        self._on_row_states_scanned(None)
 
     def _on_row_states_scanned(self, result):
         """后台扫描完成：更新状态字段 + 只做 UI 段（主线程）"""
@@ -5565,7 +5540,7 @@ class MarketplaceCard(QWidget):
         self._proxy_worker.moveToThread(self._proxy_thread)
         self._proxy_thread.started.connect(self._proxy_worker.run)
         self._proxy_worker.finished.connect(self._on_proxy_test_done)
-        self._proxy_worker.error.connect(self._on_proxy_test_error)
+        self._proxy_worker.error.connect(lambda e: self._on_proxy_test_done(("失败", e)))
         self._proxy_worker.finished.connect(self._proxy_thread.quit)
         self._proxy_worker.error.connect(self._proxy_thread.quit)
         self._proxy_worker.finished.connect(self._proxy_worker.deleteLater)
@@ -5940,7 +5915,7 @@ class MarketplaceCard(QWidget):
         if queued:
             self._status_label.setText(f"已加入更新队列：{queued} 个插件")
             self._status_label.setStyleSheet(
-                "color: #FFA726; font-size: 12px; background: transparent;"
+                f"color: #FFA726; font-size: 12px; background: transparent;"
             )
         else:
             self._status_label.setText("没有待更新的插件")
@@ -6146,7 +6121,7 @@ class MarketplaceCard(QWidget):
             card_bg=getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e"),
             border_c=(getattr(self, "_cached_theme_colors", {}) or {}).get("border", "rgba(128,128,128,0.15)"),
         )
-        if dialog.exec():
+        if dialog.exec_():
             self._active_tags = set(dialog.selected_tags())
             self._sync_tag_buttons()
             if self._plugin_data:
@@ -6185,7 +6160,7 @@ class MarketplaceCard(QWidget):
         dialog.disableRequested.connect(self._async_disable)
         dialog.uninstallRequested.connect(self._async_uninstall)
         dialog.openDirRequested.connect(self._on_open_plugin_dir)
-        dialog.exec()
+        dialog.exec_()
 
     # ── 市场管理 ──
 
@@ -6367,34 +6342,18 @@ class MarketplaceCard(QWidget):
             label.setToolTip("正在重新拉取该市场源…")
 
         self._cleanup_check_worker()
-        self._check_worker = _MarketplaceWorker(
-            lambda d=src_def: mgr.fetch_marketplace(d, force=True), task=name
-        )
+        self._check_worker = _MarketplaceWorker(lambda d=src_def: mgr.fetch_marketplace(d, force=True))
         self._check_thread = QThread(self)
         self._check_worker.moveToThread(self._check_thread)
         self._check_thread.started.connect(self._check_worker.run)
-        self._check_worker.finished.connect(self._on_check_source_sig)
-        self._check_worker.error.connect(self._on_check_source_error_sig)
+        self._check_worker.finished.connect(lambda r: self._on_check_source_done(name, r))
+        self._check_worker.error.connect(lambda e: self._on_check_source_done(name, None, err=e))
         self._check_worker.finished.connect(self._check_thread.quit)
         self._check_worker.error.connect(self._check_thread.quit)
         self._check_worker.finished.connect(self._check_worker.deleteLater)
         self._check_worker.error.connect(self._check_worker.deleteLater)
         self._check_thread.finished.connect(self._check_thread.deleteLater)
         self._check_thread.start()
-
-    def _on_proxy_test_error(self, err: str, _task=None):
-        """代理测速失败：以失败结果进入主线程处理（信号桥）"""
-        self._on_proxy_test_done(("失败", err))
-
-    def _on_check_source_sig(self, result, name):
-        """单源校验完成信号桥（name 随信号参数传入，主线程执行）"""
-        if name is not None:
-            self._on_check_source_done(name, result)
-
-    def _on_check_source_error_sig(self, err: str, name):
-        """单源校验失败信号桥（主线程执行）"""
-        if name is not None:
-            self._on_check_source_done(name, None, err=err)
 
     def _on_check_source_done(self, name: str, result, err: str = ""):
         """单源校验完成：刷新徽标；成功则把数据合并进插件列表
@@ -6511,7 +6470,7 @@ class MarketplaceCard(QWidget):
     def _on_open_plugin_dir(self, path: str):
         """在系统文件管理器中打开插件所在目录（并选中该目录）
 
-        路径可能是相对路径（开发模式下 ``_drifox_dir()`` 返回 ``.drifox6``）：
+        路径可能是相对路径（开发模式下 ``_drifox_dir()`` 返回 ``.drifox``）：
         子进程虽然继承当前工作目录，但显式转绝对路径更稳（应用从别处启动 /
         后续有人改了 CWD 都不会失效）。
         """
@@ -6543,7 +6502,7 @@ class MarketplaceCard(QWidget):
     def _alive(self) -> bool:
         """卡片 C++ 对象是否存活（销毁后迟到回调防护）"""
         try:
-            return sip.isValid(self)
+            return not shiboken6.isValid(self)
         except (RuntimeError, TypeError):
             return False
 
@@ -6560,7 +6519,7 @@ class MarketplaceCard(QWidget):
         if thread is None:
             return
         try:
-            if not sip.isValid(thread):
+            if shiboken6.isValid(thread):
                 # C++ 对象已被前轮 finished→deleteLater 销毁：仅清理悬垂引用
                 try:
                     if thread in _orphan_threads:
@@ -6575,7 +6534,7 @@ class MarketplaceCard(QWidget):
             thread.setParent(None)
             _orphan_threads.append(thread)
             try:
-                thread.finished.connect(self._release_orphan_sig)
+                thread.finished.connect(lambda t=thread: self._release_orphan(t))
             except RuntimeError:
                 pass  # 竞态：前一轮 finished 已排队，无需再连
         except RuntimeError:
@@ -6611,12 +6570,6 @@ class MarketplaceCard(QWidget):
         self._fetch_thread = None
         self._fetch_worker = None
         self._orphan_worker_thread(thread)
-
-    def _release_orphan_sig(self):
-        """孤儿线程回收信号桥（sender 即 thread）"""
-        t = self.sender()
-        if t is not None:
-            self._release_orphan(t)
 
     def _release_orphan(self, thread):
         """孤儿线程 finished 后从模块级列表移除（deleteLater 由原连接负责）"""

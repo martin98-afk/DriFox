@@ -41,14 +41,15 @@ os.environ.pop("MEM_TRACE", None)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench_common as bc  # noqa: E402
 
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings# noqa: F401
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+
 import app.plugins.registries.coding_plan_fetcher as cpf  # noqa: E402
 
 # 用量请求计数探针：替换为无网络回调，仅计数（避免真实 fetch）
@@ -71,7 +72,7 @@ def _flush_deferred_deletes(app):
     关闭的窗口对象树（含其上 ~95 个 tooltip filter 与 WebEngine page）
     会一直存活到进程结束 → RSS 殘留虚高（实测 4 tab 多算 ~6MB，且
     tracemalloc 的 tooltip 增长全部是此假象）。
-    真实运行时 app.exec() 每帧自动处理，此函数使 bench 口径对齐生产语义。"""
+    真实运行时 app.exec_() 每帧自动处理，此函数使 bench 口径对齐生产语义。"""
     for _ in range(3):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         app.processEvents()

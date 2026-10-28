@@ -58,7 +58,7 @@ class TestTabBadge:
         btn = _make_button(_qapp)
         btn.set_badge("7")
         btn.refresh_style()
-        assert btn._badge_label.styleSheet()
+        assert btn._badge_label.property("styleSheet")
         assert btn._badge_text == "7"
 
 

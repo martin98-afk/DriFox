@@ -31,14 +31,14 @@ class FileUndoCard(BaseSettingsCard):
         self._loop = None
         self._build()
 
-    def exec(self):
+    def exec_(self):
         from app.widgets.cards.global_card_controller import get_global_card_controller
         controller = get_global_card_controller()
         if controller is None:
             return self.CANCEL
         controller.show_file_undo(self.operations, self.file_recorder, self._finish)
         self._loop = QEventLoop()
-        self._loop.exec()
+        self._loop.exec_()
         return self._result
 
     def _finish(self, result, selected):

@@ -1,6 +1,6 @@
 # 可复用控件 — 统计卡片 `_StatCard`
 
-> 来自 `context-usage-stats` 等项目提炼的 PySide6 自绘控件。
+> 来自 `context-usage-stats` 等项目提炼的 PyQt5 自绘控件。
 > 索引和设计原则见 `widgets.md`。
 
 ---

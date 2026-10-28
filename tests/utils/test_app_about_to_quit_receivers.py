@@ -9,6 +9,7 @@
 import gc
 
 import pytest
+
 from PySide6.QtWidgets import QApplication
 
 from app.main_widget import OpenAIChatToolWindow
@@ -31,7 +32,7 @@ def test_about_to_quit_methods_exist():
 
 @pytest.mark.usefixtures("qapp")
 def test_app_instance_has_about_to_quit_signal():
-    """QApplication 实例必须暴露 aboutToQuit 信号（PySide6 标准）。"""
+    """QApplication 实例必须暴露 aboutToQuit 信号（PyQt5 标准）。"""
     app = QApplication.instance()
     assert app is not None  # conftest.py 已创建
     assert hasattr(app, "aboutToQuit")

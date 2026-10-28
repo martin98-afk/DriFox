@@ -45,7 +45,7 @@ from PySide6.QtCore import QTimer
 timer = QTimer()
 timer.timeout.connect(app.quit)
 timer.start(800)
-app.exec()
+app.exec_()
 print("D after slide_out: vis=", ov.isVisible(), "geo=", ov.geometry().getRect())
 img = ov.grab().toImage()
 print("D grab=", img.width(), img.height())

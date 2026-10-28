@@ -868,15 +868,7 @@ class UIEngine(BaseEngine):
         # 🛡️ 防御性检查：如果 Executor 已不在流式状态（stop() 已调用或被新 worker 覆盖），
         # 忽略此残留信号（防止 RC3：Qt 事件队列中残留的 finished_with_content 触发 UI 更新）
         if not self._conversation_executor.is_streaming:
-            # 🐛 诊断（结束态残留定位）：本守卫吞掉 stream_finished 会让卡片
-            # 永远等不到 finish_streaming（坞态不归位 / 不折叠 / 高度追踪常转），
-            # 只能靠卡片自愈闸门 6s 后兜底。升级为 WARNING + 打出判定依据，
-            # 便于确认「结束态不更新」是否源于此处。定位后降级回 debug。
-            logger.warning(
-                "[UIEngine] 丢弃 stream_finished（executor.is_streaming=False）"
-                f" current_worker={type(self._conversation_executor._current_worker).__name__}"
-                " → 卡片结束态需靠自愈闸门兜底"
-            )
+            logger.debug("[UIEngine] Ignoring stale stream_finished (stream already stopped)")
             return
 
         self._emit("stream_finished", response)

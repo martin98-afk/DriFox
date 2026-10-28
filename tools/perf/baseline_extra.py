@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-DriFox 性能基线扩展脚本（PySide6 GUI）— 补充 baseline.py 未覆盖的维度
+DriFox 性能基线扩展脚本（PyQt5 GUI）— 补充 baseline.py 未覆盖的维度
 
 覆盖 leader 子任务 #3 重点指标缺口：
   A) 1000 项 QListWidget 滚动平均帧率（交互态，列表已加载、事件循环空闲后驱动）

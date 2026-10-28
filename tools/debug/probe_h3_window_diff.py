@@ -245,7 +245,7 @@ def main() -> int:
     QTimer.singleShot(30_000, _finish)
     QTimer.singleShot(90_000, app.quit)
 
-    rc = app.exec()
+    rc = app.exec_()
     try:
         tm.cleanup()
     except Exception:  # noqa: BLE001

@@ -48,7 +48,7 @@ def step1() -> None:
 
 def step2() -> None:
     card.append_tool_result(
-        tool_name="search", result="检索结果：DriFox 是 PySide6 桌面应用。", tool_call_id="tool_1"
+        tool_name="search", result="检索结果：DriFox 是 PyQt5 桌面应用。", tool_call_id="tool_1"
     )
     print("tool result ok", flush=True)
     QTimer.singleShot(800, step3)
@@ -97,7 +97,7 @@ def done() -> None:
 
 QTimer.singleShot(2500, step1)
 QTimer.singleShot(60000, app.quit)
-app.exec()
+app.exec_()
 print("quit ok", flush=True)
 sys.stdout.flush()
 import os

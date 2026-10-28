@@ -13,7 +13,7 @@
 3. 缓存必须感知配置（主题 / 字号），触顶走 LRU 而不是整体 clear
 4. 缓存不得串味：同文本二次调用结果一致；清空缓存后仍等价
 
-不 import Qt 绑定的部分（纯函数层）无 GUI 依赖；涉及 viewer 的用例单独构造。
+不 import PyQt5 的部分（纯函数层）无 GUI 依赖；涉及 viewer 的用例单独构造。
 """
 
 import itertools

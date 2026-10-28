@@ -199,7 +199,7 @@ def main() -> None:
         view.loadFinished.connect(lambda _ok: (state.__setitem__("ready", True), QTimer.singleShot(200, run_next)))
 
     QTimer.singleShot(0, start)
-    app.exec()
+    app.exec_()
 
 
 if __name__ == "__main__":

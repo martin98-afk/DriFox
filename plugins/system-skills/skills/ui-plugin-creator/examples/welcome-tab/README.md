@@ -30,9 +30,9 @@ welcome-tab/
 
 ## 如何使用
 
-1. 复制本目录到 `~/.drifox6/plugins/welcome-tab-example/`
+1. 复制本目录到 `~/.drifox/plugins/welcome-tab-example/`
 2. 搜索 `[改名]` 标记：plugin_name / mode_key / label 三处对齐
 3. 重启后在欢迎卡片看到「⭐ 示例」tab；在 `_render.py` 里替换成你的内容
 4. tab 的显隐跟随插件的启用/禁用，无需额外代码
 
-> Qt 绑定：本示例渲染层纯 HTML，无 Qt 导入。若需 Qt（如 _fetcher 用 QThread），DriFox 当前使用 **PySide6**。
+> Qt 绑定：本示例渲染层纯 HTML，无 Qt 导入。若需 Qt（如 _fetcher 用 QThread），DriFox 当前使用 **PyQt5**（2026-09 实测仓库现状）。

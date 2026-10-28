@@ -29,10 +29,11 @@
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtCore import Qt
 Qt.AA_ShareOpenGLContexts = Qt.AA_ShareOpenGLContexts
 try:
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
+    from PySide6.QtWebEngineCore import QWebEnginePage  # noqa: F401
     from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 except Exception:
     pass

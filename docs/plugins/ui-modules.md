@@ -120,7 +120,7 @@ class MyCustomInputCardModule(UIModule):
     module_id = "input_card"
 
     def build(self, host) -> None:
-        from PyQt5.QtWidgets import QPlainTextEdit, QVBoxLayout, QWidget
+        from PySide6.QtWidgets import QPlainTextEdit, QVBoxLayout, QWidget
 
         # 产物属性挂回 host（与系统默认同名：input_area 等）
         container = QWidget(host)
@@ -157,7 +157,7 @@ registry.unload_plugin("my-plugin")
 - [ ] qapp 测试模板：
 
   ```python
-  from PyQt5.QtWidgets import QVBoxLayout, QWidget
+  from PySide6.QtWidgets import QVBoxLayout, QWidget
   from app.widgets.ui_composition import compose
 
   def test_module_contract(qapp, fresh_registry):

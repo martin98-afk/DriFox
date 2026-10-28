@@ -155,7 +155,7 @@ class ToolControlCardContent(QWidget):
         deleteLater 重建），而 PyQt wrapper 仍存活（weakref 未失效），
         此时访问 _registryChanged 会抛 RuntimeError。isdeleted 检查直接跳过。
         """
-        if not sip.isValid(self):
+        if shiboken6.isValid(self):
             return
         self._registryChanged.emit(version)
 

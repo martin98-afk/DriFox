@@ -157,7 +157,7 @@ class TestBehavioralWithRealQt:
         assert w.parent() is parent
         w.setParent(None)
         assert w.parent() is None
-        # 关键：此刻 sip.isdeleted 仍为 False → 现有存活探测拦不住
+        # 关键：此刻 shiboken6.isValid 仍为 False → 现有存活探测拦不住
         import shiboken6 as sip
 
-        assert sip.isValid(w) is False
+        assert shiboken6.isValid(w) is False

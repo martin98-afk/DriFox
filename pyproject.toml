@@ -8,7 +8,7 @@ license = {text = "GPL-3.0-or-later"}
 authors = [
     {name = "98-afk", email = "98-afk@drifox.com"}
 ]
-keywords = ["ai", "chat", "llm", "desktop", "pyside6"]
+keywords = ["ai", "chat", "llm", "desktop", "pyqt5"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
@@ -22,8 +22,9 @@ classifiers = [
 
 # 核心运行时依赖
 dependencies = [
-    "PySide6>=6.9",
-    "PySide6-Fluent-Widgets",
+    "PyQt5>=5.15.0,<5.15.16",
+    "PyQtWebEngine>=5.15.0,<5.15.7",
+    "PyQt-Fluent-Widgets",
     "loguru>=0.7.0",
     "openai>=1.0.0",
     "httpx>=0.25.0",
@@ -49,7 +50,9 @@ dependencies = [
     # LSP 集成 (Language Server Protocol)
     "pygls>=2.0.0",
     "lsprotocol",
-    # Windows 平台 pywinpty 仅提供 win_amd64 wheel
+    # Windows 平台上 pyqt5-qt5 / pyqtwebengine-qt5 仅 5.15.2 提供 win_amd64 wheel
+    "pyqt5-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
+    "pyqtwebengine-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
     "pywinpty>=3.0.5 ; sys_platform == 'win32'",
     "keyring>=25.0.0",
     # keyring 的 Windows 凭证库后端（WinVaultKeyring）需要 win32cred。keyring 会优先
@@ -123,8 +126,6 @@ quote-style = "double"
 # pytest 配置
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# 仓库根进 sys.path：plugins.* 直导（连字符目录名）不依赖 drifox 是否 editable 安装
-pythonpath = ["."]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
 # tests/ui 为 A 档全链 UI 测试（构建完整主窗口，重）：默认收集排除，

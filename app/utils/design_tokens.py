@@ -1283,8 +1283,6 @@ qcolor_from_token = _rgba_to_qcolor
 # 模块级状态：供 monkey-patched qfluentwidgets ToolTip.showEvent 读取当前主题色
 _tooltip_theme: dict = {}
 _tooltip_qf_patched: bool = False
-# qfluentwidgets SpinBox 的 lineEdit 尺寸补丁标志（见 _ensure_qfluentwidgets_spinbox_patch）
-_spinbox_qf_patched: bool = False
 
 
 def _apply_tooltip_style() -> None:
@@ -1356,7 +1354,6 @@ def _apply_tooltip_style() -> None:
 
         # ── 3) qfluentwidgets ToolTip：monkey-patch showEvent ──
         _ensure_qfluentwidgets_tooltip_patch()
-        _ensure_qfluentwidgets_spinbox_patch()
     except Exception:
         pass
 
@@ -1408,46 +1405,6 @@ def _ensure_qfluentwidgets_tooltip_patch() -> None:
             _original_show(self, event)
 
         ToolTip.showEvent = _patched_show_event
-    except Exception:
-        pass
-
-def _ensure_qfluentwidgets_spinbox_patch() -> None:
-    """修 qfluentwidgets SpinBox 输入区被压成 1px（PySide6 特有）。
-
-    ``SpinBoxBase.__init__`` 给 QAbstractSpinBox 装了一个只放两个微调按钮的
-    ``QHBoxLayout(self)``；lineEdit 是 QAbstractSpinBox 的内部子控件、不在该布局里，
-    Qt6 的布局求解把它压到最小宽度 1px —— 数值本身存在（``lineEdit().text()`` 正常），
-    但用户只能看到空白输入框。Qt5 下同一份 qfluentwidgets 无此问题。
-
-    修法：给 lineEdit 设最小宽度 = 首个微调按钮左边界 - 间隙，并在 resizeEvent
-    后重算（宽度随卡片布局变化，一次性的固定值会在拉伸后失效）。
-    """
-    global _spinbox_qf_patched
-    if _spinbox_qf_patched:
-        return
-    _spinbox_qf_patched = True
-    try:
-        from qfluentwidgets import SpinBox
-
-        _original_resize = SpinBox.resizeEvent
-
-        def _patched_resize(self, event):
-            _original_resize(self, event)
-            try:
-                le = self.lineEdit()
-                btn = getattr(self, "upButton", None)
-                if le is None or btn is None:
-                    return
-                # 微调按钮左边界留 6px 内边距；按钮未布局时退回控件宽度的一半
-                target = btn.x() - 6
-                if target <= 1:
-                    target = max(1, self.width() // 2)
-                if le.minimumWidth() != target:
-                    le.setMinimumWidth(target)
-            except Exception:
-                pass
-
-        SpinBox.resizeEvent = _patched_resize
     except Exception:
         pass
 
@@ -1553,11 +1510,3 @@ def make_scroll_content_opaque(content, fg: str, alpha: int, backdrop: str) -> b
         return True
     except RuntimeError:
         return False  # widget 已销毁
-
-
-# 模块导入期无条件装 SpinBox 尺寸补丁：不依赖任何主题刷新路径先跑过。
-# 补丁本身幂等（_spinbox_qf_patched 守卫），重复调用无副作用。
-try:
-    _ensure_qfluentwidgets_spinbox_patch()
-except Exception:  # noqa: BLE001 - qfluentwidgets 缺失时整个补丁无意义
-    pass

@@ -27,7 +27,13 @@ registry 驱动 LLM schema / 图标 / 分组 / 别名映射，**增删改热生�
 新增工具三步：
 1. 在 `plugins/<name>/tools/<模块>.py` 写实现 + `register(registry)`；系统工具放 `plugins/system-tools/tools/`。
 2. 校验 schema 与 danger 分级（走 `tool_classifier`）。
-3. 更新 Agent 的 `tools:` 权限（`.drifox6/plugins/<p>/agents/*.md` 或 `plugins/system-agents/agents/`）。
+3. 更新 Agent 的 `tools:` 权限（`.drifox/plugins/<p>/agents/*.md` 或 `plugins/system-agents/agents/`）。
+
+**返回值契约**：`ToolResult(...)` 除 `content/diff/anchors/artifacts/data` 外，`end_turn=True`
+表示**本次工具返回后不再发起下一轮 API 调用**（主对话 worker 与子智能体 worker 同一语义）。
+用于「本轮必须结束」的场景：交接类工具写完即换会话、批处理工具已跑完整批、脚手架建完项目。
+不设为 True 时模型常在工具返回后继续调工具，凡依赖 `_on_stream_finished` 的后续动作
+（典型：动作队列的 `session.interrupt/new/send` 三连）会一直等不到 drain。
 
 **返回值契约**：`ToolResult(...)` 除 `content/diff/anchors/artifacts/data` 外，`end_turn=True`
 表示**本次工具返回后不再发起下一轮 API 调用**（主对话 worker 与子智能体 worker 同一语义）。

@@ -36,7 +36,7 @@ class _Node(QObject):
 def _pump_once():
     loop = QEventLoop()
     QTimer.singleShot(0, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def _wire(style):

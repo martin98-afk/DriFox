@@ -59,7 +59,7 @@ def _wait_threads(card, timeout_ms=5000):
     card.fetchSuccess.connect(loop.quit)
     card.fetchFailed.connect(loop.quit)
     QTimer.singleShot(timeout_ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def test_models_hook_receives_form_values(card_with_hook, monkeypatch):

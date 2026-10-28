@@ -5,7 +5,7 @@
 - _welcome_card_cache 仅按 _window_id 缓存，但卡片内容依赖
   _current_project / _current_agent。
 - 切换项目/智能体/新建会话时必须显式失效，否则会展示上一个项目/智能体的陈旧数据。
-- 之前唯一的失效路径 sip.isdeleted(cached) 存在竞态：
+- 之前唯一的失效路径 shiboken6.isValid(cached) 存在竞态：
   _clear_chat_area 之后 QTimer.singleShot(0, _show_initial_welcome) 可能
   在 deleteLater 实际执行前先触发，导致缓存命中返回旧卡片。
 
@@ -89,22 +89,19 @@ class TestInvalidateWelcomeCardMethod:
         assert args[0].arg == "self"
 
     def test_method_uses_sip_isdeleted(self):
-        """方法内应检查 sip.isdeleted / shiboken6 isValid（防御性双保险）"""
+        """方法内应检查 shiboken6.isValid（防御性双保险）"""
         cls = _get_target_class()
         method = _get_method(cls, "_invalidate_welcome_card")
         assert method is not None
         src = ast.unparse(method)
-        # PySide6/shiboken6 下 isdeleted 已由 isValid 表达（语义等价反转）
-        assert (
-            "isdeleted" in src or "isValid" in src
-        ), "失效方法应检查 sip.isdeleted / sip.isValid"
+        assert "isdeleted" in src, "失效方法应检查 shiboken6.isValid"
 
 
 class TestInvalidationCallSites:
     """关键变更点已调用 _invalidate_welcome_card()"""
 
     def test_create_new_session_invalidates(self):
-        """_create_new_session 入口处失效（避免 sip.isdeleted 竞态）"""
+        """_create_new_session 入口处失效（避免 shiboken6.isValid 竞态）"""
         cls = _get_target_class()
         method = _get_method(cls, "_create_new_session")
         assert method is not None
@@ -163,7 +160,7 @@ class TestInvalidationCallSites:
         assert _method_calls(method, "_invalidate_welcome_card"), (
             "_display_current_session 显示欢迎卡片前未调用 _invalidate_welcome_card()"
         )
-        # 失效必须在 _show_initial_welcome 之前（消除 sip.isdeleted 竞态）
+        # 失效必须在 _show_initial_welcome 之前（消除 shiboken6.isValid 竞态）
         src = ast.unparse(method)
         invalidate_pos = src.find("_invalidate_welcome_card")
         show_pos = src.find("_show_initial_welcome")
@@ -228,7 +225,7 @@ class TestInvalidationBehavior:
         assert cached.deleteLater.called, "应调用 cached.deleteLater()"
 
     def test_handles_sip_deleted_widget(self, _qt_app):
-        """sip.isdeleted 返回 True 时不应再操作 widget"""
+        """shiboken6.isValid 返回 True 时不应再操作 widget"""
         from PySide6.QtCore import QObject
 
         widget = self._make_widget()
@@ -236,7 +233,7 @@ class TestInvalidationBehavior:
         widget._welcome_card_cache[widget._window_id] = cached
         # 主动释放
         cached.deleteLater()
-        # 立即调用：sip.isdeleted 可能为 False（异步），也可能为 True
+        # 立即调用：shiboken6.isValid 可能为 False（异步），也可能为 True
         # 不管哪种情况，都不应抛异常
         widget._invalidate_welcome_card()
         # 缓存必然被 pop
@@ -389,7 +386,7 @@ class TestRegressionScenarios:
         修复前流程：
           _create_new_session -> _clear_chat_area (deleteLater 异步)
                               -> QTimer.singleShot(0, _show_initial_welcome)
-          → 若 singleShot 先于 deleteLater 执行，sip.isdeleted=False，缓存命中旧卡片
+          → 若 singleShot 先于 deleteLater 执行，shiboken6.isValid=False，缓存命中旧卡片
 
         修复后流程：
           _create_new_session -> _invalidate_welcome_card (同步，pop+delete)
@@ -407,7 +404,7 @@ class TestRegressionScenarios:
 
         assert invalidate_pos != -1, "_create_new_session 未调用 _invalidate_welcome_card"
         assert clear_pos != -1, "_create_new_session 未调用 _clear_chat_area"
-        # 失效必须在清空之前（消除 sip.isdeleted 竞态的关键）
+        # 失效必须在清空之前（消除 shiboken6.isValid 竞态的关键）
         assert invalidate_pos < clear_pos, (
             "失效调用必须在 _clear_chat_area 之前，否则 QTimer.singleShot 仍可能在 deleteLater 实际执行前触发"
         )

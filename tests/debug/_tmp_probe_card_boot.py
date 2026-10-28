@@ -41,7 +41,7 @@ def done() -> None:
 
 QTimer.singleShot(2500, done)
 QTimer.singleShot(20000, app.quit)
-app.exec()
+app.exec_()
 print("quit ok", flush=True)
 sys.stdout.flush()
 import os

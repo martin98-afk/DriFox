@@ -33,9 +33,46 @@ _ERROR_KEEP_MULTIPLIER_DEFAULT = 4  # 错误结果保留倍数默认值（与 pl
 
 
 def _tool_api(kind: str = "read"):
+    """工具注册表只读面 / 注入面。
+
+    优先用本模块的 ``ToolRegistry`` 符号（若存在：插件可注入替身，测试常用），
+    否则经能力池（tool.read / tool.inject）。两者都不可用时返回 None。
+    """
+    cap = "tool.inject" if kind == "inject" else "tool.read"
+    reg = globals().get("ToolRegistry")
+    if reg is not None:
+        try:
+            inst = reg.get_instance()
+            return _registry_api(inst, kind)
+        except Exception:
+            pass
+    try:
+        from app.plugins.capabilities.bootstrap import ensure_registered
+        from app.plugins.capabilities.registry import CapabilityRegistry
+
+        ensure_registered("tool")
+        plugin = ""
+        try:
+            from pathlib import Path
+
+            parts = Path(__file__).resolve().parts
+            if "plugins" in parts:
+                plugin = parts[parts.index("plugins") + 1]
+        except Exception:
+            pass
+        pool = CapabilityRegistry.get_instance().build_pool(
+            surface="tool", host=None, plugin=plugin, declared={cap, "state.kv", "plugin.log"}
+        )
+        if cap not in pool:
+            return None
+        return pool[cap]()
+    except Exception:
+        return None
+
+
+def _tool_api(kind: str = "read"):
     """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
     return tool_registry_api(kind, module_globals=globals())
-
 
 def _count_tokens(messages: List[Dict[str, Any]]) -> int:
     try:
@@ -49,9 +86,7 @@ class ToolPruneTier:
     label = "工具结果截断"
     order = 20
     # 设置页细项行副标题（component_items 走 AST 静态读取，仅支持字面量）
-    description = (
-        "超阈值工具结果保留头尾、省略中段并附重查指引；报错结果阈值×4 优先保留错误栈；阈值为 0 时按模型上下文容量自动定"
-    )
+    description = "超阈值工具结果保留头尾、省略中段并附重查指引；报错结果阈值×4 优先保留错误栈；阈值为 0 时按模型上下文容量自动定"
     stages = frozenset(ALL_STAGES)
     cache_impact = CACHE_NONE
 
@@ -59,10 +94,8 @@ class ToolPruneTier:
         base = self._limit(view)
         mult = self._error_mult()
         skip = prune_skip_tools()
-        # 逐消息判定用的注册表只读面在循环外取一次，避免每条消息重建能力池
-        api = _tool_api("read")
         for m in view.messages:
-            if m.get("role") != "tool" or self._skip(m.get("name", ""), skip, api):
+            if m.get("role") != "tool" or self._skip(m.get("name", ""), skip):
                 continue
             c = m.get("content")
             if isinstance(c, str) and len(c) > self._limit_for(m, base, mult):
@@ -73,14 +106,13 @@ class ToolPruneTier:
         base = self._limit(view)
         mult = self._error_mult()
         skip = prune_skip_tools()
-        api = _tool_api("read")
         result: List[Dict[str, Any]] = []
         changed = 0
         pruned_errors = 0
         for m in view.messages:
             if m.get("role") == "tool" and isinstance(m.get("content"), str):
                 name = m.get("name", "")
-                if self._skip(name, skip, api):
+                if self._skip(name, skip):
                     result.append(m)
                     continue
                 new_content = prune_tool_result(m["content"], max_len=self._limit_for(m, base, mult), tool_name=name)
@@ -122,14 +154,13 @@ class ToolPruneTier:
         return base * mult if cls._is_error(m) else base
 
     @staticmethod
-    def _skip(name: str, skip: frozenset = frozenset(), api: Any = None) -> bool:
-        """免裁剪判定：工具自声明（metadata["no_prune"]）∪ 插件配置名单。
-
-        api 为注册表只读面，由调用方在循环外取一次传入。
-        """
+    def _skip(name: str, skip: frozenset = frozenset()) -> bool:
+        """免裁剪判定：工具自声明（metadata["no_prune"]）∪ 插件配置名单。"""
         if not name:
             return False
         try:
+            api = _tool_api("read")
+
             if api and api["is_no_prune"](name):
                 return True
         except Exception:

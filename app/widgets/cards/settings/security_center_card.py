@@ -299,9 +299,7 @@ class SecurityCenterCard(QWidget):
             "如 evil.com",
         )
 
-        # 名单编辑区以裸 editor 挂入下方分组卡（分组自身即折叠层，不再各自套折叠卡）
-
-        # ── 数据安全卡 ──
+        # ── 数据安全卡（开关先构造，稍后由「删除与备份」分组收纳）──
         self.delete_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "删除审批",
@@ -316,7 +314,7 @@ class SecurityCenterCard(QWidget):
         self.delete_switch.setChecked(bool(self._cfg.get("delete_protection")))
         self.delete_switch.checkedChanged.connect(self._on_delete_toggled)
 
-        # 垃圾桶软删除开关（与审批独立；外层收纳，挂载见下方首屏结构）
+        # 垃圾桶软删除开关（与审批独立；组内收纳，见 _build_data_group）
         self.trash_switch = SwitchSettingCard(
             FIF.DELETE if FIF else None,
             "垃圾桶",
@@ -329,7 +327,7 @@ class SecurityCenterCard(QWidget):
         self.trash_switch.setChecked(bool(self._cfg.get("delete.trash_enabled")))
         self.trash_switch.checkedChanged.connect(self._on_trash_toggled)
 
-        # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不进垃圾箱
+        # 删除豁免：这些路径内的删除不弹审批（如 tests/），也不做快照
         self._delete_exempt = _ListEditorCard(
             "删除豁免路径",
             "delete_exempt",
@@ -337,7 +335,7 @@ class SecurityCenterCard(QWidget):
             tip="这些目录内的删除不再弹审批，也不进垃圾箱。相对路径按工作目录解析（如 tests/）。"
             "\n⚠ 与文件黑名单重叠时以黑名单为准（拉黑的路径不会被本豁免放行）。",
         )
-        # 删除豁免以裸 editor 挂入「删除豁免与备份」分组（分组自身即折叠层）
+
         self.backup_dir_card = PushSettingCard(
             "打开目录",
             FIF.FOLDER if FIF else None,
@@ -347,9 +345,8 @@ class SecurityCenterCard(QWidget):
             "每次改文件前自动留一份原文件",
         )
         self.backup_dir_card.clicked.connect(lambda: self._open_backup_dir())
-        # 备份卡不再散装挂载（由「编辑类备份」分组收纳）
 
-        # ── EU-G12：网络外传检测开关 ──
+        # ── EU-G12：网络外传检测开关（外层）──
         self.net_switch = SwitchSettingCard(
             FIF.GLOBE if FIF else None,
             "网络外传检测",
@@ -529,9 +526,6 @@ class SecurityCenterCard(QWidget):
 
         ⚠ 先强制 editor 自身布局激活再逐 widget 求和（原版 _adjustViewSize 策略）：
         viewLayout.sizeHint() 有陈旧缓存（子项变化不传播，实测恒旧值），不可用。
-
-        editors 一律传裸 ``_ListEditorCard``（不传 _expand 出来的折叠卡）：折叠卡
-        自身收起时高度不涨，外层分组的条目增删高度联动会失效。
         """
         from PySide6.QtCore import QTimer
 
@@ -585,7 +579,6 @@ class SecurityCenterCard(QWidget):
             "删除与恢复",
             "哪些目录不必问 · 误删了从哪里找回",
         )
-        # 开关（删除审批 / 垃圾桶）已全部外提，组内只留明细，避免同一个开关出现两处
         card.addGroupWidget(self._delete_exempt)
         card.addGroupWidget(self._build_snapshot_row())
         self._bind_editor_growth(card, self._delete_exempt)
@@ -1062,7 +1055,7 @@ class SecurityCenterCard(QWidget):
                 content=f"将永久删除 {count} 项删除备份，清空后无法找回。确认继续？",
                 parent=self.window(),
             )
-            if not dialog.exec():
+            if not dialog.exec_():
                 return
         except Exception as e:  # noqa: BLE001 - 对话框不可用时保守放弃
             logger.warning(f"[SecurityCenter] 快照清空确认框不可用，已放弃: {e}")

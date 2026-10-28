@@ -20,8 +20,7 @@ def _make_worker(result_obj):
     """最小可用 worker：__new__ 绕过 __init__，仅注入 _execute_tool 依赖的状态。"""
     worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
     w = worker_cls.__new__(worker_cls)
-    # PySide6/shiboken 拒绝对非直接基类调 QObject.__init__（报 isn't a direct base
-    # class），而 SignalInstance 描述符在未初始化实例上仍可访问（emit 已被 stub 掉）。
+    QObject.__init__(w)  # 不补 QObject 初始化时 Signal 描述器会报父类未初始化
     w._backup_delete_targets = lambda arguments: None
     w._should_run_hook = lambda ev: True
     w._is_cancelled = False

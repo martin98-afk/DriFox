@@ -23,7 +23,7 @@
 - 业务类（OpenAIChatToolWindow / AttachmentChip / QWebEngineView）在首次 snapshot / start 时
   **惰性导入**，导入路径经 grep 校准（见 TRACK_CLASSES 注释）。导入失败抛清晰错误。
 - 为避免 `QtWebEngineWidgets must be imported before a QCoreApplication instance is created`，
-  惰性导入前显式导入 PySide6 WebEngine 作兜底（在已初始化的 app 进程中该前提已满足）。
+  惰性导入前显式导入 PyQt5 WebEngine 作兜底（在已初始化的 app 进程中该前提已满足）。
 
 集成点（业务代码插入留待修复阶段，本脚本不修改任何业务代码）：
 - tools/mem_snapshot 已在 add_window / _close_window_at 等生命周期边界预留调用位置，
@@ -65,7 +65,7 @@ except ImportError as exc:  # pragma: no cover
 # ── 追踪目标（导入路径经 grep 校准于 D:/work/DriFox）──
 # OpenAIChatToolWindow -> app/main_widget.py:1008   class OpenAIChatToolWindow(ToolWindow)
 # AttachmentChip       -> app/widgets/bottom_input_area.py:1927   class AttachmentChip(QFrame)
-# QWebEngineView       -> PySide6.QtWebEngineWidgets（Qt 内置，非业务类，用于观察 WebView 实例堆积）
+# QWebEngineView       -> PyQt5.QtWebEngineWidgets（Qt 内置，非业务类，用于观察 WebView 实例堆积）
 TRACK_CLASSES: List[Tuple[str, str]] = [
     ("app.main_widget", "OpenAIChatToolWindow"),
     ("app.widgets.bottom_input_area", "AttachmentChip"),
@@ -98,7 +98,7 @@ def _resolve_track_classes() -> List[type]:
 
     业务模块（app.main_widget 等）在 import 时不应创建窗口；为避免
     'QtWebEngineWidgets must be imported before a QCoreApplication instance is created'，
-    先确保 PySide6 WebEngine 已被导入（在已初始化的 app 进程中该前提通常已满足）。
+    先确保 PyQt5 WebEngine 已被导入（在已初始化的 app 进程中该前提通常已满足）。
     """
     _ensure_project_root()
     try:
@@ -291,6 +291,7 @@ if __name__ == "__main__":
     try:
         from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
         from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
     except Exception as e:  # pragma: no cover
         print(f"[self_check] Qt/WebEngine 预导入跳过（非 Qt 环境）: {e}")

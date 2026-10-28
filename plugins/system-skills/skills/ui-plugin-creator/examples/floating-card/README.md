@@ -30,9 +30,9 @@ floating-card/
 
 ## 如何使用
 
-1. 复制本目录到 `~/.drifox6/plugins/floating-card-example/`
+1. 复制本目录到 `~/.drifox/plugins/floating-card-example/`
 2. 搜索 `[改名]` / `[惯例]` 标记：插件名、card_id、objectName、sys.modules 前缀四处对齐
 3. 重启后输入 `/floating-card-example` 打开卡片
 4. 在 `ExampleCard` 里填你自己的界面
 
-> Qt 绑定：本示例按仓库现状使用 **PySide6**。新插件动手前建议 `grep "from PySide6" plugins/` 复核一次。
+> Qt 绑定：本示例按仓库现状使用 **PyQt5**（2026-09 实测）。新插件动手前建议 `grep "from PyQt5" plugins/` 复核一次。

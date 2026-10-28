@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal  # noqa: E402
 
 
@@ -40,12 +41,12 @@ class _StubViewer(QObject):
 def _pump_once():
     loop = QEventLoop()
     QTimer.singleShot(0, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def _run_console(viewer, message):
     """未绑定调用真实实现（self=替身；ConsoleMonitorPage 为回调入口类）。"""
-    from PySide6.QtWebEngineCore import QWebEnginePage
+    # (removed empty import from PySide6.QtWebEngineWidgets)
 
     from app.widgets.message_card import ConsoleMonitorPage
 
@@ -109,8 +110,8 @@ def test_deferred_emit_dropped_when_sender_destroyed(qapp, capsys):
     emit → ACCESS_VIOLATION（2026-09-16 22:46:30 例，崩在
     ``Qt5Core!QObject::signalsBlocked`` +0x4）。
 
-    这里用 ``shiboken6.delete`` 显式销毁 sender 模拟该窗口：回调一旦执行就会抛
-    RuntimeError，PySide 会把它打到 stderr —— 据此断言「没有执行」。
+    这里用 ``sip.delete`` 显式销毁 sender 模拟该窗口：回调一旦执行就会抛
+    RuntimeError，PyQt 会把它打到 stderr —— 据此断言「没有执行」。
     """
     import shiboken6 as sip
 

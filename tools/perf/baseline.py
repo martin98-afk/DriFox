@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-DriFox 性能基线测试脚本（PySide6 GUI）
+DriFox 性能基线测试脚本（PyQt5 GUI）
 
 无侵入式性能基线采集：启动耗时 / 内存基线 / 帧率 / 长时运行内存增长。
 所有插桩通过运行时 monkey-patch 完成，不修改任何业务代码。
@@ -34,7 +34,7 @@ import time
 import tracemalloc
 from datetime import datetime, timezone
 
-# ---- 必须在任何 PySide6 导入前设置 Qt 平台 ----
+# ---- 必须在任何 PyQt5 导入前设置 Qt 平台 ----
 # 默认 offscreen 以便无显示器环境可复现；可用环境变量或父进程传入覆盖。
 if "QT_QPA_PLATFORM" not in os.environ:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -204,7 +204,7 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
         win.setWindowTitle("DriFox-baseline-synthetic")
         win.resize(800, 600)
         win.show()
-        app.exec()
+        app.exec_()
         # 立即退出，跳过 Qt 原生拆卸（offscreen 下拆卸会触发原生层崩溃）
         _emit_and_exit(state, mode, entry, synthetic, enable_tracemalloc, proc)
 

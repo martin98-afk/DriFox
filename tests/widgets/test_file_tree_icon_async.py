@@ -82,7 +82,7 @@ def _pump(ms):
     """泵事件循环 ms 毫秒（等后台任务 + 防抖广播落地）"""
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 @pytest.fixture(autouse=True)

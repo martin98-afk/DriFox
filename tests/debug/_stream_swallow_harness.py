@@ -34,11 +34,11 @@ from app.widgets import card_viewers as _cv  # noqa: E402
 from app.widgets import message_card as _mcmod  # noqa: E402
 from app.widgets.message_card import CodeWebViewer, MessageCard  # noqa: E402
 
-# 桩对象不是 QObject，屏蔽 shiboken6 存活检测（源码以 shiboken6.isValid 判活）
-_isvalid_stub = types.SimpleNamespace(isValid=lambda o: True)
-mc.shiboken6 = _isvalid_stub
-_cv.shiboken6 = _isvalid_stub
-_mcmod.shiboken6 = _isvalid_stub
+# 桩对象不是 QObject，屏蔽各模块内的 sip 存活检测
+_sip_stub = types.SimpleNamespace(isdeleted=lambda o: False)
+mc.sip = _sip_stub
+_cv.sip = _sip_stub
+_mcmod.sip = _sip_stub
 
 
 _VOID_TAGS = {"br", "img", "hr", "input", "meta", "link", "source"}

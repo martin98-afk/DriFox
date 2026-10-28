@@ -84,7 +84,7 @@ class _FakePage(QWidget):
 def pump(ms=100):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 def _wrap_timed(owner, name: str, tag: str):
@@ -292,7 +292,7 @@ try:
 except Exception as e:
     log(f"  ✗ 守卫失效: {type(e).__name__}: {e}")
 
-# 模拟共享池任务晚归：直接对已销毁窗口的 pyqtSignal emit
+# 模拟共享池任务晚归：直接对已销毁窗口的 Signal emit
 try:
     _wb_ref._topic_summary_ready.emit({"topic_summary": "信号晚归"}, None)
     log("  ✓ _topic_summary_ready.emit 直接发射（信号层不崩）")

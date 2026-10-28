@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """团队框"新建任务" + "快速新建成员"按钮测试（F14 返工版）
 
 覆盖范围：
@@ -14,7 +14,7 @@
 设计说明：
 - qapp 由 pytest-qt 提供（session 级 QApplication）
 - 重依赖（backend/QWebEngine/TrayManager）一律用 __new__ 绕过 + MagicMock 隔离
-- 菜单交互通过 patch PySide6.QtWidgets.QMenu 模拟用户选择
+- 菜单交互通过 patch PyQt5.QtWidgets.QMenu 模拟用户选择
 """
 
 from unittest.mock import MagicMock, patch
@@ -772,7 +772,7 @@ def _setup_add_member_menu_patch(choice):
         return action
 
     fake_menu.addAction.side_effect = _make_action
-    fake_menu.exec = MagicMock(side_effect=lambda pos: actions_by_text.get(choice))
+    fake_menu.exec_ = MagicMock(side_effect=lambda pos: actions_by_text.get(choice))
     return fake_menu_cls, actions_by_text
 
 
@@ -988,7 +988,7 @@ def test_create_fresh_window_aborts_on_add_window_failure(qapp):
     inst = _make_main_widget_instance()
     # ⚠️ __new__ 绕过 __init__ → 未初始化实例访问属性会抛
     # "super-class __init__() was never called"，需显式补 homepage
-    # 使执行流通过 _create_fresh_window 首行的 sip.isdeleted 检查
+    # 使执行流通过 _create_fresh_window 首行的 shiboken6.isValid 检查
     inst.homepage = MagicMock()
     fake_win = MagicMock()
     fake_win._window_id = "win-E2"
@@ -1004,8 +1004,8 @@ def test_create_fresh_window_aborts_on_add_window_failure(qapp):
             fake_tm_win.add_window.side_effect = RuntimeError("add_window boom")
             fake_tm_win.isVisible.return_value = True
             m_get_tm.return_value = fake_tm_win
-            # homepage 需有效（shiboken6 isValid 检查通过）
-            with patch.object(mw.sip, "isValid", return_value=True):
+            # homepage 需有效（shiboken6.isValid 检查通过）
+            with patch.object(mw.sip, "isdeleted", return_value=False):
                 result = inst._create_fresh_window()
     assert result is None, "注册失败应返回 None"
     m_abort.assert_called_once_with(fake_win), "已构造窗口应调用 _abort_team_window 回收"

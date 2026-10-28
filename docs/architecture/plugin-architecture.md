@@ -232,7 +232,7 @@ discover → load → enable → disable → unload
 | 2 | 10s 去重 | `_DEDUP_INTERVAL = 10.0`（backend.py:1103）+ `_watcher_dedup_cache` | 保留；同一 (插件,组件) 10s 内重复变更合并 |
 | 3 | 路径索引重建防自触发循环 | `_rebuild_watcher_prefixes()`（backend.py:1709） | 保留；重载写回触发自身 watch 事件时靠索引重建过滤 |
 | 4 | watcher 引用计数 + stop_event | `_plugin_watcher_refcount` / `_plugin_watcher_stop`（backend.py:1033+） | 保留；最后一个窗口关闭时停线程，重开恢复 |
-| 5 | 多窗口 plugin_changed 广播 | `_hot_reload_requested`(pyqtSignal) → `_on_hot_reload_requested` 广播到 `ChatBackend._active_instances`（backend.py:247/1032/1692） | 保留；信号连接队列方式不变 |
+| 5 | 多窗口 plugin_changed 广播 | `_hot_reload_requested`(Signal) → `_on_hot_reload_requested` 广播到 `ChatBackend._active_instances`（backend.py:247/1032/1692） | 保留；信号连接队列方式不变 |
 
 > ⚠️ UI 目录物理分家（T5 强调）：改造 `_identify_all_components_from_changes` 时，`KNOWN_COMPONENTS = {"agents","hooks","commands","themes","skills","mcp","lsp","ui"}`（backend.py:1593/1639）必须包含 ui 且不回归——UI 组件从插件目录/运行时目录分离后，路径识别逻辑仍能正确分派。
 
@@ -268,7 +268,7 @@ discover → load → enable → disable → unload
 | 生命周期域（plugin/*） | 允许异步（watcher 线程 emit），但副作用落地走主线程 |
 | 工具域（tools/*） | 允许异步（worker 线程内 waterfall） |
 
-**过渡保留（阶段 1 不得删旧 API）**：现 watchfiles 线程 → Qt 信号桥 → 主线程重载链路原样保留——`_hot_reload_requested`（pyqtSignal, backend.py:247）由 watcher 线程 emit、队列连接（queued）到主线程 `_on_hot_reload_requested`，再经 `plugin_changed` 广播到各窗口。事件总线新机制只在其上做包装层，不拆除旧连接。
+**过渡保留（阶段 1 不得删旧 API）**：现 watchfiles 线程 → Qt 信号桥 → 主线程重载链路原样保留——`_hot_reload_requested`（Signal, backend.py:247）由 watcher 线程 emit、队列连接（queued）到主线程 `_on_hot_reload_requested`，再经 `plugin_changed` 广播到各窗口。事件总线新机制只在其上做包装层，不拆除旧连接。
 
 ---
 
@@ -358,7 +358,7 @@ discover → load → enable → disable → unload
 
 | 策略 | 说明 |
 |---|---|
-| 新字段全可选 | 旧 plugin.json 不新增字段也按默认契约加载，33+ 现有插件零迁移（T2 实测：`plugins/system/` + 6 内置 UI 插件 + `~/.drifox6/plugins/` 50+） |
+| 新字段全可选 | 旧 plugin.json 不新增字段也按默认契约加载，33+ 现有插件零迁移（T2 实测：`plugins/system/` + 6 内置 UI 插件 + `~/.drifox/plugins/` 50+） |
 | 双轨加载 | 阶段 1 同时支持「组件目录约定」（旧）与「apply(ctx) 服务注册」（新），新机制缺省时回落旧逻辑 |
 | 启用状态不破坏 | enabled_plugins / disabled_plugins 语义与存储格式不变，仅内部实现换生命周期驱动（T2 实测：`plugin_manager._get_enabled_set/_get_disabled_set` 双集合并存 → 改为单来源 + 派生） |
 | UI 与运行时分离 | 先物理分目录、后独立契约，窗口隔离语义保留（T2 实测：`ui_plugin_registry._card_widget_instances[window_id]` 按窗口隔离） |

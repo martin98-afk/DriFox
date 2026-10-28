@@ -35,7 +35,7 @@ from PySide6.QtWidgets import QApplication, QSplitter, QVBoxLayout, QWidget
 QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 # ⚠ 必须持有 QApplication 引用：无引用时 Python GC 会销毁 C++ 实例，
 # 后续字体/样式操作直接 0xC0000409 崩溃
-app = QApplication.instance() or QApplication(["test"])
+app = QApplication(["test"])
 
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.cards.card_manager import CardManager, ContainerType
@@ -47,7 +47,7 @@ _HOST = None  # 模块级持有，防 GC 后 Qt C++ 对象悬垂
 def _pump(ms: int):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()
+    loop.exec_()
 
 
 class _FakeCard(QWidget):
@@ -120,12 +120,6 @@ class _Host(QWidget):
 
 def _make_host():
     global _HOST
-    old = _HOST
-    if old is not None:
-        # 受控销毁旧实例：PySide6/shiboken 下悬垂回调（singleShot _sync 等）
-        # 触发 "Internal C++ object already deleted" 污染后续用例，必须先销毁并 pump
-        old.deleteLater()
-        _pump(60)
     _HOST = _Host()
     _HOST.resize(1000, 600)
     _HOST.show()

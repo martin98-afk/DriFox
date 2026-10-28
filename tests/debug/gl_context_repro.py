@@ -43,4 +43,4 @@ def _done():
 
 
 QTimer.singleShot(6000, _done)
-sys.exit(app.exec())
+sys.exit(app.exec_())

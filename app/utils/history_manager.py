@@ -28,7 +28,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from app.core.conversation.message_content import consolidate_messages, content_to_text
 from app.core.infra.token_estimator import count_messages_tokens
-from app.utils.utils import APP_DATA_DIR_NAME, deserialize_from_json, get_app_data_dir, serialize_for_json
+from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
 
 
 def parse_team_members_snapshot(snap_raw: str) -> List[Dict]:
@@ -2640,7 +2640,7 @@ class HistoryManager:
                 git_file_entries = [n for n in zf.namelist() if n.startswith("git_files/")]
                 if git_file_entries:
                     safe_proj = sanitize_filename(result["project_name"][:30])
-                    extract_dir = Path.home() / APP_DATA_DIR_NAME / "project_imports" / safe_proj
+                    extract_dir = Path.home() / ".drifox6" / "project_imports" / safe_proj
                     # 清空旧目录防止残留
                     if extract_dir.exists():
                         shutil.rmtree(str(extract_dir))
