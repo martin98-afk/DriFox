@@ -1773,6 +1773,14 @@ class SubAgentManager(QObject):
     # ★ T24：子智能体 ask 权限请求转发（window_id, task_id, tool_name, arguments）→ 主线程弹窗
     permission_requested = pyqtSignal(str, str, str, dict)
 
+    # [B2-3] 运行中任务硬上限：防御 exec 线程卡死（isFinished 恒 False）
+    # 导致 _running_tasks 条目只增不减。超限**拒绝新任务**，而非挤出旧条目——
+    # 旧条目挂着真实线程，挤出会丢掉它唯一的取消入口（cancel_all /
+    # cancel_task 均按本 dict 定位），反而放大泄漏。正常并发远低于此值。
+    # [T36] 200 → 64：与 _finished_tasks 的 maxlen=200 拉开距离。两者相等时，
+    # 大量运行中任务拒绝记录会挤掉 _finished_tasks 里真实完成的结果。
+    _MAX_RUNNING_TASKS = 64
+
     def __init__(self, agent_manager, tool_executor, get_llm_config: Callable):
         super().__init__()
         self._agent_manager = agent_manager
@@ -2013,6 +2021,24 @@ class SubAgentManager(QObject):
             return False
 
         try:
+            # [B2-3] 运行中任务硬上限：超限拒绝新任务并告警。
+            # 拒绝而非挤出旧条目——旧条目挂着真实线程，挤出会丢失唯一取消入口。
+            if len(self._running_tasks) >= self._MAX_RUNNING_TASKS:
+                error_msg = (
+                    f"Too many running subagent tasks: {len(self._running_tasks)}"
+                    f" >= {self._MAX_RUNNING_TASKS}, task {task_id} rejected"
+                )
+                logger.warning(f"[SubAgentManager] {error_msg}")
+                self._finished_tasks[task_id] = {
+                    "result": "",
+                    "error": error_msg,
+                    "agent_name": agent_name,
+                    "session_id": task_session_id,
+                }
+                if on_error:
+                    on_error(error_msg)
+                return False
+
             if llm_config is None:
                 llm_config = self._get_llm_config()
             elif not isinstance(llm_config, dict):

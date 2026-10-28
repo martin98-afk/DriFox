@@ -12228,6 +12228,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
             if batch_idx >= len(self._message_batch) or not self._message_batch[batch_idx]:
                 continue
+            # [T29] 活性守卫：dict 里的占位 wrapper 可能已被 deleteLater 析构，
+            # 对已删除 C++ 对象调 indexOf 会抛 RuntimeError，进而中断整轮重建。
+            if not self._is_widget_alive(ph):
+                continue
             anchor = self.chat_layout.indexOf(ph)
             if anchor < 0:
                 continue
@@ -12327,6 +12331,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 ph = self._batch_placeholders.get(batch_idx)
                 if ph is None:
                     # 占位安装失败的批次高度为 0，视口不会落在其上
+                    continue
+                # [T29] 活性守卫（本函数头号根因点）：占位 wrapper 被 deleteLater
+                # 析构后仍留在 dict 里，indexOf 对已删 C++ 对象抛 RuntimeError →
+                # 整轮回收被异常中断 → 离屏卡片永不回收 → WebEngine renderer 堆积。
+                # 范式与下方回收段 `_is_widget_alive(card)` 一致。
+                if not self._is_widget_alive(ph):
                     continue
                 anchor = self.chat_layout.indexOf(ph)
                 if anchor < 0:
@@ -15810,6 +15820,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return False
         ph = self._batch_placeholders.get(batch_idx)
         if ph is None:
+            return False
+        # [T29] 活性守卫：同 _recycle/_restore 两处，已析构占位不可访问。
+        if not self._is_widget_alive(ph):
             return False
         anchor = self.chat_layout.indexOf(ph)
         if anchor < 0:

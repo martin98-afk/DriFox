@@ -38,30 +38,35 @@ import os
 import statistics
 import time
 
-import pytest  # noqa: E402
+import pytest
 
-# ── 平台/渲染通道环境变量（module autouse fixture，见下）──
-# [T22] 原实现在**收集期**直接写 os.environ：收集期赋值会泄漏到同 session 后续
-# 收集的所有测试文件（pytest 先收集全部再执行），offscreen 泄漏会让依赖真实
-# 平台的文件崩在原生层 → 整轮必崩。改为 module 级 autouse fixture：进入本模块
-# 时设置、离开时还原。
+from PyQt5.QtCore import QCoreApplication, Qt, QTimer  # noqa: E402
+from PyQt5.QtTest import QTest  # noqa: E402
+
+QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+
+# ── 平台选择：必须留在**收集期**（模块级）──
+# [T36] 从 fixture 拿回模块级。原因：`qapp` fixture 是 session scope，pytest 按
+# scope 排序实例化，session 级**先于** module 级 —— 若把 QT_QPA_PLATFORM 放进
+# module fixture，QApplication 此时已按默认平台创建完毕，offscreen 设置迟到无效，
+# 本文件会真开窗口并触发超时（T35 审查阻塞项）。
 #
-# 两个变量都能安全挪进 fixture 的原因：本文件的 app.widgets 导入是**延迟导入**
-# （见 _run_one_round 内的 `from app.widgets.message_card import MessageCard`），
-# 不在模块顶层，因此 fixture 内赋值仍早于任何 app.* 导入，DRIFOX_QT_RENDERER
-# 的渲染通道选择不受影响（验证：跑本文件确认输出仍有 _reconcile 指标，即仍走
-# 纯 Qt 渲染器而非静默切到 WebEngine）。
-_ENV_VARS = {
-    "QT_QPA_PLATFORM": "offscreen",
-    "DRIFOX_QT_RENDERER": "1",
-}
+# 泄漏口径已知并接受（防崩溃优先）：收集期赋值会泄漏到同 session 后续收集的文件。
+# 但本文件按约定总是单独跑（tests/perf 被 addopts 默认排除，须显式指定路径），
+# 实际不会波及他人；即便并行收集，offscreen 也是比「真开窗口崩溃」更安全的降级。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# ── 渲染通道：留在 fixture（运行期读取，晚设无妨）──
+# DRIFOX_QT_RENDERER 由 message_card 在**运行期**（延迟导入时）读取，
+# 不在收集期消费，故可放进 module fixture 享受「用完还原」的干净语义。
+_RENDER_ENV = {"DRIFOX_QT_RENDERER": "1"}
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _bench_render_env():
-    """设置并在模块结束时还原平台/渲染通道环境变量（避免泄漏到后续收集的文件）。"""
-    saved = {k: os.environ.get(k) for k in _ENV_VARS}
-    for k, v in _ENV_VARS.items():
+    """设置并在模块结束时还原渲染通道环境变量。"""
+    saved = {k: os.environ.get(k) for k in _RENDER_ENV}
+    for k, v in _RENDER_ENV.items():
         os.environ[k] = v
     try:
         yield
