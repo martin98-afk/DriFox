@@ -244,6 +244,13 @@ def main():
 
     _install_info_bar_guard()
 
+    # 🎡 SpinBox 滚轮守卫：数字框不再吃滚轮改值（误改要等失焦才落盘，
+    # 用户几乎无感）。滚轮转交外层滚动容器，页面照常滚动；插件里的 SpinBox
+    # 同在应用级过滤范围内。详见 app/utils/wheel_guard.py。
+    from app.utils.wheel_guard import install_guard as _install_wheel_guard
+
+    _install_wheel_guard(app)
+
     # [A1] openai 资源预导入前移：QApp 就绪即启动预热线程（原在首窗构建后的
     # _deferred_startup，预热完成点被首窗构建推迟 2-3s）。预热线程单线程顺序导入
     # 不触发 Python 3.14 import 锁死锁；后续 worker 线程若等待 openai 模块锁为单向等待、无环。
