@@ -13,6 +13,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from app.widgets import card_render_core as crc
 from app.widgets import message_card as mc
 from app.widgets.message_card import CodeWebViewer, MessageCard
 
@@ -23,7 +24,7 @@ def _ensure_qapp():
 
 def test_streaming_dock_css_content():
     """坞态 CSS 必须包含：flex 调换、order 沉底、限高。"""
-    css = mc._STREAMING_DOCK_CSS
+    css = crc._STREAMING_DOCK_CSS
     assert "body.streaming-dock" in css
     assert "flex-direction: column" in css
     assert "body.streaming-dock #tool-section" in css
@@ -42,7 +43,7 @@ def test_streaming_dock_content_no_horizontal_scrollbar():
     长 token）超宽出现容器级横向滚动条。必须 overflow-x:hidden +
     overflow-wrap:break-word（强制换行，避免 hidden 只裁切看不到尾巴）。
     """
-    css = mc._STREAMING_DOCK_CSS
+    css = crc._STREAMING_DOCK_CSS
     # 提取坞态正文容器规则块
     m = re.search(r"body\.streaming-dock #content-placeholder \{(.*?)\}", css, re.S)
     assert m, "坞态正文容器规则必须存在"
@@ -53,7 +54,7 @@ def test_streaming_dock_content_no_horizontal_scrollbar():
 
 def test_streaming_dock_js_content():
     """坞态 JS 必须包含：_setStreamingDock 函数、流式标志、简洁模式守卫、滚动补偿。"""
-    js = mc._STREAMING_DOCK_JS
+    js = crc._STREAMING_DOCK_JS
     assert "function _setStreamingDock" in js
     assert "window._streamingActive" in js
     # 仅简洁模式启用坞态
@@ -79,19 +80,22 @@ def test_content_autoscroll_respects_user_scroll():
     body 的 scroll 事件置位，用户滚正文容器时 body 不滚，保护恒失效，
     工具区每来新内容就把正文拉底打断阅读。
     """
-    js = mc._CONTENT_AUTOSCROLL_JS
+    js = crc._CONTENT_AUTOSCROLL_JS
     # 置底正文容器前必须检查用户上滚标志（与 _scrollToolContentToBottom 同款）
     assert "if (!_cp._userScrolledUp)" in js, "正文容器置底必须尊重用户上滚"
     # 程序置底必须打 _progScroll 标记（防 scroll 事件误判为用户滚动）
-    assert "_cp._progScroll = true" in js, "程序置底必须打 _progScroll 标记"
+    assert "_progScroll(_cp" in js, "程序置底必须走 _progScroll 令牌（防 scroll 事件误判为用户滚动）"
     # 正文容器必须有 scroll 监听跟踪用户滚动（滚回底部附近恢复跟随）
     assert "getElementById('content-placeholder')?.addEventListener('scroll'" in js, "正文容器必须有独立 scroll 监听"
     # 监听内恢复跟随：位置判定（接近底部=跟随，离开=用户阅读）
-    assert "cp._userScrolledUp = !atBottom" in js, "滚回底部附近必须恢复自动跟随（位置判定）"
+    assert "if (atBottom) cp._userScrolledUp = false;" in js, "滚回底部附近必须恢复自动跟随（位置判定）"
+    # 置位上滚必须有真实输入证据：几何变化（切回标签页 / 高度上限变化 /
+    # innerHTML 重建钳制）引起的 scroll 不得把跟随永久锁死
+    assert "else if (_recentUserScrollInput(cp)) cp._userScrolledUp = true;" in js, "置位上滚必须有真实输入证据"
     # DOM 操作期间程序性 scroll 必须忽略（防误标正文上滚→置顶），与 body 监听对称
     assert "if (window._suppressScrollEvent) return;" in js, "DOM 操作期间的程序 scroll 必须忽略"
     # 程序滚动事件吞掉（不误标用户）
-    assert "if (cp._progScroll) { cp._progScroll = false; return; }" in js
+    assert "if (cp._progDepth > 0) { cp._progDepth--; return; }" in js
 
 
 def test_content_autoscroll_marks_user_scroll_via_wheel():
@@ -109,11 +113,11 @@ def test_content_autoscroll_marks_user_scroll_via_wheel():
     wheel 事件同步派发且仅由用户触发（滚轮/触控板），无程序来源，用它标记
     上滚意图可同时消除两条失效链。
     """
-    js = mc._CONTENT_AUTOSCROLL_JS
+    js = crc._CONTENT_AUTOSCROLL_JS
     # wheel 上滚同步置位（deltaY < 0）
     assert "addEventListener('wheel'" in js, "必须有 wheel 监听同步标记用户上滚"
     assert "deltaY < 0" in js, "wheel 上滚方向判定（deltaY<0）必须存在"
-    assert "this._userScrolledUp = true" in js, "wheel 上滚必须同步置 _userScrolledUp"
+    assert "el._userScrolledUp = true" in js, "wheel 上滚必须同步置 _userScrolledUp"
     # scroll 监听只做恢复跟随（位置判定 atBottom → 清标志），不得置位（防钳制 scroll 误标）
     # 注：置位唯一入口是 wheel 同步标记；scroll 监听内的位置判定赋值是恢复跟随语义。
     # wheel 监听必须是 passive（不阻断浏览器原生滚动）
@@ -121,7 +125,7 @@ def test_content_autoscroll_marks_user_scroll_via_wheel():
     # 🐛 回归（工具折叠框展开→视口弹到随机位置）：
     # wheel 置位必须门控"容器实际可滚"——无溢出时 wheel 属冒泡残留
     # （本应转发外层聊天列表），误置位会锁死正文跟随；
-    assert "scrollHeight > this.clientHeight" in js, "wheel 置位必须检查 cp 实际可滚（防冒泡残留误置位）"
+    assert "el.scrollHeight > el.clientHeight" in js, "wheel 置位必须检查 cp 实际可滚（防冒泡残留误置位）"
     # 历史注：原实现要求 _lastUserWheelAt/800ms 时间窗门控 scroll 清标志；
     # 现实现改为位置判定（离开底部=阅读，滚回底部=恢复）+ _progScroll 排除，
     # 消除了"下滚回底不刷新时间戳 → 标志卡死为已离开 → 跟随失效弹回中间"的根因。
@@ -428,9 +432,9 @@ def test_plain_text_viewer_finish_streaming_accepts_keep_dock():
 
 def test_autoscroll_body_only_param():
     """_autoScrollStreamingBody 必须支持 bodyOnly：true 时只滚 body 不碰正文容器。"""
-    js = mc._CONTENT_AUTOSCROLL_JS
+    js = crc._CONTENT_AUTOSCROLL_JS
     assert "function _autoScrollStreamingBody(bodyOnly)" in js, "必须声明 bodyOnly 参数"
-    assert "if (!bodyOnly &&" in js, "正文容器置底必须可被 bodyOnly 跳过"
+    assert "if (bodyOnly) return;" in js, "正文容器置底必须可被 bodyOnly 跳过"
 
 
 def test_tool_paths_do_not_scroll_content():

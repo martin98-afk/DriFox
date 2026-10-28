@@ -5725,6 +5725,17 @@ class CodeWebViewer(QWebEngineView):
                 window._userScrolledWithin = false;
                 window._suppressScrollEvent = false;
                 window._prevScrollTop = 0;  // 历史基线，已不再用于判定
+                // body 真实滚动输入时间戳：下方 scroll 监听的置位许可。
+                // Chromium 在几何变化（隐藏页切回、body 高度上限变化、innerHTML
+                // 重建后的钳制）时也会改 scrollTop 并派发 scroll——那不是用户意图，
+                // 据此置位会让卡内自动滚底永久失效（切回后停在旧位置的根因）。
+                (function () {{
+                    var _b = document.body;
+                    var _stamp = function () {{ _b._lastInputAt = performance.now(); }};
+                    _b.addEventListener('wheel', _stamp, {{passive: true}});
+                    _b.addEventListener('touchstart', _stamp, {{passive: true}});
+                    _b.addEventListener('keydown', _stamp);
+                }})();
                 document.body.addEventListener('scroll', function() {{
                     var _st = document.body.scrollTop;
                     // 即使被抑制也保持 _prevScrollTop 同步，避免后续用户滚动时
@@ -5743,7 +5754,13 @@ class CodeWebViewer(QWebEngineView):
                     var _nearBottom = Math.abs(document.body.scrollHeight - _st - document.body.clientHeight) < {
             AUTO_SCROLL_THRESHOLD
         };
-                    window._userScrolledWithin = !_nearBottom;
+                    // 只允许「贴底 → 复位」；置位需近期真实输入证据（见上方时间戳）。
+                    // 否则切回标签页 / 高度上限变化引起的 scroll 会把跟随永久锁死。
+                    if (_nearBottom) window._userScrolledWithin = false;
+                    else if (document.body._lastInputAt &&
+                             (performance.now() - document.body._lastInputAt) < 900) {{
+                        window._userScrolledWithin = true;
+                    }}
                     // [MEM-2] 卡内滚动改变的是 body 的滚动几何（scrollTop）与「用户正在
                     // 卡内阅读」标志——两者都只随 reportHeight 回传。补一次上报，否则
                     // 用户上滚阅读期间 Python 侧判据与阅读态要等到下一轮内容更新才刷新。
@@ -5822,8 +5839,10 @@ class CodeWebViewer(QWebEngineView):
                     // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
                     if (tc._progDepth > 0) {{ tc._progDepth--; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
-                    tc._userScrolledUp = !atBottom;
+                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期真实输入证据
+                    // （tc 已绑 _bindUserScrollIntent，会记录 _lastInputAt）。
                     if (atBottom) tc._userScrolledUp = false;
+                    else if (_recentUserScrollInput(tc)) tc._userScrolledUp = true;
                 }});
                 // 🐛 修复（流式滚动位置重置）：wheel 事件同步标记上滚意图——scroll
                 // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：

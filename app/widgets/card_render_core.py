@@ -4855,6 +4855,11 @@ _CONTENT_AUTOSCROLL_JS = """
                     if (!el || el._intentBound) return;
                     el._intentBound = true;
                     var mark = function () {
+                        // 真实输入时间戳：scroll 监听的置位许可（见 _recentUserScrollInput）。
+                        // Chromium 在几何变化（隐藏页切回 / body 高度上限变化 /
+                        // innerHTML 重建钳制）时也会改 scrollTop 并派发 scroll，
+                        // 那不是用户意图。
+                        el._lastInputAt = performance.now();
                         // 🐛 门控：仅当容器实际可滚（内容溢出）才记为上滚 —— 无溢出时 wheel
                         // 本应转发外层聊天列表，页面内收到的事件属冒泡残留，置位会让
                         // 跟随被无关操作误锁死。
@@ -4865,11 +4870,20 @@ _CONTENT_AUTOSCROLL_JS = """
                             if (typeof reportHeight === 'function') reportHeight();
                         }
                     };
-                    el.addEventListener('wheel', function (e) { if (e.deltaY < 0) mark(); }, {passive: true});
+                    var stamp = function () { el._lastInputAt = performance.now(); };
+                    el.addEventListener('wheel', function (e) { if (e.deltaY < 0) mark(); else stamp(); }, {passive: true});
                     el.addEventListener('touchstart', mark, {passive: true});
                     el.addEventListener('keydown', function (e) {
                         if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') mark();
+                        else stamp();
                     });
+                }
+                // 置位许可：近期真实输入。scroll 事件本身既可能是用户滚动，也可能是
+                // 几何变化引起的自动调整；后者在「后台标签页切回」时必然发生，若据此
+                // 置位「用户上滚」，卡内自动滚底会永久失效 —— 症状就是切回后卡内停在
+                // 旧位置，必须手动滚到底。
+                function _recentUserScrollInput(el, ms) {
+                    return !!el && !!el._lastInputAt && (performance.now() - el._lastInputAt) < (ms || 900);
                 }
                 // DOM 重建事务：最外层（save/restore 包装 / updateContent）开始前捕获锚点 +
                 // 用户上滚意图，结束后按锚点复位。嵌套只由最外层生效（depth 守卫）。
@@ -4963,7 +4977,11 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 一旦间隔 >800ms 标志卡死为"已离开"→ 内容更新时跟随失效、
                     // 视口被 _cpPrevTop 还原拖回旧阅读位置（弹回中间的根因）。
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
-                    cp._userScrolledUp = !atBottom;
+                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期真实输入证据，
+                    // 否则几何变化引起的 scroll（切回标签页 / 重建钳制）会把跟随
+                    // 永久锁死（卡内停在旧位置的根因）。
+                    if (atBottom) cp._userScrolledUp = false;
+                    else if (_recentUserScrollInput(cp)) cp._userScrolledUp = true;
                 });
                 // 异步渲染（mermaid/katex/echarts/widget iframe）完成后补滚底。
                 // 这些渲染在 updateContent 置底**之后**才完成并增高内容 →

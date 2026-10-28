@@ -188,6 +188,7 @@ def test_away_flag_set_when_scroll_up_then_cleared_at_bottom():
     # 用户滚到顶部（历史加载区）
     scroll_bar.value.return_value = 10
     scroll_bar.maximum.return_value = 1000
+    win._mark_user_scroll_input()
     win._on_scroll_changed(10)
     assert win._user_intentionally_away_from_bottom is True
 
@@ -739,6 +740,7 @@ def test_non_loading_scroll_still_marks_away():
     bar.maximum.return_value = 1400
     bar.value.return_value = 400
 
+    win._mark_user_scroll_input()
     win._on_scroll_changed(400)
 
     assert win._user_intentionally_away_from_bottom is True

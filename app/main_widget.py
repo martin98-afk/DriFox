@@ -1345,6 +1345,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 与 `_reset_bottom_follow`（用户点击发送 / 切会话 / 清空聊天区）两处；
         # 判定一律走 `_should_follow_bottom()`。禁止在别处直接读写这个标志。
         self._user_intentionally_away_from_bottom = False
+        # 真实用户滚动输入的时间窗（monotonic 截止时刻，0 = 无最近输入）。
+        # away 置位只认这里：Qt 自己也会挪滚动条（切回标签页重算上界、分栏 /
+        # 宽度重排、卡片收缩后的钳制），这些不是用户意图，却会被「非程序
+        # valueChanged」的旧判据记成「用户滚离底部」→ 此后所有自动置底被
+        # `_should_follow_bottom()` 静默拦下（症状：切回标签页停在旧位置，
+        # 必须手动滚到底）。
+        self._user_scroll_input_until = 0.0
         # 跳转锁（monotonic 截止时刻；0 = 无锁）。点历史问题 / 时间线跳转后，
         # 目标批次重建会进懒渲染队列，队列排空时 `_process_next_lazy_batch`
         # 无条件 `_scroll_to_bottom(sticky_ms=900)` —— 把刚落好的视口拽回底部
@@ -2829,6 +2836,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def eventFilter(self, obj, event):
         """处理窗口大小变化"""
+        # ── 真实滚动输入标记 ──
+        # away 状态机只认真实输入（见 `_on_scroll_changed`）：滚轮（qfw 平滑
+        # 滚动会逐拍把合成 Wheel 发给内置条，天然一并覆盖）、拖滑块 / 点页槽。
+        if event.type() == QEvent.Wheel:
+            self._mark_user_scroll_input_if_scroll_bar(obj)
+        elif event.type() == QEvent.MouseButtonPress:
+            # 点击只认滚动条本体（拖滑块 / 点页槽）；viewport 上的普通点击
+            # 不标记，否则“点空白处”会被当成滚动输入。
+            self._mark_user_scroll_input_if_scroll_bar(obj, include_viewport=False)
         # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何，
         # 否则输入框高度自适应（输入多行内容时）会让光晕"卡"在旧位置
         if event.type() == QEvent.Type.Resize and obj in (
@@ -3330,6 +3346,9 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+        # away 置位依赖真实输入证据：插件 override chat_area 时不保证调用
+        # `_wire_scroll_range_changed`，这里在通用路径上兜一层（幂等）。
+        self._wire_user_scroll_input()
 
         # ── 底部输入区域（Phase F 模块化：装配代码已迁 app/widgets/modules/input_card_module.py）──
         from app.widgets.ui_composition import compose
@@ -16274,9 +16293,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 静默失效（加载停在消息列表中间的根因），故只允许复位不允许置位。
         if self._is_view_at_bottom() or self._loading_session:
             self._user_intentionally_away_from_bottom = False
-        elif not self._loading_session and self._programmatic_scroll_depth <= 0:
-            # 只有「非程序滚动导致的离底」才算用户意图。程序置底/补偿落点落后
-            # 不在此列，否则 away 一旦误置便无人复位（value 不再变化 → 无信号）。
+        elif (
+            not self._loading_session
+            and self._programmatic_scroll_depth <= 0
+            and self._has_recent_user_scroll_input()
+        ):
+            # 只有「真实用户输入导致的离底」才算用户意图。
+            # - 程序置底 / 补偿落点落后：由 `_programmatic_scroll` 豁免；
+            # - Qt 自发的 value 变化（切回标签页重算上界、分栏 / 宽度重排、
+            #   卡片收缩钳制）：没有滚轮 / 拖动 / 键盘输入，一律不算 —— 旧判据
+            #   把它们记成「用户滚离底部」，away 随后只能在「再次 valueChanged
+            #   且贴底」时复位，后台标签页里这两种事件都可能不再发生 → 标志
+            #   永久卡死，切回后校准被 `_should_follow_bottom()` 静默拦下。
             self._user_intentionally_away_from_bottom = True
             # [T29 B1] 用户已明确滚离 → 取消挂起的程序置底请求。否则「点击发送 /
             # 切会话」排入的 _scroll_bottom_timer（50ms）仍会在用户上滚后触发
@@ -18597,6 +18625,84 @@ class OpenAIChatToolWindow(ToolWindow):
         chat_area_module.build 两分支各自收尾时调用本方法，互斥不重入。
         """
         self.chat_scroll_area.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
+        self._wire_user_scroll_input()
+
+    def _wire_user_scroll_input(self):
+        """把「真实用户滚动输入」接入 away 状态机（幂等）。
+
+        away 置位只认这条链（见 `_on_scroll_changed`）：
+        - 滚轮 / 触控板：Wheel 事件。qfw 平滑滚动把一次滚轮拆成 400ms 内
+          逐拍发给**内置条**的合成 Wheel；
+        - 拖滑块 / 点页槽 / 键盘翻页：QAbstractSlider.actionTriggered
+          （程序 `setValue` 不触发本信号）。
+
+        背景：旧判据是「非程序的 valueChanged = 用户滚动」。Qt 自己也会挪
+        value（切回标签页重算上界、分栏 / 宽度重排、卡片收缩钳制），一次
+        误判就置位 away，而 away 只能靠「再次 valueChanged 且贴底」复位
+        —— 后台标签页里这两种事件都可能不再发生，标志永久卡死。
+        """
+        if getattr(self, "_user_scroll_input_wired", False):
+            return
+        try:
+            bar = self.chat_scroll_area.verticalScrollBar()
+            bar.installEventFilter(self)
+            bar.actionTriggered.connect(self._on_scroll_action_triggered)
+            # viewport 也要装：高精度滚轮（触控板 / delta 非 120 倍数）在 qfw
+            # 里走 QAbstractScrollArea.wheelEvent 直接落到内置条，**不经**内置条
+            # 的事件过滤器（探针实测 filter 命中 0），只有发给 viewport 的那次
+            # Wheel 能被过滤到。
+            self.chat_scroll_area.viewport().installEventFilter(self)
+            vbar = getattr(self.chat_scroll_area, "vScrollBar", None)
+            if vbar is not None:
+                vbar.installEventFilter(self)
+                vbar.actionTriggered.connect(self._on_scroll_action_triggered)
+                vbar.sliderPressed.connect(self._on_scroll_slider_pressed)
+                vbar.sliderReleased.connect(self._on_scroll_slider_released)
+            self._user_scroll_input_wired = True
+        except (AttributeError, RuntimeError):
+            # 装配期对象未就绪 / 桩实例：留待下次调用重试
+            return
+
+    def _mark_user_scroll_input_if_scroll_bar(self, obj, include_viewport: bool = True) -> None:
+        """eventFilter 归属过滤：只有本窗口聊天滚动区收到的输入才算。"""
+        try:
+            area = self.chat_scroll_area
+        except (AttributeError, RuntimeError):
+            return
+        try:
+            if (
+                obj is area.verticalScrollBar()
+                or obj is getattr(area, "vScrollBar", None)
+                or (include_viewport and obj is area.viewport())
+            ):
+                self._mark_user_scroll_input()
+        except RuntimeError:
+            return
+
+    def _mark_user_scroll_input(self, hold_ms: int = 600) -> None:
+        """记录一次真实用户滚动输入，`hold_ms` 内到达的 valueChanged 都算意图。
+
+        600ms 覆盖平滑滚动的 400ms 尾段；连续滚轮会逐拍续期。
+        """
+        self._user_scroll_input_until = time.monotonic() + hold_ms / 1000.0
+
+    def _has_recent_user_scroll_input(self) -> bool:
+        try:
+            until = self._user_scroll_input_until
+        except (AttributeError, RuntimeError):
+            return False
+        return until > 0.0 and time.monotonic() < until
+
+    def _on_scroll_action_triggered(self, _action: int) -> None:
+        """滚动条 action 触发 = 键盘翻页 / 点页槽 / 拖滑块等真实交互。"""
+        self._mark_user_scroll_input()
+
+    def _on_scroll_slider_pressed(self) -> None:
+        # 拖动期间 value 持续变化且时长不可控，按长窗口续期（松手后收回 600ms）
+        self._mark_user_scroll_input(hold_ms=10_000)
+
+    def _on_scroll_slider_released(self) -> None:
+        self._mark_user_scroll_input()
 
     def _on_scroll_range_changed(self, _mn: int, _mx: int):
         """rangeChanged 事件驱动的贴底跟随（P1 步骤6）。

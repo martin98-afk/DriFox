@@ -86,6 +86,7 @@ def test_programmatic_scroll_never_sets_away():
 def test_user_scroll_still_sets_away():
     """守护：真实用户滚离底部仍然置 away（修复不得把守卫一起废掉）"""
     win = _make_win()
+    win._mark_user_scroll_input()
     win._on_scroll_changed(735)
     assert win._user_intentionally_away_from_bottom is True
 
