@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 
-## [v0.6.12] - 2026-10-27 (重新发布 #4)
+## [v0.6.12] - 2026-10-27 (重新发布 #7)
 
-自 v0.6.11 以来的变更 | 提交数：38 · 文件变更：145 · +9572/-2305 | 贡献者：dingma, mading, drifox-bot
+自 v0.6.11 以来的变更 | 提交数：47 · 文件变更：127 · +10125/-2692 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -82,6 +82,11 @@ All notable changes to this project will be documented in this file.
 
 - **CodeBuddy 专家任务按形态识别 + 对话重试与 SSE 容错** (`411af1e8`): `_is_expert_task` 由依赖 task_code 命名改为按形态判定（jump_url 含 expertId / 文案点到专家名 / 文案含「对话」），新上线同类活动任务无需改码即自动接管；`Expert_lighthouse`、`Expert_team_use_3` 两类明确排除走别处路径。buddy_auth 的 `chat_once` 增加失败重试一次（同轮连发两次取有效结果），并容错 SSE 末尾 requestId 时序差异与 JSON 序列化空格（用 `"id"\s*:\s*"` 正则解析）。新增 `tests/plugins/test_codebuddy_daily_tasks.py`（115 行）。
 - **CodeBuddy stale done marker 清理** (`368a2d11`): 任务进度里的过期 done 标记会被自动清理，避免已完成状态被陈旧标记卡住。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #7 追加）
+
+- **打包版无限自我复制（窗口疯狂弹出）** (`a542509a`): PyInstaller 打包后 `sys.executable` 是 app 二进制，bootloader 不认 `-c`；multiprocessing 拉起的 `resource_tracker` 子进程被当成「正常启动」重跑整个应用。loguru 每个 `enqueue=True` sink 首次创建 `SimpleQueue/Event/Lock` 即拉起 tracker → 子进程重跑 app → 它又建 sink 又拉 tracker，形成 app → tracker(app) → tracker(app) 无限自激。实测 17 分钟累计 221 个 PID、42 个日志分片。修法：`main.py` 的 `__main__` 块内、`main()` 之前调 `multiprocessing.freeze_support()` —— PyInstaller 的 `pyi_rth_multiprocessing` 已把该函数换成分流实现，命中 `-c "from multiprocessing.resource_tracker import main"` 时只 `exec` 那段代码再 `sys.exit()`，源码运行时为 no-op。
+- **日志安装失败静默吞掉导致零日志** (`a542509a`): POSIX semaphore 耗尽（`Errno 28`）时首个 `logger.add(enqueue=True)` 抛错，被 `main.py` 的 `except Exception: pass` 吞掉，11 个 sink 全部没装 —— 应用照常运行但零日志、事后无任何证据。三处修：①`setup_logging` 改为逐 sink 独立安装，单个失败不连带其余；②`enqueue=True` 不可用时自动降级为同步写入（`enqueue=False` 只用线程锁，不受 semaphore 配额影响），实测耗尽环境下 10 个 sink 全部降级成功、日志正常落盘；③`main.py` 的异常分支落 stderr + 写 `logs/logging_setup_failed.log`，不再静默。
 
 ## [v0.6.11] - 2026-10-26 (重新发布 #7)
 
