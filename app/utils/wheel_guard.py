@@ -24,8 +24,8 @@ from __future__ import annotations
 
 from loguru import logger
 
-from PyQt5.QtCore import QEvent, QObject
-from PyQt5.QtWidgets import QAbstractScrollArea, QAbstractSpinBox, QApplication
+from PySide6.QtCore import QEvent, QObject
+from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSpinBox, QApplication
 
 
 class _SpinBoxWheelGuard(QObject):

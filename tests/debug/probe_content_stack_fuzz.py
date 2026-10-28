@@ -11,8 +11,8 @@ resize / 打断收尾，校验终态不变量：
 import random
 import sys
 
-from PyQt5.QtCore import Qt, QTimer, QCoreApplication
-from PyQt5.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import Qt, QTimer, QCoreApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from app.widgets.tab_manager_window import _ContentStack
 
