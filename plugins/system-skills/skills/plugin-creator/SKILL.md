@@ -51,6 +51,7 @@ allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 | "接新消息平台""通讯网关" | Gateways | references/components/gateways.md |
 | "模型协议适配" | Model Adapters | references/components/model-adapters.md |
 | "改 plugin.json""设置页配置" | Manifest | references/manifest.md |
+| "做设置卡""设置页配置卡""测试连接按钮" | 设置卡 | references/settings-card.md |
 | "验证""跑测试" | 验证 | references/testing.md |
 | "发布到市场""提 PR" | 发布 | references/publishing.md |
 | "不工作""报错""不加载" | 除错 | references/troubleshooting.md |
@@ -66,6 +67,7 @@ allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 | 脚手架与流程 | references/workflow.md | 新建插件、迭代循环、版本策略（SemVer） |
 | 组件实现 | references/components.md | 开发任一组件（模板+约束+真实案例） |
 | manifest 与配置 | references/manifest.md | 新建/修改 plugin.json、config_schema/E1 契约 |
+| 设置卡 UI | references/settings-card.md | 自绘设置卡（布局口径/联动/回显/折叠/连通性测试） |
 | 测试验证 | references/testing.md | 热更新测试、validate_plugins.py、除错 |
 | 发布 | references/publishing.md | Fork→PR 上架官方市场 |
 | 排障 | references/troubleshooting.md | 报错、不加载、CI 失败 |
