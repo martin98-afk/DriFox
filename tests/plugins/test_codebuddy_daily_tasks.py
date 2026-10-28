@@ -333,3 +333,118 @@ def test_daily_tasks_disabled_by_env(cb, monkeypatch):
     monkeypatch.setattr(cb, "_run_daily_tasks", lambda *a, **k: called.append(1))
     cb._run_daily_for_entry(object(), "at", {"refresh_token": "rt"})
     assert called == []
+
+
+# ── 回归：专家定位按 id 而非名字 ──────────────────────────
+
+
+def test_expert_hint_extracts_id_and_task_name(cb):
+    """jump_url 里的 expertId 与「」里的任务用名都能取到。"""
+    task = {
+        "jump_url": "https://www.workbuddy.cn/work/launch/?deeplink=workbuddy%3A%2F%2Fexperts"
+        "%3FexpertId%3Dex_GDl31WahyIH0&buddy_type=workbuddy",
+        "task_desc": "在专家页搜索并召唤「中国电商运营专家」，完成一次对话。",
+    }
+    eid, name = cb._expert_hint(task)
+    assert eid == "ex_GDl31WahyIH0"
+    assert name == "中国电商运营专家"
+
+
+def test_resolve_expert_matches_by_id_not_name(cb, monkeypatch):
+    """回归：任务名与市场真实名不同（中国电商运营专家 vs 卖得好），必须靠 id 命中。
+
+    曾按 display_name_zh 字符串匹配 → 匹配不到 → 伪造本地条目 → 上报 200 不计分。
+    """
+    pool = [
+        {"expert_id": "ex_other", "display_name_zh": "中国电商运营专家", "version": "9.9.9"},
+        {"expert_id": "ex_GDl31WahyIH0", "display_name_zh": "卖得好", "version": "1.0.1"},
+    ]
+    task = {
+        "jump_url": "x?expertId=ex_GDl31WahyIH0",
+        "task_desc": "召唤「中国电商运营专家」",
+    }
+    expert = cb._resolve_expert(object(), "at", "uid", task, pool)
+    assert expert["expert_id"] == "ex_GDl31WahyIH0"
+    assert expert["display_name_zh"] == "卖得好"
+    assert expert["version"] == "1.0.1"
+
+
+def test_resolve_expert_falls_back_to_keyword_then_id(cb, monkeypatch):
+    """首页池没有时用任务名当关键词搜，仍按 id 认人（不按名字字符串比）。"""
+
+    class _BA:
+        def market_expert_list(self, at, uid, expert_type="", keyword=""):
+            assert keyword == "直播电商教练"
+            return [
+                {"expert_id": "ex_WZY136wV5aMt", "display_name_zh": "播旺旺", "version": "1.0.2"}
+            ]
+
+    task = {"jump_url": "x?expertId=ex_WZY136wV5aMt", "task_desc": "召唤「直播电商教练」"}
+    expert = cb._resolve_expert(_BA(), "at", "uid", task, [])
+    assert expert["expert_id"] == "ex_WZY136wV5aMt"
+    assert expert["display_name_zh"] == "播旺旺"
+
+
+def test_resolve_expert_never_fabricates(cb):
+    """定位不到真实条目时返回空表：伪造条目会导致上报 200 但不计分。"""
+    task = {"jump_url": "x?expertId=ex_unknown", "task_desc": "召唤「不存在的专家」"}
+    assert cb._resolve_expert(object(), "at", "uid", task, []) == {}
+
+
+def test_task_confirmed_reads_server_progress(cb, monkeypatch):
+    """done 标记必须回读服务端进度：上报 200 不等于计分。"""
+    states = [
+        {"x": {"progress": {"current": 0, "target": 1}, "accept_status": "accepted"}},
+        {"x": {"progress": {"current": 1, "target": 1}, "accept_status": "accepted"}},
+        {"x": {"status": "completed"}},
+        {},
+    ]
+    seq = iter(states)
+    monkeypatch.setattr(cb, "_task_map", lambda *a, **k: next(seq))
+
+    assert cb._task_confirmed(None, "at", "uid", "x") is False  # 0/1 未推进
+    assert cb._task_confirmed(None, "at", "uid", "x") is True   # 1/1 推进
+    assert cb._task_confirmed(None, "at", "uid", "x") is True   # completed
+    assert cb._task_confirmed(None, "at", "uid", "x") is False  # 任务消失
+
+
+# ── 回归：专家任务按形态识别，新任务无需改代码 ──────────────
+
+
+def test_is_expert_task_accepts_any_code_shape(cb):
+    """上游活动任务 code 随活动起名：只要形态对，任意 code 都该接管。"""
+    for code in ("expert_use_maidehao", "WorkBuddy_Valorant", "brand_new_activity_2027"):
+        task = {
+            "task_code": code,
+            "jump_url": "x?expertId=ex_GDl31WahyIH0",
+            "task_desc": "在专家页搜索并召唤「某个专家」，完成一次对话。",
+        }
+        assert cb._is_expert_task(task) is True, code
+
+
+def test_is_expert_task_rejects_non_expert_shapes(cb):
+    """缺 expertId / 缺专家名 / 缺召唤动作 的都不算专家任务。"""
+    assert not cb._is_expert_task({"task_code": "x", "task_desc": "召唤「专家」对话"})
+    assert not cb._is_expert_task(
+        {"task_code": "x", "jump_url": "x?expertId=ex_1", "task_desc": "完成一次对话"}
+    )
+    # 「召唤」单独出现已足够（判据是 召唤 or 对话）
+    assert cb._is_expert_task(
+        {"task_code": "x", "jump_url": "x?expertId=ex_1", "task_desc": "召唤「专家」"}
+    )
+
+
+def test_is_expert_task_excludes_dedicated_branches(cb):
+    """轻量云与专家团有专属判据分支，不能被通用形态识别重复接管。"""
+    lh = {
+        "task_code": "Expert_lighthouse",
+        "jump_url": "x?expertId=ex_2cvvUZQhDyeJ",
+        "task_desc": "召唤「腾讯轻量云专家」完成一次对话",
+    }
+    team = {
+        "task_code": "Expert_team_use_3",
+        "jump_url": "x?expertId=ex_team",
+        "task_desc": "召唤「某专家团」完成一次对话",
+    }
+    assert cb._is_expert_task(lh) is False
+    assert cb._is_expert_task(team) is False
