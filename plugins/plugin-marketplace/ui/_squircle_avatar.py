@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 from PySide6.QtCore import Qt, QUrl, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PySide6.QtSvg import QSvgWidget
+from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import isDarkTheme
 
