@@ -13,7 +13,7 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.6.10-brightgreen)
+![Version](https://img.shields.io/badge/version-0.6.12-brightgreen)
 
 </div>
 
@@ -70,7 +70,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 ## 与 Claude Code / DeepSeek Harness 的核心差异
 
-> **比较时点**：2026-08-17（竞品列）；DriFox 列已更新至 v0.6.10。
+> **比较时点**：2026-08-17（竞品列）；DriFox 列已更新至 v0.6.12。
 > Claude Code Agent Teams 为 **research preview / experimental**（需 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 启用）。
 > DeepSeek Harness 为 **developer preview**（2026-08-13 发布）。
 
@@ -92,7 +92,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 | **多模型后端** | ✅ **原生 OpenAI 兼容**：DeepSeek / 智谱 / DashScope / 千帆 / 火山方舟 / MiniMax / SiliconFlow / Gemini / GitHub Copilot / CodeBuddy / OpenCode Zen / OpenCode Go 共 12 家内置 + 自定义端点 | ⚠️ 需 proxy（claude-code-proxy / claude-code-openai-wrapper / Bifrost gateway） | ✅ plugin-based，可接入任意 LLM 适配器 |
 | **开源协议** | GPL-3.0-or-later | 闭源（商业） | MIT |
 | **技术栈** | Python 3.14+ / PyQt5 | TypeScript / Node | TypeScript + Cordis 插件框架 |
-| **开发成熟度** | v0.6.10（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
+| **开发成熟度** | v0.6.12（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
 
 ### DriFox 真正独有的四件事
 
@@ -173,8 +173,8 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 | 层 | 位置 | 上限 | 用途 |
 |---|---|---|---|
 | 全局记忆 | `<app_data>/assistant_hub/<助手>/MEMORY.md` | 默认 4000 字符 | 跨项目的稳定偏好与最珍贵经验，准入极严 |
-| 项目记忆 | `<工作目录>/.drifox/memory/<助手>/MEMORY.md` | 默认 3000 字符 | 当前项目的坑、决策与易错点，随目录走、随 git 管 |
-| 每日工作日志 | `<工作目录>/.drifox/memory/<助手>/YYYY-MM-DD.md` | 单条 400 字符，append-only | 实质工作的原始沉淀，蒸馏的原料 |
+| 项目记忆 | `<工作目录>/.drifox6/memory/<助手>/MEMORY.md` | 默认 3000 字符 | 当前项目的坑、决策与易错点，随目录走、随 git 管 |
+| 每日工作日志 | `<工作目录>/.drifox6/memory/<助手>/YYYY-MM-DD.md` | 单条 400 字符，append-only | 实质工作的原始沉淀，蒸馏的原料 |
 
 ### 读写与注入
 
@@ -273,7 +273,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.6.10 架构                       │
+│                    DriFox v0.6.12 架构                       │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      标签页宿主 / 消息卡片 / 工作台 / 输入区                │
 │             标题栏 + 侧栏 / 设置面板 / 浮动卡片 / 系统托盘     │
@@ -312,7 +312,7 @@ python main.py
 ```
 plugins/system-*/         # 18 个系统组件插件（随应用打包）
 plugins/<功能插件>/        # 10 个内置功能插件
-~/.drifox6/plugins/       # 用户安装的社区插件（watchfiles 热扫描，热更新）
+~/.drifox6/plugins/        # 用户安装的社区插件（watchfiles 热扫描，热更新）
 ```
 
 **28 个内置插件**：
@@ -338,12 +338,12 @@ plugins/<功能插件>/        # 10 个内置功能插件
 |------|------|
 | **文件** | read, write, edit, multi_edit, grep, list, glob, scan_repo, stage_files |
 | **终端** | bash, bg_start, bg_stop, bg_logs, bg_list |
-| **交互 / 技能 / MCP** | question, skill, manage_skill, mcp_list_servers, upload_file |
+| **交互 / 技能 / MCP** | question, skill, manage_skill, mcp_manage, upload_file |
 | **子智能体 / 团队** | subagent_para, subagent_status, team_send_message, team_list_members |
 | **诊断** | get_diagnostics, lsp |
 | **任务** | todowrite, todoread |
 | **网络** | websearch, webfetch |
-| **MCP** | `mcp__server__tool`（连接 MCP Server 后自动出现）|
+| **MCP** | `mcp__server__tool`（常驻开启的 MCP Server 自动注入）；`mcp_manage`（列出全部服务器含已关闭的 / 临时开启 / 关闭临时开启）|
 
 > 另有插件贡献的工具（助手中心记忆 / 经验库、worktree 管理等）随已装插件并入工具池。
 > **websearch API key 配置**：环境变量 `TAVILY_API_KEY`（Tavily）或 `TINYFISH_API_KEY`（TinyFish，Tavily 不可用时回退）；两者均未设置时返回「搜索失败：无可用搜索引擎」。

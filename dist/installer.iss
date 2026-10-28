@@ -4,10 +4,7 @@
 
 #define MyAppName "Drifox"
 #ifndef MyAppVersion
-  #define MyAppVersion "v0.6.10"
-#endif
-#ifndef MyAppSuffix
-  #define MyAppSuffix "dev"
+  #define MyAppVersion "v0.6.12"
 #endif
 #ifndef MyAppSuffix
   #define MyAppSuffix "dev"
@@ -37,10 +34,9 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
-; 产物名由 CI 决定后通过 /DOutputBaseFilename= 传入（见 release.yml 的 matrix.variant）
-; 单边后缀，与 create_dmg.py / update_checker 保持一致：
-;   pyqt5   → Drifox-Windows-Setup-{version}.exe        （历史文件名，存量更新器靠它找包）
-;   pyside6 → Drifox-Windows-Setup-{version}-pyside6.exe（显式区分，同 Release 共存）
+; 产物名由 CI 决定后通过 /DOutputBaseFilename= 传入（见 release.yml build-windows step）
+; 单边后缀：dev (PyQt5) → Drifox-Windows-Setup-{version}.exe（历史文件名，更新器识别）
+;         pyside6      → Drifox-Windows-Setup-{version}-pyside6.exe（区分用）
 ; 本地测试 fallback：使用 {version}（不带后缀，符合历史格式）
 #ifndef OutputBaseFilename
   #define OutputBaseFilename "Drifox-Windows-Setup-{#MyAppVersion}"
