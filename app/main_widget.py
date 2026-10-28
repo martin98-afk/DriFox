@@ -14562,7 +14562,14 @@ class OpenAIChatToolWindow(ToolWindow):
         for card in batch:
             if time.monotonic() >= deadline:
                 break
-            card.ensure_rendered()
+            # 入队到本拍之间卡片可能已被回收/销毁（pyside6 下访问抛
+            # RuntimeError: Internal C++ object already deleted），渲染前再判活
+            if not self._is_widget_alive(card):
+                continue
+            try:
+                card.ensure_rendered()
+            except RuntimeError:
+                continue
             consumed += 1
         if consumed < len(batch):
             self._pending_lazy_cards[:0] = batch[consumed:]

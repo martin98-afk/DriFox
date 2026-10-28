@@ -24,7 +24,7 @@
 
 from typing import Optional
 
-from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QCursor,
@@ -287,7 +287,7 @@ class SimpleHoverTooltip(QWidget):
         """根据文本（支持多行 \\n）/ 图像预览 + padding 计算 widget 尺寸。"""
         fm = QFontMetrics(self._font)
         lines = self._text.split("\n") if self._text else [""]
-        max_w = max((fm.width(line) for line in lines), default=0)
+        max_w = max((fm.horizontalAdvance(line) for line in lines), default=0)
         line_h = fm.lineSpacing()  # 含行间距，多行不挤
         limit = _max_tip_text_width()
         if self._pixmap is not None:
@@ -486,14 +486,14 @@ class _HoverTooltipFilter(QObject):
         if obj is not p:
             return False
         t = event.type()
-        if t == event.ToolTip:
+        if t == QEvent.Type.ToolTip:
             return True  # 拦截原生
-        elif t in (event.Enter, event.HoverEnter):
+        elif t in (QEvent.Type.Enter, QEvent.Type.HoverEnter):
             tip = p.toolTip() or ""
             if tip:
                 self._text = tip
                 self._timer.start()
-        elif t in (event.Leave, event.HoverLeave, event.Hide, event.HideToParent):
+        elif t in (QEvent.Type.Leave, QEvent.Type.HoverLeave, QEvent.Type.Hide, QEvent.Type.HideToParent):
             # 🛡️ B2 修复：目标随父容器隐藏时 Qt 发 HideToParent（27）而非 Hide（18）。
             # 团队 header 按钮（关闭团队 close_btn 等）在团队关闭时随 header 容器
             # 隐藏，旧分支只捕 Hide/Leave/HoverLeave → tooltip 不隐藏 → 屏幕残留
@@ -505,7 +505,7 @@ class _HoverTooltipFilter(QObject):
             # Leave/HoverLeave 先校验光标是否仍在目标几何内：在 → 不隐藏，
             # 交由 _guard_check 兜底（光标真正离开 rect 才收）。
             # Hide/HideToParent（容器被隐藏）无条件收起。
-            if t in (event.Leave, event.HoverLeave):
+            if t in (QEvent.Type.Leave, QEvent.Type.HoverLeave):
                 p2 = self._parent()
                 if p2 is not None and p2.isVisible():
                     local = p2.mapFromGlobal(QCursor.pos())
@@ -513,7 +513,7 @@ class _HoverTooltipFilter(QObject):
                         return False
             self._timer.stop()
             self._hide()
-        elif t in (event.MouseButtonPress, event.MouseButtonDblClick):
+        elif t in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
             # 🛡️ B3 修复：点击即收起 tooltip（与 Qt 原生 QToolTip / qfluentwidgets
             # ToolTipFilter 在 MouseButtonPress 时 hideToolTip() 的行为对齐）。
             # 此前漏捕：点击关闭团队按钮时 tooltip 仍显示，随后团队组

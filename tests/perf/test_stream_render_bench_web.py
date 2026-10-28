@@ -71,7 +71,7 @@ QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
 # QtWebEngine 类必须在 QCoreApplication 实例化前导入（main.py 同款约束）
-from PySide6.QtWebEngineWidgets import QWebEngineSettings  # noqa: E402,F401
+from PySide6.QtWebEngineCore import QWebEngineSettings  # noqa: E402,F401
 
 ROUNDS = 3  # 基线重复轮数
 CHUNK_CHARS = 40  # 每 chunk 字符数（贴近真实 LLM 吞吐粒度）

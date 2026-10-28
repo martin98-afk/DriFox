@@ -4591,7 +4591,7 @@ class TabManagerWindow(FramelessWindow):
             # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
             # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
             def _on_win_title_changed(_new_title, _win=window):
-                if _shiboken6.isValid(_win):
+                if not _sip.isValid(_win):
                     return
                 cur_idx = self._window_to_index.get(id(_win), -1)
                 if cur_idx < 0 or cur_idx >= len(self._windows):
@@ -4629,7 +4629,7 @@ class TabManagerWindow(FramelessWindow):
 
             # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
             def _on_ai_state_changed(state, _win=window):
-                if _shiboken6.isValid(_win):
+                if not _sip.isValid(_win):
                     return
                 cur_idx = self._window_to_index.get(id(_win), -1)
                 if cur_idx < 0 or cur_idx >= len(self._windows):

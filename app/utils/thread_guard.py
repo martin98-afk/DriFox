@@ -150,7 +150,7 @@ def _cpp_alive(obj: QObject) -> bool:
     try:
         import shiboken6 as _sip
 
-        return not _shiboken6.isValid(obj)
+        return _sip.isValid(obj)
     except Exception:
         return False
 

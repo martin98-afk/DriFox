@@ -45,5 +45,5 @@ dump(menu, "小字 9px")
 
 # 直接看 _longestShortcutWidth 计算
 print("_longestShortcutWidth():", menu._longestShortcutWidth())
-print("view.fontMetrics width('检查更新'):", menu.view.fontMetrics().width("检查更新"))
-print("view.fontMetrics width(' v0.6.1'):", menu.view.fontMetrics().width(" v0.6.1"))
+print("view.fontMetrics width('检查更新'):", menu.view.fontMetrics().horizontalAdvance("检查更新"))
+print("view.fontMetrics width(' v0.6.1'):", menu.view.fontMetrics().horizontalAdvance(" v0.6.1"))

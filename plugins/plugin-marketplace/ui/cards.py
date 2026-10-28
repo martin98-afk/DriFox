@@ -28,7 +28,7 @@ from . import _icon_cache_patch as _icon_patch
 _icon_patch._apply_icon_cache_patch()
 
 import shiboken6 as sip
-from PySide6.QtCore import QObject, QRect, QSize, QThread, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
@@ -2332,7 +2332,7 @@ class _ExploreCard(QFrame):
 
     def eventFilter(self, obj, event):
         try:
-            if event.type() == event.MouseButtonRelease and event.button() == Qt.LeftButton:
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
                 if obj is not self._btn:
                     self.detailRequested.emit(self._meta)
                     return True
