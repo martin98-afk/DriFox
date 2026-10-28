@@ -49,18 +49,6 @@
         ]
       },
       {
-        "matcher": "primary",
-        "hooks": [
-          {
-            "type": "python",
-            "function": ".inject_handoff_guide:hook",
-            "add_output_to_context": true,
-            "statusMessage": "交接指引:",
-            "id": "builtin_handoff_guide"
-          }
-        ]
-      },
-      {
         "hooks": [
           {
             "type": "python",
@@ -84,17 +72,6 @@
       }
     ],
     "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "python",
-            "function": ".inject_handoff:hook",
-            "add_output_to_context": true,
-            "statusMessage": "交接文档:",
-            "id": "builtin_inject_handoff"
-          }
-        ]
-      },
       {
         "matcher": "#team_member",
         "hooks": [
@@ -167,19 +144,6 @@
             "add_output_to_context": false,
             "statusMessage": "安全检查:",
             "id": "builtin_safety_guard"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "python",
-            "function": ".context_auto_compact:hook?threshold=0.60",
-            "add_output_to_context": false,
-            "statusMessage": "上下文交接:",
-            "id": "builtin_auto_compact"
           }
         ]
       }

@@ -317,6 +317,12 @@ secret = store.get("my-plugin", "api_secret") or ""
 PluginConfigStore().set_values("my-plugin", {"endpoint": endpoint, "api_secret": secret})
 ```
 
+### 什么时候不要用 E1 自动卡
+
+需要可编辑下拉、运行时选项、字段联动、行尾外链或「测试连接」按钮时，写自绘卡并注册 `register_settings_card(..., priority=1)` 覆盖自动卡。布局口径、控件选型、折叠高度、连通性测试范式与审查清单见 [settings-card.md](settings-card.md)。
+
+> 覆盖后 `config_schema` 里的 `link` / `action` 字段不再显示，自绘卡必须自己补回这些入口。
+
 ---
 
 ## 完整示例（含 config_schema）

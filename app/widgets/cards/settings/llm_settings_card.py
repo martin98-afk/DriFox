@@ -383,7 +383,6 @@ class LLMSettingsCard(SystemCardFrame):
             (
                 ("common", "通用", FluentIcon.SETTING),
                 ("security", "安全中心", "锁定"),
-                ("notify", "通知", "提示"),
                 ("update", "更新", FluentIcon.UPDATE),
             ),
         ),
@@ -644,7 +643,6 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         common_layout.addWidget(self.busyEnterCard)
-        common_layout.addStretch(1)
 
         # ════ 渲染与性能页（Webview 环境变量配置化，全部重启生效）════
         # 换算逻辑见 app/utils/render_env.py；高级项（DisabledFeatures /
@@ -799,8 +797,7 @@ class LLMSettingsCard(SystemCardFrame):
         security_layout.addWidget(self.securityCenterCard)
         security_layout.addStretch(1)
 
-        # ════ 通知页 ════
-        notify_layout = self._page_layouts["notify"]
+        # ════ 通知设置（并入通用设置页）════
 
         # 智能体完成通知
         self.llmNotifyCard = SwitchSettingCard(
@@ -810,7 +807,7 @@ class LLMSettingsCard(SystemCardFrame):
             configItem=self.cfg.llm_notify_enabled,
             parent=self,
         )
-        notify_layout.addWidget(self.llmNotifyCard)
+        common_layout.addWidget(self.llmNotifyCard)
 
         # 通知提示音
         self.llmSoundCard = OptionsSettingCard(
@@ -821,7 +818,7 @@ class LLMSettingsCard(SystemCardFrame):
             texts=["默认", "短提示音", "无"],
             parent=self,
         )
-        notify_layout.addWidget(self.llmSoundCard)
+        common_layout.addWidget(self.llmSoundCard)
 
         # 进入时崩溃通知
         self.crashNotifyCard = SwitchSettingCard(
@@ -831,8 +828,8 @@ class LLMSettingsCard(SystemCardFrame):
             configItem=self.cfg.crash_notify_on_startup,
             parent=self,
         )
-        notify_layout.addWidget(self.crashNotifyCard)
-        notify_layout.addStretch(1)
+        common_layout.addWidget(self.crashNotifyCard)
+        common_layout.addStretch(1)
 
         # ════ 外观样式页 ════
         appearance_layout = self._page_layouts["appearance"]

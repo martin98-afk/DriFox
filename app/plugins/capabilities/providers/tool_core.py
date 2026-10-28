@@ -20,10 +20,22 @@ from app.plugins.capabilities.providers import model_meta, net_sync, process_cor
 
 def register(registry) -> None:
     def _kv(host: Any):
+        """窗口级 KV。
+
+        host 有两种形态：工具 impl 里是 ToolExecutor（自身带 window_state_*），
+        hook 里是 MainWidget（方法在它的 backend.tool_executor 上）。两种都要认，
+        否则 hook 侧调 state.kv 会直接 AttributeError → 插件静默跳过。
+        """
+        target = host
+        if not hasattr(target, "window_state_get"):
+            backend = _backend(host)
+            target = getattr(backend, "tool_executor", None) if backend is not None else None
+        if target is None or not hasattr(target, "window_state_get"):
+            return None
         return {
-            "get": host.window_state_get,
-            "set": host.window_state_set,
-            "delete": host.window_state_delete,
+            "get": target.window_state_get,
+            "set": target.window_state_set,
+            "delete": target.window_state_delete,
         }
 
     def _lsp(host: Any):
@@ -66,8 +78,16 @@ def register(registry) -> None:
         return _ui_artifacts_show(real)
 
     def _backend(host: Any):
-        """ToolExecutor → ChatBackend（host 自身持引用，无则 None）。"""
-        return getattr(host, "_backend", None)
+        """→ ChatBackend。
+
+        ToolExecutor 自身持 `_backend`；MainWidget（hook 侧 host）则用 `backend` 属性。
+        两种形态都要认，否则 hook 里取不到 backend → session.* 能力全部失效。
+        """
+        backend = getattr(host, "_backend", None)
+        if backend is not None:
+            return backend
+        candidate = getattr(host, "backend", None)
+        return candidate if hasattr(candidate, "get_current_session") else None
 
     def _builtin(host: Any):
         return getattr(host, "_builtin_tools", None)
@@ -152,9 +172,10 @@ def register(registry) -> None:
             backend = _backend(host)
             session = backend.get_current_session() if backend is not None else None
             if session is None:
-                return {"session_id": "", "messages": [], "system_prompt": ""}
+                return {"session_id": "", "name": "", "messages": [], "system_prompt": ""}
             return {
                 "session_id": str(getattr(session, "session_id", "") or ""),
+                "name": str(getattr(session, "name", "") or ""),
                 "messages": list(getattr(session, "messages", None) or []),
                 "system_prompt": str(getattr(session, "system_prompt", "") or ""),
             }
@@ -180,6 +201,39 @@ def register(registry) -> None:
                 return 0
 
         return write
+
+    def _session_control(host: Any):
+        """会话控制三件套（入队语义；host 是 ToolExecutor）。
+
+        工具 impl 跑在 worker 线程，直接停流会杀掉自己所在的 worker，
+        所以只入队，由 main_widget 在本轮结束时 drain。
+        window_id 从 backend 精确取，拿不到一律拒绝入队（防多窗口串窗）。
+        """
+        from app.core.conversation.action_queue import get_action_queue
+
+        backend = _backend(host)
+        wid = str(getattr(backend, "_window_id", "") or getattr(host, "_window_id", "") or "")
+        queue = get_action_queue()
+
+        def interrupt() -> bool:
+            return queue.enqueue(wid, "interrupt", {})
+
+        def new_session() -> bool:
+            return queue.enqueue(wid, "new", {})
+
+        def send(text: str, *, ephemeral: bool = False) -> bool:
+            return queue.enqueue(wid, "send", {"text": str(text or ""), "ephemeral": bool(ephemeral)})
+
+        return {"interrupt": interrupt, "new": new_session, "send": send}
+
+    def _session_interrupt(host: Any):
+        return _session_control(host)["interrupt"]
+
+    def _session_new(host: Any):
+        return _session_control(host)["new"]
+
+    def _session_send(host: Any):
+        return _session_control(host)["send"]
 
     def _workdir_read(host: Any):
         """当前工作目录。
@@ -309,6 +363,9 @@ def register(registry) -> None:
     )
     registry.register("session.read", _session_read, surface="tool", owner="core:tool")
     registry.register("session.write", _session_write, surface="tool", owner="core:tool")
+    registry.register("session.interrupt", _session_interrupt, surface="tool", owner="core:tool")
+    registry.register("session.new", _session_new, surface="tool", owner="core:tool")
+    registry.register("session.send", _session_send, surface="tool", owner="core:tool")
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
     registry.register("storage.data_dir", _storage_data_dir, surface="tool", owner="core:tool")
     registry.register("context.compact", _context_compactor, surface="tool", owner="core:tool")

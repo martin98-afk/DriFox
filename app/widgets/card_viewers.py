@@ -101,6 +101,7 @@ from app.widgets.card_render_core import (
     _SENTENCE_END_CHARS,
     _SKELETON_CACHE_MAX,
     _SKELETON_CACHE_VERSION,
+    _STREAM_APPEND_HELPERS_JS,
     _STREAMING_DOCK_CSS,
     _STREAMING_DOCK_JS,
     _TYPEWRITER_JS,
@@ -127,6 +128,7 @@ from app.widgets.card_render_core import (
     _js_literal,
     _last_para_break_outside_fence,
     _mmd_theme_vars_js,
+    _registered_tag_names_safe,
     _render_inline_tail,
     _render_markdown_to_html_cached,
     _render_markdown_to_html_worker,
@@ -137,6 +139,7 @@ from app.widgets.card_render_core import (
     _sanitize_incomplete_markdown,
     _skeleton_cache,
     _tail_before_unclosed_block,
+    _text_has_protocol_tag,
     _unwrap_code_blocks_with_context_links,
     _update_icon_prefix,
     _wrap_code_blocks_with_copy_button_web,
@@ -159,6 +162,38 @@ _BODY_GEOM_READ_JS = (
     "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
     "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()"
 )
+
+
+def _seg_has_protocol_block(seg: str) -> bool:
+    """差量段是否含流式协议块（think / tool / 插件注册 tag）。
+
+    含协议块的段不走差量追加：这些块的 DOM 由 JS 增量注入 / restore 维护，
+    差量再渲染一份会出现重复框（历史回归族）。判定保守：注册表拿不到时
+    按「含协议块」处理，宁可多走一次全量。
+    """
+    if not seg:
+        return False
+    if "<think>" in seg or "<tool>" in seg:
+        return True
+    if "<" not in seg:
+        return False
+    try:
+        for tag in _registered_tag_names_safe():
+            if f"<{tag}>" in seg:
+                return True
+    except Exception:  # noqa: BLE001
+        return True
+    return False
+
+
+def _stream_append_call_js(text_json: str) -> str:
+    """一次增量追加的最小载荷（helper 由骨架注册）。"""
+    return (
+        "(function(){var t="
+        + text_json
+        + ";if(typeof window._twPush==='function'){window._twPush(t);}"
+        "else if(typeof window._dfxAppendStreamText==='function'){window._dfxAppendStreamText(t);}})();"
+    )
 
 
 def _parse_height_payload(payload: str):
@@ -5711,6 +5746,7 @@ class CodeWebViewer(QWebEngineView):
                 {_STREAMING_DOCK_JS}
                 {_BODY_HEIGHT_CAP_JS}
                 {_TYPEWRITER_JS}
+                {_STREAM_APPEND_HELPERS_JS}
                 {_FLIP_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
@@ -5940,173 +5976,22 @@ class CodeWebViewer(QWebEngineView):
         if not self.isVisible():
             return
         try:
-            # 防御：过滤掉可能出现在正文 chunk 中的 <think> / </think> 标签
-            # （防止增量显示标签，全量渲染会正确处理）
-            text_clean = text.replace("<think>", "").replace("</think>", "")
-            if not text_clean:
+            # chunk 级协议标签守卫：含 think/tool/插件注册 tag（开或闭）的 chunk
+            # 一律不做纯文本注入。`append_text` 的守卫只看「累积后是否未闭合」，
+            # 闭合瞬间那一批（如 `取舍…\n</plan>`）会放行 → 内容以正文闪现，
+            # 下一次全量渲染把它变成折叠卡后又消失（碎片级泄漏）。
+            if _text_has_protocol_tag(text):
                 return
+            text_clean = text
             # 内存优化：超长 chunk 截断增量推送，避免单次 JS 调用传输过大数据
             # 全量渲染最终会提供完整格式化后的内容
             if len(text_clean) > 2000:
                 text_clean = text_clean[:2000] + "\n\n..."
-            js = f"""
-            (function() {{
-                // ── 流式占位提示（渲染型 fence 未闭合期间唯一可见反馈）──
-                // 只注册一次（与 _dfxAppendStreamText 同款守卫）
-                if (typeof window._dfxStreamNote === 'undefined') {{
-                window._dfxStreamNote = {{
-                    show: function(text) {{
-                        var c = document.getElementById('content-placeholder');
-                        if (!c || document.getElementById('dfx-stream-note')) return;
-                        var note = document.createElement('div');
-                        note.id = 'dfx-stream-note';
-                        note.className = 'dfx-stream-note';
-                        note.textContent = text || '';
-                        c.appendChild(note);
-                    }},
-                    hide: function() {{
-                        var n = document.getElementById('dfx-stream-note');
-                        if (n && n.parentNode) n.parentNode.removeChild(n);
-                    }}
-                }};
-                }}
-                // ── 追加逻辑注册为全局函数（只注册一次）──
-                // 打字机揭示队列（window._twPush）需要按帧调用同一套"把一段文本
-                // 接到正文尾部"的逻辑；注册成函数后队列与直接调用共用一份实现，
-                // 避免两处逻辑漂移（段落/host 判定一旦分叉就会出现跳位）。
-                if (typeof window._dfxAppendStreamText !== 'function') {{
-                window._dfxAppendStreamText = function(text, skipReport) {{
-                if (window._dfxStreamNote) window._dfxStreamNote.hide();
-                var c = document.getElementById('content-placeholder');
-                if (!c || !text) return;
-                // ── 尾部文本宿主定位 ──
-                // rendered 尾部节点的 innerHTML 是 md.convert 产物（<p>/<ul>/<li>/<pre>…），
-                // 直接把文本追加到节点本身会落在最后一个块级元素**之后**（另起一段）。
-                // 下潜到最后一块级元素内，让文字接在已有文字后面**连续增长**。
-                var _BLOCK_TAGS = {{P:1, UL:1, OL:1, LI:1, BLOCKQUOTE:1, PRE:1, H1:1, H2:1, H3:1, H4:1, H5:1, H6:1}};
-                function _tailTextHost(node) {{
-                    var host = node;
-                    for (var _g = 0; _g < 6; _g++) {{
-                        var lc = host.lastElementChild;
-                        if (!lc) break;
-                        if (lc.tagName === 'PRE') {{
-                            // 代码块：文本承载在 <code> 内（行内 <code> 不下潜，
-                            // 避免后续正文钻进行内代码）
-                            host = (lc.lastElementChild && lc.lastElementChild.tagName === 'CODE')
-                                ? lc.lastElementChild : lc;
-                            break;
-                        }}
-                        if (!_BLOCK_TAGS[lc.tagName]) break;
-                        host = lc;
-                    }}
-                    return host;
-                }}
-                // [PERF] 文本合并追加：帧级揭示（~60fps）下若每次都 appendChild 新建
-                // 文本节点，一条 2000 字回复会产出 600+ 个 Text 节点 —— DOM 节点数
-                // 膨胀，内存与后续 querySelectorAll / innerHTML 成本同步上升
-                // （用户反馈"内存占用高了很多"的主因之一）。
-                // 末尾已是文本节点时直接 appendData 合并 → 每段稳定 1 个文本节点。
-                function _appendTextMerged(host, txt) {{
-                    var lc = host.lastChild;
-                    if (lc && lc.nodeType === 3) {{
-                        lc.appendData(txt);
-                    }} else {{
-                        host.appendChild(document.createTextNode(txt));
-                    }}
-                }}
-                function _newIncrementalP(txt) {{
-                    var _p = document.createElement('p');
-                    // [B1] 标记为增量纯文本节点：差量渲染追加格式化 HTML 时会先移除
-                    _p.setAttribute('data-incremental', 'true');
-                    _p.textContent = txt;
-                    c.appendChild(_p);
-                    return _p;
-                }}
-                // ── 智能段落处理 ──
-                // 只有**段落分隔**（>=2 个换行）才新建 <p>；单个换行是 Markdown 软换行
-                // （最终渲染为空格），必须接在当前段内 —— 否则每个 chunk 独占一行，
-                // 流式期间整段正文被切成一堆碎片行。
-                var lead = text.match(/^[\\r\\n]+/);
-                var newlines = lead ? lead[0].replace(/\\r\\n/g, '\\n').length : 0;
-                var last = c.lastElementChild;
-                // 🐛 修复（流式文字跳位）：#char-count（字数统计空 DIV）拼在全量 HTML
-                // 末尾，是 container 的 lastElementChild。不跳过它的话，全量渲染后
-                // 的所有正文 chunk 都拿不到真实末块（稳定 <p>），落入"新建独立 <p>"
-                // 兜底分支 → 源文同段文字被拆成独立行先蹦在最底部，下一轮渲染才
-                // 合并回正文（用户感知"文字先换行出现在最下面，再跳回正确位置"）。
-                if (last && last.id === 'char-count') last = last.previousElementSibling;
-                if (newlines >= 2) {{
-                    // 段落分隔：去掉前导换行，创建独立 <p>
-                    var clean = text.replace(/^[\\n\\r]+/, '');
-                    if (clean) {{
-                        _newIncrementalP(clean);
-                    }} else {{
-                        // 纯分隔换行（chunk 里只有 \\n\\n）：**不建空节点** ——
-                        // 空 <p> 的上下 margin 会凭空撑高一行，150~500ms 后又被
-                        // tail 渲染移除，表现为"正文下方闪一段空白"。改为打挂起标记，
-                        // 由下一个文字 chunk 建新段落（无空行抖动 + 段落立即正确）。
-                        c.setAttribute('data-pending-break', '1');
-                    }}
-                }} else if (c.getAttribute('data-pending-break') === '1') {{
-                    // 上一段以纯分隔换行收尾：新文字必须另起一段。
-                    // 否则会短暂粘在上一段末尾，等下次 tail 渲染才分开 → 又是一次跳位。
-                    c.removeAttribute('data-pending-break');
-                    _newIncrementalP(text);
-                }} else if (last && last.getAttribute('data-incremental') === 'true') {{
-                    // 🐛 修复（流式文字碎片化）：增量节点（含 data-rendered 的尾部渲染节点）
-                    // **就地追加文本节点**承接新文字，保持与已有内容连续。
-                    // 旧逻辑对 data-rendered 节点新建独立 <p> —— 流式期间每个 chunk 都堆出
-                    // 一个带段落间距的新行，观感就是"文字先在最后几行以片段形式冒出来，
-                    // 随后 updateTailHtml 又把碎片合并回正文"（文字不断跳位重排）。
-                    // appendChild(textNode) 既不覆盖已渲染的行内 HTML（textContent += 会把
-                    // <strong>/<code> 抹回 markdown 源码形态），又让文字连续增长。
-                    _appendTextMerged(_tailTextHost(last), text);
-                }} else if (last && last.tagName === 'P') {{
-                    // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
-                    // 不能打 data-incremental 标记/原地追加——否则下次差量渲染
-                    // updateContentAppend 移除全部 data-incremental 节点时会连带
-                    // 删除该稳定段落（已渲染正文永久丢失，"内容显示不全"）。
-                    // 新建增量节点承载：格式化段落必为已闭合段（\\n\\n 结尾），
-                    // 后续文本属新段落，独立 <p> 结构正确。
-                    _newIncrementalP(text);
-                }} else {{
-                    // 思考块 / 工具块 / 空容器等：新段落承载
-                    _newIncrementalP(text);
-                }}
-                // 🐛 修复：同步 auto-scroll（无 setTimeout 渲染间隙），
-                // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
-                // 附加修复：auto-scroll 成功后复位 _userScrolledWithin，
-                // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
-                // 用 scrollTop 差值识别用户滚动（替代原 200ms 时间窗，避免
-                // 快速流式时时间窗永不过期导致用户滚轮被永久忽略）。
-                window._suppressScrollEvent = true;
-                if (!window._userScrolledWithin) {{
-                    _autoScrollStreamingBody();
-                }} else {{
-                    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
-                    if (wasAtBottom) {{
-                        _autoScrollStreamingBody();
-                        window._userScrolledWithin = false;
-                    }}
-                }}
-                // 同步 _prevScrollTop，使 delta 检测有正确的基线
-                window._prevScrollTop = document.body.scrollTop;
-                window._autoScrollTime = performance.now();
-                window._suppressScrollEvent = false;
-                // skipReport：打字机揭示按帧调用，由队列侧节流（见 _twStep）
-                if (!skipReport) reportHeightDebounced();
-                }};  // ── _dfxAppendStreamText 定义结束 ──
-                }}
-                // ── 交给打字机揭示队列（帧级揭示）──
-                // 队列不可用时（旧骨架 / 降级）退化为立即追加，行为与改造前一致。
-                var text = {json.dumps(text_clean).decode("utf-8")};
-                if (typeof window._twPush === 'function') {{
-                    window._twPush(text);
-                }} else {{
-                    window._dfxAppendStreamText(text);
-                }}
-            }})();
-            """
+            _text_json = json.dumps(text_clean).decode("utf-8")
+            # [PERF] 静态 helper 已随骨架注入（_STREAM_APPEND_HELPERS_JS），
+            # 每 chunk 只发最小调用包。旧实现每次重发整段注册代码（实测 8.1KB/次、
+            # 常速流式 950KB/轮），字符串构建 + IPC 载荷全是重复功。
+            js = _stream_append_call_js(_text_json)
             self.page().runJavaScript(js)
         except RuntimeError:
             pass
@@ -6625,8 +6510,21 @@ class CodeWebViewer(QWebEngineView):
                 self._stable_html = ""
                 self._stable_md_len = 0
                 self._needs_full_render = True
-            if self._streaming and not self._needs_full_render and not self._has_active_tool_dom():
+            if self._streaming and self._needs_full_render:
+                self._rdiag_hit("full_needs_full")
+            elif self._streaming and self._has_pending_tool_dom():
+                self._rdiag_hit("full_tool_pending")
+            if self._streaming and not self._needs_full_render and not self._has_pending_tool_dom():
                 stable_len, segs = _extract_closed_segments(self._markdown_text[self._stable_md_len :])
+                # 含协议块的闭合段（think / tool / 插件注册 tag）仍让位全量：
+                # 这些块的 DOM 由 JS 增量注入维护，差量双写会出现重复框。
+                # 纯文本段占流式输出绝对多数，让位代价可忽略。
+                if segs and any(_seg_has_protocol_block(seg) for seg in segs):
+                    self._refresh_viewer_font_css()
+                    self._last_rendered_markdown = self._markdown_text
+                    self._rdiag_hit("full_protocol_seg")
+                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                    return
                 # 🐛 修复（流式重复/残留 —— 「同一张卡里出现两份 PLAN/两条工具框」根因）：
                 # 基线停在 0 但本消息**已经全量渲染过**（DOM 已含 md[0:len(_last_rendered
                 # _markdown)] 的产物）。此时首个 \n\n 一到，segs 会把 md[0:...] 的闭合段
@@ -6696,6 +6594,7 @@ class CodeWebViewer(QWebEngineView):
                 # _perform_update 也会被此分支拦截，思考块/闭合段永远滞留
                 # （或仅靠流式结束才一次性显示）。
                 if self._has_reached_clean_boundary(self._markdown_text):
+                    self._rdiag_hit("full_no_seg")
                     self._refresh_viewer_font_css()
                     self._sequence_render(self._markdown_text, self._tool_compact_mode)
                 else:
@@ -6727,7 +6626,6 @@ class CodeWebViewer(QWebEngineView):
             # 主线程不再同步执行 md.convert（20-80ms 阻塞消除），
             # 渲染参数以快照形式传引用（md 不复制）。
             self._last_rendered_markdown = self._markdown_text
-            self._rdiag_hit("full_submit")
             self._sequence_render(self._markdown_text, self._tool_compact_mode)
 
         except RuntimeError:
@@ -6810,6 +6708,22 @@ class CodeWebViewer(QWebEngineView):
                 self._tool_dom_dirty = False
         except Exception:
             pass
+
+    def _has_pending_tool_dom(self) -> bool:
+        """流式差量是否必须让位全量。
+
+        只统计「JS 注入但尚未落进 markdown 的工具块」（运行框 / 参数预览框）：
+        它们不在 markdown 中，整页 updateContent 会抹掉，必须走 save/restore。
+
+        已完成工具（``_restore_finished_ids`` 非空）**不阻断差量**：这些块已由
+        ``_build_incremental_md`` 写入 markdown，差量路径只追加新闭合段、不动
+        已有 DOM，无需 restore 保护。此前把它计入阻断条件，导致「本轮只要调过
+        一次工具，后续每条正文都整页 updateContent」——长回复表现为成片闪现、
+        白屏重排、打字机缓冲被 _twReset 反复丢弃（无打字机观感）。
+        """
+        if self._tool_dom_dirty:
+            return True
+        return bool(getattr(self, "_injected_pending_tools", None))
 
     def _has_active_tool_dom(self) -> bool:
         """B1: 是否有活跃工具 DOM（JS 注入的工具块 / 待 restore 的完成块）。

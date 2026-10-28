@@ -28,6 +28,10 @@ assistant_hub 人格块 <mood>/<plan> 流式输出期间，块内容先以普通
 - append_text 未闭合 tag 跳过增量注入，状态翻转（首现/闭合）强制
   全量渲染一次（占位行/完整卡片只能由全量管线产出）；
 - _push_unrendered_tail_text 回补前守卫。
+5. 闭合瞬间那一批（`取舍…\n</plan>`）：append_text 的「未闭合」守卫对已闭合
+   last_text 放行，而增量注入只清 `<think>` → 内容以纯文本进正文，下一次
+   全量渲染变成折叠卡后消失。修复：_append_text_incremental 新增 chunk 级
+   守卫 _text_has_protocol_tag（含 think/tool/注册 tag 或尾部半截标签即跳过）。
 """
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -38,6 +42,7 @@ from app.widgets.message_card import (
     _inject_tag_cards,
     _render_stable_segment,
     _tail_before_unclosed_block,
+    _text_has_protocol_tag,
 )
 
 
@@ -46,9 +51,10 @@ def noop_render(content: str, ctx: dict) -> str:
 
 
 def setup_function():
-    UIPluginRegistry.get_instance().register_tag_renderer(
-        plugin_name="t", tag_name="mood", render_func=noop_render, priority=10
-    )
+    reg = UIPluginRegistry.get_instance()
+    reg.register_tag_renderer(plugin_name="t", tag_name="mood", render_func=noop_render, priority=10)
+    # plan 同属 assistant_hub 人格块标签（真实环境已注册），闭合瞬间泄漏用例需要它
+    reg.register_tag_renderer(plugin_name="t", tag_name="plan", render_func=noop_render, priority=10)
 
 
 def teardown_function():
@@ -101,3 +107,33 @@ def test_inject_tag_cards_completed_vs_streaming():
     assert "data-completed='False'" in out, f"未闭合 tag 应渲染占位: {out!r}"
     out = _inject_tag_cards("联想：y</mood>", True, compact=False)
     assert "</mood>" not in out, f"孤立 close 应被清理: {out!r}"
+
+
+# ── 用例 7：闭合瞬间的 chunk 不得做纯文本增量注入（碎片级泄漏）──
+def test_closing_chunk_has_protocol_tag():
+    """`</plan>` 所在那批必须被 chunk 级守卫拦下。
+
+    现象：append_text 的守卫只查「累积后的 text block 是否未闭合」，闭合瞬间
+    的 last_text 已闭合 → 放行；增量注入只清 `<think>` → 该批内容以纯文本
+    进 DOM，下一次全量渲染又变成折叠卡 → 正文闪现一段后消失。
+    """
+    last_text = "<plan>目标：x\n取舍：y</plan>"
+    chunk = "取舍：y\n</plan>"
+    # 现有「未闭合」守卫对已闭合块放行——这正是需要 chunk 级守卫的原因
+    assert not _has_unclosed_registered_tag(last_text)
+    assert _text_has_protocol_tag(chunk), f"闭合标签所在 chunk 必须拦截: {chunk!r}"
+
+
+def test_text_has_protocol_tag_matrix():
+    """chunk 级守卫真值表：协议标签拦、普通正文放行。"""
+    assert _text_has_protocol_tag("<mood>感受：x</mood>")
+    assert _text_has_protocol_tag("</mood>")
+    assert _text_has_protocol_tag("<think>x</think>")
+    assert _text_has_protocol_tag("推理结束</think>后文")
+    assert _text_has_protocol_tag("<tool>")
+    assert _text_has_protocol_tag("结论：看 <pl"), "尾部半截标签应拦（残段注入同样是碎片）"
+    # 普通正文（含比较符号但不含协议标签）不误伤
+    assert not _text_has_protocol_tag("")
+    assert not _text_has_protocol_tag("就是一段中文正文，没有任何标签")
+    assert not _text_has_protocol_tag("a < b 且 c > d")
+    assert not _text_has_protocol_tag("结果是 3.5mm < 5mm")

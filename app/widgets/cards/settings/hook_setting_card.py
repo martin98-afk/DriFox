@@ -1188,6 +1188,7 @@ class HookListSettingCard(ExpandSettingCard):
             )
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
+            empty_label.show()
             return
 
         # 按事件顺序渲染
@@ -1211,6 +1212,7 @@ class HookListSettingCard(ExpandSettingCard):
                 f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
             )
             self.viewLayout.addWidget(header)
+            header.show()
 
             # Hook 条目
             for hook_data in event_hooks:
@@ -1220,6 +1222,7 @@ class HookListSettingCard(ExpandSettingCard):
                 item.edited.connect(lambda hid: self._edit_hook_by_id(hid))
                 item.toggled.connect(lambda hid, enabled: self._toggle_hook_by_id(hid, enabled))
                 self.viewLayout.addWidget(item)
+                item.show()  # 可见 parent 下新建的 widget 不 show 会被布局 isEmpty 跳过 → sizeHint=0 → 卡片高度塌成 header
                 self._hook_items[hook_id] = item
 
     def _edit_hook_by_id(self, hook_id: str):

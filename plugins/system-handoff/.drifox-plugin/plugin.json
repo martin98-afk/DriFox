@@ -1,0 +1,28 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-handoff",
+  "description": "会话交接：上下文接近上限时把工作状态写成交接文档，切新会话继续，不断档",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "GPL-3.0-or-later",
+  "type": "system",
+  "api_version": 2,
+  "capabilities": [
+    "session.interrupt",
+    "session.new",
+    "session.send",
+    "session.read",
+    "state.kv",
+    "storage.data_dir"
+  ],
+  "components": {
+    "tools": true,
+    "hooks": true
+  }
+}

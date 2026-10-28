@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_handoff:hook",
+            "add_output_to_context": true,
+            "statusMessage": "交接文档:",
+            "id": "system_handoff_inject"
+          }
+        ]
+      }
+    ],
+    "BuildSystemPrompt": [
+      {
+        "matcher": "primary",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_handoff_guide:hook",
+            "add_output_to_context": true,
+            "statusMessage": "交接指引:",
+            "id": "system_handoff_guide"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".auto_compact_trigger:hook?threshold=0.60",
+            "add_output_to_context": true,
+            "statusMessage": "上下文交接:",
+            "id": "system_handoff_auto_compact"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -288,6 +288,7 @@ class LspListSettingCard(ExpandSettingCard):
             )
             empty_label.setAlignment(Qt.AlignCenter)
             self.viewLayout.addWidget(empty_label)
+            empty_label.show()
         else:
             for name, client in mgr._clients.items():
                 exts = list(client.config.extension_to_language.keys())
@@ -310,6 +311,7 @@ class LspListSettingCard(ExpandSettingCard):
                     row.set_gate_pending(gate_key)
                 self._rows[name] = row
                 self.viewLayout.addWidget(row)
+                row.show()  # 可见 parent 下新建 widget 不 show 会被布局 isEmpty 跳过 → sizeHint=0 → 卡片高度塌成 header
 
         # ★ 原实现在这里 QCoreApplication.processEvents()：泵走当时事件队列里的
         # 全部事件，本函数耗时因此变成"那一刻队列里积压了什么"（实测首建被顶到

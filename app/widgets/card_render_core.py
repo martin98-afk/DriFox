@@ -1928,6 +1928,35 @@ _PARTIAL_TAG_TAIL_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]{0,11}$")
 _PARTIAL_TAG_TAIL_WINDOW = 24
 
 
+def _text_has_protocol_tag(text: str) -> bool:
+    """chunk 是否含协议块标签（think / tool / 插件注册 tag，开或闭）。
+
+    用途：`CodeWebViewer._append_text_incremental` 的 chunk 级守卫。
+    `MessageCard.append_text` 的守卫只看「累积后的 text block 是否**未闭合**」，
+    闭合瞬间那一批（如 `取舍…\\n</plan>`）会被放行；而增量注入只清理
+    `<think>`，于是这批文本以纯文本进 DOM，下一次全量渲染又把它变成折叠卡
+    → 视觉上"思考/人格块内容在正文闪现后消失"（碎片级泄漏）。
+    含标签的 chunk 一律不做纯文本注入，交全量/差量渲染处理；口径与
+    `_render_inline_tail`（含 think 标签即返回空）一致。
+    """
+    if not text:
+        return False
+    # chunk 边界切开标签（尾部半截 `<pl` / `</pl`）：与 _has_unclosed_registered_tag
+    # 同口径宽松拦截——残段注入正文同样是碎片泄漏，误拦代价只是该批延迟一拍渲染。
+    if _PARTIAL_TAG_TAIL_RE.search(text[-_PARTIAL_TAG_TAIL_WINDOW:]):
+        return True
+    if "<" not in text:
+        return False
+    lowered = text.lower()
+    for tag in ("think", "tool"):
+        if f"<{tag}>" in lowered or f"</{tag}>" in lowered:
+            return True
+    for tag in _registered_tag_names_safe():
+        if f"<{tag}>" in lowered or f"</{tag}>" in lowered:
+            return True
+    return False
+
+
 def _is_render_fence_lang(lang: str) -> bool:
     """lang 是否会渲染成卡片/图表（内置集合 + 插件 fence 渲染器注册表）。"""
     if not lang:
@@ -3564,7 +3593,7 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v47）：移除预览文字打字机（_PREVIEW_TYPEWRITER_JS：
 # window._pt/_ptType/_ptPlay + 全部 [data-dfx-preview] 标记 + 三处渲染路径调用）。
 # 预览/思考预览行改为渲染落地即全显，不再逐字。旧骨架仍带 _pt 资产与调用必须失效。
-_SKELETON_CACHE_VERSION = 47
+_SKELETON_CACHE_VERSION = 49
 
 
 def _js_literal(value) -> str:
@@ -4040,14 +4069,16 @@ _STREAMING_DOCK_CSS = """
                 }
                 body.streaming-dock #content-placeholder {
                     order: 1;
-                    /* [T36] 不再限高：正文按自然高度随流式生长（与普通模式一致）。
-                       原设计（max-height 600px + 容器内滚）把「卡片总高稳定」放在
-                       阅读体验之上，实际代价是三重糟感：长回复流式期间看不到正在
-                       生成的文字（要手动内滚）；结束后 600→自然高度一次大跳变
-                       （数千 px 长回复尤其剧烈）；内滚容器与消息列表滚动跟随两层
-                       滚动打架。坞态的价值保留在「工具/思考实时条目沉底可见」，
-                       正文增长交给消息列表滚动跟随（贴底已修复）。
+                    /* [T39] 恢复正文限高 + 容器内滚（[T36] 反转）：用户诉求「工具区
+                       别跟着正文一路下滑」。卡片高度 = 正文 + 工具区，正文按自然
+                       高度长高时工具区被一路推动；给正文一个上限后卡片高度钳停，
+                       工具区位置固定，正文在容器内跟滚（JS 侧
+                       _autoScrollStreamingBody 的坞态分支早已就绪，此前限高被移除
+                       后一直是空转）。代价：流式期间正文只显示最近一屏、结束后
+                       卡片回到自然高度（一次性长高，由既有高度跟踪动画收敛）。
                        保留横向裁剪（原 🐛 修复依然需要）。 */
+                    max-height: 600px;
+                    overflow-y: auto;
                     overflow-x: hidden;
                     overflow-wrap: break-word;
                 }
@@ -4441,6 +4472,158 @@ _TYPEWRITER_JS = """
                     st._boost = false;
                 };
 """
+_STREAM_APPEND_HELPERS_JS = f"""
+            (function() {{
+                // ── 流式占位提示（渲染型 fence 未闭合期间唯一可见反馈）──
+                // 只注册一次（与 _dfxAppendStreamText 同款守卫）
+                if (typeof window._dfxStreamNote === 'undefined') {{
+                window._dfxStreamNote = {{
+                    show: function(text) {{
+                        var c = document.getElementById('content-placeholder');
+                        if (!c || document.getElementById('dfx-stream-note')) return;
+                        var note = document.createElement('div');
+                        note.id = 'dfx-stream-note';
+                        note.className = 'dfx-stream-note';
+                        note.textContent = text || '';
+                        c.appendChild(note);
+                    }},
+                    hide: function() {{
+                        var n = document.getElementById('dfx-stream-note');
+                        if (n && n.parentNode) n.parentNode.removeChild(n);
+                    }}
+                }};
+                }}
+                // ── 追加逻辑注册为全局函数（只注册一次）──
+                // 打字机揭示队列（window._twPush）需要按帧调用同一套"把一段文本
+                // 接到正文尾部"的逻辑；注册成函数后队列与直接调用共用一份实现，
+                // 避免两处逻辑漂移（段落/host 判定一旦分叉就会出现跳位）。
+                if (typeof window._dfxAppendStreamText !== 'function') {{
+                window._dfxAppendStreamText = function(text, skipReport) {{
+                if (window._dfxStreamNote) window._dfxStreamNote.hide();
+                var c = document.getElementById('content-placeholder');
+                if (!c || !text) return;
+                // ── 尾部文本宿主定位 ──
+                // rendered 尾部节点的 innerHTML 是 md.convert 产物（<p>/<ul>/<li>/<pre>…），
+                // 直接把文本追加到节点本身会落在最后一个块级元素**之后**（另起一段）。
+                // 下潜到最后一块级元素内，让文字接在已有文字后面**连续增长**。
+                var _BLOCK_TAGS = {{P:1, UL:1, OL:1, LI:1, BLOCKQUOTE:1, PRE:1, H1:1, H2:1, H3:1, H4:1, H5:1, H6:1}};
+                function _tailTextHost(node) {{
+                    var host = node;
+                    for (var _g = 0; _g < 6; _g++) {{
+                        var lc = host.lastElementChild;
+                        if (!lc) break;
+                        if (lc.tagName === 'PRE') {{
+                            // 代码块：文本承载在 <code> 内（行内 <code> 不下潜，
+                            // 避免后续正文钻进行内代码）
+                            host = (lc.lastElementChild && lc.lastElementChild.tagName === 'CODE')
+                                ? lc.lastElementChild : lc;
+                            break;
+                        }}
+                        if (!_BLOCK_TAGS[lc.tagName]) break;
+                        host = lc;
+                    }}
+                    return host;
+                }}
+                // [PERF] 文本合并追加：帧级揭示（~60fps）下若每次都 appendChild 新建
+                // 文本节点，一条 2000 字回复会产出 600+ 个 Text 节点 —— DOM 节点数
+                // 膨胀，内存与后续 querySelectorAll / innerHTML 成本同步上升
+                // （用户反馈"内存占用高了很多"的主因之一）。
+                // 末尾已是文本节点时直接 appendData 合并 → 每段稳定 1 个文本节点。
+                function _appendTextMerged(host, txt) {{
+                    var lc = host.lastChild;
+                    if (lc && lc.nodeType === 3) {{
+                        lc.appendData(txt);
+                    }} else {{
+                        host.appendChild(document.createTextNode(txt));
+                    }}
+                }}
+                function _newIncrementalP(txt) {{
+                    var _p = document.createElement('p');
+                    // [B1] 标记为增量纯文本节点：差量渲染追加格式化 HTML 时会先移除
+                    _p.setAttribute('data-incremental', 'true');
+                    _p.textContent = txt;
+                    c.appendChild(_p);
+                    return _p;
+                }}
+                // ── 智能段落处理 ──
+                // 只有**段落分隔**（>=2 个换行）才新建 <p>；单个换行是 Markdown 软换行
+                // （最终渲染为空格），必须接在当前段内 —— 否则每个 chunk 独占一行，
+                // 流式期间整段正文被切成一堆碎片行。
+                var lead = text.match(/^[\\r\\n]+/);
+                var newlines = lead ? lead[0].replace(/\\r\\n/g, '\\n').length : 0;
+                var last = c.lastElementChild;
+                // 🐛 修复（流式文字跳位）：#char-count（字数统计空 DIV）拼在全量 HTML
+                // 末尾，是 container 的 lastElementChild。不跳过它的话，全量渲染后
+                // 的所有正文 chunk 都拿不到真实末块（稳定 <p>），落入"新建独立 <p>"
+                // 兜底分支 → 源文同段文字被拆成独立行先蹦在最底部，下一轮渲染才
+                // 合并回正文（用户感知"文字先换行出现在最下面，再跳回正确位置"）。
+                if (last && last.id === 'char-count') last = last.previousElementSibling;
+                if (newlines >= 2) {{
+                    // 段落分隔：去掉前导换行，创建独立 <p>
+                    var clean = text.replace(/^[\\n\\r]+/, '');
+                    if (clean) {{
+                        _newIncrementalP(clean);
+                    }} else {{
+                        // 纯分隔换行（chunk 里只有 \\n\\n）：**不建空节点** ——
+                        // 空 <p> 的上下 margin 会凭空撑高一行，150~500ms 后又被
+                        // tail 渲染移除，表现为"正文下方闪一段空白"。改为打挂起标记，
+                        // 由下一个文字 chunk 建新段落（无空行抖动 + 段落立即正确）。
+                        c.setAttribute('data-pending-break', '1');
+                    }}
+                }} else if (c.getAttribute('data-pending-break') === '1') {{
+                    // 上一段以纯分隔换行收尾：新文字必须另起一段。
+                    // 否则会短暂粘在上一段末尾，等下次 tail 渲染才分开 → 又是一次跳位。
+                    c.removeAttribute('data-pending-break');
+                    _newIncrementalP(text);
+                }} else if (last && last.getAttribute('data-incremental') === 'true') {{
+                    // 🐛 修复（流式文字碎片化）：增量节点（含 data-rendered 的尾部渲染节点）
+                    // **就地追加文本节点**承接新文字，保持与已有内容连续。
+                    // 旧逻辑对 data-rendered 节点新建独立 <p> —— 流式期间每个 chunk 都堆出
+                    // 一个带段落间距的新行，观感就是"文字先在最后几行以片段形式冒出来，
+                    // 随后 updateTailHtml 又把碎片合并回正文"（文字不断跳位重排）。
+                    // appendChild(textNode) 既不覆盖已渲染的行内 HTML（textContent += 会把
+                    // <strong>/<code> 抹回 markdown 源码形态），又让文字连续增长。
+                    _appendTextMerged(_tailTextHost(last), text);
+                }} else if (last && last.tagName === 'P') {{
+                    // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
+                    // 不能打 data-incremental 标记/原地追加——否则下次差量渲染
+                    // updateContentAppend 移除全部 data-incremental 节点时会连带
+                    // 删除该稳定段落（已渲染正文永久丢失，"内容显示不全"）。
+                    // 新建增量节点承载：格式化段落必为已闭合段（\\n\\n 结尾），
+                    // 后续文本属新段落，独立 <p> 结构正确。
+                    _newIncrementalP(text);
+                }} else {{
+                    // 思考块 / 工具块 / 空容器等：新段落承载
+                    _newIncrementalP(text);
+                }}
+                // 🐛 修复：同步 auto-scroll（无 setTimeout 渲染间隙），
+                // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
+                // 附加修复：auto-scroll 成功后复位 _userScrolledWithin，
+                // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
+                // 用 scrollTop 差值识别用户滚动（替代原 200ms 时间窗，避免
+                // 快速流式时时间窗永不过期导致用户滚轮被永久忽略）。
+                window._suppressScrollEvent = true;
+                if (!window._userScrolledWithin) {{
+                    _autoScrollStreamingBody();
+                }} else {{
+                    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
+                    if (wasAtBottom) {{
+                        _autoScrollStreamingBody();
+                        window._userScrolledWithin = false;
+                    }}
+                }}
+                // 同步 _prevScrollTop，使 delta 检测有正确的基线
+                window._prevScrollTop = document.body.scrollTop;
+                window._autoScrollTime = performance.now();
+                window._suppressScrollEvent = false;
+                // skipReport：打字机揭示按帧调用，由队列侧节流（见 _twStep）
+                if (!skipReport) reportHeightDebounced();
+                }};  // ── _dfxAppendStreamText 定义结束 ──
+                }}
+            }})();
+"""
+
+
 
 # ── FLIP 位移动画 + 动画串行队列骨架资产 ──
 # 解决"流式结束时工具与思考弹到最顶上"：

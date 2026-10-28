@@ -951,7 +951,7 @@ class OpenAIChatWorker(QThread):
             }
 
             # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息
-            # 让 hook（如 context_auto_compact）能检测当前 token 占比
+            # 让 hook（如 system-handoff 的 auto_compact_trigger）能检测当前 token 占比
             # 与圆环同源（engine 快照口径），保证 hook 触发占比与显示一致
             if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
                 token_count, token_limit = self._hook_context_usage(backend)
@@ -1015,11 +1015,6 @@ class OpenAIChatWorker(QThread):
                 except ImportError:
                     pass
 
-            # 检查 auto-compact 触发信号（context_auto_compact hook 的输出）
-            # 将 results 中 JSON 的 auto_compact 信号转发给 backend
-            if event_name == "PreAssistantMessage":
-                self._check_results_auto_compact(results, backend)
-
             return block_reason
 
         except Exception as e:
@@ -1034,30 +1029,6 @@ class OpenAIChatWorker(QThread):
             backend,
             llm_config=getattr(self, "llm_config", None),
         )
-
-    def _check_results_auto_compact(self, results: list, backend) -> None:
-        """检查 hook 结果中是否有 auto-compact 触发信号
-
-        从各 hook 返回的 JSON 解析 auto_compact 字段，
-        有信号则调用 backend.request_auto_compact。
-
-        Args:
-            results: trigger_event 返回的 HookExecutionResult 列表
-            backend: ChatBackend 实例
-        """
-        if not results:
-            return
-        for r in results:
-            if not r.success or not r.output:
-                continue
-            try:
-                data = json.loads(r.output)
-                if isinstance(data, dict) and data.get("auto_compact"):
-                    ratio = float(data.get("ratio", 0.0))
-                    backend.request_auto_compact(ratio)
-                    return  # 只触发一次
-            except json.JSONDecodeError, ValueError, TypeError:
-                pass
 
     @staticmethod
     def _extract_block_reason(output: str) -> Optional[str]:
@@ -2043,6 +2014,8 @@ class OpenAIChatWorker(QThread):
             self.full_response = ""
             self._prev_stophook_response = None
             self._reasoning_content = ""
+            # 工具的「本轮收尾」请求（update_handoff switch=true 的 handoff_switch 标记）
+            self._end_turn_requested = False
             # 开始新对话时，清理所有中间状态
             self._clear_pending_response_state()
             # 🛡️ 防御性清理：移除可能来自上次取消/中断的 orphaned tool_calls
@@ -2484,6 +2457,21 @@ class OpenAIChatWorker(QThread):
                     current_session_messages,
                     extra_context={"assistant_response": _asst_text},
                 )
+
+                # ====== 工具要求本轮立即收尾（交接写完即换会话）======
+                # 对齐轮数上限分支的四行式信号序列自然结束本轮（不走 cancel 路径，
+                # 动作队列的 new 才能通过 worker 已停的检查）。工具结果已并入
+                # current_session_messages，落库与渲染都不受影响。
+                # 有意不触发 Stop hook：hook 注入消息会再续命一轮，与「写完即切走」相反。
+                if getattr(self, "_end_turn_requested", False):
+                    logger.info("[Handoff] 工具要求本轮收尾（交接已登记），不再发起下一轮 API 调用")
+                    self._emit_with_callback(
+                        "finished_with_messages", self.finished_with_messages, current_session_messages
+                    )
+                    final_response = self.full_response
+                    self._clear_pending_response_state()
+                    self._emit_with_callback("finished_with_content", self.finished_with_content, final_response)
+                    return
 
                 # ========== 视觉模型注入：截图/read图片 → base64 图片 ==========
                 vision_injected = self._try_inject_vision_content(
@@ -4702,6 +4690,14 @@ class OpenAIChatWorker(QThread):
 
         result_content = str(result) if result else ""
         success = bool(getattr(result, "success", True)) if result else False
+        # 工具显式要求本轮收尾（插件通用契约 ToolResult.end_turn）：模型常会在此类
+        # 工具返回后继续调工具/继续输出，本轮不结束 → 需要本轮结束才生效的后续动作
+        # （交接的动作队列：停流→新建→发继续指令）永远等不到 drain。
+        try:
+            if getattr(result, "end_turn", False):
+                self._end_turn_requested = True
+        except Exception:
+            pass
         return result, result_content, success
 
     @staticmethod

@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-BuildSystemPrompt Hook 函数 — 会话交接文档使用指引
+"""BuildSystemPrompt Hook — 会话交接文档使用指引
 
 只对主智能体（current_role="primary"）输出。子智能体不写交接：
 它们看到的是任务描述而非完整会话，写出来的交接没有接手价值。
@@ -10,7 +9,7 @@ BuildSystemPrompt Hook 函数 — 会话交接文档使用指引
 
 _HANDOFF_GUIDE = """## 会话交接（update_handoff）
 上下文较长或任务告一段落时，用 `update_handoff` 把当前工作状态写成交接文档；
-交接触发后系统会开新会话，新会话读这份文档接着干。
+带 `switch: true` 调用时系统会开新会话，新会话读这份文档接着干。
 调用时机（不必每轮都写，写一次覆盖一次）：
 - 一个功能改完、一组修改落地并通过验证
 - 方案/架构定案，或推翻旧方案改走新路线
@@ -33,15 +32,7 @@ _HANDOFF_GUIDE = """## 会话交接（update_handoff）
 
 
 def hook(event: str, context: dict) -> str:
-    """输出交接文档使用指引（仅主智能体）
-
-    Args:
-        event: 事件名称（BuildSystemPrompt）
-        context: BuildSystemPrompt 上下文，含 current_role（primary/subagent）
-
-    Returns:
-        指引文本；非主智能体返回空字符串
-    """
+    """输出交接文档使用指引（仅主智能体）"""
     if (context or {}).get("current_role") != "primary":
         return ""
     return _HANDOFF_GUIDE
