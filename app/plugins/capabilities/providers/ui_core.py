@@ -383,17 +383,7 @@ def _project_workdir(host: Any):
             logger.warning(f"[Capability] 持久化工作目录失败 project={project}: {e}")
             return False
 
-    def current(project: str = "") -> str:
-        mm = _mm()
-        project = _resolve_project(project)
-        if mm is None or not project:
-            return ""
-        try:
-            return str(mm.get_working_directory(project) or "")
-        except Exception:
-            return ""
-
-    return {"switch": switch, "set_only": set_only, "current": current}
+    return {"switch": switch, "set_only": set_only}
 
 
 # ──────────────────── 上下文 / 引擎 ────────────────────
