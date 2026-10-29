@@ -19,11 +19,13 @@ from app.widgets.render.blocks import (
     KIND_REASONING,
     KIND_TEXT,
     KIND_TOOL,
+    LIVE_KEY_PREFIX,
     BlockRender,
     PatchOps,
     RenderCtx,
     diff_renders,
     fingerprint,
+    live_key,
 )
 from app.widgets.render.block_render import CHAR_COUNT_HTML, render_block, render_blocks
 from app.widgets.render.cache import BlockCache
@@ -45,6 +47,7 @@ __all__ = [
     "KIND_REASONING",
     "KIND_TEXT",
     "KIND_TOOL",
+    "LIVE_KEY_PREFIX",
     "BlockRender",
     "BlockCache",
     "MessageRender",
@@ -55,6 +58,7 @@ __all__ = [
     "diff_message",
     "diff_renders",
     "fingerprint",
+    "live_key",
     "render_block",
     "render_blocks",
     "render_message",

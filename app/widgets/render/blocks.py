@@ -32,6 +32,17 @@ KIND_CUSTOM = "custom"
 HOME_CONTENT = "content"
 HOME_TOOL = "tool"
 
+# 流式活动块（纯文本尾态）的固定 key 前缀。
+# 活动块在流式期间不走 markdown 全量渲染：节点内维护「已正式化段 + live 纯文本尾」，
+# 每批只 append 增量；key 只含块下标（与内容无关）→ identity 恒定 → diff 永远
+# 不产生该块的替换 op，DOM 更新由 card_viewers 的增量/正式化通道显式驱动。
+LIVE_KEY_PREFIX = "live:"
+
+
+def live_key(index: int) -> str:
+    """活动块的稳定 key（同一位置同一形态跨批次恒等）。"""
+    return f"{LIVE_KEY_PREFIX}{index}"
+
 
 def fingerprint(*parts: Any) -> str:
     """稳定内容指纹（12 位 sha1）。

@@ -66,6 +66,8 @@ def render_message(
     active_index: int | None = None,
     char_count: bool = False,
     cache=None,
+    live_index: int | None = None,
+    live_html: str = "",
 ) -> MessageRender:
     """渲染一条消息。
 
@@ -75,11 +77,13 @@ def render_message(
         active_index: 仍在增长的块下标；None 时按 ``ctx.streaming`` 自动推断。
         char_count: 是否在正文末尾附字符统计节点（流式期间用）。
         cache: 可选的 ``BlockCache``（按 viewer 独享）。
+        live_index: 流式纯文本尾态的活动块下标（见 ``render_blocks``）。
+        live_html: 活动块首帧纯文本 HTML。
     """
-    if active_index is None and ctx.streaming:
+    if live_index is None and active_index is None and ctx.streaming:
         active_index = active_block_index(blocks, True)
 
-    rendered = render_blocks(blocks, ctx, active_index, cache)
+    rendered = render_blocks(blocks, ctx, active_index, cache, live_index=live_index, live_html=live_html)
     content = [it for it in rendered if it.home == HOME_CONTENT]
     tool = [it for it in rendered if it.home == HOME_TOOL]
 

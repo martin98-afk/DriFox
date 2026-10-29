@@ -53,6 +53,7 @@ from app.widgets.render.blocks import (
     BlockRender,
     RenderCtx,
     fingerprint,
+    live_key,
 )
 
 # 消息级字符统计节点（流式尾部显示），不属于任何 block，由 message_render 单独拼接
@@ -298,6 +299,8 @@ def render_blocks(
     ctx: RenderCtx,
     active_index: int | None = None,
     cache=None,
+    live_index: int | None = None,
+    live_html: str = "",
 ) -> List[BlockRender]:
     """把一条消息的 block 列表渲染为 BlockRender 列表。
 
@@ -310,11 +313,21 @@ def render_blocks(
             流式期间每批只渲染一个活动块，其余零成本。**缓存必须按 viewer 独享**
             （compact / lazy_body / 主题等 ctx 差异会让 key 相同而产物不同时，
             只有同 ctx 的缓存才是安全的，key 已含 compact）。
+        live_index: 流式纯文本尾态的活动块下标。命中时该块不跑 markdown，
+            直接产出固定 key（``live_key``）的 ``BlockRender``，html 只用
+            ``live_html``（首帧 / 重置时的全量纯文本）。identity 与内容无关 →
+            后续 diff 不会重传它，DOM 由调用方的增量通道维护。
+        live_html: 活动块首帧的纯文本 HTML。
     """
     out: List[BlockRender] = []
     flip_offset = 0
     for idx, block in enumerate(blocks):
         if not isinstance(block, dict):
+            continue
+        if live_index is not None and idx == live_index:
+            # 流式活动块：纯文本尾态（key 与内容无关，见 blocks.live_key）
+            out.append(BlockRender(kind=KIND_TEXT, key=live_key(idx), html=live_html, home=HOME_CONTENT))
+            flip_offset += _count_think_blocks(live_html)
             continue
         completed = not (ctx.streaming and active_index == idx)
         kind, key = block_key(block, ctx, completed)

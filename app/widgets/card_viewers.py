@@ -80,10 +80,15 @@ from app.utils.design_tokens import (
 )
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.render import (
+    HOME_CONTENT,
+    KIND_TEXT,
     BlockCache,
+    BlockRender,
+    MessageRender,
     RenderCtx,
     active_block_index,
     diff_message,
+    live_key,
     render_message,
 )
 from app.widgets.render_crash_queue import RenderCrashQueue
@@ -846,6 +851,16 @@ class CodeWebViewer(QWebEngineView):
         self._block_cache = BlockCache()
         self._v2_last = None
         self._v2_ctx_sig = None
+        # ── [B5.2] 流式活动块纯文本尾态 ──
+        # 活动 text 块流式期间不走 markdown 全量重渲（那是 O(n²)：每批渲染
+        # + 传输全量 HTML，实测 30KB 回答累计 7.9~14.6MB / 4.5~5.1s），改为
+        # 「live 纯文本节点 + 增量 append」，安全边界处整块正式化一次。
+        # _v2_live_sent: 已下发到 JS 的文本（增量 = text[len(sent):]）
+        # _v2_live_formalize_ts: 上次正式化时刻（monotonic，节流用）
+        self._v2_live_key = ""
+        self._v2_live_sent = ""
+        self._v2_live_formalized_len = 0
+        self._v2_live_formalize_ts = 0.0
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
@@ -1502,6 +1517,7 @@ class CodeWebViewer(QWebEngineView):
         self._v2_last = None
         self._v2_ctx_sig = None
         self._block_cache.clear()
+        self._v2_reset_live()
         self._lazy_markdown_cb = None
         self._restore_finished_ids = None
         self._resize_locked = False
@@ -1967,6 +1983,7 @@ class CodeWebViewer(QWebEngineView):
         # [B5] 骨架重载 = DOM 整体重建：v2 落地基线（_v2_last）失效，必须复位。
         # 否则崩溃恢复 / 池化补载后 diff 判"无变化" → 不重灌内容 → 空白卡。
         self._v2_last = None
+        self._v2_reset_live()
         # 获取系统字体
         font_family = "Segoe UI, sans-serif"
         try:
@@ -2295,6 +2312,15 @@ class CodeWebViewer(QWebEngineView):
                    margin 归零需穿透 wrapper（旧路径无 wrapper，不受影响） */
                 #content-placeholder > [data-block-wrapper]:first-child > :first-child {{ margin-top: 0 !important; }}
                 #content-placeholder > [data-block-wrapper]:last-child > :last-child {{ margin-bottom: 0 !important; }}
+                /* v2 流式纯文本尾态：活动块新增文本以纯文本节点追加（不跑 markdown），
+                   pre-wrap 保住换行与缩进，视觉上等同正文段落 */
+                #content-placeholder .v2-live-text {{
+                    white-space: pre-wrap;
+                    word-break: break-word;
+                    margin: 0;
+                    color: var(--text-secondary);
+                    line-height: 1.65;
+                }}
                 /* 解决 Chromium 滚动容器 padding-bottom 不生效的 bug */
                 #content-placeholder::after {{
                     content: '';
@@ -4884,6 +4910,38 @@ class CodeWebViewer(QWebEngineView):
                     if (made.length && typeof restoreCollapsibleStates === 'function') restoreCollapsibleStates(made);
                     if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 30);
                 }};
+                // ===== B5.2 流式纯文本尾态（活动块增量落地） =====
+                // Python 侧 _perform_update_v2 对活动 text 块启用：首帧把全量纯文本
+                // 灌进 .v2-live-text，之后每批只 append 新增文本；安全边界处整块
+                // 正式化（patchBlocks 替换节点，新节点内无 live 尾，下次追加时重建）。
+                // 意义：每批从「整块全量 HTML 重传 + Chromium 重排整块」降到
+                // 「增量文本追加」，30KB 回答实测 7.9~14.6MB → 约 0.1MB 量级。
+                window._v2LiveNode = function (containerId, key) {{
+                    var c = document.getElementById(containerId);
+                    if (!c) return null;
+                    var nodes = window._blockNodes(c);
+                    for (var i = 0; i < nodes.length; i++) {{
+                        if (nodes[i].getAttribute('data-block-key') === key) return nodes[i];
+                    }}
+                    return null;
+                }};
+                window._v2LiveAppend = function (containerId, key, text) {{
+                    if (!text) return false;
+                    var node = window._v2LiveNode(containerId, key);
+                    if (!node) return false;
+                    var live = node.querySelector(':scope > .v2-live-text');
+                    if (!live) {{
+                        // 正式化后的节点只有 markdown 产物：新建 live 尾接在其后，
+                        // 后续增量继续追加（视觉上等同段落续写）。字符统计占位
+                        // 必须留在末尾（#char-count），live 插在它前面。
+                        live = document.createElement('div');
+                        live.className = 'v2-live-text';
+                        var cnt = node.querySelector(':scope > #char-count');
+                        if (cnt) node.insertBefore(live, cnt); else node.appendChild(live);
+                    }}
+                    live.appendChild(document.createTextNode(text));
+                    return true;
+                }};
                 // ===== B5.1 v2 收尾（block 级渲染通道专用，旧路径不调用） =====
                 // Python 侧 _perform_update_v2 每次 patch 后调用：
                 // 1) 流式运行框去重：MessageCard 的 JS 注入节点（data-tool-call-id，
@@ -7099,11 +7157,79 @@ class CodeWebViewer(QWebEngineView):
             code_font_size=_CODE_FONT_SIZE,
         )
 
+    # ── [B5.2] 流式活动块纯文本尾态 ─────────────────────────────────────
+    # 活动 text 块流式期间不跑 markdown（每批全量重渲 + 整块重传 = O(n²)）：
+    # 节点内维护「已正式化段 + live 纯文本尾」，每批只 append 新增文本，
+    # 安全边界处整块正式化一次（节流 1s）。live 块 key 与内容无关（恒定），
+    # diff 永远不产生它的替换 op，DOM 由本通道显式驱动。
+    _LIVE_MIN_CHARS = 512  # 短于此不启用（全量渲染成本可忽略，观感更稳）
+    _LIVE_FORMALIZE_MIN_INTERVAL_S = 1.0  # 两次正式化的最小间隔
+    _LIVE_FORMALIZE_MIN_DELTA = 256  # 两次正式化的最小新增字符
+
+    def _v2_reset_live(self) -> None:
+        """清空 live 尾态（force_full / 流式结束 / 文本回退时调用）。"""
+        self._v2_live_key = ""
+        self._v2_live_sent = ""
+        self._v2_live_formalized_len = 0
+        self._v2_live_formalize_ts = 0.0
+
+    def _v2_live_active(self, blocks, active: Optional[int] = None) -> Optional[int]:
+        """本批可走纯文本尾态的活动块下标；None = 走常规全量渲染。"""
+        if not self._streaming:
+            return None
+        if active is None:
+            active = active_block_index(blocks, True)
+        if active is None or active >= len(blocks):
+            return None
+        blk = blocks[active]
+        if not isinstance(blk, dict) or blk.get("type") != "text":
+            return None
+        if len(str(blk.get("text", "") or "")) < self._LIVE_MIN_CHARS:
+            return None
+        return active
+
+    @staticmethod
+    def _v2_live_html(text: str) -> str:
+        """live 节点 HTML：纯文本（CSS 保留换行缩进）+ 统计占位（与常规形态同位）。"""
+        return f'<div class="v2-live-text">{escape(text)}</div>' + _CHAR_COUNT_HTML
+
+    def _v2_live_should_formalize(self, text: str) -> bool:
+        """节流窗口 + 安全边界都满足时才整块正式化。"""
+        if time.monotonic() - self._v2_live_formalize_ts < self._LIVE_FORMALIZE_MIN_INTERVAL_S:
+            return False
+        # 基准必须是「上次正式化时的长度」：_v2_live_sent 是已下发长度，每批
+        # 都同步到全文，拿它做差恒为 0 → 正式化永不触发（长回答一直停在纯文本）。
+        if len(text) - self._v2_live_formalized_len < self._LIVE_FORMALIZE_MIN_DELTA:
+            return False
+        # 半截代码围栏 / 未闭合协议块不能正式化（会渲染成假块或半截代码块）
+        if text.count("```") % 2:
+            return False
+        if _has_unclosed_think_or_tool(text):
+            return False
+        return self._has_reached_clean_boundary(text) or self._has_reached_soft_boundary(text)
+
+    def _v2_live_stabilize(self, mr: MessageRender, lk: str, formal_key: str) -> MessageRender:
+        """正式化落库版本：活动块换回恒定 live key（html 保留正式产物）。
+
+        否则下一批 live 渲染 key 又变化 → diff 判定块被替换 → 每批重新整块
+        重传纯文本，O(n²) 又回来了。
+        """
+        content = list(mr.content)
+        for i, it in enumerate(content):
+            if it.key in (formal_key, formal_key + ":cc"):
+                content[i] = BlockRender(kind=it.kind, key=lk, html=it.html, home=it.home)
+                break
+        return MessageRender(content=tuple(content), tool=mr.tool)
+
     def _perform_update_v2(self) -> bool:
         """block 级渲染：``render_message`` → ``diff_message`` → ``patchBlocks``。
 
         同步渲染（不走线程池）：块级缓存下每批只重渲活动块，p50 0.5ms /
         p99 9.5ms，线程池往返（seq 校验 + 信号投递）反而是主要开销。
+
+        活动 text 块流式期间走纯文本尾态（见 ``_v2_live_active``）：每批只
+        append 新增文本，安全边界处整块正式化一次。原先每批对活动块跑全量
+        markdown 并整块重传，30KB 回答实测累计 7.9~14.6MB / 4.5~5.1s（O(n²)）。
 
         Returns:
             True = DOM 更新已接管（含空 diff）；False = 无块源，调用方回退旧路径。
@@ -7151,13 +7277,77 @@ class CodeWebViewer(QWebEngineView):
         force_full = self._needs_full_render or self._v2_last is None
         self._needs_full_render = False
         self._final_render_pending = False
+        if force_full:
+            # 容器将被清空 → live 节点也随之消失，尾态必须回到「未下发」状态
+            self._v2_reset_live()
 
         active = active_block_index(blocks, True) if self._streaming else None
-        mr = render_message(blocks, ctx, active_index=active, char_count=self._streaming, cache=self._block_cache)
-        content_ops, tool_ops = diff_message(None if force_full else self._v2_last, mr)
-        self._v2_last = mr
+        live_index = self._v2_live_active(blocks, active)
+        live_key_now = ""
+        live_text = ""
+        live_delta = ""
+        if live_index is not None:
+            live_key_now = live_key(live_index)
+            live_text = str(blocks[live_index].get("text", "") or "")
+            if self._v2_live_key == live_key_now and not live_text.startswith(self._v2_live_sent):
+                # 文本被回退/重写（重试、撤回、编辑）：live 节点内容与源不一致，
+                # 只能整卡重落地（patch diff 感知不到 key 不变而 html 变了）
+                force_full = True
+                self._v2_reset_live()
+
+        formalize = (
+            live_index is not None
+            and not force_full
+            and self._v2_live_key == live_key_now
+            and self._v2_live_should_formalize(live_text)
+        )
+
+        if formalize:
+            # 正式化：整块走正常 markdown（活动块 key 变化 → diff 自然生成替换 op）。
+            # active_index=-1：活动块按「已完成」渲染（与 _v2_live_stabilize 的
+            # formal_key 口径一致；未定型语义只影响流式守卫，正式化就是要定型产物）。
+            mr = render_message(blocks, ctx, active_index=-1, char_count=True, cache=self._block_cache)
+            content_ops, tool_ops = diff_message(self._v2_last, mr)
+            from app.widgets.render.block_render import block_key
+
+            _, formal_key = block_key(blocks[live_index], ctx, True)
+            self._v2_last = self._v2_live_stabilize(mr, live_key_now, formal_key)
+            self._v2_live_key = live_key_now
+            self._v2_live_sent = live_text
+            self._v2_live_formalized_len = len(live_text)
+            self._v2_live_formalize_ts = time.monotonic()
+        elif live_index is not None:
+            # 纯文本尾态：活动块不跑 markdown，其余块照常（缓存命中）
+            mr = render_message(
+                blocks,
+                ctx,
+                active_index=-1,
+                char_count=False,
+                cache=self._block_cache,
+                live_index=live_index,
+                live_html=self._v2_live_html(live_text),
+            )
+            content_ops, tool_ops = diff_message(None if force_full else self._v2_last, mr)
+            self._v2_last = mr
+            if self._v2_live_key == live_key_now:
+                # 同块续写：只下发新增文本（首帧 / force_full 时 html 已含全量）
+                if live_text.startswith(self._v2_live_sent):
+                    live_delta = live_text[len(self._v2_live_sent) :]
+            else:
+                # 首帧 / 重置：节点里已是全量纯文本，正式化基准从当前长度起算
+                # （否则会立刻把刚落的纯文本再正式化一遍，白花一次全量）
+                self._v2_live_formalized_len = len(live_text)
+            self._v2_live_key = live_key_now
+            self._v2_live_sent = live_text
+        else:
+            mr = render_message(blocks, ctx, active_index=active, char_count=self._streaming, cache=self._block_cache)
+            content_ops, tool_ops = diff_message(None if force_full else self._v2_last, mr)
+            self._v2_last = mr
+            if not self._streaming:
+                self._v2_reset_live()
+
         self._last_rendered_markdown = self._markdown_text
-        if content_ops.is_empty and tool_ops.is_empty:
+        if content_ops.is_empty and tool_ops.is_empty and not live_delta:
             return True
 
         self._height_report_pending = True
@@ -7195,6 +7385,14 @@ class CodeWebViewer(QWebEngineView):
             js.append(
                 "window.patchBlocks('tool-content',"
                 + json.dumps(tool_ops.to_payload()).decode("utf-8")
+                + ");"
+            )
+        if live_delta:
+            js.append(
+                "if(typeof window._v2LiveAppend==='function')window._v2LiveAppend('content-placeholder',"
+                + json.dumps(live_key_now).decode("utf-8")
+                + ","
+                + json.dumps(live_delta).decode("utf-8")
                 + ");"
             )
         # v2 专属收尾：流式运行框去重 / 工具区显隐与 header / 工具区滚底

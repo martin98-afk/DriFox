@@ -44,6 +44,42 @@
 切 tab 回来、窗口 resize。`_SKELETON_CACHE_VERSION` 已递增至 52（patchBlocks
 删除段 dispose + 折叠恢复 + _v2AfterPatch），首帧会全量重载骨架。
 
+### 步骤 3.5：流式纯文本尾态（B5.2）✅ 已落地（2026-10-29）
+
+v2 原先每批对活动块跑全量 markdown 并整块重传（`patchBlocks` 的 ops 里是
+活动块的完整 HTML）。真实语料实测（30KB 回答、40 字符/批、747 批）：累计
+传输 7.9~14.6MB、Python 渲染累计 4.5~5.1s，随回答长度呈 O(n²)。
+
+现在活动 text 块（≥512 字符）走「纯文本尾态」：
+
+- `render_message(..., live_index=k, live_html=...)` → 该块产出恒定 key
+  （`live:k`，见 `blocks.live_key`）、html 为纯文本节点。
+- key 与内容无关 → `diff_message` 永远不产生该块的替换 op（html 不在
+  `BlockRender.identity` 里）。
+- 每批只把新增文本经 `window._v2LiveAppend(container, key, text)` 追加到
+  `.v2-live-text`（`document.createTextNode` + `appendChild`，不触发整块
+  `innerHTML` 重解析）。live 容器插在 `#char-count` 之前，统计占位保持末尾。
+- 安全边界（段落/句号结尾 + 无未闭合 fence/think + 距上次 ≥1s + 新增
+  ≥256 字符）→ 整块正式化一次（markdown 全量，`patchBlocks` 替换）；
+  `_v2_live_stabilize` 把落库基线的该块换回恒定 key，避免下一批又判定替换。
+- 文本回退/重写（重试、撤回、编辑）→ 整卡重落地并复位尾态。
+- `_load_skeleton` / `reset_for_reuse` / force_full → 复位尾态。
+- 流式结束走非 live 分支（`char_count` 正常拼、终渲染一致）。
+
+实测收益（同语料，`tests/debug/_probe_stream_live.py`）：传输
+6.1~8.7MB → 0.16~0.17MB（7~51 倍），Python 渲染 3.5~4.9s → 89~116ms
+（18~42 倍）。
+
+骨架新增 `window._v2LiveNode` / `_v2LiveAppend` 与 `.v2-live-text` 样式，
+`_SKELETON_CACHE_VERSION` 已递增至 53（旧骨架缺追加函数 → 增量静默丢弃，
+必须失效缓存）。测试：`tests/widgets/test_block_render_v2_live.py`（8 项，
+含骨架 `<script>` 块 node 编译防线）。
+
+**观感取舍**：流式期间活动块以纯文本显示（不解析 markdown），每到安全边界
+且距上次 ≥1s（且新增 ≥256 字符）才正式格式化成 markdown。长代码块在围栏
+闭合前保持纯文本（半截围栏不能正式化）。调 `_LIVE_FORMALIZE_MIN_INTERVAL_S`
+可换「格式化及时度 ↔ 成本」。
+
 ### 步骤 4：拆旧路
 
 开关稳定后删除：`_perform_update` 的增量分支、`_render_tail_inline`、

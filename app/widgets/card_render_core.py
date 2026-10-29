@@ -3723,7 +3723,10 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v52）：patchBlocks 删除段接图表 dispose +
 # 折叠态恢复；新增 window._v2AfterPatch（v2 渲染通道收尾：运行框去重 /
 # 工具区显隐 / 内部滚底）。旧骨架无这些函数 → v2 收尾静默失效。
-_SKELETON_CACHE_VERSION = 52
+# _SKELETON_CACHE_VERSION +1（v53）：B5.2 流式纯文本尾态——新增
+# window._v2LiveNode / _v2LiveAppend 与 .v2-live-text 样式。旧骨架缺追加
+# 函数 → 活动块增量静默丢弃（只显示首帧纯文本），必须失效缓存。
+_SKELETON_CACHE_VERSION = 53
 
 
 def _js_literal(value) -> str:
