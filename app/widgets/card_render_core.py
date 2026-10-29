@@ -215,6 +215,9 @@ _CODE_BLOCK_REMOVE_PATTERN = re.compile(r"```[\s\S]*?```", re.DOTALL)
 _MULTIPLE_SPACES_PATTERN = re.compile(r" +")
 _PRE_CONTENT_PATTERN = re.compile(r"<pre[^>]*>(.*?)</pre>", re.DOTALL)
 _TOOL_NAME_PATTERN = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
+# 未闭合 `<tool>` 是否真的是协议块：真实块由 content_to_markdown 生成，恒以
+# `name:` 行起首；模型正文里的字面 `<tool>` 后面接普通句子。判据只认首个非空行。
+_TOOL_PROTOCOL_HEAD_RE = re.compile(r"^name:\s*\S", re.MULTILINE)
 _TOOL_ARGS_LINE_PATTERN = re.compile(r"args:\s*(\{[^}]*\})")
 _TOOL_SUCCESS_PATTERN = re.compile(r"^success:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_ID_PATTERN = re.compile(r"^tool_call_id:\s*(.+?)\s*$", re.MULTILINE)
@@ -2991,6 +2994,7 @@ def _inject_tool_blocks(
             break
         parts.append(md_text[i:start_idx])
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
+        content_head = md_text[start_idx + len("<tool>") :].lstrip("\n")
         if end_idx != -1:
             content = md_text[start_idx + len("<tool>") : end_idx]
             # 🐛 协议段防重复（2026-10-25）：无 tool_call_id 字段的闭合块 = 模型
@@ -3000,6 +3004,16 @@ def _inject_tool_blocks(
             if _TOOL_ID_PATTERN.search(content):
                 parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
             i = end_idx + len("</tool>")
+        elif not _TOOL_PROTOCOL_HEAD_RE.match(content_head):
+            # 🐛 修复（字面 `<tool>` 吞掉正文，2026-10-29）：正文里提到协议标签
+            # （讨论格式 / 贴日志 / 写 XML 片段）时，`<tool>` 之后既无 `</tool>`
+            # 也无 `name:` 字段行——旧实现把 content 取到 md 末尾并整段丢弃
+            # （终态）或转成「接收中」假框（流式），用户可见「正文从这一句起
+            # 整段消失，只剩工具完成框」（实测历史消息 md 16186 字 → 渲染后
+            # 正文 37 字）。此处按字面文本转义，并从中点继续扫描后续正文。
+            parts.append("&lt;tool&gt;")
+            i = start_idx + len("<tool>")
+            continue
         else:
             # 🐛 修复（工具源码泄漏）：未闭合块此前原样保留 → md.convert 把
             # <tool> 当未知 HTML 元素（标签本身不可见），内部 name:/args:/result:
