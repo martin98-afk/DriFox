@@ -134,9 +134,26 @@ def _dump_front(meta: Dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _source_session_title() -> str:
+def _cap(tool_ctx: Dict, cap_id: str):
+    """取能力对象：优先本次工具执行的能力池，回退全局解析。
+
+    工具池由 ToolExecutor 构建（host=该窗口的执行器），window_id 天然是本窗口；
+    ``caps_for`` 的 tool surface 走 UIPluginRegistry._main_widget（**最后创建**的
+    主窗口），多标签/多窗口下会指到别的窗口 —— 动作被 enqueue 进别的窗口队列，
+    本窗口 drain 空转，表现就是「交接只结束本轮、不切会话也不发继续指令」。
+    """
+    pool = (tool_ctx or {}).get("capabilities")
+    if pool is not None:
+        try:
+            if cap_id in pool:
+                return pool[cap_id]
+        except Exception:
+            pass
+    return caps_for(cap_id)
+
+def _source_session_title(tool_ctx: Dict) -> str:
     """当前（源）会话的标题，拿不到返回空串"""
-    read = caps_for("session.read")
+    read = _cap(tool_ctx, "session.read")
     if read is None:
         return ""
     try:
@@ -158,8 +175,13 @@ def _pending_path(tool_ctx: Dict) -> Optional[Path]:
     return Path(env_dir) / "plugin_data" / "system-handoff" / "pending.json"
 
 
-def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
-    """登记待注入内容（落盘）+ 入队三连（停流 → 新建 → 发继续指令）"""
+def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> str:
+    """登记待注入内容（落盘）+ 入队三连（停流 → 新建 → 发继续指令）
+
+    Returns:
+        空串=三步全部入队成功；否则为失败原因（调用方据此不请求 end_turn，
+        否则本轮静默结束而会话没切走，用户只看到对话停住）。
+    """
     pending = {
         "path": str(path),
         "content": body,
@@ -176,7 +198,7 @@ def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
             pass
 
     # handoff_active 只做防重入（auto_compact_trigger 消费），与注入通道无关
-    kv = caps_for("state.kv")
+    kv = _cap(tool_ctx, "state.kv")
     if kv:
         try:
             kv["set"]("handoff_active", {"ts": pending["ts"]})
@@ -187,16 +209,21 @@ def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> None:
         ("session.interrupt", {}),
         ("session.new", {}),
         # 自动继续是用户可见的一条新消息，带上原会话标题方便回溯
-        ("session.send", {"text": _continue_prompt(_source_session_title(), body)}),
+        ("session.send", {"text": _continue_prompt(_source_session_title(tool_ctx), body)}),
     )
     for cap_id, kwargs in steps:
-        fn = caps_for(cap_id)
+        fn = _cap(tool_ctx, cap_id)
         if fn is None:
-            return
+            return f"{cap_id} 不可用（能力池缺失或未授权）"
         try:
-            fn(**kwargs)
-        except Exception:
-            return
+            accepted = fn(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            return f"{cap_id} 调用异常: {e}"
+        # enqueue 返回 False = 被拒（window_id 为空 / 正在 drain / 去重），静默吞掉
+        # 会让工具谎报「随后开新会话继续」，实际什么都不会发生
+        if accepted is False:
+            return f"{cap_id} 未入队（window_id 缺失或被去重）"
+    return ""
 
 
 def _update_handoff_impl(content: str = "", switch: bool = True, tool_ctx: Optional[Dict] = None) -> ToolResult:
@@ -251,7 +278,21 @@ def _update_handoff_impl(content: str = "", switch: bool = True, tool_ctx: Optio
         return ToolResult(False, error=f"交接文档写入失败: {e}")
 
     if switch:
-        _arm_handoff(ctx, path, text)
+        reason = _arm_handoff(ctx, path, text)
+        if reason:
+            # 入队失败：不能报「随后开新会话」也不能 end_turn —— 那会让本轮静默
+            # 结束而会话仍停在原地（用户只看到对话停住）。交回模型，由它决定
+            # 重试或如实告知用户。
+            return ToolResult(
+                True,
+                content=(
+                    f"交接文档已更新：{path}（{len(text)} 字）。"
+                    f"但切换会话未登记成功：{reason}。本轮不自动收尾，请勿重复写交接文档，"
+                    "如实告知用户「交接已保存，切会话失败」，等用户指示。"
+                ),
+                end_turn=False,
+                data={"handoff_path": str(path), "handoff_switch_error": reason},
+            )
 
     return ToolResult(
         True,
