@@ -2407,7 +2407,14 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
             # 未闭合：内容截取到边界处，避免吞掉后续 <think>
             content = md_text[think_start:search_end]
             if content.strip():
-                parts.append(_render_think_block(content, completed=False, flip_idx=think_ordinal))
+                # 🐛 completed=True（历史 / 已完结消息）时未闭合段必须按完成态
+                # 折叠渲染：流式态产物带 data-streaming="true"，会触发
+                # _updateToolSectionHeader 的「流式新工具自动展开」把历史卡
+                # 刚折叠的工具区永久翻开（历史序列化截断出未闭合 <think>
+                # 很常见，2026-10-29「历史卡不自动折叠」根因之一）。
+                parts.append(
+                    _render_think_block(content, completed=completed, compact=compact, flip_idx=think_ordinal)
+                )
                 think_ordinal += 1
             # 空且未闭合也跳过
             i = search_end

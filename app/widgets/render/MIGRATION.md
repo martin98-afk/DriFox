@@ -18,7 +18,8 @@
 
 ### 步骤 3：CodeWebViewer 接新通道（特性开关）✅ 已落地（2026-10-29）
 
-环境变量 `DRIFOX_RENDER_V2=1` 时：
+**默认开启**（2026-10-29 起进入真机灰度）；环境变量 `DRIFOX_RENDER_V2=0/false/no`
+显式关闭（逃生门，退回旧全量路径）。v2 开启时：
 
 - `_perform_update` 入口分派 `_perform_update_v2`：`render_message` →
   `diff_message` → `patchBlocks('content-placeholder' / 'tool-content')`，
@@ -33,8 +34,9 @@
 - `_append_text_incremental` 在 v2 下短路（纯文本注入会破坏 DOM↔block 对齐）；
   `_render_tail_inline` / typewriter / save-restore 在 v2 路径不执行。
 - JS 侧新增 `window._v2AfterPatch`：流式运行框按 tool_call_id 去重（真实块
-  落地后清除 JS 注入节点）、工具区显隐 + header、工具区内部滚底；
-  patchBlocks 接 `restoreCollapsibleStates(made)`。
+  落地后清除 JS 注入节点）、简洁模式下把嵌在 text 块内的协议思考/工具卡搬到
+  工具区（reorganizeContent 最小子集，非块节点不参与 splice）、工具区显隐 +
+  header、工具区内部滚底；patchBlocks 接 `restoreCollapsibleStates(made)`。
 - DOM 重建点基线失效：`_load_skeleton` / `reset_for_reuse` 清 `_v2_last`。
 - 测试：`tests/widgets/test_block_render_v2_wiring.py`（11 项）。
 

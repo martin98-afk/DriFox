@@ -256,3 +256,48 @@ def test_no_blocks_keeps_v2_disabled(monkeypatch):
     monkeypatch.setattr(CodeWebViewer, "_sequence_render", lambda self, md, compact: None)
     v._perform_update()
     assert v._render_v2 is False
+
+# ── 回归防线：全量落地串必须语法有效 ─────────────────────────────────
+
+def _node_available() -> Optional[str]:
+    import subprocess
+
+    for cand in ("node", "node.exe"):
+        try:
+            subprocess.run([cand, "--version"], capture_output=True, check=True, timeout=5)
+            return cand
+        except Exception:
+            continue
+    return None
+
+@pytest.mark.skipif(_node_available() is None, reason="node 不可用")
+def test_full_landing_js_compiles(monkeypatch, tmp_path):
+    """首渲（force_full）发出的整串 JS 必须能通过语法编译。
+
+    回归背景（2026-10-29）：清容器段 ``clear();}}`` 多一个 ``}`` 把 try 提前
+    闭合，整串 SyntaxError → runJavaScript 静默丢弃 → 历史卡全量落地永久
+    失败（整卡空白、零日志）。stub page 只记录不执行，语法错误无任何症状，
+    故用 node ``new Function`` 编译发出的真实 JS 串。
+    """
+    import subprocess
+
+    v = _make_viewer(
+        monkeypatch,
+        [{"type": "text", "text": "# 标题\n\n正文段落，含**加粗**与 `code`。"}],
+        streaming=False,
+    )
+    assert v._perform_update_v2() is True
+    full_js = [c for c in v._page.js_calls if "patchBlocks" in c]
+    assert full_js, "首渲必须发出 patchBlocks 全量落地串"
+    js = full_js[0]
+    assert "content-placeholder" in js and "_v2AfterPatch" in js
+
+    harness = "try{new Function(" + stdlib_json.dumps(js) + ");console.log('OK');}"
+    harness += "catch(e){console.log('ERR:'+e.message);process.exit(1);}"
+    f = tmp_path / "compile_check.js"
+    f.write_text(harness, encoding="utf-8")
+    r = subprocess.run(
+        [_node_available(), str(f)], capture_output=True, text=True, timeout=30
+    )
+    assert r.returncode == 0, f"全量落地串语法错误: {r.stdout} {r.stderr[:400]}"
+    assert r.stdout.strip() == "OK", r.stdout

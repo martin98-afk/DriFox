@@ -172,13 +172,14 @@ _BODY_GEOM_READ_JS = (
 
 
 def _render_v2_enabled() -> bool:
-    """block 级渲染通道开关（步骤 3 灰度）：环境变量 ``DRIFOX_RENDER_V2=1``。
+    """block 级渲染通道开关：**默认开启**，环境变量 ``DRIFOX_RENDER_V2=0`` 显式关闭。
 
     开启后 ``CodeWebViewer`` 的 DOM 更新从「整页 innerHTML 替换 + 状态标志位」
     切到「render_message → diff_message → patchBlocks 定点 splice」。渲染函数
-    调用时机每次读取，便于测试在进程内翻转开关。
+    调用时机每次读取，便于测试在进程内翻转开关；``=0/false/no`` 是逃生门，
+    v2 出问题时不回滚代码即可退回旧全量路径。
     """
-    return os.environ.get("DRIFOX_RENDER_V2", "").strip().lower() in ("1", "true", "yes")
+    return os.environ.get("DRIFOX_RENDER_V2", "1").strip().lower() not in ("0", "false", "no")
 
 
 def _seg_has_protocol_block(seg: str) -> bool:
@@ -4913,6 +4914,39 @@ class CodeWebViewer(QWebEngineView):
                         }}
                         var tc = document.getElementById('tool-content');
                         var ts = document.getElementById('tool-section');
+                        // 1.5) 协议块归位：嵌在 text 块 wrapper 内的思考/工具卡
+                        //      （_inject_think_cards / _inject_tool_blocks 产物）
+                        //      块级 home 管不到；v2 不跑 reorganizeContent，简洁
+                        //      模式下在此搬到工具区（最小子集：非块节点不参与
+                        //      splice，搬移不破坏 patchBlocks 锚点；编辑类工具
+                        //      保留正文，与 _tool_home 的 keep_in_content 一致）。
+                        //      🐛 必须「全删重放」而非纯 append：流式活动 text 块
+                        //      每批重灌会重新产生协议卡，纯移动会让工具区副本
+                        //      随批次累积（每批 +1）。每批先清上次搬入的顶层副本
+                        //      再搬，保证工具区搬移类集合 == 正文当前集合。代价：
+                        //      搬入卡的折叠展开态每批重置（流式中可接受，完成后
+                        //      仅跑一轮不再重置）。运行中的工具流式框（JS 注入、
+                        //      data-streaming）不是搬移产物，不清理。
+                        if (window._toolCompactMode && tc) {{
+                            var cpEl = document.getElementById('content-placeholder');
+                            if (cpEl) {{
+                                var staleSel = ':scope > .think-block, :scope > .think-streaming,'
+                                    + ' :scope > .think-compact,'
+                                    + ' :scope > [data-tool-call-id]:not([data-streaming="true"])';
+                                var stale = tc.querySelectorAll(staleSel);
+                                for (var di = 0; di < stale.length; di++) {{
+                                    if (!(stale[di].hasAttribute && stale[di].hasAttribute('data-block-key'))) stale[di].remove();
+                                }}
+                                var strays = cpEl.querySelectorAll(
+                                    '.think-block, .think-streaming, .think-compact, [data-tool-call-id]'
+                                );
+                                for (var si = 0; si < strays.length; si++) {{
+                                    var sEl = strays[si];
+                                    if (sEl.getAttribute && sEl.getAttribute('data-keep-in-content') === 'true') continue;
+                                    tc.appendChild(sEl);
+                                }}
+                            }}
+                        }}
                         if (tc && ts) {{
                             ts.style.display = tc.children.length > 0 ? '' : 'none';
                             if (tc.children.length > 0 && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
@@ -7140,10 +7174,13 @@ class CodeWebViewer(QWebEngineView):
             js.append(
                 "try{if(window.__chartVault&&window.__chartVault.size){"
                 "window.__chartVault.forEach(function(el){window._disposeChartNode(el);});"
-                "window.__chartVault.clear();}}"
+                # 🐛 此处原为 `clear();}}`：多一个 } 把 try 提前闭合，后面 `}catch`
+                # 找不到 try → 整串 SyntaxError → runJavaScript 静默丢弃 → 全量
+                # 落地永久失败（历史卡一次性渲染全走 force_full → 整卡空白）。
+                "window.__chartVault.clear();}"
                 "if(window.echarts&&typeof window._disposeChartNode==='function'){"
                 "document.querySelectorAll('.echarts-container').forEach(function(el){"
-                "window._disposeChartNode(el);el._chartStashed=false;});}}"
+                "window._disposeChartNode(el);el._chartStashed=false;});}"
                 "}catch(e){}"
                 "var _c1=document.getElementById('content-placeholder');if(_c1)_c1.innerHTML='';"
                 "var _c2=document.getElementById('tool-content');if(_c2)_c2.innerHTML='';"

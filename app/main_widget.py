@@ -11616,10 +11616,39 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 流式中跳过（wid={self._window_id}）")
             return
         _cur = self.session_manager.get_current_session() if getattr(self, "session_manager", None) else None
+        # 🛡️ hook 注入消息（_hook_event 标记，如 SessionStart/插话）不算「用户已发言」，
+        # 否则团队成员窗口 create_session 同步注入 SessionStart hook 消息 → 欢迎卡永不渲染。
+        # TeamMail 例外：任务邮件是真实用户问题（R6/R7 既定语义），mail-only 会话须渲染对话。
         if _cur is not None and any(
-            m.get("role") in ("user", "assistant") for m in (getattr(_cur, "messages", None) or [])
+            m.get("role") in ("user", "assistant")
+            and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+            for m in (getattr(_cur, "messages", None) or [])
         ):
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 会话已有消息，跳过（wid={self._window_id}）")
+            # 🛡️ 兜底（2026-10-29）：守卫合法拦截（会话确有真消息）≠ 主区域有内容。
+            # 迟到的 welcome 槽位可能晚于首轮对话渲染，此前只 return 会留下空白主区域。
+            # 走会话渲染汇聚点 _display_current_session()（内部含前置序列与产物刷新），
+            # 不内联、不裸调 _load_message_batch。
+            # _welcome_fallback_busy 防重入（_display_current_session 空 batch 分支会
+            # 回调本方法，虽与守卫同口径下不可达，仍硬防）；_displayed_session_id 已是
+            # 本会话 = 已渲染过，迟到槽位直接放弃，防重复重建。
+            if getattr(self, "_welcome_fallback_busy", False) or self._displayed_session_id == _cur.session_id:
+                return
+            self._welcome_fallback_busy = True
+            try:
+                logger.debug(
+                    f"[OpenAIChatToolWindow] _show_initial_welcome: 兜底渲染会话（wid={self._window_id}）"
+                )
+                self._display_current_session()
+            except Exception as e:  # noqa: BLE001
+                # 🛡️ 异常防护（2026-10-29 T7）：兜底调用方无 try 保护（如
+                # _notify_history_data_changed），异常若直达 PyQt5 事件循环会
+                # 触发 qFatal 进程 abort。对齐本函数 OK 路径口径：记 warning 不外泄。
+                logger.warning(
+                    f"[OpenAIChatToolWindow] _show_initial_welcome 兜底渲染失败（wid={self._window_id}）: {e}"
+                )
+            finally:
+                self._welcome_fallback_busy = False
             return
         if getattr(self, "_welcome_build_hold", False):
             self._welcome_hold_pending = True
