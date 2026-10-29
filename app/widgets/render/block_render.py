@@ -255,6 +255,14 @@ def block_key(block: Dict[str, Any], ctx: RenderCtx, completed: bool) -> tuple[s
 
     # text 与未知类型统一按文本处理（与 ensure_content_blocks 的兜底语义一致）
     text = str(block.get("text", "") or "")
+    # 协议段占位框抑制集合（ctx.tool_fingerprints）只影响含 <tool> 的 text 块。
+    # 把「当前抑制规模」折进该块的 key：指纹变化时 diff 只替换这些块，其余节点
+    # （含用户展开/折叠的工具与思考框）一律不动。此前指纹是 _v2_ctx_sig 的一个
+    # 维度，每完成一个工具就整页重建一次 → 流式中用户展开的折叠框反复被销毁，
+    # 表现为「自己合上」「展开的不是原来那个」（2026-10-30 用户实测）。
+    fp_tag = str(len(ctx.tool_fingerprints)) if (ctx.tool_fingerprints and "<tool>" in text) else ""
+    if fp_tag:
+        return KIND_TEXT, fingerprint("text", text, completed, ctx.compact, fp_tag)
     return KIND_TEXT, fingerprint("text", text, completed, ctx.compact)
 
 

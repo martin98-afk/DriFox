@@ -110,30 +110,63 @@ def test_force_full_saves_before_clear_and_restores_after_patch(monkeypatch):
     assert i_clear < i_patch, "清空先于 patch"
     assert i_patch < i_restore < i_after, "restore 在 patch 之后、v2 收尾之前"
 
-def test_ctx_sig_change_also_restores_scroll(monkeypatch):
-    """工具完成（tool_fingerprints 数量变化）触发 sig 变化 → 同样走 save/restore。
+def test_tool_fingerprint_change_does_not_clear_container(monkeypatch):
+    """工具完成（指纹集合变化）只定点替换含 <tool> 的 text 块，**不整页清空**。
 
-    这是流式期间最高频的整页重建触发点：每完成一个工具清一次容器。
+    回归背景（2026-10-30 用户实测）：指纹曾进 ``_v2_ctx_sig`` → 每完成一个工具
+    就整页重建 → 流式中用户展开的折叠框被销毁重来（自己合上 / 换成别的框），
+    正文滚动位置也一起归零。修法：指纹折进含 <tool> 的 text 块 key，交给 diff
+    定点替换；sig 不再含指纹。
     """
-    blocks = [{"type": "text", "text": "正文"}]
+    blocks = [
+        {"type": "text", "text": "普通正文段落。"},
+        {"type": "text", "text": '<tool>{"name":"read_file","call_id":"c1","args":{}}</tool>'},
+    ]
     fps = {"set": frozenset()}
+    v = _make_viewer(monkeypatch, blocks)
+    monkeypatch.setattr(
+        CodeWebViewer,
+        "_v2_render_ctx",
+        lambda self: RenderCtx(streaming=True, tool_fingerprints=fps["set"]),
+    )
 
-    def _ctx():
-        return RenderCtx(streaming=True, tool_fingerprints=fps["set"])
+    assert v._perform_update_v2() is True  # 首帧 force_full（容器可能有旧路径节点）
+    v._page.js_calls.clear()
 
-    v = _make_viewer(monkeypatch, blocks, ctx=None)
-    monkeypatch.setattr(CodeWebViewer, "_v2_render_ctx", lambda self: _ctx())
-
-    assert v._perform_update_v2() is True
-    assert "_v2ScrollSave()" in _last_js(v)
-
-    # 工具完成：指纹集合变化 → sig 变化 → force_full
     fps["set"] = frozenset({"tool-x"})
     v._needs_full_render = False
     assert v._perform_update_v2() is True
-    js = _last_js(v)
-    assert "_c1.innerHTML=''" in js, "sig 变化必须整页重建"
-    assert "_v2ScrollSave()" in js and "_v2ScrollRestore()" in js
+    js = "".join(v._page.js_calls)
+    assert "_c1.innerHTML=''" not in js, "指纹变化不得清空容器"
+    assert "_v2ScrollSave()" not in js, "没有清空就无需滚动快照"
+    assert "window.patchBlocks('content-placeholder'" in js, "含 <tool> 的 text 块必须被替换"
+
+def test_partial_patch_wraps_anchor_capture_restore(monkeypatch):
+    """局部 patch 必须用锚点包住：捕获在 patchBlocks 之前，恢复在其之后。
+
+    回归背景：替换块在视口上方且高度变化（思考卡流式行 → 折叠框、工具结果展开）
+    时浏览器不会补偿，v2 此前没有任何锚点机制 → 用户阅读位置随内容更新漂移。
+    """
+    blocks = [
+        {"type": "text", "text": "第一段正文。"},
+        {"type": "text", "text": "第二段正文。"},
+    ]
+    v = _make_viewer(monkeypatch, blocks)
+    assert v._perform_update_v2() is True  # 首帧 force_full
+    v._page.js_calls.clear()
+
+    blocks[0]["text"] = "第一段正文（已更新）。"
+    v._needs_full_render = False
+    assert v._perform_update_v2() is True
+    js = "".join(v._page.js_calls)
+
+    i_cap = js.find("_v2AnchorCapture(document.getElementById('content-placeholder'))")
+    i_patch = js.find("window.patchBlocks('content-placeholder'")
+    i_res = js.find("_v2AnchorRestore(document.getElementById('content-placeholder')")
+    assert i_cap >= 0 and i_patch >= 0 and i_res >= 0
+    assert i_cap < i_patch < i_res, "锚点必须在 patch 前捕获、patch 后恢复"
+    assert "_c1.innerHTML=''" not in js, "局部 patch 不清容器"
+    assert "_v2ScrollSave()" not in js
 
 # ── 2. 骨架接线（源码级） ────────────────────────────────────────────
 

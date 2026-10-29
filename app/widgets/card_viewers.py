@@ -166,10 +166,14 @@ from app.widgets.card_render_core import (
 
 # [WHEEL-ARM] body 滚动几何 + 内层容器可滚标志的直读表达式（轮询兜底与
 # armed 事件校准共用）。返回 "sh|st|ch|ins"；body 未就绪返回 ''。
+# ⚠️ `#content-placeholder` 必须在内层容器名单里：坞态（简洁模式 + 流式，
+# body.streaming-dock）下正文 600px 限高 + overflow-y:auto，它就是**唯一**
+# 真正可滚的容器，body 反而不溢出。漏掉它 → ins 恒 0 → _inner_scrollable
+# 误判 False → 点击正文后武装态把滚轮全交外层（“点击后优先滚内部”失效）。
 _BODY_GEOM_READ_JS = (
     "(function(){var b=document.body;if(!b)return '';"
     "var ins=-1;try{var ts=document.querySelectorAll("
-    "'#tool-content,.code-container,.code-content,.table-scroll-wrapper,.echarts-container');"
+    "'#content-placeholder,#tool-content,.code-container,.code-content,.table-scroll-wrapper,.echarts-container');"
     "ins=0;for(var i=0;i<ts.length;i++){var t=ts[i];"
     "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
     "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()"
@@ -229,8 +233,9 @@ def _parse_height_payload(payload: str):
         (h, scroll_top, client_height, reading, dom_text_len, inner_scrollable)；
         可选字段缺失时为 None；载荷非法返回 None（调用方静默忽略）。
 
-    ``inner_scrollable``：卡内**除 body 外**的滚动容器（#tool-content / 代码块 /
-    图表区等）当前有无可滚量。None = 旧骨架未携带（Python 侧按"可能有"处理，
+    ``inner_scrollable``：卡内**除 body 外**的滚动容器（坞态正文
+    #content-placeholder / #tool-content / 代码块 / 图表区等）当前有无可滚量。
+    None = 旧骨架未携带（Python 侧按"可能有"处理，
     见 ``_inner_wheel_state`` 注释）。
     """
     try:
@@ -3712,10 +3717,11 @@ class CodeWebViewer(QWebEngineView):
                 // 才是跨重建稳定的身份，优先用它们，都没有才回退内容指纹。
                 function _collapseKeyOf(block) {{
                     if (!block || !block.getAttribute) return '';
-                    var fk = block.getAttribute('data-flip-key');
-                    if (fk) return 'fk:' + fk;
+                    // 工具块：tool-call-id 是真身份，优先级最高（思考块不带它）
                     var tid = block.getAttribute('data-tool-call-id');
                     if (tid) return 'tid:' + tid;
+                    var fk = block.getAttribute('data-flip-key');
+                    if (fk) return 'fk:' + fk;
                     return 'bk:' + (block.getAttribute('data-block-key') || '');
                 }}
 
@@ -5019,6 +5025,74 @@ class CodeWebViewer(QWebEngineView):
                     _restore(document.getElementById('content-placeholder'), s.c, s.cm);
                     _restore(document.getElementById('tool-content'), s.t, s.tm);
                 }};
+                // ===== B5.1.6 v2 局部 patch 的滚动锚点保持 =====
+                // patchBlocks 是定点替换，但替换块在视口上方且高度变化时（思考卡从
+                // 流式行变折叠框、工具结果展开、图片落高），浏览器不会替你补偿，
+                // 表现为「内容更新时阅读位置跟着漂」。v1 的 updateContent 有锚点恢复
+                // （_anchorable/_anchorables），v2 此前没有。
+                // 只在容器所属滚动视口**已离开底部**时介入：贴底跟随的卡必须让
+                // 浏览器自己滚（内容增长时保持在底部）。
+                window._v2ScrollHost = function (el) {{
+                    var n = el;
+                    while (n && n !== document.body) {{
+                        try {{
+                            var st = getComputedStyle(n);
+                            if ((st.overflowY === 'auto' || st.overflowY === 'scroll')
+                                && n.scrollHeight - n.clientHeight > 1) return n;
+                        }} catch (e) {{}}
+                        n = n.parentNode;
+                    }}
+                    return document.body;
+                }};
+                window._v2AnchorCapture = function (container) {{
+                    try {{
+                        if (!container) return null;
+                        var host = window._v2ScrollHost(container);
+                        if (!host) return null;
+                        var TOL = {AUTO_SCROLL_THRESHOLD};
+                        var max = Math.max(0, host.scrollHeight - host.clientHeight);
+                        // 不可滚 / 贴底跟随 → 不干预（浏览器行为已正确）
+                        if (max <= TOL || host.scrollTop >= max - TOL) return null;
+                        var hostTop = host.getBoundingClientRect().top;
+                        var nodes = window._blockNodes(container);
+                        for (var i = 0; i < nodes.length; i++) {{
+                            var r = nodes[i].getBoundingClientRect();
+                            if (r.bottom > hostTop + 1) {{
+                                return {{
+                                    host: host,
+                                    key: nodes[i].getAttribute('data-block-key') || '',
+                                    idx: i,
+                                    delta: r.top - hostTop,
+                                    top: host.scrollTop
+                                }};
+                            }}
+                        }}
+                        return {{host: host, key: '', idx: -1, delta: 0, top: host.scrollTop}};
+                    }} catch (e) {{ return null; }}
+                }};
+                window._v2AnchorRestore = function (container, a) {{
+                    if (!a || !a.host || !container) return;
+                    try {{
+                        var host = a.host;
+                        var nodes = window._blockNodes(container);
+                        var target = null;
+                        if (a.key) {{
+                            for (var i = 0; i < nodes.length; i++) {{
+                                if (nodes[i].getAttribute('data-block-key') === a.key) {{ target = nodes[i]; break; }}
+                            }}
+                        }}
+                        // key 随内容变化（指纹）→ 回退「同一个位置序号」
+                        if (!target && a.idx >= 0 && nodes[a.idx]) target = nodes[a.idx];
+                        var want = a.top;
+                        if (target) {{
+                            var hostTop = host.getBoundingClientRect().top;
+                            want = target.getBoundingClientRect().top - hostTop + host.scrollTop - a.delta;
+                        }}
+                        var max = Math.max(0, host.scrollHeight - host.clientHeight);
+                        want = Math.max(0, Math.min(want, max));
+                        if (Math.abs(host.scrollTop - want) >= 1) _progScroll(host, want);
+                    }} catch (e) {{}}
+                }};
                 // ===== B5.1 v2 收尾（block 级渲染通道专用，旧路径不调用） =====
                 // Python 侧 _perform_update_v2 每次 patch 后调用：
                 // 1) 流式运行框去重：MessageCard 的 JS 注入节点（data-tool-call-id，
@@ -5249,8 +5323,12 @@ class CodeWebViewer(QWebEngineView):
                     // Python 侧按"不可滚"处理：真异常时内层同样滚不动，交外层更合理。
                     var _ins = 0;
                     try {{
+                        // ⚠️ `#content-placeholder` 必须在内：坞态（简洁模式 + 流式）
+                        // 下正文 600px 限高 + overflow-y:auto，它是唯一真正可滚的容器，
+                        // body 反而不溢出。漏掉它 → ins 恒 0 → Python 侧把「点击正文
+                        // 优先滚内部」误判成「卡内无人消费」→ 滚轮全交外层。
                         var _tcs = document.querySelectorAll(
-                            '#tool-content, .code-container, .code-content, .table-scroll-wrapper, .echarts-container'
+                            '#content-placeholder, #tool-content, .code-container, .code-content, .table-scroll-wrapper, .echarts-container'
                         );
                         for (var _ti = 0; _ti < _tcs.length; _ti++) {{
                             var _te = _tcs[_ti];
@@ -7366,8 +7444,11 @@ class CodeWebViewer(QWebEngineView):
             return False
 
         ctx = self._v2_render_ctx()
-        # 不在 block key 里的 ctx 维度（lazy_body / heavy_caps / 主题 / suppress
-        # 数量）变化时：已落地 DOM 是旧 ctx 产物，必须清缓存 + 全量重落地。
+        # 不在 block key 里的 ctx 维度（lazy_body / heavy_caps / 主题 / 字体）变化时：
+        # 已落地 DOM 是旧 ctx 产物，必须清缓存 + 全量重落地。
+        # ⚠️ tool_fingerprints 刻意**不在**此列：它只影响含 <tool> 的 text 块，
+        # 已折进该块 key（block_render.block_key），由 diff 定点替换。放这里会让
+        # 流式中每完成一个工具就整页重建 → 用户展开的折叠框被销毁重来。
         sig = (
             ctx.compact,
             ctx.lazy_body,
@@ -7375,7 +7456,6 @@ class CodeWebViewer(QWebEngineView):
             ctx.pygments_style,
             ctx.icon_prefix,
             ctx.code_font_size,
-            len(ctx.tool_fingerprints),
         )
         if sig != self._v2_ctx_sig:
             self._v2_ctx_sig = sig
@@ -7465,11 +7545,21 @@ class CodeWebViewer(QWebEngineView):
         if page is None:
             return True
         js: List[str] = []
+        _has_patch_ops = (not content_ops.is_empty) or (not tool_ops.is_empty)
         if force_full:
             # 整页清空前快照滚动位置（body / 正文容器 / 工具区）：清空瞬间
             # scrollHeight 归零，scrollTop 被浏览器强制钳到 0 且不会自己回来
             # → 流式期间用户上滚阅读被弹回顶部。restore 见下方 patch 之后。
             js.append("if(typeof window._v2ScrollSave==='function')window._v2ScrollSave();")
+        elif _has_patch_ops:
+            # 局部 patch 的锚点包（不清容器，故用「视口顶第一个块 + 偏移」而不是
+            # scrollTop 快照）：替换块在视口上方且高度变化时保持阅读位置。
+            js.append(
+                "if(typeof window._v2AnchorCapture==='function'){"
+                "window._v2AnchorC=window._v2AnchorCapture(document.getElementById('content-placeholder'));"
+                "window._v2AnchorT=window._v2AnchorCapture(document.getElementById('tool-content'));}"
+            )
+        if force_full:
             # 全量落地前清两个容器：v2 首帧 / 内容整体替换 / ctx 切换时容器里
             # 可能残留旧路径节点（无 data-block-key，splice 不认），不清会叠加。
             # 清空即销毁全部 echarts 节点 → 先逐个 dispose（同 refresh_theme 语义）。
@@ -7511,6 +7601,12 @@ class CodeWebViewer(QWebEngineView):
             # 清空后的位置还原必须在 _v2AfterPatch 之前：它里面紧凑模式的块搬移
             # 还会再动一次正文高度，但先还原能保证用户至少不回到顶部。
             js.append("if(typeof window._v2ScrollRestore==='function')window._v2ScrollRestore();")
+        elif _has_patch_ops:
+            js.append(
+                "if(typeof window._v2AnchorRestore==='function'){"
+                "window._v2AnchorRestore(document.getElementById('content-placeholder'),window._v2AnchorC);"
+                "window._v2AnchorRestore(document.getElementById('tool-content'),window._v2AnchorT);}"
+            )
         # v2 专属收尾：流式运行框去重 / 工具区显隐与 header / 工具区滚底
         js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});")
         page.runJavaScript("".join(js))

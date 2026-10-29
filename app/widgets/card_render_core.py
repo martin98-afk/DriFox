@@ -3736,7 +3736,18 @@ _SKELETON_CACHE_MAX = 48
 # 折叠态改用稳定身份键（_collapseKeyOf：data-flip-key / data-tool-call-id 优先，
 # 内容指纹回退）、patchBlocks 新节点注入前冻结折叠框 transition。旧骨架缺这些
 # 函数 → 流式中用户上滚被弹回顶部、已展开的折叠框重放展开动画。
-_SKELETON_CACHE_VERSION = 56
+# _SKELETON_CACHE_VERSION +1（v57）：滚轮「内层可滚」判据补 #content-placeholder
+# （reportHeight 第 6 字段 + _BODY_GEOM_READ_JS 两处）。坞态下正文 600px 限高
+# 内滚，它才是唯一可滚容器；漏掉它 → Python 判「卡内无人消费」→ 点击正文后
+# 滚轮全交外层（「点击后优先滚 HTML 内部」失效）。旧骨架 ins 恒 0，必须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v58）：折叠态身份键优先级改为 tool-call-id 优先
+# （工具块真身份），flip-key 次之。v57 的 flip-key 优先会让工具卡在 think 序号
+# 重排后错配到别的块（用户实测「展开的不是原来那个」）。
+# _SKELETON_CACHE_VERSION +1（v59）：v2 局部 patch 的滚动锚点保持
+# （_v2ScrollHost / _v2AnchorCapture / _v2AnchorRestore）——替换块在视口上方且
+# 高度变化时补偿阅读位置；只在容器所属视口已离开底部时介入。旧骨架缺这些函数
+# → 流式中展开/折叠块后正文位置漂移。
+_SKELETON_CACHE_VERSION = 59
 
 
 def _js_literal(value) -> str:
