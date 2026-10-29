@@ -1254,9 +1254,10 @@ class ConfigSyncService(QObject):
                         # 无需再用云端 token 刷新回传——多端 refresh_token 互踩已根治。
                         self._refresh_and_upload_after_download()
                         if self._mark_dir_meta_migration():
-                            # 迁移上传：把带 .__drifox_sync__.json 的新包推上去。
+                            # 迁移上传：只推被标记脏的目录单元（带 initial_sync=True
+                            # 会把所有 ext 单元无差别重传一遍，白白重打包）。
                             # 已在后台线程，直接跑上传（不要在这里创建 QTimer）。
-                            self._do_upload(initial_sync=True)
+                            self._do_upload()
                         if self._pending_sync_message:
                             # Settings 重载已延迟到主线程执行，syncDone 会在
                             # _reload_settings_on_main_thread 中自动发射
