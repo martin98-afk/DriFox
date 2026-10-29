@@ -715,6 +715,28 @@ class TestInitialSync:
 # =============================================================================
 
 
+class TestPluginReloadWindow:
+    """app.config 单下不触发插件重载链（避免陈旧 pending 触发全量 rescan）"""
+
+    def test_no_window_means_skip(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        assert _should_reload_plugins(0.0) is False
+        assert _should_reload_plugins(0.0, now=time.time()) is False
+
+    def test_inside_window_schedules(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        now = time.time()
+        assert _should_reload_plugins(now + 5, now=now) is True
+
+    def test_expired_window_skips(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        now = time.time()
+        assert _should_reload_plugins(now - 1, now=now) is False
+
+
 class TestSuppressionWindow:
     """抑制窗口期间不丢失配置修改"""
 

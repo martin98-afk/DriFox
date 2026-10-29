@@ -135,13 +135,20 @@ def git_blob_sha(data: bytes) -> str:
     return h.hexdigest()
 
 
-def build_stable_zip(root: Path, arc_prefix: str = "", extra_dirs: Optional[Dict[str, Path]] = None) -> bytes:
+def build_stable_zip(
+    root: Path,
+    arc_prefix: str = "",
+    extra_dirs: Optional[Dict[str, Path]] = None,
+    sync_meta: str = "",
+) -> bytes:
     """把目录打成确定性 ZIP，返回字节内容。
 
     Args:
         root: 目录根
         arc_prefix: ZIP 内顶层目录名（空则条目直接位于根）
         extra_dirs: 额外附带的外部目录 {arcname: path}（不参与排除规则之外的特殊处理）
+        sync_meta: 非空时作为保留条目 ``.__drifox_sync__.json`` 写入包内。
+            解压端必须把它剔除，不能落到用户目录（否则会被插件扫描当成插件文件）。
 
     确定性保证：条目按 arcname 排序、固定 date_time、固定权限位与压缩级别。
     因此同一份内容每次产出的字节完全相同，可直接用 git_blob_sha 与远端 sha 比对。
@@ -160,6 +167,13 @@ def build_stable_zip(root: Path, arc_prefix: str = "", extra_dirs: Optional[Dict
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        if sync_meta:
+            meta_name = f"{arc_prefix}/.__drifox_sync__.json" if arc_prefix else ".__drifox_sync__.json"
+            info = zipfile.ZipInfo(filename=meta_name, date_time=_FIXED_DATE_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, sync_meta.encode("utf-8"))
         for arcname, path in entries:
             try:
                 data = path.read_bytes()

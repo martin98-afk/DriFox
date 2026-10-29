@@ -792,6 +792,13 @@ class Settings(QConfig):
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
     llm_api_port = RangeConfigItem("LLM", "APIPort", 8765, RangeValidator(1024, 65535))
 
+    # ========== 云同步元数据 ==========
+    # 存 JSON 字符串：{"version": 1, "clock": <lamport>, "entries": {路径: {h,t,d}}}
+    # 由 app/core/sync/meta_recorder.py 维护，UI 不展示、不提供编辑入口。
+    # 放在 System 分组是为了随 app.config 一次 PUT 原子上云（Gitee 文件 API
+    # 一次只能写一个文件，独立元数据文件会引入两文件不一致的窗口）。
+    sync_meta = ConfigItem("System", "SyncMeta", "{}")
+
     # ========== MCP 服务器配置 ==========
     mcp_servers = ConfigItem("MCP", "Servers", [], ListDictValidator())
     mcp_enabled = ConfigItem("MCP", "Enabled", True, BoolValidator())

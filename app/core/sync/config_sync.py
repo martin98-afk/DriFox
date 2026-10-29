@@ -24,7 +24,6 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from app.core.sync import fingerprint as fp
-from app.core.sync.merge import merge_config_dicts, merge_dir_manifests
 from app.utils.config import Settings
 from app.utils.utils import get_app_data_dir
 
@@ -76,6 +75,16 @@ def _get_user_custom_backup_path() -> Path:
 def _get_records_path() -> Path:
     """获取分享记录文件路径"""
     return get_app_data_dir() / "share" / "records.json"
+
+
+def _should_reload_plugins(window_until: float, now: Optional[float] = None) -> bool:
+    """本轮同步是否落在「解压过 user-custom」的时间窗内。
+
+    只有解压 user-custom 才可能产生插件目录变更。app.config 单下时插件目录没动，
+    此时若还去消费 watcher pending，会把启动期遗留的一条陈旧标记当成真变更，
+    触发一次 rescan 全量扫描（76 个插件目录重新解析），纯开销。
+    """
+    return (time.time() if now is None else now) < float(window_until or 0.0)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -255,6 +264,10 @@ class ConfigSyncService(QObject):
         self._poll_busy: bool = False
         self._sha_cache_path: Path = get_app_data_dir().resolve() / SHA_CACHE_FILE
         self._pending_sync_message: Optional[str] = None  # 延迟 syncDone 消息（Settings 在主线程重载完成后发射）
+        # 本轮下载确实解压了 user-custom 时置为「当前时间 + 10s」：只有落在这个
+        # 时间窗内的 Settings 重载才去消费 watcher pending 并排插件重载。app.config
+        # 单下时插件目录没变，消费启动期遗留的陈旧 pending 会白跑一次全量 rescan。
+        self._plugin_reload_window_until: float = 0.0
         self._initial_sync_completed: bool = False  # 初始同步是否已完成（禁止初始同步前上传）
         self._suppress_retry_scheduled: bool = False  # 抑制窗口结束后的重试已调度
 
@@ -375,6 +388,15 @@ class ConfigSyncService(QObject):
         self._debounce_timer.timeout.connect(self._on_debounce_timeout)
 
         self._set_state("idle")
+        # 同步元数据记账器：采集 ConfigItem 变更，生成 LWW 条目表（含墓碑）。
+        # 失败不阻塞同步（退化成 union 合并，不丢数据）。
+        try:
+            from app.core.sync.meta_recorder import bind_settings
+
+            self._meta_recorder = bind_settings(Settings.get_instance())
+        except Exception as e:
+            logger.warning(f"[ConfigSync] 同步元数据接线失败: {e}")
+            self._meta_recorder = None
         # 先设抑制窗口再启动 watch，防止 initial_sync 过程中的文件事件触发防抖上传
         self._suppress_until = time.time() + 30.0
         self._start_watching()
@@ -743,6 +765,12 @@ class ConfigSyncService(QObject):
                     logger.warning(f"[SecretStore] 同步回填失败: {_se}")
                     _secret_mode = ""
 
+                # 写回内存阶段全部静默：这些 value 变化来自云端合并结果，
+                # 若记账器当成用户改动，本机会把远端内容记成自己的新版本，
+                # 导致下一次同步时其他设备被它覆盖。
+                _rec = getattr(self, "_meta_recorder", None)
+                if _rec is not None:
+                    _rec.begin_suppress()
                 for _section_name, _section_data in _file_data.items():
                     for _key, _value in _section_data.items():
                         _matched = None
@@ -777,6 +805,8 @@ class ConfigSyncService(QObject):
                             # （隔天同步时多数配置未变，仅此项即可消除主线程 200-500ms 占用）
                             if getattr(cfg, _matched).value != _value:
                                 getattr(cfg, _matched).value = _value
+                if _rec is not None:
+                    _rec.end_suppress()
 
                 # 🔒 密钥态判定必须在写回循环之后（基于新内存值）：
                 # - 无锁定条目且密码在手上 → 清备份（解锁成功即清，防设置卡误读「等待解锁」）；
@@ -790,6 +820,8 @@ class ConfigSyncService(QObject):
                         cfg._cipher_backup = {}
                 logger.debug("[ConfigSync] 全量配置已从文件同步到内存（含本地 Gitee token）")
             except Exception as _e:
+                if getattr(self, "_meta_recorder", None) is not None:
+                    self._meta_recorder.reset_suppress()
                 logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")
 
             # ── 主题显式全量刷新（修复 bug#6） ──
@@ -823,14 +855,20 @@ class ConfigSyncService(QObject):
             # 延迟 200ms 执行一次；另安排 3s 兜底——watchfiles 2s 防抖可能使 pending
             # 晚于本方法置位（解压完成 → emit → 主线程重载期间 watcher 尚未处理事件），
             # 3s 后补查一次，确保 agents/commands 最终加载、事件不丢。
+            #
+            # 只在「本轮确实解压了 user-custom」的时间窗内触发：app.config 单下时
+            # 插件目录没有任何变化，此时消费 pending 只会拿启动期遗留的一条陈旧标记
+            # 去跑一次 rescan 全量扫描（76 个插件目录全部重新解析），纯开销。
             try:
-                from app.core.conversation.backend import ChatBackend
+                from app.core.services.plugin_host_service import PluginHostService
 
-                if getattr(ChatBackend, "_watcher_pending_reload", False):
-                    ChatBackend._watcher_pending_reload = False
-                    QTimer.singleShot(200, self._trigger_merged_plugin_reload)
-                    logger.info("[ConfigSync] 检测到同步期间被抑制的插件变更，200ms 后合并重载")
-                QTimer.singleShot(3000, self._consume_watcher_pending)
+                if _should_reload_plugins(self._plugin_reload_window_until):
+                    svc = PluginHostService.get_instance()
+                    if getattr(svc, "_watcher_pending_reload", False):
+                        svc._watcher_pending_reload = False
+                        QTimer.singleShot(200, self._trigger_merged_plugin_reload)
+                        logger.info("[ConfigSync] 检测到同步期间被抑制的插件变更，200ms 后合并重载")
+                    QTimer.singleShot(3000, self._consume_watcher_pending)
             except Exception as _pe:
                 logger.warning(f"[ConfigSync] 合并插件重载调度失败: {_pe}")
         except Exception as e:
@@ -1472,6 +1510,10 @@ class ConfigSyncService(QObject):
         2. 待上传字节的 git blob sha == base 版本 sha → 远端已是这份内容，跳过。
         3. 远端 sha 与 base 不同 → 别的设备改过，先三方合并再决定是否上传。
         """
+        if unit == "app.config":
+            # 元数据必须先落盘再算指纹：否则本次上传的 app.config 缺最新条目表，
+            # 其他设备拿到的墓碑/时间戳滞后一次同步。
+            self._flush_sync_meta()
         h_local = self._unit_content_hash(unit, local_path)
         if not force and h_local and self._content_hashes.get(unit) == h_local:
             logger.debug(f"[ConfigSync] {unit} 内容未变化，跳过上传")
@@ -1482,7 +1524,6 @@ class ConfigSyncService(QObject):
             logger.warning(f"[ConfigSync] {unit} 内容构建失败，跳过")
             return False
 
-        is_dir = isinstance(local_path, Path) and local_path.is_dir()
         blob_sha = fp.git_blob_sha(payload)
         base_sha = self._get_cached_remote_sha(unit)
         if blob_sha == base_sha:
@@ -1491,8 +1532,6 @@ class ConfigSyncService(QObject):
                 unit,
                 base_sha,
                 h_local,
-                manifest=fp.dir_manifest(local_path) if is_dir else None,
-                config_data=self._payload_to_config(unit, payload),
             )
             return True
 
@@ -1521,8 +1560,6 @@ class ConfigSyncService(QObject):
                     unit,
                     live_sha,
                     h_local,
-                    manifest=fp.dir_manifest(local_path) if is_dir else None,
-                    config_data=self._payload_to_config(unit, payload),
                 )
                 return True
 
@@ -1537,20 +1574,69 @@ class ConfigSyncService(QObject):
             unit,
             new_sha or live_sha,
             h_local,
-            manifest=fp.dir_manifest(local_path) if is_dir else None,
-            config_data=self._payload_to_config(unit, payload),
         )
         return True
 
-    @staticmethod
-    def _payload_to_config(unit: str, payload: bytes) -> Optional[dict]:
-        if unit != "app.config":
-            return None
+    def _flush_sync_meta(self) -> None:
+        """把记账器当前的条目表写进磁盘 app.config 的 System.SyncMeta。
+
+        只改磁盘上的这一个键，不走 ``cfg.save()``：整份 save 用内存值重建文件，
+        若此刻 Settings 尚未重载（合并写盘后、主线程重载前），会把刚合并出来的
+        内容用旧内存值覆盖回去。内存侧由 ``_reload_settings_on_main_thread``
+        统一从文件重载。
+        """
+        rec = getattr(self, "_meta_recorder", None)
+        if rec is None:
+            return
+        raw = rec.dump()
         try:
-            data = json.loads(payload.decode("utf-8"))
-            return data if isinstance(data, dict) else None
-        except Exception:
-            return None
+            from app.utils.config import Settings
+
+            lock = getattr(Settings, "_save_lock", None)
+            if lock is not None:
+                lock.acquire()
+            try:
+                with open(self._config_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                system = data.get("System")
+                if not isinstance(system, dict):
+                    system = {}
+                    data["System"] = system
+                if system.get("SyncMeta") == raw:
+                    return
+                system["SyncMeta"] = raw
+                tmp = self._config_path.with_suffix(".config.synctmp")
+                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(str(tmp), str(self._config_path))
+            finally:
+                if lock is not None:
+                    lock.release()
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 同步元数据落盘失败: {e}")
+
+    def _dir_sync_meta(self, unit: str, local_dir: Path) -> str:
+        """上传前把本地目录现状对齐到条目表，序列化为包内元数据。
+
+        时钟只按本地序号推进（不纳入远端）：本机未改动的文件不该获得比远端
+        更大的 t，否则远端修改永远输给本地旧内容。
+        """
+        from app.core.sync.lww import LamportClock, dir_meta_payload, reconcile_dir_entries
+
+        try:
+            manifest = fp.dir_manifest(local_dir)
+            state = self._load_dir_meta(unit)
+            entries = state.get("entries") or {}
+            clock = LamportClock(int(state.get("clock") or 0))
+            new_entries = reconcile_dir_entries(
+                manifest,
+                entries if isinstance(entries, dict) else {},
+                clock,
+            )
+            self._save_dir_meta(unit, new_entries, clock.value)
+            return dir_meta_payload(new_entries, clock.value)
+        except Exception as e:
+            logger.debug(f"[ConfigSync] {unit} 同步元数据生成失败: {e}")
+            return ""
 
     def _put_file(
         self,
@@ -1716,15 +1802,50 @@ class ConfigSyncService(QObject):
         except Exception as e:
             logger.debug(f"[ConfigSync] {unit} 本地快照失败: {e}")
 
+    def _dir_meta_path(self, unit: str) -> Path:
+        slug = unit.replace(":", "_").replace("/", "_")
+        return self._sync_base_dir / f"{slug}.dir.json"
+
+    def _load_dir_meta(self, unit: str) -> Dict[str, object]:
+        from app.core.sync.meta_recorder import load_state
+
+        path = self._dir_meta_path(unit)
+        try:
+            if path.exists():
+                return load_state(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return load_state("")
+
+    def _save_dir_meta(self, unit: str, entries: Dict[str, object], clock: int) -> None:
+        from app.core.sync.lww import dir_meta_payload
+
+        try:
+            path = self._dir_meta_path(unit)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(dir_meta_payload(entries, clock), encoding="utf-8")  # type: ignore[arg-type]
+        except Exception as e:
+            logger.debug(f"[ConfigSync] {unit} 同步元数据写入失败: {e}")
+
     def _apply_dir_merge(self, unit: str, local_dir: Path, remote_zip: bytes, prefix: str) -> Optional[Dict[str, str]]:
-        """三方合并远端目录到本地：远端改过的取远端，冲突保留本地并另存远端副本。
+        """目录单元按条目 LWW 合并（墓碑删文件，冲突保留本地并另存远端副本）。
 
         Returns:
-            远端目录清单（{相对路径: sha256}），供调用方计算基准内容指纹；
-            解压失败返回 None。
+            远端目录清单（{相对路径: sha256}，不含包内元数据条目），
+            供调用方计算本轮内容指纹；解压失败返回 None。
         """
-        import zipfile
         import io as _io
+        import zipfile
+
+        from app.core.sync.lww import (
+            DIR_META_NAME,
+            LamportClock,
+            is_tombstone,
+            merge_entries,
+            reconcile_dir_entries,
+            seed_entries_from_manifest,
+        )
+        from app.core.sync.meta_recorder import load_state
 
         tmp = get_app_data_dir() / "cache" / "sync_base" / f"_merge_{unit.replace(':', '_')}"
         if tmp.exists():
@@ -1737,64 +1858,112 @@ class ConfigSyncService(QObject):
             shutil.rmtree(str(tmp), ignore_errors=True)
             raise RuntimeError(f"远端 zip 解压失败: {e}")
 
-        remote_root = tmp / prefix if prefix else tmp
-        if not remote_root.exists():
-            remote_root = tmp
+        remote_root = tmp / prefix if prefix and (tmp / prefix).exists() else tmp
         try:
+            # 元数据条目只存在于包内，绝不能落到用户目录（会被插件扫描当成插件文件）
+            remote_state = load_state("")
+            for meta_candidate in (remote_root / DIR_META_NAME, tmp / DIR_META_NAME):
+                if meta_candidate.exists():
+                    try:
+                        remote_state = load_state(meta_candidate.read_text(encoding="utf-8"))
+                    finally:
+                        meta_candidate.unlink()
+
             remote_manifest = fp.dir_manifest(remote_root)
             local_manifest = fp.dir_manifest(local_dir)
-            base_manifest = self._load_base_manifest(unit)
-            plan = merge_dir_manifests(base_manifest, local_manifest, remote_manifest)
+            remote_entries = seed_entries_from_manifest(
+                remote_manifest, remote_state.get("entries") or {}
+            )
 
-            if not plan.needs_local_write:
-                logger.info(f"[ConfigSync] {unit} 三方合并无本地写入动作（{plan.summary()}）")
-                self._save_base_manifest(unit, remote_manifest)
-                return remote_manifest
+            local_state = self._load_dir_meta(unit)
+            local_entries = local_state.get("entries") or {}
+            local_clock = int(local_state.get("clock") or 0)
+            remote_clock = int(remote_state.get("clock") or 0)
+            # 本地已有条目表时时钟只按本地序号推进：若纳入远端序号，本机所有
+            # 未改动文件会被打上高于远端的 t，远端修改永远输给本地旧内容。
+            # 本地无条目表（首次升级）时反过来，抬到远端之上，让本地现有内容算新增。
+            start = local_clock if isinstance(local_entries, dict) and local_entries else max(local_clock, remote_clock)
+            clock = LamportClock(start)
+            local_entries = reconcile_dir_entries(
+                local_manifest,
+                local_entries if isinstance(local_entries, dict) else {},
+                clock,
+            )
+            raw_remote_entries = remote_state.get("entries") or {}
+            merged_entries, conflicts = merge_entries(local_entries, remote_entries)
 
-            self._backup_local_unit(unit, local_dir)
             ts = time.strftime("%Y%m%d-%H%M%S")
-            for rel in plan.take_remote:
-                src = remote_root / rel
-                dst = local_dir / rel
-                if not src.exists():
+            to_delete: list[str] = []
+            to_copy: list[str] = []
+            for rel, entry in merged_entries.items():
+                if is_tombstone(entry):
+                    to_delete.append(rel)
                     continue
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(dst))
-            for rel in plan.conflicts:
-                src = remote_root / rel
-                if not src.exists():
+                want = str(entry.get("h") or "")
+                lh = local_manifest.get(rel)
+                rh = remote_manifest.get(rel)
+                if lh == want:
+                    # 本地胜。若远端同路径内容不同、且远端那份没有正经元数据
+                    # （老版本上传的包），无从判断谁更新 → 按冲突留档，至少不静默丢内容
+                    if rh is not None and rh != lh and rel not in raw_remote_entries:
+                        conflicts.append(rel)
                     continue
-                # 冲突副本必须落在业务目录之外：user-custom 等目录会被插件扫描
-                # （team_templates / commands / hooks），混入副本会被当成真实内容
-                # 加载，模板列表、命令列表里会多出条目。主文件保留本地版本，
-                # 对方版本进 conflicts/<unit>/<时间戳>-<设备>/ 留档。
-                dst = self._conflict_path(unit, rel, ts)
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(dst))
-                slug = unit.replace(":", "_").replace("/", "_")
-                self._conflict_archive.append((dst, f"drifox/conflicts/{slug}/{ts}-{self._device_tag}/{rel}"))
-            for rel in plan.delete_local:
+                if rh == want:
+                    to_copy.append(rel)
+                    continue
+                # 内容对不上（本地优先的冲突）→ 远端版本留档，本地文件保持不动
+                if rh is not None:
+                    conflicts.append(rel)
+
+            if to_delete or to_copy or conflicts:
+                self._backup_local_unit(unit, local_dir)
+
+            for rel in to_delete:
                 try:
                     (local_dir / rel).unlink()
                 except Exception:
                     pass
-
-            logger.warning(
-                f"[ConfigSync] {unit} 三方合并完成（{plan.summary()}）。"
-                + (
-                    f" 对方版本已留档到 conflicts/{unit.replace(':', '_')}/{ts}-{self._device_tag}/"
-                    if plan.conflicts
-                    else ""
+            for rel in to_copy:
+                src = remote_root / rel
+                if not src.exists():
+                    continue
+                dst = local_dir / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+            for rel in conflicts:
+                src = remote_root / rel
+                if not src.exists():
+                    continue
+                dst = self._conflict_path(unit, rel, ts)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+                slug = unit.replace(":", "_").replace("/", "_")
+                self._conflict_archive.append(
+                    (dst, f"drifox/conflicts/{slug}/{ts}-{self._device_tag}/{rel}")
                 )
-            )
-            self._save_base_manifest(unit, remote_manifest)
+
+            self._save_dir_meta(unit, merged_entries, max(clock.value, remote_clock))
+            if to_delete or to_copy or conflicts:
+                logger.warning(
+                    f"[ConfigSync] {unit} 目录合并完成（应用远端 {len(to_copy)}，"
+                    f"跟随删除 {len(to_delete)}，冲突 {len(conflicts)}）"
+                    + (
+                        f"。对方版本已留档到 conflicts/{unit.replace(':', '_')}/{ts}-{self._device_tag}/"
+                        if conflicts
+                        else ""
+                    )
+                )
+            else:
+                logger.debug(f"[ConfigSync] {unit} 目录合并无本地写入动作")
             return remote_manifest
         finally:
             shutil.rmtree(str(tmp), ignore_errors=True)
 
     def _apply_config_merge(self, remote_bytes: bytes) -> None:
-        """app.config 按 key 三方合并并写盘（本地值优先，冲突远端值留档）。"""
-        base_data = self._load_base_config()
+        """app.config 按条目 LWW 合并（墓碑删条目，冲突本地优先 + 远端留档）。"""
+        from app.core.sync.lww import merge_config_lww
+        from app.core.sync.meta_recorder import SyncMetaRecorder, load_state
+
         try:
             remote_data = json.loads(remote_bytes.decode("utf-8"))
         except Exception:
@@ -1806,9 +1975,35 @@ class ConfigSyncService(QObject):
         except Exception:
             local_data = {}
 
-        merged, conflicts, keys = merge_config_dicts(base_data, local_data, remote_data)
-        if not merged:
-            return
+        local_meta = (local_data.get("System") or {}).get("SyncMeta") or "{}"
+        remote_meta = (remote_data.get("System") or {}).get("SyncMeta") or "{}"
+        remote_clock = int(load_state(remote_meta).get("clock") or 0)
+
+        local_rec = SyncMetaRecorder()
+        local_rec.attach(local_data, local_meta)
+        # 先纳入远端序号再补本地缺失条目：否则首次升级时本地补出来的 t 低于
+        # 远端已有序号，远端全胜会把本地独有改动覆盖掉。
+        local_rec.observe_clock(remote_clock)
+        local_rec.seed_missing()
+
+        remote_rec = SyncMetaRecorder()
+        remote_rec.attach(remote_data, remote_meta)
+
+        merged_cfg, merged_entries, conflicts = merge_config_lww(
+            local_data,
+            local_rec.entries(),
+            remote_data,
+            remote_rec.entries(),
+        )
+        merged_cfg.setdefault("System", {})["SyncMeta"] = json.dumps(
+            {
+                "version": 1,
+                "clock": max(remote_clock, int(local_rec.state.get("clock") or 0)),
+                "entries": merged_entries,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
         self._backup_local_unit("app.config", self._config_path)
         ts = time.strftime("%Y%m%d-%H%M%S")
@@ -1817,14 +2012,41 @@ class ConfigSyncService(QObject):
                 root = get_app_data_dir() / "backups" / "sync"
                 dest = root / ts / f"app.config.remote-{self._device_tag}"
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(json.dumps(conflicts, ensure_ascii=False, indent=2), encoding="utf-8")
+                from app.core.sync.lww import element_key
+
+                remote_flat = {
+                    f"{g}.{n}": v
+                    for g, items in remote_data.items()
+                    if isinstance(items, dict)
+                    for n, v in items.items()
+                }
+                snapshot: dict = {}
+                for path in conflicts:
+                    parts = path.split(".", 2)
+                    if len(parts) == 2:
+                        snapshot[path] = remote_flat.get(path)
+                        continue
+                    container = remote_data.get(parts[0]) or {}
+                    item = container.get(parts[1]) if isinstance(container, dict) else None
+                    if isinstance(item, dict):
+                        snapshot[path] = item.get(parts[2])
+                    elif isinstance(item, list):
+                        want = parts[2]
+                        for elem in item:
+                            if element_key(elem) == want:
+                                snapshot[path] = elem
+                                break
+                dest.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
-            logger.warning(f"[ConfigSync] app.config 合并存在 {len(keys)} 个键冲突（本地优先）: {', '.join(keys[:8])}")
+            logger.warning(
+                f"[ConfigSync] app.config 合并存在 {len(conflicts)} 个条目冲突（本地优先）: "
+                f"{', '.join(conflicts[:8])}"
+            )
 
         tmp = self._config_path.with_suffix(".config.synctmp")
         try:
-            tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.write_text(json.dumps(merged_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(str(tmp), str(self._config_path))
         except Exception as e:
             logger.error(f"[ConfigSync] app.config 合并结果写盘失败: {e}")
@@ -1955,69 +2177,17 @@ class ConfigSyncService(QObject):
             else:
                 self._ext_remote_sha.pop(pid, None)
 
-    def _base_manifest_path(self, unit: str) -> Path:
-        slug = unit.replace(":", "_").replace("/", "_")
-        return self._sync_base_dir / f"{slug}.manifest.json"
-
-    def _load_base_manifest(self, unit: str) -> Dict[str, str]:
-        """读取 unit 的合并基准清单（缺失返回空 dict = 无基准）"""
-        path = self._base_manifest_path(unit)
-        try:
-            if path.exists():
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return {str(k): str(v) for k, v in data.items()}
-        except Exception as e:
-            logger.debug(f"[ConfigSync] base 清单读取失败（{unit}）: {e}")
-        return {}
-
-    def _save_base_manifest(self, unit: str, manifest: Dict[str, str]) -> None:
-        try:
-            path = self._base_manifest_path(unit)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(manifest, ensure_ascii=False, indent=0), encoding="utf-8")
-        except Exception as e:
-            logger.debug(f"[ConfigSync] base 清单写入失败（{unit}）: {e}")
-
-    def _base_config_path(self) -> Path:
-        return self._sync_base_dir / "app.config.json"
-
-    def _load_base_config(self) -> Optional[dict]:
-        """读取 app.config 的合并基准内容（剔除 token 后的云端形态）"""
-        try:
-            path = self._base_config_path()
-            if path.exists():
-                data = json.loads(path.read_text(encoding="utf-8"))
-                return data if isinstance(data, dict) else None
-        except Exception:
-            pass
-        return None
-
-    def _save_base_config(self, data: dict) -> None:
-        try:
-            path = self._base_config_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.debug(f"[ConfigSync] base app.config 写入失败: {e}")
-
     def _commit_unit_state(
         self,
         unit: str,
         remote_sha: Optional[str],
         content_hash: Optional[str],
-        manifest: Optional[Dict[str, str]] = None,
-        config_data: Optional[dict] = None,
     ) -> None:
-        """一次成功同步后落盘该 unit 的 base 状态（sha / 内容指纹 / 基准清单）"""
+        """一次成功同步后落盘该 unit 的远端 sha 与内容指纹。"""
         if remote_sha:
             self._set_cached_remote_sha(unit, remote_sha)
         if content_hash:
             self._content_hashes[unit] = content_hash
-        if manifest is not None:
-            self._save_base_manifest(unit, manifest)
-        if config_data is not None:
-            self._save_base_config(config_data)
         self._save_sha_cache()
 
     @staticmethod
@@ -2047,7 +2217,11 @@ class ConfigSyncService(QObject):
                 return self._strip_gitee_token_bytes(local_path)
             if isinstance(local_path, Path) and local_path.is_dir():
                 prefix = unit.split(":", 1)[1] if unit.startswith("ext:") else ""
-                return fp.build_stable_zip(local_path, arc_prefix=prefix)
+                return fp.build_stable_zip(
+                    local_path,
+                    arc_prefix=prefix,
+                    sync_meta=self._dir_sync_meta(unit, local_path),
+                )
             return local_path.read_bytes()
         except Exception as e:
             logger.error(f"[ConfigSync] 构建 {unit} 上传内容失败: {e}")
@@ -2391,6 +2565,10 @@ class ConfigSyncService(QObject):
             # 因主题未注册而静默重置为默认主题。load 完成后自动发射 syncDone。
             if downloaded_config:
                 self._pending_sync_message = "配置与用户插件已从云端恢复"
+            if custom_downloaded:
+                # 只有解开 user-custom 才可能产生插件变更：给随后的 Settings 重载
+                # 开一个消费 watcher pending 的时间窗（重载在主线程异步执行）。
+                self._plugin_reload_window_until = time.time() + 10.0
             if downloaded_config or custom_downloaded:
                 # 🚀 P5e：user-custom 有更新（无论 app.config 是否变化）都桥接主线程，
                 # 以便消费 watcher 抑制期 pending（合并插件重载）。app.config 未变时
