@@ -3899,6 +3899,10 @@ class TabManagerWindow(FramelessWindow):
             if card_id not in open_dict:
                 open_dict[card_id] = title
                 self.titleBar.add_tab(card_id, title, closable=True)
+            elif open_dict[card_id] != title:
+                # 卡片隐藏期间注册表 title 变过（如侧栏计数「插件市场 (N)」）
+                open_dict[card_id] = title
+                self.titleBar.set_tab_text(card_id, title)
             self._set_replace_active(card_id)
             # 覆盖层内互斥切换（页已在前台且无在途切换动画）：整页按 tab 位置差
             # 方向滑入（助手→左侧的轨迹 tab = 从左滑出），无事件时兜底右滑。
@@ -5786,9 +5790,40 @@ class TabManagerWindow(FramelessWindow):
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
         self._tab_panel.refresh_ui_plugins()
         self._sync_plugin_titlebar_tabs()
+        self._sync_replace_tab_titles()
         # 工作区页面刷新（Phase G）：注册集变化后重建 sidebar 入口 + 销毁被卸载页面
         if hasattr(self, "_workspace_page_host"):
             self._workspace_page_host.refresh_pages()
+
+    def _sync_replace_tab_titles(self) -> None:
+        """把注册表里最新的卡片标题同步到已挂的标题栏 tab
+
+        replace 卡（插件 full 卡）的标题会随运行状态变化：插件市场把待更新数
+        写进 title（「插件市场 (N)」↔「插件市场」）。tab 文字在 add_tab 时
+        固化，注册表变化不会自己传过去（用户视角：更新完插件 tab 文字没变）。
+        这里按注册表现状逐个纠正，open 集合里存的标题同步更新，供后续
+        ``_refresh_titlebar_cards`` 重建时复用。
+        """
+        replace_open = getattr(self, "_replace_open", None)
+        if not replace_open:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            cards = UIPluginRegistry.get_instance().get_floating_cards()
+        except Exception:
+            return
+        for open_dict in replace_open.values():
+            for card_id, old_title in list(open_dict.items()):
+                info = cards.get(card_id)
+                if info is not None:
+                    new_title = (info.title or "").strip() or card_id
+                else:
+                    new_title = GLOBAL_REPLACE_TITLES.get(card_id, card_id)
+                if new_title == old_title:
+                    continue
+                open_dict[card_id] = new_title
+                self.titleBar.set_tab_text(card_id, new_title)
 
     @staticmethod
     def _create_fake_page():
@@ -5907,6 +5942,11 @@ class TabManagerWindow(FramelessWindow):
         # 插件常驻标题栏 tab 同步补刷（同 refresh_ui_plugins 的可见性门控根因）
         try:
             self._sync_plugin_titlebar_tabs()
+        except Exception:
+            pass
+        # replace 卡 tab 文案补刷：隐藏期间注册表 title 变化（如侧栏计数）不丢
+        try:
+            self._sync_replace_tab_titles()
         except Exception:
             pass
         # macOS：close→show 循环后修复标题栏错位（见 _refresh_mac_fullsize_content）

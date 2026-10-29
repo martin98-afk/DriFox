@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ### ✨ 新功能 (New Features)
 - **OS 级沙箱（macOS Seatbelt）**: 安全中心新增「OS 级沙箱（macOS）」开关与档位（挡写入 / 挡写入+禁网）。开启后 agent 命令（bash 工具与后台任务）经 `sandbox-exec` 包装执行，工作区与系统临时目录外写入、可选联网在内核层被拒；与应用层沙箱审批正交（审批决定要不要问，OS 沙箱决定进程实际能碰什么）。非 macOS 平台自动直通。新增回归测试 `tests/core/test_os_sandbox.py`。
 
+### 🐛 问题修复 (Bug Fixes)
+- **插件市场自动更新后侧栏计数不刷新**: `run_auto_update_check` 返回的 `pending` 是更新前快照，`execute=True` 把可更新插件全部装完后仍原样返回，左侧栏 TabPanel 条目停在「插件市场 (N)」，要等下一次 30 分钟 tick 才纠正。现于更新执行后重算待更新数（更新成功者剔除、失败者保留），新增回归测试 `tests/plugins/test_plugin_marketplace_auto_update_pending.py`。
+- **标题栏 tab 文案不跟随卡片标题变化**: full 卡 tab 文字在 `add_tab` 时固化，注册表 title 变化（「插件市场 (N)」↔「插件市场」）传不到已打开的 tab。新增 `CustomTitleBar.set_tab_text` 与 `TabManagerWindow._sync_replace_tab_titles`（`_update_shared_launcher` / 窗口重新显示 / 卡片重新可见三处补刷），新增回归测试 `tests/widgets/test_replace_tab_title_sync.py`。
+
 ## [v0.6.12] - 2026-10-27 (重新发布 #8)
 
 自 v0.6.11 以来的变更 | 提交数：49 · 文件变更：135 · +13072/-3113 | 贡献者：dingma, drifox-bot, mading, martin98-afk

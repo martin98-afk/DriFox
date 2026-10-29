@@ -753,6 +753,23 @@ def run_auto_update_check(progress=None, execute: bool = True) -> Dict[str, Any]
                 failed.append((name, str(e)))
             _time.sleep(0.3)  # 串行节流：连续替换目录留出文件句柄释放窗口
 
+    # 更新执行后重算待更新数：pending 是更新前的快照，原样返回会让侧栏
+    # 「插件市场 (N)」计数停在旧值（用户视角：自动更新完文字没动，要等下一次
+    # 30 分钟 tick 才纠正）。更新成功的插件版本已替换，重查 check_update 即
+    # False → 剔除；更新失败的保留在待更新集，供下次重试。
+    if execute and updated:
+        updated_set = set(updated)
+        still_pending: List[Tuple[dict, Optional[str]]] = []
+        for meta, remote in pending:
+            if meta.get("name") in updated_set:
+                try:
+                    if not inst.check_update(meta)[0]:
+                        continue
+                except Exception:
+                    pass  # 重查失败时保守保留，不误清计数
+            still_pending.append((meta, remote))
+        pending = still_pending
+
     phase = "done" if execute else "check"
     _report(phase, f"待更新 {len(pending)} 个" + (f"，已更新 {len(updated)} 个" if execute else ""))
     return {
