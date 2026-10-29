@@ -57,6 +57,21 @@ class SceneLayer(QWidget):
 
         self._image_label: Optional[QLabel] = None
         self._dim_label: Optional[QLabel] = None
+        # 跨宿主共享画布：宿主注入求值函数，让本层只显示同一张图的某一段。
+        # 多栏共享背景时各栏用同一画布尺寸 + 各自左缘偏移，保证接缝处图案
+        # 严格连续。None = 退化为撑满自身 rect（原有单宿主行为）。
+        self._canvas_provider = None
+
+    def set_canvas_provider(self, provider) -> None:
+        """注入跨宿主画布求值函数（幂等，可重复调用）
+
+        Args:
+            provider: callable() -> Optional[Tuple[int, int, int]]
+                (画布宽, 画布高, 本宿主左缘在画布中的 x 偏移)。
+                返回 None 表示退回「撑满自身 rect」。
+        """
+        self._canvas_provider = provider
+        self._sync_geometry()
 
     def apply_config(self, cfg: Optional[dict], image_resolver=None) -> None:
         """应用主题配置（None 或 enabled=False 时清除所有内容）
@@ -91,7 +106,7 @@ class SceneLayer(QWidget):
                 self._image_label = QLabel(self)
                 self._image_label.setPixmap(pix)
                 self._image_label.setScaledContents(True)
-                self._image_label.setGeometry(self.rect())
+                self._sync_content_geometry()
                 # 图片也设圆角（避免溢出到 _chat_frame 圆角外）
                 self._image_label.setStyleSheet(
                     f"border-radius: {_CHAT_FRAME_RADIUS}px;"
@@ -111,7 +126,7 @@ class SceneLayer(QWidget):
             self._dim_label.setStyleSheet(
                 f"background-color: {dim}; border-radius: {_CHAT_FRAME_RADIUS}px;"
             )
-            self._dim_label.setGeometry(self.rect())
+            self._sync_content_geometry()
             self._dim_label.raise_()
             self._dim_label.show()
 
@@ -136,16 +151,39 @@ class SceneLayer(QWidget):
         self.setStyleSheet("")
         self.setAutoFillBackground(False)
 
+    def _content_geometry(self) -> tuple:
+        """内容层（图片/蒙版）几何
+
+        跨宿主画布下返回「负偏移大矩形」——宽高是整块画布，x 取负的本宿主
+        偏移，超出自身边界的部分由 Qt 父子裁剪自动切掉，于是本层只显示画布
+        里属于自己的那一段。无画布时等于自身 rect。
+        """
+        canvas = None
+        if self._canvas_provider is not None:
+            try:
+                canvas = self._canvas_provider()
+            except Exception:
+                canvas = None
+        if canvas is None:
+            r = self.rect()
+            return (0, 0, r.width(), r.height())
+        width, height, offset_x = canvas
+        return (-int(offset_x), 0, int(width), int(height))
+
+    def _sync_content_geometry(self) -> None:
+        """把内容层几何对齐到画布（self 自身始终撑满 parent）"""
+        x, y, w, h = self._content_geometry()
+        for label in (self._image_label, self._dim_label):
+            if label is not None:
+                label.setGeometry(x, y, w, h)
+
     def _sync_geometry(self) -> None:
         """同步到 parent 的几何"""
         parent = self.parent()
         if parent is None:
             return
         self.setGeometry(parent.rect())
-        if self._image_label is not None:
-            self._image_label.setGeometry(self.rect())
-        if self._dim_label is not None:
-            self._dim_label.setGeometry(self.rect())
+        self._sync_content_geometry()
 
     def eventFilter(self, watched, event) -> bool:
         """监听 parent.resize → 同步 SceneLayer geometry"""
@@ -155,10 +193,7 @@ class SceneLayer(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._image_label is not None:
-            self._image_label.setGeometry(self.rect())
-        if self._dim_label is not None:
-            self._dim_label.setGeometry(self.rect())
+        self._sync_content_geometry()
 
     def refresh_theme(self) -> None:
         """theme_manager.refresh_target 钩子：触发重新应用配置

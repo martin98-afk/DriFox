@@ -3,6 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [未发布]
 ### ✨ 新功能 (New Features)
+- **主题风格选择改为网格预览卡** (`app/widgets/cards/settings/theme_style_card.py` 新增 · `llm_settings_card.py`): 系统设置「主题风格」从一列单选框换成展开式网格预览，每格画出该主题的 window 渐变底、按放大后不透明度叠加的主题背景图与 accent 主色条，主题名写在格内；点格子即切换（走 `Settings.set(..., save=True)` 落盘），选中格描 accent 边并打角标勾。列数按可用宽度在 2~4 间自适应，深/浅模式各自过滤主题列表。
 - **OS 级沙箱（macOS Seatbelt）**: 安全中心新增「OS 级沙箱（macOS）」开关与档位（挡写入 / 挡写入+禁网）。开启后 agent 命令（bash 工具与后台任务）经 `sandbox-exec` 包装执行，工作区与系统临时目录外写入、可选联网在内核层被拒；与应用层沙箱审批正交（审批决定要不要问，OS 沙箱决定进程实际能碰什么）。非 macOS 平台自动直通。新增回归测试 `tests/core/test_os_sandbox.py`。
 - **能力池新增历史 / 项目 / 团队会话面** (`app/plugins/capabilities/catalog.py` · `providers/history_core.py`): 新增 `session.history`（持久化历史只读面：列表 / 归档 / 项目聚合 / 按 session_id 定位 / 团队会话查询）、`session.history.write`（置顶 / 移动项目 / 归档 / 恢复 / 删除 / 导入）、`project.read`（当前项目 / 清单 / 元数据 / 根目录）、`project.write`（切换 / 新建 / 归档 / 导入导出 / 打开文件夹 / 拖拽）、`team.session`（团队会话恢复 / 归档 / 进入成员会话）五条能力，并把此前「catalog 登记了却没有 provider」的 `session.manage` 补成真实实现（`select(session_id)` / `new()`）。写能力内部承担宿主联动（工作目录同步 + 团队广播 + 历史页刷新 + 跨窗口通知），插件不再反射窗口私有方法。
 - **新增 `project.workdir` 能力** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py`): 写库式切换项目工作目录，封装「关键文档登记 + 工作目录持久化 + 根目录标记恢复」三步。与既有 `workdir.write`（只改会话内状态：实例缓存 + tool_executor + 团队广播 + UI 同步，进程重启即失效）互补，worktree 切换两者配合使用。根目录标记恢复规则（旧目录本身是 worktree 时跳过，否则记忆卡片根目录会被指到 worktree 上）从插件侧搬进主程序并加单测锚定。

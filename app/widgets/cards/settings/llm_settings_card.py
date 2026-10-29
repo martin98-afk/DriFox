@@ -50,7 +50,6 @@ from app.utils.startup_manager import (
     get_registered_command,
     request_auto_start_update,
 )
-from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
@@ -64,6 +63,7 @@ from app.widgets.cards.settings.update_proxy_card import UpdateProxyCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+from app.widgets.cards.settings.theme_style_card import ThemeStyleCard, prepare_theme_entries
 
 
 class NoWheelFontComboBox(QFontComboBox):
@@ -1423,24 +1423,21 @@ class LLMSettingsCard(SystemCardFrame):
         self.uiThemeStyleCard = self._make_theme_style_card()
 
     def _make_theme_style_card(self):
-        """构建主题风格卡（展开式选项卡，与提示音卡一致的下部展开交互）
+        """构建主题风格卡（网格预览选择器，见 theme_style_card 模块）
 
-        validator options 与 texts 严格对齐（均为深浅过滤后的列表），
-        防 OptionsSettingCard 内部 zip(texts, options) 错位。
+        条目采集与 validator 对齐统一走 prepare_theme_entries；主题源变化时
+        卡片自己监听 theme_manager.on_reload 重建网格。
         """
-        options = self._build_theme_options()
-        keys = list(options.keys())
-        if not keys:
+        is_light = bool(self.cfg.ui_light_mode.value)
+        entries = prepare_theme_entries(self.cfg.ui_theme_style, self.cfg, is_light)
+        if not entries:
             return getattr(self, "uiThemeStyleCard", None)
-        self.cfg.ui_theme_style.validator.__init__(keys)
-        if self.cfg.ui_theme_style.value not in keys:
-            self.cfg.set(self.cfg.ui_theme_style, keys[0], save=True)
-        return OptionsSettingCard(
+        return ThemeStyleCard(
             self.cfg.ui_theme_style,
-            get_icon("主题风格"),
-            "主题风格",
-            "选择界面卡片配色方案",
-            texts=[d["label"] for d in options.values()],
+            entries,
+            self.cfg,
+            is_light=is_light,
+            icon=get_icon("主题风格"),
             parent=self,
         )
 
@@ -1460,24 +1457,6 @@ class LLMSettingsCard(SystemCardFrame):
         else:
             layout.addWidget(new_card)
         self.uiThemeStyleCard = new_card
-
-    def _build_theme_options(self) -> dict:
-        """从 ThemeManager 动态构建主题选项，按当前深浅模式过滤并加标识"""
-        from app.utils.config import update_theme_options
-
-        update_theme_options()
-        themes = theme_manager.list_themes()
-        is_light = self.cfg.ui_light_mode.value
-
-        result = {}
-        for tid, name in themes.items():
-            theme_light = theme_manager.is_light_theme(tid)
-            # 按当前模式过滤
-            if is_light != theme_light:
-                continue
-            label = name
-            result[tid] = {"label": label}
-        return result
 
     def _setup_font_card(self):
         """创建字体设置卡片"""
