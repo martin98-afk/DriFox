@@ -5010,6 +5010,23 @@ class CodeWebViewer(QWebEngineView):
                             if (tc.children.length > 0 && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
                         }}
                         if (streaming === true && typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
+                        // [T43] 非流式（历史加载 / 流式终渲染）落地后：跟随态则把卡内
+                        // body 滚到底。v1 路径（updateContent）尾部自带
+                        // _autoScrollStreamingBody 兜底，v2 通道此前完全没有 body 滚底 →
+                        // 历史会话里内容超过 body max-height 的超长卡片首帧停在最上面
+                        // （流式期间是贴底的，加载历史后行为不一致，用户实测）。
+                        // 仅跟随态执行：用户已上滚阅读时保持位置，语义与
+                        // _autoScrollStreamingBody 的 _userScrolledWithin 守卫一致。
+                        if (streaming !== true && !window._userScrolledWithin) {{
+                            window._suppressScrollEvent = true;
+                            try {{
+                                document.body.scrollTop = document.body.scrollHeight;
+                            }} finally {{
+                                window._prevScrollTop = document.body.scrollTop;
+                                window._autoScrollTime = performance.now();
+                                window._suppressScrollEvent = false;
+                            }}
+                        }}
                         if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 0);
                     }} catch (e) {{
                         if (window.console) console.log('v2-after-patch-failed:' + e);

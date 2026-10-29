@@ -248,6 +248,12 @@ SCROLL_MAX_CACHE_TTL = 0.12
 # 取代 500/1000ms 盲滚底。DRIFOX_EVENT_SCROLL=0 回退到纯时间驱动重试链。
 STREAM_BOTTOM_EVENT_DRIVEN = os.environ.get("DRIFOX_EVENT_SCROLL", "1") != "0"
 
+# 滚动贴底诊断（DRIFOX_SCROLL_DIAG=1 打开，默认关闭）：把 value / maximum /
+# landed / container 高度 / sizeHint / away / 窗口态打到日志，用于定位
+# 「流式结束后视口比底部高一截」这类只在真机复现的欠收敛。零成本：关时只多一次
+# 模块级布尔判断。
+SCROLL_DIAG = os.environ.get("DRIFOX_SCROLL_DIAG", "").strip() == "1"
+
 # 「回到底部」胶囊的显示阈值（px）：视口离底超过它才浮出。
 # ⚠️ 故意比 AT_BOTTOM_TOLERANCE 大一个数量级 —— 两者语义不同：
 #   - AT_BOTTOM_TOLERANCE 问的是「还算贴底吗」（决定是否跟随流式输出）
@@ -16357,6 +16363,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 滚动时复用单个防抖定时器，避免堆积大量 singleShot 回调
         self._scroll_sync_timer.stop()
         self._scroll_sync_timer.start()
+        self._scroll_diag("scroll-changed", throttle=0.2)
 
     def _truncate_session_from_user_round(self, round_index: int, card: MessageCard = None) -> bool:
         """
@@ -18236,6 +18243,44 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[_on_code_action] 异常: {e}")
 
+    def _scroll_diag(self, tag: str, delta: int = 0, throttle: float = 0.0) -> None:
+        """滚动贴底诊断快照（DRIFOX_SCROLL_DIAG=1 时输出，默认零成本）。
+
+        只在真机才复现的欠收敛上用：一条日志同时给出「滚动条上界 / 已落地底 /
+        容器实际高度 / sizeHint / 视口高 / 跟随态 / away」，可区分三类现场——
+          ① max 高但 landed 低：布局滞后，贴底值被 landed 卡住；
+          ② landed 高但 value 低：贴底动作没执行（被 away / 锁 / 窗口关掉）；
+          ③ value 已贴 landed，但 landed 本身小于视觉内容底：口径问题。
+        throttle 按 tag 独立计时，避免用户滚动时刷屏。
+        """
+        if not SCROLL_DIAG:
+            return
+        now = time.monotonic()
+        if throttle > 0:
+            ts_map = getattr(self, "_scroll_diag_ts_map", None)
+            if ts_map is None:
+                ts_map = {}
+                self._scroll_diag_ts_map = ts_map
+            if now - ts_map.get(tag, 0.0) < throttle:
+                return
+            ts_map[tag] = now
+        try:
+            area = self.chat_scroll_area
+            sb = area.verticalScrollBar()
+            container = area.widget()
+            logger.info(
+                f"[scroll-diag] {tag} value={sb.value()} max={sb.maximum()} "
+                f"landed={self._landed_bottom_value()} "
+                f"container_h={container.height() if container is not None else -1} "
+                f"hint={container.sizeHint().height() if container is not None else -1} "
+                f"vp={area.viewport().height()} follow={self._should_follow_bottom()} "
+                f"away={self._user_intentionally_away_from_bottom} "
+                f"depth={self._programmatic_scroll_depth} ab={self._ensure_ab_active} "
+                f"sticky={max(0.0, self._bottom_anchor_deadline - now):.2f} delta={delta}"
+            )
+        except Exception:  # noqa: BLE001 — 诊断不得影响滚动主链
+            pass
+
     def _is_view_at_bottom(self, tolerance: int = AT_BOTTOM_TOLERANCE) -> bool:
         """视口是否贴在底部（全项目唯一权威判定）。
 
@@ -18603,6 +18648,7 @@ class OpenAIChatToolWindow(ToolWindow):
             scroll_bar.setValue(self._landed_bottom_value())
             # 再次设置确保卡片高度变化后仍在底部
             scroll_bar.setValue(self._landed_bottom_value())
+        self._scroll_diag("do-scroll-to-bottom")
         self._pending_scroll_to_bottom = False
         # 🐛 原此处无条件 `self._user_intentionally_away_from_bottom = False`：
         # 任何一次程序置底都会清空用户的「我在读历史」意图，于是守卫形同虚设
@@ -18644,6 +18690,7 @@ class OpenAIChatToolWindow(ToolWindow):
             retries = 2 if STREAM_BOTTOM_EVENT_DRIVEN else 8
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         self._sync_scroll_maximum()
+        self._scroll_diag("ensure-at-bottom")
         if not self._is_view_at_bottom():
             with self._programmatic_scroll():
                 # 贴已落地底：判定仍用预抬上界（欠贴 → 继续重试），贴则只贴
@@ -18785,6 +18832,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._should_follow_bottom():
             with self._programmatic_scroll():
                 self.chat_scroll_area.verticalScrollBar().setValue(self._landed_bottom_value())
+        self._scroll_diag("range-changed")
 
     def _maintain_bottom_anchor(self):
         # 窗口已销毁时跳过：避免 _bottom_anchor_timer 回调在 closeEvent 之后
@@ -18805,6 +18853,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # sticky 路径（_do_scroll_to_bottom else 分支）同款的
             # _ensure_at_bottom 兜底窗口；away 守卫保证不打扰用户主动阅读。
             QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
+            self._scroll_diag("anchor-expired", throttle=1.0)
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         # 🐛 原此处直接 setValue(scroll_bar.maximum())：卡片 setFixedHeight 后 Qt
@@ -18815,6 +18864,7 @@ class OpenAIChatToolWindow(ToolWindow):
         with self._programmatic_scroll():
             scroll_bar.setValue(self._landed_bottom_value())
         self._bottom_anchor_timer.start()
+        self._scroll_diag("anchor")
 
     def _on_message_card_height_changed(self, _height: int):
         """卡片高度变化时的滚动处理
@@ -18851,6 +18901,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 代价：非跟随态下跨视口顶部的折叠框展开不再补偿，会有一次性位移。
         try:
             delta = int(getattr(sender, "_last_height_delta", 0) or 0)
+            _diag_delta = delta
             # 增量是一次性令牌：读取即清零。否则后续任何一次 heightChanged
             # （如动画结束回调）都会把同一个 delta 再补偿一遍 → 视口累加漂移。
             sender._last_height_delta = 0
@@ -18950,6 +19001,11 @@ class OpenAIChatToolWindow(ToolWindow):
         elif self._is_view_at_bottom() and not _reading_inside:
             # 视口已经在底部附近 → 补一次滚底，吸收卡片高度增量（阈值统一）
             self._scroll_to_bottom()
+        self._scroll_diag(
+            "card-height",
+            delta=_diag_delta,
+            throttle=0.2,
+        )
         sender._content_just_loaded = False
 
     def handle_recommended_question(self, content: str, action: str):

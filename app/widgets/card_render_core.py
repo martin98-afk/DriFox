@@ -3726,7 +3726,9 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v53）：B5.2 流式纯文本尾态——新增
 # window._v2LiveNode / _v2LiveAppend 与 .v2-live-text 样式。旧骨架缺追加
 # 函数 → 活动块增量静默丢弃（只显示首帧纯文本），必须失效缓存。
-_SKELETON_CACHE_VERSION = 53
+# _SKELETON_CACHE_VERSION +1（v54）：[T43] _v2AfterPatch 非流式收尾补卡内 body
+# 滚底（跟随态）——旧骨架 v2 通道无此逻辑，历史会话超长卡片首帧停在最上面。
+_SKELETON_CACHE_VERSION = 54
 
 
 def _js_literal(value) -> str:
