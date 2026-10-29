@@ -1129,6 +1129,88 @@ class ChatBackend(QObject):
         if self._chat_engine:
             self._chat_engine.provide_question_answer(answer)
 
+    def withdraw_interject(self, text: str) -> int:
+        """从 hook 队列摘除尚未被 worker 消费的插话（撤回/删除幽灵插话卡）
+
+        插话入队即出用户卡片（``_interject_entry``），worker 消费前消息不在
+        session。用户在此时撤回/删除该卡，必须把队列里的条目一并摘掉：
+        queue.Queue 无法删项，只能 drain 后重建。残留条目会被下一个 worker 的
+        ``_inject_pending_hook_messages`` 当作新插话消费，已撤回消息复活并派生
+        重复用户卡片（2026-10-29 双卡片）。
+
+        同文本多次插话摘除最近入队的一条（与幽灵卡倒序定位口径一致）。
+
+        Args:
+            text: 插话纯文本（``_interject_text``）
+
+        Returns:
+            摘除条数；0 = 队列里已无该文本（worker 已消费或已回收进 stash）
+        """
+        if not text:
+            return 0
+        q = self._hook_message_queue
+        leftover: list = []
+        while True:
+            try:
+                leftover.append(q.get_nowait())
+            except queue.Empty:
+                break
+        removed = 0
+        kept: list = []
+        for item in reversed(leftover):
+            if (
+                removed == 0
+                and isinstance(item, dict)
+                and item.get("_interject") is True
+                and item.get("_interject_text") == text
+            ):
+                removed = 1
+                continue
+            kept.append(item)
+        for item in reversed(kept):
+            q.put(item)
+        if removed:
+            logger.info(f"[Interject] 已从队列摘除撤回插话: {text[:40]!r}")
+        return removed
+
+    def reclaim_pending_interjects(self) -> int:
+        """把 hook 队列中的未消费插话全部转入回收 stash（停止链路立即调用）
+
+        中止时 worker 可能正阻塞在工具执行（cancel 标志只在检查点生效），
+        主循环因 ``while not self._is_cancelled`` 直接退出，不经过
+        ``_cancel_with_stop_hook`` 的队列排空 → 插话残留，被下一个 worker 当新
+        插话消费（2026-10-29 已撤回消息复活 + 双卡片）。UI 在停止瞬间主动回收，
+        不依赖 worker 线程的退出时机。TeamMail 属被取消上下文直接丢弃，
+        其他通知放回队列供下一对话消费。
+
+        Returns:
+            回收的插话条数
+        """
+        q = self._hook_message_queue
+        leftover: list = []
+        while True:
+            try:
+                leftover.append(q.get_nowait())
+            except queue.Empty:
+                break
+        recovered: list = []
+        kept: list = []
+        for item in leftover:
+            if not isinstance(item, dict):
+                kept.append(item)
+            elif item.get("_interject") is True:
+                recovered.append(item)
+            elif item.get("_hook_event") == "TeamMail":
+                continue
+            else:
+                kept.append(item)
+        for item in kept:
+            q.put(item)
+        if recovered:
+            self.stash_recovered_interjects(recovered)
+            logger.info(f"[Interject] 停止链路回收 {len(recovered)} 条未消费插话")
+        return len(recovered)
+
     def stash_recovered_interjects(self, items: list) -> None:
         """worker 取消路径回收的未消费用户插话（线程安全）"""
         if not items:

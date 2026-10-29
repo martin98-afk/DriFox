@@ -16472,6 +16472,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 删除未生效（round_index 失效 / 卡片不在布局中）时不入栈，避免"幽灵条目"
         if entry is None or not session or len(session.messages) >= before_len:
+            # 🛡️ 幽灵插话卡（session 无对应消息）兜底：删除语义 = 移除 UI 卡片 +
+            # 摘除队列中尚未被 worker 消费的插话条目，不回填输入框。
+            # 不处理的后果：卡片删了但队列残留 → 下一个 worker 当新插话消费 →
+            # 消息复活 + 与重发消息形成两张卡片（2026-10-29）。
+            ghost_text = card.get_plain_text()
+            if ghost_text and getattr(card, "_interject_pending", False):
+                backend = self._safe_instance_attr(self, "backend")
+                withdraw = getattr(backend, "withdraw_interject", None)
+                if callable(withdraw):
+                    try:
+                        withdraw(ghost_text)
+                    except Exception as e:
+                        logger.warning(f"[DELETE] 摘除队列插话失败: {e}")
+                self._interject_withdrawn_texts.add(ghost_text)
+                if self._remove_interject_ghost_card(ghost_text):
+                    logger.info("[DELETE] 幽灵插话卡片已移除（session 无对应消息）")
+                return
             if entry is not None:
                 logger.warning("[DELETE] 删除未改变会话内容，跳过撤销条目入栈")
             return
@@ -19942,6 +19959,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 break
             widgets_to_remove.append(w)
         delete_widgets_from_layout(widgets_to_remove, self.chat_layout)
+        # 🛡️ 队列里的同一插话必须一并摘除：中止时 worker 可能仍卡在工具执行，
+        # 主循环退出不经过取消排空 → 残留条目会被下一个 worker 当新插话消费，
+        # 已撤回消息复活并派生重复用户卡片（2026-10-29 双卡片）。
+        backend = self._safe_instance_attr(self, "backend")
+        withdraw = getattr(backend, "withdraw_interject", None)
+        if callable(withdraw):
+            try:
+                withdraw(text)
+            except Exception as e:
+                logger.warning(f"[Interject] 摘除队列插话失败: {e}")
         self._rebuild_batch_cards_from_layout()
         self._refresh_all_cards_round_index()
         return True
@@ -25475,6 +25502,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 先取消 worker（仅设置标志 + 断开信号，不阻塞）
         if self.backend.chat_engine:
             self.backend.cancel_streaming()
+
+        # 🛡️ 立即回收 hook 队列里的未消费插话：worker 卡在工具执行时 cancel 只在
+        # 检查点生效，主循环退出不经过 _cancel_with_stop_hook 的队列排空；残留条目
+        # 会被下一个 worker 当新插话消费（2026-10-29 已撤回消息复活 + 双卡片）。
+        # 回收进 stash 后由 _on_finalize_complete 统一回填输入框并删幽灵卡。
+        try:
+            backend = self._safe_instance_attr(self, "backend")
+            if backend is not None:
+                backend.reclaim_pending_interjects()
+        except Exception as e:
+            logger.warning(f"[Interject] 停止链路回收插话失败: {e}")
 
         self._is_streaming = False
         self._set_ai_state("idle")

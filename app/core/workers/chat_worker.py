@@ -1220,29 +1220,53 @@ class OpenAIChatWorker(QThread):
         # 重复消费 → "停止后立即触发相同对话"的次链路。取消 = 用户主动中止，
         # 残留的 TeamMail hook 属于被取消的上下文，直接丢弃；非 TeamMail 条目
         # （SubAgentFinished 等通知）保留放回，供下一对话正常消费（通知语义不变）。
-        try:
-            backend = getattr(self.tool_executor, "_backend", None)
-            q = getattr(backend, "_hook_message_queue", None) if backend else None
-            if q is not None:
-                leftover = []
-                while True:
-                    try:
-                        leftover.append(q.get_nowait())
-                    except queue.Empty:
-                        break
-                recovered = []
-                for item in leftover:
-                    if item.get("_interject") is True:
-                        recovered.append(item)  # 用户插话：回收供停止后回填，不丢弃
-                    elif item.get("_hook_event") != "TeamMail":
-                        q.put(item)
-                if recovered and backend is not None:
-                    try:
-                        backend.stash_recovered_interjects(recovered)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"[HookManager] 回收插话失败: {e}")
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[HookManager] Cancel path drain TeamMail hook queue failed: {e}")
+        self._reclaim_pending_interjects_on_exit()
+
+    def _reclaim_pending_interjects_on_exit(self) -> int:
+        """退出前把 hook 队列中的未消费插话回收进 backend stash
+
+        取消 = 用户主动中止：残留插话回收供 UI 停止链路回填输入框，既不丢也不
+        复活。TeamMail 属被取消上下文直接丢弃；非 TeamMail 条目
+        （SubAgentFinished 等通知）放回队列供下一对话正常消费。
+
+        两条调用路径：
+        - _cancel_with_stop_hook（取消检查点命中）
+        - run() 的 finally（主循环 `while not self._is_cancelled` 直接退出、
+          question 等待中取消 return 等，从不经过检查点）
+
+        Returns:
+            回收的插话条数
+        """
+        backend = getattr(self.tool_executor, "_backend", None)
+        q = getattr(backend, "_hook_message_queue", None) if backend is not None else None
+        if q is None:
+            return 0
+        leftover: List[Dict] = []
+        while True:
+            try:
+                leftover.append(q.get_nowait())
+            except queue.Empty:
+                break
+        recovered: List[Dict] = []
+        kept: List[Dict] = []
+        for item in leftover:
+            if not isinstance(item, dict):
+                kept.append(item)
+            elif item.get("_interject") is True:
+                recovered.append(item)
+            elif item.get("_hook_event") == "TeamMail":
+                continue
+            else:
+                kept.append(item)
+        for item in kept:
+            q.put(item)
+        if recovered:
+            try:
+                backend.stash_recovered_interjects(recovered)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[HookManager] 退出兜底回收插话失败: {e}")
+            logger.info(f"[Interject] 取消退出兜底回收 {len(recovered)} 条未消费插话")
+        return len(recovered)
 
     @property
     def event_bus(self) -> WorkerEventBus:
@@ -2664,6 +2688,11 @@ class OpenAIChatWorker(QThread):
         finally:
             # 工具执行完成后，清理 round 缓存（为下一轮 API 调用做准备）
             self._permission_cache.clear_round()
+            # 🛡️ 取消退出兜底：主循环 `while not self._is_cancelled` 直接退出时
+            # 不经过循环内的 _cancel_with_stop_hook → hook 队列里的插话残留，
+            # 被下一个 worker 当新插话消费（2026-10-29 已撤回插话复活 + 双卡片）
+            if self._is_cancelled:
+                self._reclaim_pending_interjects_on_exit()
 
     def _make_assistant_msg(self, content, model_name, reasoning_content, timestamp):
         """构建 assistant 消息 dict（消除 3 处重复构造）"""
