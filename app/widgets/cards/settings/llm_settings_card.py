@@ -834,16 +834,18 @@ class LLMSettingsCard(SystemCardFrame):
         # ════ 外观样式页 ════
         appearance_layout = self._page_layouts["appearance"]
 
-        # 界面字号、浅色模式、主题风格
+        # 浅色模式、主题风格
         self._setup_appearance_cards()
-        appearance_layout.addWidget(self.uiFontSizeCard)
-        appearance_layout.addWidget(self.uiChatWidthCard)
         appearance_layout.addWidget(self.uiLightModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
-        # 全局字体设置
+        # 界面字号 + 全局字体
+        appearance_layout.addWidget(self.uiFontSizeCard)
         self._setup_font_card()
         appearance_layout.addWidget(self.llmFontCard)
+
+        # 对话区宽度
+        appearance_layout.addWidget(self.uiChatWidthCard)
         appearance_layout.addStretch(1)
 
         # ════ 版本更新页 ════

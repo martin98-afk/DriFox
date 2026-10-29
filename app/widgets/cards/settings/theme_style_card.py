@@ -17,7 +17,7 @@ import weakref
 from typing import Optional
 
 from PyQt5 import sip
-from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import (
     QColor,
     QFont,
@@ -31,18 +31,51 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
 from qfluentwidgets import ExpandSettingCard, FluentIcon
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.theme_manager import theme_manager
 
 # ── 网格几何 ──────────────────────────────────────────
 _TILE_MIN_W = 156  # 单格最小宽度（决定一行放几格）
-_TILE_H = 96  # 单格总高（预览 + 名称条）
+_PREVIEW_MIN_H = 72  # 预览区最小高（不含底部名称条）
 _GRID_SPACING = 10
-_NAME_H = 22  # 底部名称条高度
 _ACCENT_BAR_H = 3  # 主色条高度
+_NAME_FONT_SIZE = 14  # 名称条字号基准（最终像素 = scale_font_size 缩放后）
+_NAME_FONT_MIN = 11  # 最小档位下也保底可读
+_NAME_PAD_V = 5  # 名称条上下留白
 _RADIUS = 8
 _MARGIN_L = 48  # 与 ExpandSettingCard 的展开区左缩进（对齐单选项历史缩进）
 _MARGIN_R = 24
+
+# 名称字体与其撑出的条高按 (字族, 像素) 缓存：paint 每次都要用，
+# 字族/字号变化时 key 自然失效重建（design_tokens 侧缓存同步失效）
+_name_font_key: tuple = ()
+_name_font_pack: Optional[tuple] = None
+
+
+def _name_pack() -> tuple:
+    """返回名称条绘制用的 (font, bar_height)。
+
+    原先字体从 widget font 派生（-2px）：widget font 是 apply_font_size_to_widget
+    统一铺的 14px 底噪，既不吃用户字族，又被压到 12px 以下，配上 22px 的名称条
+    后主题名又小又糊。名称是格子里唯一的语义信息，这里改按 UI 字号档位独立
+    定尺寸并加粗，字族跟随全局配置；条高按实际字高算，字号变大不会被裁。
+    """
+    global _name_font_key, _name_font_pack
+    key = (_get_global_font(), max(_NAME_FONT_MIN, scale_font_size(_NAME_FONT_SIZE)))
+    if _name_font_pack is not None and _name_font_key == key:
+        return _name_font_pack
+    font = QFont(key[0])
+    font.setPixelSize(key[1])
+    font.setBold(True)
+    bar_height = _ACCENT_BAR_H + max(24, QFontMetrics(font).height() + 2 * _NAME_PAD_V)
+    _name_font_pack = (font, bar_height)
+    _name_font_key = key
+    return _name_font_pack
+
+
+def _tile_height() -> int:
+    """单格总高：预览区 + 名称条（随字号变化）"""
+    return _PREVIEW_MIN_H + _name_pack()[1]
 
 
 def _parse_color(value, fallback: str = "#2a2a2e") -> QColor:
@@ -222,11 +255,17 @@ class _ThemeTile(QWidget):
         self._selected = False
         self._hover = False
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumSize(_TILE_MIN_W, _TILE_H)
+        self.setMinimumSize(_TILE_MIN_W, _tile_height())
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+    def refresh_metrics(self) -> None:
+        """字族/字号变化后重算所占高度并重绘"""
+        self.setMinimumSize(_TILE_MIN_W, _tile_height())
+        self.updateGeometry()
+        self.update()
+
     def sizeHint(self) -> QSize:
-        return QSize(_TILE_MIN_W, _TILE_H)
+        return QSize(_TILE_MIN_W, _tile_height())
 
     def setSelected(self, selected: bool) -> None:
         if self._selected != selected:
@@ -267,8 +306,9 @@ class _ThemeTile(QWidget):
         )
         on_light = _luminance(average) > 140
         text_color = QColor(26, 26, 30) if on_light else QColor(244, 244, 248)
+        name_font, name_bar_h = _name_pack()
         painter.fillRect(
-            QRectF(rect.left(), rect.bottom() - _NAME_H, rect.width(), _NAME_H),
+            QRectF(rect.left(), rect.bottom() - name_bar_h, rect.width(), name_bar_h),
             QColor(255, 255, 255, 96) if on_light else QColor(0, 0, 0, 88),
         )
         painter.fillRect(
@@ -276,15 +316,10 @@ class _ThemeTile(QWidget):
             accent,
         )
 
-        font = QFont(self.font())
-        if font.pixelSize() > 0:
-            font.setPixelSize(max(9, font.pixelSize() - 2))
-        else:
-            font.setPointSizeF(max(7.0, font.pointSizeF() - 1.5))
-        painter.setFont(font)
+        painter.setFont(name_font)
         painter.setPen(QPen(text_color))
-        name_rect = QRectF(rect.left(), rect.bottom() - _NAME_H, rect.width(), _NAME_H - _ACCENT_BAR_H)
-        text = QFontMetrics(font).elidedText(
+        name_rect = QRectF(rect.left(), rect.bottom() - name_bar_h, rect.width(), name_bar_h - _ACCENT_BAR_H)
+        text = QFontMetrics(name_font).elidedText(
             str(self._entry.get("name", "")), Qt.ElideRight, int(name_rect.width()) - 12
         )
         painter.drawText(name_rect, Qt.AlignCenter, text)
@@ -467,3 +502,15 @@ class ThemeStyleCard(ExpandSettingCard):
         """主题切换后重绘网格：边框/描边取自当前主题色，重绘即生效"""
         for tile in self._tiles.values():
             tile.update()
+
+    def changeEvent(self, event):
+        # 字族/字号切换由 apply_font_size_to_widget 对本卡 setFont 触发；
+        # 名称条高度随字号变化，必须重算几何，否则大字号被固定条高裁掉。
+        # getattr 兜底：super().__init__ 期间也可能派发 FontChange，那时 _tiles 还没建
+        if event.type() == QEvent.FontChange:
+            tiles = getattr(self, "_tiles", None)
+            if tiles:
+                for tile in tiles.values():
+                    tile.refresh_metrics()
+                self._relayout(force=True)
+        super().changeEvent(event)

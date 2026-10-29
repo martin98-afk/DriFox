@@ -1663,18 +1663,35 @@ class TabPanel(QWidget):
         self._tree_scroll: Optional[ScrollArea] = None
         self._tree_widget: Optional[WorkspaceTree] = None
         self._tree_snapshot = None  # 树节点签名，用于跳过无变化的重建
+        self._plugin_divider: Optional[QFrame] = None  # 常驻区 pin ↔ 非 pin 的分隔线（重建时重建）
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
 
-    _SEPARATOR_STYLE = f"""
-        QFrame {{
-            background: {Colors.DIVIDER_COLOR};
-            border: none;
-            min-height: 1px;
-            max-height: 1px;
-        }}
-    """
+    # ══════════════════════════════════════════════════════════
+    # 分隔线 QSS（三条共用一个生成入口）
+    # ⚠️ 必须在运行时生成，不能写成类级 f-string：DIVIDER_COLOR 深色主题
+    #    是白色微透明、浅色主题是黑色微透明，任何静态化都会把线色锁死在
+    #    首帧主题，切到对比色主题后线与底色同向 → 视觉上"分隔线消失"。
+    # ══════════════════════════════════════════════════════════
+    def _divider_qss(self, margin_top: int = 0, margin_bottom: int = 0) -> str:
+        return f"""
+            QFrame {{
+                background: {Colors.DIVIDER_COLOR};
+                border: none;
+                min-height: 1px;
+                max-height: 1px;
+                margin-top: {margin_top}px;
+                margin-bottom: {margin_bottom}px;
+            }}
+        """
+
+    def _refresh_divider_styles(self):
+        """主题/字体刷新入口：重刷面板内三条分隔线颜色（绝不在多线程调用）"""
+        self._separator.setStyleSheet(self._divider_qss())
+        self._plugin_separator_2.setStyleSheet(self._divider_qss(4, 2))
+        if getattr(self, "_plugin_divider", None) is not None:
+            self._plugin_divider.setStyleSheet(self._divider_qss(4, 2))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1766,18 +1783,8 @@ class TabPanel(QWidget):
         # ── 分隔线：UI 插件区域 ↔ 新建标签页 ──
         self._plugin_separator_2 = QFrame(self)
         self._plugin_separator_2.setFrameShape(QFrame.HLine)
-        self._plugin_separator_2.setStyleSheet(
-            f"""
-            QFrame {{
-                background: {Colors.DIVIDER_COLOR};
-                border: none;
-                min-height: 1px;
-                max-height: 1px;
-                margin-top: 4px;
-                margin-bottom: 2px;
-            }}
-            """
-        )
+        # 线色随主题（见 _divider_qss 说明）：此处走运行时生成，refresh_style 重刷
+        self._plugin_separator_2.setStyleSheet(self._divider_qss(4, 2))
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
@@ -1921,7 +1928,7 @@ class TabPanel(QWidget):
         # ── 分隔线 ──
         self._separator = QFrame(self)
         self._separator.setFrameShape(QFrame.HLine)
-        self._separator.setStyleSheet(self._SEPARATOR_STYLE)
+        self._separator.setStyleSheet(self._divider_qss())
         layout.addWidget(self._separator)
 
         # ── 底部：Gitee 账户（头像/名称右侧为 ⚙ 设置按钮） ──
@@ -2121,6 +2128,7 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._system_plugin_buttons = []
+        self._plugin_divider = None  # 重建后旧分隔线已 deleteLater，引用同步作废
         seen_pinned_row = False  # 已成功渲染的固定行（分隔线只插在固定行之后）
         divider_added = False
         for kind, key, title, plugin_name, _priority in system_infos:
@@ -2129,19 +2137,10 @@ class TabPanel(QWidget):
             if not divider_added and seen_pinned_row and plugin_name not in pinned:
                 divider = QFrame(self._system_plugin_section)
                 divider.setFrameShape(QFrame.HLine)
-                divider.setStyleSheet(
-                    f"""
-                    QFrame {{
-                        background: {Colors.DIVIDER_COLOR};
-                        border: none;
-                        min-height: 1px;
-                        max-height: 1px;
-                        margin-top: 4px;
-                        margin-bottom: 2px;
-                    }}
-                    """
-                )
+                # 线色随主题，refresh_style → _refresh_divider_styles 负责重刷
+                divider.setStyleSheet(self._divider_qss(4, 2))
                 self._system_plugin_layout.addWidget(divider)
+                self._plugin_divider = divider
                 divider_added = True
             # ★ T3 修复：单行构造异常不中断整体刷新（任一插件构造抛异常时
             # 跳过该插件，其余插件继续重建——否则一个"毒条目"导致整批
@@ -4415,6 +4414,8 @@ class TabPanel(QWidget):
         """
         # 刷新模块级缓存颜色，避免 paintEvent 使用旧主题色值
         _invalidate_cached_colors()
+        # 分隔线线色随主题（深色白线 / 浅色黑线），静态化会锁死首帧色
+        self._refresh_divider_styles()
         # 重新应用侧边两个滚动区的滚动条 QSS（滚动条颜色随主题）
         self._reapply_scroll_styles()
         # 「工作区」标题行样式（颜色/字号随主题与字体缩放）
