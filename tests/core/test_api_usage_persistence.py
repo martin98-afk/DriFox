@@ -183,8 +183,6 @@ def _make_engine(messages, system_prompt="你是助手", budget=200000):
     engine._session_manager.get_current_session.return_value = session
     core = MagicMock()
     core.context_builder.get_context_budget.return_value = budget
-    core.compactor = MagicMock()
-    core.compactor._make_state.return_value = {"active": False}
     engine._conversation_core = core
     engine._tools_schema_cache = {"timestamp": 1e18, "tools": [], "tokens": 0}
     engine._tool_executor = None

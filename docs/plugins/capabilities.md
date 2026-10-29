@@ -215,12 +215,11 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 
 > `project.write.switch` 内含「切项目 + 同步工作目录 + 新建会话 + 团队广播 + 收起面板」，插件不需要知道其中任何一步。要单独新建会话（不切项目）用 `session.manage.new()`。
 
-### 外观 / 上下文
+### 外观
 
 | ID | level | 说明 |
 |---|---|---|
 | `theme.read` | low | 主题 id / 名称 / 配色 / 字体 / 字号 |
-| `context.compact` | medium | 上下文压缩器 |
 
 ### 工具
 

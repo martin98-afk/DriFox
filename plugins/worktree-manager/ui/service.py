@@ -14,27 +14,14 @@ from loguru import logger
 
 
 def _caps(cap_id):
-    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。
 
-        ensure_registered("ui")
-        plugin = ""
-        try:
-            from pathlib import Path
+    原实现自建 ``host=None`` 池并自报 ``declared={cap_id, ...}``：等于插件给
+    自己发权限，manifest 声明永不生效，``window.*`` 这类吃 host 的能力还恒为空。
+    """
+    from app.plugins.sdk import caps_for
 
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
-        )
-        return pool[cap_id] if cap_id in pool else None
-    except Exception:
-        return None
+    return caps_for(cap_id)
 
 
 class WorktreeService:
@@ -110,30 +97,16 @@ class WorktreeService:
         if mw._current_workdir.get(project) == worktree_path:
             return
 
-        # 1. 通过 memory_manager 切换工作目录
-        if mw.backend and mw.backend.memory_manager:
-            mm = mw.backend.memory_manager
-            db_wd = mm.get_working_directory(project)
-            mm.add_key_document(project, worktree_path, "git_worktree")
-            mm.set_working_directory(project, worktree_path)
-            # 恢复非 worktree 根目录的 is_working_dir 标记，确保记忆卡片
-            # 能正确识别用户设定的根目录。get_working_directory 可能返回
-            # worktree 路径（ORDER BY 优先），此时跳过 restore 以避免
-            # 错误地为 worktree 恢复标记。
-            if db_wd and db_wd != worktree_path and db_wd != "clear":
-                # 如果 db_wd 指向的是 worktree（added_by 为 git_worktree），
-                # 不恢复它 — 我们需要恢复的是主仓库/根目录的标记
-                all_docs = mm.get_key_documents(project)
-                is_db_wd_worktree = any(
-                    d.get("file_path") == db_wd and d.get("added_by") == "git_worktree" for d in all_docs
-                )
-                if not is_db_wd_worktree:
-                    mm.restore_working_directory_mark(project, db_wd)
-
-        # 2. 更新实例缓存 + 同步工具执行器 + 刷新分支标签
-        mw._current_workdir[project] = worktree_path
-        if mw.backend and mw.backend.tool_executor:
-            mw.backend.tool_executor.set_workdir(worktree_path)
+        # 1+2. 一次语义动作：写库（关键文档登记 + 工作目录持久化 + 根目录标记恢复）
+        #      + 实例缓存 + tool_executor 同步 + 团队广播 + UI 同步。
+        # 这几步原先在本插件里手拼，并直接摸 backend.memory_manager /
+        # backend.tool_executor / _broadcast_team_workdir，属于宿主内部实现。
+        pwd = _cap("project.workdir", mw)
+        if pwd is not None:
+            pwd["switch"](project, worktree_path)
+        wd = _cap("workdir.write", mw)
+        if wd is not None:
+            wd(worktree_path)
         self.update_branch(mw)
 
         # 3. 刷新右侧工作台关键文档/工作树 UI
@@ -172,13 +145,13 @@ class WorktreeService:
         if mw._current_workdir.get(project) == main_repo:
             return
 
-        if mw.backend and mw.backend.memory_manager:
-            mm = mw.backend.memory_manager
-            mm.set_working_directory(project, main_repo)
+        pwd = _cap("project.workdir", mw)
+        if pwd is not None:
+            pwd["set_only"](project, main_repo)
+        wd = _cap("workdir.write", mw)
+        if wd is not None:
+            wd(main_repo)
 
-        mw._current_workdir[project] = main_repo
-        if mw.backend and mw.backend.tool_executor:
-            mw.backend.tool_executor.set_workdir(main_repo)
         self.update_branch(mw)
 
         try:
