@@ -33,6 +33,10 @@ class _FakeSettings:
         self.gitee_bound = _FakeConfigItem(bound)
         self.gitee_user_owner = _FakeConfigItem(owner)
         self.gitee_user_repo = _FakeConfigItem(repo)
+        # 浮动卡片构建需要读取的其它配置项（弹窗定位回归测试用）
+        self.ui_light_mode = _FakeConfigItem(True)
+        self.window_always_on_top = _FakeConfigItem(False)
+        self.current_version = "v0.0.0"
         self.load = MagicMock()
 
 
@@ -521,3 +525,38 @@ class TestAvatarPalette:
 
         c1, c2 = _avatar_palette(QColor("#808080"))
         assert c1.isValid() and c2.isValid()
+
+
+def test_popup_visible_edge_hugs_account_row(row_factory, qtbot):
+    """弹窗可见卡片底边紧贴账号行顶部（3px 呼吸）
+
+    回归：定位曾用 popup 外框高度，把底部阴影透明边距（scale_font_size(7)）也算进
+    视觉高度，可见间隙变成 3 + 边距（用户字号 delta=6 时 16px），看起来离分隔线很远。
+    """
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget
+
+    row, _, _ = row_factory()
+    host = QWidget()
+    qtbot.addWidget(host)
+    host.resize(600, 700)
+    layout = QVBoxLayout(host)
+    layout.addStretch(1)
+    layout.addWidget(row)
+    host.show()
+    QApplication.processEvents()
+
+    row._toggle_popup()
+    popup = row._popup
+    assert popup is not None
+
+    bottom_margin = popup.content_margins()[3]
+    # 可见卡片底边（不含）＝ 外框底边减去底部透明阴影留白
+    visible_bottom = popup.geometry().y() + popup.height() - bottom_margin
+    row_top = row.mapToGlobal(QPoint(0, 0)).y()
+    assert row_top - visible_bottom == 3
+
+    popup.close()
+    # row 先脱离宿主：否则 host 析构时连带删除 row 的 C++ 对象，
+    # qtbot 随后再删 row wrapper 会报 RuntimeError
+    row.setParent(None)
