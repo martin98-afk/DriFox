@@ -3710,7 +3710,13 @@ _SKELETON_CACHE_MAX = 48
 # summary 点击分支与 _toggleToolSection 展开、restoreCollapsibleStates 接入。
 # 不可见工具块 body 只留空占位（render_tool_block 的 lazy_body），旧骨架无注入
 # 函数 → 占位块展开后永久空白，必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 50
+# _SKELETON_CACHE_VERSION +1（v51）：块级补丁通道——新增 window.patchBlocks /
+# _blockNodes / _applyBlockMeta（app/widgets/render 的接线前置）。旧骨架缺
+# patchBlocks → 新渲染路径调用时 JS 报错、卡片停在流式形态，必须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v52）：patchBlocks 删除段接图表 dispose +
+# 折叠态恢复；新增 window._v2AfterPatch（v2 渲染通道收尾：运行框去重 /
+# 工具区显隐 / 内部滚底）。旧骨架无这些函数 → v2 收尾静默失效。
+_SKELETON_CACHE_VERSION = 52
 
 
 def _js_literal(value) -> str:

@@ -79,6 +79,13 @@ from app.utils.design_tokens import (
     scale_icon_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.render import (
+    BlockCache,
+    RenderCtx,
+    active_block_index,
+    diff_message,
+    render_message,
+)
 from app.widgets.render_crash_queue import RenderCrashQueue
 from app.widgets.card_render_core import (
     ACTION_COLOR_MAP,
@@ -162,6 +169,16 @@ _BODY_GEOM_READ_JS = (
     "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
     "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()"
 )
+
+
+def _render_v2_enabled() -> bool:
+    """block 级渲染通道开关（步骤 3 灰度）：环境变量 ``DRIFOX_RENDER_V2=1``。
+
+    开启后 ``CodeWebViewer`` 的 DOM 更新从「整页 innerHTML 替换 + 状态标志位」
+    切到「render_message → diff_message → patchBlocks 定点 splice」。渲染函数
+    调用时机每次读取，便于测试在进程内翻转开关。
+    """
+    return os.environ.get("DRIFOX_RENDER_V2", "").strip().lower() in ("1", "true", "yes")
 
 
 def _seg_has_protocol_block(seg: str) -> bool:
@@ -820,6 +837,14 @@ class CodeWebViewer(QWebEngineView):
         self._cached_streaming_html = None
         self._cached_raw_md_hash = 0  # hash(self._markdown_text) 在缓存时的快照，供 finish_streaming 验证缓存有效性
         self._lazy_markdown_cb = None  # 懒回调：渲染时才生成 markdown，避免高频 content_to_markdown
+        # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2=1 启用，步骤 3 灰度）──
+        # _v2_last：已落地 DOM 的上一次渲染结果（MessageRender）；None = DOM
+        # 状态未知，下次渲染必须先清容器再全量落地。BlockCache 按 viewer 独享，
+        # 禁止跨 viewer 共享（compact / lazy_body / 主题等 ctx 差异会污染）。
+        self._render_v2 = _render_v2_enabled()
+        self._block_cache = BlockCache()
+        self._v2_last = None
+        self._v2_ctx_sig = None
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
@@ -1472,6 +1497,10 @@ class CodeWebViewer(QWebEngineView):
         self._stable_md_len = 0
         self._needs_full_render = True
         self._tail_html_hash = 0
+        # [B5] v2 状态复位：缓存与落地基线随旧内容一起失效
+        self._v2_last = None
+        self._v2_ctx_sig = None
+        self._block_cache.clear()
         self._lazy_markdown_cb = None
         self._restore_finished_ids = None
         self._resize_locked = False
@@ -1934,6 +1963,9 @@ class CodeWebViewer(QWebEngineView):
             self._renderer_pid = 0
 
     def _load_skeleton(self):
+        # [B5] 骨架重载 = DOM 整体重建：v2 落地基线（_v2_last）失效，必须复位。
+        # 否则崩溃恢复 / 池化补载后 diff 判"无变化" → 不重灌内容 → 空白卡。
+        self._v2_last = None
         # 获取系统字体
         font_family = "Segoe UI, sans-serif"
         try:
@@ -2258,6 +2290,10 @@ class CodeWebViewer(QWebEngineView):
                 /* 优化：移除首尾元素的边距，彻底消除多余空白 */
                 #content-placeholder > :first-child {{ margin-top: 0 !important; }}
                 #content-placeholder > :last-child {{ margin-bottom: 0 !important; }}
+                /* v2：block wrapper 是直系子节点，真实内容块在其内层 —— 首末块
+                   margin 归零需穿透 wrapper（旧路径无 wrapper，不受影响） */
+                #content-placeholder > [data-block-wrapper]:first-child > :first-child {{ margin-top: 0 !important; }}
+                #content-placeholder > [data-block-wrapper]:last-child > :last-child {{ margin-bottom: 0 !important; }}
                 /* 解决 Chromium 滚动容器 padding-bottom 不生效的 bug */
                 #content-placeholder::after {{
                     content: '';
@@ -3606,6 +3642,19 @@ class CodeWebViewer(QWebEngineView):
                 #tool-content > .think-streaming:last-child {{
                     margin-bottom: 0;
                 }}
+                /* v2：block wrapper 是直系子节点，首末块 margin 归零需穿透 wrapper。
+                   入场动效规则**故意不**补 wrapper 版本：v2 活动块每批重建，
+                   补了会让工具/思考块在流式期间反复播动画（闪烁）。 */
+                #tool-content > [data-block-wrapper]:first-child .tool-block:first-child,
+                #tool-content > [data-block-wrapper]:first-child .think-block:first-child,
+                #tool-content > [data-block-wrapper]:first-child .think-streaming:first-child {{
+                    margin-top: 0;
+                }}
+                #tool-content > [data-block-wrapper]:last-child .tool-block:last-child,
+                #tool-content > [data-block-wrapper]:last-child .think-block:last-child,
+                #tool-content > [data-block-wrapper]:last-child .think-streaming:last-child {{
+                    margin-bottom: 0;
+                }}
                 {_STREAMING_DOCK_CSS}
             </style>
         </head>
@@ -4754,6 +4803,126 @@ class CodeWebViewer(QWebEngineView):
                         if (window.console) console.log('finalize-failed:' + e);
                     }}
                 }}
+                // ===== B5 块级补丁通道（新渲染管线专用，旧路径不调用） =====
+                // Python 侧把消息渲染成 BlockRender 列表，用前缀/后缀 diff 算出
+                // splice 指令，这里只做机械替换：从 base 起删 delete 个子节点，
+                // 再插入 items。节点一一对应，不做任何"稳定区猜测"。
+                //
+                // 节点契约（与 app/widgets/render/blocks.py 对应）：
+                //   data-block-index  该容器内的序号，splice 后按序重排
+                //   data-block-key    内容指纹；kind/home 变化时 key 不变但节点要重建
+                //   data-block-kind   text / reasoning / tool / image / custom
+                // 每个 block 包一层 <div data-block-*>，包装层是 patch 的锚点，
+                // 因此**不要**把 wrapper 的 display 改成 contents（会让子节点数量
+                // 与 block 数脱钩，splice 立即错位）。
+                function _applyBlockMeta(el, item, index) {{
+                    el.setAttribute('data-block-index', String(index));
+                    el.setAttribute('data-block-key', item.key || '');
+                    el.setAttribute('data-block-kind', item.kind || '');
+                }}
+                window._blockNodes = function (container) {{
+                    // 只认包装层：其它节点（流式占位 / 骨架 / 增量文本）不参与 splice
+                    var out = [];
+                    var kids = container.children;
+                    for (var i = 0; i < kids.length; i++) {{
+                        if (kids[i].hasAttribute && kids[i].hasAttribute('data-block-key')) out.push(kids[i]);
+                    }}
+                    return out;
+                }};
+                window.patchBlocks = function (containerId, ops) {{
+                    var container = document.getElementById(containerId);
+                    if (!container || !ops) return;
+                    var nodes = window._blockNodes(container);
+                    var base = ops.base | 0;
+                    var del = ops.delete | 0;
+                    var items = ops.items || [];
+                    // 删除段：按已存在的 block 节点计（不是 children 下标）。
+                    // 删除前 dispose 块内 echarts 实例：节点移除后实例不可达，
+                    // ResizeObserver + canvas 常驻 → 流式长会话累积泄漏（OOM 白屏）。
+                    for (var i = 0; i < del; i++) {{
+                        var victim = nodes[base + i];
+                        if (victim && victim.parentNode) {{
+                            if (victim.querySelectorAll && typeof window._disposeChartNode === 'function') {{
+                                var _olds = victim.querySelectorAll('.echarts-container');
+                                for (var oi = 0; oi < _olds.length; oi++) window._disposeChartNode(_olds[oi]);
+                            }}
+                            victim.parentNode.removeChild(victim);
+                        }}
+                    }}
+                    // 插入段：插在 base 位置原有节点之前；base 越界则追加到末尾
+                    var anchor = nodes[base + del] || null;
+                    var frag = document.createDocumentFragment();
+                    var made = [];
+                    for (var j = 0; j < items.length; j++) {{
+                        var item = items[j];
+                        var wrap = document.createElement('div');
+                        wrap.setAttribute('data-block-wrapper', '1');
+                        wrap.innerHTML = item.html || '';
+                        _applyBlockMeta(wrap, item, base + j);
+                        frag.appendChild(wrap);
+                        made.push(wrap);
+                    }}
+                    if (anchor && anchor.parentNode === container) {{
+                        container.insertBefore(frag, anchor);
+                    }} else {{
+                        container.appendChild(frag);
+                    }}
+                    // 序号重排：删除+插入后整体按 DOM 顺序重编 data-block-index
+                    var all = window._blockNodes(container);
+                    for (var k = 0; k < all.length; k++) {{
+                        all[k].setAttribute('data-block-index', String(k));
+                    }}
+                    // 新节点的后处理：表格包裹 / 图表初始化 / 公式 / 工具块栏 / 折叠态恢复
+                    if (made.length && typeof window._wrapTablesIn === 'function') window._wrapTablesIn(made);
+                    if (made.length && typeof window._initEchartsIn === 'function') window._initEchartsIn(made);
+                    if (made.length && typeof renderMermaidBlocks === 'function') renderMermaidBlocks(made);
+                    if (made.length && typeof renderKatexBlocks === 'function') renderKatexBlocks(made);
+                    if (made.length && typeof renderWidgetToolbars === 'function') renderWidgetToolbars(made);
+                    if (made.length && typeof window._runFenceAssets === 'function') window._runFenceAssets(made);
+                    if (made.length && typeof window._initWidgets === 'function') window._initWidgets(made);
+                    if (made.length && typeof restoreCollapsibleStates === 'function') restoreCollapsibleStates(made);
+                    if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 30);
+                }};
+                // ===== B5.1 v2 收尾（block 级渲染通道专用，旧路径不调用） =====
+                // Python 侧 _perform_update_v2 每次 patch 后调用：
+                // 1) 流式运行框去重：MessageCard 的 JS 注入节点（data-tool-call-id，
+                //    无 data-block-key）在真实 tool_result 块落地后成为重复框，按 id 清除；
+                // 2) 工具区显隐 + 标题计数：v2 不跑 reorganizeContent，显隐由块数直接决定；
+                // 3) 流式期间工具区内部滚底（正文滚底仍由外部高度上报链负责）。
+                window._v2AfterPatch = function (streaming) {{
+                    try {{
+                        var _cids = ['content-placeholder', 'tool-content'];
+                        for (var ci = 0; ci < _cids.length; ci++) {{
+                            var c = document.getElementById(_cids[ci]);
+                            if (!c) continue;
+                            var kids = [];
+                            for (var i = 0; i < c.children.length; i++) kids.push(c.children[i]);
+                            var ids = {{}};
+                            for (var a = 0; a < kids.length; a++) {{
+                                var kb = kids[a];
+                                if (!(kb.hasAttribute && kb.hasAttribute('data-block-key'))) continue;
+                                var inner = kb.querySelector ? kb.querySelector('[data-tool-call-id]') : null;
+                                if (inner) ids[inner.getAttribute('data-tool-call-id')] = true;
+                            }}
+                            for (var b = 0; b < kids.length; b++) {{
+                                var k2 = kids[b];
+                                if (k2.hasAttribute && k2.hasAttribute('data-block-key')) continue;
+                                var tid = k2.getAttribute ? k2.getAttribute('data-tool-call-id') : null;
+                                if (tid && ids[tid] && k2.parentNode) k2.parentNode.removeChild(k2);
+                            }}
+                        }}
+                        var tc = document.getElementById('tool-content');
+                        var ts = document.getElementById('tool-section');
+                        if (tc && ts) {{
+                            ts.style.display = tc.children.length > 0 ? '' : 'none';
+                            if (tc.children.length > 0 && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
+                        }}
+                        if (streaming === true && typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
+                        if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 0);
+                    }} catch (e) {{
+                        if (window.console) console.log('v2-after-patch-failed:' + e);
+                    }}
+                }};
                 // ===== B1 差量渲染：未闭合尾部行内渲染（整体替换增量节点） =====
                 // 无空行分隔的长段落（`\\n\\n` 缺失）没有闭合段可差量渲染，
                 // 尾部长时间以纯文本显示 markdown 源码（**加粗**、`code`、[链接]）。
@@ -6158,6 +6327,11 @@ class CodeWebViewer(QWebEngineView):
         """
         if not self._is_js_ready or not self.page():
             return
+        if self._render_v2:
+            # v2：块级 patch 承担显示，纯文本注入会让 DOM 与 block 对齐漂移
+            # （patchBlocks 的 splice 只认 data-block-key 节点，增量裸文本会
+            # 夹在中间且永不清理）。
+            return
         # [PERF] 不可见期间跳过 DOM 注入。resize preview / 对话框穿透防护 / 切 tab
         # 隐藏期间，viewer 已被 MessageCard.hide() 或 WA_TranslucentBackground
         # 守卫关掉，但 runJavaScript 仍会执行 → Chromium 持续累积 DOM 节点 →
@@ -6516,6 +6690,27 @@ class CodeWebViewer(QWebEngineView):
                 self._render_deferred = True
                 return
 
+            # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2）：接管 DOM 更新 ──
+            # 与旧路径互斥：v2 接管时 updateContent / 差量 / save-restore 全部
+            # 跳过。未接管（无块源）或异常时复位 v2 状态并回退旧全量路径
+            # （innerHTML 整页替换能清掉 v2 的 wrapper，DOM 状态自愈）。
+            if self._render_v2:
+                try:
+                    if self._perform_update_v2():
+                        return
+                except Exception:
+                    # 异常仅回退本轮（下一帧重试）；开关保持，避免暂时性错误
+                    # （渲染器中途异常）永久降级。innerHTML 整页替换清掉 v2
+                    # wrapper，DOM 状态自愈。
+                    logger.exception("[render-v2] 渲染失败，本轮回退旧全量路径")
+                    self._v2_last = None
+                    self._needs_full_render = True
+                else:
+                    # 未接管 = 无块源（欢迎 / 用户消息的纯文本卡）：永久关闭
+                    # v2 防每帧白试，并复位状态防 DOM 双写。
+                    self._render_v2 = False
+                    self._v2_last = None
+
             # [T33] 坞态先于内容：本轮流式的首个 chunk 若先于 _sync_streaming_dock
             # 的 IPC 落地，正文会先按自然高度排版（坞态 600px 限高未生效），
             # 坞态到达后再被压回 → 起步瞬间"卡片先胀很大再缩回"。
@@ -6823,6 +7018,152 @@ class CodeWebViewer(QWebEngineView):
 
         except RuntimeError:
             pass
+
+    # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2）─────────────────────────
+
+    def _v2_blocks(self) -> Optional[List[Dict[str, Any]]]:
+        """v2 渲染数据源：父级 MessageCard 的 ``_content_data``（标准块列表）。
+
+        viewer 自身只持有 markdown 串（旧机制书账：``get_plain_text`` / 工具
+        body 反查 / 导出仍依赖），块级渲染的真源是卡片的内容块列表。向上找到
+        第一个带 ``_content_data`` 的祖先；非块列表（str：用户 / 欢迎消息）返回
+        None → 本轮回退旧路径。
+        """
+        p = self.parent()
+        while p is not None:
+            data = getattr(p, "_content_data", None)
+            if data is not None:
+                if isinstance(data, list) and data and all(isinstance(b, dict) for b in data):
+                    return data
+                return None
+            parent_fn = getattr(p, "parent", None)
+            p = parent_fn() if callable(parent_fn) else None
+        return None
+
+    def _v2_render_ctx(self) -> RenderCtx:
+        """按 viewer 当前状态构造渲染上下文（含主题 / 字号全局刷新）。"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            from app.widgets.render_helpers import set_diff_highlight_style
+
+            style = "friendly" if theme_manager.is_light_theme() else "dracula"
+            set_pygments_style(style)
+            set_diff_highlight_style(style)
+        except Exception:
+            style = "dracula"
+        _update_icon_prefix()
+        global _CODE_FONT_SIZE
+        _CODE_FONT_SIZE = scale_font_size(13)
+        return RenderCtx(
+            streaming=self._streaming,
+            compact=self._tool_compact_mode,
+            lazy_body=self._tool_lazy_body,
+            heavy_caps=_HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
+            tool_fingerprints=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
+            pygments_style=style,
+            icon_prefix=current_icon_prefix(),
+            code_font_size=_CODE_FONT_SIZE,
+        )
+
+    def _perform_update_v2(self) -> bool:
+        """block 级渲染：``render_message`` → ``diff_message`` → ``patchBlocks``。
+
+        同步渲染（不走线程池）：块级缓存下每批只重渲活动块，p50 0.5ms /
+        p99 9.5ms，线程池往返（seq 校验 + 信号投递）反而是主要开销。
+
+        Returns:
+            True = DOM 更新已接管（含空 diff）；False = 无块源，调用方回退旧路径。
+        """
+        if not self._is_js_ready or not self.isVisible():
+            self._render_deferred = True
+            return True
+        # [T33] 坞态先于内容（与旧路径同语义，幂等）
+        if self._streaming and not self._light_skeleton and not self._dock_sync_requested:
+            self._sync_streaming_dock(True)
+        # 懒回调照常消费：_markdown_text 是 get_plain_text / 工具 body 反查 /
+        # 导出的书账，v2 只替换 DOM 更新机制，不动文本维护。
+        if self._lazy_markdown_cb:
+            try:
+                self._markdown_text = self._lazy_markdown_cb()
+            except Exception:
+                pass
+            self._lazy_markdown_cb = None
+        elif not self._markdown_text:
+            # finish 后 cleanup 已清 _markdown_text 且无懒回调：无内容可渲
+            self._final_render_pending = False
+            return True
+
+        blocks = self._v2_blocks()
+        if not blocks:
+            return False
+
+        ctx = self._v2_render_ctx()
+        # 不在 block key 里的 ctx 维度（lazy_body / heavy_caps / 主题 / suppress
+        # 数量）变化时：已落地 DOM 是旧 ctx 产物，必须清缓存 + 全量重落地。
+        sig = (
+            ctx.compact,
+            ctx.lazy_body,
+            ctx.heavy_caps,
+            ctx.pygments_style,
+            ctx.icon_prefix,
+            ctx.code_font_size,
+            len(ctx.tool_fingerprints),
+        )
+        if sig != self._v2_ctx_sig:
+            self._v2_ctx_sig = sig
+            self._block_cache.clear()
+            self._v2_last = None
+        # 内容整体替换 / 主题 / 字体等旧信号同样触发全量重落地
+        force_full = self._needs_full_render or self._v2_last is None
+        self._needs_full_render = False
+        self._final_render_pending = False
+
+        active = active_block_index(blocks, True) if self._streaming else None
+        mr = render_message(blocks, ctx, active_index=active, char_count=self._streaming, cache=self._block_cache)
+        content_ops, tool_ops = diff_message(None if force_full else self._v2_last, mr)
+        self._v2_last = mr
+        self._last_rendered_markdown = self._markdown_text
+        if content_ops.is_empty and tool_ops.is_empty:
+            return True
+
+        self._height_report_pending = True
+        self._mark_has_charts("".join(b.html for b in (*mr.content, *mr.tool)))
+
+        page = self.page()
+        if page is None:
+            return True
+        js: List[str] = []
+        if force_full:
+            # 全量落地前清两个容器：v2 首帧 / 内容整体替换 / ctx 切换时容器里
+            # 可能残留旧路径节点（无 data-block-key，splice 不认），不清会叠加。
+            # 清空即销毁全部 echarts 节点 → 先逐个 dispose（同 refresh_theme 语义）。
+            js.append(
+                "try{if(window.__chartVault&&window.__chartVault.size){"
+                "window.__chartVault.forEach(function(el){window._disposeChartNode(el);});"
+                "window.__chartVault.clear();}}"
+                "if(window.echarts&&typeof window._disposeChartNode==='function'){"
+                "document.querySelectorAll('.echarts-container').forEach(function(el){"
+                "window._disposeChartNode(el);el._chartStashed=false;});}}"
+                "}catch(e){}"
+                "var _c1=document.getElementById('content-placeholder');if(_c1)_c1.innerHTML='';"
+                "var _c2=document.getElementById('tool-content');if(_c2)_c2.innerHTML='';"
+            )
+        if not content_ops.is_empty:
+            js.append(
+                "window.patchBlocks('content-placeholder',"
+                + json.dumps(content_ops.to_payload()).decode("utf-8")
+                + ");"
+            )
+        if not tool_ops.is_empty:
+            js.append(
+                "window.patchBlocks('tool-content',"
+                + json.dumps(tool_ops.to_payload()).decode("utf-8")
+                + ");"
+            )
+        # v2 专属收尾：流式运行框去重 / 工具区显隐与 header / 工具区滚底
+        js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});")
+        page.runJavaScript("".join(js))
+        return True
 
     def _render_tail_inline(self):
         """把流式未闭合尾部整体行内渲染为 HTML，替换 DOM 增量纯文本节点。
