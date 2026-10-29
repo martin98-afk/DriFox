@@ -4143,6 +4143,11 @@ class MessageCard(SimpleCardWidget):
                 # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
                 # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
                 self.viewer._restore_finished_ids = self._finished_streaming_ids
+                # 历史卡折叠：池化复用实例保留骨架 → _on_js_ready 不会再次触发，
+                # 而 reset_for_reuse 已摘掉 data-collapsed（等价展开）→ 必须在
+                # 绑定后按本卡状态补一次。新建 viewer 时 JS 未就绪，此调用内部
+                # 直接返回，由 _on_js_ready 承担。幂等：只在未应用过时执行。
+                self.viewer._apply_history_collapsed()
             self._connect_viewer_signals()
 
             self._viewer_layout.addWidget(self.viewer)

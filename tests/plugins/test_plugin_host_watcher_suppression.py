@@ -185,8 +185,11 @@ class TestInstallerRemoveSuppression:
                 full.append(True)
 
         monkeypatch.setattr(PluginHostService, "get_instance", classmethod(lambda cls: _FakeSvc()))
-        # 测试无事件循环：QTimer.singleShot 改为立即执行
-        monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", staticmethod(lambda msec, fn: fn()))
+        # 测试无事件循环：主线程投递改为立即执行
+        monkeypatch.setattr(
+            "app.core.services.plugin_host_service.run_on_main_thread",
+            lambda fn, **kw: (fn(), True)[1],
+        )
 
         ok = installer.uninstall("some-plug")
         assert ok is True
@@ -210,7 +213,10 @@ class TestInstallerRemoveSuppression:
                 targeted.append((name, action))
 
         monkeypatch.setattr(PluginHostService, "get_instance", classmethod(lambda cls: _FakeSvc()))
-        monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", staticmethod(lambda msec, fn: fn()))
+        monkeypatch.setattr(
+            "app.core.services.plugin_host_service.run_on_main_thread",
+            lambda fn, **kw: (fn(), True)[1],
+        )
 
         ok = installer.uninstall("ghost-plug")
         assert ok is True

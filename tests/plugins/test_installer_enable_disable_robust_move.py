@@ -195,8 +195,11 @@ def test_disable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
     monkeypatch.setattr(
         PluginHostService, "get_instance", classmethod(lambda cls: _FakeInst())
     )
-    # 测试无事件循环：QTimer.singleShot 改为立即执行
-    monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", staticmethod(lambda msec, fn: fn()))
+    # 测试无事件循环：主线程投递改为立即执行
+    monkeypatch.setattr(
+        "app.core.services.plugin_host_service.run_on_main_thread",
+        lambda fn, **kw: (fn(), True)[1],
+    )
 
     ok = installer.disable("gateway-feishu")
     assert ok is True
@@ -231,7 +234,10 @@ def test_enable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
     monkeypatch.setattr(
         PluginHostService, "get_instance", classmethod(lambda cls: _FakeInst())
     )
-    monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", staticmethod(lambda msec, fn: fn()))
+    monkeypatch.setattr(
+        "app.core.services.plugin_host_service.run_on_main_thread",
+        lambda fn, **kw: (fn(), True)[1],
+    )
 
     ok = installer.enable("gateway-feishu")
     assert ok is True

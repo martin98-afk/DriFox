@@ -19,7 +19,7 @@ PluginHostService — 应用级插件宿主服务（一个应用一个实例）
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
@@ -75,6 +75,61 @@ def resume_plugin_watcher() -> None:
     except Exception as e:  # pragma: no cover - 防御极端 import 时序
         logger.debug(f"[PluginHost] resume_plugin_watcher 失败（不影响调用方）: {e}")
 
+
+def run_on_main_thread(fn: Callable[[], Any], wait: bool = False, timeout: float = 5.0) -> bool:
+    """在 Qt 主线程执行 fn（跨线程安全，纯 threading 线程可用）
+
+    纯 ``threading.Thread`` 没有 Qt 事件循环：``QTimer.singleShot`` 在这种
+    线程里既不抛异常也不触发，投递静默丢失。实测 2026-10-29：市场自动更新
+    在 ``threading.Thread`` 里跑，installer 用 ``QTimer.singleShot(0, reload)``
+    投递重载 → 从未执行 → 插件目录已被替换且 sys.modules 已 purge，旧 UI 注册
+    仍指向旧模块，点击页脚按钮报 ``No module named 'ui_plugin_voice_reply'``。
+    本函数走 QObject 信号桥（``post_to_main``），跨线程 emit 由 Qt 排队到主线程
+    事件循环，不依赖调用线程自身有无循环。
+
+    Args:
+        fn: 待执行回调
+        wait: True 阻塞当前线程直到主线程执行完（或超时）
+        timeout: wait=True 时的最长等待秒数
+
+    Returns:
+        True 表示已执行或已投递；False 表示投递桥不可用（无 QApplication /
+        桥未预热）或等待超时，调用方需自行降级。
+    """
+    from PyQt5.QtCore import QThread
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None or QThread.currentThread() is app.thread():
+        fn()
+        return True
+
+    # 回调异常必须在此吞掉：信号槽里的未捕获异常会走 excepthook（PyQt5 默认
+    # 打印后 abort），不能让一个插件重载错误带走整个进程。
+    box: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def _safe() -> None:
+        try:
+            box["result"] = fn()
+        except Exception as e:  # noqa: BLE001 - 异常留待调用线程按需回抛
+            box["error"] = e
+            logger.warning(f"[PluginHost] 主线程投递的回调异常: {e}")
+        finally:
+            done.set()
+
+    from app.utils.info_bar_guard import post_to_main
+
+    if not post_to_main(_safe):
+        return False
+    if not wait:
+        return True
+    if not done.wait(timeout):
+        logger.warning(f"[PluginHost] 主线程投递超时（{timeout}s），已放弃等待")
+        return False
+    if "error" in box:
+        raise box["error"]
+    return True
 
 class PluginHostService(QObject):
     """插件宿主服务（应用级单例，主线程创建）"""

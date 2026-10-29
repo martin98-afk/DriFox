@@ -1157,17 +1157,19 @@ class PluginInstaller:
         if not reload:
             return
         try:
-            from app.core.services.plugin_host_service import PluginHostService
+            from app.core.services.plugin_host_service import PluginHostService, run_on_main_thread
 
             svc = PluginHostService.get_instance()
-            # 尽量在主线程执行重载（与 backend watcher 的 _hot_reload_requested 信号同效）；
-            # 失败则直接调用，异常被吞掉不影响安装结果
-            try:
-                from PyQt5.QtCore import QTimer
-
-                QTimer.singleShot(0, lambda: svc.reload_plugin_targeted(plugin_name, action=action))
-            except Exception:
-                svc.reload_plugin_targeted(plugin_name, action=action)
+            # 必须在主线程执行重载（会操作 QWidget / 卡片注册表）。
+            # 不能用 QTimer.singleShot：自动更新跑在纯 threading.Thread 里，
+            # 没有 Qt 事件循环，singleShot 既不抛也不触发，投递静默丢失
+            # （2026-10-29 实测：voice-reply 自动更新后 UI 从未重载）。
+            if not run_on_main_thread(
+                lambda: svc.reload_plugin_targeted(plugin_name, action=action)
+            ):
+                logger.warning(
+                    f"[Installer] 主线程投递重载失败({plugin_name})，插件 UI 需重启或重新启停后恢复"
+                )
         except Exception as e:
             logger.warning(f"[Installer] 触发插件重载失败（不影响安装）: {e}")
 

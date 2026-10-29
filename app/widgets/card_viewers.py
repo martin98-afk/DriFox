@@ -827,6 +827,11 @@ class CodeWebViewer(QWebEngineView):
         self._markdown_text = ""
         self._streaming = True
         self._is_history = False  # 历史会话标志（非流式加载的历史消息）
+        # 历史卡工具区折叠是否已应用于当前骨架 DOM。幂等标记（与
+        # _dock_sync_requested 同构）：池化复用不重载骨架 → _on_js_ready 不再
+        # 触发，折叠必须在卡片绑定后补一次（见 MessageCard.ensure_rendered）；
+        # 置位后本 viewer 生命周期内不再重复折叠（用户手动展开不被覆盖）。
+        self._history_collapse_applied = False
         self._is_js_ready = False
         # [T33] 本轮流式的坞态是否已发起过同步（False = 尚未发起，首次渲染前必须补发）。
         # 作用：坞态是 runJavaScript 异步生效的，若内容渲染早于它落地，正文会先按
@@ -1507,6 +1512,9 @@ class CodeWebViewer(QWebEngineView):
             pass
         self._streaming = False
         self._is_history = False
+        # 复用方可能是本轮对话（不折叠）或历史卡（折叠）：折叠必须在卡片
+        # 绑定后按新卡片状态重新应用一次（见 _apply_history_collapsed）。
+        self._history_collapse_applied = False
         # [T33] 坞态同步确认随卡片状态复位（新卡片新一轮流式的首次渲染需重新补发）
         self._dock_sync_requested = False
         self._stable_html = ""
@@ -1940,14 +1948,7 @@ class CodeWebViewer(QWebEngineView):
         self.sync_body_max_height(force=True)
         try:
             # 历史会话：先折叠工具区（设置 data-collapsed="true"，dock sync 需要读取此值）
-            if getattr(self, "_is_history", False):
-                self.page().runJavaScript(
-                    "var _ts=document.getElementById('tool-section');"
-                    "var _sep=document.getElementById('tool-separator');"
-                    "if(_ts){if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
-                    "_ts.setAttribute('data-collapsed','true');}"
-                    "if(_sep)_sep.setAttribute('aria-expanded','false');"
-                )
+            self._apply_history_collapsed()
             # 坞态同步：判定用 Python 端真值 _streaming，弃用旧「未折叠 → 开坞」推导。
             # 🐛 旧 `_setStreamingDock(!!_act||!_co)` 在已结束卡片重建（新骨架 DOM 无
             # data-collapsed 属性 → _co=false）时误开坞态 → 正文限矮、工具区沉底，
@@ -1983,6 +1984,9 @@ class CodeWebViewer(QWebEngineView):
         # [B5] 骨架重载 = DOM 整体重建：v2 落地基线（_v2_last）失效，必须复位。
         # 否则崩溃恢复 / 池化补载后 diff 判"无变化" → 不重灌内容 → 空白卡。
         self._v2_last = None
+        # 同理：骨架重建后 data-collapsed 回到初始值，折叠标记必须失效，
+        # 否则崩溃自愈 / 池化补载后的历史卡不会重新折叠。
+        self._history_collapse_applied = False
         self._v2_reset_live()
         # 获取系统字体
         font_family = "Segoe UI, sans-serif"
@@ -4848,11 +4852,13 @@ class CodeWebViewer(QWebEngineView):
                     el.setAttribute('data-block-kind', item.kind || '');
                 }}
                 window._blockNodes = function (container) {{
-                    // 只认包装层：其它节点（流式占位 / 骨架 / 增量文本）不参与 splice
+                    // 只认包装层：其它节点（流式占位 / 骨架 / 增量文本 /
+                    // JS 注入的工具完成框——它也带 data-block-key，但 key 是
+                    // render_tool_block 内层指纹，与 patch 的 key 不同尺度）不参与 splice。
                     var out = [];
                     var kids = container.children;
                     for (var i = 0; i < kids.length; i++) {{
-                        if (kids[i].hasAttribute && kids[i].hasAttribute('data-block-key')) out.push(kids[i]);
+                        if (kids[i].hasAttribute && kids[i].hasAttribute('data-block-wrapper')) out.push(kids[i]);
                     }}
                     return out;
                 }};
@@ -4959,13 +4965,27 @@ class CodeWebViewer(QWebEngineView):
                             var ids = {{}};
                             for (var a = 0; a < kids.length; a++) {{
                                 var kb = kids[a];
-                                if (!(kb.hasAttribute && kb.hasAttribute('data-block-key'))) continue;
-                                var inner = kb.querySelector ? kb.querySelector('[data-tool-call-id]') : null;
-                                if (inner) ids[inner.getAttribute('data-tool-call-id')] = true;
+                                // 【只认包装层】正式块是 <div data-block-wrapper>（patchBlocks
+                                // 产物）；JS 注入的完成框也带 data-block-key（render_tool_block
+                                // 内层指纹 tool-xxxx）——按 key 判定会把注入块误当正式块 → 下方
+                                // 删除段跳过它 → 流式结束后编辑类工具完成框沉底残留。
+                                if (!(kb.hasAttribute && kb.hasAttribute('data-block-wrapper'))) continue;
+                                // 正式块自身/后代都可能有 data-tool-call-id（render_tool_block
+                                // 写在外层 div 上）；querySelector 不含自身，两者都要登记。
+                                var _selfTid = kb.getAttribute ? kb.getAttribute('data-tool-call-id') : null;
+                                if (_selfTid) ids[_selfTid] = true;
+                                if (kb.querySelectorAll) {{
+                                    var _inners = kb.querySelectorAll('[data-tool-call-id]');
+                                    for (var _ii = 0; _ii < _inners.length; _ii++) {{
+                                        var _it = _inners[_ii].getAttribute
+                                            ? _inners[_ii].getAttribute('data-tool-call-id') : null;
+                                        if (_it) ids[_it] = true;
+                                    }}
+                                }}
                             }}
                             for (var b = 0; b < kids.length; b++) {{
                                 var k2 = kids[b];
-                                if (k2.hasAttribute && k2.hasAttribute('data-block-key')) continue;
+                                if (k2.hasAttribute && k2.hasAttribute('data-block-wrapper')) continue;
                                 var tid = k2.getAttribute ? k2.getAttribute('data-tool-call-id') : null;
                                 if (tid && ids[tid] && k2.parentNode) k2.parentNode.removeChild(k2);
                             }}
@@ -8234,6 +8254,39 @@ class CodeWebViewer(QWebEngineView):
         # 标题栏）。坞态归位 + 折叠由 MessageCard.finish_streaming 统一触发
         # （需 Python 端 _streaming/_has_active_tools 判据，viewer 侧无此状态，
         # 故不在此处调用）；非简洁模式保持流式结束后的展开态不变。
+
+    def _apply_history_collapsed(self):
+        """历史卡工具区折叠（幂等）。
+
+        两个触发点必须共用本方法：
+          1. ``_on_js_ready``：卡片新建（骨架首次就绪）；
+          2. ``MessageCard.ensure_rendered``：viewer 绑定到卡片后（池化复用
+             不重载骨架 → 上面那条永不触发，折叠会整体丢失 → 历史卡工具与
+             思考区默认展开）。
+
+        ``_history_collapse_applied`` 保证一个 viewer 生命周期内只折叠一次：
+        用户手动展开过历史卡工具区后，后续重渲染/重排不得把它折回去。
+        """
+        if not getattr(self, "_is_history", False):
+            return
+        if getattr(self, "_history_collapse_applied", False):
+            return
+        if not self._is_js_ready:
+            return
+        try:
+            page = self.page()
+            if page is None:
+                return
+            page.runJavaScript(
+                "var _ts=document.getElementById('tool-section');"
+                "var _sep=document.getElementById('tool-separator');"
+                "if(_ts){if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
+                "_ts.setAttribute('data-collapsed','true');}"
+                "if(_sep)_sep.setAttribute('aria-expanded','false');"
+            )
+            self._history_collapse_applied = True
+        except RuntimeError:
+            pass
 
     def _auto_collapse_tool_section(self):
         """流式结束时自动折叠工具与思考区（仅简洁模式）

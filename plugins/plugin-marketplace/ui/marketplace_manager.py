@@ -693,6 +693,29 @@ def get_auto_update_enabled() -> bool:
         return False
 
 
+def _unload_plugin_ui_on_main(name: str) -> None:
+    """自动更新前在主线程卸载插件 UI（同步等待完成）
+
+    手动更新路径由 ``MarketplaceCard._async_update`` 在主线程先卸载；自动更新
+    跑在 ``threading.Thread`` 里，没有这一步。不卸载的后果：installer 替换目录
+    前会 purge ``ui_plugin_<name>`` 模块，但注册表旧条目（页脚按钮/浮动卡/渲染器）
+    仍持有旧模块闭包 → 点击回调时相对导入按模块名查已摘除的包 → 
+    ``No module named 'ui_plugin_xxx'``（2026-10-29 实测）。
+
+    超时/无 GUI 环境只记日志，不阻断更新（宁可报错也不让更新失败）。
+    """
+    try:
+        from app.core.services.plugin_host_service import run_on_main_thread
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        run_on_main_thread(
+            lambda: UIPluginRegistry.get_instance().unload_plugin(name),
+            wait=True,
+            timeout=10.0,
+        )
+    except Exception as e:  # noqa: BLE001 - 卸载失败不能阻断更新
+        logger.debug(f"[Marketplace] 自动更新前卸载 UI({name}) 失败（忽略）: {e}")
+
 def run_auto_update_check(progress=None, execute: bool = True) -> Dict[str, Any]:
     """后台检查插件更新（纯逻辑，供 worker 线程调用）
 
@@ -744,6 +767,7 @@ def run_auto_update_check(progress=None, execute: bool = True) -> Dict[str, Any]
         for i, (meta, remote) in enumerate(pending, 1):
             name = meta.get("name", "?")
             _report("update", f"({i}/{len(pending)}) {name} → v{remote}")
+            _unload_plugin_ui_on_main(name)
             try:
                 ok = inst.update(meta)
                 (updated if ok else failed).extend(
