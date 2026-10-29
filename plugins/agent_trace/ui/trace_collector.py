@@ -103,26 +103,22 @@ class TraceCollector(QObject):
 
     @staticmethod
     def _self_pool(main_widget: Any):
-        """未拿到 ctx 能力池时按插件名自建（仍走能力池，不绕过）。
+        """未拿到 ctx 能力池时按插件名取池（仍走统一入口，不绕过声明裁剪）。
 
         生产路径由主程序注入 ctx["capabilities"]；这里是给"窗口已在但 ctx 还没到"
         与测试直调 attach 的场景兜底。构建失败返回 None = 不订阅。
+
+        用 ``pool_for`` 而不是手写 ``build_pool``：后者要插件自己拼 ``declared``，
+        等于自己给自己发权限（本插件曾漏声明 ui.events，声明形同虚设）。
         """
         if main_widget is None:
             return None
         try:
-            from app.plugins.capabilities.bootstrap import ensure_registered
-            from app.plugins.capabilities.registry import CapabilityRegistry
+            from app.plugins.sdk import pool_for
 
-            ensure_registered("ui")
-            return CapabilityRegistry.get_instance().build_pool(
-                surface="ui",
-                host=main_widget,
-                plugin="agent_trace",
-                declared={"stream.subscribe", "window.list"},
-            )
+            return pool_for("agent_trace", surface="ui", host=main_widget)
         except Exception as e:
-            logger.warning(f"[agent_trace] 自建能力池失败: {e}")
+            logger.warning(f"[agent_trace] 取能力池失败: {e}")
             return None
 
     def attach(self, backend: Any, main_widget: Any, capabilities: Any = None) -> None:

@@ -212,8 +212,14 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 |---|---|---|
 | `project.read` | low | 当前项目名 + 项目清单 + 元数据（会话数 / 工作目录数）+ 根目录映射 |
 | `project.write` | **high** | 切换 / 新建 / 提交 / 归档 / 导入导出 / 打开文件夹 / 拖拽建项目（含团队广播与 Tab 图标联动） |
+| `project.workdir` | medium | **写库式**切换项目工作目录（关键文档登记 + 工作目录持久化 + 根目录标记恢复） |
 
 > `project.write.switch` 内含「切项目 + 同步工作目录 + 新建会话 + 团队广播 + 收起面板」，插件不需要知道其中任何一步。要单独新建会话（不切项目）用 `session.manage.new()`。
+
+> `workdir.write` 与 `project.workdir` 不是一回事：前者只改会话内状态（实例缓存 +
+> tool_executor + 团队广播 + UI 同步），进程重启即失效；后者把改动落进记忆库
+> （关键文档登记 + 工作目录持久化 + 根目录标记恢复）。worktree 切换两者都要调：
+> 先 `project.workdir["switch"](project, path)` 再 `workdir.write(path)`。
 
 ### 外观
 

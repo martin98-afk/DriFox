@@ -60,7 +60,7 @@ def test_legacy_map_targets_exist():
 
 
 def test_legacy_map_covers_engine_host_keys():
-    """EngineHost 契约的 20 个服务键全部有旧键映射（P3 投影的前提）。"""
+    """EngineHost 契约的服务键全部有旧键映射（P3 投影的前提）。"""
     from app.plugins.capabilities import catalog
 
     expected = {
@@ -72,7 +72,6 @@ def test_legacy_map_covers_engine_host_keys():
         "get_tools_schema",
         "set_workdir",
         "get_workdir",
-        "get_compactor",
         "conversation_stack",
         "create_engine_session",
         "save_messages_to_session",

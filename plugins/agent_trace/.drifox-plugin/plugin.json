@@ -17,6 +17,7 @@
         "model.schema",
         "session.read",
         "stream.subscribe",
+        "ui.events",
         "window.list"
     ],
     "components": {

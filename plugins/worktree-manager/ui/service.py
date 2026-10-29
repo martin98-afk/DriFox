@@ -24,6 +24,26 @@ def _caps(cap_id):
     return caps_for(cap_id)
 
 
+def _cap(cap_id, host):
+    """取某能力并**绑定到指定窗口**。
+
+    与 ``_caps`` 的分界：``caps_for`` 用的是「插件最近交互过的窗口」，而
+    service 的方法都带 ``mw`` 参数（宿主门面传入的具体窗口）；多窗口下二者
+    可能不是同一个，写错窗口会出现「切了 A 窗口的工作目录，界面没反应」。
+    """
+    try:
+        from app.plugins.sdk import pool_for
+
+        pool = pool_for("worktree-manager", surface="ui", host=host)
+        if pool is None or cap_id not in pool:
+            logger.warning(f"[WorktreeService] 能力 {cap_id} 不可用")
+            return None
+        return pool[cap_id]
+    except Exception as e:
+        logger.warning(f"[WorktreeService] 取能力 {cap_id} 失败: {e}")
+        return None
+
+
 class WorktreeService:
     """工作树服务（插件注册到 UIPluginRegistry；无 Qt 对象成员，可安全单例）"""
 
@@ -118,8 +138,7 @@ class WorktreeService:
             pass
 
         logger.info(f"[WorktreeService] 已自动切换到 worktree: {worktree_path}（项目: {project}）")
-        # 团队模式：worktree 切换全员同步（统一工作树）
-        mw._broadcast_team_workdir(worktree_path)
+        # 团队广播已由 workdir.write 能力内部承担，此处不再重复调用
 
     def restore_main_repo(self, mw: Any) -> None:
         """从 worktree 切换回主仓库，幂等——已不在 worktree 中则跳过。
@@ -162,8 +181,7 @@ class WorktreeService:
             pass
 
         logger.info(f"[WorktreeService] 已自动切换回主仓库: {main_repo}（项目: {project}）")
-        # 团队模式：切回主仓库全员同步（统一工作树）
-        mw._broadcast_team_workdir(main_repo)
+        # 团队广播已由 workdir.write 能力内部承担，此处不再重复调用
 
     # ── 分支标签 ──
 

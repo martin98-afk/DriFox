@@ -158,6 +158,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `subagent.run` | 派生子智能体 | tool |
 | `workdir.read` / `workdir.write` | 工作目录读 / 切换 | ui（read 含 tool） |
 | `project.read` / `project.write` | 项目读（当前/清单/元数据/根目录）/ 写（切换·新建·归档·导入导出·拖拽） | ui |
+| `project.workdir` | **写库式**切换项目工作目录（关键文档登记 + 持久化 + 根目录标记恢复）；与 `workdir.write`（会话内）互补 | ui |
 | `theme.read` | 主题 id/名称/配色/字体/字号 | ui |
 | `tool.read` / `tool.execute` | 工具元信息 / 执行任意工具 | ui, tool |
 | `tool.inject` | 向 LLM 注入工具（改变模型可见行为） | **ui** |

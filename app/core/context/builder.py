@@ -223,8 +223,8 @@ class ContextBudgetAllocator:
                 pass  # 缓存写回失败不影响发送（session 可能为只读桩）
 
         # 过滤旧 system 消息（保留 _hook_event 标记的系统消息，它们是由 hook 注入的动态上下文；
-        # 同时保留 _compaction_summary 标记的压缩摘要，它是合法上下文，不应被当作"旧 system 消息"丢弃，
-        # 否则压缩后的历史摘要会整体丢失，见 history_compactor.py issue #225 修复）
+        # 同时保留 _compaction_summary 标记的历史压缩摘要：老会话的持久化数据里仍有这类消息，
+        # 它是合法上下文，不应被当作"旧 system 消息"丢弃，否则摘要会整体丢失（issue #225））
         filtered_history = [
             m
             for m in history_for_api
