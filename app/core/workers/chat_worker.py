@@ -632,8 +632,10 @@ class OpenAIChatWorker(QThread):
         """消费 backend 队列中的 PostToolUse 等 hook 消息并注入到 API 缓存。
 
         在每次 _make_api_call 前调用，确保 LLM 能感知 hook 输出。
-        队列中只有 tool_executor 触发的事件（PostToolUse/prompt），预对话事件
-        已由 engine.py 直接注入 session.messages，不经过队列。
+        队列中有 tool_executor 触发的事件（PostToolUse/prompt）与用户插话
+        （_interject）；预对话事件正常发送时由 engine.py 直接注入 session.messages
+        不经过队列，插话则在消费时由 _trigger_interject_user_hooks 补触发用户消息
+        hook 链（UserPromptSubmit/PreUserMessage/PostUserMessage）。
         不做去重——每条 PostToolUse 对应一次独立的工具调用，都应保留。
 
         同时主动检查 TeamManager 中的待处理团队邮件并注入（include_team_mail=True）。
@@ -665,15 +667,25 @@ class OpenAIChatWorker(QThread):
                 except queue.Empty:
                     break
 
-            # ── 用户插话（繁忙时插话发送）：剥离传输键，统计条数通知 UI 开新回复卡 ──
+            # ── 用户插话（繁忙时插话发送）：剥离传输键 + 补触发用户消息 hook 链 ──
             # 传输键仅用于进程内识别（UI 切卡 / 取消回收），注入前必须剥净，
-            # 落库后是干净 user 消息；hook 流程照常触发，无特判。
+            # 落库后是干净 user 消息。
+            # 插话经 _hook_message_queue 直通车绕过了正常发送的 PreSendWorker
+            # hook 链（UserPromptSubmit/PreUserMessage/PostUserMessage），长期记忆/
+            # 系统时间/关键文档注入与正则匹配 hook 对插话全部失效；此处对每条插话
+            # 补触发：hook 输出注入插话消息之前（对齐正常路径顺序），
+            # PostUserMessage 仅感知不注入。
             interject_count = 0
+            injected: List[Dict] = []
             for m in msgs:
-                if m.pop("_interject", None) is True:
-                    interject_count += 1
+                is_interject = m.pop("_interject", None) is True
                 m.pop("_interject_text", None)
                 m.pop("_interject_image_paths", None)
+                if is_interject:
+                    interject_count += 1
+                    injected.extend(self._trigger_interject_user_hooks(m))
+                else:
+                    injected.append(m)
             if interject_count:
                 logger.info(
                     f"[Interject] 消费插话 {interject_count} 条 session={str(self.session_id)[:8]} "
@@ -682,12 +694,12 @@ class OpenAIChatWorker(QThread):
                 # 信号先于本轮 _make_api_call 的流式 chunk（queued 保序）→ UI 新卡先建好
                 self._emit_with_callback("queued_user_injected", self.queued_user_injected, interject_count)
 
-            if msgs:
-                self._append_to_api_cache(msgs)
-                self._current_session_messages.extend(msgs)
+            if injected:
+                self._append_to_api_cache(injected)
+                self._current_session_messages.extend(injected)
                 if session_messages_target is not None:
-                    session_messages_target.extend(msgs)
-                logger.debug(f"[HookManager] Injected {len(msgs)} hook msgs from queue")
+                    session_messages_target.extend(injected)
+                logger.debug(f"[HookManager] Injected {len(injected)} hook msgs from queue")
 
             # 🆕 主动检查团队待处理邮件（不依赖 QFileSystemWatcher）
             if not include_team_mail:
@@ -724,6 +736,102 @@ class OpenAIChatWorker(QThread):
                     logger.info(f"[TeamMail] Worker 注入团队邮件: #{mail['id']} from [{sender_id}]")
         except Exception as e:
             logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
+
+    def _trigger_interject_user_hooks(self, msg: Dict) -> List[Dict]:
+        """插话消息消费时补触发用户消息 hook 链，返回最终注入的消息列表
+
+        对齐正常发送路径（engine.py PreSendWorker）：UserPromptSubmit →
+        PreUserMessage 的 add_to_context 输出作为 hook 消息注入在插话 user
+        消息之前，PostUserMessage 仅感知事件（输出不注入，与正常路径语义
+        一致）。异常兜底：hook 链失败时退化为直接注入插话消息，不影响消费
+        主流程；skip_finished_callback=True 对齐 _trigger_worker_hook（输出
+        由返回值收集注入，不走 on_hook_finished 队列通道防重复投递）。
+        """
+        import os
+
+        from app.core.conversation.backend import _make_hook_message
+        from app.core.conversation.message_content import content_to_text
+
+        backend = getattr(self.tool_executor, "_backend", None)
+        hook_mgr = getattr(backend, "hook_manager", None) if backend else None
+        if hook_mgr is None:
+            return [msg]
+
+        content = msg.get("content", "")
+        try:
+            text = content if isinstance(content, str) else content_to_text(content)
+        except Exception:
+            text = str(content)
+
+        def _base_ctx() -> Dict:
+            workdir = None
+            if backend.tool_executor:
+                workdir = backend.tool_executor.get_workdir()
+            if not workdir:
+                workdir = os.getcwd()
+            session_id = ""
+            try:
+                session = backend.get_current_session() if hasattr(backend, "get_current_session") else None
+                if session:
+                    session_id = session.session_id or ""
+            except Exception:
+                pass
+            return {
+                "project_root": workdir,
+                "session_id": session_id,
+                "message": text,
+                "current_role": "primary",
+                "is_subagent_call": False,
+                "is_team_member": _check_team_member(backend),
+            }
+
+        out: List[Dict] = []
+        try:
+            # PreUserMessage 增强 ctx：worktree 建议 + 关键文档（对齐 engine.py；
+            # 临时会话跳过关键文档，防止临时页泄源项目文档）
+            pre_ctx = _base_ctx()
+            try:
+                pre_ctx.update(backend._build_worktree_context_dict() or {})
+                session = backend.get_current_session() if hasattr(backend, "get_current_session") else None
+                if session is not None and not getattr(session, "is_temp", False):
+                    pre_ctx.update(backend.build_key_documents_context() or {})
+            except Exception as e:
+                logger.debug(f"[Interject] PreUserMessage 增强 ctx 构建失败（降级基础 ctx）: {e}")
+
+            for event_name, ctx in (("UserPromptSubmit", _base_ctx()), ("PreUserMessage", pre_ctx)):
+                try:
+                    results = hook_mgr.trigger_event(
+                        event_name,
+                        context=ctx,
+                        current_message=text,
+                        trigger_async=False,
+                        skip_finished_callback=True,
+                    )
+                    for r in results:
+                        if r.success and r.output and r.add_to_context:
+                            out.append(_make_hook_message(event_name, r.output, r.status_message))
+                except Exception as e:
+                    logger.debug(f"[Interject] {event_name} hook 触发失败: {e}")
+        except Exception as e:
+            logger.debug(f"[Interject] 用户消息 hook 链触发异常（降级直注入）: {e}")
+
+        out.append(msg)
+
+        try:
+            post_ctx = _base_ctx()
+            if content != text:
+                post_ctx["user_content"] = content
+            hook_mgr.trigger_event(
+                "PostUserMessage",
+                context=post_ctx,
+                current_message=text,
+                trigger_async=False,
+                skip_finished_callback=True,
+            )
+        except Exception as e:
+            logger.debug(f"[Interject] PostUserMessage hook 触发失败: {e}")
+        logger.info("[Interject] 已补触发用户消息 hook 链（UserPromptSubmit/PreUserMessage/PostUserMessage）")
+        return out
 
     def _drain_pending_hooks_before_exit(self, current_session_messages: List) -> bool:
         """退出前 _hook_message_queue 收尾决策：非空则注入并续跑一轮。
