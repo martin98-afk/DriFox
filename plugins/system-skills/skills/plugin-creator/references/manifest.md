@@ -149,12 +149,15 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `model.config` | **完整模型配置（含已解密明文 API key）** | ui, tool |
 | `provider.list` / `model.enumerate` | 服务商清单（**不含密钥与 URL**）/ 服务商可选模型列表（含视觉/思考标记） | ui, tool |
 | `session.read` / `session.write` | 会话读写（write 写库 + 刷 UI + 发事件） | ui, tool |
-| `session.list` / `session.manage` / `session.invalidate` | 会话列表 / 新建切换删除 / 失效 system_prompt 缓存 | ui |
+| `session.list` | 窗口内存会话列表（`host.session_manager.sessions`） | ui |
+| `session.history` / `session.history.write` | **持久化**历史会话只读面 / 改写（置顶·移动·归档·恢复·删除·导入） | ui |
+| `session.manage` / `session.invalidate` | 切换·新建当前会话 / 失效 system_prompt 缓存 | ui |
 | `input.read` | 输入框文本与附件列表 | **ui** |
 | `input.write` | 写入输入框文本 | **ui** |
 | `agent.read` | agent 列表/提示词/管理器 | ui, tool |
 | `subagent.run` | 派生子智能体 | tool |
 | `workdir.read` / `workdir.write` | 工作目录读 / 切换 | ui（read 含 tool） |
+| `project.read` / `project.write` | 项目读（当前/清单/元数据/根目录）/ 写（切换·新建·归档·导入导出·拖拽） | ui |
 | `theme.read` | 主题 id/名称/配色/字体/字号 | ui |
 | `context.compact` | 上下文压缩器 | ui, tool |
 | `tool.read` / `tool.execute` | 工具元信息 / 执行任意工具 | ui, tool |
@@ -171,6 +174,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `plugin.read` / `plugin.control` | 已安装插件列表 / 重载启停其他插件 | ui |
 | `command.read` / `command.reload` | 命令列表 / 命令热重载 | ui |
 | `team.read` / `team.send` | 团队成员与运行状态 / 派发任务邮件（send 仅 tool） | ui, tool / **tool** |
+| `team.session` | 团队历史会话恢复 / 归档 / 进入成员会话（跨窗口开标签页） | ui |
 | `cache.purge` | 清理主程序进程内 LRU 缓存 | ui |
 | `process.start` | 启动后台进程（argv 数组、无 shell，独立于宿主生命周期） | ui, tool |
 | `config.read` | 按 key 读主程序配置项（**不含密钥**，密钥走 `model.config`） | ui |

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 ## [未发布]
 ### ✨ 新功能 (New Features)
 - **OS 级沙箱（macOS Seatbelt）**: 安全中心新增「OS 级沙箱（macOS）」开关与档位（挡写入 / 挡写入+禁网）。开启后 agent 命令（bash 工具与后台任务）经 `sandbox-exec` 包装执行，工作区与系统临时目录外写入、可选联网在内核层被拒；与应用层沙箱审批正交（审批决定要不要问，OS 沙箱决定进程实际能碰什么）。非 macOS 平台自动直通。新增回归测试 `tests/core/test_os_sandbox.py`。
+- **能力池新增历史 / 项目 / 团队会话面** (`app/plugins/capabilities/catalog.py` · `providers/history_core.py`): 新增 `session.history`（持久化历史只读面：列表 / 归档 / 项目聚合 / 按 session_id 定位 / 团队会话查询）、`session.history.write`（置顶 / 移动项目 / 归档 / 恢复 / 删除 / 导入）、`project.read`（当前项目 / 清单 / 元数据 / 根目录）、`project.write`（切换 / 新建 / 归档 / 导入导出 / 打开文件夹 / 拖拽）、`team.session`（团队会话恢复 / 归档 / 进入成员会话）五条能力，并把此前「catalog 登记了却没有 provider」的 `session.manage` 补成真实实现（`select(session_id)` / `new()`）。写能力内部承担宿主联动（工作目录同步 + 团队广播 + 历史页刷新 + 跨窗口通知），插件不再反射窗口私有方法。
+
+### ♻️ 代码重构 (Refactoring)
+- **history-manager 全量接入能力池** (`plugins/history-manager`): manifest 升 `api_version: 2` 并显式声明 9 条能力；插件侧删除 26 处宿主耦合（`_call_window` 反射 17 个私有方法、`getattr(win, "_current_project"/"_current_session_id"/"_window_id")` 读 4 个私有字段、直连 `HistoryManager` 单例 6 处、两处 `_caps()` 自建 `host=None` 池并自报 `declared`）。`_caps` 收敛到 `sdk.caps_for`，host 由宿主解析，声明裁剪真正生效。回归守卫 `tests/plugins/test_capability_window_current_guard.py` 重写为 6 道红线（禁直连管理器 / 禁反射 / 禁读私有字段 / 禁自建池 / `_caps` 必须走 sdk / manifest 声明须覆盖实际用量）。
 
 ### 🐛 问题修复 (Bug Fixes)
 - **插件市场自动更新后侧栏计数不刷新**: `run_auto_update_check` 返回的 `pending` 是更新前快照，`execute=True` 把可更新插件全部装完后仍原样返回，左侧栏 TabPanel 条目停在「插件市场 (N)」，要等下一次 30 分钟 tick 才纠正。现于更新执行后重算待更新数（更新成功者剔除、失败者保留），新增回归测试 `tests/plugins/test_plugin_marketplace_auto_update_pending.py`。

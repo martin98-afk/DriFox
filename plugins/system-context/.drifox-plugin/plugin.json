@@ -54,6 +54,15 @@
         "min": 1,
         "max": 100,
         "description": "工具报错的结果（success=false）截断阈值按此倍数放宽，错误栈优先保留；填 1 关闭保护"
+      },
+      {
+        "key": "json_shape_max_chars",
+        "label": "JSON 骨架化阈值（字符）",
+        "type": "number",
+        "default": "8000",
+        "min": 1000,
+        "max": 100000,
+        "description": "超过此长度的 JSON 工具结果保留结构骨架（键名、数组头尾、长串截断），输出仍是合法 JSON"
       }
     ]
   }

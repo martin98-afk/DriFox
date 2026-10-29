@@ -17,6 +17,7 @@ from loguru import logger
 from app.core.context.view import ContextView, TierStat
 from app.core.modelmeta.model_capabilities import resolve_context_limit
 from app.plugins.contracts.context_policy import (
+    CACHE_INVALIDATE,
     STAGE_INGEST,
     STAGE_SEND,
     STAGE_UI,
@@ -94,6 +95,8 @@ class ContextPipeline:
 
     def run(self, view: ContextView) -> ContextView:
         for tier in self._chain(view.stage):
+            if not self._allow(tier, view):
+                continue
             try:
                 if not tier.should_apply(view):
                     continue
@@ -150,6 +153,18 @@ class ContextPipeline:
 
     # ---------- 内部 ----------
 
+    @staticmethod
+    def _allow(tier: ContextTier, view: ContextView) -> bool:
+        """缓存门控：破坏前缀的层只在真的超预算时放行。
+
+        常态（used <= budget）只跑前缀安全层（cache_impact != invalidate），
+        prompt cache 不被无谓打掉；超预算（used > budget）才允许有损层介入，
+        此时不压就发不出去。紧急层可自行读 view.hard_limit（模型窗口）做更强判定。
+        """
+        if getattr(tier, "cache_impact", "") != CACHE_INVALIDATE:
+            return True
+        return view.used_tokens > view.budget
+
     def _fallback_budget(self, llm_config: Dict[str, Any]) -> Tuple[int, int]:
         """常数级兜底预算（registry 无 resolver / 解析抛错时）。
 
@@ -200,4 +215,13 @@ class ContextPipeline:
             target_tokens=target,
             llm_config=llm_config or {},
             stage=stage,
+            hard_limit=self._hard_limit(llm_config),
         )
+
+    @staticmethod
+    def _hard_limit(llm_config: Dict[str, Any]) -> int:
+        """模型窗口硬上限（紧急层判据）；解析失败返回 0 表示未知。"""
+        try:
+            return max(1, resolve_context_limit(llm_config or {}))
+        except Exception:
+            return 0
