@@ -419,7 +419,7 @@ class InlineArtifactPanel(QWidget):
         裸 QMenu 不吃全局主题样式，深色主题下整块全黑——必须显式套。）
         """
         from app.utils.design_tokens import Colors
-        from app.utils.utils import font_size_css, get_font_family_css
+        from app.utils.utils import get_font_family_css
 
         menu = QMenu(self)
         menu.setStyleSheet(f"""

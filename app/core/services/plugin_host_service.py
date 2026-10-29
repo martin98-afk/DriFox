@@ -523,6 +523,16 @@ class PluginHostService(QObject):
                 ".ruff_cache",
                 "tmp",
                 "temp",
+                # 插件运行期产物目录：写图片/导出文件等，非源码，
+                # 变更不触发组件重载，只会在日志里刷「跳过重载」噪音
+                "generated",
+                "output",
+                "outputs",
+                "exports",
+                "downloads",
+                "uploads",
+                "cache",
+                "logs",
             }
             # 额外排除的产物 / 缓存文件
             _EXTRA_SKIP_EXTS = (
@@ -722,7 +732,8 @@ class PluginHostService(QObject):
                 for changes in watch(
                     *watch_paths,
                     recursive=True,
-                    debounce=2000,  # 2秒防抖
+                    debounce=2000,  # 聚合上限：到点即 yield（不是静默期）
+                    step=2000,  # 静默阈值：距最后一次变更 2s 才成批 yield
                     yield_on_timeout=False,
                     stop_event=self._plugin_watcher_stop,
                     watch_filter=watch_filter,  # 排除 deps/node_modules 等易变目录
