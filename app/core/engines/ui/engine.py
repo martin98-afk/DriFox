@@ -20,6 +20,7 @@ from app.core.conversation.chat_session import (
 )
 from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.context.budget import empty_compaction_state
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.conversation.message_content import content_to_text
@@ -127,19 +128,9 @@ class UIEngine(BaseEngine):
     # ========== 向后兼容属性 ==========
 
     @property
-    def compactor(self):
-        """暴露压缩器供外部使用（如工具迭代中压缩）"""
-        return self._conversation_core.compactor
-
-    @property
     def _permission_cache(self):
         """向后兼容：权限缓存已移至 ConversationCore"""
         return self._conversation_core.permission_cache
-
-    @property
-    def _compactor(self):
-        """向后兼容：压缩器已移至 ConversationCore"""
-        return self._conversation_core.compactor
 
     @property
     def _current_worker(self):
@@ -526,13 +517,11 @@ class UIEngine(BaseEngine):
         self,
         session: ChatSession,
         llm_config: Dict,
-        allow_llm_summary: bool = False,
     ) -> List[Dict]:
         """委托给 ContextBudgetAllocator 构建消息"""
         messages = self._conversation_core.context_builder.build_messages(
             session=session,
             llm_config=llm_config,
-            allow_llm_summary=allow_llm_summary,
             current_agent=self._current_agent,
         )
 
@@ -560,7 +549,7 @@ class UIEngine(BaseEngine):
                 "used_tokens": 0,
                 "budget_tokens": 0,
                 "percent": 0,
-                "compaction": self._conversation_core.compactor._make_state(),
+                "compaction": empty_compaction_state(),
                 "normal_tokens": 0,
                 "compacted_tokens": 0,
                 "breakdown": [],

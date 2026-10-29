@@ -75,11 +75,6 @@ class EngineHost(Protocol):
         """同步工作目录到 UI 显示"""
         ...
 
-    # ===== 上下文 =====
-    def get_compactor(self) -> Any:
-        """上下文压缩器"""
-        ...
-
     # ===== 对话执行栈（EP2：插件不再 deep import app.core.conversation） =====
     def conversation_stack(self) -> Any:
         """对话执行栈工厂（满足 ConversationStackFactory 契约：

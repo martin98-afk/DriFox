@@ -74,7 +74,6 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
             "app.core.context.builder",
             "app.core.context.usage",
             "app.core.hooks.hook_manager",
-            "app.core.context.history_compactor",
             "app.core.conversation.memory_manager",
             "app.core.infra.token_estimator",
             "app.core.modelmeta.models_dev_sync",

@@ -128,10 +128,15 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "切换/新建/归档/导入导出项目与根目录绑定（破坏性，含团队广播）",
             _UI,
         ),
+        _spec(
+            "project.workdir",
+            _M,
+            "写库式切换项目工作目录（关键文档登记 + 工作目录持久化 + 根目录标记恢复，"
+            "与 workdir.write 的会话内切换互补）",
+            _UI,
+        ),
         # ── 外观 ──
         _spec("theme.read", _L, "主题 id/名称/配色/字体/字号", _UI),
-        # ── 上下文 ──
-        _spec("context.compact", _M, "上下文压缩器", _BOTH, ["get_compactor"]),
         # ── 工具 ──
         _spec("tool.read", _L, "工具注册表元数据查询", _BOTH),
         _spec("tool.inject", _H, "向 LLM 注入工具（改变模型可见行为）", _UI),

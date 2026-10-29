@@ -72,6 +72,7 @@ def _get_openai_errors() -> Dict[str, type]:
                 }
     return _OPENAI_ERRORS
 
+from app.core.context.budget import resolve_context_budget
 from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
@@ -203,7 +204,6 @@ class OpenAIChatWorker(QThread):
         stage_changed_callback=None,
         permission_check_callback=None,
         permission_cache: PermissionCache = None,
-        compactor=None,
         initial_compaction_cache: Dict = None,
         session_id: str = "",
         hook_policy=None,
@@ -245,7 +245,6 @@ class OpenAIChatWorker(QThread):
             permission_cache=permission_cache or PermissionCache(),
             event_bus=WorkerEventBus(),
             tool_executor=tool_executor,
-            compactor=compactor,
             initial_compaction_cache=initial_compaction_cache,
         )
         self._sync_state_from_state()  # 同步到旧属性名（向后兼容）
@@ -510,7 +509,6 @@ class OpenAIChatWorker(QThread):
         self._current_session_messages = s.session.current_messages
         self._last_usage = s.session.last_usage
         self._accumulated_tokens = s.session.accumulated_tokens
-        self._compactor = s.compactor
         self._compaction_cache = s.compaction.cache
         self._api_messages_cache = s.api_cache.cache
         self._api_messages_built = s.api_cache.built
@@ -2033,7 +2031,7 @@ class OpenAIChatWorker(QThread):
 
             # 开始新对话时，清理 round 缓存，但保留 session 缓存
             self._permission_cache.clear_round()
-            budget = self._compactor.get_budget(self.llm_config)
+            budget = resolve_context_budget(self.llm_config)
 
             # [MEM] 启动快照
             self._mem_snapshot("start", msg_count=len(current_messages), session_count=len(current_session_messages))
@@ -2489,50 +2487,21 @@ class OpenAIChatWorker(QThread):
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
                 )
 
-                # ========== 工具迭代中压缩 ==========
-                # 在每次 API 调用前检查是否需要压缩
-                if self._compactor.should_compact(current_messages, budget):
-                    system_message = current_messages.pop(0)
-                    compacted, state, cache = self._compactor.compact(
-                        current_messages,
-                        budget,
-                        existing_cache=None,
-                        allow_llm_summary=False,  # 工具迭代中只用启发式，避免嵌套 LLM 调用
-                    )
-                    if compacted != current_messages:
-                        current_messages = compacted
-                        self._last_compaction_state = state
-                        self._compaction_cache = cache
-                        self._emit_compaction_status(state)
-                    # 修复：重新插入 system_message，否则下一轮 API 调用会丢失系统提示
-                    current_messages.insert(0, system_message)
-                    # 修复：始终更新 API 缓存以匹配 current_messages（含 system）
-                    # 注意：需要通过 messages_to_api() 转换格式，否则后续 API 调用读到内部格式对象
-                    # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
-                    current_messages, _ = self._fix_tool_result_order(current_messages)
-                    self._api_messages_cache = self._serialize_for_api(current_messages).messages
-                    # 它的增长会在 worker 结束时由 _on_messages_updated 的
-                    # preserve_compaction=False 清空缓存，下轮发送时由 ContextBudgetAllocator 统一压缩。
-                else:
-                    # 更新 API 消息缓存
-                    # 注意：如果 _try_inject_vision_content 已重建完整缓存，跳过追加避免重复
-                    if not vision_injected:
-                        self._append_to_api_cache(response_sequence)
+                # 更新 API 消息缓存
+                # 注意：如果 _try_inject_vision_content 已重建完整缓存，跳过追加避免重复
+                if not vision_injected:
+                    self._append_to_api_cache(response_sequence)
                 self._emit_with_callback(
                     "finished_with_messages", self.finished_with_messages, current_session_messages
                 )
 
                 # ========== 迭代结束：内存快照 ==========
                 self._mem_diag_iter_count += 1
-                _was_compacted = (  # 检测本轮是否执行了压缩
-                    "compacted" in locals() and locals().get("compacted") is not None
-                )
                 self._mem_snapshot(
                     "end_iter",
                     msg_count=len(current_messages),
                     session_count=len(current_session_messages),
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
-                    compacted="yes" if _was_compacted else "no",
                 )
                 # 每 3 轮触发一次 GC，帮助回收循环引用
                 # 🔧 修复：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免 stop-the-world GC 阻塞 UI
