@@ -13,7 +13,8 @@ User-Agent）经 capabilities["extra_headers"] 注入每个 LLM 请求，主程�
 自动签到：守护线程遍历缓存内全部号，临期刷新 + 每日自动签到（status 幂等）。
 每日任务：签到后顺带跑成长中心闭环 —— 活跃上报 → 领养 → 任务 accept → 行为事件链
     （桌面指纹 / 真实对话）→ Web 域领奖 → 连登兑换与抽奖 → 猫旅行 → 新手礼包。
-    幂等靠任务进度判定；DRIFOX_CODEBUDDY_TASKS=0 可整体关闭。
+    幂等靠任务进度判定；**默认关闭**，开关声明在 plugin.json config_schema
+    （auto_daily_tasks，环境变量 DRIFOX_CODEBUDDY_TASKS 优先）。
 
 凭据缓存：<app_data>/codebuddy/cache/<hash>.json，不落仓库目录。
     CLI：python buddy_auth.py {login,refresh,checkin,credits}。
@@ -405,8 +406,28 @@ _THREAD_STARTED = False
 # （本机实测：未领养时 accept 全部返回 prerequisite not met: first_buddy）
 # → 行为事件链推进进度 → 达标项走 Web 域领奖。
 # 幂等：动作前先读任务进度，已 claimed / 已达标即跳过，跨天自动恢复。
-# 开关：环境变量 DRIFOX_CODEBUDDY_TASKS=0 可整体关闭（默认开启）。
-_AUTO_TASK_DISABLED = os.environ.get("DRIFOX_CODEBUDDY_TASKS", "").strip() == "0"
+# 开关：plugin.json config_schema 的 auto_daily_tasks（默认关闭）。
+# 无人值守的自动请求会放大账号风控暴露面，故改为显式开启；运行时不缓存，
+# 设置卡保存即生效（下一轮守护循环读到新值）。
+_PLUGIN_NAME = "system-providers"
+_AUTO_TASK_KEY = "auto_daily_tasks"
+
+def _auto_task_disabled() -> bool:
+    """每日成长任务是否停用。
+
+    取值链由 PluginConfigStore 统一实现：环境变量（DRIFOX_CODEBUDDY_TASKS）→
+    存储值 → schema 默认（false）。插件配置不可用（单测直接 exec 模块、无
+    PluginManager 扫描）时按停用处理：拿不到开关就当没开。
+    """
+    try:
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+        val = PluginConfigStore().get(_PLUGIN_NAME, _AUTO_TASK_KEY)
+        if val is not None:
+            return not bool(val)
+    except Exception:
+        pass
+    return True
 
 _THEME_KEY = "theme-tkmw7j"  # 和平精英激战金秋：Hp_Appearance 判据主题
 _BUDDY_APP = ("cb_y5Dy46tPQGGWtueMxXbe", "企鹅教师助手")
@@ -1143,7 +1164,7 @@ def _refresh_loop():
 
 def _kickoff_daily(ba, refresh_token: str) -> None:
     """登录成功后异步补跑该号每日任务（不必等 6h 轮次）。"""
-    if _AUTO_TASK_DISABLED or not refresh_token:
+    if _auto_task_disabled() or not refresh_token:
         return
 
     def _run() -> None:
@@ -1160,7 +1181,7 @@ def _kickoff_daily(ba, refresh_token: str) -> None:
 
 def _run_daily_for_entry(ba, at: str, entry: dict) -> None:
     """单号入口：解析 uid 后跑每日任务；任何失败都不能影响签到主循环。"""
-    if _AUTO_TASK_DISABLED:
+    if _auto_task_disabled():
         return
     from loguru import logger
 
