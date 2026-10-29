@@ -13,7 +13,7 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.6.12-brightgreen)
+![Version](https://img.shields.io/badge/version-0.6.13-brightgreen)
 
 </div>
 
@@ -70,7 +70,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 ## 与 Claude Code / DeepSeek Harness 的核心差异
 
-> **比较时点**：2026-08-17（竞品列）；DriFox 列已更新至 v0.6.12。
+> **比较时点**：2026-08-17（竞品列）；DriFox 列已更新至 v0.6.13。
 > Claude Code Agent Teams 为 **research preview / experimental**（需 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 启用）。
 > DeepSeek Harness 为 **developer preview**（2026-08-13 发布）。
 
@@ -92,7 +92,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 | **多模型后端** | ✅ **原生 OpenAI 兼容**：DeepSeek / 智谱 / DashScope / 千帆 / 火山方舟 / MiniMax / SiliconFlow / Gemini / GitHub Copilot / CodeBuddy / OpenCode Zen / OpenCode Go 共 12 家内置 + 自定义端点 | ⚠️ 需 proxy（claude-code-proxy / claude-code-openai-wrapper / Bifrost gateway） | ✅ plugin-based，可接入任意 LLM 适配器 |
 | **开源协议** | GPL-3.0-or-later | 闭源（商业） | MIT |
 | **技术栈** | Python 3.14+ / PyQt5 | TypeScript / Node | TypeScript + Cordis 插件框架 |
-| **开发成熟度** | v0.6.12（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
+| **开发成熟度** | v0.6.13（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
 
 ### DriFox 真正独有的四件事
 
@@ -273,7 +273,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.6.12 架构                       │
+│                    DriFox v0.6.13 架构                       │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      标签页宿主 / 消息卡片 / 工作台 / 输入区                │
 │             标题栏 + 侧栏 / 设置面板 / 浮动卡片 / 系统托盘     │
