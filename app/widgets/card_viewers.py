@@ -3704,11 +3704,26 @@ class CodeWebViewer(QWebEngineView):
                 // 简洁模式标志：由 Python 在 _load_skeleton 后通过 JS 同步更新
                 window._toolCompactMode = true;
 
+                // 折叠态的稳定身份键：data-block-key 是**内容指纹**（思考块用
+                // 内容 sha1，见 _render_think_block），流式期间内容一变 key 就变 →
+                // 展开态在节点重建后失配、回落到 HTML 写死的 data-expanded="false"，
+                // 表现为「已展开的折叠框又折叠回去 / 重放一次展开」。
+                // data-flip-key（思考块，消息内序号）与 data-tool-call-id（工具块）
+                // 才是跨重建稳定的身份，优先用它们，都没有才回退内容指纹。
+                function _collapseKeyOf(block) {{
+                    if (!block || !block.getAttribute) return '';
+                    var fk = block.getAttribute('data-flip-key');
+                    if (fk) return 'fk:' + fk;
+                    var tid = block.getAttribute('data-tool-call-id');
+                    if (tid) return 'tid:' + tid;
+                    return 'bk:' + (block.getAttribute('data-block-key') || '');
+                }}
+
                 function syncExpandedAttrs(block, expanded) {{
                     block.dataset.expanded = expanded ? 'true' : 'false';
                     const summary = block.querySelector('.cm-collapsible__summary');
                     if (summary) summary.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-                    const key = block.dataset.blockKey;
+                    const key = _collapseKeyOf(block);
                     if (key) collapsibleState.set(key, expanded);
                 }}
 
@@ -3945,7 +3960,7 @@ class CodeWebViewer(QWebEngineView):
                     var blocks = window._scopeQuery(roots, '.cm-collapsible');
                     for (var _bi = 0; _bi < blocks.length; _bi++) {{
                         var block = blocks[_bi];
-                        const key = block.dataset.blockKey;
+                        const key = _collapseKeyOf(block);
                         const expanded = key && collapsibleState.has(key)
                             ? collapsibleState.get(key)
                             : block.dataset.expanded === 'true';
@@ -4442,7 +4457,7 @@ class CodeWebViewer(QWebEngineView):
                         if (!window._toolCompactMode) {{
                             expandedStates = new Map();
                             container.querySelectorAll('.think-block').forEach(function(block) {{
-                                expandedStates.set(block.dataset.blockKey, block.dataset.expanded === 'true');
+                                expandedStates.set(_collapseKeyOf(block), block.dataset.expanded === 'true');
                             }});
                         }}
 
@@ -4559,7 +4574,7 @@ class CodeWebViewer(QWebEngineView):
                         // [PERF] 简洁模式：expandedStates 为 null，跳过整段（think-compact 无折叠）
                         if (expandedStates) {{
                             container.querySelectorAll('.think-block').forEach(function(block) {{
-                                var savedState = expandedStates.get(block.dataset.blockKey);
+                                var savedState = expandedStates.get(_collapseKeyOf(block));
                                 if (savedState !== undefined) {{
                                     block.dataset.expanded = savedState ? 'true' : 'false';
                                     var body = block.querySelector('.cm-collapsible__body');
@@ -4905,6 +4920,21 @@ class CodeWebViewer(QWebEngineView):
                     for (var k = 0; k < all.length; k++) {{
                         all[k].setAttribute('data-block-index', String(k));
                     }}
+                    // 折叠框 transition 冻结（同 updateContent 的 _fz 机制）：patch 重建的
+                    // 新节点带默认折叠态，随后 restoreCollapsibleStates 把 data-expanded
+                    // 改回 true 时，chevron 旋转与 border-color 的 220ms 过渡会从默认态
+                    // 重播一次——视觉上就是「已展开的折叠框又展开一遍」。rAF 后移除，
+                    // 不影响后续用户交互。
+                    var _v2fz = null;
+                    if (made.length) {{
+                        _v2fz = document.getElementById('_fz');
+                        if (!_v2fz) {{
+                            _v2fz = document.createElement('style');
+                            _v2fz.id = '_fz';
+                            document.head.appendChild(_v2fz);
+                        }}
+                        _v2fz.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *,.think-compact,.think-compact *{{transition:none!important}}';
+                    }}
                     // 新节点的后处理：表格包裹 / 图表初始化 / 公式 / 工具块栏 / 折叠态恢复
                     if (made.length && typeof window._wrapTablesIn === 'function') window._wrapTablesIn(made);
                     if (made.length && typeof window._initEchartsIn === 'function') window._initEchartsIn(made);
@@ -4914,6 +4944,7 @@ class CodeWebViewer(QWebEngineView):
                     if (made.length && typeof window._runFenceAssets === 'function') window._runFenceAssets(made);
                     if (made.length && typeof window._initWidgets === 'function') window._initWidgets(made);
                     if (made.length && typeof restoreCollapsibleStates === 'function') restoreCollapsibleStates(made);
+                    if (_v2fz) requestAnimationFrame(function () {{ var _e = document.getElementById('_fz'); if (_e) _e.remove(); }});
                     if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 30);
                 }};
                 // ===== B5.2 流式纯文本尾态（活动块增量落地） =====
@@ -4947,6 +4978,46 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     live.appendChild(document.createTextNode(text));
                     return true;
+                }};
+                // ===== B5.1.5 v2 整页清空时的滚动位置保全 =====
+                // force_full（首次接管 / ctx 维度变化 / 工具完成指纹变化）会执行
+                // `_c1.innerHTML=''` 整页清空：清空瞬间 scrollHeight 归零，浏览器把
+                // scrollTop 强制钳到 0，重新灌入后不会自己回来 → 流式期间用户上滚
+                // 阅读被弹回顶部。v1 的 updateContent 一直有 save/restore，v2 此前没有。
+                // 只还原「清空前已离开底部」的容器（阅读态）：贴底跟随的卡交给
+                // _v2AfterPatch / 高度链继续滚底，否则会把跟随位置钉死在旧底部。
+                window._v2ScrollSnap = null;
+                window._v2ScrollSave = function () {{
+                    var s = {{b: 0, bm: 0, c: 0, cm: 0, t: 0, tm: 0}};
+                    var b = document.body;
+                    s.b = b.scrollTop;
+                    s.bm = Math.max(0, b.scrollHeight - b.clientHeight);
+                    var c1 = document.getElementById('content-placeholder');
+                    if (c1) {{
+                        s.c = c1.scrollTop;
+                        s.cm = Math.max(0, c1.scrollHeight - c1.clientHeight);
+                    }}
+                    var c2 = document.getElementById('tool-content');
+                    if (c2) {{
+                        s.t = c2.scrollTop;
+                        s.tm = Math.max(0, c2.scrollHeight - c2.clientHeight);
+                    }}
+                    window._v2ScrollSnap = s;
+                }};
+                window._v2ScrollRestore = function () {{
+                    var s = window._v2ScrollSnap;
+                    window._v2ScrollSnap = null;
+                    if (!s) return;
+                    var TOL = {AUTO_SCROLL_THRESHOLD};
+                    var _restore = function (el, top, max) {{
+                        if (!el || top <= 0 || max <= TOL || top >= max - TOL) return;
+                        var m = Math.max(0, el.scrollHeight - el.clientHeight);
+                        if (m <= 0) return;
+                        _progScroll(el, Math.min(top, m));
+                    }};
+                    _restore(document.body, s.b, s.bm);
+                    _restore(document.getElementById('content-placeholder'), s.c, s.cm);
+                    _restore(document.getElementById('tool-content'), s.t, s.tm);
                 }};
                 // ===== B5.1 v2 收尾（block 级渲染通道专用，旧路径不调用） =====
                 // Python 侧 _perform_update_v2 每次 patch 后调用：
@@ -7395,6 +7466,10 @@ class CodeWebViewer(QWebEngineView):
             return True
         js: List[str] = []
         if force_full:
+            # 整页清空前快照滚动位置（body / 正文容器 / 工具区）：清空瞬间
+            # scrollHeight 归零，scrollTop 被浏览器强制钳到 0 且不会自己回来
+            # → 流式期间用户上滚阅读被弹回顶部。restore 见下方 patch 之后。
+            js.append("if(typeof window._v2ScrollSave==='function')window._v2ScrollSave();")
             # 全量落地前清两个容器：v2 首帧 / 内容整体替换 / ctx 切换时容器里
             # 可能残留旧路径节点（无 data-block-key，splice 不认），不清会叠加。
             # 清空即销毁全部 echarts 节点 → 先逐个 dispose（同 refresh_theme 语义）。
@@ -7432,6 +7507,10 @@ class CodeWebViewer(QWebEngineView):
                 + json.dumps(live_delta).decode("utf-8")
                 + ");"
             )
+        if force_full:
+            # 清空后的位置还原必须在 _v2AfterPatch 之前：它里面紧凑模式的块搬移
+            # 还会再动一次正文高度，但先还原能保证用户至少不回到顶部。
+            js.append("if(typeof window._v2ScrollRestore==='function')window._v2ScrollRestore();")
         # v2 专属收尾：流式运行框去重 / 工具区显隐与 header / 工具区滚底
         js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});")
         page.runJavaScript("".join(js))

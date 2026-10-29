@@ -3731,7 +3731,12 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v55）：v2 通道「正式块」判据改 data-block-wrapper
 # （原按 data-block-key 判定，而 JS 注入的完成框也带该属性 → 去重不生效、splice
 # 索引把它算进块序列）。旧骨架里流式结束后编辑类工具完成框沉底残留两份。
-_SKELETON_CACHE_VERSION = 55
+# _SKELETON_CACHE_VERSION +1（v56）：v2 通道滚动位置保全（_v2ScrollSave /
+# _v2ScrollRestore——force_full 清空容器后还原正文/工具区/body 的阅读位置）、
+# 折叠态改用稳定身份键（_collapseKeyOf：data-flip-key / data-tool-call-id 优先，
+# 内容指纹回退）、patchBlocks 新节点注入前冻结折叠框 transition。旧骨架缺这些
+# 函数 → 流式中用户上滚被弹回顶部、已展开的折叠框重放展开动画。
+_SKELETON_CACHE_VERSION = 56
 
 
 def _js_literal(value) -> str:
