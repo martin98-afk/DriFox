@@ -876,8 +876,18 @@ def render_tool_block(
     tool_call_id: str = None,
     diff: str = None,
     echarts: str = None,
+    lazy_body: bool = False,
+    body_only: bool = False,
 ) -> str:
-    """渲染工具块，参数横向表格展示（左列参数名，右列结果值）"""
+    """渲染工具块，参数横向表格展示（左列参数名，右列结果值）
+
+    lazy_body：折叠态 body 只留空占位，内容完全不构造。折叠只是
+        `.cm-collapsible__body{height:0}` 的视觉隐藏，节点照样进 DOM，而工具块
+        body 是 DOM 内存大头（pygments 高亮实测膨胀 12.7 倍：12KB diff → 154KB
+        HTML + 3200 个 span）。展开时由 viewer 从 markdown 反查该块重渲染后注入
+        （见 card_viewers 的 tool_body 通道 / window._fillToolBody）。
+    body_only：只返回 body 内部 HTML（不含外层块与 header），供懒注入取内容。
+    """
 
     _gf = _get_global_font()  # 用户主题全局字体
 
@@ -976,6 +986,54 @@ def render_tool_block(
     if args_preview.startswith(cn_name):
         args_preview = args_preview[len(cn_name) :].lstrip()
 
+    # 生成哈希 key（折叠块懒注入的早返回也要用，故提前到内容构造之前）
+    block_seed = "|".join(
+        [
+            str(tool_name or ""),
+            json.dumps(tool_args or {}, option=json.OPT_SORT_KEYS).decode("utf-8"),
+            str(result or ""),
+            str(success),
+        ]
+    )
+    block_key = "tool-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+
+    # ── 不可见工具块懒注入：内容一律不构造，body 只留空占位 ──
+    # 两种形态都懒：
+    #   折叠态（cm-collapsible，body 是 height:0 的隐藏层）→ 点击 summary 时注入；
+    #   无折叠态（render_mode="expand"，body 本应常展开）→ 工具区整体折叠时
+    #     用户同样看不到，展开工具区时批量注入（历史卡典型场景）。
+    # 无 tool_call_id 的块无法反查源文本，不懒化（否则展开后永久空白）。
+    if lazy_body and tool_call_id and (collapsed or no_collapse):
+        _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
+        _head_spans = f"""<span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
+                {icon_html}
+                {badge_html}
+            </span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+        </span>
+        <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
+            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+                {escape(args_preview)}
+            </span>
+            {diff_stats_html}
+            {subagent_log_btn_html}
+        </span>"""
+        if no_collapse:
+            return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        {_head_spans}
+    </div>
+    <div class="tool-block__body" style="padding: 0 8px 4px;"></div>
+</div>"""
+        return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="false" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        {_head_spans}
+        <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
+    </button>
+    <div class="cm-collapsible__body" style="height:0;opacity:0;overflow:hidden;"></div>
+</div>"""
+
     # ── inline diff 预览区（编辑类工具：全部由插件 render 闭包渲染） ──
     # 主程序不做任何 diff 渲染兜底：工具有 diff 时插件闭包负责输出（如 edit/
     # multi_edit/write 注册的 _render_edit_diff_body），闭包返回 None/异常时
@@ -1071,18 +1129,12 @@ def render_tool_block(
             {diff_html}
         </div>"""
 
-    # 生成哈希 key
-    block_seed = "|".join(
-        [
-            str(tool_name or ""),
-            json.dumps(tool_args or {}, option=json.OPT_SORT_KEYS).decode("utf-8"),
-            str(result or ""),
-            str(success),
-        ]
-    )
-    block_key = "tool-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
     expanded_attr = "false" if collapsed else "true"
     body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
+
+    # 只取 body 内容（懒注入通道用）：不含外层块与 header
+    if body_only:
+        return expanded_content
 
     if no_collapse:
         # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示

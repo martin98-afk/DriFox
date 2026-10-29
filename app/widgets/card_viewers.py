@@ -256,6 +256,7 @@ class ConsoleMonitorPage(QWebEnginePage):
     bodyInnerScrollableChanged = pyqtSignal(bool)
     contentReady = pyqtSignal()
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
+    toolBodyRequested = pyqtSignal(str)  # tool_call_id：懒注入块展开时请求 body 内容
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — echarts/mermaid/svg/html 放大查看
@@ -425,6 +426,16 @@ class ConsoleMonitorPage(QWebEnginePage):
                     tool_call_id = msg.split("tool_diff:", 1)[1]
                     # [T43] 延迟派发（族⑤）
                     _defer_emit(self, lambda tid=tool_call_id: self.toolDiffRequested.emit(tid))
+                except Exception:
+                    pass
+            elif "tool_body:" in msg:
+                # 工具块展开：请求该块的 body 内容（惰注入，见 render_tool_block
+                # 的 lazy_body）。Page 拿不到 Viewer 的渲染源，转信号由
+                # CodeWebViewer._serve_tool_body 反查 markdown 重渲染。
+                try:
+                    _tool_body_id = msg.split("tool_body:", 1)[1].strip()
+                    # [T43] 延迟派发（族⑤）
+                    _defer_emit(self, lambda t=_tool_body_id: self.toolBodyRequested.emit(t))
                 except Exception:
                     pass
             elif "subagent_log:" in msg:
@@ -1011,6 +1022,7 @@ class CodeWebViewer(QWebEngineView):
         self._page.cardReadingChanged.connect(self._on_card_reading_changed)
         self._page.contentReady.connect(self._on_js_ready)
         self._page.toolDiffRequested.connect(self.toolDiffRequested)
+        self._page.toolBodyRequested.connect(self._serve_tool_body)
         self._page.subAgentLogRequested.connect(self.subAgentLogRequested)
         self._page.saveFileRequested.connect(self.saveFileRequested)
         self._page.chartExpandRequested.connect(self.chartExpandRequested)
@@ -1148,6 +1160,61 @@ class CodeWebViewer(QWebEngineView):
     @property
     def _tool_target_id(self) -> str:
         return "tool-content" if self._tool_compact_mode else "content-placeholder"
+
+    @property
+    def _tool_lazy_body(self) -> bool:
+        """工具块 body 是否懒注入（不可见时不构造内容，展开时再请求）。
+
+        两种场景下工具块内容用户看不见，构造了纯占内存（DOM 内存大头：
+        pygments 高亮实测膨胀 12.7 倍，12KB diff → 154KB HTML + 3200 span）：
+        1. 简洁模式：工具块逐个折叠，body 是 height:0 的隐藏层；
+        2. 历史卡：工具区整体折叠（#tool-section[data-collapsed=true]），
+           区内所有块（含 render_mode="expand" 的无折叠态块）全不可见。
+        展开对应容器时 JS 经 tool_body 通道逐块请求（见 _serve_tool_body）。
+        """
+        return self._tool_compact_mode or bool(getattr(self, "_is_history", False))
+
+    def _serve_tool_body(self, tool_call_id: str) -> None:
+        """工具块展开请求：反查渲染源该块，重渲染 body 并注入。
+
+        不可见的工具块 body 只有空占位（见 render_helpers.render_tool_block 的
+        lazy_body），点开或展开工具区时 JS 经 console 通道请求内容。内容从当前
+        渲染源 markdown 反查该 <tool> 段重算，不常驻内存。
+        """
+        tid = (tool_call_id or "").strip()
+        if not tid or not self._is_js_ready:
+            return
+        html = ""
+        try:
+            from app.widgets.card_render_core import (
+                _render_tool_block_content,
+                find_tool_segment_by_call_id,
+            )
+
+            seg = find_tool_segment_by_call_id(self._markdown_text or "", tid)
+            if not seg:
+                # 流式期间刚由 append_tool_result 增量注入的块可能尚未进
+                # _markdown_text，用块级 markdown 缓存兜底。
+                _cache = getattr(self, "_tool_md_cache", None) or {}
+                _cached_md = _cache.get(tid)
+                if _cached_md:
+                    seg = find_tool_segment_by_call_id(_cached_md, tid)
+            if seg:
+                # 绕过 lru_cache：展开结果是一次性大字符串，缓存只会让同一份
+                # 内容再多占一格（完整版渲染已缓存过一份）。
+                html = _render_tool_block_content.__wrapped__(
+                    seg, compact=self._tool_compact_mode, body_only=True
+                )
+        except Exception as e:
+            logger.warning(f"[tool-body] 反查渲染工具块失败 {tid}: {e}")
+        try:
+            page = self.page()
+            if page is None:
+                return
+            payload = base64.b64encode((html or "").encode("utf-8")).decode("ascii")
+            page.runJavaScript(f"window._fillToolBody({_js_literal(tid)}, {_js_literal(payload)});")
+        except RuntimeError:
+            pass
 
     def _handle_context_lost(self):
         """JavaScript 报告上下文丢失"""
@@ -3631,6 +3698,84 @@ class CodeWebViewer(QWebEngineView):
                     window._collapsibleAnimId = requestAnimationFrame(tick);
                 }}
 
+                // ===== 工具块 body 懒注入（折叠态 / 工具区整体折叠时的全部块）=====
+                // 不可见的工具块 body 只留空占位，内容不构造：折叠/隐藏态下这些节点
+                // 纯占内存（pygments 高亮实测膨胀 12~13 倍：12KB diff → 154KB HTML）。
+                // 展开时经 console 通道请求该块内容（Python 侧 _serve_tool_body 反查
+                // markdown 重渲染），回调用 window._fillToolBody 注入。
+                window._requestToolBodyFor = function (block, expand) {{
+                    if (!block) return;
+                    var cid = block.dataset.toolCallId || '';
+                    if (!cid || block.dataset.lazyLoading === '1') return;
+                    block.dataset.lazyLoading = '1';
+                    if (expand) block.dataset.lazyExpand = '1';
+                    console.log('pywebview_action:tool_body:' + cid);
+                    // 失败兜底：Python 侧没回（异常 / 块源此时不可用）时清掉 loading
+                    // 标记，允许用户再点一次；已点开的顺便把空 body 展开到自洽态
+                    setTimeout(function () {{
+                        if (!block.dataset || block.dataset.lazyLoading !== '1') return;
+                        delete block.dataset.lazyLoading;
+                        if (block.dataset.lazyExpand === '1') {{
+                            delete block.dataset.lazyExpand;
+                            startCollapsibleAnimation();
+                            animateCollapsible(block, true);
+                        }}
+                    }}, 2000);
+                }};
+                window._requestLazyToolBodiesIn = function (root) {{
+                    if (!root || typeof window._requestToolBodyFor !== 'function') return;
+                    var blocks = root.querySelectorAll('.tool-block[data-lazy-body="1"]');
+                    for (var i = 0; i < blocks.length; i++) {{
+                        window._requestToolBodyFor(blocks[i], false);
+                    }}
+                }};
+                // 工具区当前可见时，确保区内所有惰注入块都拿到内容。
+                // 触发场景不止用户手动展开：流式新工具自动展开（_updateToolSectionHeader）、
+                // 坞态沉底（_setStreamingDock）、历史卡初始可见（sessionStorage 恢复）。
+                // 折叠态直接跳过。rAF 合并，避开 reorganizeContent 每轮全量扫。
+                var _ensureVisibleToolBodiesPending = false;
+                window._ensureVisibleToolBodies = function () {{
+                    if (_ensureVisibleToolBodiesPending) return;
+                    _ensureVisibleToolBodiesPending = true;
+                    requestAnimationFrame(function () {{
+                        _ensureVisibleToolBodiesPending = false;
+                        var ts = document.getElementById('tool-section');
+                        if (!ts || ts.getAttribute('data-collapsed') === 'true') return;
+                        if (ts.style.display === 'none') return;
+                        window._requestLazyToolBodiesIn(document.getElementById('tool-content'));
+                    }});
+                }};
+                window._fillToolBody = function (callId, b64) {{
+                    var block = null;
+                    var nodes = document.querySelectorAll('.tool-block[data-tool-call-id]');
+                    for (var i = 0; i < nodes.length; i++) {{
+                        if (nodes[i].dataset.toolCallId === callId) {{ block = nodes[i]; break; }}
+                    }}
+                    if (!block) return;
+                    delete block.dataset.lazyLoading;
+                    var html = '';
+                    try {{ html = b64 ? _b64DecodeUtf8(b64) : ''; }} catch (err) {{ html = ''; }}
+                    if (!html) {{ delete block.dataset.lazyExpand; return; }}
+                    var isCollapsible = block.classList.contains('cm-collapsible');
+                    var wantExpand = block.dataset.lazyExpand === '1' || block.dataset.expanded === 'true';
+                    delete block.dataset.lazyExpand;
+                    delete block.dataset.lazyBody;
+                    var body = block.querySelector('.cm-collapsible__body') ||
+                               block.querySelector('.tool-block__body');
+                    if (!body) return;
+                    body.innerHTML = html;
+                    // 注入内容的后处理：表格滚动包裹 / 图表初始化 / svg 工具栏
+                    try {{ if (window._wrapTablesIn) window._wrapTablesIn([body]); }} catch (err) {{}}
+                    try {{ if (window._initEchartsIn) window._initEchartsIn([body]); }} catch (err) {{}}
+                    try {{ if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars([body]); }} catch (err) {{}}
+                    if (isCollapsible && wantExpand) {{
+                        startCollapsibleAnimation();
+                        animateCollapsible(block, true);
+                    }} else if (!isCollapsible) {{
+                        reportHeightDebounced();
+                    }}
+                }};
+
                 // 折叠动画期间暂停高度报告，避免卡片抖动
                 let _collapsibleHeightReporting = false;
                 function startCollapsibleAnimation() {{
@@ -3726,6 +3871,11 @@ class CodeWebViewer(QWebEngineView):
                             : block.dataset.expanded === 'true';
                         const body = block.querySelector('.cm-collapsible__body');
                         syncExpandedAttrs(block, !!expanded);
+                        // 懒注入块：重渲染后 body 又是空占位，展开态需重新请求内容
+                        if (expanded && block.dataset.lazyBody === '1') {{
+                            window._requestToolBodyFor(block, true);
+                            continue;
+                        }}
                         if (body) {{
                             body.style.transition = 'none';
                             if (expanded) {{
@@ -4786,6 +4936,8 @@ class CodeWebViewer(QWebEngineView):
                         _tsEl.setAttribute('data-collapsed', 'false');
                         separator.setAttribute('aria-expanded', 'true');
                     }}
+                    // 工具有内容且区可见 → 顶部新出现的惰注入块此刻才需要构造内容
+                    if (typeof window._ensureVisibleToolBodies === 'function') window._ensureVisibleToolBodies();
                 }}
 
                 function reorganizeContent() {{
@@ -5093,6 +5245,8 @@ class CodeWebViewer(QWebEngineView):
                     _beginToolSectionTransition();
                     toolSection.setAttribute('data-collapsed', collapsed ? 'false' : 'true');
                     sep.setAttribute('aria-expanded', collapsed ? 'true' : 'false');
+                    // 展开工具区：区内懒注入块的 body 内容此刻才需要构造
+                    if (collapsed) window._requestLazyToolBodiesIn(document.getElementById('tool-content'));
                     try {{ sessionStorage.setItem('_toolSectionCollapsed', collapsed ? '0' : '1'); }} catch(_err) {{}}
                 }}
                 // SVG 图形节点也要能挂 .context-tag：<g class="context-tag"
@@ -5141,9 +5295,22 @@ class CodeWebViewer(QWebEngineView):
                     if (summary) {{
                         const block = summary.closest('.cm-collapsible');
                         if (block) {{
+                            const _expand = block.dataset.expanded !== 'true';
+                            // 懒注入块：body 内容还没构造，先向 Python 请求，注入后再展开
+                            // （展开动画读 body.scrollHeight，DOM 必须先有内容）。
+                            // typeof 守卫：旧骨架（无请求函数）降级为直接展开空 body，
+                            // 不能因函数缺失而永远展不开。
+                            if (
+                                _expand &&
+                                block.dataset.lazyBody === '1' &&
+                                typeof window._requestToolBodyFor === 'function'
+                            ) {{
+                                window._requestToolBodyFor(block, true);
+                                return;
+                            }}
                             // 动画开始前暂停高度报告
                             startCollapsibleAnimation();
-                            animateCollapsible(block, block.dataset.expanded !== 'true');
+                            animateCollapsible(block, _expand);
                         }}
                         return;
                     }}
@@ -5205,6 +5372,11 @@ class CodeWebViewer(QWebEngineView):
                         }});
                     }}
                     reportHeight();
+                    // 初始即可见的工具区（sessionStorage 恢复展开 / 无记录默认展开）
+                    // 里可能有惰注入块，首帧后补一次内容
+                    if (typeof window._ensureVisibleToolBodies === 'function') {{
+                        requestAnimationFrame(window._ensureVisibleToolBodies);
+                    }}
                     // 使用防抖的 ResizeObserver，避免频繁触发高度更新
                     let resizeTimeout = null;
                     new ResizeObserver(() => {{
@@ -6043,6 +6215,7 @@ class CodeWebViewer(QWebEngineView):
             html_content = _render_markdown_to_html_cached(
                 raw_md,
                 compact=self._tool_compact_mode,
+                lazy_body=self._tool_lazy_body,
             )
             # 将图片相对路径转为绝对 file:/// 路径
             html_content = _resolve_image_src(html_content)
@@ -6070,6 +6243,7 @@ class CodeWebViewer(QWebEngineView):
             self._streaming is False,
             compact=self._tool_compact_mode,
             suppress=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
+            lazy_body=self._tool_lazy_body,
         )
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
         processed_md = _inject_tag_cards(processed_md, self._streaming is False, compact=self._tool_compact_mode)
@@ -6568,7 +6742,7 @@ class CodeWebViewer(QWebEngineView):
                     # 的 compact 对齐——否则差量段硬编码 compact=False 会把思考块渲染成
                     # think-block 折叠框（简洁模式下应为 think-compact），形态分裂
                     # （9c76d04f 只给 _render_stable_segment 加了参数，调用点漏改）。
-                    new_html = "".join(_render_stable_segment(seg, compact=self._tool_compact_mode) for seg in segs)
+                    new_html = "".join(_render_stable_segment(seg, compact=self._tool_compact_mode, lazy_body=self._tool_lazy_body) for seg in segs)
                     self._stable_md_len += stable_len
                     self._stable_html += new_html
                     # ⚠️ updateContentAppend 是"追加"语义：只推送本次新增段，
@@ -6788,6 +6962,7 @@ class CodeWebViewer(QWebEngineView):
             "pygments_style": _style,
             "icon_prefix": current_icon_prefix(),
             "heavy_caps": _HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
+            "lazy_body": self._tool_lazy_body,
             "code_font_size": _CODE_FONT_SIZE,
             # 协议段指纹去重（frozenset 快照，worker 线程只读安全）：
             # 流式渲染时未闭合协议段指纹命中已完成工具后不渲染占位框（防与真实完成块重复）
@@ -7325,7 +7500,7 @@ class CodeWebViewer(QWebEngineView):
             if md[self._stable_md_len :].strip():
                 stable_len, segs = _extract_closed_segments(md[self._stable_md_len :])
                 if segs:
-                    new_html = "".join(_render_stable_segment(s, compact=self._tool_compact_mode) for s in segs)
+                    new_html = "".join(_render_stable_segment(s, compact=self._tool_compact_mode, lazy_body=self._tool_lazy_body) for s in segs)
                     self._stable_md_len += stable_len
                     self._stable_html += new_html
                 rest = md[self._stable_md_len :]

@@ -4591,6 +4591,8 @@ class MessageCard(SimpleCardWidget):
                 tool_call_id=tool_call_id,
                 diff=diff,
                 echarts=echarts,
+                # 折叠/不可见时 body 只出空占位（展开时由 viewer 反查注入）
+                lazy_body=self.viewer._tool_lazy_body if self.viewer else False,
             )
             # 🆕 方案 D：计算完成态工具块的 data-order（与 _inject_tool_streaming_html
             # 同口径）。无锚点（历史会话等非流式路径）→ 基准取当前末尾位置，与

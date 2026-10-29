@@ -592,6 +592,19 @@ def content_to_markdown(content: Any) -> str:
             if text:
                 parts.append(text)
         elif block_type == "tool_result":
+            # 渲染源瘦身：inline（单行卡：无折叠、无 body）与 none（不渲染）形态的块，
+            # UI 完全不展示结果内容 —— 结果只服务模型上下文。这类字段（result/diff/
+            # echarts）不进渲染用 markdown：markdown 变短 → 每轮重渲染少扫一遍。
+            # 形态由插件注册的 render_mode 声明，主程序不按工具名写死。
+            try:
+                from app.tools.registry import ToolRegistry
+
+                _render_mode = ToolRegistry.get_instance().get_render_mode(block.get("name", ""))
+            except Exception:
+                _render_mode = ""
+            if _render_mode == "none":
+                continue
+            _hide_payload = _render_mode == "inline"
             # 直接从 block 中提取关键参数，避免 JSON 序列化问题
             args = block.get("arguments", {}) or {}
 
@@ -635,6 +648,8 @@ def content_to_markdown(content: Any) -> str:
             # question 工具的回答可能包含多个问题，不截断
             if block.get("name") == "question":
                 result_escaped = _sanitize_result(result_raw)
+            elif _hide_payload:
+                result_escaped = ""
             else:
                 result_escaped = _sanitize_result(result_raw)[:300]
 
@@ -642,14 +657,14 @@ def content_to_markdown(content: Any) -> str:
             tool_call_id = block.get("tool_call_id", "")
 
             # 读取 diff 字段（用于 inline diff 展示）
-            diff_raw = block.get("diff", "") or ""
+            diff_raw = "" if _hide_payload else (block.get("diff", "") or "")
             diff_escaped = ""  # 显式初始化，避免 LSP 误报未绑定
             if diff_raw:
                 # diff 多行内容，直接嵌入
                 diff_escaped = _sanitize_result(str(diff_raw))
 
             # 读取 echarts 字段（用于 DAG 图展示）
-            echarts_raw = block.get("echarts", "") or ""
+            echarts_raw = "" if _hide_payload else (block.get("echarts", "") or "")
 
             tool_lines = [
                 "<tool>",

@@ -140,6 +140,7 @@ from app.widgets.render_helpers import (
     _get_tool_icon,
     _get_tool_icon_html,
     _reg_metadata_flag,
+    _render_inline_tool,
     get_tool_qrc_prefix,
     render_tool_block,
 )
@@ -2487,15 +2488,49 @@ def _inject_tag_cards(md_text: str, completed: bool = True, compact: bool = Fals
 # 2026-09-09 内存治理：大会话卡 HTML 达 120~473KB，大头是工具块 diff/echarts。
 _HISTORY_TOOL_CAPS = (800, 3000, 8000)
 
+def find_tool_segment_by_call_id(md_text: str, tool_call_id: str) -> str | None:
+    """从渲染源 markdown 中定位指定 tool_call_id 的 <tool> 协议段。
+
+    折叠块懒注入用：折叠态 body 只留空占位（见 render_helpers.render_tool_block
+    的 lazy_body），展开时用本函数找回该块的原始协议文本，重新渲染出内容注入。
+
+    fence 内的 <tool> 是代码示例，先经哨兵摘除再扫，避免命中假块；
+    tool_call_id 取段内最后一个字段行匹配（与 _render_tool_block_content 的
+    "字段行取最后匹配"口径一致）。
+    """
+    if not md_text or not tool_call_id:
+        return None
+    try:
+        _fences, safe_md = _extract_fenced_code(md_text)
+    except Exception:
+        safe_md = md_text
+    i = 0
+    while True:
+        start = safe_md.find("<tool>", i)
+        if start == -1:
+            return None
+        end = safe_md.find("</tool>", start + len("<tool>"))
+        if end == -1:
+            return None
+        seg = safe_md[start : end + len("</tool>")]
+        _ids = _TOOL_ID_PATTERN.findall(seg)
+        if _ids and _ids[-1].strip() == tool_call_id:
+            return seg
+        i = end + len("</tool>")
+
 
 @lru_cache(maxsize=128)
-def _render_tool_block_content(content: str, compact: bool = False, heavy_caps=None) -> str:
+def _render_tool_block_content(
+    content: str, compact: bool = False, heavy_caps=None, lazy_body: bool = False, body_only: bool = False
+) -> str:
     """
     渲染工具块内容为HTML。
 
     Args:
         content: 原始 tool 块标记文本
         compact: 简洁模式标志，True 则工具块默认折叠，False 默认展开
+        lazy_body: 折叠态 body 只输出空占位（内容不构造，省 DOM 内存）
+        body_only: 只返回 body 内部 HTML（懒注入时取展开内容用）
 
     解析格式：
     <tool>
@@ -2599,6 +2634,40 @@ def _render_tool_block_content(content: str, compact: bool = False, heavy_caps=N
         _id_match = _im
     if _id_match:
         tool_call_id = _id_match.group(1).strip()
+
+    # ── 形态短路（inline / none）：无 body、不渲染结果，result/diff/echarts 免解析 ──
+    # read/glob/list 这类 render_mode="inline" 的块只出单行 header（无折叠、无 body、
+    # 无结果内容），"none" 干脆不渲染。旧流程仍要先把 result / diff(几十 KB) /
+    # echarts 全解析一遍才在 render_tool_block 里发现形态，这段解析纯浪费。
+    try:
+        from app.tools.registry import ToolRegistry
+
+        _render_mode_fast = ToolRegistry.get_instance().get_render_mode(tool_name)
+    except Exception:
+        _render_mode_fast = ""
+    if _render_mode_fast == "none":
+        return ""
+    if _render_mode_fast == "inline":
+        _quick_args = {}
+        if tool_args_str:
+            try:
+                _quick_args = json.loads(tool_args_str)
+                if not isinstance(_quick_args, dict):
+                    _quick_args = {}
+            except json.JSONDecodeError:
+                _quick_args = _extract_args_by_regex(tool_args_str)
+        else:
+            _quick_args = _extract_args_by_regex(content)
+        # 预览是单行文案：参数里的换行转字面量，避免撑破单行布局
+        for _k, _v in list(_quick_args.items()):
+            if isinstance(_v, str):
+                _quick_args[_k] = _v.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+        return _render_inline_tool(
+            tool_name=tool_name,
+            tool_args=_quick_args,
+            success=tool_success,
+            tool_call_id=tool_call_id,
+        )
 
     # ========== 解析 result（定位从 args JSON 闭合之后开始） ==========
     # result 终点 = 各字段最后匹配位置的最小值（须在 result 之后）；
@@ -2712,6 +2781,8 @@ def _render_tool_block_content(content: str, compact: bool = False, heavy_caps=N
         tool_call_id=tool_call_id,
         diff=diff_content,
         echarts=echarts_content,
+        lazy_body=lazy_body,
+        body_only=body_only,
     )
 
 
@@ -2971,6 +3042,7 @@ def _inject_tool_blocks(
     compact: bool = False,
     heavy_caps=None,
     suppress: frozenset = None,
+    lazy_body: bool = False,
 ) -> str:
     """注入工具块HTML，类似think块
 
@@ -2978,6 +3050,8 @@ def _inject_tool_blocks(
         suppress: 已完成工具指纹集合（_tool_fingerprint 产物）。未闭合协议段
             指纹命中时静默丢弃（模型对已完成调用的照抄，渲染出来只会与真实
             完成块重复）。仅流式渲染路径传入。
+        lazy_body: 折叠态工具块 body 只留空占位，内容展开时按需注入
+            （见 render_helpers.render_tool_block 的 lazy_body）。
     """
     if not md_text:
         return md_text
@@ -3002,7 +3076,11 @@ def _inject_tool_blocks(
             # 渲染成卡会与真实完成块内容重复，且空 id 使去重/清理判据失效、
             # 每次全量渲染累积一张（probe4 实证终态 3 块）。一律丢弃。
             if _TOOL_ID_PATTERN.search(content):
-                parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
+                parts.append(
+                    _render_tool_block_content(
+                        content, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
+                    )
+                )
             i = end_idx + len("</tool>")
         elif not _TOOL_PROTOCOL_HEAD_RE.match(content_head):
             # 🐛 修复（字面 `<tool>` 吞掉正文，2026-10-29）：正文里提到协议标签
@@ -3048,7 +3126,11 @@ def _inject_tool_blocks(
                         )
                     )
             if _rest:
-                parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps, suppress))
+                parts.append(
+                    _inject_tool_blocks(
+                        _rest, completed, compact, heavy_caps, suppress, lazy_body=lazy_body
+                    )
+                )
             break
     return "".join(parts)
 
@@ -3267,7 +3349,7 @@ _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
     maxsize=32
 )  # 16→32（T16）：key 加 theme_ver 尾参后深浅两版各占一份；>200KB 大文本已走 __wrapped__ 绕过缓存
 def _render_markdown_to_html_cached_impl(
-    raw_md: str, compact: bool = False, heavy_caps=None, theme_ver: int = 0
+    raw_md: str, compact: bool = False, heavy_caps=None, theme_ver: int = 0, lazy_body: bool = False
 ) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
@@ -3276,6 +3358,7 @@ def _render_markdown_to_html_cached_impl(
     同一 markdown 在深/浅主题下各存一份渲染结果，来回切换直接命中。
     默认值 0 供直接调用（历史测试/无主题上下文场景）与 __wrapped__ 绕过分支
     保持旧签名兼容；生产路径由 _render_markdown_to_html_cached 显式传入。
+    lazy_body：折叠态工具块 body 只出空占位（影响产物 → 必须进缓存 key）。
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _protect_inline_svg_blocks(safe_md)
@@ -3285,7 +3368,9 @@ def _render_markdown_to_html_cached_impl(
     # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, True, compact=compact, heavy_caps=heavy_caps)
+    processed_md = _inject_tool_blocks(
+        processed_md, True, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
+    )
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     processed_md = _restore_fenced_code(processed_md, _fences)
@@ -3300,7 +3385,9 @@ def _render_markdown_to_html_cached_impl(
         return f"<pre>{escape(raw_md)}</pre>"
 
 
-def _render_markdown_to_html_cached(raw_md: str, compact: bool = False, heavy_caps=None) -> str:
+def _render_markdown_to_html_cached(
+    raw_md: str, compact: bool = False, heavy_caps=None, lazy_body: bool = False
+) -> str:
     """
     带内存保护的 Markdown 渲染函数。
     - 对于超过阈值的文本，跳过缓存直接渲染
@@ -3313,14 +3400,18 @@ def _render_markdown_to_html_cached(raw_md: str, compact: bool = False, heavy_ca
     # 大文本跳过缓存，防止内存膨胀 — 用 __wrapped__ 绕过 LRU，不清空缓存
     text_size = len(raw_md.encode("utf-8"))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
-        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact, heavy_caps=heavy_caps)
+        return _render_markdown_to_html_cached_impl.__wrapped__(
+            raw_md, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
+        )
 
     # [T16] 主题版本入 key：按 (theme_ver, raw_md, compact, heavy_caps) 分桶，
     # 深浅主题各自缓存各自的渲染结果（get_version 内部有锁，线程安全）
     from app.utils.theme_refresh import ThemeRefreshCoordinator
 
     theme_ver = ThemeRefreshCoordinator.get_version()
-    return _render_markdown_to_html_cached_impl(raw_md, compact=compact, heavy_caps=heavy_caps, theme_ver=theme_ver)
+    return _render_markdown_to_html_cached_impl(
+        raw_md, compact=compact, heavy_caps=heavy_caps, theme_ver=theme_ver, lazy_body=lazy_body
+    )
 
 
 # ============================================================
@@ -3387,6 +3478,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     compact = snapshot["compact"]
     icon_prefix = snapshot["icon_prefix"]
     heavy_caps = snapshot.get("heavy_caps")  # 历史卡重负载上限（None=不限）
+    lazy_body = snapshot.get("lazy_body", False)  # 折叠块 body 懒注入
 
     if not streaming:
         # 非流式分支（历史加载 / 流式结束调用方已切非流式）
@@ -3397,7 +3489,9 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
         _fences, safe_md = _extract_fenced_code(safe_md)
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
-        processed_md = _inject_tool_blocks(processed_md, True, compact=compact, heavy_caps=heavy_caps)
+        processed_md = _inject_tool_blocks(
+            processed_md, True, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
+        )
         processed_md = _inject_hook_blocks(processed_md, True)
         processed_md = _inject_tag_cards(processed_md, True, compact=compact)
         processed_md = _restore_fenced_code(processed_md, _fences)
@@ -3426,7 +3520,11 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
     processed_md = _inject_tool_blocks(
-        processed_md, False, compact=compact, suppress=snapshot.get("tool_fingerprints")
+        processed_md,
+        False,
+        compact=compact,
+        suppress=snapshot.get("tool_fingerprints"),
+        lazy_body=lazy_body,
     )
     processed_md = _inject_hook_blocks(processed_md, False)
     processed_md = _inject_tag_cards(processed_md, False, compact=compact)
@@ -3607,7 +3705,12 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v47）：移除预览文字打字机（_PREVIEW_TYPEWRITER_JS：
 # window._pt/_ptType/_ptPlay + 全部 [data-dfx-preview] 标记 + 三处渲染路径调用）。
 # 预览/思考预览行改为渲染落地即全显，不再逐字。旧骨架仍带 _pt 资产与调用必须失效。
-_SKELETON_CACHE_VERSION = 49
+# _SKELETON_CACHE_VERSION +1（v50）：工具块 body 懒注入通道——新增
+# window._requestToolBodyFor / _requestLazyToolBodiesIn / _fillToolBody，
+# summary 点击分支与 _toggleToolSection 展开、restoreCollapsibleStates 接入。
+# 不可见工具块 body 只留空占位（render_tool_block 的 lazy_body），旧骨架无注入
+# 函数 → 占位块展开后永久空白，必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 50
 
 
 def _js_literal(value) -> str:
@@ -3914,7 +4017,7 @@ def _extract_closed_segments(md: str):
     return stable_len, segments
 
 
-def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
+def _render_stable_segment(md_seg: str, compact: bool = False, lazy_body: bool = False) -> str:
     """B1: 渲染单个闭合段为 HTML（差量增量渲染的段落级快速路径）。
 
     与 _render_markdown_to_html_worker 管线一致（sanitize→inject→md.convert→
@@ -3940,7 +4043,7 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=compact, lazy_body=lazy_body)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     processed_md = _restore_fenced_code(processed_md, _fences)
