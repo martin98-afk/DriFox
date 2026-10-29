@@ -1,13 +1,21 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [未发布]
+## [v0.6.13-beta] - 2026-10-29
+
+自 v0.6.12 以来的变更 | 提交数：31 · 文件变更：148 · +12321/-3414 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+
 ### ✨ 新功能 (New Features)
 - **主题风格选择改为网格预览卡** (`app/widgets/cards/settings/theme_style_card.py` 新增 · `llm_settings_card.py`): 系统设置「主题风格」从一列单选框换成展开式网格预览，每格画出该主题的 window 渐变底、按放大后不透明度叠加的主题背景图与 accent 主色条，主题名写在格内；点格子即切换（走 `Settings.set(..., save=True)` 落盘），选中格描 accent 边并打角标勾。列数按可用宽度在 2~4 间自适应，深/浅模式各自过滤主题列表。
 - **OS 级沙箱（macOS Seatbelt）**: 安全中心新增「OS 级沙箱（macOS）」开关与档位（挡写入 / 挡写入+禁网）。开启后 agent 命令（bash 工具与后台任务）经 `sandbox-exec` 包装执行，工作区与系统临时目录外写入、可选联网在内核层被拒；与应用层沙箱审批正交（审批决定要不要问，OS 沙箱决定进程实际能碰什么）。非 macOS 平台自动直通。新增回归测试 `tests/core/test_os_sandbox.py`。
 - **能力池新增历史 / 项目 / 团队会话面** (`app/plugins/capabilities/catalog.py` · `providers/history_core.py`): 新增 `session.history`（持久化历史只读面：列表 / 归档 / 项目聚合 / 按 session_id 定位 / 团队会话查询）、`session.history.write`（置顶 / 移动项目 / 归档 / 恢复 / 删除 / 导入）、`project.read`（当前项目 / 清单 / 元数据 / 根目录）、`project.write`（切换 / 新建 / 归档 / 导入导出 / 打开文件夹 / 拖拽）、`team.session`（团队会话恢复 / 归档 / 进入成员会话）五条能力，并把此前「catalog 登记了却没有 provider」的 `session.manage` 补成真实实现（`select(session_id)` / `new()`）。写能力内部承担宿主联动（工作目录同步 + 团队广播 + 历史页刷新 + 跨窗口通知），插件不再反射窗口私有方法。
 - **新增 `project.workdir` 能力** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py`): 写库式切换项目工作目录，封装「关键文档登记 + 工作目录持久化 + 根目录标记恢复」三步。与既有 `workdir.write`（只改会话内状态：实例缓存 + tool_executor + 团队广播 + UI 同步，进程重启即失效）互补，worktree 切换两者配合使用。根目录标记恢复规则（旧目录本身是 worktree 时跳过，否则记忆卡片根目录会被指到 worktree 上）从插件侧搬进主程序并加单测锚定。
 - **消息卡片成果栏四项增强** (`app/widgets/inline_artifact_panel.py` · `app/widgets/message_card.py` · `app/core/workers/chat_worker.py` · `app/core/conversation/message_content.py` · `app/widgets/ui_helpers.py`): ①折叠态缩略图带（图片成果折叠时直接可见，最多 5 张 + N，点击预览）；②左键按住行可拖拽导出（mime urls，拖到资源管理器/聊天窗口即引用文件；单击预览改到抬起，与拖拽不冲突）；③落库与历史恢复（`artifacts` 进 tool 消息与归一化白名单，重开会话后成果栏从历史重建，条目数/字段封顶防 BLOB 膨胀）；④超过 20 条的溢出提示可点击展开全部。
+- **流式渲染 live streaming 通道与性能探针** (`775cebaa` · `dc28ac28` · `394ba8da`): 消息渲染增强流式直播支持（live streaming），新增 v2 渲染块级测试与问题探针（`tests/debug/_probe_*`）。
+- **工具块 body 懒加载** (`befa91b0`): 工具调用块可视主体延迟构建，长会话与批量工具调用显著降低初始渲染成本。
+- **插话撤回与恢复** (`79fda3c9` · `3037ce2f`): ChatBackend/ChatWorker 实现插话（interject）撤回与恢复机制；用户消息 hook 在插话时触发。
+- **工具结果 JSON 整形与规范化 tiers** (`ee899531`): 上下文 tier 链新增 JSON shaping/normalization 层，工具结果统一整形后再入上下文。
+- **worker 生命周期硬限制** (`0b57c27e`): 对 worker 存活时长与并发运行任务数设硬上限，防资源泄漏。
 
 ### ♻️ 代码重构 (Refactoring)
 - **云同步换 LWW + 墓碑，退役三方合并与本地 base** (`app/core/sync/lww.py` · `app/core/sync/meta_recorder.py` 新增 · `app/core/sync/merge.py` 删除 · `app/core/sync/config_sync.py` · `app/utils/config.py`): 每个同步条目带 `{h: 内容指纹, t: Lamport 计数, d: 墓碑}` 元数据，合并逐条目比 `t`，大者胜、胜者为墓碑即删除。判断「这是删除还是漏写」不再依赖 base、也不再按递归深度猜结构（旧 `allow_delete = depth >= 3` 与实际扁平结构差一层，dict 型集合的条目删除永远不传播，删掉的服务商下次同步就复活）。app.config 的条目表存进新增配置项 `System.SyncMeta`，随配置一次 PUT 原子上云；zip 单元（user-custom / ext:*）的条目表作为保留条目 `.__drifox_sync__.json` 打进包内，解压时剔除不落地。Lamport 计数与设备时钟无关。老版本客户端重写 app.config 会抹掉 `SyncMeta`，此时退化为 union 合并（不丢数据，仅删除暂不传播，升级后恢复）。新增 `tests/core/test_sync_lww.py`（25 条）与 `tests/core/test_sync_meta_recorder.py`（11 条）。
@@ -23,6 +31,10 @@ All notable changes to this project will be documented in this file.
 - **成果栏多次推送互相覆盖丢条目** (`app/widgets/message_card.py: update_artifact_list`): 卡片侧整体替换 `_artifact_panel_items`，而同轮多次工具产出与异步任务回填（`ui.artifacts.show(target="call")`）每次只带增量 → 后到的把先到的顶掉（宿主注释写的是「追加」，实现是替换）。改为按 `path` 合并（同路径原位更新、新路径追加保序），空列表不再隐含清空，显式清理走 `clear_artifact_list()`。
 - **成果栏非图片条目徽标是空白色块** (`app/widgets/inline_artifact_panel.py: _KindBadge`): 构造期只设了尺寸与颜色，没 `setText`，且主题刷新遍历的是列表根节点（徽标是行的子控件，永远命中不到）。徽标字与样式改到构造期落地，刷新路径改为遍历行内徽标。
 - **缩略图解码队列会丢机会**: 折叠或快速切换时 `_decode_next_thumb` 已 pop 的条目因控件不可见直接丢弃，再展开时队列已空 → 该图永驻占位符。改为队首不可见就不取，折叠带与列表各用独立队列。
+- **历史折叠随卡片池复用重放；插件 UI 卸载回主线程** (`5fd1df45`): 骨架重建后 `data-collapsed` 回到初始值而折叠标记未失效，历史折叠在卡片池复用/重建后丢失或误放；改为 viewer 生命周期内只应用一次并在绑定后重放。插件市场卸载 UI 统一经 `run_on_main_thread` 回主线程执行（`plugin_host_service` 新增），配套回归测试三件。
+- **云同步目录单元元数据迁移** (`528077d0` · `87cb8937`): 目录单元缺元数据时补一次迁移上传，且迁移只推被标记脏的单元（LWW 新链路收尾补丁）。
+- **gitee 弹出定位与边距** (`680242fc`): 调整弹窗定位与边距，避免屏幕边缘裁切。
+- **滚动诊断增强** (`dc9f284f`): 滚动行为与状态跟踪补诊断打点，便于后续回归定位。
 
 ## [v0.6.12] - 2026-10-27 (重新发布 #8)
 
