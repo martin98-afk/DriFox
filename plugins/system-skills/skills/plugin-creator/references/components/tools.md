@@ -134,9 +134,10 @@ return ToolResult(True, content="已导出", artifacts=[
 ```
 
 条目形状：`{path, kind?, name?, width?, height?, size?, caption?, meta?}`；
-kind ∈ image/video/html/text/file；空列表隐藏成果区。只有异步任务晚于轮次
-结束、需要回填发起轮次原卡时，才显式声明 `ui.artifacts.show` 并调
-`show(items, target="call", call_id=tool_ctx["call_id"])`。
+kind ∈ image/video/html/text/file；空列表不改变已有成果。推送按 `path` 合并累积：
+同轮多次工具产出、异步任务回填原卡都只带本次增量即可，不会覆盖该轮已有条目。
+只有异步任务晚于轮次结束、需要回填发起轮次原卡时，才显式声明 `ui.artifacts.show`
+并调 `show(items, target="call", call_id=tool_ctx["call_id"])`。
 
 ### 图标自包含
 

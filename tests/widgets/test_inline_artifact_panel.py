@@ -254,5 +254,162 @@ def test_ui_provider_missing_card_zero(qapp):
     assert provider([{"path": "/tmp/a.png"}]) == 0
 
 
+# ── 合并语义（修覆盖丢条目）──
+
+def test_card_artifact_list_merges_instead_of_replacing(qapp):
+    """同轮多次推送必须累积：旧实现整体替换，后到的会把先到的顶掉"""
+    from app.widgets.message_card import MessageCard
+
+    card = MessageCard(role="assistant")
+    try:
+        card.update_artifact_list([{"path": "/tmp/a.png"}, {"path": "/tmp/b.png"}])
+        card.update_artifact_list([{"path": "/tmp/c.png"}])
+        assert [it["path"] for it in card._artifact_panel_items] == ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"]
+    finally:
+        card.deleteLater()
+
+def test_card_artifact_list_updates_same_path_in_place(qapp):
+    """同路径重复推送原位更新，不改变顺序"""
+    from app.widgets.message_card import MessageCard
+
+    card = MessageCard(role="assistant")
+    try:
+        card.update_artifact_list([{"path": "/tmp/a.png", "size": 1}, {"path": "/tmp/b.png"}])
+        card.update_artifact_list([{"path": "/tmp/a.png", "size": 2}])
+        items = card._artifact_panel_items
+        assert [it["path"] for it in items] == ["/tmp/a.png", "/tmp/b.png"]
+        assert items[0]["size"] == 2
+    finally:
+        card.deleteLater()
+
+def test_card_artifact_list_ignores_empty_push(qapp):
+    """空列表不再隐含清空（显式清理走 clear_artifact_list）"""
+    from app.widgets.message_card import MessageCard
+
+    card = MessageCard(role="assistant")
+    try:
+        card.update_artifact_list([{"path": "/tmp/a.png"}])
+        card.update_artifact_list([])
+        assert len(card._artifact_panel_items) == 1
+        card.clear_artifact_list()
+        assert card._artifact_panel_items == []
+    finally:
+        card.deleteLater()
+
+# ── 折叠态缩略图带 / 溢出展开 / 拖拽 ──
+
+def test_panel_collapsed_strip_lists_only_images(panel):
+    panel.update_artifacts([{"path": "/tmp/a.png"}, {"path": "/tmp/b.png"}, {"path": "/tmp/c.html"}])
+    widgets = [panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count())]
+    thumbs = [w for w in widgets if w is not None and w.metaObject().className() == "QLabel"]
+    assert len(thumbs) == 2, "折叠带只放图片条目"
+    assert not panel._thumb_strip.isHidden(), "折叠态缩略图带应可见"
+
+def test_panel_collapsed_strip_hidden_after_expand(panel):
+    panel.update_artifacts([{"path": "/tmp/a.png"}])
+    panel._on_collapse_clicked()
+    assert panel._thumb_strip.isHidden()
+
+def test_panel_overflow_expand_all(panel):
+    from app.widgets.inline_artifact_panel import MAX_VISIBLE_ITEMS
+
+    panel.update_artifacts(_img_items(25))
+    rows = [panel._list_layout.itemAt(i).widget() for i in range(panel._list_layout.count())]
+    assert len([w for w in rows if w is not None]) == MAX_VISIBLE_ITEMS + 1, "20 行 + 溢出提示"
+    panel._expand_all()
+    rows = [panel._list_layout.itemAt(i).widget() for i in range(panel._list_layout.count())]
+    assert len([w for w in rows if w is not None]) == 25
+
+def test_panel_make_drag_carries_file_url(panel, tmp_path):
+    from PyQt5.QtWidgets import QFrame
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x")
+    drag = panel._make_drag(str(f), QFrame())
+    assert drag is not None
+    from pathlib import Path
+
+    assert [Path(u.toLocalFile()) for u in drag.mimeData().urls()] == [f]
+
+def test_panel_make_drag_missing_file_returns_none(panel, tmp_path):
+    from PyQt5.QtWidgets import QFrame
+
+    assert panel._make_drag(str(tmp_path / "nope.png"), QFrame()) is None
+
+# ── 落库归一化与历史恢复 ──
+
+def test_normalize_message_keeps_artifacts():
+    from app.core.conversation.message_content import normalize_message
+
+    out = normalize_message(
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "name": "gen",
+            "content": "ok",
+            "artifacts": [
+                {
+                    "path": "/tmp/a.png",
+                    "kind": "image",
+                    "width": 1024,
+                    "height": 768,
+                    "meta": {"duration": 3, "note": "x" * 500, "bad": ["list"]},
+                },
+                {"path": "", "kind": "image"},
+                "not-a-dict",
+            ],
+        }
+    )
+    assert out is not None
+    assert len(out["artifacts"]) == 1
+    art = out["artifacts"][0]
+    assert art["path"] == "/tmp/a.png"
+    assert art["kind"] == "image"
+    assert art["width"] == 1024
+    assert len(art["meta"]["note"]) == 200, "meta 长字符串截断"
+    assert "bad" not in art["meta"], "非标量 meta 丢弃"
+
+def test_normalize_artifacts_capped():
+    from app.core.conversation.message_content import normalize_artifact_items
+
+    items = [{"path": f"/tmp/{i}.png"} for i in range(80)]
+    assert len(normalize_artifact_items(items)) == 50
+
+def test_kind_badge_shows_letter(qapp):
+    """徽标必须有字：构造期漏 setText 会渲成空白色块"""
+    from app.widgets.inline_artifact_panel import _KindBadge
+
+    assert _KindBadge("text").text() == "T"
+    assert _KindBadge("file").text() == "文"
+
+def test_render_batch_restores_artifacts():
+    """历史渲染收集 batch 内所有 tool 消息的成果（空 content 的也要收）"""
+    from app.widgets.ui_helpers import render_batch_to_assistant_card
+
+    calls = {}
+
+    class FakeCard:
+        def append_text(self, text, immediate_render=True):
+            calls.setdefault("text", []).append(text)
+
+        def append_tool_result(self, **kwargs):
+            calls.setdefault("tools", []).append(kwargs)
+
+        def update_artifact_list(self, items):
+            calls["artifacts"] = list(items)
+
+        def finish_streaming(self, history=False, immediate=True):
+            calls["finished"] = True
+
+    batch = [
+        {"role": "assistant", "content": "done"},
+        {"role": "tool", "name": "gen", "content": "ok", "tool_call_id": "c1", "artifacts": [{"path": "/tmp/a.png"}]},
+        {"role": "tool", "name": "gen2", "content": "", "tool_call_id": "c2", "artifacts": [{"path": "/tmp/b.png"}]},
+    ]
+    render_batch_to_assistant_card(FakeCard(), batch, immediate_render=False)
+    assert [it["path"] for it in calls["artifacts"]] == ["/tmp/a.png", "/tmp/b.png"]
+    assert len(calls["tools"]) == 1, "空 content 的 tool 消息不渲染工具块"
+    assert calls["finished"] is True
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

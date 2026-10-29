@@ -712,6 +712,52 @@ def normalize_tool_call(tool_call: Any) -> Optional[Dict[str, Any]]:
     return normalized
 
 
+# 工具成果条目的落库上限：条目来自任意插件 dict，原样写入会让 messages BLOB 无限膨胀
+_ARTIFACT_MAX_ITEMS = 50
+_ARTIFACT_TEXT_LIMIT = 300
+_ARTIFACT_META_LIMIT = 8
+
+
+def normalize_artifact_items(raw: Any) -> List[Dict[str, Any]]:
+    """工具成果条目白名单归一化（落库与历史恢复共用）
+
+    只保留展示所需字段并封顶条数/长度：成果栏只需要 path/kind/name/caption/
+    尺寸/meta，其他字段（插件私有数据、大文本）不落库。坏条目静默丢弃。
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw[:_ARTIFACT_MAX_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        clean: Dict[str, Any] = {"path": path[:1024]}
+        for key in ("kind", "name", "caption"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                clean[key] = value.strip()[:_ARTIFACT_TEXT_LIMIT]
+        for key in ("width", "height", "size"):
+            value = item.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                clean[key] = value
+        meta = item.get("meta")
+        if isinstance(meta, dict):
+            clean_meta: Dict[str, Any] = {}
+            for k, v in list(meta.items())[:_ARTIFACT_META_LIMIT]:
+                if not isinstance(k, str):
+                    continue
+                if isinstance(v, str):
+                    clean_meta[k] = v[:200]
+                elif isinstance(v, (int, float, bool)):
+                    clean_meta[k] = v
+            if clean_meta:
+                clean["meta"] = clean_meta
+        out.append(clean)
+    return out
+
+
 def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(message, dict):
         return None
@@ -834,6 +880,11 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["anchors"] = str(message.get("anchors"))
         if message.get("echarts"):
             normalized["echarts"] = str(message.get("echarts"))
+        # 成果条目：重开会话时卡片成果栏据此重建（旧实现只在内存里挂栏，
+        # 切会话/重启后成果不可追溯）
+        artifacts = normalize_artifact_items(message.get("artifacts"))
+        if artifacts:
+            normalized["artifacts"] = artifacts
         return normalized
 
     raw_content = message.get("content", "")

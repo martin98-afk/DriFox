@@ -4,9 +4,10 @@
 展示工具/插件推送的成果条目（生成图片、视频、HTML、文本、任意文件），挂在
 assistant 气泡布局末尾（任务看板之后、页脚之前）。与 ``InlineTodoPanel`` 同构：
 
-1. **默认折叠**：卡片空间宝贵，常态只占「分隔条 + 统计」高度。
+1. **默认折叠**：卡片空间宝贵，常态只占「分隔条 + 统计 + 图片缩略图带」。
 2. **展开全量**：列表不限高、不内滚（QScrollArea sizeHint 缓存会让宿主高度链
-   拿到滞后值，见 InlineTodoPanel 同款注释）。
+   拿到滞后值，见 InlineTodoPanel 同款注释）；超过 ``MAX_VISIBLE_ITEMS`` 时
+   只渲染前 N 条，溢出提示可点击展开全部。
 3. **无成果整区隐藏**：零高度，不占布局。
 
 与任务看板的关键语义差异——**不迁卡**：任务列表是"当前状态"，每轮工具都会
@@ -15,18 +16,23 @@ assistant 气泡布局末尾（任务看板之后、页脚之前）。与 ``Inli
 
 五类条目分控件渲染（spec: 2026-10-24-message-artifacts-panel-design）：
 
-=====  ========  ==============================
+=====  ========  ====================================
 kind   预览      交互
-=====  ========  ==============================
-image  真缩略图  单击内置预览；右键菜单
-video  占位封面  双击系统播放器；右键菜单
-html   徽标+名   双击浏览器；右键菜单
-text   徽标+名   双击系统程序；右键菜单
-file   徽标+名   双击系统程序；右键菜单
-=====  ========  ==============================
+=====  ========  ====================================
+image  真缩略图  单击内置预览；左键拖拽导出；右键菜单
+video  占位封面  双击系统播放器；左键拖拽导出；右键菜单
+html   徽标+名   双击浏览器；左键拖拽导出；右键菜单
+text   徽标+名   双击系统程序；左键拖拽导出；右键菜单
+file   徽标+名   双击系统程序；左键拖拽导出；右键菜单
+=====  ========  ====================================
 
-缩略图懒解码：折叠态零解码开销；展开时经 ``QTimer`` 分帧解码（每拍一张），
-4K PNG 全量解码约百毫秒级，一帧一张不会卡死 UI 线程。
+缩略图懒解码：折叠态只解码缩略图带（最多 ``_COLLAPSED_THUMB_LIMIT`` 张），
+展开时经 ``QTimer`` 分帧解码（每拍一张），4K PNG 全量解码约百毫秒级，
+一帧一张不会卡死 UI 线程。
+
+数据入口按 ``path`` 合并（同路径原位更新、新路径追加），同轮多次推送不会
+互相覆盖；历史会话加载时由 ``render_batch_to_assistant_card`` 从 tool 消息的
+``artifacts`` 字段重建。
 """
 
 import os
@@ -45,7 +51,9 @@ from app.widgets.elided_label import _ElidedLabel
 
 # 单卡最多渲染条数：插件一次性推几百个文件时把卡片撑爆（上限外折叠进「还有 N 个」）
 MAX_VISIBLE_ITEMS = 20
-# 缩略图预览块尺寸
+# 折叠态缩略图带：图片是最高频产出，折叠时也要看得见，只展示前 N 张
+_COLLAPSED_THUMB_LIMIT = 5
+# 缩略图预览块尺寸（折叠带与列表行共用，缓存可复用）
 _THUMB_W, _THUMB_H = 64, 48
 
 # kind → (徽标字, 主色)；主色同时用于徽标底与 meta 强调
@@ -154,6 +162,10 @@ class _KindBadge(QLabel):
         self._ch, self._color = ch, color
         self.setFixedSize(_THUMB_W, _THUMB_H)
         self.setAlignment(Qt.AlignCenter)
+        # 徽标字与样式必须构造期落地：此前只在主题刷新里补，而刷新路径遍历的是
+        # 列表根节点（徽标是行的子控件，永远命中不到）→ 徽标一直是空白色块。
+        self.setText(ch)
+        self.refresh_style()
 
     def refresh_style(self) -> None:
         self.setStyleSheet(
@@ -178,10 +190,15 @@ class InlineArtifactPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._collapsed = True
+        self._show_all = False  # 点过「还有 N 项」后不再截断
         self._items: List[Dict[str, Any]] = []
         self._last_sig: Optional[str] = None
-        self._pending_thumbs: List[tuple] = []  # [(QLabel, path)] 展开后的分帧解码队列
+        self._pending_thumbs: List[tuple] = []  # [(QLabel, path)] 展开态列表行的分帧解码队列
+        self._pending_strip_thumbs: List[tuple] = []  # [(QLabel, path)] 折叠态缩略图带的解码队列
         self._thumb_pixmaps: Dict[str, QPixmap] = {}  # path → 缩略图缓存
+        # 左键拖拽导出（拖到资源管理器/聊天软件即引用该文件）
+        self._drag_press_pos = None
+        self._drag_started = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
@@ -199,6 +216,17 @@ class InlineArtifactPanel(QWidget):
         self._header.setToolTip("点击展开成果列表")
         layout.addWidget(self._header)
 
+        # 折叠态缩略图带：只有折叠 + 有图片成果时可见，展开后让位给完整清单
+        self._thumb_strip = QWidget(self)
+        self._thumb_strip.setStyleSheet("background: transparent;")
+        # 固定高度：垂直 policy 默认 Preferred 会吸收多余空间，把缩略图拉到面板中部
+        self._thumb_strip.setFixedHeight(_THUMB_H)
+        self._strip_layout = QHBoxLayout(self._thumb_strip)
+        self._strip_layout.setContentsMargins(2, 0, 2, 0)
+        self._strip_layout.setSpacing(6)
+        self._thumb_strip.setVisible(False)
+        layout.addWidget(self._thumb_strip)
+
         # 列表容器：不用 QScrollArea（sizeHint 缓存失真，见模块注释），全量展示
         self._list_wrap = QWidget(self)
         self._list_wrap.setStyleSheet("background: transparent;")
@@ -208,6 +236,9 @@ class InlineArtifactPanel(QWidget):
         self._list_layout.addStretch(1)
         self._list_wrap.setVisible(False)
         layout.addWidget(self._list_wrap)
+        # 底部弹性空白：面板被给到高于 sizeHint 的空间时，多余高度落在这里，
+        # 而不是被 header 吸收（否则折叠带的缩略图会被顶到面板底部）
+        layout.addStretch(1)
 
         self.hide()  # 无成果整区隐藏
         self.refresh_style()
@@ -223,12 +254,16 @@ class InlineArtifactPanel(QWidget):
     def _on_collapse_clicked(self) -> None:
         self._collapsed = not self._collapsed
         self._list_wrap.setVisible(not self._collapsed)
+        # 折叠带与清单互斥：折叠看缩略图，展开看完整行
+        self._thumb_strip.setVisible(self._collapsed and self._strip_layout.count() > 1)
         icon = "展开" if self._collapsed else "折叠"
         self._collapse_btn.setIcon(get_icon(icon))
         tip = "展开成果列表" if self._collapsed else "折叠成果列表"
         self._collapse_btn.setToolTip(tip)
         self._header.setToolTip(tip)
-        if not self._collapsed:
+        if self._collapsed:
+            self._schedule_strip_decode()
+        else:
             self._schedule_thumb_decode()
         lay = self.layout()
         if lay is not None:
@@ -243,6 +278,10 @@ class InlineArtifactPanel(QWidget):
         if lay is not None:
             lay.invalidate()
         self.updateGeometry()
+        if self._collapsed:
+            self._schedule_strip_decode()
+        else:
+            self._schedule_thumb_decode()
         self.heightChanged.emit()
 
     # ── 数据 ──
@@ -263,13 +302,16 @@ class InlineArtifactPanel(QWidget):
         if not normalized:
             self._items = []
             self._last_sig = None
+            self._show_all = False
             self._clear_items()
+            self._clear_strip()
+            self._thumb_strip.setVisible(False)
             self._header.set_extra("")
             self.hide()
             self.heightChanged.emit()
             return
 
-        sig = repr([(it["path"], it["size"]) for it in normalized])
+        sig = repr([(it["path"], it["size"], it["kind"], it["name"], it["caption"]) for it in normalized])
         if sig == self._last_sig and self._items:
             return
         self._last_sig = sig
@@ -281,7 +323,9 @@ class InlineArtifactPanel(QWidget):
         if lay is not None:
             lay.invalidate()
         self.updateGeometry()
-        if not self._collapsed:
+        if self._collapsed:
+            self._schedule_strip_decode()
+        else:
             self._schedule_thumb_decode()
         self.heightChanged.emit()
 
@@ -289,8 +333,11 @@ class InlineArtifactPanel(QWidget):
         """清空（实例保留，仅隐藏——面板随卡片存活，重建时直接复用）"""
         self._items = []
         self._last_sig = None
+        self._show_all = False
         self._pending_thumbs = []
         self._clear_items()
+        self._clear_strip()
+        self._thumb_strip.setVisible(False)
         self._header.set_extra("")
         self.hide()
         self.heightChanged.emit()
@@ -309,17 +356,99 @@ class InlineArtifactPanel(QWidget):
 
     def _rebuild(self) -> None:
         self._clear_items()
-        visible = self._items[:MAX_VISIBLE_ITEMS]
+        self._rebuild_thumb_strip()
+        visible = self._items if self._show_all else self._items[:MAX_VISIBLE_ITEMS]
         for item in visible:
             self._list_layout.addWidget(self._build_row(item))
         overflow = len(self._items) - len(visible)
         if overflow > 0:
-            more = QLabel(f"… 还有 {overflow} 项未展示", self._list_wrap)
+            more = QLabel(f"… 还有 {overflow} 项，点击展开全部", self._list_wrap)
+            more.setCursor(Qt.PointingHandCursor)
+            more.setToolTip("展开全部成果条目")
             more.setStyleSheet(
                 f"QLabel {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"
                 f" {get_font_family_css()} {font_size_css(11)}; padding: 2px 4px; }}"
             )
+            more.mousePressEvent = lambda _ev: self._expand_all()
             self._list_layout.addWidget(more)
+
+    def _expand_all(self) -> None:
+        """「还有 N 项」点击：取消截断重排（单向，数据更新后保持全量）"""
+        if self._show_all:
+            return
+        self._show_all = True
+        self._rebuild()
+        lay = self.layout()
+        if lay is not None:
+            lay.invalidate()
+        self.updateGeometry()
+        self._schedule_thumb_decode()
+        self.heightChanged.emit()
+
+    # ── 折叠态缩略图带 ──
+
+    def _clear_strip(self) -> None:
+        self._pending_strip_thumbs = []
+        while self._strip_layout.count():
+            item = self._strip_layout.takeAt(0)
+            w = item.widget()
+            if w is None:
+                continue
+            w.setParent(None)
+            w.deleteLater()
+
+    def _rebuild_thumb_strip(self) -> None:
+        """折叠态缩略图带：只放图片类成果，超上限显示 +N
+
+        折叠时只占一条缩略图高度，却能让生图类产出直接可见（旧行为折叠态
+        只有「成果 N 项」一行字，图片必须手动展开才能看到）。
+        """
+        self._clear_strip()
+        images = [it for it in self._items if it["kind"] == "image"]
+        if not images:
+            self._thumb_strip.setVisible(False)
+            return
+        for item in images[:_COLLAPSED_THUMB_LIMIT]:
+            path = item["path"]
+            thumb = QLabel(self._thumb_strip)
+            thumb.setFixedSize(_THUMB_W, _THUMB_H)
+            thumb.setAlignment(Qt.AlignCenter)
+            thumb.setCursor(Qt.PointingHandCursor)
+            thumb.setToolTip(f"{item['name']}\n单击预览，左键拖拽可引用到其他应用")
+            pix = self._thumb_pixmaps.get(path)
+            if pix is not None and not pix.isNull():
+                thumb.setPixmap(pix)
+            else:
+                thumb.setText("…")
+                self._pending_strip_thumbs.append((thumb, path))
+            thumb.mousePressEvent = lambda ev, p=path: self._on_strip_press(ev, p)
+            thumb.mouseReleaseEvent = lambda ev, p=path: self._on_strip_release(ev, p)
+            thumb.mouseMoveEvent = lambda ev, p=path, w=thumb: self._on_row_move(ev, p, w)
+            self._strip_layout.addWidget(thumb)
+        rest = len(images) - _COLLAPSED_THUMB_LIMIT
+        if rest > 0:
+            more = QLabel(f"+{rest}", self._thumb_strip)
+            more.setAlignment(Qt.AlignCenter)
+            more.setStyleSheet(
+                f"QLabel {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"
+                f" {get_font_family_css()} {font_size_css(11)}; }}"
+            )
+            self._strip_layout.addWidget(more)
+        self._strip_layout.addStretch(1)
+        self._thumb_strip.setVisible(self._collapsed)
+
+    def _on_strip_press(self, ev: QMouseEvent, path: str) -> None:
+        """折叠带缩略图：左键按下记拖拽起点（单击预览在抬起时判定）"""
+        if ev.button() == Qt.LeftButton:
+            self._drag_press_pos = ev.pos()
+            self._drag_started = False
+
+    def _on_strip_release(self, ev: QMouseEvent, path: str) -> None:
+        started = self._drag_started
+        self._drag_press_pos = None
+        self._drag_started = False
+        if ev.button() == Qt.LeftButton and not started:
+            self.previewImageRequested.emit(path)
 
     # ── 条目行 ──
 
@@ -391,20 +520,69 @@ class InlineArtifactPanel(QWidget):
         folder_btn.clicked.connect(lambda _=False, p=path: self._reveal_in_folder(p))
         lay.addWidget(folder_btn)
 
-        row.setToolTip(f"{path}\n（双击打开，右键更多操作）")
-        row.setCursor(Qt.PointingHandCursor if kind == "image" else Qt.ArrowCursor)
+        row.setToolTip(f"{path}\n（双击打开，左键拖拽可引用到其他应用，右键更多操作）")
+        row.setCursor(Qt.PointingHandCursor)
 
         row.mouseDoubleClickEvent = lambda ev, p=path, k=kind: self._on_row_activate(p, k)
         row.mousePressEvent = lambda ev, p=path, k=kind, r=row: self._on_row_press(ev, p, k, r)
+        row.mouseReleaseEvent = lambda ev, p=path, k=kind, r=row: self._on_row_release(ev, p, k, r)
+        row.mouseMoveEvent = lambda ev, p=path, r=row: self._on_row_move(ev, p, r)
         row.setContextMenuPolicy(Qt.CustomContextMenu)
         self._style_row(row)
         return row
 
     def _on_row_press(self, ev: QMouseEvent, path: str, kind: str, row: QFrame) -> None:
-        if ev.button() == Qt.LeftButton and kind == "image":
-            self.previewImageRequested.emit(path)
+        """左键按下只记拖拽起点；单击预览改到抬起（否则一按就预览，拖不走）"""
+        if ev.button() == Qt.LeftButton:
+            self._drag_press_pos = ev.pos()
+            self._drag_started = False
         elif ev.button() == Qt.RightButton:
             self._show_context_menu(ev.globalPos(), path, kind)
+
+    def _on_row_release(self, ev: QMouseEvent, path: str, kind: str, row: QFrame) -> None:
+        started = self._drag_started
+        self._drag_press_pos = None
+        self._drag_started = False
+        if ev.button() == Qt.LeftButton and not started and kind == "image":
+            self.previewImageRequested.emit(path)
+
+    def _on_row_move(self, ev: QMouseEvent, path: str, row: QWidget) -> None:
+        """左键按住移动超阈值 → 起拖（mime urls，可拖到资源管理器/聊天窗口）"""
+        if self._drag_press_pos is None or not (ev.buttons() & Qt.LeftButton):
+            return
+        from PyQt5.QtWidgets import QApplication
+
+        if (ev.pos() - self._drag_press_pos).manhattanLength() < QApplication.startDragDistance():
+            return
+        # 只起拖一次：清空起点后，同一手势内的后续 move 全部短路
+        self._drag_press_pos = None
+        drag = self._make_drag(path, row)
+        if drag is None:
+            return
+        self._drag_started = True
+        try:
+            drag.exec_(Qt.CopyAction)
+        except RuntimeError:
+            pass
+
+    def _make_drag(self, path: str, row: QWidget):
+        """构造文件拖拽对象（独立方法，便于单测直接校验 mimeData）"""
+        if not path or not os.path.exists(path):
+            return None
+        from PyQt5.QtCore import QMimeData
+        from PyQt5.QtGui import QDrag
+
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(path)])
+        drag.setMimeData(mime)
+        try:
+            pix = row.grab()
+            if not pix.isNull():
+                drag.setPixmap(pix.scaledToWidth(min(240, max(64, pix.width())), Qt.SmoothTransformation))
+        except RuntimeError, AttributeError:
+            pass
+        return drag
 
     def _on_row_activate(self, path: str, kind: str) -> None:
         """双击：图片走内置预览，其余交系统默认程序"""
@@ -492,23 +670,51 @@ class InlineArtifactPanel(QWidget):
         QTimer.singleShot(0, self._decode_next_thumb)
 
     def _decode_next_thumb(self) -> None:
+        # 队首不可见（如刚又被折叠）就先不取：pop 掉会永久丢掉这张的解码机会，
+        # 再展开时队列已空 → 缩略图永驻占位符。
         if self._collapsed or not self._pending_thumbs:
             return
-        label, path = self._pending_thumbs.pop(0)
+        label, path = self._pending_thumbs[0]
+        if not label.isVisible():
+            return
+        self._pending_thumbs.pop(0)
+        self._apply_thumb(label, path)
+        if self._pending_thumbs:
+            QTimer.singleShot(10, self._decode_next_thumb)
+
+    def _schedule_strip_decode(self) -> None:
+        """折叠态缩略图带解码（与列表队列分离，互不阻塞）"""
+        if not self._pending_strip_thumbs:
+            return
+        QTimer.singleShot(0, self._decode_next_strip_thumb)
+
+    def _decode_next_strip_thumb(self) -> None:
+        if not self._collapsed or not self._pending_strip_thumbs:
+            return
+        label, path = self._pending_strip_thumbs[0]
+        if not label.isVisible():
+            return
+        self._pending_strip_thumbs.pop(0)
+        self._apply_thumb(label, path)
+        if self._pending_strip_thumbs:
+            QTimer.singleShot(10, self._decode_next_strip_thumb)
+
+    def _apply_thumb(self, label: QLabel, path: str) -> None:
+        """解码并回填（缓存命中直接复用；失败显示 ✕ 不报错）"""
         try:
-            if label.isVisible() and path not in self._thumb_pixmaps:
+            pix = self._thumb_pixmaps.get(path)
+            if pix is None:
                 pix = self._load_thumb(path)
                 if pix is not None and not pix.isNull():
                     self._thumb_pixmaps[path] = pix
-                if label.isVisible():
-                    if pix is not None and not pix.isNull():
-                        label.setPixmap(pix)
-                    else:
-                        label.setText("✕")
-        except (OSError, RuntimeError):
+            if not label.isVisible():
+                return
+            if pix is not None and not pix.isNull():
+                label.setPixmap(pix)
+            else:
+                label.setText("✕")
+        except OSError, RuntimeError:
             pass
-        if self._pending_thumbs:
-            QTimer.singleShot(10, self._decode_next_thumb)
 
     def _load_thumb(self, path: str) -> Optional[QPixmap]:
         """按缩略尺寸解码（QImageReader.setScaledSize 避免 4K 全量位图驻留内存）
@@ -535,5 +741,6 @@ class InlineArtifactPanel(QWidget):
             w = self._list_layout.itemAt(i).widget()
             if isinstance(w, QFrame) and w.objectName() == "artifactItem":
                 self._style_row(w)
-            elif isinstance(w, _KindBadge):
-                w.refresh_style()
+                # 徽标是行的子控件，不在列表根节点上（旧实现永远命中不到）
+                for badge in w.findChildren(_KindBadge):
+                    badge.refresh_style()

@@ -2771,6 +2771,9 @@ class OpenAIChatWorker(QThread):
                     "echarts": item.get("echarts"),
                     "lsp_diagnostic": item.get("lsp_diagnostic"),
                 }
+                # 成果条目：与 ts_ms 同理，重建 dict 时漏掉 → 重开会话成果栏丢失
+                if item.get("artifacts"):
+                    tool_result_map[tc_id]["artifacts"] = item["artifacts"]
                 # ⚠️ 轨迹计时字段必须透传：ts_ms / trace_phases 由执行层
                 # _build_result_dict 写入，是 agent_trace 在**重载会话后**恢复
                 # 真实耗时的唯一数据源（运行时 timing 表只存在于内存）。
@@ -4859,6 +4862,17 @@ class OpenAIChatWorker(QThread):
             # normalize_message 不保留此字段，session 历史消息不含诊断文本
             "lsp_diagnostic": getattr(result_obj, "lsp_diagnostic", None) if result_obj else None,
         }
+        artifacts = (
+            result_obj.get("artifacts") if isinstance(result_obj, dict) else getattr(result_obj, "artifacts", None)
+        )
+        if artifacts:
+            # 成果条目随 tool 消息一起落库：重开会话时卡片成果栏据此重建
+            # （旧行为只在内存里挂栏，切会话/重启后成果不可追溯）
+            from app.core.conversation.message_content import normalize_artifact_items
+
+            clean_artifacts = normalize_artifact_items(artifacts)
+            if clean_artifacts:
+                result["artifacts"] = clean_artifacts
         if raw_content is not None:
             result["raw_content"] = raw_content
         return result

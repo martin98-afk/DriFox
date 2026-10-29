@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 - **OS 级沙箱（macOS Seatbelt）**: 安全中心新增「OS 级沙箱（macOS）」开关与档位（挡写入 / 挡写入+禁网）。开启后 agent 命令（bash 工具与后台任务）经 `sandbox-exec` 包装执行，工作区与系统临时目录外写入、可选联网在内核层被拒；与应用层沙箱审批正交（审批决定要不要问，OS 沙箱决定进程实际能碰什么）。非 macOS 平台自动直通。新增回归测试 `tests/core/test_os_sandbox.py`。
 - **能力池新增历史 / 项目 / 团队会话面** (`app/plugins/capabilities/catalog.py` · `providers/history_core.py`): 新增 `session.history`（持久化历史只读面：列表 / 归档 / 项目聚合 / 按 session_id 定位 / 团队会话查询）、`session.history.write`（置顶 / 移动项目 / 归档 / 恢复 / 删除 / 导入）、`project.read`（当前项目 / 清单 / 元数据 / 根目录）、`project.write`（切换 / 新建 / 归档 / 导入导出 / 打开文件夹 / 拖拽）、`team.session`（团队会话恢复 / 归档 / 进入成员会话）五条能力，并把此前「catalog 登记了却没有 provider」的 `session.manage` 补成真实实现（`select(session_id)` / `new()`）。写能力内部承担宿主联动（工作目录同步 + 团队广播 + 历史页刷新 + 跨窗口通知），插件不再反射窗口私有方法。
 - **新增 `project.workdir` 能力** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py`): 写库式切换项目工作目录，封装「关键文档登记 + 工作目录持久化 + 根目录标记恢复」三步。与既有 `workdir.write`（只改会话内状态：实例缓存 + tool_executor + 团队广播 + UI 同步，进程重启即失效）互补，worktree 切换两者配合使用。根目录标记恢复规则（旧目录本身是 worktree 时跳过，否则记忆卡片根目录会被指到 worktree 上）从插件侧搬进主程序并加单测锚定。
+- **消息卡片成果栏四项增强** (`app/widgets/inline_artifact_panel.py` · `app/widgets/message_card.py` · `app/core/workers/chat_worker.py` · `app/core/conversation/message_content.py` · `app/widgets/ui_helpers.py`): ①折叠态缩略图带（图片成果折叠时直接可见，最多 5 张 + N，点击预览）；②左键按住行可拖拽导出（mime urls，拖到资源管理器/聊天窗口即引用文件；单击预览改到抬起，与拖拽不冲突）；③落库与历史恢复（`artifacts` 进 tool 消息与归一化白名单，重开会话后成果栏从历史重建，条目数/字段封顶防 BLOB 膨胀）；④超过 20 条的溢出提示可点击展开全部。
 
 ### ♻️ 代码重构 (Refactoring)
 - **退役 HistoryCompactor，上下文管理统一走 tier 链** (`app/core/context/budget.py` 新增 · `app/core/context/history_compactor.py` 删除): 不再保留任何自动有损压缩。`HistoryCompactor` 类连同尾保留、启发式/LLM 摘要、旧工具结果剪枝、tool_call 参数截断、历史图片剥离一并删除；`chat_worker` 工具迭代压缩段与 gateway `/compact` 命令同时移除。只读能力抽成纯函数：`resolve_context_budget`（预算口径与旧实现逐字一致，含 o1/o3 输出预留分支）、`compute_usage`（用量统计）、`empty_compaction_state`（空压缩态）。`compaction_state` 持久化列保留以兼容老会话；能力池 `context.compact` 与 `EngineHost.get_compactor` 契约移除，`ConversationCore` / `ConversationExecutor` / `ChatWorker` 不再持有压缩器。
@@ -16,6 +17,9 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes)
 - **插件市场自动更新后侧栏计数不刷新**: `run_auto_update_check` 返回的 `pending` 是更新前快照，`execute=True` 把可更新插件全部装完后仍原样返回，左侧栏 TabPanel 条目停在「插件市场 (N)」，要等下一次 30 分钟 tick 才纠正。现于更新执行后重算待更新数（更新成功者剔除、失败者保留），新增回归测试 `tests/plugins/test_plugin_marketplace_auto_update_pending.py`。
 - **标题栏 tab 文案不跟随卡片标题变化**: full 卡 tab 文字在 `add_tab` 时固化，注册表 title 变化（「插件市场 (N)」↔「插件市场」）传不到已打开的 tab。新增 `CustomTitleBar.set_tab_text` 与 `TabManagerWindow._sync_replace_tab_titles`（`_update_shared_launcher` / 窗口重新显示 / 卡片重新可见三处补刷），新增回归测试 `tests/widgets/test_replace_tab_title_sync.py`。
+- **成果栏多次推送互相覆盖丢条目** (`app/widgets/message_card.py: update_artifact_list`): 卡片侧整体替换 `_artifact_panel_items`，而同轮多次工具产出与异步任务回填（`ui.artifacts.show(target="call")`）每次只带增量 → 后到的把先到的顶掉（宿主注释写的是「追加」，实现是替换）。改为按 `path` 合并（同路径原位更新、新路径追加保序），空列表不再隐含清空，显式清理走 `clear_artifact_list()`。
+- **成果栏非图片条目徽标是空白色块** (`app/widgets/inline_artifact_panel.py: _KindBadge`): 构造期只设了尺寸与颜色，没 `setText`，且主题刷新遍历的是列表根节点（徽标是行的子控件，永远命中不到）。徽标字与样式改到构造期落地，刷新路径改为遍历行内徽标。
+- **缩略图解码队列会丢机会**: 折叠或快速切换时 `_decode_next_thumb` 已 pop 的条目因控件不可见直接丢弃，再展开时队列已空 → 该图永驻占位符。改为队首不可见就不取，折叠带与列表各用独立队列。
 
 ## [v0.6.12] - 2026-10-27 (重新发布 #8)
 

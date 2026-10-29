@@ -5476,28 +5476,66 @@ class MessageCard(SimpleCardWidget):
     # ── 卡片内嵌成果栏（三件套，契约同任务看板；关键差异见 update_artifact_list）──
 
     def update_artifact_list(self, items):
-        """更新卡片内嵌成果栏（原生 Qt 面板，不进 WebEngine）
+        """合并推送成果条目（原生 Qt 面板，不进 WebEngine）
+
+        ★ **合并而非替换**：同轮多次工具产出、异步任务回填原卡（``ui.artifacts.show``
+        的 ``target="call"``）每次只带本次增量，整体替换会把先到的条目顶掉。
+        按 ``path`` 去重：已存在则原位更新，新路径追加到末尾（保持首次出现顺序）。
 
         与任务看板的语义差异——**不迁卡**：任务列表是"当前状态"，每轮工具轮次
         都会迁到最新卡（宿主 ``_sync_todo_panel`` 卸旧卡挂新卡）；成果属于产生
-        它的那一轮，新卡不继承旧卡的成果，宿主侧不调用 ``clear_artifact_list``。
-        本方法自身幂等：同签名重复推送由面板签名比对挡掉。
+        它的那一轮，新卡不继承旧卡的成果，宿主侧不清空旧卡。显式清空走
+        ``clear_artifact_list()``（空列表推送不再隐含清空）。
 
         Args:
             items: [{path, kind?, name?, width?, height?, size?, caption?, meta?}, ...]
-                   kind 缺省按扩展名推断；空列表 → 隐藏成果区。
+                   kind 缺省按扩展名推断
         """
-        self._artifact_panel_items = list(items or [])
+        merged = self._merge_artifact_items(self._artifact_panel_items, items)
+        if not merged:
+            return
+        self._artifact_panel_items = merged
         if self.role != "assistant":
             return
-        if not self._artifact_panel_items or self._assistant_bubble is None:
+        if self._assistant_bubble is None:
             panel = self._artifact_panel
             if panel is not None:
-                panel.update_artifacts(self._artifact_panel_items)
+                panel.update_artifacts(merged)
             return
         panel = self._ensure_artifact_panel()
         if panel is not None:
-            panel.update_artifacts(self._artifact_panel_items)
+            panel.update_artifacts(merged)
+
+    @staticmethod
+    def _merge_artifact_items(current, incoming):
+        """按 path 合并成果条目：同路径原位替换，新路径追加（保序）"""
+        merged = list(current or [])
+        index = {}
+        for i, item in enumerate(merged):
+            if isinstance(item, dict) and item.get("path"):
+                index[str(item["path"])] = i
+        for raw in incoming or []:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("path") or "").strip()
+            if not path:
+                continue
+            item = dict(raw)
+            item["path"] = path
+            pos = index.get(path)
+            if pos is None:
+                index[path] = len(merged)
+                merged.append(item)
+            else:
+                merged[pos] = item
+        return merged
+
+    def clear_artifact_list(self):
+        """显式清空成果栏（面板实例保留，卡片重建时直接复用）"""
+        self._artifact_panel_items = []
+        panel = self._artifact_panel
+        if panel is not None:
+            panel.clear_artifacts()
 
     def _ensure_artifact_panel(self):
         """懒创建成果栏并挂进气泡布局末尾（任务看板之后、页脚之前）"""

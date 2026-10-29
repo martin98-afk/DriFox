@@ -2328,16 +2328,46 @@ class SendableTextEdit(TextEdit):
         self._reset_history_mode()
         super().clear()
 
+    @staticmethod
+    def _context_menu_stylesheet() -> str:
+        """右键菜单样式：与 TabPanel / 卡片菜单同款视觉，运行时插值跟随主题色"""
+        return f"""
+            QMenu {{
+                background-color: {Colors.CARD_BG_SOLID};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+            QMenu::item:disabled {{
+                color: {Colors.TEXT_MUTED};
+            }}
+        """
+
     def contextMenuEvent(self, event):
-        """Phase E：接管输入框右键菜单——保留基础 cut/copy/paste + 追加插件项"""
+        """Phase E：接管输入框右键菜单——cut/copy/paste（按可用性置灰）+ 追加插件项"""
         from PyQt5.QtWidgets import QMenu
 
         menu = QMenu(self)
+        menu.setStyleSheet(self._context_menu_stylesheet())
+        # 禁用态走 Qt 自身判据：空选区时 cut/copy 无意义，剪贴板无可用内容时 paste 无意义
+        has_selection = self.textCursor().hasSelection()
         cut_act = menu.addAction("剪切")
+        cut_act.setEnabled(has_selection)
         cut_act.triggered.connect(lambda: self.cut())
         copy_act = menu.addAction("复制")
+        copy_act.setEnabled(has_selection)
         copy_act.triggered.connect(lambda: self.copy())
         paste_act = menu.addAction("粘贴")
+        paste_act.setEnabled(self.canPaste())
         paste_act.triggered.connect(lambda: self.paste())
         # 插件菜单项注入（main_widget 提供方法）
         win = self.window()
