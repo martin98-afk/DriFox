@@ -140,8 +140,13 @@ def _zip_b64(root: Path, prefix: str = "") -> str:
 
 class TestUploadUnit:
     def test_unchanged_content_makes_no_request(self, svc):
-        """内容指纹未变 → 不打包、不发请求（空上传根治）"""
+        """内容指纹未变 → 不打包、不发请求（空上传根治）
+
+        先落一份条目表模拟「已完成升级迁移」；没有条目表时会被强制上传一次
+        （见 test_dir_without_meta_forces_migration_upload）。
+        """
         (svc._user_custom_path / "x.txt").write_text("v1", encoding="utf-8")
+        svc._dir_sync_meta("user-custom", svc._user_custom_path)
         svc._content_hashes["user-custom"] = fp.dir_fingerprint(svc._user_custom_path)
         client = MagicMock()
 
@@ -167,6 +172,26 @@ class TestUploadUnit:
         assert ok is True
         assert client.put.call_count == 0
         assert client.post.call_count == 0
+
+    def test_dir_without_meta_forces_migration_upload(self, svc):
+        """目录还没有条目表（旧版本升级上来）→ 即使内容指纹未变也要传一次带元数据的包
+
+        否则云端 zip 永远缺 .__drifox_sync__.json，目录删除只能退化成 union。
+        """
+        (svc._user_custom_path / "x.txt").write_text("v1", encoding="utf-8")
+        svc._content_hashes["user-custom"] = fp.dir_fingerprint(svc._user_custom_path)
+        svc._custom_remote_sha = "old_sha"
+        assert not svc._dir_meta_path("user-custom").exists()
+
+        client = MagicMock()
+        client.get.side_effect = [
+            _resp(200, {"sha": "old_sha"}),  # _get_remote_file_sha
+        ]
+        client.put.return_value = _resp(200, {"content": {"sha": "new_sha"}})
+
+        assert svc._upload_unit("user-custom", "drifox/user-custom.zip", svc._user_custom_path, client) is True
+        assert client.put.call_count == 1
+        assert svc._dir_meta_path("user-custom").exists()
 
     def test_diverged_remote_is_merged_not_overwritten(self, svc, tmp_path):
         """远端被别的设备改过 → 先合并，冲突保留本地并生成远端副本"""

@@ -993,6 +993,29 @@ class ConfigSyncService(QObject):
 
     # ── 下载后 token 本地恢复 ──
 
+    def _mark_dir_meta_migration(self) -> bool:
+        """升级迁移：目录单元还没有条目表时标记待上传，返回是否标记了任何单元。
+
+        旧版本上传的 zip 没有 ``.__drifox_sync__.json``，包内无墓碑可依据，
+        目录删除只能退化成 union（远端缺什么就补回来）。这里在首次同步后主动
+        安排一次上传，把带元数据的新包推上去，迁移从此完成。
+        """
+        marked = False
+        for unit, local_path in self._unit_local_paths():
+            if not isinstance(local_path, Path) or not local_path.is_dir():
+                continue
+            if self._dir_meta_path(unit).exists():
+                continue
+            if unit == "user-custom":
+                self._custom_dirty = True
+            elif unit.startswith("ext:"):
+                self._ext_dirty[unit.split(":", 1)[1]] = True
+            else:
+                continue
+            marked = True
+            logger.info(f"[ConfigSync] {unit} 缺同步元数据，安排一次迁移上传")
+        return marked
+
     def _refresh_and_upload_after_download(self):
         """下载云端配置后：从本地磁盘恢复 Gitee token 段到内存。
 
@@ -1230,6 +1253,10 @@ class ConfigSyncService(QObject):
                         # 下载不会覆盖本地 token（_download_file 已合并保留）。
                         # 无需再用云端 token 刷新回传——多端 refresh_token 互踩已根治。
                         self._refresh_and_upload_after_download()
+                        if self._mark_dir_meta_migration():
+                            # 迁移上传：把带 .__drifox_sync__.json 的新包推上去。
+                            # 已在后台线程，直接跑上传（不要在这里创建 QTimer）。
+                            self._do_upload(initial_sync=True)
                         if self._pending_sync_message:
                             # Settings 重载已延迟到主线程执行，syncDone 会在
                             # _reload_settings_on_main_thread 中自动发射
@@ -1514,6 +1541,12 @@ class ConfigSyncService(QObject):
             # 元数据必须先落盘再算指纹：否则本次上传的 app.config 缺最新条目表，
             # 其他设备拿到的墓碑/时间戳滞后一次同步。
             self._flush_sync_meta()
+        if isinstance(local_path, Path) and local_path.is_dir():
+            # 首次升级迁移：目录单元还没有本地条目表时强制走一次上传，让云端 zip
+            # 带上 .__drifox_sync__.json。否则包内永远没有墓碑数据，目录删除只能
+            # 退化成 union（远端缺什么就补回来），重写等于白做。
+            if not self._dir_meta_path(unit).exists():
+                force = True
         h_local = self._unit_content_hash(unit, local_path)
         if not force and h_local and self._content_hashes.get(unit) == h_local:
             logger.debug(f"[ConfigSync] {unit} 内容未变化，跳过上传")
