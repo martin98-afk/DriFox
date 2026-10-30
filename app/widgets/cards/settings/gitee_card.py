@@ -475,7 +475,9 @@ class GiteeAccountRow(QFrame):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 4, 6)
+        # 下边距 0：分隔线→头像 6px、头像→面板底 6px（#tabFrame 底 padding），上下对称；
+        # 此前 bottom=6 会与 frame padding 叠成 12px，头像行沉底、上下间隔不均
+        layout.setContentsMargins(8, 6, 4, 0)
         layout.setSpacing(7)
 
         avatar_size = self._desired_avatar_size()
@@ -844,8 +846,9 @@ class GiteeAccountRow(QFrame):
         self._settings_btn.setVisible(not avatar_only)
         self._name_label.setVisible(not avatar_only)
         # 仅头像形态左右 margin 对称（5px）：46px 窄条下头像放大后不贴边、水平居中
-        self.layout().setContentsMargins(5, 6, 5, 6) if avatar_only else self.layout().setContentsMargins(
-            8, 6, 4, 6
+        # 上下边距与展开态同规则：top 6 / bottom 0（底距由 #tabFrame padding 统一给 6）
+        self.layout().setContentsMargins(5, 6, 5, 0) if avatar_only else self.layout().setContentsMargins(
+            8, 6, 4, 0
         )
         self._avatar.set_size(self._desired_avatar_size())
 

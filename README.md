@@ -66,7 +66,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 **多平台网关** — 企业微信 / 钉钉 / Telegram / Discord / 飞书 / Slack / WhatsApp 平台框架，QQ 与微信机器人适配器见社区插件仓 [`drifox-plugins2`](https://github.com/martin98-afk/drifox-plugins2)，让 AI 团队在你常用的 IM 上随时响应。
 
-**云同步与更新** — Gitee OAuth 账号绑定：配置、插件、密钥密文自动备份与恢复，图床上传，分享记录云端管理，token 自动续期；应用自动检查更新，支持更新代理配置。
+**云同步与更新** — Gitee OAuth 账号绑定：配置、插件、密钥密文自动备份与恢复，图床上传，分享记录云端管理，token 自动续期；应用自动检查更新，支持更新代理配置，可选接收 Beta 预览版。
 
 ## 与 Claude Code / DeepSeek Harness 的核心差异
 

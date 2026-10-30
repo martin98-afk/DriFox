@@ -37,6 +37,7 @@ class MainThreadWatchdog:
         self._last_tick = time.monotonic()
         self._heartbeating = False  # 首次心跳前不检测（exec_ 前无事件循环）
         self._reported = False  # 同一次阻塞只报一次
+        self._suspended = False  # 已知合法阻塞期间（SC_MOVE 模态循环）暂停判定
         self._main_ident = threading.main_thread().ident
 
         self._timer = QTimer(parent)
@@ -57,9 +58,22 @@ class MainThreadWatchdog:
         self._heartbeating = True
         self._reported = False
 
+    def set_suspended(self, value: bool) -> None:
+        """暂停/恢复阻塞判定（主线程或任意线程调用均可）。
+
+        恢复时重置心跳基线：暂停期间心跳 QTimer 可能长时间未跳，
+        不重置会把暂停期整段计入 gap 造成恢复后误报一次。
+        """
+        self._suspended = value
+        if not value:
+            self._last_tick = time.monotonic()
+            self._reported = False
+
     def _monitor_loop(self) -> None:
         while True:
             time.sleep(_CHECK_INTERVAL_S)
+            if self._suspended:
+                continue
             if not self._heartbeating or self._reported:
                 continue
             gap_s = time.monotonic() - self._last_tick
@@ -95,3 +109,18 @@ def install_watchdog(threshold_ms: int = 500) -> None:
 
     _watchdog = MainThreadWatchdog(threshold_ms=threshold_ms, parent=QApplication.instance())
     _watchdog.start()
+
+def suspend_reporting() -> None:
+    """暂停阻塞上报：已知合法阻塞段（如 Windows SC_MOVE 模态拖动循环）调用。
+
+    模态循环期间 Windows 在泵消息、窗口正常移动，属「合法占用」；
+    心跳 QTimer 在循环内派发延迟会让看门狗误报（2026-10-30 实证）。
+    未安装看门狗时 no-op。必须与 resume_reporting 成对使用。
+    """
+    if _watchdog is not None:
+        _watchdog.set_suspended(True)
+
+def resume_reporting() -> None:
+    """恢复阻塞上报（与 suspend_reporting 成对）。未安装看门狗时 no-op。"""
+    if _watchdog is not None:
+        _watchdog.set_suspended(False)

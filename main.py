@@ -704,6 +704,34 @@ def main():
                 logger.exception("[Startup] openai resources 预导入失败（非致命）")
 
         QTimer.singleShot(0, _preload_openai_resources)
+
+        # [PERF] 重依赖预导入后台化：启动期主线程 deferred 任务会冷导入的重模块
+        # 提前在后台线程填充缓存，主线程届时 import/扫盘均为命中。
+        # MainThreadWatchdog 实证（2026-10-30）：不预热时启动后 6-10s 处有两次
+        # ≥500ms 主线程阻塞——①BuiltinTools.__init__ 冷导入 mcp SDK（~500ms，
+        # Windows+杀软下文件系统开销为主）；②get_local_skills 首调缓存 miss
+        # 全量读 SKILL.md+YAML（~506ms）。预热只填缓存不改任何后续行为；
+        # 与 openai 预热同样的权衡：导入窗口内主线程若也要 import 会在锁上
+        # 等待（时序上预热先跑，实测 deferred 任务在其后 ~4s）。
+        def _preload_heavy_imports():
+            try:
+                import app.tools.mcp_tools  # noqa: F401
+            except Exception:
+                logger.exception("[Startup] mcp SDK 预导入失败（非致命）")
+            # skills 索引预热仅在 PluginManager 已初始化时做：未初始化时
+            # get_local_skills 只能扫到 fallback 路径，写入的残缺缓存会被
+            # 后续 key（含插件目录）判 miss，预热白做还污染 key TTL。
+            try:
+                from app.plugins.managers.plugin_manager import PluginManager
+
+                if PluginManager.get_instance().is_initialized():
+                    from app.utils.utils import get_local_skills
+
+                    get_local_skills()
+            except Exception:
+                logger.exception("[Startup] skills 索引预热失败（非致命）")
+
+        QTimer.singleShot(0, lambda: threading.Thread(target=_preload_heavy_imports, daemon=True, name="heavy-import-preload").start())
         # [T24 R2] 窗口就绪 → 登记到共享状态；若 import 窗口期已有二次启动请求
         # （_on_show_requested 记了 pending），此处立即补激活，不再静默丢失。
         _show_window_state["window"] = tm

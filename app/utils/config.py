@@ -626,6 +626,8 @@ class Settings(QConfig):
     build_variant = "pyqt5"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
+    # 接收 Beta 更新：开启后检查更新拉 releases 列表（含 prerelease），否则仅走正式版 latest
+    allow_beta_update = ConfigItem("General", "AllowBetaUpdate", False, BoolValidator())
     # 进入时崩溃通知：检测到上次崩溃 dump 后是否弹 InfoBar 提示用户。
     # 关闭后仍会扫描日志目录并把 .reported 标记已读（不重复扫描），
     # 仅不展示横幅；用户可手动到日志目录查看 dump 文件。

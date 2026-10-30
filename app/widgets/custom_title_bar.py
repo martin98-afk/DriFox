@@ -44,6 +44,7 @@ from qframelesswindow.titlebar import TitleBarBase
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton, TitleBarButtonState
 
 from app.utils.design_tokens import Animations, Colors, font_size_css
+from app.utils.main_thread_watchdog import resume_reporting, suspend_reporting
 from app.utils.utils import get_font_family_css, get_icon
 
 # ── Windows 原生消息常量（仅 win32 分支使用，模块级常量避免热路径重复定义）──
@@ -1185,6 +1186,11 @@ class CustomTitleBar(TitleBarBase):
             return
 
         _system_move_active = True
+        # 模态移动循环期间暂停看门狗上报：SendMessageW 阻塞是 Windows 拖动的
+        # 固有形态（循环内系统在泵消息、窗口正常跟随鼠标），心跳 QTimer 在
+        # 循环内派发延迟会把拖动误报成 ≥500ms 阻塞（2026-10-30 实证 4 条中
+        # 1 条）。finally 恢复，异常路径不漏。
+        suspend_reporting()
         try:
             try:
                 import ctypes
@@ -1215,6 +1221,7 @@ class CustomTitleBar(TitleBarBase):
         finally:
             # SendMessageW 返回 = 模态循环结束（正常松手或被系统取消），必须复位
             _system_move_active = False
+            resume_reporting()
 
     def _fallback_system_move(self, global_pos) -> None:
         """兜底：走 qframelesswindow 内置实现（无 snap，但保证能拖动）"""

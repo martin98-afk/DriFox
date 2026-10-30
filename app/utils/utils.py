@@ -840,6 +840,8 @@ class AsyncUpdateChecker(QThread):
         super().__init__(parent)
         # 使用 weakref 避免循环引用导致 parent 被删除后仍持有引用
         self._parent_ref = weakref.ref(parent) if parent else None
+        # True 时检查 Beta 预览版：拉 releases 列表（含 prerelease）而非 latest
+        self.allow_beta = False
 
     @property
     def repo(self):
@@ -883,7 +885,11 @@ class AsyncUpdateChecker(QThread):
             "X-GitHub-Api-Version": "2022-11-28"
         }
         headers = headers | {"Authorization": f"token {self.token}"} if self.token else headers
-        url = f"https://api.github.com/repos/{self.repo}/releases/latest"
+        # Beta 模式拉列表取最新（含 prerelease）；latest 接口恒不返回预发布版
+        if self.allow_beta:
+            url = f"https://api.github.com/repos/{self.repo}/releases?per_page=10"
+        else:
+            url = f"https://api.github.com/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入：仅更新检查路径需要
 
         # 检查更新始终直连 API 域（加速前缀只作用于下载）；
@@ -891,8 +897,9 @@ class AsyncUpdateChecker(QThread):
         async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                logger.debug(f"GitHub API 响应: {resp.json()}")
-                return resp.json()
+                release = self._pick_release(resp.json())
+                logger.debug(f"GitHub API 响应: {release}")
+                return release
             if resp.status_code in (403, 429) and "rate limit" in resp.text.lower():
                 # 限流与一般失败区分提示：匿名配额 60 次/小时/IP，易被共享出口耗尽
                 logger.debug(f"GitHub API 响应: {resp.text}")
@@ -902,28 +909,48 @@ class AsyncUpdateChecker(QThread):
             self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
             return None
 
+    @staticmethod
+    def _pick_release(data):
+        """从 API 响应选目标 release：latest 接口返回单对象原样透传；
+        列表接口（allow_beta）按序取第一个非 draft 项（含 prerelease）"""
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and not item.get("draft"):
+                    return item
+        return None
+
     async def fetch_gitee(self):
         headers = {"Authorization": self.token} if self.token else {}
-        url = f"https://gitee.com/api/v5/repos/{self.repo}/releases/latest"
+        # Beta 模式拉列表取最新（含 prerelease）；latest 接口恒不返回预发布版
+        if self.allow_beta:
+            url = f"https://gitee.com/api/v5/repos/{self.repo}/releases?per_page=10"
+        else:
+            url = f"https://gitee.com/api/v5/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入
 
         async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                return resp.json()
+                return self._pick_release(resp.json())
             else:
                 self.error.emit(f"Gitee API 请求失败：{resp.status_code}")
                 return None
 
     async def fetch_gitcode(self):
         headers = {"Authorization": self.token} if self.token else {}
-        url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases/latest"
+        # Beta 模式拉列表取最新（含 prerelease）；latest 接口恒不返回预发布版
+        if self.allow_beta:
+            url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases?per_page=10"
+        else:
+            url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入
 
         async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                return resp.json()
+                return self._pick_release(resp.json())
             else:
                 self.error.emit(f"Gitcode API 请求失败：{resp.status_code}")
                 return None

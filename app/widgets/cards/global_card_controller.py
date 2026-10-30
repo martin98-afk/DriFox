@@ -1076,12 +1076,11 @@ class GlobalCardController:
         """
         if self._gitee_reminder_shown:
             return
-        if self._settings_popup is None:
-            # 设置弹窗改为按需构建（不再 3500ms 预构建）——此处兜底构建，
-            # 保证 gitee 绑定提醒不被延迟构建策略影响（两处必须同改）。
-            self.ensure_settings_popup()
-        if self._settings_popup is None:
-            return
+        # 先做零成本短路判断再考虑构建设置弹窗：已绑定/已关提醒的用户
+        # 启动期不该为弹不出的提醒垫付 LLMSettingsCard 的 ~500ms 构建开销
+        # （MainThreadWatchdog 实证 2026-10-30，已绑定用户启动 idle 期被
+        # 白构一次完整设置大卡）。提醒本体是 InfoBar，不依赖设置弹窗；
+        # 点「立即绑定」走 open_settings() 内部懒构建，语义不变。
         if self.cfg.gitee_bound.value:
             return
         if not self.cfg.gitee_sync_remind.value:
@@ -1138,8 +1137,10 @@ class GlobalCardController:
         """
         if self._gitee_token_invalid_reminder_shown:
             return
-        if self._settings_popup is None:
-            return
+        # 不做设置弹窗存在性门槛：提醒本体是 InfoBar（不依赖弹窗），
+        # 点「重新绑定」走 open_settings() 内部懒构建。原 None 即静默
+        # return 会让「启动后从未打开过设置卡」的用户收不到失效提醒
+        # （check_gitee_sync_reminder 不再启动期预构建后此场景成为常态）。
         if not self.cfg.gitee_sync_remind.value:
             return
 

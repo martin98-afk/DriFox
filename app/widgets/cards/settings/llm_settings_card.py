@@ -861,6 +861,16 @@ class LLMSettingsCard(SystemCardFrame):
         )
         update_layout.addWidget(self.autoUpdateCard)
 
+        # 接收 Beta 版更新（含 prerelease）
+        self.betaUpdateCard = SwitchSettingCard(
+            FluentIcon.UPDATE,
+            "接收 Beta 版更新",
+            "检查更新时包含 Beta 预览版",
+            configItem=self.cfg.allow_beta_update,
+            parent=self,
+        )
+        update_layout.addWidget(self.betaUpdateCard)
+
         self.manualUpdateCard = ManualUpdateCard(
             "手动检查更新",
             "点击按钮检查是否有新版本",
