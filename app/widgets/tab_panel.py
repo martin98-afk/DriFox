@@ -559,7 +559,10 @@ class TabItem(QFrame):
         self._icon_size = scale_icon_size(20)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 4, 4)
+        # 左右 2：选中/hover 块已改为贴 widget 缘（paintEvent），块内 pad = margin 2
+        # + 图标环位 3 = 5px（原 margin 8 + 内缩叠加达 9px，用户反馈过大）。
+        # 左 4 与系统插件行（uiPluginRow 行内 4）对齐的旧约定由块贴缘方案取代
+        layout.setContentsMargins(2, 4, 4, 4)
         layout.setSpacing(6)
 
         # 图标 — _TabProjectIcon 直接 QPainter 绘制圆角矩形+文字，与 _SquareAvatar 一致
@@ -1133,13 +1136,18 @@ class TabItem(QFrame):
 
         w, h = self.width(), self.height()
 
-        # ── 构建统一圆角路径（列表 8px 圆角 / 树行 6px，与节点头对齐 + 2px 内边距） ──
+        # ── 构建统一圆角路径（列表 8px 圆角 / 树行 6px）──
+        # 列表模式左右贴 widget 缘（右留 2 给滚动条）：原整体 2px 内缩叠加
+        # 行 margin + 图标环位，使选中块内左右 pad 达 9px（用户反馈过大）。
+        # 树行保留 2px 内缩：左侧有从属引导竖线，块贴边会盖线。
         # ★ 缓存：尺寸与树行化状态未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
         _key = (w, h, self._tree_row)
         if _key != self._cached_rect_key:
             self._cached_round_rect = _QPainterPath()
-            _radius = 6 if self._tree_row else 8
-            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, _radius, _radius)
+            if self._tree_row:
+                self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, 6, 6)
+            else:
+                self._cached_round_rect.addRoundedRect(0, 2, w - 2, h - 4, 8, 8)
             self._cached_rect_key = _key
         _round_rect = self._cached_round_rect
 
@@ -1883,7 +1891,9 @@ class TabPanel(QWidget):
         self._list_widget = QWidget()
         self._list_widget.setStyleSheet("background: transparent;")
         self._list_layout = QVBoxLayout(self._list_widget)
-        self._list_layout.setContentsMargins(2, 0, 2, 0)
+        # 左 0：tab 行 hover/选中块左缘与上方菜单行对齐（都从 frame padding 6px 处起）；
+        # 原左 2 叠 frame 6 = 8px，用户感知「对话列表外部 pad 太多」。右 2 保留给滚动条
+        self._list_layout.setContentsMargins(0, 0, 2, 0)
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
