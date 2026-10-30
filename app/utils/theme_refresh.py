@@ -29,9 +29,24 @@ def _perf_enabled() -> bool:
     return os.environ.get("DRIFOX_DEBUG_THEME_PERF") == "1"
 
 
+_logger_level_ready = False
+
+
 def _perf_log(msg: str):
-    if _perf_enabled():
-        logger.debug(msg)
+    """性能打点输出（DRIFOX_DEBUG_THEME_PERF=1 才生效）
+
+    ⚠️ 本模块用 stdlib logging，而 logging_setup 把 root 锁在 WARNING
+    （避免第三方库 DEBUG 噪音淹没 all.log）。因此 logger.debug 默认**全部被丢**，
+    历史上这个开关等于死的。这里在首次打点时把本 logger 单独提到 DEBUG，
+    不动 root（只开这一个模块）。日志仍走 stdlib→loguru 桥进 all.log。
+    """
+    global _logger_level_ready
+    if not _perf_enabled():
+        return
+    if not _logger_level_ready:
+        logger.setLevel(logging.DEBUG)
+        _logger_level_ready = True
+    logger.debug(msg)
 
 
 class ThemeRefreshCoordinator:
@@ -53,6 +68,8 @@ class ThemeRefreshCoordinator:
 
     # ── 计时 ──
     _phase_starts: dict[str, float] = {}
+    # 最近一轮各段耗时（dump_slow 汇总用；每轮 batched 刷新结束取一次快照并清空）
+    _phase_ms: dict[str, float] = {}
 
     # ══════════════════════════════════════════════════════════════
     #  版本管理
@@ -117,27 +134,47 @@ class ThemeRefreshCoordinator:
 
     @classmethod
     def timer_start(cls, phase: str):
-        """开始计时阶段"""
-        if _perf_enabled():
-            with cls._lock:
-                cls._phase_starts[phase] = time.perf_counter()
+        """开始计时阶段（**始终计时**）
+
+        常驻计时的理由：主题刷新慢的时候，正是最需要分段数字的时候，而那时用户
+        不会去记得开 DRIFOX_DEBUG_THEME_PERF。所以计时永远跑（perf_counter 两次
+        调用，开销可忽略），是否输出由阈值（dump_slow）与环境变量决定。
+        """
+        with cls._lock:
+            cls._phase_starts[phase] = time.perf_counter()
 
     @classmethod
     def timer_end(cls, phase: str) -> float | None:
         """结束计时阶段并记录耗时。
 
         Returns:
-            耗时毫秒数，性能日志未启用时返回 None
+            耗时毫秒数（阶段未开始过时为 None）。是否打日志由 _perf_enabled 决定。
         """
-        if not _perf_enabled():
-            return None
         with cls._lock:
             start = cls._phase_starts.pop(phase, None)
-        if start is None:
-            return None
-        elapsed_ms = (time.perf_counter() - start) * 1000
+            if start is None:
+                return None
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            cls._phase_ms[phase] = elapsed_ms
         _perf_log(f"[ThemeRefresh] {phase}: {elapsed_ms:.1f}ms")
         return elapsed_ms
+
+    @classmethod
+    def dump_slow(cls, threshold_ms: float = 500.0) -> None:
+        """总耗时超阈值时打一条 INFO 摘要（不依赖环境变量）
+
+        只在慢路径输出，正常切换静默。日志落在 all.log，事后可直接看到
+        哪一段吃掉了时间，不用复现、不用开 env。
+        """
+        with cls._lock:
+            snapshot = dict(cls._phase_ms)
+            cls._phase_ms.clear()
+        total = snapshot.get("batched_total")
+        if total is None or total < threshold_ms:
+            return
+        parts = [f"{k}={v:.0f}ms" for k, v in sorted(snapshot.items(), key=lambda kv: -kv[1])]
+        # 必须 warning：logging_setup 把 root 锁在 WARNING，INFO/DEBUG 一律不落盘
+        logger.warning("[ThemeRefresh-SLOW] 主题刷新 %.0fms | %s", total, " ".join(parts))
 
 
 def _build_css_var_js(theme: dict, is_light: bool) -> str:

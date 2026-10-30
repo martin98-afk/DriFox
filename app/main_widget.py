@@ -10102,7 +10102,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 前收到 EV 派发 refresh_style，随后又被框架重刷覆盖一遍 → 双刷。
         # 先框架后派发，插件卡一次刷在最终主题态上。
         # 铁律：仍居全局段（先于 per-window 循环）、无条件 publish（勿加 scope 过滤）
+        ThemeRefreshCoordinator.timer_start("ev_publish")
         theme_manager.on_theme_changed()
+        ThemeRefreshCoordinator.timer_end("ev_publish")
         ThemeRefreshCoordinator.timer_end("global")
 
         # ── Per-window：所有窗口执行样式更新 ──
@@ -10126,8 +10128,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 # P5b：记录待刷 scope，切回 tab 补刷时精确执行（V2 方案 A）
                 win._theme_needs_refresh_scope = final_scope
                 continue
+            _wid = win.__dict__.get("_window_id", "?")
             try:
+                ThemeRefreshCoordinator.timer_start(f"win-{_wid}")
                 win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
+                ThemeRefreshCoordinator.timer_end(f"win-{_wid}")
                 win._theme_needs_refresh = False
             except Exception as e:
                 logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
@@ -10147,6 +10152,12 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning(f"[batched theme refresh] TabManagerWindow: {e}")
 
         ThemeRefreshCoordinator.timer_end("batched_total")
+        # 超过阈值就自动打一条 warning 摘要（不依赖 DRIFOX_DEBUG_THEME_PERF）：
+        # 主题切换慢的时候用户不会记得开环境变量，慢路径必须自己留证据。
+        try:
+            ThemeRefreshCoordinator.dump_slow()
+        except Exception:
+            pass
 
     def _on_providers_config_changed(self):
         """服务商配置变更时的回调（多窗口同步）
@@ -10765,18 +10776,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 对话框背景完全透明，由外层容器兜底，不叠加独立背景层。
             # [T15] 同串短路：主题切换循环内多次进入，同串重写无谓 repolish
+            ThemeRefreshCoordinator.timer_start("self_qss")
             set_style_sheet_if_changed(self, "background: transparent;")
+            ThemeRefreshCoordinator.timer_end("self_qss")
             self.setAutoFillBackground(False)
 
             # 分支标签
+            ThemeRefreshCoordinator.timer_start("branch_chip")
             if hasattr(self, "_project_label"):
                 self._refresh_project_branch_style()
 
             # 分支标签（git worktree）
             if hasattr(self, "_update_branch"):
                 self._update_branch()
+            ThemeRefreshCoordinator.timer_end("branch_chip")
 
             # 时间线节点
+            ThemeRefreshCoordinator.timer_start("rings")
             if hasattr(self, "node_preview") and hasattr(self.node_preview, "refresh_theme"):
                 self.node_preview.refresh_theme()
 
@@ -10785,6 +10801,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 ring = getattr(self, ring_attr, None)
                 if ring and hasattr(ring, "refresh_theme"):
                     ring.refresh_theme()
+            ThemeRefreshCoordinator.timer_end("rings")
 
             # 消息卡片主题（per-card 隔离：单卡 refresh_theme 异常不得中断
             # 后续刷新项——2026-09-06 NameError 曾致同窗口输入框/设置弹窗卡片
@@ -10802,10 +10819,14 @@ class OpenAIChatToolWindow(ToolWindow):
             ThemeRefreshCoordinator.timer_end("msg_cards")
 
             # 自绘 hover tooltip 主题刷新（周期内去重，见 _safe_refresh_tooltips）
+            ThemeRefreshCoordinator.timer_start("tooltips")
             self._safe_refresh_tooltips()
+            ThemeRefreshCoordinator.timer_end("tooltips")
 
             # 输入区插件按钮图标随主题切换（浅色/深色图标）
+            ThemeRefreshCoordinator.timer_start("plugin_icons")
             self._refresh_plugin_input_button_icons()
+            ThemeRefreshCoordinator.timer_end("plugin_icons")
 
         # ── 2. 字体相关块（font_family + font_size + 全量） ──
         if is_font:
@@ -10910,6 +10931,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 避免数百次 setStyleSheet 重复设置相同颜色样式（实测 ~30ms 纯浪费）。
         if is_color:
             # ── 5a. 颜色相关公共块（仅主题/深浅变化时执行） ──
+            ThemeRefreshCoordinator.timer_start("cards_5a")
             # 窗口标题栏
             title_bar = self.get_title_bar()
             if hasattr(title_bar, "refresh_style"):
@@ -11026,8 +11048,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 样式由插件页自身 refresh_style 负责（宿主不再持有卡片引用）
             # 工具控制卡片
             self._safe_refresh(getattr(self, "_tool_control_card", None))
+            ThemeRefreshCoordinator.timer_end("cards_5a")
 
         # ── 5b. 字体相关公共块（颜色或字体变化时都执行） ──
+        ThemeRefreshCoordinator.timer_start("cards_5b")
         # 内嵌 font_size_css / get_font_family_css 的浮动卡片：
         #   - 5a/5b 通过 _safe_refresh 周期内自动去重，5b 跳过 5a 已刷卡片
         #   - 字体变化：5a 不走 → 这里补一次刷新，否则字号/字族切换时
@@ -11063,6 +11087,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_settings_btn_icon"):
             self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
 
+        ThemeRefreshCoordinator.timer_end("cards_5b")
         ThemeRefreshCoordinator.timer_end("total")
 
     def _refresh_floating_cards_font_style(self):

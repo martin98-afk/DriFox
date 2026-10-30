@@ -285,3 +285,96 @@ class TestEnabledFilter:
         finally:
             cfg.enabled_plugins.value = saved
             cfg.disabled_plugins.value = saved_disabled
+
+
+class TestCrossRootRestoreGating:
+    """跨根恢复门控：仅当目标插件确实覆盖过低等级根工具时才重扫低等级根
+
+    回归点：reload/unload 原为无条件 `_restore_lower_roots`，用户根插件
+    （rank=1）每次启停 tools 都会把 system 根（rank=0）全部插件工具重扫
+    重注册一遍——日志刷屏、多花 ~0.6s。改为按覆盖记账门控。
+    """
+
+    _USER_PLUGIN = "user-overrider"
+
+    @pytest.fixture(autouse=True)
+    def _clear_overrides(self):
+        from app.plugins.loaders.plugin_tool_loader import _CROSS_ROOT_OVERRIDES
+
+        _CROSS_ROOT_OVERRIDES.clear()
+        yield
+        _CROSS_ROOT_OVERRIDES.clear()
+
+    @pytest.fixture()
+    def user_root(self, tmp_path, monkeypatch):
+        """把 app_data 目录指向 tmp，使 <tmp>/appdata/plugins 被 _root_kind 识别为 user 根"""
+        import app.utils.utils as utils_mod
+
+        app_data = tmp_path / "appdata"
+        (app_data / "plugins").mkdir(parents=True)
+        monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: app_data)
+        return app_data / "plugins"
+
+    def _make_user_plugin(self, user_root: Path, tool_name: str, ret: str) -> None:
+        tools_dir = user_root / self._USER_PLUGIN / "tools"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        (tools_dir / "user_tool.py").write_text(_register_snippet(tool_name, ret=ret), encoding="utf-8")
+
+    def test_unload_without_override_skips_lower_root_rescan(self, tmp_path, user_root, plugin_enabled, monkeypatch):
+        sys_root = tmp_path / "sys_root"
+        sys_root.mkdir()
+        _make_plugin(sys_root, "sys_only_tool", _register_snippet("sys_only_tool", ret="from-sys"))
+        self._make_user_plugin(user_root, "user_only_tool", ret="from-user")
+        restore_enabled = plugin_enabled(self._USER_PLUGIN)
+        try:
+            reg = ToolRegistry.get_instance()
+            watcher = PluginToolWatcher(registry=reg, roots=[sys_root, user_root])
+            watcher.scan_now()
+            assert reg.get("user_only_tool") is not None
+
+            calls: list = []
+            monkeypatch.setattr(watcher, "_restore_lower_roots", lambda rank: calls.append(rank))
+            watcher.unload_plugin(self._USER_PLUGIN)
+            assert calls == [], "未覆盖同级低等级根工具时不应重扫"
+            assert reg.get("sys_only_tool") is not None, "无关的系统根工具应保持注册"
+            assert reg.get("user_only_tool") is None
+        finally:
+            restore_enabled()
+
+    def test_unload_with_override_restores_lower_root_tool(self, tmp_path, user_root, plugin_enabled):
+        sys_root = tmp_path / "sys_root"
+        sys_root.mkdir()
+        _make_plugin(sys_root, "shared_tool", _register_snippet("shared_tool", ret="from-sys"))
+        self._make_user_plugin(user_root, "shared_tool", ret="from-user")
+        restore_enabled = plugin_enabled(self._USER_PLUGIN)
+        try:
+            reg = ToolRegistry.get_instance()
+            watcher = PluginToolWatcher(registry=reg, roots=[sys_root, user_root])
+            watcher.scan_now()
+            assert reg.get("shared_tool").impl(**{}) == "from-user", "用户根应覆盖系统根同名工具"
+
+            watcher.unload_plugin(self._USER_PLUGIN)
+            restored = reg.get("shared_tool")
+            assert restored is not None, "被覆盖的系统根工具必须恢复"
+            assert restored.impl(**{}) == "from-sys"
+        finally:
+            restore_enabled()
+
+    def test_reload_without_override_skips_lower_root_rescan(self, tmp_path, user_root, plugin_enabled, monkeypatch):
+        sys_root = tmp_path / "sys_root"
+        sys_root.mkdir()
+        _make_plugin(sys_root, "sys_only_tool", _register_snippet("sys_only_tool", ret="from-sys"))
+        self._make_user_plugin(user_root, "user_only_tool", ret="from-user")
+        restore_enabled = plugin_enabled(self._USER_PLUGIN)
+        try:
+            reg = ToolRegistry.get_instance()
+            watcher = PluginToolWatcher(registry=reg, roots=[sys_root, user_root])
+            watcher.scan_now()
+
+            calls: list = []
+            monkeypatch.setattr(watcher, "_restore_lower_roots", lambda rank: calls.append(rank))
+            watcher.reload_plugin(self._USER_PLUGIN)
+            assert calls == [], "未覆盖低等级根工具时 reload 不应重扫"
+            assert reg.get("user_only_tool") is not None, "目标插件自身工具应重新注册"
+        finally:
+            restore_enabled()

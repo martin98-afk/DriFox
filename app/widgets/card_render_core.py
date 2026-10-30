@@ -235,6 +235,11 @@ _LEXER_CACHE_MAX = 64
 _TEXT_LEXER = TextLexer()
 # formatter 含动态字号，缓存当前字号对应的实例
 _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
+# Pygments 主题 CSS 缓存：style 名 → 样式块（只随主题变，与字号无关）
+_PYGMENTS_CSS_CACHE: dict = {}
+# 代码块高亮 CSS 的作用域根。HTML 结构是 .code-content > pre > span.k，
+# 生成时带上 pre 才能同时命中 pre 自身（前景/背景）与内部 span。
+_PYGMENTS_CSS_SCOPE = ".code-content pre"
 
 # ======== 流式态单色 tint（替代原彩虹循环色板）========
 # 旧 _RAINBOW_NORMAL 为 10 色高饱和绕卡循环，色相跳变（青→紫→粉→橙→绿）
@@ -323,23 +328,79 @@ def set_pygments_style(style_name: str):
 
 
 def _get_formatter_cached():
-    """HtmlFormatter 单例，字号或风格变化时重建"""
+    """HtmlFormatter 单例，字号或风格变化时重建
+
+    **noclasses=False**（2026-10-30 主题切换重构）：高亮色改由 class + 主题 CSS
+    决定，不再内联进 span 的 style。此前 noclasses=True 把颜色固化在 HTML 里，
+    主题一变整份 HTML 就过期，只能逐卡重跑 markdown + Pygments（单卡 40~120ms）。
+    改为 class 化后同一份 HTML 在深浅主题间通用，切主题只需替换一段 CSS。
+
+    pre 上仍保留 inline 的字体/背景，但**不写 color**：前景色交给
+    ``get_pygments_css()`` 生成的作用域规则，随主题切换（inline 会盖住 CSS）。
+    """
     fs = scale_font_size(13)
     style = _current_pygments_style
     cache_key = (fs, style)
     if _FORMATTER_CACHE.get("cache_key") != cache_key:
-        # 浅色风格用深色默认文字
-        pre_color = "#1a1a1a" if style != "dracula" else "#D4D4D4"
         _FORMATTER_CACHE["cache_key"] = cache_key
         _FORMATTER_CACHE["font_size"] = fs
         _FORMATTER_CACHE["formatter"] = HtmlFormatter(
             style=style,
             linenos=False,
-            noclasses=True,
+            noclasses=False,
             cssclass="code-block",
-            prestyles=f"margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{fs}px; color:{pre_color};",
+            prestyles=f"margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{fs}px;",
         )
     return _FORMATTER_CACHE["formatter"]
+
+
+def _keep_token_rules(css: str, scope: str) -> list[str]:
+    """从 Pygments 输出里只挑 token 规则（``<scope> .k`` 一类）
+
+    Pygments 的 ``get_style_defs`` 除 token 规则外还会输出三条会坏事的裸规则：
+    ``pre { line-height: 125% }``（影响全部 pre）、``<scope> { background/color }``
+    （会把代码块/diff 行的底色盖掉）、``td.linenos``/``span.linenos``（本项目不用行号列）。
+    只保留 token 级规则，主题色就只作用于高亮字词，不碰容器。
+    """
+    keep: list[str] = []
+    prefix = scope + " "
+    for line in css.splitlines():
+        s = line.strip()
+        if not s or "{" not in s:
+            continue
+        selector = s.split("{", 1)[0].strip()
+        if not selector.startswith(prefix):
+            continue
+        keep.append(s)
+    return keep
+
+
+def get_pygments_css(style_name: str | None = None) -> str:
+    """生成当前（或指定）Pygments 风格的 CSS 规则块
+
+    由骨架注入到 ``<style id="hl-css">``，主题切换时整段替换，因此代码块颜色
+    跟随主题而 HTML 产物保持不变。
+
+    覆盖两个作用域：通用代码块（``.code-content pre``）与工具块行内 diff
+    （``.line-code``）。两者都是 Pygments token，同一套风格。
+
+    Args:
+        style_name: Pygments 风格名；None=当前风格（深色 dracula / 浅色 friendly）
+    """
+    style = style_name or _current_pygments_style
+    cached = _PYGMENTS_CSS_CACHE.get(style)
+    if cached is None:
+        try:
+            formatter = HtmlFormatter(style=style)
+            rules = _keep_token_rules(formatter.get_style_defs(_PYGMENTS_CSS_SCOPE), _PYGMENTS_CSS_SCOPE)
+            rules += _keep_token_rules(formatter.get_style_defs(".line-code"), ".line-code")
+            css = "\n".join(rules)
+        except Exception as e:  # 风格名拼错 → 降级为空块（代码块退化为无色，不崩）
+            logger.warning(f"[pygments] 生成主题 CSS 失败 style={style}: {e}")
+            css = ""
+        cached = css
+        _PYGMENTS_CSS_CACHE[style] = cached
+    return cached
 
 
 # ======== 滚动行为常量 ========
@@ -717,12 +778,12 @@ def _wrap_code_blocks_with_copy_button_web(
 
     Args:
         html: markdown 渲染后的 HTML
-        icon_prefix: 图标前缀（None=用当前主题缓存，主线程默认；见 current_icon_prefix）
+        icon_prefix: 已废弃占位参数（保留签名兼容线程池快照）；图标已改 CSS mask，
+                  不再写主题相关的 qrc 前缀进 HTML
         font_size: 代码字号（None=用全局 _CODE_FONT_SIZE，主线程默认）
         formatter: Pygments formatter（None=用全局缓存 formatter，主线程默认；
                    B3 线程池 worker 必须传入线程局部 formatter，避免跨线程共享）
     """
-    _icon_prefix = icon_prefix if icon_prefix is not None else current_icon_prefix()
     _font_size = font_size if font_size is not None else _CODE_FONT_SIZE
 
     def replacer(match):
@@ -891,10 +952,10 @@ def _wrap_code_blocks_with_copy_button_web(
                 {f'<span style="color: var(--accent-warm, #FFA500); font-size: {_font_size}px; font-weight: bold;">{lang}</span>' if lang else '<span style="color: var(--text-muted, #888);">Plain Text</span>'}
                 <div style="display: flex; gap: 12px; align-items: center; padding-right: 4px;">
                     <button type="button" data-action="save_file" data-lang="{lang}" data-copy="{b64_copy}" class="code-btn" data-tooltip="保存本地文件" style="width: 30px; height: 30px; background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px;">
-                        <img src="{_icon_prefix}/导入.svg" style="width:22px; height:22px; pointer-events: none;" />
+                        <span class="ci ci-save"></span>
                     </button>
                     <button type="button" data-action="copy" data-copy="{b64_copy}" class="code-btn" data-tooltip="复制代码" style="width: 30px; height: 30px; background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px;">
-                        <img src="{_icon_prefix}/复制.svg" style="width:22px; height:22px; pointer-events: none;" />
+                        <span class="ci ci-copy"></span>
                     </button>
                 </div>
             </div>
@@ -994,10 +1055,13 @@ def _protect_inline_svg_blocks(md_text: str) -> str:
 
 
 def _get_think_icon_html(size: int = 18) -> str:
-    """生成思考过程图标的 HTML <img> 标签（主题感知，自动适配深色/浅色模式）"""
-    prefix = get_tool_qrc_prefix()
-    style = f"width:{size}px;height:{size}px;vertical-align:middle;pointer-events:none;"
-    return f'<img src="{prefix}/思考过程.svg" style="{style}" />'
+    """生成思考过程图标的 HTML 片段
+
+    图标走 CSS mask（``.ci-think``，颜色取 ``--text-muted``），不再拼主题相关的
+    qrc 前缀进 HTML —— 同一份 HTML 在深浅主题间通用，主题切换只需换 CSS。
+    """
+    style = f"width:{size}px;height:{size}px;"
+    return f'<span class="ci ci-think" style="{style}"></span>'
 
 
 def _get_think_block_styles() -> str:

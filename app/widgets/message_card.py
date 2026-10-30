@@ -704,13 +704,15 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
             self.viewer.refresh_theme()
         # 刷新富文本视图字体并触发重渲染（缓存已在 refresh_theme 中失效）
-        # [T6] 分帧错峰：全量重渲（单卡 40~120ms 主线程）不再逐卡 immediate
+        # [T6] 分帧错峰：图表卡全量重渲（单卡 40~120ms 主线程）不再逐卡 immediate
         # 同拍执行，改置脏 + 入分帧队列（每帧最多 2 张，可见优先）；
         # 流式卡不入队：上方 refresh_theme 已置 _needs_full_render=True，
         # 下一次流式节拍自然全量带新主题，不丢主题态不丢正文，也不打断
         # 流式自适应节流（_schedule_render 的边界合并窗口）。
+        # [2026-10-30] 无图卡不再入队：Pygments 已 class 化 + 图标走 CSS mask，
+        # 正文 HTML 与主题无关，换 CSS 就已换色，重渲纯属浪费（单卡 40~120ms）。
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
-            if getattr(self.viewer, "_streaming", False):
+            if getattr(self.viewer, "_streaming", False) or not self.viewer.__dict__.get("_has_charts", False):
                 self.viewer._theme_render_pending = False
             else:
                 self.viewer._theme_render_pending = True

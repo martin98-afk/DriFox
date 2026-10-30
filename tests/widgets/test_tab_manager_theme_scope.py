@@ -19,7 +19,7 @@ from types import SimpleNamespace  # noqa: E402
 import pytest  # noqa: E402
 
 from app.utils.design_tokens import Colors  # noqa: E402
-from app.widgets.tab_manager_window import TabManagerWindow, _WorkbenchFrame  # noqa: E402
+from app.widgets.tab_manager_window import TabManagerWindow, _ThemedPanel, _WorkbenchFrame  # noqa: E402
 
 _SRC = None
 
@@ -50,9 +50,10 @@ class _TMStub(QFrame):
 
     def __init__(self):
         super().__init__()
-        self._tab_frame = QFrame(self)
+        self._tab_frame = _ThemedPanel(self)
         self._tab_frame.setObjectName("tabFrame")
-        self._chat_frame = QFrame(self)
+        # chat/workbench 已改自绘容器（颜色在 paintEvent，不在 QSS）
+        self._chat_frame = _ThemedPanel(self)
         self._chat_frame.setObjectName("chatFrame")
         self._workbench_frame = _WorkbenchFrame(self)
         self._workbench_frame.setObjectName("workbenchFrame")
@@ -122,7 +123,11 @@ def _make_stub():
 
 
 def test_behavior_hidden_frames_dirty_until_shown():
-    """未 show：三 frame 置脏 + 静态窗口串非空；show 后补刷清脏且容器串非空"""
+    """未 show：三 frame 置脏；show 后补刷清脏
+
+    2026-10-30 契约变更：chat/workbench 改 _ThemedPanel 自绘后，主题色不再走
+    QSS，补刷后这两个容器的串应为**空**；tabFrame 仍走 QSS，串含主题色。
+    """
     stub = _make_stub()
     stub._apply_theme_stylesheet()
     # 静态串非空且不含色值
@@ -132,14 +137,16 @@ def test_behavior_hidden_frames_dirty_until_shown():
     for f in (stub._tab_frame, stub._chat_frame, stub._workbench_frame):
         assert f._theme_needs_refresh is True, "不可见容器应置脏跳过重刷"
 
-    # show 模拟（真实可见）→ 补刷清脏 + 容器串非空（含主题色值）
+    # show 模拟（真实可见）→ 补刷清脏 + 各容器按新契约校验
     stub.show()  # 父窗口可见后子 isVisible 才为 True
     for f in (stub._tab_frame, stub._chat_frame, stub._workbench_frame):
         f.show()
     stub._refresh_theme_dirty_frames()
     for f in (stub._tab_frame, stub._chat_frame, stub._workbench_frame):
         assert f._theme_needs_refresh is False, "补刷后应清脏"
-        assert "rgba(" in f.styleSheet(), "补刷后容器串应含主题色值（渲染后的 rgba 形态）"
+    # 三容器均已自绘：主题色不进 QSS（否则每次切主题都要整子树 repolish）
+    for f in (stub._tab_frame, stub._chat_frame, stub._workbench_frame):
+        assert "rgba(" not in f.styleSheet(), "自绘容器不得把主题色写回 QSS"
 
 
 def test_behavior_construction_phase_no_frames_attr():
@@ -201,12 +208,13 @@ def test_behavior_color_switch_updates_visible_and_dirties_hidden():
         Colors.CARD_BG = SimpleNamespace(format=lambda alpha: "#123ABC")
         Colors.BORDER = "#456DEF"
         stub._apply_theme_stylesheet()
-        # 可见的 tabFrame 即时吃到新色
-        assert "#123ABC" in stub._tab_frame.styleSheet(), "可见容器应即时更新色值"
+        # 2026-10-30：三容器改自绘后，切主题不再写 QSS（零 repolish）；
+        # 可见容器靠 paintEvent 重绘取新色，所以串里不得出现新色值。
+        for f in (stub._tab_frame, stub._chat_frame, stub._workbench_frame):
+            assert "#123ABC" not in f.styleSheet(), "自绘容器切主题不得重写 QSS"
         assert stub._tab_frame._theme_needs_refresh is False
-        # 隐藏的 chatFrame 只置脏，不更新
+        # 隐藏的 chatFrame 只置脏
         assert stub._chat_frame._theme_needs_refresh is True, "隐藏容器应置脏"
-        assert "#123ABC" not in stub._chat_frame.styleSheet(), "隐藏容器不得提前重刷"
     finally:
         Colors.CARD_BG = real_card_bg
         Colors.BORDER = "#456DEF" if not hasattr(real_card_bg, "format") else Colors.BORDER

@@ -12,7 +12,7 @@ import orjson as json
 from loguru import logger
 
 from app.tools.registry import DEFAULT_FALLBACK_ICON
-from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
+from app.utils.design_tokens import _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
 # 行内 diff 高亮子系统已抽取至 app/utils/diff_highlight（消除 utils→widgets 反向依赖）。
@@ -762,7 +762,7 @@ def _render_inline_tool(
             </span>
             <span style="white-space: nowrap; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
         </span>
-        <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {escape(natural_preview)}
         </span>
     </div>"""
@@ -1013,7 +1013,7 @@ def render_tool_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {escape(args_preview)}
             </span>
             {diff_stats_html}
@@ -1149,7 +1149,7 @@ def render_tool_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {escape(args_preview)}
             </span>
             {diff_stats_html}
@@ -1172,7 +1172,7 @@ def render_tool_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {escape(args_preview)}
             </span>
             {diff_stats_html}

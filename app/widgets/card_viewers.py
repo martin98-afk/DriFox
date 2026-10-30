@@ -160,6 +160,7 @@ from app.widgets.card_render_core import (
     get_font_family_css,
     get_icon,
     get_markdown_instance,
+    get_pygments_css,
     set_pygments_style,
 )
 
@@ -1924,10 +1925,7 @@ class CodeWebViewer(QWebEngineView):
                 from app.utils.theme_manager import theme_manager as _tm
 
                 _is_light = _tm.is_light_theme()
-                _theme = current_theme()
-                from app.utils.theme_refresh import ThemeRefreshCoordinator
-
-                _js = ThemeRefreshCoordinator.get_or_build_js(_theme, _is_light)
+                _js = self._theme_css_js(_is_light)
                 if self.page():
                     self.page().runJavaScript(_js)
             except Exception:
@@ -2711,6 +2709,45 @@ class CodeWebViewer(QWebEngineView):
                     line-height: 1.5 !important;
                 }}
                 .code-line {{ padding-left: 12px !important; white-space: pre; font-family: {mono_font}; }}
+
+                /* Pygments 高亮主题（class 化，noclasses=False）：内容 HTML 只带
+                   span class，颜色全由独立的 #hl-css 样式块决定（在本块之后）。
+                   主题切换只替换那段 CSS，无需重跑 markdown + 高亮。 */
+
+                /* 主题图标：单色 SVG 走 mask，颜色取 CSS 变量。
+                   一份 HTML 在深浅主题下通用，切主题无需重渲（原先按
+                   qrc:/icons vs qrc:/icons_light 前缀固化在 <img src> 里）。 */
+                .ci {{
+                    display: inline-block;
+                    width: 22px;
+                    height: 22px;
+                    background-color: var(--text-muted, #8b949e);
+                    -webkit-mask-repeat: no-repeat;
+                    -webkit-mask-position: center;
+                    -webkit-mask-size: contain;
+                    mask-repeat: no-repeat;
+                    mask-position: center;
+                    mask-size: contain;
+                    pointer-events: none;
+                }}
+                .ci-save {{
+                    -webkit-mask-image: url("qrc:/icons/导入.svg");
+                    mask-image: url("qrc:/icons/导入.svg");
+                }}
+                .ci-copy {{
+                    -webkit-mask-image: url("qrc:/icons/复制.svg");
+                    mask-image: url("qrc:/icons/复制.svg");
+                }}
+                .ci-max {{
+                    -webkit-mask-image: url("qrc:/icons/最大化.svg");
+                    mask-image: url("qrc:/icons/最大化.svg");
+                }}
+                .ci-think {{
+                    -webkit-mask-image: url("qrc:/icons/思考过程.svg");
+                    mask-image: url("qrc:/icons/思考过程.svg");
+                    background-color: var(--text-muted, #8b949e);
+                    vertical-align: middle;
+                }}
 
                 /* 代码工具按钮 hover：原为硬编码白色叠加，浅色主题下几乎不可见。
                    改为按主题取反色叠加，保证两种主题下都有明确反馈。 */
@@ -3693,6 +3730,9 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 {_STREAMING_DOCK_CSS}
             </style>
+            <!-- 代码高亮主题（Pygments class 化）：单独一个 style 便于运行时
+                 整段替换；内容 HTML 与主题无关，切主题不再重渲正文 -->
+            <style id="hl-css">{get_pygments_css()}</style>
         </head>
         <body>
             <div id="tool-section" style="display: none;" data-collapsed="false">
@@ -6819,6 +6859,29 @@ class CodeWebViewer(QWebEngineView):
         body_font_size = scale_font_size(14)
         self._viewer_font_css = f"{font_css} font-family: {font_family}, sans-serif; font-size: {body_font_size}px;"
 
+    def _theme_css_js(self, is_light: bool) -> str:
+        """组合主题 CSS 注入串：CSS 变量 + Pygments 高亮 CSS（同一 IPC）
+
+        refresh_theme 与 showEvent 补注入共用。高亮 CSS 必须跟变量一起下发，
+        否则隐藏卡恢复可见后代码块还是旧主题配色（Pygments 已 class 化，
+        颜色全在 `#hl-css` 里）。
+        """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        js = ThemeRefreshCoordinator.get_or_build_js(current_theme(), is_light)
+        try:
+            from json import dumps as _json_dumps
+
+            from app.widgets.card_render_core import get_pygments_css
+
+            _hl_style = "friendly" if is_light else "dracula"
+            set_pygments_style(_hl_style)
+            _hl_css_js = _json_dumps(get_pygments_css(_hl_style))
+            js += "(function(){var e=document.getElementById('hl-css');if(e)e.textContent=" + _hl_css_js + ";})();"
+        except Exception as e:
+            logger.warning(f"[CodeWebViewer] 高亮 CSS 下发失败: {e}")
+        return js
+
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换
 
@@ -6841,26 +6904,38 @@ class CodeWebViewer(QWebEngineView):
             return
         self._last_theme_version = v
 
-        # 🐛 主题确实变化：失效实例级 markdown HTML 缓存。
-        # 否则 _perform_update 非流式分支的 _cached_streaming_html 复用逻辑
-        # 会返回旧主题渲染的 HTML（旧 pygments 代码高亮 + 旧思考图标路径），
-        # 导致主题切换后代码块颜色/思考图标不更新。
-        self._cached_streaming_html = None
-        self._processed_md_hash = 0
-        self._cached_raw_md_hash = 0
-        # [B3] 主题变化：递增渲染序号使在途线程池任务过期（旧主题 HTML 丢弃），
-        # 强制后续 _schedule_render 以新主题重新提交渲染。
-        self._render_seq += 1
-        # [PERF-final-async] 同步作废在途终渲染（旧主题终态不得落地）
-        self._final_render_seq -= 1
-        self._final_render_inflight = False
-        # [B1] 主题变化：差量 HTML 缓存失效（旧主题高亮/图标颜色），强制全量重渲染
-        self._needs_full_render = True
-        self._stable_html = ""
-        self._stable_md_len = 0
+        # 高亮风格随主题切换，并取对应 CSS 随 CSS 变量一起下发。
+        # Pygments 已 class 化（noclasses=False）：HTML 不带颜色，换一段 CSS
+        # 就能全量换色，因此下面**不再**因主题变化丢弃渲染缓存/强制重渲。
+        _hl_style = "friendly" if _is_light else "dracula"
+        try:
+            from app.widgets.render_helpers import set_diff_highlight_style
 
-        theme = current_theme()
-        js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
+            set_pygments_style(_hl_style)
+            set_diff_highlight_style(_hl_style)
+        except Exception:
+            pass
+
+        # 只有含图表/图表的卡需要重渲（echarts 主题在 init 时确定、实例不可变色）。
+        # 无图卡：保留 _cached_streaming_html / 稳定 HTML，DOM 不动，只换 CSS。
+        # __dict__.get（非 getattr）：__new__ 桩未跑 __init__，PyQt5 wrapper 上
+        # getattr 缺失属性抛 RuntimeError 而非 AttributeError，默认值防御无效
+        if self.__dict__.get("_has_charts", False):
+            # 🐛 图表卡确实变化：失效实例级 markdown HTML 缓存 + 强制全量重渲
+            self._cached_streaming_html = None
+            self._processed_md_hash = 0
+            self._cached_raw_md_hash = 0
+            # [B3] 主题变化：递增渲染序号使在途线程池任务过期
+            self._render_seq += 1
+            # [PERF-final-async] 同步作废在途终渲染（旧主题终态不得落地）
+            self._final_render_seq -= 1
+            self._final_render_inflight = False
+            # [B1] 差量 HTML 缓存失效（图表节点必须重 init）
+            self._needs_full_render = True
+            self._stable_html = ""
+            self._stable_md_len = 0
+
+        js_code = self._theme_css_js(_is_light)
         # body_font_size 供图表主题 JS 使用（与 _load_skeleton 构建期同语义：
         # scale_font_size(14)）。此前引用的是 _refresh_viewer_font_css 的局部
         # 变量，作用域外抛 NameError，致批处理主题刷新在该卡中断，后续输入框/
@@ -6913,10 +6988,11 @@ class CodeWebViewer(QWebEngineView):
                 # [T28] 四象限分发（互斥）。常量串对所有象限必发（象限 4 由 T24 的
                 # 零 IPC 变为仅发轻量常量串——语义变化，见上）；vault 释放重活仍
                 # 严格按有图门控。可见象限合并为一次 IPC。
-                # _has_charts 用 getattr 防御：__new__ 绕过 __init__ 的测试桩
-                # 无此属性（项目惯例，如 test_message_card_refresh_theme）。
+                # _has_charts 一律用 __dict__.get 读：__new__ 绕过 __init__ 的
+                # 测试桩没有该属性，PyQt5 wrapper 上 getattr 会抛 RuntimeError
+                # （默认值防御对 RuntimeError 无效）。
                 if self.isVisible():
-                    if getattr(self, "_has_charts", False):
+                    if self.__dict__.get("_has_charts", False):
                         # 有图可见：常量 + 重置 + CSS 三段合并一次 IPC（各自 try/catch
                         # 异常域隔离，一段抛错不拖垮另一段，T8 风险 2）
                         _combined_js = (
@@ -6929,7 +7005,7 @@ class CodeWebViewer(QWebEngineView):
                         # 无图可见：常量并入 CSS 段，仍一次 IPC
                         self.page().runJavaScript(_wrap_try(_chart_theme_const_js, "chart const") + _wrap_try(js_code, "css vars"))
                     self._theme_css_pending = False
-                elif getattr(self, "_has_charts", False):
+                elif self.__dict__.get("_has_charts", False):
                     # 有图隐藏：常量 + 重置合并；CSS 变量走 _theme_css_pending 补注入
                     self.page().runJavaScript(
                         _wrap_try(_chart_theme_const_js, "chart const") + _wrap_try(_chart_reset_js, "chart reset")

@@ -42,6 +42,15 @@ _ROOT_KIND_SYSTEM = "system"  # 项目工作树 plugins/（含 plugins/system/�
 _ROOT_KIND_USER = "user"  # 用户数据目录 <app_data>/plugins/
 _ROOT_KIND_PRIORITY: Dict[str, int] = {_ROOT_KIND_SYSTEM: 0, _ROOT_KIND_USER: 1}
 
+# 跨根覆盖记账：{plugin_name: {被其覆盖的低等级根同名工具名}}
+# 用途：reload/unload 的跨根恢复原为无条件重扫所有低等级根（把 system 根下
+# 全部插件工具重新 compile + register 一遍，实测 ~0.6s 且日志刷屏）；有记账后
+# 只在目标插件**确实覆盖过**低等级根工具时才重扫。
+# 进程级而非 watcher 实例级：启动期 `load_plugin_tools()`（app/tools/__init__.py）
+# 不经 watcher 直接调用，覆盖关系必须落在同一份状态里，否则首次卸载用户插件
+# 会因记账为空而漏恢复被覆盖的系统工具。
+_CROSS_ROOT_OVERRIDES: Dict[str, Set[str]] = {}
+
 
 def _plugin_roots() -> List[Path]:
     """插件工具扫描根：项目 plugins/（含 system）+ 用户插件目录"""
@@ -139,11 +148,13 @@ class _PluginRegistryProxy:
         # - 跨根：高等级根（user）可覆盖低等级根（system）的同名工具；同级/反向拒绝
         src_root = self._root_tracker.get(name) if self._root is not None else None
         is_cross_root = src_root is not None and src_root != self._root
+        overrode_cross_root = False
         if is_cross_root:
             # 跨根：仅允许高等级覆盖低等级
             if _ROOT_KIND_PRIORITY.get(self._root_kind, 0) <= _ROOT_KIND_PRIORITY.get(_root_kind(src_root), 0):
                 return False
             # 高等级覆盖：直接放行（existing 来源是低等级根，应被替换；不再走同根保护）
+            overrode_cross_root = True
         else:
             # 同根/无 root/首次注册：已被其他插件占用时不覆盖
             existing = self._registry.get(name)
@@ -187,6 +198,9 @@ class _PluginRegistryProxy:
             self.registered_names.add(name)
             if self._root is not None:
                 self._root_tracker[name] = self._root
+            if overrode_cross_root:
+                # 记账：该插件确实顶掉了低等级根的同名工具，注销时需重扫低等级根恢复
+                _CROSS_ROOT_OVERRIDES.setdefault(self._plugin_name, set()).add(name)
         return ok
 
 
@@ -391,6 +405,7 @@ def _run_register(
             if reg is not None and reg.source == f"plugin:{plugin_name}":
                 registry.unregister(name)
                 logger.warning(f"[PluginToolLoader] 回滚部分注册工具: {name} ({plugin_name})")
+            _CROSS_ROOT_OVERRIDES.get(plugin_name, set()).discard(name)
         raise  # 保持 load_plugin_tools 既有 warning 语义（loaded 不含该插件）
     new_tools = proxy.registered_names
     if new_tools:
@@ -498,6 +513,8 @@ def unload_plugin_tools(
             if root_tracker is not None:
                 root_tracker.pop(name, None)
             logger.info(f"[PluginToolLoader] 注销插件工具: {name} ({plugin_name})")
+    # 记账同步清理：本插件已不再持有任何工具，其覆盖关系随之失效
+    _CROSS_ROOT_OVERRIDES.pop(plugin_name, None)
 
 
 class PluginToolWatcher:
@@ -580,6 +597,8 @@ class PluginToolWatcher:
             # 变更通知合并为一次（registry.notify_batch，异常安全），避免
             # UI 重建/缓存失效在热重载时反复排队。
             with self._registry.notify_batch():
+                # 0) 全量重扫会重建覆盖记账，先清空防插件消失后残留孤儿条目
+                _CROSS_ROOT_OVERRIDES.clear()
                 # 1) 注销已加载插件的全部工具（幂等；执行中的调用不受影响——快照机制）
                 for plugin_name, old_names in self._loaded.items():
                     unload_plugin_tools(plugin_name, old_names, self._registry, root_tracker=self._root_tracker)
@@ -672,6 +691,8 @@ class PluginToolWatcher:
                 # 在 unload 前（root_tracker 尚未被 pop）捕获被删插件所属根
                 removed_root = self._root_of_plugin(plugin_name)
                 removed_rank = _ROOT_KIND_PRIORITY.get(_root_kind(removed_root), 0)
+                # 记账快照：unload_plugin_tools 会清空该插件的覆盖记录，须先读
+                had_overrides = bool(_CROSS_ROOT_OVERRIDES.get(plugin_name))
                 if tool_names:
                     unload_plugin_tools(plugin_name, tool_names, self._registry, root_tracker=self._root_tracker)
                 self._loaded.pop(plugin_name, None)
@@ -679,8 +700,11 @@ class PluginToolWatcher:
                 # 不清理则旧模块对象（含模块级单例/依赖）在进程内滞留，
                 # 卸载后旧代码仍可能被引用、重装时命中旧缓存。
                 _purge_tool_modules(plugin_name)
-                # 跨根覆盖恢复：仅重扫比被删根更低等级的根（被覆盖方）
-                self._restore_lower_roots(removed_rank)
+                # 跨根覆盖恢复：仅当该插件确实覆盖过低等级根工具时才需重扫
+                if had_overrides:
+                    self._restore_lower_roots(removed_rank)
+                else:
+                    logger.debug(f"[PluginToolLoader] {plugin_name} 未覆盖低等级根工具，跳过跨根恢复重扫")
 
     def reload_plugin(self, plugin_name: str) -> None:
         """精准重载单个插件工具（安装/更新路径专用，不注销他插件工具）
@@ -723,6 +747,8 @@ class PluginToolWatcher:
                 # 在 unload 前（root_tracker 尚未被 pop）捕获目标插件所属根
                 removed_root = self._root_of_plugin(plugin_name)
                 removed_rank = _ROOT_KIND_PRIORITY.get(_root_kind(removed_root), 0)
+                # 记账快照：unload_plugin_tools 会清空该插件的覆盖记录，须先读
+                had_overrides = bool(_CROSS_ROOT_OVERRIDES.get(plugin_name))
                 if tool_names:
                     unload_plugin_tools(plugin_name, tool_names, self._registry, root_tracker=self._root_tracker)
                 self._loaded.pop(plugin_name, None)
@@ -730,8 +756,12 @@ class PluginToolWatcher:
                 # 则旧模块对象滞留 sys.modules。必须在下方重注册**之前**执行，
                 # 否则会把刚加载的新模块一并清掉。
                 _purge_tool_modules(plugin_name)
-                # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
-                self._restore_lower_roots(removed_rank)
+                # 跨根覆盖恢复：仅当旧版本确实覆盖过低等级根工具时才需重扫
+                # （新版本的覆盖关系会在下方重注册时重新记账）
+                if had_overrides:
+                    self._restore_lower_roots(removed_rank)
+                else:
+                    logger.debug(f"[PluginToolLoader] {plugin_name} 未覆盖低等级根工具，跳过跨根恢复重扫")
                 # 重注册该插件当前模块（enabled 过滤与 load_plugin_tools 一致）
                 if not _is_plugin_enabled(plugin_name):
                     logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")

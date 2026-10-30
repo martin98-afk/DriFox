@@ -21,7 +21,10 @@ from pygments import highlight as _pyg_highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_for_filename, get_lexer_by_name, TextLexer
 
-# 行内 diff 专用 formatter（缓存）：按风格切换，nowrap 不包裹 <pre>，noclasses 输出内联 color 的 token <span>
+# 行内 diff 专用 formatter（缓存）：按风格切换，nowrap 不包裹 <pre>。
+# noclasses=False：token 只带 class，颜色由骨架 #hl-css 的 .line-code 规则决定，
+# 同一份 diff HTML 在深浅主题间通用（noclasses=True 会把颜色固化进 style，
+# 切主题必须重渲整段 diff 才能换色）。
 _DIFF_FORMATTER_CACHE: dict = {"style": None, "formatter": None}
 
 
@@ -64,7 +67,7 @@ def _get_diff_formatter():
     style = _current_diff_style
     if _DIFF_FORMATTER_CACHE["style"] != style:
         _DIFF_FORMATTER_CACHE["style"] = style
-        _DIFF_FORMATTER_CACHE["formatter"] = HtmlFormatter(nowrap=True, style=style, noclasses=True)
+        _DIFF_FORMATTER_CACHE["formatter"] = HtmlFormatter(nowrap=True, style=style, noclasses=False)
     return _DIFF_FORMATTER_CACHE["formatter"]
 
 

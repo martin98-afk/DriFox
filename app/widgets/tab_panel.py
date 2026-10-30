@@ -59,6 +59,7 @@ from app.utils.design_tokens import (
     get_unified_scrollbar_style,
     scale_font_size,
     scale_icon_size,
+    set_style_sheet_if_changed,
 )
 from app.utils.motion import retarget
 from app.utils.theme_manager import theme_manager
@@ -641,16 +642,21 @@ class TabItem(QFrame):
         # 直接通过 setFont 强制应用字体（避开 stylesheet 继承坑）
         self._title_label.setFont(get_unified_font(size))
         # 颜色随主题刷新（字体同一行写也能 setFont，但颜色走 stylesheet 更稳）
-        self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(size)}"
+        # 同串短路：主题刷新会遍历**全部**标签项，N 个标签 × 3 次 setStyleSheet
+        # 的 repolish 是多标签拖慢主题刷新的直接来源之一。
+        set_style_sheet_if_changed(
+            self._title_label,
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(size)}",
         )
         self._sub_label.setFont(get_unified_font(10))
-        self._sub_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        set_style_sheet_if_changed(
+            self._sub_label,
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
         )
         self._sub_time.setFont(get_unified_font(10))
-        self._sub_time.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        set_style_sheet_if_changed(
+            self._sub_time,
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
         )
 
     def refresh_style(self):
