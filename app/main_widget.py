@@ -1037,6 +1037,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记窗口是否已销毁，防止异步回调访问已销毁的 widget
         # 多窗口隔离：实例级模型配置缓存（必须覆盖类变量，防止多窗口共享）
         self._valid_configs: Dict[str, Dict[str, Any]] = {}
+        # 加载历史会话时待跟随的模型：(model_name, provider_hint, config_id)。
+        # 窗口初始化早期 _valid_configs 尚未加载，此时先暂存，配置就绪后补应用。
+        self._pending_model_restore: Optional[tuple] = None
         self._is_destroyed = False
         # 多窗口隔离：窗口唯一标识（持久化 ID，跨重启稳定）
         from app.core.team.team_manager import TeamManager
@@ -7792,6 +7795,89 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_card_manager"):
             self._card_manager.hide_card("model_selector", self._window_id)
 
+    def _follow_session_model(self, messages) -> None:
+        """加载历史会话后跟随该会话最后使用的模型。
+
+        来源：倒序扫 assistant 消息，取第一条带 model_name 的（与团队恢复
+        `_apply_model_selection_to_window` 同源口径）。解析到可用服务商配置
+        后切到该模型；解析不到（模型已被删除 / 服务商已移除）时保持当前
+        窗口选择不动。
+
+        只改窗口实例态，不走 `_on_model_selected_from_popup` —— 后者会
+        save=True 把全局默认模型也改成历史模型，污染新窗口的默认选择。
+
+        窗口初始化早期 `_valid_configs` 尚未加载（启动恢复会话早于延迟
+        1500ms 的 `_load_model_configs`），此时暂存待补，由
+        `_load_model_configs` 末尾补应用。
+        """
+        if not isinstance(messages, list) or not messages:
+            return
+        model_name = ""
+        provider_hint = ""
+        config_id = ""
+        for msg in reversed(messages):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            if msg.get("model_name"):
+                model_name = str(msg["model_name"])
+                provider_hint = str(msg.get("provider_name") or "")
+                config_id = str(msg.get("config_id") or "")
+                break
+        if not model_name:
+            return
+        if not self._valid_configs:
+            self._pending_model_restore = (model_name, provider_hint, config_id)
+            return
+        target = self._resolve_history_model_target(model_name, provider_hint, config_id)
+        if not target:
+            return
+        if target == (self._current_provider_name, self._current_model_name):
+            return  # 已经是该模型，不重复刷新（余额/套餐/圆环刷新的副作用不必要）
+        self._current_provider_name, self._current_model_name = target
+        # 会话自带的模型选择不应被云端配置同步覆盖（与团队恢复路径同语义）
+        self._user_manually_selected_model = True
+        self._update_model_selector_btn()
+        self._refresh_context_usage_indicator()
+
+    def _resolve_history_model_target(
+        self, model_name: str, provider_hint: str = "", config_id: str = ""
+    ) -> Optional[tuple]:
+        """把历史消息里的模型元数据解析成 (config_id, model_name)。
+
+        匹配优先级：config_id 直查（UUID 最精确，改名换服务商都不失效）→
+        provider_name / display_name 反查 → 模型名唯一匹配（「模型名称」或
+        「模型列表」命中，多匹配视为不明确放弃）。解析不到返回 None。
+        """
+        valid = self._valid_configs
+        if not valid or not model_name:
+            return None
+        # 1) config_id 直查
+        if config_id and config_id in valid:
+            return config_id, model_name
+        # 2) provider_name / display_name 反查（历史消息存的是 display_name）
+        if provider_hint:
+            cid = self._resolve_service_provider(provider_hint)
+            if cid:
+                return cid, model_name
+        # 3) 模型名唯一匹配
+        matched = None
+        for cid, info in valid.items():
+            model_list = info.get("模型列表") or []
+            if isinstance(model_list, str):
+                try:
+                    import ast
+
+                    model_list = ast.literal_eval(model_list) or []
+                except Exception:
+                    model_list = []
+            if info.get("模型名称") == model_name or model_name in model_list:
+                if matched is not None:
+                    return None  # 多匹配不明确，不切换
+                matched = cid
+        if matched:
+            return matched, model_name
+        return None
+
     def _on_footer_model_label_clicked(self, model_name: str, config_id: str = ""):
         """用户点击消息卡片页脚的模型标签 — 按 UUID 精确切换到对应服务商和模型"""
         if not config_id or config_id not in self._valid_configs:
@@ -8995,7 +9081,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 and self.isVisible()
                 and not getattr(self, "_welcome_render_pending", False)
             ):
-                self._show_initial_welcome()
+                # [PERF] 首次欢迎卡（本窗口从未渲染过）改走交错调度：
+                # 新建标签页时 _on_tab_selected 会先触发本方法（此刻会话还没建），
+                # 同步建卡后紧接着的 _create_new_session 入口又会 invalidate 重健，
+                # 真机上等于白付一次 QWebEngineView 创建（100~500ms 主线程）+ 一次
+                # deleteLater。改走 _schedule_initial_welcome：pending 守卫把
+                # 「选中刷新」与「新建会话后的调度」合并成一次渲染。
+                if getattr(self, "_welcome_rendered_once", False):
+                    self._show_initial_welcome()
+                else:
+                    self._schedule_initial_welcome()
         # 3. Tab 模式广播其他窗口
         if broadcast:
             self._broadcast_history_data_changed()
@@ -9005,7 +9100,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         遍历 TabManagerWindow._windows，跳过自身与已销毁窗口。仅广播不刷新本窗口
         （本窗口刷新由调用方完成），避免递归。
+
+        [PERF] 下一拍去抖合并：一次「新建会话 / 切换会话」在同一事件循环批次内
+        会连续触发多次变更通知（保存、创建、切页选中），每次广播都要遍历全部
+        标签页窗口，接收方各自刷新历史页 + 软更新欢迎卡（实测 2~10ms/窗，
+        5 窗时同步段 30~60ms）。标签页越多，新建对话越慢。合并到下一拍执行
+        一次即可——数据此时已落库，UI 刷新晚一个事件循环无可见差异。
         """
+        if getattr(self, "_history_broadcast_pending", False):
+            return
+        self._history_broadcast_pending = True
+        QTimer.singleShot(0, lambda: self._safe_timer_call(self._flush_history_broadcast))
+
+    def _flush_history_broadcast(self):
+        """执行去抖合并后的跨窗口广播（_broadcast_history_data_changed 的落地段）"""
+        self._history_broadcast_pending = False
+        if getattr(self, "_is_destroyed", False):
+            return
         try:
             tm = TabManagerWindow.get_instance()
             if tm is None:
@@ -11253,6 +11364,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._update_model_selector_btn()
         self._refresh_context_usage_indicator()
+        # 启动恢复历史会话早于本方法：暂存的历史模型在配置就绪后补应用
+        # （否则 _valid_configs 为空时无法解析 → 静默不切换）。
+        if self._pending_model_restore:
+            _pending = self._pending_model_restore
+            self._pending_model_restore = None
+            # 配置就绪前用户已手动选过模型 → 以用户选择为准，丢弃待补
+            if not getattr(self, "_user_manually_selected_model", False):
+                self._follow_session_model(
+                    [
+                        {
+                            "role": "assistant",
+                            "model_name": _pending[0],
+                            "provider_name": _pending[1],
+                            "config_id": _pending[2],
+                        }
+                    ]
+                )
 
     def _load_agent_list(self):
         """加载智能体列表到按钮组（仅显示 primary agents）"""
@@ -15446,6 +15574,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 使用辅助函数初始化
         init_after_loading_session(self, restored, session_id, title, self.backend)
 
+        # 跟随该会话最后使用的模型（解析不到则不切，保持当前窗口选择）
+        self._follow_session_model(messages)
+
         # 如果会话有自己的项目，显示在标题上；默认项目跟随更新（下次启动落在该会话项目）
         session_project = session_record.get("project", "默认项目") or "默认项目"
         self._current_project = session_project
@@ -19158,6 +19289,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
             restored = create_session_from_record(session_record, messages, title)
             init_after_loading_session(self, restored, session_id, title, self.backend)
+            # 跟随该会话最后使用的模型（解析不到则不切，保持当前窗口选择）
+            self._follow_session_model(messages)
             self._release_inactive_session_messages()
             # 同步项目；默认项目跟随更新（下次启动落在该会话项目）
             session_project = session_record.get("project", "默认项目") or "默认项目"
