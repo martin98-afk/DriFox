@@ -128,26 +128,58 @@ def _luminance(color: QColor) -> float:
 _IMAGE_CACHE: dict = {}
 
 
-def _load_theme_image(entry: dict) -> Optional[QImage]:
-    """加载主题背景图：Qt 资源路径直接用，相对路径按主题目录解析"""
+# 异步加载队列：背景图解码挪出卡片构建关键路径。首次打开设置弹窗时 13 个
+# tile 同步冷解码（最大 1.7MB PNG），实测热缓存 109ms、冷盘首读叠加后整段
+# 阻塞主线程 >500ms（watchdog 2026-10-30 实证）。改为 tile 构造只查缓存，
+# miss 入队由 singleShot 逐张加载（每张 10~30ms 分帧摊开），完成后回调刷新。
+_pending_cbs: dict = {}  # source -> [callback, ...]
+_load_queue: list = []
+
+
+def _resolve_theme_image_source(entry: dict) -> Optional[str]:
+    """解析主题背景图源：Qt 资源路径直接用，相对路径按主题目录解析"""
     spec = entry.get("image")
     if not spec:
         return None
     spec_str = str(spec)
     if spec_str.startswith(":/"):
-        source = spec_str
-    else:
-        path = theme_manager.get_theme_resource(entry.get("id", ""), os.path.basename(spec_str))
-        if path is None:
-            return None
-        source = str(path)
+        return spec_str
+    path = theme_manager.get_theme_resource(entry.get("id", ""), os.path.basename(spec_str))
+    return None if path is None else str(path)
+
+
+def _request_theme_image(entry: dict, on_ready) -> None:
+    """取主题背景图：缓存命中立即同步回调；miss 入队异步加载。
+
+    缺图（加载结果为 None）也写缓存：缺图主题不该每次重绘都探一次文件。
+    """
+    source = _resolve_theme_image_source(entry)
+    if not source:
+        return
     if source in _IMAGE_CACHE:
-        return _IMAGE_CACHE[source]
+        on_ready(_IMAGE_CACHE[source])
+        return
+    _pending_cbs.setdefault(source, []).append(on_ready)
+    was_empty = not _load_queue
+    if source not in _load_queue:
+        _load_queue.append(source)
+    if was_empty:
+        QTimer.singleShot(30, _load_next_theme_image)
+
+
+def _load_next_theme_image() -> None:
+    """每帧加载一张：解码留在主线程但单张耗时不致触发阻塞阈值"""
+    if not _load_queue:
+        return
+    source = _load_queue.pop(0)
+    callbacks = _pending_cbs.pop(source, [])
     image = QImage(source)
     result = None if image.isNull() else image
-    # None 也缓存：缺图主题不该每次重绘都去探一次文件
     _IMAGE_CACHE[source] = result
-    return result
+    for callback in callbacks:
+        callback(result)
+    if _load_queue:
+        QTimer.singleShot(30, _load_next_theme_image)
 
 
 def _first_background(backgrounds: dict) -> dict:
@@ -249,7 +281,8 @@ class _ThemeTile(QWidget):
     def __init__(self, entry: dict, parent=None):
         super().__init__(parent)
         self._entry = entry
-        self._image = _load_theme_image(entry)
+        self._image: Optional[QImage] = None
+        _request_theme_image(entry, self._on_image_ready)
         self._scaled_image: Optional[QImage] = None
         self._scaled_key: tuple = ()
         self._selected = False
@@ -257,6 +290,13 @@ class _ThemeTile(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumSize(_TILE_MIN_W, _tile_height())
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def _on_image_ready(self, image: Optional[QImage]) -> None:
+        """异步加载完成回调：tile 可能已被 deleteLater，活性硬判"""
+        if sip.isdeleted(self):
+            return
+        self._image = image
+        self.update()
 
     def refresh_metrics(self) -> None:
         """字族/字号变化后重算所占高度并重绘"""

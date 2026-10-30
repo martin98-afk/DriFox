@@ -3895,7 +3895,11 @@ _SKELETON_CACHE_MAX = 48
 # 标题左右横线造成卡中卡双圆角 + 标题居中破阅读轴；改为去外框、标题左对齐正文轴、
 # 计数独立 pill（.ts-count）、#tool-content 左侧 1.5px 竖线缩进。旧骨架的标题
 # textContent 仍拼「· N 项」，须失效缓存避免新旧结构混用。
-_SKELETON_CACHE_VERSION = 63
+# _SKELETON_CACHE_VERSION +1（v64）：_updateToolSectionHeader 的自动展开加
+# window._streamingActive 守卫——流式结束的终渲染会再跑一次该函数，DOM 里残留的
+# data-streaming="true"（注入运行框未转型 / 思考块未正式化）会把同帧折叠好的工具区
+# 重新顶开；[T44] 工具区在正文上方，一收一放 = 正文上下抖动。旧骨架无守卫，须失效缓存。
+_SKELETON_CACHE_VERSION = 64
 
 
 def _js_literal(value) -> str:

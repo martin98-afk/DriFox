@@ -5464,7 +5464,16 @@ class CodeWebViewer(QWebEngineView):
                         countEl.style.display = total > 0 ? '' : 'none';
                     }}
                     // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
-                    var _hasStreaming = document.querySelector('#tool-content [data-streaming="true"]');
+                    // ⚠️ 必须同时满足 window._streamingActive（流式进行中）：流式结束的
+                    // 终渲染会再跑一次本函数，此时 DOM 里可能残留 data-streaming="true"
+                    // （JS 注入的运行框未转型 / 思考块尚未正式化），而折叠已由
+                    // _setStreamingDock(false, collapse_after) 同帧做过 —— 只看 data-streaming
+                    // 会把刚折叠好的工具区重新顶开。[T44] 工具区在正文上方，这一收一放 =
+                    // 正文先上移再下移数百 px（结束瞬间「文字上下抖动」）。
+                    // keep_dock 路径（工具仍在跑）不会调 _setStreamingDock(false)，
+                    // _streamingActive 保持 true，自动展开行为不变。
+                    var _hasStreaming = window._streamingActive
+                        && document.querySelector('#tool-content [data-streaming="true"]');
                     var _tsEl = document.getElementById('tool-section');
                     if (_hasStreaming && _tsEl && _tsEl.getAttribute('data-collapsed') === 'true') {{
                         // 过渡期间抑制中间态高度报告，结束后终值单报
