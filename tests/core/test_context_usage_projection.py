@@ -43,6 +43,11 @@ def _engine(session, model="gpt-4o"):
     engine._callbacks = {}
     engine._api_mode = False
     engine._worker_callbacks = {}
+    engine._tools_snapshot = {
+        "key": (getattr(session, "session_id", ""), "build", False),
+        "tools": [],
+        "hash": "empty",
+    }
     engine._tools_schema_cache = {"timestamp": 0.0, "tools": [], "tokens": 0}
     return engine
 

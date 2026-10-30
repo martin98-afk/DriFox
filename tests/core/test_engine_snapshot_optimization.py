@@ -40,7 +40,8 @@ def _make_engine_with_session(messages, system_prompt=""):
     core = MagicMock()
     core.context_builder.get_context_budget.return_value = 8000
     engine._conversation_core = core
-    # tools schema 缓存预填
+    # tools schema 缓存预填（会话快照冻结，_aggregate_tools 不再触达 agent_manager）
+    engine._tools_snapshot = {"key": ("", "build", False), "tools": [], "hash": "empty"}
     engine._tools_schema_cache = {"timestamp": 1e18, "tools": [], "tokens": 0}
     engine._tool_executor = None
     engine._backend = None
@@ -155,6 +156,7 @@ def test_snapshot_with_summary_message():
     core = MagicMock()
     core.context_builder.get_context_budget.return_value = 8000
     engine._conversation_core = core
+    engine._tools_snapshot = {"key": ("", "build", False), "tools": [], "hash": "empty"}
     engine._tools_schema_cache = {"timestamp": 1e18, "tools": ["x"], "tokens": 100}
     engine._tool_executor = None
     engine._backend = None
