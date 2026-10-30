@@ -166,13 +166,15 @@ def trigger_plugin_changed_hook(context: dict) -> None:
         # 无注册 hook 提前跳过（省线程池开销）；快照仍需刷新保持基线新鲜
         # （_hooks 类级共享，检查任一实例即可）
         if "PluginChanged" not in instances[0]._hook_manager._hooks:
-            _compute_plugin_snapshot_diff()
+            invalidate_tools_snapshots_if_changed(_compute_plugin_snapshot_diff())
             return
         if "diff" not in context:
             diff = _compute_plugin_snapshot_diff()
             if diff:
                 context = dict(context)
                 context["diff"] = diff
+        # 工具/MCP 签名变化 → 失效各窗口工具 schema 快照（提示符前缀需重建）
+        invalidate_tools_snapshots_if_changed(context.get("diff"))
         # 附带子动作（tools_added/removed/updated/mcp_*），matcher 可精确匹配
         if context.get("diff") and not context.get("sub_actions"):
             context = dict(context)
@@ -182,6 +184,28 @@ def trigger_plugin_changed_hook(context: dict) -> None:
             executor.submit(inst._hook_manager.trigger_event, "PluginChanged", dict(context))
     except Exception as e:
         logger.debug(f"[HookManager] trigger_plugin_changed_hook failed: {e}")
+
+
+def invalidate_tools_snapshots_if_changed(diff: Optional[dict]) -> None:
+    """工具/MCP 签名变化 → 失效全部窗口的工具 schema 快照
+
+    判据是 registry 工具签名（_tool_signature = description + parameters 的 hash），
+    **不含实现代码**：改工具实现不触发（prompt cache 不受影响），
+    改描述/参数、增删工具、MCP 启停才触发下一次请求重建。
+    """
+    if not diff:
+        return
+    if not any(diff.get(k) for k in ("tools_added", "tools_removed", "tools_updated", "mcp_added", "mcp_removed")):
+        return
+    try:
+        from app.core.conversation.backend import ChatBackend
+
+        for backend in list(ChatBackend._active_instances):
+            engine = getattr(backend, "chat_engine", None)
+            if engine is not None and hasattr(engine, "invalidate_tools_snapshot"):
+                engine.invalidate_tools_snapshot()
+    except Exception as e:
+        logger.debug(f"[HookManager] 失效工具快照失败: {e}")
 
 
 def _is_ui_thread() -> bool:

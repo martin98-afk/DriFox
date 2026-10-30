@@ -1441,6 +1441,13 @@ class PluginHostService(QObject):
         if diff:
             context["diff"] = diff
             context["sub_actions"] = _sub_actions_from_diff(diff)
+            # 工具/MCP 签名真变了才失效各窗口工具快照（改实现不动 schema → 缓存不受影响）
+            try:
+                from app.core.hooks.hook_manager import invalidate_tools_snapshots_if_changed
+
+                invalidate_tools_snapshots_if_changed(diff)
+            except Exception as e:
+                logger.debug(f"[PluginHost] 失效工具快照失败: {e}")
         # 广播：全部活跃 backend 的 hook_manager 各自触发（hook 输出进各自队列）。
         # 服务自身的 _host_hook_manager 仅作 AgentManager 重载时的注册目标
         # （_hooks 类级共享，注册即全局可见），无对话队列、不作为触发目标。

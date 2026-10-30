@@ -104,6 +104,57 @@ def test_snapshot_returned_copy_is_isolated():
     assert engine.get_session_tools_schema("s1")[0]["function"]["description"] != "被污染"
 
 
+def test_invalidate_snapshot_rebuilds_next_request():
+    """失效后再取 → 重新聚合（拿到新注册表内容）"""
+    mgr = _FakeAgentMgr([_tool("bash")])
+    engine = _engine(mgr)
+    engine.get_session_tools_schema("s1")
+
+    mgr.tools = [_tool("bash", "新描述")]
+    engine.invalidate_tools_snapshot()
+    tools = engine.get_session_tools_schema("s1")
+
+    assert mgr.calls == 2
+    assert tools[0]["function"]["description"] == "新描述"
+
+
+def test_plugin_diff_invalidates_only_on_tool_changes(monkeypatch):
+    """PluginChanged diff：只有工具/MCP 签名变化才失效快照"""
+    from app.core.conversation.backend import ChatBackend
+    from app.core.hooks import hook_manager
+
+    mgr = _FakeAgentMgr([_tool("bash")])
+    engine = _engine(mgr)
+    backend = type("B", (), {"chat_engine": engine})()
+    monkeypatch.setattr(ChatBackend, "_active_instances", {backend}, raising=False)
+
+    # 只有 UI 组件变化（diff 无工具/MCP 键）：不失效
+    hook_manager.invalidate_tools_snapshots_if_changed({"ui": True})
+    engine.get_session_tools_schema("s1")
+    assert mgr.calls == 1
+
+    # 工具描述/参数变了：失效 → 下次请求重建
+    hook_manager.invalidate_tools_snapshots_if_changed({"tools_updated": ["bash"]})
+    engine.get_session_tools_schema("s1")
+    assert mgr.calls == 2
+
+
+def test_plugin_diff_ignores_empty_changes():
+    """空 diff / 全空列表：不失效（改实现不改 schema 的场景）"""
+    from app.core.hooks import hook_manager
+
+    mgr = _FakeAgentMgr([_tool("bash")])
+    engine = _engine(mgr)
+    engine.get_session_tools_schema("s1")
+
+    hook_manager.invalidate_tools_snapshots_if_changed(None)
+    hook_manager.invalidate_tools_snapshots_if_changed({})
+    hook_manager.invalidate_tools_snapshots_if_changed({"tools_added": [], "tools_removed": [], "tools_updated": []})
+
+    engine.get_session_tools_schema("s1")
+    assert mgr.calls == 1
+
+
 def test_presend_worker_uses_tools_provider():
     """发送路径：_PreSendWorker 优先走注入的快照提供方，跳过自身聚合"""
     from unittest.mock import MagicMock
