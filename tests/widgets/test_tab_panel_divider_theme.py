@@ -62,7 +62,12 @@ def test_divider_qss_tracks_theme(panel, monkeypatch):
 
 
 def test_divider_margins_preserved(panel):
-    """重刷不得吞掉原本的上下 margin（插件区两条是 4/2，底部那条无 margin）"""
-    assert "margin-top: 4px" in panel._plugin_separator_2.styleSheet()
+    """重刷不得吞掉原本的上下 margin（插件区 0/2、常驻区 2/2，底部那条无 margin）
+
+    margin 值来源（2026-10-30 间隔均衡修正）：_plugin_separator_2 上方折叠头
+    (margin-bottom 5) + 卡片 QSS margin-bottom 4 已贡献 9px，线顶给 0 才能与其
+    下方 8px 持平；_plugin_divider 上下均为插件行（行内 2 + spacing 2），2/2 对称。
+    """
+    assert "margin-top: 0px" in panel._plugin_separator_2.styleSheet()
     assert "margin-bottom: 2px" in panel._plugin_separator_2.styleSheet()
     assert "margin-top: 0px" in panel._separator.styleSheet()

@@ -53,10 +53,13 @@ class InputCardModule(UIModule):
         host._bottom_input_container.setObjectName("bottomContainer")
         bottom_layout = QVBoxLayout(host._bottom_input_container)
         host._bottom_input_layout = bottom_layout
-        # 呼吸感：输入区四周留出边距（左右 10 / 顶 6 / 底 7，叠加主布局 1px），
-        # 工具栏条 _position_bottom_toolbar 的绝对定位与这套 margins 严格对齐，
-        # 改这里必须同步改那边，否则输入卡与工具栏不等宽
-        bottom_layout.setContentsMargins(10, 6, 10, 7)
+        # 呼吸感：输入区四周留出边距（左右 10 / 顶 3 / 底 4，叠加主布局 1px）。
+        # 顶/底从 6/7 收敛：像素实测 footer 行到输入框 23px、输入框到窗口底 21px，
+        # 均比上方间隔大近一倍，视觉沉坠；收敛后 footer↔输入框 ≈16、输入框↔底 ≈15。
+        # 工具栏条 _position_bottom_toolbar 的绝对定位与这套 margins 严格对齐
+        # （底抬高 = 主布局 1px + 本容器底边距 4 = 5px），改这里必须同步改那边，
+        # 否则输入卡与工具栏不等宽
+        bottom_layout.setContentsMargins(10, 3, 10, 4)
         bottom_layout.setSpacing(0)
 
         # ===== 输入卡片（上方圆角 + 渐变 + 边框，border-bottom: none）=====

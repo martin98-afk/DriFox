@@ -718,6 +718,18 @@ def main():
                 import app.tools.mcp_tools  # noqa: F401
             except Exception:
                 logger.exception("[Startup] mcp SDK 预导入失败（非致命）")
+            # provider 插件 warmup：plugin_host 的 register_async 通道 delay 2s，
+            # 窗口 deferred 段的 _load_model_configs 更早消费 provider_default_config
+            # → ensure_loaded 首调落在主线程，冷加载全部 provider 插件 ~500ms
+            # （MainThreadWatchdog 实证 2026-10-30 19:52:04）。此处提前后台加载，
+            # 与该通道经 ensure_loaded 的 _loading/_load_done 互斥语义协调，
+            # 谁先到谁加载，后到者等待或直接命中 _warmup_done。
+            try:
+                from app.plugins.registries.provider_registry import ProviderRegistry
+
+                ProviderRegistry.get_instance().ensure_loaded()
+            except Exception:
+                logger.exception("[Startup] provider 插件预热失败（非致命）")
             # skills 索引预热仅在 PluginManager 已初始化时做：未初始化时
             # get_local_skills 只能扫到 fallback 路径，写入的残缺缓存会被
             # 后续 key（含插件目录）判 miss，预热白做还污染 key TTL。

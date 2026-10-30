@@ -3401,7 +3401,7 @@ class OpenAIChatToolWindow(ToolWindow):
         工具栏是 self 的直接子控件，不在 main layout 里。这样：
         - 输入卡折叠/展开时，工具栏的窗口绝对 Y 坐标完全不变。
         - 系统卡片打开时，工具栏也不会被推上去。
-        位置 = 窗口底部抬高 8px（主布局 1px + 输入容器 7px 底边距）、
+        位置 = 窗口底部抬高 5px（主布局 1px + 输入容器 4px 底边距）、
         左右缩进 11px（1px 主 margin + 10px 容器边距），与输入卡等宽同底。
         """
         if not hasattr(self, "_bottom_toolbar_strip"):
@@ -3409,11 +3409,11 @@ class OpenAIChatToolWindow(ToolWindow):
         w = self.width()
         h = self.height()
         toolbar_h = 44
-        # 与主布局 1px margin + 输入容器 margins(10, 6, 10, 7) 对齐：
-        # strip 左右缩进 11px，底部抬高 8px（1px 主 margin + 7px 容器 margin），
+        # 与主布局 1px margin + 输入容器 margins(10, 3, 10, 4) 对齐：
+        # strip 左右缩进 11px，底部抬高 5px（1px 主 margin + 4px 容器 margin），
         # 输入卡与工具栏条保持等宽同底，四周留出呼吸边距
         toolbar_x = 11
-        toolbar_y = max(0, h - 8 - toolbar_h)
+        toolbar_y = max(0, h - 5 - toolbar_h)
         toolbar_w = max(0, w - 22)
         self._bottom_toolbar_strip.setGeometry(toolbar_x, toolbar_y, toolbar_w, toolbar_h)
         # 发送按钮挂主窗口（跨条带与输入区两段、避免被 strip 矩形裁剪），

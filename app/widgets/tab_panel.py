@@ -1718,9 +1718,9 @@ class TabPanel(QWidget):
     def _refresh_divider_styles(self):
         """主题/字体刷新入口：重刷面板内三条分隔线颜色（绝不在多线程调用）"""
         self._separator.setStyleSheet(self._divider_qss())
-        self._plugin_separator_2.setStyleSheet(self._divider_qss(4, 2))
+        self._plugin_separator_2.setStyleSheet(self._divider_qss(0, 2))
         if getattr(self, "_plugin_divider", None) is not None:
-            self._plugin_divider.setStyleSheet(self._divider_qss(4, 2))
+            self._plugin_divider.setStyleSheet(self._divider_qss(2, 2))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1812,8 +1812,10 @@ class TabPanel(QWidget):
         # ── 分隔线：UI 插件区域 ↔ 新建标签页 ──
         self._plugin_separator_2 = QFrame(self)
         self._plugin_separator_2.setFrameShape(QFrame.HLine)
-        # 线色随主题（见 _divider_qss 说明）：此处走运行时生成，refresh_style 重刷
-        self._plugin_separator_2.setStyleSheet(self._divider_qss(4, 2))
+        # 线色随主题（见 _divider_qss 说明）：此处走运行时生成，refresh_style 重刷。
+        # 上 0 下 2：折叠头自身底部 margin 5 + 卡片 QSS margin-bottom 4 已贡献 9px，
+        # 线再给 4 会叠加到 13px，与线下 8px 失衡（用户反馈间隔不均）
+        self._plugin_separator_2.setStyleSheet(self._divider_qss(0, 2))
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
@@ -1926,7 +1928,7 @@ class TabPanel(QWidget):
         self._tree_header = QWidget(self)
         self._tree_header.setStyleSheet("background: transparent;")
         _tree_header_layout = QHBoxLayout(self._tree_header)
-        _tree_header_layout.setContentsMargins(8, 2, 6, 2)
+        _tree_header_layout.setContentsMargins(6, 2, 6, 2)
         _tree_header_layout.setSpacing(4)
         self._tree_header_label = QLabel("工作区", self._tree_header)
         self._tree_header_label.setStyleSheet("background: transparent;")
