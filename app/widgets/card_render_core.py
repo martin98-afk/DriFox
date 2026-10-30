@@ -1870,18 +1870,12 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     </div>
 </div>"""
 
-    # ── 流式态：spinner 行 + 实时思考文字预览区（限高窗口，内部滚底）──
+    # ── 流式态：无 spinner 头部行，直接展示实时思考文字（live 区）──
     # live 区由 append_reasoning 节流推送增量文本（textNode append，不重建 DOM），
-    # 高度封顶不撑卡片，不触发外部滚动。样式见 card_viewers.py 骨架 CSS。
-    # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
-    # 在消息正文中显得过粗过大。
+    # 高度封顶不撑卡片，不触发外部滚动。文字为空时 CSS :empty 占位提示。
+    # 样式见 card_viewers.py 骨架 CSS。
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming"{_flip_attr} data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
-        {spinner_html}
-        <span>深度思考中...</span>
-    </span>
     <div class="think-streaming-live" style="{font_style_inline}">
         <div class="think-streaming-live-text"></div>
     </div>
@@ -1923,14 +1917,9 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     </div>
 </div>"""
 
-    # ── 流式态：spinner 行 + 实时思考文字预览区（同 _render_think_block）──
+    # ── 流式态：同 _render_think_block，直接展示实时思考文字 ──
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
-        {spinner_html}
-        <span>深度思考中...</span>
-    </span>
     <div class="think-streaming-live" style="{font_style_inline}">
         <div class="think-streaming-live-text"></div>
     </div>

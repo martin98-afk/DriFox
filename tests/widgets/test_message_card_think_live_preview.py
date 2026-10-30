@@ -70,7 +70,8 @@ def test_streaming_template_contains_live_area():
         html = render("思考内容", completed=False)
         assert 'class="think-streaming-live"' in html, f"{render.__name__} 缺 live 区容器: {html!r}"
         assert 'class="think-streaming-live-text"' in html, f"{render.__name__} 缺 live 文本节点容器: {html!r}"
-        assert "深度思考中" in html, f"{render.__name__} 缺 spinner 文案: {html!r}"
+        # 2026-10-31：spinner 头部行移除（直接显示流式文字），占位文案移至 CSS :empty::before
+        assert "tool-streaming-spinner" not in html, f"{render.__name__} 仍残留 spinner: {html!r}"
 
 
 # ── 完成态折叠框模板不受影响（回归守护：仍可渲染）──
@@ -163,3 +164,28 @@ def test_flush_idempotent_after_drain():
     card._flush_streaming_live()
     flush_js = [j for j in card.viewer.js_calls if "think-streaming-live-text" in j]
     assert len(flush_js) == 1, f"重复 flush 应为 no-op: {len(flush_js)} 次"
+
+
+# ── 历史批量加载：defer_render + force_new_block（2026-10-31 思考沉底修复）──
+def test_history_batch_reasoning_independent_blocks():
+    """历史加载路径：每条 assistant 消息的思考必须独立成块、不触发渲染。
+
+    根因回归：render_batch_to_assistant_card 旧实现把 reasoning 拼进 text 协议串
+    （<think>…</think>\\n\\n正文），思考卡混在 text 块 wrapper 内，v2 简洁模式靠
+    _v2AfterPatch 搬到工具区且插入点恒在最后一个 wrapper 之后 → 所有思考沉底。
+    修复后走独立 reasoning 块（patchBlocks 保序）。本测试锁数据层行为：
+    force_new_block 逐条独立成块；defer_render 不触发任何渲染/JS/buffer。
+    """
+    card = _make_streaming_card()
+    card.append_reasoning("第一条消息的思考", defer_render=True, force_new_block=True)
+    card.append_reasoning("第二条消息的思考", defer_render=True, force_new_block=True)
+
+    blocks = [b for b in card._content_data if b.get("type") == "reasoning"]
+    assert len(blocks) == 2, f"两条思考应独立成块: {card._content_data!r}"
+    assert blocks[0]["content"] == "第一条消息的思考"
+    assert blocks[1]["content"] == "第二条消息的思考"
+    # defer_render：零渲染、零 JS、零 live 缓冲（渲染由 finish_streaming(history=True) 统一）
+    assert card.viewer.render_calls == 0, f"defer_render 触发了渲染: {card.viewer.render_calls}"
+    assert card.viewer.js_calls == [], f"defer_render 触发了 JS: {card.viewer.js_calls!r}"
+    assert card._streaming_live_buffer == "", "defer_render 污染了 live 缓冲"
+    assert not card._streaming_live_timer.isActive(), "defer_render 启动了节流 timer"

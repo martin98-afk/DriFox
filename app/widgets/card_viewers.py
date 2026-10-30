@@ -2833,18 +2833,16 @@ class CodeWebViewer(QWebEngineView):
 
                 .think-block {{
                     margin: 4px 0;
-                    /* 视觉升级：极浅底 + 左侧暖金竖线（呼应思考 spinner 金色），与正文区分身份 */
+                    /* 浅底与正文区分；不加左边线/左侧额外 pad，与工具块左对齐（用户要求） */
                     background: {"rgba(15, 23, 42, 0.03)" if _is_light_diff else "rgba(255, 255, 255, 0.03)"};
-                    border-left: 2px solid rgba(255, 200, 50, 0.45);
                     border-radius: 6px;
                 }}
                 .think-compact {{
                     background: {"rgba(15, 23, 42, 0.03)" if _is_light_diff else "rgba(255, 255, 255, 0.03)"};
-                    border-left: 2px solid rgba(255, 200, 50, 0.45);
                     border-radius: 4px;
                 }}
                 .think-block__summary {{
-                    padding: 7px 10px;
+                    padding: 5px 10px;
                     color: var(--text-secondary);
                     font-weight: 600;
                 }}
@@ -2864,14 +2862,14 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 /* 流式思考实时预览区：限高窗口（不撑卡片高度/不触发外部滚动），
                    文本由 append_reasoning 节流 textNode append，内部程序性滚底；
-                   底部 mask 渐隐表达"内容持续增长中" */
+                   mask 顶部渐隐（旧内容淡出）、底部实（最新文字始终清晰可读） */
                 .think-streaming-live {{
-                    margin-top: 6px;
+                    margin-top: 0;
                     max-height: 96px;
                     overflow-y: hidden;
                     overflow-x: hidden;
-                    -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
-                    mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
+                    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 30%);
+                    mask-image: linear-gradient(180deg, transparent 0, #000 30%);
                 }}
                 .think-streaming-live-text {{
                     white-space: pre-wrap;
@@ -2879,6 +2877,11 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-muted);
                     font-style: italic;
                     line-height: 1.5;
+                }}
+                /* 文字未到时占位提示（首 chunk flush 后自动消失） */
+                .think-streaming-live-text:empty::before {{
+                    content: "深度思考中...";
+                    color: var(--text-muted);
                 }}
                 /* 思考轮播提示文字 — 从左到右脉冲渐变色动画 */
                 .think-streaming-tip {{

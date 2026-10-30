@@ -5896,18 +5896,29 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             pass
 
-    def append_reasoning(self, text: str):
+    def append_reasoning(self, text: str, defer_render: bool = False, force_new_block: bool = False):
         """追加思考内容到当前最后一个思考块（流式模式）
 
         将 reasoning 直接写入 _content_data 的 reasoning block，
         使其与文本、工具结果按实际发生顺序交错渲染。
+
+        Args:
+            defer_render: 只写数据层（_content_data），跳过 live buffer / 渲染调度。
+                历史批量加载用：N 条思考逐条立即渲染会打爆批量加载，渲染由末尾
+                finish_streaming(history=True) 统一做。
+            force_new_block: 跳过「追加到最后一个 reasoning 块」的兜底，直接新建块。
+                历史加载的多条 assistant 消息各有独立思考，必须逐条独立成块，
+                否则第二条会被合并进第一条（思考块堆积）。
         """
         # 🆕 Bug B：只追加到当前活动思考块（start_new_thinking_block 创建的新块）。
         # 兜底：无活动块时查找最后一个 reasoning block（兼容未走 start_new_thinking_block
         # 的流路径），仍未找到才新建块。活动块是 dict 对象引用，即使中间被工具结果
         # 锚点 insert 挤动列表位置，引用仍有效。
         _target_block = self._active_thinking_block if isinstance(self._active_thinking_block, dict) else None
-        if _target_block is None:
+        if force_new_block:
+            # 历史批量加载：每条 assistant 消息的思考独立成块，不复用活动块
+            _target_block = None
+        elif _target_block is None:
             for i in reversed(range(len(self._content_data))):
                 if self._content_data[i].get("type") == "reasoning":
                     _target_block = self._content_data[i]
@@ -5917,9 +5928,16 @@ class MessageCard(SimpleCardWidget):
             # 找到已有的（活动）思考块，追加内容
             _target_block["content"] = (_target_block.get("content", "") or "") + text
         else:
-            # 未找到，新增 reasoning 块
-            self._content_data.append({"type": "reasoning", "content": text})
+            # 未找到（或 force_new_block），新增 reasoning 块
+            _target_block = {"type": "reasoning", "content": text}
+            self._content_data.append(_target_block)
+        # 登记为活动块：后续同段思考继续追加到此块（历史批量加载逐条独立成块）
+        self._active_thinking_block = _target_block
         self._reasoning_total_len += len(text)
+
+        if defer_render:
+            # 历史批量加载：渲染由末尾 finish_streaming(history=True) 统一做
+            return
 
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
@@ -5986,6 +6004,10 @@ class MessageCard(SimpleCardWidget):
                 t.appendChild(document.createTextNode({safe_text}));
                 var box = t.parentElement;
                 if (box) {{ box.scrollTop = box.scrollHeight; }}
+                // 工具区贴底跟随（内部有 _userScrolledUp 判断，用户上滚不拉底）
+                if (window._streamingActive && typeof _scrollToolContentToBottom === 'function') {{
+                    _scrollToolContentToBottom();
+                }}
             }})();
             """
             self.viewer.page().runJavaScript(js_code)
