@@ -1851,8 +1851,11 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         content_escaped = escape(_strip_code_blocks(content))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+        # 预览文字单行省略：长预览不再折行撑高 summary 行（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; '
+            f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
+            f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
         )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
@@ -1867,7 +1870,9 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
+    # ── 流式态：spinner 行 + 实时思考文字预览区（限高窗口，内部滚底）──
+    # live 区由 append_reasoning 节流推送增量文本（textNode append，不重建 DOM），
+    # 高度封顶不撑卡片，不触发外部滚动。样式见 card_viewers.py 骨架 CSS。
     # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
     # 在消息正文中显得过粗过大。
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
@@ -1877,6 +1882,9 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         {spinner_html}
         <span>深度思考中...</span>
     </span>
+    <div class="think-streaming-live" style="{font_style_inline}">
+        <div class="think-streaming-live-text"></div>
+    </div>
 </div>"""
 
 
@@ -1896,8 +1904,11 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
+        # 预览文字单行省略：与 _render_think_block 同款（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; '
+            f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
+            f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
         )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
@@ -1912,9 +1923,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
-    # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
-    # 在消息正文中显得过粗过大。
+    # ── 流式态：spinner 行 + 实时思考文字预览区（同 _render_think_block）──
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
@@ -1922,6 +1931,9 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         {spinner_html}
         <span>深度思考中...</span>
     </span>
+    <div class="think-streaming-live" style="{font_style_inline}">
+        <div class="think-streaming-live-text"></div>
+    </div>
 </div>"""
 
 
@@ -3920,7 +3932,7 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v70）：patchBlocks 插入锚点与搬移插入点改「按存活
 # wrapper 定位」——工具区末尾挂着 JS 注入的运行框（非 wrapper），原 append 兜底会把
 # 新块/搬入卡排到运行框之后，运行框看起来「跑到思考上面」，下一批又移回 = 位置跳。
-_SKELETON_CACHE_VERSION = 70
+_SKELETON_CACHE_VERSION = 71
 
 
 def _js_literal(value) -> str:

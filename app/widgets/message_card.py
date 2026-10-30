@@ -553,6 +553,12 @@ class MessageCard(SimpleCardWidget):
         self._active_thinking_block: Optional[dict] = None
         self._pending_content: Optional[str] = None
         self._reasoning_total_len = 0  # reasoning 内容总长度计数器，避免每次遍历
+        # 流式思考实时预览：增量文本缓冲 + 节流推送（250ms 批量，避免逐 chunk runJavaScript）
+        self._streaming_live_buffer: str = ""
+        self._streaming_live_timer = QTimer(self)
+        self._streaming_live_timer.setSingleShot(True)
+        self._streaming_live_timer.setInterval(250)
+        self._streaming_live_timer.timeout.connect(self._flush_streaming_live)
         self._viewer_container = QWidget(self)
         self._viewer_layout = QVBoxLayout(self._viewer_container)
         self._viewer_layout.setContentsMargins(0, 0, 0, 0)
@@ -4985,6 +4991,9 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：新块成为当前活动思考块。append_reasoning 只追加到它，
         # 避免后续 reasoning 内容合并进已完成的旧思考块导致多轮思考堆积顶部。
         self._active_thinking_block = self._content_data[-1]
+        # 新轮思考开始：丢弃旧块 live 预览残余（flush 到新块会串块；
+        # _content_data 完整，全量渲染不受影响）
+        self._discard_streaming_live()
         # 新一轮思考开始，仅重置 streaming 标志。
         # _thinking_finalized 留在 True（上一轮已完成），直到新 reasoning chunk 到达
         # （append_reasoning 首 chunk）才置为 False，防止在两轮之间的窗口期，
@@ -5369,6 +5378,9 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：思考完成 → 活动块置空，后续 reasoning 不再追加到此块
         # （下一轮思考由 start_new_thinking_block 创建新块并重新登记）。
         self._active_thinking_block = None
+        # 清空 live 预览缓冲：残余文本随整块被完成态折叠框替换（_content_data
+        # 始终完整），不值得为被替换掉的 DOM 再发一次 append JS
+        self._discard_streaming_live()
         # 保持原始 content 用于 block-key 计算，确保与 _inject_think_cards
         # （通过 _build_incremental_md）产生的 key 一致。
         # 否则每次 _perform_update → reorganizeContent 会因 key 不匹配
@@ -5923,6 +5935,11 @@ class MessageCard(SimpleCardWidget):
         # （由 append_text / finish_streaming / _maybe_finish_thinking_for_tool 触发）一并处理
         if not self.viewer._reasoning_streaming_started:
             self.viewer._reasoning_streaming_started = True
+            # 首 chunk 也进 live buffer：全量渲染只出 spinner+空 live 区，
+            # 首 chunk 文本由 250ms 后的 flush 补上（此时渲染已完成，selector 可命中）
+            self._streaming_live_buffer += text
+            if not self._streaming_live_timer.isActive():
+                self._streaming_live_timer.start()
             # 🐛 修复：仅在新 reasoning 真正开始接收内容时才重置 _thinking_finalized。
             # start_new_thinking_block 不再重置此标志，防止两轮之间的空窗期
             # 已完成 think-block 的 </think> 被错误剥离为 think-streaming。
@@ -5936,9 +5953,53 @@ class MessageCard(SimpleCardWidget):
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             self.viewer._schedule_render(immediate=True)
         else:
-            # 后续 chunk：只累积到 _content_data，静默不触发任何 DOM 操作
+            # 后续 chunk：累积到 _content_data；同时缓冲进实时预览 buffer，
+            # 由节流 timer 批量 textNode append 到 .think-streaming-live（不重建 DOM、
+            # 不触发全量渲染、不报外部高度——live 区 CSS 限高，卡片高度不变，
+            # 外部聊天列表滚动不被打断）
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            # 不调用 _schedule_render / _update_thinking_incremental
+            self._streaming_live_buffer += text
+            if not self._streaming_live_timer.isActive():
+                self._streaming_live_timer.start()
+
+    def _flush_streaming_live(self):
+        """把缓冲的思考增量文本推送到流式 live 预览区（textNode append，不重建 DOM）
+
+        节流策略：250ms 批量，避免逐 chunk runJavaScript；live 区 CSS 限高
+        （.think-streaming-live max-height:96px），内部程序性滚底，不报外部高度。
+        viewer 未就绪/已析构时静默丢弃（后续全量渲染会从 _content_data 带完整内容）。
+        """
+        if not self._streaming_live_buffer:
+            return
+        text = self._streaming_live_buffer
+        self._streaming_live_buffer = ""
+        if not self._lazy_rendered or not self.viewer:
+            return
+        try:
+            # orjson.dumps 返回 bytes，需 decode 后嵌入 JS 字符串字面量；
+            # createTextNode 走安全文本节点，无 HTML 注入面
+            safe_text = json.dumps(text).decode("utf-8")
+            js_code = f"""
+            (function() {{
+                var t = document.querySelector('.think-streaming[data-streaming="true"] .think-streaming-live-text');
+                if (!t) {{ return; }}
+                t.appendChild(document.createTextNode({safe_text}));
+                var box = t.parentElement;
+                if (box) {{ box.scrollTop = box.scrollHeight; }}
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
+    def _discard_streaming_live(self):
+        """清空流式 live 预览缓冲（思考块完成/新轮思考开始时调用）。
+
+        丢弃残余而非追加：旧块尾部文本若被 flush 到新块的 live 区开头会串块；
+        _content_data 始终完整，全量渲染不受影响。
+        """
+        self._streaming_live_buffer = ""
+        self._streaming_live_timer.stop()
 
     def _update_thinking_incremental(self, new_text: str):
         """流式思考增量更新（仅触发布局高度重算）
