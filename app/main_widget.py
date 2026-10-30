@@ -4076,12 +4076,18 @@ class OpenAIChatToolWindow(ToolWindow):
             self._welcome_build_hold = True
         self._load_ui_plugins_step(plugin_dirs, 0, 0, on_done)
 
-    def _load_ui_plugins_step(self, plugin_dirs, idx: int, loaded: int, on_done=None, frame_spent: float = 0.0):
+    def _load_ui_plugins_step(
+        self, plugin_dirs, idx: int, loaded: int, on_done=None, frame_spent: float = 0.0, yield_at: float = 0.0
+    ):
         """分帧装载 UI 插件：单帧累计装载耗时超预算时让出事件循环一帧
 
         装载顺序不变；快插件（几十 ms）在同一帧内连续跑完不产生额外调度，
         累计耗时达 _UI_PLUGIN_FRAME_BUDGET_MS 才让帧，把连续数秒的主线程
         冻结切成可响应碎片的同时，避免逐个插件让帧的调度间隙。
+
+        [PERF] yield_at：上一次让帧的时刻。让帧后到本帧之间的间隔等于主线程被其他
+        任务（延迟队列里的主题刷新/服务商预热/warmup 等）占用的时间——它不会出现在
+        任何「本帧累计」里，却直接拉长用户感知的启动时长，超 500ms 必须能指名。
         """
         if idx >= len(plugin_dirs):
             if loaded > 0:
@@ -4092,6 +4098,13 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         name, path = plugin_dirs[idx]
+        if yield_at > 0:
+            wait_ms = (time.perf_counter() - yield_at) * 1000
+            if wait_ms >= 500:
+                logger.warning(
+                    f"[MainWidget] UI 插件装载让帧后等待 {wait_ms:.0f}ms（下一个: {name}，idx={idx}），"
+                    f"主线程被其他启动任务占用"
+                )
         t0 = time.perf_counter()
         ok = False
         try:
@@ -4110,7 +4123,13 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info(
                 f"[MainWidget] UI 插件 {name} 装载耗时 {cost_ms:.0f}ms（本帧累计 {frame_spent:.0f}ms，让出事件循环）"
             )
-            QTimer.singleShot(0, lambda: self._safe_timer_call(next_call))
+            yield_mark = time.perf_counter()
+            QTimer.singleShot(
+                0,
+                lambda: self._safe_timer_call(
+                    lambda: self._load_ui_plugins_step(plugin_dirs, idx + 1, loaded, on_done, 0.0, yield_mark)
+                ),
+            )
         else:
             next_call()
 

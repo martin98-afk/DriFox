@@ -274,7 +274,12 @@ class PluginHostService(QObject):
         queue.register("watcher", self._deferred_start_watcher, delay_ms=2000)
         queue.register("plugin_tools_rescan", self._deferred_rescan_plugin_tools, delay_ms=2000)
         queue.register("provider_warmup", self._deferred_warmup_providers, delay_ms=2000)
-        queue.register("runtime_components", self._deferred_warmup_runtime_components, delay_ms=2000)
+        # runtime_components：11 组件全量扫描实测 7.4s（transports/openai_chat.py
+        # 单文件就 2.5s，其中 httpx 首次导入连带 click/pygments/urllib.request 1.6s）。
+        # 同步执行时整段无 yield，主线程硬冻结——改后台线程，主线程只投递。
+        queue.register_async("runtime_components", self._deferred_warmup_runtime_components, delay_ms=2000)
+        # 网络栈预热：与 warmup 无依赖，越早越好；httpx 首次导入从同步段挤出来
+        queue.register_async("net_preheat", self._deferred_preheat_http, delay_ms=0)
         queue.register("gateway_sync", self._deferred_sync_gateway_platforms, delay_ms=2000)
         queue.register("lsp_init", self._deferred_init_lsp, delay_ms=2000)
         queue.register("mcp_discover", self._deferred_discover_mcp, delay_ms=2000)
@@ -375,13 +380,30 @@ class PluginHostService(QObject):
 
     def _deferred_warmup_runtime_components(self):
         """运行时组件（model_adapters / loop_policies / storages）：
-        内置实现先注册，插件目录可覆盖内置"""
+        内置实现先注册，插件目录可覆盖内置
+
+        以 register_async 投递：本函数在后台线程执行（组件模块 import 与 registry
+        注册均不碰 Qt widget），完成后由队列回主线程放行 gateway_sync。
+        """
         try:
             from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
             warmup_runtime_components()
         except Exception as e:
             logger.error(f"[PluginHost] 运行时组件 warmup 失败: {e}")
+
+    def _deferred_preheat_http(self):
+        """后台预热 HTTP 栈（httpx 及其依赖）。
+
+        httpx 首次导入实测 1.6s（连带 click/pygments/urllib.request/http.client）。
+        它最终一定要导入（chat_worker 发请求、config_sync），放在启动同步段会
+        直接冻结 UI；放后台线程则与插件装载并行。失败不影响功能（各调用点仍
+        会自行惰性导入）。
+        """
+        try:
+            import app.utils.http_client  # noqa: F401
+        except Exception as e:
+            logger.warning(f"[PluginHost] HTTP 栈预热失败（不影响功能）: {e}")
 
     def _deferred_sync_gateway_platforms(self):
         """gateway 平台此时才注册进 registry（warmup 晚于 GatewayService

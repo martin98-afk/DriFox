@@ -18,17 +18,18 @@
 自动停止。纯 QtCore，可独立单测。
 """
 
+import threading
 import time
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QTimer
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 _PUMP_IDLE_GAP_MS = 0  # idle 任务间 yield 事件循环的间隔（0 = 下一轮事件循环）
 _PUMP_WAIT_MS = 5  # 无可执行任务（等 delay/约束）时的轮询间隔
 class _Task:
-    __slots__ = ("name", "fn", "priority", "delay_ms", "once", "barrier", "ran")
+    __slots__ = ("name", "fn", "priority", "delay_ms", "once", "barrier", "ran", "started", "async_run")
 
-    def __init__(self, name, fn, priority, delay_ms, once):
+    def __init__(self, name, fn, priority, delay_ms, once, async_run=False):
         self.name = name
         self.fn = fn
         self.priority = priority
@@ -36,10 +37,16 @@ class _Task:
         self.once = once
         self.barrier = False
         self.ran = False
+        # started：异步任务已投递到后台线程但尚未回填 ran（防重复启动）
+        self.started = False
+        self.async_run = async_run
 
 
 class DeferredTaskQueue(QObject):
     """per-window 延迟任务队列（host 销毁后由窗口侧调用 stop()）"""
+
+    # 后台线程任务完成回填（跨线程 emit 自动排队到本对象线程 = 主线程）
+    _async_task_done = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -51,6 +58,7 @@ class DeferredTaskQueue(QObject):
         self._finished = False
         self._start_monotonic = 0.0
         self._pump_scheduled = False
+        self._async_task_done.connect(self._on_async_task_done)
 
     # ── 注册接口 ──
 
@@ -71,6 +79,24 @@ class DeferredTaskQueue(QObject):
             logger.debug(f"[DeferredTaskQueue] 任务 {name} 已执行过，忽略重复注册")
             return self
         self._tasks[name] = _Task(name, fn, priority, int(delay_ms), once)
+        return self
+
+    def register_async(self, name: str, fn, *, delay_ms: int = 0) -> "DeferredTaskQueue":
+        """注册后台线程任务：fn 在守护线程执行，完成后回主线程标记 ran。
+
+        用于「同步执行会冻结 UI、但必须在后续任务前完成」的预热（运行时组件
+        warmup / 网络栈预热）。队列的保序约束与屏障语义照旧：before 未回填 ran
+        时 after 不会执行，所以主线程只会等待，不会被任务体阻塞。
+
+        fn 必须不碰 Qt widget（后台线程），且自身幂等。
+        """
+        if self._stopped:
+            logger.warning(f"[DeferredTaskQueue] stop 后注册 {name}，忽略")
+            return self
+        if name in self._tasks and self._tasks[name].ran:
+            logger.debug(f"[DeferredTaskQueue] 任务 {name} 已执行过，忽略重复注册")
+            return self
+        self._tasks[name] = _Task(name, fn, "idle", int(delay_ms), True, async_run=True)
         return self
 
     def add_order_constraint(self, before: str, after: str):
@@ -129,6 +155,8 @@ class DeferredTaskQueue(QObject):
         """任务是否满足执行条件（delay 到期 + 保序约束满足 + 屏障条件满足）"""
         if task.ran:
             return False
+        if task.started:
+            return False  # 异步任务在跑，等回填
         if self._elapsed_ms() < task.delay_ms:
             return False
         for before in self._constraints.get(task.name, ()):  # 保序
@@ -209,6 +237,12 @@ class DeferredTaskQueue(QObject):
             self._finished = True
 
     def _run_task(self, task: _Task):
+        if task.async_run:
+            # 后台执行：主线程只投递，不等待；完成由 _async_task_done 回填
+            task.started = True
+            t = threading.Thread(target=self._async_runner, args=(task,), daemon=True, name=f"dtq-{task.name}")
+            t.start()
+            return
         task.ran = True
         try:
             task.fn()
@@ -216,3 +250,26 @@ class DeferredTaskQueue(QObject):
             logger.exception(f"[DeferredTaskQueue] 任务 {task.name} 执行异常（继续后续任务）")
         if task.once and task.name in self._barriers:
             self._barriers.discard(task.name)
+
+    def _async_runner(self, task: _Task):
+        """后台线程体：执行任务后经信号回主线程回填 ran"""
+        t0 = time.perf_counter()
+        try:
+            task.fn()
+        except Exception:  # noqa: BLE001
+            logger.exception(f"[DeferredTaskQueue] 后台任务 {task.name} 执行异常（继续后续任务）")
+        finally:
+            logger.debug(f"[DeferredTaskQueue] 后台任务 {task.name} 耗时 {(time.perf_counter() - t0) * 1000:.0f}ms")
+            self._async_task_done.emit(task.name)
+
+    def _on_async_task_done(self, name: str):
+        """主线程回填：标记完成并重新泵一轮（保序约束据此放行后续任务）"""
+        if self._stopped:
+            return
+        task = self._tasks.get(name)
+        if task is None:
+            return
+        task.ran = True
+        if task.once and name in self._barriers:
+            self._barriers.discard(name)
+        self._schedule_pump(0)
