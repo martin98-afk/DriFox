@@ -240,6 +240,12 @@ def main():
 
     _install_info_bar_guard()
 
+    # 🐕 主线程阻塞看门狗：后台线程在阻塞持续期抓主线程栈，指名「让帧后等待」
+    # 类警告背后的真正占用者（心跳 QTimer 阻塞期不跳，主线程自证不可能）。
+    from app.utils.main_thread_watchdog import install_watchdog as _install_watchdog
+
+    _install_watchdog()
+
     # 🎡 SpinBox 滚轮守卫：数字框不再吃滚轮改值（误改要等失焦才落盘，
     # 用户几乎无感）。滚轮转交外层滚动容器，页面照常滚动；插件里的 SpinBox
     # 同在应用级过滤范围内。详见 app/utils/wheel_guard.py。

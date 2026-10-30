@@ -4101,7 +4101,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 warmup_component("budget_resolvers")
             except Exception as e:
                 logger.warning(f"[MainWidget] 上下文策略预注册失败（继续装载）: {e}")
-            svc.pause_deferred("ui_plugin_load", only=["runtime_components", "net_preheat"])
+            # provider_warmup 一并挂起：它在后台 import 服务商模块，与装载链
+            # 争 Python import 锁（同 runtime_components 当初的 3.3s 事故）
+            svc.pause_deferred(
+                "ui_plugin_load", only=["runtime_components", "net_preheat", "provider_warmup"]
+            )
             # 步进链是单发定时器：窗口销毁后收口分支不会再跑，必须另有释放路径，
             # 否则应用级队列被永久暂停（其它窗口的启动任务全部卡死）
             self.destroyed.connect(lambda *_: svc.resume_deferred("window_destroyed"))
