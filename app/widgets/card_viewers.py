@@ -120,6 +120,8 @@ from app.widgets.card_render_core import (
     _STREAMING_DOCK_JS,
     _TYPEWRITER_JS,
     _accent_rgba,
+    _chart_ids_in,
+    _compute_stream_stable_len,
     _defer_emit,
     _dispatch_render_done,
     _dispatch_final_render_done,
@@ -140,7 +142,6 @@ from app.widgets.card_render_core import (
     _inject_tool_blocks,
     _iter_think_segments,
     _js_literal,
-    _last_para_break_outside_fence,
     _mmd_theme_vars_js,
     _registered_tag_names_safe,
     _render_inline_tail,
@@ -7339,6 +7340,7 @@ class CodeWebViewer(QWebEngineView):
                     # think-block 折叠框（简洁模式下应为 think-compact），形态分裂
                     # （9c76d04f 只给 _render_stable_segment 加了参数，调用点漏改）。
                     new_html = "".join(_render_stable_segment(seg, compact=self._tool_compact_mode, lazy_body=self._tool_lazy_body) for seg in segs)
+                    _stable_html_before = self._stable_html
                     self._stable_md_len += stable_len
                     self._stable_html += new_html
                     # ⚠️ updateContentAppend 是"追加"语义：只推送本次新增段，
@@ -7363,6 +7365,19 @@ class CodeWebViewer(QWebEngineView):
                         _safe_tail = _tail_before_unclosed_block(_tail)
                         if _safe_tail and not _has_unclosed_think_or_tool(_safe_tail):
                             _tail_html = _render_inline_tail(_safe_tail, compact=self._tool_compact_mode)
+                    # 🐛 守卫（流式图表两遍）：差量段/tail 里的图表容器若已在稳定区
+                    # 渲染过（同 id），追加就会让同一图表在 DOM 里出现两份（旧节点
+                    # 非增量，updateContentAppend 不移除）。根因是基线推进漏了 fence
+                    # （见 _compute_stream_stable_len），此处做内容级兜底：直接降级
+                    # 全量渲染，innerHTML 整体替换天然去重。
+                    if _chart_ids_in(new_html + _tail_html) & _chart_ids_in(_stable_html_before):
+                        self._stable_md_len = 0
+                        self._needs_full_render = True
+                        self._rdiag_hit("full_chart_dup_guard")
+                        self._refresh_viewer_font_css()
+                        self._last_rendered_markdown = self._markdown_text
+                        self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                        return
                     js = (
                         "updateContentAppend("
                         f"{json.dumps(new_html).decode('utf-8')},"
@@ -7814,6 +7829,12 @@ class CodeWebViewer(QWebEngineView):
             self._tail_last_rendered_ts = _now
             return
         html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
+        # 🐛 守卫（流式图表两遍）：尾部渲染产物含稳定区**已渲染过**的图表容器
+        # （同 id）→ 说明差量基线落后于 DOM（典型：fence 闭合后基线停在 fence
+        # 前）。此时插入尾节点会让同一图表出现两份；置全量标记，交整体替换去重。
+        if _chart_ids_in(html) & _chart_ids_in(self._stable_html):
+            self._needs_full_render = True
+            return
         # 无论结果是否为空都记录哈希（think/tool 尾部返回空串时避免重复计算）
         self._tail_html_hash = _h
         self._tail_last_rendered_len = len(_tail)
@@ -8095,10 +8116,10 @@ class CodeWebViewer(QWebEngineView):
                 # 推进到最后段落边界后，末段整体划入 tail 区：打标删除与 tail 重建
                 # 语义闭环（删掉的正是 tail 会重建的），不丢不重。
                 _md_r = self._last_rendered_markdown
-                # fence 感知：推进点不落在未闭合 fence 内部（否则后续差量切片
-                # 起点在 fence 内，内部代码行被当普通段产出 → 图表源码生肉流入）
-                _last_break = _last_para_break_outside_fence(_md_r)
-                self._stable_md_len = _last_break + 2 if _last_break != -1 else 0
+                # 单一真相：段落边界 / 闭合协议块 / 闭合 fence 三者聚合（
+                # 旧实现只取段落边界，fence 闭合时基线会停在 fence 起点 →
+                # 下一轮差量重复产出已渲染图表，流式两遍）。
+                self._stable_md_len = _compute_stream_stable_len(_md_r)
             # 🐛 修复（思考框/工具框重复）：md 含未闭合块时基线**不推进**（防残段
             # 泄漏到正文），但 DOM 里已渲染出该块（think-streaming / 工具框）。
             # 若让后续走差量追加，会把已渲染的段再渲染一遍 → 同一段重复出现。

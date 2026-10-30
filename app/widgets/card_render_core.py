@@ -2344,6 +2344,60 @@ def _last_para_break_outside_fence(md: str) -> int:
     return last
 
 
+# 图表 / 公式容器 id（内容指纹派生）：差量重复守卫的比对口径
+_CHART_CONTAINER_ID_RE = re.compile(r'id="((?:echart|mmd|ktx)-[0-9a-zA-Z_-]+)"')
+
+def _chart_ids_in(html: str) -> frozenset[str]:
+    """提取 HTML 内图表/公式容器 id 集合（差量重复守卫用）。
+
+    id 由内容 sha1 派生（`echart-<hash>` / `mmd-<hash>` / `ktx-<hash>` /
+    `echart-tool-<hash>`），内容相同即同 id。差量产物与稳定区已渲染产物
+    出现同 id 时，说明同一图表将在 DOM 里存在两份。
+    """
+    if not html or "id=" not in html:
+        return frozenset()
+    return frozenset(m.group(1) for m in _CHART_CONTAINER_ID_RE.finditer(html))
+
+def _last_closed_fence_end(md: str) -> int:
+    """最后一个**已闭合**代码 fence 的结束偏移（闭合行换行之后；无 → -1）。
+
+    用途：差量基线推进点下限。fence 是原子块——闭合即内容定型，渲染一次
+    就不该再作为"新闭合段"产出。
+
+    为什么必须越过它：`_last_para_break_outside_fence` 为保证推进点不落进
+    fence 内部，只能停在**最后一个 fence 外空行**。当 md 尾部正好是闭合
+    fence（`...\\n\\n````echarts ... ``` ``，fence 后暂无空行）时，该空行在
+    fence 起点之前 → 基线停在 fence 前 → 下一轮差量把**已渲染过的** fence
+    当新段再产出一遍：DOM 里旧图表节点（非增量节点，append 不会移除）与新
+    图表节点并存，用户可见「流式期间图表出现两遍，结束全量渲染才变一个」。
+    """
+    if "```" not in md and "~~~" not in md:
+        return -1
+    inside = False
+    marker = ""
+    last_end = -1
+    i = 0
+    n = len(md)
+    while i < n:
+        if i == 0 or md[i - 1] == "\n":
+            j = i
+            while j < n and md[j] in " \t":
+                j += 1
+            tok = md[j : j + 3]
+            if tok in ("```", "~~~"):
+                if not inside:
+                    inside = True
+                    marker = tok
+                elif tok == marker:
+                    inside = False
+                    # 闭合行可能带语言/说明后缀（```js），结束点取该行换行之后
+                    _eol = md.find("\n", j)
+                    last_end = (_eol + 1) if _eol != -1 else n
+                i = j + 3
+                continue
+        i += 1
+    return last_end
+
 def _last_closed_proto_tag_end(md: str) -> int:
     """最后一个**已闭合**协议标签（``</tool>`` / ``</think>``）结束之后的偏移（无 → -1）。
 
@@ -2381,7 +2435,11 @@ def _compute_stream_stable_len(md: str) -> int:
     _last_break = _last_para_break_outside_fence(md)
     _candidate = _last_break + 2 if _last_break != -1 else 0
     _proto_end = _last_closed_proto_tag_end(md)
-    return _proto_end if _proto_end > _candidate else _candidate
+    if _proto_end > _candidate:
+        _candidate = _proto_end
+    # 已闭合 fence 也是稳定区：不越过它 → 下一轮差量重复产出（图表两份）
+    _fence_end = _last_closed_fence_end(md)
+    return _fence_end if _fence_end > _candidate else _candidate
 
 
 # ── 方案 D：data-order 统一排序 ──────────────────────────────────

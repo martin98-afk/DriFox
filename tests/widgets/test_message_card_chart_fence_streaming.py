@@ -113,3 +113,61 @@ def test_tail_before_unclosed_block_cuts_at_fence():
     tail = "正文一\n\n```echarts\n{\"a\":1"
     cut = _tail_before_unclosed_block(tail)
     assert cut == "正文一\n\n", f"应截到 fence 开标记: {cut!r}"
+
+# ── 流式图表两遍（2026-10-30 用户实测）──────────────────────────────
+# 现象：图表 fence 闭合瞬间触发全量渲染（DOM 里图表 A），但 `_stable_md_len`
+# 停在 fence 起点（尾部无空行，`_last_para_break_outside_fence` 只能停在这里）
+# → 下一个 chunk 到达后差量把同一 fence 当"新闭合段"再产出一次（图表 B），
+# 旧节点 A 不是增量节点不会被移除 → 同一张卡片两个图表；流式结束全量重建才
+# 收敛成一个。
+_CHART_FENCE = """```echarts
+{"title": {"text": "UI 评分雷达"}, "series": []}
+```"""
+
+def test_last_closed_fence_end_basic():
+    from app.widgets.card_render_core import _last_closed_fence_end
+
+    md = "前文\n\n" + _CHART_FENCE
+    assert _last_closed_fence_end(md) == len(md), "闭合行结束即 md 末尾"
+    md2 = "前文\n\n" + _CHART_FENCE + "\n\n后文"
+    assert _last_closed_fence_end(md2) == md2.find("后文") - 1, "应指向闭合行换行之后（空行前）"
+    assert _last_closed_fence_end("```echarts\n未闭合") == -1, "未闭合 fence 不算"
+    assert _last_closed_fence_end("正文没有 fence") == -1
+
+def test_stream_stable_len_crosses_closed_fence():
+    from app.widgets.card_render_core import _compute_stream_stable_len
+
+    md = "前言一段。\n\n" + _CHART_FENCE
+    assert _compute_stream_stable_len(md) == len(md), "已闭合 fence 属稳定区，基线必须越过"
+    md2 = "前言。\n\n```echarts\n{\"a\":1}"
+    assert _compute_stream_stable_len(md2) <= md2.find("```echarts"), "未闭合 fence 不得越过"
+
+def test_stream_stable_no_duplicate_chart_after_full_render():
+    """回归：全量渲染后基线越过闭合 fence，下一轮差量不得再产出该 fence。"""
+    from app.widgets.card_render_core import (
+        _compute_stream_stable_len,
+        _extract_closed_segments,
+        _render_stable_segment,
+    )
+
+    md = "前言一段。\n\n" + _CHART_FENCE
+    full_html = _render_stable_segment(md, compact=False)
+    assert full_html.count("echarts-container") == 1
+    stable = _compute_stream_stable_len(md)
+    md_next = md + "\n\n**三个硬伤**"
+    _stable_len, segs = _extract_closed_segments(md_next[stable:])
+    extra = "".join(_render_stable_segment(s, compact=False) for s in segs)
+    assert "echarts-container" not in extra, "已渲染的 fence 不得作为新差量段重复产出"
+
+def test_chart_ids_in_extracts_container_ids():
+    from app.widgets.card_render_core import _chart_ids_in
+
+    html = (
+        '<p>正文</p><div id="echart-0123456789ab" class="echarts-container"></div>'
+        '<div id="mmd-abcdef123456" class="mermaid-block"></div>'
+    )
+    assert _chart_ids_in(html) == frozenset({"echart-0123456789ab", "mmd-abcdef123456"})
+    assert _chart_ids_in("<p>没有图表</p>") == frozenset()
+    assert _chart_ids_in("") == frozenset()
+    # 同内容 → 同 id：全量渲染与尾部行内渲染产物必须能对上，否则守卫失效
+    assert _chart_ids_in('<div id="echart-0123456789ab"></div>') & _chart_ids_in(html)
