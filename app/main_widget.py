@@ -19196,7 +19196,7 @@ class OpenAIChatToolWindow(ToolWindow):
         #   - 用户明确滚离 → 不跟随，位置保持
         # is_last_card 只影响「初始加载完成必须到底」这一类一次性场景，同样纳入守卫，
         # 因为「用户正在读历史时又有新卡片渲染完成」不应当抢走视口。
-        # 🐛 卡片内阅读守卫：用户在 WebEngine 内部（正文/工具区/坞态正文）上滚
+        # 🐛 卡片内阅读守卫：用户在 WebEngine 内部（正文/工具区）上滚
         # 阅读时 Qt 滚动条纹丝不动，away 守卫对此失明。若不拦，流式中每次高度
         # 变化（chunk 增高/工具块注入）都走下面的滚底 → 卡片被钉回「底部对齐」
         # 姿态 → 正文视口每拍被推回同一固定位置。
@@ -22655,7 +22655,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.set_error_state(True, error_message=error)
             # 🐛 注意顺序：update_content 在 _streaming=False 时会经 start_streaming_anim
             # 重开流式态与坞态，必须在其后强制收尾，否则错误卡片永久停留在
-            # 流式结构（坞态沉底 + 正文限矮）。
+            # 流式结构（工具区限高、不折叠）。
             self._current_assistant_card.update_content(error)
             self._current_assistant_card.finish_streaming(force_dock_off=True)
 
@@ -25822,7 +25822,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._stop_elapsed = None
             self._current_assistant_card.stop_streaming_anim()
             # 🐛 打断路径必须强制归位：worker 已取消，活跃工具结果永不到达，
-            # keep_dock 的兑底归位永不触发 → 坞态永久沉底。
+            # keep_dock 的兑底归位永不触发 → 工具区永久停在流式限高态。
             self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         # 优先显示中止提示，让用户立即感知到操作已生效

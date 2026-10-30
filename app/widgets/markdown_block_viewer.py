@@ -169,7 +169,7 @@ _BLOCK_ELEMENT_RE = re.compile(
 # ── 流式活动坞（Streaming Dock）常量（对齐 WebEngine 版 _STREAMING_DOCK_CSS）──
 # 与 WebEngine 版 body.streaming-dock #tool-content 的 max-height 保持一致。
 # 原值 110（≈3-4 行）视觉上与"折叠"难区分，用户反馈误以为工具区默认收起。
-_DOCK_LOG_MAX = 220  # 工具卡区内滚限高 ≈8 行（web #tool-content max-height）
+_DOCK_LOG_MAX = 264  # 工具卡区内滚限高 ≈9-10 行（web #tool-content max-height）
 
 _QWIDGETSIZE_MAX = 16777215
 
@@ -2041,7 +2041,7 @@ class ToolSectionWidget(QWidget):
     """「工具与思考」折叠分区：think/tool 卡统一收纳，分隔条可整体折叠。
 
     卡片区常驻 QScrollArea：非坞态无限高（不出滚动条），坞态限高 _DOCK_LOG_MAX
-    内滚并自动跟随最新条目——复刻 WebEngine 版 #tool-content max-height:110px。
+    内滚并自动跟随最新条目——复刻 WebEngine 版 #tool-content max-height:264px。
     """
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -2130,14 +2130,14 @@ class ToolSectionWidget(QWidget):
         简洁模式语义：流式结束后工具与思考区收起为「工具与思考 · N 项」
         标题栏（WebEngine 版 MessageCard._auto_collapse_tool_section 同行为）。
         本渲染器 _tool_compact_mode 恒为 True（坞态仅简洁模式启用），
-        归位即折叠；流式期间由 enter_dock 保持展开可见。
+        结束即折叠；流式期间由 enter_dock 保持展开可见。
         """
         self._cards_scroll.setMaximumHeight(_QWIDGETSIZE_MAX)
         if not self._collapsed:
             self._set_collapsed_instant(True)
 
     def _set_collapsed_instant(self, collapsed: bool) -> None:
-        """无动画切换折叠态（坞态进出用，避免与 dock 布局搬移叠加抖动）。"""
+        """无动画切换折叠态（坞态进出用，避免与限高变化叠加抖动）。"""
         if self._anim is not None:
             self._anim.stop()
             self._anim = None
@@ -2278,7 +2278,8 @@ class MarkdownBlockViewer(QWidget):
 
         # 「工具与思考」区在正文之上（对齐 WebEngine 版 DOM 顺序）
         self._tool_section = ToolSectionWidget(self)
-        # 正文块统一挂独立容器：坞态搬移只动 tool_section，body 追加顺序不受影响
+        # 正文块统一挂独立容器：tool_section 常驻顶部、不做位置搬移（[T44]），
+        # 独立容器只用于统一管理正文块层级
         self._body_box = QWidget()
         self._body_box.setStyleSheet("background:transparent;")
         self._body_lay = QVBoxLayout(self._body_box)
@@ -2369,23 +2370,19 @@ class MarkdownBlockViewer(QWidget):
     def _sync_streaming_dock(self, active: bool) -> None:
         """流式活动坞（对齐 WebEngine 版 _setStreamingDock）：
 
-        简洁模式 + 流式期间：工具/思考区从顶部沉底、卡片区限高内滚 →
-        卡片底部一块固定高度的实时日志；流式结束归位顶部并折叠。
-        纯 layout 搬移（同 widget remove+add），无控件重建，无闪烁。
-        正文高度交给外层聊天滚动链路（流式自动滚底跟随，视口底部即日志区），
-        不做 viewer 级限高——QScrollArea 尺寸协商会撑爆卡片高度（实测教训）。
+        [T44] 不再做位置调换：工具/思考区**始终在卡片顶部**（构造序即
+        tool_section → body_box），坞态只负责两件事——流式期间卡片区限高内滚
+        保证实时进度可见，流式结束解除限高并折叠成「工具与思考 · N 项」。
+        正文按自然高度在下方生长，全卡只有外层聊天列表一个滚动条。
         """
         # 仅简洁模式启用坞态；欢迎卡片（light 骨架语义）不进坞态
         on = bool(active) and bool(self._tool_compact_mode) and not self._light
         if on == self._dock_active:
             return
         self._dock_active = on
-        self._vbox.removeWidget(self._tool_section)
         if on:
-            self._vbox.addWidget(self._tool_section)  # 沉底
             self._tool_section.enter_dock()
         else:
-            self._vbox.insertWidget(0, self._tool_section)  # 归位顶部
             self._tool_section.exit_dock()
         QTimer.singleShot(0, lambda: self.contentHeightChanged.emit(self.height()))
 

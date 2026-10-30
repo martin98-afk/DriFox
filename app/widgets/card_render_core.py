@@ -428,11 +428,11 @@ FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高�
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
 # ======== 流式期「坞态预算」高度上限（起步跳变兜底）========
-# [T36] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
+# [T44] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
 # 完成时正文按自然高度排版、坞态到达再压回 → 起步「先胀大再缩回」。
-# T36 去掉坞态正文限高后，坞态生效前后正文都是自然高度（坞态只影响工具区
-# 沉底/限高，高度扰动 ~几十 px），竞态窗口不复存在。常量保留仅供回滚参考，
-# 使用点已移除（message_card._update_height）。
+# T44 移除坞态正文限高（工具区始终居顶、正文自然高度）后，坞态生效前后正文
+# 都是自然高度（只影响工具区 264px 限高），竞态窗口不复存在。常量保留仅供
+# 回滚参考，使用点已移除（message_card._update_height）。
 STREAM_DOCK_BUDGET_PX = 900
 
 # ======== 流式期高度追踪（默认开，出问题可一键关）========
@@ -3811,7 +3811,11 @@ _SKELETON_CACHE_MAX = 48
 # （_v2ScrollHost / _v2AnchorCapture / _v2AnchorRestore）——替换块在视口上方且
 # 高度变化时补偿阅读位置；只在容器所属视口已离开底部时介入。旧骨架缺这些函数
 # → 流式中展开/折叠块后正文位置漂移。
-_SKELETON_CACHE_VERSION = 59
+# _SKELETON_CACHE_VERSION +1（v60）：[T44] 坞态不再沉底——移除 body.streaming-dock
+# 的 flex/order 调换与正文 600px 限高内滚（工具区始终在上、正文自然高度在下），
+# _setStreamingDock 只剩「工具区限高 264px」+「归位同帧折叠」+ 高度报告。
+# 旧骨架仍把工具区沉到底部、正文限矮，必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 60
 
 
 def _js_literal(value) -> str:
@@ -4274,54 +4278,24 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
 
 
 # ── 流式活动坞（Streaming Dock）骨架资产 ──
-# 简洁模式下流式期间：#tool-section 从卡片顶部沉到底部并限高 ~3-4 行，
-# 让用户实时看到正在执行的工具/思考；流式结束后归位顶部恢复现状。
+# [T44] 坞态不再沉底：简洁模式下工具/思考区**始终在卡片顶部**，正文按自然
+# 高度跟在下面，只保留「流式期间工具区限高内滚」+「结束时同帧折叠」两件事。
+# 历史：原设计用 CSS order 把工具区沉到底部、正文 600px 限高内滚（双层滚动），
+# 用户诉求「一开始就在上面」→ order 调换与正文限高全部移除（沉底没有意义）。
 # 由 Python 在流式开始/结束时注入 _setStreamingDock(true/false) 切换。
 _STREAMING_DOCK_CSS = """
-                /* ── 流式活动坞：简洁模式流式期间工具区沉底 + 限高 ──
-                   纯 CSS order 调换，不搬移 DOM，避免闪烁。 */
-                body.streaming-dock {
-                    display: flex;
-                    flex-direction: column;
-                    overflow-anchor: auto;
-                }
-                body.streaming-dock #content-placeholder {
-                    order: 1;
-                    /* [T39] 恢复正文限高 + 容器内滚（[T36] 反转）：用户诉求「工具区
-                       别跟着正文一路下滑」。卡片高度 = 正文 + 工具区，正文按自然
-                       高度长高时工具区被一路推动；给正文一个上限后卡片高度钳停，
-                       工具区位置固定，正文在容器内跟滚（JS 侧
-                       _autoScrollStreamingBody 的坞态分支早已就绪，此前限高被移除
-                       后一直是空转）。代价：流式期间正文只显示最近一屏、结束后
-                       卡片回到自然高度（一次性长高，由既有高度跟踪动画收敛）。
-                       保留横向裁剪（原 🐛 修复依然需要）。 */
-                    max-height: 600px;
-                    overflow-y: auto;
-                    overflow-x: hidden;
-                    overflow-wrap: break-word;
-                }
-                body.streaming-dock #tool-section {
-                    order: 2;
-                    margin: 8px 0 0 0;
-                }
-                /* 坞态限高：流式期间工具区保持内滚，但需能看到足够多的实时条目。
-                   原值 110px 仅 ≈3-4 行，工具/思考稍多就只能看到一小截，
-                   视觉上与"折叠"难区分 —— 用户反馈误以为工具区默认收起了。
-                   放宽到 220px（≈8 行）后，常规工具序列可完整看到实时进度，
-                   同时仍为 max-height（非无限增长），保持"卡片总高不随流式膨胀"
-                   的坞态设计意图。
-                   [T36] 220 → 264px：正文不限高后，坞态唯一职责就是工具区可见，
-                   再压着它没有意义；264 ≈ 9-10 行，配合正文自然生长消除"拥挤"感。 */
+                /* ── 坞态：工具区限高内滚（位置不动，仍在本就居顶的 #tool-section） ──
+                   流式期间工具/思考条目数量不可控，不限高会把正文一路顶出视口；
+                   264px ≈ 9-10 行，常规工具序列可看到实时进度，且卡片总高不随
+                   流式膨胀。 */
                 body.streaming-dock #tool-content {
                     max-height: 264px;
                 }
                 /* ── [T38] 空正文折叠 ──
                    长工具循环期间（LLM 连续调工具、尚未输出正文）正文区没有任何
-                   可见内容，但仍占着 padding/min-height 的一块空白 —— 真机截图里
-                   表现为「卡片顶部一块约 45px 的纯白空白」，用户直接读作"白屏"。
-                   判据由 reportHeight 维护（body.cp-blank）：正文无可见文本且无
-                   图片/公式/表格等实体内容时置位，有内容即摘除。
-                   仅坞态生效：非坞态工具区在顶部，正文为空本来就不占视觉主体。 */
+                   可见内容，仍会占一段空白；判据由 reportHeight 维护
+                   （body.cp-blank）：正文无可见文本且无图片/公式/表格等实体内容时
+                   置位，有内容即摘除。 */
                 body.streaming-dock.cp-blank #content-placeholder {
                     display: none;
                 }
@@ -4329,6 +4303,9 @@ _STREAMING_DOCK_CSS = """
 
 _STREAMING_DOCK_JS = """
                 // ===== 流式活动坞（Streaming Dock）=====
+                // [T44] 只切工具区限高，**不做位置调换**：工具/思考区始终在卡片
+                // 顶部、正文在其下方自然生长（原 order 沉底 + 正文 600px 限高内滚
+                // 的双层滚动已移除）。
                 window._streamingActive = false;
                 function _setStreamingDock(active, collapseAfter) {
                     // 仅简洁模式启用坞态
@@ -4337,20 +4314,13 @@ _STREAMING_DOCK_JS = """
                     window._streamingActive = !!active;
                     if (on === wasOn) return;
                     var ts = document.getElementById('tool-section');
-                    // 切换前记录工具区高度与用户是否在底部，用于阅读位置补偿
-                    var _dockH = ts ? ts.offsetHeight : 0;
-                    var _atBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 40;
-                    // FLIP：工具区在「沉底 ↔ 顶部」之间换位（CSS order 调换）是瞬移，
-                    // 记录切换前位置，切换后补间成平滑位移。
-                    if (typeof window._flipArm === 'function') window._flipArm(1200);
-                    var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
-                    // [T30] 归位同帧折叠：坞态归位本会让 #tool-content 从 220px 限高
+                    // [T30] 归位同帧折叠：坞态归位会让 #tool-content 从 264px 限高
                     // 展开到自然高度（工具多时暴涨数百 px），随后 finish 流程又立刻
                     // 把它折叠回 0 —— 「先胀后缩」的往返峰是结束态剧烈抖动的主因，
                     // 而终态本来就是折叠，中间那次全展开纯属浪费。collapseAfter=true
                     // 时在同一同步块内连置折叠属性：两个 max-height 变化合并为一帧，
-                    // 浏览器只算一条 220px→0 的过渡曲线，自然高度峰值从不进布局。
+                    // 浏览器只算一条 264px→0 的过渡曲线，自然高度峰值从不进布局。
                     // 折叠的 transitionend 终值单报由函数尾部统一的
                     // _beginToolSectionTransition 承接（本帧内开启抑制，无漏报窗口）。
                     if (on === false && wasOn && collapseAfter && (window._toolCompactMode !== false) && ts) {
@@ -4359,45 +4329,14 @@ _STREAMING_DOCK_JS = """
                         if (_sepC) _sepC.setAttribute('aria-expanded', 'false');
                     }
                     if (!on && wasOn) {
-                        // 🐛 修复（坞态归位正文置顶）：坞态下正文容器限高内滚，用户
-                        // 阅读位置在 #content-placeholder.scrollTop。归位移除
-                        // max-height 后 clientHeight 骤增至全高，浏览器把该值钳到 0
-                        // → 正文跳顶、阅读位置丢失（坞态内展开工具完成框阅读时必现）。
-                        // 切 class 前先读出位置，切换后迁移到新滚动容器 document.body；
-                        // 归位后正文起点在工具区下方，迁移值需加工具区实际高度。
-                        var _cpDock = document.getElementById('content-placeholder');
-                        var _cpReading = _cpDock ? _cpDock.scrollTop : 0;
-                        if (_cpReading > 0 && _cpDock) {
-                            _cpDock.scrollTop = 0;
-                            var _tsDocked = ts ? ts.offsetHeight : 0;
-                            var _cpMigrated = _cpReading + (_tsDocked > 0 ? _tsDocked : 0);
-                            var _bodyMax = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
-                            document.body.scrollTop = Math.min(_cpMigrated, _bodyMax);
-                        }
-                        // 坞态 → 归位顶部：正文整体下移 ≈ 工具区高度，
-                        // 用户上滚阅读时补偿 scrollTop，避免阅读位置跳动
-                        if (!_atBottom && _dockH > 0) {
-                            document.body.scrollTop = document.body.scrollTop + _dockH;
-                        }
                         // 归位后滚到底部展示最新条目——仅当用户未在上方阅读时；
-                        // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）
+                        // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）。
+                        // 注：工具区高度变化引起的正文位移由外层聊天列表的
+                        // HeightCommitBatch 锚点补偿承接（卡片自身不做 scrollTop 调整）。
                         var tc = document.getElementById('tool-content');
                         if (tc && !tc._userScrolledUp) { _progScroll(tc, tc.scrollHeight); }
-                    } else if (on && !wasOn) {
-                        // 顶部 → 坞态：正文上移，做对称补偿
-                        if (!_atBottom && _dockH > 0) {
-                            document.body.scrollTop = Math.max(0, document.body.scrollTop - _dockH);
-                        }
-                        // 🐛 修复：进入坞态时正文容器开始限高内滚，切换瞬间内容溢出
-                        // 会触发一次程序性 scroll 事件；重置正文容器用户滚动标志并程序
-                        // 置底跟随，避免遗留状态/切换抖动误判为正文上滚而卡在顶部。
-                        var _cp = document.getElementById('content-placeholder');
-                        if (_cp) {
-                            _cp._userScrolledUp = false;
-                            _progScroll(_cp, _cp.scrollHeight);
-                        }
                     }
-                    // 高度变化（110px ↔ 600px max-height）后报告文档高度。
+                    // 高度变化（工具区自然高度 ↔ 264px 限高）后报告文档高度。
                     // 切换会触发 #tool-content 的 max-height 200ms 过渡 →
                     // 用过渡感知报告（抑制中间态，终值单报），无内容时退回 debounced。
                     var _tsHasContent = ts && ts.style.display !== 'none' && ts.offsetHeight > 0;
@@ -4406,8 +4345,6 @@ _STREAMING_DOCK_JS = """
                     } else if (typeof reportHeightDebounced === 'function') {
                         reportHeightDebounced();
                     }
-                    // FLIP Play（入队串行：不会与后续重排/折叠动画同时开跑）
-                    if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
                 }
 """
 
@@ -4844,10 +4781,9 @@ _STREAM_APPEND_HELPERS_JS = f"""
 
 
 # ── FLIP 位移动画 + 动画串行队列骨架资产 ──
-# 解决"流式结束时工具与思考弹到最顶上"：
-# 简洁模式下流式期间工具区沉底（body.streaming-dock 纯 CSS order 调换），
-# 结束时归位顶部 + 最终全量重排（innerHTML 整体替换）+ 自动折叠三个动作叠加，
-# 每个都带 200ms 过渡 → 视觉上是一次生硬跳变 + 三动画互相抢帧的卡顿。
+# 背景：流式结束时「最终全量重排（innerHTML 整体替换）+ 自动折叠」两个动作叠加，
+# 每个都带 200ms 过渡 → 视觉上是一次生硬跳变 + 动画互相抢帧的卡顿。
+# [T44] 工具区沉底 ↔ 归位的 order 调换已移除，FLIP 仍用于重排/折叠的位移补间。
 #
 # 对策：
 # 1) FLIP（First-Last-Invert-Play）：动作前记录关键容器/块的视口位置，
@@ -5156,8 +5092,9 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 完成块替换/高度回调），正文内容未变 → 严禁触碰正文容器
                     // 滚动位置（否则跟随态下正文被拉到固定底部）。
                     if (bodyOnly) return;
-                    // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
-                    // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
+                    // [T44] 坞态不再给正文限高，正文容器通常无溢出（scrollTop
+                    // 赋值退化为 no-op）；保留该分支仅为兼容「正文里嵌入的超宽
+                    // 代码块/图表」等仍可能内滚的容器状态，不做位置调换。
                     var _cp = document.getElementById('content-placeholder');
                     if (document.body.classList.contains('streaming-dock') && _cp) {
                         if (!_cp._userScrolledUp) {

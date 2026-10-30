@@ -167,10 +167,10 @@ from app.widgets.card_render_core import (
 
 # [WHEEL-ARM] body 滚动几何 + 内层容器可滚标志的直读表达式（轮询兜底与
 # armed 事件校准共用）。返回 "sh|st|ch|ins"；body 未就绪返回 ''。
-# ⚠️ `#content-placeholder` 必须在内层容器名单里：坞态（简洁模式 + 流式，
-# body.streaming-dock）下正文 600px 限高 + overflow-y:auto，它就是**唯一**
-# 真正可滚的容器，body 反而不溢出。漏掉它 → ins 恒 0 → _inner_scrollable
-# 误判 False → 点击正文后武装态把滚轮全交外层（“点击后优先滚内部”失效）。
+# ⚠️ `#content-placeholder` 留在内层容器名单里：坞态已不再给正文限高（[T44]），
+# 但正文里可能嵌超宽代码块/图表等自带内滚的容器，且历史卡回归时口径不变。
+# 漏掉它 → 这类容器可滚时 ins 判 0 → 点击正文后武装态把滚轮全交外层
+# （“点击后优先滚内部”失效）。
 _BODY_GEOM_READ_JS = (
     "(function(){var b=document.body;if(!b)return '';"
     "var ins=-1;try{var ts=document.querySelectorAll("
@@ -234,8 +234,8 @@ def _parse_height_payload(payload: str):
         (h, scroll_top, client_height, reading, dom_text_len, inner_scrollable)；
         可选字段缺失时为 None；载荷非法返回 None（调用方静默忽略）。
 
-    ``inner_scrollable``：卡内**除 body 外**的滚动容器（坞态正文
-    #content-placeholder / #tool-content / 代码块 / 图表区等）当前有无可滚量。
+    ``inner_scrollable``：卡内**除 body 外**的滚动容器（坞态工具区
+    #tool-content / 正文内嵌代码块 / 图表区等）当前有无可滚量。
     None = 旧骨架未携带（Python 侧按"可能有"处理，
     见 ``_inner_wheel_state`` 注释）。
     """
@@ -839,10 +839,9 @@ class CodeWebViewer(QWebEngineView):
         # 置位后本 viewer 生命周期内不再重复折叠（用户手动展开不被覆盖）。
         self._history_collapse_applied = False
         self._is_js_ready = False
-        # [T33] 本轮流式的坞态是否已发起过同步（False = 尚未发起，首次渲染前必须补发）。
-        # 作用：坞态是 runJavaScript 异步生效的，若内容渲染早于它落地，正文会先按
-        # **自然高度**布局（无 600px 限高），坞态生效后再被压回 → "卡片先胀成很大
-        # 再缩回"的起步跳变。这里保证内容永远排在坞态同步之后。
+        # [T44] 本轮流式的坞态是否已发起过同步（False = 尚未发起，首次渲染前必须补发）。
+        # 坞态只切工具区 264px 限高，不等它落地的后果从「正文限矮」降级为
+        # 「工具区先按自然高度排版再被压回」，仍值得保持顺序（一次 IPC 成本）。
         self._dock_sync_requested = False
         # 下一次非流式渲染是否为"流式结束的终渲染"（决定能否走线程池，见
         # _perform_update）：仅在 CodeWebViewer.__init__ 初始化一次。
@@ -1954,12 +1953,12 @@ class CodeWebViewer(QWebEngineView):
             self._apply_history_collapsed()
             # 坞态同步：判定用 Python 端真值 _streaming，弃用旧「未折叠 → 开坞」推导。
             # 🐛 旧 `_setStreamingDock(!!_act||!_co)` 在已结束卡片重建（新骨架 DOM 无
-            # data-collapsed 属性 → _co=false）时误开坞态 → 正文限矮、工具区沉底，
+            # data-collapsed 属性 → _co=false）时误开坞态 → 工具区限高、正文被挤压，
             # 是「后台标签页切回后卡片重现流式结构」的直接来源之一。
             # 此 JS 在上方 collapse 之后执行，保证历史卡 data-collapsed 已更新。
             # S2 语义保留：DOM 中存在运行中工具块（data-streaming="true"）时仍强制
             # dock on，覆盖「JS 就绪晚于工具流式注入」的竞态窗口。
-            # 🛡️ 欢迎卡片（light 骨架）跳过：坞态会限死正文高度，欢迎页长内容被截断。
+            # 🛡️ 欢迎卡片（light 骨架）跳过：坞态会限死工具区高度，不符欢迎页语义。
             if not self._light_skeleton:
                 _dock_on = "true" if self._streaming else "false"
                 self.page().runJavaScript(
@@ -3872,7 +3871,7 @@ class CodeWebViewer(QWebEngineView):
                 }};
                 // 工具区当前可见时，确保区内所有惰注入块都拿到内容。
                 // 触发场景不止用户手动展开：流式新工具自动展开（_updateToolSectionHeader）、
-                // 坞态沉底（_setStreamingDock）、历史卡初始可见（sessionStorage 恢复）。
+                // 进入流式坞态（_setStreamingDock）、历史卡初始可见（sessionStorage 恢复）。
                 // 折叠态直接跳过。rAF 合并，避开 reorganizeContent 每轮全量扫。
                 var _ensureVisibleToolBodiesPending = false;
                 window._ensureVisibleToolBodies = function () {{
@@ -4818,8 +4817,7 @@ class CodeWebViewer(QWebEngineView):
                     var roots = window._nodesSince(container, _from);
                     // 🐛 修复（阅读位置被钳制）：旧增量节点改为**最后**删除。
                     // 「先删后插」会让容器 scrollHeight 瞬时塌陷，浏览器把 scrollTop 钳到
-                    // 更小的 max —— 坞态正文内滚时每来一个 chunk 用户位置就漂一次。
-                    // 先插新内容再删旧的，高度单调不减，scrollTop 没有钳制机会。
+                    // 更小的 max；先插新内容再删旧的，高度单调不减，没有钳制机会。
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         if (el !== tailDiv) el.remove();
                     }});
@@ -5363,10 +5361,10 @@ class CodeWebViewer(QWebEngineView):
                     // Python 侧按"不可滚"处理：真异常时内层同样滚不动，交外层更合理。
                     var _ins = 0;
                     try {{
-                        // ⚠️ `#content-placeholder` 必须在内：坞态（简洁模式 + 流式）
-                        // 下正文 600px 限高 + overflow-y:auto，它是唯一真正可滚的容器，
-                        // body 反而不溢出。漏掉它 → ins 恒 0 → Python 侧把「点击正文
-                        // 优先滚内部」误判成「卡内无人消费」→ 滚轮全交外层。
+                        // ⚠️ `#content-placeholder` 留在名单里：坞态已不再给正文
+                        // 限高（[T44]），但正文内嵌的代码块/图表仍可能自带内滚；
+                        // 漏掉它 → ins 判 0 → Python 侧把「点击正文优先滚内部」
+                        // 误判成「卡内无人消费」→ 滚轮全交外层。
                         var _tcs = document.querySelectorAll(
                             '#content-placeholder, #tool-content, .code-container, .code-content, .table-scroll-wrapper, .echarts-container'
                         );
@@ -7065,10 +7063,9 @@ class CodeWebViewer(QWebEngineView):
                     self._render_v2 = False
                     self._v2_last = None
 
-            # [T33] 坞态先于内容：本轮流式的首个 chunk 若先于 _sync_streaming_dock
-            # 的 IPC 落地，正文会先按自然高度排版（坞态 600px 限高未生效），
-            # 坞态到达后再被压回 → 起步瞬间"卡片先胀很大再缩回"。
-            # runJavaScript 按派发顺序执行，此处补发一次即可保证顺序（幂等）。
+            # [T44] 坞态先于内容：坞态只切工具区 264px 限高，若首个 chunk 先于
+            # 它的 IPC 落地，工具区会先按自然高度排版再被压回（一次几十~几百 px
+            # 的收缩）。runJavaScript 按派发顺序执行，此处补发一次保证顺序（幂等）。
             if self._streaming and not self._light_skeleton and not self._dock_sync_requested:
                 self._sync_streaming_dock(True)
 
@@ -8404,9 +8401,9 @@ class CodeWebViewer(QWebEngineView):
         """流式结束收尾。
 
         Args:
-            keep_dock: True 时保留坞态（简洁模式下工具区仍沉底）——流式文本可能
-                先于工具结果结束（S1：dock 归位早于工具完成），此时不应立即归位，
-                等最后一个工具完成时再由 append_tool_result 兜底归位。
+            keep_dock: True 时保留坞态（简洁模式下工具区仍保持流式限高/不折叠）——
+                流式文本可能先于工具结果结束（S1：dock 归位早于工具完成），此时
+                不应立即归位，等最后一个工具完成时再由 append_tool_result 兜底归位。
             immediate: False 时最终全量渲染不立即派发（仅启内部定时器），
                 供批量加载路径错峰用（T11）。状态清理/JS 调用不受影响，
                 仍全部同步执行。
@@ -8442,7 +8439,7 @@ class CodeWebViewer(QWebEngineView):
         # dirty 使最终渲染走 save/restore 保护（_saved 为空时零开销）。
         if not keep_dock and not getattr(self, "_injected_pending_tools", None):
             self._tool_dom_dirty = False
-        # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
+        # 流式结束：坞态归位（简洁模式下工具区解除限高并折叠）
         # 🆕 F2（S1）：keep_dock=True 时保留坞态——流式文本先于工具结果结束是
         # 常见时序（工具执行耗时 > 文本流式），此时立即归位会让用户看到
         # "工具还在运行但工具区已回顶部"的跳动。归位推迟到最后一个工具完成时。
@@ -8459,7 +8456,7 @@ class CodeWebViewer(QWebEngineView):
         # 🆕 Bug B 方案 D+：流式结束必须清除"流式语义缓存"的 HTML。
         # _cached_streaming_html 是流式渲染产物：thinking 被渲染成 .think-streaming
         # （无 data-block-key，reorganizeContent 查不到 posMap → getPos=1e9 沉底）。
-        # 若 finish 的非流式分支直接复用它，就会在"坞态归位/折叠框从底部移到上部"的
+        # 若 finish 的非流式分支直接复用它，就会在"流式态 → 完成态重排"的
         # 最终渲染中，把思考块与 save/restore 插入的工具块错位（"所有思考在前、
         # 所有工具在后"）。清除后强制以完成态重新渲染（think-compact/think-block
         # 带稳定 data-block-key），与加载历史会话的排序尺度一致。
@@ -8469,9 +8466,10 @@ class CodeWebViewer(QWebEngineView):
         # 重置思考文本流式标志，防止下一轮对话误判
         self._think_text_streaming_started = False
         self._reasoning_streaming_started = False
-        # 🆕 FLIP：最终全量重排会把工具/思考块从"流式态沉底"换成"完成态归位"，
-        # arm 一个短窗口，让紧随其后的 updateContent 采集旧位置并补间成位移动画。
-        # （未 arm 时 _flipCapture 直接返回 null，流式期间零额外布局开销。）
+        # 🆕 FLIP：最终全量重排会把工具/思考块从"流式态"换成"完成态"（形态与
+        # 尺寸都变），arm 一个短窗口，让紧随其后的 updateContent 采集旧位置并
+        # 补间成位移动画。（未 arm 时 _flipCapture 直接返回 null，流式期间零额外
+        # 布局开销。）
         try:
             if self._is_js_ready and self.page():
                 self.page().runJavaScript("if(typeof window._flipArm==='function')window._flipArm(2000);")
@@ -8577,17 +8575,16 @@ class CodeWebViewer(QWebEngineView):
         Args:
             active: True 进坞 / False 归位。
             collapse_after: [T30] 归位时同帧折叠工具区（仅简洁模式生效）。坞态
-                归位本会把 #tool-content 从 220px 限高展开到自然高度，随后折叠
+                归位本会把 #tool-content 从 264px 限高展开到自然高度，随后折叠
                 又收回去 —— 两段式是结束态剧烈抖动的主因。True 时 JS 在归位
-                事务内连置折叠属性，高度只走一条 220px→0 的曲线。
+                事务内连置折叠属性，高度只走一条 264px→0 的曲线。
                 非归位方向（active=True）忽略。
 
-        仅简洁模式下 JS 侧 _setStreamingDock 会真正切换 body.streaming-dock，
-        非简洁模式注入为空操作。JS 未就绪时跳过——_on_js_ready 会按当前
-        _streaming / _is_history 状态兜底同步。
+        坞态本身不改变容器位置（[T44]：工具/思考区始终在卡片顶部），只切
+        #tool-content 的 264px 限高。仅简洁模式下生效，非简洁模式注入为空操作。
+        JS 未就绪时跳过——_on_js_ready 会按当前 _streaming / _is_history 状态兜底同步。
         """
-        # 欢迎卡片（light 骨架）不进入坞态：坞态 CSS 会限死正文高度，
-        # 欢迎卡片的长内容（会话列表/项目列表）会被截断在 330px。
+        # 欢迎卡片（light 骨架）不进入坞态：坞态会限死工具区高度，不符欢迎页语义。
         if self._light_skeleton:
             return
         try:

@@ -8,7 +8,6 @@
 """
 
 import inspect
-import re
 import sys
 
 from PyQt5.QtWidgets import QApplication
@@ -23,33 +22,31 @@ def _ensure_qapp():
 
 
 def test_streaming_dock_css_content():
-    """坞态 CSS 必须包含：flex 调换、order 沉底、限高。"""
+    """坞态 CSS 必须包含：工具区限高 + 空正文折叠；不得再有位置调换/正文限高。"""
     css = crc._STREAMING_DOCK_CSS
     assert "body.streaming-dock" in css
-    assert "flex-direction: column" in css
-    assert "body.streaming-dock #tool-section" in css
-    assert "order: 2" in css
     assert "body.streaming-dock #tool-content" in css
-    # 工具区限高：110→220（原 3-4 行看不见进度，放宽到 ≈8 行）
-    assert "max-height: 220px" in css
-    # 正文限高：330→450→600（流式长回复展示更多正文）
-    assert "max-height: 600px" in css
+    # 工具区限高：264px（≈9-10 行，与 Qt 通道 _DOCK_LOG_MAX 同值）
+    assert "max-height: 264px" in css
+    # [T44] 工具区始终居顶、正文自然高度：不得再有 flex order 沉底与正文限高
+    assert "order: 2" not in css, "坞态不得再把工具区沉底"
+    assert "flex-direction: column" not in css, "坞态不得再改 body 布局方向"
+    assert "max-height: 600px" not in css, "坞态不得再给正文限高（双层滚动）"
 
 
-def test_streaming_dock_content_no_horizontal_scrollbar():
-    """回归：坞态正文容器不得出现横向滚动条。
+def test_streaming_dock_content_has_no_content_max_height():
+    """[T44] 坞态不得给正文限高：工具区始终居顶、正文按自然高度在下方生长。
 
-    单轴 overflow-y:auto 时另一轴 visible 被计算为 auto → 长行（URL/无空格
-    长 token）超宽出现容器级横向滚动条。必须 overflow-x:hidden +
-    overflow-wrap:break-word（强制换行，避免 hidden 只裁切看不到尾巴）。
+    历史背景：旧实现给 #content-placeholder max-height:600px + overflow-y:auto
+    做「正文内滚」，配合 CSS order 把工具区沉到底部 → 双层滚动 + 工具区先从
+    底部弹回顶部。用户诉求「一开始就在上面」后整体移除。若将来恢复限高，
+    必须同时补回 overflow-x:hidden + overflow-wrap:break-word 防横向滚动条。
     """
     css = crc._STREAMING_DOCK_CSS
-    # 提取坞态正文容器规则块
-    m = re.search(r"body\.streaming-dock #content-placeholder \{(.*?)\}", css, re.S)
-    assert m, "坞态正文容器规则必须存在"
-    rule = m.group(1)
-    assert "overflow-x: hidden" in rule, "坞态正文容器必须禁横向滚动"
-    assert "overflow-wrap: break-word" in rule, "坞态正文容器必须强制换行（超宽长词断行）"
+    assert "body.streaming-dock #content-placeholder {" not in css, (
+        "坞态不得再给正文容器加规则（唯一例外是 body.streaming-dock.cp-blank）"
+    )
+    assert "overflow-y: auto" not in css
 
 
 def test_streaming_dock_js_content():
@@ -348,7 +345,7 @@ def test_s1_dock_returns_after_last_tool_result():
 
     #F3 回归（#R1 P1）：F2 归位兜底条件用 `not getattr(self.viewer, "_streaming")`，
     但 append_tool_result 中段「就近恢复 viewer 流式模式」把 viewer._streaming 无条件
-    置 True → 归位条件恒 False → QTimer 永不注册 → 会话末轮 dock 永久沉底。
+    置 True → 归位条件恒 False → QTimer 永不注册 → 会话末轮 dock 永久限高。
     修复：改用 MessageCard 层 self._streaming（stop_streaming_anim 置 False）判据。
     """
     from PyQt5.QtCore import QTimer
@@ -463,7 +460,7 @@ def test_update_content_preserves_content_scroll():
 #
 # 根因：打断路径（手动停止/自动压缩/引擎错误）worker 已终止，活跃工具结果
 # 永不到达 → append_tool_result 的 F2 兜底归位永不触发；若仍按 S1 语义
-# keep_dock=True，坞态永久沉底、正文限矮（卡片保持流式结构）。
+# keep_dock=True，工具区永久停在流式限高态（卡片保持流式结构）。
 # 引擎错误路径还有一层：update_content 在 _streaming=False 时经
 # start_streaming_anim 重开流式态与坞态，收尾必须在其后强制关坞。
 # ──────────────────────────────────────────────
@@ -549,7 +546,7 @@ def test_finish_streaming_force_dock_off_no_tools_still_docks_off():
 # 本轮已结束对话 _is_history=False → 新建 viewer 的 _streaming=True 初始值
 # 残留（池化实例经 reset_for_reuse 已置 False，两路径行为不一致）→ 渲染走
 # 流式分支，且 _on_js_ready 旧兜底 `_setStreamingDock(!!_act||!_co)` 因新骨架
-# 无 data-collapsed 属性（_co=false）误开坞态 → 工具区沉底 + 正文限矮。
+# 无 data-collapsed 属性（_co=false）误开坞态 → 工具区限高 + 正文被挤压。
 # ──────────────────────────────────────────────
 
 

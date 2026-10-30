@@ -2336,7 +2336,7 @@ class MessageCard(SimpleCardWidget):
         # start_streaming_anim 而为 True，导致 _on_js_ready 误折叠工具区）
         if self.viewer and hasattr(self.viewer, "_is_history") and self.viewer._is_history:
             self.viewer._is_history = False
-        # 新轮流式开始：恢复简洁模式坞态（工具区沉底跟随最新活动）
+        # 新轮流式开始：恢复简洁模式坞态（工具区限高内滚，实时跟随最新活动）
         if self.viewer and hasattr(self.viewer, "_sync_streaming_dock"):
             self.viewer._sync_streaming_dock(True)
         self._anim_t_ms = 0.0
@@ -3013,10 +3013,9 @@ class MessageCard(SimpleCardWidget):
 
     def _update_height(self, h):
         target_height = max(40, h)
-        # [T33→T36] 坞态预算上限已随坞态正文限高一并移除：正文不再限高后，
-        # 坞态生效前后高度都等于自然高度（工具区沉底只带来 ~几十 px 扰动），
-        # 「渲染抢跑 → 先胀大再压回」的竞态窗口不存在了。若回滚 T36
-        # （恢复 _STREAMING_DOCK_CSS 的 max-height），需同时恢复此处 clamp。
+        # [T44] 坞态不再给正文限高（原 order 沉底 + 600px 内滚已移除），坞态
+        # 生效前后卡片高度都等于自然高度，只剩工具区 264px 限高这一点扰动，
+        # 无需额外 clamp。
         #
         # [MEM-2] 上报值是**文档内容**高度，可远超 widget 的高度上限（物理面积
         # 上限，见 CodeWebViewer.MAX_SURFACE_MPX）：目标值必须先按同一上限钳一次，
@@ -4852,12 +4851,12 @@ class MessageCard(SimpleCardWidget):
             logger.warning(f"增量工具块注入失败: {e}")
         # 🆕 F2（S1 归位兜底）：最后一个工具完成时关闭坞态。
         # 流式文本可能先于工具结果结束（finish_streaming(keep_dock=True) 保留了坞态），
-        # 此处是归位时机：所有已登记工具都完成 → 工具区从坞态沉底回到顶部。
+        # 此处是归位时机：所有已登记工具都完成 → 工具区解除流式限高并折叠。
         # ⚠️ 必须 hasattr 守卫：stub viewer（测试桩）无 _sync_streaming_dock 方法。
         # 🐛 F3（#R1 P1）：归位判据必须用 MessageCard 层 self._streaming——
         # 本函数中段「就近恢复 viewer 流式模式」（L8737）在 viewer._streaming=False 时
         # 无条件置 True，viewer 层状态已被污染，恒 True → 归位兜底永不触发
-        # （会话末轮 dock 永久沉底）。self._streaming 由 start/stop_streaming_anim
+        # （会话末轮 dock 永久限高）。self._streaming 由 start/stop_streaming_anim
         # 管理（本轮流式结束后 stop_streaming_anim 已置 False；新一轮开始置 True 时
         # 正确跳过归位），不受 8738 行恢复逻辑影响。
         # 🐛 F3（次要提示 1）：lambda 捕获动态属性判空——0ms 内 viewer 被 cleanup
@@ -4871,7 +4870,7 @@ class MessageCard(SimpleCardWidget):
             ):
                 # F2（S1 兜底归位）+ 简洁模式折叠：最后一个工具完成时归位。
                 # [T30] 与 finish_streaming 主路径一致：归位即折叠（两段式往返
-                # 峰已并入同一条 220px→0 曲线），不再单独派发折叠调用。
+                # 峰已并入同一条 264px→0 曲线），不再单独派发折叠调用。
                 # lambda 捕获动态属性判空——0ms 内 viewer 被 cleanup 置 None 时
                 # 避免 AttributeError traceback。
                 def _dock_off_and_collapse() -> None:
@@ -5889,14 +5888,14 @@ class MessageCard(SimpleCardWidget):
             history: True 表示历史会话加载收尾（非流式渲染路径）。
                 此时跳过 stop_streaming_anim()——它会置 _streaming_finished=True，
                 使 ensure_rendered 把卡片误判为"本轮已结束的流式消息"
-                （_is_history=False → 工具与思考不折叠、正文按流式坞态限高），
+                （_is_history=False → 工具与思考不折叠、工具区按流式坞态限高），
                 与"历史会话默认折叠"的产品预期冲突。历史卡片从未启动过
                 流式动画，跳过 stop_streaming_anim 无副作用。
             force_dock_off: True 表示打断/错误收尾强制归位（忽略活跃工具）。
                 正常结束时文本先于工具完成（S1）会 keep_dock 保留坞态，
                 等最后一个工具结果经 append_tool_result 兑底归位；但打断/
                 错误路径 worker 已终止，工具结果永不到达，兑底永不触发
-                → 坞态永久沉底、正文限矮（流式结构残留 bug 根因），
+                → 工具区永久停在流式限高态（流式结构残留 bug 根因），
                 故打断/错误调用方必须传 True。
             immediate: 透传给 viewer.finish_streaming（T11）。批量加载路径传
                 False，避免 N 卡同帧全量重渲；交互路径保持默认 True。
@@ -5947,7 +5946,8 @@ class MessageCard(SimpleCardWidget):
         """是否有仍在执行中的工具（已登记但未完成）。
 
         dock 状态机的判据：只要还有工具在运行（流式文本已结束但工具结果未全部
-        到达，S1 场景），工具区应保持坞态沉底；全部完成后才归位。
+        到达，S1 场景），工具区应保持流式坞态（限高内滚、不折叠）；全部完成后
+        才归位折叠。
         """
         return any(tid not in self._finished_streaming_ids for tid in self._tool_call_order)
 
