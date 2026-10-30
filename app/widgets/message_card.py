@@ -134,6 +134,7 @@ from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from app.widgets.card_render_core import (
     AUTO_SCROLL_THRESHOLD,
     CustomTabButton,
+    DOCK_COLLAPSE_TRACK_WINDOW_S,
     FINISH_HEIGHT_ANIM_ENABLED,
     FINISH_HEIGHT_ANIM_MAX_USES,
     FINISH_HEIGHT_ANIM_MIN_DELTA,
@@ -166,7 +167,6 @@ from app.widgets.card_render_core import (
     STREAM_HEIGHT_TRACK_FAR_PX,
     STREAM_HEIGHT_TRACK_MAX_FACTOR,
     _THINK_SNAKE_SVG,
-    _classify_think_tag,
     _count_think_tool_prefix,
     _edit_tools,
     _extract_closed_segments,
@@ -441,6 +441,10 @@ class MessageCard(SimpleCardWidget):
         self._finish_height_anim_until = 0.0
         self._finish_height_anim_left = 0
         self._finish_height_anim_active = False
+        # 坞态折叠过渡窗口（monotonic 截止时刻；0 = 无窗口）：窗口内高度追踪用
+        # 流式口径 factor 快跟随，让卡片底边跟上正在收起的工具区，消除底部空白
+        # （FINISH 慢 factor 的 τ≈255ms 追 264px 要 ~1s，肉眼可见）。
+        self._dock_collapse_until = 0.0
         # [T29] 流式高度追踪进行中标记。追踪期间 Chromium 侧 ResizeObserver 会
         # 不断送来"当前中间高度"，若照单全收会把追踪打断成锯齿（stop → 防抖 →
         # 重启）。故追踪期间一律吞掉上报，落定时由 tick 主动校正。
@@ -548,6 +552,12 @@ class MessageCard(SimpleCardWidget):
         self._active_thinking_block: Optional[dict] = None
         self._pending_content: Optional[str] = None
         self._reasoning_total_len = 0  # reasoning 内容总长度计数器，避免每次遍历
+        # 流式思考实时预览：增量文本缓冲 + 节流推送（250ms 批量，避免逐 chunk runJavaScript）
+        self._streaming_live_buffer: str = ""
+        self._streaming_live_timer = QTimer(self)
+        self._streaming_live_timer.setSingleShot(True)
+        self._streaming_live_timer.setInterval(250)
+        self._streaming_live_timer.timeout.connect(self._flush_streaming_live)
         self._viewer_container = QWidget(self)
         self._viewer_layout = QVBoxLayout(self._viewer_container)
         self._viewer_layout.setContentsMargins(0, 0, 0, 0)
@@ -3264,6 +3274,11 @@ class MessageCard(SimpleCardWidget):
             # 提速跟上大台阶；基于当前基线增量而非硬编码，保住结束态比流式更缓的
             # "丝绸尾音"设计。
             factor = self._height_track_factor
+            if time.monotonic() < getattr(self, "_dock_collapse_until", 0.0):
+                # [T30 续] 坞态折叠过渡窗口：内容在 200ms 内缩短工具区高度（可达
+                # 264px），慢 factor（τ≈255ms）会让卡片底边远远落后 → 底部空白肉眼
+                # 可见。窗口内换流式口径紧跟，与页面内折叠曲线同拍收尾。
+                factor = STREAM_HEIGHT_TRACK_FACTOR
             if abs(diff) > STREAM_HEIGHT_TRACK_FAR_PX:
                 # [R4-A] cap 改用常量 STREAM_HEIGHT_TRACK_MAX_FACTOR（0.90）：原先硬编码
                 # 0.85 与基线 0.84 只差 0.01，自适应提速等于失效。
@@ -4511,6 +4526,19 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B 方案 F：用**块引用**锚点定位（_tool_anchor_pos），替代 int 索引。
         # int 索引在"其他工具结果插入 + 思考/正文追加"后偏移，导致工具结果插到
         # 错误位置 → _content_data 顺序错 → finish 完整重渲染时思考/工具错乱。
+        # v2：运行框块在这里被换成 tool_result 块（一次 diff 替换，同帧完成）。
+        # 先移走同 id 的 tool_streaming 块，避免与完成块并存（重复/顺序错乱）。
+        _v2_mode = bool(getattr(getattr(self, "viewer", None), "_render_v2", False))
+        if _v2_mode and isinstance(self._content_data, list):
+            self._content_data = [
+                _b
+                for _b in self._content_data
+                if not (
+                    isinstance(_b, dict)
+                    and _b.get("type") == "tool_streaming"
+                    and _b.get("tool_call_id") == tool_call_id
+                )
+            ]
         anchor = self._tool_anchor_pos(tool_call_id) if isinstance(self._content_data, list) else None
         if anchor is not None and isinstance(self._content_data, list) and 0 <= anchor <= len(self._content_data):
             my_order = self._tool_call_order.get(tool_call_id, 0)
@@ -4562,6 +4590,12 @@ class MessageCard(SimpleCardWidget):
                 fps.add(_tool_fingerprint(tool_name, arguments or {}))
         except Exception:
             pass
+        # v2：块已入列表，直接调度渲染即可（位置/内容由 patch 保证）；
+        # JS 注入通道（就地转换运行框）不再参与，从根上消除双体系混排。
+        if _v2_mode:
+            self.viewer._lazy_markdown_cb = self._build_incremental_md
+            self.viewer._schedule_render(immediate=True)
+            return
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
@@ -4893,6 +4927,9 @@ class MessageCard(SimpleCardWidget):
                     # 只影响本兜底路径，坞态调用结构不变。
                     self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
                     self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
+                    # [T30 续] 与主路径一致：折叠过渡期间用流式口径快跟随，
+                    # 否则工具区收起 264px 时卡片底边慢追 → 底部空白。
+                    self._dock_collapse_until = time.monotonic() + DOCK_COLLAPSE_TRACK_WINDOW_S
                     self.viewer._sync_streaming_dock(False, collapse_after=True)
 
                 QTimer.singleShot(0, _dock_off_and_collapse)
@@ -4953,6 +4990,9 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：新块成为当前活动思考块。append_reasoning 只追加到它，
         # 避免后续 reasoning 内容合并进已完成的旧思考块导致多轮思考堆积顶部。
         self._active_thinking_block = self._content_data[-1]
+        # 新轮思考开始：丢弃旧块 live 预览残余（flush 到新块会串块；
+        # _content_data 完整，全量渲染不受影响）
+        self._discard_streaming_live()
         # 新一轮思考开始，仅重置 streaming 标志。
         # _thinking_finalized 留在 True（上一轮已完成），直到新 reasoning chunk 到达
         # （append_reasoning 首 chunk）才置为 False，防止在两轮之间的窗口期，
@@ -4979,6 +5019,62 @@ class MessageCard(SimpleCardWidget):
 
     # ── 工具流式调用块 ──────────────────────────────────
 
+    def _upsert_tool_streaming_block(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        preview: str,
+        char_count: int = 0,
+        completed: bool = False,
+        add_lines: int = 0,
+        del_lines: int = 0,
+    ) -> None:
+        """v2：把运行框写进 ``_content_data`` 的 ``tool_streaming`` 块（同 id 原地替换）
+
+        首次按工具调用锚点插入（与 ``append_tool_result`` 同口径），后续同 id 原地
+        替换块对象 —— 块级 diff 只替换该块节点，工具区顺序由补丁保证，不再有
+        「JS 注入裸节点 + wrapper 正式块」两套体系混排导致的顺序跳与去重删除。
+
+        ``preview is None`` 表示仅切换完成态（placeholder 阶段的 finish 调用），
+        沿用已有预览文字。
+        """
+        blocks = self._content_data
+        if not isinstance(blocks, list):
+            return
+        created = False
+        if preview is None:
+            for b in blocks:
+                if isinstance(b, dict) and b.get("type") == "tool_streaming" and b.get("tool_call_id") == tool_call_id:
+                    b["completed"] = completed
+                    break
+        else:
+            block = {
+                "type": "tool_streaming",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "preview": preview,
+                "char_count": char_count,
+                "completed": completed,
+                "add_lines": add_lines,
+                "del_lines": del_lines,
+            }
+            for i, b in enumerate(blocks):
+                if isinstance(b, dict) and b.get("type") == "tool_streaming" and b.get("tool_call_id") == tool_call_id:
+                    blocks[i] = block
+                    break
+            else:
+                anchor = self._tool_anchor_pos(tool_call_id)
+                if anchor is not None and 0 <= anchor <= len(blocks):
+                    blocks.insert(anchor, block)
+                else:
+                    blocks.append(block)
+                created = True
+        if self.viewer:
+            # 维护 markdown 书账（v2 只作反查源，不影响 DOM）；首次出现立即渲染，
+            # 后续进度更新合并派发（高频参数流不打断正文节拍）
+            self.viewer._lazy_markdown_cb = self._build_incremental_md
+            self.viewer._schedule_render(immediate=created)
+
     def _inject_tool_streaming_html(
         self,
         tool_call_id: str,
@@ -4997,6 +5093,23 @@ class MessageCard(SimpleCardWidget):
         用于 placeholder 阶段的 finish_tool_streaming 调用（参数全是占位键时）。
         """
         if not hasattr(self, "viewer") or not self.viewer:
+            return
+
+        # ── v2 通道：运行框纳入块系统（patchBlocks 统一管理）──
+        # 背景：运行框曾走 JS 注入（裸节点，非 data-block-wrapper），完成框走块渲染，
+        # 两套节点体系混排逼出一堆补丁（每批去重删除、插入位置要绕开裸节点、dirty
+        # 保护）。纳入块系统后：位置由 diff/insert 保证，完成时同 id 块原地换成
+        # tool_result（一次替换同帧完成），不再需要 JS 注入与去重。
+        if getattr(self.viewer, "_render_v2", False) and isinstance(self._content_data, list):
+            self._upsert_tool_streaming_block(
+                tool_call_id,
+                tool_name,
+                preview,
+                char_count=char_count,
+                completed=completed,
+                add_lines=add_lines,
+                del_lines=del_lines,
+            )
             return
 
         # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
@@ -5264,6 +5377,9 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：思考完成 → 活动块置空，后续 reasoning 不再追加到此块
         # （下一轮思考由 start_new_thinking_block 创建新块并重新登记）。
         self._active_thinking_block = None
+        # 清空 live 预览缓冲：残余文本随整块被完成态折叠框替换（_content_data
+        # 始终完整），不值得为被替换掉的 DOM 再发一次 append JS
+        self._discard_streaming_live()
         # 保持原始 content 用于 block-key 计算，确保与 _inject_think_cards
         # （通过 _build_incremental_md）产生的 key 一致。
         # 否则每次 _perform_update → reorganizeContent 会因 key 不匹配
@@ -5281,13 +5397,9 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
             self.viewer._render_timer.stop()
 
-        # Python 端预计算分类（与 _render_think_block 一致），保留图标 + 分类标签
-        tag = _classify_think_tag(content)
+        # Python 端预生成状态 HTML（与 _render_think_block 一致，仅图标）
         think_icon = _get_think_icon_html()
-        if tag:
-            status_html = f'<span class="think-bulb">{think_icon}</span> {escape(tag)}'
-        else:
-            status_html = f'<span class="think-bulb">{think_icon}</span>'
+        status_html = f'<span class="think-bulb">{think_icon}</span>'
         safe_status = json.dumps(status_html).decode("utf-8")
 
         # 预生成完成态折叠框 HTML（用于替换 .think-streaming 纯文本 div）
@@ -5744,6 +5856,22 @@ class MessageCard(SimpleCardWidget):
         """移除工具流式块 — 工具执行完成后清理"""
         if not hasattr(self, "viewer") or not self.viewer:
             return
+        # v2：运行框是块系统里的 tool_streaming 块，移出列表即由补丁删除 DOM
+        if getattr(self.viewer, "_render_v2", False) and isinstance(self._content_data, list):
+            before = len(self._content_data)
+            self._content_data = [
+                _b
+                for _b in self._content_data
+                if not (
+                    isinstance(_b, dict)
+                    and _b.get("type") == "tool_streaming"
+                    and _b.get("tool_call_id") == tool_call_id
+                )
+            ]
+            if len(self._content_data) != before:
+                self.viewer._lazy_markdown_cb = self._build_incremental_md
+                self.viewer._schedule_render(immediate=False)
+            return
         # 块从 DOM 移除 → 该工具不再需要 save/restore 保护（pending 移除）
         try:
             pending = getattr(self.viewer, "_injected_pending_tools", None)
@@ -5763,18 +5891,29 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             pass
 
-    def append_reasoning(self, text: str):
+    def append_reasoning(self, text: str, defer_render: bool = False, force_new_block: bool = False):
         """追加思考内容到当前最后一个思考块（流式模式）
 
         将 reasoning 直接写入 _content_data 的 reasoning block，
         使其与文本、工具结果按实际发生顺序交错渲染。
+
+        Args:
+            defer_render: 只写数据层（_content_data），跳过 live buffer / 渲染调度。
+                历史批量加载用：N 条思考逐条立即渲染会打爆批量加载，渲染由末尾
+                finish_streaming(history=True) 统一做。
+            force_new_block: 跳过「追加到最后一个 reasoning 块」的兜底，直接新建块。
+                历史加载的多条 assistant 消息各有独立思考，必须逐条独立成块，
+                否则第二条会被合并进第一条（思考块堆积）。
         """
         # 🆕 Bug B：只追加到当前活动思考块（start_new_thinking_block 创建的新块）。
         # 兜底：无活动块时查找最后一个 reasoning block（兼容未走 start_new_thinking_block
         # 的流路径），仍未找到才新建块。活动块是 dict 对象引用，即使中间被工具结果
         # 锚点 insert 挤动列表位置，引用仍有效。
         _target_block = self._active_thinking_block if isinstance(self._active_thinking_block, dict) else None
-        if _target_block is None:
+        if force_new_block:
+            # 历史批量加载：每条 assistant 消息的思考独立成块，不复用活动块
+            _target_block = None
+        elif _target_block is None:
             for i in reversed(range(len(self._content_data))):
                 if self._content_data[i].get("type") == "reasoning":
                     _target_block = self._content_data[i]
@@ -5784,9 +5923,16 @@ class MessageCard(SimpleCardWidget):
             # 找到已有的（活动）思考块，追加内容
             _target_block["content"] = (_target_block.get("content", "") or "") + text
         else:
-            # 未找到，新增 reasoning 块
-            self._content_data.append({"type": "reasoning", "content": text})
+            # 未找到（或 force_new_block），新增 reasoning 块
+            _target_block = {"type": "reasoning", "content": text}
+            self._content_data.append(_target_block)
+        # 登记为活动块：后续同段思考继续追加到此块（历史批量加载逐条独立成块）
+        self._active_thinking_block = _target_block
         self._reasoning_total_len += len(text)
+
+        if defer_render:
+            # 历史批量加载：渲染由末尾 finish_streaming(history=True) 统一做
+            return
 
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
@@ -5802,6 +5948,11 @@ class MessageCard(SimpleCardWidget):
         # （由 append_text / finish_streaming / _maybe_finish_thinking_for_tool 触发）一并处理
         if not self.viewer._reasoning_streaming_started:
             self.viewer._reasoning_streaming_started = True
+            # 首 chunk 也进 live buffer：全量渲染只出 spinner+空 live 区，
+            # 首 chunk 文本由 250ms 后的 flush 补上（此时渲染已完成，selector 可命中）
+            self._streaming_live_buffer += text
+            if not self._streaming_live_timer.isActive():
+                self._streaming_live_timer.start()
             # 🐛 修复：仅在新 reasoning 真正开始接收内容时才重置 _thinking_finalized。
             # start_new_thinking_block 不再重置此标志，防止两轮之间的空窗期
             # 已完成 think-block 的 </think> 被错误剥离为 think-streaming。
@@ -5815,9 +5966,57 @@ class MessageCard(SimpleCardWidget):
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             self.viewer._schedule_render(immediate=True)
         else:
-            # 后续 chunk：只累积到 _content_data，静默不触发任何 DOM 操作
+            # 后续 chunk：累积到 _content_data；同时缓冲进实时预览 buffer，
+            # 由节流 timer 批量 textNode append 到 .think-streaming-live（不重建 DOM、
+            # 不触发全量渲染、不报外部高度——live 区 CSS 限高，卡片高度不变，
+            # 外部聊天列表滚动不被打断）
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            # 不调用 _schedule_render / _update_thinking_incremental
+            self._streaming_live_buffer += text
+            if not self._streaming_live_timer.isActive():
+                self._streaming_live_timer.start()
+
+    def _flush_streaming_live(self):
+        """把缓冲的思考增量文本推送到流式 live 预览区（textNode append，不重建 DOM）
+
+        节流策略：250ms 批量，避免逐 chunk runJavaScript；live 区 CSS 限高
+        （.think-streaming-live max-height:96px），内部程序性滚底，不报外部高度。
+        viewer 未就绪/已析构时静默丢弃（后续全量渲染会从 _content_data 带完整内容）。
+        """
+        if not self._streaming_live_buffer:
+            return
+        text = self._streaming_live_buffer
+        self._streaming_live_buffer = ""
+        if not self._lazy_rendered or not self.viewer:
+            return
+        try:
+            # orjson.dumps 返回 bytes，需 decode 后嵌入 JS 字符串字面量；
+            # createTextNode 走安全文本节点，无 HTML 注入面
+            safe_text = json.dumps(text).decode("utf-8")
+            js_code = f"""
+            (function() {{
+                var t = document.querySelector('.think-streaming[data-streaming="true"] .think-streaming-live-text');
+                if (!t) {{ return; }}
+                t.appendChild(document.createTextNode({safe_text}));
+                var box = t.parentElement;
+                if (box) {{ box.scrollTop = box.scrollHeight; }}
+                // 工具区贴底跟随（内部有 _userScrolledUp 判断，用户上滚不拉底）
+                if (window._streamingActive && typeof _scrollToolContentToBottom === 'function') {{
+                    _scrollToolContentToBottom();
+                }}
+            }})();
+            """
+            self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
+    def _discard_streaming_live(self):
+        """清空流式 live 预览缓冲（思考块完成/新轮思考开始时调用）。
+
+        丢弃残余而非追加：旧块尾部文本若被 flush 到新块的 live 区开头会串块；
+        _content_data 始终完整，全量渲染不受影响。
+        """
+        self._streaming_live_buffer = ""
+        self._streaming_live_timer.stop()
 
     def _update_thinking_incremental(self, new_text: str):
         """流式思考增量更新（仅触发布局高度重算）
@@ -5928,6 +6127,11 @@ class MessageCard(SimpleCardWidget):
             if not history:
                 self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
                 self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
+                # [T30 续] 本次会折叠工具区 → 折叠过渡窗口内高度追踪用流式口径
+                # 快跟随（见 _stream_height_tick_step）。必须早于下方
+                # viewer.finish_streaming 派发的折叠与首次中间上报（下游读它）。
+                if self._will_collapse_tool_section():
+                    self._dock_collapse_until = time.monotonic() + DOCK_COLLAPSE_TRACK_WINDOW_S
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 _keep_dock = self._has_active_tools() and not (history or force_dock_off)
                 self.viewer.finish_streaming(keep_dock=_keep_dock, immediate=immediate)
@@ -5957,6 +6161,24 @@ class MessageCard(SimpleCardWidget):
         才归位折叠。
         """
         return any(tid not in self._finished_streaming_ids for tid in self._tool_call_order)
+
+    def _will_collapse_tool_section(self) -> bool:
+        """本次结束是否会触发工具区折叠过渡（判据与 viewer 侧同源）。
+
+        供折叠过渡窗口用（窗口内高度追踪改走流式口径快跟随）。漏判只是失去
+        快跟随、退回旧行为，不会让折叠本身失效。判据：简洁模式 + 非欢迎卡 +
+        工具区有内容（已完成工具 id 集合，或正文含 ``<think>`` 协议块）。
+        """
+        viewer = self.viewer
+        if viewer is None:
+            return False
+        if not getattr(viewer, "_tool_compact_mode", True):
+            return False
+        if getattr(viewer, "_light_skeleton", False):
+            return False
+        if getattr(viewer, "_restore_finished_ids", None):
+            return True
+        return "<think>" in (getattr(viewer, "_markdown_text", "") or "")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

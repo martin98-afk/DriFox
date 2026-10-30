@@ -139,6 +139,38 @@ def test_v2_blocks_none_without_parent_data(monkeypatch):
     assert v._v2_blocks() is None
 
 
+def test_v2_blocks_empty_list_returns_empty_not_none(monkeypatch):
+    """空块列表 ≠ 无块源：流式首帧前 _content_data 还是 []，必须保持 v2 通道。"""
+    v = _make_viewer(monkeypatch, [])
+    assert v._v2_blocks() == [], "空 list 应返回 []（暂无内容），不能返回 None（无块源）"
+
+
+def test_v2_blocks_empty_for_assistant_card_without_content_data(monkeypatch):
+    """assistant 卡流式首帧前 _content_data 可能尚未初始化：按「暂无内容」处理。"""
+
+    class _AssistantCard:
+        role = "assistant"
+
+        def parent(self):
+            return None
+
+    v = _make_viewer(monkeypatch, [])
+    monkeypatch.setattr(CodeWebViewer, "parent", lambda self: _AssistantCard())
+    assert v._v2_blocks() == [], "assistant 卡无 _content_data 时应返回 []（不是 None）"
+
+
+def test_empty_blocks_keeps_v2_takeover(monkeypatch):
+    """空块时 _perform_update_v2 返回 True（本批不渲染），调用点不得永久关闭 v2。
+
+    返回 False 会让 ``_perform_update`` 置 ``_render_v2 = False`` → 整条消息退回
+    v1 全量 innerHTML 路径 → 每批重建全部折叠框，用户展开的思考/工具卡每批
+    「折叠又展开」（2026-10-30 实测）。
+    """
+    v = _make_viewer(monkeypatch, [])
+    assert v._perform_update_v2() is True
+    assert v._page.js_calls == [], "空块不应发任何 patch"
+
+
 # ── 2. 首渲全量落地 ─────────────────────────────────────────────────
 
 

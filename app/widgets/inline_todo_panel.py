@@ -31,6 +31,7 @@ from app.utils.utils import _is_current_theme_light, get_font_family_css, get_ic
 from app.widgets._workbench_helpers import _SectionHeader
 from app.widgets.cards.floating.sub_agent_compact_widget import _RotatingIcon
 from app.widgets.elided_label import _ElidedLabel
+from app.widgets.status_dot import StatusDot
 
 
 class InlineTodoPanel(QWidget):
@@ -46,7 +47,9 @@ class InlineTodoPanel(QWidget):
     heightChanged = pyqtSignal()
 
     _PRI_LABELS = {"high": "高", "medium": "中", "low": "低"}
-    # 状态 → (符号, 颜色)；pending 圆点恒为中性灰（优先级着色易误读为出错状态）
+    # 状态 → (符号, 颜色)；pending 圆点改用通用 StatusDot 矢量组件（字符 ● 发虚
+    # 且裁切），颜色按优先级分档（见 _pri_dot_color）；completed ✓ 恒绿；
+    # in_progress 走旋转图标，不走本表符号
     _STATUS_META = {
         "completed": ("✓", "#3fb950"),
         "in_progress": ("◐", "#f59e0b"),
@@ -289,12 +292,20 @@ class InlineTodoPanel(QWidget):
             spin_timer = LoopTimer(mark_widget, 80, _spin_tick)
             spin_timer.start()
             layout.addWidget(mark_widget)
-        else:
+        elif status == "completed":
+            # ✓ 对勾保持字符形：非圆点，StatusDot 无对应形态
             mark_label = QLabel(mark, frame)
             mark_label.setObjectName("taskMark")
             mark_label.setFixedWidth(16)
             mark_label.setAlignment(Qt.AlignCenter)
             layout.addWidget(mark_label)
+        else:
+            # pending：通用 StatusDot 矢量圆点，颜色按优先级分档
+            dot = StatusDot(8, color=self._pri_dot_color(priority), parent=frame)
+            dot.setObjectName("taskDot")
+            dot.setToolTip(f"优先级：{self._PRI_LABELS.get(priority, '中')}")
+            layout.addWidget(dot)
+            layout.setAlignment(dot, Qt.AlignVCenter)
 
         # 单行省略（_ElidedLabel 随宽度自动重算）：任务清单的价值是看进度而非读全文
         content_label = _ElidedLabel(content, frame)
@@ -308,10 +319,27 @@ class InlineTodoPanel(QWidget):
         self._apply_item_style(frame)
         return frame
 
+    def _pri_dot_color(self, priority: str) -> str:
+        """pending 圆点按优先级分色（高=红 / 中=蓝 / 低=灰）
+
+        运行时取 Colors 语义色：Colors.refresh() 动态改类属性，import 时固化到
+        dict 会拿到主题刷新前的旧值（亮暗切换后不跟变）。
+        """
+        return {
+            "high": Colors.ERROR,
+            "medium": Colors.INFO,
+            "low": Colors.TEXT_MUTED,
+        }.get(priority or "medium", Colors.TEXT_MUTED)
+
     def _apply_item_style(self, frame: QFrame) -> None:
         """应用条目样式（行式：默认透明，hover 淡背景；靠状态符号着色）"""
         status = frame.property("status") or "pending"
         _mark, color = self._STATUS_META.get(status, self._STATUS_META["pending"])
+
+        # pending 圆点：主题切换（refresh_style 重入）后颜色随语义色刷新
+        dot = frame.findChild(StatusDot, "taskDot")
+        if dot is not None:
+            dot.set_color(self._pri_dot_color(frame.property("priority") or "medium"))
 
         frame.setStyleSheet(
             "QFrame#taskItem { background: transparent; border: none;"

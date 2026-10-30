@@ -204,8 +204,8 @@ class TestModelItemIntegration:
 
         monkeypatch.setattr(
             mc,
-            "get_model_capabilities",
-            lambda name: {"supports_thinking": True, "supports_vision": True},
+            "resolve_capabilities_for_model",
+            lambda model, provider="", sources=None: {"supports_thinking": True, "supports_vision": True},
         )
         from app.widgets.cards.settings.model_selector_card import ModelItem
 
@@ -219,7 +219,7 @@ class TestModelItemIntegration:
         import app.core.modelmeta.model_capabilities as mc
 
         caps = {"supports_thinking": True, "supports_vision": True, "cost": {"input": 1}}
-        monkeypatch.setattr(mc, "get_model_capabilities", lambda name: caps)
+        monkeypatch.setattr(mc, "resolve_capabilities_for_model", lambda model, provider="", sources=None: caps)
         from app.widgets.cards.settings.model_selector_card import ModelItem
         from app.widgets.capability_badges import build_capability_tooltip
 

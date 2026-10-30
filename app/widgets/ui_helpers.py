@@ -1514,18 +1514,20 @@ def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render
             if _is_hook_message_ui(msg):
                 continue
 
-            # 处理思考内容：将 reasoning_content 转换成 <think> 标签格式
+            # 处理思考内容：独立 reasoning 块（不再拼进 text 协议串）。
+            # 🐛 旧实现拼接 "<think>…</think>\n\n正文" 进 append_text：思考卡混在
+            # text 块 wrapper 内（home=CONTENT），v2 简洁模式靠 _v2AfterPatch 把
+            # 散落协议卡搬到工具区——搬移插入点恒在最后一个 wrapper 之后，
+            # 所有思考卡物理沉底（"历史会话思考全在工具后面"根因）。
+            # 独立 reasoning 块走 v2 patchBlocks 保序，与工具块按到达顺序交错。
             reasoning_content = msg.get("reasoning_content", "")
             content = msg.get("content", "")
-            combined_content = ""
             if reasoning_content:
-                combined_content += f"<think>{reasoning_content}</think>"
+                assistant_card.append_reasoning(
+                    reasoning_content, defer_render=True, force_new_block=True
+                )
             if content:
-                if combined_content:
-                    combined_content += "\n\n"
-                combined_content += content
-            if combined_content:
-                assistant_card.append_text(combined_content, immediate_render=immediate_render)
+                assistant_card.append_text(content, immediate_render=immediate_render)
         elif msg.get("role") == "tool":
             # 成果条目与展示内容独立：无正文的 tool 消息也可能带成果
             if msg.get("artifacts"):

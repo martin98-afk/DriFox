@@ -91,6 +91,7 @@ from app.core.modelmeta.model_capabilities import (
     apply_model_defaults,
     get_model_capabilities,
     normalize_reasoning_effort,
+    resolve_capabilities_for_model,
     resolve_model_capabilities,
 )
 from app.core.infra import memory_governor
@@ -3400,7 +3401,7 @@ class OpenAIChatToolWindow(ToolWindow):
         工具栏是 self 的直接子控件，不在 main layout 里。这样：
         - 输入卡折叠/展开时，工具栏的窗口绝对 Y 坐标完全不变。
         - 系统卡片打开时，工具栏也不会被推上去。
-        位置 = 窗口底部抬高 8px（主布局 1px + 输入容器 7px 底边距）、
+        位置 = 窗口底部抬高 5px（主布局 1px + 输入容器 4px 底边距）、
         左右缩进 11px（1px 主 margin + 10px 容器边距），与输入卡等宽同底。
         """
         if not hasattr(self, "_bottom_toolbar_strip"):
@@ -3408,11 +3409,11 @@ class OpenAIChatToolWindow(ToolWindow):
         w = self.width()
         h = self.height()
         toolbar_h = 44
-        # 与主布局 1px margin + 输入容器 margins(10, 6, 10, 7) 对齐：
-        # strip 左右缩进 11px，底部抬高 8px（1px 主 margin + 7px 容器 margin），
+        # 与主布局 1px margin + 输入容器 margins(10, 3, 10, 4) 对齐：
+        # strip 左右缩进 11px，底部抬高 5px（1px 主 margin + 4px 容器 margin），
         # 输入卡与工具栏条保持等宽同底，四周留出呼吸边距
         toolbar_x = 11
-        toolbar_y = max(0, h - 8 - toolbar_h)
+        toolbar_y = max(0, h - 5 - toolbar_h)
         toolbar_w = max(0, w - 22)
         self._bottom_toolbar_strip.setGeometry(toolbar_x, toolbar_y, toolbar_w, toolbar_h)
         # 发送按钮挂主窗口（跨条带与输入区两段、避免被 strip 矩形裁剪），
@@ -4100,7 +4101,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 warmup_component("budget_resolvers")
             except Exception as e:
                 logger.warning(f"[MainWidget] 上下文策略预注册失败（继续装载）: {e}")
-            svc.pause_deferred("ui_plugin_load", only=["runtime_components", "net_preheat"])
+            # provider_warmup 一并挂起：它在后台 import 服务商模块，与装载链
+            # 争 Python import 锁（同 runtime_components 当初的 3.3s 事故）
+            svc.pause_deferred(
+                "ui_plugin_load", only=["runtime_components", "net_preheat", "provider_warmup"]
+            )
             # 步进链是单发定时器：窗口销毁后收口分支不会再跑，必须另有释放路径，
             # 否则应用级队列被永久暂停（其它窗口的启动任务全部卡死）
             self.destroyed.connect(lambda *_: svc.resume_deferred("window_destroyed"))
@@ -7985,7 +7990,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
             self._model_btn_text.setText(self._current_model_name)
-            caps = get_model_capabilities(self._current_model_name, self._current_provider_def_name())
+            caps = resolve_capabilities_for_model(self._current_model_name, self._current_provider_def_name())
             note = caps.get("note", "")
             # 第一行：服务商 · 模型 · 价格(单位在末尾一次) · 多模态/思考
             cost_parts = []
@@ -8071,7 +8076,7 @@ class OpenAIChatToolWindow(ToolWindow):
         tooltip = "模型参数配置"
         try:
             if self._current_model_name:
-                caps = get_model_capabilities(self._current_model_name, self._current_provider_def_name())
+                caps = resolve_capabilities_for_model(self._current_model_name, self._current_provider_def_name())
                 if caps.get("supports_thinking") and caps.get("thinking_param") == "reasoning_effort":
                     config = self._get_current_model_config()
                     raw_effort = config.get("思考等级", "")
@@ -8105,7 +8110,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not self._current_model_name:
             return
-        caps = get_model_capabilities(self._current_model_name, self._current_provider_def_name())
+        caps = resolve_capabilities_for_model(self._current_model_name, self._current_provider_def_name())
         values = [str(v) for v in (caps.get("reasoning_effort_values") or [])]
         if not values:
             # 无等级可选值 → 无可轮换，忽略点击
@@ -14007,13 +14012,54 @@ class OpenAIChatToolWindow(ToolWindow):
         # 轻量快照只保留元信息，实际恢复仍由 session.messages 重建
         return False
 
+    def _welcome_history_list(self) -> list:
+        """欢迎卡片数据源：全量历史已就绪时走缓存列表，否则走快速路径。
+
+        [PERF] 启动首屏 _ensure_history_loaded 要读 5000 条轻量行（慢盘/杀软
+        环境实测 500ms+，主线程阻塞等预热线程的锁）。欢迎卡片只需要十余条，
+        故未就绪时直接 SQL LIMIT 300 出首屏（~20ms），并挂一次性回调，
+        预热完成后按全量口径软更新（见 _on_welcome_history_loaded）。
+        """
+        hm = self.history_manager
+        if hm is None:
+            return []
+        if getattr(hm, "_history_loaded", True):
+            return hm.get_history_list(self._current_project)
+
+        self._hook_welcome_history_loaded()
+        getter = getattr(hm, "get_recent_lightweight", None)
+        if getter is None:
+            return hm.get_history_list(self._current_project)
+        return getter(limit=300, project=self._current_project)
+
+    def _hook_welcome_history_loaded(self):
+        """一次性连接「历史首次加载完成」信号（首屏快速路径后软更新用）"""
+        if getattr(self, "_welcome_history_hooked", False):
+            return
+        self._welcome_history_hooked = True
+        try:
+            self.history_manager._history_load_signals.loaded.connect(self._on_welcome_history_loaded)
+        except Exception as e:
+            logger.debug(f"[welcome] 连接历史加载信号失败: {e}")
+
+    def _on_welcome_history_loaded(self):
+        """历史全量加载完成（主线程槽）：欢迎卡仍在屏上时按全量口径软更新"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if self._displayed_session_id is not None:
+            return
+        try:
+            self._refresh_welcome_card_data()
+        except Exception as e:
+            logger.debug(f"[welcome] 历史加载完成后软更新失败: {e}")
+
     def _collect_welcome_sessions(self):
         """收集欢迎卡片会话列表数据（按当前项目过滤，剔除团队会话）
 
         返回 (recent_sessions, top_by_count)，供 _get_or_create_welcome_card
         构建与 _refresh_welcome_card_data 软更新共用，保证两路径数据口径一致。
         """
-        history_list = self.history_manager.get_history_list(self._current_project)
+        history_list = self._welcome_history_list()
         # 🛡️ 过滤团队会话：欢迎卡片展示的是"可继续的独立对话"，团队会话
         # （team_run_id 非空）由历史面板团队分组/合并条目统一管理，逐条混入
         # 欢迎卡片会导致成员会话重复展示且点击后团队上下文丢失。与历史面板
@@ -19399,11 +19445,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     return
             logger.warning(f"未找到 session_id: {session_id}")
 
-    def _load_input_history(self):
-        """从数据库加载输入历史到输入框"""
+    def _load_input_history(self, retry: int = 0):
+        """从数据库加载输入历史到输入框
+
+        启动窗口期查询失败（disk I/O error 等）存储层返回 None：延迟重试，
+        不把失败当空历史吞掉（启动瞬时故障后上下键历史为空，直至用户发消息
+        才恢复）。至多重试 2 次，发送路径 _record_input_history 的重拉天然兜底。
+        """
         try:
             if hasattr(self, "session_store") and self.session_store:
                 history = self.session_store.get_input_history()
+                if history is None:
+                    if retry < 2:
+                        QTimer.singleShot(5000, lambda: self._load_input_history(retry + 1))
+                    return
                 self.input_area.load_history(history)
         except Exception:
             pass
@@ -19413,9 +19468,10 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             if hasattr(self, "session_store") and self.session_store:
                 self.session_store.add_input_history(text, attachments)
-                # 更新输入框的历史缓存
+                # 更新输入框的历史缓存；查询失败（None）保留现有列表不覆盖
                 history = self.session_store.get_input_history()
-                self.input_area.load_history(history)
+                if history is not None:
+                    self.input_area.load_history(history)
         except Exception:
             pass
 

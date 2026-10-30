@@ -868,11 +868,22 @@ class SessionStore:
             return self._session_repo.get_all(limit, offset)
         return []
 
-    def get_sessions_lightweight(self, limit: int = 100, offset: int = 0) -> List[Dict]:
-        """获取会话轻量列表（不含 messages），启动时使用避免加载大量消息数据"""
+    def get_sessions_lightweight(
+        self, limit: int = 100, offset: int = 0, project: Optional[str] = None
+    ) -> Optional[List[Dict]]:
+        """获取会话轻量列表（不含 messages），启动时使用避免加载大量消息数据
+
+        Args:
+            project: 非空时只取该项目（首屏快速路径按项目过滤，走 SQL）
+
+        Returns:
+            成功返回列表（空库 = []）；存储不可用 / 查询失败返回 None（调用方
+            必须区分：把 None 当空列表会固化成「历史为空」，见 HistoryManager
+            懒加载重试契约）。
+        """
         if self._session_repo:
-            return self._session_repo.get_all_lightweight(limit, offset)
-        return []
+            return self._session_repo.get_all_lightweight(limit, offset, project)
+        return None
 
     def get_sessions_by_team_run_id(self, run_id: str) -> List[Dict]:
         """按团队 run_id 获取全部成员会话（轻量，不含 messages）。
@@ -1101,15 +1112,16 @@ class SessionStore:
             return self._input_history_repo.add(content, attachments)
         return False
 
-    def get_input_history(self, limit: int = 50) -> list:
+    def get_input_history(self, limit: int = 50) -> Optional[list]:
         """获取输入历史列表（最新在前）
 
         Returns:
-            list[dict]: 每个元素含 ``text`` 和 ``attachments`` 键
+            list[dict]: 每个元素含 ``text`` 和 ``attachments`` 键；
+            None: 查询失败（调用方应保持现状待重试，不得当空数据覆盖）。
         """
         if self._input_history_repo:
             return self._input_history_repo.get_all(limit)
-        return []
+        return None
 
     # ==================== 生命周期 ====================
 

@@ -254,6 +254,17 @@ class ProviderEditCard(QWidget):
         v.addWidget(line)
         return box
 
+    def _provider_def_name(self) -> str:
+        """模型能力查询 / 声明覆盖键用的 ProviderDef.name（不是 config_id 哈希）。
+
+        saved_providers 条目由 apply_provider_save 写入 provider_name（服务商类型名，
+        如 "CodeBuddy"）；新建卡取下拉框当前值；缺字段的旧数据回退 config_id。
+        """
+        if self.is_new:
+            combo = getattr(self, "nameCombo", None)
+            return str(combo.currentText() or "") if combo is not None else ""
+        return str(self.provider_info.get("provider_name") or self.provider_name or "")
+
     def _init_ui(self):
         self._apply_style()
 
@@ -522,12 +533,14 @@ class ProviderEditCard(QWidget):
 
         # 模型列表编辑器（常驻可见；旧代码是点「编辑列表」才显示）。
         # provider_name：能力查询走插件 per-model 层（服务商私有模型 ID
-        # 在 models.dev 不存在，不带 provider 查会能力列全 "-"）
+        # 在 models.dev 不存在，不带 provider 查会能力列全 "-"）；
+        # 必须是 ProviderDef.name 而非 config_id 哈希，否则插件声明与
+        # models.dev 分区索引都命中不了，也拼不对能力声明的覆盖键。
         self.modelListEditor = ModelListEditorWidget(
             initial_models,
             parent=self,
             default_model=str(current_model or ""),
-            provider_name="" if self.is_new else self.provider_name,
+            provider_name=self._provider_def_name(),
         )
         # P1-9：存量「模型关闭列表」回显（与选择器过滤链同口径；键缺失 = 全部启用）。
         # 行构造读编辑器 _disabled，不灌这里重开编辑卡开关会全部回显 On。
@@ -651,9 +664,9 @@ class ProviderEditCard(QWidget):
                 models.append(default_model)
             self.modelListEditor.set_models(models)
         # 候选区跟随当前服务商（词典 ∪ 已拉取 ∪ 残留，排除主列表已有的）
+        # provider 用 ProviderDef.name：词典 key 与能力查询同源，传 config_id 查不到
         try:
-            target_provider = self.nameCombo.currentText() if self.is_new else self.provider_name
-            self.modelListEditor.refresh_candidates(target_provider, self._fetched_models)
+            self.modelListEditor.refresh_candidates(self._provider_def_name(), self._fetched_models)
         except Exception:
             pass
         self._update_extra_config_visibility()

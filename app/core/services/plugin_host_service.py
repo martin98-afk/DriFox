@@ -294,7 +294,11 @@ class PluginHostService(QObject):
         queue.register("themes", self._deferred_reload_themes, delay_ms=2000)
         queue.register("watcher", self._deferred_start_watcher, delay_ms=2000)
         queue.register("plugin_tools_rescan", self._deferred_rescan_plugin_tools, delay_ms=2000)
-        queue.register("provider_warmup", self._deferred_warmup_providers, delay_ms=2000)
+        # register_async：服务商模块 import（openai 等重依赖）+ AST 审计实测
+        # 1.1s，同步跑会占主线程一个整段；与 runtime_components 同模式挪后台。
+        # 消费方经 ProviderRegistry.ensure_loaded 的加载中等待语义兜底，
+        # 不会读到半成品注册表。
+        queue.register_async("provider_warmup", self._deferred_warmup_providers, delay_ms=2000)
         # runtime_components：11 组件全量扫描实测 7.4s（transports/openai_chat.py
         # 单文件就 2.5s，其中 httpx 首次导入连带 click/pygments/urllib.request 1.6s）。
         # 同步执行时整段无 yield，主线程硬冻结——改后台线程，主线程只投递。

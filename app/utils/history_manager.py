@@ -226,6 +226,17 @@ class _ArchiveScanSignals(QObject):
     finished = pyqtSignal(int, list)  # request_id, enriched_list
 
 
+class _HistoryLoadSignals(QObject):
+    """历史首次加载完成信号：后台预热线程 → 主线程（queued 连接）。
+
+    欢迎卡片首屏走「快速路径」时不等待全量历史（5000 条查询在慢盘上实测
+    500ms+），预热完成后再用该信号通知主线程软更新，补上全量口径的
+    recent / top_by_count。
+    """
+
+    loaded = pyqtSignal()
+
+
 class _ArchiveScanTask(QRunnable):
     """异步扫描归档目录的 QRunnable。
 
@@ -447,6 +458,8 @@ class HistoryManager:
         # signals 必须在主线程创建（Qt 要求 QObject 的线程亲和性）。
         self._archive_scan_signals = _ArchiveScanSignals()
         self._archive_scan_signals.finished.connect(self._on_archive_scan_finished)
+        # 历史首次加载完成信号（后台预热 → 主线程软更新欢迎卡片）
+        self._history_load_signals = _HistoryLoadSignals()
         # 当前扫描对应的回调（仅主线程访问，无需锁）。
         self._pending_archive_callback: Optional[Callable[[List[Dict]], None]] = None
 
@@ -801,7 +814,7 @@ class HistoryManager:
 
 
 
-    def _ensure_history_loaded(self):
+    def _ensure_history_loaded(self) -> bool:
         """懒加载历史会话数据（首次访问时从 SQLite 加载）
 
         🛡️ H1（T4-TOP8）：持 _history_load_lock 保护"检查-加载"原子性——
@@ -814,25 +827,49 @@ class HistoryManager:
           且赋值前条件判断（GIL 原子）——查询/检查期间外部（测试注入/
           主线程抢先）已置 True 或写入 _history_sessions 时以外部为准，
           不覆盖（消除 H1-R3 极端竞态窗口）
+
+        Returns:
+            True=已加载（含早已加载）；False=本次未能加载（查询失败/异常），
+            调用方可据此重试（预热线程用）。
         """
         if not self._use_sqlite:
-            return
+            return False
+        loaded_now = False
         with self._history_load_lock:
             if self._history_loaded:
-                return
+                return True
             try:
                 sessions = self._session_store.get_sessions_lightweight(limit=self._history_limit)
+                if sessions is None:
+                    # 查询失败 ≠ 空库：保持未加载态，下次读取自动重试。把失败
+                    # 伪装成空列表会把空态固化成「已加载」（启动瞬时 disk I/O
+                    # error 曾因此让历史列表整个会话期为空，直到用户对话触发
+                    # db 签名变化才恢复）。
+                    logger.warning("[HistoryManager] 懒加载历史会话查询失败（存储层返回 None），保持未加载态待重试")
                 # 二次检查 + 条件赋值：查询期间外部可能已加载/注入，
                 # 以外部数据为准，不覆盖（GIL 内条件赋值原子）
-                if not self._history_loaded:
+                elif not self._history_loaded:
                     self._history_sessions = sessions
                     self._deduplicate_history_sessions()
                     self._migrate_if_needed()
                     self._history_loaded = True
                     # 记录初始变更签名，避免首次读取时误判为"外部变更"触发冗余重载
                     self._db_signature_stored = self._db_signature()
+                    # 置脏轻量缓存：失败窗口期可能已缓存空快照，不置脏会让
+                    # 后续读取者命中陈旧空列表
+                    self._mark_cache_dirty()
+                    loaded_now = True
             except Exception as e:
                 logger.warning(f"[HistoryManager] 懒加载历史会话异常: {e}")
+        # 锁外发信号：接收方（主线程槽）可能回头查历史缓存，避免持锁重入。
+        # 跨线程 emit 自动走 queued（信号对象在主线程创建）。
+        # 用于欢迎卡片等「首屏走快速路径、预热完成后软更新」的场景。
+        if loaded_now:
+            try:
+                self._history_load_signals.loaded.emit()
+            except Exception:
+                pass
+        return loaded_now
 
     def _prewarm_history(self):
         """后台线程预热历史会话（T4-TOP8）：首次历史加载从主线程移到后台
@@ -864,9 +901,17 @@ class HistoryManager:
         if not self._use_sqlite:
             return
 
-        def _do_prewarm():
+        def _do_prewarm(attempt: int = 0):
             try:
-                self._ensure_history_loaded()
+                if self._ensure_history_loaded():
+                    return
+                # 预热窗口期查询失败（如启动瞬时 disk I/O error）：延迟重试，
+                # 避免用户首开历史面板撞上空列表；至多 2 次，运行期读取路径
+                # （get_history_list）天然继续兜底重试
+                if attempt < 2:
+                    retry = threading.Timer(5.0, lambda: _do_prewarm(attempt + 1))
+                    retry.daemon = True
+                    retry.start()
             except Exception as e:
                 logger.warning(f"[HistoryManager] 历史预热异常: {e}")
 
@@ -926,9 +971,14 @@ class HistoryManager:
 
         with self._history_load_lock:
             try:
-                self._history_sessions = self._session_store.get_sessions_lightweight(
+                sessions = self._session_store.get_sessions_lightweight(
                     limit=self._history_limit
                 )
+                if sessions is None:
+                    # 查询失败保留内存现有数据，不得把 _history_sessions 污染成 None
+                    logger.warning("[HistoryManager] 跨进程重载查询失败，保留内存现有数据")
+                    return
+                self._history_sessions = sessions
                 self._deduplicate_history_sessions()
                 self._migrate_if_needed()
                 self._history_loaded = True
@@ -937,6 +987,26 @@ class HistoryManager:
                 return
         self._db_signature_stored = sig
         self._mark_cache_dirty()
+
+    def get_recent_lightweight(self, limit: int = 300, project: Optional[str] = None) -> List[Dict]:
+        """首屏快速路径：不等全量历史加载，直接按 SQL LIMIT 取最近 N 条轻量会话。
+
+        欢迎卡片首屏只需要「最近 6 条 + 消息数前 6 条」，而 _ensure_history_loaded
+        要读 5000 条（慢盘实测 500ms+ 主线程阻塞）。本方法走 SQL LIMIT + 项目
+        过滤，实测 0.1ms（N=6）~20ms（N=300），用于预热未完成的窗口期出首屏；
+        预热完成后由 _history_load_signals.loaded 通知主线程软更新为全量口径。
+
+        返回按 updated_at 降序，字段口径与 get_history_list 的轻量条目一致
+        （直接来自 _row_to_session_lightweight），不走内存缓存与去重。
+        """
+        if not self._use_sqlite or self._session_store is None:
+            return []
+        try:
+            rows = self._session_store.get_sessions_lightweight(limit=limit, project=project)
+            return rows if rows is not None else []
+        except Exception as e:
+            logger.warning(f"[HistoryManager] 快速取最近会话失败: {e}")
+            return []
 
     def get_history_list(
         self, project: str = None, with_messages: bool = False, merge_team: bool = False

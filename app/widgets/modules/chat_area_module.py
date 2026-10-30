@@ -65,7 +65,9 @@ class ChatAreaModule(UIModule):
         host.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         host.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         host.chat_scroll_area.setWidgetResizable(True)
-        host.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
+        # 右保留 6 = qfluent 浮层滚动条等宽（原 10 使文字区右缘比左缘宽 8px，
+        # 用户反馈「右侧多一点」后收敛）
+        host.chat_scroll_area.setViewportMargins(2, 2, 6, 2)
         host.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         host.chat_container = QWidget()
@@ -76,7 +78,9 @@ class ChatAreaModule(UIModule):
         except Exception:
             pass
         host.chat_layout = QVBoxLayout(host.chat_container)
-        host.chat_layout.setContentsMargins(6, 6, 6, 6)
+        # 底 2：贴底滚动时与输入区顶部留白（容器 top 3 + 主 margin 1）合计 ≈8，
+        # 原 6 使 footer 行上贴卡 10 / 下离输入框 23 明显失衡
+        host.chat_layout.setContentsMargins(6, 6, 6, 2)
         host.chat_layout.setSpacing(6)  # 消息间距（2026-09-23 收敛：8→6，配合卡片内边距收紧）
         host.chat_layout.setAlignment(Qt.AlignBottom)
         host.chat_scroll_area.setWidget(host.chat_container)

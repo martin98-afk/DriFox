@@ -566,3 +566,131 @@ def test_on_js_ready_dock_sync_uses_python_streaming_flag():
     code = "\n".join(ln.split("#")[0] for ln in src.splitlines())
     assert "!!_act||!_co" not in code, "不得保留 !_co（未折叠）开坞推导：新骨架无 data-collapsed 会误开坞态"
     assert "_dock_on" in code, "必须用 Python 端 _streaming 真值参与坞态判定"
+
+
+# ──────────────────────────────────────────────
+# 结束态折叠：终渲染串行 + 过渡期上报节流 + 高度快跟随
+#
+# 现象（用户真机）：流式结束时工具区「瞬收」，卡片底部先冒空白再慢慢收回。
+# 三条链：① 折叠过渡与终渲染同帧派发，终渲染的渲染进程长任务把 200ms 过渡
+# 连同高度上报一起压住 → 过渡按时间戳直接跳终值；② 上报延后到任务之后，
+# 内容已收、卡片高度未收 → 底部空白；③ FINISH 慢 factor（τ≈255ms）追 264px
+# 要 ~1s。对策见 card_render_core 常量注释。
+# ──────────────────────────────────────────────
+
+
+def _make_finish_stub(md: str = "", finished_ids=None):
+    """CodeWebViewer.finish_streaming 桩：补齐串行化路径依赖的属性/定时器。"""
+    from PyQt5.QtCore import QTimer
+
+    stub = _ViewerStub()
+    # 实例属性覆盖：_ViewerStub 不是 CodeWebViewer 子类，不会触发 property
+    stub._tool_compact_mode = True
+    stub._should_incremental_finalize = lambda: False
+    stub._final_render_seq = 0
+    stub._final_render_inflight = False
+    stub._render_pending = None
+    stub._dock_sync_requested = False
+    stub._injected_pending_tools = None
+    stub._markdown_text = md
+    stub._restore_finished_ids = finished_ids
+    stub._finish_defer_immediate = True
+    stub._will_collapse_tool_section = lambda: CodeWebViewer._will_collapse_tool_section(stub)
+    stub._finish_defer_timer = QTimer()
+    stub._finish_defer_timer.setSingleShot(True)
+    stub._finish_defer_timer.timeout.connect(lambda: stub._schedule_render(immediate=stub._finish_defer_immediate))
+    return stub
+
+
+def test_finish_streaming_defers_final_render_until_collapse_settled():
+    """本次结束会折叠工具区时，终渲染必须延后到折叠过渡+上报完成之后。"""
+    _ensure_qapp()
+    stub = _make_finish_stub(md="正文", finished_ids={"t1"})
+    stub.finish_streaming()
+    assert stub.render_calls == 0, "折叠过渡期间不得派发终渲染（长任务会把过渡压成瞬跳）"
+    assert stub._finish_defer_timer.isActive(), "必须启动延后派发定时器"
+    # 定时器到点后照常派发
+    stub._finish_defer_timer.timeout.emit()
+    assert stub.render_calls == 1, "延后到点后必须派发终渲染"
+
+
+def test_finish_streaming_renders_immediately_when_no_collapse():
+    """不折叠的卡（无工具/无思考）照旧立即派发终渲染，不引入多余延迟。"""
+    _ensure_qapp()
+    stub = _make_finish_stub(md="纯文本正文", finished_ids=None)
+    stub.finish_streaming()
+    assert stub.render_calls == 1
+    assert not stub._finish_defer_timer.isActive()
+
+
+def test_will_collapse_tool_section_judgement():
+    """折叠判定：已完成工具或 <think> 块 → 折叠；非简洁模式/欢迎卡 → 不折叠。"""
+    stub = _make_finish_stub(md="纯文本", finished_ids={"t1"})
+    assert CodeWebViewer._will_collapse_tool_section(stub) is True, "有已完成工具必须判定折叠"
+    stub._restore_finished_ids = None
+    stub._markdown_text = "<think>推理</think>正文"
+    assert CodeWebViewer._will_collapse_tool_section(stub) is True, "含思考块必须判定折叠"
+    stub._markdown_text = "纯文本"
+    assert CodeWebViewer._will_collapse_tool_section(stub) is False
+    stub._light_skeleton = True
+    stub._restore_finished_ids = {"t1"}
+    assert CodeWebViewer._will_collapse_tool_section(stub) is False, "欢迎卡不折叠"
+
+
+def test_tool_section_transition_reports_mid_heights():
+    """折叠过渡期间必须按拍上报中间高度（否则 Qt 侧卡片高度原地不动 → 底部空白）。"""
+    src = inspect.getsource(CodeWebViewer._load_skeleton)
+    assert "TOOL_SECTION_REPORT_MS" in src, "过渡期上报间隔必须走常量（与 Qt 追踪拍对齐）"
+    assert "_tsTransitionMidTimer" in src, "过渡期必须启节流上报定时器"
+    assert "clearInterval(_tsTransitionMidTimer)" in src, "终值单报路径必须清掉节流定时器"
+
+
+def test_dock_collapse_window_speeds_up_height_track():
+    """折叠窗口内高度追踪用流式口径快跟随（慢 factor 会让卡片底边远落后于内容）。
+
+    不实例化 MessageCard（无 WebEngine 的测试环境下建卡直接崩，存量基线），
+    只把真实 tick 方法绑到最小桩上验证 factor 选择。
+    """
+    import time as _time
+
+    from app.widgets.card_render_core import (
+        FINISH_HEIGHT_TRACK_FACTOR,
+        STREAM_HEIGHT_TRACK_FACTOR,
+    )
+
+    class _V:
+        def height(self):
+            return 100
+
+        def minimumHeight(self):
+            return 40
+
+    class _TickStub:
+        def __init__(self):
+            self.viewer = _V()
+            self._height_track_factor = FINISH_HEIGHT_TRACK_FACTOR
+            self._dock_collapse_until = 0.0
+            self._target_viewer_height = 300
+            self.applied: list[int] = []
+
+        def _apply_viewer_height(self, h):
+            self.applied.append(int(h))
+
+        def _stop_stream_height_track(self):
+            raise AssertionError("diff=200 不应落定停拍")
+
+    step = MessageCard._stream_height_tick_step
+
+    slow_stub = _TickStub()
+    step(slow_stub)
+    slow = slow_stub.applied[-1]
+
+    fast_stub = _TickStub()
+    fast_stub._dock_collapse_until = _time.monotonic() + 10.0
+    step(fast_stub)
+    fast = fast_stub.applied[-1]
+
+    assert fast > slow, f"折叠窗口内必须更快逼近（slow={slow} fast={fast}）"
+    # 200px 差值：慢档 ~0.378 → 175；快档 ~0.90 → 280
+    assert fast - slow >= 50, f"快跟随幅度不足（slow={slow} fast={fast}）"
+    assert STREAM_HEIGHT_TRACK_FACTOR >= FINISH_HEIGHT_TRACK_FACTOR

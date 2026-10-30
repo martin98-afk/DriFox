@@ -236,6 +236,21 @@ def block_key(block: Dict[str, Any], ctx: RenderCtx, completed: bool) -> tuple[s
         content = str(block.get("content", "") or "")
         return KIND_REASONING, fingerprint("reasoning", content, completed, ctx.compact)
 
+    if btype == "tool_streaming":
+        # 运行框（工具参数接收中 / 执行中）：身份用 tool_call_id，但内容（preview /
+        # 进度徽标）会变，故把变化维度折进 key —— 变化时替换节点，稳定时不发补丁。
+        return KIND_TOOL, fingerprint(
+            "tool_streaming",
+            block.get("tool_call_id", ""),
+            block.get("name", ""),
+            block.get("preview", ""),
+            int(block.get("char_count", 0) or 0),
+            bool(block.get("completed", False)),
+            int(block.get("add_lines", 0) or 0),
+            int(block.get("del_lines", 0) or 0),
+            ctx.compact,
+        )
+
     if btype == "tool_result":
         return KIND_TOOL, fingerprint(
             "tool",
@@ -286,6 +301,20 @@ def render_block(block: Dict[str, Any], ctx: RenderCtx, completed: bool, flip_of
         html = _render_tool_block(block, ctx)
         return BlockRender(kind=kind, key=key, html=html, home=_tool_home(block, ctx))
 
+    if btype == "tool_streaming":
+        from app.widgets.card_render_core import _render_tool_streaming_block
+
+        html = _render_tool_streaming_block(
+            tool_call_id=str(block.get("tool_call_id", "") or ""),
+            tool_name=str(block.get("name", "") or ""),
+            preview=str(block.get("preview", "") or ""),
+            char_count=int(block.get("char_count", 0) or 0),
+            completed=bool(block.get("completed", False)),
+            add_lines=int(block.get("add_lines", 0) or 0),
+            del_lines=int(block.get("del_lines", 0) or 0),
+        )
+        return BlockRender(kind=kind, key=key, html=html, home=_tool_home(block, ctx))
+
     if btype in ("image_url", "input_image", "image"):
         html = _render_image_block(block, ctx)
         return BlockRender(kind=kind, key=key, html=html, home=HOME_CONTENT)
@@ -333,8 +362,15 @@ def render_blocks(
         if not isinstance(block, dict):
             continue
         if live_index is not None and idx == live_index:
-            # 流式活动块：纯文本尾态（key 与内容无关，见 blocks.live_key）
-            out.append(BlockRender(kind=KIND_TEXT, key=live_key(idx), html=live_html, home=HOME_CONTENT))
+            # 流式活动块（text / reasoning）统一走纯文本尾态：key 与内容无关，
+            # 后续 diff 不会重传它，DOM 由调用方的 live 增量通道维护。
+            # reasoning 归工具区（简洁模式）保持思考卡的位置语义。
+            if block.get("type") == "reasoning":
+                out.append(
+                    BlockRender(kind=KIND_REASONING, key=live_key(idx), html=live_html, home=_reasoning_home(ctx))
+                )
+            else:
+                out.append(BlockRender(kind=KIND_TEXT, key=live_key(idx), html=live_html, home=HOME_CONTENT))
             flip_offset += _count_think_blocks(live_html)
             continue
         completed = not (ctx.streaming and active_index == idx)

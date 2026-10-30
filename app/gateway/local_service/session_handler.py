@@ -101,7 +101,12 @@ class APIHistoryManager:
         if self._session_store and self._session_store.is_initialized:
             try:
                 # [N1] 轻量投影（不含 messages）：O(100) 全量 BLOB 解压改为 15 列，按需经 get_session_by_session_id 懒回源
-                self._api_sessions = self._session_store.get_sessions_lightweight(limit=100)
+                rows = self._session_store.get_sessions_lightweight(limit=100)
+                if rows is None:
+                    # 查询失败 ≠ 空库：保留现有内存列表（None 会炸 len 并污染 _api_sessions）
+                    logger.warning("[APIHistoryManager] 轻量加载查询失败，保留现有内存列表")
+                    return
+                self._api_sessions = rows
                 logger.debug(f"[APIHistoryManager] 从 SQLite 轻量加载 {len(self._api_sessions)} 条会话")
             except Exception as e:
                 logger.error(f"[APIHistoryManager] 加载失败: {e}")

@@ -15,9 +15,11 @@ sys.path.insert(0, ".")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import Qt  # noqa: E402
-from PyQt5.QtWidgets import QFrame, QLabel, QWidget  # noqa: E402
+from PyQt5.QtWidgets import QFrame, QLabel, QScrollArea, QWidget  # noqa: E402
 
+from app.utils.design_tokens import Colors  # noqa: E402
 from app.widgets.inline_todo_panel import InlineTodoPanel  # noqa: E402
+from app.widgets.status_dot import StatusDot  # noqa: E402
 
 
 @pytest.fixture()
@@ -189,15 +191,25 @@ def test_in_progress_emphasized_with_accent_bar(panel):
     assert "font-weight: 500" in list_run.findChild(QLabel, "taskContent").styleSheet()
 
 
-def test_pending_dot_neutral_priority_in_tooltip(panel):
-    """pending 圆点恒中性灰（高优先级也不着红），优先级移到行 tooltip"""
-    panel.update_todos([{"content": "待办", "status": "pending", "priority": "high"}])
-    item = _items(panel)[0]
-    mark = item.findChild(QLabel, "taskMark")
-    assert "#6b7280" in mark.styleSheet()
-    assert "#ef4444" not in mark.styleSheet()
-    label = item.findChild(QLabel, "taskContent")
-    assert "优先级：高" in label.toolTip()
+def test_pending_dot_status_dot_priority_color(panel):
+    """pending 圆点用通用 StatusDot 矢量组件，颜色按优先级分档（高红/中蓝/低灰）"""
+    panel.update_todos(
+        [
+            {"content": "高", "status": "pending", "priority": "high"},
+            {"content": "中", "status": "pending", "priority": "medium"},
+            {"content": "低", "status": "pending", "priority": "low"},
+        ]
+    )
+    items = _items(panel)
+    dots = [w.findChild(StatusDot, "taskDot") for w in items]
+    assert all(d is not None for d in dots)
+    assert Colors.ERROR in dots[0].styleSheet()
+    assert Colors.INFO in dots[1].styleSheet()
+    assert Colors.TEXT_MUTED in dots[2].styleSheet()
+    # 优先级 tooltip 挂圆点，行 tooltip 仍含优先级 + 全文
+    assert "优先级：高" in dots[0].toolTip()
+    label = items[0].findChild(QLabel, "taskContent")
+    assert "优先级" in label.toolTip()
 
 
 def test_running_row_no_duplicate_after_refresh(panel):

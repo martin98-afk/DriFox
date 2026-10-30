@@ -210,6 +210,11 @@ class ProviderRegistry:
         self._providers: Dict[str, ProviderDef] = {}
         self._lock = threading.RLock()
         self._warmup_done = False
+        # 加载中状态 + 完成事件：warmup 已投递后台线程（deferred register_async），
+        # 与主线程消费方并发时由 ensure_loaded 等待加载方收尾，绝不读到半成品
+        self._loading = False
+        self._loading_thread = None  # 加载者线程 ident：同线程递归时放行（见 ensure_loaded）
+        self._load_done = threading.Event()
         # 内置 family 兜底（仅用于没有任何插件声明该 family 时，如自定义服务商）。
         # custom 不是"服务商"，而是通用默认能力，不属于可迁移的服务商硬编码。
         self._builtin_family_capabilities: Dict[str, Dict[str, Any]] = {
@@ -226,10 +231,13 @@ class ProviderRegistry:
     # ── 懒加载预热 ─────────────────────────────────────────
 
     def ensure_loaded(self) -> None:
-        """确保服务商插件已加载（幂等）。
+        """确保服务商插件已加载（幂等 + 线程安全）。
 
-        启动早期任何读取入口都需先走本方法触发一次插件扫描；backend 的
-        显式 warmup 也会被本标志去重。
+        warmup 由 deferred 队列投递后台线程（register_async），与消费方并发：
+        跨线程已有加载者在跑时等它收尾再返回（不读到半成品）；同线程递归
+        （加载路径内经 get/names/all 回环）直接放行读当前已注册内容。
+        启动早期任何
+        读取入口都需先走本方法触发一次插件扫描；backend 的显式 warmup 也被去重。
         早期扫描可能整体空转（Settings 启停白名单尚未由 PluginManager
         补录新插件 → load_providers 全部跳过），此时不算完成，
         复位标志允许后续调用（如 backend warmup）重试。
@@ -239,20 +247,38 @@ class ProviderRegistry:
         with self._lock:
             if self._warmup_done:
                 return
-            self._warmup_done = True
+            if self._loading:
+                if self._loading_thread == threading.get_ident():
+                    # 同线程递归：加载路径内调 get/names/all 回环到本方法。
+                    # 等自己必死锁，放行读当前已注册内容（旧「先置位后加载」语义）
+                    return
+                wait_event = self._load_done
+            else:
+                self._loading = True
+                self._loading_thread = threading.get_ident()
+                self._load_done.clear()
+                wait_event = None
+        if wait_event is not None:
+            # 加载方 finally 必 set；超时上限防极端慢 import 挂死调用线程，
+            # 超时后本次读到部分数据，下次调用自动重试
+            wait_event.wait(timeout=60.0)
+            return
         try:
             from app.plugins.loaders.provider_loader import warmup_providers
 
             loaded = warmup_providers()
-            if not any(loaded.values()):
-                # 零注册 ≠ 正常完成：多为白名单未就绪的早期空转，允许重试
-                # （load_providers 同名保护幂等，重复扫描无副作用）
+            if any(loaded.values()):
                 with self._lock:
-                    self._warmup_done = False
+                    self._warmup_done = True
+            # 零注册 ≠ 正常完成：多为白名单未就绪的早期空转，允许重试
+            # （load_providers 同名保护幂等，重复扫描无副作用）
         except Exception as e:
             logger.warning(f"[ProviderRegistry] 服务商插件懒加载失败: {e}")
+        finally:
+            self._load_done.set()
             with self._lock:
-                self._warmup_done = False  # 失败允许下次重试
+                self._loading = False
+                self._loading_thread = None
 
     # ── 注册 / 查询 ─────────────────────────────────────────
 

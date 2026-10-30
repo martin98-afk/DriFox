@@ -178,36 +178,35 @@ def test_declared_vision_beats_models_dev(monkeypatch):
 
 
 def test_model_caps_uses_resolve_chain(monkeypatch):
-    """_model_caps 走 resolve_model_capabilities（声明层 L0），不是裸 get_model_capabilities"""
+    """_model_caps 走 resolve_capabilities_for_model（含 ModelOverrides 声明层）"""
+    import app.core.modelmeta.model_capabilities as mc
     import app.plugins.capabilities.providers.model_meta as mm
 
     seen = {}
 
-    def _fake_resolve(llm_config):
-        seen.update(llm_config)
-        # 模拟用户在模型参数卡显式声明「支持图像」
+    def _fake_resolve(model, provider="", sources=None):
+        seen["model"] = model
+        seen["provider"] = provider
+        # 模拟用户在能力面板显式声明「支持图像」
         return {"supports_vision": True, "supports_thinking": False, "context_limit": 4096}
 
-    from app.plugins import sdk as sdk_mod
-
-    monkeypatch.setattr(sdk_mod, "resolve_model_capabilities", _fake_resolve, raising=False)
+    monkeypatch.setattr(mc, "resolve_capabilities_for_model", _fake_resolve, raising=False)
     caps = mm._model_caps("gw-model", "gw-provider")
     assert caps["supports_vision"] is True
     assert caps["context_limit"] == 4096
-    assert seen.get("模型名称") == "gw-model"
-    assert seen.get("provider_name") == "gw-provider"
+    assert seen.get("model") == "gw-model"
+    assert seen.get("provider") == "gw-provider"
 
 
 def test_model_caps_tolerates_failure(monkeypatch):
     """能力查询异常不应中断枚举（降级为全 False 而非抛出）"""
+    import app.core.modelmeta.model_capabilities as mc
     import app.plugins.capabilities.providers.model_meta as mm
 
-    def _boom(_llm_config):
+    def _boom(model, provider="", sources=None):
         raise RuntimeError("models.dev 不可用")
 
-    from app.plugins import sdk as sdk_mod
-
-    monkeypatch.setattr(sdk_mod, "resolve_model_capabilities", _boom, raising=False)
+    monkeypatch.setattr(mc, "resolve_capabilities_for_model", _boom, raising=False)
     caps = mm._model_caps("x", "y")
     assert caps == {
         "supports_vision": False,

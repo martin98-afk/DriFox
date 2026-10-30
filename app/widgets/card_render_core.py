@@ -16,7 +16,7 @@ import threading
 from collections import OrderedDict
 from functools import lru_cache
 from html import escape, unescape
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 import orjson as json
 from loguru import logger
 from markdown import Markdown
@@ -426,6 +426,21 @@ FINISH_HEIGHT_ANIM_MS = Animations.ENTER_MS  # 与 JS 侧 FLIP 时长 220ms 对�
 FINISH_HEIGHT_ANIM_MIN_DELTA = 16  # 小于该变化不值得动画（避免噪声抖动；16≈一行正文，60px 会放过结束态的行级收敛）
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
+
+# ======== 结束态坞态折叠：上报节流 / 终渲染串行 / 高度快跟随 ========
+# 现象：流式结束时工具区「瞬收」、卡片底部先冒空白再慢慢收回。
+# 成因三件：
+#   ① 折叠过渡与终渲染同帧派发，终渲染的渲染进程长任务（长内容实测
+#      0.7~2.1s）把 200ms 的 max-height 过渡连同高度上报一起压住，任务结束
+#      时过渡按时间戳直接跳到终值（无过程），上报才发出；
+#   ② 那一刻内容已短了工具区高度，卡片高度还是旧值 → 底部露空白；
+#   ③ Qt 侧 FINISH 态追踪 factor 0.178@50ms（τ≈255ms）追 264px 要 ~1s。
+# 对策：过渡期间按 TOOL_SECTION_REPORT_MS 节流上报中间高度（与 Qt 追踪同拍），
+# 终渲染延后到 DOCK_COLLAPSE_SETTLE_MS 之后派发，折叠后
+# DOCK_COLLAPSE_TRACK_WINDOW_S 内用流式口径 factor 快跟随。
+TOOL_SECTION_REPORT_MS = 50
+DOCK_COLLAPSE_SETTLE_MS = 280  # 200ms 过渡 + 260ms 兜底上报 + 余量
+DOCK_COLLAPSE_TRACK_WINDOW_S = 0.5
 
 # ======== 流式期「坞态预算」高度上限（起步跳变兜底）========
 # [T44] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
@@ -1069,17 +1084,22 @@ def _get_think_block_styles() -> str:
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
 
 
-def _get_think_preview(content: str, max_length: int = 160) -> str:
-    """智能生成思考内容折叠框的预览文本
+# 预览采样目标长度：未达此值则继续拼接下一句（上限仍是 max_length）
+_PREVIEW_TARGET_LEN: int = 60
+# 结论标记之后的正文最小长度：短于此说明标记紧贴文末，不构成摘要，退回开头采样
+_PREVIEW_MIN_CONCLUSION_BODY: int = 8
 
-    新策略（结论优先）：
-      1. 检测结论标记 → 优先展示结论后的内容
-      2. 无结论时三段式采样：
-         - 首句（跳过过短 <10 字的）
-         - 中间代表性句（~40% 位置）
-         - 尾句（往往含总结性内容）
-      3. 保证最少 40 字，不够时向后扩展
-      4. 未到文本结尾时追加省略号
+
+def _get_think_preview(content: str, max_length: int = 160) -> str:
+    """生成思考内容折叠框的预览文本
+
+    策略（连贯优先）：
+      1. 结论标记 → 展示从该标记起的连续内容（取文中**最早**出现的标记）
+      2. 无结论（或结论片段过短）→ 从开头取连续句，拼到 60 字或 max_length 为止
+      3. 末尾未覆盖全文时追加省略号
+
+    刻意不做跳跃采样：预览是单行 ellipsis 显示，中间插 " ... " 的三段式
+    采样读起来是三句不相干的话，信息量低于等长的连续开头片段。
     """
     if not content:
         return ""
@@ -1088,73 +1108,59 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
     if not text:
         return ""
 
-    def _is_full(preview_len: int) -> bool:
-        """预览长度是否已覆盖完整内容（忽略空白、换行差异）"""
-        norm_text = len(text.replace(" ", "").replace("\n", ""))
-        return preview_len >= norm_text
-
-    # ── 策略1: 优先检测结论，展示结论内容 ──
-    for marker in _CONCLUSION_MARKERS:
-        idx = text.find(marker)
-        if idx != -1:
-            conclusion_text = text[idx:].replace("\n", " ").strip()
-            if len(conclusion_text) <= max_length:
-                return conclusion_text if _is_full(len(conclusion_text)) else conclusion_text + "..."
-            # 结论太长，截取到 max_length
-            for i in range(min(max_length, len(conclusion_text)), 0, -1):
-                if conclusion_text[i - 1] in "。！？.!?；;":
-                    return conclusion_text[:i]
-            return conclusion_text[:max_length] + "..."
-
-    # ── 策略2: 三段式采样 ──
-    # 展平文本
+    # 预览单行显示（CSS nowrap），换行塌成空格
     flat = text.replace("\n", " ")
+    norm_len = len(flat.replace(" ", ""))
 
-    # ── 检测是否英文为主（中文占比 < 30%） ──
-    cjk_count = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-    is_english_heavy = cjk_count < len(text) * 0.3
+    def _is_full(preview_len: int) -> bool:
+        """预览是否已覆盖完整内容（忽略空白、换行差异）"""
+        return preview_len >= norm_len
 
+    def _finish(preview: str) -> str:
+        """收尾：超长则从句边界回退截断，未覆盖全文则补省略号"""
+        if len(preview) > max_length:
+            for i in range(max_length, 0, -1):
+                if preview[i - 1] in "。！？.!?；;":
+                    preview = preview[:i]
+                    break
+            else:
+                preview = preview[:max_length]
+        return preview if _is_full(len(preview)) else preview + "..."
+
+    # ── 策略1: 结论优先（按文中最早出现的标记，而非 markers 元组顺序）──
+    best_idx = -1
+    best_marker = ""
+    for marker in _CONCLUSION_MARKERS:
+        idx = flat.find(marker)
+        if idx != -1 and (best_idx == -1 or idx < best_idx):
+            best_idx, best_marker = idx, marker
+    if best_idx != -1:
+        conclusion = flat[best_idx:].strip()
+        # 标记后必须有实质内容才认（排除「…最终。」这类紧贴文末的退化命中）
+        if len(conclusion) - len(best_marker) >= _PREVIEW_MIN_CONCLUSION_BODY:
+            return _finish(conclusion)
+
+    # ── 策略2: 从开头取连续句 ──
+    # 中文按句末标点切；英文为主时按「标点 + 空格 + 大写」切，避免 1. / U.S. / v2.5
+    # 被误判成句子边界
+    cjk_count = sum(1 for c in flat if "\u4e00" <= c <= "\u9fff")
+    is_english_heavy = cjk_count < len(flat) * 0.3
     if is_english_heavy:
-        # 英文为主的策略：按句尾标点+空格+大写字母分句
-        # 避免 1. / 2. / U.S. / v2.5 等被误判为句子边界
-        raw_sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", flat)
-        # 清理空串和过短片段（纯粹的数字编号如 "1." 直接丢弃）
-        raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) >= 4]
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", flat) if s.strip()]
     else:
-        raw_sentences: List[str] = []
+        sentences = []
         current = ""
         for ch in flat:
             current += ch
             if ch in "。！？.!?；;":
-                s = current.strip()
-                if s:
-                    raw_sentences.append(s)
+                if current.strip():
+                    sentences.append(current.strip())
                 current = ""
         if current.strip():
-            raw_sentences.append(current.strip())
-
-    # 合并连续短句（<8 字）到前一句或后一句
-    sentences: List[str] = []
-    buf = ""
-    for s in raw_sentences:
-        if not s:
-            continue
-        if len(s) < 8:
-            buf += s
-        else:
-            if buf:
-                sentences.append(buf + s)
-                buf = ""
-            else:
-                sentences.append(s)
-    if buf:
-        if sentences:
-            sentences[-1] += buf
-        else:
-            sentences.append(buf)
+            sentences.append(current.strip())
 
     if not sentences:
-        # 没有有效句子，回退到简单截断
+        # 无句边界（纯短语 / 列表式思考）：直接按字符截断
         if len(flat) <= max_length:
             return flat
         for i in range(max_length, 0, -1):
@@ -1162,263 +1168,16 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
                 return flat[:i].rstrip(" ，,、.") + "..."
         return flat[:max_length] + "..."
 
-    # 选首句 + 中间句(~40%) + 尾句（相邻句子直接拼接，不加 ...）
-    selected_indices: List[int] = []
-    n = len(sentences)
+    preview = ""
+    for s in sentences:
+        # 英文句子的分隔符（空格）已被 strip 吃掉，拼回来否则 "a.B" 粘连
+        preview += (s if not preview else (s if not is_english_heavy else " " + s))
+        if len(preview) >= _PREVIEW_TARGET_LEN or len(preview) >= max_length:
+            break
 
-    # 首句
-    selected_indices.append(0)
-
-    # 中间句（40% 位置，确保不与首尾重复）
-    mid_idx = max(1, int(n * 0.4))
-    if mid_idx < n - 1:  # 不在最后一句话
-        selected_indices.append(mid_idx)
-
-    # 尾句
-    last_idx = n - 1
-    if n > 1 and last_idx not in selected_indices:
-        selected_indices.append(last_idx)
-
-    # 按原始顺序排序
-    selected_indices.sort()
-
-    # 构建预览：相邻句子直接拼接，非相邻用 ...
-    preview_groups: List[str] = []
-    current_group = sentences[selected_indices[0]]
-    for i in range(1, len(selected_indices)):
-        idx = selected_indices[i]
-        prev_idx = selected_indices[i - 1]
-        if idx == prev_idx + 1:
-            # 与上一个句子相邻，直接拼接
-            current_group += sentences[idx]
-        else:
-            preview_groups.append(current_group)
-            current_group = sentences[idx]
-    preview_groups.append(current_group)
-
-    preview = " ... ".join(preview_groups)
-
-    # ── 保证最少 40 字 ──
-    if len(preview) < 40:
-        # 只有一句时直接展示全部（或截断到 max_length）
-        if n == 1:
-            full = sentences[0]
-            if len(full) <= max_length:
-                return full if _is_full(len(full)) else full + "..."
-            else:
-                preview = full[:max_length] + "..."
-        else:
-            # 向后扩展：直接取连续句子直到 ≥40 字（不插入 ...）
-            extended = ""
-            for s in sentences:
-                if len(extended) >= 40:
-                    break
-                extended += s
-            preview = extended
-
-    # 截断到 max_length
-    if len(preview) > max_length:
-        for i in range(max_length, 0, -1):
-            if preview[i - 1] in "。！？.!?；;":
-                preview = preview[:i]
-                break
-        else:
-            preview = preview[:max_length]
-
-    if _is_full(len(preview)):
-        return preview
-    return preview + "..."
+    return _finish(preview)
 
 
-# ── 思考折叠框标签分类系统（加权） ──
-# 标签定义：tag=显示名, priority=平局优先级, cn=中文模式, en=英文模式
-# 权重规则：短语(≥4中字/含空格)权值3, 3字权值2, 常见普通词权值0.5, 其他1
-_THINK_TAGS = [
-    {
-        "tag": "分析",
-        "priority": 3,
-        "cn": (
-            "问题出在",
-            "原因在于",
-            "关键问题",
-            "核心问题",
-            "需要分析",
-            "需要理解",
-            "需要考虑",
-            "问题",
-            "分析",
-            "理解",
-            "排查",
-        ),
-        "en": ("problem", "issue", "analyze", "understand", "root cause", "what went wrong", "why"),
-    },
-    {
-        "tag": "设计",
-        "priority": 2,
-        "cn": ("设计方案", "实现方案", "架构设计", "方案", "设计", "架构", "策略", "规划"),
-        "en": ("solution", "design", "approach", "strategy", "architecture", "plan to", "propose to"),
-    },
-    {
-        "tag": "探索",
-        "priority": 2,
-        "cn": (
-            "探索",
-            "研究",
-            "了解",
-            "学习",
-            "查阅",
-            "参考",
-            "知识",
-            "概念",
-            "原理",
-            "定义",
-            "资料",
-            "文献",
-            "查询",
-            "搜索",
-            "调查",
-        ),
-        "en": (
-            "explore",
-            "research",
-            "learn",
-            "study",
-            "concept",
-            "definition",
-            "principle",
-            "reference",
-            "knowledge",
-            "investigate",
-        ),
-    },
-    {
-        "tag": "验证",
-        "priority": 2,
-        "cn": (
-            "验证",
-            "测试",
-            "检测",
-            "调试",
-            "断言",
-            "校验",
-            "用例",
-            "覆盖",
-            "回归",
-            "边界条件",
-            "测试用例",
-            "单元测试",
-            "集成测试",
-        ),
-        "en": (
-            "test",
-            "verify",
-            "validate",
-            "debug",
-            "assert",
-            "coverage",
-            "regression",
-            "unit test",
-            "integration test",
-            "test case",
-        ),
-    },
-    {
-        "tag": "版本",
-        "priority": 3,
-        "cn": (
-            "版本控制",
-            "仓库",
-            "回滚",
-            "PR",
-            "rebase",
-            "stash",
-            "cherry-pick",
-            "git bisect",
-            "git blame",
-            "git log",
-        ),
-        "en": (
-            "rebase",
-            "cherry-pick",
-            "checkout",
-            "git bisect",
-            "git blame",
-            "git log",
-            "version control",
-            "source control",
-        ),
-    },
-    {
-        "tag": "实现",
-        "priority": 2,
-        "cn": ("具体实现", "代码片段", "接口定义", "类型定义", "模块结构", "类设计", "方法签名", "API设计"),
-        "en": (
-            "implement the",
-            "define the",
-            "interface",
-            "method signature",
-            "API design",
-            "class definition",
-            "module structure",
-        ),
-    },
-    {
-        "tag": "修复",
-        "priority": 2,
-        "cn": ("错误", "异常", "报错", "修复", "崩溃", "排查错误", "错误原因", "调试日志"),
-        "en": ("bug", "crash", "fix the", "broken", "stack trace", "traceback", "debugging the error"),
-    },
-    {
-        "tag": "优化",
-        "priority": 2,
-        "cn": ("性能", "优化", "速度", "效率", "延迟", "瓶颈"),
-        "en": ("performance", "optimize", "speed", "efficiency", "latency", "bottleneck", "slow"),
-    },
-    {
-        "tag": "安全",
-        "priority": 2,
-        "cn": ("安全", "权限", "漏洞", "风险", "加密", "认证"),
-        "en": ("security", "permission", "auth", "vulnerability", "encrypt", "risk", "compliance"),
-    },
-    {
-        "tag": "重构",
-        "priority": 2,
-        "cn": ("重构", "重写", "清理代码", "消除重复", "简化代码", "代码整理", "提取方法", "模块拆分", "内联函数"),
-        "en": ("refactor", "cleanup", "simplify", "extract method", "inline", "split into", "restructure"),
-    },
-    {
-        "tag": "配置",
-        "priority": 2,
-        "cn": (
-            "配置",
-            "参数设置",
-            "环境变量",
-            "开关",
-            "配置文件",
-            "config",
-            "设置项",
-            "调整参数",
-            "初始化配置",
-            "dotenv",
-        ),
-        "en": (
-            "configuration",
-            "env var",
-            "environment variable",
-            "setting",
-            "parameter",
-            "config file",
-            "dotenv",
-            ".env",
-        ),
-    },
-    {
-        "tag": "审查",
-        "priority": 2,
-        "cn": ("审查", "review代码", "代码检查", "风格检查", "lint", "代码质量", "检查规范", "静态分析"),
-        "en": ("code review", "lint", "code quality", "inspect", "check style", "static analysis"),
-    },
-]
 # 结论标记（中英文，优先级最高）
 _CONCLUSION_MARKERS = (
     "因此",
@@ -1443,163 +1202,6 @@ _CONCLUSION_MARKERS = (
     "i suggest",
     "so the answer",
 )
-# 常见高频词（权值0.5，避免误触）
-_COMMON_WORDS = frozenset(
-    (
-        "问题",
-        "分析",
-        "代码",
-        "方案",
-        "设计",
-        "安全",
-        "性能",
-        "实现",
-        "错误",
-        "优化",
-        "检查",
-        "考虑",
-        "需要",
-        "处理",
-        "解决",
-        "使用",
-        "支持",
-        "提供",
-        "操作",
-    )
-)
-
-
-def _pattern_weight(p: str, position: float = 0.5) -> float:
-    """计算模式的权重：越长越具体→权重越高，结尾区加权
-
-    Args:
-        p: 匹配到的模式字符串
-        position: 关键词在全文中的相对位置 (0.0=开头, 1.0=结尾)
-                  结尾 30% 区域 (≥0.7) 权重 ×1.5
-    """
-    base = 1.0
-
-    if " " in p:  # 多词短语（英文短语或中文带空格）
-        base = 3.0
-    else:
-        has_cjk = any("\u4e00" <= c <= "\u9fff" for c in p)
-        if has_cjk:
-            if len(p) >= 4:
-                base = 3.0
-            elif len(p) == 3:
-                base = 2.0
-            elif p in _COMMON_WORDS:
-                base = 0.5
-        else:
-            # 英文权重
-            if len(p) >= 6:
-                base = 2.0
-            elif len(p) >= 4:
-                base = 1.5
-
-    # 位置加权：结尾 30% 区域权重 ×1.5
-    if position >= 0.7:
-        base *= 1.5
-
-    return base
-
-
-def _classify_think_tag(content: str) -> str:
-    """对思考内容进行分类，返回预定义标签名，空=不显示
-
-    改进要点：
-    - 分析窗口扩展为前 1500 + 尾部 500（覆盖结论区）
-    - 位置加权：结尾 30% 区域关键词权重 ×1.5
-    - 排他性：同词命中多标签时权重减半
-    - 阈值 3.0（关键词已清洗，阈值可提高）
-    """
-    content = content.strip()
-    if not content:
-        return ""
-
-    # ── 扩展分析窗口：前 1500 + 尾部 500 ──
-    head = content[:1500]
-    tail = content[-500:] if len(content) > 1500 else ""
-    # 合并去重：尾部可能与前部重叠
-    if tail and len(content) > 1500:
-        window = head + "\n" + tail
-    else:
-        window = head
-    window_lower = window.lower()
-
-    # ── 结论优先检测（全文中搜索） ──
-    full_lower = content.lower()
-    for marker in _CONCLUSION_MARKERS:
-        if marker in content or marker in full_lower:
-            return "结论"
-
-    # ── 计算每个关键词在窗口中的最佳位置 ──
-    def _find_position(pattern: str, text: str, text_lower: str) -> float:
-        """返回关键词在文本中的相对位置 (0~1)，找不到返回 -1"""
-        if any("\u4e00" <= c <= "\u9fff" for c in pattern):
-            idx = text.find(pattern)
-        else:
-            idx = text_lower.find(pattern)
-        if idx == -1:
-            return -1.0
-        total = max(len(text), 1)
-        return idx / total
-
-    # ── 统计所有标签命中（用于排他性计算） ──
-    all_matches: Dict[str, List[tuple]] = {}  # pattern -> [(tag_index, position)]
-
-    for ti, tag_def in enumerate(_THINK_TAGS):
-        for p in tag_def["cn"]:
-            pos = _find_position(p, window, window_lower)
-            if pos >= 0:
-                if p not in all_matches:
-                    all_matches[p] = []
-                all_matches[p].append((ti, pos))
-        for p in tag_def["en"]:
-            pos = _find_position(p, window, window_lower)
-            if pos >= 0:
-                if p not in all_matches:
-                    all_matches[p] = []
-                all_matches[p].append((ti, pos))
-
-    # ── 计算排他性权重 ──
-    def _exclusivity_multiplier(pattern: str) -> float:
-        """同词被多个标签匹配时减半"""
-        tags_hit = all_matches.get(pattern, [])
-        unique_tags = len(set(t for t, _ in tags_hit))
-        return 0.5 if unique_tags > 1 else 1.0
-
-    # ── 标签加权计分（去重 + 排他性） ──
-    best_tag = ""
-    best_score = 0.0
-    best_priority = -1
-
-    for tag_def in _THINK_TAGS:
-        matches_cn = [(p, _find_position(p, window, window_lower)) for p in tag_def["cn"]]
-        matches_en = [(p, _find_position(p, window, window_lower)) for p in tag_def["en"]]
-        matches_cn = [(p, pos) for p, pos in matches_cn if pos >= 0]
-        matches_en = [(p, pos) for p, pos in matches_en if pos >= 0]
-        all_hits = matches_cn + matches_en
-
-        if not all_hits:
-            continue
-
-        # 去重：长模式优先，子串不计；每个关键词取最佳位置
-        uniq: Dict[str, float] = {}
-        for p, pos in sorted(all_hits, key=lambda x: len(x[0]), reverse=True):
-            if not any(p in u for u in uniq):
-                if p not in uniq or pos > uniq[p]:
-                    uniq[p] = pos
-
-        # 加权计分：权重 × 排他性
-        score = sum(_pattern_weight(p, position=pos) * _exclusivity_multiplier(p) for p, pos in uniq.items())
-
-        if score > best_score or (score == best_score and tag_def["priority"] > best_priority):
-            best_score = score
-            best_tag = tag_def["tag"]
-            best_priority = tag_def["priority"]
-
-    return best_tag if best_score >= 3.0 else ""
 
 
 _THINK_SNAKE_SIZE: int = scale_icon_size(12)
@@ -1812,10 +1414,8 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     _flip_attr = f' data-flip-key="think-{flip_idx}"' if flip_idx >= 0 else ""
     if completed:
         # ── 完成态 ──
-        tag = _classify_think_tag(content)
         think_icon = _get_think_icon_html()
-        bulb = f'<span class="think-bulb">{think_icon}</span>'
-        status_text = f"{bulb} {escape(tag)}" if tag else bulb
+        status_text = f'<span class="think-bulb">{think_icon}</span>'
         preview = _get_think_preview(content)
         font_style = _get_think_block_styles()
 
@@ -1836,8 +1436,11 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         content_escaped = escape(_strip_code_blocks(content))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+        # 预览文字单行省略：长预览不再折行撑高 summary 行（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; '
+            f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
+            f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
         )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
@@ -1852,16 +1455,15 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
-    # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
-    # 在消息正文中显得过粗过大。
+    # ── 流式态：无 spinner 头部行，直接展示实时思考文字（live 区）──
+    # live 区由 append_reasoning 节流推送增量文本（textNode append，不重建 DOM），
+    # 高度封顶不撑卡片，不触发外部滚动。文字为空时 CSS :empty 占位提示。
+    # 样式见 card_viewers.py 骨架 CSS。
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming"{_flip_attr} data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
-        {spinner_html}
-        <span>深度思考中...</span>
-    </span>
+    <div class="think-streaming-live" style="{font_style_inline}">
+        <div class="think-streaming-live-text"></div>
+    </div>
 </div>"""
 
 
@@ -1873,16 +1475,17 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     2. 不生成 block_key hash（节省计算）
     """
     if completed:
-        # ── 完成态：可折叠UI（图标标签 + 预览 + 可展开全文） ──
-        tag = _classify_think_tag(content)
+        # ── 完成态：可折叠UI（图标 + 预览 + 可展开全文） ──
         think_icon = _get_think_icon_html()
-        bulb = f'<span class="think-bulb">{think_icon}</span>'
-        status_text = f"{bulb} {escape(tag)}" if tag else bulb
+        status_text = f'<span class="think-bulb">{think_icon}</span>'
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
+        # 预览文字单行省略：与 _render_think_block 同款（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; '
+            f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
+            f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
         )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
@@ -1897,16 +1500,12 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
-    # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
-    # 在消息正文中显得过粗过大。
+    # ── 流式态：同 _render_think_block，直接展示实时思考文字 ──
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
-        {spinner_html}
-        <span>深度思考中...</span>
-    </span>
+    <div class="think-streaming-live" style="{font_style_inline}">
+        <div class="think-streaming-live-text"></div>
+    </div>
 </div>"""
 
 
@@ -2329,6 +1928,60 @@ def _last_para_break_outside_fence(md: str) -> int:
     return last
 
 
+# 图表 / 公式容器 id（内容指纹派生）：差量重复守卫的比对口径
+_CHART_CONTAINER_ID_RE = re.compile(r'id="((?:echart|mmd|ktx)-[0-9a-zA-Z_-]+)"')
+
+def _chart_ids_in(html: str) -> frozenset[str]:
+    """提取 HTML 内图表/公式容器 id 集合（差量重复守卫用）。
+
+    id 由内容 sha1 派生（`echart-<hash>` / `mmd-<hash>` / `ktx-<hash>` /
+    `echart-tool-<hash>`），内容相同即同 id。差量产物与稳定区已渲染产物
+    出现同 id 时，说明同一图表将在 DOM 里存在两份。
+    """
+    if not html or "id=" not in html:
+        return frozenset()
+    return frozenset(m.group(1) for m in _CHART_CONTAINER_ID_RE.finditer(html))
+
+def _last_closed_fence_end(md: str) -> int:
+    """最后一个**已闭合**代码 fence 的结束偏移（闭合行换行之后；无 → -1）。
+
+    用途：差量基线推进点下限。fence 是原子块——闭合即内容定型，渲染一次
+    就不该再作为"新闭合段"产出。
+
+    为什么必须越过它：`_last_para_break_outside_fence` 为保证推进点不落进
+    fence 内部，只能停在**最后一个 fence 外空行**。当 md 尾部正好是闭合
+    fence（`...\\n\\n````echarts ... ``` ``，fence 后暂无空行）时，该空行在
+    fence 起点之前 → 基线停在 fence 前 → 下一轮差量把**已渲染过的** fence
+    当新段再产出一遍：DOM 里旧图表节点（非增量节点，append 不会移除）与新
+    图表节点并存，用户可见「流式期间图表出现两遍，结束全量渲染才变一个」。
+    """
+    if "```" not in md and "~~~" not in md:
+        return -1
+    inside = False
+    marker = ""
+    last_end = -1
+    i = 0
+    n = len(md)
+    while i < n:
+        if i == 0 or md[i - 1] == "\n":
+            j = i
+            while j < n and md[j] in " \t":
+                j += 1
+            tok = md[j : j + 3]
+            if tok in ("```", "~~~"):
+                if not inside:
+                    inside = True
+                    marker = tok
+                elif tok == marker:
+                    inside = False
+                    # 闭合行可能带语言/说明后缀（```js），结束点取该行换行之后
+                    _eol = md.find("\n", j)
+                    last_end = (_eol + 1) if _eol != -1 else n
+                i = j + 3
+                continue
+        i += 1
+    return last_end
+
 def _last_closed_proto_tag_end(md: str) -> int:
     """最后一个**已闭合**协议标签（``</tool>`` / ``</think>``）结束之后的偏移（无 → -1）。
 
@@ -2366,7 +2019,11 @@ def _compute_stream_stable_len(md: str) -> int:
     _last_break = _last_para_break_outside_fence(md)
     _candidate = _last_break + 2 if _last_break != -1 else 0
     _proto_end = _last_closed_proto_tag_end(md)
-    return _proto_end if _proto_end > _candidate else _candidate
+    if _proto_end > _candidate:
+        _candidate = _proto_end
+    # 已闭合 fence 也是稳定区：不越过它 → 下一轮差量重复产出（图表两份）
+    _fence_end = _last_closed_fence_end(md)
+    return _fence_end if _fence_end > _candidate else _candidate
 
 
 # ── 方案 D：data-order 统一排序 ──────────────────────────────────
@@ -3822,7 +3479,32 @@ _SKELETON_CACHE_MAX = 48
 # 标题左右横线造成卡中卡双圆角 + 标题居中破阅读轴；改为去外框、标题左对齐正文轴、
 # 计数独立 pill（.ts-count）、#tool-content 左侧 1.5px 竖线缩进。旧骨架的标题
 # textContent 仍拼「· N 项」，须失效缓存避免新旧结构混用。
-_SKELETON_CACHE_VERSION = 62
+# _SKELETON_CACHE_VERSION +1（v64）：_updateToolSectionHeader 的自动展开加
+# window._streamingActive 守卫——流式结束的终渲染会再跑一次该函数，DOM 里残留的
+# data-streaming="true"（注入运行框未转型 / 思考块未正式化）会把同帧折叠好的工具区
+# 重新顶开；[T44] 工具区在正文上方，一收一放 = 正文上下抖动。旧骨架无守卫，须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v65）：_fillToolBody 空 html 分支清 lazyBody——
+# Python 反查源不可用时（cleanup 清 _markdown_text 后的窗口）回空 html，旧逻辑
+# 留着 lazyBody 无限重试空请求（请求→空→return，2s 兜底被 lazyLoading 删除杀死）
+# → 完成框点击永远展不开。清标记后下次点击走普通展开路径。旧骨架无此行为。
+# _SKELETON_CACHE_VERSION +1（v66）：_v2AfterPatch 紧凑模式搬移改「身份复用」——
+# 原实现每批把工具区搬入节点全删再从正文重放（活动块 live 尾态期间正文无协议卡 →
+# 工具区清空、正式化后又搬回），完成框/思考卡每批一删一加 → 内容与高度抖动、
+# 外层滚动条乱跳。旧骨架每批重建，必须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v67）：同身份搬移改「保壳换瓤」——v66 用 replaceChild
+# 换思考块，节点身份虽按 flip-key 复用但整块被替换，折叠态/展开 body 每批丢失，
+# 用户展开思考/工具卡后仍每批闪一次（2026-10-30 复测）。旧骨架须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v68）：patchBlocks 删除段捕获折叠态 + 已加载 body，
+# 插入后按稳定身份（flip-key / tool-call-id）回填并清 lazy-body——流式思考块 key
+# 含内容指纹、内容每涨一批就整块替换，新节点带默认折叠态与空 body，restore 走
+# 懒注入重请求（body 先清空再回灌），表现为展开的卡每批「折叠→展开」一次。
+# _SKELETON_CACHE_VERSION +1（v69）：折叠态/body 携带抽成 _carryCollapseState /
+# _restoreCarriedCollapse，patchBlocks 与 force_full 整页清空共用——后者清空两个
+# 容器后重建，新节点同样丢展开态与 body。旧骨架无这对函数，须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v70）：patchBlocks 插入锚点与搬移插入点改「按存活
+# wrapper 定位」——工具区末尾挂着 JS 注入的运行框（非 wrapper），原 append 兜底会把
+# 新块/搬入卡排到运行框之后，运行框看起来「跑到思考上面」，下一批又移回 = 位置跳。
+_SKELETON_CACHE_VERSION = 71
 
 
 def _js_literal(value) -> str:

@@ -138,10 +138,14 @@ class ModelItem(QWidget):
         note: str = "",
         name_width: int = None,
         parent=None,
+        caps_provider: str = "",
     ):
         super().__init__(parent)
         self.provider_name = provider_name
         self.model_name = model_name
+        # 能力查询 / 声明覆盖键用的 ProviderDef.name：provider_name 是 display_name
+        # （可含 " #2" 后缀、可为用户改过的名），拿它查插件层与 ModelOverrides 均落空
+        self._caps_provider = str(caps_provider or provider_name or "")
         self.is_active = is_active
         self._note = note
         self._name_width = name_width
@@ -153,10 +157,10 @@ class ModelItem(QWidget):
         self._setup_ui()
 
     def _get_caps(self):
-        """查询模型能力（thinking + vision；带 provider 走插件 per-model 层）"""
-        from app.core.modelmeta.model_capabilities import get_model_capabilities
+        """查询模型能力（声明层 + 自动链；带 provider 走插件 per-model 层）"""
+        from app.core.modelmeta.model_capabilities import resolve_capabilities_for_model
 
-        return get_model_capabilities(self.model_name, self.provider_name)
+        return resolve_capabilities_for_model(self.model_name, self._caps_provider)
 
     def _effort_values(self) -> list:
         """思考强度可选值（models.dev reasoning_effort values，如 ["high","max"]）"""
@@ -480,7 +484,15 @@ class ModelSelectorCardContent(QWidget):
             for model_name in filtered_models:
                 is_active = provider_name == current_provider and model_name == current_model
                 note = (model_notes or {}).get(model_name, "") if model_notes else ""
-                item = ModelItem(provider_name, model_name, is_active, note, name_width, self.content_widget)
+                item = ModelItem(
+                    provider_name,
+                    model_name,
+                    is_active,
+                    note,
+                    name_width,
+                    self.content_widget,
+                    caps_provider=name_map.get(provider_name, provider_name),
+                )
                 if is_active:
                     self._active_model_item = item
                 item.clicked.connect(self._on_model_clicked)

@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import List, Optional
 
 import orjson
+from loguru import logger
 
 
 class InputHistoryRepository:
@@ -78,18 +79,26 @@ class InputHistoryRepository:
             return result[0]
         return None
 
-    def get_all(self, limit: int = 50) -> List[dict]:
+    def get_all(self, limit: int = 50) -> Optional[List[dict]]:
         """获取最近的输入历史（最新在前）
 
         Returns:
             list[dict]: 每个元素含 ``text`` 和 ``attachments`` 键。
                         旧条目（无 attachments 列）自动返回空附件列表。
+            None: 查询失败（SQL 失败 / 连接异常）——区别于合法空历史的 []，
+                  调用方应保持现状待重试，不得当空数据覆盖。
         """
         success, result = self._db.execute_sql(
             f'SELECT content, attachments FROM {self.TABLE_NAME} ORDER BY id DESC LIMIT ?',
             (limit,)
         )
-        if success and result:
+        if not success:
+            # 查询失败 ≠ 空历史：返回 None 让调用方保持可重试（启动瞬时
+            # disk I/O error 曾被静默转成空列表，上下键历史直到用户发消息
+            # 才恢复）。
+            logger.warning(f"[InputHistoryRepository] get_all 查询失败: {result}")
+            return None
+        if result:
             entries = []
             for row in result:
                 text = row.get("content", "")

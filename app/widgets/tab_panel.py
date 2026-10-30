@@ -559,7 +559,10 @@ class TabItem(QFrame):
         self._icon_size = scale_icon_size(20)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 4, 4)
+        # 左右 2：选中/hover 块已改为贴 widget 缘（paintEvent），块内 pad = margin 2
+        # + 图标环位 3 = 5px（原 margin 8 + 内缩叠加达 9px，用户反馈过大）。
+        # 左 4 与系统插件行（uiPluginRow 行内 4）对齐的旧约定由块贴缘方案取代
+        layout.setContentsMargins(2, 4, 4, 4)
         layout.setSpacing(6)
 
         # 图标 — _TabProjectIcon 直接 QPainter 绘制圆角矩形+文字，与 _SquareAvatar 一致
@@ -1133,13 +1136,18 @@ class TabItem(QFrame):
 
         w, h = self.width(), self.height()
 
-        # ── 构建统一圆角路径（列表 8px 圆角 / 树行 6px，与节点头对齐 + 2px 内边距） ──
+        # ── 构建统一圆角路径（列表 8px 圆角 / 树行 6px）──
+        # 列表模式左右贴 widget 缘（右留 2 给滚动条）：原整体 2px 内缩叠加
+        # 行 margin + 图标环位，使选中块内左右 pad 达 9px（用户反馈过大）。
+        # 树行保留 2px 内缩：左侧有从属引导竖线，块贴边会盖线。
         # ★ 缓存：尺寸与树行化状态未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
         _key = (w, h, self._tree_row)
         if _key != self._cached_rect_key:
             self._cached_round_rect = _QPainterPath()
-            _radius = 6 if self._tree_row else 8
-            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, _radius, _radius)
+            if self._tree_row:
+                self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, 6, 6)
+            else:
+                self._cached_round_rect.addRoundedRect(0, 2, w - 2, h - 4, 8, 8)
             self._cached_rect_key = _key
         _round_rect = self._cached_round_rect
 
@@ -1718,9 +1726,9 @@ class TabPanel(QWidget):
     def _refresh_divider_styles(self):
         """主题/字体刷新入口：重刷面板内三条分隔线颜色（绝不在多线程调用）"""
         self._separator.setStyleSheet(self._divider_qss())
-        self._plugin_separator_2.setStyleSheet(self._divider_qss(4, 2))
+        self._plugin_separator_2.setStyleSheet(self._divider_qss(0, 2))
         if getattr(self, "_plugin_divider", None) is not None:
-            self._plugin_divider.setStyleSheet(self._divider_qss(4, 2))
+            self._plugin_divider.setStyleSheet(self._divider_qss(2, 2))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1812,8 +1820,10 @@ class TabPanel(QWidget):
         # ── 分隔线：UI 插件区域 ↔ 新建标签页 ──
         self._plugin_separator_2 = QFrame(self)
         self._plugin_separator_2.setFrameShape(QFrame.HLine)
-        # 线色随主题（见 _divider_qss 说明）：此处走运行时生成，refresh_style 重刷
-        self._plugin_separator_2.setStyleSheet(self._divider_qss(4, 2))
+        # 线色随主题（见 _divider_qss 说明）：此处走运行时生成，refresh_style 重刷。
+        # 上 0 下 2：折叠头自身底部 margin 5 + 卡片 QSS margin-bottom 4 已贡献 9px，
+        # 线再给 4 会叠加到 13px，与线下 8px 失衡（用户反馈间隔不均）
+        self._plugin_separator_2.setStyleSheet(self._divider_qss(0, 2))
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
@@ -1881,7 +1891,9 @@ class TabPanel(QWidget):
         self._list_widget = QWidget()
         self._list_widget.setStyleSheet("background: transparent;")
         self._list_layout = QVBoxLayout(self._list_widget)
-        self._list_layout.setContentsMargins(2, 0, 2, 0)
+        # 左 0：tab 行 hover/选中块左缘与上方菜单行对齐（都从 frame padding 6px 处起）；
+        # 原左 2 叠 frame 6 = 8px，用户感知「对话列表外部 pad 太多」。右 2 保留给滚动条
+        self._list_layout.setContentsMargins(0, 0, 2, 0)
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
@@ -1926,7 +1938,7 @@ class TabPanel(QWidget):
         self._tree_header = QWidget(self)
         self._tree_header.setStyleSheet("background: transparent;")
         _tree_header_layout = QHBoxLayout(self._tree_header)
-        _tree_header_layout.setContentsMargins(8, 2, 6, 2)
+        _tree_header_layout.setContentsMargins(6, 2, 6, 2)
         _tree_header_layout.setSpacing(4)
         self._tree_header_label = QLabel("工作区", self._tree_header)
         self._tree_header_label.setStyleSheet("background: transparent;")
@@ -2149,6 +2161,21 @@ class TabPanel(QWidget):
         system_infos = _sort_plugin_entries(system_infos, frozenset(pinned))
         custom_infos = _sort_plugin_entries(custom_infos)
         self._plugin_infos = system_infos + custom_infos
+
+        # [PERF] 数据签名短路：本方法被窗口 showEvent / 插件注册表变更 / pin
+        # 切换反复调用，而多数调用时插件数据并无变化。全量销毁重建 N 行实测
+        # 500ms+（每行一次 UIPluginRow 构造 + 多路信号连接 + deleteLater 排队）。
+        # 签名含分组与排序结果、pin 集合、图标路径，任一插件增删/改名/换图标/
+        # 改分组或 pin 变更都会改变签名 → 照旧走真重建。
+        signature = (
+            tuple(system_infos),
+            tuple(custom_infos),
+            tuple(sorted(pinned)),
+            tuple(self._plugin_icon_path(pm, entry[3]) for entry in system_infos + custom_infos),
+        )
+        if signature == getattr(self, "_ui_plugins_signature", None) and self._plugin_rows_alive():
+            return
+        self._ui_plugins_signature = signature
 
         # ── 系统插件区 ──
         while self._system_plugin_layout.count() > 0:
@@ -2504,6 +2531,31 @@ class TabPanel(QWidget):
             return QIcon(str(icon_path)) if icon_path else None
         except Exception:
             return None
+
+    @staticmethod
+    def _plugin_icon_path(plugin_manager, plugin_name: str):
+        """插件当前主题图标路径（refresh_ui_plugins 签名用，不构造 QIcon）"""
+        try:
+            plugin = plugin_manager.get_plugin(plugin_name)
+            icon_config = getattr(plugin, "icon_config", None) if plugin else None
+            if not icon_config:
+                return None
+            return str(icon_config.get("dark" if isDarkTheme() else "light") or "")
+        except Exception:
+            return None
+
+    def _plugin_rows_alive(self) -> bool:
+        """现有插件行控件是否仍存活
+
+        签名短路的前提是「上次构建的行还在」。父容器被销毁/行被外部
+        deleteLater 后再命中签名，会留下空白列表，故逐行做析构探测。
+        """
+        from PyQt5 import sip
+
+        rows = list(self._system_plugin_buttons) + list(self._custom_plugin_buttons)
+        if not rows:
+            return True
+        return not any(sip.isdeleted(row) for row in rows)
 
     def _on_ui_plugin_clicked(self, card_id: str):
         """在当前活动 Tab 中打开 UI 插件卡片"""
