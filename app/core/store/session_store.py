@@ -870,15 +870,20 @@ class SessionStore:
 
     def get_sessions_lightweight(
         self, limit: int = 100, offset: int = 0, project: Optional[str] = None
-    ) -> List[Dict]:
+    ) -> Optional[List[Dict]]:
         """获取会话轻量列表（不含 messages），启动时使用避免加载大量消息数据
 
         Args:
             project: 非空时只取该项目（首屏快速路径按项目过滤，走 SQL）
+
+        Returns:
+            成功返回列表（空库 = []）；存储不可用 / 查询失败返回 None（调用方
+            必须区分：把 None 当空列表会固化成「历史为空」，见 HistoryManager
+            懒加载重试契约）。
         """
         if self._session_repo:
             return self._session_repo.get_all_lightweight(limit, offset, project)
-        return []
+        return None
 
     def get_sessions_by_team_run_id(self, run_id: str) -> List[Dict]:
         """按团队 run_id 获取全部成员会话（轻量，不含 messages）。

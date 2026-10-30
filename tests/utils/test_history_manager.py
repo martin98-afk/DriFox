@@ -343,6 +343,68 @@ def test_save_cleared_session_invalidates_pending_save(monkeypatch, tmp_path):
     assert manager._pending_save_session_id is None
     assert manager._save_timer is None
 
+# ---------- 懒加载查询失败：不得把「查询失败」固化成「真的没有历史」（启动空列表根因） ----------
+
+def test_lazy_load_query_failure_keeps_retryable_state(monkeypatch, tmp_path):
+    """🔴 回归（2026-10-31 启动空历史）：启动瞬时 disk I/O error 时
+    get_all_lightweight 静默返回 [] → _ensure_history_loaded 把空列表当真实
+    数据固化 _history_loaded=True → 整个会话期历史列表为空，直到用户对话
+    触发 db 签名变化才恢复。修复后：失败返回 None，加载态保持未加载可重试，
+    且重试成功后必须置脏轻量缓存（失败窗口期已缓存空快照）。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1), _lightweight_session(2)])
+    manager._use_sqlite = True
+    manager._session_store = store
+
+    # 模拟瞬时磁盘故障：查询失败（store 层返回 None，非合法空列表）
+    monkeypatch.setattr(store, "get_sessions_lightweight", lambda limit=500: None)
+    result = manager.get_history_list()
+    assert manager._history_loaded is False, "查询失败不得固化已加载态（否则永不重试）"
+    assert result == [], "失败窗口期对外呈现空列表（不抛异常）"
+
+    # 磁盘恢复 → 下次读取自动重试加载全量
+    monkeypatch.setattr(
+        store, "get_sessions_lightweight", lambda limit=500: [dict(s) for s in store.sessions[:limit]]
+    )
+    result = manager.get_history_list()
+    assert manager._history_loaded is True, "恢复后重试应完成加载"
+    assert len(result) == 2, "重试成功后 UI 读取必须拿到全量（缓存已被置脏重建）"
+
+def test_lazy_load_success_marks_cache_dirty_for_later_readers(monkeypatch, tmp_path):
+    """空快照已入缓存后，懒加载成功必须置脏缓存，否则后续读取者命中陈旧空快照。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+
+    # 第一次：失败 → 空快照入缓存
+    monkeypatch.setattr(store, "get_sessions_lightweight", lambda limit=500: None)
+    manager.get_history_list()
+    assert manager._cached_lightweight.get(None) == []
+
+    # 第二次：成功 → 缓存必须重建而非命中空快照
+    monkeypatch.setattr(store, "get_sessions_lightweight", lambda limit=500: [dict(store.sessions[0])])
+    result = manager.get_history_list()
+    assert len(result) == 1, "加载成功后不得再返回缓存中的空快照"
+
+def test_reload_query_failure_keeps_memory_intact(monkeypatch, tmp_path):
+    """跨进程重载查询失败（返回 None）时不得把内存历史污染成 None。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+    manager._history_loaded = True
+    manager._history_sessions = [_lightweight_session(9)]
+    manager._db_signature_stored = (0.9,)
+    monkeypatch.setattr(manager, "_db_signature", lambda: (1.0, 2.0))
+    monkeypatch.setattr(store, "get_sessions_lightweight", lambda limit=500: None)
+
+    manager._reload_if_db_changed()
+
+    assert manager._history_sessions and manager._history_sessions[0]["session_id"] == "session-9", (
+        "重载失败必须保留内存现有数据（不得被 None 污染）"
+    )
+
 
 def test_save_cleared_session_returns_false_when_session_absent(monkeypatch, tmp_path):
     """会话不在内存记录中时跳过（返回 False），不得凭空造记录。"""

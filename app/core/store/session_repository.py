@@ -771,9 +771,15 @@ class SessionRepository:
         Args:
             project: 非空时只取该项目的会话（首屏快速路径用，走 SQL 过滤
                 避免先取全局再在内存里筛）。
+
+        Returns:
+            成功返回轻量列表（空库 = []）；查询失败（未初始化 / SQL 失败 /
+            异常）返回 None——调用方（HistoryManager 懒加载）据此保持未加载
+            态重试。不得把失败伪装成空列表：启动瞬时 disk I/O error 曾因此
+            把空列表固化成「已加载」，整个会话期历史列表为空。
         """
         if not self.is_initialized:
-            return []
+            return None
 
         try:
             # 🚀 只选轻量列表展示所需的字段，跳过 compaction_state/cache
@@ -799,10 +805,11 @@ class SessionRepository:
             )
             if success:
                 return [self._row_to_session_lightweight(row) for row in rows]
-            return []
+            logger.warning(f"[SessionRepository] get_all_lightweight SQL 失败: {rows}")
+            return None
         except Exception as e:
             logger.error(f"[SessionRepository] get_all_lightweight 异常: {e}")
-            return []
+            return None
 
     def get_system_prompt(self, session_id: str) -> str:
         """单列取 system_prompt（轻量列表不再 SELECT 该列后的按需回查入口）。

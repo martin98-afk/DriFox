@@ -814,7 +814,7 @@ class HistoryManager:
 
 
 
-    def _ensure_history_loaded(self):
+    def _ensure_history_loaded(self) -> bool:
         """懒加载历史会话数据（首次访问时从 SQLite 加载）
 
         🛡️ H1（T4-TOP8）：持 _history_load_lock 保护"检查-加载"原子性——
@@ -827,24 +827,37 @@ class HistoryManager:
           且赋值前条件判断（GIL 原子）——查询/检查期间外部（测试注入/
           主线程抢先）已置 True 或写入 _history_sessions 时以外部为准，
           不覆盖（消除 H1-R3 极端竞态窗口）
+
+        Returns:
+            True=已加载（含早已加载）；False=本次未能加载（查询失败/异常），
+            调用方可据此重试（预热线程用）。
         """
         if not self._use_sqlite:
-            return
+            return False
         loaded_now = False
         with self._history_load_lock:
             if self._history_loaded:
-                return
+                return True
             try:
                 sessions = self._session_store.get_sessions_lightweight(limit=self._history_limit)
+                if sessions is None:
+                    # 查询失败 ≠ 空库：保持未加载态，下次读取自动重试。把失败
+                    # 伪装成空列表会把空态固化成「已加载」（启动瞬时 disk I/O
+                    # error 曾因此让历史列表整个会话期为空，直到用户对话触发
+                    # db 签名变化才恢复）。
+                    logger.warning("[HistoryManager] 懒加载历史会话查询失败（存储层返回 None），保持未加载态待重试")
                 # 二次检查 + 条件赋值：查询期间外部可能已加载/注入，
                 # 以外部数据为准，不覆盖（GIL 内条件赋值原子）
-                if not self._history_loaded:
+                elif not self._history_loaded:
                     self._history_sessions = sessions
                     self._deduplicate_history_sessions()
                     self._migrate_if_needed()
                     self._history_loaded = True
                     # 记录初始变更签名，避免首次读取时误判为"外部变更"触发冗余重载
                     self._db_signature_stored = self._db_signature()
+                    # 置脏轻量缓存：失败窗口期可能已缓存空快照，不置脏会让
+                    # 后续读取者命中陈旧空列表
+                    self._mark_cache_dirty()
                     loaded_now = True
             except Exception as e:
                 logger.warning(f"[HistoryManager] 懒加载历史会话异常: {e}")
@@ -856,6 +869,7 @@ class HistoryManager:
                 self._history_load_signals.loaded.emit()
             except Exception:
                 pass
+        return loaded_now
 
     def _prewarm_history(self):
         """后台线程预热历史会话（T4-TOP8）：首次历史加载从主线程移到后台
@@ -887,9 +901,17 @@ class HistoryManager:
         if not self._use_sqlite:
             return
 
-        def _do_prewarm():
+        def _do_prewarm(attempt: int = 0):
             try:
-                self._ensure_history_loaded()
+                if self._ensure_history_loaded():
+                    return
+                # 预热窗口期查询失败（如启动瞬时 disk I/O error）：延迟重试，
+                # 避免用户首开历史面板撞上空列表；至多 2 次，运行期读取路径
+                # （get_history_list）天然继续兜底重试
+                if attempt < 2:
+                    retry = threading.Timer(5.0, lambda: _do_prewarm(attempt + 1))
+                    retry.daemon = True
+                    retry.start()
             except Exception as e:
                 logger.warning(f"[HistoryManager] 历史预热异常: {e}")
 
@@ -949,9 +971,14 @@ class HistoryManager:
 
         with self._history_load_lock:
             try:
-                self._history_sessions = self._session_store.get_sessions_lightweight(
+                sessions = self._session_store.get_sessions_lightweight(
                     limit=self._history_limit
                 )
+                if sessions is None:
+                    # 查询失败保留内存现有数据，不得把 _history_sessions 污染成 None
+                    logger.warning("[HistoryManager] 跨进程重载查询失败，保留内存现有数据")
+                    return
+                self._history_sessions = sessions
                 self._deduplicate_history_sessions()
                 self._migrate_if_needed()
                 self._history_loaded = True
@@ -975,7 +1002,8 @@ class HistoryManager:
         if not self._use_sqlite or self._session_store is None:
             return []
         try:
-            return self._session_store.get_sessions_lightweight(limit=limit, project=project)
+            rows = self._session_store.get_sessions_lightweight(limit=limit, project=project)
+            return rows if rows is not None else []
         except Exception as e:
             logger.warning(f"[HistoryManager] 快速取最近会话失败: {e}")
             return []
