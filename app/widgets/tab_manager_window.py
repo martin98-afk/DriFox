@@ -2694,6 +2694,18 @@ class TabManagerWindow(FramelessWindow):
 
         # Z 序：放到 parent 最底层
         label.lower()
+        # ★ 窗口区域：背景 label 必须垫在 _WindowBaseLayer **之上**。
+        # base layer 用不透明 CONTENT_BG 填充整窗（替代原 QSS 底色），
+        # label.lower() 会把它压到 base 之下 → 背景图/底色被完全盖住
+        # （实测 2026-10-30：窗口背景不显示，侧栏/对话区不受影响——
+        # 它们的背景 label 挂在各自 frame 上，与此层不同父，Z 序无关）。
+        if area == "window":
+            base = getattr(self, "_window_base_layer", None)
+            if base is not None:
+                try:
+                    base.stackUnder(label)
+                except RuntimeError:
+                    pass  # 底色层已销毁
         # 尺寸：撑满 parent
         label.setGeometry(parent_widget.rect())
         label.show()

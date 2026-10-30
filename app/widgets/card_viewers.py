@@ -3571,30 +3571,45 @@ class CodeWebViewer(QWebEngineView):
                     cursor: default;
                 }}
 
-                /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，圆角细边框与正文分区） */
+                /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，左对齐进程条形态）
+                   不套外框：外层消息卡本身已有边界，再叠一层圆角边框会形成「卡中卡」
+                   双圆角错位；分区感改由标题行 + #tool-content 左侧竖线承担。 */
                 /* ── 性能优化：contain: layout paint 让浏览器把此容器视为独立渲染作用域，
                    父布局变化不会让其子树重排 ── */
                 #tool-section {{
                     margin: 0 0 8px 0;
                     contain: layout paint;
-                    border: 1px solid var(--border);
-                    border-radius: 8px;
-                    padding: 2px 8px;
+                    border: none;
+                    padding: 0;
                 }}
                 #tool-separator {{
                     display: flex;
                     align-items: center;
-                    gap: 8px;
+                    gap: 6px;
                     font-size: 13px;
-                    color: var(--text-muted);
+                    font-weight: 600;
+                    color: var(--text-secondary);
                     user-select: none;
-                    padding: 2px 2px 6px 2px;
+                    padding: 5px 8px 5px 0;
                     cursor: pointer;
-                    border-radius: 4px;
-                    transition: background-color 120ms ease;
+                    border-radius: 7px;
+                    transition: background-color 120ms ease, color 120ms ease;
                 }}
                 #tool-separator:hover {{
-                    background: var(--panel-soft);
+                    background: var(--row-hover);
+                    color: var(--text);
+                }}
+                /* 计项药丸：与标题拆成独立 span，项数变化不再改写标题字符串
+                   （旧实现把「· N 项」拼进标题 textContent，1→10 项时整行重新量宽） */
+                #tool-separator .ts-count {{
+                    font-size: 10.5px;
+                    font-weight: 600;
+                    line-height: 1.5;
+                    padding: 0 6px;
+                    border-radius: 999px;
+                    background: var(--row-hover);
+                    color: var(--text-muted);
+                    font-variant-numeric: tabular-nums;
                 }}
                 /* 自绘 tooltip：hover 时在分隔条下方显示说明 */
                 #tool-separator {{
@@ -3602,9 +3617,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-separator-tooltip {{
                     position: absolute;
-                    left: 50%;
+                    left: 8px;
                     top: 100%;
-                    transform: translateX(-50%);
                     margin-top: 6px;
                     white-space: nowrap;
                     background: var(--panel, rgba(30,30,32,250));
@@ -3651,19 +3665,13 @@ class CodeWebViewer(QWebEngineView):
                 #tool-section[data-collapsed="true"] #tool-separator .chevron {{
                     transform: rotate(-90deg);
                 }}
-                #tool-separator::before,
-                #tool-separator::after {{
-                    content: '';
-                    flex: 1;
-                    height: 1px;
-                    background: var(--border);
-                    opacity: 0.6;
-                }}
                 #tool-separator .chevron {{
                     display: inline-block;
+                    width: 10px;
+                    text-align: center;
                     transition: transform 160ms ease;
-                    font-size: 9px;
-                    opacity: 0.7;
+                    font-size: 10px;
+                    opacity: 1;
                 }}
 
                 @keyframes _streamingPulse {{
@@ -3685,8 +3693,11 @@ class CodeWebViewer(QWebEngineView):
                     overflow-anchor: none;  /* 禁用 scroll anchoring，防止浏览器在 reorganizeContent 后调整 scrollTop 覆盖 JS 设置的滚底位置 */
                     background: transparent;
                     border: none;
-                    border-radius: 6px;
-                    padding: 2px 0 2px 4px;
+                    /* 左侧竖线承担分区：内容整体缩进到标题文字右侧，形成从属层级 */
+                    border-left: 1.5px solid var(--border);
+                    border-radius: 0;
+                    margin-left: 7px;
+                    padding: 1px 0 1px 11px;
                     /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
                     transition: max-height 200ms ease, opacity 160ms ease;
                 }}
@@ -3743,7 +3754,8 @@ class CodeWebViewer(QWebEngineView):
             <div id="tool-section" style="display: none;" data-collapsed="false">
               <div id="tool-separator" role="button" tabindex="0" aria-expanded="true">
                 <span class="chevron">▾</span>
-                <span>⚙ 工具与思考</span>
+                <span class="ts-label">工具与思考</span>
+                <span class="ts-count" style="display: none;"></span>
                 <span class="tool-separator-tooltip">点击折叠/展开工具与思考区</span>
               </div>
               <div id="tool-content"></div>
@@ -5414,9 +5426,11 @@ class CodeWebViewer(QWebEngineView):
                     var separator = document.getElementById('tool-separator');
                     if (!separator) return;
                     var total = toolContent ? toolContent.children.length : 0;
-                    var titleSpan = separator.querySelector(':scope > span:not(.chevron)');
-                    if (titleSpan) {{
-                        titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
+                    // 计数独立成 pill：标题字符串恒定，项数变化只改药丸内容与显隐
+                    var countEl = separator.querySelector(':scope > .ts-count');
+                    if (countEl) {{
+                        countEl.textContent = total > 0 ? total + ' 项' : '';
+                        countEl.style.display = total > 0 ? '' : 'none';
                     }}
                     // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
                     var _hasStreaming = document.querySelector('#tool-content [data-streaming="true"]');

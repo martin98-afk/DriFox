@@ -3818,7 +3818,11 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v61）：#tool-section 加圆角细边框围栏
 # （border var(--border) + radius 8 + padding 2x8），简洁模式下工具/思考区与正文
 # 视觉分区。旧骨架无边框，必须失效缓存。
-_SKELETON_CACHE_VERSION = 61
+# _SKELETON_CACHE_VERSION +1（v62）：[T45] 围栏改「左对齐进程条」——v61 的外框与
+# 标题左右横线造成卡中卡双圆角 + 标题居中破阅读轴；改为去外框、标题左对齐正文轴、
+# 计数独立 pill（.ts-count）、#tool-content 左侧 1.5px 竖线缩进。旧骨架的标题
+# textContent 仍拼「· N 项」，须失效缓存避免新旧结构混用。
+_SKELETON_CACHE_VERSION = 62
 
 
 def _js_literal(value) -> str:

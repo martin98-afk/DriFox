@@ -1909,8 +1909,11 @@ class ToolCardWidget(QFrame):
 
 # ── 「工具与思考」分区 + 任务列表面板 ─────────────────────────────
 class _SeparatorRow(QFrame):
-    """可点击折叠的分隔条（对照 WebEngine 版 tool-separator/todo-separator：
-    两侧细线 + 图标 + 标题 + 附加信息 + chevron）。"""
+    """可点击折叠的分隔条（对照 WebEngine 版 #tool-separator：左对齐进程条）。
+
+    形态与 web 版一致：chevron + 图标 + 标题左对齐 + 计数药丸，无两侧横线；
+    分区感由下方内容的左侧竖线承担（见 ToolSectionWidget）。
+    """
 
     clicked = pyqtSignal()
 
@@ -1918,17 +1921,8 @@ class _SeparatorRow(QFrame):
         super().__init__(parent)
         self.setCursor(Qt.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 3, 8, 3)
+        lay.setContentsMargins(2, 4, 8, 4)
         lay.setSpacing(6)
-
-        def _line() -> QFrame:
-            ln = QFrame(self)
-            ln.setFrameShape(QFrame.HLine)
-            ln.setStyleSheet(f"background:{Colors.ASSISTANT_CARD_MUTED}; border:none; max-height:1px;")
-            ln.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            ln.setFixedHeight(1)
-            ln.setMaximumHeight(1)
-            return ln
 
         self._chevron = QLabel("▾", self)
         label = QLabel(text, self)
@@ -1945,17 +1939,17 @@ class _SeparatorRow(QFrame):
         self._icon_label.setFixedSize(16, 16)
         self._icon_label.setAlignment(Qt.AlignCenter)
         self._icon_label.setStyleSheet("background:transparent;")
-        self._extra = QLabel("", self)
+        self._extra = QLabel("", self)  # 计数药丸（对齐 web 版 .ts-count）
         self._extra.setStyleSheet(
             f"{get_font_family_css()} color:{Colors.ASSISTANT_CARD_MUTED};"
-            f" font-size:{scale_font_size(11)}px; background:transparent;"
+            f" font-size:{scale_font_size(10)}px; font-weight:600;"
+            " background:rgba(127,127,127,0.11); border-radius:7px; padding:0 6px;"
         )
-        lay.addWidget(_line(), 1)  # 左侧细线（web ::before flex:1）
         for w in (self._chevron, self._icon_label, label, self._extra):
             lay.addWidget(w)
-        lay.addWidget(_line(), 1)  # 右侧细线（web ::after flex:1）
+        lay.addStretch(1)
         self.setStyleSheet(
-            "_SeparatorRow { background:rgba(127,127,127,0.04); border-radius:6px; padding:1px 4px; }"
+            "_SeparatorRow { background:transparent; border-radius:7px; }"
             "_SeparatorRow:hover { background:rgba(127,127,127,0.10); }"
         )
 
@@ -2055,15 +2049,10 @@ class ToolSectionWidget(QWidget):
         self._widgets: List[QWidget] = []
 
         root = QVBoxLayout(self)
-        # 边框围栏内呼吸空间：左 8px 对齐 WebEngine 版 #tool-section padding，
-        # 上下 4px 让圆角边框不贴分隔条/首末卡
-        root.setContentsMargins(8, 4, 8, 4)
+        # 无外框（对齐 WebEngine 版 #tool-section border:none）：分区感由标题行 +
+        # 内容区左侧竖线承担，避免与外层卡片再叠一层圆角边框
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(2)
-        # 圆角细边框围栏：与正文分区（对齐 WebEngine 版 #tool-section border），
-        # 中性灰低透明度，亮暗主题通吃
-        self.setStyleSheet(
-            "ToolSectionWidget { border:1px solid rgba(127,127,127,0.22); border-radius:8px; }"
-        )
         self._separator = _SeparatorRow("工具与思考", self, icon_name="工具")
         self._separator.clicked.connect(self.toggle)
         self._separator.set_collapsed(False)  # 默认展开：箭头 ▾，与 _collapsed=False 一致
@@ -2073,7 +2062,7 @@ class ToolSectionWidget(QWidget):
         # 默认展开：不限高（0 会让内容区完全不可见）
         self._content_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
         cv = QVBoxLayout(self._content_wrap)
-        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setContentsMargins(7, 0, 0, 0)  # 左侧留出竖线位置（对齐 web #tool-content margin-left）
         cv.setSpacing(2)
         # ── 卡片内滚容器：坞态限高的载体 ──
         self._cards_scroll = ScrollArea(self)
@@ -2082,7 +2071,8 @@ class ToolSectionWidget(QWidget):
         self._cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._cards_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._cards_scroll.setStyleSheet(
-            "QScrollArea { background:transparent; border:none; }\n" + get_unified_scrollbar_style(6)
+            "QScrollArea { background:transparent; border:none;"
+            " border-left:2px solid rgba(127,127,127,0.22); }\n" + get_unified_scrollbar_style(6)
         )
         self._cards_host = QWidget()
         self._cards_host.setStyleSheet("background:transparent;")
@@ -2090,7 +2080,7 @@ class ToolSectionWidget(QWidget):
         cv.addWidget(self._cards_scroll)
         # cards_layout 挂到 scroll 内部 host 上
         ch = QVBoxLayout(self._cards_host)
-        ch.setContentsMargins(0, 0, 4, 0)
+        ch.setContentsMargins(11, 1, 4, 1)
         ch.setSpacing(2)
         self._cards_layout = QVBoxLayout()
         self._cards_layout.setContentsMargins(0, 0, 0, 0)
@@ -2105,7 +2095,7 @@ class ToolSectionWidget(QWidget):
             self._cards_layout, self._widgets, self._keys, items, self._build, streaming
         )
         total = len(items)
-        self._separator.set_extra(f"· {total} 项" if total else "")
+        self._separator.set_extra(f"{total} 项" if total else "")
         if not self._collapsed and not self._content_wrap.isVisible():
             self._apply_expand_state()
         self.setVisible(bool(items))
