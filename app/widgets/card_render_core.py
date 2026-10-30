@@ -3907,7 +3907,14 @@ _SKELETON_CACHE_MAX = 48
 # 原实现每批把工具区搬入节点全删再从正文重放（活动块 live 尾态期间正文无协议卡 →
 # 工具区清空、正式化后又搬回），完成框/思考卡每批一删一加 → 内容与高度抖动、
 # 外层滚动条乱跳。旧骨架每批重建，必须失效缓存。
-_SKELETON_CACHE_VERSION = 66
+# _SKELETON_CACHE_VERSION +1（v67）：同身份搬移改「保壳换瓤」——v66 用 replaceChild
+# 换思考块，节点身份虽按 flip-key 复用但整块被替换，折叠态/展开 body 每批丢失，
+# 用户展开思考/工具卡后仍每批闪一次（2026-10-30 复测）。旧骨架须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v68）：patchBlocks 删除段捕获折叠态 + 已加载 body，
+# 插入后按稳定身份（flip-key / tool-call-id）回填并清 lazy-body——流式思考块 key
+# 含内容指纹、内容每涨一批就整块替换，新节点带默认折叠态与空 body，restore 走
+# 懒注入重请求（body 先清空再回灌），表现为展开的卡每批「折叠→展开」一次。
+_SKELETON_CACHE_VERSION = 68
 
 
 def _js_literal(value) -> str:

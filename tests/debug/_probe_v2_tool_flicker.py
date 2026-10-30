@@ -81,10 +81,19 @@ READ_STATE = """
       window.__probeSeq = (window.__probeSeq || 0) + 1;
       el.setAttribute('data-probe-id', String(window.__probeSeq));
     }
+    var inner = el.querySelector('.cm-collapsible');
+    if (!inner) inner = el.querySelector('.think-compact, .think-streaming, .tool-streaming-block');
     out.push({
       pid: el.getAttribute('data-probe-id'),
-      cls: String(el.className || '').slice(0, 24),
-      tid: (el.getAttribute('data-tool-call-id') || '').slice(0, 16),
+      cls: inner ? String(inner.className || '').slice(0, 24) : '',
+      tid: inner ? (inner.getAttribute('data-tool-call-id') || '').slice(0, 16) : '',
+      fk: inner ? (inner.getAttribute('data-flip-key') || '') : '',
+      exp: inner ? (inner.getAttribute('data-expanded') || '') : '',
+      lazy: inner ? (inner.getAttribute('data-lazy-body') || '') : '',
+      bodyLen: (function () {
+        var b = inner ? inner.querySelector('.cm-collapsible__body, .tool-block__body') : null;
+        return b ? (b.innerHTML || '').length : -1;
+      })(),
       h: Math.round(el.getBoundingClientRect().height)
     });
   }
@@ -98,7 +107,7 @@ READ_STATE = """
 })()
 """
 
-THINK = "<think>\n这是一段已完成的思考内容，长度固定。\n</think>\n\n"
+THINK = "<think>\n这是一段思考内容，随批次增长{idx}。\n</think>\n\n"
 PROTO = (
     "<tool>\n"
     "name: bash\n"
@@ -110,6 +119,18 @@ PROTO = (
 )
 TAIL = "工具/思考之后模型继续输出的正文段落{idx}，用来驱动每批渲染。"
 
+EXPAND = """
+(function () {
+  var b = document.querySelector('#tool-content .think-block')
+       || document.querySelector('#tool-content .tool-block[data-tool-call-id="call_probe_1"]');
+  if (!b) return 'no-block';
+  b.setAttribute('data-expanded', 'true');
+  var body = b.querySelector('.cm-collapsible__body, .tool-block__body');
+  if (body) body.innerHTML = '<pre>展开后的内容，模拟用户已展开并加载 body</pre>';
+  return 'expanded:' + String(b.className || '').slice(0, 20);
+})()
+"""
+
 
 def main() -> None:
     from app.core.conversation.message_content import content_to_markdown
@@ -120,7 +141,19 @@ def main() -> None:
 
     card = MessageCard(role="assistant")
     card.resize(760, 520)
-    card._content_data = [{"type": "text", "text": "开始。" + THINK + PROTO + TAIL.format(idx=0)}]
+    tool_block = {
+        "type": "tool_result",
+        "tool_call_id": "call_probe_1",
+        "name": "bash",
+        "arguments": {"command": "echo hi"},
+        "content": "hi\n" * 20,
+        "success": True,
+    }
+    card._content_data = [
+        {"type": "reasoning", "content": "初始思考内容。"},
+        tool_block,
+        {"type": "text", "text": TAIL.format(idx=0)},
+    ]
     card._streaming = True
     card.show()
     card.ensure_rendered()
@@ -145,10 +178,16 @@ def main() -> None:
 
     js(INSTALL_MUT)
     print(f"[init] {js(READ_STATE)}")
+    print(f"[expand] {js(EXPAND)}")
+    spin(0.4)
+    print(f"[expanded] {js(READ_STATE)}")
 
     def render_batch(idx: int, label: str):
-        text = "开始。" + THINK + PROTO + TAIL.format(idx=idx)
-        card._content_data = [{"type": "text", "text": text}]
+        card._content_data = [
+            {"type": "reasoning", "content": "初始思考内容。" + ("追加思考" * idx)},
+            tool_block,
+            {"type": "text", "text": TAIL.format(idx=idx)},
+        ]
         viewer._markdown_text = content_to_markdown(card._content_data)
         viewer._needs_full_render = False
         # 模拟安全边界正式化：活动块整块重渲（协议卡重新产出）

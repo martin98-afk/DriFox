@@ -60,6 +60,21 @@ def test_after_patch_cleanup_only_when_not_streaming():
     assert "window._streamingActive !== true" in body, "搬入节点清理必须以非流式终态为条件"
 
 
+def test_same_identity_updates_in_place():
+    """同身份必须原地更新内容，禁止整块替换（折叠态 / 展开 body 会随之丢失）
+
+    2026-10-30 实测：首版修复用 replaceChild 换思考块 → 思考卡每批被销毁重建，
+    用户展开后看思考/工具内容时每批闪一次。改为「保壳换瓤」：节点身份不动，
+    think-compact 原地换文本，折叠框换 innerHTML 后回填展开态与已加载 body。
+    """
+    body = _after_patch_block()
+    assert "replaceChild(sEl" not in body, "同身份禁止 replaceChild 整块替换"
+    assert "cur.textContent = sEl.textContent" in body or "cur.innerHTML = sEl.innerHTML" in body, (
+        "同身份内容变化应原地更新"
+    )
+    assert "data-expanded" in body, "折叠框更新后必回填展开态"
+
+
 def test_skeleton_cache_version_bumped_for_move_identity():
     """改 _v2AfterPatch 行为必须递增骨架缓存版本（v66）"""
     assert _SKELETON_CACHE_VERSION >= 66, (

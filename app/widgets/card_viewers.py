@@ -5000,10 +5000,30 @@ class CodeWebViewer(QWebEngineView):
                     // 删除段：按已存在的 block 节点计（不是 children 下标）。
                     // 删除前 dispose 块内 echarts 实例：节点移除后实例不可达，
                     // ResizeObserver + canvas 常驻 → 流式长会话累积泄漏（OOM 白屏）。
+                    // 🐛 折叠态 + 已加载 body 迁移（2026-10-30 用户实测「展开后又重新
+                    // 折叠展开」）：流式思考块的 key 含内容指纹，内容每涨一批就整块
+                    // 替换；新节点带默认折叠态与空的 lazy body → restoreCollapsibleStates
+                    // 走懒注入重请求（body 先清空再回灌）→ 展开的卡每批「折叠→展开」
+                    // 一次。按稳定身份（data-flip-key / data-tool-call-id）把展开态与
+                    // body HTML 带到新节点，插入 DOM 时即终态，过程中无折叠过渡。
+                    var carried = {{}};
                     for (var i = 0; i < del; i++) {{
                         var victim = nodes[base + i];
                         if (victim && victim.parentNode) {{
-                            if (victim.querySelectorAll && typeof window._disposeChartNode === 'function') {{
+                            if (victim.querySelectorAll) {{
+                                var _cbs = victim.querySelectorAll('.cm-collapsible');
+                                for (var ci = 0; ci < _cbs.length; ci++) {{
+                                    var _cb = _cbs[ci];
+                                    var _ck = typeof _collapseKeyOf === 'function' ? _collapseKeyOf(_cb) : '';
+                                    if (!_ck) continue;
+                                    var _cbody = _cb.querySelector('.cm-collapsible__body');
+                                    carried[_ck] = {{
+                                        exp: _cb.getAttribute('data-expanded') === 'true',
+                                        html: _cbody ? (_cbody.innerHTML || '') : ''
+                                    }};
+                                }}
+                            }}
+                            if (typeof window._disposeChartNode === 'function') {{
                                 var _olds = victim.querySelectorAll('.echarts-container');
                                 for (var oi = 0; oi < _olds.length; oi++) window._disposeChartNode(_olds[oi]);
                             }}
@@ -5056,6 +5076,33 @@ class CodeWebViewer(QWebEngineView):
                     if (made.length && typeof renderWidgetToolbars === 'function') renderWidgetToolbars(made);
                     if (made.length && typeof window._runFenceAssets === 'function') window._runFenceAssets(made);
                     if (made.length && typeof window._initWidgets === 'function') window._initWidgets(made);
+                    // 折叠态 / body 回填（必须在 restoreCollapsibleStates 之前：回填后
+                    // data-expanded 已是 true 且已清 lazy-body 标记，restore 直接走终态分支，
+                    // 不会发起懒注入重请求把 body 清空重灌）
+                    if (made.length) {{
+                        var _newCbs = [];
+                        for (var mi2 = 0; mi2 < made.length; mi2++) {{
+                            var _found = made[mi2].querySelectorAll
+                                ? made[mi2].querySelectorAll('.cm-collapsible') : [];
+                            for (var ni2 = 0; ni2 < _found.length; ni2++) _newCbs.push(_found[ni2]);
+                        }}
+                        for (var ei = 0; ei < _newCbs.length; ei++) {{
+                            var _nb2 = _newCbs[ei];
+                            var _nk2 = typeof _collapseKeyOf === 'function' ? _collapseKeyOf(_nb2) : '';
+                            var _st = _nk2 ? carried[_nk2] : null;
+                            if (!_st) continue;
+                            if (typeof syncExpandedAttrs === 'function') syncExpandedAttrs(_nb2, !!_st.exp);
+                            var _nbody2 = _nb2.querySelector('.cm-collapsible__body');
+                            if (_nbody2 && _st.html) {{
+                                _nbody2.innerHTML = _st.html;
+                                _nbody2.style.height = _st.exp ? 'auto' : '0px';
+                                _nbody2.style.opacity = _st.exp ? '1' : '0';
+                                // 内容已随节点带过来：清懒加载标记，restore 的懒注入分支
+                                // 不会再清空重灌（否则一次可见的塌陷-回弹）
+                                _nb2.removeAttribute('data-lazy-body');
+                            }}
+                        }}
+                    }}
                     if (made.length && typeof restoreCollapsibleStates === 'function') restoreCollapsibleStates(made);
                     if (_v2fz) requestAnimationFrame(function () {{ var _e = document.getElementById('_fz'); if (_e) _e.remove(); }});
                     if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 30);
@@ -5301,15 +5348,30 @@ class CodeWebViewer(QWebEngineView):
                                     seen[sk] = true;
                                     var cur = existing[sk];
                                     if (cur) {{
-                                        // 同身份已存在：工具块内容固定 → 丢新副本保旧节点（不闪）；
-                                        // 思考块内容会增长（流式）→ 新副本原位替换旧节点
+                                        // 同身份：保留节点外壳，只同步变化的内容。
+                                        // 旧实现在此 replaceChild 整块替换 → 思考卡每批销毁重建，
+                                        // 用户展开的思考/工具卡每批闪一次（2026-10-30 实测
+                                        // 「工具与思考里面展开还是会闪烁」）。折叠态、展开 body、
+                                        // 滚动位置都挂在外壳/子节点上，整块替换必然丢。
                                         if ((sEl.textContent || '').length > (cur.textContent || '').length) {{
-                                            sEl.setAttribute('data-moved', '1');
-                                            if (cur.parentNode) cur.parentNode.replaceChild(sEl, cur);
-                                            existing[sk] = sEl;
-                                        }} else if (sEl.parentNode) {{
-                                            sEl.parentNode.removeChild(sEl);
+                                            if (cur.classList && cur.classList.contains('think-compact')) {{
+                                                // 简洁模式思考纯文本行：无折叠结构，原地换文本
+                                                cur.textContent = sEl.textContent;
+                                            }} else {{
+                                                var _exp = cur.getAttribute('data-expanded');
+                                                var _oldBody = cur.querySelector('.cm-collapsible__body, .tool-block__body');
+                                                var _oldBodyHTML = _oldBody ? _oldBody.innerHTML : '';
+                                                cur.innerHTML = sEl.innerHTML;
+                                                if (_exp !== null) {{
+                                                    cur.setAttribute('data-expanded', _exp);
+                                                    var _sum = cur.querySelector('.cm-collapsible__summary');
+                                                    if (_sum) _sum.setAttribute('aria-expanded', _exp);
+                                                }}
+                                                var _newBody = cur.querySelector('.cm-collapsible__body, .tool-block__body');
+                                                if (_newBody && _oldBodyHTML) _newBody.innerHTML = _oldBodyHTML;
+                                            }}
                                         }}
+                                        if (sEl.parentNode) sEl.parentNode.removeChild(sEl);
                                         continue;
                                     }}
                                     tc.appendChild(sEl);
@@ -7529,8 +7591,13 @@ class CodeWebViewer(QWebEngineView):
         while p is not None:
             data = getattr(p, "_content_data", None)
             if data is not None:
-                if isinstance(data, list) and data and all(isinstance(b, dict) for b in data):
-                    return data
+                if isinstance(data, list):
+                    if not data:
+                        # 空块列表 = 暂无可渲染块（流式首帧前）。不能当成「无块源」：
+                        # 那会让调用点永久关闭 v2，整条消息退回 v1 全量重建。
+                        return []
+                    if all(isinstance(b, dict) for b in data):
+                        return data
                 return None
             parent_fn = getattr(p, "parent", None)
             p = parent_fn() if callable(parent_fn) else None
@@ -7689,8 +7756,17 @@ class CodeWebViewer(QWebEngineView):
             return True
 
         blocks = self._v2_blocks()
-        if not blocks:
+        if blocks is None:
+            # 无块源（用户消息 / 欢迎卡的纯文本 str）：交由调用方永久关闭 v2
             return False
+        if not blocks:
+            # 空块列表 = 暂无可渲染块（流式首帧前 _content_data 还是空 list）。
+            # 🐛 这里不能返回 False：调用点会把 False 当成「无块源」永久关闭 v2，
+            # 整条消息退回 v1 全量 innerHTML 路径 → 每批重建全部折叠框，用户展开
+            # 的思考/工具卡每批「折叠又展开」（2026-10-30 实测）。本批不渲染，
+            # 保持 v2 接管，下一批有块时正常走 patch。
+            self._final_render_pending = False
+            return True
 
         ctx = self._v2_render_ctx()
         # 不在 block key 里的 ctx 维度（lazy_body / heavy_caps / 主题 / 字体）变化时：
