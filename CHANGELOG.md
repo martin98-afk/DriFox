@@ -1,6 +1,36 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.13] - 2026-10-30
+
+自 v0.6.13-beta 以来的变更 | 提交数：30 · 文件变更：104 · +7993/-1865 | 贡献者：dingma, mading
+
+### ✨ 新功能 (New Features)
+- **流式渲染防重复与工具区自动展开守卫** (`201e4b6f` · `f9ea7bf6`): 工具区 auto-expand 增加流式活跃守卫；图表容器 ID 提取与稳定长度计算（`_compute_stream_stable_len`）改进，防止流式模式图表重复渲染，骨架缓存版本同步递增。
+- **v2 渲染折叠态滚动保持** (`68f35787` · `bdf11bb4`): 折叠状态滚动位置保持与稳定身份管理，卡片池复用/重建后滚动与折叠态不再漂移。
+- **插件热重载不击穿 prompt cache** (`e4936a62` · `3ba45e47` · `571492d9`): 工具 schema 会话级冻结；`PluginChanged` 以工具签名 diff 驱动工具快照失效；MCP 启停不再触发工具快照换代，保持前缀稳定。
+- **主线程看门狗与待办优先级指示** (`bb0e635e`): 新增 `MainThreadWatchdog` 监控主线程阻塞并抓栈定位；`InlineTodoPanel` 新增 StatusDot 优先级指示。
+- **模型能力声明层落地** (`01fa0f71` · `fead9ab9`): `model_capabilities` 能力声明层上线，主界面模型按钮与思考胶囊接入能力声明；模型列表编辑器支持能力编辑与 UI 改进。
+- **多 tab 活动主窗口解析与会话流式保护** (`59f62330`): 多 tab 下 active main widget 解析，会话管理增加流式保护。
+- **运行时组件异步注册与 HTTP 预热** (`36cf952f`): runtime 组件异步任务注册 + HTTP 预热，防止启动期 UI 冻结。
+- **延迟任务暂停/恢复** (`6333b35e` · `8929a8b3`): 延迟任务调度支持暂停与恢复，优化 UI 插件加载；工具调用 live text 渲染收尾。
+- **更新检查器支持 beta 渠道** (`79900d0e`): update checker 与 UI 设置新增 beta 更新通道支持。
+- **GC 策略与会话检索优化** (`dd41defd` · `928849a4`): 垃圾回收策略优化、回收间隔可调；会话检索增加项目过滤。
+- **主题刷新性能优化** (`4bf01de3` · `ff94e4f5`): 主题刷新引入循环追踪与条件更新，hover tooltip filter 定时器懒创建。
+- **SDK 新增 `card_container_surface_color`** (`ec6d8817`): SDK 暴露卡片容器表面色，HistoryPage 接入统一 UI 一致性。
+- **handoff 会话管理增强** (`15062162`): 会话接力能力处理与错误报告增强。
+- **文件预览测试与错误处理** (`e79c1009`): FilePreviewPage 新增文件成功加载与不支持格式的测试覆盖。
+- **工具区与 tab 布局对齐微调** (`799286db` · `eb68345c` · `ae84b2fd`): 按反馈调整 tab 布局边距与对齐；工具区进度条左对齐、去外框、计数 pill 独立。
+
+### ♻️ 代码重构 (Refactoring)
+- **流式 dock 行为更新** (`a34d7c91`): 更新流式停靠行为，移除冗余高度约束。
+- **CardContainer/SystemCardFrame 背景样式优化** (`d0b05388`): 背景样式绘制优化，降低重绘成本。
+- **代码结构可读性重构** (`16d3f2db`): 结构性重构提升可读性与可维护性。
+
+### 🐛 问题修复 (Bug Fixes)
+- **流式结束工具区瞬收与卡片底部空白** (`a84bfdbb`): 修复流式结束时工具区瞬间收起与卡片底部空白问题。
+- **tab 分隔线随主题刷新** (`78025f3a`): tab-panel 分隔线样式跟随主题变化刷新。
+
 ## [v0.6.13-beta] - 2026-10-29
 
 自 v0.6.12 以来的变更 | 提交数：31 · 文件变更：148 · +12321/-3414 | 贡献者：dingma, drifox-bot, mading, martin98-afk
