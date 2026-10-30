@@ -1461,15 +1461,14 @@ class ThinkCard(QFrame):
             self._refresh_title()
 
     def _refresh_title(self) -> None:
-        """完成态标题/预览：复刻 WebEngine 版分类标签(_classify_think_tag)+结论优先预览。"""
+        """完成态标题/预览：图标标题 + 结论优先预览（与 WebEngine 版一致）。"""
+        self._title_label.setText("深度思考")
         try:
-            from app.widgets.message_card import _classify_think_tag, _get_think_preview
+            from app.widgets.message_card import _get_think_preview
 
-            tag = _classify_think_tag(self._content) if self._content else ""
-            self._title_label.setText(tag or "深度思考")
             self._preview_label.setText(_get_think_preview(self._content) if self._content else "")
         except Exception:
-            self._title_label.setText("深度思考")
+            self._preview_label.setText("")
 
     def update_content(self, b: Dict[str, Any]) -> None:
         """流式原位更新（不重建控件）：正文文本 + 完成态标题/预览。"""

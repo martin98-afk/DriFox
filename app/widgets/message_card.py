@@ -167,7 +167,6 @@ from app.widgets.card_render_core import (
     STREAM_HEIGHT_TRACK_FAR_PX,
     STREAM_HEIGHT_TRACK_MAX_FACTOR,
     _THINK_SNAKE_SVG,
-    _classify_think_tag,
     _count_think_tool_prefix,
     _edit_tools,
     _extract_closed_segments,
@@ -5398,13 +5397,9 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
             self.viewer._render_timer.stop()
 
-        # Python 端预计算分类（与 _render_think_block 一致），保留图标 + 分类标签
-        tag = _classify_think_tag(content)
+        # Python 端预生成状态 HTML（与 _render_think_block 一致，仅图标）
         think_icon = _get_think_icon_html()
-        if tag:
-            status_html = f'<span class="think-bulb">{think_icon}</span> {escape(tag)}'
-        else:
-            status_html = f'<span class="think-bulb">{think_icon}</span>'
+        status_html = f'<span class="think-bulb">{think_icon}</span>'
         safe_status = json.dumps(status_html).decode("utf-8")
 
         # 预生成完成态折叠框 HTML（用于替换 .think-streaming 纯文本 div）
