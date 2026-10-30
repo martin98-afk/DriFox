@@ -187,16 +187,39 @@ class SystemCardFrame(QFrame):
     def content_layout(self):
         return self._content_layout
 
+    # ── 卡片表面自绘常量（与 CardStyles.floating 逐项等价）──
+    _SURFACE_ALPHA = 230
+    _SURFACE_RADIUS = CardStyles.FLOATING_RADIUS
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        """自绘卡片表面：CARD_BG alpha=230 + BORDER 1px + 10px 圆角
+
+        [PERF] 原实现把表面挂在 QSS 上（CardStyles.floating），主题一变串就变
+        → setStyleSheet 触发**整卡** repolish。离线基准（tests/_bench_settings_
+        popup_refresh.py，1216 控件）：切主题后单这一句 211.8ms，占该卡刷新
+        全程的 92%（整体 230ms）。改 paintEvent 自绘后主题切换只 update()，
+        与顶层容器 _ThemedPanel 同一手法。
+        观感等价：底色/BORDER 1px/圆角值与原 QSS 逐项相同。
+        """
+        from PyQt5.QtCore import QRectF
+        from PyQt5.QtGui import QPainter, QPen
+
+        from app.utils.design_tokens import _rgba_to_qcolor
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # 内缩 0.5px：1px 描边落在像素中心，避免抗锯齿把边框糊成 2px 虚边
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setBrush(_rgba_to_qcolor(Colors.CARD_BG.format(alpha=self._SURFACE_ALPHA)))
+        painter.setPen(QPen(_rgba_to_qcolor(Colors.BORDER), 1))
+        painter.drawRoundedRect(rect, self._SURFACE_RADIUS, self._SURFACE_RADIUS)
+
     # ── 样式 ──────────────────────────────────────────
 
     def _apply_base_style(self):
-        # Colors.refresh() 由调用方（refresh_style / _build_base_ui）确保已执行
-        # 表面规范与浮层卡同源（CardStyles.floating），alpha 沿用原本的 230。
-        # [PERF] 同串短路：setStyleSheet 会 repolish 本卡全子树（设置卡
-        # 1087 控件，实测单次 ~260ms）；同一张卡在同一刷新周期内可能被
-        # main_widget 5a 与 GlobalCardController 各刷一次（如设置弹窗），
-        # 第二次必须 0 成本。
-        set_style_sheet_if_changed(self, CardStyles.floating("SystemCardFrame", alpha=230))
+        # 表面已由 paintEvent 自绘（见 paintEvent 的 [PERF] 注释），
+        # 此处不再设 QSS —— 只标脏重绘，切主题零 repolish。
+        self.update()
 
     def _apply_content_surface(self):
         """内容层不透明实底（滚动 blit 前置条件）
@@ -247,6 +270,7 @@ class SystemCardFrame(QFrame):
 
         # ── 字体/图标 ──（[PERF] setFont 同字体短路：字体不变时 setFont 仍会
         # 走 fontChange + 布局失效重算，每张卡 3\u00d7 全量遍历时成本可观）
+        _TRC.timer_start("scf_fonts")
         _title_font = get_unified_font(12, True)
         if self.title_label.font() != _title_font:
             self.title_label.setFont(_title_font)
@@ -265,10 +289,13 @@ class SystemCardFrame(QFrame):
         _count_font = get_unified_font(10)
         if self._count_label.font() != _count_font:
             self._count_label.setFont(_count_font)
+        _TRC.timer_end("scf_fonts")
 
         # ── Tab 按钮样式 ──
+        _TRC.timer_start("scf_tabs")
         if hasattr(self, "_tab_buttons"):
             self._update_tab_styles()
+        _TRC.timer_end("scf_tabs")
 
         # ── 搜索框（直接刷新自身样式） ──
         if hasattr(self, "_search_input") and self._search_input is not None:
@@ -307,8 +334,10 @@ class SystemCardFrame(QFrame):
             )
 
         # ── 面包屑（颜色 token 随主题重建） ──
+        _TRC.timer_start("scf_breadcrumb")
         if hasattr(self, "_breadcrumb_items") and self._breadcrumb_items:
             self._apply_breadcrumb_styles()
+        _TRC.timer_end("scf_breadcrumb")
 
         # ── 内容区子控件递归刷新（SettingCard 等子卡片） ──
         _TRC.timer_start("scf_children")
@@ -320,8 +349,10 @@ class SystemCardFrame(QFrame):
         # repolish 整个滚动区子树（设置页单页 1400+ 控件，实测主题切换 1.6s 级）。
         # 主题变化影响的只有滚动条颜色；QScrollArea / 内容通明那几条规则是静态的，
         # 构造期已设过，无需重刷。
+        _TRC.timer_start("scf_scrollbar")
         if hasattr(self, "scroll_area") and getattr(self, "scroll_area", None) is not None:
             self._apply_scrollbar_style()
+        _TRC.timer_end("scf_scrollbar")
 
     def _apply_scrollbar_style(self) -> None:
         """只给两个滚动条控件设 QSS（同串短路，repolish 范围缩到滑条自身）"""
