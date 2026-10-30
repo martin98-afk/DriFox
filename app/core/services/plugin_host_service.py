@@ -1441,7 +1441,8 @@ class PluginHostService(QObject):
         if diff:
             context["diff"] = diff
             context["sub_actions"] = _sub_actions_from_diff(diff)
-            # 工具/MCP 签名真变了才失效各窗口工具快照（改实现不动 schema → 缓存不受影响）
+            # registry 工具签名真变了才失效各窗口工具快照（改实现不动 schema → 缓存不受影响；
+            # MCP 启停不参与，快照保持前缀稳定）
             try:
                 from app.core.hooks.hook_manager import invalidate_tools_snapshots_if_changed
 

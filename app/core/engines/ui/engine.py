@@ -452,10 +452,10 @@ class UIEngine(BaseEngine):
     def invalidate_tools_snapshot(self) -> None:
         """失效工具 schema 快照，下一次请求重建。
 
-        由 PluginChanged 的工具/MCP 签名 diff 驱动（见
+        由 PluginChanged 的工具签名 diff 驱动（见
         hook_manager.invalidate_tools_snapshots_if_changed）：判据是 description +
         parameters 的 hash，**不含实现代码**。所以改工具实现不触发换代，
-        prompt cache 照旧命中；改描述/参数、增删工具才换代。
+        prompt cache 照旧命中；改描述/参数、增删工具才换代。MCP 启停不换代。
         """
         snap = getattr(self, "_tools_snapshot", None)
         if snap is None:

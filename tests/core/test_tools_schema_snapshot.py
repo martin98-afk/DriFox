@@ -155,6 +155,23 @@ def test_plugin_diff_ignores_empty_changes():
     assert mgr.calls == 1
 
 
+def test_plugin_diff_ignores_mcp_changes(monkeypatch):
+    """MCP 启停不换代：前缀保持稳定，新工具需新会话才见到"""
+    from app.core.conversation.backend import ChatBackend
+    from app.core.hooks import hook_manager
+
+    mgr = _FakeAgentMgr([_tool("bash")])
+    engine = _engine(mgr)
+    backend = type("B", (), {"chat_engine": engine})()
+    monkeypatch.setattr(ChatBackend, "_active_instances", {backend}, raising=False)
+
+    engine.get_session_tools_schema("s1")
+    hook_manager.invalidate_tools_snapshots_if_changed({"mcp_added": ["github"], "mcp_removed": ["fs"]})
+    engine.get_session_tools_schema("s1")
+
+    assert mgr.calls == 1, "MCP 启停不得触发快照换代"
+
+
 def test_presend_worker_uses_tools_provider():
     """发送路径：_PreSendWorker 优先走注入的快照提供方，跳过自身聚合"""
     from unittest.mock import MagicMock
