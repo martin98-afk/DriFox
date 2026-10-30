@@ -834,6 +834,12 @@ def resolve_model_capabilities(
     # （如 MiniMax 系 "adaptive"），思考发送链（_apply_thinking）与 caps 同构消费
     if "thinking_enable_value" in caps and caps["thinking_enable_value"] not in (None, ""):
         out.setdefault("thinking_enable_value", caps["thinking_enable_value"])
+    # 展示性字段透传（cost / note 等）：本函数契约是「caps 同构 dict」，只返回六键
+    # 会让消费方（模型列表价格列 / 选择卡金额）整块变空
+    for key, value in caps.items():
+        if key in out or key in fields:
+            continue
+        out[key] = value
 
     # L3：family 能力（providers 插件按 family 聚合声明）
     if any(src.get(f) is None for f in fields):
@@ -857,6 +863,37 @@ def resolve_model_capabilities(
             src["context_limit"] = "default"
 
     return out
+
+
+def resolve_capabilities_for_model(
+    model: str,
+    provider: str = "",
+    sources: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """UI 展示统一入口：用户声明（ModelOverrides 六键）+ resolve 链合成。
+
+    展示点（服务商模型列表 / 模型选择卡 / 模型按钮 tooltip / 思考强度胶囊）
+    必须走本函数。只用 ``get_model_capabilities`` 会让用户在能力面板里声明的
+    多模态 / 思考 / 上下文「看起来没生效」（2026-10-30 用户实测）。
+
+    Args:
+        model: 模型名
+        provider: ``ProviderDef.name``（与 ModelOverrides 的键前缀一致）
+        sources: 可选输出参数，透传给 ``resolve_model_capabilities``
+    """
+    declared: Dict[str, Any] = {}
+    try:
+        # 延迟导入：model_declarations 顶层依赖本模块的六键表，避免循环 import
+        from app.core.modelmeta.model_declarations import read_declarations
+        from app.utils.config import Settings
+
+        overrides = Settings.llm_model_overrides.value or {}
+        declared = read_declarations(overrides, provider, model)
+    except Exception:
+        declared = {}
+    cfg: Dict[str, Any] = {"模型名称": model, "provider_name": provider}
+    cfg.update(declared)
+    return resolve_model_capabilities(cfg, provider, sources)
 
 
 def get_model_capability_sources(model: str, provider: str = "") -> Dict[str, str]:

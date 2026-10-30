@@ -52,7 +52,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 **上下文管理** — 8 层 tier cascade 降级链：图片剥离 → 去重 → 工具结果截断 → 超限落盘 → 参数截断 → 摘要化 → 尾保留 → LLM 压缩。阈值与开关全部可视化配置，Token 预算环形图实时反馈。
 
-**模型接入** — 12 家内置服务商：DeepSeek / 智谱 AI / 阿里云 DashScope / 百度千帆 / 火山方舟 / MiniMax / SiliconFlow / Google Gemini / GitHub Copilot / CodeBuddy / OpenCode Zen / OpenCode Go。Copilot 与 CodeBuddy 支持 OAuth 登录；任意 OpenAI 兼容端点可加为自定义服务商；模型元数据从 models.dev 动态同步；同名模型在不同服务商下的参数完全隔离。
+**模型接入** — 12 家内置服务商：DeepSeek / 智谱 AI / 阿里云 DashScope / 百度千帆 / 火山方舟 / MiniMax / SiliconFlow / Google Gemini / GitHub Copilot / CodeBuddy / OpenCode Zen / OpenCode Go。Copilot 与 CodeBuddy 支持 OAuth 登录；任意 OpenAI 兼容端点可加为自定义服务商；模型元数据从 models.dev 动态同步，服务商编辑卡的每个模型可手动声明多模态 / 思考开关 / 思考参数与强度 / 上下文长度 / 输出上限（声明优先于自动识别）；同名模型在不同服务商下的参数完全隔离。
 
 **MCP 系统** — 完整 Model Context Protocol 支持，含 OAuth 2.1 授权流（元数据发现 / PKCE / 动态客户端注册 / token 自动刷新），Notion 等需授权的服务一次登录即可使用；MCP 工具自动并入工具池。
 

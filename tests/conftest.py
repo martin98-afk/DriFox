@@ -93,6 +93,21 @@ def qapp(_setup_qt_attributes):
     app = QApplication.instance() or QApplication([])
     yield app
 
+@pytest.fixture(scope="session", autouse=True)
+def _qapp_keepalive(_setup_qt_attributes):
+    """QApplication 必须活到会话结束（autouse，先于各模块自建 _qapp 生效）。
+
+    多个测试模块自带 module 级 `_qapp`（`QApplication.instance() or QApplication()`）。
+    若本 fixture 不存在，模块结束后其返回值失去引用，QApplication 被 GC 销毁；
+    Settings 单例（QConfig）挂在 app 下会一起销毁，后续任何测试访问
+    `Settings.llm_*` 抛「wrapped C/C++ object of type QConfig has been deleted」
+    （2026-10-30 实测：test_capability_badges 之后 model_config_card 全崩）。
+    """
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
 
 @pytest.fixture()
 def log_capture():

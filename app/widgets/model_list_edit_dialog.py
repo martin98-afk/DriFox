@@ -12,11 +12,12 @@
 - 「设默认模型」语义退役：「模型名称」由保存链自动维护（见 provider_save_plan）。
 """
 
-from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QFrame,
+    QGraphicsOpacityEffect,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -25,7 +26,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import PushButton, SwitchButton
+from qfluentwidgets import FluentIcon, PushButton, SwitchButton, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css
@@ -41,8 +42,9 @@ _ROW_H = 46  # 行高：双行文本（名称 + 灰字摘要）+ 开关 + 底部
 _DEFER_ROW_THRESHOLD = 30  # 同步建行上限（阈值内行为与旧版一致，兼容测试同步断言）
 _ROW_BUILD_BATCH = 40  # 每拍建行数（~280ms/拍）
 # 表格列宽（行控件与表头共用）：价格/开关列固定；徽章列随字号缩放（_badges_col_width）
-_COL_PRICE_W = 76  # 单个价格列（右对齐）
+_COL_PRICE_W = 68  # 单个价格列（右对齐；$10.00 实测需 ~46px，余量给名称列）
 _COL_SWITCH_W = 68  # 开关列
+_BADGE_EDIT_BTN_W = 26  # 能力列尾部「编辑能力」按钮占宽
 _PRICE_NA = "-"  # models.dev 无价格占位（对齐 opencode 的空价列）
 
 
@@ -54,13 +56,14 @@ def _fmt_price(v) -> str:
 
 
 def _badges_col_width() -> int:
-    """能力徽章列宽：随系统字号缩放（三个文字 chip 最宽组合）。
+    """能力徽章列宽：随系统字号缩放（三个文字 chip 最宽组合 + 尾部编辑按钮）。
 
-    固定基准值在高字号档位下会截断 chip（用户实测「开关思考」被裁）。
-    估宽：11 个字 ×(11+delta) + 三 chip padding ≈36 + 间距/边距 ≈20，再留余量。
+    固定基准值在高字号档位下会截断 chip（用户实测「开关思考」被裁），
+    三 chip 齐全时（开关思考 + 思考强度 + 多模态）实测约 272px，故留足余量：
+    11 个字 ×(11+delta) + padding/间距 100 + 按钮 26。
     """
     delta = scale_font_size(11) - 11
-    return 11 * (11 + delta) + 56
+    return 11 * (11 + delta) + 100 + _BADGE_EDIT_BTN_W
 
 
 def _accent_rgba(alpha_pct: int) -> str:
@@ -68,6 +71,36 @@ def _accent_rgba(alpha_pct: int) -> str:
     color = QColor(Colors.SYSTEM_ACCENT)
     return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha_pct / 100:.2f})"
 
+
+class _ElidedLabel(QLabel):
+    """单行省略标签：长模型名不得溢出名称列盖到能力列上。
+
+    QLabel 默认 minimumSizeHint 取全文宽度，布局只能把它撑出边界（用户实测
+    长名与徽章叠字）。这里放宽压缩限制（Ignored + minimumWidth 0），并在
+    resize/字体变更时按可用宽度重算 elidedText。
+    """
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self._full_text = str(text or "")
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+
+    def set_full_text(self, text: str):
+        """换全文（模型名不变，保留接口供后续复用）"""
+        self._full_text = str(text or "")
+        self._apply_elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self):
+        """按当前字体与宽度截断；文本未变时不动（防 setText → 布局 → resize 递归）"""
+        metrics = self.fontMetrics()
+        elided = metrics.elidedText(self._full_text, Qt.ElideRight, max(self.width(), 0))
+        if elided != self.text():
+            self.setText(elided)
 
 class _RowSwitch(SwitchButton):
     """无文字间隔开关：qfw 的 SWITCH_BUTTON.qss 带 ``qproperty-spacing: 12``，
@@ -97,11 +130,13 @@ class _ModelRowWidget(QWidget):
         caps: dict,
         enabled: bool,
         on_toggle,  # Callable[[str, bool], None]
+        on_edit_caps=None,  # Callable[[str], None] | None
         parent=None,
     ):
         super().__init__(parent)
         self.model_name = str(name)
         self._on_toggle = on_toggle
+        self._on_edit_caps = on_edit_caps
         self._duplicate = False
         caps = caps or {}
 
@@ -117,29 +152,37 @@ class _ModelRowWidget(QWidget):
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(1)
-        self.name_label = QLabel(self.model_name, self)
+        self.name_label = _ElidedLabel(self.model_name, self)
         self.sub_label = QLabel(self._summary_text(caps), self)
         text_col.addWidget(self.name_label)
-        if self.sub_label.text():
-            text_col.addWidget(self.sub_label)
-        else:
-            self.sub_label.setVisible(False)
+        # 灰字行恒在布局里，空文本靠隐藏让位：能力声明编辑后可能从「无上下文」
+        # 变为「有上下文」，若初始未 addWidget，后续 setVisible(True) 不会显示
+        text_col.addWidget(self.sub_label)
+        self.sub_label.setVisible(bool(self.sub_label.text()))
         row.addLayout(text_col, 1)
 
         # 能力徽章列：固定宽（保证价格/开关列跨行严格对齐，无徽章也占位）；
         # 宽度随系统字号缩放，字号变更时 refresh_style 同步；
-        # chip 自带 tooltip 在本列表一律清除（用户要求：此列表不要悬浮提示）
-        self.badges = ModelCapabilityBadges(caps, parent=self)
-        for attr in ("think_label", "effort_label", "vision_label"):
-            chip = getattr(self.badges, attr, None)
-            if chip is not None:
-                chip.setToolTip("")
+        # 末尾齿轮是能力声明入口（chip 自带 tooltip 一律清除，行级 tooltip 统一说明）
         self.badge_holder = QWidget(self)
         self.badge_holder.setFixedWidth(_badges_col_width())
         badge_lay = QHBoxLayout(self.badge_holder)
-        badge_lay.setContentsMargins(0, 0, 8, 0)
-        if self.badges.has_any_badge():
-            badge_lay.addWidget(self.badges, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        badge_lay.setContentsMargins(8, 0, 8, 0)
+        badge_lay.setSpacing(0)
+        self.badges = self._make_badges(caps)
+        badge_lay.addWidget(self.badges, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        badge_lay.addStretch(1)
+        self.caps_btn = TransparentToolButton(FluentIcon.EDIT, self.badge_holder)
+        self.caps_btn.setFixedSize(22, 22)
+        self.caps_btn.setIconSize(QSize(13, 13))
+        self.caps_btn.setToolTip("编辑模型能力（多模态 / 思考 / 上下文长度）")
+        self.caps_btn.clicked.connect(self._emit_edit_caps)
+        # 默认半透明：每行一个铅笔常亮会抢过内容，hover 才提到满不透明
+        self._caps_btn_fx = QGraphicsOpacityEffect(self.caps_btn)
+        self._caps_btn_fx.setOpacity(0.4)
+        self.caps_btn.setGraphicsEffect(self._caps_btn_fx)
+        self.caps_btn.installEventFilter(self)
+        badge_lay.addWidget(self.caps_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(self.badge_holder, 0, Qt.AlignVCenter)
 
         # 价格四列（caps["cost"] 来自 models.dev，$/M tokens；无数据显示 "-"；
@@ -172,6 +215,37 @@ class _ModelRowWidget(QWidget):
         self._line.setFixedHeight(1)
         outer.addWidget(self._line)
 
+        self._apply_text_style()
+
+    def _make_badges(self, caps: dict) -> ModelCapabilityBadges:
+        """构造芯片行（chip 自带 tooltip 清空：行级 tooltip 统一说明来源）"""
+        badges = ModelCapabilityBadges(caps or {}, parent=self.badge_holder)
+        for attr in ("think_label", "effort_label", "vision_label"):
+            chip = getattr(badges, attr, None)
+            if chip is not None:
+                chip.setToolTip("")
+        return badges
+
+    def _emit_edit_caps(self):
+        if callable(self._on_edit_caps):
+            self._on_edit_caps(self.model_name)
+
+    def update_caps(self, caps: dict):
+        """重设能力数据（声明变更后局部刷新：灰字 / 价格 / 徽章全量重画）"""
+        caps = caps or {}
+        self.sub_label.setText(self._summary_text(caps))
+        self.sub_label.setVisible(bool(self.sub_label.text()))
+        cost = caps.get("cost") if isinstance(caps.get("cost"), dict) else {}
+        for lbl, key in zip(self.price_labels, ("input", "output", "cache_read", "cache_write")):
+            lbl.setText(_fmt_price(cost.get(key)))
+        old = self.badges
+        lay = self.badge_holder.layout()
+        if old is not None:
+            lay.removeWidget(old)
+            old.setParent(None)
+            old.deleteLater()
+        self.badges = self._make_badges(caps)
+        lay.insertWidget(0, self.badges, 0, Qt.AlignLeft | Qt.AlignVCenter)
         self._apply_text_style()
 
     @staticmethod
@@ -221,6 +295,17 @@ class _ModelRowWidget(QWidget):
         for lbl in self.price_labels:
             lbl.setStyleSheet(price_style)
         self._line.setStyleSheet(f"background-color: {Colors.BORDER}; border: none;")
+        # 字体/字号变化会改 fontMetrics → 省略结果需重算
+        self.name_label._apply_elide()
+
+    def eventFilter(self, obj, event):
+        """铅笔按钮 hover 提亮（默认 0.4，进入行时满不透明）"""
+        if obj is self.caps_btn and self._caps_btn_fx is not None:
+            if event.type() == QEvent.Enter:
+                self._caps_btn_fx.setOpacity(1.0)
+            elif event.type() == QEvent.Leave:
+                self._caps_btn_fx.setOpacity(0.4)
+        return super().eventFilter(obj, event)
 
     def refresh_style(self):
         self._apply_text_style()
@@ -264,6 +349,7 @@ class ModelListEditorWidget(QWidget):
         # 候选区状态（折叠/展开 + 数据源）
         self._disabled: set = set()
         self._caps_cache: dict = {}
+        self._sources_cache: dict = {}
         self._provider_name = str(provider_name or "").strip()
         self._candidate_models: list = []
         self._candidate_expanded = False
@@ -302,6 +388,8 @@ class ModelListEditorWidget(QWidget):
         lay.addWidget(QLabel("模型", header), 1)
         self.header_feats_label = QLabel("能力", header)
         self.header_feats_label.setFixedWidth(_badges_col_width())
+        # 与行内徽章左侧 8px 内边距对齐（否则表头文字比徽章靠左一截）
+        self.header_feats_label.setIndent(8)
         lay.addWidget(self.header_feats_label)
         for cn in ("输入", "输出", "缓存读", "缓存写"):
             lbl = QLabel(cn, header)
@@ -420,22 +508,77 @@ class ModelListEditorWidget(QWidget):
         """
         self._provider_name = str(name or "").strip()
         self._caps_cache.clear()
+        self._sources_cache.clear()
 
     def _caps_for(self, name: str) -> dict:
-        """查模型能力（refresh 时批量查一次缓存复用；几十行规模可接受）。
+        """查模型能力：声明层 + 自动链合成（refresh 时批量查一次缓存复用）。
 
         带 provider 名走 get_model_capabilities 的 L-1 插件 per-model 层——
         服务商私有模型 ID（如 CodeBuddy 的 claude-opus-4.8 带点命名）在
         models.dev 不存在，不带 provider 查会全链落空、能力列全 "-"。
+        用户在能力弹窗里的声明（ModelOverrides 六键）作为 L0 优先于自动链。
         """
         if name not in self._caps_cache:
-            try:
-                from app.core.modelmeta.model_capabilities import get_model_capabilities
-
-                self._caps_cache[name] = get_model_capabilities(name, self._provider_name) or {}
-            except Exception:
-                self._caps_cache[name] = {}
+            caps, sources = self._compute_caps(name)
+            self._caps_cache[name] = caps
+            self._sources_cache[name] = sources
         return self._caps_cache[name]
+
+    def _compute_caps(self, name: str) -> tuple:
+        """按 resolve 链解析单模型能力，返回 (caps, sources)"""
+        try:
+            from app.core.modelmeta.model_capabilities import resolve_capabilities_for_model
+
+            sources: dict = {}
+            caps = resolve_capabilities_for_model(name, self._provider_name, sources) or {}
+            return caps, sources
+        except Exception:
+            return {}, {}
+
+    def _tooltip_for(self, name: str) -> str:
+        """行 tooltip：能力短语 + 上下文生效层（防把兜底值当真实数据）"""
+        try:
+            from app.core.modelmeta.model_declarations import describe_source
+            from app.widgets.capability_badges import build_capability_tooltip
+
+            parts = []
+            text = build_capability_tooltip(self._caps_for(name))
+            if text:
+                parts.append(text)
+            label = describe_source((self._sources_cache.get(name) or {}).get("context_limit"))
+            if label:
+                parts.append(f"上下文来源: {label}")
+            return "\n".join(parts)
+        except Exception:
+            return ""
+
+    def _on_row_edit_caps(self, name: str):
+        """打开能力声明弹窗；保存后写 ModelOverrides 并只刷新对应行"""
+        try:
+            from app.core.modelmeta.model_declarations import apply_declarations
+            from app.utils.config import Settings
+            from app.widgets.model_capability_edit_dialog import ModelCapabilityEditDialog
+
+            dialog = ModelCapabilityEditDialog(name, self._provider_name, parent=self.window())
+            dialog.exec_()
+            if not dialog.saved:
+                return
+            # ⚠ set 是实例方法：Settings.set(item, value) 会把 item 当 self 直接抛
+            # AttributeError（被兜底 except 吞成「保存没反应」），必须走单例实例
+            settings = Settings.get_instance()
+            overrides = dict(settings.llm_model_overrides.value or {})
+            updated = apply_declarations(overrides, self._provider_name, name, dialog.declared)
+            settings.set(settings.llm_model_overrides, updated, save=True)
+            self._caps_cache.pop(name, None)
+            self._sources_cache.pop(name, None)
+            row = self._row_of(name)
+            if row is not None and hasattr(row, "update_caps"):
+                row.update_caps(self._caps_for(name))
+                row.setToolTip(self._tooltip_for(name))
+        except Exception as e:
+            from loguru import logger
+
+            logger.opt(exception=True).warning(f"[ModelList] 能力声明编辑失败: {e}")
 
     def _make_row_item(self, name: str, insert_at: int = -1, defer: bool = False) -> QListWidgetItem:
         """创建一行：模型名存 Qt.UserRole（item 本体**零绘制文本**，防与行容器
@@ -465,8 +608,10 @@ class ModelListEditorWidget(QWidget):
             self._caps_for(name),
             enabled=name not in self._disabled,
             on_toggle=self._on_row_toggle,
+            on_edit_caps=self._on_row_edit_caps,
             parent=self.listWidget,
         )
+        row.setToolTip(self._tooltip_for(name))
         # 行容器横向 Expanding：跟随 viewport 拉满（防窄窗口下挤压叠印）
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.listWidget.setItemWidget(item, row)
