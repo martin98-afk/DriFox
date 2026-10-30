@@ -1255,7 +1255,20 @@ class CodeWebViewer(QWebEngineView):
                 find_tool_segment_by_call_id,
             )
 
-            seg = find_tool_segment_by_call_id(self._markdown_text or "", tid)
+            # 🐛 修复（完成框点击无法展开，2026-10-30）：_cleanup_render_cache
+            # 清空 _markdown_text 后、终渲染消费懒回调前（defer 280ms 窗口，或
+            # 懒回调已被流式末拍消费且 v2 直接短路）点击完成框，此处反查源为空
+            # → 回空 html → JS _fillToolBody 空分支直接 return（不展开且不清
+            # lazyBody，2s 兜底又被 lazyLoading 删除杀死）→ 永远展不开。
+            # 与 get_plain_text 同口径：反查源为空时走懒回调恢复并回写。
+            _md = self._markdown_text or ""
+            if not _md and self._lazy_markdown_cb:
+                try:
+                    _md = self._lazy_markdown_cb() or ""
+                    self._markdown_text = _md
+                except Exception:
+                    _md = ""
+            seg = find_tool_segment_by_call_id(_md, tid)
             if not seg:
                 # 流式期间刚由 append_tool_result 增量注入的块可能尚未进
                 # _markdown_text，用块级 markdown 缓存兜底。
@@ -3927,7 +3940,14 @@ class CodeWebViewer(QWebEngineView):
                     delete block.dataset.lazyLoading;
                     var html = '';
                     try {{ html = b64 ? _b64DecodeUtf8(b64) : ''; }} catch (err) {{ html = ''; }}
-                    if (!html) {{ delete block.dataset.lazyExpand; return; }}
+                    if (!html) {{
+                        // 反查失败（Python 侧源不可用）：清 lazyBody 让下次点击走
+                        // 普通展开路径。留着标记会无限重试空请求（请求→空→return，
+                        // 2s 兜底又被上面 lazyLoading 删除杀死）→ 永远展不开。
+                        delete block.dataset.lazyExpand;
+                        delete block.dataset.lazyBody;
+                        return;
+                    }}
                     var isCollapsible = block.classList.contains('cm-collapsible');
                     var wantExpand = block.dataset.lazyExpand === '1' || block.dataset.expanded === 'true';
                     delete block.dataset.lazyExpand;
@@ -8770,6 +8790,24 @@ class CodeWebViewer(QWebEngineView):
         self._last_rendered_html = None
         self._last_rendered_markdown = ""
         self._markdown_text = ""
+        # 🐛 修复（强停后正文丢失 / 完成框无法展开，2026-10-30）：清空
+        # _markdown_text 必须同时保证「终渲染 / 工具 body 反查」有恢复途径。
+        # 懒回调可能已被流式末拍消费置 None（_perform_update 流式分支每拍
+        # 消费后清引用），而本方法在 finish_streaming 的 defer 终渲染
+        # （DOCK_COLLAPSE_SETTLE_MS=280ms）**之前**执行——届时懒回调 None +
+        # _markdown_text 空 → v1 终渲染产出空 HTML 整页替换（updateContent('')
+        # 清空 #content-placeholder，工具框在 #tool-content 不动 → 卡片只剩
+        # 工具框）；_serve_tool_body 双源全空 → 懒 body 完成框点击永远展不开。
+        # 此处从父卡重建回调兜底（与 _v2_blocks 的父链遍历同模式）。
+        if self._lazy_markdown_cb is None:
+            _p = self.parent()
+            while _p is not None:
+                _cb = getattr(_p, "_build_incremental_md", None)
+                if callable(_cb):
+                    self._lazy_markdown_cb = _cb
+                    break
+                _parent_fn = getattr(_p, "parent", None)
+                _p = _parent_fn() if callable(_parent_fn) else None
         # [P2-8 F1] 清 tail 行内渲染降载状态（下一轮流式从零起算）
         self._tail_last_rendered_ts = 0.0
         self._tail_last_rendered_len = 0

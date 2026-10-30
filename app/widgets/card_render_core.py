@@ -3899,7 +3899,11 @@ _SKELETON_CACHE_MAX = 48
 # window._streamingActive 守卫——流式结束的终渲染会再跑一次该函数，DOM 里残留的
 # data-streaming="true"（注入运行框未转型 / 思考块未正式化）会把同帧折叠好的工具区
 # 重新顶开；[T44] 工具区在正文上方，一收一放 = 正文上下抖动。旧骨架无守卫，须失效缓存。
-_SKELETON_CACHE_VERSION = 64
+# _SKELETON_CACHE_VERSION +1（v65）：_fillToolBody 空 html 分支清 lazyBody——
+# Python 反查源不可用时（cleanup 清 _markdown_text 后的窗口）回空 html，旧逻辑
+# 留着 lazyBody 无限重试空请求（请求→空→return，2s 兜底被 lazyLoading 删除杀死）
+# → 完成框点击永远展不开。清标记后下次点击走普通展开路径。旧骨架无此行为。
+_SKELETON_CACHE_VERSION = 65
 
 
 def _js_literal(value) -> str:
