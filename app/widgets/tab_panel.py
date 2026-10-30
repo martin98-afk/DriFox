@@ -2150,6 +2150,21 @@ class TabPanel(QWidget):
         custom_infos = _sort_plugin_entries(custom_infos)
         self._plugin_infos = system_infos + custom_infos
 
+        # [PERF] 数据签名短路：本方法被窗口 showEvent / 插件注册表变更 / pin
+        # 切换反复调用，而多数调用时插件数据并无变化。全量销毁重建 N 行实测
+        # 500ms+（每行一次 UIPluginRow 构造 + 多路信号连接 + deleteLater 排队）。
+        # 签名含分组与排序结果、pin 集合、图标路径，任一插件增删/改名/换图标/
+        # 改分组或 pin 变更都会改变签名 → 照旧走真重建。
+        signature = (
+            tuple(system_infos),
+            tuple(custom_infos),
+            tuple(sorted(pinned)),
+            tuple(self._plugin_icon_path(pm, entry[3]) for entry in system_infos + custom_infos),
+        )
+        if signature == getattr(self, "_ui_plugins_signature", None) and self._plugin_rows_alive():
+            return
+        self._ui_plugins_signature = signature
+
         # ── 系统插件区 ──
         while self._system_plugin_layout.count() > 0:
             item = self._system_plugin_layout.takeAt(0)
@@ -2504,6 +2519,31 @@ class TabPanel(QWidget):
             return QIcon(str(icon_path)) if icon_path else None
         except Exception:
             return None
+
+    @staticmethod
+    def _plugin_icon_path(plugin_manager, plugin_name: str):
+        """插件当前主题图标路径（refresh_ui_plugins 签名用，不构造 QIcon）"""
+        try:
+            plugin = plugin_manager.get_plugin(plugin_name)
+            icon_config = getattr(plugin, "icon_config", None) if plugin else None
+            if not icon_config:
+                return None
+            return str(icon_config.get("dark" if isDarkTheme() else "light") or "")
+        except Exception:
+            return None
+
+    def _plugin_rows_alive(self) -> bool:
+        """现有插件行控件是否仍存活
+
+        签名短路的前提是「上次构建的行还在」。父容器被销毁/行被外部
+        deleteLater 后再命中签名，会留下空白列表，故逐行做析构探测。
+        """
+        from PyQt5 import sip
+
+        rows = list(self._system_plugin_buttons) + list(self._custom_plugin_buttons)
+        if not rows:
+            return True
+        return not any(sip.isdeleted(row) for row in rows)
 
     def _on_ui_plugin_clicked(self, card_id: str):
         """在当前活动 Tab 中打开 UI 插件卡片"""

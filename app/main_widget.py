@@ -14012,13 +14012,54 @@ class OpenAIChatToolWindow(ToolWindow):
         # 轻量快照只保留元信息，实际恢复仍由 session.messages 重建
         return False
 
+    def _welcome_history_list(self) -> list:
+        """欢迎卡片数据源：全量历史已就绪时走缓存列表，否则走快速路径。
+
+        [PERF] 启动首屏 _ensure_history_loaded 要读 5000 条轻量行（慢盘/杀软
+        环境实测 500ms+，主线程阻塞等预热线程的锁）。欢迎卡片只需要十余条，
+        故未就绪时直接 SQL LIMIT 300 出首屏（~20ms），并挂一次性回调，
+        预热完成后按全量口径软更新（见 _on_welcome_history_loaded）。
+        """
+        hm = self.history_manager
+        if hm is None:
+            return []
+        if getattr(hm, "_history_loaded", True):
+            return hm.get_history_list(self._current_project)
+
+        self._hook_welcome_history_loaded()
+        getter = getattr(hm, "get_recent_lightweight", None)
+        if getter is None:
+            return hm.get_history_list(self._current_project)
+        return getter(limit=300, project=self._current_project)
+
+    def _hook_welcome_history_loaded(self):
+        """一次性连接「历史首次加载完成」信号（首屏快速路径后软更新用）"""
+        if getattr(self, "_welcome_history_hooked", False):
+            return
+        self._welcome_history_hooked = True
+        try:
+            self.history_manager._history_load_signals.loaded.connect(self._on_welcome_history_loaded)
+        except Exception as e:
+            logger.debug(f"[welcome] 连接历史加载信号失败: {e}")
+
+    def _on_welcome_history_loaded(self):
+        """历史全量加载完成（主线程槽）：欢迎卡仍在屏上时按全量口径软更新"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if self._displayed_session_id is not None:
+            return
+        try:
+            self._refresh_welcome_card_data()
+        except Exception as e:
+            logger.debug(f"[welcome] 历史加载完成后软更新失败: {e}")
+
     def _collect_welcome_sessions(self):
         """收集欢迎卡片会话列表数据（按当前项目过滤，剔除团队会话）
 
         返回 (recent_sessions, top_by_count)，供 _get_or_create_welcome_card
         构建与 _refresh_welcome_card_data 软更新共用，保证两路径数据口径一致。
         """
-        history_list = self.history_manager.get_history_list(self._current_project)
+        history_list = self._welcome_history_list()
         # 🛡️ 过滤团队会话：欢迎卡片展示的是"可继续的独立对话"，团队会话
         # （team_run_id 非空）由历史面板团队分组/合并条目统一管理，逐条混入
         # 欢迎卡片会导致成员会话重复展示且点击后团队上下文丢失。与历史面板

@@ -868,10 +868,16 @@ class SessionStore:
             return self._session_repo.get_all(limit, offset)
         return []
 
-    def get_sessions_lightweight(self, limit: int = 100, offset: int = 0) -> List[Dict]:
-        """获取会话轻量列表（不含 messages），启动时使用避免加载大量消息数据"""
+    def get_sessions_lightweight(
+        self, limit: int = 100, offset: int = 0, project: Optional[str] = None
+    ) -> List[Dict]:
+        """获取会话轻量列表（不含 messages），启动时使用避免加载大量消息数据
+
+        Args:
+            project: 非空时只取该项目（首屏快速路径按项目过滤，走 SQL）
+        """
         if self._session_repo:
-            return self._session_repo.get_all_lightweight(limit, offset)
+            return self._session_repo.get_all_lightweight(limit, offset, project)
         return []
 
     def get_sessions_by_team_run_id(self, run_id: str) -> List[Dict]:

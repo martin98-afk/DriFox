@@ -13,6 +13,7 @@
 """
 
 import gc
+import time
 
 import sip
 
@@ -195,5 +196,30 @@ def _compact_process_heap_after_cleanup():
     切换项目、undo）上制造无效异常开销；Linux malloc_trim 收益同样有限。
     故移除两者，保留 gc.collect() —— pymalloc arena 的归还由 CPython
     内存管理自行处理，gc 收集足够。
+
+    [PERF] 全代 gc.collect() 在对象图大时实测 627ms 主线程冻结（主线程
+    watchdog 日志实证）。改为分代 + 全代节流：
+    - 默认 gc.collect(1) 只扫 gen0+gen1，毫秒级。会话切换/卡片清理产生的
+      临时对象基本都在年轻代，这部分已覆盖。
+    - 全代只在「累积 ≥_GC_FULL_EVERY_N 次且距上次全代 ≥_GC_FULL_MIN_INTERVAL_S」
+      时做一次，负责跨代老对象（卡片、WebEngine 包装）。
+    内存压力兜底另有 WebEngine renderer 强回收层（_over_memory_threshold），
+    不依赖本函数的全代频率。
     """
-    gc.collect()
+    global _gc_partial_count, _last_gc_full_at
+    _gc_partial_count += 1
+    now = time.monotonic()
+    if _gc_partial_count >= _GC_FULL_EVERY_N and now - _last_gc_full_at >= _GC_FULL_MIN_INTERVAL_S:
+        _gc_partial_count = 0
+        _last_gc_full_at = now
+        gc.collect()
+    else:
+        gc.collect(1)
+
+
+# [PERF] 全代 GC 节流参数：主线程 watchdog 实测单次全代 627ms。
+# 每 8 次清理尝试 + 至少 120s 间隔才做一次全代，其余只收年轻代。
+_GC_FULL_EVERY_N = 8
+_GC_FULL_MIN_INTERVAL_S = 120.0
+_gc_partial_count = 0
+_last_gc_full_at = 0.0

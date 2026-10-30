@@ -9,7 +9,9 @@
 """
 
 import logging
+import os
 import re
+import time
 import weakref
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +24,11 @@ logger = logging.getLogger(__name__)
 # 内置主题目录（打包在 exe 中，只读）
 # 指向系统插件 themes 目录，不再依赖 app/themes/
 _BUILTIN_THEMES_DIR = Path(__file__).parent.parent.parent / "plugins" / "system-themes" / "themes"
+
+# 指纹全量扫描窗口（秒）：窗口内只要主题根目录 mtime 未变，就复用上次指纹
+# 而不做逐文件扫描。插件/主题目录增删会改父目录 mtime，必被捕获；
+# 仅「已存在 yaml 就地改内容」会延迟到本窗口之后（或显式 reload(force=True)）。
+_FINGERPRINT_FULL_WINDOW_S = 10.0
 
 
 class ThemeManager:
@@ -44,6 +51,16 @@ class ThemeManager:
         self._themes_loaded = False
         # 🚀 P5c：主题源目录 mtime 指纹缓存（reload 短路用，None=未计算）
         self._themes_fingerprint: Optional[str] = None
+        # [PERF] 指纹计算的根目录预检缓存：Windows + 杀软环境实测单次目录枚举
+        # ~26ms、单次 stat ~6ms，旧实现两轮 rglob 全树扫（17 个主题 yaml）要
+        # 550~1050ms 主线程阻塞。改为「根目录 mtime 预检 + 单层 scandir」：
+        # 根目录未变且全量扫描窗口未过期时直接复用上次指纹（仅 6 次 stat）。
+        self._fingerprint_value: Optional[str] = None
+        self._fingerprint_root_sig: Optional[tuple] = None
+        self._fingerprint_full_checked_at: float = 0.0
+        # [PERF] 插件 themes 目录收集缓存（plugins 根目录 mtime 未变则复用）
+        self._plugin_theme_dirs_cache: Optional[list] = None
+        self._plugin_theme_dirs_sig: Optional[tuple] = None
 
     # ── 扫描加载 ──────────────────────────────────────────
 
@@ -518,7 +535,8 @@ class ThemeManager:
         首次加载（_themes 为空）不短路，保证数据就绪。
         """
         # 指纹未变化且已有主题数据 → 直接复用，跳过重扫与 UI 刷新
-        if not force and self._themes and self._compute_fingerprint() == self._themes_fingerprint:
+        fp = self._compute_fingerprint()
+        if not force and self._themes and fp == self._themes_fingerprint:
             logger.debug("[ThemeManager] reload: 主题指纹未变化，跳过重扫与 UI 刷新")
             return
 
@@ -528,8 +546,10 @@ class ThemeManager:
 
         self._themes.clear()
         self._load_themes()
-        # 记录本次重载后的指纹，供下次 reload 比对
-        self._themes_fingerprint = self._compute_fingerprint()
+        # 记录本次重载后的指纹，供下次 reload 比对。直接复用入口处算出的 fp：
+        # 重扫本身不写文件，指纹不会因重扫而变化；旧实现在这里再算一遍，
+        # 等于把全目录扫描成本翻倍（实测 550ms × 2）。
+        self._themes_fingerprint = fp
         # 清除浅色检测缓存
         self._cached_light_check = (None, None)
 
@@ -556,56 +576,139 @@ class ThemeManager:
             except Exception as e:
                 logger.warning(f"[ThemeManager] reload callback error: {e}")
 
-    def _compute_fingerprint(self) -> str:
-        """计算主题源目录指纹：所有主题 YAML 的 (路径, mtime_ns) 排序哈希
+    def _plugin_theme_dirs(self) -> list:
+        """扫描插件目录下所有 themes/ 子目录（按 plugins 根目录 mtime 缓存）
 
-        与 _load_themes 的 4 个来源一一对应：
-        1. 内置主题目录（plugins/system/themes）
-        2. 插件主题直扫（plugins/*/themes，系统 + 用户插件目录）
-        3. PluginManager 提供的已启用插件主题路径
-        4. 用户主题目录（~/.drifox/themes）
-
-        mtime_ns 纳秒精度：主题文件任何真实改动（增/删/改）都会改变指纹；
-        仅重扫 stat 不读文件内容，比 YAML 解析快两个数量级。
+        [PERF] 收集本身要 iterdir 两个 plugins 根 + 每个 entry 两次 is_dir，
+        实测 200~300ms（单目录枚举 26ms 起）。根目录 mtime 未变说明插件目录
+        增删未发生，直接复用上次结果。
         """
-        import hashlib
-
         from app.utils.utils import get_app_data_dir
 
-        h = hashlib.md5()
-        theme_dirs = {_BUILTIN_THEMES_DIR}
+        roots = (Path(__file__).parent.parent.parent / "plugins", get_app_data_dir() / "plugins")
+        sig_parts = []
+        for root in roots:
+            try:
+                sig_parts.append(root.stat().st_mtime_ns)
+            except OSError:
+                sig_parts.append(None)
+        sig = tuple(sig_parts)
+        if self._plugin_theme_dirs_cache is not None and sig == self._plugin_theme_dirs_sig:
+            return list(self._plugin_theme_dirs_cache)
 
-        # 2. 插件主题直扫：系统 + 用户插件目录下所有插件子目录的 themes/
-        for base in (Path(__file__).parent.parent.parent / "plugins", get_app_data_dir() / "plugins"):
-            if base.is_dir():
-                for entry in sorted(base.iterdir()):
+        dirs: list = []
+        for root in roots:
+            if not root.is_dir():
+                continue
+            try:
+                for entry in sorted(root.iterdir()):
                     if entry.is_dir():
                         td = entry / "themes"
                         if td.is_dir():
-                            theme_dirs.add(td)
+                            dirs.append(td)
+            except OSError:
+                continue
+        self._plugin_theme_dirs_cache = dirs
+        self._plugin_theme_dirs_sig = sig
+        return list(dirs)
 
-        # 3. PluginManager 已启用插件主题路径
+    def _theme_source_dirs(self) -> list:
+        """主题源根目录全集（与 _load_themes 的 4 个来源一一对应）"""
+        from app.utils.utils import get_app_data_dir
+
+        dirs = [_BUILTIN_THEMES_DIR]
+        dirs.extend(self._plugin_theme_dirs())
+
+        # 3. PluginManager 已启用插件主题路径（内存查询，无 I/O）
         try:
             from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
-                theme_dirs.update(Path(p) for p in pm.get_theme_paths())
+                dirs.extend(Path(p) for p in pm.get_theme_paths())
         except Exception:
             pass
 
         # 4. 用户主题目录
-        theme_dirs.add(get_app_data_dir() / "themes")
+        dirs.append(get_app_data_dir() / "themes")
 
-        for base in sorted(theme_dirs, key=str):
-            if not base.is_dir():
+        # 去重保序（同一目录可能同时来自直扫与 PluginManager）
+        seen = set()
+        out = []
+        for d in dirs:
+            key = str(d)
+            if key in seen:
                 continue
-            for yaml_file in sorted(base.rglob("*.yaml")) + sorted(base.rglob("*.yml")):
+            seen.add(key)
+            out.append(d)
+        return out
+
+    def _compute_fingerprint(self) -> str:
+        """计算主题源目录指纹：所有主题 YAML 的 (路径, mtime_ns) 排序哈希
+
+        与 _load_themes 的 4 个来源一一对应（见 _theme_source_dirs）。
+
+        [PERF] 两级策略（旧实现单次 rglob 双后缀全树扫实测 550~1050ms）：
+        1. 快路径：主题根目录 mtime 未变且距上次全量扫描不足
+           _FINGERPRINT_FULL_WINDOW_S → 直接复用上次指纹（仅 6~8 次 stat，
+           约 40ms）。插件/主题目录的增删都会改父目录 mtime，必被捕获。
+        2. 全量路径：窗口过期或根目录 mtime 变化 → 单层 scandir 扫描
+           （与 _load_from_dir 的目录约定一致：<themes>/<id>/<id>.yaml 或
+           <themes>/<id>.yaml），用 DirEntry 自带 stat 数据，不再每文件单独
+           stat，也不再同一棵树扫两遍（旧实现 .yaml 与 .yml 各一遍）。
+        """
+        import hashlib
+
+        theme_dirs = self._theme_source_dirs()
+
+        # ── 快路径：根目录 mtime 预检 ──
+        root_sig_parts = []
+        for base in theme_dirs:
+            try:
+                st = base.stat()
+                root_sig_parts.append((str(base), st.st_mtime_ns))
+            except OSError:
+                root_sig_parts.append((str(base), None))
+        root_sig = tuple(root_sig_parts)
+
+        now = time.monotonic()
+        if (
+            self._fingerprint_value is not None
+            and root_sig == self._fingerprint_root_sig
+            and now - self._fingerprint_full_checked_at < _FINGERPRINT_FULL_WINDOW_S
+        ):
+            return self._fingerprint_value
+
+        # ── 全量路径：单层扫描 ──
+        h = hashlib.md5()
+        for base in sorted(theme_dirs, key=str):
+            try:
+                entries = sorted(os.scandir(base), key=lambda e: e.name)
+            except OSError:
+                continue
+            for entry in entries:
                 try:
-                    h.update(f"{yaml_file}:{yaml_file.stat().st_mtime_ns}".encode("utf-8"))
+                    if entry.is_dir():
+                        # 目录形式：只看同名 yaml（与 _load_from_dir 一致）
+                        for suffix in (".yaml", ".yml"):
+                            path = os.path.join(entry.path, entry.name + suffix)
+                            try:
+                                mtime_ns = os.stat(path).st_mtime_ns
+                            except OSError:
+                                continue
+                            h.update(f"{path}:{mtime_ns}".encode("utf-8"))
+                            break
+                    elif entry.name.endswith((".yaml", ".yml")):
+                        st = entry.stat()
+                        h.update(f"{entry.path}:{st.st_mtime_ns}".encode("utf-8"))
                 except OSError:
-                    pass  # 文件被并发删除等竞态 → 跳过，指纹可能含噪，重扫兜底
-        return h.hexdigest()
+                    continue  # 文件被并发删除等竞态 → 跳过，重扫兜底
+
+        value = h.hexdigest()
+        self._fingerprint_value = value
+        self._fingerprint_root_sig = root_sig
+        self._fingerprint_full_checked_at = now
+        return value
 
 
 
