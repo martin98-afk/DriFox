@@ -59,6 +59,7 @@ from loguru import logger
 from app.plugins.sdk import Animations, Colors, font_size_css, get_unified_scrollbar_style
 from app.plugins.sdk import alpha_tint as _alpha_tint, get_project_color
 from app.plugins.sdk import bind_theme_qss
+from app.plugins.sdk import card_container_surface_color
 from app.plugins.sdk import replay_theme_qss
 from app.plugins.sdk import get_font_family_css, get_icon
 from app.plugins.sdk import EmptyHint as _EmptyHint
@@ -556,15 +557,18 @@ class HistoryPage(QWidget):
         """
         panel = QFrame(host)
         panel.setObjectName("projectSelectorPanel")
-        # 面板容器轻底色 + 边框 + 圆角：展开后是一个明确的「下拉面板」块面，
+        # 面板容器实底 + 边框 + 圆角：展开后是一个明确的「下拉面板」块面，
         # 与折叠头/搜索框区分；走主题 QSS 登记随主题切换重放（面板默认收起，
-        # 宿主 refresh_style 派发时可能被跳过，同 _project_new_edit 的原因）
+        # 宿主 refresh_style 派发时可能被跳过，同 _project_new_edit 的原因）。
+        # ★ 背景必须用与列表 content 层同源的合成实底（card_container_surface_color），
+        #   不可用 CARD_BG_DIM（4% 白）这类轻底：本卡浮在壁纸上方，轻底直接
+        #   透出壁纸，行文字与花背景混在一起不可读（2026-10-30 用户反馈）。
         bind_theme_qss(
             panel,
             lambda c: (
                 f"""
             QFrame#projectSelectorPanel {{
-                background: {c.CARD_BG_DIM};
+                background: {card_container_surface_color(246).name()};
                 border: 1px solid {c.BORDER};
                 border-radius: 6px;
             }}
