@@ -2055,8 +2055,15 @@ class ToolSectionWidget(QWidget):
         self._widgets: List[QWidget] = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 2, 0, 2)
+        # 边框围栏内呼吸空间：左 8px 对齐 WebEngine 版 #tool-section padding，
+        # 上下 4px 让圆角边框不贴分隔条/首末卡
+        root.setContentsMargins(8, 4, 8, 4)
         root.setSpacing(2)
+        # 圆角细边框围栏：与正文分区（对齐 WebEngine 版 #tool-section border），
+        # 中性灰低透明度，亮暗主题通吃
+        self.setStyleSheet(
+            "ToolSectionWidget { border:1px solid rgba(127,127,127,0.22); border-radius:8px; }"
+        )
         self._separator = _SeparatorRow("工具与思考", self, icon_name="工具")
         self._separator.clicked.connect(self.toggle)
         self._separator.set_collapsed(False)  # 默认展开：箭头 ▾，与 _collapsed=False 一致

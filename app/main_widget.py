@@ -4074,7 +4074,91 @@ class OpenAIChatToolWindow(ToolWindow):
         # hold 期间 _show_initial_welcome 只记 pending，装载完成后统一渲染一次。
         if plugin_dirs:
             self._welcome_build_hold = True
+            self._hold_deferred_for_plugin_load()
         self._load_ui_plugins_step(plugin_dirs, 0, 0, on_done)
+
+    def _hold_deferred_for_plugin_load(self) -> None:
+        """UI 插件装载期暂停插件宿主的延迟队列。
+
+        两边都要 import 插件模块，而 Python 的 import 锁是进程级的：后台
+        runtime_components warmup 导入模块时，主线程的 load_plugin 会整段
+        阻塞——实测让帧后等 3.3s，且恢复时刻精确等于 warmup 结束，把并行
+        变成了串行 + 额外等待。错峰后装载独占主线程，warmup 在装载完成后
+        接着跑（那时界面已可用，后台慢几秒无感）。
+        """
+        try:
+            from app.core.services.plugin_host_service import PluginHostService
+
+            svc = PluginHostService.get_instance()
+            # 上下文策略（context_tiers / budget_resolvers）是对话主链路依赖，
+            # 必须早于任何一轮请求就绪；暂停队列会连它们一起推后，实测装载期
+            # 首次请求因此降级为「全量发送」。这两个组件合计约 0.5s，先同步扫掉。
+            try:
+                from app.plugins.loaders.runtime_component_loader import warmup_component
+
+                warmup_component("context_tiers")
+                warmup_component("budget_resolvers")
+            except Exception as e:
+                logger.warning(f"[MainWidget] 上下文策略预注册失败（继续装载）: {e}")
+            svc.pause_deferred("ui_plugin_load")
+            # 步进链是单发定时器：窗口销毁后收口分支不会再跑，必须另有释放路径，
+            # 否则应用级队列被永久暂停（其它窗口的启动任务全部卡死）
+            self.destroyed.connect(lambda *_: svc.resume_deferred("window_destroyed"))
+        except Exception as e:
+            logger.warning(f"[MainWidget] 暂停延迟队列失败（不影响装载）: {e}")
+        self._start_ui_load_stall_probe()
+
+    def _start_ui_load_stall_probe(self) -> None:
+        """[DEBUG-stall] 装载期采样主线程栈：连续同栈即打印。
+
+        背景：装载过程存在多段 1~3s 的无日志空白（在 assistant_hub 之后、
+        marketplace 之后），打点只能测长度不能指认位置。采样用
+        sys._current_frames() 从后台线程读主线程栈，不干扰被测线程。
+        定位完成后删除整个方法与 _stop_ui_load_stall_probe。
+        """
+        import sys as _sys
+        import threading
+        import traceback
+
+        stop = threading.Event()
+        self._ui_load_probe_stop = stop
+        main_ident = threading.main_thread().ident
+
+        def loop():
+            last = ""
+            same = 0
+            while not stop.wait(0.15):
+                frame = _sys._current_frames().get(main_ident)
+                if frame is None:
+                    continue
+                stack = "".join(traceback.format_stack(frame, limit=10))
+                if stack == last:
+                    same += 1
+                    if same == 5:  # 约 0.75s 停在同一栈
+                        logger.warning(f"[MainWidget][DEBUG-stall] 主线程连续停在同一栈：\n{stack}")
+                        same = 0
+                else:
+                    last = stack
+                    same = 0
+
+        threading.Thread(target=loop, daemon=True, name="ui-load-stall-probe").start()
+
+    def _stop_ui_load_stall_probe(self) -> None:
+        """[DEBUG-stall] 停止主线程栈采样"""
+        stop = getattr(self, "_ui_load_probe_stop", None)
+        if stop is not None:
+            stop.set()
+            self._ui_load_probe_stop = None
+
+    def _release_deferred_after_plugin_load(self) -> None:
+        """装载收口：恢复被 _hold_deferred_for_plugin_load 暂停的队列（幂等）"""
+        self._stop_ui_load_stall_probe()
+        try:
+            from app.core.services.plugin_host_service import PluginHostService
+
+            PluginHostService.get_instance().resume_deferred("ui_plugin_load_done")
+        except Exception as e:
+            logger.warning(f"[MainWidget] 恢复延迟队列失败: {e}")
 
     def _load_ui_plugins_step(
         self, plugin_dirs, idx: int, loaded: int, on_done=None, frame_spent: float = 0.0, yield_at: float = 0.0
@@ -4092,6 +4176,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if idx >= len(plugin_dirs):
             if loaded > 0:
                 logger.info(f"[MainWidget] Loaded {loaded}/{len(plugin_dirs)} UI plugins")
+            self._release_deferred_after_plugin_load()
             self._release_welcome_build_hold()
             if on_done:
                 on_done()

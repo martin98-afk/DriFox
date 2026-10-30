@@ -3815,7 +3815,10 @@ _SKELETON_CACHE_MAX = 48
 # 的 flex/order 调换与正文 600px 限高内滚（工具区始终在上、正文自然高度在下），
 # _setStreamingDock 只剩「工具区限高 264px」+「归位同帧折叠」+ 高度报告。
 # 旧骨架仍把工具区沉到底部、正文限矮，必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 60
+# _SKELETON_CACHE_VERSION +1（v61）：#tool-section 加圆角细边框围栏
+# （border var(--border) + radius 8 + padding 2x8），简洁模式下工具/思考区与正文
+# 视觉分区。旧骨架无边框，必须失效缓存。
+_SKELETON_CACHE_VERSION = 61
 
 
 def _js_literal(value) -> str:

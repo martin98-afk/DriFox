@@ -158,6 +158,55 @@ def test_async_task_runs_off_main_thread(qapp):
     assert q._tasks["bg"].ran is True, "后台任务完成后未回填 ran"
 
 
+def test_pause_stops_scheduling_until_resume(qapp):
+    """pause 期间任务不执行，resume 后照常执行（幂等重入）。
+
+    背景：UI 插件装载期与后台 warmup 都要 import 插件模块，import 锁让两者
+    串行；错峰靠暂停队列实现。误实现成「暂停后永不恢复」会让所有启动预热丢失。
+    """
+    q = DeferredTaskQueue()
+    ran = []
+    q.register("warmup", lambda: ran.append("warmup"), priority="idle", delay_ms=0)
+    q.pause("before_start")
+    q.start()
+    _drain(300)
+    assert ran == [], f"pause 期间任务仍被执行：{ran}"
+
+    q.resume("load_done")
+    _drain(400)
+    assert ran == ["warmup"], f"resume 后任务未执行：{ran}"
+
+    # 幂等：重复 resume 不重复执行
+    q.resume("again")
+    _drain(200)
+    assert ran == ["warmup"], f"重复 resume 导致重复执行：{ran}"
+
+
+def test_pause_holds_async_task_completion(qapp):
+    """异步任务已在后台跑时 pause：ran 照常回填，但后续任务被压住到 resume。
+
+    这是真实时序：装载开始 pause 时 warmup 可能已投递（无法撤回），
+    resume 后保序任务才放行。
+    """
+    q = DeferredTaskQueue()
+    ran = []
+    q.register_async("bg", lambda: time.sleep(0.15), delay_ms=0)
+    q.register("after", lambda: ran.append("after"), priority="idle", delay_ms=0)
+    q.add_order_constraint("bg", "after")
+    q.start()
+    _drain(50)  # 让泵把 async 投递出去
+    assert q._tasks["bg"].started is True, "异步任务未投递（测试前提不成立）"
+
+    q.pause("load")
+    _drain(300)  # 后台跑完并回填
+    assert q._tasks["bg"].ran is True, "已投递的异步任务应正常完成（无法撤回）"
+    assert ran == [], f"pause 期间后续任务被执行：{ran}"
+
+    q.resume("done")
+    _drain(400)
+    assert ran == ["after"], f"resume 后后续任务未执行：{ran}"
+
+
 def test_async_task_does_not_block_main_thread(qapp):
     """异步任务执行期间主线程定时器照常触发（事件循环不被冻结）。
 

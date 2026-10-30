@@ -58,6 +58,7 @@ class DeferredTaskQueue(QObject):
         self._finished = False
         self._start_monotonic = 0.0
         self._pump_scheduled = False
+        self._paused = False
         self._async_task_done.connect(self._on_async_task_done)
 
     # ── 注册接口 ──
@@ -115,6 +116,27 @@ class DeferredTaskQueue(QObject):
         self._barriers.discard(name)
         return self
 
+    def pause(self, reason: str = "") -> None:
+        """暂停调度（幂等）。
+
+        用途：与另一段「会 import 插件模块」的主线程工作错峰。Python 的 import
+        锁是进程级的，后台线程导入模块时主线程再导同一模块会整段阻塞（实测
+        UI 插件装载被拖住 3.3s，且恢复时刻精确等于后台 warmup 结束）。
+        已投递的异步任务无法撤回，但主线程不会再启新的。
+        """
+        if self._stopped or self._paused:
+            return
+        self._paused = True
+        logger.debug(f"[DeferredTaskQueue] paused ({reason or 'manual'})")
+
+    def resume(self, reason: str = "") -> None:
+        """恢复调度（幂等；暂停期间未执行的任务照常按 delay/约束执行）"""
+        if self._stopped or not self._paused:
+            return
+        self._paused = False
+        logger.debug(f"[DeferredTaskQueue] resumed ({reason or 'manual'})")
+        self._schedule_pump(0)
+
     # ── 生命周期 ──
 
     def start(self):
@@ -143,7 +165,7 @@ class DeferredTaskQueue(QObject):
     # ── 调度内核 ──
 
     def _schedule_pump(self, delay_ms: int):
-        if self._stopped or self._finished or self._pump_scheduled:
+        if self._stopped or self._finished or self._pump_scheduled or self._paused:
             return
         self._pump_scheduled = True
         QTimer.singleShot(max(0, delay_ms), self._pump)
@@ -192,7 +214,7 @@ class DeferredTaskQueue(QObject):
 
     def _pump(self):
         self._pump_scheduled = False
-        if self._stopped:
+        if self._stopped or self._paused:
             return
 
         if not self._tasks:
@@ -272,4 +294,5 @@ class DeferredTaskQueue(QObject):
         task.ran = True
         if task.once and name in self._barriers:
             self._barriers.discard(name)
-        self._schedule_pump(0)
+        if not self._paused:
+            self._schedule_pump(0)

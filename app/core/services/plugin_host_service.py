@@ -186,6 +186,22 @@ class PluginHostService(QObject):
         self._started = True
         self._init_plugin_system()
 
+    def pause_deferred(self, reason: str = "") -> None:
+        """暂停延迟队列（幂等）。UI 插件装载期与后台 warmup 错峰用。
+
+        两段都 import 插件模块：后台线程持 import 锁时，主线程的 load_plugin
+        会整段阻塞。实测让帧后等 3.3s，且恢复时刻精确等于后台 warmup 结束。
+        """
+        queue = getattr(self, "_deferred_queue", None)
+        if queue is not None:
+            queue.pause(reason)
+
+    def resume_deferred(self, reason: str = "") -> None:
+        """恢复延迟队列（幂等；重复调用无副作用）"""
+        queue = getattr(self, "_deferred_queue", None)
+        if queue is not None:
+            queue.resume(reason)
+
     def stop(self) -> None:
         """停止 watcher 线程 + 延迟队列（应用退出时由 TabManagerWindow.cleanup 调用）"""
         # [T31 改动4] 先停延迟队列：未执行的 idle 任务静默丢弃，避免退出期

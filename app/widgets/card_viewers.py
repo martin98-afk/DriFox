@@ -3568,12 +3568,15 @@ class CodeWebViewer(QWebEngineView):
                     cursor: default;
                 }}
 
-                /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，背景+边框区分） */
+                /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，圆角细边框与正文分区） */
                 /* ── 性能优化：contain: layout paint 让浏览器把此容器视为独立渲染作用域，
                    父布局变化不会让其子树重排 ── */
                 #tool-section {{
                     margin: 0 0 8px 0;
                     contain: layout paint;
+                    border: 1px solid var(--border);
+                    border-radius: 8px;
+                    padding: 2px 8px;
                 }}
                 #tool-separator {{
                     display: flex;
