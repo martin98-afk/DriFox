@@ -4521,6 +4521,19 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B 方案 F：用**块引用**锚点定位（_tool_anchor_pos），替代 int 索引。
         # int 索引在"其他工具结果插入 + 思考/正文追加"后偏移，导致工具结果插到
         # 错误位置 → _content_data 顺序错 → finish 完整重渲染时思考/工具错乱。
+        # v2：运行框块在这里被换成 tool_result 块（一次 diff 替换，同帧完成）。
+        # 先移走同 id 的 tool_streaming 块，避免与完成块并存（重复/顺序错乱）。
+        _v2_mode = bool(getattr(getattr(self, "viewer", None), "_render_v2", False))
+        if _v2_mode and isinstance(self._content_data, list):
+            self._content_data = [
+                _b
+                for _b in self._content_data
+                if not (
+                    isinstance(_b, dict)
+                    and _b.get("type") == "tool_streaming"
+                    and _b.get("tool_call_id") == tool_call_id
+                )
+            ]
         anchor = self._tool_anchor_pos(tool_call_id) if isinstance(self._content_data, list) else None
         if anchor is not None and isinstance(self._content_data, list) and 0 <= anchor <= len(self._content_data):
             my_order = self._tool_call_order.get(tool_call_id, 0)
@@ -4572,6 +4585,12 @@ class MessageCard(SimpleCardWidget):
                 fps.add(_tool_fingerprint(tool_name, arguments or {}))
         except Exception:
             pass
+        # v2：块已入列表，直接调度渲染即可（位置/内容由 patch 保证）；
+        # JS 注入通道（就地转换运行框）不再参与，从根上消除双体系混排。
+        if _v2_mode:
+            self.viewer._lazy_markdown_cb = self._build_incremental_md
+            self.viewer._schedule_render(immediate=True)
+            return
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
@@ -4992,6 +5011,62 @@ class MessageCard(SimpleCardWidget):
 
     # ── 工具流式调用块 ──────────────────────────────────
 
+    def _upsert_tool_streaming_block(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        preview: str,
+        char_count: int = 0,
+        completed: bool = False,
+        add_lines: int = 0,
+        del_lines: int = 0,
+    ) -> None:
+        """v2：把运行框写进 ``_content_data`` 的 ``tool_streaming`` 块（同 id 原地替换）
+
+        首次按工具调用锚点插入（与 ``append_tool_result`` 同口径），后续同 id 原地
+        替换块对象 —— 块级 diff 只替换该块节点，工具区顺序由补丁保证，不再有
+        「JS 注入裸节点 + wrapper 正式块」两套体系混排导致的顺序跳与去重删除。
+
+        ``preview is None`` 表示仅切换完成态（placeholder 阶段的 finish 调用），
+        沿用已有预览文字。
+        """
+        blocks = self._content_data
+        if not isinstance(blocks, list):
+            return
+        created = False
+        if preview is None:
+            for b in blocks:
+                if isinstance(b, dict) and b.get("type") == "tool_streaming" and b.get("tool_call_id") == tool_call_id:
+                    b["completed"] = completed
+                    break
+        else:
+            block = {
+                "type": "tool_streaming",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "preview": preview,
+                "char_count": char_count,
+                "completed": completed,
+                "add_lines": add_lines,
+                "del_lines": del_lines,
+            }
+            for i, b in enumerate(blocks):
+                if isinstance(b, dict) and b.get("type") == "tool_streaming" and b.get("tool_call_id") == tool_call_id:
+                    blocks[i] = block
+                    break
+            else:
+                anchor = self._tool_anchor_pos(tool_call_id)
+                if anchor is not None and 0 <= anchor <= len(blocks):
+                    blocks.insert(anchor, block)
+                else:
+                    blocks.append(block)
+                created = True
+        if self.viewer:
+            # 维护 markdown 书账（v2 只作反查源，不影响 DOM）；首次出现立即渲染，
+            # 后续进度更新合并派发（高频参数流不打断正文节拍）
+            self.viewer._lazy_markdown_cb = self._build_incremental_md
+            self.viewer._schedule_render(immediate=created)
+
     def _inject_tool_streaming_html(
         self,
         tool_call_id: str,
@@ -5010,6 +5085,23 @@ class MessageCard(SimpleCardWidget):
         用于 placeholder 阶段的 finish_tool_streaming 调用（参数全是占位键时）。
         """
         if not hasattr(self, "viewer") or not self.viewer:
+            return
+
+        # ── v2 通道：运行框纳入块系统（patchBlocks 统一管理）──
+        # 背景：运行框曾走 JS 注入（裸节点，非 data-block-wrapper），完成框走块渲染，
+        # 两套节点体系混排逼出一堆补丁（每批去重删除、插入位置要绕开裸节点、dirty
+        # 保护）。纳入块系统后：位置由 diff/insert 保证，完成时同 id 块原地换成
+        # tool_result（一次替换同帧完成），不再需要 JS 注入与去重。
+        if getattr(self.viewer, "_render_v2", False) and isinstance(self._content_data, list):
+            self._upsert_tool_streaming_block(
+                tool_call_id,
+                tool_name,
+                preview,
+                char_count=char_count,
+                completed=completed,
+                add_lines=add_lines,
+                del_lines=del_lines,
+            )
             return
 
         # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
@@ -5756,6 +5848,22 @@ class MessageCard(SimpleCardWidget):
     def remove_tool_streaming(self, tool_call_id: str):
         """移除工具流式块 — 工具执行完成后清理"""
         if not hasattr(self, "viewer") or not self.viewer:
+            return
+        # v2：运行框是块系统里的 tool_streaming 块，移出列表即由补丁删除 DOM
+        if getattr(self.viewer, "_render_v2", False) and isinstance(self._content_data, list):
+            before = len(self._content_data)
+            self._content_data = [
+                _b
+                for _b in self._content_data
+                if not (
+                    isinstance(_b, dict)
+                    and _b.get("type") == "tool_streaming"
+                    and _b.get("tool_call_id") == tool_call_id
+                )
+            ]
+            if len(self._content_data) != before:
+                self.viewer._lazy_markdown_cb = self._build_incremental_md
+                self.viewer._schedule_render(immediate=False)
             return
         # 块从 DOM 移除 → 该工具不再需要 save/restore 保护（pending 移除）
         try:
