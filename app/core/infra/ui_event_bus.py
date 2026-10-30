@@ -81,12 +81,26 @@ class UIEventBus:
                 del self._subs[event]
 
     def publish(self, event: str, **payload: Any) -> None:
-        """发布事件；订阅回调异常隔离（吞掉记 warning）"""
+        """发布事件；订阅回调异常隔离（吞掉记 warning）
+
+        [PERF] 慢订阅者打点（>=50ms 记 WARNING）：publish 是**同步直调**，
+        任一订阅者慢都会阻塞整条调用链（主题切换实测出现过 ev_publish 段
+        秒级）。日志给出事件名 + plugin_name + 回调限定名 + 耗时，可直接
+        定位是哪个订阅者吃掉了时间，不用逐个插件猜。
+        """
+        from time import perf_counter
+
         for plugin_name, callback in list(self._subs.get(event, [])):
+            _t0 = perf_counter()
             try:
                 callback(payload)
             except Exception as e:
                 logger.warning(f"[UIEventBus] {event} 订阅回调异常 ({plugin_name}): {e}")
+            finally:
+                _ms = (perf_counter() - _t0) * 1000
+                if _ms >= 50:
+                    owner = getattr(callback, "__qualname__", None) or getattr(callback, "__name__", "?")
+                    logger.warning(f"[UIEventBus] 慢订阅者 {event}: {plugin_name or 'main'} {owner} = {_ms:.0f}ms")
 
     def subscriptions(self) -> Dict[str, int]:
         """当前各事件订阅数（调试/测试）"""

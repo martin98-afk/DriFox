@@ -197,6 +197,18 @@ def _session_manage(host: Any):
         record = _history().get_session_by_session_id(session_id)
         if record is None:
             return False
+        # 流式保护：当前标签页正在输出时开新标签页加载该会话，不打断对话
+        # （对齐 MainWidget._on_history_session_selected 的既有语义；插件历史页
+        # 直接调 loader 会在 _load_session_from_record 里把当前对话停掉）。
+        if getattr(host, "_is_streaming", False):
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                tm = TabManagerWindow.get_instance()
+                if tm is not None and tm.spawn_tab(host, session_record=record) is not None:
+                    return True
+            except Exception as e:
+                logger.warning(f"[Capability] 流式保护开新标签页失败: {e}")
         loader = getattr(host, "_load_session_from_record", None)
         if not callable(loader):
             return False

@@ -224,17 +224,16 @@ def _resolve_active_host(host: Any):
     """host 为空时（无窗口的调用点）解析一个活跃主窗口。
 
     工具/hook 类调用点没有 MainWidget，而模型配置只存在于主窗口内存态
-    （密钥模式下磁盘 app.config 是密文）。经 UIPluginRegistry 拿活跃窗口。
+    （密钥模式下磁盘 app.config 是密文）。
+
+    ★ 走 ``resolve.active_main_widget``：多标签下必须取用户此刻所在标签页。
+    ``UIPluginRegistry._main_widget`` 是「最后构造的窗口」，切标签页不更新。
     """
     if host is not None:
         return host
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+    from app.plugins.capabilities.resolve import active_main_widget
 
-        reg = UIPluginRegistry.get_instance()
-        return getattr(reg, "_main_widget", None) or next(iter(getattr(reg, "_window_main_widgets", {}).values()), None)
-    except Exception:
-        return None
+    return active_main_widget()
 
 
 def _model_config(host: Any):

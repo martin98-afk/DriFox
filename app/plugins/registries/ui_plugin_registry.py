@@ -1009,8 +1009,11 @@ class UIPluginRegistry:
         """
         from app.utils.theme_style import replay_theme_qss
 
-        for instances in list(self._card_widget_instances.values()):
-            for widget in list(instances.values()):
+        from time import perf_counter
+
+        for _win_id, instances in list(self._card_widget_instances.items()):
+            for _card_id, widget in list(instances.items()):
+                _t0 = perf_counter()
                 try:
                     method = getattr(widget, "refresh_style", None)
                     if not callable(method):
@@ -1031,6 +1034,14 @@ class UIPluginRegistry:
                     continue  # C++ 对象已销毁
                 except Exception as e:
                     logger.warning(f"[UIPluginRegistry] 插件卡 QSS 重放失败: {e}")
+                # [PERF] 慢卡打点：主题切换时整条 publish 是同步的，
+                # 单卡几百 ms 就会让用户感知卡顿，必须能指名道姓
+                _ms = (perf_counter() - _t0) * 1000
+                if _ms >= 100:
+                    logger.warning(
+                        f"[UIPluginRegistry] 慢插件卡主题刷新: {type(widget).__name__} "
+                        f"(card={_card_id}, win={_win_id}) = {_ms:.0f}ms"
+                    )
 
     # ---- 内部注册表操作（Task 2 起填充）----
 
@@ -4177,6 +4188,7 @@ class UIPluginRegistry:
             上下文 dict（可能为空）
         """
         ctx: Dict[str, Any] = {}
+        global_scope = False
         try:
             if card_info.context_provider is not None:
                 ctx.update(card_info.context_provider())
@@ -4185,6 +4197,7 @@ class UIPluginRegistry:
             else:
                 # 全局作用域（Tab 级卡片）：动态解析当前活跃对话窗口的 provider，
                 # 切 Tab 后卡片拉到的是新活跃窗口的 project_root/session_id
+                global_scope = True
                 active_provider = self._resolve_active_window_provider()
                 if active_provider is not None:
                     ctx.update(active_provider())
@@ -4200,11 +4213,17 @@ class UIPluginRegistry:
         # 这里是所有浮动卡/工作台页/设置卡 ctx 的唯一出口，一处覆盖全部路径。
         _host = ctx.get("main_widget")
         if _host is not None:
-            # 登记插件 → 窗口绑定：后台线程（无 ctx）经 caps_for 取能力时用它解析
-            # host，否则 window.current / session.read 这类能力在后台必然拿到空。
-            from app.plugins.capabilities.resolve import note_host
+            # ★ 全局作用域（Tab 级卡片）不登记插件 → 窗口绑定：其宿主不是某个
+            # 具体窗口，绑到「构建 ctx 时的活跃窗口」会把插件后续全部 caps_for
+            # 调用冻结在那个窗口。回归：历史会话页（左侧全局卡）在标签 B 建卡，
+            # 切回标签 A 点会话仍加载进 B——session.manage 的 host 来自这里。
+            # 全局卡的 host 必须每次动态解析（resolve.active_main_widget）。
+            if not global_scope:
+                # 登记插件 → 窗口绑定：后台线程（无 ctx）经 caps_for 取能力时用它
+                # 解析 host，否则 window.current / session.read 这类能力在后台必然拿到空。
+                from app.plugins.capabilities.resolve import note_host
 
-            note_host(card_info.plugin_name, _host)
+                note_host(card_info.plugin_name, _host)
             _pool = _capabilities_for(card_info.plugin_name, _host)
             if _pool is not None:
                 ctx["capabilities"] = _pool

@@ -63,12 +63,9 @@ def register(registry) -> None:
         """
         real = None
         try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.capabilities.resolve import active_main_widget
 
-            reg = UIPluginRegistry.get_instance()
-            real = getattr(reg, "_main_widget", None) or next(
-                iter(getattr(reg, "_window_main_widgets", {}).values()), None
-            )
+            real = active_main_widget()
         except Exception:  # noqa: BLE001 - 无窗口场景返回空实现
             real = None
         if real is None:
