@@ -13715,6 +13715,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.TOP_RIGHT,
             )
 
+    # [PERF] 同进程 GC 钩子最小间隔：gc.collect() 全代回收在对象图大时
+    # 实测 100ms+ 主线程停顿（加载历史会话 profile：gc.collect 118ms）。
+    # 原实现每次清空聊天区（新建/切换会话都走）后 150ms 必回收一次，
+    # 连续新建多个标签页 = 连续卡顿。改为 15s 窗口内至多一次：LRU/渲染
+    # 缓存清理不受影响（_cleanup_global_lru_caches 在切换路径同步执行），
+    # 只是堆回收延后，对象暂留十几秒无功能影响。
+    _GC_HOOK_MIN_INTERVAL_S = 15.0
+
     def _schedule_gc_hook(self):
         """GC 钩子（T9）：防抖合并触发全局缓存清理 + 堆回收。
 
@@ -13723,6 +13731,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if memory_governor._gc_hook_pending:
             return
+        now = time.monotonic()
+        if now - getattr(memory_governor, "_last_gc_hook_at", 0.0) < self._GC_HOOK_MIN_INTERVAL_S:
+            return
+        memory_governor._last_gc_hook_at = now
         memory_governor._gc_hook_pending = True
         QTimer.singleShot(150, memory_governor._run_gc_hook)
 

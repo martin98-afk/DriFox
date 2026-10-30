@@ -1610,7 +1610,7 @@ class FileTreeCard(QWidget):
     # ── 预览 ──
 
     def _open_preview(self, path: str) -> None:
-        """卡片内预览（双击 / 右键菜单入口）；不支持的类型回退到默认程序"""
+        """卡片内预览（双击 / 右键菜单入口）；预览不了回退到默认程序"""
         if not path or not os.path.isfile(path):
             self._show_error(f"文件不存在: {path}")
             return
@@ -1623,7 +1623,11 @@ class FileTreeCard(QWidget):
             font_size=self._colors.get("font_size", 0),
             scrollbar_qss=self._scrollbar_qss,
         )
-        self._preview_page.load(path)
+        if not self._preview_page.load(path):
+            # 预览失败（超大 / 损坏 / 含二进制内容）→ 回树页并交系统默认程序
+            self._close_preview()
+            self._open_file(path)
+            return
         self._stack.setCurrentIndex(_PAGE_PREVIEW)
 
     def _close_preview(self) -> None:

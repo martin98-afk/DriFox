@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
 from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401,E402
 
 PROFILE = "--profile" in sys.argv
+PROFILE_LOAD = "--profile-load" in sys.argv
 RECORD: dict = {}
 
 
@@ -400,6 +401,10 @@ def main():
 
         for i in range(2):
             RECORD.clear()
+            _pr = None
+            if PROFILE_LOAD and i == 0:
+                _pr = cProfile.Profile()
+                _pr.enable()
             t0 = time.perf_counter()
             new = tm.spawn_tab(w0, session_record=record)
             t_sync = (time.perf_counter() - t0) * 1000
@@ -408,6 +413,12 @@ def main():
             t_load = (time.perf_counter() - t1) * 1000
             print(f"\n[加载历史 tab #{i + 1}] spawn_tab 同步段={t_sync:.1f}ms 后续 pump={t_load:.1f}ms")
             report(f"加载历史 tab #{i + 1} 分段")
+            if _pr is not None:
+                _pr.disable()
+                _sio = io.StringIO()
+                pstats.Stats(_pr, stream=_sio).sort_stats("cumulative").print_stats(40)
+                print("\n=== cProfile（加载历史会话全链）===")
+                print(_sio.getvalue())
             try:
                 idx = tm._window_to_index.get(id(new), -1)
                 if idx >= 0:
