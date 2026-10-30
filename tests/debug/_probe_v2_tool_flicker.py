@@ -102,6 +102,11 @@ READ_STATE = """
     added: window.__probeAdded || 0,
     removed: window.__probeRemoved || 0,
     tcH: tc.scrollHeight,
+    order: Array.prototype.map.call(tc.children, function (c) {
+      return (c.getAttribute('data-probe-id') ? 'w' + c.getAttribute('data-probe-id') : '')
+        + (c.id === 'probe-run-block' ? 'RUN' : '')
+        + (c.hasAttribute('data-block-wrapper') ? '' : 'x');
+    }).join(','),
     kids: out
   });
 })()
@@ -121,13 +126,23 @@ TAIL = "工具/思考之后模型继续输出的正文段落{idx}，用来驱动
 
 EXPAND = """
 (function () {
+  var tc = document.getElementById('tool-content');
+  if (!tc) return 'no-tc';
+  // 模拟 worker 侧注入的工具运行框（非 wrapper、data-streaming）
+  var run = document.createElement('div');
+  run.className = 'tool-streaming-block tool-block';
+  run.setAttribute('data-tool-call-id', 'call_run_1');
+  run.setAttribute('data-streaming', 'true');
+  run.textContent = '运行中...';
+  run.id = 'probe-run-block';
+  tc.appendChild(run);
   var b = document.querySelector('#tool-content .think-block')
        || document.querySelector('#tool-content .tool-block[data-tool-call-id="call_probe_1"]');
   if (!b) return 'no-block';
   b.setAttribute('data-expanded', 'true');
   var body = b.querySelector('.cm-collapsible__body, .tool-block__body');
   if (body) body.innerHTML = '<pre>展开后的内容，模拟用户已展开并加载 body</pre>';
-  return 'expanded:' + String(b.className || '').slice(0, 20);
+  return 'expanded+run-injected:' + String(b.className || '').slice(0, 20);
 })()
 """
 

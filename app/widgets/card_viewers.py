@@ -3817,6 +3817,57 @@ class CodeWebViewer(QWebEngineView):
                     if (key) collapsibleState.set(key, expanded);
                 }}
 
+                // 折叠态 + 已加载 body 的跨重建携带（patchBlocks 局部替换与 force_full
+                // 整页清空共用）。流式思考块 key 含内容指纹，内容每涨一批就整块替换；
+                // 新节点带默认折叠态与空 lazy body → 用户展开的卡每批「折叠→展开」
+                // （body 还要走一次 Python 往返才回灌）。按稳定身份（flip-key /
+                // tool-call-id）把展开态与 body HTML 带到新节点，插入时即终态。
+                window._carryCollapseState = function (roots) {{
+                    var out = {{}};
+                    var scope = roots || [document];
+                    for (var i = 0; i < scope.length; i++) {{
+                        var root = scope[i];
+                        if (!root || !root.querySelectorAll) continue;
+                        var cbs = root.querySelectorAll('.cm-collapsible');
+                        for (var j = 0; j < cbs.length; j++) {{
+                            var cb = cbs[j];
+                            var k = _collapseKeyOf(cb);
+                            if (!k) continue;
+                            var cbody = cb.querySelector('.cm-collapsible__body');
+                            out[k] = {{
+                                exp: cb.getAttribute('data-expanded') === 'true',
+                                html: cbody ? (cbody.innerHTML || '') : ''
+                            }};
+                        }}
+                    }}
+                    return out;
+                }};
+                window._restoreCarriedCollapse = function (roots, carried) {{
+                    if (!carried) return;
+                    var scope = roots || [document];
+                    for (var i = 0; i < scope.length; i++) {{
+                        var root = scope[i];
+                        if (!root || !root.querySelectorAll) continue;
+                        var cbs = root.querySelectorAll('.cm-collapsible');
+                        for (var j = 0; j < cbs.length; j++) {{
+                            var cb = cbs[j];
+                            var k = _collapseKeyOf(cb);
+                            var st = k ? carried[k] : null;
+                            if (!st) continue;
+                            syncExpandedAttrs(cb, !!st.exp);
+                            var cbody = cb.querySelector('.cm-collapsible__body');
+                            if (cbody && st.html) {{
+                                cbody.innerHTML = st.html;
+                                cbody.style.height = st.exp ? 'auto' : '0px';
+                                cbody.style.opacity = st.exp ? '1' : '0';
+                                // 内容已随节点带过来：清懒加载标记，restoreCollapsibleStates
+                                // 的懒注入分支不会再清空重灌（那是一次可见的塌陷-回弹）
+                                cb.removeAttribute('data-lazy-body');
+                            }}
+                        }}
+                    }}
+                }};
+
                 function animateCollapsible(block, expand) {{
                     const body = block.querySelector('.cm-collapsible__body');
                     if (!body) return;
@@ -5000,29 +5051,17 @@ class CodeWebViewer(QWebEngineView):
                     // 删除段：按已存在的 block 节点计（不是 children 下标）。
                     // 删除前 dispose 块内 echarts 实例：节点移除后实例不可达，
                     // ResizeObserver + canvas 常驻 → 流式长会话累积泄漏（OOM 白屏）。
-                    // 🐛 折叠态 + 已加载 body 迁移（2026-10-30 用户实测「展开后又重新
-                    // 折叠展开」）：流式思考块的 key 含内容指纹，内容每涨一批就整块
-                    // 替换；新节点带默认折叠态与空的 lazy body → restoreCollapsibleStates
-                    // 走懒注入重请求（body 先清空再回灌）→ 展开的卡每批「折叠→展开」
-                    // 一次。按稳定身份（data-flip-key / data-tool-call-id）把展开态与
-                    // body HTML 带到新节点，插入 DOM 时即终态，过程中无折叠过渡。
-                    var carried = {{}};
+                    // 🐛 折叠态 + 已加载 body 迁移（见 _carryCollapseState）：原地删除前
+                    // 按稳定身份快照，插入后回填，插入 DOM 时即终态。
+                    var _victims = [];
+                    for (var vi = 0; vi < del; vi++) {{
+                        if (nodes[base + vi]) _victims.push(nodes[base + vi]);
+                    }}
+                    var carried = (typeof window._carryCollapseState === 'function'
+                        && window._carryCollapseState(_victims)) || {{}};
                     for (var i = 0; i < del; i++) {{
                         var victim = nodes[base + i];
                         if (victim && victim.parentNode) {{
-                            if (victim.querySelectorAll) {{
-                                var _cbs = victim.querySelectorAll('.cm-collapsible');
-                                for (var ci = 0; ci < _cbs.length; ci++) {{
-                                    var _cb = _cbs[ci];
-                                    var _ck = typeof _collapseKeyOf === 'function' ? _collapseKeyOf(_cb) : '';
-                                    if (!_ck) continue;
-                                    var _cbody = _cb.querySelector('.cm-collapsible__body');
-                                    carried[_ck] = {{
-                                        exp: _cb.getAttribute('data-expanded') === 'true',
-                                        html: _cbody ? (_cbody.innerHTML || '') : ''
-                                    }};
-                                }}
-                            }}
                             if (typeof window._disposeChartNode === 'function') {{
                                 var _olds = victim.querySelectorAll('.echarts-container');
                                 for (var oi = 0; oi < _olds.length; oi++) window._disposeChartNode(_olds[oi]);
@@ -5030,8 +5069,22 @@ class CodeWebViewer(QWebEngineView):
                             victim.parentNode.removeChild(victim);
                         }}
                     }}
-                    // 插入段：插在 base 位置原有节点之前；base 越界则追加到末尾
-                    var anchor = nodes[base + del] || null;
+                    // 插入段：锚点必须是「删除后仍存活的 wrapper」。
+                    // ⚠️ 不能简单用 nodes[base+del] 兜底 append：工具区里还有 JS 注入
+                    // 的工具运行框（data-streaming，非 wrapper），append 会把新块排到
+                    // 它们之后 → 运行框看起来「跑到思考上面」，下一批 patch 又移回来，
+                    // 表现为运行框位置来回跳（2026-10-30 用户实测）。base==0 时插到
+                    // 容器最前，保证新块仍在运行框之前。
+                    var anchor = null;
+                    var _after = nodes[base + del] || null;
+                    if (_after && _after.parentNode === container) {{
+                        anchor = _after;
+                    }} else if (base > 0) {{
+                        var _prev = nodes[base - 1];
+                        if (_prev && _prev.parentNode === container) anchor = _prev.nextSibling;
+                    }} else {{
+                        anchor = container.firstChild;
+                    }}
                     var frag = document.createDocumentFragment();
                     var made = [];
                     for (var j = 0; j < items.length; j++) {{
@@ -5079,29 +5132,8 @@ class CodeWebViewer(QWebEngineView):
                     // 折叠态 / body 回填（必须在 restoreCollapsibleStates 之前：回填后
                     // data-expanded 已是 true 且已清 lazy-body 标记，restore 直接走终态分支，
                     // 不会发起懒注入重请求把 body 清空重灌）
-                    if (made.length) {{
-                        var _newCbs = [];
-                        for (var mi2 = 0; mi2 < made.length; mi2++) {{
-                            var _found = made[mi2].querySelectorAll
-                                ? made[mi2].querySelectorAll('.cm-collapsible') : [];
-                            for (var ni2 = 0; ni2 < _found.length; ni2++) _newCbs.push(_found[ni2]);
-                        }}
-                        for (var ei = 0; ei < _newCbs.length; ei++) {{
-                            var _nb2 = _newCbs[ei];
-                            var _nk2 = typeof _collapseKeyOf === 'function' ? _collapseKeyOf(_nb2) : '';
-                            var _st = _nk2 ? carried[_nk2] : null;
-                            if (!_st) continue;
-                            if (typeof syncExpandedAttrs === 'function') syncExpandedAttrs(_nb2, !!_st.exp);
-                            var _nbody2 = _nb2.querySelector('.cm-collapsible__body');
-                            if (_nbody2 && _st.html) {{
-                                _nbody2.innerHTML = _st.html;
-                                _nbody2.style.height = _st.exp ? 'auto' : '0px';
-                                _nbody2.style.opacity = _st.exp ? '1' : '0';
-                                // 内容已随节点带过来：清懒加载标记，restore 的懒注入分支
-                                // 不会再清空重灌（否则一次可见的塌陷-回弹）
-                                _nb2.removeAttribute('data-lazy-body');
-                            }}
-                        }}
+                    if (made.length && typeof window._restoreCarriedCollapse === 'function') {{
+                        window._restoreCarriedCollapse(made, carried);
                     }}
                     if (made.length && typeof restoreCollapsibleStates === 'function') restoreCollapsibleStates(made);
                     if (_v2fz) requestAnimationFrame(function () {{ var _e = document.getElementById('_fz'); if (_e) _e.remove(); }});
@@ -5335,6 +5367,15 @@ class CodeWebViewer(QWebEngineView):
                                     }}
                                 }}
                                 var seen = {{}};
+                                // 搬入位置：最后一个正式块 wrapper 之后（而不能 append）。
+                                // 工具区末尾常挂着 JS 注入的运行框（非 wrapper），append 会把
+                                // 搬入卡排到运行框后面 → 运行框看起来「跑到思考上面」，下批又
+                                // 被 patch 挤回去 = 位置来回跳（2026-10-30 用户实测）。
+                                var _insPoint = null;
+                                var _tcNodes = window._blockNodes(tc);
+                                _insPoint = _tcNodes.length
+                                    ? _tcNodes[_tcNodes.length - 1].nextSibling
+                                    : tc.firstChild;
                                 var strays = cpEl.querySelectorAll(
                                     '.think-block, .think-streaming, .think-compact, [data-tool-call-id]'
                                 );
@@ -5374,7 +5415,12 @@ class CodeWebViewer(QWebEngineView):
                                         if (sEl.parentNode) sEl.parentNode.removeChild(sEl);
                                         continue;
                                     }}
-                                    tc.appendChild(sEl);
+                                    if (_insPoint && _insPoint.parentNode === tc) {{
+                                        tc.insertBefore(sEl, _insPoint);
+                                    }} else {{
+                                        tc.appendChild(sEl);
+                                    }}
+                                    _insPoint = sEl.nextSibling;
                                     sEl.setAttribute('data-moved', '1');
                                     existing[sk] = sEl;
                                 }}
@@ -7242,6 +7288,9 @@ class CodeWebViewer(QWebEngineView):
             if self._render_v2:
                 try:
                     if self._perform_update_v2():
+                        if not self.__dict__.get("_v2_diag_done", False):
+                            self._v2_diag_done = True
+                            logger.info("[render-v2] 本卡已由 v2 块级通道接管（后续走 patchBlocks）")
                         return
                 except Exception:
                     # 异常仅回退本轮（下一帧重试）；开关保持，避免暂时性错误
@@ -7253,6 +7302,10 @@ class CodeWebViewer(QWebEngineView):
                 else:
                     # 未接管 = 无块源（欢迎 / 用户消息的纯文本卡）：永久关闭
                     # v2 防每帧白试，并复位状态防 DOM 双写。
+                    logger.info(
+                        f"[render-v2] 关闭 v2（无块源）：role={getattr(self.parent(), 'role', '?')} "
+                        f"content_data_type={type(getattr(self.parent(), '_content_data', None)).__name__}"
+                    )
                     self._render_v2 = False
                     self._v2_last = None
 
@@ -7601,6 +7654,14 @@ class CodeWebViewer(QWebEngineView):
                 return None
             parent_fn = getattr(p, "parent", None)
             p = parent_fn() if callable(parent_fn) else None
+        # 没找到 _content_data：assistant 卡在流式首帧前可能尚未初始化该属性，
+        # 与「空块列表」同语义（暂无内容），保持 v2 接管，不能永久关闭。
+        q = self.parent()
+        while q is not None:
+            if getattr(q, "role", None) == "assistant":
+                return []
+            parent_fn = getattr(q, "parent", None)
+            q = parent_fn() if callable(parent_fn) else None
         return None
 
     def _v2_render_ctx(self) -> RenderCtx:
@@ -7765,6 +7826,9 @@ class CodeWebViewer(QWebEngineView):
             # 整条消息退回 v1 全量 innerHTML 路径 → 每批重建全部折叠框，用户展开
             # 的思考/工具卡每批「折叠又展开」（2026-10-30 实测）。本批不渲染，
             # 保持 v2 接管，下一批有块时正常走 patch。
+            if not self.__dict__.get("_v2_empty_logged", False):
+                self._v2_empty_logged = True
+                logger.info("[render-v2] 空块待内容（保持 v2 接管，不回退 v1）")
             self._final_render_pending = False
             return True
 
@@ -7906,6 +7970,13 @@ class CodeWebViewer(QWebEngineView):
                 "document.querySelectorAll('.echarts-container').forEach(function(el){"
                 "window._disposeChartNode(el);el._chartStashed=false;});}"
                 "}catch(e){}"
+                # force_full 会整页清空两个容器：清空后 patchBlocks 重建的新节点
+                # 带默认折叠态与空 lazy body → 展开的思考/工具卡又抹平，且 body
+                # 要走一次 Python 往返重灌（可见的塌陷-回弹）。清空前按稳定身份
+                # 快照，重建后回填（与 patchBlocks 共用 _carryCollapseState）。
+                "window.__v2Carry=window._carryCollapseState?"
+                "window._carryCollapseState([document.getElementById('content-placeholder'),"
+                "document.getElementById('tool-content')]):null;"
                 "var _c1=document.getElementById('content-placeholder');if(_c1)_c1.innerHTML='';"
                 "var _c2=document.getElementById('tool-content');if(_c2)_c2.innerHTML='';"
             )
@@ -7930,8 +8001,13 @@ class CodeWebViewer(QWebEngineView):
                 + ");"
             )
         if force_full:
-            # 清空后的位置还原必须在 _v2AfterPatch 之前：它里面紧凑模式的块搬移
-            # 还会再动一次正文高度，但先还原能保证用户至少不回到顶部。
+            # 清空后：先回填折叠态/body（插入时即终态），再还原滚动位置。
+            # 两者都必须在 _v2AfterPatch 之前（它里面的搬移还会再动一次高度）。
+            js.append(
+                "if(window.__v2Carry&&window._restoreCarriedCollapse){"
+                "window._restoreCarriedCollapse([document.getElementById('content-placeholder'),"
+                "document.getElementById('tool-content')],window.__v2Carry);window.__v2Carry=null;}"
+            )
             js.append("if(typeof window._v2ScrollRestore==='function')window._v2ScrollRestore();")
         elif _has_patch_ops:
             js.append(

@@ -145,6 +145,20 @@ def test_v2_blocks_empty_list_returns_empty_not_none(monkeypatch):
     assert v._v2_blocks() == [], "空 list 应返回 []（暂无内容），不能返回 None（无块源）"
 
 
+def test_v2_blocks_empty_for_assistant_card_without_content_data(monkeypatch):
+    """assistant 卡流式首帧前 _content_data 可能尚未初始化：按「暂无内容」处理。"""
+
+    class _AssistantCard:
+        role = "assistant"
+
+        def parent(self):
+            return None
+
+    v = _make_viewer(monkeypatch, [])
+    monkeypatch.setattr(CodeWebViewer, "parent", lambda self: _AssistantCard())
+    assert v._v2_blocks() == [], "assistant 卡无 _content_data 时应返回 []（不是 None）"
+
+
 def test_empty_blocks_keeps_v2_takeover(monkeypatch):
     """空块时 _perform_update_v2 返回 True（本批不渲染），调用点不得永久关闭 v2。
 

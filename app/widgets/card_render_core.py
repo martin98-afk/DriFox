@@ -3914,7 +3914,13 @@ _SKELETON_CACHE_MAX = 48
 # 插入后按稳定身份（flip-key / tool-call-id）回填并清 lazy-body——流式思考块 key
 # 含内容指纹、内容每涨一批就整块替换，新节点带默认折叠态与空 body，restore 走
 # 懒注入重请求（body 先清空再回灌），表现为展开的卡每批「折叠→展开」一次。
-_SKELETON_CACHE_VERSION = 68
+# _SKELETON_CACHE_VERSION +1（v69）：折叠态/body 携带抽成 _carryCollapseState /
+# _restoreCarriedCollapse，patchBlocks 与 force_full 整页清空共用——后者清空两个
+# 容器后重建，新节点同样丢展开态与 body。旧骨架无这对函数，须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v70）：patchBlocks 插入锚点与搬移插入点改「按存活
+# wrapper 定位」——工具区末尾挂着 JS 注入的运行框（非 wrapper），原 append 兜底会把
+# 新块/搬入卡排到运行框之后，运行框看起来「跑到思考上面」，下一批又移回 = 位置跳。
+_SKELETON_CACHE_VERSION = 70
 
 
 def _js_literal(value) -> str:
