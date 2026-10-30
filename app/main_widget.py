@@ -91,6 +91,7 @@ from app.core.modelmeta.model_capabilities import (
     apply_model_defaults,
     get_model_capabilities,
     normalize_reasoning_effort,
+    resolve_capabilities_for_model,
     resolve_model_capabilities,
 )
 from app.core.infra import memory_governor
@@ -7985,7 +7986,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
             self._model_btn_text.setText(self._current_model_name)
-            caps = get_model_capabilities(self._current_model_name, self._current_provider_def_name())
+            caps = resolve_capabilities_for_model(self._current_model_name, self._current_provider_def_name())
             note = caps.get("note", "")
             # 第一行：服务商 · 模型 · 价格(单位在末尾一次) · 多模态/思考
             cost_parts = []
@@ -8071,7 +8072,7 @@ class OpenAIChatToolWindow(ToolWindow):
         tooltip = "模型参数配置"
         try:
             if self._current_model_name:
-                caps = get_model_capabilities(self._current_model_name, self._current_provider_def_name())
+                caps = resolve_capabilities_for_model(self._current_model_name, self._current_provider_def_name())
                 if caps.get("supports_thinking") and caps.get("thinking_param") == "reasoning_effort":
                     config = self._get_current_model_config()
                     raw_effort = config.get("思考等级", "")
@@ -8105,7 +8106,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not self._current_model_name:
             return
-        caps = get_model_capabilities(self._current_model_name, self._current_provider_def_name())
+        caps = resolve_capabilities_for_model(self._current_model_name, self._current_provider_def_name())
         values = [str(v) for v in (caps.get("reasoning_effort_values") or [])]
         if not values:
             # 无等级可选值 → 无可轮换，忽略点击
