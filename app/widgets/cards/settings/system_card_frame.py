@@ -192,14 +192,33 @@ class SystemCardFrame(QFrame):
     def _apply_base_style(self):
         # Colors.refresh() 由调用方（refresh_style / _build_base_ui）确保已执行
         # 表面规范与浮层卡同源（CardStyles.floating），alpha 沿用原本的 230。
-        self.setStyleSheet(CardStyles.floating("SystemCardFrame", alpha=230))
+        # [PERF] 同串短路：setStyleSheet 会 repolish 本卡全子树（设置卡
+        # 1087 控件，实测单次 ~260ms）；同一张卡在同一刷新周期内可能被
+        # main_widget 5a 与 GlobalCardController 各刷一次（如设置弹窗），
+        # 第二次必须 0 成本。
+        set_style_sheet_if_changed(self, CardStyles.floating("SystemCardFrame", alpha=230))
 
     def _apply_content_surface(self):
         """内容层不透明实底（滚动 blit 前置条件）
 
         卡片本体表面是 CARD_BG alpha=230（见 _apply_base_style），下层由
         覆盖层容器承托；这里把两者预合成成等价实色，避免改实底后观感变化。
+
+        [PERF] palette 同色短路：setPalette 即使颜色完全不变也会向整棵子树
+        投递 PaletteChange（设置弹窗 1087 控件逐个重新 polish，实测该段占
+        LLMSettingsCard.refresh_style 的绝大部分）。颜色没变就一个字节都不动。
         """
+        from app.utils.design_tokens import opaque_surface_color
+
+        try:
+            color = opaque_surface_color(
+                fg=Colors.CARD_BG.format(alpha=255), alpha=230, backdrop=Colors.CONTENT_BG
+            )
+            cw = self.content_widget
+            if cw.autoFillBackground() and cw.palette().color(cw.backgroundRole()) == color:
+                return
+        except RuntimeError:
+            return  # widget 已销毁
         # fg 只取 CARD_BG 的 rgb 分量（工具内部忽略串自带 alpha，以 alpha 参数为准）
         make_scroll_content_opaque(
             self.content_widget,
@@ -218,14 +237,23 @@ class SystemCardFrame(QFrame):
         """
         Colors.refresh()
 
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
         # ── 卡片本体（背景 + 边框） ──
+        _TRC.timer_start("scf_base")
         self._apply_base_style()
         self._apply_content_surface()
+        _TRC.timer_end("scf_base")
 
-        # ── 字体/图标 ──
-        self.title_label.setFont(get_unified_font(12, True))
+        # ── 字体/图标 ──（[PERF] setFont 同字体短路：字体不变时 setFont 仍会
+        # 走 fontChange + 布局失效重算，每张卡 3\u00d7 全量遍历时成本可观）
+        _title_font = get_unified_font(12, True)
+        if self.title_label.font() != _title_font:
+            self.title_label.setFont(_title_font)
         if self.icon_label is not None:
-            self.icon_label.setFont(get_unified_font(12))
+            _icon_font = get_unified_font(12)
+            if self.icon_label.font() != _icon_font:
+                self.icon_label.setFont(_icon_font)
             if self._svg_icon_name:
                 s = scale_icon_size(self._ICON_SVG_BASE_SIZE)
                 self.icon_label.setPixmap(get_icon(self._svg_icon_name).pixmap(s, s))
@@ -234,7 +262,9 @@ class SystemCardFrame(QFrame):
             base_size = getattr(self, "_icon_base_size", 20)
             s = scale_icon_size(base_size)
             icon_widget.setFixedSize(s, s)
-        self._count_label.setFont(get_unified_font(10))
+        _count_font = get_unified_font(10)
+        if self._count_label.font() != _count_font:
+            self._count_label.setFont(_count_font)
 
         # ── Tab 按钮样式 ──
         if hasattr(self, "_tab_buttons"):
@@ -243,7 +273,9 @@ class SystemCardFrame(QFrame):
         # ── 搜索框（直接刷新自身样式） ──
         if hasattr(self, "_search_input") and self._search_input is not None:
             si = self._search_input
-            si.setStyleSheet(f"""
+            set_style_sheet_if_changed(
+                si,
+                f"""
                 QLineEdit {{
                     background: {Colors.HOVER_BG};
                     border: 1px solid {Colors.BORDER};
@@ -259,23 +291,29 @@ class SystemCardFrame(QFrame):
                 QLineEdit::placeholder {{
                     color: {Colors.INPUT_PLACEHOLDER};
                 }}
-            """)
+            """,
+            )
 
         # ── 头部粘性标签（直接刷新自身样式） ──
         if hasattr(self, "_header_sticky_label"):
-            self._header_sticky_label.setStyleSheet(f"""
+            set_style_sheet_if_changed(
+                self._header_sticky_label,
+                f"""
                 color: {Colors.ACCENT_WARM};
                 {font_size_css(11)}
                 padding: 0 2px 0 6px;
                 font-weight: bold;
-            """)
+            """,
+            )
 
         # ── 面包屑（颜色 token 随主题重建） ──
         if hasattr(self, "_breadcrumb_items") and self._breadcrumb_items:
             self._apply_breadcrumb_styles()
 
         # ── 内容区子控件递归刷新（SettingCard 等子卡片） ──
+        _TRC.timer_start("scf_children")
         self._refresh_content_children()
+        _TRC.timer_end("scf_children")
 
         # ── 滚动区 QSS（滚动条颜色随主题） ──
         # [PERF] 只在滚动条**控件自身**上设 QSS：对 QScrollArea setStyleSheet 会
@@ -470,17 +508,16 @@ class SystemCardFrame(QFrame):
             clickable = callable(spec.get("handler"))
             color = Colors.TEXT_ACCENT if clickable else Colors.TEXT_PRIMARY
             label.setFont(QFont(title_font))
-            label.setStyleSheet(
-                f"color: {color}; background: transparent; border: none;"
-            )
+            set_style_sheet_if_changed(label, f"color: {color}; background: transparent; border: none;")
         # 分隔符槽位：1, 3, 5, ...
         for i in range(1, self._breadcrumb_layout.count(), 2):
             item = self._breadcrumb_layout.itemAt(i)
             w = item.widget() if item is not None else None
             if w is not None:
-                w.setStyleSheet(
+                set_style_sheet_if_changed(
+                    w,
                     f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; "
-                    f"{get_font_family_css()}; background: transparent; border: none;"
+                    f"{get_font_family_css()}; background: transparent; border: none;",
                 )
 
     def set_header_sticky(self, text: str):
@@ -512,8 +549,10 @@ class SystemCardFrame(QFrame):
 
     def _update_tab_styles(self):
         for tab_id, btn in self._tab_buttons.items():
-            btn.setStyleSheet(TabStyles.active() if tab_id == self._current_tab else TabStyles.inactive())
-            btn.setFont(get_unified_font(12))
+            set_style_sheet_if_changed(btn, TabStyles.active() if tab_id == self._current_tab else TabStyles.inactive())
+            _f = get_unified_font(12)
+            if btn.font() != _f:
+                btn.setFont(_f)
 
     def set_extra_button_handler(self, handler, icon=None, tooltip=""):
         """设置标题栏额外按钮（通用方法）

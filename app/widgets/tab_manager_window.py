@@ -1541,26 +1541,37 @@ class TabManagerWindow(FramelessWindow):
         # hover 预览浮层是独立顶层窗口，不继承本窗口 QSS，需单独刷新；
         # 预览中的 frame 带内联样式（脱离 QSS 作用域），同步刷新
         overlay = getattr(self, "_wb_overlay", None)
+        ThemeRefreshCoordinator.timer_start("tm_overlay")
         if overlay is not None:
             overlay.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_overlay")
         if getattr(self, "_wb_in_preview", False):
             self._workbench_frame.setStyleSheet(self._wb_frame_inline_qss())
 
         # 刷新自绘顶栏（tab 胶囊/按钮样式随主题；Colors 已由调用方 refresh）
+        ThemeRefreshCoordinator.timer_start("tm_titlebar")
         if hasattr(self.titleBar, "refresh_style"):
             self.titleBar.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_titlebar")
         # 刷新空状态页（字体/颜色随主题或字号刷新）
+        ThemeRefreshCoordinator.timer_start("tm_empty")
         if hasattr(self, "_empty_state"):
             self._empty_state.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_empty")
         # 刷新所有 Tab 项（标题颜色/字体/图标尺寸随主题或字号刷新）
         # refresh_style 内部已执行 repaint，此处不再重复
         try:
             ThemeRefreshCoordinator.timer_start("tm_tabs")
-            self._tab_panel.refresh_style()
-            ThemeRefreshCoordinator.timer_end("tm_tabs")
+            _tab_panel = getattr(self, "_tab_panel", None)
+            if _tab_panel is not None:
+                _tab_panel.refresh_style()
         except Exception:
-            pass
+            # 不能静默：此前 except pass 吞掉异常 → tm_tabs 计时缺失且侧栏停留旧主题
+            logger.exception("[TabManagerWindow] tab panel theme refresh failed")
+        finally:
+            ThemeRefreshCoordinator.timer_end("tm_tabs")
         # 刷新全局卡片容器背景（主题色/边框随主题切换）
+        ThemeRefreshCoordinator.timer_start("tm_containers")
         for _c in (
             getattr(self, "_global_top_container", None),
             getattr(self, "_global_bottom_container", None),
@@ -1571,6 +1582,7 @@ class TabManagerWindow(FramelessWindow):
                     _c.refresh_style()
                 except Exception:
                     pass
+        ThemeRefreshCoordinator.timer_end("tm_containers")
         # 刷新全局卡片本体（系统设置/服务商/Hook/MCP 编辑等挂在本窗口层，
         # 不在 main_widget widget 树内，主题/字号刷新链扫不到，需显式触发）
         try:
@@ -1603,11 +1615,10 @@ class TabManagerWindow(FramelessWindow):
         self._apply_bg_from_theme()
         ThemeRefreshCoordinator.timer_end("tm_bg")
 
-        # 刷新标题栏（含 full 卡片 tab 与插件常驻 tab 样式）
-        try:
-            self.titleBar.refresh_style()
-        except Exception:
-            pass
+        # [PERF] 此处原有第二次无条件 self.titleBar.refresh_style()：本方法前部
+        # 已刷过同一个顶栏，中间几步（tm_tabs/tm_cards/tm_bg）均不涉及顶栏
+        # 控件，属纯重复（顶栏内部多次 setStyleSheet，实测几十 ms 级）。
+        # 若未来把前部那次调用移走，记得在这里补回。
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
@@ -2466,13 +2477,18 @@ class TabManagerWindow(FramelessWindow):
                 border-radius: 8px;
             }
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
+        _TRC.timer_start("tm_qss_win")
         if qss != self.styleSheet():
             self.setStyleSheet(qss)
+        _TRC.timer_end("tm_qss_win")
         # [T30] 顶层三兄弟：可见者即时刷色值串并清脏；不可见者置脏跳过
         #（repolish 留到可见性恢复点 _refresh_theme_dirty_frames）
         # [T30-P0] getattr 防御：本方法在构造期（_setup_ui）即被调用，
         # 此时 frame 属性可能尚未创建——未创建属正常态，跳过即可，
         # 后续主题切换 / showEvent / 动画结束等补刷点会兜住。
+        _TRC.timer_start("tm_qss_frames")
         for frame, qss_method in (
             (getattr(self, "_tab_frame", None), self._qss_tab_frame),
             (getattr(self, "_chat_frame", None), self._qss_chat_frame),
@@ -2493,6 +2509,7 @@ class TabManagerWindow(FramelessWindow):
                     frame._theme_needs_refresh = True
             except RuntimeError:
                 continue  # C++ 对象已销毁
+        _TRC.timer_end("tm_qss_frames")
         # ── splitter handle 样式：下沉到 QSplitterHandle 自身（性能关键）──
         # [PERF] QSplitter.setStyleSheet 会让 QStyleSheetStyle 重建并 repolish
         # **整棵子树**（本窗口三个 splitter 分别挂 431/1470/1462 个子控件）。
@@ -2508,7 +2525,9 @@ class TabManagerWindow(FramelessWindow):
         #   （裸属性写法与 `*:hover` 均无法触发 hover 态）；
         # - handle 由 splitter 在 addWidget / setOrientation 时按需创建，
         #   故需 _reapply_splitter_handle_styles 在布局变化后补刷。
+        _TRC.timer_start("tm_qss_handles")
         self._reapply_splitter_handle_styles()
+        _TRC.timer_end("tm_qss_handles")
 
     def _qss_tab_frame(self) -> str:
         """#tabFrame 串：色值已改 paintEvent 自绘（tabFrame + tabPanel 双层），此处恒为空

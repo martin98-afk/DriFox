@@ -1384,17 +1384,26 @@ class LLMSettingsCard(SystemCardFrame):
 
     def refresh_style(self):
         """主题刷新：基类样式 + 左侧导航按钮 + 页滚动条"""
+        from app.utils.design_tokens import set_style_sheet_if_changed
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
+        _TRC.timer_start("llm_super")
         super().refresh_style()
+        _TRC.timer_end("llm_super")
+        _TRC.timer_start("llm_nav")
         if self._nav_frame is not None:
-            self._nav_frame.setStyleSheet(self._nav_frame_style())
+            set_style_sheet_if_changed(self._nav_frame, self._nav_frame_style())
         if hasattr(self, "_nav_buttons"):
             self._update_nav_styles()
+        _nav_group_css = self._nav_group_style()
         for label in getattr(self, "_nav_group_labels", []):
-            label.setStyleSheet(self._nav_group_style())
+            set_style_sheet_if_changed(label, _nav_group_css)
+        _TRC.timer_end("llm_nav")
         # [PERF] 只刷滚动条控件自身：对 QScrollArea setStyleSheet 会 repolish
         # 整页子树（每页 1400+ 控件），而主题变化只影响滚动条颜色。
+        _TRC.timer_start("llm_sb")
         try:
-            from app.utils.design_tokens import get_unified_scrollbar_style, set_style_sheet_if_changed
+            from app.utils.design_tokens import get_unified_scrollbar_style
 
             sb_style = get_unified_scrollbar_style(8)
             for page in getattr(self, "_page_scrolls", {}).values():
@@ -1403,6 +1412,7 @@ class LLMSettingsCard(SystemCardFrame):
                         set_style_sheet_if_changed(sb, sb_style)
         except Exception:
             pass
+        _TRC.timer_end("llm_sb")
 
     def _setup_appearance_cards(self):
         self.uiFontSizeCard = FontSizeStepperCard(

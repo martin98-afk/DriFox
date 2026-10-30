@@ -71,6 +71,25 @@ class ThemeRefreshCoordinator:
     # 最近一轮各段耗时（dump_slow 汇总用；每轮 batched 刷新结束取一次快照并清空）
     _phase_ms: dict[str, float] = {}
 
+    # ── 刷新周期令牌 ──
+    # 一次主题刷新周期（= 一次 _apply_runtime_ui_settings 进入）内，同一张卡
+    # 可能被多条刷新链命中：main_widget 5a 显式列表 + TabManagerWindow 的
+    # GlobalCardController.refresh_theme_styles（设置弹窗两处都在刷，实测
+    # 单卡 260ms 级被付两次）。卡被刷过就打上本周期号，后到的链路直接跳过。
+    _refresh_cycle: int = 0
+
+    @classmethod
+    def begin_refresh_cycle(cls) -> int:
+        """开启新一轮刷新周期（每个 _apply_runtime_ui_settings 入口调一次）"""
+        with cls._lock:
+            cls._refresh_cycle += 1
+            return cls._refresh_cycle
+
+    @classmethod
+    def get_refresh_cycle(cls) -> int:
+        with cls._lock:
+            return cls._refresh_cycle
+
     # ══════════════════════════════════════════════════════════════
     #  版本管理
     # ══════════════════════════════════════════════════════════════

@@ -640,7 +640,12 @@ class TabItem(QFrame):
         # 树行化后并入 12px 体系（与历史会话行一致）；列表模式保持 13px
         size = 12 if self._tree_row else 13
         # 直接通过 setFont 强制应用字体（避开 stylesheet 继承坑）
-        self._title_label.setFont(get_unified_font(size))
+        # [PERF] 同字体短路：setFont 即使字体完全不变也会走 fontChange →
+        # 布局失效重算（全量标签项 × 3 个 QLabel）；比较值后再设，
+        # 与 apply_font_size_to_widget 的短路写法一致。
+        _tf = get_unified_font(size)
+        if self._title_label.font() != _tf:
+            self._title_label.setFont(_tf)
         # 颜色随主题刷新（字体同一行写也能 setFont，但颜色走 stylesheet 更稳）
         # 同串短路：主题刷新会遍历**全部**标签项，N 个标签 × 3 次 setStyleSheet
         # 的 repolish 是多标签拖慢主题刷新的直接来源之一。
@@ -648,12 +653,15 @@ class TabItem(QFrame):
             self._title_label,
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(size)}",
         )
-        self._sub_label.setFont(get_unified_font(10))
+        _sf = get_unified_font(10)
+        if self._sub_label.font() != _sf:
+            self._sub_label.setFont(_sf)
         set_style_sheet_if_changed(
             self._sub_label,
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
         )
-        self._sub_time.setFont(get_unified_font(10))
+        if self._sub_time.font() != _sf:
+            self._sub_time.setFont(_sf)
         set_style_sheet_if_changed(
             self._sub_time,
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
@@ -1425,14 +1433,26 @@ class UIPluginRow(QFrame):
         self.update()
 
     def refresh_style(self):
-        """刷新主题样式：字体 + 颜色 + 主题相关图标"""
+        """刷新主题样式：字体 + 颜色 + 主题相关图标
+
+        [PERF] 三个短路：字体同值不 setFont（fontChange 会触发布局重算）、
+        QSS 同串不重设（setStyleSheet 恒 repolish）、图标仅在明暗模式翻转时
+        重取（QIcon(路径) + set_icon 每次都是新的 pixmap 链，纯色切换下图标
+        不变）。插件行数量 = 已装插件数，主题刷新会逐行走一遍。
+        """
         from app.utils.utils import get_unified_font
 
         # 应用系统字体（避免 stylesheet 继承问题）
-        self._title_label.setFont(get_unified_font(12))
-        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
-        self._icon_label.setStyleSheet("background: transparent;")
-        self.setStyleSheet(f"""
+        _tf = get_unified_font(12)
+        if self._title_label.font() != _tf:
+            self._title_label.setFont(_tf)
+        set_style_sheet_if_changed(
+            self._title_label, f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}"
+        )
+        set_style_sheet_if_changed(self._icon_label, "background: transparent;")
+        set_style_sheet_if_changed(
+            self,
+            f"""
             #uiPluginRow {{
                 background: transparent;
                 border-radius: 5px;
@@ -1440,17 +1460,20 @@ class UIPluginRow(QFrame):
             #uiPluginRow:hover {{
                 background: {Colors.HOVER_BG};
             }}
-        """)
+        """,
+        )
 
-        # 重新获取主题相关图标（浅/深色主题图标不同）
-        if self._plugin_name:
+        # 重新获取主题相关图标（浅/深色主题图标不同）——仅明暗模式确实翻转时
+        _is_dark = isDarkTheme()
+        if self._plugin_name and getattr(self, "_icon_theme_is_dark", None) != _is_dark:
+            self._icon_theme_is_dark = _is_dark
             try:
                 from app.plugins.managers.plugin_manager import PluginManager
 
                 pm = PluginManager.get_instance()
                 plugin = pm.get_plugin(self._plugin_name)
                 icon_config = getattr(plugin, "icon_config", None) if plugin else None
-                icon_path = icon_config.get("dark" if isDarkTheme() else "light") if icon_config else None
+                icon_path = icon_config.get("dark" if _is_dark else "light") if icon_config else None
                 if icon_path:
                     self.set_icon(QIcon(str(icon_path)))
             except Exception:
@@ -2626,10 +2649,16 @@ class TabPanel(QWidget):
             self.set_mode(PANEL_MODE_TREE)
 
     def _refresh_top_bar_style(self):
-        """刷新顶部行样式：「新建对话」行（颜色/字体/图标）+ 图标按钮（主题图标/图标尺寸）"""
+        """刷新顶部行样式：「新建对话」行（颜色/字体/图标）+ 图标按钮（主题图标/图标尺寸）
+
+        [PERF] QSS 走同串短路；图标（新建会话 pixmap / 竖向「⋯」旋转位图）
+        仅在明暗模式翻转或图标尺寸变化时重建——主题刷新会每轮走到这里，
+        纯色切换下图标本身不变。
+        """
         # 「新建对话」行：复用插件行样式惯例（hover 背景 + 圆角），随主题刷新
         if getattr(self, "_new_chat_row", None) is not None:
-            self._new_chat_row.setStyleSheet(
+            set_style_sheet_if_changed(
+                self._new_chat_row,
                 f"""
                 #uiPluginRow {{
                     background: transparent;
@@ -2638,21 +2667,25 @@ class TabPanel(QWidget):
                 #uiPluginRow:hover {{
                     background: {Colors.HOVER_BG};
                 }}
-            """
+            """,
             )
         if getattr(self, "_new_chat_label", None) is not None:
-            self._new_chat_label.setFont(get_unified_font(12))
-            self._new_chat_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
+            _tf = get_unified_font(12)
+            if self._new_chat_label.font() != _tf:
+                self._new_chat_label.setFont(_tf)
+            set_style_sheet_if_changed(
+                self._new_chat_label,
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}",
             )
-        self._update_new_chat_icon()
-        # 竖向「⋯」是旋转位图（不随主题自动变色），主题/字号变更时必须重新生成
-        if getattr(self, "_new_more_btn", None) is not None:
-            self._new_more_btn.setIcon(_vertical_more_icon())
         _icon_px = scale_icon_size(14)
-        for _btn in (
-            getattr(self, "_new_more_btn", None),
-        ):
+        _icon_sig = (isDarkTheme(), _icon_px)
+        if getattr(self, "_top_bar_icon_sig", None) != _icon_sig:
+            self._top_bar_icon_sig = _icon_sig
+            self._update_new_chat_icon()
+            # 竖向「⋯」是旋转位图（不随主题自动变色），主题/字号变更时必须重新生成
+            if getattr(self, "_new_more_btn", None) is not None:
+                self._new_more_btn.setIcon(_vertical_more_icon())
+        for _btn in (getattr(self, "_new_more_btn", None),):
             if _btn is not None:
                 _btn.setIconSize(QSize(_icon_px, _icon_px))
 
@@ -4420,27 +4453,43 @@ class TabPanel(QWidget):
         """
         # 刷新模块级缓存颜色，避免 paintEvent 使用旧主题色值
         _invalidate_cached_colors()
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
         # 分隔线线色随主题（深色白线 / 浅色黑线），静态化会锁死首帧色
+        _TRC.timer_start("tab_divider")
         self._refresh_divider_styles()
+        _TRC.timer_end("tab_divider")
         # 重新应用侧边两个滚动区的滚动条 QSS（滚动条颜色随主题）
+        _TRC.timer_start("tab_scroll")
         self._reapply_scroll_styles()
+        _TRC.timer_end("tab_scroll")
         # 「工作区」标题行样式（颜色/字号随主题与字体缩放）
+        _TRC.timer_start("tab_header")
         self._refresh_tree_header_style()
+        _TRC.timer_end("tab_header")
         # 先全部调用 update()（异步，Qt 自动合并绘制事件），
         # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
+        _TRC.timer_start("tab_items")
         for item in self._items:
             item.refresh_style()
+        _TRC.timer_end("tab_items")
         # 同步刷新团队分组框样式（边框/背景色随主题）
+        _TRC.timer_start("tab_groups")
         for grp in self._team_groups.values():
             # 折叠态保持加深背景（bg_alpha=70），避免主题刷新把 alpha 重置回 40
             self._apply_team_group_style(grp, bg_alpha=70 if getattr(grp, "_team_compact", False) else 40)
+        _TRC.timer_end("tab_groups")
         self.update()
         # 工作区树（即使当前不可见也要刷新，否则切过去还是旧主题）
+        _TRC.timer_start("tab_tree")
         if self._tree_widget is not None:
             self._tree_widget.refresh_style()
+        _TRC.timer_end("tab_tree")
+        _TRC.timer_start("tab_plugin")
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:
             self._gitee_account_row.refresh_style()
+        _TRC.timer_end("tab_plugin")
 
     def _apply_custom_card_style(self, compact: bool = False):
         """应用自定义插件卡片分组样式（二级菜单风：去边框 + 极淡底色块）。

@@ -109,7 +109,14 @@ class GlobalCardController:
         一遍）。隐藏卡用户看不见，刷新纯属白付；置 _theme_needs_refresh
         后由其自身 showEvent 补刷自愈（LLMSettingsCard 已有该链路）。
         无补刷链路的卡（实现 _theme_needs_refresh 才是协议）保守照常刷。
+
+        [PERF] 跨链去重：设置弹窗同时挂在 main_widget 5a 的显式刷新列表里，
+        批处理路径下同一周期内会被刷两遍（实测 ~520ms 白付）。5a 刷完会在
+        卡上打 `_last_theme_refresh_cycle`，本层比对同周期号直接跳过。
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        _cycle = ThemeRefreshCoordinator.get_refresh_cycle()
         for card in (
             self._settings_popup,
             self._provider_edit_card,
@@ -129,12 +136,16 @@ class GlobalCardController:
             try:
                 if not hasattr(card, "refresh_style"):
                     continue
+                # 本周期已由别处刷过（含 5a 打标）→ 跳过
+                if getattr(card, "_last_theme_refresh_cycle", None) == _cycle:
+                    continue
                 # 仅对「有补刷链路」+ 隐藏的卡做门控，避免主题更新永久丢失
                 if hasattr(card, "_theme_needs_refresh"):
                     if not card.isVisible():
                         card._theme_needs_refresh = True
                         continue
                 card.refresh_style()
+                card._last_theme_refresh_cycle = _cycle
             except RuntimeError:
                 continue  # C++ 对象已销毁（本卡跳过，序列继续）
             except Exception as e:

@@ -1010,6 +1010,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._deferred_queue = DeferredTaskQueue()
         self._pending_agent_switch = None
+        # 慢刷新卡打点（_safe_refresh 累计；每周期在 _apply_runtime_ui_settings 重置）
+        self._slow_refresh_cards: list = []
         # ★ singleton 信号连接跟踪（销毁时统一断开，防泄漏）
         # 注意：self._singleton_connections 是纯 Python 属性，可先于 super().__init__()
         # 设置；但 self.destroyed 是 QObject 内置信号，其 .connect() 必须在父类
@@ -10653,11 +10655,17 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[HotReload] UI 插件列表已刷新")
 
     def _safe_refresh(self, widget, method_name: str = "refresh_style") -> None:
-        """周期内刷新去重：同一 widget 的同名刷新方法每周期只调一次。
+        """周期内刷新去重 + 隐藏门控：同一 widget 的同名刷新方法每周期只调一次。
 
         5a（颜色）与 5b（字体）块对同一批浮动卡片的 refresh_style 重复调用
         是已知冗余（setStyleSheet 解析 + 向下传播非免费）。周期集合在
         _apply_runtime_ui_settings 入口重置。
+
+        [PERF] 隐藏门控：仅在 widget **类上实现了 `_theme_needs_refresh`
+        协议**时生效（协议语义 = 该卡自带显示期补刷链路，如 CardContainer
+        的 showEvent、LLMSettingsCard 的 showEvent）。隐藏卡用户看不见，
+        刷新纯属白付；置脏后由补刷链路自愈。无协议的卡保守照刷，避免
+        主题更新永久丢失。
         """
         if widget is None or not hasattr(widget, method_name):
             return
@@ -10665,10 +10673,31 @@ class OpenAIChatToolWindow(ToolWindow):
         if key in self._refreshed_in_cycle:
             return
         self._refreshed_in_cycle.add(key)
+        if method_name == "refresh_style" and hasattr(type(widget), "_theme_needs_refresh"):
+            try:
+                if not widget.isVisible():
+                    widget._theme_needs_refresh = True
+                    return
+            except RuntimeError:
+                return  # C++ 对象已销毁
+        import time as _time
+
+        _t0 = _time.perf_counter()
         try:
             getattr(widget, method_name)()
         except Exception as e:
             logger.warning(f"[theme refresh] {type(widget).__name__}.{method_name}: {e}")
+        else:
+            # 打周期标：跨链去重（见 _apply_runtime_ui_settings 的 begin_refresh_cycle）
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            try:
+                widget._last_theme_refresh_cycle = ThemeRefreshCoordinator.get_refresh_cycle()
+            except Exception:
+                pass  # C++ 已销毁或其他异常：打标失败不影响刷新结果
+            _ms = (_time.perf_counter() - _t0) * 1000
+            if _ms >= 25:
+                self._slow_refresh_cards.append(f"{type(widget).__name__}={_ms:.0f}ms")
 
     def _safe_refresh_tooltips(self) -> None:
         """refresh_all_tooltips 的周期内去重（主题块与字体块各有一处调用）。"""
@@ -10729,6 +10758,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 是已知冗余；set/flag 在每次进入本方法时重置，即一个刷新周期） ──
         self._refreshed_in_cycle: set = set()
         self._tooltips_refreshed_in_cycle = False
+        # 慢卡打点（_safe_refresh 累计，5b 结束后汇总输出；常驻但只在慢时落日志）
+        self._slow_refresh_cards: list = []
+        # 跨链去重周期号：同一张卡被 5a 刷过后，GlobalCardController 等后续
+        # 链路（TabManagerWindow._on_theme_changed）靠它跳过重复刷新
+        ThemeRefreshCoordinator.begin_refresh_cycle()
 
         # ── 0. 按需扫描 widget 树，按类型缓存 ──
         # [PERF] 单次 findChildren(QWidget) 全树遍历 + isinstance 分类，
@@ -11088,6 +11122,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
 
         ThemeRefreshCoordinator.timer_end("cards_5b")
+        if self._slow_refresh_cards:
+            logger.warning(f"[theme refresh] 慢刷新卡: {' '.join(self._slow_refresh_cards)}")
+            self._slow_refresh_cards.clear()
         ThemeRefreshCoordinator.timer_end("total")
 
     def _refresh_floating_cards_font_style(self):
