@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
 
 from qframelesswindow import FramelessWindow
 
+from app.utils._startup_probe import mark as _probe
 from app.utils.config import Settings
 from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
@@ -683,7 +684,78 @@ class _DockSideWrapper(QWidget):
         self._partner_saved_size = 0
 
 
-class _WorkbenchFrame(QFrame):
+class _ThemedPanel(QFrame):
+    """自绘主题面板：圆角半透明底 + 1px 边框，颜色实时取 Colors
+
+    为什么要自绘（2026-10-30）：三个顶层容器的主题色原先写在 QSS 串里，
+    主题一变串就变 → `setStyleSheet` 触发**整子树 repolish**（三容器合计
+    实测 1.5s 级，见 ThemeRefresh-SLOW 的 tm_qss 段）。改成 paintEvent 自绘后
+    主题切换只需 `update()`（重绘一个矩形），QSS 只剩 margin/radius 这类静态
+    属性，串恒定 → 同串短路天然命中。
+
+    观感等价性：背景色/边框色/圆角值与原 QSS 逐项相同（CARD_BG alpha=150、
+    BORDER 1px、8px 圆角），不引入新的视觉差异。
+    """
+
+    # 主题刷新协议：ThemeManager 派发时优先调 refresh_style
+    _theme_needs_refresh: bool = False
+
+    def __init__(self, parent=None, *, radius: int = 8, bg_alpha: int = 150, border: bool = True):
+        super().__init__(parent)
+        self._panel_radius = radius
+        self._panel_bg_alpha = bg_alpha
+        self._panel_border = border
+
+    def refresh_style(self) -> None:
+        """主题切换入口：只重绘（不碰 QSS，零 repolish）"""
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        from PyQt5.QtCore import QRectF
+        from PyQt5.QtGui import QPainter, QPen
+
+        from app.utils.design_tokens import Colors, _rgba_to_qcolor
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # 内缩 0.5px：1px 描边落在像素中心，避免抗锯齿把边框糊成 2px 虚边
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setBrush(_rgba_to_qcolor(Colors.CARD_BG.format(alpha=self._panel_bg_alpha)))
+        if self._panel_border:
+            painter.setPen(QPen(_rgba_to_qcolor(Colors.BORDER), 1))
+        else:
+            painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(rect, self._panel_radius, self._panel_radius)
+
+
+class _WindowBaseLayer(QWidget):
+    """窗口本体底色层（替代 #tabManagerWindow 的 QSS 背景）
+
+    QSS 里写窗口底色会让主题切换触发**整窗** repolish（实测 600~800ms）；
+    改由铺满窗口的底层控件自绘，主题切换只 update()。层级必须在所有内容
+    之下（lower），且鼠标穿透，不参与任何交互。
+    """
+
+    _theme_needs_refresh: bool = False
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setObjectName("windowBaseLayer")
+
+    def refresh_style(self) -> None:
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        from PyQt5.QtGui import QPainter
+
+        from app.utils.design_tokens import Colors, _rgba_to_qcolor
+
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), _rgba_to_qcolor(Colors.CONTENT_BG))
+
+
+class _WorkbenchFrame(_ThemedPanel):
     """工作台外框：动画期间可临时把 minimumSizeHint 归零
 
     QSplitter 经 QWidgetItemV2::minimumSize() 取窗格下限：显式 minimum 为
@@ -701,7 +773,7 @@ class _WorkbenchFrame(QFrame):
     _theme_needs_refresh: bool = False
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
+        super().__init__(parent, radius=8)
         self._min_hint_disabled = False
 
     def set_min_hint_disabled(self, disabled: bool) -> None:
@@ -828,20 +900,32 @@ class _ContentStack(QWidget):
         self._current = i
         if direction != 0 and Animations.motion_enabled() and old is not None and old is not new:
             self._start_slide(old, new, direction)
-        elif i == 0:
+        else:
+            # 直切分支同样必须先快进在途动画（over/swap 收尾 _settle 会把旧顶层页
+            # raise 归位，若放任其在直切之后收尾，覆盖层页会被顶到对话页之上——
+            # 对话页被空覆盖层遮住，表现为「切回对话后整个对话区空白，切走再切回
+            # 才恢复」）。_start_slide 自带重入快进，只有本分支此前裸奔。
+            if self.slide_in_progress():
+                self._finish_slide(interrupted=True)
             # 回对话：show 对话页（实测 ~10ms）+ raise 盖住覆盖层。
             # ⚠️ 覆盖层页**不 hide**——保活不变式，消灭下次切换的 show 传播。
-            if old is not None:
-                old.lower()
-            new.show()
-            new.raise_()
-        else:
-            # 去覆盖层：覆盖层 raise 到顶；对话页 hide（实测 ~11ms，
-            # 省布局 + 杜绝焦点穿透到被遮的对话区）
-            new.show()
-            new.raise_()
-            if old is not None:
-                old.hide()
+            # ⚠️ show 前先归位几何：动画在途期 resize 只同步动画参与页
+            # （_sync_slide_baseline），hide 态的对话页会停留在旧尺寸，
+            # 直接 show 会以旧几何上屏（右侧漏出一条旧宽度的空白）。
+            if i == 0:
+                if old is not None:
+                    old.lower()
+                new.setGeometry(self.rect())
+                new.show()
+                new.raise_()
+            else:
+                # 去覆盖层：覆盖层 raise 到顶；对话页 hide（实测 ~11ms，
+                # 省布局 + 杜绝焦点穿透到被遮的对话区）
+                new.setGeometry(self.rect())
+                new.show()
+                new.raise_()
+                if old is not None:
+                    old.hide()
         self.currentChanged.emit(i)
 
     def setCurrentWidget(self, w: QWidget) -> None:
@@ -1188,8 +1272,10 @@ class TabManagerWindow(FramelessWindow):
         self._tab_switch_queue: list = []
         self._tab_switch_timer: Optional[QTimer] = None
 
+        _probe("p4.setup_ui.start")
         self._setup_ui()
         self._setup_signals()
+        _probe("p4.setup_ui.end")
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
         # ── 应用级服务启动已挪至 main.py（壳显示后、首窗构造前）──
@@ -1226,7 +1312,9 @@ class TabManagerWindow(FramelessWindow):
         get_global_card_controller()
 
         # 刷新 Tab 面板内嵌的 UI 插件列表
+        _probe("p4.refresh_ui_plugins.start")
         self._tab_panel.refresh_ui_plugins()
+        _probe("p4.refresh_ui_plugins.end")
         # 注册到 TrayManager
         _sm_t2 = _sm_time.perf_counter()
         logger.debug(f"[TabManager] __init__ API 会话/全局卡段耗时 {(_sm_t2 - _sm_t1) * 1000:.0f}ms")
@@ -1420,7 +1508,16 @@ class TabManagerWindow(FramelessWindow):
         ThemeRefreshCoordinator.timer_start("tab_manager")
 
         # 重建样式表
+        ThemeRefreshCoordinator.timer_start("tm_qss")
         self._apply_theme_stylesheet()
+        # 窗口底色层自绘：串恒定短路后靠 update() 换色
+        _base_layer = getattr(self, "_window_base_layer", None)
+        if _base_layer is not None:
+            try:
+                _base_layer.refresh_style()
+            except RuntimeError:
+                self._window_base_layer = None
+        ThemeRefreshCoordinator.timer_end("tm_qss")
 
         # 刷新右侧工作台面板（页签条 / 任务区 / 内置页 / 插件页签 / 卡片 tab
         # 全在 workbench_panel.refresh_style 内逐页分发，独立于本窗口 QSS）
@@ -1433,33 +1530,48 @@ class TabManagerWindow(FramelessWindow):
         #   dispatch 路径下 panel 另有独立注册，此处会重复刷新——低频云同步/
         #   主题热重载路径，refresh_style 幂等，双刷可接受。
         try:
+            ThemeRefreshCoordinator.timer_start("tm_wb")
             panel = getattr(self, "workbench_panel", None)
             if panel is not None:
                 panel.refresh_style()
+            ThemeRefreshCoordinator.timer_end("tm_wb")
         except Exception:
             logger.exception("[TabManagerWindow] workbench panel theme refresh failed")
 
         # hover 预览浮层是独立顶层窗口，不继承本窗口 QSS，需单独刷新；
         # 预览中的 frame 带内联样式（脱离 QSS 作用域），同步刷新
         overlay = getattr(self, "_wb_overlay", None)
+        ThemeRefreshCoordinator.timer_start("tm_overlay")
         if overlay is not None:
             overlay.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_overlay")
         if getattr(self, "_wb_in_preview", False):
             self._workbench_frame.setStyleSheet(self._wb_frame_inline_qss())
 
         # 刷新自绘顶栏（tab 胶囊/按钮样式随主题；Colors 已由调用方 refresh）
+        ThemeRefreshCoordinator.timer_start("tm_titlebar")
         if hasattr(self.titleBar, "refresh_style"):
             self.titleBar.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_titlebar")
         # 刷新空状态页（字体/颜色随主题或字号刷新）
+        ThemeRefreshCoordinator.timer_start("tm_empty")
         if hasattr(self, "_empty_state"):
             self._empty_state.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_empty")
         # 刷新所有 Tab 项（标题颜色/字体/图标尺寸随主题或字号刷新）
         # refresh_style 内部已执行 repaint，此处不再重复
         try:
-            self._tab_panel.refresh_style()
+            ThemeRefreshCoordinator.timer_start("tm_tabs")
+            _tab_panel = getattr(self, "_tab_panel", None)
+            if _tab_panel is not None:
+                _tab_panel.refresh_style()
         except Exception:
-            pass
+            # 不能静默：此前 except pass 吞掉异常 → tm_tabs 计时缺失且侧栏停留旧主题
+            logger.exception("[TabManagerWindow] tab panel theme refresh failed")
+        finally:
+            ThemeRefreshCoordinator.timer_end("tm_tabs")
         # 刷新全局卡片容器背景（主题色/边框随主题切换）
+        ThemeRefreshCoordinator.timer_start("tm_containers")
         for _c in (
             getattr(self, "_global_top_container", None),
             getattr(self, "_global_bottom_container", None),
@@ -1470,14 +1582,17 @@ class TabManagerWindow(FramelessWindow):
                     _c.refresh_style()
                 except Exception:
                     pass
+        ThemeRefreshCoordinator.timer_end("tm_containers")
         # 刷新全局卡片本体（系统设置/服务商/Hook/MCP 编辑等挂在本窗口层，
         # 不在 main_widget widget 树内，主题/字号刷新链扫不到，需显式触发）
         try:
             from app.widgets.cards.global_card_controller import get_global_card_controller
 
+            ThemeRefreshCoordinator.timer_start("tm_cards")
             _controller = get_global_card_controller()
             if _controller is not None:
                 _controller.refresh_theme_styles()
+            ThemeRefreshCoordinator.timer_end("tm_cards")
         except Exception:
             logger.exception("[TabManagerWindow] global cards theme refresh failed")
         # 重画所有 tab 的项目图标：仅在 scale_icon_size 变化时才需重建
@@ -1496,13 +1611,14 @@ class TabManagerWindow(FramelessWindow):
                     pass
 
         # 刷新全局背景图
+        ThemeRefreshCoordinator.timer_start("tm_bg")
         self._apply_bg_from_theme()
+        ThemeRefreshCoordinator.timer_end("tm_bg")
 
-        # 刷新标题栏（含 full 卡片 tab 与插件常驻 tab 样式）
-        try:
-            self.titleBar.refresh_style()
-        except Exception:
-            pass
+        # [PERF] 此处原有第二次无条件 self.titleBar.refresh_style()：本方法前部
+        # 已刷过同一个顶栏，中间几步（tm_tabs/tm_cards/tm_bg）均不涉及顶栏
+        # 控件，属纯重复（顶栏内部多次 setStyleSheet，实测几十 ms 级）。
+        # 若未来把前部那次调用移走，记得在这里补回。
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
@@ -2314,58 +2430,65 @@ class TabManagerWindow(FramelessWindow):
         # wb_hidden 路径独立成串重设窗口串即可，无需触碰色值容器串）。
         # 只拆**顶层三兄弟**的原因：子树重叠容器（chatFrame/chatManagerContent
         # 各含 1400+ 控件）逐个设反而更慢（拆分合计 1245ms vs 整窗 320ms，实测）。
-        qss = f"""
-            #tabManagerWindow {{
-                /* [T30-P0fix] 窗口本体底色：无独立承载链，窗口串是唯一挂点。
-                   f-string 动态色值——CONTENT_BG 变则串变，同串短路语义不受影响
-                   （字号/同主题场景色值不变，仍走短路）。
+        qss = """
+            #tabManagerWindow {
+                /* [2026-10-30] 窗口本体底色改由 _WindowBaseLayer 自绘承载：
+                   原先这里写 f-string 色值 → 主题一变整串变 → setStyleSheet
+                   触发整窗 1500+ 控件 repolish（实测 600~800ms）。改为
+                   transparent 后本串恒定（同串短路直接命中），底色由铺满
+                   窗口的底层控件绘制，主题切换只 update()。
                    ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
                    圆角外侧三角区不会被绘制，底层透出系统默认窗口色。窗口圆角
                    由 DWM 负责（_apply_win11_dwm_chrome）。 */
-                background: {Colors.CONTENT_BG};
-            }}
-            #tabFrame {{
+                background: transparent;
+            }
+            #tabFrame {
                 /* 左侧圆角矩形容器，与右侧 #chatFrame 对称，提升呼吸感 */
                 border-radius: 8px;
                 margin: 4px 0 4px 4px;  /* 四边与窗口 4px 边距，右 0 让位 splitter handle */
-            }}
-            #chatFrame {{
+            }
+            #chatFrame {
                 border-radius: 8px;
                 /* 左右 margin 均 0，让位给 splitter handle：三窗格布局下
                    中间窗格两侧各有一个 4px handle，若此处保留右 4px margin，
                    右间距会变成 8px 而左间距只有 4px，两侧不对称。 */
                 margin: 4px 0 4px 0;
-            }}
+            }
             /* 工作台隐藏后右侧 handle 消失，需补回窗口右边距，
                否则对话区圆角矩形贴死窗口边框 */
-            #chatFrame[wbHidden="true"] {{
+            #chatFrame[wbHidden="true"] {
                 margin: 4px 4px 4px 0;
-            }}
-            #tabManagerContent {{
+            }
+            #tabManagerContent {
                 background: transparent;
                 border-radius: 8px;
-            }}
-            #contentArea {{
+            }
+            #contentArea {
                 background: transparent;
-            }}
-            #contentStack {{
+            }
+            #contentStack {
                 background: transparent;
-            }}
-            #globalOverlay {{
+            }
+            #globalOverlay {
                 /* 覆盖层页面透明：面板底由内部 CardContainer 按卡片状态自绘
                    （transparentOverlay 卡片 → 容器透明，透出 #chatFrame 半透明
                    面板与对话区无缝衔接；普通卡片 → 容器自画 alpha=246 面板底）。 */
                 background: transparent;
                 border-radius: 8px;
-            }}
+            }
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
+        _TRC.timer_start("tm_qss_win")
         if qss != self.styleSheet():
             self.setStyleSheet(qss)
+        _TRC.timer_end("tm_qss_win")
         # [T30] 顶层三兄弟：可见者即时刷色值串并清脏；不可见者置脏跳过
         #（repolish 留到可见性恢复点 _refresh_theme_dirty_frames）
         # [T30-P0] getattr 防御：本方法在构造期（_setup_ui）即被调用，
         # 此时 frame 属性可能尚未创建——未创建属正常态，跳过即可，
         # 后续主题切换 / showEvent / 动画结束等补刷点会兜住。
+        _TRC.timer_start("tm_qss_frames")
         for frame, qss_method in (
             (getattr(self, "_tab_frame", None), self._qss_tab_frame),
             (getattr(self, "_chat_frame", None), self._qss_chat_frame),
@@ -2378,11 +2501,15 @@ class TabManagerWindow(FramelessWindow):
                 if frame.isVisible():
                     if frame_qss != frame.styleSheet():
                         frame.setStyleSheet(frame_qss)
+                    # 自绘容器（_ThemedPanel）：颜色不在 QSS 里，靠 update() 重绘
+                    if hasattr(frame, "refresh_style"):
+                        frame.refresh_style()
                     frame._theme_needs_refresh = False
                 else:
                     frame._theme_needs_refresh = True
             except RuntimeError:
                 continue  # C++ 对象已销毁
+        _TRC.timer_end("tm_qss_frames")
         # ── splitter handle 样式：下沉到 QSplitterHandle 自身（性能关键）──
         # [PERF] QSplitter.setStyleSheet 会让 QStyleSheetStyle 重建并 repolish
         # **整棵子树**（本窗口三个 splitter 分别挂 431/1470/1462 个子控件）。
@@ -2398,39 +2525,37 @@ class TabManagerWindow(FramelessWindow):
         #   （裸属性写法与 `*:hover` 均无法触发 hover 态）；
         # - handle 由 splitter 在 addWidget / setOrientation 时按需创建，
         #   故需 _reapply_splitter_handle_styles 在布局变化后补刷。
+        _TRC.timer_start("tm_qss_handles")
         self._reapply_splitter_handle_styles()
+        _TRC.timer_end("tm_qss_handles")
 
     def _qss_tab_frame(self) -> str:
-        """#tabPanel/#tabFrame 主题色值串（[T30] 静态串拆出的色值组）"""
-        return f"""
-            #tabPanel {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border-radius: 8px;
-            }}
-            #tabFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
-            }}
+        """#tabFrame 串：色值已改 paintEvent 自绘（tabFrame + tabPanel 双层），此处恒为空
+
+        tabPanel 的背景同步改为 TabPanel.paintEvent 自绘；两层 alpha=150 叠加
+        关系与原 QSS 一致。串恒为空 → 同串短路命中，主题切换零 repolish。
         """
+        return ""
 
     def _qss_chat_frame(self) -> str:
-        """#chatFrame 主题色值串"""
-        return f"""
-            #chatFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
-            }}
+        """#chatFrame 串：色值已改 paintEvent 自绘，此处恒为空
+
+        返回空串时调用点会跳过 setStyleSheet（空串会触发一次无意义 repolish）。
+        margin/圆角在静态窗口串里，不依赖本串。
         """
+        return ""
 
     def _qss_workbench_frame(self) -> str:
-        """#workbenchFrame 主题色值串（radius/margin 一并在此：静态串无此规则）"""
-        return f"""
-            #workbenchFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
+        """#workbenchFrame 串：只剩静态的 radius/margin（色值已自绘）
+
+        串与主题无关 → 始终同串 → 同串短路命中，主题切换零 repolish。
+        margin 必须留在这里：静态窗口串不含 #workbenchFrame 规则。
+        """
+        return """
+            #workbenchFrame {
                 border-radius: 8px;
                 margin: 4px 4px 4px 0;
-            }}
+            }
         """
 
     def _refresh_theme_dirty_frames(self) -> None:
@@ -2462,6 +2587,10 @@ class TabManagerWindow(FramelessWindow):
                     frame_qss = qss_method()
                     if frame_qss != frame.styleSheet():
                         frame.setStyleSheet(frame_qss)
+                    # 自绘容器（_ThemedPanel）：颜色已不在 QSS 里，必须 update()
+                    # 重绘才会换色；无 refresh_style 的普通 QFrame 自动跳过。
+                    if hasattr(frame, "refresh_style"):
+                        frame.refresh_style()
                     frame._theme_needs_refresh = False
                 else:
                     frame._theme_needs_refresh = True
@@ -2565,6 +2694,18 @@ class TabManagerWindow(FramelessWindow):
 
         # Z 序：放到 parent 最底层
         label.lower()
+        # ★ 窗口区域：背景 label 必须垫在 _WindowBaseLayer **之上**。
+        # base layer 用不透明 CONTENT_BG 填充整窗（替代原 QSS 底色），
+        # label.lower() 会把它压到 base 之下 → 背景图/底色被完全盖住
+        # （实测 2026-10-30：窗口背景不显示，侧栏/对话区不受影响——
+        # 它们的背景 label 挂在各自 frame 上，与此层不同父，Z 序无关）。
+        if area == "window":
+            base = getattr(self, "_window_base_layer", None)
+            if base is not None:
+                try:
+                    base.stackUnder(label)
+                except RuntimeError:
+                    pass  # 底色层已销毁
         # 尺寸：撑满 parent
         label.setGeometry(parent_widget.rect())
         label.show()
@@ -2599,7 +2740,13 @@ class TabManagerWindow(FramelessWindow):
         return image  # fallback 原值
 
     def _resize_bg_labels(self):
-        """同步 3 个区域背景 label 的尺寸跟随 parent（resize 阶段一/阶段二都用）"""
+        """同步背景 label 与窗口底色层的尺寸（resize 阶段一/阶段二都用）"""
+        base = getattr(self, "_window_base_layer", None)
+        if base is not None:
+            try:
+                base.setGeometry(self.rect())
+            except Exception:
+                pass
         for attr in ("_bg_label", "_sidebar_bg_label", "_chat_area_bg_label"):
             lbl = getattr(self, attr, None)
             if lbl is None:
@@ -2617,6 +2764,13 @@ class TabManagerWindow(FramelessWindow):
         # 顶部让位自绘无边框标题栏；mac 上标题栏只有 28（与系统交通灯配套）
         main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)
         main_layout.setSpacing(0)
+
+        # ── 窗口本体底色层（承载原 #tabManagerWindow 的 background）──
+        # 必须先于内容创建并 lower() 到底层；几何由 resizeEvent 同步。
+        self._window_base_layer = _WindowBaseLayer(self)
+        self._window_base_layer.setGeometry(self.rect())
+        self._window_base_layer.lower()
+        self._window_base_layer.show()
 
         # ── 内容区（水平：TabPanel + QStackedWidget） ──
         content_widget = QWidget(self)
@@ -2638,7 +2792,7 @@ class TabManagerWindow(FramelessWindow):
         # ── 左侧 Tab 区域圆角矩形包裹框架（与右侧 #chatFrame 对称，提升呼吸感） ──
         # 在 splitter 里直接给 #tabPanel 设 border 会被 splitter handle 子控件
         # 绘制顺序吞掉，所以再包一层 QFrame 用 objectName 给样式。
-        self._tab_frame = QFrame(content_widget)
+        self._tab_frame = _ThemedPanel(content_widget, radius=8)
         self._tab_frame.setObjectName("tabFrame")
         # QSplitter 控制的 child 是 _tab_frame 而非 _tab_panel，因此
         # _tab_frame 必须显式设最大/最小宽度，否则 splitter 拖拽会绕过
@@ -2689,7 +2843,7 @@ class TabManagerWindow(FramelessWindow):
         ResizeOrchestrator.get_instance().register_stack(self._content_area)
 
         # ── 右侧对话区域圆角矩形包裹框架 ──
-        self._chat_frame = QFrame(content_widget)
+        self._chat_frame = _ThemedPanel(content_widget, radius=8)
         self._chat_frame.setObjectName("chatFrame")
         # 工作台默认隐藏：对话区先按“右侧无边距”以外的隐藏态样式渲染，
         # 首次展开时由 set_workbench_visible 切回三窗格 margin
@@ -3882,6 +4036,10 @@ class TabManagerWindow(FramelessWindow):
             if card_id not in open_dict:
                 open_dict[card_id] = title
                 self.titleBar.add_tab(card_id, title, closable=True)
+            elif open_dict[card_id] != title:
+                # 卡片隐藏期间注册表 title 变过（如侧栏计数「插件市场 (N)」）
+                open_dict[card_id] = title
+                self.titleBar.set_tab_text(card_id, title)
             self._set_replace_active(card_id)
             # 覆盖层内互斥切换（页已在前台且无在途切换动画）：整页按 tab 位置差
             # 方向滑入（助手→左侧的轨迹 tab = 从左滑出），无事件时兜底右滑。
@@ -5769,9 +5927,40 @@ class TabManagerWindow(FramelessWindow):
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
         self._tab_panel.refresh_ui_plugins()
         self._sync_plugin_titlebar_tabs()
+        self._sync_replace_tab_titles()
         # 工作区页面刷新（Phase G）：注册集变化后重建 sidebar 入口 + 销毁被卸载页面
         if hasattr(self, "_workspace_page_host"):
             self._workspace_page_host.refresh_pages()
+
+    def _sync_replace_tab_titles(self) -> None:
+        """把注册表里最新的卡片标题同步到已挂的标题栏 tab
+
+        replace 卡（插件 full 卡）的标题会随运行状态变化：插件市场把待更新数
+        写进 title（「插件市场 (N)」↔「插件市场」）。tab 文字在 add_tab 时
+        固化，注册表变化不会自己传过去（用户视角：更新完插件 tab 文字没变）。
+        这里按注册表现状逐个纠正，open 集合里存的标题同步更新，供后续
+        ``_refresh_titlebar_cards`` 重建时复用。
+        """
+        replace_open = getattr(self, "_replace_open", None)
+        if not replace_open:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            cards = UIPluginRegistry.get_instance().get_floating_cards()
+        except Exception:
+            return
+        for open_dict in replace_open.values():
+            for card_id, old_title in list(open_dict.items()):
+                info = cards.get(card_id)
+                if info is not None:
+                    new_title = (info.title or "").strip() or card_id
+                else:
+                    new_title = GLOBAL_REPLACE_TITLES.get(card_id, card_id)
+                if new_title == old_title:
+                    continue
+                open_dict[card_id] = new_title
+                self.titleBar.set_tab_text(card_id, new_title)
 
     @staticmethod
     def _create_fake_page():
@@ -5890,6 +6079,11 @@ class TabManagerWindow(FramelessWindow):
         # 插件常驻标题栏 tab 同步补刷（同 refresh_ui_plugins 的可见性门控根因）
         try:
             self._sync_plugin_titlebar_tabs()
+        except Exception:
+            pass
+        # replace 卡 tab 文案补刷：隐藏期间注册表 title 变化（如侧栏计数）不丢
+        try:
+            self._sync_replace_tab_titles()
         except Exception:
             pass
         # macOS：close→show 循环后修复标题栏错位（见 _refresh_mac_fullsize_content）
@@ -6547,6 +6741,8 @@ class TabManagerWindow(FramelessWindow):
             # FramelessWindow.__init__ 内部 resize(500,500) 同步触发的首个 Resize：
             # 本类节流状态尚未初始化，直接走基类布局（含顶栏宽度同步）并返回
             super().resizeEvent(event)
+            if getattr(self, "_window_base_layer", None) is not None:
+                self._window_base_layer.setGeometry(self.rect())
             self._sync_wb_overlay_geometry()
             return
 

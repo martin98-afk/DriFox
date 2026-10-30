@@ -19,7 +19,7 @@ PluginHostService — 应用级插件宿主服务（一个应用一个实例）
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
@@ -76,6 +76,61 @@ def resume_plugin_watcher() -> None:
         logger.debug(f"[PluginHost] resume_plugin_watcher 失败（不影响调用方）: {e}")
 
 
+def run_on_main_thread(fn: Callable[[], Any], wait: bool = False, timeout: float = 5.0) -> bool:
+    """在 Qt 主线程执行 fn（跨线程安全，纯 threading 线程可用）
+
+    纯 ``threading.Thread`` 没有 Qt 事件循环：``QTimer.singleShot`` 在这种
+    线程里既不抛异常也不触发，投递静默丢失。实测 2026-10-29：市场自动更新
+    在 ``threading.Thread`` 里跑，installer 用 ``QTimer.singleShot(0, reload)``
+    投递重载 → 从未执行 → 插件目录已被替换且 sys.modules 已 purge，旧 UI 注册
+    仍指向旧模块，点击页脚按钮报 ``No module named 'ui_plugin_voice_reply'``。
+    本函数走 QObject 信号桥（``post_to_main``），跨线程 emit 由 Qt 排队到主线程
+    事件循环，不依赖调用线程自身有无循环。
+
+    Args:
+        fn: 待执行回调
+        wait: True 阻塞当前线程直到主线程执行完（或超时）
+        timeout: wait=True 时的最长等待秒数
+
+    Returns:
+        True 表示已执行或已投递；False 表示投递桥不可用（无 QApplication /
+        桥未预热）或等待超时，调用方需自行降级。
+    """
+    from PyQt5.QtCore import QThread
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None or QThread.currentThread() is app.thread():
+        fn()
+        return True
+
+    # 回调异常必须在此吞掉：信号槽里的未捕获异常会走 excepthook（PyQt5 默认
+    # 打印后 abort），不能让一个插件重载错误带走整个进程。
+    box: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def _safe() -> None:
+        try:
+            box["result"] = fn()
+        except Exception as e:  # noqa: BLE001 - 异常留待调用线程按需回抛
+            box["error"] = e
+            logger.warning(f"[PluginHost] 主线程投递的回调异常: {e}")
+        finally:
+            done.set()
+
+    from app.utils.info_bar_guard import post_to_main
+
+    if not post_to_main(_safe):
+        return False
+    if not wait:
+        return True
+    if not done.wait(timeout):
+        logger.warning(f"[PluginHost] 主线程投递超时（{timeout}s），已放弃等待")
+        return False
+    if "error" in box:
+        raise box["error"]
+    return True
+
 class PluginHostService(QObject):
     """插件宿主服务（应用级单例，主线程创建）"""
 
@@ -130,6 +185,27 @@ class PluginHostService(QObject):
             return
         self._started = True
         self._init_plugin_system()
+
+    def pause_deferred(self, reason: str = "", only=None) -> None:
+        """挂起延迟队列（幂等）。UI 插件装载期与后台预热错峰用。
+
+        Args:
+            only: 只挂起这些任务名（None = 全部）。装载期应只点名会与主线程
+                import 争锁的 runtime_components / net_preheat；整体挂起会把
+                provider 预热也推后，随后被读路径在主线程同步拉起，更慢。
+
+        两段都 import 插件模块：后台线程持 import 锁时，主线程的 load_plugin
+        会整段阻塞。实测让帧后等 3.3s，且恢复时刻精确等于后台 warmup 结束。
+        """
+        queue = getattr(self, "_deferred_queue", None)
+        if queue is not None:
+            queue.pause(reason, only=only)
+
+    def resume_deferred(self, reason: str = "") -> None:
+        """恢复延迟队列（幂等；重复调用无副作用）"""
+        queue = getattr(self, "_deferred_queue", None)
+        if queue is not None:
+            queue.resume(reason)
 
     def stop(self) -> None:
         """停止 watcher 线程 + 延迟队列（应用退出时由 TabManagerWindow.cleanup 调用）"""
@@ -219,7 +295,12 @@ class PluginHostService(QObject):
         queue.register("watcher", self._deferred_start_watcher, delay_ms=2000)
         queue.register("plugin_tools_rescan", self._deferred_rescan_plugin_tools, delay_ms=2000)
         queue.register("provider_warmup", self._deferred_warmup_providers, delay_ms=2000)
-        queue.register("runtime_components", self._deferred_warmup_runtime_components, delay_ms=2000)
+        # runtime_components：11 组件全量扫描实测 7.4s（transports/openai_chat.py
+        # 单文件就 2.5s，其中 httpx 首次导入连带 click/pygments/urllib.request 1.6s）。
+        # 同步执行时整段无 yield，主线程硬冻结——改后台线程，主线程只投递。
+        queue.register_async("runtime_components", self._deferred_warmup_runtime_components, delay_ms=2000)
+        # 网络栈预热：与 warmup 无依赖，越早越好；httpx 首次导入从同步段挤出来
+        queue.register_async("net_preheat", self._deferred_preheat_http, delay_ms=0)
         queue.register("gateway_sync", self._deferred_sync_gateway_platforms, delay_ms=2000)
         queue.register("lsp_init", self._deferred_init_lsp, delay_ms=2000)
         queue.register("mcp_discover", self._deferred_discover_mcp, delay_ms=2000)
@@ -320,13 +401,30 @@ class PluginHostService(QObject):
 
     def _deferred_warmup_runtime_components(self):
         """运行时组件（model_adapters / loop_policies / storages）：
-        内置实现先注册，插件目录可覆盖内置"""
+        内置实现先注册，插件目录可覆盖内置
+
+        以 register_async 投递：本函数在后台线程执行（组件模块 import 与 registry
+        注册均不碰 Qt widget），完成后由队列回主线程放行 gateway_sync。
+        """
         try:
             from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
             warmup_runtime_components()
         except Exception as e:
             logger.error(f"[PluginHost] 运行时组件 warmup 失败: {e}")
+
+    def _deferred_preheat_http(self):
+        """后台预热 HTTP 栈（httpx 及其依赖）。
+
+        httpx 首次导入实测 1.6s（连带 click/pygments/urllib.request/http.client）。
+        它最终一定要导入（chat_worker 发请求、config_sync），放在启动同步段会
+        直接冻结 UI；放后台线程则与插件装载并行。失败不影响功能（各调用点仍
+        会自行惰性导入）。
+        """
+        try:
+            import app.utils.http_client  # noqa: F401
+        except Exception as e:
+            logger.warning(f"[PluginHost] HTTP 栈预热失败（不影响功能）: {e}")
 
     def _deferred_sync_gateway_platforms(self):
         """gateway 平台此时才注册进 registry（warmup 晚于 GatewayService
@@ -523,6 +621,16 @@ class PluginHostService(QObject):
                 ".ruff_cache",
                 "tmp",
                 "temp",
+                # 插件运行期产物目录：写图片/导出文件等，非源码，
+                # 变更不触发组件重载，只会在日志里刷「跳过重载」噪音
+                "generated",
+                "output",
+                "outputs",
+                "exports",
+                "downloads",
+                "uploads",
+                "cache",
+                "logs",
             }
             # 额外排除的产物 / 缓存文件
             _EXTRA_SKIP_EXTS = (
@@ -722,7 +830,8 @@ class PluginHostService(QObject):
                 for changes in watch(
                     *watch_paths,
                     recursive=True,
-                    debounce=2000,  # 2秒防抖
+                    debounce=2000,  # 聚合上限：到点即 yield（不是静默期）
+                    step=2000,  # 静默阈值：距最后一次变更 2s 才成批 yield
                     yield_on_timeout=False,
                     stop_event=self._plugin_watcher_stop,
                     watch_filter=watch_filter,  # 排除 deps/node_modules 等易变目录
@@ -1375,6 +1484,14 @@ class PluginHostService(QObject):
         if diff:
             context["diff"] = diff
             context["sub_actions"] = _sub_actions_from_diff(diff)
+            # registry 工具签名真变了才失效各窗口工具快照（改实现不动 schema → 缓存不受影响；
+            # MCP 启停不参与，快照保持前缀稳定）
+            try:
+                from app.core.hooks.hook_manager import invalidate_tools_snapshots_if_changed
+
+                invalidate_tools_snapshots_if_changed(diff)
+            except Exception as e:
+                logger.debug(f"[PluginHost] 失效工具快照失败: {e}")
         # 广播：全部活跃 backend 的 hook_manager 各自触发（hook 输出进各自队列）。
         # 服务自身的 _host_hook_manager 仅作 AgentManager 重载时的注册目标
         # （_hooks 类级共享，注册即全局可见），无对话队列、不作为触发目标。

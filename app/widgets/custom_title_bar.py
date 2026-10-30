@@ -486,6 +486,18 @@ class CustomTabButton(QWidget):
         self._label_css_key = None
         self._apply_label_color()
 
+    def set_text(self, text: str) -> None:
+        """更新文案（宿主把外部状态同步到已挂 tab 时调用，幂等）
+
+        宽度由 label 的 sizeHint 驱动，改完布局自行收敛；胶囊指示器由
+        TabIndicatorController 监听 LayoutRequest 自动重钉，这里不碰几何。
+        """
+        text = str(text or "")
+        if self._label.text() == text:
+            return
+        self._label.setText(text)
+        self.updateGeometry()
+
     def set_hover(self, hovered: bool) -> None:
         """设置悬浮态（幂等；进度卡在中途会自动补一次收尾）"""
         target = 1.0 if hovered else 0.0
@@ -1254,6 +1266,17 @@ class CustomTitleBar(TitleBarBase):
         # 新增 tab 会让后面的 tab 右移；若光标正好落在某个新位置上，
         # Qt 不会补发 enter/leave
         self._schedule_tab_hover_sync()
+
+    def set_tab_text(self, tab_id: str, text: str) -> None:
+        """更新已挂 tab 的文案（tab 不存在时静默跳过；新增仍走 add_tab）
+
+        场景：插件市场把待更新数写进卡片 title（「插件市场 (N)」↔「插件市场」），
+        已打开 tab 的文字在 add_tab 时固化，不跟随注册表变化。
+        """
+        btn = self._tabs.get(tab_id)
+        if btn is None:
+            return
+        btn.set_text(text)
 
     def remove_tab(self, tab_id: str, *, reactivate: bool = True) -> None:
         """移除 tab；reactivate=True 且移除的是激活 tab 时自动激活剩余第一个

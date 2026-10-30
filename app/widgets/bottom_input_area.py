@@ -165,7 +165,7 @@ PLACEHOLDER_TIPS = [
     "点击上下文指示器查看 Token 趋势与消息量",
     "子智能体 DAG 工作流编排复杂多步骤任务",
     "子智能体对话框实时查看任务日志与执行摘要",
-    "长对话自动启用上下文压缩省 Token",
+    "长对话按无损层截断工具结果与冗余文本，不改写前缀",
     "历史会话自动保存，关闭不丢失",
     "来源项目追踪：切换项目不串会话",
     "/debug 调试模式查看内部状态",
@@ -181,7 +181,7 @@ PLACEHOLDER_TIPS = [
     "UI 插件提供可热加载的组件，支持自定义按钮、面板、卡片等",
     "已安装插件：插件市场 / 文件树 / 系统清理 / Token 统计",
     # ════ Hook 预设 ════
-    "系统 Hook 链：会话注入→安全检查→自动压缩→智能增强",
+    "系统 Hook 链：会话注入→安全检查→上下文增强",
     "安全守卫在写/改文件前自动审查指令安全性",
     "长期记忆 Hook 让 AI 跨会话记住你的偏好",
     "项目笔记自动注入对话上下文，无需手动引用",
@@ -2328,16 +2328,46 @@ class SendableTextEdit(TextEdit):
         self._reset_history_mode()
         super().clear()
 
+    @staticmethod
+    def _context_menu_stylesheet() -> str:
+        """右键菜单样式：与 TabPanel / 卡片菜单同款视觉，运行时插值跟随主题色"""
+        return f"""
+            QMenu {{
+                background-color: {Colors.CARD_BG_SOLID};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+            QMenu::item:disabled {{
+                color: {Colors.TEXT_MUTED};
+            }}
+        """
+
     def contextMenuEvent(self, event):
-        """Phase E：接管输入框右键菜单——保留基础 cut/copy/paste + 追加插件项"""
+        """Phase E：接管输入框右键菜单——cut/copy/paste（按可用性置灰）+ 追加插件项"""
         from PyQt5.QtWidgets import QMenu
 
         menu = QMenu(self)
+        menu.setStyleSheet(self._context_menu_stylesheet())
+        # 禁用态走 Qt 自身判据：空选区时 cut/copy 无意义，剪贴板无可用内容时 paste 无意义
+        has_selection = self.textCursor().hasSelection()
         cut_act = menu.addAction("剪切")
+        cut_act.setEnabled(has_selection)
         cut_act.triggered.connect(lambda: self.cut())
         copy_act = menu.addAction("复制")
+        copy_act.setEnabled(has_selection)
         copy_act.triggered.connect(lambda: self.copy())
         paste_act = menu.addAction("粘贴")
+        paste_act.setEnabled(self.canPaste())
         paste_act.triggered.connect(lambda: self.paste())
         # 插件菜单项注入（main_widget 提供方法）
         win = self.window()

@@ -1,11 +1,44 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [未发布]
+## [v0.6.13-beta] - 2026-10-29
 
-## [v0.6.12] - 2026-10-27 (重新发布 #4)
+自 v0.6.12 以来的变更 | 提交数：31 · 文件变更：148 · +12321/-3414 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
-自 v0.6.11 以来的变更 | 提交数：38 · 文件变更：145 · +9572/-2305 | 贡献者：dingma, mading, drifox-bot
+### ✨ 新功能 (New Features)
+- **主题风格选择改为网格预览卡** (`app/widgets/cards/settings/theme_style_card.py` 新增 · `llm_settings_card.py`): 系统设置「主题风格」从一列单选框换成展开式网格预览，每格画出该主题的 window 渐变底、按放大后不透明度叠加的主题背景图与 accent 主色条，主题名写在格内；点格子即切换（走 `Settings.set(..., save=True)` 落盘），选中格描 accent 边并打角标勾。列数按可用宽度在 2~4 间自适应，深/浅模式各自过滤主题列表。
+- **OS 级沙箱（macOS Seatbelt）**: 安全中心新增「OS 级沙箱（macOS）」开关与档位（挡写入 / 挡写入+禁网）。开启后 agent 命令（bash 工具与后台任务）经 `sandbox-exec` 包装执行，工作区与系统临时目录外写入、可选联网在内核层被拒；与应用层沙箱审批正交（审批决定要不要问，OS 沙箱决定进程实际能碰什么）。非 macOS 平台自动直通。新增回归测试 `tests/core/test_os_sandbox.py`。
+- **能力池新增历史 / 项目 / 团队会话面** (`app/plugins/capabilities/catalog.py` · `providers/history_core.py`): 新增 `session.history`（持久化历史只读面：列表 / 归档 / 项目聚合 / 按 session_id 定位 / 团队会话查询）、`session.history.write`（置顶 / 移动项目 / 归档 / 恢复 / 删除 / 导入）、`project.read`（当前项目 / 清单 / 元数据 / 根目录）、`project.write`（切换 / 新建 / 归档 / 导入导出 / 打开文件夹 / 拖拽）、`team.session`（团队会话恢复 / 归档 / 进入成员会话）五条能力，并把此前「catalog 登记了却没有 provider」的 `session.manage` 补成真实实现（`select(session_id)` / `new()`）。写能力内部承担宿主联动（工作目录同步 + 团队广播 + 历史页刷新 + 跨窗口通知），插件不再反射窗口私有方法。
+- **新增 `project.workdir` 能力** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py`): 写库式切换项目工作目录，封装「关键文档登记 + 工作目录持久化 + 根目录标记恢复」三步。与既有 `workdir.write`（只改会话内状态：实例缓存 + tool_executor + 团队广播 + UI 同步，进程重启即失效）互补，worktree 切换两者配合使用。根目录标记恢复规则（旧目录本身是 worktree 时跳过，否则记忆卡片根目录会被指到 worktree 上）从插件侧搬进主程序并加单测锚定。
+- **消息卡片成果栏四项增强** (`app/widgets/inline_artifact_panel.py` · `app/widgets/message_card.py` · `app/core/workers/chat_worker.py` · `app/core/conversation/message_content.py` · `app/widgets/ui_helpers.py`): ①折叠态缩略图带（图片成果折叠时直接可见，最多 5 张 + N，点击预览）；②左键按住行可拖拽导出（mime urls，拖到资源管理器/聊天窗口即引用文件；单击预览改到抬起，与拖拽不冲突）；③落库与历史恢复（`artifacts` 进 tool 消息与归一化白名单，重开会话后成果栏从历史重建，条目数/字段封顶防 BLOB 膨胀）；④超过 20 条的溢出提示可点击展开全部。
+- **流式渲染 live streaming 通道与性能探针** (`775cebaa` · `dc28ac28` · `394ba8da`): 消息渲染增强流式直播支持（live streaming），新增 v2 渲染块级测试与问题探针（`tests/debug/_probe_*`）。
+- **工具块 body 懒加载** (`befa91b0`): 工具调用块可视主体延迟构建，长会话与批量工具调用显著降低初始渲染成本。
+- **插话撤回与恢复** (`79fda3c9` · `3037ce2f`): ChatBackend/ChatWorker 实现插话（interject）撤回与恢复机制；用户消息 hook 在插话时触发。
+- **工具结果 JSON 整形与规范化 tiers** (`ee899531`): 上下文 tier 链新增 JSON shaping/normalization 层，工具结果统一整形后再入上下文。
+- **worker 生命周期硬限制** (`0b57c27e`): 对 worker 存活时长与并发运行任务数设硬上限，防资源泄漏。
+
+### ♻️ 代码重构 (Refactoring)
+- **云同步换 LWW + 墓碑，退役三方合并与本地 base** (`app/core/sync/lww.py` · `app/core/sync/meta_recorder.py` 新增 · `app/core/sync/merge.py` 删除 · `app/core/sync/config_sync.py` · `app/utils/config.py`): 每个同步条目带 `{h: 内容指纹, t: Lamport 计数, d: 墓碑}` 元数据，合并逐条目比 `t`，大者胜、胜者为墓碑即删除。判断「这是删除还是漏写」不再依赖 base、也不再按递归深度猜结构（旧 `allow_delete = depth >= 3` 与实际扁平结构差一层，dict 型集合的条目删除永远不传播，删掉的服务商下次同步就复活）。app.config 的条目表存进新增配置项 `System.SyncMeta`，随配置一次 PUT 原子上云；zip 单元（user-custom / ext:*）的条目表作为保留条目 `.__drifox_sync__.json` 打进包内，解压时剔除不落地。Lamport 计数与设备时钟无关。老版本客户端重写 app.config 会抹掉 `SyncMeta`，此时退化为 union 合并（不丢数据，仅删除暂不传播，升级后恢复）。新增 `tests/core/test_sync_lww.py`（25 条）与 `tests/core/test_sync_meta_recorder.py`（11 条）。
+- **退役 HistoryCompactor，上下文管理统一走 tier 链** (`app/core/context/budget.py` 新增 · `app/core/context/history_compactor.py` 删除): 不再保留任何自动有损压缩。`HistoryCompactor` 类连同尾保留、启发式/LLM 摘要、旧工具结果剪枝、tool_call 参数截断、历史图片剥离一并删除；`chat_worker` 工具迭代压缩段与 gateway `/compact` 命令同时移除。只读能力抽成纯函数：`resolve_context_budget`（预算口径与旧实现逐字一致，含 o1/o3 输出预留分支）、`compute_usage`（用量统计）、`empty_compaction_state`（空压缩态）。`compaction_state` 持久化列保留以兼容老会话；能力池 `context.compact` 与 `EngineHost.get_compactor` 契约移除，`ConversationCore` / `ConversationExecutor` / `ChatWorker` 不再持有压缩器。
+- **其余内置插件全量接入能力池** (`plugins/artifacts-manager` · `welcome_changelog` · `worktree-manager` · `agent_trace` · `shortcut-manager`): 五个插件升 `api_version: 2` 并显式声明能力，删除 7 处自建 `host=None` 池（各自复制同一段样板并自报 `declared={cap_id, "state.kv", "plugin.log"}`，等于插件给自己发权限、manifest 声明恒不生效）。`artifacts-manager` 另把 `ctx["main_widget"].backend` 兜底改为走 `window.current` 快照。新增回归守卫 `tests/plugins/test_capability_plugin_adoption.py`：扫描全部已声明 `api_version>=2` 的插件，守四条线（禁自建池 / 禁直连历史单例 / 声明须覆盖实际用量 / 声明 ID 必须在 catalog）。
+- **worktree-manager 工作目录切换能力化** (`plugins/worktree-manager/ui/service.py`): 原先手拼 `backend.memory_manager` 四步（`get_working_directory` → `add_key_document` → `set_working_directory` → 判断旧目录是否 worktree 再 `restore_working_directory_mark`）并直接调 `backend.tool_executor.set_workdir` / `_broadcast_team_workdir`。现改走新能力 `project.workdir`（`switch` / `set_only` / `current`）与既有 `workdir.write`，并删掉两处与能力内部重复的团队广播。根目录标记恢复的判定规则（旧目录本身是 worktree 时不恢复，否则记忆卡片根目录会指到 worktree 上）整体搬进主程序 provider，有单测锚定。service 方法带 `mw` 参数（宿主门面传入的具体窗口），故用 `pool_for(host=mw)` 显式绑定，避免多窗口下写到别的窗口。
+- **history-manager 全量接入能力池** (`plugins/history-manager`): manifest 升 `api_version: 2` 并显式声明 9 条能力；插件侧删除 26 处宿主耦合（`_call_window` 反射 17 个私有方法、`getattr(win, "_current_project"/"_current_session_id"/"_window_id")` 读 4 个私有字段、直连 `HistoryManager` 单例 6 处、两处 `_caps()` 自建 `host=None` 池并自报 `declared`）。`_caps` 收敛到 `sdk.caps_for`，host 由宿主解析，声明裁剪真正生效。回归守卫 `tests/plugins/test_capability_window_current_guard.py` 重写为 6 道红线（禁直连管理器 / 禁反射 / 禁读私有字段 / 禁自建池 / `_caps` 必须走 sdk / manifest 声明须覆盖实际用量）。
+
+### 🐛 问题修复 (Bug Fixes)
+- **同步后无谓全量重扫插件** (`app/core/sync/config_sync.py`): `_reload_settings_on_main_thread` 无条件排 3s 兜底去消费 watcher pending，且读的是 `ChatBackend._watcher_pending_reload`（`ChatBackend` 根本没这个属性，标记实际挂在 `PluginHostService` 实例上，200ms 那条分支从未生效）。纯 app.config 同步时插件目录没变，启动期遗留的一条陈旧 pending 被当成真变更，白跑一次 `rescan` 把 76 个插件目录重新解析一遍。改为只在「本轮确实解压了 user-custom」的 10 秒时间窗内消费（`_should_reload_plugins`），并修正标记来源到 `PluginHostService` 单例。新增 `tests/core/test_config_sync.py::TestPluginReloadWindow`。
+- **插件市场自动更新后侧栏计数不刷新**: `run_auto_update_check` 返回的 `pending` 是更新前快照，`execute=True` 把可更新插件全部装完后仍原样返回，左侧栏 TabPanel 条目停在「插件市场 (N)」，要等下一次 30 分钟 tick 才纠正。现于更新执行后重算待更新数（更新成功者剔除、失败者保留），新增回归测试 `tests/plugins/test_plugin_marketplace_auto_update_pending.py`。
+- **标题栏 tab 文案不跟随卡片标题变化**: full 卡 tab 文字在 `add_tab` 时固化，注册表 title 变化（「插件市场 (N)」↔「插件市场」）传不到已打开的 tab。新增 `CustomTitleBar.set_tab_text` 与 `TabManagerWindow._sync_replace_tab_titles`（`_update_shared_launcher` / 窗口重新显示 / 卡片重新可见三处补刷），新增回归测试 `tests/widgets/test_replace_tab_title_sync.py`。
+- **成果栏多次推送互相覆盖丢条目** (`app/widgets/message_card.py: update_artifact_list`): 卡片侧整体替换 `_artifact_panel_items`，而同轮多次工具产出与异步任务回填（`ui.artifacts.show(target="call")`）每次只带增量 → 后到的把先到的顶掉（宿主注释写的是「追加」，实现是替换）。改为按 `path` 合并（同路径原位更新、新路径追加保序），空列表不再隐含清空，显式清理走 `clear_artifact_list()`。
+- **成果栏非图片条目徽标是空白色块** (`app/widgets/inline_artifact_panel.py: _KindBadge`): 构造期只设了尺寸与颜色，没 `setText`，且主题刷新遍历的是列表根节点（徽标是行的子控件，永远命中不到）。徽标字与样式改到构造期落地，刷新路径改为遍历行内徽标。
+- **缩略图解码队列会丢机会**: 折叠或快速切换时 `_decode_next_thumb` 已 pop 的条目因控件不可见直接丢弃，再展开时队列已空 → 该图永驻占位符。改为队首不可见就不取，折叠带与列表各用独立队列。
+- **历史折叠随卡片池复用重放；插件 UI 卸载回主线程** (`5fd1df45`): 骨架重建后 `data-collapsed` 回到初始值而折叠标记未失效，历史折叠在卡片池复用/重建后丢失或误放；改为 viewer 生命周期内只应用一次并在绑定后重放。插件市场卸载 UI 统一经 `run_on_main_thread` 回主线程执行（`plugin_host_service` 新增），配套回归测试三件。
+- **云同步目录单元元数据迁移** (`528077d0` · `87cb8937`): 目录单元缺元数据时补一次迁移上传，且迁移只推被标记脏的单元（LWW 新链路收尾补丁）。
+- **gitee 弹出定位与边距** (`680242fc`): 调整弹窗定位与边距，避免屏幕边缘裁切。
+- **滚动诊断增强** (`dc9f284f`): 滚动行为与状态跟踪补诊断打点，便于后续回归定位。
+
+## [v0.6.12] - 2026-10-27 (重新发布 #8)
+
+自 v0.6.11 以来的变更 | 提交数：49 · 文件变更：135 · +13072/-3113 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -82,6 +115,26 @@ All notable changes to this project will be documented in this file.
 
 - **CodeBuddy 专家任务按形态识别 + 对话重试与 SSE 容错** (`411af1e8`): `_is_expert_task` 由依赖 task_code 命名改为按形态判定（jump_url 含 expertId / 文案点到专家名 / 文案含「对话」），新上线同类活动任务无需改码即自动接管；`Expert_lighthouse`、`Expert_team_use_3` 两类明确排除走别处路径。buddy_auth 的 `chat_once` 增加失败重试一次（同轮连发两次取有效结果），并容错 SSE 末尾 requestId 时序差异与 JSON 序列化空格（用 `"id"\s*:\s*"` 正则解析）。新增 `tests/plugins/test_codebuddy_daily_tasks.py`（115 行）。
 - **CodeBuddy stale done marker 清理** (`368a2d11`): 任务进度里的过期 done 标记会被自动清理，避免已完成状态被陈旧标记卡住。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #7 追加）
+
+- **打包版无限自我复制（窗口疯狂弹出）** (`a542509a`): PyInstaller 打包后 `sys.executable` 是 app 二进制，bootloader 不认 `-c`；multiprocessing 拉起的 `resource_tracker` 子进程被当成「正常启动」重跑整个应用。loguru 每个 `enqueue=True` sink 首次创建 `SimpleQueue/Event/Lock` 即拉起 tracker → 子进程重跑 app → 它又建 sink 又拉 tracker，形成 app → tracker(app) → tracker(app) 无限自激。实测 17 分钟累计 221 个 PID、42 个日志分片。修法：`main.py` 的 `__main__` 块内、`main()` 之前调 `multiprocessing.freeze_support()` —— PyInstaller 的 `pyi_rth_multiprocessing` 已把该函数换成分流实现，命中 `-c "from multiprocessing.resource_tracker import main"` 时只 `exec` 那段代码再 `sys.exit()`，源码运行时为 no-op。
+- **日志安装失败静默吞掉导致零日志** (`a542509a`): POSIX semaphore 耗尽（`Errno 28`）时首个 `logger.add(enqueue=True)` 抛错，被 `main.py` 的 `except Exception: pass` 吞掉，11 个 sink 全部没装 —— 应用照常运行但零日志、事后无任何证据。三处修：①`setup_logging` 改为逐 sink 独立安装，单个失败不连带其余；②`enqueue=True` 不可用时自动降级为同步写入（`enqueue=False` 只用线程锁，不受 semaphore 配额影响），实测耗尽环境下 10 个 sink 全部降级成功、日志正常落盘；③`main.py` 的异常分支落 stderr + 写 `logs/logging_setup_failed.log`，不再静默。
+
+### 🐛 问题修复 (Bug Fixes)（重新发布 #8 追加）
+
+- **多设备云同步不再互相覆盖** (`app/core/sync/merge.py` 新增): 同步从「整包后写者胜」改为以 base 版本为基准的三方合并。远端被其他设备改动时先合并再上传，删除「sha 冲突后重新拉取 SHA 覆盖」的自毁逻辑；冲突文件主名保留本机版本，对方版本落 `conflicts/<单元>/<时间戳>-<设备>/`（业务目录之外，插件扫描不到）并归档到远端 `drifox/conflicts/`，两台机器都能找回。下载不再整目录替换并删除本地旧内容，改为文件级合并 + 本地快照留档（`backups/sync/`，保留 5 份）。
+- **无变化不再触发上传** (`app/core/sync/fingerprint.py` 新增): 引入内容指纹（目录清单摘要 + git blob sha，与 Gitee 返回的 sha 同算法）与确定性打包（固定 mtime/顺序/压缩参数）。内容未变时零网络请求跳过；provider 不再搭车 app.config 全量重推（改配置开关不再触发 assistant_hub 等 1MB+ 数据上传）。ZIP 打包排除 `__pycache__`/`.DS_Store`/`*.pyc`/`*.log` 等运行时产物。
+- **app.config 合并细化到集合元素级**: `LLM.SavedProviders` / `MCP.Servers` / `Tools.Toggles` / `Plugin.EnabledPlugins` 等 dict/list 型配置按元素三方合并，双机各自新增的 provider、MCP 服务、插件条目都保留，不再整块冲突丢一边。API Key 本机权威（本地已有值永不被云端密文覆盖，本地为空时才接收云端）；Gitee token 继续本机独立。配置项层禁用删除传播：老版本客户端重写 app.config 丢掉新版本 ConfigItem 时，不会再把「缺失」当成用户删除同步到所有设备导致新配置项集体消失。
+- **运行期云端变更轮询**: 新增 5 分钟轮询（单轮 2 次目录列表请求），远端有更新且本地无未同步改动时自动合并下载，不再只能靠下次启动整包覆盖收敛。
+- **上传结果自校验** (`5013c981`): Gitee 返回的 `content.sha` 是本机待上传字节的 git blob sha，上传成功后立即比对；不一致说明远端落地内容不是我们发的那份（并发写入 / 服务端异常），打 error 留证据但不判失败，避免脏标记回滚后无限重传。
+- **冲突归档补齐下载路径** (`5013c981`): `_flush_conflict_archive()` 补到两个下载入口，本地与云端同时改过时对方版本同样归档到远端 `drifox/conflicts/`，不再只有上传侧能找回。
+- **流式跟底被非用户滚动永久锁死** (`cff5e5ed`): 旧判据把 Qt 自发的 `valueChanged`（切回标签页重算上界、分栏/宽度重排、卡片收缩钳制）记成「用户滚离底部」，而 away 标志复位依赖下一次「valueChanged 且贴底」，后台标签页里这事件可能再也不来（症状：切回标签页停在旧位置，须手动滚到底）。改为置位必须有 600ms 内真实输入证据（滚轮 / 拖滑块 / 点页槽 / 键盘翻页），贴底一律复位。卡内（WebEngine）同源问题同批修复：`document.body` 与 `#content-placeholder` / `#tool-content` 的 scroll 监听只在 900ms 内有过 wheel/touch/key 才置位，Chromium 几何变化引起的 scroll 不再误锁跟随。
+
+### 🔧 测试基建 (Testing Infrastructure)（重新发布 #8 追加）
+
+- **多设备云同步仿真** (`tools/sync_sim.py`、`tools/fake_gitee.py`、`5013c981`): 本地假 Gitee contents API（GET 单文件/目录、PUT 带 sha 冲突返 409、POST 已存在返 400，数据落 JSON 跨进程共享，请求全量记录），client 侧走真实 httpx 与真实文件系统，覆盖单测 mock 不到的 base64 往返、409 冲突处理与「内容未变时零写请求」断言。
+- **同步与滚动的回归测试** (`cff5e5ed`): 新增 `tests/core/test_config_sync_merge.py`（内容指纹、目录三方合并、冲突归档）与 `tests/widgets/test_scroll_away_user_input.py`（只有真实输入能置 away）；`test_config_sync.py`、`test_main_widget_scroll_anchor.py`、`test_stream_finish_bottom_follow.py`、`test_message_card_streaming_dock.py` 同步对齐新判据。
 
 ## [v0.6.11] - 2026-10-26 (重新发布 #7)
 

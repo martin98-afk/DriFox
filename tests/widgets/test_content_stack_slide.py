@@ -170,3 +170,43 @@ def test_direction_zero_switches_directly(qtbot, stack):
     assert not s.slide_in_progress()
     assert p0.isHidden()
     assert p1.isVisible()
+
+
+def test_direct_switch_during_over_slide_raises_chat_top(qtbot, stack):
+    """over 动画在途时 direction=0 直切：收尾不得把覆盖层页 raise 到对话页之上
+
+    真实场景：卡片视图下 slide_over 动画在途，隐藏卡片触发
+    _on_overlay_state_changed(False) → setCurrentIndex(0)（direction=0 直切分支，
+    不经 _start_slide 的重入保护）。若直切分支不处理在途动画，动画收尾
+    _settle(top, None) 会把覆盖层页顶到对话页之上——对话页被空覆盖层盖住，
+    表现为「切回对话后整个对话区空白」，切走再切回（重新 raise）才恢复。
+    """
+    s, p0, p1 = stack
+    s.setCurrentIndex(1, direction=0)  # 进覆盖层（对话页 hide）
+    s.slide_over(direction=1)  # over 动画在途
+    assert s.slide_in_progress()
+    s.setCurrentIndex(0)  # direction=0 直切（真实：回对话）
+    assert s.currentIndex() == 0
+    _wait_slide_done(qtbot, s)
+    kids = [c for c in s.children() if isinstance(c, QWidget)]
+    assert kids[-1] is p0, "对话页必须 z 顶（覆盖层页保活但必须垫底）"
+    assert p0.isVisible()
+    assert not p1.isHidden()  # 保活不变式不受影响
+
+
+def test_direct_switch_after_resize_during_over_slide(qtbot, stack):
+    """over 动画在途时 resize + 直切：对话页不得以旧尺寸上屏
+
+    动画在途期 resizeEvent 只同步动画参与页（_sync_slide_baseline），
+    hide 态的对话页几何停留旧尺寸；直切分支 show 前必须归位，
+    否则对话页右侧漏出一条旧宽度的空白。
+    """
+    s, p0, p1 = stack
+    s.setCurrentIndex(1, direction=0)  # 进覆盖层，对话页 hide
+    s.slide_over(direction=1)  # 动画在途
+    s.resize(832, 600)  # 在途 resize：只同步 p1
+    assert p0.width() == 400  # 前置：hide 页确实漏同步（旧行为）
+    s.setCurrentIndex(0)  # 直切回对话
+    _wait_slide_done(qtbot, s)
+    assert p0.geometry() == s.rect(), "对话页 show 时必须归位到当前容器尺寸"
+    assert p0.isVisible()

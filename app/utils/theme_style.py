@@ -130,6 +130,11 @@ def apply_theme_qss(widget: Any, *, ensure_colors: bool = True) -> bool:
     if not qss:
         return False
     try:
+        # 同串短路：Qt5 对完全相同的串也会重建 QStyleSheetStyle 并 repolish 整棵
+        # 子树。主题派发会对插件卡全树 BFS 重放，其中大量控件的 QSS 并不含主题色
+        # （固定几何/字号），同串重写纯属浪费；多标签时这条链随标签数线性增长。
+        if qss == widget.styleSheet():
+            return False
         widget.setStyleSheet(qss)
     except RuntimeError:
         return False  # C++ 对象已销毁

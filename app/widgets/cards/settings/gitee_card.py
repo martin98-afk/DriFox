@@ -910,8 +910,12 @@ class GiteeAccountRow(QFrame):
         if x < win_rect.left() + 2:
             x = win_rect.left() + 2
 
-        # Y：贴着本行（设置栏）上方弹出，留 3px 呼吸
-        y = row_global.y() - popup_height - 3
+        # Y：贴着本行（设置栏）上方弹出，留 3px 呼吸。
+        # 按「可见卡片」高度算，不能用 popup 外框高度：外框底部有
+        # _content_margins[3] 的透明阴影留白，算进去会凭空多出一截间距
+        # （字号 delta 越大留白越宽，弹窗看起来离分隔线越远）。
+        visible_height = popup_height - popup.content_margins()[3]
+        y = row_global.y() - visible_height - 3
         if y < win_rect.top() + 4:
             # 空间不够则向下弹出
             y = row_global.y() + self.height() + 3
@@ -1162,10 +1166,13 @@ class _GiteeMorePopup(QWidget):
 
         # 阴影透明边距：投影画在容器外（popup 自身为透明层）；收紧边距让卡片贴近窗口边角
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(
-            scale_font_size(5), scale_font_size(5), scale_font_size(5), scale_font_size(7)
-        )
+        pad = scale_font_size(5)
+        pad_bottom = scale_font_size(7)
+        main_layout.setContentsMargins(pad, pad, pad, pad_bottom)
         main_layout.addWidget(self._container)
+        # 可见卡片（container）相对 popup 外框的透明边距 (左, 上, 右, 下)：
+        # 定位与阴影绘制共用同一来源，避免「按外框高度定位」把底部阴影留白算进视觉高度
+        self._content_margins = (pad, pad, pad, pad_bottom)
 
         # 刷新账号状态
         self._refresh_account_state()
@@ -1408,14 +1415,21 @@ class _GiteeMorePopup(QWidget):
 
     # ── 自绘柔和阴影（画在卡片下层的透明边距内）──
 
+    def content_margins(self) -> tuple[int, int, int, int]:
+        """可见卡片（container）相对 popup 外框的透明边距 (左, 上, 右, 下)"""
+        return self._content_margins
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         Colors.refresh()
-        margin = scale_font_size(5)
+        left, top, right, bottom = self._content_margins
         radius = scale_font_size(12)
-        # 与 main_layout 边距一致（底部多 2px 给下沉阴影），container 覆盖中部露出外环
-        card = self.rect().adjusted(margin, margin, -margin, -(margin + scale_font_size(2)))
+        # 阴影矩形与 container 几何严格重合（边距取自主布局），外环 grow 后在透明边距内露出。
+        # 此前底部写成 margin + scale_font_size(2)：字号 delta 被算两次
+        # （底线距底 = 7 + 2*delta > container 的 7 + delta），card 反被 container 整块遮住，
+        # 阴影实际不可见。
+        card = self.rect().adjusted(left, top, -right, -bottom)
         painter.setPen(Qt.NoPen)
         for grow, alpha in ((4, 8), (3, 12), (2, 16), (1, 22)):
             painter.setBrush(QColor(0, 0, 0, alpha))

@@ -50,7 +50,6 @@ from app.utils.startup_manager import (
     get_registered_command,
     request_auto_start_update,
 )
-from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
@@ -64,6 +63,7 @@ from app.widgets.cards.settings.update_proxy_card import UpdateProxyCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+from app.widgets.cards.settings.theme_style_card import ThemeStyleCard, prepare_theme_entries
 
 
 class NoWheelFontComboBox(QFontComboBox):
@@ -834,16 +834,18 @@ class LLMSettingsCard(SystemCardFrame):
         # ════ 外观样式页 ════
         appearance_layout = self._page_layouts["appearance"]
 
-        # 界面字号、浅色模式、主题风格
+        # 浅色模式、主题风格
         self._setup_appearance_cards()
-        appearance_layout.addWidget(self.uiFontSizeCard)
-        appearance_layout.addWidget(self.uiChatWidthCard)
         appearance_layout.addWidget(self.uiLightModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
-        # 全局字体设置
+        # 界面字号 + 全局字体
+        appearance_layout.addWidget(self.uiFontSizeCard)
         self._setup_font_card()
         appearance_layout.addWidget(self.llmFontCard)
+
+        # 对话区宽度
+        appearance_layout.addWidget(self.uiChatWidthCard)
         appearance_layout.addStretch(1)
 
         # ════ 版本更新页 ════
@@ -1381,21 +1383,36 @@ class LLMSettingsCard(SystemCardFrame):
         return None
 
     def refresh_style(self):
-        """主题刷新：基类样式 + 左侧导航按钮 + 分页滚动条"""
+        """主题刷新：基类样式 + 左侧导航按钮 + 页滚动条"""
+        from app.utils.design_tokens import set_style_sheet_if_changed
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
+        _TRC.timer_start("llm_super")
         super().refresh_style()
+        _TRC.timer_end("llm_super")
+        _TRC.timer_start("llm_nav")
         if self._nav_frame is not None:
-            self._nav_frame.setStyleSheet(self._nav_frame_style())
+            set_style_sheet_if_changed(self._nav_frame, self._nav_frame_style())
         if hasattr(self, "_nav_buttons"):
             self._update_nav_styles()
+        _nav_group_css = self._nav_group_style()
         for label in getattr(self, "_nav_group_labels", []):
-            label.setStyleSheet(self._nav_group_style())
-        for page in getattr(self, "_page_scrolls", {}).values():
-            page.setStyleSheet(SystemCardFrame._scroll_style())
-            for sb in (page.verticalScrollBar(), page.horizontalScrollBar()):
-                if sb is not None:
-                    sb_style = sb.style()
-                    sb_style.unpolish(sb)
-                    sb_style.polish(sb)
+            set_style_sheet_if_changed(label, _nav_group_css)
+        _TRC.timer_end("llm_nav")
+        # [PERF] 只刷滚动条控件自身：对 QScrollArea setStyleSheet 会 repolish
+        # 整页子树（每页 1400+ 控件），而主题变化只影响滚动条颜色。
+        _TRC.timer_start("llm_sb")
+        try:
+            from app.utils.design_tokens import get_unified_scrollbar_style
+
+            sb_style = get_unified_scrollbar_style(8)
+            for page in getattr(self, "_page_scrolls", {}).values():
+                for sb in (page.verticalScrollBar(), page.horizontalScrollBar()):
+                    if sb is not None:
+                        set_style_sheet_if_changed(sb, sb_style)
+        except Exception:
+            pass
+        _TRC.timer_end("llm_sb")
 
     def _setup_appearance_cards(self):
         self.uiFontSizeCard = FontSizeStepperCard(
@@ -1423,24 +1440,21 @@ class LLMSettingsCard(SystemCardFrame):
         self.uiThemeStyleCard = self._make_theme_style_card()
 
     def _make_theme_style_card(self):
-        """构建主题风格卡（展开式选项卡，与提示音卡一致的下部展开交互）
+        """构建主题风格卡（网格预览选择器，见 theme_style_card 模块）
 
-        validator options 与 texts 严格对齐（均为深浅过滤后的列表），
-        防 OptionsSettingCard 内部 zip(texts, options) 错位。
+        条目采集与 validator 对齐统一走 prepare_theme_entries；主题源变化时
+        卡片自己监听 theme_manager.on_reload 重建网格。
         """
-        options = self._build_theme_options()
-        keys = list(options.keys())
-        if not keys:
+        is_light = bool(self.cfg.ui_light_mode.value)
+        entries = prepare_theme_entries(self.cfg.ui_theme_style, self.cfg, is_light)
+        if not entries:
             return getattr(self, "uiThemeStyleCard", None)
-        self.cfg.ui_theme_style.validator.__init__(keys)
-        if self.cfg.ui_theme_style.value not in keys:
-            self.cfg.set(self.cfg.ui_theme_style, keys[0], save=True)
-        return OptionsSettingCard(
+        return ThemeStyleCard(
             self.cfg.ui_theme_style,
-            get_icon("主题风格"),
-            "主题风格",
-            "选择界面卡片配色方案",
-            texts=[d["label"] for d in options.values()],
+            entries,
+            self.cfg,
+            is_light=is_light,
+            icon=get_icon("主题风格"),
             parent=self,
         )
 
@@ -1460,24 +1474,6 @@ class LLMSettingsCard(SystemCardFrame):
         else:
             layout.addWidget(new_card)
         self.uiThemeStyleCard = new_card
-
-    def _build_theme_options(self) -> dict:
-        """从 ThemeManager 动态构建主题选项，按当前深浅模式过滤并加标识"""
-        from app.utils.config import update_theme_options
-
-        update_theme_options()
-        themes = theme_manager.list_themes()
-        is_light = self.cfg.ui_light_mode.value
-
-        result = {}
-        for tid, name in themes.items():
-            theme_light = theme_manager.is_light_theme(tid)
-            # 按当前模式过滤
-            if is_light != theme_light:
-                continue
-            label = name
-            result[tid] = {"label": label}
-        return result
 
     def _setup_font_card(self):
         """创建字体设置卡片"""

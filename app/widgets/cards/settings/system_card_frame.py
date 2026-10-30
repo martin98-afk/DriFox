@@ -28,6 +28,7 @@ from app.utils.design_tokens import (
     font_size_css,
     get_unified_scrollbar_style,
     make_scroll_content_opaque,
+    set_style_sheet_if_changed,
     scale_icon_size,
 )
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -186,19 +187,61 @@ class SystemCardFrame(QFrame):
     def content_layout(self):
         return self._content_layout
 
+    # ── 卡片表面自绘常量（与 CardStyles.floating 逐项等价）──
+    _SURFACE_ALPHA = 230
+    _SURFACE_RADIUS = CardStyles.FLOATING_RADIUS
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        """自绘卡片表面：CARD_BG alpha=230 + BORDER 1px + 10px 圆角
+
+        [PERF] 原实现把表面挂在 QSS 上（CardStyles.floating），主题一变串就变
+        → setStyleSheet 触发**整卡** repolish。离线基准（tests/_bench_settings_
+        popup_refresh.py，1216 控件）：切主题后单这一句 211.8ms，占该卡刷新
+        全程的 92%（整体 230ms）。改 paintEvent 自绘后主题切换只 update()，
+        与顶层容器 _ThemedPanel 同一手法。
+        观感等价：底色/BORDER 1px/圆角值与原 QSS 逐项相同。
+        """
+        from PyQt5.QtCore import QRectF
+        from PyQt5.QtGui import QPainter, QPen
+
+        from app.utils.design_tokens import _rgba_to_qcolor
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # 内缩 0.5px：1px 描边落在像素中心，避免抗锯齿把边框糊成 2px 虚边
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setBrush(_rgba_to_qcolor(Colors.CARD_BG.format(alpha=self._SURFACE_ALPHA)))
+        painter.setPen(QPen(_rgba_to_qcolor(Colors.BORDER), 1))
+        painter.drawRoundedRect(rect, self._SURFACE_RADIUS, self._SURFACE_RADIUS)
+
     # ── 样式 ──────────────────────────────────────────
 
     def _apply_base_style(self):
-        # Colors.refresh() 由调用方（refresh_style / _build_base_ui）确保已执行
-        # 表面规范与浮层卡同源（CardStyles.floating），alpha 沿用原本的 230。
-        self.setStyleSheet(CardStyles.floating("SystemCardFrame", alpha=230))
+        # 表面已由 paintEvent 自绘（见 paintEvent 的 [PERF] 注释），
+        # 此处不再设 QSS —— 只标脏重绘，切主题零 repolish。
+        self.update()
 
     def _apply_content_surface(self):
         """内容层不透明实底（滚动 blit 前置条件）
 
         卡片本体表面是 CARD_BG alpha=230（见 _apply_base_style），下层由
         覆盖层容器承托；这里把两者预合成成等价实色，避免改实底后观感变化。
+
+        [PERF] palette 同色短路：setPalette 即使颜色完全不变也会向整棵子树
+        投递 PaletteChange（设置弹窗 1087 控件逐个重新 polish，实测该段占
+        LLMSettingsCard.refresh_style 的绝大部分）。颜色没变就一个字节都不动。
         """
+        from app.utils.design_tokens import opaque_surface_color
+
+        try:
+            color = opaque_surface_color(
+                fg=Colors.CARD_BG.format(alpha=255), alpha=230, backdrop=Colors.CONTENT_BG
+            )
+            cw = self.content_widget
+            if cw.autoFillBackground() and cw.palette().color(cw.backgroundRole()) == color:
+                return
+        except RuntimeError:
+            return  # widget 已销毁
         # fg 只取 CARD_BG 的 rgb 分量（工具内部忽略串自带 alpha，以 alpha 参数为准）
         make_scroll_content_opaque(
             self.content_widget,
@@ -217,14 +260,24 @@ class SystemCardFrame(QFrame):
         """
         Colors.refresh()
 
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
         # ── 卡片本体（背景 + 边框） ──
+        _TRC.timer_start("scf_base")
         self._apply_base_style()
         self._apply_content_surface()
+        _TRC.timer_end("scf_base")
 
-        # ── 字体/图标 ──
-        self.title_label.setFont(get_unified_font(12, True))
+        # ── 字体/图标 ──（[PERF] setFont 同字体短路：字体不变时 setFont 仍会
+        # 走 fontChange + 布局失效重算，每张卡 3\u00d7 全量遍历时成本可观）
+        _TRC.timer_start("scf_fonts")
+        _title_font = get_unified_font(12, True)
+        if self.title_label.font() != _title_font:
+            self.title_label.setFont(_title_font)
         if self.icon_label is not None:
-            self.icon_label.setFont(get_unified_font(12))
+            _icon_font = get_unified_font(12)
+            if self.icon_label.font() != _icon_font:
+                self.icon_label.setFont(_icon_font)
             if self._svg_icon_name:
                 s = scale_icon_size(self._ICON_SVG_BASE_SIZE)
                 self.icon_label.setPixmap(get_icon(self._svg_icon_name).pixmap(s, s))
@@ -233,16 +286,23 @@ class SystemCardFrame(QFrame):
             base_size = getattr(self, "_icon_base_size", 20)
             s = scale_icon_size(base_size)
             icon_widget.setFixedSize(s, s)
-        self._count_label.setFont(get_unified_font(10))
+        _count_font = get_unified_font(10)
+        if self._count_label.font() != _count_font:
+            self._count_label.setFont(_count_font)
+        _TRC.timer_end("scf_fonts")
 
         # ── Tab 按钮样式 ──
+        _TRC.timer_start("scf_tabs")
         if hasattr(self, "_tab_buttons"):
             self._update_tab_styles()
+        _TRC.timer_end("scf_tabs")
 
         # ── 搜索框（直接刷新自身样式） ──
         if hasattr(self, "_search_input") and self._search_input is not None:
             si = self._search_input
-            si.setStyleSheet(f"""
+            set_style_sheet_if_changed(
+                si,
+                f"""
                 QLineEdit {{
                     background: {Colors.HOVER_BG};
                     border: 1px solid {Colors.BORDER};
@@ -258,37 +318,51 @@ class SystemCardFrame(QFrame):
                 QLineEdit::placeholder {{
                     color: {Colors.INPUT_PLACEHOLDER};
                 }}
-            """)
+            """,
+            )
 
         # ── 头部粘性标签（直接刷新自身样式） ──
         if hasattr(self, "_header_sticky_label"):
-            self._header_sticky_label.setStyleSheet(f"""
+            set_style_sheet_if_changed(
+                self._header_sticky_label,
+                f"""
                 color: {Colors.ACCENT_WARM};
                 {font_size_css(11)}
                 padding: 0 2px 0 6px;
                 font-weight: bold;
-            """)
+            """,
+            )
 
         # ── 面包屑（颜色 token 随主题重建） ──
+        _TRC.timer_start("scf_breadcrumb")
         if hasattr(self, "_breadcrumb_items") and self._breadcrumb_items:
             self._apply_breadcrumb_styles()
+        _TRC.timer_end("scf_breadcrumb")
 
         # ── 内容区子控件递归刷新（SettingCard 等子卡片） ──
+        _TRC.timer_start("scf_children")
         self._refresh_content_children()
+        _TRC.timer_end("scf_children")
 
         # ── 滚动区 QSS（滚动条颜色随主题） ──
-        # _scroll_style() 内部经 get_unified_scrollbar_style() 现取
-        # Colors.SCROLLBAR_HANDLE_BG（刷新后为新主题色），需在 Colors.refresh()
-        # 之后重建；setStyleSheet 本身触发样式重评。强制 unpolish/polish
-        # 确保滚动条颜色即时生效。
+        # [PERF] 只在滚动条**控件自身**上设 QSS：对 QScrollArea setStyleSheet 会
+        # repolish 整个滚动区子树（设置页单页 1400+ 控件，实测主题切换 1.6s 级）。
+        # 主题变化影响的只有滚动条颜色；QScrollArea / 内容通明那几条规则是静态的，
+        # 构造期已设过，无需重刷。
+        _TRC.timer_start("scf_scrollbar")
         if hasattr(self, "scroll_area") and getattr(self, "scroll_area", None) is not None:
-            self.scroll_area.setStyleSheet(self._scroll_style())
-            for sb in (self.scroll_area.verticalScrollBar(), self.scroll_area.horizontalScrollBar()):
-                if sb is not None:
-                    sb_style = sb.style()
-                    if sb_style is not None:
-                        sb_style.unpolish(sb)
-                        sb_style.polish(sb)
+            self._apply_scrollbar_style()
+        _TRC.timer_end("scf_scrollbar")
+
+    def _apply_scrollbar_style(self) -> None:
+        """只给两个滚动条控件设 QSS（同串短路，repolish 范围缩到滑条自身）"""
+        try:
+            style = get_unified_scrollbar_style(8)
+        except Exception:
+            return
+        for sb in (self.scroll_area.verticalScrollBar(), self.scroll_area.horizontalScrollBar()):
+            if sb is not None:
+                set_style_sheet_if_changed(sb, style)
 
     def _refresh_content_children(self):
         """递归刷新内容区子控件的主题样式"""
@@ -465,17 +539,16 @@ class SystemCardFrame(QFrame):
             clickable = callable(spec.get("handler"))
             color = Colors.TEXT_ACCENT if clickable else Colors.TEXT_PRIMARY
             label.setFont(QFont(title_font))
-            label.setStyleSheet(
-                f"color: {color}; background: transparent; border: none;"
-            )
+            set_style_sheet_if_changed(label, f"color: {color}; background: transparent; border: none;")
         # 分隔符槽位：1, 3, 5, ...
         for i in range(1, self._breadcrumb_layout.count(), 2):
             item = self._breadcrumb_layout.itemAt(i)
             w = item.widget() if item is not None else None
             if w is not None:
-                w.setStyleSheet(
+                set_style_sheet_if_changed(
+                    w,
                     f"color: {Colors.TEXT_MUTED}; {font_size_css(12)}; "
-                    f"{get_font_family_css()}; background: transparent; border: none;"
+                    f"{get_font_family_css()}; background: transparent; border: none;",
                 )
 
     def set_header_sticky(self, text: str):
@@ -507,8 +580,10 @@ class SystemCardFrame(QFrame):
 
     def _update_tab_styles(self):
         for tab_id, btn in self._tab_buttons.items():
-            btn.setStyleSheet(TabStyles.active() if tab_id == self._current_tab else TabStyles.inactive())
-            btn.setFont(get_unified_font(12))
+            set_style_sheet_if_changed(btn, TabStyles.active() if tab_id == self._current_tab else TabStyles.inactive())
+            _f = get_unified_font(12)
+            if btn.font() != _f:
+                btn.setFont(_f)
 
     def set_extra_button_handler(self, handler, icon=None, tooltip=""):
         """设置标题栏额外按钮（通用方法）

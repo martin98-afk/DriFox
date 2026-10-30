@@ -79,6 +79,18 @@ from app.utils.design_tokens import (
     scale_icon_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.render import (
+    HOME_CONTENT,
+    KIND_TEXT,
+    BlockCache,
+    BlockRender,
+    MessageRender,
+    RenderCtx,
+    active_block_index,
+    diff_message,
+    live_key,
+    render_message,
+)
 from app.widgets.render_crash_queue import RenderCrashQueue
 from app.widgets.card_render_core import (
     ACTION_COLOR_MAP,
@@ -148,20 +160,36 @@ from app.widgets.card_render_core import (
     get_font_family_css,
     get_icon,
     get_markdown_instance,
+    get_pygments_css,
     set_pygments_style,
 )
 
 
 # [WHEEL-ARM] body 滚动几何 + 内层容器可滚标志的直读表达式（轮询兜底与
 # armed 事件校准共用）。返回 "sh|st|ch|ins"；body 未就绪返回 ''。
+# ⚠️ `#content-placeholder` 留在内层容器名单里：坞态已不再给正文限高（[T44]），
+# 但正文里可能嵌超宽代码块/图表等自带内滚的容器，且历史卡回归时口径不变。
+# 漏掉它 → 这类容器可滚时 ins 判 0 → 点击正文后武装态把滚轮全交外层
+# （“点击后优先滚内部”失效）。
 _BODY_GEOM_READ_JS = (
     "(function(){var b=document.body;if(!b)return '';"
     "var ins=-1;try{var ts=document.querySelectorAll("
-    "'#tool-content,.code-container,.code-content,.table-scroll-wrapper,.echarts-container');"
+    "'#content-placeholder,#tool-content,.code-container,.code-content,.table-scroll-wrapper,.echarts-container');"
     "ins=0;for(var i=0;i<ts.length;i++){var t=ts[i];"
     "if(t.scrollHeight-t.clientHeight>1){ins=1;break;}}}catch(e){}"
     "return (b.scrollHeight|0)+'|'+(b.scrollTop|0)+'|'+(b.clientHeight|0)+'|'+ins;})()"
 )
+
+
+def _render_v2_enabled() -> bool:
+    """block 级渲染通道开关：**默认开启**，环境变量 ``DRIFOX_RENDER_V2=0`` 显式关闭。
+
+    开启后 ``CodeWebViewer`` 的 DOM 更新从「整页 innerHTML 替换 + 状态标志位」
+    切到「render_message → diff_message → patchBlocks 定点 splice」。渲染函数
+    调用时机每次读取，便于测试在进程内翻转开关；``=0/false/no`` 是逃生门，
+    v2 出问题时不回滚代码即可退回旧全量路径。
+    """
+    return os.environ.get("DRIFOX_RENDER_V2", "1").strip().lower() not in ("0", "false", "no")
 
 
 def _seg_has_protocol_block(seg: str) -> bool:
@@ -206,8 +234,9 @@ def _parse_height_payload(payload: str):
         (h, scroll_top, client_height, reading, dom_text_len, inner_scrollable)；
         可选字段缺失时为 None；载荷非法返回 None（调用方静默忽略）。
 
-    ``inner_scrollable``：卡内**除 body 外**的滚动容器（#tool-content / 代码块 /
-    图表区等）当前有无可滚量。None = 旧骨架未携带（Python 侧按"可能有"处理，
+    ``inner_scrollable``：卡内**除 body 外**的滚动容器（坞态工具区
+    #tool-content / 正文内嵌代码块 / 图表区等）当前有无可滚量。
+    None = 旧骨架未携带（Python 侧按"可能有"处理，
     见 ``_inner_wheel_state`` 注释）。
     """
     try:
@@ -256,6 +285,7 @@ class ConsoleMonitorPage(QWebEnginePage):
     bodyInnerScrollableChanged = pyqtSignal(bool)
     contentReady = pyqtSignal()
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
+    toolBodyRequested = pyqtSignal(str)  # tool_call_id：懒注入块展开时请求 body 内容
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — echarts/mermaid/svg/html 放大查看
@@ -425,6 +455,16 @@ class ConsoleMonitorPage(QWebEnginePage):
                     tool_call_id = msg.split("tool_diff:", 1)[1]
                     # [T43] 延迟派发（族⑤）
                     _defer_emit(self, lambda tid=tool_call_id: self.toolDiffRequested.emit(tid))
+                except Exception:
+                    pass
+            elif "tool_body:" in msg:
+                # 工具块展开：请求该块的 body 内容（惰注入，见 render_tool_block
+                # 的 lazy_body）。Page 拿不到 Viewer 的渲染源，转信号由
+                # CodeWebViewer._serve_tool_body 反查 markdown 重渲染。
+                try:
+                    _tool_body_id = msg.split("tool_body:", 1)[1].strip()
+                    # [T43] 延迟派发（族⑤）
+                    _defer_emit(self, lambda t=_tool_body_id: self.toolBodyRequested.emit(t))
                 except Exception:
                     pass
             elif "subagent_log:" in msg:
@@ -793,11 +833,15 @@ class CodeWebViewer(QWebEngineView):
         self._markdown_text = ""
         self._streaming = True
         self._is_history = False  # 历史会话标志（非流式加载的历史消息）
+        # 历史卡工具区折叠是否已应用于当前骨架 DOM。幂等标记（与
+        # _dock_sync_requested 同构）：池化复用不重载骨架 → _on_js_ready 不再
+        # 触发，折叠必须在卡片绑定后补一次（见 MessageCard.ensure_rendered）；
+        # 置位后本 viewer 生命周期内不再重复折叠（用户手动展开不被覆盖）。
+        self._history_collapse_applied = False
         self._is_js_ready = False
-        # [T33] 本轮流式的坞态是否已发起过同步（False = 尚未发起，首次渲染前必须补发）。
-        # 作用：坞态是 runJavaScript 异步生效的，若内容渲染早于它落地，正文会先按
-        # **自然高度**布局（无 600px 限高），坞态生效后再被压回 → "卡片先胀成很大
-        # 再缩回"的起步跳变。这里保证内容永远排在坞态同步之后。
+        # [T44] 本轮流式的坞态是否已发起过同步（False = 尚未发起，首次渲染前必须补发）。
+        # 坞态只切工具区 264px 限高，不等它落地的后果从「正文限矮」降级为
+        # 「工具区先按自然高度排版再被压回」，仍值得保持顺序（一次 IPC 成本）。
         self._dock_sync_requested = False
         # 下一次非流式渲染是否为"流式结束的终渲染"（决定能否走线程池，见
         # _perform_update）：仅在 CodeWebViewer.__init__ 初始化一次。
@@ -809,6 +853,27 @@ class CodeWebViewer(QWebEngineView):
         self._cached_streaming_html = None
         self._cached_raw_md_hash = 0  # hash(self._markdown_text) 在缓存时的快照，供 finish_streaming 验证缓存有效性
         self._lazy_markdown_cb = None  # 懒回调：渲染时才生成 markdown，避免高频 content_to_markdown
+        # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2=1 启用，步骤 3 灰度）──
+        # _v2_last：已落地 DOM 的上一次渲染结果（MessageRender）；None = DOM
+        # 状态未知，下次渲染必须先清容器再全量落地。BlockCache 按 viewer 独享，
+        # 禁止跨 viewer 共享（compact / lazy_body / 主题等 ctx 差异会污染）。
+        self._render_v2 = _render_v2_enabled()
+        self._block_cache = BlockCache()
+        self._v2_last = None
+        self._v2_ctx_sig = None
+        # ── [B5.2] 流式活动块纯文本尾态 ──
+        # 活动 text 块流式期间不走 markdown 全量重渲（那是 O(n²)：每批渲染
+        # + 传输全量 HTML，实测 30KB 回答累计 7.9~14.6MB / 4.5~5.1s），改为
+        # 「live 纯文本节点 + 增量 append」，安全边界处整块正式化一次。
+        # _v2_live_sent: 已下发到 JS 的文本（增量 = text[len(sent):]）
+        # _v2_live_formalize_ts: 上次正式化时刻（monotonic，节流用）
+        self._v2_live_key = ""
+        self._v2_live_sent = ""
+        self._v2_live_formalized_len = 0
+        self._v2_live_formalize_ts = 0.0
+        # 活动块已定型标记：工具调用开始时由 MessageCard 置位，下一帧把
+        # 纯文本尾态整块正式化（见 mark_live_tail_finalized）
+        self._v2_live_finalize_requested = False
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
@@ -1011,6 +1076,7 @@ class CodeWebViewer(QWebEngineView):
         self._page.cardReadingChanged.connect(self._on_card_reading_changed)
         self._page.contentReady.connect(self._on_js_ready)
         self._page.toolDiffRequested.connect(self.toolDiffRequested)
+        self._page.toolBodyRequested.connect(self._serve_tool_body)
         self._page.subAgentLogRequested.connect(self.subAgentLogRequested)
         self._page.saveFileRequested.connect(self.saveFileRequested)
         self._page.chartExpandRequested.connect(self.chartExpandRequested)
@@ -1148,6 +1214,61 @@ class CodeWebViewer(QWebEngineView):
     @property
     def _tool_target_id(self) -> str:
         return "tool-content" if self._tool_compact_mode else "content-placeholder"
+
+    @property
+    def _tool_lazy_body(self) -> bool:
+        """工具块 body 是否懒注入（不可见时不构造内容，展开时再请求）。
+
+        两种场景下工具块内容用户看不见，构造了纯占内存（DOM 内存大头：
+        pygments 高亮实测膨胀 12.7 倍，12KB diff → 154KB HTML + 3200 span）：
+        1. 简洁模式：工具块逐个折叠，body 是 height:0 的隐藏层；
+        2. 历史卡：工具区整体折叠（#tool-section[data-collapsed=true]），
+           区内所有块（含 render_mode="expand" 的无折叠态块）全不可见。
+        展开对应容器时 JS 经 tool_body 通道逐块请求（见 _serve_tool_body）。
+        """
+        return self._tool_compact_mode or bool(getattr(self, "_is_history", False))
+
+    def _serve_tool_body(self, tool_call_id: str) -> None:
+        """工具块展开请求：反查渲染源该块，重渲染 body 并注入。
+
+        不可见的工具块 body 只有空占位（见 render_helpers.render_tool_block 的
+        lazy_body），点开或展开工具区时 JS 经 console 通道请求内容。内容从当前
+        渲染源 markdown 反查该 <tool> 段重算，不常驻内存。
+        """
+        tid = (tool_call_id or "").strip()
+        if not tid or not self._is_js_ready:
+            return
+        html = ""
+        try:
+            from app.widgets.card_render_core import (
+                _render_tool_block_content,
+                find_tool_segment_by_call_id,
+            )
+
+            seg = find_tool_segment_by_call_id(self._markdown_text or "", tid)
+            if not seg:
+                # 流式期间刚由 append_tool_result 增量注入的块可能尚未进
+                # _markdown_text，用块级 markdown 缓存兜底。
+                _cache = getattr(self, "_tool_md_cache", None) or {}
+                _cached_md = _cache.get(tid)
+                if _cached_md:
+                    seg = find_tool_segment_by_call_id(_cached_md, tid)
+            if seg:
+                # 绕过 lru_cache：展开结果是一次性大字符串，缓存只会让同一份
+                # 内容再多占一格（完整版渲染已缓存过一份）。
+                html = _render_tool_block_content.__wrapped__(
+                    seg, compact=self._tool_compact_mode, body_only=True
+                )
+        except Exception as e:
+            logger.warning(f"[tool-body] 反查渲染工具块失败 {tid}: {e}")
+        try:
+            page = self.page()
+            if page is None:
+                return
+            payload = base64.b64encode((html or "").encode("utf-8")).decode("ascii")
+            page.runJavaScript(f"window._fillToolBody({_js_literal(tid)}, {_js_literal(payload)});")
+        except RuntimeError:
+            pass
 
     def _handle_context_lost(self):
         """JavaScript 报告上下文丢失"""
@@ -1399,12 +1520,20 @@ class CodeWebViewer(QWebEngineView):
             pass
         self._streaming = False
         self._is_history = False
+        # 复用方可能是本轮对话（不折叠）或历史卡（折叠）：折叠必须在卡片
+        # 绑定后按新卡片状态重新应用一次（见 _apply_history_collapsed）。
+        self._history_collapse_applied = False
         # [T33] 坞态同步确认随卡片状态复位（新卡片新一轮流式的首次渲染需重新补发）
         self._dock_sync_requested = False
         self._stable_html = ""
         self._stable_md_len = 0
         self._needs_full_render = True
         self._tail_html_hash = 0
+        # [B5] v2 状态复位：缓存与落地基线随旧内容一起失效
+        self._v2_last = None
+        self._v2_ctx_sig = None
+        self._block_cache.clear()
+        self._v2_reset_live()
         self._lazy_markdown_cb = None
         self._restore_finished_ids = None
         self._resize_locked = False
@@ -1798,10 +1927,7 @@ class CodeWebViewer(QWebEngineView):
                 from app.utils.theme_manager import theme_manager as _tm
 
                 _is_light = _tm.is_light_theme()
-                _theme = current_theme()
-                from app.utils.theme_refresh import ThemeRefreshCoordinator
-
-                _js = ThemeRefreshCoordinator.get_or_build_js(_theme, _is_light)
+                _js = self._theme_css_js(_is_light)
                 if self.page():
                     self.page().runJavaScript(_js)
             except Exception:
@@ -1827,22 +1953,15 @@ class CodeWebViewer(QWebEngineView):
         self.sync_body_max_height(force=True)
         try:
             # 历史会话：先折叠工具区（设置 data-collapsed="true"，dock sync 需要读取此值）
-            if getattr(self, "_is_history", False):
-                self.page().runJavaScript(
-                    "var _ts=document.getElementById('tool-section');"
-                    "var _sep=document.getElementById('tool-separator');"
-                    "if(_ts){if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
-                    "_ts.setAttribute('data-collapsed','true');}"
-                    "if(_sep)_sep.setAttribute('aria-expanded','false');"
-                )
+            self._apply_history_collapsed()
             # 坞态同步：判定用 Python 端真值 _streaming，弃用旧「未折叠 → 开坞」推导。
             # 🐛 旧 `_setStreamingDock(!!_act||!_co)` 在已结束卡片重建（新骨架 DOM 无
-            # data-collapsed 属性 → _co=false）时误开坞态 → 正文限矮、工具区沉底，
+            # data-collapsed 属性 → _co=false）时误开坞态 → 工具区限高、正文被挤压，
             # 是「后台标签页切回后卡片重现流式结构」的直接来源之一。
             # 此 JS 在上方 collapse 之后执行，保证历史卡 data-collapsed 已更新。
             # S2 语义保留：DOM 中存在运行中工具块（data-streaming="true"）时仍强制
             # dock on，覆盖「JS 就绪晚于工具流式注入」的竞态窗口。
-            # 🛡️ 欢迎卡片（light 骨架）跳过：坞态会限死正文高度，欢迎页长内容被截断。
+            # 🛡️ 欢迎卡片（light 骨架）跳过：坞态会限死工具区高度，不符欢迎页语义。
             if not self._light_skeleton:
                 _dock_on = "true" if self._streaming else "false"
                 self.page().runJavaScript(
@@ -1867,6 +1986,13 @@ class CodeWebViewer(QWebEngineView):
             self._renderer_pid = 0
 
     def _load_skeleton(self):
+        # [B5] 骨架重载 = DOM 整体重建：v2 落地基线（_v2_last）失效，必须复位。
+        # 否则崩溃恢复 / 池化补载后 diff 判"无变化" → 不重灌内容 → 空白卡。
+        self._v2_last = None
+        # 同理：骨架重建后 data-collapsed 回到初始值，折叠标记必须失效，
+        # 否则崩溃自愈 / 池化补载后的历史卡不会重新折叠。
+        self._history_collapse_applied = False
+        self._v2_reset_live()
         # 获取系统字体
         font_family = "Segoe UI, sans-serif"
         try:
@@ -2191,6 +2317,19 @@ class CodeWebViewer(QWebEngineView):
                 /* 优化：移除首尾元素的边距，彻底消除多余空白 */
                 #content-placeholder > :first-child {{ margin-top: 0 !important; }}
                 #content-placeholder > :last-child {{ margin-bottom: 0 !important; }}
+                /* v2：block wrapper 是直系子节点，真实内容块在其内层 —— 首末块
+                   margin 归零需穿透 wrapper（旧路径无 wrapper，不受影响） */
+                #content-placeholder > [data-block-wrapper]:first-child > :first-child {{ margin-top: 0 !important; }}
+                #content-placeholder > [data-block-wrapper]:last-child > :last-child {{ margin-bottom: 0 !important; }}
+                /* v2 流式纯文本尾态：活动块新增文本以纯文本节点追加（不跑 markdown），
+                   pre-wrap 保住换行与缩进，视觉上等同正文段落 */
+                #content-placeholder .v2-live-text {{
+                    white-space: pre-wrap;
+                    word-break: break-word;
+                    margin: 0;
+                    color: var(--text-secondary);
+                    line-height: 1.65;
+                }}
                 /* 解决 Chromium 滚动容器 padding-bottom 不生效的 bug */
                 #content-placeholder::after {{
                     content: '';
@@ -2572,6 +2711,45 @@ class CodeWebViewer(QWebEngineView):
                     line-height: 1.5 !important;
                 }}
                 .code-line {{ padding-left: 12px !important; white-space: pre; font-family: {mono_font}; }}
+
+                /* Pygments 高亮主题（class 化，noclasses=False）：内容 HTML 只带
+                   span class，颜色全由独立的 #hl-css 样式块决定（在本块之后）。
+                   主题切换只替换那段 CSS，无需重跑 markdown + 高亮。 */
+
+                /* 主题图标：单色 SVG 走 mask，颜色取 CSS 变量。
+                   一份 HTML 在深浅主题下通用，切主题无需重渲（原先按
+                   qrc:/icons vs qrc:/icons_light 前缀固化在 <img src> 里）。 */
+                .ci {{
+                    display: inline-block;
+                    width: 22px;
+                    height: 22px;
+                    background-color: var(--text-muted, #8b949e);
+                    -webkit-mask-repeat: no-repeat;
+                    -webkit-mask-position: center;
+                    -webkit-mask-size: contain;
+                    mask-repeat: no-repeat;
+                    mask-position: center;
+                    mask-size: contain;
+                    pointer-events: none;
+                }}
+                .ci-save {{
+                    -webkit-mask-image: url("qrc:/icons/导入.svg");
+                    mask-image: url("qrc:/icons/导入.svg");
+                }}
+                .ci-copy {{
+                    -webkit-mask-image: url("qrc:/icons/复制.svg");
+                    mask-image: url("qrc:/icons/复制.svg");
+                }}
+                .ci-max {{
+                    -webkit-mask-image: url("qrc:/icons/最大化.svg");
+                    mask-image: url("qrc:/icons/最大化.svg");
+                }}
+                .ci-think {{
+                    -webkit-mask-image: url("qrc:/icons/思考过程.svg");
+                    mask-image: url("qrc:/icons/思考过程.svg");
+                    background-color: var(--text-muted, #8b949e);
+                    vertical-align: middle;
+                }}
 
                 /* 代码工具按钮 hover：原为硬编码白色叠加，浅色主题下几乎不可见。
                    改为按主题取反色叠加，保证两种主题下都有明确反馈。 */
@@ -3393,27 +3571,45 @@ class CodeWebViewer(QWebEngineView):
                     cursor: default;
                 }}
 
-                /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，背景+边框区分） */
+                /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，左对齐进程条形态）
+                   不套外框：外层消息卡本身已有边界，再叠一层圆角边框会形成「卡中卡」
+                   双圆角错位；分区感改由标题行 + #tool-content 左侧竖线承担。 */
                 /* ── 性能优化：contain: layout paint 让浏览器把此容器视为独立渲染作用域，
                    父布局变化不会让其子树重排 ── */
                 #tool-section {{
                     margin: 0 0 8px 0;
                     contain: layout paint;
+                    border: none;
+                    padding: 0;
                 }}
                 #tool-separator {{
                     display: flex;
                     align-items: center;
-                    gap: 8px;
+                    gap: 6px;
                     font-size: 13px;
-                    color: var(--text-muted);
+                    font-weight: 600;
+                    color: var(--text-secondary);
                     user-select: none;
-                    padding: 2px 2px 6px 2px;
+                    padding: 5px 8px 5px 0;
                     cursor: pointer;
-                    border-radius: 4px;
-                    transition: background-color 120ms ease;
+                    border-radius: 7px;
+                    transition: background-color 120ms ease, color 120ms ease;
                 }}
                 #tool-separator:hover {{
-                    background: var(--panel-soft);
+                    background: var(--row-hover);
+                    color: var(--text);
+                }}
+                /* 计项药丸：与标题拆成独立 span，项数变化不再改写标题字符串
+                   （旧实现把「· N 项」拼进标题 textContent，1→10 项时整行重新量宽） */
+                #tool-separator .ts-count {{
+                    font-size: 10.5px;
+                    font-weight: 600;
+                    line-height: 1.5;
+                    padding: 0 6px;
+                    border-radius: 999px;
+                    background: var(--row-hover);
+                    color: var(--text-muted);
+                    font-variant-numeric: tabular-nums;
                 }}
                 /* 自绘 tooltip：hover 时在分隔条下方显示说明 */
                 #tool-separator {{
@@ -3421,9 +3617,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-separator-tooltip {{
                     position: absolute;
-                    left: 50%;
+                    left: 8px;
                     top: 100%;
-                    transform: translateX(-50%);
                     margin-top: 6px;
                     white-space: nowrap;
                     background: var(--panel, rgba(30,30,32,250));
@@ -3470,19 +3665,13 @@ class CodeWebViewer(QWebEngineView):
                 #tool-section[data-collapsed="true"] #tool-separator .chevron {{
                     transform: rotate(-90deg);
                 }}
-                #tool-separator::before,
-                #tool-separator::after {{
-                    content: '';
-                    flex: 1;
-                    height: 1px;
-                    background: var(--border);
-                    opacity: 0.6;
-                }}
                 #tool-separator .chevron {{
                     display: inline-block;
+                    width: 10px;
+                    text-align: center;
                     transition: transform 160ms ease;
-                    font-size: 9px;
-                    opacity: 0.7;
+                    font-size: 10px;
+                    opacity: 1;
                 }}
 
                 @keyframes _streamingPulse {{
@@ -3504,8 +3693,11 @@ class CodeWebViewer(QWebEngineView):
                     overflow-anchor: none;  /* 禁用 scroll anchoring，防止浏览器在 reorganizeContent 后调整 scrollTop 覆盖 JS 设置的滚底位置 */
                     background: transparent;
                     border: none;
-                    border-radius: 6px;
-                    padding: 2px 0 2px 4px;
+                    /* 左侧竖线承担分区：内容整体缩进到标题文字右侧，形成从属层级 */
+                    border-left: 1.5px solid var(--border);
+                    border-radius: 0;
+                    margin-left: 7px;
+                    padding: 1px 0 1px 11px;
                     /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
                     transition: max-height 200ms ease, opacity 160ms ease;
                 }}
@@ -3539,14 +3731,31 @@ class CodeWebViewer(QWebEngineView):
                 #tool-content > .think-streaming:last-child {{
                     margin-bottom: 0;
                 }}
+                /* v2：block wrapper 是直系子节点，首末块 margin 归零需穿透 wrapper。
+                   入场动效规则**故意不**补 wrapper 版本：v2 活动块每批重建，
+                   补了会让工具/思考块在流式期间反复播动画（闪烁）。 */
+                #tool-content > [data-block-wrapper]:first-child .tool-block:first-child,
+                #tool-content > [data-block-wrapper]:first-child .think-block:first-child,
+                #tool-content > [data-block-wrapper]:first-child .think-streaming:first-child {{
+                    margin-top: 0;
+                }}
+                #tool-content > [data-block-wrapper]:last-child .tool-block:last-child,
+                #tool-content > [data-block-wrapper]:last-child .think-block:last-child,
+                #tool-content > [data-block-wrapper]:last-child .think-streaming:last-child {{
+                    margin-bottom: 0;
+                }}
                 {_STREAMING_DOCK_CSS}
             </style>
+            <!-- 代码高亮主题（Pygments class 化）：单独一个 style 便于运行时
+                 整段替换；内容 HTML 与主题无关，切主题不再重渲正文 -->
+            <style id="hl-css">{get_pygments_css()}</style>
         </head>
         <body>
             <div id="tool-section" style="display: none;" data-collapsed="false">
               <div id="tool-separator" role="button" tabindex="0" aria-expanded="true">
                 <span class="chevron">▾</span>
-                <span>⚙ 工具与思考</span>
+                <span class="ts-label">工具与思考</span>
+                <span class="ts-count" style="display: none;"></span>
                 <span class="tool-separator-tooltip">点击折叠/展开工具与思考区</span>
               </div>
               <div id="tool-content"></div>
@@ -3557,11 +3766,27 @@ class CodeWebViewer(QWebEngineView):
                 // 简洁模式标志：由 Python 在 _load_skeleton 后通过 JS 同步更新
                 window._toolCompactMode = true;
 
+                // 折叠态的稳定身份键：data-block-key 是**内容指纹**（思考块用
+                // 内容 sha1，见 _render_think_block），流式期间内容一变 key 就变 →
+                // 展开态在节点重建后失配、回落到 HTML 写死的 data-expanded="false"，
+                // 表现为「已展开的折叠框又折叠回去 / 重放一次展开」。
+                // data-flip-key（思考块，消息内序号）与 data-tool-call-id（工具块）
+                // 才是跨重建稳定的身份，优先用它们，都没有才回退内容指纹。
+                function _collapseKeyOf(block) {{
+                    if (!block || !block.getAttribute) return '';
+                    // 工具块：tool-call-id 是真身份，优先级最高（思考块不带它）
+                    var tid = block.getAttribute('data-tool-call-id');
+                    if (tid) return 'tid:' + tid;
+                    var fk = block.getAttribute('data-flip-key');
+                    if (fk) return 'fk:' + fk;
+                    return 'bk:' + (block.getAttribute('data-block-key') || '');
+                }}
+
                 function syncExpandedAttrs(block, expanded) {{
                     block.dataset.expanded = expanded ? 'true' : 'false';
                     const summary = block.querySelector('.cm-collapsible__summary');
                     if (summary) summary.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-                    const key = block.dataset.blockKey;
+                    const key = _collapseKeyOf(block);
                     if (key) collapsibleState.set(key, expanded);
                 }}
 
@@ -3630,6 +3855,84 @@ class CodeWebViewer(QWebEngineView):
 
                     window._collapsibleAnimId = requestAnimationFrame(tick);
                 }}
+
+                // ===== 工具块 body 懒注入（折叠态 / 工具区整体折叠时的全部块）=====
+                // 不可见的工具块 body 只留空占位，内容不构造：折叠/隐藏态下这些节点
+                // 纯占内存（pygments 高亮实测膨胀 12~13 倍：12KB diff → 154KB HTML）。
+                // 展开时经 console 通道请求该块内容（Python 侧 _serve_tool_body 反查
+                // markdown 重渲染），回调用 window._fillToolBody 注入。
+                window._requestToolBodyFor = function (block, expand) {{
+                    if (!block) return;
+                    var cid = block.dataset.toolCallId || '';
+                    if (!cid || block.dataset.lazyLoading === '1') return;
+                    block.dataset.lazyLoading = '1';
+                    if (expand) block.dataset.lazyExpand = '1';
+                    console.log('pywebview_action:tool_body:' + cid);
+                    // 失败兜底：Python 侧没回（异常 / 块源此时不可用）时清掉 loading
+                    // 标记，允许用户再点一次；已点开的顺便把空 body 展开到自洽态
+                    setTimeout(function () {{
+                        if (!block.dataset || block.dataset.lazyLoading !== '1') return;
+                        delete block.dataset.lazyLoading;
+                        if (block.dataset.lazyExpand === '1') {{
+                            delete block.dataset.lazyExpand;
+                            startCollapsibleAnimation();
+                            animateCollapsible(block, true);
+                        }}
+                    }}, 2000);
+                }};
+                window._requestLazyToolBodiesIn = function (root) {{
+                    if (!root || typeof window._requestToolBodyFor !== 'function') return;
+                    var blocks = root.querySelectorAll('.tool-block[data-lazy-body="1"]');
+                    for (var i = 0; i < blocks.length; i++) {{
+                        window._requestToolBodyFor(blocks[i], false);
+                    }}
+                }};
+                // 工具区当前可见时，确保区内所有惰注入块都拿到内容。
+                // 触发场景不止用户手动展开：流式新工具自动展开（_updateToolSectionHeader）、
+                // 进入流式坞态（_setStreamingDock）、历史卡初始可见（sessionStorage 恢复）。
+                // 折叠态直接跳过。rAF 合并，避开 reorganizeContent 每轮全量扫。
+                var _ensureVisibleToolBodiesPending = false;
+                window._ensureVisibleToolBodies = function () {{
+                    if (_ensureVisibleToolBodiesPending) return;
+                    _ensureVisibleToolBodiesPending = true;
+                    requestAnimationFrame(function () {{
+                        _ensureVisibleToolBodiesPending = false;
+                        var ts = document.getElementById('tool-section');
+                        if (!ts || ts.getAttribute('data-collapsed') === 'true') return;
+                        if (ts.style.display === 'none') return;
+                        window._requestLazyToolBodiesIn(document.getElementById('tool-content'));
+                    }});
+                }};
+                window._fillToolBody = function (callId, b64) {{
+                    var block = null;
+                    var nodes = document.querySelectorAll('.tool-block[data-tool-call-id]');
+                    for (var i = 0; i < nodes.length; i++) {{
+                        if (nodes[i].dataset.toolCallId === callId) {{ block = nodes[i]; break; }}
+                    }}
+                    if (!block) return;
+                    delete block.dataset.lazyLoading;
+                    var html = '';
+                    try {{ html = b64 ? _b64DecodeUtf8(b64) : ''; }} catch (err) {{ html = ''; }}
+                    if (!html) {{ delete block.dataset.lazyExpand; return; }}
+                    var isCollapsible = block.classList.contains('cm-collapsible');
+                    var wantExpand = block.dataset.lazyExpand === '1' || block.dataset.expanded === 'true';
+                    delete block.dataset.lazyExpand;
+                    delete block.dataset.lazyBody;
+                    var body = block.querySelector('.cm-collapsible__body') ||
+                               block.querySelector('.tool-block__body');
+                    if (!body) return;
+                    body.innerHTML = html;
+                    // 注入内容的后处理：表格滚动包裹 / 图表初始化 / svg 工具栏
+                    try {{ if (window._wrapTablesIn) window._wrapTablesIn([body]); }} catch (err) {{}}
+                    try {{ if (window._initEchartsIn) window._initEchartsIn([body]); }} catch (err) {{}}
+                    try {{ if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars([body]); }} catch (err) {{}}
+                    if (isCollapsible && wantExpand) {{
+                        startCollapsibleAnimation();
+                        animateCollapsible(block, true);
+                    }} else if (!isCollapsible) {{
+                        reportHeightDebounced();
+                    }}
+                }};
 
                 // 折叠动画期间暂停高度报告，避免卡片抖动
                 let _collapsibleHeightReporting = false;
@@ -3720,12 +4023,17 @@ class CodeWebViewer(QWebEngineView):
                     var blocks = window._scopeQuery(roots, '.cm-collapsible');
                     for (var _bi = 0; _bi < blocks.length; _bi++) {{
                         var block = blocks[_bi];
-                        const key = block.dataset.blockKey;
+                        const key = _collapseKeyOf(block);
                         const expanded = key && collapsibleState.has(key)
                             ? collapsibleState.get(key)
                             : block.dataset.expanded === 'true';
                         const body = block.querySelector('.cm-collapsible__body');
                         syncExpandedAttrs(block, !!expanded);
+                        // 懒注入块：重渲染后 body 又是空占位，展开态需重新请求内容
+                        if (expanded && block.dataset.lazyBody === '1') {{
+                            window._requestToolBodyFor(block, true);
+                            continue;
+                        }}
                         if (body) {{
                             body.style.transition = 'none';
                             if (expanded) {{
@@ -4212,7 +4520,7 @@ class CodeWebViewer(QWebEngineView):
                         if (!window._toolCompactMode) {{
                             expandedStates = new Map();
                             container.querySelectorAll('.think-block').forEach(function(block) {{
-                                expandedStates.set(block.dataset.blockKey, block.dataset.expanded === 'true');
+                                expandedStates.set(_collapseKeyOf(block), block.dataset.expanded === 'true');
                             }});
                         }}
 
@@ -4329,7 +4637,7 @@ class CodeWebViewer(QWebEngineView):
                         // [PERF] 简洁模式：expandedStates 为 null，跳过整段（think-compact 无折叠）
                         if (expandedStates) {{
                             container.querySelectorAll('.think-block').forEach(function(block) {{
-                                var savedState = expandedStates.get(block.dataset.blockKey);
+                                var savedState = expandedStates.get(_collapseKeyOf(block));
                                 if (savedState !== undefined) {{
                                     block.dataset.expanded = savedState ? 'true' : 'false';
                                     var body = block.querySelector('.cm-collapsible__body');
@@ -4527,8 +4835,7 @@ class CodeWebViewer(QWebEngineView):
                     var roots = window._nodesSince(container, _from);
                     // 🐛 修复（阅读位置被钳制）：旧增量节点改为**最后**删除。
                     // 「先删后插」会让容器 scrollHeight 瞬时塌陷，浏览器把 scrollTop 钳到
-                    // 更小的 max —— 坞态正文内滚时每来一个 chunk 用户位置就漂一次。
-                    // 先插新内容再删旧的，高度单调不减，scrollTop 没有钳制机会。
+                    // 更小的 max；先插新内容再删旧的，高度单调不减，没有钳制机会。
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         if (el !== tailDiv) el.remove();
                     }});
@@ -4604,6 +4911,348 @@ class CodeWebViewer(QWebEngineView):
                         if (window.console) console.log('finalize-failed:' + e);
                     }}
                 }}
+                // ===== B5 块级补丁通道（新渲染管线专用，旧路径不调用） =====
+                // Python 侧把消息渲染成 BlockRender 列表，用前缀/后缀 diff 算出
+                // splice 指令，这里只做机械替换：从 base 起删 delete 个子节点，
+                // 再插入 items。节点一一对应，不做任何"稳定区猜测"。
+                //
+                // 节点契约（与 app/widgets/render/blocks.py 对应）：
+                //   data-block-index  该容器内的序号，splice 后按序重排
+                //   data-block-key    内容指纹；kind/home 变化时 key 不变但节点要重建
+                //   data-block-kind   text / reasoning / tool / image / custom
+                // 每个 block 包一层 <div data-block-*>，包装层是 patch 的锚点，
+                // 因此**不要**把 wrapper 的 display 改成 contents（会让子节点数量
+                // 与 block 数脱钩，splice 立即错位）。
+                function _applyBlockMeta(el, item, index) {{
+                    el.setAttribute('data-block-index', String(index));
+                    el.setAttribute('data-block-key', item.key || '');
+                    el.setAttribute('data-block-kind', item.kind || '');
+                }}
+                window._blockNodes = function (container) {{
+                    // 只认包装层：其它节点（流式占位 / 骨架 / 增量文本 /
+                    // JS 注入的工具完成框——它也带 data-block-key，但 key 是
+                    // render_tool_block 内层指纹，与 patch 的 key 不同尺度）不参与 splice。
+                    var out = [];
+                    var kids = container.children;
+                    for (var i = 0; i < kids.length; i++) {{
+                        if (kids[i].hasAttribute && kids[i].hasAttribute('data-block-wrapper')) out.push(kids[i]);
+                    }}
+                    return out;
+                }};
+                window.patchBlocks = function (containerId, ops) {{
+                    var container = document.getElementById(containerId);
+                    if (!container || !ops) return;
+                    var nodes = window._blockNodes(container);
+                    var base = ops.base | 0;
+                    var del = ops.delete | 0;
+                    var items = ops.items || [];
+                    // 删除段：按已存在的 block 节点计（不是 children 下标）。
+                    // 删除前 dispose 块内 echarts 实例：节点移除后实例不可达，
+                    // ResizeObserver + canvas 常驻 → 流式长会话累积泄漏（OOM 白屏）。
+                    for (var i = 0; i < del; i++) {{
+                        var victim = nodes[base + i];
+                        if (victim && victim.parentNode) {{
+                            if (victim.querySelectorAll && typeof window._disposeChartNode === 'function') {{
+                                var _olds = victim.querySelectorAll('.echarts-container');
+                                for (var oi = 0; oi < _olds.length; oi++) window._disposeChartNode(_olds[oi]);
+                            }}
+                            victim.parentNode.removeChild(victim);
+                        }}
+                    }}
+                    // 插入段：插在 base 位置原有节点之前；base 越界则追加到末尾
+                    var anchor = nodes[base + del] || null;
+                    var frag = document.createDocumentFragment();
+                    var made = [];
+                    for (var j = 0; j < items.length; j++) {{
+                        var item = items[j];
+                        var wrap = document.createElement('div');
+                        wrap.setAttribute('data-block-wrapper', '1');
+                        wrap.innerHTML = item.html || '';
+                        _applyBlockMeta(wrap, item, base + j);
+                        frag.appendChild(wrap);
+                        made.push(wrap);
+                    }}
+                    if (anchor && anchor.parentNode === container) {{
+                        container.insertBefore(frag, anchor);
+                    }} else {{
+                        container.appendChild(frag);
+                    }}
+                    // 序号重排：删除+插入后整体按 DOM 顺序重编 data-block-index
+                    var all = window._blockNodes(container);
+                    for (var k = 0; k < all.length; k++) {{
+                        all[k].setAttribute('data-block-index', String(k));
+                    }}
+                    // 折叠框 transition 冻结（同 updateContent 的 _fz 机制）：patch 重建的
+                    // 新节点带默认折叠态，随后 restoreCollapsibleStates 把 data-expanded
+                    // 改回 true 时，chevron 旋转与 border-color 的 220ms 过渡会从默认态
+                    // 重播一次——视觉上就是「已展开的折叠框又展开一遍」。rAF 后移除，
+                    // 不影响后续用户交互。
+                    var _v2fz = null;
+                    if (made.length) {{
+                        _v2fz = document.getElementById('_fz');
+                        if (!_v2fz) {{
+                            _v2fz = document.createElement('style');
+                            _v2fz.id = '_fz';
+                            document.head.appendChild(_v2fz);
+                        }}
+                        _v2fz.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *,.think-compact,.think-compact *{{transition:none!important}}';
+                    }}
+                    // 新节点的后处理：表格包裹 / 图表初始化 / 公式 / 工具块栏 / 折叠态恢复
+                    if (made.length && typeof window._wrapTablesIn === 'function') window._wrapTablesIn(made);
+                    if (made.length && typeof window._initEchartsIn === 'function') window._initEchartsIn(made);
+                    if (made.length && typeof renderMermaidBlocks === 'function') renderMermaidBlocks(made);
+                    if (made.length && typeof renderKatexBlocks === 'function') renderKatexBlocks(made);
+                    if (made.length && typeof renderWidgetToolbars === 'function') renderWidgetToolbars(made);
+                    if (made.length && typeof window._runFenceAssets === 'function') window._runFenceAssets(made);
+                    if (made.length && typeof window._initWidgets === 'function') window._initWidgets(made);
+                    if (made.length && typeof restoreCollapsibleStates === 'function') restoreCollapsibleStates(made);
+                    if (_v2fz) requestAnimationFrame(function () {{ var _e = document.getElementById('_fz'); if (_e) _e.remove(); }});
+                    if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 30);
+                }};
+                // ===== B5.2 流式纯文本尾态（活动块增量落地） =====
+                // Python 侧 _perform_update_v2 对活动 text 块启用：首帧把全量纯文本
+                // 灌进 .v2-live-text，之后每批只 append 新增文本；安全边界处整块
+                // 正式化（patchBlocks 替换节点，新节点内无 live 尾，下次追加时重建）。
+                // 意义：每批从「整块全量 HTML 重传 + Chromium 重排整块」降到
+                // 「增量文本追加」，30KB 回答实测 7.9~14.6MB → 约 0.1MB 量级。
+                window._v2LiveNode = function (containerId, key) {{
+                    var c = document.getElementById(containerId);
+                    if (!c) return null;
+                    var nodes = window._blockNodes(c);
+                    for (var i = 0; i < nodes.length; i++) {{
+                        if (nodes[i].getAttribute('data-block-key') === key) return nodes[i];
+                    }}
+                    return null;
+                }};
+                window._v2LiveAppend = function (containerId, key, text) {{
+                    if (!text) return false;
+                    var node = window._v2LiveNode(containerId, key);
+                    if (!node) return false;
+                    var live = node.querySelector(':scope > .v2-live-text');
+                    if (!live) {{
+                        // 正式化后的节点只有 markdown 产物：新建 live 尾接在其后，
+                        // 后续增量继续追加（视觉上等同段落续写）。字符统计占位
+                        // 必须留在末尾（#char-count），live 插在它前面。
+                        live = document.createElement('div');
+                        live.className = 'v2-live-text';
+                        var cnt = node.querySelector(':scope > #char-count');
+                        if (cnt) node.insertBefore(live, cnt); else node.appendChild(live);
+                    }}
+                    live.appendChild(document.createTextNode(text));
+                    return true;
+                }};
+                // ===== B5.1.5 v2 整页清空时的滚动位置保全 =====
+                // force_full（首次接管 / ctx 维度变化 / 工具完成指纹变化）会执行
+                // `_c1.innerHTML=''` 整页清空：清空瞬间 scrollHeight 归零，浏览器把
+                // scrollTop 强制钳到 0，重新灌入后不会自己回来 → 流式期间用户上滚
+                // 阅读被弹回顶部。v1 的 updateContent 一直有 save/restore，v2 此前没有。
+                // 只还原「清空前已离开底部」的容器（阅读态）：贴底跟随的卡交给
+                // _v2AfterPatch / 高度链继续滚底，否则会把跟随位置钉死在旧底部。
+                window._v2ScrollSnap = null;
+                window._v2ScrollSave = function () {{
+                    var s = {{b: 0, bm: 0, c: 0, cm: 0, t: 0, tm: 0}};
+                    var b = document.body;
+                    s.b = b.scrollTop;
+                    s.bm = Math.max(0, b.scrollHeight - b.clientHeight);
+                    var c1 = document.getElementById('content-placeholder');
+                    if (c1) {{
+                        s.c = c1.scrollTop;
+                        s.cm = Math.max(0, c1.scrollHeight - c1.clientHeight);
+                    }}
+                    var c2 = document.getElementById('tool-content');
+                    if (c2) {{
+                        s.t = c2.scrollTop;
+                        s.tm = Math.max(0, c2.scrollHeight - c2.clientHeight);
+                    }}
+                    window._v2ScrollSnap = s;
+                }};
+                window._v2ScrollRestore = function () {{
+                    var s = window._v2ScrollSnap;
+                    window._v2ScrollSnap = null;
+                    if (!s) return;
+                    var TOL = {AUTO_SCROLL_THRESHOLD};
+                    var _restore = function (el, top, max) {{
+                        if (!el || top <= 0 || max <= TOL || top >= max - TOL) return;
+                        var m = Math.max(0, el.scrollHeight - el.clientHeight);
+                        if (m <= 0) return;
+                        _progScroll(el, Math.min(top, m));
+                    }};
+                    _restore(document.body, s.b, s.bm);
+                    _restore(document.getElementById('content-placeholder'), s.c, s.cm);
+                    _restore(document.getElementById('tool-content'), s.t, s.tm);
+                }};
+                // ===== B5.1.6 v2 局部 patch 的滚动锚点保持 =====
+                // patchBlocks 是定点替换，但替换块在视口上方且高度变化时（思考卡从
+                // 流式行变折叠框、工具结果展开、图片落高），浏览器不会替你补偿，
+                // 表现为「内容更新时阅读位置跟着漂」。v1 的 updateContent 有锚点恢复
+                // （_anchorable/_anchorables），v2 此前没有。
+                // 只在容器所属滚动视口**已离开底部**时介入：贴底跟随的卡必须让
+                // 浏览器自己滚（内容增长时保持在底部）。
+                window._v2ScrollHost = function (el) {{
+                    var n = el;
+                    while (n && n !== document.body) {{
+                        try {{
+                            var st = getComputedStyle(n);
+                            if ((st.overflowY === 'auto' || st.overflowY === 'scroll')
+                                && n.scrollHeight - n.clientHeight > 1) return n;
+                        }} catch (e) {{}}
+                        n = n.parentNode;
+                    }}
+                    return document.body;
+                }};
+                window._v2AnchorCapture = function (container) {{
+                    try {{
+                        if (!container) return null;
+                        var host = window._v2ScrollHost(container);
+                        if (!host) return null;
+                        var TOL = {AUTO_SCROLL_THRESHOLD};
+                        var max = Math.max(0, host.scrollHeight - host.clientHeight);
+                        // 不可滚 / 贴底跟随 → 不干预（浏览器行为已正确）
+                        if (max <= TOL || host.scrollTop >= max - TOL) return null;
+                        var hostTop = host.getBoundingClientRect().top;
+                        var nodes = window._blockNodes(container);
+                        for (var i = 0; i < nodes.length; i++) {{
+                            var r = nodes[i].getBoundingClientRect();
+                            if (r.bottom > hostTop + 1) {{
+                                return {{
+                                    host: host,
+                                    key: nodes[i].getAttribute('data-block-key') || '',
+                                    idx: i,
+                                    delta: r.top - hostTop,
+                                    top: host.scrollTop
+                                }};
+                            }}
+                        }}
+                        return {{host: host, key: '', idx: -1, delta: 0, top: host.scrollTop}};
+                    }} catch (e) {{ return null; }}
+                }};
+                window._v2AnchorRestore = function (container, a) {{
+                    if (!a || !a.host || !container) return;
+                    try {{
+                        var host = a.host;
+                        var nodes = window._blockNodes(container);
+                        var target = null;
+                        if (a.key) {{
+                            for (var i = 0; i < nodes.length; i++) {{
+                                if (nodes[i].getAttribute('data-block-key') === a.key) {{ target = nodes[i]; break; }}
+                            }}
+                        }}
+                        // key 随内容变化（指纹）→ 回退「同一个位置序号」
+                        if (!target && a.idx >= 0 && nodes[a.idx]) target = nodes[a.idx];
+                        var want = a.top;
+                        if (target) {{
+                            var hostTop = host.getBoundingClientRect().top;
+                            want = target.getBoundingClientRect().top - hostTop + host.scrollTop - a.delta;
+                        }}
+                        var max = Math.max(0, host.scrollHeight - host.clientHeight);
+                        want = Math.max(0, Math.min(want, max));
+                        if (Math.abs(host.scrollTop - want) >= 1) _progScroll(host, want);
+                    }} catch (e) {{}}
+                }};
+                // ===== B5.1 v2 收尾（block 级渲染通道专用，旧路径不调用） =====
+                // Python 侧 _perform_update_v2 每次 patch 后调用：
+                // 1) 流式运行框去重：MessageCard 的 JS 注入节点（data-tool-call-id，
+                //    无 data-block-key）在真实 tool_result 块落地后成为重复框，按 id 清除；
+                // 2) 工具区显隐 + 标题计数：v2 不跑 reorganizeContent，显隐由块数直接决定；
+                // 3) 流式期间工具区内部滚底（正文滚底仍由外部高度上报链负责）。
+                window._v2AfterPatch = function (streaming) {{
+                    try {{
+                        var _cids = ['content-placeholder', 'tool-content'];
+                        for (var ci = 0; ci < _cids.length; ci++) {{
+                            var c = document.getElementById(_cids[ci]);
+                            if (!c) continue;
+                            var kids = [];
+                            for (var i = 0; i < c.children.length; i++) kids.push(c.children[i]);
+                            var ids = {{}};
+                            for (var a = 0; a < kids.length; a++) {{
+                                var kb = kids[a];
+                                // 【只认包装层】正式块是 <div data-block-wrapper>（patchBlocks
+                                // 产物）；JS 注入的完成框也带 data-block-key（render_tool_block
+                                // 内层指纹 tool-xxxx）——按 key 判定会把注入块误当正式块 → 下方
+                                // 删除段跳过它 → 流式结束后编辑类工具完成框沉底残留。
+                                if (!(kb.hasAttribute && kb.hasAttribute('data-block-wrapper'))) continue;
+                                // 正式块自身/后代都可能有 data-tool-call-id（render_tool_block
+                                // 写在外层 div 上）；querySelector 不含自身，两者都要登记。
+                                var _selfTid = kb.getAttribute ? kb.getAttribute('data-tool-call-id') : null;
+                                if (_selfTid) ids[_selfTid] = true;
+                                if (kb.querySelectorAll) {{
+                                    var _inners = kb.querySelectorAll('[data-tool-call-id]');
+                                    for (var _ii = 0; _ii < _inners.length; _ii++) {{
+                                        var _it = _inners[_ii].getAttribute
+                                            ? _inners[_ii].getAttribute('data-tool-call-id') : null;
+                                        if (_it) ids[_it] = true;
+                                    }}
+                                }}
+                            }}
+                            for (var b = 0; b < kids.length; b++) {{
+                                var k2 = kids[b];
+                                if (k2.hasAttribute && k2.hasAttribute('data-block-wrapper')) continue;
+                                var tid = k2.getAttribute ? k2.getAttribute('data-tool-call-id') : null;
+                                if (tid && ids[tid] && k2.parentNode) k2.parentNode.removeChild(k2);
+                            }}
+                        }}
+                        var tc = document.getElementById('tool-content');
+                        var ts = document.getElementById('tool-section');
+                        // 1.5) 协议块归位：嵌在 text 块 wrapper 内的思考/工具卡
+                        //      （_inject_think_cards / _inject_tool_blocks 产物）
+                        //      块级 home 管不到；v2 不跑 reorganizeContent，简洁
+                        //      模式下在此搬到工具区（最小子集：非块节点不参与
+                        //      splice，搬移不破坏 patchBlocks 锚点；编辑类工具
+                        //      保留正文，与 _tool_home 的 keep_in_content 一致）。
+                        //      🐛 必须「全删重放」而非纯 append：流式活动 text 块
+                        //      每批重灌会重新产生协议卡，纯移动会让工具区副本
+                        //      随批次累积（每批 +1）。每批先清上次搬入的顶层副本
+                        //      再搬，保证工具区搬移类集合 == 正文当前集合。代价：
+                        //      搬入卡的折叠展开态每批重置（流式中可接受，完成后
+                        //      仅跑一轮不再重置）。运行中的工具流式框（JS 注入、
+                        //      data-streaming）不是搬移产物，不清理。
+                        if (window._toolCompactMode && tc) {{
+                            var cpEl = document.getElementById('content-placeholder');
+                            if (cpEl) {{
+                                var staleSel = ':scope > .think-block, :scope > .think-streaming,'
+                                    + ' :scope > .think-compact,'
+                                    + ' :scope > [data-tool-call-id]:not([data-streaming="true"])';
+                                var stale = tc.querySelectorAll(staleSel);
+                                for (var di = 0; di < stale.length; di++) {{
+                                    if (!(stale[di].hasAttribute && stale[di].hasAttribute('data-block-key'))) stale[di].remove();
+                                }}
+                                var strays = cpEl.querySelectorAll(
+                                    '.think-block, .think-streaming, .think-compact, [data-tool-call-id]'
+                                );
+                                for (var si = 0; si < strays.length; si++) {{
+                                    var sEl = strays[si];
+                                    if (sEl.getAttribute && sEl.getAttribute('data-keep-in-content') === 'true') continue;
+                                    tc.appendChild(sEl);
+                                }}
+                            }}
+                        }}
+                        if (tc && ts) {{
+                            ts.style.display = tc.children.length > 0 ? '' : 'none';
+                            if (tc.children.length > 0 && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
+                        }}
+                        if (streaming === true && typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
+                        // [T43] 非流式（历史加载 / 流式终渲染）落地后：跟随态则把卡内
+                        // body 滚到底。v1 路径（updateContent）尾部自带
+                        // _autoScrollStreamingBody 兜底，v2 通道此前完全没有 body 滚底 →
+                        // 历史会话里内容超过 body max-height 的超长卡片首帧停在最上面
+                        // （流式期间是贴底的，加载历史后行为不一致，用户实测）。
+                        // 仅跟随态执行：用户已上滚阅读时保持位置，语义与
+                        // _autoScrollStreamingBody 的 _userScrolledWithin 守卫一致。
+                        if (streaming !== true && !window._userScrolledWithin) {{
+                            window._suppressScrollEvent = true;
+                            try {{
+                                document.body.scrollTop = document.body.scrollHeight;
+                            }} finally {{
+                                window._prevScrollTop = document.body.scrollTop;
+                                window._autoScrollTime = performance.now();
+                                window._suppressScrollEvent = false;
+                            }}
+                        }}
+                        if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 0);
+                    }} catch (e) {{
+                        if (window.console) console.log('v2-after-patch-failed:' + e);
+                    }}
+                }};
                 // ===== B1 差量渲染：未闭合尾部行内渲染（整体替换增量节点） =====
                 // 无空行分隔的长段落（`\\n\\n` 缺失）没有闭合段可差量渲染，
                 // 尾部长时间以纯文本显示 markdown 源码（**加粗**、`code`、[链接]）。
@@ -4730,8 +5379,12 @@ class CodeWebViewer(QWebEngineView):
                     // Python 侧按"不可滚"处理：真异常时内层同样滚不动，交外层更合理。
                     var _ins = 0;
                     try {{
+                        // ⚠️ `#content-placeholder` 留在名单里：坞态已不再给正文
+                        // 限高（[T44]），但正文内嵌的代码块/图表仍可能自带内滚；
+                        // 漏掉它 → ins 判 0 → Python 侧把「点击正文优先滚内部」
+                        // 误判成「卡内无人消费」→ 滚轮全交外层。
                         var _tcs = document.querySelectorAll(
-                            '#tool-content, .code-container, .code-content, .table-scroll-wrapper, .echarts-container'
+                            '#content-placeholder, #tool-content, .code-container, .code-content, .table-scroll-wrapper, .echarts-container'
                         );
                         for (var _ti = 0; _ti < _tcs.length; _ti++) {{
                             var _te = _tcs[_ti];
@@ -4773,9 +5426,11 @@ class CodeWebViewer(QWebEngineView):
                     var separator = document.getElementById('tool-separator');
                     if (!separator) return;
                     var total = toolContent ? toolContent.children.length : 0;
-                    var titleSpan = separator.querySelector(':scope > span:not(.chevron)');
-                    if (titleSpan) {{
-                        titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
+                    // 计数独立成 pill：标题字符串恒定，项数变化只改药丸内容与显隐
+                    var countEl = separator.querySelector(':scope > .ts-count');
+                    if (countEl) {{
+                        countEl.textContent = total > 0 ? total + ' 项' : '';
+                        countEl.style.display = total > 0 ? '' : 'none';
                     }}
                     // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
                     var _hasStreaming = document.querySelector('#tool-content [data-streaming="true"]');
@@ -4786,6 +5441,8 @@ class CodeWebViewer(QWebEngineView):
                         _tsEl.setAttribute('data-collapsed', 'false');
                         separator.setAttribute('aria-expanded', 'true');
                     }}
+                    // 工具有内容且区可见 → 顶部新出现的惰注入块此刻才需要构造内容
+                    if (typeof window._ensureVisibleToolBodies === 'function') window._ensureVisibleToolBodies();
                 }}
 
                 function reorganizeContent() {{
@@ -5093,6 +5750,8 @@ class CodeWebViewer(QWebEngineView):
                     _beginToolSectionTransition();
                     toolSection.setAttribute('data-collapsed', collapsed ? 'false' : 'true');
                     sep.setAttribute('aria-expanded', collapsed ? 'true' : 'false');
+                    // 展开工具区：区内懒注入块的 body 内容此刻才需要构造
+                    if (collapsed) window._requestLazyToolBodiesIn(document.getElementById('tool-content'));
                     try {{ sessionStorage.setItem('_toolSectionCollapsed', collapsed ? '0' : '1'); }} catch(_err) {{}}
                 }}
                 // SVG 图形节点也要能挂 .context-tag：<g class="context-tag"
@@ -5141,9 +5800,22 @@ class CodeWebViewer(QWebEngineView):
                     if (summary) {{
                         const block = summary.closest('.cm-collapsible');
                         if (block) {{
+                            const _expand = block.dataset.expanded !== 'true';
+                            // 懒注入块：body 内容还没构造，先向 Python 请求，注入后再展开
+                            // （展开动画读 body.scrollHeight，DOM 必须先有内容）。
+                            // typeof 守卫：旧骨架（无请求函数）降级为直接展开空 body，
+                            // 不能因函数缺失而永远展不开。
+                            if (
+                                _expand &&
+                                block.dataset.lazyBody === '1' &&
+                                typeof window._requestToolBodyFor === 'function'
+                            ) {{
+                                window._requestToolBodyFor(block, true);
+                                return;
+                            }}
                             // 动画开始前暂停高度报告
                             startCollapsibleAnimation();
-                            animateCollapsible(block, block.dataset.expanded !== 'true');
+                            animateCollapsible(block, _expand);
                         }}
                         return;
                     }}
@@ -5205,6 +5877,11 @@ class CodeWebViewer(QWebEngineView):
                         }});
                     }}
                     reportHeight();
+                    // 初始即可见的工具区（sessionStorage 恢复展开 / 无记录默认展开）
+                    // 里可能有惰注入块，首帧后补一次内容
+                    if (typeof window._ensureVisibleToolBodies === 'function') {{
+                        requestAnimationFrame(window._ensureVisibleToolBodies);
+                    }}
                     // 使用防抖的 ResizeObserver，避免频繁触发高度更新
                     let resizeTimeout = null;
                     new ResizeObserver(() => {{
@@ -5635,6 +6312,17 @@ class CodeWebViewer(QWebEngineView):
                 window._userScrolledWithin = false;
                 window._suppressScrollEvent = false;
                 window._prevScrollTop = 0;  // 历史基线，已不再用于判定
+                // body 真实滚动输入时间戳：下方 scroll 监听的置位许可。
+                // Chromium 在几何变化（隐藏页切回、body 高度上限变化、innerHTML
+                // 重建后的钳制）时也会改 scrollTop 并派发 scroll——那不是用户意图，
+                // 据此置位会让卡内自动滚底永久失效（切回后停在旧位置的根因）。
+                (function () {{
+                    var _b = document.body;
+                    var _stamp = function () {{ _b._lastInputAt = performance.now(); }};
+                    _b.addEventListener('wheel', _stamp, {{passive: true}});
+                    _b.addEventListener('touchstart', _stamp, {{passive: true}});
+                    _b.addEventListener('keydown', _stamp);
+                }})();
                 document.body.addEventListener('scroll', function() {{
                     var _st = document.body.scrollTop;
                     // 即使被抑制也保持 _prevScrollTop 同步，避免后续用户滚动时
@@ -5653,7 +6341,13 @@ class CodeWebViewer(QWebEngineView):
                     var _nearBottom = Math.abs(document.body.scrollHeight - _st - document.body.clientHeight) < {
             AUTO_SCROLL_THRESHOLD
         };
-                    window._userScrolledWithin = !_nearBottom;
+                    // 只允许「贴底 → 复位」；置位需近期真实输入证据（见上方时间戳）。
+                    // 否则切回标签页 / 高度上限变化引起的 scroll 会把跟随永久锁死。
+                    if (_nearBottom) window._userScrolledWithin = false;
+                    else if (document.body._lastInputAt &&
+                             (performance.now() - document.body._lastInputAt) < 900) {{
+                        window._userScrolledWithin = true;
+                    }}
                     // [MEM-2] 卡内滚动改变的是 body 的滚动几何（scrollTop）与「用户正在
                     // 卡内阅读」标志——两者都只随 reportHeight 回传。补一次上报，否则
                     // 用户上滚阅读期间 Python 侧判据与阅读态要等到下一轮内容更新才刷新。
@@ -5732,8 +6426,10 @@ class CodeWebViewer(QWebEngineView):
                     // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
                     if (tc._progDepth > 0) {{ tc._progDepth--; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
-                    tc._userScrolledUp = !atBottom;
+                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期真实输入证据
+                    // （tc 已绑 _bindUserScrollIntent，会记录 _lastInputAt）。
                     if (atBottom) tc._userScrolledUp = false;
+                    else if (_recentUserScrollInput(tc)) tc._userScrolledUp = true;
                 }});
                 // 🐛 修复（流式滚动位置重置）：wheel 事件同步标记上滚意图——scroll
                 // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：
@@ -5967,6 +6663,11 @@ class CodeWebViewer(QWebEngineView):
         """
         if not self._is_js_ready or not self.page():
             return
+        if self._render_v2:
+            # v2：块级 patch 承担显示，纯文本注入会让 DOM 与 block 对齐漂移
+            # （patchBlocks 的 splice 只认 data-block-key 节点，增量裸文本会
+            # 夹在中间且永不清理）。
+            return
         # [PERF] 不可见期间跳过 DOM 注入。resize preview / 对话框穿透防护 / 切 tab
         # 隐藏期间，viewer 已被 MessageCard.hide() 或 WA_TranslucentBackground
         # 守卫关掉，但 runJavaScript 仍会执行 → Chromium 持续累积 DOM 节点 →
@@ -6024,6 +6725,7 @@ class CodeWebViewer(QWebEngineView):
             html_content = _render_markdown_to_html_cached(
                 raw_md,
                 compact=self._tool_compact_mode,
+                lazy_body=self._tool_lazy_body,
             )
             # 将图片相对路径转为绝对 file:/// 路径
             html_content = _resolve_image_src(html_content)
@@ -6051,6 +6753,7 @@ class CodeWebViewer(QWebEngineView):
             self._streaming is False,
             compact=self._tool_compact_mode,
             suppress=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
+            lazy_body=self._tool_lazy_body,
         )
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
         processed_md = _inject_tag_cards(processed_md, self._streaming is False, compact=self._tool_compact_mode)
@@ -6174,6 +6877,29 @@ class CodeWebViewer(QWebEngineView):
         body_font_size = scale_font_size(14)
         self._viewer_font_css = f"{font_css} font-family: {font_family}, sans-serif; font-size: {body_font_size}px;"
 
+    def _theme_css_js(self, is_light: bool) -> str:
+        """组合主题 CSS 注入串：CSS 变量 + Pygments 高亮 CSS（同一 IPC）
+
+        refresh_theme 与 showEvent 补注入共用。高亮 CSS 必须跟变量一起下发，
+        否则隐藏卡恢复可见后代码块还是旧主题配色（Pygments 已 class 化，
+        颜色全在 `#hl-css` 里）。
+        """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        js = ThemeRefreshCoordinator.get_or_build_js(current_theme(), is_light)
+        try:
+            from json import dumps as _json_dumps
+
+            from app.widgets.card_render_core import get_pygments_css
+
+            _hl_style = "friendly" if is_light else "dracula"
+            set_pygments_style(_hl_style)
+            _hl_css_js = _json_dumps(get_pygments_css(_hl_style))
+            js += "(function(){var e=document.getElementById('hl-css');if(e)e.textContent=" + _hl_css_js + ";})();"
+        except Exception as e:
+            logger.warning(f"[CodeWebViewer] 高亮 CSS 下发失败: {e}")
+        return js
+
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换
 
@@ -6196,26 +6922,38 @@ class CodeWebViewer(QWebEngineView):
             return
         self._last_theme_version = v
 
-        # 🐛 主题确实变化：失效实例级 markdown HTML 缓存。
-        # 否则 _perform_update 非流式分支的 _cached_streaming_html 复用逻辑
-        # 会返回旧主题渲染的 HTML（旧 pygments 代码高亮 + 旧思考图标路径），
-        # 导致主题切换后代码块颜色/思考图标不更新。
-        self._cached_streaming_html = None
-        self._processed_md_hash = 0
-        self._cached_raw_md_hash = 0
-        # [B3] 主题变化：递增渲染序号使在途线程池任务过期（旧主题 HTML 丢弃），
-        # 强制后续 _schedule_render 以新主题重新提交渲染。
-        self._render_seq += 1
-        # [PERF-final-async] 同步作废在途终渲染（旧主题终态不得落地）
-        self._final_render_seq -= 1
-        self._final_render_inflight = False
-        # [B1] 主题变化：差量 HTML 缓存失效（旧主题高亮/图标颜色），强制全量重渲染
-        self._needs_full_render = True
-        self._stable_html = ""
-        self._stable_md_len = 0
+        # 高亮风格随主题切换，并取对应 CSS 随 CSS 变量一起下发。
+        # Pygments 已 class 化（noclasses=False）：HTML 不带颜色，换一段 CSS
+        # 就能全量换色，因此下面**不再**因主题变化丢弃渲染缓存/强制重渲。
+        _hl_style = "friendly" if _is_light else "dracula"
+        try:
+            from app.widgets.render_helpers import set_diff_highlight_style
 
-        theme = current_theme()
-        js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
+            set_pygments_style(_hl_style)
+            set_diff_highlight_style(_hl_style)
+        except Exception:
+            pass
+
+        # 只有含图表/图表的卡需要重渲（echarts 主题在 init 时确定、实例不可变色）。
+        # 无图卡：保留 _cached_streaming_html / 稳定 HTML，DOM 不动，只换 CSS。
+        # __dict__.get（非 getattr）：__new__ 桩未跑 __init__，PyQt5 wrapper 上
+        # getattr 缺失属性抛 RuntimeError 而非 AttributeError，默认值防御无效
+        if self.__dict__.get("_has_charts", False):
+            # 🐛 图表卡确实变化：失效实例级 markdown HTML 缓存 + 强制全量重渲
+            self._cached_streaming_html = None
+            self._processed_md_hash = 0
+            self._cached_raw_md_hash = 0
+            # [B3] 主题变化：递增渲染序号使在途线程池任务过期
+            self._render_seq += 1
+            # [PERF-final-async] 同步作废在途终渲染（旧主题终态不得落地）
+            self._final_render_seq -= 1
+            self._final_render_inflight = False
+            # [B1] 差量 HTML 缓存失效（图表节点必须重 init）
+            self._needs_full_render = True
+            self._stable_html = ""
+            self._stable_md_len = 0
+
+        js_code = self._theme_css_js(_is_light)
         # body_font_size 供图表主题 JS 使用（与 _load_skeleton 构建期同语义：
         # scale_font_size(14)）。此前引用的是 _refresh_viewer_font_css 的局部
         # 变量，作用域外抛 NameError，致批处理主题刷新在该卡中断，后续输入框/
@@ -6268,10 +7006,11 @@ class CodeWebViewer(QWebEngineView):
                 # [T28] 四象限分发（互斥）。常量串对所有象限必发（象限 4 由 T24 的
                 # 零 IPC 变为仅发轻量常量串——语义变化，见上）；vault 释放重活仍
                 # 严格按有图门控。可见象限合并为一次 IPC。
-                # _has_charts 用 getattr 防御：__new__ 绕过 __init__ 的测试桩
-                # 无此属性（项目惯例，如 test_message_card_refresh_theme）。
+                # _has_charts 一律用 __dict__.get 读：__new__ 绕过 __init__ 的
+                # 测试桩没有该属性，PyQt5 wrapper 上 getattr 会抛 RuntimeError
+                # （默认值防御对 RuntimeError 无效）。
                 if self.isVisible():
-                    if getattr(self, "_has_charts", False):
+                    if self.__dict__.get("_has_charts", False):
                         # 有图可见：常量 + 重置 + CSS 三段合并一次 IPC（各自 try/catch
                         # 异常域隔离，一段抛错不拖垮另一段，T8 风险 2）
                         _combined_js = (
@@ -6284,7 +7023,7 @@ class CodeWebViewer(QWebEngineView):
                         # 无图可见：常量并入 CSS 段，仍一次 IPC
                         self.page().runJavaScript(_wrap_try(_chart_theme_const_js, "chart const") + _wrap_try(js_code, "css vars"))
                     self._theme_css_pending = False
-                elif getattr(self, "_has_charts", False):
+                elif self.__dict__.get("_has_charts", False):
                     # 有图隐藏：常量 + 重置合并；CSS 变量走 _theme_css_pending 补注入
                     self.page().runJavaScript(
                         _wrap_try(_chart_theme_const_js, "chart const") + _wrap_try(_chart_reset_js, "chart reset")
@@ -6323,10 +7062,30 @@ class CodeWebViewer(QWebEngineView):
                 self._render_deferred = True
                 return
 
-            # [T33] 坞态先于内容：本轮流式的首个 chunk 若先于 _sync_streaming_dock
-            # 的 IPC 落地，正文会先按自然高度排版（坞态 600px 限高未生效），
-            # 坞态到达后再被压回 → 起步瞬间"卡片先胀很大再缩回"。
-            # runJavaScript 按派发顺序执行，此处补发一次即可保证顺序（幂等）。
+            # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2）：接管 DOM 更新 ──
+            # 与旧路径互斥：v2 接管时 updateContent / 差量 / save-restore 全部
+            # 跳过。未接管（无块源）或异常时复位 v2 状态并回退旧全量路径
+            # （innerHTML 整页替换能清掉 v2 的 wrapper，DOM 状态自愈）。
+            if self._render_v2:
+                try:
+                    if self._perform_update_v2():
+                        return
+                except Exception:
+                    # 异常仅回退本轮（下一帧重试）；开关保持，避免暂时性错误
+                    # （渲染器中途异常）永久降级。innerHTML 整页替换清掉 v2
+                    # wrapper，DOM 状态自愈。
+                    logger.exception("[render-v2] 渲染失败，本轮回退旧全量路径")
+                    self._v2_last = None
+                    self._needs_full_render = True
+                else:
+                    # 未接管 = 无块源（欢迎 / 用户消息的纯文本卡）：永久关闭
+                    # v2 防每帧白试，并复位状态防 DOM 双写。
+                    self._render_v2 = False
+                    self._v2_last = None
+
+            # [T44] 坞态先于内容：坞态只切工具区 264px 限高，若首个 chunk 先于
+            # 它的 IPC 落地，工具区会先按自然高度排版再被压回（一次几十~几百 px
+            # 的收缩）。runJavaScript 按派发顺序执行，此处补发一次保证顺序（幂等）。
             if self._streaming and not self._light_skeleton and not self._dock_sync_requested:
                 self._sync_streaming_dock(True)
 
@@ -6549,7 +7308,7 @@ class CodeWebViewer(QWebEngineView):
                     # 的 compact 对齐——否则差量段硬编码 compact=False 会把思考块渲染成
                     # think-block 折叠框（简洁模式下应为 think-compact），形态分裂
                     # （9c76d04f 只给 _render_stable_segment 加了参数，调用点漏改）。
-                    new_html = "".join(_render_stable_segment(seg, compact=self._tool_compact_mode) for seg in segs)
+                    new_html = "".join(_render_stable_segment(seg, compact=self._tool_compact_mode, lazy_body=self._tool_lazy_body) for seg in segs)
                     self._stable_md_len += stable_len
                     self._stable_html += new_html
                     # ⚠️ updateContentAppend 是"追加"语义：只推送本次新增段，
@@ -6630,6 +7389,359 @@ class CodeWebViewer(QWebEngineView):
 
         except RuntimeError:
             pass
+
+    # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2）─────────────────────────
+
+    def _v2_blocks(self) -> Optional[List[Dict[str, Any]]]:
+        """v2 渲染数据源：父级 MessageCard 的 ``_content_data``（标准块列表）。
+
+        viewer 自身只持有 markdown 串（旧机制书账：``get_plain_text`` / 工具
+        body 反查 / 导出仍依赖），块级渲染的真源是卡片的内容块列表。向上找到
+        第一个带 ``_content_data`` 的祖先；非块列表（str：用户 / 欢迎消息）返回
+        None → 本轮回退旧路径。
+        """
+        p = self.parent()
+        while p is not None:
+            data = getattr(p, "_content_data", None)
+            if data is not None:
+                if isinstance(data, list) and data and all(isinstance(b, dict) for b in data):
+                    return data
+                return None
+            parent_fn = getattr(p, "parent", None)
+            p = parent_fn() if callable(parent_fn) else None
+        return None
+
+    def _v2_render_ctx(self) -> RenderCtx:
+        """按 viewer 当前状态构造渲染上下文（含主题 / 字号全局刷新）。"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            from app.widgets.render_helpers import set_diff_highlight_style
+
+            style = "friendly" if theme_manager.is_light_theme() else "dracula"
+            set_pygments_style(style)
+            set_diff_highlight_style(style)
+        except Exception:
+            style = "dracula"
+        _update_icon_prefix()
+        global _CODE_FONT_SIZE
+        _CODE_FONT_SIZE = scale_font_size(13)
+        return RenderCtx(
+            streaming=self._streaming,
+            compact=self._tool_compact_mode,
+            lazy_body=self._tool_lazy_body,
+            heavy_caps=_HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
+            tool_fingerprints=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
+            pygments_style=style,
+            icon_prefix=current_icon_prefix(),
+            code_font_size=_CODE_FONT_SIZE,
+        )
+
+    # ── [B5.2] 流式活动块纯文本尾态 ─────────────────────────────────────
+    # 活动 text 块流式期间不跑 markdown（每批全量重渲 + 整块重传 = O(n²)）：
+    # 节点内维护「已正式化段 + live 纯文本尾」，每批只 append 新增文本，
+    # 安全边界处整块正式化一次（节流 1s）。live 块 key 与内容无关（恒定），
+    # diff 永远不产生它的替换 op，DOM 由本通道显式驱动。
+    _LIVE_MIN_CHARS = 512  # 短于此不启用（全量渲染成本可忽略，观感更稳）
+    _LIVE_FORMALIZE_MIN_INTERVAL_S = 1.0  # 两次正式化的最小间隔
+    _LIVE_FORMALIZE_MIN_DELTA = 256  # 两次正式化的最小新增字符
+
+    def _v2_reset_live(self) -> None:
+        """清空 live 尾态（force_full / 流式结束 / 文本回退时调用）。"""
+        self._v2_live_key = ""
+        self._v2_live_sent = ""
+        self._v2_live_formalized_len = 0
+        self._v2_live_formalize_ts = 0.0
+        self._v2_live_finalize_requested = False
+
+    def mark_live_tail_finalized(self) -> None:
+        """宣告活动正文块已定型（工具调用开始），立即按完成态正式渲染一次。
+
+        活动块判据 ``active_block_index`` 只认「最后一个 text/reasoning 块」：
+        工具调用后该块不会再增长，但流式标记仍在 —— 纯文本尾态会一直挂着，
+        而正式化要求「新增 ≥256 字符」，永远不满足 → 正文停在 markdown 源码
+        形态直到流式结束（提问卡等阻塞工具等待回答期间最明显）。
+
+        置位后下一帧把活动块按完成态整块渲染（markdown），与纯文本节点的差异
+        由 ``diff_message`` 自然生成替换 op。幂等：多路径重复调用只多一次渲染。
+        """
+        self._v2_live_finalize_requested = True
+        self._schedule_render(immediate=True)
+
+    def _v2_live_active(self, blocks, active: Optional[int] = None) -> Optional[int]:
+        """本批可走纯文本尾态的活动块下标；None = 走常规全量渲染。
+
+        ``active`` 传负数为「无活动块」哨兵（调用方已判定末尾块定型），
+        不得回落到自动推断。
+        """
+        if not self._streaming:
+            return None
+        if active is None:
+            active = active_block_index(blocks, True)
+        if active is None or active < 0 or active >= len(blocks):
+            return None
+        blk = blocks[active]
+        if not isinstance(blk, dict) or blk.get("type") != "text":
+            return None
+        if len(str(blk.get("text", "") or "")) < self._LIVE_MIN_CHARS:
+            return None
+        return active
+
+    @staticmethod
+    def _v2_live_html(text: str) -> str:
+        """live 节点 HTML：纯文本（CSS 保留换行缩进）+ 统计占位（与常规形态同位）。"""
+        return f'<div class="v2-live-text">{escape(text)}</div>' + _CHAR_COUNT_HTML
+
+    def _v2_active_block_finalized(self, blocks, active: int, requested: bool = False) -> bool:
+        """活动块是否已定型（不会再增长）。
+
+        两种情形：① 工具调用已开始（``mark_live_tail_finalized`` 置位，由
+        ``_perform_update_v2`` 本帧取走传入）；② 该块之后已有工具/图片/自定义
+        块——协议已切段，末尾 text 块不可能是活动块（``active_block_index``
+        只跳过 text/reasoning，看不到这一点）。
+        """
+        return requested or any(
+            isinstance(b, dict) and b.get("type") not in ("text", "reasoning") for b in blocks[active + 1 :]
+        )
+
+    def _v2_live_should_formalize(self, text: str) -> bool:
+        """节流窗口 + 安全边界都满足时才整块正式化。"""
+        if time.monotonic() - self._v2_live_formalize_ts < self._LIVE_FORMALIZE_MIN_INTERVAL_S:
+            return False
+        # 基准必须是「上次正式化时的长度」：_v2_live_sent 是已下发长度，每批
+        # 都同步到全文，拿它做差恒为 0 → 正式化永不触发（长回答一直停在纯文本）。
+        if len(text) - self._v2_live_formalized_len < self._LIVE_FORMALIZE_MIN_DELTA:
+            return False
+        # 半截代码围栏 / 未闭合协议块不能正式化（会渲染成假块或半截代码块）
+        if text.count("```") % 2:
+            return False
+        if _has_unclosed_think_or_tool(text):
+            return False
+        return self._has_reached_clean_boundary(text) or self._has_reached_soft_boundary(text)
+
+    def _v2_live_stabilize(self, mr: MessageRender, lk: str, formal_key: str) -> MessageRender:
+        """正式化落库版本：活动块换回恒定 live key（html 保留正式产物）。
+
+        否则下一批 live 渲染 key 又变化 → diff 判定块被替换 → 每批重新整块
+        重传纯文本，O(n²) 又回来了。
+        """
+        content = list(mr.content)
+        for i, it in enumerate(content):
+            if it.key in (formal_key, formal_key + ":cc"):
+                content[i] = BlockRender(kind=it.kind, key=lk, html=it.html, home=it.home)
+                break
+        return MessageRender(content=tuple(content), tool=mr.tool)
+
+    def _perform_update_v2(self) -> bool:
+        """block 级渲染：``render_message`` → ``diff_message`` → ``patchBlocks``。
+
+        同步渲染（不走线程池）：块级缓存下每批只重渲活动块，p50 0.5ms /
+        p99 9.5ms，线程池往返（seq 校验 + 信号投递）反而是主要开销。
+
+        活动 text 块流式期间走纯文本尾态（见 ``_v2_live_active``）：每批只
+        append 新增文本，安全边界处整块正式化一次。原先每批对活动块跑全量
+        markdown 并整块重传，30KB 回答实测累计 7.9~14.6MB / 4.5~5.1s（O(n²)）。
+
+        Returns:
+            True = DOM 更新已接管（含空 diff）；False = 无块源，调用方回退旧路径。
+        """
+        if not self._is_js_ready or not self.isVisible():
+            self._render_deferred = True
+            return True
+        # [T33] 坞态先于内容（与旧路径同语义，幂等）
+        if self._streaming and not self._light_skeleton and not self._dock_sync_requested:
+            self._sync_streaming_dock(True)
+        # 懒回调照常消费：_markdown_text 是 get_plain_text / 工具 body 反查 /
+        # 导出的书账，v2 只替换 DOM 更新机制，不动文本维护。
+        if self._lazy_markdown_cb:
+            try:
+                self._markdown_text = self._lazy_markdown_cb()
+            except Exception:
+                pass
+            self._lazy_markdown_cb = None
+        elif not self._markdown_text:
+            # finish 后 cleanup 已清 _markdown_text 且无懒回调：无内容可渲
+            self._final_render_pending = False
+            return True
+
+        blocks = self._v2_blocks()
+        if not blocks:
+            return False
+
+        ctx = self._v2_render_ctx()
+        # 不在 block key 里的 ctx 维度（lazy_body / heavy_caps / 主题 / 字体）变化时：
+        # 已落地 DOM 是旧 ctx 产物，必须清缓存 + 全量重落地。
+        # ⚠️ tool_fingerprints 刻意**不在**此列：它只影响含 <tool> 的 text 块，
+        # 已折进该块 key（block_render.block_key），由 diff 定点替换。放这里会让
+        # 流式中每完成一个工具就整页重建 → 用户展开的折叠框被销毁重来。
+        sig = (
+            ctx.compact,
+            ctx.lazy_body,
+            ctx.heavy_caps,
+            ctx.pygments_style,
+            ctx.icon_prefix,
+            ctx.code_font_size,
+        )
+        if sig != self._v2_ctx_sig:
+            self._v2_ctx_sig = sig
+            self._block_cache.clear()
+            self._v2_last = None
+        # 内容整体替换 / 主题 / 字体等旧信号同样触发全量重落地
+        # 定型标记本帧消费：上面的 deferred / 无块源分支已提前 return，
+        # 标志不会丢；必须早于 force_full 的 _v2_reset_live（它会清标志）
+        finalize_requested = self._v2_live_finalize_requested
+        self._v2_live_finalize_requested = False
+        force_full = self._needs_full_render or self._v2_last is None
+        self._needs_full_render = False
+        self._final_render_pending = False
+        if force_full:
+            # 容器将被清空 → live 节点也随之消失，尾态必须回到「未下发」状态
+            self._v2_reset_live()
+
+        active = active_block_index(blocks, True) if self._streaming else None
+        if active is not None and self._v2_active_block_finalized(blocks, active, finalize_requested):
+            # 已定型：-1 不被任何 idx 命中 → 全块按完成态渲染（含 markdown 正式化）
+            active = -1
+        live_index = self._v2_live_active(blocks, active)
+        live_key_now = ""
+        live_text = ""
+        live_delta = ""
+        if live_index is not None:
+            live_key_now = live_key(live_index)
+            live_text = str(blocks[live_index].get("text", "") or "")
+            if self._v2_live_key == live_key_now and not live_text.startswith(self._v2_live_sent):
+                # 文本被回退/重写（重试、撤回、编辑）：live 节点内容与源不一致，
+                # 只能整卡重落地（patch diff 感知不到 key 不变而 html 变了）
+                force_full = True
+                self._v2_reset_live()
+
+        formalize = (
+            live_index is not None
+            and not force_full
+            and self._v2_live_key == live_key_now
+            and self._v2_live_should_formalize(live_text)
+        )
+
+        if formalize:
+            # 正式化：整块走正常 markdown（活动块 key 变化 → diff 自然生成替换 op）。
+            # active_index=-1：活动块按「已完成」渲染（与 _v2_live_stabilize 的
+            # formal_key 口径一致；未定型语义只影响流式守卫，正式化就是要定型产物）。
+            mr = render_message(blocks, ctx, active_index=-1, char_count=True, cache=self._block_cache)
+            content_ops, tool_ops = diff_message(self._v2_last, mr)
+            from app.widgets.render.block_render import block_key
+
+            _, formal_key = block_key(blocks[live_index], ctx, True)
+            self._v2_last = self._v2_live_stabilize(mr, live_key_now, formal_key)
+            self._v2_live_key = live_key_now
+            self._v2_live_sent = live_text
+            self._v2_live_formalized_len = len(live_text)
+            self._v2_live_formalize_ts = time.monotonic()
+        elif live_index is not None:
+            # 纯文本尾态：活动块不跑 markdown，其余块照常（缓存命中）
+            mr = render_message(
+                blocks,
+                ctx,
+                active_index=-1,
+                char_count=False,
+                cache=self._block_cache,
+                live_index=live_index,
+                live_html=self._v2_live_html(live_text),
+            )
+            content_ops, tool_ops = diff_message(None if force_full else self._v2_last, mr)
+            self._v2_last = mr
+            if self._v2_live_key == live_key_now:
+                # 同块续写：只下发新增文本（首帧 / force_full 时 html 已含全量）
+                if live_text.startswith(self._v2_live_sent):
+                    live_delta = live_text[len(self._v2_live_sent) :]
+            else:
+                # 首帧 / 重置：节点里已是全量纯文本，正式化基准从当前长度起算
+                # （否则会立刻把刚落的纯文本再正式化一遍，白花一次全量）
+                self._v2_live_formalized_len = len(live_text)
+            self._v2_live_key = live_key_now
+            self._v2_live_sent = live_text
+        else:
+            mr = render_message(blocks, ctx, active_index=active, char_count=self._streaming, cache=self._block_cache)
+            content_ops, tool_ops = diff_message(None if force_full else self._v2_last, mr)
+            self._v2_last = mr
+            if not self._streaming:
+                self._v2_reset_live()
+
+        self._last_rendered_markdown = self._markdown_text
+        if content_ops.is_empty and tool_ops.is_empty and not live_delta:
+            return True
+
+        self._height_report_pending = True
+        self._mark_has_charts("".join(b.html for b in (*mr.content, *mr.tool)))
+
+        page = self.page()
+        if page is None:
+            return True
+        js: List[str] = []
+        _has_patch_ops = (not content_ops.is_empty) or (not tool_ops.is_empty)
+        if force_full:
+            # 整页清空前快照滚动位置（body / 正文容器 / 工具区）：清空瞬间
+            # scrollHeight 归零，scrollTop 被浏览器强制钳到 0 且不会自己回来
+            # → 流式期间用户上滚阅读被弹回顶部。restore 见下方 patch 之后。
+            js.append("if(typeof window._v2ScrollSave==='function')window._v2ScrollSave();")
+        elif _has_patch_ops:
+            # 局部 patch 的锚点包（不清容器，故用「视口顶第一个块 + 偏移」而不是
+            # scrollTop 快照）：替换块在视口上方且高度变化时保持阅读位置。
+            js.append(
+                "if(typeof window._v2AnchorCapture==='function'){"
+                "window._v2AnchorC=window._v2AnchorCapture(document.getElementById('content-placeholder'));"
+                "window._v2AnchorT=window._v2AnchorCapture(document.getElementById('tool-content'));}"
+            )
+        if force_full:
+            # 全量落地前清两个容器：v2 首帧 / 内容整体替换 / ctx 切换时容器里
+            # 可能残留旧路径节点（无 data-block-key，splice 不认），不清会叠加。
+            # 清空即销毁全部 echarts 节点 → 先逐个 dispose（同 refresh_theme 语义）。
+            js.append(
+                "try{if(window.__chartVault&&window.__chartVault.size){"
+                "window.__chartVault.forEach(function(el){window._disposeChartNode(el);});"
+                # 🐛 此处原为 `clear();}}`：多一个 } 把 try 提前闭合，后面 `}catch`
+                # 找不到 try → 整串 SyntaxError → runJavaScript 静默丢弃 → 全量
+                # 落地永久失败（历史卡一次性渲染全走 force_full → 整卡空白）。
+                "window.__chartVault.clear();}"
+                "if(window.echarts&&typeof window._disposeChartNode==='function'){"
+                "document.querySelectorAll('.echarts-container').forEach(function(el){"
+                "window._disposeChartNode(el);el._chartStashed=false;});}"
+                "}catch(e){}"
+                "var _c1=document.getElementById('content-placeholder');if(_c1)_c1.innerHTML='';"
+                "var _c2=document.getElementById('tool-content');if(_c2)_c2.innerHTML='';"
+            )
+        if not content_ops.is_empty:
+            js.append(
+                "window.patchBlocks('content-placeholder',"
+                + json.dumps(content_ops.to_payload()).decode("utf-8")
+                + ");"
+            )
+        if not tool_ops.is_empty:
+            js.append(
+                "window.patchBlocks('tool-content',"
+                + json.dumps(tool_ops.to_payload()).decode("utf-8")
+                + ");"
+            )
+        if live_delta:
+            js.append(
+                "if(typeof window._v2LiveAppend==='function')window._v2LiveAppend('content-placeholder',"
+                + json.dumps(live_key_now).decode("utf-8")
+                + ","
+                + json.dumps(live_delta).decode("utf-8")
+                + ");"
+            )
+        if force_full:
+            # 清空后的位置还原必须在 _v2AfterPatch 之前：它里面紧凑模式的块搬移
+            # 还会再动一次正文高度，但先还原能保证用户至少不回到顶部。
+            js.append("if(typeof window._v2ScrollRestore==='function')window._v2ScrollRestore();")
+        elif _has_patch_ops:
+            js.append(
+                "if(typeof window._v2AnchorRestore==='function'){"
+                "window._v2AnchorRestore(document.getElementById('content-placeholder'),window._v2AnchorC);"
+                "window._v2AnchorRestore(document.getElementById('tool-content'),window._v2AnchorT);}"
+            )
+        # v2 专属收尾：流式运行框去重 / 工具区显隐与 header / 工具区滚底
+        js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});")
+        page.runJavaScript("".join(js))
+        return True
 
     def _render_tail_inline(self):
         """把流式未闭合尾部整体行内渲染为 HTML，替换 DOM 增量纯文本节点。
@@ -6769,6 +7881,7 @@ class CodeWebViewer(QWebEngineView):
             "pygments_style": _style,
             "icon_prefix": current_icon_prefix(),
             "heavy_caps": _HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
+            "lazy_body": self._tool_lazy_body,
             "code_font_size": _CODE_FONT_SIZE,
             # 协议段指纹去重（frozenset 快照，worker 线程只读安全）：
             # 流式渲染时未闭合协议段指纹命中已完成工具后不渲染占位框（防与真实完成块重复）
@@ -7306,7 +8419,7 @@ class CodeWebViewer(QWebEngineView):
             if md[self._stable_md_len :].strip():
                 stable_len, segs = _extract_closed_segments(md[self._stable_md_len :])
                 if segs:
-                    new_html = "".join(_render_stable_segment(s, compact=self._tool_compact_mode) for s in segs)
+                    new_html = "".join(_render_stable_segment(s, compact=self._tool_compact_mode, lazy_body=self._tool_lazy_body) for s in segs)
                     self._stable_md_len += stable_len
                     self._stable_html += new_html
                 rest = md[self._stable_md_len :]
@@ -7346,9 +8459,9 @@ class CodeWebViewer(QWebEngineView):
         """流式结束收尾。
 
         Args:
-            keep_dock: True 时保留坞态（简洁模式下工具区仍沉底）——流式文本可能
-                先于工具结果结束（S1：dock 归位早于工具完成），此时不应立即归位，
-                等最后一个工具完成时再由 append_tool_result 兜底归位。
+            keep_dock: True 时保留坞态（简洁模式下工具区仍保持流式限高/不折叠）——
+                流式文本可能先于工具结果结束（S1：dock 归位早于工具完成），此时
+                不应立即归位，等最后一个工具完成时再由 append_tool_result 兜底归位。
             immediate: False 时最终全量渲染不立即派发（仅启内部定时器），
                 供批量加载路径错峰用（T11）。状态清理/JS 调用不受影响，
                 仍全部同步执行。
@@ -7384,7 +8497,7 @@ class CodeWebViewer(QWebEngineView):
         # dirty 使最终渲染走 save/restore 保护（_saved 为空时零开销）。
         if not keep_dock and not getattr(self, "_injected_pending_tools", None):
             self._tool_dom_dirty = False
-        # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
+        # 流式结束：坞态归位（简洁模式下工具区解除限高并折叠）
         # 🆕 F2（S1）：keep_dock=True 时保留坞态——流式文本先于工具结果结束是
         # 常见时序（工具执行耗时 > 文本流式），此时立即归位会让用户看到
         # "工具还在运行但工具区已回顶部"的跳动。归位推迟到最后一个工具完成时。
@@ -7401,7 +8514,7 @@ class CodeWebViewer(QWebEngineView):
         # 🆕 Bug B 方案 D+：流式结束必须清除"流式语义缓存"的 HTML。
         # _cached_streaming_html 是流式渲染产物：thinking 被渲染成 .think-streaming
         # （无 data-block-key，reorganizeContent 查不到 posMap → getPos=1e9 沉底）。
-        # 若 finish 的非流式分支直接复用它，就会在"坞态归位/折叠框从底部移到上部"的
+        # 若 finish 的非流式分支直接复用它，就会在"流式态 → 完成态重排"的
         # 最终渲染中，把思考块与 save/restore 插入的工具块错位（"所有思考在前、
         # 所有工具在后"）。清除后强制以完成态重新渲染（think-compact/think-block
         # 带稳定 data-block-key），与加载历史会话的排序尺度一致。
@@ -7411,9 +8524,10 @@ class CodeWebViewer(QWebEngineView):
         # 重置思考文本流式标志，防止下一轮对话误判
         self._think_text_streaming_started = False
         self._reasoning_streaming_started = False
-        # 🆕 FLIP：最终全量重排会把工具/思考块从"流式态沉底"换成"完成态归位"，
-        # arm 一个短窗口，让紧随其后的 updateContent 采集旧位置并补间成位移动画。
-        # （未 arm 时 _flipCapture 直接返回 null，流式期间零额外布局开销。）
+        # 🆕 FLIP：最终全量重排会把工具/思考块从"流式态"换成"完成态"（形态与
+        # 尺寸都变），arm 一个短窗口，让紧随其后的 updateContent 采集旧位置并
+        # 补间成位移动画。（未 arm 时 _flipCapture 直接返回 null，流式期间零额外
+        # 布局开销。）
         try:
             if self._is_js_ready and self.page():
                 self.page().runJavaScript("if(typeof window._flipArm==='function')window._flipArm(2000);")
@@ -7447,6 +8561,39 @@ class CodeWebViewer(QWebEngineView):
         # 标题栏）。坞态归位 + 折叠由 MessageCard.finish_streaming 统一触发
         # （需 Python 端 _streaming/_has_active_tools 判据，viewer 侧无此状态，
         # 故不在此处调用）；非简洁模式保持流式结束后的展开态不变。
+
+    def _apply_history_collapsed(self):
+        """历史卡工具区折叠（幂等）。
+
+        两个触发点必须共用本方法：
+          1. ``_on_js_ready``：卡片新建（骨架首次就绪）；
+          2. ``MessageCard.ensure_rendered``：viewer 绑定到卡片后（池化复用
+             不重载骨架 → 上面那条永不触发，折叠会整体丢失 → 历史卡工具与
+             思考区默认展开）。
+
+        ``_history_collapse_applied`` 保证一个 viewer 生命周期内只折叠一次：
+        用户手动展开过历史卡工具区后，后续重渲染/重排不得把它折回去。
+        """
+        if not getattr(self, "_is_history", False):
+            return
+        if getattr(self, "_history_collapse_applied", False):
+            return
+        if not self._is_js_ready:
+            return
+        try:
+            page = self.page()
+            if page is None:
+                return
+            page.runJavaScript(
+                "var _ts=document.getElementById('tool-section');"
+                "var _sep=document.getElementById('tool-separator');"
+                "if(_ts){if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
+                "_ts.setAttribute('data-collapsed','true');}"
+                "if(_sep)_sep.setAttribute('aria-expanded','false');"
+            )
+            self._history_collapse_applied = True
+        except RuntimeError:
+            pass
 
     def _auto_collapse_tool_section(self):
         """流式结束时自动折叠工具与思考区（仅简洁模式）
@@ -7486,17 +8633,16 @@ class CodeWebViewer(QWebEngineView):
         Args:
             active: True 进坞 / False 归位。
             collapse_after: [T30] 归位时同帧折叠工具区（仅简洁模式生效）。坞态
-                归位本会把 #tool-content 从 220px 限高展开到自然高度，随后折叠
+                归位本会把 #tool-content 从 264px 限高展开到自然高度，随后折叠
                 又收回去 —— 两段式是结束态剧烈抖动的主因。True 时 JS 在归位
-                事务内连置折叠属性，高度只走一条 220px→0 的曲线。
+                事务内连置折叠属性，高度只走一条 264px→0 的曲线。
                 非归位方向（active=True）忽略。
 
-        仅简洁模式下 JS 侧 _setStreamingDock 会真正切换 body.streaming-dock，
-        非简洁模式注入为空操作。JS 未就绪时跳过——_on_js_ready 会按当前
-        _streaming / _is_history 状态兜底同步。
+        坞态本身不改变容器位置（[T44]：工具/思考区始终在卡片顶部），只切
+        #tool-content 的 264px 限高。仅简洁模式下生效，非简洁模式注入为空操作。
+        JS 未就绪时跳过——_on_js_ready 会按当前 _streaming / _is_history 状态兜底同步。
         """
-        # 欢迎卡片（light 骨架）不进入坞态：坞态 CSS 会限死正文高度，
-        # 欢迎卡片的长内容（会话列表/项目列表）会被截断在 330px。
+        # 欢迎卡片（light 骨架）不进入坞态：坞态会限死工具区高度，不符欢迎页语义。
         if self._light_skeleton:
             return
         try:

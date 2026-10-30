@@ -128,3 +128,75 @@ def test_send_text_carries_source_title(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "caps_for", _call)
     mod._update_handoff_impl("## 任务目标\\nX", switch=True, tool_ctx={"workdir": str(tmp_path), "session_id": "s1"})
     assert sent and "继续完成「修复登录 bug」会话的交接任务" in sent[0]
+
+def test_prefers_tool_pool_over_global_caps(tmp_path, monkeypatch):
+    """能力池优先：caps_for 的 tool host 是「最后创建的主窗口」，多标签下会指错窗口。
+
+    工具池由 ToolExecutor 建（host=本窗口执行器），window_id 天然正确。这里断言
+    动作全部取自 tool_ctx["capabilities"]，且完全不回退到全局 caps_for。
+    """
+    mod = _load_tool()
+    actions = []
+
+    def _accept(name):
+        def _fn(**kw):
+            actions.append((name, kw.get("text", "")))
+            return True
+
+        return _fn
+
+    pool = {
+        "state.kv": {"get": lambda k, d=None: None, "set": lambda k, v: None, "delete": lambda k: None},
+        "session.read": lambda: {"name": "池里的标题"},
+        "session.interrupt": _accept("session.interrupt"),
+        "session.new": _accept("session.new"),
+        "session.send": _accept("session.send"),
+    }
+
+    def _boom(cap_id):
+        raise AssertionError(f"不应回退到全局 caps_for: {cap_id}")
+
+    monkeypatch.setattr(mod, "caps_for", _boom)
+    res = mod._update_handoff_impl(
+        "## 任务目标\nX",
+        switch=True,
+        tool_ctx={
+            "workdir": str(tmp_path),
+            "session_id": "s1",
+            "env": {"app_data_dir": str(tmp_path)},
+            "capabilities": pool,
+        },
+    )
+
+    assert res.success is True
+    assert res.end_turn is True
+    assert [a[0] for a in actions] == ["session.interrupt", "session.new", "session.send"]
+    assert "池里的标题" in actions[2][1]
+
+def test_enqueue_rejected_keeps_turn_and_reports(tmp_path, monkeypatch):
+    """入队被拒（window_id 缺失 / 去重 / 正在 drain）不能谎报「随后开新会话继续」。
+
+    静默吞掉会让本轮 end_turn 收尾而会话没切走，用户只看到对话停住，
+    这正是交接「只中断不新建」的现场。
+    """
+    mod = _load_tool()
+
+    class _RejectingCaps(_Caps):
+        def __call__(self, cap_id):
+            if cap_id == "session.interrupt":
+                return lambda **kw: False  # enqueue 被拒
+            return super().__call__(cap_id)
+
+    caps = _RejectingCaps()
+    monkeypatch.setattr(mod, "caps_for", caps)
+    res = mod._update_handoff_impl(
+        "## 任务目标\nX",
+        switch=True,
+        tool_ctx={"workdir": str(tmp_path), "session_id": "s1", "env": {"app_data_dir": str(tmp_path)}},
+    )
+
+    assert res.success is True
+    assert res.end_turn is False, "入队失败必须继续本轮，否则会话不切却静默收尾"
+    assert "session.interrupt" in str(res.data.get("handoff_switch_error"))
+    assert "切会话失败" in str(res.content)
+    assert caps.actions == []

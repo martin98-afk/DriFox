@@ -56,9 +56,22 @@ def make_gitee_file_response(content_str: str, sha: str = "abc123"):
 
 
 @pytest.fixture(autouse=True)
-def reset_sync_service():
-    """每个测试前重置 ConfigSyncService 状态"""
+def reset_sync_service(tmp_path):
+    """每个测试前重置 ConfigSyncService 状态
+
+    注意：_prepare_read_token / _sync_token 会从 Settings 单例读取 token，
+    而 self._token 会被其无条件覆盖。因此这里必须把 Settings 内存值也设成
+    测试凭证，否则所有依赖读权限的用例都会退化成「本地无 token」。
+    """
     from app.core.sync.config_sync import ConfigSyncService
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    cfg.gitee_bound.value = True
+    cfg.gitee_user_token.value = "valid_token"
+    cfg.gitee_user_owner.value = "test_user"
+    # token 未过期：否则 _initial_sync 走「本地刷新并上传」分支，下载路径用例全部失效
+    cfg.gitee_token_expires_at.value = time.time() + 3600
 
     svc = ConfigSyncService.get_instance()
     # 重置所有实例状态
@@ -75,6 +88,10 @@ def reset_sync_service():
     svc._suppress_until = 0.0
     svc._suppress_retry_scheduled = False
     svc._debounce_timer = None
+    # 同步状态与合并基准必须落在测试临时目录，否则会写脏真实 .drifox/
+    # （_commit_unit_state / _backup_local_unit 都按这两个路径落盘）
+    svc._sha_cache_path = tmp_path / ".sync_shas.json"
+    svc._sync_base_dir = tmp_path / "cache" / "sync_base"
     # 停掉 watch 线程
     svc._stop_watching()
     yield svc
@@ -278,14 +295,14 @@ class TestDoUpload:
     def test_allows_initial_sync_param(self, svc):
         """initial_sync=True 时绕过初始同步检查"""
         svc._initial_sync_completed = False
-        with patch.object(svc, "_upload_file", return_value=True):
+        with patch.object(svc, "_upload_unit", return_value=True):
             with patch.object(svc, "_sync_token", return_value=True):
                 assert svc._do_upload(initial_sync=True) is True
 
     def test_allows_upload_after_initial_sync(self, svc):
         """初始同步完成后可正常上传"""
         with patch.object(svc, "_sync_token", return_value=True):
-            with patch.object(svc, "_upload_file", return_value=True):
+            with patch.object(svc, "_upload_unit", return_value=True):
                 assert svc._do_upload() is True
 
     def test_skips_when_nothing_dirty(self, svc):
@@ -304,7 +321,7 @@ class TestDoUpload:
     def test_clears_dirty_flags_before_upload(self, svc):
         """上传前清空脏标记，避免重复触发"""
         with patch.object(svc, "_sync_token", return_value=True):
-            with patch.object(svc, "_upload_file", return_value=True):
+            with patch.object(svc, "_upload_unit", return_value=True):
                 svc._do_upload()
                 assert svc._config_dirty is False
                 assert svc._custom_dirty is False
@@ -322,12 +339,11 @@ class TestDoUpload:
         svc._custom_dirty = False
         svc._records_dirty = False
         with patch.object(svc, "_sync_token", return_value=True):
-            with patch.object(svc, "_upload_file", return_value=True) as mock_upload:
+            with patch.object(svc, "_upload_unit", return_value=True) as mock_upload:
                 svc._do_upload()
                 # 只上传了 app.config
                 assert mock_upload.call_count == 1
-                _args, kwargs = mock_upload.call_args
-                assert kwargs.get("label") == "app.config"
+                assert mock_upload.call_args[0][0] == "app.config"
 
 
 # =============================================================================
@@ -367,10 +383,12 @@ class TestDoDownload:
             ]
 
             with patch.object(svc, "_sync_token", return_value=True):
-                with patch.object(svc._config_path, "write_bytes") as mock_write:
+                # app.config 走 key 级三方合并写盘（不再是整文件覆盖）
+                with patch.object(svc, "_apply_config_merge") as mock_merge:
                     result = svc._do_download()
                     assert result is True
-                    mock_write.assert_called_once_with(b"new_config_data")
+                    mock_merge.assert_called_once()
+                    assert b"new_config_data" in mock_merge.call_args[0][0]
 
     def test_aborts_when_app_config_fails(self, svc):
         """app.config 下载失败 → 整体失败（不继续下载其他项）"""
@@ -491,7 +509,7 @@ class TestInitialSync:
             mock_client.get.return_value = make_httpx_response(404)
 
             with patch.object(svc, "_sync_token", return_value=True):
-                with patch.object(svc, "_upload_file", return_value=True) as mock_upload:
+                with patch.object(svc, "_upload_unit", return_value=True) as mock_upload:
                     svc._initial_sync()
                     assert svc._initial_sync_completed is True
                     assert mock_upload.called
@@ -542,7 +560,7 @@ class TestInitialSync:
             mock_client.get.return_value = make_httpx_response(404)
 
             with patch.object(svc, "_sync_token", return_value=True):
-                with patch.object(svc, "_upload_file", return_value=False):
+                with patch.object(svc, "_upload_unit", return_value=False):
                     svc._initial_sync()
                     assert svc._initial_sync_completed is False
 
@@ -555,7 +573,7 @@ class TestInitialSync:
 
             before = time.time()
             with patch.object(svc, "_sync_token", return_value=True):
-                with patch.object(svc, "_upload_file", return_value=True):
+                with patch.object(svc, "_upload_unit", return_value=True):
                     svc._initial_sync()
                     remaining = svc._suppress_until - time.time()
                     assert 0 <= remaining <= 6.0  # 大约 5s 抑制
@@ -689,12 +707,34 @@ class TestInitialSync:
         # 网络异常语义不变：发出"网络异常"，不得误报"已失效"、不得清绑
         assert any(ok is False and "网络异常" in msg for ok, msg in msgs), f"未发出网络异常提示: {msgs}"
         assert not any("已失效" in msg for ok, msg in msgs)
-        assert not fake_cfg.gitee_bound.value, "网络异常不得清绑"
+        assert fake_cfg.gitee_bound.value, "网络异常不得清绑"
 
 
 # =============================================================================
 # 6. 抑制窗口 — 不丢失变更
 # =============================================================================
+
+
+class TestPluginReloadWindow:
+    """app.config 单下不触发插件重载链（避免陈旧 pending 触发全量 rescan）"""
+
+    def test_no_window_means_skip(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        assert _should_reload_plugins(0.0) is False
+        assert _should_reload_plugins(0.0, now=time.time()) is False
+
+    def test_inside_window_schedules(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        now = time.time()
+        assert _should_reload_plugins(now + 5, now=now) is True
+
+    def test_expired_window_skips(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        now = time.time()
+        assert _should_reload_plugins(now - 1, now=now) is False
 
 
 class TestSuppressionWindow:
@@ -853,7 +893,7 @@ class TestReBinding:
             mock_client.get.return_value = make_httpx_response(404)  # check_remote
 
             with patch.object(svc, "_sync_token", return_value=True):
-                with patch.object(svc, "_upload_file", return_value=True):
+                with patch.object(svc, "_upload_unit", return_value=True):
                     svc._initial_sync()
                     assert svc._initial_sync_completed is True
 
@@ -1040,7 +1080,9 @@ class TestShaCache:
 
         svc._save_sha_cache()
         data = json.loads(svc._sha_cache_path.read_text(encoding="utf-8"))
-        assert data == {}
+        assert data.get("config_sha") is None
+        assert data.get("custom_sha") is None
+        assert data.get("records_sha") is None
 
 
 # =============================================================================
@@ -1212,6 +1254,15 @@ class TestThemeSyncTiming:
             dispatch_mock,
         )
 
+        # P5d 把主题全量刷新拆到 150ms 后的事件循环分片。测试进程没有稳定事件
+        # 循环，直接同步执行 150ms 分片，其余定时器（200ms 插件重载）保持原样。
+        from app.core.sync import config_sync as cs
+
+        monkeypatch.setattr(
+            cs.QTimer,
+            "singleShot",
+            staticmethod(lambda ms, fn: fn() if ms == 150 else None),
+        )
         svc._reload_settings_on_main_thread()
         return dispatch_mock, fake.ui_theme_style
 

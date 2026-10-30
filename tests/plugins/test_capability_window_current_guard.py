@@ -1,88 +1,140 @@
 # -*- coding: utf-8 -*-
-"""回归守卫：history-manager 的 _active_window() 必须返回窗口对象（非快照 dict）。
+"""回归守卫：history-manager 全面走能力池，不得反射宿主私有成员。
 
-背景（2026-10-18 真实回归）：迁移时把 `_active_window()` 改成走
-window.current（语义快照 dict），但 9 个调用点做的是
-`win._on_history_session_selected(index)` 之类的方法调用 → 运行时
-AttributeError: 'dict' object has no attribute '_on_history_session_selected'
-表现：历史会话切换项目失效。
+历史背景（两轮）：
+1. 2026-10-18：迁移时把 `_active_window()` 改成走 window.current（语义快照
+   dict），但 9 个调用点做方法调用 → `AttributeError: 'dict' object has no
+   attribute '_on_history_session_selected'`，历史会话切换失效。
+2. 2026-10-29：能力池全量收敛。插件原先
+   - 直连 `app.utils.history_manager.HistoryManager` 单例取历史数据
+   - 用 `_call_window("_on_xxx", ...)` 反射宿主窗口 17 个私有方法
+   - 用 `getattr(win, "_current_project"/"_current_session_id"/"_window_id")`
+     读宿主私有字段
+   - 自建 `host=None` 能力池并自报 `declared={cap_id, ...}`（等于自己给自己
+     发权限，manifest 声明恒不生效）
 
-只想要语义字段时用 window.current；要窗口对象时用 window.active。
+现约定：数据面走 `session.history` / `session.history.write` /
+`session.manage` / `project.read` / `project.write` / `team.session`，
+窗口语义走 `window.current` / `window.host` / `window.events`。
 """
+
 import ast
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
-HISTORY_PAGE = REPO / "plugins" / "history-manager" / "ui" / "history_page.py"
+PLUGIN = REPO / "plugins" / "history-manager"
+
+# 宿主私有方法/字段名：插件源码里一律不得出现（含 getattr 字符串形式）
+_FORBIDDEN_CALL_WINDOW = "_call_window"
+_FORBIDDEN_FIELDS = (
+    "_current_project",
+    "_current_session_id",
+    "_window_id",
+    "_build_project_meta_map",
+    "_build_project_root_dir_map",
+)
 
 
-def test_active_window_uses_window_active_capability():
-    """_active_window 必须走 window.active（返回对象），不得用 window.current。"""
-    src = HISTORY_PAGE.read_text(encoding="utf-8")
-    idx = src.find("def _active_window")
-    assert idx > 0, "找不到 _active_window"
-    end = len(src)
-    for marker in ("\ndef ", "\nclass "):
-        k = src.find(marker, idx + 10)
-        if k > 0 and k < end:
-            end = k
-    body = src[idx:end]
-    # 代码里必须走 window.active（docstring 里的说明文字不算，故看调用形式）
-    assert '_caps("window.active")' in body, "_active_window 必须走 window.active"
-    assert (
-        'window.current' not in body.replace('只想要语义字段（project/workdir/session）时用 window.current。', '')
-    ), "_active_window 不得返回语义快照"
+def _plugin_sources():
+    for path in sorted(PLUGIN.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        yield path, path.read_text(encoding="utf-8")
 
 
-def test_no_snapshot_dict_used_as_window():
-    """全仓扫描：window.current 的结果不得当对象调方法。
+def test_no_private_history_manager_import():
+    """插件不得直连 HistoryManager 单例（数据面必须经 session.history 能力）。"""
+    bad = [p.name for p, src in _plugin_sources() if "history_manager import" in src or "HistoryManager.get_instance" in src]
+    assert not bad, f"仍直连 HistoryManager: {bad}"
 
-    判据：变量的值直接来自 _caps("window.current") 的调用结果（snap = ...()），
-    随后出现 <var>._xxx( 的调用 —— dict 没有下划线方法名，必然是误用。
-    """
-    SKIP = {"__pycache__", "deps", "skills", "examples"}
+
+def test_no_call_window_reflection():
+    """不得用 _call_window 反射宿主私有方法（依赖面在代码里不可见）。"""
+    bad = [p.name for p, src in _plugin_sources() if _FORBIDDEN_CALL_WINDOW in src.split("原实现用")[0]]
+    assert not bad, f"仍用 _call_window 反射: {bad}"
+
+
+def test_no_private_host_field_access():
+    """不得读写宿主私有字段（项目名/会话 id/窗口 id 走 window.current 快照）。"""
     bad = []
-    for path in sorted((REPO / "plugins").rglob("*.py")):
-        rel = path.relative_to(REPO / "plugins")
-        if any(p in SKIP for p in rel.parts):
-            continue
-        src = path.read_text(encoding="utf-8", errors="ignore")
-        if "window.current" not in src:
-            continue
-        try:
-            tree = ast.parse(src)
-        except SyntaxError:
-            continue
+    for path, src in _plugin_sources():
+        for field in _FORBIDDEN_FIELDS:
+            # getattr(win, "_xxx") 与 win._xxx 两种形态都算
+            if f'"{field}"' in src or f"'{field}'" in src:
+                bad.append(f"{path.name}: attr {field}")
+    assert not bad, "仍访问宿主私有字段: " + ", ".join(bad)
 
-        # 1) _caps("window.current") 赋给谁
-        cap_vars: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-                seg = ast.get_source_segment(src, node.value) or ""
-                if 'window.current' in seg:
-                    cap_vars.add(node.targets[0].id)
 
-        # 2) <cap_var>() 的结果赋给谁 → 那是快照变量
-        snap_vars: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-                seg = ast.get_source_segment(src, node.value) or ""
-                # 形如：snap = snap() / snap = _caps(...)() / a = active()
-                if any(f"{v}()" in seg.replace(" ", "") for v in cap_vars) or (
-                    seg.strip().endswith("()") and seg.strip().startswith(tuple(cap_vars))
-                ):
-                    snap_vars.add(node.targets[0].id)
-        # cap 变量若被就地重绑（snap = snap()），它自己也成了快照
-        snap_vars |= {v for v in cap_vars if v in snap_vars}
+def test_no_self_granted_capability_pool():
+    """不得自建 host=None 池并自报 declared（等于插件自己发权限）。"""
+    bad = []
+    for path, src in _plugin_sources():
+        if "build_pool(" in src and "declared=" in src:
+            bad.append(path.name)
+    assert not bad, f"仍自建能力池自报声明: {bad}"
 
-        # 3) 快照变量上不得出现 ._xxx() 调用
+
+def test_caps_uses_sdk_caps_for():
+    """两处 _caps 必须收敛到 sdk.caps_for（host 由宿主解析）。"""
+    for name in ("history_page.py", "history_card.py"):
+        src = (PLUGIN / "ui" / name).read_text(encoding="utf-8")
+        idx = src.find("def _caps")
+        assert idx > 0, f"{name} 缺少 _caps"
+        body = src[idx : idx + 800]
+        assert "from app.plugins.sdk import caps_for" in body, f"{name}._caps 未走 sdk.caps_for"
+        assert "return caps_for(cap_id)" in body, f"{name}._caps 未直接返回 caps_for"
+
+
+def test_declared_capabilities_match_usage():
+    """manifest 声明的能力必须覆盖源码里用到的全部 _caps("x") 字面量。"""
+    import json
+
+    manifest = json.loads((PLUGIN / ".drifox-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    declared = set(manifest.get("capabilities") or [])
+    assert manifest.get("api_version") == 2
+    assert declared, "必须显式声明能力清单"
+
+    used = set()
+    for path, src in _plugin_sources():
+        tree = ast.parse(src)
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr.startswith("_")
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id in snap_vars
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_caps"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
             ):
-                bad.append(f"{path.name}:{node.lineno} {node.func.value.id}.{node.func.attr}()")
-    assert not bad, f"语义快照被当窗口对象用: {bad}"
+                used.add(node.args[0].value)
+
+    missing = used - declared
+    assert not missing, f"用到但未声明: {sorted(missing)}"
+
+
+@pytest.mark.parametrize(
+    "cap_id",
+    ["session.history", "session.history.write", "session.manage", "project.read", "project.write", "team.session"],
+)
+def test_new_history_capabilities_registered(cap_id):
+    """新增的六条能力必须在 catalog 登记并在 ui surface 注册、可构造。"""
+    from unittest.mock import MagicMock
+
+    from app.plugins.capabilities import bootstrap, catalog
+    from app.plugins.capabilities.registry import CapabilityRegistry
+
+    CapabilityRegistry.reset_instance()
+    bootstrap.reset_bootstrap()
+    try:
+        reg = CapabilityRegistry.get_instance()
+        bootstrap.ensure_registered("ui")
+        assert catalog.get(cap_id) is not None, f"{cap_id} 未在 catalog 登记"
+        assert reg.has(cap_id, "ui"), f"{cap_id} 未在 ui surface 注册"
+        pool = reg.build_pool(surface="ui", host=MagicMock(), plugin="probe", declared={cap_id})
+        value = pool[cap_id]
+        assert value is not None, f"{cap_id} provider 返回 None"
+    finally:
+        CapabilityRegistry.reset_instance()
+        bootstrap.reset_bootstrap()

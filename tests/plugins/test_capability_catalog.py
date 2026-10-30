@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""能力目录：53 条定义完整性 / 命名空间 / 别名 / 通配展开 / 旧键映射。"""
+"""能力目录：66 条定义完整性 / 命名空间 / 别名 / 通配展开 / 旧键映射。"""
 import re
 
 import pytest
@@ -8,7 +8,7 @@ import pytest
 def test_catalog_size_and_ids():
     from app.plugins.capabilities import catalog
 
-    assert len(catalog.CATALOG) == 58
+    assert len(catalog.CATALOG) == 66
     for cid, spec in catalog.CATALOG.items():
         assert spec.id == cid
         assert re.fullmatch(r"[a-z]+(\.[a-z][a-z_]*)+", cid), cid
@@ -45,6 +45,10 @@ def test_high_level_set_is_stable():
         "plugin.control",
         "host.raw",
         "process.start",
+        # 2026-10-29 历史/项目/团队会话面（一次性收敛 history-manager 的宿主耦合）
+        "session.history.write",
+        "project.write",
+        "team.session",
     }
 
 
@@ -56,7 +60,7 @@ def test_legacy_map_targets_exist():
 
 
 def test_legacy_map_covers_engine_host_keys():
-    """EngineHost 契约的 20 个服务键全部有旧键映射（P3 投影的前提）。"""
+    """EngineHost 契约的服务键全部有旧键映射（P3 投影的前提）。"""
     from app.plugins.capabilities import catalog
 
     expected = {
@@ -68,7 +72,6 @@ def test_legacy_map_covers_engine_host_keys():
         "get_tools_schema",
         "set_workdir",
         "get_workdir",
-        "get_compactor",
         "conversation_stack",
         "create_engine_session",
         "save_messages_to_session",

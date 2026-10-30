@@ -147,17 +147,14 @@ def _fire(action: str, fn: Callable[[], Any]) -> Dict[str, Any]:
 
 
 def _resolve_widget() -> Any:
-    """承载模型配置的 MainWidget（host 进不来，自己解析活跃主窗口）。"""
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+    """承载模型配置的 MainWidget（host 进不来，自己解析活跃主窗口）。
 
-        reg = UIPluginRegistry.get_instance()
-        widget = getattr(reg, "_main_widget", None) or next(
-            iter(getattr(reg, "_window_main_widgets", {}).values()), None
-        )
-        return widget
-    except Exception:
-        return None
+    ★ 必须取「用户此刻所在标签页」：``_main_widget`` 是最后构造的窗口，
+    多标签下会拿到最新标签页而非当前标签页。
+    """
+    from app.plugins.capabilities.resolve import active_main_widget
+
+    return active_main_widget()
 
 
 def _resolve_tab_window() -> Any:

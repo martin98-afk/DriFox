@@ -4,12 +4,12 @@
 
 负责：
 1. 组装 LLM 消息上下文（系统提示、技能、自定义提示、记忆等）
-2. 预算分配决策（决定压缩策略、保留比例）
-3. 委托 HistoryCompactor 执行实际压缩
+2. 预算分配决策（历史消息分到多少 token）
+3. 把历史消息交给 ContextPipeline 的 tier 链投影
 
 设计原则：
 - 预算决策集中在此处，调整 token 分配只需改这里
-- 实际压缩逻辑委托给 HistoryCompactor，避免重复
+- 历史压缩器已退役，上下文降级只走无损 tier（见 ContextPolicyRegistry）
 """
 
 from collections import OrderedDict
@@ -25,6 +25,7 @@ from app.core.context.tool_prune import (  # noqa: F401  向后兼容 re-export�
     prune_tool_result,
     resolve_tool_result_max_len,
 )
+from app.core.context.budget import resolve_context_budget
 from app.core.conversation.message_content import consolidate_messages
 from app.core.infra.token_estimator import count_messages_tokens
 
@@ -44,17 +45,15 @@ class ContextBudgetAllocator:
     - 系统提示 token 缓存：避免重复计算相同内容
     """
 
-    def __init__(self, agent_manager, compactor=None, backend=None, pipeline=None):
+    def __init__(self, agent_manager, backend=None, pipeline=None):
         """
         Args:
             agent_manager: AgentManager 实例
-            compactor: HistoryCompactor 实例（用于预算查询与压缩）
             backend: 后端实例（用于获取记忆上下文）
             pipeline: ContextPipeline 实例（可注入，测试用桩替换；不传则每次新建）
         """
         self._agent_manager = agent_manager
         self.backend = backend
-        self._compactor = compactor
         self._pipeline = pipeline
 
         # ========== 性能优化：系统提示 token 缓存（LRU，md5 键跨进程稳定） ==========
@@ -89,7 +88,6 @@ class ContextBudgetAllocator:
         self,
         session,
         llm_config: Dict,
-        allow_llm_summary: bool = False,
         current_agent: Optional[str] = None,
     ) -> List[Dict]:
         """
@@ -98,7 +96,6 @@ class ContextBudgetAllocator:
         Args:
             session: ChatSession 实例
             llm_config: LLM 配置字典
-            allow_llm_summary: 是否允许 LLM 摘要
             current_agent: 当前智能体名称
 
         Returns:
@@ -165,7 +162,7 @@ class ContextBudgetAllocator:
         budget = self._allocate_history_budget(full_system_content, llm_config)
         # [PERF T33] 发送前处理缓存：cascade 输出在同一消息版本 + 同一预算/模型/
         # 截断参数下结果确定，而一次发送会经多次调用（主发送 + 工具迭代回环）。
-        # 长会话下是 100-300ms 级开销。命中条件 8 元组全等，任一变化即 miss。
+        # 长会话下是 100-300ms 级开销。命中条件 7 元组全等，任一变化即 miss。
         # filtered_history 过滤留在缓存外（对 cascade 输出原地筛选，不回写缓存）。
         tool_result_max_len = resolve_tool_result_max_len(llm_config)
         prep_key = (
@@ -176,7 +173,6 @@ class ContextBudgetAllocator:
             budget,
             llm_config.get("model", "") if isinstance(llm_config, dict) else "",
             tool_result_max_len,
-            bool(allow_llm_summary),
         )
         cached_prep = getattr(session, "_send_prep_cache", None)
         if cached_prep is not None and cached_prep.get("key") == prep_key:
@@ -227,8 +223,8 @@ class ContextBudgetAllocator:
                 pass  # 缓存写回失败不影响发送（session 可能为只读桩）
 
         # 过滤旧 system 消息（保留 _hook_event 标记的系统消息，它们是由 hook 注入的动态上下文；
-        # 同时保留 _compaction_summary 标记的压缩摘要，它是合法上下文，不应被当作"旧 system 消息"丢弃，
-        # 否则压缩后的历史摘要会整体丢失，见 history_compactor.py issue #225 修复）
+        # 同时保留 _compaction_summary 标记的历史压缩摘要：老会话的持久化数据里仍有这类消息，
+        # 它是合法上下文，不应被当作"旧 system 消息"丢弃，否则摘要会整体丢失（issue #225））
         filtered_history = [
             m
             for m in history_for_api
@@ -265,8 +261,8 @@ class ContextBudgetAllocator:
         Returns:
             历史消息可用 token 数
         """
-        # 委托给 compactor 计算总预算
-        total_budget = self._compactor.get_budget(llm_config)
+        # 总预算：上下文窗口 − 输出预留（纯函数，见 app.core.context.budget）
+        total_budget = resolve_context_budget(llm_config)
 
         # 估算系统提示 token（使用缓存）
         system_tokens = self._get_cached_system_tokens(system_content)
@@ -291,7 +287,7 @@ class ContextBudgetAllocator:
 
     def get_context_budget(self, llm_config: Dict) -> int:
         """
-        计算上下文预算（委托给 HistoryCompactor）。
+        计算上下文预算。
 
         Args:
             llm_config: LLM 配置字典
@@ -299,6 +295,6 @@ class ContextBudgetAllocator:
         Returns:
             可用的上下文 token 数
         """
-        return self._compactor.get_budget(llm_config)
+        return resolve_context_budget(llm_config)
 
 

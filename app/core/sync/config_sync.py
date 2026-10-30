@@ -9,18 +9,21 @@
 """
 
 import base64
+import json
 import os
 import shutil
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
+from app.core.sync import fingerprint as fp
 from app.utils.config import Settings
 from app.utils.utils import get_app_data_dir
 
@@ -31,6 +34,8 @@ USER_CUSTOM_REMOTE_PATH = "drifox/user-custom.zip"
 REMOTE_RECORDS_PATH = "drifox/share_records.json"
 SHA_CACHE_FILE = ".sync_shas.json"
 DEBOUNCE_MS = 10000
+# 远端变更轮询间隔（毫秒）。单轮只发 1 个目录列表请求，48 次/小时，远低于 Gitee 限流。
+POLL_INTERVAL_MS = 5 * 60 * 1000
 # 初始同步启动延迟（毫秒）：把 enable() 后立即发起的网络链（实测 ~8.8s）
 # 移到启动空闲窗口之后，避免与 tab 创建/首次会话争抢 I/O。
 INITIAL_SYNC_DELAY_MS = 8000
@@ -72,6 +77,16 @@ def _get_records_path() -> Path:
     return get_app_data_dir() / "share" / "records.json"
 
 
+def _should_reload_plugins(window_until: float, now: Optional[float] = None) -> bool:
+    """本轮同步是否落在「解压过 user-custom」的时间窗内。
+
+    只有解压 user-custom 才可能产生插件目录变更。app.config 单下时插件目录没动，
+    此时若还去消费 watcher pending，会把启动期遗留的一条陈旧标记当成真变更，
+    触发一次 rescan 全量扫描（76 个插件目录重新解析），纯开销。
+    """
+    return (time.time() if now is None else now) < float(window_until or 0.0)
+
+
 # ─────────────────────────────────────────────────────────────
 # 可注册同步内容（SyncContentProvider）
 #
@@ -104,8 +119,8 @@ class SyncContentProvider:
 
     provider_id: str = ""
     label: str = ""
-    local_dir: str = ""          # 本地目录绝对路径
-    remote_path: str = ""        # 远端仓库内路径（缺省自动生成）
+    local_dir: str = ""  # 本地目录绝对路径
+    remote_path: str = ""  # 远端仓库内路径（缺省自动生成）
     enabled: bool = True
 
 
@@ -149,9 +164,7 @@ def register_sync_content_provider(
         enabled=enabled,
     )
     _sync_content_providers[provider_id] = provider
-    logger.info(
-        f"[ConfigSync] 注册同步内容: {provider_id} ({provider.label}) → {provider.remote_path}"
-    )
+    logger.info(f"[ConfigSync] 注册同步内容: {provider_id} ({provider.label}) → {provider.remote_path}")
     return True
 
 
@@ -238,8 +251,23 @@ class ConfigSyncService(QObject):
         self._records_remote_sha: Optional[str] = None  # 远端 share_records.json SHA 缓存
         self._ext_remote_sha: Dict[str, str] = {}  # 远端 provider zip SHA 缓存 {provider_id: sha}
         self._ext_dirty: Dict[str, bool] = {}  # provider 内容待上传标记 {provider_id: bool}
+        # 各同步单元「上次与远端一致时的本地内容指纹」（unit → hex），
+        # 用于 zero-network 判断「内容没变就不要上传」。
+        self._content_hashes: Dict[str, str] = {}
+        # 三方合并基准：单文件存内容副本，目录存 {相对路径: 文件 sha256} 清单
+        self._sync_base_dir: Path = get_app_data_dir().resolve() / "cache" / "sync_base"
+        self._device_tag: str = ""  # 冲突副本命名用设备标识（首次生成后持久化）
+        # 待归档到远端的冲突文件 [(本地路径, 远端路径)]：冲突时对方版本既留本地
+        # conflicts/，也推到远端独立目录，两台机器都能找回，且不混入业务 zip。
+        self._conflict_archive: List[Tuple[Path, str]] = []
+        self._poll_timer: Optional[QTimer] = None  # 运行期远端变更轮询
+        self._poll_busy: bool = False
         self._sha_cache_path: Path = get_app_data_dir().resolve() / SHA_CACHE_FILE
         self._pending_sync_message: Optional[str] = None  # 延迟 syncDone 消息（Settings 在主线程重载完成后发射）
+        # 本轮下载确实解压了 user-custom 时置为「当前时间 + 10s」：只有落在这个
+        # 时间窗内的 Settings 重载才去消费 watcher pending 并排插件重载。app.config
+        # 单下时插件目录没变，消费启动期遗留的陈旧 pending 会白跑一次全量 rescan。
+        self._plugin_reload_window_until: float = 0.0
         self._initial_sync_completed: bool = False  # 初始同步是否已完成（禁止初始同步前上传）
         self._suppress_retry_scheduled: bool = False  # 抑制窗口结束后的重试已调度
 
@@ -360,9 +388,19 @@ class ConfigSyncService(QObject):
         self._debounce_timer.timeout.connect(self._on_debounce_timeout)
 
         self._set_state("idle")
+        # 同步元数据记账器：采集 ConfigItem 变更，生成 LWW 条目表（含墓碑）。
+        # 失败不阻塞同步（退化成 union 合并，不丢数据）。
+        try:
+            from app.core.sync.meta_recorder import bind_settings
+
+            self._meta_recorder = bind_settings(Settings.get_instance())
+        except Exception as e:
+            logger.warning(f"[ConfigSync] 同步元数据接线失败: {e}")
+            self._meta_recorder = None
         # 先设抑制窗口再启动 watch，防止 initial_sync 过程中的文件事件触发防抖上传
         self._suppress_until = time.time() + 30.0
         self._start_watching()
+        self._start_polling()
 
         # 启动延迟：把初始同步的网络流量移到启动空闲窗口之后（启动阶段 tab 创建/
         # 首次会话会争抢 I/O，实测 8.8s 网络链拖慢启动）。QTimer 在主线程事件循环
@@ -377,6 +415,7 @@ class ConfigSyncService(QObject):
     def disable(self):
         """解绑前调用：停止文件监听和防抖计时器，清除 SHA 缓存"""
         self._stop_watching()
+        self._stop_polling()
         if self._debounce_timer:
             self._debounce_timer.stop()
             self._debounce_timer = None
@@ -390,10 +429,18 @@ class ConfigSyncService(QObject):
         self._config_remote_sha = None
         self._custom_remote_sha = None
         self._records_remote_sha = None
+        self._ext_remote_sha = {}
+        self._content_hashes = {}
         self._initial_sync_completed = False
         try:
             if self._sha_cache_path.exists():
                 self._sha_cache_path.unlink()
+        except Exception:
+            pass
+        # 合并基准随解绑一起丢弃：重新绑定后从 union 合并开始（保守、不丢内容）
+        try:
+            if self._sync_base_dir.exists():
+                shutil.rmtree(str(self._sync_base_dir), ignore_errors=True)
         except Exception:
             pass
         self._set_state("disabled")
@@ -554,9 +601,7 @@ class ConfigSyncService(QObject):
                         _pdir = Path(_p.local_dir)
                         if _pdir.exists() and changed_p != _pdir and changed_p.is_relative_to(_pdir):
                             if not self._ext_dirty.get(_p.provider_id):
-                                logger.info(
-                                    f"[ConfigSync] 检测到同步内容变更: {_p.provider_id} ({changed_path})"
-                                )
+                                logger.info(f"[ConfigSync] 检测到同步内容变更: {_p.provider_id} ({changed_path})")
                             self._ext_dirty[_p.provider_id] = True
                             needs_notify = True
                             break
@@ -720,6 +765,12 @@ class ConfigSyncService(QObject):
                     logger.warning(f"[SecretStore] 同步回填失败: {_se}")
                     _secret_mode = ""
 
+                # 写回内存阶段全部静默：这些 value 变化来自云端合并结果，
+                # 若记账器当成用户改动，本机会把远端内容记成自己的新版本，
+                # 导致下一次同步时其他设备被它覆盖。
+                _rec = getattr(self, "_meta_recorder", None)
+                if _rec is not None:
+                    _rec.begin_suppress()
                 for _section_name, _section_data in _file_data.items():
                     for _key, _value in _section_data.items():
                         _matched = None
@@ -754,6 +805,8 @@ class ConfigSyncService(QObject):
                             # （隔天同步时多数配置未变，仅此项即可消除主线程 200-500ms 占用）
                             if getattr(cfg, _matched).value != _value:
                                 getattr(cfg, _matched).value = _value
+                if _rec is not None:
+                    _rec.end_suppress()
 
                 # 🔒 密钥态判定必须在写回循环之后（基于新内存值）：
                 # - 无锁定条目且密码在手上 → 清备份（解锁成功即清，防设置卡误读「等待解锁」）；
@@ -767,6 +820,8 @@ class ConfigSyncService(QObject):
                         cfg._cipher_backup = {}
                 logger.debug("[ConfigSync] 全量配置已从文件同步到内存（含本地 Gitee token）")
             except Exception as _e:
+                if getattr(self, "_meta_recorder", None) is not None:
+                    self._meta_recorder.reset_suppress()
                 logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")
 
             # ── 主题显式全量刷新（修复 bug#6） ──
@@ -800,14 +855,20 @@ class ConfigSyncService(QObject):
             # 延迟 200ms 执行一次；另安排 3s 兜底——watchfiles 2s 防抖可能使 pending
             # 晚于本方法置位（解压完成 → emit → 主线程重载期间 watcher 尚未处理事件），
             # 3s 后补查一次，确保 agents/commands 最终加载、事件不丢。
+            #
+            # 只在「本轮确实解压了 user-custom」的时间窗内触发：app.config 单下时
+            # 插件目录没有任何变化，此时消费 pending 只会拿启动期遗留的一条陈旧标记
+            # 去跑一次 rescan 全量扫描（76 个插件目录全部重新解析），纯开销。
             try:
-                from app.core.conversation.backend import ChatBackend
+                from app.core.services.plugin_host_service import PluginHostService
 
-                if getattr(ChatBackend, "_watcher_pending_reload", False):
-                    ChatBackend._watcher_pending_reload = False
-                    QTimer.singleShot(200, self._trigger_merged_plugin_reload)
-                    logger.info("[ConfigSync] 检测到同步期间被抑制的插件变更，200ms 后合并重载")
-                QTimer.singleShot(3000, self._consume_watcher_pending)
+                if _should_reload_plugins(self._plugin_reload_window_until):
+                    svc = PluginHostService.get_instance()
+                    if getattr(svc, "_watcher_pending_reload", False):
+                        svc._watcher_pending_reload = False
+                        QTimer.singleShot(200, self._trigger_merged_plugin_reload)
+                        logger.info("[ConfigSync] 检测到同步期间被抑制的插件变更，200ms 后合并重载")
+                    QTimer.singleShot(3000, self._consume_watcher_pending)
             except Exception as _pe:
                 logger.warning(f"[ConfigSync] 合并插件重载调度失败: {_pe}")
         except Exception as e:
@@ -931,6 +992,29 @@ class ConfigSyncService(QObject):
             return False
 
     # ── 下载后 token 本地恢复 ──
+
+    def _mark_dir_meta_migration(self) -> bool:
+        """升级迁移：目录单元还没有条目表时标记待上传，返回是否标记了任何单元。
+
+        旧版本上传的 zip 没有 ``.__drifox_sync__.json``，包内无墓碑可依据，
+        目录删除只能退化成 union（远端缺什么就补回来）。这里在首次同步后主动
+        安排一次上传，把带元数据的新包推上去，迁移从此完成。
+        """
+        marked = False
+        for unit, local_path in self._unit_local_paths():
+            if not isinstance(local_path, Path) or not local_path.is_dir():
+                continue
+            if self._dir_meta_path(unit).exists():
+                continue
+            if unit == "user-custom":
+                self._custom_dirty = True
+            elif unit.startswith("ext:"):
+                self._ext_dirty[unit.split(":", 1)[1]] = True
+            else:
+                continue
+            marked = True
+            logger.info(f"[ConfigSync] {unit} 缺同步元数据，安排一次迁移上传")
+        return marked
 
     def _refresh_and_upload_after_download(self):
         """下载云端配置后：从本地磁盘恢复 Gitee token 段到内存。
@@ -1169,6 +1253,11 @@ class ConfigSyncService(QObject):
                         # 下载不会覆盖本地 token（_download_file 已合并保留）。
                         # 无需再用云端 token 刷新回传——多端 refresh_token 互踩已根治。
                         self._refresh_and_upload_after_download()
+                        if self._mark_dir_meta_migration():
+                            # 迁移上传：只推被标记脏的目录单元（带 initial_sync=True
+                            # 会把所有 ext 单元无差别重传一遍，白白重打包）。
+                            # 已在后台线程，直接跑上传（不要在这里创建 QTimer）。
+                            self._do_upload()
                         if self._pending_sync_message:
                             # Settings 重载已延迟到主线程执行，syncDone 会在
                             # _reload_settings_on_main_thread 中自动发射
@@ -1297,7 +1386,9 @@ class ConfigSyncService(QObject):
 
         # 抑制窗口检查已在 _on_config_changed_main / _on_debounce_timeout 中执行，
         # 不在 _do_upload 中重复检查——否则会误拦截 _initial_sync 的显式上传。
-        if not self._config_dirty and not self._custom_dirty and not self._records_dirty:
+        # provider（插件业务数据）只有 _ext_dirty，不能只看三个文件脏标记，
+        # 否则 watch 捕获到的 provider 变更会被这里直接吞掉。
+        if not (self._config_dirty or self._custom_dirty or self._records_dirty or any(self._ext_dirty.values())):
             logger.debug("[ConfigSync] 无可上传的变更，跳过")
             return True
 
@@ -1319,8 +1410,7 @@ class ConfigSyncService(QObject):
             custom_ok = True
             records_ok = True
 
-            # [PERF] 三个文件上传共享同一 httpx.Client（keep-alive 连接池），
-            # 避免每文件独立建连（TCP+TLS 握手 ×3 → ×1）
+            # [PERF] 所有单元共享同一 httpx.Client（keep-alive 连接池）
             with httpx.Client(timeout=httpx.Timeout(30.0)) as client:
                 # ── 1. 上传 app.config（仅脏时） ──
                 if upload_config:
@@ -1328,25 +1418,33 @@ class ConfigSyncService(QObject):
                         logger.warning("[ConfigSync] 无法上传：配置文件不存在")
                         config_ok = False
                     else:
-                        config_ok = self._upload_file(
-                            local_path=self._config_path,
-                            remote_path=REMOTE_PATH,
-                            label="app.config",
-                            client=client,
+                        config_ok = self._upload_unit(
+                            "app.config",
+                            REMOTE_PATH,
+                            self._config_path,
+                            client,
+                            force=initial_sync,
                         )
 
                 # ── 2. 上传 user-custom 插件（仅脏时，压缩后上传） ──
                 if upload_custom and self._user_custom_path.exists():
-                    custom_ok = self._upload_user_custom_zip(client=client)
+                    custom_ok = self._upload_unit(
+                        "user-custom",
+                        USER_CUSTOM_REMOTE_PATH,
+                        self._user_custom_path,
+                        client,
+                        force=initial_sync,
+                    )
 
                 # ── 3. 上传分享记录（仅脏时） ──
                 if upload_records:
                     if self._records_path.exists():
-                        records_ok = self._upload_file(
-                            local_path=self._records_path,
-                            remote_path=REMOTE_RECORDS_PATH,
-                            label="share_records",
-                            client=client,
+                        records_ok = self._upload_unit(
+                            "share_records",
+                            REMOTE_RECORDS_PATH,
+                            self._records_path,
+                            client,
+                            force=initial_sync,
                         )
                     else:
                         # 本地无分享记录，跳过（不清除远端）
@@ -1354,8 +1452,9 @@ class ConfigSyncService(QObject):
 
                 # ── 4. 上传可注册同步内容（provider zip，仅脏时） ──
                 # 插件/模块通过 register_sync_content_provider 注册的业务目录
-                # （如 assistant_hub 的助手信息与记忆），打包后上传到各自远端路径。
-                # 与 user-custom 同策略：独立失败不影响 app.config 同步结果。
+                # （如 assistant_hub 的助手信息与记忆）。
+                # ⚠️ 不与 app.config 搭车：provider 只在自己的脏标记置位时上传，
+                # 否则改一个配置开关就会把 1.6MB 的 assistant_hub 全量重推。
                 ext_ok = True
                 for provider in list_sync_content_providers():
                     if not provider.enabled or not provider.local_dir:
@@ -1364,27 +1463,24 @@ class ConfigSyncService(QObject):
                     if not local_dir.exists():
                         continue
                     provider_id = provider.provider_id
-                    if (
-                        self._ext_dirty.get(provider_id, False)
-                        or upload_config  # 初始同步/全量上传时一起推
-                        or initial_sync
-                    ):
-                        ok = self._upload_provider_zip(
-                            provider=provider,
-                            local_dir=local_dir,
-                            client=client,
-                        )
-                        if ok:
-                            self._ext_dirty[provider_id] = False
-                        else:
-                            ext_ok = False
-                            logger.warning(f"[ConfigSync] 同步内容上传失败: {provider_id}")
-                if ext_ok:
-                    self._save_sha_cache()
+                    if not (self._ext_dirty.get(provider_id, False) or initial_sync):
+                        continue
+                    ok = self._upload_unit(
+                        f"ext:{provider_id}",
+                        provider.remote_path,
+                        local_dir,
+                        client,
+                        force=initial_sync,
+                    )
+                    if ok:
+                        self._ext_dirty[provider_id] = False
+                    else:
+                        ext_ok = False
+                        logger.warning(f"[ConfigSync] 同步内容上传失败: {provider_id}")
 
             # 🛡️ 失败项回滚脏标记：上传失败（网络抖动/401）时本次变更不得丢失，
             # 恢复 dirty 供下次防抖重试；与 ext provider 的失败保留语义对齐
-            #（ext 实时读标记，失败时标记本就未清）
+            # （ext 实时读标记，失败时标记本就未清）
             if not config_ok:
                 self._config_dirty = True
             if not custom_ok:
@@ -1422,23 +1518,603 @@ class ConfigSyncService(QObject):
         轮换机制（用一次即作废）互相踩踏导致误清绑。Bound/UserOwner/UserRepo
         等业务字段正常同步。
         """
-        import json as _json
+        _raw = ConfigSyncService._strip_gitee_token_bytes(local_path)
+        return base64.b64encode(_raw or b"").decode("utf-8")
+
+    # ── 单单元上传（内容短路 + 冲突合并） ────────────────────
+
+    def _upload_unit(
+        self,
+        unit: str,
+        remote_path: str,
+        local_path: Path,
+        client: httpx.Client,
+        force: bool = False,
+    ) -> bool:
+        """上传单个同步单元。
+
+        三道闸门，任意一道拦下都不发写请求：
+        1. 本地内容指纹 == 上次同步时的指纹 → 没变化，跳过（watch 误报/touch 清零）。
+        2. 待上传字节的 git blob sha == base 版本 sha → 远端已是这份内容，跳过。
+        3. 远端 sha 与 base 不同 → 别的设备改过，先三方合并再决定是否上传。
+        """
+        if unit == "app.config":
+            # 元数据必须先落盘再算指纹：否则本次上传的 app.config 缺最新条目表，
+            # 其他设备拿到的墓碑/时间戳滞后一次同步。
+            self._flush_sync_meta()
+        if isinstance(local_path, Path) and local_path.is_dir():
+            # 首次升级迁移：目录单元还没有本地条目表时强制走一次上传，让云端 zip
+            # 带上 .__drifox_sync__.json。否则包内永远没有墓碑数据，目录删除只能
+            # 退化成 union（远端缺什么就补回来），重写等于白做。
+            if not self._dir_meta_path(unit).exists():
+                force = True
+        h_local = self._unit_content_hash(unit, local_path)
+        if not force and h_local and self._content_hashes.get(unit) == h_local:
+            logger.debug(f"[ConfigSync] {unit} 内容未变化，跳过上传")
+            return True
+
+        payload = self._build_unit_payload(unit, local_path)
+        if payload is None:
+            logger.warning(f"[ConfigSync] {unit} 内容构建失败，跳过")
+            return False
+
+        blob_sha = fp.git_blob_sha(payload)
+        base_sha = self._get_cached_remote_sha(unit)
+        if blob_sha == base_sha:
+            logger.debug(f"[ConfigSync] {unit} 远端已是该内容，跳过上传")
+            self._commit_unit_state(
+                unit,
+                base_sha,
+                h_local,
+            )
+            return True
+
+        live_sha = self._get_remote_file_sha(remote_path, client)
+        # 注意 base_sha 为 None 也必须走合并：新机器首次绑定、sha 缓存被清、
+        # 解绑重绑都会让本机没有基准，而远端可能有别的设备写入的内容。
+        # 这里若直接 PUT，等于把远端内容整体覆盖掉，是真实内容丢失路径。
+        if live_sha and live_sha != base_sha:
+            logger.info(
+                f"[ConfigSync] {unit} 远端有本机未知的内容 "
+                f"(base={(base_sha or '无')[:8]} → live={live_sha[:8]})，先合并再上传"
+            )
+            merged_sha = self._resolve_unit_divergence(unit, remote_path, local_path, client, live_sha)
+            if merged_sha is None:
+                logger.warning(f"[ConfigSync] {unit} 远端合并失败，本次不上传（保留本地内容）")
+                return False
+            live_sha = merged_sha
+            h_local = self._unit_content_hash(unit, local_path)
+            payload = self._build_unit_payload(unit, local_path)
+            if payload is None:
+                return False
+            blob_sha = fp.git_blob_sha(payload)
+            if blob_sha == live_sha:
+                logger.info(f"[ConfigSync] {unit} 合并后与远端一致，无需上传")
+                self._commit_unit_state(
+                    unit,
+                    live_sha,
+                    h_local,
+                )
+                return True
+
+        # live_sha 为 None 可能是「远端文件不存在」或「查询失败」。
+        # 有 base_sha 时用它做 PUT（远端被改过则 Gitee 拒绝，我们不会覆盖），
+        # 远端确实不存在则 _put_file 内部回退 POST。
+        put_sha = live_sha if live_sha is not None else base_sha
+        ok, new_sha = self._put_file(payload, remote_path, put_sha, client, label=unit)
+        if not ok:
+            return False
+        self._commit_unit_state(
+            unit,
+            new_sha or live_sha,
+            h_local,
+        )
+        return True
+
+    def _flush_sync_meta(self) -> None:
+        """把记账器当前的条目表写进磁盘 app.config 的 System.SyncMeta。
+
+        只改磁盘上的这一个键，不走 ``cfg.save()``：整份 save 用内存值重建文件，
+        若此刻 Settings 尚未重载（合并写盘后、主线程重载前），会把刚合并出来的
+        内容用旧内存值覆盖回去。内存侧由 ``_reload_settings_on_main_thread``
+        统一从文件重载。
+        """
+        rec = getattr(self, "_meta_recorder", None)
+        if rec is None:
+            return
+        raw = rec.dump()
+        try:
+            from app.utils.config import Settings
+
+            lock = getattr(Settings, "_save_lock", None)
+            if lock is not None:
+                lock.acquire()
+            try:
+                with open(self._config_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                system = data.get("System")
+                if not isinstance(system, dict):
+                    system = {}
+                    data["System"] = system
+                if system.get("SyncMeta") == raw:
+                    return
+                system["SyncMeta"] = raw
+                tmp = self._config_path.with_suffix(".config.synctmp")
+                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(str(tmp), str(self._config_path))
+            finally:
+                if lock is not None:
+                    lock.release()
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 同步元数据落盘失败: {e}")
+
+    def _dir_sync_meta(self, unit: str, local_dir: Path) -> str:
+        """上传前把本地目录现状对齐到条目表，序列化为包内元数据。
+
+        时钟只按本地序号推进（不纳入远端）：本机未改动的文件不该获得比远端
+        更大的 t，否则远端修改永远输给本地旧内容。
+        """
+        from app.core.sync.lww import LamportClock, dir_meta_payload, reconcile_dir_entries
 
         try:
-            with open(local_path, encoding="utf-8") as _f:
-                _data = _json.load(_f)
-            if isinstance(_data, dict):
-                _g = _data.get("Gitee", {})
-                if isinstance(_g, dict):
-                    _g.pop("UserToken", None)
-                    _g.pop("UserRefreshToken", None)
-                    _g.pop("TokenExpiresAt", None)
-            _raw = _json.dumps(_data, ensure_ascii=False, indent=2).encode("utf-8")
-            return base64.b64encode(_raw).decode("utf-8")
-        except Exception as _e:
-            # 解析失败：退化为原样上传（与旧行为一致，不阻塞同步）
-            logger.warning(f"[ConfigSync] 剔除 Gitee token 失败，按原样上传: {_e}")
-            return base64.b64encode(local_path.read_bytes()).decode("utf-8")
+            manifest = fp.dir_manifest(local_dir)
+            state = self._load_dir_meta(unit)
+            entries = state.get("entries") or {}
+            clock = LamportClock(int(state.get("clock") or 0))
+            new_entries = reconcile_dir_entries(
+                manifest,
+                entries if isinstance(entries, dict) else {},
+                clock,
+            )
+            self._save_dir_meta(unit, new_entries, clock.value)
+            return dir_meta_payload(new_entries, clock.value)
+        except Exception as e:
+            logger.debug(f"[ConfigSync] {unit} 同步元数据生成失败: {e}")
+            return ""
+
+    def _put_file(
+        self,
+        content: bytes,
+        remote_path: str,
+        known_sha: Optional[str],
+        client: httpx.Client,
+        label: str = "",
+    ) -> Tuple[bool, Optional[str]]:
+        """把字节写入远端，返回 (成功, 新 sha)。
+
+        known_sha 必须是「远端当前 sha」。sha 不匹配时**不做**重试覆盖：
+        那是别的设备刚写进去的内容，覆盖即丢失。冲突交由上层合并处理。
+        """
+        tag = label or remote_path
+        url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=remote_path)
+        payload = {
+            "access_token": self._token,
+            "content": base64.b64encode(content).decode("utf-8"),
+            "message": f"DriFox sync {tag} ({time.strftime('%Y-%m-%d %H:%M:%S')})",
+            "branch": "master",
+        }
+        try:
+            if known_sha:
+                payload["sha"] = known_sha
+                resp = client.put(url, data=payload)
+                method = "PUT"
+                if resp.status_code == 404:
+                    # base 已失效（远端文件被删）→ 回退为新建
+                    payload.pop("sha", None)
+                    resp = client.post(url, data=payload)
+                    method = "POST"
+            else:
+                resp = client.post(url, data=payload)
+                method = "POST"
+
+            if resp.status_code in (200, 201):
+                new_sha = self._extract_sha(resp)
+                # 上传结果自校验：Gitee 返回的 content.sha 是文件内容的 git blob sha，
+                # 应当等于本地待上传字节的 blob sha。不等说明远端落地内容不是我们
+                # 发的内容（并发覆盖 / 服务端异常），留证据但不判失败，避免误判导致
+                # 脏标记回滚后无限重传。
+                expected = fp.git_blob_sha(content)
+                if new_sha and new_sha != expected:
+                    logger.error(
+                        f"[ConfigSync] {tag} 上传后远端 sha 与本地内容不一致 "
+                        f"({new_sha[:8]} != {expected[:8]})，请检查是否有并发写入"
+                    )
+                logger.info(f"[ConfigSync] {tag} 上传成功 ({method})")
+                return True, new_sha
+
+            err_msg = self._parse_error(resp)
+            if resp.status_code in (401, 403):
+                logger.error(f"[ConfigSync] {tag} 上传失败 (token 无效) [{resp.status_code}]: {err_msg}")
+                return False, None
+            if known_sha and ("sha" in err_msg.lower() or resp.status_code in (409, 422)):
+                logger.warning(f"[ConfigSync] {tag} 上传冲突（远端已被改写），放弃本次覆盖: {err_msg[:120]}")
+                return False, None
+            logger.error(f"[ConfigSync] {tag} 上传最终失败 [{resp.status_code}]: {err_msg}")
+            return False, None
+        except Exception as e:
+            logger.error(f"[ConfigSync] {tag} 上传异常: {e}")
+            return False, None
+
+    @staticmethod
+    def _extract_sha(resp) -> Optional[str]:
+        try:
+            body = resp.json()
+            content = body.get("content") if isinstance(body, dict) else None
+            if isinstance(content, dict):
+                return content.get("sha") or None
+        except Exception:
+            pass
+        return None
+
+    def _read_remote_bytes(
+        self, remote_path: str, client: Optional[httpx.Client] = None
+    ) -> Tuple[Optional[bytes], Optional[str]]:
+        """读取远端文件内容，返回 (bytes, sha)；失败返回 (None, None)"""
+        url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=remote_path)
+        try:
+            if client is not None:
+                resp = client.get(url, params={"access_token": self._token})
+            else:
+                with httpx.Client(timeout=httpx.Timeout(15.0)) as c:
+                    resp = c.get(url, params={"access_token": self._token})
+            if resp.status_code != 200:
+                return None, None
+            body = resp.json()
+            if not isinstance(body, dict):
+                return None, None
+            b64 = body.get("content")
+            sha = body.get("sha") or None
+            if not b64:
+                return None, sha
+            return base64.b64decode(b64), sha
+        except Exception as e:
+            logger.warning(f"[ConfigSync] 读取远端 {remote_path} 失败: {e}")
+            return None, None
+
+    def _resolve_unit_divergence(
+        self,
+        unit: str,
+        remote_path: str,
+        local_path: Path,
+        client: httpx.Client,
+        live_sha: str,
+    ) -> Optional[str]:
+        """远端与本地分叉时：拉远端内容与本地做三方合并，返回新的 base sha。"""
+        content, sha = self._read_remote_bytes(remote_path, client)
+        if content is None:
+            return None
+        sha = sha or live_sha
+        try:
+            if unit == "app.config":
+                self._apply_config_merge(content)
+            elif local_path.is_dir():
+                prefix = unit.split(":", 1)[1] if unit.startswith("ext:") else ""
+                self._apply_dir_merge(unit, local_path, content, prefix)
+            else:
+                self._preserve_remote_copy(unit, local_path, content)
+        except Exception as e:
+            logger.error(f"[ConfigSync] {unit} 合并失败: {e}")
+            return None
+        logger.info(f"[ConfigSync] {unit} 合并完成（基准更新为远端 {sha[:8]}）")
+        self._flush_conflict_archive(client)
+        self._set_cached_remote_sha(unit, sha)
+        self._save_sha_cache()
+        return sha
+
+    def _flush_conflict_archive(self, client: Optional[httpx.Client] = None) -> None:
+        """把本次冲突的对方版本推到远端独立目录（尽力而为，失败不影响主同步）"""
+        pending = list(self._conflict_archive)
+        self._conflict_archive.clear()
+        if not pending:
+            return
+        if client is None:
+            with httpx.Client(timeout=httpx.Timeout(30.0)) as _client:
+                self._flush_conflict_archive(_client)
+            return
+        for local_path, remote_path in pending:
+            try:
+                content = local_path.read_bytes()
+            except Exception:
+                continue
+            ok, _ = self._put_file(content, remote_path, None, client, label=f"冲突归档 {remote_path}")
+            if not ok:
+                logger.warning(f"[ConfigSync] 冲突归档上传失败（本地已留档）: {remote_path}")
+
+    def _backup_local_unit(self, unit: str, local_path: Path) -> None:
+        """合并前把本地内容整体快照到 backups/sync/<ts>/（保留最近 5 份）"""
+        try:
+            root = get_app_data_dir() / "backups" / "sync"
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            slug = unit.replace(":", "_").replace("/", "_")
+            dest = root / ts / slug
+            if local_path.is_dir():
+                fp.snapshot_tree(local_path, dest)
+            elif local_path.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(local_path), str(dest))
+            fp.prune_snapshot_dirs(root, keep=5)
+        except Exception as e:
+            logger.debug(f"[ConfigSync] {unit} 本地快照失败: {e}")
+
+    def _dir_meta_path(self, unit: str) -> Path:
+        slug = unit.replace(":", "_").replace("/", "_")
+        return self._sync_base_dir / f"{slug}.dir.json"
+
+    def _load_dir_meta(self, unit: str) -> Dict[str, object]:
+        from app.core.sync.meta_recorder import load_state
+
+        path = self._dir_meta_path(unit)
+        try:
+            if path.exists():
+                return load_state(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return load_state("")
+
+    def _save_dir_meta(self, unit: str, entries: Dict[str, object], clock: int) -> None:
+        from app.core.sync.lww import dir_meta_payload
+
+        try:
+            path = self._dir_meta_path(unit)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(dir_meta_payload(entries, clock), encoding="utf-8")  # type: ignore[arg-type]
+        except Exception as e:
+            logger.debug(f"[ConfigSync] {unit} 同步元数据写入失败: {e}")
+
+    def _apply_dir_merge(self, unit: str, local_dir: Path, remote_zip: bytes, prefix: str) -> Optional[Dict[str, str]]:
+        """目录单元按条目 LWW 合并（墓碑删文件，冲突保留本地并另存远端副本）。
+
+        Returns:
+            远端目录清单（{相对路径: sha256}，不含包内元数据条目），
+            供调用方计算本轮内容指纹；解压失败返回 None。
+        """
+        import io as _io
+        import zipfile
+
+        from app.core.sync.lww import (
+            DIR_META_NAME,
+            LamportClock,
+            is_tombstone,
+            merge_entries,
+            reconcile_dir_entries,
+            seed_entries_from_manifest,
+        )
+        from app.core.sync.meta_recorder import load_state
+
+        tmp = get_app_data_dir() / "cache" / "sync_base" / f"_merge_{unit.replace(':', '_')}"
+        if tmp.exists():
+            shutil.rmtree(str(tmp), ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(_io.BytesIO(remote_zip)) as zf:
+                zf.extractall(str(tmp))
+        except Exception as e:
+            shutil.rmtree(str(tmp), ignore_errors=True)
+            raise RuntimeError(f"远端 zip 解压失败: {e}")
+
+        remote_root = tmp / prefix if prefix and (tmp / prefix).exists() else tmp
+        try:
+            # 元数据条目只存在于包内，绝不能落到用户目录（会被插件扫描当成插件文件）
+            remote_state = load_state("")
+            for meta_candidate in (remote_root / DIR_META_NAME, tmp / DIR_META_NAME):
+                if meta_candidate.exists():
+                    try:
+                        remote_state = load_state(meta_candidate.read_text(encoding="utf-8"))
+                    finally:
+                        meta_candidate.unlink()
+
+            remote_manifest = fp.dir_manifest(remote_root)
+            local_manifest = fp.dir_manifest(local_dir)
+            remote_entries = seed_entries_from_manifest(
+                remote_manifest, remote_state.get("entries") or {}
+            )
+
+            local_state = self._load_dir_meta(unit)
+            local_entries = local_state.get("entries") or {}
+            local_clock = int(local_state.get("clock") or 0)
+            remote_clock = int(remote_state.get("clock") or 0)
+            # 本地已有条目表时时钟只按本地序号推进：若纳入远端序号，本机所有
+            # 未改动文件会被打上高于远端的 t，远端修改永远输给本地旧内容。
+            # 本地无条目表（首次升级）时反过来，抬到远端之上，让本地现有内容算新增。
+            start = local_clock if isinstance(local_entries, dict) and local_entries else max(local_clock, remote_clock)
+            clock = LamportClock(start)
+            local_entries = reconcile_dir_entries(
+                local_manifest,
+                local_entries if isinstance(local_entries, dict) else {},
+                clock,
+            )
+            raw_remote_entries = remote_state.get("entries") or {}
+            merged_entries, conflicts = merge_entries(local_entries, remote_entries)
+
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            to_delete: list[str] = []
+            to_copy: list[str] = []
+            for rel, entry in merged_entries.items():
+                if is_tombstone(entry):
+                    to_delete.append(rel)
+                    continue
+                want = str(entry.get("h") or "")
+                lh = local_manifest.get(rel)
+                rh = remote_manifest.get(rel)
+                if lh == want:
+                    # 本地胜。若远端同路径内容不同、且远端那份没有正经元数据
+                    # （老版本上传的包），无从判断谁更新 → 按冲突留档，至少不静默丢内容
+                    if rh is not None and rh != lh and rel not in raw_remote_entries:
+                        conflicts.append(rel)
+                    continue
+                if rh == want:
+                    to_copy.append(rel)
+                    continue
+                # 内容对不上（本地优先的冲突）→ 远端版本留档，本地文件保持不动
+                if rh is not None:
+                    conflicts.append(rel)
+
+            if to_delete or to_copy or conflicts:
+                self._backup_local_unit(unit, local_dir)
+
+            for rel in to_delete:
+                try:
+                    (local_dir / rel).unlink()
+                except Exception:
+                    pass
+            for rel in to_copy:
+                src = remote_root / rel
+                if not src.exists():
+                    continue
+                dst = local_dir / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+            for rel in conflicts:
+                src = remote_root / rel
+                if not src.exists():
+                    continue
+                dst = self._conflict_path(unit, rel, ts)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+                slug = unit.replace(":", "_").replace("/", "_")
+                self._conflict_archive.append(
+                    (dst, f"drifox/conflicts/{slug}/{ts}-{self._device_tag}/{rel}")
+                )
+
+            self._save_dir_meta(unit, merged_entries, max(clock.value, remote_clock))
+            if to_delete or to_copy or conflicts:
+                logger.warning(
+                    f"[ConfigSync] {unit} 目录合并完成（应用远端 {len(to_copy)}，"
+                    f"跟随删除 {len(to_delete)}，冲突 {len(conflicts)}）"
+                    + (
+                        f"。对方版本已留档到 conflicts/{unit.replace(':', '_')}/{ts}-{self._device_tag}/"
+                        if conflicts
+                        else ""
+                    )
+                )
+            else:
+                logger.debug(f"[ConfigSync] {unit} 目录合并无本地写入动作")
+            return remote_manifest
+        finally:
+            shutil.rmtree(str(tmp), ignore_errors=True)
+
+    def _apply_config_merge(self, remote_bytes: bytes) -> None:
+        """app.config 按条目 LWW 合并（墓碑删条目，冲突本地优先 + 远端留档）。"""
+        from app.core.sync.lww import merge_config_lww
+        from app.core.sync.meta_recorder import SyncMetaRecorder, load_state
+
+        try:
+            remote_data = json.loads(remote_bytes.decode("utf-8"))
+        except Exception:
+            remote_data = {}
+        local_data: dict = {}
+        try:
+            with open(self._config_path, encoding="utf-8") as f:
+                local_data = json.load(f)
+        except Exception:
+            local_data = {}
+
+        local_meta = (local_data.get("System") or {}).get("SyncMeta") or "{}"
+        remote_meta = (remote_data.get("System") or {}).get("SyncMeta") or "{}"
+        remote_clock = int(load_state(remote_meta).get("clock") or 0)
+
+        local_rec = SyncMetaRecorder()
+        local_rec.attach(local_data, local_meta)
+        # 先纳入远端序号再补本地缺失条目：否则首次升级时本地补出来的 t 低于
+        # 远端已有序号，远端全胜会把本地独有改动覆盖掉。
+        local_rec.observe_clock(remote_clock)
+        local_rec.seed_missing()
+
+        remote_rec = SyncMetaRecorder()
+        remote_rec.attach(remote_data, remote_meta)
+
+        merged_cfg, merged_entries, conflicts = merge_config_lww(
+            local_data,
+            local_rec.entries(),
+            remote_data,
+            remote_rec.entries(),
+        )
+        merged_cfg.setdefault("System", {})["SyncMeta"] = json.dumps(
+            {
+                "version": 1,
+                "clock": max(remote_clock, int(local_rec.state.get("clock") or 0)),
+                "entries": merged_entries,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+        self._backup_local_unit("app.config", self._config_path)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        if conflicts:
+            try:
+                root = get_app_data_dir() / "backups" / "sync"
+                dest = root / ts / f"app.config.remote-{self._device_tag}"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                from app.core.sync.lww import element_key
+
+                remote_flat = {
+                    f"{g}.{n}": v
+                    for g, items in remote_data.items()
+                    if isinstance(items, dict)
+                    for n, v in items.items()
+                }
+                snapshot: dict = {}
+                for path in conflicts:
+                    parts = path.split(".", 2)
+                    if len(parts) == 2:
+                        snapshot[path] = remote_flat.get(path)
+                        continue
+                    container = remote_data.get(parts[0]) or {}
+                    item = container.get(parts[1]) if isinstance(container, dict) else None
+                    if isinstance(item, dict):
+                        snapshot[path] = item.get(parts[2])
+                    elif isinstance(item, list):
+                        want = parts[2]
+                        for elem in item:
+                            if element_key(elem) == want:
+                                snapshot[path] = elem
+                                break
+                dest.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            logger.warning(
+                f"[ConfigSync] app.config 合并存在 {len(conflicts)} 个条目冲突（本地优先）: "
+                f"{', '.join(conflicts[:8])}"
+            )
+
+        tmp = self._config_path.with_suffix(".config.synctmp")
+        try:
+            tmp.write_text(json.dumps(merged_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(str(tmp), str(self._config_path))
+        except Exception as e:
+            logger.error(f"[ConfigSync] app.config 合并结果写盘失败: {e}")
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            return
+        # 后台线程写盘后桥接主线程重载 Settings，避免 UI 与磁盘不一致
+        self._pause_after_merge()
+        self._reloadSettings.emit()
+
+    def _conflict_path(self, unit: str, rel: str, ts: str) -> Path:
+        """冲突副本落地路径（业务目录之外，按单元+时间戳+设备分组）"""
+        slug = unit.replace(":", "_").replace("/", "_")
+        return get_app_data_dir() / "conflicts" / slug / f"{ts}-{self._device_tag}" / rel
+
+    def _preserve_remote_copy(self, unit: str, local_path: Path, remote_bytes: bytes) -> None:
+        """非 JSON 单文件（如 share_records）：本地优先，远端版本留档到备份目录"""
+        try:
+            root = get_app_data_dir() / "backups" / "sync"
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            slug = unit.replace(":", "_")
+            dest = root / ts / f"{slug}.remote-{self._device_tag}-{ts}"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(remote_bytes)
+            fp.prune_snapshot_dirs(root, keep=5)
+            logger.warning(f"[ConfigSync] {unit} 远端版本与本地不同，已留档: {dest}")
+        except Exception as e:
+            logger.debug(f"[ConfigSync] {unit} 远端留档失败: {e}")
+
+    def _pause_after_merge(self) -> None:
+        """本地被合并改写后，抑制一次 watcher 触发的回传（合并结果已由上传侧接管）"""
+        self._suppress_until = max(self._suppress_until, time.time() + 20.0)
 
     @staticmethod
     def _merge_local_gitee_token(local_path: Path, remote_raw: bytes) -> bytes:
@@ -1479,15 +2155,16 @@ class ConfigSyncService(QObject):
             return remote_raw
 
     def _upload_file(
-        self, local_path: Path, remote_path: str, label: str = "", client: Optional[httpx.Client] = None
+        self,
+        local_path: Path,
+        remote_path: str,
+        label: str = "",
+        client: Optional[httpx.Client] = None,
     ) -> bool:
-        """通用上传：将本地文件 base64 后 PUT/POST 到远端。
+        """通用单文件上传（兼容旧调用点）。
 
-        Args:
-            local_path: 本地文件路径
-            remote_path: 远端路径（相对仓库根）
-            label: 日志标识
-            client: 可复用的 httpx.Client（_do_upload 批量上传时共享连接池）
+        仅做「读内容 → 写远端」，不做冲突重试：sha 不匹配意味着远端刚被别的
+        设备写入，覆盖即丢失。需要合并语义的调用方走 ``_upload_unit``。
         """
         if client is None:
             with httpx.Client(timeout=httpx.Timeout(30.0)) as _client:
@@ -1495,126 +2172,18 @@ class ConfigSyncService(QObject):
 
         tag = label or remote_path
         try:
-            if label == "app.config":
-                # token 为设备本地独立凭证：上传前剔除 Gitee token 段，
-                # 云端 app.config 永不包含 token，杜绝多设备 refresh_token 互踩。
-                content_b64 = self._strip_gitee_token(local_path)
-            else:
-                data = local_path.read_bytes()
-                content_b64 = base64.b64encode(data).decode("utf-8")
-            url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=remote_path)
-            payload = {
-                "access_token": self._token,
-                "content": content_b64,
-                "message": f"DriFox sync {tag} ({time.strftime('%Y-%m-%d %H:%M:%S')})",
-                "branch": "master",
-            }
-
-            # [PERF] 优先用本地缓存的远端 SHA，跳过上传前全量查询远端
-            # （app.config/user-custom/share_records 3 项 = 3 次 GET 往返）。
-            # 缓存过期由 Gitee 服务端 sha 校验兜底：409 冲突走下方重试，
-            # 404（远端文件已被删除）回退 POST 新建，语义与逐次查询等价。
-            existing_sha = self._get_cached_remote_sha(label) or self._get_remote_file_sha(remote_path, client)
-            if existing_sha:
-                payload["sha"] = existing_sha
-                resp = client.put(url, data=payload)
-                method = "PUT"
-                if resp.status_code == 404:
-                    # 缓存 sha 已失效（远端文件不存在）→ 回退为新建
-                    payload.pop("sha", None)
-                    resp = client.post(url, data=payload)
-                    method = "POST"
-            else:
-                resp = client.post(url, data=payload)
-                method = "POST"
-
-            if resp.status_code in (200, 201):
-                logger.info(f"[ConfigSync] {tag} 上传成功 ({method})")
-                # 缓存远端 SHA，避免下次下载时重复拉取
-                try:
-                    resp_data = resp.json()
-                    content_data = resp_data.get("content")
-                    if isinstance(content_data, dict):
-                        sha = content_data.get("sha", "")
-                        if sha:
-                            if label == "app.config":
-                                self._config_remote_sha = sha
-                            elif label == "user-custom":
-                                self._custom_remote_sha = sha
-                            elif label == "share_records":
-                                self._records_remote_sha = sha
-                            elif label.startswith("ext:"):
-                                self._ext_remote_sha[label.split(":", 1)[1]] = sha
-                            self._save_sha_cache()
-                except Exception:
-                    pass
-                return True
-
-            err_msg = self._parse_error(resp)
-            if resp.status_code in (401, 403):
-                logger.error(f"[ConfigSync] {tag} 上传失败 (token 无效) [{resp.status_code}]: {err_msg}")
+            content = self._strip_gitee_token_bytes(local_path) if label == "app.config" else local_path.read_bytes()
+            if content is None:
                 return False
-
-            # PUT sha 冲突时重试一次
-            if method == "PUT" and "sha" in err_msg.lower():
-                retry_sha = self._get_remote_file_sha(remote_path, client)
-                if retry_sha:
-                    payload["sha"] = retry_sha
-                    resp2 = client.put(url, data=payload)
-                    if resp2.status_code in (200, 201):
-                        logger.info(f"[ConfigSync] {tag} 上传成功 (PUT retry)")
-                        # 缓存重试后的 SHA
-                        try:
-                            resp2_data = resp2.json()
-                            content2 = resp2_data.get("content")
-                            if isinstance(content2, dict):
-                                sha2 = content2.get("sha", "")
-                                if sha2:
-                                    if label == "app.config":
-                                        self._config_remote_sha = sha2
-                                    elif label == "user-custom":
-                                        self._custom_remote_sha = sha2
-                                    elif label == "share_records":
-                                        self._records_remote_sha = sha2
-                                    elif label.startswith("ext:"):
-                                        self._ext_remote_sha[label.split(":", 1)[1]] = sha2
-                                    self._save_sha_cache()
-                        except Exception:
-                            pass
-                        return True
-
-            logger.error(f"[ConfigSync] {tag} 上传最终失败 [{resp.status_code}]: {err_msg}")
-            return False
+            existing_sha = self._get_cached_remote_sha(label) or self._get_remote_file_sha(remote_path, client)
+            ok, new_sha = self._put_file(content, remote_path, existing_sha, client, label=tag)
+            if ok and new_sha:
+                self._set_cached_remote_sha(label, new_sha)
+                self._save_sha_cache()
+            return ok
         except Exception as e:
             logger.error(f"[ConfigSync] {tag} 上传异常: {e}")
             return False
-
-    def _upload_user_custom_zip(self, client: Optional[httpx.Client] = None) -> bool:
-        """压缩 user-custom 插件目录并上传到远端"""
-        import zipfile
-
-        zip_path = get_app_data_dir() / "user-custom.zip"
-        try:
-            # 压缩 user-custom 目录
-            with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
-                for f in self._user_custom_path.rglob("*"):
-                    if f.is_file():
-                        arcname = str(f.relative_to(self._user_custom_path))
-                        zf.write(str(f), arcname)
-
-            # 上传
-            ok = self._upload_file(zip_path, USER_CUSTOM_REMOTE_PATH, label="user-custom", client=client)
-            return ok
-        except Exception as e:
-            logger.error(f"[ConfigSync] user-custom 压缩上传失败: {e}")
-            return False
-        finally:
-            # 清理临时 zip 文件
-            try:
-                if zip_path.exists():
-                    zip_path.unlink()
-            except Exception:
-                pass
 
     def _get_cached_remote_sha(self, label: str) -> Optional[str]:
         """获取本地缓存的远端 SHA（上传时避免每次全量查询远端）"""
@@ -1624,137 +2193,106 @@ class ConfigSyncService(QObject):
             return self._custom_remote_sha
         if label == "share_records":
             return self._records_remote_sha
+        if label.startswith("ext:"):
+            return self._ext_remote_sha.get(label.split(":", 1)[1])
         return None
 
-    def _upload_provider_zip(
+    def _set_cached_remote_sha(self, label: str, sha: Optional[str]) -> None:
+        if label == "app.config":
+            self._config_remote_sha = sha
+        elif label == "user-custom":
+            self._custom_remote_sha = sha
+        elif label == "share_records":
+            self._records_remote_sha = sha
+        elif label.startswith("ext:"):
+            pid = label.split(":", 1)[1]
+            if sha:
+                self._ext_remote_sha[pid] = sha
+            else:
+                self._ext_remote_sha.pop(pid, None)
+
+    def _commit_unit_state(
         self,
-        provider: SyncContentProvider,
-        local_dir: Path,
-        client: Optional[httpx.Client] = None,
-    ) -> bool:
-        """将单个 provider 的本地目录压缩上传到其远端路径。
+        unit: str,
+        remote_sha: Optional[str],
+        content_hash: Optional[str],
+    ) -> None:
+        """一次成功同步后落盘该 unit 的远端 sha 与内容指纹。"""
+        if remote_sha:
+            self._set_cached_remote_sha(unit, remote_sha)
+        if content_hash:
+            self._content_hashes[unit] = content_hash
+        self._save_sha_cache()
 
-        与 user-custom 同款策略：打包本地目录 → 上传 → 清理临时 zip。
-        SHA 缓存按 provider_id 独立记录（_ext_remote_sha）。
-
-        Args:
-            provider: provider 元数据（local_dir 已 resolve）
-            local_dir: 本地目录（zip 内以目录名作为顶层，避免不同 provider 文件名冲突）
-            client: 可复用的 httpx.Client
-        """
-        import zipfile
-
-        provider_id = provider.provider_id
-        tag = f"ext:{provider_id}"
-        zip_path = get_app_data_dir() / f"ext-{provider_id}.zip"
+    @staticmethod
+    def _strip_gitee_token_bytes(local_path: Path) -> Optional[bytes]:
+        """读取 app.config 并剔除 Gitee token 段，返回规范化 JSON 字节（上传/比对共用）"""
         try:
-            # 压缩：zip 内以 provider_id 为顶层目录，下载解压时归位到各自目录
-            with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
-                for f in local_dir.rglob("*"):
-                    if f.is_file():
-                        arcname = f"{provider_id}/{str(f.relative_to(local_dir))}"
-                        zf.write(str(f), arcname)
-
-            ok = self._upload_file(
-                zip_path,
-                provider.remote_path,
-                label=tag,
-                client=client,
-            )
-            if ok:
-                logger.info(f"[ConfigSync] {tag} 上传成功（{provider.label}）")
-            return ok
-        except Exception as e:
-            logger.error(f"[ConfigSync] {tag} 压缩上传失败: {e}")
-            return False
-        finally:
+            with open(local_path, encoding="utf-8") as _f:
+                _data = json.load(_f)
+            if isinstance(_data, dict):
+                _g = _data.get("Gitee", {})
+                if isinstance(_g, dict):
+                    _g.pop("UserToken", None)
+                    _g.pop("UserRefreshToken", None)
+                    _g.pop("TokenExpiresAt", None)
+            return json.dumps(_data, ensure_ascii=False, indent=2).encode("utf-8")
+        except Exception as _e:
+            logger.warning(f"[ConfigSync] 剔除 Gitee token 失败，按原样处理: {_e}")
             try:
-                if zip_path.exists():
-                    zip_path.unlink()
+                return local_path.read_bytes()
             except Exception:
-                pass
+                return None
 
-    def _download_provider_zip(self, provider: SyncContentProvider) -> bool:
-        """下载单个 provider 的远端 zip 并解压归位到本地目录。
+    def _build_unit_payload(self, unit: str, local_path: Path) -> Optional[bytes]:
+        """构建 unit 待上传字节（确定性：同内容 → 同字节 → 同 git blob sha）"""
+        try:
+            if unit == "app.config":
+                return self._strip_gitee_token_bytes(local_path)
+            if isinstance(local_path, Path) and local_path.is_dir():
+                prefix = unit.split(":", 1)[1] if unit.startswith("ext:") else ""
+                return fp.build_stable_zip(
+                    local_path,
+                    arc_prefix=prefix,
+                    sync_meta=self._dir_sync_meta(unit, local_path),
+                )
+            return local_path.read_bytes()
+        except Exception as e:
+            logger.error(f"[ConfigSync] 构建 {unit} 上传内容失败: {e}")
+            return None
 
-        参考 _download_user_custom_zip 的原子解压策略：
-        备份现有目录 → 解压到临时目录 → 原子 rename 到目标路径。
-        """
-        import zipfile
+    def _unit_content_hash(self, unit: str, local_path: Path) -> Optional[str]:
+        """unit 当前本地内容指纹（目录用清单摘要，文件用内容 sha256）"""
+        try:
+            if isinstance(local_path, Path) and local_path.is_dir():
+                return fp.dir_fingerprint(local_path)
+            if unit == "app.config":
+                payload = self._strip_gitee_token_bytes(local_path)
+                return fp.sha256_bytes(payload) if payload is not None else None
+            return fp.file_fingerprint(local_path) or None
+        except Exception:
+            return None
 
-        provider_id = provider.provider_id
-        tag = f"ext:{provider_id}"
+    def _download_provider_merge(self, provider: SyncContentProvider) -> bool:
+        """拉远端 provider zip → 三方合并到本地目录（不再整目录替换）。"""
+        unit = f"ext:{provider.provider_id}"
+        content, sha = self._read_remote_bytes(provider.remote_path)
+        if content is None:
+            logger.error(f"[ConfigSync] {unit} 下载失败")
+            return False
         local_dir = Path(provider.local_dir)
-        zip_path = get_app_data_dir() / f"ext-{provider_id}.zip"
-        rollback_path = get_app_data_dir() / f"ext-{provider_id}.backup"
-        try:
-            ok = self._download_file(provider.remote_path, zip_path, label=tag)
-            if not ok:
-                return False
-
-            # 备份当前目录（异常时回滚）
-            if local_dir.exists():
-                if rollback_path.exists():
-                    shutil.rmtree(str(rollback_path))
-                shutil.move(str(local_dir), str(rollback_path))
-
-            try:
-                # 解压到临时目录（zip 内顶层为 provider_id/，剥掉一层归位）
-                _extract_ok = False
-                _tmp_extract = get_app_data_dir() / f"ext-{provider_id}.extract"
-                for _attempt in range(3):
-                    try:
-                        if _tmp_extract.exists():
-                            shutil.rmtree(str(_tmp_extract))
-                        _tmp_extract.mkdir(parents=True, exist_ok=True)
-                        with zipfile.ZipFile(str(zip_path), "r") as zf:
-                            zf.extractall(str(_tmp_extract))
-                        _extract_ok = True
-                        break
-                    except (PermissionError, OSError) as _e:
-                        logger.warning(
-                            f"[ConfigSync] {tag} 解压文件被占用，重试中 ({_attempt + 1}/3)... {_e}"
-                        )
-                        time.sleep(1.0)
-                if not _extract_ok:
-                    raise RuntimeError(f"{tag} 解压失败：文件持续被占用")
-
-                # 原子归位：临时目录/顶层/provider_id → local_dir
-                inner = _tmp_extract / provider_id
-                if not inner.exists():
-                    inner = _tmp_extract  # 兼容无顶层目录的旧包
-                if local_dir.exists():
-                    shutil.rmtree(str(local_dir))
-                shutil.move(str(inner), str(local_dir))
-            except (RuntimeError, zipfile.BadZipFile):
-                # 解压失败 → 回滚
-                if local_dir.exists():
-                    shutil.rmtree(str(local_dir))
-                if rollback_path.exists():
-                    shutil.move(str(rollback_path), str(local_dir))
-                raise
-            finally:
-                try:
-                    _tmp_extract = get_app_data_dir() / f"ext-{provider_id}.extract"
-                    if _tmp_extract.exists():
-                        shutil.rmtree(str(_tmp_extract))
-                except Exception:
-                    pass
-
-            logger.info(f"[ConfigSync] {tag} 已从云端恢复（{provider.label}）")
-            try:
-                zip_path.unlink()
-            except Exception:
-                pass
-            try:
-                if rollback_path.exists():
-                    shutil.rmtree(str(rollback_path))
-            except Exception:
-                pass
-            return True
-        except Exception as e:
-            logger.error(f"[ConfigSync] {tag} 下载恢复失败: {e}")
+        local_dir.mkdir(parents=True, exist_ok=True)
+        remote_manifest = self._apply_dir_merge(unit, local_dir, content, provider.provider_id)
+        if remote_manifest is None:
             return False
+        self._flush_conflict_archive()
+        if sha:
+            self._set_cached_remote_sha(unit, sha)
+        # base 内容指纹取「远端那份内容」，本地独有改动保持未上传态
+        self._content_hashes[unit] = fp.manifest_digest(remote_manifest)
+        self._save_sha_cache()
+        logger.info(f"[ConfigSync] {unit} 已合并（{provider.label}）")
+        return True
 
     def mark_provider_dirty(self, provider_id: str) -> None:
         """标记某个 provider 内容待上传（插件数据变更时调用）。"""
@@ -1783,6 +2321,127 @@ class ConfigSyncService(QObject):
             return None
         except Exception:
             return None
+
+    # ── 运行期远端轮询 ────────────────────────────────────
+    #
+    # 旧实现只在启动时下载一次，两台机器交替使用时，后启动的一台永远看不到
+    # 对方在它运行期间写入的内容，只能靠"下一次启动整包覆盖"收敛——那就是丢
+    # 内容的场景。这里加轻量轮询：单次请求拿 drifox/ 目录列表（一次拿到所有
+    # 单元 sha），有变化才走合并下载。
+    #
+    # 保守约束：本地存在未上传改动时不触发下载（避免"下载→合并→上传"自激），
+    # 这类情况交由上传路径的冲突合并处理。
+
+    def _start_polling(self) -> None:
+        if self._poll_timer is not None:
+            return
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(POLL_INTERVAL_MS)
+        self._poll_timer.timeout.connect(self._poll_remote_changes)
+        self._poll_timer.start()
+        logger.info(f"[ConfigSync] 云端变更轮询已启动（{POLL_INTERVAL_MS // 1000}s）")
+
+    def _stop_polling(self) -> None:
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+            logger.info("[ConfigSync] 云端变更轮询已停止")
+
+    def _unit_local_paths(self) -> List[Tuple[str, Path]]:
+        """全部同步单元的 (unit, 本地路径)"""
+        items: List[Tuple[str, Path]] = [
+            ("app.config", self._config_path),
+            ("user-custom", self._user_custom_path),
+            ("share_records", self._records_path),
+        ]
+        for p in list_sync_content_providers():
+            if p.enabled and p.local_dir:
+                items.append((f"ext:{p.provider_id}", Path(p.local_dir)))
+        return items
+
+    def _unit_remote_paths(self) -> Dict[str, str]:
+        """全部同步单元的 {unit: 远端路径}"""
+        items: Dict[str, str] = {
+            "app.config": REMOTE_PATH,
+            "user-custom": USER_CUSTOM_REMOTE_PATH,
+            "share_records": REMOTE_RECORDS_PATH,
+        }
+        for p in list_sync_content_providers():
+            if p.enabled:
+                items[f"ext:{p.provider_id}"] = p.remote_path
+        return items
+
+    def _has_local_pending_changes(self) -> bool:
+        """本地是否有「尚未与远端一致」的内容改动"""
+        for unit, local_path in self._unit_local_paths():
+            if not local_path.exists():
+                continue
+            h = self._unit_content_hash(unit, local_path)
+            if h and h != self._content_hashes.get(unit):
+                return True
+        return False
+
+    def _poll_remote_changes(self) -> None:
+        """主线程定时器回调：满足条件时起后台线程做一次远端比对"""
+        if self._state == "disabled" or not self._initial_sync_completed:
+            return
+        if self._poll_busy or self._upload_lock.locked():
+            return
+        if time.time() < self._suppress_until:
+            return
+        self._poll_busy = True
+        t = threading.Thread(target=self._poll_worker, daemon=True)
+        t.start()
+
+    def _poll_worker(self) -> None:
+        try:
+            if self._has_local_pending_changes():
+                logger.debug("[ConfigSync] 本地有未同步改动，本轮跳过远端拉取（交由上传冲突合并处理）")
+                return
+            shas = self._list_remote_dir_shas()
+            if not shas:
+                return
+            changed = [
+                unit
+                for unit, path in self._unit_remote_paths().items()
+                if shas.get(path) and shas.get(path) != self._get_cached_remote_sha(unit)
+            ]
+            if not changed:
+                return
+            logger.info(f"[ConfigSync] 检测到云端更新: {changed}，开始合并下载")
+            self._do_download()
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 远端轮询异常: {e}")
+        finally:
+            self._poll_busy = False
+
+    def _list_remote_dir_shas(self) -> Dict[str, str]:
+        """拿到 drifox/ 与 drifox/ext/ 下所有文件的 {path: sha}（两次请求，共用连接池）"""
+        remote_dirs = ("drifox", EXT_SYNC_REMOTE_ROOT)
+        out: Dict[str, str] = {}
+        try:
+            with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+                for dir_path in remote_dirs:
+                    url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=dir_path)
+                    try:
+                        resp = client.get(url, params={"access_token": self._token})
+                    except Exception as e:
+                        logger.debug(f"[ConfigSync] 目录列表请求失败（{dir_path}）: {e}")
+                        continue
+                    if resp.status_code != 200:
+                        continue
+                    body = resp.json()
+                    if not isinstance(body, list):
+                        continue
+                    for item in body:
+                        if isinstance(item, dict) and item.get("type") == "file":
+                            path = str(item.get("path") or "")
+                            sha = str(item.get("sha") or "")
+                            if path and sha:
+                                out[path] = sha
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 远端目录列表获取失败: {e}")
+        return out
 
     def _do_download(self) -> bool:
         """从远端下载配置和 user-custom 插件，覆盖本地（SHA 未变则跳过）"""
@@ -1832,7 +2491,7 @@ class ConfigSyncService(QObject):
                     logger.debug("[ConfigSync] 远端 app.config 未变化，跳过下载")
                     results.append(True)
                 else:
-                    if self._download_file(REMOTE_PATH, self._config_path, label="app.config"):
+                    if self._download_config_merge():
                         # [PERF] Settings 不在此处主线程重载，避免大量 valueChanged 信号
                         # 从非主线程发射到主线程收集队列引起 UI 卡顿；也不在 app.config
                         # 单一下载完成后立即触发，延后到本次下载全部完成（user-custom 解压
@@ -1857,7 +2516,7 @@ class ConfigSyncService(QObject):
                         logger.debug("[ConfigSync] 远端 user-custom 未变化，跳过下载")
                         results.append(True)
                     else:
-                        ok = self._download_user_custom_zip()
+                        ok = self._download_user_custom_merge()
                         if ok:
                             logger.debug("[ConfigSync] user-custom 已解压恢复")
                             custom_downloaded = True
@@ -1883,11 +2542,7 @@ class ConfigSyncService(QObject):
                         logger.debug("[ConfigSync] 远端 share_records 未变化，跳过下载")
                         results.append(True)
                     else:
-                        ok = self._download_file(
-                            REMOTE_RECORDS_PATH,
-                            self._records_path,
-                            label="share_records",
-                        )
+                        ok = self._download_share_records_merge()
                         results.append(ok)
                 elif rc is None:
                     logger.warning("[ConfigSync] 无法确认远端 share_records 状态，跳过")
@@ -1914,7 +2569,7 @@ class ConfigSyncService(QObject):
                             logger.debug(f"[ConfigSync] 远端 {provider_id} 未变化，跳过下载")
                             results.append(True)
                         else:
-                            ok = self._download_provider_zip(provider)
+                            ok = self._download_provider_merge(provider)
                             if ok:
                                 logger.debug(f"[ConfigSync] {provider_id} 已解压恢复")
                             else:
@@ -1944,6 +2599,10 @@ class ConfigSyncService(QObject):
             # 因主题未注册而静默重置为默认主题。load 完成后自动发射 syncDone。
             if downloaded_config:
                 self._pending_sync_message = "配置与用户插件已从云端恢复"
+            if custom_downloaded:
+                # 只有解开 user-custom 才可能产生插件变更：给随后的 Settings 重载
+                # 开一个消费 watcher pending 的时间窗（重载在主线程异步执行）。
+                self._plugin_reload_window_until = time.time() + 10.0
             if downloaded_config or custom_downloaded:
                 # 🚀 P5e：user-custom 有更新（无论 app.config 是否变化）都桥接主线程，
                 # 以便消费 watcher 抑制期 pending（合并插件重载）。app.config 未变时
@@ -2006,94 +2665,73 @@ class ConfigSyncService(QObject):
             logger.error(f"[ConfigSync] {tag} 下载异常: {e}")
             return False
 
-    def _download_user_custom_zip(self) -> bool:
-        """从远端下载 user-custom.zip 并解压到 user-custom 目录"""
-        import zipfile
+    def _download_user_custom_merge(self) -> bool:
+        """拉远端 user-custom zip → 三方合并到本地目录。
 
-        zip_path = get_app_data_dir() / "user-custom.zip"
-        try:
-            ok = self._download_file(USER_CUSTOM_REMOTE_PATH, zip_path, label="user-custom")
-            if not ok:
-                return False
-
-            # 解压前备份当前 user-custom（异常时回滚，备份放 .drifox/ 根目录避免触发插件 watch）
-            rollback_path = get_app_data_dir() / "user-custom.backup"
-            if self._user_custom_path.exists():
-                if rollback_path.exists():
-                    shutil.rmtree(str(rollback_path))
-                shutil.move(str(self._user_custom_path), str(rollback_path))
-
-            try:
-                # 先解压到临时目录（不在插件 watch 路径内），再原子重命名到目标路径。
-                # 避免 watchfiles 逐文件检测到 184+ 个写入事件 → PluginManager 反复
-                # 在 manifest 未就绪时 rescan → 插件被移除/重载多次。
-                _extract_ok = False
-                _tmp_extract = get_app_data_dir() / "user-custom.extract"
-                for _attempt in range(3):
-                    try:
-                        if _tmp_extract.exists():
-                            shutil.rmtree(str(_tmp_extract))
-                        _tmp_extract.mkdir(parents=True, exist_ok=True)
-                        with zipfile.ZipFile(str(zip_path), "r") as zf:
-                            zf.extractall(str(_tmp_extract))
-                        _extract_ok = True
-                        break
-                    except (PermissionError, OSError) as _e:
-                        logger.warning(f"[ConfigSync] user-custom 解压文件被占用，重试中 ({_attempt + 1}/3)... {_e}")
-                        time.sleep(1.0)
-                if not _extract_ok:
-                    raise RuntimeError("user-custom 解压失败：文件持续被占用")
-
-                # 原子重命名到目标路径（单次目录操作，watch 只看到一个事件）
-                if self._user_custom_path.exists():
-                    shutil.rmtree(str(self._user_custom_path))
-                shutil.move(str(_tmp_extract), str(self._user_custom_path))
-            except (RuntimeError, zipfile.BadZipFile):
-                # 解压失败 → 回滚
-                if self._user_custom_path.exists():
-                    shutil.rmtree(str(self._user_custom_path))
-                if rollback_path.exists():
-                    shutil.move(str(rollback_path), str(self._user_custom_path))
-                raise
-            finally:
-                # 确保临时目录被清理
-                try:
-                    _tmp_extract = get_app_data_dir() / "user-custom.extract"
-                    if _tmp_extract.exists():
-                        shutil.rmtree(str(_tmp_extract))
-                except Exception:
-                    pass
-
-            # 解压成功后清理临时文件（失败不阻塞，不触发回滚）
-            logger.info("[ConfigSync] user-custom 插件已从云端恢复")
-            try:
-                zip_path.unlink()
-            except Exception:
-                pass
-            try:
-                if rollback_path.exists():
-                    shutil.rmtree(str(rollback_path))
-            except Exception:
-                pass
-            return True
-        except Exception as e:
-            logger.error(f"[ConfigSync] user-custom 下载解压失败: {e}")
-            # 清理残留
-            try:
-                if zip_path.exists():
-                    zip_path.unlink()
-            except Exception:
-                pass
+        与旧实现的本质区别：旧版先把本地目录整体移走，解压远端后直接删除回滚
+        备份，任何「本地独有 / 本地更新」的文件都被永久丢弃。现在按 base 三方
+        合并，本地改过或双方都改的文件都保留，远端版本另存冲突副本。
+        """
+        content, sha = self._read_remote_bytes(USER_CUSTOM_REMOTE_PATH)
+        if content is None:
+            logger.error("[ConfigSync] user-custom 下载失败")
             return False
+        self._user_custom_path.mkdir(parents=True, exist_ok=True)
+        remote_manifest = self._apply_dir_merge("user-custom", self._user_custom_path, content, "")
+        if remote_manifest is None:
+            return False
+        # 下载路径也会产生冲突（本地改过 + 云端也改过），同样要把对方版本归档到远端
+        self._flush_conflict_archive()
+        if sha:
+            self._set_cached_remote_sha("user-custom", sha)
+        self._content_hashes["user-custom"] = fp.manifest_digest(remote_manifest)
+        self._save_sha_cache()
+        logger.info("[ConfigSync] user-custom 已合并")
+        return True
+
+    def _download_config_merge(self) -> bool:
+        """拉远端 app.config → key 级三方合并写回本地（凭证/密钥保留本机值）。"""
+        content, sha = self._read_remote_bytes(REMOTE_PATH)
+        if content is None:
+            logger.error("[ConfigSync] app.config 下载失败")
+            return False
+        self._apply_config_merge(content)
+        if sha:
+            self._set_cached_remote_sha("app.config", sha)
+        # base 内容指纹取远端那份（本地独有改动保持未上传态，下次上传收敛）
+        self._content_hashes["app.config"] = fp.sha256_bytes(content)
+        self._save_sha_cache()
+        logger.info("[ConfigSync] app.config 已合并")
+        return True
+
+    def _download_share_records_merge(self) -> bool:
+        """拉远端分享记录，按 id 与本地合并（本地优先，远端独有追加）。"""
+        content, sha = self._read_remote_bytes(REMOTE_RECORDS_PATH)
+        if content is None:
+            logger.error("[ConfigSync] share_records 下载失败")
+            return False
+        remote_list = _loads_json_list(content)
+        local_list = _loads_json_list(self._records_path.read_bytes()) if self._records_path.exists() else []
+        if remote_list is not None and local_list is not None:
+            merged = _merge_share_records(local_list, remote_list)
+            if merged is not None:
+                try:
+                    self._records_path.parent.mkdir(parents=True, exist_ok=True)
+                    self._records_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+                except Exception as e:
+                    logger.warning(f"[ConfigSync] share_records 合并写盘失败: {e}")
+        if sha:
+            self._set_cached_remote_sha("share_records", sha)
+        self._content_hashes["share_records"] = fp.sha256_bytes(content)
+        self._save_sha_cache()
+        return True
 
     # ── SHA 缓存持久化 ───────────────────────────────────
 
     def _load_sha_cache(self):
-        """从磁盘加载持久化的远端 SHA 缓存"""
+        """从磁盘加载持久化的同步状态（兼容 v1 旧格式）"""
         try:
             if self._sha_cache_path.exists():
-                import json
-
                 data = json.loads(self._sha_cache_path.read_text(encoding="utf-8"))
                 self._config_remote_sha = data.get("config_sha") or None
                 self._custom_remote_sha = data.get("custom_sha") or None
@@ -2101,17 +2739,34 @@ class ConfigSyncService(QObject):
                 ext_data = data.get("ext_shas") or {}
                 if isinstance(ext_data, dict):
                     self._ext_remote_sha = {str(k): str(v) for k, v in ext_data.items() if v}
+                # v2：内容指纹（缺省空集 = 下次上传前不做短路，行为等同旧版）
+                hashes = data.get("content_hashes") or {}
+                if isinstance(hashes, dict):
+                    self._content_hashes = {str(k): str(v) for k, v in hashes.items() if v}
+                self._device_tag = str(data.get("device_tag") or "")
                 logger.debug(
-                    f"[ConfigSync] SHA 缓存已加载: config={self._config_remote_sha[:12] if self._config_remote_sha else None}..."
+                    f"[ConfigSync] 同步状态已加载: config={self._config_remote_sha[:12] if self._config_remote_sha else None}..."
                 )
         except Exception as e:
             logger.warning(f"[ConfigSync] SHA 缓存加载失败: {e}")
+        if not self._device_tag:
+            self._device_tag = self._new_device_tag()
+
+    @staticmethod
+    def _new_device_tag() -> str:
+        """生成设备标识（冲突副本命名用）：主机名前缀 + 随机后缀，避免同名机器碰撞"""
+        try:
+            import socket
+            import re as _re
+
+            host = _re.sub(r"[^a-z0-9]", "", socket.gethostname().lower())[:6] or "dev"
+        except Exception:
+            host = "dev"
+        return f"{host}-{uuid.uuid4().hex[:4]}"
 
     def _save_sha_cache(self):
-        """持久化当前远端 SHA 到磁盘"""
+        """持久化当前远端 SHA + 内容指纹到磁盘"""
         try:
-            import json
-
             data = {}
             if self._config_remote_sha:
                 data["config_sha"] = self._config_remote_sha
@@ -2121,6 +2776,11 @@ class ConfigSyncService(QObject):
                 data["records_sha"] = self._records_remote_sha
             if self._ext_remote_sha:
                 data["ext_shas"] = dict(self._ext_remote_sha)
+            if self._content_hashes:
+                data["content_hashes"] = dict(self._content_hashes)
+            if self._device_tag:
+                data["device_tag"] = self._device_tag
+            data["state_version"] = 2
             self._sha_cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._sha_cache_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
@@ -2139,3 +2799,32 @@ class ConfigSyncService(QObject):
             return body.get("message", resp.text[:200])
         except Exception:
             return resp.text[:200]
+
+
+# ── 模块级辅助 ────────────────────────────────────────
+
+
+def _loads_json_list(raw: bytes) -> Optional[list]:
+    """把字节解析成 JSON 数组，失败返回 None"""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+        return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+
+def _merge_share_records(local: list, remote: list) -> Optional[list]:
+    """分享记录按 id 合并：本地优先，远端独有追加（记录只增不减，不做删除传播）"""
+    seen = set()
+    out: list = []
+    for item in local:
+        rid = item.get("id") if isinstance(item, dict) else None
+        if rid is not None:
+            seen.add(rid)
+        out.append(item)
+    for item in remote:
+        rid = item.get("id") if isinstance(item, dict) else None
+        if rid is not None and rid in seen:
+            continue
+        out.append(item)
+    return out

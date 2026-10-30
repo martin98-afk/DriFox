@@ -15,19 +15,11 @@ from app.core.infra.token_estimator import per_message_tokens
 
 
 class _FakeCore:
-    class _Compactor:
-        def _make_state(self):
-            return {}
-
-        def get_budget(self, llm_config):
-            return 200000
-
     class _ContextBuilder:
         def get_context_budget(self, llm_config):
             return 200000
 
     def __init__(self):
-        self.compactor = self._Compactor()
         self.context_builder = self._ContextBuilder()
         self.permission_cache = None
 
@@ -51,6 +43,11 @@ def _engine(session, model="gpt-4o"):
     engine._callbacks = {}
     engine._api_mode = False
     engine._worker_callbacks = {}
+    engine._tools_snapshot = {
+        "key": (getattr(session, "session_id", ""), "build", False),
+        "tools": [],
+        "hash": "empty",
+    }
     engine._tools_schema_cache = {"timestamp": 0.0, "tools": [], "tokens": 0}
     return engine
 

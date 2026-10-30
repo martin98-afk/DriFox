@@ -57,6 +57,33 @@ class SceneLayer(QWidget):
 
         self._image_label: Optional[QLabel] = None
         self._dim_label: Optional[QLabel] = None
+        # 跨宿主共享画布：宿主注入求值函数，让本层只显示同一张图的某一段。
+        # 多栏共享背景时各栏用同一画布尺寸 + 各自左缘偏移，保证接缝处图案
+        # 严格连续。None = 退化为撑满自身 rect（原有单宿主行为）。
+        self._canvas_provider = None
+        # 模糊外扩边：blur>0 时内容层四周留出的额外像素（见 _content_geometry）
+        self._blur_pad = 0
+
+    def set_canvas_provider(self, provider) -> None:
+        """注入跨宿主画布求值函数（幂等，可重复调用）
+
+        Args:
+            provider: callable() -> Optional[Tuple[int, int, int] | Tuple[int, int, int, int]]
+                (画布宽, 画布高, 本宿主左缘在画布中的 x 偏移[, 统一模糊外扩])。
+                返回 None 表示退回「撑满自身 rect」。
+                ★ 共享画布的多个宿主必须拿到**同一组**宽高与���扩值，否则
+                scaledContents 缩放比例不一致，接缝处图案会错位。
+        """
+        self._canvas_provider = provider
+        self._sync_geometry()
+
+    def refresh_canvas_geometry(self) -> None:
+        """重新求值画布几何（宿主宽度变化/开合动画帧后调用）
+
+        常态下宿主 resize 已由 eventFilter 驱动同步；本入口用于**另一宿主**
+        的几何变化（共享画布宽度取决于两栏之和）与动画逐帧落位后的补齐。
+        """
+        self._sync_content_geometry()
 
     def apply_config(self, cfg: Optional[dict], image_resolver=None) -> None:
         """应用主题配置（None 或 enabled=False 时清除所有内容）
@@ -91,7 +118,7 @@ class SceneLayer(QWidget):
                 self._image_label = QLabel(self)
                 self._image_label.setPixmap(pix)
                 self._image_label.setScaledContents(True)
-                self._image_label.setGeometry(self.rect())
+                self._sync_content_geometry()
                 # 图片也设圆角（避免溢出到 _chat_frame 圆角外）
                 self._image_label.setStyleSheet(
                     f"border-radius: {_CHAT_FRAME_RADIUS}px;"
@@ -103,6 +130,8 @@ class SceneLayer(QWidget):
                     blur_effect = QGraphicsBlurEffect(self._image_label)
                     blur_effect.setBlurRadius(min(float(blur), 30.0))
                     self._image_label.setGraphicsEffect(blur_effect)
+                    self._blur_pad = int(min(float(blur), 30.0)) * 2
+                    self._sync_content_geometry()
 
         # 3. dim 蒙版（半透明黑色，叠在 image_label 之上压暗）
         dim = cfg.get("dim")
@@ -111,7 +140,7 @@ class SceneLayer(QWidget):
             self._dim_label.setStyleSheet(
                 f"background-color: {dim}; border-radius: {_CHAT_FRAME_RADIUS}px;"
             )
-            self._dim_label.setGeometry(self.rect())
+            self._sync_content_geometry()
             self._dim_label.raise_()
             self._dim_label.show()
 
@@ -132,9 +161,50 @@ class SceneLayer(QWidget):
         if self._dim_label is not None:
             self._dim_label.deleteLater()
             self._dim_label = None
+        self._blur_pad = 0
         self.setGraphicsEffect(None)
         self.setStyleSheet("")
         self.setAutoFillBackground(False)
+
+    def _content_geometry(self) -> tuple:
+        """内容层（图片/蒙版）几何
+
+        跨宿主画布下返回「负偏移大矩形」——宽高是整块画布，x 取负的本宿主
+        偏移，超出自身边界的部分由 Qt 父子裁剪自动切掉，于是本层只显示画布
+        里属于自己的那一段。无画布时等于自身 rect。
+        """
+        canvas = None
+        if self._canvas_provider is not None:
+            try:
+                canvas = self._canvas_provider()
+            except Exception:
+                canvas = None
+        if canvas is None:
+            r = self.rect()
+            return (0, 0, r.width(), r.height())
+        # 模糊外扩边：QGraphicsBlurEffect 采样越界像素按透明处理，label 边缘会
+        # 向内淡化。共享画布下两栏各有一个 label 边缘落在接缝两侧 → 接缝出现
+        # 一条淡化亮带。四周留 pad（超出宿主可视区，被父控件裁掉）后淡化带整段
+        # 落在可视区外，两栏图案严格连续。
+        if len(canvas) >= 4:
+            width, height, offset_x, pad = canvas[0], canvas[1], canvas[2], canvas[3]
+        else:
+            width, height, offset_x = canvas[0], canvas[1], canvas[2]
+            pad = self._blur_pad
+        pad = int(pad)
+        return (
+            -(int(offset_x) + pad),
+            -pad,
+            int(width) + pad * 2,
+            int(height) + pad * 2,
+        )
+
+    def _sync_content_geometry(self) -> None:
+        """把内容层几何对齐到画布（self 自身始终撑满 parent）"""
+        x, y, w, h = self._content_geometry()
+        for label in (self._image_label, self._dim_label):
+            if label is not None:
+                label.setGeometry(x, y, w, h)
 
     def _sync_geometry(self) -> None:
         """同步到 parent 的几何"""
@@ -142,10 +212,7 @@ class SceneLayer(QWidget):
         if parent is None:
             return
         self.setGeometry(parent.rect())
-        if self._image_label is not None:
-            self._image_label.setGeometry(self.rect())
-        if self._dim_label is not None:
-            self._dim_label.setGeometry(self.rect())
+        self._sync_content_geometry()
 
     def eventFilter(self, watched, event) -> bool:
         """监听 parent.resize → 同步 SceneLayer geometry"""
@@ -155,10 +222,7 @@ class SceneLayer(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._image_label is not None:
-            self._image_label.setGeometry(self.rect())
-        if self._dim_label is not None:
-            self._dim_label.setGeometry(self.rect())
+        self._sync_content_geometry()
 
     def refresh_theme(self) -> None:
         """theme_manager.refresh_target 钩子：触发重新应用配置

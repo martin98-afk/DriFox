@@ -72,6 +72,7 @@ def _get_openai_errors() -> Dict[str, type]:
                 }
     return _OPENAI_ERRORS
 
+from app.core.context.budget import resolve_context_budget
 from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
@@ -203,7 +204,6 @@ class OpenAIChatWorker(QThread):
         stage_changed_callback=None,
         permission_check_callback=None,
         permission_cache: PermissionCache = None,
-        compactor=None,
         initial_compaction_cache: Dict = None,
         session_id: str = "",
         hook_policy=None,
@@ -245,7 +245,6 @@ class OpenAIChatWorker(QThread):
             permission_cache=permission_cache or PermissionCache(),
             event_bus=WorkerEventBus(),
             tool_executor=tool_executor,
-            compactor=compactor,
             initial_compaction_cache=initial_compaction_cache,
         )
         self._sync_state_from_state()  # 同步到旧属性名（向后兼容）
@@ -510,7 +509,6 @@ class OpenAIChatWorker(QThread):
         self._current_session_messages = s.session.current_messages
         self._last_usage = s.session.last_usage
         self._accumulated_tokens = s.session.accumulated_tokens
-        self._compactor = s.compactor
         self._compaction_cache = s.compaction.cache
         self._api_messages_cache = s.api_cache.cache
         self._api_messages_built = s.api_cache.built
@@ -634,8 +632,10 @@ class OpenAIChatWorker(QThread):
         """消费 backend 队列中的 PostToolUse 等 hook 消息并注入到 API 缓存。
 
         在每次 _make_api_call 前调用，确保 LLM 能感知 hook 输出。
-        队列中只有 tool_executor 触发的事件（PostToolUse/prompt），预对话事件
-        已由 engine.py 直接注入 session.messages，不经过队列。
+        队列中有 tool_executor 触发的事件（PostToolUse/prompt）与用户插话
+        （_interject）；预对话事件正常发送时由 engine.py 直接注入 session.messages
+        不经过队列，插话则在消费时由 _trigger_interject_user_hooks 补触发用户消息
+        hook 链（UserPromptSubmit/PreUserMessage/PostUserMessage）。
         不做去重——每条 PostToolUse 对应一次独立的工具调用，都应保留。
 
         同时主动检查 TeamManager 中的待处理团队邮件并注入（include_team_mail=True）。
@@ -667,15 +667,25 @@ class OpenAIChatWorker(QThread):
                 except queue.Empty:
                     break
 
-            # ── 用户插话（繁忙时插话发送）：剥离传输键，统计条数通知 UI 开新回复卡 ──
+            # ── 用户插话（繁忙时插话发送）：剥离传输键 + 补触发用户消息 hook 链 ──
             # 传输键仅用于进程内识别（UI 切卡 / 取消回收），注入前必须剥净，
-            # 落库后是干净 user 消息；hook 流程照常触发，无特判。
+            # 落库后是干净 user 消息。
+            # 插话经 _hook_message_queue 直通车绕过了正常发送的 PreSendWorker
+            # hook 链（UserPromptSubmit/PreUserMessage/PostUserMessage），长期记忆/
+            # 系统时间/关键文档注入与正则匹配 hook 对插话全部失效；此处对每条插话
+            # 补触发：hook 输出注入插话消息之前（对齐正常路径顺序），
+            # PostUserMessage 仅感知不注入。
             interject_count = 0
+            injected: List[Dict] = []
             for m in msgs:
-                if m.pop("_interject", None) is True:
-                    interject_count += 1
+                is_interject = m.pop("_interject", None) is True
                 m.pop("_interject_text", None)
                 m.pop("_interject_image_paths", None)
+                if is_interject:
+                    interject_count += 1
+                    injected.extend(self._trigger_interject_user_hooks(m))
+                else:
+                    injected.append(m)
             if interject_count:
                 logger.info(
                     f"[Interject] 消费插话 {interject_count} 条 session={str(self.session_id)[:8]} "
@@ -684,12 +694,12 @@ class OpenAIChatWorker(QThread):
                 # 信号先于本轮 _make_api_call 的流式 chunk（queued 保序）→ UI 新卡先建好
                 self._emit_with_callback("queued_user_injected", self.queued_user_injected, interject_count)
 
-            if msgs:
-                self._append_to_api_cache(msgs)
-                self._current_session_messages.extend(msgs)
+            if injected:
+                self._append_to_api_cache(injected)
+                self._current_session_messages.extend(injected)
                 if session_messages_target is not None:
-                    session_messages_target.extend(msgs)
-                logger.debug(f"[HookManager] Injected {len(msgs)} hook msgs from queue")
+                    session_messages_target.extend(injected)
+                logger.debug(f"[HookManager] Injected {len(injected)} hook msgs from queue")
 
             # 🆕 主动检查团队待处理邮件（不依赖 QFileSystemWatcher）
             if not include_team_mail:
@@ -726,6 +736,102 @@ class OpenAIChatWorker(QThread):
                     logger.info(f"[TeamMail] Worker 注入团队邮件: #{mail['id']} from [{sender_id}]")
         except Exception as e:
             logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
+
+    def _trigger_interject_user_hooks(self, msg: Dict) -> List[Dict]:
+        """插话消息消费时补触发用户消息 hook 链，返回最终注入的消息列表
+
+        对齐正常发送路径（engine.py PreSendWorker）：UserPromptSubmit →
+        PreUserMessage 的 add_to_context 输出作为 hook 消息注入在插话 user
+        消息之前，PostUserMessage 仅感知事件（输出不注入，与正常路径语义
+        一致）。异常兜底：hook 链失败时退化为直接注入插话消息，不影响消费
+        主流程；skip_finished_callback=True 对齐 _trigger_worker_hook（输出
+        由返回值收集注入，不走 on_hook_finished 队列通道防重复投递）。
+        """
+        import os
+
+        from app.core.conversation.backend import _make_hook_message
+        from app.core.conversation.message_content import content_to_text
+
+        backend = getattr(self.tool_executor, "_backend", None)
+        hook_mgr = getattr(backend, "hook_manager", None) if backend else None
+        if hook_mgr is None:
+            return [msg]
+
+        content = msg.get("content", "")
+        try:
+            text = content if isinstance(content, str) else content_to_text(content)
+        except Exception:
+            text = str(content)
+
+        def _base_ctx() -> Dict:
+            workdir = None
+            if backend.tool_executor:
+                workdir = backend.tool_executor.get_workdir()
+            if not workdir:
+                workdir = os.getcwd()
+            session_id = ""
+            try:
+                session = backend.get_current_session() if hasattr(backend, "get_current_session") else None
+                if session:
+                    session_id = session.session_id or ""
+            except Exception:
+                pass
+            return {
+                "project_root": workdir,
+                "session_id": session_id,
+                "message": text,
+                "current_role": "primary",
+                "is_subagent_call": False,
+                "is_team_member": _check_team_member(backend),
+            }
+
+        out: List[Dict] = []
+        try:
+            # PreUserMessage 增强 ctx：worktree 建议 + 关键文档（对齐 engine.py；
+            # 临时会话跳过关键文档，防止临时页泄源项目文档）
+            pre_ctx = _base_ctx()
+            try:
+                pre_ctx.update(backend._build_worktree_context_dict() or {})
+                session = backend.get_current_session() if hasattr(backend, "get_current_session") else None
+                if session is not None and not getattr(session, "is_temp", False):
+                    pre_ctx.update(backend.build_key_documents_context() or {})
+            except Exception as e:
+                logger.debug(f"[Interject] PreUserMessage 增强 ctx 构建失败（降级基础 ctx）: {e}")
+
+            for event_name, ctx in (("UserPromptSubmit", _base_ctx()), ("PreUserMessage", pre_ctx)):
+                try:
+                    results = hook_mgr.trigger_event(
+                        event_name,
+                        context=ctx,
+                        current_message=text,
+                        trigger_async=False,
+                        skip_finished_callback=True,
+                    )
+                    for r in results:
+                        if r.success and r.output and r.add_to_context:
+                            out.append(_make_hook_message(event_name, r.output, r.status_message))
+                except Exception as e:
+                    logger.debug(f"[Interject] {event_name} hook 触发失败: {e}")
+        except Exception as e:
+            logger.debug(f"[Interject] 用户消息 hook 链触发异常（降级直注入）: {e}")
+
+        out.append(msg)
+
+        try:
+            post_ctx = _base_ctx()
+            if content != text:
+                post_ctx["user_content"] = content
+            hook_mgr.trigger_event(
+                "PostUserMessage",
+                context=post_ctx,
+                current_message=text,
+                trigger_async=False,
+                skip_finished_callback=True,
+            )
+        except Exception as e:
+            logger.debug(f"[Interject] PostUserMessage hook 触发失败: {e}")
+        logger.info("[Interject] 已补触发用户消息 hook 链（UserPromptSubmit/PreUserMessage/PostUserMessage）")
+        return out
 
     def _drain_pending_hooks_before_exit(self, current_session_messages: List) -> bool:
         """退出前 _hook_message_queue 收尾决策：非空则注入并续跑一轮。
@@ -1114,29 +1220,53 @@ class OpenAIChatWorker(QThread):
         # 重复消费 → "停止后立即触发相同对话"的次链路。取消 = 用户主动中止，
         # 残留的 TeamMail hook 属于被取消的上下文，直接丢弃；非 TeamMail 条目
         # （SubAgentFinished 等通知）保留放回，供下一对话正常消费（通知语义不变）。
-        try:
-            backend = getattr(self.tool_executor, "_backend", None)
-            q = getattr(backend, "_hook_message_queue", None) if backend else None
-            if q is not None:
-                leftover = []
-                while True:
-                    try:
-                        leftover.append(q.get_nowait())
-                    except queue.Empty:
-                        break
-                recovered = []
-                for item in leftover:
-                    if item.get("_interject") is True:
-                        recovered.append(item)  # 用户插话：回收供停止后回填，不丢弃
-                    elif item.get("_hook_event") != "TeamMail":
-                        q.put(item)
-                if recovered and backend is not None:
-                    try:
-                        backend.stash_recovered_interjects(recovered)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"[HookManager] 回收插话失败: {e}")
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[HookManager] Cancel path drain TeamMail hook queue failed: {e}")
+        self._reclaim_pending_interjects_on_exit()
+
+    def _reclaim_pending_interjects_on_exit(self) -> int:
+        """退出前把 hook 队列中的未消费插话回收进 backend stash
+
+        取消 = 用户主动中止：残留插话回收供 UI 停止链路回填输入框，既不丢也不
+        复活。TeamMail 属被取消上下文直接丢弃；非 TeamMail 条目
+        （SubAgentFinished 等通知）放回队列供下一对话正常消费。
+
+        两条调用路径：
+        - _cancel_with_stop_hook（取消检查点命中）
+        - run() 的 finally（主循环 `while not self._is_cancelled` 直接退出、
+          question 等待中取消 return 等，从不经过检查点）
+
+        Returns:
+            回收的插话条数
+        """
+        backend = getattr(self.tool_executor, "_backend", None)
+        q = getattr(backend, "_hook_message_queue", None) if backend is not None else None
+        if q is None:
+            return 0
+        leftover: List[Dict] = []
+        while True:
+            try:
+                leftover.append(q.get_nowait())
+            except queue.Empty:
+                break
+        recovered: List[Dict] = []
+        kept: List[Dict] = []
+        for item in leftover:
+            if not isinstance(item, dict):
+                kept.append(item)
+            elif item.get("_interject") is True:
+                recovered.append(item)
+            elif item.get("_hook_event") == "TeamMail":
+                continue
+            else:
+                kept.append(item)
+        for item in kept:
+            q.put(item)
+        if recovered:
+            try:
+                backend.stash_recovered_interjects(recovered)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[HookManager] 退出兜底回收插话失败: {e}")
+            logger.info(f"[Interject] 取消退出兜底回收 {len(recovered)} 条未消费插话")
+        return len(recovered)
 
     @property
     def event_bus(self) -> WorkerEventBus:
@@ -2033,7 +2163,7 @@ class OpenAIChatWorker(QThread):
 
             # 开始新对话时，清理 round 缓存，但保留 session 缓存
             self._permission_cache.clear_round()
-            budget = self._compactor.get_budget(self.llm_config)
+            budget = resolve_context_budget(self.llm_config)
 
             # [MEM] 启动快照
             self._mem_snapshot("start", msg_count=len(current_messages), session_count=len(current_session_messages))
@@ -2489,50 +2619,21 @@ class OpenAIChatWorker(QThread):
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
                 )
 
-                # ========== 工具迭代中压缩 ==========
-                # 在每次 API 调用前检查是否需要压缩
-                if self._compactor.should_compact(current_messages, budget):
-                    system_message = current_messages.pop(0)
-                    compacted, state, cache = self._compactor.compact(
-                        current_messages,
-                        budget,
-                        existing_cache=None,
-                        allow_llm_summary=False,  # 工具迭代中只用启发式，避免嵌套 LLM 调用
-                    )
-                    if compacted != current_messages:
-                        current_messages = compacted
-                        self._last_compaction_state = state
-                        self._compaction_cache = cache
-                        self._emit_compaction_status(state)
-                    # 修复：重新插入 system_message，否则下一轮 API 调用会丢失系统提示
-                    current_messages.insert(0, system_message)
-                    # 修复：始终更新 API 缓存以匹配 current_messages（含 system）
-                    # 注意：需要通过 messages_to_api() 转换格式，否则后续 API 调用读到内部格式对象
-                    # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
-                    current_messages, _ = self._fix_tool_result_order(current_messages)
-                    self._api_messages_cache = self._serialize_for_api(current_messages).messages
-                    # 它的增长会在 worker 结束时由 _on_messages_updated 的
-                    # preserve_compaction=False 清空缓存，下轮发送时由 ContextBudgetAllocator 统一压缩。
-                else:
-                    # 更新 API 消息缓存
-                    # 注意：如果 _try_inject_vision_content 已重建完整缓存，跳过追加避免重复
-                    if not vision_injected:
-                        self._append_to_api_cache(response_sequence)
+                # 更新 API 消息缓存
+                # 注意：如果 _try_inject_vision_content 已重建完整缓存，跳过追加避免重复
+                if not vision_injected:
+                    self._append_to_api_cache(response_sequence)
                 self._emit_with_callback(
                     "finished_with_messages", self.finished_with_messages, current_session_messages
                 )
 
                 # ========== 迭代结束：内存快照 ==========
                 self._mem_diag_iter_count += 1
-                _was_compacted = (  # 检测本轮是否执行了压缩
-                    "compacted" in locals() and locals().get("compacted") is not None
-                )
                 self._mem_snapshot(
                     "end_iter",
                     msg_count=len(current_messages),
                     session_count=len(current_session_messages),
                     api_cache=len(self._api_messages_cache) if self._api_messages_cache else 0,
-                    compacted="yes" if _was_compacted else "no",
                 )
                 # 每 3 轮触发一次 GC，帮助回收循环引用
                 # 🔧 修复：仅在 MEM_DIAG 启用时才执行 gc.collect()，避免 stop-the-world GC 阻塞 UI
@@ -2587,6 +2688,11 @@ class OpenAIChatWorker(QThread):
         finally:
             # 工具执行完成后，清理 round 缓存（为下一轮 API 调用做准备）
             self._permission_cache.clear_round()
+            # 🛡️ 取消退出兜底：主循环 `while not self._is_cancelled` 直接退出时
+            # 不经过循环内的 _cancel_with_stop_hook → hook 队列里的插话残留，
+            # 被下一个 worker 当新插话消费（2026-10-29 已撤回插话复活 + 双卡片）
+            if self._is_cancelled:
+                self._reclaim_pending_interjects_on_exit()
 
     def _make_assistant_msg(self, content, model_name, reasoning_content, timestamp):
         """构建 assistant 消息 dict（消除 3 处重复构造）"""
@@ -2694,6 +2800,9 @@ class OpenAIChatWorker(QThread):
                     "echarts": item.get("echarts"),
                     "lsp_diagnostic": item.get("lsp_diagnostic"),
                 }
+                # 成果条目：与 ts_ms 同理，重建 dict 时漏掉 → 重开会话成果栏丢失
+                if item.get("artifacts"):
+                    tool_result_map[tc_id]["artifacts"] = item["artifacts"]
                 # ⚠️ 轨迹计时字段必须透传：ts_ms / trace_phases 由执行层
                 # _build_result_dict 写入，是 agent_trace 在**重载会话后**恢复
                 # 真实耗时的唯一数据源（运行时 timing 表只存在于内存）。
@@ -4782,6 +4891,17 @@ class OpenAIChatWorker(QThread):
             # normalize_message 不保留此字段，session 历史消息不含诊断文本
             "lsp_diagnostic": getattr(result_obj, "lsp_diagnostic", None) if result_obj else None,
         }
+        artifacts = (
+            result_obj.get("artifacts") if isinstance(result_obj, dict) else getattr(result_obj, "artifacts", None)
+        )
+        if artifacts:
+            # 成果条目随 tool 消息一起落库：重开会话时卡片成果栏据此重建
+            # （旧行为只在内存里挂栏，切会话/重启后成果不可追溯）
+            from app.core.conversation.message_content import normalize_artifact_items
+
+            clean_artifacts = normalize_artifact_items(artifacts)
+            if clean_artifacts:
+                result["artifacts"] = clean_artifacts
         if raw_content is not None:
             result["raw_content"] = raw_content
         return result

@@ -25,6 +25,9 @@ STAGE_UI = "ui"
 ALL_STAGES: FrozenSet[str] = frozenset({STAGE_INGEST, STAGE_SEND, STAGE_UI})
 
 # cache_impact 取值
+# 执行门控语义（ContextPipeline._allow）：非 invalidate 层常态运行；
+# invalidate 层仅在 used_tokens > budget（真的超预算）时才放行 ——
+# 优先保住 prompt cache，只在压不下去就发不出去时牺牲前缀。
 CACHE_NONE = "none"  # 不动 prompt cache 前缀
 CACHE_PRESERVE = "preserve"  # 保持前缀稳定
 CACHE_INVALIDATE = "invalidate"  # 破坏前缀，cache 失效

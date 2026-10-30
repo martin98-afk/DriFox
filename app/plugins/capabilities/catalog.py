@@ -73,7 +73,24 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("session.read", _M, "当前 session_id 与消息列表", _BOTH),
         _spec("session.write", _M, "消息写回当前会话（入库 + 刷 UI + 发事件）", _BOTH, ["save_messages_to_session"]),
         _spec("session.list", _M, "历史会话列表与元数据", _UI),
-        _spec("session.manage", _H, "新建/切换/删除会话（破坏性）", _UI),
+        _spec(
+            "session.history",
+            _M,
+            "持久化历史会话只读面（列表/归档/项目聚合/按 session_id 定位；经 HistoryManager）",
+            _UI,
+        ),
+        _spec(
+            "session.history.write",
+            _H,
+            "改写持久化历史（置顶/移动项目/归档/恢复/删除/导入，破坏性）",
+            _UI,
+        ),
+        _spec(
+            "session.manage",
+            _H,
+            "切换/新建当前会话（加载历史会话、清空开新会话；破坏性）",
+            _UI,
+        ),
         _spec(
             "session.invalidate",
             _M,
@@ -98,10 +115,28 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _UI,
             ["set_workdir", "sync_working_directory"],
         ),
+        # ── 项目 ──
+        _spec(
+            "project.read",
+            _L,
+            "当前项目与项目清单/元数据（会话数、工作目录数、根目录，不含密钥）",
+            _UI,
+        ),
+        _spec(
+            "project.write",
+            _H,
+            "切换/新建/归档/导入导出项目与根目录绑定（破坏性，含团队广播）",
+            _UI,
+        ),
+        _spec(
+            "project.workdir",
+            _M,
+            "写库式切换项目工作目录（关键文档登记 + 工作目录持久化 + 根目录标记恢复，"
+            "与 workdir.write 的会话内切换互补）",
+            _UI,
+        ),
         # ── 外观 ──
         _spec("theme.read", _L, "主题 id/名称/配色/字体/字号", _UI),
-        # ── 上下文 ──
-        _spec("context.compact", _M, "上下文压缩器", _BOTH, ["get_compactor"]),
         # ── 工具 ──
         _spec("tool.read", _L, "工具注册表元数据查询", _BOTH),
         _spec("tool.inject", _H, "向 LLM 注入工具（改变模型可见行为）", _UI),
@@ -162,6 +197,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 团队 ──
         _spec("team.read", _L, "团队成员/角色/运行状态", _BOTH),
         _spec("team.send", _M, "向团队成员派发任务邮件（写对方邮箱）", _TOOL),
+        _spec(
+            "team.session",
+            _H,
+            "团队历史会话的恢复/归档/成员会话进入（跨窗口开标签页，破坏性）",
+            _UI,
+        ),
         # ── 存储 ──
         _spec("storage.data_dir", _L, "插件持久化数据根目录（插件自拼 plugin_data/<name>/）", _BOTH),
         # ── 基础（恒放行） ──

@@ -5,13 +5,25 @@
   },
   "name": "history-manager",
   "description": "DriFox 内置 UI 组件：工作台历史会话页（历史 / 归档列表、项目切换、置顶、归档 · 恢复 · 导入）",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "DriFox Team"
   },
   "homepage": "https://github.com/martin98-afk/DriFox",
   "license": "GPL-3.0-or-later",
   "type": "system",
+  "api_version": 2,
+  "capabilities": [
+    "session.history",
+    "session.history.write",
+    "session.manage",
+    "project.read",
+    "project.write",
+    "team.session",
+    "window.current",
+    "window.events",
+    "window.host"
+  ],
   "components": {
     "ui": true
   }

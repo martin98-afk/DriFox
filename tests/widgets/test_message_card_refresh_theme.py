@@ -45,6 +45,10 @@ def _make_viewer_stub():
     v = CodeWebViewer.__new__(CodeWebViewer)
     v._last_theme_version = -1
     v._render_seq = 0
+    # 图表卡重渲分支会读改写这两个序号（refresh_theme 内），桩必须预置：
+    # PyQt5 wrapper 未跑 __init__ 时读缺失属性抛 RuntimeError 而非 AttributeError
+    v._final_render_seq = 0
+    v._final_render_inflight = False
     v._stub_page = _StubPage()
     v.page = MethodType(lambda self: self._stub_page, v)
     v.isVisible = MethodType(lambda self: False, v)

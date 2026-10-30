@@ -618,7 +618,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.6.12"
+    current_version = "v0.6.13"
     # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
     # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
     # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。
@@ -791,6 +791,13 @@ class Settings(QConfig):
     # ========== LLM API 服务配置 ==========
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
     llm_api_port = RangeConfigItem("LLM", "APIPort", 8765, RangeValidator(1024, 65535))
+
+    # ========== 云同步元数据 ==========
+    # 存 JSON 字符串：{"version": 1, "clock": <lamport>, "entries": {路径: {h,t,d}}}
+    # 由 app/core/sync/meta_recorder.py 维护，UI 不展示、不提供编辑入口。
+    # 放在 System 分组是为了随 app.config 一次 PUT 原子上云（Gitee 文件 API
+    # 一次只能写一个文件，独立元数据文件会引入两文件不一致的窗口）。
+    sync_meta = ConfigItem("System", "SyncMeta", "{}")
 
     # ========== MCP 服务器配置 ==========
     mcp_servers = ConfigItem("MCP", "Servers", [], ListDictValidator())

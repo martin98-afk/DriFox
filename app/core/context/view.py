@@ -34,6 +34,7 @@ class ContextView:
     messages: List[Dict[str, Any]]
     budget: int = 0
     target_tokens: int = 0
+    hard_limit: int = 0  # 模型窗口硬上限（0=未知）；紧急层据此判断是否已到极限
     llm_config: Dict[str, Any] = field(default_factory=dict)
     stage: str = "send"
     stats: List[TierStat] = field(default_factory=list)

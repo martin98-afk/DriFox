@@ -28,16 +28,14 @@ def _resolve_widget(host: Any) -> Any:
 
     host 是 MainWidget（ui surface）时直接用；否则（tool surface 的
     ToolExecutor / host=None）解析活跃主窗口。取不到返回 None。
+
+    ★ 活跃 = 用户此刻所在标签页；``_main_widget`` 是最后构造的窗口，多标签下会指错。
     """
     if getattr(host, "_valid_configs", None) is not None:
         return host
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+    from app.plugins.capabilities.resolve import active_main_widget
 
-        reg = UIPluginRegistry.get_instance()
-        return getattr(reg, "_main_widget", None) or next(iter(getattr(reg, "_window_main_widgets", {}).values()), None)
-    except Exception:
-        return None
+    return active_main_widget()
 
 
 def _models_for(widget: Any, config_id: str) -> List[str]:

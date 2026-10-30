@@ -248,6 +248,12 @@ SCROLL_MAX_CACHE_TTL = 0.12
 # 取代 500/1000ms 盲滚底。DRIFOX_EVENT_SCROLL=0 回退到纯时间驱动重试链。
 STREAM_BOTTOM_EVENT_DRIVEN = os.environ.get("DRIFOX_EVENT_SCROLL", "1") != "0"
 
+# 滚动贴底诊断（DRIFOX_SCROLL_DIAG=1 打开，默认关闭）：把 value / maximum /
+# landed / container 高度 / sizeHint / away / 窗口态打到日志，用于定位
+# 「流式结束后视口比底部高一截」这类只在真机复现的欠收敛。零成本：关时只多一次
+# 模块级布尔判断。
+SCROLL_DIAG = os.environ.get("DRIFOX_SCROLL_DIAG", "").strip() == "1"
+
 # 「回到底部」胶囊的显示阈值（px）：视口离底超过它才浮出。
 # ⚠️ 故意比 AT_BOTTOM_TOLERANCE 大一个数量级 —— 两者语义不同：
 #   - AT_BOTTOM_TOLERANCE 问的是「还算贴底吗」（决定是否跟随流式输出）
@@ -1004,6 +1010,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._deferred_queue = DeferredTaskQueue()
         self._pending_agent_switch = None
+        # 慢刷新卡打点（_safe_refresh 累计；每周期在 _apply_runtime_ui_settings 重置）
+        self._slow_refresh_cards: list = []
         # ★ singleton 信号连接跟踪（销毁时统一断开，防泄漏）
         # 注意：self._singleton_connections 是纯 Python 属性，可先于 super().__init__()
         # 设置；但 self.destroyed 是 QObject 内置信号，其 .connect() 必须在父类
@@ -1029,6 +1037,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标记窗口是否已销毁，防止异步回调访问已销毁的 widget
         # 多窗口隔离：实例级模型配置缓存（必须覆盖类变量，防止多窗口共享）
         self._valid_configs: Dict[str, Dict[str, Any]] = {}
+        # 加载历史会话时待跟随的模型：(model_name, provider_hint, config_id)。
+        # 窗口初始化早期 _valid_configs 尚未加载，此时先暂存，配置就绪后补应用。
+        self._pending_model_restore: Optional[tuple] = None
         self._is_destroyed = False
         # 多窗口隔离：窗口唯一标识（持久化 ID，跨重启稳定）
         from app.core.team.team_manager import TeamManager
@@ -1345,6 +1356,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 与 `_reset_bottom_follow`（用户点击发送 / 切会话 / 清空聊天区）两处；
         # 判定一律走 `_should_follow_bottom()`。禁止在别处直接读写这个标志。
         self._user_intentionally_away_from_bottom = False
+        # 真实用户滚动输入的时间窗（monotonic 截止时刻，0 = 无最近输入）。
+        # away 置位只认这里：Qt 自己也会挪滚动条（切回标签页重算上界、分栏 /
+        # 宽度重排、卡片收缩后的钳制），这些不是用户意图，却会被「非程序
+        # valueChanged」的旧判据记成「用户滚离底部」→ 此后所有自动置底被
+        # `_should_follow_bottom()` 静默拦下（症状：切回标签页停在旧位置，
+        # 必须手动滚到底）。
+        self._user_scroll_input_until = 0.0
         # 跳转锁（monotonic 截止时刻；0 = 无锁）。点历史问题 / 时间线跳转后，
         # 目标批次重建会进懒渲染队列，队列排空时 `_process_next_lazy_batch`
         # 无条件 `_scroll_to_bottom(sticky_ms=900)` —— 把刚落好的视口拽回底部
@@ -2829,6 +2847,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def eventFilter(self, obj, event):
         """处理窗口大小变化"""
+        # ── 真实滚动输入标记 ──
+        # away 状态机只认真实输入（见 `_on_scroll_changed`）：滚轮（qfw 平滑
+        # 滚动会逐拍把合成 Wheel 发给内置条，天然一并覆盖）、拖滑块 / 点页槽。
+        if event.type() == QEvent.Wheel:
+            self._mark_user_scroll_input_if_scroll_bar(obj)
+        elif event.type() == QEvent.MouseButtonPress:
+            # 点击只认滚动条本体（拖滑块 / 点页槽）；viewport 上的普通点击
+            # 不标记，否则“点空白处”会被当成滚动输入。
+            self._mark_user_scroll_input_if_scroll_bar(obj, include_viewport=False)
         # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何，
         # 否则输入框高度自适应（输入多行内容时）会让光晕"卡"在旧位置
         if event.type() == event.Type.Resize and obj in (
@@ -3330,6 +3357,9 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+        # away 置位依赖真实输入证据：插件 override chat_area 时不保证调用
+        # `_wire_scroll_range_changed`，这里在通用路径上兜一层（幂等）。
+        self._wire_user_scroll_input()
 
         # ── 底部输入区域（Phase F 模块化：装配代码已迁 app/widgets/modules/input_card_module.py）──
         from app.widgets.ui_composition import compose
@@ -4044,24 +4074,78 @@ class OpenAIChatToolWindow(ToolWindow):
         # hold 期间 _show_initial_welcome 只记 pending，装载完成后统一渲染一次。
         if plugin_dirs:
             self._welcome_build_hold = True
+            self._hold_deferred_for_plugin_load()
         self._load_ui_plugins_step(plugin_dirs, 0, 0, on_done)
 
-    def _load_ui_plugins_step(self, plugin_dirs, idx: int, loaded: int, on_done=None, frame_spent: float = 0.0):
+    def _hold_deferred_for_plugin_load(self) -> None:
+        """UI 插件装载期暂停插件宿主的延迟队列。
+
+        两边都要 import 插件模块，而 Python 的 import 锁是进程级的：后台
+        runtime_components warmup 导入模块时，主线程的 load_plugin 会整段
+        阻塞——实测让帧后等 3.3s，且恢复时刻精确等于 warmup 结束，把并行
+        变成了串行 + 额外等待。错峰后装载独占主线程，warmup 在装载完成后
+        接着跑（那时界面已可用，后台慢几秒无感）。
+        """
+        try:
+            from app.core.services.plugin_host_service import PluginHostService
+
+            svc = PluginHostService.get_instance()
+            # 上下文策略（context_tiers / budget_resolvers）是对话主链路依赖，
+            # 必须早于任何一轮请求就绪；暂停队列会连它们一起推后，实测装载期
+            # 首次请求因此降级为「全量发送」。这两个组件合计约 0.5s，先同步扫掉。
+            try:
+                from app.plugins.loaders.runtime_component_loader import warmup_component
+
+                warmup_component("context_tiers")
+                warmup_component("budget_resolvers")
+            except Exception as e:
+                logger.warning(f"[MainWidget] 上下文策略预注册失败（继续装载）: {e}")
+            svc.pause_deferred("ui_plugin_load", only=["runtime_components", "net_preheat"])
+            # 步进链是单发定时器：窗口销毁后收口分支不会再跑，必须另有释放路径，
+            # 否则应用级队列被永久暂停（其它窗口的启动任务全部卡死）
+            self.destroyed.connect(lambda *_: svc.resume_deferred("window_destroyed"))
+        except Exception as e:
+            logger.warning(f"[MainWidget] 暂停延迟队列失败（不影响装载）: {e}")
+
+    def _release_deferred_after_plugin_load(self) -> None:
+        """装载收口：恢复被 _hold_deferred_for_plugin_load 挂起的队列（幂等）"""
+        try:
+            from app.core.services.plugin_host_service import PluginHostService
+
+            PluginHostService.get_instance().resume_deferred("ui_plugin_load_done")
+        except Exception as e:
+            logger.warning(f"[MainWidget] 恢复延迟队列失败: {e}")
+
+    def _load_ui_plugins_step(
+        self, plugin_dirs, idx: int, loaded: int, on_done=None, frame_spent: float = 0.0, yield_at: float = 0.0
+    ):
         """分帧装载 UI 插件：单帧累计装载耗时超预算时让出事件循环一帧
 
         装载顺序不变；快插件（几十 ms）在同一帧内连续跑完不产生额外调度，
         累计耗时达 _UI_PLUGIN_FRAME_BUDGET_MS 才让帧，把连续数秒的主线程
         冻结切成可响应碎片的同时，避免逐个插件让帧的调度间隙。
+
+        [PERF] yield_at：上一次让帧的时刻。让帧后到本帧之间的间隔等于主线程被其他
+        任务（延迟队列里的主题刷新/服务商预热/warmup 等）占用的时间——它不会出现在
+        任何「本帧累计」里，却直接拉长用户感知的启动时长，超 500ms 必须能指名。
         """
         if idx >= len(plugin_dirs):
             if loaded > 0:
                 logger.info(f"[MainWidget] Loaded {loaded}/{len(plugin_dirs)} UI plugins")
+            self._release_deferred_after_plugin_load()
             self._release_welcome_build_hold()
             if on_done:
                 on_done()
             return
 
         name, path = plugin_dirs[idx]
+        if yield_at > 0:
+            wait_ms = (time.perf_counter() - yield_at) * 1000
+            if wait_ms >= 500:
+                logger.warning(
+                    f"[MainWidget] UI 插件装载让帧后等待 {wait_ms:.0f}ms（下一个: {name}，idx={idx}），"
+                    f"主线程被其他启动任务占用"
+                )
         t0 = time.perf_counter()
         ok = False
         try:
@@ -4080,7 +4164,13 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info(
                 f"[MainWidget] UI 插件 {name} 装载耗时 {cost_ms:.0f}ms（本帧累计 {frame_spent:.0f}ms，让出事件循环）"
             )
-            QTimer.singleShot(0, lambda: self._safe_timer_call(next_call))
+            yield_mark = time.perf_counter()
+            QTimer.singleShot(
+                0,
+                lambda: self._safe_timer_call(
+                    lambda: self._load_ui_plugins_step(plugin_dirs, idx + 1, loaded, on_done, 0.0, yield_mark)
+                ),
+            )
         else:
             next_call()
 
@@ -7765,6 +7855,89 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_card_manager"):
             self._card_manager.hide_card("model_selector", self._window_id)
 
+    def _follow_session_model(self, messages) -> None:
+        """加载历史会话后跟随该会话最后使用的模型。
+
+        来源：倒序扫 assistant 消息，取第一条带 model_name 的（与团队恢复
+        `_apply_model_selection_to_window` 同源口径）。解析到可用服务商配置
+        后切到该模型；解析不到（模型已被删除 / 服务商已移除）时保持当前
+        窗口选择不动。
+
+        只改窗口实例态，不走 `_on_model_selected_from_popup` —— 后者会
+        save=True 把全局默认模型也改成历史模型，污染新窗口的默认选择。
+
+        窗口初始化早期 `_valid_configs` 尚未加载（启动恢复会话早于延迟
+        1500ms 的 `_load_model_configs`），此时暂存待补，由
+        `_load_model_configs` 末尾补应用。
+        """
+        if not isinstance(messages, list) or not messages:
+            return
+        model_name = ""
+        provider_hint = ""
+        config_id = ""
+        for msg in reversed(messages):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            if msg.get("model_name"):
+                model_name = str(msg["model_name"])
+                provider_hint = str(msg.get("provider_name") or "")
+                config_id = str(msg.get("config_id") or "")
+                break
+        if not model_name:
+            return
+        if not self._valid_configs:
+            self._pending_model_restore = (model_name, provider_hint, config_id)
+            return
+        target = self._resolve_history_model_target(model_name, provider_hint, config_id)
+        if not target:
+            return
+        if target == (self._current_provider_name, self._current_model_name):
+            return  # 已经是该模型，不重复刷新（余额/套餐/圆环刷新的副作用不必要）
+        self._current_provider_name, self._current_model_name = target
+        # 会话自带的模型选择不应被云端配置同步覆盖（与团队恢复路径同语义）
+        self._user_manually_selected_model = True
+        self._update_model_selector_btn()
+        self._refresh_context_usage_indicator()
+
+    def _resolve_history_model_target(
+        self, model_name: str, provider_hint: str = "", config_id: str = ""
+    ) -> Optional[tuple]:
+        """把历史消息里的模型元数据解析成 (config_id, model_name)。
+
+        匹配优先级：config_id 直查（UUID 最精确，改名换服务商都不失效）→
+        provider_name / display_name 反查 → 模型名唯一匹配（「模型名称」或
+        「模型列表」命中，多匹配视为不明确放弃）。解析不到返回 None。
+        """
+        valid = self._valid_configs
+        if not valid or not model_name:
+            return None
+        # 1) config_id 直查
+        if config_id and config_id in valid:
+            return config_id, model_name
+        # 2) provider_name / display_name 反查（历史消息存的是 display_name）
+        if provider_hint:
+            cid = self._resolve_service_provider(provider_hint)
+            if cid:
+                return cid, model_name
+        # 3) 模型名唯一匹配
+        matched = None
+        for cid, info in valid.items():
+            model_list = info.get("模型列表") or []
+            if isinstance(model_list, str):
+                try:
+                    import ast
+
+                    model_list = ast.literal_eval(model_list) or []
+                except Exception:
+                    model_list = []
+            if info.get("模型名称") == model_name or model_name in model_list:
+                if matched is not None:
+                    return None  # 多匹配不明确，不切换
+                matched = cid
+        if matched:
+            return matched, model_name
+        return None
+
     def _on_footer_model_label_clicked(self, model_name: str, config_id: str = ""):
         """用户点击消息卡片页脚的模型标签 — 按 UUID 精确切换到对应服务商和模型"""
         if not config_id or config_id not in self._valid_configs:
@@ -8968,7 +9141,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 and self.isVisible()
                 and not getattr(self, "_welcome_render_pending", False)
             ):
-                self._show_initial_welcome()
+                # [PERF] 首次欢迎卡（本窗口从未渲染过）改走交错调度：
+                # 新建标签页时 _on_tab_selected 会先触发本方法（此刻会话还没建），
+                # 同步建卡后紧接着的 _create_new_session 入口又会 invalidate 重健，
+                # 真机上等于白付一次 QWebEngineView 创建（100~500ms 主线程）+ 一次
+                # deleteLater。改走 _schedule_initial_welcome：pending 守卫把
+                # 「选中刷新」与「新建会话后的调度」合并成一次渲染。
+                if getattr(self, "_welcome_rendered_once", False):
+                    self._show_initial_welcome()
+                else:
+                    self._schedule_initial_welcome()
         # 3. Tab 模式广播其他窗口
         if broadcast:
             self._broadcast_history_data_changed()
@@ -8978,7 +9160,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         遍历 TabManagerWindow._windows，跳过自身与已销毁窗口。仅广播不刷新本窗口
         （本窗口刷新由调用方完成），避免递归。
+
+        [PERF] 下一拍去抖合并：一次「新建会话 / 切换会话」在同一事件循环批次内
+        会连续触发多次变更通知（保存、创建、切页选中），每次广播都要遍历全部
+        标签页窗口，接收方各自刷新历史页 + 软更新欢迎卡（实测 2~10ms/窗，
+        5 窗时同步段 30~60ms）。标签页越多，新建对话越慢。合并到下一拍执行
+        一次即可——数据此时已落库，UI 刷新晚一个事件循环无可见差异。
         """
+        if getattr(self, "_history_broadcast_pending", False):
+            return
+        self._history_broadcast_pending = True
+        QTimer.singleShot(0, lambda: self._safe_timer_call(self._flush_history_broadcast))
+
+    def _flush_history_broadcast(self):
+        """执行去抖合并后的跨窗口广播（_broadcast_history_data_changed 的落地段）"""
+        self._history_broadcast_pending = False
+        if getattr(self, "_is_destroyed", False):
+            return
         try:
             tm = TabManagerWindow.get_instance()
             if tm is None:
@@ -10077,7 +10275,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 前收到 EV 派发 refresh_style，随后又被框架重刷覆盖一遍 → 双刷。
         # 先框架后派发，插件卡一次刷在最终主题态上。
         # 铁律：仍居全局段（先于 per-window 循环）、无条件 publish（勿加 scope 过滤）
+        ThemeRefreshCoordinator.timer_start("ev_publish")
         theme_manager.on_theme_changed()
+        ThemeRefreshCoordinator.timer_end("ev_publish")
         ThemeRefreshCoordinator.timer_end("global")
 
         # ── Per-window：所有窗口执行样式更新 ──
@@ -10101,8 +10301,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 # P5b：记录待刷 scope，切回 tab 补刷时精确执行（V2 方案 A）
                 win._theme_needs_refresh_scope = final_scope
                 continue
+            _wid = win.__dict__.get("_window_id", "?")
             try:
+                ThemeRefreshCoordinator.timer_start(f"win-{_wid}")
                 win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
+                ThemeRefreshCoordinator.timer_end(f"win-{_wid}")
                 win._theme_needs_refresh = False
             except Exception as e:
                 logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
@@ -10122,6 +10325,12 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning(f"[batched theme refresh] TabManagerWindow: {e}")
 
         ThemeRefreshCoordinator.timer_end("batched_total")
+        # 超过阈值就自动打一条 warning 摘要（不依赖 DRIFOX_DEBUG_THEME_PERF）：
+        # 主题切换慢的时候用户不会记得开环境变量，慢路径必须自己留证据。
+        try:
+            ThemeRefreshCoordinator.dump_slow()
+        except Exception:
+            pass
 
     def _on_providers_config_changed(self):
         """服务商配置变更时的回调（多窗口同步）
@@ -10617,11 +10826,17 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[HotReload] UI 插件列表已刷新")
 
     def _safe_refresh(self, widget, method_name: str = "refresh_style") -> None:
-        """周期内刷新去重：同一 widget 的同名刷新方法每周期只调一次。
+        """周期内刷新去重 + 隐藏门控：同一 widget 的同名刷新方法每周期只调一次。
 
         5a（颜色）与 5b（字体）块对同一批浮动卡片的 refresh_style 重复调用
         是已知冗余（setStyleSheet 解析 + 向下传播非免费）。周期集合在
         _apply_runtime_ui_settings 入口重置。
+
+        [PERF] 隐藏门控：仅在 widget **类上实现了 `_theme_needs_refresh`
+        协议**时生效（协议语义 = 该卡自带显示期补刷链路，如 CardContainer
+        的 showEvent、LLMSettingsCard 的 showEvent）。隐藏卡用户看不见，
+        刷新纯属白付；置脏后由补刷链路自愈。无协议的卡保守照刷，避免
+        主题更新永久丢失。
         """
         if widget is None or not hasattr(widget, method_name):
             return
@@ -10629,10 +10844,31 @@ class OpenAIChatToolWindow(ToolWindow):
         if key in self._refreshed_in_cycle:
             return
         self._refreshed_in_cycle.add(key)
+        if method_name == "refresh_style" and hasattr(type(widget), "_theme_needs_refresh"):
+            try:
+                if not widget.isVisible():
+                    widget._theme_needs_refresh = True
+                    return
+            except RuntimeError:
+                return  # C++ 对象已销毁
+        import time as _time
+
+        _t0 = _time.perf_counter()
         try:
             getattr(widget, method_name)()
         except Exception as e:
             logger.warning(f"[theme refresh] {type(widget).__name__}.{method_name}: {e}")
+        else:
+            # 打周期标：跨链去重（见 _apply_runtime_ui_settings 的 begin_refresh_cycle）
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            try:
+                widget._last_theme_refresh_cycle = ThemeRefreshCoordinator.get_refresh_cycle()
+            except Exception:
+                pass  # C++ 已销毁或其他异常：打标失败不影响刷新结果
+            _ms = (_time.perf_counter() - _t0) * 1000
+            if _ms >= 25:
+                self._slow_refresh_cards.append(f"{type(widget).__name__}={_ms:.0f}ms")
 
     def _safe_refresh_tooltips(self) -> None:
         """refresh_all_tooltips 的周期内去重（主题块与字体块各有一处调用）。"""
@@ -10693,6 +10929,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 是已知冗余；set/flag 在每次进入本方法时重置，即一个刷新周期） ──
         self._refreshed_in_cycle: set = set()
         self._tooltips_refreshed_in_cycle = False
+        # 慢卡打点（_safe_refresh 累计，5b 结束后汇总输出；常驻但只在慢时落日志）
+        self._slow_refresh_cards: list = []
+        # 跨链去重周期号：同一张卡被 5a 刷过后，GlobalCardController 等后续
+        # 链路（TabManagerWindow._on_theme_changed）靠它跳过重复刷新
+        ThemeRefreshCoordinator.begin_refresh_cycle()
 
         # ── 0. 按需扫描 widget 树，按类型缓存 ──
         # [PERF] 单次 findChildren(QWidget) 全树遍历 + isinstance 分类，
@@ -10740,18 +10981,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 对话框背景完全透明，由外层容器兜底，不叠加独立背景层。
             # [T15] 同串短路：主题切换循环内多次进入，同串重写无谓 repolish
+            ThemeRefreshCoordinator.timer_start("self_qss")
             set_style_sheet_if_changed(self, "background: transparent;")
+            ThemeRefreshCoordinator.timer_end("self_qss")
             self.setAutoFillBackground(False)
 
             # 分支标签
+            ThemeRefreshCoordinator.timer_start("branch_chip")
             if hasattr(self, "_project_label"):
                 self._refresh_project_branch_style()
 
             # 分支标签（git worktree）
             if hasattr(self, "_update_branch"):
                 self._update_branch()
+            ThemeRefreshCoordinator.timer_end("branch_chip")
 
             # 时间线节点
+            ThemeRefreshCoordinator.timer_start("rings")
             if hasattr(self, "node_preview") and hasattr(self.node_preview, "refresh_theme"):
                 self.node_preview.refresh_theme()
 
@@ -10760,6 +11006,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 ring = getattr(self, ring_attr, None)
                 if ring and hasattr(ring, "refresh_theme"):
                     ring.refresh_theme()
+            ThemeRefreshCoordinator.timer_end("rings")
 
             # 消息卡片主题（per-card 隔离：单卡 refresh_theme 异常不得中断
             # 后续刷新项——2026-09-06 NameError 曾致同窗口输入框/设置弹窗卡片
@@ -10777,10 +11024,14 @@ class OpenAIChatToolWindow(ToolWindow):
             ThemeRefreshCoordinator.timer_end("msg_cards")
 
             # 自绘 hover tooltip 主题刷新（周期内去重，见 _safe_refresh_tooltips）
+            ThemeRefreshCoordinator.timer_start("tooltips")
             self._safe_refresh_tooltips()
+            ThemeRefreshCoordinator.timer_end("tooltips")
 
             # 输入区插件按钮图标随主题切换（浅色/深色图标）
+            ThemeRefreshCoordinator.timer_start("plugin_icons")
             self._refresh_plugin_input_button_icons()
+            ThemeRefreshCoordinator.timer_end("plugin_icons")
 
         # ── 2. 字体相关块（font_family + font_size + 全量） ──
         if is_font:
@@ -10885,6 +11136,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 避免数百次 setStyleSheet 重复设置相同颜色样式（实测 ~30ms 纯浪费）。
         if is_color:
             # ── 5a. 颜色相关公共块（仅主题/深浅变化时执行） ──
+            ThemeRefreshCoordinator.timer_start("cards_5a")
             # 窗口标题栏
             title_bar = self.get_title_bar()
             if hasattr(title_bar, "refresh_style"):
@@ -11001,8 +11253,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 样式由插件页自身 refresh_style 负责（宿主不再持有卡片引用）
             # 工具控制卡片
             self._safe_refresh(getattr(self, "_tool_control_card", None))
+            ThemeRefreshCoordinator.timer_end("cards_5a")
 
         # ── 5b. 字体相关公共块（颜色或字体变化时都执行） ──
+        ThemeRefreshCoordinator.timer_start("cards_5b")
         # 内嵌 font_size_css / get_font_family_css 的浮动卡片：
         #   - 5a/5b 通过 _safe_refresh 周期内自动去重，5b 跳过 5a 已刷卡片
         #   - 字体变化：5a 不走 → 这里补一次刷新，否则字号/字族切换时
@@ -11038,6 +11292,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_settings_btn_icon"):
             self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
 
+        ThemeRefreshCoordinator.timer_end("cards_5b")
+        if self._slow_refresh_cards:
+            logger.warning(f"[theme refresh] 慢刷新卡: {' '.join(self._slow_refresh_cards)}")
+            self._slow_refresh_cards.clear()
         ThemeRefreshCoordinator.timer_end("total")
 
     def _refresh_floating_cards_font_style(self):
@@ -11166,6 +11424,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._update_model_selector_btn()
         self._refresh_context_usage_indicator()
+        # 启动恢复历史会话早于本方法：暂存的历史模型在配置就绪后补应用
+        # （否则 _valid_configs 为空时无法解析 → 静默不切换）。
+        if self._pending_model_restore:
+            _pending = self._pending_model_restore
+            self._pending_model_restore = None
+            # 配置就绪前用户已手动选过模型 → 以用户选择为准，丢弃待补
+            if not getattr(self, "_user_manually_selected_model", False):
+                self._follow_session_model(
+                    [
+                        {
+                            "role": "assistant",
+                            "model_name": _pending[0],
+                            "provider_name": _pending[1],
+                            "config_id": _pending[2],
+                        }
+                    ]
+                )
 
     def _load_agent_list(self):
         """加载智能体列表到按钮组（仅显示 primary agents）"""
@@ -11597,10 +11872,39 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 流式中跳过（wid={self._window_id}）")
             return
         _cur = self.session_manager.get_current_session() if getattr(self, "session_manager", None) else None
+        # 🛡️ hook 注入消息（_hook_event 标记，如 SessionStart/插话）不算「用户已发言」，
+        # 否则团队成员窗口 create_session 同步注入 SessionStart hook 消息 → 欢迎卡永不渲染。
+        # TeamMail 例外：任务邮件是真实用户问题（R6/R7 既定语义），mail-only 会话须渲染对话。
         if _cur is not None and any(
-            m.get("role") in ("user", "assistant") for m in (getattr(_cur, "messages", None) or [])
+            m.get("role") in ("user", "assistant")
+            and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+            for m in (getattr(_cur, "messages", None) or [])
         ):
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 会话已有消息，跳过（wid={self._window_id}）")
+            # 🛡️ 兜底（2026-10-29）：守卫合法拦截（会话确有真消息）≠ 主区域有内容。
+            # 迟到的 welcome 槽位可能晚于首轮对话渲染，此前只 return 会留下空白主区域。
+            # 走会话渲染汇聚点 _display_current_session()（内部含前置序列与产物刷新），
+            # 不内联、不裸调 _load_message_batch。
+            # _welcome_fallback_busy 防重入（_display_current_session 空 batch 分支会
+            # 回调本方法，虽与守卫同口径下不可达，仍硬防）；_displayed_session_id 已是
+            # 本会话 = 已渲染过，迟到槽位直接放弃，防重复重建。
+            if getattr(self, "_welcome_fallback_busy", False) or self._displayed_session_id == _cur.session_id:
+                return
+            self._welcome_fallback_busy = True
+            try:
+                logger.debug(
+                    f"[OpenAIChatToolWindow] _show_initial_welcome: 兜底渲染会话（wid={self._window_id}）"
+                )
+                self._display_current_session()
+            except Exception as e:  # noqa: BLE001
+                # 🛡️ 异常防护（2026-10-29 T7）：兜底调用方无 try 保护（如
+                # _notify_history_data_changed），异常若直达 PyQt5 事件循环会
+                # 触发 qFatal 进程 abort。对齐本函数 OK 路径口径：记 warning 不外泄。
+                logger.warning(
+                    f"[OpenAIChatToolWindow] _show_initial_welcome 兜底渲染失败（wid={self._window_id}）: {e}"
+                )
+            finally:
+                self._welcome_fallback_busy = False
             return
         if getattr(self, "_welcome_build_hold", False):
             self._welcome_hold_pending = True
@@ -12209,6 +12513,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
             if batch_idx >= len(self._message_batch) or not self._message_batch[batch_idx]:
                 continue
+            # [T29] 活性守卫：dict 里的占位 wrapper 可能已被 deleteLater 析构，
+            # 对已删除 C++ 对象调 indexOf 会抛 RuntimeError，进而中断整轮重建。
+            if not self._is_widget_alive(ph):
+                continue
             anchor = self.chat_layout.indexOf(ph)
             if anchor < 0:
                 continue
@@ -12308,6 +12616,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 ph = self._batch_placeholders.get(batch_idx)
                 if ph is None:
                     # 占位安装失败的批次高度为 0，视口不会落在其上
+                    continue
+                # [T29] 活性守卫（本函数头号根因点）：占位 wrapper 被 deleteLater
+                # 析构后仍留在 dict 里，indexOf 对已删 C++ 对象抛 RuntimeError →
+                # 整轮回收被异常中断 → 离屏卡片永不回收 → WebEngine renderer 堆积。
+                # 范式与下方回收段 `_is_widget_alive(card)` 一致。
+                if not self._is_widget_alive(ph):
                     continue
                 anchor = self.chat_layout.indexOf(ph)
                 if anchor < 0:
@@ -13461,6 +13775,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.TOP_RIGHT,
             )
 
+    # [PERF] 同进程 GC 钩子最小间隔：gc.collect() 全代回收在对象图大时
+    # 实测 100ms+ 主线程停顿（加载历史会话 profile：gc.collect 118ms）。
+    # 原实现每次清空聊天区（新建/切换会话都走）后 150ms 必回收一次，
+    # 连续新建多个标签页 = 连续卡顿。改为 15s 窗口内至多一次：LRU/渲染
+    # 缓存清理不受影响（_cleanup_global_lru_caches 在切换路径同步执行），
+    # 只是堆回收延后，对象暂留十几秒无功能影响。
+    _GC_HOOK_MIN_INTERVAL_S = 15.0
+
     def _schedule_gc_hook(self):
         """GC 钩子（T9）：防抖合并触发全局缓存清理 + 堆回收。
 
@@ -13469,6 +13791,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if memory_governor._gc_hook_pending:
             return
+        now = time.monotonic()
+        if now - getattr(memory_governor, "_last_gc_hook_at", 0.0) < self._GC_HOOK_MIN_INTERVAL_S:
+            return
+        memory_governor._last_gc_hook_at = now
         memory_governor._gc_hook_pending = True
         QTimer.singleShot(150, memory_governor._run_gc_hook)
 
@@ -15320,6 +15646,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 使用辅助函数初始化
         init_after_loading_session(self, restored, session_id, title, self.backend)
 
+        # 跟随该会话最后使用的模型（解析不到则不切，保持当前窗口选择）
+        self._follow_session_model(messages)
+
         # 如果会话有自己的项目，显示在标题上；默认项目跟随更新（下次启动落在该会话项目）
         session_project = session_record.get("project", "默认项目") or "默认项目"
         self._current_project = session_project
@@ -15791,6 +16120,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return False
         ph = self._batch_placeholders.get(batch_idx)
         if ph is None:
+            return False
+        # [T29] 活性守卫：同 _recycle/_restore 两处，已析构占位不可访问。
+        if not self._is_widget_alive(ph):
             return False
         anchor = self.chat_layout.indexOf(ph)
         if anchor < 0:
@@ -16267,9 +16599,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 静默失效（加载停在消息列表中间的根因），故只允许复位不允许置位。
         if self._is_view_at_bottom() or self._loading_session:
             self._user_intentionally_away_from_bottom = False
-        elif not self._loading_session and self._programmatic_scroll_depth <= 0:
-            # 只有「非程序滚动导致的离底」才算用户意图。程序置底/补偿落点落后
-            # 不在此列，否则 away 一旦误置便无人复位（value 不再变化 → 无信号）。
+        elif (
+            not self._loading_session
+            and self._programmatic_scroll_depth <= 0
+            and self._has_recent_user_scroll_input()
+        ):
+            # 只有「真实用户输入导致的离底」才算用户意图。
+            # - 程序置底 / 补偿落点落后：由 `_programmatic_scroll` 豁免；
+            # - Qt 自发的 value 变化（切回标签页重算上界、分栏 / 宽度重排、
+            #   卡片收缩钳制）：没有滚轮 / 拖动 / 键盘输入，一律不算 —— 旧判据
+            #   把它们记成「用户滚离底部」，away 随后只能在「再次 valueChanged
+            #   且贴底」时复位，后台标签页里这两种事件都可能不再发生 → 标志
+            #   永久卡死，切回后校准被 `_should_follow_bottom()` 静默拦下。
             self._user_intentionally_away_from_bottom = True
             # [T29 B1] 用户已明确滚离 → 取消挂起的程序置底请求。否则「点击发送 /
             # 切会话」排入的 _scroll_bottom_timer（50ms）仍会在用户上滚后触发
@@ -16287,6 +16628,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 滚动时复用单个防抖定时器，避免堆积大量 singleShot 回调
         self._scroll_sync_timer.stop()
         self._scroll_sync_timer.start()
+        self._scroll_diag("scroll-changed", throttle=0.2)
 
     def _truncate_session_from_user_round(self, round_index: int, card: MessageCard = None) -> bool:
         """
@@ -16431,6 +16773,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 删除未生效（round_index 失效 / 卡片不在布局中）时不入栈，避免"幽灵条目"
         if entry is None or not session or len(session.messages) >= before_len:
+            # 🛡️ 幽灵插话卡（session 无对应消息）兜底：删除语义 = 移除 UI 卡片 +
+            # 摘除队列中尚未被 worker 消费的插话条目，不回填输入框。
+            # 不处理的后果：卡片删了但队列残留 → 下一个 worker 当新插话消费 →
+            # 消息复活 + 与重发消息形成两张卡片（2026-10-29）。
+            ghost_text = card.get_plain_text()
+            if ghost_text and getattr(card, "_interject_pending", False):
+                backend = self._safe_instance_attr(self, "backend")
+                withdraw = getattr(backend, "withdraw_interject", None)
+                if callable(withdraw):
+                    try:
+                        withdraw(ghost_text)
+                    except Exception as e:
+                        logger.warning(f"[DELETE] 摘除队列插话失败: {e}")
+                self._interject_withdrawn_texts.add(ghost_text)
+                if self._remove_interject_ghost_card(ghost_text):
+                    logger.info("[DELETE] 幽灵插话卡片已移除（session 无对应消息）")
+                return
             if entry is not None:
                 logger.warning("[DELETE] 删除未改变会话内容，跳过撤销条目入栈")
             return
@@ -18149,6 +18508,44 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[_on_code_action] 异常: {e}")
 
+    def _scroll_diag(self, tag: str, delta: int = 0, throttle: float = 0.0) -> None:
+        """滚动贴底诊断快照（DRIFOX_SCROLL_DIAG=1 时输出，默认零成本）。
+
+        只在真机才复现的欠收敛上用：一条日志同时给出「滚动条上界 / 已落地底 /
+        容器实际高度 / sizeHint / 视口高 / 跟随态 / away」，可区分三类现场——
+          ① max 高但 landed 低：布局滞后，贴底值被 landed 卡住；
+          ② landed 高但 value 低：贴底动作没执行（被 away / 锁 / 窗口关掉）；
+          ③ value 已贴 landed，但 landed 本身小于视觉内容底：口径问题。
+        throttle 按 tag 独立计时，避免用户滚动时刷屏。
+        """
+        if not SCROLL_DIAG:
+            return
+        now = time.monotonic()
+        if throttle > 0:
+            ts_map = getattr(self, "_scroll_diag_ts_map", None)
+            if ts_map is None:
+                ts_map = {}
+                self._scroll_diag_ts_map = ts_map
+            if now - ts_map.get(tag, 0.0) < throttle:
+                return
+            ts_map[tag] = now
+        try:
+            area = self.chat_scroll_area
+            sb = area.verticalScrollBar()
+            container = area.widget()
+            logger.info(
+                f"[scroll-diag] {tag} value={sb.value()} max={sb.maximum()} "
+                f"landed={self._landed_bottom_value()} "
+                f"container_h={container.height() if container is not None else -1} "
+                f"hint={container.sizeHint().height() if container is not None else -1} "
+                f"vp={area.viewport().height()} follow={self._should_follow_bottom()} "
+                f"away={self._user_intentionally_away_from_bottom} "
+                f"depth={self._programmatic_scroll_depth} ab={self._ensure_ab_active} "
+                f"sticky={max(0.0, self._bottom_anchor_deadline - now):.2f} delta={delta}"
+            )
+        except Exception:  # noqa: BLE001 — 诊断不得影响滚动主链
+            pass
+
     def _is_view_at_bottom(self, tolerance: int = AT_BOTTOM_TOLERANCE) -> bool:
         """视口是否贴在底部（全项目唯一权威判定）。
 
@@ -18516,6 +18913,7 @@ class OpenAIChatToolWindow(ToolWindow):
             scroll_bar.setValue(self._landed_bottom_value())
             # 再次设置确保卡片高度变化后仍在底部
             scroll_bar.setValue(self._landed_bottom_value())
+        self._scroll_diag("do-scroll-to-bottom")
         self._pending_scroll_to_bottom = False
         # 🐛 原此处无条件 `self._user_intentionally_away_from_bottom = False`：
         # 任何一次程序置底都会清空用户的「我在读历史」意图，于是守卫形同虚设
@@ -18557,6 +18955,7 @@ class OpenAIChatToolWindow(ToolWindow):
             retries = 2 if STREAM_BOTTOM_EVENT_DRIVEN else 8
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         self._sync_scroll_maximum()
+        self._scroll_diag("ensure-at-bottom")
         if not self._is_view_at_bottom():
             with self._programmatic_scroll():
                 # 贴已落地底：判定仍用预抬上界（欠贴 → 继续重试），贴则只贴
@@ -18590,6 +18989,84 @@ class OpenAIChatToolWindow(ToolWindow):
         chat_area_module.build 两分支各自收尾时调用本方法，互斥不重入。
         """
         self.chat_scroll_area.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
+        self._wire_user_scroll_input()
+
+    def _wire_user_scroll_input(self):
+        """把「真实用户滚动输入」接入 away 状态机（幂等）。
+
+        away 置位只认这条链（见 `_on_scroll_changed`）：
+        - 滚轮 / 触控板：Wheel 事件。qfw 平滑滚动把一次滚轮拆成 400ms 内
+          逐拍发给**内置条**的合成 Wheel；
+        - 拖滑块 / 点页槽 / 键盘翻页：QAbstractSlider.actionTriggered
+          （程序 `setValue` 不触发本信号）。
+
+        背景：旧判据是「非程序的 valueChanged = 用户滚动」。Qt 自己也会挪
+        value（切回标签页重算上界、分栏 / 宽度重排、卡片收缩钳制），一次
+        误判就置位 away，而 away 只能靠「再次 valueChanged 且贴底」复位
+        —— 后台标签页里这两种事件都可能不再发生，标志永久卡死。
+        """
+        if getattr(self, "_user_scroll_input_wired", False):
+            return
+        try:
+            bar = self.chat_scroll_area.verticalScrollBar()
+            bar.installEventFilter(self)
+            bar.actionTriggered.connect(self._on_scroll_action_triggered)
+            # viewport 也要装：高精度滚轮（触控板 / delta 非 120 倍数）在 qfw
+            # 里走 QAbstractScrollArea.wheelEvent 直接落到内置条，**不经**内置条
+            # 的事件过滤器（探针实测 filter 命中 0），只有发给 viewport 的那次
+            # Wheel 能被过滤到。
+            self.chat_scroll_area.viewport().installEventFilter(self)
+            vbar = getattr(self.chat_scroll_area, "vScrollBar", None)
+            if vbar is not None:
+                vbar.installEventFilter(self)
+                vbar.actionTriggered.connect(self._on_scroll_action_triggered)
+                vbar.sliderPressed.connect(self._on_scroll_slider_pressed)
+                vbar.sliderReleased.connect(self._on_scroll_slider_released)
+            self._user_scroll_input_wired = True
+        except (AttributeError, RuntimeError):
+            # 装配期对象未就绪 / 桩实例：留待下次调用重试
+            return
+
+    def _mark_user_scroll_input_if_scroll_bar(self, obj, include_viewport: bool = True) -> None:
+        """eventFilter 归属过滤：只有本窗口聊天滚动区收到的输入才算。"""
+        try:
+            area = self.chat_scroll_area
+        except (AttributeError, RuntimeError):
+            return
+        try:
+            if (
+                obj is area.verticalScrollBar()
+                or obj is getattr(area, "vScrollBar", None)
+                or (include_viewport and obj is area.viewport())
+            ):
+                self._mark_user_scroll_input()
+        except RuntimeError:
+            return
+
+    def _mark_user_scroll_input(self, hold_ms: int = 600) -> None:
+        """记录一次真实用户滚动输入，`hold_ms` 内到达的 valueChanged 都算意图。
+
+        600ms 覆盖平滑滚动的 400ms 尾段；连续滚轮会逐拍续期。
+        """
+        self._user_scroll_input_until = time.monotonic() + hold_ms / 1000.0
+
+    def _has_recent_user_scroll_input(self) -> bool:
+        try:
+            until = self._user_scroll_input_until
+        except (AttributeError, RuntimeError):
+            return False
+        return until > 0.0 and time.monotonic() < until
+
+    def _on_scroll_action_triggered(self, _action: int) -> None:
+        """滚动条 action 触发 = 键盘翻页 / 点页槽 / 拖滑块等真实交互。"""
+        self._mark_user_scroll_input()
+
+    def _on_scroll_slider_pressed(self) -> None:
+        # 拖动期间 value 持续变化且时长不可控，按长窗口续期（松手后收回 600ms）
+        self._mark_user_scroll_input(hold_ms=10_000)
+
+    def _on_scroll_slider_released(self) -> None:
+        self._mark_user_scroll_input()
 
     def _on_scroll_range_changed(self, _mn: int, _mx: int):
         """rangeChanged 事件驱动的贴底跟随（P1 步骤6）。
@@ -18620,6 +19097,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._should_follow_bottom():
             with self._programmatic_scroll():
                 self.chat_scroll_area.verticalScrollBar().setValue(self._landed_bottom_value())
+        self._scroll_diag("range-changed")
 
     def _maintain_bottom_anchor(self):
         # 窗口已销毁时跳过：避免 _bottom_anchor_timer 回调在 closeEvent 之后
@@ -18640,6 +19118,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # sticky 路径（_do_scroll_to_bottom else 分支）同款的
             # _ensure_at_bottom 兜底窗口；away 守卫保证不打扰用户主动阅读。
             QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
+            self._scroll_diag("anchor-expired", throttle=1.0)
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         # 🐛 原此处直接 setValue(scroll_bar.maximum())：卡片 setFixedHeight 后 Qt
@@ -18650,6 +19129,7 @@ class OpenAIChatToolWindow(ToolWindow):
         with self._programmatic_scroll():
             scroll_bar.setValue(self._landed_bottom_value())
         self._bottom_anchor_timer.start()
+        self._scroll_diag("anchor")
 
     def _on_message_card_height_changed(self, _height: int):
         """卡片高度变化时的滚动处理
@@ -18686,6 +19166,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 代价：非跟随态下跨视口顶部的折叠框展开不再补偿，会有一次性位移。
         try:
             delta = int(getattr(sender, "_last_height_delta", 0) or 0)
+            _diag_delta = delta
             # 增量是一次性令牌：读取即清零。否则后续任何一次 heightChanged
             # （如动画结束回调）都会把同一个 delta 再补偿一遍 → 视口累加漂移。
             sender._last_height_delta = 0
@@ -18775,7 +19256,7 @@ class OpenAIChatToolWindow(ToolWindow):
         #   - 用户明确滚离 → 不跟随，位置保持
         # is_last_card 只影响「初始加载完成必须到底」这一类一次性场景，同样纳入守卫，
         # 因为「用户正在读历史时又有新卡片渲染完成」不应当抢走视口。
-        # 🐛 卡片内阅读守卫：用户在 WebEngine 内部（正文/工具区/坞态正文）上滚
+        # 🐛 卡片内阅读守卫：用户在 WebEngine 内部（正文/工具区）上滚
         # 阅读时 Qt 滚动条纹丝不动，away 守卫对此失明。若不拦，流式中每次高度
         # 变化（chunk 增高/工具块注入）都走下面的滚底 → 卡片被钉回「底部对齐」
         # 姿态 → 正文视口每拍被推回同一固定位置。
@@ -18785,6 +19266,11 @@ class OpenAIChatToolWindow(ToolWindow):
         elif self._is_view_at_bottom() and not _reading_inside:
             # 视口已经在底部附近 → 补一次滚底，吸收卡片高度增量（阈值统一）
             self._scroll_to_bottom()
+        self._scroll_diag(
+            "card-height",
+            delta=_diag_delta,
+            throttle=0.2,
+        )
         sender._content_just_loaded = False
 
     def handle_recommended_question(self, content: str, action: str):
@@ -18875,6 +19361,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
             restored = create_session_from_record(session_record, messages, title)
             init_after_loading_session(self, restored, session_id, title, self.backend)
+            # 跟随该会话最后使用的模型（解析不到则不切，保持当前窗口选择）
+            self._follow_session_model(messages)
             self._release_inactive_session_messages()
             # 同步项目；默认项目跟随更新（下次启动落在该会话项目）
             session_project = session_record.get("project", "默认项目") or "默认项目"
@@ -19823,6 +20311,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 break
             widgets_to_remove.append(w)
         delete_widgets_from_layout(widgets_to_remove, self.chat_layout)
+        # 🛡️ 队列里的同一插话必须一并摘除：中止时 worker 可能仍卡在工具执行，
+        # 主循环退出不经过取消排空 → 残留条目会被下一个 worker 当新插话消费，
+        # 已撤回消息复活并派生重复用户卡片（2026-10-29 双卡片）。
+        backend = self._safe_instance_attr(self, "backend")
+        withdraw = getattr(backend, "withdraw_interject", None)
+        if callable(withdraw):
+            try:
+                withdraw(text)
+            except Exception as e:
+                logger.warning(f"[Interject] 摘除队列插话失败: {e}")
         self._rebuild_batch_cards_from_layout()
         self._refresh_all_cards_round_index()
         return True
@@ -20141,7 +20639,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 需通过 .viewer 访问。viewer 可能为 None（懒渲染未就绪）。
             _vwr = getattr(self._current_assistant_card, "viewer", None)
             if _vwr is not None:
-                _vwr._schedule_render(immediate=True)
+                # [v2] 正文块已定型：同帧把 live 纯文本尾态正式化（无该方法时退回普通调度）
+                _finalize_cb = getattr(_vwr, "mark_live_tail_finalized", None)
+                if callable(_finalize_cb):
+                    _finalize_cb()
+                else:
+                    _vwr._schedule_render(immediate=True)
 
         # 🐛 修复：在工具启动路径也触发 _maybe_finish_thinking_for_tool，
         # 覆盖 LLM 只输出 reasoning 然后直接调用工具（无 update_tool_streaming）的场景。
@@ -22217,7 +22720,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_assistant_card.set_error_state(True, error_message=error)
             # 🐛 注意顺序：update_content 在 _streaming=False 时会经 start_streaming_anim
             # 重开流式态与坞态，必须在其后强制收尾，否则错误卡片永久停留在
-            # 流式结构（坞态沉底 + 正文限矮）。
+            # 流式结构（工具区限高、不折叠）。
             self._current_assistant_card.update_content(error)
             self._current_assistant_card.finish_streaming(force_dock_off=True)
 
@@ -25357,6 +25860,17 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend.chat_engine:
             self.backend.cancel_streaming()
 
+        # 🛡️ 立即回收 hook 队列里的未消费插话：worker 卡在工具执行时 cancel 只在
+        # 检查点生效，主循环退出不经过 _cancel_with_stop_hook 的队列排空；残留条目
+        # 会被下一个 worker 当新插话消费（2026-10-29 已撤回消息复活 + 双卡片）。
+        # 回收进 stash 后由 _on_finalize_complete 统一回填输入框并删幽灵卡。
+        try:
+            backend = self._safe_instance_attr(self, "backend")
+            if backend is not None:
+                backend.reclaim_pending_interjects()
+        except Exception as e:
+            logger.warning(f"[Interject] 停止链路回收插话失败: {e}")
+
         self._is_streaming = False
         self._set_ai_state("idle")
 
@@ -25373,7 +25887,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._stop_elapsed = None
             self._current_assistant_card.stop_streaming_anim()
             # 🐛 打断路径必须强制归位：worker 已取消，活跃工具结果永不到达，
-            # keep_dock 的兑底归位永不触发 → 坞态永久沉底。
+            # keep_dock 的兑底归位永不触发 → 工具区永久停在流式限高态。
             self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         # 优先显示中止提示，让用户立即感知到操作已生效

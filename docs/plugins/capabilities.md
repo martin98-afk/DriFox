@@ -171,11 +171,17 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 |---|---|---|
 | `session.read` | medium | 当前 session_id 与消息列表 |
 | `session.write` | medium | 消息写回当前会话（入库 + 刷 UI + 发事件） |
-| `session.list` | medium | 历史会话列表与元数据 |
-| `session.manage` | **high** | 新建 / 切换 / 删除会话（破坏性） |
+| `session.list` | medium | 窗口内存会话列表与元数据（`host.session_manager.sessions`） |
+| `session.history` | medium | **持久化**历史会话只读面（列表 / 归档 / 项目聚合 / 按 session_id 定位 / 团队会话查询） |
+| `session.history.write` | **high** | 改写持久化历史（置顶 / 移动项目 / 归档 / 恢复 / 删除 / 导入） |
+| `session.manage` | **high** | 切换 / 新建当前会话（加载历史会话、清空开新会话） |
 | `session.interrupt` | medium | 停止当前流式输出（入队，本轮结束后执行） |
 | `session.new` | medium | 新建会话（入队，停流后执行） |
 | `session.send` | medium | 发消息驱动一轮对话（入队；`ephemeral` 不写会话、不渲染气泡） |
+
+> `session.list` 与 `session.history` 不是一回事：前者是**当前窗口内存里的活跃会话对象**（`host.session_manager.sessions`），后者是 `HistoryManager` 的**跨会话落库记录**（含归档、项目归属、团队 run_id）。取历史面板数据必须用 `session.history`。
+
+> `session.history.write` 的写动作**内部已含宿主联动通知**（历史页刷新 + 欢迎卡片失效 + 跨窗口广播）。插件调完不必再自己调窗口方法。
 
 > `session.interrupt` / `session.new` / `session.send` 是**入队语义**：插件在工具执行期调用只登记动作，主程序在本轮结束（`stream_finished`）后按登记顺序执行。原因：工具跑在 worker 线程，同步停流会杀掉自己所在的 worker。队列按 `window_id` 隔离，拿不到 id 一律拒绝（写操作回退「活跃窗口」会在多窗口同时交接时串窗）。
 
@@ -200,12 +206,26 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `workdir.read` | low | 当前工作目录 |
 | `workdir.write` | medium | 切换工作目录（一次封装：实例缓存 + executor 同步 + 团队广播 + 事件） |
 
-### 外观 / 上下文
+### 项目
+
+| ID | level | 说明 |
+|---|---|---|
+| `project.read` | low | 当前项目名 + 项目清单 + 元数据（会话数 / 工作目录数）+ 根目录映射 |
+| `project.write` | **high** | 切换 / 新建 / 提交 / 归档 / 导入导出 / 打开文件夹 / 拖拽建项目（含团队广播与 Tab 图标联动） |
+| `project.workdir` | medium | **写库式**切换项目工作目录（关键文档登记 + 工作目录持久化 + 根目录标记恢复） |
+
+> `project.write.switch` 内含「切项目 + 同步工作目录 + 新建会话 + 团队广播 + 收起面板」，插件不需要知道其中任何一步。要单独新建会话（不切项目）用 `session.manage.new()`。
+
+> `workdir.write` 与 `project.workdir` 不是一回事：前者只改会话内状态（实例缓存 +
+> tool_executor + 团队广播 + UI 同步），进程重启即失效；后者把改动落进记忆库
+> （关键文档登记 + 工作目录持久化 + 根目录标记恢复）。worktree 切换两者都要调：
+> 先 `project.workdir["switch"](project, path)` 再 `workdir.write(path)`。
+
+### 外观
 
 | ID | level | 说明 |
 |---|---|---|
 | `theme.read` | low | 主题 id / 名称 / 配色 / 字体 / 字号 |
-| `context.compact` | medium | 上下文压缩器 |
 
 ### 工具
 
@@ -244,7 +264,7 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `ui.notify` | low | 弹 InfoBar 通知 |
 | `ui.card.show` | low | 显示浮动卡 |
 | `ui.card.hide` | low | 隐藏浮动卡 |
-| `ui.artifacts.show` | medium | 向消息卡片成果栏推送成果条目（image/video/html/text/file 五类分控件；`show(items, target="latest", call_id="")`，返回投递条目数；`ToolResult.artifacts` 字段是工具插件的免声明通道） |
+| `ui.artifacts.show` | medium | 向消息卡片成果栏推送成果条目（image/video/html/text/file 五类分控件；`show(items, target="latest", call_id="")`，返回投递条目数；多次调用按 `path` 累积不覆盖；`ToolResult.artifacts` 字段是工具插件的免声明通道，随消息落库可在重开会话后恢复） |
 | `ui.exclusive` | medium | 独占 UI 模式 |
 | `ui.dialog` | low | 文件 / 目录选择、确认框、单行输入（跟随主题） |
 
@@ -318,6 +338,7 @@ caps["stream.subscribe"]({
 | `sync.register` | **high** | 把插件数据接入云端同步（数据外发） |
 | `team.read` | low | 团队成员 / 角色 / 运行状态（只读门面，写操作不可见） |
 | `team.send` | medium | 向团队成员派发任务邮件（写对方邮箱） |
+| `team.session` | **high** | 团队历史会话恢复 / 归档 / 进入成员会话（跨窗口开标签页） |
 
 ### 存储
 

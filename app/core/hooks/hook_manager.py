@@ -166,13 +166,15 @@ def trigger_plugin_changed_hook(context: dict) -> None:
         # 无注册 hook 提前跳过（省线程池开销）；快照仍需刷新保持基线新鲜
         # （_hooks 类级共享，检查任一实例即可）
         if "PluginChanged" not in instances[0]._hook_manager._hooks:
-            _compute_plugin_snapshot_diff()
+            invalidate_tools_snapshots_if_changed(_compute_plugin_snapshot_diff())
             return
         if "diff" not in context:
             diff = _compute_plugin_snapshot_diff()
             if diff:
                 context = dict(context)
                 context["diff"] = diff
+        # registry 工具签名变化 → 失效各窗口工具 schema 快照（提示符前缀需重建）
+        invalidate_tools_snapshots_if_changed(context.get("diff"))
         # 附带子动作（tools_added/removed/updated/mcp_*），matcher 可精确匹配
         if context.get("diff") and not context.get("sub_actions"):
             context = dict(context)
@@ -182,6 +184,32 @@ def trigger_plugin_changed_hook(context: dict) -> None:
             executor.submit(inst._hook_manager.trigger_event, "PluginChanged", dict(context))
     except Exception as e:
         logger.debug(f"[HookManager] trigger_plugin_changed_hook failed: {e}")
+
+
+def invalidate_tools_snapshots_if_changed(diff: Optional[dict]) -> None:
+    """registry 工具签名变化 → 失效全部窗口的工具 schema 快照
+
+    判据是 registry 工具签名（_tool_signature = description + parameters 的 hash），
+    **不含实现代码**：改工具实现不触发（prompt cache 不受影响）。
+    只有增删工具、改描述/参数才触发下一次请求重建。
+
+    MCP 启停不参与判定：MCP schema 是聚合时从 _mcp_manager 动态注入的，不在
+    registry；快照已含建立时的 MCP 工具列表，启停后保持一致（需新会话才见变化），
+    前缀不因启停而断。
+    """
+    if not diff:
+        return
+    if not any(diff.get(k) for k in ("tools_added", "tools_removed", "tools_updated")):
+        return
+    try:
+        from app.core.conversation.backend import ChatBackend
+
+        for backend in list(ChatBackend._active_instances):
+            engine = getattr(backend, "chat_engine", None)
+            if engine is not None and hasattr(engine, "invalidate_tools_snapshot"):
+                engine.invalidate_tools_snapshot()
+    except Exception as e:
+        logger.debug(f"[HookManager] 失效工具快照失败: {e}")
 
 
 def _is_ui_thread() -> bool:

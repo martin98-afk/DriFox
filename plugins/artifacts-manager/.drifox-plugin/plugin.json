@@ -12,6 +12,8 @@
   "homepage": "https://github.com/martin98-afk/DriFox",
   "license": "GPL-3.0-or-later",
   "type": "system",
+  "api_version": 2,
+  "capabilities": ["window.current"],
   "components": {
     "ui": true
   }

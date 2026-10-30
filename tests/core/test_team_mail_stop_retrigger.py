@@ -127,6 +127,9 @@ class TestCancelDrainsHookQueue:
 
         worker = SimpleNamespace(tool_executor=tool_executor)
         worker._cancel_with_stop_hook = MethodType(OpenAIChatWorker._cancel_with_stop_hook, worker)
+        worker._reclaim_pending_interjects_on_exit = MethodType(
+            OpenAIChatWorker._reclaim_pending_interjects_on_exit, worker
+        )
         worker._build_response_message_sequence = lambda: []  # partial 为空也执行排空
         worker._trigger_worker_hook = lambda *a, **k: None
         worker._emit_with_callback = lambda *a, **k: None
@@ -147,6 +150,9 @@ class TestCancelDrainsHookQueue:
 
         worker = SimpleNamespace(tool_executor=tool_executor)
         worker._cancel_with_stop_hook = MethodType(OpenAIChatWorker._cancel_with_stop_hook, worker)
+        worker._reclaim_pending_interjects_on_exit = MethodType(
+            OpenAIChatWorker._reclaim_pending_interjects_on_exit, worker
+        )
         worker._build_response_message_sequence = lambda: []
         worker._trigger_worker_hook = lambda *a, **k: None
         worker._emit_with_callback = lambda *a, **k: None

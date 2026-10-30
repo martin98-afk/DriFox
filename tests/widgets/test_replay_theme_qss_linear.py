@@ -12,6 +12,10 @@ setStyleSheet）。改为 `obj.children()` 直接子级 + isinstance(QWidget) �
 1. 全程不调用 findChildren（防将来改回去）；
 2. 遍历语义不变：root 及其全部后代各 apply 恰一次（以登记工厂的执行计数为证）；
    QLayout/QAction 等非 QWidget 子对象被过滤、不参与。
+
+2026-10-30：apply_theme_qss 新增同串短路（Qt5 对相同串也会 repolish 整棵
+子树）。因此 factory 执行次数与 setStyleSheet 次数不再相等：前者=遍历触达数，
+后者仅统计串真变化的控件。断言据此分开。
 """
 
 from PyQt5.QtCore import QObject
@@ -40,8 +44,8 @@ def test_replay_never_calls_find_children(qapp, monkeypatch):
     applied.clear()  # bind_theme_qss 登记时会立即应用一次，与 replay 无关，清掉
 
     count = replay_theme_qss(root)
-    assert count == 1, f"仅 root 登记了工厂，应恰 apply 1 次，实际 count={count}"
-    assert applied == [root]
+    assert applied == [root], "遍历必须触达 root（factory 执行即触达证据）"
+    assert count == 0, f"串与现状相同→同串短路不重写，实际 count={count}"
     assert probe.parent() is root  # 哨兵仍挂在树上，证明过滤发生在遍历侧
 
 
@@ -61,6 +65,6 @@ def test_replay_visits_each_descendant_exactly_once(qapp):
 
     applied.clear()
     count = replay_theme_qss(root)
-    assert count == 4, f"线性 BFS 应恰好 apply 4 次，实际 {count}"
-    assert len(applied) == 4, f"每个 widget 恰被 apply 一次，实际 {len(applied)} 次: {applied}"
+    assert len(applied) == 4, f"每个 widget 恰被 factory 触达一次，实际 {len(applied)} 次: {applied}"
     assert set(applied) == {root, a, b, c}, "深嵌套后代必须全部触达"
+    assert count == 0, f"串未变→同串短路不重写任何控件，实际 {count}"

@@ -231,3 +231,51 @@ def test_filter_withdrawn_interjects_skips_and_unregisters():
     assert [item["_interject_text"] for item in kept] == ["另一条"]
     # 一次性消费：同文本第二次出现不再拦截（对齐新插入的同文本插话）
     assert "插话消息" not in w._interject_withdrawn_texts
+
+
+# ============ M5：中止后残留插话复活 → 双卡片（2026-10-29） ============
+
+class _FakeBackend:
+    """记录摘队列调用"""
+
+    def __init__(self):
+        self.withdrawn = []
+        self.reclaimed = 0
+
+    def withdraw_interject(self, text):
+        self.withdrawn.append(text)
+        return 1
+
+    def reclaim_pending_interjects(self):
+        self.reclaimed += 1
+        return 1
+
+
+def test_ghost_card_removal_withdraws_queue_entry(monkeypatch):
+    """删幽灵卡时必须摘除 hook 队列中的同类插话条目
+
+    残留条目会被下一个 worker 当新插话消费 → 已撤回消息复活 + 双卡片。
+    """
+    ghost = _FakeCard(role="user", text="插话消息", pending=True)
+    w = _make_widget([ghost], monkeypatch)
+    w.backend = _FakeBackend()
+
+    assert w._remove_interject_ghost_card("插话消息") is True
+    assert w.backend.withdrawn == ["插话消息"], "删幽灵卡必须同步摘除队列中未消费的插话条目"
+
+
+def test_stop_clicked_reclaims_pending_interjects():
+    """源码契约：停止链路必须立即回收队列插话（不等 worker 线程退出）"""
+    src = inspect.getsource(mw.OpenAIChatToolWindow._on_stop_clicked)
+    assert "reclaim_pending_interjects" in src, (
+        "中止时 worker 可能卡在工具执行，退出不经过取消排空 → 停止链路必须主动回收插话"
+    )
+
+
+def test_delete_message_handles_ghost_interject_card():
+    """源码契约：删除路径对幽灵插话卡兜底（删卡 + 摘队列 + 登记，不回填输入框）"""
+    src = inspect.getsource(mw.OpenAIChatToolWindow._delete_message)
+    assert "_interject_pending" in src, "删除未生效分支必须识别幽灵插话卡"
+    assert "withdraw_interject" in src, "删除幽灵插话卡必须同步摘除队列条目"
+    assert "_remove_interject_ghost_card" in src, "删除幽灵插话卡必须移除 UI 卡片"
+    assert "_withdraw_interject_to_input" not in src, "删除语义不回填输入框（撤回才回填）"

@@ -448,18 +448,13 @@ class _HoverTooltipFilter(QObject):
         # 每次显示时调用，不缓存 —— 文件可能被外部修改，重读保证所见即所得。
         self._image_loader = None
         self._tooltip: Optional[SimpleHoverTooltip] = None
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(delay_ms)
-        self._timer.timeout.connect(self._on_timeout)
-        # 🛡️ 残留修复（R1）：显示后启动看护轮询，兜底各类漏发的隐藏事件
-        # （窗口失焦/alt-tab、列表滚动导致控件移出光标、合成器下漏发的
-        #  Leave 等），最长 ~120ms 内强制收起，杜绝“飘在屏幕上不消失”。
-        #  仅在该 filter 自己的 tooltip 显示时运行，开销极小。
-        self._guard = QTimer(self)
-        self._guard.setSingleShot(False)
-        self._guard.setInterval(120)
-        self._guard.timeout.connect(self._guard_check)
+        # [PERF] 定时器懒创建：新建标签页时 batch_install_hover_tooltips 会给
+        # 全窗口 200+ 控件各装一个本 filter，构造期两个 QTimer + 三个 connect
+        # 实测 ~0.3ms/个（整批 10~60ms）——绝大多数控件一辈子只被 hover 几次，
+        # 首帧白付这笔钱。改为首次 Enter / 首次显示时按需创建。
+        self._delay_ms = delay_ms
+        self._timer: Optional[QTimer] = None
+        self._guard: Optional[QTimer] = None
         parent.installEventFilter(self)
         # 目标销毁时自动清理 tooltip
         # ⚠️ 实测（PyQt5）：self.destroyed 自连接 bound method 在 parent 析构
@@ -468,6 +463,28 @@ class _HoverTooltipFilter(QObject):
         # 改挂 parent.destroyed：跨对象连接实测可靠触发，且 destroyed 在
         # children 销毁前 emit，此刻 filter 仍存活，清理安全。
         parent.destroyed.connect(self._cleanup)
+
+    def _ensure_timer(self) -> QTimer:
+        """懒创建 hover 计时器（首个 Enter 才建，见 __init__ 注释）"""
+        if self._timer is None:
+            self._timer = QTimer(self)
+            self._timer.setSingleShot(True)
+            self._timer.setInterval(self._delay_ms)
+            self._timer.timeout.connect(self._on_timeout)
+        return self._timer
+
+    def _ensure_guard(self) -> QTimer:
+        """懒创建看护轮询（R1：只看护「已显示」的 tooltip，未显示不占对象）"""
+        if self._guard is None:
+            self._guard = QTimer(self)
+            self._guard.setSingleShot(False)
+            self._guard.setInterval(120)
+            self._guard.timeout.connect(self._guard_check)
+        return self._guard
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
 
     def _get_tooltip(self) -> SimpleHoverTooltip:
         if self._tooltip is None:
@@ -492,7 +509,7 @@ class _HoverTooltipFilter(QObject):
             tip = p.toolTip() or ""
             if tip:
                 self._text = tip
-                self._timer.start()
+                self._ensure_timer().start()
         elif t in (event.Leave, event.HoverLeave, event.Hide, event.HideToParent):
             # 🛡️ B2 修复：目标随父容器隐藏时 Qt 发 HideToParent（27）而非 Hide（18）。
             # 团队 header 按钮（关闭团队 close_btn 等）在团队关闭时随 header 容器
@@ -511,7 +528,7 @@ class _HoverTooltipFilter(QObject):
                     local = p2.mapFromGlobal(QCursor.pos())
                     if p2.rect().contains(local):
                         return False
-            self._timer.stop()
+            self._stop_timer()
             self._hide()
         elif t in (event.MouseButtonPress, event.MouseButtonDblClick):
             # 🛡️ B3 修复：点击即收起 tooltip（与 Qt 原生 QToolTip / qfluentwidgets
@@ -521,7 +538,7 @@ class _HoverTooltipFilter(QObject):
             # 与用户点击之间存在延迟窗口，若窗口 close 阻塞/事件繁忙/清理
             # 竞态 → tooltip 残留在屏幕上不消失。按下即隐藏彻底消除该窗口期。
             # 注意：此处不 return True（不拦截鼠标事件），按钮点击正常响应。
-            self._timer.stop()
+            self._stop_timer()
             self._hide()
         return False
 
@@ -532,11 +549,11 @@ class _HoverTooltipFilter(QObject):
         # 隐藏），直接显示会出现"飘着的 tooltip"。校验失败则停表放弃。
         p = self._parent()
         if p is None or not p.isVisible():
-            self._timer.stop()
+            self._stop_timer()
             return
         local = p.mapFromGlobal(QCursor.pos())
         if not p.rect().contains(local):
-            self._timer.stop()
+            self._stop_timer()
             return
         tt = self._get_tooltip()
         pm = None
@@ -551,14 +568,15 @@ class _HoverTooltipFilter(QObject):
             tt.set_text(self._text)
         tt.show_above(p)
         # 启动看护轮询（显示期间持续校验是否仍需显示）
-        self._guard.start()
+        self._ensure_guard().start()
 
     def _guard_check(self):
         """显示后兜底看护：任何漏发的隐藏事件（失焦/滚动/几何变化/漏发
         Leave）都在此强制收起 tooltip，避免残留在屏幕上。"""
         tt = self._tooltip
         if tt is None or not tt.isVisible():
-            self._guard.stop()
+            if self._guard is not None:
+                self._guard.stop()
             return
         p = self._parent()
         # 目标已销毁/不可见，或应用已失焦（alt-tab 等）→ 立即收起
@@ -572,7 +590,8 @@ class _HoverTooltipFilter(QObject):
 
     def _hide(self):
         try:
-            self._guard.stop()
+            if self._guard is not None:
+                self._guard.stop()
         except (RuntimeError, AttributeError):
             pass
         if self._tooltip:
@@ -592,7 +611,10 @@ class _HoverTooltipFilter(QObject):
         # 残留治理（R2）：显式停表并断开定时器连接。PyQt 连接表持有
         # bound method → 滞留 self（filter wrapper）→ 连带 _timer/_guard
         # wrapper 驻留（每 tab ~95 filter + 2 QTimer）。
+        # [PERF] 定时器懒创建后可能从未存在，逐项判空。
         for _t, _h in ((self._timer, self._on_timeout), (self._guard, self._guard_check)):
+            if _t is None:
+                continue
             try:
                 _t.stop()
                 _t.timeout.disconnect(_h)

@@ -38,11 +38,44 @@ import os
 import statistics
 import time
 
-# 必须早于 QApplication 与任何 app.* 导入（pytest 收集期即执行）
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["DRIFOX_QT_RENDERER"] = "1"
+import pytest
 
-import pytest  # noqa: E402
+from PyQt5.QtCore import QCoreApplication, Qt, QTimer  # noqa: E402
+from PyQt5.QtTest import QTest  # noqa: E402
+
+QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+
+# ── 平台选择：必须留在**收集期**（模块级）──
+# [T36] 从 fixture 拿回模块级。原因：`qapp` fixture 是 session scope，pytest 按
+# scope 排序实例化，session 级**先于** module 级 —— 若把 QT_QPA_PLATFORM 放进
+# module fixture，QApplication 此时已按默认平台创建完毕，offscreen 设置迟到无效，
+# 本文件会真开窗口并触发超时（T35 审查阻塞项）。
+#
+# 泄漏口径已知并接受（防崩溃优先）：收集期赋值会泄漏到同 session 后续收集的文件。
+# 但本文件按约定总是单独跑（tests/perf 被 addopts 默认排除，须显式指定路径），
+# 实际不会波及他人；即便并行收集，offscreen 也是比「真开窗口崩溃」更安全的降级。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# ── 渲染通道：留在 fixture（运行期读取，晚设无妨）──
+# DRIFOX_QT_RENDERER 由 message_card 在**运行期**（延迟导入时）读取，
+# 不在收集期消费，故可放进 module fixture 享受「用完还原」的干净语义。
+_RENDER_ENV = {"DRIFOX_QT_RENDERER": "1"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _bench_render_env():
+    """设置并在模块结束时还原渲染通道环境变量。"""
+    saved = {k: os.environ.get(k) for k in _RENDER_ENV}
+    for k, v in _RENDER_ENV.items():
+        os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 # Qt 属性必须在 QApplication 创建前设置（与 main.py / test_new_tab_baseline 对齐）
 from PyQt5.QtCore import QCoreApplication, Qt, QTimer  # noqa: E402

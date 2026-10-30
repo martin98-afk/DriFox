@@ -13,5 +13,5 @@
         "ui": true
     },
     "api_version": 2,
-    "capabilities": []
+    "capabilities": ["command.read", "command.reload"]
 }

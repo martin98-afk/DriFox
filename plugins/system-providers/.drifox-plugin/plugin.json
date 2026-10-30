@@ -5,7 +5,7 @@
   },
   "name": "system-providers",
   "description": "DriFox 内置服务商定义：DeepSeek / 智谱 / 通达 / 阿里 / 火山 / MiniMax / SiliconFlow / Gemini / 百度 / OpenCode / CodeBuddy",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "author": {
     "name": "DriFoxx Team"
   },
@@ -14,5 +14,18 @@
   "type": "system",
   "components": {
     "providers": true
+  },
+  "config_schema": {
+    "title": "CodeBuddy 自动任务",
+    "fields": [
+      {
+        "key": "auto_daily_tasks",
+        "label": "自动跑每日成长任务",
+        "type": "bool",
+        "default": false,
+        "env": "DRIFOX_CODEBUDDY_TASKS",
+        "description": "开启后，登录成功与每 6 小时轮次会为在用账号自动完成成长中心闭环：活跃上报 → 领养 → 任务 accept → 行为事件链 → Web 域领奖 → 连登兑换与抽奖 → 猫猫旅行 → 新手礼包。默认关闭：无人值守的自动请求会增加账号风控暴露面，需要时手动打开。每日签到不受此开关控制（签到与成长任务是两条独立链路）。"
+      }
+    ]
   }
 }

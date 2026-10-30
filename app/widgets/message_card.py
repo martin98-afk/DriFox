@@ -704,13 +704,15 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
             self.viewer.refresh_theme()
         # 刷新富文本视图字体并触发重渲染（缓存已在 refresh_theme 中失效）
-        # [T6] 分帧错峰：全量重渲（单卡 40~120ms 主线程）不再逐卡 immediate
+        # [T6] 分帧错峰：图表卡全量重渲（单卡 40~120ms 主线程）不再逐卡 immediate
         # 同拍执行，改置脏 + 入分帧队列（每帧最多 2 张，可见优先）；
         # 流式卡不入队：上方 refresh_theme 已置 _needs_full_render=True，
         # 下一次流式节拍自然全量带新主题，不丢主题态不丢正文，也不打断
         # 流式自适应节流（_schedule_render 的边界合并窗口）。
+        # [2026-10-30] 无图卡不再入队：Pygments 已 class 化 + 图标走 CSS mask，
+        # 正文 HTML 与主题无关，换 CSS 就已换色，重渲纯属浪费（单卡 40~120ms）。
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
-            if getattr(self.viewer, "_streaming", False):
+            if getattr(self.viewer, "_streaming", False) or not self.viewer.__dict__.get("_has_charts", False):
                 self.viewer._theme_render_pending = False
             else:
                 self.viewer._theme_render_pending = True
@@ -2334,7 +2336,7 @@ class MessageCard(SimpleCardWidget):
         # start_streaming_anim 而为 True，导致 _on_js_ready 误折叠工具区）
         if self.viewer and hasattr(self.viewer, "_is_history") and self.viewer._is_history:
             self.viewer._is_history = False
-        # 新轮流式开始：恢复简洁模式坞态（工具区沉底跟随最新活动）
+        # 新轮流式开始：恢复简洁模式坞态（工具区限高内滚，实时跟随最新活动）
         if self.viewer and hasattr(self.viewer, "_sync_streaming_dock"):
             self.viewer._sync_streaming_dock(True)
         self._anim_t_ms = 0.0
@@ -3011,10 +3013,9 @@ class MessageCard(SimpleCardWidget):
 
     def _update_height(self, h):
         target_height = max(40, h)
-        # [T33→T36] 坞态预算上限已随坞态正文限高一并移除：正文不再限高后，
-        # 坞态生效前后高度都等于自然高度（工具区沉底只带来 ~几十 px 扰动），
-        # 「渲染抢跑 → 先胀大再压回」的竞态窗口不存在了。若回滚 T36
-        # （恢复 _STREAMING_DOCK_CSS 的 max-height），需同时恢复此处 clamp。
+        # [T44] 坞态不再给正文限高（原 order 沉底 + 600px 内滚已移除），坞态
+        # 生效前后卡片高度都等于自然高度，只剩工具区 264px 限高这一点扰动，
+        # 无需额外 clamp。
         #
         # [MEM-2] 上报值是**文档内容**高度，可远超 widget 的高度上限（物理面积
         # 上限，见 CodeWebViewer.MAX_SURFACE_MPX）：目标值必须先按同一上限钳一次，
@@ -4143,6 +4144,11 @@ class MessageCard(SimpleCardWidget):
                 # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
                 # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
                 self.viewer._restore_finished_ids = self._finished_streaming_ids
+                # 历史卡折叠：池化复用实例保留骨架 → _on_js_ready 不会再次触发，
+                # 而 reset_for_reuse 已摘掉 data-collapsed（等价展开）→ 必须在
+                # 绑定后按本卡状态补一次。新建 viewer 时 JS 未就绪，此调用内部
+                # 直接返回，由 _on_js_ready 承担。幂等：只在未应用过时执行。
+                self.viewer._apply_history_collapsed()
             self._connect_viewer_signals()
 
             self._viewer_layout.addWidget(self.viewer)
@@ -4591,6 +4597,8 @@ class MessageCard(SimpleCardWidget):
                 tool_call_id=tool_call_id,
                 diff=diff,
                 echarts=echarts,
+                # 折叠/不可见时 body 只出空占位（展开时由 viewer 反查注入）
+                lazy_body=self.viewer._tool_lazy_body if self.viewer else False,
             )
             # 🆕 方案 D：计算完成态工具块的 data-order（与 _inject_tool_streaming_html
             # 同口径）。无锚点（历史会话等非流式路径）→ 基准取当前末尾位置，与
@@ -4843,12 +4851,12 @@ class MessageCard(SimpleCardWidget):
             logger.warning(f"增量工具块注入失败: {e}")
         # 🆕 F2（S1 归位兜底）：最后一个工具完成时关闭坞态。
         # 流式文本可能先于工具结果结束（finish_streaming(keep_dock=True) 保留了坞态），
-        # 此处是归位时机：所有已登记工具都完成 → 工具区从坞态沉底回到顶部。
+        # 此处是归位时机：所有已登记工具都完成 → 工具区解除流式限高并折叠。
         # ⚠️ 必须 hasattr 守卫：stub viewer（测试桩）无 _sync_streaming_dock 方法。
         # 🐛 F3（#R1 P1）：归位判据必须用 MessageCard 层 self._streaming——
         # 本函数中段「就近恢复 viewer 流式模式」（L8737）在 viewer._streaming=False 时
         # 无条件置 True，viewer 层状态已被污染，恒 True → 归位兜底永不触发
-        # （会话末轮 dock 永久沉底）。self._streaming 由 start/stop_streaming_anim
+        # （会话末轮 dock 永久限高）。self._streaming 由 start/stop_streaming_anim
         # 管理（本轮流式结束后 stop_streaming_anim 已置 False；新一轮开始置 True 时
         # 正确跳过归位），不受 8738 行恢复逻辑影响。
         # 🐛 F3（次要提示 1）：lambda 捕获动态属性判空——0ms 内 viewer 被 cleanup
@@ -4862,7 +4870,7 @@ class MessageCard(SimpleCardWidget):
             ):
                 # F2（S1 兜底归位）+ 简洁模式折叠：最后一个工具完成时归位。
                 # [T30] 与 finish_streaming 主路径一致：归位即折叠（两段式往返
-                # 峰已并入同一条 220px→0 曲线），不再单独派发折叠调用。
+                # 峰已并入同一条 264px→0 曲线），不再单独派发折叠调用。
                 # lambda 捕获动态属性判空——0ms 内 viewer 被 cleanup 置 None 时
                 # 避免 AttributeError traceback。
                 def _dock_off_and_collapse() -> None:
@@ -5476,28 +5484,66 @@ class MessageCard(SimpleCardWidget):
     # ── 卡片内嵌成果栏（三件套，契约同任务看板；关键差异见 update_artifact_list）──
 
     def update_artifact_list(self, items):
-        """更新卡片内嵌成果栏（原生 Qt 面板，不进 WebEngine）
+        """合并推送成果条目（原生 Qt 面板，不进 WebEngine）
+
+        ★ **合并而非替换**：同轮多次工具产出、异步任务回填原卡（``ui.artifacts.show``
+        的 ``target="call"``）每次只带本次增量，整体替换会把先到的条目顶掉。
+        按 ``path`` 去重：已存在则原位更新，新路径追加到末尾（保持首次出现顺序）。
 
         与任务看板的语义差异——**不迁卡**：任务列表是"当前状态"，每轮工具轮次
         都会迁到最新卡（宿主 ``_sync_todo_panel`` 卸旧卡挂新卡）；成果属于产生
-        它的那一轮，新卡不继承旧卡的成果，宿主侧不调用 ``clear_artifact_list``。
-        本方法自身幂等：同签名重复推送由面板签名比对挡掉。
+        它的那一轮，新卡不继承旧卡的成果，宿主侧不清空旧卡。显式清空走
+        ``clear_artifact_list()``（空列表推送不再隐含清空）。
 
         Args:
             items: [{path, kind?, name?, width?, height?, size?, caption?, meta?}, ...]
-                   kind 缺省按扩展名推断；空列表 → 隐藏成果区。
+                   kind 缺省按扩展名推断
         """
-        self._artifact_panel_items = list(items or [])
+        merged = self._merge_artifact_items(self._artifact_panel_items, items)
+        if not merged:
+            return
+        self._artifact_panel_items = merged
         if self.role != "assistant":
             return
-        if not self._artifact_panel_items or self._assistant_bubble is None:
+        if self._assistant_bubble is None:
             panel = self._artifact_panel
             if panel is not None:
-                panel.update_artifacts(self._artifact_panel_items)
+                panel.update_artifacts(merged)
             return
         panel = self._ensure_artifact_panel()
         if panel is not None:
-            panel.update_artifacts(self._artifact_panel_items)
+            panel.update_artifacts(merged)
+
+    @staticmethod
+    def _merge_artifact_items(current, incoming):
+        """按 path 合并成果条目：同路径原位替换，新路径追加（保序）"""
+        merged = list(current or [])
+        index = {}
+        for i, item in enumerate(merged):
+            if isinstance(item, dict) and item.get("path"):
+                index[str(item["path"])] = i
+        for raw in incoming or []:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("path") or "").strip()
+            if not path:
+                continue
+            item = dict(raw)
+            item["path"] = path
+            pos = index.get(path)
+            if pos is None:
+                index[path] = len(merged)
+                merged.append(item)
+            else:
+                merged[pos] = item
+        return merged
+
+    def clear_artifact_list(self):
+        """显式清空成果栏（面板实例保留，卡片重建时直接复用）"""
+        self._artifact_panel_items = []
+        panel = self._artifact_panel
+        if panel is not None:
+            panel.clear_artifacts()
 
     def _ensure_artifact_panel(self):
         """懒创建成果栏并挂进气泡布局末尾（任务看板之后、页脚之前）"""
@@ -5593,6 +5639,13 @@ class MessageCard(SimpleCardWidget):
             if isinstance(self._content_data, list) and self._content_data:
                 self._tool_anchor_refs[tool_call_id] = self._content_data[-1]
             self._tool_call_order[tool_call_id] = len(self._tool_call_order)
+            # [v2] 工具调用开始 → 活动正文块已定型：立即把 live 纯文本尾态正式化。
+            # 否则该块不再增长、正式化阈值永不满足，正文停在 markdown 源码形态
+            # 直到流式结束（提问卡等阻塞工具等待回答期间最明显）。
+            _finalize_vwr = getattr(self, "viewer", None)
+            _finalize_cb = getattr(_finalize_vwr, "mark_live_tail_finalized", None) if _finalize_vwr else None
+            if callable(_finalize_cb):
+                _finalize_cb()
         # 🆕 第一次工具参数到达时，标记当前思考块为完成态（💡）
         # 修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 还显示"思考中"
         self._maybe_finish_thinking_for_tool(tool_call_id)
@@ -5842,14 +5895,14 @@ class MessageCard(SimpleCardWidget):
             history: True 表示历史会话加载收尾（非流式渲染路径）。
                 此时跳过 stop_streaming_anim()——它会置 _streaming_finished=True，
                 使 ensure_rendered 把卡片误判为"本轮已结束的流式消息"
-                （_is_history=False → 工具与思考不折叠、正文按流式坞态限高），
+                （_is_history=False → 工具与思考不折叠、工具区按流式坞态限高），
                 与"历史会话默认折叠"的产品预期冲突。历史卡片从未启动过
                 流式动画，跳过 stop_streaming_anim 无副作用。
             force_dock_off: True 表示打断/错误收尾强制归位（忽略活跃工具）。
                 正常结束时文本先于工具完成（S1）会 keep_dock 保留坞态，
                 等最后一个工具结果经 append_tool_result 兑底归位；但打断/
                 错误路径 worker 已终止，工具结果永不到达，兑底永不触发
-                → 坞态永久沉底、正文限矮（流式结构残留 bug 根因），
+                → 工具区永久停在流式限高态（流式结构残留 bug 根因），
                 故打断/错误调用方必须传 True。
             immediate: 透传给 viewer.finish_streaming（T11）。批量加载路径传
                 False，避免 N 卡同帧全量重渲；交互路径保持默认 True。
@@ -5900,7 +5953,8 @@ class MessageCard(SimpleCardWidget):
         """是否有仍在执行中的工具（已登记但未完成）。
 
         dock 状态机的判据：只要还有工具在运行（流式文本已结束但工具结果未全部
-        到达，S1 场景），工具区应保持坞态沉底；全部完成后才归位。
+        到达，S1 场景），工具区应保持流式坞态（限高内滚、不折叠）；全部完成后
+        才归位折叠。
         """
         return any(tid not in self._finished_streaming_ids for tid in self._tool_call_order)
 

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Callable
@@ -73,7 +74,6 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
             "app.core.context.builder",
             "app.core.context.usage",
             "app.core.hooks.hook_manager",
-            "app.core.context.history_compactor",
             "app.core.conversation.memory_manager",
             "app.core.infra.token_estimator",
             "app.core.modelmeta.models_dev_sync",
@@ -146,9 +146,9 @@ def _install_stdlib_logging_bridge() -> None:
                 # 这样 LOG_ROUTES 的前缀匹配（app.tools / plugins 等）对插件与
                 # 第三方库同样生效；不命中任何前缀的记录落 all.log（本模块
                 # 「无遗漏」设计目标）。若不 patch，name 会是本模块名。
-                logger.patch(lambda r: r.update(name=record.name)).opt(
-                    exception=record.exc_info
-                ).log(level, record.getMessage())
+                logger.patch(lambda r: r.update(name=record.name)).opt(exception=record.exc_info).log(
+                    level, record.getMessage()
+                )
             except Exception:
                 pass  # 日志链路自身异常绝不能影响业务
 
@@ -181,12 +181,44 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     # 必须在加 sink 前安装：转发器只做转投，落盘由下面的 sink 决定。
     _install_stdlib_logging_bridge()
 
+    # 逐个 sink 独立安装：单个 sink 失败不能连带其余全丢。
+    # 2026-10-28 实测：POSIX semaphore 耗尽（Errno 28）时首个 enqueue=True 的
+    # logger.add 直接抛错，此前顺序安装会让 11 个 sink 全部没装 → 应用能跑但
+    # 零日志、事后无任何证据。失败原因写 stderr（此时日志链路本身不可信）。
+    #
+    # 降级策略：enqueue=True 依赖 multiprocessing 的 SimpleQueue/Event/Lock，
+    # 每个都要一个 POSIX semaphore；enqueue=False 只用线程锁，不受该配额影响
+    # （同一耗尽环境下实测：前者 Errno 28，后者正常写入）。所以失败时退回同步
+    # 写盘 —— 牺牲吞吐换「日志永远有」，这类环境本就是排查期，日志比性能重要。
+    _failed: list[str] = []
+    _degraded: list[str] = []
+
+    def _add_sink(name: str, **kwargs: Any) -> None:
+        try:
+            logger.add(**kwargs)
+            return
+        except Exception as exc:
+            if not kwargs.get("enqueue"):
+                _failed.append(name)
+                sys.stderr.write(f"[logging_setup] sink 安装失败 {name}: {exc}\n")
+                return
+        # 走到这里说明 enqueue=True 不可用，退回同步 sink
+        kwargs["enqueue"] = False
+        try:
+            logger.add(**kwargs)
+            _degraded.append(name)
+            sys.stderr.write(f"[logging_setup] sink 降级为同步写入 {name}（enqueue 不可用）\n")
+        except Exception as exc:  # noqa: BLE001
+            _failed.append(name)
+            sys.stderr.write(f"[logging_setup] sink 安装失败 {name}: {exc}\n")
+
     # 全量日志（兜底）
     # enqueue=True：写盘转 loguru 内部后台线程，调用线程只格式化入队。
     # 背景：主线程槽内高频 logger.info（工具结果/流式节拍）同步写 all.log，
     # DEBUG 全量 + 10MB 轮转下每条都摊文件 IO，累积成可感卡顿。
-    logger.add(
-        log_dir / "all.log",
+    _add_sink(
+        "all.log",
+        sink=log_dir / "all.log",
         rotation="10 MB",
         level="DEBUG",
         format=LOG_FORMAT,
@@ -195,8 +227,9 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
 
     # 分系统日志（enqueue=True 同 all.log：主线程高频写不再同步落盘）
     for file_name, include, exclude in LOG_ROUTES:
-        logger.add(
-            log_dir / file_name,
+        _add_sink(
+            file_name,
+            sink=log_dir / file_name,
             rotation="00:00",
             retention="7 days",
             level="DEBUG",
@@ -207,11 +240,17 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
 
     # 单独的内存诊断日志文件
     if mem_diag_enabled:
-        logger.add(
-            log_dir / "mem_diag.log",
+        _add_sink(
+            "mem_diag.log",
+            sink=log_dir / "mem_diag.log",
             rotation="10 MB",
             level="DEBUG",
             format=LOG_FORMAT,
             filter=lambda r: "[MEM]" in r["message"],
             enqueue=True,
         )
+
+    if _degraded:
+        sys.stderr.write(f"[logging_setup] {len(_degraded)} 个 sink 降级为同步: {', '.join(_degraded)}\n")
+    if _failed:
+        sys.stderr.write(f"[logging_setup] {len(_failed)} 个 sink 未安装: {', '.join(_failed)}\n")

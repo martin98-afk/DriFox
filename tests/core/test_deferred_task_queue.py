@@ -7,8 +7,11 @@
 - set_barrier(name)：屏障任务等 critical 全完成 + idle 尝试一轮后才执行
 - start() / cancel(name) / stop()
 - stop 后未执行的 critical 丢弃并 warning；任务异常不阻塞后续任务
+- register_async(name, fn, *, delay_ms)：fn 在后台线程执行，完成后回主线程
+  标记 ran；保序约束与屏障语义对异步任务同样生效（等待期间主线程不被阻塞）
 """
 
+import threading
 import time
 
 import pytest
@@ -132,3 +135,133 @@ def test_task_exception_does_not_block(qapp):
     q.start()
     _drain(400)
     assert ran["n"] is True, "异常任务阻塞了后续任务"
+
+
+def test_async_task_runs_off_main_thread(qapp):
+    """register_async：任务体在非主线程执行，完成后回主线程标记 ran。
+
+    背景：运行时组件 warmup 同步执行 7.4s 无 yield，主线程硬冻结；改后台线程后
+    主线程只投递不等待，任务体必须真的离开主线程，否则优化无效。
+    """
+    q = DeferredTaskQueue()
+    main_ident = threading.get_ident()
+    seen = {}
+
+    def bg():
+        seen["ident"] = threading.get_ident()
+        time.sleep(0.02)
+
+    q.register_async("bg", bg, delay_ms=0)
+    q.start()
+    _drain(500)
+    assert seen.get("ident") not in (None, main_ident), f"任务体仍在主线程执行: {seen}"
+    assert q._tasks["bg"].ran is True, "后台任务完成后未回填 ran"
+
+
+def test_pause_stops_scheduling_until_resume(qapp):
+    """pause 期间任务不执行，resume 后照常执行（幂等重入）。
+
+    背景：UI 插件装载期与后台 warmup 都要 import 插件模块，import 锁让两者
+    串行；错峰靠暂停队列实现。误实现成「暂停后永不恢复」会让所有启动预热丢失。
+    """
+    q = DeferredTaskQueue()
+    ran = []
+    q.register("warmup", lambda: ran.append("warmup"), priority="idle", delay_ms=0)
+    q.pause("before_start")
+    q.start()
+    _drain(300)
+    assert ran == [], f"pause 期间任务仍被执行：{ran}"
+
+    q.resume("load_done")
+    _drain(400)
+    assert ran == ["warmup"], f"resume 后任务未执行：{ran}"
+
+    # 幂等：重复 resume 不重复执行
+    q.resume("again")
+    _drain(200)
+    assert ran == ["warmup"], f"重复 resume 导致重复执行：{ran}"
+
+
+def test_pause_holds_async_task_completion(qapp):
+    """异步任务已在后台跑时 pause：ran 照常回填，但后续任务被压住到 resume。
+
+    这是真实时序：装载开始 pause 时 warmup 可能已投递（无法撤回），
+    resume 后保序任务才放行。
+    """
+    q = DeferredTaskQueue()
+    ran = []
+    q.register_async("bg", lambda: time.sleep(0.15), delay_ms=0)
+    q.register("after", lambda: ran.append("after"), priority="idle", delay_ms=0)
+    q.add_order_constraint("bg", "after")
+    q.start()
+    _drain(50)  # 让泵把 async 投递出去
+    assert q._tasks["bg"].started is True, "异步任务未投递（测试前提不成立）"
+
+    q.pause("load")
+    _drain(300)  # 后台跑完并回填
+    assert q._tasks["bg"].ran is True, "已投递的异步任务应正常完成（无法撤回）"
+    assert ran == [], f"pause 期间后续任务被执行：{ran}"
+
+    q.resume("done")
+    _drain(400)
+    assert ran == ["after"], f"resume 后后续任务未执行：{ran}"
+
+
+def test_async_task_does_not_block_main_thread(qapp):
+    """异步任务执行期间主线程定时器照常触发（事件循环不被冻结）。
+
+    这条锁的是本次优化的核心契约：改动前 runtime_components 同步跑 7.4s，
+    期间主线程零响应（拖动/输入全卡）；异步化后同样的任务体只占后台线程。
+    """
+    q = DeferredTaskQueue()
+    ticks = {"n": 0}
+    timer = QTimer()
+    timer.setInterval(10)
+    timer.timeout.connect(lambda: ticks.__setitem__("n", ticks["n"] + 1))
+    timer.start()
+    try:
+        q.register_async("slow", lambda: time.sleep(0.3), delay_ms=0)
+        q.start()
+        _drain(400)
+    finally:
+        timer.stop()
+    assert ticks["n"] >= 15, f"主线程在异步任务执行期间被阻塞：10ms 定时器只触发 {ticks['n']} 次"
+
+
+def test_async_task_blocks_constraint_until_done(qapp):
+    """保序：before 是异步任务时，after 必须等它真正完成才执行。
+
+    背景：gateway_sync 依赖 runtime_components 注册的平台；异步化后若按「已投递」
+    就放行，gateway_sync 会看到空平台表漏启连接。
+    """
+    q = DeferredTaskQueue()
+    done_at = {}
+
+    def bg():
+        time.sleep(0.05)
+        done_at["bg"] = time.perf_counter()
+
+    q.register_async("bg", bg, delay_ms=0)
+    q.register("after", lambda: done_at.__setitem__("after", time.perf_counter()), priority="idle", delay_ms=0)
+    q.add_order_constraint("bg", "after")
+    q.start()
+    _drain(600)
+    assert "bg" in done_at and "after" in done_at, f"任务未全执行：{done_at.keys()}"
+    assert done_at["after"] >= done_at["bg"], "after 先于异步 before 完成（保序失效）"
+
+
+def test_async_task_exception_does_not_block(qapp):
+    """异步任务抛异常：回填 ran 并继续后续任务，不把泵卡死"""
+    q = DeferredTaskQueue()
+
+    def boom():
+        raise RuntimeError("boom")
+
+    ran = {"n": False}
+    q.register_async("bad_async", boom, delay_ms=0)
+    q.register("after", lambda: ran.__setitem__("n", True), priority="idle", delay_ms=0)
+    q.add_order_constraint("bad_async", "after")
+    q.start()
+    _drain(500)
+    assert q._tasks["bad_async"].ran is True, "异常异步任务未回填 ran（泵会永久等待）"
+    assert ran["n"] is True, "异常异步任务阻塞了后续任务"

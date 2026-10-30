@@ -63,12 +63,9 @@ def register(registry) -> None:
         """
         real = None
         try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.capabilities.resolve import active_main_widget
 
-            reg = UIPluginRegistry.get_instance()
-            real = getattr(reg, "_main_widget", None) or next(
-                iter(getattr(reg, "_window_main_widgets", {}).values()), None
-            )
+            real = active_main_widget()
         except Exception:  # noqa: BLE001 - 无窗口场景返回空实现
             real = None
         if real is None:
@@ -255,12 +252,6 @@ def register(registry) -> None:
 
         return get_app_data_dir()
 
-    def _context_compactor(host: Any):
-        """上下文压缩器（与 ui_core 同路径：backend → chat_engine → _compactor）。"""
-        backend = _backend(host)
-        ce = getattr(backend, "chat_engine", None) if backend else None
-        return getattr(ce, "_compactor", None) if ce else None
-
     def _plugin_log(host: Any, ctx: Any):
         """带 plugin=<name> 前缀的 logger（与 ui_core 同实现）。"""
         from loguru import logger
@@ -368,7 +359,6 @@ def register(registry) -> None:
     registry.register("session.send", _session_send, surface="tool", owner="core:tool")
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
     registry.register("storage.data_dir", _storage_data_dir, surface="tool", owner="core:tool")
-    registry.register("context.compact", _context_compactor, surface="tool", owner="core:tool")
     registry.register("tool.execute", _tool_execute, surface="tool", owner="core:tool")
     registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
     registry.register("model.enumerate", model_meta.model_enumerate, surface="tool", owner="core:tool")

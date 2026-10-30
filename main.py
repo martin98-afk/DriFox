@@ -98,9 +98,7 @@ def _unraisable_hook(unraisable):
 
 def _threading_excepthook_hook(args):
     thread_name = args.thread.name if args.thread is not None else "?"
-    _hook_logger.error(
-        f"[ThreadUnhandledException] {args.exc_type.__name__}: {args.exc_value} in thread {thread_name}"
-    )
+    _hook_logger.error(f"[ThreadUnhandledException] {args.exc_type.__name__}: {args.exc_value} in thread {thread_name}")
     _hook_logger.error("".join(_exc_tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
 
 
@@ -190,7 +188,7 @@ def main():
             logger.debug(msg)
         _sm_seg = _now
 
-    if _qt_pp: 
+    if _qt_pp:
         logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
 
     # ========== 必须在创建 QApplication 之前设置 Qt 属性 ==========
@@ -249,16 +247,10 @@ def main():
 
     _install_wheel_guard(app)
 
-    # [A1] openai 资源预导入前移：QApp 就绪即启动预热线程（原在首窗构建后的
-    # _deferred_startup，预热完成点被首窗构建推迟 2-3s）。预热线程单线程顺序导入
-    # 不触发 Python 3.14 import 锁死锁；后续 worker 线程若等待 openai 模块锁为单向等待、无环。
-    try:
-        from app.utils.http_client import preload_openai_resources_async
-
-        preload_openai_resources_async()
-        logger.debug("[Startup] openai resources 子模块预导入已转后台线程（前移）")
-    except Exception:
-        logger.exception("[Startup] openai resources 预导入失败（非致命）")
+    # [T24] openai 资源预导入**不**在此处启动：预热线程会与主线程随后的
+    # main_widget 级联 import 争 Python import 锁，实测拖慢主线程 26%
+    # （首窗就绪 1948ms → 1433ms）。现推迟到首窗就绪之后启动，见 _show_popup
+    # 内 singleShot(0) 处。预热仅影响首次 LLM 调用快慢，晚启动无正确性代价。
 
     # ========== 延迟启动的非关键 I/O 操作 ==========
     # 以下操作不阻塞首帧渲染，放到一次性定时器中执行
@@ -291,7 +283,24 @@ def main():
 
             setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
         except Exception:
-            pass
+            # 日志系统自身失败不能拖垮启动，但绝不能静默：2026-10-28 出现
+            # POSIX semaphore 耗尽（Errno 28），setup_logging 抛出后被这里的
+            # pass 吞掉 → 应用照常运行但零日志，事后完全无证据可查。
+            # 落 stderr（打包版由 bootloader 转发）+ 数据目录留痕。
+            import traceback
+
+            _tb = traceback.format_exc()
+            sys.stderr.write(f"[EarlyForensics] setup_logging 失败:\n{_tb}\n")
+            sys.stderr.flush()
+            try:
+                from app.utils.utils import get_app_data_dir
+
+                _diag = get_app_data_dir() / "logs" / "logging_setup_failed.log"
+                _diag.parent.mkdir(parents=True, exist_ok=True)
+                with open(_diag, "a", encoding="utf-8") as _df:
+                    _df.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n{_tb}")
+            except Exception:
+                pass
         try:
             from app.core.infra.crash_handler import install_crash_handler
             from app.utils.utils import get_app_data_dir
@@ -357,7 +366,9 @@ def main():
             _bk_t0 = _time.perf_counter()
             _bk_thread = threading.Thread(target=_cleanup_backups, daemon=True)
             _bk_thread.start()
-            logger.debug(f"[DeferredStartup] 备份清理已派发后台线程（派发耗时 {(_time.perf_counter() - _bk_t0) * 1000:.1f}ms）")
+            logger.debug(
+                f"[DeferredStartup] 备份清理已派发后台线程（派发耗时 {(_time.perf_counter() - _bk_t0) * 1000:.1f}ms）"
+            )
         except Exception:
             logger.exception("[DeferredStartup] 启动备份清理线程失败")
         _mark("backup_limit_cleanup(dispatch)")
@@ -394,7 +405,6 @@ def main():
                 prewarm_markdown_block_viewer()
         except Exception:
             logger.exception("[DeferredStartup] prewarm_markdown_block_viewer 失败")
-
 
         # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
         # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
@@ -477,6 +487,7 @@ def main():
 
     # ========== 单实例检查 ==========
     from app.core.infra.single_instance import SingleInstanceGuard
+    from app.utils._startup_probe import dump as _probe_dump, mark as _probe
     from app.utils.config import Settings
 
     # [T24 R2] 二次启动 show 请求的接入口必须在拿到单实例锁后**立即**注册。
@@ -499,6 +510,7 @@ def main():
         win = _show_window_state["window"]
         if win is None:
             _show_window_state["wanted"] = True
+
             # [T36 P5] pending 超时兜底：首窗构造异常（如渲染环境崩溃）时，
             # 二次启动请求会一直挂在 wanted 上被静默丢弃 → 用户双击图标无反应。
             # 30s 后仍未就绪则清 wanted + 告警（对应 T24 R2 的"窗口期"上限）。
@@ -524,6 +536,7 @@ def main():
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
 
+    _probe("p1a.before_setTheme")
     try:
         from app.utils.theme_manager import theme_manager
 
@@ -533,6 +546,7 @@ def main():
             setTheme(Theme.DARK)
     except Exception:
         setTheme(Theme.DARK)
+    _probe("p1b.after_setTheme")
 
     # 获取全局字体配置
     from app.utils.config import Settings
@@ -545,6 +559,7 @@ def main():
             font_family = Settings.get_instance().canvas_font_selected.value
         except Exception:
             font_family = "Segoe UI"
+    _probe("p1c.after_font_config")
 
     # 注意：不在这里设置 QToolTip/ToolTip 样式，
     # 由 Colors.refresh() 在主题加载后用主题色统一设置。
@@ -668,6 +683,21 @@ def main():
         tm.add_window(chat_window)
         tm.remove_boot_placeholder()
         tm._mark_first_window_ready()
+        _probe_dump()
+        # [T24] openai 资源预导入推迟到此处（原在 QApp 就绪处）：预热线程的
+        # 串行 import 与主线程 main_widget 级联 import 争 Python import 锁，
+        # 实测拖慢主线程 26%。singleShot(0) 保证不阻塞首帧后的第一次交互；
+        # 预热失败不得阻塞启动。
+        def _preload_openai_resources():
+            try:
+                from app.utils.http_client import preload_openai_resources_async
+
+                preload_openai_resources_async()
+                logger.debug("[Startup] openai resources 子模块预导入已转后台线程（首窗就绪后）")
+            except Exception:
+                logger.exception("[Startup] openai resources 预导入失败（非致命）")
+
+        QTimer.singleShot(0, _preload_openai_resources)
         # [T24 R2] 窗口就绪 → 登记到共享状态；若 import 窗口期已有二次启动请求
         # （_on_show_requested 记了 pending），此处立即补激活，不再静默丢失。
         _show_window_state["window"] = tm
@@ -788,4 +818,18 @@ def main():
 
 
 if __name__ == "__main__":
+    # PyInstaller 打包后 sys.executable 是 app 二进制本身，multiprocessing 拉起
+    # 的辅助子进程（resource_tracker / spawn worker）不再由 python 解释器执行 ——
+    # bootloader 不认 `-c`，会把它当「正常启动」重跑整个应用。而 loguru 每个
+    # enqueue=True sink 都会创建 SimpleQueue/Event/Lock，首次调用即拉起
+    # resource_tracker → 子进程重跑 app → 它又建 sink 又拉 tracker → 无限自激。
+    # 实测（2026-10-28 打包版）：每 1-2s 派生一个主实例，17 分钟累计 221 个 PID。
+    #
+    # PyInstaller 的 pyi_rth_multiprocessing 已把本函数换成分流实现：命中
+    # `-c "from multiprocessing.resource_tracker import main"` 时只 exec 那段代码
+    # 然后 sys.exit()，不再进入 main()。源码运行时它是 no-op（先判 sys.frozen）。
+    # 位置必须在 __main__ 块内、main() 之前：rthook 在解释器启动时已完成替换。
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     main()

@@ -110,27 +110,44 @@ def reset_hosts() -> None:
     _plugin_hosts.clear()
 
 
-def _resolve_host(plugin: str, surface: str) -> Any:
-    """按插件名解析 host：绑定窗口 → 活跃窗口 → surface 默认 host。
+def active_main_widget() -> Any:
+    """当前活跃对话窗口（多标签下 = 用户此刻所在标签页）。
 
-    tool surface 没有窗口概念（host = ToolExecutor），直接返回 None，
-    由 tool_core 的 provider 自行从单例解析。hooks/ 调用点同样推断为
-    tool surface（见 _caller_info），同走 host=None。
+    ★ 不能用 ``UIPluginRegistry._main_widget``：它由窗口 __init__ 的
+    ``set_main_widget(self)`` 写入，语义是「最后构造的窗口」= 最新标签页，
+    切标签页不会更新。历史 bug：全局卡（历史会话页等）在主线程回调里经
+    ``caps_for`` 取 host 时拿到最新标签页，加载会话 / 切项目 / 新建会话
+    全部作用到错误标签页。
+
+    解析顺序：TabManagerWindow 当前选中 → _main_widget → 任一已登记窗口。
     """
-    host = _plugin_hosts.get(plugin)
-    if host is not None:
-        return host
+    try:
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            win = tm.get_current_window()
+            if win is not None and not getattr(win, "_is_destroyed", False):
+                return win
+    except Exception:
+        pass
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         reg = UIPluginRegistry.get_instance()
-        active = getattr(reg, "_main_widget", None)
-        if active is None:
-            widgets = getattr(reg, "_window_main_widgets", None) or {}
-            active = next(iter(widgets.values()), None)
-        return active
+        return getattr(reg, "_main_widget", None) or next(
+            iter((getattr(reg, "_window_main_widgets", None) or {}).values()), None
+        )
     except Exception:
         return None
+
+
+def _resolve_host(plugin: str, surface: str) -> Any:
+    """按插件名解析 host：绑定窗口 → 活跃窗口 → surface 默认 host。"""
+    host = _plugin_hosts.get(plugin)
+    if host is not None:
+        return host
+    return active_main_widget()
 
 
 def _registry():
