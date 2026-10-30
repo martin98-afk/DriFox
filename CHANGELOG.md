@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.13] - 2026-10-30
+## [v0.6.13] - 2026-10-30 (重新发布 #2)
 
-自 v0.6.13-beta 以来的变更 | 提交数：30 · 文件变更：104 · +7993/-1865 | 贡献者：dingma, mading
+自 v0.6.13-beta 以来的变更 | 提交数：40 · 文件变更：137 · +11051/-2554 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 - **流式渲染防重复与工具区自动展开守卫** (`201e4b6f` · `f9ea7bf6`): 工具区 auto-expand 增加流式活跃守卫；图表容器 ID 提取与稳定长度计算（`_compute_stream_stable_len`）改进，防止流式模式图表重复渲染，骨架缓存版本同步递增。
@@ -30,6 +30,17 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes)
 - **流式结束工具区瞬收与卡片底部空白** (`a84bfdbb`): 修复流式结束时工具区瞬间收起与卡片底部空白问题。
 - **tab 分隔线随主题刷新** (`78025f3a`): tab-panel 分隔线样式跟随主题变化刷新。
+
+### ✨ 新功能 (New Features) · 重新发布 #2 补充
+- **思考块流式实时预览** (`957e0bb3` · `bafafdd2` · `d3d34c3b`): 思考块在流式期间直接显示实时预览文本（节流更新 + 缓冲区管理），移除 spinner 动画，标题与预览统一为同一行展示并去掉分类标签；`message_card` / `card_viewers` 相应收口，缩回去掉约 500 行旧分支。
+- **工具流式块并入 v2 渲染体系** (`99ab913c`): 工具调用块改由 v2 块系统渲染，消除 JS 注入拼串，DOM 与正文块同源一致（+629 行，纯新增）。
+- **v2 块身份复用与防闪烁** (`870fd9e5` · `f9d182d5` · `a4665604`): 简洁模式下同身份块原地更新而非重建，流式期间不再闪烁、内容不跳变；骨架缓存版本递增，折叠态处理同步增强。
+
+### 🐛 问题修复 (Bug Fixes) · 重新发布 #2 补充
+- **启动期存储查询失败吞成空历史** (`460f9848` · `c4c98b10`): `HistoryManager` 首次查询失败会把空列表固化、后续不再重试，表现为历史页/输入历史永久空白；改为失败不写回缓存并延迟重试，新增 `tests/core/test_session_repository_lightweight_failure.py` 与 `tests/core/test_input_history_query_failure.py`。
+
+### 🧪 测试与诊断 (Tests & Diagnostics) · 重新发布 #2 补充
+- **强停后内容丢失与工具补全回归** (`b2581c90`): 新增强停场景回归测试与 6 个诊断探针（`tests/debug/_probe_*`、`_bench_v2_frame_cost.py`）、v2 工具块/实时预览/懒回调恢复等 8 个 widget 级测试，覆盖此前只能靠肉眼复现的渲染问题。
 
 ## [v0.6.13-beta] - 2026-10-29
 
