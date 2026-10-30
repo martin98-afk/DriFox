@@ -95,9 +95,11 @@ from app.widgets.render_crash_queue import RenderCrashQueue
 from app.widgets.card_render_core import (
     ACTION_COLOR_MAP,
     AUTO_SCROLL_THRESHOLD,
+    DOCK_COLLAPSE_SETTLE_MS,
     FINISH_TIMING_ENABLED,
     INCREMENTAL_FINALIZE_ENABLED,
     RenderCrashQueue,
+    TOOL_SECTION_REPORT_MS,
     _BODY_HEIGHT_CAP_JS,
     _BORDER_RADIUS_CSS_VARS,
     _BUILTIN_FENCE_PERMS,
@@ -1036,6 +1038,13 @@ class CodeWebViewer(QWebEngineView):
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._perform_update)
 
+        # 1b. 结束态终渲染串行定时器：坞态折叠过渡期间不派发终渲染
+        # （终渲染的长任务会把 200ms 折叠过渡压成瞬跳，详见 finish_streaming）
+        self._finish_defer_timer = QTimer(self)
+        self._finish_defer_timer.setSingleShot(True)
+        self._finish_defer_timer.timeout.connect(self._on_finish_defer_timeout)
+        self._finish_defer_immediate = True
+
         # 2. Resize 定时器
         # （原 _resize_timer(100ms → _safe_report_height) 从未 start()，死代码已移除；
         #   resize 期高度上报统一由 _resize_unlock_timer(150ms) 兜底。）
@@ -1520,6 +1529,10 @@ class CodeWebViewer(QWebEngineView):
             pass
         self._streaming = False
         self._is_history = False
+        # 结束态终渲染串行定时器：复用时必须停掉，否则旧卡的延后派发会落到新卡
+        if hasattr(self, "_finish_defer_timer"):
+            self._finish_defer_timer.stop()
+            self._finish_defer_immediate = True
         # 复用方可能是本轮对话（不折叠）或历史卡（折叠）：折叠必须在卡片
         # 绑定后按新卡片状态重新应用一次（见 _apply_history_collapsed）。
         self._history_collapse_applied = False
@@ -3940,17 +3953,21 @@ class CodeWebViewer(QWebEngineView):
                     _collapsibleHeightReporting = true;
                 }}
 
-                // ===== tool-section 折叠/展开过渡的高度报告抑制 =====
-                // #tool-content 有 max-height 200ms CSS 过渡，过渡期间 ResizeObserver
-                // 会上报中间态高度 → viewer setFixedHeight 连跳多次（流式抖动主因之二）。
-                // 统一模式：切换属性前先抑制报告 → transitionend（260ms 兜底）终值单报。
+                // ===== tool-section 折叠/展开过渡的高度报告 =====
+                // #tool-content 有 max-height 200ms CSS 过渡：transition 期间逐帧
+                // 上报会把 viewer setFixedHeight 打成锯齿（流式抖动主因之二），
+                // 因此 debounced 通道整体抑制，只留「过渡期间按拍节流直报 +
+                // transitionend（260ms 兜底）终值单报」两条出口。
                 // _finishToolSectionTransition 带 guard：先到者生效，后到者 no-op
                 // （同时修复旧 _toggleToolSection transitionend+setTimeout 双报告）。
                 var _tsTransitionDone = false;
                 var _tsTransitionToken = 0;
+                // 过渡期间中间高度上报的节拍句柄（见 _beginToolSectionTransition）
+                var _tsTransitionMidTimer = 0;
                 function _finishToolSectionTransition() {{
                     if (_tsTransitionDone) return;
                     _tsTransitionDone = true;
+                    if (_tsTransitionMidTimer) {{ clearInterval(_tsTransitionMidTimer); _tsTransitionMidTimer = 0; }}
                     reportHeight();          // 终值直报（不经 debounced，且此时抑制已可释放）
                     _collapsibleHeightReporting = false;
                 }}
@@ -3959,6 +3976,19 @@ class CodeWebViewer(QWebEngineView):
                     _tsTransitionDone = false;
                     var token = ++_tsTransitionToken;     // 轮次令牌：连续切换时旧 timer 失效
                     var _tcEl = document.getElementById('tool-content');
+                    // 过渡期间按固定节拍上报中间高度（≈Qt 追踪拍 50ms）：
+                    // 完全抑制上报时内容一路收、卡片高度原地不动，底部露出空白，
+                    // 等过渡结束才一次性上报。节流上报让 Qt 侧按拍逼近，卡片底边
+                    // 与工具区同步收起（抑制 debounced 仍保留：单帧内不重复报）。
+                    if (_tsTransitionMidTimer) {{ clearInterval(_tsTransitionMidTimer); _tsTransitionMidTimer = 0; }}
+                    _tsTransitionMidTimer = setInterval(function() {{
+                        if (token !== _tsTransitionToken) {{
+                            clearInterval(_tsTransitionMidTimer);
+                            _tsTransitionMidTimer = 0;
+                            return;
+                        }}
+                        reportHeight();
+                    }}, {TOOL_SECTION_REPORT_MS});
                     var _onTsEnd = function(ev) {{
                         // 只认 max-height 过渡结束（同元素 opacity 过渡会额外触发一次）
                         if (ev && ev.propertyName && ev.propertyName !== 'max-height') return;
@@ -8553,7 +8583,17 @@ class CodeWebViewer(QWebEngineView):
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         # immediate=False（T11 批量加载错峰）：交内部短定时器合并派发，
         # 避免 N 卡同帧全量重渲；状态清理与 JS 调用已在上方同步执行。
-        if immediate:
+        #
+        # [T30 续] 折叠过渡与终渲染串行：终渲染在渲染进程是 0.7~2.1s 的长任务
+        # （长内容全量重建 / v2 patch 全块，实测日志 [finish-render]），与折叠
+        # 过渡同帧派发会把它连同高度上报一起压住——任务结束时过渡按时间戳直接
+        # 跳到终值（用户看到「瞬收」），随后才上报高度 → 内容已收、卡片高度还是
+        # 旧值，底部露出空白再慢收。延后到过渡 + 终值上报完成再派发，折叠过程
+        # 可见、上报不被拖延。不折叠的卡照旧立即派发（不引入多余延迟）。
+        if not keep_dock and self._will_collapse_tool_section():
+            self._finish_defer_immediate = immediate
+            self._finish_defer_timer.start(DOCK_COLLAPSE_SETTLE_MS)
+        elif immediate:
             self._schedule_render(immediate=True)
         else:
             self._schedule_render(immediate=False)
@@ -8561,6 +8601,25 @@ class CodeWebViewer(QWebEngineView):
         # 标题栏）。坞态归位 + 折叠由 MessageCard.finish_streaming 统一触发
         # （需 Python 端 _streaming/_has_active_tools 判据，viewer 侧无此状态，
         # 故不在此处调用）；非简洁模式保持流式结束后的展开态不变。
+
+    def _on_finish_defer_timeout(self):
+        """折叠过渡结束后的终渲染派发（见 finish_streaming 串行化注释）。"""
+        self._schedule_render(immediate=self._finish_defer_immediate)
+
+    def _will_collapse_tool_section(self) -> bool:
+        """本次结束是否会触发工具区折叠过渡。
+
+        只服务「终渲染是否延后」这一个判定：漏判退化为旧行为（同帧派发），
+        多判仅多等 ``DOCK_COLLAPSE_SETTLE_MS`` 一拍，无正确性风险。
+        判据与 JS 侧 ``_setStreamingDock`` 的折叠条件对齐（简洁模式 + 非欢迎卡 +
+        工具区有内容）：已完成工具 id 集合，或正文含 ``<think>`` 协议块
+        （简洁模式下渲染成 think-compact，同样落在工具区）。
+        """
+        if not self._tool_compact_mode or self._light_skeleton:
+            return False
+        if getattr(self, "_restore_finished_ids", None):
+            return True
+        return "<think>" in (self._markdown_text or "")
 
     def _apply_history_collapsed(self):
         """历史卡工具区折叠（幂等）。

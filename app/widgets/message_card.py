@@ -134,6 +134,7 @@ from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from app.widgets.card_render_core import (
     AUTO_SCROLL_THRESHOLD,
     CustomTabButton,
+    DOCK_COLLAPSE_TRACK_WINDOW_S,
     FINISH_HEIGHT_ANIM_ENABLED,
     FINISH_HEIGHT_ANIM_MAX_USES,
     FINISH_HEIGHT_ANIM_MIN_DELTA,
@@ -441,6 +442,10 @@ class MessageCard(SimpleCardWidget):
         self._finish_height_anim_until = 0.0
         self._finish_height_anim_left = 0
         self._finish_height_anim_active = False
+        # 坞态折叠过渡窗口（monotonic 截止时刻；0 = 无窗口）：窗口内高度追踪用
+        # 流式口径 factor 快跟随，让卡片底边跟上正在收起的工具区，消除底部空白
+        # （FINISH 慢 factor 的 τ≈255ms 追 264px 要 ~1s，肉眼可见）。
+        self._dock_collapse_until = 0.0
         # [T29] 流式高度追踪进行中标记。追踪期间 Chromium 侧 ResizeObserver 会
         # 不断送来"当前中间高度"，若照单全收会把追踪打断成锯齿（stop → 防抖 →
         # 重启）。故追踪期间一律吞掉上报，落定时由 tick 主动校正。
@@ -3264,6 +3269,11 @@ class MessageCard(SimpleCardWidget):
             # 提速跟上大台阶；基于当前基线增量而非硬编码，保住结束态比流式更缓的
             # "丝绸尾音"设计。
             factor = self._height_track_factor
+            if time.monotonic() < getattr(self, "_dock_collapse_until", 0.0):
+                # [T30 续] 坞态折叠过渡窗口：内容在 200ms 内缩短工具区高度（可达
+                # 264px），慢 factor（τ≈255ms）会让卡片底边远远落后 → 底部空白肉眼
+                # 可见。窗口内换流式口径紧跟，与页面内折叠曲线同拍收尾。
+                factor = STREAM_HEIGHT_TRACK_FACTOR
             if abs(diff) > STREAM_HEIGHT_TRACK_FAR_PX:
                 # [R4-A] cap 改用常量 STREAM_HEIGHT_TRACK_MAX_FACTOR（0.90）：原先硬编码
                 # 0.85 与基线 0.84 只差 0.01，自适应提速等于失效。
@@ -4893,6 +4903,9 @@ class MessageCard(SimpleCardWidget):
                     # 只影响本兜底路径，坞态调用结构不变。
                     self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
                     self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
+                    # [T30 续] 与主路径一致：折叠过渡期间用流式口径快跟随，
+                    # 否则工具区收起 264px 时卡片底边慢追 → 底部空白。
+                    self._dock_collapse_until = time.monotonic() + DOCK_COLLAPSE_TRACK_WINDOW_S
                     self.viewer._sync_streaming_dock(False, collapse_after=True)
 
                 QTimer.singleShot(0, _dock_off_and_collapse)
@@ -5928,6 +5941,11 @@ class MessageCard(SimpleCardWidget):
             if not history:
                 self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
                 self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
+                # [T30 续] 本次会折叠工具区 → 折叠过渡窗口内高度追踪用流式口径
+                # 快跟随（见 _stream_height_tick_step）。必须早于下方
+                # viewer.finish_streaming 派发的折叠与首次中间上报（下游读它）。
+                if self._will_collapse_tool_section():
+                    self._dock_collapse_until = time.monotonic() + DOCK_COLLAPSE_TRACK_WINDOW_S
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 _keep_dock = self._has_active_tools() and not (history or force_dock_off)
                 self.viewer.finish_streaming(keep_dock=_keep_dock, immediate=immediate)
@@ -5957,6 +5975,24 @@ class MessageCard(SimpleCardWidget):
         才归位折叠。
         """
         return any(tid not in self._finished_streaming_ids for tid in self._tool_call_order)
+
+    def _will_collapse_tool_section(self) -> bool:
+        """本次结束是否会触发工具区折叠过渡（判据与 viewer 侧同源）。
+
+        供折叠过渡窗口用（窗口内高度追踪改走流式口径快跟随）。漏判只是失去
+        快跟随、退回旧行为，不会让折叠本身失效。判据：简洁模式 + 非欢迎卡 +
+        工具区有内容（已完成工具 id 集合，或正文含 ``<think>`` 协议块）。
+        """
+        viewer = self.viewer
+        if viewer is None:
+            return False
+        if not getattr(viewer, "_tool_compact_mode", True):
+            return False
+        if getattr(viewer, "_light_skeleton", False):
+            return False
+        if getattr(viewer, "_restore_finished_ids", None):
+            return True
+        return "<think>" in (getattr(viewer, "_markdown_text", "") or "")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

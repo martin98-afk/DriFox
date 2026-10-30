@@ -427,6 +427,21 @@ FINISH_HEIGHT_ANIM_MIN_DELTA = 16  # 小于该变化不值得动画（避免噪�
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
+# ======== 结束态坞态折叠：上报节流 / 终渲染串行 / 高度快跟随 ========
+# 现象：流式结束时工具区「瞬收」、卡片底部先冒空白再慢慢收回。
+# 成因三件：
+#   ① 折叠过渡与终渲染同帧派发，终渲染的渲染进程长任务（长内容实测
+#      0.7~2.1s）把 200ms 的 max-height 过渡连同高度上报一起压住，任务结束
+#      时过渡按时间戳直接跳到终值（无过程），上报才发出；
+#   ② 那一刻内容已短了工具区高度，卡片高度还是旧值 → 底部露空白；
+#   ③ Qt 侧 FINISH 态追踪 factor 0.178@50ms（τ≈255ms）追 264px 要 ~1s。
+# 对策：过渡期间按 TOOL_SECTION_REPORT_MS 节流上报中间高度（与 Qt 追踪同拍），
+# 终渲染延后到 DOCK_COLLAPSE_SETTLE_MS 之后派发，折叠后
+# DOCK_COLLAPSE_TRACK_WINDOW_S 内用流式口径 factor 快跟随。
+TOOL_SECTION_REPORT_MS = 50
+DOCK_COLLAPSE_SETTLE_MS = 280  # 200ms 过渡 + 260ms 兜底上报 + 余量
+DOCK_COLLAPSE_TRACK_WINDOW_S = 0.5
+
 # ======== 流式期「坞态预算」高度上限（起步跳变兜底）========
 # [T44] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
 # 完成时正文按自然高度排版、坞态到达再压回 → 起步「先胀大再缩回」。
@@ -3822,7 +3837,7 @@ _SKELETON_CACHE_MAX = 48
 # 标题左右横线造成卡中卡双圆角 + 标题居中破阅读轴；改为去外框、标题左对齐正文轴、
 # 计数独立 pill（.ts-count）、#tool-content 左侧 1.5px 竖线缩进。旧骨架的标题
 # textContent 仍拼「· N 项」，须失效缓存避免新旧结构混用。
-_SKELETON_CACHE_VERSION = 62
+_SKELETON_CACHE_VERSION = 63
 
 
 def _js_literal(value) -> str:
