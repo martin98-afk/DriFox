@@ -135,6 +135,58 @@ def test_live_block_skips_markdown():
     assert "<h1" not in mr.content[0].html
 
 
+def test_reasoning_active_block_uses_live_tail(monkeypatch):
+    """思考流也走纯文本尾态：内容增长不产生 patch op，且归工具区（简洁模式）。"""
+    content = "思考内容" * 200  # > _LIVE_MIN_CHARS
+    blocks = [{"type": "reasoning", "content": content}]
+    ctx_tool = RenderCtx(streaming=True, compact=True)
+
+    mr1 = render_message(blocks, ctx_tool, live_index=0, live_html="<div class='v2-live-text think-compact'>x</div>")
+    assert mr1.tool and not mr1.content, "reasoning live 块应归工具区（compact）"
+    assert mr1.tool[0].key == live_key(0)
+
+    blocks2 = [{"type": "reasoning", "content": content + "继续思考"}]
+    mr2 = render_message(blocks2, ctx_tool, live_index=0, live_html="<div class='v2-live-text think-compact'>xy</div>")
+    c_ops, t_ops = diff_message(mr1, mr2)
+    assert c_ops.is_empty and t_ops.is_empty, "思考内容增长不得触发整块重传"
+
+
+def test_reasoning_live_active_detection(monkeypatch):
+    from app.widgets.card_viewers import CodeWebViewer as _V
+
+    v = _make_viewer(monkeypatch, [])
+
+    class _Blk(dict):
+        pass
+
+    blocks = [{"type": "reasoning", "content": "思考" * 400}]
+    assert v._v2_live_active(blocks, 0) == 0, "reasoning 活动块应被 live 通道接受"
+
+    short = [{"type": "reasoning", "content": "短"}]
+    assert v._v2_live_active(short, 0) is None, "短内容仍走常规路径"
+
+
+def test_finalize_incremental_skips_container_clear(monkeypatch):
+    """流式结束的终渲染走增量：不清容器（免整卡重排，实测 450~490ms）。"""
+    blocks = [{"type": "text", "text": _long_text()}]
+    v = _make_viewer(monkeypatch, blocks, streaming=True)
+    assert v._perform_update_v2() is True
+    js1 = "".join(v._page.js_calls)
+    assert "_c1.innerHTML=''" in js1, "首帧仍应清容器（全量落地）"
+
+    v._page.js_calls.clear()
+    v._streaming = False
+    v._needs_full_render = True  # finish_streaming 会置位
+    v._v2_finalize_incremental = True  # v2 终渲染增量标记
+    blocks[0]["text"] = blocks[0]["text"] + "收尾追加的新段落内容。\n\n"
+    monkeypatch.setattr(CodeWebViewer, "_v2_render_ctx", lambda self: RenderCtx(streaming=False))
+    assert v._perform_update_v2() is True
+
+    js2 = "".join(v._page.js_calls)
+    assert "_c1.innerHTML=''" not in js2 and "_c2.innerHTML=''" not in js2, "终渲染应走增量 patch，不得清空容器"
+    assert "window.patchBlocks(" in js2, "终渲染仍要下发块级补丁"
+
+
 # ── 2. 首帧全量纯文本落地 ──────────────────────────────────────────
 
 

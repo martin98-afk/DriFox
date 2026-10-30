@@ -165,7 +165,7 @@ def main() -> None:
         "success": True,
     }
     card._content_data = [
-        {"type": "reasoning", "content": "初始思考内容。"},
+        {"type": "reasoning", "content": "初始思考内容。" + ("铺垫思考" * 200)},
         tool_block,
         {"type": "text", "text": TAIL.format(idx=0)},
     ]
@@ -199,7 +199,7 @@ def main() -> None:
 
     def render_batch(idx: int, label: str):
         card._content_data = [
-            {"type": "reasoning", "content": "初始思考内容。" + ("追加思考" * idx)},
+            {"type": "reasoning", "content": "初始思考内容。" + ("铺垫思考" * 200) + ("追加思考" * idx)},
             tool_block,
             {"type": "text", "text": TAIL.format(idx=idx)},
         ]

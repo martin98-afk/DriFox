@@ -19445,11 +19445,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     return
             logger.warning(f"未找到 session_id: {session_id}")
 
-    def _load_input_history(self):
-        """从数据库加载输入历史到输入框"""
+    def _load_input_history(self, retry: int = 0):
+        """从数据库加载输入历史到输入框
+
+        启动窗口期查询失败（disk I/O error 等）存储层返回 None：延迟重试，
+        不把失败当空历史吞掉（启动瞬时故障后上下键历史为空，直至用户发消息
+        才恢复）。至多重试 2 次，发送路径 _record_input_history 的重拉天然兜底。
+        """
         try:
             if hasattr(self, "session_store") and self.session_store:
                 history = self.session_store.get_input_history()
+                if history is None:
+                    if retry < 2:
+                        QTimer.singleShot(5000, lambda: self._load_input_history(retry + 1))
+                    return
                 self.input_area.load_history(history)
         except Exception:
             pass
@@ -19459,9 +19468,10 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             if hasattr(self, "session_store") and self.session_store:
                 self.session_store.add_input_history(text, attachments)
-                # 更新输入框的历史缓存
+                # 更新输入框的历史缓存；查询失败（None）保留现有列表不覆盖
                 history = self.session_store.get_input_history()
-                self.input_area.load_history(history)
+                if history is not None:
+                    self.input_area.load_history(history)
         except Exception:
             pass
 

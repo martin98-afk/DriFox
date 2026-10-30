@@ -362,8 +362,15 @@ def render_blocks(
         if not isinstance(block, dict):
             continue
         if live_index is not None and idx == live_index:
-            # 流式活动块：纯文本尾态（key 与内容无关，见 blocks.live_key）
-            out.append(BlockRender(kind=KIND_TEXT, key=live_key(idx), html=live_html, home=HOME_CONTENT))
+            # 流式活动块（text / reasoning）统一走纯文本尾态：key 与内容无关，
+            # 后续 diff 不会重传它，DOM 由调用方的 live 增量通道维护。
+            # reasoning 归工具区（简洁模式）保持思考卡的位置语义。
+            if block.get("type") == "reasoning":
+                out.append(
+                    BlockRender(kind=KIND_REASONING, key=live_key(idx), html=live_html, home=_reasoning_home(ctx))
+                )
+            else:
+                out.append(BlockRender(kind=KIND_TEXT, key=live_key(idx), html=live_html, home=HOME_CONTENT))
             flip_offset += _count_think_blocks(live_html)
             continue
         completed = not (ctx.streaming and active_index == idx)

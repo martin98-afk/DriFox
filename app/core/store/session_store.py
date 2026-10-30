@@ -1112,15 +1112,16 @@ class SessionStore:
             return self._input_history_repo.add(content, attachments)
         return False
 
-    def get_input_history(self, limit: int = 50) -> list:
+    def get_input_history(self, limit: int = 50) -> Optional[list]:
         """获取输入历史列表（最新在前）
 
         Returns:
-            list[dict]: 每个元素含 ``text`` 和 ``attachments`` 键
+            list[dict]: 每个元素含 ``text`` 和 ``attachments`` 键；
+            None: 查询失败（调用方应保持现状待重试，不得当空数据覆盖）。
         """
         if self._input_history_repo:
             return self._input_history_repo.get_all(limit)
-        return []
+        return None
 
     # ==================== 生命周期 ====================
 
