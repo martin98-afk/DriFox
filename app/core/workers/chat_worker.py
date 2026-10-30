@@ -506,7 +506,18 @@ class OpenAIChatWorker(QThread):
         self._last_line_est = s.response.last_line_est
         self._last_est_len = s.response.last_est_len
         self._last_compaction_state = s.compaction.last_state
-        self._current_session_messages = s.session.current_messages
+        # ⚠️ 会话消息单向同步（初始化读 state，之后以实例为准）。
+        # state.session.current_messages 只在构造期写入一次（run 起点快照），
+        # 运行中不会随工具迭代推进；若此处反向覆盖，每轮 API 调用前的
+        # _clear_pending_response_state() 会把 _current_session_messages
+        # 回退到起点列表 → 强制停止时 get_interrupted_messages() 取到残缺
+        # 快照（当前轮全部 assistant/tool 消息丢失），finalize 再覆盖 session，
+        # 继续发送的新 worker 即以残缺历史为基线（2026-10-30 实测：
+        # 插话→强停→撤回→续发 后整轮工具调用与大模型调用全部消失）。
+        if self.__dict__.get("_current_session_messages", None) is None:
+            self._current_session_messages = s.session.current_messages
+        else:
+            s.session.current_messages = self._current_session_messages
         self._last_usage = s.session.last_usage
         self._accumulated_tokens = s.session.accumulated_tokens
         self._compaction_cache = s.compaction.cache

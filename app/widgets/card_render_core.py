@@ -3903,7 +3903,11 @@ _SKELETON_CACHE_MAX = 48
 # Python 反查源不可用时（cleanup 清 _markdown_text 后的窗口）回空 html，旧逻辑
 # 留着 lazyBody 无限重试空请求（请求→空→return，2s 兜底被 lazyLoading 删除杀死）
 # → 完成框点击永远展不开。清标记后下次点击走普通展开路径。旧骨架无此行为。
-_SKELETON_CACHE_VERSION = 65
+# _SKELETON_CACHE_VERSION +1（v66）：_v2AfterPatch 紧凑模式搬移改「身份复用」——
+# 原实现每批把工具区搬入节点全删再从正文重放（活动块 live 尾态期间正文无协议卡 →
+# 工具区清空、正式化后又搬回），完成框/思考卡每批一删一加 → 内容与高度抖动、
+# 外层滚动条乱跳。旧骨架每批重建，必须失效缓存。
+_SKELETON_CACHE_VERSION = 66
 
 
 def _js_literal(value) -> str:

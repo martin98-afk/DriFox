@@ -5260,20 +5260,71 @@ class CodeWebViewer(QWebEngineView):
                         if (window._toolCompactMode && tc) {{
                             var cpEl = document.getElementById('content-placeholder');
                             if (cpEl) {{
-                                var staleSel = ':scope > .think-block, :scope > .think-streaming,'
-                                    + ' :scope > .think-compact,'
-                                    + ' :scope > [data-tool-call-id]:not([data-streaming="true"])';
-                                var stale = tc.querySelectorAll(staleSel);
-                                for (var di = 0; di < stale.length; di++) {{
-                                    if (!(stale[di].hasAttribute && stale[di].hasAttribute('data-block-key'))) stale[di].remove();
+                                // 🐛 搬移改「身份复用」（2026-10-30 用户实测：简洁模式流式
+                                // 下完成框/思考卡每批一删一加，内容与高度持续抖动，外层
+                                // 滚动条跟着乱跳）。原实现每批先把工具区搬入节点全删、再从
+                                // 正文重放：活动 text 块走 live 纯文本尾态时正文并无协议卡
+                                // → 工具区被清空；下一次正式化整块重渲又把卡搬回，于是
+                                // 每批一删一加。新语义：同身份（data-tool-call-id /
+                                // data-flip-key）的节点留在工具区不动，正文里的新副本
+                                // （重渲产物）直接丢弃；只有新身份才搬入。删除语义延后到
+                                // 非流式终态统一清理（那时正文重渲结果才是完整集合）。
+                                function _mvKey(el) {{
+                                    var tid = el.getAttribute && el.getAttribute('data-tool-call-id');
+                                    if (tid) return 't:' + tid;
+                                    var fk = el.getAttribute && el.getAttribute('data-flip-key');
+                                    if (fk) return 'k:' + fk;
+                                    return '';
                                 }}
+                                var existing = {{}};
+                                var moveds = tc.querySelectorAll(':scope > .think-block, :scope > .think-streaming,'
+                                    + ' :scope > .think-compact,'
+                                    + ' :scope > [data-tool-call-id]:not([data-streaming="true"])');
+                                for (var mi = 0; mi < moveds.length; mi++) {{
+                                    var mk = _mvKey(moveds[mi]);
+                                    if (mk && !existing[mk]) {{
+                                        existing[mk] = moveds[mi];
+                                        moveds[mi].setAttribute('data-moved', '1');
+                                    }}
+                                }}
+                                var seen = {{}};
                                 var strays = cpEl.querySelectorAll(
                                     '.think-block, .think-streaming, .think-compact, [data-tool-call-id]'
                                 );
                                 for (var si = 0; si < strays.length; si++) {{
                                     var sEl = strays[si];
                                     if (sEl.getAttribute && sEl.getAttribute('data-keep-in-content') === 'true') continue;
+                                    var sk = _mvKey(sEl);
+                                    // 无稳定身份键（flip_idx<0 的极早流式块）：用「类名 + 序位」兜底，
+                                    // 同位置的块每批命中同一身份（内容增长走替换），不再累积副本
+                                    if (!sk) sk = 'x:' + String(sEl.className || '') + ':' + si;
+                                    seen[sk] = true;
+                                    var cur = existing[sk];
+                                    if (cur) {{
+                                        // 同身份已存在：工具块内容固定 → 丢新副本保旧节点（不闪）；
+                                        // 思考块内容会增长（流式）→ 新副本原位替换旧节点
+                                        if ((sEl.textContent || '').length > (cur.textContent || '').length) {{
+                                            sEl.setAttribute('data-moved', '1');
+                                            if (cur.parentNode) cur.parentNode.replaceChild(sEl, cur);
+                                            existing[sk] = sEl;
+                                        }} else if (sEl.parentNode) {{
+                                            sEl.parentNode.removeChild(sEl);
+                                        }}
+                                        continue;
+                                    }}
                                     tc.appendChild(sEl);
+                                    sEl.setAttribute('data-moved', '1');
+                                    existing[sk] = sEl;
+                                }}
+                                // 删除语义：仅非流式终态清理工具区里正文已不存在的搬入节点
+                                if (window._streamingActive !== true) {{
+                                    var olds = tc.querySelectorAll('[data-moved="1"]');
+                                    for (var oi = olds.length - 1; oi >= 0; oi--) {{
+                                        var ok = _mvKey(olds[oi]);
+                                        if (ok && !seen[ok] && olds[oi].parentNode) {{
+                                            olds[oi].parentNode.removeChild(olds[oi]);
+                                        }}
+                                    }}
                                 }}
                             }}
                         }}
