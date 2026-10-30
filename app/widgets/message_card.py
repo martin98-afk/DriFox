@@ -5639,6 +5639,13 @@ class MessageCard(SimpleCardWidget):
             if isinstance(self._content_data, list) and self._content_data:
                 self._tool_anchor_refs[tool_call_id] = self._content_data[-1]
             self._tool_call_order[tool_call_id] = len(self._tool_call_order)
+            # [v2] 工具调用开始 → 活动正文块已定型：立即把 live 纯文本尾态正式化。
+            # 否则该块不再增长、正式化阈值永不满足，正文停在 markdown 源码形态
+            # 直到流式结束（提问卡等阻塞工具等待回答期间最明显）。
+            _finalize_vwr = getattr(self, "viewer", None)
+            _finalize_cb = getattr(_finalize_vwr, "mark_live_tail_finalized", None) if _finalize_vwr else None
+            if callable(_finalize_cb):
+                _finalize_cb()
         # 🆕 第一次工具参数到达时，标记当前思考块为完成态（💡）
         # 修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 还显示"思考中"
         self._maybe_finish_thinking_for_tool(tool_call_id)

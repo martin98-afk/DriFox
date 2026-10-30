@@ -59,6 +59,7 @@ class DeferredTaskQueue(QObject):
         self._start_monotonic = 0.0
         self._pump_scheduled = False
         self._paused = False
+        self._held: set = set()  # 被点名挂起的任务（_ready 恒 False，依赖它们的任务也不会放行）
         self._async_task_done.connect(self._on_async_task_done)
 
     # ── 注册接口 ──
@@ -116,22 +117,36 @@ class DeferredTaskQueue(QObject):
         self._barriers.discard(name)
         return self
 
-    def pause(self, reason: str = "") -> None:
-        """暂停调度（幂等）。
+    def pause(self, reason: str = "", only=None) -> None:
+        """挂起调度（幂等）。
 
-        用途：与另一段「会 import 插件模块」的主线程工作错峰。Python 的 import
-        锁是进程级的，后台线程导入模块时主线程再导同一模块会整段阻塞（实测
-        UI 插件装载被拖住 3.3s，且恢复时刻精确等于后台 warmup 结束）。
-        已投递的异步任务无法撤回，但主线程不会再启新的。
+        Args:
+            only: 只挂起这些任务名（其余任务照常调度）。传 None 则全部挂起。
+
+        用途：与另一段「会 import 插件模块 / 会拉起插件扫描」的主线程工作错峰。
+        Python 的 import 锁是进程级的，后台线程导入模块时主线程再导同一模块会
+        整段阻塞（实测 UI 插件装载被拖住 3.3s，且恢复时刻精确等于后台 warmup 结束）。
+        但挂起范围过宽会把本应跑完的预热推到装载之后，反而被读路径在主线程
+        同步拉起（provider 扫描就踩过这个：脱离队列后由 GiraCard 读配置触发，
+        1.5s 落在装载中间）。所以只挂起真正会争 import 锁的那几项。
         """
-        if self._stopped or self._paused:
+        if self._stopped:
+            return
+        if only is not None:
+            self._held.update(only)
+            logger.debug(f"[DeferredTaskQueue] hold {sorted(self._held)} ({reason or 'manual'})")
+            return
+        if self._paused:
             return
         self._paused = True
         logger.debug(f"[DeferredTaskQueue] paused ({reason or 'manual'})")
 
     def resume(self, reason: str = "") -> None:
         """恢复调度（幂等；暂停期间未执行的任务照常按 delay/约束执行）"""
-        if self._stopped or not self._paused:
+        if self._stopped:
+            return
+        self._held.clear()
+        if not self._paused:
             return
         self._paused = False
         logger.debug(f"[DeferredTaskQueue] resumed ({reason or 'manual'})")
@@ -177,6 +192,8 @@ class DeferredTaskQueue(QObject):
         """任务是否满足执行条件（delay 到期 + 保序约束满足 + 屏障条件满足）"""
         if task.ran:
             return False
+        if task.name in self._held:
+            return False  # 被点名挂起（等 resume）
         if task.started:
             return False  # 异步任务在跑，等回填
         if self._elapsed_ms() < task.delay_ms:

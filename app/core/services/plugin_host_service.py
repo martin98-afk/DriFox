@@ -186,15 +186,20 @@ class PluginHostService(QObject):
         self._started = True
         self._init_plugin_system()
 
-    def pause_deferred(self, reason: str = "") -> None:
-        """暂停延迟队列（幂等）。UI 插件装载期与后台 warmup 错峰用。
+    def pause_deferred(self, reason: str = "", only=None) -> None:
+        """挂起延迟队列（幂等）。UI 插件装载期与后台预热错峰用。
+
+        Args:
+            only: 只挂起这些任务名（None = 全部）。装载期应只点名会与主线程
+                import 争锁的 runtime_components / net_preheat；整体挂起会把
+                provider 预热也推后，随后被读路径在主线程同步拉起，更慢。
 
         两段都 import 插件模块：后台线程持 import 锁时，主线程的 load_plugin
         会整段阻塞。实测让帧后等 3.3s，且恢复时刻精确等于后台 warmup 结束。
         """
         queue = getattr(self, "_deferred_queue", None)
         if queue is not None:
-            queue.pause(reason)
+            queue.pause(reason, only=only)
 
     def resume_deferred(self, reason: str = "") -> None:
         """恢复延迟队列（幂等；重复调用无副作用）"""

@@ -4100,59 +4100,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 warmup_component("budget_resolvers")
             except Exception as e:
                 logger.warning(f"[MainWidget] 上下文策略预注册失败（继续装载）: {e}")
-            svc.pause_deferred("ui_plugin_load")
+            svc.pause_deferred("ui_plugin_load", only=["runtime_components", "net_preheat"])
             # 步进链是单发定时器：窗口销毁后收口分支不会再跑，必须另有释放路径，
             # 否则应用级队列被永久暂停（其它窗口的启动任务全部卡死）
             self.destroyed.connect(lambda *_: svc.resume_deferred("window_destroyed"))
         except Exception as e:
             logger.warning(f"[MainWidget] 暂停延迟队列失败（不影响装载）: {e}")
-        self._start_ui_load_stall_probe()
-
-    def _start_ui_load_stall_probe(self) -> None:
-        """[DEBUG-stall] 装载期采样主线程栈：连续同栈即打印。
-
-        背景：装载过程存在多段 1~3s 的无日志空白（在 assistant_hub 之后、
-        marketplace 之后），打点只能测长度不能指认位置。采样用
-        sys._current_frames() 从后台线程读主线程栈，不干扰被测线程。
-        定位完成后删除整个方法与 _stop_ui_load_stall_probe。
-        """
-        import sys as _sys
-        import threading
-        import traceback
-
-        stop = threading.Event()
-        self._ui_load_probe_stop = stop
-        main_ident = threading.main_thread().ident
-
-        def loop():
-            last = ""
-            same = 0
-            while not stop.wait(0.15):
-                frame = _sys._current_frames().get(main_ident)
-                if frame is None:
-                    continue
-                stack = "".join(traceback.format_stack(frame, limit=10))
-                if stack == last:
-                    same += 1
-                    if same == 5:  # 约 0.75s 停在同一栈
-                        logger.warning(f"[MainWidget][DEBUG-stall] 主线程连续停在同一栈：\n{stack}")
-                        same = 0
-                else:
-                    last = stack
-                    same = 0
-
-        threading.Thread(target=loop, daemon=True, name="ui-load-stall-probe").start()
-
-    def _stop_ui_load_stall_probe(self) -> None:
-        """[DEBUG-stall] 停止主线程栈采样"""
-        stop = getattr(self, "_ui_load_probe_stop", None)
-        if stop is not None:
-            stop.set()
-            self._ui_load_probe_stop = None
 
     def _release_deferred_after_plugin_load(self) -> None:
-        """装载收口：恢复被 _hold_deferred_for_plugin_load 暂停的队列（幂等）"""
-        self._stop_ui_load_stall_probe()
+        """装载收口：恢复被 _hold_deferred_for_plugin_load 挂起的队列（幂等）"""
         try:
             from app.core.services.plugin_host_service import PluginHostService
 
@@ -20683,7 +20639,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 需通过 .viewer 访问。viewer 可能为 None（懒渲染未就绪）。
             _vwr = getattr(self._current_assistant_card, "viewer", None)
             if _vwr is not None:
-                _vwr._schedule_render(immediate=True)
+                # [v2] 正文块已定型：同帧把 live 纯文本尾态正式化（无该方法时退回普通调度）
+                _finalize_cb = getattr(_vwr, "mark_live_tail_finalized", None)
+                if callable(_finalize_cb):
+                    _finalize_cb()
+                else:
+                    _vwr._schedule_render(immediate=True)
 
         # 🐛 修复：在工具启动路径也触发 _maybe_finish_thinking_for_tool，
         # 覆盖 LLM 只输出 reasoning 然后直接调用工具（无 update_tool_streaming）的场景。

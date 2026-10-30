@@ -24,6 +24,7 @@ User-Agent）经 capabilities["extra_headers"] 注入每个 LLM 请求，主程�
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -398,6 +399,20 @@ def _fetch_balance(config):
 #   fatal exception 0x8001010D（pytest/开发进程退出必现）
 _STOP_EVENT = threading.Event()
 _THREAD_STARTED = False
+# 跨热重载的线程单例：热重载会重新 exec 本模块，模块级 _THREAD_STARTED 归零，
+# 但旧守护线程仍在跑（且只认旧模块的 _STOP_EVENT）。历史后果不是「无害」：
+# 多个线程并发 refresh 同一批号，各自拿到不同的新 refresh_token、各写一份
+# 缓存文件，旧代次又互相删不掉——实测累积到 181 个文件而真实账号只有 3 个。
+# 存在 sys 上可跨模块重载存活，新模块直接复用旧线程与其退出信标。
+_STATE_SYS_ATTR = "_drifox_codebuddy_refresh_state"
+# 启动宽限（秒）：注册时守护线程立即开跑第一轮，68 个缓存号 × (refresh +
+# checkin_status + 每日任务) 是数分钟的串行 HTTP。它跑在后台线程，但 urllib/SSL/
+# JSON 全程持 GIL，与 UI 初始化抢 CPU——实测首轮仅 25 个号就 6.99s（cProfile），
+# 直接表现为 UI 插件装载帧间等待 3~5s、且主线程栈一直在变（非单点阻塞）。
+# 签到是日常任务，晚两分钟无代价。
+_STARTUP_GRACE_SEC = 120
+# 非活跃号的兜底维护条数：缓存目录里多数是 token 轮换代次残留，只需覆盖最近几个
+_REFRESH_RECENT_LIMIT = 5
 
 
 # ── 每日任务编排（成长中心 / 活跃上报 / 领奖 / 旅行，2026-10 真机校准）─────
@@ -1098,6 +1113,24 @@ def _run_daily_tasks(ba, at: str, uid: str, nickname: str, entry: dict) -> None:
         logger.info(f"[CodeBuddy] 本轮累计 +{gained_credit} 积分 / +{gained_energy} 能量")
 
 
+def _refresh_targets() -> list:
+    """守护循环要维护的缓存文件：活跃号 + 最近几个兜底，不扫历史全量。
+
+    历史遗留：早期实现遍历 ``_CACHE_DIR.glob("*.json")`` 全部文件（实测 181 个），
+    每个都发一轮签到 HTTP，而真实账号只有 3 个——其余是同账号 refresh_token
+    轮换产生的代次残留（文件名按 sha1(token)[:12] 生成，旧代次未删净）。
+    代价是启动后数分钟的后台密集请求，urllib/SSL 全程持 GIL，直接拖慢 UI 装载。
+
+    ``DRIFOX_CODEBUDDY_TASKS_ALL=1``（_FORCE_ALL）恢复全量遍历。
+    """
+    if _FORCE_ALL:
+        return sorted(_CACHE_DIR.glob("*.json"))
+    keep = {p for p in _active_cache_files() if p.exists()}
+    recent = sorted(_CACHE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    keep.update(recent[:_REFRESH_RECENT_LIMIT])
+    return sorted(keep)
+
+
 def _refresh_loop():
     """守护循环：遍历缓存内全部号 —— 临期刷新 access_token + 每日签到/成长任务（幂等）。
 
@@ -1108,19 +1141,23 @@ def _refresh_loop():
         _load_auth_module()  # 预热：退出期不再首次加载 auth 模块
     except Exception:
         pass
+    # 启动宽限：先把 CPU/GIL 让给 UI 初始化与插件装载（秒级扫描），再开始跑账号维护
+    for _ in range(_STARTUP_GRACE_SEC):
+        if _STOP_EVENT.is_set():
+            return
+        time.sleep(1)
     while not _STOP_EVENT.is_set():
         try:
             from loguru import logger
 
             ba = _load_auth_module()
-            paths = sorted(_CACHE_DIR.glob("*.json"))
+            paths = _refresh_targets()
             active = set(_active_cache_files())
             # 在用号排最前：历史缓存号上百个，配置号不能排在它们后面干等
             ordered = [p for p in paths if p in active] + [p for p in paths if p not in active]
             if paths:
                 logger.info(
-                    f"[CodeBuddy] 开始维护 {len(paths)} 个号（签到全量，"
-                    f"每日任务 {len(active)} 个在用号优先）"
+                    f"[CodeBuddy] 开始维护 {len(paths)} 个号（每日任务 {len(active)} 个在用号优先）"
                 )
             for path in ordered:
                 try:
@@ -1138,6 +1175,9 @@ def _refresh_loop():
                             if _cache_path(entry.get("refresh_token", "")) != _cache_path(rt):
                                 path.unlink(missing_ok=True)
                             path = _cache_path(rt)
+                            # 轮换代次后把活跃标记迁到新文件名，否则 active.json 的 stem
+                            # 指向已删文件，「在用号」识别永久失效（实测 3 条里 2 条悬空）
+                            _mark_active(rt)
                     if at:
                         status = ba.checkin_status(at)
                         if (
@@ -1201,17 +1241,28 @@ def _run_daily_for_entry(ba, at: str, entry: dict) -> None:
 
 
 def _bootstrap():
-    """注册时启动守护线程（热重载重复启动无害：daemon 且幂等写）。
+    """注册时启动守护线程（进程内单例，跨模块热重载存活）。
+
+    热重载会重新 exec 本模块：模块级 _THREAD_STARTED 归零，但旧线程活着。
+    必须到 sys 上找旧线程，否则每重载一次就多一个线程并发刷新同一批号。
 
     测试/CI 环境（DRIFOX_NO_CODEBUDDY_REFRESH=1）不启动：守护线程的
     urlopen/DNS 解析与解释器退出存在竞态（Windows fatal 0x8001010D），
     测试进程退出期会被它击中。
     """
-    global _THREAD_STARTED
+    global _THREAD_STARTED, _STOP_EVENT
     if _THREAD_STARTED:
         return
     if os.environ.get("DRIFOX_NO_CODEBUDDY_REFRESH") == "1":
         return
+    prev = getattr(sys, _STATE_SYS_ATTR, None)
+    if prev is not None:
+        thread, stop_event = prev
+        if thread.is_alive():
+            # 复用存活线程的退出信标，使本模块的 aboutToQuit/热重载路径能停掉它
+            _STOP_EVENT = stop_event
+            _THREAD_STARTED = True
+            return
     _THREAD_STARTED = True
     _STOP_EVENT.clear()
     # 主线程预热配置号（守护线程不能碰 QConfig）；配置变化时在主线程刷新缓存
@@ -1223,7 +1274,9 @@ def _bootstrap():
         settings.llm_saved_providers.valueChanged.connect(lambda *_: _warm_config_tokens())
     except Exception:
         pass
-    threading.Thread(target=_refresh_loop, daemon=True).start()
+    worker = threading.Thread(target=_refresh_loop, daemon=True)
+    setattr(sys, _STATE_SYS_ATTR, (worker, _STOP_EVENT))
+    worker.start()
     try:
         from PyQt5.QtCore import QCoreApplication
 

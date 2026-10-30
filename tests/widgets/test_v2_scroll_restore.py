@@ -69,6 +69,7 @@ def _make_viewer(monkeypatch, blocks, ctx: Optional[RenderCtx] = None):
     v._v2_live_sent = ""
     v._v2_live_formalized_len = 0
     v._v2_live_formalize_ts = 0.0
+    v._v2_live_finalize_requested = False
     v._markdown_text = "md"
     v._lazy_markdown_cb = None
     v._needs_full_render = True

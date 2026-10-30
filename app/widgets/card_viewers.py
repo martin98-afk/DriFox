@@ -871,6 +871,9 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_sent = ""
         self._v2_live_formalized_len = 0
         self._v2_live_formalize_ts = 0.0
+        # 活动块已定型标记：工具调用开始时由 MessageCard 置位，下一帧把
+        # 纯文本尾态整块正式化（见 mark_live_tail_finalized）
+        self._v2_live_finalize_requested = False
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
@@ -7434,14 +7437,33 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_sent = ""
         self._v2_live_formalized_len = 0
         self._v2_live_formalize_ts = 0.0
+        self._v2_live_finalize_requested = False
+
+    def mark_live_tail_finalized(self) -> None:
+        """宣告活动正文块已定型（工具调用开始），立即按完成态正式渲染一次。
+
+        活动块判据 ``active_block_index`` 只认「最后一个 text/reasoning 块」：
+        工具调用后该块不会再增长，但流式标记仍在 —— 纯文本尾态会一直挂着，
+        而正式化要求「新增 ≥256 字符」，永远不满足 → 正文停在 markdown 源码
+        形态直到流式结束（提问卡等阻塞工具等待回答期间最明显）。
+
+        置位后下一帧把活动块按完成态整块渲染（markdown），与纯文本节点的差异
+        由 ``diff_message`` 自然生成替换 op。幂等：多路径重复调用只多一次渲染。
+        """
+        self._v2_live_finalize_requested = True
+        self._schedule_render(immediate=True)
 
     def _v2_live_active(self, blocks, active: Optional[int] = None) -> Optional[int]:
-        """本批可走纯文本尾态的活动块下标；None = 走常规全量渲染。"""
+        """本批可走纯文本尾态的活动块下标；None = 走常规全量渲染。
+
+        ``active`` 传负数为「无活动块」哨兵（调用方已判定末尾块定型），
+        不得回落到自动推断。
+        """
         if not self._streaming:
             return None
         if active is None:
             active = active_block_index(blocks, True)
-        if active is None or active >= len(blocks):
+        if active is None or active < 0 or active >= len(blocks):
             return None
         blk = blocks[active]
         if not isinstance(blk, dict) or blk.get("type") != "text":
@@ -7454,6 +7476,18 @@ class CodeWebViewer(QWebEngineView):
     def _v2_live_html(text: str) -> str:
         """live 节点 HTML：纯文本（CSS 保留换行缩进）+ 统计占位（与常规形态同位）。"""
         return f'<div class="v2-live-text">{escape(text)}</div>' + _CHAR_COUNT_HTML
+
+    def _v2_active_block_finalized(self, blocks, active: int, requested: bool = False) -> bool:
+        """活动块是否已定型（不会再增长）。
+
+        两种情形：① 工具调用已开始（``mark_live_tail_finalized`` 置位，由
+        ``_perform_update_v2`` 本帧取走传入）；② 该块之后已有工具/图片/自定义
+        块——协议已切段，末尾 text 块不可能是活动块（``active_block_index``
+        只跳过 text/reasoning，看不到这一点）。
+        """
+        return requested or any(
+            isinstance(b, dict) and b.get("type") not in ("text", "reasoning") for b in blocks[active + 1 :]
+        )
 
     def _v2_live_should_formalize(self, text: str) -> bool:
         """节流窗口 + 安全边界都满足时才整块正式化。"""
@@ -7538,6 +7572,10 @@ class CodeWebViewer(QWebEngineView):
             self._block_cache.clear()
             self._v2_last = None
         # 内容整体替换 / 主题 / 字体等旧信号同样触发全量重落地
+        # 定型标记本帧消费：上面的 deferred / 无块源分支已提前 return，
+        # 标志不会丢；必须早于 force_full 的 _v2_reset_live（它会清标志）
+        finalize_requested = self._v2_live_finalize_requested
+        self._v2_live_finalize_requested = False
         force_full = self._needs_full_render or self._v2_last is None
         self._needs_full_render = False
         self._final_render_pending = False
@@ -7546,6 +7584,9 @@ class CodeWebViewer(QWebEngineView):
             self._v2_reset_live()
 
         active = active_block_index(blocks, True) if self._streaming else None
+        if active is not None and self._v2_active_block_finalized(blocks, active, finalize_requested):
+            # 已定型：-1 不被任何 idx 命中 → 全块按完成态渲染（含 markdown 正式化）
+            active = -1
         live_index = self._v2_live_active(blocks, active)
         live_key_now = ""
         live_text = ""

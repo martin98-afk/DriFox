@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
@@ -61,7 +61,11 @@ def _make_viewer(monkeypatch, blocks: Any, streaming: bool = True):
     v._v2_ctx_sig = None
     v._v2_live_key = ""
     v._v2_live_sent = ""
+    v._v2_live_formalized_len = 0
     v._v2_live_formalize_ts = 0.0
+    v._v2_live_finalize_requested = False
+    v._render_timer = QTimer()
+    v._last_render_ts = 0.0
     v._markdown_text = "md"
     v._lazy_markdown_cb = None
     v._needs_full_render = True
@@ -236,6 +240,64 @@ def test_short_text_keeps_regular_path(monkeypatch):
 
 # ── 7. 骨架 JS 防线：新增的两个函数必须真实存在且语法有效 ──────────
 
+
+def test_tool_call_start_finalizes_live_tail(monkeypatch):
+    """提问卡等阻塞工具：正文块在工具调用后不再增长，必须立即转正式 markdown。
+
+    否则 ``_v2_live_should_formalize`` 等「新增 ≥256 字符」永远不满足，
+    正文停在纯文本源码形态直到流式结束（用户报告：提问卡上方一块纯文本）。
+    """
+    text = "# 剩下的是物理清理\n\n" + "物理清理建议正文。" * 60
+    blocks = [{"type": "text", "text": text}]
+    v = _make_viewer(monkeypatch, blocks)
+    assert v._perform_update_v2() is True
+    assert v._v2_live_key == "live:0"
+    assert "v2-live-text" in "".join(v._page.js_calls)
+
+    v._page.js_calls.clear()
+    v._needs_full_render = False
+    v.mark_live_tail_finalized()  # 等价于工具调用开始
+    js = "".join(v._page.js_calls)
+    ops = _patch_ops(js, "content-placeholder")
+    assert ops, "工具调用开始时必须把定型正文整块正式化"
+    item = ops[0]["items"][0]
+    assert item["key"] != "live:0", "定型块必须用 markdown 指纹 key"
+    assert "<h1" in item["html"] and "<p>" in item["html"], "定型块必须走 markdown 转换"
+    assert "v2-live-text" not in item["html"]
+    assert v._v2_live_finalize_requested is False, "定型标记消费后必须清除"
+
+def test_trailing_tool_block_means_text_finalized(monkeypatch):
+    """工具结果块已落地：其前的 text 块不可能再增长，不得继续走 live 尾态。"""
+    text = _long_text()
+    blocks = [
+        {"type": "text", "text": text},
+        {
+            "type": "tool_result",
+            "name": "question",
+            "tool_call_id": "t1",
+            "result": '{"questions": []}',
+            "success": True,
+        },
+    ]
+    v = _make_viewer(monkeypatch, blocks)
+    assert v._perform_update_v2() is True
+    js = "".join(v._page.js_calls)
+    ops = _patch_ops(js, "content-placeholder")
+    assert ops, "末尾 text 块之后有工具块 → 必须正式化"
+    keys = [it["key"] for it in ops[0]["items"]]
+    assert all(k != "live:0" for k in keys)
+    assert any("<p>" in it["html"] for it in ops[0]["items"])
+
+def test_growing_text_after_tool_block_still_live(monkeypatch):
+    """工具块之后的新 text 块仍在增长 → 正常走 live 尾态（不得误判定型）。"""
+    blocks = [
+        {"type": "text", "text": _long_text()},
+        {"type": "tool_result", "name": "question", "tool_call_id": "t1", "result": "{}", "success": True},
+        {"type": "text", "text": _long_text()},
+    ]
+    v = _make_viewer(monkeypatch, blocks)
+    assert v._perform_update_v2() is True
+    assert v._v2_live_key == live_key(2)
 
 def _node_available() -> Optional[str]:
     import subprocess
