@@ -2044,13 +2044,6 @@ class SendableTextEdit(TextEdit):
                 event.accept()
                 return
 
-        # 命令已折叠成胶囊（确认过）→ Tab 静默：不再触发命令补全重建
-        # （否则按 Tab 会把胶囊+参数整段替换成新胶囊），也不确认 detail 参数，
-        # 避免「命令输入完后按 Tab 重复插参数」。参数仍可 ↑↓ 高亮 + 点击确认。
-        if event.key() == Qt.Key_Tab and self._command_mention_at(0) is not None:
-            event.accept()
-            return
-
         # 历史浏览模式下，↑↓ 始终导航历史，不受命令卡片影响
         in_history_mode = self._history_index >= 0
 
@@ -2110,6 +2103,13 @@ class SendableTextEdit(TextEdit):
 
         # Tab 键：开头有 / 时触发补全（detail 模式不触发）
         if event.key() == Qt.Key_Tab:
+            # 命令已折叠（确认过）→ 不再重新触发补全：否则 slashTriggered →
+            # select_current → insert_command_text 会把「胶囊+已打参数」整段
+            # 替换成新胶囊。detail 卡片自身的 Tab 选参数在上面分支已处理，
+            # 不受此拦截影响。
+            if self._command_mention_at(0) is not None:
+                event.accept()
+                return
             text = self.toPlainText()
             if text.startswith("/") and not (card and card.is_detail_mode):
                 # 模拟 / 触发，然后选择当前项

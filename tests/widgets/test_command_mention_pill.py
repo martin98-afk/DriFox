@@ -7,6 +7,7 @@ remove_parameter_text 后重折叠。
 """
 
 import pytest
+from PyQt5.QtCore import QObject, pyqtSignal
 
 from app.widgets.bottom_input_area import (
     _ASSISTANT_MENTION_NAME_PROP,
@@ -239,7 +240,7 @@ def test_all_mention_objects_draw_without_error(editor):
 
 
 def test_tab_silent_after_command_collapsed(editor, monkeypatch):
-    """命令已折叠后按 Tab 静默：不重触发补全、不改文本、不重复插参数"""
+    """命令已折叠且无卡片时按 Tab 静默：不重触发补全、不改文本"""
     fired = []
     editor.slashTriggered.connect(lambda q: fired.append(q))
 
@@ -257,6 +258,49 @@ def test_tab_silent_after_command_collapsed(editor, monkeypatch):
     assert fired == []
     assert editor.toPlainText() == "/cmd "
     assert _first_frag_is_command_pill(editor)
+
+
+class _StubCard(QObject):
+    """detail 卡片桩：验证折叠态下 Tab 仍走卡片导航分支选参数"""
+
+    commandSelected = pyqtSignal(str, str)
+    parameterSelected = pyqtSignal(str, str)
+    parameterDeselected = pyqtSignal(str, str)
+    parameterValueSelected = pyqtSignal(str)
+    dismissed = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.is_card_visible = True
+        self.is_detail_mode = True
+        self.detail_cmd_name = None
+        self._current_selected_type = ""
+        self.select_count = 0
+
+    def select_current(self):
+        self.select_count += 1
+        return True
+
+
+def test_tab_selects_param_in_detail_after_collapsed(editor):
+    """折叠态 + detail 卡片可见：Tab 确认当前高亮参数（不被静默拦截）"""
+    from PyQt5.QtCore import QEvent, Qt
+    from PyQt5.QtGui import QKeyEvent
+
+    card = _StubCard()
+    editor.set_command_card(card)
+    try:
+        editor.setPlainText("/cmd")
+        _type_at_end(editor, " ")
+        assert _first_frag_is_command_pill(editor)
+
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.NoModifier)
+        editor.keyPressEvent(event)
+
+        assert card.select_count == 1
+        assert editor.toPlainText() == "/cmd "
+    finally:
+        editor._command_card_ref = None
 
 
 def test_tab_still_completes_before_collapse(editor, monkeypatch):
