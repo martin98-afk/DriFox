@@ -6,10 +6,10 @@
     ┌────────────────────────────────────┐
     │        ArcCardStack 弧形卡片堆叠     │
     │   名称 + ★主助手 + 操作行（重命名等）  │
-    │   基本信息（对话模型 / 记忆整理模型）    │
+    │   基本信息（昵称 / 称呼 / 用户头像）      │
     │   关于 Ta（人格 chips 切换）          │
     │   记忆（全局 + 项目 + 日志）           │
-    │   经验（工具型 + 反思）               │
+    │   经验（工具型，模型自主维护）          │
     │   专属技能                          │
     └────────────────────────────────────┘
 
@@ -143,7 +143,7 @@ class AssistantCardWidget(QWidget):
 
     # 后台线程 → 主线程调度的唯一通道。
     # ⚠️ 不能用 QTimer.singleShot(0, fn)：Qt 的 singleShot 会在**调用方线程**
-    # 创建 QSingleShotTimer，而经验反思跑在纯 Python daemon 线程里
+    # 创建 QSingleShotTimer，而 gitee 头像拉取跑在纯 Python daemon 线程里
     # （没有 Qt 事件循环）→ 计时器永不触发 → 回调永不执行。
     # 信号 + QueuedConnection 会把调用投递到本 widget 所在线程（主线程）的事件循环。
     _main_thread_call = pyqtSignal(object)
@@ -195,15 +195,10 @@ class AssistantCardWidget(QWidget):
     def set_context(self, ctx: dict) -> None:
         """主程序注入的卡片上下文（UIPluginRegistry 创建卡片时调用）。
 
-        把 ctx["services"]（含 create_engine_session）提前缓存进 core/llm_client：
-        经验反思等后台任务拿不到卡片 context，只能靠注册表兜底解析（多窗口时可能取到非本窗口的 services）。
+        宿主 ctx 的 services/capabilities 由卡片按需实时取用（_ctx_caps_pool），
+        本插件不缓存宿主服务对象，也不再有后台 LLM 任务需要预热。
         """
-        try:
-            services = (ctx or {}).get("services")
-            if isinstance(services, dict):
-                self._mgr._core_llm().set_services(services)
-        except Exception as e:
-            logger.debug(f"[assistant_hub] 注入 services 失败（走注册表兜底）: {e}")
+        return
 
     # ══════════════════════════════════════════════════
     #  UI 构建
@@ -469,7 +464,7 @@ class AssistantCardWidget(QWidget):
 
         def _do_bind() -> None:
             mgr = self._mgr
-            self._profile.bind(a.name or a.id, a.user_addressing or mgr.user_name(), a.utility_model or "")
+            self._profile.bind(a.name or a.id, a.user_addressing or mgr.user_name())
             shown = mgr.display_user_avatar_path(aid_capture)
             self._profile.set_user_avatar(shown, a.user_addressing or mgr.user_name())
             # 自设与 gitee 缓存均未命中：后台拉取，完成后回主线程刷新回落显示
@@ -601,7 +596,7 @@ class AssistantCardWidget(QWidget):
     #  基本信息 / 关于 Ta
     # ══════════════════════════════════════════════════
 
-    def _on_profile_save(self, name: str, addressing: str, utility_model: str) -> None:
+    def _on_profile_save(self, name: str, addressing: str) -> None:
         """基本信息实时保存（对话模型跟随系统当前配置，不再持久化覆盖）。"""
         a = self._mgr.get(self._active_aid)
         if not a:
@@ -612,9 +607,6 @@ class AssistantCardWidget(QWidget):
             changed = True
         if a.model:  # 历史遗留的对话模型覆盖一并清除，避免旧值暗中生效
             a.model = ""
-            changed = True
-        if a.utility_model != utility_model:
-            a.utility_model = utility_model
             changed = True
         if a.user_addressing != addressing:
             a.user_addressing = addressing

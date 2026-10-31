@@ -4,7 +4,7 @@
         "dark": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png"
     },
     "name": "assistant_hub",
-    "description": "智能体助手中心 — 助手切换 + 人格（persona）切换：人格是只读的内置预设（personas/<id>/persona.md），点卡片即切换；新增人格在对话里说「创建新人格」走 persona-creator 技能。含人工提示（pinned.md）、长期记忆体系（全局 MEMORY.md + 项目 .drifox/memory/<助手>/：MEMORY.md 长期笔记 + YYYY-MM-DD.md 每日日志，模型经 memory_read/memory_write 工具自主读写，照抄 WorkBuddy 双层结构）、专属技能、头像库、预置工具三档快捷切换（全量/只读/极简，控制初始注入的工具 schema，未注入的可经 tool_search 搜索、tool_execute 中转调用）、经验库（recall/record_experience 工具 + 手动反思，分类少而稳定）。激活助手后通过系统提示词替换当前智能体身份注入（不改动原 build 智能体，仍可被子智能体调用）。",
+    "description": "智能体助手中心 — 助手切换 + 人格（persona）切换：人格是只读的内置预设（personas/<id>/persona.md），点卡片即切换；新增人格在对话里说「创建新人格」走 persona-creator 技能。含人工提示（pinned.md）、长期记忆体系（全局 MEMORY.md + 项目 .drifox/memory/<助手>/：MEMORY.md 长期笔记 + YYYY-MM-DD.md 每日日志，模型经 memory_read/memory_write 工具自主读写，照抄 WorkBuddy 双层结构）、专属技能、头像库、预置工具三档快捷切换（全量/只读/极简，控制初始注入的工具 schema，未注入的可经 tool_search 搜索、tool_execute 中转调用）、经验库（recall/record_experience 工具自主维护，无后台 LLM 管线）。激活助手后通过系统提示词替换当前智能体身份注入（不改动原 build 智能体，仍可被子智能体调用）。",
     "version": "0.4.1",
     "author": {
         "name": "DriFox Contributors"
@@ -20,14 +20,12 @@
         "ui": true,
         "hooks": true,
         "tools": true,
-        "skills": true,
-        "loop_policies": true
+        "skills": true
     },
     "api_version": 2,
     "capabilities": [
-        "engine.session",
+        "hook.promote",
         "mcp.call",
-        "model.config",
         "input.read",
         "input.write",
         "net.avatar",

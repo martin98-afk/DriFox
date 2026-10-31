@@ -141,6 +141,13 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("tool.read", _L, "工具注册表元数据查询", _BOTH),
         _spec("tool.inject", _H, "向 LLM 注入工具（改变模型可见行为）", _UI),
         _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"]),
+        # ── Hook ──
+        _spec(
+            "hook.promote",
+            _M,
+            "把某插件的事件 hook 提到注册列表最前（决定注入执行顺序，幂等）",
+            _UI,
+        ),
         # ── 对话引擎 ──
         _spec("engine.session", _H, "创建对话引擎会话（消耗 token）", _UI, ["create_engine_session"]),
         _spec("engine.stack", _H, "对话执行栈工厂", _UI, ["conversation_stack"]),

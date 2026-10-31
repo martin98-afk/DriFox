@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, ComboBox, LineEdit, MaskDialogBase, SwitchButton
+from qfluentwidgets import BodyLabel, LineEdit, MaskDialogBase, SwitchButton
 
 from app.plugins.sdk import Colors, font_size_css, scale_font_size
 from app.plugins.sdk import get_font_family_css
@@ -514,23 +514,14 @@ def _host_window():
     """弹窗 parent：完整主窗口（与 assistant_card 同实现，供分区内的弹窗复用）。
 
     self.window() 在 full 卡容器内可能返回卡片容器导致 MaskDialog 遮罩
-    只盖住容器、定位异常；回退链：TabManagerWindow 单例 → UIPluginRegistry
-    主 widget 的 window() → None（调用方自行兜底）。
+    只盖住容器、定位异常；统一走 ``window.host`` 能力（宿主解析当前窗口），
+    取不到时返回 None（调用方自行兜底）。
     """
     try:
         host = _caps("window.host")
         win = host() if host else None
         if win is not None:
             return win
-    except Exception:
-        pass
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        reg = UIPluginRegistry.get_instance()
-        for mw in (getattr(reg, "_main_widget", None), *getattr(reg, "_window_main_widgets", {}).values()):
-            if mw is not None:
-                return mw.window()
     except Exception:
         pass
     return None
@@ -626,17 +617,15 @@ class _CenterFlowLayout(QLayout):
 
 
 class ProfileSection(_Section):
-    """对他/她的称呼 / 称呼 / 记忆整理模型 / 用户头像（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
+    """对他/她的称呼 / 称呼 / 用户头像（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
 
-    saveRequested = pyqtSignal(str, str, str)  # (name, user_addressing, utility_model_key)
+    saveRequested = pyqtSignal(str, str)  # (name, user_addressing)
     userAvatarPicked = pyqtSignal(bytes, str)  # 用户头像选中（数据, 扩展名）
     userAvatarCleared = pyqtSignal()  # 恢复默认用户头像
     _DEBOUNCE_MS = 600
-    _MAX_VISIBLE_ITEMS = 12  # 下拉弹层最大可见条目数，超出滚动
 
     def __init__(self, parent=None):
         super().__init__("基本信息", parent)
-        self._model_keys: List[str] = [""]
         self._suspend_autosave = True  # bind() 期间不触发自动保存
 
         # 表单整体固定宽度、居中（不占满整行；两行 label 左缘对齐）
@@ -668,17 +657,6 @@ class ProfileSection(_Section):
         row_addr.addWidget(self._addressing, 1)
         form.addLayout(row_addr)
 
-        row2 = QHBoxLayout()
-        lbl2 = _title_label("记忆整理模型", 11)
-        lbl2.setFixedWidth(118)
-        row2.addWidget(lbl2)
-        self._utility_model = ComboBox()
-        self._utility_model.setMaxVisibleItems(self._MAX_VISIBLE_ITEMS)
-        self._utility_model.setStyleSheet(self._combo_style())
-        self._utility_model.currentIndexChanged.connect(self._schedule_autosave)
-        row2.addWidget(self._utility_model, 1)
-        form.addLayout(row2)
-
         # 用户头像：预览 + 选择按钮（选中的头像注入消息身份行，显示在用户消息旁）
         row3 = QHBoxLayout()
         lbl3 = _title_label("你的头像", 11)
@@ -702,7 +680,7 @@ class ProfileSection(_Section):
         self.body().addLayout(wrap)
         self.body().addWidget(
             _hint(
-                "对话模型跟随系统配置；记忆整理模型用于经验反思，跟随全局即用当前对话模型。"
+                "对话模型跟随系统配置（助手不单独设置）。"
                 "用户头像显示在消息列表中你的消息旁，每个助手独立设置。改动自动保存。"
             )
         )
@@ -711,31 +689,6 @@ class ProfileSection(_Section):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(self._DEBOUNCE_MS)
         self._debounce.timeout.connect(self._emit_save)
-        self._reload_models()
-
-    def _combo_style(self) -> str:
-        """记忆整理模型下拉：透明背景融入卡片（选择器名对齐 bottom_input_area 先例）。"""
-        return f"""
-            ComboBox {{
-                background: transparent;
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 6px;
-                padding: 4px 10px;
-                {get_font_family_css()} {font_size_css(12)};
-            }}
-            ComboBox:hover {{
-                background: {Colors.HOVER_BG};
-                border-color: {Colors.TEXT_ACCENT};
-            }}
-            ComboBox::drop-down {{ border: none; width: 16px; }}
-            ComboBox::down-arrow {{
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {Colors.TEXT_PRIMARY};
-                margin-right: 2px;
-            }}
-        """
 
     def set_user_avatar(self, image_path: Optional[str], name: str = "") -> None:
         """刷新用户头像预览（bind 与保存后由宿主调用；name 用于无图时的首字母色块）。
@@ -761,64 +714,14 @@ class ProfileSection(_Section):
             return
         self._debounce.start()
 
-    def bind(self, name: str, addressing: str, utility_model: str) -> None:
+    def bind(self, name: str, addressing: str) -> None:
         self._suspend_autosave = True
         self._name.setText(name)
         self._addressing.setText(addressing)
-        keys = self._model_keys
-        key = utility_model or ""
-        idx = keys.index(key) if key in keys else 0
-        self._utility_model.setCurrentIndex(idx)
         self._suspend_autosave = False
 
-    def _reload_models(self) -> None:
-        """数据源（对齐 cron-tasks）：main_widget._valid_configs 展开「配置 × 模型列表」。
-
-        复合键 "<config_id>||<model>"——一个服务商可选它模型列表里的任意模型；
-        首项「跟随全局」= 空（执行时用当前全局对话模型，选中模型失效自动回退）。
-        用 qfluentwidgets.ComboBox：弹层样式/定位/滚动全部由其自管。
-        """
-        mw = None
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            reg = UIPluginRegistry.get_instance()
-            mw = getattr(reg, "_main_widget", None) or next(
-                iter(getattr(reg, "_window_main_widgets", {}).values()), None
-            )
-        except Exception:
-            mw = None
-        valid = getattr(mw, "_valid_configs", None) if mw is not None else None
-        current = getattr(mw, "_current_provider_name", None) if mw is not None else None
-
-        labels: List[str] = ["跟随全局"]
-        keys: List[str] = [""]
-        if isinstance(valid, dict):
-            for key, cfg in valid.items():
-                if not isinstance(cfg, dict):
-                    continue
-                display = str(cfg.get("display_name") or cfg.get("name") or cfg.get("provider_name") or key)
-                cur_model = str(cfg.get("模型名称") or "")
-                models = [str(m) for m in (cfg.get("模型列表") or []) if str(m).strip()]
-                if not models:
-                    models = [cur_model] if cur_model else []
-                for model in models:
-                    label = f"{display} · {model}"
-                    if key == current and model == cur_model:
-                        label += "（当前）"
-                    labels.append(label)
-                    keys.append(f"{key}||{model}")
-        self._model_keys = keys
-        combo = self._utility_model
-        combo.clear()
-        combo.addItems(labels)
-        combo.setCurrentIndex(0)
-
     def _emit_save(self) -> None:
-        keys = getattr(self, "_model_keys", [""])
-        ui_ = self._utility_model.currentIndex()
-        util_key = keys[ui_] if 0 <= ui_ < len(keys) else ""
-        self.saveRequested.emit(self._name.text().strip(), self._addressing.text().strip(), util_key)
+        self.saveRequested.emit(self._name.text().strip(), self._addressing.text().strip())
 
 
 # ── 关于 Ta（人格切换）────────────────────

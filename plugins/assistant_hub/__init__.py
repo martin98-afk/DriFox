@@ -17,7 +17,7 @@ persona / pinned）"数据模型，并把 WorkBuddy 的双层记忆体系（全�
 
 2. **存储布局**
    每个助手存放在 ``<app_data_dir>/assistant_hub/<assistant_id>/``：
-   - assistant.yaml               — 元数据（name / yuan / color / 主助手标记 / model 覆盖）
+   - assistant.yaml               — 元数据（name / yuan / color / 主助手标记 / 工具档位 / 记忆开关）
    - AGENTS.public.md             — 对外人格（无须内部细节时使用）
    - pinned.md                    — 人工提示（手动添加，永不衰减）
    - MEMORY.md                    — 全局记忆（跨项目，模型经 memory_write 维护）

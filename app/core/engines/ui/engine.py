@@ -674,6 +674,12 @@ class UIEngine(BaseEngine):
                             extra_context["project_root"] = self._tool_executor.get_workdir() or ""
                         if self._backend and hasattr(self._backend, "current_project"):
                             extra_context["project_name"] = self._backend.current_project or ""
+                        # session_id 必须透传：assistant_hub 等插件按它解析会话级助手，
+                        # 缺了会按主助手构建；而本方法会把结果缓存回 session.system_prompt，
+                        # 后续 build_messages 命中缓存 → 选中的助手身份被主助手顶掉。
+                        sid = str(getattr(session, "session_id", "") or "")
+                        if sid:
+                            extra_context["session_id"] = sid
                     except Exception:
                         pass
                     system_prompt = (

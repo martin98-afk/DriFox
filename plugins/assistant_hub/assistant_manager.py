@@ -95,7 +95,7 @@ class Assistant:
     steps: Optional[int] = None
     # 对外人格（控制其他 agent 调用本助手时看到的描述）
     public_description: str = ""
-    # 经验体系（recall/record_experience 工具 + 每日反思）：默认关闭
+    # 经验体系（recall/record_experience 工具自主维护）：默认关闭
     experience_enabled: bool = False
     # 项目笔记（AGENTS.md）注入开关：主智能体按此开关控制；子智能体始终注入
     project_notes_enabled: bool = True
@@ -108,8 +108,6 @@ class Assistant:
     # 记忆字符上限（UI 可配；<=0 时回落内置默认）
     global_memory_max_chars: int = 4000
     project_memory_max_chars: int = 3000
-    # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
-    utility_model: str = ""
     # 对用户的称呼（{{userName}} 模板变量覆盖）：空 = 跟随系统用户名
     user_addressing: str = ""
     # 创建/更新时间戳
@@ -137,7 +135,6 @@ class Assistant:
             "tool_access": self.tool_access,
             "global_memory_max_chars": self.global_memory_max_chars,
             "project_memory_max_chars": self.project_memory_max_chars,
-            "utility_model": self.utility_model,
             "user_addressing": self.user_addressing,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -169,7 +166,6 @@ class Assistant:
             tool_access=str(data.get("tool_access") or "full"),
             global_memory_max_chars=int(data.get("global_memory_max_chars", 4000) or 0),
             project_memory_max_chars=int(data.get("project_memory_max_chars", 3000) or 0),
-            utility_model=str(data.get("utility_model") or ""),
             user_addressing=str(data.get("user_addressing") or ""),
             created_at=str(data.get("created_at") or ""),
             updated_at=str(data.get("updated_at") or ""),
@@ -464,7 +460,7 @@ class AssistantManager:
 
         只在根目录完全为空时执行一次；用户删除后不会复活（目录已存在 yaml）。
         头像：从 personas/<id>/avatar.png 复制到助手 avatars/agent.png。
-        毒蛇妹：默认关闭记忆（不沉淀跨会话上下文）、开启经验（保留经验库与反思）。
+        毒蛇妹：默认关闭记忆（不沉淀跨会话上下文）、开启经验（保留经验库与回忆工具）。
         """
         seeds = [
             ("build", "DriFox", "build", True, None, None),
@@ -779,11 +775,16 @@ class AssistantManager:
         except Exception as e:
             logger.warning(f"[assistant_hub] 失效 system_prompt 缓存失败: {e}")
 
+    @staticmethod
     def _invalidate_session_prompt(session_id: str) -> None:
         """只清空指定 session 的 system_prompt 缓存（会话级临时助手切换用）。
 
         经能力池 session.invalidate(session_id)：一次语义动作，插件不再遍历
         ChatBackend._active_instances 摸私有类属性。
+
+        ⚠️ 必须是 staticmethod：调用方写 ``mgr._invalidate_session_prompt(sid)``，
+        漏装饰时 session_id 被 self 吃掉、真实 sid 变成多余实参 → TypeError
+        被上层 except 吞掉，缓存永不清 → 选中的助手身份本轮不生效。
         """
         if not session_id:
             return
@@ -1043,9 +1044,6 @@ class AssistantManager:
     def _core_persona(self):
         return _load_core_module("persona", "persona.py")
 
-    def _core_llm(self):
-        return _load_core_module("llm_client", "llm_client.py")
-
     def _core_store(self):
         return _load_core_module("memory.store", "memory/store.py")
 
@@ -1054,68 +1052,6 @@ class AssistantManager:
 
     def _core_experience(self):
         return _load_core_module("experience", "experience.py")
-
-    def _utility_llm(self, aid: str):
-        """返回绑定了该助手记忆整理模型的 chat_once（走主对话引擎，单回合）。
-
-        utility_model 复合键格式（对齐 cron-tasks）："&lt;config_id&gt;||&lt;model_name&gt;"；
-        兼容旧纯 config_id。解析失败/配置不存在 → None override = 回退全局当前模型。
-
-        调用链：chat_once → services["create_engine_session"] → 主对话引擎，
-        并用本插件的 single_turn 循环策略钳制成一回合（见 core/llm_client.py）。
-        """
-        a = self.get(aid)
-        model_key = (a.utility_model if a else "") or ""
-        chat_once = self._core_llm().chat_once
-        override = self._resolve_model_override(model_key)
-
-        def _call(messages, **kwargs):
-            if override is not None:
-                return chat_once(messages, model_config=override, **kwargs)
-            return chat_once(messages, **kwargs)
-
-        return _call
-
-    def _resolve_model_override(self, model_key: str) -> Optional[Dict[str, Any]]:
-        """解析 "<config_id>||<model_name>" 复合键为完整配置覆盖。
-
-        未指定/配置缺失 → None（回退当前全局模型）。对齐 cron-tasks scheduler。
-        数据源：main_widget._valid_configs（双源兜底，同 ui/sections.py）。
-        """
-        if not model_key:
-            return None
-        config_id, _, model_name = str(model_key).partition("||")
-        mw = None
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            reg = UIPluginRegistry.get_instance()
-            mw = getattr(reg, "_main_widget", None) or next(
-                iter(getattr(reg, "_window_main_widgets", {}).values()), None
-            )
-        except Exception:
-            mw = None
-        valid = getattr(mw, "_valid_configs", None) if mw is not None else None
-        if not isinstance(valid, dict):
-            # 无窗口场景：走 model.config 能力（从主程序内存态取，
-            # 不读磁盘 app.config —— 密钥模式下那里是密文/空串）
-            get_config = _caps("model.config")
-            if get_config is None:
-                return None
-            try:
-                cfg = get_config(config_id, model_name)
-            except Exception:
-                return None
-            if not isinstance(cfg, dict) or not cfg:
-                return None
-            return dict(cfg)
-        cfg = valid.get(config_id)
-        if not isinstance(cfg, dict) or not cfg:
-            return None
-        override = dict(cfg)
-        if model_name:
-            override["模型名称"] = model_name
-        return override
 
     # ── 通用 ──
 
@@ -1538,54 +1474,19 @@ class AssistantManager:
     def experience_delete(self, aid: str, category: str, index: int) -> Dict[str, Any]:
         return self._core_experience().delete_entry(self._assistant_dir(aid), category, index)
 
-    def experience_reflect(self, aid: str) -> Dict[str, Any]:
-        """经验反思：从近期日志/项目记忆提炼工作心得，随后自动压缩超限分类（需 LLM）。
-
-        数据源改版（拆传送带后）：项目 MEMORY.md + 近期日志拼接，取代原编译产物 memory.md。
-        """
-        try:
-            llm = self._utility_llm(aid)
-        except Exception as e:
-            return {"added": 0, "items": [], "error": f"llm_unavailable: {e}"}
-        r = self._core_experience().reflect(
-            self._assistant_dir(aid),
-            identity_and_persona=self.identity_and_persona(aid),
-            memory_md=self._recent_memory_text(aid),
-            llm=llm,
-        )
-        r["consolidated"] = self._experience_auto_consolidate(aid, llm)
-        return r
-
-    def _recent_memory_text(self, aid: str) -> str:
-        """反思素材：项目 MEMORY.md + 最近日志（无 workdir 时取全局记忆兑底）。"""
-        parts: list[str] = []
-        wd = self._current_workdir()
-        if wd:
-            pm = self.read_project_memory(aid, wd).strip()
-            if pm:
-                parts.append("# 项目记忆\n" + pm)
-            for it in self.list_daily(aid, wd, limit=3):
-                body = self.read_daily(aid, wd, it["date"]).strip()
-                if body:
-                    parts.append(f"# {it['date']}\n{body}")
-        if not parts:
-            g = self.read_global_memory(aid).strip()
-            if g:
-                parts.append("# 全局记忆\n" + g)
-        return "\n\n".join(parts)
-
     @staticmethod
     def _current_workdir(pool=None) -> str:
-        """当前应使用的项目工作目录（UI 查看/反思/统计等无 tool_ctx 场景用）。
+        """当前应使用的项目工作目录（UI 查看/统计等无 tool_ctx 场景用）。
 
         pool（宿主 ctx 能力池）优先：宿主已按卡片形态解析窗口并裁剪授权
         （dock 卡=归属窗口，全局卡=当前选中 tab），插件只消费语义快照，
-        全程不持有窗口对象。None（后台线程）时回退全局链路：caps_for
-        （授权仍按 manifest 裁剪）→ UIPluginRegistry 注册表。
+        全程不持有窗口对象。None（后台线程）时回退全局链路 caps_for
+        （授权仍按 manifest 裁剪，host 由宿主按插件登记窗口/活跃窗口解析）。
 
         历史 bug（0.4.0）：manifest api_version=2 但 capabilities 漏声明
         window.current → caps_for 恒 None → 每次落到注册表 fallback 取
-        「第一个注册窗口」的 workdir，多窗口下必然串味。
+        「第一个注册窗口」的 workdir，多窗口下必然串味。故不再保留注册表
+        直连兜底（也就不能再绕过声明裁剪）。
         """
         if pool is not None and "window.current" in pool:
             try:
@@ -1605,44 +1506,4 @@ class AssistantManager:
                 return str(snap["workdir"])
         except Exception as e:
             logger.debug(f"[assistant_hub] 全局链取窗口快照失败: {e}")
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            reg = UIPluginRegistry.get_instance()
-            mw = getattr(reg, "_main_widget", None) or next(
-                iter(getattr(reg, "_window_main_widgets", {}).values()), None
-            )
-            if mw is not None and getattr(mw, "backend", None) is not None:
-                return str(mw.backend.tool_executor.get_workdir() or "")
-        except Exception:
-            pass
         return ""
-
-    def _experience_auto_consolidate(self, aid: str, llm) -> List[Dict[str, Any]]:
-        """水位检查：全库条目超阈值时自动压缩一次（无人管理，反思收尾时跑）。
-
-        冷却熔断：上次失败 30 分钟内跳过（防失败任务每次反思重烧双倍超时）；
-        retries=0（失败有冷却兜底，重试只翻倍烧时间）。手动压缩不受限。
-        """
-        try:
-            core = self._core_experience()
-            if not core.needs_consolidate(self._assistant_dir(aid)):
-                return []
-            if core.consolidate_in_cooldown(self._assistant_dir(aid)):
-                return []
-        except Exception:
-            return []
-        try:
-            r = core.consolidate(self._assistant_dir(aid), llm=llm, retries=0)
-        except Exception as e:
-            return [{"error": str(e)}]
-        return [r]
-
-    def experience_consolidate(self, aid: str) -> Dict[str, Any]:
-        """手动全库压缩（跨分类语义合并去重 + 重新归类）。"""
-        try:
-            llm = self._utility_llm(aid)
-        except Exception as e:
-            return {"changed": False, "error": f"llm_unavailable: {e}"}
-        r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
-        return r

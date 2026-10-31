@@ -3421,7 +3421,7 @@ class OpenAIChatWorker(QThread):
             policy = None
             policy_id = self._loop_policy_id
             if policy_id:
-                # 指定 id（如 "assistant_hub_single_turn"）：按 id 直接定位策略对象
+                # 指定 id（如 "minimal"）：按 id 直接定位策略对象
                 policy = registry.policies().get(policy_id)
                 if policy is None:
                     logger.warning(f"[LoopPolicy] 未找到 id={policy_id!r}，回落全局激活策略")

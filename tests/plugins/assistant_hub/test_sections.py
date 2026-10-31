@@ -54,10 +54,10 @@ overlays = _load("overlays", "overlays.py")
 def test_profile_section_bind_emit(qtbot=None):
     host = QWidget()
     s = sections.ProfileSection(host)
-    s.bind("小狐", "mading", "cfg-2")  # 三参签名：(称呼助手, 称呼用户, 记忆整理模型)
+    s.bind("小狐", "mading")  # 两参签名：(助手名, 对用户的称呼)
     assert s._name.text() == "小狐"
     got = []
-    s.saveRequested.connect(lambda n, u, m: got.append((n, u, m)))
+    s.saveRequested.connect(lambda n, u: got.append((n, u)))
     s._emit_save()
     assert got and got[0][0] == "小狐"
 

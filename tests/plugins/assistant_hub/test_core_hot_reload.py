@@ -3,8 +3,8 @@
 
 背景：assistant_hub 的 core 模块经 importlib 手动注册 sys.modules（前缀
 assistant_hub_core.*），app 侧热重载的 purge 历史上不覆盖该前缀，命中即返回
-会让热更新后的新代码不可见。现加载点（assistant_manager._load_core_module /
-experience._prompts）均带 mtime 自检：磁盘 mtime 更新 → 重新加载替换缓存对象。
+会让热更新后的新代码不可见。现加载点（assistant_manager._load_core_module）带 mtime 自检：
+磁盘 mtime 更新 → 重新加载替换缓存对象。
 """
 
 import importlib.util
@@ -74,17 +74,6 @@ def test_manager_load_core_module_reload_on_mtime_change():
     assert mod._load_core_module("memory.store", "memory/store.py") is s2
 
 
-def test_experience_prompts_reload_on_mtime_change():
-    m = _load_by_path("assistant_hub_core.experience", _CORE / "experience.py")
-    p1 = m._prompts("build_reflect")
-    assert getattr(p1, "_source_mtime", -1.0) >= 0.0
-    _bump_mtime(_CORE / "memory" / "prompts.py")
-    p2 = m._prompts("build_reflect")
-    assert p1 is not p2
-    # required 兜底：函数缺失时即使 mtime 未变也重载
-    del p2.build_reflect  # 模拟函数缺失（hasattr 对 None 值仍为 True，须真删）
-    p3 = m._prompts("build_reflect")
-    assert p3 is not p2
 
 
 def test_purge_module_prefixes():

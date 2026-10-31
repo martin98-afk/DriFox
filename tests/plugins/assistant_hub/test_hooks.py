@@ -184,3 +184,48 @@ def test_on_stop_non_primary_noop(monkeypatch):
     mgr = _patch_mgr(monkeypatch)
     out = m.on_stop("Stop", {"current_role": "subagent", "session_id": "s1"})
     assert out == "" and mgr.session_map == {}
+
+# ── @ 提及边界：与输入框胶囊还原同口径 ──
+
+class _Named:
+    memory_enabled = True
+
+    def __init__(self, name, aid):
+        self.name = name
+        self.id = aid
+
+def _multi_mgr(monkeypatch, assistants):
+    mgr = _Mgr()
+    mgr.list_assistants_sorted_by_stable = lambda: list(assistants)
+    monkeypatch.setattr(m, "_get_manager", lambda: mgr)
+    switched = {}
+    mgr.set_session_override = lambda sid, aid: (switched.__setitem__(sid, aid), True)[1]
+    mgr._invalidate_session_prompt = lambda sid: None
+    return mgr, switched
+
+def test_mention_after_chinese_char_switches(monkeypatch):
+    """中文紧邻 @（「问下@小狐」）也要切换——旧实现要求 @ 前为空白/串首。"""
+    _, switched = _multi_mgr(monkeypatch, [_Named("小狐", "xiaohu-x1")])
+    m.on_pre_user("PreUserMessage", {"current_role": "primary", "message": "问下@小狐，这个怎么改", "session_id": "s1"})
+    assert switched == {"s1": "xiaohu-x1"}
+
+def test_mention_email_like_not_matched(monkeypatch):
+    """邮箱/路径里的 @ 不算提及（前边界为 ASCII 字母数字）。"""
+    _, switched = _multi_mgr(monkeypatch, [_Named("小狐", "xiaohu-x1")])
+    m.on_pre_user("PreUserMessage", {"current_role": "primary", "message": "mail a@小狐 无效", "session_id": "s1"})
+    assert switched == {}
+
+def test_mention_long_name_priority(monkeypatch):
+    """长名优先：@小狐助手 不应被前缀名「小狐」抢走。"""
+    _, switched = _multi_mgr(
+        monkeypatch,
+        [_Named("小狐", "xiaohu-x1"), _Named("小狐助手", "xiaohu-pro")],
+    )
+    m.on_pre_user("PreUserMessage", {"current_role": "primary", "message": "@小狐助手 看下", "session_id": "s1"})
+    assert switched == {"s1": "xiaohu-pro"}
+
+def test_mention_name_followed_by_chinese_not_matched(monkeypatch):
+    """名字后紧跟中文（无分隔）不匹配——与输入框胶囊还原的后边界口径一致。"""
+    _, switched = _multi_mgr(monkeypatch, [_Named("小狐", "xiaohu-x1")])
+    m.on_pre_user("PreUserMessage", {"current_role": "primary", "message": "@小狐帮我看看", "session_id": "s1"})
+    assert switched == {}
