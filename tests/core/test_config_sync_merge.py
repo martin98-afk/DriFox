@@ -490,3 +490,38 @@ class TestDownloadMerge:
             assert svc._download_user_custom_merge() is True
 
         assert not (svc._user_custom_path / "a.txt").exists()
+
+    def test_dir_empty_meta_follows_remote_tombstone(self, svc, tmp_path):
+        """本地无条目表（重绑/清缓存/首次升级）+ 远端已删 → 跟随删除
+
+        回归：空表时 reconcile 曾把本地现存文件打成高于墓碑的 live t，
+        墓碑在 LWW 中必输，对端删除永远不传播（2026-10-31 user-custom
+        commands 删除未同步）。本地独有且远端无记录的文件必须保留。
+        """
+        from app.core.sync.lww import dir_meta_payload
+
+        cmd_dir = svc._user_custom_path / "commands"
+        cmd_dir.mkdir()
+        (cmd_dir / "team.md").write_text("cmd", encoding="utf-8")
+        (svc._user_custom_path / "mine.txt").write_text("local only", encoding="utf-8")
+
+        # 远端：commands/team.md 已被删除端删掉（墓碑），mine.txt 仍在
+        remote_dir = tmp_path / "rtomb"
+        remote_dir.mkdir()
+        (remote_dir / "mine.txt").write_text("local only", encoding="utf-8")
+        meta = dir_meta_payload(
+            {
+                "mine.txt": {"h": fp.file_fingerprint(remote_dir / "mine.txt"), "t": 1},
+                "commands/team.md": {"h": "a" * 64, "t": 3, "d": True},
+            },
+            3,
+        )
+        zip_bytes = fp.build_stable_zip(remote_dir, sync_meta=meta)
+        with patch.object(svc, "_read_remote_bytes", return_value=(zip_bytes, "sha5")):
+            assert svc._download_user_custom_merge() is True
+
+        assert not (svc._user_custom_path / "commands" / "team.md").exists()
+        assert (svc._user_custom_path / "mine.txt").exists()
+        # 墓碑必须进本地条目表持久化，否则下次上传会把它反杀回云端
+        saved = svc._load_dir_meta("user-custom").get("entries") or {}
+        assert saved.get("commands/team.md", {}).get("d") is True

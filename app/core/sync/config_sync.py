@@ -1975,6 +1975,24 @@ class ConfigSyncService(QObject):
             # 本地无条目表（首次升级）时反过来，抬到远端之上，让本地现有内容算新增。
             start = local_clock if isinstance(local_entries, dict) and local_entries else max(local_clock, remote_clock)
             clock = LamportClock(start)
+            # 空条目表（重绑/清缓存/首次升级）时本地没有任何同步历史，远端墓碑是
+            # 唯一的显式删除记录，直接服从：先删本地对应文件并从清单剔除，否则
+            # 下方 reconcile 会把这些文件打成高于墓碑的 live t，删除永远不传播。
+            # 本地独有且远端无记录的文件不受影响，照旧算新增。
+            raw_remote_entries = remote_state.get("entries")
+            if not local_entries and isinstance(raw_remote_entries, dict):
+                remote_tombstones = {
+                    str(rel) for rel, e in raw_remote_entries.items() if is_tombstone(e)
+                }
+                for rel in remote_tombstones:
+                    try:
+                        (local_dir / rel).unlink()
+                    except Exception:
+                        pass
+                if remote_tombstones:
+                    local_manifest = {
+                        rel: h for rel, h in local_manifest.items() if rel not in remote_tombstones
+                    }
             local_entries = reconcile_dir_entries(
                 local_manifest,
                 local_entries if isinstance(local_entries, dict) else {},
