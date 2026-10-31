@@ -274,6 +274,40 @@ class TestUploadUnit:
         assert (svc._user_custom_path / "mine.txt").read_text(encoding="utf-8") == "local-only"
         assert (svc._user_custom_path / "theirs.txt").read_text(encoding="utf-8") == "cloud-only"
 
+    def test_upload_without_base_is_remote_authoritative(self, svc):
+        """无合并基准（解绑重绑）上传前合并以云端为权威，本地旧配置不覆盖远端"""
+        local = {
+            "UI": {"FontSize": "12"},
+            "System": {
+                "SyncMeta": json.dumps(
+                    {"version": 1, "clock": 99, "entries": {"UI.FontSize": {"h": "a", "t": 99}}}
+                )
+            },
+        }
+        remote = {
+            "UI": {"FontSize": "18"},
+            "System": {
+                "SyncMeta": json.dumps(
+                    {"version": 1, "clock": 7, "entries": {"UI.FontSize": {"h": "b", "t": 7}}}
+                )
+            },
+        }
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+        remote_b64 = base64.b64encode(json.dumps(remote).encode("utf-8")).decode("utf-8")
+
+        client = MagicMock()
+        client.get.side_effect = [
+            _resp(200, {"sha": "live_sha"}),  # _get_remote_file_sha
+            _resp(200, {"content": remote_b64, "sha": "live_sha"}),  # _read_remote_bytes
+        ]
+        client.put.return_value = _resp(200, {"content": {"sha": "new_sha"}})
+
+        assert svc._upload_unit("app.config", "drifox/app.config", svc._config_path, client) is True
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["UI"]["FontSize"] == "18"
+        assert client.put.call_count == 1
+
     def test_put_conflict_does_not_retry_overwrite(self, svc):
         """PUT 报 sha 冲突时不重试覆盖：必须放弃本次写入，等下一轮合并"""
         (svc._records_path.parent).mkdir(parents=True, exist_ok=True)
@@ -390,6 +424,62 @@ class TestConfigMergeLww:
         data = json.loads(svc._config_path.read_text(encoding="utf-8"))
         assert data["UI"]["FontSize"] == "12"
         assert "SyncMeta" in data["System"]
+
+    def test_remote_authority_ignores_local_higher_ts(self, svc):
+        """无合并基准时云端权威：本地旧快照的 t 再大也不能覆盖云端（解绑重绑事故）"""
+        local = {
+            "UI": {"FontSize": "12"},
+            "System": {
+                "SyncMeta": json.dumps(
+                    {"version": 1, "clock": 99, "entries": {"UI.FontSize": {"h": "a", "t": 99}}}
+                )
+            },
+        }
+        remote = {
+            "UI": {"FontSize": "18"},
+            "System": {
+                "SyncMeta": json.dumps(
+                    {"version": 1, "clock": 7, "entries": {"UI.FontSize": {"h": "b", "t": 7}}}
+                )
+            },
+        }
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"), remote_authority=True)
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["UI"]["FontSize"] == "18"
+        state = json.loads(data["System"]["SyncMeta"])
+        assert state["entries"]["UI.FontSize"] == {"h": "b", "t": 7}
+
+    def test_download_without_base_is_remote_authoritative(self, svc):
+        """没有合并基准（解绑重绑）→ 下载合并以云端为权威，本地旧值不赢"""
+        local = {
+            "UI": {"FontSize": "12"},
+            "System": {
+                "SyncMeta": json.dumps(
+                    {"version": 1, "clock": 99, "entries": {"UI.FontSize": {"h": "a", "t": 99}}}
+                )
+            },
+        }
+        remote = {
+            "UI": {"FontSize": "18"},
+            "System": {
+                "SyncMeta": json.dumps(
+                    {"version": 1, "clock": 7, "entries": {"UI.FontSize": {"h": "b", "t": 7}}}
+                )
+            },
+        }
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+        svc._config_remote_sha = None
+
+        with patch.object(
+            svc, "_read_remote_bytes", return_value=(json.dumps(remote).encode("utf-8"), "cloud_sha")
+        ):
+            assert svc._download_config_merge() is True
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["UI"]["FontSize"] == "18"
 
 
 class TestDownloadMerge:

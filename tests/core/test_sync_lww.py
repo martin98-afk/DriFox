@@ -165,6 +165,21 @@ def test_merge_without_meta_falls_back_to_union():
     assert cfg["UI"]["OnlyLocal"] == 1
     assert cfg["UI"]["OnlyRemote"] == 2
 
+def test_remote_authority_prefers_remote_without_meta():
+    """云端权威模式：两端都缺元数据时取远端（解绑重绑后的首次合并）"""
+    local = {"UI": {"FontSize": "12"}}
+    remote = {"UI": {"FontSize": "16"}}
+    cfg, _, _ = merge_config_lww(local, {}, remote, {}, remote_authority=True)
+    assert cfg["UI"]["FontSize"] == "16"
+
+def test_remote_authority_keeps_local_only_keys():
+    """云端权威只裁决冲突项，本地独有键仍保留，不丢内容"""
+    local = {"UI": {"FontSize": "12", "OnlyLocal": 1}}
+    remote = {"UI": {"FontSize": "16"}}
+    cfg, _, _ = merge_config_lww(local, {}, remote, {}, remote_authority=True)
+    assert cfg["UI"]["FontSize"] == "16"
+    assert cfg["UI"]["OnlyLocal"] == 1
+
 
 def test_merge_list_collection_by_element_key():
     local = {"MCP": {"Servers": [{"name": "a"}, {"name": "b"}]}}

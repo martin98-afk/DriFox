@@ -1327,8 +1327,9 @@ class ConfigSyncService(QObject):
                         logger.warning("[ConfigSync] 下载失败，降级为本地刷新并上传")
                         self._refresh_local_and_upload()
                 else:
-                    # access_token 过期：无法读取云端 → 本地刷新并上传
-                    logger.info("[ConfigSync] access_token 过期，本地刷新并上传（本地权威）")
+                    # access_token 过期：无法读取云端 → 本地刷新后上传。
+                    # 无合并基准时 _upload_unit 会先合并（云端权威），不会覆盖云端。
+                    logger.info("[ConfigSync] access_token 过期，本地刷新并上传（无基准时先合并）")
                     self._refresh_local_and_upload()
             elif remote_status is False:
                 # 远端确定无配置 → 上传当前（必要时先刷新本地 token，使本地权威）
@@ -1843,7 +1844,11 @@ class ConfigSyncService(QObject):
         sha = sha or live_sha
         try:
             if unit == "app.config":
-                self._apply_config_merge(content)
+                # 本机没有合并基准时云端权威（同 _download_config_merge）
+                self._apply_config_merge(
+                    content,
+                    remote_authority=self._get_cached_remote_sha(unit) is None,
+                )
             elif local_path.is_dir():
                 prefix = unit.split(":", 1)[1] if unit.startswith("ext:") else ""
                 self._apply_dir_merge(unit, local_path, content, prefix)
@@ -2068,8 +2073,12 @@ class ConfigSyncService(QObject):
         finally:
             shutil.rmtree(str(tmp), ignore_errors=True)
 
-    def _apply_config_merge(self, remote_bytes: bytes) -> None:
-        """app.config 按条目 LWW 合并（墓碑删条目，冲突本地优先 + 远端留档）。"""
+    def _apply_config_merge(self, remote_bytes: bytes, remote_authority: bool = False) -> None:
+        """app.config 按条目 LWW 合并（墓碑删条目，冲突本地优先 + 远端留档）。
+
+        ``remote_authority=True``：本机没有合并基准（解绑重绑 / 新机首次绑定）
+        时的首次合并，本地条目一律按 t=0 参与比较，云端任何版本都胜出。
+        """
         from app.core.sync.lww import merge_config_lww
         from app.core.sync.meta_recorder import SyncMetaRecorder, load_state
 
@@ -2094,20 +2103,29 @@ class ConfigSyncService(QObject):
         # 远端已有序号，远端全胜会把本地独有改动覆盖掉。
         local_rec.observe_clock(remote_clock)
         local_rec.seed_missing()
+        local_entries = local_rec.entries()
+        if remote_authority:
+            # 云端权威：本地条目一律压到 t=0，云端的任何版本都胜出。
+            # 解绑重绑 / 新机首次绑定时本机没有合并基准，本地配置是绑定前
+            # 快照（restore_local 回滚出来的），seed_missing 会给它打出高于
+            # 远端的时间戳，不压住就会反向覆盖云端。
+            local_entries = {k: {**v, "t": 0} for k, v in local_entries.items()}
 
         remote_rec = SyncMetaRecorder()
         remote_rec.attach(remote_data, remote_meta)
 
+        merged_clock = max(remote_clock, int(local_rec.state.get("clock") or 0))
         merged_cfg, merged_entries, conflicts = merge_config_lww(
             local_data,
-            local_rec.entries(),
+            local_entries,
             remote_data,
             remote_rec.entries(),
+            remote_authority=remote_authority,
         )
         merged_cfg.setdefault("System", {})["SyncMeta"] = json.dumps(
             {
                 "version": 1,
-                "clock": max(remote_clock, int(local_rec.state.get("clock") or 0)),
+                "clock": merged_clock,
                 "entries": merged_entries,
             },
             ensure_ascii=False,
@@ -2164,6 +2182,14 @@ class ConfigSyncService(QObject):
             except Exception:
                 pass
             return
+        # 记账器与合并结果对齐：上传时 _flush_sync_meta 用它的条目表覆盖磁盘
+        # SyncMeta，留旧表会把合并前的本地旧值重新标成最高 t 推回云端。
+        rec = getattr(self, "_meta_recorder", None)
+        if rec is not None:
+            try:
+                rec.attach(merged_cfg, merged_cfg["System"]["SyncMeta"])
+            except Exception as e:
+                logger.warning(f"[ConfigSync] 合并后同步记账器回写失败: {e}")
         # 后台线程写盘后桥接主线程重载 Settings，避免 UI 与磁盘不一致
         self._pause_after_merge()
         self._reloadSettings.emit()
@@ -2770,7 +2796,9 @@ class ConfigSyncService(QObject):
         if content is None:
             logger.error("[ConfigSync] app.config 下载失败")
             return False
-        self._apply_config_merge(content)
+        # 本机没有合并基准（解绑重绑 / 新机首次绑定）→ 云端权威，
+        # 本地 pre_bind 快照不得反向覆盖云端
+        self._apply_config_merge(content, remote_authority=self._config_remote_sha is None)
         if sha:
             self._set_cached_remote_sha("app.config", sha)
         # base 内容指纹取远端那份（本地独有改动保持未上传态，下次上传收敛）

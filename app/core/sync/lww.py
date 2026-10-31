@@ -153,16 +153,19 @@ def _pick_entry(
     path: str,
     local_entries: Dict[str, Entry],
     remote_entries: Dict[str, Entry],
+    remote_authority: bool = False,
 ) -> Tuple[Entry | None, str]:
     """按 t 取胜者，返回 (entry, side)。side ∈ {local, remote, conflict, none}。
 
     entry 为 None 表示两边都没有元数据（老版本抹掉 / 首次升级），调用方走
-    union 降级：本地有取本地，否则取远端。
+    union 降级：本地有取本地，否则取远端。``remote_authority=True`` 时改为
+    远端优先——用于本机没有合并基准（解绑重绑 / 新机首次绑定）的首次合并，
+    此时本地配置可能是被回滚的绑定前快照，不能压过云端。
     """
     le = local_entries.get(path)
     re_ = remote_entries.get(path)
     if le is None and re_ is None:
-        return None, "none"
+        return None, ("remote" if remote_authority else "none")
     if le is None:
         return re_, "remote"
     if re_ is None:
@@ -186,6 +189,7 @@ def _merge_collection(
     remote_entries: Dict[str, Entry],
     merged_entries: Dict[str, Entry],
     conflicts: List[str],
+    remote_authority: bool = False,
 ) -> object:
     l_items = _collection_items(kind, local_value) if local_value is not _MISSING else {}
     r_items = _collection_items(kind, remote_value) if remote_value is not _MISSING else {}
@@ -193,7 +197,7 @@ def _merge_collection(
     order = list(l_items) + [k for k in r_items if k not in l_items]
     for ek in order:
         epath = f"{path}.{ek}"
-        entry, side = _pick_entry(epath, local_entries, remote_entries)
+        entry, side = _pick_entry(epath, local_entries, remote_entries, remote_authority)
         if entry is not None:
             merged_entries[epath] = entry
             if side == "conflict":
@@ -214,10 +218,12 @@ def merge_config_lww(
     local_entries: Dict[str, Entry],
     remote_cfg: Dict[str, object],
     remote_entries: Dict[str, Entry],
+    remote_authority: bool = False,
 ) -> Tuple[Dict[str, object], Dict[str, Entry], List[str]]:
     """按条目 LWW 合并两份 app.config，返回 (结果, 条目表, 冲突路径)。
 
     直接操作嵌套结构，不经过「扁平化再重建」往返，避免路径里含点号时的歧义。
+    ``remote_authority=True`` 时，两端都缺元数据的条目改取远端（默认取本地）。
     """
     merged_cfg: Dict[str, object] = {}
     merged_entries: Dict[str, Entry] = {}
@@ -228,7 +234,7 @@ def merge_config_lww(
         rg = remote_cfg.get(group, _MISSING)
         if not isinstance(lg, dict) or not isinstance(rg, dict):
             path = str(group)
-            entry, side = _pick_entry(path, local_entries, remote_entries)
+            entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)
             if entry is not None:
                 merged_entries[path] = entry
                 if side == "conflict":
@@ -257,10 +263,11 @@ def merge_config_lww(
                     remote_entries,
                     merged_entries,
                     conflicts,
+                    remote_authority,
                 )
                 g_out[name] = value
                 continue
-            entry, side = _pick_entry(path, local_entries, remote_entries)
+            entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)
             if entry is not None:
                 merged_entries[path] = entry
                 if side == "conflict":
