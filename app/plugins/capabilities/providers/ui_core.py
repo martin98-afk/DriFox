@@ -762,15 +762,18 @@ def _ui_card_show(host: Any):
 
 
 def _ui_notify(host: Any):
-    def notify(title: str, message: str) -> None:
+    def notify(title: str, message: str, kind: str = "success", duration: int = 5000) -> None:
         from qfluentwidgets import InfoBar, InfoBarPosition
 
         def _show() -> None:
-            InfoBar.success(
-                title,
-                message,
+            bar_cls = getattr(InfoBar, kind, None)
+            if not callable(bar_cls):  # 非法 kind 回落 success，不让通知因拼写错误丢消息
+                bar_cls = InfoBar.success
+            bar_cls(
+                str(title),
+                str(message),
                 parent=_resolve_tab_window() or host.window(),
-                duration=5000,
+                duration=int(duration),
                 position=InfoBarPosition.BOTTOM,
             )
 

@@ -24,7 +24,8 @@ surface，原因是工具执行在工作线程，直接摸 QWidget 违反「UI �
 - snapshot()                 界面语义快照（当前页签/会话/项目/工作目录/输入框）
 - switch_tab(page_id)        切换工作台页签
 - run_command(text)          触发已注册命令（FUNCTION 交 handler，替换类返回 replacement）
-- notify(title, message)     InfoBar 通知
+- notify(title, message, kind="success", duration=5000)
+                            InfoBar 通知（kind: success/warning/error/info）
 - set_input(text, append)    写输入框
 """
 
@@ -243,17 +244,20 @@ def _action_run_command(text: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _action_notify(title: str, message: str) -> None:
+def _action_notify(title: str, message: str, kind: str = "success", duration: int = 5000) -> None:
     from qfluentwidgets import InfoBar, InfoBarPosition
 
     parent = _resolve_tab_window() or _resolve_widget()
     if parent is None:
         raise RuntimeError("无可用窗口，无法弹通知")
-    InfoBar.success(
+    bar_cls = getattr(InfoBar, kind, None)
+    if not callable(bar_cls):  # 非法 kind 回落 success，不让通知因拼写错误丢消息
+        bar_cls = InfoBar.success
+    bar_cls(
         str(title),
         str(message),
         parent=parent,
-        duration=5000,
+        duration=int(duration),
         position=InfoBarPosition.BOTTOM,
     )
 
@@ -291,7 +295,9 @@ def _ui_control(host: Any):
         "snapshot": lambda: _dispatch(_action_snapshot),
         "switch_tab": lambda page_id: _fire("switch_tab", lambda: _action_switch_tab(page_id)),
         "run_command": lambda text: _fire("run_command", lambda: _action_run_command(text)),
-        "notify": lambda title, message: _fire("notify", lambda: _action_notify(title, message)),
+        "notify": lambda title, message, kind="success", duration=5000: _fire(
+            "notify", lambda: _action_notify(title, message, kind, duration)
+        ),
         "set_input": lambda text, append=False: _fire(
             "set_input", lambda: _action_set_input(text, append)
         ),

@@ -160,7 +160,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
 
         # ── 界面 ──
-        _spec("ui.notify", _L, "弹 InfoBar 通知", _UI, ["notify"]),
+        _spec("ui.notify", _L, "弹 InfoBar 通知（kind=success/warning/error/info，duration 毫秒）", _UI, ["notify"]),
         _spec("ui.card.show", _L, "显示浮动卡", _UI),
         _spec("ui.card.hide", _L, "隐藏浮动卡", _UI, ["hide_card"]),
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
