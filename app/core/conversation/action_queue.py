@@ -33,6 +33,26 @@ _DEDUP = frozenset({"interrupt", "new"})
 _DISCARD_SEND = frozenset({"interrupt", "new"})
 
 
+# 入队观察者：enqueue 成功后回调 observer(window_id)。回调在入队线程同步执行
+# （通常是 worker 线程，也可能是主线程），只允许做线程安全的调度动作
+# （如 pyqtSignal.emit），严禁直接触碰 UI 对象；注册方用弱引用自防生命周期。
+_enqueue_observers: List[Callable[[str], None]] = []
+
+
+def add_enqueue_observer(observer: Callable[[str], None]) -> None:
+    """注册入队观察者（去重）。"""
+    if observer not in _enqueue_observers:
+        _enqueue_observers.append(observer)
+
+
+def remove_enqueue_observer(observer: Callable[[str], None]) -> None:
+    """注销入队观察者（窗口销毁时调用，防泄漏）。"""
+    try:
+        _enqueue_observers.remove(observer)
+    except ValueError:
+        pass
+
+
 class WindowActionQueue:
     """按 window_id 隔离的动作队列"""
 
@@ -59,6 +79,14 @@ class WindowActionQueue:
             self._queues[wid] = queue = deque(item for item in queue if item["action"] != "send")
             logger.info(f"[ActionQueue] {action} 入队：丢弃旧会话排队的 send")
         queue.append({"action": action, "payload": dict(payload or {})})
+        # 通知观察者：空闲期入队的动作（如定时器 session.send）没有
+        # _on_stream_finished 末尾的 drain 时机可等，必须由观察方立即调度消费；
+        # busy 期入队由观察方自行判忙跳过，维持「本轮结束 drain」原契约。
+        for observer in tuple(_enqueue_observers):
+            try:
+                observer(wid)
+            except Exception as e:  # noqa: BLE001 - 单个观察者异常不影响入队结果
+                logger.debug(f"[ActionQueue] 入队观察者异常: {e}")
         return True
 
     def peek(self, window_id: str) -> List[dict]:

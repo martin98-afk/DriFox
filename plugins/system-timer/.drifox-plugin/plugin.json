@@ -1,0 +1,19 @@
+{
+    "name": "system-timer",
+    "description": "系统定时任务 — 让模型创建一次性/循环定时任务，到期后向创建任务的会话自动发送触发消息开启新一轮对话（内存级，不持久化）",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "GPL-3.0-or-later",
+    "type": "system",
+    "api_version": 2,
+    "components": {
+        "tools": true,
+        "ui": true
+    },
+    "capabilities": [
+        "session.send"
+    ]
+}

@@ -993,6 +993,10 @@ class OpenAIChatToolWindow(ToolWindow):
     _models_dev_ready = pyqtSignal(object)
     # 工具注册表变更桥接（registry.on_change 回调可能来自后台 watcher 线程 → 主线程）
     _tool_registry_changed = pyqtSignal(int)
+    # 动作队列入队桥接（enqueue 回调线程 → 主线程）：空闲期入队的动作立即 drain。
+    # 原契约只在 _on_stream_finished 末尾 drain，空闲期入队（如定时器 session.send）
+    # 无人消费会永久滞留。
+    _action_enqueued = pyqtSignal(str)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1076,6 +1080,28 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.get_instance().on_change(self._on_tool_registry_changed)
+
+        # 动作队列观察者：enqueue 可能来自任意线程（工具 worker / 主线程定时器），
+        # 回调里只做弱引用判活 + 信号发射（自动排队到主线程）；槽里 wid 匹配 +
+        # 判忙守卫后 drain。busy 期入队维持「本轮结束 drain」原契约（interrupt/new
+        # 语义依赖本轮结束后才执行），空闲期入队立即消费，否则永久滞留。
+        from app.core.conversation.action_queue import add_enqueue_observer
+        from app.core.conversation.action_queue import remove_enqueue_observer
+
+        _mw_weak = weakref.ref(self)
+
+        def _enqueue_observer(wid: str):
+            mw = _mw_weak()
+            if mw is None or getattr(mw, "_is_destroyed", False):
+                return
+            mw._action_enqueued.emit(str(wid))
+
+        add_enqueue_observer(_enqueue_observer)
+        self._enqueue_observer = _enqueue_observer  # 保活引用（destroyed 时反注册）
+        self.destroyed.connect(lambda: remove_enqueue_observer(_enqueue_observer))
+        # 信号 → 槽接线：观察者只在入队线程 emit，真正 drain 在主线程槽内做
+        # （缺这条接线 = 信号空操作 = 空闲期入队仍无人消费，回到挂死现场）
+        self._action_enqueued.connect(self._on_action_enqueued)
 
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
@@ -21892,6 +21918,20 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info(f"[ActionQueue] drain 结束 已执行 {done}/{len(pending)} 个")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[ActionQueue] 动作队列执行失败: {e}")
+
+    def _on_action_enqueued(self, wid: str):
+        """入队观察者槽（信号已排队回主线程）：空闲期入队的动作立即 drain。
+
+        判忙守卫不可省：busy 期入队的 interrupt/new 语义是「本轮结束后才执行」
+        （同步停流会杀掉正在执行该工具的 worker），提前 drain 会破坏交接链路
+        时序；此类入队仍由 _on_stream_finished 末尾的 drain 消费（原契约）。
+        drain 本身幂等（空队列直接返回），与老路径双触发无害。
+        """
+        if wid != str(getattr(self, "_window_id", "") or ""):
+            return
+        if self._worker_actually_busy():
+            return
+        self._drain_action_queue()
 
     def _handle_action_new(self, payload: dict):
         """动作队列的新建会话：worker 必须先真正停下
