@@ -9,6 +9,8 @@ remove_parameter_text 后重折叠。
 import pytest
 
 from app.widgets.bottom_input_area import (
+    _ASSISTANT_MENTION_NAME_PROP,
+    _ASSISTANT_MENTION_TYPE,
     _COMMAND_MENTION_TYPE,
     SendableTextEdit,
 )
@@ -197,6 +199,43 @@ def test_long_command_name_not_elided(editor):
     fm = QFontMetrics(editor.document().defaultFont())
     expected = pill._PAD_LEFT + fm.horizontalAdvance(long_name) + pill._PAD_RIGHT
     assert size == QSizeF(expected, pill._HEIGHT)
+
+
+def test_all_mention_objects_draw_without_error(editor):
+    """三类胶囊 drawObject 在真实 painter 下不抛错（回归：命令胶囊曾因
+    编辑误伤残留 fm 引用而 NameError 崩溃）"""
+    from PyQt5.QtCore import QBuffer, QIODevice
+    from PyQt5.QtGui import QImage, QPainter
+
+    from app.widgets.bottom_input_area import (
+        AssistantMentionObject,
+        CommandMentionObject,
+        FileMentionObject,
+    )
+
+    img = QImage(200, 40, QImage.Format_ARGB32_Premultiplied)
+    buffer = QBuffer()
+    buffer.open(QIODevice.WriteOnly)
+    img.save(buffer, "PNG")  # 确保 QImage 底层存储有效
+    painter = QPainter(img)
+    try:
+        rect = editor.contentsRect()
+        # 助手格式需要名字属性
+        from PyQt5.QtGui import QTextCharFormat
+
+        afmt = QTextCharFormat()
+        afmt.setObjectType(_ASSISTANT_MENTION_TYPE)
+        afmt.setProperty(_ASSISTANT_MENTION_NAME_PROP, "阿明")
+
+        cases = [
+            (FileMentionObject(), editor._make_mention_format("a/b/c.py")),
+            (AssistantMentionObject(), afmt),
+            (CommandMentionObject(), editor._make_command_format("cmd")),
+        ]
+        for pill, fmt in cases:
+            pill.drawObject(painter, rect, editor.document(), 0, fmt)
+    finally:
+        painter.end()
 
 
 def test_tab_silent_after_command_collapsed(editor, monkeypatch):

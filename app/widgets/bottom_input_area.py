@@ -3226,9 +3226,10 @@ class AssistantMentionObject(QObject, QTextObjectInterface):
             x = pill.left() + self._PAD_LEFT
             painter.setFont(doc.defaultFont() if doc else QFont())
 
+            text = fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH)
             text_rect = QRectF(x, pill.top(), max(0.0, pill.right() - self._PAD_RIGHT - x), h)
             painter.setPen(QPen(QColor(Colors.INPUT_TEXT)))
-            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, name)
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
         finally:
             painter.restore()
 
@@ -3286,10 +3287,9 @@ class CommandMentionObject(QObject, QTextObjectInterface):
             x = pill.left() + self._PAD_LEFT
             painter.setFont(doc.defaultFont() if doc else QFont())
 
-            text = fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH)
             text_rect = QRectF(x, pill.top(), max(0.0, pill.right() - self._PAD_RIGHT - x), h)
             painter.setPen(QPen(QColor(Colors.INPUT_TEXT)))
-            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, name)
         finally:
             painter.restore()
 
