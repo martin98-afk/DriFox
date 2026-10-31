@@ -7353,8 +7353,10 @@ class OpenAIChatToolWindow(ToolWindow):
         }
         # 提取当前输入文本和光标位置，让 show_command_detail 重建 widgets
         # 后能立即应用 active 状态（修复失焦→重新聚焦时 active 状态丢失）
+        # ⚠️ 卡片在 plain 域消费 cursor_pos（与 full_text 切片比较），命令胶囊
+        # 存在时 doc 与 plain 坐标不等长，必须经输入框换算
         full_text = self.input_area.toPlainText()
-        cursor_pos = self.input_area.textCursor().position()
+        cursor_pos = self.input_area._plain_offset_from_doc(self.input_area.textCursor().position())
         # 切换到 detail 模式（按选中类型显示对应 hint）
         card.show_command_detail(
             cmd_name,
