@@ -145,6 +145,11 @@ _SYMBOLS: dict[str, tuple[str, str]] = {
     "load_skill": ("app.utils.utils", "load_skill"),
     "get_local_skills": ("app.utils.utils", "get_local_skills"),
     "get_skill_by_name": ("app.utils.utils", "get_skill_by_name"),
+    # ── 插件贡献注册表（能力池：动态技能源/命令/智能体） ──
+    "contribution_registry": (
+        "app.plugins.registries.contribution_registry",
+        "ContributionRegistry",
+    ),
 }
 
 __all__ = sorted(_SYMBOLS)

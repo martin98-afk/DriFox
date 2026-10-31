@@ -19893,11 +19893,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 修复：parse_suffixed_name 会把技能真名"my-skill"错误截断为"my"，
                 # 导致 get_skill_by_name("my") 查不到（技能实际叫"my-skill"）
                 raw_name, _ = CommandManager.parse_suffixed_name(parts[0])
-                skill = get_skill_by_name(parts[0])
+                _proj_wd = self._get_current_workdir() or None
+                skill = get_skill_by_name(parts[0], project_dir=_proj_wd)
                 if skill:
                     skill_name = parts[0]
                 elif raw_name:
-                    skill = get_skill_by_name(raw_name)
+                    skill = get_skill_by_name(raw_name, project_dir=_proj_wd)
                     skill_name = raw_name if skill else parts[0]
                 else:
                     skill_name = parts[0]
@@ -19913,7 +19914,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 🆕 直接调用 load_skill 读取技能内容，通过 PreUserMessage hook 注入
                     from app.utils.utils import load_skill as load_skill_func
 
-                    success, content, workspace = load_skill_func(skill_name)
+                    success, content, workspace = load_skill_func(skill_name, project_dir=_proj_wd)
                     if not success:
                         logger.warning(f"[Skill] load_skill failed for '{skill_name}': content={len(content)}")
                     if success:

@@ -101,6 +101,8 @@ class Assistant:
     project_notes_enabled: bool = True
     # 项目上下文（项目根目录 + git 状态）注入开关：主智能体按此开关控制；子智能体始终注入
     project_context_enabled: bool = True
+    # 项目技能（<项目根>/.drifox/skills/ 自动发现与注入）开关
+    project_skills_enabled: bool = True
     # 预置工具档位（控制初始注入的 schema，不影响可用性）：full=全量 / readonly=仅安全类 / minimal=bash+write+edit / search=仅搜索+中转 / none=无工具
     tool_access: str = "full"
     # 记忆字符上限（UI 可配；<=0 时回落内置默认）
@@ -131,6 +133,7 @@ class Assistant:
             "experience_enabled": self.experience_enabled,
             "project_notes_enabled": self.project_notes_enabled,
             "project_context_enabled": self.project_context_enabled,
+            "project_skills_enabled": self.project_skills_enabled,
             "tool_access": self.tool_access,
             "global_memory_max_chars": self.global_memory_max_chars,
             "project_memory_max_chars": self.project_memory_max_chars,
@@ -162,6 +165,7 @@ class Assistant:
             experience_enabled=bool(data.get("experience_enabled", False)),
             project_notes_enabled=bool(data.get("project_notes_enabled", True)),
             project_context_enabled=bool(data.get("project_context_enabled", True)),
+            project_skills_enabled=bool(data.get("project_skills_enabled", True)),
             tool_access=str(data.get("tool_access") or "full"),
             global_memory_max_chars=int(data.get("global_memory_max_chars", 4000) or 0),
             project_memory_max_chars=int(data.get("project_memory_max_chars", 3000) or 0),
@@ -194,6 +198,7 @@ class Assistant:
             public_description="",
             project_notes_enabled=True,
             project_context_enabled=True,
+            project_skills_enabled=True,
             created_at=now,
             updated_at=now,
         )

@@ -802,7 +802,19 @@ class AgentManager:
         return Agent.from_dict(data)
 
     def get_agent(self, name: str) -> Optional[Agent]:
-        return self._agents.get(name) or self._hidden_agents.get(name)
+        agent = self._agents.get(name) or self._hidden_agents.get(name)
+        if agent is not None:
+            return agent
+        # 贡献回落：插件注入的动态智能体（能力池 agent 定义）
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            d = ContributionRegistry.get_instance().get_agent_def(name)
+            if d:
+                return Agent.from_dict({k: v for k, v in d.items() if not k.startswith("_")})
+        except Exception:
+            pass
+        return None
 
     def list_agents(self, include_hidden: bool = False) -> List[Agent]:
         if include_hidden:
@@ -1014,15 +1026,16 @@ Use the tools available to you based on your permissions."""
             # 合并外部上下文（由 context_builder 传入 project_root/project_name）
             if extra_context:
                 hook_ctx.update(extra_context)
-            # 技能内容
+            # 技能内容（project_root 贯穿：动态技能源按会话所属项目求值）
             try:
                 from app.utils.config import Settings
 
                 enabled_skills = Settings.get_instance().llm_enabled_skills.value
-                if enabled_skills:
-                    sk_content = self.get_enabled_skills_content(enabled_skills)
-                    if sk_content:
-                        hook_ctx["enabled_skills_content"] = sk_content
+                sk_content = self.get_enabled_skills_content(
+                    enabled_skills, project_dir=hook_ctx.get("project_root") or None
+                )
+                if sk_content:
+                    hook_ctx["enabled_skills_content"] = sk_content
             except Exception:
                 pass
             # 子智能体列表（仅主智能体需要）
@@ -1045,20 +1058,27 @@ Use the tools available to you based on your permissions."""
 
         return base
 
-    def get_enabled_skills_content(self, enabled_skills: List[str]) -> str:
-        """获取已启用的技能内容"""
+    def get_enabled_skills_content(
+        self, enabled_skills: List[str], project_dir: Optional[str] = None
+    ) -> str:
+        """获取已启用技能内容（project_dir 非空时含贡献动态技能源）
+
+        两类进「偏好技能」段：
+        - enabled_skills 名单内的技能（现有语义）
+        - auto_enable=True 的贡献条目（如项目技能，无需手动启用）
+        """
         from app.utils.utils import get_local_skills
 
-        if not enabled_skills:
+        all_skills = get_local_skills(project_dir)
+        if not all_skills:
             return ""
-
-        all_skills = get_local_skills()
+        enabled_set = set(enabled_skills or [])
         result_parts = [
             "\n\n## 偏好技能\n凡用户请求命中以下技能 description 描述的场景，必须先调用 `skill` 工具加载对应技能再回答，禁止跳过直接作答；以下技能无法满足时用 `manage_skill(action=\"list\")` 查看完整列表：\n"
         ]
 
         for skill in all_skills:
-            if skill["name"] in enabled_skills:
+            if skill["name"] in enabled_set or skill.get("auto_enable"):
                 display_name = skill.get("qualified_name", skill["name"])
                 result_parts.append(f"\n### {display_name}\n{skill.get('description', '')}\n")
 

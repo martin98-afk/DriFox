@@ -1018,6 +1018,7 @@ class ProjectSection(_Section):
 
     toggleNotes = pyqtSignal(bool)
     toggleContext = pyqtSignal(bool)
+    toggleSkills = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__("项目", parent)
@@ -1061,11 +1062,34 @@ class ProjectSection(_Section):
         self.body().addLayout(ctx_row)
         self.body().addWidget(_hint("项目根目录路径规则 + git 分支/工作树状态。"))
 
+        self.body().addWidget(_sep())
+
+        # 项目技能
+        skills_row = QHBoxLayout()
+        skills_row.addWidget(_title_label("项目技能", 11))
+        skills_row.addStretch()
+        skills_lbl = QLabel("注入")
+        skills_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        skills_row.addWidget(skills_lbl)
+        self._skills_switch = SwitchButton()
+        self._skills_switch.setOnText("开")
+        self._skills_switch.setOffText("关")
+        self._skills_switch.checkedChanged.connect(self.toggleSkills.emit)
+        skills_row.addWidget(self._skills_switch)
+        self.body().addLayout(skills_row)
+        self.body().addWidget(_hint("{项目根}/.drifox/skills/ 下的项目内技能，自动进技能段，可被 /技能名 加载。"))
+
     def set_notes(self, on: bool) -> None:
         self._notes_switch.setChecked(on)
 
     def set_context_enabled(self, on: bool) -> None:
         self._context_switch.setChecked(on)
+
+    def set_skills(self, on: bool) -> None:
+        self._skills_switch.setChecked(on)
 
 
 # ── 人工提示分区 ────────────────────────────────────────

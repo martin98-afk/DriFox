@@ -297,6 +297,7 @@ class AssistantCardWidget(QWidget):
         self._project = ProjectSection()
         self._project.toggleNotes.connect(self._on_project_notes_toggle)
         self._project.toggleContext.connect(self._on_project_context_toggle)
+        self._project.toggleSkills.connect(self._on_project_skills_toggle)
         self._inner_v.addWidget(self._project)
 
         self._pinned = PinnedSection()
@@ -477,6 +478,7 @@ class AssistantCardWidget(QWidget):
             self._about.set_persona(a.yuan)
             self._project.set_notes(a.project_notes_enabled)
             self._project.set_context_enabled(a.project_context_enabled)
+            self._project.set_skills(a.project_skills_enabled)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_limits(a.global_memory_max_chars, a.project_memory_max_chars)
             self._memory.set_sections(mgr.memory_sections(aid_capture))
@@ -722,6 +724,14 @@ class AssistantCardWidget(QWidget):
         if not a:
             return
         a.project_context_enabled = bool(on)
+        self._mgr.update(a)
+        self._mgr._invalidate_session_prompt_caches()
+
+    def _on_project_skills_toggle(self, on: bool) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.project_skills_enabled = bool(on)
         self._mgr.update(a)
         self._mgr._invalidate_session_prompt_caches()
 
