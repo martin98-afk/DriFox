@@ -8,6 +8,7 @@
 """
 
 from datetime import datetime
+import threading
 from typing import Callable, Dict, Optional, Tuple
 
 from PyQt5.QtCore import QEvent, QSize, Qt, QThread, QTimer, pyqtSignal
@@ -39,7 +40,8 @@ from .scanner import (
     _drifox_dir,
     _format_size,
     _get_process_memory,
-    _release_memory_deep,
+    _kill_qwebengine_processes,
+    _release_memory_deep_core,
     _release_memory_light,
 )
 
@@ -627,11 +629,57 @@ class SystemCleanerCard(QWidget):
         mem_before = _get_process_memory()
         _release_memory_light()
 
-        def _finish_deep():
+        # ── 分三拍（2026-10-31 运行日志驱动）──
+        # 拍1（本帧）：轻清理。
+        # 拍2（+120ms 主线程）：GC 全代 + 工作集修剪。留主线程是因为 gc.collect(2)
+        #   回收期间暂停全部线程，换到后台只是把停顿挪个位置，主线程照样卡；
+        #   而它确实需要「事件循环已排干在途回调」这个前置（既有崩溃修复）。
+        # 拍3（后台线程）：`_kill_qwebengine_processes` 的 psutil.process_iter
+        #   全系统遍历。这是真实的阻塞式 IO（逐个 OpenProcess 取 pid/name/ppid），
+        #   实测主线程阻塞 501ms，栈顶落在 psutil._pswindows.ppid。它只碰 OS
+        #   进程句柄，不碰任何 QObject，放后台是安全的。
+        # 收尾回主线程，所有 UI 写操作 + sip 活性硬判都在那里。
+        def _deep_core_on_main():
             try:
-                collected, killed_procs = _release_memory_deep()
-            except RuntimeError:
-                return  # 卡片/控件已销毁，直接放弃收尾
+                collected = _release_memory_deep_core()
+            except Exception:  # noqa: BLE001 — 主线程阶段失败不能吞掉按钮复位
+                collected = 0
+
+            def _kill_in_background():
+                try:
+                    killed = _kill_qwebengine_processes()
+                except Exception:  # noqa: BLE001
+                    killed = 0
+                QTimer.singleShot(
+                    0,
+                    lambda: self._finish_memory_release(mem_before, collected, killed),
+                )
+
+            threading.Thread(
+                target=_kill_in_background,
+                daemon=True,
+                name="cleaner-kill-webengine",
+            ).start()
+
+        QTimer.singleShot(120, _deep_core_on_main)
+
+    def _finish_memory_release(self, mem_before, collected, killed_procs):
+        """深度释放完成后的主线程收尾（按钮文案 / 状态 / 刷新）。
+
+        单独成方法是为了让 QTimer 回调里只有一个方法调用：卡片在后台线程
+        工作期间被销毁时，lambda 内的属性访问会在调用时立刻抛 RuntimeError，
+        由 sip 活性检查提前拦截。
+        """
+        # 活性判定用 sip.isdeleted 硬判：已析构 wrapper 上访问 Python 侧实例
+        # 属性不会抛异常（项目既有坑），靠属性访问做存在性检查会静默漏过。
+        try:
+            from PyQt5 import sip as _sip
+
+            if _sip.isdeleted(self) or _sip.isdeleted(self._mem_release_btn):
+                return
+        except Exception:
+            return
+        try:
             mem_after = _get_process_memory()
 
             freed_mem = (mem_before - mem_after) if (mem_before and mem_after) else None
@@ -654,8 +702,8 @@ class SystemCleanerCard(QWidget):
             self._set_status("")
 
             QTimer.singleShot(3000, self._reset_mem_release_btn)
-
-        QTimer.singleShot(120, _finish_deep)
+        except RuntimeError:
+            return  # 控件在收尾途中被销毁
 
     def _reset_mem_release_btn(self):
         if not self._is_releasing_mem:

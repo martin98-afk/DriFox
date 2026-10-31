@@ -951,8 +951,16 @@ class HistoryManager:
         """跨进程一致性：检测 SQLite 被其他 OS 进程修改后，把本进程内存缓存与
         SQLite 重新对齐，避免各窗口的历史卡片/欢迎卡片互相陈旧、且重开也无法刷新。
 
-        安全策略：重载前先 flush 本进程挂起写（确保本进程状态已落盘），再整体从
-        SQLite 重载内存缓存，杜绝「重载覆盖其他进程保存」的数据丢失。
+        [PERF] 读路径不得同步写盘。旧实现在签名变化时无条件 ``self.flush()``
+        （内部 ``_do_save(synchronous=True)``：全量 serialize+zstd+写盘，大会话
+        实测 500ms+），而签名变化最常见的来源就是**本进程自己刚写完**——
+        流式结束 → _save_current_session_to_history 置脏 → _notify_history_data_changed
+        → get_history_list → 本方法，每次对话完都白付一次同步全量写盘。
+        2026-10-31 运行日志里 MainThreadWatchdog 抓到 4 次（最长 544ms）。
+
+        改成：本进程有待保存会话时，内存就是最新权威数据。把写丢给后台线程，
+        本次**不重载**（重载会把内存换成 SQLite 旧快照，反而丢数据），签名也
+        不推进，下次读取时再对齐（后台写完成时会 ``_refresh_db_signature``）。
         仅应在读取路径（get_history_list 等）调用，不破坏写入路径的权威状态。
         """
         if not self._use_sqlite or self._session_store is None:
@@ -963,11 +971,17 @@ class HistoryManager:
         if self._db_signature_stored is not None and sig == self._db_signature_stored:
             return  # 未变化，跳过（含本进程自身写入后已对齐的情况）
 
-        # 文件变化 → 先 flush 本进程挂起写，再整体重载
-        try:
-            self.flush()
-        except Exception:
-            logger.exception("[HistoryManager] 跨进程重载前 flush 失败")
+        if self._pending_save_session_id:
+            # 本进程有未落盘的写：内存领先于 SQLite，重载会回退。后台写盘后再对齐。
+            logger.debug(
+                f"[HistoryManager] 有待保存会话，跳过跨进程重载并异步写盘: "
+                f"{self._pending_save_session_id[:8]}..."
+            )
+            try:
+                self.flush_async()
+            except Exception:
+                logger.exception("[HistoryManager] 跨进程重载前 flush_async 失败")
+            return
 
         with self._history_load_lock:
             try:
@@ -2314,6 +2328,13 @@ class HistoryManager:
                     store.save_session(snapshot)
                     if db is not None and getattr(db, "is_connected", False):
                         db.flush()
+                # 与 _do_save 的后台写同口径：本进程刚写库会推进 -wal 的 mtime，
+                # 不刷新签名的话下一次 get_history_list 的 _reload_if_db_changed
+                # 会把自己的写入误判成「外部进程改动」→ 白跑一次全量重载
+                # （1915 条约 19ms，持 _history_load_lock）。读路径已改为
+                # 待保存写时跳过重载并异步落盘，这条刷新就是让紧随其后的那次
+                # 读取能直接命中签名、彻底不重载。
+                self._refresh_db_signature()
             except Exception as e:
                 logger.error(f"[HistoryManager] flush_async 后台保存失败: {e}")
 

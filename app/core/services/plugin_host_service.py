@@ -218,7 +218,11 @@ class PluginHostService(QObject):
             except Exception as e:
                 logger.warning(f"[PluginHost] 延迟队列 stop failed: {e}")
         try:
-            self._stop_plugin_watcher()
+            # wait=False：应用退出路径。watchfiles 的 rust 侧要等当前
+            # debounce/step 窗口结束才检出 stop_event（实测主线程 join 阻塞
+            # 535ms，看门狗日志 4 次），而线程是 daemon、进程马上就要退出，
+            # 在主线程干等只换来关软件那半秒卡顿。
+            self._stop_plugin_watcher(wait=False)
         except Exception as e:
             logger.warning(f"[PluginHost] stop failed: {e}")
 
@@ -1100,7 +1104,7 @@ class PluginHostService(QObject):
             # 被反复重启/插件被重载（实际无任何行为）
             self._watcher_baseline_until = 0.0
 
-    def _stop_plugin_watcher(self):
+    def _stop_plugin_watcher(self, wait: bool = True):
         """backend 关闭时递减 watcher 引用计数；归零时停止 watchfiles 线程。
 
         泄漏修复（P1）：watcher 闭包持有启动它的第一个 backend 实例引用
@@ -1111,6 +1115,12 @@ class PluginHostService(QObject):
         - refcount == 0：设置 stop_event → watch() 生成器退出 → join 等待线程结束
           → 闭包释放 → 首个 backend 实例可回收；同时复位标志，允许新窗口
           重新启动 watcher（stop_event 在 _start_plugin_watcher 中重建），热更新不丢失。
+
+        Args:
+            wait: 归零时是否在调用线程（通常是主线程）等 watcher 线程退出。
+                默认 True——窗口关闭但进程存活（托盘驻留）时必须等，否则闭包
+                引用不释放、且新窗口重开 watcher 会与旧线程监听同一批目录。
+                应用退出路径传 False：daemon 线程随进程死亡，主线程干等只是白掉帧。
         """
         self._plugin_watcher_refcount = max(0, self._plugin_watcher_refcount - 1)
         if self._plugin_watcher_refcount > 0:
@@ -1119,7 +1129,7 @@ class PluginHostService(QObject):
         if stop is not None:
             stop.set()
         t = self._plugin_watcher_thread
-        if t is not None and t.is_alive():
+        if wait and t is not None and t.is_alive():
             try:
                 t.join(timeout=2.0)
             except Exception:
