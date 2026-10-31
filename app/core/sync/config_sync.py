@@ -393,7 +393,7 @@ class ConfigSyncService(QObject):
         try:
             from app.core.sync.meta_recorder import bind_settings
 
-            self._meta_recorder = bind_settings(Settings.get_instance())
+            self._meta_recorder = bind_settings(Settings.get_instance(), device=self._device_tag)
         except Exception as e:
             logger.warning(f"[ConfigSync] 同步元数据接线失败: {e}")
             self._meta_recorder = None
@@ -2079,7 +2079,7 @@ class ConfigSyncService(QObject):
         ``remote_authority=True``：本机没有合并基准（解绑重绑 / 新机首次绑定）
         时的首次合并，本地条目一律按 t=0 参与比较，云端任何版本都胜出。
         """
-        from app.core.sync.lww import merge_config_lww
+        from app.core.sync.lww import entry_ts, is_tombstone, merge_config_lww
         from app.core.sync.meta_recorder import SyncMetaRecorder, load_state
 
         try:
@@ -2097,13 +2097,14 @@ class ConfigSyncService(QObject):
         remote_meta = (remote_data.get("System") or {}).get("SyncMeta") or "{}"
         remote_clock = int(load_state(remote_meta).get("clock") or 0)
 
-        local_rec = SyncMetaRecorder()
+        local_rec = SyncMetaRecorder(self._device_tag)
         local_rec.attach(local_data, local_meta)
         # 先纳入远端序号再补本地缺失条目：否则首次升级时本地补出来的 t 低于
         # 远端已有序号，远端全胜会把本地独有改动覆盖掉。
         local_rec.observe_clock(remote_clock)
         local_rec.seed_missing()
         local_entries = local_rec.entries()
+        local_entries_raw = local_entries
         if remote_authority:
             # 云端权威：本地条目一律压到 t=0，云端的任何版本都胜出。
             # 解绑重绑 / 新机首次绑定时本机没有合并基准，本地配置是绑定前
@@ -2122,6 +2123,29 @@ class ConfigSyncService(QObject):
             remote_rec.entries(),
             remote_authority=remote_authority,
         )
+        # 墓碑保底：合并只遍历值里的键，两端值都已删除的墓碑会被漏掉，
+        # 丢掉后下一次同步就有人拿旧值把条目复活。墓碑一律取 t 更大的那份。
+        for _src in (local_entries_raw, remote_rec.entries()):
+            for _path, _entry in _src.items():
+                if not is_tombstone(_entry):
+                    continue
+                _prev = merged_entries.get(_path)
+                if _prev is None or entry_ts(_entry) > entry_ts(_prev):
+                    merged_entries[_path] = dict(_entry)
+        if remote_authority:
+            # 清零只用于本次比较。写回时若留下 t=0，两台设备各自的本地独有键
+            # 会在下一次合并中平局（0 vs 0 → 冲突 → 本地优先），云端被两边
+            # 轮流覆盖，永不收敛。落盘前把非正 t 重编到当前 clock 之上；
+            # 其他设备合并时会 observe 这个 clock，后续写入仍能赢过它们。
+            _next = max(
+                merged_clock,
+                max((int(e.get("t") or 0) for e in merged_entries.values()), default=0),
+            )
+            for _entry in merged_entries.values():
+                if int(_entry.get("t") or 0) <= 0:
+                    _next += 1
+                    _entry["t"] = _next
+            merged_clock = max(merged_clock, _next)
         merged_cfg.setdefault("System", {})["SyncMeta"] = json.dumps(
             {
                 "version": 1,

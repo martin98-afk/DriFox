@@ -19,6 +19,8 @@ from typing import Dict, List, Tuple
 Entry = Dict[str, object]
 
 TOMBSTONE_KEY = "d"
+# 条目写入者标识：t 相同时靠它做确定性裁决（否则多端同写一个键会永不收敛）
+DEVICE_KEY = "dv"
 
 
 class LamportClock:
@@ -84,18 +86,31 @@ def merge_entries(
         elif rt > lt:
             merged[key] = dict(re_)
         else:
+            # t 相同：按设备标识字典序裁决，保证多端收敛到同一结果。
+            # 旧条目没有标识时退化为本地优先（与历史行为一致）。
+            ldev = str(le.get(DEVICE_KEY) or "")
+            rdev = str(re_.get(DEVICE_KEY) or "")
+            if ldev and rdev and ldev != rdev:
+                merged[key] = dict(le) if ldev > rdev else dict(re_)
+                continue
             if str(le.get("h") or "") != str(re_.get("h") or ""):
                 conflicts.append(key)
             merged[key] = dict(le)
     return merged, conflicts
 
 
-def tombstone(h: str, t: int) -> Entry:
-    return {"h": h, "t": t, TOMBSTONE_KEY: True}
+def tombstone(h: str, t: int, device: str = "") -> Entry:
+    entry: Entry = {"h": h, "t": t, TOMBSTONE_KEY: True}
+    if device:
+        entry[DEVICE_KEY] = device
+    return entry
 
 
-def live(h: str, t: int) -> Entry:
-    return {"h": h, "t": t}
+def live(h: str, t: int, device: str = "") -> Entry:
+    entry: Entry = {"h": h, "t": t}
+    if device:
+        entry[DEVICE_KEY] = device
+    return entry
 
 
 def is_tombstone(entry: Entry | None) -> bool:
@@ -175,6 +190,11 @@ def _pick_entry(
         return re_, "remote"
     if lt > rt:
         return le, "local"
+    # t 相同：按设备标识字典序裁决。没有标识的旧条目退化为本地优先。
+    ldev = str(le.get(DEVICE_KEY) or "")
+    rdev = str(re_.get(DEVICE_KEY) or "")
+    if ldev and rdev and ldev != rdev:
+        return (le, "local") if ldev > rdev else (re_, "remote")
     if str(le.get("h") or "") != str(re_.get("h") or ""):
         return le, "conflict"
     return le, "local"
@@ -232,6 +252,13 @@ def merge_config_lww(
     for group in sorted(set(local_cfg) | set(remote_cfg)):
         lg = local_cfg.get(group, _MISSING)
         rg = remote_cfg.get(group, _MISSING)
+        # 一侧整组缺失时按空组处理，仍走逐项合并：否则会退化成组级 block
+        # 合并，组内集合条目（如 LLM.SavedProviders.p0）全部丢失条目表。
+        # 典型场景：新设备首次下载，本地配置里根本没有 LLM 组。
+        if lg is _MISSING and isinstance(rg, dict):
+            lg = {}
+        elif rg is _MISSING and isinstance(lg, dict):
+            rg = {}
         if not isinstance(lg, dict) or not isinstance(rg, dict):
             path = str(group)
             entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)

@@ -41,8 +41,10 @@ def value_hash(value: object) -> str:
 
 
 class SyncMetaRecorder:
-    def __init__(self) -> None:
+    def __init__(self, device: str = "") -> None:
         self.state: Dict[str, object] = {"version": META_VERSION, "clock": 0, "entries": {}}
+        # 本设备标识：写进条目，供 t 相同时做确定性裁决
+        self.device = device
         # path（group.name）→ 该配置项当前值，用于 diff 出集合条目的增删
         self.values: Dict[str, object] = {}
         self._clock = LamportClock(0)
@@ -90,16 +92,16 @@ class SyncMetaRecorder:
                     for k, v in (value.items() if isinstance(value, dict) else []):
                         epath = f"{path}.{k}"
                         if epath not in entries:
-                            entries[epath] = live(value_hash(v), self._clock.tick())
+                            entries[epath] = live(value_hash(v), self._clock.tick(), self.device)
                     continue
                 if kind == "list":
                     for elem in value if isinstance(value, list) else []:
                         epath = f"{path}.{element_key(elem)}"
                         if epath not in entries:
-                            entries[epath] = live(value_hash(elem), self._clock.tick())
+                            entries[epath] = live(value_hash(elem), self._clock.tick(), self.device)
                     continue
                 if path not in entries:
-                    entries[path] = live(value_hash(value), self._clock.tick())
+                    entries[path] = live(value_hash(value), self._clock.tick(), self.device)
             self.state["entries"] = entries
             self._sync_clock()
 
@@ -145,7 +147,7 @@ class SyncMetaRecorder:
             self._sync_clock()
 
     def _touch(self, path: str, value: object) -> None:
-        self._entries()[path] = live(value_hash(value), self._clock.tick())
+        self._entries()[path] = live(value_hash(value), self._clock.tick(), self.device)
 
     def _diff_dict(self, path: str, old: object, new: object) -> None:
         old_d = old if isinstance(old, dict) else {}
@@ -156,7 +158,7 @@ class SyncMetaRecorder:
         for k, v in old_d.items():
             if k not in new_d:
                 self._entries()[f"{path}.{k}"] = tombstone(
-                    value_hash(v), self._clock.tick()
+                    value_hash(v), self._clock.tick(), self.device
                 )
 
     def _diff_list(self, path: str, old: object, new: object) -> None:
@@ -170,7 +172,7 @@ class SyncMetaRecorder:
         for k, v in old_map.items():
             if k not in new_map:
                 self._entries()[f"{path}.{k}"] = tombstone(
-                    value_hash(v), self._clock.tick()
+                    value_hash(v), self._clock.tick(), self.device
                 )
 
     def _sync_clock(self) -> None:
@@ -261,7 +263,7 @@ def is_tombstone_entry(entry: Optional[Entry]) -> bool:
 _recorder_singleton: Optional[SyncMetaRecorder] = None
 
 
-def bind_settings(cfg) -> SyncMetaRecorder:
+def bind_settings(cfg, device: str = "") -> SyncMetaRecorder:
     """把记账器接到 Settings 的全部 ConfigItem 上（幂等，全局单例）。
 
     只负责 app.config 内存侧的变化采集；合并下载写回内存时由调用方
@@ -273,7 +275,7 @@ def bind_settings(cfg) -> SyncMetaRecorder:
 
     from qfluentwidgets.common.config import ConfigItem
 
-    rec = SyncMetaRecorder()
+    rec = SyncMetaRecorder(device)
     rec.attach(cfg.toDict(serialize=False), getattr(cfg, "sync_meta").value)
     rec.seed_missing()
 

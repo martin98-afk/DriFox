@@ -452,6 +452,19 @@ class TestConfigMergeLww:
         state = json.loads(data["System"]["SyncMeta"])
         assert state["entries"]["UI.FontSize"] == {"h": "b", "t": 7}
 
+    def test_remote_authority_lifts_zero_ts(self, svc):
+        """云端权威合并后本地独有键必须拿到正时间戳，留 t=0 会让两端平局各自为政"""
+        local = {"UI": {"FontSize": "12", "OnlyLocal": 1}}
+        remote = {"UI": {"FontSize": "18"}}
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"), remote_authority=True)
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        entries = json.loads(data["System"]["SyncMeta"])["entries"]
+        assert entries["UI.OnlyLocal"]["t"] > 0
+        assert entries["UI.FontSize"]["t"] > 0
+
     def test_download_without_base_is_remote_authoritative(self, svc):
         """没有合并基准（解绑重绑）→ 下载合并以云端为权威，本地旧值不赢"""
         local = {

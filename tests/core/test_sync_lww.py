@@ -67,6 +67,16 @@ def test_same_ts_diff_hash_conflict_local_wins():
     assert merged["a"]["h"] == "1"
     assert conflicts == ["a"]
 
+def test_same_ts_with_device_resolves_deterministically():
+    """t 相同且两端都带设备标识 → 按字典序裁决，交换顺序结果一致（多端收敛）"""
+    a = {"a": {"h": "1", "t": 2, "dv": "devA"}}
+    b = {"a": {"h": "9", "t": 2, "dv": "devB"}}
+    merged_ab, conflicts_ab = merge_entries(a, b)
+    merged_ba, conflicts_ba = merge_entries(b, a)
+    assert merged_ab["a"]["h"] == "9"
+    assert merged_ba["a"]["h"] == "9"
+    assert conflicts_ab == [] and conflicts_ba == []
+
 
 def test_lamport_observe_and_tick():
     c = LamportClock(0)
@@ -194,6 +204,19 @@ def test_merge_list_collection_by_element_key():
     }
     cfg, _, _ = merge_config_lww(local, le, remote, re_)
     assert [s["name"] for s in cfg["MCP"]["Servers"]] == ["a", "b", "c"]
+
+
+def test_merge_group_missing_keeps_collection_entries():
+    """一侧整组缺失（新设备首次下载）→ 仍逐项合并，集合条目不得丢"""
+    local: dict = {}
+    remote = {"LLM": {"SavedProviders": {"p0": {"n": 1}, "p1": {"n": 2}}}}
+    re_ = {
+        "LLM.SavedProviders.p0": {"h": "a", "t": 1},
+        "LLM.SavedProviders.p1": {"h": "b", "t": 2},
+    }
+    cfg, entries, _ = merge_config_lww(local, {}, remote, re_)
+    assert set(cfg["LLM"]["SavedProviders"]) == {"p0", "p1"}
+    assert set(entries) == {"LLM.SavedProviders.p0", "LLM.SavedProviders.p1"}
 
 
 def test_merge_unknown_collection_block_level():
