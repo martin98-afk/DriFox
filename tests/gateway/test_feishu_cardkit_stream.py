@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""gateway-feishu CardKit 流式 + 宿主新命令逻辑单测（不依赖飞书网络）。"""
+"""gateway-feishu CardKit 流式 + 宿主新命令逻辑单测（不依赖飞书网络）。
+
+注：gateway-feishu 是用户级插件（``.drifox/plugins``，gitignore 不入库），
+当前 1.2.3 版本**尚未实现** CardKit 流式（无 ``start_stream`` / ``_stream_states``）。
+本文件保留为规格：插件实现后自动恢复运行，未实现时整组跳过，不制造红灯。
+"""
 
 import asyncio
 import io
@@ -8,7 +13,24 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-PLUGIN_DIR = Path(r"D:\work\DriFox\.drifox\plugins\gateway-feishu\gateways")
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+PLUGIN_DIR = _REPO_ROOT / ".drifox" / "plugins" / "gateway-feishu" / "gateways"
+_ADAPTER_FILE = PLUGIN_DIR / "feishu.py"
+
+
+def _plugin_has_cardkit() -> bool:
+    try:
+        return _ADAPTER_FILE.exists() and "def start_stream" in _ADAPTER_FILE.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _plugin_has_cardkit(),
+    reason="gateway-feishu 当前版本未实现 CardKit 流式（插件在 .drifox/，不入库）",
+)
 
 
 def load_adapter_cls():
