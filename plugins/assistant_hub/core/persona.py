@@ -307,11 +307,19 @@ class PersonaRegistry:
 
 
 def _persona_data_dir() -> Path:
-    """<app_data>/assistant_hub（与 AssistantManager.root 一致的探测逻辑）。"""
+    """<app_data>/assistant_hub（与 AssistantManager.root 同一入口：能力池优先）。"""
+    try:
+        from app.plugins.sdk import caps_for
+
+        app_data = str(caps_for("storage.data_dir") or "")
+        if app_data:
+            return (Path(app_data) / "assistant_hub").resolve()
+    except Exception:
+        pass
     try:
         from app.plugins.sdk import get_app_data_dir
 
-        return Path(get_app_data_dir()) / "assistant_hub"
+        return (Path(get_app_data_dir()) / "assistant_hub").resolve()
     except Exception:
         pass
     try:

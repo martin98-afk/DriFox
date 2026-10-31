@@ -1334,7 +1334,16 @@ class TestThemeModeSync:
 
         # 捕获 150ms 延迟回调（真实链：lambda 闭包携带 tm_diff），手动执行模拟到期
         captured = []
-        monkeypatch.setattr(cs.QTimer, "singleShot", staticmethod(lambda ms, cb: captured.append(cb)))
+
+        class _StubQTimer:
+            """最小 QTimer 替身：只捕获 singleShot，避免替换 PyQt5 QTimer 类本体
+            （影响进程内所有调用方）"""
+
+            @staticmethod
+            def singleShot(ms, cb):
+                captured.append(cb)
+
+        monkeypatch.setattr(cs, "QTimer", _StubQTimer)
         svc.settingsRestored.connect(lambda: None)  # 占位，避免空连接告警
         try:
             svc._reload_settings_on_main_thread()
@@ -1358,6 +1367,99 @@ class TestThemeModeSync:
         dispatch_mock, fake = self._run_reload(reset_sync_service, tmp_path, monkeypatch, cloud_mode="Dark")
         assert fake.themeMode.value == Theme.DARK
         dispatch_mock.assert_not_called(), "深浅模式未变化不应触发全量刷新"
+
+
+class TestFontSyncFallback:
+    """回归：Gitee 同步写回字体/字号后 UI 不刷新（2026-10-31）。
+
+    根因：LLMSettingsCard 懒构建（窗口可见 3500ms 后），同步写回发生在其构建前
+    时 llm_font_family/ui_font_size 的 valueChanged 无监听者，只更新配置值不刷 UI；
+    主题有 _delayed_theme_refresh 兜底，字体/字号没有。修复：写回前记录旧值，
+    150ms 延迟分片按变更项驱动窗口 _apply_runtime_ui_settings。
+    """
+
+    class _FakeSettings:
+        """替身：主题 + 字体族 + 字号三项真实 ConfigItem"""
+
+        ui_theme_style = OptionsConfigItem("UI", "ThemeStyle", "lumia", OptionsValidator(["lumia"]))
+        ui_font_size = OptionsConfigItem("UI", "FontSize", "2", OptionsValidator([str(d) for d in range(-5, 11)]))
+        llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
+        # 写回循环读 secret_mode（密钥回填判定）；缺失会走 except 打 warning 噪声
+        secret_mode = ConfigItem("Secret", "Mode", "")
+
+        def __init__(self):
+            self.file = Path("")
+            # ConfigItem 挂在类上跨测试共享，逐实例重置回默认防前序用例污染
+            type(self).ui_theme_style.value = "lumia"
+            type(self).ui_font_size.value = "2"
+            type(self).llm_font_family.value = "楷体"
+
+        def get_instance(self):
+            return self
+
+    def _run(self, svc, tmp_path, monkeypatch, cloud: dict):
+        """执行 _reload_settings_on_main_thread 并手动触发 150ms 延迟回调。
+
+        返回 (dispatch_mock, wins, fake)：wins 为假窗口 MagicMock 列表。
+        """
+        from app.core.sync import config_sync as cs
+
+        cfg_path = tmp_path / "app.config"
+        cfg_path.write_text(json.dumps(cloud), encoding="utf-8")
+
+        fake = self._FakeSettings()
+        fake.file = cfg_path
+
+        monkeypatch.setattr("app.utils.config.update_theme_options", lambda: None)
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.reload", lambda self: None)
+        monkeypatch.setattr(cs, "Settings", fake)
+        dispatch_mock = MagicMock()
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.dispatch_refresh", dispatch_mock)
+
+        win = MagicMock()
+        win._is_destroyed = False
+        monkeypatch.setattr("app.core.infra.window_registry.alive_window_instances", lambda: [win])
+
+        captured = []
+        monkeypatch.setattr(cs.QTimer, "singleShot", staticmethod(lambda ms, cb: captured.append(cb)))
+        svc._reload_settings_on_main_thread()
+        for cb in captured:
+            cb()
+        return dispatch_mock, [win], fake
+
+    def test_font_and_size_changed_triggers_full_refresh(self, reset_sync_service, tmp_path, monkeypatch):
+        """字体族+字号都变（主题不变）→ 全量刷新窗口、不触发主题 dispatch"""
+        dispatch_mock, wins, fake = self._run(
+            reset_sync_service,
+            tmp_path,
+            monkeypatch,
+            cloud={"UI": {"ThemeStyle": "lumia", "FontSize": "5"}, "LLM": {"FontFamily": "微软雅黑"}},
+        )
+        assert fake.llm_font_family.value == "微软雅黑"
+        assert fake.ui_font_size.value == "5"
+        dispatch_mock.assert_not_called(), "主题未变不应触发 dispatch_refresh"
+        wins[0]._apply_runtime_ui_settings.assert_called_once_with(scope=None), "字体字号同变 → scope=None 全量"
+
+    def test_font_size_only_changed_uses_precise_scope(self, reset_sync_service, tmp_path, monkeypatch):
+        """仅字号变 → scope="font_size" 精确刷新"""
+        dispatch_mock, wins, fake = self._run(
+            reset_sync_service, tmp_path, monkeypatch, cloud={"UI": {"ThemeStyle": "lumia", "FontSize": "7"}}
+        )
+        assert fake.ui_font_size.value == "7"
+        assert fake.llm_font_family.value == "楷体"
+        dispatch_mock.assert_not_called()
+        wins[0]._apply_runtime_ui_settings.assert_called_once_with(scope="font_size")
+
+    def test_no_appearance_change_skips_refresh(self, reset_sync_service, tmp_path, monkeypatch):
+        """外观三项全未变 → 不 dispatch、不驱动窗口刷新"""
+        dispatch_mock, wins, _ = self._run(
+            reset_sync_service,
+            tmp_path,
+            monkeypatch,
+            cloud={"UI": {"ThemeStyle": "lumia", "FontSize": "2"}, "LLM": {"FontFamily": "楷体"}},
+        )
+        dispatch_mock.assert_not_called()
+        wins[0]._apply_runtime_ui_settings.assert_not_called()
 
 
 class TestSetThemeAfterSkip:

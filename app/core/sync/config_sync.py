@@ -688,6 +688,14 @@ class ConfigSyncService(QObject):
             #  若同步发生在该卡片构建前，写回 ui_theme_style.value 无监听者，qfluentwidgets
             #  图标/样式不会全量刷新，只更新配置值。通过 dispatch_refresh 兜底显式刷新。）
             _old_theme_id = cfg.ui_theme_style.value
+            # 字体/字号旧值：写回可能发生在 LLMSettingsCard 构建前（懒构建），
+            # valueChanged 无监听者 → 只更新配置值不刷 UI。写回后由
+            # _delayed_theme_refresh 按变更项显式驱动窗口刷新（与主题兜底同机制）。
+            # getattr 防御：测试桩/降级场景缺失属性时置 None，兜底自动跳过该项。
+            _old_font_family = getattr(cfg, "llm_font_family", None)
+            _old_font_family = _old_font_family.value if _old_font_family is not None else None
+            _old_font_size = getattr(cfg, "ui_font_size", None)
+            _old_font_size = _old_font_size.value if _old_font_size is not None else None
             # 云端 qfluentwidgets ThemeMode 与内存不一致（跨设备深/浅色同步场景）。
             # 不直接写内存（见下方写回循环特判），由 _delayed_theme_refresh 的
             # setTheme 正规链完成切换。
@@ -730,6 +738,7 @@ class ConfigSyncService(QObject):
                     from app.utils.secret_store import (
                         MASTER_PASSWORD_ACCOUNT,
                         MODE_KEYRING,
+                        MODE_NONE,
                         MODE_PASSWORD,
                         SecretStore,
                         collect_ciphertexts,
@@ -737,28 +746,39 @@ class ConfigSyncService(QObject):
                         unwrap_secrets,
                     )
 
-                    _secret_mode = str(cfg.secret_mode.value or MODE_KEYRING)
+                    # 密钥模式以**云端文件**为准：写回循环在下方，此刻 cfg.secret_mode
+                    # 还是本机旧值。跨设备首次同步时本机默认 keyring、云端 password，
+                    # 按旧值判定会走错回填分支 → 密文既不备份也不置 locked，表现为
+                    # 「同步后不弹解锁、服务商密钥不可用、只能重设密码、重启才恢复」。
+                    _cloud_mode = str((_file_data.get("General") or {}).get("SecretMode") or "")
+                    if _cloud_mode in (MODE_KEYRING, MODE_PASSWORD, MODE_NONE):
+                        _secret_mode = _cloud_mode
+                    else:
+                        _secret_mode = str(cfg.secret_mode.value or MODE_KEYRING)
                     if _secret_mode == MODE_PASSWORD:
                         _secret_backup = collect_ciphertexts(_file_data)
                         _secret_pwd = cfg._secret_password or SecretStore().get(MASTER_PASSWORD_ACCOUNT)
                         unwrap_secrets(_file_data, SecretStore(), mode=_secret_mode, password=_secret_pwd)
-                        # 🔒 本机权威：解密失败/无密码被置空的条目，若内存已有明文 key，
-                        # 恢复内存值。云端解不开的密文严禁把可用密钥覆盖成空
-                        # （历史 bug：同步后 API Key 无效、重启才恢复）。
-                        _mem_saved = cfg.llm_saved_providers.value
-                        _cloud_saved = (_file_data.get("LLM") or {}).get("SavedProviders")
-                        if isinstance(_mem_saved, dict) and isinstance(_cloud_saved, dict):
-                            for _cid, _info in _cloud_saved.items():
-                                if not (isinstance(_info, dict) and str(_cid) in _secret_backup):
-                                    continue
-                                if str(_info.get("API_KEY") or ""):
-                                    continue
-                                _mem_info = _mem_saved.get(_cid)
-                                _mem_key = str(_mem_info.get("API_KEY") or "") if isinstance(_mem_info, dict) else ""
-                                if _mem_key and not is_ciphertext(_mem_key):
-                                    _info["API_KEY"] = _mem_key
                     else:
                         unwrap_secrets(_file_data, SecretStore(), mode=_secret_mode)
+                    # 🔒 本机权威：云端该项为空或仍是密文（解不开 / keyring 剥离 /
+                    # 跨模式残留），而内存已有明文 key → 用内存值覆盖回写内容。
+                    # 任何模式下都要走这一步：云端 keyring 模式剥空的 API_KEY 若不
+                    # 保护，会把本机明文覆盖成空，等价丢密钥（历史 bug：同步后
+                    # API Key 无效、重启才恢复）。
+                    _mem_saved = cfg.llm_saved_providers.value
+                    _cloud_saved = (_file_data.get("LLM") or {}).get("SavedProviders")
+                    if isinstance(_mem_saved, dict) and isinstance(_cloud_saved, dict):
+                        for _cid, _info in _cloud_saved.items():
+                            if not isinstance(_info, dict):
+                                continue
+                            _cur_key = str(_info.get("API_KEY") or "")
+                            if _cur_key and not is_ciphertext(_cur_key):
+                                continue
+                            _mem_info = _mem_saved.get(_cid)
+                            _mem_key = str(_mem_info.get("API_KEY") or "") if isinstance(_mem_info, dict) else ""
+                            if _mem_key and not is_ciphertext(_mem_key):
+                                _info["API_KEY"] = _mem_key
                 except Exception as _se:
                     # 回填异常时清零模式标记：写回后的密钥态判定整体跳过，
                     # 保留 Settings 现有 locked/备份态，避免误清备份或误置 locked
@@ -840,8 +860,8 @@ class ConfigSyncService(QObject):
             try:
                 QTimer.singleShot(
                     150,
-                    lambda cfg=cfg, old=_old_theme_id, tm_diff=_cloud_theme_mode_differs: self._delayed_theme_refresh(
-                        cfg, old, tm_diff
+                    lambda cfg=cfg, old=_old_theme_id, tm_diff=_cloud_theme_mode_differs, off=_old_font_family, ofs=_old_font_size: self._delayed_theme_refresh(
+                        cfg, old, tm_diff, off, ofs
                     ),
                 )
             except Exception as _te:
@@ -888,20 +908,32 @@ class ConfigSyncService(QObject):
             self._set_state("idle")
             self.syncDone.emit(True, msg)
 
-    def _delayed_theme_refresh(self, cfg, old_theme_id, cloud_theme_mode_differs=False):
-        """延迟分片：写回完成后 ~150ms 执行主题显式全量刷新（修复 bug#6 兜底）
+    def _delayed_theme_refresh(
+        self, cfg, old_theme_id, cloud_theme_mode_differs=False, old_font_family=None, old_font_size=None
+    ):
+        """延迟分片：写回完成后 ~150ms 执行外观显式刷新（修复 bug#6 兜底）
 
         🚀 P5d：从 _reload_settings_on_main_thread 拆出的独立 QTimer 分片，
         避免单次事件循环内写回 + dispatch_refresh（全窗口 refresh_theme）
-        连续 1-2s 阻塞主线程。仅当主题值确实变化才刷新（diff 短路）。
+        连续 1-2s 阻塞主线程。仅当外观值确实变化才刷新（diff 短路）。
 
         cloud_theme_mode_differs：云端 qfluentwidgets ThemeMode 与本地不一致
         （themeMode 未直写内存，见 _reload_settings_on_main_thread 写回循环特判）。
         此时也触发 dispatch_refresh → setTheme 正规链：themeMode 内存值仍为旧值，
         set 不被幂等短路 → themeChanged 发射 + qconfig.theme 同步 + 图标/QSS 刷新。
+
+        old_font_family/old_font_size：写回前字体族/字号档位。LLMSettingsCard
+        未构建（懒构建）时写回 llm_font_family/ui_font_size 无 valueChanged 监听者，
+        此处兜底按变更类型驱动窗口刷新：仅字体变 → 精确 scope；与主题同变 →
+        scope=None 一次全量（避免同批 theme/font/font_size 三连刷）。
         """
         try:
-            if cfg.ui_theme_style.value != old_theme_id or cloud_theme_mode_differs:
+            theme_changed = bool(cfg.ui_theme_style.value != old_theme_id or cloud_theme_mode_differs)
+            _ff_changed = old_font_family is not None and cfg.llm_font_family.value != old_font_family
+            _fs_changed = old_font_size is not None and cfg.ui_font_size.value != old_font_size
+            if not theme_changed and not _ff_changed and not _fs_changed:
+                return
+            if theme_changed:
                 from app.utils.theme_manager import theme_manager as _tm
 
                 _tm.dispatch_refresh()
@@ -910,8 +942,33 @@ class ConfigSyncService(QObject):
                     + ("（含深浅模式）" if cloud_theme_mode_differs else "")
                     + "，显式全量刷新"
                 )
+            if _ff_changed or _fs_changed:
+                # 字体/字号兜底：scope 选取——单变精确刷，双变或与主题同批 → 全量
+                # （字体族变化需重渲消息卡 viewer，scope=None 全量语义最安全）
+                if theme_changed or (_ff_changed and _fs_changed):
+                    _font_scope: Optional[str] = None
+                elif _ff_changed:
+                    _font_scope = "font_family"
+                else:
+                    _font_scope = "font_size"
+                from app.core.infra import window_registry as _wr
+
+                for _win in _wr.alive_window_instances():
+                    try:
+                        if getattr(_win, "_is_destroyed", False):
+                            continue
+                        _win._apply_runtime_ui_settings(scope=_font_scope)
+                    except Exception as _we:
+                        logger.warning(f"[ConfigSync] 字体刷新失败 window={getattr(_win, '_window_id', '?')}: {_we}")
+                _new_ff = getattr(cfg, "llm_font_family", None)
+                _new_fs = getattr(cfg, "ui_font_size", None)
+                logger.info(
+                    f"[ConfigSync] 字体/字号已从（{old_font_family!r}, {old_font_size!r}）"
+                    f"→（{(_new_ff.value if _new_ff is not None else None)!r}, "
+                    f"{(_new_fs.value if _new_fs is not None else None)!r}），scope={_font_scope!r} 刷新"
+                )
         except Exception as _te:
-            logger.warning(f"[ConfigSync] 下载后主题全量刷新失败: {_te}")
+            logger.warning(f"[ConfigSync] 下载后外观全量刷新失败: {_te}")
 
     def _trigger_merged_plugin_reload(self):
         """合并触发一次插件子系统重载（同步窗口内被抑制的 watcher 变更兜底）

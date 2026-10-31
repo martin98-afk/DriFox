@@ -349,17 +349,33 @@ class AssistantManager:
     # ── 根目录 ──
 
     def _default_root(self) -> Path:
-        """默认根目录：<app_data_dir>/assistant_hub"""
-        try:
-            from app.plugins.sdk import get_app_data_dir
+        """默认根目录：<app_data_dir>/assistant_hub
 
-            app_data = get_app_data_dir()
+        数据根优先经能力池 ``storage.data_dir`` 取（插件不直连主程序内部模块），
+        能力未就绪/未授权时退回 sdk 直通，最后兜底用户目录。
+
+        统一 ``resolve()``：开发环境 app_data 是相对路径（``Path('.drifox')``），
+        不绝对化会随进程 CWD 漂移——同步 provider 注册的 local_dir 按注册时
+        CWD 解析，插件读写按调用时 CWD 解析，两者会分叉到不同目录。
+        """
+        app_data = ""
+        try:
+            from app.plugins.sdk import caps_for
+
+            app_data = str(caps_for("storage.data_dir") or "")
         except Exception:
-            app_data = None
+            app_data = ""
+        if not app_data:
+            try:
+                from app.plugins.sdk import get_app_data_dir
+
+                app_data = str(get_app_data_dir() or "")
+            except Exception:
+                app_data = ""
         if not app_data:
             # 兜底：用户目录/.drifox/assistant_hub
             app_data = str(Path.home() / ".drifox")
-        return Path(app_data) / "assistant_hub"
+        return (Path(app_data) / "assistant_hub").resolve()
 
     @property
     def root(self) -> Path:

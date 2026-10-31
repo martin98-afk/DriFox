@@ -33,6 +33,7 @@
         "net.avatar",
         "session.invalidate",
         "session.read",
+        "storage.data_dir",
         "sync.register",
         "tool.inject",
         "tool.read",

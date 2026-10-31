@@ -10199,6 +10199,8 @@ class OpenAIChatToolWindow(ToolWindow):
     # ── 多窗口批处理：避免每个窗口重复执行全局操作 ──
     _theme_batch_timer = None
     _theme_batch_scope = None
+    # 待刷 scope 哨兵：None=无待刷；"_full"=本批已合并为全量；其余为精确 scope
+    _BATCH_SCOPE_FULL = "_full"
 
     def _on_settings_config_changed(self):
         """外观设置变更 → 读取 LLMSettingsCard 标记的变更类型，按需刷新
@@ -10214,13 +10216,20 @@ class OpenAIChatToolWindow(ToolWindow):
         scope = LLMSettingsCard._last_change_type
         LLMSettingsCard._last_change_type = None
 
-        # 合并 scope：theme 优先级最高（涵盖颜色+字体），其次保留具体类型
+        # 合并 scope：同一批次（30ms debounce 窗口）出现多种变更类型时合并为
+        # 全量（哨兵 _BATCH_SCOPE_FULL）。不得折叠为 "theme"——
+        # _apply_runtime_ui_settings(scope="theme") 只刷颜色块、跳过字体块，
+        # 折叠会把同批的字体/字号刷新吞掉（Gitee 同步一次写回主题+字体+字号
+        # 多项的经典场景）。哨兵存在原因：None 双义（无待刷/全量），
+        # 已合并全量后若继续用 None 表示，会被后续 scope 当成「本批第一个」覆盖。
         cls = type(self)
         previous = cls._theme_batch_scope
-        if scope == "theme" or previous == "theme":
-            cls._theme_batch_scope = "theme"
-        elif scope:
+        if previous == cls._BATCH_SCOPE_FULL or previous == scope:
+            pass  # 已全量 / 同类型，保持
+        elif previous is None:
             cls._theme_batch_scope = scope
+        else:
+            cls._theme_batch_scope = cls._BATCH_SCOPE_FULL
 
         # ── Debounce: 30ms 内的多次配置变更合并为一次刷新 ──
         if cls._theme_batch_timer is not None:
@@ -10253,6 +10262,9 @@ class OpenAIChatToolWindow(ToolWindow):
         cls._theme_batch_timer = None
         final_scope = cls._theme_batch_scope
         cls._theme_batch_scope = None
+        # 哨兵映射："_full" → None（_apply_runtime_ui_settings 的全量语义）
+        if final_scope == cls._BATCH_SCOPE_FULL:
+            final_scope = None
 
         # ── 全局操作：只执行一次 ──
         ThemeRefreshCoordinator.timer_start("global")
@@ -10916,6 +10928,29 @@ class OpenAIChatToolWindow(ToolWindow):
             is_color = False  # 主题未变，跳过颜色块；字体相关块照常执行
         else:
             self._last_color_theme_id = current_theme_id
+
+        # ── 幂等跳过：字体族/字号未变则跳过对应块 ──
+        # 与 _last_color_theme_id 同模式。Gitee 同步场景下 LLMSettingsCard 监听链
+        # （30ms debounce）与同步服务兜底（150ms 分片）会对同一次字体变更各刷一遍；
+        # 字体块含 findChildren 全树 + MessageCard 重渲，无哨兵即双跑（多窗口 ×2）。
+        _not_seen = object()  # 哨兵默认值：属性未设时保证与任何配置值不等
+        try:
+            _cur_ff = self.cfg.llm_font_family.value
+            _cur_fs = self.cfg.ui_font_size.value
+        except Exception:
+            # 读不到配置（窗口构建极早期/降级）→ 每次用新对象，永不命中相等 → 保守照刷
+            _cur_ff = _cur_fs = object()
+        if is_font_family:
+            if getattr(self, "_last_font_family", _not_seen) == _cur_ff:
+                is_font_family = False  # 字体族未变，跳过 1/4 字体块
+            else:
+                self._last_font_family = _cur_ff
+        if is_font_size:
+            if getattr(self, "_last_font_size", _not_seen) == _cur_fs:
+                is_font_size = False  # 字号未变，跳过 3 块与块 2
+            else:
+                self._last_font_size = _cur_fs
+        is_font = is_font_family or is_font_size
 
         # ── 幂等短路：无任何块需要执行（theme 且主题未变）→ 直接返回 ──
         # scope="theme" 且主题未变时 is_color/is_font 全 False，
