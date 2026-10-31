@@ -18,10 +18,8 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import uuid
-from pathlib import Path
 from typing import List
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -191,14 +189,6 @@ class AssistantCardWidget(QWidget):
         except Exception as e:
             logger.debug(f"[assistant_hub] 实时拉能力池失败: {e}")
         return None
-
-    def set_context(self, ctx: dict) -> None:
-        """主程序注入的卡片上下文（UIPluginRegistry 创建卡片时调用）。
-
-        宿主 ctx 的 services/capabilities 由卡片按需实时取用（_ctx_caps_pool），
-        本插件不缓存宿主服务对象，也不再有后台 LLM 任务需要预热。
-        """
-        return
 
     # ══════════════════════════════════════════════════
     #  UI 构建

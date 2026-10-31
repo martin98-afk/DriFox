@@ -24,13 +24,10 @@
     },
     "api_version": 2,
     "capabilities": [
-        "hook.promote",
         "mcp.call",
-        "input.read",
         "input.write",
         "net.avatar",
         "session.invalidate",
-        "session.read",
         "storage.data_dir",
         "sync.register",
         "tool.inject",

@@ -217,39 +217,6 @@ def _window_events(host: Any, ctx: Any):
     return subscribe
 
 
-# ──────────────────── Hook ────────────────────
-
-def _hook_promote(host: Any):
-    """把插件的事件 hook 提到注册列表最前（与 host 无关）。
-
-    插件原先直接 import HookManager 并摸类属性 _shared_hooks（主程序内部
-    结构，私有）；这里封装成一次语义动作：注册顺序 = 执行顺序，插件需
-    先于系统注入改写 context 时（如 assistant_hub 清 agent_identity_content）
-    必须提前。hook 尚未注册（首窗口 UI 先于 backend）返回 False，调用方
-    自行重试。
-    """
-
-    def promote(plugin: str, event: str = "BuildSystemPrompt") -> bool:
-        name = str(plugin or "")
-        event_name = str(event or "BuildSystemPrompt")
-        if not name:
-            return False
-        try:
-            from app.core.hooks.hook_manager import HookManager
-
-            rules = HookManager._shared_hooks.get(event_name) or []
-            target = next((r for r in rules if getattr(r, "skill_name", "") == name), None)
-            if target is None:
-                return False
-            index = rules.index(target)
-            if index > 0:
-                rules.insert(0, rules.pop(index))
-            return True
-        except Exception as e:
-            logger.warning(f"[Capability:hook.promote] 提升 {name}/{event_name} 失败: {e}")
-            return False
-
-    return promote
 
 # ──────────────────── 模型 / 智能体 ────────────────────
 
@@ -1171,7 +1138,6 @@ def register(registry) -> None:
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
     reg.register("engine.stack", _engine_stack, surface="ui", owner="core:ui")
     reg.register("engine.session", _engine_session, surface="ui", owner="core:ui")
-    reg.register("hook.promote", _hook_promote, surface="ui", owner="core:ui")
     reg.register("session.read", _session_read, surface="ui", owner="core:ui")
     reg.register("session.list", _session_list, surface="ui", owner="core:ui")
     reg.register("session.invalidate", _session_invalidate, surface="ui", owner="core:ui")

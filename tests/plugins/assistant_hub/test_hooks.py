@@ -93,7 +93,8 @@ def test_hook_injects_identity_and_memory(monkeypatch):
     assert "<global_memory>" in out and "简洁回复" in out
     assert "<project_memory>" in out and "DriFox 重构中" in out
     assert "<daily_logs>" in out
-    assert context["agent_identity_content"] == ""  # 置空防重复注入
+    # 不再改写宿主 context（主链路 system prompt 不注入原智能体身份，无需替换语义）
+    assert context["agent_identity_content"] == "原build提示词"
 
 
 def test_hook_non_primary_noop(monkeypatch):

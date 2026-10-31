@@ -4,7 +4,8 @@
 Hook 清单（hooks.json 对应）：
 1. BuildSystemPrompt（``hook``）：激活助手时输出 助手身份块 → 记忆体系块
    （记忆说明书 + 全局记忆 + 项目记忆 + 日志索引，全部进系统提示词，
-   照抄 WorkBuddy 注入结构）；并把 context 里预取的智能体提示词置空防重复。
+   照抄 WorkBuddy 注入结构）。主链路 system prompt 不注入原智能体身份，
+   故无需依赖 hook 注册顺序做「替换注入」。
 2. SessionStart（``on_session_start``）：注入人工提示（pinned）到会话消息。
    记忆内容不进会话消息（单一通道：系统提示词，写后失效缓存即可刷新）。
 3. PreUserMessage（``on_pre_user``）：@提及检测，切会话级临时助手。
@@ -98,7 +99,6 @@ def hook(event: str, context: Dict[str, Any]) -> str:
         block = "\n\n".join(p for p in parts if p)
         if not block:
             return ""
-        context["agent_identity_content"] = ""
         return block
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] BuildSystemPrompt 处理失败: {e}")

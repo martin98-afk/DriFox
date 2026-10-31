@@ -1,35 +1,12 @@
 # -*- coding: utf-8 -*-
-"""prompts.py — 记忆系统说明书 + 经验体系 LLM 模板（中文）。
+"""prompts.py — 记忆系统说明书（中文）。
 
 结构对齐 WorkBuddy 的 workbuddy-memory-system.md（三层记忆规范），
-品牌词全部替换为 drifox。编译/传送带（openhanako 系）prompt 已随管线删除。
+品牌词全部替换为 drifox。写入由模型经 memory_write 自主完成，
+后台整理/反思的 LLM 模板已随管线一并删除。
 """
 
 from typing import Dict, List
-
-_SYSTEM = "你是记忆整理器。输出面向 LLM 回读而非人类阅读：记忆碎片式高密度条目，零冗余。只输出要求的内容，不解释，不加 markdown 代码围栏。"
-
-# 各模板共用的高密度输出风格：碎片化条目，形式像人类记忆，内容保真不能松
-_STYLE = (
-    "输出风格（读者是 LLM，非人类）：\n"
-    "- 一条一碎片：`[标签] 对象: 事实`，一行一条，每行 ≤60 字符，写不下拆成多条；标签取 [事实][决策][偏好][坑]，无合适则省略\n"
-    "- 只写固定内容：已完成的进展、事实、决策、偏好/用户习惯、坑；\n"
-    "  禁写待办、计划、未完成事项等实时性状态（它们天然过时，读了误导）\n"
-    "- 禁完整句、禁连接词、禁修饰语；主语可省。如「修 persona.py 打包丢 getpass」，\n"
-    "  不写「我们发现并修复了 persona.py 中的打包问题」\n"
-    "- 数字/路径/函数名/API/错误原文逐字保留，不翻译不改写、不自造缩写\n"
-    "- 时间用绝对日期（如 09-03），禁「昨天/上次/最近」\n"
-    "- 每条自包含，脱离上下文可解码；禁「同上」「见前」\n"
-    "- 不确定的信息不写，禁止脑补\n"
-)
-
-
-def _msg(user_text: str) -> list:
-    return [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": user_text},
-    ]
-
 
 # ── 记忆系统说明书（BuildSystemPrompt 注入，照抄 WorkBuddy 结构）────
 

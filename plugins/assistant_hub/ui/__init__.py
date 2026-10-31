@@ -475,37 +475,6 @@ def _register_sync_provider() -> None:
         logger.warning(f"[assistant_hub] 注册 Gitee 同步内容失败: {e}")
 
 
-def _promote_build_system_prompt_hook(_attempt: int = 0) -> None:
-    """确保 assistant_hub 的 BuildSystemPrompt hook 先于系统 inject_agent_identity 执行。
-
-    系统插件（plugins/system-hooks/hooks.json）里的身份注入会读
-    context["agent_identity_content"]。assistant_hub 的 hook 需要**先**改
-    context 才能实现"替换注入"（否则系统 hook 先输出原智能体提示词，我们的
-    修改只变成追加）。注册顺序 = 执行顺序，把我们的 rule 提前到列表头部。
-
-    经能力池 ``hook.promote`` 完成（插件不再直连 HookManager 私有类属性）。
-    时机：UI 注册早于 backend 初始化的 AgentManager hooks 加载（首窗口必然
-    扑空），热重载时 hooks 也可能尚未重注册 → 返回 False 时延迟重试。
-    """
-    from PyQt5.QtCore import QTimer
-
-    try:
-        from app.plugins.sdk import caps_for
-
-        promote = caps_for("hook.promote", surface="ui")
-        if promote is None:
-            logger.warning("[assistant_hub] hook.promote 能力不可用（未声明或未注册），跳过顺序提升")
-            return
-        if promote("assistant_hub", "BuildSystemPrompt"):
-            logger.debug("[assistant_hub] BuildSystemPrompt hook 已在最前（经能力池确认）")
-            return
-        # hooks 尚未注册（首窗口：UI 注册先于 backend 初始化），延迟重试
-        if _attempt < 20:
-            QTimer.singleShot(500, lambda: _promote_build_system_prompt_hook(_attempt + 1))
-        else:
-            logger.warning(f"[assistant_hub] BuildSystemPrompt hook 未注册，放弃顺序提升（已重试 {_attempt} 次）")
-    except Exception as e:
-        logger.warning(f"[assistant_hub] 提升 hook 顺序失败: {e}")
 
 
 def _kv_sections(content: str) -> List[tuple]:
@@ -769,9 +738,6 @@ def register_ui(registry) -> None:
 
     # ── 欢迎卡片「助手」tab + 点击填 @助手名 ──
     _register_welcome_tab()
-
-    # ── BuildSystemPrompt hook 顺序提升（先于系统身份注入）──
-    _promote_build_system_prompt_hook()
 
     logger.info(
         f"[assistant_hub] UI 组件已注册：floating_card(assistant_hub/full"
