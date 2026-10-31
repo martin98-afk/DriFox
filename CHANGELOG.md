@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.13] - 2026-10-30 (重新发布 #2)
+## [v0.6.13] - 2026-10-31 (重新发布 #3)
 
-自 v0.6.13-beta 以来的变更 | 提交数：40 · 文件变更：137 · +11051/-2554 | 贡献者：dingma, mading
+自 v0.6.13-beta 以来的变更 | 提交数：42 · 文件变更：148 · +11616/-2594 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 - **流式渲染防重复与工具区自动展开守卫** (`201e4b6f` · `f9ea7bf6`): 工具区 auto-expand 增加流式活跃守卫；图表容器 ID 提取与稳定长度计算（`_compute_stream_stable_len`）改进，防止流式模式图表重复渲染，骨架缓存版本同步递增。
@@ -41,6 +41,10 @@ All notable changes to this project will be documented in this file.
 
 ### 🧪 测试与诊断 (Tests & Diagnostics) · 重新发布 #2 补充
 - **强停后内容丢失与工具补全回归** (`b2581c90`): 新增强停场景回归测试与 6 个诊断探针（`tests/debug/_probe_*`、`_bench_v2_frame_cost.py`）、v2 工具块/实时预览/懒回调恢复等 8 个 widget 级测试，覆盖此前只能靠肉眼复现的渲染问题。
+
+### ✨ 新功能 (New Features) · 重新发布 #3 补充
+- **云同步远端墓碑跟随** (`293f98c1`): config sync 处理远端墓碑记录，本地删除跟随远端状态——某设备删掉的配置不再在其他设备同步时复活；密钥存储回填路径同步加固，`test_config_sync` / `test_config_sync_merge` 补墓碑与合并用例。
+- **主题与字体变更的跨组件刷新增强** (`523ed40c`): 主题/字体变化时各组件精确刷新，懒构建设置卡的 font/size 写回接 `_delayed_theme_refresh` 兜底，同批 scope 用 `_BATCH_SCOPE_FULL` 不折叠成 theme，避免部分控件停留在旧外观。
 
 ## [v0.6.13-beta] - 2026-10-29
 
