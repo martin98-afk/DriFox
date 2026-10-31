@@ -3504,7 +3504,11 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v70）：patchBlocks 插入锚点与搬移插入点改「按存活
 # wrapper 定位」——工具区末尾挂着 JS 注入的运行框（非 wrapper），原 append 兜底会把
 # 新块/搬入卡排到运行框之后，运行框看起来「跑到思考上面」，下一批又移回 = 位置跳。
-_SKELETON_CACHE_VERSION = 71
+# _SKELETON_CACHE_VERSION +1（v72）：v2 流式帧级揭示——新增 window._v2tw 队列
+# （_v2LiveStep rAF 指数追赶 / _v2LiveFlush / _v2LiveDrop / _v2LiveAppendNow）与
+# 前缀切片结算 _v2LiveSplit + .v2-live-part 样式。旧骨架只在批边界整段 append
+# （文字一块块蹦）、且无切片通道。缺这些函数 → 新调用全部静默失效。
+_SKELETON_CACHE_VERSION = 72
 
 
 def _js_literal(value) -> str:

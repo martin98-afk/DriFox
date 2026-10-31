@@ -877,6 +877,13 @@ class CodeWebViewer(QWebEngineView):
         # 活动块已定型标记：工具调用开始时由 MessageCard 置位，下一帧把
         # 纯文本尾态整块正式化（见 mark_live_tail_finalized）
         self._v2_live_finalize_requested = False
+        # [B6] 尾部行内渲染降载记账（与 v1 _render_tail_inline 同口径）：无空行
+        # 中文长段落切不出闭合段，只能靠这条路把 `**加粗**` 及时变成格式。
+        self._v2_live_tail_done_len = 0
+        self._v2_live_tail_done_ts = 0.0
+        self._v2_live_tail_html_pending: Optional[str] = None
+        # 上次「整块 formalize」时的文本长度（与 formalized_len 语义不同）
+        self._v2_live_whole_done_len = 0
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
@@ -2357,6 +2364,32 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary);
                     line-height: 1.65;
                 }}
+                /* 思考块的尾态节点归 #tool-content（reasoning home = tool）：上一条
+                   规则带 #content-placeholder 前缀，命不中工具区 → pre-wrap 失效 →
+                   模型输出的换行被 HTML 折叠，整段思考挤成一长串连续文本。
+                   这里补齐工具区口径，并与 .think-content / .think-streaming 保持一致
+                   （斜体、思考字号）。 */
+                #tool-content .v2-live-text {{
+                    white-space: pre-wrap;
+                    word-break: break-word;
+                    margin: 0;
+                    color: var(--text-secondary);
+                    font-style: italic;
+                    font-size: {code_font_size + 2}px;
+                    font-family: '{font_family}', sans-serif;
+                    line-height: 1.6;
+                }}
+                /* v2 前缀切片产物：已闭合段落的 markdown 正式渲染结果。
+                   与相邻的 .v2-live-text 之间要留出正常段落间距（tail 是续写段落） */
+                #content-placeholder .v2-live-part {{ display: block; }}
+                #content-placeholder .v2-live-part > :first-child {{ margin-top: 0; }}
+                #content-placeholder .v2-live-part + .v2-live-text {{ margin-top: 8px; }}
+                /* 尾部行内渲染产物：结构由 HTML 自带，不需要 pre-wrap 保留空白 */
+                #content-placeholder .v2-live-text.v2-live-html {{
+                    white-space: normal;
+                }}
+                #content-placeholder .v2-live-text.v2-live-html > :first-child {{ margin-top: 0; }}
+                #content-placeholder .v2-live-text.v2-live-html > :last-child {{ margin-bottom: 0; }}
                 /* 解决 Chromium 滚动容器 padding-bottom 不生效的 bug */
                 #content-placeholder::after {{
                     content: '';
@@ -5165,16 +5198,48 @@ class CodeWebViewer(QWebEngineView):
                 // 正式化（patchBlocks 替换节点，新节点内无 live 尾，下次追加时重建）。
                 // 意义：每批从「整块全量 HTML 重传 + Chromium 重排整块」降到
                 // 「增量文本追加」，30KB 回答实测 7.9~14.6MB → 约 0.1MB 量级。
+                // 帧级揭示队列（与 v1 的 window._tw 同算法）。
+                // Python 侧 live_delta 的下发节奏由批处理决定（软边界 100ms 合并 /
+                // 安全定时器 150~500ms），直接 append 到 DOM 就是"一块一块蹦"。
+                // 这里把「到达节奏」与「显示节奏」解耦：Python 只管 push 增量，
+                // rAF 每帧按指数追赶揭示（CATCHUP_MS 内排空），掉帧时按实际经过
+                // 时间补足欠账，不会越拖越长。
+                window._v2tw = {{
+                    buf: "",          // 待揭示文本
+                    raf: 0,           // rAF 句柄（0 = 未运行）
+                    last: 0,          // 上一帧时间戳
+                    cid: "",          // 当前 live 节点所在容器
+                    key: "",          // 当前 live 块 key
+                    node: null,       // 节点引用缓存（patch 后 isConnected 失效自动重查）
+                    reportedAt: 0,    // 上次高度上报时刻
+                    reasoning: false, // 当前尾态是否属于思考块（决定 think-compact 类）
+                    CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
+                    NORMAL_FRAME_MS: 33,  // 正常帧间隔基准（30fps）
+                    BURST_LEN: 400,   // 超过该积压视为突发，加速揭示
+                    REPORT_MS: 40     // 高度上报节流（与 v1 _twStep 同口径）
+                }};
                 window._v2LiveNode = function (containerId, key) {{
+                    var st = window._v2tw;
+                    // 缓存命中判定必须带 isConnected：patchBlocks 会替换 live 节点，
+                    // 旧引用成孤儿（append 上去看不见，文本静默丢失）。
+                    if (st && st.node && st.node.isConnected
+                        && st.node.getAttribute('data-block-key') === key) return st.node;
                     var c = document.getElementById(containerId);
                     if (!c) return null;
                     var nodes = window._blockNodes(c);
                     for (var i = 0; i < nodes.length; i++) {{
-                        if (nodes[i].getAttribute('data-block-key') === key) return nodes[i];
+                        if (nodes[i].getAttribute('data-block-key') === key) {{
+                            if (st) st.node = nodes[i];
+                            return nodes[i];
+                        }}
                     }}
                     return null;
                 }};
-                window._v2LiveAppend = function (containerId, key, text) {{
+                // 实际 DOM 追加（揭示队列与 flush 共用）
+                // reasoning：思考块尾态要带 think-compact 类。首帧由 Python 侧的
+                // _v2_live_html 生成（含该类），但正式化后节点被重建、live 尾要
+                // 重新创建时就丢了 → 思考块背景/间距退化成普通正文。
+                window._v2LiveAppendNow = function (containerId, key, text, reasoning) {{
                     if (!text) return false;
                     var node = window._v2LiveNode(containerId, key);
                     if (!node) return false;
@@ -5184,13 +5249,159 @@ class CodeWebViewer(QWebEngineView):
                         // 后续增量继续追加（视觉上等同段落续写）。字符统计占位
                         // 必须留在末尾（#char-count），live 插在它前面。
                         live = document.createElement('div');
-                        live.className = 'v2-live-text';
+                        live.className = 'v2-live-text' + (reasoning ? ' think-compact' : '');
                         var cnt = node.querySelector(':scope > #char-count');
                         if (cnt) node.insertBefore(live, cnt); else node.appendChild(live);
                     }}
                     live.appendChild(document.createTextNode(text));
                     return true;
                 }};
+                window._v2LiveStep = function (ts) {{
+                    var st = window._v2tw;
+                    if (!st) return;
+                    st.raf = 0;
+                    if (!st.buf) return;
+                    var now = (typeof ts === 'number' && ts > 0) ? ts : performance.now();
+                    var _raw = Math.max(1, now - st.last);
+                    st.last = now;
+                    // 掉帧自适应追赶：主线程繁忙时帧间隔会拉到 300ms+，若仍按
+                    // clamp 值算每帧揭示量，追赶速度会低于积压增长速度，缓冲越
+                    // 拖越长（文字反而更卡）。超出 NORMAL_FRAME_MS 的部分按真实
+                    // 时长计入，每帧一次补足欠账。
+                    var _over = Math.max(0, _raw - st.NORMAL_FRAME_MS);
+                    var dt = Math.max(1, Math.min(200, _raw)) + _over;
+                    var n = Math.max(1, Math.ceil(st.buf.length * (dt / st.CATCHUP_MS)));
+                    if (st.buf.length > st.BURST_LEN) n = Math.max(n, Math.ceil(st.buf.length / 8));
+                    var slice = st.buf.slice(0, n);
+                    st.buf = st.buf.slice(n);
+                    try {{ window._v2LiveAppendNow(st.cid, st.key, slice, st.reasoning); }} catch (e) {{}}
+                    // 逐帧追加必须跟上滚底与高度上报：v2 的 body 滚底原本只在
+                    // _v2AfterPatch 里做（每批一次），帧级揭示下漏掉就会看到文字
+                    // 被 body 上限裁掉、卡片高度憋到下一批才追。
+                    window._suppressScrollEvent = true;
+                    try {{ if (typeof _autoScrollStreamingBody === 'function') _autoScrollStreamingBody(); }} catch (e) {{}}
+                    window._prevScrollTop = document.body.scrollTop;
+                    window._autoScrollTime = performance.now();
+                    window._suppressScrollEvent = false;
+                    if (now - (st.reportedAt || 0) >= st.REPORT_MS) {{
+                        st.reportedAt = now;
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                    }}
+                    if (st.buf) st.raf = requestAnimationFrame(window._v2LiveStep);
+                }};
+                // 缓冲排空：patch 前调用。局部 patch 不一定替换 live 节点，
+                // 未上屏的增量必须先落地，否则那批文本永久丢失（Python 侧
+                // 已把它记入 _v2_live_sent，不会再下发）。
+                window._v2LiveFlush = function () {{
+                    var st = window._v2tw;
+                    if (!st) return;
+                    if (st.raf) {{ cancelAnimationFrame(st.raf); st.raf = 0; }}
+                    if (!st.buf) return;
+                    var t = st.buf;
+                    st.buf = "";
+                    try {{ window._v2LiveAppendNow(st.cid, st.key, t, st.reasoning); }} catch (e) {{}}
+                }};
+                // 缓冲丢弃：整页清空前调用。force_full 的 patch 自带全量文本，
+                // 再补一遍会重复。
+                window._v2LiveDrop = function () {{
+                    var st = window._v2tw;
+                    if (!st) return;
+                    if (st.raf) {{ cancelAnimationFrame(st.raf); st.raf = 0; }}
+                    st.buf = "";
+                    st.node = null;
+                }};
+                // Python 侧入口：增量进缓冲，由 _v2LiveStep 按帧揭示
+                window._v2LiveAppend = function (containerId, key, text, reasoning) {{
+                    var st = window._v2tw;
+                    if (!st || !text) return false;
+                    // 换块（正式化推进 / 首帧）：旧缓冲属于上一个节点，先落地
+                    if (st.key !== key || st.cid !== containerId) {{
+                        window._v2LiveFlush();
+                        st.cid = containerId;
+                        st.key = key;
+                        st.node = null;
+                    }}
+                    st.reasoning = !!reasoning;
+                    st.buf += text;
+                    // 异常保险：正常指数追赶下缓冲稳态几百字符；超 2000 = 揭示链
+                    // 被闸门/rAF 饥饿卡死，此时瞬时全显优于继续追。
+                    if (st.buf.length > 2000) {{ window._v2LiveFlush(); return true; }}
+                    if (!st.raf) {{
+                        st.last = performance.now();
+                        st.raf = requestAnimationFrame(window._v2LiveStep);
+                    }}
+                    return true;
+                }};
+                // 尾部整体替换为行内渲染 HTML：让 `**加粗**`、`# 标题`、`[链接](url)`
+                // 在段落闭合之前就变成格式（v1 的 _render_tail_inline 承担这件事，
+                // v2 此前完全没有）。只替换 .v2-live-text 的内容，前缀 part 不动。
+                window._v2LiveTailHtml = function (containerId, key, html) {{
+                    var node = window._v2LiveNode(containerId, key);
+                    if (!node) return false;
+                    var live = node.querySelector(':scope > .v2-live-text');
+                    if (!live) {{
+                        live = document.createElement('div');
+                        live.className = 'v2-live-text';
+                        var cnt = node.querySelector(':scope > #char-count');
+                        if (cnt) node.insertBefore(live, cnt); else node.appendChild(live);
+                    }}
+                    live.innerHTML = html;
+                    live.classList.add('v2-live-html');
+                    var st = window._v2tw;
+                    if (st) st.node = node;
+                    return true;
+                }};
+                // 前缀切片结算：把「刚闭合的段」按 markdown 落成节点内的一个
+                // .v2-live-part，并把纯文本尾重置为「尚未正式化的部分」。
+                // 为什么由 Python 下发 tail 全文而不是「剥掉前 N 个字符」：切片后
+                // tail 只剩下几百字（前缀已被吃掉），全量下发是 O(tail) 而非
+                // O(n)；而按字符数记账会与揭示缓冲里未上屏的文本错位（buf 里的
+                // 字符在 Python 侧已计入 live_text，但 DOM 上还没有），记账一旦
+                // 算错就是可见的丢字/重复。语义直给：先 flush 让 DOM 与 Python
+                // 对齐，再按 Python 认定的内容重置。
+                // tailIsHtml：尾部已由 Python 侧行内渲染（_render_inline_tail），
+                // 此时用 innerHTML 注入让 `**加粗**` / `# 标题` 立刻变成格式，
+                // 而不是等段落闭合。false 时按纯文本处理（保留换行）。
+                window._v2LiveSplit = function (containerId, key, html, tailText, tailIsHtml) {{
+                    window._v2LiveFlush();
+                    var node = window._v2LiveNode(containerId, key);
+                    if (!node) return false;
+                    var live = node.querySelector(':scope > .v2-live-text');
+                    if (html) {{
+                        var part = document.createElement('div');
+                        part.className = 'v2-live-part';
+                        part.innerHTML = html;
+                        if (live) node.insertBefore(part, live); else node.appendChild(part);
+                    }}
+                    if (!tailText) {{
+                        if (live && live.parentNode) live.parentNode.removeChild(live);
+                        return true;
+                    }}
+                    if (!live) {{
+                        live = document.createElement('div');
+                        live.className = 'v2-live-text';
+                        var cnt = node.querySelector(':scope > #char-count');
+                        if (cnt) node.insertBefore(live, cnt); else node.appendChild(live);
+                    }}
+                    if (tailIsHtml === true) {{
+                        // 行内渲染产物：关掉 pre-wrap 的空白保留（HTML 结构自带
+                        // 段落语义），避免模板缩进把文本撑出多余空白。
+                        live.innerHTML = tailText;
+                        live.classList.add('v2-live-html');
+                    }} else {{
+                        live.textContent = tailText;
+                        live.classList.remove('v2-live-html');
+                    }}
+                    var st = window._v2tw;
+                    if (st) st.node = node;
+                    return true;
+                }};
+                // 正式化换 key：patchBlocks 按正式化指纹 key 建节点，而 Python 侧
+                // 落库基线要保有恒定 live key（否则下一批判定块被替换，O(n²) 又回来）。
+                // 两个 key 对不上会让 _v2LiveNode 查不到节点 → _v2LiveAppend 静默
+                // 返回 false → 文本卡在「已下发未上屏」，直到下次整块重灌才冒出来
+                // （用户可见「大批未渲染文本」）。解法不在 JS 侧改名，而是 Python
+                // 侧下发前就把 ops 的 key 换成 live key（见 _v2_live_rewrite_ops）。
                 // ===== B5.1.5 v2 整页清空时的滚动位置保全 =====
                 // force_full（首次接管 / ctx 维度变化 / 工具完成指纹变化）会执行
                 // `_c1.innerHTML=''` 整页清空：清空瞬间 scrollHeight 归零，浏览器把
@@ -7715,8 +7926,143 @@ class CodeWebViewer(QWebEngineView):
     # 安全边界处整块正式化一次（节流 1s）。live 块 key 与内容无关（恒定），
     # diff 永远不产生它的替换 op，DOM 由本通道显式驱动。
     _LIVE_MIN_CHARS = 512  # 短于此不启用（全量渲染成本可忽略，观感更稳）
+    # [B6] 整块正式化：整块重渲是 O(n)，只在「前缀切片推不动」时才需要它
+    # （无空行的中文长段落由尾部行内渲染负责，也不走这里）。因此保持保守值，
+    # 避免每批重渲退化成 O(n²)。
     _LIVE_FORMALIZE_MIN_INTERVAL_S = 1.0  # 两次正式化的最小间隔
     _LIVE_FORMALIZE_MIN_DELTA = 256  # 两次正式化的最小新增字符
+    # [B6] 前缀切片正式化：把活动块按「已闭合前缀 + 未闭合尾部」切开，前缀
+    # 立刻走 markdown，尾部保持纯文本。旧实现整块等 1s 节流，期间用户看到的
+    # 是 markdown 源码（`**加粗**`、`# 标题`）；代码块未闭合时 _v2_live_should_
+    # formalize 直接 return False，整段正文一直是源码形态直到 fence 闭合。
+    # 切片只吃「已闭合」边界（空行 + fence 配对 + think/tool/tag 配对），
+    # 未闭合部分一个字都不切。
+    _LIVE_SLICE_MIN_CHARS = 64  # 单次切片短于此不单独正式化（省一次渲染）
+
+    def _v2_live_slice(self, text: str) -> int:
+        """活动文本块「可安全正式化的前缀」长度（绝对偏移）。
+
+        从 ``_v2_live_formalized_len`` 往后扫，只吃已闭合段（复用 v1 差量渲染
+        的 ``_extract_closed_segments``，它已覆盖流式协议的全部失效模式：fence
+        跨空行回溯、think/tool/tag 未闭合不切、句号不作切段边界）。
+
+        Returns:
+            绝对前缀长度；无可切部分返回当前 ``_v2_live_formalized_len``。
+        """
+        base = self._v2_live_formalized_len
+        if base >= len(text):
+            return base
+        scan = text[base:]
+        # ⚠️ 起点必须落在段落边界上，否则 _extract_closed_segments 的局部扫描与
+        # 全量扫描不等价：它从起点开始算 fence/协议块配对，起点本身若落在某个
+        # 未闭合块内部（base 被清零后又推进，或文本被回退重写），配对状态就从
+        # 错的初值起算 → 切点落进 fence 内部，渲染出半截代码块。
+        # 判据：起点前一个字符必须是换行，或者 base 就是 0（消息开头）。
+        if base > 0 and text[base - 1] != "\n":
+            return base
+        try:
+            stable_len, _segs = _extract_closed_segments(scan)
+        except Exception:  # noqa: BLE001
+            return base
+        if stable_len < self._LIVE_SLICE_MIN_CHARS:
+            return base
+        cut = base + stable_len
+        # 硬校验：切点之前必须完全没有未闭合的 fence / 协议块。局部扫描的配对
+        # 初值来自 base，一旦 base 落在某个块内部（base 被清零后重推进、文本被
+        # 回退重写），它会算出错误的配对状态 → 切点落进 fence 内部，渲染出
+        # 半截代码块。这里用「全量口径」复核，代价是 O(n) 一次扫描，但只在真正
+        # 要切的时候跑（远低于每批都跑）。
+        head = text[:cut]
+        if head.count("```") % 2:
+            return base
+        if _has_unclosed_think_or_tool(head):
+            return base
+        if _has_unclosed_chart_fence(head):
+            return base
+        return cut
+
+    def _emit_v2_live_slice(
+        self,
+        blocks,
+        ctx: RenderCtx,
+        live_index: int,
+        live_key_now: str,
+        live_text: str,
+        slice_to: int,
+    ) -> bool:
+        """把 ``[formalized_len, slice_to)`` 段渲染成 part 并下发。
+
+        Returns:
+            True = 本批已处理完（DOM 更新由本方法负责，调用方直接返回）。
+            False = 本批不切片，交调用方继续走纯文本尾态路径。
+        """
+        from app.widgets.render.block_render import _render_text_block
+
+        base = self._v2_live_formalized_len
+        seg_md = live_text[base:slice_to]
+        seg_html = ""
+        if seg_md.strip():
+            try:
+                # flip_offset：让本段的 think 序号接着消息前面已有的 think 块，
+                # 否则不同段的思考块共用 data-flip-key，FLIP 配对错乱。
+                seg_html, _ = _render_text_block(seg_md, ctx, True, self._v2_flip_offset(blocks, live_index))
+            except Exception:  # noqa: BLE001
+                logger.exception("[render-v2] 前缀切片渲染失败，本批保持纯文本")
+                return False
+        # 渲染基线必须与 _v2_last 对齐：本批不动活动块的 patch（key 恒定），
+        # 只把该块的 html 更新成「前缀 markdown + 尾巴纯文本」，供下一批 diff 比对。
+        mr = render_message(
+            blocks,
+            ctx,
+            active_index=-1,
+            char_count=False,
+            cache=self._block_cache,
+            live_index=live_index,
+            live_html=self._v2_live_html(live_text, reasoning=False),
+        )
+        self._v2_last = mr
+        self._v2_live_key = live_key_now
+        self._v2_live_sent = live_text
+        self._v2_live_formalized_len = slice_to
+        self._last_rendered_markdown = self._markdown_text
+        self._height_report_pending = True
+        page = self.page()
+        if page is None:
+            return True
+        tail = live_text[slice_to:]
+        tail_html = self._v2_live_tail_html(tail, reasoning=False)
+        try:
+            page.runJavaScript(
+                "if(typeof window._v2LiveSplit==='function')window._v2LiveSplit('content-placeholder',"                + json.dumps(live_key_now).decode("utf-8")
+                + ","
+                + json.dumps(seg_html).decode("utf-8")
+                + ","
+                + json.dumps(tail_html or tail).decode("utf-8")
+                + ","
+                + ("true" if tail_html else "false")
+                + ");"
+            )
+        except RuntimeError:
+            return True
+        return True
+
+    def _v2_flip_offset(self, blocks, live_index: int) -> int:
+        """活动块之前已出现的 think 块数（FLIP 序号起点）。
+
+        与 ``render_blocks`` 的记账口径一致：reasoning 块恒贡献 1 个，
+        text 块按其 markdown 里的 ``<think>`` 开标签数贡献。
+        """
+        n = 0
+        for i, b in enumerate(blocks):
+            if i >= live_index:
+                break
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "reasoning":
+                n += 1
+            elif b.get("type") == "text":
+                n += str(b.get("text", "") or "").count("<think>")
+        return n
 
     def _v2_reset_live(self) -> None:
         """清空 live 尾态（force_full / 流式结束 / 文本回退时调用）。"""
@@ -7724,6 +8070,12 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_sent = ""
         self._v2_live_formalized_len = 0
         self._v2_live_formalize_ts = 0.0
+        # 上次「整块 formalize」时的文本长度（与 formalized_len 语义不同：
+        # 后者是前缀切片的推进基准）
+        self._v2_live_whole_done_len = 0
+        self._v2_live_tail_done_len = 0
+        self._v2_live_tail_done_ts = 0.0
+        self._v2_live_tail_html_pending = None
         self._v2_live_finalize_requested = False
 
     def mark_live_tail_finalized(self) -> None:
@@ -7773,6 +8125,52 @@ class CodeWebViewer(QWebEngineView):
             return f'<div class="v2-live-text think-compact">{escape(text)}</div>'
         return f'<div class="v2-live-text">{escape(text)}</div>' + _CHAR_COUNT_HTML
 
+    def _v2_live_tail_html(self, text: str, reasoning: bool) -> str:
+        """未闭合尾部的行内渲染 HTML（``.v2-live-text`` 的内容部分）。
+
+        v1 有 ``_render_tail_inline`` 这一层，v2 一直没有 —— 结果是**无空行
+        分隔的中文长段落**（大模型最常见的输出形态，``_extract_closed_segments``
+        切不出任何闭合段，实测 stable=0）在整个流式期间只能显示 ``**加粗**`` /
+        ``# 标题`` / ``[链接](url)`` 的源码字面，直到流式结束才格式化。这是
+        用户反馈的「大批未渲染文本」。
+
+        保守项：reasoning 保持纯文本（思考内容不跑 markdown，与既有尾态口径
+        一致）；含 think/tool 协议标签的尾部由 ``_render_inline_tail`` 自身
+        返回空串，调用方据此退回纯文本转义。
+        """
+        if reasoning or not text:
+            return ""
+        try:
+            return _render_inline_tail(text, compact=self._tool_compact_mode)
+        except Exception:  # noqa: BLE001
+            logger.exception("[render-v2] 尾部行内渲染失败，退回纯文本")
+            return ""
+
+    def _v2_live_tail_refresh(self, text: str) -> Optional[str]:
+        """按降载门限决定本批是否重渲尾部行内 HTML。
+
+        门限与 v1 ``_render_tail_inline`` 同口径（``_TAIL_INLINE_MIN_DELTA`` /
+        ``_TAIL_INLINE_MIN_INTERVAL_S``）：无空行长段落每批都整段 convert 是
+        O(n²)，而中文正文每 15~40 字才有一个标点，按 512 字/1.5s 降载足够
+        让源码形态的滞留时间从「整条回答」压到「一两句话」。
+
+        Returns:
+            需要重渲时返回新的行内 HTML；否则 None（本批保持既有 DOM）。
+        """
+        now = time.monotonic()
+        # 用 __dict__.get 而非 getattr(..., 默认)：PyQt5 未初始化 wrapper（测试
+        # 桩用 __new__ 构造）上 getattr 缺属性会抛 RuntimeError 而不是走默认值。
+        grown = len(text) - self.__dict__.get("_v2_live_tail_done_len", 0)
+        since = now - self.__dict__.get("_v2_live_tail_done_ts", 0.0)
+        if grown < self._TAIL_INLINE_MIN_DELTA and since < self._TAIL_INLINE_MIN_INTERVAL_S:
+            return None
+        html = self._v2_live_tail_html(text, reasoning=False)
+        if not html:
+            # 含协议标签 / 渲染失败：退回纯文本尾（不更新记账，下一批再试）
+            return None
+        self._v2_live_tail_done_len = len(text)
+        self._v2_live_tail_done_ts = now
+        return html
     def _v2_active_block_finalized(self, blocks, active: int, requested: bool = False) -> bool:
         """活动块是否已定型（不会再增长）。
 
@@ -7786,19 +8184,24 @@ class CodeWebViewer(QWebEngineView):
         )
 
     def _v2_live_should_formalize(self, text: str) -> bool:
-        """节流窗口 + 安全边界都满足时才整块正式化。"""
+        """是否值得整块正式化（重渲全文 + 替换节点）。
+
+        ⚠️ 基准是「上次整块正式化时的文本长度」（``_v2_live_whole_done_len``），
+        不是 ``_v2_live_formalized_len`` —— 后者是**前缀切片**的推进基准，两者
+        语义不同。混用会让 formalize 要么永不触发、要么每批都触发。
+
+        ⚠️ 未闭合 fence / 协议块必须否决：整块重渲会把半截代码块渲染成
+        ``<pre>``、把未闭合 think 内容泄漏成正文。这类情形交给前缀切片推进。
+        """
         if time.monotonic() - self._v2_live_formalize_ts < self._LIVE_FORMALIZE_MIN_INTERVAL_S:
             return False
-        # 基准必须是「上次正式化时的长度」：_v2_live_sent 是已下发长度，每批
-        # 都同步到全文，拿它做差恒为 0 → 正式化永不触发（长回答一直停在纯文本）。
-        if len(text) - self._v2_live_formalized_len < self._LIVE_FORMALIZE_MIN_DELTA:
+        if len(text) - self.__dict__.get("_v2_live_whole_done_len", 0) < self._LIVE_FORMALIZE_MIN_DELTA:
             return False
-        # 半截代码围栏 / 未闭合协议块不能正式化（会渲染成假块或半截代码块）
         if text.count("```") % 2:
             return False
         if _has_unclosed_think_or_tool(text):
             return False
-        return self._has_reached_clean_boundary(text) or self._has_reached_soft_boundary(text)
+        return True
 
     def _v2_live_stabilize(self, mr: MessageRender, lk: str, formal_key: str) -> MessageRender:
         """正式化落库版本：活动块换回恒定 live key（html 保留正式产物）。
@@ -7918,6 +8321,17 @@ class CodeWebViewer(QWebEngineView):
                 force_full = True
                 self._v2_reset_live()
 
+        # [B6] 前缀切片：已闭合的部分立刻按 markdown 落地，未闭合尾部保持纯文本。
+        # **优先于整块 formalize**：切片只插入新的 .v2-live-part（增量），而整块
+        # formalize 是 O(n) 重渲 + 整块替换。能切片就没必要整块重渲。
+        # 本批切片成功后直接返回 —— 两种路径互斥，同批都跑会把刚插进去的
+        # part 又整块替换掉（用户可见闪烁 + O(n) 白跑）。
+        if live_index is not None and not force_full and self._v2_live_key == live_key_now:
+            slice_to = self._v2_live_slice(live_text)
+            if slice_to > self._v2_live_formalized_len:
+                if self._emit_v2_live_slice(blocks, ctx, live_index, live_key_now, live_text, slice_to):
+                    return True
+
         formalize = (
             live_index is not None
             and not force_full
@@ -7938,6 +8352,7 @@ class CodeWebViewer(QWebEngineView):
             self._v2_live_key = live_key_now
             self._v2_live_sent = live_text
             self._v2_live_formalized_len = len(live_text)
+            self._v2_live_whole_done_len = len(live_text)
             self._v2_live_formalize_ts = time.monotonic()
         elif live_index is not None:
             # 纯文本尾态：活动块不跑 markdown，其余块照常（缓存命中）
@@ -7957,11 +8372,25 @@ class CodeWebViewer(QWebEngineView):
                 if live_text.startswith(self._v2_live_sent):
                     live_delta = live_text[len(self._v2_live_sent) :]
             else:
-                # 首帧 / 重置：节点里已是全量纯文本，正式化基准从当前长度起算
-                # （否则会立刻把刚落的纯文本再正式化一遍，白花一次全量）
-                self._v2_live_formalized_len = len(live_text)
+                # 首帧 / 重置：节点里已灌入全量纯文本，整块 formalize 的增量基准
+                # 从当前长度起算（否则下一批立刻被判「新增 ≥256」→ 白跑一次 O(n)
+                # 整块重渲）。注意 _v2_live_formalized_len（切片基准）**不设**：
+                # 首帧内容是纯文本，还没有任何前缀走过 markdown。
+                self._v2_live_whole_done_len = len(live_text)
             self._v2_live_key = live_key_now
             self._v2_live_sent = live_text
+            # [B6] 尾部行内格式化：_extract_closed_segments 对无空行的中文长段落
+            # 切不出任何闭合段（stable=0），光靠前缀切片救不了 —— 这类文本占大
+            # 模型输出的大头，必须在尾态通道里直接升级成行内 HTML。
+            # 降载：新增 ≥ _TAIL_INLINE_MIN_DELTA 或距上次 ≥ _TAIL_INLINE_MIN_INTERVAL_S
+            # 才重渲（与 v1 的 _render_tail_inline 同口径，避免 O(n²)）。
+            if not live_reasoning:
+                _tail_html = self._v2_live_tail_refresh(live_text)
+                if _tail_html is not None:
+                    # 尾部整体替换成行内 HTML，因此本批的纯文本增量不再追加
+                    # （否则会先追加纯文本再被 innerHTML 覆盖，白跑一次 IPC）。
+                    live_delta = ""
+                    self._v2_live_tail_html_pending = _tail_html
         else:
             mr = render_message(blocks, ctx, active_index=active, char_count=self._streaming, cache=self._block_cache)
             content_ops, tool_ops = diff_message(None if force_full else self._v2_last, mr)
@@ -7981,6 +8410,15 @@ class CodeWebViewer(QWebEngineView):
             return True
         js: List[str] = []
         _has_patch_ops = (not content_ops.is_empty) or (not tool_ops.is_empty)
+        # 帧级揭示缓冲结算：必须早于本批任何 DOM 操作。
+        # - force_full / 正式化：本批 html 已含全量文本，且会替换/清空 live 节点
+        #   → 丢弃缓冲（补回去就是重复文本）。
+        # - 局部 patch：live 节点 key 恒定不换，未上屏的增量必须先落地 ——
+        #   Python 侧已把它计入 _v2_live_sent，不会再下发，丢掉就真丢了。
+        if force_full or formalize:
+            js.append("if(typeof window._v2LiveDrop==='function')window._v2LiveDrop();")
+        elif _has_patch_ops:
+            js.append("if(typeof window._v2LiveFlush==='function')window._v2LiveFlush();")
         if force_full:
             # 整页清空前快照滚动位置（body / 正文容器 / 工具区）：清空瞬间
             # scrollHeight 归零，scrollTop 被浏览器强制钳到 0 且不会自己回来
@@ -8032,11 +8470,35 @@ class CodeWebViewer(QWebEngineView):
                 + ");"
             )
         if live_delta:
+            # 容器按块归属选：思考块归 #tool-content（_reasoning_home 返回 HOME_TOOL），
+            # 硬编码 content-placeholder 会让 _v2LiveNode 在错误容器里查不到节点 →
+            # _v2LiveAppend 静默返回 false → 思考增量全部丢失（实测表现为思考内容
+            # 停在首帧纯文本、后续增长完全不显示）。
+            _live_cid = "tool-content" if live_reasoning else "content-placeholder"
             js.append(
-                "if(typeof window._v2LiveAppend==='function')window._v2LiveAppend('content-placeholder',"
+                "if(typeof window._v2LiveAppend==='function')window._v2LiveAppend('"
+                + _live_cid
+                + "',"
                 + json.dumps(live_key_now).decode("utf-8")
                 + ","
                 + json.dumps(live_delta).decode("utf-8")
+                + ","
+                + ("true" if live_reasoning else "false")
+                + ");"
+            )
+        # ⚠️ 用 __dict__.get 而非 getattr(self, ..., None)：PyQt5 未初始化 wrapper
+        # （测试桩用 __new__ 构造）上 getattr 缺属性抛 RuntimeError 而非走默认值。
+        _pending_tail = self.__dict__.get("_v2_live_tail_html_pending")
+        if _pending_tail is not None:
+            self._v2_live_tail_html_pending = None
+            # 尾部整体替换为行内渲染 HTML。必须先 flush 揭示缓冲：缓冲内容是
+            # 「已计入 live_text 但尚未上屏」的纯文本，innerHTML 覆盖会把它抹掉。
+            js.append("if(typeof window._v2LiveFlush==='function')window._v2LiveFlush();")
+            js.append(
+                "if(typeof window._v2LiveTailHtml==='function')window._v2LiveTailHtml('content-placeholder',"
+                + json.dumps(live_key_now).decode("utf-8")
+                + ","
+                + json.dumps(_pending_tail).decode("utf-8")
                 + ");"
             )
         if force_full:
