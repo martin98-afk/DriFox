@@ -139,7 +139,7 @@ class InputCardModule(UIModule):
         host._load_input_history()
 
         # 命令卡片（必须是输入框创建后）
-        host._command_card = CommandCard(host._bottom_input_container)
+        host._command_card = CommandCard(host._bottom_input_container, host=host)
         host._command_card.setVisible(False)
         host.input_area.set_command_card(host._command_card)
         mgr = host._card_manager

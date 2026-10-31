@@ -810,13 +810,16 @@ class CommandCard(QWidget):
     parameterDeselected = pyqtSignal(str, str)  # param_name, param_type — 已激活参数被再次点击（取消选中）
     parameterValueSelected = pyqtSignal(str)  # value — --model= 的值被选中
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, host=None):
         super().__init__(parent)
+        self._host = host  # 主窗口引用：动态技能源按当前标签页项目求值
         self._all_items: List[Dict[str, str]] = []
         self._all_items_cache: List[Dict[str, str]] = []  # 缓存，避免每次敲击都读磁盘
         self._cache_dirty: bool = True  # 缓存脏标记，热重载后置 True
         # UI 插件命令账本版本号（变化即置脏，见 _refresh_data）
         self._ui_cmds_version: int = -1
+        # 动态技能源缓存维度：workdir 变化（切标签页/项目）即置脏
+        self._cache_workdir: str = ""
         self._filtered_items: List[Dict[str, str]] = []
         self._pinned_keys: set = set()  # 置顶键集合（load_items 时从 AppState 刷新）
         self._selected_index = 0
@@ -2466,6 +2469,14 @@ class CommandCard(QWidget):
             self._ui_cmds_version = _ui_ver
             self._cache_dirty = True
 
+        try:
+            _cur_wd = (self._host._get_current_workdir() if self._host is not None else "") or ""
+        except Exception:
+            _cur_wd = ""
+        if _cur_wd != self._cache_workdir:
+            self._cache_workdir = _cur_wd
+            self._cache_dirty = True
+
         if not self._cache_dirty and self._all_items_cache:
             # 安全检查：缓存必须包含命令项，防止初始化时序导致缓存了只有技能的脏数据
             if any(item["type"] == "command" for item in self._all_items_cache):
@@ -2484,7 +2495,8 @@ class CommandCard(QWidget):
                 cmd["subtype"] = "ui_plugin"
 
         skills = [
-            {"name": s["name"], "description": s.get("description", ""), "type": "skill"} for s in get_local_skills()
+            {"name": s["name"], "description": s.get("description", ""), "type": "skill"}
+            for s in get_local_skills(project_dir=_cur_wd or None)
         ]
         self._all_items = commands + skills
 

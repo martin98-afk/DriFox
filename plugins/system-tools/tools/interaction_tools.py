@@ -92,7 +92,8 @@ def _skill_impl(tool_ctx, **kwargs):
     from app.plugins.sdk import load_skill
 
     name = kwargs.get("name", "")
-    success, content, workspace = load_skill(name)
+    workdir = (tool_ctx or {}).get("workdir") or None
+    success, content, workspace = load_skill(name, project_dir=workdir)
     if success:
         return ToolResult(
             True,
@@ -138,10 +139,10 @@ def _agent_created_check(skill: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def _skill_inventory(query: str = "", source: str = "") -> str:
+def _skill_inventory(query: str = "", source: str = "", workdir: str = "") -> str:
     from app.plugins.sdk import get_app_data_dir, get_local_skills
 
-    skills = get_local_skills()
+    skills = get_local_skills(project_dir=workdir or None)
     if not skills:
         return "当前没有任何技能。用 create 动作可创建新技能。"
     user_base = (get_app_data_dir() / "skills").resolve()
@@ -156,7 +157,7 @@ def _skill_inventory(query: str = "", source: str = "") -> str:
             md = p / "SKILL.md"
             if md.exists() and "agent_created: true" in md.read_text(encoding="utf-8")[:600]:
                 tag = " [agent_created]"
-        src_name = s.get("plugin_name") or ("system" if s.get("is_system") else "user")
+        src_name = s.get("plugin_name") or s.get("source") or ("system" if s.get("is_system") else "user")
         if src and src not in src_name.lower():
             continue
         desc = (s.get("description") or "").strip().replace("\n", " ")
@@ -260,7 +261,8 @@ def _manage_skill_impl(tool_ctx, **kwargs):
     action = (kwargs.get("action") or "list").lower()
     name = kwargs.get("name", "")
     if action == "list":
-        return ToolResult(True, content=_skill_inventory(kwargs.get("query", ""), kwargs.get("source", "")))
+        wd = (tool_ctx or {}).get("workdir") or ""
+        return ToolResult(True, content=_skill_inventory(kwargs.get("query", ""), kwargs.get("source", ""), workdir=wd))
     if action == "create":
         return ToolResult(True, content=_guide_create(name))
     if action == "modify":
