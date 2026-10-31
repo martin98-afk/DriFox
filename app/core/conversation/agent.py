@@ -802,7 +802,19 @@ class AgentManager:
         return Agent.from_dict(data)
 
     def get_agent(self, name: str) -> Optional[Agent]:
-        return self._agents.get(name) or self._hidden_agents.get(name)
+        agent = self._agents.get(name) or self._hidden_agents.get(name)
+        if agent is not None:
+            return agent
+        # 贡献回落：插件注入的动态智能体（能力池 agent 定义）
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            d = ContributionRegistry.get_instance().get_agent_def(name)
+            if d:
+                return Agent.from_dict({k: v for k, v in d.items() if not k.startswith("_")})
+        except Exception:
+            pass
+        return None
 
     def list_agents(self, include_hidden: bool = False) -> List[Agent]:
         if include_hidden:

@@ -446,7 +446,7 @@ class CommandManager:
             cmd_name = base_name
 
         if cmd_name not in self._commands:
-            return None
+            return self._execute_contrib(text, cmd_name)
 
         entries = self._commands[cmd_name]
         if not entries:
@@ -541,6 +541,38 @@ class CommandManager:
             command_name=cmd_name,
             replacement=cmd.prompt_text,
             remainder=remainder,
+        )
+
+    def _execute_contrib(self, text: str, cmd_name: str) -> Optional[CommandResult]:
+        """贡献命令回落：注册表有 prompt 型定义时按 PROMPT 语义执行
+
+        贡献定义字段：display_type（仅支持 "prompt"）、prompt_text、description。
+        FUNCTION/AGENT 型贡献需注册运行时 handler，暂不支持（P1）。
+        """
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            d = ContributionRegistry.get_instance().get_command(cmd_name)
+        except Exception:
+            return None
+        if not d:
+            return None
+        if (d.get("display_type") or "prompt") != "prompt":
+            return None
+        text_stripped = text.strip()
+        remainder = ""
+        if text_stripped.startswith("/"):
+            first_space = text_stripped.find(" ")
+            if first_space > 0:
+                remainder = text_stripped[first_space + 1:]
+        replacement = str(d.get("prompt_text") or "")
+        if remainder:
+            replacement = f"{replacement}\n\n用户参数：\n{remainder}"
+        return CommandResult(
+            type=CommandType.PROMPT,
+            command_name=cmd_name,
+            remainder=remainder,
+            replacement=replacement,
         )
 
     # ---- 提示词分段装配 ----
