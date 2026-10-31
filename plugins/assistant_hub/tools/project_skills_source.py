@@ -10,7 +10,7 @@ from pathlib import Path
 import importlib.util
 import sys
 
-_CORE_MODULE_NAME = "assistant_hub_project_skills"
+_CORE_MODULE_NAME = "assistant_hub_core.project_skills"
 
 def _load_project_skills():
     mod = sys.modules.get(_CORE_MODULE_NAME)
