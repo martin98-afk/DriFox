@@ -590,6 +590,28 @@
             }
         },
         {
+            "name": "system-timer",
+            "description": "系统定时任务 — 让模型创建一次性/循环定时任务，到期后向创建任务的会话自动发送触发消息开启新一轮对话（内存级，不持久化）",
+            "version": "0.1.0",
+            "author": "DriFox Contributors",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "ui",
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-timer",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true,
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox"
+        },
+        {
             "name": "system-tools",
             "description": "DriFox 内置工具集：文件读写、终端执行、网页搜索、诊断、任务管理、子智能体调度、用户交互，含 Tavily/TinyFish 搜索 API Key 配置",
             "version": "1.0.1",
