@@ -25252,10 +25252,12 @@ class OpenAIChatToolWindow(ToolWindow):
         - 不入 DB（不调 memory_manager.set_working_directory）
         - 不写 _current_workdir 实例缓存（避免项目切换/团队同步误读）
         - 窗口关闭时整目录删除；崩溃残留由启动清扫兜底
+        - 每次同步刷新归属文件（pid + 进程启动时间），供跨进程清扫判活
         """
         try:
             temp_dir = str(get_app_data_dir() / "tmp-sessions" / str(self._window_id))
             os.makedirs(temp_dir, exist_ok=True)
+            self._write_temp_owner(str(self._window_id))
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_workdir(temp_dir)
             return temp_dir
@@ -25264,25 +25266,161 @@ class OpenAIChatToolWindow(ToolWindow):
             return ""
 
     @staticmethod
-    def _cleanup_orphan_temp_pages():
-        """启动清扫：删除 {app_data}/tmp-sessions/ 下所有孤儿目录
+    def _temp_owner_dir() -> Path:
+        """临时页目录归属登记目录（放在工作目录之外，不污染用户文件）"""
+        return get_app_data_dir() / "tmp-sessions" / ".owners"
 
-        临时对话页目录本应随窗口关闭删除；崩溃/强杀进程时会残留，
-        启动时统一清扫（此刻尚无存活临时页，全删安全）。
+    @classmethod
+    def _write_temp_owner(cls, window_id: str) -> None:
+        """登记临时页目录归属：pid + 进程启动时间
+
+        单实例开关默认关闭，多开/调试时另一进程的首窗清扫会遍历
+        tmp-sessions —— 没有归属信息就只能盲删，正在用的临时页目录
+        会被清空。psutil 不可用时 create_time 记 0（仅按 pid 判活）。
         """
         try:
-            import shutil
+            import json
+            import time
 
+            pid = os.getpid()
+            create_time = 0.0
+            try:
+                import psutil
+
+                create_time = float(psutil.Process(pid).create_time())
+            except Exception:
+                create_time = 0.0
+            owner_dir = cls._temp_owner_dir()
+            owner_dir.mkdir(parents=True, exist_ok=True)
+            payload = {"pid": pid, "create_time": create_time, "ts": time.time()}
+            (owner_dir / f"{window_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"[MainWidget] 写临时页归属文件失败: {e}")
+
+    @staticmethod
+    def _pid_alive(pid: int, expect_create: float = 0.0) -> bool:
+        """进程是否仍存活；给 expect_create 时同时比对启动时间（防 pid 复用）
+
+        Windows 上不得用 os.kill(pid, 0) 判活：CPython 的 nt 实现把它
+        当 TerminateProcess，会直接杀掉目标进程。
+        """
+        if not pid or pid <= 0:
+            return False
+        try:
+            import psutil
+
+            if not psutil.pid_exists(pid):
+                return False
+            if not expect_create:
+                return True
+            return abs(float(psutil.Process(pid).create_time()) - expect_create) <= 2.0
+        except Exception:
+            pass
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                from ctypes import wintypes
+
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.OpenProcess.restype = wintypes.HANDLE
+                handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+                if not handle:
+                    return False
+                try:
+                    code = wintypes.DWORD()
+                    if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                        return True  # 无法判定 → 保守保留
+                    return code.value == 259  # STILL_ACTIVE
+                finally:
+                    kernel32.CloseHandle(handle)
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return True  # 无法判定 → 保守保留，宁留残留不误删
+
+    @classmethod
+    def _temp_owner_alive(cls, window_id: str) -> bool:
+        """临时页目录的归属进程是否仍存活（无归属文件 → False）"""
+        try:
+            import json
+
+            owner_file = cls._temp_owner_dir() / f"{window_id}.json"
+            if not owner_file.is_file():
+                return False
+            data = json.loads(owner_file.read_text(encoding="utf-8"))
+            return cls._pid_alive(int(data.get("pid") or 0), float(data.get("create_time") or 0.0))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _rmtree_force(path) -> bool:
+        """删除目录树（清只读位重试），返回是否彻底删除
+
+        git 对象默认带只读属性，Windows 上裸 rmtree 会 WinError 5 静默失败，
+        只留下 .git/objects 空壳 —— 历史清扫日志报「已删除 N 个」而目录仍在
+        的根因。
+        """
+        import shutil
+        import stat as _stat
+
+        def _retry(func, failed_path, _excinfo):
+            try:
+                os.chmod(failed_path, _stat.S_IWRITE)
+                func(failed_path)
+            except OSError:
+                pass
+
+        try:
+            shutil.rmtree(path, onexc=_retry)
+            return not os.path.exists(path)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _cleanup_orphan_temp_pages():
+        """启动清扫：删除归属进程已死的临时页残留目录
+
+        临时页目录本应随窗口关闭删除；崩溃/强杀会残留。归属文件
+        （.owners/<window_id>.json）记录的进程仍存活时跳过：单实例默认
+        关闭，另一个实例启动时不得清空本实例正在用的临时工作目录。
+        """
+        try:
             base = get_app_data_dir() / "tmp-sessions"
             if not base.is_dir():
                 return
             removed = 0
-            for child in base.iterdir():
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
+            kept = 0
+            failed = 0
+            for child in list(base.iterdir()):
+                if not child.is_dir() or child.name == ".owners":
+                    continue
+                if OpenAIChatToolWindow._temp_owner_alive(child.name):
+                    kept += 1
+                    continue
+                if OpenAIChatToolWindow._rmtree_force(child):
                     removed += 1
-            if removed:
-                logger.info(f"[MainWidget] 启动清扫：已删除 {removed} 个临时页残留目录")
+                else:
+                    failed += 1
+            # 清孤儿归属文件 + 空 .owners 目录
+            owner_dir = base / ".owners"
+            if owner_dir.is_dir():
+                for owner_file in list(owner_dir.iterdir()):
+                    if not (base / owner_file.stem).is_dir():
+                        try:
+                            owner_file.unlink()
+                        except OSError:
+                            pass
+                try:
+                    if not any(owner_dir.iterdir()):
+                        owner_dir.rmdir()
+                except OSError:
+                    pass
+            if removed or kept or failed:
+                logger.info(
+                    f"[MainWidget] 启动清扫：删除 {removed} 个临时页残留目录"
+                    + (f"，保留 {kept} 个存活页（归属进程在跑）" if kept else "")
+                    + (f"，{failed} 个删除失败（文件被占用）" if failed else "")
+                )
         except Exception as e:
             logger.warning(f"[MainWidget] 启动清扫临时页目录失败: {e}")
 

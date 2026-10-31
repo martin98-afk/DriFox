@@ -14,6 +14,8 @@
 8. temp 页 Tab 视觉：无项目色块图标；右键菜单无「分支标签页」入口
 """
 import ast
+import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -122,6 +124,40 @@ class TestTempPageCleanup:
         OpenAIChatToolWindow._cleanup_orphan_temp_pages()
         assert not base.exists() or not any(base.iterdir())
 
+    def test_cleanup_keeps_alive_page(self, tmp_path, monkeypatch):
+        """归属进程存活 → 目录保留（多开实例不得清空活跃临时页）"""
+        base = tmp_path / "tmp-sessions"
+        alive = base / "win_alive"
+        alive.mkdir(parents=True)
+        (alive / "keep.txt").write_text("活跃", encoding="utf-8")
+        owners = base / ".owners"
+        owners.mkdir()
+        try:
+            import psutil
+
+            create = float(psutil.Process(os.getpid()).create_time())
+        except Exception:
+            create = 0.0
+        (owners / "win_alive.json").write_text(
+            json.dumps({"pid": os.getpid(), "create_time": create}), encoding="utf-8"
+        )
+        monkeypatch.setattr("app.main_widget.get_app_data_dir", lambda: tmp_path)
+        OpenAIChatToolWindow._cleanup_orphan_temp_pages()
+        assert (alive / "keep.txt").is_file()
+
+    def test_cleanup_removes_dead_page(self, tmp_path, monkeypatch):
+        """归属进程已退出 → 目录删除（崩溃残留）"""
+        base = tmp_path / "tmp-sessions"
+        dead = base / "win_dead"
+        dead.mkdir(parents=True)
+        (dead / "stale.txt").write_text("残留", encoding="utf-8")
+        owners = base / ".owners"
+        owners.mkdir()
+        (owners / "win_dead.json").write_text(json.dumps({"pid": 0, "create_time": 0.0}), encoding="utf-8")
+        monkeypatch.setattr("app.main_widget.get_app_data_dir", lambda: tmp_path)
+        OpenAIChatToolWindow._cleanup_orphan_temp_pages()
+        assert not dead.exists()
+
     def test_cleanup_noop_when_missing(self, tmp_path, monkeypatch):
         """目录不存在时清扫静默跳过（不抛异常）"""
         monkeypatch.setattr("app.main_widget.get_app_data_dir", lambda: tmp_path)
@@ -146,6 +182,7 @@ class TestTempPageWorkdir:
             _window_id="win_77",
             _current_project="默认项目",
             _current_workdir={},
+            _last_synced_wd_key=None,
             backend=backend,
         )
         # 裸实例补齐 UI 副作用方法（真实实现依赖完整窗口，此处只关心 workdir 语义）
@@ -168,6 +205,15 @@ class TestTempPageWorkdir:
         expected = paths.pop()
         assert "tmp-sessions" in expected
         assert "win_77" in expected
+
+    def test_sync_working_directory_writes_owner(self, temp_window):
+        """同步临时页目录时写归属文件（pid + create_time），清扫据此判活"""
+        win, _ = temp_window
+        win._sync_working_directory()
+        owner = win._temp_owner_dir() / "win_77.json"
+        assert owner.is_file()
+        data = json.loads(owner.read_text(encoding="utf-8"))
+        assert int(data["pid"]) == os.getpid()
 
     def test_workdir_kept_across_session_switch(self, temp_window):
         """页内切换会话（再次同步）目录保留：同一 tmp 路径、不入实例缓存"""
