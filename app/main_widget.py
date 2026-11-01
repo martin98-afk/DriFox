@@ -994,6 +994,9 @@ class OpenAIChatToolWindow(ToolWindow):
     # 原契约只在 _on_stream_finished 末尾 drain，空闲期入队（如定时器 session.send）
     # 无人消费会永久滞留。
     _action_enqueued = pyqtSignal(str)
+    # 团队开窗实时桥接（worker 线程 → 主线程）：create/add 的窗口创建不等
+    # 本轮对话结束，流式期间就拉起（用户要求创建即生效）。
+    _team_spawn_now = pyqtSignal(str, object)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1099,6 +1102,26 @@ class OpenAIChatToolWindow(ToolWindow):
         # 信号 → 槽接线：观察者只在入队线程 emit，真正 drain 在主线程槽内做
         # （缺这条接线 = 信号空操作 = 空闲期入队仍无人消费，回到挂死现场）
         self._action_enqueued.connect(self._on_action_enqueued)
+
+        # 团队开窗实时处理器：worker 线程调用 submit_immediate → 这里只做
+        # 弱引用判活 + 信号发射（自动排队主线程），窗口创建在槽内立即执行，
+        # 不受 busy 守卫限制（create/add 要创建即生效）。
+        from app.core.conversation.action_queue import register_immediate_handler
+        from app.core.conversation.action_queue import unregister_immediate_handler
+
+        def _team_spawn_handler(wid: str, payload: dict) -> bool:
+            mw = _mw_weak()
+            if mw is None or getattr(mw, "_is_destroyed", False):
+                return False
+            if str(wid) != str(getattr(mw, "_window_id", "") or ""):
+                return False
+            mw._team_spawn_now.emit(str(wid), dict(payload or {}))
+            return True
+
+        register_immediate_handler("team_spawn", _team_spawn_handler)
+        self._team_spawn_handler = _team_spawn_handler  # 保活引用
+        self.destroyed.connect(lambda: unregister_immediate_handler("team_spawn", _team_spawn_handler))
+        self._team_spawn_now.connect(self._on_team_spawn_now)
 
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
@@ -5269,6 +5292,7 @@ class OpenAIChatToolWindow(ToolWindow):
         team_label: str = "",
         team_name: str = "",
         initial_session_delay_ms: int = 0,
+        is_leader: bool = False,
     ) -> Optional["OpenAIChatToolWindow"]:
         """为团队新建一个成员窗口（_handle_team_load 与团队框"快速新建成员"共用）。
 
@@ -5365,6 +5389,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if team_label:
                 join_kwargs["team_label"] = team_label
             tm_mgr.join_team(**join_kwargs)
+            # team_manage(create) 路径：leader 由该新窗口担任，join 后立即回写
+            # 顶层 leader_window_id（remove/群发的 leader 门禁据此判定）。
+            # 写在这里而不是 create 工具侧：window_id 只有开窗后才存在。
+            if is_leader:
+                try:
+                    tm_mgr.set_leader_window_id(win._window_id)
+                    logger.info(f"[_spawn_team_member_window] leader 已登记: {agent_name}@{win._window_id}")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[_spawn_team_member_window] leader 登记失败: {e}")
             # 应用团队级统一项目：新窗口与团队共享同一项目。
             # 🐛 构建团队默认项目继承：首次 /team --load / 快速新建成员时
             # 团队级项目尚未设置（get_team_project 为空串），此前新窗口会回落到
@@ -5437,6 +5470,7 @@ class OpenAIChatToolWindow(ToolWindow):
         team_label: str = "",
         team_name: str = "",
         keep_current_active: bool = False,
+        leader_agent: str = "",
     ) -> int:
         """批量创建团队成员窗口（去重由调用方保证）。
 
@@ -5450,8 +5484,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 避免 team.json 模板名覆盖为别的团队）
             keep_current_active: True 时保持发起者当前 tab 不动（抑制
                 add_window 逐窗激活 + 结束后恢复原激活 tab，而非切到首个
-                成员）——供 pixel-team-studio 等管理入口使用，批量建成员
-                不打断用户焦点；默认 False 保持 /team --load 现有行为。
+                成员）——供 pixel-team-studio 等管理入口与 team_manage(create)
+                使用，批量建成员不打断用户焦点；默认 False 保持 /team --load
+                现有行为。
+            leader_agent: 非空时，该角色对应的窗口创建后登记为团队 leader
+                （只认第一个匹配；team_manage(create) 传 "leader"）。
 
         Returns:
             成功创建的窗口数
@@ -5477,8 +5514,13 @@ class OpenAIChatToolWindow(ToolWindow):
             # 第 i 窗 (i × 50ms) 后再触发 session 创建。idx 从 0 起→首窗仍 0ms 行为
             # 不变；后续窗依次 50/100/150ms 错峰，事件循环得以穿插处理绘制/输入。
             # 仅「创建团队」路径改这一支，「新建任务」/ 单窗会话入口不动。
+            _leader_assigned = False
             for idx, agent_name in enumerate(agent_names):
                 _initial_session_delay_ms = idx * self._TEAM_NEW_TASK_STAGGER_MS
+                # leader 只认第一个匹配角色（create 路径清单里 leader 恒在首位）
+                _is_leader = bool(leader_agent) and not _leader_assigned and agent_name == leader_agent
+                if _is_leader:
+                    _leader_assigned = True
                 # 🛡️ M1：run_id / team_label 透传到 join_team，保证一次 /team --load
                 # 生成的所有新窗口共享同一团队归属（多团队分组基础）。
                 # 🛡️ M1'：team_name 同样透传，避免窗口实例 _team_name 被 team.json
@@ -5489,6 +5531,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     team_label=team_label,
                     team_name=team_name,
                     initial_session_delay_ms=_initial_session_delay_ms,
+                    is_leader=_is_leader,
                 )
                 if win is not None:
                     new_windows.append(win)
@@ -21194,6 +21237,10 @@ class OpenAIChatToolWindow(ToolWindow):
         （_spawn_team_member_window 的前置 join 不做角色校验）。批量语义由
         _spawn_team_members 自带（begin_batch_add 批量布局 + idx×50ms 错峰），
         此处不再包循环。
+
+        create 路径额外透传 leader_agent / keep_current_active：leader 由新
+        窗口担任（开窗后回写 leader_window_id），且整个搭建过程不抢当前
+        焦点 tab（调用窗口保持非团队成员）。
         """
         agents = [str(a) for a in (payload.get("agents") or []) if str(a or "").strip()]
         if not agents:
@@ -21219,6 +21266,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 run_id=str(payload.get("run_id") or ""),
                 team_label=str(payload.get("team_label") or ""),
                 team_name=str(payload.get("team_name") or ""),
+                leader_agent=str(payload.get("leader_agent") or ""),
+                keep_current_active=bool(payload.get("keep_current_active", False)),
             )
 
     def _drain_team_leader_watch(self, payload: dict):
@@ -21261,6 +21310,22 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._worker_actually_busy():
             return
         self._drain_action_queue()
+
+    def _on_team_spawn_now(self, wid: str, payload: dict):
+        """团队开窗实时槽（主线程）：流式期间也立即创建窗口。
+
+        与 _drain_action_queue 的区别是不受 busy 守卫限制。create/add 的
+        语义要求「创建即生效」，等本轮结束才开窗会让用户体感卡一轮。
+        代价：窗口构造与会话初始化占用主线程（数百毫秒），属既定取舍。
+        """
+        if wid != str(getattr(self, "_window_id", "") or ""):
+            return
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            self._drain_team_spawn(payload or {})
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[team_spawn] 实时开窗失败: {e}")
 
     def _handle_action_new(self, payload: dict):
         """动作队列的新建会话：worker 必须先真正停下

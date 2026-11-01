@@ -365,8 +365,22 @@ def register(registry) -> None:
                 bt = getattr(backend, "_builtin_tools", None)
             return bt if hasattr(bt, "set_team_context") else None
 
-        def spawn_members(agents, run_id, team_label="", team_name="", start_idx=0):
-            """入队 team_spawn 开窗请求，返回结构化回执（submitted/pending_window）。"""
+        def spawn_members(
+            agents,
+            run_id,
+            team_label="",
+            team_name="",
+            start_idx=0,
+            leader_agent="",
+            keep_current_active=False,
+        ):
+            """入队 team_spawn 开窗请求，返回结构化回执（submitted/pending_window）。
+
+            leader_agent：开窗清单里由哪个角色担任 leader（create 路径传
+            "leader"，drain 侧在该窗口创建后回写 leader_window_id）；
+            keep_current_active：True 时搭建过程不抢当前焦点 tab（create
+            路径用——原窗口保持非团队成员且不被切走）。
+            """
             target = _resolve_wid()
             if not target:
                 return {"submitted": False, "error": "无法定位调用方窗口（window_id 缺失）"}
@@ -376,18 +390,28 @@ def register(registry) -> None:
             names = [n for n in names if n]
             if not names:
                 return {"submitted": False, "error": "agents 为空，无成员可开窗"}
+            payload = {
+                "agents": names,
+                "run_id": run_id,
+                "team_label": team_label,
+                "team_name": team_name,
+                "start_idx": int(start_idx or 0),
+                "leader_agent": str(leader_agent or ""),
+                "keep_current_active": bool(keep_current_active),
+            }
+            # 实时路径优先：主窗口注册了 team_spawn 实时处理器时，窗口在本轮
+            # 对话进行中就开始创建（用户要求创建即生效，不等流结束）。
+            from app.core.conversation.action_queue import submit_immediate
+
+            if submit_immediate(target, "team_spawn", payload):
+                return {
+                    "submitted": True,
+                    "queued": len(names),
+                    "pending_window": list(names),
+                    "note": "窗口正在实时创建（本轮对话期间拉起）",
+                }
             queue = get_action_queue()
-            ok = queue.enqueue(
-                target,
-                "team_spawn",
-                {
-                    "agents": names,
-                    "run_id": run_id,
-                    "team_label": team_label,
-                    "team_name": team_name,
-                    "start_idx": int(start_idx or 0),
-                },
-            )
+            ok = queue.enqueue(target, "team_spawn", payload)
             if not ok:
                 return {"submitted": False, "error": "入队被拒（窗口正忙），请重试"}
             pending = [

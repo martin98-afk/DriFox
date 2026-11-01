@@ -432,8 +432,9 @@ class TestTeamToolsCapabilityDisplay:
         assert result.success, result.error
         mails = tm.get_mailbox_mails("win_02")
         assert mails and mails[0]["from_agent"] == "leader", "角色一致时不应被覆盖"
-        # 成员表无此 window 时不崩溃，保持 tool_ctx 原值
+        # 成员表无此 window（非团队成员）→ 发送方标识为 user（外部发起）
         result2 = subagent._team_send_message(self._tool_ctx("win_99", "build"), to_agent="build", message="派活2")
         assert result2.success, result2.error
         mails2 = tm.get_mailbox_mails("win_02")
-        assert mails2[-1]["from_agent"] == "build", "成员表查不到时保留 tool_ctx 角色"
+        assert mails2[-1]["from_agent"] == "user", "非团队成员发送时标识为 user"
+        assert mails2[-1]["from_window"] == "win_99"

@@ -61,6 +61,35 @@ def test_team_spawn_value_style_dict_structured_reject(caps_env):
     # 不抛异常即可到达此处
 
 
+def test_team_spawn_uses_immediate_handler_when_registered(caps_env):
+    """注册了 team_spawn 实时处理器时，spawn_members 走实时路径（不入队）。"""
+    from app.core.conversation.action_queue import (
+        get_action_queue,
+        register_immediate_handler,
+        unregister_immediate_handler,
+    )
+
+    got = []
+
+    def _handler(wid, payload):
+        if wid != "win_now":
+            return False
+        got.append((wid, payload.get("leader_agent"), payload.get("agents")))
+        return True
+
+    register_immediate_handler("team_spawn", _handler)
+    try:
+        pool = caps_env["build"](host=SimpleNamespace(_window_id="win_now"))
+        v = pool["team.spawn"]
+        receipt = v["spawn_members"](["leader", "build"], "run-x", leader_agent="leader")
+        assert receipt.get("submitted") is True
+        assert got and got[0][1] == "leader" and got[0][2] == ["leader", "build"]
+        # 实时路径不回退入队，队列保持为空
+        assert get_action_queue().peek("win_now") == []
+    finally:
+        unregister_immediate_handler("team_spawn", _handler)
+
+
 def test_team_facets_factory_style_readonly_facade(caps_env):
     """team.read/send/manage 两段式：callable 且调用后是 ReadOnlyFacade。"""
     pool = caps_env["build"](host=SimpleNamespace())

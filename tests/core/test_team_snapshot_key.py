@@ -3,8 +3,8 @@
 
 会话工具快照 key=(session_id, current_agent, in_team)，in_team 实时查
 TeamManager.is_team_member(builtin_tools._team_window_id)。本文件在
-注册表层面锁定该契约：join 前后工具集翻转、key 元组语义、team_manage
-恒可见而 team_send_message 仅成员可见。
+注册表层面锁定该契约：team_manage / team_send_message 均对非成员可见
+（create 不再入队，外部窗口需直接派任务），key 仍按 in_team 区分。
 """
 
 import tempfile
@@ -56,23 +56,26 @@ def _snapshot_key(session_id: str, agent: str, in_team: bool):
     return (session_id, agent, in_team)
 
 
-def test_snapshot_tools_flip_after_join(registry_env):
+def test_snapshot_tools_visible_without_join(registry_env):
+    """新契约：team_manage 与 team_send_message 都对非成员可见。
+
+    create 不再把调用窗口入队，非成员会话必须能直接给成员派任务，
+    因此两者都从 team_only 集合移除；join 前后工具集不翻转。
+    """
     reg, tm = registry_env["reg"], registry_env["tm"]
     wid = "win_71"
 
     key1 = _snapshot_key("sess-a", "build", tm.is_team_member(wid))
     snap1 = _visible_tools(reg, key1[2])
-    assert "team_manage" in snap1  # 全员可见，join 前就在
-    assert "team_send_message" not in snap1  # 成员专用，未入队不可见
+    assert "team_manage" in snap1
+    assert "team_send_message" in snap1  # 非成员也可见（外部发起派单）
 
-    # join → in_team 翻转
     tm.join_team(wid, "build", run_id=tm.start_team_run(force=True))
     key2 = _snapshot_key("sess-a", "build", tm.is_team_member(wid))
     snap2 = _visible_tools(reg, key2[2])
 
     assert key2[2] is True
-    assert "team_send_message" in snap2
-    assert snap2 != snap1
+    assert snap2 == snap1
 
 
 def test_snapshot_key_distinct_by_in_team(registry_env):
@@ -86,5 +89,6 @@ def test_snapshot_key_distinct_by_in_team(registry_env):
 def test_team_only_set_matches_contract(registry_env):
     reg = registry_env["reg"]
     team_only = reg.team_only_tools()
-    assert "team_send_message" in team_only
+    # 新契约：两个团队工具都对非成员可见（create 后原窗口直接派任务）
+    assert "team_send_message" not in team_only
     assert "team_manage" not in team_only

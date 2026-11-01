@@ -53,6 +53,47 @@ def remove_enqueue_observer(observer: Callable[[str], None]) -> None:
         pass
 
 
+# 实时动作处理器：不入队、由注册方（主线程）在收到回调后立即执行。
+# 与 enqueue 的区别是绕开「本轮对话结束才 drain」的时序约束——用于
+# team_spawn 这类必须实时生效的 UI 动作。回调同样在调用线程同步执行，
+# 只允许做线程安全调度（pyqtSignal.emit），严禁直接触碰 UI。
+# 多窗口各自注册一个处理器：处理器自己比对 window_id，命中返回 True。
+_immediate_handlers: Dict[str, List[Callable[[str, dict], bool]]] = {}
+
+
+def register_immediate_handler(action: str, handler: Callable[[str, dict], bool]) -> None:
+    """注册实时动作处理器（多窗口并存时按 window_id 命中）。"""
+    handlers = _immediate_handlers.setdefault(str(action), [])
+    if handler not in handlers:
+        handlers.append(handler)
+
+
+def unregister_immediate_handler(action: str, handler: Callable[[str, dict], bool]) -> None:
+    handlers = _immediate_handlers.get(str(action))
+    if not handlers:
+        return
+    try:
+        handlers.remove(handler)
+    except ValueError:
+        pass
+    if not handlers:
+        _immediate_handlers.pop(str(action), None)
+
+
+def submit_immediate(window_id: str, action: str, payload: Optional[dict] = None) -> bool:
+    """交给实时处理器执行；无处理器命中时返回 False（调用方回退入队）。"""
+    handlers = _immediate_handlers.get(str(action))
+    if not handlers:
+        return False
+    for handler in tuple(handlers):
+        try:
+            if handler(str(window_id or ""), dict(payload or {})):
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ActionQueue] 实时动作 {action} 提交失败: {e}")
+    return False
+
+
 class WindowActionQueue:
     """按 window_id 隔离的动作队列"""
 

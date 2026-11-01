@@ -357,6 +357,20 @@ class TeamManager:
             data = self._get_team_data(team_name)
             return str(data.get("leader_window_id") or "")
 
+    def set_leader_window_id(self, window_id: str, team_name: str = DEFAULT_TEAM) -> bool:
+        """登记团队 leader 窗口（create 流程：leader 是新开窗，非调用方窗口）。
+
+        create_team 建团时不再登记 leader（调用方保持非团队成员）；leader
+        窗口由主线程开窗路径 join_team 后经本方法回写顶层 leader_window_id。
+        空串 = 清空（与 leave_team 的接任/清空语义一致）。
+        """
+        window_id = str(window_id or "")
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            data["leader_window_id"] = window_id
+            self._save_team_data(team_name)
+        return bool(window_id)
+
     def create_team(
         self,
         team_label: str,

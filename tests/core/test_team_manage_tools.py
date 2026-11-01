@@ -63,8 +63,9 @@ def test_team_manage_visible_to_non_member(team_env, monkeypatch):
     try:
         tt.register(_Proxy(reg))  # 走插件代理语义（source=plugin:*）
         tools = reg.team_only_tools()
+        # team_manage 与非成员可用的 team_send_message 都不再是 team_only
         assert "team_manage" not in tools
-        assert "team_send_message" in tools
+        assert "team_send_message" not in tools
         # 工具确实注册成功
         assert reg.get("team_manage") is not None
         assert reg.get("team_send_message") is not None
@@ -97,21 +98,33 @@ def test_team_manage_action_create_basic(team_env):
     assert r.success, r.error
     run_id = tm.get_team_run_id()
     assert run_id
-    # leader 身份固定为 "leader"（P0①）
-    leader_wid = tm.get_leader_window_id()
-    assert leader_wid == "win_90"
-    assert tm.get_member_agent_name(leader_wid) == "leader"
-    # 槽位 runtime 标记
+    # 新语义：调用窗口保持非团队成员，leader 由新开窗担任（此处未开窗 → 无 leader）
+    assert not tm.is_team_member("win_90")
+    assert tm.get_leader_window_id() == ""
+    assert tm.get_members() == []
+    # 槽位 runtime 标记 + 角色清单（leader 不进槽位）
     slot = tm.get_template_for_run_id(run_id)
     assert slot and slot.get("runtime") is True and slot.get("name") == "g1"
+    assert [a["agent_name"] for a in slot.get("agents") or []] == ["build"]
 
 
-def test_team_manage_action_create_registers_leader_as_member(team_env):
+def test_team_manage_action_create_keeps_caller_out_of_team(team_env):
     tt, tm = team_env["tt"], team_env["tm"]
     r = tt._team_manage_impl(_member_ctx("win_91"), action="create", team_name="g2", team_role="x")
     assert r.success
-    assert tm.is_team_member("win_91")
-    assert any(m["agent_name"] == "leader" for m in tm.get_members())
+    assert not tm.is_team_member("win_91")
+    assert tm.get_members() == []
+    # leader 角色由开窗清单固定创建；调用方重复传 leader 会被过滤（不进槽位）
+    r2 = tt._team_manage_impl(
+        _member_ctx("win_92"),
+        action="create",
+        team_name="g3",
+        team_role="y",
+        members=[{"agent_name": "leader", "description": "dup"}, {"agent_name": "build", "description": "b"}],
+    )
+    assert r2.success
+    slot = tm.get_template_for_run_id(tm.get_team_run_id())
+    assert [a["agent_name"] for a in slot.get("agents") or []] == ["build"]
 
 
 # ── 用例 4：add（team.spawn 缺失 → 结构化未就绪，不写 members）──
@@ -208,13 +221,21 @@ def _facade(cap_id):
     return build_facet(cap_id)()
 
 
-# ── 用例 17：非成员 action=list → 友好文案（success=True）──
+# ── 用例 17：非成员 action=list → 只读查看团队（无团队时给创建引导）──
 
 def test_team_manage_action_list_non_member(team_env):
-    tt = team_env["tt"]
+    tt, tm = team_env["tt"], team_env["tm"]
     r = tt._team_manage_impl({}, action="list")
     assert r.success is True
-    assert "不在任何团队" in r.content
+    assert "创建团队" in r.content
+    # 非成员窗口（有 window_id）且团队为空：给创建引导而不是报错
+    r0 = tt._team_manage_impl({"team_window_id": "win_95"}, action="list")
+    assert r0.success is True and "当前没有团队成员" in r0.content
+    # 有团队后：非成员只读看到全部成员（不再返回「不在任何团队」）
+    _prepare_team(tm)
+    r2 = tt._team_manage_impl({"team_window_id": "win_95", "team_agent_name": "build"}, action="list")
+    assert r2.success is True
+    assert "leader@win_90" in r2.content and "build@win_91" in r2.content
 
 
 # ── 用例 18：已在团队中 create → 拒绝且不重复建 run ──
@@ -222,8 +243,38 @@ def test_team_manage_action_list_non_member(team_env):
 def test_team_manage_action_create_when_already_in_team(team_env):
     tt, tm = team_env["tt"], team_env["tm"]
     tt._team_manage_impl(_member_ctx(), action="create", team_name="g1", team_role="dev")
+    # 新语义下 create 不会把调用方入队，手动 join 模拟「已在团队中」
+    tm.join_team("win_90", "build", run_id=tm.get_team_run_id())
     old_run = tm.get_team_run_id()
     r = tt._team_manage_impl(_member_ctx(), action="create", team_name="g2", team_role="y")
     assert r.success is False
     assert ("已在团队" in r.error) or ('action="add"' in r.error)
     assert tm.get_team_run_id() == old_run  # 未重复建 run
+
+
+# ── 用例 19：非团队成员向成员发送任务（外部发起，from_agent=user）──
+
+def test_non_member_can_send_task_to_member(team_env):
+    tt, tm = team_env["tt"], team_env["tm"]
+    _prepare_team(tm)
+    r = tt._team_manage_impl(_member_ctx("win_90"), action="list")  # 预热能力
+    assert r.success
+    res = tt._team_send_impl(
+        {"team_window_id": "win_95", "team_agent_name": "build"},
+        to_agent="build",
+        message="外部任务",
+    )
+    assert res.success, res.error
+    mails = tm.get_mailbox_mails("win_91")
+    assert len(mails) == 1
+    assert mails[0]["body"] == "外部任务"
+    assert mails[0]["from_agent"] == "user"
+    assert mails[0]["from_window"] == "win_95"
+    assert "外部发起" in res.content
+    # 成员只能发团队内部：成员回发到外部窗口会找不到目标
+    back = tt._team_send_impl(
+        {"team_window_id": "win_91", "team_agent_name": "build"},
+        to_agent="user@win_95",
+        message="回复",
+    )
+    assert back.success is False
