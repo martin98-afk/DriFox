@@ -413,8 +413,20 @@ class ThemeManager:
 
         图标适配由 _ThemeIconEngine 自动处理（QIconEngine.key 随主题变化），
         无需手动清图标缓存。
+
+        另：推进一次外观纪元（``ThemeRefreshCoordinator.bump_appearance_epoch``）。
+        这是"一次外观变更 = 一个纪元"的唯一定义点——batched 路径每次主题/字体/
+        字号变更都无条件调本方法一次，插件页据此判定自己是否落后（隐藏期只置脏，
+        显示时 ``ensure_theme_fresh`` 补刷）。放这里而不是 ``begin_refresh_cycle``：
+        后者每窗口进一次，会在一轮内推进 N 次，先把可见页刷新再判它落后。
         """
         self._cached_light_check = (None, None)
+        try:
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            ThemeRefreshCoordinator.bump_appearance_epoch()
+        except Exception:
+            pass
         # 🐛 推进 ThemeRefreshCoordinator 版本号：使消息卡正文 CSS 变量注入
         # 的幂等短路失效。此前 should_skip / on_theme_changed 从未被调用，
         # 版本号恒为 0，导致 CodeWebViewer.refresh_theme 只在首次切换注入一次

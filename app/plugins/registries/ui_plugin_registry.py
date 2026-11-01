@@ -1039,41 +1039,35 @@ class UIPluginRegistry:
             logger.warning(f"[UIPluginRegistry] 主题变更订阅失败: {e}")
 
     def _on_theme_changed_event(self, payload: dict) -> None:
-        """主题变更：对全部已建浮动卡实例派发样式刷新（鸭子类型，无实现则跳过）
+        """主题变更：可见浮动卡立即刷，隐藏卡只置脏（显示时补刷）
 
         两条互补路径：
         1. ``refresh_style`` 系（约定）—— 卡片自己穷举重设各控件样式；
         2. ``replay_theme_qss``（兜底）—— 重放控件上登记过的 QSS 工厂，覆盖
            渲染期动态创建、未被 ``refresh_style`` 枚举到的控件（空态标签、
            分页按钮等）。旧插件没登记则空转，无副作用。
-        """
-        from app.utils.theme_style import replay_theme_qss
 
+        [PERF] 可见性分流：卡片样式是构造期 f-string 固化的，隐藏卡在切换时
+        刷了也看不见，却要付整棵子树 repolish（历史实测本派发单次 141ms）。
+        隐藏卡改为 ``mark_theme_dirty`` 置脏，真正显示时由
+        ``_show_floating_card`` / ``CardManager`` 路径的 ``ensure_theme_fresh``
+        补刷——正确性由纪元比对保证，不靠插件自觉。
+        """
         from time import perf_counter
+
+        from app.utils.theme_style import ensure_theme_fresh, mark_theme_dirty
 
         for _win_id, instances in list(self._card_widget_instances.items()):
             for _card_id, widget in list(instances.items()):
+                try:
+                    visible = bool(widget.isVisible())
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+                if not visible:
+                    mark_theme_dirty(widget)
+                    continue
                 _t0 = perf_counter()
-                try:
-                    method = getattr(widget, "refresh_style", None)
-                    if not callable(method):
-                        # 兼容旧插件的三种私有命名
-                        for name in ("_apply_latest_theme", "_apply_theme", "_retheme"):
-                            method = getattr(widget, name, None)
-                            if callable(method):
-                                break
-                    if callable(method):
-                        method()
-                except RuntimeError:
-                    continue  # C++ 对象已销毁
-                except Exception as e:
-                    logger.warning(f"[UIPluginRegistry] 插件卡主题刷新失败: {e}")
-                try:
-                    replay_theme_qss(widget)
-                except RuntimeError:
-                    continue  # C++ 对象已销毁
-                except Exception as e:
-                    logger.warning(f"[UIPluginRegistry] 插件卡 QSS 重放失败: {e}")
+                ensure_theme_fresh(widget)
                 # [PERF] 慢卡打点：主题切换时整条 publish 是同步的，
                 # 单卡几百 ms 就会让用户感知卡顿，必须能指名道姓
                 _ms = (perf_counter() - _t0) * 1000
@@ -3361,6 +3355,20 @@ class UIPluginRegistry:
 
         # toggle：显示/隐藏切换
         card_manager.toggle_card(card_id, window_id)
+
+        # 显示补刷：本次 toggle 若让卡片变可见（且此前隐藏期已置脏），
+        # 补刷到当前外观纪元。主题切换时隐藏卡只置脏不刷（省一次整树
+        # repolish），正确性靠这里兜住——不依赖插件在自己的 show_card()
+        # 里记得重设样式。
+        widget_now = win_instances.get(card_id)
+        if widget_now is not None:
+            try:
+                if widget_now.isVisible():
+                    from app.utils.theme_style import ensure_theme_fresh
+
+                    ensure_theme_fresh(widget_now)
+            except RuntimeError:
+                pass
 
         # Tab 模式：按标签页记录可见状态（切换标签时投影恢复/隐藏）
         if host is not None:

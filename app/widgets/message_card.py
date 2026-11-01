@@ -655,6 +655,8 @@ class MessageCard(SimpleCardWidget):
 
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换"""
+        from app.utils.theme_style import ensure_theme_fresh, mark_theme_dirty
+
         # [T16] 渲染缓存已按主题版本分桶（lru key 含 ThemeRefreshCoordinator
         # 版本号），主题切换无需清空——旧版本条目永不命中，深浅来回切换
         # 直接命中各自版本桶，无需逐卡 clear。
@@ -757,14 +759,17 @@ class MessageCard(SimpleCardWidget):
                 self._artifact_panel.refresh_style()
             except RuntimeError:
                 self._artifact_panel = None
-        # 插件注册的内嵌面板（如子智能体运行区）：QSS 同样在构造期固化
+        # 插件注册的内嵌面板（如子智能体运行区）：QSS 同样在构造期固化。
+        # [PERF] 可见性分流：卡片滚出视口 / 在非当前标签页时只置脏，回到
+        # 可见时由 showEvent → ensure_theme_fresh 补刷。
         for _panel in list(self._inline_panels.values()):
-            _refresh = getattr(_panel, "refresh_style", None)
-            if callable(_refresh):
-                try:
-                    _refresh()
-                except RuntimeError:
-                    continue
+            try:
+                if _panel.isVisible():
+                    ensure_theme_fresh(_panel)
+                else:
+                    mark_theme_dirty(_panel)
+            except RuntimeError:
+                continue
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
@@ -3891,6 +3896,8 @@ class MessageCard(SimpleCardWidget):
         ensure_rendered 时窗口不可见，被 _do_ensure_rendered 的可见性守卫推迟
         （设 _render_deferred=True 并 return，避免弹出幽灵窗口）。切回该标签页
         时本事件触发，此时父 HWND 已就绪，可安全创建 QWebEngineView。
+
+        另：主题切换期间本卡若不可见，内嵌插件面板只被置脏，这里补刷。
         """
         super().showEvent(event)
         # 修 #2：用户气泡 viewer 懒加载——若已暂存待显示文本且 viewer 尚未创建，补建
@@ -3898,6 +3905,18 @@ class MessageCard(SimpleCardWidget):
             self._ensure_user_viewer()
         if getattr(self, "_render_deferred", False) and not getattr(self, "_lazy_rendered", False):
             self.ensure_rendered()
+        # 内嵌插件面板补刷（主题切换时不可见 → 只置脏）
+        if self._inline_panels:
+            try:
+                from app.utils.theme_style import ensure_theme_fresh
+            except Exception:
+                ensure_theme_fresh = None
+            if ensure_theme_fresh is not None:
+                for _panel in list(self._inline_panels.values()):
+                    try:
+                        ensure_theme_fresh(_panel)
+                    except RuntimeError:
+                        continue
 
     def _is_effectively_visible(self) -> bool:
         """判断本卡片是否真正显示在屏幕上（有有效父 native window 供 QWebEngineView 附着）。

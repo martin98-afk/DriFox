@@ -3054,6 +3054,29 @@ def _extract_formulas(md_text: str) -> str:
     return "\n".join(seg if is_fence else _extract_formulas_in_plain(seg) for is_fence, seg in segments)
 
 
+def _line_tag_pending(line: str, tag: str, pending: bool) -> bool:
+    """单行内按出现顺序推进某注册标签的「未闭合」状态。
+
+    等价于 ``_has_unclosed_registered_tag`` 的 rfind 语义（即「全文前缀里该标签
+    最后一个事件是否为 open」）。**不能用 open/close 计数比较**：``</mood><mood>``
+    两者计数相等但 rfind 判为未闭合。
+    """
+    open_tag = f"<{tag}>"
+    close_tag = f"</{tag}>"
+    i = 0
+    while True:
+        o = line.find(open_tag, i)
+        c = line.find(close_tag, i)
+        if o == -1 and c == -1:
+            return pending
+        if o != -1 and (c == -1 or o < c):
+            pending = True
+            i = o + len(open_tag)
+        else:
+            pending = False
+            i = c + len(close_tag)
+
+
 def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     """提取完整 fenced code 块为 \x00F<i>\x00 哨兵（inject 免疫保护）。
 
@@ -3067,15 +3090,36 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     前放回原文，fenced_code 正常渲染代码内容（协议标签转义为字面文本）。
     fence 状态机与 _extract_formulas 同款语义；未闭合 fence（流式中间态，
     _sanitize_incomplete_markdown 已补闭合，此处兜底）原样放回不提取。
+
+    [PERF] 单遍增量判定：原实现对每个 fence 开栏各调一次
+    ``_has_unclosed_think_or_tool(md_text[:offset])``，内含 4 次全文 str.count
+    + 每注册标签一次全文 rfind + 一次前缀切片拷贝 → O(fences × n) 二次复杂度。
+    实测 1.5MB 文本：60 fence 13ms、200 fence 86ms；而工具块展开
+    （_serve_tool_body → find_tool_segment_by_call_id）每次都要重跑一遍。
+    现改为随行扫描增量维护协议块状态，单次判定降为 O(1)，总复杂度 O(n)。
+
+    状态语义与 ``_has_unclosed_think_or_tool`` 逐项对齐：
+    - think/tool：原实现用 count 比较 → 净计数差分等价；
+    - 注册标签：原实现用 rfind（「最后一个事件是 open」）→ 布尔 pending 等价；
+    - 半截标签：原实现只看前缀尾 _PARTIAL_TAG_TAIL_WINDOW 字符 → 直接切窗口，
+      O(1)，不必构造前缀。
+    状态按「含 fence 内文本的原文前缀」推进（原实现的前缀就是 md_text[:offset]，
+    同样不跳过已提取的 fence），故 fence 内的协议标签也计入。
     """
     if "```" not in md_text and "~~~" not in md_text:
         return [], md_text
+
+    tag_names = _registered_tag_names_safe()
+    tag_pending: dict[str, bool] = dict.fromkeys(tag_names, False)
+    tag_open_count = 0
+    think_net = 0
+    tool_net = 0
 
     fences: list[str] = []
     out_lines: list[str] = []
     buf: list[str] | None = None
     fence_marker = ""
-    offset = 0  # 当前行之前累计的字符数（供协议块未闭合判定取样前缀）
+    offset = 0  # 当前行之前累计的字符数（协议块状态取样用）
     for line in md_text.split("\n"):
         stripped = line.lstrip()
         if buf is None:
@@ -3088,7 +3132,12 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
             # _restore_fenced_code 找不回哨兵 → 从 fence 到文末的全部内容
             # 永久丢失（历史会话重开同样丢失，"偶尔内容显示不全"根因）。
             # 放行后 fence 原文留在协议块内，由 think/tool 卡自身处理。
-            if m and not _has_unclosed_think_or_tool(md_text[:offset]):
+            if m and not (
+                think_net > 0
+                or tool_net > 0
+                or tag_open_count > 0
+                or _PARTIAL_TAG_TAIL_RE.search(md_text[max(0, offset - _PARTIAL_TAG_TAIL_WINDOW) : offset])
+            ):
                 fence_marker = m.group(1)
                 buf = [line]
             else:
@@ -3099,6 +3148,22 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
                 fences.append("\n".join(buf))
                 out_lines.append(f"\x00F{len(fences) - 1}\x00")
                 buf = None
+
+        # 协议块状态推进（放在 fence 判定之后：原实现取样的是「不含当前行」的
+        # 前缀 md_text[:offset]，与上面判定用的状态口径必须一致）
+        if "<" in line:
+            if "<think>" in line or "</think>" in line:
+                think_net += line.count("<think>") - line.count("</think>")
+            if "<tool>" in line or "</tool>" in line:
+                tool_net += line.count("<tool>") - line.count("</tool>")
+            for tag in tag_names:
+                if f"<{tag}>" in line or f"</{tag}>" in line:
+                    was = tag_pending[tag]
+                    now = _line_tag_pending(line, tag, was)
+                    if now != was:
+                        tag_pending[tag] = now
+                        tag_open_count += 1 if now else -1
+
         offset += len(line) + 1
     if buf is not None:
         # 未闭合 fence：原样放回（流式中间态兜底，语义与 _extract_formulas 一致）

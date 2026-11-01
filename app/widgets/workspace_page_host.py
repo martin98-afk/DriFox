@@ -124,6 +124,14 @@ class WorkspacePageHost:
             self._page_indexes[page_id] = idx
             self._loaded[page_id] = (info, widget)
         self._tab_window._content_area.setCurrentIndex(self._page_indexes[page_id])
+        # 切页补刷外观：工作区页不在 WorkbenchPanel 的派发范围内（独立宿主），
+        # 主题切换期间它不可见 → 只置脏，这里补到当前纪元。
+        try:
+            from app.utils.theme_style import ensure_theme_fresh
+
+            ensure_theme_fresh(self._loaded[page_id][1])
+        except RuntimeError:
+            pass
 
     def teardown_plugin(self, plugin_name: str) -> None:
         """插件卸载：销毁其页面 + 移除 content_area 占位 + 清入口"""
