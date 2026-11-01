@@ -123,6 +123,7 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | `model.metadata` | low | 当前模型的 provider / 名称 / 上下文长度 |
 | `model.schema` | low | 指定 agent 视角的工具 schema |
 | `model.config` | **high** | 完整模型配置，**含已解密明文 API key** |
+| `model.config_for` | **high** | 按 query（模型名 / 服务商 / `服务商:模型名`）解析出可执行的完整配置（含明文 key） |
 | `provider.list` | low | 已配置服务商清单（id / 名称 / 模型数，**不含密钥与 URL**） |
 | `model.enumerate` | low | 指定服务商的可选模型列表（含视觉 / 思考能力标记） |
 
@@ -347,10 +348,29 @@ caps["stream.subscribe"]({
 | ID | level | 说明 |
 |---|---|---|
 | `storage.data_dir` | low | 插件持久化数据根目录 `<app_data>`（插件自拼 `plugin_data/<name>/` 自用） |
+| `storage.db` | **high** | 通用数据库执行权限（受限代理：表名须 `plugin_<name>_` 前缀，禁 ATTACH/PRAGMA/VACUUM） |
 
 只给根目录：CapabilityPool 的 provider 全局共享、调用不传插件名，per-plugin
 目录隔离没有现成机制。目录约定与 E1 配置契约（`plugin_data/<name>/config.json`）
 一致。
+
+`storage.db` 给的是**受限代理**（`PluginDBProxy`）而不是 `DatabaseManager` 句柄：
+插件表与主程序表共用一个库，直接给句柄等于把 `sessions` / `messages` 等业务表
+一并交出去。代理做了两道约束：
+
+1. 语句白名单：只允许 SELECT / INSERT / UPDATE / DELETE / REPLACE / CREATE / DROP /
+   ALTER / WITH 开头的单段语句；ATTACH / DETACH / PRAGMA / VACUUM / LOAD_EXTENSION
+   一律拒绝（这几个能绕过表名前缀约束，甚至读写文件）。
+2. 表名前缀：语句里出现的表名必须带 `plugin_<name>_` 前缀，`sqlite_*` 系统表拒绝。
+
+```python
+db = caps["storage.db"]          # PluginDBProxy
+db.execute(f"CREATE TABLE IF NOT EXISTS {db.table('task')} (id TEXT, body TEXT)", ())
+db.query(f"SELECT * FROM {db.table('task')} WHERE id=?", ("t1",))
+```
+
+定位是**防手滑**而非防恶意：插件在本机是可信代码，真要绕过的人可以直接 import
+sqlite3 自己开库（这也正是把它标 high 的原因）。
 
 ### 基础（恒放行）
 
@@ -367,6 +387,7 @@ caps["stream.subscribe"]({
 |---|---|---|
 | `cache.purge` | low | 清理主程序进程内 LRU 缓存（HTML 渲染 / token 估算 / grep 编译） |
 | `config.read` | medium | 按 key 读主程序配置项（非敏感标量） |
+| `config.write` | medium | 按 key 写主程序配置项（仅已声明项；密钥类字段一律拒绝） |
 | `process.start` | **high** | 启动后台进程（argv 数组、无 shell；宿主退出即全杀） |
 
 `process.start` 启动的进程**绑定宿主存续期**（2026-10 定稿）：每个进程入专属

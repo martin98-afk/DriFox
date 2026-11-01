@@ -58,6 +58,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             ["get_model_config", "get_provider_config"],
         ),
         _spec(
+            "model.config_for",
+            _H,
+            "按 query（模型名 / 服务商 / 服务商:模型名）解析出可执行的完整模型配置（含明文 key）",
+            _BOTH,
+        ),
+        _spec(
             "provider.list",
             _L,
             "已配置服务商清单（id/名称/模型数，不含密钥与 URL）",
@@ -205,6 +211,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         # ── 存储 ──
         _spec("storage.data_dir", _L, "插件持久化数据根目录（插件自拼 plugin_data/<name>/）", _BOTH),
+        _spec(
+            "storage.db",
+            _H,
+            "通用数据库执行权限（受限代理：表名须 plugin_<name>_ 前缀，禁 ATTACH/PRAGMA 等库级语句）",
+            _BOTH,
+        ),
         # ── 基础（恒放行） ──
         _spec("plugin.log", _N, "带 plugin=<name> 前缀的 logger", _BOTH),
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),
@@ -218,6 +230,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "按 key 读主程序配置项（非敏感标量；不含密钥，密钥走 model.config）",
             _UI,
             ["get_setting"],
+        ),
+        _spec(
+            "config.write",
+            _M,
+            "按 key 写主程序配置项（仅已声明项；密钥类字段一律拒绝）",
+            _UI,
         ),
         # ── 逃生舱 ──
         _spec("host.raw", _H, "裸 main_widget / backend 对象引用", _UI),

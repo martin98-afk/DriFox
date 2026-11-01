@@ -53,6 +53,31 @@ def register(registry) -> None:
     def _subagent(host: Any):
         return getattr(host, "_sub_agent_manager", None)
 
+    def _model_config_for(host: Any):
+        """按 query 解析完整模型配置（复用 ui_core 实现，窗口经 active_main_widget）。
+
+        工具侧 host 是 ToolExecutor，没有窗口的模型配置缓存；解析逻辑必须落到
+        宿主窗口。取不到窗口返回恒 None 的实现（后台任务无窗口是正常态）。
+        """
+        real = None
+        try:
+            from app.plugins.capabilities.resolve import active_main_widget
+
+            real = active_main_widget()
+        except Exception:  # noqa: BLE001 - 无窗口场景退化为空实现
+            real = None
+        if real is None:
+            return lambda query: None
+        from app.plugins.capabilities.providers.ui_core import _model_config_for as _impl
+
+        return _impl(real)
+
+    def _storage_db(host: Any, ctx: Any):
+        """通用数据库执行权限（与 ui_core 同一受限代理实现）。"""
+        from app.plugins.capabilities.providers.db_guard import PluginDBProxy
+
+        return PluginDBProxy(getattr(ctx, "plugin", "") or "")
+
     def _artifacts_show(host: Any):
         """tool surface 的成果推送：host 是 ToolExecutor，无窗口引用。
 
@@ -360,6 +385,7 @@ def register(registry) -> None:
     registry.register("model.metadata", _model_metadata, surface="tool", owner="core:tool")
     registry.register("model.schema", _model_schema, surface="tool", owner="core:tool")
     registry.register("model.config", _model_config, surface="tool", owner="core:tool")
+    registry.register("model.config_for", _model_config_for, surface="tool", owner="core:tool")
     registry.register("agent.read", _agent_read, surface="tool", owner="core:tool")
     registry.register(
         "agent.read", _agent_prompt, surface="tool", owner="core:tool", legacy_key="get_agent_prompt"
@@ -371,6 +397,7 @@ def register(registry) -> None:
     registry.register("session.send", _session_send, surface="tool", owner="core:tool")
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
     registry.register("storage.data_dir", _storage_data_dir, surface="tool", owner="core:tool")
+    registry.register("storage.db", _storage_db, surface="tool", owner="core:tool")
     registry.register("tool.execute", _tool_execute, surface="tool", owner="core:tool")
     registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
     registry.register("model.enumerate", model_meta.model_enumerate, surface="tool", owner="core:tool")

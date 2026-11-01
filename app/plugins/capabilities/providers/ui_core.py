@@ -1165,6 +1165,70 @@ def _config_read(host: Any):
     return read
 
 
+def _config_write(host: Any):
+    """按 key 写主程序配置项（仅已声明项；密钥类字段一律拒绝）。
+
+    只认 Settings 上的具名 ConfigItem：插件能改的范围与「界面里存在的开关」
+    一致，写不进从未声明的字段。密钥类字段与 config.read 同口径拒绝（密钥
+    走 model.config 的写路径不存在，也不该存在）。
+    """
+
+    _SECRET_HINTS = ("key", "token", "secret", "password", "credential")
+
+    def write(key: str, value: Any, save: bool = True) -> bool:
+        if not key:
+            return False
+        if any(h in key.lower() for h in _SECRET_HINTS):
+            logger.warning(f"[Capability] config.write 拒绝密钥类字段: {key}")
+            return False
+        try:
+            from app.utils.config import Settings
+
+            s = Settings.get_instance()
+            item = getattr(s, key, None)
+            if item is None or not hasattr(item, "value"):
+                logger.warning(f"[Capability] config.write 未声明的配置项: {key}")
+                return False
+            item.value = value
+            if save:
+                s.save()
+            return True
+        except Exception as e:
+            logger.warning(f"[Capability] config.write 写 {key} 失败: {e}")
+            return False
+
+    return write
+
+def _model_config_for(host: Any):
+    """按 query 解析出可执行的完整模型配置（含明文 key）。
+
+    query 三种格式与 ``/subagents --model=`` / 标题生成默认模型一致：
+    模型名（当前服务商模糊匹配）/ 服务商名（config_id、display_name、provider_name
+    皆可）/ ``服务商:模型名``。解析逻辑留在宿主窗口（`_resolve_subagent_model_config`）：
+    它依赖窗口内的 ``_valid_configs`` 与模型列表缓存，插件侧没有等价数据源。
+    """
+
+    def config_for(query: str) -> Any:
+        if not query:
+            return None
+        resolver = getattr(host, "_resolve_subagent_model_config", None)
+        if not callable(resolver):
+            logger.debug("[Capability] model.config_for 宿主无模型解析器")
+            return None
+        try:
+            return resolver(query, show_error=False)
+        except Exception as e:
+            logger.warning(f"[Capability] model.config_for 解析失败 {query!r}: {e}")
+            return None
+
+    return config_for
+
+def _storage_db(host: Any, ctx: Any):
+    """通用数据库执行权限：受限代理（表名须 ``plugin_<name>_`` 前缀）。"""
+    from app.plugins.capabilities.providers.db_guard import PluginDBProxy
+
+    return PluginDBProxy(getattr(ctx, "plugin", "") or "")
+
 def _host_raw(host: Any):
     return host
 
@@ -1193,6 +1257,7 @@ def register(registry) -> None:
     # 模型 / 智能体
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
     reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
+    reg.register("model.config_for", _model_config_for, surface="ui", owner="core:ui")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
     reg.register("model.metadata", _model_metadata, surface="ui", owner="core:ui")
     reg.register("provider.list", model_meta.provider_list, surface="ui", owner="core:ui")
@@ -1208,6 +1273,7 @@ def register(registry) -> None:
     )
     # 存储
     reg.register("storage.data_dir", _storage_data_dir, surface="ui", owner="core:ui")
+    reg.register("storage.db", _storage_db, surface="ui", owner="core:ui")
     # 上下文 / 引擎
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
     reg.register("engine.stack", _engine_stack, surface="ui", owner="core:ui")
@@ -1259,6 +1325,7 @@ def register(registry) -> None:
         pass
     # 配置（按 key 读非敏感标量）
     reg.register("config.read", _config_read, surface="ui", owner="core:ui")
+    reg.register("config.write", _config_write, surface="ui", owner="core:ui")
     # 网络 / 云同步（host 无关实现，与 tool_core 共用 net_sync）
     reg.register("net.avatar", net_sync.net_avatar, surface="ui", owner="core:net")
     reg.register("net.download", net_sync.net_download, surface="ui", owner="core:net")
