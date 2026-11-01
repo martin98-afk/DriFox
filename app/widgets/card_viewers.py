@@ -5372,6 +5372,18 @@ class CodeWebViewer(QWebEngineView):
                         part.className = 'v2-live-part';
                         part.innerHTML = html;
                         if (live) node.insertBefore(part, live); else node.appendChild(part);
+                        // 切片段内的图表/公式/插件 fence 就地初始化：
+                        // patchBlocks 与 updateTailHtml 都有这四连，切片路径此前
+                        // 缺失 → 容器插进 DOM 却没人 init，一直空白到下一次整块
+                        // 正式化（用户可见「图表区空一块」）。异常域隔离：任一
+                        // 初始化器缺失/抛错不得中断 tail 重置。
+                        try {{
+                            if (typeof window._initEchartsIn === 'function') window._initEchartsIn([part]);
+                            if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks([part]);
+                            if (typeof renderKatexBlocks === 'function') renderKatexBlocks([part]);
+                            if (typeof window._runFenceAssets === 'function') window._runFenceAssets([part]);
+                            if (typeof window._initWidgets === 'function') window._initWidgets([part]);
+                        }} catch (err) {{}}
                     }}
                     if (!tailText) {{
                         if (live && live.parentNode) live.parentNode.removeChild(live);
@@ -8031,6 +8043,11 @@ class CodeWebViewer(QWebEngineView):
             return True
         tail = live_text[slice_to:]
         tail_html = self._v2_live_tail_html(tail, reasoning=False)
+        # 降载记账对齐 DOM：本批已把 live 尾重置为 tail 的渲染结果，下一批的
+        # grown 基准必须从 tail 长度起算，否则按旧全量长度算出的增长恒为负，
+        # 尾部格式化会白白多等一个时间窗口。
+        self._v2_live_tail_done_len = len(tail)
+        self._v2_live_tail_done_ts = time.monotonic()
         try:
             page.runJavaScript(
                 "if(typeof window._v2LiveSplit==='function')window._v2LiveSplit('content-placeholder',"                + json.dumps(live_key_now).decode("utf-8")
@@ -8384,8 +8401,16 @@ class CodeWebViewer(QWebEngineView):
             # 模型输出的大头，必须在尾态通道里直接升级成行内 HTML。
             # 降载：新增 ≥ _TAIL_INLINE_MIN_DELTA 或距上次 ≥ _TAIL_INLINE_MIN_INTERVAL_S
             # 才重渲（与 v1 的 _render_tail_inline 同口径，避免 O(n²)）。
+            # ⚠️ 只能渲染**尚未切片的尾部**（formalized_len 之后）：节点里已切片的
+            # 前缀是独立的 .v2-live-part 节点，live 尾再渲染一遍全量就是同一段
+            # 内容出现两遍 —— 图表首当其冲（part 里已渲染的容器 + live 里重渲的
+            # 一份容器/代码块，用户可见「渲染代码与图表并存」），且超过
+            # _TAIL_CODE_WRAP_MAX_CHARS 时 live 里的图表还会降级成代码块
+            # （「已渲染图表回退成代码」）。
             if not live_reasoning:
-                _tail_html = self._v2_live_tail_refresh(live_text)
+                _tail_from = self._v2_live_formalized_len
+                _tail_text = live_text[_tail_from:] if _tail_from > 0 else live_text
+                _tail_html = self._v2_live_tail_refresh(_tail_text)
                 if _tail_html is not None:
                     # 尾部整体替换成行内 HTML，因此本批的纯文本增量不再追加
                     # （否则会先追加纯文本再被 innerHTML 覆盖，白跑一次 IPC）。
@@ -8399,7 +8424,11 @@ class CodeWebViewer(QWebEngineView):
                 self._v2_reset_live()
 
         self._last_rendered_markdown = self._markdown_text
-        if content_ops.is_empty and tool_ops.is_empty and not live_delta:
+        # 尾部行内 HTML 也是一批真实的 DOM 更新：pending 非空时必须继续下发。
+        # 漏判时本批只做了 tail 渲染记账（_v2_live_tail_done_len 已推进）却不发
+        # JS → 尾部格式化永久丢一次，直到攒够下一个降载窗口（用户可见格式回退）。
+        _pending_tail = self.__dict__.get("_v2_live_tail_html_pending")
+        if content_ops.is_empty and tool_ops.is_empty and not live_delta and _pending_tail is None:
             return True
 
         self._height_report_pending = True

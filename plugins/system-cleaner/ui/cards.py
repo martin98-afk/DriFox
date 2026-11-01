@@ -99,6 +99,9 @@ class SystemCleanerCard(QWidget):
     """系统清理浮动卡片"""
 
     closed = pyqtSignal()
+    # 内存释放收尾信号：拍3 后台线程完成时 emit，跨线程自动 queued 回主线程。
+    # 后台线程没有 Qt 事件循环，不能在那里调 QTimer.singleShot（回调永不执行）。
+    _mem_release_finished = pyqtSignal(object, int, int)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -121,6 +124,7 @@ class SystemCleanerCard(QWidget):
         self._ctx_danger = "#e34c4c"
         self._ctx_is_dark = isDarkTheme()
 
+        self._mem_release_finished.connect(self._finish_memory_release)
         self._setup_ui()
         self._apply_fallback_theme()
 
@@ -650,10 +654,13 @@ class SystemCleanerCard(QWidget):
                     killed = _kill_qwebengine_processes()
                 except Exception:  # noqa: BLE001
                     killed = 0
-                QTimer.singleShot(
-                    0,
-                    lambda: self._finish_memory_release(mem_before, collected, killed),
-                )
+                try:
+                    # 跨线程回主线程只能走信号（auto queued connection）。
+                    # b47875df 曾在此调 QTimer.singleShot(0, ...)：daemon 线程无
+                    # 事件循环，回调永不执行，按钮永久卡「释放中…」。
+                    self._mem_release_finished.emit(mem_before, collected, killed)
+                except RuntimeError:
+                    pass  # 卡片已销毁，无需收尾
 
             threading.Thread(
                 target=_kill_in_background,

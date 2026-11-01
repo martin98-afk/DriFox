@@ -295,3 +295,84 @@ def test_skeleton_has_all_new_hooks():
         "window._v2LiveSplit",
     ):
         assert fn in code, f"骨架缺 {fn}"
+
+def test_live_split_initializes_embedded_fences():
+    """切片段插入后必须就地初始化图表/公式/插件 fence（与 patchBlocks 同款五连）。
+
+    缺失时容器插进 DOM 却没人 init → 图表区空白到下一次整块正式化
+    （用户可见「切出来的图表空一块」）。
+    """
+    src = __import__("pathlib").Path(__file__).resolve().parents[2] / "app" / "widgets" / "card_viewers.py"
+    code = src.read_text(encoding="utf-8")
+    i = code.find("window._v2LiveSplit = function")
+    j = code.find("正式化换 key", i)
+    assert i > 0 and j > i
+    seg = code[i:j]
+    for fn in ("_initEchartsIn", "renderMermaidBlocks", "renderKatexBlocks", "_runFenceAssets", "_initWidgets"):
+        assert fn in seg, f"_v2LiveSplit 缺 {fn} 初始化"
+
+# ── B''. 尾部行内渲染的图表围栏保护（2026-11-01）───────────────────────
+
+def test_tail_inline_promotes_closed_chart_fence_past_wrap_limit():
+    """超长 tail 跳过整页代码高亮，但已闭合的 echarts 围栏必须出容器。
+
+    修复前：``_render_inline_tail`` 对 > ``_TAIL_CODE_WRAP_MAX_CHARS`` 的文本
+    跳过 ``_wrap_code_blocks_with_copy_button_web``，echarts 围栏退化成
+    ``<pre><code class="language-echarts">`` —— 用户可见「已渲染图表回退成代码」。
+    """
+    from app.widgets.card_render_core import _TAIL_CODE_WRAP_MAX_CHARS, _render_inline_tail
+
+    chart = '```echarts\n{"series":[{"type":"bar","data":[1,2,3]}]}\n```'
+    text = "前缀。" * (_TAIL_CODE_WRAP_MAX_CHARS // 3) + "\n\n" + chart
+    assert len(text) > _TAIL_CODE_WRAP_MAX_CHARS
+    html = _render_inline_tail(text)
+    assert "echarts-container" in html, "超长 tail 的图表围栏必须仍产出容器"
+    assert "language-echarts" not in html, "不得降级成代码块"
+
+
+def test_tail_inline_promotes_unclosed_chart_fence_to_skeleton():
+    """超长 tail 的未闭合图表围栏必须是骨架，不能裸露半截 JSON。"""
+    from app.widgets.card_render_core import _TAIL_CODE_WRAP_MAX_CHARS, _render_inline_tail
+
+    text = (
+        "前缀。" * (_TAIL_CODE_WRAP_MAX_CHARS // 3)
+        + '\n\n```echarts\n{"series": [{"type": "line", "data": [1, 2'
+    )
+    assert len(text) > _TAIL_CODE_WRAP_MAX_CHARS
+    html = _render_inline_tail(text)
+    assert "chart-streaming" in html, "半截图表围栏必须降级为骨架"
+    assert "language-echarts" not in html, "不得裸露半截 JSON"
+
+
+def test_tail_refresh_renders_only_unsliced_tail(monkeypatch):
+    """切片推进后，尾部刷新只能渲染 ``formalized_len`` 之后的部分。
+
+    修复前传的是整块 ``live_text``：已切成 ``.v2-live-part`` 的图表/正文会被
+    live 尾再渲染一遍（同一图表两份），超长时那份还是代码块 —— 用户可见
+    「渲染代码与图表并存」。
+    """
+    chart = '```echarts\n{"series":[{"type":"bar","data":[1,2,3]}]}\n```'
+    head = "第一段标记内容。\n\n" + chart + "\n\n后续说明文字。\n\n"
+    unclosed = '```echarts\n{"series": [{"type": "line", "data": [1, 2'
+    # 首帧文本必须 > _LIVE_MIN_CHARS，否则第一批走常规渲染、live key 未建立
+    blocks = [{"type": "text", "text": head + unclosed + "0123456789" * 200}]
+    v = _make_viewer(monkeypatch, blocks)
+    assert v._perform_update_v2() is True
+
+    # 第二轮：闭合段切片（第一段 + 图表进 part），tail 只剩未闭合围栏
+    v._page.js_calls.clear()
+    v._needs_full_render = False
+    blocks[0]["text"] = head + unclosed + "0123456789" * 280
+    assert v._perform_update_v2() is True
+    assert v._v2_live_formalized_len > 0, "闭合段必须切片推进"
+
+    # 第三轮：尾部增长超过降载阈值，触发 _v2LiveTailHtml
+    v._page.js_calls.clear()
+    v._needs_full_render = False
+    blocks[0]["text"] = head + unclosed + "0123456789" * 440
+    assert v._perform_update_v2() is True
+    js = _all_js(v)
+    assert "_v2LiveTailHtml" in js
+    tail_arg = js[js.index("_v2LiveTailHtml") :]
+    assert "第一段标记内容" not in tail_arg, "已切片前缀不得进入 live 尾"
+    assert "echart-" not in tail_arg, "已渲染图表不得在 live 尾重复"

@@ -8,6 +8,8 @@ permission:
   "question": allow
   "team_list_members": allow
   "team_send_message": allow
+  "update_handoff": allow
+  "timer": allow
   "*": deny
 ---
 
