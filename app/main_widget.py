@@ -14003,7 +14003,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if hm is None:
             return []
         if getattr(hm, "_history_loaded", True):
-            return hm.get_history_list(self._current_project)
+            # sync_db=False：每轮对话收尾都会走到这里（_on_stream_finished →
+            # 存历史 → _notify_history_data_changed → 本方法）。此时本进程刚
+            # 写库、内存即权威；若走 get_history_list 默认路径，db signature
+            # 每轮保存后必然变化 → 主线程全量重载 5000 条 + WAL 锁等待
+            # （MainThreadWatchdog 实测 500ms+，watchdog L12580/L17912 实锤）。
+            # 跨进程变更由历史面板等 sync_db=True 的低频读取方兜底。
+            return hm.get_history_list(self._current_project, sync_db=False)
 
         self._hook_welcome_history_loaded()
         getter = getattr(hm, "get_recent_lightweight", None)

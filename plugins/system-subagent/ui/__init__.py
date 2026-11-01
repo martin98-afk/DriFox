@@ -54,6 +54,8 @@ def register_ui(registry) -> None:
             container="full",
             title="子智能体会话",
             default_visible=False,
+            # 不进左侧边栏：仅经消息卡内嵌面板「进入会话」/ /subagents 命令唤出
+            metadata={"hide_sidebar": True},
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[system-subagent] 会话卡注册失败: {e}")

@@ -1023,7 +1023,11 @@ class HistoryManager:
             return []
 
     def get_history_list(
-        self, project: str = None, with_messages: bool = False, merge_team: bool = False
+        self,
+        project: str = None,
+        with_messages: bool = False,
+        merge_team: bool = False,
+        sync_db: bool = True,
     ) -> List[Dict]:
         """获取历史会话列表，可选按项目过滤，按最后对话时间排序
 
@@ -1033,10 +1037,17 @@ class HistoryManager:
             merge_team: 为 True 时，team_run_id 非空的会话按 run_id 聚合为
                 单个合并条目（团队成员不再逐条出现），普通会话条目保持不变。
                 仅在 with_messages=False（轻量列表）时生效。
+            sync_db: 为 False 时跳过跨进程重载探测（_reload_if_db_changed），
+                直接信任本进程内存。仅供「本进程刚写入、内存即权威」的高频
+                读取热路径使用（欢迎卡每轮收尾刷新）——db signature 每轮保存
+                后必然变化，探测会在主线程触发全量 SQLite 重载 + WAL 锁等待
+                （watchdog 实测 500ms+）。跨进程变更由低频读取方（历史面板等
+                sync_db=True 调用）兜底刷新，欢迎卡只损失展示时效性。
         """
         self._ensure_history_loaded()
         # 跨进程一致性：若其他 OS 进程已提交（WAL 模式写入 -wal），重载本进程内存缓存
-        self._reload_if_db_changed()
+        if sync_db:
+            self._reload_if_db_changed()
         # 先去重
         self._deduplicate_history_sessions()
 
