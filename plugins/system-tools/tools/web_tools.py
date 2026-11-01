@@ -222,7 +222,7 @@ def _webfetch_impl(tool_ctx, **kwargs):
         h.ignore_images = True
         h.body_width = 0
         h.ignore_emphasis = False
-        md = h.handle(html_content)
+        md = h.handle(str(soup))
         md = _NEWLINE_PATTERN.sub("\n\n", md).strip()
         return ToolResult(True, content=md[:max_chars])
     except httpx.HTTPStatusError as e:
