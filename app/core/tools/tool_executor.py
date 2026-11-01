@@ -1110,6 +1110,10 @@ class ToolExecutor:
             "sub_agent_manager": sub_agent,
             "team_window_id": getattr(bt, "_team_window_id", "") if bt else "",
             "team_agent_name": getattr(bt, "_team_agent_name", "") if bt else "",
+            # #4（team_create 回填通道）：工具 impl 经此引用调
+            # set_team_context 回填窗口团队上下文（快照 key 依赖）。
+            # 拿不到实例时为 None，impl 判空跳过回填并提示，不抛异常。
+            "builtin_tools": bt,
             "env": env,
             "services": services,
             "capabilities": pool,

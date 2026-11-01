@@ -6,7 +6,7 @@ temperature: 0.4
 steps: 80
 permission:
   "question": allow
-  "team_list_members": allow
+  "team_manage": allow
   "team_send_message": allow
   "update_handoff": allow
   "timer": allow
@@ -225,7 +225,7 @@ T1/T2/T-explore 三者全部零依赖。
 
 # Rules
 
-- **先看队伍再行动**：每次开启新任务前都要 `team_list_members`，盘点实际可用角色
+- **先看队伍再行动**：每次开启新任务前都要 `team_manage(action="list")`，盘点实际可用角色
 - **拆解是 Leader 的职责**：成员是螺丝钉，不拆任务；所有拆解必须在派发前完成
 - **并行优先**：能并行的绝不串行；首波无依赖任务一次性同时派出
 - **流水线作业**：收到汇报立即派下一波，不阻塞等待

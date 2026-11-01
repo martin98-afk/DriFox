@@ -328,6 +328,143 @@ def register(registry) -> None:
 
         return build_facet("team.send")
 
+    def _team_manage(host: Any):
+        """团队管理面：建团/入退队/移除成员/群发（声明见 capabilities.facets）。"""
+        from app.plugins.capabilities.facets import build_facet
+
+        return build_facet("team.manage")
+
+    def _action_queue(host: Any):
+        """动作队列只读面：仅 peek（pending 开窗回执；声明见 capabilities.facets）。"""
+        from app.plugins.capabilities.facets import build_facet
+
+        return build_facet("action.queue")
+
+    def _team_spawn(host: Any):
+        """team.spawn：为团队拉起成员窗口（UI 副作用，入队语义）。
+
+        先例同 _session_control：provider 属主程序侧，直接 import action_queue；
+        只暴露语义化方法，不把通用 enqueue 交给插件（权限放大：可塞
+        interrupt/new 等非团队动作）。window_id 从 backend → host 逐级取，
+        全空拒绝入队（防多窗口串窗）。
+
+        sync/clear_caller_context：窗口团队上下文回填/清空也收在这里——
+        插件侧禁止直接碰 builtin_tools（test_impl_source_self_contained 护栏）。
+        """
+        from app.core.conversation.action_queue import get_action_queue
+
+        backend = _backend(host)
+        wid = str(getattr(backend, "_window_id", "") or getattr(host, "_window_id", "") or "")
+
+        def _resolve_wid(window_id: str = "") -> str:
+            return str(window_id or wid or "")
+
+        def _builtin_tools():
+            bt = getattr(host, "_builtin_tools", None)
+            if bt is None:
+                bt = getattr(backend, "_builtin_tools", None)
+            return bt if hasattr(bt, "set_team_context") else None
+
+        def spawn_members(agents, run_id, team_label="", team_name="", start_idx=0):
+            """入队 team_spawn 开窗请求，返回结构化回执（submitted/pending_window）。"""
+            target = _resolve_wid()
+            if not target:
+                return {"submitted": False, "error": "无法定位调用方窗口（window_id 缺失）"}
+            if not run_id:
+                return {"submitted": False, "error": "run_id 必填（防团队框漂移）"}
+            names = [a if isinstance(a, str) else (a or {}).get("agent_name", "") for a in (agents or [])]
+            names = [n for n in names if n]
+            if not names:
+                return {"submitted": False, "error": "agents 为空，无成员可开窗"}
+            queue = get_action_queue()
+            ok = queue.enqueue(
+                target,
+                "team_spawn",
+                {
+                    "agents": names,
+                    "run_id": run_id,
+                    "team_label": team_label,
+                    "team_name": team_name,
+                    "start_idx": int(start_idx or 0),
+                },
+            )
+            if not ok:
+                return {"submitted": False, "error": "入队被拒（窗口正忙），请重试"}
+            pending = [
+                i["payload"].get("agents", [])
+                for i in queue.peek(target)
+                if i.get("action") == "team_spawn"
+            ]
+            return {
+                "submitted": True,
+                "queued": len(names),
+                "pending_window": [a for sub in pending for a in sub],
+                "note": "成员窗口在本轮对话结束后拉起；下一轮用 team_manage(action=list) 验证",
+            }
+
+        def ensure_leader_watch(window_id: str = "", run_id: str = "", team_label: str = "", team_name: str = ""):
+            """入队 team_leader_watch：本轮结束后为 leader 窗口做 UI 分组 + 启动邮箱 watcher。
+
+            payload 携带 run_id/team_label/team_name——drain 侧据其设置窗口
+            三标记并调 refresh_capsule_for_window 把 leader 窗口移进团队框。
+            """
+            target = _resolve_wid(window_id)
+            if not target:
+                return {"ok": False, "error": "window_id 缺失"}
+            ok = get_action_queue().enqueue(
+                target,
+                "team_leader_watch",
+                {
+                    "run_id": str(run_id or ""),
+                    "team_label": str(team_label or ""),
+                    "team_name": str(team_name or ""),
+                },
+            )
+            if not ok:
+                return {"ok": False, "error": "入队被拒（窗口正忙），请重试"}
+            return {"ok": True, "note": "leader 窗口分组与邮箱监听将在本轮结束后完成"}
+
+        def sync_caller_context(agent_name: str = ""):
+            """回填调用窗口团队上下文（set_team_context），返回解析出的 window_id。
+
+            替代插件侧直碰 tool_ctx["builtin_tools"]（护栏禁止）；同时承担
+            create 场景的 window_id 解析降级链（bt._team_window_id → homepage._window_id）。
+            """
+            bt = _builtin_tools()
+            if bt is None:
+                return {"ok": False, "error": "builtin_tools 不可用，窗口上下文未同步"}
+            target = str(getattr(bt, "_team_window_id", "") or "")
+            if not target:
+                homepage = getattr(bt, "homepage", None)
+                target = str(getattr(homepage, "_window_id", "") or "")
+            if not target:
+                return {"ok": False, "error": "无法定位调用窗口（window_id 缺失）"}
+            if agent_name:
+                # agent_name 空串 = 仅解析 window_id（不触碰现有上下文）
+                try:
+                    bt.set_team_context(target, agent_name)
+                except Exception as e:  # noqa: BLE001
+                    return {"ok": False, "error": f"set_team_context 失败: {e}"}
+            return {"ok": True, "window_id": target}
+
+        def clear_caller_context():
+            """清空调用窗口团队上下文（leave 语义，对齐 backend 清空行为）。"""
+            bt = _builtin_tools()
+            if bt is None:
+                return {"ok": False, "error": "builtin_tools 不可用"}
+            try:
+                bt.set_team_context("", "")
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": f"set_team_context 失败: {e}"}
+            return {"ok": True}
+
+        return {
+            "spawn_members": spawn_members,
+            "ensure_leader_watch": ensure_leader_watch,
+            "sync_caller_context": sync_caller_context,
+            "clear_caller_context": clear_caller_context,
+        }
+
     def _tool_policy_api():
         """工具权限策略只读面（与 ui_core 同构）。"""
 
@@ -417,6 +554,9 @@ def register(registry) -> None:
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("team.read", _team_read, surface="tool", owner="core:tool")
     registry.register("team.send", _team_send, surface="tool", owner="core:tool")
+    registry.register("team.manage", _team_manage, surface="tool", owner="core:tool")
+    registry.register("team.spawn", _team_spawn, surface="tool", owner="core:tool")
+    registry.register("action.queue", _action_queue, surface="tool", owner="core:tool")
     registry.register("lsp.query", _lsp, surface="tool", owner="core:tool")
     registry.register("mcp.call", _mcp, surface="tool", owner="core:tool")
     registry.register("net.upload", _gitee, surface="tool", owner="core:tool")

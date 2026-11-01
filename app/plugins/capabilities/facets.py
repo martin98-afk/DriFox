@@ -23,6 +23,7 @@ provider 侧用法::
 from __future__ import annotations
 
 import importlib
+import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Tuple
 
@@ -41,10 +42,21 @@ class FacetSpec:
     methods: Tuple[str, ...]
 
     def resolve(self) -> Any:
-        """解析出目标单例实例（延迟 import，不缓存类引用）。"""
+        """解析出目标单例实例（延迟 import，不缓存类引用）。
+
+        兼容两种形态（显式判定，不靠异常兜底）：
+        - ``module:Cls`` — 类，调 ``Cls.get_instance()``；无 get_instance 时
+          AttributeError（与历史行为一致，不静默降级）
+        - ``module:factory`` — 模块级工厂函数（inspect.isfunction 精确判定，
+          如 ``action_queue:get_action_queue``），直接调用取实例
+        """
         module_name, _, cls_name = self.target.partition(":")
         module = importlib.import_module(module_name)
-        return getattr(module, cls_name).get_instance()
+        obj = getattr(module, cls_name)
+        if inspect.isfunction(obj):
+            # 模块级工厂函数形态（类与实例均非 function，不会误入此分支）
+            return obj()
+        return obj.get_instance()
 
 
 class ReadOnlyFacade:
@@ -93,6 +105,8 @@ _TEAM_READ = FacetSpec(
         "get_team_label",
         "get_team_label_by_run",
         "get_team_workdir",
+        # #4：leader 门禁只读（工具 impl 层比对 leader_window_id）
+        "get_leader_window_id",
     ),
 )
 
@@ -103,6 +117,22 @@ FACETS: Dict[str, FacetSpec] = {
     "team.send": FacetSpec(
         target="app.core.team.team_manager:TeamManager",
         methods=("send_task",),
+    ),
+    # #4 团队管理面：建团/入退队/移除成员/群发（leader 门禁在工具 impl 层）
+    "team.manage": FacetSpec(
+        target="app.core.team.team_manager:TeamManager",
+        methods=(
+            "create_team",
+            "join_team",
+            "leave_team",
+            "remove_member",
+            "send_task_broadcast",
+        ),
+    ),
+    # #4 动作队列只读面：工具层 pending 开窗回执（peek 返回只读副本）
+    "action.queue": FacetSpec(
+        target="app.core.conversation.action_queue:get_action_queue",
+        methods=("peek",),
     ),
 }
 

@@ -173,7 +173,7 @@ class TestSystemPluginTools:
             "subagent_para",
             "subagent_status",
             "team_send_message",
-            "team_list_members",
+            "team_manage",
             "question",
             "skill",
             "manage_skill",
@@ -1818,8 +1818,9 @@ class TestSelfContained:
         assert result.todos and result.todos[0]["content"] == "t1"
         result = reg.get("todoread").impl(tool_ctx=ctx)
         assert result.success
-        # 团队工具：无窗口上下文 → 优雅失败（不崩溃）
-        result = reg.get("team_list_members").impl(tool_ctx=ctx)
+        # 团队工具：无窗口上下文 → 优雅失败（不崩溃）。
+        # action=list 已改为非成员友好文案（success=True），故用 add 验证失败语义
+        result = reg.get("team_manage").impl(tool_ctx=ctx, action="add", agent_name="plan", role="规划")
         assert not result.success
 
 

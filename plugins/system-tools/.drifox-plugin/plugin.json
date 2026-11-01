@@ -14,11 +14,15 @@
   "type": "system",
   "api_version": 2,
   "capabilities": [
+    "agent.read",
     "lsp.query",
     "mcp.call",
     "net.upload",
     "team.read",
-    "team.send"
+    "team.send",
+    "team.manage",
+    "team.spawn",
+    "action.queue"
   ],
   "components": {
     "tools": true

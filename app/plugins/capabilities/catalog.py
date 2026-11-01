@@ -8,6 +8,7 @@
 - ID 形如 ``<group>.<name>``，group 必须等于首段
 - level 是审核语义，不参与运行时裁剪
 - surfaces 声明该能力在哪些上下文可用（ui = 浮动卡/工作台页，tool = 工具插件）
+- 新增能力必须显式核对 value_style；value 形态（pool 值即终值）若漏标，调用侧 `x()` 会在运行时炸 'dict' object is not callable（不会静默，tests/plugins/test_capability_value_style_ast.py 兜静态检查）
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ def _spec(
     summary: str,
     surfaces: FrozenSet[str],
     legacy: Iterable[str] = (),
+    value_style: str = "factory",
 ) -> CapabilitySpec:
     return CapabilitySpec(
         id=cid,
@@ -41,6 +43,7 @@ def _spec(
         summary=summary,
         surfaces=surfaces,
         legacy_keys=tuple(legacy),
+        value_style=value_style,
     )
 
 
@@ -146,7 +149,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 工具 ──
         _spec("tool.read", _L, "工具注册表元数据查询", _BOTH),
         _spec("tool.inject", _H, "向 LLM 注入工具（改变模型可见行为）", _UI),
-        _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"]),
+        _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"], value_style="value"),
         # ── 对话引擎 ──
         _spec("engine.session", _H, "创建对话引擎会话（消耗 token）", _UI, ["create_engine_session"]),
         _spec("engine.stack", _H, "对话执行栈工厂", _UI, ["conversation_stack"]),
@@ -203,6 +206,9 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 团队 ──
         _spec("team.read", _L, "团队成员/角色/运行状态", _BOTH),
         _spec("team.send", _M, "向团队成员派发任务邮件（写对方邮箱）", _TOOL),
+        _spec("team.manage", _H, "管理团队：建队/退出/加人/踢人/群发", _TOOL),
+        _spec("team.spawn", _H, "为团队拉起成员窗口（UI 副作用）", _BOTH, value_style="value"),
+        _spec("action.queue", _L, "窗口动作队列只读（peek 待执行动作）", _TOOL),
         _spec(
             "team.session",
             _H,

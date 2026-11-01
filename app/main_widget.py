@@ -8819,7 +8819,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._ai_state = state
             self.ai_state_changed.emit(state)
             # 🛡️ 团队实时状态同步：流式/思考/提问 → busy；空闲 → idle
-            # （覆盖所有流式/思考阶段，供 team_list_members 查询路径可见）
+            # （覆盖所有流式/思考阶段，供 team_manage(action=list) 查询路径可见）
             self._sync_team_member_runtime_status(state)
 
     def _sync_team_member_runtime_status(self, state: str) -> None:
@@ -15553,7 +15553,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._team_run_id = record_run_id
             self._team_name = (session_record.get("team_name") or "").strip()
             self._team_agent_name = (session_record.get("agent_name") or "").strip()
-            # 🆕 恢复团队会话即重新登记成员（否则 leader 的 team_list_members 查不到
+            # 🆕 恢复团队会话即重新登记成员（否则 leader 的 team_manage(action=list) 查不到
             # 本窗口，发任务报"未找到目标"）。历史会话恢复原本只设置 UI 标记，
             # 未调用 join_team → 成员表缺失；此处补注册 + 启动 watcher + 同步活跃
             # 窗口（防 _cleanup_stale_members 误清）。仅 window_id 与 agent_name
@@ -15565,7 +15565,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 🆕 review#13-#1：守卫从「未注册」升级为「未注册 OR 已注册但 agent_name 不一致」。
                 # 原 `is_team_member` 守卫的漏洞：窗口已注册（如 build）但本次恢复的会话
                 # agent_name 不同（如 review）时返回 True → join_team 被拦截 → 团队数据里
-                # agent_name 仍是旧值，与 UI 实际 agent 漂移，leader team_list_members 不一致。
+                # agent_name 仍是旧值，与 UI 实际 agent 漂移，leader team_manage(action=list) 不一致。
                 # join_team 幂等覆盖，仅在需要时触发（已注册且 agent_name 一致则跳过，免写盘）。
                 _existing = None
                 try:
@@ -21178,11 +21178,75 @@ class OpenAIChatToolWindow(ToolWindow):
                     preserve_input=True,
                     ephemeral=bool(p.get("ephemeral", True)),
                 ),
+                # #10：一句话组队——开窗（TOCTOU 二次过滤后批量拉起）+ leader 分组/watcher
+                "team_spawn": lambda p: self._drain_team_spawn(p),
+                "team_leader_watch": lambda p: self._drain_team_leader_watch(p),
             }
             done = queue.drain(wid, handlers)
             logger.info(f"[ActionQueue] drain 结束 已执行 {done}/{len(pending)} 个")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[ActionQueue] 动作队列执行失败: {e}")
+
+    def _drain_team_spawn(self, payload: dict):
+        """动作队列的团队开窗：角色 TOCTOU 二次过滤后批量拉起（#10）
+
+        入队到 drain 之间角色可能被删除/重载，再过滤一次防 ghost 成员
+        （_spawn_team_member_window 的前置 join 不做角色校验）。批量语义由
+        _spawn_team_members 自带（begin_batch_add 批量布局 + idx×50ms 错峰），
+        此处不再包循环。
+        """
+        agents = [str(a) for a in (payload.get("agents") or []) if str(a or "").strip()]
+        if not agents:
+            return
+        am = self.backend.agent_manager if self.backend else None
+        valid = [a for a in agents if am is not None and am.get_agent(a) is not None]
+        dropped = [a for a in agents if a not in valid]
+        if dropped:
+            logger.warning(f"[team_spawn] 角色已失效，跳过开窗: {dropped}")
+            try:
+                InfoBar.warning(
+                    "成员角色已失效",
+                    f"以下角色开窗被跳过: {', '.join(dropped)}",
+                    parent=TabManagerWindow.get_instance() or self.window(),
+                    duration=4000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            except Exception:
+                pass
+        if valid:
+            self._spawn_team_members(
+                valid,
+                run_id=str(payload.get("run_id") or ""),
+                team_label=str(payload.get("team_label") or ""),
+                team_name=str(payload.get("team_name") or ""),
+            )
+
+    def _drain_team_leader_watch(self, payload: dict):
+        """create 工具路径的 leader 窗口收尾：移进团队框 + 启动邮箱 watcher（#10 P0）
+
+        对齐手动 /team --join（_do_join_team）的 UI 动作：设窗口三标记
+        （_team_agent_name/_team_run_id/_team_name，_resolve_tab_team_id 的
+        分组 key 数据源）后调 TabManagerWindow.refresh_capsule_for_window
+        （tab_manager_window.py:4861，幂等：重复调用只是重设同一分组）。
+        分组与 watcher 独立 try，互不拖垮。
+        """
+        run_id = str(payload.get("run_id") or "")
+        team_label = str(payload.get("team_label") or "")
+        try:
+            if run_id:
+                self._team_run_id = run_id
+                self._team_name = team_label
+                if not getattr(self, "_team_agent_name", ""):
+                    self._team_agent_name = "leader"
+                tm_win = TabManagerWindow.get_instance()
+                if tm_win is not None:
+                    tm_win.refresh_capsule_for_window(self)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[team_leader_watch] leader 分组失败（不影响 watcher）: {e}")
+        try:
+            self._start_team_watcher()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[team_leader_watch] watcher 启动失败: {e}")
 
     def _on_action_enqueued(self, wid: str):
         """入队观察者槽（信号已排队回主线程）：空闲期入队的动作立即 drain。

@@ -34,6 +34,11 @@ class CapabilitySpec:
     summary: str
     surfaces: FrozenSet[str] = field(default_factory=lambda: frozenset({"ui"}))
     legacy_keys: Tuple[str, ...] = ()
+    # pool 取值形态（单一真相源，供 AST 静态检查与调用方自查）：
+    #   "factory" — pool 值是闭包/工厂，需再调用一次拿到对象再用（facade 模式，默认）
+    #   "value"   — pool 值即终值（dict/宿主实例等），直接用；再调用 = 形态 bug
+    # （#23：本次 'dict' object is not callable 的根因即调用方多调了一层）
+    value_style: str = "factory"
 
 
 @dataclass(frozen=True)
