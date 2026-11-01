@@ -544,6 +544,29 @@
             }
         },
         {
+            "name": "system-subagent",
+            "description": "子智能体 — assistant 消息卡末尾展示任务运行区（旋转图标、工具计数、上下文用量、进入会话/停止），并提供 /subagents 命令与会话卡",
+            "version": "0.2.0",
+            "author": "DriFox Contributors",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "ui",
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-subagent",
+                "ref": "master"
+            },
+            "components": {
+                "commands": true,
+                "tools": true,
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox"
+        },
+        {
             "name": "system-team-templates",
             "description": "DriFox 内置团队模板：default-team",
             "version": "1.0.0",
