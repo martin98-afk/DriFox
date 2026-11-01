@@ -62,11 +62,23 @@ def register_ui(registry) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[system-subagent] 运行面板桥接启动失败: {e}")
         _bridge = None
+    try:
+        from .command_handler import register_commands
+
+        register_commands()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[system-subagent] /subagents 命令注册失败: {e}")
 
 
 def unload_ui(registry) -> None:
-    """停心跳、解绑 manager 信号、摘除面板（热重载防双桥接）。"""
+    """停心跳、解绑 manager 信号、注销命令处理器、摘除面板（热重载防双份）。"""
     global _bridge
+    try:
+        from .command_handler import unregister_commands
+
+        unregister_commands()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[system-subagent] 命令注销失败: {e}")
     if _bridge is not None:
         try:
             _bridge.stop()

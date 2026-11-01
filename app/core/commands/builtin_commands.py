@@ -72,6 +72,11 @@ class FunctionCommandHandlers:
         """检查是否有该命令的处理器"""
         return name in cls._handlers
 
+    @classmethod
+    def unregister(cls, name: str) -> None:
+        """注销处理器（插件热重载 / 卸载路径用，避免闭包指向已销毁实例）"""
+        cls._handlers.pop(name, None)
+
 
 # ============================================================
 # 解析结果缓存（避免每次启动重解析 60+ .md 文件）

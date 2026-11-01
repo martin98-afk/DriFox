@@ -951,7 +951,7 @@ class OpenAIChatToolWindow(ToolWindow):
     # 内置 function 命令 → 方法名（类级映射；实例 dict 只承载动态注册如 UI 插件命令）
     # 查找顺序：实例 dict（动态）→ 本类级表（getattr 解析）→ FunctionCommandHandlers 全局 → 硬编码
     _BUILTIN_COMMAND_HANDLER_NAMES: Dict[str, str] = {
-        "subagents": "_handle_subagents_command",
+        # subagents 已迁 system-subagent 插件（handler 走 FunctionCommandHandlers 全局表）
         "title-gen": "_handle_title_gen_command",
         "compact": "_handle_compact_command",
         "todos": "_handle_todos_command",
@@ -20870,120 +20870,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
 
-    def _handle_subagents_command(self, args: str):
-        """/subagents 命令：管理子智能体任务和默认模型
-
-        参数：
-          无参数     → 显示运行中的子智能体任务（紧凑卡片）
-          --detail   → 显示子智能体详细日志面板
-          --model=X  → 设置子智能体默认模型
-          --reset    → 清空子智能体默认模型设置
-          --create=X → 走 PROMPT 注入（prompt_sections 自动匹配，无需 Python handler）
-        """
-        import re
-
-        from qfluentwidgets import InfoBar, InfoBarPosition
-
-        from app.utils.config import Settings
-
-        args = (args or "").strip()
-
-        # ---- --reset：清空默认模型设置 ----
-        if args == "--reset":
-            cfg = Settings.get_instance()
-            cfg.set(cfg.llm_subagent_default_model, "", save=True)
-            InfoBar.success(
-                title="已重置",
-                content="子智能体默认模型已清空，将使用主智能体模型",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            # 更新命令卡参数描述
-            self._update_subagents_param_description()
-            return
-
-        # ---- --model=xxx：设置默认模型 ----
-        model_match = re.match(r"^--model=(.+)$", args)
-        if model_match:
-            model_value = model_match.group(1).strip().strip("\"'")
-            if not model_value:
-                InfoBar.warning(
-                    title="参数错误",
-                    content="--model= 后需要指定模型名或服务商:模型名",
-                    parent=TabManagerWindow.get_instance() or self.window(),
-                    duration=3000,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
-
-            # 复用现有模型解析逻辑
-            llm_config = self._resolve_subagent_model_config(model_value)
-            if llm_config is None:
-                # _resolve_subagent_model_config 内部已弹出错误提示
-                return
-
-            # 保存显示名
-            # 用 display_name 作为保存的服务商标识（与命令卡枚举 value 一致且唯一），
-            # 避免同 provider_name 多个配置时歧义匹配到错误的 config
-            provider_display = llm_config.get("display_name", llm_config.get("provider_name", ""))
-            model_display = llm_config.get("模型名称", model_value)
-            display_value = f"{provider_display}:{model_display}" if provider_display else model_display
-
-            cfg = Settings.get_instance()
-            cfg.set(cfg.llm_subagent_default_model, display_value, save=True)
-
-            if provider_display:
-                info_text = f"{provider_display} - {model_display}"
-            else:
-                info_text = model_display
-
-            InfoBar.success(
-                title="子智能体模型设置",
-                content=f"{info_text}",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=2000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            # 更新命令卡参数描述
-            self._update_subagents_param_description()
-            return
-
-        # ---- --create=<描述>：无 Python handler → 抛 CommandNeedDegrade 降级到
-        # prompt 注入（_execute_command 捕获后 select_prompt 按 --create= 参数
-        # 匹配 `<!-- section:create -->` 段，AI 自动生成子智能体 md 文件）。
-        if args.startswith("--create"):
-            from app.core.commands.command_manager import CommandNeedDegrade
-
-            raise CommandNeedDegrade("subagents", args)
-
-        # ---- 无参数：展开消息卡内嵌运行面板 ----
-        sub_agent_mgr = self.backend.sub_agent_manager
-        running_tasks = sub_agent_mgr._running_tasks
-
-        if not running_tasks:
-            InfoBar.warning(
-                title="暂无运行中的子智能体",
-                content="当前没有正在执行的子智能体任务",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
-        panel = self._sub_agent_run_panel()
-        if panel is None:
-            logger.warning("[SubAgent] 运行面板不可用（system-subagent 插件未加载），跳过展示")
-            return
-
-        for task_id, executor in running_tasks.items():
-            # 任务行已存在则保留已有统计数据
-            if panel.has_task(task_id):
-                continue
-            llm_cfg = getattr(executor, "llm_config", {}) or {}
-            model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
-            panel.add_task(task_id, executor.agent_name, executor.task_description, model_name=model_name)
-
     def _handle_title_gen_command(self, args: str):
         """/title-gen 命令：切换标题生成使用的默认模型
 
@@ -21134,11 +21020,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     else:
                         param.description = "设置标题生成默认模型"
                     break
-
-    def _on_subagent_model_config_changed(self):
-        """子智能体默认模型配置变更时：更新命令描述 + 刷新命令卡 UI"""
-        self._update_subagents_param_description()
-        self._refresh_command_card_detail("subagents")
 
     def _on_title_gen_model_config_changed(self):
         """标题生成默认模型配置变更时：更新命令描述 + 刷新命令卡 UI"""

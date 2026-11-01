@@ -1,7 +1,7 @@
 {
     "name": "system-subagent",
-    "description": "子智能体运行区 — 在 assistant 消息卡末尾展示子智能体任务（旋转图标、工具计数、上下文用量、进入会话/停止），全部完成后折叠收起",
-    "version": "0.1.0",
+    "description": "子智能体 — assistant 消息卡末尾展示任务运行区（旋转图标、工具计数、上下文用量、进入会话/停止），并提供 /subagents 命令与会话卡",
+    "version": "0.2.0",
     "author": {
         "name": "DriFox Contributors"
     },
@@ -10,7 +10,14 @@
     "type": "system",
     "api_version": 2,
     "components": {
+        "commands": true,
         "ui": true
     },
-    "capabilities": []
+    "capabilities": [
+        "config.write",
+        "model.config_for",
+        "subagent.run",
+        "ui.notify",
+        "ui.card.show"
+    ]
 }
