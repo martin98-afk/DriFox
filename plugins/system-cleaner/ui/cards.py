@@ -175,7 +175,13 @@ class SystemCleanerCard(QWidget):
     def _apply_latest_theme(self):
         ctx = self._get_context()
         if ctx is None:
+            # [theme-probe] 临时诊断：provider 缺失/抛错导致整次刷新早退
+            logger.warning("[theme-probe] apply_latest ctx=None（provider 缺失或抛错）")
             return
+        logger.warning(
+            f"[theme-probe] apply_latest colors={len(_ctx_colors(ctx))} "
+            f"dark={ctx.get('is_dark')} font={ctx.get('font_family')}"
+        )
 
         self._ctx_font_family, self._ctx_font_size = _ctx_font(ctx)
         ff = self._ctx_font_family

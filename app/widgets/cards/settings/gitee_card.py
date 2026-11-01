@@ -632,8 +632,8 @@ class GiteeAccountRow(QFrame):
         self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
         # 浮层操作按钮同步进行中态：绑定等待时变「中止授权」可点
-        # 必须 shiboken isValid 硬判：wrapper 已析构时读 Python 侧属性不抛异常
-        if self._popup is not None and sip.isValid(self._popup):
+        # 必须 sip.isdeleted 硬判：C++ 对象已删除时引用仍非 None
+        if self._popup is not None and sip.isdeleted(self._popup):
             self._popup._refresh_account_state()
 
     # ── 真实头像拉取（绑定态：API 拿 avatar_url → 下载 → 圆形渲染） ──
@@ -669,7 +669,7 @@ class GiteeAccountRow(QFrame):
         self._avatar.set_image(pm)
         self._avatar_owner_loaded = self._bound_owner
         # 弹窗大头像同步（可能未创建）
-        if self._popup is not None and sip.isValid(self._popup):
+        if self._popup is not None and sip.isdeleted(self._popup):
             self._popup._popup_avatar.set_image(pm)
         try:
             cache = _avatar_cache_path(self._bound_owner)

@@ -148,7 +148,13 @@ class ToolPermissionController(QObject):
             # 自由变量：destroyed 在本对象销毁后才触发，届时外层帧已被清理，闭包里
             # 的 _registry / self 会变成空 cell，访问即抛
             # "cannot access free variable ... where it is not associated with a value"。
-            self.destroyed.connect(lambda _reg=_registry, _slot=_on_change_slot: _reg.off_change(_slot))
+            # ★ *_a 必须在最前：destroyed(QObject) 发射时携带被销毁对象作实参，
+            #   位置默认参数 _reg 会被该实参覆盖成已析构的 QObject（wrapper 退化），
+            #   off_change 查找失败抛 AttributeError，析构路径里异常还会引发
+            #   0xC0000409 快速失败。*a 吞掉信号实参后 keyword-only 默认值才可靠。
+            self.destroyed.connect(
+                lambda *_a, _reg=_registry, _slot=_on_change_slot: _reg.off_change(_slot)
+            )
             self._registry_version_changed.connect(self._sync_known_tools)
         except Exception:
             pass

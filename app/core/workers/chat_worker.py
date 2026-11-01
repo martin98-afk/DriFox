@@ -3618,7 +3618,10 @@ class OpenAIChatWorker(QThread):
                     # 插件协议 / chat-completions：请求发出与响应归一全在 transport 内，
                     # 产出 StreamEvent 流由 sink 消费（下方统一处理）。
                     # stream 已由 _transport_supports_streaming 决定，此处不再硬设
+                    # TTFT 与请求起点同源重置：重试后 elapsed_ms 只算最后一次请求，
+                    # 沿用上一次的 ttft 会出现 ttft>elapsed（生成秒为负）。
                     self._llm_req_t0 = time.monotonic()
+                    self._last_ttft_ms = 0.0
                     response = active_transport.create_stream(
                         self.llm_config,
                         messages,
@@ -3630,6 +3633,7 @@ class OpenAIChatWorker(QThread):
                     # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
                     self.stream = True
                     self._llm_req_t0 = time.monotonic()
+                    self._last_ttft_ms = 0.0  # 与请求起点同源重置（重试不再沿用旧 TTFT）
                     # 原生 responses 通道：按需取 HTTP 客户端（transport 通道不经此）
                     response = self._get_http_client().responses.create(**self._build_responses_kwargs(messages))
                 if attempt > 0:
@@ -4081,6 +4085,11 @@ class OpenAIChatWorker(QThread):
                 item = getattr(event, "item", None) or {}
                 if self._responses_item_get(item, "type") == "function_call":
                     tool_calls_found = True
+                    # 📊 TTFT：纯工具调用时首个内容事件可能是 item.added（网关省掉
+                    # function_call_arguments.delta 直接给 done），只认 .delta 会漏记，
+                    # 该次调用只剩 elapsed_ms → 下游把 prefill/排队算进生成时间。
+                    if self._last_ttft_ms <= 0.0 and self._llm_req_t0 > 0:
+                        self._last_ttft_ms = round((time.monotonic() - self._llm_req_t0) * 1000, 1)
                     # 思考阶段结束：冲刷残留批次（见 function_call_arguments.delta 注释）
                     if _reasoning_batch:
                         self._emit_with_callback(

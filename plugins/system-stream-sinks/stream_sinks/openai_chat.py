@@ -282,6 +282,16 @@ class OpenAIChatStreamSink:
             if etype == "tool_call_begin":
                 tool_calls_found = True
 
+                # 📊 TTFT：纯工具调用（模型不吐正文/思考）的首个内容事件就是这里。
+                # 漏记时该次调用只有 elapsed_ms 落盘，下游按「总耗时 − 首 token 延迟」
+                # 算生成速度会把 prefill/排队时间全算进生成段（长上下文实测 8~35s），
+                # 页脚吞吐量因此掉到个位数。工具调用首 chunk 即首 token。
+                if ctx.last_ttft_ms <= 0.0:
+                    try:
+                        ctx.last_ttft_ms = round((time.monotonic() - ctx.llm_req_t0) * 1000, 1)
+                    except Exception:
+                        pass
+
                 # 🔧 检测到 tool_calls 时，强制冲刷已积累的内容批处理缓冲
                 # 避免：文本因不满 30 字符/80ms 阈值而滞留到流式结束才 emit，
                 # 然后流结束立即进入工具执行，导致内容 signal 排队在工具 signal 之后，

@@ -1065,9 +1065,21 @@ class UIPluginRegistry:
                     continue  # C++ 对象已销毁
                 if not visible:
                     mark_theme_dirty(widget)
+                    # [theme-probe] 临时诊断：主题切换时卡被判为不可见 → 只置脏
+                    logger.warning(
+                        f"[theme-probe] ev_hidden card={_card_id} win={_win_id} "
+                        f"cls={type(widget).__name__}"
+                    )
                     continue
                 _t0 = perf_counter()
-                ensure_theme_fresh(widget)
+                _fresh = ensure_theme_fresh(widget)
+                # [theme-probe] 临时诊断：可见卡实际是否被刷 + 纪元与 provider 状态
+                logger.warning(
+                    f"[theme-probe] ev_visible card={_card_id} win={_win_id} "
+                    f"cls={type(widget).__name__} fresh={_fresh} "
+                    f"own={getattr(widget, '_drifox_theme_epoch', 'MISSING')} "
+                    f"provider={getattr(widget, '_context_provider', None) is not None}"
+                )
                 # [PERF] 慢卡打点：主题切换时整条 publish 是同步的，
                 # 单卡几百 ms 就会让用户感知卡顿，必须能指名道姓
                 _ms = (perf_counter() - _t0) * 1000
@@ -3363,10 +3375,19 @@ class UIPluginRegistry:
         widget_now = win_instances.get(card_id)
         if widget_now is not None:
             try:
-                if widget_now.isVisible():
+                # [theme-probe] 临时诊断：重开路径是否补刷 + 是否被纪元短路
+                _vis = bool(widget_now.isVisible())
+                _fresh = None
+                if _vis:
                     from app.utils.theme_style import ensure_theme_fresh
 
-                    ensure_theme_fresh(widget_now)
+                    _fresh = ensure_theme_fresh(widget_now)
+                logger.warning(
+                    f"[theme-probe] show card={card_id} win={window_id} cls={type(widget_now).__name__} "
+                    f"visible={_vis} fresh={_fresh} "
+                    f"own={getattr(widget_now, '_drifox_theme_epoch', 'MISSING')} "
+                    f"provider={getattr(widget_now, '_context_provider', None) is not None}"
+                )
             except RuntimeError:
                 pass
 
