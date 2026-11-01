@@ -131,6 +131,46 @@ def _sub_actions_from_diff(diff: Optional[dict]) -> list:
     return [k for k, v in diff.items() if v]
 
 
+def merge_plugin_diffs_net_zero(diffs: List[Optional[dict]]) -> bool:
+    """判断一批 PluginChanged diff 依次应用后是否净零（开关抵消）
+
+    用户连续开关插件（中间 AI 未消费消息）时，各条 hook 消息的 diff
+    相互抵消（+a 后 -a = 净零），整批无需注入。updated 意味着工具在
+    场且签名变化，本身是净变化。tools 与 mcp 用前缀隔离命名空间。
+    """
+    state: Dict[str, bool] = {}  # 条目 -> 最终是否在场
+    for d in diffs:
+        if not d:
+            continue
+        for t in d.get("tools_added") or ():
+            state[t] = True
+        for t in d.get("tools_removed") or ():
+            state[t] = False
+        for t in d.get("tools_updated") or ():
+            state.setdefault(t, True)
+        for s in d.get("mcp_added") or ():
+            state["\x00mcp:" + s] = True
+        for s in d.get("mcp_removed") or ():
+            state["\x00mcp:" + s] = False
+    return not any(state.values())
+
+
+def filter_net_zero_plugin_messages(msgs: List[Dict]) -> List[Dict]:
+    """批内合并 PluginChanged 消息：diff 净零（开了又关抵消）的整批剔除
+
+    只剔带结构化 _plugin_diff 的消息；无 diff 的事件通知（如 ui 组件重载）
+    保守保留。判定异常时保守保留全部，宁可多发不丢信息。
+    """
+    try:
+        pc = [m for m in msgs if m.get("_hook_event") == "PluginChanged" and m.get("_plugin_diff")]
+        if pc and merge_plugin_diffs_net_zero([m["_plugin_diff"] for m in pc]):
+            logger.info(f"[HookManager] PluginChanged 净零抵消（开了又关），丢弃 {len(pc)} 条注入消息")
+            return [m for m in msgs if not (m.get("_hook_event") == "PluginChanged" and m.get("_plugin_diff"))]
+    except Exception as e:
+        logger.debug(f"[HookManager] PluginChanged 合并判定失败，保守保留: {e}")
+    return msgs
+
+
 def trigger_plugin_changed_hook(context: dict) -> None:
     """全局触发 PluginChanged hook（任意线程安全调用）
 
@@ -1127,8 +1167,9 @@ class HookManager:
         # 线程池
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
 
-        # 完成回调（每个窗口独立）(event_name, output, success, status_message)
-        self._on_finished_callback: Optional[Callable[[str, str, bool, str], None]] = None
+        # 完成回调（每个窗口独立）(event_name, output, success, status_message, diff=None)
+        # diff：PluginChanged 的结构化工具/MCP 变更明细，随消息入队供消费端合并判定
+        self._on_finished_callback: Optional[Callable[[str, str, bool, str, Optional[dict]], None]] = None
 
         # 决策回调（每个窗口独立）
         self._on_decision_callback: Optional[Callable[[str, HookDecision], None]] = None
@@ -1276,8 +1317,8 @@ class HookManager:
         """获取 hook 的字典表示"""
         return hook.to_dict()
 
-    def set_on_finished_callback(self, callback: Callable[[str, str, bool, str], None]):
-        """设置 Hook 执行完成回调 (event_name, output, success, status_message)"""
+    def set_on_finished_callback(self, callback: Callable[[str, str, bool, str, Optional[dict]], None]):
+        """设置 Hook 执行完成回调 (event_name, output, success, status_message, diff=None)"""
         self._on_finished_callback = callback
 
     def set_on_status_callback(self, callback: Optional[Callable[[str, str, bool], None]]):
@@ -2192,7 +2233,9 @@ class HookManager:
                 else:
                     async_event = f"__async__:{context.get('event_name', '')}"
                 signals.finished.connect(
-                    lambda _ev, _out, _ok, _st, _ae=async_event: self._on_finished_callback(_ae, _out, _ok, _st)
+                    lambda _ev, _out, _ok, _st, _ae=async_event, _diff=context.get("diff"): self._on_finished_callback(
+                        _ae, _out, _ok, _st, _diff
+                    )
                 )
 
             # 连接状态回调（异步结束时触发 is_start=False）
@@ -2379,7 +2422,7 @@ class HookManager:
                     # PROMPT 类型 hook 用前缀标记，backend 据此总是加入消息列表
                     if hook.type == HookType.PROMPT.value:
                         callback_event = f"__prompt__:{callback_event}"
-                    self._on_finished_callback(callback_event, output, success, status_message)
+                    self._on_finished_callback(callback_event, output, success, status_message, context.get("diff"))
 
                 logger.info(f"[HookManager] Hook executed: {context.get('event_name')}")
 

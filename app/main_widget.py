@@ -997,6 +997,8 @@ class OpenAIChatToolWindow(ToolWindow):
     # 团队开窗实时桥接（worker 线程 → 主线程）：create/add 的窗口创建不等
     # 本轮对话结束，流式期间就拉起（用户要求创建即生效）。
     _team_spawn_now = pyqtSignal(str, object)
+    # 团队退出实时桥接：工具 leave 后主线程立即清胶囊/分组/权限（不等流结束）
+    _team_leave_now = pyqtSignal(str)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1122,6 +1124,23 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_spawn_handler = _team_spawn_handler  # 保活引用
         self.destroyed.connect(lambda: unregister_immediate_handler("team_spawn", _team_spawn_handler))
         self._team_spawn_now.connect(self._on_team_spawn_now)
+
+        # 团队退出实时处理器：team_manage(action=leave) 由工具层提交，
+        # 主线程立即走完整 UI 退出（停 watcher / 清标记 / 胶囊与分组移除 /
+        # 权限恢复 / 默认智能体回切），避免"离开后左侧团队框还在"。
+        def _team_leave_handler(wid: str, payload: dict) -> bool:
+            mw = _mw_weak()
+            if mw is None or getattr(mw, "_is_destroyed", False):
+                return False
+            if str(wid) != str(getattr(mw, "_window_id", "") or ""):
+                return False
+            mw._team_leave_now.emit(str(wid))
+            return True
+
+        register_immediate_handler("team_leave", _team_leave_handler)
+        self._team_leave_handler = _team_leave_handler  # 保活引用
+        self.destroyed.connect(lambda: unregister_immediate_handler("team_leave", _team_leave_handler))
+        self._team_leave_now.connect(self._on_team_leave_now)
 
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
@@ -4968,6 +4987,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 6) 恢复模型选择按钮的 tooltip（离开团队后不再显示 agent 信息）
         self._update_model_selector_btn()
+
+        # 7) 退出团队后自动关闭本窗口标签页（团队窗口是一次性工作窗口，
+        # 留在独立区没有意义）。流式中先按标准停流路径停下 worker（与停止
+        # 按钮同语义，最多等 3s），再关窗——不能直接销毁仍在执行工具的
+        # worker 所属窗口对象树。批量解散由 TabManager 统一关闭，不重复调度。
+        if not batch_disband:
+            self._pending_close_after_leave = True
+            if getattr(self, "_is_streaming", False) or self._worker_actually_busy():
+                try:
+                    self._stop_stream_for_actions()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[_handle_team_leave] 停流失败（继续关窗）: {e}")
+            QTimer.singleShot(0, self._close_tab_after_leave)
 
         if not silent:
             InfoBar.info(
@@ -21193,6 +21225,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._focus_input_if_active()
 
+        # 已退出团队的窗口：本轮结束后自动关闭标签页（流式中不能立刻销毁，
+        # 否则 worker 执行工具期间窗口对象树被删）。延后到下一 tick 执行，
+        # 保证本回调栈完整退出。
+        if getattr(self, "_pending_close_after_leave", False):
+            QTimer.singleShot(0, self._close_tab_after_leave)
+
         # 插件登记的动作（停流/新建/发消息）：本轮真正结束，主线程按序执行。
         # 放最后：drain 里新建会话会清空待发队列，避免旧会话的消息续发到新会话。
         self._drain_action_queue()
@@ -21326,6 +21364,35 @@ class OpenAIChatToolWindow(ToolWindow):
             self._drain_team_spawn(payload or {})
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[team_spawn] 实时开窗失败: {e}")
+
+    def _on_team_leave_now(self, wid: str):
+        """团队退出实时槽（主线程）：工具 leave 后立即完成 UI 收尾。
+
+        完整走 _handle_team_leave（TeamManager.leave_team 幂等，重复调用无害），
+        清团队标记、刷新胶囊/分组，并按其中第 7 步安排标签页自动关闭。
+        """
+        if wid != str(getattr(self, "_window_id", "") or ""):
+            return
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            self._handle_team_leave(silent=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[team_leave] 实时退出 UI 失败: {e}")
+
+    def _close_tab_after_leave(self):
+        """关闭已退出团队的窗口标签页（流式结束后或空闲时调用）。"""
+        self._pending_close_after_leave = False
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            tm_win = TabManagerWindow.get_instance()
+            if tm_win is not None:
+                tm_win.remove_window(self)
+            else:
+                self.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[team_leave] 自动关闭标签页失败: {e}")
 
     def _handle_action_new(self, payload: dict):
         """动作队列的新建会话：worker 必须先真正停下

@@ -963,6 +963,13 @@ class SubAgentExecutor(QThread):
                         msgs.append(q.get_nowait())
                     except Exception:
                         break
+            # PluginChanged 净零合并：连续开关插件（中间无消费）时整批不注入
+            try:
+                from app.core.hooks.hook_manager import filter_net_zero_plugin_messages
+
+                msgs = filter_net_zero_plugin_messages(msgs)
+            except Exception as e:
+                logger.debug(f"[SubAgent] 净零合并判定跳过: {e}")
         except Exception as e:
             logger.debug(f"[SubAgent] drain hook queues failed: {e}")
         return msgs
@@ -1740,6 +1747,13 @@ class SubAgentExecutor(QThread):
                     msgs.append(q.get_nowait())
                 except Exception:
                     break
+            # PluginChanged 净零合并：连续开关插件（中间无消费）时整批不注入
+            try:
+                from app.core.hooks.hook_manager import filter_net_zero_plugin_messages
+
+                msgs = filter_net_zero_plugin_messages(msgs)
+            except Exception as e:
+                logger.debug(f"[SubAgent] 净零合并判定跳过: {e}")
         except Exception as e:
             logger.debug(f"[SubAgent] drain posttool queue failed: {e}")
         return msgs

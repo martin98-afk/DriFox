@@ -278,3 +278,69 @@ def test_non_member_can_send_task_to_member(team_env):
         message="回复",
     )
     assert back.success is False
+
+
+# ── 用例 20：leave 触发 UI 实时收尾（清胶囊/团队分组）──
+
+def test_team_leave_triggers_immediate_ui_sync(team_env):
+    tt, tm = team_env["tt"], team_env["tm"]
+    from app.core.conversation.action_queue import (
+        register_immediate_handler,
+        unregister_immediate_handler,
+    )
+
+    got = []
+
+    def _handler(wid, payload):
+        if wid != "win_90":
+            return False
+        got.append((wid, payload.get("window_id")))
+        return True
+
+    register_immediate_handler("team_leave", _handler)
+    try:
+        tm.join_team("win_90", "build", run_id=tm.start_team_run(force=True))
+        r = tt._team_manage_impl(_member_ctx("win_90"), action="leave")
+        assert r.success, r.error
+        assert got == [("win_90", "win_90")]
+        assert not tm.is_team_member("win_90")
+        assert "UI 已同步" in r.content
+    finally:
+        unregister_immediate_handler("team_leave", _handler)
+
+
+def test_team_leave_without_ui_channel_reports_residual_group(team_env):
+    """无实时通道时明确提示看板可能残留，引导 /team --leave。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    tm.join_team("win_90", "build", run_id=tm.start_team_run(force=True))
+    r = tt._team_manage_impl(_member_ctx("win_90"), action="leave")
+    assert r.success
+    assert not tm.is_team_member("win_90")
+    assert "UI 未同步" in r.content
+
+
+def test_team_remove_triggers_immediate_ui_sync(team_env):
+    """leader 移除成员时，被移除窗口同步 UI 退出（清胶囊/团队分组）。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    from app.core.conversation.action_queue import (
+        register_immediate_handler,
+        unregister_immediate_handler,
+    )
+
+    _prepare_team(tm)  # win_90 leader, win_91 build
+    got = []
+
+    def _handler(wid, payload):
+        if wid != "win_91":
+            return False
+        got.append(wid)
+        return True
+
+    register_immediate_handler("team_leave", _handler)
+    try:
+        r = tt._team_manage_impl(_member_ctx("win_90"), action="remove", agent_name="build")
+        assert r.success, r.error
+        assert got == ["win_91"]
+        assert not tm.is_team_member("win_91")
+    finally:
+        unregister_immediate_handler("team_leave", _handler)

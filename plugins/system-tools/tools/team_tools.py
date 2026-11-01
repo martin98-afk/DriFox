@@ -585,6 +585,23 @@ def _team_leave(tool_ctx) -> ToolResult:
     else:
         note = "\n⚠ 窗口上下文清理跳过（team.spawn 未就绪）"
 
+    # UI 收尾实时生效：清团队标记 + 移除 Tab 胶囊/团队分组 + 恢复工具权限
+    # + 默认智能体回切。只清数据层 leave_team 会留下左侧团队框（工具路径
+    # 不走 _handle_team_leave 的 UI 部分）。
+    ui_note = ""
+    try:
+        from app.core.conversation.action_queue import submit_immediate
+
+        if submit_immediate(window_id, "team_leave", {"window_id": window_id}):
+            ui_note = "\nUI 已同步：胶囊/团队分组已移除，标签页将自动关闭。"
+        else:
+            ui_note = (
+                "\n⚠ UI 未同步（主窗口实时通道未就绪）：左侧团队框可能残留，"
+                "可用 /team --leave 完成 UI 退出。"
+            )
+    except Exception as e:  # noqa: BLE001
+        ui_note = f"\n⚠ UI 同步失败（{e}）：可用 /team --leave 完成 UI 退出。"
+
     lines = ["已退出团队。"]
     if was_leader:
         try:
@@ -597,7 +614,8 @@ def _team_leave(tool_ctx) -> ToolResult:
             pass
     if note:
         lines.append(note)
-    lines.append("提示：UI 侧完整退出（权限恢复/胶囊刷新）仍可用 /team --leave。")
+    if ui_note:
+        lines.append(ui_note)
     return ToolResult(True, content="\n".join(lines))
 
 def _validate_agent_exists(tm, agent_name: str) -> Optional[ToolResult]:
@@ -772,6 +790,20 @@ def _team_remove_member(tool_ctx, agent_name: str) -> ToolResult:
     lines = [f"已移除 {len(removed)} 个成员窗口：" if len(removed) > 1 else "已移除成员："]
     for r in removed:
         lines.append(f"  - {r['agent_name']}@{r['window_id']}")
+    # 被移除窗口同步 UI 退出：清胶囊/团队分组并恢复权限与默认智能体
+    # （否则成员窗口仍挂在左侧团队框里，看起来像没被踢掉）
+    try:
+        from app.core.conversation.action_queue import submit_immediate
+
+        ui_synced = sum(
+            1 for r in removed if submit_immediate(r["window_id"], "team_leave", {"window_id": r["window_id"]})
+        )
+    except Exception:
+        ui_synced = 0
+    if removed and ui_synced == 0:
+        lines.append("⚠ 被移除窗口的 UI 未同步（实时通道未就绪），左侧团队框可能残留。")
+    elif removed:
+        lines.append("被移除窗口的标签页已自动关闭。")
     try:
         new_leader = str(tm.get_leader_window_id() or "")
         if new_leader and new_leader != window_id:

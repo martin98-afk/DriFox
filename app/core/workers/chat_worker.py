@@ -678,6 +678,13 @@ class OpenAIChatWorker(QThread):
                 except queue.Empty:
                     break
 
+            # PluginChanged 净零合并：连续开关插件（中间无消费）时各条 diff 相互抵消，整批不注入
+            try:
+                from app.core.hooks.hook_manager import filter_net_zero_plugin_messages
+
+                msgs = filter_net_zero_plugin_messages(msgs)
+            except Exception as e:
+                logger.debug(f"[HookManager] 净零合并判定跳过: {e}")
             # ── 用户插话（繁忙时插话发送）：剥离传输键 + 补触发用户消息 hook 链 ──
             # 传输键仅用于进程内识别（UI 切卡 / 取消回收），注入前必须剥净，
             # 落库后是干净 user 消息。

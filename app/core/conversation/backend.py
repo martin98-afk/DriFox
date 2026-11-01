@@ -434,7 +434,9 @@ class ChatBackend(QObject):
         # engine.send_message）在所有 hook 输出注入完成后再 emit。
         _PRE_DIALOG_EVENTS = {"SessionStart", "PreUserMessage", "PostUserMessage"}
 
-        def on_hook_finished(event_name: str, output: str, success: bool, status_message: str = ""):
+        def on_hook_finished(
+            event_name: str, output: str, success: bool, status_message: str = "", diff: Optional[dict] = None
+        ):
             if not getattr(self, "_ui_valid", True):
                 logger.debug("[HookManager] Hook callback skipped: UI already closed")
                 return
@@ -509,13 +511,15 @@ class ChatBackend(QObject):
                 logger.debug("[HookManager] PreToolUse queued to pre-tool queue")
             elif is_prompt_hook or event_name in ("PostToolUse", "PluginChanged"):
                 hook_output = _format_hook_output(event_name, output, status_message)
-                self._hook_message_queue.put(
-                    {
-                        "role": "user",
-                        "content": hook_output,
-                        "_hook_event": event_name,
-                    }
-                )
+                msg = {
+                    "role": "user",
+                    "content": hook_output,
+                    "_hook_event": event_name,
+                }
+                # 结构化 diff 随消息入队：worker 消费时批内合并，开关抵消（净零）整批不注入
+                if event_name == "PluginChanged" and diff:
+                    msg["_plugin_diff"] = diff
+                self._hook_message_queue.put(msg)
                 self._hook_messages_updated.emit()
                 logger.debug(f"[HookManager] Hook queued for worker: {event_name}")
 
