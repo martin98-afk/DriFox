@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""
-SubAgentSessionCard — 内嵌子智能体会话卡片，覆盖右侧对话区域（类似系统设置）
+"""子智能体会话卡（插件侧实现，full 容器浮动卡）
 
-替代弹窗式 SubAgentSessionDialog（QDialog），以系统卡片形式嵌入全局卡片容器，
-利用 TabManagerWindow 的覆盖层栈（QStackedWidget）切换对话区/会话面板，
-与 DiffViewerCard 同构。
+原 ``app/widgets/cards/settings/sub_agent_session_card.py``：自系统的 TOP 覆盖层
+迁到插件浮动卡槽位（``container="full"``），行为不变，覆盖对话区展示单个子智能体
+的完整运行日志（左导览 + 右消息流，运行中按 logs_provider 轮询刷新）。
 
-以 MessageCard 同款样式渲染子智能体的运行日志/消息：
-左侧导览栏 + 右侧详细消息布局。
-支持 logs_provider 回调实现实时更新（子智能体执行中自动轮询刷新）。
+宿主差异点：
+- 关闭走 ``closed`` 信号 → 注册表隐藏卡片（不再由 GlobalCardController 接管）；
+- 数据由 ``SubAgentSessionService.show()`` 灌入（主程序经服务门面调用）；
+- ``BaseSettingsCard`` 仍复用宿主 UI 基类（标题栏 + 内容区布局），不重造外壳。
 """
 
 import time

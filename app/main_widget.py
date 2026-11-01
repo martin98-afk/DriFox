@@ -164,9 +164,6 @@ from app.widgets.cards import (
     ContainerType,
     TopCardContainer,
 )
-from app.widgets.cards.floating.sub_agent_compact_widget import (
-    SubAgentCompactFloatingWidget,
-)
 from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
 from app.widgets.cards.floating.share_card import ShareCardContent
 
@@ -1667,7 +1664,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """连接子智能体信号到 UI 回调"""
         sub_agent_mgr = self.backend.sub_agent_manager
         if sub_agent_mgr:
-            sub_agent_mgr.task_started.connect(self._on_sub_agent_task_started)
+            # task_started 不再由主程序消费：运行区（内嵌面板）由 system-subagent
+            # 插件桥接层订阅同一信号并投影到最新 assistant 卡片。
             sub_agent_mgr.task_finished.connect(self._on_sub_agent_task_finished)
             # 批次全部完成（非流式路径）：UI 开新轮承接汇总（流式路径 manager 内部注入）
             sub_agent_mgr.batch_finished.connect(self._on_sub_agent_batch_finished)
@@ -1719,25 +1717,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # ===== BottomCardContainer (chatscroll 下方) =====
         # Question: 强制覆盖所有其他卡片（批1 懒创建：注册/入容器移入
         # _ensure_question_floating_widget()，弹出链入口兜底）
-        # Tool/SubAgent: 实时卡片
+        # Tool: 实时卡片
         # History/Memory/ModelConfig: 系统卡片
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "sub_agent_compact",
-            self._sub_agent_compact_widget,
-            layer="status",
-            stackable=True,
-            order_hint=10,
-            # 谓词 = 批次仍活跃且仍有任务行。卡片自身的 _auto_hide / 手动关闭
-            # 都会 closed.emit() → _on_sub_agent_compact_closed → _batch_started=False，
-            # 因此"卡片已结束"与谓词为假严格对应，不会被 refresh_layer 复活。
-            visible_when=lambda: bool(
-                self._sub_agent_compact_widget._batch_started and self._sub_agent_compact_widget._task_rows
-            ),
-        )
-        self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
+        # 子智能体运行区不再占底部容器：已迁入 system-subagent 插件的消息卡内嵌面板。
 
         # 注：history/share/history_questions/memory/model_config/model_selector
         # 六张系统卡片框架已懒创建（P0-1），注册/入容器在各自 _ensure_xxx_card() 中执行，
@@ -2944,9 +2926,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新设置卡片
         if self._settings_popup:
             self._settings_popup.set_opacity(opacity)
-        # 更新子智能体紧凑悬浮框
-        if hasattr(self, "_sub_agent_compact_widget") and self._sub_agent_compact_widget:
-            self._sub_agent_compact_widget.set_opacity(opacity)
         # 更新问题悬浮框
         if self._question_floating_widget:
             self._question_floating_widget.set_opacity(opacity)
@@ -3256,19 +3235,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 实例由 GlobalCardController 持有，本类通过下方只读 property 兼容旧读取点
         # （透明度调节、主题刷新、字体缩放等仍按旧属性名访问）
 
-        self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
-        self._sub_agent_compact_widget.setVisible(False)
-        self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
-        self._sub_agent_compact_widget.enter_session_requested.connect(self._on_sub_agent_enter_session)
-        self._sub_agent_compact_widget.stop_subagent_requested.connect(self._on_sub_agent_stop_requested)
+        # 子智能体运行区已迁入 system-subagent 插件（消息卡内嵌面板槽位）：
+        # 本窗口不再持有浮动运行卡，面板由插件桥接层按窗口绑定 manager 后投影。
 
         # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）。
         # 内置 7 项已上提类级 _BUILTIN_COMMAND_HANDLER_NAMES，实例 dict 只存动态注册
         # （系统卡片 toggle 方法、UI 插件命令等）。
         self._function_command_handlers: Dict[str, Callable] = {}
-
-        # 下方卡片容器 - 添加 SubAgentCompact
-        self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
 
         # 注：mcp_edit/hook_edit/provider_edit 三张编辑卡片已改为懒创建，
         # 在 _ensure_xxx_card() 中按需添加至容器，此处跳过避免访问 None。
@@ -11294,7 +11267,6 @@ class OpenAIChatToolWindow(ToolWindow):
             for card in (
                 self._question_floating_widget,
                 self._permission_floating_widget,
-                self._sub_agent_compact_widget,
                 self._share_card_content,
                 self._history_questions_card_content,
                 self._undo_delete_card,
@@ -11384,7 +11356,6 @@ class OpenAIChatToolWindow(ToolWindow):
         for card in (
             self._question_floating_widget,
             self._permission_floating_widget,
-            self._sub_agent_compact_widget,
             self._share_card_content,
             self._history_questions_card_content,
             self._undo_delete_card,
@@ -11758,10 +11729,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._toggle_send_stop(False)
         # 繁忙时排队消息：切会话即失效（内存态不跨会话），同步隐藏排队卡片
         self._clear_pending_message_queue()
-
-        if self._sub_agent_compact_widget:
-            self._sub_agent_compact_widget.clear()
-            self._sub_agent_compact_widget.setVisible(False)
 
         try:
             self._auto_save_current_session()
@@ -17972,8 +17939,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return False
 
     def _on_subagent_log_requested(self, task_ids_str: str):
-        """
-        处理子智能体日志查看请求 — 使用紧凑卡片显示任务信息
+        """处理子智能体日志查看请求 — 展开消息卡内嵌运行面板上的对应任务行
 
         Args:
             task_ids_str: 逗号分隔的任务ID列表
@@ -17990,49 +17956,28 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning("[LLMChatter] sub_agent_manager 未初始化")
             return
 
-        compact = self._sub_agent_compact_widget
-        found_any = False
+        panel = self._sub_agent_run_panel()
+        if panel is None:
+            logger.warning("[SubAgent] 运行面板不可用（system-subagent 插件未加载），跳过日志查看")
+            return
 
         for task_id in task_ids:
             task_data = sub_agent_mgr.get_task_logs(task_id)
             if not task_data.get("found"):
                 continue
-
-            found_any = True
-            summary = task_data.get("summary", {})
-            agent_name = summary.get("agent_name", task_data.get("agent_name", "未知"))
-            task_desc = summary.get("task_description", task_data.get("task_description", ""))
-            tool_count = summary.get("tool_call_count", 0)
-            elapsed = summary.get("elapsed_seconds", 0)
-            model_name = summary.get("model_name", task_data.get("model_name", ""))
-            ctx_usage = summary.get("context_usage", "")
-
-            # 已在 compact 中则跳过
-            if task_id in compact._task_rows:
+            if panel.has_task(task_id):
                 continue
 
-            compact.show_completed_task(
+            summary = task_data.get("summary", {})
+            panel.show_completed_task(
                 task_id,
-                agent_name,
-                task_desc,
-                model_name=model_name,
-                tool_call_count=tool_count,
-                elapsed_seconds=elapsed,
-                context_usage=ctx_usage,
+                summary.get("agent_name", task_data.get("agent_name", "未知")),
+                summary.get("task_description", task_data.get("task_description", "")),
+                model_name=summary.get("model_name", task_data.get("model_name", "")),
+                tool_call_count=summary.get("tool_call_count", 0),
+                elapsed_seconds=summary.get("elapsed_seconds", 0),
+                context_usage=summary.get("context_usage", ""),
             )
-
-        if not found_any:
-            return
-
-        # 用户主动点按钮 = 显式要求查看。auto_hide/手动关闭后 _batch_started=False
-        # 且任务行仍在（show_completed_task 因 task_id in _task_rows 早退，不会
-        # setVisible），必须重新置位，否则分层谓词(_batch_started and _task_rows)
-        # 恒假，refresh_layer 不会让卡片重现 → 点击无反应。与 /subagents 命令路径
-        # （_handle_subagents_command）语义一致。
-        compact._batch_started = True
-
-        # 触发状态层重算（谓词：批次活跃且有任务行）
-        self._card_manager.refresh_layer(self._window_id, "status")
 
     def _on_card_diff_requested(self, round_index: int, message_index: int = -1):
         """
@@ -20813,16 +20758,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._tool_card_map[tool_call_id] = card
             card.update_tool_streaming(tool_call_id, tool_name, arguments)
 
-    def _on_sub_agent_compact_closed(self):
-        """子智能体紧凑卡片关闭时清理状态"""
-        if hasattr(self, "_sub_agent_compact_widget"):
-            self._sub_agent_compact_widget._batch_started = False
-        # 通知 CardManager 重算状态层：_batch_started=False 后谓词为假，
-        # 卡片随之退出可见集（旧实现依赖 hide_card 手动对齐，易与卡片自身
-        # 的 _auto_hide 定时器脱节）。
-        if hasattr(self, "_card_manager"):
-            self._card_manager.refresh_layer(self._window_id, "status")
-
     def _on_sub_agent_stop_requested(self, task_id: str):
         """处理子智能体停止请求 - 中止当前运行中的子智能体"""
         if getattr(self, "_is_destroyed", False):
@@ -20860,7 +20795,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
     def _on_sub_agent_enter_session(self, task_id: str, agent_name: str):
-        """进入子智能体会话 - 内嵌卡片显示该子智能体的运行日志/消息"""
+        """进入子智能体会话 — 会话卡（system-subagent 插件浮动卡）展示运行日志/消息"""
         if getattr(self, "_is_destroyed", False):
             return
 
@@ -20877,13 +20812,14 @@ class OpenAIChatToolWindow(ToolWindow):
         summary["status"] = status
         summary["agent_name"] = agent_name
 
-        # 显示子智能体会话卡片（内嵌于软件窗口内部，覆盖对话区域，与 DiffViewerCard 同模式）
-        from app.widgets.cards.global_card_controller import get_global_card_controller
+        # 会话卡归 system-subagent 插件所有，经服务门面灌数据 + 显示
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        controller = get_global_card_controller()
-        if controller is None:
+        service = UIPluginRegistry.get_instance().get_service("subagent_session")
+        if service is None:
+            logger.warning("[SubAgent] 会话服务不可用（system-subagent 插件未加载），跳过进入会话")
             return
-        controller.show_sub_agent_session(
+        service.show(
             task_id=task_id,
             agent_name=agent_name,
             logs=logs,
@@ -21021,7 +20957,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             raise CommandNeedDegrade("subagents", args)
 
-        # ---- 无参数：显示紧凑卡片 ----
+        # ---- 无参数：展开消息卡内嵌运行面板 ----
         sub_agent_mgr = self.backend.sub_agent_manager
         running_tasks = sub_agent_mgr._running_tasks
 
@@ -21035,19 +20971,18 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        compact = self._sub_agent_compact_widget
+        panel = self._sub_agent_run_panel()
+        if panel is None:
+            logger.warning("[SubAgent] 运行面板不可用（system-subagent 插件未加载），跳过展示")
+            return
 
         for task_id, executor in running_tasks.items():
-            # 如果任务行已存在（之前关闭过），保留已有统计数据
-            if task_id in compact._task_rows:
+            # 任务行已存在则保留已有统计数据
+            if panel.has_task(task_id):
                 continue
             llm_cfg = getattr(executor, "llm_config", {}) or {}
             model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
-            compact.add_task(task_id, executor.agent_name, executor.task_description, model_name=model_name)
-
-        compact._batch_started = True
-        # 触发状态层重算（谓词：批次活跃且有任务行）
-        self._card_manager.refresh_layer(self._window_id, "status")
+            panel.add_task(task_id, executor.agent_name, executor.task_description, model_name=model_name)
 
     def _handle_title_gen_command(self, args: str):
         """/title-gen 命令：切换标题生成使用的默认模型
@@ -21218,60 +21153,19 @@ class OpenAIChatToolWindow(ToolWindow):
         if card.is_detail_mode and card.detail_cmd_name == cmd_name:
             card._refresh_detail_view()
 
-    def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
-        """子智能体任务启动（通过 SubAgentManager 信号触发）
+    def _sub_agent_run_panel(self):
+        """取本窗口最新 assistant 卡片上的子智能体运行面板（插件实现）。
 
-        策略：
-        - 紧凑卡片（sub_agent_compact_widget）：自动弹出，显示运行状态（旋转图标+agent名+任务描述）
+        运行区已迁入 system-subagent 插件的消息卡内嵌面板槽位；插件缺失或无可用
+        卡片时返回 None，调用方按「无面板可展示」降级，不保留主程序兜底实现。
         """
-        if getattr(self, "_is_destroyed", False):
-            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        # 系统卡片打开时，阻止子智能体卡片显示
-        if self._is_system_card_visible:
-            return
-
-        # ── 紧凑卡片：自动弹出 ──
-        compact = self._sub_agent_compact_widget
-        if not compact._batch_started:
-            # 只清空已完成的任务，保留运行中的任务行（避免关闭再打开后统计数据重置）
-            finished_ids = [tid for tid, row in compact._task_rows.items() if not row.is_running]
-            for tid in finished_ids:
-                compact.remove_task(tid)
-        compact._batch_started = True
-
-        # 从 executor 提取模型名称
-        sub_agent_mgr = self.backend.sub_agent_manager
-        executor_for_model = sub_agent_mgr._running_tasks.get(task_id)
-        model_name = ""
-        if executor_for_model:
-            llm_cfg = getattr(executor_for_model, "llm_config", {}) or {}
-            model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
-
-        compact.add_task(task_id, agent_name, task_description, model_name=model_name)
-        if not compact.isVisible():
-            compact.setVisible(True)
-
-        # 连接 executor 信号（紧凑卡片实时更新）
-        sub_agent_mgr = self.backend.sub_agent_manager
-        executor = sub_agent_mgr._running_tasks.get(task_id)
-        if executor:
-            executor.tool_call_started.connect(
-                lambda tid, name, args: (
-                    self._sub_agent_compact_widget.add_tool_call(tid, name, args)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
-            executor.token_usage_updated.connect(
-                lambda tid, pt, ct, tt: (
-                    self._on_sub_agent_token_usage(tid, pt, ct, tt)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
-            # 完成链已由 SubAgentManager 内部接线（execute_task 时连
-            # _on_executor_finished），此处不再转发，避免完成槽双重触发
+            return UIPluginRegistry.get_instance().attach_card_inline_panel("subagent_run", main_widget=self)
+        except Exception as e:  # noqa: BLE001 - 插件缺失/卡片异常不拖垮命令
+            logger.debug(f"[SubAgent] 运行面板不可用: {e}")
+            return None
 
     def _on_subagent_permission_requested(self, window_id: str, task_id: str, tool_name: str, arguments: dict):
         """子智能体 ask 权限弹窗（主线程，T24）。
@@ -21313,25 +21207,12 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
-    def _on_sub_agent_token_usage(self, task_id: str, prompt_tokens: int, completion_tokens: int, total_tokens: int):
-        """子智能体 token 用量更新"""
-        if getattr(self, "_is_destroyed", False):
-            return
-        # 更新紧凑卡片的上下文用量行
-        if hasattr(self, "_sub_agent_compact_widget"):
-            # 显示单次 API 调用的 token 数（不累加，避免随多次工具调用无限膨胀）
-            acc_total = total_tokens
-            if acc_total >= 1000:
-                display = f"{acc_total / 1000:.1f}K tokens"
-            else:
-                display = f"{acc_total} tokens"
-            self._sub_agent_compact_widget.set_task_context(task_id, display)
-
     def _on_sub_agent_task_finished(self, task_id: str, result: str):
-        """子智能体任务完成（UI 归档）：卡片收尾 + 落库归档。
+        """子智能体任务完成：落库归档。
 
         完成链（批次计数/流式注入/全完成判定）已迁入 SubAgentManager 内部
-        （_on_executor_finished），本槽只负责 UI 与持久化。
+        （_on_executor_finished）；运行面板收尾由 system-subagent 插件桥接层订阅
+        同一信号完成，本槽只剩持久化。
         """
         if getattr(self, "_is_destroyed", False):
             return
@@ -21342,11 +21223,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 优先使用 executor 中记录的 _execution_error 来判断成功/失败
         # 而不是依赖结果内容中的关键词（这会导致误判）
         execution_error = getattr(executor, "_execution_error", None) if executor else None
-        success = execution_error is None or execution_error == ""
-
-        # 更新紧凑卡片
-        if hasattr(self, "_sub_agent_compact_widget"):
-            self._sub_agent_compact_widget.finish_task(task_id, success)
 
         # 归档到管理器：内存 _finished_tasks + 数据库 finished 状态（含最终 logs/summary）。
         # 之前只写内存不落库，DB 永挂 running → 会话卡片永远显示执行中、工具数/时间冻结
@@ -22840,7 +22716,6 @@ class OpenAIChatToolWindow(ToolWindow):
             "hook_edit",
             "undo_delete",
             "message_queue",
-            "sub_agent_compact",
             "permission",
         ]:
             self._card_manager.hide_card(card_id, self._window_id)

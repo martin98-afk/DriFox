@@ -843,7 +843,7 @@ class UIPluginRegistry:
         # 插件注册的消息卡内嵌面板：{panel_id: CardInlinePanelInfo}
         self._card_inline_panels: Dict[str, CardInlinePanelInfo] = {}
         # 内嵌面板当前挂载的卡片（弱引用，避免阻止卡片回收）
-        self._inline_panel_cards: Dict[str, Any] = {}
+        self._inline_panel_cards: Dict[str, Dict[str, Any]] = {}
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
         # 欢迎卡片插件点击动作：{action: WelcomeActionInfo}
         self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
@@ -1629,8 +1629,11 @@ class UIPluginRegistry:
             card = finder() if callable(finder) else None
         if not _widget_alive(card):
             return None
-        # 旧卡摘除：只保留最新卡片上的实例（同 _sync_todo_panel 语义）
-        prev = self._inline_panel_cards.get(panel_id)
+        # 旧卡摘除：只保留最新卡片上的实例（同 _sync_todo_panel 语义）。
+        # 按宿主窗口分桶：多窗口共用一个 panel_id，A 窗口 attach 不能摘掉 B 窗口的卡。
+        host_wid = str(getattr(mw, "_window_id", "") or "")
+        win_refs = self._inline_panel_cards.setdefault(panel_id, {})
+        prev = win_refs.get(host_wid)
         prev_card = prev() if isinstance(prev, weakref.ref) else prev
         if _widget_alive(prev_card) and prev_card is not card:
             try:
@@ -1643,21 +1646,22 @@ class UIPluginRegistry:
         panel = ensure(panel_id)
         if panel is not None:
             try:
-                self._inline_panel_cards[panel_id] = weakref.ref(card)
+                win_refs[host_wid] = weakref.ref(card)
             except TypeError:
-                self._inline_panel_cards[panel_id] = card
+                win_refs[host_wid] = card
         return panel
 
     def detach_card_inline_panel(self, panel_id: str) -> None:
-        """从当前卡片摘除内嵌面板（不注销注册；插件卸载路径用它清实例）。"""
-        ref = self._inline_panel_cards.pop(panel_id, None)
-        card = ref() if isinstance(ref, weakref.ref) else ref
-        if not _widget_alive(card):
-            return
-        try:
-            card.remove_inline_panel(panel_id)
-        except (RuntimeError, AttributeError):
-            pass
+        """从所有窗口的当前卡片摘除该内嵌面板（不注销注册；插件卸载路径用）"""
+        win_refs = self._inline_panel_cards.pop(panel_id, None) or {}
+        for ref in list(win_refs.values()):
+            card = ref() if isinstance(ref, weakref.ref) else ref
+            if not _widget_alive(card):
+                continue
+            try:
+                card.remove_inline_panel(panel_id)
+            except (RuntimeError, AttributeError):
+                pass
 
     def register_floating_card(
         self,
@@ -3109,6 +3113,23 @@ class UIPluginRegistry:
                          ``self._main_widget``（单例兼容路径）。
         """
         self._show_floating_card(card_id, main_widget=main_widget)
+
+    def get_floating_card_widget(self, card_id: str, main_widget=None):
+        """取已创建的浮动卡片 widget 实例（不触发创建，未创建返回 None）
+
+        给「带数据展示」的卡片用：调用方先 ``toggle_floating_card`` 建卡，
+        再取实例灌数据（卡片的加载接口由插件自己定义，注册表不参与）。
+
+        Args:
+            card_id: 卡片唯一 ID
+            main_widget: 目标主窗口（None 时与显示路径一致地解析全局宿主）
+        """
+        host = self._resolve_global_host()
+        mw = host or main_widget or self._main_widget
+        window_id = getattr(mw, "_window_id", None) if mw is not None else None
+        if window_id is None:
+            return None
+        return self._card_widget_instances.get(window_id, {}).get(card_id)
 
     def hide_floating_card_globally(self, card_id: str) -> bool:
         """隐藏浮动卡片（公开 API — EP6 公开面，给插件调用）

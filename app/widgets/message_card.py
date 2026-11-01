@@ -757,6 +757,14 @@ class MessageCard(SimpleCardWidget):
                 self._artifact_panel.refresh_style()
             except RuntimeError:
                 self._artifact_panel = None
+        # 插件注册的内嵌面板（如子智能体运行区）：QSS 同样在构造期固化
+        for _panel in list(self._inline_panels.values()):
+            _refresh = getattr(_panel, "refresh_style", None)
+            if callable(_refresh):
+                try:
+                    _refresh()
+                except RuntimeError:
+                    continue
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析

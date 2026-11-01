@@ -1,0 +1,16 @@
+{
+    "name": "system-subagent",
+    "description": "子智能体运行区 — 在 assistant 消息卡末尾展示子智能体任务（旋转图标、工具计数、上下文用量、进入会话/停止），全部完成后折叠收起",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "GPL-3.0-or-later",
+    "type": "system",
+    "api_version": 2,
+    "components": {
+        "ui": true
+    },
+    "capabilities": []
+}
