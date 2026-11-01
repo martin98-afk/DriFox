@@ -7,6 +7,8 @@ sys.modules["ui_plugin_system_timer"] 解析单例引用（tools 与 ui 是两�
 严禁触碰任何 Qt 对象（QTimer 属 scheduler.start/stop，仅主线程调用）。
 """
 
+import math
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from app.plugins.sdk import ToolResult
@@ -20,7 +22,7 @@ _TIMER_SCHEMA = {
         "name": "timer",
         "description": (
             "定时任务管理：创建到期后自动向当前会话发送触发消息的定时任务"
-            "（触发消息会开启一轮新对话）。一次性任务传 delay_seconds，"
+            "（触发消息会开启一轮新对话）。一次性任务传 delay_seconds 或 fire_at，"
             "循环任务传 interval_minutes；任务仅存内存，应用重启后失效。"
             "到期触发要求会话窗口存活：任务仅当前会话内生效，切换会话即自动取消。"
         ),
@@ -37,7 +39,22 @@ _TIMER_SCHEMA = {
                     "type": "integer",
                     "description": "create（一次性）：延迟秒数，触发一次后任务终结",
                 },
+                "fire_at": {
+                    "type": "string",
+                    "description": (
+                        "create（一次性）：指定触发时刻，支持 'YYYY-MM-DD HH:MM[:SS]'（已过去报错）"
+                        "或纯 'HH:MM[:SS]'（今天已过自动明天）"
+                    ),
+                },
                 "interval_minutes": {"type": "integer", "description": "create（循环）：触发间隔分钟数"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["queue", "skip", "hook"],
+                    "description": (
+                        "create（可选）：到期触发方式。queue=流式中排队（默认）；"
+                        "skip=流式中忽略（返回不发送）；hook=流式中静默注入当前对话上下文（不打断）"
+                    ),
+                },
                 "task_id": {"type": "string", "description": "cancel：任务 ID（创建时返回）"},
                 "all": {"type": "boolean", "description": "cancel：true 时取消当前会话的全部任务"},
             },
@@ -82,6 +99,41 @@ def _as_positive_int(value: Any) -> Optional[int]:
     return num if num > 0 else None
 
 
+def _parse_fire_at(value: Any) -> tuple[Optional[int], Optional[datetime], str]:
+    """解析 fire_at 为「距现在的延迟秒数」与目标时刻。
+
+    双格式（本地时间）：完整时间戳 YYYY-MM-DD HH:MM[:SS]（空格或 T 分隔），
+    已过去即报错；纯 HH:MM[:SS] 取今天该时刻，已过自动顺延明天。
+    返回 (delay_seconds, target, error)，未提供时三值均空，成功时 error 为空。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None, None, ""
+    now = datetime.now()
+    target: Optional[datetime] = None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            target = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if target is None:
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                hhmm = datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+            target = now.replace(hour=hhmm.hour, minute=hhmm.minute, second=hhmm.second, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            break
+    if target is None:
+        return None, None, f"无法解析 fire_at：{text}，支持 'YYYY-MM-DD HH:MM[:SS]' 或 'HH:MM[:SS]'"
+    if target <= now:
+        return None, None, f"fire_at 指定的时刻 {target:%Y-%m-%d %H:%M:%S} 已过去"
+    return max(1, math.ceil((target - now).total_seconds())), target, ""
+
+
 def _timer_impl(tool_ctx, **kwargs) -> ToolResult:
     action = str(kwargs.get("action") or "").strip().lower()
     if action not in ("create", "list", "cancel"):
@@ -108,29 +160,49 @@ def _create(scheduler, tool_ctx, kwargs: dict) -> ToolResult:
 
     delay_val = _as_positive_int(kwargs.get("delay_seconds"))
     interval_val = _as_positive_int(kwargs.get("interval_minutes"))
-    if delay_val is not None and interval_val is not None:
-        return ToolResult(False, error="delay_seconds 与 interval_minutes 只能二选一")
-    if delay_val is None and interval_val is None:
+    mode_val = str(kwargs.get("mode") or "queue").strip().lower()
+    if mode_val not in ("queue", "skip", "hook"):
+        return ToolResult(False, error=f"非法 mode：{mode_val}，可用值 queue/skip/hook")
+    fire_delay, fire_target, fire_err = _parse_fire_at(kwargs.get("fire_at"))
+    if fire_err:
+        return ToolResult(False, error=fire_err)
+    provided = [
+        name
+        for name, val in (("delay_seconds", delay_val), ("interval_minutes", interval_val), ("fire_at", fire_delay))
+        if val is not None
+    ]
+    if len(provided) > 1:
+        return ToolResult(False, error="delay_seconds / interval_minutes / fire_at 只能三选一")
+    if not provided:
         return ToolResult(
             False,
-            error="必须提供触发时机：一次性任务用 delay_seconds，循环任务用 interval_minutes",
+            error="必须提供触发时机：一次性任务用 delay_seconds 或 fire_at，循环任务用 interval_minutes",
         )
 
     task = scheduler.add_task(
         session_id=session_id,
         prompt=prompt,
-        delay_seconds=delay_val,
+        delay_seconds=delay_val if delay_val is not None else fire_delay,
         interval_minutes=interval_val,
+        mode=mode_val,
     )
     kind = "循环" if task["type"] == "loop" else "一次性"
-    when = (
-        f"{task['next_fire_seconds'] / 60:.1f} 分钟后首次触发"
-        if task["type"] == "loop"
-        else f"{task['next_fire_seconds']:.0f} 秒后触发"
-    )
+    mode_note = {
+        "skip": "，会话正忙时将忽略本次触发",
+        "hook": "，会话正忙时静默注入当前对话上下文",
+    }.get(mode_val, "")
+    if task["type"] == "loop":
+        when = f"{task['next_fire_seconds'] / 60:.1f} 分钟后首次触发"
+    elif fire_target is not None:
+        when = f"将于 {fire_target:%Y-%m-%d %H:%M:%S} 触发"
+    else:
+        when = f"{task['next_fire_seconds']:.0f} 秒后触发"
     return ToolResult(
         True,
-        content=(f"定时任务已创建（ID: {task['id']}）：{kind}任务，{when}。到期后将向本会话自动发送：{prompt[:80]}"),
+        content=(
+            f"定时任务已创建（ID: {task['id']}）：{kind}任务，{when}{mode_note}。"
+            f"到期后将向本会话自动发送：{prompt[:80]}"
+        ),
         data={"task": task},
     )
 

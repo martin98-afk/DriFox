@@ -71,9 +71,11 @@ class TimerScheduler:
         prompt: str,
         delay_seconds: Optional[int] = None,
         interval_minutes: Optional[int] = None,
+        mode: str = "queue",
     ) -> Dict[str, Any]:
         """登记任务并返回快照。一次性（delay_seconds）与循环（interval_minutes）
-        二选一，合法性由调用方（工具层）校验。"""
+        二选一，合法性由调用方（工具层）校验。mode 为触发方式（queue/skip/hook），
+        到期时透传给 session.send。"""
         now = time.monotonic()
         if interval_minutes is not None and interval_minutes > 0:
             task: Dict[str, Any] = {
@@ -81,6 +83,7 @@ class TimerScheduler:
                 "session_id": session_id,
                 "prompt": prompt,
                 "type": "loop",
+                "mode": mode,
                 "interval_seconds": float(interval_minutes) * 60.0,
                 "fire_at": now + float(interval_minutes) * 60.0,
             }
@@ -90,6 +93,7 @@ class TimerScheduler:
                 "session_id": session_id,
                 "prompt": prompt,
                 "type": "once",
+                "mode": mode,
                 "fire_at": now + float(delay_seconds or 0),
             }
         with self._lock:
@@ -172,9 +176,11 @@ class TimerScheduler:
                 f"（session={snapshot['session_id'][:8]}，会话可能已切走/关闭）"
             )
         else:
-            delivered = self._send(f"⏰ 定时任务触发：{snapshot['prompt']}", window_id)
+            delivered = self._send(
+                f"⏰ 定时任务触发：{snapshot['prompt']}", window_id, mode=snapshot.get("mode", "queue")
+            )
             if not delivered:
-                logger.warning(f"[system-timer] 任务 {task_id} 触发消息入队被拒（窗口忙/正在关闭）")
+                logger.warning(f"[system-timer] 任务 {task_id} 触发消息发送被拒（窗口忙/正在关闭）")
 
         with self._lock:
             task = self._tasks.get(task_id)
@@ -213,8 +219,8 @@ class TimerScheduler:
             logger.warning(f"[system-timer] 窗口定位失败: {e}")
         return None
 
-    def _send(self, text: str, window_id: str) -> bool:
-        """经目标窗口 tool surface 能力池 session.send 入队（纯入队，立即返回）。"""
+    def _send(self, text: str, window_id: str, mode: str = "queue") -> bool:
+        """经目标窗口 tool surface 能力池 session.send 入队（mode 透传触发方式）。"""
         try:
             from app.plugins.capabilities.bootstrap import ensure_registered
             from app.plugins.capabilities.registry import CapabilityRegistry
@@ -233,7 +239,7 @@ class TimerScheduler:
             if not callable(send):
                 logger.warning("[system-timer] session.send 能力形状异常（非可调用）")
                 return False
-            return bool(send(text))
+            return bool(send(text, mode=mode))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[system-timer] 触发消息发送失败: {e}")
             return False
@@ -247,6 +253,7 @@ class TimerScheduler:
             "session_id": task["session_id"],
             "prompt": task["prompt"],
             "type": task["type"],
+            "mode": task.get("mode", "queue"),
             "next_fire_seconds": round(max(0.0, task["fire_at"] - now), 1),
         }
 

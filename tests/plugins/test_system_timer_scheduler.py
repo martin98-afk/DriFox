@@ -96,7 +96,7 @@ class _SendRecorder:
     def find_window(self, session_id):
         return "w-rec"
 
-    def send(self, text, window_id):
+    def send(self, text, window_id, mode="queue"):
         self.calls.append((window_id, text))
         if self.on_send is not None:
             self.on_send()
@@ -211,7 +211,7 @@ class TestPureLogic:
         """worker 线程并发 add（工具 impl 线程纪律）：50 并发不丢不崩"""
         s = fresh_scheduler
         s._find_window = lambda sid: None
-        s._send = lambda text, wid: False
+        s._send = lambda text, wid, mode="queue": False
 
         def _adder():
             for _ in range(50):
@@ -234,7 +234,7 @@ class TestPureLogic:
         calls = []
         state = {"boom": True}
 
-        def _send(text, window_id):
+        def _send(text, window_id, mode="queue"):
             calls.append(text)
             if state["boom"]:
                 state["boom"] = False
@@ -278,7 +278,7 @@ class _StubCapRegistry:
                 # 对齐真实 CapabilityPool 语义：session.send provider 返回裸可调用
                 # （tool_core._session_send 直返 _session_control(host)["send"]），非 dict
                 assert key == "session.send"
-                return lambda text, **kw: sentinel.sent.append((host._window_id, text)) or True
+                return lambda text, **kw: sentinel.sent.append((host._window_id, text, kw.get("mode", "queue"))) or True
 
         return _Pool()
 
@@ -310,9 +310,23 @@ class TestWindowResolve:
         self._mount_window("w1", "s-target")
         s.add_task("s-target", "定点提醒", delay_seconds=1)
         s.tick(time.monotonic() + 5)
-        assert stub.sent == [("w1", "⏰ 定时任务触发：定点提醒")]
+        assert stub.sent == [("w1", "⏰ 定时任务触发：定点提醒", "queue")]
         assert stub.hosts == [{"surface": "tool", "wid": "w1", "plugin": "system-timer"}]
         assert s.list_tasks() == []  # 一次性送达出表
+        s.stop()
+
+    def test_send_mode_passthrough(self, timer_mod, monkeypatch):
+        """add_task 的 mode 存任务表并透传到 session.send"""
+        s = _scheduler_mod(timer_mod).TimerScheduler()
+        stub = _StubCapRegistry()
+        monkeypatch.setattr("app.plugins.capabilities.registry.CapabilityRegistry", stub)
+        self._mount_window("w1", "s-target")
+        task = s.add_task("s-target", "催收", delay_seconds=1, mode="hook")
+        assert task["mode"] == "hook"
+        assert [t["mode"] for t in s.list_tasks()] == ["hook"]
+        s.tick(time.monotonic() + 5)
+        assert stub.sent == [("w1", "⏰ 定时任务触发：催收", "hook")]
+        assert s.list_tasks() == []
         s.stop()
 
     def test_session_mismatch_skips(self, timer_mod, monkeypatch):
@@ -549,7 +563,7 @@ class TestDrainSignalBridge:
         class _Wiring:
             queue = q
             window = win
-            send = staticmethod(lambda text: send_fn(text))
+            send = staticmethod(lambda text, mode="queue": send_fn(text))
             observer: Any = None  # 类级声明；实例上覆盖为真实回调供用例摘取
 
         wiring = _Wiring()

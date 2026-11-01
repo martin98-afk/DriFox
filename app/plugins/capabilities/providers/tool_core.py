@@ -205,6 +205,7 @@ def register(registry) -> None:
         工具 impl 跑在 worker 线程，直接停流会杀掉自己所在的 worker，
         所以只入队，由 main_widget 在本轮结束时 drain。
         window_id 从 backend 精确取，拿不到一律拒绝入队（防多窗口串窗）。
+        send 支持三模式（queue/skip/hook），见 ui_core._send_with_mode。
         """
         from app.core.conversation.action_queue import get_action_queue
 
@@ -218,8 +219,18 @@ def register(registry) -> None:
         def new_session() -> bool:
             return queue.enqueue(wid, "new", {})
 
-        def send(text: str, *, ephemeral: bool = False) -> bool:
-            return queue.enqueue(wid, "send", {"text": str(text or ""), "ephemeral": bool(ephemeral)})
+        def send(text: str, *, ephemeral: bool = False, mode: str = "queue") -> bool:
+            # 三模式复用 ui_core 同实现（先例：_ui_artifacts_show 跨 provider 复用）
+            from app.plugins.capabilities.providers.ui_core import _send_with_mode
+
+            return _send_with_mode(
+                backend,
+                queue,
+                wid,
+                text,
+                ephemeral=ephemeral,
+                mode=mode,
+            )
 
         return {"interrupt": interrupt, "new": new_session, "send": send}
 

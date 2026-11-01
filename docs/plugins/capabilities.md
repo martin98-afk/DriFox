@@ -177,13 +177,15 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `session.manage` | **high** | 切换 / 新建当前会话（加载历史会话、清空开新会话） |
 | `session.interrupt` | medium | 停止当前流式输出（入队，本轮结束后执行） |
 | `session.new` | medium | 新建会话（入队，停流后执行） |
-| `session.send` | medium | 发消息驱动一轮对话（入队；`ephemeral` 不写会话、不渲染气泡） |
+| `session.send` | medium | 发消息驱动一轮对话（`mode`: queue 流式中排队默认 / skip 流式中忽略 / hook 流式中注入消息列表；`ephemeral` 不写会话、不渲染气泡） |
 
 > `session.list` 与 `session.history` 不是一回事：前者是**当前窗口内存里的活跃会话对象**（`host.session_manager.sessions`），后者是 `HistoryManager` 的**跨会话落库记录**（含归档、项目归属、团队 run_id）。取历史面板数据必须用 `session.history`。
 
 > `session.history.write` 的写动作**内部已含宿主联动通知**（历史页刷新 + 欢迎卡片失效 + 跨窗口广播）。插件调完不必再自己调窗口方法。
 
 > `session.interrupt` / `session.new` / `session.send` 是**入队语义**：插件在工具执行期调用只登记动作，主程序在本轮结束（`stream_finished`）后按登记顺序执行。原因：工具跑在 worker 线程，同步停流会杀掉自己所在的 worker。队列按 `window_id` 隔离，拿不到 id 一律拒绝（写操作回退「活跃窗口」会在多窗口同时交接时串窗）。
+>
+> `session.send` 的 `mode` 参数改变流式中的行为：`queue`（默认）本轮结束后发送并开新轮；`skip` 流式中直接拒绝（返回 False，调用方感知被忽略）；`hook` 流式中经 `_hook_message_queue` 静默注入当前对话上下文（worker 下一轮消费，不建卡不打断，同 SubAgentFinished 通道），空闲时降级为普通发送。三模式判忙均以 `chat_engine.is_streaming` 为准。
 
 ### 输入框
 

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -39,12 +40,13 @@ class _FakeScheduler:
         self.cancelled = []
         self.tasks = []
 
-    def add_task(self, session_id, prompt, delay_seconds=None, interval_minutes=None):
+    def add_task(self, session_id, prompt, delay_seconds=None, interval_minutes=None, mode="queue"):
         task = {
             "id": "t0001",
             "session_id": session_id,
             "prompt": prompt,
             "type": "loop" if (interval_minutes or 0) > 0 else "once",
+            "mode": mode,
             "next_fire_seconds": float(delay_seconds or (interval_minutes or 0) * 60),
         }
         self.added.append(task)
@@ -124,6 +126,81 @@ def test_create_rejects_bad_args(monkeypatch):
     assert mod._timer_impl(_CTX, action="create", prompt="x", delay_seconds=0).success is False
 
 
+def test_create_with_fire_at_hhmm(monkeypatch):
+    """纯 HH:MM：今天已过自动明天，恒能创建，回显墙钟时刻"""
+    mod = _load_tool()
+    fake = _FakeScheduler()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: fake)
+    res = mod._timer_impl(_CTX, action="create", prompt="定点提醒", fire_at="15:00")
+    assert res.success is True
+    assert fake.added[0]["type"] == "once"
+    assert 1 <= fake.added[0]["next_fire_seconds"] <= 86400
+    assert "将于" in str(res.content)
+
+
+def test_create_with_fire_at_full_timestamp(monkeypatch):
+    """完整时间戳：延迟≈2小时，返回消息含目标时刻"""
+    mod = _load_tool()
+    fake = _FakeScheduler()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: fake)
+    target = datetime.now() + timedelta(hours=2)
+    res = mod._timer_impl(_CTX, action="create", prompt="定点提醒", fire_at=target.strftime("%Y-%m-%d %H:%M"))
+    assert res.success is True
+    assert 7100 <= fake.added[0]["next_fire_seconds"] <= 7200
+    assert target.strftime("%H:%M") in str(res.content)
+
+
+def test_create_fire_at_conflicts_with_other_triggers(monkeypatch):
+    """fire_at 与 delay_seconds / interval_minutes 三选一"""
+    mod = _load_tool()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: _FakeScheduler())
+    r1 = mod._timer_impl(_CTX, action="create", prompt="x", fire_at="00:00", delay_seconds=10)
+    r2 = mod._timer_impl(_CTX, action="create", prompt="x", fire_at="00:00", interval_minutes=5)
+    assert r1.success is False and r2.success is False
+    assert "三选一" in (r1.error or "")
+
+
+def test_create_fire_at_past_full_timestamp_rejected(monkeypatch):
+    """完整时间戳已过去 → 报错不静默"""
+    mod = _load_tool()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: _FakeScheduler())
+    res = mod._timer_impl(_CTX, action="create", prompt="x", fire_at="2020-01-01 00:00")
+    assert res.success is False
+    assert "已过去" in (res.error or "")
+
+
+def test_create_mode_passthrough(monkeypatch):
+    """mode 透传到调度器；非法值拒绝；缺省回落 queue"""
+    mod = _load_tool()
+    fake = _FakeScheduler()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: fake)
+    res = mod._timer_impl(_CTX, action="create", prompt="催收", delay_seconds=60, mode="hook")
+    assert res.success is True
+    assert fake.added[0]["mode"] == "hook"
+    assert "静默注入" in str(res.content)
+    bad = mod._timer_impl(_CTX, action="create", prompt="x", delay_seconds=60, mode="bogus")
+    assert bad.success is False
+    assert "非法 mode" in (bad.error or "")
+    assert mod._timer_impl(_CTX, action="create", prompt="x", delay_seconds=60).success is True
+    assert fake.added[-1]["mode"] == "queue"
+
+
+def test_parse_fire_at_hhmm_rolls_to_next_day():
+    """00:00 今天必已过 → 恒落到明天，延迟不超过 24h"""
+    mod = _load_tool()
+    delay, target, err = mod._parse_fire_at("00:00")
+    assert err == "" and target is not None and delay is not None
+    assert target.date() == (datetime.now() + timedelta(days=1)).date()
+    assert 1 <= delay <= 86400
+
+
+def test_parse_fire_at_unparseable():
+    mod = _load_tool()
+    delay, target, err = mod._parse_fire_at("25:00")
+    assert delay is None and target is None
+    assert "无法解析" in err
+
+
 def test_create_requires_session_id(monkeypatch):
     mod = _load_tool()
     monkeypatch.setattr(mod, "_resolve_scheduler", lambda: _FakeScheduler())
@@ -191,7 +268,7 @@ def test_list_snapshot_no_internal_fields():
     sched.add_task("s1", "循环", interval_minutes=2)
     snaps = sched.list_tasks()
     assert len(snaps) == 2
-    allowed = {"id", "session_id", "prompt", "type", "next_fire_seconds"}
+    allowed = {"id", "session_id", "prompt", "type", "mode", "next_fire_seconds"}
     for snap in snaps:
         assert set(snap.keys()) == allowed, f"快照字段泄漏：{set(snap.keys())}"
     loop = next(s for s in snaps if s["type"] == "loop")

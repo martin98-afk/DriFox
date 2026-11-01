@@ -540,17 +540,84 @@ def _session_write(host: Any):
     return host._save_messages_to_session
 
 
+def _engine_busy(backend: Any) -> bool:
+    """worker 真实繁忙判据（core 层 chat_engine.is_streaming）。
+
+    与 main_widget._worker_actually_busy 同源；backend 拿不到 / engine 未建
+    一律视为不忙（安全默认：普通入队路径兜底）。
+    """
+    engine = getattr(backend, "chat_engine", None)
+    if engine is None:
+        return False
+    try:
+        return bool(engine.is_streaming)
+    except Exception:  # noqa: BLE001 - 状态读取失败按空闲处理
+        return False
+
+
+def _send_with_mode(
+    backend: Any,
+    queue: Any,
+    wid: str,
+    text: str,
+    *,
+    ephemeral: bool = False,
+    mode: str = "queue",
+) -> bool:
+    """session.send 三模式（queue 默认 / skip 流式中忽略 / hook 流式中注入消息列表）。
+
+    - queue：入队等本轮结束 drain 后发送（原契约）。
+    - skip：流式中直接拒绝（返回 False，调用方感知被忽略）；空闲正常入队。
+    - hook：流式中经 backend._hook_message_queue 注入当前对话上下文，worker
+      工具循环下一轮消费（不建卡不打断，同 SubAgentFinished 通道）；空闲时
+      降级为普通 send 开新轮（hook 队列无 worker 消费，滞留会拖到下轮开头）。
+
+    判忙 stale 误判方向保守：skip 可能误拒（语义安全），hook 注入可能落到
+    下轮开头消费（行为安全）。
+    """
+    mode = str(mode or "queue").strip().lower()
+    if mode not in ("queue", "skip", "hook"):
+        mode = "queue"
+    text = str(text or "")
+    if mode != "queue":
+        if _engine_busy(backend):
+            if mode == "skip":
+                return False
+            hook_q = getattr(backend, "_hook_message_queue", None)
+            if hook_q is not None:
+                try:
+                    from app.core.conversation.backend import _format_hook_output
+
+                    hook_q.put(
+                        {
+                            "role": "user",
+                            "content": _format_hook_output("SessionSend", text, wrap_system_reminder=False),
+                            "_hook_event": "SessionSend",
+                        }
+                    )
+                    return True
+                except Exception as e:  # noqa: BLE001 - 注入失败退化为普通入队
+                    import logging
+
+                    logging.getLogger(__name__).warning(f"[session.send] hook 注入失败，退化排队: {e}")
+        elif mode == "skip":
+            pass  # 空闲：skip 与 queue 同路径
+    return queue.enqueue(wid, "send", {"text": text, "ephemeral": bool(ephemeral)})
+
+
 def _session_control(host: Any):
     """会话控制三件套（入队语义，不直接操作 UI）。
 
     调用方可能在 worker 线程（工具 impl），所以只往窗口队列里塞动作，
     真正执行由 main_widget 在本轮结束时 drain。window_id 只做精确匹配，
     拿不到就拒绝——写操作回退「活跃窗口」会在多窗口同时交接时串窗。
+    send 支持三模式（queue/skip/hook），见 _send_with_mode。
     """
     from app.core.conversation.action_queue import get_action_queue
 
     wid = str(getattr(host, "_window_id", "") or "")
     queue = get_action_queue()
+    backend = getattr(host, "backend", None)
 
     def interrupt() -> bool:
         return queue.enqueue(wid, "interrupt", {})
@@ -558,8 +625,8 @@ def _session_control(host: Any):
     def new_session() -> bool:
         return queue.enqueue(wid, "new", {})
 
-    def send(text: str, *, ephemeral: bool = False) -> bool:
-        return queue.enqueue(wid, "send", {"text": str(text or ""), "ephemeral": bool(ephemeral)})
+    def send(text: str, *, ephemeral: bool = False, mode: str = "queue") -> bool:
+        return _send_with_mode(backend, queue, wid, text, ephemeral=ephemeral, mode=mode)
 
     return {"interrupt": interrupt, "new": new_session, "send": send}
 
