@@ -21,7 +21,6 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QTimer
 
 from .manager_module import load_manager_module
-from .run_bridge import PANEL_ID
 
 SERVICE_KEY = "subagent"
 _PLUGIN_NAME = "system-subagent"
@@ -79,11 +78,11 @@ class _WindowFacade:
     def stop_task(self, task_id: str) -> None:
         self._host.stop_task(self._window_id, task_id)
 
-    def show_logs(self, task_ids_str: str) -> None:
-        self._host.show_logs(self._window_id, task_ids_str)
-
     def show_session(self, task_id: str, agent_name: str) -> None:
         self._host.show_session(self._window_id, task_id, agent_name)
+
+    def latest_task(self) -> Dict:
+        return self._host.latest_task(self._window_id)
 
 
 class SubAgentHost(QObject):
@@ -94,7 +93,6 @@ class SubAgentHost(QObject):
         self._registry = registry
         self._bindings: Dict[str, _WindowBinding] = {}
         self._services = None
-        self._legacy_imported = False
         self._legacy_imported = False
         self._heartbeat = QTimer(self)
         self._heartbeat.setInterval(_HEARTBEAT_MS)
@@ -269,6 +267,23 @@ class SubAgentHost(QObject):
             f"已手动中止子智能体「{agent_name}」: {description[:40]}{'...' if len(description) > 40 else ''}",
         )
 
+    def latest_task(self, window_id: str) -> Dict:
+        """该窗口当前会话最近一个任务（会话卡显示时恢复内容）。"""
+        binding = self._bindings.get(window_id)
+        if binding is None:
+            return {"found": False}
+        backend = getattr(binding.main_widget, "backend", None)
+        try:
+            session = backend.get_current_session() if backend is not None else None
+        except Exception:  # noqa: BLE001
+            session = None
+        session_id = str(getattr(session, "session_id", "") or "")
+        try:
+            return binding.manager.latest_task_for_session(session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[system-subagent] 恢复会话卡内容失败: {e}")
+            return {"found": False}
+
     def show_session(self, window_id: str, task_id: str, agent_name: str) -> None:
         """进入子智能体会话：读任务日志并灌入会话卡。"""
         manager = self.manager_for(window_id)
@@ -292,37 +307,6 @@ class SubAgentHost(QObject):
             summary=summary,
             logs_provider=lambda: manager.get_task_logs(task_id),
         )
-
-    def show_logs(self, window_id: str, task_ids_str: str) -> None:
-        """卡片脚部日志按钮：把已完成任务补进内嵌运行面板。"""
-        binding = self._bindings.get(window_id)
-        if binding is None:
-            return
-        task_ids = [tid.strip() for tid in (task_ids_str or "").split(",") if tid.strip()]
-        if not task_ids:
-            return
-        manager = binding.manager
-        try:
-            panel = self._registry.attach_card_inline_panel(PANEL_ID, main_widget=binding.main_widget)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[system-subagent] 运行面板不可用: {e}")
-            return
-        if panel is None:
-            return
-        for task_id in task_ids:
-            data = manager.get_task_logs(task_id)
-            if not data.get("found") or panel.has_task(task_id):
-                continue
-            summary = data.get("summary", {})
-            panel.show_completed_task(
-                task_id,
-                summary.get("agent_name", data.get("agent_name", "未知")),
-                summary.get("task_description", data.get("task_description", "")),
-                model_name=summary.get("model_name", data.get("model_name", "")),
-                tool_call_count=summary.get("tool_call_count", 0),
-                elapsed_seconds=summary.get("elapsed_seconds", 0),
-                context_usage=summary.get("context_usage", ""),
-            )
 
     # ── 宿主回调（原 main_widget 槽位） ──
 

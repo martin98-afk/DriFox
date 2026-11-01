@@ -3732,7 +3732,7 @@ class UIPluginRegistry:
             before_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
             register_func(self)
             self._loaded_plugins.add(plugin_name)
-            logger.info(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
+            logger.debug(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
             # P2-2：记录 ui/ 目录 mtime 签名（静默写入兑底轮询基准）
             try:
                 self._ui_signatures[plugin_name] = self._compute_ui_signature(plugin_path)
@@ -4027,7 +4027,7 @@ class UIPluginRegistry:
         except Exception as e:
             logger.warning(f"[UIPluginRegistry] 释放能力订阅失败 ({plugin_name}): {e}")
         self._loaded_plugins.discard(plugin_name)
-        logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
+        logger.debug(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
             self._schedule_welcome_refresh()
         return True

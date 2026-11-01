@@ -160,7 +160,14 @@ def test_no_args_adds_running_tasks_to_panel(env, monkeypatch):
             "t2": _FakeExecutor("reviewer", "评审", "claude-3"),
         }
 
-    pool["subagent.run"] = _Manager()
+    class _Facade:
+        manager = _Manager()
+
+    # 管理器归插件：命令经窗口服务表取门面（不再是 pool["subagent.run"]）
+    from app.plugins.registries.window_services import get_window_services
+
+    services = get_window_services()
+    services.register("subagent", _Facade(), plugin_name="system-subagent")
 
     class _Registry:
         def attach_card_inline_panel(self, panel_id, main_widget=None):
@@ -171,7 +178,10 @@ def test_no_args_adds_running_tasks_to_panel(env, monkeypatch):
         classmethod(lambda cls: _Registry()),
     )
 
-    _handler.handle_command("")
+    try:
+        _handler.handle_command("")
+    finally:
+        services.unregister_plugin("system-subagent")
 
     assert [a[0] for a in panel.added] == ["t1", "t2"]
     assert panel.added[0][3] == "gpt-4o"

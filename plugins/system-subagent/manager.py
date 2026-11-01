@@ -153,6 +153,16 @@ class SubAgentTaskStore:
         rows = self._db.query(f"SELECT * FROM {self._table} WHERE task_id = ?", (task_id,))
         return self._row_to_task(rows[0]) if rows else None
 
+    def latest_for_session(self, session_id: str) -> Optional[Dict]:
+        """该会话最近更新的任务（会话卡显示时恢复内容用）。"""
+        if not self.ensure() or not session_id:
+            return None
+        rows = self._db.query(
+            f"SELECT * FROM {self._table} WHERE session_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (session_id,),
+        )
+        return self._row_to_task(rows[0]) if rows else None
+
     def clear_old(self, days: int = 7) -> int:
         if not self.ensure():
             return 0
@@ -489,14 +499,22 @@ class SubAgentManager(QObject):
     def _on_executor_finished(self, task_id: str, result: str):
         """executor 完成回调（manager 内部接线，AutoConnection 落主线程）。
 
-        职责：单任务流式注入 → 批次计数 → 全完成时汇总注入（流式）或
-        广播 batch_finished（非流式，由 UI 层开新轮）。UI 归档
-        （mark_task_finished/卡片收尾）仍由 main_widget 的 task_finished 槽负责。
+        职责：广播完成（面板收尾 + 归档）→ 单任务流式注入 → 批次计数 →
+        全完成时汇总注入（流式）或广播 batch_finished（非流式，由 UI 层开新轮）。
+
+        ``task_finished`` 必须在正常完成路径发射：面板行靠它打完成标记、
+        窗口宿主靠它把任务归档进 _finished_tasks/插件表。此前只有 stalled /
+        cancel 路径发射，行会永远停在「执行中」且计时器无限累加。
         """
         executor = self._running_tasks.get(task_id)
         success = not (getattr(executor, "_execution_error", None) or "")
         agent_name = getattr(executor, "agent_name", "") if executor else ""
         task_description = getattr(executor, "task_description", "") if executor else ""
+
+        try:
+            self.task_finished.emit(task_id, result)
+        except Exception as e:  # noqa: BLE001 - 广播失败不阻断注入/批次汇总
+            logger.error(f"[SubAgentManager] task_finished.emit 失败 (finished path): {e}")
 
         # 单任务流式注入（不中断当前流式；空闲时降级为普通发送开新轮）
         if self._is_engine_streaming():
@@ -1038,6 +1056,67 @@ class SubAgentManager(QObject):
             }
 
         return {"summary": {}, "logs": [], "found": False, "status": "unknown"}
+
+    def latest_task_for_session(self, session_id: str) -> Dict:
+        """该会话最近一个任务（会话卡显示时恢复内容）。
+
+        优先级：插件表（更新最全，跨重启仍在）> 内存运行中 > 内存归档。
+        返回值与 ``get_task_logs`` 同形，可直接灌给会话卡。
+        """
+        if session_id and self._task_store is not None:
+            row = self._task_store.latest_for_session(session_id)
+            if row and row.get("task_id"):
+                summary = dict(row.get("summary") or {})
+                summary.setdefault("task_id", row["task_id"])
+                summary.setdefault("agent_name", row.get("agent_name", ""))
+                summary.setdefault("task_description", row.get("task_description", ""))
+                summary.setdefault("result", row.get("result", ""))
+                summary.setdefault("error", row.get("error", ""))
+                return {
+                    "found": True,
+                    "task_id": row["task_id"],
+                    "agent_name": row.get("agent_name", ""),
+                    "logs": row.get("logs", []),
+                    "summary": summary,
+                    "status": row.get("status", ""),
+                    "session_id": row.get("session_id", ""),
+                }
+
+        for task_id, executor in reversed(list(self._running_tasks.items())):
+            if session_id and getattr(executor, "_task_session_id", "") not in (session_id, ""):
+                continue
+            return {
+                "found": True,
+                "task_id": task_id,
+                "agent_name": getattr(executor, "agent_name", ""),
+                "logs": executor.get_logs(),
+                "summary": executor.get_summary(),
+                "status": "running",
+                "session_id": getattr(executor, "_task_session_id", ""),
+            }
+
+        for task_id, info in reversed(list(self._finished_tasks.items())):
+            if session_id and info.get("session_id", "") != session_id:
+                continue
+            return {
+                "found": True,
+                "task_id": task_id,
+                "agent_name": info.get("agent_name", ""),
+                "logs": info.get("logs", []),
+                "summary": {
+                    "task_id": task_id,
+                    "agent_name": info.get("agent_name", ""),
+                    "task_description": info.get("task_description", ""),
+                    "result": info.get("result", ""),
+                    "error": info.get("error", ""),
+                    "tool_call_count": info.get("tool_call_count", 0),
+                    "elapsed_seconds": info.get("elapsed_seconds", 0),
+                },
+                "status": "finished",
+                "session_id": info.get("session_id", ""),
+            }
+
+        return {"found": False}
 
     def get_tasks_status_with_details(
         self, task_ids: List[str], with_log: bool = False, with_result: bool = True, session_id: str = None

@@ -78,8 +78,6 @@ _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
 _HTML_CODE_BLOCK_PATTERN = re.compile(r"<(pre|code)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
 # HTML 标签清理正则（避免每次调用 re.sub）
 _HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
-# UUID 模式（用于提取 task_id）
-_UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 # Null 字符清理（编译一次，多次使用）
 _NULL_CHAR = "\x00"  # 避免 str.replace 被重复调用
 
@@ -281,34 +279,6 @@ def _format_unified_table(
         )
 
     return f'<div class="args-table">{"".join(rows)}</div>'
-
-
-def _parse_subagent_task_ids(result: str) -> str:
-    """
-    解析 result 中的 task_ids，返回逗号分隔的字符串。
-    """
-    if not result:
-        return ""
-
-    # 尝试解析 JSON
-    try:
-        data = json.loads(result)
-        if isinstance(data, dict):
-            task_ids = data.get("task_ids", [])
-            if task_ids:
-                return ",".join(task_ids)
-        elif isinstance(data, list):
-            return ",".join(data)
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # 尝试从文本中提取 task_id（UUID 格式）
-    # 使用预编译的 _UUID_PATTERN
-    matches = _UUID_PATTERN.findall(result)
-    if matches:
-        return ",".join(matches)
-
-    return ""
 
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)")
@@ -894,7 +864,7 @@ def render_tool_block(
     # 检测是否为 MCP 工具（mcp__ 前缀，动态发现工具；固定工具走 registry 图标）
     is_mcp_tool = tool_name.startswith("mcp__")
 
-    # 子智能体任务检测：插件注册 metadata["subagent_task"]=True 声明（表格语义 + 日志按钮）
+    # 子智能体任务检测：插件注册 metadata["subagent_task"]=True 声明（表格语义 + 图标配色）
     # 历史消息中的旧名 task（现为 subagent_para 的 alias）经 to_native 归一化后命中
     try:
         from app.tools.registry import ToolRegistry
@@ -961,22 +931,6 @@ def render_tool_block(
                 <span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{deleted}</span>
             </span>"""
 
-    # 子智能体日志查看按钮
-    subagent_log_btn_html = ""
-    if is_sub_agent_task:
-        # 解析 task_ids
-        task_ids_str = _parse_subagent_task_ids(result)
-        if task_ids_str:
-            subagent_log_btn_html = f'''
-        <span class="tool-subagent-log-btn" data-task-ids="{escape(task_ids_str)}"
-            role="button" tabindex="0"
-            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 8px; border-radius: 4px; position: relative;"
-            onclick="event.stopPropagation(); window._requestSubAgentLog(this.dataset.taskIds)"
-            onkeydown="if(event.key === 'Enter' || event.key === ' '){{ event.preventDefault(); event.stopPropagation(); window._requestSubAgentLog(this.dataset.taskIds); }}"
-            data-tooltip="查看子智能体执行日志">
-            <img src="qrc:/icons/日志.svg" style="width: 16px; height: 16px;" />
-        </span>'''
-
     # 生成参数预览（折叠时显示）
     # 优先使用插件 preview 闭包（自然语言预览），无匹配时 fallback 到 key=value 格式
     natural = _format_natural_preview(tool_name, tool_args)
@@ -1017,7 +971,6 @@ def render_tool_block(
                 {escape(args_preview)}
             </span>
             {diff_stats_html}
-            {subagent_log_btn_html}
         </span>"""
         if no_collapse:
             return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
@@ -1153,7 +1106,6 @@ def render_tool_block(
                 {escape(args_preview)}
             </span>
             {diff_stats_html}
-            {subagent_log_btn_html}
         </span>
     </div>
     <div class="tool-block__body" style="padding: 0 8px 4px;">
@@ -1176,7 +1128,6 @@ def render_tool_block(
                 {escape(args_preview)}
             </span>
             {diff_stats_html}
-            {subagent_log_btn_html}
         </span>
         <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>

@@ -132,3 +132,59 @@ def test_service_hide_uses_registry():
     SubAgentSessionService(registry).hide()
 
     assert registry.calls == [("hide", CARD_ID)]
+
+
+class _FakeFacade:
+    """窗口服务门面桩：给出当前会话最近任务。"""
+
+    def __init__(self, data):
+        self._data = data
+        self.log_calls = []
+
+    def latest_task(self):
+        return self._data
+
+    def get_task_logs(self, task_id):
+        self.log_calls.append(task_id)
+        return {"found": True, "logs": [], "summary": {}}
+
+
+def test_recover_loads_latest_task_of_current_session(card, monkeypatch):
+    """显示时按当前会话恢复内容（同成果框语义）。"""
+    facade = _FakeFacade(
+        {
+            "found": True,
+            "task_id": "t9",
+            "agent_name": "explore",
+            "logs": [{"type": "progress", "content": "开始", "timestamp": 0}],
+            "summary": {"status": "finished"},
+        }
+    )
+    monkeypatch.setattr(_session_card_mod, "_current_facade", lambda: (facade, "sess-1"))
+
+    card._recover_for_current_session()
+
+    assert card._task_id == "t9"
+    assert card._agent_name == "explore"
+    assert card._bound_session_id == "sess-1"
+    assert len(card._logs) == 1
+
+
+def test_recover_skips_when_same_session_already_bound(card, monkeypatch):
+    """已绑定同一会话的任务时不重复灌数据。"""
+    card.load("t1", "coder", [], {})
+    card._bound_session_id = "sess-1"
+    facade = _FakeFacade({"found": True, "task_id": "t9", "agent_name": "x", "logs": [], "summary": {}})
+    monkeypatch.setattr(_session_card_mod, "_current_facade", lambda: (facade, "sess-1"))
+
+    card._recover_for_current_session()
+
+    assert card._task_id == "t1"
+
+
+def test_recover_noop_without_facade(card, monkeypatch):
+    monkeypatch.setattr(_session_card_mod, "_current_facade", lambda: (None, ""))
+
+    card._recover_for_current_session()
+
+    assert card._task_id == ""

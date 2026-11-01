@@ -197,3 +197,24 @@ class TestGetTaskLogsAfterFinish:
         assert data["status"] == "finished"
         assert data["summary"]["tool_call_count"] == 3
         assert "t1" not in mgr._running_tasks
+
+
+class TestFinishedBroadcast:
+    """正常完成路径必须广播 task_finished（面板打完成 + 归档的唯一触发点）
+
+    回归背景：只有 stalled / cancel 路径 emit，正常完成不 emit → 运行面板行
+    永远停在「执行中」、计时器无限累加，任务也不归档。
+    """
+
+    def test_finished_path_emits_task_finished(self, store):
+        mgr = _make_manager(store)
+        ex = _make_executor()
+        mgr._running_tasks["t1"] = ex
+        seen = []
+        mgr.task_finished.connect(lambda tid, result: seen.append((tid, result)))
+
+        mgr._on_executor_finished("t1", "任务完成结果")
+
+        assert seen == [("t1", "任务完成结果")]
+        # 广播先于批次汇总：批次计数归零后不再有副作用
+        assert mgr._batch_task_ids == set()

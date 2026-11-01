@@ -134,6 +134,47 @@ def test_panel_emits_height_on_data_change(panel):
     assert len(hits) >= 3
 
 
+# ──────────────────── 主题着色 ────────────────────
+
+
+def test_detail_labels_have_text_color_rule(panel):
+    """详情面板四个 label 必须命中 Row 级聚合 QSS 的文字色规则
+
+    回归：这些 label 原先没有 objectName，聚合表里的 color 规则一条都命中不了，
+    深色主题下落到应用调色板默认黑字（截图里模型名/调用次数/token/耗时全黑）。
+    """
+    import re
+
+    from PyQt5.QtGui import QPalette
+
+    from app.utils.design_tokens import Colors
+
+    panel.add_task("t1", "coder", "任务", model_name="gpt-4")
+    row = panel._rows["t1"]
+    qss = row.styleSheet()
+    assert "QLabel#agentDetailLabel" in qss
+    assert Colors.REALTIME_TEXT_SECONDARY in qss
+
+    # token 可能是 CSS rgba() 语法（QColor 解析不了），只比 RGB 三通道
+    token = Colors.REALTIME_TEXT_SECONDARY
+    m = re.search(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", token)
+    expected_rgb = tuple(int(g) for g in m.groups()) if m else None
+
+    for label in (
+        row._model_label_detail,
+        row._tool_label_detail,
+        row._ctx_label_detail,
+        row._elapsed_label_detail,
+    ):
+        assert label.objectName() == "agentDetailLabel"
+        assert label.styleSheet() == ""  # 默认路径不靠单控件兜底
+        got = label.palette().color(QPalette.WindowText)
+        if expected_rgb is not None:
+            assert (got.red(), got.green(), got.blue()) == expected_rgb
+        else:
+            assert got.name() == token.lower()
+
+
 # ──────────────────── 桥接 ────────────────────
 
 

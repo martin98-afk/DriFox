@@ -147,7 +147,8 @@ class AgentTaskRow(QFrame):
                 background: transparent;
                 border: none;
             }}
-            QLabel#agentDescLabel, QLabel#agentToolCountLabel, QLabel#agentTimeLabel {{
+            QLabel#agentDescLabel, QLabel#agentToolCountLabel, QLabel#agentTimeLabel,
+            QLabel#agentDetailLabel {{
                 color: {Colors.REALTIME_TEXT_SECONDARY};
                 background: transparent;
             }}
@@ -257,6 +258,9 @@ class AgentTaskRow(QFrame):
             icon.setFont(get_unified_font(9))
             label = QLabel(text, self._detail_panel)
             label.setFont(get_unified_font(8))
+            # 默认色路径必须挂 objectName，Row 级聚合 QSS 才能命中文字色规则；
+            # 没有 objectName 的 QLabel 只能落到应用调色板（深色主题下是黑字）。
+            label.setObjectName("agentDetailLabel")
             c = text_color if text_color else f"{Colors.REALTIME_TEXT_SECONDARY}"
             # [PERF T35] 动态色（调用方可传 text_color）整表保留；默认色路径
             # 走 Row 级聚合 QSS 的 QLabel 文字色规则（此处仅当显式传色时才设）

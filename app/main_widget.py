@@ -15911,7 +15911,6 @@ class OpenAIChatToolWindow(ToolWindow):
             on_tool_diff=self._on_tool_diff_requested,
             on_card_diff=self._on_card_diff_requested,
             on_save_file=self._on_save_file_requested,
-            on_subagent_log=self._on_subagent_log_requested,
             on_review=self._on_review_requested,
             on_branch=self._on_branch_from_card_requested,
             immediate_render=scroll,  # 流式(scroll=True)立即渲染，加载(scroll=False)走懒渲染队列
@@ -17873,20 +17872,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[LLMChatter] 消息内嵌 diff（round 范围）显示失败: {e}")
             return False
-
-    def _on_subagent_log_requested(self, task_ids_str: str):
-        """卡片脚部日志按钮：转交子智能体插件（渲染层回调桥，不做业务）。
-
-        Args:
-            task_ids_str: 逗号分隔的任务ID列表
-        """
-        if not task_ids_str:
-            return
-        service = self._subagent_service()
-        if service is None:
-            logger.warning("[MainWidget] 子智能体插件未加载，跳过日志查看")
-            return
-        service.show_logs(task_ids_str)
 
     def _on_card_diff_requested(self, round_index: int, message_index: int = -1):
         """

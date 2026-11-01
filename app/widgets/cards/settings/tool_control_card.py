@@ -249,7 +249,7 @@ class ToolControlCardContent(QWidget):
 
         agent_name = self._controller.get_active_agent_name() if self._controller else None
         enabled = sum(1 for v in toggles.values() if v)
-        logger.info(f"[ToolCard] togglesChanged: agent={agent_name}, enabled={enabled}/{len(toggles)}")
+        logger.debug(f"[ToolCard] togglesChanged: agent={agent_name}, enabled={enabled}/{len(toggles)}")
         self._apply_toggles()
         # 向上层转发,触发主窗口工具栏按钮数字刷新
         self.togglesChanged.emit(toggles)
@@ -334,7 +334,7 @@ class ToolControlCardContent(QWidget):
             if self._controller:
                 toggles = self._controller.get_toggles()
                 agent = self._controller.get_active_agent_name()
-                logger.info(
+                logger.debug(
                     f"[ToolCard] _rebuild: agent={agent}, toggles_enabled={sum(1 for v in toggles.values() if v)}/{len(toggles)}"
                 )
             else:
@@ -358,7 +358,7 @@ class ToolControlCardContent(QWidget):
             self.setUpdatesEnabled(updates_enabled)
             self.update()
 
-        logger.info(f"[ToolCard] _rebuild done: {(_time.monotonic() - t0) * 1000:.0f} ms, groups={len(groups)}")
+        logger.debug(f"[ToolCard] _rebuild done: {(_time.monotonic() - t0) * 1000:.0f} ms, groups={len(groups)}")
 
     def _get_groups(self) -> list:
         """从 registry 动态聚合分组：[(group_name, [tool_name, ...]), ...]

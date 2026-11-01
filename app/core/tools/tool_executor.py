@@ -835,7 +835,7 @@ class ToolExecutor:
             local_session_id = self._session_id
             local_call_id = call_id or self._call_id
 
-        logger.info(f"[ToolExecutor] Executing tool: {tool_name}, args: {args}")
+        logger.debug(f"[ToolExecutor] Executing tool: {tool_name}, args: {args}")
 
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
         # trigger_hooks=False 时整体跳过（引擎 HookPolicy.NONE）
