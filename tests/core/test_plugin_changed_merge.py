@@ -185,6 +185,17 @@ class TestWorkerConsumesFiltered:
         assert w._appended[0]["_hook_event"] == "PostToolUse"
         assert q.empty()
 
+    def test_plugin_diff_transport_key_stripped(self):
+        """有净变化的 PluginChanged 消息注入前必须剥离 _plugin_diff 传输键"""
+        q: queue.Queue = queue.Queue()
+        q.put({"role": "user", "content": "启用", "_hook_event": "PluginChanged", "_plugin_diff": _d(add=["a"])})
+        w = self._make_worker(q)
+
+        w._inject_pending_hook_messages(include_team_mail=False)
+
+        assert len(w._appended) == 1
+        assert "_plugin_diff" not in w._appended[0], "传输键不得进入 API 缓存/持久化"
+
     def test_real_change_still_injected(self):
         q: queue.Queue = queue.Queue()
         q.put({"role": "user", "content": "启用", "_hook_event": "PluginChanged", "_plugin_diff": _d(add=["a"])})

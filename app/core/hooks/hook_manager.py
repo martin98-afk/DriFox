@@ -160,14 +160,17 @@ def filter_net_zero_plugin_messages(msgs: List[Dict]) -> List[Dict]:
 
     只剔带结构化 _plugin_diff 的消息；无 diff 的事件通知（如 ui 组件重载）
     保守保留。判定异常时保守保留全部，宁可多发不丢信息。
+    判定完成后就地剥离 _plugin_diff 传输键（合并依据，不入消息列表/持久化）。
     """
     try:
         pc = [m for m in msgs if m.get("_hook_event") == "PluginChanged" and m.get("_plugin_diff")]
         if pc and merge_plugin_diffs_net_zero([m["_plugin_diff"] for m in pc]):
             logger.info(f"[HookManager] PluginChanged 净零抵消（开了又关），丢弃 {len(pc)} 条注入消息")
-            return [m for m in msgs if not (m.get("_hook_event") == "PluginChanged" and m.get("_plugin_diff"))]
+            msgs = [m for m in msgs if not (m.get("_hook_event") == "PluginChanged" and m.get("_plugin_diff"))]
     except Exception as e:
         logger.debug(f"[HookManager] PluginChanged 合并判定失败，保守保留: {e}")
+    for m in msgs:
+        m.pop("_plugin_diff", None)
     return msgs
 
 
