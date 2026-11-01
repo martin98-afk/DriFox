@@ -15,6 +15,7 @@
 
 from loguru import logger
 
+from .history_loader import load_history_items
 from .host import SubAgentHost
 from .run_bridge import PANEL_ID, SubAgentRunBridge
 from .run_panel import SubAgentRunPanel
@@ -39,6 +40,8 @@ def register_ui(registry) -> None:
             SubAgentRunPanel,
             order=110,
             metadata={"title": "子智能体", "role": "assistant"},
+            # 会话重载：从落库 tool 消息的 task_ids 重建已完成行（运行态由 run_bridge 投影）
+            history_loader=load_history_items,
         )
     except Exception as e:  # noqa: BLE001 - 注册失败不拖垮宿主
         logger.warning(f"[system-subagent] 运行面板注册失败: {e}")

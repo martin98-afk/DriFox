@@ -155,3 +155,38 @@ def test_detach_from_registry_removes_from_card(card, registry):
     registry.detach_card_inline_panel("panel")
 
     assert card.get_inline_panel("panel") is None
+
+
+def test_hydrate_restores_history_on_real_card(card, registry):
+    """真实卡片：会话重载回填把 loader 返回的条目灌进面板并挂到气泡布局。"""
+
+    class _RestorePanel(_DemoPanel):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.items = []
+
+        def restore_items(self, items):
+            self.items.extend(items)
+
+    registry.register_card_inline_panel(
+        "demo",
+        "panel",
+        _RestorePanel,
+        history_loader=lambda batch, host: [{"task_id": "t1"}] if batch else [],
+    )
+
+    registry.hydrate_inline_panels(card, [{"role": "tool", "name": "subagent_para"}])
+
+    panel = card.get_inline_panel("panel")
+    assert isinstance(panel, _RestorePanel)
+    assert panel.items == [{"task_id": "t1"}]
+    assert card._assistant_bubble.layout().indexOf(panel) >= 0
+
+
+def test_hydrate_empty_batch_leaves_card_clean(card, registry):
+    """loader 返回空：不创建空面板（历史卡不应凭空多出一块空白区）。"""
+    registry.register_card_inline_panel("demo", "panel", _DemoPanel, history_loader=lambda batch, host: [])
+
+    registry.hydrate_inline_panels(card, [])
+
+    assert card.get_inline_panel("panel") is None

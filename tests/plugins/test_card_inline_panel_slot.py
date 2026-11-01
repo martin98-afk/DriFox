@@ -128,3 +128,75 @@ def test_inline_panel_does_not_touch_floating_cards(fresh_registry):
     """内嵌面板与浮动卡是两套注册表，互不影响。"""
     fresh_registry.register_card_inline_panel("demo", "panel", _FakePanel)
     assert fresh_registry.get_floating_cards() == {}
+
+
+# ──────────────────── 历史回填（会话重载） ────────────────────
+
+class _RestoreCard(_StubCard):
+    """带 restore_items 的面板宿主卡：记录回填条目。"""
+
+    def __init__(self, name: str, panel=None):
+        super().__init__(name)
+        self.panel = panel
+        self.restored = []
+
+    def ensure_inline_panel(self, panel_id):
+        self.ensured.append(panel_id)
+        return self.panel
+
+
+class _RestorePanel:
+    def __init__(self):
+        self.items = []
+
+    def restore_items(self, items):
+        self.items.extend(items)
+
+
+def test_hydrate_skips_panel_without_history_loader(fresh_registry):
+    """未提供 history_loader 的插件不参与历史回填（不创建空面板）。"""
+    fresh_registry.register_card_inline_panel("demo", "panel", _FakePanel)
+    card = _RestoreCard("card", _RestorePanel())
+
+    fresh_registry.hydrate_inline_panels(card, [{"role": "tool", "name": "subagent_para"}])
+
+    assert card.ensured == []
+
+
+def test_hydrate_restores_when_loader_returns_items(fresh_registry):
+    fresh_registry.register_card_inline_panel(
+        "demo", "panel", _FakePanel, history_loader=lambda batch, host: [{"task_id": "t1"}]
+    )
+    panel = _RestorePanel()
+    card = _RestoreCard("card", panel)
+
+    fresh_registry.hydrate_inline_panels(card, [{"role": "tool"}])
+
+    assert card.ensured == ["panel"]
+    assert panel.items == [{"task_id": "t1"}]
+
+
+def test_hydrate_skips_when_loader_returns_empty(fresh_registry):
+    fresh_registry.register_card_inline_panel("demo", "panel", _FakePanel, history_loader=lambda batch, host: [])
+    card = _RestoreCard("card", _RestorePanel())
+
+    fresh_registry.hydrate_inline_panels(card, [])
+
+    assert card.ensured == []
+
+
+def test_hydrate_survives_loader_exception(fresh_registry):
+    """插件 loader 抛错不能打断会话渲染，其余面板照常回填。"""
+
+    def _boom(batch, host):
+        raise RuntimeError("loader 挂了")
+
+    fresh_registry.register_card_inline_panel("demo", "bad", _FakePanel, order=100, history_loader=_boom)
+    fresh_registry.register_card_inline_panel(
+        "demo", "good", _FakePanel, order=200, history_loader=lambda batch, host: [{"task_id": "t9"}]
+    )
+    card = _RestoreCard("card", _RestorePanel())
+
+    fresh_registry.hydrate_inline_panels(card, [])
+
+    assert card.ensured == ["good"]

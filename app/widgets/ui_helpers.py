@@ -1497,6 +1497,25 @@ def materialize_batch_with_extras(batch: list, session_id: str, load_extras) -> 
     return out
 
 
+def _hydrate_inline_panels(assistant_card, batch: list) -> None:
+    """会话重载：把落库 tool 消息里的历史数据灌回本卡的内嵌面板。
+
+    与运行态投影（``attach_card_inline_panel``）互补——后者恒迁到最新卡，本函数
+    只为「产生数据的这张卡」重建，语义同成果栏。插件在注册面板时提供
+    ``history_loader(batch, host)`` 才参与；未提供即跳过（主程序不含任何插件业务）。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        registry = UIPluginRegistry.get_instance()
+    except Exception as e:  # noqa: BLE001 - 插件系统未就绪时按无面板处理
+        logger.debug(f"[ui_helpers] 内嵌面板回填跳过（注册表不可用）: {e}")
+        return
+    resolver = getattr(assistant_card, "_resolve_footer_host", None)
+    host = resolver() if callable(resolver) else None
+    registry.hydrate_inline_panels(assistant_card, batch, main_widget=host)
+
+
 def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render: bool = True) -> None:
     """
     将消息批次渲染到 assistant 卡片
@@ -1545,6 +1564,7 @@ def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render
     if artifacts:
         # 成果属于产生它的那一轮，重开会话后仍要能看到（数据来自 tool 消息落库）
         assistant_card.update_artifact_list(artifacts)
+    _hydrate_inline_panels(assistant_card, batch)
     assistant_card.finish_streaming(history=True, immediate=immediate_render)
 
 

@@ -519,6 +519,7 @@ class CardInlinePanelInfo:
         widget_class: QWidget 子类，构造签名为 ``widget_class(parent)``
         order: 同卡多面板时的排布顺序（升序；缺省 100，排在任务看板/成果栏之后）
         metadata: 附加元数据
+        history_loader: 会话重载时的历史数据提供者（见 ``register_card_inline_panel``）
     """
 
     plugin_name: str
@@ -526,6 +527,7 @@ class CardInlinePanelInfo:
     widget_class: type
     order: int = 100
     metadata: Dict[str, Any] = field(default_factory=dict)
+    history_loader: Optional[Callable[..., Any]] = None
 
 @dataclass(frozen=True)
 class TitlebarTabInfo:
@@ -1583,12 +1585,21 @@ class UIPluginRegistry:
         widget_class: type,
         order: int = 100,
         metadata: Optional[Dict[str, Any]] = None,
+        history_loader: Optional[Callable[..., Any]] = None,
     ) -> None:
         """注册消息卡片内嵌面板（同 panel_id 后注册覆盖）。
 
         面板实例由 MessageCard 在 attach 时懒创建并缓存；同一卡片重复 attach 幂等。
         面板若定义 ``heightChanged`` 信号，宿主会自动接线到卡片高度锚定补偿
         （契约同 ``InlineTodoPanel``：必须报「实际占高」而非 sizeHint）。
+
+        ``history_loader(batch, host) -> items``：会话重载时的历史数据通道。
+        会话重载会把消息批次重渲成新卡，运行态投影（插件桥接层）此时没有数据；
+        面板要能回看历史，只能从落库的 tool 消息侧重建——形如成果栏
+        （``ToolResult.artifacts`` 随消息落库后由 ``render_batch_to_assistant_card``
+        灌回卡片）。loader 返回非空列表时宿主会 ``ensure_inline_panel`` 并调用面板的
+        ``restore_items(items)``；面板自带去重，重复渲染幂等。插件不实现该约定则
+        历史卡上不出现该面板（运行态投影不受影响）。
         """
         self._card_inline_panels[panel_id] = CardInlinePanelInfo(
             plugin_name=plugin_name,
@@ -1596,6 +1607,7 @@ class UIPluginRegistry:
             widget_class=widget_class,
             order=order,
             metadata=metadata or {},
+            history_loader=history_loader,
         )
 
     def get_card_inline_panel(self, panel_id: str) -> Optional[CardInlinePanelInfo]:
@@ -1650,6 +1662,46 @@ class UIPluginRegistry:
             except TypeError:
                 win_refs[host_wid] = card
         return panel
+
+    def hydrate_inline_panels(self, card, batch: Any, main_widget=None) -> None:
+        """会话重载：按落库的 tool 消息把历史数据灌回卡片的对应内嵌面板。
+
+        与 ``attach_card_inline_panel``（运行态投影，恒迁到最新卡）互补：本方法
+        **不迁卡**，只为「产生该数据的那张卡」重建面板——语义同成果栏
+        （``update_artifact_list`` 追加到所属卡片）。面板缺失时不创建无数据的空面板：
+        loader 返回空即跳过。
+
+        Args:
+            card: 目标 assistant 卡片（由批次渲染方传入，宿主不猜）
+            batch: 该卡片对应的消息批次（含 tool 消息）
+            main_widget: 宿主窗口（插件 loader 取窗口级服务用；可缺省）
+        """
+        if not self._card_inline_panels or not _widget_alive(card):
+            return
+        for info in self.get_card_inline_panels():
+            loader = getattr(info, "history_loader", None)
+            if not callable(loader):
+                continue
+            try:
+                items = loader(batch, main_widget)
+            except Exception as e:  # noqa: BLE001 - 插件 loader 异常不打断会话渲染
+                logger.debug(f"[UIPluginRegistry] 内嵌面板历史回填失败 {info.panel_id}: {e}")
+                continue
+            if not items:
+                continue
+            ensure = getattr(card, "ensure_inline_panel", None)
+            if not callable(ensure):
+                return
+            panel = ensure(info.panel_id)
+            if panel is None:
+                continue
+            restore = getattr(panel, "restore_items", None)
+            if not callable(restore):
+                continue
+            try:
+                restore(items)
+            except RuntimeError, AttributeError:
+                pass
 
     def detach_card_inline_panel(self, panel_id: str) -> None:
         """从所有窗口的当前卡片摘除该内嵌面板（不注销注册；插件卸载路径用）"""

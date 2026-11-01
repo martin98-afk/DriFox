@@ -16,7 +16,7 @@
 （契约同 ``InlineTodoPanel``：必须报实际占高，宿主据此做外层滚动锚定补偿）。
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
@@ -178,6 +178,41 @@ class SubAgentRunPanel(QWidget):
         self._sync_visibility()
         self._emit_height()
 
+    # ── 历史回填（会话重载）──
+
+    def restore_items(self, items: List[Dict[str, Any]]) -> None:
+        """按历史条目重建已完成行（会话重载路径，幂等）。
+
+        行数据来自工具结果落库的 task_ids（插件 loader 查表整理成 item），
+        与运行态投影（桥接层 ``add_task``）互不重叠：本方法只补已完成行。
+
+        Args:
+            items: [{task_id, agent_name, description, model_name?, tool_call_count?,
+                     elapsed_seconds?, context_usage?, success?}, ...]
+        """
+        restored = False
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            task_id = str(item.get("task_id") or "")
+            if not task_id or task_id in self._rows:
+                continue
+            self.show_completed_task(
+                task_id,
+                str(item.get("agent_name") or ""),
+                str(item.get("description") or ""),
+                model_name=str(item.get("model_name") or ""),
+                tool_call_count=int(item.get("tool_call_count") or 0),
+                elapsed_seconds=int(item.get("elapsed_seconds") or 0),
+                context_usage=str(item.get("context_usage") or ""),
+                success=bool(item.get("success", True)),
+            )
+            restored = True
+        if restored and not self._needs_tick():
+            # 历史卡默认折叠（同成果栏）：几十张历史卡各撑开一列已完成行会淹没正文
+            self._set_collapsed(True)
+            self._emit_height()
+
     def show_completed_task(
         self,
         task_id: str,
@@ -187,8 +222,13 @@ class SubAgentRunPanel(QWidget):
         tool_call_count: int = 0,
         elapsed_seconds: int = 0,
         context_usage: str = "",
+        success: bool = True,
     ) -> None:
-        """补一条已完成任务行（消息内日志按钮按 task_id 回看历史任务）。"""
+        """补一条已完成任务行（会话重载 / 历史回看）。
+
+        Args:
+            success: 是否成功完成（失败/中止的行显示 ❌）
+        """
         if task_id in self._rows:
             return
         import time as _time
@@ -211,7 +251,7 @@ class SubAgentRunPanel(QWidget):
             row.set_model_name(model_name)
         if context_usage:
             row.set_context_info(context_usage)
-        row.finish(success=True)
+        row.finish(success=success)
 
         self._ensure_expanded()
         self._sync_visibility()
