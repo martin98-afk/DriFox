@@ -384,6 +384,11 @@ class MessageCard(SimpleCardWidget):
         self._artifact_panel_host = None
         self._artifact_panel_items: list = []
         self._artifact_panel_height_cache = 0
+        # 插件注册的消息卡内嵌面板（panel_id -> widget；槽位见
+        # UIPluginRegistry.register_card_inline_panel，挂载顺序同任务看板）
+        self._inline_panels: Dict[str, QWidget] = {}
+        self._inline_panel_host = None
+        self._inline_panel_height_cache: Dict[str, int] = {}
         self._retry_error_type = ""  # 重试错误类型
         self._retry_attempt = 0  # 当前重试次数
         self._retry_max = 15  # 最大重试次数
@@ -5511,6 +5516,101 @@ class MessageCard(SimpleCardWidget):
         host = self._todo_panel_host
         if host is not None:
             host.removeWidget(panel)
+
+    # ── 插件内嵌面板（通用槽位；任务看板/成果栏是内置的同位面板）──
+
+    def ensure_inline_panel(self, panel_id: str):
+        """按插件注册表懒创建内嵌面板并挂进气泡布局末尾。
+
+        面板类与排布顺序由插件在 ``register_card_inline_panel`` 声明，本方法只负责
+        实例化、挂载与高度记账接线。同一卡片内幂等；面板被外部摘除后重新挂回。
+
+        Returns:
+            面板实例；注册缺失 / 无气泡 / 创建失败返回 None。
+        """
+        panel = self._inline_panels.get(panel_id)
+        if panel is not None:
+            host = self._inline_panel_host
+            if host is not None and host.indexOf(panel) < 0:
+                host.addWidget(panel)
+            return panel
+        bubble = self._assistant_bubble
+        if bubble is None:
+            return None
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            info = UIPluginRegistry.get_instance().get_card_inline_panel(panel_id)
+        except Exception as e:  # noqa: BLE001 - 注册表异常降级为不渲染
+            logger.warning(f"[MessageCard] 内嵌面板注册表不可用 {panel_id}: {e}")
+            return None
+        if info is None:
+            return None
+        try:
+            panel = info.widget_class(bubble)
+        except Exception as e:  # noqa: BLE001 - 插件面板构造失败不拖垮卡片
+            logger.warning(f"[MessageCard] 内嵌面板创建失败 {panel_id}: {e}")
+            return None
+        height_signal = getattr(panel, "heightChanged", None)
+        if height_signal is not None and hasattr(height_signal, "connect"):
+            height_signal.connect(lambda *_, _pid=panel_id: self._on_inline_panel_height_changed(_pid))
+        bubble_lay = bubble.layout()
+        if bubble_lay is not None:
+            bubble_lay.addWidget(panel)
+            self._inline_panel_host = bubble_lay
+        self._inline_panels[panel_id] = panel
+        return panel
+
+    def get_inline_panel(self, panel_id: str):
+        """取本卡已创建的内嵌面板（未创建返回 None，不触发创建）。"""
+        return self._inline_panels.get(panel_id)
+
+    def remove_inline_panel(self, panel_id: str) -> None:
+        """摘除并销毁内嵌面板（迁卡/插件卸载路径）。"""
+        panel = self._inline_panels.pop(panel_id, None)
+        self._inline_panel_height_cache.pop(panel_id, None)
+        if panel is None:
+            return
+        host = self._inline_panel_host
+        try:
+            if host is not None:
+                host.removeWidget(panel)
+        except RuntimeError:
+            pass
+        try:
+            panel.setParent(None)
+            panel.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _on_inline_panel_height_changed(self, panel_id: str):
+        """内嵌面板高度变化：按实际占高差上报销定补偿（契约同任务看板）
+
+        取 ``max(sizeHint, height)`` 而非单取其一：面板刚重建时内部 sizeHint 已刷新、
+        Qt 尚未重排，两者不同源会让 delta 符号与实际变化相反（详见
+        ``_todo_panel_effective_height`` 的事故注释）。
+        """
+        panel = self._inline_panels.get(panel_id)
+        if panel is None:
+            return
+        try:
+            if not panel.isVisible():
+                cur = 0
+            else:
+                cur = max(int(panel.sizeHint().height()), int(panel.height()))
+            prev = self._inline_panel_height_cache.get(panel_id, 0)
+            self._inline_panel_height_cache[panel_id] = cur
+            delta = int(cur - prev)
+            if not delta:
+                return
+            bubble = getattr(self, "_assistant_bubble", None)
+            if bubble is not None:
+                bubble.updateGeometry()
+            self.updateGeometry()
+            self._last_height_delta += delta
+            self.heightChanged.emit(self.height())
+        except RuntimeError:
+            pass
 
     def _ensure_todo_panel(self):
         """懒创建任务看板并挂进气泡布局末尾（正文 viewer 之后、页脚之前）"""

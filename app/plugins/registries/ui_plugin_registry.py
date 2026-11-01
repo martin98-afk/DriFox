@@ -10,6 +10,7 @@ import json
 import os
 import re
 import threading
+import weakref
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
@@ -493,6 +494,39 @@ class FloatingCardInfo:
     context_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
 
+def _widget_alive(widget: Any) -> bool:
+    """widget 是否存活（None / 已销毁 wrapper 均视为不存活）。"""
+    if widget is None:
+        return False
+    try:
+        import sip
+
+        return not sip.isdeleted(widget)
+    except Exception:
+        return True
+
+@dataclass(frozen=True)
+class CardInlinePanelInfo:
+    """消息卡片内嵌面板注册信息
+
+    内嵌面板挂在 assistant 气泡布局末尾（正文、任务看板、成果栏之后，页脚之前），
+    与浮动卡的区别：无独立容器/标题/命令，生命周期跟随卡片，由宿主在「新卡出现」
+    时迁卡（旧卡摘除、新卡接管）。
+
+    Attributes:
+        plugin_name: 所属插件名
+        panel_id: 面板唯一 ID
+        widget_class: QWidget 子类，构造签名为 ``widget_class(parent)``
+        order: 同卡多面板时的排布顺序（升序；缺省 100，排在任务看板/成果栏之后）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    panel_id: str
+    widget_class: type
+    order: int = 100
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
 @dataclass(frozen=True)
 class TitlebarTabInfo:
     """标题栏常驻 tab 注册信息
@@ -806,6 +840,10 @@ class UIPluginRegistry:
         self._plugin_paths: Dict[str, str] = {}
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
+        # 插件注册的消息卡内嵌面板：{panel_id: CardInlinePanelInfo}
+        self._card_inline_panels: Dict[str, CardInlinePanelInfo] = {}
+        # 内嵌面板当前挂载的卡片（弱引用，避免阻止卡片回收）
+        self._inline_panel_cards: Dict[str, Any] = {}
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
         # 欢迎卡片插件点击动作：{action: WelcomeActionInfo}
         self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
@@ -1535,6 +1573,91 @@ class UIPluginRegistry:
                 priority=priority,
             )
         )
+
+    # ── 消息卡内嵌面板（与浮动卡互补：无独立容器，随卡片迁卡） ──
+
+    def register_card_inline_panel(
+        self,
+        plugin_name: str,
+        panel_id: str,
+        widget_class: type,
+        order: int = 100,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息卡片内嵌面板（同 panel_id 后注册覆盖）。
+
+        面板实例由 MessageCard 在 attach 时懒创建并缓存；同一卡片重复 attach 幂等。
+        面板若定义 ``heightChanged`` 信号，宿主会自动接线到卡片高度锚定补偿
+        （契约同 ``InlineTodoPanel``：必须报「实际占高」而非 sizeHint）。
+        """
+        self._card_inline_panels[panel_id] = CardInlinePanelInfo(
+            plugin_name=plugin_name,
+            panel_id=panel_id,
+            widget_class=widget_class,
+            order=order,
+            metadata=metadata or {},
+        )
+
+    def get_card_inline_panel(self, panel_id: str) -> Optional[CardInlinePanelInfo]:
+        """按 panel_id 取注册信息；未注册返回 None。"""
+        return self._card_inline_panels.get(panel_id)
+
+    def get_card_inline_panels(self) -> List[CardInlinePanelInfo]:
+        """全部内嵌面板注册（order 升序）。"""
+        return sorted(self._card_inline_panels.values(), key=lambda i: i.order)
+
+    def attach_card_inline_panel(self, panel_id: str, main_widget=None) -> Optional[Any]:
+        """把内嵌面板挂到宿主最新 assistant 卡片（跨卡迁移：旧卡摘除、新卡接管）。
+
+        迁移语义同任务看板（运行态是「当前状态」，每轮跟随最新卡）。宿主优先序：
+        调用方传入的 main_widget → Tab 全局宿主 → 注册时的主窗口。
+
+        Returns:
+            面板实例；注册缺失 / 宿主无卡 / 卡片不支持槽位 / 创建失败返回 None。
+        """
+        info = self._card_inline_panels.get(panel_id)
+        if info is None:
+            return None
+        mw = main_widget or self._resolve_global_host() or self._main_widget
+        if mw is None:
+            return None
+        if not _widget_alive(mw):
+            return None
+        card = getattr(mw, "_current_assistant_card", None)
+        if not _widget_alive(card):
+            finder = getattr(mw, "_find_latest_assistant_card", None)
+            card = finder() if callable(finder) else None
+        if not _widget_alive(card):
+            return None
+        # 旧卡摘除：只保留最新卡片上的实例（同 _sync_todo_panel 语义）
+        prev = self._inline_panel_cards.get(panel_id)
+        prev_card = prev() if isinstance(prev, weakref.ref) else prev
+        if _widget_alive(prev_card) and prev_card is not card:
+            try:
+                prev_card.remove_inline_panel(panel_id)
+            except (RuntimeError, AttributeError):
+                pass
+        ensure = getattr(card, "ensure_inline_panel", None)
+        if not callable(ensure):
+            return None
+        panel = ensure(panel_id)
+        if panel is not None:
+            try:
+                self._inline_panel_cards[panel_id] = weakref.ref(card)
+            except TypeError:
+                self._inline_panel_cards[panel_id] = card
+        return panel
+
+    def detach_card_inline_panel(self, panel_id: str) -> None:
+        """从当前卡片摘除内嵌面板（不注销注册；插件卸载路径用它清实例）。"""
+        ref = self._inline_panel_cards.pop(panel_id, None)
+        card = ref() if isinstance(ref, weakref.ref) else ref
+        if not _widget_alive(card):
+            return
+        try:
+            card.remove_inline_panel(panel_id)
+        except (RuntimeError, AttributeError):
+            pass
 
     def register_floating_card(
         self,
@@ -3806,6 +3929,10 @@ class UIPluginRegistry:
                         pass
                     if was_visible:
                         self._pending_card_restore.append((plugin_name, win_id, cid))
+        # 清理消息卡内嵌面板：先摘除已挂实例（面板可能含 QTimer/线程），再注销注册
+        for pid in [k for k, v in self._card_inline_panels.items() if v.plugin_name == plugin_name]:
+            self.detach_card_inline_panel(pid)
+            self._card_inline_panels.pop(pid, None)
         # 清理 fence 渲染器注册
         self._fence_renderers = {k: v for k, v in self._fence_renderers.items() if v.plugin_name != plugin_name}
         self._plugin_paths.pop(plugin_name, None)
