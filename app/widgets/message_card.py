@@ -4140,6 +4140,10 @@ class MessageCard(SimpleCardWidget):
                     # reorganizeContent 等守卫按旧模式归拢工具/思考块（"切换简洁
                     # 模式对复用卡片永不生效"）。绑定时按当前配置重同步。
                     pooled.sync_compact_mode_to_js()
+                    # 字体同理：reset_for_reuse 保留骨架 → :root 里是上一任卡片
+                    # 的字体变量。用户可能在这期间切过字体，这里按当前配置对齐
+                    # （骨架字体规则读变量，一次 IPC 即可，无需重建骨架）。
+                    pooled._apply_font_vars()
                     self.viewer = pooled
                 except Exception:
                     # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建

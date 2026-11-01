@@ -121,6 +121,7 @@ def svc(tmp_path, monkeypatch):
     service._ext_remote_sha = {}
     service._ext_dirty = {}
     service._content_hashes = {}
+    service._merge_bases = set()
     service._upload_lock = threading.Lock()
     service._sync_base_dir = tmp_path / "cache" / "sync_base"
     service._sha_cache_path = tmp_path / ".sync_shas.json"

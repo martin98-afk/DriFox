@@ -36,6 +36,14 @@ def invalidate_font_cache() -> None:
     _cached_font_size_key = None
     _cached_font_size_delta = 0
     _cached_font_size_base = 14
+    # markdown 渲染结果缓存：工具块的 <pre> 内联了全局字体（render_helpers）
+    # 与字号，缓存 key 不含这两项 → 不清则切字体后工具输出仍是旧字体。
+    try:
+        from app.widgets.card_render_core import _render_markdown_to_html_cached_impl
+
+        _render_markdown_to_html_cached_impl.cache_clear()
+    except Exception:
+        pass
     try:
         from app.widgets.markdown_block_viewer import _HTML_PREFIX_CACHE, _TEXT_BLOCK_CACHE
 

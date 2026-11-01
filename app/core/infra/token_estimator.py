@@ -228,8 +228,13 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
         (hash(text), len(text), model) 传给内层 lru_cache——缓存不再持有
         消息全文引用（长消息曾致缓存峰值膨胀且阻止已压缩消息字符串被 GC）。
         hash+len 双键防跨文本碰撞误命中；hash() 进程内一致即可（lru_cache
-        本就是进程内生命周期，不跨进程）。容量 1024 → 256（键已轻量，
-        下调无命中率损失）。
+        本就是进程内生命周期，不跨进程）。
+
+        ⚠️ 容量 2048：曾降到 256 并断言「键已轻量、下调无命中率损失」，实测
+        是错的。长会话每次快照要估 2N 个文本（content + reasoning_content），
+        200 条消息 = 400 个唯一键，超过 256 就整轮抖动重算——1.48MB 会话实测
+        稳定在 hits=398 / misses=1202，即每遍有一半白算（310ms/次，主线程）。
+        2048 覆盖约 1000 条消息，按每格 ~200 字节算内存约 400KB，可接受。
         原文传递：lru_cache MISS 时内层需要原文重算，经 thread-local 单槽
         寄存器获取——同线程内 estimate_tokens 非重入，MISS 必然紧跟外层
         调用，单槽无交错风险；命中路径不读寄存器，纯缓存返回。
@@ -244,7 +249,7 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
 _cache_text_reg = threading.local()
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=2048)
 def _estimate_tokens_cached(text_hash: int, text_len: int, model: str) -> int:
     """内层缓存实现：键为 (hash, len, model)，不持消息全文。
 

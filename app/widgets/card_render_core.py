@@ -3555,7 +3555,11 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v73）：_v2LiveSplit 插入切片段后就地初始化图表/
 # 公式/插件 fence（与 patchBlocks / updateTailHtml 同款五连）。缺它时切片段里的
 # echarts 容器插进 DOM 却没人 init，一直空白到下一次整块正式化（图表区空一块）。
-_SKELETON_CACHE_VERSION = 73
+# _SKELETON_CACHE_VERSION +1（v74）：字体族/等宽族改走 :root CSS 变量
+# （--dfx-font-family / --dfx-font-mono / --dfx-font-size），供 CodeWebViewer.refresh_font
+# 运行时注入。旧骨架把字体值写死在 <style> 里且池化复用保留骨架 → 切字体后
+# 已存在的卡片永远不跟随（"要重建几次会话才刷出来"）。
+_SKELETON_CACHE_VERSION = 74
 
 
 def _js_literal(value) -> str:

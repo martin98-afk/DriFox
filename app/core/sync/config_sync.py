@@ -24,6 +24,7 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from app.core.sync import fingerprint as fp
+from app.core.sync.lww import Entry
 from app.utils.config import Settings
 from app.utils.utils import get_app_data_dir
 
@@ -251,6 +252,12 @@ class ConfigSyncService(QObject):
         self._records_remote_sha: Optional[str] = None  # 远端 share_records.json SHA 缓存
         self._ext_remote_sha: Dict[str, str] = {}  # 远端 provider zip SHA 缓存 {provider_id: sha}
         self._ext_dirty: Dict[str, bool] = {}  # provider 内容待上传标记 {provider_id: bool}
+        # 已确认为「本机曾与远端成功同步过」的单元集合（持久化）。
+        # 用于区分两种「无 base sha」：
+        #   - 真新机/解绑重绑 → 云端权威（本地是绑定前快照，不能反压云端）
+        #   - 老状态文件没有该字段 / 仅 sha 为 None → 本机仍是同一台设备，
+        #     应按正常 LWW 合并，否则本地刚改的值会被云端旧内容覆盖。
+        self._merge_bases: set = set()
         # 各同步单元「上次与远端一致时的本地内容指纹」（unit → hex），
         # 用于 zero-network 判断「内容没变就不要上传」。
         self._content_hashes: Dict[str, str] = {}
@@ -389,11 +396,15 @@ class ConfigSyncService(QObject):
 
         self._set_state("idle")
         # 同步元数据记账器：采集 ConfigItem 变更，生成 LWW 条目表（含墓碑）。
-        # 失败不阻塞同步（退化成 union 合并，不丢数据）。
+        # 正常启动路径下 Settings 已在 get_instance() 里绑好（见
+        # Settings._bind_sync_recorder），此处只补设备标识；单例未绑定
+        # （测试桩 / 早期异常）时才现绑。失败不阻塞同步（退化成 union 合并）。
         try:
             from app.core.sync.meta_recorder import bind_settings
 
-            self._meta_recorder = bind_settings(Settings.get_instance(), device=self._device_tag)
+            rec = bind_settings(Settings.get_instance(), device=self._device_tag)
+            rec.set_device(self._device_tag)
+            self._meta_recorder = rec
         except Exception as e:
             logger.warning(f"[ConfigSync] 同步元数据接线失败: {e}")
             self._meta_recorder = None
@@ -412,8 +423,15 @@ class ConfigSyncService(QObject):
         self._initial_sync_timer.timeout.connect(self._start_initial_sync)
         self._initial_sync_timer.start()
 
-    def disable(self):
-        """解绑前调用：停止文件监听和防抖计时器，清除 SHA 缓存"""
+    def disable(self, clear_state: bool = True):
+        """停止同步。
+
+        Args:
+            clear_state: True（默认）= 解绑语义，清空 SHA 缓存与合并基准，
+                避免解绑重绑后误用旧基准；False = 仅停止（进程退出路径），
+                保留磁盘上的 SHA 缓存与合并基准，否则下次启动会误判成
+                「新机首次同步」，把本地配置整份交给云端裁决。
+        """
         self._stop_watching()
         self._stop_polling()
         if self._debounce_timer:
@@ -425,13 +443,18 @@ class ConfigSyncService(QObject):
             self._initial_sync_timer = None
         self._token = ""
         self._owner = ""
+        if not clear_state:
+            self._set_state("disabled")
+            return
         # 清除 SHA 缓存（磁盘 + 内存），防止解绑后重新绑定时误判跳过下载
         self._config_remote_sha = None
         self._custom_remote_sha = None
         self._records_remote_sha = None
         self._ext_remote_sha = {}
         self._content_hashes = {}
+        self._merge_bases = set()
         self._initial_sync_completed = False
+
         try:
             if self._sha_cache_path.exists():
                 self._sha_cache_path.unlink()
@@ -444,6 +467,40 @@ class ConfigSyncService(QObject):
         except Exception:
             pass
         self._set_state("disabled")
+
+    def _apply_session_touched(self, local_entries: Dict[str, Entry], remote_clock: int) -> list:
+        """把本次会话真实改过的条目抬到远端 clock 之上，返回被抬高的路径。
+
+        为什么需要：Lamport 时钟是每设备独立计数，云端 clock 完全可能高于本地
+        （上次会话 clock 未落盘、旧版本残留、进程崩溃）。此时本地 tick 出来的
+        序号压不过云端，合并时本地刚改的值仍会被云端旧内容覆盖。
+
+        只抬「本次会话确实写过」的条目，语义安全：这些值就是用户刚做的操作结果，
+        本就该赢过任何云端旧版本。没有绑定记账器（测试桩 / 降级）时不动。
+        """
+        rec = getattr(self, "_meta_recorder", None)
+        if rec is None:
+            return []
+        floor = int(remote_clock) + 1
+        rec.observe_clock(remote_clock)
+        lifted = rec.lift_session_touched(floor)
+        if lifted:
+            # 就地抬高 merge 入参，调用方拿的 local_entries 也要看到新 t
+            for path in lifted:
+                entry = rec.entries().get(path)
+                if entry:
+                    local_entries[path] = entry
+        return lifted
+
+    def _has_merge_base(self, unit: str) -> bool:
+        """本机是否曾与远端就该单元成功同步过（决定合并是否云端权威）。
+
+        只看 SHA 缓存是否为 None 会把「同一台设备重启」误判成新机：老版本
+        状态文件没有持久化该字段、或 sha 恰好为空时，本地全新改动就被云端
+        旧内容覆盖。这里改用持久化的 _merge_bases 集合，只有确实从未同步过
+        （新机首次绑定 / 解绑重绑）才认定云端权威。
+        """
+        return unit in self._merge_bases or bool(self._get_cached_remote_sha(unit))
 
     def upload(self) -> bool:
         """强制立即上传当前配置、user-custom 和分享记录到远端（公开方法，供手动重试）
@@ -1847,7 +1904,7 @@ class ConfigSyncService(QObject):
                 # 本机没有合并基准时云端权威（同 _download_config_merge）
                 self._apply_config_merge(
                     content,
-                    remote_authority=self._get_cached_remote_sha(unit) is None,
+                    remote_authority=not self._has_merge_base(unit),
                 )
             elif local_path.is_dir():
                 prefix = unit.split(":", 1)[1] if unit.startswith("ext:") else ""
@@ -2105,6 +2162,13 @@ class ConfigSyncService(QObject):
         local_rec.seed_missing()
         local_entries = local_rec.entries()
         local_entries_raw = local_entries
+        if not remote_authority:
+            _lifted = self._apply_session_touched(local_entries, remote_clock)
+            if _lifted:
+                logger.info(
+                    f"[ConfigSync] 本次会话有 {len(_lifted)} 个条目改动，已抬到远端版本之上: "
+                    f"{', '.join(_lifted[:8])}"
+                )
         if remote_authority:
             # 云端权威：本地条目一律压到 t=0，云端的任何版本都胜出。
             # 解绑重绑 / 新机首次绑定时本机没有合并基准，本地配置是绑定前
@@ -2345,6 +2409,9 @@ class ConfigSyncService(QObject):
         """一次成功同步后落盘该 unit 的远端 sha 与内容指纹。"""
         if remote_sha:
             self._set_cached_remote_sha(unit, remote_sha)
+            # 成功同步过一次 = 本机有合并基准，后续合并按正常 LWW 走，
+            # 不再把本地条目压到 t=0 交给云端裁决
+            self._merge_bases.add(unit)
         if content_hash:
             self._content_hashes[unit] = content_hash
         self._save_sha_cache()
@@ -2822,7 +2889,7 @@ class ConfigSyncService(QObject):
             return False
         # 本机没有合并基准（解绑重绑 / 新机首次绑定）→ 云端权威，
         # 本地 pre_bind 快照不得反向覆盖云端
-        self._apply_config_merge(content, remote_authority=self._config_remote_sha is None)
+        self._apply_config_merge(content, remote_authority=not self._has_merge_base("app.config"))
         if sha:
             self._set_cached_remote_sha("app.config", sha)
         # base 内容指纹取远端那份（本地独有改动保持未上传态，下次上传收敛）
@@ -2871,6 +2938,9 @@ class ConfigSyncService(QObject):
                 if isinstance(hashes, dict):
                     self._content_hashes = {str(k): str(v) for k, v in hashes.items() if v}
                 self._device_tag = str(data.get("device_tag") or "")
+                bases = data.get("merge_bases") or []
+                if isinstance(bases, list):
+                    self._merge_bases = {str(b) for b in bases if b}
                 logger.debug(
                     f"[ConfigSync] 同步状态已加载: config={self._config_remote_sha[:12] if self._config_remote_sha else None}..."
                 )
@@ -2907,6 +2977,8 @@ class ConfigSyncService(QObject):
                 data["content_hashes"] = dict(self._content_hashes)
             if self._device_tag:
                 data["device_tag"] = self._device_tag
+            if self._merge_bases:
+                data["merge_bases"] = sorted(self._merge_bases)
             data["state_version"] = 2
             self._sha_cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._sha_cache_path.write_text(

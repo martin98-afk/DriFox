@@ -88,6 +88,7 @@ def reset_sync_service(tmp_path):
     svc._suppress_until = 0.0
     svc._suppress_retry_scheduled = False
     svc._debounce_timer = None
+    svc._merge_bases = set()
     # 同步状态与合并基准必须落在测试临时目录，否则会写脏真实 .drifox/
     # （_commit_unit_state / _backup_local_unit 都按这两个路径落盘）
     svc._sha_cache_path = tmp_path / ".sync_shas.json"
@@ -1083,6 +1084,68 @@ class TestShaCache:
         assert data.get("config_sha") is None
         assert data.get("custom_sha") is None
         assert data.get("records_sha") is None
+
+    def test_exit_keeps_state_on_disk(self, svc, tmp_path):
+        """进程退出走 disable(clear_state=False)：SHA 缓存与合并基准留在磁盘
+
+        回归：退出路径曾用默认 disable()，把 .sync_shas.json 与 sync_base 当解绑
+        清掉。下次启动因「无合并基准」被判成新机首次同步，本地条目一律压到 t=0
+        交给云端裁决，本地刚改的配置被云端旧内容覆盖（主题被刷回旧值）。
+        """
+        svc._sha_cache_path = tmp_path / ".sync_shas.json"
+        svc._sync_base_dir = tmp_path / "cache" / "sync_base"
+        svc._config_remote_sha = "abc123"
+        svc._merge_bases = {"app.config"}
+        svc._save_sha_cache()
+        svc._sync_base_dir.mkdir(parents=True, exist_ok=True)
+        (svc._sync_base_dir / "user-custom.dir.json").write_text("{}", encoding="utf-8")
+
+        svc.disable(clear_state=False)
+
+        assert svc._sha_cache_path.exists()
+        assert svc._sync_base_dir.exists()
+        data = json.loads(svc._sha_cache_path.read_text(encoding="utf-8"))
+        assert data["config_sha"] == "abc123"
+        assert data["merge_bases"] == ["app.config"]
+
+    def test_unbind_clears_state(self, svc, tmp_path):
+        """解绑走默认 disable()：缓存与基准必须清干净（防止重绑误用旧基准）"""
+        svc._sha_cache_path = tmp_path / ".sync_shas.json"
+        svc._sync_base_dir = tmp_path / "cache" / "sync_base"
+        svc._config_remote_sha = "abc123"
+        svc._merge_bases = {"app.config"}
+        svc._save_sha_cache()
+        svc._sync_base_dir.mkdir(parents=True, exist_ok=True)
+
+        svc.disable()
+
+        assert not svc._sha_cache_path.exists()
+        assert not svc._sync_base_dir.exists()
+        assert svc._merge_bases == set()
+
+    def test_merge_base_persisted_and_loaded(self, svc, tmp_path):
+        """merge_bases 随状态文件持久化：重启后仍认得出「本机同步过」"""
+        svc._sha_cache_path = tmp_path / ".sync_shas.json"
+        svc._config_remote_sha = None
+        svc._merge_bases = set()
+        svc._commit_unit_state("app.config", "sha1", None)
+        assert "app.config" in svc._merge_bases
+
+        svc._merge_bases = set()
+        svc._config_remote_sha = None
+        svc._load_sha_cache()
+
+        assert "app.config" in svc._merge_bases
+        assert svc._has_merge_base("app.config") is True
+
+    def test_no_merge_base_means_remote_authority(self, svc):
+        """从没同步过（新机/解绑重绑）→ 无合并基准，合并按云端权威"""
+        svc._merge_bases = set()
+        svc._config_remote_sha = None
+        assert svc._has_merge_base("app.config") is False
+
+        svc._config_remote_sha = "sha1"
+        assert svc._has_merge_base("app.config") is True
 
 
 # =============================================================================

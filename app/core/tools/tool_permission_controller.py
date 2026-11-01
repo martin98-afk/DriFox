@@ -142,10 +142,13 @@ class ToolPermissionController(QObject):
             from app.tools.registry import ToolRegistry
 
             _registry = ToolRegistry.get_instance()
-            _registry.on_change(self._on_registry_version_changed)
-            self.destroyed.connect(
-                lambda: _registry.off_change(self._on_registry_version_changed)
-            )
+            _on_change_slot = self._on_registry_version_changed
+            _registry.on_change(_on_change_slot)
+            # 用默认参数捕获（求值时机 = lambda 创建时，存在函数对象里）而不是闭包
+            # 自由变量：destroyed 在本对象销毁后才触发，届时外层帧已被清理，闭包里
+            # 的 _registry / self 会变成空 cell，访问即抛
+            # "cannot access free variable ... where it is not associated with a value"。
+            self.destroyed.connect(lambda _reg=_registry, _slot=_on_change_slot: _reg.off_change(_slot))
             self._registry_version_changed.connect(self._sync_known_tools)
         except Exception:
             pass

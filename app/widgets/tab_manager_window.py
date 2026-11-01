@@ -6841,7 +6841,10 @@ class TabManagerWindow(FramelessWindow):
         try:
             from app.core.sync.config_sync import ConfigSyncService
 
-            ConfigSyncService.get_instance().disable()
+            # clear_state=False：进程退出只停监听，保留磁盘上的 SHA 缓存与合并基准。
+            # 传默认 True 会把它们当成解绑清掉，下次启动就误判为「新机首次同步」，
+            # 本地配置整份交给云端裁决（实测：切好的主题重启后被云端旧值刷回）。
+            ConfigSyncService.get_instance().disable(clear_state=False)
         except Exception as e:
             logger.warning(f"[TabManager] cleanup ConfigSyncService.disable 失败: {e}")
         for w in list(self._windows):

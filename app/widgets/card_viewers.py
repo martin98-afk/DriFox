@@ -941,6 +941,9 @@ class CodeWebViewer(QWebEngineView):
         self._render_deferred: bool = False
         # [PERF] 主题刷新期间不可见 → 跳过 JS 注入，恢复可见时补注入标记
         self._theme_css_pending: bool = False
+        # 字体变量待注入标记：字体刷新时 viewer 不可见/JS 未就绪 → 置位，
+        # showEvent / _on_js_ready 补注入（字体走骨架 :root 变量，见 refresh_font）
+        self._font_css_pending: bool = False
         # [T6] 主题重渲分帧队列脏标记：refresh_theme 置 True + 入队，队列消费时清除
         self._theme_render_pending: bool = False
         # [T24] 图表存在标记（只置不清）：全量渲染产物含图表容器任一标记即置位。
@@ -1970,6 +1973,10 @@ class CodeWebViewer(QWebEngineView):
             if self._is_js_ready:
                 self._render_deferred = False
                 self._schedule_render(immediate=True)
+        # 字体变量补注入：刷新时不可见 / JS 未就绪的卡片在此跟上（字体走
+        # :root CSS 变量，见 refresh_font）
+        if getattr(self, "_font_css_pending", False):
+            self._apply_font_vars()
         # delegate wheel 抢断补装（幂等；hide/show 或 tab 切回后 focusProxy 若重建则重挂）
         self._ensure_wheel_filter_installed()
             # 🛡️ F2：JS 未就绪时保留 deferred（不清标志）——先清标志再调
@@ -1985,6 +1992,14 @@ class CodeWebViewer(QWebEngineView):
         # 强制补推一次真实值（否则整个渲染周期都停在不匹配的上限上，超限内容
         # 被静默裁掉且不可滚）。幂等，未变化时仅一次属性读取。
         self.sync_body_max_height(force=True)
+        # 字体变量兜底：骨架 HTML 是按构建期字体分桶缓存的，从取缓存到 JS
+        # 就绪之间配置可能已变（用户在别的窗口切了字体）；且池化复用的骨架
+        # 保留上一张卡片的字体。这里比对一次，不一致就注入（一致则零 IPC）。
+        if getattr(self, "_viewer_font_family", None) != _current_viewer_font_family():
+            self._refresh_viewer_font_css()
+            self._apply_font_vars()
+        elif getattr(self, "_font_css_pending", False):
+            self._apply_font_vars()
         try:
             # 历史会话：先折叠工具区（设置 data-collapsed="true"，dock sync 需要读取此值）
             self._apply_history_collapsed()
@@ -2028,17 +2043,7 @@ class CodeWebViewer(QWebEngineView):
         self._history_collapse_applied = False
         self._v2_reset_live()
         # 获取系统字体
-        font_family = "Segoe UI, sans-serif"
-        try:
-            from app.utils.config import Settings
-
-            settings = Settings.get_instance()
-            font_family = settings.llm_font_family.value
-            if not font_family:
-                font_family = settings.canvas_font_selected.value or "Segoe UI, sans-serif"
-        except Exception:
-            pass
-
+        font_family = _current_viewer_font_family()
         self._viewer_font_family = font_family
         self._viewer_font_css = (
             f"{get_font_family_css()} font-family: {font_family}, sans-serif; font-size: {scale_font_size(14)}px;"
@@ -2241,6 +2246,12 @@ class CodeWebViewer(QWebEngineView):
                     --row-header: {"rgba(15, 23, 42, 0.06)" if _is_light else "rgba(255, 255, 255, 0.04)"};
                     /* 圆角节奏（与 design_tokens.BorderRadius 同源，4/6/10/14/18/全圆） */
                     {_BORDER_RADIUS_CSS_VARS}
+                    /* 字体族：运行时可变（refresh_font 注入）。骨架 HTML 按字体
+                       分桶缓存且池化复用会保留骨架，若字体值写死在 <style> 里，
+                       用户切字体后已建好的卡片永远停在旧字体（必须重建骨架才生效）
+                       —— 故字体一律走 CSS 变量，见 CodeWebViewer.refresh_font。 */
+                    --dfx-font-family: '{font_family}', sans-serif;
+                    --dfx-font-mono: {mono_font};
                 }}
                 html {{
                     overflow: hidden;
@@ -2252,7 +2263,8 @@ class CodeWebViewer(QWebEngineView):
                 html, body {{
                     background: var(--bg) !important;
                     color: var(--text);
-                    {self._viewer_font_css}
+                    font-family: var(--dfx-font-family);
+                    font-size: var(--dfx-font-size, {scale_font_size(14)}px);
                     margin: 0; 
                     padding: 0;
                 }}
@@ -2343,7 +2355,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--accent-text) !important;
                     padding: 2px 6px; 
                     border-radius: var(--r-sm); 
-                    font-family: {mono_font};
+                    font-family: var(--dfx-font-mono, {mono_font});
                     font-size: {code_font_size}px;
                 }}
                 hr {{ border: none; border-top: 1px solid var(--border); margin: 14px 0; }}
@@ -2376,7 +2388,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary);
                     font-style: italic;
                     font-size: {code_font_size + 2}px;
-                    font-family: '{font_family}', sans-serif;
+                    font-family: var(--dfx-font-family, '{font_family}', sans-serif);
                     line-height: 1.6;
                 }}
                 /* v2 前缀切片产物：已闭合段落的 markdown 正式渲染结果。
@@ -2409,7 +2421,7 @@ class CodeWebViewer(QWebEngineView):
                     border: 1px solid var(--border);
                     border-radius: var(--r-md);
                     overflow: hidden;
-                    font-family: '{font_family}', sans-serif;
+                    font-family: var(--dfx-font-family, '{font_family}', sans-serif);
                     font-size: {body_font_size}px;
                 }}
                 table:not(.code-table):not(.layout-table) th {{
@@ -2458,7 +2470,7 @@ class CodeWebViewer(QWebEngineView):
                     width: 100%;
                     border-collapse: collapse;
                     background: transparent;
-                    font-family: '{font_family}', sans-serif;
+                    font-family: var(--dfx-font-family, '{font_family}', sans-serif);
                     font-size: {body_font_size}px;
                     margin: 0;
                     border: none !important;
@@ -2737,7 +2749,7 @@ class CodeWebViewer(QWebEngineView):
                     overflow-x: auto;
                     overflow-y: hidden;
                     background: transparent;
-                    font-family: {mono_font};
+                    font-family: var(--dfx-font-mono, {mono_font});
                     font-size: {code_font_size}px;
                     line-height: 1.5;
                     padding: 0 10px 8px 0;
@@ -2766,11 +2778,11 @@ class CodeWebViewer(QWebEngineView):
                     word-wrap: normal;
                     overflow: visible;
                     background: transparent !important;
-                    font-family: {mono_font} !important;
+                    font-family: var(--dfx-font-mono, {mono_font}) !important;
                     font-size: {code_font_size}px !important;
                     line-height: 1.5 !important;
                 }}
-                .code-line {{ padding-left: 12px !important; white-space: pre; font-family: {mono_font}; }}
+                .code-line {{ padding-left: 12px !important; white-space: pre; font-family: var(--dfx-font-mono, {mono_font}); }}
 
                 /* Pygments 高亮主题（class 化，noclasses=False）：内容 HTML 只带
                    span class，颜色全由独立的 #hl-css 样式块决定（在本块之后）。
@@ -2958,7 +2970,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary) !important;
                     font-style: italic;
                     font-size: {code_font_size + 2}px;
-                    font-family: '{font_family}', sans-serif;
+                    font-family: var(--dfx-font-family, '{font_family}', sans-serif);
                     line-height: 1.6;
                     max-height: 500px;
                     overflow-y: scroll;
@@ -3060,7 +3072,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--accent);
                     font-weight: 600;
                     font-size: {code_font_size}px;
-                    font-family: '{font_family}', sans-serif;
+                    font-family: var(--dfx-font-family, '{font_family}', sans-serif);
                     white-space: normal;
                 }}
                 .tool-expanded-content {{
@@ -3353,7 +3365,7 @@ class CodeWebViewer(QWebEngineView):
                     flex: 1 1 auto;
                     color: var(--text);
                     word-break: break-all;
-                    font-family: {mono_font};
+                    font-family: var(--dfx-font-mono, {mono_font});
                     font-size: {small_font_size}px;
                 }}
                 .result-content {{
@@ -3363,7 +3375,7 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {tag_font_size}px;
                     line-height: 1.5;
                     word-break: break-word;
-                    font-family: {mono_font};
+                    font-family: var(--dfx-font-mono, {mono_font});
                     max-height: 400px;
                     overflow-y: scroll;
                     /* 🐛 修复（偶发横向滚动条）：显式 hidden 避免一轴非 visible
@@ -3385,7 +3397,7 @@ class CodeWebViewer(QWebEngineView):
                     margin: 0;
                     color: #d8b68d;
                     font-size: {tag_font_size}px;
-                    font-family: {mono_font};
+                    font-family: var(--dfx-font-mono, {mono_font});
                     white-space: pre-wrap;
                     word-break: break-word;
                 }}
@@ -3407,14 +3419,14 @@ class CodeWebViewer(QWebEngineView):
                     color: #00BCD4;
                     font-weight: 600;
                     font-size: {code_font_size}px;
-                    font-family: '{font_family}', sans-serif;
+                    font-family: var(--dfx-font-family, '{font_family}', sans-serif);
                     white-space: normal;
                 }}
                 .hook-content {{
                     padding: 10px 12px;
                     border-top: 1px solid rgba(0, 188, 212, 0.2);
                     background: transparent;
-                    font-family: {mono_font};
+                    font-family: var(--dfx-font-mono, {mono_font});
                     font-size: {tag_font_size}px;
                     color: #e0e0e0;
                     white-space: pre-wrap;
@@ -7313,31 +7325,126 @@ class CodeWebViewer(QWebEngineView):
                 self._render_timer.start(40)
 
     def _refresh_viewer_font(self):
-        """刷新 viewer 字体样式，响应系统字体设置变化"""
+        """旧入口（MessageCard / 主题补渲队列调用）→ 委托 refresh_font
+
+        保留该名字：``MessageCard.refresh_theme`` 与 ``_ThemeRerenderQueue``
+        都按此名探测能力，改签名会静默跳过（hasattr 落空）。
+        """
         if not hasattr(self, "_viewer_font_family"):
             return
-        # [B1] 字体变化：差量 HTML 缓存失效，强制全量重渲染
-        # 🆕 差量收尾：满足条件时保留差量基线（_stable_md_len），走「稳定区不动
-        # + 仅收尾」路径，避免整页 innerHTML 替换造成的重排闪动与坞态归位跳动。
-        # 不满足则原样回退全量终渲染（行为完全不变）。
-        self._incremental_finalize = self._should_incremental_finalize()
-        if self._incremental_finalize:
-            self._needs_full_render = False
-        else:
-            self._needs_full_render = True
-            self._stable_html = ""
-            self._stable_md_len = 0
-        self._refresh_viewer_font_css()
-        self._schedule_render(immediate=True)
+        self.refresh_font()
 
     def _refresh_viewer_font_css(self):
-        """刷新字体 CSS 变量，供 render 使用"""
+        """重算字体相关的 Python 侧缓存值（不触碰 DOM）
+
+        ⚠️ 归位说明：字体现在通过 CSS 变量 ``--dfx-font-family`` /
+        ``--dfx-font-mono`` 生效（见 ``refresh_font``），骨架里的字体规则
+        全部读变量，因此这里只更新实例字段，**不再**指望它让字体生效。
+        """
         if not hasattr(self, "_viewer_font_family"):
             return
-        font_family = self._viewer_font_family
-        font_css = get_font_family_css()
+        self._viewer_font_family = _current_viewer_font_family()
         body_font_size = scale_font_size(14)
-        self._viewer_font_css = f"{font_css} font-family: {font_family}, sans-serif; font-size: {body_font_size}px;"
+        self._viewer_font_css = (
+            f"{get_font_family_css()} font-family: {self._viewer_font_family}, sans-serif; "
+            f"font-size: {body_font_size}px;"
+        )
+
+    def _font_css_js(self) -> str:
+        """构建字体 CSS 变量注入串（字体族 + 等宽族 + 正文字号）
+
+        与 ``_theme_css_js`` 同构：字体改了只跑这段，不动主题变量。
+        字体名走 JSON 序列化（字体名可能含引号/反斜杠，拼串会产出语法错误
+        的 JS —— QWebEngine 遇到语法错误静默失败，无回调也无日志）。
+        """
+        font_family = f"'{_current_viewer_font_family()}', sans-serif"
+        mono_family = f"{_get_global_font()}, Consolas, monospace"
+        body_font_size = f"{scale_font_size(14)}px"
+
+        def _js_str(s: str) -> str:
+            raw = json.dumps(s)
+            return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+        return (
+            "(function(){"
+            "var r=document.documentElement;"
+            "if(!r)return;"
+            f"r.style.setProperty('--dfx-font-family',{_js_str(font_family)});"
+            f"r.style.setProperty('--dfx-font-mono',{_js_str(mono_family)});"
+            f"r.style.setProperty('--dfx-font-size',{_js_str(body_font_size)});"
+            "})();"
+        )
+
+    def _apply_font_vars(self) -> None:
+        """把当前字体配置写进骨架 :root 的字体变量（幂等，便宜）
+
+        骨架 HTML 里的字体规则全部读 ``--dfx-font-family`` / ``--dfx-font-mono``
+        / ``--dfx-font-size``，所以这一步足以让字体生效，不需要重建骨架或
+        重跑 markdown。新建骨架（``_on_js_ready``）、池化复用（``ensure_rendered``）
+        与设置变更（``refresh_font``）三条路径都要走它：池化复用的 viewer
+        骨架是上一次归还时的，字体可能已经变了。
+        """
+        if not getattr(self, "_is_js_ready", False) or not self.isVisible():
+            self._font_css_pending = True
+            return
+        self._font_css_pending = False
+        try:
+            page = self.page()
+        except RuntimeError:
+            return
+        if page is None:
+            return
+        try:
+            js = self._font_css_js()
+            # 沙箱 widget iframe 与 mermaid 的字体是 init 期常量，需随变量一起重推
+            js = "if(typeof window._refreshWidgetVars==='function')window._refreshWidgetVars();" + js
+            page.runJavaScript("try{" + js + "}catch(err){if(window.console)console.warn('[font] apply failed',err);}")
+        except RuntimeError:
+            pass
+
+    def refresh_font(self):
+        """刷新卡片正文字体（全局字体/字号设置变化后调用）
+
+        🐛 为什么必须有这条通道：正文字体写在 QWebEngine 骨架的 ``<style>``
+        里，而骨架 HTML 既按字体分桶缓存、又被 ``reset_for_reuse`` 原样复用
+        （刻意不清骨架，见该方法 docstring）。只重渲 ``#content-placeholder``
+        换不掉 ``<style>`` 里的字体声明，于是切字体后已存在的卡片永远停在旧
+        字体，只有新建/换会话让 viewer 走到 ``_load_skeleton`` 才刷得出来
+        （"要建几次会话才刷新"的真身）。
+
+        现在的做法与大主题刷新一致：字体走 CSS 变量，运行时注入覆盖
+        :root，一轮 IPC 全卡生效，不重建骨架、不重跑 markdown。
+        """
+        self._refresh_viewer_font_css()
+        self._apply_font_vars()
+        # 有图表卡：Mermaid / echarts 的 fontSize 是 init 期常量，变量改了不会
+        # 自己跟随；重推主题常量 + 触发重绘。无图表卡零成本。
+        if self.__dict__.get("_has_charts", False):
+            try:
+                page = self.page()
+            except RuntimeError:
+                page = None
+            if page is not None:
+                try:
+                    body_font_size = scale_font_size(14)
+                    page.runJavaScript(
+                        "try{"
+                        f"window._MMD_THEME_VARS={_mmd_theme_vars_js(body_font_size)};"
+                        "if(typeof window._mmdApplyTheme==='function')window._mmdApplyTheme();"
+                        "}catch(err){if(window.console)console.warn('[font] chart theme failed',err);}"
+                    )
+                except RuntimeError:
+                    pass
+        # 字体变了：实例级 HTML 缓存虽然与字体无关（字体走 CSS），但工具块
+        # 里仍有内联 font-family（render_helpers 的 <pre>），这些由 markdown
+        # 产物决定 —— 清掉缓存并重渲一次，保证正文/工具区同时跟上。
+        self._cached_streaming_html = None
+        self._processed_md_hash = 0
+        self._cached_raw_md_hash = 0
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
+        self._schedule_render(immediate=True)
 
     def _theme_css_js(self, is_light: bool) -> str:
         """组合主题 CSS 注入串：CSS 变量 + Pygments 高亮 CSS（同一 IPC）
@@ -11481,6 +11588,25 @@ def _download_and_preview(url_str: str, parent=None) -> None:
             QDesktopServices.openUrl(QUrl(url_str))
         except Exception:
             pass
+
+
+def _current_viewer_font_family() -> str:
+    """读取当前生效的卡片正文字体族（与骨架构建期同源）
+
+    骨架 ``_load_skeleton`` 与运行时 ``refresh_font`` 必须读同一处配置，
+    否则切字体后两者不一致（历史包袱：骨架读 llm_font_family，回退
+    canvas_font_selected）。这里抽成单一入口。
+    """
+    try:
+        from app.utils.config import Settings
+
+        settings = Settings.get_instance()
+        font_family = settings.llm_font_family.value
+        if not font_family:
+            font_family = settings.canvas_font_selected.value or "Segoe UI, sans-serif"
+        return font_family
+    except Exception:
+        return "Segoe UI, sans-serif"
 
 
 def _fence_assets_for_skeleton() -> tuple:

@@ -10923,7 +10923,9 @@ class OpenAIChatToolWindow(ToolWindow):
         from PyQt5.QtWidgets import QWidget as _QWidget
 
         _all_widgets = self.findChildren(_QWidget) if (is_color or is_font) else []
-        if is_color or is_font_family:
+        if is_color or is_font:
+            # is_font 含 font_size：正文字号同样走 CSS 变量（--dfx-font-size），
+            # 消息卡需要参与刷新；_all_widgets 本就在 is_font 时已扫描，无额外成本。
             _message_cards = [w for w in _all_widgets if isinstance(w, MessageCard)]
         else:
             _message_cards = []
@@ -11031,9 +11033,8 @@ class OpenAIChatToolWindow(ToolWindow):
             # setFont 覆盖不到，这里按当前 delta 重设（首次构建同路径）。
             # [T4-2] 复用已扫好的 _message_cards，避免再跑一次全树 findChildren
             # （字体切换热路径上整树扫描实测数十 ms）。
-            # ⚠️ 仅 is_font_family 可复用：该分支下 _message_cards 由 _all_widgets
-            # 过滤得到、非空；scope="font_size" 时它是空列表，必须回落全树扫描。
-            _welcome_cards = _message_cards if is_font_family else self.findChildren(MessageCard)
+            # _message_cards 在 is_font（含 font_size）时已由 _all_widgets 过滤得到。
+            _welcome_cards = _message_cards
             for _card in _welcome_cards:
                 if getattr(_card, "role", None) == "welcome" and hasattr(_card, "_apply_welcome_tabs_font"):
                     try:
@@ -11103,11 +11104,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 for card in self._settings_popup.findChildren(SettingCard):
                     card.setIconSize(icon_sz, icon_sz)
 
-        # ── 4. 消息卡 viewer 渲染（仅 font_family + 全量，字族变化需重渲） ──
-        if is_font_family:
+        # ── 4. 消息卡 viewer 渲染（仅 font_family + 全量） ──
+        # 字体走 :root CSS 变量：refresh_font 一次 IPC 让已存在的卡片（含池化
+        # 复用、骨架未重建的）全部跟随，旧的 _schedule_render 只重渲正文
+        # #content-placeholder，换不掉 <style> 里的字体声明（字体不刷新的根因）。
+        if is_font_family or is_font_size:
             for card in _message_cards:
                 viewer = getattr(card, "viewer", None)
-                if viewer and hasattr(viewer, "_schedule_render"):
+                if viewer is None:
+                    continue
+                if hasattr(viewer, "refresh_font"):
+                    try:
+                        viewer.refresh_font()
+                    except Exception as e:
+                        logger.warning(f"[font refresh] message card {id(card):#x}: {e}")
+                elif hasattr(viewer, "_schedule_render"):
                     viewer._schedule_render(immediate=True)
 
         # ── 5. 公共块 ──
