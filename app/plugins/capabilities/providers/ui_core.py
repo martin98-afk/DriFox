@@ -563,6 +563,7 @@ def _send_with_mode(
     *,
     ephemeral: bool = False,
     mode: str = "queue",
+    hook_event: str = "SessionSend",
 ) -> bool:
     """session.send 三模式（queue 默认 / skip 流式中忽略 / hook 流式中注入消息列表）。
 
@@ -571,6 +572,8 @@ def _send_with_mode(
     - hook：流式中经 backend._hook_message_queue 注入当前对话上下文，worker
       工具循环下一轮消费（不建卡不打断，同 SubAgentFinished 通道）；空闲时
       降级为普通 send 开新轮（hook 队列无 worker 消费，滞留会拖到下轮开头）。
+    hook_event：注入消息的 _hook_event 事件标记（也用作 _format_hook_output
+    标签），调用方可自定义（如 SubAgentFinished）保留语义。
 
     判忙 stale 误判方向保守：skip 可能误拒（语义安全），hook 注入可能落到
     下轮开头消费（行为安全）。
@@ -578,6 +581,7 @@ def _send_with_mode(
     mode = str(mode or "queue").strip().lower()
     if mode not in ("queue", "skip", "hook"):
         mode = "queue"
+    hook_event = str(hook_event or "SessionSend").strip() or "SessionSend"
     text = str(text or "")
     if mode != "queue":
         if _engine_busy(backend):
@@ -591,8 +595,8 @@ def _send_with_mode(
                     hook_q.put(
                         {
                             "role": "user",
-                            "content": _format_hook_output("SessionSend", text, wrap_system_reminder=False),
-                            "_hook_event": "SessionSend",
+                            "content": _format_hook_output(hook_event, text, wrap_system_reminder=False),
+                            "_hook_event": hook_event,
                         }
                     )
                     return True
@@ -625,8 +629,8 @@ def _session_control(host: Any):
     def new_session() -> bool:
         return queue.enqueue(wid, "new", {})
 
-    def send(text: str, *, ephemeral: bool = False, mode: str = "queue") -> bool:
-        return _send_with_mode(backend, queue, wid, text, ephemeral=ephemeral, mode=mode)
+    def send(text: str, *, ephemeral: bool = False, mode: str = "queue", hook_event: str = "SessionSend") -> bool:
+        return _send_with_mode(backend, queue, wid, text, ephemeral=ephemeral, mode=mode, hook_event=hook_event)
 
     return {"interrupt": interrupt, "new": new_session, "send": send}
 

@@ -494,6 +494,38 @@ def _preview_subagent_status(tool_args: dict) -> str:
         return f"查询子智能体状态 ({', '.join(str(t)[:12] for t in task_ids[:3])})"
     return "查询子智能体状态"
 
+def _inject_subagent_result(
+    send,
+    task_id: str,
+    result: str,
+    success: bool,
+    agent_name: str,
+    task_description: str,
+    mode: str = "hook",
+) -> bool:
+    """子智能体结果注入（插件所有物）：构建文案并经 session.send 发送。
+
+    由主程序在 task_finished 信号时经 ToolRegistry metadata 发现并调用
+    （send 为 session.send 裸 callable，tool surface，host=ToolExecutor）。
+    流式中经 hook 通道静默注入当前对话上下文（worker 下一轮消费，不打断）；
+    空闲时 session.send 自动降级为普通发送开新轮。mode 可选 queue/skip/hook。
+    """
+    if task_id == "__batch_summary__":
+        content = str(result or "")
+    else:
+        status_icon = "✅" if success else "❌"
+        agent_label = f"[{agent_name}]" if agent_name else ""
+        MAX_RESULT_CHARS = 4096
+        if result and len(result) > MAX_RESULT_CHARS:
+            result = result[:MAX_RESULT_CHARS] + "\n\n[... 已省略 " + str(len(result) - MAX_RESULT_CHARS) + " 个字符 ...]"
+        else:
+            result = result or "(无输出)"
+        content = (
+            f"子智能体任务完成: {status_icon} {agent_label} {task_description} (id: {task_id})\n"
+            f"执行结果：\n{result}"
+        )
+    return bool(send(content, mode=mode, hook_event="SubAgentFinished"))
+
 
 def register(registry):
     registry.register(
@@ -504,7 +536,13 @@ def register(registry):
         preview=_preview_subagent_para,
         summarize=make_summarize_from_preview(_preview_subagent_para),
         keep_in_content=True,  # 任务表常驻正文，不迁入工具折叠区
-        metadata={"subagent_task": True, "permission_task": True},
+        metadata={
+            "subagent_task": True,
+            "permission_task": True,
+            # 子智能体结果注入器：主程序 task_finished 时经 ToolRegistry 发现并调用
+            # （迁移自 main_widget._inject_subagent_completion_into_stream，插件所有物）
+            "subagent_result_injector": _inject_subagent_result,
+        },
     )
     registry.register(
         "subagent_status", _SUBAGENT_STATUS_SCHEMA, impl=_subagent_status_impl,

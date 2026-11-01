@@ -86,6 +86,24 @@ def test_hook_mode_busy_injects_to_hook_queue():
     assert q.peek("w-hook-busy") == [], "hook 注入不得同时入动作队列"
 
 
+def test_hook_mode_custom_hook_event():
+    """hook：hook_event 自定义事件标记透传（子智能体结果注入用 SubAgentFinished）"""
+    q = get_action_queue()
+    q.clear("w-hook-event")
+    win, backend = _busy_window("w-hook-event", busy=True)
+    api = _session_control(win)
+    assert api["send"]("子智能体结果", mode="hook", hook_event="SubAgentFinished") is True
+    msgs = []
+    while True:
+        try:
+            msgs.append(backend._hook_message_queue.get_nowait())
+        except _queue.Empty:
+            break
+    assert len(msgs) == 1
+    assert msgs[0]["_hook_event"] == "SubAgentFinished"
+    assert "sub-agent-finished-hook" in msgs[0]["content"]
+
+
 def test_hook_mode_idle_falls_back_to_enqueue():
     """hook：空闲时降级普通 send（开新轮，比滞留 hook 队列到下轮开头更及时）"""
     q = get_action_queue()

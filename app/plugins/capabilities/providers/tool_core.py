@@ -219,7 +219,7 @@ def register(registry) -> None:
         def new_session() -> bool:
             return queue.enqueue(wid, "new", {})
 
-        def send(text: str, *, ephemeral: bool = False, mode: str = "queue") -> bool:
+        def send(text: str, *, ephemeral: bool = False, mode: str = "queue", hook_event: str = "SessionSend") -> bool:
             # 三模式复用 ui_core 同实现（先例：_ui_artifacts_show 跨 provider 复用）
             from app.plugins.capabilities.providers.ui_core import _send_with_mode
 
@@ -230,6 +230,7 @@ def register(registry) -> None:
                 text,
                 ephemeral=ephemeral,
                 mode=mode,
+                hook_event=hook_event,
             )
 
         return {"interrupt": interrupt, "new": new_session, "send": send}

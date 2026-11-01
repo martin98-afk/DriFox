@@ -1769,7 +1769,7 @@ class SubAgentManager(QObject):
 
     task_started = pyqtSignal(str, str, str)  # task_id, agent_name, task_description
     task_finished = pyqtSignal(str, str)  # task_id, result
-    batch_finished = pyqtSignal()  # 批次内所有任务都完成时触发
+    batch_finished = pyqtSignal(str, int)  # callback_content, failed（批次全部完成时触发）
     # ★ T24：子智能体 ask 权限请求转发（window_id, task_id, tool_name, arguments）→ 主线程弹窗
     permission_requested = pyqtSignal(str, str, str, dict)
 
@@ -1954,6 +1954,140 @@ class SubAgentManager(QObject):
         else:
             signal.connect(callback, connection_type)
 
+    # ========== 完成链（manager 自持：计数/流式注入/全完成判定） ==========
+
+    def _is_engine_streaming(self) -> bool:
+        """主对话是否正在流式（经 tool_executor._backend.chat_engine 判定）。"""
+        try:
+            engine = getattr(getattr(self._tool_executor, "_backend", None), "chat_engine", None)
+            return bool(engine and engine.is_streaming)
+        except Exception:  # noqa: BLE001 - 状态读取失败按空闲处理
+            return False
+
+    def _resolve_result_injector(self):
+        """从工具注册表取插件注入器（system-tools subagent_tools 经 metadata 注册）。"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            entry = ToolRegistry.get_instance().get("subagent_para")
+            injector = (getattr(entry, "metadata", None) or {}).get("subagent_result_injector")
+            if callable(injector):
+                return injector
+        except Exception as e:  # noqa: BLE001 - registry 异常时注入降级为跳过
+            logger.warning(f"[SubAgentManager] 注入器查询失败，跳过结果注入: {e}")
+            return None
+        logger.warning("[SubAgentManager] subagent_para 未注册注入器（system-tools 缺失/旧版），跳过结果注入")
+        return None
+
+    def _get_session_send(self):
+        """session.send 裸 callable（tool surface，host=ToolExecutor，_backend 现成）。"""
+        try:
+            from app.plugins.capabilities.providers.tool_core import _session_control
+
+            return _session_control(self._tool_executor)["send"]
+        except Exception as e:  # noqa: BLE001 - 能力池异常时注入降级为跳过
+            logger.warning(f"[SubAgentManager] session.send 不可用，跳过结果注入: {e}")
+            return None
+
+    def _dispatch_result_injection(
+        self, task_id: str, result: str, success: bool, agent_name: str, task_description: str
+    ) -> None:
+        """单条结果经插件注入器发送。
+
+        mode=hook：流式中经 hook 通道静默注入当前对话上下文（不打断）；空闲时
+        session.send 自动降级为普通发送开新轮。文案构建与通道选择均为插件所有物。
+        """
+        injector = self._resolve_result_injector()
+        send = self._get_session_send()
+        if injector is None or send is None:
+            return
+        try:
+            delivered = injector(send, task_id, result, success, agent_name, task_description, mode="hook")
+        except Exception as e:  # noqa: BLE001 - 插件异常不拖垮完成链
+            logger.warning(f"[SubAgentManager] 注入器异常: {e}")
+            return
+        logger.debug(f"[SubAgentManager] 结果注入: task_id={task_id[:12]}, delivered={delivered}")
+
+    def _batch_task_info(self, task_id: str) -> dict:
+        """批次任务的完成信息：优先归档表，回退运行中 executor（同拍未归档场景）。"""
+        info = self._finished_tasks.get(task_id) or {}
+        if info:
+            return info
+        ex = self._running_tasks.get(task_id)
+        if ex is not None:
+            return {
+                "result": getattr(ex, "_last_result", "") or "",
+                "error": getattr(ex, "_execution_error", "") or "",
+                "agent_name": getattr(ex, "agent_name", ""),
+                "task_description": getattr(ex, "task_description", ""),
+                "session_id": getattr(ex, "_task_session_id", ""),
+            }
+        return {}
+
+    def _on_executor_finished(self, task_id: str, result: str):
+        """executor 完成回调（manager 内部接线，AutoConnection 落主线程）。
+
+        职责：单任务流式注入 → 批次计数 → 全完成时汇总注入（流式）或
+        广播 batch_finished（非流式，由 UI 层开新轮）。UI 归档
+        （mark_task_finished/卡片收尾）仍由 main_widget 的 task_finished 槽负责。
+        """
+        executor = self._running_tasks.get(task_id)
+        success = not (getattr(executor, "_execution_error", None) or "")
+        agent_name = getattr(executor, "agent_name", "") if executor else ""
+        task_description = getattr(executor, "task_description", "") if executor else ""
+
+        # 单任务流式注入（不中断当前流式；空闲时降级为普通发送开新轮）
+        if self._is_engine_streaming():
+            self._dispatch_result_injection(task_id, result, success, agent_name, task_description)
+
+        # 批次计数与全完成判定
+        self._batch_completed += 1
+        if self._batch_total <= 0 or self._batch_completed < self._batch_total:
+            return
+
+        batch_tasks = []
+        for tid in list(self._batch_task_ids):
+            info = self._batch_task_info(tid)
+            error_text = info.get("error", "") or ""
+            batch_tasks.append(
+                {
+                    "task_id": tid,
+                    "agent_name": info.get("agent_name", "") or "",
+                    "task_description": info.get("task_description", "") or "",
+                    "success": not error_text,
+                    "result": info.get("result", "") or "(无输出)",
+                    "error": error_text,
+                }
+            )
+        total = len(batch_tasks)
+        failed = sum(1 for t in batch_tasks if not t["success"])
+        task_lines = []
+        for t in batch_tasks:
+            status_icon = "✅" if t["success"] else "❌"
+            desc_preview = t["task_description"][:50] + ("..." if len(t["task_description"]) > 50 else "")
+            task_lines.append(f"- {status_icon} [{t['agent_name']}] {desc_preview} (id: {t['task_id']})")
+        task_list_text = "\n".join(task_lines) if task_lines else "- (无任务详情)"
+        callback_content = (
+            f"子智能体全部完成。\n"
+            f"共 {total} 个，成功 {total - failed} 个，失败 {failed} 个。\n"
+            f"本次完成的任务：\n{task_list_text}\n"
+            f"可使用 subagent_status 查询详细结果。"
+        )
+
+        self._batch_total = 0
+        self._batch_completed = 0
+        self._batch_task_ids = set()
+
+        if self._is_engine_streaming():
+            # 流式：汇总静默注入，不中断
+            self._dispatch_result_injection("__batch_summary__", callback_content, failed == 0, "", "")
+        else:
+            # 非流式：广播给 UI 层开新轮（不中断语义已无意义，UI 决定呈现）
+            try:
+                self.batch_finished.emit(callback_content, failed)
+            except Exception as e:
+                logger.error(f"[SubAgentManager] batch_finished.emit failed: {e}")
+
     def execute_task(
         self,
         task_id: str,
@@ -2115,6 +2249,12 @@ class SubAgentManager(QObject):
                 self._connect_cb(executor.error_occurred, on_error, connection_type)
             if on_progress:
                 self._connect_cb(executor.progress_updated, on_progress, connection_type)
+
+            # 完成链内部接线：manager 自持完成处理（批次计数/流式注入/全完成判定），
+            # 不再绕道 main_widget 转发。恒 AutoConnection（回调落主线程，
+            # 不跟随调用方 connection_type——同步等待型调用方的 DirectConnection
+            # 会让本回调在 executor 线程执行，与主线程 UI 归档槽产生时序竞争）。
+            executor.finished_with_result.connect(self._on_executor_finished)
 
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)

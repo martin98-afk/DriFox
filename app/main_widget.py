@@ -1669,6 +1669,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if sub_agent_mgr:
             sub_agent_mgr.task_started.connect(self._on_sub_agent_task_started)
             sub_agent_mgr.task_finished.connect(self._on_sub_agent_task_finished)
+            # 批次全部完成（非流式路径）：UI 开新轮承接汇总（流式路径 manager 内部注入）
+            sub_agent_mgr.batch_finished.connect(self._on_sub_agent_batch_finished)
             # ★ T24：子智能体 ask 权限请求 → 主线程弹窗（用户允许/拒绝）
             sub_agent_mgr.permission_requested.connect(self._on_subagent_permission_requested)
 
@@ -21268,11 +21270,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     else None
                 )
             )
-            executor.finished_with_result.connect(
-                lambda tid, result: (
-                    self._on_sub_agent_finished(tid, result) if not getattr(self, "_is_destroyed", False) else None
-                )
-            )
+            # 完成链已由 SubAgentManager 内部接线（execute_task 时连
+            # _on_executor_finished），此处不再转发，避免完成槽双重触发
 
     def _on_subagent_permission_requested(self, window_id: str, task_id: str, tool_name: str, arguments: dict):
         """子智能体 ask 权限弹窗（主线程，T24）。
@@ -21329,7 +21328,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sub_agent_compact_widget.set_task_context(task_id, display)
 
     def _on_sub_agent_task_finished(self, task_id: str, result: str):
-        """子智能体任务完成"""
+        """子智能体任务完成（UI 归档）：卡片收尾 + 落库归档。
+
+        完成链（批次计数/流式注入/全完成判定）已迁入 SubAgentManager 内部
+        （_on_executor_finished），本槽只负责 UI 与持久化。
+        """
         if getattr(self, "_is_destroyed", False):
             return
         # 从管理器获取执行器，检查是否有真实的错误状态
@@ -21347,173 +21350,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 归档到管理器：内存 _finished_tasks + 数据库 finished 状态（含最终 logs/summary）。
         # 之前只写内存不落库，DB 永挂 running → 会话卡片永远显示执行中、工具数/时间冻结
-        info = sub_agent_mgr.mark_task_finished(task_id, result, execution_error or "")
-        agent_name = info["agent_name"]
-        task_description = info["task_description"]
+        sub_agent_mgr.mark_task_finished(task_id, result, execution_error or "")
 
-        # 批次完成检查：先检查当前计数，用于精确诊断
-        _batch_before = sub_agent_mgr._batch_completed
-        _batch_total = sub_agent_mgr._batch_total
+    def _on_sub_agent_batch_finished(self, callback_content: str, failed: int):
+        """批次全部完成（非流式路径）：UI 开新轮承接汇总消息。
 
-        # ====== 流式注入：单个子智能体完成时，立即注入到流中（不中断） ======
-        engine = self.backend.chat_engine
-        is_currently_streaming = engine and engine.is_streaming
-        if is_currently_streaming:
-            logger.info(
-                "[SubAgent-Callback] task_finished during streaming: "
-                f"task_id={task_id[:8]}, result_len={len(result) if result else 0}, "
-                f"batch_completed={_batch_before}/{_batch_total}"
-            )
-            self._inject_subagent_completion_into_stream(task_id, result, success, agent_name, task_description)
-            # 流式场景下仍继续累加批次计数器，以便所有完成时通过 _do_trigger_callback 发送汇总
-
-        # 批次完成检查：只有当所有任务都完成时才触发回调
-        sub_agent_mgr._batch_completed += 1
-        logger.info(
-            "[SubAgent-Callback] task_finished counting: "
-            f"task_id={task_id[:8]}, "
-            f"before={_batch_before}, total={_batch_total}, "
-            f"after={sub_agent_mgr._batch_completed}, "
-            f"is_streaming={is_currently_streaming}"
-        )
-        if sub_agent_mgr._batch_completed >= sub_agent_mgr._batch_total and sub_agent_mgr._batch_total > 0:
-            # 全部任务完成，发送回调通知
-            self._do_trigger_callback(sub_agent_mgr)
-            # 重置计数器和批次任务ID集合
-            sub_agent_mgr._batch_total = 0
-            sub_agent_mgr._batch_completed = 0
-            sub_agent_mgr._batch_task_ids = set()
-
-    def _inject_subagent_completion_into_stream(
-        self, task_id: str, result: str, success: bool, agent_name: str, task_description: str
-    ):
-        """将子智能体完成信号注入到正在流式输出的消息流中（不中断流式）
-
-        使用与 hook 相同的 _hook_message_queue 机制，worker 在下一轮 API 调用前
-        自动消费队列并注入到上下文，LLM 在下一轮响应中即可感知完成信息。
-
-        优化：流式场景下直接注入子智能体的执行结果，不再要求 LLM 调用
-        subagent_status 去查询——LLM 在下一轮响应中直接看到结果。
-        只有用户中断流式后，才需要使用 subagent_status 查询。
-
-        Args:
-            task_id: 任务 ID（汇总消息传 "__batch_summary__"）
-            result: 执行结果
-            success: 是否成功
-            agent_name: 智能体名称
-            task_description: 任务描述
+        批次计数/流式注入/全完成判定均在 SubAgentManager._on_executor_finished；
+        流式中 manager 直接注入汇总不走本槽。非流式时广播到此，由 UI 层
+        强制中断并创建新对话轮次承接回调消息。
         """
-        # 构建消息内容
-        if task_id == "__batch_summary__":
-            # 最终汇总消息
-            content = result
-        else:
-            # 单个任务完成消息：直接嵌入执行结果
-            status_icon = "✅" if success else "❌"
-            agent_label = f"[{agent_name}]" if agent_name else ""
-            # 结果截断以防太长
-            MAX_RESULT_CHARS = 4096
-            if result and len(result) > MAX_RESULT_CHARS:
-                result_preview = (
-                    result[:MAX_RESULT_CHARS] + f"\n\n[... 已省略 {len(result) - MAX_RESULT_CHARS} 个字符 ...]"
-                )
-            else:
-                result_preview = result or "(无输出)"
-            content = (
-                f"子智能体任务完成: {status_icon} {agent_label} {task_description} (id: {task_id})\n"
-                f"执行结果：\n{result_preview}"
-            )
-
-        # 使用 hook 消息格式包裹
-        from app.core.conversation.backend import _format_hook_output
-
-        hook_content = _format_hook_output("SubAgentFinished", content, wrap_system_reminder=False)
-
-        # 推送到 _hook_message_queue，worker 在下一轮 API 调用前自动消费
-        self.backend._hook_message_queue.put(
-            {
-                "role": "user",
-                "content": hook_content,
-                "_hook_event": "SubAgentFinished",
-            }
-        )
-        # 注意：不再 emit _hook_messages_updated，因为 backend.py:380 的 on_hook_finished
-        # 回调已经在 put 后 emit 过了，重复 emit 会导致前端刷新两次
-        logger.debug(f"[SubAgent] 流式注入完成信号: task_id={task_id[:12]}")
-
-    def _do_trigger_callback(self, sub_agent_mgr):
-        """执行回调触发 - 支持强制中断当前流式输出
-
-        三种场景：
-        1. 流式中回调（LLM 调用子智能体，持续流式）：注入汇总到流，不中断
-        2. 非流式中回调（如 /compact 手动命令）：强制中断并创建新对话轮次
-
-        优化：流式场景下直接注入每个任务的执行结果，不再要求 LLM 调用
-        subagent_status 查询。只有非流式中断场景才需要后续主动查询。
-        """
-        # 只提取本次批次完成的任务信息（不是所有历史任务）
-        batch_ids = sub_agent_mgr._batch_task_ids
-        batch_tasks = []
-        for tid in batch_ids:
-            task_info = sub_agent_mgr._finished_tasks.get(tid, {})
-            is_error = bool(task_info.get("error"))
-            result_text = task_info.get("result", "") or "(无输出)"
-            error_text = task_info.get("error", "") or ""
-            batch_tasks.append(
-                {
-                    "task_id": tid,
-                    "agent_name": task_info.get("agent_name", ""),
-                    "task_description": task_info.get("task_description", ""),
-                    "success": not is_error,
-                    "result": result_text,
-                    "error": error_text,
-                }
-            )
-
-        total = len(batch_tasks)
-        failed = sum(1 for t in batch_tasks if not t["success"])
-
-        # 生成任务列表（包含任务名和ID，方便LLM用subagent_status查询）
-        task_lines = []
-        for t in batch_tasks:
-            status_icon = "✅" if t["success"] else "❌"
-            desc_preview = t["task_description"][:50] + ("..." if len(t["task_description"]) > 50 else "")
-            agent = t["agent_name"]
-            task_lines.append(f"- {status_icon} [{agent}] {desc_preview} (id: {t['task_id']})")
-
-        task_list_text = "\n".join(task_lines) if task_lines else "- (无任务详情)"
-
-        callback_content = (
-            f"子智能体全部完成。\n"
-            f"共 {total} 个，成功 {total - failed} 个，失败 {failed} 个。\n"
-            f"本次完成的任务：\n{task_list_text}\n"
-            f"可使用 subagent_status 查询详细结果。"
-        )
-
-        engine = self.backend.chat_engine
-        is_currently_streaming = engine and engine.is_streaming
         logger.info(
-            "[SubAgent-Callback] _do_trigger_callback: "
-            f"engine_exists={engine is not None}, "
-            f"is_streaming={is_currently_streaming}, "
-            f"total={total}, failed={failed}"
-        )
-
-        # ====== 流式路径：注入汇总到流中，不中断 ======
-        if is_currently_streaming:
-            logger.info("[ChatEngine] Sub-agent all done during streaming: injecting summary without interrupt")
-            self._inject_subagent_completion_into_stream(
-                task_id="__batch_summary__",
-                result=callback_content,
-                success=(failed == 0),
-                agent_name="",
-                task_description="",
-            )
-            return
-
-        # ====== 非流式路径：强制中断并创建新对话轮次 ======
-        logger.info(
-            f"[SubAgent-Callback] _do_trigger_callback: 非流式路径，创建新对话轮次 total={total}, failed={failed}"
+            f"[SubAgent-Callback] batch_finished 非流式路径，创建新对话轮次 failed={failed}"
         )
 
         # 统一处理：为回调消息准备 UI（用户卡片 + 新助手卡片）
@@ -21583,14 +21430,6 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if session and self.backend.tool_executor:
             self.backend.set_session_context(session.session_id)
-
-    def _on_sub_agent_finished(self, task_id: str, result: str):
-        """单个子智能体执行完成"""
-        if getattr(self, "_is_destroyed", False):
-            return
-        sub_agent_mgr = self.backend.sub_agent_manager
-        if sub_agent_mgr:
-            sub_agent_mgr.task_finished.emit(task_id, result)
 
     def _on_tool_result_received(self, tool_call_id: str, tool_name: str, arguments: dict, result: Any):
         if getattr(self, "_is_destroyed", False):
