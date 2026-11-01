@@ -67,7 +67,7 @@ class _Host:
         self._result = result
         self._raise = raise_exc
 
-    def _resolve_subagent_model_config(self, query, show_error=True):
+    def _resolve_model_config_by_query(self, query, show_error=True):
         self.calls.append((query, show_error))
         if self._raise:
             raise RuntimeError("boom")

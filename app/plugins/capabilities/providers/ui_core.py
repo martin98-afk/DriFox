@@ -301,13 +301,18 @@ def _agent_prompt(host: Any):
     return prompt
 
 def _subagent_manager(host: Any):
-    """子智能体调度器（per-window，经 backend 延迟创建；未就绪返回 None）。
+    """子智能体窗口服务（按 window_id 取插件注册的门面；未就绪返回 None）。
 
-    ui 面给的是实例而不是「派一个任务」的动作封装：编排层（批次/完成链/
-    stall/日志归档）正在迁往插件，插件要的正是同一个 manager 对象。
+    管理器归 system-subagent 插件所有，主程序不持有实例：插件把每窗口门面
+    写入 ``WindowServiceRegistry``，这里只做按窗口查询。
     """
-    backend = getattr(host, "backend", None)
-    return getattr(backend, "sub_agent_manager", None) if backend else None
+    try:
+        from app.plugins.registries.window_services import get_window_services
+
+        return get_window_services().get("subagent", str(getattr(host, "_window_id", "") or ""))
+    except Exception as e:  # noqa: BLE001 - 服务表不可用按未加载处理
+        logger.debug(f"[Capability] 子智能体服务查询失败: {e}")
+        return None
 
 
 # ──────────────────── 工作目录 ────────────────────
@@ -1213,14 +1218,14 @@ def _model_config_for(host: Any):
 
     query 三种格式与 ``/subagents --model=`` / 标题生成默认模型一致：
     模型名（当前服务商模糊匹配）/ 服务商名（config_id、display_name、provider_name
-    皆可）/ ``服务商:模型名``。解析逻辑留在宿主窗口（`_resolve_subagent_model_config`）：
+    皆可）/ ``服务商:模型名``。解析逻辑留在宿主窗口（`_resolve_model_config_by_query`）：
     它依赖窗口内的 ``_valid_configs`` 与模型列表缓存，插件侧没有等价数据源。
     """
 
     def config_for(query: str) -> Any:
         if not query:
             return None
-        resolver = getattr(host, "_resolve_subagent_model_config", None)
+        resolver = getattr(host, "_resolve_model_config_by_query", None)
         if not callable(resolver):
             logger.debug("[Capability] model.config_for 宿主无模型解析器")
             return None

@@ -74,8 +74,20 @@ def _handle_model(pool: Any, model_value: str) -> None:
     _notify(pool, "子智能体模型设置", display_value)
 
 
+def _subagent_facade(mw: Any) -> Optional[Any]:
+    """取该窗口的子智能体服务门面（插件未加载返回 None）。"""
+    try:
+        from app.plugins.registries.window_services import get_window_services
+
+        return get_window_services().get("subagent", str(getattr(mw, "_window_id", "") or ""))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[system-subagent] 服务门面不可用: {e}")
+        return None
+
+
 def _handle_show_panel(mw: Any, pool: Any) -> None:
-    manager = pool["subagent.run"] if (pool is not None and "subagent.run" in pool) else None
+    facade = _subagent_facade(mw)
+    manager = getattr(facade, "manager", None) if facade is not None else None
     running = dict(getattr(manager, "_running_tasks", None) or {})
     if not running:
         _notify(pool, "暂无运行中的子智能体", "当前没有正在执行的子智能体任务", "warning")
@@ -138,6 +150,53 @@ def register_commands() -> None:
     from app.core.commands.builtin_commands import FunctionCommandHandlers
 
     FunctionCommandHandlers.register(COMMAND_NAME, handle_command)
+    refresh_model_param_description()
+    _watch_default_model()
+
+
+def refresh_model_param_description() -> None:
+    """把当前默认模型写回 /subagents 命令的 --model= 参数描述。
+
+    命令定义在 md，参数描述由插件自己维护（不在主程序写子智能体分支）；
+    ``register_all_commands`` 重建命令表后需重新调用一次。
+    """
+    try:
+        from app.core.commands.command_manager import CommandManager
+        from app.utils.config import Settings
+
+        saved = Settings.get_instance().llm_subagent_default_model.value or ""
+        entries = CommandManager.get_instance()._commands.get(COMMAND_NAME, {})
+        for cmd_def in entries.values():
+            for param in cmd_def.parameters:
+                if param.name == "--model=":
+                    param.description = f"当前子智能体默认模型: {saved}" if saved else "设置子智能体默认模型"
+                    break
+    except Exception as e:  # noqa: BLE001 - 描述刷新失败不影响命令执行
+        logger.debug(f"[system-subagent] 命令参数描述刷新失败: {e}")
+
+
+def _watch_default_model() -> None:
+    """监听默认模型配置变更：刷新命令卡参数描述。"""
+    try:
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        cfg.llm_subagent_default_model.valueChanged.connect(_on_default_model_changed)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[system-subagent] 默认模型监听失败: {e}")
+
+
+def _on_default_model_changed(*_args) -> None:
+    refresh_model_param_description()
+    try:
+        from app.plugins.capabilities.resolve import active_main_widget
+
+        mw = active_main_widget()
+        refresh = getattr(mw, "_refresh_command_card_detail", None)
+        if callable(refresh):
+            refresh(COMMAND_NAME)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[system-subagent] 命令卡刷新失败: {e}")
 
 
 def unregister_commands() -> None:

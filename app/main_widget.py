@@ -1137,8 +1137,8 @@ class OpenAIChatToolWindow(ToolWindow):
             delay_ms=400,
         )
         q.register(
-            "create_sub_agent_and_misc",
-            lambda: self._safe_timer_call(self.backend._deferred_create_sub_agent_and_misc),
+            "warm_git_cache",
+            lambda: self._safe_timer_call(self.backend._deferred_warm_git_cache),
             priority="idle",
             delay_ms=600,
         )
@@ -1183,9 +1183,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # ensure 内为主绑定路径；此处仅兜底极端时序——卡片已建而 controller 后到)
         if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
             self._tool_control_card.set_controller(self._tool_permission_controller)
-        # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
-        # 子智能体默认解析是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
-        self.backend.set_subagent_model_resolver(lambda v: self._resolve_subagent_model_config(v, show_error=False))
         # 连接插件热更新信号
         from app.core.services.plugin_host_service import PluginHostService
 
@@ -1507,14 +1504,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 初始化 UI 相关的回调
         self._setup_engine_callbacks()
 
-        # 初始化子智能体信号连接
-        self._init_sub_agent_signals()
-        # 设置子智能体获取主智能体历史消息的回调
-        self.backend.set_sub_agent_history_getter(self._get_current_session_messages_for_tools)
-        # [审查 #8r Bug D] SubAgentManager 延迟创建（600ms 批）完成前信号连接会跳过；
-        # 监听 sub_agent_ready 信号补连 + 补传历史 getter
-        self.backend.sub_agent_ready.connect(self._on_sub_agent_ready)
-
         # 初始化历史管理器
         self._project_label.setText(self._current_project)
 
@@ -1659,32 +1648,6 @@ class OpenAIChatToolWindow(ToolWindow):
             "context_updated": self._on_context_updated,
         }
         self.backend.set_all_callbacks(callbacks)
-
-    def _init_sub_agent_signals(self):
-        """连接子智能体信号到 UI 回调"""
-        sub_agent_mgr = self.backend.sub_agent_manager
-        if sub_agent_mgr:
-            # task_started 不再由主程序消费：运行区（内嵌面板）由 system-subagent
-            # 插件桥接层订阅同一信号并投影到最新 assistant 卡片。
-            sub_agent_mgr.task_finished.connect(self._on_sub_agent_task_finished)
-            # 批次全部完成（非流式路径）：UI 开新轮承接汇总（流式路径 manager 内部注入）
-            sub_agent_mgr.batch_finished.connect(self._on_sub_agent_batch_finished)
-            # ★ T24：子智能体 ask 权限请求 → 主线程弹窗（用户允许/拒绝）
-            sub_agent_mgr.permission_requested.connect(self._on_subagent_permission_requested)
-
-    def _on_sub_agent_ready(self):
-        """[审查 #8r Bug D] SubAgentManager 延迟创建完成后的补连入口
-
-        backend 的 SubAgentManager 在 QTimer 600ms 批延迟创建；窗口 __init__
-        同步调用 _init_sub_agent_signals 时 manager 为 None 会静默跳过，
-        导致子智能体任务信号/权限弹窗永久缺失。此槽在 sub_agent_ready
-        信号发出时重连，并补传历史 getter（backend 侧也会补传，双保险）。
-        """
-        try:
-            self._init_sub_agent_signals()
-            self.backend.set_sub_agent_history_getter(self._get_current_session_messages_for_tools)
-        except Exception as e:
-            logger.warning(f"[MainWidget] SubAgent 补连失败: {e}")
 
     def _register_cards_to_manager(self):
         """注册所有卡片到 CardManager 并添加到容器
@@ -2547,7 +2510,7 @@ class OpenAIChatToolWindow(ToolWindow):
         - provider 可传 config_id / display_name / provider_name（同
           _resolve_service_provider 的五级匹配）；未知 provider → 返回 {}。
         - model 非空时覆盖「模型名称」，并做一次模糊匹配回填真实模型名
-          （与 _resolve_subagent_model_config 同规则；匹配不到则保留原值）。
+          （与 _resolve_model_config_by_query 同规则；匹配不到则保留原值）。
         - 附带模型默认参数（apply_model_defaults），与主程序发起请求的配置同构。
 
         返回 {} 表示无可用配置（调用方应提示用户先配置模型）。
@@ -3583,9 +3546,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._register_system_card_commands()
         self._register_command_shortcuts()
         # ⚠️ register_all_commands() 清空并重建了所有命令定义，
-        # 导致之前 _update_subagents_param_description() 更新的
-        # param.description 被重置为默认值。此处重新应用当前配置。
-        self._update_subagents_param_description()
+        # 各插件命令的参数描述由插件在注册时自行回填（/subagents 在 system-subagent 内）。
         self._update_title_gen_param_description()
 
         # ── 全局热键同步 ──
@@ -6711,18 +6672,18 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        sub_agent_mgr = self.backend.sub_agent_manager
+        sub_agent_mgr = self._subagent_service()
         if not sub_agent_mgr:
             InfoBar.error(
                 "未就绪",
-                "子智能体管理器未初始化",
+                "子智能体插件未加载",
                 parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
 
         # 解析模型配置（支持 --model=xxx 覆盖）
-        llm_config = self._resolve_subagent_model_config(model_value)
+        llm_config = self._resolve_model_config_by_query(model_value)
 
         # 触发子智能体任务
         sub_agent_mgr.execute_task(
@@ -6736,6 +6697,20 @@ class OpenAIChatToolWindow(ToolWindow):
             llm_config=llm_config,
         )
         logger.info(f"[BuiltinCommands] 触发子智能体任务: agent={agent_name}, task={task_description[:50]}...")
+
+    def _subagent_service(self):
+        """窗口级子智能体服务（system-subagent 插件注入；未加载返回 None）。
+
+        主程序不持有子智能体任何字段：管理器由插件宿主建好后写入窗口服务表，
+        这里只按 window_id 取实例。
+        """
+        try:
+            from app.plugins.registries.window_services import get_window_services
+
+            return get_window_services().get("subagent", str(getattr(self, "_window_id", "") or ""))
+        except Exception as e:  # noqa: BLE001 - 插件表不可用按未加载处理
+            logger.debug(f"[MainWidget] 子智能体服务不可用: {e}")
+            return None
 
     def _resolve_service_provider(self, name: str) -> Optional[str]:
         """把用户传入的"服务商名"解析成 config_id
@@ -6773,7 +6748,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 return cid
         return None
 
-    def _resolve_subagent_model_config(self, model_value: str, show_error: bool = True) -> Optional[Dict]:
+    def _resolve_model_config_by_query(self, model_value: str, show_error: bool = True) -> Optional[Dict]:
         """解析 --model=xxx 参数，返回覆盖后的 LLM 配置
 
         支持三种格式：
@@ -6869,7 +6844,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型列表缺失/为空 → 回退到 merged_provider_models（插件模型 + models.dev），
         # 与 _load_model_selector_to_card 的兜底逻辑一致。用户添加服务商时可能
         # 不写"模型列表"键（依赖 models.dev 动态数据回填），在动态数据尚未
-        # 完成/失败时，若不回退会导致 _resolve_subagent_model_config 匹配不到
+        # 完成/失败时，若不回退会导致 _resolve_model_config_by_query 匹配不到
         # 用户已保存的模型，弹"模型不存在"警告并回退主模型。
         if not model_list:
             pname = config.get("provider_name", provider)
@@ -6939,11 +6914,11 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        sub_agent_mgr = self.backend.sub_agent_manager
+        sub_agent_mgr = self._subagent_service()
         if not sub_agent_mgr:
             InfoBar.error(
                 "未就绪",
-                "子智能体管理器未初始化",
+                "子智能体插件未加载",
                 parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
@@ -6987,7 +6962,7 @@ class OpenAIChatToolWindow(ToolWindow):
             share_context=True,  # 接入主智能体完整上下文
             on_finished=on_finished_cb,
             on_error=self._on_compact_error,
-            session_id=session.session_id,  # 显式传 session_id，避免回退到 SubAgentManager 内部可能陈旧的值
+            session_id=session.session_id,  # 显式传 session_id，避免回退到管理器内部可能陈旧的值
         )
 
         if not success:
@@ -7089,40 +7064,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             logger.info(f"[DEBUG-cc] _on_compact_clear_finished early-return: _is_destroyed (task={task_id[:8]})")
             return
-        # 校验执行结果：仅在无错误时清空
-        sub_agent_mgr = self.backend.sub_agent_manager
-        executor = sub_agent_mgr._running_tasks.get(task_id) if sub_agent_mgr else None
-        if executor is None:
-            # executor 可能已被 get_finished_tasks() 从 _running_tasks 移除（竞态条件）
-            # 此时检查 _finished_tasks：有明确错误则不清空，否则继续尝试清空
-            if sub_agent_mgr and task_id in sub_agent_mgr._finished_tasks:
-                task_info = sub_agent_mgr._finished_tasks.get(task_id, {})
-                if task_info.get("error"):
-                    # 有明确错误（agent 缺失 / mode 不允许 / staled / timeout）— 不清空
-                    logger.info(
-                        f"[DEBUG-cc] early-return: finished_tasks error (task={task_id[:8]}, "
-                        f"error={str(task_info.get('error'))[:80]})"
-                    )
-                    self._safe_resume_team_mail_after_compact()
-                    return
-                # 无错误：可能是竞态条件，继续尝试清空
-            else:
-                # 无任何记录 — 任务从未启动 / 已被丢弃，不清空
-                logger.info(
-                    f"[DEBUG-cc] early-return: no record (task={task_id[:8]}, "
-                    f"running={sub_agent_mgr is not None and task_id in sub_agent_mgr._running_tasks}, "
-                    f"finished_keys={list(sub_agent_mgr._finished_tasks.keys())[-5:] if sub_agent_mgr else None})"
-                )
-                self._safe_resume_team_mail_after_compact()
-                return
-        else:
-            execution_error = getattr(executor, "_execution_error", None)
-            if execution_error:
-                logger.info(
-                    f"[DEBUG-cc] early-return: execution_error (task={task_id[:8]}, error={str(execution_error)[:80]})"
-                )
-                self._safe_resume_team_mail_after_compact()
-                return
+        # 走到这里说明子智能体成功完成：本回调只接 executor 的 finished_with_result
+        # （成功路径）；失败/取消走 _on_compact_error，不触发清空。
 
         # 按 ID 找到触发压缩时的那个 session（不依赖 session_manager.get_current_session，
         # 避免用户在子智能体执行期间切换会话后误清空当前会话）
@@ -7288,14 +7231,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if getattr(self, "_is_destroyed", False):
             return
-        # 校验执行结果：仅在无错误时触发
-        sub_agent_mgr = self.backend.sub_agent_manager
-        executor = sub_agent_mgr._running_tasks.get(task_id) if sub_agent_mgr else None
-        if executor is None:
-            return
-        execution_error = getattr(executor, "_execution_error", None)
-        if execution_error:
-            return
+        # 成功路径专用（on_finished 只接 finished_with_result）：失败/取消走 _on_compact_error
         try:
             self._pending_session_hook = True
             self.backend.trigger_session_event("compact")
@@ -7348,7 +7284,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 构建数据源（供 detail 模式参数列表使用）
         data_provider = {
             "model_options": self._get_all_model_options_flat(),
-            "agent_options": self._get_subagent_names(),
+            "agent_options": self._get_selectable_agent_names(),
             "template_options": self._get_team_template_names(),
             "plugin_options": self._get_plugin_names(),
         }
@@ -7495,8 +7431,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 options.append({"value": f"{display}:{model}", "description": note})
         return sorted(options, key=lambda x: x["value"])
 
-    def _get_subagent_names(self) -> list:
-        """获取所有可作为子智能体的 agent 选项列表（带描述）
+    def _get_selectable_agent_names(self) -> list:
+        """可作为子智能体/智能体命令取用的 agent 选项列表（带描述）
 
         条目格式：{"value": name, "description": "..."}（无描述则空串）。
         供命令卡片枚举值模式显示当前 agent 描述。
@@ -17939,45 +17875,18 @@ class OpenAIChatToolWindow(ToolWindow):
             return False
 
     def _on_subagent_log_requested(self, task_ids_str: str):
-        """处理子智能体日志查看请求 — 展开消息卡内嵌运行面板上的对应任务行
+        """卡片脚部日志按钮：转交子智能体插件（渲染层回调桥，不做业务）。
 
         Args:
             task_ids_str: 逗号分隔的任务ID列表
         """
         if not task_ids_str:
             return
-
-        task_ids = [tid.strip() for tid in task_ids_str.split(",") if tid.strip()]
-        if not task_ids:
+        service = self._subagent_service()
+        if service is None:
+            logger.warning("[MainWidget] 子智能体插件未加载，跳过日志查看")
             return
-
-        sub_agent_mgr = self.backend.sub_agent_manager
-        if not sub_agent_mgr:
-            logger.warning("[LLMChatter] sub_agent_manager 未初始化")
-            return
-
-        panel = self._sub_agent_run_panel()
-        if panel is None:
-            logger.warning("[SubAgent] 运行面板不可用（system-subagent 插件未加载），跳过日志查看")
-            return
-
-        for task_id in task_ids:
-            task_data = sub_agent_mgr.get_task_logs(task_id)
-            if not task_data.get("found"):
-                continue
-            if panel.has_task(task_id):
-                continue
-
-            summary = task_data.get("summary", {})
-            panel.show_completed_task(
-                task_id,
-                summary.get("agent_name", task_data.get("agent_name", "未知")),
-                summary.get("task_description", task_data.get("task_description", "")),
-                model_name=summary.get("model_name", task_data.get("model_name", "")),
-                tool_call_count=summary.get("tool_call_count", 0),
-                elapsed_seconds=summary.get("elapsed_seconds", 0),
-                context_usage=summary.get("context_usage", ""),
-            )
+        service.show_logs(task_ids_str)
 
     def _on_card_diff_requested(self, round_index: int, message_index: int = -1):
         """
@@ -20758,75 +20667,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._tool_card_map[tool_call_id] = card
             card.update_tool_streaming(tool_call_id, tool_name, arguments)
 
-    def _on_sub_agent_stop_requested(self, task_id: str):
-        """处理子智能体停止请求 - 中止当前运行中的子智能体"""
-        if getattr(self, "_is_destroyed", False):
-            return
-
-        sub_agent_mgr = self.backend.sub_agent_manager
-        executor = sub_agent_mgr._running_tasks.get(task_id)
-        if not executor:
-            logger.warning(f"[main_widget] 停止子智能体失败: task_id={task_id} 不在运行中")
-            return
-
-        agent_name = executor.agent_name
-        task_description = getattr(executor, "task_description", "")
-
-        # 1. 设置取消标志 + 执行错误（让后面的 _on_sub_agent_task_finished 读到正确状态）
-        executor.cancel()
-        executor._execution_error = "用户已手动中止子智能体"
-
-        # 2. 通过 task_finished 信号走标准完成路径 → _on_sub_agent_task_finished
-        #    会在那里更新 UI + 写入 _finished_tasks + 从 running_tasks 移除
-        try:
-            sub_agent_mgr.task_finished.emit(task_id, "")
-        except Exception as e:
-            logger.error(f"[main_widget] task_finished.emit 失败 (中止路径): {e}")
-
-        # 3. 通知用户
-        from qfluentwidgets import InfoBar, InfoBarPosition
-
-        InfoBar.info(
-            title="子智能体已中止",
-            content=f"已手动中止子智能体「{agent_name}」: {task_description[:40]}{'...' if len(task_description) > 40 else ''}",
-            parent=TabManagerWindow.get_instance() or self.window(),
-            duration=3000,
-            position=InfoBarPosition.BOTTOM,
-        )
-
-    def _on_sub_agent_enter_session(self, task_id: str, agent_name: str):
-        """进入子智能体会话 — 会话卡（system-subagent 插件浮动卡）展示运行日志/消息"""
-        if getattr(self, "_is_destroyed", False):
-            return
-
-        # 通过 SubAgentManager 获取任务日志（支持运行中/已完成/数据库三种来源）
-        sub_agent_mgr = self.backend.sub_agent_manager
-        task_log_data = sub_agent_mgr.get_task_logs(task_id)
-
-        if not task_log_data.get("found"):
-            return
-
-        logs = task_log_data.get("logs", [])
-        summary = task_log_data.get("summary", {})
-        status = task_log_data.get("status", "unknown")
-        summary["status"] = status
-        summary["agent_name"] = agent_name
-
-        # 会话卡归 system-subagent 插件所有，经服务门面灌数据 + 显示
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        service = UIPluginRegistry.get_instance().get_service("subagent_session")
-        if service is None:
-            logger.warning("[SubAgent] 会话服务不可用（system-subagent 插件未加载），跳过进入会话")
-            return
-        service.show(
-            task_id=task_id,
-            agent_name=agent_name,
-            logs=logs,
-            summary=summary,
-            logs_provider=lambda: sub_agent_mgr.get_task_logs(task_id),
-        )
-
     def _handle_compact_command(self, args: str):
         """/compact 命令：触发上下文压缩
 
@@ -20913,7 +20753,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 return
 
-            llm_config = self._resolve_subagent_model_config(model_value)
+            llm_config = self._resolve_model_config_by_query(model_value)
             if llm_config is None:
                 return
 
@@ -20983,25 +20823,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """/clear 命令：清空当前会话的所有消息（重新显示欢迎页）"""
         self._on_clear_shortcut()
 
-    def _update_subagents_param_description(self):
-        """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""
-        from app.core.commands.command_manager import CommandManager
-        from app.utils.config import Settings
-
-        cfg = Settings.get_instance()
-        saved = cfg.llm_subagent_default_model.value or ""
-
-        cmd_mgr = CommandManager.get_instance()
-        entries = cmd_mgr._commands.get("subagents", {})
-        for cmd_type, cmd_def in entries.items():
-            for param in cmd_def.parameters:
-                if param.name == "--model=":
-                    if saved:
-                        param.description = f"当前子智能体默认模型: {saved}"
-                    else:
-                        param.description = "设置子智能体默认模型"
-                    break
-
     def _update_title_gen_param_description(self):
         """更新 /title_gen 命令的 --model= 参数描述，反映当前默认值"""
         from app.core.commands.command_manager import CommandManager
@@ -21033,160 +20854,6 @@ class OpenAIChatToolWindow(ToolWindow):
         card = self._command_card
         if card.is_detail_mode and card.detail_cmd_name == cmd_name:
             card._refresh_detail_view()
-
-    def _sub_agent_run_panel(self):
-        """取本窗口最新 assistant 卡片上的子智能体运行面板（插件实现）。
-
-        运行区已迁入 system-subagent 插件的消息卡内嵌面板槽位；插件缺失或无可用
-        卡片时返回 None，调用方按「无面板可展示」降级，不保留主程序兜底实现。
-        """
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            return UIPluginRegistry.get_instance().attach_card_inline_panel("subagent_run", main_widget=self)
-        except Exception as e:  # noqa: BLE001 - 插件缺失/卡片异常不拖垮命令
-            logger.debug(f"[SubAgent] 运行面板不可用: {e}")
-            return None
-
-    def _on_subagent_permission_requested(self, window_id: str, task_id: str, tool_name: str, arguments: dict):
-        """子智能体 ask 权限弹窗（主线程，T24）。
-
-        多窗口隔离：仅本窗口的请求弹窗。用户允许 → respond_permission(True)
-        继续执行；拒绝 → respond_permission(False) 回填失败；关闭弹窗默认拒绝。
-        """
-        if getattr(self, "_is_destroyed", False):
-            return
-        if window_id and window_id != self._window_id:
-            return  # 其它窗口的请求，跳过
-        # 缺陷 2：补 Tab 提示（切走窗口也能看到哪个 Tab 在等审批）与系统通知
-        self._set_ai_state("question")
-        self._notify_if_inactive("子智能体待授权", f"子智能体请求使用工具 {tool_name}")
-        try:
-            args_preview = ""
-            if arguments:
-                try:
-                    args_preview = json.dumps(arguments, ensure_ascii=False)[:200]
-                except Exception:
-                    args_preview = str(arguments)[:200]
-            from PyQt5.QtWidgets import QMessageBox
-
-            box = QMessageBox(self)
-            box.setWindowTitle("子智能体工具权限请求")
-            box.setIcon(QMessageBox.Question)
-            box.setText(f"子智能体请求使用工具「{tool_name}」\n\n参数: {args_preview}\n\n是否允许？")
-            allow_btn = box.addButton("允许", QMessageBox.AcceptRole)
-            deny_btn = box.addButton("拒绝", QMessageBox.RejectRole)
-            box.setDefaultButton(deny_btn)
-            box.setEscapeButton(deny_btn)
-            box.exec_()
-            allow = box.clickedButton() is allow_btn
-            self.backend.sub_agent_manager.respond_permission(task_id, allow)
-        except Exception as e:
-            logger.warning(f"[SubAgent] 权限弹窗失败: {e}")
-            try:
-                self.backend.sub_agent_manager.respond_permission(task_id, False)
-            except Exception:
-                pass
-
-    def _on_sub_agent_task_finished(self, task_id: str, result: str):
-        """子智能体任务完成：落库归档。
-
-        完成链（批次计数/流式注入/全完成判定）已迁入 SubAgentManager 内部
-        （_on_executor_finished）；运行面板收尾由 system-subagent 插件桥接层订阅
-        同一信号完成，本槽只剩持久化。
-        """
-        if getattr(self, "_is_destroyed", False):
-            return
-        # 从管理器获取执行器，检查是否有真实的错误状态
-        sub_agent_mgr = self.backend.sub_agent_manager
-        executor = sub_agent_mgr._running_tasks.get(task_id)
-
-        # 优先使用 executor 中记录的 _execution_error 来判断成功/失败
-        # 而不是依赖结果内容中的关键词（这会导致误判）
-        execution_error = getattr(executor, "_execution_error", None) if executor else None
-
-        # 归档到管理器：内存 _finished_tasks + 数据库 finished 状态（含最终 logs/summary）。
-        # 之前只写内存不落库，DB 永挂 running → 会话卡片永远显示执行中、工具数/时间冻结
-        sub_agent_mgr.mark_task_finished(task_id, result, execution_error or "")
-
-    def _on_sub_agent_batch_finished(self, callback_content: str, failed: int):
-        """批次全部完成（非流式路径）：UI 开新轮承接汇总消息。
-
-        批次计数/流式注入/全完成判定均在 SubAgentManager._on_executor_finished；
-        流式中 manager 直接注入汇总不走本槽。非流式时广播到此，由 UI 层
-        强制中断并创建新对话轮次承接回调消息。
-        """
-        logger.info(
-            f"[SubAgent-Callback] batch_finished 非流式路径，创建新对话轮次 failed={failed}"
-        )
-
-        # 统一处理：为回调消息准备 UI（用户卡片 + 新助手卡片）
-        self._prepare_ui_for_callback_message(callback_content)
-
-        # 发送回调消息到引擎（非流式场景下 UI 已在 _prepare_ui_for_callback_message 中准备好）
-        if not self.backend.send_message_to_engine(callback_content):
-            # 发送失败（通常是正在流式或配置无效），回滚 UI 状态
-            logger.warning("[ChatEngine] Sub-agent callback: send_message_to_engine failed, rolling back UI")
-            self._is_streaming = False
-            self._toggle_send_stop(False)
-            if self._current_assistant_card:
-                self._current_assistant_card.deleteLater()
-                self._current_assistant_card = None
-        else:
-            # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
-            self._sync_batch_structures()
-            self._fix_new_card_message_index(
-                user_text=callback_content
-            )  # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
-            self._advance_visible_batch_window()
-            self._register_new_cards_into_batches()
-            # 🆕 发送纪元 +1（**不再解除压缩守卫**）。
-            # 本回调路径不走 _on_send_clicked，因此必须自己推进 epoch；但旧实现
-            # 顺手把 _post_compact_guard 置 False 是错的：一旦守卫被关，旧 worker
-            # 的延迟全量快照（清空前那 400+ 条）就会在 _on_messages_updated 里
-            # 静默覆写已清空的会话 → 清空被复活、DB 又被写回旧消息
-            # （2026-10-11 `/compact --clear` 清不掉的核心路径）。
-            # 正确做法：守卫保持开启，由 _on_messages_updated 用**时间线切断点**
-            # 判定放行 —— 本路径写入的 callback 消息 ts_ms ≥ 切断点，新 worker 的
-            # 快照会被放行；旧快照尾部 < 切断点，被拦截。原先担心的
-            # "守卫吞掉新回复"（团队成员自动压缩后看不到大模型恢复结果）由
-            # 时间线判据 + 时间戳缺失时的 epoch 回退共同兜住。
-            self._send_epoch += 1
-
-    def _prepare_ui_for_callback_message(self, callback_text: str):
-        """为子智能体回调消息准备 UI（用户卡片 + 助手卡片 + 流式状态）
-
-        非流式场景（如 /compact 手动命令）下，回调消息发送后引擎会产生流式响应，
-        但 UI 上没有对应的卡片来承载内容，导致消息写入 session 却不可见。
-        此方法复用 _on_send_message 的 UI 准备逻辑，确保流式回调内容能正确渲染。
-
-        注意：只做 UI 准备（创建卡片、设置状态），不做 batch 同步。
-        batch 同步必须在 send_message_to_engine 之后执行（因为 send 会往 session 写消息）。
-        """
-        self._hide_welcome_cards()
-
-        # 创建用户消息卡片（显示回调通知文本）
-        self._append_user_message(callback_text)
-
-        # 创建助手消息卡片（用于接收 LLM 的流式响应）
-        assistant_card = self._append_assistant_message(
-            model_name=self._current_model_name,
-            config_id=self._current_provider_name,
-        )
-
-        # 设置当前卡片（必须在 send_message 之前，否则流式回调触发时 _current_assistant_card 为 None）
-        self._current_assistant_card = assistant_card
-        self._response_start_time = time.time()
-        assistant_card.start_elapsed_tracking()
-        self._is_streaming = True
-        # ❌ 不在这里切换停止按钮！内建函数/子智能体执行后只是准备接收回调响应，
-        # 按钮状态应在 LLM 实际开始流式响应时由 _on_stream_started 切换。
-        # self._toggle_send_stop(True)
-
-        # 确保 ToolExecutor 使用正确的 session_id
-        session = self.session_manager.get_current_session()
-        if session and self.backend.tool_executor:
-            self.backend.set_session_context(session.session_id)
 
     def _on_tool_result_received(self, tool_call_id: str, tool_name: str, arguments: dict, result: Any):
         if getattr(self, "_is_destroyed", False):
@@ -23052,7 +22719,7 @@ class OpenAIChatToolWindow(ToolWindow):
         llm_config = None
         saved = policy.get("ai_model") or ""
         if saved:
-            llm_config = self._resolve_subagent_model_config(saved, show_error=False)
+            llm_config = self._resolve_model_config_by_query(saved, show_error=False)
         if llm_config is None:
             try:
                 llm_config = self._get_current_model_config()
@@ -23233,7 +22900,7 @@ class OpenAIChatToolWindow(ToolWindow):
         saved = cfg.llm_title_gen_default_model.value
         if saved:
             # 标题生成是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
-            resolved = self._resolve_subagent_model_config(saved, show_error=False)
+            resolved = self._resolve_model_config_by_query(saved, show_error=False)
             if resolved:
                 llm_config = resolved
             else:
@@ -25505,14 +25172,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "backend") and self.backend:
             # 🔧 内存泄漏修复：先断开信号连接，防止闭包持有窗口引用
             # （plugin_changed 已上移 PluginHostService——服务信号断开见下方）
-            for signal_pair in (("sub_agent_ready", "_on_sub_agent_ready"),):
-                try:
-                    sig = getattr(self.backend, signal_pair[0], None)
-                    slot = getattr(self, signal_pair[1], None)
-                    if sig is not None and slot is not None:
-                        sig.disconnect(slot)
-                except TypeError, RuntimeError:
-                    pass
 
             # 🔧 断开应用级 PluginHostService 的 plugin_changed（窗口销毁后
             # 服务常驻，不断开会向死窗口槽投递 → RuntimeError 刷屏）

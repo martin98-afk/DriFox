@@ -11,13 +11,21 @@
     "api_version": 2,
     "components": {
         "commands": true,
+        "tools": true,
         "ui": true
     },
     "capabilities": [
         "config.write",
+        "model.config",
         "model.config_for",
+        "session.read",
+        "session.send",
+        "storage.db",
         "subagent.run",
         "ui.notify",
         "ui.card.show"
+    ],
+    "module_prefixes": [
+        "system_subagent_manager"
     ]
 }

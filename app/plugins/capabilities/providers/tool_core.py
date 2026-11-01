@@ -51,7 +51,19 @@ def register(registry) -> None:
         return getattr(bt, "gitee_upload", None) if bt is not None else None
 
     def _subagent(host: Any):
-        return getattr(host, "_sub_agent_manager", None)
+        """子智能体窗口服务（按 ToolExecutor 所属窗口查插件注册的门面）。"""
+        from app.plugins.registries.window_services import get_window_services
+
+        backend = getattr(host, "_backend", None)
+        window_id = str(getattr(backend, "_window_id", "") or "")
+        if not window_id:
+            try:
+                from app.plugins.capabilities.resolve import active_main_widget
+
+                window_id = str(getattr(active_main_widget(), "_window_id", "") or "")
+            except Exception:  # noqa: BLE001
+                window_id = ""
+        return get_window_services().get("subagent", window_id)
 
     def _model_config_for(host: Any):
         """按 query 解析完整模型配置（复用 ui_core 实现，窗口经 active_main_widget）。

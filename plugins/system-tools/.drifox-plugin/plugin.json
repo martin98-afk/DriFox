@@ -17,7 +17,6 @@
     "lsp.query",
     "mcp.call",
     "net.upload",
-    "subagent.run",
     "team.read",
     "team.send"
   ],

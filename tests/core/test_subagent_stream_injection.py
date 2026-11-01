@@ -3,7 +3,7 @@
 回归测试：子智能体结果注入链路（插件所有物）
 
 迁移说明：注入逻辑原为 main_widget._inject_subagent_completion_into_stream
-（已删），现归 plugins/system-tools/tools/subagent_tools.py 的
+（已删），现归 plugins/system-subagent/tools/subagent_tools.py 的
 _inject_subagent_result（经 ToolRegistry metadata["subagent_result_injector"]
 被发现，主程序只做接线）。
 
@@ -23,7 +23,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_PLUGIN_TOOLS = _REPO_ROOT / "plugins" / "system-tools" / "tools"
+_PLUGIN_TOOLS = _REPO_ROOT / "plugins" / "system-subagent" / "tools"
 
 def _load_subagent_tools():
     """直载插件模块（幂等：已加载返回缓存，先例 test_team_capability.py）"""

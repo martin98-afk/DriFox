@@ -62,7 +62,6 @@ class BuiltinTools(QObject):
         self._mcp_manager.acquire()
 
         # Dependencies injected later
-        self._sub_agent_manager = None
         self._agent_manager = None
         self._set_stage_callback = None
         self._memory_manager = None
@@ -118,9 +117,6 @@ class BuiltinTools(QObject):
         彻底清理 BuiltinTools 的所有缓存，防止内存泄漏。
         应该在对话结束后或切换会话时调用。
         """
-        # 清理子智能体管理器（工具插件待办/技能状态随插件生命周期，主程序不持有）
-        self._sub_agent_manager = None
-
         # 释放 MCP 引用（引用计数归零时才真正断开）
         self._mcp_manager.release()
 

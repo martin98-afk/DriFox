@@ -31,6 +31,16 @@ class _FakeBT:
 class _FakeSubAgentManager:
     anything = "probe"
 
+_WINDOW_ID = "win-a3"
+
+@pytest.fixture(autouse=True, scope="module")
+def _clean_window_services():
+    """模块结束后摘掉子智能体窗口服务（避免污染其他测试）。"""
+    yield
+    from app.plugins.registries.window_services import get_window_services
+
+    get_window_services().drop_window(_WINDOW_ID)
+
 
 def _make_executor(tmp_path) -> ToolExecutor:
     """跳过 __init__ 的最小 ToolExecutor（_execute_registered_tool 依赖面）。"""
@@ -38,7 +48,13 @@ def _make_executor(tmp_path) -> ToolExecutor:
     executor._builtin_tools = _FakeBT()
     executor._workdir = str(tmp_path)
     executor._call_id = "call-1"
-    executor._sub_agent_manager = _FakeSubAgentManager()
+    # 子智能体管理器归插件：经窗口服务表按 window_id 提供
+    executor._backend = SimpleNamespace(_window_id=_WINDOW_ID)
+    from app.plugins.registries.window_services import get_window_services
+
+    get_window_services().register(
+        "subagent", _FakeSubAgentManager(), plugin_name="system-subagent", window_id=_WINDOW_ID
+    )
     executor._window_state = {}
     executor._window_state_lock = threading.Lock()
     return executor

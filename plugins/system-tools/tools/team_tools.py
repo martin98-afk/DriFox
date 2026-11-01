@@ -1,23 +1,18 @@
 # -*- coding: utf-8 -*-
-"""
-系统工具插件 — 子智能体与团队协作（自包含实现）
+"""系统工具插件 — 团队协作工具（自包含实现）
 
-subagent_*：直接使用 tool_ctx["sub_agent_manager"]（ToolExecutor 注入的主程序
-子智能体调度器），不依赖主程序服务转发。
-team_*：直接调用主程序 TeamManager（插件 import 主程序，正常方向），
+team_*：经 team.read / team.send 能力调用主程序 TeamManager，
 窗口团队上下文从 tool_ctx["team_window_id"]/["team_agent_name"] 获取。
 团队专用工具注册 team_only=True → 非团队成员从 schema 定义中过滤。
-"""
-import uuid
 
-import orjson
+子智能体工具（subagent_para / subagent_status + 结果注入器）已迁
+``plugins/system-subagent/tools/subagent_tools.py``。
+"""
 
 from loguru import logger
 
 from app.plugins.sdk import ToolResult
-from app.plugins.sdk import make_summarize_from_preview
 
-GROUP_SUBAGENT = "子智能体"
 GROUP_TEAM = "团队协作"
 
 
@@ -160,11 +155,7 @@ def _team_list_members(tool_ctx) -> ToolResult:
             # 当前窗口有 run：本团队 = 该 run 的成员 ∪ legacy 成员
             my_slot = by_run.get(my_run_id, {"label": "", "members": []})
             my_members = list(my_slot["members"]) + list(legacy_members)
-            my_label = (
-                my_slot.get("label")
-                or _safe_team_label_by_run(my_run_id)
-                or _safe_team_label()
-            )
+            my_label = my_slot.get("label") or _safe_team_label_by_run(my_run_id) or _safe_team_label()
             other_teams = [(rid, info) for rid, info in by_run.items() if rid != my_run_id]
         else:
             # 🛡️ S1（review 建议修）：当前窗口无 run_id 但系统存在 run 团队 →
@@ -226,10 +217,7 @@ def _team_list_members(tool_ctx) -> ToolResult:
             for m in info["members"]:
                 lines.append(_render_member(m))
         lines.append("")
-        lines.append(
-            "⚠ 团队间沟通：你只能向本团队成员发送任务；如需联系其他团队，"
-            "只通过各自 leader 传递团队间消息。"
-        )
+        lines.append("⚠ 团队间沟通：你只能向本团队成员发送任务；如需联系其他团队，只通过各自 leader 传递团队间消息。")
 
     return ToolResult(True, content="\n".join(lines))
 
@@ -276,10 +264,7 @@ def _team_send_message(tool_ctx, to_agent: str, message: str) -> ToolResult:
         target_pre = tm.find_member(to_agent)
         to_run_id = ((target_pre or {}).get("run_id") or "") if target_pre else ""
         if from_run_id and to_run_id and from_run_id != to_run_id:
-            cross_team_notice = (
-                f"\n⚠ 跨团队消息已发送（{from_run_id} → {to_run_id}）："
-                f"建议经双方 leader 协调任务边界"
-            )
+            cross_team_notice = f"\n⚠ 跨团队消息已发送（{from_run_id} → {to_run_id}）：建议经双方 leader 协调任务边界"
     except Exception:
         # 跨团队判定失败不影响正常发件（兜底：仅放行不报）
         pass
@@ -320,53 +305,6 @@ def _team_send_message(tool_ctx, to_agent: str, message: str) -> ToolResult:
 # schema
 # ============================================================
 
-_SUBAGENT_PARA_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "subagent_para",
-        "description": "",  # 运行时由 get_builtin_tools_schema 动态填充子智能体列表
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "tasks": {
-                    "type": "array",
-                    "description": "",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "agent": {"type": "string", "description": "子智能体名称。"},
-                            "description": {"type": "string", "description": "任务描述"},
-                            "context": {"type": "string", "description": "上下文(可选)"},
-                        },
-                        "required": ["agent", "description"],
-                    },
-                },
-                "share_context": {"type": "boolean", "description": "共享主智能体上下文给子智能体(默认True)", "default": True},
-            },
-            "required": ["tasks"],
-        },
-    },
-}
-
-_SUBAGENT_STATUS_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "subagent_status",
-        "description": (
-            "查询子智能体任务状态。task_ids 不传只能查一次刚完成的；指定task_id始终能查。\n\n"
-            "**重要**：运行中任务勿重复查——完成后自动发[后台任务状态]通知，届时再查。轮询卡死。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_ids": {"type": "array", "description": "任务ID列表(不传则查刚完成的，仅一次)", "items": {"type": "string"}},
-                "with_log": {"type": "boolean", "description": "含执行日志(默认False)"},
-                "with_result": {"type": "boolean", "description": "含执行结果(默认True)"},
-            },
-        },
-    },
-}
-
 _TEAM_SEND_SCHEMA = {
     "type": "function",
     "function": {
@@ -400,64 +338,6 @@ _TEAM_LIST_SCHEMA = {
 # impl
 # ============================================================
 
-def _subagent_para_impl(tool_ctx, **kwargs):
-    manager = tool_ctx.get("sub_agent_manager")
-    if not manager:
-        return ToolResult(False, error="子智能体管理器未初始化")
-    tasks_val = kwargs.get("tasks", [])
-    tasks = orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or [])
-    if not tasks:
-        return ToolResult(False, error="任务列表为空")
-    share_context = kwargs.get("share_context", False)
-    session_id = tool_ctx.get("session_id", "")
-
-    task_ids = []
-    for task_item in tasks:
-        agent = task_item.get("agent", "")
-        description = task_item.get("description", "")
-        context = task_item.get("context", "")
-        if not agent or not description:
-            continue
-        task_id = str(uuid.uuid4())
-        manager.execute_task(
-            task_id=task_id,
-            agent_name=agent,
-            task_description=description,
-            parent_context=context or "",
-            on_finished=None,
-            on_error=None,
-            executor_ref=None,
-            share_context=share_context,
-            session_id=session_id,
-        )
-        task_ids.append(task_id)
-
-    return ToolResult(
-        True,
-        content={
-            "task_ids": task_ids,
-            "status": "running",
-            "count": len(task_ids),
-        },
-    )
-
-
-def _subagent_status_impl(tool_ctx, **kwargs):
-    manager = tool_ctx.get("sub_agent_manager")
-    if not manager:
-        return ToolResult(False, error="子智能体管理器未初始化")
-    task_ids = kwargs.get("task_ids")
-    with_log = kwargs.get("with_log", False)
-    with_result = kwargs.get("with_result", True)
-    session_id = tool_ctx.get("session_id", "")
-    if task_ids:
-        if isinstance(task_ids, list):
-            id_list = [str(tid).strip() for tid in task_ids if tid]
-        else:
-            id_list = [tid.strip() for tid in str(task_ids).split(",") if tid.strip()]
-        return manager.get_tasks_status_with_details(id_list, with_log, with_result, session_id=session_id)
-    return manager.get_all_active_tasks_with_details(with_log, with_result, session_id=session_id)
-
 
 def _team_send_impl(tool_ctx, **kwargs):
     return _team_send_message(tool_ctx, kwargs.get("to_agent", ""), kwargs.get("message", ""))
@@ -467,99 +347,27 @@ def _team_list_impl(tool_ctx, **kwargs):
     return _team_list_members(tool_ctx)
 
 
-def _preview_subagent_para(tool_args: dict) -> str:
-    """分发任务预览：优先展示子任务各自的 description（比"分发 N 个子任务"更有信息量）"""
-    tasks = tool_args.get("tasks", [])
-    count = len(tasks) if isinstance(tasks, list) else 0
-    if not count:
-        return "分发子智能体任务"
-    descs = []
-    for t in tasks:
-        if isinstance(t, dict):
-            d = str(t.get("description") or "").strip()
-            if d:
-                descs.append(d)
-    if not descs:
-        return f"分发 {count} 个子任务"
-    if count == 1:
-        return descs[0]
-    if len(descs) == 2:
-        return " / ".join(d[:40] for d in descs)
-    return f"{descs[0][:40]} 等 {count} 个子任务"
-
-
-def _preview_subagent_status(tool_args: dict) -> str:
-    task_ids = tool_args.get("task_ids", [])
-    if isinstance(task_ids, list) and task_ids:
-        return f"查询子智能体状态 ({', '.join(str(t)[:12] for t in task_ids[:3])})"
-    return "查询子智能体状态"
-
-def _inject_subagent_result(
-    send,
-    task_id: str,
-    result: str,
-    success: bool,
-    agent_name: str,
-    task_description: str,
-    mode: str = "hook",
-) -> bool:
-    """子智能体结果注入（插件所有物）：构建文案并经 session.send 发送。
-
-    由主程序在 task_finished 信号时经 ToolRegistry metadata 发现并调用
-    （send 为 session.send 裸 callable，tool surface，host=ToolExecutor）。
-    流式中经 hook 通道静默注入当前对话上下文（worker 下一轮消费，不打断）；
-    空闲时 session.send 自动降级为普通发送开新轮。mode 可选 queue/skip/hook。
-    """
-    if task_id == "__batch_summary__":
-        content = str(result or "")
-    else:
-        status_icon = "✅" if success else "❌"
-        agent_label = f"[{agent_name}]" if agent_name else ""
-        MAX_RESULT_CHARS = 4096
-        if result and len(result) > MAX_RESULT_CHARS:
-            result = result[:MAX_RESULT_CHARS] + "\n\n[... 已省略 " + str(len(result) - MAX_RESULT_CHARS) + " 个字符 ...]"
-        else:
-            result = result or "(无输出)"
-        content = (
-            f"子智能体任务完成: {status_icon} {agent_label} {task_description} (id: {task_id})\n"
-            f"执行结果：\n{result}"
-        )
-    return bool(send(content, mode=mode, hook_event="SubAgentFinished"))
-
-
 def register(registry):
-    registry.register(
-        "subagent_para", _SUBAGENT_PARA_SCHEMA, impl=_subagent_para_impl,
-        danger="dangerous", icon="设置-subagent", cn_name="分发任务",
-        group=GROUP_SUBAGENT, description="并行启动子智能体",
-        aliases=["subagents-para", "subagent-para", "TaskBatch", "Batch", "task", "Task"],
-        preview=_preview_subagent_para,
-        summarize=make_summarize_from_preview(_preview_subagent_para),
-        keep_in_content=True,  # 任务表常驻正文，不迁入工具折叠区
-        metadata={
-            "subagent_task": True,
-            "permission_task": True,
-            # 子智能体结果注入器：主程序 task_finished 时经 ToolRegistry 发现并调用
-            # （迁移自 main_widget._inject_subagent_completion_into_stream，插件所有物）
-            "subagent_result_injector": _inject_subagent_result,
-        },
-    )
-    registry.register(
-        "subagent_status", _SUBAGENT_STATUS_SCHEMA, impl=_subagent_status_impl,
-        danger="safe", icon="设置-subagent", cn_name="查询任务状态",
-        group=GROUP_SUBAGENT, description="查询子智能体状态",
-        aliases=["subagent-status", "TaskStatus", "Status"],
-        preview=_preview_subagent_status,
-        summarize=make_summarize_from_preview(_preview_subagent_status),
-    )
     # 团队专用工具：team_only=True → 非团队成员从 schema 定义中过滤（LLM 不可见）
     registry.register(
-        "team_send_message", _TEAM_SEND_SCHEMA, impl=_team_send_impl,
-        danger="safe", icon="邮件-发送", cn_name="发送邮件",
-        group=GROUP_TEAM, description="向团队成员发送任务", team_only=True,
+        "team_send_message",
+        _TEAM_SEND_SCHEMA,
+        impl=_team_send_impl,
+        danger="safe",
+        icon="邮件-发送",
+        cn_name="发送邮件",
+        group=GROUP_TEAM,
+        description="向团队成员发送任务",
+        team_only=True,
     )
     registry.register(
-        "team_list_members", _TEAM_LIST_SCHEMA, impl=_team_list_impl,
-        danger="safe", icon="团队", cn_name="团队成员",
-        group=GROUP_TEAM, description="列出团队成员", team_only=True,
+        "team_list_members",
+        _TEAM_LIST_SCHEMA,
+        impl=_team_list_impl,
+        danger="safe",
+        icon="团队",
+        cn_name="团队成员",
+        group=GROUP_TEAM,
+        description="列出团队成员",
+        team_only=True,
     )

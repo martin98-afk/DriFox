@@ -4,13 +4,11 @@
 职责：把「每窗口一个 SubAgentManager」的事件流投影到该窗口最新 assistant 卡片上的
 内嵌运行面板。三件事：
 
-1. **窗口发现**：SubAgentManager 是 per-window 的（``backend.sub_agent_manager``，
-   启动后 600ms 延迟创建），插件无法在注册时一次性拿全。用 1s 心跳遍历窗口表，
-   manager 实例变化即重绑（这是唯一的轮询点，其余全部走信号）。
+1. **窗口发现**：管理器由 ``SubAgentHost`` 按窗口创建，本桥只按 window_id 取实例
+   （1s 心跳重取，管理器换实例即重绑；其余全部走信号）。
 2. **状态投影**：运行中任务的状态记在桥里（``_tasks``），行只是投影。迁卡后新卡
    上新面板从桥里全量补齐，不依赖旧面板实例。
-3. **动作回落**：行内「进入会话」「停止」交给宿主窗口的既有实现（会话卡与中止
-   逻辑仍在主程序，P2 才迁）。
+3. **动作回落**：行内「进入会话」「停止」交给窗口宿主（``SubAgentHost``）执行。
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,9 +49,10 @@ class _Binding:
 class SubAgentRunBridge(QObject):
     """把子智能体运行态推到消息卡内嵌面板（每窗口一份绑定）。"""
 
-    def __init__(self, registry: Any, parent: Optional[QObject] = None):
+    def __init__(self, registry: Any, host: Any, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._registry = registry
+        self._host = host
         self._bindings: Dict[str, _Binding] = {}
         # task_id → 运行中任务记录（完成后即出表，行留在面板上）
         self._tasks: Dict[str, Dict[str, Any]] = {}
@@ -99,7 +98,7 @@ class SubAgentRunBridge(QObject):
         try:
             for window_id, mw in self._iter_windows():
                 seen.add(window_id)
-                manager = getattr(getattr(mw, "backend", None), "sub_agent_manager", None)
+                manager = self._host.manager_for(window_id)
                 binding = self._bindings.get(window_id)
                 if binding is not None and (binding.manager is manager and binding.main_widget is mw):
                     continue
@@ -148,7 +147,7 @@ class SubAgentRunBridge(QObject):
         for signal, slot in binding.connections:
             try:
                 signal.disconnect(slot)
-            except (RuntimeError, TypeError):
+            except RuntimeError, TypeError:
                 pass
         binding.connections.clear()
 
@@ -183,13 +182,13 @@ class SubAgentRunBridge(QObject):
                 executor.tool_call_started.connect(
                     lambda tid, name, args, _wid=window_id: self._on_tool_call(_wid, tid)
                 )
-            except (RuntimeError, TypeError):
+            except RuntimeError, TypeError:
                 pass
             try:
                 executor.token_usage_updated.connect(
                     lambda tid, pt, ct, tt, _wid=window_id: self._on_token_usage(_wid, tid, tt)
                 )
-            except (RuntimeError, TypeError):
+            except RuntimeError, TypeError:
                 pass
 
         self._project(window_id, task_id)
@@ -203,7 +202,7 @@ class SubAgentRunBridge(QObject):
         if panel is not None:
             try:
                 panel.set_task_tool_count(task_id, rec["tool_count"])
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_token_usage(self, window_id: str, task_id: str, total_tokens: int) -> None:
@@ -216,7 +215,7 @@ class SubAgentRunBridge(QObject):
         if panel is not None:
             try:
                 panel.set_task_context(task_id, rec["context"])
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_task_finished(self, window_id: str, task_id: str, result: str) -> None:
@@ -238,7 +237,7 @@ class SubAgentRunBridge(QObject):
         if panel is not None:
             try:
                 panel.finish_task(task_id, success)
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
         # 完成后即出表：面板行保留展示，新批次不再迁移旧行（跟最新卡语义）
         self._tasks.pop(task_id, None)
@@ -306,32 +305,20 @@ class SubAgentRunBridge(QObject):
         try:
             if not panel.has_task(task_id):
                 self._project(window_id, task_id, panel)
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             return None
         return panel
 
-    # ── 动作：回落宿主窗口既有实现 ──
+    # ── 动作：交给窗口宿主（管理器在插件内，不再回落 main_widget） ──
 
     def _on_enter_session(self, window_id: str, task_id: str, agent_name: str) -> None:
-        binding = self._bindings.get(window_id)
-        mw = binding.main_widget if binding is not None else None
-        handler = getattr(mw, "_on_sub_agent_enter_session", None)
-        if callable(handler):
-            try:
-                handler(task_id, agent_name)
-                return
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[system-subagent] 进入会话失败: {e}")
-        logger.warning("[system-subagent] 宿主未提供进入会话入口，忽略")
+        try:
+            self._host.show_session(window_id, task_id, agent_name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[system-subagent] 进入会话失败: {e}")
 
     def _on_stop_requested(self, window_id: str, task_id: str) -> None:
-        binding = self._bindings.get(window_id)
-        mw = binding.main_widget if binding is not None else None
-        handler = getattr(mw, "_on_sub_agent_stop_requested", None)
-        if callable(handler):
-            try:
-                handler(task_id)
-                return
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[system-subagent] 停止子智能体失败: {e}")
-        logger.warning("[system-subagent] 宿主未提供停止入口，忽略")
+        try:
+            self._host.stop_task(window_id, task_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[system-subagent] 停止子智能体失败: {e}")

@@ -161,28 +161,36 @@ class _FakeManager(QObject):
         self._finished_tasks = {}
 
 
-class _FakeBackend:
-    def __init__(self, manager):
-        self.sub_agent_manager = manager
+class _FakeSubAgentHost:
+    """假窗口宿主：按 window_id 提供管理器 + 记录动作（替代真实 SubAgentHost）。"""
+
+    def __init__(self):
+        self.managers = {}
+        self.entered = []
+        self.stopped = []
+
+    def manager_for(self, window_id: str):
+        return self.managers.get(window_id)
+
+    def show_session(self, window_id: str, task_id: str, agent_name: str):
+        self.entered.append((task_id, agent_name))
+
+    def stop_task(self, window_id: str, task_id: str):
+        self.stopped.append(task_id)
 
 
 class _FakeHost(QObject):
-    """最小宿主窗口：卡片查找 + backend + 两个动作入口。"""
+    """最小宿主窗口：卡片查找（动作记在 subagent 宿主上，与生产同构）。"""
 
-    def __init__(self, card, manager, window_id: str = "w1"):
+    def __init__(self, card, manager, window_id: str = "w1", sub=None):
         super().__init__()
         self._window_id = window_id
         self._current_assistant_card = card
         self._find_latest_assistant_card = lambda: self._current_assistant_card
-        self.backend = _FakeBackend(manager)
-        self.entered = []
-        self.stopped = []
-
-    def _on_sub_agent_enter_session(self, task_id, agent_name):
-        self.entered.append((task_id, agent_name))
-
-    def _on_sub_agent_stop_requested(self, task_id):
-        self.stopped.append(task_id)
+        self.subagent = sub or _FakeSubAgentHost()
+        self.subagent.managers[window_id] = manager
+        self.entered = self.subagent.entered
+        self.stopped = self.subagent.stopped
 
 
 @pytest.fixture()
@@ -202,7 +210,7 @@ def bridge_env(fresh_registry, card):
     fresh_registry._window_main_widgets["w1"] = host
     fresh_registry.register_card_inline_panel("system-subagent", PANEL_ID, SubAgentRunPanel)
 
-    bridge = SubAgentRunBridge(fresh_registry)
+    bridge = SubAgentRunBridge(fresh_registry, host.subagent)
     bridge._sync_windows()
     yield bridge, fresh_registry, host, manager, card
     bridge.stop()
@@ -306,12 +314,13 @@ def test_bridge_keeps_windows_isolated(fresh_registry, qapp):
 
     card1, card2 = MessageCard(role="assistant"), MessageCard(role="assistant")
     mgr1, mgr2 = _FakeManager(), _FakeManager()
-    host1, host2 = _FakeHost(card1, mgr1, "w1"), _FakeHost(card2, mgr2, "w2")
+    sub = _FakeSubAgentHost()
+    host1, host2 = _FakeHost(card1, mgr1, "w1", sub), _FakeHost(card2, mgr2, "w2", sub)
     fresh_registry._window_main_widgets["w1"] = host1
     fresh_registry._window_main_widgets["w2"] = host2
     fresh_registry.register_card_inline_panel("system-subagent", PANEL_ID, SubAgentRunPanel)
 
-    bridge = SubAgentRunBridge(fresh_registry)
+    bridge = SubAgentRunBridge(fresh_registry, sub)
     bridge._sync_windows()
     try:
         mgr1._running_tasks["t1"] = _FakeExecutor("coder", "窗口一")
