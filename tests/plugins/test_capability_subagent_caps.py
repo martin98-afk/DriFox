@@ -52,3 +52,32 @@ def test_undeclared_capability_denied(registry):
 
     with pytest.raises(CapabilityDenied):
         _ = pool["storage.db"]
+
+
+def test_ui_subagent_run_returns_window_manager(registry):
+    """ui 面 subagent.run 给的是该窗口的 manager 实例（编排层迁移的接口面）。"""
+    manager = object()
+
+    class _Host:
+        class backend:  # noqa: N801 - 模拟 MainWidget.backend
+            sub_agent_manager = manager
+
+    pool = registry.build_pool(
+        surface="ui", host=_Host(), plugin="demo", declared=frozenset({"subagent.run"})
+    )
+
+    assert pool["subagent.run"] is manager
+
+
+def test_ui_subagent_run_none_before_ready(registry):
+    """manager 是延迟创建的，未就绪时返回 None 而不是抛错。"""
+
+    class _Host:
+        backend = type("B", (), {"sub_agent_manager": None})()
+
+    pool = registry.build_pool(
+        surface="ui", host=_Host(), plugin="demo", declared=frozenset({"subagent.run"})
+    )
+
+    assert pool["subagent.run"] is None
+

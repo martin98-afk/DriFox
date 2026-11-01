@@ -300,6 +300,15 @@ def _agent_prompt(host: Any):
 
     return prompt
 
+def _subagent_manager(host: Any):
+    """子智能体调度器（per-window，经 backend 延迟创建；未就绪返回 None）。
+
+    ui 面给的是实例而不是「派一个任务」的动作封装：编排层（批次/完成链/
+    stall/日志归档）正在迁往插件，插件要的正是同一个 manager 对象。
+    """
+    backend = getattr(host, "backend", None)
+    return getattr(backend, "sub_agent_manager", None) if backend else None
+
 
 # ──────────────────── 工作目录 ────────────────────
 
@@ -1264,6 +1273,7 @@ def register(registry) -> None:
     reg.register("model.enumerate", model_meta.model_enumerate, surface="ui", owner="core:ui")
     reg.register("agent.read", _agent_manager, surface="ui", owner="core:ui")
     reg.register("agent.read", _agent_prompt, surface="ui", owner="core:ui", legacy_key="get_agent_prompt")
+    reg.register("subagent.run", _subagent_manager, surface="ui", owner="core:ui")
     # 工作目录
     reg.register("workdir.read", _workdir_read, surface="ui", owner="core:ui")
     reg.register("workdir.write", _workdir_write, surface="ui", owner="core:ui")

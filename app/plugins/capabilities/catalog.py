@@ -111,7 +111,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("input.write", _M, "写入输入框文本", _UI),
         # ── 智能体 ──
         _spec("agent.read", _L, "agent 列表/提示词/管理器", _BOTH, ["get_agent_manager", "get_agent_prompt"]),
-        _spec("subagent.run", _H, "派生子智能体", _TOOL, ["subagent"]),
+        _spec("subagent.run", _H, "派生子智能体（ui 面返 manager 实例，tool 面返工具侧 manager）", _BOTH, ["subagent"]),
         # ── 工作目录 ──
         _spec("workdir.read", _L, "当前工作目录", _BOTH, ["get_workdir"]),
         _spec(
