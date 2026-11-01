@@ -471,6 +471,23 @@ class ThemeManager:
 
         Colors.refresh()
 
+        # 🐛 先同步 qfluentwidgets 全局主题再分发（与 main_widget
+        # _execute_batched_theme_refresh 全局段同款：清缓存 → setTheme → EV）。
+        # 此前 setTheme 只存在于 OpenAIChatToolWindow._apply_runtime_ui_settings
+        # 的 is_color 块内，而本方法按注册顺序分发 target：TabPanel /
+        # TabManagerWindow / WorkbenchPanel 排在 main_widget 之前，刷新时全局
+        # 主题还是旧值，其中的 FluentIcon 按旧主题渲染后无人补刷 → gitee 弹窗
+        # 兜底切换后侧栏/标题区 icon 反色。
+        # 清缓存必须在 setTheme 之前：reload() 热改主题 mode 时 theme_id 未变，
+        # is_light_theme() 会命中旧缓存。
+        self._cached_light_check = (None, None)
+        try:
+            from qfluentwidgets import Theme, setTheme
+
+            setTheme(Theme.LIGHT if self.is_light_theme() else Theme.DARK, lazy=True)
+        except Exception:
+            pass
+
         self.on_theme_changed()
 
         alive = []
