@@ -586,23 +586,23 @@ _READ_SCHEMA = {
                 },
                 "level": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：按等级过滤，逗号分隔多值，如 WARNING 或 info,error",
+                    "description": "按等级过滤，逗号分隔多值，如 WARNING 或 info,error",
                 },
                 "from_date": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：起始日期 YYYY-MM-DD（含），缺省不限；与 date 互斥",
+                    "description": "起始日期 YYYY-MM-DD（含），缺省不限",
                 },
                 "to_date": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：结束日期 YYYY-MM-DD（含），缺省今天；与 date 互斥",
+                    "description": "结束日期 YYYY-MM-DD（含），缺省今天",
                 },
                 "search": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：按正则过滤(忽略大小写，编译失败回退子串)",
+                    "description": "按正则过滤(忽略大小写，编译失败回退子串)",
                 },
                 "summary_only": {
                     "type": "boolean",
-                    "description": "scope=daily 查询模式：true 只输出「时刻 | 等级 | 摘要」一行，不含正文",
+                    "description": "true 只输出「时刻 | 等级 | 摘要」一行，不含正文",
                 },
                 "limit": {
                     "type": "integer",
