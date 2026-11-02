@@ -34,7 +34,7 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from .trace_models import (
     GAP_CAP_S,
@@ -59,6 +59,9 @@ _TS_CACHE: Dict[str, float] = {}
 # 工具结果写入都发生在最后几条消息上。一轮工具调用可长达 user +
 # assistant(tool_calls) + tool×N + assistant，取 8 覆盖绝大多数轮次。
 _KEEP_TAIL = 8
+
+# messages_updated 节流窗口（ms）：流式期每 tick 全量投影 500ms+，合并为 400ms 一次
+_SYNC_INTERVAL_MS = 400
 
 
 class TraceCollector(QObject):
@@ -231,6 +234,17 @@ class TraceCollector(QObject):
             return None
 
     def _on_messages_updated(self, *_args: Any) -> None:
+        # 节流：流式期 messages_updated 每 tick 触发，_sync 全量投影长会话实测
+        # 500ms+（watchdog 2026-11-02 统计 94 次主线程阻塞，全部来源）。合并
+        # 高频触发为 400ms 一次：timing 表由实时信号独立写入，节流只延迟
+        # 投影显示不丢数据；tail 收尾延迟 ≤400ms 面板无感。
+        if getattr(self, "_sync_pending", False):
+            return
+        self._sync_pending = True
+        QTimer.singleShot(_SYNC_INTERVAL_MS, self._sync_after_throttle)
+
+    def _sync_after_throttle(self) -> None:
+        self._sync_pending = False
         try:
             self._sync()
         except Exception as e:

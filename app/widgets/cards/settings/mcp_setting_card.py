@@ -1157,6 +1157,9 @@ class MCPListSettingCard(ExpandSettingCard):
         # 若用布尔标记会永久停在 True，导致此后所有热重载刷新被吞掉（计数更新、列表不更新）。
         # 窗口取 3s（> watchfiles 的 2s 防抖），既能在自触发刷新到达时正确抑制，又会自动过期。
         self._suppress_hot_reload_until = 0.0
+        # 热重载置脏：卡片不可见/折叠时 _refresh 全量重建（逐行 MCPServerRow + 布局计算）
+        # 纯属白干，置脏延迟到 showEvent/展开时补刷（watchdog 61 次 500ms+ 阻塞治理）
+        self._hot_reload_dirty = False
         # need_confirm 确认弹窗去重：key → InfoBar。同 key 多次失败回调只保留首个弹窗
         self._confirm_bars: Dict[str, object] = {}
         # 状态轮询定时器（3秒刷新一次连接状态指示灯 + token 占用）
@@ -1644,6 +1647,18 @@ class MCPListSettingCard(ExpandSettingCard):
         # 注意：全局开关不触发全量刷新——列表内容未变，行级状态已由上面的
         # _refresh_status_dots() 更新。全量重建会导致开关时整卡闪烁。
 
+    def _refresh_if_visible(self):
+        """热重载触发点入口：不可见/折叠时只置脏，可见时才真刷新。
+
+        _refresh 全量重建行列表（每行一个 MCPServerRow + 布局计算，实测 500ms+），
+        设置面板未打开时重建不可见内容纯属白干；每次插件热重载（watchfiles 监控
+        插件目录，开发期每次保存都触发）会广播到全部窗口，逐窗口重建放大成本。
+        """
+        if self.isHidden() or not self.isExpand:
+            self._hot_reload_dirty = True
+            return
+        self._refresh()
+
     def consume_hot_reload(self) -> bool:
         """检查并消费自触发标记。热重载触发时调用，返回 True 表示本次是自触发的，应跳过刷新
 
@@ -1801,10 +1816,18 @@ class MCPListSettingCard(ExpandSettingCard):
     def setExpand(self, isExpand: bool):
         super().setExpand(isExpand)
         self._sync_status_timer()
+        # 展开时消费热重载置脏：补刷一次（异步，不拖慢展开动画）
+        if isExpand and getattr(self, "_hot_reload_dirty", False):
+            self._hot_reload_dirty = False
+            QTimer.singleShot(0, self._refresh)
 
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_status_timer()
+        # 不可见期间攒下的热重载置脏：显示后异步补刷（不拖慢面板打开）
+        if getattr(self, "_hot_reload_dirty", False):
+            self._hot_reload_dirty = False
+            QTimer.singleShot(0, self._refresh)
 
     def hideEvent(self, event):
         self._status_timer.stop()

@@ -10905,7 +10905,9 @@ class OpenAIChatToolWindow(ToolWindow):
                             mcp_card._get_pm().invalidate_mcp_cache()
                         except Exception:
                             pass
-                        mcp_card._refresh()
+                        # 置脏入口：面板未打开/卡片折叠时只置脏，showEvent/展开时补刷
+                        # （_refresh 全量重建逐行 500ms+，热重载开发期高频，watchdog 实测 61 次阻塞）
+                        mcp_card._refresh_if_visible()
                         # 补连新增/未连接的已启用服务器：
                         # 热重载路径只刷新列表 + 断开孤儿连接（disconnect_missing），
                         # 从不主动连接新出现的服务器——而唯一连接入口 _init_mcp_connections
