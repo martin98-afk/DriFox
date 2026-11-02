@@ -36,6 +36,7 @@ from app.utils.config import Settings
 from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
+from app.widgets.custom_title_bar import _MacTrafficLightCenterMixin
 
 # ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
@@ -1111,7 +1112,7 @@ class _ContentStack(QWidget):
         return w.minimumSizeHint() if w is not None else QSize(0, 0)
 
 
-class TabManagerWindow(FramelessWindow):
+class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     """Tab 管理器宿主窗口（单例）"""
 
     _instance: Optional["TabManagerWindow"] = None
@@ -2761,7 +2762,7 @@ class TabManagerWindow(FramelessWindow):
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（顶部让位自绘无边框标题栏） ──
         main_layout = QVBoxLayout(self)
-        # 顶部让位自绘无边框标题栏；mac 上标题栏只有 28（与系统交通灯配套）
+        # 顶部让位自绘无边框标题栏（mac 与 Win/Linux 统一 38，交通灯由 mixin 居中）
         main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)
         main_layout.setSpacing(0)
 
@@ -3507,6 +3508,13 @@ class TabManagerWindow(FramelessWindow):
             # ★ 三值 setSizes：保留工作台宽度，否则折叠左侧会连带清掉右侧
             if self._sidebar_anim_collapsing:
                 target_w = self._tab_panel._collapsed_min_width + _FRAME_PADDING_X
+                # ★ 折叠收尾态必须与落位宽度一致：动画期间 _collapsed 可能被
+                #   外部编排（启动恢复 / 切页 restore / 卡片让位）改写为 False，
+                #   只按 _sidebar_anim_collapsing 落位会留下「宽度=图标条、
+                #   状态=展开」的矛盾态；此后切页按展开态恢复，宽度先跳变再
+                #   被 resizeEvent 折回（用户可见"先弹一下再缩回"）。
+                if not self._tab_panel._collapsed:
+                    self._tab_panel._collapsed = True
             else:
                 # ★ 同 _on_sidebar_toggled：展开下限必须明显高于折叠线，
                 #   否则落位宽度骑在折叠线上会被 resizeEvent 再次判折叠。
@@ -3729,6 +3737,20 @@ class TabManagerWindow(FramelessWindow):
             return
         if abs(sizes[0] - prev_left_w) <= 1 and bool(panel._collapsed) == prev_collapsed:
             return  # 未被挤压：零操作
+        # ★ 空间守卫：当前已折叠、目标却是展开态时，若几何放不下「目标宽 +
+        #   聊天最小宽 + 工作台」（或目标宽本身落在折叠区），放弃恢复。
+        #   否则 setSizes 会被 QSplitter 钳回折叠区，TabPanel.resizeEvent
+        #   同步折叠并启动一次 200ms 收起动画——用户可见「切页/新建先弹一下
+        #   再缩回」（右侧工作台挤压折叠常驻时必现）。保持折叠与挤压标记，
+        #   空间恢复后由 _maybe_auto_expand_after_squeeze 统一展开。
+        if not prev_collapsed and panel._collapsed:
+            _collapse_frame_w = panel._auto_collapse_width + _FRAME_PADDING_X
+            _wb_w = sizes[2] if len(sizes) >= 3 else 0
+            if prev_left_w <= _collapse_frame_w or sum(sizes) < prev_left_w + _MIN_CHAT_WIDTH + _wb_w:
+                logger.debug(
+                    f"[TSW] restore 放弃(空间不足) prev={prev_left_w} total={sum(sizes)} wb={_wb_w}"
+                )
+                return
         # 还原切前折叠态并清挤压标记（切页挤压痕迹一并抹掉，防后续
         # _maybe_auto_expand_after_squeeze 误触发自动展开）
         if bool(panel._collapsed) != prev_collapsed:
@@ -3790,7 +3812,13 @@ class TabManagerWindow(FramelessWindow):
                     lambda: self._maybe_auto_expand_after_squeeze(growth_required=growth_required, _retried=True),
                 )
             return
-        total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
+        _sizes = self._splitter.sizes() if hasattr(self, "_splitter") else []
+        total = sum(_sizes) if _sizes else self.width()
+        # ★ 工作台窗格当前占位必须计入空间判定（同 _evaluate_squeeze_collapse
+        #   的 `needed + _MIN_CHAT_WIDTH + wb_w` 口径）：漏扣时右栏开着但
+        #   chat 已被挤到最小宽以下的布局会被误判为"放得下"，展开请求随即
+        #   被打回折叠（用户可见弹动）。
+        _wb_w = _sizes[2] if len(_sizes) >= 3 else 0
         # ★ 展开目标下限须明显高于折叠线（同 _on_sidebar_toggled 注释）
         _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
         target_w = max(_min_expand_w, getattr(self, "_saved_panel_frame_width", _min_expand_w))
@@ -3801,8 +3829,8 @@ class TabManagerWindow(FramelessWindow):
             if base is not None and total < base + _AUTO_EXPAND_GROWTH:
                 return  # 窗口未比折叠时更宽，不自动展开
         # 条件2：绝对下限
-        if total - (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X) < target_w + chat_min:
-            return  # 空间不足，保持折叠
+        if total - (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X) < target_w + chat_min + _wb_w:
+            return  # 空间不足，保持折叠（含工作台占位）
         # 空间足够：自动展开（先清标记防重入）
         panel._collapsed_by_squeeze = False
         panel.set_collapsed(False)

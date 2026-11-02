@@ -3043,7 +3043,12 @@ class MessageCard(SimpleCardWidget):
                 cache.pop(key, None)
 
     def _update_height(self, h):
-        target_height = max(40, h)
+        # [DOCK-BLANK 修] 原钳 max(40, h) 与折叠态矮内容冲突：思考折叠收起 +
+        # 正文未开时 JS scrollHeight≈11，13 的上报被顶成 40 → 折叠框下恒定
+        # 29px 空白（2026-11-02 [dock-blank] 打点定位：viewer=40 scrollHeight=11）。
+        # 流式塌缩噪声已由 B1 挂起窗拦（_schedule_pending_shrink），非流式由
+        # ±2px 死区拦，此处的 40 下限只剩制造空白这一个作用。
+        target_height = max(0, int(h))
         # [T44] 坞态不再给正文限高（原 order 沉底 + 600px 内滚已移除），坞态
         # 生效前后卡片高度都等于自然高度，只剩工具区 264px 限高这一点扰动，
         # 无需额外 clamp。
@@ -3549,7 +3554,8 @@ class MessageCard(SimpleCardWidget):
         self.heightChanged.emit(height)
 
     def _apply_viewer_height(self, value):
-        height = max(40, int(value))
+        # [DOCK-BLANK 修] 同 _update_height 入口钳：出口不再顶 40 下限
+        height = max(0, int(value))
         # [MEM] 面积上限：上报高度先按「物理面积封顶」钳一次（成本 ∝ 宽×高×dpr²，
         # 见 CodeWebViewer.MAX_SURFACE_MPX）。必须在下面所有记账/广播之前完成 ——
         # 否则 widget 被钳短、heightChanged 仍报原值，外层聊天列表会按未钳高度做
@@ -6148,9 +6154,17 @@ class MessageCard(SimpleCardWidget):
             # （两种形态互斥，各自 no-op 不会重复显示）。
             _v2_key = getattr(self.viewer, "_v2_live_key", "") or ""
             if _v2_key:
+                # 容器必须与 v2 尾态归属一致（简洁模式 tool-content，非简洁
+                # content-placeholder）：硬编码 tool-content 时非简洁模式的增量
+                # 选择器命不中，思考预览静默停更（2026-11-02 排查发现）。
+                _v2_cid = getattr(self.viewer, "_tool_target_id", "tool-content")
+                # orjson.dumps 返回 bytes：直接插进 f-string 会变成 b'...' 字面量，
+                # 发出的 JS 语法错误并静默失败（增量永不显示）。统一 decode。
+                _cid_js = json.dumps(_v2_cid).decode("utf-8")
+                _key_js = json.dumps(_v2_key).decode("utf-8")
                 page.runJavaScript(
                     "if(typeof window._v2LiveAppend==='function')"
-                    f"window._v2LiveAppend('tool-content',{json.dumps(_v2_key)},{safe_text},true);"
+                    f"window._v2LiveAppend({_cid_js},{_key_js},{safe_text},true);"
                 )
         except RuntimeError:
             pass

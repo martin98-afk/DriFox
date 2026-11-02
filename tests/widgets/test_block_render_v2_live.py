@@ -226,7 +226,7 @@ def test_growth_sends_append_only(monkeypatch):
     # 重渲更轻。两者都属增量通道，都不得出现 patchBlocks。
     assert (
         "_v2LiveAppend('content-placeholder',\"live:0\"," in js
-        or "_v2LiveSplit('content-placeholder',\"live:0\"," in js
+        or "_v2LiveSplit(\"content-placeholder\",\"live:0\"," in js
     ), "续写必须走增量通道（append 或切片）"
     assert v._v2_live_sent == text + delta
 
@@ -250,7 +250,7 @@ def test_formalize_on_boundary_then_append_again(monkeypatch):
     # 比整块 formalize 更轻。断言改为「必须走切片且不得 patchBlocks」。
     ops = _patch_ops(js, "content-placeholder")
     assert not ops, "切片路径不得整块替换活动块"
-    assert "_v2LiveSplit('content-placeholder',\"live:0\"," in js, "闭合段必须走切片"
+    assert "_v2LiveSplit(\"content-placeholder\",\"live:0\"," in js, "闭合段必须走切片"
     assert "<p>" in js, "切片内容必须走 markdown"
     # 落库基线保持恒定 key，避免下一批又判定替换
     assert v._v2_last.content[0].key == "live:0"

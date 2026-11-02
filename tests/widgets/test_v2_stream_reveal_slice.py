@@ -149,7 +149,7 @@ def test_slice_progresses_on_paragraph_boundary(monkeypatch):
     blocks[0]["text"] = text + "继续写第三段。"
     assert v._perform_update_v2() is True
     js = _all_js(v)
-    assert "_v2LiveSplit('content-placeholder'" in js, "闭合段必须走切片正式化"
+    assert "_v2LiveSplit(\"content-placeholder\"" in js, "闭合段必须走切片正式化"
     assert v._v2_live_formalized_len > 0
     assert v._v2_live_formalized_len <= len(blocks[0]["text"])
 

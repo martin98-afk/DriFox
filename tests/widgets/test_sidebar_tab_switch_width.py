@@ -16,6 +16,7 @@ import pytest
 from app.widgets.tab_manager_window import (
     _CHAT_ABSOLUTE_MIN_WIDTH,
     _COLLAPSED_PANEL_WIDTH,
+    _EXPANDED_MIN_CONTENT_WIDTH,
     _FRAME_PADDING_X,
     _LEFT_CARD_MIN_VISIBLE_WIDTH,
     _MIN_CHAT_WIDTH,
@@ -49,6 +50,7 @@ class _StubPanel:
         self._left_card_present = False
         self._auto_collapse_suppressed = False
         self._collapsed_min_width = 46  # 收起态窄宽（_COLLAPSED_PANEL_WIDTH）
+        self._auto_collapse_width = _EXPANDED_MIN_CONTENT_WIDTH  # 折叠线（content 宽）
         self.sync_calls = 0
 
     def sync_collapsed_ui(self):
@@ -385,3 +387,20 @@ def test_restore_replay_reads_live_cfg(qapp, monkeypatch):
     TabManagerWindow._apply_restored_panel_width(win)
     assert win._splitter.sizes()[0] == _BASE_FRAME_W  # 落位折叠宽
     assert win._tab_panel._collapsed is True  # 不被翻回展开
+
+
+def test_restore_keeps_collapsed_when_workbench_blocks_space(qapp):
+    """右栏占位、几何放不下展开态：保持折叠与挤压标记，不 setSizes
+
+    回归：切页/新建时 restore 把宽度还原到折叠区，QSplitter 落地后
+    TabPanel.resizeEvent 立即折回并启动 200ms 收起动画 → 用户可见
+    「左栏先往外弹一下再缩回」。
+    """
+    win = _StubWindow([60, 540, 300])  # 总宽 900，工作台 300
+    win._tab_panel._collapsed = True
+    win._tab_panel._collapsed_by_squeeze = True
+    TabManagerWindow._restore_tab_frame_after_tab_switch(win, 414, False)
+    assert win._splitter.sizes()[0] == 60  # 未展开
+    assert win._tab_panel._collapsed is True
+    assert win._tab_panel._collapsed_by_squeeze is True  # 空间恢复后仍需自动展开
+    assert win._tab_panel.sync_calls == 0
